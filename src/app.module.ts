@@ -12,6 +12,7 @@ import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { SupabaseModule } from './modules/supabase/supabase.module';
 import { HealthModule } from './modules/health/health.module';
 import { UsersModule } from './modules/users/users.module';
+import { MeModule } from './modules/me/me.module';
 
 @Module({
   imports: [
@@ -53,6 +54,7 @@ import { UsersModule } from './modules/users/users.module';
     SupabaseModule,
     HealthModule,
     UsersModule,
+    MeModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
