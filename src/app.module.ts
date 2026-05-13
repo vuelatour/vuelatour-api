@@ -25,6 +25,7 @@ import { IssuingEntitiesModule } from './modules/issuing-entities/issuing-entiti
 import { RoutesModule } from './modules/routes/routes.module';
 import { QuotesModule } from './modules/quotes/quotes.module';
 import { FlightsModule } from './modules/flights/flights.module';
+import { CalendarModule } from './modules/calendar/calendar.module';
 
 @Module({
   imports: [
@@ -79,6 +80,7 @@ import { FlightsModule } from './modules/flights/flights.module';
     RoutesModule,
     QuotesModule,
     FlightsModule,
+    CalendarModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
