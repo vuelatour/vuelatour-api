@@ -13,6 +13,9 @@ import { SupabaseModule } from './modules/supabase/supabase.module';
 import { HealthModule } from './modules/health/health.module';
 import { UsersModule } from './modules/users/users.module';
 import { MeModule } from './modules/me/me.module';
+import { AircraftModule } from './modules/aircraft/aircraft.module';
+import { EnginesModule } from './modules/engines/engines.module';
+import { PropellersModule } from './modules/propellers/propellers.module';
 
 @Module({
   imports: [
@@ -55,6 +58,9 @@ import { MeModule } from './modules/me/me.module';
     HealthModule,
     UsersModule,
     MeModule,
+    AircraftModule,
+    EnginesModule,
+    PropellersModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
