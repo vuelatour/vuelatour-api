@@ -20,6 +20,8 @@ import { ClientsModule } from './modules/clients/clients.module';
 import { ProvidersModule } from './modules/providers/providers.module';
 import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module';
 import { CardsModule } from './modules/cards/cards.module';
+import { AirportsModule } from './modules/airports/airports.module';
+import { IssuingEntitiesModule } from './modules/issuing-entities/issuing-entities.module';
 
 @Module({
   imports: [
@@ -69,6 +71,8 @@ import { CardsModule } from './modules/cards/cards.module';
     ProvidersModule,
     BankAccountsModule,
     CardsModule,
+    AirportsModule,
+    IssuingEntitiesModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
