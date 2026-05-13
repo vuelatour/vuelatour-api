@@ -1,12 +1,21 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
+import { SupabaseService } from '../supabase/supabase.service';
 import {
   CalculateQuoteDto,
   MetodoPago,
   TipoTarifa,
 } from './dto/calculate-quote.dto';
+import { CreateQuoteDto, TipoVuelo } from './dto/create-quote.dto';
+import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
+import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
 interface ResolvedRoute {
   origen_iata: string;
@@ -19,6 +28,9 @@ interface ResolvedRoute {
 
 const IVA_DEFAULT = 0.16;
 const CALZOS_HR_POR_ATERRIZAJE = 0.15;
+
+const VUELO_COLS =
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, fecha_solicitud, fecha_vuelo, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -34,8 +46,12 @@ export class QuotesService {
     private readonly aircraft: AircraftService,
     private readonly airports: AirportsService,
     private readonly routes: RoutesService,
+    private readonly supabase: SupabaseService,
   ) {}
 
+  /**
+   * Pure calculation, no persistence. Returns the full breakdown.
+   */
   async calculate(dto: CalculateQuoteDto) {
     const aeronave = await this.aircraft.findById(dto.aeronave_id);
     if (!aeronave.activa) throw new BadRequestException('Aeronave inactiva');
@@ -57,7 +73,6 @@ export class QuotesService {
     const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
     const tiempoCobrableHr = tiempoVueloHr + calzosHr;
 
-    // Tarifa
     const tarifaHora =
       dto.tarifa_hora_override_usd ??
       (dto.tipo_tarifa === TipoTarifa.PUBLICO
@@ -70,7 +85,6 @@ export class QuotesService {
     }
     const subtotal = tiempoCobrableHr * tarifaHora;
 
-    // TUAS — solo en origen y destino (no en escalas intermedias por ahora)
     const tuasOrigen = await this.computeTuas(
       route.origen_iata,
       matriculaPrefix,
@@ -87,7 +101,6 @@ export class QuotesService {
       (tuasOrigen.aplica ? tuasOrigen.usd_pax * dto.pasajeros : 0) +
       (tuasDestino.aplica ? tuasDestino.usd_pax * dto.pasajeros : 0);
 
-    // IVA
     const ivaAplicaPorMetodo =
       dto.metodo_pago === MetodoPago.TRANSFERENCIA ||
       dto.metodo_pago === MetodoPago.HSBC_LINK;
@@ -160,6 +173,241 @@ export class QuotesService {
     };
   }
 
+  // ============ Persistence ============
+
+  async list(filters: ListQuotesQuery) {
+    let q = this.supabase.service
+      .from('vuelo')
+      .select(VUELO_COLS, { count: 'exact' })
+      .order('fecha_solicitud', { ascending: false })
+      .range(filters.offset, filters.offset + filters.limit - 1);
+
+    if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
+    if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
+    if (filters.estado) q = q.eq('estado', filters.estado);
+    if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
+    if (filters.q) {
+      const term = `%${filters.q.toUpperCase()}%`;
+      q = q.or(`origen_iata.ilike.${term},destino_iata.ilike.${term}`);
+    }
+    const { data, error, count } = await q;
+    if (error) throw new Error(error.message);
+    return {
+      data: data ?? [],
+      count: count ?? 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    };
+  }
+
+  async findById(id: string) {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select(VUELO_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    return data;
+  }
+
+  async findVersions(vueloId: string) {
+    await this.findById(vueloId);
+    const { data, error } = await this.supabase.service
+      .from('cotizacion_version_history')
+      .select('*')
+      .eq('vuelo_id', vueloId)
+      .order('version', { ascending: false });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  async create(dto: CreateQuoteDto, userId: string) {
+    const breakdown = await this.calculate(dto);
+
+    const insertPayload = {
+      cliente_id: dto.cliente_id,
+      aeronave_id: dto.aeronave_id,
+      ruta_id: breakdown.ruta.id,
+      tipo: dto.tipo ?? TipoVuelo.REDONDO,
+      estado: 'COTIZADO',
+      es_externo: false,
+      cotizacion_version: 1,
+      origen_iata: breakdown.ruta.origen_iata,
+      destino_iata: breakdown.ruta.destino_iata,
+      millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
+      es_redondo_auto: breakdown.ruta.es_redondo_auto,
+      num_aterrizajes: breakdown.ruta.num_aterrizajes,
+      pasajeros: dto.pasajeros,
+      pase_abordar: dto.pase_abordar ?? false,
+      tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
+      tarifa_tipo: dto.tipo_tarifa,
+      tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
+      subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
+      tuas_usd: breakdown.totales.tuas_total_usd,
+      iva_pct: breakdown.iva.porcentaje,
+      iva_usd: breakdown.iva.monto_usd,
+      monto_total_usd: breakdown.totales.total_usd,
+      metodo_cobro: dto.metodo_pago,
+      fecha_vuelo: dto.fecha_vuelo?.toISOString(),
+      notas: dto.notas,
+      notas_internas: dto.notas_internas,
+      calculo_snapshot: breakdown,
+      created_by: userId,
+      updated_by: userId,
+    };
+
+    const { data: vuelo, error } = await this.supabase.service
+      .from('vuelo')
+      .insert(insertPayload)
+      .select(VUELO_COLS)
+      .maybeSingle();
+
+    if (error) {
+      if (error.code === '23503')
+        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+      throw new Error(error.message);
+    }
+
+    await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
+    return vuelo!;
+  }
+
+  async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
+    const current = await this.findById(vueloId);
+    if (
+      current.estado === 'CONFIRMADO' ||
+      current.estado === 'EN_VUELO' ||
+      current.estado === 'COMPLETADO' ||
+      current.estado === 'CANCELADO'
+    ) {
+      throw new ConflictException(
+        `No se puede revisar una cotización en estado ${current.estado}. Solo SOLICITUD o COTIZADO admiten revisión.`,
+      );
+    }
+
+    const breakdown = await this.calculate(dto);
+    const newVersion = current.cotizacion_version + 1;
+
+    const { data: updated, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        cotizacion_version: newVersion,
+        aeronave_id: dto.aeronave_id,
+        ruta_id: breakdown.ruta.id,
+        origen_iata: breakdown.ruta.origen_iata,
+        destino_iata: breakdown.ruta.destino_iata,
+        millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
+        es_redondo_auto: breakdown.ruta.es_redondo_auto,
+        num_aterrizajes: breakdown.ruta.num_aterrizajes,
+        pasajeros: dto.pasajeros,
+        pase_abordar: dto.pase_abordar ?? false,
+        tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
+        tarifa_tipo: dto.tipo_tarifa,
+        tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
+        subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
+        tuas_usd: breakdown.totales.tuas_total_usd,
+        iva_pct: breakdown.iva.porcentaje,
+        iva_usd: breakdown.iva.monto_usd,
+        monto_total_usd: breakdown.totales.total_usd,
+        metodo_cobro: dto.metodo_pago,
+        notas: dto.notas ?? current.notas,
+        calculo_snapshot: breakdown,
+        estado: current.estado === 'SOLICITUD' ? 'COTIZADO' : current.estado,
+        updated_by: userId,
+      })
+      .eq('id', vueloId)
+      .select(VUELO_COLS)
+      .maybeSingle();
+
+    if (error) throw new Error(error.message);
+    await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
+    return updated!;
+  }
+
+  async confirm(vueloId: string, userId: string) {
+    const current = await this.findById(vueloId);
+    if (current.estado !== 'COTIZADO') {
+      throw new ConflictException(
+        `Solo cotizaciones en estado COTIZADO pueden confirmarse. Estado actual: ${current.estado}`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        estado: 'CONFIRMADO',
+        fecha_confirmacion: new Date().toISOString(),
+        updated_by: userId,
+      })
+      .eq('id', vueloId)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data!;
+  }
+
+  async cancel(vueloId: string, motivo: string | undefined, userId: string) {
+    const current = await this.findById(vueloId);
+    if (current.estado === 'COMPLETADO' || current.estado === 'CANCELADO') {
+      throw new ConflictException(
+        `No se puede cancelar un vuelo en estado ${current.estado}`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        estado: 'CANCELADO',
+        fecha_cancelacion: new Date().toISOString(),
+        motivo_cancelacion: motivo ?? null,
+        updated_by: userId,
+      })
+      .eq('id', vueloId)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data!;
+  }
+
+  // ============ Internals ============
+
+  private async appendVersionHistory(
+    vueloId: string,
+    version: number,
+    dto: CalculateQuoteDto,
+    breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
+    motivo: string,
+    userId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('cotizacion_version_history')
+      .insert({
+        vuelo_id: vueloId,
+        version,
+        aeronave_id: dto.aeronave_id,
+        ruta_id: breakdown.ruta.id,
+        origen_iata: breakdown.ruta.origen_iata,
+        destino_iata: breakdown.ruta.destino_iata,
+        millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
+        es_redondo_auto: breakdown.ruta.es_redondo_auto,
+        num_aterrizajes: breakdown.ruta.num_aterrizajes,
+        pasajeros: dto.pasajeros,
+        pase_abordar: dto.pase_abordar ?? false,
+        tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
+        tarifa_tipo: dto.tipo_tarifa,
+        tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
+        subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
+        tuas_usd: breakdown.totales.tuas_total_usd,
+        iva_pct: breakdown.iva.porcentaje,
+        iva_usd: breakdown.iva.monto_usd,
+        monto_total_usd: breakdown.totales.total_usd,
+        metodo_cobro: dto.metodo_pago,
+        calculo_snapshot: breakdown,
+        motivo,
+        created_by: userId,
+      });
+    if (error) throw new Error(`Failed to write cotizacion version history: ${error.message}`);
+  }
+
   private async resolveRoute(dto: CalculateQuoteDto): Promise<ResolvedRoute> {
     if (dto.ruta_id) {
       const r = await this.routes.findById(dto.ruta_id);
@@ -230,3 +478,5 @@ export class QuotesService {
     }
   }
 }
+
+export { EstadoVuelo };
