@@ -16,6 +16,10 @@ import { MeModule } from './modules/me/me.module';
 import { AircraftModule } from './modules/aircraft/aircraft.module';
 import { EnginesModule } from './modules/engines/engines.module';
 import { PropellersModule } from './modules/propellers/propellers.module';
+import { ClientsModule } from './modules/clients/clients.module';
+import { ProvidersModule } from './modules/providers/providers.module';
+import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module';
+import { CardsModule } from './modules/cards/cards.module';
 
 @Module({
   imports: [
@@ -61,6 +65,10 @@ import { PropellersModule } from './modules/propellers/propellers.module';
     AircraftModule,
     EnginesModule,
     PropellersModule,
+    ClientsModule,
+    ProvidersModule,
+    BankAccountsModule,
+    CardsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
