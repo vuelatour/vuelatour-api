@@ -25,6 +25,10 @@ import {
   CreateAeronaveSocioDto,
   UpdateAeronaveSocioDto,
 } from './dto/upsert-aeronave-socio.dto';
+import {
+  CreateAeronaveImagenDto,
+  UpdateAeronaveImagenDto,
+} from './dto/aeronave-imagen.dto';
 import { AircraftService } from './aircraft.service';
 
 @ApiTags('Aircraft')
@@ -132,5 +136,49 @@ export class AircraftController {
   @ApiOperation({ summary: 'Overhaul reserves per engine for this aircraft' })
   listReserves(@Param('id', ParseUUIDPipe) id: string) {
     return this.aircraft.listOverhaulReserves(id);
+  }
+
+  // ============ Imagenes ============
+
+  @Get(':id/images')
+  @ApiOperation({ summary: 'List images of an aircraft (ordered by orden)' })
+  listImages(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.listImagenes(id);
+  }
+
+  @Post(':id/images')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Register an image after uploading to Storage. Frontend uploads file to bucket and posts metadata here.',
+  })
+  createImage(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateAeronaveImagenDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.createImagen(id, dto, current.userId);
+  }
+
+  @Patch('images/:imageId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Update image metadata (alt_text, orden, es_principal)' })
+  updateImage(
+    @Param('imageId', ParseUUIDPipe) imageId: string,
+    @Body() dto: UpdateAeronaveImagenDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.updateImagen(imageId, dto, current.userId);
+  }
+
+  @Delete('images/:imageId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Delete image (removes both the storage file and the row). If was principal, promotes the next one.',
+  })
+  deleteImage(@Param('imageId', ParseUUIDPipe) imageId: string) {
+    return this.aircraft.deleteImagen(imageId);
   }
 }
