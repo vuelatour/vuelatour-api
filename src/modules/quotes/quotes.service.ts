@@ -10,20 +10,30 @@ import { RoutesService } from '../routes/routes.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   CalculateQuoteDto,
+  EscalaInputDto,
   MetodoPago,
   TipoTarifa,
+  TipoVuelo,
 } from './dto/calculate-quote.dto';
-import { CreateQuoteDto, TipoVuelo } from './dto/create-quote.dto';
+import { CreateQuoteDto } from './dto/create-quote.dto';
 import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
 interface ResolvedRoute {
   origen_iata: string;
   destino_iata: string;
-  millas_nauticas: number;
+  millas_nauticas: number; // total (suma para MULTIESCALA)
   es_redondo_auto: boolean;
   num_aterrizajes: number;
   ruta_id: string | null;
+  escalas: EscalaInputDto[] | null; // null si es single-leg
+}
+
+export interface TuasAeropuerto {
+  iata: string;
+  aplica: boolean;
+  usd_pax: number;
+  razon: string;
 }
 
 const IVA_DEFAULT = 0.16;
@@ -85,21 +95,26 @@ export class QuotesService {
     }
     const subtotal = tiempoCobrableHr * tarifaHora;
 
-    const tuasOrigen = await this.computeTuas(
-      route.origen_iata,
-      matriculaPrefix,
-      dto.pase_abordar ?? false,
-      dto.tuas_override_usd_pax,
+    // TUAS por cada aeropuerto único del itinerario (preserva orden de aparición).
+    const aeropuertosOrdenados = route.escalas
+      ? this.aeropuertosUnicos(route.escalas)
+      : [route.origen_iata, route.destino_iata];
+
+    const tuasAeropuertos: TuasAeropuerto[] = [];
+    for (const iata of aeropuertosOrdenados) {
+      tuasAeropuertos.push(
+        await this.computeTuas(
+          iata,
+          matriculaPrefix,
+          dto.pase_abordar ?? false,
+          dto.tuas_override_usd_pax,
+        ),
+      );
+    }
+    const tuasTotal = tuasAeropuertos.reduce(
+      (acc, t) => acc + (t.aplica ? t.usd_pax * dto.pasajeros : 0),
+      0,
     );
-    const tuasDestino = await this.computeTuas(
-      route.destino_iata,
-      matriculaPrefix,
-      dto.pase_abordar ?? false,
-      dto.tuas_override_usd_pax,
-    );
-    const tuasTotal =
-      (tuasOrigen.aplica ? tuasOrigen.usd_pax * dto.pasajeros : 0) +
-      (tuasDestino.aplica ? tuasDestino.usd_pax * dto.pasajeros : 0);
 
     const ivaAplicaPorMetodo =
       dto.metodo_pago === MetodoPago.TRANSFERENCIA ||
@@ -113,6 +128,26 @@ export class QuotesService {
     const baseIva = subtotal + tuasTotal;
     const iva = baseIva * ivaPct;
     const total = baseIva + iva;
+
+    // Conservamos `origen` y `destino` siempre para retrocompat del frontend single-leg.
+    // En MULTIESCALA `intermedios` lleva los demás aeropuertos.
+    const tuasBlock = route.escalas
+      ? {
+          usd_pax_default: dto.tuas_override_usd_pax,
+          pasajeros: dto.pasajeros,
+          origen: tuasAeropuertos[0],
+          destino: tuasAeropuertos[tuasAeropuertos.length - 1],
+          intermedios: tuasAeropuertos.slice(1, -1),
+          aeropuertos: tuasAeropuertos,
+          total_usd: round2(tuasTotal),
+        }
+      : {
+          usd_pax_default: dto.tuas_override_usd_pax,
+          pasajeros: dto.pasajeros,
+          origen: tuasAeropuertos[0],
+          destino: tuasAeropuertos[1],
+          total_usd: round2(tuasTotal),
+        };
 
     return {
       aeronave: {
@@ -130,6 +165,7 @@ export class QuotesService {
         millas_nauticas_totales: round2(nmTotal),
         es_redondo_auto: route.es_redondo_auto,
         num_aterrizajes: route.num_aterrizajes,
+        escalas: route.escalas,
       },
       tiempos: {
         vuelo_hr: round4(tiempoVueloHr),
@@ -141,13 +177,7 @@ export class QuotesService {
         usd_por_hora: round2(tarifaHora),
         proviene_de_override: dto.tarifa_hora_override_usd !== undefined,
       },
-      tuas: {
-        usd_pax_default: dto.tuas_override_usd_pax,
-        pasajeros: dto.pasajeros,
-        origen: tuasOrigen,
-        destino: tuasDestino,
-        total_usd: round2(tuasTotal),
-      },
+      tuas: tuasBlock,
       iva: {
         aplica_por_metodo_pago: ivaAplicaPorMetodo,
         porcentaje: round4(ivaPct),
@@ -168,7 +198,7 @@ export class QuotesService {
       },
       meta: {
         calculado_at: new Date().toISOString(),
-        version_motor: '1.0.0',
+        version_motor: '1.1.0',
       },
     };
   }
@@ -208,7 +238,9 @@ export class QuotesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
-    return data;
+    // Adjuntar escalas plan (sin tacometros - es lo que se mostro al cotizar).
+    const escalas = await this.findEscalas(id);
+    return { ...data, escalas };
   }
 
   async findVersions(vueloId: string) {
@@ -269,8 +301,14 @@ export class QuotesService {
       throw new Error(error.message);
     }
 
+    if (breakdown.ruta.escalas) {
+      await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId);
+    }
+
     await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
-    return vuelo!;
+
+    const escalas = await this.findEscalas(vuelo!.id);
+    return { ...vuelo!, escalas };
   }
 
   async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
@@ -293,6 +331,7 @@ export class QuotesService {
       .from('vuelo')
       .update({
         cotizacion_version: newVersion,
+        tipo: dto.tipo ?? current.tipo,
         aeronave_id: dto.aeronave_id,
         ruta_id: breakdown.ruta.id,
         origen_iata: breakdown.ruta.origen_iata,
@@ -321,8 +360,10 @@ export class QuotesService {
       .maybeSingle();
 
     if (error) throw new Error(error.message);
+    await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId);
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
-    return updated!;
+    const escalas = await this.findEscalas(vueloId);
+    return { ...updated!, escalas };
   }
 
   async confirm(vueloId: string, userId: string) {
@@ -370,6 +411,50 @@ export class QuotesService {
 
   // ============ Internals ============
 
+  private async findEscalas(vueloId: string) {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
+      )
+      .eq('vuelo_id', vueloId)
+      .order('orden', { ascending: true });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /**
+   * Reemplaza el plan de escalas. Solo aplica para MULTIESCALA. Para vuelos no
+   * multiescala que tuvieran escalas (cambio de tipo en revise), las borra.
+   */
+  private async replaceEscalas(
+    vueloId: string,
+    escalas: EscalaInputDto[] | null,
+    userId: string,
+  ): Promise<void> {
+    const { error: delErr } = await this.supabase.service
+      .from('escala')
+      .delete()
+      .eq('vuelo_id', vueloId);
+    if (delErr) throw new Error(`Failed to clear escalas: ${delErr.message}`);
+
+    if (!escalas || escalas.length === 0) return;
+
+    const rows = escalas.map((e, idx) => ({
+      vuelo_id: vueloId,
+      orden: idx + 1,
+      origen_iata: e.origen_iata.toUpperCase(),
+      destino_iata: e.destino_iata.toUpperCase(),
+      millas_nauticas: e.millas_nauticas,
+      created_by: userId,
+      updated_by: userId,
+    }));
+    const { error: insErr } = await this.supabase.service
+      .from('escala')
+      .insert(rows);
+    if (insErr) throw new Error(`Failed to insert escalas: ${insErr.message}`);
+  }
+
   private async appendVersionHistory(
     vueloId: string,
     version: number,
@@ -409,9 +494,27 @@ export class QuotesService {
   }
 
   private async resolveRoute(dto: CalculateQuoteDto): Promise<ResolvedRoute> {
+    // Ruta del catalogo (incluye multiescala con tramos hidratados).
+    // Prioritaria sobre dto.tipo / dto.escalas porque el catalogo es la fuente.
     if (dto.ruta_id) {
       const r = await this.routes.findById(dto.ruta_id);
       if (!r.activa) throw new BadRequestException('Ruta inactiva');
+      if (r.tipo === 'MULTIESCALA' && r.tramos && r.tramos.length >= 2) {
+        const escalasNorm: EscalaInputDto[] = r.tramos.map((t) => ({
+          origen_iata: t.origen_iata.toUpperCase(),
+          destino_iata: t.destino_iata.toUpperCase(),
+          millas_nauticas: Number(t.millas_nauticas),
+        }));
+        return {
+          ruta_id: r.id,
+          origen_iata: escalasNorm[0].origen_iata,
+          destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
+          millas_nauticas: escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0),
+          es_redondo_auto: false,
+          num_aterrizajes: escalasNorm.length,
+          escalas: escalasNorm,
+        };
+      }
       return {
         ruta_id: r.id,
         origen_iata: r.origen_iata,
@@ -419,6 +522,40 @@ export class QuotesService {
         millas_nauticas: Number(r.millas_nauticas),
         es_redondo_auto: r.es_redondo_auto,
         num_aterrizajes: r.num_aterrizajes,
+        escalas: null,
+      };
+    }
+
+    // Sin ruta_id: MULTIESCALA requiere escalas[] explicitas.
+    if (dto.tipo === TipoVuelo.MULTIESCALA) {
+      if (!dto.escalas || dto.escalas.length < 2) {
+        throw new BadRequestException(
+          'MULTIESCALA requiere al menos 2 escalas (origen->intermedio->destino).',
+        );
+      }
+      for (let i = 0; i < dto.escalas.length - 1; i++) {
+        const a = dto.escalas[i].destino_iata.toUpperCase();
+        const b = dto.escalas[i + 1].origen_iata.toUpperCase();
+        if (a !== b) {
+          throw new BadRequestException(
+            `Escala ${i + 2}: el origen (${b}) debe coincidir con el destino de la escala ${i + 1} (${a}).`,
+          );
+        }
+      }
+      const escalasNorm: EscalaInputDto[] = dto.escalas.map((e) => ({
+        origen_iata: e.origen_iata.toUpperCase(),
+        destino_iata: e.destino_iata.toUpperCase(),
+        millas_nauticas: Number(e.millas_nauticas),
+      }));
+      const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
+      return {
+        ruta_id: null,
+        origen_iata: escalasNorm[0].origen_iata,
+        destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
+        millas_nauticas: nmTotal,
+        es_redondo_auto: false,
+        num_aterrizajes: escalasNorm.length,
+        escalas: escalasNorm,
       };
     }
     if (!dto.origen_iata || !dto.destino_iata || dto.millas_nauticas === undefined) {
@@ -433,7 +570,28 @@ export class QuotesService {
       millas_nauticas: dto.millas_nauticas,
       es_redondo_auto: dto.es_redondo_auto ?? true,
       num_aterrizajes: dto.num_aterrizajes ?? 2,
+      escalas: null,
     };
+  }
+
+  /**
+   * Aeropuertos únicos del itinerario en orden de aparición. Para
+   * CUN-HOL-CZM-CUN devuelve [CUN, HOL, CZM] (sin duplicar el regreso a CUN
+   * porque TUAS por aeropuerto se cobra por aeropuerto, no por aterrizaje).
+   */
+  private aeropuertosUnicos(escalas: EscalaInputDto[]): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const e of escalas) {
+      for (const iata of [e.origen_iata, e.destino_iata]) {
+        const u = iata.toUpperCase();
+        if (!seen.has(u)) {
+          seen.add(u);
+          out.push(u);
+        }
+      }
+    }
+    return out;
   }
 
   private derivarMatriculaPrefix(matricula: string): 'XA' | 'XB' | 'N' {
@@ -451,7 +609,7 @@ export class QuotesService {
     matriculaPrefix: 'XA' | 'XB' | 'N',
     paseAbordar: boolean,
     override?: number,
-  ): Promise<{ aplica: boolean; usd_pax: number; razon: string; iata: string }> {
+  ): Promise<TuasAeropuerto> {
     try {
       const result = await this.airports.computeTuasUsdPax(
         iata,

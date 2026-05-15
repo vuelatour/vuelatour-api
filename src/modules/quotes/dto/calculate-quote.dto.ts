@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsEnum,
   IsInt,
@@ -11,6 +13,7 @@ import {
   Length,
   Min,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 
 export enum TipoTarifa {
@@ -26,42 +29,99 @@ export enum MetodoPago {
   DOLARES = 'DOLARES',
 }
 
+export enum TipoVuelo {
+  SENCILLO = 'SENCILLO',
+  REDONDO = 'REDONDO',
+  MULTIESCALA = 'MULTIESCALA',
+}
+
+export class EscalaInputDto {
+  @ApiProperty({ description: 'IATA origen del tramo', example: 'CUN' })
+  @IsString()
+  @Length(3, 4)
+  origen_iata!: string;
+
+  @ApiProperty({ description: 'IATA destino del tramo', example: 'HOL' })
+  @IsString()
+  @Length(3, 4)
+  destino_iata!: string;
+
+  @ApiProperty({ description: 'Millas nauticas del tramo (one-way)' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  millas_nauticas!: number;
+}
+
 export class CalculateQuoteDto {
   @ApiProperty({ description: 'Aeronave que vuela la ruta' })
   @IsUUID()
   aeronave_id!: string;
 
-  // Either ruta_id OR (origen+destino+millas_nauticas) — validated below
+  @ApiPropertyOptional({
+    enum: TipoVuelo,
+    description:
+      'Tipo de vuelo. Si MULTIESCALA, debe proveerse `escalas[]` (>=2). Default SENCILLO/REDONDO segun la ruta.',
+  })
+  @IsOptional()
+  @IsEnum(TipoVuelo)
+  tipo?: TipoVuelo;
+
+  // ---- MULTIESCALA: lista ordenada de tramos ----
+  // Solo se exigen si tipo=MULTIESCALA Y no viene ruta_id (cuando hay ruta_id
+  // del catalogo, el service hidrata las escalas desde ahi).
+  @ApiPropertyOptional({
+    type: [EscalaInputDto],
+    description:
+      'Requerido si tipo=MULTIESCALA y no se pasa ruta_id. Tramos ordenados (ej. CUN->HOL, HOL->CZM, CZM->CUN).',
+  })
+  @ValidateIf(
+    (o: CalculateQuoteDto) => o.tipo === TipoVuelo.MULTIESCALA && !o.ruta_id,
+  )
+  @IsArray()
+  @ArrayMinSize(2)
+  @ValidateNested({ each: true })
+  @Type(() => EscalaInputDto)
+  escalas?: EscalaInputDto[];
+
+  // ---- Single-leg: ruta predefinida o ad-hoc ----
   @ApiPropertyOptional({ description: 'Si se pasa, usa la ruta predefinida' })
+  @ValidateIf((o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA)
   @IsOptional()
   @IsUUID()
   ruta_id?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto origen IATA. Requerido si no hay ruta_id.' })
-  @ValidateIf((o: CalculateQuoteDto) => !o.ruta_id)
+  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto origen IATA. Requerido si no hay ruta_id ni escalas.' })
+  @ValidateIf(
+    (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
+  )
   @IsString()
   @Length(3, 4)
   origen_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto destino IATA. Requerido si no hay ruta_id.' })
-  @ValidateIf((o: CalculateQuoteDto) => !o.ruta_id)
+  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto destino IATA. Requerido si no hay ruta_id ni escalas.' })
+  @ValidateIf(
+    (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
+  )
   @IsString()
   @Length(3, 4)
   destino_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: millas náuticas. Requerido si no hay ruta_id.' })
-  @ValidateIf((o: CalculateQuoteDto) => !o.ruta_id)
+  @ApiPropertyOptional({ description: 'Ad-hoc: millas náuticas. Requerido si no hay ruta_id ni escalas.' })
+  @ValidateIf(
+    (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
+  )
   @Type(() => Number)
   @IsNumber()
   @Min(0.01)
   millas_nauticas?: number;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: motor multiplica NM por 2 (default true)' })
+  @ApiPropertyOptional({ description: 'Ad-hoc: motor multiplica NM por 2 (default true). Ignorado en MULTIESCALA.' })
   @IsOptional()
   @IsBoolean()
   es_redondo_auto?: boolean;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: número de aterrizajes (default 2)' })
+  @ApiPropertyOptional({ description: 'Ad-hoc: número de aterrizajes (default 2). Ignorado en MULTIESCALA (se deriva de escalas.length).' })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
