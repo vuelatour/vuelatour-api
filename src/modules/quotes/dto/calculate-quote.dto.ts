@@ -91,7 +91,10 @@ export class CalculateQuoteDto {
   @IsUUID()
   ruta_id?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto origen IATA. Requerido si no hay ruta_id ni escalas.' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: aeropuerto origen IATA. Requerido si no hay ruta_id ni escalas.',
+  })
   @ValidateIf(
     (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
   )
@@ -99,7 +102,10 @@ export class CalculateQuoteDto {
   @Length(3, 4)
   origen_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: aeropuerto destino IATA. Requerido si no hay ruta_id ni escalas.' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: aeropuerto destino IATA. Requerido si no hay ruta_id ni escalas.',
+  })
   @ValidateIf(
     (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
   )
@@ -107,7 +113,10 @@ export class CalculateQuoteDto {
   @Length(3, 4)
   destino_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: millas náuticas. Requerido si no hay ruta_id ni escalas.' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: millas náuticas. Requerido si no hay ruta_id ni escalas.',
+  })
   @ValidateIf(
     (o: CalculateQuoteDto) => o.tipo !== TipoVuelo.MULTIESCALA && !o.ruta_id,
   )
@@ -116,12 +125,18 @@ export class CalculateQuoteDto {
   @Min(0.01)
   millas_nauticas?: number;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: motor multiplica NM por 2 (default true). Ignorado en MULTIESCALA.' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: motor multiplica NM por 2 (default true). Ignorado en MULTIESCALA.',
+  })
   @IsOptional()
   @IsBoolean()
   es_redondo_auto?: boolean;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: número de aterrizajes (default 2). Ignorado en MULTIESCALA (se deriva de escalas.length).' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: número de aterrizajes (default 2). Ignorado en MULTIESCALA (se deriva de escalas.length).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -138,7 +153,10 @@ export class CalculateQuoteDto {
   @Min(1)
   pasajeros!: number;
 
-  @ApiPropertyOptional({ description: 'Pasajeros con pase de abordar (exenta TUAS excepto en Cozumel)' })
+  @ApiPropertyOptional({
+    description:
+      'Pasajeros con pase de abordar (exenta TUAS excepto en Cozumel)',
+  })
   @IsOptional()
   @IsBoolean()
   pase_abordar?: boolean;
@@ -147,21 +165,28 @@ export class CalculateQuoteDto {
   @IsEnum(MetodoPago)
   metodo_pago!: MetodoPago;
 
-  @ApiPropertyOptional({ description: 'Tarifa por hora override (USD). Si null, usa la del avión.' })
+  @ApiPropertyOptional({
+    description: 'Tarifa por hora override (USD). Si null, usa la del avión.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   tarifa_hora_override_usd?: number;
 
-  @ApiPropertyOptional({ description: 'TUAS por pasajero override (USD). Si null, usa la del aeropuerto.' })
+  @ApiPropertyOptional({
+    description:
+      'TUAS por pasajero override (USD). Si null, usa la del aeropuerto.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   tuas_override_usd_pax?: number;
 
-  @ApiPropertyOptional({ description: 'Override de IVA (0.16 default si transferencia/tarjeta)' })
+  @ApiPropertyOptional({
+    description: 'Override de IVA (0.16 default si transferencia/tarjeta)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

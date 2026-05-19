@@ -75,7 +75,10 @@ export class CardsController {
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activa=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.cards.softDelete(id, c.userId);
   }
 }

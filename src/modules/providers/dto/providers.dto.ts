@@ -58,7 +58,9 @@ export class CreateProveedorDto {
   @MaxLength(200)
   nombre!: string;
 
-  @ApiPropertyOptional({ description: 'RFC mexicano (solo para tipo NACIONAL)' })
+  @ApiPropertyOptional({
+    description: 'RFC mexicano (solo para tipo NACIONAL)',
+  })
   @IsOptional()
   @IsString()
   @Length(12, 13)

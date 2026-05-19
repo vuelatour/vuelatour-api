@@ -11,12 +11,16 @@ import {
 } from 'class-validator';
 
 export class CreateAeronaveImagenDto {
-  @ApiProperty({ description: 'Path dentro del bucket Storage (ej. uuid/uuid.jpg)' })
+  @ApiProperty({
+    description: 'Path dentro del bucket Storage (ej. uuid/uuid.jpg)',
+  })
   @IsString()
   @MaxLength(500)
   storage_path!: string;
 
-  @ApiProperty({ description: 'URL publica (o firmada) del archivo en Storage' })
+  @ApiProperty({
+    description: 'URL publica (o firmada) del archivo en Storage',
+  })
   @IsUrl({ require_tld: false })
   @MaxLength(1000)
   url!: string;
@@ -27,7 +31,9 @@ export class CreateAeronaveImagenDto {
   @MaxLength(200)
   alt_text?: string;
 
-  @ApiPropertyOptional({ description: 'Marcar como imagen principal de la aeronave' })
+  @ApiPropertyOptional({
+    description: 'Marcar como imagen principal de la aeronave',
+  })
   @IsOptional()
   @IsBoolean()
   es_principal?: boolean;
@@ -67,7 +73,9 @@ export class UpdateAeronaveImagenDto {
 }
 
 export class ReorderAeronaveImagenesDto {
-  @ApiProperty({ description: 'Ids ordenados en la posicion deseada (orden = indice)' })
+  @ApiProperty({
+    description: 'Ids ordenados en la posicion deseada (orden = indice)',
+  })
   @IsString({ each: true })
   ids!: string[];
 }

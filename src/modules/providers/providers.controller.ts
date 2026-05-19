@@ -63,7 +63,10 @@ export class ProvidersController {
   @Roles(Rol.ADMIN, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activo=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.providers.softDelete(id, c.userId);
   }
 }

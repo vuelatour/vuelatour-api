@@ -17,19 +17,26 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @IsUUID()
   cliente_id!: string;
 
-  @ApiPropertyOptional({ description: 'Fecha programada del vuelo (ISO)', example: '2026-06-15T09:00:00Z' })
+  @ApiPropertyOptional({
+    description: 'Fecha programada del vuelo (ISO)',
+    example: '2026-06-15T09:00:00Z',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   fecha_vuelo?: Date;
 
-  @ApiPropertyOptional({ description: 'Notas visibles para el cliente (aparecen en PDF)' })
+  @ApiPropertyOptional({
+    description: 'Notas visibles para el cliente (aparecen en PDF)',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2000)
   notas?: string;
 
-  @ApiPropertyOptional({ description: 'Notas internas del equipo (no van al cliente)' })
+  @ApiPropertyOptional({
+    description: 'Notas internas del equipo (no van al cliente)',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2000)

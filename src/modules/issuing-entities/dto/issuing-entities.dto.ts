@@ -57,7 +57,9 @@ export class CreateIssuingEntityDto {
   @Length(12, 13)
   rfc?: string;
 
-  @ApiPropertyOptional({ description: 'Régimen fiscal SAT (601 = PM Régimen General)' })
+  @ApiPropertyOptional({
+    description: 'Régimen fiscal SAT (601 = PM Régimen General)',
+  })
   @IsOptional()
   @IsString()
   @Length(3, 10)
@@ -97,7 +99,9 @@ export class CreateIssuingEntityDto {
   notas?: string;
 }
 
-export class UpdateIssuingEntityDto extends PartialType(CreateIssuingEntityDto) {
+export class UpdateIssuingEntityDto extends PartialType(
+  CreateIssuingEntityDto,
+) {
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()

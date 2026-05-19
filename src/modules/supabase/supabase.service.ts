@@ -14,8 +14,14 @@ export class SupabaseService implements OnModuleInit {
   onModuleInit() {
     this.supabaseUrl = this.config.get('SUPABASE_URL', { infer: true });
     this.anonKey = this.config.get('SUPABASE_ANON_KEY', { infer: true });
-    const serviceKey = this.config.get('SUPABASE_SERVICE_ROLE_KEY', { infer: true });
+    const serviceKey = this.config.get('SUPABASE_SERVICE_ROLE_KEY', {
+      infer: true,
+    });
 
+    // supabase-js: createClient() devuelve SupabaseClient con argumentos
+    // genericos distintos al tipo SupabaseClient exportado. Es un quirk de
+    // tipos upstream sin efecto en runtime.
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     this.serviceClient = createClient(this.supabaseUrl, serviceKey, {
       auth: {
         autoRefreshToken: false,
@@ -29,6 +35,7 @@ export class SupabaseService implements OnModuleInit {
   }
 
   forRequest(jwt: string): SupabaseClient {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-return -- ver nota en onModuleInit
     return createClient(this.supabaseUrl, this.anonKey, {
       auth: {
         autoRefreshToken: false,

@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { ExpirationsService } from '../expirations/expirations.service';
 import type {
   AssignFlightDto,
   CreateExternalFlightDto,
@@ -25,7 +26,33 @@ const COBRO_COLS =
 
 @Injectable()
 export class FlightsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly expirations: ExpirationsService,
+  ) {}
+
+  /**
+   * Bloquea operar un vuelo si la aeronave (o sus motores) o el piloto tienen
+   * un documento critico vencido (doc 4.3). Los vuelos externos se omiten:
+   * no usan aeronave ni piloto propios.
+   */
+  private async assertAirworthy(
+    aeronaveId: string | null,
+    pilotoId: string | null,
+  ): Promise<void> {
+    const blocking = await this.expirations.findBlockingExpirations({
+      aeronaveId: aeronaveId ?? undefined,
+      pilotoId: pilotoId ?? undefined,
+    });
+    if (blocking.length > 0) {
+      const detalle = blocking
+        .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
+        .join('; ');
+      throw new ConflictException(
+        `Documento(s) critico(s) vencido(s), no se puede operar el vuelo: ${detalle}`,
+      );
+    }
+  }
 
   // ============ Vuelos ============
 
@@ -41,7 +68,8 @@ export class FlightsService {
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.piloto_id) q = q.eq('piloto_id', filters.piloto_id);
     if (filters.estado) q = q.eq('estado', filters.estado);
-    if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
+    if (typeof filters.es_externo === 'boolean')
+      q = q.eq('es_externo', filters.es_externo);
     if (filters.desde) q = q.gte('fecha_vuelo', filters.desde.toISOString());
     if (filters.hasta) q = q.lte('fecha_vuelo', filters.hasta.toISOString());
 
@@ -72,10 +100,7 @@ export class FlightsService {
       this.listEscalas(id),
       this.listCobros(id),
     ]);
-    const totalCobrado = cobros.reduce(
-      (acc, c) => acc + Number(c.monto),
-      0,
-    );
+    const totalCobrado = cobros.reduce((acc, c) => acc + Number(c.monto), 0);
     return {
       ...vuelo,
       escalas,
@@ -102,7 +127,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -116,15 +143,30 @@ export class FlightsService {
       );
     }
     if (current.es_externo && dto.aeronave_id) {
-      throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
+      throw new BadRequestException(
+        'Vuelo externo no admite aeronave_id propia',
+      );
     }
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
-    if (dto.fecha_vuelo !== undefined) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
+    if (dto.fecha_vuelo !== undefined)
+      patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
 
     if (Object.keys(patch).length === 1) {
       throw new BadRequestException('Empty assign payload');
+    }
+
+    if (!current.es_externo) {
+      const aeronaveId: string | null =
+        dto.aeronave_id !== undefined
+          ? dto.aeronave_id
+          : ((current.aeronave_id as string | null) ?? null);
+      const pilotoId: string | null =
+        dto.piloto_id !== undefined
+          ? dto.piloto_id
+          : ((current.piloto_id as string | null) ?? null);
+      await this.assertAirworthy(aeronaveId, pilotoId);
     }
 
     const { data, error } = await this.supabase.service
@@ -135,7 +177,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -150,11 +194,19 @@ export class FlightsService {
     }
     if (!current.es_externo) {
       if (!current.aeronave_id) {
-        throw new BadRequestException('No se puede iniciar sin aeronave_id asignada');
+        throw new BadRequestException(
+          'No se puede iniciar sin aeronave_id asignada',
+        );
       }
       if (!current.piloto_id) {
-        throw new BadRequestException('No se puede iniciar sin piloto_id asignado');
+        throw new BadRequestException(
+          'No se puede iniciar sin piloto_id asignado',
+        );
       }
+      await this.assertAirworthy(
+        current.aeronave_id as string,
+        current.piloto_id as string,
+      );
     }
     const { data, error } = await this.supabase.service
       .from('vuelo')
@@ -221,7 +273,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -259,7 +313,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException(`Ya existe una escala con orden ${dto.orden}`);
+        throw new ConflictException(
+          `Ya existe una escala con orden ${dto.orden}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -311,7 +367,10 @@ export class FlightsService {
         'No se puede borrar una escala con tacómetro capturado (auditoría)',
       );
     }
-    const { error } = await this.supabase.service.from('escala').delete().eq('id', escalaId);
+    const { error } = await this.supabase.service
+      .from('escala')
+      .delete()
+      .eq('id', escalaId);
     if (error) throw new Error(error.message);
     return { deleted: true, id: escalaId };
   }
@@ -332,7 +391,9 @@ export class FlightsService {
   async createCobro(vueloId: string, dto: CreateCobroDto, userId: string) {
     const vuelo = await this.findById(vueloId);
     if (vuelo.estado === 'CANCELADO') {
-      throw new ConflictException('No se puede registrar cobro en vuelo CANCELADO');
+      throw new ConflictException(
+        'No se puede registrar cobro en vuelo CANCELADO',
+      );
     }
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
@@ -359,7 +420,10 @@ export class FlightsService {
     return cobro!;
   }
 
-  private async refreshCobradoFlag(vueloId: string, userId: string): Promise<void> {
+  private async refreshCobradoFlag(
+    vueloId: string,
+    userId: string,
+  ): Promise<void> {
     const cobros = await this.listCobros(vueloId);
     const vuelo = await this.findById(vueloId);
     // Solo consideramos cobros en USD para esta heurística simple. En FASE de bancos
@@ -369,7 +433,7 @@ export class FlightsService {
       .reduce((acc, c) => acc + Number(c.monto), 0);
     const totalMxnAsUsd = cobros
       .filter((c) => c.moneda === 'MXN' && c.tc_usd_mxn)
-      .reduce((acc, c) => acc + Number(c.monto) / Number(c.tc_usd_mxn!), 0);
+      .reduce((acc, c) => acc + Number(c.monto) / Number(c.tc_usd_mxn), 0);
     const aproximadoUsd = totalUsd + totalMxnAsUsd;
     const cobradoDeberiaSer = aproximadoUsd >= Number(vuelo.monto_total_usd);
 

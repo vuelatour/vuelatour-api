@@ -35,8 +35,10 @@ export class AircraftService {
       .order('matricula', { ascending: true })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
-    if (filters.pais_registro) query = query.eq('pais_registro', filters.pais_registro);
-    if (typeof filters.activa === 'boolean') query = query.eq('activa', filters.activa);
+    if (filters.pais_registro)
+      query = query.eq('pais_registro', filters.pais_registro);
+    if (typeof filters.activa === 'boolean')
+      query = query.eq('activa', filters.activa);
     if (filters.q) {
       const term = `%${filters.q}%`;
       query = query.or(`matricula.ilike.${term},modelo.ilike.${term}`);
@@ -69,7 +71,9 @@ export class AircraftService {
       await Promise.all([
         this.supabase.service
           .from('motor')
-          .select('id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas')
+          .select(
+            'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas',
+          )
           .eq('aeronave_id', id)
           .order('posicion'),
         this.supabase.service
@@ -79,7 +83,9 @@ export class AircraftService {
           .order('posicion'),
         this.supabase.service
           .from('aeronave_socio')
-          .select('id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, usuario:socio_id(nombre, es_empresa, rol)')
+          .select(
+            'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, usuario:socio_id(nombre, es_empresa, rol)',
+          )
           .eq('aeronave_id', id)
           .is('vigente_hasta', null)
           .order('porcentaje', { ascending: false }),
@@ -117,7 +123,8 @@ export class AircraftService {
       .select(AERONAVE_COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new BadRequestException('matricula already exists');
+      if (error.code === '23505')
+        throw new BadRequestException('matricula already exists');
       throw new Error(error.message);
     }
     return data!;
@@ -156,7 +163,11 @@ export class AircraftService {
     return data ?? [];
   }
 
-  async createOwner(aeronaveId: string, dto: CreateAeronaveSocioDto, createdBy: string) {
+  async createOwner(
+    aeronaveId: string,
+    dto: CreateAeronaveSocioDto,
+    createdBy: string,
+  ) {
     await this.findById(aeronaveId);
     const { data, error } = await this.supabase.service
       .from('aeronave_socio')
@@ -173,13 +184,18 @@ export class AircraftService {
       .select('id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas')
       .maybeSingle();
     if (error) {
-      if (error.code === '23503') throw new BadRequestException('socio_id does not exist');
+      if (error.code === '23503')
+        throw new BadRequestException('socio_id does not exist');
       throw new Error(error.message);
     }
     return data!;
   }
 
-  async updateOwner(ownerId: string, dto: UpdateAeronaveSocioDto, updatedBy: string) {
+  async updateOwner(
+    ownerId: string,
+    dto: UpdateAeronaveSocioDto,
+    updatedBy: string,
+  ) {
     if (Object.keys(dto).length === 0) {
       throw new BadRequestException('Empty patch');
     }
@@ -193,22 +209,31 @@ export class AircraftService {
       .from('aeronave_socio')
       .update(patch)
       .eq('id', ownerId)
-      .select('id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas')
+      .select(
+        'id, aeronave_id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas',
+      )
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`aeronave_socio ${ownerId} not found`);
+    if (!data)
+      throw new NotFoundException(`aeronave_socio ${ownerId} not found`);
     return data;
   }
 
   async closeOwner(ownerId: string, vigenteHasta: Date, updatedBy: string) {
-    return this.updateOwner(ownerId, { vigente_hasta: vigenteHasta }, updatedBy);
+    return this.updateOwner(
+      ownerId,
+      { vigente_hasta: vigenteHasta },
+      updatedBy,
+    );
   }
 
   async listOverhaulReserves(aeronaveId: string) {
     await this.findById(aeronaveId);
     const { data, error } = await this.supabase.service
       .from('reserva_overhaul')
-      .select('id, motor_id, monto_por_hora_usd, horas_acumuladas, notas, motor:motor_id(posicion, numero_serie)')
+      .select(
+        'id, motor_id, monto_por_hora_usd, horas_acumuladas, notas, motor:motor_id(posicion, numero_serie)',
+      )
       .eq('aeronave_id', aeronaveId);
     if (error) throw new Error(error.message);
     return data ?? [];
@@ -242,7 +267,9 @@ export class AircraftService {
     }
 
     // Si no hay imagenes todavia, esta automaticamente es la principal.
-    const existing = await this.listImagenes(aeronaveId);
+    const existing = (await this.listImagenes(aeronaveId)) as {
+      orden: number;
+    }[];
     const esPrincipal = dto.es_principal ?? existing.length === 0;
     const nextOrden =
       existing.length > 0 ? Math.max(...existing.map((i) => i.orden)) + 1 : 0;
@@ -287,7 +314,7 @@ export class AircraftService {
 
     // Si vamos a marcar como principal, desmarcamos las otras.
     if (dto.es_principal === true && !current.es_principal) {
-      await this.unsetPrincipal(current.aeronave_id);
+      await this.unsetPrincipal(current.aeronave_id as string);
     }
 
     const patch: Record<string, unknown> = { updated_by: userId };
@@ -319,9 +346,8 @@ export class AircraftService {
     //    el delete de la fila para no dejar registros huerfanos).
     const { error: storageErr } = await this.supabase.service.storage
       .from(IMAGENES_BUCKET)
-      .remove([current.storage_path]);
+      .remove([current.storage_path as string]);
     if (storageErr) {
-      // eslint-disable-next-line no-console
       console.warn(
         `Could not remove storage object ${current.storage_path}: ${storageErr.message}`,
       );
@@ -336,7 +362,7 @@ export class AircraftService {
 
     // 3. Si era la principal, promovemos a la siguiente (la de menor orden).
     if (current.es_principal) {
-      const next = await this.listImagenes(current.aeronave_id);
+      const next = await this.listImagenes(current.aeronave_id as string);
       if (next.length > 0) {
         await this.supabase.service
           .from('aeronave_imagen')

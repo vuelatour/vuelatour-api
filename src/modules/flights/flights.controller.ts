@@ -67,7 +67,9 @@ export class FlightsController {
 
   @Patch(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Update non-cotization fields (piloto, fecha, notas, flags)' })
+  @ApiOperation({
+    summary: 'Update non-cotization fields (piloto, fecha, notas, flags)',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateFlightDto,
@@ -78,7 +80,10 @@ export class FlightsController {
 
   @Post(':id/assign')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)' })
+  @ApiOperation({
+    summary:
+      'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)',
+  })
   assign(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AssignFlightDto,
@@ -91,7 +96,10 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition CONFIRMADO -> EN_VUELO' })
-  start(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  start(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.flights.start(id, c.userId);
   }
 
@@ -99,7 +107,10 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition EN_VUELO -> COMPLETADO' })
-  complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  complete(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.flights.complete(id, c.userId);
   }
 
@@ -113,7 +124,9 @@ export class FlightsController {
 
   @Post(':id/legs')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
-  @ApiOperation({ summary: 'Create a flight leg (tacómetro fields populated later in FASE 3)' })
+  @ApiOperation({
+    summary: 'Create a flight leg (tacómetro fields populated later in FASE 3)',
+  })
   createLeg(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateEscalaDto,
@@ -124,7 +137,10 @@ export class FlightsController {
 
   @Patch('legs/:legId')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
-  @ApiOperation({ summary: 'Update leg metadata (route/orden/horas). Tacómetro endpoints en FASE 3.' })
+  @ApiOperation({
+    summary:
+      'Update leg metadata (route/orden/horas). Tacómetro endpoints en FASE 3.',
+  })
   updateLeg(
     @Param('legId', ParseUUIDPipe) legId: string,
     @Body() dto: UpdateEscalaDto,

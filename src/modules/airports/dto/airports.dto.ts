@@ -13,7 +13,9 @@ import {
 } from 'class-validator';
 
 export class ListAirportsQuery {
-  @ApiPropertyOptional({ description: 'Búsqueda por IATA, ICAO, nombre o ciudad' })
+  @ApiPropertyOptional({
+    description: 'Búsqueda por IATA, ICAO, nombre o ciudad',
+  })
   @IsOptional()
   @IsString()
   q?: string;
@@ -52,7 +54,10 @@ export class CreateAirportDto {
   @Length(3, 4)
   iata!: string;
 
-  @ApiPropertyOptional({ description: 'Código ICAO (4 chars)', example: 'MMUN' })
+  @ApiPropertyOptional({
+    description: 'Código ICAO (4 chars)',
+    example: 'MMUN',
+  })
   @IsOptional()
   @IsString()
   @Length(4, 4)
@@ -74,7 +79,11 @@ export class CreateAirportDto {
   @Length(2, 2)
   pais!: string;
 
-  @ApiPropertyOptional({ description: 'Tarifa TUAS USD/pasajero', default: 25, minimum: 0 })
+  @ApiPropertyOptional({
+    description: 'Tarifa TUAS USD/pasajero',
+    default: 25,
+    minimum: 0,
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

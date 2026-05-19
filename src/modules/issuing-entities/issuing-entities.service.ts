@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -28,7 +27,9 @@ export class IssuingEntitiesService {
     else q = q.eq('activa', true);
     if (filters.q) {
       const term = `%${filters.q}%`;
-      q = q.or(`codigo.ilike.${term},razon_social.ilike.${term},rfc.ilike.${term}`);
+      q = q.or(
+        `codigo.ilike.${term},razon_social.ilike.${term},rfc.ilike.${term}`,
+      );
     }
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -58,7 +59,8 @@ export class IssuingEntitiesService {
       .eq('codigo', codigo.toUpperCase())
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Entidad fiscal ${codigo} not found`);
+    if (!data)
+      throw new NotFoundException(`Entidad fiscal ${codigo} not found`);
     return data;
   }
 

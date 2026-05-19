@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import type {
   CreateBankAccountDto,
@@ -55,7 +59,8 @@ export class BankAccountsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new BadRequestException('alias already exists');
+      if (error.code === '23505')
+        throw new BadRequestException('alias already exists');
       throw new Error(error.message);
     }
     return data!;

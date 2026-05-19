@@ -4,11 +4,11 @@ import {
   Get,
   HttpCode,
   HttpStatus,
-  NotImplementedException,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -83,9 +83,13 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version.',
+    summary:
+      'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version.',
   })
-  confirm(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  confirm(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.quotes.confirm(id, c.userId);
   }
 
@@ -102,13 +106,15 @@ export class QuotesController {
   }
 
   @Post(':id/pdf')
-  @HttpCode(HttpStatus.NOT_IMPLEMENTED)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
-    summary: 'Generate cotization PDF (delegates to FastAPI pyservices) — pending implementation',
+    summary: 'Generate the cotization PDF (rendered by vuelatour-pyservices)',
   })
-  pdf(@Param('id', ParseUUIDPipe) _id: string) {
-    throw new NotImplementedException(
-      'PDF generation delegated to vuelatour-pyservices. Endpoint disponible cuando se entregue ReportLab/WeasyPrint en FASE pyservices.',
-    );
+  async pdf(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
+    const { buffer, folio, version } = await this.quotes.cotizacionPdf(id);
+    return new StreamableFile(buffer, {
+      type: 'application/pdf',
+      disposition: `inline; filename="cotizacion-${folio}-v${version}.pdf"`,
+    });
   }
 }

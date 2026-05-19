@@ -1,14 +1,22 @@
 import { z } from 'zod';
 
 export const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  NODE_ENV: z
+    .enum(['development', 'test', 'production'])
+    .default('development'),
   PORT: z.coerce.number().int().positive().default(3001),
-  LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  LOG_LEVEL: z
+    .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace'])
+    .default('info'),
 
   SUPABASE_URL: z.string().url(),
   SUPABASE_ANON_KEY: z.string().min(1),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
   SUPABASE_JWT_LEGACY_SECRET: z.string().min(1).optional(),
+
+  // Microservicio Python (FastAPI) para PDFs, Excel y conciliacion.
+  PYSERVICES_URL: z.string().url().default('http://localhost:8000'),
+  PYSERVICES_TOKEN: z.string().min(1).optional(),
 
   CORS_ORIGINS: z
     .string()

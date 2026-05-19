@@ -8,6 +8,7 @@ import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -57,7 +58,87 @@ export class QuotesService {
     private readonly airports: AirportsService,
     private readonly routes: RoutesService,
     private readonly supabase: SupabaseService,
+    private readonly pyservices: PyservicesService,
   ) {}
+
+  /**
+   * Genera el PDF de la cotizacion delegando el render al microservicio Python.
+   * Devuelve los bytes del PDF mas folio/version para el nombre de archivo.
+   */
+  async cotizacionPdf(
+    id: string,
+  ): Promise<{ buffer: Buffer; folio: number; version: number }> {
+    const v = (await this.findById(id)) as {
+      folio: number | string;
+      cliente_id: string;
+      aeronave_id: string | null;
+      tipo: string;
+      cotizacion_version: number;
+      origen_iata: string;
+      destino_iata: string;
+      pasajeros: number;
+      tiempo_cobrable_hr: string;
+      tarifa_hora_usd: string;
+      tarifa_tipo: string;
+      subtotal_vuelo_usd: string;
+      tuas_usd: string;
+      iva_usd: string;
+      monto_total_usd: string;
+      tc_usd_mxn: string | null;
+      fecha_solicitud: string;
+      notas: string | null;
+      es_redondo_auto: boolean;
+    };
+
+    const { data: clienteRow } = await this.supabase.service
+      .from('cliente')
+      .select('nombre')
+      .eq('id', v.cliente_id)
+      .maybeSingle();
+    const cliente = String(clienteRow?.nombre ?? 'Cliente');
+
+    let aeronave = 'Aeronave por asignar';
+    if (v.aeronave_id) {
+      const { data: aeronaveRow } = await this.supabase.service
+        .from('aeronave')
+        .select('matricula, modelo')
+        .eq('id', v.aeronave_id)
+        .maybeSingle();
+      const ac = aeronaveRow;
+      if (ac) aeronave = `${ac.matricula} — ${ac.modelo}`;
+    }
+
+    const tiempo = Number(v.tiempo_cobrable_hr);
+    const tarifaHora = Number(v.tarifa_hora_usd);
+    const subtotal = Number(v.subtotal_vuelo_usd);
+    const folio = Number(v.folio);
+    const version = Number(v.cotizacion_version);
+
+    const buffer = await this.pyservices.generateCotizacionPdf({
+      folio,
+      version,
+      fecha: new Date(v.fecha_solicitud).toISOString().slice(0, 10),
+      cliente,
+      aeronave,
+      ruta: `${v.origen_iata} → ${v.destino_iata}${v.es_redondo_auto ? ' (redondo)' : ''}`,
+      tipo_vuelo: v.tipo,
+      pasajeros: Number(v.pasajeros),
+      lineas: [
+        {
+          concepto: `Tiempo de vuelo cobrable: ${tiempo.toFixed(2)} hrs x $${tarifaHora.toFixed(2)} USD/hr (tarifa ${v.tarifa_tipo.toLowerCase()})`,
+          monto_usd: subtotal,
+        },
+      ],
+      subtotal_usd: subtotal,
+      tuas_usd: Number(v.tuas_usd),
+      iva_usd: Number(v.iva_usd),
+      total_usd: Number(v.monto_total_usd),
+      tc_usd_mxn: v.tc_usd_mxn ? Number(v.tc_usd_mxn) : null,
+      notas: v.notas,
+    });
+
+    return { buffer, folio, version };
+  }
 
   /**
    * Pure calculation, no persistence. Returns the full breakdown.
@@ -67,7 +148,9 @@ export class QuotesService {
     if (!aeronave.activa) throw new BadRequestException('Aeronave inactiva');
 
     const route = await this.resolveRoute(dto);
-    const matriculaPrefix = this.derivarMatriculaPrefix(aeronave.matricula);
+    const matriculaPrefix = this.derivarMatriculaPrefix(
+      aeronave.matricula as string,
+    );
 
     const nmTotal = route.es_redondo_auto
       ? Number(route.millas_nauticas) * 2
@@ -151,10 +234,10 @@ export class QuotesService {
 
     return {
       aeronave: {
-        id: aeronave.id,
-        matricula: aeronave.matricula,
-        modelo: aeronave.modelo,
-        pais_registro: aeronave.pais_registro,
+        id: aeronave.id as string,
+        matricula: aeronave.matricula as string,
+        modelo: aeronave.modelo as string,
+        pais_registro: aeronave.pais_registro as string,
         velocidad_crucero_kts: velocidadKts,
       },
       ruta: {
@@ -215,7 +298,8 @@ export class QuotesService {
     if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.estado) q = q.eq('estado', filters.estado);
-    if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
+    if (typeof filters.es_externo === 'boolean')
+      q = q.eq('es_externo', filters.es_externo);
     if (filters.q) {
       const term = `%${filters.q.toUpperCase()}%`;
       q = q.or(`origen_iata.ilike.${term},destino_iata.ilike.${term}`);
@@ -251,7 +335,7 @@ export class QuotesService {
       .eq('vuelo_id', vueloId)
       .order('version', { ascending: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    return (data ?? []) as unknown[];
   }
 
   async create(dto: CreateQuoteDto, userId: string) {
@@ -297,17 +381,27 @@ export class QuotesService {
 
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
+    const vueloId = vuelo!.id as string;
     if (breakdown.ruta.escalas) {
-      await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId);
+      await this.replaceEscalas(vueloId, breakdown.ruta.escalas, userId);
     }
 
-    await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
+    await this.appendVersionHistory(
+      vueloId,
+      1,
+      dto,
+      breakdown,
+      'Versión inicial',
+      userId,
+    );
 
-    const escalas = await this.findEscalas(vuelo!.id);
+    const escalas = await this.findEscalas(vueloId);
     return { ...vuelo!, escalas };
   }
 
@@ -325,7 +419,7 @@ export class QuotesService {
     }
 
     const breakdown = await this.calculate(dto);
-    const newVersion = current.cotizacion_version + 1;
+    const newVersion = (current.cotizacion_version as number) + 1;
 
     const { data: updated, error } = await this.supabase.service
       .from('vuelo')
@@ -361,7 +455,14 @@ export class QuotesService {
 
     if (error) throw new Error(error.message);
     await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId);
-    await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
+    await this.appendVersionHistory(
+      vueloId,
+      newVersion,
+      dto,
+      breakdown,
+      dto.motivo,
+      userId,
+    );
     const escalas = await this.findEscalas(vueloId);
     return { ...updated!, escalas };
   }
@@ -490,7 +591,10 @@ export class QuotesService {
         motivo,
         created_by: userId,
       });
-    if (error) throw new Error(`Failed to write cotizacion version history: ${error.message}`);
+    if (error)
+      throw new Error(
+        `Failed to write cotizacion version history: ${error.message}`,
+      );
   }
 
   private async resolveRoute(dto: CalculateQuoteDto): Promise<ResolvedRoute> {
@@ -506,22 +610,25 @@ export class QuotesService {
           millas_nauticas: Number(t.millas_nauticas),
         }));
         return {
-          ruta_id: r.id,
+          ruta_id: r.id as string,
           origen_iata: escalasNorm[0].origen_iata,
           destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
-          millas_nauticas: escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0),
+          millas_nauticas: escalasNorm.reduce(
+            (acc, e) => acc + e.millas_nauticas,
+            0,
+          ),
           es_redondo_auto: false,
           num_aterrizajes: escalasNorm.length,
           escalas: escalasNorm,
         };
       }
       return {
-        ruta_id: r.id,
-        origen_iata: r.origen_iata,
-        destino_iata: r.destino_iata,
+        ruta_id: r.id as string,
+        origen_iata: r.origen_iata as string,
+        destino_iata: r.destino_iata as string,
         millas_nauticas: Number(r.millas_nauticas),
-        es_redondo_auto: r.es_redondo_auto,
-        num_aterrizajes: r.num_aterrizajes,
+        es_redondo_auto: r.es_redondo_auto as boolean,
+        num_aterrizajes: r.num_aterrizajes as number,
         escalas: null,
       };
     }
@@ -547,7 +654,10 @@ export class QuotesService {
         destino_iata: e.destino_iata.toUpperCase(),
         millas_nauticas: Number(e.millas_nauticas),
       }));
-      const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
+      const nmTotal = escalasNorm.reduce(
+        (acc, e) => acc + e.millas_nauticas,
+        0,
+      );
       return {
         ruta_id: null,
         origen_iata: escalasNorm[0].origen_iata,
@@ -558,7 +668,11 @@ export class QuotesService {
         escalas: escalasNorm,
       };
     }
-    if (!dto.origen_iata || !dto.destino_iata || dto.millas_nauticas === undefined) {
+    if (
+      !dto.origen_iata ||
+      !dto.destino_iata ||
+      dto.millas_nauticas === undefined
+    ) {
       throw new BadRequestException(
         'Provee ruta_id o (origen_iata + destino_iata + millas_nauticas)',
       );

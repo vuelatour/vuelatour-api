@@ -38,7 +38,10 @@ export class BankAccountsController {
   @Post()
   @Roles(Rol.ADMIN)
   @ApiOperation({ summary: 'Create bank account (ADMIN)' })
-  create(@Body() dto: CreateBankAccountDto, @CurrentUser() c: AuthenticatedUser) {
+  create(
+    @Body() dto: CreateBankAccountDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.accounts.create(dto, c.userId);
   }
 
@@ -63,7 +66,10 @@ export class BankAccountsController {
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activa=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.accounts.softDelete(id, c.userId);
   }
 }

@@ -19,7 +19,10 @@ export class MeController {
 
   @Patch()
   @ApiOperation({ summary: 'Update non-privileged fields of the current user' })
-  update(@Body() body: UpdateSelfDto, @CurrentUser() current: AuthenticatedUser) {
+  update(
+    @Body() body: UpdateSelfDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
     return this.users.updateSelf(current.authId, body, current.userId);
   }
 }

@@ -13,7 +13,12 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
@@ -46,7 +51,10 @@ export class AircraftController {
   @Post()
   @Roles(Rol.ADMIN)
   @ApiOperation({ summary: 'Create aircraft (ADMIN)' })
-  create(@Body() dto: CreateAeronaveDto, @CurrentUser() current: AuthenticatedUser) {
+  create(
+    @Body() dto: CreateAeronaveDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
     return this.aircraft.create(dto, current.userId);
   }
 
@@ -57,7 +65,10 @@ export class AircraftController {
   }
 
   @Get(':id/snapshot')
-  @ApiOperation({ summary: 'Aircraft with engines, propellers, active owners and overhaul reserves' })
+  @ApiOperation({
+    summary:
+      'Aircraft with engines, propellers, active owners and overhaul reserves',
+  })
   snapshot(@Param('id', ParseUUIDPipe) id: string) {
     return this.aircraft.getSnapshot(id);
   }
@@ -87,7 +98,12 @@ export class AircraftController {
   // ============ Ownership ============
 
   @Get(':id/owners')
-  @ApiQuery({ name: 'history', required: false, type: Boolean, description: 'Include closed shares' })
+  @ApiQuery({
+    name: 'history',
+    required: false,
+    type: Boolean,
+    description: 'Include closed shares',
+  })
   @ApiOperation({ summary: 'List ownership shares (active by default)' })
   listOwners(
     @Param('id', ParseUUIDPipe) id: string,
@@ -98,7 +114,10 @@ export class AircraftController {
 
   @Post(':id/owners')
   @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Add ownership share (ADMIN). Caller closes prior shares manually.' })
+  @ApiOperation({
+    summary:
+      'Add ownership share (ADMIN). Caller closes prior shares manually.',
+  })
   createOwner(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateAeronaveSocioDto,
@@ -121,7 +140,9 @@ export class AircraftController {
   @Delete('owners/:ownerId')
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Close ownership share with today as vigente_hasta (ADMIN)' })
+  @ApiOperation({
+    summary: 'Close ownership share with today as vigente_hasta (ADMIN)',
+  })
   closeOwner(
     @Param('ownerId', ParseUUIDPipe) ownerId: string,
     @CurrentUser() current: AuthenticatedUser,
@@ -162,7 +183,9 @@ export class AircraftController {
 
   @Patch('images/:imageId')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Update image metadata (alt_text, orden, es_principal)' })
+  @ApiOperation({
+    summary: 'Update image metadata (alt_text, orden, es_principal)',
+  })
   updateImage(
     @Param('imageId', ParseUUIDPipe) imageId: string,
     @Body() dto: UpdateAeronaveImagenDto,

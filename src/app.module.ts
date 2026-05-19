@@ -26,6 +26,14 @@ import { RoutesModule } from './modules/routes/routes.module';
 import { QuotesModule } from './modules/quotes/quotes.module';
 import { FlightsModule } from './modules/flights/flights.module';
 import { CalendarModule } from './modules/calendar/calendar.module';
+import { ExpensesModule } from './modules/expenses/expenses.module';
+import { DocumentTypesModule } from './modules/document-types/document-types.module';
+import { ExpirationsModule } from './modules/expirations/expirations.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
+import { CashFundsModule } from './modules/cash-funds/cash-funds.module';
+import { TreasuryModule } from './modules/treasury/treasury.module';
+import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
+import { DashboardsModule } from './modules/dashboards/dashboards.module';
 
 @Module({
   imports: [
@@ -81,6 +89,14 @@ import { CalendarModule } from './modules/calendar/calendar.module';
     QuotesModule,
     FlightsModule,
     CalendarModule,
+    ExpensesModule,
+    DocumentTypesModule,
+    ExpirationsModule,
+    InventoryModule,
+    CashFundsModule,
+    TreasuryModule,
+    ProfitSharingModule,
+    DashboardsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

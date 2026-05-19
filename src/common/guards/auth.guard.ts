@@ -73,17 +73,25 @@ export class AuthGuard implements CanActivate {
     if (!data) {
       throw new UnauthorizedException('User not provisioned in application');
     }
-    if (data.estado !== EstadoUsuario.ACTIVO) {
-      throw new UnauthorizedException(`User account is ${data.estado}`);
+    const u: {
+      id: string;
+      supabase_auth_id: string | null;
+      email: string;
+      nombre: string;
+      rol: Rol;
+      estado: EstadoUsuario;
+    } = data;
+    if (u.estado !== EstadoUsuario.ACTIVO) {
+      throw new UnauthorizedException(`User account is ${u.estado}`);
     }
 
     req.user = {
-      authId: data.supabase_auth_id,
-      userId: data.id,
-      email: data.email,
-      nombre: data.nombre,
-      rol: data.rol as Rol,
-      estado: data.estado as EstadoUsuario,
+      authId: payload.sub,
+      userId: u.id,
+      email: u.email,
+      nombre: u.nombre,
+      rol: u.rol,
+      estado: u.estado,
       jwt: token,
     } satisfies AuthenticatedUser;
     return true;
@@ -110,7 +118,7 @@ export class AuthGuard implements CanActivate {
           { algorithms: ['HS256'] },
         );
         return payload;
-      } catch (e) {
+      } catch (e: unknown) {
         this.logger.debug({ err: e }, 'HS256 verification failed');
         throw new UnauthorizedException('Invalid or expired token');
       }
@@ -119,7 +127,7 @@ export class AuthGuard implements CanActivate {
     try {
       const { payload } = await jwtVerify<SupabaseJwtPayload>(token, this.jwks);
       return payload;
-    } catch (e) {
+    } catch (e: unknown) {
       this.logger.debug({ err: e }, 'JWKS verification failed');
       throw new UnauthorizedException('Invalid or expired token');
     }

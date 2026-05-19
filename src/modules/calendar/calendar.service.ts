@@ -19,7 +19,14 @@ export class CalendarService {
     const from = q.from ?? now;
     const to =
       q.to ??
-      new Date(now.getFullYear(), now.getMonth(), now.getDate() + 30, 23, 59, 59);
+      new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 30,
+        23,
+        59,
+        59,
+      );
 
     let query = this.supabase.service
       .from('vuelo')

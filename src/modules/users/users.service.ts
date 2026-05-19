@@ -61,7 +61,7 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to load usuario: ${error.message}`);
     if (!data) throw new NotFoundException(`Usuario ${id} not found`);
-    return data as UsuarioRow;
+    return data;
   }
 
   async findByAuthId(authId: string): Promise<UsuarioRow> {
@@ -73,10 +73,14 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to load usuario: ${error.message}`);
     if (!data) throw new NotFoundException('Usuario not provisioned');
-    return data as UsuarioRow;
+    return data;
   }
 
-  async update(id: string, patch: UpdateUsuarioDto, updatedBy: string): Promise<UsuarioRow> {
+  async update(
+    id: string,
+    patch: UpdateUsuarioDto,
+    updatedBy: string,
+  ): Promise<UsuarioRow> {
     if (Object.keys(patch).length === 0) {
       return this.findById(id);
     }
@@ -89,7 +93,7 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to update usuario: ${error.message}`);
     if (!data) throw new NotFoundException(`Usuario ${id} not found`);
-    return data as UsuarioRow;
+    return data;
   }
 
   async updateSelf(
@@ -109,7 +113,7 @@ export class UsersService {
 
     if (error) throw new Error(`Failed to update self: ${error.message}`);
     if (!data) throw new NotFoundException('Usuario not provisioned');
-    return data as UsuarioRow;
+    return data;
   }
 
   async softDelete(id: string, updatedBy: string): Promise<UsuarioRow> {

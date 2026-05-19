@@ -32,7 +32,9 @@ async function bootstrap() {
   if (config.get('SWAGGER_ENABLED', { infer: true })) {
     const doc = new DocumentBuilder()
       .setTitle('Vuelatour API')
-      .setDescription('Sistema de Control Financiero y Operativo — Aero Charter Cancún')
+      .setDescription(
+        'Sistema de Control Financiero y Operativo — Aero Charter Cancún',
+      )
       .setVersion('0.1.0')
       .addBearerAuth({ type: 'http', scheme: 'bearer', bearerFormat: 'JWT' })
       .build();
@@ -49,4 +51,4 @@ async function bootstrap() {
   logger.log(`Vuelatour API listening on http://localhost:${port}/v1`);
 }
 
-bootstrap();
+void bootstrap();

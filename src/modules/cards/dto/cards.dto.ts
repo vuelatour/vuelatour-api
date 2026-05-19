@@ -88,7 +88,10 @@ export class UpdateCardDto extends PartialType(CreateCardDto) {
 }
 
 export class LinkCardUserDto {
-  @ApiProperty({ description: 'Usuario id a vincular (null para desvincular)', nullable: true })
+  @ApiProperty({
+    description: 'Usuario id a vincular (null para desvincular)',
+    nullable: true,
+  })
   @IsOptional()
   @IsUUID()
   usuario_id?: string | null;
