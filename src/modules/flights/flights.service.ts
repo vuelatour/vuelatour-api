@@ -5,13 +5,14 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type {
   AssignFlightDto,
   CreateExternalFlightDto,
   ListFlightsQuery,
   UpdateFlightDto,
 } from './dto/flights.dto';
-import type { CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
+import type { CaptureTacoDto, CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
@@ -25,7 +26,10 @@ const COBRO_COLS =
 
 @Injectable()
 export class FlightsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly calendar: CalendarSyncService,
+  ) {}
 
   // ============ Vuelos ============
 
@@ -105,6 +109,7 @@ export class FlightsService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+    void this.calendar.syncFlight(id);
     return data!;
   }
 
@@ -138,6 +143,7 @@ export class FlightsService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+    void this.calendar.syncFlight(id);
     return data!;
   }
 
@@ -163,6 +169,7 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(id);
     return data!;
   }
 
@@ -180,6 +187,7 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(id);
     return data!;
   }
 
@@ -224,6 +232,7 @@ export class FlightsService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+    if (data?.id) void this.calendar.syncFlight(data.id as string);
     return data!;
   }
 
@@ -294,6 +303,67 @@ export class FlightsService {
         throw new ConflictException('orden ya existe en este vuelo');
       throw new Error(error.message);
     }
+    if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+    return data;
+  }
+
+  async captureTaco(escalaId: string, dto: CaptureTacoDto, userId: string) {
+    const { data: current, error: readErr } = await this.supabase.service
+      .from('escala')
+      .select('id, vuelo_id, orden, taco_salida, taco_llegada, capturado_por')
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    if (Object.keys(dto).length === 0) {
+      throw new BadRequestException('Empty taco payload');
+    }
+
+    // Validate monotonicity: new taco_salida/llegada must be >= existing capture
+    if (dto.taco_salida !== undefined && current.taco_salida !== null) {
+      if (Number(dto.taco_salida) < Number(current.taco_salida)) {
+        throw new ConflictException(
+          `taco_salida (${dto.taco_salida}) menor al valor previo (${current.taco_salida})`,
+        );
+      }
+    }
+    if (dto.taco_llegada !== undefined && current.taco_llegada !== null) {
+      if (Number(dto.taco_llegada) < Number(current.taco_llegada)) {
+        throw new ConflictException(
+          `taco_llegada (${dto.taco_llegada}) menor al valor previo (${current.taco_llegada})`,
+        );
+      }
+    }
+    if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_salida !== undefined &&
+      Number(dto.taco_llegada) < Number(dto.taco_salida)
+    ) {
+      throw new ConflictException('taco_llegada no puede ser menor a taco_salida');
+    }
+
+    const patch: Record<string, unknown> = {
+      updated_by: userId,
+      capturado_por: userId,
+      sincronizado_at: new Date().toISOString(),
+    };
+    if (dto.taco_salida !== undefined) patch.taco_salida = dto.taco_salida;
+    if (dto.taco_llegada !== undefined) patch.taco_llegada = dto.taco_llegada;
+    if (dto.foto_taco_salida_url !== undefined) patch.foto_taco_salida_url = dto.foto_taco_salida_url;
+    if (dto.foto_taco_llegada_url !== undefined) patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
+    if (dto.valor_ia_propuesto !== undefined) patch.valor_ia_propuesto = dto.valor_ia_propuesto;
+    if (dto.hora_salida !== undefined) patch.hora_salida = dto.hora_salida.toISOString();
+    if (dto.hora_llegada !== undefined) patch.hora_llegada = dto.hora_llegada.toISOString();
+    if (dto.capturado_offline !== undefined) patch.capturado_offline = dto.capturado_offline;
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escalaId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
     return data;
   }

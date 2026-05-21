@@ -23,6 +23,17 @@ export const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v === 'true'),
+
+  // ===== Google Calendar (app -> Calendar sync) =====
+  // Full service-account JSON as a single-line string. Leave empty to disable sync.
+  GOOGLE_SERVICE_ACCOUNT_JSON: z.string().default(''),
+  // Target calendar id (the shared "aerochartercancunflightplanner" calendar,
+  // e.g. an email like info@vuelatour.com or a *@group.calendar.google.com id).
+  GOOGLE_CALENDAR_ID: z.string().default(''),
+  GOOGLE_CALENDAR_SYNC_ENABLED: z
+    .string()
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type EnvVars = z.infer<typeof envSchema>;

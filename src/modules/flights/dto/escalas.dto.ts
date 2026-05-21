@@ -1,8 +1,10 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsDate,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
   Length,
@@ -45,3 +47,52 @@ export class CreateEscalaDto {
 }
 
 export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
+
+export class CaptureTacoDto {
+  @ApiPropertyOptional({ description: 'Lectura HOBBS de salida (horas)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  taco_salida?: number;
+
+  @ApiPropertyOptional({ description: 'Lectura HOBBS de llegada (horas)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  taco_llegada?: number;
+
+  @ApiPropertyOptional({ description: 'URL pública/path de la foto del tacómetro de salida' })
+  @IsOptional()
+  @IsString()
+  foto_taco_salida_url?: string;
+
+  @ApiPropertyOptional({ description: 'URL pública/path de la foto del tacómetro de llegada' })
+  @IsOptional()
+  @IsString()
+  foto_taco_llegada_url?: string;
+
+  @ApiPropertyOptional({ description: 'Valor propuesto por la IA antes de confirmación' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  valor_ia_propuesto?: number;
+
+  @ApiPropertyOptional({ description: 'Hora real de salida' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  hora_salida?: Date;
+
+  @ApiPropertyOptional({ description: 'Hora real de llegada' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  hora_llegada?: Date;
+
+  @ApiPropertyOptional({ description: 'Captura realizada offline (sincroniza después)' })
+  @IsOptional()
+  @IsBoolean()
+  capturado_offline?: boolean;
+}

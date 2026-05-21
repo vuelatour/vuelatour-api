@@ -8,6 +8,7 @@ import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -57,6 +58,7 @@ export class QuotesService {
     private readonly airports: AirportsService,
     private readonly routes: RoutesService,
     private readonly supabase: SupabaseService,
+    private readonly calendar: CalendarSyncService,
   ) {}
 
   /**
@@ -384,6 +386,7 @@ export class QuotesService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(vueloId);
     return data!;
   }
 
@@ -406,6 +409,7 @@ export class QuotesService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    void this.calendar.removeFlight(vueloId);
     return data!;
   }
 

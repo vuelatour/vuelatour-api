@@ -17,7 +17,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CreateCobroDto } from './dto/cobros.dto';
-import { CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
+import { CaptureTacoDto, CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
 import {
   AssignFlightDto,
   CreateExternalFlightDto,
@@ -131,6 +131,20 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.updateEscala(legId, dto, c.userId);
+  }
+
+  @Patch('legs/:legId/taco')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @ApiOperation({
+    summary:
+      'Capture tacómetro reading (HOBBS) for a leg. Pilots use this from the mobile app — validates monotonicity vs previous reading.',
+  })
+  captureTaco(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: CaptureTacoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.captureTaco(legId, dto, c.userId);
   }
 
   @Delete('legs/:legId')
