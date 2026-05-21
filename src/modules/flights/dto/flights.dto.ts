@@ -78,11 +78,17 @@ export class UpdateFlightDto {
   @IsUUID()
   piloto_id?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Fecha de traslado inicial / salida' })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   fecha_vuelo?: Date;
+
+  @ApiPropertyOptional({ description: 'Fecha de traslado final / regreso a base' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_traslado_final?: Date;
 
   @ApiPropertyOptional()
   @IsOptional()

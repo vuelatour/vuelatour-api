@@ -30,7 +30,6 @@ export enum MetodoPago {
 }
 
 export enum TipoVuelo {
-  SENCILLO = 'SENCILLO',
   REDONDO = 'REDONDO',
   MULTIESCALA = 'MULTIESCALA',
 }
@@ -61,7 +60,7 @@ export class CalculateQuoteDto {
   @ApiPropertyOptional({
     enum: TipoVuelo,
     description:
-      'Tipo de vuelo. Si MULTIESCALA, debe proveerse `escalas[]` (>=2). Default SENCILLO/REDONDO segun la ruta.',
+      'Tipo de vuelo. Default REDONDO. Si MULTIESCALA, debe proveerse `escalas[]` (>=2).',
   })
   @IsOptional()
   @IsEnum(TipoVuelo)
@@ -116,7 +115,10 @@ export class CalculateQuoteDto {
   @Min(0.01)
   millas_nauticas?: number;
 
-  @ApiPropertyOptional({ description: 'Ad-hoc: motor multiplica NM por 2 (default true). Ignorado en MULTIESCALA.' })
+  @ApiPropertyOptional({
+    description:
+      'Ad-hoc: motor multiplica NM por 2 (vuelo redondo). Default true — todos los vuelos son redondos. Ignorado en MULTIESCALA.',
+  })
   @IsOptional()
   @IsBoolean()
   es_redondo_auto?: boolean;
