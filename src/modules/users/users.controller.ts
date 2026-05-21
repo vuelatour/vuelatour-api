@@ -9,6 +9,7 @@ import {
   Param,
   ParseUUIDPipe,
   Patch,
+  Post,
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -16,7 +17,9 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CreateUsuarioDto } from './dto/create-usuario.dto';
 import { ListUsuariosQuery } from './dto/list-usuarios.query';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { UpdateUsuarioDto } from './dto/update-usuario.dto';
 import { UsersService } from './users.service';
 
@@ -31,6 +34,16 @@ export class UsersController {
   @ApiOperation({ summary: 'List users (admin only)' })
   list(@Query() query: ListUsuariosQuery) {
     return this.users.list(query);
+  }
+
+  @Post()
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Create / invite user. supabase_auth_id queda null hasta el primer login. Útil para pre-cargar pilotos antes de que se logueen con Google.',
+  })
+  create(@Body() dto: CreateUsuarioDto, @CurrentUser() current: AuthenticatedUser) {
+    return this.users.create(dto, current.userId);
   }
 
   @Get(':id')
@@ -54,6 +67,21 @@ export class UsersController {
     @CurrentUser() current: AuthenticatedUser,
   ) {
     return this.users.update(id, body, current.userId);
+  }
+
+  @Post(':id/reset-password')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Define / restablece la contraseña del usuario en Supabase Auth. Si el usuario aún no tiene auth account (INVITADO sin login), crea una con email+password.',
+  })
+  resetPassword(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ResetPasswordDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.users.resetPassword(id, dto.password, current.userId);
   }
 
   @Delete(':id')

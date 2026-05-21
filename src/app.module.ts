@@ -26,12 +26,15 @@ import { RoutesModule } from './modules/routes/routes.module';
 import { QuotesModule } from './modules/quotes/quotes.module';
 import { FlightsModule } from './modules/flights/flights.module';
 import { CalendarModule } from './modules/calendar/calendar.module';
+import { ExpensesModule } from './modules/expenses/expenses.module';
+import { PilotsModule } from './modules/pilots/pilots.module';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
       cache: true,
+      envFilePath: ['.env.local', '.env'],
       validate: (raw) => validateEnv(raw),
     }),
     LoggerModule.forRootAsync({
@@ -81,6 +84,8 @@ import { CalendarModule } from './modules/calendar/calendar.module';
     QuotesModule,
     FlightsModule,
     CalendarModule,
+    ExpensesModule,
+    PilotsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
