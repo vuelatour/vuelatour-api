@@ -12,7 +12,28 @@ import type {
 } from './dto/airports.dto';
 
 const COLS =
-  'id, iata, icao, nombre, ciudad, pais, tuas_default_usd_pax, tuas_aplica_xa, tuas_aplica_xb, tuas_aplica_n, tuas_pase_abordar_exenta, requiere_permiso, notas, activo, created_at, updated_at';
+  'id, iata, icao, nombre, ciudad, pais, latitud, longitud, tuas_default_usd_pax, tuas_aplica_xa, tuas_aplica_xb, tuas_aplica_n, tuas_pase_abordar_exenta, requiere_permiso, notas, activo, created_at, updated_at';
+
+const NM_PER_KM = 0.539957;
+const EARTH_RADIUS_KM = 6371;
+
+/** Distancia great-circle (Haversine) en millas náuticas entre dos coords. */
+export function haversineNm(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number,
+): number {
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const km = EARTH_RADIUS_KM * c;
+  return Math.round(km * NM_PER_KM * 100) / 100;
+}
 
 type AeronaveMatricula = 'XA' | 'XB' | 'N';
 
@@ -101,6 +122,38 @@ export class AirportsService {
 
   async softDelete(id: string, updatedBy: string) {
     return this.update(id, { activo: false }, updatedBy);
+  }
+
+  /**
+   * Millas náuticas great-circle entre dos aeropuertos (por IATA). Devuelve
+   * null si a alguno le faltan coordenadas (el cotizador cae a input manual).
+   */
+  async distanceNm(
+    origenIata: string,
+    destinoIata: string,
+  ): Promise<{ millas_nauticas: number | null; origen: string; destino: string; falta_coords: boolean }> {
+    const codes = [origenIata.toUpperCase(), destinoIata.toUpperCase()];
+    const { data, error } = await this.supabase.service
+      .from('aeropuerto')
+      .select('iata, latitud, longitud')
+      .in('iata', codes);
+    if (error) throw new Error(error.message);
+
+    const byIata = new Map(
+      (data ?? []).map((a) => [a.iata as string, a as { latitud: number | null; longitud: number | null }]),
+    );
+    const o = byIata.get(codes[0]);
+    const d = byIata.get(codes[1]);
+
+    if (
+      !o || !d ||
+      o.latitud == null || o.longitud == null ||
+      d.latitud == null || d.longitud == null
+    ) {
+      return { millas_nauticas: null, origen: codes[0], destino: codes[1], falta_coords: true };
+    }
+    const nm = haversineNm(Number(o.latitud), Number(o.longitud), Number(d.latitud), Number(d.longitud));
+    return { millas_nauticas: nm, origen: codes[0], destino: codes[1], falta_coords: false };
   }
 
   /**

@@ -74,6 +74,22 @@ export class CreateAirportDto {
   @Length(2, 2)
   pais!: string;
 
+  @ApiPropertyOptional({ description: 'Latitud en grados decimales (WGS84)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-90)
+  @Max(90)
+  latitud?: number;
+
+  @ApiPropertyOptional({ description: 'Longitud en grados decimales (WGS84)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(-180)
+  @Max(180)
+  longitud?: number;
+
   @ApiPropertyOptional({ description: 'Tarifa TUAS USD/pasajero', default: 25, minimum: 0 })
   @IsOptional()
   @Type(() => Number)

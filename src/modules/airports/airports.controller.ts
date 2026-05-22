@@ -51,6 +51,20 @@ export class AirportsController {
     return this.airports.findByIata(iata);
   }
 
+  @Get('distance')
+  @ApiQuery({ name: 'origen', description: 'IATA origen' })
+  @ApiQuery({ name: 'destino', description: 'IATA destino' })
+  @ApiOperation({
+    summary:
+      'Millas náuticas great-circle entre dos aeropuertos. millas_nauticas=null si falta coordenada.',
+  })
+  distance(@Query('origen') origen: string, @Query('destino') destino: string) {
+    if (!origen || !destino) {
+      throw new BadRequestException('origen y destino son requeridos');
+    }
+    return this.airports.distanceNm(origen, destino);
+  }
+
   @Get(':id/tuas')
   @ApiQuery({ name: 'matricula', enum: ['XA', 'XB', 'N'] })
   @ApiQuery({ name: 'pase_abordar', type: Boolean, required: false })
