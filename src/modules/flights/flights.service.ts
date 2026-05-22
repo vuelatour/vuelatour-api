@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { EmailService } from '../notifications/email.service';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
@@ -32,7 +33,31 @@ export class FlightsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly calendar: CalendarSyncService,
+    private readonly email: EmailService,
   ) {}
+
+  /** Envía aviso de asignación al piloto (best-effort). */
+  private async notifyPilotAssigned(
+    pilotoId: string,
+    vuelo: Record<string, unknown>,
+  ): Promise<void> {
+    const { data: piloto } = await this.supabase.service
+      .from('usuario')
+      .select('nombre, email')
+      .eq('id', pilotoId)
+      .maybeSingle();
+    const email = (piloto as { email: string | null } | null)?.email;
+    if (!email) return;
+    void this.email.sendPilotAssignment({
+      to: email,
+      pilotoNombre: (piloto as { nombre: string }).nombre ?? 'Piloto',
+      folio: vuelo.folio as number,
+      origenIata: vuelo.origen_iata as string,
+      destinoIata: vuelo.destino_iata as string,
+      pasajeros: Number(vuelo.pasajeros ?? 0),
+      fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
+    });
+  }
 
   // ============ Vuelos ============
 
@@ -162,6 +187,20 @@ export class FlightsService {
         `No se puede modificar un vuelo en estado ${current.estado}`,
       );
     }
+
+    // No se puede asignar piloto hasta que la cotización esté confirmada.
+    const asignandoPiloto =
+      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+    if (
+      asignandoPiloto &&
+      current.estado !== 'CONFIRMADO' &&
+      current.estado !== 'EN_VUELO'
+    ) {
+      throw new ConflictException(
+        'Debes confirmar la cotización antes de asignar un piloto',
+      );
+    }
+
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
     if (dto.fecha_vuelo) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
     if (dto.fecha_traslado_final) {
@@ -179,6 +218,9 @@ export class FlightsService {
       throw new Error(error.message);
     }
     void this.calendar.syncFlight(id);
+    if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
+      void this.notifyPilotAssigned(dto.piloto_id!, data!);
+    }
     return data!;
   }
 
@@ -208,6 +250,16 @@ export class FlightsService {
     if (current.es_externo && dto.aeronave_id) {
       throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
     }
+
+    // No se puede asignar piloto hasta que la cotización esté confirmada.
+    const asignandoPiloto =
+      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+    if (asignandoPiloto && current.estado !== 'CONFIRMADO') {
+      throw new ConflictException(
+        'Debes confirmar la cotización antes de asignar un piloto',
+      );
+    }
+
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
@@ -229,6 +281,9 @@ export class FlightsService {
       throw new Error(error.message);
     }
     void this.calendar.syncFlight(id);
+    if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
+      void this.notifyPilotAssigned(dto.piloto_id!, data!);
+    }
     return data!;
   }
 
