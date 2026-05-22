@@ -34,6 +34,12 @@ export const envSchema = z.object({
     .string()
     .default('false')
     .transform((v) => v === 'true'),
+
+  // ===== Email (Resend) =====
+  RESEND_API_KEY: z.string().default(''),
+  RESEND_FROM: z
+    .string()
+    .default('Vuelatour Notificaciones <notificaciones@notify.vuelatour.com>'),
 });
 
 export type EnvVars = z.infer<typeof envSchema>;

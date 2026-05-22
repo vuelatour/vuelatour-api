@@ -9,6 +9,7 @@ import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { EmailService } from '../notifications/email.service';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -59,6 +60,7 @@ export class QuotesService {
     private readonly routes: RoutesService,
     private readonly supabase: SupabaseService,
     private readonly calendar: CalendarSyncService,
+    private readonly email: EmailService,
   ) {}
 
   /**
@@ -397,7 +399,31 @@ export class QuotesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.syncFlight(vueloId);
+    void this.sendConfirmationEmail(data!);
     return data!;
+  }
+
+  /** Envía el correo de confirmación al cliente (best-effort). */
+  private async sendConfirmationEmail(vuelo: Record<string, unknown>): Promise<void> {
+    const clienteId = vuelo.cliente_id as string | null;
+    if (!clienteId) return;
+    const { data: cliente } = await this.supabase.service
+      .from('cliente')
+      .select('nombre, email')
+      .eq('id', clienteId)
+      .maybeSingle();
+    const email = (cliente as { email: string | null } | null)?.email;
+    if (!email) return;
+    void this.email.sendFlightConfirmation({
+      to: email,
+      clienteNombre: (cliente as { nombre: string }).nombre ?? 'Cliente',
+      folio: vuelo.folio as number,
+      origenIata: vuelo.origen_iata as string,
+      destinoIata: vuelo.destino_iata as string,
+      pasajeros: Number(vuelo.pasajeros ?? 0),
+      fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
+      montoTotalUsd: Number(vuelo.monto_total_usd ?? 0),
+    });
   }
 
   async cancel(vueloId: string, motivo: string | undefined, userId: string) {
