@@ -40,6 +40,14 @@ export const envSchema = z.object({
   RESEND_FROM: z
     .string()
     .default('Vuelatour Notificaciones <notificaciones@notify.vuelatour.com>'),
+
+  // ===== pyservices (IA / visión) =====
+  // Base URL del microservicio FastAPI. Vacío = visión por IA deshabilitada
+  // (la captura cae a manual + sugerencia histórica).
+  PYSERVICES_BASE_URL: z.string().default(''),
+  // Token compartido (header X-Internal-Token). Debe coincidir con pyservices.
+  INTERNAL_SHARED_TOKEN: z.string().default(''),
+  PYSERVICES_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
 });
 
 export type EnvVars = z.infer<typeof envSchema>;
