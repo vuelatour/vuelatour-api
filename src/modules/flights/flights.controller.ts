@@ -17,7 +17,12 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CreateCobroDto } from './dto/cobros.dto';
-import { CaptureTacoDto, CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
+import {
+  CaptureTacoDto,
+  CreateEscalaDto,
+  TacoAiReadDto,
+  UpdateEscalaDto,
+} from './dto/escalas.dto';
 import {
   AssignFlightDto,
   CreateExternalFlightDto,
@@ -170,6 +175,17 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.captureTaco(legId, dto, c.userId);
+  }
+
+  @Post('legs/:legId/taco/ai-read')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Lee el tacómetro de una foto con IA (Claude Vision), sin guardar. Prellena el campo en la app. Si la IA falla o la foto sale ilegible, devuelve una sugerencia histórica para la lectura de llegada.',
+  })
+  tacoAiRead(@Param('legId', ParseUUIDPipe) legId: string, @Body() dto: TacoAiReadDto) {
+    return this.flights.tacoAiRead(legId, dto);
   }
 
   @Delete('legs/:legId')

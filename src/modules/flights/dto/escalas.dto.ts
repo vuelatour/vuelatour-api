@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDate,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -47,6 +48,27 @@ export class CreateEscalaDto {
 }
 
 export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
+
+export class TacoAiReadDto {
+  @ApiProperty({ enum: ['salida', 'llegada'], description: '¿Qué lectura se está tomando?' })
+  @IsIn(['salida', 'llegada'])
+  which!: 'salida' | 'llegada';
+
+  @ApiPropertyOptional({ description: 'Imagen en base64 (sin prefijo data:). Requiere media_type.' })
+  @IsOptional()
+  @IsString()
+  image_base64?: string;
+
+  @ApiPropertyOptional({ enum: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] })
+  @IsOptional()
+  @IsIn(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+  media_type?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+
+  @ApiPropertyOptional({ description: 'URL pública/firmada de la imagen (alternativa a base64)' })
+  @IsOptional()
+  @IsString()
+  image_url?: string;
+}
 
 export class CaptureTacoDto {
   @ApiPropertyOptional({ description: 'Lectura HOBBS de salida (horas)' })

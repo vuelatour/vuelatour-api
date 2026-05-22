@@ -8,6 +8,7 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
+import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
@@ -16,14 +17,24 @@ import type {
   ListFlightsQuery,
   UpdateFlightDto,
 } from './dto/flights.dto';
-import type { CaptureTacoDto, CreateEscalaDto, UpdateEscalaDto } from './dto/escalas.dto';
+import type {
+  CaptureTacoDto,
+  CreateEscalaDto,
+  TacoAiReadDto,
+  UpdateEscalaDto,
+} from './dto/escalas.dto';
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+
+// Umbrales de consistencia para la marca AMARILLA (revisión manual).
+const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
+const DURATION_TOL_PCT = 0.4; // desviación de duración vs promedio histórico
+const MIN_MUESTRAS = 3; // muestras mínimas para confiar en el promedio
 
 const COBRO_COLS =
   'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, referencia, fecha_cobro, registrado_por, notas, created_at, updated_at';
@@ -34,6 +45,7 @@ export class FlightsService {
     private readonly supabase: SupabaseService,
     private readonly calendar: CalendarSyncService,
     private readonly email: EmailService,
+    private readonly vision: VisionService,
   ) {}
 
   /** Envía aviso de asignación al piloto (best-effort). */
@@ -328,6 +340,13 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.syncFlight(id);
+    // Alimenta el histórico de tiempos por tramo (best-effort, no bloquea).
+    try {
+      await this.recordTramoTiempos(id);
+    } catch (err) {
+      // El recálculo de promedios nunca debe impedir cerrar el vuelo.
+      void err;
+    }
     return data!;
   }
 
@@ -505,7 +524,191 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
-    return data;
+
+    return this.applyConsistencyFlag(data, userId);
+  }
+
+  /**
+   * Lee el tacómetro de una foto con IA (visión), SIN guardar nada. La app la
+   * usa para prellenar el campo tras subir la foto. Si la IA está deshabilitada,
+   * falla o la foto sale ilegible, cae a una sugerencia histórica (solo para la
+   * lectura de llegada, cuando ya hay taco_salida) — nunca bloquea al piloto.
+   */
+  async tacoAiRead(escalaId: string, dto: TacoAiReadDto) {
+    const { data: escala, error } = await this.supabase.service
+      .from('escala')
+      .select('id, origen_iata, destino_iata, taco_salida')
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!escala) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    const ia = await this.vision.readTacometro({
+      imageBase64: dto.image_base64,
+      mediaType: dto.media_type,
+      imageUrl: dto.image_url,
+    });
+
+    if (ia && ia.legible && ia.lectura !== null) {
+      return {
+        fuente: 'ia' as const,
+        lectura: ia.lectura,
+        confianza: ia.confianza,
+        legible: true,
+        notas: ia.notas,
+      };
+    }
+
+    // Fallback histórico: solo aplica a la llegada y si ya hay salida capturada.
+    const fallback = await this.historicalArrivalSuggestion(
+      escala.origen_iata,
+      escala.destino_iata,
+      dto.which,
+      escala.taco_salida === null ? null : Number(escala.taco_salida),
+    );
+
+    return {
+      fuente: fallback ? ('historico' as const) : ('ninguna' as const),
+      lectura: null,
+      confianza: 0,
+      legible: false,
+      notas: ia?.notas ?? 'IA no disponible',
+      sugerencia_historica: fallback,
+    };
+  }
+
+  /**
+   * Sugerencia de taco_llegada = taco_salida + promedio histórico del tramo.
+   * Devuelve null si no aplica (no es llegada, falta salida, o sin historial).
+   */
+  private async historicalArrivalSuggestion(
+    origen: string,
+    destino: string,
+    which: 'salida' | 'llegada',
+    tacoSalida: number | null,
+  ): Promise<{ taco_llegada: number; minutos_promedio: number; muestras: number } | null> {
+    if (which !== 'llegada' || tacoSalida === null) return null;
+    const tramo = await this.getTramoPromedio(origen, destino);
+    if (!tramo || tramo.muestras < MIN_MUESTRAS || tramo.minutos_promedio <= 0) return null;
+    const horas = tramo.minutos_promedio / 60;
+    return {
+      taco_llegada: Math.round((tacoSalida + horas) * 10) / 10,
+      minutos_promedio: tramo.minutos_promedio,
+      muestras: tramo.muestras,
+    };
+  }
+
+  private async getTramoPromedio(
+    origen: string,
+    destino: string,
+  ): Promise<{ minutos_promedio: number; muestras: number } | null> {
+    const { data, error } = await this.supabase.service
+      .from('tramo_tiempo_promedio')
+      .select('minutos_promedio, muestras')
+      .eq('origen_iata', origen.toUpperCase())
+      .eq('destino_iata', destino.toUpperCase())
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    return { minutos_promedio: Number(data.minutos_promedio), muestras: Number(data.muestras) };
+  }
+
+  /**
+   * Evalúa consistencia de la lectura y marca AMARILLO (revision_requerida) si:
+   * (a) la lectura manual difiere de la sugerida por IA más de AI_VS_MANUAL_TOL_HR, o
+   * (b) la duración taco (llegada − salida) se aleja del promedio histórico del tramo.
+   * Persiste el resultado en la escala y devuelve la fila final.
+   */
+  private async applyConsistencyFlag(
+    escala: Record<string, unknown>,
+    userId: string,
+  ): Promise<Record<string, unknown>> {
+    const tacoSalida = escala.taco_salida === null ? null : Number(escala.taco_salida);
+    const tacoLlegada = escala.taco_llegada === null ? null : Number(escala.taco_llegada);
+    const valorIa = escala.valor_ia_propuesto === null ? null : Number(escala.valor_ia_propuesto);
+    const motivos: string[] = [];
+
+    // (a) Manual vs IA. valor_ia_propuesto refleja la última lectura sugerida;
+    // la comparamos contra la lectura más reciente disponible.
+    const lecturaManual = tacoLlegada ?? tacoSalida;
+    if (valorIa !== null && lecturaManual !== null) {
+      const delta = Math.abs(lecturaManual - valorIa);
+      if (delta > AI_VS_MANUAL_TOL_HR) {
+        motivos.push(`Lectura difiere de la IA (Δ ${delta.toFixed(1)} h)`);
+      }
+    }
+
+    // (b) Duración vs promedio histórico.
+    if (tacoSalida !== null && tacoLlegada !== null && tacoLlegada >= tacoSalida) {
+      const durMin = (tacoLlegada - tacoSalida) * 60;
+      const tramo = await this.getTramoPromedio(
+        escala.origen_iata as string,
+        escala.destino_iata as string,
+      );
+      if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
+        const desv = Math.abs(durMin - tramo.minutos_promedio) / tramo.minutos_promedio;
+        if (desv > DURATION_TOL_PCT) {
+          motivos.push(
+            `Duración ${Math.round(durMin)} min fuera de rango histórico (~${Math.round(tramo.minutos_promedio)} min)`,
+          );
+        }
+      }
+    }
+
+    const revisionRequerida = motivos.length > 0;
+    const revisionMotivo = revisionRequerida ? motivos.join('; ') : null;
+    if (
+      revisionRequerida === Boolean(escala.revision_requerida) &&
+      revisionMotivo === (escala.revision_motivo ?? null)
+    ) {
+      return escala;
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update({
+        revision_requerida: revisionRequerida,
+        revision_motivo: revisionMotivo,
+        updated_by: userId,
+      })
+      .eq('id', escala.id as string)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ?? escala;
+  }
+
+  /**
+   * Recalcula tramo_tiempo_promedio a partir de las escalas completas de un vuelo
+   * (con taco_salida y taco_llegada). Promedio incremental por par origen→destino.
+   */
+  private async recordTramoTiempos(vueloId: string): Promise<void> {
+    const escalas = await this.listEscalas(vueloId);
+    for (const e of escalas) {
+      const salida = e.taco_salida === null ? null : Number(e.taco_salida);
+      const llegada = e.taco_llegada === null ? null : Number(e.taco_llegada);
+      if (salida === null || llegada === null || llegada <= salida) continue;
+      const durMin = (llegada - salida) * 60;
+      const origen = (e.origen_iata as string).toUpperCase();
+      const destino = (e.destino_iata as string).toUpperCase();
+
+      const tramo = await this.getTramoPromedio(origen, destino);
+      const muestras = tramo ? tramo.muestras : 0;
+      const promedioPrev = tramo ? tramo.minutos_promedio : 0;
+      const nuevoPromedio = (promedioPrev * muestras + durMin) / (muestras + 1);
+
+      const { error } = await this.supabase.service.from('tramo_tiempo_promedio').upsert(
+        {
+          origen_iata: origen,
+          destino_iata: destino,
+          minutos_promedio: Math.round(nuevoPromedio * 10) / 10,
+          muestras: muestras + 1,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'origen_iata,destino_iata' },
+      );
+      if (error) throw new Error(error.message);
+    }
   }
 
   async deleteEscala(escalaId: string) {
