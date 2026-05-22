@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
 import {
+  ConnectedSocket,
+  MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
@@ -41,9 +44,55 @@ export class RealtimeGateway implements OnGatewayConnection, OnGatewayDisconnect
     }
   }
 
-  handleDisconnect(client: Socket): void {
+  async handleDisconnect(client: Socket): Promise<void> {
     const user = client.data.user as AuthenticatedUser | undefined;
     if (user) this.logger.debug(`Socket ${client.id} desconectado · ${user.email}`);
+    // Al desconectarse, refresca la presencia de las cotizaciones que veía.
+    const quotes = client.data.quoteRooms as Set<string> | undefined;
+    if (quotes) {
+      for (const quoteId of quotes) await this.broadcastQuotePresence(quoteId);
+    }
+  }
+
+  // ===== Presencia de co-edición de cotizaciones =====
+
+  @SubscribeMessage('quote:join')
+  async onQuoteJoin(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { quoteId?: string },
+  ): Promise<void> {
+    const quoteId = payload?.quoteId;
+    if (!quoteId) return;
+    client.join(quoteRoom(quoteId));
+    const set = (client.data.quoteRooms as Set<string>) ?? new Set<string>();
+    set.add(quoteId);
+    client.data.quoteRooms = set;
+    await this.broadcastQuotePresence(quoteId);
+  }
+
+  @SubscribeMessage('quote:leave')
+  async onQuoteLeave(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() payload: { quoteId?: string },
+  ): Promise<void> {
+    const quoteId = payload?.quoteId;
+    if (!quoteId) return;
+    await client.leave(quoteRoom(quoteId));
+    (client.data.quoteRooms as Set<string> | undefined)?.delete(quoteId);
+    await this.broadcastQuotePresence(quoteId);
+  }
+
+  /** Emite al room de la cotización quién la está viendo/editando (sin duplicar usuarios). */
+  private async broadcastQuotePresence(quoteId: string): Promise<void> {
+    const sockets = await this.server.in(quoteRoom(quoteId)).fetchSockets();
+    const editores = new Map<string, { userId: string; nombre: string }>();
+    for (const s of sockets) {
+      const u = s.data.user as AuthenticatedUser | undefined;
+      if (u) editores.set(u.userId, { userId: u.userId, nombre: u.nombre });
+    }
+    this.server
+      .to(quoteRoom(quoteId))
+      .emit('quote:presence', { quoteId, editores: [...editores.values()] });
   }
 
   emitToUser(userId: string, event: string, payload: unknown): void {
