@@ -66,6 +66,16 @@ export class FlightsController {
     return this.flights.snapshot(id);
   }
 
+  @Get(':id/quote-view')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
+  @ApiOperation({
+    summary:
+      'Vista de cotización SOLO LECTURA para el piloto: cliente, ruta, pasajeros, fechas, escalas y monto total cobrable. Oculta comisiones, IVA desglosado, plataforma de cobro, overrides y costos internos. El piloto solo ve su vuelo asignado.',
+  })
+  quoteView(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    return this.flights.quoteView(id, c);
+  }
+
   @Patch(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Update non-cotization fields (piloto, fecha, notas, flags)' })

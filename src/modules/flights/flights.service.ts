@@ -1,11 +1,14 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { Rol } from '../../common/types/auth.types';
+import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
   AssignFlightDto,
   CreateExternalFlightDto,
@@ -68,6 +71,69 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
     return data;
+  }
+
+  /**
+   * Vista de cotización SEGURA para el piloto: solo campos no sensibles
+   * (cliente, ruta, pasajeros, fechas, escalas, monto total cobrable). Oculta
+   * comisiones, plataforma de cobro, IVA desglosado, overrides, márgenes y
+   * costos internos. Un PILOTO solo puede ver el vuelo asignado a él.
+   */
+  async quoteView(id: string, current: AuthenticatedUser) {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, es_externo, cliente:cliente_id(nombre)',
+      )
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+
+    const v = data as unknown as {
+      id: string;
+      folio: number;
+      tipo: string;
+      estado: string;
+      origen_iata: string;
+      destino_iata: string;
+      pasajeros: number;
+      monto_total_usd: string | number;
+      fecha_vuelo: string | null;
+      fecha_traslado_final: string | null;
+      piloto_id: string | null;
+      es_externo: boolean;
+      cliente: { nombre: string } | { nombre: string }[] | null;
+    };
+
+    if (current.rol === Rol.PILOTO && v.piloto_id !== current.userId) {
+      throw new ForbiddenException('No puedes ver la cotización de un vuelo que no tienes asignado');
+    }
+
+    const clienteRaw = v.cliente;
+    const cliente = Array.isArray(clienteRaw) ? clienteRaw[0] : clienteRaw;
+
+    const escalas = await this.listEscalas(id);
+
+    return {
+      id: v.id,
+      folio: v.folio,
+      tipo: v.tipo,
+      estado: v.estado,
+      cliente_nombre: cliente?.nombre ?? null,
+      origen_iata: v.origen_iata,
+      destino_iata: v.destino_iata,
+      pasajeros: v.pasajeros,
+      fecha_traslado_inicial: v.fecha_vuelo,
+      fecha_traslado_final: v.fecha_traslado_final,
+      monto_total_usd: Number(v.monto_total_usd),
+      moneda: 'USD' as const,
+      escalas: escalas.map((e) => ({
+        orden: e.orden,
+        origen_iata: e.origen_iata,
+        destino_iata: e.destino_iata,
+      })),
+    };
   }
 
   async snapshot(id: string) {
