@@ -31,9 +31,16 @@ COMMENT ON COLUMN vuelo.estado_permiso IS
 COMMENT ON COLUMN vuelo.foto_plan_vuelo_url IS
   'Foto opcional del plan de vuelo de salida (vuelos hacia/desde pistas con permiso).';
 
--- Seed de pistas con permiso requerido (si existen en el catálogo).
+-- Seed de pistas con permiso requerido. HOL ya existe en el catálogo; MHL y
+-- PTU son pistas pequeñas que se crean aquí si faltan.
 UPDATE aeropuerto SET requiere_permiso = true
 WHERE upper(iata) IN ('HOL', 'MHL', 'PTU');
+
+INSERT INTO aeropuerto (iata, nombre, ciudad, pais, requiere_permiso, activo)
+VALUES
+  ('MHL', 'Mahahual', 'Mahahual', 'MX', true, true),
+  ('PTU', 'Pulticub', 'Pulticub', 'MX', true, true)
+ON CONFLICT (iata) DO UPDATE SET requiere_permiso = true;
 
 -- Bucket privado para fotos de plan de vuelo.
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
