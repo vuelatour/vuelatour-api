@@ -24,6 +24,18 @@ export const envSchema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
 
+  // Orígenes permitidos para el handshake de Socket.IO. Vacío = se reutilizan
+  // los CORS_ORIGINS. Coma-separado (web admin + simulador/app Flutter).
+  SOCKET_CORS_ORIGINS: z
+    .string()
+    .default('')
+    .transform((v) =>
+      v
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+    ),
+
   // ===== Google Calendar (app -> Calendar sync) =====
   // Full service-account JSON as a single-line string. Leave empty to disable sync.
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().default(''),

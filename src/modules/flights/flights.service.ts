@@ -8,6 +8,7 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
+import { NotificationsService } from '../realtime/notifications.service';
 import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -46,6 +47,7 @@ export class FlightsService {
     private readonly calendar: CalendarSyncService,
     private readonly email: EmailService,
     private readonly vision: VisionService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Envía aviso de asignación al piloto (best-effort). */
@@ -58,6 +60,15 @@ export class FlightsService {
       .select('nombre, email')
       .eq('id', pilotoId)
       .maybeSingle();
+    // Socket en vivo al piloto (independiente del email).
+    void this.notifications.notifyUser(pilotoId, {
+      tipo: 'vuelo_asignado',
+      titulo: 'Nuevo vuelo asignado',
+      cuerpo: `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+      link: `/flights/${vuelo.id as string}`,
+    });
+
     const email = (piloto as { email: string | null } | null)?.email;
     if (!email) return;
     void this.email.sendPilotAssignment({
@@ -232,6 +243,18 @@ export class FlightsService {
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
+    }
+    // Permiso de pista emitido (pendiente → emitido): avisa a admin/coordinador.
+    if (dto.estado_permiso === 'emitido' && current.estado_permiso !== 'emitido') {
+      const payload = {
+        tipo: 'permiso_emitido',
+        titulo: 'Permiso de pista emitido',
+        cuerpo: `${current.origen_iata} → ${current.destino_iata} · folio #${current.folio}`,
+        data: { vuelo_id: id, folio: current.folio },
+        link: `/admin/flights/${id}`,
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, payload, updatedBy);
+      void this.notifications.notifyRole(Rol.COORDINADOR, payload, updatedBy);
     }
     return data!;
   }
@@ -525,7 +548,30 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
 
-    return this.applyConsistencyFlag(data, userId);
+    const finalRow = await this.applyConsistencyFlag(data, userId);
+    void this.notifyTacoCaptured(finalRow);
+    return finalRow;
+  }
+
+  /** Avisa a admin/coordinador que un piloto capturó tacómetro. */
+  private async notifyTacoCaptured(escala: Record<string, unknown>): Promise<void> {
+    const revision = Boolean(escala.revision_requerida);
+    const ruta = `${escala.origen_iata as string} → ${escala.destino_iata as string}`;
+    const payload = {
+      tipo: 'taco_capturado',
+      titulo: revision ? 'Tacómetro capturado · revisar' : 'Tacómetro capturado',
+      cuerpo: revision
+        ? `${ruta} — ${(escala.revision_motivo as string) ?? 'requiere revisión'}`
+        : ruta,
+      data: {
+        escala_id: escala.id,
+        vuelo_id: escala.vuelo_id,
+        revision_requerida: revision,
+      },
+      link: `/admin/flights/${escala.vuelo_id as string}`,
+    };
+    await this.notifications.notifyRole(Rol.ADMIN, payload);
+    await this.notifications.notifyRole(Rol.COORDINADOR, payload);
   }
 
   /**
@@ -810,6 +856,16 @@ export class FlightsService {
 
     // Auto-mark cobrado=true si la suma de cobros >= monto_total_usd
     await this.refreshCobradoFlag(vueloId, userId);
+
+    const payload = {
+      tipo: 'cobro_registrado',
+      titulo: 'Cobro registrado',
+      cuerpo: `${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')} · folio #${vuelo.folio}`,
+      data: { vuelo_id: vueloId, folio: vuelo.folio, monto: dto.monto, moneda: dto.moneda },
+      link: `/admin/flights/${vueloId}`,
+    };
+    void this.notifications.notifyRole(Rol.ADMIN, payload, userId);
+    void this.notifications.notifyRole(Rol.FACTURACION, payload, userId);
 
     return cobro!;
   }

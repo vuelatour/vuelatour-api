@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { validateEnv } from './config/env.schema';
 import type { EnvVars } from './config/env.schema';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
+import { AuthModule } from './common/auth/auth.module';
 import { AuthGuard } from './common/guards/auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
@@ -28,6 +29,7 @@ import { FlightsModule } from './modules/flights/flights.module';
 import { CalendarModule } from './modules/calendar/calendar.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
 import { PilotsModule } from './modules/pilots/pilots.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
 
 @Module({
   imports: [
@@ -68,6 +70,7 @@ import { PilotsModule } from './modules/pilots/pilots.module';
       }),
     }),
     SupabaseModule,
+    AuthModule,
     HealthModule,
     UsersModule,
     MeModule,
@@ -86,6 +89,7 @@ import { PilotsModule } from './modules/pilots/pilots.module';
     CalendarModule,
     ExpensesModule,
     PilotsModule,
+    RealtimeModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

@@ -4,6 +4,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import { ConfiguredIoAdapter } from './common/adapters/socket-io.adapter';
 import type { EnvVars } from './config/env.schema';
 
 async function bootstrap() {
@@ -28,6 +29,11 @@ async function bootstrap() {
     origin: corsOrigins.length > 0 ? corsOrigins : true,
     credentials: true,
   });
+
+  const socketOrigins = config.get('SOCKET_CORS_ORIGINS', { infer: true });
+  app.useWebSocketAdapter(
+    new ConfiguredIoAdapter(app, socketOrigins.length > 0 ? socketOrigins : corsOrigins),
+  );
 
   if (config.get('SWAGGER_ENABLED', { infer: true })) {
     const doc = new DocumentBuilder()

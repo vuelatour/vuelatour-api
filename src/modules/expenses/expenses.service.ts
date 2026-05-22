@@ -1,5 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { NotificationsService } from '../realtime/notifications.service';
+import { Rol } from '../../common/types/auth.types';
 import type {
   CreateGastoDto,
   ListGastosQuery,
@@ -11,7 +13,10 @@ const COLS =
 
 @Injectable()
 export class ExpensesService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async list(filters: ListGastosQuery) {
     let q = this.supabase.service
@@ -81,6 +86,20 @@ export class ExpensesService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+
+    // Aviso a admin: el piloto subió un gasto desde campo.
+    void this.notifications.notifyRole(
+      Rol.ADMIN,
+      {
+        tipo: 'gasto_registrado',
+        titulo: 'Gasto registrado',
+        cuerpo: `${dto.categoria} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
+        data: { gasto_id: (data as { id: string }).id, vuelo_id: dto.vuelo_id ?? null },
+        link: dto.vuelo_id ? `/admin/flights/${dto.vuelo_id}` : '/admin/expenses',
+      },
+      userId,
+    );
+
     return data!;
   }
 
