@@ -177,6 +177,16 @@ export class FlightsController {
     return this.flights.captureTaco(legId, dto, c.userId);
   }
 
+  @Get(':id/taco-photos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Galería de fotos de tacómetro del vuelo con URLs firmadas (1 h) + marca de revisión. Para el panel admin.',
+  })
+  tacoPhotos(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.tacoPhotos(id);
+  }
+
   @Post('legs/:legId/taco/ai-read')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)

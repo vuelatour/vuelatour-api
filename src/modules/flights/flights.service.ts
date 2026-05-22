@@ -711,6 +711,48 @@ export class FlightsService {
     }
   }
 
+  /**
+   * Galería de fotos de tacómetro de un vuelo, con URLs firmadas (bucket privado
+   * taco-fotos, 1 h). Para el panel admin: ver la evidencia y la marca de revisión.
+   */
+  async tacoPhotos(vueloId: string) {
+    const escalas = await this.listEscalas(vueloId);
+    const paths: string[] = [];
+    for (const e of escalas) {
+      if (e.foto_taco_salida_url) paths.push(e.foto_taco_salida_url as string);
+      if (e.foto_taco_llegada_url) paths.push(e.foto_taco_llegada_url as string);
+    }
+    const signed: Record<string, string> = {};
+    if (paths.length > 0) {
+      const { data } = await this.supabase.service.storage
+        .from('taco-fotos')
+        .createSignedUrls(paths, 3600);
+      for (const item of data ?? []) {
+        if (item.signedUrl && item.path) signed[item.path] = item.signedUrl;
+      }
+    }
+    return escalas
+      .filter((e) => e.foto_taco_salida_url || e.foto_taco_llegada_url)
+      .map((e) => ({
+        escala_id: e.id,
+        orden: e.orden,
+        origen_iata: e.origen_iata,
+        destino_iata: e.destino_iata,
+        taco_salida: e.taco_salida,
+        taco_llegada: e.taco_llegada,
+        valor_ia_propuesto: e.valor_ia_propuesto,
+        revision_requerida: e.revision_requerida,
+        revision_motivo: e.revision_motivo,
+        foto_salida_url: e.foto_taco_salida_url
+          ? (signed[e.foto_taco_salida_url as string] ?? null)
+          : null,
+        foto_llegada_url: e.foto_taco_llegada_url
+          ? (signed[e.foto_taco_llegada_url as string] ?? null)
+          : null,
+        capturado_at: e.sincronizado_at,
+      }));
+  }
+
   async deleteEscala(escalaId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
