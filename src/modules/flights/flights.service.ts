@@ -16,7 +16,7 @@ import type { CaptureTacoDto, CreateEscalaDto, UpdateEscalaDto } from './dto/esc
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 const ESCALA_COLS =
   'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
@@ -114,6 +114,22 @@ export class FlightsService {
     }
     void this.calendar.syncFlight(id);
     return data!;
+  }
+
+  /**
+   * Guarda la foto del plan de vuelo de salida (vuelos hacia/desde pistas con
+   * permiso). La sube el piloto desde la app; opcional, no bloqueante.
+   */
+  async setFlightPlan(id: string, fotoUrl: string, userId: string) {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({ foto_plan_vuelo_url: fotoUrl, updated_by: userId })
+      .eq('id', id)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    return data;
   }
 
   async assign(id: string, dto: AssignFlightDto, updatedBy: string) {

@@ -3,6 +3,8 @@ import { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarRangeQuery } from './dto/calendar.dto';
 
 const EXTERNAL_COLOR = '#FFB6C1';
+// Color de alerta para vuelos con permiso de pista pendiente. Configurable.
+const PERMISO_PENDIENTE_COLOR = '#F59E0B';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -24,7 +26,7 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
+        'id, folio, fecha_vuelo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
       )
       .gte('fecha_vuelo', from.toISOString())
       .lte('fecha_vuelo', to.toISOString())
@@ -55,6 +57,7 @@ export class CalendarService {
         piloto_id: string | null;
         cliente_id: string;
         operador_externo: string | null;
+        estado_permiso: string | null;
         google_calendar_id: string | null;
         aeronave:
           | { matricula: string; color_calendario: string | null }
@@ -70,16 +73,30 @@ export class CalendarService {
       const aeronaveStr = v.es_externo
         ? (v.operador_externo ?? 'Externo')
         : (aeronave?.matricula ?? 'sin avión');
-      const color = v.es_externo
-        ? EXTERNAL_COLOR
-        : (aeronave?.color_calendario ?? '#9CA3AF');
-      const title = `${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)`;
+      const permisoPendiente = v.estado_permiso === 'pendiente';
+      // Permiso pendiente domina el color (alerta) hasta que se emita.
+      const color = permisoPendiente
+        ? PERMISO_PENDIENTE_COLOR
+        : v.es_externo
+          ? EXTERNAL_COLOR
+          : (aeronave?.color_calendario ?? '#9CA3AF');
+      // Hora junto al título para comparar disponibilidad de un vistazo.
+      const hora = v.fecha_vuelo
+        ? new Date(v.fecha_vuelo).toLocaleTimeString('es-MX', {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: 'America/Cancun',
+          })
+        : null;
+      const title = `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${permisoPendiente ? ' ⚠ permiso' : ''}`;
 
       return {
         id: v.id,
         folio: v.folio,
         fecha_vuelo: v.fecha_vuelo,
+        hora,
         estado: v.estado,
+        estado_permiso: v.estado_permiso,
         es_externo: v.es_externo,
         title,
         color,

@@ -22,6 +22,7 @@ import {
   AssignFlightDto,
   CreateExternalFlightDto,
   ListFlightsQuery,
+  SetFlightPlanDto,
   UpdateFlightDto,
 } from './dto/flights.dto';
 import { FlightsService } from './flights.service';
@@ -93,6 +94,20 @@ export class FlightsController {
   @ApiOperation({ summary: 'Transition CONFIRMADO -> EN_VUELO' })
   start(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
     return this.flights.start(id, c.userId);
+  }
+
+  @Patch(':id/flight-plan')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @ApiOperation({
+    summary:
+      'Adjunta la foto del plan de vuelo de salida (vuelos hacia/desde pistas con permiso). Piloto desde la app.',
+  })
+  setFlightPlan(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetFlightPlanDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.setFlightPlan(id, dto.foto_plan_vuelo_url, c.userId);
   }
 
   @Post(':id/complete')

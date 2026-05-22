@@ -41,7 +41,7 @@ const IVA_DEFAULT = 0.16;
 const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -259,6 +259,14 @@ export class QuotesService {
   async create(dto: CreateQuoteDto, userId: string) {
     const breakdown = await this.calculate(dto);
 
+    // Permiso de pista: pendiente si origen/destino (o algún tramo) requiere permiso.
+    const iatas = [
+      breakdown.ruta.origen_iata,
+      breakdown.ruta.destino_iata,
+      ...(breakdown.ruta.escalas ?? []).flatMap((e) => [e.origen_iata, e.destino_iata]),
+    ];
+    const requierePermiso = await this.airports.anyRequiresPermit(iatas);
+
     const insertPayload = {
       cliente_id: dto.cliente_id,
       aeronave_id: dto.aeronave_id,
@@ -283,6 +291,7 @@ export class QuotesService {
       iva_usd: breakdown.iva.monto_usd,
       monto_total_usd: breakdown.totales.total_usd,
       metodo_cobro: dto.metodo_pago,
+      estado_permiso: requierePermiso ? 'pendiente' : 'no_aplica',
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
       notas: dto.notas,

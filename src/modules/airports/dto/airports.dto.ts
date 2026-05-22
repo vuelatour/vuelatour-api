@@ -101,6 +101,14 @@ export class CreateAirportDto {
   @IsBoolean()
   tuas_pase_abordar_exenta?: boolean;
 
+  @ApiPropertyOptional({
+    default: false,
+    description: 'La pista exige tramitar permiso antes del vuelo (ej. HOL, MHL, PTU).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiere_permiso?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

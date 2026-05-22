@@ -7,9 +7,10 @@ import { SupabaseService } from '../supabase/supabase.service';
 
 const EXTERNAL_COLOR_ID = '4'; // Flamingo (pinkish) — externos
 const DEFAULT_COLOR_ID = '9'; // Blueberry — vuelos propios
+const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendiente
 
 const VUELO_SELECT =
-  'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, notas, google_calendar_id, ' +
+  'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, notas, estado_permiso, google_calendar_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
@@ -29,7 +30,9 @@ interface VueloRow {
   pasajeros: number;
   monto_total_usd: string | number;
   fecha_vuelo: string | null;
+  fecha_traslado_final: string | null;
   notas: string | null;
+  estado_permiso: string | null;
   google_calendar_id: string | null;
   aeronave: { matricula: string } | { matricula: string }[] | null;
   piloto: { nombre: string } | { nombre: string }[] | null;
@@ -189,15 +192,20 @@ export class CalendarSyncService implements OnModuleInit {
       ? (v.operador_externo ?? 'Externo')
       : (aeronave?.matricula ?? 'sin avión');
 
-    const summary = `${aeronaveStr} · ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)`;
+    const permisoPendiente = v.estado_permiso === 'pendiente';
+
+    const summary = `${aeronaveStr} · ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${permisoPendiente ? ' ⚠ permiso pendiente' : ''}`;
 
     const start = new Date(v.fecha_vuelo!);
-    // Flights have no stored duration yet; show a 2h block as a sensible default.
-    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+    // Si hay fecha de traslado final usamos esa como fin; si no, bloque de 2h.
+    const end = v.fecha_traslado_final
+      ? new Date(v.fecha_traslado_final)
+      : new Date(start.getTime() + 2 * 60 * 60 * 1000);
 
     const descriptionLines = [
       `Folio: #${v.folio}`,
       `Estado: ${v.estado}`,
+      permisoPendiente ? 'Permiso de pista: PENDIENTE' : null,
       `Cliente: ${cliente?.nombre ?? '—'}`,
       `Ruta: ${v.origen_iata} → ${v.destino_iata}`,
       `Pasajeros: ${v.pasajeros}`,
@@ -211,10 +219,17 @@ export class CalendarSyncService implements OnModuleInit {
       `VuelaTour · vuelo ${v.id}`,
     ].filter(Boolean);
 
+    // Permiso pendiente domina el color (alerta) hasta que se emita.
+    const colorId = permisoPendiente
+      ? PERMISO_PENDIENTE_COLOR_ID
+      : v.es_externo
+        ? EXTERNAL_COLOR_ID
+        : DEFAULT_COLOR_ID;
+
     return {
       summary,
       description: descriptionLines.join('\n'),
-      colorId: v.es_externo ? EXTERNAL_COLOR_ID : DEFAULT_COLOR_ID,
+      colorId,
       start: { dateTime: start.toISOString(), timeZone: 'America/Cancun' },
       end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
       // Idempotency anchor — lets us recognize our own events.

@@ -17,6 +17,12 @@ import {
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
 
+export enum EstadoPermiso {
+  NO_APLICA = 'no_aplica',
+  PENDIENTE = 'pendiente',
+  EMITIDO = 'emitido',
+}
+
 export class ListFlightsQuery {
   @ApiPropertyOptional()
   @IsOptional()
@@ -102,6 +108,11 @@ export class UpdateFlightDto {
   @MaxLength(2000)
   notas_internas?: string;
 
+  @ApiPropertyOptional({ enum: EstadoPermiso, description: 'Estado del permiso de pista' })
+  @IsOptional()
+  @IsEnum(EstadoPermiso)
+  estado_permiso?: EstadoPermiso;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -111,6 +122,12 @@ export class UpdateFlightDto {
   @IsOptional()
   @IsBoolean()
   cobrado?: boolean;
+}
+
+export class SetFlightPlanDto {
+  @ApiProperty({ description: 'URL/path en Storage de la foto del plan de vuelo' })
+  @IsString()
+  foto_plan_vuelo_url!: string;
 }
 
 export class AssignFlightDto {

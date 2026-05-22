@@ -12,7 +12,7 @@ import type {
 } from './dto/airports.dto';
 
 const COLS =
-  'id, iata, icao, nombre, ciudad, pais, tuas_default_usd_pax, tuas_aplica_xa, tuas_aplica_xb, tuas_aplica_n, tuas_pase_abordar_exenta, notas, activo, created_at, updated_at';
+  'id, iata, icao, nombre, ciudad, pais, tuas_default_usd_pax, tuas_aplica_xa, tuas_aplica_xb, tuas_aplica_n, tuas_pase_abordar_exenta, requiere_permiso, notas, activo, created_at, updated_at';
 
 type AeronaveMatricula = 'XA' | 'XB' | 'N';
 
@@ -101,6 +101,23 @@ export class AirportsService {
 
   async softDelete(id: string, updatedBy: string) {
     return this.update(id, { activo: false }, updatedBy);
+  }
+
+  /**
+   * True si alguno de los IATA dados corresponde a una pista que requiere
+   * permiso. Usado al crear vuelos para fijar estado_permiso.
+   */
+  async anyRequiresPermit(iatas: string[]): Promise<boolean> {
+    const codes = iatas.filter(Boolean).map((s) => s.toUpperCase());
+    if (codes.length === 0) return false;
+    const { data, error } = await this.supabase.service
+      .from('aeropuerto')
+      .select('iata')
+      .in('iata', codes)
+      .eq('requiere_permiso', true)
+      .limit(1);
+    if (error) throw new Error(error.message);
+    return (data ?? []).length > 0;
   }
 
   /**
