@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Rol } from '../../common/types/auth.types';
+import { PushService } from './push.service';
 import { RealtimeGateway } from './realtime.gateway';
 
 export interface NotificationInput {
@@ -21,7 +22,22 @@ export class NotificationsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly gateway: RealtimeGateway,
+    private readonly push: PushService,
   ) {}
+
+  private pushPayload(n: NotificationInput) {
+    return {
+      title: n.titulo,
+      body: n.cuerpo,
+      data: {
+        tipo: n.tipo,
+        link: n.link ?? '',
+        ...Object.fromEntries(
+          Object.entries(n.data ?? {}).map(([k, v]) => [k, String(v)]),
+        ),
+      },
+    };
+  }
 
   /** Persiste y emite una notificación a un usuario. Best-effort. */
   async notifyUser(usuarioId: string, n: NotificationInput): Promise<void> {
@@ -40,6 +56,7 @@ export class NotificationsService {
         .maybeSingle();
       if (error) throw new Error(error.message);
       this.gateway.emitToUser(usuarioId, SOCKET_EVENT, data);
+      void this.push.sendToUser(usuarioId, this.pushPayload(n));
     } catch (err) {
       this.logger.warn(
         `notifyUser(${usuarioId}) falló: ${err instanceof Error ? err.message : String(err)}`,
@@ -79,6 +96,10 @@ export class NotificationsService {
       }));
       const { error } = await this.supabase.service.from('notificacion').insert(rows);
       if (error) throw new Error(error.message);
+
+      // Push a cada destinatario (best-effort, no-op si está deshabilitado).
+      const payload = this.pushPayload(n);
+      for (const id of targets) void this.push.sendToUser(id, payload);
 
       // Emisión en vivo: al room del rol (excepto el emisor, que ya tiene su
       // propio room por usuario y queda excluido de la persistencia arriba).

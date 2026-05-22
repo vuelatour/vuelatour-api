@@ -60,6 +60,10 @@ export const envSchema = z.object({
   // Token compartido (header X-Internal-Token). Debe coincidir con pyservices.
   INTERNAL_SHARED_TOKEN: z.string().default(''),
   PYSERVICES_TIMEOUT_MS: z.coerce.number().int().positive().default(30000),
+
+  // ===== Push (Firebase Cloud Messaging / APNs) =====
+  // JSON del service account de Firebase (una sola línea). Vacío = push deshabilitado.
+  FCM_SERVICE_ACCOUNT_JSON: z.string().default(''),
 });
 
 export type EnvVars = z.infer<typeof envSchema>;

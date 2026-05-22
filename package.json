@@ -30,6 +30,7 @@
     "@supabase/supabase-js": "^2.105.4",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
+    "firebase-admin": "^13.10.0",
     "googleapis": "^172.0.0",
     "jose": "^6.2.3",
     "nestjs-pino": "^4.6.1",
