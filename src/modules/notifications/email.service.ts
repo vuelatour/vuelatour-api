@@ -147,6 +147,38 @@ export class EmailService implements OnModuleInit {
     }
   }
 
+  /** Correo genérico de alerta (Tarea 8). Best-effort. */
+  async sendAlert(to: string, subject: string, titulo: string, cuerpo: string): Promise<void> {
+    if (!this.resend || !to) return;
+    try {
+      const { error } = await this.resend.emails.send({
+        from: this.from,
+        to,
+        subject,
+        html: `
+<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;color:#1d1d1d">
+  <div style="background:#102a43;padding:20px;border-radius:12px 12px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:18px;font-weight:700">VuelaTour</h1>
+    <p style="color:#9fb3c8;margin:4px 0 0;font-size:12px">Aero Charter Cancún</p>
+  </div>
+  <div style="border:1px solid #e5e5e5;border-top:none;border-radius:0 0 12px 12px;padding:24px">
+    <p style="font-size:16px;font-weight:700;margin:0 0 8px">${titulo}</p>
+    <p style="font-size:14px;color:#374151;margin:0;white-space:pre-line">${cuerpo}</p>
+    <p style="font-size:12px;color:#6b7280;margin-top:24px">Esta es una alerta automática del sistema VuelaTour.</p>
+  </div>
+</div>`.trim(),
+        text: `${titulo}\n\n${cuerpo}\n\n— Alerta automática de VuelaTour.`,
+      });
+      if (error) {
+        this.logger.error(`Resend error (alerta): ${JSON.stringify(error)}`);
+      }
+    } catch (err) {
+      this.logger.error(
+        `sendAlert falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   private buildText(d: FlightConfirmationData, fecha: string, monto: string): string {
     return [
       `Hola ${d.clienteNombre},`,

@@ -1,6 +1,7 @@
 import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD } from '@nestjs/core';
+import { ScheduleModule } from '@nestjs/schedule';
 import { LoggerModule } from 'nestjs-pino';
 import { randomUUID } from 'node:crypto';
 import { validateEnv } from './config/env.schema';
@@ -30,6 +31,7 @@ import { CalendarModule } from './modules/calendar/calendar.module';
 import { ExpensesModule } from './modules/expenses/expenses.module';
 import { PilotsModule } from './modules/pilots/pilots.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
+import { AlertsModule } from './modules/alerts/alerts.module';
 
 @Module({
   imports: [
@@ -39,6 +41,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
       envFilePath: ['.env.local', '.env'],
       validate: (raw) => validateEnv(raw),
     }),
+    ScheduleModule.forRoot(),
     LoggerModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
@@ -90,6 +93,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
     ExpensesModule,
     PilotsModule,
     RealtimeModule,
+    AlertsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
