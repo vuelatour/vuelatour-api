@@ -37,6 +37,15 @@ const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
 const DURATION_TOL_PCT = 0.4; // desviación de duración vs promedio histórico
 const MIN_MUESTRAS = 3; // muestras mínimas para confiar en el promedio
 
+// Tarea 9: validación obligatoria de tacómetro.
+const MSG_TACO = 'Debes registrar el tacómetro antes de continuar.';
+
+interface EscalaTaco {
+  orden: number;
+  taco_salida: string | number | null;
+  taco_llegada: string | number | null;
+}
+
 const COBRO_COLS =
   'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, referencia, fecha_cobro, registrado_por, notas, created_at, updated_at';
 
@@ -337,6 +346,10 @@ export class FlightsService {
         throw new BadRequestException('No se puede iniciar sin piloto_id asignado');
       }
     }
+    // Tarea 9: no se inicia sin la lectura de tacómetro de salida.
+    if (!current.es_externo && this.faltaSalidaInicial(await this.escalasTaco(id))) {
+      throw new ConflictException(MSG_TACO);
+    }
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({ estado: 'EN_VUELO', updated_by: updatedBy })
@@ -354,6 +367,10 @@ export class FlightsService {
       throw new ConflictException(
         `Solo se completa vuelo desde EN_VUELO. Actual: ${current.estado}`,
       );
+    }
+    // Tarea 9: no se completa sin tacómetro de salida y llegada en todos los tramos.
+    if (!current.es_externo && this.faltaTacoCompleto(await this.escalasTaco(id))) {
+      throw new ConflictException(MSG_TACO);
     }
     const { data, error } = await this.supabase.service
       .from('vuelo')
@@ -799,6 +816,58 @@ export class FlightsService {
       }));
   }
 
+  // ===== Validación de tacómetro (Tarea 9) =====
+
+  private async escalasTaco(vueloId: string): Promise<EscalaTaco[]> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select('orden, taco_salida, taco_llegada')
+      .eq('vuelo_id', vueloId)
+      .order('orden', { ascending: true });
+    if (error) throw new Error(error.message);
+    return (data as EscalaTaco[] | null) ?? [];
+  }
+
+  /** Falta la lectura de salida del primer tramo (o no hay escalas). */
+  private faltaSalidaInicial(escalas: EscalaTaco[]): boolean {
+    if (escalas.length === 0) return true;
+    return escalas[0].taco_salida == null;
+  }
+
+  /** Falta cualquier lectura (salida o llegada) en algún tramo, o no hay escalas. */
+  private faltaTacoCompleto(escalas: EscalaTaco[]): boolean {
+    if (escalas.length === 0) return true;
+    return escalas.some((e) => e.taco_salida == null || e.taco_llegada == null);
+  }
+
+  /**
+   * Estado de captura de tacómetro por vuelo (para el badge en admin).
+   * `falta` = sin escalas, o algún tramo sin salida/llegada.
+   */
+  async tacoStatus(ids: string[]): Promise<Record<string, { falta: boolean }>> {
+    const out: Record<string, { falta: boolean }> = {};
+    if (ids.length === 0) return out;
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id, taco_salida, taco_llegada')
+      .in('vuelo_id', ids);
+    if (error) throw new Error(error.message);
+
+    const acc = new Map<string, { count: number; salida: boolean; llegada: boolean }>();
+    for (const id of ids) acc.set(id, { count: 0, salida: true, llegada: true });
+    for (const e of data ?? []) {
+      const s = acc.get(e.vuelo_id as string);
+      if (!s) continue;
+      s.count++;
+      if (e.taco_salida == null) s.salida = false;
+      if (e.taco_llegada == null) s.llegada = false;
+    }
+    for (const [id, s] of acc) {
+      out[id] = { falta: s.count === 0 || !s.salida || !s.llegada };
+    }
+    return out;
+  }
+
   async deleteEscala(escalaId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
@@ -830,10 +899,15 @@ export class FlightsService {
     return data ?? [];
   }
 
-  async createCobro(vueloId: string, dto: CreateCobroDto, userId: string) {
+  async createCobro(vueloId: string, dto: CreateCobroDto, userId: string, rol?: Rol) {
     const vuelo = await this.findById(vueloId);
     if (vuelo.estado === 'CANCELADO') {
       throw new ConflictException('No se puede registrar cobro en vuelo CANCELADO');
+    }
+    // Tarea 9: el piloto no cobra en campo sin la lectura de tacómetro de salida.
+    // (Admin/Facturación quedan exentos para no bloquear anticipos de oficina.)
+    if (rol === Rol.PILOTO && !vuelo.es_externo && this.faltaSalidaInicial(await this.escalasTaco(vueloId))) {
+      throw new ConflictException(MSG_TACO);
     }
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')

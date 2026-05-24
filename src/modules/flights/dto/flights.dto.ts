@@ -1,6 +1,9 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  ArrayNotEmpty,
+  IsArray,
   IsBoolean,
   IsDate,
   IsEnum,
@@ -16,6 +19,15 @@ import {
   MinLength,
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
+
+export class TacoStatusDto {
+  @ApiProperty({ type: [String], description: 'IDs de vuelo a evaluar' })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(200)
+  @IsUUID('all', { each: true })
+  ids!: string[];
+}
 
 export enum EstadoPermiso {
   NO_APLICA = 'no_aplica',

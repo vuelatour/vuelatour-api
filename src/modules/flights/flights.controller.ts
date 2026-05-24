@@ -28,6 +28,7 @@ import {
   CreateExternalFlightDto,
   ListFlightsQuery,
   SetFlightPlanDto,
+  TacoStatusDto,
   UpdateFlightDto,
 } from './dto/flights.dto';
 import { FlightsService } from './flights.service';
@@ -225,6 +226,17 @@ export class FlightsController {
     @Body() dto: CreateCobroDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.flights.createCobro(id, dto, c.userId);
+    return this.flights.createCobro(id, dto, c.userId, c.rol);
+  }
+
+  @Post('taco-status')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Para una lista de vuelos, indica cuáles tienen el tacómetro incompleto (badge en admin).',
+  })
+  tacoStatus(@Body() dto: TacoStatusDto) {
+    return this.flights.tacoStatus(dto.ids);
   }
 }
