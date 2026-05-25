@@ -20,6 +20,7 @@ import {
   CategoriaGasto,
   CreateGastoDto,
   ListGastosQuery,
+  PhotoUrlsDto,
   UpdateGastoDto,
 } from './dto/expenses.dto';
 import { ExpensesService } from './expenses.service';
@@ -53,6 +54,14 @@ export class ExpensesController {
   })
   create(@Body() dto: CreateGastoDto, @CurrentUser() c: AuthenticatedUser) {
     return this.expenses.create(dto, c.userId, c.rol);
+  }
+
+  @Post('photo-urls')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Firma URLs de fotos de recibos (bucket privado) para el panel admin.' })
+  photoUrls(@Body() dto: PhotoUrlsDto) {
+    return this.expenses.signPhotos(dto.paths);
   }
 
   @Get(':id')

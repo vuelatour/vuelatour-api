@@ -125,6 +125,12 @@ export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   conciliado?: boolean;
 }
 
+export class PhotoUrlsDto {
+  @ApiProperty({ type: [String], description: 'Paths de fotos en gasto-fotos a firmar' })
+  @IsString({ each: true })
+  paths!: string[];
+}
+
 export class ListGastosQuery {
   @ApiPropertyOptional()
   @IsOptional()

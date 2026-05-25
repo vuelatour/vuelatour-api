@@ -55,6 +55,20 @@ export class ExpensesService {
     return data;
   }
 
+  /** URLs firmadas (1 h) para fotos de recibos en el bucket privado gasto-fotos. */
+  async signPhotos(paths: string[]): Promise<Record<string, string>> {
+    const clean = [...new Set(paths.filter(Boolean))];
+    if (clean.length === 0) return {};
+    const { data } = await this.supabase.service.storage
+      .from('gasto-fotos')
+      .createSignedUrls(clean, 3600);
+    const map: Record<string, string> = {};
+    for (const it of data ?? []) {
+      if (it.signedUrl && it.path) map[it.path] = it.signedUrl;
+    }
+    return map;
+  }
+
   async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
