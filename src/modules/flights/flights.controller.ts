@@ -30,6 +30,7 @@ import {
   SetFlightPlanDto,
   TacoStatusDto,
   UpdateFlightDto,
+  VoucherUrlsDto,
 } from './dto/flights.dto';
 import { FlightsService } from './flights.service';
 
@@ -238,5 +239,13 @@ export class FlightsController {
   })
   tacoStatus(@Body() dto: TacoStatusDto) {
     return this.flights.tacoStatus(dto.ids);
+  }
+
+  @Post('cobro-voucher-urls')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Firma URLs de vouchers de cobro (bucket privado) para el panel admin.' })
+  cobroVoucherUrls(@Body() dto: VoucherUrlsDto) {
+    return this.flights.signCobroVouchers(dto.paths);
   }
 }

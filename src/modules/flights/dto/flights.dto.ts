@@ -29,6 +29,14 @@ export class TacoStatusDto {
   ids!: string[];
 }
 
+export class VoucherUrlsDto {
+  @ApiProperty({ type: [String], description: 'Paths de vouchers en cobro-vouchers a firmar' })
+  @IsArray()
+  @ArrayMaxSize(200)
+  @IsString({ each: true })
+  paths!: string[];
+}
+
 export enum EstadoPermiso {
   NO_APLICA = 'no_aplica',
   PENDIENTE = 'pendiente',

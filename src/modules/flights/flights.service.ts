@@ -47,7 +47,10 @@ interface EscalaTaco {
 }
 
 const COBRO_COLS =
-  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, referencia, fecha_cobro, registrado_por, notas, created_at, updated_at';
+  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
+
+// Tarea 11: métodos con tarjeta que exigen foto de voucher.
+const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
 
 @Injectable()
 export class FlightsService {
@@ -868,6 +871,20 @@ export class FlightsService {
     return out;
   }
 
+  /** URLs firmadas (1 h) de vouchers de cobro (bucket privado cobro-vouchers). */
+  async signCobroVouchers(paths: string[]): Promise<Record<string, string>> {
+    const clean = [...new Set(paths.filter(Boolean))];
+    if (clean.length === 0) return {};
+    const { data } = await this.supabase.service.storage
+      .from('cobro-vouchers')
+      .createSignedUrls(clean, 3600);
+    const map: Record<string, string> = {};
+    for (const it of data ?? []) {
+      if (it.signedUrl && it.path) map[it.path] = it.signedUrl;
+    }
+    return map;
+  }
+
   async deleteEscala(escalaId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
@@ -909,6 +926,11 @@ export class FlightsService {
     if (rol === Rol.PILOTO && !vuelo.es_externo && this.faltaSalidaInicial(await this.escalasTaco(vueloId))) {
       throw new ConflictException(MSG_TACO);
     }
+    // Tarea 11: el piloto, al cobrar con tarjeta en campo, debe adjuntar el voucher.
+    // (Admin/Facturación quedan exentos para conciliaciones de oficina sin foto.)
+    if (rol === Rol.PILOTO && METODOS_TARJETA.has(dto.metodo_cobro) && !dto.foto_voucher_url) {
+      throw new BadRequestException('Foto del voucher obligatoria para pagos con tarjeta.');
+    }
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
@@ -919,6 +941,7 @@ export class FlightsService {
         tc_usd_mxn: dto.tc_usd_mxn,
         referencia: dto.referencia,
         fecha_cobro: dto.fecha_cobro?.toISOString(),
+        foto_voucher_url: dto.foto_voucher_url,
         registrado_por: userId,
         notas: dto.notas,
         created_by: userId,

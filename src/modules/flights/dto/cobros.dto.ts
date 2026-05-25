@@ -40,11 +40,18 @@ export class CreateCobroDto {
   @MaxLength(100)
   referencia?: string;
 
-  @ApiPropertyOptional({ description: 'Fecha real del cobro. Default: now()' })
+  @ApiPropertyOptional({ description: 'Fecha real del cobro (puede diferir de la del vuelo). Default: now()' })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   fecha_cobro?: Date;
+
+  @ApiPropertyOptional({
+    description: 'Path del voucher en storage (cobro-vouchers). Obligatorio si método es tarjeta.',
+  })
+  @IsOptional()
+  @IsString()
+  foto_voucher_url?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
