@@ -5,6 +5,7 @@ export enum Rol {
   FACTURACION = 'FACTURACION',
   PILOTO = 'PILOTO',
   SOCIO = 'SOCIO',
+  MECANICO = 'MECANICO',
 }
 
 export enum EstadoUsuario {

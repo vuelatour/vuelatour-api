@@ -17,6 +17,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  CategoriaGasto,
   CreateGastoDto,
   ListGastosQuery,
   UpdateGastoDto,
@@ -33,19 +34,25 @@ export class ExpensesController {
   @ApiOperation({ summary: 'List gastos (with filters). Pilotos see only own captures.' })
   list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
-    if (c.rol === Rol.PILOTO && !filters.usuario_captura_id) {
+    // Pilotos y mecánicos solo ven sus propias capturas. El mecánico, además,
+    // solo combustible (GAS) — no ve el resto de gastos.
+    if ((c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) && !filters.usuario_captura_id) {
       filters.usuario_captura_id = c.userId;
+    }
+    if (c.rol === Rol.MECANICO) {
+      filters.categoria = CategoriaGasto.GAS;
     }
     return this.expenses.list(filters);
   }
 
   @Post()
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
   @ApiOperation({
-    summary: 'Capture a gasto. Pilotos lo usan desde la app móvil (foto + datos).',
+    summary:
+      'Capture a gasto. Pilotos/mecánicos lo usan desde la app móvil. El mecánico solo carga combustible.',
   })
   create(@Body() dto: CreateGastoDto, @CurrentUser() c: AuthenticatedUser) {
-    return this.expenses.create(dto, c.userId);
+    return this.expenses.create(dto, c.userId, c.rol);
   }
 
   @Get(':id')

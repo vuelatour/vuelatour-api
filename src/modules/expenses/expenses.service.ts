@@ -55,7 +55,11 @@ export class ExpensesService {
     return data;
   }
 
-  async create(dto: CreateGastoDto, userId: string) {
+  async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
+    // El mecánico solo puede cargar combustible (GAS).
+    if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
+      throw new BadRequestException('El mecánico solo puede cargar combustible (GAS).');
+    }
     const payload: Record<string, unknown> = {
       usuario_captura_id: userId,
       categoria: dto.categoria,
