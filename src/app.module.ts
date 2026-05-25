@@ -32,6 +32,7 @@ import { ExpensesModule } from './modules/expenses/expenses.module';
 import { PilotsModule } from './modules/pilots/pilots.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
+import { FacturacionModule } from './modules/facturacion/facturacion.module';
 
 @Module({
   imports: [
@@ -94,6 +95,7 @@ import { AlertsModule } from './modules/alerts/alerts.module';
     PilotsModule,
     RealtimeModule,
     AlertsModule,
+    FacturacionModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
