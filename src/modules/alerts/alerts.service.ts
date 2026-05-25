@@ -46,6 +46,7 @@ export class AlertsService {
     await this.safe('vencimiento', (c) => this.checkVencimientos(c));
     await this.safe('cobro_pendiente', (c) => this.checkCobrosPendientes(c));
     await this.safe('inventario_bajo', (c) => this.checkInventarioBajo(c));
+    await this.safe('mantenimiento_programado', (c) => this.checkMantenimientos(c));
   }
 
   /** Dispara todas las reglas activas de inmediato (para pruebas / botón admin). */
@@ -56,6 +57,7 @@ export class AlertsService {
       ['vencimiento', (c: AlertConfig) => this.checkVencimientos(c)],
       ['cobro_pendiente', (c: AlertConfig) => this.checkCobrosPendientes(c)],
       ['inventario_bajo', (c: AlertConfig) => this.checkInventarioBajo(c)],
+      ['mantenimiento_programado', (c: AlertConfig) => this.checkMantenimientos(c)],
     ] as const) {
       const ran = await this.safe(clave, fn);
       if (ran) ejecutadas.push(clave);
@@ -143,6 +145,34 @@ export class AlertsService {
           titulo: `Vence en ${d} días: ${tipo}`,
           cuerpo: `${tipo}${entidad ? ` de ${entidad}` : ''} vence el ${row.fecha_vencimiento}`,
           data: { vencimiento_id: row.id, dias: d },
+        });
+      }
+    }
+  }
+
+  /** Mantenimientos programados próximos (por cada umbral configurado). */
+  private async checkMantenimientos(config: AlertConfig): Promise<void> {
+    const umbrales = config.dias_anticipacion.length > 0 ? config.dias_anticipacion : [15, 7, 1];
+    for (const d of umbrales) {
+      const target = dateOnly(new Date(Date.now() + d * 86400 * 1000));
+      const { data, error } = await this.supabase.service
+        .from('mantenimiento')
+        .select('id, descripcion, fecha_programada, aeronave_id, aeronave(matricula)')
+        .eq('tipo', 'PROGRAMADO')
+        .is('fecha_realizada', null)
+        .eq('fecha_programada', target);
+      if (error) throw new Error(error.message);
+
+      for (const m of data ?? []) {
+        const matricula =
+          unwrap(m.aeronave as unknown as { matricula: string } | { matricula: string }[] | null)
+            ?.matricula ?? 'aeronave';
+        await this.dispatch(config, `mant:${m.id}:${d}`, {
+          tipo: 'mantenimiento_programado',
+          titulo: `Mantenimiento en ${d} día(s): ${matricula}`,
+          cuerpo: `${m.descripcion} (programado ${m.fecha_programada})`,
+          data: { mantenimiento_id: m.id, aeronave_id: m.aeronave_id, dias: d },
+          link: `/admin/aircraft/${m.aeronave_id}`,
         });
       }
     }

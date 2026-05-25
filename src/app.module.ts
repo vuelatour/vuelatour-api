@@ -33,6 +33,7 @@ import { PilotsModule } from './modules/pilots/pilots.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
 import { FacturacionModule } from './modules/facturacion/facturacion.module';
+import { EngineeringModule } from './modules/engineering/engineering.module';
 
 @Module({
   imports: [
@@ -96,6 +97,7 @@ import { FacturacionModule } from './modules/facturacion/facturacion.module';
     RealtimeModule,
     AlertsModule,
     FacturacionModule,
+    EngineeringModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
