@@ -123,6 +123,11 @@ export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   @IsOptional()
   @IsBoolean()
   conciliado?: boolean;
+
+  @ApiPropertyOptional({ description: 'Bandera de posible duplicado (la oficina la descarta).' })
+  @IsOptional()
+  @IsBoolean()
+  duplicado_sospechado?: boolean;
 }
 
 export class PhotoUrlsDto {
@@ -162,11 +167,27 @@ export class ListGastosQuery {
   @IsDateString()
   hasta?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Solo gastos sin avión asignado (bandeja de pendientes).' })
   @IsOptional()
   @Type(() => Boolean)
   @IsBoolean()
   pendientes?: boolean;
+
+  @ApiPropertyOptional({ description: 'Solo gastos marcados como posible duplicado.' })
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  duplicados?: boolean;
+
+  @ApiPropertyOptional({ enum: EstatusComprobante })
+  @IsOptional()
+  @IsEnum(EstatusComprobante)
+  estatus_comprobante?: EstatusComprobante;
+
+  @ApiPropertyOptional({ enum: MedioPago })
+  @IsOptional()
+  @IsEnum(MedioPago)
+  medio_pago?: MedioPago;
 
   @ApiPropertyOptional({ default: 50 })
   @IsOptional()
