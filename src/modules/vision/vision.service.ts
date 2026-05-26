@@ -18,6 +18,25 @@ export interface TacometroVisionResult {
   modelo: string;
 }
 
+export interface GastoTicketVisionInput {
+  imageBase64?: string;
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+  imageUrl?: string;
+}
+
+export interface GastoTicketVisionResult {
+  monto: number | null;
+  moneda: 'MXN' | 'USD' | null;
+  fecha: string | null;
+  proveedor: string | null;
+  concepto: string | null;
+  categoria_sugerida: string | null;
+  confianza: number;
+  legible: boolean;
+  notas: string;
+  modelo: string;
+}
+
 /**
  * Cliente HTTP hacia pyservices (FastAPI) para lectura de tacómetros por visión.
  *
@@ -80,6 +99,46 @@ export class VisionService implements OnModuleInit {
     } catch (err) {
       this.logger.warn(
         `readTacometro falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Extrae datos de un ticket de gasto (monto, fecha, proveedor, concepto,
+   * categoría sugerida). Best-effort: null si pyservices no está activo o falla,
+   * y la captura cae a manual.
+   */
+  async readGastoTicket(input: GastoTicketVisionInput): Promise<GastoTicketVisionResult | null> {
+    if (!this.enabled) return null;
+    if (!input.imageBase64 && !input.imageUrl) return null;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/vision/gasto`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': this.token,
+        },
+        body: JSON.stringify({
+          image_base64: input.imageBase64,
+          media_type: input.mediaType,
+          image_url: input.imageUrl,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        this.logger.warn(`pyservices /vision/gasto respondió ${res.status}`);
+        return null;
+      }
+      return (await res.json()) as GastoTicketVisionResult;
+    } catch (err) {
+      this.logger.warn(
+        `readGastoTicket falló: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     } finally {
