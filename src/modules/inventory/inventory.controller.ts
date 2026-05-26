@@ -23,7 +23,9 @@ import {
   ListMovimientosQuery,
   UpdateInventarioItemDto,
 } from './dto/inventory.dto';
+import { ExtraerCompraDto, ImportarCompraDto } from './dto/compras.dto';
 import { InventoryService } from './inventory.service';
+import { ComprasService } from './compras.service';
 
 const OFICINA = [
   Rol.ADMIN,
@@ -38,7 +40,25 @@ const OFICINA = [
 @ApiBearerAuth()
 @Controller({ path: 'inventory', version: '1' })
 export class InventoryController {
-  constructor(private readonly inventory: InventoryService) {}
+  constructor(
+    private readonly inventory: InventoryService,
+    private readonly compras: ComprasService,
+  ) {}
+
+  @Post('compras/extraer')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Extrae líneas de producto de un PDF de compra (IA)' })
+  extraerCompra(@Body() dto: ExtraerCompraDto) {
+    return this.compras.extraer(dto);
+  }
+
+  @Post('compras/importar')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({ summary: 'Crea ítems (si faltan) y registra entradas desde una compra' })
+  importarCompra(@Body() dto: ImportarCompraDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.compras.importar(dto, c.userId);
+  }
 
   @Get('items')
   @Roles(...OFICINA)
