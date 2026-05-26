@@ -133,6 +133,36 @@ export class FlightsService {
     return data;
   }
 
+  // ===== Aislamiento de pilotos (Tarea 15) =====
+
+  /** Un PILOTO solo puede operar/ver vuelos asignados a él. Otros roles no se restringen. */
+  async assertAccess(vueloId: string, current: AuthenticatedUser): Promise<void> {
+    if (current.rol !== Rol.PILOTO) return;
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('piloto_id')
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    if (data.piloto_id !== current.userId) {
+      throw new ForbiddenException('No tienes acceso a este vuelo');
+    }
+  }
+
+  /** Igual que assertAccess pero resolviendo el vuelo a partir de la escala (leg). */
+  async assertAccessByLeg(legId: string, current: AuthenticatedUser): Promise<void> {
+    if (current.rol !== Rol.PILOTO) return;
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id')
+      .eq('id', legId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Escala ${legId} not found`);
+    await this.assertAccess(data.vuelo_id as string, current);
+  }
+
   /**
    * Vista de cotización SEGURA para el piloto: solo campos no sensibles
    * (cliente, ruta, pasajeros, fechas, escalas, monto total cobrable). Oculta

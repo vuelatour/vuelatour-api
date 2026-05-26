@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Delete,
+  ForbiddenException,
   Get,
   HttpCode,
   HttpStatus,
@@ -65,9 +66,16 @@ export class ExpensesController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get gasto by id' })
-  getOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.expenses.findById(id);
+  @ApiOperation({ summary: 'Get gasto by id. Piloto/mecánico solo ven sus propias capturas.' })
+  async getOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    const gasto = await this.expenses.findById(id);
+    if (
+      (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) &&
+      (gasto as { usuario_captura_id: string | null }).usuario_captura_id !== c.userId
+    ) {
+      throw new ForbiddenException('No tienes acceso a este gasto');
+    }
+    return gasto;
   }
 
   @Patch(':id')

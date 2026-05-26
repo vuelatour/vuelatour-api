@@ -28,6 +28,7 @@ export class QuotesController {
   constructor(private readonly quotes: QuotesService) {}
 
   @Post('calculate')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -38,7 +39,8 @@ export class QuotesController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List quotes (vuelos) with filters' })
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'List quotes (vuelos) with filters. No accesible a pilotos.' })
   list(@Query() q: ListQuotesQuery) {
     return this.quotes.list(q);
   }
@@ -54,13 +56,15 @@ export class QuotesController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get vuelo/quote with current cotization snapshot' })
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'Get vuelo/quote with current cotization snapshot. No accesible a pilotos.' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.quotes.findById(id);
   }
 
   @Get(':id/versions')
-  @ApiOperation({ summary: 'Full version history of the quote' })
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'Full version history of the quote. No accesible a pilotos.' })
   versions(@Param('id', ParseUUIDPipe) id: string) {
     return this.quotes.findVersions(id);
   }

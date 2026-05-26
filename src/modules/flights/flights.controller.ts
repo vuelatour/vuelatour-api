@@ -43,8 +43,10 @@ export class FlightsController {
   // ============ Vuelos ============
 
   @Get()
-  @ApiOperation({ summary: 'List flights with filters' })
-  list(@Query() q: ListFlightsQuery) {
+  @ApiOperation({ summary: 'List flights with filters. El piloto solo ve sus vuelos asignados.' })
+  list(@Query() q: ListFlightsQuery, @CurrentUser() c: AuthenticatedUser) {
+    // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
+    if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
     return this.flights.list(q);
   }
 
@@ -63,13 +65,15 @@ export class FlightsController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get flight summary' })
-  getOne(@Param('id', ParseUUIDPipe) id: string) {
+  async getOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.findById(id);
   }
 
   @Get(':id/snapshot')
   @ApiOperation({ summary: 'Full flight with escalas + cobros' })
-  snapshot(@Param('id', ParseUUIDPipe) id: string) {
+  async snapshot(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.snapshot(id);
   }
 
@@ -109,7 +113,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition CONFIRMADO -> EN_VUELO' })
-  start(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async start(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.start(id, c.userId);
   }
 
@@ -119,11 +124,12 @@ export class FlightsController {
     summary:
       'Adjunta la foto del plan de vuelo de salida (vuelos hacia/desde pistas con permiso). Piloto desde la app.',
   })
-  setFlightPlan(
+  async setFlightPlan(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SetFlightPlanDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.flights.assertAccess(id, c);
     return this.flights.setFlightPlan(id, dto.foto_plan_vuelo_url, c.userId);
   }
 
@@ -131,7 +137,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition EN_VUELO -> COMPLETADO' })
-  complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.complete(id, c.userId);
   }
 
@@ -139,29 +146,32 @@ export class FlightsController {
 
   @Get(':id/legs')
   @ApiOperation({ summary: 'List flight legs (escalas)' })
-  listLegs(@Param('id', ParseUUIDPipe) id: string) {
+  async listLegs(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.listEscalas(id);
   }
 
   @Post(':id/legs')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @ApiOperation({ summary: 'Create a flight leg (tacómetro fields populated later in FASE 3)' })
-  createLeg(
+  async createLeg(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateEscalaDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.flights.assertAccess(id, c);
     return this.flights.createEscala(id, dto, c.userId);
   }
 
   @Patch('legs/:legId')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @ApiOperation({ summary: 'Update leg metadata (route/orden/horas). Tacómetro endpoints en FASE 3.' })
-  updateLeg(
+  async updateLeg(
     @Param('legId', ParseUUIDPipe) legId: string,
     @Body() dto: UpdateEscalaDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.flights.assertAccessByLeg(legId, c);
     return this.flights.updateEscala(legId, dto, c.userId);
   }
 
@@ -171,11 +181,12 @@ export class FlightsController {
     summary:
       'Capture tacómetro reading (HOBBS) for a leg. Pilots use this from the mobile app — validates monotonicity vs previous reading.',
   })
-  captureTaco(
+  async captureTaco(
     @Param('legId', ParseUUIDPipe) legId: string,
     @Body() dto: CaptureTacoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.flights.assertAccessByLeg(legId, c);
     return this.flights.captureTaco(legId, dto, c.userId);
   }
 
@@ -196,7 +207,12 @@ export class FlightsController {
     summary:
       'Lee el tacómetro de una foto con IA (Claude Vision), sin guardar. Prellena el campo en la app. Si la IA falla o la foto sale ilegible, devuelve una sugerencia histórica para la lectura de llegada.',
   })
-  tacoAiRead(@Param('legId', ParseUUIDPipe) legId: string, @Body() dto: TacoAiReadDto) {
+  async tacoAiRead(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: TacoAiReadDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccessByLeg(legId, c);
     return this.flights.tacoAiRead(legId, dto);
   }
 
@@ -212,7 +228,8 @@ export class FlightsController {
 
   @Get(':id/payments')
   @ApiOperation({ summary: 'List payments registered for the flight' })
-  listPayments(@Param('id', ParseUUIDPipe) id: string) {
+  async listPayments(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+    await this.flights.assertAccess(id, c);
     return this.flights.listCobros(id);
   }
 
@@ -222,11 +239,12 @@ export class FlightsController {
     summary:
       'Register a payment. Auto-marks cobrado=true if sum (USD equiv) >= monto_total. Pilotos pueden registrar cobros BillPocket/efectivo en campo.',
   })
-  createPayment(
+  async createPayment(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateCobroDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    await this.flights.assertAccess(id, c);
     return this.flights.createCobro(id, dto, c.userId, c.rol);
   }
 
