@@ -55,8 +55,11 @@ export class PropellersService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('numero_serie or (aeronave,posicion) already exists');
-      if (error.code === '23503') throw new BadRequestException('aeronave_id does not exist');
+        throw new ConflictException(
+          'numero_serie or (aeronave,posicion) already exists',
+        );
+      if (error.code === '23503')
+        throw new BadRequestException('aeronave_id does not exist');
       throw new Error(error.message);
     }
     return data!;
@@ -72,7 +75,9 @@ export class PropellersService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('numero_serie or (aeronave,posicion) collision');
+        throw new ConflictException(
+          'numero_serie or (aeronave,posicion) collision',
+        );
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Hélice ${id} not found`);

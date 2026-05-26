@@ -30,7 +30,9 @@ export class IssuingEntitiesController {
   constructor(private readonly entities: IssuingEntitiesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List razones sociales emisoras (Aerocharter, Aerodinamica)' })
+  @ApiOperation({
+    summary: 'List razones sociales emisoras (Aerocharter, Aerodinamica)',
+  })
   list(@Query() q: ListIssuingEntitiesQuery) {
     return this.entities.list(q);
   }
@@ -38,7 +40,10 @@ export class IssuingEntitiesController {
   @Post()
   @Roles(Rol.ADMIN)
   @ApiOperation({ summary: 'Create issuing entity (ADMIN)' })
-  create(@Body() dto: CreateIssuingEntityDto, @CurrentUser() c: AuthenticatedUser) {
+  create(
+    @Body() dto: CreateIssuingEntityDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.entities.create(dto, c.userId);
   }
 
@@ -69,7 +74,10 @@ export class IssuingEntitiesController {
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activa=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.entities.softDelete(id, c.userId);
   }
 }

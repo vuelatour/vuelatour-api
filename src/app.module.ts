@@ -37,6 +37,11 @@ import { EngineeringModule } from './modules/engineering/engineering.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { CajaChicaModule } from './modules/caja-chica/caja-chica.module';
 import { ConciliacionModule } from './modules/conciliacion/conciliacion.module';
+// Módulos complementarios de dramirez (treasury/cash-funds quedaron en historial; los reemplazan caja-chica/conciliacion).
+import { DocumentTypesModule } from './modules/document-types/document-types.module';
+import { ExpirationsModule } from './modules/expirations/expirations.module';
+import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
+import { DashboardsModule } from './modules/dashboards/dashboards.module';
 
 @Module({
   imports: [
@@ -104,6 +109,10 @@ import { ConciliacionModule } from './modules/conciliacion/conciliacion.module';
     InventoryModule,
     CajaChicaModule,
     ConciliacionModule,
+    DocumentTypesModule,
+    ExpirationsModule,
+    ProfitSharingModule,
+    DashboardsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

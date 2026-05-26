@@ -1,5 +1,4 @@
 import {
-  BadRequestException,
   ConflictException,
   Injectable,
   NotFoundException,
@@ -92,11 +91,17 @@ export class AirportsService {
   async create(dto: CreateAirportDto, createdBy: string) {
     const { data, error } = await this.supabase.service
       .from('aeropuerto')
-      .insert({ ...dto, iata: dto.iata.toUpperCase(), created_by: createdBy, updated_by: createdBy })
+      .insert({
+        ...dto,
+        iata: dto.iata.toUpperCase(),
+        created_by: createdBy,
+        updated_by: createdBy,
+      })
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new ConflictException('iata already exists');
+      if (error.code === '23505')
+        throw new ConflictException('iata already exists');
       throw new Error(error.message);
     }
     return data!;
@@ -113,7 +118,8 @@ export class AirportsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new ConflictException('iata already exists');
+      if (error.code === '23505')
+        throw new ConflictException('iata already exists');
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Aeropuerto ${id} not found`);
@@ -183,12 +189,13 @@ export class AirportsService {
     tienePaseAbordar: boolean,
   ): Promise<{ aplica: boolean; usd_pax: number; razon: string }> {
     const aeropuerto = await this.findByIata(iata);
-    const aplicaPorMatricula =
+    const aplicaPorMatricula = (
       matriculaPrefix === 'XA'
         ? aeropuerto.tuas_aplica_xa
         : matriculaPrefix === 'XB'
           ? aeropuerto.tuas_aplica_xb
-          : aeropuerto.tuas_aplica_n;
+          : aeropuerto.tuas_aplica_n
+    ) as boolean;
     if (!aplicaPorMatricula) {
       return {
         aplica: false,

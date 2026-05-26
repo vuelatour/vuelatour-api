@@ -62,13 +62,22 @@ export class CreateAeronaveDto {
   @Min(0)
   reserva_overhaul_hr_usd?: number;
 
-  @ApiPropertyOptional({ description: 'Color hex para UI (#XXXXXX)', example: '#3B82F6' })
+  @ApiPropertyOptional({
+    description: 'Color hex para UI (#XXXXXX)',
+    example: '#3B82F6',
+  })
   @IsOptional()
   @IsString()
-  @Matches(/^#[0-9A-Fa-f]{6}$/, { message: 'color_calendario must be hex #RRGGBB' })
+  @Matches(/^#[0-9A-Fa-f]{6}$/, {
+    message: 'color_calendario must be hex #RRGGBB',
+  })
   color_calendario?: string;
 
-  @ApiPropertyOptional({ description: 'IATA base', example: 'CUN', default: 'CUN' })
+  @ApiPropertyOptional({
+    description: 'IATA base',
+    example: 'CUN',
+    default: 'CUN',
+  })
   @IsOptional()
   @IsString()
   @Length(3, 4)

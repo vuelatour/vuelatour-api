@@ -28,7 +28,9 @@ export class EnginesController {
   constructor(private readonly engines: EnginesService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List engines (filter by aeronave_id, tipo, posicion)' })
+  @ApiOperation({
+    summary: 'List engines (filter by aeronave_id, tipo, posicion)',
+  })
   list(@Query() q: ListEnginesQuery) {
     return this.engines.list(q);
   }

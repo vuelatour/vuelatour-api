@@ -83,14 +83,20 @@ export class CreateEngineDto {
   @IsString()
   modelo?: string;
 
-  @ApiPropertyOptional({ description: 'Horas lineales desde fabricación', default: 0 })
+  @ApiPropertyOptional({
+    description: 'Horas lineales desde fabricación',
+    default: 0,
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   horas_totales?: number;
 
-  @ApiPropertyOptional({ description: 'Horas al último overhaul mayor', default: 0 })
+  @ApiPropertyOptional({
+    description: 'Horas al último overhaul mayor',
+    default: 0,
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
@@ -116,7 +122,10 @@ export class TransplantEngineDto {
   @IsUUID()
   aeronave_destino_id!: string;
 
-  @ApiProperty({ enum: PosicionMotor, description: 'Posición en la aeronave destino' })
+  @ApiProperty({
+    enum: PosicionMotor,
+    description: 'Posición en la aeronave destino',
+  })
   @IsEnum(PosicionMotor)
   posicion_destino!: PosicionMotor;
 

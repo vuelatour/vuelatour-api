@@ -25,7 +25,9 @@ export class CalendarRangeQuery {
   @IsUUID()
   piloto_id?: string;
 
-  @ApiPropertyOptional({ description: 'Incluir vuelos CANCELADOS. Default: false' })
+  @ApiPropertyOptional({
+    description: 'Incluir vuelos CANCELADOS. Default: false',
+  })
   @IsOptional()
   @Type(() => Boolean)
   @IsBoolean()

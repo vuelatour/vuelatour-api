@@ -60,7 +60,9 @@ export class UsersController {
 
   @Patch(':id')
   @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Update user (admin only — includes rol, estado, fondo)' })
+  @ApiOperation({
+    summary: 'Update user (admin only — includes rol, estado, fondo)',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateUsuarioDto,

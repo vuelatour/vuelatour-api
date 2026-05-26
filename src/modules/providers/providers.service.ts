@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import type {
   CreateProveedorDto,
@@ -55,7 +59,8 @@ export class ProvidersService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new BadRequestException('Conflict on unique field');
+      if (error.code === '23505')
+        throw new BadRequestException('Conflict on unique field');
       throw new Error(error.message);
     }
     return data!;

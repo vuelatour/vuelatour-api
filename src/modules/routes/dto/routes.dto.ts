@@ -53,7 +53,9 @@ export class ListRoutesQuery {
   @Length(3, 4)
   destino?: string;
 
-  @ApiPropertyOptional({ description: 'Búsqueda libre por iata origen/destino' })
+  @ApiPropertyOptional({
+    description: 'Búsqueda libre por iata origen/destino',
+  })
   @IsOptional()
   @IsString()
   q?: string;
@@ -91,31 +93,55 @@ export class CreateRouteDto {
   @IsEnum(TipoRuta)
   tipo?: TipoRuta;
 
-  @ApiPropertyOptional({ example: 'CUN', description: 'Requerido si tipo=SIMPLE. Para MULTIESCALA se deriva del primer tramo.' })
-  @ValidateIf((o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE)
+  @ApiPropertyOptional({
+    example: 'CUN',
+    description:
+      'Requerido si tipo=SIMPLE. Para MULTIESCALA se deriva del primer tramo.',
+  })
+  @ValidateIf(
+    (o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE,
+  )
   @IsString()
   @Length(3, 4)
   origen_iata?: string;
 
-  @ApiPropertyOptional({ example: 'CZM', description: 'Requerido si tipo=SIMPLE. Para MULTIESCALA se deriva del último tramo.' })
-  @ValidateIf((o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE)
+  @ApiPropertyOptional({
+    example: 'CZM',
+    description:
+      'Requerido si tipo=SIMPLE. Para MULTIESCALA se deriva del último tramo.',
+  })
+  @ValidateIf(
+    (o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE,
+  )
   @IsString()
   @Length(3, 4)
   destino_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Millas náuticas one-way (SIMPLE). En MULTIESCALA se calcula como suma de tramos.', example: 63.14 })
-  @ValidateIf((o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE)
+  @ApiPropertyOptional({
+    description:
+      'Millas náuticas one-way (SIMPLE). En MULTIESCALA se calcula como suma de tramos.',
+    example: 63.14,
+  })
+  @ValidateIf(
+    (o: CreateRouteDto) => (o.tipo ?? TipoRuta.SIMPLE) === TipoRuta.SIMPLE,
+  )
   @Type(() => Number)
   @IsNumber()
   @Min(0.01)
   millas_nauticas?: number;
 
-  @ApiPropertyOptional({ default: true, description: 'SIMPLE: motor multiplica NM por 2. Ignorado en MULTIESCALA.' })
+  @ApiPropertyOptional({
+    default: true,
+    description: 'SIMPLE: motor multiplica NM por 2. Ignorado en MULTIESCALA.',
+  })
   @IsOptional()
   @IsBoolean()
   es_redondo_auto?: boolean;
 
-  @ApiPropertyOptional({ default: 2, description: 'Aterrizajes. En MULTIESCALA se deriva de tramos.length.' })
+  @ApiPropertyOptional({
+    default: 2,
+    description: 'Aterrizajes. En MULTIESCALA se deriva de tramos.length.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -124,7 +150,8 @@ export class CreateRouteDto {
 
   @ApiPropertyOptional({
     type: [RouteTramoInputDto],
-    description: 'Requerido si tipo=MULTIESCALA. Tramos ordenados con continuidad (destino[i] === origen[i+1]).',
+    description:
+      'Requerido si tipo=MULTIESCALA. Tramos ordenados con continuidad (destino[i] === origen[i+1]).',
   })
   @ValidateIf((o: CreateRouteDto) => o.tipo === TipoRuta.MULTIESCALA)
   @IsArray()
@@ -133,7 +160,10 @@ export class CreateRouteDto {
   @Type(() => RouteTramoInputDto)
   tramos?: RouteTramoInputDto[];
 
-  @ApiPropertyOptional({ example: 'FOREFLIGHT', description: 'GOOGLE_EARTH | FOREFLIGHT | MANUAL | APROXIMACION' })
+  @ApiPropertyOptional({
+    example: 'FOREFLIGHT',
+    description: 'GOOGLE_EARTH | FOREFLIGHT | MANUAL | APROXIMACION',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(50)

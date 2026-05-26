@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import type {
   CreateClienteDto,
@@ -23,7 +27,8 @@ export class ClientsService {
     if (typeof filters.activo === 'boolean') q = q.eq('activo', filters.activo);
     else q = q.eq('activo', true);
     if (filters.canal_origen) q = q.eq('canal_origen', filters.canal_origen);
-    if (typeof filters.es_broker === 'boolean') q = q.eq('es_broker', filters.es_broker);
+    if (typeof filters.es_broker === 'boolean')
+      q = q.eq('es_broker', filters.es_broker);
     if (filters.q) {
       const term = `%${filters.q}%`;
       q = q.or(
@@ -58,7 +63,8 @@ export class ClientsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new BadRequestException('Conflict — cliente already exists');
+      if (error.code === '23505')
+        throw new BadRequestException('Conflict — cliente already exists');
       throw new Error(error.message);
     }
     return data!;

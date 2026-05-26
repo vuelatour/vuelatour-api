@@ -27,14 +27,18 @@ export class CreateCobroDto {
   @IsEnum(MetodoPago)
   metodo_cobro!: MetodoPago;
 
-  @ApiPropertyOptional({ description: 'TC al momento del cobro (si moneda=USD y se factura en MXN)' })
+  @ApiPropertyOptional({
+    description: 'TC al momento del cobro (si moneda=USD y se factura en MXN)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   tc_usd_mxn?: number;
 
-  @ApiPropertyOptional({ description: 'Referencia bancaria, ticket, link, voucher BillPocket' })
+  @ApiPropertyOptional({
+    description: 'Referencia bancaria, ticket, link, voucher BillPocket',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(100)

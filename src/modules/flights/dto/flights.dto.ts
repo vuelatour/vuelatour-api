@@ -151,7 +151,9 @@ export class SetFlightPlanDto {
 }
 
 export class AssignFlightDto {
-  @ApiPropertyOptional({ description: 'Aeronave asignada (solo si no es externo)' })
+  @ApiPropertyOptional({
+    description: 'Aeronave asignada (solo si no es externo)',
+  })
   @IsOptional()
   @IsUUID()
   aeronave_id?: string;

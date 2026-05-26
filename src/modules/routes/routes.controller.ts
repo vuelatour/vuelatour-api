@@ -13,12 +13,21 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
-import { CreateRouteDto, ListRoutesQuery, UpdateRouteDto } from './dto/routes.dto';
+import {
+  CreateRouteDto,
+  ListRoutesQuery,
+  UpdateRouteDto,
+} from './dto/routes.dto';
 import { RoutesService } from './routes.service';
 
 @ApiTags('Routes')
@@ -77,7 +86,10 @@ export class RoutesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activa=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.routes.softDelete(id, c.userId);
   }
 }

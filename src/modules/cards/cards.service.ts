@@ -59,9 +59,12 @@ export class CardsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new ConflictException('terminacion already exists');
+      if (error.code === '23505')
+        throw new ConflictException('terminacion already exists');
       if (error.code === '23503')
-        throw new BadRequestException('usuario_id or cuenta_bancaria_id does not exist');
+        throw new BadRequestException(
+          'usuario_id or cuenta_bancaria_id does not exist',
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -76,7 +79,8 @@ export class CardsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505') throw new ConflictException('terminacion collision');
+      if (error.code === '23505')
+        throw new ConflictException('terminacion collision');
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Tarjeta ${id} not found`);
@@ -91,7 +95,8 @@ export class CardsService {
       .select(COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23503') throw new BadRequestException('usuario_id does not exist');
+      if (error.code === '23503')
+        throw new BadRequestException('usuario_id does not exist');
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Tarjeta ${id} not found`);

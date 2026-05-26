@@ -57,8 +57,11 @@ export class EnginesService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('numero_serie or (aeronave,posicion) already exists');
-      if (error.code === '23503') throw new BadRequestException('aeronave_id does not exist');
+        throw new ConflictException(
+          'numero_serie or (aeronave,posicion) already exists',
+        );
+      if (error.code === '23503')
+        throw new BadRequestException('aeronave_id does not exist');
       throw new Error(error.message);
     }
     return data!;
@@ -74,7 +77,9 @@ export class EnginesService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('numero_serie or (aeronave,posicion) collision');
+        throw new ConflictException(
+          'numero_serie or (aeronave,posicion) collision',
+        );
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Motor ${id} not found`);
@@ -88,11 +93,13 @@ export class EnginesService {
       motor.aeronave_id === dto.aeronave_destino_id &&
       motor.posicion === dto.posicion_destino
     ) {
-      throw new BadRequestException('Destination aircraft+position equals current placement');
+      throw new BadRequestException(
+        'Destination aircraft+position equals current placement',
+      );
     }
 
-    const aeronaveOrigenId = motor.aeronave_id;
-    const posicionOrigen = motor.posicion;
+    const aeronaveOrigenId = motor.aeronave_id as string;
+    const posicionOrigen = motor.posicion as string;
 
     const { error: updErr } = await this.supabase.service
       .from('motor')
@@ -112,16 +119,18 @@ export class EnginesService {
       throw new Error(updErr.message);
     }
 
-    const { error: logErr } = await this.supabase.service.from('motor_traslado').insert({
-      motor_id: id,
-      aeronave_origen_id: aeronaveOrigenId,
-      aeronave_destino_id: dto.aeronave_destino_id,
-      posicion_origen: posicionOrigen,
-      posicion_destino: dto.posicion_destino,
-      horas_al_traslado: motor.horas_totales,
-      motivo: dto.motivo,
-      trasladado_por: performedBy,
-    });
+    const { error: logErr } = await this.supabase.service
+      .from('motor_traslado')
+      .insert({
+        motor_id: id,
+        aeronave_origen_id: aeronaveOrigenId,
+        aeronave_destino_id: dto.aeronave_destino_id,
+        posicion_origen: posicionOrigen,
+        posicion_destino: dto.posicion_destino,
+        horas_al_traslado: motor.horas_totales,
+        motivo: dto.motivo,
+        trasladado_por: performedBy,
+      });
     if (logErr) {
       // Best-effort log; do not reverse the move silently. Surface the error.
       throw new Error(`Motor moved but audit log failed: ${logErr.message}`);

@@ -32,7 +32,9 @@ export class UpdateUsuarioDto {
   @IsBoolean()
   tiene_fondo_caja?: boolean;
 
-  @ApiPropertyOptional({ description: 'Últimos 4 dígitos de tarjeta corporativa' })
+  @ApiPropertyOptional({
+    description: 'Últimos 4 dígitos de tarjeta corporativa',
+  })
   @IsOptional()
   @IsString()
   @Length(4, 4)

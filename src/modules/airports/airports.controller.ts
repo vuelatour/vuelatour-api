@@ -12,7 +12,12 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
@@ -24,8 +29,6 @@ import {
 } from './dto/airports.dto';
 import { AirportsService } from './airports.service';
 
-type MatriculaPrefix = 'XA' | 'XB' | 'N';
-
 @ApiTags('Airports')
 @ApiBearerAuth()
 @Controller({ path: 'airports', version: '1' })
@@ -33,7 +36,9 @@ export class AirportsController {
   constructor(private readonly airports: AirportsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List airports (search by iata/icao/nombre/ciudad with q=)' })
+  @ApiOperation({
+    summary: 'List airports (search by iata/icao/nombre/ciudad with q=)',
+  })
   list(@Query() q: ListAirportsQuery) {
     return this.airports.list(q);
   }
@@ -83,8 +88,8 @@ export class AirportsController {
     }
     const airport = await this.airports.findById(id);
     return this.airports.computeTuasUsdPax(
-      airport.iata,
-      prefix as MatriculaPrefix,
+      airport.iata as string,
+      prefix,
       paseAbordar === 'true',
     );
   }
@@ -110,7 +115,10 @@ export class AirportsController {
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Soft delete (activo=false)' })
-  remove(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.airports.softDelete(id, c.userId);
   }
 }

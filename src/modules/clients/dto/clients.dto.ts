@@ -22,7 +22,9 @@ export enum CanalCliente {
 }
 
 export class ListClientesQuery {
-  @ApiPropertyOptional({ description: 'Búsqueda por nombre, email, teléfono o RFC' })
+  @ApiPropertyOptional({
+    description: 'Búsqueda por nombre, email, teléfono o RFC',
+  })
   @IsOptional()
   @IsString()
   q?: string;
@@ -77,7 +79,10 @@ export class CreateClienteDto {
   @IsEmail()
   email?: string;
 
-  @ApiPropertyOptional({ maxLength: 200, description: 'Razón social para facturar por default' })
+  @ApiPropertyOptional({
+    maxLength: 200,
+    description: 'Razón social para facturar por default',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(200)
@@ -94,7 +99,10 @@ export class CreateClienteDto {
   @IsEnum(CanalCliente)
   canal_origen?: CanalCliente;
 
-  @ApiPropertyOptional({ default: false, description: 'True = aplica tarifa broker' })
+  @ApiPropertyOptional({
+    default: false,
+    description: 'True = aplica tarifa broker',
+  })
   @IsOptional()
   @IsBoolean()
   es_broker?: boolean;

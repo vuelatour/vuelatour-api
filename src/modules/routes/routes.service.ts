@@ -49,7 +49,8 @@ export class RoutesService {
     if (typeof filters.activa === 'boolean') q = q.eq('activa', filters.activa);
     else q = q.eq('activa', true);
     if (filters.origen) q = q.eq('origen_iata', filters.origen.toUpperCase());
-    if (filters.destino) q = q.eq('destino_iata', filters.destino.toUpperCase());
+    if (filters.destino)
+      q = q.eq('destino_iata', filters.destino.toUpperCase());
     if (filters.q) {
       const term = `%${filters.q.toUpperCase()}%`;
       q = q.or(`origen_iata.ilike.${term},destino_iata.ilike.${term}`);
@@ -62,12 +63,16 @@ export class RoutesService {
     const multiIds = rutas
       .filter((r) => r.tipo === TipoRuta.MULTIESCALA)
       .map((r) => r.id as string);
-    const tramosByRuta = multiIds.length > 0 ? await this.findTramosByRutas(multiIds) : {};
+    const tramosByRuta =
+      multiIds.length > 0 ? await this.findTramosByRutas(multiIds) : {};
 
     return {
       data: rutas.map((r) => ({
         ...r,
-        tramos: r.tipo === TipoRuta.MULTIESCALA ? tramosByRuta[r.id as string] ?? [] : [],
+        tramos:
+          r.tipo === TipoRuta.MULTIESCALA
+            ? (tramosByRuta[r.id as string] ?? [])
+            : [],
       })),
       count: count ?? 0,
       limit: filters.limit,
@@ -104,13 +109,19 @@ export class RoutesService {
     const tipo = dto.tipo ?? TipoRuta.SIMPLE;
 
     if (tipo === TipoRuta.SIMPLE) {
-      if (!dto.origen_iata || !dto.destino_iata || dto.millas_nauticas === undefined) {
+      if (
+        !dto.origen_iata ||
+        !dto.destino_iata ||
+        dto.millas_nauticas === undefined
+      ) {
         throw new BadRequestException(
           'tipo=SIMPLE requiere origen_iata, destino_iata y millas_nauticas',
         );
       }
       if (dto.origen_iata.toUpperCase() === dto.destino_iata.toUpperCase()) {
-        throw new BadRequestException('origen_iata y destino_iata no pueden ser iguales');
+        throw new BadRequestException(
+          'origen_iata y destino_iata no pueden ser iguales',
+        );
       }
       const { data, error } = await this.supabase.service
         .from('ruta_predefinida')
@@ -130,7 +141,9 @@ export class RoutesService {
         .maybeSingle();
       if (error) {
         if (error.code === '23505')
-          throw new ConflictException('Route already exists (origen+destino para tipo SIMPLE)');
+          throw new ConflictException(
+            'Route already exists (origen+destino para tipo SIMPLE)',
+          );
         throw new Error(error.message);
       }
       return { ...data!, tramos: [] as RouteTramo[] };
@@ -166,7 +179,7 @@ export class RoutesService {
   async update(id: string, dto: UpdateRouteDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const current = await this.findById(id);
-    const targetTipo = dto.tipo ?? current.tipo;
+    const targetTipo = dto.tipo ?? (current.tipo as TipoRuta);
 
     const patch: Record<string, unknown> = {
       ...dto,
@@ -174,7 +187,7 @@ export class RoutesService {
       updated_by: updatedBy,
     };
     // Las DTOs/tramos no van directo al UPDATE de la tabla padre.
-    delete (patch as Record<string, unknown>).tramos;
+    delete patch.tramos;
 
     if (targetTipo === TipoRuta.MULTIESCALA) {
       const tramosSource = dto.tramos ?? current.tramos;
@@ -192,7 +205,9 @@ export class RoutesService {
       );
       patch.origen_iata = tramos[0].origen_iata;
       patch.destino_iata = tramos[tramos.length - 1].destino_iata;
-      patch.millas_nauticas = round2(tramos.reduce((acc, t) => acc + t.millas_nauticas, 0));
+      patch.millas_nauticas = round2(
+        tramos.reduce((acc, t) => acc + t.millas_nauticas, 0),
+      );
       patch.es_redondo_auto = false;
       patch.num_aterrizajes = tramos.length;
 
@@ -228,7 +243,9 @@ export class RoutesService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('Conflict: origen+destino combination already exists');
+        throw new ConflictException(
+          'Conflict: origen+destino combination already exists',
+        );
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Ruta ${id} not found`);
@@ -248,7 +265,7 @@ export class RoutesService {
       .eq('ruta_id', rutaId)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
-    return (data ?? []) as RouteTramo[];
+    return data ?? [];
   }
 
   private async findTramosByRutas(
@@ -291,7 +308,9 @@ export class RoutesService {
         );
       }
     }
-    if (norm[norm.length - 1].origen_iata === norm[norm.length - 1].destino_iata) {
+    if (
+      norm[norm.length - 1].origen_iata === norm[norm.length - 1].destino_iata
+    ) {
       throw new BadRequestException(
         `Tramo ${norm.length}: origen y destino no pueden ser iguales.`,
       );
