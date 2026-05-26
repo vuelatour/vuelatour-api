@@ -35,6 +35,7 @@ import { AlertsModule } from './modules/alerts/alerts.module';
 import { FacturacionModule } from './modules/facturacion/facturacion.module';
 import { EngineeringModule } from './modules/engineering/engineering.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { CajaChicaModule } from './modules/caja-chica/caja-chica.module';
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { InventoryModule } from './modules/inventory/inventory.module';
     FacturacionModule,
     EngineeringModule,
     InventoryModule,
+    CajaChicaModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
