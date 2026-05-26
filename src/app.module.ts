@@ -36,6 +36,7 @@ import { FacturacionModule } from './modules/facturacion/facturacion.module';
 import { EngineeringModule } from './modules/engineering/engineering.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
 import { CajaChicaModule } from './modules/caja-chica/caja-chica.module';
+import { ConciliacionModule } from './modules/conciliacion/conciliacion.module';
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { CajaChicaModule } from './modules/caja-chica/caja-chica.module';
     EngineeringModule,
     InventoryModule,
     CajaChicaModule,
+    ConciliacionModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
