@@ -34,6 +34,7 @@ import { RealtimeModule } from './modules/realtime/realtime.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
 import { FacturacionModule } from './modules/facturacion/facturacion.module';
 import { EngineeringModule } from './modules/engineering/engineering.module';
+import { InventoryModule } from './modules/inventory/inventory.module';
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { EngineeringModule } from './modules/engineering/engineering.module';
     AlertsModule,
     FacturacionModule,
     EngineeringModule,
+    InventoryModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
