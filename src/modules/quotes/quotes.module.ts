@@ -6,11 +6,12 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { RoutesModule } from '../routes/routes.module';
 import { QuotesController } from './quotes.controller';
 import { QuotesService } from './quotes.service';
+import { QuotesPdfService } from './quotes-pdf.service';
 
 @Module({
   imports: [AircraftModule, AirportsModule, RoutesModule, CalendarModule, NotificationsModule],
   controllers: [QuotesController],
-  providers: [QuotesService],
+  providers: [QuotesService, QuotesPdfService],
   exports: [QuotesService],
 })
 export class QuotesModule {}

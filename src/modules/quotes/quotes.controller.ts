@@ -4,12 +4,13 @@ import {
   Get,
   HttpCode,
   HttpStatus,
-  NotImplementedException,
   Param,
   ParseUUIDPipe,
   Post,
   Query,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -20,12 +21,16 @@ import { CreateQuoteDto } from './dto/create-quote.dto';
 import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
+import { QuotesPdfService } from './quotes-pdf.service';
 
 @ApiTags('Quotes')
 @ApiBearerAuth()
 @Controller({ path: 'quotes', version: '1' })
 export class QuotesController {
-  constructor(private readonly quotes: QuotesService) {}
+  constructor(
+    private readonly quotes: QuotesService,
+    private readonly quotesPdf: QuotesPdfService,
+  ) {}
 
   @Post('calculate')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
@@ -106,13 +111,15 @@ export class QuotesController {
   }
 
   @Post(':id/pdf')
-  @HttpCode(HttpStatus.NOT_IMPLEMENTED)
-  @ApiOperation({
-    summary: 'Generate cotization PDF (delegates to FastAPI pyservices) — pending implementation',
-  })
-  pdf(@Param('id', ParseUUIDPipe) _id: string) {
-    throw new NotImplementedException(
-      'PDF generation delegated to vuelatour-pyservices. Endpoint disponible cuando se entregue ReportLab/WeasyPrint en FASE pyservices.',
-    );
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'Genera el PDF de la cotización (render en pyservices/WeasyPrint).' })
+  async pdf(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
+    const quote = await this.quotes.findById(id);
+    const pdf = await this.quotesPdf.render(quote as Record<string, unknown>);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="cotizacion-${(quote as { folio?: unknown }).folio ?? id}.pdf"`,
+    });
+    res.send(pdf);
   }
 }
