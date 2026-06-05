@@ -33,6 +33,23 @@ export interface ParsedStatement {
   modelo: string | null;
 }
 
+export interface SugerenciaConciliacion {
+  disponible: boolean;
+  gasto_id_sugerido: string | null;
+  confianza: number;
+  razon: string;
+  /** Gastos candidatos considerados (para que el front muestre opciones). */
+  candidatos: Array<{
+    id: string;
+    fecha: string | null;
+    monto: number;
+    proveedor: string | null;
+  }>;
+}
+
+/** Banda de tolerancia de monto (±5%) para juntar gastos candidatos. */
+const MATCH_MONTO_PCT = 0.05;
+
 @Injectable()
 export class ConciliacionService {
   private readonly logger = new Logger(ConciliacionService.name);
@@ -203,5 +220,152 @@ export class ConciliacionService {
         .eq('id', gastoId);
     }
     return data!;
+  }
+
+  /**
+   * Sugiere (vía Claude en pyservices) el gasto más probable para un movimiento
+   * bancario sin conciliar y ambiguo. Junta gastos candidatos cercanos (±3 días
+   * y ±5% de monto, sin conciliar) y deja que la IA proponga el match con razón.
+   * Best-effort: si pyservices no está configurado o falla, devuelve
+   * disponible=false con los candidatos para que el operador elija a mano.
+   */
+  async sugerir(movId: string): Promise<SugerenciaConciliacion> {
+    const { data: mov, error: movErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id, fecha, monto, descripcion, conciliado')
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
+
+    const m = mov as {
+      id: string;
+      fecha: string;
+      monto: number;
+      descripcion: string | null;
+      conciliado: boolean;
+    };
+    if (m.conciliado) {
+      throw new BadRequestException('El movimiento ya está conciliado.');
+    }
+
+    const candidatos = await this.candidatosCercanos(m.monto, m.fecha);
+    if (candidatos.length === 0) {
+      return {
+        disponible: true,
+        gasto_id_sugerido: null,
+        confianza: 0,
+        razon: 'No hay gastos candidatos cercanos (±3 días y ±5% de monto) sin conciliar.',
+        candidatos,
+      };
+    }
+
+    const baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
+    if (!baseUrl || !token) {
+      return {
+        disponible: false,
+        gasto_id_sugerido: null,
+        confianza: 0,
+        razon: 'Asistente de conciliación no configurado (pyservices).',
+        candidatos,
+      };
+    }
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(`${baseUrl}/conciliacion/sugerir`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
+        body: JSON.stringify({
+          movimiento: { fecha: m.fecha, monto: m.monto, descripcion: m.descripcion },
+          candidatos,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        this.logger.warn(`pyservices /conciliacion/sugerir respondió ${res.status}`);
+        return {
+          disponible: false,
+          gasto_id_sugerido: null,
+          confianza: 0,
+          razon: `pyservices respondió ${res.status}.`,
+          candidatos,
+        };
+      }
+      const data = (await res.json()) as {
+        gasto_id_sugerido: string | null;
+        confianza: number;
+        razon: string;
+      };
+      // Solo aceptamos un id que esté realmente entre los candidatos.
+      const sugerido = candidatos.some((c) => c.id === data.gasto_id_sugerido)
+        ? data.gasto_id_sugerido
+        : null;
+      return {
+        disponible: true,
+        gasto_id_sugerido: sugerido,
+        confianza: sugerido ? data.confianza : 0,
+        razon: data.razon ?? '',
+        candidatos,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`sugerir conciliación falló: ${msg}`);
+      return {
+        disponible: false,
+        gasto_id_sugerido: null,
+        confianza: 0,
+        razon: `No se pudo contactar al asistente de conciliación: ${msg}`,
+        candidatos,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Gastos sin conciliar dentro de ±MATCH_DAYS días y ±MATCH_MONTO_PCT de monto. */
+  private async candidatosCercanos(
+    monto: number,
+    fecha: string,
+  ): Promise<SugerenciaConciliacion['candidatos']> {
+    const base = new Date(`${fecha}T00:00:00Z`);
+    const lo = new Date(base);
+    lo.setUTCDate(lo.getUTCDate() - MATCH_DAYS);
+    const hi = new Date(base);
+    hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
+    const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+    const delta = Math.abs(monto) * MATCH_MONTO_PCT;
+    const montoLo = monto - delta;
+    const montoHi = monto + delta;
+
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)')
+      .eq('conciliado', false)
+      .gte('fecha_gasto', iso(lo))
+      .lte('fecha_gasto', iso(hi))
+      .gte('monto', montoLo)
+      .lte('monto', montoHi)
+      .limit(15);
+    if (error) throw new Error(error.message);
+
+    return (data ?? []).map((g) => {
+      const row = g as {
+        id: string;
+        fecha_gasto: string | null;
+        monto: number;
+        proveedor: { nombre: string } | { nombre: string }[] | null;
+      };
+      const prov = Array.isArray(row.proveedor) ? row.proveedor[0] : row.proveedor;
+      return {
+        id: row.id,
+        fecha: row.fecha_gasto,
+        monto: Number(row.monto),
+        proveedor: prov?.nombre ?? null,
+      };
+    });
   }
 }

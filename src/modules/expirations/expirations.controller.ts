@@ -18,16 +18,38 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateVencimientoDto,
+  ExtraerVencimientoDto,
   ListVencimientosQuery,
   UpdateVencimientoDto,
 } from './dto/expirations.dto';
+import { ExpirationsClient } from './expirations.client';
 import { ExpirationsService } from './expirations.service';
 
 @ApiTags('Expirations')
 @ApiBearerAuth()
 @Controller({ path: 'expirations', version: '1' })
 export class ExpirationsController {
-  constructor(private readonly expirations: ExpirationsService) {}
+  constructor(
+    private readonly expirations: ExpirationsService,
+    private readonly extractor: ExpirationsClient,
+  ) {}
+
+  @Post('extraer')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Extrae por IA los datos de un documento de vencimiento renovado (PDF/imagen) para pre-llenar el alta. Best-effort: si la IA no está disponible regresa disponible=false.',
+  })
+  async extraer(@Body() dto: ExtraerVencimientoDto) {
+    const result = await this.extractor.extraer({
+      pdfBase64: dto.pdfBase64,
+      imageBase64: dto.imageBase64,
+      mediaType: dto.mediaType,
+    });
+    if (!result) return { disponible: false };
+    return { disponible: true, ...result };
+  }
 
   @Get()
   @ApiOperation({

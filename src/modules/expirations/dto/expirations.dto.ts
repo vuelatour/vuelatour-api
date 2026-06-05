@@ -149,3 +149,34 @@ export class CreateVencimientoDto {
 }
 
 export class UpdateVencimientoDto extends PartialType(CreateVencimientoDto) {}
+
+export enum DocumentoMediaType {
+  JPEG = 'image/jpeg',
+  PNG = 'image/png',
+  WEBP = 'image/webp',
+  GIF = 'image/gif',
+}
+
+export class ExtraerVencimientoDto {
+  @ApiPropertyOptional({
+    description: 'PDF del documento renovado en base64 (sin prefijo data:)',
+  })
+  @IsOptional()
+  @IsString()
+  pdfBase64?: string;
+
+  @ApiPropertyOptional({
+    description: 'Alternativa: imagen del documento en base64 (sin prefijo data:)',
+  })
+  @IsOptional()
+  @IsString()
+  imageBase64?: string;
+
+  @ApiPropertyOptional({
+    enum: DocumentoMediaType,
+    description: 'Requerido si se envía imageBase64',
+  })
+  @IsOptional()
+  @IsEnum(DocumentoMediaType)
+  mediaType?: DocumentoMediaType;
+}

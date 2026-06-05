@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import { FacturacionClient } from './facturacion.client';
+import { FacturacionClient, type TimbrarPayload } from './facturacion.client';
 
 interface ListPendientesFilters {
   desde?: string;
@@ -16,8 +16,34 @@ interface ListPendientesFilters {
   offset: number;
 }
 
+/** Receptor alterno opcional (caso 9.7 "SE FACTURÓ A"). */
+interface FacturadoA {
+  facturado_a_rfc?: string;
+  facturado_a_nombre?: string;
+  facturado_a_regimen?: string;
+  facturado_a_cp?: string;
+  facturado_a_uso_cfdi?: string;
+}
+
+interface EmitirInput extends FacturadoA {
+  vuelo_id: string;
+  entidad_fiscal_emisora_id: string;
+}
+
+interface CancelarInput {
+  motivo: string;
+  folio_sustitucion?: string;
+}
+
+interface NotaCreditoInput {
+  factura_id: string;
+  tipo_relacion?: string;
+  monto?: number;
+  descripcion?: string;
+}
+
 const FACTURA_COLS =
-  'id, vuelo_id, cliente_id, entidad_fiscal_emisora_id, estado, serie, folio, uuid_fiscal, total, moneda, xml_url, pdf_url, fecha_timbrado, error_mensaje, created_at';
+  'id, vuelo_id, cliente_id, entidad_fiscal_emisora_id, estado, serie, folio, uuid_fiscal, total, moneda, xml_url, pdf_url, fecha_timbrado, error_mensaje, tipo_comprobante, factura_relacionada_id, facturado_a_rfc, facturado_a_nombre, motivo_cancelacion, cancelada_at, created_at';
 
 @Injectable()
 export class InvoicesService {
@@ -90,7 +116,8 @@ export class InvoicesService {
    * Valida completitud fiscal, arma el payload, llama a pyservices/FEL, guarda
    * XML/PDF y la factura, y marca el vuelo como facturado.
    */
-  async emitir(vueloId: string, emisoraId: string, userId: string) {
+  async emitir(input: EmitirInput, userId: string) {
+    const { vuelo_id: vueloId, entidad_fiscal_emisora_id: emisoraId } = input;
     const { data: vuelo, error: vErr } = await this.supabase.service
       .from('vuelo')
       .select(
@@ -112,12 +139,33 @@ export class InvoicesService {
       .maybeSingle();
     if (cErr) throw new Error(cErr.message);
     if (!cliente) throw new BadRequestException('El vuelo no tiene cliente asociado.');
-    const faltanReceptor = ['rfc', 'regimen_fiscal_receptor', 'uso_cfdi', 'codigo_postal'].filter(
-      (k) => !(cliente as Record<string, unknown>)[k],
+
+    // Receptor del CFDI: por defecto el cliente del vuelo; si se indicó "SE FACTURÓ A"
+    // (caso 9.7) se usa ese receptor alterno y se persiste en la factura.
+    const usaReceptorAlterno = Boolean(input.facturado_a_rfc);
+    const receptor = usaReceptorAlterno
+      ? {
+          rfc: input.facturado_a_rfc as string,
+          nombre: (input.facturado_a_nombre ?? '') as string,
+          domicilio_fiscal: (input.facturado_a_cp ?? '') as string,
+          regimen_fiscal: (input.facturado_a_regimen ?? '') as string,
+          uso_cfdi: (input.facturado_a_uso_cfdi ?? '') as string,
+        }
+      : {
+          rfc: cliente.rfc as string,
+          nombre: (cliente.razon_social_default || cliente.nombre) as string,
+          domicilio_fiscal: cliente.codigo_postal as string,
+          regimen_fiscal: cliente.regimen_fiscal_receptor as string,
+          uso_cfdi: cliente.uso_cfdi as string,
+        };
+    const faltanReceptor = (['rfc', 'nombre', 'domicilio_fiscal', 'regimen_fiscal', 'uso_cfdi'] as const).filter(
+      (k) => !receptor[k],
     );
     if (faltanReceptor.length > 0) {
       throw new BadRequestException(
-        `Faltan datos fiscales del cliente: ${faltanReceptor.join(', ')}.`,
+        usaReceptorAlterno
+          ? `Faltan datos fiscales del receptor 'SE FACTURÓ A': ${faltanReceptor.join(', ')}.`
+          : `Faltan datos fiscales del cliente: ${faltanReceptor.join(', ')}.`,
       );
     }
 
@@ -164,13 +212,7 @@ export class InvoicesService {
         nombre: emisora.razon_social as string,
         regimen_fiscal: emisora.regimen_fiscal_sat as string,
       },
-      receptor: {
-        rfc: cliente.rfc as string,
-        nombre: (cliente.razon_social_default || cliente.nombre) as string,
-        domicilio_fiscal: cliente.codigo_postal as string,
-        regimen_fiscal: cliente.regimen_fiscal_receptor as string,
-        uso_cfdi: cliente.uso_cfdi as string,
-      },
+      receptor,
       conceptos: [
         {
           descripcion: `Servicio de transporte aéreo ${vuelo.origen_iata} → ${vuelo.destino_iata} (folio #${vuelo.folio})`,
@@ -188,7 +230,275 @@ export class InvoicesService {
     }
 
     // Guarda XML/PDF en storage.
-    const base = `${vuelo.id}/VT-${vuelo.folio}`;
+    const { xmlPath, pdfPath } = await this.uploadCfdiFiles(`${vuelo.id}/VT-${vuelo.folio}`, result);
+
+    const { data: factura, error: fErr } = await this.supabase.service
+      .from('factura')
+      .insert({
+        vuelo_id: vuelo.id,
+        cliente_id: vuelo.cliente_id,
+        entidad_fiscal_emisora_id: emisoraId,
+        estado: 'TIMBRADA',
+        tipo_comprobante: 'I',
+        uuid_fiscal: result.uuid,
+        total: totalMxn,
+        moneda: 'MXN',
+        fel_referencia: `VT-${vuelo.folio}`,
+        xml_url: xmlPath,
+        pdf_url: pdfPath,
+        fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
+        // Receptor alterno (caso 9.7 "SE FACTURÓ A"); NULL si se facturó al cliente del vuelo.
+        facturado_a_rfc: usaReceptorAlterno ? receptor.rfc : null,
+        facturado_a_nombre: usaReceptorAlterno ? receptor.nombre : null,
+        facturado_a_regimen: usaReceptorAlterno ? receptor.regimen_fiscal : null,
+        facturado_a_cp: usaReceptorAlterno ? receptor.domicilio_fiscal : null,
+        facturado_a_uso_cfdi: usaReceptorAlterno ? receptor.uso_cfdi : null,
+        created_by: userId,
+      })
+      .select(FACTURA_COLS)
+      .maybeSingle();
+    if (fErr) throw new Error(fErr.message);
+
+    await this.supabase.service
+      .from('vuelo')
+      .update({ facturado: true, updated_by: userId })
+      .eq('id', vuelo.id);
+
+    return factura;
+  }
+
+  /**
+   * Cancela un CFDI ante el SAT (vía pyservices/FEL). La factura debe estar
+   * TIMBRADA y con UUID. Si la cancelación es aceptada: marca la factura como
+   * CANCELADA (motivo + fecha) y libera el vuelo (facturado=false) para refacturar.
+   */
+  async cancelar(facturaId: string, dto: CancelarInput, userId: string) {
+    const factura = await this.getFactura(facturaId);
+    if (factura.estado !== 'TIMBRADA') {
+      throw new ConflictException(`La factura no está TIMBRADA (estado: ${factura.estado}).`);
+    }
+    if (!factura.uuid_fiscal) {
+      throw new BadRequestException('La factura no tiene UUID fiscal; no se puede cancelar.');
+    }
+    if (dto.motivo === '01' && !dto.folio_sustitucion) {
+      throw new BadRequestException(
+        'El motivo 01 requiere el folio (UUID) de la factura que la sustituye.',
+      );
+    }
+
+    const emisora = await this.getEmisora(factura.entidad_fiscal_emisora_id as string);
+
+    const result = await this.fel.cancelar({
+      uuid: factura.uuid_fiscal as string,
+      rfc_emisor: emisora.rfc as string,
+      motivo: dto.motivo,
+      folio_sustitucion: dto.folio_sustitucion ?? null,
+    });
+    if (!result.ok) {
+      throw new BadRequestException(result.error ?? 'No se pudo cancelar el CFDI.');
+    }
+
+    const { data: updated, error: uErr } = await this.supabase.service
+      .from('factura')
+      .update({
+        estado: 'CANCELADA',
+        motivo_cancelacion: dto.motivo,
+        cancelada_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', factura.id)
+      .select(FACTURA_COLS)
+      .maybeSingle();
+    if (uErr) throw new Error(uErr.message);
+
+    // Libera el vuelo para poder refacturar (solo facturas de Ingreso ligadas a un vuelo).
+    if (factura.tipo_comprobante !== 'E' && factura.vuelo_id) {
+      await this.supabase.service
+        .from('vuelo')
+        .update({ facturado: false, updated_by: userId })
+        .eq('id', factura.vuelo_id);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Emite una nota de crédito (CFDI tipo Egreso) relacionada a una factura original
+   * TIMBRADA. El receptor es el mismo de la factura original; el CFDI relacionado es su
+   * UUID. Inserta una nueva fila factura con tipo_comprobante='E' y factura_relacionada_id.
+   */
+  async emitirNotaCredito(dto: NotaCreditoInput, userId: string) {
+    const original = await this.getFactura(dto.factura_id);
+    if (original.estado !== 'TIMBRADA') {
+      throw new ConflictException(
+        `Solo se puede emitir nota de crédito sobre una factura TIMBRADA (estado: ${original.estado}).`,
+      );
+    }
+    if (!original.uuid_fiscal) {
+      throw new BadRequestException('La factura original no tiene UUID fiscal.');
+    }
+    if (original.tipo_comprobante === 'E') {
+      throw new BadRequestException('No se puede emitir una nota de crédito sobre otra nota de crédito.');
+    }
+
+    const emisora = await this.getEmisora(original.entidad_fiscal_emisora_id as string);
+    if (!emisora.csd_cer_url || !emisora.csd_key_url) {
+      throw new BadRequestException(`La entidad ${emisora.codigo} no tiene CSD cargado.`);
+    }
+    const csdPassword =
+      process.env[`CSD_PASSWORD_${emisora.codigo}`] ?? process.env.CSD_PASSWORD ?? '';
+    if (!csdPassword) {
+      throw new BadRequestException(`Falta la contraseña del CSD de ${emisora.codigo} (env CSD_PASSWORD).`);
+    }
+    const [cerB64, keyB64] = await Promise.all([
+      this.downloadB64('csd', emisora.csd_cer_url as string),
+      this.downloadB64('csd', emisora.csd_key_url as string),
+    ]);
+
+    // Receptor = el de la factura original (alterno si lo hubo, si no el del cliente del vuelo).
+    const receptor = await this.receptorDeFactura(original);
+
+    // Monto: el indicado en el DTO o, por defecto, el total de la factura original.
+    const montoTotal = dto.monto && dto.monto > 0 ? dto.monto : Number(original.total);
+    if (!montoTotal || montoTotal <= 0) {
+      throw new BadRequestException('Monto de la nota de crédito inválido.');
+    }
+    const valorUnitario = Math.round((montoTotal / 1.16) * 100) / 100;
+
+    // Sufijo corto para no colisionar con el UNIQUE de fel_referencia si se emiten
+    // varias notas (créditos parciales) sobre la misma factura.
+    const referencia = `NC-${original.fel_referencia ?? original.id}-${Date.now().toString(36)}`;
+    const payload: TimbrarPayload = {
+      referencia,
+      moneda: (original.moneda as string) ?? 'MXN',
+      forma_pago: '03',
+      metodo_pago: 'PUE',
+      lugar_expedicion: emisora.codigo_postal as string,
+      tipo_comprobante: 'E',
+      cfdi_relacionado_uuid: original.uuid_fiscal as string,
+      tipo_relacion: dto.tipo_relacion ?? '01',
+      emisor: {
+        rfc: emisora.rfc as string,
+        nombre: emisora.razon_social as string,
+        regimen_fiscal: emisora.regimen_fiscal_sat as string,
+      },
+      receptor,
+      conceptos: [
+        {
+          descripcion:
+            dto.descripcion ?? `Nota de crédito sobre CFDI ${original.uuid_fiscal}`,
+          valor_unitario: valorUnitario,
+          cantidad: 1,
+        },
+      ],
+      csd_cer_b64: cerB64,
+      csd_key_b64: keyB64,
+      csd_password: csdPassword,
+    };
+
+    const result = await this.fel.notaCredito(payload);
+    if (!result.ok) {
+      throw new BadRequestException(result.error ?? 'No se pudo timbrar la nota de crédito.');
+    }
+
+    const { xmlPath, pdfPath } = await this.uploadCfdiFiles(
+      `${original.vuelo_id}/${referencia}`,
+      result,
+    );
+
+    const { data: nota, error: nErr } = await this.supabase.service
+      .from('factura')
+      .insert({
+        vuelo_id: original.vuelo_id,
+        cliente_id: original.cliente_id,
+        entidad_fiscal_emisora_id: original.entidad_fiscal_emisora_id,
+        estado: 'TIMBRADA',
+        tipo_comprobante: 'E',
+        factura_relacionada_id: original.id,
+        uuid_fiscal: result.uuid,
+        total: montoTotal,
+        moneda: (original.moneda as string) ?? 'MXN',
+        fel_referencia: referencia,
+        xml_url: xmlPath,
+        pdf_url: pdfPath,
+        fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
+        facturado_a_rfc: original.facturado_a_rfc ?? null,
+        facturado_a_nombre: original.facturado_a_nombre ?? null,
+        facturado_a_regimen: original.facturado_a_regimen ?? null,
+        facturado_a_cp: original.facturado_a_cp ?? null,
+        facturado_a_uso_cfdi: original.facturado_a_uso_cfdi ?? null,
+        created_by: userId,
+      })
+      .select(FACTURA_COLS)
+      .maybeSingle();
+    if (nErr) throw new Error(nErr.message);
+
+    return nota;
+  }
+
+  // ── Helpers internos ──────────────────────────────────────────────────────
+
+  /** Carga una factura con todas sus columnas o lanza 404. */
+  private async getFactura(facturaId: string) {
+    const { data, error } = await this.supabase.service
+      .from('factura')
+      .select('*')
+      .eq('id', facturaId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Factura ${facturaId} no encontrada`);
+    return data as Record<string, unknown>;
+  }
+
+  /** Carga la entidad emisora (con CSD) o lanza 404. */
+  private async getEmisora(emisoraId: string) {
+    const { data, error } = await this.supabase.service
+      .from('entidad_fiscal_emisora')
+      .select('id, codigo, razon_social, rfc, regimen_fiscal_sat, codigo_postal, csd_cer_url, csd_key_url')
+      .eq('id', emisoraId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException('Entidad emisora no encontrada.');
+    return data as Record<string, unknown>;
+  }
+
+  /**
+   * Reconstruye el receptor del CFDI a partir de una factura: usa el receptor
+   * alterno ("SE FACTURÓ A") si está guardado, si no el del cliente del vuelo.
+   */
+  private async receptorDeFactura(
+    factura: Record<string, unknown>,
+  ): Promise<TimbrarPayload['receptor']> {
+    if (factura.facturado_a_rfc) {
+      return {
+        rfc: factura.facturado_a_rfc as string,
+        nombre: (factura.facturado_a_nombre ?? '') as string,
+        domicilio_fiscal: (factura.facturado_a_cp ?? '') as string,
+        regimen_fiscal: (factura.facturado_a_regimen ?? '') as string,
+        uso_cfdi: (factura.facturado_a_uso_cfdi ?? '') as string,
+      };
+    }
+    const { data: cliente, error } = await this.supabase.service
+      .from('cliente')
+      .select('nombre, razon_social_default, rfc, regimen_fiscal_receptor, uso_cfdi, codigo_postal')
+      .eq('id', factura.cliente_id as string)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!cliente) throw new BadRequestException('La factura original no tiene cliente asociado.');
+    return {
+      rfc: cliente.rfc as string,
+      nombre: (cliente.razon_social_default || cliente.nombre) as string,
+      domicilio_fiscal: cliente.codigo_postal as string,
+      regimen_fiscal: cliente.regimen_fiscal_receptor as string,
+      uso_cfdi: cliente.uso_cfdi as string,
+    };
+  }
+
+  /** Sube XML/PDF (base64) al bucket privado `facturas` y devuelve sus paths. */
+  private async uploadCfdiFiles(
+    base: string,
+    result: { xml_b64?: string | null; pdf_b64?: string | null },
+  ): Promise<{ xmlPath: string | null; pdfPath: string | null }> {
     let xmlPath: string | null = null;
     let pdfPath: string | null = null;
     if (result.xml_b64) {
@@ -209,32 +519,6 @@ export class InvoicesService {
           upsert: true,
         });
     }
-
-    const { data: factura, error: fErr } = await this.supabase.service
-      .from('factura')
-      .insert({
-        vuelo_id: vuelo.id,
-        cliente_id: vuelo.cliente_id,
-        entidad_fiscal_emisora_id: emisoraId,
-        estado: 'TIMBRADA',
-        uuid_fiscal: result.uuid,
-        total: totalMxn,
-        moneda: 'MXN',
-        fel_referencia: `VT-${vuelo.folio}`,
-        xml_url: xmlPath,
-        pdf_url: pdfPath,
-        fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
-        created_by: userId,
-      })
-      .select(FACTURA_COLS)
-      .maybeSingle();
-    if (fErr) throw new Error(fErr.message);
-
-    await this.supabase.service
-      .from('vuelo')
-      .update({ facturado: true, updated_by: userId })
-      .eq('id', vuelo.id);
-
-    return factura;
+    return { xmlPath, pdfPath };
   }
 }

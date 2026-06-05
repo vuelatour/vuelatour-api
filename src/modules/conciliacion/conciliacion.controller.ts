@@ -58,4 +58,15 @@ export class ConciliacionController {
   ) {
     return this.conciliacion.link(id, dto.gasto_id ?? null, c.userId);
   }
+
+  @Post('movimientos/:id/sugerir')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Sugiere por IA el gasto más probable para un movimiento sin conciliar y ambiguo (ADMIN). Best-effort: disponible=false si la IA no está disponible.',
+  })
+  sugerir(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.sugerir(id);
+  }
 }

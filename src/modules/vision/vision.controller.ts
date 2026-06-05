@@ -27,4 +27,21 @@ export class VisionController {
     if (!result) return { disponible: false };
     return { disponible: true, ...result };
   }
+
+  @Post('combustible-ticket')
+  @Roles(Rol.PILOTO, Rol.MECANICO, Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Extrae datos de un ticket de combustible (litros, precio/litro, total, aeropuerto) por IA. Best-effort.',
+  })
+  async combustibleTicket(@Body() dto: GastoTicketDto) {
+    const result = await this.vision.readCombustibleTicket({
+      imageBase64: dto.imageBase64,
+      mediaType: dto.mediaType,
+      imageUrl: dto.imageUrl,
+    });
+    if (!result) return { disponible: false };
+    return { disponible: true, ...result };
+  }
 }

@@ -1,14 +1,16 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  CancelarFacturaDto,
   EmitirFacturaDto,
   FacturaFileUrlsDto,
   ListFacturasQuery,
   ListPendientesQuery,
+  NotaCreditoDto,
 } from './dto/invoices.dto';
 import { InvoicesService } from './invoices.service';
 
@@ -35,7 +37,25 @@ export class InvoicesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Emite (timbra) el CFDI de un vuelo con la entidad emisora indicada.' })
   emitir(@Body() dto: EmitirFacturaDto, @CurrentUser() c: AuthenticatedUser) {
-    return this.invoices.emitir(dto.vuelo_id, dto.entidad_fiscal_emisora_id, c.userId);
+    return this.invoices.emitir(dto, c.userId);
+  }
+
+  @Post('nota-credito')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Emite una nota de crédito (CFDI Egreso) relacionada a una factura.' })
+  notaCredito(@Body() dto: NotaCreditoDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.invoices.emitirNotaCredito(dto, c.userId);
+  }
+
+  @Post(':id/cancelar')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Cancela un CFDI timbrado ante el SAT (con motivo SAT).' })
+  cancelar(
+    @Param('id') id: string,
+    @Body() dto: CancelarFacturaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.cancelar(id, dto, c.userId);
   }
 
   @Post('file-urls')

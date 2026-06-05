@@ -6,29 +6,6 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 
-export interface CotizacionPdfLinea {
-  concepto: string;
-  monto_usd: number;
-}
-
-export interface CotizacionPdfPayload {
-  folio: number;
-  version: number;
-  fecha: string;
-  cliente: string;
-  aeronave: string;
-  ruta: string;
-  tipo_vuelo: string;
-  pasajeros: number;
-  lineas: CotizacionPdfLinea[];
-  subtotal_usd: number;
-  tuas_usd: number;
-  iva_usd: number;
-  total_usd: number;
-  tc_usd_mxn?: number | null;
-  notas?: string | null;
-}
-
 export interface RepartoSocioPayload {
   socio_nombre: string;
   porcentaje: number;
@@ -63,10 +40,6 @@ export interface RepartoPdfPayload {
 @Injectable()
 export class PyservicesService {
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
-
-  async generateCotizacionPdf(payload: CotizacionPdfPayload): Promise<Buffer> {
-    return this.postForBuffer('/pdf/cotizacion', payload);
-  }
 
   async generateRepartoPdf(payload: RepartoPdfPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/reparto', payload);

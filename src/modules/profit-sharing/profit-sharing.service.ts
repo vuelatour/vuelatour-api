@@ -46,7 +46,8 @@ interface SocioRow {
 }
 interface ReservaRow {
   aeronave_id: string;
-  monto_acumulado_usd: string;
+  monto_por_hora_usd: string;
+  horas_acumuladas: string;
 }
 
 @Injectable()
@@ -189,9 +190,14 @@ export class ProfitSharingService {
       // FIJO se prorratea aparte; otras categorias no avion-especificas se ignoran.
     }
 
+    // Reserva acumulada = tarifa por hora x horas voladas acumuladas (por motor).
     const reservaOverhaul = ctx.reservas
       .filter((r) => r.aeronave_id === a.id)
-      .reduce((acc, r) => acc + Number(r.monto_acumulado_usd), 0);
+      .reduce(
+        (acc, r) =>
+          acc + Number(r.monto_por_hora_usd) * Number(r.horas_acumuladas),
+        0,
+      );
 
     const saldo =
       cobrado -
@@ -235,7 +241,7 @@ export class ProfitSharingService {
         gastos_sin_tc_count: sinTc,
       },
       reserva_overhaul_usd: round2(reservaOverhaul),
-      reserva_overhaul_incompleta: true,
+      reserva_overhaul_incompleta: false,
       saldo_disponible_usd: round2(saldo),
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
@@ -307,7 +313,7 @@ export class ProfitSharingService {
   private async fetchReservas(): Promise<ReservaRow[]> {
     const { data, error } = await this.supabase.service
       .from('reserva_overhaul')
-      .select('aeronave_id, monto_acumulado_usd');
+      .select('aeronave_id, monto_por_hora_usd, horas_acumuladas');
     if (error) throw new Error(error.message);
     return data ?? [];
   }

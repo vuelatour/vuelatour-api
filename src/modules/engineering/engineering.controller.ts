@@ -15,12 +15,14 @@ export class EngineeringController {
   constructor(private readonly engineering: EngineeringService) {}
 
   @Get('aircraft/:id/maintenance')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
   @ApiOperation({ summary: 'Mantenimientos (programados/realizados) de una aeronave' })
   listMaintenance(@Param('id', ParseUUIDPipe) id: string) {
     return this.engineering.listMantenimientos(id);
   }
 
   @Post('aircraft/:id/maintenance')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
   @ApiOperation({ summary: 'Registra un mantenimiento de la aeronave' })
   createMaintenance(
     @Param('id', ParseUUIDPipe) id: string,
@@ -53,6 +55,7 @@ export class EngineeringController {
   }
 
   @Get('upcoming')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
   @ApiOperation({ summary: 'Dashboard de flota: vencimientos y mantenimientos próximos.' })
   upcoming(@Query('dias') dias?: string) {
     const d = Math.min(Math.max(Number(dias) || 60, 1), 365);

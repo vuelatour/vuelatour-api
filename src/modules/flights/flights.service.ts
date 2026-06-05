@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -10,6 +11,7 @@ import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import { VisionService } from '../vision/vision.service';
+import { ExpirationsService } from '../expirations/expirations.service';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
@@ -60,7 +62,10 @@ export class FlightsService {
     private readonly email: EmailService,
     private readonly vision: VisionService,
     private readonly notifications: NotificationsService,
+    private readonly expirations: ExpirationsService,
   ) {}
+
+  private readonly logger = new Logger(FlightsService.name);
 
   /** Envía aviso de asignación al piloto (best-effort). */
   private async notifyPilotAssigned(
@@ -337,6 +342,23 @@ export class FlightsService {
       );
     }
 
+    // Doc 4.3: no se asigna un avión o piloto con documento crítico vencido.
+    const objetivos: { aeronaveId?: string; pilotoId?: string } = {};
+    if (dto.aeronave_id) objetivos.aeronaveId = dto.aeronave_id;
+    if (asignandoPiloto) objetivos.pilotoId = dto.piloto_id!;
+    if (objetivos.aeronaveId || objetivos.pilotoId) {
+      const bloqueos =
+        await this.expirations.findBlockingExpirations(objetivos);
+      if (bloqueos.length > 0) {
+        const detalle = bloqueos
+          .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
+          .join(', ');
+        throw new ConflictException(
+          `No se puede asignar: documento(s) crítico(s) vencido(s): ${detalle}`,
+        );
+      }
+    }
+
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
@@ -413,6 +435,19 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.syncFlight(id);
+    // Propaga las horas voladas a motor(es), hélice(s) y reserva de overhaul.
+    try {
+      await this.advanceComponentHours(
+        id,
+        (data?.aeronave_id as string | null) ?? null,
+      );
+    } catch (err) {
+      this.logger.error(
+        `No se pudieron avanzar las horas de componentes del vuelo ${id}: ${
+          (err as Error).message
+        }`,
+      );
+    }
     // Alimenta el histórico de tiempos por tramo (best-effort, no bloquea).
     try {
       await this.recordTramoTiempos(id);
@@ -850,6 +885,82 @@ export class FlightsService {
   }
 
   // ===== Validación de tacómetro (Tarea 9) =====
+
+  /**
+   * Al completar un vuelo, propaga las horas voladas (suma de
+   * taco_llegada − taco_salida por escala) a los contadores lineales de los
+   * motores y hélices del avión, y a la reserva de overhaul (horas_acumuladas).
+   * Doc 5.2 / 5.7 / 5.9. Solo aplica a vuelos con avión propio (no externos).
+   */
+  private async advanceComponentHours(
+    vueloId: string,
+    aeronaveId: string | null,
+  ): Promise<void> {
+    if (!aeronaveId) return;
+    const escalas = await this.escalasTaco(vueloId);
+    let horas = 0;
+    for (const e of escalas) {
+      const salida = Number(e.taco_salida);
+      const llegada = Number(e.taco_llegada);
+      if (
+        Number.isFinite(salida) &&
+        Number.isFinite(llegada) &&
+        llegada > salida
+      ) {
+        horas += llegada - salida;
+      }
+    }
+    horas = Math.round(horas * 100) / 100;
+    if (horas <= 0) return;
+    await Promise.all([
+      this.incrementHorasComponente('motor', aeronaveId, horas),
+      this.incrementHorasComponente('helice', aeronaveId, horas),
+      this.incrementReservaHoras(aeronaveId, horas),
+    ]);
+  }
+
+  /** Suma `horas` a horas_totales de cada motor/hélice del avión. */
+  private async incrementHorasComponente(
+    tabla: 'motor' | 'helice',
+    aeronaveId: string,
+    horas: number,
+  ): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from(tabla)
+      .select('id, horas_totales')
+      .eq('aeronave_id', aeronaveId);
+    if (error) throw new Error(error.message);
+    await Promise.all(
+      (data ?? []).map((row) =>
+        this.supabase.service
+          .from(tabla)
+          .update({ horas_totales: Number(row.horas_totales) + horas })
+          .eq('id', row.id as string),
+      ),
+    );
+  }
+
+  /** Suma `horas` a horas_acumuladas de la reserva de overhaul del avión. */
+  private async incrementReservaHoras(
+    aeronaveId: string,
+    horas: number,
+  ): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('reserva_overhaul')
+      .select('id, horas_acumuladas')
+      .eq('aeronave_id', aeronaveId);
+    if (error) throw new Error(error.message);
+    await Promise.all(
+      (data ?? []).map((row) =>
+        this.supabase.service
+          .from('reserva_overhaul')
+          .update({
+            horas_acumuladas: Number(row.horas_acumuladas) + horas,
+          })
+          .eq('id', row.id as string),
+      ),
+    );
+  }
 
   private async escalasTaco(vueloId: string): Promise<EscalaTaco[]> {
     const { data, error } = await this.supabase.service

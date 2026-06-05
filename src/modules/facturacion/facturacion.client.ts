@@ -22,6 +22,10 @@ export interface TimbrarPayload {
   csd_cer_b64: string;
   csd_key_b64: string;
   csd_password: string;
+  // Nota de crédito (CFDI tipo Egreso): el shape es el mismo que /timbrar.
+  tipo_comprobante?: string;
+  cfdi_relacionado_uuid?: string;
+  tipo_relacion?: string;
 }
 
 export interface TimbrarResult {
@@ -30,6 +34,20 @@ export interface TimbrarResult {
   fecha_timbrado?: string | null;
   xml_b64?: string | null;
   pdf_b64?: string | null;
+  error?: string | null;
+}
+
+export interface CancelarPayload {
+  uuid: string;
+  rfc_emisor: string;
+  motivo: string;
+  folio_sustitucion?: string | null;
+}
+
+export interface CancelarResult {
+  ok: boolean;
+  estatus?: string | null;
+  acuse_xml?: string | null;
   error?: string | null;
 }
 
@@ -56,26 +74,48 @@ export class FacturacionClient implements OnModuleInit {
   }
 
   async timbrar(payload: TimbrarPayload): Promise<TimbrarResult> {
+    return this.post<TimbrarResult>('/facturacion/timbrar', payload, 'timbrar');
+  }
+
+  /** Timbra una nota de crédito (CFDI tipo Egreso) relacionada a una factura. */
+  async notaCredito(payload: TimbrarPayload): Promise<TimbrarResult> {
+    return this.post<TimbrarResult>('/facturacion/nota-credito', payload, 'nota-credito');
+  }
+
+  /** Solicita la cancelación de un CFDI ante el SAT vía pyservices. */
+  async cancelar(payload: CancelarPayload): Promise<CancelarResult> {
+    return this.post<CancelarResult>('/facturacion/cancelar', payload, 'cancelar');
+  }
+
+  /** POST defensivo hacia pyservices (timeout + AbortController + token interno). */
+  private async post<T extends { ok: boolean; error?: string | null }>(
+    path: string,
+    payload: unknown,
+    op: string,
+  ): Promise<T> {
     if (!this.enabled) {
-      return { ok: false, error: 'Facturación no configurada (pyservices/credenciales ausentes).' };
+      return {
+        ok: false,
+        error: 'Facturación no configurada (pyservices/credenciales ausentes).',
+      } as T;
     }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
-      const res = await fetch(`${this.baseUrl}/facturacion/timbrar`, {
+      const res = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-Internal-Token': this.token },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
       if (!res.ok) {
-        return { ok: false, error: `pyservices respondió ${res.status}` };
+        return { ok: false, error: `pyservices respondió ${res.status}` } as T;
       }
-      return (await res.json()) as TimbrarResult;
+      return (await res.json()) as T;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      this.logger.warn(`timbrar falló: ${msg}`);
-      return { ok: false, error: `No se pudo contactar al servicio de timbrado: ${msg}` };
+      this.logger.warn(`${op} falló: ${msg}`);
+      return { ok: false, error: `No se pudo contactar al servicio de timbrado: ${msg}` } as T;
     } finally {
       clearTimeout(timer);
     }
