@@ -35,7 +35,8 @@ export interface RepartoPdfPayload {
 
 /**
  * Cliente HTTP del microservicio Python (vuelatour-pyservices).
- * Autentica con el header X-Service-Token contra PYSERVICES_TOKEN.
+ * Autentica con el header X-Internal-Token contra INTERNAL_SHARED_TOKEN
+ * (misma configuración que el resto de clientes a pyservices).
  */
 @Injectable()
 export class PyservicesService {
@@ -46,11 +47,13 @@ export class PyservicesService {
   }
 
   private async postForBuffer(path: string, body: unknown): Promise<Buffer> {
-    const baseUrl = this.config.get('PYSERVICES_URL', { infer: true });
-    const token = this.config.get('PYSERVICES_TOKEN', { infer: true });
-    if (!token) {
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
+    const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
+    if (!baseUrl || !token) {
       throw new ServiceUnavailableException(
-        'PYSERVICES_TOKEN no configurado: el microservicio Python no esta enlazado',
+        'pyservices no configurado (PYSERVICES_BASE_URL / INTERNAL_SHARED_TOKEN)',
       );
     }
 
@@ -58,7 +61,7 @@ export class PyservicesService {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Service-Token': token,
+        'X-Internal-Token': token,
       },
       body: JSON.stringify(body),
     }).catch((e: unknown) => {
