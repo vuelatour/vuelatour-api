@@ -83,8 +83,11 @@ export class CalendarService {
         ? (v.operador_externo ?? 'Externo')
         : (aeronave?.matricula ?? 'sin avión');
       const permisoPendiente = v.estado_permiso === 'pendiente';
-      // Vuelo propio confirmado sin avión asignado: aún falta asignarlo.
-      const sinAsignar = !v.es_externo && !v.aeronave_id && v.estado !== 'CANCELADO';
+      // Vuelo propio confirmado pero aún no asignado del todo (le falta avión o piloto).
+      const sinAsignar =
+        v.estado === 'CONFIRMADO' &&
+        !v.es_externo &&
+        (!v.aeronave_id || !v.piloto_id);
       // Prioridad de color: sin asignar (acción) > permiso pendiente (alerta) >
       // externo > color de la aeronave.
       const color = sinAsignar
