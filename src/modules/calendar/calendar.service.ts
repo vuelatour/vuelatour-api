@@ -5,6 +5,8 @@ import type { CalendarRangeQuery } from './dto/calendar.dto';
 const EXTERNAL_COLOR = '#FFB6C1';
 // Color de alerta para vuelos con permiso de pista pendiente. Configurable.
 const PERMISO_PENDIENTE_COLOR = '#F59E0B';
+// Vuelo propio confirmado pero todavía SIN avión asignado (acción pendiente).
+const SIN_ASIGNAR_COLOR = '#8B5CF6';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -81,12 +83,17 @@ export class CalendarService {
         ? (v.operador_externo ?? 'Externo')
         : (aeronave?.matricula ?? 'sin avión');
       const permisoPendiente = v.estado_permiso === 'pendiente';
-      // Permiso pendiente domina el color (alerta) hasta que se emita.
-      const color = permisoPendiente
-        ? PERMISO_PENDIENTE_COLOR
-        : v.es_externo
-          ? EXTERNAL_COLOR
-          : (aeronave?.color_calendario ?? '#9CA3AF');
+      // Vuelo propio confirmado sin avión asignado: aún falta asignarlo.
+      const sinAsignar = !v.es_externo && !v.aeronave_id && v.estado !== 'CANCELADO';
+      // Prioridad de color: sin asignar (acción) > permiso pendiente (alerta) >
+      // externo > color de la aeronave.
+      const color = sinAsignar
+        ? SIN_ASIGNAR_COLOR
+        : permisoPendiente
+          ? PERMISO_PENDIENTE_COLOR
+          : v.es_externo
+            ? EXTERNAL_COLOR
+            : (aeronave?.color_calendario ?? '#9CA3AF');
       // Hora junto al título para comparar disponibilidad de un vistazo.
       const hora = v.fecha_vuelo
         ? new Date(v.fecha_vuelo).toLocaleTimeString('es-MX', {
@@ -95,7 +102,7 @@ export class CalendarService {
             timeZone: 'America/Cancun',
           })
         : null;
-      const title = `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${permisoPendiente ? ' ⚠ permiso' : ''}`;
+      const title = `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`;
 
       return {
         id: v.id,
@@ -105,6 +112,7 @@ export class CalendarService {
         estado: v.estado,
         estado_permiso: v.estado_permiso,
         es_externo: v.es_externo,
+        sin_asignar: sinAsignar,
         title,
         color,
         cliente_id: v.cliente_id,
