@@ -99,6 +99,13 @@ export class FlightsController {
     return this.flights.update(id, dto, c.userId);
   }
 
+  @Get(':id/pilotos-disponibilidad')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Pilotos con conflicto de horario ese día y horas del mes vs. límite' })
+  pilotosDisponibilidad(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.pilotosDisponibilidad(id);
+  }
+
   @Post(':id/assign')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)' })

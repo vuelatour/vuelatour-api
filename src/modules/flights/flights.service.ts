@@ -338,6 +338,95 @@ export class FlightsService {
     return !!data;
   }
 
+  /**
+   * Disponibilidad de pilotos para asignar este vuelo: marca conflicto si el
+   * piloto ya tiene otro vuelo (no cancelado) el mismo día, y sus horas voladas
+   * del mes del vuelo vs. el límite informativo de 90 hrs (doc 5.6/5.10).
+   */
+  async pilotosDisponibilidad(flightId: string) {
+    const LIMITE_HORAS_MES = 90;
+    const { data: flight } = await this.supabase.service
+      .from('vuelo')
+      .select('id, fecha_vuelo')
+      .eq('id', flightId)
+      .maybeSingle();
+    const fecha = (flight?.fecha_vuelo as string | null) ?? null;
+
+    const { data: pilots } = await this.supabase.service
+      .from('usuario')
+      .select('id, nombre')
+      .eq('rol', 'PILOTO')
+      .eq('estado', 'ACTIVO')
+      .order('nombre', { ascending: true });
+
+    // Conflicto: otro vuelo (no cancelado) del mismo piloto ese día.
+    const conflicto = new Map<string, number>();
+    if (fecha) {
+      const day = fecha.slice(0, 10);
+      const { data: sameDay } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio, piloto_id')
+        .gte('fecha_vuelo', `${day}T00:00:00`)
+        .lte('fecha_vuelo', `${day}T23:59:59`)
+        .neq('estado', 'CANCELADO')
+        .neq('id', flightId)
+        .not('piloto_id', 'is', null);
+      for (const f of sameDay ?? []) {
+        if (f.piloto_id) conflicto.set(f.piloto_id as string, f.folio as number);
+      }
+    }
+
+    // Horas voladas (escalas de vuelos COMPLETADOS) en el mes del vuelo.
+    const horas = new Map<string, number>();
+    if (fecha) {
+      const d = new Date(fecha);
+      const mDesde = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
+      const mHasta = new Date(
+        Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 23, 59, 59),
+      ).toISOString();
+      const { data: vuelosMes } = await this.supabase.service
+        .from('vuelo')
+        .select('id, piloto_id')
+        .eq('estado', 'COMPLETADO')
+        .not('piloto_id', 'is', null)
+        .gte('fecha_vuelo', mDesde)
+        .lte('fecha_vuelo', mHasta);
+      const pilotoPorVuelo = new Map(
+        (vuelosMes ?? []).map((v) => [v.id as string, v.piloto_id as string]),
+      );
+      const ids = [...pilotoPorVuelo.keys()];
+      if (ids.length) {
+        const { data: escalas } = await this.supabase.service
+          .from('escala')
+          .select('vuelo_id, taco_salida, taco_llegada')
+          .in('vuelo_id', ids);
+        for (const e of escalas ?? []) {
+          const ts = Number(e.taco_salida);
+          const tl = Number(e.taco_llegada);
+          if (!Number.isFinite(ts) || !Number.isFinite(tl) || tl <= ts) continue;
+          const pid = pilotoPorVuelo.get(e.vuelo_id as string);
+          if (!pid) continue;
+          horas.set(pid, (horas.get(pid) ?? 0) + (tl - ts));
+        }
+      }
+    }
+
+    return (pilots ?? []).map((p) => {
+      const h = Math.round((horas.get(p.id) ?? 0) * 10) / 10;
+      const folio = conflicto.get(p.id);
+      return {
+        id: p.id,
+        nombre: p.nombre,
+        horas_mes: h,
+        limite_horas_mes: LIMITE_HORAS_MES,
+        excede_limite: h >= LIMITE_HORAS_MES,
+        cerca_limite: h >= LIMITE_HORAS_MES * 0.9 && h < LIMITE_HORAS_MES,
+        conflicto: folio != null,
+        conflicto_folio: folio ?? null,
+      };
+    });
+  }
+
   async assign(id: string, dto: AssignFlightDto, updatedBy: string) {
     const current = await this.findById(id);
     if (current.estado !== 'COTIZADO' && current.estado !== 'CONFIRMADO') {
