@@ -46,6 +46,14 @@ export interface TablaXlsxPayload {
   totales?: (string | number | null)[];
 }
 
+export interface ArchivoZipPayload {
+  nombre: string;
+  contenido_b64: string;
+}
+export interface ZipPayload {
+  archivos: ArchivoZipPayload[];
+}
+
 /**
  * Cliente HTTP del microservicio Python (vuelatour-pyservices).
  * Autentica con el header X-Internal-Token contra INTERNAL_SHARED_TOKEN
@@ -67,6 +75,11 @@ export class PyservicesService {
   /** Export genérico de cualquier tabla a Excel. */
   async generateTablaXlsx(payload: TablaXlsxPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/tabla-xlsx', payload);
+  }
+
+  /** Ensambla archivos (base64) en un .zip. */
+  async generateZip(payload: ZipPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/zip', payload);
   }
 
   private async postForBuffer(path: string, body: unknown): Promise<Buffer> {

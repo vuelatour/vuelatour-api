@@ -6,6 +6,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
+import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import { FacturacionClient, type TimbrarPayload } from './facturacion.client';
 
 interface ListPendientesFilters {
@@ -52,7 +54,57 @@ export class InvoicesService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly fel: FacturacionClient,
+    private readonly pyservices: PyservicesService,
+    private readonly profitSharing: ProfitSharingService,
   ) {}
+
+  /**
+   * Paquete de cierre mensual (doc etapa 7): un .zip con el reporte mensual por
+   * avión (Excel) + el XML y PDF de cada factura timbrada del periodo. Los
+   * estados de cuenta no se almacenan en el sistema, así que se agregan aparte.
+   */
+  async cierreZip(
+    desde: string,
+    hasta: string,
+  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    // 1) Reporte mensual por avión (Excel) — reutiliza el cómputo de reparto.
+    const { buffer: excel } = await this.profitSharing.repartoXlsx({ desde, hasta });
+    const archivos: { nombre: string; contenido_b64: string }[] = [
+      {
+        nombre: `reporte-mensual-${desde}-a-${hasta}.xlsx`,
+        contenido_b64: excel.toString('base64'),
+      },
+    ];
+
+    // 2) Facturas timbradas en el periodo: XML + PDF.
+    const { data: facturas } = await this.supabase.service
+      .from('factura')
+      .select('serie, folio, uuid_fiscal, estado, tipo_comprobante, xml_url, pdf_url, fecha_timbrado')
+      .eq('estado', 'TIMBRADA')
+      .gte('fecha_timbrado', desde)
+      .lte('fecha_timbrado', `${hasta}T23:59:59`)
+      .order('fecha_timbrado', { ascending: true });
+
+    for (const f of (facturas ?? []) as Array<Record<string, unknown>>) {
+      const base = `${(f.serie as string) ?? ''}${(f.folio as string) ?? ''}-${String(f.uuid_fiscal ?? '').slice(0, 8)}`;
+      for (const [campo, ext] of [
+        ['xml_url', 'xml'],
+        ['pdf_url', 'pdf'],
+      ] as const) {
+        const path = f[campo] as string | null;
+        if (!path) continue;
+        try {
+          const b64 = await this.downloadB64('facturas', path);
+          archivos.push({ nombre: `facturas/${base}.${ext}`, contenido_b64: b64 });
+        } catch (e) {
+          this.logger.warn(`cierre: no se pudo leer ${path}: ${(e as Error).message}`);
+        }
+      }
+    }
+
+    const buffer = await this.pyservices.generateZip({ archivos });
+    return { buffer, desde, hasta };
+  }
 
   /** Vuelos pagados aún sin facturar. */
   async listPendientes(f: ListPendientesFilters) {

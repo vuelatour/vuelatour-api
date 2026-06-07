@@ -1,4 +1,14 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  Query,
+  StreamableFile,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -31,6 +41,21 @@ export class InvoicesController {
   @ApiOperation({ summary: 'Facturas emitidas (filtros: estado, entidad emisora).' })
   list(@Query() q: ListFacturasQuery) {
     return this.invoices.listFacturas(q);
+  }
+
+  @Get('cierre')
+  @ApiOperation({
+    summary: 'Paquete de cierre mensual (.zip): reporte por avión en Excel + XML/PDF de facturas',
+  })
+  async cierre(
+    @Query('desde') desde: string,
+    @Query('hasta') hasta: string,
+  ): Promise<StreamableFile> {
+    const { buffer } = await this.invoices.cierreZip(desde, hasta);
+    return new StreamableFile(buffer, {
+      type: 'application/zip',
+      disposition: `attachment; filename="cierre-${desde}-a-${hasta}.zip"`,
+    });
   }
 
   @Post('emitir')
