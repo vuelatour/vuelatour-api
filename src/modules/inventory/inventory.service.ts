@@ -1,6 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
+  PyservicesService,
+  type TablaColumnaPayload,
+} from '../pyservices/pyservices.service';
+import {
   CreateInventarioItemDto,
   CreateMovimientoDto,
   ListInventarioQuery,
@@ -29,7 +33,52 @@ const EPS = 1e-9;
 
 @Injectable()
 export class InventoryService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly pyservices: PyservicesService,
+  ) {}
+
+  /** Inventario valorizado en Excel (respeta los filtros del listado). */
+  async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
+    const { data, valor_total_usd } = await this.listItems({
+      ...filters,
+      limit: 2000,
+      offset: 0,
+    });
+    const columnas: TablaColumnaPayload[] = [
+      { label: 'Ítem' },
+      { label: 'Código' },
+      { label: 'No. parte' },
+      { label: 'Categoría' },
+      { label: 'Ubicación' },
+      { label: 'Stock', tipo: 'numero' },
+      { label: 'Mínimo', tipo: 'numero' },
+      { label: 'Costo FIFO', tipo: 'money' },
+      { label: 'Valor USD', tipo: 'money' },
+    ];
+    const filas = data.map((it) => {
+      const x = it as Record<string, unknown>;
+      return [
+        (x.nombre as string) ?? '',
+        (x.codigo as string) ?? '',
+        (x.numero_parte as string) ?? '',
+        (x.categoria as string) ?? '',
+        (x.ubicacion as string) ?? '',
+        x.stock as number,
+        (x.stock_minimo as number) ?? null,
+        x.costo_fifo_actual as number,
+        x.valor_usd as number,
+      ];
+    });
+    const totales = ['TOTAL', null, null, null, null, null, null, null, valor_total_usd];
+    return this.pyservices.generateTablaXlsx({
+      titulo: 'Inventario valorizado',
+      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      columnas,
+      filas,
+      totales,
+    });
+  }
 
   // ===== Cálculo FIFO =====
 

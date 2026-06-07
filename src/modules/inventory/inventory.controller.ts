@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -65,6 +66,17 @@ export class InventoryController {
   @ApiOperation({ summary: 'List inventory items with computed stock + valuation' })
   listItems(@Query() q: ListInventarioQuery) {
     return this.inventory.listItems(q);
+  }
+
+  @Get('items/export')
+  @Roles(...OFICINA)
+  @ApiOperation({ summary: 'Inventario valorizado en Excel (respeta filtros)' })
+  async exportItems(@Query() q: ListInventarioQuery): Promise<StreamableFile> {
+    const buffer = await this.inventory.itemsXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="inventario-valorizado.xlsx"',
+    });
   }
 
   @Post('items')

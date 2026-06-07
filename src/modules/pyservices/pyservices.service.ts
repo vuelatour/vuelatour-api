@@ -33,6 +33,19 @@ export interface RepartoPdfPayload {
   aviones: RepartoAvionPayload[];
 }
 
+export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';
+export interface TablaColumnaPayload {
+  label: string;
+  tipo?: TablaColumnaTipo;
+}
+export interface TablaXlsxPayload {
+  titulo: string;
+  subtitulo?: string;
+  columnas: TablaColumnaPayload[];
+  filas: (string | number | null)[][];
+  totales?: (string | number | null)[];
+}
+
 /**
  * Cliente HTTP del microservicio Python (vuelatour-pyservices).
  * Autentica con el header X-Internal-Token contra INTERNAL_SHARED_TOKEN
@@ -49,6 +62,11 @@ export class PyservicesService {
   /** Reporte mensual por avión en Excel (mismos datos del reparto). */
   async generateRepartoXlsx(payload: RepartoPdfPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/reparto-xlsx', payload);
+  }
+
+  /** Export genérico de cualquier tabla a Excel. */
+  async generateTablaXlsx(payload: TablaXlsxPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/tabla-xlsx', payload);
   }
 
   private async postForBuffer(path: string, body: unknown): Promise<Buffer> {
