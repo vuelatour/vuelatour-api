@@ -31,6 +31,7 @@ import {
   SetFlightPlanDto,
   TacoStatusDto,
   UpdateFlightDto,
+  UpdatePermisoDto,
   VoucherUrlsDto,
 } from './dto/flights.dto';
 import { FlightsService } from './flights.service';
@@ -104,6 +105,20 @@ export class FlightsController {
   @ApiOperation({ summary: 'Pilotos con conflicto de horario ese día y horas del mes vs. límite' })
   pilotosDisponibilidad(@Param('id', ParseUUIDPipe) id: string) {
     return this.flights.pilotosDisponibilidad(id);
+  }
+
+  @Patch(':id/permiso')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @ApiOperation({ summary: 'Actualiza el permiso de pista (Admin/Coord. o el piloto asignado)' })
+  updatePermiso(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdatePermisoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.updatePermiso(id, dto.estado_permiso, {
+      userId: c.userId,
+      rol: c.rol,
+    });
   }
 
   @Post(':id/assign')

@@ -307,6 +307,45 @@ export class FlightsService {
   }
 
   /**
+   * Actualiza SOLO el permiso de pista. Lo pueden hacer Admin/Coordinador y el
+   * piloto asignado al vuelo (p. ej. cuando el piloto recibe el permiso en el
+   * aeropuerto). Al pasar a "emitido" avisa a Admin/Coordinador.
+   */
+  async updatePermiso(
+    id: string,
+    estadoPermiso: 'no_aplica' | 'pendiente' | 'emitido',
+    user: { userId: string; rol: Rol },
+  ) {
+    const current = await this.findById(id);
+    if (user.rol === Rol.PILOTO && current.piloto_id !== user.userId) {
+      throw new ForbiddenException(
+        'Solo el piloto asignado puede actualizar el permiso de este vuelo',
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({ estado_permiso: estadoPermiso, updated_by: user.userId })
+      .eq('id', id)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Flight ${id} not found`);
+    void this.calendar.syncFlight(id);
+    if (estadoPermiso === 'emitido' && current.estado_permiso !== 'emitido') {
+      const payload = {
+        tipo: 'permiso_emitido',
+        titulo: 'Permiso de pista emitido',
+        cuerpo: `${current.origen_iata} → ${current.destino_iata} · folio #${current.folio}`,
+        data: { vuelo_id: id, folio: current.folio },
+        link: `/admin/flights/${id}`,
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, payload, user.userId);
+      void this.notifications.notifyRole(Rol.COORDINADOR, payload, user.userId);
+    }
+    return data;
+  }
+
+  /**
    * Guarda la foto del plan de vuelo de salida (vuelos hacia/desde pistas con
    * permiso). La sube el piloto desde la app; opcional, no bloqueante.
    */

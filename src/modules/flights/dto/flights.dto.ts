@@ -144,6 +144,12 @@ export class UpdateFlightDto {
   cobrado?: boolean;
 }
 
+export class UpdatePermisoDto {
+  @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista' })
+  @IsEnum(EstadoPermiso)
+  estado_permiso!: EstadoPermiso;
+}
+
 export class SetFlightPlanDto {
   @ApiProperty({ description: 'URL/path en Storage de la foto del plan de vuelo' })
   @IsString()
