@@ -11,6 +11,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -45,6 +46,17 @@ export class ExpensesController {
       filters.categoria = CategoriaGasto.GAS;
     }
     return this.expenses.list(filters);
+  }
+
+  @Get('export')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({ summary: 'Gastos por avión/categoría en Excel (respeta filtros)' })
+  async export(@Query() q: ListGastosQuery): Promise<StreamableFile> {
+    const buffer = await this.expenses.listXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="gastos.xlsx"',
+    });
   }
 
   @Post()

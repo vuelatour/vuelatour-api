@@ -1,6 +1,10 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
+import {
+  PyservicesService,
+  type TablaColumnaPayload,
+} from '../pyservices/pyservices.service';
 import type {
   GastosQuery,
   HorasPilotoQuery,
@@ -57,7 +61,47 @@ export class DashboardsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly profitSharing: ProfitSharingService,
+    private readonly pyservices: PyservicesService,
   ) {}
+
+  /** Horas por piloto en Excel (mismos datos del tablero). */
+  async horasPilotoXlsx(q: HorasPilotoQuery): Promise<Buffer> {
+    const r = await this.horasPiloto(q);
+    const columnas: TablaColumnaPayload[] = [
+      { label: 'Piloto' },
+      { label: 'Horas (periodo)', tipo: 'numero' },
+      { label: 'Vuelos (periodo)', tipo: 'entero' },
+      { label: 'Horas mes actual', tipo: 'numero' },
+      { label: 'Límite mes', tipo: 'numero' },
+      { label: 'Restantes mes', tipo: 'numero' },
+      { label: 'Excede límite' },
+    ];
+    const filas = r.pilotos.map((p) => [
+      p.nombre,
+      p.horas_periodo,
+      p.vuelos_periodo,
+      p.horas_mes_actual,
+      p.limite_horas_mes,
+      p.horas_restantes_mes,
+      p.excede_limite ? 'Sí' : 'No',
+    ]);
+    const totales = [
+      'TOTAL',
+      r.resumen.horas_periodo_total,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ];
+    return this.pyservices.generateTablaXlsx({
+      titulo: 'Horas por piloto',
+      subtitulo: `Periodo ${q.desde} a ${q.hasta} · límite informativo ${LIMITE_HORAS_MES} hrs/mes`,
+      columnas,
+      filas,
+      totales,
+    });
+  }
 
   /** Tablero ejecutivo: financiero del periodo + pipeline operativo + top clientes. */
   async overview(q: OverviewQuery) {

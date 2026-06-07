@@ -1,4 +1,4 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, StreamableFile } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
@@ -64,5 +64,16 @@ export class DashboardsController {
   })
   horasPiloto(@Query() q: HorasPilotoQuery) {
     return this.dashboards.horasPiloto(q);
+  }
+
+  @Get('horas-piloto/export')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Horas por piloto en Excel' })
+  async horasPilotoExport(@Query() q: HorasPilotoQuery): Promise<StreamableFile> {
+    const buffer = await this.dashboards.horasPilotoXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="horas-por-piloto.xlsx"',
+    });
   }
 }

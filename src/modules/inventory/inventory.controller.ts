@@ -93,6 +93,17 @@ export class InventoryController {
     return this.inventory.listMovimientos(q);
   }
 
+  @Get('movimientos/export')
+  @Roles(...OFICINA)
+  @ApiOperation({ summary: 'Cardex en Excel (respeta filtros)' })
+  async exportMovimientos(@Query() q: ListMovimientosQuery): Promise<StreamableFile> {
+    const buffer = await this.inventory.movimientosXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="cardex.xlsx"',
+    });
+  }
+
   @Get('items/:id')
   @Roles(...OFICINA)
   @ApiOperation({ summary: 'Item detail with cardex + FIFO stats' })

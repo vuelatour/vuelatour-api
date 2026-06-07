@@ -1,6 +1,10 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { NotificationsService } from '../realtime/notifications.service';
+import {
+  PyservicesService,
+  type TablaColumnaPayload,
+} from '../pyservices/pyservices.service';
 import { Rol } from '../../common/types/auth.types';
 import type {
   CreateGastoDto,
@@ -22,7 +26,44 @@ export class ExpensesService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly notifications: NotificationsService,
+    private readonly pyservices: PyservicesService,
   ) {}
+
+  /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
+  async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
+    const { data } = await this.list({ ...filters, limit: 5000, offset: 0 });
+    const columnas: TablaColumnaPayload[] = [
+      { label: 'Fecha' },
+      { label: 'Categoría' },
+      { label: 'Avión' },
+      { label: 'Proveedor' },
+      { label: 'Medio pago' },
+      { label: 'Comprobante' },
+      { label: 'Moneda' },
+      { label: 'Monto', tipo: 'money' },
+    ];
+    const filas = data.map((g) => {
+      const x = g as Record<string, unknown>;
+      const aeronave = x.aeronave as { matricula?: string } | null;
+      const proveedor = x.proveedor as { nombre?: string } | null;
+      return [
+        (x.fecha_gasto as string) ?? '',
+        (x.categoria as string) ?? '',
+        aeronave?.matricula ?? '(pendiente)',
+        proveedor?.nombre ?? '',
+        (x.medio_pago as string) ?? '',
+        (x.estatus_comprobante as string) ?? '',
+        (x.moneda as string) ?? '',
+        Number(x.monto),
+      ];
+    });
+    return this.pyservices.generateTablaXlsx({
+      titulo: 'Gastos por avión / categoría',
+      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      columnas,
+      filas,
+    });
+  }
 
   async list(filters: ListGastosQuery) {
     let q = this.supabase.service

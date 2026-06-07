@@ -80,6 +80,45 @@ export class InventoryService {
     });
   }
 
+  /** Cardex (movimientos de inventario) en Excel. */
+  async movimientosXlsx(filters: ListMovimientosQuery): Promise<Buffer> {
+    const { data } = await this.listMovimientos({ ...filters, limit: 5000, offset: 0 });
+    const columnas: TablaColumnaPayload[] = [
+      { label: 'Fecha' },
+      { label: 'Tipo' },
+      { label: 'Ítem' },
+      { label: 'No. parte' },
+      { label: 'Cantidad', tipo: 'numero' },
+      { label: 'Costo unit.', tipo: 'money' },
+      { label: 'Avión' },
+      { label: 'Proveedor' },
+      { label: 'Referencia' },
+    ];
+    const filas = data.map((m) => {
+      const x = m as Record<string, unknown>;
+      const item = x.item as { nombre?: string; numero_parte?: string } | null;
+      const aeronave = x.aeronave as { matricula?: string } | null;
+      const proveedor = x.proveedor as { nombre?: string } | null;
+      return [
+        (x.fecha_movimiento as string) ?? '',
+        (x.tipo as string) ?? '',
+        item?.nombre ?? '',
+        item?.numero_parte ?? '',
+        Number(x.cantidad),
+        x.costo_unitario_usd != null ? Number(x.costo_unitario_usd) : null,
+        aeronave?.matricula ?? '',
+        proveedor?.nombre ?? '',
+        (x.referencia as string) ?? '',
+      ];
+    });
+    return this.pyservices.generateTablaXlsx({
+      titulo: 'Cardex de inventario',
+      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      columnas,
+      filas,
+    });
+  }
+
   // ===== Cálculo FIFO =====
 
   /** Orden cronológico estable: fecha_movimiento y, a igualdad, created_at. */
