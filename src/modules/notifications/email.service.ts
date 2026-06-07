@@ -56,11 +56,11 @@ export class EmailService implements OnModuleInit {
     }
     try {
       const fecha = data.fechaVuelo
-        ? new Date(data.fechaVuelo).toLocaleString('es-MX', {
+        ? `${new Date(data.fechaVuelo).toLocaleString('es-MX', {
             dateStyle: 'long',
             timeStyle: 'short',
             timeZone: 'America/Cancun',
-          })
+          })} (hora de Cancún)`
         : 'Por confirmar';
       const monto = `$${data.montoTotalUsd.toLocaleString('en-US')} USD`;
 
@@ -91,11 +91,11 @@ export class EmailService implements OnModuleInit {
     }
     try {
       const fecha = data.fechaVuelo
-        ? new Date(data.fechaVuelo).toLocaleString('es-MX', {
+        ? `${new Date(data.fechaVuelo).toLocaleString('es-MX', {
             dateStyle: 'long',
             timeStyle: 'short',
             timeZone: 'America/Cancun',
-          })
+          })} (hora de Cancún)`
         : 'Por confirmar';
 
       const { error } = await this.resend.emails.send({

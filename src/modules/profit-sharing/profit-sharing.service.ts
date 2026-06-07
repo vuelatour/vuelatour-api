@@ -63,7 +63,13 @@ export class ProfitSharingService {
     const payload = {
       periodo_desde: result.periodo.desde,
       periodo_hasta: result.periodo.hasta,
-      generado: new Date().toISOString().slice(0, 10),
+      // Fecha de generación en hora de Cancún (UTC−5), no UTC.
+      generado: new Intl.DateTimeFormat("en-CA", {
+        timeZone: "America/Cancun",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      }).format(new Date()),
       aviones: result.aviones.map((a) => ({
         matricula: a.aeronave.matricula,
         modelo: a.aeronave.modelo,
