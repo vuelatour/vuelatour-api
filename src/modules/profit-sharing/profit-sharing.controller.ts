@@ -32,4 +32,17 @@ export class ProfitSharingController {
       disposition: `inline; filename="reparto-${desde}-a-${hasta}.pdf"`,
     });
   }
+
+  @Get('xlsx')
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary: 'Reporte mensual por avión en Excel (rendered by vuelatour-pyservices)',
+  })
+  async xlsx(@Query() q: ProfitSharingQuery): Promise<StreamableFile> {
+    const { buffer, desde, hasta } = await this.profitSharing.repartoXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="reporte-mensual-${desde}-a-${hasta}.xlsx"`,
+    });
+  }
 }

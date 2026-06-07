@@ -57,12 +57,10 @@ export class ProfitSharingService {
     private readonly pyservices: PyservicesService,
   ) {}
 
-  /** Genera el PDF del reparto delegando el render al microservicio Python. */
-  async repartoPdf(
-    q: ProfitSharingQuery,
-  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+  /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
+  private async buildRepartoPayload(q: ProfitSharingQuery) {
     const result = await this.compute(q);
-    const buffer = await this.pyservices.generateRepartoPdf({
+    const payload = {
       periodo_desde: result.periodo.desde,
       periodo_hasta: result.periodo.hasta,
       generado: new Date().toISOString().slice(0, 10),
@@ -83,8 +81,26 @@ export class ProfitSharingService {
           monto_usd: r.monto_usd,
         })),
       })),
-    });
-    return { buffer, desde: result.periodo.desde, hasta: result.periodo.hasta };
+    };
+    return { payload, desde: result.periodo.desde, hasta: result.periodo.hasta };
+  }
+
+  /** Genera el PDF del reparto delegando el render al microservicio Python. */
+  async repartoPdf(
+    q: ProfitSharingQuery,
+  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    const { payload, desde, hasta } = await this.buildRepartoPayload(q);
+    const buffer = await this.pyservices.generateRepartoPdf(payload);
+    return { buffer, desde, hasta };
+  }
+
+  /** Genera el reporte mensual por avión en Excel (mismos datos). */
+  async repartoXlsx(
+    q: ProfitSharingQuery,
+  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    const { payload, desde, hasta } = await this.buildRepartoPayload(q);
+    const buffer = await this.pyservices.generateRepartoXlsx(payload);
+    return { buffer, desde, hasta };
   }
 
   async compute(q: ProfitSharingQuery) {

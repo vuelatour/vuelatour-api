@@ -46,6 +46,11 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/reparto', payload);
   }
 
+  /** Reporte mensual por avión en Excel (mismos datos del reparto). */
+  async generateRepartoXlsx(payload: RepartoPdfPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/reparto-xlsx', payload);
+  }
+
   private async postForBuffer(path: string, body: unknown): Promise<Buffer> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
