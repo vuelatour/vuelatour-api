@@ -25,6 +25,7 @@ import {
 } from './dto/escalas.dto';
 import {
   AssignFlightDto,
+  CancelFlightDto,
   CreateExternalFlightDto,
   ListFlightsQuery,
   SetFlightPlanDto,
@@ -140,6 +141,20 @@ export class FlightsController {
   async complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
     await this.flights.assertAccess(id, c);
     return this.flights.complete(id, c.userId);
+  }
+
+  @Post(':id/cancel')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Cancela un vuelo (-> CANCELADO) con motivo auditable. Solo ADMIN/COORDINADOR.',
+  })
+  async cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CancelFlightDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.cancel(id, dto.motivo, c.userId);
   }
 
   // ============ Escalas ============

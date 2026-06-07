@@ -150,6 +150,16 @@ export class SetFlightPlanDto {
   foto_plan_vuelo_url!: string;
 }
 
+export class CancelFlightDto {
+  @ApiProperty({
+    description: 'Motivo de la cancelación. Queda auditado en notas_internas.',
+  })
+  @IsString()
+  @MinLength(3)
+  @MaxLength(500)
+  motivo!: string;
+}
+
 export class AssignFlightDto {
   @ApiPropertyOptional({
     description: 'Aeronave asignada (solo si no es externo)',

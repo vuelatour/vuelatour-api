@@ -458,6 +458,33 @@ export class FlightsService {
     return data!;
   }
 
+  /**
+   * Cancela un vuelo (-> CANCELADO). Pensado para que ADMIN/COORDINADOR cierren
+   * vuelos que quedaron atorados (p. ej. CONFIRMADO con fecha pasada y sin
+   * tacómetros). El motivo se guarda auditado en notas_internas.
+   */
+  async cancel(id: string, motivo: string, updatedBy: string) {
+    const current = await this.findById(id);
+    if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
+      throw new ConflictException(
+        `No se puede cancelar un vuelo en estado ${current.estado}`,
+      );
+    }
+    const sello = `[Cancelado ${new Date().toISOString()}] ${motivo.trim()}`;
+    const previas = (current.notas_internas as string | null)?.trim();
+    const notas_internas = previas ? `${previas}\n${sello}` : sello;
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({ estado: 'CANCELADO', notas_internas, updated_by: updatedBy })
+      .eq('id', id)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    // El calendario elimina el evento cuando el vuelo pasa a CANCELADO.
+    void this.calendar.syncFlight(id);
+    return data!;
+  }
+
   async createExternal(dto: CreateExternalFlightDto, userId: string) {
     const payload = {
       cliente_id: dto.cliente_id,
