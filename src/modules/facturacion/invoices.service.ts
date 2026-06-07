@@ -5,10 +5,12 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import { FacturacionClient, type TimbrarPayload } from './facturacion.client';
+import type { UpdateRecibidaDto } from './dto/invoices.dto';
 
 interface ListPendientesFilters {
   desde?: string;
@@ -46,6 +48,9 @@ interface NotaCreditoInput {
 
 const FACTURA_COLS =
   'id, vuelo_id, cliente_id, entidad_fiscal_emisora_id, estado, serie, folio, uuid_fiscal, total, moneda, xml_url, pdf_url, fecha_timbrado, error_mensaje, tipo_comprobante, factura_relacionada_id, facturado_a_rfc, facturado_a_nombre, motivo_cancelacion, cancelada_at, created_at';
+
+const RECIBIDA_COLS =
+  'id, uuid_fiscal, emisor_rfc, emisor_nombre, receptor_rfc, receptor_nombre, tipo_comprobante, subtotal, total, moneda, fecha_emision, conceptos_resumen, xml_url, estado, gasto_id, aeronave_id, categoria_sugerida, notas, created_at, updated_at';
 
 @Injectable()
 export class InvoicesService {
@@ -104,6 +109,95 @@ export class InvoicesService {
 
     const buffer = await this.pyservices.generateZip({ archivos });
     return { buffer, desde, hasta };
+  }
+
+  // ============ Facturas recibidas (buzón de CFDI de proveedores) ============
+
+  /** Sube un XML recibido: lo parsea, lo guarda en Storage e inserta la fila. */
+  async crearRecibida(xmlB64: string, userId: string) {
+    const p = await this.pyservices.parseFacturaRecibida(xmlB64);
+    const nombre = (p.uuid_fiscal ?? randomUUID()).replace(/[^a-zA-Z0-9-]/g, '');
+    const path = `recibidas/${nombre}.xml`;
+    const { error: upErr } = await this.supabase.service.storage
+      .from('facturas')
+      .upload(path, Buffer.from(xmlB64, 'base64'), {
+        contentType: 'application/xml',
+        upsert: true,
+      });
+    if (upErr) throw new Error(`No se pudo guardar el XML: ${upErr.message}`);
+
+    const { data, error } = await this.supabase.service
+      .from('factura_recibida')
+      .insert({
+        uuid_fiscal: p.uuid_fiscal,
+        emisor_rfc: p.emisor_rfc,
+        emisor_nombre: p.emisor_nombre,
+        receptor_rfc: p.receptor_rfc,
+        receptor_nombre: p.receptor_nombre,
+        tipo_comprobante: p.tipo_comprobante,
+        subtotal: p.subtotal,
+        total: p.total,
+        moneda: p.moneda,
+        fecha_emision: p.fecha_emision,
+        conceptos_resumen: p.conceptos_resumen,
+        xml_url: path,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(RECIBIDA_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23505') {
+        throw new ConflictException('Esa factura (UUID) ya está registrada.');
+      }
+      throw new Error(error.message);
+    }
+    return data;
+  }
+
+  async listRecibidas(filters: { estado?: string; limit: number; offset: number }) {
+    let q = this.supabase.service
+      .from('factura_recibida')
+      .select(
+        `${RECIBIDA_COLS}, gasto:gasto_id(id, categoria, monto, moneda), aeronave:aeronave_id(matricula)`,
+        { count: 'exact' },
+      )
+      .order('created_at', { ascending: false })
+      .range(filters.offset, filters.offset + filters.limit - 1);
+    if (filters.estado) q = q.eq('estado', filters.estado);
+    const { data, error, count } = await q;
+    if (error) throw new Error(error.message);
+    return { data: data ?? [], count: count ?? 0, limit: filters.limit, offset: filters.offset };
+  }
+
+  async updateRecibida(id: string, dto: UpdateRecibidaDto, userId: string) {
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.gasto_id !== undefined) patch.gasto_id = dto.gasto_id;
+    if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
+    if (dto.categoria_sugerida !== undefined) patch.categoria_sugerida = dto.categoria_sugerida;
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+    if (dto.estado !== undefined) patch.estado = dto.estado;
+    // Amarrar a un gasto marca la factura como clasificada (si no se indicó estado).
+    else if (dto.gasto_id) patch.estado = 'CLASIFICADA';
+
+    const { data, error } = await this.supabase.service
+      .from('factura_recibida')
+      .update(patch)
+      .eq('id', id)
+      .select(RECIBIDA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
+    return data;
+  }
+
+  async deleteRecibida(id: string) {
+    const { error } = await this.supabase.service
+      .from('factura_recibida')
+      .delete()
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+    return { ok: true };
   }
 
   /** Vuelos pagados aún sin facturar. */

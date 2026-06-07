@@ -54,6 +54,20 @@ export interface ZipPayload {
   archivos: ArchivoZipPayload[];
 }
 
+export interface FacturaRecibidaParsed {
+  uuid_fiscal: string | null;
+  emisor_rfc: string | null;
+  emisor_nombre: string | null;
+  receptor_rfc: string | null;
+  receptor_nombre: string | null;
+  tipo_comprobante: string | null;
+  subtotal: number | null;
+  total: number | null;
+  moneda: string | null;
+  fecha_emision: string | null;
+  conceptos_resumen: string | null;
+}
+
 /**
  * Cliente HTTP del microservicio Python (vuelatour-pyservices).
  * Autentica con el header X-Internal-Token contra INTERNAL_SHARED_TOKEN
@@ -80,6 +94,40 @@ export class PyservicesService {
   /** Ensambla archivos (base64) en un .zip. */
   async generateZip(payload: ZipPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/zip', payload);
+  }
+
+  /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */
+  async parseFacturaRecibida(xmlB64: string): Promise<FacturaRecibidaParsed> {
+    return this.postForJson<FacturaRecibidaParsed>('/facturacion/parse-recibida', {
+      xml_b64: xmlB64,
+    });
+  }
+
+  private async postForJson<T>(path: string, body: unknown): Promise<T> {
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
+    const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
+    if (!baseUrl || !token) {
+      throw new ServiceUnavailableException(
+        'pyservices no configurado (PYSERVICES_BASE_URL / INTERNAL_SHARED_TOKEN)',
+      );
+    }
+    const res = await fetch(`${baseUrl}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
+      body: JSON.stringify(body),
+    }).catch((e: unknown) => {
+      const msg = e instanceof Error ? e.message : 'error de red';
+      throw new BadGatewayException(`No se pudo contactar a pyservices: ${msg}`);
+    });
+    if (!res.ok) {
+      const detalle = await res.text().catch(() => '');
+      throw new BadGatewayException(
+        `pyservices respondio ${res.status}: ${detalle.slice(0, 300)}`,
+      );
+    }
+    return (await res.json()) as T;
   }
 
   private async postForBuffer(path: string, body: unknown): Promise<Buffer> {

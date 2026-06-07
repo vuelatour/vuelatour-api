@@ -166,3 +166,68 @@ export class FacturaFileUrlsDto {
   @IsString({ each: true })
   paths!: string[];
 }
+
+const ESTADOS_RECIBIDA = ['SIN_CLASIFICAR', 'CLASIFICADA', 'DESCARTADA'];
+
+export class CrearRecibidaDto {
+  @ApiProperty({ description: 'XML del CFDI recibido en base64' })
+  @IsString()
+  xml_b64!: string;
+}
+
+export class ListRecibidasQuery {
+  @ApiPropertyOptional({ enum: ESTADOS_RECIBIDA })
+  @IsOptional()
+  @IsIn(ESTADOS_RECIBIDA)
+  estado?: string;
+
+  @ApiPropertyOptional({ default: 100 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(300)
+  limit = 100;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset = 0;
+}
+
+export class UpdateRecibidaDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  gasto_id?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  categoria_sugerida?: string;
+
+  @ApiPropertyOptional({ enum: ESTADOS_RECIBIDA })
+  @IsOptional()
+  @IsIn(ESTADOS_RECIBIDA)
+  estado?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}
+
+export class RecibidaFileUrlsDto {
+  @ApiProperty({ type: [String] })
+  @IsArray()
+  @IsString({ each: true })
+  paths!: string[];
+}

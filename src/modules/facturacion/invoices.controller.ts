@@ -1,10 +1,13 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   StreamableFile,
@@ -16,11 +19,15 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CancelarFacturaDto,
+  CrearRecibidaDto,
   EmitirFacturaDto,
   FacturaFileUrlsDto,
   ListFacturasQuery,
   ListPendientesQuery,
+  ListRecibidasQuery,
   NotaCreditoDto,
+  RecibidaFileUrlsDto,
+  UpdateRecibidaDto,
 } from './dto/invoices.dto';
 import { InvoicesService } from './invoices.service';
 
@@ -87,6 +94,44 @@ export class InvoicesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Firma URLs de XML/PDF de facturas (bucket privado) para descarga.' })
   fileUrls(@Body() dto: FacturaFileUrlsDto) {
+    return this.invoices.signFacturaFiles(dto.paths);
+  }
+
+  // ============ Facturas recibidas (buzón) ============
+
+  @Get('recibidas')
+  @ApiOperation({ summary: 'Lista de facturas recibidas (CFDI de proveedores).' })
+  listRecibidas(@Query() q: ListRecibidasQuery) {
+    return this.invoices.listRecibidas(q);
+  }
+
+  @Post('recibidas')
+  @ApiOperation({ summary: 'Sube un XML de CFDI recibido: lo parsea y lo registra.' })
+  crearRecibida(@Body() dto: CrearRecibidaDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.invoices.crearRecibida(dto.xml_b64, c.userId);
+  }
+
+  @Patch('recibidas/:id')
+  @ApiOperation({ summary: 'Amarra/actualiza una factura recibida (gasto, avión, estado).' })
+  updateRecibida(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateRecibidaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.updateRecibida(id, dto, c.userId);
+  }
+
+  @Delete('recibidas/:id')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Elimina una factura recibida del buzón.' })
+  deleteRecibida(@Param('id', ParseUUIDPipe) id: string) {
+    return this.invoices.deleteRecibida(id);
+  }
+
+  @Post('recibidas/file-urls')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Firma URLs de los XML recibidos (bucket privado).' })
+  recibidaFileUrls(@Body() dto: RecibidaFileUrlsDto) {
     return this.invoices.signFacturaFiles(dto.paths);
   }
 }
