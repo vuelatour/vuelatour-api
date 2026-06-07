@@ -322,6 +322,22 @@ export class FlightsService {
     return data;
   }
 
+  /**
+   * True si la aeronave tiene un servicio de mantenimiento en curso (EN_TALLER).
+   * Se usa para impedir asignarla a vuelos (Doc 4.3: "no en mantenimiento").
+   */
+  async aircraftEnTaller(aeronaveId: string): Promise<boolean> {
+    const { data, error } = await this.supabase.service
+      .from('mantenimiento')
+      .select('id')
+      .eq('aeronave_id', aeronaveId)
+      .eq('estado', 'EN_TALLER')
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return !!data;
+  }
+
   async assign(id: string, dto: AssignFlightDto, updatedBy: string) {
     const current = await this.findById(id);
     if (current.estado !== 'COTIZADO' && current.estado !== 'CONFIRMADO') {
@@ -357,6 +373,13 @@ export class FlightsService {
           `No se puede asignar: documento(s) crítico(s) vencido(s): ${detalle}`,
         );
       }
+    }
+
+    // Doc 4.3: un avión "no disponible, en mantenimiento" no se puede asignar.
+    if (dto.aeronave_id && (await this.aircraftEnTaller(dto.aeronave_id))) {
+      throw new ConflictException(
+        'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
+      );
     }
 
     const patch: Record<string, unknown> = { updated_by: updatedBy };
