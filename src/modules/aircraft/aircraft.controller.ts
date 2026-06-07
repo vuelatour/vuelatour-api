@@ -68,6 +68,14 @@ export class AircraftController {
     return this.aircraft.findById(id);
   }
 
+  @Get(':id/metrics')
+  @ApiOperation({
+    summary: 'Métricas operativas: apto-para-volar, utilización (horas/vuelos) y finanzas',
+  })
+  metrics(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.aircraftMetrics(id);
+  }
+
   @Get(':id/snapshot')
   @ApiOperation({
     summary:

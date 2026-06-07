@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { ExpirationsService } from '../expirations/expirations.service';
 import type { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import type { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import type { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -33,7 +34,139 @@ const IMAGENES_BUCKET = 'aeronave-imagenes';
 
 @Injectable()
 export class AircraftService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly expirations: ExpirationsService,
+  ) {}
+
+  /**
+   * Métricas operativas del avión para el expediente:
+   *  - airworthiness ("apto para volar"): documentos críticos vencidos +
+   *    servicio en taller + componentes con TBO agotado.
+   *  - utilización: horas voladas y # de vuelos (mes / año / total).
+   *  - finanzas: ingresos cobrados vs gastos por moneda.
+   */
+  async aircraftMetrics(id: string) {
+    await this.findById(id);
+    const now = new Date();
+    const startMonth = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+    ).toISOString();
+    const startYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1)).toISOString();
+
+    const [motorsRes, tallerRes, blocking, escalasRes, cobrosRes, gastosRes] =
+      await Promise.all([
+        this.supabase.service
+          .from('motor')
+          .select('posicion, numero_serie, horas_totales, turm, tbo_horas')
+          .eq('aeronave_id', id),
+        this.supabase.service
+          .from('mantenimiento')
+          .select('id')
+          .eq('aeronave_id', id)
+          .eq('estado', 'EN_TALLER')
+          .limit(1),
+        this.expirations.findBlockingExpirations({ aeronaveId: id }),
+        this.supabase.service
+          .from('escala')
+          .select(
+            'taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, aeronave_id, fecha_vuelo, estado)',
+          )
+          .eq('vuelo.aeronave_id', id)
+          .neq('vuelo.estado', 'CANCELADO'),
+        this.supabase.service
+          .from('cobro_vuelo')
+          .select('monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado)')
+          .eq('vuelo.aeronave_id', id)
+          .neq('vuelo.estado', 'CANCELADO'),
+        this.supabase.service
+          .from('gasto')
+          .select('monto, moneda')
+          .eq('aeronave_id', id),
+      ]);
+    if (motorsRes.error) throw new Error(motorsRes.error.message);
+    if (tallerRes.error) throw new Error(tallerRes.error.message);
+    if (escalasRes.error) throw new Error(escalasRes.error.message);
+    if (cobrosRes.error) throw new Error(cobrosRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+
+    // Componentes con overhaul agotado (TBO).
+    const componentesVencidos = (motorsRes.data ?? [])
+      .map((m: Record<string, unknown>) => ({
+        posicion: m.posicion as string,
+        numero_serie: m.numero_serie as string,
+        restantes:
+          Number(m.tbo_horas) - (Number(m.horas_totales) - Number(m.turm)),
+      }))
+      .filter((m) => m.restantes <= 0);
+
+    const enTaller = (tallerRes.data ?? []).length > 0;
+
+    // Utilización: suma de horas (taco_llegada - taco_salida) y # de vuelos.
+    let horasTotal = 0;
+    let horasMes = 0;
+    let horasAnio = 0;
+    const vuelosTotal = new Set<string>();
+    const vuelosMes = new Set<string>();
+    const vuelosAnio = new Set<string>();
+    for (const e of (escalasRes.data ?? []) as Array<Record<string, unknown>>) {
+      if (e.taco_salida == null || e.taco_llegada == null) continue;
+      const h = Number(e.taco_llegada) - Number(e.taco_salida);
+      const v = e.vuelo as { id: string; fecha_vuelo: string | null };
+      horasTotal += h;
+      vuelosTotal.add(v.id);
+      if (v.fecha_vuelo) {
+        const f = new Date(v.fecha_vuelo).toISOString();
+        if (f >= startYear) {
+          horasAnio += h;
+          vuelosAnio.add(v.id);
+        }
+        if (f >= startMonth) {
+          horasMes += h;
+          vuelosMes.add(v.id);
+        }
+      }
+    }
+
+    // Finanzas por moneda: ingresos cobrados vs gastos.
+    const byMoneda = new Map<string, { ingresos: number; gastos: number }>();
+    const bump = (moneda: string, key: 'ingresos' | 'gastos', monto: number) => {
+      const cur = byMoneda.get(moneda) ?? { ingresos: 0, gastos: 0 };
+      cur[key] += monto;
+      byMoneda.set(moneda, cur);
+    };
+    for (const c of (cobrosRes.data ?? []) as Array<Record<string, unknown>>) {
+      bump(c.moneda as string, 'ingresos', Number(c.monto));
+    }
+    for (const g of (gastosRes.data ?? []) as Array<Record<string, unknown>>) {
+      bump(g.moneda as string, 'gastos', Number(g.monto));
+    }
+    const finanzas = [...byMoneda.entries()].map(([moneda, v]) => ({
+      moneda,
+      ingresos: v.ingresos,
+      gastos: v.gastos,
+      utilidad: v.ingresos - v.gastos,
+    }));
+
+    return {
+      airworthiness: {
+        apto:
+          blocking.length === 0 && !enTaller && componentesVencidos.length === 0,
+        documentos_vencidos: blocking,
+        en_taller: enTaller,
+        componentes_vencidos: componentesVencidos,
+      },
+      utilizacion: {
+        horas_total: Number(horasTotal.toFixed(1)),
+        horas_mes: Number(horasMes.toFixed(1)),
+        horas_anio: Number(horasAnio.toFixed(1)),
+        vuelos_total: vuelosTotal.size,
+        vuelos_mes: vuelosMes.size,
+        vuelos_anio: vuelosAnio.size,
+      },
+      finanzas,
+    };
+  }
 
   async list(filters: ListAeronavesQuery) {
     let query = this.supabase.service
