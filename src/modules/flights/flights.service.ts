@@ -104,7 +104,7 @@ export class FlightsService {
   async list(filters: ListFlightsQuery) {
     let q = this.supabase.service
       .from('vuelo')
-      .select(VUELO_COLS, { count: 'exact' })
+      .select(`${VUELO_COLS}, aeronave:aeronave_id(matricula)`, { count: 'exact' })
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .order('fecha_solicitud', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
@@ -119,8 +119,19 @@ export class FlightsService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
+    // Aplana la matrícula de la aeronave para el listado (móvil/portal).
+    const rows = (data ?? []).map((r) => {
+      const row = r as Record<string, unknown> & {
+        aeronave?: { matricula?: string } | { matricula?: string }[] | null;
+      };
+      const a = row.aeronave;
+      const matricula = Array.isArray(a) ? a[0]?.matricula : a?.matricula;
+      const { aeronave: _omit, ...rest } = row;
+      void _omit;
+      return { ...rest, aeronave_matricula: matricula ?? null };
+    });
     return {
-      data: data ?? [],
+      data: rows,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
