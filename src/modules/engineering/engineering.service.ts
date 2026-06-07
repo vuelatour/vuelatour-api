@@ -1,9 +1,19 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import type { CreateMantenimientoDto, CreateVencimientoDto } from './dto/engineering.dto';
+import type {
+  CreateMantenimientoDto,
+  CreateVencimientoDto,
+  EstadoMantenimiento,
+  UpdateMantenimientoDto,
+} from './dto/engineering.dto';
 
 const MANT_COLS =
-  'id, aeronave_id, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, costo_usd, proveedor, notas, created_at';
+  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, costo_usd, proveedor, notas, created_at';
+
+/** El campo legado `tipo` (NOT NULL) se mantiene en sync con el nuevo `estado`. */
+function tipoFromEstado(estado: EstadoMantenimiento): 'PROGRAMADO' | 'REALIZADO' {
+  return estado === 'COMPLETADO' ? 'REALIZADO' : 'PROGRAMADO';
+}
 
 const VENC_COLS =
   'id, aeronave_id, tipo_documento_id, motor_id, piloto_id, vence_por, fecha_vencimiento, horas_limite, umbral_alerta_dias, referencia, archivo_url, notas, created_at';
@@ -30,7 +40,9 @@ export class EngineeringService {
       .from('mantenimiento')
       .insert({
         aeronave_id: aeronaveId,
-        tipo: dto.tipo,
+        estado: dto.estado,
+        tipo: tipoFromEstado(dto.estado),
+        pais: dto.pais ?? null,
         descripcion: dto.descripcion,
         fecha_programada: dto.fecha_programada ?? null,
         fecha_realizada: dto.fecha_realizada ?? null,
@@ -43,6 +55,32 @@ export class EngineeringService {
       .select(MANT_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    return data;
+  }
+
+  /** Actualiza un servicio (incluye transicionar estado programado→en taller→completado). */
+  async updateMantenimiento(id: string, dto: UpdateMantenimientoDto) {
+    const patch: Record<string, unknown> = {};
+    if (dto.estado !== undefined) {
+      patch.estado = dto.estado;
+      patch.tipo = tipoFromEstado(dto.estado);
+    }
+    if (dto.descripcion !== undefined) patch.descripcion = dto.descripcion;
+    if (dto.pais !== undefined) patch.pais = dto.pais;
+    if (dto.fecha_programada !== undefined) patch.fecha_programada = dto.fecha_programada;
+    if (dto.fecha_realizada !== undefined) patch.fecha_realizada = dto.fecha_realizada;
+    if (dto.horas_aeronave !== undefined) patch.horas_aeronave = dto.horas_aeronave;
+    if (dto.costo_usd !== undefined) patch.costo_usd = dto.costo_usd;
+    if (dto.proveedor !== undefined) patch.proveedor = dto.proveedor;
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+
+    const query = this.supabase.service.from('mantenimiento');
+    const { data, error } =
+      Object.keys(patch).length === 0
+        ? await query.select(MANT_COLS).eq('id', id).maybeSingle()
+        : await query.update(patch).eq('id', id).select(MANT_COLS).maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Mantenimiento ${id} not found`);
     return data;
   }
 
@@ -110,9 +148,8 @@ export class EngineeringService {
 
     const { data: mantenimientos, error: mErr } = await this.supabase.service
       .from('mantenimiento')
-      .select('id, descripcion, fecha_programada, aeronave_id, aeronave(matricula)')
-      .eq('tipo', 'PROGRAMADO')
-      .is('fecha_realizada', null)
+      .select('id, descripcion, fecha_programada, estado, aeronave_id, aeronave(matricula)')
+      .neq('estado', 'COMPLETADO')
       .not('fecha_programada', 'is', null)
       .lte('fecha_programada', limite)
       .order('fecha_programada', { ascending: true });

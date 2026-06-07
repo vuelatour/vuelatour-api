@@ -12,15 +12,80 @@ import {
   Min,
 } from 'class-validator';
 
+export const ESTADOS_MANTENIMIENTO = ['PROGRAMADO', 'EN_TALLER', 'COMPLETADO'] as const;
+export type EstadoMantenimiento = (typeof ESTADOS_MANTENIMIENTO)[number];
+const PAISES_SERVICIO = ['MX', 'USA'] as const;
+
 export class CreateMantenimientoDto {
-  @ApiProperty({ enum: ['PROGRAMADO', 'REALIZADO'] })
-  @IsIn(['PROGRAMADO', 'REALIZADO'])
-  tipo!: 'PROGRAMADO' | 'REALIZADO';
+  @ApiProperty({
+    enum: ESTADOS_MANTENIMIENTO,
+    description: 'Ciclo del servicio: programado → en taller → completado',
+  })
+  @IsIn(ESTADOS_MANTENIMIENTO)
+  estado!: EstadoMantenimiento;
 
   @ApiProperty()
   @IsString()
   @MaxLength(500)
   descripcion!: string;
+
+  @ApiPropertyOptional({ enum: PAISES_SERVICIO, description: 'País del servicio (MX/USA)' })
+  @IsOptional()
+  @IsIn(PAISES_SERVICIO)
+  pais?: 'MX' | 'USA';
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD' })
+  @IsOptional()
+  @IsDateString()
+  fecha_programada?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD' })
+  @IsOptional()
+  @IsDateString()
+  fecha_realizada?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0)
+  horas_aeronave?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  costo_usd?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  proveedor?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}
+
+export class UpdateMantenimientoDto {
+  @ApiPropertyOptional({ enum: ESTADOS_MANTENIMIENTO })
+  @IsOptional()
+  @IsIn(ESTADOS_MANTENIMIENTO)
+  estado?: EstadoMantenimiento;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  descripcion?: string;
+
+  @ApiPropertyOptional({ enum: PAISES_SERVICIO })
+  @IsOptional()
+  @IsIn(PAISES_SERVICIO)
+  pais?: 'MX' | 'USA';
 
   @ApiPropertyOptional({ description: 'YYYY-MM-DD' })
   @IsOptional()

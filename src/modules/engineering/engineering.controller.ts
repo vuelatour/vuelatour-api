@@ -1,10 +1,23 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
-import { CreateMantenimientoDto, CreateVencimientoDto } from './dto/engineering.dto';
+import {
+  CreateMantenimientoDto,
+  CreateVencimientoDto,
+  UpdateMantenimientoDto,
+} from './dto/engineering.dto';
 import { EngineeringService } from './engineering.service';
 
 @ApiTags('Engineering')
@@ -30,6 +43,18 @@ export class EngineeringController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.engineering.createMantenimiento(id, dto, c.userId);
+  }
+
+  @Patch('maintenance/:mid')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
+  @ApiOperation({
+    summary: 'Actualiza/transiciona un servicio (programado → en taller → completado)',
+  })
+  updateMaintenance(
+    @Param('mid', ParseUUIDPipe) mid: string,
+    @Body() dto: UpdateMantenimientoDto,
+  ) {
+    return this.engineering.updateMantenimiento(mid, dto);
   }
 
   @Get('aircraft/:id/expirations')
