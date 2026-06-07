@@ -10,7 +10,7 @@ import {
 } from './dto/inventory.dto';
 
 const ITEM_COLS =
-  'id, nombre, numero_parte, categoria, stock_minimo, ubicacion, notas, activo, created_at, updated_at';
+  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, notas, activo, created_at, updated_at';
 const MOV_COLS =
   'id, item_id, tipo, cantidad, costo_unitario_usd, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
 
@@ -122,7 +122,7 @@ export class InventoryService {
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
     if (filters.q) {
       const term = `%${filters.q}%`;
-      q = q.or(`nombre.ilike.${term},numero_parte.ilike.${term}`);
+      q = q.or(`nombre.ilike.${term},numero_parte.ilike.${term},codigo.ilike.${term}`);
     }
 
     const { data: items, error, count } = await q;
@@ -206,6 +206,7 @@ export class InventoryService {
       .insert({
         nombre: dto.nombre,
         numero_parte: dto.numero_parte,
+        codigo: dto.codigo,
         categoria: dto.categoria,
         stock_minimo: dto.stock_minimo ?? 0,
         ubicacion: dto.ubicacion ?? 'Bodega Cancún',

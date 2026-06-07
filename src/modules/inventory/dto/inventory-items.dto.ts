@@ -64,6 +64,15 @@ export class CreateInventoryItemDto {
   @MaxLength(50)
   numero_parte?: string;
 
+  @ApiPropertyOptional({
+    description: 'SKU / código de barras interno (distinto del numero_parte)',
+    maxLength: 60,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  codigo?: string;
+
   @ApiProperty({
     description: 'Categoria libre (aceites, filtros, llantas...)',
     maxLength: 50,
