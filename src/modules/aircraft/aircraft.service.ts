@@ -20,12 +20,19 @@ import type {
   CreateAeronaveSeguroDto,
   UpdateAeronaveSeguroDto,
 } from './dto/upsert-aeronave-seguro.dto';
+import type {
+  CreateDiscrepanciaDto,
+  UpdateDiscrepanciaDto,
+} from './dto/upsert-aeronave-discrepancia.dto';
 
 const AERONAVE_COLS =
   'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, color_calendario, ubicacion_base, activa, notas, created_at, updated_at';
 
 const SEGURO_COLS =
   'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
+
+const DISCREPANCIA_COLS =
+  'id, aeronave_id, vuelo_id, descripcion, severidad, estado, reportado_por, fecha_reporte, resolucion, fecha_resolucion, resuelto_por, notas, created_at, updated_at';
 
 const IMAGEN_COLS =
   'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, size_bytes, content_type, created_at, updated_at';
@@ -207,8 +214,15 @@ export class AircraftService {
 
   async getSnapshot(id: string) {
     const aeronave = await this.findById(id);
-    const [motorsRes, propellersRes, ownersRes, reservesRes, imagenesRes, segurosRes] =
-      await Promise.all([
+    const [
+      motorsRes,
+      propellersRes,
+      ownersRes,
+      reservesRes,
+      imagenesRes,
+      segurosRes,
+      discrepanciasRes,
+    ] = await Promise.all([
         this.supabase.service
           .from('motor')
           .select(
@@ -244,6 +258,11 @@ export class AircraftService {
           .select(SEGURO_COLS)
           .eq('aeronave_id', id)
           .order('vigente_hasta', { ascending: false }),
+        this.supabase.service
+          .from('aeronave_discrepancia')
+          .select(DISCREPANCIA_COLS)
+          .eq('aeronave_id', id)
+          .order('fecha_reporte', { ascending: false }),
       ]);
     if (motorsRes.error) throw new Error(motorsRes.error.message);
     if (propellersRes.error) throw new Error(propellersRes.error.message);
@@ -251,6 +270,7 @@ export class AircraftService {
     if (reservesRes.error) throw new Error(reservesRes.error.message);
     if (imagenesRes.error) throw new Error(imagenesRes.error.message);
     if (segurosRes.error) throw new Error(segurosRes.error.message);
+    if (discrepanciasRes.error) throw new Error(discrepanciasRes.error.message);
 
     return {
       ...aeronave,
@@ -260,6 +280,7 @@ export class AircraftService {
       overhaul_reserves: reservesRes.data ?? [],
       imagenes: imagenesRes.data ?? [],
       seguros: segurosRes.data ?? [],
+      discrepancias: discrepanciasRes.data ?? [],
     };
   }
 
@@ -441,6 +462,85 @@ export class AircraftService {
       .from('aeronave_seguro')
       .delete()
       .eq('id', seguroId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
+  // ============ Discrepancias (squawks) ============
+
+  async listDiscrepancias(aeronaveId: string) {
+    await this.findById(aeronaveId);
+    const { data, error } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .select(DISCREPANCIA_COLS)
+      .eq('aeronave_id', aeronaveId)
+      .order('fecha_reporte', { ascending: false });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  async createDiscrepancia(aeronaveId: string, dto: CreateDiscrepanciaDto, userId: string) {
+    await this.findById(aeronaveId);
+    const estado = dto.estado ?? 'ABIERTA';
+    const { data, error } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .insert({
+        aeronave_id: aeronaveId,
+        vuelo_id: dto.vuelo_id ?? null,
+        descripcion: dto.descripcion,
+        severidad: dto.severidad ?? 'MEDIA',
+        estado,
+        reportado_por: userId,
+        fecha_reporte: dto.fecha_reporte ?? null,
+        resolucion: dto.resolucion ?? null,
+        fecha_resolucion:
+          estado === 'RESUELTA' ? (dto.fecha_resolucion ?? new Date().toISOString().slice(0, 10)) : null,
+        resuelto_por: estado === 'RESUELTA' ? userId : null,
+        notas: dto.notas ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(DISCREPANCIA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
+  async updateDiscrepancia(id: string, dto: UpdateDiscrepanciaDto, userId: string) {
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.descripcion !== undefined) patch.descripcion = dto.descripcion;
+    if (dto.severidad !== undefined) patch.severidad = dto.severidad;
+    if (dto.vuelo_id !== undefined) patch.vuelo_id = dto.vuelo_id;
+    if (dto.fecha_reporte !== undefined) patch.fecha_reporte = dto.fecha_reporte;
+    if (dto.resolucion !== undefined) patch.resolucion = dto.resolucion;
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+    if (dto.estado !== undefined) {
+      patch.estado = dto.estado;
+      // Al resolver, sella quién y cuándo (si no se especifica fecha).
+      if (dto.estado === 'RESUELTA') {
+        patch.resuelto_por = userId;
+        patch.fecha_resolucion =
+          dto.fecha_resolucion ?? new Date().toISOString().slice(0, 10);
+      }
+    }
+    if (dto.fecha_resolucion !== undefined) patch.fecha_resolucion = dto.fecha_resolucion;
+
+    const { data, error } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .update(patch)
+      .eq('id', id)
+      .select(DISCREPANCIA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Discrepancia ${id} not found`);
+    return data;
+  }
+
+  async deleteDiscrepancia(id: string) {
+    const { error } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .delete()
+      .eq('id', id);
     if (error) throw new Error(error.message);
     return { ok: true };
   }

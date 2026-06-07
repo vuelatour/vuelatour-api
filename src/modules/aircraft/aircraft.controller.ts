@@ -38,6 +38,10 @@ import {
   CreateAeronaveSeguroDto,
   UpdateAeronaveSeguroDto,
 } from './dto/upsert-aeronave-seguro.dto';
+import {
+  CreateDiscrepanciaDto,
+  UpdateDiscrepanciaDto,
+} from './dto/upsert-aeronave-discrepancia.dto';
 import { AircraftService } from './aircraft.service';
 
 @ApiTags('Aircraft')
@@ -199,6 +203,44 @@ export class AircraftController {
   @ApiOperation({ summary: 'Delete an insurance policy (ADMIN/COORDINADOR)' })
   deleteInsurance(@Param('seguroId', ParseUUIDPipe) seguroId: string) {
     return this.aircraft.deleteSeguro(seguroId);
+  }
+
+  // ============ Discrepancias (squawks) ============
+
+  @Get(':id/squawks')
+  @ApiOperation({ summary: 'List discrepancies/squawks for this aircraft' })
+  listSquawks(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.listDiscrepancias(id);
+  }
+
+  @Post(':id/squawks')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
+  @ApiOperation({ summary: 'Report a discrepancy/squawk (ADMIN/COORDINADOR/MECANICO)' })
+  createSquawk(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateDiscrepanciaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.createDiscrepancia(id, dto, current.userId);
+  }
+
+  @Patch('squawks/:squawkId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
+  @ApiOperation({ summary: 'Update/resolve a discrepancy (ADMIN/COORDINADOR/MECANICO)' })
+  updateSquawk(
+    @Param('squawkId', ParseUUIDPipe) squawkId: string,
+    @Body() dto: UpdateDiscrepanciaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.updateDiscrepancia(squawkId, dto, current.userId);
+  }
+
+  @Delete('squawks/:squawkId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete a discrepancy (ADMIN/COORDINADOR)' })
+  deleteSquawk(@Param('squawkId', ParseUUIDPipe) squawkId: string) {
+    return this.aircraft.deleteDiscrepancia(squawkId);
   }
 
   // ============ Overhaul reserves ============
