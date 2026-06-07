@@ -15,9 +15,16 @@ import type {
   CreateAeronaveImagenDto,
   UpdateAeronaveImagenDto,
 } from './dto/aeronave-imagen.dto';
+import type {
+  CreateAeronaveSeguroDto,
+  UpdateAeronaveSeguroDto,
+} from './dto/upsert-aeronave-seguro.dto';
 
 const AERONAVE_COLS =
   'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, color_calendario, ubicacion_base, activa, notas, created_at, updated_at';
+
+const SEGURO_COLS =
+  'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
 
 const IMAGEN_COLS =
   'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, size_bytes, content_type, created_at, updated_at';
@@ -67,7 +74,7 @@ export class AircraftService {
 
   async getSnapshot(id: string) {
     const aeronave = await this.findById(id);
-    const [motorsRes, propellersRes, ownersRes, reservesRes, imagenesRes] =
+    const [motorsRes, propellersRes, ownersRes, reservesRes, imagenesRes, segurosRes] =
       await Promise.all([
         this.supabase.service
           .from('motor')
@@ -99,12 +106,18 @@ export class AircraftService {
           .eq('aeronave_id', id)
           .order('orden', { ascending: true })
           .order('created_at', { ascending: true }),
+        this.supabase.service
+          .from('aeronave_seguro')
+          .select(SEGURO_COLS)
+          .eq('aeronave_id', id)
+          .order('vigente_hasta', { ascending: false }),
       ]);
     if (motorsRes.error) throw new Error(motorsRes.error.message);
     if (propellersRes.error) throw new Error(propellersRes.error.message);
     if (ownersRes.error) throw new Error(ownersRes.error.message);
     if (reservesRes.error) throw new Error(reservesRes.error.message);
     if (imagenesRes.error) throw new Error(imagenesRes.error.message);
+    if (segurosRes.error) throw new Error(segurosRes.error.message);
 
     return {
       ...aeronave,
@@ -113,6 +126,7 @@ export class AircraftService {
       owners: ownersRes.data ?? [],
       overhaul_reserves: reservesRes.data ?? [],
       imagenes: imagenesRes.data ?? [],
+      seguros: segurosRes.data ?? [],
     };
   }
 
@@ -225,6 +239,77 @@ export class AircraftService {
       { vigente_hasta: vigenteHasta },
       updatedBy,
     );
+  }
+
+  // ============ Seguros ============
+
+  async listSeguros(aeronaveId: string) {
+    await this.findById(aeronaveId);
+    const { data, error } = await this.supabase.service
+      .from('aeronave_seguro')
+      .select(SEGURO_COLS)
+      .eq('aeronave_id', aeronaveId)
+      .order('vigente_hasta', { ascending: false });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  async createSeguro(aeronaveId: string, dto: CreateAeronaveSeguroDto, userId: string) {
+    await this.findById(aeronaveId);
+    const { data, error } = await this.supabase.service
+      .from('aeronave_seguro')
+      .insert({
+        aeronave_id: aeronaveId,
+        aseguradora: dto.aseguradora,
+        num_poliza: dto.num_poliza,
+        cobertura: dto.cobertura ?? null,
+        suma_asegurada_usd: dto.suma_asegurada_usd ?? null,
+        prima_usd: dto.prima_usd ?? null,
+        vigente_desde: dto.vigente_desde.toISOString().slice(0, 10),
+        vigente_hasta: dto.vigente_hasta.toISOString().slice(0, 10),
+        archivo_url: dto.archivo_url ?? null,
+        notas: dto.notas ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(SEGURO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data;
+  }
+
+  async updateSeguro(seguroId: string, dto: UpdateAeronaveSeguroDto, userId: string) {
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.aseguradora !== undefined) patch.aseguradora = dto.aseguradora;
+    if (dto.num_poliza !== undefined) patch.num_poliza = dto.num_poliza;
+    if (dto.cobertura !== undefined) patch.cobertura = dto.cobertura;
+    if (dto.suma_asegurada_usd !== undefined) patch.suma_asegurada_usd = dto.suma_asegurada_usd;
+    if (dto.prima_usd !== undefined) patch.prima_usd = dto.prima_usd;
+    if (dto.vigente_desde !== undefined)
+      patch.vigente_desde = dto.vigente_desde.toISOString().slice(0, 10);
+    if (dto.vigente_hasta !== undefined)
+      patch.vigente_hasta = dto.vigente_hasta.toISOString().slice(0, 10);
+    if (dto.archivo_url !== undefined) patch.archivo_url = dto.archivo_url;
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+
+    const { data, error } = await this.supabase.service
+      .from('aeronave_seguro')
+      .update(patch)
+      .eq('id', seguroId)
+      .select(SEGURO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Seguro ${seguroId} not found`);
+    return data;
+  }
+
+  async deleteSeguro(seguroId: string) {
+    const { error } = await this.supabase.service
+      .from('aeronave_seguro')
+      .delete()
+      .eq('id', seguroId);
+    if (error) throw new Error(error.message);
+    return { ok: true };
   }
 
   async listOverhaulReserves(aeronaveId: string) {

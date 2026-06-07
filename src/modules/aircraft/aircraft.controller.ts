@@ -34,6 +34,10 @@ import {
   CreateAeronaveImagenDto,
   UpdateAeronaveImagenDto,
 } from './dto/aeronave-imagen.dto';
+import {
+  CreateAeronaveSeguroDto,
+  UpdateAeronaveSeguroDto,
+} from './dto/upsert-aeronave-seguro.dto';
 import { AircraftService } from './aircraft.service';
 
 @ApiTags('Aircraft')
@@ -149,6 +153,44 @@ export class AircraftController {
   ) {
     if (!current) throw new ForbiddenException();
     return this.aircraft.closeOwner(ownerId, new Date(), current.userId);
+  }
+
+  // ============ Seguros ============
+
+  @Get(':id/insurance')
+  @ApiOperation({ summary: 'List insurance policies for this aircraft' })
+  listInsurance(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.listSeguros(id);
+  }
+
+  @Post(':id/insurance')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Add an insurance policy (ADMIN/COORDINADOR)' })
+  createInsurance(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateAeronaveSeguroDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.createSeguro(id, dto, current.userId);
+  }
+
+  @Patch('insurance/:seguroId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Update an insurance policy (ADMIN/COORDINADOR)' })
+  updateInsurance(
+    @Param('seguroId', ParseUUIDPipe) seguroId: string,
+    @Body() dto: UpdateAeronaveSeguroDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.aircraft.updateSeguro(seguroId, dto, current.userId);
+  }
+
+  @Delete('insurance/:seguroId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Delete an insurance policy (ADMIN/COORDINADOR)' })
+  deleteInsurance(@Param('seguroId', ParseUUIDPipe) seguroId: string) {
+    return this.aircraft.deleteSeguro(seguroId);
   }
 
   // ============ Overhaul reserves ============
