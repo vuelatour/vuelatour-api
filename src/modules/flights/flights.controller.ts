@@ -18,10 +18,12 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CreateCobroDto } from './dto/cobros.dto';
 import {
+  AssignEscalaDto,
   CaptureTacoDto,
   CreateEscalaDto,
   TacoAiReadDto,
   UpdateEscalaDto,
+  UpdateEscalaPermisoDto,
 } from './dto/escalas.dto';
 import {
   AssignFlightDto,
@@ -198,6 +200,37 @@ export class FlightsController {
   ) {
     await this.flights.assertAccess(id, c);
     return this.flights.createEscala(id, dto, c.userId);
+  }
+
+  @Post(':id/legs/:legId/assign')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Asigna aeronave/piloto a UN tramo (ida o regreso por separado). El tramo de ida (orden=1) se espeja en el vuelo.',
+  })
+  assignLeg(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: AssignEscalaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.assignEscala(legId, dto, c.userId);
+  }
+
+  @Patch('legs/:legId/permiso')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
+  @ApiOperation({
+    summary: 'Actualiza el permiso de pista de un tramo (Admin/Coord. o el piloto asignado al tramo)',
+  })
+  async updateLegPermiso(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: UpdateEscalaPermisoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccessByLeg(legId, c);
+    return this.flights.updateEscalaPermiso(legId, dto.estado_permiso, {
+      userId: c.userId,
+      rol: c.rol,
+    });
   }
 
   @Patch('legs/:legId')

@@ -11,7 +11,8 @@ const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendie
 
 const VUELO_SELECT =
   'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, google_calendar_id, google_calendar_regreso_id, ' +
-  'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)';
+  'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), ' +
+  'escalas:escala(orden, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre))';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -39,6 +40,14 @@ interface VueloRow {
   aeronave: { matricula: string } | { matricula: string }[] | null;
   piloto: { nombre: string } | { nombre: string }[] | null;
   cliente: { nombre: string } | { nombre: string }[] | null;
+  escalas: Array<{
+    orden: number;
+    aeronave_id: string | null;
+    piloto_id: string | null;
+    estado_permiso: string | null;
+    aeronave: { matricula: string } | { matricula: string }[] | null;
+    piloto: { nombre: string } | { nombre: string }[] | null;
+  }> | null;
 }
 
 /**
@@ -241,16 +250,21 @@ export class CalendarSyncService implements OnModuleInit {
   }
 
   private buildEvent(v: VueloRow, tramo: 'ida' | 'regreso'): calendar_v3.Schema$Event {
-    const aeronave = unwrap(v.aeronave);
-    const piloto = unwrap(v.piloto);
+    const esRegreso = tramo === 'regreso';
+    // Asignación POR TRAMO: ida = escala orden 1, regreso = escala orden 2. Si el
+    // tramo aún no tiene escala (vuelo viejo/externo), cae a la asignación del vuelo.
+    const escala = (v.escalas ?? []).find((e) => e.orden === (esRegreso ? 2 : 1));
+    const aeronave = unwrap(escala?.aeronave ?? v.aeronave);
+    const piloto = unwrap(escala?.piloto ?? v.piloto);
     const cliente = unwrap(v.cliente);
 
     const aeronaveStr = v.es_externo
       ? (v.operador_externo ?? 'Externo')
       : (aeronave?.matricula ?? 'sin avión');
 
-    const permisoPendiente = v.estado_permiso === 'pendiente';
-    const esRegreso = tramo === 'regreso';
+    const permisoPendiente = escala
+      ? escala.estado_permiso === 'pendiente'
+      : v.estado_permiso === 'pendiente';
     // En el regreso se invierte la ruta y se usa la fecha de traslado final.
     const origen = esRegreso ? v.destino_iata : v.origen_iata;
     const destino = esRegreso ? v.origen_iata : v.destino_iata;

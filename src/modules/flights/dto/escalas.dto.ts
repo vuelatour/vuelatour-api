@@ -3,14 +3,17 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDate,
+  IsEnum,
   IsIn,
   IsInt,
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   Min,
 } from 'class-validator';
+import { EstadoPermiso } from './flights.dto';
 
 export class CreateEscalaDto {
   @ApiProperty({ minimum: 1 })
@@ -48,6 +51,31 @@ export class CreateEscalaDto {
 }
 
 export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
+
+/** Asignación de aeronave/piloto a UN tramo (ida o regreso por separado). */
+export class AssignEscalaDto {
+  @ApiPropertyOptional({ description: 'Aeronave asignada al tramo (solo si no es externo)' })
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string;
+
+  @ApiPropertyOptional({ description: 'Piloto asignado al tramo' })
+  @IsOptional()
+  @IsUUID()
+  piloto_id?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_salida_plan?: Date;
+}
+
+export class UpdateEscalaPermisoDto {
+  @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista del tramo' })
+  @IsEnum(EstadoPermiso)
+  estado_permiso!: EstadoPermiso;
+}
 
 export class TacoAiReadDto {
   @ApiProperty({ enum: ['salida', 'llegada'], description: '¿Qué lectura se está tomando?' })

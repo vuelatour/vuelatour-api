@@ -35,7 +35,7 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
+        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(orden, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
       )
       // Trae vuelos cuya IDA o cuyo REGRESO caiga en el rango (los redondos
       // pintan dos eventos: salida en fecha_vuelo y regreso en fecha_traslado_final).
@@ -96,81 +96,110 @@ export class CalendarService {
           | null;
         piloto: { nombre: string } | { nombre: string }[] | null;
         cliente: { nombre: string } | { nombre: string }[] | null;
+        escalas: Array<{
+          id: string;
+          orden: number;
+          aeronave_id: string | null;
+          piloto_id: string | null;
+          estado_permiso: string | null;
+          aeronave:
+            | { matricula: string; color_calendario: string | null }
+            | { matricula: string; color_calendario: string | null }[]
+            | null;
+          piloto: { nombre: string } | { nombre: string }[] | null;
+        }> | null;
       };
-      const aeronave = unwrap(v.aeronave);
-      const piloto = unwrap(v.piloto);
       const cliente = unwrap(v.cliente);
+      const escalaPorOrden = new Map((v.escalas ?? []).map((e) => [e.orden, e]));
 
-      const aeronaveStr = v.es_externo
-        ? (v.operador_externo ?? 'Externo')
-        : (aeronave?.matricula ?? 'sin avión');
-      const permisoPendiente = v.estado_permiso === 'pendiente';
-      // Vuelo propio confirmado pero aún no asignado del todo (le falta avión o piloto).
-      const sinAsignar =
-        v.estado === 'CONFIRMADO' &&
-        !v.es_externo &&
-        (!v.aeronave_id || !v.piloto_id);
-      // Prioridad de color: sin asignar (acción) > permiso pendiente (alerta) >
-      // externo > color de la aeronave.
-      const color = sinAsignar
-        ? SIN_ASIGNAR_COLOR
-        : permisoPendiente
-          ? PERMISO_PENDIENTE_COLOR
-          : v.es_externo
-            ? EXTERNAL_COLOR
-            : (aeronave?.color_calendario ?? '#9CA3AF');
+      // Construye un evento usando la asignación del TRAMO (escala), con respaldo
+      // en la asignación a nivel de vuelo cuando el tramo no exista todavía.
+      const buildEvent = (params: {
+        idSuffix: string;
+        escalaOrden: number;
+        fecha: string | null;
+        tramo: 'ida' | 'regreso';
+        origen: string;
+        destino: string;
+        prefijo?: string;
+      }): Record<string, unknown> | null => {
+        if (!inRange(params.fecha)) return null;
+        const escala = escalaPorOrden.get(params.escalaOrden);
+        const aeronaveId = escala?.aeronave_id ?? (escala ? null : v.aeronave_id);
+        const pilotoId = escala?.piloto_id ?? (escala ? null : v.piloto_id);
+        const aeronave = unwrap(escala?.aeronave ?? v.aeronave);
+        const piloto = unwrap(escala?.piloto ?? v.piloto);
+        const estadoPermiso = escala
+          ? (escala.estado_permiso ?? null)
+          : v.estado_permiso;
 
-      const base = {
-        folio: v.folio,
-        estado: v.estado,
-        estado_permiso: v.estado_permiso,
-        es_externo: v.es_externo,
-        sin_asignar: sinAsignar,
-        color,
-        cliente_id: v.cliente_id,
-        cliente_nombre: cliente?.nombre ?? null,
-        aeronave_id: v.aeronave_id,
-        aeronave_matricula: aeronave?.matricula ?? null,
-        operador_externo: v.operador_externo,
-        piloto_id: v.piloto_id,
-        piloto_nombre: piloto?.nombre ?? null,
-        pasajeros: v.pasajeros,
-        monto_total_usd: Number(v.monto_total_usd),
-        google_calendar_id: v.google_calendar_id,
+        const aeronaveStr = v.es_externo
+          ? (v.operador_externo ?? 'Externo')
+          : (aeronave?.matricula ?? 'sin avión');
+        const permisoPendiente = estadoPermiso === 'pendiente';
+        const sinAsignar =
+          v.estado === 'CONFIRMADO' && !v.es_externo && (!aeronaveId || !pilotoId);
+        const color = sinAsignar
+          ? SIN_ASIGNAR_COLOR
+          : permisoPendiente
+            ? PERMISO_PENDIENTE_COLOR
+            : v.es_externo
+              ? EXTERNAL_COLOR
+              : (aeronave?.color_calendario ?? '#9CA3AF');
+        const hora = horaOf(params.fecha);
+        return {
+          id: `${v.id}${params.idSuffix}`,
+          vuelo_id: v.id,
+          escala_id: escala?.id ?? null,
+          folio: v.folio,
+          estado: v.estado,
+          estado_permiso: estadoPermiso,
+          es_externo: v.es_externo,
+          sin_asignar: sinAsignar,
+          color,
+          cliente_id: v.cliente_id,
+          cliente_nombre: cliente?.nombre ?? null,
+          aeronave_id: aeronaveId,
+          aeronave_matricula: aeronave?.matricula ?? null,
+          operador_externo: v.operador_externo,
+          piloto_id: pilotoId,
+          piloto_nombre: piloto?.nombre ?? null,
+          pasajeros: v.pasajeros,
+          monto_total_usd: Number(v.monto_total_usd),
+          google_calendar_id: v.google_calendar_id,
+          fecha_vuelo: params.fecha,
+          hora,
+          tramo: params.tramo,
+          origen_iata: params.origen,
+          destino_iata: params.destino,
+          title: `${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
+        };
       };
 
       const out: Array<Record<string, unknown>> = [];
-
-      // IDA (en fecha_vuelo).
-      if (inRange(v.fecha_vuelo)) {
-        const hora = horaOf(v.fecha_vuelo);
-        out.push({
-          id: v.id,
-          ...base,
-          fecha_vuelo: v.fecha_vuelo,
-          hora,
-          tramo: 'ida',
-          origen_iata: v.origen_iata,
-          destino_iata: v.destino_iata,
-          title: `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
-        });
-      }
-
-      // REGRESO de vuelo redondo (en fecha_traslado_final, origen/destino invertidos).
-      if (v.tipo === 'REDONDO' && inRange(v.fecha_traslado_final)) {
-        const hora = horaOf(v.fecha_traslado_final);
-        out.push({
-          id: `${v.id}:regreso`,
-          ...base,
-          fecha_vuelo: v.fecha_traslado_final,
-          hora,
+      // IDA (orden 1, en fecha_vuelo).
+      const ida = buildEvent({
+        idSuffix: '',
+        escalaOrden: 1,
+        fecha: v.fecha_vuelo,
+        tramo: 'ida',
+        origen: v.origen_iata,
+        destino: v.destino_iata,
+      });
+      if (ida) out.push(ida);
+      // REGRESO de vuelo redondo (orden 2, en fecha_traslado_final, IATAs invertidos).
+      if (v.tipo === 'REDONDO') {
+        const regreso = buildEvent({
+          idSuffix: ':regreso',
+          escalaOrden: 2,
+          fecha: v.fecha_traslado_final,
           tramo: 'regreso',
-          origen_iata: v.destino_iata,
-          destino_iata: v.origen_iata,
-          title: `↩ Regreso · ${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.destino_iata}-${v.origen_iata} (${v.pasajeros} pax)`,
+          origen: v.destino_iata,
+          destino: v.origen_iata,
+          prefijo: '↩ Regreso · ',
         });
+        if (regreso) out.push(regreso);
       }
-
       return out;
     });
 

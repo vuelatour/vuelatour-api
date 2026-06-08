@@ -398,9 +398,65 @@ export class QuotesService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // REDONDO: crea los 2 tramos (ida + regreso) para asignarlos por separado.
+    await this.ensureRedondoEscalas(data!, userId);
     void this.calendar.syncFlight(vueloId);
     void this.sendConfirmationEmail(data!);
     return data!;
+  }
+
+  /**
+   * Crea los 2 tramos de un vuelo REDONDO (ida orden=1, regreso orden=2 con IATAs
+   * invertidos) para que ida y regreso se asignen por separado. Idempotente: si el
+   * vuelo ya tiene escalas (MULTIESCALA, o un REDONDO ya inicializado) no hace nada.
+   * El permiso de pista de cada tramo se deriva de aeropuerto.requiere_permiso.
+   */
+  private async ensureRedondoEscalas(
+    vuelo: Record<string, unknown>,
+    userId: string,
+  ): Promise<void> {
+    if (vuelo.tipo !== 'REDONDO') return;
+    const vueloId = vuelo.id as string;
+    const { count, error: cErr } = await this.supabase.service
+      .from('escala')
+      .select('id', { count: 'exact', head: true })
+      .eq('vuelo_id', vueloId);
+    if (cErr) throw new Error(cErr.message);
+    if ((count ?? 0) > 0) return;
+
+    const origen = vuelo.origen_iata as string;
+    const destino = vuelo.destino_iata as string;
+    const requierePermiso = await this.airports.anyRequiresPermit([origen, destino]);
+    const permiso = requierePermiso ? 'pendiente' : 'no_aplica';
+
+    const rows = [
+      {
+        vuelo_id: vueloId,
+        orden: 1,
+        origen_iata: origen,
+        destino_iata: destino,
+        aeronave_id: (vuelo.aeronave_id as string | null) ?? null,
+        piloto_id: (vuelo.piloto_id as string | null) ?? null,
+        estado_permiso: permiso,
+        fecha_salida_plan: (vuelo.fecha_vuelo as string | null) ?? null,
+        created_by: userId,
+        updated_by: userId,
+      },
+      {
+        vuelo_id: vueloId,
+        orden: 2,
+        origen_iata: destino,
+        destino_iata: origen,
+        aeronave_id: null,
+        piloto_id: null,
+        estado_permiso: permiso,
+        fecha_salida_plan: (vuelo.fecha_traslado_final as string | null) ?? null,
+        created_by: userId,
+        updated_by: userId,
+      },
+    ];
+    const { error } = await this.supabase.service.from('escala').insert(rows);
+    if (error) throw new Error(`No se pudieron crear los tramos del redondo: ${error.message}`);
   }
 
   /** Envía el correo de confirmación al cliente (best-effort). */

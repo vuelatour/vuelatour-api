@@ -21,6 +21,7 @@ import type {
   UpdateFlightDto,
 } from './dto/flights.dto';
 import type {
+  AssignEscalaDto,
   CaptureTacoDto,
   CreateEscalaDto,
   TacoAiReadDto,
@@ -31,8 +32,12 @@ import type { CreateCobroDto } from './dto/cobros.dto';
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
+// NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
+// como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
+// ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
+// independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -111,7 +116,20 @@ export class FlightsService {
 
     if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
-    if (filters.piloto_id) q = q.eq('piloto_id', filters.piloto_id);
+    if (filters.piloto_id) {
+      // Incluye vuelos donde el piloto está asignado al vuelo (ida) o a CUALQUIER
+      // tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
+      const { data: legVuelos } = await this.supabase.service
+        .from('escala')
+        .select('vuelo_id')
+        .eq('piloto_id', filters.piloto_id);
+      const ids = [
+        ...new Set((legVuelos ?? []).map((e) => e.vuelo_id as string)),
+      ];
+      q = ids.length
+        ? q.or(`piloto_id.eq.${filters.piloto_id},id.in.(${ids.join(',')})`)
+        : q.eq('piloto_id', filters.piloto_id);
+    }
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
     if (filters.desde) q = q.gte('fecha_vuelo', filters.desde.toISOString());
@@ -151,7 +169,11 @@ export class FlightsService {
 
   // ===== Aislamiento de pilotos (Tarea 15) =====
 
-  /** Un PILOTO solo puede operar/ver vuelos asignados a él. Otros roles no se restringen. */
+  /**
+   * Un PILOTO solo puede operar/ver vuelos asignados a él: al vuelo (ida) o a
+   * CUALQUIER tramo (p. ej. solo el regreso de un redondo). Otros roles no se
+   * restringen.
+   */
   async assertAccess(vueloId: string, current: AuthenticatedUser): Promise<void> {
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
@@ -161,7 +183,16 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
-    if (data.piloto_id !== current.userId) {
+    if (data.piloto_id === current.userId) return;
+    // ¿Asignado a algún tramo de este vuelo?
+    const { data: leg } = await this.supabase.service
+      .from('escala')
+      .select('id')
+      .eq('vuelo_id', vueloId)
+      .eq('piloto_id', current.userId)
+      .limit(1)
+      .maybeSingle();
+    if (!leg) {
       throw new ForbiddenException('No tienes acceso a este vuelo');
     }
   }
@@ -212,14 +243,21 @@ export class FlightsService {
       cliente: { nombre: string } | { nombre: string }[] | null;
     };
 
-    if (current.rol === Rol.PILOTO && v.piloto_id !== current.userId) {
-      throw new ForbiddenException('No puedes ver la cotización de un vuelo que no tienes asignado');
+    const escalas = await this.listEscalas(id);
+
+    // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida) o
+    // a cualquier tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
+    if (current.rol === Rol.PILOTO) {
+      const asignadoATramo = escalas.some((e) => e.piloto_id === current.userId);
+      if (v.piloto_id !== current.userId && !asignadoATramo) {
+        throw new ForbiddenException(
+          'No puedes ver la cotización de un vuelo que no tienes asignado',
+        );
+      }
     }
 
     const clienteRaw = v.cliente;
     const cliente = Array.isArray(clienteRaw) ? clienteRaw[0] : clienteRaw;
-
-    const escalas = await this.listEscalas(id);
 
     return {
       id: v.id,
@@ -238,6 +276,10 @@ export class FlightsService {
         orden: e.orden,
         origen_iata: e.origen_iata,
         destino_iata: e.destino_iata,
+        // Datos operativos por tramo (sin financieros) para que el piloto vea su tramo.
+        piloto_id: e.piloto_id ?? null,
+        estado_permiso: e.estado_permiso ?? null,
+        fecha_salida_plan: e.fecha_salida_plan ?? null,
       })),
     };
   }
@@ -261,6 +303,7 @@ export class FlightsService {
       this.listCobros(id),
       this.aeronaveMatricula((vuelo as { aeronave_id?: string | null }).aeronave_id),
     ]);
+    const escalasEnriquecidas = await this.enrichEscalasAssignment(escalas);
     const totalCobrado = cobros.reduce(
       (acc, c) => acc + Number(c.monto),
       0,
@@ -268,10 +311,53 @@ export class FlightsService {
     return {
       ...vuelo,
       aeronave_matricula: aeronaveMatricula,
-      escalas,
+      escalas: escalasEnriquecidas,
       cobros,
       total_cobrado: Math.round(totalCobrado * 100) / 100,
     };
+  }
+
+  /**
+   * Resuelve por lote matrícula de aeronave y nombre de piloto para cada tramo,
+   * para que el admin pueda mostrar la asignación por tramo (ida/regreso).
+   */
+  private async enrichEscalasAssignment(
+    escalas: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    if (escalas.length === 0) return escalas;
+    const aeronaveIds = [
+      ...new Set(escalas.map((e) => e.aeronave_id).filter(Boolean) as string[]),
+    ];
+    const pilotoIds = [
+      ...new Set(escalas.map((e) => e.piloto_id).filter(Boolean) as string[]),
+    ];
+    const [aeronaves, pilotos] = await Promise.all([
+      aeronaveIds.length
+        ? this.supabase.service
+            .from('aeronave')
+            .select('id, matricula')
+            .in('id', aeronaveIds)
+        : Promise.resolve({ data: [] as { id: string; matricula: string }[] }),
+      pilotoIds.length
+        ? this.supabase.service
+            .from('usuario')
+            .select('id, nombre')
+            .in('id', pilotoIds)
+        : Promise.resolve({ data: [] as { id: string; nombre: string }[] }),
+    ]);
+    const matriculaPorId = new Map(
+      (aeronaves.data ?? []).map((a) => [a.id, a.matricula]),
+    );
+    const nombrePorId = new Map((pilotos.data ?? []).map((p) => [p.id, p.nombre]));
+    return escalas.map((e) => ({
+      ...e,
+      aeronave_matricula: e.aeronave_id
+        ? (matriculaPorId.get(e.aeronave_id as string) ?? null)
+        : null,
+      piloto_nombre: e.piloto_id
+        ? (nombrePorId.get(e.piloto_id as string) ?? null)
+        : null,
+    }));
   }
 
   async update(id: string, dto: UpdateFlightDto, updatedBy: string) {
@@ -355,6 +441,8 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Flight ${id} not found`);
+    // Espejo: el tramo de ida (orden=1) refleja el permiso del vuelo.
+    await this.mirrorVueloToIdaEscala(id, { estado_permiso: estadoPermiso });
     void this.calendar.syncFlight(id);
     if (estadoPermiso === 'emitido' && current.estado_permiso !== 'emitido') {
       const payload = {
@@ -462,13 +550,16 @@ export class FlightsService {
       if (ids.length) {
         const { data: escalas } = await this.supabase.service
           .from('escala')
-          .select('vuelo_id, taco_salida, taco_llegada')
+          .select('vuelo_id, piloto_id, taco_salida, taco_llegada')
           .in('vuelo_id', ids);
         for (const e of escalas ?? []) {
           const ts = Number(e.taco_salida);
           const tl = Number(e.taco_llegada);
           if (!Number.isFinite(ts) || !Number.isFinite(tl) || tl <= ts) continue;
-          const pid = pilotoPorVuelo.get(e.vuelo_id as string);
+          // Atribuye las horas al piloto del tramo (ida/regreso pueden diferir);
+          // si el tramo no tiene piloto propio, usa el del vuelo.
+          const pid =
+            (e.piloto_id as string | null) ?? pilotoPorVuelo.get(e.vuelo_id as string);
           if (!pid) continue;
           horas.set(pid, (horas.get(pid) ?? 0) + (tl - ts));
         }
@@ -511,29 +602,11 @@ export class FlightsService {
       );
     }
 
-    // Doc 4.3: no se asigna un avión o piloto con documento crítico vencido.
-    const objetivos: { aeronaveId?: string; pilotoId?: string } = {};
-    if (dto.aeronave_id) objetivos.aeronaveId = dto.aeronave_id;
-    if (asignandoPiloto) objetivos.pilotoId = dto.piloto_id!;
-    if (objetivos.aeronaveId || objetivos.pilotoId) {
-      const bloqueos =
-        await this.expirations.findBlockingExpirations(objetivos);
-      if (bloqueos.length > 0) {
-        const detalle = bloqueos
-          .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
-          .join(', ');
-        throw new ConflictException(
-          `No se puede asignar: documento(s) crítico(s) vencido(s): ${detalle}`,
-        );
-      }
-    }
-
-    // Doc 4.3: un avión "no disponible, en mantenimiento" no se puede asignar.
-    if (dto.aeronave_id && (await this.aircraftEnTaller(dto.aeronave_id))) {
-      throw new ConflictException(
-        'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
-      );
-    }
+    // Doc 4.3: no se asigna avión/piloto con documento crítico vencido ni avión en taller.
+    await this.validateAssignTargets({
+      aeronaveId: dto.aeronave_id,
+      pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+    });
 
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
@@ -555,11 +628,212 @@ export class FlightsService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+    // Espejo: el tramo de ida (orden=1) refleja la asignación del vuelo.
+    await this.mirrorVueloToIdaEscala(id, {
+      aeronave_id: dto.aeronave_id,
+      piloto_id: dto.piloto_id,
+      fecha_salida_plan:
+        dto.fecha_vuelo !== undefined ? dto.fecha_vuelo.toISOString() : undefined,
+    });
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
     }
     return data!;
+  }
+
+  /**
+   * Valida que un avión/piloto pueda asignarse (doc 4.3): sin documento crítico
+   * vencido y sin la aeronave en taller. Reutilizable por vuelo y por tramo.
+   */
+  private async validateAssignTargets(targets: {
+    aeronaveId?: string | null;
+    pilotoId?: string | null;
+  }): Promise<void> {
+    const objetivos: { aeronaveId?: string; pilotoId?: string } = {};
+    if (targets.aeronaveId) objetivos.aeronaveId = targets.aeronaveId;
+    if (targets.pilotoId) objetivos.pilotoId = targets.pilotoId;
+    if (objetivos.aeronaveId || objetivos.pilotoId) {
+      const bloqueos = await this.expirations.findBlockingExpirations(objetivos);
+      if (bloqueos.length > 0) {
+        const detalle = bloqueos
+          .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
+          .join(', ');
+        throw new ConflictException(
+          `No se puede asignar: documento(s) crítico(s) vencido(s): ${detalle}`,
+        );
+      }
+    }
+    if (targets.aeronaveId && (await this.aircraftEnTaller(targets.aeronaveId))) {
+      throw new ConflictException(
+        'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
+      );
+    }
+  }
+
+  /**
+   * Sincroniza el tramo de ida (orden=1) con la asignación del vuelo. Best-effort:
+   * si el vuelo no tiene escalas (p. ej. externo), no hace nada. Solo escribe los
+   * campos presentes en `fields`.
+   */
+  private async mirrorVueloToIdaEscala(
+    vueloId: string,
+    fields: {
+      aeronave_id?: string | null;
+      piloto_id?: string | null;
+      estado_permiso?: 'no_aplica' | 'pendiente' | 'emitido';
+      fecha_salida_plan?: string | null;
+    },
+  ): Promise<void> {
+    const patch: Record<string, unknown> = {};
+    if (fields.aeronave_id !== undefined) patch.aeronave_id = fields.aeronave_id;
+    if (fields.piloto_id !== undefined) patch.piloto_id = fields.piloto_id;
+    if (fields.estado_permiso !== undefined) patch.estado_permiso = fields.estado_permiso;
+    if (fields.fecha_salida_plan !== undefined)
+      patch.fecha_salida_plan = fields.fecha_salida_plan;
+    if (Object.keys(patch).length === 0) return;
+    const { error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('vuelo_id', vueloId)
+      .eq('orden', 1);
+    if (error) this.logger.warn(`No se pudo espejar la ida del vuelo ${vueloId}: ${error.message}`);
+  }
+
+  /**
+   * Asigna aeronave/piloto a UN TRAMO (escala) — permite ida y regreso con avión y
+   * piloto distintos. Misma validación de documentos/taller que el vuelo. Si el
+   * tramo es la ida (orden=1) espeja la asignación en el vuelo (compat).
+   */
+  async assignEscala(legId: string, dto: AssignEscalaDto, updatedBy: string) {
+    const { data: escala, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select('id, vuelo_id, orden, aeronave_id, piloto_id')
+      .eq('id', legId)
+      .maybeSingle();
+    if (escErr) throw new Error(escErr.message);
+    if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
+
+    const vuelo = await this.findById(escala.vuelo_id as string);
+    if (vuelo.estado !== 'COTIZADO' && vuelo.estado !== 'CONFIRMADO') {
+      throw new ConflictException(
+        `Solo se asigna en estado COTIZADO o CONFIRMADO. Actual: ${vuelo.estado}`,
+      );
+    }
+    if (vuelo.es_externo && dto.aeronave_id) {
+      throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
+    }
+
+    const asignandoPiloto =
+      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+    if (asignandoPiloto && vuelo.estado !== 'CONFIRMADO') {
+      throw new ConflictException(
+        'Debes confirmar la cotización antes de asignar un piloto',
+      );
+    }
+
+    await this.validateAssignTargets({
+      aeronaveId: dto.aeronave_id,
+      pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+    });
+
+    const patch: Record<string, unknown> = { updated_by: updatedBy };
+    if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
+    if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
+    if (dto.fecha_salida_plan !== undefined)
+      patch.fecha_salida_plan = dto.fecha_salida_plan.toISOString();
+    if (Object.keys(patch).length === 1) {
+      throw new BadRequestException('Empty assign payload');
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', legId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503')
+        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+      throw new Error(error.message);
+    }
+
+    // Si es la ida, espeja al vuelo (compat con lectores vuelo-level).
+    if (escala.orden === 1) {
+      const vueloPatch: Record<string, unknown> = { updated_by: updatedBy };
+      if (dto.aeronave_id !== undefined) vueloPatch.aeronave_id = dto.aeronave_id;
+      if (dto.piloto_id !== undefined) vueloPatch.piloto_id = dto.piloto_id;
+      if (dto.fecha_salida_plan !== undefined)
+        vueloPatch.fecha_vuelo = dto.fecha_salida_plan.toISOString();
+      await this.supabase.service
+        .from('vuelo')
+        .update(vueloPatch)
+        .eq('id', escala.vuelo_id as string);
+    }
+
+    void this.calendar.syncFlight(escala.vuelo_id as string);
+    if (asignandoPiloto && dto.piloto_id !== escala.piloto_id) {
+      void this.notifyPilotAssigned(dto.piloto_id!, {
+        ...vuelo,
+        origen_iata: (data as { origen_iata?: string }).origen_iata ?? vuelo.origen_iata,
+        destino_iata: (data as { destino_iata?: string }).destino_iata ?? vuelo.destino_iata,
+      });
+    }
+    return data!;
+  }
+
+  /**
+   * Actualiza el permiso de pista de UN TRAMO. Admin/Coordinador o el piloto
+   * asignado a ese tramo. Si es la ida (orden=1) espeja en el vuelo. Al pasar a
+   * "emitido" avisa a Admin/Coordinador.
+   */
+  async updateEscalaPermiso(
+    legId: string,
+    estadoPermiso: 'no_aplica' | 'pendiente' | 'emitido',
+    user: { userId: string; rol: Rol },
+  ) {
+    const { data: escala, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select('id, vuelo_id, orden, piloto_id, estado_permiso, origen_iata, destino_iata')
+      .eq('id', legId)
+      .maybeSingle();
+    if (escErr) throw new Error(escErr.message);
+    if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
+    if (user.rol === Rol.PILOTO && escala.piloto_id !== user.userId) {
+      throw new ForbiddenException(
+        'Solo el piloto asignado puede actualizar el permiso de este tramo',
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update({ estado_permiso: estadoPermiso, updated_by: user.userId })
+      .eq('id', legId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Escala ${legId} not found`);
+
+    if (escala.orden === 1) {
+      await this.supabase.service
+        .from('vuelo')
+        .update({ estado_permiso: estadoPermiso, updated_by: user.userId })
+        .eq('id', escala.vuelo_id as string);
+    }
+
+    void this.calendar.syncFlight(escala.vuelo_id as string);
+    if (estadoPermiso === 'emitido' && escala.estado_permiso !== 'emitido') {
+      const vuelo = await this.findById(escala.vuelo_id as string);
+      const payload = {
+        tipo: 'permiso_emitido',
+        titulo: 'Permiso de pista emitido',
+        cuerpo: `${escala.origen_iata as string} → ${escala.destino_iata as string} · folio #${vuelo.folio}`,
+        data: { vuelo_id: escala.vuelo_id, folio: vuelo.folio },
+        link: `/admin/flights/${escala.vuelo_id as string}`,
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, payload, user.userId);
+      void this.notifications.notifyRole(Rol.COORDINADOR, payload, user.userId);
+    }
+    return data;
   }
 
   async start(id: string, updatedBy: string) {
