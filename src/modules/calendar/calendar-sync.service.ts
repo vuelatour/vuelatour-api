@@ -137,6 +137,28 @@ export class CalendarSyncService implements OnModuleInit {
     }
   }
 
+  /**
+   * Re-sincroniza todos los vuelos redondos no cancelados (para que su tramo de
+   * regreso se cree/actualice en Google Calendar). Secuencial para no saturar la
+   * API de Calendar. Devuelve cuántos se procesaron.
+   */
+  async resyncRedondos(): Promise<{ enabled: boolean; total: number }> {
+    if (!this.enabled || !this.calendar) return { enabled: false, total: 0 };
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id')
+      .eq('tipo', 'REDONDO')
+      .neq('estado', 'CANCELADO')
+      .not('fecha_traslado_final', 'is', null);
+    if (error) throw new Error(error.message);
+    const ids = (data ?? []).map((r) => (r as { id: string }).id);
+    for (const id of ids) {
+      await this.syncFlight(id);
+    }
+    this.logger.log(`resyncRedondos: ${ids.length} vuelos redondos re-sincronizados.`);
+    return { enabled: true, total: ids.length };
+  }
+
   /** Crea o actualiza el evento de un tramo (ida/regreso) y devuelve su id. */
   private async upsertEvent(
     v: VueloRow,

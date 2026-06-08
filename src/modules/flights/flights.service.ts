@@ -242,11 +242,24 @@ export class FlightsService {
     };
   }
 
+  private async aeronaveMatricula(
+    aeronaveId: string | null | undefined,
+  ): Promise<string | null> {
+    if (!aeronaveId) return null;
+    const { data } = await this.supabase.service
+      .from('aeronave')
+      .select('matricula')
+      .eq('id', aeronaveId)
+      .maybeSingle();
+    return (data as { matricula?: string } | null)?.matricula ?? null;
+  }
+
   async snapshot(id: string) {
     const vuelo = await this.findById(id);
-    const [escalas, cobros] = await Promise.all([
+    const [escalas, cobros, aeronaveMatricula] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
+      this.aeronaveMatricula((vuelo as { aeronave_id?: string | null }).aeronave_id),
     ]);
     const totalCobrado = cobros.reduce(
       (acc, c) => acc + Number(c.monto),
@@ -254,6 +267,7 @@ export class FlightsService {
     );
     return {
       ...vuelo,
+      aeronave_matricula: aeronaveMatricula,
       escalas,
       cobros,
       total_cobrado: Math.round(totalCobrado * 100) / 100,
