@@ -35,10 +35,14 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
+        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
       )
-      .gte('fecha_vuelo', from.toISOString())
-      .lte('fecha_vuelo', to.toISOString())
+      // Trae vuelos cuya IDA o cuyo REGRESO caiga en el rango (los redondos
+      // pintan dos eventos: salida en fecha_vuelo y regreso en fecha_traslado_final).
+      .or(
+        `and(fecha_vuelo.gte.${from.toISOString()},fecha_vuelo.lte.${to.toISOString()}),` +
+          `and(fecha_traslado_final.gte.${from.toISOString()},fecha_traslado_final.lte.${to.toISOString()})`,
+      )
       .order('fecha_vuelo', { ascending: true });
 
     if (!q.incluir_cancelados) {
@@ -51,11 +55,29 @@ export class CalendarService {
     const { data, error } = await query;
     if (error) throw new Error(error.message);
 
-    const events = (data ?? []).map((row) => {
+    const fromMs = from.getTime();
+    const toMs = to.getTime();
+    const inRange = (iso: string | null): boolean => {
+      if (!iso) return false;
+      const t = new Date(iso).getTime();
+      return !Number.isNaN(t) && t >= fromMs && t <= toMs;
+    };
+    const horaOf = (iso: string | null): string | null =>
+      iso
+        ? new Date(iso).toLocaleTimeString('es-MX', {
+            hour: '2-digit',
+            minute: '2-digit',
+            timeZone: 'America/Cancun',
+          })
+        : null;
+
+    const events = (data ?? []).flatMap((row) => {
       const v = row as unknown as {
         id: string;
         folio: number;
         fecha_vuelo: string | null;
+        fecha_traslado_final: string | null;
+        tipo: string | null;
         estado: string;
         es_externo: boolean;
         origen_iata: string;
@@ -97,26 +119,13 @@ export class CalendarService {
           : v.es_externo
             ? EXTERNAL_COLOR
             : (aeronave?.color_calendario ?? '#9CA3AF');
-      // Hora junto al título para comparar disponibilidad de un vistazo.
-      const hora = v.fecha_vuelo
-        ? new Date(v.fecha_vuelo).toLocaleTimeString('es-MX', {
-            hour: '2-digit',
-            minute: '2-digit',
-            timeZone: 'America/Cancun',
-          })
-        : null;
-      const title = `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`;
 
-      return {
-        id: v.id,
+      const base = {
         folio: v.folio,
-        fecha_vuelo: v.fecha_vuelo,
-        hora,
         estado: v.estado,
         estado_permiso: v.estado_permiso,
         es_externo: v.es_externo,
         sin_asignar: sinAsignar,
-        title,
         color,
         cliente_id: v.cliente_id,
         cliente_nombre: cliente?.nombre ?? null,
@@ -125,12 +134,44 @@ export class CalendarService {
         operador_externo: v.operador_externo,
         piloto_id: v.piloto_id,
         piloto_nombre: piloto?.nombre ?? null,
-        origen_iata: v.origen_iata,
-        destino_iata: v.destino_iata,
         pasajeros: v.pasajeros,
         monto_total_usd: Number(v.monto_total_usd),
         google_calendar_id: v.google_calendar_id,
       };
+
+      const out: Array<Record<string, unknown>> = [];
+
+      // IDA (en fecha_vuelo).
+      if (inRange(v.fecha_vuelo)) {
+        const hora = horaOf(v.fecha_vuelo);
+        out.push({
+          id: v.id,
+          ...base,
+          fecha_vuelo: v.fecha_vuelo,
+          hora,
+          tramo: 'ida',
+          origen_iata: v.origen_iata,
+          destino_iata: v.destino_iata,
+          title: `${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.origen_iata}-${v.destino_iata} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
+        });
+      }
+
+      // REGRESO de vuelo redondo (en fecha_traslado_final, origen/destino invertidos).
+      if (v.tipo === 'REDONDO' && inRange(v.fecha_traslado_final)) {
+        const hora = horaOf(v.fecha_traslado_final);
+        out.push({
+          id: `${v.id}:regreso`,
+          ...base,
+          fecha_vuelo: v.fecha_traslado_final,
+          hora,
+          tramo: 'regreso',
+          origen_iata: v.destino_iata,
+          destino_iata: v.origen_iata,
+          title: `↩ Regreso · ${hora ? `${hora} · ` : ''}${aeronaveStr} ${v.destino_iata}-${v.origen_iata} (${v.pasajeros} pax)`,
+        });
+      }
+
+      return out;
     });
 
     return {
