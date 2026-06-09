@@ -56,6 +56,8 @@ export const envSchema = z.object({
   RESEND_FROM: z
     .string()
     .default('Vuelatour Notificaciones <notificaciones@notify.vuelatour.com>'),
+  // URL pública del panel admin (para enlaces en correos, p. ej. invitación).
+  APP_PUBLIC_URL: z.string().default('https://vuelatour-next.vercel.app'),
 
   // ===== pyservices (IA / visión) =====
   // Base URL del microservicio FastAPI. Vacío = visión por IA deshabilitada

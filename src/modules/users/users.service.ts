@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { EmailService } from '../notifications/email.service';
 import type { CreateUsuarioDto } from './dto/create-usuario.dto';
 import type { ListUsuariosQuery } from './dto/list-usuarios.query';
 import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
@@ -26,7 +27,10 @@ export interface UsuarioRow {
 
 @Injectable()
 export class UsersService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly email: EmailService,
+  ) {}
 
   async list(filters: ListUsuariosQuery) {
     let query = this.supabase.service
@@ -113,7 +117,34 @@ export class UsersService {
       }
       throw new Error(`Failed to create usuario: ${error.message}`);
     }
-    return data as UsuarioRow;
+    const usuario = data as UsuarioRow;
+    // Aviso de invitación por correo (best-effort, no bloquea la creación).
+    void this.email.sendUserInvitation({
+      to: usuario.email,
+      nombre: usuario.nombre,
+      rol: usuario.rol,
+    });
+    return usuario;
+  }
+
+  /**
+   * Reenvía el correo de invitación/acceso a un usuario ya existente. Devuelve
+   * si el correo se envió (false si Resend está deshabilitado o falló).
+   */
+  async resendInvitation(id: string): Promise<{ ok: true; sent: boolean; email: string }> {
+    const user = await this.findById(id);
+    if (user.estado === 'INACTIVO') {
+      throw new BadRequestException(
+        'El usuario está inactivo; reactívalo antes de reenviar la invitación.',
+      );
+    }
+    const sent = await this.email.sendUserInvitation({
+      to: user.email,
+      nombre: user.nombre,
+      rol: user.rol,
+      reenvio: true,
+    });
+    return { ok: true, sent, email: user.email };
   }
 
   async update(id: string, patch: UpdateUsuarioDto, updatedBy: string): Promise<UsuarioRow> {

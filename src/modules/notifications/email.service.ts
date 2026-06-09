@@ -24,28 +24,118 @@ export interface PilotAssignmentData {
   fechaVuelo: string | null;
 }
 
+export interface UserInvitationData {
+  to: string;
+  nombre: string;
+  rol: string;
+  /** True si es un reenvío (cambia el asunto/copy). */
+  reenvio?: boolean;
+}
+
 /**
  * Envío de correos vía Resend. Best-effort: si falla (key ausente, dominio sin
  * verificar, rate limit) se loguea y NO se propaga el error, para no romper la
  * operación que disparó el correo (ej. confirmar una cotización).
  */
+const ROL_LABELS: Record<string, string> = {
+  ADMIN: 'Administrador',
+  COORDINADOR: 'Coordinador',
+  ANALISTA: 'Analista',
+  FACTURACION: 'Facturación',
+  PILOTO: 'Piloto',
+  SOCIO: 'Socio',
+  MECANICO: 'Mecánico',
+};
+
 @Injectable()
 export class EmailService implements OnModuleInit {
   private readonly logger = new Logger(EmailService.name);
   private resend: Resend | null = null;
   private from = '';
+  private appUrl = '';
 
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 
   onModuleInit() {
     const apiKey = this.config.get('RESEND_API_KEY', { infer: true });
     this.from = this.config.get('RESEND_FROM', { infer: true });
+    this.appUrl = this.config.get('APP_PUBLIC_URL', { infer: true });
     if (!apiKey) {
       this.logger.log('Resend disabled (RESEND_API_KEY vacío) — correos no se envían');
       return;
     }
     this.resend = new Resend(apiKey);
     this.logger.log(`Email (Resend) activo · from: ${this.from}`);
+  }
+
+  /** ¿Resend está configurado? (para que el caller informe si no se envió). */
+  get enabled(): boolean {
+    return !!this.resend;
+  }
+
+  /**
+   * Invitación de acceso a la plataforma. El usuario ya quedó pre-autorizado en
+   * la BD; este correo le avisa y lo manda a iniciar sesión con su correo de
+   * Google. Devuelve true si el correo se envió correctamente.
+   */
+  async sendUserInvitation(data: UserInvitationData): Promise<boolean> {
+    if (!this.resend) {
+      this.logger.warn('sendUserInvitation: Resend deshabilitado, no se envía invitación');
+      return false;
+    }
+    if (!data.to) {
+      this.logger.warn('sendUserInvitation: usuario sin email');
+      return false;
+    }
+    const rolLabel = ROL_LABELS[data.rol] ?? data.rol;
+    const loginUrl = `${this.appUrl.replace(/\/$/, '')}/login`;
+    const subject = data.reenvio
+      ? 'Recordatorio: tu acceso a VuelaTour'
+      : 'Te invitaron a VuelaTour';
+    try {
+      const { error } = await this.resend.emails.send({
+        from: this.from,
+        to: data.to,
+        subject,
+        html: `
+<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;color:#1d1d1d">
+  <div style="background:#102a43;padding:24px;border-radius:12px 12px 0 0">
+    <h1 style="color:#fff;margin:0;font-size:20px;font-weight:700">VuelaTour</h1>
+    <p style="color:#9fb3c8;margin:4px 0 0;font-size:13px">Aero Charter Cancún</p>
+  </div>
+  <div style="border:1px solid #e5e5e5;border-top:none;border-radius:0 0 12px 12px;padding:24px">
+    <p style="font-size:15px">Hola <strong>${data.nombre}</strong>,</p>
+    <p style="font-size:15px">Tienes acceso a la plataforma de VuelaTour con el rol de <strong>${rolLabel}</strong>.</p>
+    <p style="font-size:15px">Inicia sesión con este mismo correo (<strong>${data.to}</strong>), que ya quedó autorizado. Puedes entrar con tu cuenta de Google o con la contraseña que te compartan:</p>
+    <div style="text-align:center;margin:24px 0">
+      <a href="${loginUrl}" style="display:inline-block;background:#dc2626;color:#fff;text-decoration:none;font-weight:700;font-size:15px;padding:12px 28px;border-radius:10px">Iniciar sesión</a>
+    </div>
+    <p style="font-size:13px;color:#6b7280">Si el botón no funciona, copia y pega esta dirección:<br><span style="color:#102a43">${loginUrl}</span></p>
+    <p style="font-size:13px;color:#6b7280;margin-top:24px">Si crees que recibiste este correo por error, ignóralo.</p>
+  </div>
+</div>`.trim(),
+        text: [
+          `Hola ${data.nombre},`,
+          '',
+          `Tienes acceso a la plataforma de VuelaTour con el rol de ${rolLabel}.`,
+          `Inicia sesión con este mismo correo (${data.to}) — con Google o la contraseña que te compartan:`,
+          loginUrl,
+          '',
+          'Si crees que recibiste este correo por error, ignóralo.',
+        ].join('\n'),
+      });
+      if (error) {
+        this.logger.error(`Resend error (invitación ${data.to}): ${JSON.stringify(error)}`);
+        return false;
+      }
+      this.logger.log(`Invitación enviada a ${data.to}`);
+      return true;
+    } catch (err) {
+      this.logger.error(
+        `sendUserInvitation(${data.to}) falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
   }
 
   async sendFlightConfirmation(data: FlightConfirmationData): Promise<void> {

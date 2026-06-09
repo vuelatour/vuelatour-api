@@ -86,6 +86,17 @@ export class UsersController {
     return this.users.resetPassword(id, dto.password, current.userId);
   }
 
+  @Post(':id/resend-invitation')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Reenvía por correo (Resend) la invitación/aviso de acceso al usuario. Devuelve sent=false si Resend está deshabilitado.',
+  })
+  resendInvitation(@Param('id', ParseUUIDPipe) id: string) {
+    return this.users.resendInvitation(id);
+  }
+
   @Delete(':id')
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
