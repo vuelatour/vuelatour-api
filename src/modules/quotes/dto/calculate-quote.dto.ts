@@ -34,6 +34,11 @@ export enum TipoVuelo {
   MULTIESCALA = 'MULTIESCALA',
 }
 
+export enum TipoParada {
+  NORMAL = 'NORMAL',
+  SERVICIO = 'SERVICIO',
+}
+
 export class EscalaInputDto {
   @ApiProperty({ description: 'IATA origen del tramo', example: 'CUN' })
   @IsString()
@@ -50,6 +55,42 @@ export class EscalaInputDto {
   @IsNumber()
   @Min(0.01)
   millas_nauticas!: number;
+
+  // ---- Detalle por tramo (opcional; defaults en el motor) ----
+  @ApiPropertyOptional({ description: 'Pax de este tramo (TUAS por tramo). Si null usa los pax globales.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pasajeros?: number;
+
+  @ApiPropertyOptional({ description: 'Tramo ferry (vacío): cobra tiempo+calzos pero 0 pax / sin TUAS.' })
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
+
+  @ApiPropertyOptional({ description: 'Marca pernocta en este tramo (suma viáticos).' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_pernocta?: boolean;
+
+  @ApiPropertyOptional({ description: 'Costo de pernocta/viáticos del tramo (USD). Default si null.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pernocta_costo_usd?: number;
+
+  @ApiPropertyOptional({ enum: TipoParada, description: 'NORMAL o SERVICIO (parada técnica/servicio).' })
+  @IsOptional()
+  @IsEnum(TipoParada)
+  tipo_parada?: TipoParada;
+
+  @ApiPropertyOptional({ description: 'Notas de servicio (ej. "aterriza en Toledo a cambiar llanta").' })
+  @IsOptional()
+  @IsString()
+  @Length(0, 500)
+  servicio_notas?: string;
 }
 
 export class CalculateQuoteDto {

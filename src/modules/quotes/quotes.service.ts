@@ -21,6 +21,19 @@ import { CreateQuoteDto } from './dto/create-quote.dto';
 import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
+/** Tramo con sus detalles ya resueltos (defaults aplicados). */
+export interface ResolvedLeg {
+  origen_iata: string;
+  destino_iata: string;
+  millas_nauticas: number;
+  pasajeros: number; // ferry => 0; si no, leg.pasajeros ?? pax global
+  es_ferry: boolean;
+  requiere_pernocta: boolean;
+  pernocta_costo_usd: number; // 0 si no hay pernocta
+  tipo_parada: 'NORMAL' | 'SERVICIO';
+  servicio_notas: string | null;
+}
+
 interface ResolvedRoute {
   origen_iata: string;
   destino_iata: string;
@@ -28,7 +41,20 @@ interface ResolvedRoute {
   es_redondo_auto: boolean;
   num_aterrizajes: number;
   ruta_id: string | null;
-  escalas: EscalaInputDto[] | null; // null si es single-leg
+  escalas: ResolvedLeg[] | null; // null si es single-leg
+}
+
+/** Forma mínima de un tramo de entrada (escala de cotización o tramo de ruta). */
+interface RawLeg {
+  origen_iata: string;
+  destino_iata: string;
+  millas_nauticas: number | string;
+  pasajeros?: number | null;
+  es_ferry?: boolean | null;
+  requiere_pernocta?: boolean | null;
+  pernocta_costo_usd?: number | string | null;
+  tipo_parada?: string | null;
+  servicio_notas?: string | null;
 }
 
 export interface TuasAeropuerto {
@@ -40,6 +66,9 @@ export interface TuasAeropuerto {
 
 const IVA_DEFAULT = 0.16;
 const CALZOS_HR_POR_ATERRIZAJE = 0.15;
+// Costo default de pernocta/viáticos por tramo (USD). Editable por tramo; confirmar
+// el monto con finanzas. Se usa cuando el tramo marca pernocta sin costo explícito.
+const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
@@ -99,7 +128,8 @@ export class QuotesService {
     }
     const subtotal = tiempoCobrableHr * tarifaHora;
 
-    // TUAS por cada aeropuerto único del itinerario (preserva orden de aparición).
+    // TUAS por cada aeropuerto único del itinerario (preserva orden de aparición),
+    // para mostrar el desglose por aeropuerto.
     const aeropuertosOrdenados = route.escalas
       ? this.aeropuertosUnicos(route.escalas)
       : [route.origen_iata, route.destino_iata];
@@ -115,8 +145,35 @@ export class QuotesService {
         ),
       );
     }
-    const tuasTotal = tuasAeropuertos.reduce(
-      (acc, t) => acc + (t.aplica ? t.usd_pax * dto.pasajeros : 0),
+
+    // TUAS total:
+    // - MULTIESCALA: por tramo no-ferry, usd_pax(aeropuerto de salida) × pax del tramo.
+    // - REDONDO/single-leg: aeropuertos únicos × pax global (modelo histórico, sin cambio).
+    const tramosTuas: number[] = [];
+    let tuasTotal = 0;
+    if (route.escalas) {
+      for (const leg of route.escalas) {
+        const t = await this.computeTuas(
+          leg.origen_iata,
+          matriculaPrefix,
+          dto.pase_abordar ?? false,
+          dto.tuas_override_usd_pax,
+        );
+        const legTuas =
+          !leg.es_ferry && t.aplica ? round2(t.usd_pax * leg.pasajeros) : 0;
+        tramosTuas.push(legTuas);
+        tuasTotal += legTuas;
+      }
+    } else {
+      tuasTotal = tuasAeropuertos.reduce(
+        (acc, t) => acc + (t.aplica ? t.usd_pax * dto.pasajeros : 0),
+        0,
+      );
+    }
+
+    // Pernocta / viáticos: suma de tramos con pernocta (fuera de la base de IVA).
+    const viaticosPernocta = (route.escalas ?? []).reduce(
+      (acc, leg) => acc + (leg.requiere_pernocta ? leg.pernocta_costo_usd : 0),
       0,
     );
 
@@ -131,7 +188,7 @@ export class QuotesService {
           : 0;
     const baseIva = subtotal + tuasTotal;
     const iva = baseIva * ivaPct;
-    const total = baseIva + iva;
+    const total = baseIva + iva + viaticosPernocta;
 
     // Conservamos `origen` y `destino` siempre para retrocompat del frontend single-leg.
     // En MULTIESCALA `intermedios` lleva los demás aeropuertos.
@@ -182,6 +239,25 @@ export class QuotesService {
         proviene_de_override: dto.tarifa_hora_override_usd !== undefined,
       },
       tuas: tuasBlock,
+      // Desglose por tramo (null en single-leg/REDONDO simple).
+      tramos: route.escalas
+        ? route.escalas.map((leg, i) => ({
+            orden: i + 1,
+            origen: leg.origen_iata,
+            destino: leg.destino_iata,
+            millas: round2(leg.millas_nauticas),
+            pasajeros: leg.pasajeros,
+            es_ferry: leg.es_ferry,
+            tiempo_hr: round4(
+              leg.millas_nauticas / velocidadKts + CALZOS_HR_POR_ATERRIZAJE,
+            ),
+            tuas_usd: round2(tramosTuas[i] ?? 0),
+            requiere_pernocta: leg.requiere_pernocta,
+            pernocta_usd: round2(leg.pernocta_costo_usd),
+            tipo_parada: leg.tipo_parada,
+            servicio_notas: leg.servicio_notas,
+          }))
+        : null,
       iva: {
         aplica_por_metodo_pago: ivaAplicaPorMetodo,
         porcentaje: round4(ivaPct),
@@ -197,17 +273,32 @@ export class QuotesService {
       totales: {
         subtotal_vuelo_usd: round2(subtotal),
         tuas_total_usd: round2(tuasTotal),
+        viaticos_pernocta_usd: round2(viaticosPernocta),
         iva_usd: round2(iva),
         total_usd: round2(total),
       },
       meta: {
         calculado_at: new Date().toISOString(),
-        version_motor: '1.1.0',
+        version_motor: '1.2.0',
       },
     };
   }
 
   // ============ Persistence ============
+
+  /**
+   * Pax representativo del vuelo (para vuelo.pasajeros, que muchos lectores usan):
+   * el máximo de pax entre tramos no-ferry. Si no hay tramos, usa el pax global.
+   */
+  private representativePax(
+    breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
+    fallback: number,
+  ): number {
+    const tramos = breakdown.tramos;
+    if (!tramos || tramos.length === 0) return fallback;
+    const noFerry = tramos.filter((t) => !t.es_ferry).map((t) => t.pasajeros);
+    return noFerry.length ? Math.max(...noFerry) : fallback;
+  }
 
   async list(filters: ListQuotesQuery) {
     let q = this.supabase.service
@@ -260,6 +351,7 @@ export class QuotesService {
 
   async create(dto: CreateQuoteDto, userId: string) {
     const breakdown = await this.calculate(dto);
+    const reprPax = this.representativePax(breakdown, dto.pasajeros);
 
     // Permiso de pista: pendiente si origen/destino (o algún tramo) requiere permiso.
     const iatas = [
@@ -282,7 +374,7 @@ export class QuotesService {
       millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
       es_redondo_auto: breakdown.ruta.es_redondo_auto,
       num_aterrizajes: breakdown.ruta.num_aterrizajes,
-      pasajeros: dto.pasajeros,
+      pasajeros: reprPax,
       pase_abordar: dto.pase_abordar ?? false,
       tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
       tarifa_tipo: dto.tipo_tarifa,
@@ -339,6 +431,7 @@ export class QuotesService {
     }
 
     const breakdown = await this.calculate(dto);
+    const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
 
     const { data: updated, error } = await this.supabase.service
@@ -353,7 +446,7 @@ export class QuotesService {
         millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
         es_redondo_auto: breakdown.ruta.es_redondo_auto,
         num_aterrizajes: breakdown.ruta.num_aterrizajes,
-        pasajeros: dto.pasajeros,
+        pasajeros: reprPax,
         pase_abordar: dto.pase_abordar ?? false,
         tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
         tarifa_tipo: dto.tipo_tarifa,
@@ -429,6 +522,7 @@ export class QuotesService {
     const requierePermiso = await this.airports.anyRequiresPermit([origen, destino]);
     const permiso = requierePermiso ? 'pendiente' : 'no_aplica';
 
+    const pax = Number(vuelo.pasajeros ?? 0);
     const rows = [
       {
         vuelo_id: vueloId,
@@ -439,6 +533,9 @@ export class QuotesService {
         piloto_id: (vuelo.piloto_id as string | null) ?? null,
         estado_permiso: permiso,
         fecha_salida_plan: (vuelo.fecha_vuelo as string | null) ?? null,
+        pasajeros: pax,
+        es_ferry: false,
+        tipo_parada: 'NORMAL',
         created_by: userId,
         updated_by: userId,
       },
@@ -451,6 +548,10 @@ export class QuotesService {
         piloto_id: null,
         estado_permiso: permiso,
         fecha_salida_plan: (vuelo.fecha_traslado_final as string | null) ?? null,
+        // Regreso NO ferry por default (los pax suelen regresar); editable luego.
+        pasajeros: pax,
+        es_ferry: false,
+        tipo_parada: 'NORMAL',
         created_by: userId,
         updated_by: userId,
       },
@@ -511,7 +612,7 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -525,7 +626,7 @@ export class QuotesService {
    */
   private async replaceEscalas(
     vueloId: string,
-    escalas: EscalaInputDto[] | null,
+    escalas: ResolvedLeg[] | null,
     userId: string,
   ): Promise<void> {
     const { error: delErr } = await this.supabase.service
@@ -542,6 +643,12 @@ export class QuotesService {
       origen_iata: e.origen_iata.toUpperCase(),
       destino_iata: e.destino_iata.toUpperCase(),
       millas_nauticas: e.millas_nauticas,
+      pasajeros: e.es_ferry ? 0 : e.pasajeros,
+      es_ferry: e.es_ferry,
+      requiere_pernocta: e.requiere_pernocta,
+      pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
+      tipo_parada: e.tipo_parada,
+      servicio_notas: e.servicio_notas,
       created_by: userId,
       updated_by: userId,
     }));
@@ -589,6 +696,33 @@ export class QuotesService {
     if (error) throw new Error(`Failed to write cotizacion version history: ${error.message}`);
   }
 
+  /**
+   * Resuelve los detalles por tramo aplicando defaults: ferry fuerza 0 pax;
+   * pax = leg.pasajeros ?? pax global; pernocta_costo solo si requiere pernocta.
+   */
+  private resolveLegs(raw: RawLeg[], globalPax: number): ResolvedLeg[] {
+    return raw.map((l) => {
+      const esFerry = l.es_ferry ?? false;
+      const requierePernocta = l.requiere_pernocta ?? false;
+      const pernoctaCosto = requierePernocta
+        ? (l.pernocta_costo_usd != null
+            ? Number(l.pernocta_costo_usd)
+            : PERNOCTA_COSTO_DEFAULT_USD)
+        : 0;
+      return {
+        origen_iata: l.origen_iata.toUpperCase(),
+        destino_iata: l.destino_iata.toUpperCase(),
+        millas_nauticas: Number(l.millas_nauticas),
+        pasajeros: esFerry ? 0 : (l.pasajeros ?? globalPax),
+        es_ferry: esFerry,
+        requiere_pernocta: requierePernocta,
+        pernocta_costo_usd: pernoctaCosto,
+        tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
+        servicio_notas: l.servicio_notas ?? null,
+      };
+    });
+  }
+
   private async resolveRoute(dto: CalculateQuoteDto): Promise<ResolvedRoute> {
     // Ruta del catalogo (incluye multiescala con tramos hidratados).
     // Prioritaria sobre dto.tipo / dto.escalas porque el catalogo es la fuente.
@@ -596,11 +730,8 @@ export class QuotesService {
       const r = await this.routes.findById(dto.ruta_id);
       if (!r.activa) throw new BadRequestException('Ruta inactiva');
       if (r.tipo === 'MULTIESCALA' && r.tramos && r.tramos.length >= 2) {
-        const escalasNorm: EscalaInputDto[] = r.tramos.map((t) => ({
-          origen_iata: t.origen_iata.toUpperCase(),
-          destino_iata: t.destino_iata.toUpperCase(),
-          millas_nauticas: Number(t.millas_nauticas),
-        }));
+        // Hidrata los defaults por tramo de la plantilla guardada.
+        const escalasNorm = this.resolveLegs(r.tramos as RawLeg[], dto.pasajeros);
         return {
           ruta_id: r.id,
           origen_iata: escalasNorm[0].origen_iata,
@@ -638,11 +769,7 @@ export class QuotesService {
           );
         }
       }
-      const escalasNorm: EscalaInputDto[] = dto.escalas.map((e) => ({
-        origen_iata: e.origen_iata.toUpperCase(),
-        destino_iata: e.destino_iata.toUpperCase(),
-        millas_nauticas: Number(e.millas_nauticas),
-      }));
+      const escalasNorm = this.resolveLegs(dto.escalas as RawLeg[], dto.pasajeros);
       const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
       return {
         ruta_id: null,
@@ -675,7 +802,9 @@ export class QuotesService {
    * CUN-HOL-CZM-CUN devuelve [CUN, HOL, CZM] (sin duplicar el regreso a CUN
    * porque TUAS por aeropuerto se cobra por aeropuerto, no por aterrizaje).
    */
-  private aeropuertosUnicos(escalas: EscalaInputDto[]): string[] {
+  private aeropuertosUnicos(
+    escalas: { origen_iata: string; destino_iata: string }[],
+  ): string[] {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const e of escalas) {

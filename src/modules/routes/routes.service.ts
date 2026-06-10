@@ -17,7 +17,7 @@ const COLS =
   'id, tipo, origen_iata, destino_iata, millas_nauticas, es_redondo_auto, num_aterrizajes, fuente, notas, activa, created_at, updated_at';
 
 const TRAMO_COLS =
-  'id, ruta_id, orden, origen_iata, destino_iata, millas_nauticas, created_at, updated_at';
+  'id, ruta_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, created_at, updated_at';
 
 export interface RouteTramo {
   id: string;
@@ -26,8 +26,42 @@ export interface RouteTramo {
   origen_iata: string;
   destino_iata: string;
   millas_nauticas: string;
+  pasajeros: number | null;
+  es_ferry: boolean;
+  requiere_pernocta: boolean;
+  pernocta_costo_usd: string | null;
+  tipo_parada: 'NORMAL' | 'SERVICIO';
+  servicio_notas: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** Detalle por tramo normalizado (null en vez de undefined, listo para la BD). */
+interface TramoDetalle {
+  pasajeros: number | null;
+  es_ferry: boolean;
+  requiere_pernocta: boolean;
+  pernocta_costo_usd: number | null;
+  tipo_parada: 'NORMAL' | 'SERVICIO';
+  servicio_notas: string | null;
+}
+
+interface NormalizedTramo extends TramoDetalle {
+  origen_iata: string;
+  destino_iata: string;
+  millas_nauticas: number;
+}
+
+/** Campos de detalle por tramo, normalizados desde el DTO (defaults aplicados). */
+function tramoDetalle(t: RouteTramoInputDto): TramoDetalle {
+  return {
+    pasajeros: t.pasajeros ?? null,
+    es_ferry: t.es_ferry ?? false,
+    requiere_pernocta: t.requiere_pernocta ?? false,
+    pernocta_costo_usd: t.pernocta_costo_usd ?? null,
+    tipo_parada: t.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
+    servicio_notas: t.servicio_notas ?? null,
+  };
 }
 
 function round2(n: number): number {
@@ -201,6 +235,15 @@ export class RoutesService {
           origen_iata: t.origen_iata,
           destino_iata: t.destino_iata,
           millas_nauticas: Number(t.millas_nauticas),
+          pasajeros: t.pasajeros ?? undefined,
+          es_ferry: t.es_ferry ?? undefined,
+          requiere_pernocta: t.requiere_pernocta ?? undefined,
+          pernocta_costo_usd:
+            t.pernocta_costo_usd != null ? Number(t.pernocta_costo_usd) : undefined,
+          tipo_parada: (t.tipo_parada ?? undefined) as
+            | RouteTramoInputDto['tipo_parada']
+            | undefined,
+          servicio_notas: t.servicio_notas ?? undefined,
         })),
       );
       patch.origen_iata = tramos[0].origen_iata;
@@ -287,7 +330,7 @@ export class RoutesService {
 
   private normalizeTramos(
     tramos: RouteTramoInputDto[] | undefined,
-  ): RouteTramoInputDto[] {
+  ): NormalizedTramo[] {
     if (!tramos || tramos.length < 2) {
       throw new BadRequestException('MULTIESCALA requiere al menos 2 tramos');
     }
@@ -295,6 +338,7 @@ export class RoutesService {
       origen_iata: t.origen_iata.toUpperCase(),
       destino_iata: t.destino_iata.toUpperCase(),
       millas_nauticas: Number(t.millas_nauticas),
+      ...tramoDetalle(t),
     }));
     for (let i = 0; i < norm.length - 1; i++) {
       if (norm[i].destino_iata !== norm[i + 1].origen_iata) {
@@ -328,7 +372,7 @@ export class RoutesService {
 
   private async replaceTramos(
     rutaId: string,
-    tramos: RouteTramoInputDto[],
+    tramos: NormalizedTramo[],
   ): Promise<void> {
     await this.deleteTramos(rutaId);
     const rows = tramos.map((t, idx) => ({
@@ -337,6 +381,12 @@ export class RoutesService {
       origen_iata: t.origen_iata,
       destino_iata: t.destino_iata,
       millas_nauticas: t.millas_nauticas,
+      pasajeros: t.pasajeros,
+      es_ferry: t.es_ferry,
+      requiere_pernocta: t.requiere_pernocta,
+      pernocta_costo_usd: t.pernocta_costo_usd,
+      tipo_parada: t.tipo_parada,
+      servicio_notas: t.servicio_notas,
     }));
     const { error } = await this.supabase.service
       .from('ruta_predefinida_tramo')

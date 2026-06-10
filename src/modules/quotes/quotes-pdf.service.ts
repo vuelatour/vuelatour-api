@@ -56,11 +56,25 @@ export class QuotesPdfService {
         orden: num(e.orden) ?? 0,
         origen: (e.origen_iata as string) ?? '',
         destino: (e.destino_iata as string) ?? '',
+        // Detalle por tramo (la plantilla vieja ignora estas claves).
+        pasajeros: e.es_ferry ? 0 : (num(e.pasajeros) ?? null),
+        es_ferry: e.es_ferry === true,
+        requiere_pernocta: e.requiere_pernocta === true,
+        pernocta_usd: num(e.pernocta_costo_usd) ?? 0,
+        tipo_parada: (e.tipo_parada as string) ?? 'NORMAL',
+        servicio_notas: (e.servicio_notas as string) ?? null,
       })),
       tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
       subtotal_usd: num(quote.subtotal_vuelo_usd) ?? 0,
       tuas_usd: num(quote.tuas_usd) ?? 0,
+      viaticos_pernocta_usd:
+        num(
+          (
+            (quote.calculo_snapshot as Record<string, unknown> | undefined)
+              ?.totales as Record<string, unknown> | undefined
+          )?.viaticos_pernocta_usd,
+        ) ?? 0,
       iva_pct: ivaRaw <= 1 ? ivaRaw * 100 : ivaRaw, // normaliza 0.16 → 16
       iva_usd: num(quote.iva_usd) ?? 0,
       total_usd: num(quote.monto_total_usd) ?? 0,

@@ -22,6 +22,11 @@ export enum TipoRuta {
   MULTIESCALA = 'MULTIESCALA',
 }
 
+export enum TipoParada {
+  NORMAL = 'NORMAL',
+  SERVICIO = 'SERVICIO',
+}
+
 export class RouteTramoInputDto {
   @ApiProperty({ example: 'CUN' })
   @IsString()
@@ -38,6 +43,42 @@ export class RouteTramoInputDto {
   @IsNumber()
   @Min(0.01)
   millas_nauticas!: number;
+
+  // ---- Detalle por tramo (defaults de plantilla) ----
+  @ApiPropertyOptional({ description: 'Pax sugeridos del tramo. NULL = usa pax globales al cotizar.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pasajeros?: number;
+
+  @ApiPropertyOptional({ description: 'Tramo ferry (vacío): tiempo+calzos, 0 pax / sin TUAS.' })
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
+
+  @ApiPropertyOptional({ description: 'Pernocta en este tramo (suma viáticos).' })
+  @IsOptional()
+  @IsBoolean()
+  requiere_pernocta?: boolean;
+
+  @ApiPropertyOptional({ description: 'Costo de pernocta/viáticos (USD). Default si null.' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  pernocta_costo_usd?: number;
+
+  @ApiPropertyOptional({ enum: TipoParada, description: 'NORMAL o SERVICIO.' })
+  @IsOptional()
+  @IsEnum(TipoParada)
+  tipo_parada?: TipoParada;
+
+  @ApiPropertyOptional({ description: 'Notas de servicio (ej. cambiar llanta en Toledo).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  servicio_notas?: string;
 }
 
 export class ListRoutesQuery {
