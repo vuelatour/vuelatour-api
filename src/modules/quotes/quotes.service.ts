@@ -77,7 +77,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -212,9 +212,53 @@ export class QuotesService {
         : ivaAplicaPorMetodo
           ? IVA_DEFAULT
           : 0;
-    const baseIva = subtotal + tuasTotal + extrasConIva;
-    const iva = baseIva * ivaPct;
-    const total = baseIva + iva + viaticosPernocta + extrasSinIva;
+    // Integridad contable (balance): cada componente se redondea PRIMERO y el
+    // total es la suma exacta de los componentes redondeados — el desglose
+    // siempre cuadra al centavo con el total registrado.
+    const subtotalR = round2(subtotal);
+    const tuasR = round2(tuasTotal);
+    const extrasConIvaR = round2(extrasConIva);
+    const extrasSinIvaR = round2(extrasSinIva);
+    const pernoctaR = round2(viaticosPernocta);
+    const baseIva = round2(subtotalR + tuasR + extrasConIvaR);
+    const iva = round2(baseIva * ivaPct);
+    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+
+    // Desglose canónico para el balance: cada concepto cobrado al cliente como
+    // línea independiente; la suma de las líneas ES el total.
+    const desglose: Array<{ clave: string; concepto: string; monto_usd: number }> = [
+      {
+        clave: 'TIEMPO_VUELO',
+        concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr`,
+        monto_usd: subtotalR,
+      },
+      ...(tuasR > 0
+        ? [{ clave: 'TUAS', concepto: 'TUAS', monto_usd: tuasR }]
+        : []),
+      ...extras.map((e) => ({
+        clave: 'EXTRA',
+        concepto: `${e.concepto}${e.aplica_iva ? '' : ' (sin IVA)'}`,
+        monto_usd: e.monto_usd,
+      })),
+      ...(iva > 0
+        ? [
+            {
+              clave: 'IVA',
+              concepto: `IVA ${round2(ivaPct * 100)}%`,
+              monto_usd: iva,
+            },
+          ]
+        : []),
+      ...(pernoctaR > 0
+        ? [
+            {
+              clave: 'PERNOCTA',
+              concepto: 'Viáticos por pernocta (sin IVA)',
+              monto_usd: pernoctaR,
+            },
+          ]
+        : []),
+    ];
 
     // Conservamos `origen` y `destino` siempre para retrocompat del frontend single-leg.
     // En MULTIESCALA `intermedios` lleva los demás aeropuertos.
@@ -226,14 +270,14 @@ export class QuotesService {
           destino: tuasAeropuertos[tuasAeropuertos.length - 1],
           intermedios: tuasAeropuertos.slice(1, -1),
           aeropuertos: tuasAeropuertos,
-          total_usd: round2(tuasTotal),
+          total_usd: tuasR,
         }
       : {
           usd_pax_default: dto.tuas_override_usd_pax,
           pasajeros: dto.pasajeros,
           origen: tuasAeropuertos[0],
           destino: tuasAeropuertos[1],
-          total_usd: round2(tuasTotal),
+          total_usd: tuasR,
         };
 
     return {
@@ -287,8 +331,8 @@ export class QuotesService {
       iva: {
         aplica_por_metodo_pago: ivaAplicaPorMetodo,
         porcentaje: round4(ivaPct),
-        base_usd: round2(baseIva),
-        monto_usd: round2(iva),
+        base_usd: baseIva,
+        monto_usd: iva,
         nota:
           dto.metodo_pago === MetodoPago.EFECTIVO
             ? 'Pago en efectivo: sin IVA (subtotal)'
@@ -297,17 +341,19 @@ export class QuotesService {
               : `Método ${dto.metodo_pago}: sin IVA por default`,
       },
       extras: extras.length > 0 ? extras : null,
+      // Desglose canónico para el balance: las líneas suman EXACTAMENTE el total.
+      desglose,
       totales: {
-        subtotal_vuelo_usd: round2(subtotal),
-        tuas_total_usd: round2(tuasTotal),
-        viaticos_pernocta_usd: round2(viaticosPernocta),
-        extras_total_usd: round2(extrasConIva + extrasSinIva),
-        iva_usd: round2(iva),
-        total_usd: round2(total),
+        subtotal_vuelo_usd: subtotalR,
+        tuas_total_usd: tuasR,
+        viaticos_pernocta_usd: pernoctaR,
+        extras_total_usd: round2(extrasConIvaR + extrasSinIvaR),
+        iva_usd: iva,
+        total_usd: total,
       },
       meta: {
         calculado_at: new Date().toISOString(),
-        version_motor: '1.2.0',
+        version_motor: '1.3.0',
       },
     };
   }
@@ -413,6 +459,8 @@ export class QuotesService {
       iva_pct: breakdown.iva.porcentaje,
       iva_usd: breakdown.iva.monto_usd,
       monto_total_usd: breakdown.totales.total_usd,
+      viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
+      extras_total_usd: breakdown.totales.extras_total_usd,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       extras: breakdown.extras ?? [],
@@ -498,6 +546,8 @@ export class QuotesService {
         iva_pct: breakdown.iva.porcentaje,
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
+        viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
+        extras_total_usd: breakdown.totales.extras_total_usd,
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
@@ -916,6 +966,8 @@ export class QuotesService {
         iva_pct: breakdown.iva.porcentaje,
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
+        viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
+        extras_total_usd: breakdown.totales.extras_total_usd,
         metodo_cobro: dto.metodo_pago,
         calculo_snapshot: breakdown,
         motivo,
