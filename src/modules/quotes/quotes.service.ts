@@ -76,7 +76,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -384,6 +384,7 @@ export class QuotesService {
       es_redondo_auto: breakdown.ruta.es_redondo_auto,
       num_aterrizajes: breakdown.ruta.num_aterrizajes,
       pasajeros: reprPax,
+      pasajeros_nombres: dto.pasajeros_nombres ?? [],
       pase_abordar: dto.pase_abordar ?? false,
       tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
       tarifa_tipo: dto.tipo_tarifa,
@@ -471,6 +472,9 @@ export class QuotesService {
         es_redondo_auto: breakdown.ruta.es_redondo_auto,
         num_aterrizajes: breakdown.ruta.num_aterrizajes,
         pasajeros: reprPax,
+        ...(dto.pasajeros_nombres !== undefined
+          ? { pasajeros_nombres: dto.pasajeros_nombres }
+          : {}),
         pase_abordar: dto.pase_abordar ?? false,
         tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
         tarifa_tipo: dto.tipo_tarifa,

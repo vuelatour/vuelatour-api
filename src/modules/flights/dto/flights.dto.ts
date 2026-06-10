@@ -133,6 +133,16 @@ export class UpdateFlightDto {
   @IsEnum(EstadoPermiso)
   estado_permiso?: EstadoPermiso;
 
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  pasajeros_nombres?: string[];
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -293,6 +303,13 @@ export class CreateReservaDto {
   @IsOptional()
   @IsBoolean()
   cotizacion_abierta?: boolean;
+
+  @ApiPropertyOptional({ type: [String], description: 'Nombres de los pasajeros (si ya se conocen).' })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  pasajeros_nombres?: string[];
 
   @ApiPropertyOptional()
   @IsOptional()

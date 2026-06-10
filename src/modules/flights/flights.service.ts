@@ -31,7 +31,7 @@ import type {
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -244,7 +244,7 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, es_externo, cliente:cliente_id(nombre)',
+        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, es_externo, cliente:cliente_id(nombre)',
       )
       .eq('id', id)
       .maybeSingle();
@@ -259,6 +259,7 @@ export class FlightsService {
       origen_iata: string;
       destino_iata: string;
       pasajeros: number;
+      pasajeros_nombres: string[] | null;
       monto_total_usd: string | number;
       fecha_vuelo: string | null;
       fecha_traslado_final: string | null;
@@ -292,6 +293,7 @@ export class FlightsService {
       origen_iata: v.origen_iata,
       destino_iata: v.destino_iata,
       pasajeros: v.pasajeros,
+      pasajeros_nombres: v.pasajeros_nombres ?? [],
       fecha_traslado_inicial: v.fecha_vuelo,
       fecha_traslado_final: v.fecha_traslado_final,
       monto_total_usd: Number(v.monto_total_usd),
@@ -1020,6 +1022,7 @@ export class FlightsService {
       es_redondo_auto: false,
       num_aterrizajes: dto.fecha_traslado_final ? 2 : 1,
       pasajeros,
+      pasajeros_nombres: dto.pasajeros_nombres ?? [],
       pase_abordar: false,
       tiempo_cobrable_hr: 0,
       tarifa_tipo: 'PUBLICO',

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsDate,
   IsOptional,
   IsString,
@@ -28,6 +29,16 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @Type(() => Date)
   @IsDate()
   fecha_traslado_final?: Date;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  pasajeros_nombres?: string[];
 
   @ApiPropertyOptional({ description: 'Notas visibles para el cliente (aparecen en PDF)' })
   @IsOptional()

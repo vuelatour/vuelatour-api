@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsArray, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
 import { CalculateQuoteDto } from './calculate-quote.dto';
 
 export class ReviseQuoteDto extends CalculateQuoteDto {
@@ -17,4 +17,14 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   @IsString()
   @MaxLength(2000)
   notas?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  pasajeros_nombres?: string[];
 }
