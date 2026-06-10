@@ -134,6 +134,78 @@ export class AirportsService {
    * Millas náuticas great-circle entre dos aeropuertos (por IATA). Devuelve
    * null si a alguno le faltan coordenadas (el cotizador cae a input manual).
    */
+  // ============ Catálogo de distancias por aerovía ============
+
+  async listDistancias() {
+    const { data, error } = await this.supabase.service
+      .from('distancia_tramo')
+      .select('id, origen_iata, destino_iata, millas_nauticas, fuente, notas, updated_at')
+      .order('origen_iata', { ascending: true })
+      .order('destino_iata', { ascending: true })
+      .limit(2000);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /** Upsert por par origen+destino (el par es único; editar = recargar). */
+  async upsertDistancia(dto: {
+    origen_iata: string;
+    destino_iata: string;
+    millas_nauticas: number;
+    fuente?: string;
+    notas?: string;
+  }) {
+    const { data, error } = await this.supabase.service
+      .from('distancia_tramo')
+      .upsert(
+        {
+          origen_iata: dto.origen_iata.toUpperCase(),
+          destino_iata: dto.destino_iata.toUpperCase(),
+          millas_nauticas: dto.millas_nauticas,
+          fuente: dto.fuente ?? 'AEROVIA',
+          notas: dto.notas ?? null,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'origen_iata,destino_iata' },
+      )
+      .select('id, origen_iata, destino_iata, millas_nauticas, fuente, notas')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data!;
+  }
+
+  /** Carga masiva (archivo de distancias por aerovía de Alejandro). */
+  async importDistancias(tramos: Array<{
+    origen_iata: string;
+    destino_iata: string;
+    millas_nauticas: number;
+    fuente?: string;
+    notas?: string;
+  }>) {
+    const rows = tramos.map((t) => ({
+      origen_iata: t.origen_iata.toUpperCase(),
+      destino_iata: t.destino_iata.toUpperCase(),
+      millas_nauticas: t.millas_nauticas,
+      fuente: t.fuente ?? 'AEROVIA',
+      notas: t.notas ?? null,
+      updated_at: new Date().toISOString(),
+    }));
+    const { error } = await this.supabase.service
+      .from('distancia_tramo')
+      .upsert(rows, { onConflict: 'origen_iata,destino_iata' });
+    if (error) throw new Error(error.message);
+    return { imported: rows.length };
+  }
+
+  async deleteDistancia(id: string) {
+    const { error } = await this.supabase.service
+      .from('distancia_tramo')
+      .delete()
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+    return { deleted: true, id };
+  }
+
   async distanceNm(
     origenIata: string,
     destinoIata: string,

@@ -88,6 +88,156 @@ export class FlightsService {
     return (data ?? []).map((e) => e.destino_iata as string);
   }
 
+  /**
+   * Elimina un vuelo SIN actividad (solicitudes/apartados fantasma que nunca
+   * se confirmaron). Bloqueado si tiene cobros, gastos o tacómetros: esos se
+   * cancelan (no se borran) para no perder el rastro contable.
+   */
+  async deleteFlight(id: string): Promise<{ deleted: true; id: string }> {
+    const vuelo = await this.findById(id);
+    if (vuelo.cobrado || vuelo.facturado) {
+      throw new ConflictException(
+        'El vuelo ya fue cobrado/facturado; cancélalo en lugar de borrarlo.',
+      );
+    }
+    const sb = this.supabase.service;
+    const [{ count: cobros }, { count: gastos }, { count: tacos }] = await Promise.all([
+      sb.from('cobro_vuelo').select('id', { count: 'exact', head: true }).eq('vuelo_id', id),
+      sb.from('gasto').select('id', { count: 'exact', head: true }).eq('vuelo_id', id),
+      sb
+        .from('escala')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id)
+        .not('taco_salida', 'is', null),
+    ]);
+    if ((cobros ?? 0) > 0 || (gastos ?? 0) > 0 || (tacos ?? 0) > 0) {
+      throw new ConflictException(
+        'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
+      );
+    }
+    // Quita eventos de Google antes de perder los IDs.
+    await this.calendar.removeFlight(id).catch(() => undefined);
+    await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
+    await sb.from('escala').delete().eq('vuelo_id', id);
+    const { error } = await sb.from('vuelo').delete().eq('id', id);
+    if (error) throw new Error(error.message);
+    return { deleted: true, id };
+  }
+
+  /**
+   * Reasignación de aeronave de último minuto (acordado en reunión 10 jun):
+   * el vuelo original queda CANCELADO conservando sus gastos (esa matrícula
+   * los absorbe: factura de operación, combustible…), y se crea un CLON con
+   * la nueva aeronave que hereda cotización, fechas, tramos plan y piloto.
+   * Los cobros del cliente se MUEVEN al clon (pagó el vuelo que sí sale).
+   */
+  async reassignAircraft(
+    id: string,
+    dto: { aeronave_id: string; motivo?: string },
+    userId: string,
+  ) {
+    const sb = this.supabase.service;
+    const { data: original, error: e0 } = await sb
+      .from('vuelo')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (e0) throw new Error(e0.message);
+    if (!original) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (original.estado === 'CANCELADO' || original.estado === 'COMPLETADO') {
+      throw new ConflictException(`No se puede reasignar un vuelo ${original.estado as string}.`);
+    }
+    if (original.aeronave_id === dto.aeronave_id) {
+      throw new BadRequestException('Selecciona una aeronave distinta a la actual.');
+    }
+    await this.validateAssignTargets({ aeronaveId: dto.aeronave_id });
+
+    const { data: aeronave } = await sb
+      .from('aeronave')
+      .select('matricula')
+      .eq('id', dto.aeronave_id)
+      .maybeSingle();
+    const matricula = (aeronave?.matricula as string) ?? 'otra aeronave';
+
+    // 1) Clon con la nueva aeronave (folio/ids/google nuevos, sin capturas).
+    const clonPayload: Record<string, unknown> = { ...(original as Record<string, unknown>) };
+    for (const k of [
+      'id',
+      'folio',
+      'created_at',
+      'updated_at',
+      'google_calendar_id',
+      'foto_plan_vuelo_url',
+    ]) {
+      delete clonPayload[k];
+    }
+    clonPayload.aeronave_id = dto.aeronave_id;
+    clonPayload.created_by = userId;
+    clonPayload.updated_by = userId;
+    clonPayload.notas_internas = [
+      (original.notas_internas as string | null) ?? '',
+      `Reasignado desde el vuelo #${original.folio as number} (cambio de aeronave a ${matricula}).`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const { data: clon, error: e1 } = await sb
+      .from('vuelo')
+      .insert(clonPayload)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (e1) throw new Error(e1.message);
+
+    // 2) Tramos plan del original (sin tacómetros/horas reales).
+    const { data: legs } = await sb
+      .from('escala')
+      .select(
+        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, estado_permiso',
+      )
+      .eq('vuelo_id', id)
+      .order('orden', { ascending: true });
+    if (legs && legs.length > 0) {
+      await sb.from('escala').insert(
+        legs.map((l) => ({
+          ...l,
+          vuelo_id: (clon as { id: string }).id,
+          aeronave_id: dto.aeronave_id,
+          created_by: userId,
+          updated_by: userId,
+        })),
+      );
+    }
+
+    // 3) Cobros del cliente → al vuelo que sí sale. (Los GASTOS se quedan: esa
+    //    matrícula los absorbe y el siguiente vuelo solo paga su remanente.)
+    await sb
+      .from('cobro_vuelo')
+      .update({ vuelo_id: (clon as { id: string }).id })
+      .eq('vuelo_id', id);
+
+    // 4) Original queda cancelado con el motivo auditable.
+    const motivoFinal = [
+      `Reasignado a ${matricula} (vuelo #${(clon as { folio: number }).folio}).`,
+      dto.motivo?.trim() || null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    await sb
+      .from('vuelo')
+      .update({
+        estado: 'CANCELADO',
+        fecha_cancelacion: new Date().toISOString(),
+        motivo_cancelacion: motivoFinal,
+        updated_by: userId,
+      })
+      .eq('id', id);
+
+    void this.calendar.syncFlight(id);
+    void this.calendar.syncFlight((clon as { id: string }).id);
+    const pilotoId = (clon as { piloto_id?: string | null }).piloto_id;
+    if (pilotoId) void this.notifyPilotAssigned(pilotoId, clon as Record<string, unknown>);
+    return clon!;
+  }
+
   /** Envía aviso de asignación al piloto (best-effort), con info de pernocta. */
   private async notifyPilotAssigned(
     pilotoId: string,

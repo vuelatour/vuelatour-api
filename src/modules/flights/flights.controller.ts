@@ -30,6 +30,7 @@ import {
   CancelFlightDto,
   CreateExternalFlightDto,
   CreateReservaDto,
+  ReassignAircraftDto,
   ListFlightsQuery,
   SetFlightPlanDto,
   TacoStatusDto,
@@ -179,6 +180,32 @@ export class FlightsController {
   async complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
     await this.flights.assertAccess(id, c);
     return this.flights.complete(id, c.userId);
+  }
+
+  @Delete(':id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Elimina un vuelo SIN actividad (solicitud fantasma). Si tiene cobros/gastos/tacómetros, se rechaza: cancélalo.',
+  })
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.deleteFlight(id);
+  }
+
+  @Post(':id/reassign-aircraft')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Cambio de aeronave de último minuto: clona el vuelo a la nueva matrícula (cobros se mueven) y el original queda CANCELADO con sus gastos.',
+  })
+  reassignAircraft(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ReassignAircraftDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.reassignAircraft(id, dto, c.userId);
   }
 
   @Post(':id/cancel')

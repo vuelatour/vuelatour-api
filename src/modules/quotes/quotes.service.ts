@@ -87,7 +87,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -232,7 +232,9 @@ export class QuotesService {
     const pernoctaR = round2(viaticosPernocta);
     const baseIva = round2(subtotalR + tuasR + extrasConIvaR);
     const iva = round2(baseIva * ivaPct);
-    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+    // Ajuste final (fuera de IVA): negativo = descuento, positivo = redondeo.
+    const ajusteFinal = round2(Number(dto.ajuste_final_usd) || 0);
+    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR + ajusteFinal);
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
@@ -265,6 +267,15 @@ export class QuotesService {
               clave: 'PERNOCTA',
               concepto: 'Viáticos por pernocta (sin IVA)',
               monto_usd: pernoctaR,
+            },
+          ]
+        : []),
+      ...(ajusteFinal !== 0
+        ? [
+            {
+              clave: 'AJUSTE',
+              concepto: ajusteFinal < 0 ? 'Descuento' : 'Redondeo',
+              monto_usd: ajusteFinal,
             },
           ]
         : []),
@@ -358,6 +369,7 @@ export class QuotesService {
         tuas_total_usd: tuasR,
         viaticos_pernocta_usd: pernoctaR,
         extras_total_usd: round2(extrasConIvaR + extrasSinIvaR),
+        ajuste_final_usd: ajusteFinal,
         iva_usd: iva,
         total_usd: total,
       },
@@ -396,8 +408,21 @@ export class QuotesService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
     if (filters.q) {
-      const term = `%${filters.q.toUpperCase()}%`;
-      q = q.or(`origen_iata.ilike.${term},destino_iata.ilike.${term}`);
+      const raw = filters.q.trim();
+      const term = `%${raw.toUpperCase()}%`;
+      const conds = [`origen_iata.ilike.${term}`, `destino_iata.ilike.${term}`];
+      // Folio exacto si es numérico.
+      if (/^\d+$/.test(raw)) conds.push(`folio.eq.${raw}`);
+      // Por nombre de cliente ("¿cuánto le cobré a Punta Pájaros?").
+      const { data: clientes } = await this.supabase.service
+        .from('cliente')
+        .select('id')
+        .ilike('nombre', `%${raw}%`)
+        .limit(50);
+      if (clientes && clientes.length > 0) {
+        conds.push(`cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`);
+      }
+      q = q.or(conds.join(','));
     }
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -471,6 +496,7 @@ export class QuotesService {
       monto_total_usd: breakdown.totales.total_usd,
       viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
       extras_total_usd: breakdown.totales.extras_total_usd,
+      ajuste_final_usd: breakdown.totales.ajuste_final_usd,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       extras: breakdown.extras ?? [],
@@ -565,6 +591,7 @@ export class QuotesService {
         monto_total_usd: breakdown.totales.total_usd,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
+        ajuste_final_usd: breakdown.totales.ajuste_final_usd,
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
@@ -673,6 +700,7 @@ export class QuotesService {
           : undefined,
       iva_pct_override: Number(current.iva_pct),
       extras: dto.extras ?? ((current.extras as never[]) ?? []),
+      ajuste_final_usd: Number(current.ajuste_final_usd) || 0,
       motivo: dto.motivo?.trim() || 'Ajuste rápido desde el detalle (extras/pasajeros)',
     } as unknown as ReviseQuoteDto;
 
@@ -870,7 +898,9 @@ export class QuotesService {
           origen_iata: l.origen_iata,
           destino_iata: l.destino_iata,
           millas_nauticas: Number(l.millas_nauticas) || 0,
-          pasajeros: l.es_ferry ? 0 : l.pasajeros,
+          // null = hereda los pax de la cotización NUEVA (copiar los pax del
+          // vuelo histórico alteraba TUAS y descuadraba el total sugerido).
+          pasajeros: l.es_ferry ? 0 : null,
           es_ferry: l.es_ferry === true,
           requiere_pernocta: l.requiere_pernocta === true,
           pernocta_costo_usd:
@@ -1072,6 +1102,7 @@ export class QuotesService {
         monto_total_usd: breakdown.totales.total_usd,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
+        ajuste_final_usd: breakdown.totales.ajuste_final_usd,
         metodo_cobro: dto.metodo_pago,
         calculo_snapshot: breakdown,
         motivo,

@@ -176,6 +176,19 @@ export class CancelFlightDto {
   motivo!: string;
 }
 
+/** Reasignación de aeronave de último minuto (clona el vuelo; el original queda cancelado con sus gastos). */
+export class ReassignAircraftDto {
+  @ApiProperty({ description: 'Nueva aeronave que volará el servicio' })
+  @IsUUID()
+  aeronave_id!: string;
+
+  @ApiPropertyOptional({ description: 'Motivo del cambio (queda en el vuelo cancelado)' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  motivo?: string;
+}
+
 export class AssignFlightDto {
   @ApiPropertyOptional({
     description: 'Aeronave asignada (solo si no es externo)',

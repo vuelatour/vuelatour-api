@@ -224,6 +224,15 @@ export class CalculateQuoteDto {
   cotizacion_abierta?: boolean;
 
   @ApiPropertyOptional({
+    description:
+      'Ajuste final del total: negativo = descuento ("ciérramelo en 750"), positivo = redondeo hacia arriba. Fuera de la base de IVA.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  ajuste_final_usd?: number;
+
+  @ApiPropertyOptional({
     type: [ExtraConceptoDto],
     description:
       'Conceptos extra (handler, comisariato, extensión de servicios…). Se suman al total; los gravados entran a la base de IVA.',

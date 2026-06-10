@@ -10,6 +10,9 @@ import {
   Max,
   MaxLength,
   Min,
+  IsArray,
+  ArrayNotEmpty,
+  ValidateNested,
 } from 'class-validator';
 
 export class ListAirportsQuery {
@@ -136,4 +139,45 @@ export class UpdateAirportDto extends PartialType(CreateAirportDto) {
   @IsOptional()
   @IsBoolean()
   activo?: boolean;
+}
+
+
+/** Distancia por aerovía entre dos aeropuertos (catálogo del autollenado). */
+export class UpsertDistanciaDto {
+  @ApiProperty()
+  @IsString()
+  @Length(3, 4)
+  origen_iata!: string;
+
+  @ApiProperty()
+  @IsString()
+  @Length(3, 4)
+  destino_iata!: string;
+
+  @ApiProperty({ description: 'Millas náuticas por aerovía' })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.1)
+  millas_nauticas!: number;
+
+  @ApiPropertyOptional({ default: 'AEROVIA' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  fuente?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notas?: string;
+}
+
+export class ImportDistanciasDto {
+  @ApiProperty({ type: [UpsertDistanciaDto], description: 'Pares a cargar (upsert por origen+destino)' })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ValidateNested({ each: true })
+  @Type(() => UpsertDistanciaDto)
+  tramos!: UpsertDistanciaDto[];
 }

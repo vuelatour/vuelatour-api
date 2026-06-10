@@ -24,8 +24,10 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateAirportDto,
+  ImportDistanciasDto,
   ListAirportsQuery,
   UpdateAirportDto,
+  UpsertDistanciaDto,
 } from './dto/airports.dto';
 import { AirportsService } from './airports.service';
 
@@ -68,6 +70,35 @@ export class AirportsController {
       throw new BadRequestException('origen y destino son requeridos');
     }
     return this.airports.distanceNm(origen, destino);
+  }
+
+  @Get('distancias')
+  @ApiOperation({ summary: 'Catálogo de distancias por aerovía (autollenado de millas náuticas).' })
+  listDistancias() {
+    return this.airports.listDistancias();
+  }
+
+  @Post('distancias')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Alta/edición de una distancia (upsert por par origen+destino).' })
+  upsertDistancia(@Body() dto: UpsertDistanciaDto) {
+    return this.airports.upsertDistancia(dto);
+  }
+
+  @Post('distancias/import')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Carga masiva de distancias por aerovía (archivo de referencia).' })
+  importDistancias(@Body() dto: ImportDistanciasDto) {
+    return this.airports.importDistancias(dto.tramos);
+  }
+
+  @Delete('distancias/:id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Elimina una distancia del catálogo.' })
+  deleteDistancia(@Param('id', ParseUUIDPipe) id: string) {
+    return this.airports.deleteDistancia(id);
   }
 
   @Get(':id/tuas')
