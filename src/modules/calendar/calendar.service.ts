@@ -7,6 +7,8 @@ const EXTERNAL_COLOR = '#FFB6C1';
 const PERMISO_PENDIENTE_COLOR = '#F59E0B';
 // Vuelo propio confirmado pero todavía SIN avión asignado (acción pendiente).
 const SIN_ASIGNAR_COLOR = '#8B5CF6';
+// Reserva tentativa: espacio apartado sin cotización ("espérame y te confirmo").
+const TENTATIVO_COLOR = '#64748B';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -146,13 +148,17 @@ export class CalendarService {
         const permisoPendiente = estadoPermiso === 'pendiente';
         const sinAsignar =
           v.estado === 'CONFIRMADO' && !v.es_externo && (!aeronaveId || !pilotoId);
-        const color = sinAsignar
-          ? SIN_ASIGNAR_COLOR
-          : permisoPendiente
-            ? PERMISO_PENDIENTE_COLOR
-            : v.es_externo
-              ? EXTERNAL_COLOR
-              : (aeronave?.color_calendario ?? '#9CA3AF');
+        const esTentativo = v.estado === 'RESERVA';
+        // El tentativo domina el color: es un espacio apartado, no un vuelo firme.
+        const color = esTentativo
+          ? TENTATIVO_COLOR
+          : sinAsignar
+            ? SIN_ASIGNAR_COLOR
+            : permisoPendiente
+              ? PERMISO_PENDIENTE_COLOR
+              : v.es_externo
+                ? EXTERNAL_COLOR
+                : (aeronave?.color_calendario ?? '#9CA3AF');
         const hora = horaOf(params.fecha);
         return {
           id: `${v.id}${params.idSuffix}`,
@@ -179,7 +185,7 @@ export class CalendarService {
           tramo: params.tramo,
           origen_iata: params.origen,
           destino_iata: params.destino,
-          title: `${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${params.pasajeros ?? v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
+          title: `${esTentativo ? 'Tentativo · ' : ''}${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${params.pasajeros ?? v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
         };
       };
 

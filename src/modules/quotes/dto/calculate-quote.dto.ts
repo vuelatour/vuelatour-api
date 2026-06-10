@@ -196,6 +196,14 @@ export class CalculateQuoteDto {
   @IsBoolean()
   pase_abordar?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Vuelo abierto: el itinerario/precio se cierra al final (permite re-cotizar con tramos reales hasta antes de cobrar/facturar).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  cotizacion_abierta?: boolean;
+
   @ApiProperty({ enum: MetodoPago, description: 'Determina si aplica IVA' })
   @IsEnum(MetodoPago)
   metodo_pago!: MetodoPago;

@@ -12,6 +12,7 @@ import {
 } from 'class-validator';
 
 export enum EstadoVuelo {
+  RESERVA = 'RESERVA',
   SOLICITUD = 'SOLICITUD',
   COTIZADO = 'COTIZADO',
   CONFIRMADO = 'CONFIRMADO',

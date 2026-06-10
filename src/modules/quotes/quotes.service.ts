@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { AircraftService } from '../aircraft/aircraft.service';
@@ -74,7 +75,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -86,6 +87,8 @@ function round4(n: number): number {
 
 @Injectable()
 export class QuotesService {
+  private readonly logger = new Logger(QuotesService.name);
+
   constructor(
     private readonly aircraft: AircraftService,
     private readonly airports: AirportsService,
@@ -389,6 +392,7 @@ export class QuotesService {
       iva_usd: breakdown.iva.monto_usd,
       monto_total_usd: breakdown.totales.total_usd,
       metodo_cobro: dto.metodo_pago,
+      cotizacion_abierta: dto.cotizacion_abierta ?? false,
       estado_permiso: requierePermiso ? 'pendiente' : 'no_aplica',
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
@@ -426,14 +430,25 @@ export class QuotesService {
 
   async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
     const current = await this.findById(vueloId);
-    if (
+    if (current.estado === 'CANCELADO') {
+      throw new ConflictException('No se puede revisar una cotización cancelada.');
+    }
+    const esAbierta =
+      current.cotizacion_abierta === true || dto.cotizacion_abierta === true;
+    const estadoAvanzado =
       current.estado === 'CONFIRMADO' ||
       current.estado === 'EN_VUELO' ||
-      current.estado === 'COMPLETADO' ||
-      current.estado === 'CANCELADO'
-    ) {
+      current.estado === 'COMPLETADO';
+    if (estadoAvanzado && !esAbierta) {
       throw new ConflictException(
-        `No se puede revisar una cotización en estado ${current.estado}. Solo SOLICITUD o COTIZADO admiten revisión.`,
+        `No se puede revisar una cotización en estado ${current.estado}. Solo RESERVA, SOLICITUD o COTIZADO admiten revisión (o vuelos con cotización abierta).`,
+      );
+    }
+    // Cotización abierta: el precio se cierra re-cotizando con los tramos
+    // reales, pero solo mientras no se haya cobrado/facturado.
+    if (estadoAvanzado && esAbierta && (current.cobrado || current.facturado)) {
+      throw new ConflictException(
+        'El vuelo ya fue cobrado/facturado; la cotización abierta ya no puede ajustarse.',
       );
     }
 
@@ -466,7 +481,14 @@ export class QuotesService {
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
-        estado: current.estado === 'SOLICITUD' ? 'COTIZADO' : current.estado,
+        // Cotizar una RESERVA o SOLICITUD la convierte en COTIZADO; los estados
+        // avanzados (abierta) conservan su estado al ajustar el precio.
+        estado:
+          current.estado === 'SOLICITUD' || current.estado === 'RESERVA'
+            ? 'COTIZADO'
+            : current.estado,
+        cotizacion_abierta:
+          dto.cotizacion_abierta ?? current.cotizacion_abierta ?? false,
         updated_by: userId,
       })
       .eq('id', vueloId)
@@ -631,8 +653,11 @@ export class QuotesService {
   }
 
   /**
-   * Reemplaza el plan de escalas. Solo aplica para MULTIESCALA. Para vuelos no
-   * multiescala que tuvieran escalas (cambio de tipo en revise), las borra.
+   * Sincroniza el plan de escalas con el itinerario cotizado, SIN destruir las
+   * capturas: hace upsert por `orden` (UPDATE de los campos de plan preservando
+   * tacómetros/fotos/horas reales y la asignación por tramo; INSERT de tramos
+   * nuevos) y borra los sobrantes solo si no tienen tacómetro capturado. Esto
+   * permite re-cotizar vuelos abiertos ya volados sin perder datos.
    */
   private async replaceEscalas(
     vueloId: string,
@@ -640,42 +665,78 @@ export class QuotesService {
     userId: string,
     fechas?: { inicio?: string | null; fin?: string | null },
   ): Promise<void> {
-    const { error: delErr } = await this.supabase.service
+    const { data: existing, error: exErr } = await this.supabase.service
       .from('escala')
-      .delete()
+      .select('id, orden, taco_salida, taco_llegada, fecha_salida_plan')
       .eq('vuelo_id', vueloId);
-    if (delErr) throw new Error(`Failed to clear escalas: ${delErr.message}`);
+    if (exErr) throw new Error(`Failed to read escalas: ${exErr.message}`);
+    const porOrden = new Map(
+      (existing ?? []).map((e) => [e.orden as number, e]),
+    );
+    const tieneTaco = (e: { taco_salida: unknown; taco_llegada: unknown }) =>
+      e.taco_salida != null || e.taco_llegada != null;
 
-    if (!escalas || escalas.length === 0) return;
-
-    const rows = escalas.map((e, idx) => ({
-      vuelo_id: vueloId,
-      orden: idx + 1,
-      origen_iata: e.origen_iata.toUpperCase(),
-      destino_iata: e.destino_iata.toUpperCase(),
-      millas_nauticas: e.millas_nauticas,
-      pasajeros: e.es_ferry ? 0 : e.pasajeros,
-      es_ferry: e.es_ferry,
-      requiere_pernocta: e.requiere_pernocta,
-      pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
-      tipo_parada: e.tipo_parada,
-      servicio_notas: e.servicio_notas,
-      // Fecha del tramo: explícita, o por default el 1er tramo hereda la fecha
-      // de salida del vuelo y el último la del traslado final.
-      fecha_salida_plan:
+    const total = escalas?.length ?? 0;
+    for (let idx = 0; idx < total; idx++) {
+      const e = escalas![idx];
+      const orden = idx + 1;
+      const fechaPlan =
         e.fecha_salida_plan ??
         (idx === 0
           ? (fechas?.inicio ?? null)
-          : idx === escalas.length - 1
+          : idx === total - 1
             ? (fechas?.fin ?? null)
-            : null),
-      created_by: userId,
-      updated_by: userId,
-    }));
-    const { error: insErr } = await this.supabase.service
-      .from('escala')
-      .insert(rows);
-    if (insErr) throw new Error(`Failed to insert escalas: ${insErr.message}`);
+            : null);
+      const planFields: Record<string, unknown> = {
+        origen_iata: e.origen_iata.toUpperCase(),
+        destino_iata: e.destino_iata.toUpperCase(),
+        millas_nauticas: e.millas_nauticas,
+        pasajeros: e.es_ferry ? 0 : e.pasajeros,
+        es_ferry: e.es_ferry,
+        requiere_pernocta: e.requiere_pernocta,
+        pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
+        tipo_parada: e.tipo_parada,
+        servicio_notas: e.servicio_notas,
+        updated_by: userId,
+      };
+      const actual = porOrden.get(orden);
+      if (actual) {
+        // No pisar con null una fecha ya planeada/asignada al tramo.
+        if (fechaPlan != null || actual.fecha_salida_plan == null) {
+          planFields.fecha_salida_plan = fechaPlan;
+        }
+        const { error } = await this.supabase.service
+          .from('escala')
+          .update(planFields)
+          .eq('id', actual.id as string);
+        if (error) throw new Error(`Failed to update escala ${orden}: ${error.message}`);
+      } else {
+        const { error } = await this.supabase.service.from('escala').insert({
+          vuelo_id: vueloId,
+          orden,
+          ...planFields,
+          fecha_salida_plan: fechaPlan,
+          created_by: userId,
+        });
+        if (error) throw new Error(`Failed to insert escala ${orden}: ${error.message}`);
+      }
+    }
+
+    // Sobrantes (orden > nuevo total): se eliminan solo si no tienen captura.
+    const sobrantes = (existing ?? []).filter((e) => (e.orden as number) > total);
+    for (const s of sobrantes) {
+      if (tieneTaco(s)) {
+        this.logger.warn(
+          `Vuelo ${vueloId}: escala orden ${s.orden} tiene tacómetro capturado; se conserva aunque el plan cotizado ya no la incluye.`,
+        );
+        continue;
+      }
+      const { error } = await this.supabase.service
+        .from('escala')
+        .delete()
+        .eq('id', s.id as string);
+      if (error) throw new Error(`Failed to delete escala sobrante: ${error.message}`);
+    }
   }
 
   private async appendVersionHistory(

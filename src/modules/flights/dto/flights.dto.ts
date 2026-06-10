@@ -241,3 +241,68 @@ export class CreateExternalFlightDto {
   @IsString()
   notas_internas?: string;
 }
+
+/**
+ * Reserva tentativa: aparta el espacio en el calendario SIN cotización
+ * (el cliente aún no confirma o faltan costos para cotizar). Vuelo propio.
+ */
+export class CreateReservaDto {
+  @ApiProperty()
+  @IsUUID()
+  cliente_id!: string;
+
+  @ApiProperty()
+  @IsString()
+  @Length(3, 4)
+  origen_iata!: string;
+
+  @ApiProperty({ description: 'Destino tentativo (primer destino conocido si es vuelo abierto)' })
+  @IsString()
+  @Length(3, 4)
+  destino_iata!: string;
+
+  @ApiProperty({ description: 'Fecha/hora apartada (salida)' })
+  @Type(() => Date)
+  @IsDate()
+  fecha_vuelo!: Date;
+
+  @ApiPropertyOptional({ description: 'Fecha/hora del regreso (si se conoce)' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_traslado_final?: Date;
+
+  @ApiPropertyOptional({ minimum: 1, default: 1 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  pasajeros?: number;
+
+  @ApiPropertyOptional({ description: 'Aeronave tentativa' })
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string;
+
+  @ApiPropertyOptional({ description: 'Piloto tentativo' })
+  @IsOptional()
+  @IsUUID()
+  piloto_id?: string;
+
+  @ApiPropertyOptional({ description: 'Vuelo abierto: el itinerario/precio se cierra al final' })
+  @IsOptional()
+  @IsBoolean()
+  cotizacion_abierta?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notas?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notas_internas?: string;
+}

@@ -29,6 +29,7 @@ import {
   AssignFlightDto,
   CancelFlightDto,
   CreateExternalFlightDto,
+  CreateReservaDto,
   ListFlightsQuery,
   SetFlightPlanDto,
   TacoStatusDto,
@@ -65,6 +66,19 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.createExternal(dto, c.userId);
+  }
+
+  @Post('reserva')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Reserva tentativa: aparta el espacio en el calendario SIN cotización (vuelo propio). Se cotiza después desde el detalle.',
+  })
+  createReserva(
+    @Body() dto: CreateReservaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.createReserva(dto, c.userId);
   }
 
   @Get(':id')

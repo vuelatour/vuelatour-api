@@ -17,6 +17,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
   AssignFlightDto,
   CreateExternalFlightDto,
+  CreateReservaDto,
   ListFlightsQuery,
   UpdateFlightDto,
 } from './dto/flights.dto';
@@ -30,7 +31,7 @@ import type {
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -369,18 +370,10 @@ export class FlightsService {
       );
     }
 
-    // No se puede asignar piloto hasta que la cotización esté confirmada.
+    // Operación y administración son caminos independientes: el piloto se puede
+    // asignar aunque la cotización no esté confirmada (decisión Itzel/Alejandro).
     const asignandoPiloto =
       dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
-    if (
-      asignandoPiloto &&
-      current.estado !== 'CONFIRMADO' &&
-      current.estado !== 'EN_VUELO'
-    ) {
-      throw new ConflictException(
-        'Debes confirmar la cotización antes de asignar un piloto',
-      );
-    }
 
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
     if (dto.fecha_vuelo) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
@@ -584,23 +577,19 @@ export class FlightsService {
 
   async assign(id: string, dto: AssignFlightDto, updatedBy: string) {
     const current = await this.findById(id);
-    if (current.estado !== 'COTIZADO' && current.estado !== 'CONFIRMADO') {
+    // Operación independiente de lo administrativo: se asigna avión/piloto en
+    // cualquier estado operable (incluida la RESERVA sin cotizar).
+    if (current.estado === 'COMPLETADO' || current.estado === 'CANCELADO') {
       throw new ConflictException(
-        `Solo se asigna en estado COTIZADO o CONFIRMADO. Actual: ${current.estado}`,
+        `No se asigna en estado ${current.estado}.`,
       );
     }
     if (current.es_externo && dto.aeronave_id) {
       throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
     }
 
-    // No se puede asignar piloto hasta que la cotización esté confirmada.
     const asignandoPiloto =
       dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
-    if (asignandoPiloto && current.estado !== 'CONFIRMADO') {
-      throw new ConflictException(
-        'Debes confirmar la cotización antes de asignar un piloto',
-      );
-    }
 
     // Doc 4.3: no se asigna avión/piloto con documento crítico vencido ni avión en taller.
     await this.validateAssignTargets({
@@ -715,10 +704,9 @@ export class FlightsService {
     if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
 
     const vuelo = await this.findById(escala.vuelo_id as string);
-    if (vuelo.estado !== 'COTIZADO' && vuelo.estado !== 'CONFIRMADO') {
-      throw new ConflictException(
-        `Solo se asigna en estado COTIZADO o CONFIRMADO. Actual: ${vuelo.estado}`,
-      );
+    // Operación independiente: asignable en cualquier estado operable.
+    if (vuelo.estado === 'COMPLETADO' || vuelo.estado === 'CANCELADO') {
+      throw new ConflictException(`No se asigna en estado ${vuelo.estado}.`);
     }
     if (vuelo.es_externo && dto.aeronave_id) {
       throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
@@ -726,11 +714,6 @@ export class FlightsService {
 
     const asignandoPiloto =
       dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
-    if (asignandoPiloto && vuelo.estado !== 'CONFIRMADO') {
-      throw new ConflictException(
-        'Debes confirmar la cotización antes de asignar un piloto',
-      );
-    }
 
     await this.validateAssignTargets({
       aeronaveId: dto.aeronave_id,
@@ -838,9 +821,13 @@ export class FlightsService {
 
   async start(id: string, updatedBy: string) {
     const current = await this.findById(id);
-    if (current.estado !== 'CONFIRMADO') {
+    // Operación independiente de lo administrativo: el vuelo puede despegar
+    // aunque la cotización siga abierta (RESERVA/COTIZADO). Los guards de
+    // asignación y tacómetro se mantienen.
+    const iniciables = ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'];
+    if (!iniciables.includes(current.estado as string)) {
       throw new ConflictException(
-        `Solo se inicia vuelo desde CONFIRMADO. Actual: ${current.estado}`,
+        `No se puede iniciar un vuelo en estado ${current.estado}.`,
       );
     }
     if (!current.es_externo) {
@@ -977,6 +964,110 @@ export class FlightsService {
       throw new Error(error.message);
     }
     if (data?.id) void this.calendar.syncFlight(data.id as string);
+    return data!;
+  }
+
+  /**
+   * Reserva tentativa: aparta el espacio en el calendario SIN cotización
+   * (vuelo propio; el cliente aún no confirma o faltan costos para cotizar).
+   * Precios en 0 — se cotiza después con "revisar" desde el detalle. Crea sus
+   * tramos (ida + regreso si hay fecha final) para que la asignación por tramo
+   * y el calendario por tramo funcionen desde el día uno.
+   */
+  async createReserva(dto: CreateReservaDto, userId: string) {
+    if (dto.aeronave_id || dto.piloto_id) {
+      await this.validateAssignTargets({
+        aeronaveId: dto.aeronave_id,
+        pilotoId: dto.piloto_id,
+      });
+    }
+    const origen = dto.origen_iata.toUpperCase();
+    const destino = dto.destino_iata.toUpperCase();
+    const pasajeros = dto.pasajeros ?? 1;
+    const payload = {
+      cliente_id: dto.cliente_id,
+      aeronave_id: dto.aeronave_id ?? null,
+      piloto_id: dto.piloto_id ?? null,
+      es_externo: false,
+      tipo: 'MULTIESCALA',
+      estado: 'RESERVA',
+      cotizacion_version: 1,
+      origen_iata: origen,
+      destino_iata: destino,
+      es_redondo_auto: false,
+      num_aterrizajes: dto.fecha_traslado_final ? 2 : 1,
+      pasajeros,
+      pase_abordar: false,
+      tiempo_cobrable_hr: 0,
+      tarifa_tipo: 'PUBLICO',
+      tarifa_hora_usd: 0,
+      subtotal_vuelo_usd: 0,
+      tuas_usd: 0,
+      iva_pct: 0,
+      iva_usd: 0,
+      monto_total_usd: 0,
+      cotizacion_abierta: dto.cotizacion_abierta ?? false,
+      fecha_vuelo: dto.fecha_vuelo.toISOString(),
+      fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
+      notas: dto.notas,
+      notas_internas: dto.notas_internas,
+      created_by: userId,
+      updated_by: userId,
+    };
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .insert(payload)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503')
+        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+      throw new Error(error.message);
+    }
+
+    // Tramos tentativos: ida (+ regreso invertido si hay fecha de regreso).
+    const vueloId = data!.id as string;
+    const legs = [
+      {
+        vuelo_id: vueloId,
+        orden: 1,
+        origen_iata: origen,
+        destino_iata: destino,
+        aeronave_id: dto.aeronave_id ?? null,
+        piloto_id: dto.piloto_id ?? null,
+        pasajeros,
+        fecha_salida_plan: dto.fecha_vuelo.toISOString(),
+        created_by: userId,
+        updated_by: userId,
+      },
+      ...(dto.fecha_traslado_final
+        ? [
+            {
+              vuelo_id: vueloId,
+              orden: 2,
+              origen_iata: destino,
+              destino_iata: origen,
+              aeronave_id: dto.aeronave_id ?? null,
+              piloto_id: dto.piloto_id ?? null,
+              pasajeros,
+              fecha_salida_plan: dto.fecha_traslado_final.toISOString(),
+              created_by: userId,
+              updated_by: userId,
+            },
+          ]
+        : []),
+    ];
+    const { error: legsErr } = await this.supabase.service
+      .from('escala')
+      .insert(legs);
+    if (legsErr) {
+      this.logger.warn(
+        `Reserva ${vueloId}: no se pudieron crear los tramos tentativos: ${legsErr.message}`,
+      );
+    }
+
+    if (dto.piloto_id) void this.notifyPilotAssigned(dto.piloto_id, data!);
+    void this.calendar.syncFlight(vueloId);
     return data!;
   }
 
