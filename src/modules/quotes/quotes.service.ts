@@ -505,6 +505,7 @@ export class QuotesService {
 
     await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
 
+    void this.calendar.syncFlight(vuelo!.id);
     const escalas = await this.findEscalas(vuelo!.id);
     return { ...vuelo!, escalas };
   }
@@ -544,6 +545,12 @@ export class QuotesService {
         es_redondo_auto: breakdown.ruta.es_redondo_auto,
         num_aterrizajes: breakdown.ruta.num_aterrizajes,
         pasajeros: reprPax,
+        ...(dto.fecha_vuelo !== undefined
+          ? { fecha_vuelo: dto.fecha_vuelo.toISOString() }
+          : {}),
+        ...(dto.fecha_traslado_final !== undefined
+          ? { fecha_traslado_final: dto.fecha_traslado_final.toISOString() }
+          : {}),
         ...(dto.pasajeros_nombres !== undefined
           ? { pasajeros_nombres: dto.pasajeros_nombres }
           : {}),
@@ -579,12 +586,21 @@ export class QuotesService {
     if (error) throw new Error(error.message);
     const pernoctasAntes = await this.pernoctaDestinos(vueloId);
     await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId, {
-      inicio: (current.fecha_vuelo as string | null) ?? null,
-      fin: (current.fecha_traslado_final as string | null) ?? null,
+      inicio:
+        dto.fecha_vuelo?.toISOString() ??
+        (current.fecha_vuelo as string | null) ??
+        null,
+      fin:
+        dto.fecha_traslado_final?.toISOString() ??
+        (current.fecha_traslado_final as string | null) ??
+        null,
     });
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     void this.notifyPernoctaCambiada(updated!, pernoctasAntes, pernoctasDespues);
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
+    // Refleja fechas/tramos nuevos en el calendario (admin lee en vivo; esto
+    // mueve también los eventos de Google si el vuelo ya estaba sincronizado).
+    void this.calendar.syncFlight(vueloId);
     const escalas = await this.findEscalas(vueloId);
     return { ...updated!, escalas };
   }

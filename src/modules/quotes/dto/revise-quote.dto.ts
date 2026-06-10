@@ -1,5 +1,13 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsArray, IsOptional, IsString, MaxLength, MinLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import {
+  IsArray,
+  IsDate,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+} from 'class-validator';
 import { CalculateQuoteDto } from './calculate-quote.dto';
 
 export class ReviseQuoteDto extends CalculateQuoteDto {
@@ -17,6 +25,18 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   @IsString()
   @MaxLength(2000)
   notas?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha de traslado inicial / salida' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_vuelo?: Date;
+
+  @ApiPropertyOptional({ description: 'Fecha de traslado final / regreso' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_traslado_final?: Date;
 
   @ApiPropertyOptional({
     type: [String],
