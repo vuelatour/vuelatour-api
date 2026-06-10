@@ -23,6 +23,7 @@ import {
   CreateGastoDto,
   ListGastosQuery,
   PhotoUrlsDto,
+  SugerirVueloQuery,
   UpdateGastoDto,
 } from './dto/expenses.dto';
 import { ExpensesService } from './expenses.service';
@@ -46,6 +47,16 @@ export class ExpensesController {
       filters.categoria = CategoriaGasto.GAS;
     }
     return this.expenses.list(filters);
+  }
+
+  @Get('sugerir-vuelo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Sugiere el vuelo al que corresponde una carga de combustible (aeronave + momento de la carga). En ruta → ese vuelo; si no → siguiente salida.',
+  })
+  sugerirVuelo(@Query() q: SugerirVueloQuery) {
+    return this.expenses.sugerirVuelo(q.aeronave_id, q.fecha_hora);
   }
 
   @Get('export')

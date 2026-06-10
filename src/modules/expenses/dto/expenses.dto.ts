@@ -41,6 +41,11 @@ export enum MedioPago {
   TRANSFERENCIA = 'TRANSFERENCIA',
 }
 
+export enum TipoCombustible {
+  TURBOSINA = 'TURBOSINA',
+  AVGAS = 'AVGAS',
+}
+
 export enum EstatusComprobante {
   FACTURA = 'FACTURA',
   VALE = 'VALE',
@@ -107,6 +112,28 @@ export class CreateGastoDto {
   @IsString()
   foto_url?: string;
 
+  @ApiPropertyOptional({ description: 'Litros cargados (solo combustible)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  litros?: number;
+
+  @ApiPropertyOptional({ enum: TipoCombustible })
+  @IsOptional()
+  @IsEnum(TipoCombustible)
+  tipo_combustible?: TipoCombustible;
+
+  @ApiPropertyOptional({ description: 'Aeropuerto/FBO donde se hizo la carga' })
+  @IsOptional()
+  @IsString()
+  lugar?: string;
+
+  @ApiPropertyOptional({ description: 'Momento preciso de la carga (ISO); permite sugerir el vuelo' })
+  @IsOptional()
+  @IsDateString()
+  fecha_hora_carga?: string;
+
   @ApiPropertyOptional({ description: 'Valores extraídos por IA antes de confirmación' })
   @IsOptional()
   @IsObject()
@@ -134,6 +161,16 @@ export class PhotoUrlsDto {
   @ApiProperty({ type: [String], description: 'Paths de fotos en gasto-fotos a firmar' })
   @IsString({ each: true })
   paths!: string[];
+}
+
+export class SugerirVueloQuery {
+  @ApiProperty({ description: 'Aeronave de la carga' })
+  @IsUUID()
+  aeronave_id!: string;
+
+  @ApiProperty({ description: 'Momento de la carga (ISO 8601)' })
+  @IsDateString()
+  fecha_hora!: string;
 }
 
 export class ListGastosQuery {

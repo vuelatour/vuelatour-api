@@ -13,7 +13,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, notas, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, notas, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión y persona que capturó.
 const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre)`;
@@ -137,6 +137,10 @@ export class ExpensesService {
       vuelo_id: dto.vuelo_id,
       aeronave_id: dto.aeronave_id,
       proveedor_id: dto.proveedor_id,
+      litros: dto.litros,
+      tipo_combustible: dto.tipo_combustible,
+      lugar: dto.lugar,
+      fecha_hora_carga: dto.fecha_hora_carga,
       estatus_comprobante: dto.estatus_comprobante ?? 'SIN_COMPROBANTE',
       foto_url: dto.foto_url,
       valor_ia_extraido: dto.valor_ia_extraido,
@@ -198,6 +202,118 @@ export class ExpensesService {
       .limit(1);
     if (error) return false; // la detección no debe bloquear la captura
     return (data ?? []).length > 0;
+  }
+
+  /**
+   * Sugiere a qué vuelo corresponde una carga de combustible según la
+   * aeronave (matrícula) y el momento de la carga:
+   *  - si la carga cae dentro de la ventana del vuelo (en ruta) → ese vuelo;
+   *  - si no → la SIGUIENTE salida de esa aeronave (la carga de las 6 pm
+   *    "previene" el siguiente vuelo, aunque sea días después).
+   * Devuelve el sugerido + candidatos cercanos para confirmar/cambiar.
+   */
+  async sugerirVuelo(aeronaveId: string, fechaHoraIso: string) {
+    const t = new Date(fechaHoraIso).getTime();
+    if (!Number.isFinite(t)) {
+      throw new BadRequestException('fecha_hora inválida (usa ISO 8601)');
+    }
+    const desde = new Date(t - 7 * 86_400_000).toISOString();
+    const hasta = new Date(t + 14 * 86_400_000).toISOString();
+
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, folio, origen_iata, destino_iata, estado, fecha_vuelo, fecha_traslado_final, aeronave_id, escalas:escala(aeronave_id, fecha_salida_plan, hora_salida, hora_llegada)',
+      )
+      .neq('estado', 'CANCELADO')
+      .not('fecha_vuelo', 'is', null)
+      .gte('fecha_vuelo', desde)
+      .lte('fecha_vuelo', hasta)
+      .order('fecha_vuelo', { ascending: true })
+      .limit(100);
+    if (error) throw new Error(error.message);
+
+    interface LegRow {
+      aeronave_id: string | null;
+      fecha_salida_plan: string | null;
+      hora_salida: string | null;
+      hora_llegada: string | null;
+    }
+    const ms = (v: string | null) => (v ? new Date(v).getTime() : null);
+
+    const deAvion = (data ?? [])
+      .map((v) => {
+        const escalas = ((v.escalas as LegRow[] | null) ?? []).filter(
+          (e) =>
+            e.aeronave_id === aeronaveId ||
+            (e.aeronave_id == null && v.aeronave_id === aeronaveId),
+        );
+        const esDeAvion = v.aeronave_id === aeronaveId || escalas.length > 0;
+        if (!esDeAvion) return null;
+        const salidas = escalas
+          .map((e) => ms(e.fecha_salida_plan))
+          .filter((x): x is number => x != null);
+        const llegadas = escalas
+          .map((e) => ms(e.hora_llegada))
+          .filter((x): x is number => x != null);
+        const inicio = salidas.length
+          ? Math.min(...salidas)
+          : (ms(v.fecha_vuelo as string) ?? t);
+        const fin = Math.max(
+          ms(v.fecha_traslado_final as string | null) ?? inicio,
+          salidas.length ? Math.max(...salidas) : inicio,
+          llegadas.length ? Math.max(...llegadas) : inicio,
+        );
+        return { v, inicio, fin };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+
+    const VENTANA_ANTES_MS = 3 * 3_600_000; // carga previa al primer despegue
+    const VENTANA_DESPUES_MS = 2 * 3_600_000; // carga justo al cerrar el vuelo
+
+    const toItem = (c: (typeof deAvion)[number]) => ({
+      vuelo_id: c.v.id as string,
+      folio: c.v.folio as number,
+      origen_iata: c.v.origen_iata as string,
+      destino_iata: c.v.destino_iata as string,
+      estado: c.v.estado as string,
+      fecha_vuelo: c.v.fecha_vuelo as string,
+    });
+
+    // 1) Carga en ruta: cae dentro de la ventana del vuelo (o va en el aire).
+    const enRuta = deAvion.find(
+      (c) =>
+        (t >= c.inicio - VENTANA_ANTES_MS && t <= c.fin + VENTANA_DESPUES_MS) ||
+        (c.v.estado === 'EN_VUELO' && t >= c.inicio - VENTANA_ANTES_MS),
+    );
+    // 2) Previno: la siguiente salida de la aeronave después de la carga.
+    const siguiente = deAvion
+      .filter((c) => c.inicio >= t)
+      .sort((a, b) => a.inicio - b.inicio)[0];
+    // 3) Fallback: el vuelo más cercano hacia atrás.
+    const anterior = deAvion
+      .filter((c) => c.inicio < t)
+      .sort((a, b) => b.inicio - a.inicio)[0];
+
+    const elegido = enRuta ?? siguiente ?? anterior ?? null;
+    const razon = enRuta
+      ? 'EN_RUTA'
+      : siguiente
+        ? 'SIGUIENTE_SALIDA'
+        : anterior
+          ? 'VUELO_ANTERIOR'
+          : null;
+
+    const candidatos = deAvion
+      .slice()
+      .sort((a, b) => Math.abs(a.inicio - t) - Math.abs(b.inicio - t))
+      .slice(0, 5)
+      .map(toItem);
+
+    return {
+      sugerido: elegido ? { ...toItem(elegido), razon } : null,
+      candidatos,
+    };
   }
 
   async update(id: string, dto: UpdateGastoDto, userId: string) {

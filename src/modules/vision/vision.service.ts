@@ -51,7 +51,11 @@ export interface CombustibleTicketVisionResult {
   aeropuerto: string | null;
   tipo_combustible: 'TURBOSINA' | 'AVGAS' | null;
   fecha: string | null;
+  /** Hora de la carga HH:MM (24h) — clave para ligar el ticket al vuelo. */
+  hora: string | null;
   proveedor: string | null;
+  /** Últimos 4 dígitos de la tarjeta usada, si aparecen en el ticket. */
+  tarjeta_terminacion: string | null;
   confianza: number;
   legible: boolean;
   notas: string;
