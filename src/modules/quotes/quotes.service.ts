@@ -747,8 +747,37 @@ export class QuotesService {
   }
 
   private async resolveRoute(dto: CalculateQuoteDto): Promise<ResolvedRoute> {
-    // Ruta del catalogo (incluye multiescala con tramos hidratados).
-    // Prioritaria sobre dto.tipo / dto.escalas porque el catalogo es la fuente.
+    // Escalas explícitas = el itinerario PROPIO de la cotización (la plantilla
+    // hidratada y posiblemente ajustada por el operador). Tienen prioridad;
+    // ruta_id se conserva solo como referencia de la plantilla usada.
+    if (
+      dto.tipo === TipoVuelo.MULTIESCALA &&
+      dto.escalas &&
+      dto.escalas.length >= 1
+    ) {
+      for (let i = 0; i < dto.escalas.length - 1; i++) {
+        const a = dto.escalas[i].destino_iata.toUpperCase();
+        const b = dto.escalas[i + 1].origen_iata.toUpperCase();
+        if (a !== b) {
+          throw new BadRequestException(
+            `Escala ${i + 2}: el origen (${b}) debe coincidir con el destino de la escala ${i + 1} (${a}).`,
+          );
+        }
+      }
+      const escalasNorm = this.resolveLegs(dto.escalas as RawLeg[], dto.pasajeros);
+      const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
+      return {
+        ruta_id: dto.ruta_id ?? null,
+        origen_iata: escalasNorm[0].origen_iata,
+        destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
+        millas_nauticas: nmTotal,
+        es_redondo_auto: false,
+        num_aterrizajes: escalasNorm.length,
+        escalas: escalasNorm,
+      };
+    }
+
+    // Ruta del catalogo sin escalas explícitas: hidrata los tramos guardados.
     if (dto.ruta_id) {
       const r = await this.routes.findById(dto.ruta_id);
       if (!r.activa) throw new BadRequestException('Ruta inactiva');
@@ -776,33 +805,10 @@ export class QuotesService {
       };
     }
 
-    // Sin ruta_id: MULTIESCALA requiere escalas[] explicitas.
     if (dto.tipo === TipoVuelo.MULTIESCALA) {
-      if (!dto.escalas || dto.escalas.length < 1) {
-        throw new BadRequestException(
-          'El itinerario requiere al menos 1 tramo (agrega el regreso si aplica).',
-        );
-      }
-      for (let i = 0; i < dto.escalas.length - 1; i++) {
-        const a = dto.escalas[i].destino_iata.toUpperCase();
-        const b = dto.escalas[i + 1].origen_iata.toUpperCase();
-        if (a !== b) {
-          throw new BadRequestException(
-            `Escala ${i + 2}: el origen (${b}) debe coincidir con el destino de la escala ${i + 1} (${a}).`,
-          );
-        }
-      }
-      const escalasNorm = this.resolveLegs(dto.escalas as RawLeg[], dto.pasajeros);
-      const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
-      return {
-        ruta_id: null,
-        origen_iata: escalasNorm[0].origen_iata,
-        destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
-        millas_nauticas: nmTotal,
-        es_redondo_auto: false,
-        num_aterrizajes: escalasNorm.length,
-        escalas: escalasNorm,
-      };
+      throw new BadRequestException(
+        'El itinerario requiere al menos 1 tramo (agrega el regreso si aplica).',
+      );
     }
     if (!dto.origen_iata || !dto.destino_iata || dto.millas_nauticas === undefined) {
       throw new BadRequestException(
