@@ -105,9 +105,10 @@ export class QuotesService {
     const route = await this.resolveRoute(dto);
     const matriculaPrefix = this.derivarMatriculaPrefix(aeronave.matricula);
 
-    const nmTotal = route.es_redondo_auto
-      ? Number(route.millas_nauticas) * 2
-      : Number(route.millas_nauticas);
+    // El "redondo automático" (×2) se eliminó: las millas son SIEMPRE la suma
+    // explícita de los tramos del itinerario. resolveRoute rechaza los caminos
+    // legacy que dependían de duplicar millas.
+    const nmTotal = Number(route.millas_nauticas);
 
     const velocidadKts = Number(aeronave.velocidad_crucero_kts);
     if (!velocidadKts || velocidadKts <= 0) {
@@ -794,15 +795,12 @@ export class QuotesService {
           escalas: escalasNorm,
         };
       }
-      return {
-        ruta_id: r.id,
-        origen_iata: r.origen_iata,
-        destino_iata: r.destino_iata,
-        millas_nauticas: Number(r.millas_nauticas),
-        es_redondo_auto: r.es_redondo_auto,
-        num_aterrizajes: r.num_aterrizajes,
-        escalas: null,
-      };
+      // Ruta legacy SIMPLE (redondo automático ×2): ya no se cotiza. El precio
+      // dependía de duplicar millas implícitamente — edítala en Rutas para
+      // convertirla a tramos explícitos.
+      throw new BadRequestException(
+        `La ruta ${r.origen_iata}→${r.destino_iata} es legacy (redondo automático). Edítala en Rutas para convertirla a tramos antes de cotizar.`,
+      );
     }
 
     if (dto.tipo === TipoVuelo.MULTIESCALA) {
@@ -810,20 +808,12 @@ export class QuotesService {
         'El itinerario requiere al menos 1 tramo (agrega el regreso si aplica).',
       );
     }
-    if (!dto.origen_iata || !dto.destino_iata || dto.millas_nauticas === undefined) {
-      throw new BadRequestException(
-        'Provee ruta_id o (origen_iata + destino_iata + millas_nauticas)',
-      );
-    }
-    return {
-      ruta_id: null,
-      origen_iata: dto.origen_iata.toUpperCase(),
-      destino_iata: dto.destino_iata.toUpperCase(),
-      millas_nauticas: dto.millas_nauticas,
-      es_redondo_auto: dto.es_redondo_auto ?? true,
-      num_aterrizajes: dto.num_aterrizajes ?? 2,
-      escalas: null,
-    };
+    // Modo ad-hoc legacy (origen/destino/millas sueltos con ×2 implícito):
+    // eliminado junto con el "redondo automático". Toda cotización se arma por
+    // tramos explícitos o con una ruta guardada.
+    throw new BadRequestException(
+      'Cotiza con una ruta guardada (ruta_id) o con el itinerario por tramos (escalas[]).',
+    );
   }
 
   /**
