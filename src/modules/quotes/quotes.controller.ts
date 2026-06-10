@@ -61,6 +61,16 @@ export class QuotesController {
     return this.quotes.create(dto, c.userId);
   }
 
+  @Get('rutas-sugeridas')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Rutas que el cliente suele pedir (historial agrupado por itinerario), para sugerir en el cotizador.',
+  })
+  rutasSugeridas(@Query('cliente_id', ParseUUIDPipe) clienteId: string) {
+    return this.quotes.rutasSugeridas(clienteId);
+  }
+
   @Get(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({ summary: 'Get vuelo/quote with current cotization snapshot. No accesible a pilotos.' })

@@ -63,6 +63,16 @@ interface RawLeg {
   fecha_salida_plan?: Date | string | null;
 }
 
+/** Ruta sugerida por historial del cliente (grupo de itinerarios iguales). */
+export interface RutaSugerida {
+  clave: string;
+  etiqueta: string;
+  veces: number;
+  ultima_fecha: string | null;
+  ruta_id: string | null;
+  tramos: Array<Record<string, unknown>>;
+}
+
 export interface TuasAeropuerto {
   iata: string;
   aplica: boolean;
@@ -784,6 +794,84 @@ export class QuotesService {
     if (error) throw new Error(error.message);
     void this.calendar.removeFlight(vueloId);
     return data!;
+  }
+
+  /**
+   * Rutas que el cliente suele pedir, según su historial real de vuelos:
+   * agrupa los itinerarios por firma (cadena de tramos), cuenta veces y
+   * recencia, y devuelve el detalle de tramos del vuelo más reciente de cada
+   * grupo (listo para hidratar el cotizador de un tap).
+   */
+  async rutasSugeridas(clienteId: string): Promise<RutaSugerida[]> {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, ruta_id, fecha_vuelo, estado, escalas:escala(orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas)',
+      )
+      .eq('cliente_id', clienteId)
+      .neq('estado', 'CANCELADO')
+      .eq('es_externo', false)
+      .order('fecha_vuelo', { ascending: false, nullsFirst: false })
+      .limit(60);
+    if (error) throw new Error(error.message);
+
+    interface LegRow {
+      orden: number;
+      origen_iata: string;
+      destino_iata: string;
+      millas_nauticas: number | string | null;
+      pasajeros: number | null;
+      es_ferry: boolean | null;
+      requiere_pernocta: boolean | null;
+      pernocta_costo_usd: number | string | null;
+      tipo_parada: string | null;
+      servicio_notas: string | null;
+    }
+
+    const grupos = new Map<string, RutaSugerida>();
+    for (const v of data ?? []) {
+      const legs = (((v.escalas as LegRow[] | null) ?? []) as LegRow[])
+        .slice()
+        .sort((a, b) => a.orden - b.orden);
+      if (legs.length === 0) continue;
+      const clave = legs.map((l) => `${l.origen_iata}-${l.destino_iata}`).join('|');
+      const existente = grupos.get(clave);
+      if (existente) {
+        existente.veces += 1;
+        // El query viene ordenado por recencia: el primero ya trae el
+        // itinerario y la fecha más recientes del grupo.
+        existente.ruta_id ??= v.ruta_id as string | null;
+        continue;
+      }
+      const etiqueta = [legs[0].origen_iata, ...legs.map((l) => l.destino_iata)].join(' → ');
+      grupos.set(clave, {
+        clave,
+        etiqueta,
+        veces: 1,
+        ultima_fecha: (v.fecha_vuelo as string | null) ?? null,
+        ruta_id: (v.ruta_id as string | null) ?? null,
+        tramos: legs.map((l) => ({
+          origen_iata: l.origen_iata,
+          destino_iata: l.destino_iata,
+          millas_nauticas: Number(l.millas_nauticas) || 0,
+          pasajeros: l.es_ferry ? 0 : l.pasajeros,
+          es_ferry: l.es_ferry === true,
+          requiere_pernocta: l.requiere_pernocta === true,
+          pernocta_costo_usd:
+            l.pernocta_costo_usd != null ? Number(l.pernocta_costo_usd) : null,
+          tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
+          servicio_notas: l.servicio_notas ?? null,
+        })),
+      });
+    }
+
+    return [...grupos.values()]
+      .sort(
+        (a, b) =>
+          b.veces - a.veces ||
+          (b.ultima_fecha ?? '').localeCompare(a.ultima_fecha ?? ''),
+      )
+      .slice(0, 5);
   }
 
   // ============ Internals ============
