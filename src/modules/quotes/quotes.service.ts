@@ -21,6 +21,7 @@ import {
 } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
+import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
 /** Tramo con sus detalles ya resueltos (defaults aplicados). */
@@ -76,7 +77,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -186,6 +187,22 @@ export class QuotesService {
       0,
     );
 
+    // Conceptos extra (handler, comisariato, extensión de servicios…): los
+    // gravados entran a la base de IVA; los no gravados se suman al final.
+    const extras = (dto.extras ?? [])
+      .map((e) => ({
+        concepto: e.concepto.trim(),
+        monto_usd: round2(Number(e.monto_usd) || 0),
+        aplica_iva: e.aplica_iva ?? true,
+      }))
+      .filter((e) => e.concepto.length > 0 && e.monto_usd > 0);
+    const extrasConIva = extras
+      .filter((e) => e.aplica_iva)
+      .reduce((acc, e) => acc + e.monto_usd, 0);
+    const extrasSinIva = extras
+      .filter((e) => !e.aplica_iva)
+      .reduce((acc, e) => acc + e.monto_usd, 0);
+
     const ivaAplicaPorMetodo =
       dto.metodo_pago === MetodoPago.TRANSFERENCIA ||
       dto.metodo_pago === MetodoPago.HSBC_LINK;
@@ -195,9 +212,9 @@ export class QuotesService {
         : ivaAplicaPorMetodo
           ? IVA_DEFAULT
           : 0;
-    const baseIva = subtotal + tuasTotal;
+    const baseIva = subtotal + tuasTotal + extrasConIva;
     const iva = baseIva * ivaPct;
-    const total = baseIva + iva + viaticosPernocta;
+    const total = baseIva + iva + viaticosPernocta + extrasSinIva;
 
     // Conservamos `origen` y `destino` siempre para retrocompat del frontend single-leg.
     // En MULTIESCALA `intermedios` lleva los demás aeropuertos.
@@ -276,13 +293,15 @@ export class QuotesService {
           dto.metodo_pago === MetodoPago.EFECTIVO
             ? 'Pago en efectivo: sin IVA (subtotal)'
             : ivaAplicaPorMetodo
-              ? 'Pago facturable: IVA 16% sobre (subtotal + TUAS)'
+              ? 'Pago facturable: IVA 16% sobre (subtotal + TUAS + extras gravados)'
               : `Método ${dto.metodo_pago}: sin IVA por default`,
       },
+      extras: extras.length > 0 ? extras : null,
       totales: {
         subtotal_vuelo_usd: round2(subtotal),
         tuas_total_usd: round2(tuasTotal),
         viaticos_pernocta_usd: round2(viaticosPernocta),
+        extras_total_usd: round2(extrasConIva + extrasSinIva),
         iva_usd: round2(iva),
         total_usd: round2(total),
       },
@@ -396,6 +415,7 @@ export class QuotesService {
       monto_total_usd: breakdown.totales.total_usd,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
+      extras: breakdown.extras ?? [],
       estado_permiso: requierePermiso ? 'pendiente' : 'no_aplica',
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
@@ -436,22 +456,16 @@ export class QuotesService {
     if (current.estado === 'CANCELADO') {
       throw new ConflictException('No se puede revisar una cotización cancelada.');
     }
-    const esAbierta =
-      current.cotizacion_abierta === true || dto.cotizacion_abierta === true;
+    // Ajustes de última hora (extras, pax/TUAs, cierre de abiertas): la
+    // cotización se puede revisar en cualquier estado mientras NO se haya
+    // cobrado ni facturado. Cada revisión queda versionada en el historial.
     const estadoAvanzado =
       current.estado === 'CONFIRMADO' ||
       current.estado === 'EN_VUELO' ||
       current.estado === 'COMPLETADO';
-    if (estadoAvanzado && !esAbierta) {
+    if (estadoAvanzado && (current.cobrado || current.facturado)) {
       throw new ConflictException(
-        `No se puede revisar una cotización en estado ${current.estado}. Solo RESERVA, SOLICITUD o COTIZADO admiten revisión (o vuelos con cotización abierta).`,
-      );
-    }
-    // Cotización abierta: el precio se cierra re-cotizando con los tramos
-    // reales, pero solo mientras no se haya cobrado/facturado.
-    if (estadoAvanzado && esAbierta && (current.cobrado || current.facturado)) {
-      throw new ConflictException(
-        'El vuelo ya fue cobrado/facturado; la cotización abierta ya no puede ajustarse.',
+        'El vuelo ya fue cobrado/facturado; la cotización ya no puede ajustarse.',
       );
     }
 
@@ -495,6 +509,7 @@ export class QuotesService {
             : current.estado,
         cotizacion_abierta:
           dto.cotizacion_abierta ?? current.cotizacion_abierta ?? false,
+        ...(dto.extras !== undefined ? { extras: breakdown.extras ?? [] } : {}),
         updated_by: userId,
       })
       .eq('id', vueloId)
@@ -512,6 +527,80 @@ export class QuotesService {
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
     const escalas = await this.findEscalas(vueloId);
     return { ...updated!, escalas };
+  }
+
+  /**
+   * Ajuste rápido desde el detalle de la cotización: extras y/o pasajeros, sin
+   * rearmar el cotizador. Reconstruye el DTO de revisión desde lo persistido
+   * (tramos, tarifa, método, IVA quedan idénticos) y delega en revise() — así
+   * el recálculo y el versionado son los mismos de siempre.
+   */
+  async quickAdjust(
+    vueloId: string,
+    dto: QuickAdjustQuoteDto,
+    userId: string,
+  ) {
+    const current = await this.findById(vueloId);
+    if (current.estado === 'RESERVA') {
+      throw new ConflictException(
+        'La reserva aún no tiene precios: cotízala primero (botón Cotizar).',
+      );
+    }
+    if (!current.aeronave_id) {
+      throw new BadRequestException(
+        'El vuelo no tiene aeronave asignada; usa "Revisar" para cotizar completo.',
+      );
+    }
+    const escalas = (current.escalas ?? []) as Array<Record<string, unknown>>;
+    if (escalas.length === 0) {
+      throw new BadRequestException(
+        'La cotización no tiene tramos registrados; usa "Revisar".',
+      );
+    }
+
+    const oldPax = Number(current.pasajeros);
+    const newPax = dto.pasajeros ?? oldPax;
+    const reviseDto = {
+      aeronave_id: current.aeronave_id as string,
+      tipo: TipoVuelo.MULTIESCALA,
+      // Tramos tal como están persistidos. Si cambia el pax global, los tramos
+      // que usaban el global anterior lo heredan (los personalizados se quedan).
+      escalas: escalas.map((e) => ({
+        origen_iata: e.origen_iata as string,
+        destino_iata: e.destino_iata as string,
+        millas_nauticas: Number(e.millas_nauticas) || 0,
+        pasajeros:
+          e.es_ferry === true
+            ? 0
+            : dto.pasajeros !== undefined && Number(e.pasajeros) === oldPax
+              ? undefined
+              : ((e.pasajeros as number | null) ?? undefined),
+        es_ferry: e.es_ferry === true,
+        requiere_pernocta: e.requiere_pernocta === true,
+        pernocta_costo_usd:
+          e.pernocta_costo_usd != null ? Number(e.pernocta_costo_usd) : undefined,
+        tipo_parada: (e.tipo_parada as 'NORMAL' | 'SERVICIO') ?? 'NORMAL',
+        servicio_notas: (e.servicio_notas as string | null) ?? undefined,
+        fecha_salida_plan: e.fecha_salida_plan
+          ? new Date(e.fecha_salida_plan as string)
+          : undefined,
+      })),
+      tipo_tarifa: current.tarifa_tipo as TipoTarifa,
+      pasajeros: newPax,
+      pase_abordar: current.pase_abordar === true,
+      metodo_pago: (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
+      cotizacion_abierta: current.cotizacion_abierta === true,
+      // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
+      tarifa_hora_override_usd:
+        Number(current.tarifa_hora_usd) > 0
+          ? Number(current.tarifa_hora_usd)
+          : undefined,
+      iva_pct_override: Number(current.iva_pct),
+      extras: dto.extras ?? ((current.extras as never[]) ?? []),
+      motivo: dto.motivo?.trim() || 'Ajuste rápido desde el detalle (extras/pasajeros)',
+    } as unknown as ReviseQuoteDto;
+
+    return this.revise(vueloId, reviseDto, userId);
   }
 
   async confirm(vueloId: string, userId: string) {

@@ -19,6 +19,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
+import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
 import { QuotesPdfService } from './quotes-pdf.service';
@@ -78,7 +79,7 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Revise quote (creates new version, increments cotizacion_version). Only SOLICITUD/COTIZADO allow revision.',
+      'Revise quote (creates new version, increments cotizacion_version). Permitida mientras no se haya cobrado/facturado.',
   })
   revise(
     @Param('id', ParseUUIDPipe) id: string,
@@ -86,6 +87,21 @@ export class QuotesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.quotes.revise(id, dto, c.userId);
+  }
+
+  @Post(':id/ajuste')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Ajuste rápido desde el detalle: extras y/o pasajeros (recalcula TUAs) sin rearmar el cotizador. Versiona como una revisión.',
+  })
+  quickAdjust(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: QuickAdjustQuoteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotes.quickAdjust(id, dto, c.userId);
   }
 
   @Post(':id/confirm')

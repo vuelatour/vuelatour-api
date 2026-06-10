@@ -103,6 +103,25 @@ export class EscalaInputDto {
   fecha_salida_plan?: Date;
 }
 
+/** Concepto extra de la cotización (handler, comisariato, extensión, etc.). */
+export class ExtraConceptoDto {
+  @ApiProperty({ description: 'Nombre del concepto (ej. Handler, Comisariato)' })
+  @IsString()
+  @Length(1, 120)
+  concepto!: string;
+
+  @ApiProperty({ description: 'Monto en USD' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  monto_usd!: number;
+
+  @ApiPropertyOptional({ description: 'Si entra a la base de IVA (default true)' })
+  @IsOptional()
+  @IsBoolean()
+  aplica_iva?: boolean;
+}
+
 export class CalculateQuoteDto {
   @ApiProperty({ description: 'Aeronave que vuela la ruta' })
   @IsUUID()
@@ -203,6 +222,17 @@ export class CalculateQuoteDto {
   @IsOptional()
   @IsBoolean()
   cotizacion_abierta?: boolean;
+
+  @ApiPropertyOptional({
+    type: [ExtraConceptoDto],
+    description:
+      'Conceptos extra (handler, comisariato, extensión de servicios…). Se suman al total; los gravados entran a la base de IVA.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ExtraConceptoDto)
+  extras?: ExtraConceptoDto[];
 
   @ApiProperty({ enum: MetodoPago, description: 'Determina si aplica IVA' })
   @IsEnum(MetodoPago)

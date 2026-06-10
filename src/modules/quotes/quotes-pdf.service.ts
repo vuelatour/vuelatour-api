@@ -68,6 +68,20 @@ export class QuotesPdfService {
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
       subtotal_usd: num(quote.subtotal_vuelo_usd) ?? 0,
       tuas_usd: num(quote.tuas_usd) ?? 0,
+      extras: ((quote.extras as Array<Record<string, unknown>> | undefined) ?? []).map(
+        (e) => ({
+          concepto: (e.concepto as string) ?? '',
+          monto_usd: num(e.monto_usd) ?? 0,
+          aplica_iva: e.aplica_iva !== false,
+        }),
+      ),
+      extras_total_usd:
+        num(
+          (
+            (quote.calculo_snapshot as Record<string, unknown> | undefined)
+              ?.totales as Record<string, unknown> | undefined
+          )?.extras_total_usd,
+        ) ?? 0,
       viaticos_pernocta_usd:
         num(
           (
