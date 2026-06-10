@@ -225,9 +225,9 @@ export class RoutesService {
 
     if (targetTipo === TipoRuta.MULTIESCALA) {
       const tramosSource = dto.tramos ?? current.tramos;
-      if (!tramosSource || tramosSource.length < 2) {
+      if (!tramosSource || tramosSource.length < 1) {
         throw new BadRequestException(
-          'tipo=MULTIESCALA requiere tramos[] con al menos 2 tramos',
+          'tipo=MULTIESCALA requiere tramos[] con al menos 1 tramo',
         );
       }
       const tramos = this.normalizeTramos(
@@ -331,8 +331,8 @@ export class RoutesService {
   private normalizeTramos(
     tramos: RouteTramoInputDto[] | undefined,
   ): NormalizedTramo[] {
-    if (!tramos || tramos.length < 2) {
-      throw new BadRequestException('MULTIESCALA requiere al menos 2 tramos');
+    if (!tramos || tramos.length < 1) {
+      throw new BadRequestException('La ruta requiere al menos 1 tramo');
     }
     const norm = tramos.map((t) => ({
       origen_iata: t.origen_iata.toUpperCase(),

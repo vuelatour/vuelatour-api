@@ -192,11 +192,11 @@ export class CreateRouteDto {
   @ApiPropertyOptional({
     type: [RouteTramoInputDto],
     description:
-      'Requerido si tipo=MULTIESCALA. Tramos ordenados con continuidad (destino[i] === origen[i+1]).',
+      'Requerido si tipo=MULTIESCALA. Tramos ordenados con continuidad (destino[i] === origen[i+1]). Mínimo 1 (las rutas se arman siempre por tramos; el regreso lo agrega quien crea la ruta).',
   })
   @ValidateIf((o: CreateRouteDto) => o.tipo === TipoRuta.MULTIESCALA)
   @IsArray()
-  @ArrayMinSize(2)
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => RouteTramoInputDto)
   tramos?: RouteTramoInputDto[];

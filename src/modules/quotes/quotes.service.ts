@@ -32,6 +32,8 @@ export interface ResolvedLeg {
   pernocta_costo_usd: number; // 0 si no hay pernocta
   tipo_parada: 'NORMAL' | 'SERVICIO';
   servicio_notas: string | null;
+  /** Fecha/hora planeada de salida del tramo (ISO). Null = sin definir aún. */
+  fecha_salida_plan: string | null;
 }
 
 interface ResolvedRoute {
@@ -55,6 +57,7 @@ interface RawLeg {
   pernocta_costo_usd?: number | string | null;
   tipo_parada?: string | null;
   servicio_notas?: string | null;
+  fecha_salida_plan?: Date | string | null;
 }
 
 export interface TuasAeropuerto {
@@ -408,7 +411,10 @@ export class QuotesService {
     }
 
     if (breakdown.ruta.escalas) {
-      await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId);
+      await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId, {
+        inicio: dto.fecha_vuelo?.toISOString() ?? null,
+        fin: dto.fecha_traslado_final?.toISOString() ?? null,
+      });
     }
 
     await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
@@ -467,7 +473,10 @@ export class QuotesService {
       .maybeSingle();
 
     if (error) throw new Error(error.message);
-    await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId);
+    await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId, {
+      inicio: (current.fecha_vuelo as string | null) ?? null,
+      fin: (current.fecha_traslado_final as string | null) ?? null,
+    });
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
     const escalas = await this.findEscalas(vueloId);
     return { ...updated!, escalas };
@@ -612,7 +621,7 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -628,6 +637,7 @@ export class QuotesService {
     vueloId: string,
     escalas: ResolvedLeg[] | null,
     userId: string,
+    fechas?: { inicio?: string | null; fin?: string | null },
   ): Promise<void> {
     const { error: delErr } = await this.supabase.service
       .from('escala')
@@ -649,6 +659,15 @@ export class QuotesService {
       pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
       tipo_parada: e.tipo_parada,
       servicio_notas: e.servicio_notas,
+      // Fecha del tramo: explícita, o por default el 1er tramo hereda la fecha
+      // de salida del vuelo y el último la del traslado final.
+      fecha_salida_plan:
+        e.fecha_salida_plan ??
+        (idx === 0
+          ? (fechas?.inicio ?? null)
+          : idx === escalas.length - 1
+            ? (fechas?.fin ?? null)
+            : null),
       created_by: userId,
       updated_by: userId,
     }));
@@ -719,6 +738,10 @@ export class QuotesService {
         pernocta_costo_usd: pernoctaCosto,
         tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
         servicio_notas: l.servicio_notas ?? null,
+        fecha_salida_plan:
+          l.fecha_salida_plan instanceof Date
+            ? l.fecha_salida_plan.toISOString()
+            : (l.fecha_salida_plan ?? null),
       };
     });
   }
@@ -729,7 +752,7 @@ export class QuotesService {
     if (dto.ruta_id) {
       const r = await this.routes.findById(dto.ruta_id);
       if (!r.activa) throw new BadRequestException('Ruta inactiva');
-      if (r.tipo === 'MULTIESCALA' && r.tramos && r.tramos.length >= 2) {
+      if (r.tipo === 'MULTIESCALA' && r.tramos && r.tramos.length >= 1) {
         // Hidrata los defaults por tramo de la plantilla guardada.
         const escalasNorm = this.resolveLegs(r.tramos as RawLeg[], dto.pasajeros);
         return {
@@ -755,9 +778,9 @@ export class QuotesService {
 
     // Sin ruta_id: MULTIESCALA requiere escalas[] explicitas.
     if (dto.tipo === TipoVuelo.MULTIESCALA) {
-      if (!dto.escalas || dto.escalas.length < 2) {
+      if (!dto.escalas || dto.escalas.length < 1) {
         throw new BadRequestException(
-          'MULTIESCALA requiere al menos 2 escalas (origen->intermedio->destino).',
+          'El itinerario requiere al menos 1 tramo (agrega el regreso si aplica).',
         );
       }
       for (let i = 0; i < dto.escalas.length - 1; i++) {

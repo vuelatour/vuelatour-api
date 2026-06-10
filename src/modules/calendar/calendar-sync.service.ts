@@ -12,7 +12,7 @@ const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendie
 const VUELO_SELECT =
   'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), ' +
-  'escalas:escala(orden, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre))';
+  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre))';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -41,7 +41,14 @@ interface VueloRow {
   piloto: { nombre: string } | { nombre: string }[] | null;
   cliente: { nombre: string } | { nombre: string }[] | null;
   escalas: Array<{
+    id: string;
     orden: number;
+    origen_iata: string;
+    destino_iata: string;
+    fecha_salida_plan: string | null;
+    es_ferry: boolean;
+    pasajeros: number | null;
+    google_calendar_id: string | null;
     aeronave_id: string | null;
     piloto_id: string | null;
     estado_permiso: string | null;
@@ -49,6 +56,8 @@ interface VueloRow {
     piloto: { nombre: string } | { nombre: string }[] | null;
   }> | null;
 }
+
+type EscalaRow = NonNullable<VueloRow['escalas']>[number];
 
 /**
  * One-way sync: VuelaTour flights -> Google Calendar.
@@ -118,20 +127,34 @@ export class CalendarSyncService implements OnModuleInit {
         await this.removeFlight(vueloId);
         return;
       }
+
+      // Itinerario personalizado (MULTIESCALA con escalas): un evento por tramo,
+      // guardado en escala.google_calendar_id. El 1er tramo hereda fecha_vuelo y
+      // el último fecha_traslado_final si no tienen fecha propia.
+      const escalas = [...(vuelo.escalas ?? [])].sort((a, b) => a.orden - b.orden);
+      if (vuelo.tipo === 'MULTIESCALA' && escalas.length > 0) {
+        await this.syncLegs(vuelo, escalas);
+        return;
+      }
+
       // Without a date there is nothing meaningful to place on a calendar.
       if (!vuelo.fecha_vuelo) return;
 
       // IDA (en fecha_vuelo).
-      const idaId = await this.upsertEvent(vuelo, 'ida', vuelo.google_calendar_id);
+      const idaId = await this.upsertRaw(
+        this.buildEvent(vuelo, 'ida'),
+        vuelo.google_calendar_id,
+        'ida',
+      );
       await this.saveEventId(vueloId, 'google_calendar_id', idaId);
 
       // REGRESO de redondo (en fecha_traslado_final): segundo evento.
       const esRedondo = vuelo.tipo === 'REDONDO' && !!vuelo.fecha_traslado_final;
       if (esRedondo) {
-        const regId = await this.upsertEvent(
-          vuelo,
-          'regreso',
+        const regId = await this.upsertRaw(
+          this.buildEvent(vuelo, 'regreso'),
           vuelo.google_calendar_regreso_id,
+          'regreso',
         );
         await this.saveEventId(vueloId, 'google_calendar_regreso_id', regId);
       } else if (vuelo.google_calendar_regreso_id) {
@@ -147,35 +170,73 @@ export class CalendarSyncService implements OnModuleInit {
   }
 
   /**
-   * Re-sincroniza todos los vuelos redondos no cancelados (para que su tramo de
-   * regreso se cree/actualice en Google Calendar). Secuencial para no saturar la
-   * API de Calendar. Devuelve cuántos se procesaron.
+   * Re-sincroniza todos los vuelos no cancelados con fecha (redondos legacy y
+   * multiescala por tramos). Secuencial para no saturar la API de Calendar.
+   * Devuelve cuántos se procesaron.
    */
   async resyncRedondos(): Promise<{ enabled: boolean; total: number }> {
     if (!this.enabled || !this.calendar) return { enabled: false, total: 0 };
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('id')
-      .eq('tipo', 'REDONDO')
       .neq('estado', 'CANCELADO')
-      .not('fecha_traslado_final', 'is', null);
+      .not('fecha_vuelo', 'is', null);
     if (error) throw new Error(error.message);
     const ids = (data ?? []).map((r) => (r as { id: string }).id);
     for (const id of ids) {
       await this.syncFlight(id);
     }
-    this.logger.log(`resyncRedondos: ${ids.length} vuelos redondos re-sincronizados.`);
+    this.logger.log(`resync: ${ids.length} vuelos re-sincronizados con Google.`);
     return { enabled: true, total: ids.length };
   }
 
-  /** Crea o actualiza el evento de un tramo (ida/regreso) y devuelve su id. */
-  private async upsertEvent(
-    v: VueloRow,
-    tramo: 'ida' | 'regreso',
+  /**
+   * Sincroniza un itinerario por tramos: un evento de Google por escala con
+   * fecha. Limpia los eventos legacy a nivel de vuelo (ida/regreso) para no
+   * duplicar el primer tramo.
+   */
+  private async syncLegs(vuelo: VueloRow, escalas: EscalaRow[]): Promise<void> {
+    // Limpia eventos legacy del modelo ida/regreso si existieran.
+    if (vuelo.google_calendar_id) {
+      await this.deleteEvent(vuelo.google_calendar_id);
+      await this.saveEventId(vuelo.id, 'google_calendar_id', null);
+    }
+    if (vuelo.google_calendar_regreso_id) {
+      await this.deleteEvent(vuelo.google_calendar_regreso_id);
+      await this.saveEventId(vuelo.id, 'google_calendar_regreso_id', null);
+    }
+
+    for (let i = 0; i < escalas.length; i++) {
+      const e = escalas[i];
+      const fecha =
+        e.fecha_salida_plan ??
+        (i === 0
+          ? vuelo.fecha_vuelo
+          : i === escalas.length - 1
+            ? vuelo.fecha_traslado_final
+            : null);
+      if (fecha) {
+        const eventId = await this.upsertRaw(
+          this.buildLegEvent(vuelo, e, fecha),
+          e.google_calendar_id,
+          `tramo ${e.orden}`,
+        );
+        await this.saveLegEventId(e.id, eventId);
+      } else if (e.google_calendar_id) {
+        // El tramo perdió su fecha: quita su evento.
+        await this.deleteEvent(e.google_calendar_id);
+        await this.saveLegEventId(e.id, null);
+      }
+    }
+  }
+
+  /** Crea o actualiza un evento ya construido y devuelve su id. */
+  private async upsertRaw(
+    event: calendar_v3.Schema$Event,
     currentEventId: string | null,
+    label: string,
   ): Promise<string | null> {
     if (!this.calendar) return currentEventId;
-    const event = this.buildEvent(v, tramo);
     if (currentEventId) {
       try {
         await this.calendar.events.update({
@@ -187,7 +248,7 @@ export class CalendarSyncService implements OnModuleInit {
       } catch (err) {
         // El evento fue borrado del lado de Calendar — se recrea.
         this.logger.warn(
-          `Update failed for ${tramo} event ${currentEventId}, recreating: ${
+          `Update failed for ${label} event ${currentEventId}, recreating: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -231,6 +292,16 @@ export class CalendarSyncService implements OnModuleInit {
       if (row?.google_calendar_regreso_id) {
         await this.deleteEvent(row.google_calendar_regreso_id);
         await this.saveEventId(vueloId, 'google_calendar_regreso_id', null);
+      }
+      // Eventos por tramo (itinerarios personalizados).
+      const { data: legs } = await this.supabase.service
+        .from('escala')
+        .select('id, google_calendar_id')
+        .eq('vuelo_id', vueloId)
+        .not('google_calendar_id', 'is', null);
+      for (const leg of (legs ?? []) as { id: string; google_calendar_id: string }[]) {
+        await this.deleteEvent(leg.google_calendar_id);
+        await this.saveLegEventId(leg.id, null);
       }
     } catch (err) {
       this.logger.error(
@@ -314,6 +385,63 @@ export class CalendarSyncService implements OnModuleInit {
     };
   }
 
+  /** Evento de Google para UN tramo de un itinerario personalizado. */
+  private buildLegEvent(
+    v: VueloRow,
+    e: EscalaRow,
+    fechaIso: string,
+  ): calendar_v3.Schema$Event {
+    const aeronave = unwrap(e.aeronave ?? v.aeronave);
+    const piloto = unwrap(e.piloto ?? v.piloto);
+    const cliente = unwrap(v.cliente);
+
+    const aeronaveStr = v.es_externo
+      ? (v.operador_externo ?? 'Externo')
+      : (aeronave?.matricula ?? 'sin avión');
+    const permisoPendiente = e.estado_permiso === 'pendiente';
+    const pax = e.es_ferry ? 0 : (e.pasajeros ?? v.pasajeros);
+    const prefijo = e.es_ferry ? `T${e.orden} Ferry · ` : `T${e.orden} · `;
+
+    const summary = `${prefijo}${aeronaveStr} · ${e.origen_iata}-${e.destino_iata} (${pax} pax)${permisoPendiente ? ' ⚠ permiso pendiente' : ''}`;
+
+    const start = new Date(fechaIso);
+    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
+
+    const descriptionLines = [
+      `Folio: #${v.folio}`,
+      `Tramo: ${e.orden} de ${(v.escalas ?? []).length}${e.es_ferry ? ' (ferry, vacío)' : ''}`,
+      `Estado: ${v.estado}`,
+      permisoPendiente ? 'Permiso de pista: PENDIENTE' : null,
+      `Cliente: ${cliente?.nombre ?? '—'}`,
+      `Ruta: ${e.origen_iata} → ${e.destino_iata}`,
+      `Pasajeros: ${pax}`,
+      v.es_externo
+        ? `Operador externo: ${v.operador_externo ?? '—'}`
+        : `Aeronave: ${aeronave?.matricula ?? '—'}`,
+      `Piloto: ${v.es_externo ? '(externo)' : (piloto?.nombre ?? 'sin asignar')}`,
+      v.notas ? `Notas: ${v.notas}` : null,
+      '',
+      `VuelaTour · vuelo ${v.id}`,
+    ].filter(Boolean);
+
+    const colorId = permisoPendiente
+      ? PERMISO_PENDIENTE_COLOR_ID
+      : v.es_externo
+        ? EXTERNAL_COLOR_ID
+        : DEFAULT_COLOR_ID;
+
+    return {
+      summary,
+      description: descriptionLines.join('\n'),
+      colorId,
+      start: { dateTime: start.toISOString(), timeZone: 'America/Cancun' },
+      end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
+      extendedProperties: {
+        private: { vuelatour_vuelo_id: v.id, vuelatour_tramo: `leg-${e.orden}` },
+      },
+    };
+  }
+
   private async saveEventId(
     vueloId: string,
     column: 'google_calendar_id' | 'google_calendar_regreso_id',
@@ -325,6 +453,18 @@ export class CalendarSyncService implements OnModuleInit {
       .eq('id', vueloId);
     if (error) {
       this.logger.error(`Failed to persist ${column} for ${vueloId}: ${error.message}`);
+    }
+  }
+
+  private async saveLegEventId(escalaId: string, eventId: string | null): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('escala')
+      .update({ google_calendar_id: eventId })
+      .eq('id', escalaId);
+    if (error) {
+      this.logger.error(
+        `Failed to persist escala google_calendar_id for ${escalaId}: ${error.message}`,
+      );
     }
   }
 }

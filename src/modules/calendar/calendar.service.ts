@@ -35,13 +35,14 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(orden, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
+        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
       )
-      // Trae vuelos cuya IDA o cuyo REGRESO caiga en el rango (los redondos
-      // pintan dos eventos: salida en fecha_vuelo y regreso en fecha_traslado_final).
+      // Trae vuelos cuya salida o regreso caiga en el rango, o que lo abarquen
+      // completo (los tramos intermedios de un multiescala viven entre ambas fechas).
       .or(
         `and(fecha_vuelo.gte.${from.toISOString()},fecha_vuelo.lte.${to.toISOString()}),` +
-          `and(fecha_traslado_final.gte.${from.toISOString()},fecha_traslado_final.lte.${to.toISOString()})`,
+          `and(fecha_traslado_final.gte.${from.toISOString()},fecha_traslado_final.lte.${to.toISOString()}),` +
+          `and(fecha_vuelo.lte.${from.toISOString()},fecha_traslado_final.gte.${to.toISOString()})`,
       )
       .order('fecha_vuelo', { ascending: true });
 
@@ -99,6 +100,11 @@ export class CalendarService {
         escalas: Array<{
           id: string;
           orden: number;
+          origen_iata: string;
+          destino_iata: string;
+          fecha_salida_plan: string | null;
+          es_ferry: boolean;
+          pasajeros: number | null;
           aeronave_id: string | null;
           piloto_id: string | null;
           estado_permiso: string | null;
@@ -118,10 +124,11 @@ export class CalendarService {
         idSuffix: string;
         escalaOrden: number;
         fecha: string | null;
-        tramo: 'ida' | 'regreso';
+        tramo?: 'ida' | 'regreso';
         origen: string;
         destino: string;
         prefijo?: string;
+        pasajeros?: number;
       }): Record<string, unknown> | null => {
         if (!inRange(params.fecha)) return null;
         const escala = escalaPorOrden.get(params.escalaOrden);
@@ -164,7 +171,7 @@ export class CalendarService {
           operador_externo: v.operador_externo,
           piloto_id: pilotoId,
           piloto_nombre: piloto?.nombre ?? null,
-          pasajeros: v.pasajeros,
+          pasajeros: params.pasajeros ?? v.pasajeros,
           monto_total_usd: Number(v.monto_total_usd),
           google_calendar_id: v.google_calendar_id,
           fecha_vuelo: params.fecha,
@@ -172,11 +179,41 @@ export class CalendarService {
           tramo: params.tramo,
           origen_iata: params.origen,
           destino_iata: params.destino,
-          title: `${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
+          title: `${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${params.pasajeros ?? v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
         };
       };
 
       const out: Array<Record<string, unknown>> = [];
+      const escalasOrdenadas = [...(v.escalas ?? [])].sort(
+        (a, b) => a.orden - b.orden,
+      );
+
+      if (v.tipo === 'MULTIESCALA' && escalasOrdenadas.length > 0) {
+        // Itinerario personalizado: un evento por tramo con fecha. El 1er tramo
+        // hereda fecha_vuelo y el último fecha_traslado_final si no tienen fecha
+        // propia (compat con escalas creadas antes de fecha_salida_plan).
+        escalasOrdenadas.forEach((e, i) => {
+          const fecha =
+            e.fecha_salida_plan ??
+            (i === 0
+              ? v.fecha_vuelo
+              : i === escalasOrdenadas.length - 1
+                ? v.fecha_traslado_final
+                : null);
+          const ev = buildEvent({
+            idSuffix: i === 0 ? '' : `:leg:${e.orden}`,
+            escalaOrden: e.orden,
+            fecha,
+            origen: e.origen_iata,
+            destino: e.destino_iata,
+            prefijo: e.es_ferry ? `T${e.orden} Ferry · ` : `T${e.orden} · `,
+            pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? undefined),
+          });
+          if (ev) out.push(ev);
+        });
+        return out;
+      }
+
       // IDA (orden 1, en fecha_vuelo).
       const ida = buildEvent({
         idSuffix: '',

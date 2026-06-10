@@ -4,6 +4,7 @@ import {
   ArrayMinSize,
   IsArray,
   IsBoolean,
+  IsDate,
   IsEnum,
   IsInt,
   IsNumber,
@@ -91,6 +92,15 @@ export class EscalaInputDto {
   @IsString()
   @Length(0, 500)
   servicio_notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Fecha/hora planeada de salida del tramo. Si se omite, el 1er tramo hereda fecha_vuelo y el último fecha_traslado_final.',
+  })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_salida_plan?: Date;
 }
 
 export class CalculateQuoteDto {
@@ -119,7 +129,7 @@ export class CalculateQuoteDto {
     (o: CalculateQuoteDto) => o.tipo === TipoVuelo.MULTIESCALA && !o.ruta_id,
   )
   @IsArray()
-  @ArrayMinSize(2)
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => EscalaInputDto)
   escalas?: EscalaInputDto[];
