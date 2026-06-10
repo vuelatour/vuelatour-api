@@ -1803,8 +1803,13 @@ export class FlightsService {
 
   async createCobro(vueloId: string, dto: CreateCobroDto, userId: string, rol?: Rol) {
     const vuelo = await this.findById(vueloId);
-    if (vuelo.estado === 'CANCELADO') {
-      throw new ConflictException('No se puede registrar cobro en vuelo CANCELADO');
+    // Cargo por cancelación (Itzel): la oficina SÍ puede registrar un cobro en
+    // un vuelo cancelado (ej. cliente canceló por clima y se le cobra algo);
+    // el piloto en campo no.
+    if (vuelo.estado === 'CANCELADO' && rol === Rol.PILOTO) {
+      throw new ConflictException(
+        'El vuelo está CANCELADO; los cargos por cancelación los registra la oficina.',
+      );
     }
     // Tarea 9: el piloto no cobra en campo sin la lectura de tacómetro de salida.
     // (Admin/Facturación quedan exentos para no bloquear anticipos de oficina.)

@@ -422,6 +422,18 @@ export class QuotesService {
       if (clientes && clientes.length > 0) {
         conds.push(`cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`);
       }
+      // Por ciudad/nombre de aeropuerto ("Miami" → MIA/OPF/…): resuelve IATAs.
+      const { data: aeropuertos } = await this.supabase.service
+        .from('aeropuerto')
+        .select('iata')
+        .or(`ciudad.ilike.%${raw}%,nombre.ilike.%${raw}%`)
+        .limit(20);
+      for (const a of aeropuertos ?? []) {
+        const iata = (a.iata as string)?.toUpperCase();
+        if (iata) {
+          conds.push(`origen_iata.eq.${iata}`, `destino_iata.eq.${iata}`);
+        }
+      }
       q = q.or(conds.join(','));
     }
     const { data, error, count } = await q;
