@@ -73,22 +73,44 @@ export class FlightsService {
 
   private readonly logger = new Logger(FlightsService.name);
 
-  /** Envía aviso de asignación al piloto (best-effort). */
+  /**
+   * Destinos del itinerario donde el piloto pernocta (tramos con
+   * requiere_pernocta). Vacío = el piloto NO pernocta — clave para que no lo
+   * asuma en destinos lejanos (ej. CUN–Huatulco sin pernocta).
+   */
+  private async pernoctasDeVuelo(vueloId: string): Promise<string[]> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('orden, destino_iata, requiere_pernocta')
+      .eq('vuelo_id', vueloId)
+      .eq('requiere_pernocta', true)
+      .order('orden', { ascending: true });
+    return (data ?? []).map((e) => e.destino_iata as string);
+  }
+
+  /** Envía aviso de asignación al piloto (best-effort), con info de pernocta. */
   private async notifyPilotAssigned(
     pilotoId: string,
     vuelo: Record<string, unknown>,
   ): Promise<void> {
-    const { data: piloto } = await this.supabase.service
-      .from('usuario')
-      .select('nombre, email')
-      .eq('id', pilotoId)
-      .maybeSingle();
-    // Socket en vivo al piloto (independiente del email).
+    const [{ data: piloto }, pernoctas] = await Promise.all([
+      this.supabase.service
+        .from('usuario')
+        .select('nombre, email')
+        .eq('id', pilotoId)
+        .maybeSingle(),
+      this.pernoctasDeVuelo(vuelo.id as string),
+    ]);
+    const pernoctaTxt =
+      pernoctas.length > 0
+        ? ` · 🌙 Pernocta en ${pernoctas.join(', ')}`
+        : ' · Sin pernocta';
+    // Socket + push al piloto (independiente del email).
     void this.notifications.notifyUser(pilotoId, {
       tipo: 'vuelo_asignado',
       titulo: 'Nuevo vuelo asignado',
-      cuerpo: `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}`,
-      data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+      cuerpo: `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}${pernoctaTxt}`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas },
       link: `/flights/${vuelo.id as string}`,
     });
 
@@ -102,6 +124,7 @@ export class FlightsService {
       destinoIata: vuelo.destino_iata as string,
       pasajeros: Number(vuelo.pasajeros ?? 0),
       fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
+      pernoctas,
     });
   }
 

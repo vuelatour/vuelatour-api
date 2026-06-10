@@ -22,6 +22,8 @@ export interface PilotAssignmentData {
   destinoIata: string;
   pasajeros: number;
   fechaVuelo: string | null;
+  /** Destinos donde el piloto pernocta. Vacío = sin pernocta (también se informa). */
+  pernoctas?: string[];
 }
 
 export interface UserInvitationData {
@@ -187,11 +189,15 @@ export class EmailService implements OnModuleInit {
             timeZone: 'America/Cancun',
           })} (hora de Cancún)`
         : 'Por confirmar';
+      const tienePernocta = (data.pernoctas?.length ?? 0) > 0;
+      const pernoctaLabel = tienePernocta
+        ? `🌙 Sí — en ${data.pernoctas!.join(', ')}`
+        : 'No (regreso según itinerario)';
 
       const { error } = await this.resend.emails.send({
         from: this.from,
         to: data.to,
-        subject: `Vuelo asignado · ${data.origenIata} → ${data.destinoIata} (folio #${data.folio})`,
+        subject: `Vuelo asignado · ${data.origenIata} → ${data.destinoIata} (folio #${data.folio})${tienePernocta ? ' · 🌙 con pernocta' : ''}`,
         html: `
 <div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;color:#1d1d1d">
   <div style="background:#102a43;padding:24px;border-radius:12px 12px 0 0">
@@ -208,6 +214,7 @@ export class EmailService implements OnModuleInit {
       <tr><td style="padding:8px 0;color:#6b7280">Folio</td><td style="padding:8px 0;text-align:right;font-weight:600">#${data.folio}</td></tr>
       <tr><td style="padding:8px 0;color:#6b7280">Pasajeros</td><td style="padding:8px 0;text-align:right;font-weight:600">${data.pasajeros}</td></tr>
       <tr><td style="padding:8px 0;color:#6b7280">Fecha</td><td style="padding:8px 0;text-align:right;font-weight:600">${fecha}</td></tr>
+      <tr><td style="padding:8px 0;color:#6b7280">Pernocta</td><td style="padding:8px 0;text-align:right;font-weight:600;${tienePernocta ? 'color:#b45309' : ''}">${pernoctaLabel}</td></tr>
     </table>
     <p style="font-size:13px;color:#6b7280;margin-top:24px">Revisa los detalles en la app VuelaTour Pilotos.</p>
   </div>
@@ -221,6 +228,7 @@ export class EmailService implements OnModuleInit {
           `Ruta: ${data.origenIata} → ${data.destinoIata}`,
           `Pasajeros: ${data.pasajeros}`,
           `Fecha: ${fecha}`,
+          `Pernocta: ${pernoctaLabel}`,
           '',
           'Revisa los detalles en la app VuelaTour Pilotos.',
         ].join('\n'),

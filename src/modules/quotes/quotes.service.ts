@@ -11,6 +11,7 @@ import { RoutesService } from '../routes/routes.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
+import { NotificationsService } from '../realtime/notifications.service';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -96,6 +97,7 @@ export class QuotesService {
     private readonly supabase: SupabaseService,
     private readonly calendar: CalendarSyncService,
     private readonly email: EmailService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /**
@@ -496,10 +498,13 @@ export class QuotesService {
       .maybeSingle();
 
     if (error) throw new Error(error.message);
+    const pernoctasAntes = await this.pernoctaDestinos(vueloId);
     await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId, {
       inicio: (current.fecha_vuelo as string | null) ?? null,
       fin: (current.fecha_traslado_final as string | null) ?? null,
     });
+    const pernoctasDespues = await this.pernoctaDestinos(vueloId);
+    void this.notifyPernoctaCambiada(updated!, pernoctasAntes, pernoctasDespues);
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
     const escalas = await this.findEscalas(vueloId);
     return { ...updated!, escalas };
@@ -639,6 +644,55 @@ export class QuotesService {
   }
 
   // ============ Internals ============
+
+  /** Destinos del itinerario donde hay pernocta, en orden. */
+  private async pernoctaDestinos(vueloId: string): Promise<string[]> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('orden, destino_iata')
+      .eq('vuelo_id', vueloId)
+      .eq('requiere_pernocta', true)
+      .order('orden', { ascending: true });
+    return (data ?? []).map((e) => e.destino_iata as string);
+  }
+
+  /**
+   * Si la pernocta del itinerario cambió tras una revisión, avisa a los pilotos
+   * asignados (al vuelo o a cualquier tramo) por socket/push — para que nadie
+   * asuma que pernocta donde no es (o que NO pernocta donde sí).
+   */
+  private async notifyPernoctaCambiada(
+    vuelo: Record<string, unknown>,
+    antes: string[],
+    despues: string[],
+  ): Promise<void> {
+    if (JSON.stringify(antes) === JSON.stringify(despues)) return;
+    const { data: legs } = await this.supabase.service
+      .from('escala')
+      .select('piloto_id')
+      .eq('vuelo_id', vuelo.id as string)
+      .not('piloto_id', 'is', null);
+    const pilotos = new Set<string>(
+      [
+        ...(legs ?? []).map((l) => l.piloto_id as string),
+        vuelo.piloto_id as string | null,
+      ].filter((p): p is string => !!p),
+    );
+    if (pilotos.size === 0) return;
+    const cuerpo =
+      despues.length > 0
+        ? `🌙 Ahora pernoctas en ${despues.join(', ')} · ${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}`
+        : `Este vuelo ya NO incluye pernocta · ${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}`;
+    for (const pilotoId of pilotos) {
+      void this.notifications.notifyUser(pilotoId, {
+        tipo: 'pernocta_actualizada',
+        titulo: 'Pernocta actualizada',
+        cuerpo,
+        data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas: despues },
+        link: `/flights/${vuelo.id as string}`,
+      });
+    }
+  }
 
   private async findEscalas(vueloId: string) {
     const { data, error } = await this.supabase.service
