@@ -89,6 +89,13 @@ export class QuotesPdfService {
               ?.totales as Record<string, unknown> | undefined
           )?.viaticos_pernocta_usd,
         ) ?? 0,
+      // Recibo del CLIENTE: el descuento SÍ se muestra como línea; el redondeo
+      // hacia arriba NUNCA (es cocina interna: queda absorbido en el total
+      // cerrado). El desglose con ambos vive solo en el admin (balance).
+      descuento_usd: (() => {
+        const ajuste = num(quote.ajuste_final_usd) ?? 0;
+        return ajuste < 0 ? Math.abs(ajuste) : 0;
+      })(),
       iva_pct: ivaRaw <= 1 ? ivaRaw * 100 : ivaRaw, // normaliza 0.16 → 16
       iva_usd: num(quote.iva_usd) ?? 0,
       total_usd: num(quote.monto_total_usd) ?? 0,
