@@ -168,6 +168,8 @@ export class FlightsService {
       'updated_at',
       'google_calendar_id',
       'foto_plan_vuelo_url',
+      // GENERATED ALWAYS en la BD (se calcula sola del origen): insertarla revienta.
+      'pago_anticipado_req',
     ]) {
       delete clonPayload[k];
     }
