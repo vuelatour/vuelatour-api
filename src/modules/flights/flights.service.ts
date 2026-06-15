@@ -209,14 +209,88 @@ export class FlightsService {
       );
     }
 
-    // 3) Cobros del cliente → al vuelo que sí sale. (Los GASTOS se quedan: esa
+    // 3) Historial de cotización: el clon HEREDA las versiones del original
+    //    (marcadas como heredadas, conservando su fecha para no romper la
+    //    cronología) y se le agrega un renglón FINAL que documenta el cambio
+    //    de aeronave como la versión vigente. Así no se pierde "por qué te
+    //    cobro esto" al cambiar de avión a último minuto.
+    const clonId = (clon as { id: string }).id;
+    const origenMatricula =
+      (await sb
+        .from('aeronave')
+        .select('matricula')
+        .eq('id', original.aeronave_id as string)
+        .maybeSingle()).data?.matricula ?? 'la aeronave anterior';
+
+    const { data: histOriginal } = await sb
+      .from('cotizacion_version_history')
+      .select('*')
+      .eq('vuelo_id', id)
+      .order('version', { ascending: true });
+
+    let maxVersion = Number(original.cotizacion_version) || 1;
+    if (histOriginal && histOriginal.length > 0) {
+      for (const h of histOriginal) {
+        maxVersion = Math.max(maxVersion, Number(h.version) || 0);
+      }
+      const heredadas = histOriginal.map((h) => {
+        const row = { ...(h as Record<string, unknown>) };
+        delete row.id; // nuevo uuid
+        row.vuelo_id = clonId;
+        const motivoPrev = (h.motivo as string | null)?.trim();
+        row.motivo = `[Heredado de la cotización #${original.folio as number}] ${motivoPrev || `Versión v${h.version as number}`}`;
+        return row;
+      });
+      await sb.from('cotizacion_version_history').insert(heredadas);
+    }
+
+    // Renglón final: el cambio de aeronave es la versión vigente del clon.
+    const nuevaVersion = maxVersion + 1;
+    const c = clon as Record<string, unknown>;
+    await sb.from('cotizacion_version_history').insert({
+      vuelo_id: clonId,
+      version: nuevaVersion,
+      aeronave_id: dto.aeronave_id,
+      ruta_id: c.ruta_id,
+      origen_iata: c.origen_iata,
+      destino_iata: c.destino_iata,
+      millas_nauticas_one_way: c.millas_nauticas_one_way,
+      es_redondo_auto: c.es_redondo_auto,
+      num_aterrizajes: c.num_aterrizajes,
+      pasajeros: c.pasajeros,
+      pase_abordar: c.pase_abordar,
+      tiempo_cobrable_hr: c.tiempo_cobrable_hr,
+      tarifa_tipo: c.tarifa_tipo,
+      tarifa_hora_usd: c.tarifa_hora_usd,
+      subtotal_vuelo_usd: c.subtotal_vuelo_usd,
+      tuas_usd: c.tuas_usd,
+      iva_pct: c.iva_pct,
+      iva_usd: c.iva_usd,
+      monto_total_usd: c.monto_total_usd,
+      viaticos_pernocta_usd: c.viaticos_pernocta_usd,
+      extras_total_usd: c.extras_total_usd,
+      ajuste_final_usd: c.ajuste_final_usd,
+      metodo_cobro: c.metodo_cobro,
+      calculo_snapshot: c.calculo_snapshot,
+      motivo: `Cambio de aeronave: de ${origenMatricula} a ${matricula} (último minuto). Viene del vuelo #${original.folio as number}.${dto.motivo?.trim() ? ` ${dto.motivo.trim()}` : ''}`,
+      created_by: userId,
+    });
+    // El clon queda en la versión del cambio de aeronave (la timeline la marca
+    // como "actual").
+    await sb
+      .from('vuelo')
+      .update({ cotizacion_version: nuevaVersion, updated_by: userId })
+      .eq('id', clonId);
+    c.cotizacion_version = nuevaVersion;
+
+    // 4) Cobros del cliente → al vuelo que sí sale. (Los GASTOS se quedan: esa
     //    matrícula los absorbe y el siguiente vuelo solo paga su remanente.)
     await sb
       .from('cobro_vuelo')
       .update({ vuelo_id: (clon as { id: string }).id })
       .eq('vuelo_id', id);
 
-    // 4) Original queda cancelado con el motivo auditable.
+    // 5) Original queda cancelado con el motivo auditable.
     const motivoFinal = [
       `Reasignado a ${matricula} (vuelo #${(clon as { folio: number }).folio}).`,
       dto.motivo?.trim() || null,
