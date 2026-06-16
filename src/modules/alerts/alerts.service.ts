@@ -41,6 +41,83 @@ export class AlertsService {
     await this.safe('permiso_pista', (c) => this.checkPermisoPista(c));
   }
 
+  /**
+   * Recordatorio al piloto de capturar el tacómetro de SALIDA antes del vuelo.
+   * Corre cada minuto y avisa a 15, 10 y 5 min de la salida si aún no se ha
+   * capturado. Cada umbral se envía una sola vez (dedupe vía notificacion).
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async runTacoReminders(): Promise<void> {
+    try {
+      await this.checkTacoReminders();
+    } catch (err) {
+      this.logger.warn(
+        `runTacoReminders falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private static readonly TACO_UMBRALES = [15, 10, 5] as const;
+
+  private async checkTacoReminders(): Promise<void> {
+    const now = Date.now();
+    const desde = new Date(now).toISOString();
+    const hasta = new Date(now + 16 * 60_000).toISOString();
+
+    // Vuelos propios, operables, con piloto y salida en los próximos ~16 min.
+    const { data: vuelos, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, piloto_id, origen_iata, destino_iata, fecha_vuelo, estado')
+      .eq('es_externo', false)
+      .not('piloto_id', 'is', null)
+      .not('fecha_vuelo', 'is', null)
+      .in('estado', ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO', 'EN_VUELO'])
+      .gte('fecha_vuelo', desde)
+      .lte('fecha_vuelo', hasta);
+    if (error) throw new Error(error.message);
+    if (!vuelos || vuelos.length === 0) return;
+
+    for (const v of vuelos) {
+      const salida = new Date(v.fecha_vuelo as string).getTime();
+      const minutos = (salida - now) / 60_000;
+
+      // El umbral que cae en esta ventana de 1 min (con tolerancia a desfase).
+      const umbral = AlertsService.TACO_UMBRALES.find(
+        (t) => minutos <= t && minutos > t - 1.5,
+      );
+      if (!umbral) continue;
+
+      // ¿Ya se capturó el tacómetro de salida (tramo orden=1)?
+      const { data: primerTramo } = await this.supabase.service
+        .from('escala')
+        .select('taco_salida')
+        .eq('vuelo_id', v.id as string)
+        .eq('orden', 1)
+        .maybeSingle();
+      if (primerTramo && primerTramo.taco_salida !== null) continue;
+
+      // Dedupe: ¿ya se envió este umbral para este vuelo?
+      const { count } = await this.supabase.service
+        .from('notificacion')
+        .select('id', { count: 'exact', head: true })
+        .eq('tipo', 'recordatorio_taco')
+        .eq('data->>vuelo_id', v.id as string)
+        .eq('data->>umbral', String(umbral));
+      if ((count ?? 0) > 0) continue;
+
+      await this.notifications.notifyUser(v.piloto_id as string, {
+        tipo: 'recordatorio_taco',
+        titulo: `Captura el tacómetro · faltan ${umbral} min`,
+        cuerpo: `Vuelo ${v.origen_iata as string} → ${v.destino_iata as string} (#${v.folio as number}). Sube la lectura de salida antes de despegar.`,
+        data: { vuelo_id: v.id, folio: v.folio, umbral },
+        link: `/flights/${v.id as string}`,
+      });
+      this.logger.log(
+        `Recordatorio taco #${v.folio as number} · ${umbral} min → piloto ${v.piloto_id as string}`,
+      );
+    }
+  }
+
   @Cron('0 8 * * *', { timeZone: 'America/Cancun' })
   async runDaily(): Promise<void> {
     await this.safe('vencimiento', (c) => this.checkVencimientos(c));

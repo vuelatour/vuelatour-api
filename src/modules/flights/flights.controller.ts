@@ -344,6 +344,16 @@ export class FlightsController {
     return this.flights.listCobros(id);
   }
 
+  @Get(':id/bitacora')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Bitácora del vuelo: recordatorios de tacómetro enviados al piloto y capturas de tacómetro registradas, en orden cronológico.',
+  })
+  bitacora(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.flightBitacora(id);
+  }
+
   @Post(':id/payments')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
   @ApiOperation({

@@ -1469,6 +1469,36 @@ export class FlightsService {
   }
 
   /** Avisa a admin/coordinador que un piloto capturó tacómetro. */
+  /**
+   * Bitácora del vuelo para el admin (punto 5): recordatorios de tacómetro
+   * enviados al piloto y capturas de tacómetro registradas, en orden
+   * cronológico. Se arma desde la tabla `notificacion` (que ya persiste cada
+   * aviso) filtrando por el vuelo.
+   */
+  async flightBitacora(vueloId: string) {
+    const { data, error } = await this.supabase.service
+      .from('notificacion')
+      .select('id, tipo, titulo, cuerpo, data, created_at, usuario:usuario_id(nombre, rol)')
+      .in('tipo', ['recordatorio_taco', 'taco_capturado'])
+      .eq('data->>vuelo_id', vueloId)
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((n) => {
+      const u = Array.isArray(n.usuario) ? n.usuario[0] : n.usuario;
+      return {
+        id: n.id,
+        tipo: n.tipo,
+        titulo: n.titulo,
+        cuerpo: n.cuerpo,
+        umbral: (n.data as { umbral?: number } | null)?.umbral ?? null,
+        destinatario: (u as { nombre?: string } | null)?.nombre ?? null,
+        destinatario_rol: (u as { rol?: string } | null)?.rol ?? null,
+        created_at: n.created_at,
+      };
+    });
+  }
+
   private async notifyTacoCaptured(escala: Record<string, unknown>): Promise<void> {
     const revision = Boolean(escala.revision_requerida);
     const ruta = `${escala.origen_iata as string} → ${escala.destino_iata as string}`;
