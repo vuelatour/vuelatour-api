@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
@@ -10,6 +10,16 @@ import { VisionService } from './vision.service';
 @Controller({ path: 'vision', version: '1' })
 export class VisionController {
   constructor(private readonly vision: VisionService) {}
+
+  @Get('health')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Diagnóstico de la visión IA: si está habilitada y si pyservices/Claude responden (para saber por qué "la foto no lee").',
+  })
+  health() {
+    return this.vision.health();
+  }
 
   @Post('gasto-ticket')
   @Roles(Rol.PILOTO, Rol.MECANICO, Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)

@@ -92,6 +92,68 @@ export class VisionService implements OnModuleInit {
     return Boolean(this.baseUrl && this.token);
   }
 
+  /**
+   * Diagnóstico de la visión IA (sin exponer secretos): si está habilitada y
+   * si pyservices responde. Sirve para confirmar por qué "la foto no lee".
+   */
+  async health(): Promise<{
+    habilitada: boolean;
+    pyservices_url_configurada: boolean;
+    token_configurado: boolean;
+    pyservices_responde: boolean | null;
+    detalle: string;
+  }> {
+    const base = {
+      habilitada: this.enabled,
+      pyservices_url_configurada: Boolean(this.baseUrl),
+      token_configurado: Boolean(this.token),
+    };
+    if (!this.enabled) {
+      return {
+        ...base,
+        pyservices_responde: null,
+        detalle:
+          'Visión deshabilitada: falta PYSERVICES_BASE_URL o INTERNAL_SHARED_TOKEN en el API.',
+      };
+    }
+    // Llamada mínima: si la llave de Anthropic está mal, pyservices responde 502.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    try {
+      const res = await fetch(`${this.baseUrl}/vision/tacometro`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': this.token,
+        },
+        // 1px PNG transparente: válida para el contrato, basta para ver si la
+        // IA responde o falla por config (llave/cuota).
+        body: JSON.stringify({
+          image_base64:
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQAY3Y2wAAAAAElFTkSuQmCC',
+          media_type: 'image/png',
+        }),
+        signal: controller.signal,
+      });
+      const detalle = await res.text().catch(() => '');
+      return {
+        ...base,
+        pyservices_responde: res.ok,
+        detalle: res.ok
+          ? 'pyservices y la IA responden correctamente.'
+          : `pyservices respondió ${res.status}: ${detalle.slice(0, 200)}`,
+      };
+    } catch (err) {
+      return {
+        ...base,
+        pyservices_responde: false,
+        detalle: `No se pudo contactar a pyservices: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async readTacometro(input: TacometroVisionInput): Promise<TacometroVisionResult | null> {
     if (!this.enabled) return null;
     if (!input.imageBase64 && !input.imageUrl) {
@@ -116,7 +178,12 @@ export class VisionService implements OnModuleInit {
         signal: controller.signal,
       });
       if (!res.ok) {
-        this.logger.warn(`pyservices /vision/tacometro respondió ${res.status}`);
+        // Cuerpo del error para diagnosticar la causa (p. ej. "Claude no
+        // disponible (401)" = llave de Anthropic inválida/vencida en pyservices).
+        const detalle = await res.text().catch(() => '');
+        this.logger.warn(
+          `pyservices /vision/tacometro respondió ${res.status}: ${detalle.slice(0, 300)}`,
+        );
         return null;
       }
       const data = (await res.json()) as TacometroVisionResult;

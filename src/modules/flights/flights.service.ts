@@ -532,6 +532,16 @@ export class FlightsService {
         piloto_id: e.piloto_id ?? null,
         estado_permiso: e.estado_permiso ?? null,
         fecha_salida_plan: e.fecha_salida_plan ?? null,
+        // Detalle por tramo: el piloto necesita ver cuánta gente sube en cada
+        // escala, si es ferry/pernocta/parada de servicio, y la nota operativa.
+        pasajeros: (e as { pasajeros?: number | null }).pasajeros ?? null,
+        es_ferry: (e as { es_ferry?: boolean }).es_ferry === true,
+        requiere_pernocta: (e as { requiere_pernocta?: boolean }).requiere_pernocta === true,
+        pernocta_costo_usd:
+          (e as { pernocta_costo_usd?: number | null }).pernocta_costo_usd ?? null,
+        tipo_parada: (e as { tipo_parada?: string | null }).tipo_parada ?? 'NORMAL',
+        servicio_notas: (e as { servicio_notas?: string | null }).servicio_notas ?? null,
+        notas: (e as { notas?: string | null }).notas ?? null,
       })),
     };
   }
@@ -1887,11 +1897,10 @@ export class FlightsService {
         'El vuelo está CANCELADO; los cargos por cancelación los registra la oficina.',
       );
     }
-    // Tarea 9: el piloto no cobra en campo sin la lectura de tacómetro de salida.
-    // (Admin/Facturación quedan exentos para no bloquear anticipos de oficina.)
-    if (rol === Rol.PILOTO && !vuelo.es_externo && this.faltaSalidaInicial(await this.escalasTaco(vueloId))) {
-      throw new ConflictException(MSG_TACO);
-    }
+    // (Se retiró el candado de "tacómetro antes de cobrar": el cobro y la
+    // captura del tacómetro son independientes; el cliente puede pagar antes
+    // de que el piloto registre la lectura. El tacómetro sigue siendo
+    // obligatorio para INICIAR y COMPLETAR el vuelo.)
     // Tarea 11: el piloto, al cobrar con tarjeta en campo, debe adjuntar el voucher.
     // (Admin/Facturación quedan exentos para conciliaciones de oficina sin foto.)
     if (rol === Rol.PILOTO && METODOS_TARJETA.has(dto.metodo_cobro) && !dto.foto_voucher_url) {
