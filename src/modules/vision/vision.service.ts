@@ -31,6 +31,8 @@ export interface GastoTicketVisionResult {
   proveedor: string | null;
   concepto: string | null;
   categoria_sugerida: string | null;
+  medio_pago: 'EFECTIVO' | 'TARJETA_CORP' | 'TRANSFERENCIA' | null;
+  tarjeta_terminacion: string | null;
   confianza: number;
   legible: boolean;
   notas: string;
@@ -56,6 +58,8 @@ export interface CombustibleTicketVisionResult {
   proveedor: string | null;
   /** Últimos 4 dígitos de la tarjeta usada, si aparecen en el ticket. */
   tarjeta_terminacion: string | null;
+  /** Medio de pago detectado (EFECTIVO/TARJETA_CORP/TRANSFERENCIA). */
+  medio_pago: 'EFECTIVO' | 'TARJETA_CORP' | 'TRANSFERENCIA' | null;
   confianza: number;
   legible: boolean;
   notas: string;
