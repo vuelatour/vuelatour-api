@@ -2,6 +2,7 @@ import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { json, urlencoded } from 'express';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import { ConfiguredIoAdapter } from './common/adapters/socket-io.adapter';
@@ -10,6 +11,12 @@ import type { EnvVars } from './config/env.schema';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   app.useLogger(app.get(Logger));
+
+  // Las capturas con IA (tacómetro, tickets de gasto/combustible) mandan la
+  // foto en base64 dentro del JSON; el default de Express (100 KB) las rechazaba
+  // con 413 antes de llamar a pyservices. Subimos el límite para imágenes.
+  app.use(json({ limit: '25mb' }));
+  app.use(urlencoded({ limit: '25mb', extended: true }));
 
   const config = app.get(ConfigService<EnvVars, true>);
 
