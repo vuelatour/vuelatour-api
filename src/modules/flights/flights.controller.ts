@@ -21,6 +21,7 @@ import {
   AssignEscalaDto,
   CaptureTacoDto,
   CreateEscalaDto,
+  OperationalLegDto,
   TacoAiReadDto,
   UpdateEscalaDto,
   UpdateEscalaPermisoDto,
@@ -241,6 +242,20 @@ export class FlightsController {
   ) {
     await this.flights.assertAccess(id, c);
     return this.flights.createEscala(id, dto, c.userId);
+  }
+
+  @Post(':id/operational-legs')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Agrega un tramo OPERATIVO interno (ferry, parada técnica, pernocta operativa) a la ruta real. No se cotiza ni se cobra ni se muestra al cliente; no recalcula el precio.',
+  })
+  createOperationalLeg(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: OperationalLegDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.createOperationalLeg(id, dto, c.userId);
   }
 
   @Post(':id/legs/:legId/assign')

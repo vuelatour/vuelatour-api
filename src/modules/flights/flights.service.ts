@@ -25,6 +25,7 @@ import type {
   AssignEscalaDto,
   CaptureTacoDto,
   CreateEscalaDto,
+  OperationalLegDto,
   TacoAiReadDto,
   UpdateEscalaDto,
 } from './dto/escalas.dto';
@@ -38,7 +39,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -494,12 +495,17 @@ export class FlightsService {
       cliente: { nombre: string } | { nombre: string }[] | null;
     };
 
-    const escalas = await this.listEscalas(id);
+    const todasEscalas = await this.listEscalas(id);
+    // La COTIZACIÓN refleja lo contratado: solo tramos comerciales (los
+    // operativos internos viven en la operación del vuelo, no se cobran).
+    const escalas = todasEscalas.filter(
+      (e) => (e as { solo_operativa?: boolean }).solo_operativa !== true,
+    );
 
     // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida) o
     // a cualquier tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
     if (current.rol === Rol.PILOTO) {
-      const asignadoATramo = escalas.some((e) => e.piloto_id === current.userId);
+      const asignadoATramo = todasEscalas.some((e) => e.piloto_id === current.userId);
       if (v.piloto_id !== current.userId && !asignadoATramo) {
         throw new ForbiddenException(
           'No puedes ver la cotización de un vuelo que no tienes asignado',
@@ -1371,6 +1377,53 @@ export class FlightsService {
     return data!;
   }
 
+  // Los tramos operativos internos viven en un rango de orden propio (>=100)
+  // para no colisionar nunca con los comerciales (1..N) al re-cotizar.
+  private static readonly OPERATIVA_ORDEN_BASE = 100;
+
+  /**
+   * Agrega un tramo OPERATIVO interno (ferry, parada técnica, movimiento
+   * interno, pernocta operativa): visible para piloto/calendario/tacómetro pero
+   * EXCLUIDO del precio y de la cotización del cliente. No recalcula la
+   * cotización. El orden se asigna en el rango operativo (>=100).
+   */
+  async createOperationalLeg(vueloId: string, dto: OperationalLegDto, userId: string) {
+    await this.findById(vueloId);
+    const { data: existentes } = await this.supabase.service
+      .from('escala')
+      .select('orden')
+      .eq('vuelo_id', vueloId);
+    const maxOrden = (existentes ?? []).reduce(
+      (m, e) => Math.max(m, Number(e.orden) || 0),
+      0,
+    );
+    const orden = Math.max(maxOrden + 1, FlightsService.OPERATIVA_ORDEN_BASE);
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .insert({
+        vuelo_id: vueloId,
+        orden,
+        solo_operativa: true,
+        origen_iata: dto.origen_iata.toUpperCase(),
+        destino_iata: dto.destino_iata.toUpperCase(),
+        pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
+        es_ferry: dto.es_ferry ?? false,
+        requiere_pernocta: dto.requiere_pernocta ?? false,
+        tipo_parada: dto.tipo_parada ?? 'NORMAL',
+        servicio_notas: dto.servicio_notas ?? null,
+        fecha_salida_plan: dto.fecha_salida_plan?.toISOString() ?? null,
+        notas: dto.notas ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(`Failed to insert operational leg: ${error.message}`);
+    void this.calendar.syncFlight(vueloId);
+    return data!;
+  }
+
   async updateEscala(escalaId: string, dto: UpdateEscalaDto, userId: string) {
     if (Object.keys(dto).length === 0) {
       const { data } = await this.supabase.service
@@ -1388,6 +1441,14 @@ export class FlightsService {
     if (dto.hora_salida) patch.hora_salida = dto.hora_salida.toISOString();
     if (dto.hora_llegada) patch.hora_llegada = dto.hora_llegada.toISOString();
     if (dto.notas !== undefined) patch.notas = dto.notas;
+    // Campos operativos (editar un tramo interno desde la operación del vuelo).
+    if (dto.pasajeros !== undefined) patch.pasajeros = dto.pasajeros;
+    if (dto.es_ferry !== undefined) patch.es_ferry = dto.es_ferry;
+    if (dto.requiere_pernocta !== undefined) patch.requiere_pernocta = dto.requiere_pernocta;
+    if (dto.tipo_parada !== undefined) patch.tipo_parada = dto.tipo_parada;
+    if (dto.servicio_notas !== undefined) patch.servicio_notas = dto.servicio_notas;
+    if (dto.fecha_salida_plan !== undefined)
+      patch.fecha_salida_plan = dto.fecha_salida_plan?.toISOString() ?? null;
 
     const { data, error } = await this.supabase.service
       .from('escala')

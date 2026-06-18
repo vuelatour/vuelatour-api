@@ -1008,10 +1008,14 @@ export class QuotesService {
     userId: string,
     fechas?: { inicio?: string | null; fin?: string | null },
   ): Promise<void> {
+    // Solo gestionamos los tramos COMERCIALES (cotizados). Los operativos
+    // internos (solo_operativa=true) los administra operaciones aparte y NUNCA
+    // se tocan aquí: ni se reordenan ni se borran al re-cotizar.
     const { data: existing, error: exErr } = await this.supabase.service
       .from('escala')
       .select('id, orden, taco_salida, taco_llegada, fecha_salida_plan')
-      .eq('vuelo_id', vueloId);
+      .eq('vuelo_id', vueloId)
+      .eq('solo_operativa', false);
     if (exErr) throw new Error(`Failed to read escalas: ${exErr.message}`);
     const porOrden = new Map(
       (existing ?? []).map((e) => [e.orden as number, e]),

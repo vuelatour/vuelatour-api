@@ -40,7 +40,10 @@ export class QuotesPdfService {
     }
 
     const ivaRaw = num(quote.iva_pct) ?? 0;
-    const escalas = (quote.escalas as Array<Record<string, unknown>> | undefined) ?? [];
+    // Recibo del cliente: solo tramos COMERCIALES (los operativos internos no se cobran ni se muestran).
+    const escalas = ((quote.escalas as Array<Record<string, unknown>> | undefined) ?? []).filter(
+      (e) => (e as { solo_operativa?: boolean }).solo_operativa !== true,
+    );
 
     const payload = {
       folio: String(quote.folio ?? ''),

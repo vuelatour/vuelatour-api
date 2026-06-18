@@ -48,9 +48,98 @@ export class CreateEscalaDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  // Campos operativos por tramo (también se editan en tramos internos).
+  @ApiPropertyOptional({ minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pasajeros?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requiere_pernocta?: boolean;
+
+  @ApiPropertyOptional({ enum: ['NORMAL', 'SERVICIO'] })
+  @IsOptional()
+  @IsIn(['NORMAL', 'SERVICIO'])
+  tipo_parada?: 'NORMAL' | 'SERVICIO';
+
+  @ApiPropertyOptional({ description: 'Detalle de la parada de servicio/técnica' })
+  @IsOptional()
+  @IsString()
+  servicio_notas?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_salida_plan?: Date;
 }
 
 export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
+
+/**
+ * Tramo OPERATIVO interno (ferry, parada técnica, movimiento interno, pernocta
+ * operativa): forma parte de la ruta real pero NO se cotiza ni se cobra ni se
+ * muestra al cliente. El orden lo asigna el servidor en el rango operativo.
+ */
+export class OperationalLegDto {
+  @ApiProperty()
+  @IsString()
+  @Length(3, 4)
+  origen_iata!: string;
+
+  @ApiProperty()
+  @IsString()
+  @Length(3, 4)
+  destino_iata!: string;
+
+  @ApiPropertyOptional({ minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pasajeros?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  requiere_pernocta?: boolean;
+
+  @ApiPropertyOptional({ enum: ['NORMAL', 'SERVICIO'] })
+  @IsOptional()
+  @IsIn(['NORMAL', 'SERVICIO'])
+  tipo_parada?: 'NORMAL' | 'SERVICIO';
+
+  @ApiPropertyOptional({ description: 'Detalle de la parada de servicio/técnica' })
+  @IsOptional()
+  @IsString()
+  servicio_notas?: string;
+
+  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_salida_plan?: Date;
+
+  @ApiPropertyOptional({ description: 'Instrucción/justificación operativa para el piloto' })
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}
 
 /** Asignación de aeronave/piloto a UN tramo (ida o regreso por separado). */
 export class AssignEscalaDto {
