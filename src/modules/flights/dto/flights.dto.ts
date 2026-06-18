@@ -17,6 +17,7 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
 
@@ -201,6 +202,17 @@ export class AssignFlightDto {
   @IsOptional()
   @IsUUID()
   piloto_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Copiloto del viaje (segundo piloto). Ve todo el vuelo igual que el piloto. ' +
+      'Enviar null para quitarlo.',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_o, v) => v !== null)
+  @IsUUID()
+  copiloto_id?: string | null;
 
   @ApiPropertyOptional({ description: 'Fecha programada del vuelo' })
   @IsOptional()

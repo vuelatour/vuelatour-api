@@ -32,7 +32,7 @@ import type {
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -420,8 +420,9 @@ export class FlightsService {
     if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.piloto_id) {
-      // Incluye vuelos donde el piloto está asignado al vuelo (ida) o a CUALQUIER
-      // tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
+      // Incluye vuelos donde el usuario es piloto o copiloto del vuelo (ida), o
+      // piloto de CUALQUIER tramo (p. ej. solo el regreso de un redondo con
+      // pilotos distintos). El copiloto va a nivel vuelo (todo el viaje).
       const { data: legVuelos } = await this.supabase.service
         .from('escala')
         .select('vuelo_id')
@@ -429,9 +430,12 @@ export class FlightsService {
       const ids = [
         ...new Set((legVuelos ?? []).map((e) => e.vuelo_id as string)),
       ];
-      q = ids.length
-        ? q.or(`piloto_id.eq.${filters.piloto_id},id.in.(${ids.join(',')})`)
-        : q.eq('piloto_id', filters.piloto_id);
+      const ors = [
+        `piloto_id.eq.${filters.piloto_id}`,
+        `copiloto_id.eq.${filters.piloto_id}`,
+      ];
+      if (ids.length) ors.push(`id.in.(${ids.join(',')})`);
+      q = q.or(ors.join(','));
     }
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
@@ -481,12 +485,13 @@ export class FlightsService {
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select('piloto_id')
+      .select('piloto_id, copiloto_id')
       .eq('id', vueloId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
-    if (data.piloto_id === current.userId) return;
+    if (data.piloto_id === current.userId || data.copiloto_id === current.userId)
+      return;
     // ¿Asignado a algún tramo de este vuelo?
     const { data: leg } = await this.supabase.service
       .from('escala')
@@ -916,9 +921,24 @@ export class FlightsService {
       pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
     });
 
+    // Copiloto (segundo piloto del viaje): valida que exista y no choque con el
+    // piloto principal. null = quitarlo.
+    const asignandoCopiloto =
+      dto.copiloto_id !== undefined && dto.copiloto_id !== null && dto.copiloto_id !== '';
+    if (asignandoCopiloto) {
+      const pilotoFinal =
+        dto.piloto_id !== undefined ? dto.piloto_id : current.piloto_id;
+      if (dto.copiloto_id === pilotoFinal) {
+        throw new BadRequestException('El copiloto debe ser distinto al piloto.');
+      }
+      await this.validateAssignTargets({ pilotoId: dto.copiloto_id! });
+    }
+
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
+    if (dto.copiloto_id !== undefined)
+      patch.copiloto_id = dto.copiloto_id === '' ? null : dto.copiloto_id;
     if (dto.fecha_vuelo !== undefined) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
 
     if (Object.keys(patch).length === 1) {
@@ -946,6 +966,10 @@ export class FlightsService {
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
+    }
+    // Avisa también al copiloto recién asignado (ve todo el vuelo).
+    if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id) {
+      void this.notifyPilotAssigned(dto.copiloto_id!, data!);
     }
     return data!;
   }
@@ -1415,6 +1439,9 @@ export class FlightsService {
         destino_iata: dto.destino_iata.toUpperCase(),
         hora_salida: dto.hora_salida?.toISOString(),
         hora_llegada: dto.hora_llegada?.toISOString(),
+        // Pasajeros por tramo (puede variar entre escalas). null = usa el
+        // global del vuelo.
+        pasajeros: dto.pasajeros ?? null,
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,
