@@ -17,6 +17,7 @@ import {
 export enum CategoriaGasto {
   GAS = 'GAS',
   ATERRIZAJE = 'ATERRIZAJE',
+  OPERACIONES = 'OPERACIONES',
   TUAS = 'TUAS',
   FBO = 'FBO',
   COMIDA = 'COMIDA',
