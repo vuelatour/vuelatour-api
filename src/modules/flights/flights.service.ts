@@ -90,6 +90,57 @@ export class FlightsService {
   }
 
   /**
+   * Ruta COMPLETA del vuelo como cadena "CUN → CZM → CUN": origen del primer
+   * tramo + destino de cada tramo, en orden. Así el piloto ve todas las escalas
+   * y no solo origen/destino (que en un redondo se ven iguales: "CUN → CUN").
+   * Cae a origen/destino del vuelo si aún no hay escalas.
+   */
+  private async rutaDeVuelo(vuelo: Record<string, unknown>): Promise<string> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('origen_iata, destino_iata, orden')
+      .eq('vuelo_id', vuelo.id as string)
+      .order('orden', { ascending: true });
+    const legs = data ?? [];
+    if (legs.length === 0) {
+      return `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string}`;
+    }
+    const puntos = [
+      legs[0].origen_iata as string,
+      ...legs.map((l) => l.destino_iata as string),
+    ];
+    return puntos.join(' → ');
+  }
+
+  /**
+   * Mayor lectura de tacómetro registrada para una aeronave (el horómetro solo
+   * sube). Sirve de ancla de magnitud para la IA al leer una foto nueva. Incluye
+   * el taco_salida de la escala en curso (`incluir`) por si es la lectura más
+   * reciente aún no comparada. Devuelve null si no hay historial.
+   */
+  private async ultimoTacoAeronave(
+    aeronaveId: string | null,
+    incluir: number | null,
+  ): Promise<number | null> {
+    let max = incluir ?? null;
+    if (aeronaveId) {
+      const { data } = await this.supabase.service
+        .from('escala')
+        .select('taco_salida, taco_llegada')
+        .eq('aeronave_id', aeronaveId);
+      for (const e of data ?? []) {
+        for (const v of [e.taco_salida, e.taco_llegada]) {
+          if (v !== null && v !== undefined) {
+            const n = Number(v);
+            if (!Number.isNaN(n) && (max === null || n > max)) max = n;
+          }
+        }
+      }
+    }
+    return max;
+  }
+
+  /**
    * Elimina un vuelo SIN actividad (solicitudes/apartados fantasma que nunca
    * se confirmaron). Bloqueado si tiene cobros, gastos o tacómetros: esos se
    * cancelan (no se borran) para no perder el rastro contable.
@@ -320,13 +371,14 @@ export class FlightsService {
     pilotoId: string,
     vuelo: Record<string, unknown>,
   ): Promise<void> {
-    const [{ data: piloto }, pernoctas] = await Promise.all([
+    const [{ data: piloto }, pernoctas, ruta] = await Promise.all([
       this.supabase.service
         .from('usuario')
         .select('nombre, email')
         .eq('id', pilotoId)
         .maybeSingle(),
       this.pernoctasDeVuelo(vuelo.id as string),
+      this.rutaDeVuelo(vuelo),
     ]);
     const pernoctaTxt =
       pernoctas.length > 0
@@ -336,7 +388,7 @@ export class FlightsService {
     void this.notifications.notifyUser(pilotoId, {
       tipo: 'vuelo_asignado',
       titulo: 'Nuevo vuelo asignado',
-      cuerpo: `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} · folio #${vuelo.folio as number}${pernoctaTxt}`,
+      cuerpo: `${ruta} · folio #${vuelo.folio as number}${pernoctaTxt}`,
       data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas },
       link: `/flights/${vuelo.id as string}`,
     });
@@ -1589,16 +1641,24 @@ export class FlightsService {
   async tacoAiRead(escalaId: string, dto: TacoAiReadDto) {
     const { data: escala, error } = await this.supabase.service
       .from('escala')
-      .select('id, origen_iata, destino_iata, taco_salida')
+      .select('id, origen_iata, destino_iata, taco_salida, aeronave_id')
       .eq('id', escalaId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!escala) throw new NotFoundException(`Escala ${escalaId} not found`);
 
+    // Ancla de magnitud para la IA: la última lectura conocida de la aeronave.
+    // Evita que confunda la décima con un entero (1555.8 vs 15558.1).
+    const ultimo = await this.ultimoTacoAeronave(
+      escala.aeronave_id as string | null,
+      escala.taco_salida === null ? null : Number(escala.taco_salida),
+    );
+
     const ia = await this.vision.readTacometro({
       imageBase64: dto.image_base64,
       mediaType: dto.media_type,
       imageUrl: dto.image_url,
+      ultimo,
     });
 
     if (ia && ia.legible && ia.lectura !== null) {

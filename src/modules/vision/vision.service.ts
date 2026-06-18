@@ -8,6 +8,8 @@ export interface TacometroVisionInput {
   mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
   /** Alternativa: URL pública o firmada de la imagen. */
   imageUrl?: string;
+  /** Última lectura conocida de la aeronave: ancla de magnitud para la IA. */
+  ultimo?: number | null;
 }
 
 export interface TacometroVisionResult {
@@ -178,6 +180,7 @@ export class VisionService implements OnModuleInit {
           image_base64: input.imageBase64,
           media_type: input.mediaType,
           image_url: input.imageUrl,
+          ultimo: input.ultimo ?? undefined,
         }),
         signal: controller.signal,
       });
