@@ -636,7 +636,9 @@ export class FlightsService {
       this.listCobros(id),
       this.aeronaveMatricula((vuelo as { aeronave_id?: string | null }).aeronave_id),
     ]);
-    const escalasEnriquecidas = await this.enrichEscalasAssignment(escalas);
+    const escalasEnriquecidas = await this.attachTramoEstimado(
+      await this.enrichEscalasAssignment(escalas),
+    );
     const totalCobrado = cobros.reduce(
       (acc, c) => acc + Number(c.monto),
       0,
@@ -690,6 +692,39 @@ export class FlightsService {
       piloto_nombre: e.piloto_id
         ? (nombrePorId.get(e.piloto_id as string) ?? null)
         : null,
+    }));
+  }
+
+  /**
+   * Adjunta a cada tramo el tiempo de vuelo estimado en minutos
+   * (`tramo_min_promedio`) según el histórico, SOLO si es confiable (>= muestras
+   * mínimas). La app del piloto lo usa para agendar un recordatorio local
+   * (offline) antes de la llegada. Null si aún no hay historial del tramo.
+   */
+  private async attachTramoEstimado(
+    escalas: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    if (escalas.length === 0) return escalas;
+    const pares = [
+      ...new Set(
+        escalas.map((e) => `${e.origen_iata as string}|${e.destino_iata as string}`),
+      ),
+    ];
+    const minPorPar = new Map<string, number>();
+    await Promise.all(
+      pares.map(async (par) => {
+        const [o, d] = par.split('|');
+        const t = await this.getTramoPromedio(o, d);
+        if (t && t.muestras >= MIN_MUESTRAS && t.minutos_promedio > 0) {
+          minPorPar.set(par, Math.round(t.minutos_promedio));
+        }
+      }),
+    );
+    return escalas.map((e) => ({
+      ...e,
+      tramo_min_promedio:
+        minPorPar.get(`${e.origen_iata as string}|${e.destino_iata as string}`) ??
+        null,
     }));
   }
 
