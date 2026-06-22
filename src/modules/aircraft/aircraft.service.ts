@@ -65,7 +65,7 @@ export class AircraftService {
       await Promise.all([
         this.supabase.service
           .from('motor')
-          .select('posicion, numero_serie, horas_totales, turm, tbo_horas')
+          .select('posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref')
           .eq('aeronave_id', id),
         this.supabase.service
           .from('mantenimiento')
@@ -97,26 +97,19 @@ export class AircraftService {
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
 
-    // Componentes con overhaul agotado (TBO).
-    const componentesVencidos = (motorsRes.data ?? [])
-      .map((m: Record<string, unknown>) => ({
-        posicion: m.posicion as string,
-        numero_serie: m.numero_serie as string,
-        restantes:
-          Number(m.tbo_horas) - (Number(m.horas_totales) - Number(m.turm)),
-      }))
-      .filter((m) => m.restantes <= 0);
-
     const enTaller = (tallerRes.data ?? []).length > 0;
 
     // Utilización: suma de horas (taco_llegada - taco_salida) y # de vuelos.
     let horasTotal = 0;
     let horasMes = 0;
     let horasAnio = 0;
+    let maxHobbs = 0; // último horómetro conocido (para horas de vida vivas)
     const vuelosTotal = new Set<string>();
     const vuelosMes = new Set<string>();
     const vuelosAnio = new Set<string>();
     for (const e of (escalasRes.data ?? []) as Array<Record<string, unknown>>) {
+      if (e.taco_salida != null) maxHobbs = Math.max(maxHobbs, Number(e.taco_salida));
+      if (e.taco_llegada != null) maxHobbs = Math.max(maxHobbs, Number(e.taco_llegada));
       if (e.taco_salida == null || e.taco_llegada == null) continue;
       const h = Number(e.taco_llegada) - Number(e.taco_salida);
       const v = e.vuelo as { id: string; fecha_vuelo: string | null };
@@ -134,6 +127,15 @@ export class AircraftService {
         }
       }
     }
+
+    // Componentes con overhaul agotado (TBO), usando horas de vida VIVAS.
+    const componentesVencidos = (motorsRes.data ?? [])
+      .map((m: Record<string, unknown>) => ({
+        posicion: m.posicion as string,
+        numero_serie: m.numero_serie as string,
+        restantes: this.componenteEstado(m, maxHobbs, true).tbo_restante ?? 1,
+      }))
+      .filter((m) => m.restantes <= 0);
 
     // Finanzas por moneda: ingresos cobrados vs gastos.
     const byMoneda = new Map<string, { ingresos: number; gastos: number }>();
@@ -225,11 +227,43 @@ export class AircraftService {
       Number,
     );
     const base = Number(aeronave.servicio_horas_base ?? 0);
+
+    // Motores y hélices con horas de vida vivas + estatus de overhaul (TBO).
+    const [motoresRes, helicesRes] = await Promise.all([
+      this.supabase.service
+        .from('motor')
+        .select('id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref')
+        .eq('aeronave_id', id)
+        .order('posicion'),
+      this.supabase.service
+        .from('helice')
+        .select('id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref')
+        .eq('aeronave_id', id)
+        .order('posicion'),
+    ]);
+    const componentes = [
+      ...(motoresRes.data ?? []).map((m) => ({
+        tipo: 'MOTOR' as const,
+        posicion: m.posicion as string,
+        numero_serie: m.numero_serie as string,
+        ...this.componenteEstado(m, horasActuales, true),
+        tbo_horas: m.tbo_horas != null ? Number(m.tbo_horas) : null,
+      })),
+      ...(helicesRes.data ?? []).map((h) => ({
+        tipo: 'HELICE' as const,
+        posicion: h.posicion as string,
+        numero_serie: h.numero_serie as string,
+        ...this.componenteEstado(h, horasActuales, false),
+        tbo_horas: h.tbo_horas != null ? Number(h.tbo_horas) : null,
+      })),
+    ];
+
     return {
       horas_actuales: Number(horasActuales.toFixed(1)),
       servicio_intervalos: intervalos,
       servicio_horas_base: base,
       proximo_servicio: this.proximoServicio(intervalos, base, horasActuales),
+      componentes,
       historial: items,
     };
   }
@@ -307,13 +341,13 @@ export class AircraftService {
         this.supabase.service
           .from('motor')
           .select(
-            'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas',
+            'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas, aeronave_horas_ref',
           )
           .eq('aeronave_id', id)
           .order('posicion'),
         this.supabase.service
           .from('helice')
-          .select('id, posicion, numero_serie, horas_totales, tbo_horas')
+          .select('id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref')
           .eq('aeronave_id', id)
           .order('posicion'),
         this.supabase.service
@@ -353,16 +387,63 @@ export class AircraftService {
     if (segurosRes.error) throw new Error(segurosRes.error.message);
     if (discrepanciasRes.error) throw new Error(discrepanciasRes.error.message);
 
+    // Horas de vida vivas (acumulan con lo volado) + estatus de overhaul (TBO).
+    const hobbs = await this.currentHobbs(id);
+    const motors = (motorsRes.data ?? []).map((m) => ({
+      ...m,
+      ...this.componenteEstado(m, hobbs, true),
+    }));
+    const propellers = (propellersRes.data ?? []).map((p) => ({
+      ...p,
+      ...this.componenteEstado(p, hobbs, false),
+    }));
+
     return {
       ...aeronave,
-      motors: motorsRes.data ?? [],
-      propellers: propellersRes.data ?? [],
+      motors,
+      propellers,
       owners: ownersRes.data ?? [],
       overhaul_reserves: reservesRes.data ?? [],
       imagenes: imagenesRes.data ?? [],
       seguros: segurosRes.data ?? [],
       discrepancias: discrepanciasRes.data ?? [],
     };
+  }
+
+  /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
+  private async currentHobbs(aeronaveId: string): Promise<number> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
+      .eq('vuelo.aeronave_id', aeronaveId)
+      .neq('vuelo.estado', 'CANCELADO');
+    let max = 0;
+    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v != null) max = Math.max(max, Number(v));
+      }
+    }
+    return Number(max.toFixed(1));
+  }
+
+  /**
+   * Horas de vida vivas de un componente (motor/hélice) y horas restantes a su
+   * overhaul (TBO). El motor descuenta desde su último overhaul (turm); la
+   * hélice desde 0. Si no hay referencia/TBO, devuelve los valores que se puedan.
+   */
+  private componenteEstado(
+    c: Record<string, unknown>,
+    hobbs: number,
+    conTurm: boolean,
+  ): { horas_actuales: number; tbo_restante: number | null } {
+    const ht = Number(c.horas_totales ?? 0);
+    const ref = c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
+    const horasActuales =
+      ref != null ? Number((ht + Math.max(0, hobbs - ref)).toFixed(1)) : ht;
+    const tbo = Number(c.tbo_horas ?? 0);
+    const desdeOverhaul = conTurm ? horasActuales - Number(c.turm ?? 0) : horasActuales;
+    const tboRestante = tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;
+    return { horas_actuales: horasActuales, tbo_restante: tboRestante };
   }
 
   async create(dto: CreateAeronaveDto, createdBy: string) {
