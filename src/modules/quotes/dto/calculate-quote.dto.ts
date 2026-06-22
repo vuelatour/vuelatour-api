@@ -105,6 +105,15 @@ export class EscalaInputDto {
 
   @ApiPropertyOptional({
     description:
+      'Nota operativa de este tramo para el piloto (ej. "cargar gasolina aquí"). Se muestra en su app.',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(0, 1000)
+  notas?: string;
+
+  @ApiPropertyOptional({
+    description:
       'Fecha/hora planeada de salida del tramo. Si se omite, el 1er tramo hereda fecha_vuelo y el último fecha_traslado_final.',
   })
   @IsOptional()

@@ -32,7 +32,7 @@ import type {
 import type { CreateCobroDto } from './dto/cobros.dto';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, metodo_cobro, cotizacion_abierta, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -60,6 +60,14 @@ const COBRO_COLS =
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
 const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
+// Métodos que el PILOTO puede cobrar en campo: efectivo (MXN/USD) y terminal de
+// tarjeta. La transferencia la concilia la oficina, no el piloto.
+const METODOS_COBRO_PILOTO = new Set([
+  'EFECTIVO',
+  'DOLARES',
+  'BILLPOCKET',
+  'HSBC_LINK',
+]);
 
 @Injectable()
 export class FlightsService {
@@ -2076,6 +2084,17 @@ export class FlightsService {
     if (vuelo.estado === 'CANCELADO' && rol === Rol.PILOTO) {
       throw new ConflictException(
         'El vuelo está CANCELADO; los cargos por cancelación los registra la oficina.',
+      );
+    }
+    // El piloto solo cobra en campo cuando el método acordado es efectivo o
+    // tarjeta (tiene terminal). Transferencia/otros los registra la oficina.
+    if (
+      rol === Rol.PILOTO &&
+      vuelo.metodo_cobro != null &&
+      !METODOS_COBRO_PILOTO.has(vuelo.metodo_cobro as string)
+    ) {
+      throw new ForbiddenException(
+        'Este vuelo se cobra por transferencia; el cobro lo registra administración.',
       );
     }
     // (Se retiró el candado de "tacómetro antes de cobrar": el cobro y la

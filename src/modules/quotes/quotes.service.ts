@@ -37,6 +37,8 @@ export interface ResolvedLeg {
   pernocta_costo_usd: number; // 0 si no hay pernocta
   tipo_parada: 'NORMAL' | 'SERVICIO';
   servicio_notas: string | null;
+  /** Nota operativa del tramo para el piloto (ej. "cargar gasolina aquí"). */
+  notas: string | null;
   /** Fecha/hora planeada de salida del tramo (ISO). Null = sin definir aún. */
   fecha_salida_plan: string | null;
 }
@@ -63,6 +65,7 @@ interface RawLeg {
   pernocta_costo_usd?: number | string | null;
   tipo_parada?: string | null;
   servicio_notas?: string | null;
+  notas?: string | null;
   fecha_salida_plan?: Date | string | null;
 }
 
@@ -704,6 +707,7 @@ export class QuotesService {
           e.pernocta_costo_usd != null ? Number(e.pernocta_costo_usd) : undefined,
         tipo_parada: (e.tipo_parada as 'NORMAL' | 'SERVICIO') ?? 'NORMAL',
         servicio_notas: (e.servicio_notas as string | null) ?? undefined,
+        notas: (e.notas as string | null) ?? undefined,
         fecha_salida_plan: e.fecha_salida_plan
           ? new Date(e.fecha_salida_plan as string)
           : undefined,
@@ -1053,6 +1057,7 @@ export class QuotesService {
         pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
         tipo_parada: e.tipo_parada,
         servicio_notas: e.servicio_notas,
+        notas: e.notas,
         updated_by: userId,
       };
       const actual = porOrden.get(orden);
@@ -1165,6 +1170,7 @@ export class QuotesService {
         pernocta_costo_usd: pernoctaCosto,
         tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
         servicio_notas: l.servicio_notas ?? null,
+        notas: l.notas ?? null,
         fecha_salida_plan:
           l.fecha_salida_plan instanceof Date
             ? l.fecha_salida_plan.toISOString()
