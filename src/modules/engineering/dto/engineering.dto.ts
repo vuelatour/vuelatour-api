@@ -44,12 +44,19 @@ export class CreateMantenimientoDto {
   @IsDateString()
   fecha_realizada?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Horas a las que ENTRÓ realmente (Hobbs).' })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
   @Min(0)
   horas_aeronave?: number;
+
+  @ApiPropertyOptional({ description: 'Horas a las que DEBÍA entrar (umbral programado).' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0)
+  horas_programadas?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -97,12 +104,19 @@ export class UpdateMantenimientoDto {
   @IsDateString()
   fecha_realizada?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({ description: 'Horas a las que ENTRÓ realmente (Hobbs).' })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
   @Min(0)
   horas_aeronave?: number;
+
+  @ApiPropertyOptional({ description: 'Horas a las que DEBÍA entrar (umbral programado).' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0)
+  horas_programadas?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

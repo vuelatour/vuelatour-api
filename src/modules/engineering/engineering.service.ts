@@ -8,7 +8,7 @@ import type {
 } from './dto/engineering.dto';
 
 const MANT_COLS =
-  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, costo_usd, proveedor, notas, created_at';
+  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, horas_programadas, costo_usd, proveedor, notas, created_at';
 
 /** El campo legado `tipo` (NOT NULL) se mantiene en sync con el nuevo `estado`. */
 function tipoFromEstado(estado: EstadoMantenimiento): 'PROGRAMADO' | 'REALIZADO' {
@@ -24,6 +24,22 @@ export class EngineeringService {
 
   // ===== Mantenimientos =====
 
+  /** Horas actuales de la aeronave (último Hobbs conocido = máximo tacómetro). */
+  private async horasActualesAeronave(aeronaveId: string): Promise<number> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
+      .eq('vuelo.aeronave_id', aeronaveId)
+      .neq('vuelo.estado', 'CANCELADO');
+    let max = 0;
+    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v != null) max = Math.max(max, Number(v));
+      }
+    }
+    return Number(max.toFixed(1));
+  }
+
   async listMantenimientos(aeronaveId: string) {
     const { data, error } = await this.supabase.service
       .from('mantenimiento')
@@ -36,6 +52,15 @@ export class EngineeringService {
   }
 
   async createMantenimiento(aeronaveId: string, dto: CreateMantenimientoDto, userId: string) {
+    // Al entrar a taller / completarse, si no dieron las horas de entrada, se
+    // toman las horas actuales del avión (último tacómetro) automáticamente.
+    let horasEntrada = dto.horas_aeronave ?? null;
+    if (
+      horasEntrada == null &&
+      (dto.estado === 'EN_TALLER' || dto.estado === 'COMPLETADO')
+    ) {
+      horasEntrada = await this.horasActualesAeronave(aeronaveId);
+    }
     const { data, error } = await this.supabase.service
       .from('mantenimiento')
       .insert({
@@ -46,7 +71,8 @@ export class EngineeringService {
         descripcion: dto.descripcion,
         fecha_programada: dto.fecha_programada ?? null,
         fecha_realizada: dto.fecha_realizada ?? null,
-        horas_aeronave: dto.horas_aeronave ?? null,
+        horas_aeronave: horasEntrada,
+        horas_programadas: dto.horas_programadas ?? null,
         costo_usd: dto.costo_usd ?? null,
         proveedor: dto.proveedor ?? null,
         notas: dto.notas ?? null,
@@ -70,9 +96,28 @@ export class EngineeringService {
     if (dto.fecha_programada !== undefined) patch.fecha_programada = dto.fecha_programada;
     if (dto.fecha_realizada !== undefined) patch.fecha_realizada = dto.fecha_realizada;
     if (dto.horas_aeronave !== undefined) patch.horas_aeronave = dto.horas_aeronave;
+    if (dto.horas_programadas !== undefined) patch.horas_programadas = dto.horas_programadas;
     if (dto.costo_usd !== undefined) patch.costo_usd = dto.costo_usd;
     if (dto.proveedor !== undefined) patch.proveedor = dto.proveedor;
     if (dto.notas !== undefined) patch.notas = dto.notas;
+
+    // Al pasar a EN_TALLER/COMPLETADO sin horas de entrada, se toman las horas
+    // actuales del avión automáticamente (solo si aún no estaban registradas).
+    if (
+      (dto.estado === 'EN_TALLER' || dto.estado === 'COMPLETADO') &&
+      dto.horas_aeronave === undefined
+    ) {
+      const { data: actual } = await this.supabase.service
+        .from('mantenimiento')
+        .select('aeronave_id, horas_aeronave')
+        .eq('id', id)
+        .maybeSingle();
+      if (actual && actual.horas_aeronave == null) {
+        patch.horas_aeronave = await this.horasActualesAeronave(
+          actual.aeronave_id as string,
+        );
+      }
+    }
 
     const query = this.supabase.service.from('mantenimiento');
     const { data, error } =

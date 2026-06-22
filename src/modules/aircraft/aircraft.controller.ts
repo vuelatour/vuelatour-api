@@ -89,6 +89,15 @@ export class AircraftController {
     return this.aircraft.getSnapshot(id);
   }
 
+  @Get(':id/tacometros')
+  @ApiOperation({
+    summary:
+      'Histórico de tacómetros por aeronave + horas actuales y próximo servicio por horas',
+  })
+  tacometros(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.tacometroHistorial(id);
+  }
+
   @Patch(':id')
   @Roles(Rol.ADMIN)
   @ApiOperation({ summary: 'Update aircraft (ADMIN)' })

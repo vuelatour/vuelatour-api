@@ -26,7 +26,7 @@ import type {
 } from './dto/upsert-aeronave-discrepancia.dto';
 
 const AERONAVE_COLS =
-  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, color_calendario, ubicacion_base, activa, notas, created_at, updated_at';
+  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, created_at, updated_at';
 
 const SEGURO_COLS =
   'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
@@ -173,6 +173,87 @@ export class AircraftService {
       },
       finanzas,
     };
+  }
+
+  /**
+   * Histórico de tacómetros de una aeronave + horas actuales (último Hobbs) y el
+   * próximo servicio por horas según su programa (secuencia de intervalos).
+   */
+  async tacometroHistorial(id: string) {
+    const aeronave = await this.findById(id);
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
+      )
+      .eq('vuelo.aeronave_id', id)
+      .neq('vuelo.estado', 'CANCELADO')
+      .not('taco_salida', 'is', null);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+
+    let horasActuales = 0;
+    for (const e of rows) {
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v != null) horasActuales = Math.max(horasActuales, Number(v));
+      }
+    }
+
+    const items = rows
+      .map((e) => {
+        const v = e.vuelo as { folio?: number; fecha_vuelo?: string | null };
+        const s = e.taco_salida == null ? null : Number(e.taco_salida);
+        const l = e.taco_llegada == null ? null : Number(e.taco_llegada);
+        return {
+          escala_id: e.id as string,
+          folio: v.folio ?? null,
+          fecha: (e.hora_salida as string | null) ?? v.fecha_vuelo ?? null,
+          ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
+          taco_salida: s,
+          taco_llegada: l,
+          horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
+        };
+      })
+      .sort((a, b) => {
+        const fa = a.fecha ? Date.parse(a.fecha) : 0;
+        const fb = b.fecha ? Date.parse(b.fecha) : 0;
+        if (fb !== fa) return fb - fa;
+        return Number(b.taco_salida ?? 0) - Number(a.taco_salida ?? 0);
+      });
+
+    const intervalos = ((aeronave.servicio_intervalos as unknown[]) ?? []).map(
+      Number,
+    );
+    const base = Number(aeronave.servicio_horas_base ?? 0);
+    return {
+      horas_actuales: Number(horasActuales.toFixed(1)),
+      servicio_intervalos: intervalos,
+      servicio_horas_base: base,
+      proximo_servicio: this.proximoServicio(intervalos, base, horasActuales),
+      historial: items,
+    };
+  }
+
+  /**
+   * Próximo umbral de servicio: recorre la secuencia de intervalos (cíclica)
+   * desde `base` y devuelve el primer umbral por encima de `horas`. Null si no
+   * hay programa configurado.
+   */
+  proximoServicio(intervalos: number[], base: number, horas: number) {
+    const ints = intervalos.filter((n) => Number(n) > 0).map(Number);
+    if (ints.length === 0) return null;
+    let acc = base;
+    for (let i = 0; i < 100000; i++) {
+      acc += ints[i % ints.length];
+      if (acc > horas) {
+        return {
+          a_las: Number(acc.toFixed(1)),
+          intervalo: ints[i % ints.length],
+          faltan: Number((acc - horas).toFixed(1)),
+        };
+      }
+    }
+    return null;
   }
 
   async list(filters: ListAeronavesQuery) {

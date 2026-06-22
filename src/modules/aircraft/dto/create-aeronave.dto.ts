@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  IsArray,
   IsBoolean,
   IsIn,
   IsInt,
@@ -87,6 +88,25 @@ export class CreateAeronaveDto {
   @IsOptional()
   @IsBoolean()
   activa?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Secuencia de intervalos de servicio en horas que se repite (ej. [50,100,200] o [100]).',
+    type: [Number],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsNumber({}, { each: true })
+  @Min(1, { each: true })
+  servicio_intervalos?: number[];
+
+  @ApiPropertyOptional({
+    description: 'Horómetro (Hobbs) donde arranca la secuencia de servicios.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  servicio_horas_base?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
