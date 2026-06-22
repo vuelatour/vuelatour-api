@@ -65,6 +65,16 @@ export class EscalaInputDto {
   @Min(0)
   pasajeros?: number;
 
+  @ApiPropertyOptional({
+    description:
+      'Nombres de pasajeros de ESTE tramo (manifiesto por escala, opcional). Puede variar entre tramos o ir vacío.',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pasajeros_nombres?: string[];
+
   @ApiPropertyOptional({ description: 'Tramo ferry (vacío): cobra tiempo+calzos pero 0 pax / sin TUAS.' })
   @IsOptional()
   @IsBoolean()

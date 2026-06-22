@@ -39,7 +39,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -1442,6 +1442,7 @@ export class FlightsService {
         // Pasajeros por tramo (puede variar entre escalas). null = usa el
         // global del vuelo.
         pasajeros: dto.pasajeros ?? null,
+        pasajeros_nombres: dto.pasajeros_nombres ?? [],
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,
@@ -1522,6 +1523,8 @@ export class FlightsService {
     if (dto.notas !== undefined) patch.notas = dto.notas;
     // Campos operativos (editar un tramo interno desde la operación del vuelo).
     if (dto.pasajeros !== undefined) patch.pasajeros = dto.pasajeros;
+    if (dto.pasajeros_nombres !== undefined)
+      patch.pasajeros_nombres = dto.pasajeros_nombres;
     if (dto.es_ferry !== undefined) patch.es_ferry = dto.es_ferry;
     if (dto.requiere_pernocta !== undefined) patch.requiere_pernocta = dto.requiere_pernocta;
     if (dto.tipo_parada !== undefined) patch.tipo_parada = dto.tipo_parada;

@@ -30,6 +30,8 @@ export interface ResolvedLeg {
   destino_iata: string;
   millas_nauticas: number;
   pasajeros: number; // ferry => 0; si no, leg.pasajeros ?? pax global
+  /** Manifiesto de nombres de ESTE tramo (puede variar por escala / ir vacío). */
+  pasajeros_nombres: string[];
   es_ferry: boolean;
   requiere_pernocta: boolean;
   pernocta_costo_usd: number; // 0 si no hay pernocta
@@ -55,6 +57,7 @@ interface RawLeg {
   destino_iata: string;
   millas_nauticas: number | string;
   pasajeros?: number | null;
+  pasajeros_nombres?: string[] | null;
   es_ferry?: boolean | null;
   requiere_pernocta?: boolean | null;
   pernocta_costo_usd?: number | string | null;
@@ -690,6 +693,11 @@ export class QuotesService {
             : dto.pasajeros !== undefined && Number(e.pasajeros) === oldPax
               ? undefined
               : ((e.pasajeros as number | null) ?? undefined),
+        // Preserva el manifiesto por tramo en el ajuste rápido.
+        pasajeros_nombres:
+          e.es_ferry === true
+            ? []
+            : ((e.pasajeros_nombres as string[] | null) ?? undefined),
         es_ferry: e.es_ferry === true,
         requiere_pernocta: e.requiere_pernocta === true,
         pernocta_costo_usd:
@@ -987,7 +995,7 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -1039,6 +1047,7 @@ export class QuotesService {
         destino_iata: e.destino_iata.toUpperCase(),
         millas_nauticas: e.millas_nauticas,
         pasajeros: e.es_ferry ? 0 : e.pasajeros,
+        pasajeros_nombres: e.es_ferry ? [] : e.pasajeros_nombres,
         es_ferry: e.es_ferry,
         requiere_pernocta: e.requiere_pernocta,
         pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
@@ -1145,6 +1154,12 @@ export class QuotesService {
         destino_iata: l.destino_iata.toUpperCase(),
         millas_nauticas: Number(l.millas_nauticas),
         pasajeros: esFerry ? 0 : (l.pasajeros ?? globalPax),
+        // Manifiesto por tramo: ferry sin pasajeros => vacío; nombres limpios.
+        pasajeros_nombres: esFerry
+          ? []
+          : (l.pasajeros_nombres ?? [])
+              .map((n) => n.trim())
+              .filter((n) => n.length > 0),
         es_ferry: esFerry,
         requiere_pernocta: requierePernocta,
         pernocta_costo_usd: pernoctaCosto,
