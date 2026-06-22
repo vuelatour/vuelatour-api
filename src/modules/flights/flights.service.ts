@@ -1558,7 +1558,7 @@ export class FlightsService {
   async captureTaco(escalaId: string, dto: CaptureTacoDto, userId: string) {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, taco_salida, taco_llegada, capturado_por')
+      .select('id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, capturado_por')
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
@@ -1615,8 +1615,54 @@ export class FlightsService {
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
 
     const finalRow = await this.applyConsistencyFlag(data, userId);
+    // Ahorra un paso: la llegada de un tramo es la salida del siguiente. Si se
+    // capturó taco_llegada, se copia como taco_salida del próximo tramo comercial
+    // (mismo avión, salida aún vacía) para que el piloto no la reescriba.
+    if (dto.taco_llegada !== undefined) {
+      await this.propagarLlegadaASalidaSiguiente(
+        current.vuelo_id as string,
+        current.orden as number,
+        current.aeronave_id as string | null,
+        Number(dto.taco_llegada),
+        userId,
+      );
+    }
     void this.notifyTacoCaptured(finalRow);
     return finalRow;
+  }
+
+  /**
+   * Copia el taco_llegada de un tramo como taco_salida del SIGUIENTE tramo
+   * comercial del mismo vuelo y misma aeronave, solo si ese siguiente tramo aún
+   * no tiene salida capturada. Best-effort: nunca pisa una lectura existente ni
+   * cruza aviones distintos (cada matrícula lleva su horómetro).
+   */
+  private async propagarLlegadaASalidaSiguiente(
+    vueloId: string,
+    orden: number,
+    aeronaveId: string | null,
+    tacoLlegada: number,
+    userId: string,
+  ): Promise<void> {
+    const { data: siguientes } = await this.supabase.service
+      .from('escala')
+      .select('id, orden, aeronave_id, taco_salida')
+      .eq('vuelo_id', vueloId)
+      .eq('solo_operativa', false)
+      .gt('orden', orden)
+      .order('orden', { ascending: true })
+      .limit(1);
+    const sig = (siguientes ?? [])[0];
+    if (!sig) return;
+    if (sig.taco_salida != null) return; // ya tiene salida: no se pisa
+    if ((sig.aeronave_id ?? null) !== (aeronaveId ?? null)) return; // otro avión
+    await this.supabase.service
+      .from('escala')
+      .update({
+        taco_salida: tacoLlegada,
+        updated_by: userId,
+      })
+      .eq('id', sig.id as string);
   }
 
   /** Avisa a admin/coordinador que un piloto capturó tacómetro. */
