@@ -444,12 +444,50 @@ export class QuotesService {
     }
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
+    // Ruta COMPLETA (origen → escalas → destino) por cotización para el listado.
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    const rutas = await this.rutasIatasPorVuelo(
+      rows.map((r) => r.id as string),
+    );
+    const dataConRuta = rows.map((r) => ({
+      ...r,
+      ruta_iatas:
+        rutas.get(r.id as string) ??
+        [r.origen_iata as string, r.destino_iata as string].filter(Boolean),
+    }));
     return {
-      data: data ?? [],
+      data: dataConRuta,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /** Cadena de puntos de la ruta real (origen 1er tramo + destinos) por lote. */
+  private async rutasIatasPorVuelo(
+    vueloIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (vueloIds.length === 0) return out;
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id, orden, origen_iata, destino_iata')
+      .in('vuelo_id', vueloIds)
+      .eq('solo_operativa', false)
+      .order('orden', { ascending: true });
+    const porVuelo = new Map<string, Array<Record<string, unknown>>>();
+    for (const e of data ?? []) {
+      const vid = e.vuelo_id as string;
+      (porVuelo.get(vid) ?? porVuelo.set(vid, []).get(vid)!).push(e);
+    }
+    for (const [vid, legs] of porVuelo) {
+      if (legs.length === 0) continue;
+      out.set(vid, [
+        legs[0].origen_iata as string,
+        ...legs.map((l) => l.destino_iata as string),
+      ]);
+    }
+    return out;
   }
 
   async findById(id: string) {

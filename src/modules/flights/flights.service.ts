@@ -463,12 +463,57 @@ export class FlightsService {
       void _omit;
       return { ...rest, aeronave_matricula: matricula ?? null };
     });
+    // Ruta COMPLETA por vuelo (origen → escalas → destino) para los listados:
+    // se resuelve en lote desde las escalas comerciales, no solo origen/destino.
+    const rutas = await this.rutasIatasPorVuelo(
+      rows.map((r) => (r as Record<string, unknown>).id as string),
+    );
+    const rowsConRuta = rows.map((r) => {
+      const row = r as Record<string, unknown>;
+      return {
+        ...row,
+        ruta_iatas:
+          rutas.get(row.id as string) ??
+          [row.origen_iata as string, row.destino_iata as string].filter(Boolean),
+      };
+    });
     return {
-      data: rows,
+      data: rowsConRuta,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /**
+   * Para un lote de vuelos, devuelve la cadena de puntos de la ruta REAL
+   * (origen del primer tramo + destino de cada tramo comercial, en orden).
+   * Map vacío para vuelos sin escalas (el caller cae a origen/destino).
+   */
+  private async rutasIatasPorVuelo(
+    vueloIds: string[],
+  ): Promise<Map<string, string[]>> {
+    const out = new Map<string, string[]>();
+    if (vueloIds.length === 0) return out;
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id, orden, origen_iata, destino_iata')
+      .in('vuelo_id', vueloIds)
+      .eq('solo_operativa', false)
+      .order('orden', { ascending: true });
+    const porVuelo = new Map<string, Array<Record<string, unknown>>>();
+    for (const e of data ?? []) {
+      const vid = e.vuelo_id as string;
+      (porVuelo.get(vid) ?? porVuelo.set(vid, []).get(vid)!).push(e);
+    }
+    for (const [vid, legs] of porVuelo) {
+      if (legs.length === 0) continue;
+      out.set(vid, [
+        legs[0].origen_iata as string,
+        ...legs.map((l) => l.destino_iata as string),
+      ]);
+    }
+    return out;
   }
 
   async findById(id: string) {
