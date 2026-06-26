@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   HttpCode,
   HttpStatus,
   Param,
@@ -10,6 +11,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -39,15 +41,44 @@ import {
   UpdatePermisoDto,
   VoucherUrlsDto,
 } from './dto/flights.dto';
+import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
 
 @ApiTags('Flights')
 @ApiBearerAuth()
 @Controller({ path: 'flights', version: '1' })
 export class FlightsController {
-  constructor(private readonly flights: FlightsService) {}
+  constructor(
+    private readonly flights: FlightsService,
+    private readonly report: FlightReportService,
+  ) {}
 
   // ============ Vuelos ============
+
+  @Get(':id/reporte.pdf')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO)
+  @Header('Content-Type', 'application/pdf')
+  @ApiOperation({ summary: 'Reporte consolidado del vuelo (cotización, ingreso, tacómetro, gastos) en PDF' })
+  async reportePdf(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
+    const folio = await this.report.folio(id);
+    const buffer = await this.report.pdf(id);
+    return new StreamableFile(buffer, {
+      type: 'application/pdf',
+      disposition: `attachment; filename="vuelo-${folio}.pdf"`,
+    });
+  }
+
+  @Get(':id/reporte.xlsx')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO)
+  @ApiOperation({ summary: 'Reporte consolidado del vuelo en Excel' })
+  async reporteXlsx(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
+    const folio = await this.report.folio(id);
+    const buffer = await this.report.xlsx(id);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="vuelo-${folio}.xlsx"`,
+    });
+  }
 
   @Get()
   @ApiOperation({ summary: 'List flights with filters. El piloto solo ve sus vuelos asignados.' })

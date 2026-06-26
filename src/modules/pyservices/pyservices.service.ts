@@ -46,6 +46,55 @@ export interface TablaXlsxPayload {
   totales?: (string | number | null)[];
 }
 
+export interface ReporteVueloLineaPayload {
+  fecha?: string | null;
+  concepto?: string;
+  detalle?: string | null;
+  moneda?: string | null;
+  monto?: number | null;
+}
+export interface ReporteVueloTramoPayload {
+  orden: number;
+  ruta: string;
+  pasajeros?: number | null;
+  taco_salida?: number | null;
+  taco_llegada?: number | null;
+  horas?: number | null;
+}
+export interface ReporteVueloPayload {
+  generado: string;
+  folio: string;
+  cliente?: string;
+  aeronave?: string | null;
+  piloto?: string | null;
+  copiloto?: string | null;
+  tipo?: string;
+  estado?: string;
+  ruta?: string;
+  fecha_vuelo?: string | null;
+  fecha_traslado_final?: string | null;
+  pasajeros?: number;
+  tarifa_tipo?: string | null;
+  tarifa_hora_usd?: number | null;
+  tiempo_cobrable_hr?: number | null;
+  subtotal_usd?: number;
+  tuas_usd?: number;
+  iva_usd?: number;
+  extras_total_usd?: number;
+  ajuste_final_usd?: number;
+  total_usd?: number;
+  total_mxn?: number | null;
+  tc_usd_mxn?: number | null;
+  metodo_cobro?: string | null;
+  tramos?: ReporteVueloTramoPayload[];
+  cobros?: ReporteVueloLineaPayload[];
+  total_cobrado_usd?: number;
+  saldo_usd?: number;
+  combustible?: ReporteVueloLineaPayload[];
+  gastos?: ReporteVueloLineaPayload[];
+  notas?: string | null;
+}
+
 export interface ArchivoZipPayload {
   nombre: string;
   contenido_b64: string;
@@ -94,6 +143,16 @@ export class PyservicesService {
   /** Ensambla archivos (base64) en un .zip. */
   async generateZip(payload: ZipPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/zip', payload);
+  }
+
+  /** Reporte consolidado de un vuelo en PDF. */
+  async generateReporteVueloPdf(payload: ReporteVueloPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/reporte-vuelo', payload);
+  }
+
+  /** Reporte consolidado de un vuelo en Excel. */
+  async generateReporteVueloXlsx(payload: ReporteVueloPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/reporte-vuelo-xlsx', payload);
   }
 
   /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */

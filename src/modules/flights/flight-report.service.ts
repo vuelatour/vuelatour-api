@@ -1,0 +1,186 @@
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { SupabaseService } from '../supabase/supabase.service';
+import {
+  PyservicesService,
+  type ReporteVueloLineaPayload,
+  type ReporteVueloPayload,
+} from '../pyservices/pyservices.service';
+
+/** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
+const REPORTE_COLS =
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, extras_total_usd, ajuste_final_usd, metodo_cobro';
+
+function n(v: unknown): number {
+  const x = Number(v);
+  return Number.isFinite(x) ? x : 0;
+}
+
+/**
+ * Arma el reporte consolidado de UN vuelo (cotización + ingreso + tacómetro +
+ * combustible + gastos) y lo renderiza en PDF/Excel vía pyservices.
+ */
+@Injectable()
+export class FlightReportService {
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly pyservices: PyservicesService,
+  ) {}
+
+  async pdf(flightId: string): Promise<Buffer> {
+    return this.pyservices.generateReporteVueloPdf(await this.buildPayload(flightId));
+  }
+
+  async xlsx(flightId: string): Promise<Buffer> {
+    return this.pyservices.generateReporteVueloXlsx(await this.buildPayload(flightId));
+  }
+
+  /** Folio del vuelo (para nombrar el archivo descargado). */
+  async folio(flightId: string): Promise<string> {
+    const { data } = await this.supabase.service
+      .from('vuelo')
+      .select('folio')
+      .eq('id', flightId)
+      .maybeSingle();
+    return data?.folio != null ? String(data.folio) : flightId.slice(0, 8);
+  }
+
+  private async buildPayload(flightId: string): Promise<ReporteVueloPayload> {
+    const sb = this.supabase.service;
+    const { data: v, error } = await sb
+      .from('vuelo')
+      .select(REPORTE_COLS)
+      .eq('id', flightId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!v) throw new NotFoundException(`Vuelo ${flightId} not found`);
+
+    const [{ data: cliente }, { data: aeronave }, escalasRes, cobrosRes, gastosRes] =
+      await Promise.all([
+        v.cliente_id
+          ? sb.from('cliente').select('nombre').eq('id', v.cliente_id).maybeSingle()
+          : Promise.resolve({ data: null }),
+        v.aeronave_id
+          ? sb.from('aeronave').select('matricula, modelo').eq('id', v.aeronave_id).maybeSingle()
+          : Promise.resolve({ data: null }),
+        sb
+          .from('escala')
+          .select('orden, origen_iata, destino_iata, pasajeros, taco_salida, taco_llegada, solo_operativa')
+          .eq('vuelo_id', flightId)
+          .order('orden', { ascending: true }),
+        sb
+          .from('cobro_vuelo')
+          .select('monto, moneda, metodo_cobro, fecha_cobro')
+          .eq('vuelo_id', flightId)
+          .order('fecha_cobro', { ascending: true }),
+        sb
+          .from('gasto')
+          .select('fecha_gasto, categoria, monto, moneda, litros, lugar, proveedor:proveedor_id(nombre)')
+          .eq('vuelo_id', flightId)
+          .order('fecha_gasto', { ascending: true }),
+      ]);
+
+    // Nombres de piloto/copiloto.
+    const userIds = [v.piloto_id, v.copiloto_id].filter(Boolean) as string[];
+    const nombrePorId = new Map<string, string>();
+    if (userIds.length) {
+      const { data: us } = await sb.from('usuario').select('id, nombre').in('id', userIds);
+      for (const u of us ?? []) nombrePorId.set(u.id as string, u.nombre as string);
+    }
+
+    const escalas = (escalasRes.data ?? []) as Array<Record<string, unknown>>;
+    const comerciales = escalas.filter((e) => e.solo_operativa !== true);
+    const rutaLegs = comerciales.length > 0 ? comerciales : escalas;
+    const ruta =
+      rutaLegs.length > 0
+        ? [
+            rutaLegs[0].origen_iata as string,
+            ...rutaLegs.map((e) => e.destino_iata as string),
+          ].join(' → ')
+        : `${v.origen_iata as string} → ${v.destino_iata as string}`;
+
+    const tramos = escalas.map((e) => {
+      const s = e.taco_salida == null ? null : n(e.taco_salida);
+      const l = e.taco_llegada == null ? null : n(e.taco_llegada);
+      return {
+        orden: n(e.orden),
+        ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
+        pasajeros: e.pasajeros == null ? null : n(e.pasajeros),
+        taco_salida: s,
+        taco_llegada: l,
+        horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
+      };
+    });
+
+    const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map((c) => ({
+      fecha: (c.fecha_cobro as string) ?? null,
+      concepto: (c.metodo_cobro as string) ?? 'Cobro',
+      moneda: (c.moneda as string) ?? 'USD',
+      monto: n(c.monto),
+    }));
+    const totalCobrado = cobros.reduce((acc, c) => acc + n(c.monto), 0);
+
+    const gastosRows = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
+    const proveedorNombre = (g: Record<string, unknown>): string | null => {
+      const p = g.proveedor as { nombre?: string } | { nombre?: string }[] | null;
+      if (Array.isArray(p)) return p[0]?.nombre ?? null;
+      return p?.nombre ?? null;
+    };
+    const combustible: ReporteVueloLineaPayload[] = gastosRows
+      .filter((g) => g.categoria === 'GAS')
+      .map((g) => ({
+        fecha: (g.fecha_gasto as string) ?? null,
+        detalle:
+          [g.lugar, g.litros != null ? `${n(g.litros)} L` : null]
+            .filter(Boolean)
+            .join(' · ') || 'Combustible',
+        moneda: (g.moneda as string) ?? 'MXN',
+        monto: n(g.monto),
+      }));
+    const gastos: ReporteVueloLineaPayload[] = gastosRows
+      .filter((g) => g.categoria !== 'GAS')
+      .map((g) => ({
+        fecha: (g.fecha_gasto as string) ?? null,
+        concepto: (g.categoria as string) ?? 'OTRO',
+        detalle: proveedorNombre(g),
+        moneda: (g.moneda as string) ?? 'MXN',
+        monto: n(g.monto),
+      }));
+
+    const matricula = (aeronave as { matricula?: string; modelo?: string } | null);
+
+    return {
+      generado: new Date().toISOString(),
+      folio: v.folio != null ? String(v.folio) : flightId.slice(0, 8),
+      cliente: (cliente as { nombre?: string } | null)?.nombre ?? '',
+      aeronave: matricula
+        ? [matricula.matricula, matricula.modelo].filter(Boolean).join(' · ')
+        : null,
+      piloto: v.piloto_id ? (nombrePorId.get(v.piloto_id as string) ?? null) : null,
+      copiloto: v.copiloto_id ? (nombrePorId.get(v.copiloto_id as string) ?? null) : null,
+      tipo: (v.tipo as string) ?? '',
+      estado: (v.estado as string) ?? '',
+      ruta,
+      fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+      fecha_traslado_final: (v.fecha_traslado_final as string) ?? null,
+      pasajeros: n(v.pasajeros),
+      tarifa_tipo: (v.tarifa_tipo as string) ?? null,
+      tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
+      tiempo_cobrable_hr: v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
+      subtotal_usd: n(v.subtotal_vuelo_usd),
+      tuas_usd: n(v.tuas_usd),
+      iva_usd: n(v.iva_usd),
+      extras_total_usd: n(v.extras_total_usd),
+      ajuste_final_usd: n(v.ajuste_final_usd),
+      total_usd: n(v.monto_total_usd),
+      total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
+      tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
+      metodo_cobro: (v.metodo_cobro as string) ?? null,
+      tramos,
+      cobros,
+      total_cobrado_usd: Number(totalCobrado.toFixed(2)),
+      saldo_usd: Number((n(v.monto_total_usd) - totalCobrado).toFixed(2)),
+      combustible,
+      gastos,
+    };
+  }
+}
