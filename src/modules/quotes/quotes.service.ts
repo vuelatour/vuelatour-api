@@ -236,11 +236,12 @@ export class QuotesService {
     const extrasConIvaR = round2(extrasConIva);
     const extrasSinIvaR = round2(extrasSinIva);
     const pernoctaR = round2(viaticosPernocta);
-    const baseIva = round2(subtotalR + tuasR + extrasConIvaR);
-    const iva = round2(baseIva * ivaPct);
-    // Ajuste final (fuera de IVA): negativo = descuento, positivo = redondeo.
+    // Ajuste (negativo = descuento, positivo = redondeo) ANTES del IVA: reduce la
+    // base gravable para que el descuento también baje el IVA (si se cobra IVA).
     const ajusteFinal = round2(Number(dto.ajuste_final_usd) || 0);
-    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR + ajusteFinal);
+    const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajusteFinal);
+    const iva = round2(baseIva * ivaPct);
+    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
@@ -258,6 +259,16 @@ export class QuotesService {
         concepto: `${e.concepto}${e.aplica_iva ? '' : ' (sin IVA)'}`,
         monto_usd: e.monto_usd,
       })),
+      // El ajuste/descuento se lista ANTES del IVA porque reduce la base gravable.
+      ...(ajusteFinal !== 0
+        ? [
+            {
+              clave: 'AJUSTE',
+              concepto: ajusteFinal < 0 ? 'Descuento' : 'Redondeo',
+              monto_usd: ajusteFinal,
+            },
+          ]
+        : []),
       ...(iva > 0
         ? [
             {
@@ -273,15 +284,6 @@ export class QuotesService {
               clave: 'PERNOCTA',
               concepto: 'Viáticos por pernocta (sin IVA)',
               monto_usd: pernoctaR,
-            },
-          ]
-        : []),
-      ...(ajusteFinal !== 0
-        ? [
-            {
-              clave: 'AJUSTE',
-              concepto: ajusteFinal < 0 ? 'Descuento' : 'Redondeo',
-              monto_usd: ajusteFinal,
             },
           ]
         : []),
