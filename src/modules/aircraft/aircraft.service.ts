@@ -186,7 +186,7 @@ export class AircraftService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
+        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
       )
       .eq('vuelo.aeronave_id', id)
       .neq('vuelo.estado', 'CANCELADO')
@@ -198,6 +198,23 @@ export class AircraftService {
     for (const e of rows) {
       for (const v of [e.taco_salida, e.taco_llegada]) {
         if (v != null) horasActuales = Math.max(horasActuales, Number(v));
+      }
+    }
+
+    // Firma las fotos del tacómetro (bucket privado taco-fotos) para verlas en
+    // el panel admin desde el histórico.
+    const fotoPaths: string[] = [];
+    for (const e of rows) {
+      if (e.foto_taco_salida_url) fotoPaths.push(e.foto_taco_salida_url as string);
+      if (e.foto_taco_llegada_url) fotoPaths.push(e.foto_taco_llegada_url as string);
+    }
+    const firmadas: Record<string, string> = {};
+    if (fotoPaths.length > 0) {
+      const { data: signed } = await this.supabase.service.storage
+        .from('taco-fotos')
+        .createSignedUrls(fotoPaths, 3600);
+      for (const s of signed ?? []) {
+        if (s.signedUrl && s.path) firmadas[s.path] = s.signedUrl;
       }
     }
 
@@ -214,6 +231,12 @@ export class AircraftService {
           taco_salida: s,
           taco_llegada: l,
           horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
+          foto_salida_url: e.foto_taco_salida_url
+            ? (firmadas[e.foto_taco_salida_url as string] ?? null)
+            : null,
+          foto_llegada_url: e.foto_taco_llegada_url
+            ? (firmadas[e.foto_taco_llegada_url as string] ?? null)
+            : null,
         };
       })
       .sort((a, b) => {
