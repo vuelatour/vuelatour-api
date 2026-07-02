@@ -244,4 +244,33 @@ export class CaptureTacoDto {
   @IsOptional()
   @IsBoolean()
   capturado_offline?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Foto sincronizada sin lectura confirmada por el piloto: el servidor intenta leerla con IA y marca la escala para revisión en oficina (amarillo). Nunca aplica la lectura IA como definitiva.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pendiente_lectura?: boolean;
+}
+
+export class ConfirmTacoDto {
+  @ApiPropertyOptional({ description: 'Corrección de la lectura de salida (opcional)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  taco_salida?: number;
+
+  @ApiPropertyOptional({ description: 'Corrección de la lectura de llegada (opcional)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  taco_llegada?: number;
+
+  @ApiPropertyOptional({ description: 'Nota de la revisión/corrección (auditoría)' })
+  @IsOptional()
+  @IsString()
+  nota?: string;
 }

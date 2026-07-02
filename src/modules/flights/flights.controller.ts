@@ -22,6 +22,7 @@ import { CreateCobroDto } from './dto/cobros.dto';
 import {
   AssignEscalaDto,
   CaptureTacoDto,
+  ConfirmTacoDto,
   CreateEscalaDto,
   OperationalLegDto,
   TacoAiReadDto,
@@ -345,6 +346,35 @@ export class FlightsController {
   ) {
     await this.flights.assertAccessByLeg(legId, c);
     return this.flights.captureTaco(legId, dto, c.userId);
+  }
+
+  @Post('legs/:legId/taco/confirm')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Oficina confirma una lectura marcada para revisión (amarillo → verde). Permite corregir los valores en el mismo paso; si corrige la llegada, se propaga como salida del siguiente tramo.',
+  })
+  confirmTaco(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: ConfirmTacoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.confirmTaco(legId, dto, c.userId);
+  }
+
+  @Post(':id/taco/fill-gaps')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Rellena los huecos de tacómetro del vuelo con el promedio histórico del tramo. Lo calculado queda en amarillo (revision_requerida) hasta confirmarse. También corre solo cada noche (cierre del día).',
+  })
+  fillTacoGaps(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.fillTacoGaps(id, c.userId);
   }
 
   @Get(':id/taco-photos')

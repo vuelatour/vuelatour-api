@@ -6,6 +6,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
@@ -24,6 +25,7 @@ import type {
 import type {
   AssignEscalaDto,
   CaptureTacoDto,
+  ConfirmTacoDto,
   CreateEscalaDto,
   OperationalLegDto,
   TacoAiReadDto,
@@ -1694,7 +1696,7 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
 
-    const finalRow = await this.applyConsistencyFlag(data, userId);
+    let finalRow = await this.applyConsistencyFlag(data, userId);
     // Ahorra un paso: la llegada de un tramo es la salida del siguiente. Si se
     // capturó taco_llegada, se copia como taco_salida del próximo tramo comercial
     // (mismo avión, salida aún vacía) para que el piloto no la reescriba.
@@ -1707,8 +1709,160 @@ export class FlightsService {
         userId,
       );
     }
+    // Sincronización offline con foto pero sin lectura confirmada por el
+    // piloto: el servidor intenta leer la foto con IA. La lectura IA nunca se
+    // da por buena — queda en AMARILLO (revision_requerida) hasta que oficina
+    // la confirme.
+    if (dto.capturado_offline && dto.pendiente_lectura) {
+      finalRow = await this.resolverLecturaPendiente(finalRow, userId);
+    }
     void this.notifyTacoCaptured(finalRow);
     return finalRow;
+  }
+
+  /**
+   * Resuelve lecturas faltantes de una escala sincronizada offline: por cada
+   * lado (salida/llegada) con foto pero sin valor, lee la foto con IA (URL
+   * firmada del bucket privado). El resultado SIEMPRE queda marcado con
+   * revision_requerida=true para confirmación en oficina; una lectura menor al
+   * último tacómetro del avión no se aplica (solo se reporta el motivo). La
+   * llegada resuelta por IA NO se propaga al siguiente tramo hasta confirmarse.
+   */
+  private async resolverLecturaPendiente(
+    escala: Record<string, unknown>,
+    userId: string,
+  ): Promise<Record<string, unknown>> {
+    const motivos: string[] = [];
+    const patch: Record<string, unknown> = {};
+    const tacoSalidaActual =
+      escala.taco_salida === null ? null : Number(escala.taco_salida);
+
+    for (const which of ['salida', 'llegada'] as const) {
+      const valor = escala[`taco_${which}`];
+      const foto = escala[`foto_taco_${which}_url`] as string | null;
+      if (valor !== null && valor !== undefined) continue;
+      if (!foto) continue;
+
+      const signed = await this.signedTacoUrl(foto);
+      if (!signed) {
+        motivos.push(`Foto de ${which} sincronizada pero no accesible — revisar`);
+        continue;
+      }
+      const ultimo = await this.ultimoTacoAeronave(
+        escala.aeronave_id as string | null,
+        tacoSalidaActual,
+      );
+      const ia = await this.vision.readTacometro({ imageUrl: signed, ultimo });
+
+      if (!ia || !ia.legible || ia.lectura === null) {
+        motivos.push(
+          `Foto de ${which} sincronizada sin lectura legible — capturar manualmente`,
+        );
+        continue;
+      }
+      const lectura = Number(ia.lectura);
+      if (ultimo !== null && lectura < ultimo) {
+        motivos.push(
+          `IA leyó ${which} ${lectura} menor al último tacómetro del avión (${ultimo}) — revisar foto`,
+        );
+        continue;
+      }
+      if (which === 'llegada' && tacoSalidaActual !== null && lectura < tacoSalidaActual) {
+        motivos.push(
+          `IA leyó llegada ${lectura} menor a la salida (${tacoSalidaActual}) — revisar foto`,
+        );
+        continue;
+      }
+      patch[`taco_${which}`] = lectura;
+      patch.valor_ia_propuesto = lectura;
+      const pct = Math.round((ia.confianza ?? 0) * 100);
+      motivos.push(
+        `Lectura de ${which} leída por IA al sincronizar (confianza ${pct}%) — confirmar en oficina`,
+      );
+    }
+
+    if (motivos.length === 0) return escala;
+    patch.revision_requerida = true;
+    patch.revision_motivo = [escala.revision_motivo, motivos.join('; ')]
+      .filter(Boolean)
+      .join('; ');
+    patch.updated_by = userId;
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escala.id as string)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) {
+      this.logger.warn(`resolverLecturaPendiente falló: ${error.message}`);
+      return escala;
+    }
+    return data ?? escala;
+  }
+
+  /** URL firmada (1 h) de una foto del bucket privado taco-fotos. */
+  private async signedTacoUrl(path: string): Promise<string | null> {
+    const { data } = await this.supabase.service.storage
+      .from('taco-fotos')
+      .createSignedUrl(path, 3600);
+    return data?.signedUrl ?? null;
+  }
+
+  /**
+   * Confirmación de oficina (amarillo → verde): limpia revision_requerida y
+   * registra quién revisó. Permite corregir las lecturas en el mismo paso; si
+   * se corrige la llegada, se propaga como salida del siguiente tramo.
+   */
+  async confirmTaco(escalaId: string, dto: ConfirmTacoDto, userId: string) {
+    const { data: current, error: readErr } = await this.supabase.service
+      .from('escala')
+      .select('id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada')
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    const salida =
+      dto.taco_salida ??
+      (current.taco_salida === null ? null : Number(current.taco_salida));
+    const llegada =
+      dto.taco_llegada ??
+      (current.taco_llegada === null ? null : Number(current.taco_llegada));
+    if (salida !== null && llegada !== null && llegada < salida) {
+      throw new ConflictException('taco_llegada no puede ser menor a taco_salida');
+    }
+
+    const patch: Record<string, unknown> = {
+      revision_requerida: false,
+      revision_motivo: null,
+      corregido_por: userId,
+      corregido_at: new Date().toISOString(),
+      updated_by: userId,
+    };
+    if (dto.taco_salida !== undefined) patch.taco_salida = dto.taco_salida;
+    if (dto.taco_llegada !== undefined) patch.taco_llegada = dto.taco_llegada;
+    if (dto.nota !== undefined) patch.nota_correccion = dto.nota;
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escalaId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    if (llegada !== null) {
+      await this.propagarLlegadaASalidaSiguiente(
+        current.vuelo_id as string,
+        current.orden as number,
+        current.aeronave_id as string | null,
+        llegada,
+        userId,
+      );
+    }
+    return data;
   }
 
   /**
@@ -1985,6 +2139,149 @@ export class FlightsService {
       );
       if (error) throw new Error(error.message);
     }
+  }
+
+  // ===== Cierre del día: relleno de huecos de tacómetro =====
+
+  /**
+   * Cron de cierre del día (23:45 Cancún = 04:45 UTC; Cancún no observa DST).
+   * Recorre los vuelos recientes COMPLETADOS/EN_VUELO con tacómetros
+   * incompletos y rellena los huecos con el promedio histórico del tramo
+   * (tramo_tiempo_promedio). Todo valor calculado queda en AMARILLO
+   * (revision_requerida) hasta que oficina lo confirme — acuerdo de la sesión
+   * con el cliente: la IA llena los huecos que dejan los pilotos y la oficina
+   * solo pasa de amarillo a verde.
+   */
+  @Cron('45 4 * * *', { name: 'taco-fill-gaps' })
+  async fillTacoGapsDelDia(): Promise<void> {
+    try {
+      const desde = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
+      const { data, error } = await this.supabase.service
+        .from('vuelo')
+        .select('id')
+        .in('estado', ['COMPLETADO', 'EN_VUELO'])
+        .eq('es_externo', false)
+        .gte('updated_at', desde);
+      if (error) throw new Error(error.message);
+      for (const v of data ?? []) {
+        try {
+          await this.fillTacoGaps(v.id as string, null);
+        } catch (err) {
+          this.logger.warn(
+            `fillTacoGaps(${v.id as string}) falló: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `fillTacoGapsDelDia falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Rellena los huecos de tacómetro de UN vuelo:
+   *  - salida vacía ← llegada del tramo anterior (mismo avión): dato exacto,
+   *    no se marca.
+   *  - llegada vacía ← salida + promedio histórico del tramo: ESTIMADO, se
+   *    marca amarillo (revision_requerida) para confirmar en oficina.
+   *  - salida vacía ← llegada − promedio histórico: ESTIMADO, amarillo.
+   * Requiere al menos MIN_MUESTRAS vuelos históricos del tramo para estimar.
+   * Devuelve el resumen de lo actualizado.
+   */
+  async fillTacoGaps(vueloId: string, userId: string | null) {
+    const escalas = await this.listEscalas(vueloId);
+    const rows = escalas.map((e) => ({
+      id: e.id as string,
+      orden: Number(e.orden),
+      origen: e.origen_iata as string,
+      destino: e.destino_iata as string,
+      aeronaveId: (e.aeronave_id as string | null) ?? null,
+      salida: e.taco_salida === null ? null : Number(e.taco_salida),
+      llegada: e.taco_llegada === null ? null : Number(e.taco_llegada),
+      cambios: [] as string[],
+      estimado: false,
+    }));
+    rows.sort((a, b) => a.orden - b.orden);
+
+    // Varias pasadas: un valor resuelto habilita el vecino (propagación en cadena).
+    for (let pass = 0; pass < rows.length + 1; pass++) {
+      let changed = false;
+      for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        // (1) salida ← llegada del tramo anterior (mismo avión). Dato exacto.
+        if (r.salida === null && i > 0) {
+          const prev = rows[i - 1];
+          if (prev.llegada !== null && prev.aeronaveId === r.aeronaveId) {
+            r.salida = prev.llegada;
+            r.cambios.push('salida tomada de la llegada del tramo anterior');
+            changed = true;
+          }
+        }
+        // (2) llegada ← salida + promedio histórico del tramo. Estimado.
+        if (r.llegada === null && r.salida !== null) {
+          const tramo = await this.getTramoPromedio(r.origen, r.destino);
+          if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
+            r.llegada = Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
+            r.cambios.push(
+              `llegada calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
+            );
+            r.estimado = true;
+            changed = true;
+          }
+        }
+        // (3) salida ← llegada − promedio histórico del tramo. Estimado.
+        if (r.salida === null && r.llegada !== null) {
+          const tramo = await this.getTramoPromedio(r.origen, r.destino);
+          if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
+            r.salida = Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
+            r.cambios.push(
+              `salida calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
+            );
+            r.estimado = true;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) break;
+    }
+
+    const actualizadas: Array<Record<string, unknown>> = [];
+    for (const r of rows) {
+      if (r.cambios.length === 0) continue;
+      const patch: Record<string, unknown> = {
+        taco_salida: r.salida,
+        taco_llegada: r.llegada,
+      };
+      if (r.estimado) {
+        patch.revision_requerida = true;
+        patch.revision_motivo = `Calculado automáticamente al cierre del día: ${r.cambios.join('; ')} — confirmar en oficina`;
+      }
+      if (userId) patch.updated_by = userId;
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .update(patch)
+        .eq('id', r.id)
+        .select(ESCALA_COLS)
+        .maybeSingle();
+      if (error) {
+        this.logger.warn(`fillTacoGaps escala ${r.id}: ${error.message}`);
+        continue;
+      }
+      if (data) {
+        actualizadas.push({
+          escala_id: r.id,
+          orden: r.orden,
+          ruta: `${r.origen} → ${r.destino}`,
+          taco_salida: r.salida,
+          taco_llegada: r.llegada,
+          estimado: r.estimado,
+          cambios: r.cambios,
+        });
+        if (r.estimado) void this.notifyTacoCaptured(data);
+      }
+    }
+    return { vuelo_id: vueloId, escalas_actualizadas: actualizadas.length, detalle: actualizadas };
   }
 
   /**
