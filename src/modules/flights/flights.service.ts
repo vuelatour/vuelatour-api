@@ -1513,24 +1513,42 @@ export class FlightsService {
     // pero no se cotizan ni se muestran al cliente). Sin itinerario, el
     // comportamiento clásico: ida (+ regreso invertido si hay fecha).
     const vueloId = data!.id as string;
+    // Pernocta automática: si el siguiente tramo sale OTRO día (hora por tramo
+    // capturada), el piloto duerme en el destino de este tramo — se marca
+    // requiere_pernocta sin captura manual.
+    const dayCancun = (d: Date): string =>
+      d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    const fechaEfectiva = (i: number): Date | null =>
+      itinerario[i]?.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null);
     const legs = itinerario.length
-      ? itinerario.map((e, i) => ({
-          vuelo_id: vueloId,
-          orden: i + 1,
-          origen_iata: e.origen_iata,
-          destino_iata: e.destino_iata,
-          aeronave_id: dto.aeronave_id ?? null,
-          piloto_id: dto.piloto_id ?? null,
-          pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
-          pasajeros_nombres: e.pasajeros_nombres ?? [],
-          es_ferry: e.es_ferry ?? false,
-          solo_operativa: e.es_ferry ?? false,
-          notas: e.notas ?? null,
-          fecha_salida_plan: (e.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null))
-            ?.toISOString(),
-          created_by: userId,
-          updated_by: userId,
-        }))
+      ? itinerario.map((e, i) => {
+          // Última fecha conocida hasta este tramo (un tramo sin hora se asume
+          // del mismo día que el anterior).
+          let referencia: Date | null = null;
+          for (let j = i; j >= 0 && !referencia; j--) referencia = fechaEfectiva(j);
+          const siguiente = itinerario[i + 1]?.hora_salida ?? null;
+          const pernocta =
+            referencia != null &&
+            siguiente != null &&
+            dayCancun(siguiente) > dayCancun(referencia);
+          return {
+            vuelo_id: vueloId,
+            orden: i + 1,
+            origen_iata: e.origen_iata,
+            destino_iata: e.destino_iata,
+            aeronave_id: dto.aeronave_id ?? null,
+            piloto_id: dto.piloto_id ?? null,
+            pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
+            pasajeros_nombres: e.pasajeros_nombres ?? [],
+            es_ferry: e.es_ferry ?? false,
+            solo_operativa: e.es_ferry ?? false,
+            requiere_pernocta: pernocta,
+            notas: e.notas ?? null,
+            fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
+            created_by: userId,
+            updated_by: userId,
+          };
+        })
       : [
       {
         vuelo_id: vueloId,
@@ -1543,6 +1561,7 @@ export class FlightsService {
         pasajeros_nombres: [] as string[],
         es_ferry: false,
         solo_operativa: false,
+        requiere_pernocta: false,
         notas: null as string | null,
         fecha_salida_plan: dto.fecha_vuelo.toISOString() as string | undefined,
         created_by: userId,
@@ -1561,6 +1580,7 @@ export class FlightsService {
               pasajeros_nombres: [] as string[],
               es_ferry: false,
               solo_operativa: false,
+              requiere_pernocta: false,
               notas: null as string | null,
               fecha_salida_plan: dto.fecha_traslado_final.toISOString() as string | undefined,
               created_by: userId,

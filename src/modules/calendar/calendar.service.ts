@@ -195,25 +195,39 @@ export class CalendarService {
       );
 
       if (v.tipo === 'MULTIESCALA' && escalasOrdenadas.length > 0) {
-        // Itinerario personalizado: un evento por tramo con fecha. El 1er tramo
-        // hereda fecha_vuelo y el último fecha_traslado_final si no tienen fecha
-        // propia (compat con escalas creadas antes de fecha_salida_plan).
+        // UN evento por vuelo por DÍA (no por tramo): el itinerario del día se
+        // muestra encadenado ("CZM-PCE-CZM-CUN"), como lo maneja el cliente en
+        // su calendario. Un tramo sin fecha propia se asume del mismo día que
+        // el tramo anterior; si sale otro día, abre un evento nuevo (pernocta
+        // o viaje multi-día).
+        const dayOf = (iso: string): string =>
+          new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+        type Grupo = { fecha: string; legs: typeof escalasOrdenadas };
+        const grupos: Grupo[] = [];
         escalasOrdenadas.forEach((e, i) => {
-          const fecha =
-            e.fecha_salida_plan ??
-            (i === 0
-              ? v.fecha_vuelo
-              : i === escalasOrdenadas.length - 1
-                ? v.fecha_traslado_final
-                : null);
+          const fecha = e.fecha_salida_plan ?? (i === 0 ? v.fecha_vuelo : null);
+          const ultimo = grupos[grupos.length - 1];
+          if (fecha && (!ultimo || dayOf(fecha) !== dayOf(ultimo.fecha))) {
+            grupos.push({ fecha, legs: [e] });
+          } else if (ultimo) {
+            ultimo.legs.push(e);
+          }
+        });
+        grupos.forEach((g, gi) => {
+          const puntos = [g.legs[0].origen_iata, ...g.legs.map((l) => l.destino_iata)];
+          const pax = g.legs
+            .filter((l) => !l.es_ferry)
+            .reduce((m, l) => Math.max(m, l.pasajeros ?? 0), 0);
+          const todoFerry = g.legs.every((l) => l.es_ferry);
           const ev = buildEvent({
-            idSuffix: i === 0 ? '' : `:leg:${e.orden}`,
-            escalaOrden: e.orden,
-            fecha,
-            origen: e.origen_iata,
-            destino: e.destino_iata,
-            prefijo: e.es_ferry ? `T${e.orden} Ferry · ` : `T${e.orden} · `,
-            pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? undefined),
+            idSuffix: gi === 0 ? '' : `:dia:${gi}`,
+            escalaOrden: g.legs[0].orden,
+            fecha: g.fecha,
+            // La cadena completa del día en el label: "CZM-PCE-CZM" → "CUN".
+            origen: puntos.slice(0, -1).join('-'),
+            destino: puntos[puntos.length - 1],
+            prefijo: todoFerry ? 'Ferry · ' : undefined,
+            pasajeros: pax,
           });
           if (ev) out.push(ev);
         });
