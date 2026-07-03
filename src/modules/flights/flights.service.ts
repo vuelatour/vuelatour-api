@@ -1451,9 +1451,17 @@ export class FlightsService {
       }
     }
 
-    const origen = itinerario[0]?.origen_iata ?? dto.origen_iata!.toUpperCase();
-    const destino =
-      itinerario[itinerario.length - 1]?.destino_iata ?? dto.destino_iata!.toUpperCase();
+    // Ruta comercial derivada (convención del cliente): la cotización SIEMPRE
+    // abre y cierra en Cancún aunque la operación salga de otra base. El
+    // destino comercial es el último destino de los tramos con pasajeros
+    // (excluyendo CUN); la oficina la ajusta después en el cotizador.
+    const destinosComerciales = itinerario
+      .filter((e) => !e.es_ferry && e.destino_iata !== 'CUN')
+      .map((e) => e.destino_iata);
+    const origen = itinerario.length ? 'CUN' : dto.origen_iata!.toUpperCase();
+    const destino = itinerario.length
+      ? (destinosComerciales[destinosComerciales.length - 1] ?? 'CUN')
+      : dto.destino_iata!.toUpperCase();
     const paxItinerario = itinerario
       .filter((e) => !e.es_ferry)
       .reduce((max, e) => Math.max(max, e.pasajeros ?? 0), 0);

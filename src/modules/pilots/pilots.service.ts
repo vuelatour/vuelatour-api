@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type { CreateDescansoDto, ListDescansosQuery, ListPilotsQuery } from './dto/pilots.dto';
 
 const USUARIO_COLS =
@@ -10,7 +11,10 @@ const VUELO_COLS =
 
 @Injectable()
 export class PilotsService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly calendarSync: CalendarSyncService,
+  ) {}
 
   /**
    * Lista pilotos (rol=PILOTO) con métricas agregadas: vuelos del mes,
@@ -257,6 +261,32 @@ export class PilotsService {
       if (error.code === '23503') throw new NotFoundException('Piloto no encontrado');
       throw new Error(error.message);
     }
+
+    // Espejo en el Google Calendar compartido (best-effort, no bloquea).
+    void (async () => {
+      try {
+        const { data: piloto } = await this.supabase.service
+          .from('usuario')
+          .select('nombre')
+          .eq('id', pilotoId)
+          .maybeSingle();
+        const eventId = await this.calendarSync.upsertDescansoEvent({
+          piloto_nombre: (piloto?.nombre as string | undefined) ?? 'Piloto',
+          fecha_inicio: inicio,
+          fecha_fin: fin,
+          motivo: dto.motivo ?? null,
+        });
+        if (eventId) {
+          await this.supabase.service
+            .from('piloto_descanso')
+            .update({ google_calendar_id: eventId })
+            .eq('id', data!.id as string);
+        }
+      } catch {
+        /* best-effort */
+      }
+    })();
+
     return data!;
   }
 
@@ -265,10 +295,11 @@ export class PilotsService {
       .from('piloto_descanso')
       .delete()
       .eq('id', id)
-      .select('id')
+      .select('id, google_calendar_id')
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Descanso ${id} not found`);
+    void this.calendarSync.removeDescansoEvent(data.google_calendar_id as string | null);
     return { ok: true };
   }
 }

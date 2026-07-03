@@ -261,6 +261,43 @@ export class CalendarSyncService implements OnModuleInit {
     return created.data.id ?? null;
   }
 
+  /**
+   * Evento de día completo en el calendario compartido para un descanso de
+   * piloto. Devuelve el eventId (para guardarlo en piloto_descanso). Best-effort.
+   */
+  async upsertDescansoEvent(d: {
+    piloto_nombre: string;
+    fecha_inicio: string; // YYYY-MM-DD
+    fecha_fin: string; // YYYY-MM-DD (inclusivo)
+    motivo?: string | null;
+    google_calendar_id?: string | null;
+  }): Promise<string | null> {
+    if (!this.calendar) return d.google_calendar_id ?? null;
+    // Google usa fin EXCLUSIVO en eventos de día completo: fin + 1 día.
+    const fin = new Date(`${d.fecha_fin}T12:00:00Z`);
+    fin.setUTCDate(fin.getUTCDate() + 1);
+    const event = {
+      summary: `😴 Descansa · ${d.piloto_nombre}`,
+      description: d.motivo ?? undefined,
+      start: { date: d.fecha_inicio },
+      end: { date: fin.toISOString().slice(0, 10) },
+      transparency: 'transparent',
+    };
+    try {
+      return await this.upsertRaw(event, d.google_calendar_id ?? null, 'descanso');
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo sincronizar el descanso a Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return d.google_calendar_id ?? null;
+    }
+  }
+
+  /** Borra el evento de un descanso del calendario compartido. Best-effort. */
+  async removeDescansoEvent(eventId: string | null | undefined): Promise<void> {
+    if (eventId) await this.deleteEvent(eventId);
+  }
+
   private async deleteEvent(eventId: string): Promise<void> {
     if (!this.calendar) return;
     try {

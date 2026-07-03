@@ -19,3 +19,7 @@ create index idx_piloto_descanso_rango on public.piloto_descanso (fecha_inicio, 
 
 comment on table public.piloto_descanso is
   'Rangos de descanso del piloto: se pintan en el calendario y marcan conflicto al asignar vuelos.';
+
+-- Evento espejo en el Google Calendar compartido (sync best-effort).
+alter table public.piloto_descanso
+  add column if not exists google_calendar_id text;
