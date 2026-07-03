@@ -151,6 +151,9 @@ export class ConciliacionService {
       .select('id')
       .eq('monto', monto)
       .eq('conciliado', false)
+      // Los cargos automáticos de bodega (REFACCION medio BODEGA) no son
+      // egresos bancarios: el dinero salió al comprar la pieza, no al usarla.
+      .neq('medio_pago', 'BODEGA')
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .limit(2);
@@ -345,6 +348,8 @@ export class ConciliacionService {
       .from('gasto')
       .select('id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)')
       .eq('conciliado', false)
+      // Ver nota en tryAutoMatch: los cargos de bodega no se cruzan con banco.
+      .neq('medio_pago', 'BODEGA')
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .gte('monto', montoLo)

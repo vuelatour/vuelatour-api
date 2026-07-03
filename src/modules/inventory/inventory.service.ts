@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   PyservicesService,
@@ -37,6 +37,8 @@ export class InventoryService {
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
   ) {}
+
+  private readonly logger = new Logger(InventoryService.name);
 
   /** Inventario valorizado en Excel (respeta los filtros del listado). */
   async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
@@ -328,7 +330,7 @@ export class InventoryService {
   // ===== Movimientos (cardex) =====
 
   async createMovimiento(itemId: string, dto: CreateMovimientoDto, userId: string) {
-    await this.findItem(itemId); // 404 si no existe
+    const item = (await this.findItem(itemId)) as { nombre: string }; // 404 si no existe
 
     let costoUnitario: number;
 
@@ -374,8 +376,139 @@ export class InventoryService {
       throw new Error(error.message);
     }
 
+    // Puente inventario → gastos (diseño 5.6): "el cargo al avión ocurre al
+    // sacar la pieza de bodega". La SALIDA genera el gasto REFACCION con el
+    // costo FIFO para que llegue al reporte mensual del avión y al reparto.
+    // La DEVOLUCION con avión revierte ese cargo.
+    let gastoGenerado: Record<string, unknown> | null = null;
+    if (dto.tipo === TipoMovimientoInventario.SALIDA) {
+      gastoGenerado = await this.crearGastoDeSalida(
+        data as Record<string, unknown>,
+        item.nombre,
+        userId,
+      );
+    } else if (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id) {
+      await this.revertirGastoPorDevolucion(itemId, dto, item.nombre, userId);
+    }
+
     const stats = this.statsFromLayers(this.buildLayers(await this.movsForItem(itemId)));
-    return { ...data, stock_resultante: stats.stock, valor_usd: stats.valor_usd };
+    return {
+      ...data,
+      stock_resultante: stats.stock,
+      valor_usd: stats.valor_usd,
+      gasto_generado: gastoGenerado,
+    };
+  }
+
+  /**
+   * Crea el gasto REFACCION del avión a partir de una SALIDA de bodega.
+   * medio_pago 'BODEGA': el dinero salió del banco al COMPRAR la pieza, no al
+   * consumirla, así que este cargo no debe cruzarse con la conciliación
+   * bancaria. Si el costo FIFO es 0 (capas capturadas sin costo) no hay nada
+   * que cargar y solo se registra en el cardex.
+   */
+  private async crearGastoDeSalida(
+    mov: Record<string, unknown>,
+    itemNombre: string,
+    userId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const monto = round(Number(mov.cantidad) * Number(mov.costo_unitario_usd), 2);
+    if (monto <= 0) return null;
+
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .insert({
+        usuario_captura_id: userId,
+        categoria: 'REFACCION',
+        monto,
+        moneda: 'USD',
+        fecha_gasto: mov.fecha_movimiento,
+        medio_pago: 'BODEGA',
+        estatus_comprobante: 'SIN_COMPROBANTE',
+        aeronave_id: mov.aeronave_id,
+        proveedor_id: mov.proveedor_id ?? null,
+        inventario_movimiento_id: mov.id,
+        notas:
+          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO)` +
+          (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select('id, monto, moneda, categoria')
+      .maybeSingle();
+    if (error) {
+      // El movimiento de cardex ya quedó registrado; no lo revertimos, pero el
+      // cargo económico debe quedar visible como pendiente para no descuadrar
+      // el reporte del avión en silencio.
+      this.logger.error(
+        `SALIDA ${mov.id as string}: no se pudo crear el gasto REFACCION (${error.message}). Capturarlo manualmente.`,
+      );
+      return null;
+    }
+    return data;
+  }
+
+  /**
+   * DEVOLUCION con avión: revierte el cargo automático. Reduce (o elimina) los
+   * gastos generados por SALIDAs de este ítem a ese avión, empezando por el más
+   * reciente, hasta cubrir el monto devuelto. Best-effort: las devoluciones son
+   * excepcionales (≈1%) y cualquier resto se ajusta desde /admin/expenses.
+   */
+  private async revertirGastoPorDevolucion(
+    itemId: string,
+    dto: CreateMovimientoDto,
+    itemNombre: string,
+    userId: string,
+  ): Promise<void> {
+    try {
+      let porRevertir = round(Number(dto.cantidad) * Number(dto.costo_unitario_usd ?? 0), 2);
+      if (porRevertir <= 0) return;
+
+      // Gastos automáticos de este ítem+avión (via la liga al cardex).
+      const { data: movs } = await this.supabase.service
+        .from('inventario_movimiento')
+        .select('id')
+        .eq('item_id', itemId)
+        .eq('tipo', 'SALIDA')
+        .eq('aeronave_id', dto.aeronave_id!);
+      const movIds = (movs ?? []).map((m) => m.id as string);
+      if (movIds.length === 0) return;
+
+      const { data: gastos } = await this.supabase.service
+        .from('gasto')
+        .select('id, monto')
+        .in('inventario_movimiento_id', movIds)
+        .order('fecha_gasto', { ascending: false })
+        .order('created_at', { ascending: false });
+
+      for (const g of gastos ?? []) {
+        if (porRevertir <= 0) break;
+        const monto = Number(g.monto);
+        if (monto <= porRevertir + EPS) {
+          await this.supabase.service.from('gasto').delete().eq('id', g.id as string);
+          porRevertir = round(porRevertir - monto, 2);
+        } else {
+          await this.supabase.service
+            .from('gasto')
+            .update({
+              monto: round(monto - porRevertir, 2),
+              notas: `Ajustado por devolución a bodega de ${itemNombre}`,
+              updated_by: userId,
+            })
+            .eq('id', g.id as string);
+          porRevertir = 0;
+        }
+      }
+      if (porRevertir > 0) {
+        this.logger.warn(
+          `DEVOLUCION de ${itemNombre}: quedaron $${porRevertir} USD sin revertir (no hay gastos automáticos suficientes). Ajustar manualmente.`,
+        );
+      }
+    } catch (err) {
+      this.logger.error(
+        `revertirGastoPorDevolucion falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   async listMovimientos(filters: ListMovimientosQuery) {
