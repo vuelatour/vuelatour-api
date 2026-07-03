@@ -18,6 +18,7 @@ import {
   Min,
   MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
 
@@ -281,20 +282,85 @@ export class CreateExternalFlightDto {
  * Reserva tentativa: aparta el espacio en el calendario SIN cotización
  * (el cliente aún no confirma o faltan costos para cotizar). Vuelo propio.
  */
-export class CreateReservaDto {
-  @ApiProperty()
-  @IsUUID()
-  cliente_id!: string;
-
+/**
+ * Tramo del itinerario de OPERACIÓN en la creación rápida: la ruta real que
+ * vuela el avión y ve el piloto (puede salir de otra base, con ferries), que
+ * NO es la ruta comercial de la cotización (esa siempre abre/cierra en CUN y
+ * se arma después en el cotizador).
+ */
+export class ReservaEscalaDto {
   @ApiProperty()
   @IsString()
   @Length(3, 4)
   origen_iata!: string;
 
-  @ApiProperty({ description: 'Destino tentativo (primer destino conocido si es vuelo abierto)' })
+  @ApiProperty()
   @IsString()
   @Length(3, 4)
   destino_iata!: string;
+
+  @ApiPropertyOptional({ description: 'Hora planeada de salida del tramo' })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  hora_salida?: Date;
+
+  @ApiPropertyOptional({
+    description: 'Ferry/posicionamiento (sin pasajeros): no se cotiza ni se muestra al cliente',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
+
+  @ApiPropertyOptional({ minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  pasajeros?: number;
+
+  @ApiPropertyOptional({ type: [String] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  pasajeros_nombres?: string[];
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notas?: string;
+}
+
+export class CreateReservaDto {
+  @ApiProperty()
+  @IsUUID()
+  cliente_id!: string;
+
+  @ApiPropertyOptional({ description: 'Requerido si no se envía escalas_operacion' })
+  @ValidateIf((o: CreateReservaDto) => !o.escalas_operacion?.length)
+  @IsString()
+  @Length(3, 4)
+  origen_iata?: string;
+
+  @ApiPropertyOptional({ description: 'Destino tentativo. Requerido si no se envía escalas_operacion' })
+  @ValidateIf((o: CreateReservaDto) => !o.escalas_operacion?.length)
+  @IsString()
+  @Length(3, 4)
+  destino_iata?: string;
+
+  @ApiPropertyOptional({
+    type: [ReservaEscalaDto],
+    description:
+      'Itinerario de OPERACIÓN completo (creación rápida): sustituye a origen/destino tentativos. La ruta comercial queda pendiente hasta cotizar.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => ReservaEscalaDto)
+  escalas_operacion?: ReservaEscalaDto[];
 
   @ApiProperty({ description: 'Fecha/hora apartada (salida)' })
   @Type(() => Date)

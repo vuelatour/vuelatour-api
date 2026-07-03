@@ -1414,9 +1414,30 @@ export class FlightsService {
         pilotoId: dto.piloto_id,
       });
     }
-    const origen = dto.origen_iata.toUpperCase();
-    const destino = dto.destino_iata.toUpperCase();
-    const pasajeros = dto.pasajeros ?? 1;
+    // Creación rápida con itinerario de OPERACIÓN: la ruta real del avión
+    // (puede salir de otra base, con ferries). Mientras no exista cotización,
+    // el vuelo muestra los extremos de la operación; la ruta comercial
+    // (CUN→…→CUN) se arma después en el cotizador.
+    const itinerario = (dto.escalas_operacion ?? []).map((e) => ({
+      ...e,
+      origen_iata: e.origen_iata.toUpperCase(),
+      destino_iata: e.destino_iata.toUpperCase(),
+    }));
+    for (const [i, e] of itinerario.entries()) {
+      if (e.origen_iata === e.destino_iata) {
+        throw new BadRequestException(
+          `Tramo ${i + 1}: origen y destino no pueden ser iguales`,
+        );
+      }
+    }
+
+    const origen = itinerario[0]?.origen_iata ?? dto.origen_iata!.toUpperCase();
+    const destino =
+      itinerario[itinerario.length - 1]?.destino_iata ?? dto.destino_iata!.toUpperCase();
+    const paxItinerario = itinerario
+      .filter((e) => !e.es_ferry)
+      .reduce((max, e) => Math.max(max, e.pasajeros ?? 0), 0);
+    const pasajeros = dto.pasajeros ?? (paxItinerario > 0 ? paxItinerario : 1);
     const payload = {
       cliente_id: dto.cliente_id,
       aeronave_id: dto.aeronave_id ?? null,
@@ -1459,9 +1480,30 @@ export class FlightsService {
       throw new Error(error.message);
     }
 
-    // Tramos tentativos: ida (+ regreso invertido si hay fecha de regreso).
+    // Tramos: con itinerario de operación se crean TODOS los tramos reales
+    // (los ferry como solo_operativa: el piloto los ve y captura tacómetro,
+    // pero no se cotizan ni se muestran al cliente). Sin itinerario, el
+    // comportamiento clásico: ida (+ regreso invertido si hay fecha).
     const vueloId = data!.id as string;
-    const legs = [
+    const legs = itinerario.length
+      ? itinerario.map((e, i) => ({
+          vuelo_id: vueloId,
+          orden: i + 1,
+          origen_iata: e.origen_iata,
+          destino_iata: e.destino_iata,
+          aeronave_id: dto.aeronave_id ?? null,
+          piloto_id: dto.piloto_id ?? null,
+          pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
+          pasajeros_nombres: e.pasajeros_nombres ?? [],
+          es_ferry: e.es_ferry ?? false,
+          solo_operativa: e.es_ferry ?? false,
+          notas: e.notas ?? null,
+          fecha_salida_plan: (e.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null))
+            ?.toISOString(),
+          created_by: userId,
+          updated_by: userId,
+        }))
+      : [
       {
         vuelo_id: vueloId,
         orden: 1,
@@ -1469,8 +1511,12 @@ export class FlightsService {
         destino_iata: destino,
         aeronave_id: dto.aeronave_id ?? null,
         piloto_id: dto.piloto_id ?? null,
-        pasajeros,
-        fecha_salida_plan: dto.fecha_vuelo.toISOString(),
+        pasajeros: pasajeros as number | null,
+        pasajeros_nombres: [] as string[],
+        es_ferry: false,
+        solo_operativa: false,
+        notas: null as string | null,
+        fecha_salida_plan: dto.fecha_vuelo.toISOString() as string | undefined,
         created_by: userId,
         updated_by: userId,
       },
@@ -1483,8 +1529,12 @@ export class FlightsService {
               destino_iata: origen,
               aeronave_id: dto.aeronave_id ?? null,
               piloto_id: dto.piloto_id ?? null,
-              pasajeros,
-              fecha_salida_plan: dto.fecha_traslado_final.toISOString(),
+              pasajeros: pasajeros as number | null,
+              pasajeros_nombres: [] as string[],
+              es_ferry: false,
+              solo_operativa: false,
+              notas: null as string | null,
+              fecha_salida_plan: dto.fecha_traslado_final.toISOString() as string | undefined,
               created_by: userId,
               updated_by: userId,
             },
