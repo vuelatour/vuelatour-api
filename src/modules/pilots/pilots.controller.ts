@@ -1,8 +1,21 @@
-import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
-import { ListPilotsQuery } from './dto/pilots.dto';
+import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CreateDescansoDto, ListDescansosQuery, ListPilotsQuery } from './dto/pilots.dto';
 import { PilotsService } from './pilots.service';
 
 @ApiTags('Pilots')
@@ -18,6 +31,32 @@ export class PilotsController {
   })
   list(@Query() q: ListPilotsQuery) {
     return this.pilots.list(q);
+  }
+
+  @Get('descansos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Descansos de pilotos en un rango (para el calendario).' })
+  listDescansos(@Query() q: ListDescansosQuery) {
+    return this.pilots.listDescansos(q);
+  }
+
+  @Post(':id/descansos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({ summary: 'Marca un rango de descanso para el piloto.' })
+  createDescanso(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateDescansoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.pilots.createDescanso(id, dto, c.userId);
+  }
+
+  @Delete('descansos/:descansoId')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Quita un descanso marcado.' })
+  deleteDescanso(@Param('descansoId', ParseUUIDPipe) descansoId: string) {
+    return this.pilots.deleteDescanso(descansoId);
   }
 
   @Get(':id')

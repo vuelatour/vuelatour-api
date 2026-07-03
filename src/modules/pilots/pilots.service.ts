@@ -1,6 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import type { ListPilotsQuery } from './dto/pilots.dto';
+import type { CreateDescansoDto, ListDescansosQuery, ListPilotsQuery } from './dto/pilots.dto';
 
 const USUARIO_COLS =
   'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
@@ -214,5 +214,61 @@ export class PilotsService {
     }
 
     return stats;
+  }
+
+  // ===== Descansos (se pintan en el calendario y avisan al asignar) =====
+
+  async listDescansos(q: ListDescansosQuery) {
+    let query = this.supabase.service
+      .from('piloto_descanso')
+      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)')
+      .order('fecha_inicio', { ascending: true });
+    if (q.piloto_id) query = query.eq('piloto_id', q.piloto_id);
+    // Solapamiento con el rango pedido: inicio <= hasta y fin >= desde.
+    if (q.hasta) query = query.lte('fecha_inicio', q.hasta);
+    if (q.desde) query = query.gte('fecha_fin', q.desde);
+    const { data, error } = await query;
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((d) => {
+      const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
+      return { ...d, piloto_nombre: (piloto as { nombre?: string } | null)?.nombre ?? null };
+    });
+  }
+
+  async createDescanso(pilotoId: string, dto: CreateDescansoDto, userId: string) {
+    const inicio = dto.fecha_inicio.slice(0, 10);
+    const fin = dto.fecha_fin.slice(0, 10);
+    if (fin < inicio) {
+      throw new BadRequestException('fecha_fin no puede ser anterior a fecha_inicio');
+    }
+    const { data, error } = await this.supabase.service
+      .from('piloto_descanso')
+      .insert({
+        piloto_id: pilotoId,
+        fecha_inicio: inicio,
+        fecha_fin: fin,
+        motivo: dto.motivo ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo')
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503') throw new NotFoundException('Piloto no encontrado');
+      throw new Error(error.message);
+    }
+    return data!;
+  }
+
+  async deleteDescanso(id: string) {
+    const { data, error } = await this.supabase.service
+      .from('piloto_descanso')
+      .delete()
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Descanso ${id} not found`);
+    return { ok: true };
   }
 }

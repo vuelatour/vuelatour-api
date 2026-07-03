@@ -973,9 +973,27 @@ export class FlightsService {
       }
     }
 
+    // Descanso marcado ese día (piloto_descanso): avisa igual que un conflicto.
+    const descansa = new Map<string, string>();
+    if (fecha) {
+      const day = fecha.slice(0, 10);
+      const { data: descansos } = await this.supabase.service
+        .from('piloto_descanso')
+        .select('piloto_id, fecha_inicio, fecha_fin, motivo')
+        .lte('fecha_inicio', day)
+        .gte('fecha_fin', day);
+      for (const d of descansos ?? []) {
+        descansa.set(
+          d.piloto_id as string,
+          (d.motivo as string | null) ?? 'descanso',
+        );
+      }
+    }
+
     return (pilots ?? []).map((p) => {
       const h = Math.round((horas.get(p.id) ?? 0) * 10) / 10;
       const folio = conflicto.get(p.id);
+      const motivoDescanso = descansa.get(p.id) ?? null;
       return {
         id: p.id,
         nombre: p.nombre,
@@ -983,8 +1001,10 @@ export class FlightsService {
         limite_horas_mes: LIMITE_HORAS_MES,
         excede_limite: h >= LIMITE_HORAS_MES,
         cerca_limite: h >= LIMITE_HORAS_MES * 0.9 && h < LIMITE_HORAS_MES,
-        conflicto: folio != null,
+        conflicto: folio != null || motivoDescanso != null,
         conflicto_folio: folio ?? null,
+        descansa: motivoDescanso != null,
+        descanso_motivo: motivoDescanso,
       };
     });
   }

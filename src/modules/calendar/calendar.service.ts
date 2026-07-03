@@ -246,6 +246,51 @@ export class CalendarService {
       return out;
     });
 
+    // Descansos de pilotos en el rango: un evento por día de descanso, para
+    // que se pinten en el calendario junto a los vuelos (pedido del cliente).
+    const DESCANSO_COLOR = '#14B8A6';
+    const fromDay = from.toISOString().slice(0, 10);
+    const toDay = to.toISOString().slice(0, 10);
+    let dq = this.supabase.service
+      .from('piloto_descanso')
+      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)')
+      .lte('fecha_inicio', toDay)
+      .gte('fecha_fin', fromDay);
+    if (q.piloto_id) dq = dq.eq('piloto_id', q.piloto_id);
+    const { data: descansos } = q.solo_externos ? { data: [] } : await dq;
+    for (const d of descansos ?? []) {
+      const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
+      const nombre = (piloto as { nombre?: string } | null)?.nombre ?? 'Piloto';
+      const ini = new Date(`${d.fecha_inicio as string}T12:00:00Z`);
+      const fin = new Date(`${d.fecha_fin as string}T12:00:00Z`);
+      for (let t = ini.getTime(); t <= fin.getTime(); t += 86_400_000) {
+        const day = new Date(t).toISOString().slice(0, 10);
+        if (day < fromDay || day > toDay) continue;
+        events.push({
+          id: `descanso:${d.id as string}:${day}`,
+          tipo_evento: 'descanso',
+          descanso_id: d.id,
+          vuelo_id: null,
+          escala_id: null,
+          folio: null,
+          fecha_vuelo: `${day}T12:00:00Z`,
+          hora: null,
+          estado: 'DESCANSO',
+          estado_permiso: null,
+          es_externo: false,
+          title: `Descansa · ${nombre}${d.motivo ? ` (${d.motivo as string})` : ''}`,
+          color: DESCANSO_COLOR,
+          piloto_id: d.piloto_id,
+          piloto_nombre: nombre,
+        } as unknown as (typeof events)[number]);
+      }
+    }
+    events.sort((a, b) =>
+      String((a as { fecha_vuelo?: string }).fecha_vuelo ?? '').localeCompare(
+        String((b as { fecha_vuelo?: string }).fecha_vuelo ?? ''),
+      ),
+    );
+
     return {
       from: from.toISOString(),
       to: to.toISOString(),
