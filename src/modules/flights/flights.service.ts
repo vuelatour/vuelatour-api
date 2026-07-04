@@ -805,6 +805,16 @@ export class FlightsService {
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
     }
+    // Espejo: al cambiar la fecha general (traslado inicial) desde "Editar",
+    // el tramo 1 la refleja — es la salida real del itinerario (feedback de
+    // pruebas: "cambié la hora y no se actualiza").
+    if (dto.fecha_vuelo !== undefined || dto.piloto_id !== undefined) {
+      await this.mirrorVueloToIdaEscala(id, {
+        piloto_id: dto.piloto_id,
+        fecha_salida_plan:
+          dto.fecha_vuelo !== undefined ? dto.fecha_vuelo.toISOString() : undefined,
+      });
+    }
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
