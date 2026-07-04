@@ -1787,6 +1787,23 @@ export class FlightsService {
       capturado_por: userId,
       sincronizado_at: new Date().toISOString(),
     };
+    // UNA foto por escala (acuerdo de junta): el piloto solo captura la
+    // LLEGADA. Si este tramo aún no tiene salida, se llena sola con el último
+    // tacómetro conocido del avión — físicamente es el mismo número (el
+    // horómetro no se mueve con el avión apagado).
+    if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_salida === undefined &&
+      current.taco_salida == null
+    ) {
+      const ultimo = await this.ultimoTacoAeronave(
+        current.aeronave_id as string | null,
+        null,
+      );
+      if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
+        patch.taco_salida = ultimo;
+      }
+    }
     if (dto.taco_salida !== undefined) patch.taco_salida = dto.taco_salida;
     if (dto.taco_llegada !== undefined) patch.taco_llegada = dto.taco_llegada;
     if (dto.foto_taco_salida_url !== undefined) patch.foto_taco_salida_url = dto.foto_taco_salida_url;
