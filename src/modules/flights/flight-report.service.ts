@@ -64,7 +64,9 @@ export class FlightReportService {
           : Promise.resolve({ data: null }),
         sb
           .from('escala')
-          .select('orden, origen_iata, destino_iata, pasajeros, taco_salida, taco_llegada, solo_operativa')
+          .select(
+            'orden, origen_iata, destino_iata, pasajeros, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta',
+          )
           .eq('vuelo_id', flightId)
           .order('orden', { ascending: true }),
         sb
@@ -108,8 +110,46 @@ export class FlightReportService {
         taco_salida: s,
         taco_llegada: l,
         horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
+        es_ferry: e.es_ferry === true,
       };
     });
+
+    // Comparación pedida por el cliente: horas COTIZADAS (ruta comercial, lo
+    // que pagó el cliente) vs horas VOLADAS (ruta operativa completa, según
+    // tacómetros). El delta positivo es la utilidad operativa que buscan
+    // maximizar (salir de otra base, pernoctar, aprovechar ferries). Las notas
+    // explican el motivo del ahorro SIN captura extra: se derivan de los datos
+    // que ya existen en las escalas.
+    const horasCotizadas = v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr);
+    const horasConDato = tramos.filter((t) => t.horas != null);
+    const horasVoladas =
+      horasConDato.length > 0
+        ? Number(horasConDato.reduce((acc, t) => acc + (t.horas ?? 0), 0).toFixed(1))
+        : null;
+    const notasHoras: string[] = [];
+    const primerOrigen = (escalas[0]?.origen_iata as string | undefined) ?? null;
+    if (primerOrigen && primerOrigen !== 'CUN') {
+      notasHoras.push(`El avión salió de ${primerOrigen} (no de CUN): se ahorró el posicionamiento.`);
+    }
+    for (const e of escalas) {
+      if (e.requiere_pernocta === true) {
+        notasHoras.push(`Pernoctó en ${e.destino_iata as string}: el regreso no se voló el mismo día.`);
+      }
+    }
+    const ferries = escalas.filter((e) => e.es_ferry === true).length;
+    if (ferries > 0) {
+      notasHoras.push(
+        `${ferries} tramo${ferries === 1 ? '' : 's'} ferry (sin pasajeros) dentro del itinerario operativo.`,
+      );
+    }
+    if (horasCotizadas != null && horasVoladas != null) {
+      const delta = Number((horasCotizadas - horasVoladas).toFixed(1));
+      if (delta > 0) {
+        notasHoras.push(`Se volaron ${delta} hrs MENOS de las cotizadas: utilidad operativa a favor.`);
+      } else if (delta < 0) {
+        notasHoras.push(`Se volaron ${Math.abs(delta)} hrs MÁS de las cotizadas: revisar el itinerario.`);
+      }
+    }
 
     const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map((c) => ({
       fecha: (c.fecha_cobro as string) ?? null,
@@ -176,6 +216,13 @@ export class FlightReportService {
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
+      horas_cotizadas_hr: horasCotizadas,
+      horas_voladas_hr: horasVoladas,
+      horas_delta_hr:
+        horasCotizadas != null && horasVoladas != null
+          ? Number((horasCotizadas - horasVoladas).toFixed(1))
+          : null,
+      notas_horas: notasHoras,
       cobros,
       total_cobrado_usd: Number(totalCobrado.toFixed(2)),
       saldo_usd: Number((n(v.monto_total_usd) - totalCobrado).toFixed(2)),

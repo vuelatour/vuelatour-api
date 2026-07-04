@@ -60,6 +60,7 @@ export interface ReporteVueloTramoPayload {
   taco_salida?: number | null;
   taco_llegada?: number | null;
   horas?: number | null;
+  es_ferry?: boolean;
 }
 export interface ReporteVueloPayload {
   generado: string;
@@ -87,6 +88,11 @@ export interface ReporteVueloPayload {
   tc_usd_mxn?: number | null;
   metodo_cobro?: string | null;
   tramos?: ReporteVueloTramoPayload[];
+  // Comparación horas cotizadas vs voladas (utilidad operativa) + motivos.
+  horas_cotizadas_hr?: number | null;
+  horas_voladas_hr?: number | null;
+  horas_delta_hr?: number | null;
+  notas_horas?: string[];
   cobros?: ReporteVueloLineaPayload[];
   total_cobrado_usd?: number;
   saldo_usd?: number;
