@@ -1301,9 +1301,16 @@ export class FlightsService {
         throw new BadRequestException('No se puede iniciar sin piloto_id asignado');
       }
     }
-    // Tarea 9: no se inicia sin la lectura de tacómetro de salida.
-    if (!current.es_externo && this.faltaSalidaInicial(await this.escalasTaco(id))) {
-      throw new ConflictException(MSG_TACO);
+    // La operación no se detiene: la salida del primer tramo ya no la captura
+    // el piloto (una foto por escala = solo la llegada), así que aquí se llena
+    // sola con el último tacómetro conocido del avión. Si no hay historial, el
+    // vuelo inicia igual y la oficina la resuelve en Tacómetros en vivo.
+    if (!current.es_externo) {
+      await this.autoFillSalidaInicial(
+        id,
+        current.aeronave_id as string | null,
+        updatedBy,
+      );
     }
     const { data, error } = await this.supabase.service
       .from('vuelo')
@@ -1323,8 +1330,10 @@ export class FlightsService {
         `Solo se completa vuelo desde EN_VUELO. Actual: ${current.estado}`,
       );
     }
-    // Tarea 9: no se completa sin tacómetro de salida y llegada en todos los tramos.
-    if (!current.es_externo && this.faltaTacoCompleto(await this.escalasTaco(id))) {
+    // Para completar solo se exigen las LLEGADAS (la única lectura que captura
+    // el piloto). Las salidas son del sistema (último taco / propagación) y no
+    // deben bloquear: si alguna falta, la oficina la ajusta en Tacómetros en vivo.
+    if (!current.es_externo && this.faltanLlegadas(await this.escalasTaco(id))) {
       throw new ConflictException(MSG_TACO);
     }
     const { data, error } = await this.supabase.service
@@ -1913,6 +1922,23 @@ export class FlightsService {
       motivos.push(
         `Lectura de ${which} leída por IA al sincronizar (confianza ${pct}%) — confirmar en oficina`,
       );
+    }
+
+    // Una foto por escala: si la IA resolvió la llegada y la salida sigue
+    // vacía (de salida nunca hay foto), se llena con el último taco del avión.
+    if (
+      patch.taco_llegada !== undefined &&
+      tacoSalidaActual === null &&
+      escala.foto_taco_salida_url == null
+    ) {
+      const ultimo = await this.ultimoTacoAeronave(
+        escala.aeronave_id as string | null,
+        null,
+      );
+      if (ultimo != null && ultimo <= Number(patch.taco_llegada)) {
+        patch.taco_salida = ultimo;
+        patch.taco_salida_origen = 'DEDUCIDO';
+      }
     }
 
     if (motivos.length === 0) return escala;
@@ -2758,6 +2784,39 @@ export class FlightsService {
     );
   }
 
+  /**
+   * Llena la salida del primer tramo con el último tacómetro conocido del
+   * avión (el horómetro no se mueve con el avión apagado). Nunca bloquea: si
+   * no hay historial del avión, no hace nada y el vuelo inicia igual — la
+   * lectura queda visible como faltante en Tacómetros en vivo para ajustarla.
+   */
+  private async autoFillSalidaInicial(
+    vueloId: string,
+    aeronaveId: string | null,
+    userId: string,
+  ): Promise<void> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('id, taco_salida, taco_llegada')
+      .eq('vuelo_id', vueloId)
+      .order('orden', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (!data || data.taco_salida != null) return;
+    const ultimo = await this.ultimoTacoAeronave(aeronaveId, null);
+    if (ultimo == null) return;
+    // Nunca dejar salida > llegada (p. ej. si la llegada ya se capturó).
+    if (data.taco_llegada != null && ultimo > Number(data.taco_llegada)) return;
+    await this.supabase.service
+      .from('escala')
+      .update({
+        taco_salida: ultimo,
+        taco_salida_origen: 'DEDUCIDO',
+        updated_by: userId,
+      })
+      .eq('id', data.id);
+  }
+
   private async escalasTaco(vueloId: string): Promise<EscalaTaco[]> {
     const { data, error } = await this.supabase.service
       .from('escala')
@@ -2768,10 +2827,10 @@ export class FlightsService {
     return (data as EscalaTaco[] | null) ?? [];
   }
 
-  /** Falta la lectura de salida del primer tramo (o no hay escalas). */
-  private faltaSalidaInicial(escalas: EscalaTaco[]): boolean {
+  /** Falta alguna lectura de LLEGADA (la única que captura el piloto). */
+  private faltanLlegadas(escalas: EscalaTaco[]): boolean {
     if (escalas.length === 0) return true;
-    return escalas[0].taco_salida == null;
+    return escalas.some((e) => e.taco_llegada == null);
   }
 
   /** Falta cualquier lectura (salida o llegada) en algún tramo, o no hay escalas. */
