@@ -115,6 +115,16 @@ export class FlightsController {
     return this.flights.createReserva(dto, c.userId);
   }
 
+  @Get('taco-live')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Tacómetros en vivo: escalas de los vuelos del día (no cancelados) con estado, origen de cada lectura, fotos firmadas y hora esperada de fin. La operación no se detiene: lo vencido se deduce y oficina confirma/ajusta.',
+  })
+  tacoLive(@Query('fecha') fecha?: string) {
+    return this.flights.tacoLive(fecha);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get flight summary' })
   async getOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {

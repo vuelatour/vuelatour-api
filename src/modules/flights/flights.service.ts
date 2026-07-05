@@ -41,7 +41,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -1802,10 +1802,17 @@ export class FlightsService {
       );
       if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
         patch.taco_salida = ultimo;
+        patch.taco_salida_origen = 'DEDUCIDO';
       }
     }
-    if (dto.taco_salida !== undefined) patch.taco_salida = dto.taco_salida;
-    if (dto.taco_llegada !== undefined) patch.taco_llegada = dto.taco_llegada;
+    if (dto.taco_salida !== undefined) {
+      patch.taco_salida = dto.taco_salida;
+      patch.taco_salida_origen = 'PILOTO';
+    }
+    if (dto.taco_llegada !== undefined) {
+      patch.taco_llegada = dto.taco_llegada;
+      patch.taco_llegada_origen = 'PILOTO';
+    }
     if (dto.foto_taco_salida_url !== undefined) patch.foto_taco_salida_url = dto.foto_taco_salida_url;
     if (dto.foto_taco_llegada_url !== undefined) patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
     if (dto.valor_ia_propuesto !== undefined) patch.valor_ia_propuesto = dto.valor_ia_propuesto;
@@ -1900,6 +1907,7 @@ export class FlightsService {
         continue;
       }
       patch[`taco_${which}`] = lectura;
+      patch[`taco_${which}_origen`] = 'IA';
       patch.valor_ia_propuesto = lectura;
       const pct = Math.round((ia.confianza ?? 0) * 100);
       motivos.push(
@@ -1966,8 +1974,14 @@ export class FlightsService {
       corregido_at: new Date().toISOString(),
       updated_by: userId,
     };
-    if (dto.taco_salida !== undefined) patch.taco_salida = dto.taco_salida;
-    if (dto.taco_llegada !== undefined) patch.taco_llegada = dto.taco_llegada;
+    if (dto.taco_salida !== undefined) {
+      patch.taco_salida = dto.taco_salida;
+      patch.taco_salida_origen = 'OFICINA';
+    }
+    if (dto.taco_llegada !== undefined) {
+      patch.taco_llegada = dto.taco_llegada;
+      patch.taco_llegada_origen = 'OFICINA';
+    }
     if (dto.nota !== undefined) patch.nota_correccion = dto.nota;
 
     const { data, error } = await this.supabase.service
@@ -1986,6 +2000,7 @@ export class FlightsService {
         current.aeronave_id as string | null,
         llegada,
         userId,
+        dto.taco_llegada !== undefined ? 'OFICINA' : 'PILOTO',
       );
     }
     return data;
@@ -2003,6 +2018,7 @@ export class FlightsService {
     aeronaveId: string | null,
     tacoLlegada: number,
     userId: string,
+    origen: 'PILOTO' | 'IA' | 'DEDUCIDO' | 'OFICINA' = 'PILOTO',
   ): Promise<void> {
     const { data: siguientes } = await this.supabase.service
       .from('escala')
@@ -2020,6 +2036,7 @@ export class FlightsService {
       .from('escala')
       .update({
         taco_salida: tacoLlegada,
+        taco_salida_origen: origen,
         updated_by: userId,
       })
       .eq('id', sig.id as string);
@@ -2306,6 +2323,41 @@ export class FlightsService {
   }
 
   /**
+   * Deducción EN VIVO (cada 10 min): para los vuelos del día (no cancelados),
+   * si una escala ya debió terminar y no llegó su lectura, se deduce con el
+   * promedio del tramo y queda en AMARILLO con leyenda "Deducido en vivo".
+   * La operación no se detiene: piloto > IA > deducción, y oficina confirma.
+   */
+  @Cron('*/10 * * * *', { name: 'taco-live-deduce' })
+  async deduceTacosEnVivo(): Promise<void> {
+    try {
+      const now = new Date();
+      const hoyCancun = now.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+      const { data, error } = await this.supabase.service
+        .from('vuelo')
+        .select('id, fecha_vuelo, estado')
+        .neq('estado', 'CANCELADO')
+        .eq('es_externo', false)
+        .gte('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`)
+        .lte('fecha_vuelo', `${hoyCancun}T23:59:59-05:00`);
+      if (error) throw new Error(error.message);
+      for (const v of data ?? []) {
+        try {
+          await this.fillTacoGaps(v.id as string, null, { soloVencidasA: now });
+        } catch (err) {
+          this.logger.warn(
+            `deduceTacosEnVivo(${v.id as string}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `deduceTacosEnVivo falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Rellena los huecos de tacómetro de UN vuelo:
    *  - salida vacía ← llegada del tramo anterior (mismo avión): dato exacto,
    *    no se marca.
@@ -2315,7 +2367,16 @@ export class FlightsService {
    * Requiere al menos MIN_MUESTRAS vuelos históricos del tramo para estimar.
    * Devuelve el resumen de lo actualizado.
    */
-  async fillTacoGaps(vueloId: string, userId: string | null) {
+  async fillTacoGaps(
+    vueloId: string,
+    userId: string | null,
+    opts?: {
+      /** Modo EN VIVO: solo deduce llegadas cuya hora esperada de fin (salida
+       *  plan + promedio del tramo + margen) ya venció a este instante. Sin
+       *  esta opción (cierre del día) deduce todos los huecos. */
+      soloVencidasA?: Date;
+    },
+  ) {
     const escalas = await this.listEscalas(vueloId);
     const rows = escalas.map((e) => ({
       id: e.id as string,
@@ -2323,10 +2384,14 @@ export class FlightsService {
       origen: e.origen_iata as string,
       destino: e.destino_iata as string,
       aeronaveId: (e.aeronave_id as string | null) ?? null,
+      fechaPlan: (e.fecha_salida_plan as string | null) ?? null,
+      horaSalidaReal: (e.hora_salida as string | null) ?? null,
       salida: e.taco_salida === null ? null : Number(e.taco_salida),
       llegada: e.taco_llegada === null ? null : Number(e.taco_llegada),
       cambios: [] as string[],
       estimado: false,
+      salidaDeducida: false,
+      llegadaDeducida: false,
     }));
     rows.sort((a, b) => a.orden - b.orden);
 
@@ -2341,6 +2406,8 @@ export class FlightsService {
           if (prev.llegada !== null && prev.aeronaveId === r.aeronaveId) {
             r.salida = prev.llegada;
             r.cambios.push('salida tomada de la llegada del tramo anterior');
+            // Si la llegada anterior fue deducida, esta salida también lo es.
+            if (prev.llegadaDeducida) r.salidaDeducida = true;
             changed = true;
           }
         }
@@ -2348,16 +2415,29 @@ export class FlightsService {
         if (r.llegada === null && r.salida !== null) {
           const tramo = await this.getTramoPromedio(r.origen, r.destino);
           if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
+            // Modo EN VIVO: solo si la escala ya debió terminar (hora de
+            // salida + promedio + 20 min de margen). Escalas futuras o en el
+            // aire siguen "esperando dato".
+            if (opts?.soloVencidasA) {
+              const base = r.horaSalidaReal ?? r.fechaPlan;
+              if (!base) continue;
+              const fin =
+                new Date(base).getTime() +
+                (tramo.minutos_promedio + 20) * 60_000;
+              if (fin > opts.soloVencidasA.getTime()) continue;
+            }
             r.llegada = Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
             r.cambios.push(
               `llegada calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
             r.estimado = true;
+            r.llegadaDeducida = true;
             changed = true;
           }
         }
         // (3) salida ← llegada − promedio histórico del tramo. Estimado.
-        if (r.salida === null && r.llegada !== null) {
+        // Solo al cierre del día: en vivo no inventamos hacia atrás.
+        if (r.salida === null && r.llegada !== null && !opts?.soloVencidasA) {
           const tramo = await this.getTramoPromedio(r.origen, r.destino);
           if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
             r.salida = Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
@@ -2365,6 +2445,7 @@ export class FlightsService {
               `salida calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
             r.estimado = true;
+            r.salidaDeducida = true;
             changed = true;
           }
         }
@@ -2379,9 +2460,15 @@ export class FlightsService {
         taco_salida: r.salida,
         taco_llegada: r.llegada,
       };
+      if (r.salidaDeducida || r.cambios.some((c) => c.startsWith('salida tomada'))) {
+        patch.taco_salida_origen = r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO';
+      }
+      if (r.llegadaDeducida) patch.taco_llegada_origen = 'DEDUCIDO';
       if (r.estimado) {
         patch.revision_requerida = true;
-        patch.revision_motivo = `Calculado automáticamente al cierre del día: ${r.cambios.join('; ')} — confirmar en oficina`;
+        patch.revision_motivo = opts?.soloVencidasA
+          ? `Deducido en vivo (la escala ya debió terminar y no llegó lectura): ${r.cambios.join('; ')} — confirmar en oficina`
+          : `Calculado automáticamente al cierre del día: ${r.cambios.join('; ')} — confirmar en oficina`;
       }
       if (userId) patch.updated_by = userId;
       const { data, error } = await this.supabase.service
@@ -2414,6 +2501,147 @@ export class FlightsService {
    * Galería de fotos de tacómetro de un vuelo, con URLs firmadas (bucket privado
    * taco-fotos, 1 h). Para el panel admin: ver la evidencia y la marca de revisión.
    */
+  /**
+   * Tablero "Tacómetros en vivo": todas las escalas de los vuelos del día
+   * (cualquier estatus salvo CANCELADO) con el estado de cada lectura, su
+   * origen (piloto/IA/deducido/oficina), quién confirmó/ajustó, la hora
+   * esperada de fin y las fotos firmadas. La oficina solo confirma o corrige;
+   * la operación nunca espera.
+   */
+  async tacoLive(fecha?: string) {
+    const dia =
+      fecha ??
+      new Date().toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    const { data: vuelos, error } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        `id, folio, estado, fecha_vuelo, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
+      )
+      .neq('estado', 'CANCELADO')
+      .eq('es_externo', false)
+      .gte('fecha_vuelo', `${dia}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${dia}T23:59:59-05:00`)
+      .order('fecha_vuelo', { ascending: true });
+    if (error) throw new Error(error.message);
+
+    const unwrapOne = <T,>(v: T | T[] | null): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : v;
+
+    // Fotos firmadas y nombres de quienes confirmaron/ajustaron, en lote.
+    const paths: string[] = [];
+    const userIds = new Set<string>();
+    for (const v of vuelos ?? []) {
+      for (const e of (v.escalas as Array<Record<string, unknown>>) ?? []) {
+        if (e.foto_taco_salida_url) paths.push(e.foto_taco_salida_url as string);
+        if (e.foto_taco_llegada_url) paths.push(e.foto_taco_llegada_url as string);
+        if (e.corregido_por) userIds.add(e.corregido_por as string);
+        if (e.capturado_por) userIds.add(e.capturado_por as string);
+      }
+    }
+    const signed: Record<string, string> = {};
+    if (paths.length) {
+      const { data: urls } = await this.supabase.service.storage
+        .from('taco-fotos')
+        .createSignedUrls(paths, 3600);
+      for (const item of urls ?? []) {
+        if (item.signedUrl && item.path) signed[item.path] = item.signedUrl;
+      }
+    }
+    const nombres = new Map<string, string>();
+    if (userIds.size) {
+      const { data: us } = await this.supabase.service
+        .from('usuario')
+        .select('id, nombre')
+        .in('id', [...userIds]);
+      for (const u of us ?? []) nombres.set(u.id as string, u.nombre as string);
+    }
+
+    const promedios = new Map<string, number | null>();
+    const promedioDe = async (o: string, d: string): Promise<number | null> => {
+      const k = `${o}-${d}`;
+      if (!promedios.has(k)) {
+        const t = await this.getTramoPromedio(o, d);
+        promedios.set(
+          k,
+          t && t.muestras >= MIN_MUESTRAS && t.minutos_promedio > 0
+            ? t.minutos_promedio
+            : null,
+        );
+      }
+      return promedios.get(k)!;
+    };
+
+    const ahora = Date.now();
+    const out = [] as Array<Record<string, unknown>>;
+    for (const v of vuelos ?? []) {
+      const aeronave = unwrapOne(v.aeronave as { matricula?: string } | null);
+      const piloto = unwrapOne(v.piloto as { nombre?: string } | null);
+      const escalas = [...((v.escalas as Array<Record<string, unknown>>) ?? [])].sort(
+        (a, b) => Number(a.orden) - Number(b.orden),
+      );
+      const filas = [] as Array<Record<string, unknown>>;
+      for (const e of escalas) {
+        const salida = e.taco_salida == null ? null : Number(e.taco_salida);
+        const llegada = e.taco_llegada == null ? null : Number(e.taco_llegada);
+        const prom = await promedioDe(e.origen_iata as string, e.destino_iata as string);
+        const base = (e.hora_salida as string | null) ?? (e.fecha_salida_plan as string | null);
+        const esperadoFin =
+          base && prom != null
+            ? new Date(new Date(base).getTime() + (prom + 20) * 60_000).toISOString()
+            : null;
+        // Estado de la escala para el tablero.
+        let estado: string;
+        if (Boolean(e.revision_requerida)) estado = 'REVISAR';
+        else if (llegada != null) estado = 'OK';
+        else if (esperadoFin && new Date(esperadoFin).getTime() < ahora) estado = 'VENCIDA';
+        else if (salida != null || (base && new Date(base).getTime() < ahora)) estado = 'EN_CURSO';
+        else estado = 'ESPERANDO';
+        filas.push({
+          escala_id: e.id,
+          orden: e.orden,
+          origen_iata: e.origen_iata,
+          destino_iata: e.destino_iata,
+          es_ferry: e.es_ferry === true,
+          fecha_salida_plan: e.fecha_salida_plan ?? null,
+          esperado_fin: esperadoFin,
+          estado,
+          taco_salida: salida,
+          taco_salida_origen: e.taco_salida_origen ?? null,
+          taco_llegada: llegada,
+          taco_llegada_origen: e.taco_llegada_origen ?? null,
+          valor_ia_propuesto:
+            e.valor_ia_propuesto == null ? null : Number(e.valor_ia_propuesto),
+          revision_requerida: Boolean(e.revision_requerida),
+          revision_motivo: (e.revision_motivo as string | null) ?? null,
+          capturado_por_nombre: e.capturado_por
+            ? (nombres.get(e.capturado_por as string) ?? null)
+            : null,
+          corregido_por_nombre: e.corregido_por
+            ? (nombres.get(e.corregido_por as string) ?? null)
+            : null,
+          corregido_at: (e.corregido_at as string | null) ?? null,
+          nota_correccion: (e.nota_correccion as string | null) ?? null,
+          foto_salida_url: e.foto_taco_salida_url
+            ? (signed[e.foto_taco_salida_url as string] ?? null)
+            : null,
+          foto_llegada_url: e.foto_taco_llegada_url
+            ? (signed[e.foto_taco_llegada_url as string] ?? null)
+            : null,
+        });
+      }
+      out.push({
+        vuelo_id: v.id,
+        folio: v.folio,
+        estado: v.estado,
+        fecha_vuelo: v.fecha_vuelo,
+        matricula: aeronave?.matricula ?? null,
+        piloto_nombre: piloto?.nombre ?? null,
+        escalas: filas,
+      });
+    }
+    return { fecha: dia, vuelos: out };
+  }
+
   async tacoPhotos(vueloId: string) {
     const escalas = await this.listEscalas(vueloId);
     const paths: string[] = [];
