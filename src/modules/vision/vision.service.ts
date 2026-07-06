@@ -90,7 +90,13 @@ export class VisionService implements OnModuleInit {
   onModuleInit() {
     this.baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
     this.token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
-    this.timeoutMs = this.config.get('PYSERVICES_TIMEOUT_MS', { infer: true });
+    // La visión con Opus puede tomar 20-40s por foto: el timeout nunca baja
+    // de 90s aunque PYSERVICES_TIMEOUT_MS sea menor (cortarla a 30s hacía que
+    // la app mostrara "la IA no pudo leer" con el modelo grande).
+    this.timeoutMs = Math.max(
+      Number(this.config.get('PYSERVICES_TIMEOUT_MS', { infer: true })) || 30000,
+      90000,
+    );
     if (!this.baseUrl || !this.token) {
       this.logger.log('Visión IA deshabilitada (PYSERVICES_BASE_URL/INTERNAL_SHARED_TOKEN vacíos)');
       return;
