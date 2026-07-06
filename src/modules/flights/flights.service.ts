@@ -49,7 +49,9 @@ const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
 const DURATION_TOL_PCT = 0.4; // desviación de duración vs promedio histórico
 const MIN_MUESTRAS = 3; // muestras mínimas para confiar en el promedio
 
-// Tarea 9: validación obligatoria de tacómetro.
+// Único candado de tacómetro vigente: COMPLETAR exige las LLEGADAS (la foto
+// del piloto). Iniciar nunca bloquea (la salida se autollena) — "la operación
+// no se detiene".
 const MSG_TACO = 'Debes registrar el tacómetro antes de continuar.';
 
 interface EscalaTaco {
@@ -2762,7 +2764,7 @@ export class FlightsService {
       }));
   }
 
-  // ===== Validación de tacómetro (Tarea 9) =====
+  // ===== Cierre automático y validación de tacómetro =====
 
   /**
    * Cierre nocturno de vuelos "zombi" (23:55 Cancún, tras el cierre de tacos):
