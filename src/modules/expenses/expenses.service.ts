@@ -112,6 +112,144 @@ export class ExpensesService {
     return data;
   }
 
+  /**
+   * Sugerencia de asignación para un gasto de la bandeja: ¿a qué vuelo/avión
+   * pertenece? Candidatos DETERMINISTAS = vuelos donde el capturista voló
+   * (piloto/copiloto/por tramo) con fecha a ±3 días del gasto. Si hay
+   * exactamente UNO el mismo día → match por regla. Si hay varios → Claude
+   * elige usando notas/lugar vs la ruta. Sin candidatos o sin IA → sin match
+   * (la asignación queda manual: la IA propone, el humano confirma).
+   */
+  async sugerirAsignacion(gastoId: string) {
+    const gasto = await this.findById(gastoId);
+    const fecha = gasto.fecha_gasto as string | null;
+    const capturo = gasto.usuario_captura_id as string | null;
+    const sinMatch = (razon: string) => ({
+      sugerido: null,
+      confianza: 0,
+      razon,
+      fuente: 'regla' as const,
+      candidatos: [] as Array<Record<string, unknown>>,
+    });
+    if (!fecha || !capturo) {
+      return sinMatch('El gasto no tiene fecha o capturista para buscar vuelos.');
+    }
+
+    // Vuelos propios no cancelados en ±3 días de la fecha del gasto.
+    const base = new Date(`${fecha}T12:00:00-05:00`);
+    const lo = new Date(base.getTime() - 3 * 86400_000).toISOString();
+    const hi = new Date(base.getTime() + 3 * 86400_000).toISOString();
+    const { data: vuelos, error } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, folio, fecha_vuelo, piloto_id, copiloto_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id)',
+      )
+      .neq('estado', 'CANCELADO')
+      .eq('es_externo', false)
+      .gte('fecha_vuelo', lo)
+      .lte('fecha_vuelo', hi);
+    if (error) throw new Error(error.message);
+
+    const participo = (v: Record<string, unknown>): boolean => {
+      if (v.piloto_id === capturo || v.copiloto_id === capturo) return true;
+      const escalas = (v.escalas as Array<Record<string, unknown>> | null) ?? [];
+      return escalas.some((e) => e.piloto_id === capturo);
+    };
+    const rutaDe = (v: Record<string, unknown>): string | null => {
+      const escalas = [
+        ...((v.escalas as Array<Record<string, unknown>> | null) ?? []),
+      ].sort((a, b) => Number(a.orden) - Number(b.orden));
+      if (escalas.length === 0) return null;
+      return [
+        escalas[0].origen_iata as string,
+        ...escalas.map((e) => e.destino_iata as string),
+      ].join(' → ');
+    };
+    const matriculaDe = (v: Record<string, unknown>): string | null => {
+      const a = v.aeronave as { matricula?: string } | { matricula?: string }[] | null;
+      if (Array.isArray(a)) return a[0]?.matricula ?? null;
+      return a?.matricula ?? null;
+    };
+
+    const candidatos = ((vuelos ?? []) as Array<Record<string, unknown>>)
+      .filter(participo)
+      .map((v) => ({
+        vuelo_id: v.id as string,
+        folio: (v.folio as number | null) ?? null,
+        fecha_vuelo: (v.fecha_vuelo as string | null) ?? null,
+        aeronave_id: (v.aeronave_id as string | null) ?? null,
+        matricula: matriculaDe(v),
+        ruta: rutaDe(v),
+      }));
+
+    if (candidatos.length === 0) {
+      return sinMatch(
+        'El piloto no tiene vuelos en ±3 días de la fecha del gasto: asignar a mano.',
+      );
+    }
+
+    // Regla fuerte: exactamente UN vuelo del capturista el MISMO día (Cancún).
+    const diaCancun = (iso: string | null) =>
+      iso
+        ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
+            new Date(iso),
+          )
+        : null;
+    const mismoDia = candidatos.filter((c) => diaCancun(c.fecha_vuelo) === fecha);
+    if (mismoDia.length === 1) {
+      return {
+        sugerido: mismoDia[0],
+        confianza: 0.95,
+        razon: 'Único vuelo del piloto ese día.',
+        fuente: 'regla' as const,
+        candidatos,
+      };
+    }
+
+    // Ambiguo: Claude elige entre los candidatos (best-effort).
+    const { data: piloto } = await this.supabase.service
+      .from('usuario')
+      .select('nombre')
+      .eq('id', capturo)
+      .maybeSingle();
+    const ia = await this.pyservices.sugerirGastoVuelo({
+      gasto: {
+        fecha,
+        monto: gasto.monto == null ? null : Number(gasto.monto),
+        moneda: (gasto.moneda as string | null) ?? null,
+        categoria: (gasto.categoria as string | null) ?? null,
+        notas: (gasto.notas as string | null) ?? null,
+        lugar: (gasto.lugar as string | null) ?? null,
+        piloto_nombre: (piloto?.nombre as string | null) ?? null,
+      },
+      candidatos: candidatos.map((c) => ({
+        vuelo_id: c.vuelo_id,
+        folio: c.folio,
+        fecha_vuelo: c.fecha_vuelo,
+        matricula: c.matricula,
+        ruta: c.ruta,
+      })),
+    });
+    if (!ia) {
+      return {
+        sugerido: null,
+        confianza: 0,
+        razon:
+          'Hay varios vuelos posibles y el asistente IA no está disponible: elige entre los candidatos.',
+        fuente: 'regla' as const,
+        candidatos,
+      };
+    }
+    const pick = candidatos.find((c) => c.vuelo_id === ia.vuelo_id_sugerido) ?? null;
+    return {
+      sugerido: pick,
+      confianza: pick ? ia.confianza : 0,
+      razon: ia.razon || (pick ? 'Match propuesto por IA.' : 'Sin coincidencias claras.'),
+      fuente: 'ia' as const,
+      candidatos,
+    };
+  }
+
   /** URLs firmadas (1 h) para fotos de recibos en el bucket privado gasto-fotos. */
   async signPhotos(paths: string[]): Promise<Record<string, string>> {
     const clean = [...new Set(paths.filter(Boolean))];

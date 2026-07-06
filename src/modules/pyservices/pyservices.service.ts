@@ -1,6 +1,7 @@
 import {
   BadGatewayException,
   Injectable,
+  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -104,6 +105,32 @@ export interface ReporteVueloPayload {
   notas?: string | null;
 }
 
+export interface GastoVueloSugerenciaPayload {
+  gasto: {
+    fecha: string | null;
+    monto: number | null;
+    moneda: string | null;
+    categoria: string | null;
+    notas: string | null;
+    lugar: string | null;
+    piloto_nombre: string | null;
+  };
+  candidatos: Array<{
+    vuelo_id: string;
+    folio: number | null;
+    fecha_vuelo: string | null;
+    matricula: string | null;
+    ruta: string | null;
+  }>;
+}
+
+export interface GastoVueloSugerenciaResult {
+  vuelo_id_sugerido: string | null;
+  confianza: number;
+  razon: string;
+  modelo: string;
+}
+
 export interface ArchivoZipPayload {
   nombre: string;
   contenido_b64: string;
@@ -133,6 +160,8 @@ export interface FacturaRecibidaParsed {
  */
 @Injectable()
 export class PyservicesService {
+  private readonly logger = new Logger(PyservicesService.name);
+
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 
   async generateRepartoPdf(payload: RepartoPdfPayload): Promise<Buffer> {
@@ -169,6 +198,23 @@ export class PyservicesService {
     return this.postForJson<FacturaRecibidaParsed>('/facturacion/parse-recibida', {
       xml_b64: xmlB64,
     });
+  }
+
+  /** Sugerencia IA gasto→vuelo (elige entre candidatos deterministas). */
+  async sugerirGastoVuelo(
+    payload: GastoVueloSugerenciaPayload,
+  ): Promise<GastoVueloSugerenciaResult | null> {
+    try {
+      return await this.postForJson<GastoVueloSugerenciaResult>(
+        '/gastos/sugerir-vuelo',
+        payload,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `sugerirGastoVuelo falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   private async postForJson<T>(path: string, body: unknown): Promise<T> {

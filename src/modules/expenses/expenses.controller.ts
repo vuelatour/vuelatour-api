@@ -59,6 +59,16 @@ export class ExpensesController {
     return this.expenses.sugerirVuelo(q.aeronave_id, q.fecha_hora);
   }
 
+  @Get(':id/sugerir-asignacion')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Sugiere a qué vuelo/avión pertenece un gasto de la bandeja: vuelos del capturista a ±3 días (regla si hay uno el mismo día; IA si hay varios). Sin candidatos → sin match (asignación manual).',
+  })
+  sugerirAsignacion(@Param('id', ParseUUIDPipe) id: string) {
+    return this.expenses.sugerirAsignacion(id);
+  }
+
   @Get('export')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({ summary: 'Gastos por avión/categoría en Excel (respeta filtros)' })
