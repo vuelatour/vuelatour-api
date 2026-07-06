@@ -5,10 +5,11 @@ import {
   type ReporteVueloLineaPayload,
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, extras_total_usd, ajuste_final_usd, metodo_cobro';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, metodo_cobro';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -65,13 +66,13 @@ export class FlightReportService {
         sb
           .from('escala')
           .select(
-            'orden, origen_iata, destino_iata, pasajeros, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta',
+            'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta',
           )
           .eq('vuelo_id', flightId)
           .order('orden', { ascending: true }),
         sb
           .from('cobro_vuelo')
-          .select('monto, moneda, metodo_cobro, fecha_cobro')
+          .select('monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro')
           .eq('vuelo_id', flightId)
           .order('fecha_cobro', { ascending: true }),
         sb
@@ -107,6 +108,7 @@ export class FlightReportService {
         orden: n(e.orden),
         ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
         pasajeros: e.pasajeros == null ? null : n(e.pasajeros),
+        pasajeros_nombres: (e.pasajeros_nombres as string | null) ?? null,
         taco_salida: s,
         taco_llegada: l,
         horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
@@ -157,7 +159,18 @@ export class FlightReportService {
       moneda: (c.moneda as string) ?? 'USD',
       monto: n(c.monto),
     }));
-    const totalCobrado = cobros.reduce((acc, c) => acc + n(c.monto), 0);
+    // Total cobrado por la fuente canónica: cada cobro convertido a USD con su
+    // TC (o el del vuelo). Antes se sumaban MXN y USD crudos → saldos absurdos.
+    const conv = cobrosEnUsd(
+      (cobrosRes.data ?? []) as Array<Record<string, unknown>>,
+      v.tc_usd_mxn as number | null,
+    );
+    const totalCobrado = conv.total_usd;
+    if (conv.sin_tc_count > 0) {
+      notasHoras.push(
+        `${conv.sin_tc_count} cobro(s) en MXN por $${conv.sin_tc_mxn.toLocaleString('en-US')} sin tipo de cambio: NO están en el total cobrado — captura su TC.`,
+      );
+    }
 
     const gastosRows = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
     const proveedorNombre = (g: Record<string, unknown>): string | null => {
@@ -203,12 +216,14 @@ export class FlightReportService {
       fecha_vuelo: (v.fecha_vuelo as string) ?? null,
       fecha_traslado_final: (v.fecha_traslado_final as string) ?? null,
       pasajeros: n(v.pasajeros),
+      pasajeros_nombres: (v.pasajeros_nombres as string | null) ?? null,
       tarifa_tipo: (v.tarifa_tipo as string) ?? null,
       tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
       tiempo_cobrable_hr: v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
       subtotal_usd: n(v.subtotal_vuelo_usd),
       tuas_usd: n(v.tuas_usd),
       iva_usd: n(v.iva_usd),
+      viaticos_pernocta_usd: n(v.viaticos_pernocta_usd),
       extras_total_usd: n(v.extras_total_usd),
       ajuste_final_usd: n(v.ajuste_final_usd),
       total_usd: n(v.monto_total_usd),

@@ -62,3 +62,47 @@ export class CreateCobroDto {
   @IsString()
   notas?: string;
 }
+
+/** Corrección de un cobro por oficina; todo opcional (patch). */
+export class UpdateCobroDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  monto?: number;
+
+  @ApiPropertyOptional({ enum: Moneda })
+  @IsOptional()
+  @IsEnum(Moneda)
+  moneda?: Moneda;
+
+  @ApiPropertyOptional({ enum: MetodoPago })
+  @IsOptional()
+  @IsEnum(MetodoPago)
+  metodo_cobro?: MetodoPago;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  tc_usd_mxn?: number;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  referencia?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_cobro?: Date;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}

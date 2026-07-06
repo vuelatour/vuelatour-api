@@ -1,4 +1,10 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import {
@@ -314,6 +320,32 @@ export class ExpensesService {
       sugerido: elegido ? { ...toItem(elegido), razon } : null,
       candidatos,
     };
+  }
+
+  /**
+   * Regla del doc 5.2/5.3: el CAPTURISTA (piloto/mecánico) corrige o borra su
+   * gasto SOLO el mismo día de la captura (hora Cancún) y solo si aún no está
+   * conciliado. Después, únicamente oficina. Lanza si no cumple.
+   */
+  async assertOwnSameDay(id: string, userId: string): Promise<void> {
+    const gasto = await this.findById(id);
+    if (gasto.usuario_captura_id !== userId) {
+      throw new ForbiddenException('Solo puedes corregir gastos capturados por ti.');
+    }
+    if (gasto.conciliado === true) {
+      throw new ConflictException(
+        'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
+      );
+    }
+    const dia = (iso: string | Date) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
+        typeof iso === 'string' ? new Date(iso) : iso,
+      );
+    if (dia(gasto.created_at as string) !== dia(new Date())) {
+      throw new ForbiddenException(
+        'Los gastos solo se corrigen el mismo día. Pide el ajuste a oficina.',
+      );
+    }
   }
 
   async update(id: string, dto: UpdateGastoDto, userId: string) {

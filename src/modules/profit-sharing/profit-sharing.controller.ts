@@ -20,6 +20,16 @@ export class ProfitSharingController {
     return this.profitSharing.compute(q);
   }
 
+  @Get('pre-cierre')
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Checklist de pre-cierre: vuelos sin completar, tacos en revisión, cobros con saldo, gastos sin TC/avión/comprobante y pendientes de conciliar.',
+  })
+  preCierre(@Query() q: ProfitSharingQuery) {
+    return this.profitSharing.preCierre(q);
+  }
+
   @Get('pdf')
   @Roles(Rol.ADMIN, Rol.ANALISTA)
   @ApiOperation({

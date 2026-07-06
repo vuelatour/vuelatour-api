@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -683,6 +684,10 @@ export class QuotesService {
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     void this.notifyPernoctaCambiada(updated!, pernoctasAntes, pernoctasDespues);
     await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
+    // El precio cambió: la bandera `cobrado` se recalcula con la fuente
+    // canónica (un anticipo previo puede ahora cubrir —o dejar de cubrir— el
+    // total). Antes quedaba obsoleta hasta el siguiente cobro.
+    await this.refreshCobradoTrasRecotizar(vueloId, updated!, userId);
     // Refleja fechas/tramos nuevos en el calendario (admin lee en vivo; esto
     // mueve también los eventos de Google si el vuelo ya estaba sincronizado).
     void this.calendar.syncFlight(vueloId);
@@ -987,6 +992,32 @@ export class QuotesService {
   // ============ Internals ============
 
   /** Destinos del itinerario donde hay pernocta, en orden. */
+  /**
+   * Misma regla canónica que FlightsService.refreshCobradoFlag (cobrosEnUsd);
+   * se replica aquí solo para no crear una dependencia circular de módulos.
+   */
+  private async refreshCobradoTrasRecotizar(
+    vueloId: string,
+    vuelo: Record<string, unknown>,
+    userId: string,
+  ): Promise<void> {
+    const { data: cobros } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('monto, moneda, tc_usd_mxn')
+      .eq('vuelo_id', vueloId);
+    const { total_usd } = cobrosEnUsd(
+      (cobros ?? []) as Array<Record<string, unknown>>,
+      vuelo.tc_usd_mxn as number | null,
+    );
+    const deberia = total_usd >= Number(vuelo.monto_total_usd) - 1;
+    if (deberia !== vuelo.cobrado) {
+      await this.supabase.service
+        .from('vuelo')
+        .update({ cobrado: deberia, updated_by: userId })
+        .eq('id', vueloId);
+    }
+  }
+
   private async pernoctaDestinos(vueloId: string): Promise<string[]> {
     const { data } = await this.supabase.service
       .from('escala')

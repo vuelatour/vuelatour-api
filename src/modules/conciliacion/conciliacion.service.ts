@@ -16,8 +16,15 @@ import {
 } from './dto/conciliacion.dto';
 
 const MOV_COLS =
-  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, origen, notas, created_at';
+  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, origen, notas, created_at';
 const MATCH_DAYS = 3;
+/**
+ * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
+ * estado de cuenta. EFECTIVO sale de caja chica (del cajón), BODEGA es un
+ * cargo contable de inventario y los PERSONAL_* llegan al banco después como
+ * reintegro, no como el gasto original. Cruzarlos generaba matches falsos.
+ */
+const MEDIOS_BANCARIOS = ['TARJETA_CORP', 'TRANSFERENCIA'];
 
 export interface ParsedStatement {
   movimientos: Array<{
@@ -121,22 +128,38 @@ export class ConciliacionService {
       throw new Error(error.message);
     }
 
+    // La moneda de la cuenta define contra qué se cruza: un cargo de 3,000 en
+    // la cuenta USD jamás debe conciliar un gasto de $3,000 MXN.
+    const monedaCuenta = await this.monedaCuenta(dto.cuenta_bancaria_id);
+
     let conciliadosAuto = 0;
     for (const mov of inserted ?? []) {
       const m = mov as { id: string; fecha: string; monto: number; tipo: string };
-      if (m.tipo !== TipoMovimientoBancario.CARGO) continue;
-      const matched = await this.autoMatch(m.id, m.monto, m.fecha, userId);
+      const matched =
+        m.tipo === TipoMovimientoBancario.CARGO
+          ? await this.autoMatch(m.id, m.monto, m.fecha, monedaCuenta, userId)
+          : await this.autoMatchAbono(m.id, m.monto, m.fecha, monedaCuenta, userId);
       if (matched) conciliadosAuto += 1;
     }
 
     return { importados: rows.length, conciliados_auto: conciliadosAuto };
   }
 
-  /** Si hay exactamente un gasto candidato (mismo monto, fecha ±N días, sin conciliar), lo vincula. */
+  private async monedaCuenta(cuentaId: string): Promise<string | null> {
+    const { data } = await this.supabase.service
+      .from('cuenta_bancaria')
+      .select('moneda')
+      .eq('id', cuentaId)
+      .maybeSingle();
+    return (data?.moneda as string | null) ?? null;
+  }
+
+  /** Si hay exactamente un gasto candidato (mismo monto+moneda, fecha ±N días, medio bancario, sin conciliar), lo vincula. */
   private async autoMatch(
     movId: string,
     monto: number,
     fecha: string,
+    moneda: string | null,
     userId: string,
   ): Promise<boolean> {
     const base = new Date(`${fecha}T00:00:00Z`);
@@ -146,22 +169,148 @@ export class ConciliacionService {
     hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
 
-    const { data, error } = await this.supabase.service
+    let q = this.supabase.service
       .from('gasto')
       .select('id')
       .eq('monto', monto)
       .eq('conciliado', false)
-      // Los cargos automáticos de bodega (REFACCION medio BODEGA) no son
-      // egresos bancarios: el dinero salió al comprar la pieza, no al usarla.
-      .neq('medio_pago', 'BODEGA')
+      // Solo medios que tocan el banco (excluye EFECTIVO, BODEGA, PERSONAL_*).
+      .in('medio_pago', MEDIOS_BANCARIOS)
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .limit(2);
+    if (moneda) q = q.eq('moneda', moneda);
+    const { data, error } = await q;
     if (error || !data || data.length !== 1) return false;
 
     const gastoId = (data[0] as { id: string }).id;
     await this.link(movId, gastoId, userId);
     return true;
+  }
+
+  /**
+   * ABONO = entrada de dinero. Se cruza contra los COBROS de vuelos (HSBC
+   * link, transferencia) del mismo monto/moneda ±N días que aún no estén
+   * enlazados a otro movimiento. Con esto la mitad "ingresos" del estado de
+   * cuenta también se concilia sola.
+   */
+  private async autoMatchAbono(
+    movId: string,
+    monto: number,
+    fecha: string,
+    moneda: string | null,
+    userId: string,
+  ): Promise<boolean> {
+    const base = new Date(`${fecha}T00:00:00Z`);
+    const lo = new Date(base);
+    lo.setUTCDate(lo.getUTCDate() - MATCH_DAYS);
+    const hi = new Date(base);
+    hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
+
+    let q = this.supabase.service
+      .from('cobro_vuelo')
+      .select('id')
+      .eq('monto', monto)
+      .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK'])
+      .gte('fecha_cobro', lo.toISOString())
+      .lte('fecha_cobro', hi.toISOString())
+      .limit(5);
+    if (moneda) q = q.eq('moneda', moneda);
+    const { data, error } = await q;
+    if (error || !data || data.length === 0) return false;
+
+    // Descarta cobros ya enlazados a otro movimiento; exige candidato único.
+    const ids = data.map((c) => (c as { id: string }).id);
+    const { data: yaEnlazados } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('cobro_id')
+      .in('cobro_id', ids);
+    const ocupados = new Set((yaEnlazados ?? []).map((m) => m.cobro_id as string));
+    const libres = ids.filter((id) => !ocupados.has(id));
+    if (libres.length !== 1) return false;
+
+    await this.linkCobro(movId, libres[0], userId);
+    return true;
+  }
+
+  /** Vincula (o desvincula si cobroId es null) un ABONO con un cobro de vuelo. */
+  async linkCobro(movId: string, cobroId: string | null, userId: string) {
+    const { data: mov, error: movErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id, gasto_id')
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
+
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .update({
+        cobro_id: cobroId,
+        conciliado: cobroId !== null || (mov as { gasto_id: string | null }).gasto_id !== null,
+        updated_by: userId,
+      })
+      .eq('id', movId)
+      .select(MOV_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503') throw new BadRequestException('Cobro no encontrado.');
+      throw new Error(error.message);
+    }
+    return data!;
+  }
+
+  /**
+   * Resumen por cuenta para el cierre: cuántos movimientos hay, cuántos están
+   * conciliados y cuánto dinero sigue pendiente. "Faltan N por conciliar" deja
+   * de descubrirse revisando la lista a mano.
+   */
+  async resumen(desde?: string, hasta?: string) {
+    let q = this.supabase.service
+      .from('movimiento_bancario')
+      .select('cuenta_bancaria_id, tipo, monto, conciliado');
+    if (desde) q = q.gte('fecha', desde);
+    if (hasta) q = q.lte('fecha', hasta);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const { data: cuentas } = await this.supabase.service
+      .from('cuenta_bancaria')
+      .select('id, alias, banco, moneda');
+    const cuentaInfo = new Map(
+      (cuentas ?? []).map((c) => [c.id as string, c as Record<string, unknown>]),
+    );
+
+    const porCuenta = new Map<
+      string,
+      { total: number; conciliados: number; pendientes: number; monto_pendiente: number }
+    >();
+    for (const m of (data ?? []) as Array<Record<string, unknown>>) {
+      const key = m.cuenta_bancaria_id as string;
+      const cur =
+        porCuenta.get(key) ?? { total: 0, conciliados: 0, pendientes: 0, monto_pendiente: 0 };
+      cur.total += 1;
+      if (m.conciliado === true) cur.conciliados += 1;
+      else {
+        cur.pendientes += 1;
+        cur.monto_pendiente += Number(m.monto);
+      }
+      porCuenta.set(key, cur);
+    }
+
+    return [...porCuenta.entries()].map(([id, v]) => {
+      const info = cuentaInfo.get(id);
+      return {
+        cuenta_bancaria_id: id,
+        alias: (info?.alias as string) ?? null,
+        banco: (info?.banco as string) ?? null,
+        moneda: (info?.moneda as string) ?? null,
+        total: v.total,
+        conciliados: v.conciliados,
+        pendientes: v.pendientes,
+        monto_pendiente: Math.round(v.monto_pendiente * 100) / 100,
+      };
+    });
   }
 
   async list(filters: ListConciliacionQuery) {
@@ -235,7 +384,7 @@ export class ConciliacionService {
   async sugerir(movId: string): Promise<SugerenciaConciliacion> {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id, fecha, monto, descripcion, conciliado')
+      .select('id, fecha, monto, descripcion, conciliado, cuenta_bancaria_id')
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
@@ -247,12 +396,14 @@ export class ConciliacionService {
       monto: number;
       descripcion: string | null;
       conciliado: boolean;
+      cuenta_bancaria_id: string;
     };
     if (m.conciliado) {
       throw new BadRequestException('El movimiento ya está conciliado.');
     }
 
-    const candidatos = await this.candidatosCercanos(m.monto, m.fecha);
+    const moneda = await this.monedaCuenta(m.cuenta_bancaria_id);
+    const candidatos = await this.candidatosCercanos(m.monto, m.fecha, moneda);
     if (candidatos.length === 0) {
       return {
         disponible: true,
@@ -332,6 +483,7 @@ export class ConciliacionService {
   private async candidatosCercanos(
     monto: number,
     fecha: string,
+    moneda: string | null,
   ): Promise<SugerenciaConciliacion['candidatos']> {
     const base = new Date(`${fecha}T00:00:00Z`);
     const lo = new Date(base);
@@ -344,17 +496,19 @@ export class ConciliacionService {
     const montoLo = monto - delta;
     const montoHi = monto + delta;
 
-    const { data, error } = await this.supabase.service
+    let query = this.supabase.service
       .from('gasto')
       .select('id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)')
       .eq('conciliado', false)
-      // Ver nota en tryAutoMatch: los cargos de bodega no se cruzan con banco.
-      .neq('medio_pago', 'BODEGA')
+      // Solo medios que tocan el banco (misma regla que autoMatch).
+      .in('medio_pago', MEDIOS_BANCARIOS)
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .gte('monto', montoLo)
       .lte('monto', montoHi)
       .limit(15);
+    if (moneda) query = query.eq('moneda', moneda);
+    const { data, error } = await query;
     if (error) throw new Error(error.message);
 
     return (data ?? []).map((g) => {

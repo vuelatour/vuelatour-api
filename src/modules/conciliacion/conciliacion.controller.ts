@@ -18,6 +18,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   ConciliacionParseDto,
   ImportarMovimientosDto,
+  LinkMovimientoCobroDto,
   LinkMovimientoDto,
   ListConciliacionQuery,
 } from './dto/conciliacion.dto';
@@ -49,6 +50,15 @@ export class ConciliacionController {
     return this.conciliacion.list(q);
   }
 
+  @Get('resumen')
+  @ApiOperation({
+    summary:
+      'KPIs de conciliación por cuenta: movimientos, conciliados, pendientes y monto pendiente.',
+  })
+  resumen(@Query('desde') desde?: string, @Query('hasta') hasta?: string) {
+    return this.conciliacion.resumen(desde, hasta);
+  }
+
   @Patch('movimientos/:id')
   @ApiOperation({ summary: 'Vincula o desvincula un movimiento con un gasto' })
   link(
@@ -57,6 +67,18 @@ export class ConciliacionController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.conciliacion.link(id, dto.gasto_id ?? null, c.userId);
+  }
+
+  @Patch('movimientos/:id/cobro')
+  @ApiOperation({
+    summary: 'Vincula o desvincula un ABONO con un cobro de vuelo (conciliación de ingresos)',
+  })
+  linkCobro(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LinkMovimientoCobroDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.linkCobro(id, dto.cobro_id ?? null, c.userId);
   }
 
   @Post('movimientos/:id/sugerir')

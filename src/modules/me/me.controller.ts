@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Patch } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -24,5 +24,17 @@ export class MeController {
     @CurrentUser() current: AuthenticatedUser,
   ) {
     return this.users.updateSelf(current.authId, body, current.userId);
+  }
+
+  @Get('horas')
+  @ApiOperation({
+    summary:
+      'Horas voladas del usuario actual (mes en curso o ?mes=YYYY-MM) vs límite informativo de 90 hrs/mes.',
+  })
+  horas(
+    @CurrentUser() current: AuthenticatedUser,
+    @Query('mes') mes?: string,
+  ) {
+    return this.users.horasDelMes(current.userId, mes);
   }
 }

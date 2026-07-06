@@ -421,16 +421,46 @@ export class AircraftService {
       ...this.componenteEstado(p, hobbs, false),
     }));
 
+    // Reserva de overhaul: horas mostradas = base manual + voladas DERIVADAS.
+    const voladas = await this.horasVoladas(id);
+    const overhaulReserves = (reservesRes.data ?? []).map((r) => ({
+      ...r,
+      horas_acumuladas: Number(
+        (Number(r.horas_acumuladas ?? 0) + voladas).toFixed(2),
+      ),
+    }));
+
     return {
       ...aeronave,
       motors,
       propellers,
       owners: ownersRes.data ?? [],
-      overhaul_reserves: reservesRes.data ?? [],
+      overhaul_reserves: overhaulReserves,
       imagenes: imagenesRes.data ?? [],
       seguros: segurosRes.data ?? [],
       discrepancias: discrepanciasRes.data ?? [],
     };
+  }
+
+  /**
+   * Horas voladas reales del avión, DERIVADAS de las escalas (suma de
+   * taco_llegada − taco_salida en vuelos no cancelados). Fuente única para la
+   * reserva de overhaul mostrada: nunca se incrementa un contador aparte, así
+   * un ajuste de tacómetro posterior se refleja solo y no hay doble conteo.
+   */
+  private async horasVoladas(aeronaveId: string): Promise<number> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
+      .eq('vuelo.aeronave_id', aeronaveId)
+      .neq('vuelo.estado', 'CANCELADO');
+    let horas = 0;
+    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+      if (e.taco_salida == null || e.taco_llegada == null) continue;
+      const h = Number(e.taco_llegada) - Number(e.taco_salida);
+      if (Number.isFinite(h) && h > 0) horas += h;
+    }
+    return Number(horas.toFixed(2));
   }
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
@@ -739,7 +769,14 @@ export class AircraftService {
       )
       .eq('aeronave_id', aeronaveId);
     if (error) throw new Error(error.message);
-    return data ?? [];
+    // Horas mostradas = base manual + voladas derivadas de escalas (ver horasVoladas).
+    const voladas = await this.horasVoladas(aeronaveId);
+    return (data ?? []).map((r) => ({
+      ...r,
+      horas_acumuladas: Number(
+        (Number(r.horas_acumuladas ?? 0) + voladas).toFixed(2),
+      ),
+    }));
   }
 
   // ============ Imagenes ============

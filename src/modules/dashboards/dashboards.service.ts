@@ -591,8 +591,8 @@ export class DashboardsService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('estado, cliente_id, monto_total_usd')
-      .gte('fecha_vuelo', desde)
-      .lte('fecha_vuelo', `${hasta}T23:59:59`);
+      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return data ?? [];
   }
@@ -605,8 +605,8 @@ export class DashboardsService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('id, estado, fecha_solicitud, fecha_vuelo')
-      .gte('fecha_solicitud', `${desde}T00:00:00`)
-      .lte('fecha_solicitud', `${hasta}T23:59:59`);
+      .gte('fecha_solicitud', `${desde}T00:00:00-05:00`)
+      .lte('fecha_solicitud', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return (data as VueloOpsRow[] | null) ?? [];
   }
@@ -615,8 +615,8 @@ export class DashboardsService {
     const { count, error } = await this.supabase.service
       .from('vuelo')
       .select('id', { count: 'exact', head: true })
-      .gte('fecha_solicitud', `${hoy}T00:00:00`)
-      .lte('fecha_solicitud', `${hoy}T23:59:59`);
+      .gte('fecha_solicitud', `${hoy}T00:00:00-05:00`)
+      .lte('fecha_solicitud', `${hoy}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return count ?? 0;
   }
@@ -642,8 +642,8 @@ export class DashboardsService {
         'id, folio, estado, origen_iata, destino_iata, fecha_vuelo, piloto_id, aeronave_id',
       )
       .in('estado', ['CONFIRMADO', 'EN_VUELO'])
-      .gte('fecha_vuelo', `${hoy}T00:00:00`)
-      .lte('fecha_vuelo', `${hasta}T23:59:59`)
+      .gte('fecha_vuelo', `${hoy}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
     if (error) throw new Error(error.message);
     return (data as never) ?? [];
@@ -701,8 +701,8 @@ export class DashboardsService {
       .from('vuelo')
       .select('id, aeronave_id, piloto_id, monto_total_usd, cobrado')
       .eq('estado', 'COMPLETADO')
-      .gte('fecha_vuelo', desde)
-      .lte('fecha_vuelo', `${hasta}T23:59:59`);
+      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return (data as VueloHorasRow[] | null) ?? [];
   }
@@ -716,8 +716,8 @@ export class DashboardsService {
       .select('id, piloto_id')
       .eq('estado', 'COMPLETADO')
       .not('piloto_id', 'is', null)
-      .gte('fecha_vuelo', desde)
-      .lte('fecha_vuelo', `${hasta}T23:59:59`);
+      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return (data as Array<{ id: string; piloto_id: string | null }> | null) ?? [];
   }

@@ -31,10 +31,11 @@ import type {
   TacoAiReadDto,
   UpdateEscalaDto,
 } from './dto/escalas.dto';
-import type { CreateCobroDto } from './dto/cobros.dto';
+import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -819,6 +820,27 @@ export class FlightsService {
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
     }
+    // Reagenda de último minuto (doc 4.3: "si Itzel cambia el vuelo a las 8am
+    // y el piloto lo ve a las 10am es un problema grave"): si cambió la fecha
+    // y el piloto es el MISMO, también se le avisa con push.
+    const fechaCambio =
+      dto.fecha_vuelo !== undefined &&
+      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
+    const pilotoFinal = (data?.piloto_id as string | null) ?? null;
+    if (fechaCambio && pilotoFinal && pilotoFinal === current.piloto_id) {
+      const nueva = new Date(dto.fecha_vuelo!).toLocaleString('es-MX', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+        timeZone: 'America/Cancun',
+      });
+      void this.notifications.notifyUser(pilotoFinal, {
+        tipo: 'vuelo_asignado',
+        titulo: `Vuelo #${current.folio as number} reagendado`,
+        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${nueva} (hora Cancún).`,
+        data: { vuelo_id: id, folio: current.folio },
+        link: `/flights/${id}`,
+      });
+    }
     // Permiso de pista emitido (pendiente → emitido): avisa a admin/coordinador.
     if (dto.estado_permiso === 'emitido' && current.estado_permiso !== 'emitido') {
       const payload = {
@@ -935,8 +957,8 @@ export class FlightsService {
       const { data: sameDay } = await this.supabase.service
         .from('vuelo')
         .select('id, folio, piloto_id')
-        .gte('fecha_vuelo', `${day}T00:00:00`)
-        .lte('fecha_vuelo', `${day}T23:59:59`)
+        .gte('fecha_vuelo', `${day}T00:00:00-05:00`)
+        .lte('fecha_vuelo', `${day}T23:59:59-05:00`)
         .neq('estado', 'CANCELADO')
         .neq('id', flightId)
         .not('piloto_id', 'is', null);
@@ -1120,6 +1142,24 @@ export class FlightsService {
       throw new ConflictException(
         'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
       );
+    }
+    // Un squawk de severidad ALTA sin resolver = avión no apto (doc 4.3): no
+    // se asigna hasta resolver la discrepancia. BAJA/MEDIA no bloquean.
+    if (targets.aeronaveId) {
+      const { data: squawks } = await this.supabase.service
+        .from('aeronave_discrepancia')
+        .select('id, descripcion')
+        .eq('aeronave_id', targets.aeronaveId)
+        .neq('estado', 'RESUELTA')
+        .eq('severidad', 'ALTA')
+        .limit(3);
+      if (squawks && squawks.length > 0) {
+        throw new ConflictException(
+          `No se puede asignar: discrepancia de severidad ALTA sin resolver (${squawks
+            .map((s) => String(s.descripcion).slice(0, 60))
+            .join('; ')}).`,
+        );
+      }
     }
   }
 
@@ -1323,7 +1363,7 @@ export class FlightsService {
     return data!;
   }
 
-  async complete(id: string, updatedBy: string) {
+  async complete(id: string, updatedBy: string | null) {
     const current = await this.findById(id);
     if (current.estado !== 'EN_VUELO') {
       throw new ConflictException(
@@ -1344,19 +1384,10 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.syncFlight(id);
-    // Propaga las horas voladas a motor(es), hélice(s) y reserva de overhaul.
-    try {
-      await this.advanceComponentHours(
-        id,
-        (data?.aeronave_id as string | null) ?? null,
-      );
-    } catch (err) {
-      this.logger.error(
-        `No se pudieron avanzar las horas de componentes del vuelo ${id}: ${
-          (err as Error).message
-        }`,
-      );
-    }
+    // Las horas de motor/hélice/overhaul NO se incrementan aquí: son DERIVADAS
+    // de las escalas (horas vivas = horas_totales + hobbs − ref). Incrementar
+    // además de derivar contaba cada vuelo DOS veces, y un ajuste de tacómetro
+    // posterior al cierre jamás se reflejaba. Derivar es autocorregible.
     // Alimenta el histórico de tiempos por tramo (best-effort, no bloquea).
     try {
       await this.recordTramoTiempos(id);
@@ -2029,6 +2060,31 @@ export class FlightsService {
         dto.taco_llegada !== undefined ? 'OFICINA' : 'PILOTO',
       );
     }
+
+    // Cierra el círculo de confianza con el piloto: le avisa que su lectura
+    // pasó de amarillo a verde (confirmada) o que oficina la ajustó.
+    void (async () => {
+      try {
+        const vuelo = await this.findById(current.vuelo_id as string);
+        const pilotoId =
+          ((data.piloto_id as string | null) ?? (vuelo.piloto_id as string | null));
+        if (!pilotoId || pilotoId === userId) return;
+        const ajustada = dto.taco_salida !== undefined || dto.taco_llegada !== undefined;
+        await this.notifications.notifyUser(pilotoId, {
+          tipo: 'taco_capturado',
+          titulo: ajustada
+            ? `Tacómetro ajustado por oficina · vuelo #${vuelo.folio as number}`
+            : `Tacómetro confirmado · vuelo #${vuelo.folio as number}`,
+          cuerpo: ajustada
+            ? `${data.origen_iata as string} → ${data.destino_iata as string}: oficina ajustó la lectura (${salida ?? '—'} → ${llegada ?? '—'})${dto.nota ? ` · ${dto.nota}` : ''}.`
+            : `${data.origen_iata as string} → ${data.destino_iata as string}: tu lectura quedó confirmada.`,
+          data: { vuelo_id: current.vuelo_id, escala_id: escalaId },
+          link: `/flights/${current.vuelo_id as string}`,
+        });
+      } catch {
+        // best-effort: la notificación nunca bloquea la confirmación
+      }
+    })();
     return data;
   }
 
@@ -2709,79 +2765,48 @@ export class FlightsService {
   // ===== Validación de tacómetro (Tarea 9) =====
 
   /**
-   * Al completar un vuelo, propaga las horas voladas (suma de
-   * taco_llegada − taco_salida por escala) a los contadores lineales de los
-   * motores y hélices del avión, y a la reserva de overhaul (horas_acumuladas).
-   * Doc 5.2 / 5.7 / 5.9. Solo aplica a vuelos con avión propio (no externos).
+   * Cierre nocturno de vuelos "zombi" (23:55 Cancún, tras el cierre de tacos):
+   * un EN_VUELO cuya fecha ya pasó y que tiene todas sus lecturas (reales o
+   * deducidas) se completa solo — sus horas, ingresos y reportes del mes no se
+   * pierden porque el piloto olvidó el botón. La operación no se detiene.
    */
-  private async advanceComponentHours(
-    vueloId: string,
-    aeronaveId: string | null,
-  ): Promise<void> {
-    if (!aeronaveId) return;
-    const escalas = await this.escalasTaco(vueloId);
-    let horas = 0;
-    for (const e of escalas) {
-      const salida = Number(e.taco_salida);
-      const llegada = Number(e.taco_llegada);
-      if (
-        Number.isFinite(salida) &&
-        Number.isFinite(llegada) &&
-        llegada > salida
-      ) {
-        horas += llegada - salida;
+  @Cron('55 4 * * *', { name: 'vuelos-zombi' })
+  async cerrarVuelosZombis(): Promise<void> {
+    try {
+      const hoyCancun = new Date().toLocaleDateString('en-CA', {
+        timeZone: 'America/Cancun',
+      });
+      const { data, error } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio, fecha_vuelo')
+        .eq('estado', 'EN_VUELO')
+        .eq('es_externo', false)
+        .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`);
+      if (error) throw new Error(error.message);
+      for (const v of data ?? []) {
+        try {
+          const escalas = await this.escalasTaco(v.id as string);
+          if (this.faltanLlegadas(escalas)) {
+            this.logger.warn(
+              `Vuelo zombi #${v.folio as number} sigue EN_VUELO con llegadas incompletas — requiere oficina`,
+            );
+            continue;
+          }
+          await this.complete(v.id as string, null);
+          this.logger.log(
+            `Vuelo #${v.folio as number} completado automáticamente (cierre nocturno)`,
+          );
+        } catch (err) {
+          this.logger.warn(
+            `Autocierre del vuelo ${v.id as string} falló: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
+    } catch (err) {
+      this.logger.warn(
+        `cerrarVuelosZombis falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    horas = Math.round(horas * 100) / 100;
-    if (horas <= 0) return;
-    await Promise.all([
-      this.incrementHorasComponente('motor', aeronaveId, horas),
-      this.incrementHorasComponente('helice', aeronaveId, horas),
-      this.incrementReservaHoras(aeronaveId, horas),
-    ]);
-  }
-
-  /** Suma `horas` a horas_totales de cada motor/hélice del avión. */
-  private async incrementHorasComponente(
-    tabla: 'motor' | 'helice',
-    aeronaveId: string,
-    horas: number,
-  ): Promise<void> {
-    const { data, error } = await this.supabase.service
-      .from(tabla)
-      .select('id, horas_totales')
-      .eq('aeronave_id', aeronaveId);
-    if (error) throw new Error(error.message);
-    await Promise.all(
-      (data ?? []).map((row) =>
-        this.supabase.service
-          .from(tabla)
-          .update({ horas_totales: Number(row.horas_totales) + horas })
-          .eq('id', row.id as string),
-      ),
-    );
-  }
-
-  /** Suma `horas` a horas_acumuladas de la reserva de overhaul del avión. */
-  private async incrementReservaHoras(
-    aeronaveId: string,
-    horas: number,
-  ): Promise<void> {
-    const { data, error } = await this.supabase.service
-      .from('reserva_overhaul')
-      .select('id, horas_acumuladas')
-      .eq('aeronave_id', aeronaveId);
-    if (error) throw new Error(error.message);
-    await Promise.all(
-      (data ?? []).map((row) =>
-        this.supabase.service
-          .from('reserva_overhaul')
-          .update({
-            horas_acumuladas: Number(row.horas_acumuladas) + horas,
-          })
-          .eq('id', row.id as string),
-      ),
-    );
   }
 
   /**
@@ -2937,11 +2962,26 @@ export class FlightsService {
     // captura del tacómetro son independientes; el cliente puede pagar antes
     // de que el piloto registre la lectura. El tacómetro sigue siendo
     // obligatorio para INICIAR y COMPLETAR el vuelo.)
+    // El candado aplica también al método que TECLEA el piloto, no solo al
+    // pactado en el vuelo: un cobro por transferencia siempre es de oficina.
+    if (rol === Rol.PILOTO && !METODOS_COBRO_PILOTO.has(dto.metodo_cobro)) {
+      throw new ForbiddenException(
+        'Ese método de cobro lo registra administración, no el piloto.',
+      );
+    }
     // Tarea 11: el piloto, al cobrar con tarjeta en campo, debe adjuntar el voucher.
     // (Admin/Facturación quedan exentos para conciliaciones de oficina sin foto.)
     if (rol === Rol.PILOTO && METODOS_TARJETA.has(dto.metodo_cobro) && !dto.foto_voucher_url) {
       throw new BadRequestException('Foto del voucher obligatoria para pagos con tarjeta.');
     }
+    // Un cobro MXN sin TC "desaparecía" de todos los balances. Si el capturista
+    // no lo da, se toma el TC de la cotización para que el dinero siempre
+    // convierta a USD (fuente canónica cobrosEnUsd).
+    const tcCobro =
+      dto.tc_usd_mxn ??
+      (dto.moneda === 'MXN' && Number(vuelo.tc_usd_mxn) > 0
+        ? Number(vuelo.tc_usd_mxn)
+        : undefined);
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
@@ -2949,7 +2989,7 @@ export class FlightsService {
         monto: dto.monto,
         moneda: dto.moneda,
         metodo_cobro: dto.metodo_cobro,
-        tc_usd_mxn: dto.tc_usd_mxn,
+        tc_usd_mxn: tcCobro,
         referencia: dto.referencia,
         fecha_cobro: dto.fecha_cobro?.toISOString(),
         foto_voucher_url: dto.foto_voucher_url,
@@ -2978,19 +3018,20 @@ export class FlightsService {
     return cobro!;
   }
 
-  private async refreshCobradoFlag(vueloId: string, userId: string): Promise<void> {
+  /**
+   * Recalcula la bandera `cobrado` con la fuente canónica (cobrosEnUsd): un
+   * cobro MXN sin TC usa el tc_cotizacion del vuelo como respaldo, así un
+   * vuelo pagado en pesos sí se marca cobrado. Tolerancia de 1 USD por
+   * redondeos de conversión. Público: quotes.revise() también debe refrescar.
+   */
+  async refreshCobradoFlag(vueloId: string, userId: string | null): Promise<void> {
     const cobros = await this.listCobros(vueloId);
     const vuelo = await this.findById(vueloId);
-    // Solo consideramos cobros en USD para esta heurística simple. En FASE de bancos
-    // se hace una conciliación más sofisticada con multi-moneda + TC.
-    const totalUsd = cobros
-      .filter((c) => c.moneda === 'USD')
-      .reduce((acc, c) => acc + Number(c.monto), 0);
-    const totalMxnAsUsd = cobros
-      .filter((c) => c.moneda === 'MXN' && c.tc_usd_mxn)
-      .reduce((acc, c) => acc + Number(c.monto) / Number(c.tc_usd_mxn!), 0);
-    const aproximadoUsd = totalUsd + totalMxnAsUsd;
-    const cobradoDeberiaSer = aproximadoUsd >= Number(vuelo.monto_total_usd);
+    const { total_usd } = cobrosEnUsd(
+      cobros,
+      vuelo.tc_usd_mxn as number | null,
+    );
+    const cobradoDeberiaSer = total_usd >= Number(vuelo.monto_total_usd) - 1;
 
     if (cobradoDeberiaSer !== vuelo.cobrado) {
       await this.supabase.service
@@ -2998,5 +3039,58 @@ export class FlightsService {
         .update({ cobrado: cobradoDeberiaSer, updated_by: userId })
         .eq('id', vueloId);
     }
+  }
+
+  /** Corrige un cobro capturado mal (oficina) y recalcula la bandera cobrado. */
+  async updateCobro(
+    cobroId: string,
+    dto: UpdateCobroDto,
+    userId: string,
+  ): Promise<Record<string, unknown>> {
+    const { data: existing, error: findErr } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('id, vuelo_id')
+      .eq('id', cobroId)
+      .maybeSingle();
+    if (findErr) throw new Error(findErr.message);
+    if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.monto !== undefined) patch.monto = dto.monto;
+    if (dto.moneda !== undefined) patch.moneda = dto.moneda;
+    if (dto.metodo_cobro !== undefined) patch.metodo_cobro = dto.metodo_cobro;
+    if (dto.tc_usd_mxn !== undefined) patch.tc_usd_mxn = dto.tc_usd_mxn;
+    if (dto.referencia !== undefined) patch.referencia = dto.referencia;
+    if (dto.fecha_cobro !== undefined)
+      patch.fecha_cobro = dto.fecha_cobro.toISOString();
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .update(patch)
+      .eq('id', cobroId)
+      .select(COBRO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    return data!;
+  }
+
+  /** Elimina un cobro capturado por error (oficina) y recalcula la bandera. */
+  async deleteCobro(cobroId: string, userId: string): Promise<{ ok: true }> {
+    const { data: existing, error: findErr } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('id, vuelo_id')
+      .eq('id', cobroId)
+      .maybeSingle();
+    if (findErr) throw new Error(findErr.message);
+    if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    const { error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .delete()
+      .eq('id', cobroId);
+    if (error) throw new Error(error.message);
+    await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    return { ok: true };
   }
 }

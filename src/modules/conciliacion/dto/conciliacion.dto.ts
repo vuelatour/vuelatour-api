@@ -105,3 +105,10 @@ export class LinkMovimientoDto {
   @IsUUID()
   gasto_id?: string | null;
 }
+
+export class LinkMovimientoCobroDto {
+  @ApiPropertyOptional({ description: 'Cobro de vuelo a vincular. null para desvincular.', nullable: true })
+  @IsOptional()
+  @IsUUID()
+  cobro_id?: string | null;
+}

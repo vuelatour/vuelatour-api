@@ -57,6 +57,7 @@ export interface ReporteVueloTramoPayload {
   orden: number;
   ruta: string;
   pasajeros?: number | null;
+  pasajeros_nombres?: string | null;
   taco_salida?: number | null;
   taco_llegada?: number | null;
   horas?: number | null;
@@ -75,12 +76,14 @@ export interface ReporteVueloPayload {
   fecha_vuelo?: string | null;
   fecha_traslado_final?: string | null;
   pasajeros?: number;
+  pasajeros_nombres?: string | null;
   tarifa_tipo?: string | null;
   tarifa_hora_usd?: number | null;
   tiempo_cobrable_hr?: number | null;
   subtotal_usd?: number;
   tuas_usd?: number;
   iva_usd?: number;
+  viaticos_pernocta_usd?: number;
   extras_total_usd?: number;
   ajuste_final_usd?: number;
   total_usd?: number;

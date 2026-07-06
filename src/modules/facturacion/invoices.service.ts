@@ -86,8 +86,8 @@ export class InvoicesService {
       .from('factura')
       .select('serie, folio, uuid_fiscal, estado, tipo_comprobante, xml_url, pdf_url, fecha_timbrado')
       .eq('estado', 'TIMBRADA')
-      .gte('fecha_timbrado', desde)
-      .lte('fecha_timbrado', `${hasta}T23:59:59`)
+      .gte('fecha_timbrado', `${desde}T00:00:00-05:00`)
+      .lte('fecha_timbrado', `${hasta}T23:59:59-05:00`)
       .order('fecha_timbrado', { ascending: true });
 
     for (const f of (facturas ?? []) as Array<Record<string, unknown>>) {

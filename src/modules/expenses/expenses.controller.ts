@@ -102,21 +102,36 @@ export class ExpensesController {
   }
 
   @Patch(':id')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
-  @ApiOperation({ summary: 'Update gasto (admin/coordinador/facturacion)' })
-  update(
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo el mismo día (doc 5.2/5.3).',
+  })
+  async update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateGastoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+      await this.expenses.assertOwnSameDay(id, c.userId);
+    }
     return this.expenses.update(id, dto, c.userId);
   }
 
   @Delete(':id')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO, Rol.MECANICO)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Delete gasto (admin/coordinador)' })
-  remove(@Param('id', ParseUUIDPipe) id: string) {
+  @ApiOperation({
+    summary:
+      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo del mismo día.',
+  })
+  async remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+      await this.expenses.assertOwnSameDay(id, c.userId);
+    }
     return this.expenses.remove(id);
   }
 }

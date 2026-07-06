@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
+import { AircraftService } from '../aircraft/aircraft.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService, type NotificationInput } from '../realtime/notifications.service';
 import { Rol } from '../../common/types/auth.types';
@@ -30,6 +31,7 @@ export class AlertsService {
 
   constructor(
     private readonly supabase: SupabaseService,
+    private readonly aircraft: AircraftService,
     private readonly notifications: NotificationsService,
     private readonly email: EmailService,
   ) {}
@@ -124,6 +126,10 @@ export class AlertsService {
     await this.safe('cobro_pendiente', (c) => this.checkCobrosPendientes(c));
     await this.safe('inventario_bajo', (c) => this.checkInventarioBajo(c));
     await this.safe('mantenimiento_programado', (c) => this.checkMantenimientos(c));
+    await this.safe('servicio_horas', (c) => this.checkServicioPorHoras(c));
+    await this.safe('caja_negativa', (c) => this.checkCajaNegativa(c));
+    await this.safe('gastos_sin_avion', (c) => this.checkGastosSinAvion(c));
+    await this.safe('vuelo_estancado', (c) => this.checkVuelosEstancados(c));
   }
 
   /** Dispara todas las reglas activas de inmediato (para pruebas / botón admin). */
@@ -135,6 +141,10 @@ export class AlertsService {
       ['cobro_pendiente', (c: AlertConfig) => this.checkCobrosPendientes(c)],
       ['inventario_bajo', (c: AlertConfig) => this.checkInventarioBajo(c)],
       ['mantenimiento_programado', (c: AlertConfig) => this.checkMantenimientos(c)],
+      ['servicio_horas', (c: AlertConfig) => this.checkServicioPorHoras(c)],
+      ['caja_negativa', (c: AlertConfig) => this.checkCajaNegativa(c)],
+      ['gastos_sin_avion', (c: AlertConfig) => this.checkGastosSinAvion(c)],
+      ['vuelo_estancado', (c: AlertConfig) => this.checkVuelosEstancados(c)],
     ] as const) {
       const ran = await this.safe(clave, fn);
       if (ran) ejecutadas.push(clave);
@@ -314,6 +324,214 @@ export class AlertsService {
         });
       }
     }
+  }
+
+  /**
+   * Servicio POR HORAS y TBO de componentes: nadie debería tener que abrir el
+   * expediente del avión para enterarse. Avisa cuando faltan pocas horas para
+   * el próximo servicio del programa cíclico o para agotar el TBO de un
+   * motor/hélice (re-alerta a lo sumo una vez al mes por objetivo).
+   */
+  private async checkServicioPorHoras(config: AlertConfig): Promise<void> {
+    const umbralHoras = config.horas_anticipacion ?? 10;
+    const mes = dateOnly(new Date()).slice(0, 7);
+
+    const { data: aviones, error } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula, servicio_intervalos, servicio_horas_base')
+      .eq('activa', true);
+    if (error) throw new Error(error.message);
+
+    // Hobbs por avión (máximo tacómetro de vuelos no cancelados) en una consulta.
+    const { data: escalas } = await this.supabase.service
+      .from('escala')
+      .select('aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)')
+      .neq('vuelo.estado', 'CANCELADO');
+    const hobbsPorAvion = new Map<string, number>();
+    for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
+      const id = e.aeronave_id as string | null;
+      if (!id) continue;
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v == null) continue;
+        const num = Number(v);
+        if (Number.isFinite(num))
+          hobbsPorAvion.set(id, Math.max(hobbsPorAvion.get(id) ?? 0, num));
+      }
+    }
+
+    for (const a of aviones ?? []) {
+      const hobbs = hobbsPorAvion.get(a.id as string) ?? 0;
+      if (hobbs <= 0) continue;
+      const prox = this.aircraft.proximoServicio(
+        (a.servicio_intervalos as number[] | null) ?? [],
+        Number(a.servicio_horas_base ?? 0),
+        hobbs,
+      );
+      if (prox && prox.faltan <= umbralHoras) {
+        await this.dispatch(config, `servicio:${a.id as string}:${prox.a_las}:${mes}`, {
+          tipo: 'mantenimiento_programado',
+          titulo: `Servicio por horas cerca: ${a.matricula as string}`,
+          cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.`,
+          data: { aeronave_id: a.id, a_las: prox.a_las },
+          link: `/admin/aircraft/${a.id as string}`,
+        });
+      }
+    }
+
+    // TBO de motores y hélices (horas vivas = horas_totales + hobbs − ref).
+    for (const tabla of ['motor', 'helice'] as const) {
+      const { data: comps } = await this.supabase.service
+        .from(tabla)
+        .select(
+          'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)',
+        )
+        .not('aeronave_id', 'is', null);
+      for (const c of (comps ?? []) as Array<Record<string, unknown>>) {
+        const tbo = Number(c.tbo_horas ?? 0);
+        if (tbo <= 0) continue;
+        const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
+        const ref = c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
+        const vivas =
+          ref != null
+            ? Number(c.horas_totales ?? 0) + Math.max(0, hobbs - ref)
+            : Number(c.horas_totales ?? 0);
+        const desdeOH = tabla === 'motor' ? vivas - Number(c.turm ?? 0) : vivas;
+        const restantes = Number((tbo - desdeOH).toFixed(1));
+        const umbralTbo = Math.max(umbralHoras, 25);
+        if (restantes <= umbralTbo) {
+          const matricula =
+            unwrap(c.aeronave as { matricula: string } | { matricula: string }[] | null)
+              ?.matricula ?? '';
+          await this.dispatch(config, `tbo:${tabla}:${c.id as string}:${mes}`, {
+            tipo: 'vencimiento',
+            titulo:
+              restantes <= 0
+                ? `TBO AGOTADO: ${tabla} de ${matricula}`
+                : `TBO cerca (${restantes} hrs): ${tabla} de ${matricula}`,
+            cuerpo: `${tabla === 'motor' ? 'Motor' : 'Hélice'} ${c.numero_serie as string} (${c.posicion as string}) · ${restantes <= 0 ? 'overhaul vencido' : `quedan ${restantes} hrs de TBO`}.`,
+            data: { aeronave_id: c.aeronave_id, componente: tabla, id: c.id },
+            link: `/admin/aircraft/${c.aeronave_id as string}`,
+          });
+        }
+      }
+    }
+  }
+
+  /** Fondos de caja chica en saldo negativo (sobregiro invisible). */
+  private async checkCajaNegativa(config: AlertConfig): Promise<void> {
+    const hoy = dateOnly(new Date());
+    const { data: fondos, error } = await this.supabase.service
+      .from('caja_chica_fondo')
+      .select('id, usuario_id, moneda, activo, usuario:usuario_id(nombre)')
+      .eq('activo', true);
+    if (error) throw new Error(error.message);
+    if (!fondos || fondos.length === 0) return;
+
+    const usuarioIds = fondos.map((f) => f.usuario_id as string);
+    const [{ data: movs }, { data: gastos }] = await Promise.all([
+      this.supabase.service
+        .from('caja_chica_movimiento')
+        .select('fondo_id, tipo, monto, estado')
+        .eq('estado', 'AUTORIZADO'),
+      this.supabase.service
+        .from('gasto')
+        .select('usuario_captura_id, monto, moneda')
+        .eq('medio_pago', 'EFECTIVO')
+        .in('usuario_captura_id', usuarioIds),
+    ]);
+
+    for (const f of fondos) {
+      let saldo = 0;
+      for (const m of (movs ?? []) as Array<Record<string, unknown>>) {
+        if (m.fondo_id !== f.id) continue;
+        const monto = Number(m.monto);
+        saldo += m.tipo === 'REINTEGRO' ? -monto : monto;
+      }
+      for (const g of (gastos ?? []) as Array<Record<string, unknown>>) {
+        if (g.usuario_captura_id !== f.usuario_id || g.moneda !== f.moneda) continue;
+        saldo -= Number(g.monto);
+      }
+      if (saldo < 0) {
+        const nombre =
+          unwrap(f.usuario as { nombre: string } | { nombre: string }[] | null)?.nombre ??
+          'usuario';
+        await this.dispatch(config, `caja:${f.id as string}:${hoy}`, {
+          tipo: 'alerta_sistema',
+          titulo: `Caja chica en NEGATIVO: ${nombre}`,
+          cuerpo: `Saldo ${saldo.toFixed(2)} ${f.moneda as string}. Registra la reposición o revisa los gastos en efectivo.`,
+          data: { fondo_id: f.id, saldo },
+          link: `/admin/caja-chica`,
+        });
+      }
+    }
+  }
+
+  /** Bandeja de gastos sin avión: la meta del diseño es que SIEMPRE esté vacía. */
+  private async checkGastosSinAvion(config: AlertConfig): Promise<void> {
+    const hoy = dateOnly(new Date());
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('id, monto, moneda')
+      .is('aeronave_id', null)
+      .neq('categoria', 'FIJO');
+    if (error) throw new Error(error.message);
+    const pendientes = data ?? [];
+    if (pendientes.length === 0) return;
+
+    await this.dispatch(config, `gastos_sin_avion:${hoy}`, {
+      tipo: 'alerta_sistema',
+      titulo: `${pendientes.length} gasto(s) sin avión asignado`,
+      cuerpo:
+        'Estos gastos no se restan a ningún avión en el cierre. Asígnalos desde Gastos (bandeja de pendientes).',
+      data: { count: pendientes.length },
+      link: '/admin/expenses?pendientes=1',
+    });
+  }
+
+  /**
+   * Vuelos "estancados": programados cuya fecha ya pasó y siguen sin iniciar,
+   * o EN_VUELO de días anteriores con lecturas incompletas (el autocierre
+   * nocturno no pudo completarlos). Sin esto, sus horas e ingresos desaparecen
+   * del cierre sin que nadie lo note.
+   */
+  private async checkVuelosEstancados(config: AlertConfig): Promise<void> {
+    const hoyCancun = new Date().toLocaleDateString('en-CA', {
+      timeZone: 'America/Cancun',
+    });
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
+      .in('estado', ['COTIZADO', 'RESERVA', 'CONFIRMADO', 'EN_VUELO'])
+      .eq('es_externo', false)
+      .not('fecha_vuelo', 'is', null)
+      .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`);
+    if (error) throw new Error(error.message);
+
+    const semana = this.isoWeek(new Date());
+    for (const v of data ?? []) {
+      const esEnVuelo = v.estado === 'EN_VUELO';
+      await this.dispatch(config, `zombi:${v.id as string}:${semana}`, {
+        tipo: 'alerta_sistema',
+        titulo: esEnVuelo
+          ? `Vuelo #${v.folio as number} sigue EN VUELO (fecha pasada)`
+          : `Vuelo #${v.folio as number} quedó ${v.estado as string} y su fecha ya pasó`,
+        cuerpo: esEnVuelo
+          ? `${v.origen_iata as string} → ${v.destino_iata as string}: faltan lecturas de llegada; complétalo o ajusta en Tacómetros en vivo. Sus horas no entran al cierre hasta completarse.`
+          : `${v.origen_iata as string} → ${v.destino_iata as string}: complétalo si voló, reagéndalo o cancélalo. Si queda así, no cuenta en el cierre.`,
+        data: { vuelo_id: v.id, folio: v.folio, estado: v.estado },
+        link: `/admin/flights/${v.id as string}`,
+      });
+    }
+  }
+
+  /** Semana ISO (YYYY-Www) para deduplicar alertas que re-avisan semanalmente. */
+  private isoWeek(d: Date): string {
+    const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+    const dayNum = date.getUTCDay() || 7;
+    date.setUTCDate(date.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(date.getUTCFullYear(), 0, 1));
+    const week = Math.ceil(((date.getTime() - yearStart.getTime()) / 86400000 + 1) / 7);
+    return `${date.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
   }
 
   // ===== Despacho + dedupe =====

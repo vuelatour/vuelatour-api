@@ -257,4 +257,61 @@ export class UsersService {
       supabase_auth_id: authId,
     };
   }
+
+  /**
+   * Horas voladas del usuario en un mes (hora Cancún): suma de
+   * taco_llegada − taco_salida de las escalas donde fue piloto (del tramo o,
+   * si el tramo no tiene, del vuelo). Límite de 90 hrs/mes: INFORMATIVO
+   * (doc 3.6), nunca bloquea. Consulta rápida del piloto en la app.
+   */
+  async horasDelMes(userId: string, mes?: string) {
+    const mesValido = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes ?? '')
+      ? (mes as string)
+      : new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Cancun',
+          year: 'numeric',
+          month: '2-digit',
+        })
+          .format(new Date())
+          .slice(0, 7);
+    const [y, m] = mesValido.split('-').map(Number);
+    const ultimoDia = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const desde = `${mesValido}-01T00:00:00-05:00`;
+    const hasta = `${mesValido}-${String(ultimoDia).padStart(2, '0')}T23:59:59-05:00`;
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'piloto_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, folio, piloto_id, estado, fecha_vuelo)',
+      )
+      .neq('vuelo.estado', 'CANCELADO')
+      .gte('vuelo.fecha_vuelo', desde)
+      .lte('vuelo.fecha_vuelo', hasta);
+    if (error) throw new Error(error.message);
+
+    let horas = 0;
+    const vuelos = new Set<string>();
+    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+      const vuelo = (Array.isArray(e.vuelo) ? e.vuelo[0] : e.vuelo) as Record<
+        string,
+        unknown
+      > | null;
+      const pilotoTramo = (e.piloto_id as string | null) ?? (vuelo?.piloto_id as string | null);
+      if (pilotoTramo !== userId) continue;
+      if (e.taco_salida == null || e.taco_llegada == null) continue;
+      const h = Number(e.taco_llegada) - Number(e.taco_salida);
+      if (!Number.isFinite(h) || h <= 0) continue;
+      horas += h;
+      if (vuelo?.id) vuelos.add(vuelo.id as string);
+    }
+
+    const total = Math.round(horas * 10) / 10;
+    return {
+      mes: mesValido,
+      horas: total,
+      vuelos: vuelos.size,
+      limite: 90,
+      restantes: Math.round((90 - total) * 10) / 10,
+    };
+  }
 }

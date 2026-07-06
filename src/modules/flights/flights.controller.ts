@@ -18,7 +18,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
-import { CreateCobroDto } from './dto/cobros.dto';
+import { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import {
   AssignEscalaDto,
   CaptureTacoDto,
@@ -453,6 +453,32 @@ export class FlightsController {
   ) {
     await this.flights.assertAccess(id, c);
     return this.flights.createCobro(id, dto, c.userId, c.rol);
+  }
+
+  @Patch('cobros/:cobroId')
+  @Roles(Rol.ADMIN, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Corrige un cobro capturado mal (oficina). Recalcula la bandera cobrado con la fuente canónica.',
+  })
+  updatePayment(
+    @Param('cobroId', ParseUUIDPipe) cobroId: string,
+    @Body() dto: UpdateCobroDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.updateCobro(cobroId, dto, c.userId);
+  }
+
+  @Delete('cobros/:cobroId')
+  @Roles(Rol.ADMIN, Rol.FACTURACION)
+  @ApiOperation({
+    summary: 'Elimina un cobro capturado por error (oficina). Recalcula la bandera cobrado.',
+  })
+  deletePayment(
+    @Param('cobroId', ParseUUIDPipe) cobroId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.deleteCobro(cobroId, c.userId);
   }
 
   @Post('taco-status')
