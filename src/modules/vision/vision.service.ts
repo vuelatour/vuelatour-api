@@ -35,6 +35,8 @@ export interface GastoTicketVisionResult {
   categoria_sugerida: string | null;
   medio_pago: 'EFECTIVO' | 'TARJETA_CORP' | 'TRANSFERENCIA' | null;
   tarjeta_terminacion: string | null;
+  /** Renglones del ticket (desglose por concepto), si los desglosa claramente. */
+  conceptos?: Array<{ concepto: string; monto: number }>;
   confianza: number;
   legible: boolean;
   notas: string;
