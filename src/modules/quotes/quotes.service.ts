@@ -591,6 +591,9 @@ export class QuotesService {
       ajuste_final_usd: breakdown.totales.ajuste_final_usd,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
+      // Con ruta operativa: las escalas del vuelo son las del PILOTO y la
+      // cotización nunca las pisa (replaceEscalas hace early-return).
+      itinerario_operativo: (dto.escalas_operacion?.length ?? 0) > 0,
       extras: breakdown.extras ?? [],
       estado_permiso: requierePermiso ? 'pendiente' : 'no_aplica',
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
@@ -614,7 +617,49 @@ export class QuotesService {
       throw new Error(error.message);
     }
 
-    if (breakdown.ruta.escalas) {
+    if ((dto.escalas_operacion?.length ?? 0) > 0) {
+      // Ruta OPERATIVA (mismas semánticas que la reserva del vuelo rápido):
+      // ferry → solo_operativa (el piloto lo ve, el cliente no) y pernocta
+      // automática si el siguiente tramo sale otro día (hora Cancún).
+      const itinerario = dto.escalas_operacion!;
+      const dayCancun = (d: Date): string =>
+        d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+      const fechaEfectiva = (i: number): Date | null =>
+        itinerario[i]?.hora_salida ?? (i === 0 ? (dto.fecha_vuelo ?? null) : null);
+      const legs = itinerario.map((e, i) => {
+        let referencia: Date | null = null;
+        for (let j = i; j >= 0 && !referencia; j--) referencia = fechaEfectiva(j);
+        const siguiente = itinerario[i + 1]?.hora_salida ?? null;
+        const pernocta =
+          referencia != null &&
+          siguiente != null &&
+          dayCancun(siguiente) > dayCancun(referencia);
+        return {
+          vuelo_id: vuelo!.id as string,
+          orden: i + 1,
+          origen_iata: e.origen_iata.toUpperCase(),
+          destino_iata: e.destino_iata.toUpperCase(),
+          aeronave_id: dto.aeronave_id ?? null,
+          pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
+          pasajeros_nombres: e.pasajeros_nombres ?? [],
+          es_ferry: e.es_ferry ?? false,
+          solo_operativa: e.es_ferry ?? false,
+          requiere_pernocta: pernocta,
+          notas: e.notas ?? null,
+          fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
+          created_by: userId,
+          updated_by: userId,
+        };
+      });
+      const { error: legsErr } = await this.supabase.service
+        .from('escala')
+        .insert(legs);
+      if (legsErr) {
+        this.logger.warn(
+          `No se pudieron crear las escalas operativas del vuelo ${vuelo!.id}: ${legsErr.message}`,
+        );
+      }
+    } else if (breakdown.ruta.escalas) {
       await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId, {
         inicio: dto.fecha_vuelo?.toISOString() ?? null,
         fin: dto.fecha_traslado_final?.toISOString() ?? null,

@@ -8,7 +8,9 @@ import {
   IsUUID,
   MaxLength,
 } from 'class-validator';
+import { ValidateNested } from 'class-validator';
 import { CalculateQuoteDto, TipoVuelo } from './calculate-quote.dto';
+import { ReservaEscalaDto } from '../../flights/dto/flights.dto';
 
 // Re-export para no romper imports existentes (quotes.service.ts importa de aqui).
 export { TipoVuelo };
@@ -17,6 +19,17 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @ApiProperty({ description: 'Cliente que solicita el vuelo' })
   @IsUUID()
   cliente_id!: string;
+
+  @ApiPropertyOptional({
+    type: [ReservaEscalaDto],
+    description:
+      'Ruta OPERATIVA real del avión (opcional). Si se envía, estas escalas son las del piloto (itinerario_operativo=true) y los tramos comerciales solo fijan el precio — la cotización nunca las pisa.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ReservaEscalaDto)
+  escalas_operacion?: ReservaEscalaDto[];
 
   @ApiPropertyOptional({ description: 'Fecha de traslado inicial / salida (ISO)', example: '2026-06-15T09:00:00Z' })
   @IsOptional()
