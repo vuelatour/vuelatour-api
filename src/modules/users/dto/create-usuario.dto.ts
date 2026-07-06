@@ -47,6 +47,13 @@ export class CreateUsuarioDto {
   @IsBoolean()
   es_piloto_externo?: boolean;
 
+  @ApiPropertyOptional({
+    description: 'También vuela (doble rol): entra a selectores de piloto, disponibilidad y horas.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_piloto?: boolean;
+
   @ApiPropertyOptional({ maxLength: 20 })
   @IsOptional()
   @IsString()

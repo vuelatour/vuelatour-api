@@ -7,7 +7,7 @@ import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
 import type { UpdateSelfDto } from './dto/update-self.dto';
 
 const COLUMNS =
-  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
+  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
 
 export interface UsuarioRow {
   id: string;
@@ -18,6 +18,8 @@ export interface UsuarioRow {
   estado: string;
   tiene_fondo_caja: boolean;
   tarjeta_terminacion: string | null;
+  /** También vuela (rol secundario): entra a selectores de piloto y horas. */
+  es_piloto: boolean;
   es_piloto_externo: boolean;
   telefono: string | null;
   avatar_url: string | null;
@@ -39,7 +41,14 @@ export class UsersService {
       .order('created_at', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
-    if (filters.rol) query = query.eq('rol', filters.rol);
+    if (filters.rol === 'PILOTO') {
+      // "Pilotos" = quien VUELA: rol PILOTO o doble rol (ADMIN/SOCIO que
+      // también vuela). Así los selectores de asignación los incluyen sin
+      // cambiar a los consumidores.
+      query = query.or('rol.eq.PILOTO,es_piloto.eq.true');
+    } else if (filters.rol) {
+      query = query.eq('rol', filters.rol);
+    }
     if (filters.estado) query = query.eq('estado', filters.estado);
     if (filters.q) {
       const term = `%${filters.q}%`;
@@ -98,6 +107,7 @@ export class UsersService {
       estado: dto.estado ?? 'INVITADO',
       tiene_fondo_caja: dto.tiene_fondo_caja ?? false,
       tarjeta_terminacion: dto.tarjeta_terminacion ?? '',
+      es_piloto: dto.es_piloto ?? dto.rol === 'PILOTO',
       es_piloto_externo: dto.es_piloto_externo ?? false,
       telefono: dto.telefono ?? '',
       avatar_url: '',

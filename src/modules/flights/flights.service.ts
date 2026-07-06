@@ -948,7 +948,7 @@ export class FlightsService {
     const { data: pilots } = await this.supabase.service
       .from('usuario')
       .select('id, nombre')
-      .eq('rol', 'PILOTO')
+      .or('rol.eq.PILOTO,es_piloto.eq.true')
       .eq('estado', 'ACTIVO')
       .order('nombre', { ascending: true });
 

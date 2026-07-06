@@ -24,7 +24,7 @@ export class PilotsService {
     let query = this.supabase.service
       .from('usuario')
       .select(USUARIO_COLS, { count: 'exact' })
-      .eq('rol', 'PILOTO')
+      .or('rol.eq.PILOTO,es_piloto.eq.true')
       .order('nombre', { ascending: true })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
@@ -68,7 +68,7 @@ export class PilotsService {
       .from('usuario')
       .select(USUARIO_COLS)
       .eq('id', id)
-      .eq('rol', 'PILOTO')
+      .or('rol.eq.PILOTO,es_piloto.eq.true')
       .maybeSingle();
 
     if (error) throw new Error(`Failed to load pilot: ${error.message}`);
