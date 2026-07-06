@@ -12,6 +12,7 @@ import {
   IsString,
   IsUUID,
   Length,
+  Max,
   Min,
   ValidateIf,
   ValidateNested,
@@ -265,6 +266,17 @@ export class CalculateQuoteDto {
   @ApiProperty({ enum: MetodoPago, description: 'Determina si aplica IVA' })
   @IsEnum(MetodoPago)
   metodo_pago!: MetodoPago;
+
+  @ApiPropertyOptional({
+    description:
+      'Comisión de BillPocket en % (custom por operación: 5, 9… tope 20). Solo aplica con metodo_pago=BILLPOCKET; se cobra al cliente como línea sin IVA.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(20)
+  comision_billpocket_pct?: number;
 
   @ApiPropertyOptional({
     description:

@@ -88,6 +88,8 @@ export interface TuasAeropuerto {
 }
 
 const IVA_DEFAULT = 0.16;
+/** Prefijo del extra sintetizado por el motor para la comisión de BillPocket. */
+const COMISION_BILLPOCKET_PREFIX = 'Comisión BillPocket';
 const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 // Costo default de pernocta/viáticos por tramo (USD). Editable por tramo; confirmar
 // el monto con finanzas. Se usa cuando el tramo marca pernocta sin costo explícito.
@@ -212,7 +214,10 @@ export class QuotesService {
         monto_usd: round2(Number(e.monto_usd) || 0),
         aplica_iva: e.aplica_iva ?? true,
       }))
-      .filter((e) => e.concepto.length > 0 && e.monto_usd > 0);
+      .filter((e) => e.concepto.length > 0 && e.monto_usd > 0)
+      // La comisión BillPocket la sintetiza el MOTOR (línea abajo): se
+      // descarta cualquier copia persistida para no duplicarla al re-cotizar.
+      .filter((e) => !e.concepto.startsWith(COMISION_BILLPOCKET_PREFIX));
     const extrasConIva = extras
       .filter((e) => e.aplica_iva)
       .reduce((acc, e) => acc + e.monto_usd, 0);
@@ -242,7 +247,28 @@ export class QuotesService {
     const ajusteFinal = round2(Number(dto.ajuste_final_usd) || 0);
     const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajusteFinal);
     const iva = round2(baseIva * ivaPct);
-    const total = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+    const totalSinComision = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+
+    // Comisión BillPocket (no factura → sin IVA): porcentaje CUSTOM que la
+    // terminal cobra (5%, 9%… tope 20%). Se cobra al cliente como línea sin
+    // IVA sobre todo lo demás, sintetizada como "extra" para que fluya igual
+    // que cualquier concepto (desglose, PDF, reporte, balance) sin columnas
+    // nuevas.
+    const comisionPct =
+      dto.metodo_pago === MetodoPago.BILLPOCKET
+        ? Math.min(Number(dto.comision_billpocket_pct) || 0, 20)
+        : 0;
+    const comisionR = round2((totalSinComision * comisionPct) / 100);
+    let extrasSinIvaRFinal = extrasSinIvaR;
+    if (comisionR > 0) {
+      extras.push({
+        concepto: `${COMISION_BILLPOCKET_PREFIX} (${round2(comisionPct)}%)`,
+        monto_usd: comisionR,
+        aplica_iva: false,
+      });
+      extrasSinIvaRFinal = round2(extrasSinIvaR + comisionR);
+    }
+    const total = round2(totalSinComision + comisionR);
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
@@ -377,14 +403,15 @@ export class QuotesService {
         subtotal_vuelo_usd: subtotalR,
         tuas_total_usd: tuasR,
         viaticos_pernocta_usd: pernoctaR,
-        extras_total_usd: round2(extrasConIvaR + extrasSinIvaR),
+        extras_total_usd: round2(extrasConIvaR + extrasSinIvaRFinal),
         ajuste_final_usd: ajusteFinal,
         iva_usd: iva,
         total_usd: total,
       },
       meta: {
         calculado_at: new Date().toISOString(),
-        version_motor: '1.3.0',
+        version_motor: '1.3.1',
+        comision_billpocket_pct: comisionPct > 0 ? round2(comisionPct) : null,
       },
     };
   }
@@ -771,9 +798,15 @@ export class QuotesService {
       pasajeros: newPax,
       pase_abordar: current.pase_abordar === true,
       metodo_pago: (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
-      // El ajuste rápido no debe borrar el TC pactado.
+      // El ajuste rápido no debe borrar el TC pactado ni la comisión BillPocket.
       tc_usd_mxn:
         Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
+      comision_billpocket_pct:
+        (
+          current.calculo_snapshot as {
+            meta?: { comision_billpocket_pct?: number | null };
+          } | null
+        )?.meta?.comision_billpocket_pct ?? undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
       tarifa_hora_override_usd:
