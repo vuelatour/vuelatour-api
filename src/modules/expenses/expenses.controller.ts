@@ -59,6 +59,17 @@ export class ExpensesController {
     return this.expenses.sugerirVuelo(q.aeronave_id, q.fecha_hora);
   }
 
+  @Post('sugerir-asignaciones')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Barrido de la bandeja: sugiere vuelo/avión para TODOS los gastos pendientes (máx 15). Devuelve gasto→sugerencia; la oficina aplica en lote.',
+  })
+  sugerirAsignaciones() {
+    return this.expenses.sugerirAsignaciones();
+  }
+
   @Get(':id/sugerir-asignacion')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({

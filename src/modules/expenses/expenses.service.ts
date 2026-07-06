@@ -250,6 +250,64 @@ export class ExpensesService {
     };
   }
 
+  /**
+   * Barrido de la BANDEJA completa: corre sugerirAsignacion para cada gasto
+   * sin avión (máx 15, en tandas de 5 para no saturar la IA) y devuelve la
+   * lista gasto→sugerencia. La oficina revisa y aplica en lote — nunca se
+   * asigna solo (la IA propone, el humano confirma).
+   */
+  async sugerirAsignaciones() {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
+      )
+      .is('aeronave_id', null)
+      .neq('categoria', 'FIJO')
+      .order('fecha_gasto', { ascending: false })
+      .limit(15);
+    if (error) throw new Error(error.message);
+    const pendientes = (data ?? []) as Array<Record<string, unknown>>;
+
+    const resumen = (g: Record<string, unknown>) => {
+      const cap = g.captura as { nombre?: string } | { nombre?: string }[] | null;
+      const nombre = Array.isArray(cap) ? cap[0]?.nombre : cap?.nombre;
+      return {
+        id: g.id as string,
+        fecha_gasto: (g.fecha_gasto as string | null) ?? null,
+        monto: g.monto == null ? null : Number(g.monto),
+        moneda: (g.moneda as string | null) ?? null,
+        categoria: (g.categoria as string | null) ?? null,
+        capturo_nombre: nombre ?? null,
+      };
+    };
+
+    const resultados: Array<Record<string, unknown>> = [];
+    const CONCURRENCIA = 5;
+    for (let i = 0; i < pendientes.length; i += CONCURRENCIA) {
+      const lote = pendientes.slice(i, i + CONCURRENCIA);
+      const parciales = await Promise.all(
+        lote.map(async (g) => {
+          try {
+            const sug = await this.sugerirAsignacion(g.id as string);
+            return { gasto: resumen(g), ...sug };
+          } catch {
+            return {
+              gasto: resumen(g),
+              sugerido: null,
+              confianza: 0,
+              razon: 'No se pudo evaluar este gasto.',
+              fuente: 'regla' as const,
+              candidatos: [],
+            };
+          }
+        }),
+      );
+      resultados.push(...parciales);
+    }
+    return { total_pendientes: pendientes.length, resultados };
+  }
+
   /** URLs firmadas (1 h) para fotos de recibos en el bucket privado gasto-fotos. */
   async signPhotos(paths: string[]): Promise<Record<string, string>> {
     const clean = [...new Set(paths.filter(Boolean))];
