@@ -35,8 +35,10 @@ export interface GastoTicketVisionResult {
   categoria_sugerida: string | null;
   medio_pago: 'EFECTIVO' | 'TARJETA_CORP' | 'TRANSFERENCIA' | null;
   tarjeta_terminacion: string | null;
-  /** Renglones del ticket (desglose por concepto), si los desglosa claramente. */
+  /** Renglones del ticket (incl. IVA como renglón si viene aparte; suma = total). */
   conceptos?: Array<{ concepto: string; monto: number }>;
+  /** Matrícula de la aeronave si aparece en el documento (facturas de FBO). */
+  matricula?: string | null;
   confianza: number;
   legible: boolean;
   notas: string;
