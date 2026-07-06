@@ -266,6 +266,16 @@ export class CalculateQuoteDto {
   @IsEnum(MetodoPago)
   metodo_pago!: MetodoPago;
 
+  @ApiPropertyOptional({
+    description:
+      'Tipo de cambio MXN por USD con el que entrará el pago (BillPocket/transferencia pueden cobrarse en pesos). Persiste tc_usd_mxn y monto_total_mxn; los cobros MXN sin TC lo usan de respaldo.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  tc_usd_mxn?: number;
+
   @ApiPropertyOptional({ description: 'Tarifa por hora override (USD). Si null, usa la del avión.' })
   @IsOptional()
   @Type(() => Number)

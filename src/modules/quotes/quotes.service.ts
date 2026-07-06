@@ -553,6 +553,12 @@ export class QuotesService {
       iva_pct: breakdown.iva.porcentaje,
       iva_usd: breakdown.iva.monto_usd,
       monto_total_usd: breakdown.totales.total_usd,
+      // TC declarado al cotizar (el pago puede entrar en pesos): habilita el
+      // total MXN y sirve de respaldo para convertir cobros MXN sin TC.
+      tc_usd_mxn: dto.tc_usd_mxn ?? null,
+      monto_total_mxn: dto.tc_usd_mxn
+        ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
+        : null,
       viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
       extras_total_usd: breakdown.totales.extras_total_usd,
       ajuste_final_usd: breakdown.totales.ajuste_final_usd,
@@ -648,6 +654,10 @@ export class QuotesService {
         iva_pct: breakdown.iva.porcentaje,
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
+        tc_usd_mxn: dto.tc_usd_mxn ?? null,
+        monto_total_mxn: dto.tc_usd_mxn
+          ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
+          : null,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
@@ -761,6 +771,9 @@ export class QuotesService {
       pasajeros: newPax,
       pase_abordar: current.pase_abordar === true,
       metodo_pago: (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
+      // El ajuste rápido no debe borrar el TC pactado.
+      tc_usd_mxn:
+        Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
       tarifa_hora_override_usd:
@@ -1211,6 +1224,10 @@ export class QuotesService {
         iva_pct: breakdown.iva.porcentaje,
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
+        tc_usd_mxn: dto.tc_usd_mxn ?? null,
+        monto_total_mxn: dto.tc_usd_mxn
+          ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
+          : null,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
