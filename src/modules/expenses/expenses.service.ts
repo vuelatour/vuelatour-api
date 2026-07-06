@@ -184,28 +184,37 @@ export class ExpensesService {
   }
 
   /**
-   * Posible duplicado: mismo proveedor + mismo monto + misma moneda y fecha
-   * dentro de ±DUP_DAYS días (regla del diseño funcional). Sin proveedor no se
-   * intenta detectar para evitar falsos positivos.
+   * Posible duplicado (doble captura). Dos reglas, deterministas — más fiable
+   * que IA para esto:
+   * - CON proveedor: mismo proveedor + monto + moneda, fecha ±DUP_DAYS
+   *   (regla del diseño funcional).
+   * - SIN proveedor (capturas del piloto/mecánico desde la app): misma
+   *   categoría + monto + moneda, fecha ±1 día — ventana corta para no marcar
+   *   falsos positivos (dos taxis iguales en días distintos).
+   * El flag NUNCA bloquea: la app avisa al capturista y el admin lo lista.
    */
   private async looksLikeDuplicate(dto: CreateGastoDto): Promise<boolean> {
-    if (!dto.proveedor_id) return false;
     const base = new Date(`${dto.fecha_gasto}T00:00:00Z`);
+    if (Number.isNaN(base.getTime())) return false;
+    const dias = dto.proveedor_id ? DUP_DAYS : 1;
     const lo = new Date(base);
-    lo.setUTCDate(lo.getUTCDate() - DUP_DAYS);
+    lo.setUTCDate(lo.getUTCDate() - dias);
     const hi = new Date(base);
-    hi.setUTCDate(hi.getUTCDate() + DUP_DAYS);
+    hi.setUTCDate(hi.getUTCDate() + dias);
     const iso = (d: Date) => d.toISOString().slice(0, 10);
 
-    const { data, error } = await this.supabase.service
+    let q = this.supabase.service
       .from('gasto')
       .select('id')
-      .eq('proveedor_id', dto.proveedor_id)
       .eq('moneda', dto.moneda)
       .eq('monto', dto.monto)
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .limit(1);
+    q = dto.proveedor_id
+      ? q.eq('proveedor_id', dto.proveedor_id)
+      : q.eq('categoria', dto.categoria);
+    const { data, error } = await q;
     if (error) return false; // la detección no debe bloquear la captura
     return (data ?? []).length > 0;
   }
