@@ -423,16 +423,57 @@ export class ExpensesService {
       updated_by: userId,
     };
 
-    // Fecha del ticket manda sobre la default de captura.
-    if (ai.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ai.fecha)) {
-      patch.fecha_gasto = ai.fecha;
-    }
-    // Categoría: solo si el piloto dejó la genérica.
+    // REGLA: lo que el piloto CAPTURÓ nunca se sobreescribe. Solo se llenan
+    // huecos; toda diferencia IA-vs-captura se anota con ⚠ y se avisa a
+    // oficina — los pilotos también se equivocan y debe quedar visible.
+    const discrepancias: string[] = [];
+
+    // Categoría: solo se llena si el piloto dejó la genérica; si eligió una
+    // específica y la IA ve otra, discrepancia.
     if (gasto.categoria === 'OTRO' && ai.categoria_sugerida) {
       patch.categoria = ai.categoria_sugerida;
+    } else if (
+      ai.categoria_sugerida &&
+      gasto.categoria !== 'OTRO' &&
+      ai.categoria_sugerida !== gasto.categoria
+    ) {
+      discrepancias.push(
+        `categoría capturada ${gasto.categoria as string}, la IA sugiere ${ai.categoria_sugerida}`,
+      );
     }
+    // Fecha: NO se pisa; si el ticket trae otra, discrepancia.
+    if (
+      ai.fecha &&
+      /^\d{4}-\d{2}-\d{2}$/.test(ai.fecha) &&
+      ai.fecha !== (gasto.fecha_gasto as string | null)
+    ) {
+      discrepancias.push(
+        `fecha capturada ${gasto.fecha_gasto as string}, el ticket dice ${ai.fecha}`,
+      );
+    }
+    // Moneda distinta = monto probablemente en la divisa equivocada.
+    if (ai.moneda && ai.moneda !== gasto.moneda) {
+      discrepancias.push(
+        `moneda capturada ${gasto.moneda as string}, el ticket está en ${ai.moneda}`,
+      );
+    }
+    // Total: nunca se toca; diferencia → discrepancia.
+    if (ai.monto != null && Math.abs(Number(gasto.monto) - ai.monto) > 0.01) {
+      discrepancias.push(
+        `total capturado $${Number(gasto.monto).toFixed(2)} ${gasto.moneda}, la IA leyó $${ai.monto.toFixed(2)} ${ai.moneda ?? ''}`,
+      );
+    }
+    // Tarjeta: llenar si falta; discrepancia si difiere.
     if (!gasto.tarjeta_terminacion && ai.tarjeta_terminacion) {
       patch.tarjeta_terminacion = ai.tarjeta_terminacion;
+    } else if (
+      ai.tarjeta_terminacion &&
+      gasto.tarjeta_terminacion &&
+      ai.tarjeta_terminacion !== gasto.tarjeta_terminacion
+    ) {
+      discrepancias.push(
+        `tarjeta capturada •${gasto.tarjeta_terminacion as string}, el voucher dice •${ai.tarjeta_terminacion}`,
+      );
     }
     if (gasto.categoria === 'GAS' || ai.categoria_sugerida === 'GAS') {
       if (gasto.litros == null && (ai as { litros?: number }).litros != null) {
@@ -440,7 +481,7 @@ export class ExpensesService {
       }
     }
     // Matrícula del documento → avión (saca el gasto de la bandeja solo).
-    if (!gasto.aeronave_id && ai.matricula) {
+    if (ai.matricula) {
       const { data: aviones } = await this.supabase.service
         .from('aeronave')
         .select('id, matricula')
@@ -449,11 +490,17 @@ export class ExpensesService {
       const match = (aviones ?? []).find(
         (a) => norm(a.matricula as string) === norm(ai.matricula!),
       );
-      if (match) patch.aeronave_id = match.id;
+      if (match && !gasto.aeronave_id) {
+        patch.aeronave_id = match.id;
+      } else if (match && gasto.aeronave_id && match.id !== gasto.aeronave_id) {
+        discrepancias.push(
+          `el documento trae la matrícula ${match.matricula as string} pero el gasto está asignado a otro avión`,
+        );
+      }
     }
 
     // Notas: bloque IA (desglose renglón por renglón + proveedor + matrícula),
-    // añadido DESPUÉS de lo que el piloto escribió.
+    // añadido DESPUÉS de lo que el piloto escribió, y las ⚠ discrepancias.
     const lineas: string[] = [];
     for (const c of ai.conceptos ?? []) {
       lineas.push(`${c.concepto} - $${c.monto.toFixed(2)} ${ai.moneda ?? gasto.moneda}`);
@@ -462,15 +509,7 @@ export class ExpensesService {
       .filter((v): v is string => !!v && v.trim().length > 0)
       .join(' · ');
     if (extras) lineas.push(extras);
-    // Total leído distinto al capturado a mano: dejarlo VISIBLE para oficina.
-    if (
-      ai.monto != null &&
-      Math.abs(Number(gasto.monto) - ai.monto) > 0.01
-    ) {
-      lineas.push(
-        `⚠ IA leyó total $${ai.monto.toFixed(2)} ${ai.moneda ?? ''} y se capturó $${Number(gasto.monto).toFixed(2)} ${gasto.moneda} — revisar`,
-      );
-    }
+    for (const d of discrepancias) lineas.push(`⚠ ${d} — revisar`);
     if (lineas.length > 0) {
       const bloque = `[IA al sincronizar]\n${lineas.join('\n')}`;
       patch.notas = gasto.notas ? `${gasto.notas}\n\n${bloque}` : bloque;
@@ -481,7 +520,22 @@ export class ExpensesService {
       .update(patch)
       .eq('id', gastoId);
     if (error) throw new Error(error.message);
-    this.logger.log(`Gasto ${gastoId} enriquecido con IA al sincronizar`);
+
+    // Con discrepancias, oficina se entera de inmediato (no solo en notas).
+    if (discrepancias.length > 0) {
+      const aviso = {
+        tipo: 'alerta_sistema',
+        titulo: 'Gasto con discrepancias IA vs captura',
+        cuerpo: `${gasto.categoria as string} · $${Number(gasto.monto).toFixed(2)} ${gasto.moneda as string}: ${discrepancias[0]}${discrepancias.length > 1 ? ` (+${discrepancias.length - 1} más)` : ''}`,
+        data: { gasto_id: gastoId },
+        link: '/admin/expenses',
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, aviso);
+      void this.notifications.notifyRole(Rol.ANALISTA, aviso);
+    }
+    this.logger.log(
+      `Gasto ${gastoId} enriquecido con IA al sincronizar (${discrepancias.length} discrepancias)`,
+    );
   }
 
   /**
