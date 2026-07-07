@@ -439,6 +439,8 @@ export class InvoicesService {
       rfc_emisor: emisora.rfc as string,
       motivo: dto.motivo,
       folio_sustitucion: dto.folio_sustitucion ?? null,
+      rfc_receptor: (factura.facturado_a_rfc as string | null) ?? null,
+      total: factura.total != null ? Number(factura.total) : null,
     });
     if (!result.ok) {
       throw new BadRequestException(result.error ?? 'No se pudo cancelar el CFDI.');

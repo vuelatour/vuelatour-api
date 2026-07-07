@@ -42,6 +42,9 @@ export interface CancelarPayload {
   rfc_emisor: string;
   motivo: string;
   folio_sustitucion?: string | null;
+  // FEL exige RFC receptor y total del CFDI en el detalle de cancelación.
+  rfc_receptor?: string | null;
+  total?: number | null;
 }
 
 export interface CancelarResult {
