@@ -3,6 +3,7 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -11,6 +12,7 @@ import {
   PyservicesService,
   type TablaColumnaPayload,
 } from '../pyservices/pyservices.service';
+import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
 import type {
   CreateGastoDto,
@@ -29,10 +31,13 @@ const DUP_DAYS = 3;
 
 @Injectable()
 export class ExpensesService {
+  private readonly logger = new Logger(ExpensesService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly notifications: NotificationsService,
     private readonly pyservices: PyservicesService,
+    private readonly vision: VisionService,
   ) {}
 
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
@@ -363,6 +368,21 @@ export class ExpensesService {
       throw new Error(error.message);
     }
 
+    // Captura OFFLINE con foto: el piloto no tuvo IA en campo — el servidor
+    // lee el comprobante ahora y completa lo que falte (como el tacómetro:
+    // la operación no se detiene y el dato llega completo igual).
+    if (dto.leer_con_ia === true && dto.foto_url) {
+      void this.enriquecerGastoConIA(
+        (data as { id: string }).id,
+        dto.foto_url,
+        userId,
+      ).catch((err) =>
+        this.logger.warn(
+          `Enriquecimiento IA del gasto falló: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+
     // Aviso a admin: el piloto subió un gasto desde campo.
     void this.notifications.notifyRole(
       Rol.ADMIN,
@@ -377,6 +397,91 @@ export class ExpensesService {
     );
 
     return data!;
+  }
+
+  /**
+   * Lee el comprobante de un gasto capturado OFFLINE y completa los campos
+   * que el piloto no pudo llenar. REGLAS: lo manual NUNCA se pisa (el monto
+   * jamás se toca; si la IA lee otro total, se anota para revisión). Se
+   * completa: desglose→notas, fecha del ticket, categoría (solo si quedó
+   * OTRO), tarjeta, litros/lugar en GAS, matrícula→aeronave si estaba vacía.
+   */
+  private async enriquecerGastoConIA(
+    gastoId: string,
+    fotoPath: string,
+    userId: string,
+  ): Promise<void> {
+    const urls = await this.signPhotos([fotoPath]);
+    const imageUrl = urls[fotoPath];
+    if (!imageUrl) return;
+    const ai = await this.vision.readGastoTicket({ imageUrl });
+    if (!ai || ai.monto === undefined || !ai.legible) return;
+
+    const gasto = await this.findById(gastoId);
+    const patch: Record<string, unknown> = {
+      valor_ia_extraido: ai,
+      updated_by: userId,
+    };
+
+    // Fecha del ticket manda sobre la default de captura.
+    if (ai.fecha && /^\d{4}-\d{2}-\d{2}$/.test(ai.fecha)) {
+      patch.fecha_gasto = ai.fecha;
+    }
+    // Categoría: solo si el piloto dejó la genérica.
+    if (gasto.categoria === 'OTRO' && ai.categoria_sugerida) {
+      patch.categoria = ai.categoria_sugerida;
+    }
+    if (!gasto.tarjeta_terminacion && ai.tarjeta_terminacion) {
+      patch.tarjeta_terminacion = ai.tarjeta_terminacion;
+    }
+    if (gasto.categoria === 'GAS' || ai.categoria_sugerida === 'GAS') {
+      if (gasto.litros == null && (ai as { litros?: number }).litros != null) {
+        patch.litros = (ai as { litros?: number }).litros;
+      }
+    }
+    // Matrícula del documento → avión (saca el gasto de la bandeja solo).
+    if (!gasto.aeronave_id && ai.matricula) {
+      const { data: aviones } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula')
+        .eq('activa', true);
+      const norm = (m: string) => m.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const match = (aviones ?? []).find(
+        (a) => norm(a.matricula as string) === norm(ai.matricula!),
+      );
+      if (match) patch.aeronave_id = match.id;
+    }
+
+    // Notas: bloque IA (desglose renglón por renglón + proveedor + matrícula),
+    // añadido DESPUÉS de lo que el piloto escribió.
+    const lineas: string[] = [];
+    for (const c of ai.conceptos ?? []) {
+      lineas.push(`${c.concepto} - $${c.monto.toFixed(2)} ${ai.moneda ?? gasto.moneda}`);
+    }
+    const extras = [ai.matricula, ai.proveedor, ai.concepto]
+      .filter((v): v is string => !!v && v.trim().length > 0)
+      .join(' · ');
+    if (extras) lineas.push(extras);
+    // Total leído distinto al capturado a mano: dejarlo VISIBLE para oficina.
+    if (
+      ai.monto != null &&
+      Math.abs(Number(gasto.monto) - ai.monto) > 0.01
+    ) {
+      lineas.push(
+        `⚠ IA leyó total $${ai.monto.toFixed(2)} ${ai.moneda ?? ''} y se capturó $${Number(gasto.monto).toFixed(2)} ${gasto.moneda} — revisar`,
+      );
+    }
+    if (lineas.length > 0) {
+      const bloque = `[IA al sincronizar]\n${lineas.join('\n')}`;
+      patch.notas = gasto.notas ? `${gasto.notas}\n\n${bloque}` : bloque;
+    }
+
+    const { error } = await this.supabase.service
+      .from('gasto')
+      .update(patch)
+      .eq('id', gastoId);
+    if (error) throw new Error(error.message);
+    this.logger.log(`Gasto ${gastoId} enriquecido con IA al sincronizar`);
   }
 
   /**

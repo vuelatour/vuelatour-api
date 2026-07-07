@@ -144,6 +144,14 @@ export class CreateGastoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Captura offline con foto: al recibirla, el servidor lee el comprobante con IA y completa lo que falte (desglose, fecha del ticket, matrícula→avión) sin pisar lo capturado a mano.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  leer_con_ia?: boolean;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {
