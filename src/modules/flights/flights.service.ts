@@ -1680,6 +1680,7 @@ export class FlightsService {
         destino_iata: dto.destino_iata.toUpperCase(),
         hora_salida: dto.hora_salida?.toISOString(),
         hora_llegada: dto.hora_llegada?.toISOString(),
+        fecha_salida_plan: dto.fecha_salida_plan?.toISOString(),
         // Pasajeros por tramo (puede variar entre escalas). null = usa el
         // global del vuelo.
         pasajeros: dto.pasajeros ?? null,
@@ -1785,6 +1786,20 @@ export class FlightsService {
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+    // Espejo inverso: la salida plan del TRAMO 1 es la fecha del vuelo. Pasa
+    // por update() para reusar el push de reagenda al piloto (doc 4.3) y el
+    // sync de calendario. Los tramos 2+ solo refrescan el calendario.
+    if (dto.fecha_salida_plan instanceof Date) {
+      if (Number(data.orden) === 1) {
+        await this.update(
+          data.vuelo_id as string,
+          { fecha_vuelo: dto.fecha_salida_plan } as UpdateFlightDto,
+          userId,
+        );
+      } else {
+        void this.calendar.syncFlight(data.vuelo_id as string);
+      }
+    }
     return data;
   }
 
