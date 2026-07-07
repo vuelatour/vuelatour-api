@@ -220,7 +220,9 @@ export class VisionService implements OnModuleInit {
    * categoría sugerida). Best-effort: null si pyservices no está activo o falla,
    * y la captura cae a manual.
    */
-  async readGastoTicket(input: GastoTicketVisionInput): Promise<GastoTicketVisionResult | null> {
+  async readGastoTicket(
+    input: GastoTicketVisionInput,
+  ): Promise<(GastoTicketVisionResult & { motivo?: string }) | null> {
     if (!this.enabled) return null;
     if (!input.imageBase64 && !input.imageUrl) return null;
 
@@ -241,15 +243,31 @@ export class VisionService implements OnModuleInit {
         signal: controller.signal,
       });
       if (!res.ok) {
-        this.logger.warn(`pyservices /vision/gasto respondió ${res.status}`);
-        return null;
+        // Devuelve el motivo real (ej. "Claude no disponible (404)" = modelo
+        // mal escrito; timeout = ANTHROPIC_TIMEOUT_S corto) para que la app lo
+        // muestre y el operador sepa QUÉ arreglar en vez de adivinar.
+        const detalle = await res.text().catch(() => '');
+        this.logger.warn(
+          `pyservices /vision/gasto respondió ${res.status}: ${detalle.slice(0, 200)}`,
+        );
+        let motivo = `pyservices ${res.status}`;
+        try {
+          const j = JSON.parse(detalle) as { detail?: string };
+          if (j.detail) motivo = j.detail;
+        } catch {
+          /* texto plano */
+        }
+        return { motivo } as GastoTicketVisionResult & { motivo: string };
       }
       return (await res.json()) as GastoTicketVisionResult;
     } catch (err) {
-      this.logger.warn(
-        `readGastoTicket falló: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      return null;
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`readGastoTicket falló: ${msg}`);
+      return {
+        motivo: msg.includes('abort')
+          ? 'La lectura tardó demasiado (timeout API→pyservices)'
+          : `Sin conexión con pyservices: ${msg.slice(0, 120)}`,
+      } as GastoTicketVisionResult & { motivo: string };
     } finally {
       clearTimeout(timer);
     }

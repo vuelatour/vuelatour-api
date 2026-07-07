@@ -35,6 +35,10 @@ export class VisionController {
       imageUrl: dto.imageUrl,
     });
     if (!result) return { disponible: false };
+    // Falla con motivo (modelo mal escrito, timeout…): la app lo muestra.
+    if (result.motivo && result.monto === undefined) {
+      return { disponible: false, motivo: result.motivo };
+    }
     return { disponible: true, ...result };
   }
 
