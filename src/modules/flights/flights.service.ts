@@ -1791,7 +1791,9 @@ export class FlightsService {
   async captureTaco(escalaId: string, dto: CaptureTacoDto, userId: string) {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, capturado_por')
+      .select(
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, capturado_por',
+      )
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
@@ -1801,9 +1803,13 @@ export class FlightsService {
       throw new BadRequestException('Empty taco payload');
     }
 
-    // Validate monotonicity: new taco_salida/llegada must be >= existing capture
+    // Validate monotonicity: new taco_salida/llegada must be >= existing capture.
+    // Excepción: una salida llenada por el SISTEMA (DEDUCIDO) puede venir mal
+    // (avión que durmió fuera, historial sucio); la foto del piloto en el
+    // tramo 1 es evidencia y puede corregirla hacia abajo.
     if (dto.taco_salida !== undefined && current.taco_salida !== null) {
-      if (Number(dto.taco_salida) < Number(current.taco_salida)) {
+      const salidaCorregible = current.taco_salida_origen === 'DEDUCIDO';
+      if (Number(dto.taco_salida) < Number(current.taco_salida) && !salidaCorregible) {
         throw new ConflictException(
           `taco_salida (${dto.taco_salida}) menor al valor previo (${current.taco_salida})`,
         );
@@ -1822,6 +1828,16 @@ export class FlightsService {
       Number(dto.taco_llegada) < Number(dto.taco_salida)
     ) {
       throw new ConflictException('taco_llegada no puede ser menor a taco_salida');
+    }
+    if (
+      dto.taco_salida !== undefined &&
+      dto.taco_llegada === undefined &&
+      current.taco_llegada !== null &&
+      Number(dto.taco_salida) > Number(current.taco_llegada)
+    ) {
+      throw new ConflictException(
+        `taco_salida (${dto.taco_salida}) mayor a la llegada ya capturada (${current.taco_llegada})`,
+      );
     }
 
     const patch: Record<string, unknown> = {

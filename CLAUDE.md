@@ -32,6 +32,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    - La salida se llena sola: tramo 1 ← último taco del avión (en `start()` y
      en `captureTaco`); tramos 2+ ← propagación de la llegada anterior;
      huecos ← `fillTacoGaps` (nightly) / `deduceTacosEnVivo` (cada 10 min).
+   - EXCEPCIÓN (jul 2026): en el TRAMO 1 el piloto sí puede fotografiar la
+     salida (arranque del vuelo); su captura PILOTO puede corregir hacia abajo
+     una salida DEDUCIDO (la foto es evidencia; PILOTO/OFICINA no se bajan).
    - `taco_salida_origen`/`taco_llegada_origen` ∈ {PILOTO, IA, DEDUCIDO,
      OFICINA} se setean en TODOS los caminos de escritura. No perderlos.
    - `start()` NUNCA bloquea por tacómetro; `complete()` solo exige LLEGADAS
