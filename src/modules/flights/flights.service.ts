@@ -2177,9 +2177,18 @@ export class FlightsService {
       .order('created_at', { ascending: false })
       .limit(100);
     if (error) throw new Error(error.message);
-    return (data ?? []).map((n) => {
+    // Las notificaciones se insertan UNA POR DESTINATARIO (notifyRole a todos
+    // los ADMIN/COORDINADOR); la bitácora es del EVENTO: colapsar las copias.
+    // Clave = tipo+cuerpo+minuto (el fan-out ocurre en el mismo request; dos
+    // eventos legítimos iguales en minutos distintos NO se colapsan).
+    const vistos = new Set<string>();
+    const eventos: Record<string, unknown>[] = [];
+    for (const n of data ?? []) {
+      const key = `${n.tipo}|${n.cuerpo}|${String(n.created_at).slice(0, 16)}`;
+      if (vistos.has(key)) continue;
+      vistos.add(key);
       const u = Array.isArray(n.usuario) ? n.usuario[0] : n.usuario;
-      return {
+      eventos.push({
         id: n.id,
         tipo: n.tipo,
         titulo: n.titulo,
@@ -2188,8 +2197,9 @@ export class FlightsService {
         destinatario: (u as { nombre?: string } | null)?.nombre ?? null,
         destinatario_rol: (u as { rol?: string } | null)?.rol ?? null,
         created_at: n.created_at,
-      };
-    });
+      });
+    }
+    return eventos;
   }
 
   private async notifyTacoCaptured(escala: Record<string, unknown>): Promise<void> {
