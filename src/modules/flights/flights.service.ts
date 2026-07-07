@@ -1811,32 +1811,36 @@ export class FlightsService {
       const salidaCorregible = current.taco_salida_origen === 'DEDUCIDO';
       if (Number(dto.taco_salida) < Number(current.taco_salida) && !salidaCorregible) {
         throw new ConflictException(
-          `taco_salida (${dto.taco_salida}) menor al valor previo (${current.taco_salida})`,
+          `La lectura de salida (${dto.taco_salida}) es menor a la ya registrada (${current.taco_salida}). El tacómetro nunca retrocede; revisa la foto.`,
         );
       }
     }
     if (dto.taco_llegada !== undefined && current.taco_llegada !== null) {
       if (Number(dto.taco_llegada) < Number(current.taco_llegada)) {
         throw new ConflictException(
-          `taco_llegada (${dto.taco_llegada}) menor al valor previo (${current.taco_llegada})`,
+          `La lectura de llegada (${dto.taco_llegada}) es menor a la ya registrada (${current.taco_llegada}). El tacómetro nunca retrocede; revisa la foto.`,
         );
       }
     }
     if (
       dto.taco_llegada !== undefined &&
       dto.taco_salida !== undefined &&
-      Number(dto.taco_llegada) < Number(dto.taco_salida)
+      Number(dto.taco_llegada) <= Number(dto.taco_salida)
     ) {
-      throw new ConflictException('taco_llegada no puede ser menor a taco_salida');
+      throw new ConflictException(
+        'La llegada debe ser mayor que la salida (las horas del tramo saldrían en cero o negativas).',
+      );
     }
+    // El check de la BD exige llegada > salida ESTRICTO; usar >= aquí para que
+    // el rechazo llegue con explicación y no como error genérico de Postgres.
     if (
       dto.taco_salida !== undefined &&
       dto.taco_llegada === undefined &&
       current.taco_llegada !== null &&
-      Number(dto.taco_salida) > Number(current.taco_llegada)
+      Number(dto.taco_salida) >= Number(current.taco_llegada)
     ) {
       throw new ConflictException(
-        `taco_salida (${dto.taco_salida}) mayor a la llegada ya capturada (${current.taco_llegada})`,
+        `La salida (${dto.taco_salida}) no puede ser igual o mayor que la llegada ya registrada de este tramo (${current.taco_llegada}). La foto de la salida se toma ANTES de volar el tramo; si la que está mal es la llegada, corrígela la oficina.`,
       );
     }
 
