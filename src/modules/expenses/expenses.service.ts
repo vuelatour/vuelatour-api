@@ -26,8 +26,9 @@ import type {
 const COLS =
   'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, created_at, updated_at';
 
-// Para el panel admin: nombres legibles de proveedor, avión y persona que capturó.
-const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre)`;
+// Para el panel admin: nombres legibles de proveedor, avión, persona que
+// capturó y folio del vuelo (para linkear al detalle).
+const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio)`;
 
 /** Ventana en días para considerar dos gastos como posible duplicado. */
 const DUP_DAYS = 3;
@@ -598,10 +599,53 @@ export class ExpensesService {
     return { ok: true };
   }
 
+  /**
+   * Desglose para oficina a partir de los renglones que leyó la IA.
+   *
+   * REGLA DEL CLIENTE (facturas de aeródromo con IVA desglosado): el concepto
+   * FBO se separa CON su IVA incluido (FBO × 1.16) y todo lo demás se agrupa
+   * como "Operación" = total − FBO con IVA. Ej.: total $634.61 con FBO $77.59
+   * → FBO $90.00 y Operación $544.61. Sin renglón FBO+IVA, se listan los
+   * renglones tal cual.
+   */
+  private desgloseLineas(
+    conceptos: Array<{ concepto: string; monto: number }>,
+    total: number,
+    moneda: string,
+  ): string[] {
+    const esFbo = (c: string) => /fbo/i.test(c);
+    const hayIva = conceptos.some((c) => /\biva\b/i.test(c.concepto));
+    const fbo = conceptos.filter((c) => esFbo(c.concepto)).reduce((a, c) => a + c.monto, 0);
+    if (fbo > 0 && hayIva && total > 0) {
+      const fboConIva = Math.round(fbo * 1.16 * 100) / 100;
+      const operacion = Math.round((total - fboConIva) * 100) / 100;
+      return [
+        `Operación - $${operacion.toFixed(2)} ${moneda}`,
+        `FBO (IVA incluido) - $${fboConIva.toFixed(2)} ${moneda}`,
+      ];
+    }
+    return conceptos.map((c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`);
+  }
+
   async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
       throw new BadRequestException('El mecánico solo puede cargar combustible (GAS).');
+    }
+    // El piloto ya NO ve ni edita desglose en la app (solo el total): el
+    // desglose que leyó la IA llega en valor_ia_extraido y aquí se compone
+    // para oficina (aplica la regla FBO+IVA).
+    let notas = dto.notas;
+    const ia = dto.valor_ia_extraido as
+      | { conceptos?: Array<{ concepto?: unknown; monto?: unknown }> }
+      | undefined;
+    const conceptos = (ia?.conceptos ?? [])
+      .map((c) => ({ concepto: String(c.concepto ?? ''), monto: Number(c.monto) }))
+      .filter((c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0);
+    if (conceptos.length >= 2) {
+      const lineas = this.desgloseLineas(conceptos, dto.monto, dto.moneda);
+      const bloque = `Desglose:\n${lineas.join('\n')}`;
+      notas = notas ? `${notas}\n\n${bloque}` : bloque;
     }
     // Distintivo pedido por el cliente: quién sube el gasto (piloto vs oficina).
     const origen =
@@ -628,7 +672,7 @@ export class ExpensesService {
       foto_url: dto.foto_url,
       valor_ia_extraido: dto.valor_ia_extraido,
       duplicado_sospechado: await this.looksLikeDuplicate(dto),
-      notas: dto.notas,
+      notas,
       created_by: userId,
       updated_by: userId,
     };
@@ -775,12 +819,14 @@ export class ExpensesService {
       }
     }
 
-    // Notas: bloque IA (desglose renglón por renglón + proveedor + matrícula),
-    // añadido DESPUÉS de lo que el piloto escribió, y las ⚠ discrepancias.
-    const lineas: string[] = [];
-    for (const c of ai.conceptos ?? []) {
-      lineas.push(`${c.concepto} - $${c.monto.toFixed(2)} ${ai.moneda ?? gasto.moneda}`);
-    }
+    // Notas: bloque IA (desglose con la regla FBO+IVA + proveedor +
+    // matrícula), añadido DESPUÉS de lo que el piloto escribió, y las ⚠
+    // discrepancias.
+    const lineas: string[] = this.desgloseLineas(
+      (ai.conceptos ?? []).filter((c) => c.concepto && Number.isFinite(c.monto)),
+      Number(gasto.monto),
+      (ai.moneda ?? gasto.moneda) as string,
+    );
     const extras = [ai.matricula, ai.proveedor, ai.concepto]
       .filter((v): v is string => !!v && v.trim().length > 0)
       .join(' · ');
