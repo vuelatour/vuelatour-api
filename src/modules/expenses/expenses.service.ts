@@ -602,11 +602,13 @@ export class ExpensesService {
   /**
    * Desglose para oficina a partir de los renglones que leyó la IA.
    *
-   * REGLA DEL CLIENTE (facturas de aeródromo con IVA desglosado): el concepto
-   * FBO se separa CON su IVA incluido (FBO × 1.16) y todo lo demás se agrupa
-   * como "Operación" = total − FBO con IVA. Ej.: total $634.61 con FBO $77.59
-   * → FBO $90.00 y Operación $544.61. Sin renglón FBO+IVA, se listan los
-   * renglones tal cual.
+   * REGLA DEL CLIENTE (facturas de aeródromo con IVA desglosado): FBO y TUA
+   * se separan CON su IVA incluido (neto × 1.16 — el neto ya trae aplicado el
+   * descuento que la IA lee del renglón) y todo lo demás se agrupa como
+   * "Operación" = total − separados. Ejs.: total $634.61 con FBO $77.59 →
+   * FBO $90.00 + Operación $544.61; total $911.28 con TUA $605.18 y
+   * descuento $5.18 (neto $600) → TUA $696.00 + Operación $215.28. Sin
+   * renglones FBO/TUA con IVA desglosado, se listan tal cual.
    */
   private desgloseLineas(
     conceptos: Array<{ concepto: string; monto: number }>,
@@ -614,15 +616,22 @@ export class ExpensesService {
     moneda: string,
   ): string[] {
     const esFbo = (c: string) => /fbo/i.test(c);
+    // TUA / T.U.A. / TUAS con límites de palabra (no matchear "actual").
+    const esTua = (c: string) => /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c);
     const hayIva = conceptos.some((c) => /\biva\b/i.test(c.concepto));
+    const r2 = (n: number) => Math.round(n * 100) / 100;
     const fbo = conceptos.filter((c) => esFbo(c.concepto)).reduce((a, c) => a + c.monto, 0);
-    if (fbo > 0 && hayIva && total > 0) {
-      const fboConIva = Math.round(fbo * 1.16 * 100) / 100;
-      const operacion = Math.round((total - fboConIva) * 100) / 100;
-      return [
-        `Operación - $${operacion.toFixed(2)} ${moneda}`,
-        `FBO (IVA incluido) - $${fboConIva.toFixed(2)} ${moneda}`,
-      ];
+    const tua = conceptos
+      .filter((c) => esTua(c.concepto) && !esFbo(c.concepto))
+      .reduce((a, c) => a + c.monto, 0);
+    if ((fbo > 0 || tua > 0) && hayIva && total > 0) {
+      const fboConIva = r2(fbo * 1.16);
+      const tuaConIva = r2(tua * 1.16);
+      const operacion = r2(total - fboConIva - tuaConIva);
+      const lineas = [`Operación - $${operacion.toFixed(2)} ${moneda}`];
+      if (tua > 0) lineas.push(`TUA (IVA incluido) - $${tuaConIva.toFixed(2)} ${moneda}`);
+      if (fbo > 0) lineas.push(`FBO (IVA incluido) - $${fboConIva.toFixed(2)} ${moneda}`);
+      return lineas;
     }
     return conceptos.map((c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`);
   }
