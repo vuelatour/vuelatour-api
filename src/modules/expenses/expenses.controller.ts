@@ -21,10 +21,14 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CategoriaGasto,
   CreateGastoDto,
+  CreateTarifaAerodromoDto,
+  GenerarPistasDto,
   ListGastosQuery,
   PhotoUrlsDto,
+  PistasPendientesQuery,
   SugerirVueloQuery,
   UpdateGastoDto,
+  UpdateTarifaAerodromoDto,
 } from './dto/expenses.dto';
 import { ExpensesService } from './expenses.service';
 
@@ -107,6 +111,62 @@ export class ExpensesController {
   @ApiOperation({ summary: 'Firma URLs de fotos de recibos (bucket privado) para el panel admin.' })
   photoUrls(@Body() dto: PhotoUrlsDto) {
     return this.expenses.signPhotos(dto.paths);
+  }
+
+  // ===== Gastos de pista (cuotas de aeródromo) — rutas literales antes de :id =====
+
+  @Get('pistas/pendientes')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Aterrizajes del periodo (destino ≠ CUN) sin gasto de pista, con monto sugerido del tarifario. La oficina revisa y confirma.',
+  })
+  pistasPendientes(@Query() q: PistasPendientesQuery) {
+    return this.expenses.pistasPendientes(q.desde, q.hasta);
+  }
+
+  @Post('pistas/generar')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Crea los gastos de pista confirmados (origen SISTEMA, un gasto por aterrizaje, SIN_COMPROBANTE hasta amarrar la factura).',
+  })
+  generarPistas(@Body() dto: GenerarPistasDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.expenses.generarPistas(dto, c.userId);
+  }
+
+  @Get('tarifas-aerodromo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({ summary: 'Tarifario de cuotas de aterrizaje por aeródromo/modelo.' })
+  listTarifas() {
+    return this.expenses.listTarifasAerodromo();
+  }
+
+  @Post('tarifas-aerodromo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({ summary: 'Agrega una tarifa de aeródromo.' })
+  createTarifa(@Body() dto: CreateTarifaAerodromoDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.expenses.createTarifaAerodromo(dto, c.userId);
+  }
+
+  @Patch('tarifas-aerodromo/:id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({ summary: 'Actualiza una tarifa de aeródromo.' })
+  updateTarifa(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateTarifaAerodromoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.updateTarifaAerodromo(id, dto, c.userId);
+  }
+
+  @Delete('tarifas-aerodromo/:id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Elimina una tarifa de aeródromo.' })
+  removeTarifa(@Param('id', ParseUUIDPipe) id: string) {
+    return this.expenses.removeTarifaAerodromo(id);
   }
 
   @Get(':id')

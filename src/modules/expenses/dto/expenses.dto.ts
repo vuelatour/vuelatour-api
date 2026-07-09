@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -11,7 +13,9 @@ import {
   IsString,
   IsUUID,
   Max,
+  MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 export enum CategoriaGasto {
@@ -93,6 +97,13 @@ export class CreateGastoDto {
   @IsUUID()
   vuelo_id?: string;
 
+  @ApiPropertyOptional({
+    description: 'Escala/aterrizaje asociado (gastos de pista: un gasto por aterrizaje)',
+  })
+  @IsOptional()
+  @IsUUID()
+  escala_id?: string;
+
   @ApiPropertyOptional({ description: 'Aeronave (opcional). null = bandeja de pendientes' })
   @IsOptional()
   @IsUUID()
@@ -165,6 +176,106 @@ export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   @IsBoolean()
   duplicado_sospechado?: boolean;
 }
+
+// ===== Gastos de pista (cuotas de aeródromo VIP SAESA) =====
+
+export class PistasPendientesQuery {
+  @ApiProperty({ description: 'fecha >= (YYYY-MM-DD, corte Cancún)' })
+  @IsDateString()
+  desde!: string;
+
+  @ApiProperty({ description: 'fecha <= (YYYY-MM-DD, corte Cancún)' })
+  @IsDateString()
+  hasta!: string;
+}
+
+export class GenerarPistaItemDto {
+  @ApiProperty({ description: 'Escala (aterrizaje) a la que corresponde la cuota' })
+  @IsUUID()
+  escala_id!: string;
+
+  @ApiProperty({ description: 'Monto de la cuota (editable; PCE es variable)' })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  monto!: number;
+
+  @ApiPropertyOptional({ enum: Moneda, default: Moneda.MXN })
+  @IsOptional()
+  @IsEnum(Moneda)
+  moneda?: Moneda;
+
+  @ApiPropertyOptional({ enum: CategoriaGasto, default: CategoriaGasto.OPERACIONES })
+  @IsOptional()
+  @IsEnum(CategoriaGasto)
+  categoria?: CategoriaGasto;
+
+  @ApiPropertyOptional({ enum: MedioPago, default: MedioPago.TRANSFERENCIA })
+  @IsOptional()
+  @IsEnum(MedioPago)
+  medio_pago?: MedioPago;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  proveedor_id?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}
+
+export class GenerarPistasDto {
+  @ApiProperty({ type: [GenerarPistaItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => GenerarPistaItemDto)
+  items!: GenerarPistaItemDto[];
+}
+
+export class CreateTarifaAerodromoDto {
+  @ApiPropertyOptional({ description: 'IATA del aeródromo; vacío = cualquiera' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(8)
+  codigo_iata?: string;
+
+  @ApiPropertyOptional({ description: 'Modelo de aeronave (Kodiak/Cessna/Seneca); vacío = cualquiera' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  modelo?: string;
+
+  @ApiProperty({ description: 'Cuota por aterrizaje' })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  monto!: number;
+
+  @ApiPropertyOptional({ enum: Moneda, default: Moneda.MXN })
+  @IsOptional()
+  @IsEnum(Moneda)
+  moneda?: Moneda;
+
+  @ApiPropertyOptional({ description: 'Tarifa variable (p.ej. PCE): el monto es estimado' })
+  @IsOptional()
+  @IsBoolean()
+  variable?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsBoolean()
+  activo?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  notas?: string;
+}
+
+export class UpdateTarifaAerodromoDto extends PartialType(CreateTarifaAerodromoDto) {}
 
 export class PhotoUrlsDto {
   @ApiProperty({ type: [String], description: 'Paths de fotos en gasto-fotos a firmar' })

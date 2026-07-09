@@ -159,7 +159,7 @@ export class InvoicesService {
     let q = this.supabase.service
       .from('factura_recibida')
       .select(
-        `${RECIBIDA_COLS}, gasto:gasto_id(id, categoria, monto, moneda), aeronave:aeronave_id(matricula)`,
+        `${RECIBIDA_COLS}, gasto:gasto_id(id, categoria, monto, moneda), aeronave:aeronave_id(matricula), gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)`,
         { count: 'exact' },
       )
       .order('created_at', { ascending: false })
@@ -188,7 +188,77 @@ export class InvoicesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
+
+    // El gasto amarrado (camino legacy 1:1) queda comprobado con FACTURA.
+    if (dto.gasto_id) {
+      await this.supabase.service
+        .from('gasto')
+        .update({
+          factura_recibida_id: id,
+          estatus_comprobante: 'FACTURA',
+          updated_by: userId,
+        })
+        .eq('id', dto.gasto_id);
+    }
     return data;
+  }
+
+  /**
+   * Amarra una factura recibida a VARIOS gastos (una factura de VIP SAESA
+   * ampara varios aterrizajes/servicios). Reemplaza el amarre anterior:
+   * los gastos fuera de la lista se desamarra, los de la lista quedan con
+   * estatus_comprobante = FACTURA. Lista vacía = desamarrar todo.
+   */
+  async amarrarGastos(recibidaId: string, gastoIds: string[], userId: string) {
+    const { data: recibida, error: rErr } = await this.supabase.service
+      .from('factura_recibida')
+      .select('id')
+      .eq('id', recibidaId)
+      .maybeSingle();
+    if (rErr) throw new Error(rErr.message);
+    if (!recibida) throw new NotFoundException(`Factura recibida ${recibidaId} not found`);
+
+    // Desamarra los gastos que ya no están en la lista (vuelven a SIN_COMPROBANTE).
+    let unlink = this.supabase.service
+      .from('gasto')
+      .update({
+        factura_recibida_id: null,
+        estatus_comprobante: 'SIN_COMPROBANTE',
+        updated_by: userId,
+      })
+      .eq('factura_recibida_id', recibidaId);
+    if (gastoIds.length > 0) {
+      unlink = unlink.not('id', 'in', `(${gastoIds.join(',')})`);
+    }
+    const { error: uErr } = await unlink;
+    if (uErr) throw new Error(uErr.message);
+
+    if (gastoIds.length > 0) {
+      const { error: lErr } = await this.supabase.service
+        .from('gasto')
+        .update({
+          factura_recibida_id: recibidaId,
+          estatus_comprobante: 'FACTURA',
+          updated_by: userId,
+        })
+        .in('id', gastoIds);
+      if (lErr) throw new Error(lErr.message);
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('factura_recibida')
+      .update({
+        estado: gastoIds.length > 0 ? 'CLASIFICADA' : 'SIN_CLASIFICAR',
+        gasto_id: gastoIds[0] ?? null, // legacy 1:1
+        updated_by: userId,
+      })
+      .eq('id', recibidaId)
+      .select(
+        `${RECIBIDA_COLS}, gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)`,
+      )
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data!;
   }
 
   async deleteRecibida(id: string) {

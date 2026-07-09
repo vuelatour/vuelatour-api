@@ -16,12 +16,15 @@ import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
 import type {
   CreateGastoDto,
+  CreateTarifaAerodromoDto,
+  GenerarPistasDto,
   ListGastosQuery,
   UpdateGastoDto,
+  UpdateTarifaAerodromoDto,
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, notas, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión y persona que capturó.
 const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre)`;
@@ -327,13 +330,285 @@ export class ExpensesService {
     return map;
   }
 
+  // ===== Gastos de pista (cuotas de aeródromo, p.ej. VIP SAESA) =====
+  //
+  // El sistema ya sabe qué avión aterrizó dónde y cuándo (escalas). En vez de
+  // capturar desde cero, se PROPONE un gasto por aterrizaje fuera de CUN con
+  // el monto del tarifario; la oficina solo confirma (mínimo trabajo, doc 5.2).
+  // La factura del proveedor llega días después y se amarra a estos gastos.
+
+  /** Fecha Cancún (UTC-5 fija, sin DST) de un timestamp ISO. */
+  private cancunDate(iso: string): string {
+    return new Date(new Date(iso).getTime() - 5 * 3600 * 1000)
+      .toISOString()
+      .slice(0, 10);
+  }
+
+  /**
+   * Aterrizajes del periodo (escalas con destino ≠ CUN) que aún NO tienen
+   * gasto de pista, con el monto sugerido del tarifario aeródromo×modelo.
+   */
+  async pistasPendientes(desde: string, hasta: string) {
+    const d1 = `${desde}T00:00:00-05:00`;
+    const d2 = `${hasta}T23:59:59-05:00`;
+    const { data: escalas, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, hora_llegada, fecha_salida_plan, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo), vuelo:vuelo!vuelo_id(id, folio, estado, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo))',
+      )
+      .neq('destino_iata', 'CUN')
+      .or(
+        `and(hora_llegada.gte.${d1},hora_llegada.lte.${d2}),and(hora_llegada.is.null,fecha_salida_plan.gte.${d1},fecha_salida_plan.lte.${d2})`,
+      )
+      .order('fecha_salida_plan', { ascending: true });
+    if (error) throw new Error(error.message);
+
+    type EscalaRow = {
+      id: string;
+      vuelo_id: string;
+      orden: number;
+      origen_iata: string;
+      destino_iata: string;
+      hora_llegada: string | null;
+      fecha_salida_plan: string | null;
+      aeronave: { id: string; matricula: string; modelo: string } | null;
+      vuelo: {
+        id: string;
+        folio: string | null;
+        estado: string;
+        aeronave: { id: string; matricula: string; modelo: string } | null;
+      } | null;
+    };
+    const filas = ((escalas ?? []) as unknown as EscalaRow[]).filter(
+      (e) => e.vuelo && e.vuelo.estado !== 'CANCELADO',
+    );
+    if (filas.length === 0) return { data: [] };
+
+    // Escalas que ya tienen gasto de pista (no proponer doble).
+    const { data: existentes, error: gErr } = await this.supabase.service
+      .from('gasto')
+      .select('escala_id, categoria')
+      .in('escala_id', filas.map((e) => e.id));
+    if (gErr) throw new Error(gErr.message);
+    const conGasto = new Set(
+      (existentes ?? [])
+        .filter((g) => g.categoria === 'OPERACIONES' || g.categoria === 'ATERRIZAJE')
+        .map((g) => g.escala_id as string),
+    );
+
+    const tarifas = await this.listTarifasAerodromo();
+
+    const data = filas
+      .filter((e) => !conGasto.has(e.id))
+      .map((e) => {
+        const aeronave = e.aeronave ?? e.vuelo?.aeronave ?? null;
+        const tarifa = this.matchTarifa(tarifas, e.destino_iata, aeronave?.modelo);
+        const fechaIso = e.hora_llegada ?? e.fecha_salida_plan;
+        return {
+          escala_id: e.id,
+          vuelo_id: e.vuelo_id,
+          folio: e.vuelo?.folio ?? null,
+          orden: e.orden,
+          tramo: `${e.origen_iata}→${e.destino_iata}`,
+          destino_iata: e.destino_iata,
+          fecha: fechaIso,
+          fecha_gasto: fechaIso ? this.cancunDate(fechaIso) : null,
+          aeronave_id: aeronave?.id ?? null,
+          matricula: aeronave?.matricula ?? null,
+          modelo: aeronave?.modelo ?? null,
+          monto_sugerido: tarifa ? Number(tarifa.monto) : null,
+          moneda: tarifa?.moneda ?? 'MXN',
+          tarifa_variable: tarifa?.variable ?? false,
+        };
+      });
+    return { data };
+  }
+
+  /** Mejor tarifa: iata+modelo > iata > modelo > nada. Modelo por contains. */
+  private matchTarifa(
+    tarifas: Array<Record<string, unknown>>,
+    iata: string,
+    modelo?: string | null,
+  ) {
+    const m = (modelo ?? '').toLowerCase();
+    const matchModelo = (t: Record<string, unknown>) =>
+      t.modelo != null && m.includes(String(t.modelo).toLowerCase());
+    const matchIata = (t: Record<string, unknown>) =>
+      t.codigo_iata != null &&
+      String(t.codigo_iata).toUpperCase() === iata.toUpperCase();
+    const activas = tarifas.filter((t) => t.activo !== false);
+    return (
+      activas.find((t) => matchIata(t) && matchModelo(t)) ??
+      activas.find((t) => matchIata(t) && t.modelo == null) ??
+      activas.find((t) => t.codigo_iata == null && matchModelo(t)) ??
+      null
+    );
+  }
+
+  /**
+   * Crea los gastos de pista confirmados por la oficina: origen SISTEMA,
+   * ligados a su escala/vuelo, SIN_COMPROBANTE hasta que llegue la factura.
+   */
+  async generarPistas(dto: GenerarPistasDto, userId: string) {
+    // Proveedor VIP SAESA por default si existe en el catálogo.
+    const { data: prov } = await this.supabase.service
+      .from('proveedor')
+      .select('id')
+      .ilike('nombre', '%saesa%')
+      .limit(1)
+      .maybeSingle();
+
+    const resultados: Array<{
+      escala_id: string;
+      ok: boolean;
+      gasto_id?: string;
+      error?: string;
+    }> = [];
+    for (const item of dto.items) {
+      const { data: esc } = await this.supabase.service
+        .from('escala')
+        .select(
+          'id, vuelo_id, destino_iata, hora_llegada, fecha_salida_plan, aeronave_id, vuelo:vuelo!vuelo_id(aeronave_id)',
+        )
+        .eq('id', item.escala_id)
+        .maybeSingle();
+      if (!esc) {
+        resultados.push({ escala_id: item.escala_id, ok: false, error: 'Escala no encontrada' });
+        continue;
+      }
+      const categoria = item.categoria ?? 'OPERACIONES';
+      const { data: dup } = await this.supabase.service
+        .from('gasto')
+        .select('id')
+        .eq('escala_id', item.escala_id)
+        .eq('categoria', categoria)
+        .limit(1);
+      if (dup && dup.length > 0) {
+        resultados.push({
+          escala_id: item.escala_id,
+          ok: false,
+          error: `Ya existe un gasto ${categoria} para ese aterrizaje`,
+        });
+        continue;
+      }
+      const vuelo = esc.vuelo as unknown as { aeronave_id: string | null } | null;
+      const fechaIso = (esc.hora_llegada ?? esc.fecha_salida_plan) as string | null;
+      const { data: gasto, error } = await this.supabase.service
+        .from('gasto')
+        .insert({
+          usuario_captura_id: userId,
+          origen: 'SISTEMA',
+          categoria,
+          monto: item.monto,
+          moneda: item.moneda ?? 'MXN',
+          fecha_gasto: fechaIso
+            ? this.cancunDate(fechaIso)
+            : this.cancunDate(new Date().toISOString()),
+          medio_pago: item.medio_pago ?? 'TRANSFERENCIA',
+          vuelo_id: esc.vuelo_id,
+          escala_id: esc.id,
+          aeronave_id: (esc.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null,
+          proveedor_id: item.proveedor_id ?? prov?.id ?? null,
+          lugar: esc.destino_iata,
+          estatus_comprobante: 'SIN_COMPROBANTE',
+          notas: item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .maybeSingle();
+      if (error || !gasto) {
+        resultados.push({
+          escala_id: item.escala_id,
+          ok: false,
+          error: error?.message ?? 'No se pudo crear el gasto',
+        });
+        continue;
+      }
+      resultados.push({ escala_id: item.escala_id, ok: true, gasto_id: gasto.id as string });
+    }
+    return { creados: resultados.filter((r) => r.ok).length, resultados };
+  }
+
+  // ===== Tarifario de aeródromos =====
+
+  async listTarifasAerodromo() {
+    const { data, error } = await this.supabase.service
+      .from('tarifa_aerodromo')
+      .select('id, codigo_iata, modelo, monto, moneda, variable, activo, notas')
+      .order('codigo_iata', { ascending: true, nullsFirst: false })
+      .order('modelo', { ascending: true });
+    if (error) throw new Error(error.message);
+    return (data ?? []) as Array<Record<string, unknown>>;
+  }
+
+  async createTarifaAerodromo(dto: CreateTarifaAerodromoDto, userId: string) {
+    const { data, error } = await this.supabase.service
+      .from('tarifa_aerodromo')
+      .insert({
+        codigo_iata: dto.codigo_iata?.toUpperCase() || null,
+        modelo: dto.modelo || null,
+        monto: dto.monto,
+        moneda: dto.moneda ?? 'MXN',
+        variable: dto.variable ?? false,
+        activo: dto.activo ?? true,
+        notas: dto.notas,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select('id, codigo_iata, modelo, monto, moneda, variable, activo, notas')
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23505')
+        throw new ConflictException('Ya existe una tarifa para ese aeródromo/modelo.');
+      throw new Error(error.message);
+    }
+    return data!;
+  }
+
+  async updateTarifaAerodromo(id: string, dto: UpdateTarifaAerodromoDto, userId: string) {
+    const patch: Record<string, unknown> = {
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    };
+    if (dto.codigo_iata !== undefined) patch.codigo_iata = dto.codigo_iata?.toUpperCase() || null;
+    if (dto.modelo !== undefined) patch.modelo = dto.modelo || null;
+    if (dto.monto !== undefined) patch.monto = dto.monto;
+    if (dto.moneda !== undefined) patch.moneda = dto.moneda;
+    if (dto.variable !== undefined) patch.variable = dto.variable;
+    if (dto.activo !== undefined) patch.activo = dto.activo;
+    if (dto.notas !== undefined) patch.notas = dto.notas;
+    const { data, error } = await this.supabase.service
+      .from('tarifa_aerodromo')
+      .update(patch)
+      .eq('id', id)
+      .select('id, codigo_iata, modelo, monto, moneda, variable, activo, notas')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Tarifa ${id} not found`);
+    return data;
+  }
+
+  async removeTarifaAerodromo(id: string) {
+    const { error } = await this.supabase.service
+      .from('tarifa_aerodromo')
+      .delete()
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+    return { ok: true };
+  }
+
   async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
       throw new BadRequestException('El mecánico solo puede cargar combustible (GAS).');
     }
+    // Distintivo pedido por el cliente: quién sube el gasto (piloto vs oficina).
+    const origen =
+      rol === Rol.PILOTO ? 'PILOTO' : rol === Rol.MECANICO ? 'MECANICO' : 'OFICINA';
     const payload: Record<string, unknown> = {
       usuario_captura_id: userId,
+      origen,
       categoria: dto.categoria,
       monto: dto.monto,
       moneda: dto.moneda,
@@ -342,6 +617,7 @@ export class ExpensesService {
       medio_pago: dto.medio_pago,
       tarjeta_terminacion: dto.tarjeta_terminacion,
       vuelo_id: dto.vuelo_id,
+      escala_id: dto.escala_id,
       aeronave_id: dto.aeronave_id,
       proveedor_id: dto.proveedor_id,
       litros: dto.litros,

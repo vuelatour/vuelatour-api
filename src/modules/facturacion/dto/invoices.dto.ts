@@ -231,3 +231,14 @@ export class RecibidaFileUrlsDto {
   @IsString({ each: true })
   paths!: string[];
 }
+
+export class AmarrarGastosDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Gastos amparados por la factura (una factura de proveedor puede cubrir varios aterrizajes/servicios). Lista vacía = desamarrar todo.',
+  })
+  @IsArray()
+  @IsUUID(undefined, { each: true })
+  gasto_ids!: string[];
+}

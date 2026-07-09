@@ -19,6 +19,7 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CancelarFacturaDto,
+  AmarrarGastosDto,
   CrearRecibidaDto,
   EmitirFacturaDto,
   FacturaFileUrlsDto,
@@ -119,6 +120,20 @@ export class InvoicesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.invoices.updateRecibida(id, dto, c.userId);
+  }
+
+  @Post('recibidas/:id/amarrar-gastos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Amarra la factura a VARIOS gastos (VIP SAESA: una factura ampara varios aterrizajes). Reemplaza el amarre anterior; lista vacía = desamarrar.',
+  })
+  amarrarGastos(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AmarrarGastosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.amarrarGastos(id, dto.gasto_ids, c.userId);
   }
 
   @Delete('recibidas/:id')
