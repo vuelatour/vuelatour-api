@@ -77,7 +77,7 @@ export class FlightReportService {
           .order('fecha_cobro', { ascending: true }),
         sb
           .from('gasto')
-          .select('fecha_gasto, categoria, monto, moneda, litros, lugar, proveedor:proveedor_id(nombre)')
+          .select('fecha_gasto, categoria, monto, moneda, litros, lugar, notas, proveedor:proveedor_id(nombre)')
           .eq('vuelo_id', flightId)
           .order('fecha_gasto', { ascending: true }),
       ]);
@@ -194,7 +194,16 @@ export class FlightReportService {
       .map((g) => ({
         fecha: (g.fecha_gasto as string) ?? null,
         concepto: (g.categoria as string) ?? 'OTRO',
-        detalle: proveedorNombre(g),
+        // El detalle incluye el DESGLOSE que compone el servidor (Operación /
+        // TUA / FBO con IVA) — el cliente lo pidió explícitamente EN el
+        // reporte. Se aplana a una línea para el PDF/Excel.
+        detalle:
+          [
+            proveedorNombre(g),
+            (g.notas as string | null)?.replace(/\s*\n+\s*/g, ' · ') || null,
+          ]
+            .filter(Boolean)
+            .join(' · ') || null,
         moneda: (g.moneda as string) ?? 'MXN',
         monto: n(g.monto),
       }));

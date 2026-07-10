@@ -7,6 +7,10 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 /** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
 const DIRECTO = new Set([
   'GAS',
+  // OPERACIONES es la categoría operativa REAL de pistas/aeródromos (la app
+  // y el módulo de pistas la usan; ATERRIZAJE/FBO son legacy). Sin ella, las
+  // cuotas de VIP SAESA no restaban en el reparto e inflaban la utilidad.
+  'OPERACIONES',
   'ATERRIZAJE',
   'TUAS',
   'FBO',
@@ -371,7 +375,7 @@ export class ProfitSharingService {
     const desdeTs = `${q.desde}T00:00:00-05:00`;
     const hastaTs = `${q.hasta}T23:59:59-05:00`;
 
-    const [pendRes, completadosRes, gastosRes, movRes, revRes] =
+    const [pendRes, completadosRes, gastosRes, movRes, revRes, pistasRes] =
       await Promise.all([
         // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
         sb
@@ -409,9 +413,32 @@ export class ProfitSharingService {
           .neq('vuelo.estado', 'CANCELADO')
           .gte('vuelo.fecha_vuelo', desdeTs)
           .lte('vuelo.fecha_vuelo', hastaTs),
+        // Aterrizajes fuera de CUN del periodo (candidatos a cuota de pista).
+        sb
+          .from('escala')
+          .select('id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
+          .neq('destino_iata', 'CUN')
+          .neq('vuelo.estado', 'CANCELADO')
+          .gte('vuelo.fecha_vuelo', desdeTs)
+          .lte('vuelo.fecha_vuelo', hastaTs),
       ]);
-    for (const r of [pendRes, completadosRes, gastosRes, movRes, revRes]) {
+    for (const r of [pendRes, completadosRes, gastosRes, movRes, revRes, pistasRes]) {
       if (r.error) throw new Error(r.error.message);
+    }
+
+    // Aterrizajes sin su gasto de pista: la cuota de VIP SAESA se paga días
+    // después — si no se provisiona, el reparto sale inflado.
+    const escalasPista = (pistasRes.data ?? []) as Array<Record<string, unknown>>;
+    let pistasSinGasto = 0;
+    if (escalasPista.length > 0) {
+      const { data: gastosPista, error: gpErr } = await sb
+        .from('gasto')
+        .select('escala_id, categoria')
+        .in('escala_id', escalasPista.map((e) => e.id as string))
+        .in('categoria', ['OPERACIONES', 'ATERRIZAJE']);
+      if (gpErr) throw new Error(gpErr.message);
+      const cubiertas = new Set((gastosPista ?? []).map((g) => g.escala_id as string));
+      pistasSinGasto = escalasPista.filter((e) => !cubiertas.has(e.id as string)).length;
     }
 
     const vuelosSinCompletar = (pendRes.data ?? []).map((v) => ({
@@ -498,6 +525,13 @@ export class ProfitSharingService {
         titulo: 'Gastos sin avión asignado (bandeja)',
         detalle: 'No se restan a ningún avión en el reparto. Meta: bandeja vacía.',
         count: sinAvion.length,
+      },
+      {
+        clave: 'pistas_sin_gasto',
+        titulo: 'Aterrizajes fuera de CUN sin gasto de pista',
+        detalle:
+          'La cuota de aeródromo (VIP SAESA) aún no está provisionada: genérala en Gastos → "Pistas por pagar" o el reparto saldrá inflado.',
+        count: pistasSinGasto,
       },
       {
         clave: 'gastos_sin_tc',
