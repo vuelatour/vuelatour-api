@@ -13,6 +13,7 @@ import {
   IsUUID,
   Length,
   Max,
+  MaxLength,
   Min,
   ValidateIf,
   ValidateNested,
@@ -277,6 +278,22 @@ export class CalculateQuoteDto {
   @Min(0)
   @Max(20)
   comision_billpocket_pct?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Comisión del VENDEDOR en USD (Itzy/Pablo/broker): sale del precio de venta, NO se suma al cliente. El cliente paga el total completo; el neto VuelaTour (total − comisión) es lo que fluye a reparto/reportes. Solo interna: jamás en el PDF del cliente.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  comision_vendedor_usd?: number;
+
+  @ApiPropertyOptional({ description: 'Quién vendió y cobra la comisión (Itzy, Pablo, broker…).' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  comision_vendedor_nombre?: string;
 
   @ApiPropertyOptional({
     description:

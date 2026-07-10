@@ -96,7 +96,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -269,6 +269,12 @@ export class QuotesService {
       extrasSinIvaRFinal = round2(extrasSinIvaR + comisionR);
     }
     const total = round2(totalSinComision + comisionR);
+    // Comisión del vendedor (Itzy/Pablo/broker): sale del precio, no del
+    // cliente — solo meta/neto, el total canónico queda intacto.
+    const comisionVendedor = Math.min(
+      round2(Number(dto.comision_vendedor_usd) || 0),
+      total,
+    );
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
@@ -412,6 +418,13 @@ export class QuotesService {
         calculado_at: new Date().toISOString(),
         version_motor: '1.3.1',
         comision_billpocket_pct: comisionPct > 0 ? round2(comisionPct) : null,
+        // Comisión del VENDEDOR: informativa (NO altera el desglose canónico —
+        // el cliente paga el total completo). El neto es lo que queda a
+        // VuelaTour y fluye a reparto/reportes. Interna: nunca al PDF cliente.
+        comision_vendedor_usd: comisionVendedor > 0 ? comisionVendedor : null,
+        comision_vendedor_nombre:
+          comisionVendedor > 0 ? (dto.comision_vendedor_nombre?.trim() || null) : null,
+        neto_vuelatour_usd: comisionVendedor > 0 ? round2(total - comisionVendedor) : null,
       },
     };
   }
@@ -589,6 +602,8 @@ export class QuotesService {
       viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
       extras_total_usd: breakdown.totales.extras_total_usd,
       ajuste_final_usd: breakdown.totales.ajuste_final_usd,
+      comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
+      comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       // Con ruta operativa: las escalas del vuelo son las del PILOTO y la
@@ -733,6 +748,8 @@ export class QuotesService {
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
+        comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
+        comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
@@ -843,7 +860,8 @@ export class QuotesService {
       pasajeros: newPax,
       pase_abordar: current.pase_abordar === true,
       metodo_pago: (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
-      // El ajuste rápido no debe borrar el TC pactado ni la comisión BillPocket.
+      // El ajuste rápido no debe borrar el TC pactado, la comisión BillPocket
+      // ni la comisión del vendedor.
       tc_usd_mxn:
         Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
       comision_billpocket_pct:
@@ -852,6 +870,12 @@ export class QuotesService {
             meta?: { comision_billpocket_pct?: number | null };
           } | null
         )?.meta?.comision_billpocket_pct ?? undefined,
+      comision_vendedor_usd:
+        Number(current.comision_vendedor_usd) > 0
+          ? Number(current.comision_vendedor_usd)
+          : undefined,
+      comision_vendedor_nombre:
+        (current.comision_vendedor_nombre as string | null) ?? undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
       tarifa_hora_override_usd:

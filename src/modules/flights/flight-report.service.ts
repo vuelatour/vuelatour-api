@@ -9,7 +9,7 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, metodo_cobro';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -229,6 +229,14 @@ export class FlightReportService {
       total_usd: n(v.monto_total_usd),
       total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
+      // Comisión del vendedor: se muestra DESPUÉS del total (el cliente paga
+      // el total completo); neto = lo que queda a VuelaTour.
+      comision_vendedor_usd: n(v.comision_vendedor_usd),
+      comision_vendedor_nombre: (v.comision_vendedor_nombre as string | null) ?? null,
+      neto_vuelatour_usd:
+        n(v.comision_vendedor_usd) > 0
+          ? Number((n(v.monto_total_usd) - n(v.comision_vendedor_usd)).toFixed(2))
+          : null,
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
       horas_cotizadas_hr: horasCotizadas,

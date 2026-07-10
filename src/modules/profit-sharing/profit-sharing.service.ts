@@ -32,6 +32,8 @@ interface VueloRow {
   monto_total_usd: string | null;
   tc_usd_mxn: string | null;
   cobrado: boolean;
+  /** Comisión de quien vendió: se descuenta del ingreso (neto VuelaTour). */
+  comision_vendedor_usd: string | null;
 }
 interface CobroRow {
   vuelo_id: string;
@@ -89,6 +91,7 @@ export class ProfitSharingService {
         matricula: a.aeronave.matricula,
         modelo: a.aeronave.modelo,
         ingresos_cobrado_usd: a.ingresos.cobrado_usd,
+        comisiones_venta_usd: a.ingresos.comisiones_venta_usd,
         pendiente_cobro_usd: a.ingresos.pendiente_cobro_usd,
         horas_voladas_hr: a.horas_voladas_hr,
         gastos_directos_usd: a.gastos.directos_usd,
@@ -241,6 +244,10 @@ export class ProfitSharingService {
     let vuelosCobrados = 0;
     let vuelosPendientes = 0;
     let cobrosSinTcMxn = 0;
+    // Comisiones de venta (Itzy/Pablo/broker): el cliente paga el total, pero
+    // esa parte no es de VuelaTour — se descuenta del ingreso a repartir. Se
+    // hace efectiva contra lo cobrado (tope: lo cobrado del vuelo).
+    let comisionesVenta = 0;
     for (const v of ctx.vuelos) {
       if (v.aeronave_id !== a.id) continue;
       const monto = Number(v.monto_total_usd ?? 0);
@@ -251,6 +258,10 @@ export class ProfitSharingService {
       cobrado += conv.total_usd;
       cobrosSinTcMxn += conv.sin_tc_mxn;
       pendiente += Math.max(0, monto - conv.total_usd);
+      comisionesVenta += Math.min(
+        Number(v.comision_vendedor_usd ?? 0),
+        conv.total_usd,
+      );
       if (v.cobrado) vuelosCobrados += 1;
       else vuelosPendientes += 1;
     }
@@ -286,6 +297,7 @@ export class ProfitSharingService {
 
     const saldo =
       cobrado -
+      comisionesVenta -
       directos -
       indirectos -
       permisos -
@@ -314,6 +326,7 @@ export class ProfitSharingService {
       aeronave: { id: a.id, matricula: a.matricula, modelo: a.modelo },
       ingresos: {
         cobrado_usd: round2(cobrado),
+        comisiones_venta_usd: round2(comisionesVenta),
         pendiente_cobro_usd: round2(pendiente),
         vuelos_cobrados: vuelosCobrados,
         vuelos_pendientes: vuelosPendientes,
@@ -549,7 +562,7 @@ export class ProfitSharingService {
   private async fetchVuelos(desde: string, hasta: string): Promise<VueloRow[]> {
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select('id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado')
+      .select('id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd')
       .eq('estado', 'COMPLETADO')
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);

@@ -90,6 +90,10 @@ export interface ReporteVueloPayload {
   total_usd?: number;
   total_mxn?: number | null;
   tc_usd_mxn?: number | null;
+  // Comisión del vendedor (interna): neto = total − comisión, lo de VuelaTour.
+  comision_vendedor_usd?: number;
+  comision_vendedor_nombre?: string | null;
+  neto_vuelatour_usd?: number | null;
   metodo_cobro?: string | null;
   tramos?: ReporteVueloTramoPayload[];
   // Comparación horas cotizadas vs voladas (utilidad operativa) + motivos.
