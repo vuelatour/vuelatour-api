@@ -14,7 +14,7 @@ import {
 } from './dto/inventory.dto';
 
 const ITEM_COLS =
-  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, notas, activo, created_at, updated_at';
+  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, notas, activo, created_at, updated_at';
 const MOV_COLS =
   'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
 
@@ -54,6 +54,7 @@ export class InventoryService {
       { label: 'Categoría' },
       { label: 'Ubicación' },
       { label: 'Stock', tipo: 'numero' },
+      { label: 'Unidad' },
       { label: 'Mínimo', tipo: 'numero' },
       { label: 'Costo FIFO', tipo: 'money' },
       { label: 'Valor USD', tipo: 'money' },
@@ -67,12 +68,13 @@ export class InventoryService {
         (x.categoria as string) ?? '',
         (x.ubicacion as string) ?? '',
         x.stock as number,
+        (x.unidad as string) ?? '',
         (x.stock_minimo as number) ?? null,
         x.costo_fifo_actual as number,
         x.valor_usd as number,
       ];
     });
-    const totales = ['TOTAL', null, null, null, null, null, null, null, valor_total_usd];
+    const totales = ['TOTAL', null, null, null, null, null, null, null, null, valor_total_usd];
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
       subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
@@ -300,6 +302,7 @@ export class InventoryService {
         categoria: dto.categoria,
         stock_minimo: dto.stock_minimo ?? 0,
         ubicacion: dto.ubicacion ?? 'Bodega Cancún',
+        unidad: dto.unidad || null,
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,

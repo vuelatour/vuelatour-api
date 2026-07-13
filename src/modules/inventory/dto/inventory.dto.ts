@@ -102,6 +102,15 @@ export class CreateInventarioItemDto {
   @MaxLength(50)
   ubicacion?: string;
 
+  @ApiPropertyOptional({
+    maxLength: 30,
+    description: 'Presentación/unidad del stock: pieza, caja, bote, galón, litro, bolsa…',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  unidad?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
