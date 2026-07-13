@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -19,6 +20,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateClienteDto,
   ListClientesQuery,
+  SetTarifasClienteDto,
   UpdateClienteDto,
 } from './dto/clients.dto';
 import { ClientsService } from './clients.service';
@@ -46,6 +48,30 @@ export class ClientsController {
   @ApiOperation({ summary: 'Get client' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.clients.findById(id);
+  }
+
+  @Get(':id/tarifas')
+  // Tarifas negociadas = pricing: mismo set de roles que quotes (sin pilotos).
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Tarifas preferenciales por aeronave del cliente (no accesible a pilotos)',
+  })
+  listTarifas(@Param('id', ParseUUIDPipe) id: string) {
+    return this.clients.listTarifas(id);
+  }
+
+  @Put(':id/tarifas')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary: 'Reemplaza el set de tarifas preferenciales (ADMIN o COORDINADOR)',
+  })
+  setTarifas(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetTarifasClienteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.clients.setTarifas(id, dto, c.userId);
   }
 
   @Patch(':id')

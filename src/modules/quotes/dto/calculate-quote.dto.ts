@@ -149,6 +149,14 @@ export class CalculateQuoteDto {
   aeronave_id!: string;
 
   @ApiPropertyOptional({
+    description:
+      'Cliente que cotiza: si tiene tarifa preferencial pactada para la aeronave, esa manda sobre la tarifa default (público/broker). El override manual sigue teniendo prioridad.',
+  })
+  @IsOptional()
+  @IsUUID()
+  cliente_id?: string;
+
+  @ApiPropertyOptional({
     enum: TipoVuelo,
     description:
       'Tipo de vuelo. Default REDONDO. Si MULTIESCALA, debe proveerse `escalas[]` (>=2).',

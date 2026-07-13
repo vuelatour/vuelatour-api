@@ -121,6 +121,25 @@ export class QuotesService {
   ) {}
 
   /**
+   * Tarifa por hora pactada con el cliente para una aeronave (USD/hr), o null
+   * si no tiene. Se administra desde el perfil del cliente en el panel.
+   */
+  private async tarifaPreferencialCliente(
+    clienteId: string,
+    aeronaveId: string,
+  ): Promise<number | null> {
+    const { data, error } = await this.supabase.service
+      .from('tarifa_cliente_aeronave')
+      .select('tarifa_hora_usd')
+      .eq('cliente_id', clienteId)
+      .eq('aeronave_id', aeronaveId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const tarifa = data ? Number(data.tarifa_hora_usd) : 0;
+    return tarifa > 0 ? tarifa : null;
+  }
+
+  /**
    * Pure calculation, no persistence. Returns the full breakdown.
    */
   async calculate(dto: CalculateQuoteDto) {
@@ -143,10 +162,23 @@ export class QuotesService {
     }
     const tiempoVueloHr = nmTotal / velocidadKts;
     const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
-    const tiempoCobrableHr = tiempoVueloHr + calzosHr;
+    // Hora mínima de facturación (regla del cliente, jul 2026): un vuelo corto
+    // se cobra como hora completa — si el total del vuelo (tiempo + calzos)
+    // queda debajo de 1 hr, se facturan 1.0 hr (0.8 → 1.0 × tarifa). Por
+    // arriba de la hora se siguen cobrando las décimas reales.
+    const tiempoRealHr = tiempoVueloHr + calzosHr;
+    const tiempoCobrableHr = Math.max(1, tiempoRealHr);
+    const minimoHoraAplicado = tiempoRealHr < 1;
 
+    // Tarifa efectiva: override manual > tarifa preferencial pactada con el
+    // cliente para ESTA aeronave > tarifa default del avión (público/broker).
+    const tarifaPreferencial =
+      dto.tarifa_hora_override_usd == null && dto.cliente_id
+        ? await this.tarifaPreferencialCliente(dto.cliente_id, dto.aeronave_id)
+        : null;
     const tarifaHora =
       dto.tarifa_hora_override_usd ??
+      tarifaPreferencial ??
       (dto.tipo_tarifa === TipoTarifa.PUBLICO
         ? Number(aeronave.tarifa_hora_pub_usd)
         : Number(aeronave.tarifa_hora_broker_usd));
@@ -311,7 +343,9 @@ export class QuotesService {
     const desglose: Array<{ clave: string; concepto: string; monto_usd: number }> = [
       {
         clave: 'TIEMPO_VUELO',
-        concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr`,
+        concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr${
+          minimoHoraAplicado ? ' (mínimo 1 hr)' : ''
+        }`,
         monto_usd: subtotalR,
       },
       ...(tuasR > 0
@@ -394,11 +428,18 @@ export class QuotesService {
         vuelo_hr: round4(tiempoVueloHr),
         calzos_hr: round4(calzosHr),
         cobrable_hr: round4(tiempoCobrableHr),
+        // Vuelo corto: se facturó la hora completa (cobrable_hr = 1.0 aunque
+        // el tiempo real vuelo+calzos fuera menor).
+        minimo_hora_aplicado: minimoHoraAplicado,
       },
       tarifa: {
         tipo: dto.tipo_tarifa,
         usd_por_hora: round2(tarifaHora),
-        proviene_de_override: dto.tarifa_hora_override_usd !== undefined,
+        // != null (no !== undefined): mismo gate que la cadena de tarifa, para
+        // que un null explícito no marque override y preferencial a la vez.
+        proviene_de_override: dto.tarifa_hora_override_usd != null,
+        // La tarifa aplicada es la pactada con el cliente para esta aeronave.
+        preferencial_cliente: tarifaPreferencial != null,
       },
       tuas: tuasBlock,
       // Desglose por tramo (null en single-leg/REDONDO simple).
@@ -595,6 +636,13 @@ export class QuotesService {
   }
 
   async create(dto: CreateQuoteDto, userId: string) {
+    // cliente_id ahora también existe (opcional) en CalculateQuoteDto y
+    // class-validator hereda ese @IsOptional: se re-valida aquí lo obligatorio.
+    if (!dto.cliente_id) {
+      throw new BadRequestException(
+        'cliente_id es obligatorio para crear la cotización',
+      );
+    }
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
 
@@ -743,6 +791,9 @@ export class QuotesService {
       );
     }
 
+    // La tarifa preferencial se resuelve SIEMPRE con el cliente real del
+    // vuelo (no se confía en el que mande el front al revisar).
+    dto.cliente_id = (current.cliente_id as string | null) ?? undefined;
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;

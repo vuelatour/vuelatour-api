@@ -7,6 +7,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import type {
   CreateClienteDto,
   ListClientesQuery,
+  SetTarifasClienteDto,
   UpdateClienteDto,
 } from './dto/clients.dto';
 
@@ -85,5 +86,71 @@ export class ClientsService {
 
   async softDelete(id: string, updatedBy: string) {
     return this.update(id, { activo: false }, updatedBy);
+  }
+
+  // ===== Tarifas preferenciales por aeronave =====
+  // Si el cliente tiene tarifa pactada para un avión, el cotizador la usa en
+  // lugar de la default (público/broker). Ver quotes.service.calculate().
+
+  async listTarifas(clienteId: string) {
+    await this.findById(clienteId);
+    const { data, error } = await this.supabase.service
+      .from('tarifa_cliente_aeronave')
+      .select(
+        'id, aeronave_id, tarifa_hora_usd, aeronave:aeronave!aeronave_id(matricula, modelo)',
+      )
+      .eq('cliente_id', clienteId);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /** Reemplaza el set completo de tarifas preferenciales del cliente. */
+  async setTarifas(
+    clienteId: string,
+    dto: SetTarifasClienteDto,
+    userId: string,
+  ) {
+    await this.findById(clienteId);
+    // Última tarifa gana si mandan la misma aeronave dos veces.
+    const porAeronave = new Map<string, number>();
+    for (const t of dto.tarifas)
+      porAeronave.set(t.aeronave_id, t.tarifa_hora_usd);
+    const keep = [...porAeronave.keys()];
+
+    // Sin transacción (dos llamadas PostgREST): PRIMERO el upsert y después el
+    // borrado — si algo falla a la mitad, a lo sumo sobran tarifas por quitar
+    // (visibles y reintentables); nunca se pierden las pactadas.
+    if (keep.length > 0) {
+      const now = new Date().toISOString();
+      const { error } = await this.supabase.service
+        .from('tarifa_cliente_aeronave')
+        .upsert(
+          [...porAeronave].map(([aeronave_id, tarifa_hora_usd]) => ({
+            cliente_id: clienteId,
+            aeronave_id,
+            tarifa_hora_usd,
+            updated_at: now,
+            updated_by: userId,
+          })),
+          { onConflict: 'cliente_id,aeronave_id' },
+        );
+      if (error) {
+        if (error.code === '23503')
+          throw new BadRequestException('Alguna aeronave no existe');
+        throw new Error(error.message);
+      }
+    }
+
+    // Las aeronaves que ya no vienen pierden su tarifa (vuelven a la default).
+    let del = this.supabase.service
+      .from('tarifa_cliente_aeronave')
+      .delete()
+      .eq('cliente_id', clienteId);
+    if (keep.length > 0)
+      del = del.not('aeronave_id', 'in', `(${keep.join(',')})`);
+    const { error: delError } = await del;
+    if (delError) throw new Error(delError.message);
+
+    return this.listTarifas(clienteId);
   }
 }

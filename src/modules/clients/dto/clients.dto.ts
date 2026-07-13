@@ -1,16 +1,20 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsArray,
   IsBoolean,
   IsEmail,
   IsEnum,
   IsInt,
+  IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Length,
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
 
 export enum CanalCliente {
@@ -118,4 +122,32 @@ export class UpdateClienteDto extends PartialType(CreateClienteDto) {
   @IsOptional()
   @IsBoolean()
   activo?: boolean;
+}
+
+/** Tarifa preferencial pactada con el cliente para una aeronave. */
+export class TarifaClienteAeronaveDto {
+  @ApiProperty({ description: 'Aeronave a la que aplica la tarifa' })
+  @IsUUID()
+  aeronave_id!: string;
+
+  @ApiProperty({
+    description:
+      'Tarifa por hora en USD pactada con el cliente (puede ser mayor o menor que la default del avión)',
+  })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  tarifa_hora_usd!: number;
+}
+
+export class SetTarifasClienteDto {
+  @ApiProperty({
+    type: [TarifaClienteAeronaveDto],
+    description:
+      'Set COMPLETO de tarifas preferenciales del cliente: reemplaza las existentes (las aeronaves que no vengan pierden su tarifa y vuelven a la default).',
+  })
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => TarifaClienteAeronaveDto)
+  tarifas!: TarifaClienteAeronaveDto[];
 }
