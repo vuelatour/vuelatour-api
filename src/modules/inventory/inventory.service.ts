@@ -23,11 +23,16 @@ type MovForFifo = {
   tipo: string;
   cantidad: number | string;
   costo_unitario_usd: number | string;
+  moneda?: string | null;
+  costo_unitario_mxn?: number | string | null;
+  tc_usd_mxn?: number | string | null;
   fecha_movimiento: string;
   created_at: string;
 };
 
-type FifoLayer = { qty: number; cost: number };
+// cost = costo USD interno (reparto); costMxn = costo en pesos por unidad
+// (para VER el valorizado en MXN, la moneda operativa del cliente).
+type FifoLayer = { qty: number; cost: number; costMxn: number };
 
 const EPS = 1e-9;
 
@@ -42,11 +47,13 @@ export class InventoryService {
 
   /** Inventario valorizado en Excel (respeta los filtros del listado). */
   async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
-    const { data, valor_total_usd } = await this.listItems({
+    const { data, valor_total_mxn } = await this.listItems({
       ...filters,
       limit: 2000,
       offset: 0,
     });
+    // El cliente maneja el inventario en PESOS: el Excel valoriza en MXN (el
+    // USD interno solo alimenta el reparto, no este reporte de bodega).
     const columnas: TablaColumnaPayload[] = [
       { label: 'Ítem' },
       { label: 'Código' },
@@ -56,8 +63,8 @@ export class InventoryService {
       { label: 'Stock', tipo: 'numero' },
       { label: 'Unidad' },
       { label: 'Mínimo', tipo: 'numero' },
-      { label: 'Costo FIFO', tipo: 'money' },
-      { label: 'Valor USD', tipo: 'money' },
+      { label: 'Costo FIFO (MXN)', tipo: 'money' },
+      { label: 'Valor (MXN)', tipo: 'money' },
     ];
     const filas = data.map((it) => {
       const x = it as Record<string, unknown>;
@@ -70,11 +77,11 @@ export class InventoryService {
         x.stock as number,
         (x.unidad as string) ?? '',
         (x.stock_minimo as number) ?? null,
-        x.costo_fifo_actual as number,
-        x.valor_usd as number,
+        x.costo_fifo_mxn_actual as number,
+        x.valor_mxn as number,
       ];
     });
-    const totales = ['TOTAL', null, null, null, null, null, null, null, null, valor_total_usd];
+    const totales = ['TOTAL', null, null, null, null, null, null, null, null, valor_total_mxn];
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
       subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
@@ -152,7 +159,17 @@ export class InventoryService {
           if (layer.qty <= EPS) layers.shift();
         }
       } else {
-        layers.push({ qty: cant, cost: Number(m.costo_unitario_usd) });
+        const usd = Number(m.costo_unitario_usd);
+        // Costo en pesos de la capa: el capturado en MXN si la compra fue en
+        // pesos; si fue USD, se reconvierte con su TC (o cae al número USD si
+        // no hay TC — no pasa cuando todo se maneja en pesos).
+        const mxn =
+          m.moneda === 'MXN' && m.costo_unitario_mxn != null
+            ? Number(m.costo_unitario_mxn)
+            : m.tc_usd_mxn != null && Number(m.tc_usd_mxn) > 0
+              ? round(usd * Number(m.tc_usd_mxn), 2)
+              : usd;
+        layers.push({ qty: cant, cost: usd, costMxn: mxn });
       }
     }
     return layers;
@@ -162,13 +179,18 @@ export class InventoryService {
     stock: number;
     valor_usd: number;
     costo_fifo_actual: number;
+    valor_mxn: number;
+    costo_fifo_mxn_actual: number;
   } {
     const stock = layers.reduce((s, l) => s + l.qty, 0);
     const valor_usd = layers.reduce((s, l) => s + l.qty * l.cost, 0);
+    const valor_mxn = layers.reduce((s, l) => s + l.qty * l.costMxn, 0);
     return {
       stock: round(stock),
       valor_usd: round(valor_usd, 2),
       costo_fifo_actual: round(layers[0]?.cost ?? 0, 2),
+      valor_mxn: round(valor_mxn, 2),
+      costo_fifo_mxn_actual: round(layers[0]?.costMxn ?? 0, 2),
     };
   }
 
@@ -194,7 +216,7 @@ export class InventoryService {
   private async movsForItem(itemId: string): Promise<MovForFifo[]> {
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select('tipo, cantidad, costo_unitario_usd, fecha_movimiento, created_at')
+      .select('tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at')
       .eq('item_id', itemId);
     if (error) throw new Error(error.message);
     return (data ?? []) as MovForFifo[];
@@ -245,6 +267,10 @@ export class InventoryService {
         data.reduce((s, d) => s + d.valor_usd, 0),
         2,
       ),
+      valor_total_mxn: round(
+        data.reduce((s, d) => s + d.valor_mxn, 0),
+        2,
+      ),
     };
   }
 
@@ -253,7 +279,7 @@ export class InventoryService {
     if (itemIds.length === 0) return map;
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select('item_id, tipo, cantidad, costo_unitario_usd, fecha_movimiento, created_at')
+      .select('item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at')
       .in('item_id', itemIds);
     if (error) throw new Error(error.message);
     for (const m of data ?? []) {
