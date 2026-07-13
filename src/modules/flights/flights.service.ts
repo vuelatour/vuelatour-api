@@ -1927,7 +1927,57 @@ export class FlightsService {
       finalRow = await this.resolverLecturaPendiente(finalRow, userId);
     }
     void this.notifyTacoCaptured(finalRow);
+    // El estado del vuelo se DERIVA de los tacómetros (ya no hay botones
+    // Iniciar/Finalizar): la primera captura lo pone EN_VUELO y, cuando no
+    // faltan llegadas, en COMPLETADO. Best-effort: si algo falla aquí, la
+    // captura ya quedó guardada — jamás se pierde ni se bloquea.
+    try {
+      await this.syncEstadoDesdeTacos(current.vuelo_id as string, userId);
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo derivar el estado del vuelo tras capturar taco: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     return finalRow;
+  }
+
+  /**
+   * Deriva el estado del vuelo a partir de sus tacómetros (reemplaza los
+   * botones Iniciar/Finalizar). SOLO avanza, nunca retrocede:
+   *   iniciable → EN_VUELO (con la primera lectura capturada)
+   *   EN_VUELO  → COMPLETADO (cuando no faltan LLEGADAS)
+   * Los vuelos externos (sin tacómetros) siguen manejándose a mano en el
+   * panel. Un COMPLETADO/CANCELADO no vuelve atrás por una corrección de taco.
+   */
+  private async syncEstadoDesdeTacos(
+    vueloId: string,
+    userId: string,
+  ): Promise<void> {
+    const current = await this.findById(vueloId);
+    if (current.es_externo) return;
+    const estado = current.estado as string;
+    const iniciables = ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'];
+
+    // "Inició": la captura del tacómetro es la señal de que el vuelo despegó.
+    if (iniciables.includes(estado)) {
+      const { error } = await this.supabase.service
+        .from('vuelo')
+        .update({ estado: 'EN_VUELO', updated_by: userId })
+        .eq('id', vueloId);
+      if (error) throw new Error(error.message);
+      void this.calendar.syncFlight(vueloId);
+    }
+
+    // "Finalizó": todas las llegadas capturadas → cierra (reutiliza complete()
+    // para arrastrar recordTramoTiempos + sync de calendario). complete() exige
+    // estado EN_VUELO, que ya garantizamos arriba.
+    if (estado === 'EN_VUELO' || iniciables.includes(estado)) {
+      if (!this.faltanLlegadas(await this.escalasTaco(vueloId))) {
+        await this.complete(vueloId, userId);
+      }
+    }
   }
 
   /**
