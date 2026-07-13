@@ -242,12 +242,9 @@ export class QuotesService {
     const extrasConIvaR = round2(extrasConIva);
     const extrasSinIvaR = round2(extrasSinIva);
     const pernoctaR = round2(viaticosPernocta);
-    // Ajuste (negativo = descuento, positivo = redondeo) ANTES del IVA: reduce la
-    // base gravable para que el descuento también baje el IVA (si se cobra IVA).
-    const ajusteFinal = round2(Number(dto.ajuste_final_usd) || 0);
-    const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajusteFinal);
-    const iva = round2(baseIva * ivaPct);
-    const totalSinComision = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+    // Ajuste (negativo = descuento, positivo = redondeo manual) ANTES del IVA:
+    // reduce la base gravable para que el descuento también baje el IVA.
+    const ajusteBase = round2(Number(dto.ajuste_final_usd) || 0);
 
     // Comisión BillPocket (no factura → sin IVA): porcentaje CUSTOM que la
     // terminal cobra (5%, 9%… tope 20%). Se cobra al cliente como línea sin
@@ -258,7 +255,40 @@ export class QuotesService {
       dto.metodo_pago === MetodoPago.BILLPOCKET
         ? Math.min(Number(dto.comision_billpocket_pct) || 0, 20)
         : 0;
-    const comisionR = round2((totalSinComision * comisionPct) / 100);
+
+    // Cadena canónica de totales EN FUNCIÓN del ajuste (mismo orden de
+    // redondeo del invariante v1.3). Se usa para resolver el redondeo
+    // automático con exactitud de centavo.
+    const calcTotales = (ajuste: number) => {
+      const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajuste);
+      const iva = round2(baseIva * ivaPct);
+      const totalSinComision = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+      const comisionR = round2((totalSinComision * comisionPct) / 100);
+      const total = round2(totalSinComision + comisionR);
+      return { baseIva, iva, totalSinComision, comisionR, total };
+    };
+
+    let ajusteFinal = ajusteBase;
+    let tot = calcTotales(ajusteFinal);
+    // REDONDEO AUTOMÁTICO (regla del cliente): el total SIEMPRE cierra hacia
+    // arriba al siguiente múltiplo de $10 (976→980, 923→930, 991→1000). El
+    // descuento (ajuste base) entra ANTES del IVA (lo reduce); el redondeo
+    // automático se agrega DESPUÉS del IVA y de la comisión BillPocket —
+    // como los conceptos sin IVA — para aterrizar EXACTO en el número
+    // cerrado (la cadena redondeada por pasos no siempre puede alcanzar un
+    // total arbitrario ajustando la base gravable). La línea AJUSTE del
+    // desglose queda como redondeo − descuento y la suma sigue siendo exacta.
+    if (dto.redondeo_automatico) {
+      const cents = Math.round(tot.total * 100);
+      const targetCents = Math.ceil(cents / 1000) * 1000;
+      if (targetCents > cents) {
+        const extra = round2((targetCents - cents) / 100);
+        ajusteFinal = round2(ajusteBase + extra);
+        tot = { ...tot, total: round2(tot.total + extra) };
+      }
+    }
+
+    const { baseIva, iva, comisionR } = tot;
     let extrasSinIvaRFinal = extrasSinIvaR;
     if (comisionR > 0) {
       extras.push({
@@ -268,7 +298,7 @@ export class QuotesService {
       });
       extrasSinIvaRFinal = round2(extrasSinIvaR + comisionR);
     }
-    const total = round2(totalSinComision + comisionR);
+    const total = tot.total;
     // Comisión del vendedor (Itzy/Pablo/broker): sale del precio, no del
     // cliente — solo meta/neto, el total canónico queda intacto.
     const comisionVendedor = Math.min(
@@ -418,6 +448,13 @@ export class QuotesService {
         calculado_at: new Date().toISOString(),
         version_motor: '1.3.1',
         comision_billpocket_pct: comisionPct > 0 ? round2(comisionPct) : null,
+        // Redondeo automático a número cerrado (múltiplo de $10, siempre
+        // arriba): cuánto agregó el motor y el descuento base capturado —
+        // permiten re-hidratar el cotizador y re-redondear en revisiones.
+        redondeo_automatico: dto.redondeo_automatico === true,
+        redondeo_auto_usd:
+          dto.redondeo_automatico === true ? round2(ajusteFinal - ajusteBase) : null,
+        descuento_usd: ajusteBase < 0 ? round2(-ajusteBase) : null,
         // Comisión del VENDEDOR: informativa (NO altera el desglose canónico —
         // el cliente paga el total completo). El neto es lo que queda a
         // VuelaTour y fluye a reparto/reportes. Interna: nunca al PDF cliente.
@@ -806,6 +843,15 @@ export class QuotesService {
     userId: string,
   ) {
     const current = await this.findById(vueloId);
+    const metaSnapshot = (
+      current.calculo_snapshot as {
+        meta?: {
+          comision_billpocket_pct?: number | null;
+          redondeo_automatico?: boolean | null;
+          descuento_usd?: number | null;
+        };
+      } | null
+    )?.meta;
     if (current.estado === 'RESERVA') {
       throw new ConflictException(
         'La reserva aún no tiene precios: cotízala primero (botón Cotizar).',
@@ -864,18 +910,16 @@ export class QuotesService {
       // ni la comisión del vendedor.
       tc_usd_mxn:
         Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
-      comision_billpocket_pct:
-        (
-          current.calculo_snapshot as {
-            meta?: { comision_billpocket_pct?: number | null };
-          } | null
-        )?.meta?.comision_billpocket_pct ?? undefined,
+      comision_billpocket_pct: metaSnapshot?.comision_billpocket_pct ?? undefined,
       comision_vendedor_usd:
         Number(current.comision_vendedor_usd) > 0
           ? Number(current.comision_vendedor_usd)
           : undefined,
       comision_vendedor_nombre:
         (current.comision_vendedor_nombre as string | null) ?? undefined,
+      // Redondeo automático: se re-resuelve sobre el descuento BASE (no sobre
+      // el ajuste ya redondeado) para no acumular redondeos entre revisiones.
+      redondeo_automatico: metaSnapshot?.redondeo_automatico === true || undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
       tarifa_hora_override_usd:
@@ -884,7 +928,13 @@ export class QuotesService {
           : undefined,
       iva_pct_override: Number(current.iva_pct),
       extras: dto.extras ?? ((current.extras as never[]) ?? []),
-      ajuste_final_usd: Number(current.ajuste_final_usd) || 0,
+      // Con redondeo automático, el ajuste base es SOLO el descuento (el
+      // redondeo se vuelve a resolver con el total nuevo); sin él, se
+      // conserva el ajuste manual tal cual.
+      ajuste_final_usd:
+        metaSnapshot?.redondeo_automatico === true
+          ? -(Number(metaSnapshot?.descuento_usd) || 0)
+          : Number(current.ajuste_final_usd) || 0,
       motivo: dto.motivo?.trim() || 'Ajuste rápido desde el detalle (extras/pasajeros)',
     } as unknown as ReviseQuoteDto;
 

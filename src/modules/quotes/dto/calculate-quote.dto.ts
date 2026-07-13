@@ -270,6 +270,14 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
+      'Redondeo AUTOMÁTICO del total al siguiente múltiplo de $10, siempre hacia arriba (976→980, 991→1000). El motor resuelve el ajuste exacto considerando IVA y comisión BillPocket. El descuento (ajuste_final_usd negativo) se aplica antes.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  redondeo_automatico?: boolean;
+
+  @ApiPropertyOptional({
+    description:
       'Comisión de BillPocket en % (custom por operación: 5, 9… tope 20). Solo aplica con metodo_pago=BILLPOCKET; se cobra al cliente como línea sin IVA.',
   })
   @IsOptional()
