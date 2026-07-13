@@ -317,7 +317,9 @@ export class ConciliacionService {
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
-        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto)`,
+        // El gasto/cobro conciliado trae su vuelo (folio) para que la fila
+        // sea verificable de un clic desde el panel.
+        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(vuelo_id, vuelo:vuelo!vuelo_id(folio))`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
