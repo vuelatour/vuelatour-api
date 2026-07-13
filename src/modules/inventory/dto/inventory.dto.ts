@@ -173,10 +173,18 @@ export class CreateMovimientoDto {
   @IsPositive()
   tc_usd_mxn?: number;
 
-  @ApiPropertyOptional({ description: 'Avión al que se carga la pieza. Requerido en SALIDA.' })
+  @ApiPropertyOptional({ description: 'Avión al que se carga la pieza. Requerido en SALIDA (salvo para_flota).' })
   @IsOptional()
   @IsUUID()
   aeronave_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'SALIDA para TODAS las matrículas (aceites/consumibles de flota): el costo FIFO se prorratea en partes iguales entre los aviones activos, un gasto por avión. Excluye aeronave_id.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  para_flota?: boolean;
 
   @ApiPropertyOptional({ description: 'Proveedor de origen (en ENTRADA)' })
   @IsOptional()

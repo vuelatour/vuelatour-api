@@ -344,8 +344,15 @@ export class InventoryService {
     let tc: number | null = null;
 
     if (dto.tipo === TipoMovimientoInventario.SALIDA) {
-      if (!dto.aeronave_id) {
-        throw new BadRequestException('La salida debe registrar el avión (aeronave_id).');
+      if (!dto.aeronave_id && dto.para_flota !== true) {
+        throw new BadRequestException(
+          'La salida debe registrar el avión (aeronave_id) o marcarse para toda la flota (para_flota).',
+        );
+      }
+      if (dto.aeronave_id && dto.para_flota === true) {
+        throw new BadRequestException(
+          'Una salida para toda la flota no lleva avión específico.',
+        );
       }
       const layers = this.buildLayers(await this.movsForItem(itemId));
       const total = this.consumeFifo(layers, dto.cantidad);
@@ -379,6 +386,7 @@ export class InventoryService {
         moneda,
         costo_unitario_mxn: costoMxn,
         tc_usd_mxn: tc,
+        para_flota: dto.tipo === TipoMovimientoInventario.SALIDA && dto.para_flota === true,
         aeronave_id: dto.aeronave_id ?? null,
         proveedor_id: dto.proveedor_id ?? null,
         fecha_movimiento: dto.fecha_movimiento ?? undefined,
@@ -403,7 +411,13 @@ export class InventoryService {
     // costo FIFO para que llegue al reporte mensual del avión y al reparto.
     // La DEVOLUCION con avión revierte ese cargo.
     let gastoGenerado: Record<string, unknown> | null = null;
-    if (dto.tipo === TipoMovimientoInventario.SALIDA) {
+    if (dto.tipo === TipoMovimientoInventario.SALIDA && dto.para_flota === true) {
+      gastoGenerado = await this.crearGastosDeSalidaFlota(
+        data as Record<string, unknown>,
+        item.nombre,
+        userId,
+      );
+    } else if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       gastoGenerado = await this.crearGastoDeSalida(
         data as Record<string, unknown>,
         item.nombre,
@@ -471,10 +485,80 @@ export class InventoryService {
   }
 
   /**
+   * SALIDA "para todas las matrículas" (aceites/consumibles de flota): el
+   * costo FIFO total se PRORRATEA en partes iguales entre los aviones
+   * ACTIVOS — un gasto REFACCION medio BODEGA por avión, todos ligados al
+   * mismo movimiento. Los centavos de diferencia se ajustan en el primer
+   * avión para que la suma sea EXACTA al costo de la salida.
+   */
+  private async crearGastosDeSalidaFlota(
+    mov: Record<string, unknown>,
+    itemNombre: string,
+    userId: string,
+  ): Promise<Record<string, unknown> | null> {
+    const monto = round(Number(mov.cantidad) * Number(mov.costo_unitario_usd), 2);
+    if (monto <= 0) return null;
+
+    const { data: aviones, error: avErr } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula')
+      .eq('activa', true)
+      .order('matricula');
+    if (avErr || !aviones || aviones.length === 0) {
+      this.logger.error(
+        `SALIDA flota ${mov.id as string}: sin aviones activos para prorratear (${avErr?.message ?? 'lista vacía'}). Capturar el gasto manualmente.`,
+      );
+      return null;
+    }
+
+    const n = aviones.length;
+    const base = round(monto / n, 2);
+    // El primero absorbe el residuo de redondeo: base×(n−1) + primero == monto.
+    const primero = round(monto - base * (n - 1), 2);
+
+    const filas = aviones.map((a, i) => ({
+      usuario_captura_id: userId,
+      origen: 'SISTEMA',
+      categoria: 'REFACCION',
+      monto: i === 0 ? primero : base,
+      moneda: 'USD',
+      fecha_gasto: mov.fecha_movimiento,
+      medio_pago: 'BODEGA',
+      estatus_comprobante: 'SIN_COMPROBANTE',
+      aeronave_id: a.id,
+      proveedor_id: mov.proveedor_id ?? null,
+      inventario_movimiento_id: mov.id,
+      notas:
+        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO $${monto.toFixed(2)})` +
+        (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
+      created_by: userId,
+      updated_by: userId,
+    }));
+
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .insert(filas)
+      .select('id, monto, moneda, categoria');
+    if (error) {
+      this.logger.error(
+        `SALIDA flota ${mov.id as string}: no se pudieron crear los gastos prorrateados (${error.message}). Capturarlos manualmente.`,
+      );
+      return null;
+    }
+    return {
+      prorrateado: true,
+      aviones: n,
+      monto_total: monto,
+      gastos: (data ?? []).length,
+    };
+  }
+
+  /**
    * DEVOLUCION con avión: revierte el cargo automático. Reduce (o elimina) los
    * gastos generados por SALIDAs de este ítem a ese avión, empezando por el más
    * reciente, hasta cubrir el monto devuelto. Best-effort: las devoluciones son
    * excepcionales (≈1%) y cualquier resto se ajusta desde /admin/expenses.
+   * Las salidas de FLOTA no se revierten aquí: se corrigen desde Gastos.
    */
   private async revertirGastoPorDevolucion(
     itemId: string,
