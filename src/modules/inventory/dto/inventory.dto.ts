@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsISO8601,
   IsNumber,
@@ -127,13 +128,41 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION/AJUSTE. En SALIDA se ignora: se calcula por FIFO.',
+      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION/AJUSTE si la captura es USD. En SALIDA se ignora: se calcula por FIFO.',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   costo_unitario_usd?: number;
+
+  @ApiPropertyOptional({
+    enum: ['MXN', 'USD'],
+    description:
+      'Moneda de la CAPTURA (default USD por compatibilidad; panel/app mandan MXN por default). La contabilidad interna (FIFO/valorizado/gasto bodega) sigue en USD.',
+  })
+  @IsOptional()
+  @IsIn(['MXN', 'USD'])
+  moneda?: 'MXN' | 'USD';
+
+  @ApiPropertyOptional({
+    description:
+      'Costo unitario en PESOS (capturas MXN). El API lo convierte a USD con tc_usd_mxn.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_unitario_mxn?: number;
+
+  @ApiPropertyOptional({
+    description: 'Tipo de cambio de la compra (MXN por USD). Requerido en capturas MXN.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  tc_usd_mxn?: number;
 
   @ApiPropertyOptional({ description: 'Avión al que se carga la pieza. Requerido en SALIDA.' })
   @IsOptional()

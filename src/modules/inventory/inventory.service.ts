@@ -16,7 +16,7 @@ import {
 const ITEM_COLS =
   'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, notas, activo, created_at, updated_at';
 const MOV_COLS =
-  'id, item_id, tipo, cantidad, costo_unitario_usd, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+  'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
 
 /** Movimiento mínimo necesario para reconstruir el cardex FIFO. */
 type MovForFifo = {
@@ -333,6 +333,12 @@ export class InventoryService {
     const item = (await this.findItem(itemId)) as { nombre: string }; // 404 si no existe
 
     let costoUnitario: number;
+    // Captura en PESOS (default operativo del cliente) o en USD (compras tipo
+    // Aircraft Spruce). La moneda CANÓNICA interna sigue siendo USD: FIFO,
+    // valorizado y el gasto de bodega que entra al reparto no cambian.
+    let moneda: 'MXN' | 'USD' = dto.moneda ?? 'USD';
+    let costoMxn: number | null = null;
+    let tc: number | null = null;
 
     if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       if (!dto.aeronave_id) {
@@ -341,6 +347,16 @@ export class InventoryService {
       const layers = this.buildLayers(await this.movsForItem(itemId));
       const total = this.consumeFifo(layers, dto.cantidad);
       costoUnitario = round(total / dto.cantidad, 4);
+      moneda = 'USD'; // el costo FIFO es interno, siempre USD
+    } else if (moneda === 'MXN') {
+      if (dto.costo_unitario_mxn == null || !(Number(dto.tc_usd_mxn) > 0)) {
+        throw new BadRequestException(
+          'Captura en MXN: se requieren costo_unitario_mxn y tc_usd_mxn (tipo de cambio de la compra).',
+        );
+      }
+      costoMxn = dto.costo_unitario_mxn;
+      tc = Number(dto.tc_usd_mxn);
+      costoUnitario = round(costoMxn / tc, 4);
     } else {
       if (dto.costo_unitario_usd == null) {
         throw new BadRequestException(
@@ -357,6 +373,9 @@ export class InventoryService {
         tipo: dto.tipo,
         cantidad: dto.cantidad,
         costo_unitario_usd: costoUnitario,
+        moneda,
+        costo_unitario_mxn: costoMxn,
+        tc_usd_mxn: tc,
         aeronave_id: dto.aeronave_id ?? null,
         proveedor_id: dto.proveedor_id ?? null,
         fecha_movimiento: dto.fecha_movimiento ?? undefined,

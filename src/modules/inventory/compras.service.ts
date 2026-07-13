@@ -79,12 +79,22 @@ export class ComprasService {
       const itemId = await this.findOrCreateItem(linea, userId, () => {
         itemsCreados += 1;
       });
+      // La factura puede venir en MXN (compra local) o USD (Aircraft Spruce):
+      // el costo de cada línea se interpreta en la moneda declarada y el
+      // movimiento guarda el original + TC; la contabilidad interna sigue USD.
+      const esMxn = dto.moneda === 'MXN';
       await this.inventory.createMovimiento(
         itemId,
         {
           tipo: TipoMovimientoInventario.ENTRADA,
           cantidad: linea.cantidad,
-          costo_unitario_usd: linea.costo_unitario_usd,
+          moneda: dto.moneda,
+          ...(esMxn
+            ? {
+                costo_unitario_mxn: linea.costo_unitario_usd,
+                tc_usd_mxn: dto.tc_usd_mxn,
+              }
+            : { costo_unitario_usd: linea.costo_unitario_usd }),
           proveedor_id: dto.proveedor_id,
           fecha_orden: dto.fecha_orden,
           referencia: dto.referencia,

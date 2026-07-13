@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsIn,
   IsISO8601,
   IsNumber,
   IsOptional,
@@ -54,6 +55,22 @@ export class ImportarCompraDto {
   @IsOptional()
   @IsUUID()
   proveedor_id?: string;
+
+  @ApiPropertyOptional({
+    enum: ['MXN', 'USD'],
+    description:
+      'Moneda de los costos de las LÍNEAS (toda la factura). Con MXN se requiere tc_usd_mxn; el API convierte a USD (moneda canónica interna).',
+  })
+  @IsOptional()
+  @IsIn(['MXN', 'USD'])
+  moneda?: 'MXN' | 'USD';
+
+  @ApiPropertyOptional({ description: 'Tipo de cambio de la compra (MXN por USD).' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  tc_usd_mxn?: number;
 
   @ApiPropertyOptional({ description: 'Fecha de la orden' })
   @IsOptional()
