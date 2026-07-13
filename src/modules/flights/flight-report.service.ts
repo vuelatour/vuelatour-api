@@ -193,7 +193,10 @@ export class FlightReportService {
       .filter((g) => g.categoria !== 'GAS')
       .map((g) => ({
         fecha: (g.fecha_gasto as string) ?? null,
-        concepto: (g.categoria as string) ?? 'OTRO',
+        concepto:
+          g.categoria === 'PILOTO_EXTERNO'
+            ? 'Piloto externo'
+            : ((g.categoria as string) ?? 'OTRO'),
         // El detalle incluye el DESGLOSE que compone el servidor (Operación /
         // TUA / FBO con IVA) — el cliente lo pidió explícitamente EN el
         // reporte. Se aplana a una línea para el PDF/Excel.

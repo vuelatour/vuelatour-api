@@ -148,6 +148,13 @@ export class UsersService {
         'El usuario está inactivo; reactívalo antes de reenviar la invitación.',
       );
     }
+    // El correo de invitación promete acceso ("ya quedó autorizado") — falso
+    // para un externo: la allowlist de signup lo bloquea. Nunca se le envía.
+    if (user.es_piloto_externo) {
+      throw new BadRequestException(
+        'Los pilotos externos no tienen acceso al sistema; no hay invitación que enviar.',
+      );
+    }
     const sent = await this.email.sendUserInvitation({
       to: user.email,
       nombre: user.nombre,
@@ -161,9 +168,19 @@ export class UsersService {
     if (Object.keys(patch).length === 0) {
       return this.findById(id);
     }
+    const extra: Record<string, unknown> = {};
+    // Convertir un piloto EXTERNO en piloto de base NO le abre acceso directo:
+    // sin cuenta enlazada pasa por el flujo normal de invitación (INVITADO →
+    // primer login con Google → un admin lo activa).
+    if (patch.es_piloto_externo === false) {
+      const current = await this.findById(id);
+      if (current.es_piloto_externo && !current.supabase_auth_id) {
+        extra.estado = 'INVITADO';
+      }
+    }
     const { data, error } = await this.supabase.service
       .from('usuario')
-      .update({ ...patch, updated_by: updatedBy })
+      .update({ ...patch, ...extra, updated_by: updatedBy })
       .eq('id', id)
       .select(COLUMNS)
       .maybeSingle();
@@ -220,6 +237,13 @@ export class UsersService {
     }
 
     const user = await this.findById(id);
+    // Piloto externo (doc 3.7): JAMÁS tiene acceso — esta vía crearía su
+    // cuenta de auth y le abriría la puerta aunque la allowlist lo excluya.
+    if (user.es_piloto_externo) {
+      throw new BadRequestException(
+        'Los pilotos externos no tienen acceso al sistema; no se les puede asignar contraseña.',
+      );
+    }
 
     if (user.supabase_auth_id) {
       const { error } = await this.supabase.service.auth.admin.updateUserById(

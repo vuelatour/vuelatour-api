@@ -387,12 +387,17 @@ export class FlightsService {
     const [{ data: piloto }, pernoctas, ruta] = await Promise.all([
       this.supabase.service
         .from('usuario')
-        .select('nombre, email')
+        .select('nombre, email, es_piloto_externo')
         .eq('id', pilotoId)
         .maybeSingle(),
       this.pernoctasDeVuelo(vuelo.id as string),
       this.rutaDeVuelo(vuelo),
     ]);
+    // Piloto externo (doc 3.7): sin acceso al sistema — ni push ni email; la
+    // coordinación con él es por WhatsApp fuera del sistema.
+    if ((piloto as { es_piloto_externo?: boolean } | null)?.es_piloto_externo) {
+      return;
+    }
     const pernoctaTxt =
       pernoctas.length > 0
         ? ` · 🌙 Pernocta en ${pernoctas.join(', ')}`
@@ -2118,6 +2123,24 @@ export class FlightsService {
       corregido_at: new Date().toISOString(),
       updated_by: userId,
     };
+    // Igual que captureTaco: si la oficina captura solo la LLEGADA (caso
+    // piloto externo) y el tramo no tiene salida, se llena sola con el último
+    // taco del avión (DEDUCIDO) — sin esto el tramo queda sin horas (las
+    // horas voladas se derivan de llegada − salida).
+    if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_salida === undefined &&
+      current.taco_salida == null
+    ) {
+      const ultimo = await this.ultimoTacoAeronave(
+        current.aeronave_id as string | null,
+        null,
+      );
+      if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
+        patch.taco_salida = ultimo;
+        patch.taco_salida_origen = 'DEDUCIDO';
+      }
+    }
     if (dto.taco_salida !== undefined) {
       patch.taco_salida = dto.taco_salida;
       patch.taco_salida_origen = 'OFICINA';
@@ -2146,6 +2169,25 @@ export class FlightsService {
         userId,
         dto.taco_llegada !== undefined ? 'OFICINA' : 'PILOTO',
       );
+    }
+
+    // Estado derivado también cuando captura la OFICINA (caso piloto externo,
+    // doc 3.7: Itzel sube los tacómetros): sin esto, un vuelo cuyas lecturas
+    // entran solo por esta vía se quedaría en CONFIRMADO para siempre.
+    // SOLO cuando la oficina TECLEÓ una lectura — confirmar sin cambios (el
+    // botón "Confirmar" de taco-live manda {}) valida una lectura deducida,
+    // no es evidencia de que el vuelo voló, y completar es irreversible.
+    // Best-effort, igual que en captureTaco: la lectura ya quedó guardada.
+    if (dto.taco_salida !== undefined || dto.taco_llegada !== undefined) {
+      try {
+        await this.syncEstadoDesdeTacos(current.vuelo_id as string, userId);
+      } catch (err) {
+        this.logger.warn(
+          `No se pudo derivar el estado del vuelo tras confirmar taco: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
     }
 
     // Cierra el círculo de confianza con el piloto: le avisa que su lectura

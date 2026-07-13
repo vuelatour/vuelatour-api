@@ -42,6 +42,15 @@ export class NotificationsService {
   /** Persiste y emite una notificación a un usuario. Best-effort. */
   async notifyUser(usuarioId: string, n: NotificationInput): Promise<void> {
     try {
+      // Los pilotos EXTERNOS no tienen acceso al sistema (doc 3.7): no se les
+      // genera notificación (ni fila, ni socket, ni push) por ningún camino.
+      const { data: target } = await this.supabase.service
+        .from('usuario')
+        .select('es_piloto_externo')
+        .eq('id', usuarioId)
+        .maybeSingle();
+      if (target?.es_piloto_externo === true) return;
+
       const { data, error } = await this.supabase.service
         .from('notificacion')
         .insert({
@@ -78,7 +87,9 @@ export class NotificationsService {
         .from('usuario')
         .select('id')
         .eq('rol', rol)
-        .eq('estado', 'ACTIVO');
+        .eq('estado', 'ACTIVO')
+        // Externos sin acceso: fuera de los broadcasts por rol.
+        .eq('es_piloto_externo', false);
       if (usersErr) throw new Error(usersErr.message);
 
       const targets = (users ?? [])

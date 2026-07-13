@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsEmail,
   IsEnum,
   IsInt,
   IsISO8601,
@@ -11,6 +12,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
 } from 'class-validator';
 import { EstadoUsuario } from '../../../common/types/auth.types';
 
@@ -78,4 +80,31 @@ export class ListDescansosQuery {
   @IsOptional()
   @IsUUID()
   piloto_id?: string;
+}
+
+/**
+ * Alta de piloto EXTERNO (doc 3.7): freelance sin acceso al sistema. Queda
+ * como usuario rol PILOTO con es_piloto_externo=true y SIN cuenta de auth —
+ * la oficina captura sus tacómetros y gastos desde el admin.
+ */
+export class CreatePilotoExternoDto {
+  @ApiProperty({ maxLength: 100, minLength: 2 })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  nombre!: string;
+
+  @ApiPropertyOptional({ maxLength: 20, description: 'WhatsApp de contacto' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  telefono?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Solo referencia de contacto: NO le da acceso (la allowlist de signup ignora externos).',
+  })
+  @IsOptional()
+  @IsEmail()
+  email?: string;
 }

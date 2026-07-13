@@ -29,6 +29,8 @@ export enum CategoriaGasto {
   TAXI = 'TAXI',
   REFACCION = 'REFACCION',
   PERMISO = 'PERMISO',
+  /** Honorario del piloto externo (freelance sin acceso; lo captura oficina). */
+  PILOTO_EXTERNO = 'PILOTO_EXTERNO',
   FIJO = 'FIJO',
   OTRO = 'OTRO',
 }

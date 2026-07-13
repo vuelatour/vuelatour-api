@@ -563,7 +563,10 @@ export class AlertsService {
       .from('usuario')
       .select('email')
       .in('rol', roles)
-      .eq('estado', 'ACTIVO');
+      .eq('estado', 'ACTIVO')
+      // Externos sin acceso (doc 3.7): fuera de correos por rol, igual que
+      // notifyRole los excluye del socket/push.
+      .eq('es_piloto_externo', false);
     if (error) throw new Error(error.message);
     const emails = [...new Set((data ?? []).map((u) => (u as { email: string }).email).filter(Boolean))];
     const subject = `VuelaTour · ${notif.titulo}`;

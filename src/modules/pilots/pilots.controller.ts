@@ -15,7 +15,12 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
-import { CreateDescansoDto, ListDescansosQuery, ListPilotsQuery } from './dto/pilots.dto';
+import {
+  CreateDescansoDto,
+  CreatePilotoExternoDto,
+  ListDescansosQuery,
+  ListPilotsQuery,
+} from './dto/pilots.dto';
 import { PilotsService } from './pilots.service';
 
 @ApiTags('Pilots')
@@ -31,6 +36,19 @@ export class PilotsController {
   })
   list(@Query() q: ListPilotsQuery) {
     return this.pilots.list(q);
+  }
+
+  @Post('externo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Alta de piloto EXTERNO (freelance sin acceso al sistema): asignable a vuelos; la oficina captura sus tacómetros y gastos.',
+  })
+  createExterno(
+    @Body() dto: CreatePilotoExternoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.pilots.createExterno(dto, c.userId);
   }
 
   @Get('descansos')

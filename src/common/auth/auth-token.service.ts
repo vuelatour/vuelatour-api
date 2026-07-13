@@ -79,7 +79,7 @@ export class AuthTokenService {
     const payload = await this.verify(token);
     const { data, error } = await this.supabase.service
       .from('usuario')
-      .select('id, supabase_auth_id, email, nombre, rol, estado')
+      .select('id, supabase_auth_id, email, nombre, rol, estado, es_piloto_externo')
       .eq('supabase_auth_id', payload.sub)
       .maybeSingle();
 
@@ -87,6 +87,11 @@ export class AuthTokenService {
     if (!data) throw new UnauthorizedException('User not provisioned in application');
     if (data.estado !== EstadoUsuario.ACTIVO) {
       throw new UnauthorizedException(`User account is ${data.estado}`);
+    }
+    // Defensa en profundidad (doc 3.7): un piloto EXTERNO jamás opera el
+    // sistema, aunque por algún camino haya quedado enlazado a una cuenta.
+    if (data.es_piloto_externo === true) {
+      throw new UnauthorizedException('Los pilotos externos no tienen acceso al sistema');
     }
 
     return {

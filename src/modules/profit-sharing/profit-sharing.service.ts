@@ -17,6 +17,9 @@ const DIRECTO = new Set([
   'COMIDA',
   'HOTEL',
   'TAXI',
+  // Honorario del piloto externo (freelance, doc 3.7): costo directo del
+  // vuelo — fuera de este set el reparto lo ignoraría e inflaría la utilidad.
+  'PILOTO_EXTERNO',
   'OTRO',
 ]);
 /** Talleres, aceites, refacciones, mecanicos. */
@@ -388,7 +391,7 @@ export class ProfitSharingService {
         // Completados del periodo (para cobros pendientes/parciales).
         sb
           .from('vuelo')
-          .select('id, folio, monto_total_usd, tc_usd_mxn, cobrado')
+          .select('id, folio, piloto_id, monto_total_usd, tc_usd_mxn, cobrado')
           .eq('estado', 'COMPLETADO')
           .gte('fecha_vuelo', desdeTs)
           .lte('fecha_vuelo', hastaTs),
@@ -439,6 +442,43 @@ export class ProfitSharingService {
       if (gpErr) throw new Error(gpErr.message);
       const cubiertas = new Set((gastosPista ?? []).map((g) => g.escala_id as string));
       pistasSinGasto = escalasPista.filter((e) => !cubiertas.has(e.id as string)).length;
+    }
+
+    // Vuelos COMPLETADOS por piloto EXTERNO sin su honorario capturado: el
+    // pago del freelance es gasto DIRECTO del vuelo — si falta, la utilidad
+    // del reparto sale inflada en silencio.
+    let externosSinHonorario = 0;
+    {
+      const completadosRows = (completadosRes.data ?? []) as Array<Record<string, unknown>>;
+      const pilotoIds = [
+        ...new Set(
+          completadosRows.map((v) => v.piloto_id as string | null).filter(Boolean),
+        ),
+      ] as string[];
+      if (pilotoIds.length > 0) {
+        const { data: exts, error: extErr } = await sb
+          .from('usuario')
+          .select('id')
+          .in('id', pilotoIds)
+          .eq('es_piloto_externo', true);
+        if (extErr) throw new Error(extErr.message);
+        const externos = new Set((exts ?? []).map((u) => u.id as string));
+        const vuelosExternos = completadosRows.filter((v) =>
+          externos.has(v.piloto_id as string),
+        );
+        if (vuelosExternos.length > 0) {
+          const { data: gastosPE, error: gpeErr } = await sb
+            .from('gasto')
+            .select('vuelo_id')
+            .in('vuelo_id', vuelosExternos.map((v) => v.id as string))
+            .eq('categoria', 'PILOTO_EXTERNO');
+          if (gpeErr) throw new Error(gpeErr.message);
+          const cubiertos = new Set((gastosPE ?? []).map((g) => g.vuelo_id as string));
+          externosSinHonorario = vuelosExternos.filter(
+            (v) => !cubiertos.has(v.id as string),
+          ).length;
+        }
+      }
     }
 
     const vuelosSinCompletar = (pendRes.data ?? []).map((v) => ({
@@ -532,6 +572,13 @@ export class ProfitSharingService {
         detalle:
           'La cuota de aeródromo (VIP SAESA) aún no está provisionada: genérala en Gastos → "Pistas por pagar" o el reparto saldrá inflado.',
         count: pistasSinGasto,
+      },
+      {
+        clave: 'externos_sin_honorario',
+        titulo: 'Vuelos de piloto externo sin honorario capturado',
+        detalle:
+          'El pago del freelance es gasto directo del vuelo (categoría "Piloto externo"): captúralo en Gastos y lígalo al vuelo, o el reparto saldrá inflado.',
+        count: externosSinHonorario,
       },
       {
         clave: 'gastos_sin_tc',

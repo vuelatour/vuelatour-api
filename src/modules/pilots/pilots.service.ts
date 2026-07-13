@@ -1,7 +1,17 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
-import type { CreateDescansoDto, ListDescansosQuery, ListPilotsQuery } from './dto/pilots.dto';
+import type {
+  CreateDescansoDto,
+  CreatePilotoExternoDto,
+  ListDescansosQuery,
+  ListPilotsQuery,
+} from './dto/pilots.dto';
 
 const USUARIO_COLS =
   'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
@@ -58,6 +68,61 @@ export class PilotsService {
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /**
+   * Alta de piloto EXTERNO (doc 3.7): fila en usuario rol PILOTO con
+   * es_piloto_externo=true, estado ACTIVO y SIN cuenta de auth — entra a los
+   * selectores de asignación pero jamás puede loguearse (la allowlist de
+   * signup y el enlace por email lo excluyen) ni recibe notificaciones.
+   */
+  async createExterno(dto: CreatePilotoExternoDto, createdBy: string) {
+    const nombre = dto.nombre.trim();
+    if (nombre.length < 2) {
+      throw new BadRequestException(
+        'El nombre del piloto externo es obligatorio',
+      );
+    }
+    // Sin email no hay unicidad en BD: se evita el duplicado obvio por nombre.
+    const { data: dup, error: dupErr } = await this.supabase.service
+      .from('usuario')
+      .select('id')
+      .eq('es_piloto_externo', true)
+      .neq('estado', 'INACTIVO')
+      .ilike('nombre', nombre)
+      .limit(1)
+      .maybeSingle();
+    if (dupErr) throw new Error(dupErr.message);
+    if (dup) {
+      throw new ConflictException(
+        `Ya existe un piloto externo llamado "${nombre}". Si es otra persona, distínguelo (ej. apellido).`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('usuario')
+      .insert({
+        nombre,
+        email: dto.email?.trim() ? dto.email.trim().toLowerCase() : null,
+        rol: 'PILOTO',
+        estado: 'ACTIVO',
+        es_piloto: true,
+        es_piloto_externo: true,
+        tiene_fondo_caja: false,
+        telefono: dto.telefono ?? '',
+        avatar_url: '',
+        created_by: createdBy,
+        updated_by: createdBy,
+      })
+      .select(USUARIO_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23505')
+        throw new ConflictException(
+          `Ya existe un usuario con el email ${dto.email}`,
+        );
+      throw new Error(error.message);
+    }
+    return data!;
   }
 
   /**
