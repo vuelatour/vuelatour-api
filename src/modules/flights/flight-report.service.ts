@@ -111,11 +111,14 @@ export class FlightReportService {
       return typeof v === 'string' && v.trim() ? v : null;
     };
 
-    const tramos = escalas.map((e) => {
+    const tramos = escalas.map((e, idx) => {
       const s = e.taco_salida == null ? null : n(e.taco_salida);
       const l = e.taco_llegada == null ? null : n(e.taco_llegada);
       return {
-        orden: n(e.orden),
+        // Numeración VISIBLE secuencial: el orden interno puede ser >=100
+        // (tramos operativos agregados a mano, para que el cotizador no los
+        // pise) y confundía en el PDF ("tramo 100").
+        orden: idx + 1,
         ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
         pasajeros: e.pasajeros == null ? null : n(e.pasajeros),
         pasajeros_nombres: nombresATexto(e.pasajeros_nombres),
