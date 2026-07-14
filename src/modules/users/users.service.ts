@@ -169,6 +169,17 @@ export class UsersService {
       return this.findById(id);
     }
     const extra: Record<string, unknown> = {};
+    // "Piloto externo" es EXCLUSIVO de freelance sin cuenta: marcárselo a un
+    // usuario ya enlazado a auth lo dejaría FUERA del sistema al instante
+    // (resolveUser rechaza externos) — pasó con un ADMIN real por accidente.
+    if (patch.es_piloto_externo === true) {
+      const current = await this.findById(id);
+      if (current.supabase_auth_id) {
+        throw new BadRequestException(
+          `${current.nombre} ya tiene cuenta con acceso: marcarlo como piloto externo lo bloquearía por completo. Ese flag es solo para freelance dados de alta sin usuario.`,
+        );
+      }
+    }
     // Convertir un piloto EXTERNO en piloto de base NO le abre acceso directo:
     // sin cuenta enlazada pasa por el flujo normal de invitación (INVITADO →
     // primer login con Google → un admin lo activa).
