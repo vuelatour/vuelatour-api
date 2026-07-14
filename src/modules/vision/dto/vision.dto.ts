@@ -67,4 +67,17 @@ export class GastoTicketDto {
   @IsOptional()
   @IsString()
   pdfBase64?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Factura en Excel (.xlsx) o CSV en base64: pyservices la convierte a texto y la IA extrae los datos.',
+  })
+  @IsOptional()
+  @IsString()
+  excelBase64?: string;
+
+  @ApiPropertyOptional({ description: 'Nombre del archivo Excel/CSV (decide el parser).' })
+  @IsOptional()
+  @IsString()
+  excelFilename?: string;
 }

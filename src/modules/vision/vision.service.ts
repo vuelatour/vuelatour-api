@@ -32,6 +32,9 @@ export interface GastoTicketVisionInput {
   }>;
   /** Factura en PDF (base64). */
   pdfBase64?: string;
+  /** Factura en Excel (.xlsx) o CSV (base64) + nombre para el parser. */
+  excelBase64?: string;
+  excelFilename?: string;
 }
 
 export interface GastoTicketVisionResult {
@@ -236,14 +239,16 @@ export class VisionService implements OnModuleInit {
       !input.imageBase64 &&
       !input.imageUrl &&
       !(input.images?.length ?? 0) &&
-      !input.pdfBase64
+      !input.pdfBase64 &&
+      !input.excelBase64
     ) {
       return null;
     }
 
     const controller = new AbortController();
     // Multi-página/PDF tarda más que una foto: margen extra sobre el timeout base.
-    const esDocumento = (input.images?.length ?? 0) > 1 || !!input.pdfBase64;
+    const esDocumento =
+      (input.images?.length ?? 0) > 1 || !!input.pdfBase64 || !!input.excelBase64;
     const timer = setTimeout(
       () => controller.abort(),
       esDocumento ? Math.max(this.timeoutMs, 150_000) : this.timeoutMs,
@@ -265,6 +270,8 @@ export class VisionService implements OnModuleInit {
             image_url: i.imageUrl,
           })),
           pdf_base64: input.pdfBase64,
+          excel_base64: input.excelBase64,
+          excel_filename: input.excelFilename,
         }),
         signal: controller.signal,
       });

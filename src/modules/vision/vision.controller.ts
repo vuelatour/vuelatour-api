@@ -35,6 +35,8 @@ export class VisionController {
       imageUrl: dto.imageUrl,
       images: dto.images,
       pdfBase64: dto.pdfBase64,
+      excelBase64: dto.excelBase64,
+      excelFilename: dto.excelFilename,
     });
     if (!result) return { disponible: false };
     // Falla con motivo (modelo mal escrito, timeout…): la app lo muestra.
