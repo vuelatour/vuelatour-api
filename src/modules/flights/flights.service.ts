@@ -1436,6 +1436,47 @@ export class FlightsService {
     return data!;
   }
 
+  /**
+   * Convierte un vuelo cotizado con avión propio en CUBIERTO por operador
+   * externo (pedido de Itzy): conserva la cotización al cliente tal cual;
+   * libera avión y piloto (el externo no captura tacómetros — estado manual).
+   * Llamado de nuevo sobre un externo, actualiza operador/costo.
+   */
+  async cubrirConExterno(
+    id: string,
+    dto: { operador_externo: string; costo_externo_usd: number },
+    userId: string,
+  ) {
+    const current = await this.findById(id);
+    if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
+      throw new ConflictException(
+        `No se puede cubrir con externo en estado ${current.estado}.`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        es_externo: true,
+        operador_externo: dto.operador_externo.trim(),
+        costo_externo_usd: dto.costo_externo_usd,
+        aeronave_id: null,
+        piloto_id: null,
+        copiloto_id: null,
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    // Los tramos sueltan avión/piloto propios (la ruta se conserva).
+    await this.supabase.service
+      .from('escala')
+      .update({ aeronave_id: null, piloto_id: null })
+      .eq('vuelo_id', id);
+    void this.calendar.syncFlight(id);
+    return data!;
+  }
+
   async createExternal(dto: CreateExternalFlightDto, userId: string) {
     // MULTIESCALA opcional: con tramos, la ruta del vuelo se deriva de ellos.
     const legs = (dto.escalas ?? []).map((e) => ({

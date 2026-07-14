@@ -162,11 +162,14 @@ export class QuotesService {
     }
     const tiempoVueloHr = nmTotal / velocidadKts;
     const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
+    // SOBREVUELO (ej. sobrevolar la isla 0.5 hr): tiempo extra cobrable que
+    // se suma ANTES del mínimo de 1 hr.
+    const sobrevueloHr = Math.max(0, Number(dto.sobrevuelo_hr) || 0);
     // Hora mínima de facturación (regla del cliente, jul 2026): un vuelo corto
     // se cobra como hora completa — si el total del vuelo (tiempo + calzos)
     // queda debajo de 1 hr, se facturan 1.0 hr (0.8 → 1.0 × tarifa). Por
     // arriba de la hora se siguen cobrando las décimas reales.
-    const tiempoRealHr = tiempoVueloHr + calzosHr;
+    const tiempoRealHr = tiempoVueloHr + calzosHr + sobrevueloHr;
     const tiempoCobrableHr = Math.max(1, tiempoRealHr);
     const minimoHoraAplicado = tiempoRealHr < 1;
 
@@ -428,6 +431,7 @@ export class QuotesService {
       tiempos: {
         vuelo_hr: round4(tiempoVueloHr),
         calzos_hr: round4(calzosHr),
+        sobrevuelo_hr: round4(sobrevueloHr),
         cobrable_hr: round4(tiempoCobrableHr),
         // Vuelo corto: se facturó la hora completa (cobrable_hr = 1.0 aunque
         // el tiempo real vuelo+calzos fuera menor).
@@ -644,6 +648,14 @@ export class QuotesService {
         'cliente_id es obligatorio para crear la cotización',
       );
     }
+    // Vuelo CUBIERTO por operador externo: la cotización al cliente es normal
+    // (el avión elegido solo da tarifa/velocidad de referencia), pero el vuelo
+    // nace es_externo — sin avión propio ni tacómetros (estado manual).
+    if (dto.es_externo && !dto.operador_externo?.trim()) {
+      throw new BadRequestException(
+        'Indica el operador externo que cubre el vuelo.',
+      );
+    }
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
 
@@ -657,11 +669,13 @@ export class QuotesService {
 
     const insertPayload = {
       cliente_id: dto.cliente_id,
-      aeronave_id: dto.aeronave_id,
+      aeronave_id: dto.es_externo ? null : dto.aeronave_id,
       ruta_id: breakdown.ruta.id,
       tipo: dto.tipo ?? TipoVuelo.REDONDO,
       estado: 'COTIZADO',
-      es_externo: false,
+      es_externo: dto.es_externo === true,
+      operador_externo: dto.es_externo ? dto.operador_externo?.trim() : null,
+      costo_externo_usd: dto.es_externo ? (dto.costo_externo_usd ?? 0) : null,
       cotizacion_version: 1,
       origen_iata: breakdown.ruta.origen_iata,
       destino_iata: breakdown.ruta.destino_iata,
@@ -804,7 +818,9 @@ export class QuotesService {
       .update({
         cotizacion_version: newVersion,
         tipo: dto.tipo ?? current.tipo,
-        aeronave_id: dto.aeronave_id,
+        // Vuelo cubierto por externo: el avión del DTO es solo la REFERENCIA
+        // de tarifa para el cálculo; el vuelo se queda sin avión propio.
+        aeronave_id: current.es_externo ? null : dto.aeronave_id,
         ruta_id: breakdown.ruta.id,
         origen_iata: breakdown.ruta.origen_iata,
         destino_iata: breakdown.ruta.destino_iata,
@@ -895,15 +911,17 @@ export class QuotesService {
     userId: string,
   ) {
     const current = await this.findById(vueloId);
-    const metaSnapshot = (
-      current.calculo_snapshot as {
-        meta?: {
-          comision_billpocket_pct?: number | null;
-          redondeo_automatico?: boolean | null;
-          descuento_usd?: number | null;
-        };
-      } | null
-    )?.meta;
+    const snapshot = current.calculo_snapshot as {
+      meta?: {
+        comision_billpocket_pct?: number | null;
+        redondeo_automatico?: boolean | null;
+        descuento_usd?: number | null;
+      };
+      tiempos?: { sobrevuelo_hr?: number | null };
+      tuas?: { usd_pax_default?: number | null };
+      aeronave?: { id?: string | null };
+    } | null;
+    const metaSnapshot = snapshot?.meta;
     if (current.estado === 'RESERVA') {
       throw new ConflictException(
         'La reserva aún no tiene precios: cotízala primero (botón Cotizar).',
@@ -924,7 +942,10 @@ export class QuotesService {
     const oldPax = Number(current.pasajeros);
     const newPax = dto.pasajeros ?? oldPax;
     const reviseDto = {
-      aeronave_id: current.aeronave_id as string,
+      // Vuelo cubierto por externo: sin avión propio; se re-precia con el
+      // avión de REFERENCIA con el que se cotizó (vive en el snapshot).
+      aeronave_id: (current.aeronave_id ??
+        snapshot?.aeronave?.id) as string,
       tipo: TipoVuelo.MULTIESCALA,
       // Tramos tal como están persistidos. Si cambia el pax global, los tramos
       // que usaban el global anterior lo heredan (los personalizados se quedan).
@@ -973,6 +994,15 @@ export class QuotesService {
       // el ajuste ya redondeado) para no acumular redondeos entre revisiones.
       redondeo_automatico: metaSnapshot?.redondeo_automatico === true || undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
+      // El sobrevuelo pactado y el override de TUAS también se conservan.
+      sobrevuelo_hr:
+        Number(snapshot?.tiempos?.sobrevuelo_hr) > 0
+          ? Number(snapshot?.tiempos?.sobrevuelo_hr)
+          : undefined,
+      tuas_override_usd_pax:
+        snapshot?.tuas?.usd_pax_default != null
+          ? Number(snapshot.tuas.usd_pax_default)
+          : undefined,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
       tarifa_hora_override_usd:
         Number(current.tarifa_hora_usd) > 0

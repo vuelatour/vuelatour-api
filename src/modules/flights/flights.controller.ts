@@ -33,6 +33,7 @@ import {
   AssignFlightDto,
   CancelFlightDto,
   CreateExternalFlightDto,
+  CubrirExternoDto,
   CreateReservaDto,
   ReassignAircraftDto,
   ListFlightsQuery,
@@ -87,6 +88,20 @@ export class FlightsController {
     // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
     if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
     return this.flights.list(q);
+  }
+
+  @Post(':id/cubrir-externo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Cubre el vuelo con un operador externo: conserva la cotización al cliente, libera avión/piloto (sin tacómetros; estado manual). Repetido, actualiza operador/costo.',
+  })
+  cubrirExterno(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CubrirExternoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.cubrirConExterno(id, dto, c.userId);
   }
 
   @Post('external')

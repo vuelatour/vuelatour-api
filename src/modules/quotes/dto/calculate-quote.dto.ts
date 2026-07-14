@@ -323,6 +323,17 @@ export class CalculateQuoteDto {
   @Min(0.01)
   tc_usd_mxn?: number;
 
+  @ApiPropertyOptional({
+    description:
+      'Horas de SOBREVUELO (ej. sobrevolar la isla 0.5 hr): se suman al tiempo cobrable antes del mínimo de 1 hr.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(24)
+  sobrevuelo_hr?: number;
+
   @ApiPropertyOptional({ description: 'Tarifa por hora override (USD). Si null, usa la del avión.' })
   @IsOptional()
   @Type(() => Number)

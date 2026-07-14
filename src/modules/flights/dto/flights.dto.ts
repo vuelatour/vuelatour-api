@@ -241,6 +241,21 @@ export class EscalaExternaDto {
   es_ferry?: boolean;
 }
 
+/** Cubrir un vuelo existente con operador externo (conversión). */
+export class CubrirExternoDto {
+  @ApiProperty({ description: 'Operador externo (ej. XA-TIB)' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  operador_externo!: string;
+
+  @ApiProperty({ description: 'Lo que cobra el operador externo (USD)' })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_usd!: number;
+}
+
 export class CreateExternalFlightDto {
   @ApiProperty()
   @IsUUID()

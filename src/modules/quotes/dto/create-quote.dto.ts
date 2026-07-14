@@ -2,10 +2,14 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDate,
+  IsNumber,
   IsOptional,
   IsString,
   MaxLength,
+  Min,
+  MinLength,
 } from 'class-validator';
 import { ValidateNested } from 'class-validator';
 import { CalculateQuoteDto, TipoVuelo } from './calculate-quote.dto';
@@ -67,6 +71,29 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @IsString()
   @MaxLength(2000)
   notas?: string;
+
+  // ---- Vuelo CUBIERTO por operador externo (flujo normal del cotizador) ----
+  @ApiPropertyOptional({
+    description:
+      'El vuelo lo cubre un operador externo: la cotización al cliente es normal, pero el vuelo nace es_externo (sin avión propio, sin tacómetros; estado manual).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_externo?: boolean;
+
+  @ApiPropertyOptional({ description: 'Operador externo (ej. XA-TIB). Requerido si es_externo.' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  operador_externo?: string;
+
+  @ApiPropertyOptional({ description: 'Lo que cobra el operador externo (USD).' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_usd?: number;
 
   @ApiPropertyOptional({
     description: 'Notas internas del equipo (no van al cliente)',
