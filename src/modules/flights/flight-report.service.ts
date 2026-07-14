@@ -101,6 +101,16 @@ export class FlightReportService {
           ].join(' → ')
         : `${v.origen_iata as string} → ${v.destino_iata as string}`;
 
+    // pasajeros_nombres es ARREGLO en BD (manifiesto por tramo); el esquema
+    // del PDF espera TEXTO — un [] crudo tiraba TODO el reporte (422).
+    const nombresATexto = (v: unknown): string | null => {
+      if (Array.isArray(v)) {
+        const s = v.filter((x) => typeof x === 'string' && x.trim()).join(', ');
+        return s || null;
+      }
+      return typeof v === 'string' && v.trim() ? v : null;
+    };
+
     const tramos = escalas.map((e) => {
       const s = e.taco_salida == null ? null : n(e.taco_salida);
       const l = e.taco_llegada == null ? null : n(e.taco_llegada);
@@ -108,7 +118,7 @@ export class FlightReportService {
         orden: n(e.orden),
         ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
         pasajeros: e.pasajeros == null ? null : n(e.pasajeros),
-        pasajeros_nombres: (e.pasajeros_nombres as string | null) ?? null,
+        pasajeros_nombres: nombresATexto(e.pasajeros_nombres),
         taco_salida: s,
         taco_llegada: l,
         horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
@@ -228,7 +238,7 @@ export class FlightReportService {
       fecha_vuelo: (v.fecha_vuelo as string) ?? null,
       fecha_traslado_final: (v.fecha_traslado_final as string) ?? null,
       pasajeros: n(v.pasajeros),
-      pasajeros_nombres: (v.pasajeros_nombres as string | null) ?? null,
+      pasajeros_nombres: nombresATexto(v.pasajeros_nombres),
       tarifa_tipo: (v.tarifa_tipo as string) ?? null,
       tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
       tiempo_cobrable_hr: v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
