@@ -14,7 +14,10 @@ import {
 } from './dto/inventory.dto';
 
 const ITEM_COLS =
-  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, notas, activo, created_at, updated_at';
+  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, notas, foto_url, foto_storage_path, activo, created_at, updated_at';
+
+/** Bucket PÚBLICO de fotos de producto (el cliente sube; el API borra). */
+const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
   'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
 
@@ -330,6 +333,8 @@ export class InventoryService {
         ubicacion: dto.ubicacion ?? 'Bodega Cancún',
         unidad: dto.unidad || null,
         notas: dto.notas,
+        foto_url: dto.foto_url || null,
+        foto_storage_path: dto.foto_storage_path || null,
         created_by: userId,
         updated_by: userId,
       })
@@ -341,6 +346,14 @@ export class InventoryService {
 
   async updateItem(id: string, dto: UpdateInventarioItemDto, userId: string) {
     if (Object.keys(dto).length === 0) return this.findItem(id);
+    // Si cambia (o se quita) la foto, el archivo anterior se borra del bucket
+    // BEST-EFFORT con la service key — el cliente nunca borra de Storage.
+    let fotoAnterior: string | null = null;
+    if (dto.foto_storage_path !== undefined) {
+      const current = await this.findItem(id);
+      const previa = (current as { foto_storage_path?: string | null }).foto_storage_path ?? null;
+      if (previa && previa !== dto.foto_storage_path) fotoAnterior = previa;
+    }
     const { data, error } = await this.supabase.service
       .from('inventario_item')
       .update({ ...dto, updated_by: userId })
@@ -349,6 +362,12 @@ export class InventoryService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Ítem ${id} not found`);
+    if (fotoAnterior) {
+      void this.supabase.service.storage
+        .from(FOTOS_BUCKET)
+        .remove([fotoAnterior])
+        .catch(() => undefined);
+    }
     return data;
   }
 

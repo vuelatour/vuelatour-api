@@ -89,6 +89,25 @@ export class CreateInventarioItemDto {
   @MaxLength(50)
   categoria!: string;
 
+  @ApiPropertyOptional({
+    description:
+      'URL PÚBLICA de la foto del producto (bucket inventario-fotos; el cliente sube el archivo y manda aquí la URL). null = quitar la foto.',
+    maxLength: 1000,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(1000)
+  foto_url?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Path del archivo en el bucket (para borrar al reemplazar). null = quitar.',
+    maxLength: 500,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  foto_storage_path?: string | null;
+
   @ApiPropertyOptional({ description: 'Umbral de alerta de stock' })
   @IsOptional()
   @Type(() => Number)
