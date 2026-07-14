@@ -331,8 +331,26 @@ export class AircraftService {
 
     const { data, error, count } = await query;
     if (error) throw new Error(`list aeronaves failed: ${error.message}`);
+
+    // Foto principal de cada avión (galería aeronave_imagen): el listado del
+    // panel la muestra como avatar de la fila.
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    if (rows.length > 0) {
+      const { data: imgs } = await this.supabase.service
+        .from('aeronave_imagen')
+        .select('aeronave_id, url')
+        .in('aeronave_id', rows.map((a) => a.id as string))
+        .eq('es_principal', true);
+      const porAvion = new Map(
+        (imgs ?? []).map((i) => [i.aeronave_id as string, i.url as string]),
+      );
+      for (const a of rows) {
+        a.imagen_principal_url = porAvion.get(a.id as string) ?? null;
+      }
+    }
+
     return {
-      data: data ?? [],
+      data: rows,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
