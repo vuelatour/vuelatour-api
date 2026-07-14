@@ -977,20 +977,24 @@ export class FlightsService {
     // Horas voladas (escalas de vuelos COMPLETADOS) en el mes del vuelo.
     const horas = new Map<string, number>();
     if (fecha) {
-      const d = new Date(fecha);
-      const mDesde = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1)).toISOString();
-      const mHasta = new Date(
-        Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0, 23, 59, 59),
-      ).toISOString();
+      // Mes calendario en hora CANCÚN (regla del repo): con Date.UTC un vuelo
+      // del día último en la noche caía en el mes siguiente.
+      const diaCancun = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Cancun',
+      }).format(new Date(fecha));
+      const [anio, mes] = diaCancun.split('-').map(Number);
+      const ultimoDia = new Date(Date.UTC(anio, mes, 0)).getUTCDate();
+      const mDesde = `${diaCancun.slice(0, 7)}-01T00:00:00-05:00`;
+      const mHasta = `${diaCancun.slice(0, 7)}-${String(ultimoDia).padStart(2, '0')}T23:59:59-05:00`;
+      // Sin exigir piloto a nivel vuelo: el del tramo también cuenta.
       const { data: vuelosMes } = await this.supabase.service
         .from('vuelo')
         .select('id, piloto_id')
         .eq('estado', 'COMPLETADO')
-        .not('piloto_id', 'is', null)
         .gte('fecha_vuelo', mDesde)
         .lte('fecha_vuelo', mHasta);
       const pilotoPorVuelo = new Map(
-        (vuelosMes ?? []).map((v) => [v.id as string, v.piloto_id as string]),
+        (vuelosMes ?? []).map((v) => [v.id as string, v.piloto_id as string | null]),
       );
       const ids = [...pilotoPorVuelo.keys()];
       if (ids.length) {

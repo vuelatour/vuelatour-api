@@ -454,43 +454,27 @@ export class DashboardsService {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
 
-    // Mes en curso (para el control del límite de 90 hrs).
-    const now = new Date();
-    const mesDesde = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
-    )
-      .toISOString()
-      .slice(0, 10);
-    const mesHasta = now.toISOString().slice(0, 10);
+    // Mes en curso para el control del límite de 90 hrs — corte en hora
+    // Cancún (regla del repo), no UTC: un vuelo del día 31 en la noche caía
+    // en el mes equivocado.
+    const hoyCancun = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+    }).format(new Date());
+    const mesDesde = `${hoyCancun.slice(0, 7)}-01`;
+    const mesHasta = hoyCancun;
 
     const [vuelosPeriodo, vuelosMes] = await Promise.all([
       this.fetchVuelosCompletadosConPiloto(q.desde, q.hasta),
       this.fetchVuelosCompletadosConPiloto(mesDesde, mesHasta),
     ]);
 
-    const ids = [
-      ...new Set(
-        [...vuelosPeriodo, ...vuelosMes].map((v) => v.id),
-      ),
-    ];
-    const horasPorVuelo = await this.horasPorVuelo(ids);
-
-    const periodoPorPiloto = new Map<string, { horas: number; vuelos: number }>();
-    for (const v of vuelosPeriodo) {
-      if (!v.piloto_id) continue;
-      const h = horasPorVuelo.get(v.id) ?? 0;
-      const prev = periodoPorPiloto.get(v.piloto_id) ?? { horas: 0, vuelos: 0 };
-      prev.horas += h;
-      prev.vuelos += 1;
-      periodoPorPiloto.set(v.piloto_id, prev);
-    }
-
-    const mesPorPiloto = new Map<string, number>();
-    for (const v of vuelosMes) {
-      if (!v.piloto_id) continue;
-      const h = horasPorVuelo.get(v.id) ?? 0;
-      mesPorPiloto.set(v.piloto_id, (mesPorPiloto.get(v.piloto_id) ?? 0) + h);
-    }
+    // Horas POR TRAMO: la ida y el regreso pueden volarlos pilotos distintos
+    // (asignación por tramo) — atribuir todo el vuelo al piloto principal
+    // inflaba al de la ida y desaparecía al del regreso.
+    const [periodoPorPiloto, mesPorPiloto] = await Promise.all([
+      this.horasPorPilotoTramo(vuelosPeriodo),
+      this.horasPorPilotoTramo(vuelosMes),
+    ]);
 
     const pilotoIds = [
       ...new Set([...periodoPorPiloto.keys(), ...mesPorPiloto.keys()]),
@@ -499,13 +483,13 @@ export class DashboardsService {
 
     const pilotos = pilotoIds
       .map((id) => {
-        const periodo = periodoPorPiloto.get(id) ?? { horas: 0, vuelos: 0 };
-        const horasMes = round2(mesPorPiloto.get(id) ?? 0);
+        const periodo = periodoPorPiloto.get(id) ?? { horas: 0, vuelos: new Set<string>() };
+        const horasMes = round2(mesPorPiloto.get(id)?.horas ?? 0);
         return {
           piloto_id: id,
           nombre: nombres.get(id) ?? 'Piloto',
           horas_periodo: round2(periodo.horas),
-          vuelos_periodo: periodo.vuelos,
+          vuelos_periodo: periodo.vuelos.size,
           horas_mes_actual: horasMes,
           limite_horas_mes: LIMITE_HORAS_MES,
           excede_limite: horasMes > LIMITE_HORAS_MES,
@@ -711,15 +695,57 @@ export class DashboardsService {
     desde: string,
     hasta: string,
   ): Promise<Array<{ id: string; piloto_id: string | null }>> {
+    // Sin exigir piloto a nivel vuelo: el piloto puede vivir solo en el
+    // tramo (ida/regreso con pilotos distintos) y esas horas también cuentan.
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('id, piloto_id')
       .eq('estado', 'COMPLETADO')
-      .not('piloto_id', 'is', null)
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
     return (data as Array<{ id: string; piloto_id: string | null }> | null) ?? [];
+  }
+
+  /**
+   * Horas voladas por PILOTO a partir de los tacómetros de cada tramo
+   * (taco_llegada − taco_salida), atribuidas al piloto del tramo o, si el
+   * tramo no tiene, al piloto del vuelo — la MISMA regla que el perfil del
+   * piloto en la app (users.horasDelMes) y el semáforo de asignación.
+   */
+  private async horasPorPilotoTramo(
+    vuelos: Array<{ id: string; piloto_id: string | null }>,
+  ): Promise<Map<string, { horas: number; vuelos: Set<string> }>> {
+    const out = new Map<string, { horas: number; vuelos: Set<string> }>();
+    if (vuelos.length === 0) return out;
+    const pilotoPorVuelo = new Map(vuelos.map((v) => [v.id, v.piloto_id]));
+    const ids = vuelos.map((v) => v.id);
+    const CHUNK = 200;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const slice = ids.slice(i, i + CHUNK);
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .select('vuelo_id, piloto_id, taco_salida, taco_llegada')
+        .in('vuelo_id', slice);
+      if (error) throw new Error(error.message);
+      for (const e of (data as Array<Record<string, unknown>> | null) ?? []) {
+        const salida = e.taco_salida === null ? NaN : Number(e.taco_salida);
+        const llegada = e.taco_llegada === null ? NaN : Number(e.taco_llegada);
+        if (!Number.isFinite(salida) || !Number.isFinite(llegada) || llegada <= salida) {
+          continue;
+        }
+        const pid =
+          (e.piloto_id as string | null) ??
+          pilotoPorVuelo.get(e.vuelo_id as string) ??
+          null;
+        if (!pid) continue;
+        const prev = out.get(pid) ?? { horas: 0, vuelos: new Set<string>() };
+        prev.horas += llegada - salida;
+        prev.vuelos.add(e.vuelo_id as string);
+        out.set(pid, prev);
+      }
+    }
+    return out;
   }
 
   private async fetchTitularesTarjeta(
