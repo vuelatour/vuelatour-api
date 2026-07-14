@@ -1471,7 +1471,11 @@ export class FlightsService {
    */
   async cubrirConExterno(
     id: string,
-    dto: { operador_externo: string; costo_externo_usd: number },
+    dto: {
+      operador_externo: string;
+      costo_externo_usd: number;
+      tc_usd_mxn?: number;
+    },
     userId: string,
   ) {
     const current = await this.findById(id);
@@ -1480,6 +1484,8 @@ export class FlightsService {
         `No se puede cubrir con externo en estado ${current.estado}.`,
       );
     }
+    // TC pactado: sin él, un vuelo en USD no se puede facturar (CFDI en MXN).
+    const tc = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({
@@ -1489,6 +1495,13 @@ export class FlightsService {
         aeronave_id: null,
         piloto_id: null,
         copiloto_id: null,
+        ...(tc
+          ? {
+              tc_usd_mxn: tc,
+              monto_total_mxn:
+                Math.round(Number(current.monto_total_usd) * tc * 100) / 100,
+            }
+          : {}),
         updated_by: userId,
       })
       .eq('id', id)
@@ -1547,6 +1560,13 @@ export class FlightsService {
       // Sin método, el vuelo jamás aparecía en Facturas hasta cobrarse (los
       // facturables entran a la bandeja ANTES del cobro — pedido de Itzy).
       metodo_cobro: dto.metodo_cobro ?? 'TRANSFERENCIA',
+      // TC pactado (opcional): sin MXN el CFDI no se puede emitir; también se
+      // puede capturar después, al emitir la factura.
+      tc_usd_mxn: Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null,
+      monto_total_mxn:
+        Number(dto.tc_usd_mxn) > 0
+          ? Math.round(dto.monto_total_usd * Number(dto.tc_usd_mxn) * 100) / 100
+          : null,
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_confirmacion: new Date().toISOString(),
       notas: dto.notas,

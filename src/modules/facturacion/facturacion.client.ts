@@ -18,7 +18,17 @@ export interface TimbrarPayload {
     regimen_fiscal: string;
     uso_cfdi: string;
   };
-  conceptos: Array<{ descripcion: string; valor_unitario: number; cantidad?: number }>;
+  conceptos: Array<{
+    descripcion: string;
+    valor_unitario: number;
+    cantidad?: number;
+    /**
+     * IVA residual (total − subtotal) para que subtotal + IVA cuadre EXACTO
+     * con el total cobrado. Aditivo: pyservices hoy recalcula el 16% y lo
+     * ignora; debe adoptar este campo para cerrar el centavo en montos límite.
+     */
+    iva?: number;
+  }>;
   /** PÚBLICO EN GENERAL (XAXX010101000): nodo InformacionGlobal del CFDI 4.0. */
   informacion_global?: { periodicidad: string; meses: string; anio: number };
   csd_cer_b64: string;
@@ -66,7 +76,11 @@ export class FacturacionClient implements OnModuleInit {
   private readonly logger = new Logger(FacturacionClient.name);
   private baseUrl = '';
   private token = '';
-  private timeoutMs = 45000;
+  // Este cliente SOLO atiende timbrado/cancelación: pyservices reintenta
+  // contra el PAC (hasta ~5 requests × 60 s) y abortar a los 45 s dejaba el
+  // timbrado corriendo del otro lado — el reintento del operador duplicaba
+  // el CFDI. Los demás consumos de pyservices tienen su propio cliente.
+  private timeoutMs = 180000;
 
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 

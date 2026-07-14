@@ -9,7 +9,11 @@ import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
-import { FacturacionClient, type TimbrarPayload } from './facturacion.client';
+import {
+  FacturacionClient,
+  type TimbrarPayload,
+  type TimbrarResult,
+} from './facturacion.client';
 import type { UpdateRecibidaDto } from './dto/invoices.dto';
 
 interface ListPendientesFilters {
@@ -35,10 +39,25 @@ interface EmitirInput extends FacturadoA {
   /** Venta al PÚBLICO EN GENERAL (XAXX010101000): el cliente no pide factura. */
   publico_en_general?: boolean;
   periodicidad?: string;
+  /** TC MXN/USD pactado para vuelos cotizados en USD sin TC (externos). */
+  tc_usd_mxn?: number;
 }
 
 /** Métodos con los que se puede facturar ANTES del cobro (pedido de Itzy). */
 const METODOS_FACTURABLES = new Set(['TRANSFERENCIA', 'HSBC_LINK', 'BILLPOCKET', 'CHEQUE']);
+
+/**
+ * c_FormaPago del SAT por método de cobro interno: hardcodear '03'
+ * (transferencia) declaraba mal los cobros en efectivo, terminal o cheque.
+ */
+const FORMA_PAGO_SAT: Record<string, string> = {
+  EFECTIVO: '01',
+  DOLARES: '01', // efectivo en dólares: mismo c_FormaPago 01
+  CHEQUE: '02',
+  TRANSFERENCIA: '03',
+  HSBC_LINK: '03', // el link HSBC liquida vía transferencia/SPEI
+  BILLPOCKET: '04', // terminal = tarjeta de crédito
+};
 
 interface CancelarInput {
   motivo: string;
@@ -294,8 +313,24 @@ export class InvoicesService {
       )
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .range(f.offset, f.offset + f.limit - 1);
-    if (f.desde) q = q.gte('fecha_vuelo', f.desde);
-    if (f.hasta) q = q.lte('fecha_vuelo', f.hasta);
+    // Fechas planas se anclan a hora Cancún (invariante #4): 'YYYY-MM-DD' a
+    // secas corta en UTC y mueve vuelos de día/mes en el listado de pendientes.
+    if (f.desde) {
+      q = q.gte(
+        'fecha_vuelo',
+        /^\d{4}-\d{2}-\d{2}$/.test(f.desde)
+          ? `${f.desde}T00:00:00-05:00`
+          : f.desde,
+      );
+    }
+    if (f.hasta) {
+      q = q.lte(
+        'fecha_vuelo',
+        /^\d{4}-\d{2}-\d{2}$/.test(f.hasta)
+          ? `${f.hasta}T23:59:59-05:00`
+          : f.hasta,
+      );
+    }
     if (f.cliente_id) q = q.eq('cliente_id', f.cliente_id);
 
     const { data, error, count } = await q;
@@ -333,7 +368,10 @@ export class InvoicesService {
     let q = this.supabase.service
       .from('factura')
       .select(
-        `${FACTURA_COLS}, vuelo:vuelo_id(folio, origen_iata, destino_iata), emisora:entidad_fiscal_emisora_id(codigo, razon_social)`,
+        // El RFC del cliente permite al panel distinguir el caso 9.7 "SE
+        // FACTURÓ A" (receptor ≠ cliente): facturado_a_* ahora se persiste en
+        // TODAS las facturas (lo exige la cancelación), no solo en alternos.
+        `${FACTURA_COLS}, vuelo:vuelo_id(folio, origen_iata, destino_iata, cliente:cliente_id(rfc)), emisora:entidad_fiscal_emisora_id(codigo, razon_social)`,
         { count: 'exact' },
       )
       .order('created_at', { ascending: false })
@@ -373,7 +411,7 @@ export class InvoicesService {
     const { data: vuelo, error: vErr } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, cliente_id, estado, origen_iata, destino_iata, cobrado, facturado, metodo_cobro, monto_total_usd, monto_total_mxn, tc_usd_mxn',
+        'id, folio, cliente_id, estado, origen_iata, destino_iata, fecha_vuelo, cobrado, facturado, metodo_cobro, monto_total_usd, monto_total_mxn, tc_usd_mxn',
       )
       .eq('id', vueloId)
       .maybeSingle();
@@ -389,6 +427,19 @@ export class InvoicesService {
       );
     }
     if (vuelo.estado === 'CANCELADO') throw new ConflictException('El vuelo está cancelado.');
+    // Antes del cobro solo se facturan vuelos ya confirmados/operados: timbrar
+    // una cotización o reserva suelta emite CFDI de servicios que pueden no
+    // prestarse nunca (y obliga a cancelarlos ante el SAT).
+    if (
+      !vuelo.cobrado &&
+      !['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'].includes(
+        (vuelo.estado as string) ?? '',
+      )
+    ) {
+      throw new ConflictException(
+        'Solo vuelos confirmados/en vuelo/completados se facturan antes del cobro.',
+      );
+    }
 
     // Receptor (cliente) — datos fiscales obligatorios CFDI 4.0.
     const { data: cliente, error: cErr } = await this.supabase.service
@@ -466,61 +517,134 @@ export class InvoicesService {
 
     // Importes en MXN. NOTA: mapeo simplificado (un concepto, IVA 16%); validar
     // contra FEL pruebas antes de producción.
-    const totalMxn =
+    let totalMxn =
       Number(vuelo.monto_total_mxn) ||
       Number(vuelo.monto_total_usd) * (Number(vuelo.tc_usd_mxn) || 0);
-    if (!totalMxn || totalMxn <= 0) {
-      throw new BadRequestException('El vuelo no tiene monto en MXN para facturar.');
+    if (
+      (!totalMxn || totalMxn <= 0) &&
+      input.tc_usd_mxn &&
+      Number(vuelo.monto_total_usd) > 0
+    ) {
+      // Vuelos cotizados en USD sin TC (externos): el TC del DTO es el TC
+      // PACTADO de la operación, así que se PERSISTE en el vuelo — cobrosEnUsd
+      // (invariante #2) lo usa de respaldo y reparto/reportes ven el mismo MXN
+      // que el CFDI, sin crear un cálculo paralelo.
+      totalMxn =
+        Math.round(Number(vuelo.monto_total_usd) * input.tc_usd_mxn * 100) /
+        100;
+      const { error: tcErr } = await this.supabase.service
+        .from('vuelo')
+        .update({
+          tc_usd_mxn: input.tc_usd_mxn,
+          monto_total_mxn: totalMxn,
+          updated_by: userId,
+        })
+        .eq('id', vuelo.id);
+      if (tcErr) throw new Error(tcErr.message);
     }
+    if (!totalMxn || totalMxn <= 0) {
+      throw new BadRequestException(
+        'El vuelo no tiene monto en MXN para facturar (registra el monto MXN o envía tc_usd_mxn).',
+      );
+    }
+    // IVA residual (total − subtotal redondeado): redondear subtotal e IVA por
+    // separado descuadraba 1 centavo en ciertos montos y el CFDI dejaba de
+    // cuadrar contra el cobro registrado (fiabilidad del cierre).
     const valorUnitario = Math.round((totalMxn / 1.16) * 100) / 100;
+    const iva = Math.round((totalMxn - valorUnitario) * 100) / 100;
 
     if (esPublicoGeneral) {
       receptor.domicilio_fiscal = emisora.codigo_postal as string;
     }
-    // Nodo InformacionGlobal (obligatorio con XAXX010101000): periodicidad
-    // elegida (default mensual) con mes/año actuales en hora Cancún.
-    const hoyCancun = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'America/Cancun',
-    }).format(new Date());
+    // Nodo InformacionGlobal (obligatorio con XAXX010101000): el periodo
+    // fiscal es el del VUELO (hora Cancún), no el del día en que se emite —
+    // facturar en los primeros días del mes siguiente no debe mover la venta.
     const informacionGlobal = esPublicoGeneral
-      ? {
-          periodicidad: input.periodicidad ?? '04',
-          meses: hoyCancun.slice(5, 7),
-          anio: Number(hoyCancun.slice(0, 4)),
-        }
+      ? this.informacionGlobalPara(
+          input.periodicidad,
+          vuelo.fecha_vuelo as string | null,
+        )
       : undefined;
 
-    const result = await this.fel.timbrar({
-      referencia: `VT-${vuelo.folio}`,
-      moneda: 'MXN',
-      forma_pago: '03',
-      metodo_pago: 'PUE',
-      lugar_expedicion: emisora.codigo_postal as string,
-      informacion_global: informacionGlobal,
-      emisor: {
-        rfc: emisora.rfc as string,
-        nombre: emisora.razon_social as string,
-        regimen_fiscal: emisora.regimen_fiscal_sat as string,
-      },
-      receptor,
-      conceptos: [
-        {
-          descripcion: `Servicio de transporte aéreo ${vuelo.origen_iata} → ${vuelo.destino_iata} (folio #${vuelo.folio})`,
-          valor_unitario: valorUnitario,
-          cantidad: 1,
-        },
-      ],
-      csd_cer_b64: cerB64,
-      csd_key_b64: keyB64,
-      csd_password: csdPassword,
-    });
+    // Forma/método de pago SAT reales del cobro: hardcodear '03'/PUE declaraba
+    // mal efectivo, terminal y cheque. Sin cobro aún → '99 por definir' + PPD;
+    // el complemento de pago REP (fase A2 del plan) queda pendiente para
+    // cerrar el ciclo PPD cuando entre el cobro.
+    const formaPago = vuelo.cobrado
+      ? (FORMA_PAGO_SAT[(vuelo.metodo_cobro as string) ?? ''] ?? '99')
+      : '99';
+    const metodoPago = vuelo.cobrado ? 'PUE' : 'PPD';
 
-    if (!result.ok) {
-      throw new BadRequestException(result.error ?? 'No se pudo timbrar el CFDI.');
+    // Referencia única POR EMISIÓN (no por vuelo): al refacturar tras una
+    // cancelación, repetir `VT-<folio>` chocaba con el UNIQUE de
+    // fel_referencia y el path de Storage pisaba el XML de la cancelada.
+    const referencia = `VT-${vuelo.folio}-${Date.now().toString(36)}`;
+
+    // Candado anti doble emisión (compare-and-set): el vuelo se marca
+    // facturado ANTES de llamar al PAC. Marcarlo al final permitía que un
+    // doble click (o dos requests concurrentes) pasara dos veces la
+    // validación y timbrara DOS CFDI del mismo vuelo.
+    const { data: lock, error: lockErr } = await this.supabase.service
+      .from('vuelo')
+      .update({ facturado: true, updated_by: userId })
+      .eq('id', vuelo.id)
+      .eq('facturado', false)
+      .select('id');
+    if (lockErr) throw new Error(lockErr.message);
+    if (!lock || lock.length === 0) {
+      throw new ConflictException(
+        'El vuelo ya tiene una emisión en curso o factura timbrada.',
+      );
     }
 
-    // Guarda XML/PDF en storage.
-    const { xmlPath, pdfPath } = await this.uploadCfdiFiles(`${vuelo.id}/VT-${vuelo.folio}`, result);
+    let result: TimbrarResult;
+    try {
+      result = await this.fel.timbrar({
+        referencia,
+        moneda: 'MXN',
+        forma_pago: formaPago,
+        metodo_pago: metodoPago,
+        lugar_expedicion: emisora.codigo_postal as string,
+        informacion_global: informacionGlobal,
+        emisor: {
+          rfc: emisora.rfc as string,
+          nombre: emisora.razon_social as string,
+          regimen_fiscal: emisora.regimen_fiscal_sat as string,
+        },
+        receptor,
+        conceptos: [
+          {
+            descripcion: `Servicio de transporte aéreo ${vuelo.origen_iata} → ${vuelo.destino_iata} (folio #${vuelo.folio})`,
+            valor_unitario: valorUnitario,
+            cantidad: 1,
+            iva,
+          },
+        ],
+        csd_cer_b64: cerB64,
+        csd_key_b64: keyB64,
+        csd_password: csdPassword,
+      });
+      if (!result.ok) {
+        throw new BadRequestException(
+          result.error ?? 'No se pudo timbrar el CFDI.',
+        );
+      }
+    } catch (err) {
+      // El timbrado NO se concretó: se libera el candado para poder
+      // reintentar. Con timbrado exitoso el vuelo ya quedó facturado=true,
+      // así que no hay update post-éxito que pueda perderse.
+      await this.supabase.service
+        .from('vuelo')
+        .update({ facturado: false, updated_by: userId })
+        .eq('id', vuelo.id);
+      throw err;
+    }
+
+    // Guarda XML/PDF en storage (path por emisión: nunca pisa una cancelada).
+    const { xmlPath, pdfPath } = await this.uploadCfdiFiles(
+      `${vuelo.id}/${referencia}`,
+      result,
+    );
 
     const { data: factura, error: fErr } = await this.supabase.service
       .from('factura')
@@ -534,26 +658,25 @@ export class InvoicesService {
         pac_id: result.pac_id ?? null,
         total: totalMxn,
         moneda: 'MXN',
-        fel_referencia: `VT-${vuelo.folio}`,
+        fel_referencia: referencia,
         xml_url: xmlPath,
         pdf_url: pdfPath,
         fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
-        // Receptor alterno (caso 9.7 "SE FACTURÓ A"); NULL si se facturó al cliente del vuelo.
-        facturado_a_rfc: usaReceptorAlterno ? receptor.rfc : null,
-        facturado_a_nombre: usaReceptorAlterno ? receptor.nombre : null,
-        facturado_a_regimen: usaReceptorAlterno ? receptor.regimen_fiscal : null,
-        facturado_a_cp: usaReceptorAlterno ? receptor.domicilio_fiscal : null,
-        facturado_a_uso_cfdi: usaReceptorAlterno ? receptor.uso_cfdi : null,
+        // Receptor EFECTIVO del CFDI (cliente, alterno 9.7 o público en
+        // general), SIEMPRE persistido: cancelar() lo manda a FEL (que lo
+        // exige) y la nota de crédito debe salir al MISMO receptor del CFDI
+        // original — reconstruirlo del cliente del vuelo timbraba mal las
+        // facturas de público en general.
+        facturado_a_rfc: receptor.rfc,
+        facturado_a_nombre: receptor.nombre,
+        facturado_a_regimen: receptor.regimen_fiscal,
+        facturado_a_cp: receptor.domicilio_fiscal,
+        facturado_a_uso_cfdi: receptor.uso_cfdi,
         created_by: userId,
       })
       .select(FACTURA_COLS)
       .maybeSingle();
     if (fErr) throw new Error(fErr.message);
-
-    await this.supabase.service
-      .from('vuelo')
-      .update({ facturado: true, updated_by: userId })
-      .eq('id', vuelo.id);
 
     return factura;
   }
@@ -579,12 +702,20 @@ export class InvoicesService {
 
     const emisora = await this.getEmisora(factura.entidad_fiscal_emisora_id as string);
 
+    // FEL exige el RFC receptor en el detalle de cancelación. Las facturas
+    // nuevas persisten SIEMPRE el receptor efectivo en facturado_a_*; para
+    // filas viejas (solo guardaban el alterno) se reconstruye del cliente —
+    // mandar null hacía rechazar la cancelación de facturas normales.
+    const rfcReceptor =
+      (factura.facturado_a_rfc as string | null) ??
+      (factura.cliente_id ? (await this.receptorDeFactura(factura)).rfc : null);
+
     const result = await this.fel.cancelar({
       uuid: factura.uuid_fiscal as string,
       rfc_emisor: emisora.rfc as string,
       motivo: dto.motivo,
       folio_sustitucion: dto.folio_sustitucion ?? null,
-      rfc_receptor: (factura.facturado_a_rfc as string | null) ?? null,
+      rfc_receptor: rfcReceptor,
       total: factura.total != null ? Number(factura.total) : null,
       // Facturama cancela por su Id de plataforma (null si se timbró con FEL).
       pac_id: (factura.pac_id as string | null) ?? null,
@@ -658,7 +789,49 @@ export class InvoicesService {
     if (!montoTotal || montoTotal <= 0) {
       throw new BadRequestException('Monto de la nota de crédito inválido.');
     }
+    // Tope de acreditación: la suma de notas TIMBRADAS sobre la misma factura
+    // no puede exceder su total — el SAT rechaza egresos mayores al CFDI
+    // relacionado y el excedente inflaría lo acreditado en el cierre.
+    const { data: previas, error: ncPrevErr } = await this.supabase.service
+      .from('factura')
+      .select('total')
+      .eq('factura_relacionada_id', original.id as string)
+      .eq('tipo_comprobante', 'E')
+      .eq('estado', 'TIMBRADA');
+    if (ncPrevErr) throw new Error(ncPrevErr.message);
+    const acreditado = (
+      (previas ?? []) as Array<{ total: number | null }>
+    ).reduce((suma, nc) => suma + Number(nc.total ?? 0), 0);
+    const disponible =
+      Math.round((Number(original.total) - acreditado) * 100) / 100;
+    if (montoTotal > disponible) {
+      throw new BadRequestException(
+        `El monto excede lo acreditable: restan $${disponible.toFixed(2)} ` +
+          `${(original.moneda as string) ?? 'MXN'} disponibles ` +
+          `(ya hay $${acreditado.toFixed(2)} en notas de crédito timbradas sobre esta factura).`,
+      );
+    }
+    // IVA residual (mismo criterio que la emisión): subtotal + IVA reproduce
+    // exacto el monto acreditado, sin descuadre de 1 centavo.
     const valorUnitario = Math.round((montoTotal / 1.16) * 100) / 100;
+    const iva = Math.round((montoTotal - valorUnitario) * 100) / 100;
+
+    // CFDI global: si la original fue a PÚBLICO EN GENERAL, el SAT exige el
+    // nodo InformacionGlobal también en el Egreso relacionado — mismo periodo
+    // que la emisión (mes del vuelo en hora Cancún).
+    let informacionGlobal: TimbrarPayload['informacion_global'];
+    if ((original.facturado_a_rfc as string | null) === 'XAXX010101000') {
+      let fechaVuelo: string | null = null;
+      if (original.vuelo_id) {
+        const { data: vuelo } = await this.supabase.service
+          .from('vuelo')
+          .select('fecha_vuelo')
+          .eq('id', original.vuelo_id as string)
+          .maybeSingle();
+        fechaVuelo = (vuelo?.fecha_vuelo as string | null) ?? null;
+      }
+      informacionGlobal = this.informacionGlobalPara(undefined, fechaVuelo);
+    }
 
     // Sufijo corto para no colisionar con el UNIQUE de fel_referencia si se emiten
     // varias notas (créditos parciales) sobre la misma factura.
@@ -666,12 +839,15 @@ export class InvoicesService {
     const payload: TimbrarPayload = {
       referencia,
       moneda: (original.moneda as string) ?? 'MXN',
-      forma_pago: '03',
+      // La NC acredita un pago ya aplicado: siempre PUE, con la forma de pago
+      // de la original ('03' de respaldo mientras factura no la persista).
+      forma_pago: (original.forma_pago as string | null) ?? '03',
       metodo_pago: 'PUE',
       lugar_expedicion: emisora.codigo_postal as string,
       tipo_comprobante: 'E',
       cfdi_relacionado_uuid: original.uuid_fiscal as string,
       tipo_relacion: dto.tipo_relacion ?? '01',
+      informacion_global: informacionGlobal,
       emisor: {
         rfc: emisora.rfc as string,
         nombre: emisora.razon_social as string,
@@ -684,6 +860,7 @@ export class InvoicesService {
             dto.descripcion ?? `Nota de crédito sobre CFDI ${original.uuid_fiscal}`,
           valor_unitario: valorUnitario,
           cantidad: 1,
+          iva,
         },
       ],
       csd_cer_b64: cerB64,
@@ -718,11 +895,14 @@ export class InvoicesService {
         xml_url: xmlPath,
         pdf_url: pdfPath,
         fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
-        facturado_a_rfc: original.facturado_a_rfc ?? null,
-        facturado_a_nombre: original.facturado_a_nombre ?? null,
-        facturado_a_regimen: original.facturado_a_regimen ?? null,
-        facturado_a_cp: original.facturado_a_cp ?? null,
-        facturado_a_uso_cfdi: original.facturado_a_uso_cfdi ?? null,
+        // Receptor EFECTIVO con el que se timbró la NC (en facturas viejas
+        // facturado_a_* venía NULL y la fila quedaba sin receptor): así su
+        // propia cancelación no depende de reconstruirlo.
+        facturado_a_rfc: receptor.rfc,
+        facturado_a_nombre: receptor.nombre,
+        facturado_a_regimen: receptor.regimen_fiscal,
+        facturado_a_cp: receptor.domicilio_fiscal,
+        facturado_a_uso_cfdi: receptor.uso_cfdi,
         created_by: userId,
       })
       .select(FACTURA_COLS)
@@ -790,7 +970,31 @@ export class InvoicesService {
     };
   }
 
-  /** Sube XML/PDF (base64) al bucket privado `facturas` y devuelve sus paths. */
+  /**
+   * Nodo InformacionGlobal (público en general): el periodo fiscal es el del
+   * VUELO (hora Cancún) cuando se conoce su fecha — emitir a inicios del mes
+   * siguiente no debe mover la venta de periodo — y solo de respaldo el actual.
+   */
+  private informacionGlobalPara(
+    periodicidad?: string,
+    fechaRef?: string | null,
+  ) {
+    const fecha = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+    }).format(fechaRef ? new Date(fechaRef) : new Date());
+    return {
+      periodicidad: periodicidad ?? '04',
+      meses: fecha.slice(5, 7),
+      anio: Number(fecha.slice(0, 4)),
+    };
+  }
+
+  /**
+   * Sube XML/PDF (base64) al bucket privado `facturas` y devuelve sus paths.
+   * Si un upload falla se devuelve null para ese archivo: persistir un path
+   * que no se escribió rompería descargas y el zip de cierre en silencio
+   * (el XML siempre se puede re-descargar del PAC vía pac_id/uuid).
+   */
   private async uploadCfdiFiles(
     base: string,
     result: { xml_b64?: string | null; pdf_b64?: string | null },
@@ -798,22 +1002,36 @@ export class InvoicesService {
     let xmlPath: string | null = null;
     let pdfPath: string | null = null;
     if (result.xml_b64) {
-      xmlPath = `${base}.xml`;
-      await this.supabase.service.storage
+      const path = `${base}.xml`;
+      const { error } = await this.supabase.service.storage
         .from('facturas')
-        .upload(xmlPath, Buffer.from(result.xml_b64, 'base64'), {
+        .upload(path, Buffer.from(result.xml_b64, 'base64'), {
           contentType: 'application/xml',
           upsert: true,
         });
+      if (error) {
+        this.logger.error(
+          `No se pudo subir el XML del CFDI a ${path}: ${error.message}`,
+        );
+      } else {
+        xmlPath = path;
+      }
     }
     if (result.pdf_b64) {
-      pdfPath = `${base}.pdf`;
-      await this.supabase.service.storage
+      const path = `${base}.pdf`;
+      const { error } = await this.supabase.service.storage
         .from('facturas')
-        .upload(pdfPath, Buffer.from(result.pdf_b64, 'base64'), {
+        .upload(path, Buffer.from(result.pdf_b64, 'base64'), {
           contentType: 'application/pdf',
           upsert: true,
         });
+      if (error) {
+        this.logger.error(
+          `No se pudo subir el PDF del CFDI a ${path}: ${error.message}`,
+        );
+      } else {
+        pdfPath = path;
+      }
     }
     return { xmlPath, pdfPath };
   }

@@ -267,6 +267,18 @@ export class CubrirExternoDto {
   @IsNumber()
   @Min(0)
   costo_externo_usd!: number;
+
+  @ApiPropertyOptional({
+    description:
+      'TC MXN por USD pactado. Sin él, un vuelo cotizado en USD no se puede ' +
+      'facturar (el CFDI se emite en MXN).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  tc_usd_mxn?: number;
 }
 
 export class CreateExternalFlightDto {
@@ -302,6 +314,18 @@ export class CreateExternalFlightDto {
   @IsOptional()
   @IsEnum(MetodoPago)
   metodo_cobro?: MetodoPago;
+
+  @ApiPropertyOptional({
+    description:
+      'TC MXN por USD pactado. Sin él, el vuelo (cotizado en USD) no se ' +
+      'puede facturar hasta capturar el TC al emitir.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  tc_usd_mxn?: number;
 
   @ApiProperty()
   @IsString()

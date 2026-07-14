@@ -131,6 +131,17 @@ export class EmitirFacturaDto {
   @IsOptional()
   @IsIn(['01', '02', '03', '04'])
   periodicidad?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'TC MXN/USD para facturar vuelos cotizados en USD sin TC (externos): se persiste en el vuelo como TC pactado.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  tc_usd_mxn?: number;
 }
 
 export class CancelarFacturaDto {
