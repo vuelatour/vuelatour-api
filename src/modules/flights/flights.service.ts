@@ -1441,6 +1441,7 @@ export class FlightsService {
     const legs = (dto.escalas ?? []).map((e) => ({
       origen_iata: e.origen_iata.toUpperCase(),
       destino_iata: e.destino_iata.toUpperCase(),
+      es_ferry: e.es_ferry === true,
     }));
     for (const l of legs) {
       if (l.origen_iata === l.destino_iata) {
@@ -1500,7 +1501,8 @@ export class FlightsService {
           orden: i + 1,
           origen_iata: l.origen_iata,
           destino_iata: l.destino_iata,
-          pasajeros: dto.pasajeros,
+          es_ferry: l.es_ferry,
+          pasajeros: l.es_ferry ? 0 : dto.pasajeros,
           // El primer tramo sale a la hora del vuelo (espejo estándar).
           fecha_salida_plan: i === 0 ? dto.fecha_vuelo?.toISOString() : null,
           created_by: userId,

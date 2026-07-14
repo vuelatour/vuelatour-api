@@ -234,6 +234,11 @@ export class EscalaExternaDto {
   @IsString()
   @Length(3, 4)
   destino_iata!: string;
+
+  @ApiPropertyOptional({ description: 'Tramo ferry (vacío, sin pasajeros).' })
+  @IsOptional()
+  @IsBoolean()
+  es_ferry?: boolean;
 }
 
 export class CreateExternalFlightDto {
