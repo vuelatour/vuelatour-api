@@ -259,7 +259,8 @@ export class QuotesService {
 
     const ivaAplicaPorMetodo =
       dto.metodo_pago === MetodoPago.TRANSFERENCIA ||
-      dto.metodo_pago === MetodoPago.HSBC_LINK;
+      dto.metodo_pago === MetodoPago.HSBC_LINK ||
+      dto.metodo_pago === MetodoPago.CHEQUE;
     const ivaPct =
       dto.iva_pct_override !== undefined
         ? dto.iva_pct_override

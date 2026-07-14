@@ -28,6 +28,8 @@ export enum MetodoPago {
   BILLPOCKET = 'BILLPOCKET',
   HSBC_LINK = 'HSBC_LINK',
   TRANSFERENCIA = 'TRANSFERENCIA',
+  /** Pago bancario facturable (IVA como transferencia); lo concilia oficina. */
+  CHEQUE = 'CHEQUE',
   EFECTIVO = 'EFECTIVO',
   DOLARES = 'DOLARES',
 }

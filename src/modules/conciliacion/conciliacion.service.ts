@@ -211,7 +211,7 @@ export class ConciliacionService {
       .from('cobro_vuelo')
       .select('id')
       .eq('monto', monto)
-      .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK'])
+      .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'])
       .gte('fecha_cobro', lo.toISOString())
       .lte('fecha_cobro', hi.toISOString())
       .limit(5);

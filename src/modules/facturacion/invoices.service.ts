@@ -275,12 +275,17 @@ export class InvoicesService {
     let q = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, cliente_id, origen_iata, destino_iata, monto_total_usd, monto_total_mxn, fecha_vuelo, cliente:cliente_id(nombre, rfc)',
+        'id, folio, cliente_id, origen_iata, destino_iata, monto_total_usd, monto_total_mxn, fecha_vuelo, cobrado, metodo_cobro, cliente:cliente_id(nombre, rfc)',
         { count: 'exact' },
       )
-      .eq('cobrado', true)
       .eq('facturado', false)
       .neq('estado', 'CANCELADO')
+      // Pagados (cualquier método) O confirmados por cobrar con método
+      // FACTURABLE: hay clientes que piden la factura ANTES de pagar
+      // (transferencia/link/terminal/cheque) — pedido de Itzy, 14 jul 2026.
+      .or(
+        'cobrado.eq.true,and(metodo_cobro.in.(TRANSFERENCIA,HSBC_LINK,BILLPOCKET,CHEQUE),estado.in.(CONFIRMADO,EN_VUELO,COMPLETADO))',
+      )
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .range(f.offset, f.offset + f.limit - 1);
     if (f.desde) q = q.gte('fecha_vuelo', f.desde);
@@ -289,7 +294,32 @@ export class InvoicesService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
-    return { data: data ?? [], count: count ?? 0, limit: f.limit, offset: f.offset };
+
+    // Ruta COMPLETA con escalas (comerciales; sin tramos internos): en el
+    // listado solo se veía origen → destino y las rutas multiescala confundían.
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    if (rows.length > 0) {
+      const { data: escalas } = await this.supabase.service
+        .from('escala')
+        .select('vuelo_id, orden, origen_iata, destino_iata, solo_operativa')
+        .in('vuelo_id', rows.map((v) => v.id as string))
+        .order('orden', { ascending: true });
+      const porVuelo = new Map<string, Array<Record<string, unknown>>>();
+      for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
+        const vid = e.vuelo_id as string;
+        (porVuelo.get(vid) ?? porVuelo.set(vid, []).get(vid)!).push(e);
+      }
+      for (const v of rows) {
+        const legs = porVuelo.get(v.id as string) ?? [];
+        const comerciales = legs.filter((e) => e.solo_operativa !== true);
+        const usar = comerciales.length > 0 ? comerciales : legs;
+        v.ruta =
+          usar.length > 0
+            ? [usar[0].origen_iata, ...usar.map((e) => e.destino_iata)].join(' → ')
+            : `${v.origen_iata as string} → ${v.destino_iata as string}`;
+      }
+    }
+    return { data: rows, count: count ?? 0, limit: f.limit, offset: f.offset };
   }
 
   /** Facturas emitidas. */
