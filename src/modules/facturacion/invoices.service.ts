@@ -53,7 +53,7 @@ interface NotaCreditoInput {
 }
 
 const FACTURA_COLS =
-  'id, vuelo_id, cliente_id, entidad_fiscal_emisora_id, estado, serie, folio, uuid_fiscal, total, moneda, xml_url, pdf_url, fecha_timbrado, error_mensaje, tipo_comprobante, factura_relacionada_id, facturado_a_rfc, facturado_a_nombre, motivo_cancelacion, cancelada_at, created_at';
+  'id, vuelo_id, cliente_id, entidad_fiscal_emisora_id, estado, serie, folio, uuid_fiscal, pac_id, total, moneda, xml_url, pdf_url, fecha_timbrado, error_mensaje, tipo_comprobante, factura_relacionada_id, facturado_a_rfc, facturado_a_nombre, motivo_cancelacion, cancelada_at, created_at';
 
 const RECIBIDA_COLS =
   'id, uuid_fiscal, emisor_rfc, emisor_nombre, receptor_rfc, receptor_nombre, tipo_comprobante, subtotal, total, moneda, fecha_emision, conceptos_resumen, xml_url, estado, gasto_id, aeronave_id, categoria_sugerida, notas, created_at, updated_at';
@@ -531,6 +531,7 @@ export class InvoicesService {
         estado: 'TIMBRADA',
         tipo_comprobante: 'I',
         uuid_fiscal: result.uuid,
+        pac_id: result.pac_id ?? null,
         total: totalMxn,
         moneda: 'MXN',
         fel_referencia: `VT-${vuelo.folio}`,
@@ -585,6 +586,8 @@ export class InvoicesService {
       folio_sustitucion: dto.folio_sustitucion ?? null,
       rfc_receptor: (factura.facturado_a_rfc as string | null) ?? null,
       total: factura.total != null ? Number(factura.total) : null,
+      // Facturama cancela por su Id de plataforma (null si se timbró con FEL).
+      pac_id: (factura.pac_id as string | null) ?? null,
     });
     if (!result.ok) {
       throw new BadRequestException(result.error ?? 'No se pudo cancelar el CFDI.');
@@ -708,6 +711,7 @@ export class InvoicesService {
         tipo_comprobante: 'E',
         factura_relacionada_id: original.id,
         uuid_fiscal: result.uuid,
+        pac_id: result.pac_id ?? null,
         total: montoTotal,
         moneda: (original.moneda as string) ?? 'MXN',
         fel_referencia: referencia,

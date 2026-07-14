@@ -36,6 +36,8 @@ export interface TimbrarResult {
   fecha_timbrado?: string | null;
   xml_b64?: string | null;
   pdf_b64?: string | null;
+  /** Id del CFDI en el PAC (Facturama): se persiste para poder cancelar. */
+  pac_id?: string | null;
   error?: string | null;
 }
 
@@ -47,6 +49,8 @@ export interface CancelarPayload {
   // FEL exige RFC receptor y total del CFDI en el detalle de cancelación.
   rfc_receptor?: string | null;
   total?: number | null;
+  /** Facturama: Id del CFDI en su plataforma (factura.pac_id). */
+  pac_id?: string | null;
 }
 
 export interface CancelarResult {
