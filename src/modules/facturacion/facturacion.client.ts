@@ -19,6 +19,8 @@ export interface TimbrarPayload {
     uso_cfdi: string;
   };
   conceptos: Array<{ descripcion: string; valor_unitario: number; cantidad?: number }>;
+  /** PÚBLICO EN GENERAL (XAXX010101000): nodo InformacionGlobal del CFDI 4.0. */
+  informacion_global?: { periodicidad: string; meses: string; anio: number };
   csd_cer_b64: string;
   csd_key_b64: string;
   csd_password: string;

@@ -32,7 +32,13 @@ interface FacturadoA {
 interface EmitirInput extends FacturadoA {
   vuelo_id: string;
   entidad_fiscal_emisora_id: string;
+  /** Venta al PÚBLICO EN GENERAL (XAXX010101000): el cliente no pide factura. */
+  publico_en_general?: boolean;
+  periodicidad?: string;
 }
+
+/** Métodos con los que se puede facturar ANTES del cobro (pedido de Itzy). */
+const METODOS_FACTURABLES = new Set(['TRANSFERENCIA', 'HSBC_LINK', 'BILLPOCKET', 'CHEQUE']);
 
 interface CancelarInput {
   motivo: string;
@@ -367,14 +373,21 @@ export class InvoicesService {
     const { data: vuelo, error: vErr } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, cliente_id, estado, origen_iata, destino_iata, cobrado, facturado, monto_total_usd, monto_total_mxn, tc_usd_mxn',
+        'id, folio, cliente_id, estado, origen_iata, destino_iata, cobrado, facturado, metodo_cobro, monto_total_usd, monto_total_mxn, tc_usd_mxn',
       )
       .eq('id', vueloId)
       .maybeSingle();
     if (vErr) throw new Error(vErr.message);
     if (!vuelo) throw new NotFoundException(`Vuelo ${vueloId} no encontrado`);
     if (vuelo.facturado) throw new ConflictException('El vuelo ya está facturado.');
-    if (!vuelo.cobrado) throw new ConflictException('El vuelo no está cobrado; no se puede facturar.');
+    // Se puede facturar ANTES del cobro con método facturable (hay clientes
+    // que piden la factura para poder pagar) — con efectivo/dólares se exige
+    // el cobro primero, como siempre.
+    if (!vuelo.cobrado && !METODOS_FACTURABLES.has((vuelo.metodo_cobro as string) ?? '')) {
+      throw new ConflictException(
+        'El vuelo no está cobrado y su método no es facturable por adelantado (transferencia, link, terminal o cheque).',
+      );
+    }
     if (vuelo.estado === 'CANCELADO') throw new ConflictException('El vuelo está cancelado.');
 
     // Receptor (cliente) — datos fiscales obligatorios CFDI 4.0.
@@ -386,33 +399,47 @@ export class InvoicesService {
     if (cErr) throw new Error(cErr.message);
     if (!cliente) throw new BadRequestException('El vuelo no tiene cliente asociado.');
 
-    // Receptor del CFDI: por defecto el cliente del vuelo; si se indicó "SE FACTURÓ A"
-    // (caso 9.7) se usa ese receptor alterno y se persiste en la factura.
-    const usaReceptorAlterno = Boolean(input.facturado_a_rfc);
-    const receptor = usaReceptorAlterno
+    // Receptor del CFDI: cliente del vuelo por default; "SE FACTURÓ A" (9.7)
+    // si viene receptor alterno; o PÚBLICO EN GENERAL (XAXX010101000) cuando
+    // el cliente no pide factura pero se necesita emitirla igual.
+    const esPublicoGeneral = input.publico_en_general === true;
+    const usaReceptorAlterno = !esPublicoGeneral && Boolean(input.facturado_a_rfc);
+    const receptor = esPublicoGeneral
       ? {
-          rfc: input.facturado_a_rfc as string,
-          nombre: (input.facturado_a_nombre ?? '') as string,
-          domicilio_fiscal: (input.facturado_a_cp ?? '') as string,
-          regimen_fiscal: (input.facturado_a_regimen ?? '') as string,
-          uso_cfdi: (input.facturado_a_uso_cfdi ?? '') as string,
+          rfc: 'XAXX010101000',
+          nombre: 'PUBLICO EN GENERAL',
+          // CFDI 4.0: DomicilioFiscalReceptor = CP del lugar de expedición
+          // (el de la emisora); se rellena tras cargar la entidad emisora.
+          domicilio_fiscal: '',
+          regimen_fiscal: '616',
+          uso_cfdi: 'S01',
         }
-      : {
-          rfc: cliente.rfc as string,
-          nombre: (cliente.razon_social_default || cliente.nombre) as string,
-          domicilio_fiscal: cliente.codigo_postal as string,
-          regimen_fiscal: cliente.regimen_fiscal_receptor as string,
-          uso_cfdi: cliente.uso_cfdi as string,
-        };
-    const faltanReceptor = (['rfc', 'nombre', 'domicilio_fiscal', 'regimen_fiscal', 'uso_cfdi'] as const).filter(
-      (k) => !receptor[k],
-    );
-    if (faltanReceptor.length > 0) {
-      throw new BadRequestException(
-        usaReceptorAlterno
-          ? `Faltan datos fiscales del receptor 'SE FACTURÓ A': ${faltanReceptor.join(', ')}.`
-          : `Faltan datos fiscales del cliente: ${faltanReceptor.join(', ')}.`,
+      : usaReceptorAlterno
+        ? {
+            rfc: input.facturado_a_rfc as string,
+            nombre: (input.facturado_a_nombre ?? '') as string,
+            domicilio_fiscal: (input.facturado_a_cp ?? '') as string,
+            regimen_fiscal: (input.facturado_a_regimen ?? '') as string,
+            uso_cfdi: (input.facturado_a_uso_cfdi ?? '') as string,
+          }
+        : {
+            rfc: cliente.rfc as string,
+            nombre: (cliente.razon_social_default || cliente.nombre) as string,
+            domicilio_fiscal: cliente.codigo_postal as string,
+            regimen_fiscal: cliente.regimen_fiscal_receptor as string,
+            uso_cfdi: cliente.uso_cfdi as string,
+          };
+    if (!esPublicoGeneral) {
+      const faltanReceptor = (['rfc', 'nombre', 'domicilio_fiscal', 'regimen_fiscal', 'uso_cfdi'] as const).filter(
+        (k) => !receptor[k],
       );
+      if (faltanReceptor.length > 0) {
+        throw new BadRequestException(
+          usaReceptorAlterno
+            ? `Faltan datos fiscales del receptor 'SE FACTURÓ A': ${faltanReceptor.join(', ')}.`
+            : `Faltan datos fiscales del cliente: ${faltanReceptor.join(', ')}.`,
+        );
+      }
     }
 
     // Emisor (entidad fiscal) + CSD.
@@ -447,12 +474,29 @@ export class InvoicesService {
     }
     const valorUnitario = Math.round((totalMxn / 1.16) * 100) / 100;
 
+    if (esPublicoGeneral) {
+      receptor.domicilio_fiscal = emisora.codigo_postal as string;
+    }
+    // Nodo InformacionGlobal (obligatorio con XAXX010101000): periodicidad
+    // elegida (default mensual) con mes/año actuales en hora Cancún.
+    const hoyCancun = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+    }).format(new Date());
+    const informacionGlobal = esPublicoGeneral
+      ? {
+          periodicidad: input.periodicidad ?? '04',
+          meses: hoyCancun.slice(5, 7),
+          anio: Number(hoyCancun.slice(0, 4)),
+        }
+      : undefined;
+
     const result = await this.fel.timbrar({
       referencia: `VT-${vuelo.folio}`,
       moneda: 'MXN',
       forma_pago: '03',
       metodo_pago: 'PUE',
       lugar_expedicion: emisora.codigo_postal as string,
+      informacion_global: informacionGlobal,
       emisor: {
         rfc: emisora.rfc as string,
         nombre: emisora.razon_social as string,

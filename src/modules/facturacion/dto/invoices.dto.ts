@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDateString,
   IsIn,
   IsInt,
@@ -114,6 +115,22 @@ export class EmitirFacturaDto {
   @IsString()
   @MaxLength(5)
   facturado_a_uso_cfdi?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Venta al PÚBLICO EN GENERAL: receptor genérico XAXX010101000 (el cliente no pide factura). CFDI 4.0 exige periodicidad.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  publico_en_general?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'c_Periodicidad para público en general: 01 diario, 02 semanal, 03 quincenal, 04 mensual (default).',
+    enum: ['01', '02', '03', '04'],
+  })
+  @IsOptional()
+  @IsIn(['01', '02', '03', '04'])
+  periodicidad?: string;
 }
 
 export class CancelarFacturaDto {
