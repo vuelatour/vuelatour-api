@@ -33,6 +33,8 @@ export class VisionController {
       imageBase64: dto.imageBase64,
       mediaType: dto.mediaType,
       imageUrl: dto.imageUrl,
+      images: dto.images,
+      pdfBase64: dto.pdfBase64,
     });
     if (!result) return { disponible: false };
     // Falla con motivo (modelo mal escrito, timeout…): la app lo muestra.

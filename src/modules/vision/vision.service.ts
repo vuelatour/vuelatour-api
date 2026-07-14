@@ -24,6 +24,14 @@ export interface GastoTicketVisionInput {
   imageBase64?: string;
   mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
   imageUrl?: string;
+  /** Varias fotos del MISMO documento (hojas de una factura); máx 8. */
+  images?: Array<{
+    imageBase64?: string;
+    mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+    imageUrl?: string;
+  }>;
+  /** Factura en PDF (base64). */
+  pdfBase64?: string;
 }
 
 export interface GastoTicketVisionResult {
@@ -224,10 +232,22 @@ export class VisionService implements OnModuleInit {
     input: GastoTicketVisionInput,
   ): Promise<(GastoTicketVisionResult & { motivo?: string }) | null> {
     if (!this.enabled) return null;
-    if (!input.imageBase64 && !input.imageUrl) return null;
+    if (
+      !input.imageBase64 &&
+      !input.imageUrl &&
+      !(input.images?.length ?? 0) &&
+      !input.pdfBase64
+    ) {
+      return null;
+    }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    // Multi-página/PDF tarda más que una foto: margen extra sobre el timeout base.
+    const esDocumento = (input.images?.length ?? 0) > 1 || !!input.pdfBase64;
+    const timer = setTimeout(
+      () => controller.abort(),
+      esDocumento ? Math.max(this.timeoutMs, 150_000) : this.timeoutMs,
+    );
     try {
       const res = await fetch(`${this.baseUrl}/vision/gasto`, {
         method: 'POST',
@@ -239,6 +259,12 @@ export class VisionService implements OnModuleInit {
           image_base64: input.imageBase64,
           media_type: input.mediaType,
           image_url: input.imageUrl,
+          images: input.images?.map((i) => ({
+            image_base64: i.imageBase64,
+            media_type: i.mediaType,
+            image_url: i.imageUrl,
+          })),
+          pdf_base64: input.pdfBase64,
         }),
         signal: controller.signal,
       });
