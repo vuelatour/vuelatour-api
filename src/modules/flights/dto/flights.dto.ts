@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
@@ -222,6 +223,19 @@ export class AssignFlightDto {
   fecha_vuelo?: Date;
 }
 
+/** Tramo de un vuelo EXTERNO multiescala (solo ruta; sin tacos ni pax por tramo). */
+export class EscalaExternaDto {
+  @ApiProperty({ example: 'CUN' })
+  @IsString()
+  @Length(3, 4)
+  origen_iata!: string;
+
+  @ApiProperty({ example: 'HOL' })
+  @IsString()
+  @Length(3, 4)
+  destino_iata!: string;
+}
+
 export class CreateExternalFlightDto {
   @ApiProperty()
   @IsUUID()
@@ -254,6 +268,18 @@ export class CreateExternalFlightDto {
   @IsString()
   @Length(3, 4)
   destino_iata!: string;
+
+  @ApiPropertyOptional({
+    type: [EscalaExternaDto],
+    description:
+      'MULTIESCALA opcional: tramos ordenados de la ruta (algunas rutas externas lo necesitan). Si viene, origen/destino del vuelo se derivan del primero/último.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ValidateNested({ each: true })
+  @Type(() => EscalaExternaDto)
+  escalas?: EscalaExternaDto[];
 
   @ApiProperty({ minimum: 1 })
   @Type(() => Number)

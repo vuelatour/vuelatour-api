@@ -1437,19 +1437,34 @@ export class FlightsService {
   }
 
   async createExternal(dto: CreateExternalFlightDto, userId: string) {
+    // MULTIESCALA opcional: con tramos, la ruta del vuelo se deriva de ellos.
+    const legs = (dto.escalas ?? []).map((e) => ({
+      origen_iata: e.origen_iata.toUpperCase(),
+      destino_iata: e.destino_iata.toUpperCase(),
+    }));
+    for (const l of legs) {
+      if (l.origen_iata === l.destino_iata) {
+        throw new BadRequestException(
+          `Un tramo no puede tener el mismo origen y destino (${l.origen_iata}).`,
+        );
+      }
+    }
+    const origen = legs[0]?.origen_iata ?? dto.origen_iata.toUpperCase();
+    const destino =
+      legs.length > 0 ? legs[legs.length - 1].destino_iata : dto.destino_iata.toUpperCase();
     const payload = {
       cliente_id: dto.cliente_id,
       aeronave_id: null,
       es_externo: true,
       operador_externo: dto.operador_externo,
       costo_externo_usd: dto.costo_externo_usd,
-      tipo: 'REDONDO',
+      tipo: legs.length > 1 ? 'MULTIESCALA' : 'REDONDO',
       estado: 'CONFIRMADO',
       cotizacion_version: 1,
-      origen_iata: dto.origen_iata.toUpperCase(),
-      destino_iata: dto.destino_iata.toUpperCase(),
-      es_redondo_auto: true,
-      num_aterrizajes: 2,
+      origen_iata: origen,
+      destino_iata: destino,
+      es_redondo_auto: legs.length === 0,
+      num_aterrizajes: legs.length > 0 ? legs.length : 2,
       pasajeros: dto.pasajeros,
       pase_abordar: false,
       tiempo_cobrable_hr: 0,
@@ -1476,6 +1491,26 @@ export class FlightsService {
       if (error.code === '23503')
         throw new BadRequestException(`Referenced entity not found: ${error.message}`);
       throw new Error(error.message);
+    }
+    // Tramos del externo (solo ruta, sin tacómetros: el estado es manual).
+    if (data?.id && legs.length > 0) {
+      const { error: escErr } = await this.supabase.service.from('escala').insert(
+        legs.map((l, i) => ({
+          vuelo_id: data.id as string,
+          orden: i + 1,
+          origen_iata: l.origen_iata,
+          destino_iata: l.destino_iata,
+          pasajeros: dto.pasajeros,
+          // El primer tramo sale a la hora del vuelo (espejo estándar).
+          fecha_salida_plan: i === 0 ? dto.fecha_vuelo?.toISOString() : null,
+          created_by: userId,
+        })),
+      );
+      if (escErr) {
+        this.logger.warn(
+          `Vuelo externo ${data.id as string}: no se pudieron crear los tramos: ${escErr.message}`,
+        );
+      }
     }
     if (data?.id) void this.calendar.syncFlight(data.id as string);
     return data!;
