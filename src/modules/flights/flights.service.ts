@@ -786,7 +786,34 @@ export class FlightsService {
   async update(id: string, dto: UpdateFlightDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const current = await this.findById(id);
-    if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
+    // El método de cobro pactado SOLO se edita aquí en vuelos externos sin
+    // desglose canónico (los externos viejos nacían sin método y por eso no
+    // salían en Facturas). En vuelos cotizados se cambia REVISANDO la
+    // cotización: el método define el IVA y el total debe recalcularse.
+    if (dto.metodo_cobro !== undefined) {
+      const { data: snap } = await this.supabase.service
+        .from('vuelo')
+        .select('calculo_snapshot')
+        .eq('id', id)
+        .maybeSingle();
+      if (!current.es_externo || snap?.calculo_snapshot != null) {
+        throw new ConflictException(
+          'Este vuelo tiene desglose de cotización: cambia el método de cobro revisando la cotización (recalcula el IVA).',
+        );
+      }
+      if (current.facturado) {
+        throw new ConflictException(
+          'El vuelo ya está facturado; el método de cobro ya no puede cambiarse.',
+        );
+      }
+    }
+    // COMPLETADO sigue editable ÚNICAMENTE para poner el método de cobro (la
+    // bandeja de Facturas incluye vuelos completados por cobrar).
+    const soloMetodoCobro = Object.keys(dto).every((k) => k === 'metodo_cobro');
+    if (
+      current.estado === 'CANCELADO' ||
+      (current.estado === 'COMPLETADO' && !soloMetodoCobro)
+    ) {
       throw new ConflictException(
         `No se puede modificar un vuelo en estado ${current.estado}`,
       );
@@ -1517,6 +1544,9 @@ export class FlightsService {
       iva_pct: 0,
       iva_usd: 0,
       monto_total_usd: dto.monto_total_usd,
+      // Sin método, el vuelo jamás aparecía en Facturas hasta cobrarse (los
+      // facturables entran a la bandeja ANTES del cobro — pedido de Itzy).
+      metodo_cobro: dto.metodo_cobro ?? 'TRANSFERENCIA',
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_confirmacion: new Date().toISOString(),
       notas: dto.notas,

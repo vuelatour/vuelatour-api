@@ -22,6 +22,7 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
+import { MetodoPago } from '../../quotes/dto/calculate-quote.dto';
 
 export class TacoStatusDto {
   @ApiProperty({ type: [String], description: 'IDs de vuelo a evaluar' })
@@ -155,6 +156,18 @@ export class UpdateFlightDto {
   @IsOptional()
   @IsBoolean()
   cobrado?: boolean;
+
+  @ApiPropertyOptional({
+    enum: MetodoPago,
+    description:
+      'Método de cobro pactado. SOLO editable en vuelos externos sin desglose ' +
+      'canónico (en los demás, el método se cambia revisando la cotización ' +
+      'porque re-calcula el IVA). Define si el vuelo aparece en Facturas ' +
+      'antes de cobrarse.',
+  })
+  @IsOptional()
+  @IsEnum(MetodoPago)
+  metodo_cobro?: MetodoPago;
 }
 
 export class UpdatePermisoDto {
@@ -278,6 +291,17 @@ export class CreateExternalFlightDto {
   @IsNumber()
   @Min(0)
   monto_total_usd!: number;
+
+  @ApiPropertyOptional({
+    enum: MetodoPago,
+    description:
+      'Método de cobro pactado con el cliente. Con método facturable ' +
+      '(transferencia/link/terminal/cheque) el vuelo aparece en Facturas ' +
+      'ANTES de cobrarse. Default: TRANSFERENCIA.',
+  })
+  @IsOptional()
+  @IsEnum(MetodoPago)
+  metodo_cobro?: MetodoPago;
 
   @ApiProperty()
   @IsString()
