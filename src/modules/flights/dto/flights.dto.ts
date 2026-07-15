@@ -86,12 +86,15 @@ export class ListFlightsQuery {
   @IsDate()
   hasta?: Date;
 
+  // Tope 500: el selector de vuelos del app (oficina) trae un lote grande y
+  // filtra localmente por folio/cliente/ruta/piloto. Los listados paginados
+  // siguen usando límites chicos.
   @ApiPropertyOptional({ default: 50 })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(200)
+  @Max(500)
   limit: number = 50;
 
   @ApiPropertyOptional({ default: 0 })
