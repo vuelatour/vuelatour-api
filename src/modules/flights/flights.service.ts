@@ -433,7 +433,10 @@ export class FlightsService {
   async list(filters: ListFlightsQuery) {
     let q = this.supabase.service
       .from('vuelo')
-      .select(`${VUELO_COLS}, aeronave:aeronave_id(matricula)`, { count: 'exact' })
+      .select(
+        `${VUELO_COLS}, aeronave:aeronave_id(matricula), cliente:cliente_id(nombre), piloto:piloto_id(nombre)`,
+        { count: 'exact' },
+      )
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .order('fecha_solicitud', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
@@ -465,16 +468,34 @@ export class FlightsService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
-    // Aplana la matrícula de la aeronave para el listado (móvil/portal).
+    // Aplana matrícula + nombre de cliente/piloto para el listado (móvil/portal):
+    // el selector de vuelos del app los usa para buscar e identificar el vuelo.
+    const flatten = (
+      rel: { nombre?: string } | { nombre?: string }[] | null | undefined,
+    ) => (Array.isArray(rel) ? rel[0]?.nombre : rel?.nombre) ?? null;
     const rows = (data ?? []).map((r) => {
       const row = r as Record<string, unknown> & {
         aeronave?: { matricula?: string } | { matricula?: string }[] | null;
+        cliente?: { nombre?: string } | { nombre?: string }[] | null;
+        piloto?: { nombre?: string } | { nombre?: string }[] | null;
       };
       const a = row.aeronave;
       const matricula = Array.isArray(a) ? a[0]?.matricula : a?.matricula;
-      const { aeronave: _omit, ...rest } = row;
+      const {
+        aeronave: _omit,
+        cliente: _omitCli,
+        piloto: _omitPil,
+        ...rest
+      } = row;
       void _omit;
-      return { ...rest, aeronave_matricula: matricula ?? null };
+      void _omitCli;
+      void _omitPil;
+      return {
+        ...rest,
+        aeronave_matricula: matricula ?? null,
+        cliente_nombre: flatten(row.cliente),
+        piloto_nombre: flatten(row.piloto),
+      };
     });
     // Ruta COMPLETA por vuelo (origen → escalas → destino) para los listados:
     // se resuelve en lote desde las escalas comerciales, no solo origen/destino.

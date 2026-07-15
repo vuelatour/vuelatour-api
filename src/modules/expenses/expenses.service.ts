@@ -657,10 +657,46 @@ export class ExpensesService {
       notas = notas ? `${notas}\n\n${bloque}` : bloque;
     }
     // Distintivo pedido por el cliente: quién sube el gasto (piloto vs oficina).
-    const origen =
+    let origen: string =
       rol === Rol.PILOTO ? 'PILOTO' : rol === Rol.MECANICO ? 'MECANICO' : 'OFICINA';
+    // Backfill de oficina "como si lo hubiera subido el piloto": la oficina
+    // carga gastos de vuelos pasados y deben quedar atribuidos al piloto del
+    // vuelo (usuario_captura + origen = PILOTO), pero created_by conserva al
+    // admin real (auditoría). Solo ADMIN/COORDINADOR.
+    let capturaId = userId;
+    let aeronaveId = dto.aeronave_id;
+    if (dto.capturar_como_piloto === true) {
+      if (rol !== Rol.ADMIN && rol !== Rol.COORDINADOR) {
+        throw new BadRequestException(
+          'Solo oficina (admin/coordinador) puede registrar un gasto a nombre del piloto.',
+        );
+      }
+      if (!dto.vuelo_id) {
+        throw new BadRequestException(
+          'Para simular la captura del piloto, selecciona el vuelo.',
+        );
+      }
+      const { data: vuelo } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio, piloto_id, aeronave_id')
+        .eq('id', dto.vuelo_id)
+        .maybeSingle();
+      if (!vuelo) {
+        throw new BadRequestException('El vuelo seleccionado no existe.');
+      }
+      if (!vuelo.piloto_id) {
+        throw new BadRequestException(
+          `El vuelo #${vuelo.folio as number} no tiene piloto asignado; no se puede registrar a su nombre.`,
+        );
+      }
+      capturaId = vuelo.piloto_id as string;
+      origen = 'PILOTO';
+      // La aeronave del vuelo (si no se envió) para que el costo caiga en ella.
+      aeronaveId =
+        dto.aeronave_id ?? (vuelo.aeronave_id as string | null) ?? undefined;
+    }
     const payload: Record<string, unknown> = {
-      usuario_captura_id: userId,
+      usuario_captura_id: capturaId,
       origen,
       categoria: dto.categoria,
       monto: dto.monto,
@@ -671,7 +707,7 @@ export class ExpensesService {
       tarjeta_terminacion: dto.tarjeta_terminacion,
       vuelo_id: dto.vuelo_id,
       escala_id: dto.escala_id,
-      aeronave_id: dto.aeronave_id,
+      aeronave_id: aeronaveId,
       proveedor_id: dto.proveedor_id,
       litros: dto.litros,
       tipo_combustible: dto.tipo_combustible,

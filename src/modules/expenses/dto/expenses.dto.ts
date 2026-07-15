@@ -165,6 +165,17 @@ export class CreateGastoDto {
   @IsOptional()
   @IsBoolean()
   leer_con_ia?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Backfill de oficina: registra el gasto COMO SI lo hubiera subido el ' +
+      'piloto del vuelo (usuario_captura + origen = PILOTO). Requiere ' +
+      'vuelo_id y que el vuelo tenga piloto. La auditoría (created_by) ' +
+      'conserva al usuario real que lo cargó. Solo ADMIN/COORDINADOR.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  capturar_como_piloto?: boolean;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {
