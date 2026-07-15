@@ -72,6 +72,13 @@ export class CreateEscalaDto {
   @IsBoolean()
   es_ferry?: boolean;
 
+  @ApiPropertyOptional({
+    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_sobrevuelo?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
@@ -123,6 +130,13 @@ export class OperationalLegDto {
   @IsOptional()
   @IsBoolean()
   es_ferry?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_sobrevuelo?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()

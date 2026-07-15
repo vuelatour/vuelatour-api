@@ -406,6 +406,13 @@ export class ReservaEscalaDto {
   @IsBoolean()
   es_ferry?: boolean;
 
+  @ApiPropertyOptional({
+    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_sobrevuelo?: boolean;
+
   @ApiPropertyOptional({ minimum: 0 })
   @IsOptional()
   @Type(() => Number)
@@ -483,6 +490,13 @@ export class CreateReservaDto {
   @IsOptional()
   @IsUUID()
   piloto_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'Copiloto (2do piloto). Ve todo el vuelo igual que el piloto.',
+  })
+  @IsOptional()
+  @IsUUID()
+  copiloto_id?: string;
 
   @ApiPropertyOptional({ description: 'Vuelo abierto: el itinerario/precio se cierra al final' })
   @IsOptional()

@@ -42,7 +42,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -258,7 +258,7 @@ export class FlightsService {
     const { data: legs } = await sb
       .from('escala')
       .select(
-        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, estado_permiso',
+        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, estado_permiso',
       )
       .eq('vuelo_id', id)
       .order('orden', { ascending: true });
@@ -419,6 +419,9 @@ export class FlightsService {
       folio: vuelo.folio as number,
       origenIata: vuelo.origen_iata as string,
       destinoIata: vuelo.destino_iata as string,
+      // Ruta operativa completa (con escalas): el correo no debe mostrar solo
+      // CUN → CUN — el piloto necesita ver todo el itinerario.
+      rutaCompleta: ruta,
       pasajeros: Number(vuelo.pasajeros ?? 0),
       fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
       pernoctas,
@@ -1623,6 +1626,16 @@ export class FlightsService {
         pilotoId: dto.piloto_id,
       });
     }
+    // Copiloto (2 pilotos volando): debe ser un piloto válido y distinto del
+    // titular. Se valida aparte para dar un mensaje claro.
+    if (dto.copiloto_id) {
+      if (dto.copiloto_id === dto.piloto_id) {
+        throw new BadRequestException(
+          'El copiloto debe ser distinto del piloto.',
+        );
+      }
+      await this.validateAssignTargets({ pilotoId: dto.copiloto_id });
+    }
     // Creación rápida con itinerario de OPERACIÓN: la ruta real del avión
     // (puede salir de otra base, con ferries). Mientras no exista cotización,
     // el vuelo muestra los extremos de la operación; la ruta comercial
@@ -1659,6 +1672,7 @@ export class FlightsService {
       cliente_id: dto.cliente_id,
       aeronave_id: dto.aeronave_id ?? null,
       piloto_id: dto.piloto_id ?? null,
+      copiloto_id: dto.copiloto_id ?? null,
       es_externo: false,
       tipo: 'MULTIESCALA',
       estado: 'RESERVA',
@@ -1731,6 +1745,7 @@ export class FlightsService {
             pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
             pasajeros_nombres: e.pasajeros_nombres ?? [],
             es_ferry: e.es_ferry ?? false,
+            es_sobrevuelo: e.es_sobrevuelo ?? false,
             solo_operativa: e.es_ferry ?? false,
             requiere_pernocta: pernocta,
             notas: e.notas ?? null,
@@ -1789,6 +1804,8 @@ export class FlightsService {
     }
 
     if (dto.piloto_id) void this.notifyPilotAssigned(dto.piloto_id, data!);
+    // El copiloto también recibe su aviso (ve todo el vuelo en su app).
+    if (dto.copiloto_id) void this.notifyPilotAssigned(dto.copiloto_id, data!);
     void this.calendar.syncFlight(vueloId);
     return data!;
   }
@@ -1822,6 +1839,10 @@ export class FlightsService {
         // global del vuelo.
         pasajeros: dto.pasajeros ?? null,
         pasajeros_nombres: dto.pasajeros_nombres ?? [],
+        // Sobrevuelo por tramo (metadato operativo): el switch del editor lo manda.
+        ...(dto.es_sobrevuelo !== undefined
+          ? { es_sobrevuelo: dto.es_sobrevuelo }
+          : {}),
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,
@@ -1868,6 +1889,7 @@ export class FlightsService {
         destino_iata: dto.destino_iata.toUpperCase(),
         pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
         es_ferry: dto.es_ferry ?? false,
+        es_sobrevuelo: dto.es_sobrevuelo ?? false,
         requiere_pernocta: dto.requiere_pernocta ?? false,
         tipo_parada: dto.tipo_parada ?? 'NORMAL',
         servicio_notas: dto.servicio_notas ?? null,
@@ -1905,6 +1927,7 @@ export class FlightsService {
     if (dto.pasajeros_nombres !== undefined)
       patch.pasajeros_nombres = dto.pasajeros_nombres;
     if (dto.es_ferry !== undefined) patch.es_ferry = dto.es_ferry;
+    if (dto.es_sobrevuelo !== undefined) patch.es_sobrevuelo = dto.es_sobrevuelo;
     if (dto.requiere_pernocta !== undefined) patch.requiere_pernocta = dto.requiere_pernocta;
     if (dto.tipo_parada !== undefined) patch.tipo_parada = dto.tipo_parada;
     if (dto.servicio_notas !== undefined) patch.servicio_notas = dto.servicio_notas;
