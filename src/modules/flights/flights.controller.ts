@@ -154,6 +154,16 @@ export class FlightsController {
     return this.flights.snapshot(id);
   }
 
+  @Get(':id/ultimo-taco')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Última lectura de tacómetro del avión del vuelo (historial): sugerencia de salida al capturar/corregir en oficina.',
+  })
+  ultimoTaco(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.ultimoTacoDeVuelo(id);
+  }
+
   @Get(':id/quote-view')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
   @ApiOperation({

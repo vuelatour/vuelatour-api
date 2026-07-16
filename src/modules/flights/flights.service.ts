@@ -154,6 +154,23 @@ export class FlightsService {
   }
 
   /**
+   * Última lectura de tacómetro del AVIÓN del vuelo (historial completo del
+   * horómetro, que solo sube). El panel la usa para PRECARGAR la salida al
+   * capturar/corregir tacos en oficina — antes había que ir a buscar la
+   * última lectura a mano en cada vuelo.
+   */
+  async ultimoTacoDeVuelo(
+    vueloId: string,
+  ): Promise<{ ultimo_taco: number | null }> {
+    const vuelo = await this.findById(vueloId);
+    const ultimo = await this.ultimoTacoAeronave(
+      (vuelo.aeronave_id as string | null) ?? null,
+      null,
+    );
+    return { ultimo_taco: ultimo };
+  }
+
+  /**
    * Elimina un vuelo SIN actividad (solicitudes/apartados fantasma que nunca
    * se confirmaron). Bloqueado si tiene cobros, gastos o tacómetros: esos se
    * cancelan (no se borran) para no perder el rastro contable.
