@@ -11,6 +11,7 @@ import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import {
   FacturacionClient,
+  type PreviewPayload,
   type TimbrarPayload,
   type TimbrarResult,
 } from './facturacion.client';
@@ -45,6 +46,62 @@ interface EmitirInput extends FacturadoA {
 
 /** Métodos con los que se puede facturar ANTES del cobro (pedido de Itzy). */
 const METODOS_FACTURABLES = new Set(['TRANSFERENCIA', 'HSBC_LINK', 'BILLPOCKET', 'CHEQUE']);
+
+/** RFC genérico SAT para residentes en el extranjero. */
+const RFC_EXTRANJERO = 'XEXX010101000';
+
+/** Fila del vuelo con lo necesario para facturar (tipado del select). */
+interface VueloFacturable {
+  id: string;
+  folio: number | string;
+  cliente_id: string;
+  estado: string | null;
+  origen_iata: string | null;
+  destino_iata: string | null;
+  fecha_vuelo: string | null;
+  cobrado: boolean;
+  facturado: boolean;
+  metodo_cobro: string | null;
+  monto_total_usd: number | null;
+  monto_total_mxn: number | null;
+  tc_usd_mxn: number | null;
+}
+
+/** Fila de la entidad fiscal emisora (tipado del select). */
+interface EmisoraFiscal {
+  id: string;
+  codigo: string;
+  razon_social: string;
+  rfc: string;
+  regimen_fiscal_sat: string;
+  codigo_postal: string;
+  csd_cer_url: string | null;
+  csd_key_url: string | null;
+}
+
+/**
+ * Paquete que DEFINE el CFDI de un vuelo: receptor efectivo, importes,
+ * forma/método de pago, InformacionGlobal y concepto. emitir() y preview()
+ * salen del MISMO prepararEmision() — la vista previa nunca puede diferir de
+ * lo que se timbra (fiabilidad numérica).
+ */
+interface EmisionPreparada {
+  vuelo: VueloFacturable;
+  emisora: EmisoraFiscal;
+  receptor: TimbrarPayload['receptor'];
+  esPublicoGeneral: boolean;
+  /** Receptor con RFC genérico XEXX010101000 (cliente extranjero o alterno). */
+  esExtranjero: boolean;
+  totalMxn: number;
+  valorUnitario: number;
+  iva: number;
+  formaPago: string;
+  metodoPago: string;
+  informacionGlobal?: TimbrarPayload['informacion_global'];
+  descripcionConcepto: string;
+  /** TC pactado pendiente de persistir en el vuelo — SOLO emitir() lo escribe. */
+  tcPactado?: { tc_usd_mxn: number; monto_total_mxn: number };
+}
 
 /**
  * c_FormaPago del SAT por método de cobro interno: hardcodear '03'
@@ -402,13 +459,18 @@ export class InvoicesService {
   }
 
   /**
-   * Emite (timbra) el CFDI de un vuelo con la entidad emisora indicada.
-   * Valida completitud fiscal, arma el payload, llama a pyservices/FEL, guarda
-   * XML/PDF y la factura, y marca el vuelo como facturado.
+   * Prepara TODO lo que define el CFDI de un vuelo: receptor efectivo
+   * (cliente / alterno 9.7 / público en general XAXX / extranjero XEXX),
+   * importes MXN con IVA residual, forma/método de pago SAT,
+   * InformacionGlobal y el concepto. La usan emitir() Y preview() — así la
+   * vista previa muestra EXACTAMENTE lo que se timbraría. Valida completitud
+   * fiscal pero NO aplica los candados de emisión (facturado/cobrado/estado,
+   * que son de emitir()) y NO escribe en la BD (el TC pactado se devuelve en
+   * tcPactado para que solo la emisión real lo persista).
    */
-  async emitir(input: EmitirInput, userId: string) {
+  private async prepararEmision(input: EmitirInput): Promise<EmisionPreparada> {
     const { vuelo_id: vueloId, entidad_fiscal_emisora_id: emisoraId } = input;
-    const { data: vuelo, error: vErr } = await this.supabase.service
+    const { data: vueloRow, error: vErr } = await this.supabase.service
       .from('vuelo')
       .select(
         'id, folio, cliente_id, estado, origen_iata, destino_iata, fecha_vuelo, cobrado, facturado, metodo_cobro, monto_total_usd, monto_total_mxn, tc_usd_mxn',
@@ -416,30 +478,9 @@ export class InvoicesService {
       .eq('id', vueloId)
       .maybeSingle();
     if (vErr) throw new Error(vErr.message);
-    if (!vuelo) throw new NotFoundException(`Vuelo ${vueloId} no encontrado`);
-    if (vuelo.facturado) throw new ConflictException('El vuelo ya está facturado.');
-    // Se puede facturar ANTES del cobro con método facturable (hay clientes
-    // que piden la factura para poder pagar) — con efectivo/dólares se exige
-    // el cobro primero, como siempre.
-    if (!vuelo.cobrado && !METODOS_FACTURABLES.has((vuelo.metodo_cobro as string) ?? '')) {
-      throw new ConflictException(
-        'El vuelo no está cobrado y su método no es facturable por adelantado (transferencia, link, terminal o cheque).',
-      );
-    }
-    if (vuelo.estado === 'CANCELADO') throw new ConflictException('El vuelo está cancelado.');
-    // Antes del cobro solo se facturan vuelos ya confirmados/operados: timbrar
-    // una cotización o reserva suelta emite CFDI de servicios que pueden no
-    // prestarse nunca (y obliga a cancelarlos ante el SAT).
-    if (
-      !vuelo.cobrado &&
-      !['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'].includes(
-        (vuelo.estado as string) ?? '',
-      )
-    ) {
-      throw new ConflictException(
-        'Solo vuelos confirmados/en vuelo/completados se facturan antes del cobro.',
-      );
-    }
+    if (!vueloRow)
+      throw new NotFoundException(`Vuelo ${vueloId} no encontrado`);
+    const vuelo: VueloFacturable = vueloRow;
 
     // Receptor (cliente) — datos fiscales obligatorios CFDI 4.0.
     const { data: cliente, error: cErr } = await this.supabase.service
@@ -450,37 +491,93 @@ export class InvoicesService {
     if (cErr) throw new Error(cErr.message);
     if (!cliente) throw new BadRequestException('El vuelo no tiene cliente asociado.');
 
+    // Emisora (aquí NO se exige el CSD: el preview no firma nada; la emisión
+    // real valida cer/key/contraseña en emitir()).
+    const { data: emisoraRow, error: eErr } = await this.supabase.service
+      .from('entidad_fiscal_emisora')
+      .select(
+        'id, codigo, razon_social, rfc, regimen_fiscal_sat, codigo_postal, csd_cer_url, csd_key_url',
+      )
+      .eq('id', emisoraId)
+      .maybeSingle();
+    if (eErr) throw new Error(eErr.message);
+    if (!emisoraRow)
+      throw new NotFoundException('Entidad emisora no encontrada.');
+    const emisora: EmisoraFiscal = emisoraRow;
+
     // Receptor del CFDI: cliente del vuelo por default; "SE FACTURÓ A" (9.7)
-    // si viene receptor alterno; o PÚBLICO EN GENERAL (XAXX010101000) cuando
-    // el cliente no pide factura pero se necesita emitirla igual.
+    // si viene receptor alterno; PÚBLICO EN GENERAL (XAXX010101000) cuando el
+    // cliente no pide factura; o EXTRANJERO (XEXX010101000) cuando el RFC
+    // efectivo (del cliente o del alterno) es el genérico de residentes en el
+    // extranjero.
     const esPublicoGeneral = input.publico_en_general === true;
     const usaReceptorAlterno = !esPublicoGeneral && Boolean(input.facturado_a_rfc);
-    const receptor = esPublicoGeneral
+    const rfcEfectivo = (
+      (usaReceptorAlterno
+        ? input.facturado_a_rfc
+        : (cliente.rfc as string | null)) ?? ''
+    ).toUpperCase();
+    const esExtranjero = !esPublicoGeneral && rfcEfectivo === RFC_EXTRANJERO;
+    // XAXX capturado como RFC del cliente SIN el switch de público en general:
+    // el receptor saldría con nombre/régimen reales sin InformacionGlobal y el
+    // PAC lo rechaza con un error críptico — mejor guiar al operador.
+    if (!esPublicoGeneral && rfcEfectivo === 'XAXX010101000') {
+      throw new BadRequestException(
+        'El RFC del receptor es el genérico XAXX010101000: usa la opción «Público en gral.» para emitir esta factura.',
+      );
+    }
+
+    const receptor: TimbrarPayload['receptor'] = esPublicoGeneral
       ? {
           rfc: 'XAXX010101000',
           nombre: 'PUBLICO EN GENERAL',
           // CFDI 4.0: DomicilioFiscalReceptor = CP del lugar de expedición
-          // (el de la emisora); se rellena tras cargar la entidad emisora.
-          domicilio_fiscal: '',
+          // (el de la emisora).
+          domicilio_fiscal: emisora.codigo_postal,
           regimen_fiscal: '616',
           uso_cfdi: 'S01',
         }
-      : usaReceptorAlterno
+      : esExtranjero
         ? {
-            rfc: input.facturado_a_rfc as string,
-            nombre: (input.facturado_a_nombre ?? '') as string,
-            domicilio_fiscal: (input.facturado_a_cp ?? '') as string,
-            regimen_fiscal: (input.facturado_a_regimen ?? '') as string,
-            uso_cfdi: (input.facturado_a_uso_cfdi ?? '') as string,
+            // EXTRANJERO (XEXX010101000): mismas reglas SAT que público en
+            // general (régimen 616, uso S01, CP de la emisora como domicilio
+            // fiscal receptor) pero con el NOMBRE REAL del cliente y SIN nodo
+            // InformacionGlobal (ese es exclusivo de XAXX).
+            rfc: RFC_EXTRANJERO,
+            nombre: usaReceptorAlterno
+              ? (input.facturado_a_nombre ?? '')
+              : ((cliente.razon_social_default || cliente.nombre) as string),
+            domicilio_fiscal: emisora.codigo_postal,
+            regimen_fiscal: '616',
+            uso_cfdi: 'S01',
           }
-        : {
-            rfc: cliente.rfc as string,
-            nombre: (cliente.razon_social_default || cliente.nombre) as string,
-            domicilio_fiscal: cliente.codigo_postal as string,
-            regimen_fiscal: cliente.regimen_fiscal_receptor as string,
-            uso_cfdi: cliente.uso_cfdi as string,
-          };
-    if (!esPublicoGeneral) {
+        : usaReceptorAlterno
+          ? {
+              rfc: input.facturado_a_rfc as string,
+              nombre: input.facturado_a_nombre ?? '',
+              domicilio_fiscal: input.facturado_a_cp ?? '',
+              regimen_fiscal: input.facturado_a_regimen ?? '',
+              uso_cfdi: input.facturado_a_uso_cfdi ?? '',
+            }
+          : {
+              rfc: cliente.rfc as string,
+              nombre: (cliente.razon_social_default ||
+                cliente.nombre) as string,
+              domicilio_fiscal: cliente.codigo_postal as string,
+              regimen_fiscal: cliente.regimen_fiscal_receptor as string,
+              uso_cfdi: cliente.uso_cfdi as string,
+            };
+    if (esExtranjero) {
+      // Al extranjero NO se le exigen CP/régimen/uso propios (van los
+      // genéricos del SAT); solo el RFC (ya implícito) y el nombre real.
+      if (!receptor.nombre) {
+        throw new BadRequestException(
+          usaReceptorAlterno
+            ? "Falta la razón social/nombre del receptor extranjero 'SE FACTURÓ A'."
+            : 'Falta la razón social/nombre del cliente extranjero.',
+        );
+      }
+    } else if (!esPublicoGeneral) {
       const faltanReceptor = (['rfc', 'nombre', 'domicilio_fiscal', 'regimen_fiscal', 'uso_cfdi'] as const).filter(
         (k) => !receptor[k],
       );
@@ -493,33 +590,12 @@ export class InvoicesService {
       }
     }
 
-    // Emisor (entidad fiscal) + CSD.
-    const { data: emisora, error: eErr } = await this.supabase.service
-      .from('entidad_fiscal_emisora')
-      .select('id, codigo, razon_social, rfc, regimen_fiscal_sat, codigo_postal, csd_cer_url, csd_key_url')
-      .eq('id', emisoraId)
-      .maybeSingle();
-    if (eErr) throw new Error(eErr.message);
-    if (!emisora) throw new NotFoundException('Entidad emisora no encontrada.');
-    if (!emisora.csd_cer_url || !emisora.csd_key_url) {
-      throw new BadRequestException(`La entidad ${emisora.codigo} no tiene CSD cargado.`);
-    }
-    const csdPassword =
-      process.env[`CSD_PASSWORD_${emisora.codigo}`] ?? process.env.CSD_PASSWORD ?? '';
-    if (!csdPassword) {
-      throw new BadRequestException(`Falta la contraseña del CSD de ${emisora.codigo} (env CSD_PASSWORD).`);
-    }
-
-    const [cerB64, keyB64] = await Promise.all([
-      this.downloadB64('csd', emisora.csd_cer_url as string),
-      this.downloadB64('csd', emisora.csd_key_url as string),
-    ]);
-
     // Importes en MXN. NOTA: mapeo simplificado (un concepto, IVA 16%); validar
     // contra FEL pruebas antes de producción.
     let totalMxn =
       Number(vuelo.monto_total_mxn) ||
       Number(vuelo.monto_total_usd) * (Number(vuelo.tc_usd_mxn) || 0);
+    let tcPactado: EmisionPreparada['tcPactado'];
     if (
       (!totalMxn || totalMxn <= 0) &&
       input.tc_usd_mxn &&
@@ -528,19 +604,12 @@ export class InvoicesService {
       // Vuelos cotizados en USD sin TC (externos): el TC del DTO es el TC
       // PACTADO de la operación, así que se PERSISTE en el vuelo — cobrosEnUsd
       // (invariante #2) lo usa de respaldo y reparto/reportes ven el mismo MXN
-      // que el CFDI, sin crear un cálculo paralelo.
+      // que el CFDI, sin crear un cálculo paralelo. Aquí solo se CALCULA:
+      // emitir() escribe tcPactado en el vuelo (el preview no toca la BD).
       totalMxn =
         Math.round(Number(vuelo.monto_total_usd) * input.tc_usd_mxn * 100) /
         100;
-      const { error: tcErr } = await this.supabase.service
-        .from('vuelo')
-        .update({
-          tc_usd_mxn: input.tc_usd_mxn,
-          monto_total_mxn: totalMxn,
-          updated_by: userId,
-        })
-        .eq('id', vuelo.id);
-      if (tcErr) throw new Error(tcErr.message);
+      tcPactado = { tc_usd_mxn: input.tc_usd_mxn, monto_total_mxn: totalMxn };
     }
     if (!totalMxn || totalMxn <= 0) {
       throw new BadRequestException(
@@ -553,17 +622,12 @@ export class InvoicesService {
     const valorUnitario = Math.round((totalMxn / 1.16) * 100) / 100;
     const iva = Math.round((totalMxn - valorUnitario) * 100) / 100;
 
-    if (esPublicoGeneral) {
-      receptor.domicilio_fiscal = emisora.codigo_postal as string;
-    }
-    // Nodo InformacionGlobal (obligatorio con XAXX010101000): el periodo
-    // fiscal es el del VUELO (hora Cancún), no el del día en que se emite —
-    // facturar en los primeros días del mes siguiente no debe mover la venta.
+    // Nodo InformacionGlobal (obligatorio con XAXX010101000, y SOLO con XAXX:
+    // el extranjero XEXX no lo lleva): el periodo fiscal es el del VUELO
+    // (hora Cancún), no el del día en que se emite — facturar en los primeros
+    // días del mes siguiente no debe mover la venta.
     const informacionGlobal = esPublicoGeneral
-      ? this.informacionGlobalPara(
-          input.periodicidad,
-          vuelo.fecha_vuelo as string | null,
-        )
+      ? this.informacionGlobalPara(input.periodicidad, vuelo.fecha_vuelo)
       : undefined;
 
     // Forma/método de pago SAT reales del cobro: hardcodear '03'/PUE declaraba
@@ -571,9 +635,147 @@ export class InvoicesService {
     // el complemento de pago REP (fase A2 del plan) queda pendiente para
     // cerrar el ciclo PPD cuando entre el cobro.
     const formaPago = vuelo.cobrado
-      ? (FORMA_PAGO_SAT[(vuelo.metodo_cobro as string) ?? ''] ?? '99')
+      ? (FORMA_PAGO_SAT[vuelo.metodo_cobro ?? ''] ?? '99')
       : '99';
     const metodoPago = vuelo.cobrado ? 'PUE' : 'PPD';
+
+    const descripcionConcepto = `Servicio de transporte aéreo ${vuelo.origen_iata} → ${vuelo.destino_iata} (folio #${vuelo.folio})`;
+
+    return {
+      vuelo,
+      emisora,
+      receptor,
+      esPublicoGeneral,
+      esExtranjero,
+      totalMxn,
+      valorUnitario,
+      iva,
+      formaPago,
+      metodoPago,
+      informacionGlobal,
+      descripcionConcepto,
+      tcPactado,
+    };
+  }
+
+  /**
+   * Payload de timbrado/preview a partir del paquete preparado: emitir() le
+   * agrega el CSD; el preview lo manda tal cual (pyservices renderiza el PDF
+   * sin firmar). Un solo constructor = cero divergencia entre ambos.
+   */
+  private payloadCfdi(
+    prep: EmisionPreparada,
+    referencia: string,
+  ): PreviewPayload {
+    return {
+      referencia,
+      moneda: 'MXN',
+      forma_pago: prep.formaPago,
+      metodo_pago: prep.metodoPago,
+      lugar_expedicion: prep.emisora.codigo_postal,
+      informacion_global: prep.informacionGlobal,
+      emisor: {
+        rfc: prep.emisora.rfc,
+        nombre: prep.emisora.razon_social,
+        regimen_fiscal: prep.emisora.regimen_fiscal_sat,
+      },
+      receptor: prep.receptor,
+      conceptos: [
+        {
+          descripcion: prep.descripcionConcepto,
+          valor_unitario: prep.valorUnitario,
+          cantidad: 1,
+          iva: prep.iva,
+        },
+      ],
+    };
+  }
+
+  /**
+   * Vista previa del PDF del CFDI SIN timbrar: usa el MISMO prepararEmision()
+   * que emitir(), por lo que el PDF mostrado nunca difiere del que se timbra.
+   * No aplica los candados de emisión (facturado/estado/método), no usa el
+   * candado CAS, no marca facturado y NO escribe en la BD — solo valida los
+   * datos fiscales, para que el error se vea ANTES de intentar timbrar.
+   */
+  async preview(input: EmitirInput): Promise<Buffer> {
+    const prep = await this.prepararEmision(input);
+    // Referencia efímera solo para el render (no se persiste ni timbra).
+    const referencia = `PREVIEW-${prep.vuelo.folio}-${Date.now().toString(36)}`;
+    const result = await this.fel.preview(this.payloadCfdi(prep, referencia));
+    if (!result.pdf_b64) {
+      throw new BadRequestException(
+        result.error ?? 'No se pudo generar la vista previa del CFDI.',
+      );
+    }
+    return Buffer.from(result.pdf_b64, 'base64');
+  }
+
+  /**
+   * Emite (timbra) el CFDI de un vuelo con la entidad emisora indicada.
+   * El contenido del CFDI sale de prepararEmision() (compartido con el
+   * preview); aquí van los candados de emisión, el CSD, el candado CAS
+   * anti doble emisión y la persistencia (factura + XML/PDF).
+   */
+  async emitir(input: EmitirInput, userId: string) {
+    const prep = await this.prepararEmision(input);
+    const { vuelo, emisora, receptor, totalMxn } = prep;
+
+    if (vuelo.facturado)
+      throw new ConflictException('El vuelo ya está facturado.');
+    // Se puede facturar ANTES del cobro con método facturable (hay clientes
+    // que piden la factura para poder pagar) — con efectivo/dólares se exige
+    // el cobro primero, como siempre.
+    if (!vuelo.cobrado && !METODOS_FACTURABLES.has(vuelo.metodo_cobro ?? '')) {
+      throw new ConflictException(
+        'El vuelo no está cobrado y su método no es facturable por adelantado (transferencia, link, terminal o cheque).',
+      );
+    }
+    if (vuelo.estado === 'CANCELADO')
+      throw new ConflictException('El vuelo está cancelado.');
+    // Antes del cobro solo se facturan vuelos ya confirmados/operados: timbrar
+    // una cotización o reserva suelta emite CFDI de servicios que pueden no
+    // prestarse nunca (y obliga a cancelarlos ante el SAT).
+    if (
+      !vuelo.cobrado &&
+      !['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'].includes(vuelo.estado ?? '')
+    ) {
+      throw new ConflictException(
+        'Solo vuelos confirmados/en vuelo/completados se facturan antes del cobro.',
+      );
+    }
+
+    // CSD de la emisora (solo la emisión real firma; el preview no lo usa).
+    if (!emisora.csd_cer_url || !emisora.csd_key_url) {
+      throw new BadRequestException(
+        `La entidad ${emisora.codigo} no tiene CSD cargado.`,
+      );
+    }
+    const csdPassword =
+      process.env[`CSD_PASSWORD_${emisora.codigo}`] ??
+      process.env.CSD_PASSWORD ??
+      '';
+    if (!csdPassword) {
+      throw new BadRequestException(
+        `Falta la contraseña del CSD de ${emisora.codigo} (env CSD_PASSWORD).`,
+      );
+    }
+
+    const [cerB64, keyB64] = await Promise.all([
+      this.downloadB64('csd', emisora.csd_cer_url),
+      this.downloadB64('csd', emisora.csd_key_url),
+    ]);
+
+    // TC pactado calculado en prepararEmision(): se PERSISTE en el vuelo
+    // (invariante #2 — cobrosEnUsd lo usa de respaldo y reparto/reportes ven
+    // el mismo MXN que el CFDI). Solo la emisión real escribe.
+    if (prep.tcPactado) {
+      const { error: tcErr } = await this.supabase.service
+        .from('vuelo')
+        .update({ ...prep.tcPactado, updated_by: userId })
+        .eq('id', vuelo.id);
+      if (tcErr) throw new Error(tcErr.message);
+    }
 
     // Referencia única POR EMISIÓN (no por vuelo): al refacturar tras una
     // cancelación, repetir `VT-<folio>` chocaba con el UNIQUE de
@@ -600,26 +802,7 @@ export class InvoicesService {
     let result: TimbrarResult;
     try {
       result = await this.fel.timbrar({
-        referencia,
-        moneda: 'MXN',
-        forma_pago: formaPago,
-        metodo_pago: metodoPago,
-        lugar_expedicion: emisora.codigo_postal as string,
-        informacion_global: informacionGlobal,
-        emisor: {
-          rfc: emisora.rfc as string,
-          nombre: emisora.razon_social as string,
-          regimen_fiscal: emisora.regimen_fiscal_sat as string,
-        },
-        receptor,
-        conceptos: [
-          {
-            descripcion: `Servicio de transporte aéreo ${vuelo.origen_iata} → ${vuelo.destino_iata} (folio #${vuelo.folio})`,
-            valor_unitario: valorUnitario,
-            cantidad: 1,
-            iva,
-          },
-        ],
+        ...this.payloadCfdi(prep, referencia),
         csd_cer_b64: cerB64,
         csd_key_b64: keyB64,
         csd_password: csdPassword,
@@ -651,7 +834,7 @@ export class InvoicesService {
       .insert({
         vuelo_id: vuelo.id,
         cliente_id: vuelo.cliente_id,
-        entidad_fiscal_emisora_id: emisoraId,
+        entidad_fiscal_emisora_id: emisora.id,
         estado: 'TIMBRADA',
         tipo_comprobante: 'I',
         uuid_fiscal: result.uuid,
@@ -662,11 +845,11 @@ export class InvoicesService {
         xml_url: xmlPath,
         pdf_url: pdfPath,
         fecha_timbrado: result.fecha_timbrado ?? new Date().toISOString(),
-        // Receptor EFECTIVO del CFDI (cliente, alterno 9.7 o público en
-        // general), SIEMPRE persistido: cancelar() lo manda a FEL (que lo
-        // exige) y la nota de crédito debe salir al MISMO receptor del CFDI
-        // original — reconstruirlo del cliente del vuelo timbraba mal las
-        // facturas de público en general.
+        // Receptor EFECTIVO del CFDI (cliente, alterno 9.7, público en
+        // general XAXX o extranjero XEXX), SIEMPRE persistido: cancelar() lo
+        // manda a FEL (que lo exige) y la nota de crédito debe salir al MISMO
+        // receptor del CFDI original — reconstruirlo del cliente del vuelo
+        // timbraba mal las facturas de público en general.
         facturado_a_rfc: receptor.rfc,
         facturado_a_nombre: receptor.nombre,
         facturado_a_regimen: receptor.regimen_fiscal,

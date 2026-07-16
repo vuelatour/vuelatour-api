@@ -73,6 +73,23 @@ export class InvoicesController {
     return this.invoices.emitir(dto, c.userId);
   }
 
+  // Ruta literal ANTES de las rutas ':id' (convención del repo): Nest evalúa
+  // en orden de declaración y 'preview' no debe caer en un handler por id.
+  @Post('preview')
+  @HttpCode(HttpStatus.OK)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Vista previa del PDF del CFDI SIN timbrar: mismo body que /emitir y mismos datos (no marca facturado ni toca la BD).',
+  })
+  async preview(@Body() dto: EmitirFacturaDto): Promise<StreamableFile> {
+    const pdf = await this.invoices.preview(dto);
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: 'inline; filename="factura-preview.pdf"',
+    });
+  }
+
   @Post('nota-credito')
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Emite una nota de crédito (CFDI Egreso) relacionada a una factura.' })

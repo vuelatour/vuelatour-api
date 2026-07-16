@@ -11,8 +11,11 @@ import type {
   UpdateClienteDto,
 } from './dto/clients.dto';
 
+// Incluye los datos fiscales CFDI 4.0 del cliente (régimen, uso, CP) y los de
+// captura de la constancia (domicilio_fiscal, pais_residencia — extranjeros):
+// el panel los edita y la facturación los exige antes de timbrar.
 const COLS =
-  'id, nombre, telefono, email, razon_social_default, rfc, canal_origen, es_broker, notas, activo, created_at, updated_at';
+  'id, nombre, telefono, email, razon_social_default, rfc, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, canal_origen, es_broker, notas, activo, created_at, updated_at';
 
 @Injectable()
 export class ClientsService {

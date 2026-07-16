@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -10,12 +10,17 @@ import {
   IsOptional,
   IsString,
   IsUUID,
-  Length,
+  Matches,
   Max,
   MaxLength,
   Min,
   ValidateNested,
 } from 'class-validator';
+
+// Normaliza claves SAT a MAYÚSCULAS (RFC/uso CFDI): el SAT las rechaza en
+// minúsculas y el equipo las captura como sea.
+const aMayusculas = ({ value }: { value: unknown }): unknown =>
+  typeof value === 'string' ? value.trim().toUpperCase() : value;
 
 export enum CanalCliente {
   WHATSAPP = 'WHATSAPP',
@@ -92,11 +97,65 @@ export class CreateClienteDto {
   @MaxLength(200)
   razon_social_default?: string;
 
-  @ApiPropertyOptional({ description: 'RFC mexicano (12 o 13 caracteres)' })
+  @ApiPropertyOptional({
+    description:
+      'RFC (12-13). Acepta también los genéricos del SAT: XAXX010101000 (público en general) y XEXX010101000 (extranjero). Se normaliza a MAYÚSCULAS.',
+  })
   @IsOptional()
   @IsString()
-  @Length(12, 13)
+  // El SAT solo acepta RFC en mayúsculas: se normaliza aquí para que el CFDI
+  // no rebote por un rfc capturado en minúsculas.
+  @Transform(aMayusculas)
+  // Patrón SAT (moral 12 / física 13): cubre RFCs normales Y los genéricos
+  // XAXX010101000 / XEXX010101000 (mismo regex que el receptor alterno 9.7).
+  @Matches(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'RFC inválido.' })
   rfc?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Régimen fiscal SAT del receptor (c_RegimenFiscal, 3 dígitos; ej. 601, 612, 616).',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{3}$/, { message: 'Régimen fiscal SAT de 3 dígitos.' })
+  regimen_fiscal_receptor?: string;
+
+  @ApiPropertyOptional({
+    description: 'Uso CFDI default del cliente (c_UsoCFDI; ej. G03, S01).',
+    maxLength: 4,
+  })
+  @IsOptional()
+  @IsString()
+  @Transform(aMayusculas)
+  @MaxLength(4)
+  uso_cfdi?: string;
+
+  @ApiPropertyOptional({
+    description: 'CP fiscal (DomicilioFiscalReceptor del CFDI, 5 dígitos).',
+  })
+  @IsOptional()
+  @Matches(/^\d{5}$/, { message: 'CP de 5 dígitos.' })
+  codigo_postal?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 300,
+    description:
+      'Domicilio fiscal completo (de la constancia). El CFDI solo usa el CP; esto es referencia del equipo.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  domicilio_fiscal?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 60,
+    description:
+      'País de residencia (clientes extranjeros, RFC XEXX010101000).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  pais_residencia?: string;
 
   @ApiPropertyOptional({ enum: CanalCliente })
   @IsOptional()

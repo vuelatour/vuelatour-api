@@ -6,8 +6,14 @@ import {
   IsEnum,
   IsOptional,
   IsString,
+  MaxLength,
   ValidateNested,
 } from 'class-validator';
+
+// Tope de los adjuntos en base64: ~12 MB binarios ≈ 16M caracteres base64
+// (4/3 del binario). El body global admite 25mb; esto corta antes payloads
+// absurdos que solo queman memoria y timeout de la IA.
+const MAX_BASE64_CHARS = 16_000_000;
 
 export enum ImageMediaType {
   JPEG = 'image/jpeg',
@@ -80,4 +86,38 @@ export class GastoTicketDto {
   @IsOptional()
   @IsString()
   excelFilename?: string;
+}
+
+/**
+ * Constancia de situación fiscal del cliente (PDF del SAT o foto): la IA
+ * extrae RFC, razón social, régimen y CP para pre-llenar el alta/edición del
+ * cliente en el panel. EXACTAMENTE una fuente: pdfBase64 O imageBase64
+ * (+mediaType) — el controller valida la exclusión.
+ */
+export class ConstanciaFiscalDto {
+  @ApiPropertyOptional({
+    description:
+      'Constancia en PDF (base64, sin prefijo data:). Excluyente con imageBase64.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_BASE64_CHARS, { message: 'El PDF excede ~12 MB.' })
+  pdfBase64?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Foto de la constancia en base64 (sin prefijo data:). Requiere mediaType.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(MAX_BASE64_CHARS, { message: 'La imagen excede ~12 MB.' })
+  imageBase64?: string;
+
+  @ApiPropertyOptional({
+    enum: ImageMediaType,
+    description: 'Requerido si se envía imageBase64.',
+  })
+  @IsOptional()
+  @IsEnum(ImageMediaType)
+  mediaType?: ImageMediaType;
 }

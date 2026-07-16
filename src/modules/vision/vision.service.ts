@@ -56,6 +56,29 @@ export interface GastoTicketVisionResult {
   modelo: string;
 }
 
+export interface ConstanciaFiscalVisionInput {
+  /** Constancia en PDF (base64). Excluyente con imageBase64. */
+  pdfBase64?: string;
+  /** Foto de la constancia (base64). Requiere mediaType. */
+  imageBase64?: string;
+  mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+}
+
+/** Respuesta de pyservices POST /vision/constancia-fiscal (snake_case). */
+export interface ConstanciaFiscalVisionResult {
+  disponible: boolean;
+  legible: boolean;
+  rfc: string | null;
+  razon_social: string | null;
+  /** Clave c_RegimenFiscal (3 dígitos) detectada en la constancia. */
+  regimen_fiscal: string | null;
+  regimen_descripcion: string | null;
+  cp: string | null;
+  domicilio: string | null;
+  confianza: number;
+  motivo?: string | null;
+}
+
 export interface CombustibleTicketVisionInput {
   imageBase64?: string;
   mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
@@ -301,6 +324,71 @@ export class VisionService implements OnModuleInit {
           ? 'La lectura tardó demasiado (timeout API→pyservices)'
           : `Sin conexión con pyservices: ${msg.slice(0, 120)}`,
       } as GastoTicketVisionResult & { motivo: string };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Lee una constancia de situación fiscal (PDF del SAT o foto) y extrae RFC,
+   * razón social, régimen, CP y domicilio para pre-llenar el alta del cliente.
+   * Passthrough a pyservices /vision/constancia-fiscal. Best-effort: si falla
+   * devuelve el motivo (misma UX que readGastoTicket) y la captura sigue manual.
+   */
+  async readConstanciaFiscal(
+    input: ConstanciaFiscalVisionInput,
+  ): Promise<
+    (ConstanciaFiscalVisionResult & { motivo?: string | null }) | null
+  > {
+    if (!this.enabled) return null;
+    if (!input.pdfBase64 && !input.imageBase64) return null;
+
+    const controller = new AbortController();
+    // La constancia suele venir en PDF (varias hojas): mismo margen que los
+    // documentos de gasto — cortar antes de 150s dejaba lecturas a medias.
+    const timer = setTimeout(
+      () => controller.abort(),
+      Math.max(this.timeoutMs, 150_000),
+    );
+    try {
+      const res = await fetch(`${this.baseUrl}/vision/constancia-fiscal`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': this.token,
+        },
+        body: JSON.stringify({
+          pdf_base64: input.pdfBase64,
+          image_base64: input.imageBase64,
+          media_type: input.mediaType,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        // Motivo real del fallo (llave IA, timeout de pyservices…) para que
+        // el panel lo muestre en vez de un genérico "no se pudo leer".
+        const detalle = await res.text().catch(() => '');
+        this.logger.warn(
+          `pyservices /vision/constancia-fiscal respondió ${res.status}: ${detalle.slice(0, 200)}`,
+        );
+        let motivo = `pyservices ${res.status}`;
+        try {
+          const j = JSON.parse(detalle) as { detail?: string };
+          if (j.detail) motivo = j.detail;
+        } catch {
+          /* texto plano */
+        }
+        return { motivo } as ConstanciaFiscalVisionResult & { motivo: string };
+      }
+      return (await res.json()) as ConstanciaFiscalVisionResult;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`readConstanciaFiscal falló: ${msg}`);
+      return {
+        motivo: msg.includes('abort')
+          ? 'La lectura tardó demasiado (timeout API→pyservices)'
+          : `Sin conexión con pyservices: ${msg.slice(0, 120)}`,
+      } as ConstanciaFiscalVisionResult & { motivo: string };
     } finally {
       clearTimeout(timer);
     }

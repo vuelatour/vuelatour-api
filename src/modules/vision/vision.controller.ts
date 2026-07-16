@@ -1,8 +1,16 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Post,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
-import { GastoTicketDto } from './dto/vision.dto';
+import { ConstanciaFiscalDto, GastoTicketDto } from './dto/vision.dto';
 import { VisionService } from './vision.service';
 
 @ApiTags('Vision')
@@ -44,6 +52,39 @@ export class VisionController {
       return { disponible: false, motivo: result.motivo };
     }
     return { disponible: true, ...result };
+  }
+
+  @Post('constancia-fiscal')
+  // Datos fiscales del cliente = quienes dan de alta clientes y facturan.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Lee una constancia de situación fiscal (PDF o foto) por IA: RFC, razón social, régimen, CP y domicilio para pre-llenar el cliente. Best-effort.',
+  })
+  async constanciaFiscal(@Body() dto: ConstanciaFiscalDto) {
+    // Exactamente UNA fuente: mandar ambas (o ninguna) es señal de un bug del
+    // cliente HTTP y la IA no sabría cuál leer.
+    if (Boolean(dto.pdfBase64) === Boolean(dto.imageBase64)) {
+      throw new BadRequestException(
+        'Envía exactamente una fuente: pdfBase64 O imageBase64 (+mediaType).',
+      );
+    }
+    if (dto.imageBase64 && !dto.mediaType) {
+      throw new BadRequestException('mediaType es requerido con imageBase64.');
+    }
+    const result = await this.vision.readConstanciaFiscal({
+      pdfBase64: dto.pdfBase64,
+      imageBase64: dto.imageBase64,
+      mediaType: dto.mediaType,
+    });
+    if (!result) return { disponible: false };
+    // Falla con motivo (llave IA, timeout…): el panel lo muestra tal cual.
+    if (result.motivo && result.rfc === undefined) {
+      return { disponible: false, motivo: result.motivo };
+    }
+    // pyservices ya responde `disponible`; solo se asegura ante respuestas viejas.
+    return { ...result, disponible: result.disponible ?? true };
   }
 
   @Post('combustible-ticket')

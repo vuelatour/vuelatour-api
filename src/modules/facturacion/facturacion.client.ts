@@ -70,6 +70,23 @@ export interface CancelarResult {
   error?: string | null;
 }
 
+/**
+ * Vista previa (sin timbrar): MISMO shape que /timbrar pero con el CSD
+ * opcional — pyservices renderiza el PDF sin firmar ni tocar al PAC.
+ */
+export type PreviewPayload = Omit<
+  TimbrarPayload,
+  'csd_cer_b64' | 'csd_key_b64' | 'csd_password'
+> &
+  Partial<Pick<TimbrarPayload, 'csd_cer_b64' | 'csd_key_b64' | 'csd_password'>>;
+
+export interface PreviewResult {
+  ok?: boolean;
+  /** PDF de la vista previa en base64 (respuesta de /facturacion/preview). */
+  pdf_b64?: string | null;
+  error?: string | null;
+}
+
 /** Cliente HTTP hacia pyservices para timbrar CFDI 4.0 (FEL). */
 @Injectable()
 export class FacturacionClient implements OnModuleInit {
@@ -110,8 +127,17 @@ export class FacturacionClient implements OnModuleInit {
     return this.post<CancelarResult>('/facturacion/cancelar', payload, 'cancelar');
   }
 
+  /**
+   * Vista previa del PDF del CFDI SIN timbrar: mismo payload que /timbrar
+   * (CSD opcional). Mismo cliente/timeout que el timbrado — el render del
+   * PDF en pyservices puede tardar y abortar antes dejaba previews "rotos".
+   */
+  async preview(payload: PreviewPayload): Promise<PreviewResult> {
+    return this.post<PreviewResult>('/facturacion/preview', payload, 'preview');
+  }
+
   /** POST defensivo hacia pyservices (timeout + AbortController + token interno). */
-  private async post<T extends { ok: boolean; error?: string | null }>(
+  private async post<T extends { ok?: boolean; error?: string | null }>(
     path: string,
     payload: unknown,
     op: string,

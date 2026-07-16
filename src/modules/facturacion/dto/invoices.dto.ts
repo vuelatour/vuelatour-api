@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -90,7 +90,12 @@ export class EmitirFacturaDto {
   // el CFDI se emite a este receptor en lugar del cliente del vuelo.
   @ApiPropertyOptional({ description: 'RFC del receptor "SE FACTURÓ A" (12-13).' })
   @IsOptional()
-  @Matches(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i, { message: 'RFC inválido.' })
+  // CFDI 4.0 exige el RFC en MAYÚSCULAS: normalizar aquí evita que un alterno
+  // tecleado en minúsculas rebote en el PAC.
+  @Transform(({ value }) =>
+    typeof value === 'string' ? value.trim().toUpperCase() : (value as string),
+  )
+  @Matches(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'RFC inválido.' })
   facturado_a_rfc?: string;
 
   @ApiPropertyOptional({ description: 'Razón social / nombre del receptor "SE FACTURÓ A".' })
