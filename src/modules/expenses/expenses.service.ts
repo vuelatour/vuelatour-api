@@ -14,6 +14,7 @@ import {
 } from '../pyservices/pyservices.service';
 import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
+import { CategoriaGasto } from './dto/expenses.dto';
 import type {
   CreateGastoDto,
   CreateTarifaAerodromoDto,
@@ -97,7 +98,11 @@ export class ExpensesService {
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
     // Pendiente = sin avión asignado (la bandeja debe quedar siempre vacía).
-    if (filters.pendientes === true) q = q.is('aeronave_id', null);
+    // FIJO e INDIRECTO se excluyen: por diseño no llevan avión/vuelo — no son
+    // "pendientes de resolver" (mismo criterio que el pre-cierre).
+    if (filters.pendientes === true) {
+      q = q.is('aeronave_id', null).not('categoria', 'in', '(FIJO,INDIRECTO)');
+    }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
 
     const { data, error, count } = await q;
@@ -640,6 +645,13 @@ export class ExpensesService {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
       throw new BadRequestException('El mecánico solo puede cargar combustible (GAS).');
+    }
+    // Un gasto INDIRECTO es de la operación, NO de un vuelo: ligarlo a uno lo
+    // metería al reporte/reparto de ese vuelo y contaminaría sus números.
+    if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
+      throw new BadRequestException(
+        'Un gasto INDIRECTO no se liga a un vuelo; usa otra categoría o quita el vuelo.',
+      );
     }
     // El piloto ya NO ve ni edita desglose en la app (solo el total): el
     // desglose que leyó la IA llega en valor_ia_extraido y aquí se compone

@@ -23,6 +23,9 @@ const DIRECTO = new Set([
   'OTRO',
 ]);
 /** Talleres, aceites, refacciones, mecanicos. */
+// OJO: la CATEGORÍA de gasto 'INDIRECTO' (captura sin vuelo, jul 2026) NO
+// está en ningún set A PROPÓSITO: cae al else y el reparto la ignora hasta
+// que el equipo decida su tratamiento. No "arreglarlo" sin esa decisión.
 const INDIRECTO = new Set(['REFACCION']);
 const PERMISO = new Set(['PERMISO']);
 /** Sueldos, seguros: se prorratean entre aviones activos. */
@@ -524,8 +527,12 @@ export class ProfitSharingService {
     }
 
     const gastos = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
+    // FIJO e INDIRECTO no llevan avión por diseño: no bloquean el cierre.
     const sinAvion = gastos.filter(
-      (g) => g.aeronave_id == null && g.categoria !== 'FIJO',
+      (g) =>
+        g.aeronave_id == null &&
+        g.categoria !== 'FIJO' &&
+        g.categoria !== 'INDIRECTO',
     );
     const sinTc = gastos.filter(
       (g) => g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0),

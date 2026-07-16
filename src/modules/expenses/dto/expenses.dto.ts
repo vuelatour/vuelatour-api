@@ -32,6 +32,10 @@ export enum CategoriaGasto {
   /** Honorario del piloto externo (freelance sin acceso; lo captura oficina). */
   PILOTO_EXTERNO = 'PILOTO_EXTERNO',
   FIJO = 'FIJO',
+  /** Gasto indirecto de la operación (SIN vuelo; avión opcional). Por ahora
+   *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir
+   *  su tratamiento con el equipo (hoja "gastos indirectos" de su control). */
+  INDIRECTO = 'INDIRECTO',
   OTRO = 'OTRO',
 }
 
