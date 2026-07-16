@@ -66,7 +66,7 @@ export class FlightReportService {
         sb
           .from('escala')
           .select(
-            'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta',
+            'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id',
           )
           .eq('vuelo_id', flightId)
           .order('orden', { ascending: true }),
@@ -79,7 +79,9 @@ export class FlightReportService {
           .order('fecha_cobro', { ascending: true }),
         sb
           .from('gasto')
-          .select('fecha_gasto, categoria, monto, moneda, litros, lugar, notas, proveedor:proveedor_id(nombre)')
+          .select(
+            'fecha_gasto, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
+          )
           .eq('vuelo_id', flightId)
           .order('fecha_gasto', { ascending: true }),
       ]);
@@ -241,6 +243,8 @@ export class FlightReportService {
             .join(' · ') || 'Combustible',
         moneda: (g.moneda as string) ?? 'MXN',
         monto: n(g.monto),
+        // Litros como dato (el Excel del equipo muestra litros y $/litro).
+        litros: g.litros != null ? n(g.litros) : null,
       }));
     const gastos: ReporteVueloLineaPayload[] = gastosRows
       .filter((g) => g.categoria !== 'GAS')
@@ -265,6 +269,85 @@ export class FlightReportService {
       }));
 
     const matricula = (aeronave as { matricula?: string; modelo?: string } | null);
+
+    // ===== Economía del vuelo (formato de los Excel de control del equipo:
+    // "Balance VGV" / "Dinero <mes>") =====
+    // Tacómetro global: primera salida y última llegada con lectura — SOLO de
+    // los tramos volados en el avión del vuelo. Con asignación por tramo, un
+    // tramo en OTRO avión tiene tacómetro propio: mezclar lecturas daría un
+    // rango absurdo (fin − inicio ≠ horas). Si hay varias aeronaves, la tabla
+    // por tramo sigue mostrando cada lectura.
+    const escalasDelAvion = escalas.filter(
+      (e) => e.aeronave_id == null || e.aeronave_id === v.aeronave_id,
+    );
+    const tacosSalida = escalasDelAvion
+      .map((e) => (e.taco_salida == null ? null : n(e.taco_salida)))
+      .filter((x): x is number => x != null);
+    const tacosLlegada = escalasDelAvion
+      .map((e) => (e.taco_llegada == null ? null : n(e.taco_llegada)))
+      .filter((x): x is number => x != null);
+    const tacoInicio = tacosSalida.length > 0 ? Math.min(...tacosSalida) : null;
+    const tacoFin = tacosLlegada.length > 0 ? Math.max(...tacosLlegada) : null;
+
+    // Gastos a USD con la MISMA regla del reparto (fuente única de criterio):
+    // USD directo; MXN ÷ tc_gasto; sin TC no se inventa — se excluye y se
+    // reporta para que la oficina lo corrija.
+    const gastoUsd = (g: Record<string, unknown>): number | null => {
+      if (g.moneda === 'USD') return n(g.monto);
+      if (g.tc_gasto != null && Number(g.tc_gasto) > 0) {
+        return n(g.monto) / Number(g.tc_gasto);
+      }
+      return null;
+    };
+    let gastosTotalUsd = 0;
+    let combustibleTotalUsd = 0;
+    let gastosSinTcCount = 0;
+    let gastosSinTcMxn = 0;
+    for (const g of gastosRows) {
+      const usd = gastoUsd(g);
+      if (usd == null) {
+        gastosSinTcCount += 1;
+        gastosSinTcMxn += n(g.monto);
+        continue;
+      }
+      if (g.categoria === 'GAS') combustibleTotalUsd += usd;
+      else gastosTotalUsd += usd;
+    }
+    gastosTotalUsd = Number(gastosTotalUsd.toFixed(2));
+    combustibleTotalUsd = Number(combustibleTotalUsd.toFixed(2));
+    const costoVueloUsd = Number((gastosTotalUsd + combustibleTotalUsd).toFixed(2));
+    if (gastosSinTcCount > 0) {
+      notasHoras.push(
+        `${gastosSinTcCount} gasto(s) en MXN por $${gastosSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio: no entran al balance USD — captura su TC en Gastos.`,
+      );
+    }
+
+    // Como el Excel del equipo: REMANENTE = venta (total c/IVA) − costo;
+    // GANANCIA = remanente − comisión vendedor − comisiones bancarias;
+    // GANANCIA X HR sobre horas COBRADAS (fallback voladas); % sobre venta
+    // sin IVA.
+    const ventaUsd = n(v.monto_total_usd);
+    const ventaSinIvaUsd = Number((ventaUsd - n(v.iva_usd)).toFixed(2));
+    const hayEconomia = ventaUsd > 0 || costoVueloUsd > 0;
+    const remanenteUsd = hayEconomia
+      ? Number((ventaUsd - costoVueloUsd).toFixed(2))
+      : null;
+    const gananciaFinalUsd =
+      remanenteUsd != null
+        ? Number(
+            (remanenteUsd - n(v.comision_vendedor_usd) - comisionesBancoUsd).toFixed(2),
+          )
+        : null;
+    const horasParaGanancia =
+      horasCotizadas != null && horasCotizadas > 0 ? horasCotizadas : horasVoladas;
+    const gananciaXHrUsd =
+      gananciaFinalUsd != null && horasParaGanancia != null && horasParaGanancia > 0
+        ? Number((gananciaFinalUsd / horasParaGanancia).toFixed(2))
+        : null;
+    const gananciaPct =
+      gananciaFinalUsd != null && ventaSinIvaUsd > 0
+        ? Number((gananciaFinalUsd / ventaSinIvaUsd).toFixed(4))
+        : null;
 
     return {
       generado: new Date().toISOString(),
@@ -323,6 +406,18 @@ export class FlightReportService {
       saldo_usd: Number((n(v.monto_total_usd) - totalCobrado).toFixed(2)),
       combustible,
       gastos,
+      // Economía del vuelo (Excel del equipo).
+      taco_inicio: tacoInicio,
+      taco_fin: tacoFin,
+      gastos_total_usd: gastosTotalUsd,
+      combustible_total_usd: combustibleTotalUsd,
+      gastos_sin_tc_count: gastosSinTcCount,
+      gastos_sin_tc_mxn: Number(gastosSinTcMxn.toFixed(2)),
+      venta_sin_iva_usd: ventaSinIvaUsd,
+      remanente_usd: remanenteUsd,
+      ganancia_final_usd: gananciaFinalUsd,
+      ganancia_x_hr_usd: gananciaXHrUsd,
+      ganancia_pct: gananciaPct,
     };
   }
 }

@@ -53,6 +53,8 @@ export interface ReporteVueloLineaPayload {
   detalle?: string | null;
   moneda?: string | null;
   monto?: number | null;
+  /** Litros cargados (solo líneas de combustible; precio x litro = monto/litros). */
+  litros?: number | null;
 }
 export interface ReporteVueloTramoPayload {
   orden: number;
@@ -110,6 +112,27 @@ export interface ReporteVueloPayload {
   saldo_usd?: number;
   combustible?: ReporteVueloLineaPayload[];
   gastos?: ReporteVueloLineaPayload[];
+  // ===== Economía del vuelo (formato de los Excel de control del equipo:
+  // "Balance VGV" / "Dinero"): venta vs costo, remanente y ganancia. =====
+  /** Tacómetro global: primera salida y última llegada con lectura. */
+  taco_inicio?: number | null;
+  taco_fin?: number | null;
+  /** Gastos del vuelo convertidos a USD (misma regla que el reparto:
+   *  USD directo, MXN ÷ tc_gasto; los sin TC se excluyen y se reportan). */
+  gastos_total_usd?: number;
+  combustible_total_usd?: number;
+  gastos_sin_tc_count?: number;
+  gastos_sin_tc_mxn?: number;
+  /** Venta sin IVA (total − IVA): base del % de ganancia, como en el Excel. */
+  venta_sin_iva_usd?: number;
+  /** Venta (total c/IVA) − gastos del vuelo. */
+  remanente_usd?: number | null;
+  /** Remanente − comisión vendedor − comisiones bancarias. */
+  ganancia_final_usd?: number | null;
+  /** Ganancia / horas cobradas (fallback: voladas), como el Excel. */
+  ganancia_x_hr_usd?: number | null;
+  /** Ganancia / venta sin IVA. */
+  ganancia_pct?: number | null;
   notas?: string | null;
 }
 
