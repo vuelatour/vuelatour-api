@@ -91,11 +91,11 @@ export class ProfitSharingService {
       periodo_desde: result.periodo.desde,
       periodo_hasta: result.periodo.hasta,
       // Fecha de generación en hora de Cancún (UTC−5), no UTC.
-      generado: new Intl.DateTimeFormat("en-CA", {
-        timeZone: "America/Cancun",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
+      generado: new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Cancun',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
       }).format(new Date()),
       aviones: result.aviones.map((a) => ({
         matricula: a.aeronave.matricula,
@@ -121,7 +121,11 @@ export class ProfitSharingService {
         })),
       })),
     };
-    return { payload, desde: result.periodo.desde, hasta: result.periodo.hasta };
+    return {
+      payload,
+      desde: result.periodo.desde,
+      hasta: result.periodo.hasta,
+    };
   }
 
   /** Genera el PDF del reparto delegando el render al microservicio Python. */
@@ -381,70 +385,149 @@ export class ProfitSharingService {
     const desdeTs = `${q.desde}T00:00:00-05:00`;
     const hastaTs = `${q.hasta}T23:59:59-05:00`;
 
-    const [pendRes, completadosRes, gastosRes, movRes, revRes, pistasRes] =
-      await Promise.all([
-        // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
-        sb
-          .from('vuelo')
-          .select('id, folio, estado, fecha_vuelo')
-          .in('estado', ['SOLICITUD', 'COTIZADO', 'RESERVA', 'CONFIRMADO', 'EN_VUELO'])
-          .gte('fecha_vuelo', desdeTs)
-          .lte('fecha_vuelo', hastaTs)
-          .order('fecha_vuelo', { ascending: true }),
-        // Completados del periodo (para cobros pendientes/parciales).
-        sb
-          .from('vuelo')
-          .select('id, folio, piloto_id, monto_total_usd, tc_usd_mxn, cobrado')
-          .eq('estado', 'COMPLETADO')
-          .gte('fecha_vuelo', desdeTs)
-          .lte('fecha_vuelo', hastaTs),
-        // Gastos del periodo con huecos de datos.
-        sb
-          .from('gasto')
-          .select('id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_comprobante')
-          .gte('fecha_gasto', q.desde)
-          .lte('fecha_gasto', q.hasta),
-        // Movimientos bancarios del periodo sin conciliar.
-        sb
-          .from('movimiento_bancario')
-          .select('id, tipo, monto')
-          .eq('conciliado', false)
-          .gte('fecha', q.desde)
-          .lte('fecha', q.hasta),
-        // Tacómetros en revisión (amarillos) de vuelos del periodo.
-        sb
-          .from('escala')
-          .select('id, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
-          .eq('revision_requerida', true)
-          .neq('vuelo.estado', 'CANCELADO')
-          .gte('vuelo.fecha_vuelo', desdeTs)
-          .lte('vuelo.fecha_vuelo', hastaTs),
-        // Aterrizajes fuera de CUN del periodo (candidatos a cuota de pista).
-        sb
-          .from('escala')
-          .select('id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
-          .neq('destino_iata', 'CUN')
-          .neq('vuelo.estado', 'CANCELADO')
-          .gte('vuelo.fecha_vuelo', desdeTs)
-          .lte('vuelo.fecha_vuelo', hastaTs),
-      ]);
-    for (const r of [pendRes, completadosRes, gastosRes, movRes, revRes, pistasRes]) {
+    const [
+      pendRes,
+      completadosRes,
+      gastosRes,
+      movRes,
+      revRes,
+      pistasRes,
+      legsRes,
+    ] = await Promise.all([
+      // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
+      sb
+        .from('vuelo')
+        .select('id, folio, estado, fecha_vuelo')
+        .in('estado', [
+          'SOLICITUD',
+          'COTIZADO',
+          'RESERVA',
+          'CONFIRMADO',
+          'EN_VUELO',
+        ])
+        .gte('fecha_vuelo', desdeTs)
+        .lte('fecha_vuelo', hastaTs)
+        .order('fecha_vuelo', { ascending: true }),
+      // Completados del periodo (para cobros pendientes/parciales).
+      sb
+        .from('vuelo')
+        .select('id, folio, piloto_id, monto_total_usd, tc_usd_mxn, cobrado')
+        .eq('estado', 'COMPLETADO')
+        .gte('fecha_vuelo', desdeTs)
+        .lte('fecha_vuelo', hastaTs),
+      // Gastos del periodo con huecos de datos.
+      sb
+        .from('gasto')
+        .select(
+          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_comprobante',
+        )
+        .gte('fecha_gasto', q.desde)
+        .lte('fecha_gasto', q.hasta),
+      // Movimientos bancarios del periodo sin conciliar.
+      sb
+        .from('movimiento_bancario')
+        .select('id, tipo, monto')
+        .eq('conciliado', false)
+        .gte('fecha', q.desde)
+        .lte('fecha', q.hasta),
+      // Tacómetros en revisión (amarillos) de vuelos del periodo.
+      sb
+        .from('escala')
+        .select('id, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
+        .eq('revision_requerida', true)
+        .neq('vuelo.estado', 'CANCELADO')
+        .gte('vuelo.fecha_vuelo', desdeTs)
+        .lte('vuelo.fecha_vuelo', hastaTs),
+      // Aterrizajes fuera de CUN del periodo (candidatos a cuota de pista).
+      sb
+        .from('escala')
+        .select(
+          'id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)',
+        )
+        .neq('destino_iata', 'CUN')
+        .neq('vuelo.estado', 'CANCELADO')
+        .gte('vuelo.fecha_vuelo', desdeTs)
+        .lte('vuelo.fecha_vuelo', hastaTs),
+      // Fechas de tramos: detectar tramos que "salen" antes que el anterior.
+      sb
+        .from('escala')
+        .select(
+          'vuelo_id, orden, fecha_salida_plan, vuelo:vuelo_id!inner(folio, estado)',
+        )
+        .not('fecha_salida_plan', 'is', null)
+        .neq('vuelo.estado', 'CANCELADO')
+        .gte('vuelo.fecha_vuelo', desdeTs)
+        .lte('vuelo.fecha_vuelo', hastaTs),
+    ]);
+    for (const r of [
+      pendRes,
+      completadosRes,
+      gastosRes,
+      movRes,
+      revRes,
+      pistasRes,
+      legsRes,
+    ]) {
       if (r.error) throw new Error(r.error.message);
     }
 
+    // Tramos fuera de orden cronológico (el "regreso" sale antes que la ida):
+    // casi siempre es un dedazo al capturar la fecha (caso real: folio 10).
+    // No altera montos, pero sí calendario/reportes por fecha — se avisa.
+    const legs = (legsRes.data ?? []) as Array<Record<string, unknown>>;
+    const legsPorVuelo = new Map<
+      string,
+      Array<{ orden: number; fecha: string }>
+    >();
+    for (const e of legs) {
+      const list = legsPorVuelo.get(e.vuelo_id as string) ?? [];
+      list.push({
+        orden: Number(e.orden),
+        fecha: e.fecha_salida_plan as string,
+      });
+      legsPorVuelo.set(e.vuelo_id as string, list);
+    }
+    const fechasFueraDeOrden: Array<{ id: string; folio: number }> = [];
+    for (const [vueloId, list] of legsPorVuelo) {
+      list.sort((a, b) => a.orden - b.orden);
+      const desorden = list.some(
+        (l, i) =>
+          i > 0 &&
+          new Date(l.fecha).getTime() < new Date(list[i - 1].fecha).getTime(),
+      );
+      if (desorden) {
+        const row = legs.find((e) => e.vuelo_id === vueloId);
+        const vuelo = row?.vuelo as Record<string, unknown> | undefined;
+        fechasFueraDeOrden.push({
+          id: vueloId,
+          folio: Number(vuelo?.folio ?? 0),
+        });
+      }
+    }
+    fechasFueraDeOrden.sort((a, b) => a.folio - b.folio);
+
     // Aterrizajes sin su gasto de pista: la cuota de VIP SAESA se paga días
     // después — si no se provisiona, el reparto sale inflado.
-    const escalasPista = (pistasRes.data ?? []) as Array<Record<string, unknown>>;
+    const escalasPista = (pistasRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
     let pistasSinGasto = 0;
     if (escalasPista.length > 0) {
       const { data: gastosPista, error: gpErr } = await sb
         .from('gasto')
         .select('escala_id, categoria')
-        .in('escala_id', escalasPista.map((e) => e.id as string))
+        .in(
+          'escala_id',
+          escalasPista.map((e) => e.id as string),
+        )
         .in('categoria', ['OPERACIONES', 'ATERRIZAJE']);
       if (gpErr) throw new Error(gpErr.message);
-      const cubiertas = new Set((gastosPista ?? []).map((g) => g.escala_id as string));
-      pistasSinGasto = escalasPista.filter((e) => !cubiertas.has(e.id as string)).length;
+      const cubiertas = new Set(
+        (gastosPista ?? []).map((g) => g.escala_id as string),
+      );
+      pistasSinGasto = escalasPista.filter(
+        (e) => !cubiertas.has(e.id as string),
+      ).length;
     }
 
     // Vuelos COMPLETADOS por piloto EXTERNO sin su honorario capturado: el
@@ -452,10 +535,14 @@ export class ProfitSharingService {
     // del reparto sale inflada en silencio.
     let externosSinHonorario = 0;
     {
-      const completadosRows = (completadosRes.data ?? []) as Array<Record<string, unknown>>;
+      const completadosRows = (completadosRes.data ?? []) as Array<
+        Record<string, unknown>
+      >;
       const pilotoIds = [
         ...new Set(
-          completadosRows.map((v) => v.piloto_id as string | null).filter(Boolean),
+          completadosRows
+            .map((v) => v.piloto_id as string | null)
+            .filter(Boolean),
         ),
       ] as string[];
       if (pilotoIds.length > 0) {
@@ -473,10 +560,15 @@ export class ProfitSharingService {
           const { data: gastosPE, error: gpeErr } = await sb
             .from('gasto')
             .select('vuelo_id')
-            .in('vuelo_id', vuelosExternos.map((v) => v.id as string))
+            .in(
+              'vuelo_id',
+              vuelosExternos.map((v) => v.id as string),
+            )
             .eq('categoria', 'PILOTO_EXTERNO');
           if (gpeErr) throw new Error(gpeErr.message);
-          const cubiertos = new Set((gastosPE ?? []).map((g) => g.vuelo_id as string));
+          const cubiertos = new Set(
+            (gastosPE ?? []).map((g) => g.vuelo_id as string),
+          );
           externosSinHonorario = vuelosExternos.filter(
             (v) => !cubiertos.has(v.id as string),
           ).length;
@@ -492,7 +584,9 @@ export class ProfitSharingService {
     }));
 
     // Cobros pendientes con SALDO real (soporta pago parcial).
-    const completados = (completadosRes.data ?? []) as Array<Record<string, unknown>>;
+    const completados = (completadosRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
     const ids = completados.map((v) => v.id as string);
     const cobros = await this.fetchCobros(ids);
     const porVuelo = new Map<string, CobroRow[]>();
@@ -558,9 +652,18 @@ export class ProfitSharingService {
         count: (revRes.data ?? []).length,
       },
       {
+        clave: 'fechas_tramos_incoherentes',
+        titulo: 'Vuelos con fechas de tramos fuera de orden',
+        detalle:
+          'Un tramo "sale" antes que el tramo anterior (dedazo de fecha): corrígelo en el detalle del vuelo → Asignación por tramo.',
+        count: fechasFueraDeOrden.length,
+        vuelos: fechasFueraDeOrden,
+      },
+      {
         clave: 'cobros_pendientes',
         titulo: 'Vuelos completados con saldo por cobrar',
-        detalle: 'Solo se reparte lo cobrado: este dinero queda fuera del reparto.',
+        detalle:
+          'Solo se reparte lo cobrado: este dinero queda fuera del reparto.',
         count: cobrosPendientes.length,
         monto_usd: round2(
           cobrosPendientes.reduce((acc, c) => acc + c.saldo_usd, 0),
@@ -570,7 +673,8 @@ export class ProfitSharingService {
       {
         clave: 'gastos_sin_avion',
         titulo: 'Gastos sin avión asignado (bandeja)',
-        detalle: 'No se restan a ningún avión en el reparto. Meta: bandeja vacía.',
+        detalle:
+          'No se restan a ningún avión en el reparto. Meta: bandeja vacía.',
         count: sinAvion.length,
       },
       {
@@ -611,7 +715,11 @@ export class ProfitSharingService {
 
     // Lo único que BLOQUEA números: vuelos sin completar, tacos amarillos,
     // gastos sin TC. El resto es aviso (cobranza/conciliación son procesos).
-    const bloqueantes = ['vuelos_sin_completar', 'tacos_en_revision', 'gastos_sin_tc'];
+    const bloqueantes = [
+      'vuelos_sin_completar',
+      'tacos_en_revision',
+      'gastos_sin_tc',
+    ];
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))
       .every((i) => i.count === 0);
@@ -650,7 +758,9 @@ export class ProfitSharingService {
   private async fetchVuelos(desde: string, hasta: string): Promise<VueloRow[]> {
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select('id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd')
+      .select(
+        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd',
+      )
       .eq('estado', 'COMPLETADO')
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
