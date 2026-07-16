@@ -74,7 +74,10 @@ export class ConciliacionService {
       throw new ServiceUnavailableException('Conciliación no configurada (pyservices).');
     }
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 60000);
+    // Un PDF con cientos de movimientos tarda varios minutos en extraerse con
+    // IA: 60s abortaba a media lectura. La importación es manual (el operador
+    // espera) y CSV/Excel siguen siendo instantáneos.
+    const timer = setTimeout(() => controller.abort(), 270_000);
     try {
       const res = await fetch(`${baseUrl}/conciliacion/parse`, {
         method: 'POST',
