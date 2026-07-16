@@ -793,6 +793,26 @@ export class QuotesService {
     if (current.estado === 'CANCELADO') {
       throw new ConflictException('No se puede revisar una cotización cancelada.');
     }
+    // Ventana de edición (pedido del cliente, jul 2026): la cotización —aún
+    // CONFIRMADA— solo se ajusta mientras el vuelo sea del MES CORRIENTE o el
+    // ANTERIOR (hora Cancún). Más atrás ya pertenece a cierres pasados y sus
+    // números no se tocan. Cubre también quickAdjust y "Cotizar" reservas
+    // viejas (ambos pasan por aquí). Cancún es UTC−5 fijo (sin DST).
+    if (current.fecha_vuelo) {
+      const ahoraCancun = new Date(Date.now() - 5 * 3_600_000);
+      const inicioMesAnterior =
+        Date.UTC(
+          ahoraCancun.getUTCFullYear(),
+          ahoraCancun.getUTCMonth() - 1,
+          1,
+        ) +
+        5 * 3_600_000;
+      if (new Date(current.fecha_vuelo as string).getTime() < inicioMesAnterior) {
+        throw new ConflictException(
+          'El vuelo es de un mes ya cerrado (anterior al mes pasado): la cotización ya no puede ajustarse.',
+        );
+      }
+    }
     // Ajustes de última hora (extras, pax/TUAs, cierre de abiertas): la
     // cotización se puede revisar en cualquier estado mientras NO se haya
     // cobrado ni facturado. Cada revisión queda versionada en el historial.
