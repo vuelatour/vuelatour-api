@@ -72,7 +72,9 @@ export class FlightReportService {
           .order('orden', { ascending: true }),
         sb
           .from('cobro_vuelo')
-          .select('monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro')
+          .select(
+            'monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_pct, comision_banco_monto',
+          )
           .eq('vuelo_id', flightId)
           .order('fecha_cobro', { ascending: true }),
         sb
@@ -81,6 +83,21 @@ export class FlightReportService {
           .eq('vuelo_id', flightId)
           .order('fecha_gasto', { ascending: true }),
       ]);
+
+    // Un query fallido NO puede degradar a "sin datos": un reporte con cero
+    // cobros de un vuelo pagado es una mentira numérica silenciosa (peor que
+    // un error visible). Se truena aquí y el panel muestra el fallo.
+    for (const [nombre, res] of [
+      ['escalas', escalasRes],
+      ['cobros', cobrosRes],
+      ['gastos', gastosRes],
+    ] as const) {
+      if (res.error) {
+        throw new Error(
+          `Reporte del vuelo ${flightId}: fallo al leer ${nombre}: ${res.error.message}`,
+        );
+      }
+    }
 
     // Nombres de piloto/copiloto.
     const userIds = [v.piloto_id, v.copiloto_id].filter(Boolean) as string[];
@@ -169,6 +186,15 @@ export class FlightReportService {
     const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map((c) => ({
       fecha: (c.fecha_cobro as string) ?? null,
       concepto: (c.metodo_cobro as string) ?? 'Cobro',
+      // La comisión bancaria del cobro se muestra en su renglón: el banco
+      // depositó monto − comisión (pedido del cliente: el reporte no cuadraba
+      // con el estado de cuenta).
+      detalle:
+        n(c.comision_banco_monto) > 0
+          ? `Comisión banco ${Number(c.comision_banco_pct ?? 0)}% − $${n(
+              c.comision_banco_monto,
+            ).toFixed(2)} ${(c.moneda as string) ?? ''}`.trim()
+          : null,
       moneda: (c.moneda as string) ?? 'USD',
       monto: n(c.monto),
     }));
@@ -184,6 +210,20 @@ export class FlightReportService {
         `${conv.sin_tc_count} cobro(s) en MXN por $${conv.sin_tc_mxn.toLocaleString('en-US')} sin tipo de cambio: NO están en el total cobrado — captura su TC.`,
       );
     }
+    // Comisiones bancarias a USD con la MISMA regla de conversión que los
+    // cobros (pseudo-cobros por el monto de la comisión): total antes de
+    // comisión vs neto que realmente entró al banco.
+    const comisionesConv = cobrosEnUsd(
+      ((cobrosRes.data ?? []) as Array<Record<string, unknown>>)
+        .filter((c) => n(c.comision_banco_monto) > 0)
+        .map((c) => ({
+          monto: c.comision_banco_monto,
+          moneda: c.moneda,
+          tc_usd_mxn: c.tc_usd_mxn,
+        })),
+      v.tc_usd_mxn as number | null,
+    );
+    const comisionesBancoUsd = comisionesConv.total_usd;
 
     const gastosRows = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
     const proveedorNombre = (g: Record<string, unknown>): string | null => {
@@ -273,6 +313,13 @@ export class FlightReportService {
       notas_horas: notasHoras,
       cobros,
       total_cobrado_usd: Number(totalCobrado.toFixed(2)),
+      // Comisiones del banco: el saldo del CLIENTE se calcula contra el bruto
+      // (pagó completo); el neto es lo que de verdad entró a la cuenta.
+      comision_banco_usd: Number(comisionesBancoUsd.toFixed(2)),
+      total_cobrado_neto_usd:
+        comisionesBancoUsd > 0
+          ? Number((totalCobrado - comisionesBancoUsd).toFixed(2))
+          : null,
       saldo_usd: Number((n(v.monto_total_usd) - totalCobrado).toFixed(2)),
       combustible,
       gastos,

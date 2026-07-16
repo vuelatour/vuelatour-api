@@ -6,6 +6,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Max,
   MaxLength,
   Min,
 } from 'class-validator';
@@ -35,6 +36,19 @@ export class CreateCobroDto {
   @IsNumber()
   @Min(0)
   tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Comisión del banco en % sobre este cobro (terminal/transferencia/link). ' +
+      'El monto sigue siendo lo que pagó el CLIENTE; el banco deposita ' +
+      'monto − comisión. Explica la diferencia contra el estado de cuenta.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(20)
+  comision_banco_pct?: number;
 
   @ApiPropertyOptional({
     description: 'Referencia bancaria, ticket, link, voucher BillPocket',
@@ -88,6 +102,16 @@ export class UpdateCobroDto {
   @IsNumber()
   @Min(0)
   tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({
+    description: 'Comisión del banco en % (0 = quitarla). Recalcula el monto de comisión.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 4 })
+  @Min(0)
+  @Max(20)
+  comision_banco_pct?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

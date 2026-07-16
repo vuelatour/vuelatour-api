@@ -61,7 +61,7 @@ interface EscalaTaco {
 }
 
 const COBRO_COLS =
-  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
+  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
 const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
@@ -3297,6 +3297,14 @@ export class FlightsService {
       (dto.moneda === 'MXN' && Number(vuelo.tc_usd_mxn) > 0
         ? Number(vuelo.tc_usd_mxn)
         : undefined);
+    // Comisión bancaria: el banco deposita monto − comisión; sin registrarla,
+    // el reporte no cuadraba con el estado de cuenta. `monto` sigue siendo el
+    // BRUTO que pagó el cliente (cobrado/cobrosEnUsd intactos).
+    const comisionPct =
+      Number(dto.comision_banco_pct) > 0 ? Number(dto.comision_banco_pct) : null;
+    const comisionMonto = comisionPct
+      ? Math.round(dto.monto * (comisionPct / 100) * 100) / 100
+      : null;
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
@@ -3305,6 +3313,8 @@ export class FlightsService {
         moneda: dto.moneda,
         metodo_cobro: dto.metodo_cobro,
         tc_usd_mxn: tcCobro,
+        comision_banco_pct: comisionPct,
+        comision_banco_monto: comisionMonto,
         referencia: dto.referencia,
         fecha_cobro: dto.fecha_cobro?.toISOString(),
         foto_voucher_url: dto.foto_voucher_url,
@@ -3364,7 +3374,7 @@ export class FlightsService {
   ): Promise<Record<string, unknown>> {
     const { data: existing, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, vuelo_id')
+      .select('id, vuelo_id, monto, comision_banco_pct')
       .eq('id', cobroId)
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
@@ -3379,6 +3389,23 @@ export class FlightsService {
     if (dto.fecha_cobro !== undefined)
       patch.fecha_cobro = dto.fecha_cobro.toISOString();
     if (dto.notas !== undefined) patch.notas = dto.notas;
+    // La comisión bancaria se recalcula si cambia el % (0 = quitarla) o si
+    // cambia el monto de un cobro que ya tenía comisión.
+    const pctFinal =
+      dto.comision_banco_pct !== undefined
+        ? dto.comision_banco_pct > 0
+          ? dto.comision_banco_pct
+          : null
+        : Number(existing.comision_banco_pct) > 0
+          ? Number(existing.comision_banco_pct)
+          : null;
+    if (dto.comision_banco_pct !== undefined || dto.monto !== undefined) {
+      const montoFinal = dto.monto ?? Number(existing.monto);
+      patch.comision_banco_pct = pctFinal;
+      patch.comision_banco_monto = pctFinal
+        ? Math.round(montoFinal * (pctFinal / 100) * 100) / 100
+        : null;
+    }
 
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')

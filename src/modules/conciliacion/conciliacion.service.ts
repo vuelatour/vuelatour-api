@@ -207,20 +207,36 @@ export class ConciliacionService {
     const hi = new Date(base);
     hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
 
+    // El banco deposita monto − comisión bancaria: el abono real es el NETO.
+    // Se matchea por bruto (cobros sin comisión) O por neto (con comisión) —
+    // antes solo por bruto y los cobros con comisión jamás conciliaban.
     let q = this.supabase.service
       .from('cobro_vuelo')
-      .select('id')
-      .eq('monto', monto)
+      .select('id, monto, comision_banco_monto')
       .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'])
       .gte('fecha_cobro', lo.toISOString())
       .lte('fecha_cobro', hi.toISOString())
-      .limit(5);
+      // Orden estable: si la ventana excede el tope, el corte es determinista.
+      .order('fecha_cobro', { ascending: true })
+      .limit(50);
     if (moneda) q = q.eq('moneda', moneda);
     const { data, error } = await q;
     if (error || !data || data.length === 0) return false;
 
+    const r2 = (x: number) => Math.round(x * 100) / 100;
+    const matchea = (c: { monto: unknown; comision_banco_monto: unknown }) => {
+      const bruto = Number(c.monto);
+      const comision = Number(c.comision_banco_monto) || 0;
+      if (comision > 0) return r2(bruto - comision) === r2(monto);
+      return r2(bruto) === r2(monto);
+    };
+    const candidatos = (data as Array<{ id: string; monto: unknown; comision_banco_monto: unknown }>).filter(
+      matchea,
+    );
+    if (candidatos.length === 0) return false;
+
     // Descarta cobros ya enlazados a otro movimiento; exige candidato único.
-    const ids = data.map((c) => (c as { id: string }).id);
+    const ids = candidatos.map((c) => c.id);
     const { data: yaEnlazados } = await this.supabase.service
       .from('movimiento_bancario')
       .select('cobro_id')

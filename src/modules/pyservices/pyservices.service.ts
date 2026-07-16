@@ -103,6 +103,10 @@ export interface ReporteVueloPayload {
   notas_horas?: string[];
   cobros?: ReporteVueloLineaPayload[];
   total_cobrado_usd?: number;
+  /** Comisiones bancarias de los cobros (USD): el banco depositó menos. */
+  comision_banco_usd?: number;
+  /** Total cobrado − comisiones bancarias = lo que entró a la cuenta. */
+  total_cobrado_neto_usd?: number | null;
   saldo_usd?: number;
   combustible?: ReporteVueloLineaPayload[];
   gastos?: ReporteVueloLineaPayload[];
