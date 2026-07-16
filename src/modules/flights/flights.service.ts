@@ -1667,9 +1667,11 @@ export class FlightsService {
       destino_iata: e.destino_iata.toUpperCase(),
     }));
     for (const [i, e] of itinerario.entries()) {
-      if (e.origen_iata === e.destino_iata) {
+      // Un SOBREVUELO sale y regresa al mismo punto (CUN → CUN): la igualdad
+      // solo se prohíbe en tramos de traslado normales.
+      if (e.origen_iata === e.destino_iata && e.es_sobrevuelo !== true) {
         throw new BadRequestException(
-          `Tramo ${i + 1}: origen y destino no pueden ser iguales`,
+          `Tramo ${i + 1}: origen y destino no pueden ser iguales (salvo sobrevuelo)`,
         );
       }
     }
