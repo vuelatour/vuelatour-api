@@ -298,7 +298,9 @@ export class QuotesService {
     const calcTotales = (ajuste: number) => {
       const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajuste);
       const iva = round2(baseIva * ivaPct);
-      const totalSinComision = round2(baseIva + iva + pernoctaR + extrasSinIvaR);
+      const totalSinComision = round2(
+        baseIva + iva + pernoctaR + extrasSinIvaR,
+      );
       const comisionR = round2((totalSinComision * comisionPct) / 100);
       const total = round2(totalSinComision + comisionR);
       return { baseIva, iva, totalSinComision, comisionR, total };
@@ -314,7 +316,18 @@ export class QuotesService {
     // cerrado (la cadena redondeada por pasos no siempre puede alcanzar un
     // total arbitrario ajustando la base gravable). La línea AJUSTE del
     // desglose queda como redondeo − descuento y la suma sigue siendo exacta.
-    if (dto.redondeo_automatico) {
+    // PRECIO PACTADO (vuelos cubiertos por externo: hay operadores más caros
+    // y más económicos, el total se acuerda a mano): línea de AJUSTE directa
+    // post-IVA — el MISMO mecanismo del redondeo automático — para aterrizar
+    // EXACTO en lo pactado. Manda sobre el redondeo (sería redundante).
+    const pactado = round2(Number(dto.total_pactado_usd) || 0);
+    if (pactado > 0) {
+      const extra = round2(pactado - tot.total);
+      if (extra !== 0) {
+        ajusteFinal = round2(ajusteFinal + extra);
+        tot = { ...tot, total: pactado };
+      }
+    } else if (dto.redondeo_automatico) {
       const cents = Math.round(tot.total * 100);
       const targetCents = Math.ceil(cents / 1000) * 1000;
       if (targetCents > cents) {
@@ -344,7 +357,11 @@ export class QuotesService {
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
-    const desglose: Array<{ clave: string; concepto: string; monto_usd: number }> = [
+    const desglose: Array<{
+      clave: string;
+      concepto: string;
+      monto_usd: number;
+    }> = [
       {
         clave: 'TIEMPO_VUELO',
         concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr${
@@ -494,20 +511,34 @@ export class QuotesService {
         calculado_at: new Date().toISOString(),
         version_motor: '1.3.1',
         comision_billpocket_pct: comisionPct > 0 ? round2(comisionPct) : null,
+        // PRECIO PACTADO (externos): se PERSISTE para que revisiones y ajuste
+        // rápido lo conserven — sin esto, cualquier recálculo posterior
+        // pisaba el precio acordado en silencio. Con pactado activo, el
+        // redondeo automático NO corrió (else-if): el meta lo refleja para
+        // que la rehidratación no invente un "redondeo" con el delta.
+        total_pactado_usd: pactado > 0 ? pactado : null,
         // Redondeo automático a número cerrado (múltiplo de $10, siempre
         // arriba): cuánto agregó el motor y el descuento base capturado —
         // permiten re-hidratar el cotizador y re-redondear en revisiones.
-        redondeo_automatico: dto.redondeo_automatico === true,
+        redondeo_automatico:
+          pactado > 0 ? false : dto.redondeo_automatico === true,
         redondeo_auto_usd:
-          dto.redondeo_automatico === true ? round2(ajusteFinal - ajusteBase) : null,
+          pactado > 0
+            ? null
+            : dto.redondeo_automatico === true
+              ? round2(ajusteFinal - ajusteBase)
+              : null,
         descuento_usd: ajusteBase < 0 ? round2(-ajusteBase) : null,
         // Comisión del VENDEDOR: informativa (NO altera el desglose canónico —
         // el cliente paga el total completo). El neto es lo que queda a
         // VuelaTour y fluye a reparto/reportes. Interna: nunca al PDF cliente.
         comision_vendedor_usd: comisionVendedor > 0 ? comisionVendedor : null,
         comision_vendedor_nombre:
-          comisionVendedor > 0 ? (dto.comision_vendedor_nombre?.trim() || null) : null,
-        neto_vuelatour_usd: comisionVendedor > 0 ? round2(total - comisionVendedor) : null,
+          comisionVendedor > 0
+            ? dto.comision_vendedor_nombre?.trim() || null
+            : null,
+        neto_vuelatour_usd:
+          comisionVendedor > 0 ? round2(total - comisionVendedor) : null,
       },
     };
   }
@@ -538,7 +569,8 @@ export class QuotesService {
     if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.estado) q = q.eq('estado', filters.estado);
-    if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
+    if (typeof filters.es_externo === 'boolean')
+      q = q.eq('es_externo', filters.es_externo);
     if (filters.q) {
       const raw = filters.q.trim();
       const term = `%${raw.toUpperCase()}%`;
@@ -552,7 +584,9 @@ export class QuotesService {
         .ilike('nombre', `%${raw}%`)
         .limit(50);
       if (clientes && clientes.length > 0) {
-        conds.push(`cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`);
+        conds.push(
+          `cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`,
+        );
       }
       // Por ciudad/nombre de aeropuerto ("Miami" → MIA/OPF/…): resuelve IATAs.
       const { data: aeropuertos } = await this.supabase.service
@@ -663,7 +697,10 @@ export class QuotesService {
     const iatas = [
       breakdown.ruta.origen_iata,
       breakdown.ruta.destino_iata,
-      ...(breakdown.ruta.escalas ?? []).flatMap((e) => [e.origen_iata, e.destino_iata]),
+      ...(breakdown.ruta.escalas ?? []).flatMap((e) => [
+        e.origen_iata,
+        e.destino_iata,
+      ]),
     ];
     const requierePermiso = await this.airports.anyRequiresPermit(iatas);
 
@@ -728,7 +765,9 @@ export class QuotesService {
 
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
@@ -740,10 +779,12 @@ export class QuotesService {
       const dayCancun = (d: Date): string =>
         d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
       const fechaEfectiva = (i: number): Date | null =>
-        itinerario[i]?.hora_salida ?? (i === 0 ? (dto.fecha_vuelo ?? null) : null);
+        itinerario[i]?.hora_salida ??
+        (i === 0 ? (dto.fecha_vuelo ?? null) : null);
       const legs = itinerario.map((e, i) => {
         let referencia: Date | null = null;
-        for (let j = i; j >= 0 && !referencia; j--) referencia = fechaEfectiva(j);
+        for (let j = i; j >= 0 && !referencia; j--)
+          referencia = fechaEfectiva(j);
         const siguiente = itinerario[i + 1]?.hora_salida ?? null;
         const pernocta =
           referencia != null &&
@@ -781,7 +822,14 @@ export class QuotesService {
       });
     }
 
-    await this.appendVersionHistory(vuelo!.id, 1, dto, breakdown, 'Versión inicial', userId);
+    await this.appendVersionHistory(
+      vuelo!.id,
+      1,
+      dto,
+      breakdown,
+      'Versión inicial',
+      userId,
+    );
 
     void this.calendar.syncFlight(vuelo!.id);
     const escalas = await this.findEscalas(vuelo!.id);
@@ -791,7 +839,9 @@ export class QuotesService {
   async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
     const current = await this.findById(vueloId);
     if (current.estado === 'CANCELADO') {
-      throw new ConflictException('No se puede revisar una cotización cancelada.');
+      throw new ConflictException(
+        'No se puede revisar una cotización cancelada.',
+      );
     }
     // Ventana de edición (pedido del cliente, jul 2026): la cotización —aún
     // CONFIRMADA— solo se ajusta mientras el vuelo sea del MES CORRIENTE o el
@@ -807,7 +857,9 @@ export class QuotesService {
           1,
         ) +
         5 * 3_600_000;
-      if (new Date(current.fecha_vuelo as string).getTime() < inicioMesAnterior) {
+      if (
+        new Date(current.fecha_vuelo as string).getTime() < inicioMesAnterior
+      ) {
         throw new ConflictException(
           'El vuelo es de un mes ya cerrado (anterior al mes pasado): la cotización ya no puede ajustarse.',
         );
@@ -874,7 +926,8 @@ export class QuotesService {
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
         comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
-        comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
+        comision_vendedor_nombre:
+          breakdown.meta.comision_vendedor_nombre ?? null,
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
@@ -906,8 +959,19 @@ export class QuotesService {
         null,
     });
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
-    void this.notifyPernoctaCambiada(updated!, pernoctasAntes, pernoctasDespues);
-    await this.appendVersionHistory(vueloId, newVersion, dto, breakdown, dto.motivo, userId);
+    void this.notifyPernoctaCambiada(
+      updated!,
+      pernoctasAntes,
+      pernoctasDespues,
+    );
+    await this.appendVersionHistory(
+      vueloId,
+      newVersion,
+      dto,
+      breakdown,
+      dto.motivo,
+      userId,
+    );
     // El precio cambió: la bandera `cobrado` se recalcula con la fuente
     // canónica (un anticipo previo puede ahora cubrir —o dejar de cubrir— el
     // total). Antes quedaba obsoleta hasta el siguiente cobro.
@@ -925,17 +989,14 @@ export class QuotesService {
    * (tramos, tarifa, método, IVA quedan idénticos) y delega en revise() — así
    * el recálculo y el versionado son los mismos de siempre.
    */
-  async quickAdjust(
-    vueloId: string,
-    dto: QuickAdjustQuoteDto,
-    userId: string,
-  ) {
+  async quickAdjust(vueloId: string, dto: QuickAdjustQuoteDto, userId: string) {
     const current = await this.findById(vueloId);
     const snapshot = current.calculo_snapshot as {
       meta?: {
         comision_billpocket_pct?: number | null;
         redondeo_automatico?: boolean | null;
         descuento_usd?: number | null;
+        total_pactado_usd?: number | null;
       };
       tiempos?: { sobrevuelo_hr?: number | null };
       tuas?: { usd_pax_default?: number | null };
@@ -964,8 +1025,7 @@ export class QuotesService {
     const reviseDto = {
       // Vuelo cubierto por externo: sin avión propio; se re-precia con el
       // avión de REFERENCIA con el que se cotizó (vive en el snapshot).
-      aeronave_id: (current.aeronave_id ??
-        snapshot?.aeronave?.id) as string,
+      aeronave_id: (current.aeronave_id ?? snapshot?.aeronave?.id) as string,
       tipo: TipoVuelo.MULTIESCALA,
       // Tramos tal como están persistidos. Si cambia el pax global, los tramos
       // que usaban el global anterior lo heredan (los personalizados se quedan).
@@ -987,7 +1047,9 @@ export class QuotesService {
         es_ferry: e.es_ferry === true,
         requiere_pernocta: e.requiere_pernocta === true,
         pernocta_costo_usd:
-          e.pernocta_costo_usd != null ? Number(e.pernocta_costo_usd) : undefined,
+          e.pernocta_costo_usd != null
+            ? Number(e.pernocta_costo_usd)
+            : undefined,
         tipo_parada: (e.tipo_parada as 'NORMAL' | 'SERVICIO') ?? 'NORMAL',
         servicio_notas: (e.servicio_notas as string | null) ?? undefined,
         notas: (e.notas as string | null) ?? undefined,
@@ -998,12 +1060,14 @@ export class QuotesService {
       tipo_tarifa: current.tarifa_tipo as TipoTarifa,
       pasajeros: newPax,
       pase_abordar: current.pase_abordar === true,
-      metodo_pago: (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
+      metodo_pago:
+        (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
       // El ajuste rápido no debe borrar el TC pactado, la comisión BillPocket
       // ni la comisión del vendedor.
       tc_usd_mxn:
         Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
-      comision_billpocket_pct: metaSnapshot?.comision_billpocket_pct ?? undefined,
+      comision_billpocket_pct:
+        metaSnapshot?.comision_billpocket_pct ?? undefined,
       comision_vendedor_usd:
         Number(current.comision_vendedor_usd) > 0
           ? Number(current.comision_vendedor_usd)
@@ -1012,7 +1076,8 @@ export class QuotesService {
         (current.comision_vendedor_nombre as string | null) ?? undefined,
       // Redondeo automático: se re-resuelve sobre el descuento BASE (no sobre
       // el ajuste ya redondeado) para no acumular redondeos entre revisiones.
-      redondeo_automatico: metaSnapshot?.redondeo_automatico === true || undefined,
+      redondeo_automatico:
+        metaSnapshot?.redondeo_automatico === true || undefined,
       cotizacion_abierta: current.cotizacion_abierta === true,
       // El sobrevuelo pactado y el override de TUAS también se conservan.
       sobrevuelo_hr:
@@ -1029,15 +1094,24 @@ export class QuotesService {
           ? Number(current.tarifa_hora_usd)
           : undefined,
       iva_pct_override: Number(current.iva_pct),
-      extras: dto.extras ?? ((current.extras as never[]) ?? []),
+      extras: dto.extras ?? (current.extras as never[]) ?? [],
       // Con redondeo automático, el ajuste base es SOLO el descuento (el
       // redondeo se vuelve a resolver con el total nuevo); sin él, se
-      // conserva el ajuste manual tal cual.
+      // conserva el ajuste manual tal cual. Con PRECIO PACTADO, el ajuste
+      // manual previo era el delta al pactado: viaja solo el descuento y el
+      // pactado re-genera su ajuste exacto (el total acordado NO se mueve).
       ajuste_final_usd:
-        metaSnapshot?.redondeo_automatico === true
+        metaSnapshot?.redondeo_automatico === true ||
+        Number(metaSnapshot?.total_pactado_usd) > 0
           ? -(Number(metaSnapshot?.descuento_usd) || 0)
           : Number(current.ajuste_final_usd) || 0,
-      motivo: dto.motivo?.trim() || 'Ajuste rápido desde el detalle (extras/pasajeros)',
+      total_pactado_usd:
+        Number(metaSnapshot?.total_pactado_usd) > 0
+          ? Number(metaSnapshot?.total_pactado_usd)
+          : undefined,
+      motivo:
+        dto.motivo?.trim() ||
+        'Ajuste rápido desde el detalle (extras/pasajeros)',
     } as unknown as ReviseQuoteDto;
 
     return this.revise(vueloId, reviseDto, userId);
@@ -1089,7 +1163,10 @@ export class QuotesService {
 
     const origen = vuelo.origen_iata as string;
     const destino = vuelo.destino_iata as string;
-    const requierePermiso = await this.airports.anyRequiresPermit([origen, destino]);
+    const requierePermiso = await this.airports.anyRequiresPermit([
+      origen,
+      destino,
+    ]);
     const permiso = requierePermiso ? 'pendiente' : 'no_aplica';
 
     const pax = Number(vuelo.pasajeros ?? 0);
@@ -1117,7 +1194,8 @@ export class QuotesService {
         aeronave_id: null,
         piloto_id: null,
         estado_permiso: permiso,
-        fecha_salida_plan: (vuelo.fecha_traslado_final as string | null) ?? null,
+        fecha_salida_plan:
+          (vuelo.fecha_traslado_final as string | null) ?? null,
         // Regreso NO ferry por default (los pax suelen regresar); editable luego.
         pasajeros: pax,
         es_ferry: false,
@@ -1127,11 +1205,16 @@ export class QuotesService {
       },
     ];
     const { error } = await this.supabase.service.from('escala').insert(rows);
-    if (error) throw new Error(`No se pudieron crear los tramos del redondo: ${error.message}`);
+    if (error)
+      throw new Error(
+        `No se pudieron crear los tramos del redondo: ${error.message}`,
+      );
   }
 
   /** Envía el correo de confirmación al cliente (best-effort). */
-  private async sendConfirmationEmail(vuelo: Record<string, unknown>): Promise<void> {
+  private async sendConfirmationEmail(
+    vuelo: Record<string, unknown>,
+  ): Promise<void> {
     const clienteId = vuelo.cliente_id as string | null;
     if (!clienteId) return;
     const { data: cliente } = await this.supabase.service
@@ -1210,11 +1293,11 @@ export class QuotesService {
 
     const grupos = new Map<string, RutaSugerida>();
     for (const v of data ?? []) {
-      const legs = (((v.escalas as LegRow[] | null) ?? []) as LegRow[])
-        .slice()
-        .sort((a, b) => a.orden - b.orden);
+      const legs = (v.escalas ?? []).slice().sort((a, b) => a.orden - b.orden);
       if (legs.length === 0) continue;
-      const clave = legs.map((l) => `${l.origen_iata}-${l.destino_iata}`).join('|');
+      const clave = legs
+        .map((l) => `${l.origen_iata}-${l.destino_iata}`)
+        .join('|');
       const existente = grupos.get(clave);
       if (existente) {
         existente.veces += 1;
@@ -1223,7 +1306,10 @@ export class QuotesService {
         existente.ruta_id ??= v.ruta_id as string | null;
         continue;
       }
-      const etiqueta = [legs[0].origen_iata, ...legs.map((l) => l.destino_iata)].join(' → ');
+      const etiqueta = [
+        legs[0].origen_iata,
+        ...legs.map((l) => l.destino_iata),
+      ].join(' → ');
       grupos.set(clave, {
         clave,
         etiqueta,
@@ -1273,7 +1359,7 @@ export class QuotesService {
       .select('monto, moneda, tc_usd_mxn')
       .eq('vuelo_id', vueloId);
     const { total_usd } = cobrosEnUsd(
-      (cobros ?? []) as Array<Record<string, unknown>>,
+      cobros ?? [],
       vuelo.tc_usd_mxn as number | null,
     );
     const deberia = total_usd >= Number(vuelo.monto_total_usd) - 1;
@@ -1418,7 +1504,8 @@ export class QuotesService {
           .from('escala')
           .update(planFields)
           .eq('id', actual.id as string);
-        if (error) throw new Error(`Failed to update escala ${orden}: ${error.message}`);
+        if (error)
+          throw new Error(`Failed to update escala ${orden}: ${error.message}`);
       } else {
         const { error } = await this.supabase.service.from('escala').insert({
           vuelo_id: vueloId,
@@ -1427,12 +1514,15 @@ export class QuotesService {
           fecha_salida_plan: fechaPlan,
           created_by: userId,
         });
-        if (error) throw new Error(`Failed to insert escala ${orden}: ${error.message}`);
+        if (error)
+          throw new Error(`Failed to insert escala ${orden}: ${error.message}`);
       }
     }
 
     // Sobrantes (orden > nuevo total): se eliminan solo si no tienen captura.
-    const sobrantes = (existing ?? []).filter((e) => (e.orden as number) > total);
+    const sobrantes = (existing ?? []).filter(
+      (e) => (e.orden as number) > total,
+    );
     for (const s of sobrantes) {
       if (tieneTaco(s)) {
         this.logger.warn(
@@ -1444,7 +1534,8 @@ export class QuotesService {
         .from('escala')
         .delete()
         .eq('id', s.id as string);
-      if (error) throw new Error(`Failed to delete escala sobrante: ${error.message}`);
+      if (error)
+        throw new Error(`Failed to delete escala sobrante: ${error.message}`);
     }
   }
 
@@ -1490,7 +1581,10 @@ export class QuotesService {
         motivo,
         created_by: userId,
       });
-    if (error) throw new Error(`Failed to write cotizacion version history: ${error.message}`);
+    if (error)
+      throw new Error(
+        `Failed to write cotizacion version history: ${error.message}`,
+      );
   }
 
   /**
@@ -1502,9 +1596,9 @@ export class QuotesService {
       const esFerry = l.es_ferry ?? false;
       const requierePernocta = l.requiere_pernocta ?? false;
       const pernoctaCosto = requierePernocta
-        ? (l.pernocta_costo_usd != null
-            ? Number(l.pernocta_costo_usd)
-            : PERNOCTA_COSTO_DEFAULT_USD)
+        ? l.pernocta_costo_usd != null
+          ? Number(l.pernocta_costo_usd)
+          : PERNOCTA_COSTO_DEFAULT_USD
         : 0;
       return {
         origen_iata: l.origen_iata.toUpperCase(),
@@ -1549,8 +1643,11 @@ export class QuotesService {
           );
         }
       }
-      const escalasNorm = this.resolveLegs(dto.escalas as RawLeg[], dto.pasajeros);
-      const nmTotal = escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0);
+      const escalasNorm = this.resolveLegs(dto.escalas, dto.pasajeros);
+      const nmTotal = escalasNorm.reduce(
+        (acc, e) => acc + e.millas_nauticas,
+        0,
+      );
       return {
         ruta_id: dto.ruta_id ?? null,
         origen_iata: escalasNorm[0].origen_iata,
@@ -1568,12 +1665,15 @@ export class QuotesService {
       if (!r.activa) throw new BadRequestException('Ruta inactiva');
       if (r.tipo === 'MULTIESCALA' && r.tramos && r.tramos.length >= 1) {
         // Hidrata los defaults por tramo de la plantilla guardada.
-        const escalasNorm = this.resolveLegs(r.tramos as RawLeg[], dto.pasajeros);
+        const escalasNorm = this.resolveLegs(r.tramos, dto.pasajeros);
         return {
           ruta_id: r.id,
           origen_iata: escalasNorm[0].origen_iata,
           destino_iata: escalasNorm[escalasNorm.length - 1].destino_iata,
-          millas_nauticas: escalasNorm.reduce((acc, e) => acc + e.millas_nauticas, 0),
+          millas_nauticas: escalasNorm.reduce(
+            (acc, e) => acc + e.millas_nauticas,
+            0,
+          ),
           es_redondo_auto: false,
           num_aterrizajes: escalasNorm.length,
           escalas: escalasNorm,
