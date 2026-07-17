@@ -136,11 +136,73 @@ export class ConciliacionService {
       );
     }
 
+    // CANDADO DE RE-IMPORTACIÓN: el mismo estado de cuenta subido dos veces
+    // duplicaría los movimientos e inflaría los pendientes para siempre (los
+    // gastos ya conciliados no se vuelven a cruzar). Dedup MULTICONJUNTO por
+    // (fecha, tipo, monto, descripción) contra lo ya importado en la cuenta:
+    // dos cargos legítimos idénticos del mismo día solo se omiten si ya
+    // existen exactamente esas repeticiones en la base.
+    const fechas = base.map((r) => r.fecha).sort();
+    const { data: previos, error: prevErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('fecha, tipo, monto, descripcion')
+      .eq('cuenta_bancaria_id', dto.cuenta_bancaria_id)
+      .gte('fecha', fechas[0])
+      .lte('fecha', fechas[fechas.length - 1]);
+    if (prevErr) throw new Error(prevErr.message);
+    const clave = (m: {
+      fecha?: string | null;
+      tipo?: string | null;
+      monto: number | string;
+      descripcion?: string | null;
+    }) =>
+      [
+        m.fecha,
+        m.tipo,
+        Number(m.monto).toFixed(2),
+        (m.descripcion ?? '').trim().toLowerCase().replace(/\s+/g, ' '),
+      ].join('|');
+    const existentes = new Map<string, number>();
+    for (const p of previos ?? []) {
+      const k = clave(p);
+      existentes.set(k, (existentes.get(k) ?? 0) + 1);
+    }
+    const nuevos: typeof base = [];
+    let duplicadosOmitidos = 0;
+    for (const r of base) {
+      const k = clave(r);
+      const disponibles = existentes.get(k) ?? 0;
+      if (disponibles > 0) {
+        existentes.set(k, disponibles - 1);
+        duplicadosOmitidos += 1;
+      } else {
+        nuevos.push(r);
+      }
+    }
+
     // El archivo original se archiva DESPUÉS de validar y ANTES de insertar:
-    // cada movimiento queda ligado a su estado de cuenta, y una importación
-    // vacía no deja archivos fantasma en el listado.
+    // cada movimiento queda ligado a su estado de cuenta. Se archiva aunque
+    // todo resulte duplicado (re-subir un estado de cuenta viejo solo para
+    // conservar el archivo es un caso legítimo).
     const estadoCuentaId = await this.archivarEstadoCuenta(dto, userId);
-    const rows = base.map((r) => ({ ...r, estado_cuenta_id: estadoCuentaId }));
+
+    if (nuevos.length === 0) {
+      if (estadoCuentaId) {
+        await this.supabase.service
+          .from('estado_cuenta_archivo')
+          .update({ movimientos_importados: 0 })
+          .eq('id', estadoCuentaId);
+      }
+      return {
+        importados: 0,
+        conciliados_auto: 0,
+        duplicados_omitidos: duplicadosOmitidos,
+      };
+    }
+    const rows = nuevos.map((r) => ({
+      ...r,
+      estado_cuenta_id: estadoCuentaId,
+    }));
 
     const { data: inserted, error } = await this.supabase.service
       .from('movimiento_bancario')
@@ -179,7 +241,11 @@ export class ConciliacionService {
         .eq('id', estadoCuentaId);
     }
 
-    return { importados: rows.length, conciliados_auto: conciliadosAuto };
+    return {
+      importados: rows.length,
+      conciliados_auto: conciliadosAuto,
+      duplicados_omitidos: duplicadosOmitidos,
+    };
   }
 
   /**
