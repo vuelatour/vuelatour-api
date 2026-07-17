@@ -183,15 +183,22 @@ export class FlightsService {
       );
     }
     const sb = this.supabase.service;
-    const [{ count: cobros }, { count: gastos }, { count: tacos }] = await Promise.all([
-      sb.from('cobro_vuelo').select('id', { count: 'exact', head: true }).eq('vuelo_id', id),
-      sb.from('gasto').select('id', { count: 'exact', head: true }).eq('vuelo_id', id),
-      sb
-        .from('escala')
-        .select('id', { count: 'exact', head: true })
-        .eq('vuelo_id', id)
-        .not('taco_salida', 'is', null),
-    ]);
+    const [{ count: cobros }, { count: gastos }, { count: tacos }] =
+      await Promise.all([
+        sb
+          .from('cobro_vuelo')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', id),
+        sb
+          .from('gasto')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', id),
+        sb
+          .from('escala')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', id)
+          .not('taco_salida', 'is', null),
+      ]);
     if ((cobros ?? 0) > 0 || (gastos ?? 0) > 0 || (tacos ?? 0) > 0) {
       throw new ConflictException(
         'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
@@ -227,10 +234,14 @@ export class FlightsService {
     if (e0) throw new Error(e0.message);
     if (!original) throw new NotFoundException(`Vuelo ${id} not found`);
     if (original.estado === 'CANCELADO' || original.estado === 'COMPLETADO') {
-      throw new ConflictException(`No se puede reasignar un vuelo ${original.estado as string}.`);
+      throw new ConflictException(
+        `No se puede reasignar un vuelo ${original.estado as string}.`,
+      );
     }
     if (original.aeronave_id === dto.aeronave_id) {
-      throw new BadRequestException('Selecciona una aeronave distinta a la actual.');
+      throw new BadRequestException(
+        'Selecciona una aeronave distinta a la actual.',
+      );
     }
     await this.validateAssignTargets({ aeronaveId: dto.aeronave_id });
 
@@ -242,7 +253,9 @@ export class FlightsService {
     const matricula = (aeronave?.matricula as string) ?? 'otra aeronave';
 
     // 1) Clon con la nueva aeronave (folio/ids/google nuevos, sin capturas).
-    const clonPayload: Record<string, unknown> = { ...(original as Record<string, unknown>) };
+    const clonPayload: Record<string, unknown> = {
+      ...(original as Record<string, unknown>),
+    };
     for (const k of [
       'id',
       'folio',
@@ -298,11 +311,13 @@ export class FlightsService {
     //    cobro esto" al cambiar de avión a último minuto.
     const clonId = (clon as { id: string }).id;
     const origenMatricula =
-      (await sb
-        .from('aeronave')
-        .select('matricula')
-        .eq('id', original.aeronave_id as string)
-        .maybeSingle()).data?.matricula ?? 'la aeronave anterior';
+      (
+        await sb
+          .from('aeronave')
+          .select('matricula')
+          .eq('id', original.aeronave_id as string)
+          .maybeSingle()
+      ).data?.matricula ?? 'la aeronave anterior';
 
     const { data: histOriginal } = await sb
       .from('cotizacion_version_history')
@@ -392,7 +407,8 @@ export class FlightsService {
     void this.calendar.syncFlight(id);
     void this.calendar.syncFlight((clon as { id: string }).id);
     const pilotoId = (clon as { piloto_id?: string | null }).piloto_id;
-    if (pilotoId) void this.notifyPilotAssigned(pilotoId, clon as Record<string, unknown>);
+    if (pilotoId)
+      void this.notifyPilotAssigned(pilotoId, clon as Record<string, unknown>);
     return clon!;
   }
 
@@ -479,7 +495,8 @@ export class FlightsService {
       q = q.or(ors.join(','));
     }
     if (filters.estado) q = q.eq('estado', filters.estado);
-    if (typeof filters.es_externo === 'boolean') q = q.eq('es_externo', filters.es_externo);
+    if (typeof filters.es_externo === 'boolean')
+      q = q.eq('es_externo', filters.es_externo);
     if (filters.desde) q = q.gte('fecha_vuelo', filters.desde.toISOString());
     if (filters.hasta) q = q.lte('fecha_vuelo', filters.hasta.toISOString());
 
@@ -525,7 +542,9 @@ export class FlightsService {
         ...row,
         ruta_iatas:
           rutas.get(row.id as string) ??
-          [row.origen_iata as string, row.destino_iata as string].filter(Boolean),
+          [row.origen_iata as string, row.destino_iata as string].filter(
+            Boolean,
+          ),
       };
     });
     return {
@@ -585,7 +604,10 @@ export class FlightsService {
    * CUALQUIER tramo (p. ej. solo el regreso de un redondo). Otros roles no se
    * restringen.
    */
-  async assertAccess(vueloId: string, current: AuthenticatedUser): Promise<void> {
+  async assertAccess(
+    vueloId: string,
+    current: AuthenticatedUser,
+  ): Promise<void> {
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('vuelo')
@@ -594,7 +616,10 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
-    if (data.piloto_id === current.userId || data.copiloto_id === current.userId)
+    if (
+      data.piloto_id === current.userId ||
+      data.copiloto_id === current.userId
+    )
       return;
     // ¿Asignado a algún tramo de este vuelo?
     const { data: leg } = await this.supabase.service
@@ -610,7 +635,10 @@ export class FlightsService {
   }
 
   /** Igual que assertAccess pero resolviendo el vuelo a partir de la escala (leg). */
-  async assertAccessByLeg(legId: string, current: AuthenticatedUser): Promise<void> {
+  async assertAccessByLeg(
+    legId: string,
+    current: AuthenticatedUser,
+  ): Promise<void> {
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('escala')
@@ -666,7 +694,9 @@ export class FlightsService {
     // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida) o
     // a cualquier tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
     if (current.rol === Rol.PILOTO) {
-      const asignadoATramo = todasEscalas.some((e) => e.piloto_id === current.userId);
+      const asignadoATramo = todasEscalas.some(
+        (e) => e.piloto_id === current.userId,
+      );
       if (v.piloto_id !== current.userId && !asignadoATramo) {
         throw new ForbiddenException(
           'No puedes ver la cotización de un vuelo que no tienes asignado',
@@ -703,11 +733,15 @@ export class FlightsService {
         // escala, si es ferry/pernocta/parada de servicio, y la nota operativa.
         pasajeros: (e as { pasajeros?: number | null }).pasajeros ?? null,
         es_ferry: (e as { es_ferry?: boolean }).es_ferry === true,
-        requiere_pernocta: (e as { requiere_pernocta?: boolean }).requiere_pernocta === true,
+        requiere_pernocta:
+          (e as { requiere_pernocta?: boolean }).requiere_pernocta === true,
         pernocta_costo_usd:
-          (e as { pernocta_costo_usd?: number | null }).pernocta_costo_usd ?? null,
-        tipo_parada: (e as { tipo_parada?: string | null }).tipo_parada ?? 'NORMAL',
-        servicio_notas: (e as { servicio_notas?: string | null }).servicio_notas ?? null,
+          (e as { pernocta_costo_usd?: number | null }).pernocta_costo_usd ??
+          null,
+        tipo_parada:
+          (e as { tipo_parada?: string | null }).tipo_parada ?? 'NORMAL',
+        servicio_notas:
+          (e as { servicio_notas?: string | null }).servicio_notas ?? null,
         notas: (e as { notas?: string | null }).notas ?? null,
       })),
     };
@@ -730,15 +764,14 @@ export class FlightsService {
     const [escalas, cobros, aeronaveMatricula] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
-      this.aeronaveMatricula((vuelo as { aeronave_id?: string | null }).aeronave_id),
+      this.aeronaveMatricula(
+        (vuelo as { aeronave_id?: string | null }).aeronave_id,
+      ),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
     );
-    const totalCobrado = cobros.reduce(
-      (acc, c) => acc + Number(c.monto),
-      0,
-    );
+    const totalCobrado = cobros.reduce((acc, c) => acc + Number(c.monto), 0);
     return {
       ...vuelo,
       aeronave_matricula: aeronaveMatricula,
@@ -779,7 +812,9 @@ export class FlightsService {
     const matriculaPorId = new Map(
       (aeronaves.data ?? []).map((a) => [a.id, a.matricula]),
     );
-    const nombrePorId = new Map((pilotos.data ?? []).map((p) => [p.id, p.nombre]));
+    const nombrePorId = new Map(
+      (pilotos.data ?? []).map((p) => [p.id, p.nombre]),
+    );
     return escalas.map((e) => ({
       ...e,
       aeronave_matricula: e.aeronave_id
@@ -803,7 +838,9 @@ export class FlightsService {
     if (escalas.length === 0) return escalas;
     const pares = [
       ...new Set(
-        escalas.map((e) => `${e.origen_iata as string}|${e.destino_iata as string}`),
+        escalas.map(
+          (e) => `${e.origen_iata as string}|${e.destino_iata as string}`,
+        ),
       ),
     ];
     const minPorPar = new Map<string, number>();
@@ -819,8 +856,9 @@ export class FlightsService {
     return escalas.map((e) => ({
       ...e,
       tramo_min_promedio:
-        minPorPar.get(`${e.origen_iata as string}|${e.destino_iata as string}`) ??
-        null,
+        minPorPar.get(
+          `${e.origen_iata as string}|${e.destino_iata as string}`,
+        ) ?? null,
     }));
   }
 
@@ -863,7 +901,9 @@ export class FlightsService {
     // Operación y administración son caminos independientes: el piloto se puede
     // asignar aunque la cotización no esté confirmada (decisión Itzel/Alejandro).
     const asignandoPiloto =
-      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+      dto.piloto_id !== undefined &&
+      dto.piloto_id !== null &&
+      dto.piloto_id !== '';
 
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
     if (dto.fecha_vuelo) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
@@ -878,7 +918,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     // Espejo: al cambiar la fecha general (traslado inicial) desde "Editar",
@@ -888,7 +930,9 @@ export class FlightsService {
       await this.mirrorVueloToIdaEscala(id, {
         piloto_id: dto.piloto_id,
         fecha_salida_plan:
-          dto.fecha_vuelo !== undefined ? dto.fecha_vuelo.toISOString() : undefined,
+          dto.fecha_vuelo !== undefined
+            ? dto.fecha_vuelo.toISOString()
+            : undefined,
       });
     }
     void this.calendar.syncFlight(id);
@@ -917,7 +961,10 @@ export class FlightsService {
       });
     }
     // Permiso de pista emitido (pendiente → emitido): avisa a admin/coordinador.
-    if (dto.estado_permiso === 'emitido' && current.estado_permiso !== 'emitido') {
+    if (
+      dto.estado_permiso === 'emitido' &&
+      current.estado_permiso !== 'emitido'
+    ) {
       const payload = {
         tipo: 'permiso_emitido',
         titulo: 'Permiso de pista emitido',
@@ -1038,7 +1085,8 @@ export class FlightsService {
         .neq('id', flightId)
         .not('piloto_id', 'is', null);
       for (const f of sameDay ?? []) {
-        if (f.piloto_id) conflicto.set(f.piloto_id as string, f.folio as number);
+        if (f.piloto_id)
+          conflicto.set(f.piloto_id as string, f.folio as number);
       }
     }
 
@@ -1062,7 +1110,10 @@ export class FlightsService {
         .gte('fecha_vuelo', mDesde)
         .lte('fecha_vuelo', mHasta);
       const pilotoPorVuelo = new Map(
-        (vuelosMes ?? []).map((v) => [v.id as string, v.piloto_id as string | null]),
+        (vuelosMes ?? []).map((v) => [
+          v.id as string,
+          v.piloto_id as string | null,
+        ]),
       );
       const ids = [...pilotoPorVuelo.keys()];
       if (ids.length) {
@@ -1073,11 +1124,13 @@ export class FlightsService {
         for (const e of escalas ?? []) {
           const ts = Number(e.taco_salida);
           const tl = Number(e.taco_llegada);
-          if (!Number.isFinite(ts) || !Number.isFinite(tl) || tl <= ts) continue;
+          if (!Number.isFinite(ts) || !Number.isFinite(tl) || tl <= ts)
+            continue;
           // Atribuye las horas al piloto del tramo (ida/regreso pueden diferir);
           // si el tramo no tiene piloto propio, usa el del vuelo.
           const pid =
-            (e.piloto_id as string | null) ?? pilotoPorVuelo.get(e.vuelo_id as string);
+            (e.piloto_id as string | null) ??
+            pilotoPorVuelo.get(e.vuelo_id as string);
           if (!pid) continue;
           horas.set(pid, (horas.get(pid) ?? 0) + (tl - ts));
         }
@@ -1125,16 +1178,18 @@ export class FlightsService {
     // Operación independiente de lo administrativo: se asigna avión/piloto en
     // cualquier estado operable (incluida la RESERVA sin cotizar).
     if (current.estado === 'COMPLETADO' || current.estado === 'CANCELADO') {
-      throw new ConflictException(
-        `No se asigna en estado ${current.estado}.`,
-      );
+      throw new ConflictException(`No se asigna en estado ${current.estado}.`);
     }
     if (current.es_externo && dto.aeronave_id) {
-      throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
+      throw new BadRequestException(
+        'Vuelo externo no admite aeronave_id propia',
+      );
     }
 
     const asignandoPiloto =
-      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+      dto.piloto_id !== undefined &&
+      dto.piloto_id !== null &&
+      dto.piloto_id !== '';
 
     // Doc 4.3: no se asigna avión/piloto con documento crítico vencido ni avión en taller.
     await this.validateAssignTargets({
@@ -1145,12 +1200,16 @@ export class FlightsService {
     // Copiloto (segundo piloto del viaje): valida que exista y no choque con el
     // piloto principal. null = quitarlo.
     const asignandoCopiloto =
-      dto.copiloto_id !== undefined && dto.copiloto_id !== null && dto.copiloto_id !== '';
+      dto.copiloto_id !== undefined &&
+      dto.copiloto_id !== null &&
+      dto.copiloto_id !== '';
     if (asignandoCopiloto) {
       const pilotoFinal =
         dto.piloto_id !== undefined ? dto.piloto_id : current.piloto_id;
       if (dto.copiloto_id === pilotoFinal) {
-        throw new BadRequestException('El copiloto debe ser distinto al piloto.');
+        throw new BadRequestException(
+          'El copiloto debe ser distinto al piloto.',
+        );
       }
       await this.validateAssignTargets({ pilotoId: dto.copiloto_id! });
     }
@@ -1160,7 +1219,8 @@ export class FlightsService {
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
     if (dto.copiloto_id !== undefined)
       patch.copiloto_id = dto.copiloto_id === '' ? null : dto.copiloto_id;
-    if (dto.fecha_vuelo !== undefined) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
+    if (dto.fecha_vuelo !== undefined)
+      patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
 
     if (Object.keys(patch).length === 1) {
       throw new BadRequestException('Empty assign payload');
@@ -1174,7 +1234,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     // Espejo: el tramo de ida (orden=1) refleja la asignación del vuelo.
@@ -1182,7 +1244,9 @@ export class FlightsService {
       aeronave_id: dto.aeronave_id,
       piloto_id: dto.piloto_id,
       fecha_salida_plan:
-        dto.fecha_vuelo !== undefined ? dto.fecha_vuelo.toISOString() : undefined,
+        dto.fecha_vuelo !== undefined
+          ? dto.fecha_vuelo.toISOString()
+          : undefined,
     });
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
@@ -1207,7 +1271,8 @@ export class FlightsService {
     if (targets.aeronaveId) objetivos.aeronaveId = targets.aeronaveId;
     if (targets.pilotoId) objetivos.pilotoId = targets.pilotoId;
     if (objetivos.aeronaveId || objetivos.pilotoId) {
-      const bloqueos = await this.expirations.findBlockingExpirations(objetivos);
+      const bloqueos =
+        await this.expirations.findBlockingExpirations(objetivos);
       if (bloqueos.length > 0) {
         const detalle = bloqueos
           .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
@@ -1217,7 +1282,10 @@ export class FlightsService {
         );
       }
     }
-    if (targets.aeronaveId && (await this.aircraftEnTaller(targets.aeronaveId))) {
+    if (
+      targets.aeronaveId &&
+      (await this.aircraftEnTaller(targets.aeronaveId))
+    ) {
       throw new ConflictException(
         'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
       );
@@ -1257,9 +1325,11 @@ export class FlightsService {
     },
   ): Promise<void> {
     const patch: Record<string, unknown> = {};
-    if (fields.aeronave_id !== undefined) patch.aeronave_id = fields.aeronave_id;
+    if (fields.aeronave_id !== undefined)
+      patch.aeronave_id = fields.aeronave_id;
     if (fields.piloto_id !== undefined) patch.piloto_id = fields.piloto_id;
-    if (fields.estado_permiso !== undefined) patch.estado_permiso = fields.estado_permiso;
+    if (fields.estado_permiso !== undefined)
+      patch.estado_permiso = fields.estado_permiso;
     if (fields.fecha_salida_plan !== undefined)
       patch.fecha_salida_plan = fields.fecha_salida_plan;
     if (Object.keys(patch).length === 0) return;
@@ -1268,7 +1338,10 @@ export class FlightsService {
       .update(patch)
       .eq('vuelo_id', vueloId)
       .eq('orden', 1);
-    if (error) this.logger.warn(`No se pudo espejar la ida del vuelo ${vueloId}: ${error.message}`);
+    if (error)
+      this.logger.warn(
+        `No se pudo espejar la ida del vuelo ${vueloId}: ${error.message}`,
+      );
   }
 
   /**
@@ -1291,11 +1364,15 @@ export class FlightsService {
       throw new ConflictException(`No se asigna en estado ${vuelo.estado}.`);
     }
     if (vuelo.es_externo && dto.aeronave_id) {
-      throw new BadRequestException('Vuelo externo no admite aeronave_id propia');
+      throw new BadRequestException(
+        'Vuelo externo no admite aeronave_id propia',
+      );
     }
 
     const asignandoPiloto =
-      dto.piloto_id !== undefined && dto.piloto_id !== null && dto.piloto_id !== '';
+      dto.piloto_id !== undefined &&
+      dto.piloto_id !== null &&
+      dto.piloto_id !== '';
 
     await this.validateAssignTargets({
       aeronaveId: dto.aeronave_id,
@@ -1319,14 +1396,17 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
     // Si es la ida, espeja al vuelo (compat con lectores vuelo-level).
     if (escala.orden === 1) {
       const vueloPatch: Record<string, unknown> = { updated_by: updatedBy };
-      if (dto.aeronave_id !== undefined) vueloPatch.aeronave_id = dto.aeronave_id;
+      if (dto.aeronave_id !== undefined)
+        vueloPatch.aeronave_id = dto.aeronave_id;
       if (dto.piloto_id !== undefined) vueloPatch.piloto_id = dto.piloto_id;
       if (dto.fecha_salida_plan !== undefined)
         vueloPatch.fecha_vuelo = dto.fecha_salida_plan.toISOString();
@@ -1340,8 +1420,11 @@ export class FlightsService {
     if (asignandoPiloto && dto.piloto_id !== escala.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, {
         ...vuelo,
-        origen_iata: (data as { origen_iata?: string }).origen_iata ?? vuelo.origen_iata,
-        destino_iata: (data as { destino_iata?: string }).destino_iata ?? vuelo.destino_iata,
+        origen_iata:
+          (data as { origen_iata?: string }).origen_iata ?? vuelo.origen_iata,
+        destino_iata:
+          (data as { destino_iata?: string }).destino_iata ??
+          vuelo.destino_iata,
       });
     }
     return data!;
@@ -1359,7 +1442,9 @@ export class FlightsService {
   ) {
     const { data: escala, error: escErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, piloto_id, estado_permiso, origen_iata, destino_iata')
+      .select(
+        'id, vuelo_id, orden, piloto_id, estado_permiso, origen_iata, destino_iata',
+      )
       .eq('id', legId)
       .maybeSingle();
     if (escErr) throw new Error(escErr.message);
@@ -1414,10 +1499,14 @@ export class FlightsService {
     }
     if (!current.es_externo) {
       if (!current.aeronave_id) {
-        throw new BadRequestException('No se puede iniciar sin aeronave_id asignada');
+        throw new BadRequestException(
+          'No se puede iniciar sin aeronave_id asignada',
+        );
       }
       if (!current.piloto_id) {
-        throw new BadRequestException('No se puede iniciar sin piloto_id asignado');
+        throw new BadRequestException(
+          'No se puede iniciar sin piloto_id asignado',
+        );
       }
     }
     // La operación no se detiene: la salida del primer tramo ya no la captura
@@ -1452,7 +1541,10 @@ export class FlightsService {
     // Para completar solo se exigen las LLEGADAS (la única lectura que captura
     // el piloto). Las salidas son del sistema (último taco / propagación) y no
     // deben bloquear: si alguna falta, la oficina la ajusta en Tacómetros en vivo.
-    if (!current.es_externo && this.faltanLlegadas(await this.escalasTaco(id))) {
+    if (
+      !current.es_externo &&
+      this.faltanLlegadas(await this.escalasTaco(id))
+    ) {
       throw new ConflictException(MSG_TACO);
     }
     const { data, error } = await this.supabase.service
@@ -1558,6 +1650,38 @@ export class FlightsService {
     return data!;
   }
 
+  /**
+   * Regresa un vuelo CUBIERTO por externo a vuelo PROPIO (el apoyo se cayó o
+   * al final sí sale con avión de la casa): limpia operador/costo del apoyo
+   * y el vuelo queda listo para asignar avión y piloto propios (tacómetros y
+   * gastos vuelven a aplicar). La cotización del cliente no se toca.
+   */
+  async revertirExterno(id: string, userId: string) {
+    const current = await this.findById(id);
+    if (current.es_externo !== true) {
+      throw new ConflictException('El vuelo no está cubierto por externo.');
+    }
+    if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
+      throw new ConflictException(
+        `No se puede regresar a vuelo propio en estado ${current.estado as string}.`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        es_externo: false,
+        operador_externo: null,
+        costo_externo_usd: null,
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(id);
+    return data!;
+  }
+
   async createExternal(dto: CreateExternalFlightDto, userId: string) {
     // MULTIESCALA opcional: con tramos, la ruta del vuelo se deriva de ellos.
     const legs = (dto.escalas ?? []).map((e) => ({
@@ -1574,7 +1698,9 @@ export class FlightsService {
     }
     const origen = legs[0]?.origen_iata ?? dto.origen_iata.toUpperCase();
     const destino =
-      legs.length > 0 ? legs[legs.length - 1].destino_iata : dto.destino_iata.toUpperCase();
+      legs.length > 0
+        ? legs[legs.length - 1].destino_iata
+        : dto.destino_iata.toUpperCase();
     const payload = {
       cliente_id: dto.cliente_id,
       aeronave_id: null,
@@ -1622,24 +1748,28 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     // Tramos del externo (solo ruta, sin tacómetros: el estado es manual).
     if (data?.id && legs.length > 0) {
-      const { error: escErr } = await this.supabase.service.from('escala').insert(
-        legs.map((l, i) => ({
-          vuelo_id: data.id as string,
-          orden: i + 1,
-          origen_iata: l.origen_iata,
-          destino_iata: l.destino_iata,
-          es_ferry: l.es_ferry,
-          pasajeros: l.es_ferry ? 0 : dto.pasajeros,
-          // El primer tramo sale a la hora del vuelo (espejo estándar).
-          fecha_salida_plan: i === 0 ? dto.fecha_vuelo?.toISOString() : null,
-          created_by: userId,
-        })),
-      );
+      const { error: escErr } = await this.supabase.service
+        .from('escala')
+        .insert(
+          legs.map((l, i) => ({
+            vuelo_id: data.id as string,
+            orden: i + 1,
+            origen_iata: l.origen_iata,
+            destino_iata: l.destino_iata,
+            es_ferry: l.es_ferry,
+            pasajeros: l.es_ferry ? 0 : dto.pasajeros,
+            // El primer tramo sale a la hora del vuelo (espejo estándar).
+            fecha_salida_plan: i === 0 ? dto.fecha_vuelo?.toISOString() : null,
+            created_by: userId,
+          })),
+        );
       if (escErr) {
         this.logger.warn(
           `Vuelo externo ${data.id as string}: no se pudieron crear los tramos: ${escErr.message}`,
@@ -1748,7 +1878,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
@@ -1769,7 +1901,8 @@ export class FlightsService {
           // Última fecha conocida hasta este tramo (un tramo sin hora se asume
           // del mismo día que el anterior).
           let referencia: Date | null = null;
-          for (let j = i; j >= 0 && !referencia; j--) referencia = fechaEfectiva(j);
+          for (let j = i; j >= 0 && !referencia; j--)
+            referencia = fechaEfectiva(j);
           const siguiente = itinerario[i + 1]?.hora_salida ?? null;
           const pernocta =
             referencia != null &&
@@ -1795,45 +1928,49 @@ export class FlightsService {
           };
         })
       : [
-      {
-        vuelo_id: vueloId,
-        orden: 1,
-        origen_iata: origen,
-        destino_iata: destino,
-        aeronave_id: dto.aeronave_id ?? null,
-        piloto_id: dto.piloto_id ?? null,
-        pasajeros: pasajeros as number | null,
-        pasajeros_nombres: [] as string[],
-        es_ferry: false,
-        solo_operativa: false,
-        requiere_pernocta: false,
-        notas: null as string | null,
-        fecha_salida_plan: dto.fecha_vuelo.toISOString() as string | undefined,
-        created_by: userId,
-        updated_by: userId,
-      },
-      ...(dto.fecha_traslado_final
-        ? [
-            {
-              vuelo_id: vueloId,
-              orden: 2,
-              origen_iata: destino,
-              destino_iata: origen,
-              aeronave_id: dto.aeronave_id ?? null,
-              piloto_id: dto.piloto_id ?? null,
-              pasajeros: pasajeros as number | null,
-              pasajeros_nombres: [] as string[],
-              es_ferry: false,
-              solo_operativa: false,
-              requiere_pernocta: false,
-              notas: null as string | null,
-              fecha_salida_plan: dto.fecha_traslado_final.toISOString() as string | undefined,
-              created_by: userId,
-              updated_by: userId,
-            },
-          ]
-        : []),
-    ];
+          {
+            vuelo_id: vueloId,
+            orden: 1,
+            origen_iata: origen,
+            destino_iata: destino,
+            aeronave_id: dto.aeronave_id ?? null,
+            piloto_id: dto.piloto_id ?? null,
+            pasajeros: pasajeros as number | null,
+            pasajeros_nombres: [] as string[],
+            es_ferry: false,
+            solo_operativa: false,
+            requiere_pernocta: false,
+            notas: null as string | null,
+            fecha_salida_plan: dto.fecha_vuelo.toISOString() as
+              | string
+              | undefined,
+            created_by: userId,
+            updated_by: userId,
+          },
+          ...(dto.fecha_traslado_final
+            ? [
+                {
+                  vuelo_id: vueloId,
+                  orden: 2,
+                  origen_iata: destino,
+                  destino_iata: origen,
+                  aeronave_id: dto.aeronave_id ?? null,
+                  piloto_id: dto.piloto_id ?? null,
+                  pasajeros: pasajeros as number | null,
+                  pasajeros_nombres: [] as string[],
+                  es_ferry: false,
+                  solo_operativa: false,
+                  requiere_pernocta: false,
+                  notas: null as string | null,
+                  fecha_salida_plan: dto.fecha_traslado_final.toISOString() as
+                    | string
+                    | undefined,
+                  created_by: userId,
+                  updated_by: userId,
+                },
+              ]
+            : []),
+        ];
     const { error: legsErr } = await this.supabase.service
       .from('escala')
       .insert(legs);
@@ -1891,7 +2028,9 @@ export class FlightsService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException(`Ya existe una escala con orden ${dto.orden}`);
+        throw new ConflictException(
+          `Ya existe una escala con orden ${dto.orden}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -1907,7 +2046,11 @@ export class FlightsService {
    * EXCLUIDO del precio y de la cotización del cliente. No recalcula la
    * cotización. El orden se asigna en el rango operativo (>=100).
    */
-  async createOperationalLeg(vueloId: string, dto: OperationalLegDto, userId: string) {
+  async createOperationalLeg(
+    vueloId: string,
+    dto: OperationalLegDto,
+    userId: string,
+  ) {
     await this.findById(vueloId);
     const { data: existentes } = await this.supabase.service
       .from('escala')
@@ -1940,7 +2083,8 @@ export class FlightsService {
       })
       .select(ESCALA_COLS)
       .maybeSingle();
-    if (error) throw new Error(`Failed to insert operational leg: ${error.message}`);
+    if (error)
+      throw new Error(`Failed to insert operational leg: ${error.message}`);
     void this.calendar.syncFlight(vueloId);
     return data!;
   }
@@ -1967,10 +2111,13 @@ export class FlightsService {
     if (dto.pasajeros_nombres !== undefined)
       patch.pasajeros_nombres = dto.pasajeros_nombres;
     if (dto.es_ferry !== undefined) patch.es_ferry = dto.es_ferry;
-    if (dto.es_sobrevuelo !== undefined) patch.es_sobrevuelo = dto.es_sobrevuelo;
-    if (dto.requiere_pernocta !== undefined) patch.requiere_pernocta = dto.requiere_pernocta;
+    if (dto.es_sobrevuelo !== undefined)
+      patch.es_sobrevuelo = dto.es_sobrevuelo;
+    if (dto.requiere_pernocta !== undefined)
+      patch.requiere_pernocta = dto.requiere_pernocta;
     if (dto.tipo_parada !== undefined) patch.tipo_parada = dto.tipo_parada;
-    if (dto.servicio_notas !== undefined) patch.servicio_notas = dto.servicio_notas;
+    if (dto.servicio_notas !== undefined)
+      patch.servicio_notas = dto.servicio_notas;
     if (dto.fecha_salida_plan !== undefined)
       patch.fecha_salida_plan = dto.fecha_salida_plan?.toISOString() ?? null;
 
@@ -1993,7 +2140,7 @@ export class FlightsService {
       if (Number(data.orden) === 1) {
         await this.update(
           data.vuelo_id as string,
-          { fecha_vuelo: dto.fecha_salida_plan } as UpdateFlightDto,
+          { fecha_vuelo: dto.fecha_salida_plan },
           userId,
         );
       } else {
@@ -2024,7 +2171,10 @@ export class FlightsService {
     // tramo 1 es evidencia y puede corregirla hacia abajo.
     if (dto.taco_salida !== undefined && current.taco_salida !== null) {
       const salidaCorregible = current.taco_salida_origen === 'DEDUCIDO';
-      if (Number(dto.taco_salida) < Number(current.taco_salida) && !salidaCorregible) {
+      if (
+        Number(dto.taco_salida) < Number(current.taco_salida) &&
+        !salidaCorregible
+      ) {
         throw new ConflictException(
           `La lectura de salida (${dto.taco_salida}) es menor a la ya registrada (${current.taco_salida}). El tacómetro nunca retrocede; revisa la foto.`,
         );
@@ -2090,12 +2240,18 @@ export class FlightsService {
       patch.taco_llegada = dto.taco_llegada;
       patch.taco_llegada_origen = 'PILOTO';
     }
-    if (dto.foto_taco_salida_url !== undefined) patch.foto_taco_salida_url = dto.foto_taco_salida_url;
-    if (dto.foto_taco_llegada_url !== undefined) patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
-    if (dto.valor_ia_propuesto !== undefined) patch.valor_ia_propuesto = dto.valor_ia_propuesto;
-    if (dto.hora_salida !== undefined) patch.hora_salida = dto.hora_salida.toISOString();
-    if (dto.hora_llegada !== undefined) patch.hora_llegada = dto.hora_llegada.toISOString();
-    if (dto.capturado_offline !== undefined) patch.capturado_offline = dto.capturado_offline;
+    if (dto.foto_taco_salida_url !== undefined)
+      patch.foto_taco_salida_url = dto.foto_taco_salida_url;
+    if (dto.foto_taco_llegada_url !== undefined)
+      patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
+    if (dto.valor_ia_propuesto !== undefined)
+      patch.valor_ia_propuesto = dto.valor_ia_propuesto;
+    if (dto.hora_salida !== undefined)
+      patch.hora_salida = dto.hora_salida.toISOString();
+    if (dto.hora_llegada !== undefined)
+      patch.hora_llegada = dto.hora_llegada.toISOString();
+    if (dto.capturado_offline !== undefined)
+      patch.capturado_offline = dto.capturado_offline;
 
     const { data, error } = await this.supabase.service
       .from('escala')
@@ -2205,7 +2361,9 @@ export class FlightsService {
 
       const signed = await this.signedTacoUrl(foto);
       if (!signed) {
-        motivos.push(`Foto de ${which} sincronizada pero no accesible — revisar`);
+        motivos.push(
+          `Foto de ${which} sincronizada pero no accesible — revisar`,
+        );
         continue;
       }
       const ultimo = await this.ultimoTacoAeronave(
@@ -2227,7 +2385,11 @@ export class FlightsService {
         );
         continue;
       }
-      if (which === 'llegada' && tacoSalidaActual !== null && lectura < tacoSalidaActual) {
+      if (
+        which === 'llegada' &&
+        tacoSalidaActual !== null &&
+        lectura < tacoSalidaActual
+      ) {
         motivos.push(
           `IA leyó llegada ${lectura} menor a la salida (${tacoSalidaActual}) — revisar foto`,
         );
@@ -2308,7 +2470,9 @@ export class FlightsService {
       dto.taco_llegada ??
       (current.taco_llegada === null ? null : Number(current.taco_llegada));
     if (salida !== null && llegada !== null && llegada < salida) {
-      throw new ConflictException('taco_llegada no puede ser menor a taco_salida');
+      throw new ConflictException(
+        'taco_llegada no puede ser menor a taco_salida',
+      );
     }
 
     const patch: Record<string, unknown> = {
@@ -2391,9 +2555,11 @@ export class FlightsService {
       try {
         const vuelo = await this.findById(current.vuelo_id as string);
         const pilotoId =
-          ((data.piloto_id as string | null) ?? (vuelo.piloto_id as string | null));
+          (data.piloto_id as string | null) ??
+          (vuelo.piloto_id as string | null);
         if (!pilotoId || pilotoId === userId) return;
-        const ajustada = dto.taco_salida !== undefined || dto.taco_llegada !== undefined;
+        const ajustada =
+          dto.taco_salida !== undefined || dto.taco_llegada !== undefined;
         await this.notifications.notifyUser(pilotoId, {
           tipo: 'taco_capturado',
           titulo: ajustada
@@ -2458,7 +2624,9 @@ export class FlightsService {
   async flightBitacora(vueloId: string) {
     const { data, error } = await this.supabase.service
       .from('notificacion')
-      .select('id, tipo, titulo, cuerpo, data, created_at, usuario:usuario_id(nombre, rol)')
+      .select(
+        'id, tipo, titulo, cuerpo, data, created_at, usuario:usuario_id(nombre, rol)',
+      )
       .in('tipo', ['recordatorio_taco', 'taco_capturado'])
       .eq('data->>vuelo_id', vueloId)
       .order('created_at', { ascending: false })
@@ -2489,12 +2657,16 @@ export class FlightsService {
     return eventos;
   }
 
-  private async notifyTacoCaptured(escala: Record<string, unknown>): Promise<void> {
+  private async notifyTacoCaptured(
+    escala: Record<string, unknown>,
+  ): Promise<void> {
     const revision = Boolean(escala.revision_requerida);
     const ruta = `${escala.origen_iata as string} → ${escala.destino_iata as string}`;
     const payload = {
       tipo: 'taco_capturado',
-      titulo: revision ? 'Tacómetro capturado · revisar' : 'Tacómetro capturado',
+      titulo: revision
+        ? 'Tacómetro capturado · revisar'
+        : 'Tacómetro capturado',
       cuerpo: revision
         ? `${ruta} — ${(escala.revision_motivo as string) ?? 'requiere revisión'}`
         : ruta,
@@ -2575,10 +2747,15 @@ export class FlightsService {
     destino: string,
     which: 'salida' | 'llegada',
     tacoSalida: number | null,
-  ): Promise<{ taco_llegada: number; minutos_promedio: number; muestras: number } | null> {
+  ): Promise<{
+    taco_llegada: number;
+    minutos_promedio: number;
+    muestras: number;
+  } | null> {
     if (which !== 'llegada' || tacoSalida === null) return null;
     const tramo = await this.getTramoPromedio(origen, destino);
-    if (!tramo || tramo.muestras < MIN_MUESTRAS || tramo.minutos_promedio <= 0) return null;
+    if (!tramo || tramo.muestras < MIN_MUESTRAS || tramo.minutos_promedio <= 0)
+      return null;
     const horas = tramo.minutos_promedio / 60;
     return {
       taco_llegada: Math.round((tacoSalida + horas) * 10) / 10,
@@ -2599,7 +2776,10 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) return null;
-    return { minutos_promedio: Number(data.minutos_promedio), muestras: Number(data.muestras) };
+    return {
+      minutos_promedio: Number(data.minutos_promedio),
+      muestras: Number(data.muestras),
+    };
   }
 
   /**
@@ -2612,9 +2792,14 @@ export class FlightsService {
     escala: Record<string, unknown>,
     userId: string,
   ): Promise<Record<string, unknown>> {
-    const tacoSalida = escala.taco_salida === null ? null : Number(escala.taco_salida);
-    const tacoLlegada = escala.taco_llegada === null ? null : Number(escala.taco_llegada);
-    const valorIa = escala.valor_ia_propuesto === null ? null : Number(escala.valor_ia_propuesto);
+    const tacoSalida =
+      escala.taco_salida === null ? null : Number(escala.taco_salida);
+    const tacoLlegada =
+      escala.taco_llegada === null ? null : Number(escala.taco_llegada);
+    const valorIa =
+      escala.valor_ia_propuesto === null
+        ? null
+        : Number(escala.valor_ia_propuesto);
     const motivos: string[] = [];
 
     // (a) Manual vs IA. valor_ia_propuesto refleja la última lectura sugerida;
@@ -2628,14 +2813,23 @@ export class FlightsService {
     }
 
     // (b) Duración vs promedio histórico.
-    if (tacoSalida !== null && tacoLlegada !== null && tacoLlegada >= tacoSalida) {
+    if (
+      tacoSalida !== null &&
+      tacoLlegada !== null &&
+      tacoLlegada >= tacoSalida
+    ) {
       const durMin = (tacoLlegada - tacoSalida) * 60;
       const tramo = await this.getTramoPromedio(
         escala.origen_iata as string,
         escala.destino_iata as string,
       );
-      if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
-        const desv = Math.abs(durMin - tramo.minutos_promedio) / tramo.minutos_promedio;
+      if (
+        tramo &&
+        tramo.muestras >= MIN_MUESTRAS &&
+        tramo.minutos_promedio > 0
+      ) {
+        const desv =
+          Math.abs(durMin - tramo.minutos_promedio) / tramo.minutos_promedio;
         if (desv > DURATION_TOL_PCT) {
           motivos.push(
             `Duración ${Math.round(durMin)} min fuera de rango histórico (~${Math.round(tramo.minutos_promedio)} min)`,
@@ -2686,16 +2880,18 @@ export class FlightsService {
       const promedioPrev = tramo ? tramo.minutos_promedio : 0;
       const nuevoPromedio = (promedioPrev * muestras + durMin) / (muestras + 1);
 
-      const { error } = await this.supabase.service.from('tramo_tiempo_promedio').upsert(
-        {
-          origen_iata: origen,
-          destino_iata: destino,
-          minutos_promedio: Math.round(nuevoPromedio * 10) / 10,
-          muestras: muestras + 1,
-          updated_at: new Date().toISOString(),
-        },
-        { onConflict: 'origen_iata,destino_iata' },
-      );
+      const { error } = await this.supabase.service
+        .from('tramo_tiempo_promedio')
+        .upsert(
+          {
+            origen_iata: origen,
+            destino_iata: destino,
+            minutos_promedio: Math.round(nuevoPromedio * 10) / 10,
+            muestras: muestras + 1,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: 'origen_iata,destino_iata' },
+        );
       if (error) throw new Error(error.message);
     }
   }
@@ -2748,7 +2944,9 @@ export class FlightsService {
   async deduceTacosEnVivo(): Promise<void> {
     try {
       const now = new Date();
-      const hoyCancun = now.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+      const hoyCancun = now.toLocaleDateString('en-CA', {
+        timeZone: 'America/Cancun',
+      });
       const { data, error } = await this.supabase.service
         .from('vuelo')
         .select('id, fecha_vuelo, estado')
@@ -2830,7 +3028,11 @@ export class FlightsService {
         // (2) llegada ← salida + promedio histórico del tramo. Estimado.
         if (r.llegada === null && r.salida !== null) {
           const tramo = await this.getTramoPromedio(r.origen, r.destino);
-          if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
+          if (
+            tramo &&
+            tramo.muestras >= MIN_MUESTRAS &&
+            tramo.minutos_promedio > 0
+          ) {
             // Modo EN VIVO: solo si la escala ya debió terminar (hora de
             // salida + promedio + 20 min de margen). Escalas futuras o en el
             // aire siguen "esperando dato".
@@ -2842,7 +3044,8 @@ export class FlightsService {
                 (tramo.minutos_promedio + 20) * 60_000;
               if (fin > opts.soloVencidasA.getTime()) continue;
             }
-            r.llegada = Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
+            r.llegada =
+              Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
             r.cambios.push(
               `llegada calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
@@ -2855,8 +3058,13 @@ export class FlightsService {
         // Solo al cierre del día: en vivo no inventamos hacia atrás.
         if (r.salida === null && r.llegada !== null && !opts?.soloVencidasA) {
           const tramo = await this.getTramoPromedio(r.origen, r.destino);
-          if (tramo && tramo.muestras >= MIN_MUESTRAS && tramo.minutos_promedio > 0) {
-            r.salida = Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
+          if (
+            tramo &&
+            tramo.muestras >= MIN_MUESTRAS &&
+            tramo.minutos_promedio > 0
+          ) {
+            r.salida =
+              Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
             r.cambios.push(
               `salida calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
@@ -2876,7 +3084,10 @@ export class FlightsService {
         taco_salida: r.salida,
         taco_llegada: r.llegada,
       };
-      if (r.salidaDeducida || r.cambios.some((c) => c.startsWith('salida tomada'))) {
+      if (
+        r.salidaDeducida ||
+        r.cambios.some((c) => c.startsWith('salida tomada'))
+      ) {
         patch.taco_salida_origen = r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO';
       }
       if (r.llegadaDeducida) patch.taco_llegada_origen = 'DEDUCIDO';
@@ -2910,7 +3121,11 @@ export class FlightsService {
         if (r.estimado) void this.notifyTacoCaptured(data);
       }
     }
-    return { vuelo_id: vueloId, escalas_actualizadas: actualizadas.length, detalle: actualizadas };
+    return {
+      vuelo_id: vueloId,
+      escalas_actualizadas: actualizadas.length,
+      detalle: actualizadas,
+    };
   }
 
   /**
@@ -2940,7 +3155,7 @@ export class FlightsService {
       .order('fecha_vuelo', { ascending: true });
     if (error) throw new Error(error.message);
 
-    const unwrapOne = <T,>(v: T | T[] | null): T | null =>
+    const unwrapOne = <T>(v: T | T[] | null): T | null =>
       Array.isArray(v) ? (v[0] ?? null) : v;
 
     // Fotos firmadas y nombres de quienes confirmaron/ajustaron, en lote.
@@ -2948,8 +3163,10 @@ export class FlightsService {
     const userIds = new Set<string>();
     for (const v of vuelos ?? []) {
       for (const e of (v.escalas as Array<Record<string, unknown>>) ?? []) {
-        if (e.foto_taco_salida_url) paths.push(e.foto_taco_salida_url as string);
-        if (e.foto_taco_llegada_url) paths.push(e.foto_taco_llegada_url as string);
+        if (e.foto_taco_salida_url)
+          paths.push(e.foto_taco_salida_url as string);
+        if (e.foto_taco_llegada_url)
+          paths.push(e.foto_taco_llegada_url as string);
         if (e.corregido_por) userIds.add(e.corregido_por as string);
         if (e.capturado_por) userIds.add(e.capturado_por as string);
       }
@@ -2992,25 +3209,34 @@ export class FlightsService {
     for (const v of vuelos ?? []) {
       const aeronave = unwrapOne(v.aeronave as { matricula?: string } | null);
       const piloto = unwrapOne(v.piloto as { nombre?: string } | null);
-      const escalas = [...((v.escalas as Array<Record<string, unknown>>) ?? [])].sort(
-        (a, b) => Number(a.orden) - Number(b.orden),
-      );
+      const escalas = [
+        ...((v.escalas as Array<Record<string, unknown>>) ?? []),
+      ].sort((a, b) => Number(a.orden) - Number(b.orden));
       const filas = [] as Array<Record<string, unknown>>;
       for (const e of escalas) {
         const salida = e.taco_salida == null ? null : Number(e.taco_salida);
         const llegada = e.taco_llegada == null ? null : Number(e.taco_llegada);
-        const prom = await promedioDe(e.origen_iata as string, e.destino_iata as string);
-        const base = (e.hora_salida as string | null) ?? (e.fecha_salida_plan as string | null);
+        const prom = await promedioDe(
+          e.origen_iata as string,
+          e.destino_iata as string,
+        );
+        const base =
+          (e.hora_salida as string | null) ??
+          (e.fecha_salida_plan as string | null);
         const esperadoFin =
           base && prom != null
-            ? new Date(new Date(base).getTime() + (prom + 20) * 60_000).toISOString()
+            ? new Date(
+                new Date(base).getTime() + (prom + 20) * 60_000,
+              ).toISOString()
             : null;
         // Estado de la escala para el tablero.
         let estado: string;
-        if (Boolean(e.revision_requerida)) estado = 'REVISAR';
+        if (e.revision_requerida) estado = 'REVISAR';
         else if (llegada != null) estado = 'OK';
-        else if (esperadoFin && new Date(esperadoFin).getTime() < ahora) estado = 'VENCIDA';
-        else if (salida != null || (base && new Date(base).getTime() < ahora)) estado = 'EN_CURSO';
+        else if (esperadoFin && new Date(esperadoFin).getTime() < ahora)
+          estado = 'VENCIDA';
+        else if (salida != null || (base && new Date(base).getTime() < ahora))
+          estado = 'EN_CURSO';
         else estado = 'ESPERANDO';
         filas.push({
           escala_id: e.id,
@@ -3028,15 +3254,15 @@ export class FlightsService {
           valor_ia_propuesto:
             e.valor_ia_propuesto == null ? null : Number(e.valor_ia_propuesto),
           revision_requerida: Boolean(e.revision_requerida),
-          revision_motivo: (e.revision_motivo as string | null) ?? null,
+          revision_motivo: e.revision_motivo ?? null,
           capturado_por_nombre: e.capturado_por
             ? (nombres.get(e.capturado_por as string) ?? null)
             : null,
           corregido_por_nombre: e.corregido_por
             ? (nombres.get(e.corregido_por as string) ?? null)
             : null,
-          corregido_at: (e.corregido_at as string | null) ?? null,
-          nota_correccion: (e.nota_correccion as string | null) ?? null,
+          corregido_at: e.corregido_at ?? null,
+          nota_correccion: e.nota_correccion ?? null,
           foto_salida_url: e.foto_taco_salida_url
             ? (signed[e.foto_taco_salida_url as string] ?? null)
             : null,
@@ -3063,7 +3289,8 @@ export class FlightsService {
     const paths: string[] = [];
     for (const e of escalas) {
       if (e.foto_taco_salida_url) paths.push(e.foto_taco_salida_url as string);
-      if (e.foto_taco_llegada_url) paths.push(e.foto_taco_llegada_url as string);
+      if (e.foto_taco_llegada_url)
+        paths.push(e.foto_taco_llegada_url as string);
     }
     const signed: Record<string, string> = {};
     if (paths.length > 0) {
@@ -3183,7 +3410,7 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
-    return (data as EscalaTaco[] | null) ?? [];
+    return data ?? [];
   }
 
   /** Falta alguna lectura de LLEGADA (la única que captura el piloto). */
@@ -3211,8 +3438,12 @@ export class FlightsService {
       .in('vuelo_id', ids);
     if (error) throw new Error(error.message);
 
-    const acc = new Map<string, { count: number; salida: boolean; llegada: boolean }>();
-    for (const id of ids) acc.set(id, { count: 0, salida: true, llegada: true });
+    const acc = new Map<
+      string,
+      { count: number; salida: boolean; llegada: boolean }
+    >();
+    for (const id of ids)
+      acc.set(id, { count: 0, salida: true, llegada: true });
     for (const e of data ?? []) {
       const s = acc.get(e.vuelo_id as string);
       if (!s) continue;
@@ -3253,7 +3484,10 @@ export class FlightsService {
         'No se puede borrar una escala con tacómetro capturado (auditoría)',
       );
     }
-    const { error } = await this.supabase.service.from('escala').delete().eq('id', escalaId);
+    const { error } = await this.supabase.service
+      .from('escala')
+      .delete()
+      .eq('id', escalaId);
     if (error) throw new Error(error.message);
     return { deleted: true, id: escalaId };
   }
@@ -3271,7 +3505,12 @@ export class FlightsService {
     return data ?? [];
   }
 
-  async createCobro(vueloId: string, dto: CreateCobroDto, userId: string, rol?: Rol) {
+  async createCobro(
+    vueloId: string,
+    dto: CreateCobroDto,
+    userId: string,
+    rol?: Rol,
+  ) {
     const vuelo = await this.findById(vueloId);
     // Cargo por cancelación (Itzel): la oficina SÍ puede registrar un cobro en
     // un vuelo cancelado (ej. cliente canceló por clima y se le cobra algo);
@@ -3305,8 +3544,14 @@ export class FlightsService {
     }
     // Tarea 11: el piloto, al cobrar con tarjeta en campo, debe adjuntar el voucher.
     // (Admin/Facturación quedan exentos para conciliaciones de oficina sin foto.)
-    if (rol === Rol.PILOTO && METODOS_TARJETA.has(dto.metodo_cobro) && !dto.foto_voucher_url) {
-      throw new BadRequestException('Foto del voucher obligatoria para pagos con tarjeta.');
+    if (
+      rol === Rol.PILOTO &&
+      METODOS_TARJETA.has(dto.metodo_cobro) &&
+      !dto.foto_voucher_url
+    ) {
+      throw new BadRequestException(
+        'Foto del voucher obligatoria para pagos con tarjeta.',
+      );
     }
     // Un cobro MXN sin TC "desaparecía" de todos los balances. Si el capturista
     // no lo da, se toma el TC de la cotización para que el dinero siempre
@@ -3320,7 +3565,9 @@ export class FlightsService {
     // el reporte no cuadraba con el estado de cuenta. `monto` sigue siendo el
     // BRUTO que pagó el cliente (cobrado/cobrosEnUsd intactos).
     const comisionPct =
-      Number(dto.comision_banco_pct) > 0 ? Number(dto.comision_banco_pct) : null;
+      Number(dto.comision_banco_pct) > 0
+        ? Number(dto.comision_banco_pct)
+        : null;
     const comisionMonto = comisionPct
       ? Math.round(dto.monto * (comisionPct / 100) * 100) / 100
       : null;
@@ -3353,7 +3600,12 @@ export class FlightsService {
       tipo: 'cobro_registrado',
       titulo: 'Cobro registrado',
       cuerpo: `${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')} · folio #${vuelo.folio}`,
-      data: { vuelo_id: vueloId, folio: vuelo.folio, monto: dto.monto, moneda: dto.moneda },
+      data: {
+        vuelo_id: vueloId,
+        folio: vuelo.folio,
+        monto: dto.monto,
+        moneda: dto.moneda,
+      },
       link: `/admin/flights/${vueloId}`,
     };
     void this.notifications.notifyRole(Rol.ADMIN, payload, userId);
@@ -3368,7 +3620,10 @@ export class FlightsService {
    * vuelo pagado en pesos sí se marca cobrado. Tolerancia de 1 USD por
    * redondeos de conversión. Público: quotes.revise() también debe refrescar.
    */
-  async refreshCobradoFlag(vueloId: string, userId: string | null): Promise<void> {
+  async refreshCobradoFlag(
+    vueloId: string,
+    userId: string | null,
+  ): Promise<void> {
     const cobros = await this.listCobros(vueloId);
     const vuelo = await this.findById(vueloId);
     const { total_usd } = cobrosEnUsd(

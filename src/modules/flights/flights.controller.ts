@@ -60,8 +60,13 @@ export class FlightsController {
   @Get(':id/reporte.pdf')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO)
   @Header('Content-Type', 'application/pdf')
-  @ApiOperation({ summary: 'Reporte consolidado del vuelo (cotización, ingreso, tacómetro, gastos) en PDF' })
-  async reportePdf(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
+  @ApiOperation({
+    summary:
+      'Reporte consolidado del vuelo (cotización, ingreso, tacómetro, gastos) en PDF',
+  })
+  async reportePdf(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<StreamableFile> {
     const folio = await this.report.folio(id);
     const buffer = await this.report.pdf(id);
     return new StreamableFile(buffer, {
@@ -73,7 +78,9 @@ export class FlightsController {
   @Get(':id/reporte.xlsx')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO)
   @ApiOperation({ summary: 'Reporte consolidado del vuelo en Excel' })
-  async reporteXlsx(@Param('id', ParseUUIDPipe) id: string): Promise<StreamableFile> {
+  async reporteXlsx(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<StreamableFile> {
     const folio = await this.report.folio(id);
     const buffer = await this.report.xlsx(id);
     return new StreamableFile(buffer, {
@@ -83,7 +90,10 @@ export class FlightsController {
   }
 
   @Get()
-  @ApiOperation({ summary: 'List flights with filters. El piloto solo ve sus vuelos asignados.' })
+  @ApiOperation({
+    summary:
+      'List flights with filters. El piloto solo ve sus vuelos asignados.',
+  })
   list(@Query() q: ListFlightsQuery, @CurrentUser() c: AuthenticatedUser) {
     // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
     if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
@@ -102,6 +112,19 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.cubrirConExterno(id, dto, c.userId);
+  }
+
+  @Post(':id/revertir-externo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Regresa un vuelo cubierto por externo a vuelo propio: limpia operador/costo del apoyo; queda listo para asignar avión y piloto.',
+  })
+  revertirExterno(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.revertirExterno(id, c.userId);
   }
 
   @Post('external')
@@ -142,14 +165,20 @@ export class FlightsController {
 
   @Get(':id')
   @ApiOperation({ summary: 'Get flight summary' })
-  async getOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async getOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.findById(id);
   }
 
   @Get(':id/snapshot')
   @ApiOperation({ summary: 'Full flight with escalas + cobros' })
-  async snapshot(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async snapshot(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.snapshot(id);
   }
@@ -170,13 +199,18 @@ export class FlightsController {
     summary:
       'Vista de cotización SOLO LECTURA para el piloto: cliente, ruta, pasajeros, fechas, escalas y monto total cobrable. Oculta comisiones, IVA desglosado, plataforma de cobro, overrides y costos internos. El piloto solo ve su vuelo asignado.',
   })
-  quoteView(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  quoteView(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.flights.quoteView(id, c);
   }
 
   @Patch(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Update non-cotization fields (piloto, fecha, notas, flags)' })
+  @ApiOperation({
+    summary: 'Update non-cotization fields (piloto, fecha, notas, flags)',
+  })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateFlightDto,
@@ -187,14 +221,20 @@ export class FlightsController {
 
   @Get(':id/pilotos-disponibilidad')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Pilotos con conflicto de horario ese día y horas del mes vs. límite' })
+  @ApiOperation({
+    summary:
+      'Pilotos con conflicto de horario ese día y horas del mes vs. límite',
+  })
   pilotosDisponibilidad(@Param('id', ParseUUIDPipe) id: string) {
     return this.flights.pilotosDisponibilidad(id);
   }
 
   @Patch(':id/permiso')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
-  @ApiOperation({ summary: 'Actualiza el permiso de pista (Admin/Coord. o el piloto asignado)' })
+  @ApiOperation({
+    summary:
+      'Actualiza el permiso de pista (Admin/Coord. o el piloto asignado)',
+  })
   updatePermiso(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdatePermisoDto,
@@ -208,7 +248,10 @@ export class FlightsController {
 
   @Post(':id/assign')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)' })
+  @ApiOperation({
+    summary:
+      'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)',
+  })
   assign(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AssignFlightDto,
@@ -221,7 +264,10 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition CONFIRMADO -> EN_VUELO' })
-  async start(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async start(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.start(id, c.userId);
   }
@@ -245,7 +291,10 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Transition EN_VUELO -> COMPLETADO' })
-  async complete(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async complete(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.complete(id, c.userId);
   }
@@ -280,7 +329,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Cancela un vuelo (-> CANCELADO) con motivo auditable. Solo ADMIN/COORDINADOR.',
+    summary:
+      'Cancela un vuelo (-> CANCELADO) con motivo auditable. Solo ADMIN/COORDINADOR.',
   })
   async cancel(
     @Param('id', ParseUUIDPipe) id: string,
@@ -294,14 +344,19 @@ export class FlightsController {
 
   @Get(':id/legs')
   @ApiOperation({ summary: 'List flight legs (escalas)' })
-  async listLegs(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async listLegs(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.listEscalas(id);
   }
 
   @Post(':id/legs')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
-  @ApiOperation({ summary: 'Create a flight leg (tacómetro fields populated later in FASE 3)' })
+  @ApiOperation({
+    summary: 'Create a flight leg (tacómetro fields populated later in FASE 3)',
+  })
   async createLeg(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateEscalaDto,
@@ -342,7 +397,8 @@ export class FlightsController {
   @Patch('legs/:legId/permiso')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @ApiOperation({
-    summary: 'Actualiza el permiso de pista de un tramo (Admin/Coord. o el piloto asignado al tramo)',
+    summary:
+      'Actualiza el permiso de pista de un tramo (Admin/Coord. o el piloto asignado al tramo)',
   })
   async updateLegPermiso(
     @Param('legId', ParseUUIDPipe) legId: string,
@@ -358,7 +414,10 @@ export class FlightsController {
 
   @Patch('legs/:legId')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
-  @ApiOperation({ summary: 'Update leg metadata (route/orden/horas). Tacómetro endpoints en FASE 3.' })
+  @ApiOperation({
+    summary:
+      'Update leg metadata (route/orden/horas). Tacómetro endpoints en FASE 3.',
+  })
   async updateLeg(
     @Param('legId', ParseUUIDPipe) legId: string,
     @Body() dto: UpdateEscalaDto,
@@ -450,7 +509,10 @@ export class FlightsController {
 
   @Get(':id/payments')
   @ApiOperation({ summary: 'List payments registered for the flight' })
-  async listPayments(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  async listPayments(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     await this.flights.assertAccess(id, c);
     return this.flights.listCobros(id);
   }
@@ -497,7 +559,8 @@ export class FlightsController {
   @Delete('cobros/:cobroId')
   @Roles(Rol.ADMIN, Rol.FACTURACION)
   @ApiOperation({
-    summary: 'Elimina un cobro capturado por error (oficina). Recalcula la bandera cobrado.',
+    summary:
+      'Elimina un cobro capturado por error (oficina). Recalcula la bandera cobrado.',
   })
   deletePayment(
     @Param('cobroId', ParseUUIDPipe) cobroId: string,
@@ -520,7 +583,10 @@ export class FlightsController {
   @Post('cobro-voucher-urls')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Firma URLs de vouchers de cobro (bucket privado) para el panel admin.' })
+  @ApiOperation({
+    summary:
+      'Firma URLs de vouchers de cobro (bucket privado) para el panel admin.',
+  })
   cobroVoucherUrls(@Body() dto: VoucherUrlsDto) {
     return this.flights.signCobroVouchers(dto.paths);
   }
