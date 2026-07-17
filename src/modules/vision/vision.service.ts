@@ -39,6 +39,8 @@ export interface GastoTicketVisionInput {
 
 export interface GastoTicketVisionResult {
   monto: number | null;
+  /** Propina si el ticket la muestra como línea (el monto ya la incluye). */
+  propina?: number | null;
   moneda: 'MXN' | 'USD' | null;
   fecha: string | null;
   proveedor: string | null;
@@ -122,17 +124,22 @@ export class VisionService implements OnModuleInit {
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 
   onModuleInit() {
-    this.baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    this.baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     this.token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     // La visión con Opus puede tomar 20-40s por foto: el timeout nunca baja
     // de 90s aunque PYSERVICES_TIMEOUT_MS sea menor (cortarla a 30s hacía que
     // la app mostrara "la IA no pudo leer" con el modelo grande).
     this.timeoutMs = Math.max(
-      Number(this.config.get('PYSERVICES_TIMEOUT_MS', { infer: true })) || 30000,
+      Number(this.config.get('PYSERVICES_TIMEOUT_MS', { infer: true })) ||
+        30000,
       90000,
     );
     if (!this.baseUrl || !this.token) {
-      this.logger.log('Visión IA deshabilitada (PYSERVICES_BASE_URL/INTERNAL_SHARED_TOKEN vacíos)');
+      this.logger.log(
+        'Visión IA deshabilitada (PYSERVICES_BASE_URL/INTERNAL_SHARED_TOKEN vacíos)',
+      );
       return;
     }
     this.logger.log(`Visión IA activa · pyservices: ${this.baseUrl}`);
@@ -204,7 +211,9 @@ export class VisionService implements OnModuleInit {
     }
   }
 
-  async readTacometro(input: TacometroVisionInput): Promise<TacometroVisionResult | null> {
+  async readTacometro(
+    input: TacometroVisionInput,
+  ): Promise<TacometroVisionResult | null> {
     if (!this.enabled) return null;
     if (!input.imageBase64 && !input.imageUrl) {
       this.logger.warn('readTacometro sin imagen (ni base64 ni url)');
@@ -271,7 +280,9 @@ export class VisionService implements OnModuleInit {
     const controller = new AbortController();
     // Multi-página/PDF tarda más que una foto: margen extra sobre el timeout base.
     const esDocumento =
-      (input.images?.length ?? 0) > 1 || !!input.pdfBase64 || !!input.excelBase64;
+      (input.images?.length ?? 0) > 1 ||
+      !!input.pdfBase64 ||
+      !!input.excelBase64;
     const timer = setTimeout(
       () => controller.abort(),
       esDocumento ? Math.max(this.timeoutMs, 150_000) : this.timeoutMs,
@@ -421,7 +432,9 @@ export class VisionService implements OnModuleInit {
         signal: controller.signal,
       });
       if (!res.ok) {
-        this.logger.warn(`pyservices /vision/combustible respondió ${res.status}`);
+        this.logger.warn(
+          `pyservices /vision/combustible respondió ${res.status}`,
+        );
         return null;
       }
       return (await res.json()) as CombustibleTicketVisionResult;

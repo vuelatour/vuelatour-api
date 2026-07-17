@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  InternalServerErrorException,
   Logger,
   NotFoundException,
   ServiceUnavailableException,
@@ -68,10 +69,14 @@ export class ConciliacionService {
 
   /** Parsea el estado de cuenta en pyservices (sin persistir). */
   async parse(dto: ConciliacionParseDto): Promise<ParsedStatement> {
-    const baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     if (!baseUrl || !token) {
-      throw new ServiceUnavailableException('Conciliación no configurada (pyservices).');
+      throw new ServiceUnavailableException(
+        'Conciliación no configurada (pyservices).',
+      );
     }
     const controller = new AbortController();
     // Un PDF con cientos de movimientos tarda varios minutos en extraerse con
@@ -81,8 +86,14 @@ export class ConciliacionService {
     try {
       const res = await fetch(`${baseUrl}/conciliacion/parse`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
-        body: JSON.stringify({ filename: dto.filename, file_base64: dto.file_base64 }),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': token,
+        },
+        body: JSON.stringify({
+          filename: dto.filename,
+          file_base64: dto.file_base64,
+        }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -96,7 +107,9 @@ export class ConciliacionService {
       if (err instanceof ServiceUnavailableException) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`parse estado de cuenta falló: ${msg}`);
-      throw new ServiceUnavailableException(`No se pudo parsear el estado de cuenta: ${msg}`);
+      throw new ServiceUnavailableException(
+        `No se pudo parsear el estado de cuenta: ${msg}`,
+      );
     } finally {
       clearTimeout(timer);
     }
@@ -104,7 +117,7 @@ export class ConciliacionService {
 
   /** Persiste los movimientos y auto-concilia los CARGO con gastos del mismo monto/fecha. */
   async importar(dto: ImportarMovimientosDto, userId: string) {
-    const rows = dto.movimientos
+    const base = dto.movimientos
       .filter((m) => m.fecha)
       .map((m) => ({
         cuenta_bancaria_id: dto.cuenta_bancaria_id,
@@ -117,9 +130,17 @@ export class ConciliacionService {
         created_by: userId,
         updated_by: userId,
       }));
-    if (rows.length === 0) {
-      throw new BadRequestException('No hay movimientos con fecha para importar.');
+    if (base.length === 0) {
+      throw new BadRequestException(
+        'No hay movimientos con fecha para importar.',
+      );
     }
+
+    // El archivo original se archiva DESPUÉS de validar y ANTES de insertar:
+    // cada movimiento queda ligado a su estado de cuenta, y una importación
+    // vacía no deja archivos fantasma en el listado.
+    const estadoCuentaId = await this.archivarEstadoCuenta(dto, userId);
+    const rows = base.map((r) => ({ ...r, estado_cuenta_id: estadoCuentaId }));
 
     const { data: inserted, error } = await this.supabase.service
       .from('movimiento_bancario')
@@ -137,15 +158,103 @@ export class ConciliacionService {
 
     let conciliadosAuto = 0;
     for (const mov of inserted ?? []) {
-      const m = mov as { id: string; fecha: string; monto: number; tipo: string };
+      const m = mov;
       const matched =
         m.tipo === TipoMovimientoBancario.CARGO
           ? await this.autoMatch(m.id, m.monto, m.fecha, monedaCuenta, userId)
-          : await this.autoMatchAbono(m.id, m.monto, m.fecha, monedaCuenta, userId);
+          : await this.autoMatchAbono(
+              m.id,
+              m.monto,
+              m.fecha,
+              monedaCuenta,
+              userId,
+            );
       if (matched) conciliadosAuto += 1;
     }
 
+    if (estadoCuentaId) {
+      await this.supabase.service
+        .from('estado_cuenta_archivo')
+        .update({ movimientos_importados: rows.length })
+        .eq('id', estadoCuentaId);
+    }
+
     return { importados: rows.length, conciliados_auto: conciliadosAuto };
+  }
+
+  /**
+   * Guarda el archivo original del estado de cuenta en el bucket privado
+   * `estados-cuenta` y registra la importación. Sin archivo (panel viejo) la
+   * importación sigue funcionando; CON archivo, un fallo al archivar tumba
+   * la importación a propósito (fail-loud): importar sin respaldo en
+   * silencio dejaría la auditoría incompleta, y como aún no se insertó
+   * ningún movimiento, reintentar es seguro.
+   */
+  private async archivarEstadoCuenta(
+    dto: ImportarMovimientosDto,
+    userId: string,
+  ): Promise<string | null> {
+    if (!dto.file_base64 || !dto.filename) return null;
+    const limpio = dto.filename.replace(/[^\w.-]+/g, '_').slice(-120);
+    const path = `${dto.cuenta_bancaria_id}/${Date.now()}-${limpio}`;
+    const { error: upErr } = await this.supabase.service.storage
+      .from('estados-cuenta')
+      .upload(path, Buffer.from(dto.file_base64, 'base64'), {
+        contentType: 'application/octet-stream',
+      });
+    if (upErr) {
+      throw new InternalServerErrorException(
+        `No se pudo archivar el estado de cuenta (${upErr.message}). Reintenta la importación.`,
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('estado_cuenta_archivo')
+      .insert({
+        cuenta_bancaria_id: dto.cuenta_bancaria_id,
+        filename: dto.filename,
+        storage_path: path,
+        formato: limpio.split('.').pop()?.toLowerCase() ?? null,
+        created_by: userId,
+      })
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data?.id as string) ?? null;
+  }
+
+  /** Estados de cuenta importados (para consultarlos/descargarlos después). */
+  async listEstadosCuenta(cuentaBancariaId?: string) {
+    let q = this.supabase.service
+      .from('estado_cuenta_archivo')
+      .select(
+        'id, cuenta_bancaria_id, filename, formato, movimientos_importados, created_at, cuenta:cuenta_bancaria(banco, alias, moneda)',
+      )
+      .order('created_at', { ascending: false })
+      .limit(100);
+    if (cuentaBancariaId) q = q.eq('cuenta_bancaria_id', cuentaBancariaId);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    return { data: data ?? [] };
+  }
+
+  /** URL firmada (1 h) para descargar un estado de cuenta archivado. */
+  async estadoCuentaUrl(id: string) {
+    const { data, error } = await this.supabase.service
+      .from('estado_cuenta_archivo')
+      .select('storage_path, filename')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Estado de cuenta ${id} not found`);
+    const { data: signed, error: signErr } = await this.supabase.service.storage
+      .from('estados-cuenta')
+      .createSignedUrl(data.storage_path as string, 3600, {
+        download: data.filename as string,
+      });
+    if (signErr || !signed?.signedUrl) {
+      throw new Error(signErr?.message ?? 'No se pudo firmar la URL');
+    }
+    return { url: signed.signedUrl, filename: data.filename as string };
   }
 
   private async monedaCuenta(cuentaId: string): Promise<string | null> {
@@ -186,7 +295,7 @@ export class ConciliacionService {
     const { data, error } = await q;
     if (error || !data || data.length !== 1) return false;
 
-    const gastoId = (data[0] as { id: string }).id;
+    const gastoId = data[0].id;
     await this.link(movId, gastoId, userId);
     return true;
   }
@@ -233,9 +342,13 @@ export class ConciliacionService {
       if (comision > 0) return r2(bruto - comision) === r2(monto);
       return r2(bruto) === r2(monto);
     };
-    const candidatos = (data as Array<{ id: string; monto: unknown; comision_banco_monto: unknown }>).filter(
-      matchea,
-    );
+    const candidatos = (
+      data as Array<{
+        id: string;
+        monto: unknown;
+        comision_banco_monto: unknown;
+      }>
+    ).filter(matchea);
     if (candidatos.length === 0) return false;
 
     // Descarta cobros ya enlazados a otro movimiento; exige candidato único.
@@ -244,7 +357,9 @@ export class ConciliacionService {
       .from('movimiento_bancario')
       .select('cobro_id')
       .in('cobro_id', ids);
-    const ocupados = new Set((yaEnlazados ?? []).map((m) => m.cobro_id as string));
+    const ocupados = new Set(
+      (yaEnlazados ?? []).map((m) => m.cobro_id as string),
+    );
     const libres = ids.filter((id) => !ocupados.has(id));
     if (libres.length !== 1) return false;
 
@@ -266,14 +381,17 @@ export class ConciliacionService {
       .from('movimiento_bancario')
       .update({
         cobro_id: cobroId,
-        conciliado: cobroId !== null || (mov as { gasto_id: string | null }).gasto_id !== null,
+        conciliado:
+          cobroId !== null ||
+          (mov as { gasto_id: string | null }).gasto_id !== null,
         updated_by: userId,
       })
       .eq('id', movId)
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23503') throw new BadRequestException('Cobro no encontrado.');
+      if (error.code === '23503')
+        throw new BadRequestException('Cobro no encontrado.');
       throw new Error(error.message);
     }
     return data!;
@@ -297,17 +415,29 @@ export class ConciliacionService {
       .from('cuenta_bancaria')
       .select('id, alias, banco, moneda');
     const cuentaInfo = new Map(
-      (cuentas ?? []).map((c) => [c.id as string, c as Record<string, unknown>]),
+      (cuentas ?? []).map((c) => [
+        c.id as string,
+        c as Record<string, unknown>,
+      ]),
     );
 
     const porCuenta = new Map<
       string,
-      { total: number; conciliados: number; pendientes: number; monto_pendiente: number }
+      {
+        total: number;
+        conciliados: number;
+        pendientes: number;
+        monto_pendiente: number;
+      }
     >();
     for (const m of (data ?? []) as Array<Record<string, unknown>>) {
       const key = m.cuenta_bancaria_id as string;
-      const cur =
-        porCuenta.get(key) ?? { total: 0, conciliados: 0, pendientes: 0, monto_pendiente: 0 };
+      const cur = porCuenta.get(key) ?? {
+        total: 0,
+        conciliados: 0,
+        pendientes: 0,
+        monto_pendiente: 0,
+      };
       cur.total += 1;
       if (m.conciliado === true) cur.conciliados += 1;
       else {
@@ -344,12 +474,19 @@ export class ConciliacionService {
       .order('fecha', { ascending: false })
       .order('created_at', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
-    if (filters.cuenta_bancaria_id) q = q.eq('cuenta_bancaria_id', filters.cuenta_bancaria_id);
-    if (typeof filters.conciliado === 'boolean') q = q.eq('conciliado', filters.conciliado);
+    if (filters.cuenta_bancaria_id)
+      q = q.eq('cuenta_bancaria_id', filters.cuenta_bancaria_id);
+    if (typeof filters.conciliado === 'boolean')
+      q = q.eq('conciliado', filters.conciliado);
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
-    return { data: data ?? [], count: count ?? 0, limit: filters.limit, offset: filters.offset };
+    return {
+      data: data ?? [],
+      count: count ?? 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    };
   }
 
   /** Vincula (o desvincula si gastoId es null) un movimiento con un gasto. */
@@ -382,7 +519,8 @@ export class ConciliacionService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23503') throw new BadRequestException('Gasto no encontrado.');
+      if (error.code === '23503')
+        throw new BadRequestException('Gasto no encontrado.');
       throw new Error(error.message);
     }
 
@@ -411,14 +549,7 @@ export class ConciliacionService {
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
-    const m = mov as {
-      id: string;
-      fecha: string;
-      monto: number;
-      descripcion: string | null;
-      conciliado: boolean;
-      cuenta_bancaria_id: string;
-    };
+    const m = mov;
     if (m.conciliado) {
       throw new BadRequestException('El movimiento ya está conciliado.');
     }
@@ -430,12 +561,15 @@ export class ConciliacionService {
         disponible: true,
         gasto_id_sugerido: null,
         confianza: 0,
-        razon: 'No hay gastos candidatos cercanos (±3 días y ±5% de monto) sin conciliar.',
+        razon:
+          'No hay gastos candidatos cercanos (±3 días y ±5% de monto) sin conciliar.',
         candidatos,
       };
     }
 
-    const baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     if (!baseUrl || !token) {
       return {
@@ -452,15 +586,24 @@ export class ConciliacionService {
     try {
       const res = await fetch(`${baseUrl}/conciliacion/sugerir`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': token,
+        },
         body: JSON.stringify({
-          movimiento: { fecha: m.fecha, monto: m.monto, descripcion: m.descripcion },
+          movimiento: {
+            fecha: m.fecha,
+            monto: m.monto,
+            descripcion: m.descripcion,
+          },
           candidatos,
         }),
         signal: controller.signal,
       });
       if (!res.ok) {
-        this.logger.warn(`pyservices /conciliacion/sugerir respondió ${res.status}`);
+        this.logger.warn(
+          `pyservices /conciliacion/sugerir respondió ${res.status}`,
+        );
         return {
           disponible: false,
           gasto_id_sugerido: null,
@@ -519,7 +662,9 @@ export class ConciliacionService {
 
     let query = this.supabase.service
       .from('gasto')
-      .select('id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)')
+      .select(
+        'id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)',
+      )
       .eq('conciliado', false)
       // Solo medios que tocan el banco (misma regla que autoMatch).
       .in('medio_pago', MEDIOS_BANCARIOS)
@@ -539,7 +684,9 @@ export class ConciliacionService {
         monto: number;
         proveedor: { nombre: string } | { nombre: string }[] | null;
       };
-      const prov = Array.isArray(row.proveedor) ? row.proveedor[0] : row.proveedor;
+      const prov = Array.isArray(row.proveedor)
+        ? row.proveedor[0]
+        : row.proveedor;
       return {
         id: row.id,
         fecha: row.fecha_gasto,

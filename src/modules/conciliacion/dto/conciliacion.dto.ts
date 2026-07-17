@@ -23,7 +23,9 @@ export enum TipoMovimientoBancario {
 }
 
 export class ConciliacionParseDto {
-  @ApiProperty({ description: 'Nombre del archivo (define el parser por extensión)' })
+  @ApiProperty({
+    description: 'Nombre del archivo (define el parser por extensión)',
+  })
   @IsString()
   filename!: string;
 
@@ -60,7 +62,9 @@ export class MovimientoImportDto {
 }
 
 export class ImportarMovimientosDto {
-  @ApiProperty({ description: 'Cuenta bancaria a la que pertenece el estado de cuenta' })
+  @ApiProperty({
+    description: 'Cuenta bancaria a la que pertenece el estado de cuenta',
+  })
   @IsUUID()
   cuenta_bancaria_id!: string;
 
@@ -69,6 +73,22 @@ export class ImportarMovimientosDto {
   @ValidateNested({ each: true })
   @Type(() => MovimientoImportDto)
   movimientos!: MovimientoImportDto[];
+
+  // Archivo original del estado de cuenta: se archiva en el bucket privado
+  // estados-cuenta para poder consultarlo/descargarlo después (auditoría).
+  @ApiPropertyOptional({ description: 'Nombre del archivo importado' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  filename?: string;
+
+  @ApiPropertyOptional({
+    description: 'Archivo del estado de cuenta en base64',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(16_000_000)
+  file_base64?: string;
 }
 
 export class ListConciliacionQuery {
@@ -100,14 +120,20 @@ export class ListConciliacionQuery {
 }
 
 export class LinkMovimientoDto {
-  @ApiPropertyOptional({ description: 'Gasto a vincular. null para desvincular.', nullable: true })
+  @ApiPropertyOptional({
+    description: 'Gasto a vincular. null para desvincular.',
+    nullable: true,
+  })
   @IsOptional()
   @IsUUID()
   gasto_id?: string | null;
 }
 
 export class LinkMovimientoCobroDto {
-  @ApiPropertyOptional({ description: 'Cobro de vuelo a vincular. null para desvincular.', nullable: true })
+  @ApiPropertyOptional({
+    description: 'Cobro de vuelo a vincular. null para desvincular.',
+    nullable: true,
+  })
   @IsOptional()
   @IsUUID()
   cobro_id?: string | null;

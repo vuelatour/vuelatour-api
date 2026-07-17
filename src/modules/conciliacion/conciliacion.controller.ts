@@ -33,19 +33,44 @@ export class ConciliacionController {
 
   @Post('parse')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Parsea un estado de cuenta (CSV/Excel/PDF) sin persistir' })
+  @ApiOperation({
+    summary: 'Parsea un estado de cuenta (CSV/Excel/PDF) sin persistir',
+  })
   parse(@Body() dto: ConciliacionParseDto) {
     return this.conciliacion.parse(dto);
   }
 
   @Post('importar')
-  @ApiOperation({ summary: 'Importa movimientos y auto-concilia los CARGO contra gastos' })
-  importar(@Body() dto: ImportarMovimientosDto, @CurrentUser() c: AuthenticatedUser) {
+  @ApiOperation({
+    summary: 'Importa movimientos y auto-concilia los CARGO contra gastos',
+  })
+  importar(
+    @Body() dto: ImportarMovimientosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.conciliacion.importar(dto, c.userId);
   }
 
+  @Get('estados-cuenta')
+  @ApiOperation({
+    summary: 'Estados de cuenta importados (archivo original archivado)',
+  })
+  estadosCuenta(@Query('cuenta_bancaria_id') cuentaBancariaId?: string) {
+    return this.conciliacion.listEstadosCuenta(cuentaBancariaId || undefined);
+  }
+
+  @Post('estados-cuenta/:id/url')
+  @ApiOperation({
+    summary: 'URL firmada (1 h) para descargar el archivo importado',
+  })
+  estadoCuentaUrl(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.estadoCuentaUrl(id);
+  }
+
   @Get('movimientos')
-  @ApiOperation({ summary: 'Lista movimientos bancarios con su gasto conciliado' })
+  @ApiOperation({
+    summary: 'Lista movimientos bancarios con su gasto conciliado',
+  })
   list(@Query() q: ListConciliacionQuery) {
     return this.conciliacion.list(q);
   }
@@ -71,7 +96,8 @@ export class ConciliacionController {
 
   @Patch('movimientos/:id/cobro')
   @ApiOperation({
-    summary: 'Vincula o desvincula un ABONO con un cobro de vuelo (conciliación de ingresos)',
+    summary:
+      'Vincula o desvincula un ABONO con un cobro de vuelo (conciliación de ingresos)',
   })
   linkCobro(
     @Param('id', ParseUUIDPipe) id: string,

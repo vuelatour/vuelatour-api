@@ -74,11 +74,24 @@ export class CreateGastoDto {
   @Min(0)
   monto!: number;
 
+  @ApiPropertyOptional({
+    description:
+      'Propina incluida en monto (monto = ticket + propina; monto es lo que llega al banco).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  propina?: number;
+
   @ApiProperty({ enum: Moneda })
   @IsEnum(Moneda)
   moneda!: Moneda;
 
-  @ApiPropertyOptional({ description: 'Tipo de cambio MXN/USD si el gasto es en moneda distinta a USD' })
+  @ApiPropertyOptional({
+    description:
+      'Tipo de cambio MXN/USD si el gasto es en moneda distinta a USD',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 4 })
@@ -104,13 +117,16 @@ export class CreateGastoDto {
   vuelo_id?: string;
 
   @ApiPropertyOptional({
-    description: 'Escala/aterrizaje asociado (gastos de pista: un gasto por aterrizaje)',
+    description:
+      'Escala/aterrizaje asociado (gastos de pista: un gasto por aterrizaje)',
   })
   @IsOptional()
   @IsUUID()
   escala_id?: string;
 
-  @ApiPropertyOptional({ description: 'Aeronave (opcional). null = bandeja de pendientes' })
+  @ApiPropertyOptional({
+    description: 'Aeronave (opcional). null = bandeja de pendientes',
+  })
   @IsOptional()
   @IsUUID()
   aeronave_id?: string;
@@ -147,12 +163,16 @@ export class CreateGastoDto {
   @IsString()
   lugar?: string;
 
-  @ApiPropertyOptional({ description: 'Momento preciso de la carga (ISO); permite sugerir el vuelo' })
+  @ApiPropertyOptional({
+    description: 'Momento preciso de la carga (ISO); permite sugerir el vuelo',
+  })
   @IsOptional()
   @IsDateString()
   fecha_hora_carga?: string;
 
-  @ApiPropertyOptional({ description: 'Valores extraídos por IA antes de confirmación' })
+  @ApiPropertyOptional({
+    description: 'Valores extraídos por IA antes de confirmación',
+  })
   @IsOptional()
   @IsObject()
   valor_ia_extraido?: Record<string, unknown>;
@@ -188,7 +208,9 @@ export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   @IsBoolean()
   conciliado?: boolean;
 
-  @ApiPropertyOptional({ description: 'Bandera de posible duplicado (la oficina la descarta).' })
+  @ApiPropertyOptional({
+    description: 'Bandera de posible duplicado (la oficina la descarta).',
+  })
   @IsOptional()
   @IsBoolean()
   duplicado_sospechado?: boolean;
@@ -207,7 +229,9 @@ export class PistasPendientesQuery {
 }
 
 export class GenerarPistaItemDto {
-  @ApiProperty({ description: 'Escala (aterrizaje) a la que corresponde la cuota' })
+  @ApiProperty({
+    description: 'Escala (aterrizaje) a la que corresponde la cuota',
+  })
   @IsUUID()
   escala_id!: string;
 
@@ -222,7 +246,10 @@ export class GenerarPistaItemDto {
   @IsEnum(Moneda)
   moneda?: Moneda;
 
-  @ApiPropertyOptional({ enum: CategoriaGasto, default: CategoriaGasto.OPERACIONES })
+  @ApiPropertyOptional({
+    enum: CategoriaGasto,
+    default: CategoriaGasto.OPERACIONES,
+  })
   @IsOptional()
   @IsEnum(CategoriaGasto)
   categoria?: CategoriaGasto;
@@ -253,13 +280,18 @@ export class GenerarPistasDto {
 }
 
 export class CreateTarifaAerodromoDto {
-  @ApiPropertyOptional({ description: 'IATA del aeródromo; vacío = cualquiera' })
+  @ApiPropertyOptional({
+    description: 'IATA del aeródromo; vacío = cualquiera',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(8)
   codigo_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Modelo de aeronave (Kodiak/Cessna/Seneca); vacío = cualquiera' })
+  @ApiPropertyOptional({
+    description:
+      'Modelo de aeronave (Kodiak/Cessna/Seneca); vacío = cualquiera',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(80)
@@ -276,7 +308,9 @@ export class CreateTarifaAerodromoDto {
   @IsEnum(Moneda)
   moneda?: Moneda;
 
-  @ApiPropertyOptional({ description: 'Tarifa variable (p.ej. PCE): el monto es estimado' })
+  @ApiPropertyOptional({
+    description: 'Tarifa variable (p.ej. PCE): el monto es estimado',
+  })
   @IsOptional()
   @IsBoolean()
   variable?: boolean;
@@ -292,10 +326,15 @@ export class CreateTarifaAerodromoDto {
   notas?: string;
 }
 
-export class UpdateTarifaAerodromoDto extends PartialType(CreateTarifaAerodromoDto) {}
+export class UpdateTarifaAerodromoDto extends PartialType(
+  CreateTarifaAerodromoDto,
+) {}
 
 export class PhotoUrlsDto {
-  @ApiProperty({ type: [String], description: 'Paths de fotos en gasto-fotos a firmar' })
+  @ApiProperty({
+    type: [String],
+    description: 'Paths de fotos en gasto-fotos a firmar',
+  })
   @IsString({ each: true })
   paths!: string[];
 }
@@ -341,13 +380,17 @@ export class ListGastosQuery {
   @IsDateString()
   hasta?: string;
 
-  @ApiPropertyOptional({ description: 'Solo gastos sin avión asignado (bandeja de pendientes).' })
+  @ApiPropertyOptional({
+    description: 'Solo gastos sin avión asignado (bandeja de pendientes).',
+  })
   @IsOptional()
   @Type(() => Boolean)
   @IsBoolean()
   pendientes?: boolean;
 
-  @ApiPropertyOptional({ description: 'Solo gastos marcados como posible duplicado.' })
+  @ApiPropertyOptional({
+    description: 'Solo gastos marcados como posible duplicado.',
+  })
   @IsOptional()
   @Type(() => Boolean)
   @IsBoolean()

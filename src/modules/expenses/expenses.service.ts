@@ -25,7 +25,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
@@ -91,9 +91,11 @@ export class ExpensesService {
 
     if (filters.vuelo_id) q = q.eq('vuelo_id', filters.vuelo_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
-    if (filters.usuario_captura_id) q = q.eq('usuario_captura_id', filters.usuario_captura_id);
+    if (filters.usuario_captura_id)
+      q = q.eq('usuario_captura_id', filters.usuario_captura_id);
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
-    if (filters.estatus_comprobante) q = q.eq('estatus_comprobante', filters.estatus_comprobante);
+    if (filters.estatus_comprobante)
+      q = q.eq('estatus_comprobante', filters.estatus_comprobante);
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
@@ -146,7 +148,9 @@ export class ExpensesService {
       candidatos: [] as Array<Record<string, unknown>>,
     });
     if (!fecha || !capturo) {
-      return sinMatch('El gasto no tiene fecha o capturista para buscar vuelos.');
+      return sinMatch(
+        'El gasto no tiene fecha o capturista para buscar vuelos.',
+      );
     }
 
     // Vuelos propios no cancelados en ±3 días de la fecha del gasto.
@@ -166,7 +170,8 @@ export class ExpensesService {
 
     const participo = (v: Record<string, unknown>): boolean => {
       if (v.piloto_id === capturo || v.copiloto_id === capturo) return true;
-      const escalas = (v.escalas as Array<Record<string, unknown>> | null) ?? [];
+      const escalas =
+        (v.escalas as Array<Record<string, unknown>> | null) ?? [];
       return escalas.some((e) => e.piloto_id === capturo);
     };
     const rutaDe = (v: Record<string, unknown>): string | null => {
@@ -180,7 +185,10 @@ export class ExpensesService {
       ].join(' → ');
     };
     const matriculaDe = (v: Record<string, unknown>): string | null => {
-      const a = v.aeronave as { matricula?: string } | { matricula?: string }[] | null;
+      const a = v.aeronave as
+        | { matricula?: string }
+        | { matricula?: string }[]
+        | null;
       if (Array.isArray(a)) return a[0]?.matricula ?? null;
       return a?.matricula ?? null;
     };
@@ -205,11 +213,13 @@ export class ExpensesService {
     // Regla fuerte: exactamente UN vuelo del capturista el MISMO día (Cancún).
     const diaCancun = (iso: string | null) =>
       iso
-        ? new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
-            new Date(iso),
-          )
+        ? new Intl.DateTimeFormat('en-CA', {
+            timeZone: 'America/Cancun',
+          }).format(new Date(iso))
         : null;
-    const mismoDia = candidatos.filter((c) => diaCancun(c.fecha_vuelo) === fecha);
+    const mismoDia = candidatos.filter(
+      (c) => diaCancun(c.fecha_vuelo) === fecha,
+    );
     if (mismoDia.length === 1) {
       return {
         sugerido: mismoDia[0],
@@ -254,11 +264,14 @@ export class ExpensesService {
         candidatos,
       };
     }
-    const pick = candidatos.find((c) => c.vuelo_id === ia.vuelo_id_sugerido) ?? null;
+    const pick =
+      candidatos.find((c) => c.vuelo_id === ia.vuelo_id_sugerido) ?? null;
     return {
       sugerido: pick,
       confianza: pick ? ia.confianza : 0,
-      razon: ia.razon || (pick ? 'Match propuesto por IA.' : 'Sin coincidencias claras.'),
+      razon:
+        ia.razon ||
+        (pick ? 'Match propuesto por IA.' : 'Sin coincidencias claras.'),
       fuente: 'ia' as const,
       candidatos,
     };
@@ -284,7 +297,10 @@ export class ExpensesService {
     const pendientes = (data ?? []) as Array<Record<string, unknown>>;
 
     const resumen = (g: Record<string, unknown>) => {
-      const cap = g.captura as { nombre?: string } | { nombre?: string }[] | null;
+      const cap = g.captura as
+        | { nombre?: string }
+        | { nombre?: string }[]
+        | null;
       const nombre = Array.isArray(cap) ? cap[0]?.nombre : cap?.nombre;
       return {
         id: g.id as string,
@@ -394,11 +410,16 @@ export class ExpensesService {
     const { data: existentes, error: gErr } = await this.supabase.service
       .from('gasto')
       .select('escala_id, categoria')
-      .in('escala_id', filas.map((e) => e.id));
+      .in(
+        'escala_id',
+        filas.map((e) => e.id),
+      );
     if (gErr) throw new Error(gErr.message);
     const conGasto = new Set(
       (existentes ?? [])
-        .filter((g) => g.categoria === 'OPERACIONES' || g.categoria === 'ATERRIZAJE')
+        .filter(
+          (g) => g.categoria === 'OPERACIONES' || g.categoria === 'ATERRIZAJE',
+        )
         .map((g) => g.escala_id as string),
     );
 
@@ -408,7 +429,11 @@ export class ExpensesService {
       .filter((e) => !conGasto.has(e.id))
       .map((e) => {
         const aeronave = e.aeronave ?? e.vuelo?.aeronave ?? null;
-        const tarifa = this.matchTarifa(tarifas, e.destino_iata, aeronave?.modelo);
+        const tarifa = this.matchTarifa(
+          tarifas,
+          e.destino_iata,
+          aeronave?.modelo,
+        );
         const fechaIso = e.hora_llegada ?? e.fecha_salida_plan;
         return {
           escala_id: e.id,
@@ -479,7 +504,11 @@ export class ExpensesService {
         .eq('id', item.escala_id)
         .maybeSingle();
       if (!esc) {
-        resultados.push({ escala_id: item.escala_id, ok: false, error: 'Escala no encontrada' });
+        resultados.push({
+          escala_id: item.escala_id,
+          ok: false,
+          error: 'Escala no encontrada',
+        });
         continue;
       }
       const categoria = item.categoria ?? 'OPERACIONES';
@@ -497,8 +526,12 @@ export class ExpensesService {
         });
         continue;
       }
-      const vuelo = esc.vuelo as unknown as { aeronave_id: string | null } | null;
-      const fechaIso = (esc.hora_llegada ?? esc.fecha_salida_plan) as string | null;
+      const vuelo = esc.vuelo as unknown as {
+        aeronave_id: string | null;
+      } | null;
+      const fechaIso = (esc.hora_llegada ?? esc.fecha_salida_plan) as
+        | string
+        | null;
       const { data: gasto, error } = await this.supabase.service
         .from('gasto')
         .insert({
@@ -513,11 +546,13 @@ export class ExpensesService {
           medio_pago: item.medio_pago ?? 'TRANSFERENCIA',
           vuelo_id: esc.vuelo_id,
           escala_id: esc.id,
-          aeronave_id: (esc.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null,
+          aeronave_id:
+            (esc.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null,
           proveedor_id: item.proveedor_id ?? prov?.id ?? null,
           lugar: esc.destino_iata,
           estatus_comprobante: 'SIN_COMPROBANTE',
-          notas: item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
+          notas:
+            item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
           created_by: userId,
           updated_by: userId,
         })
@@ -531,7 +566,11 @@ export class ExpensesService {
         });
         continue;
       }
-      resultados.push({ escala_id: item.escala_id, ok: true, gasto_id: gasto.id as string });
+      resultados.push({
+        escala_id: item.escala_id,
+        ok: true,
+        gasto_id: gasto.id as string,
+      });
     }
     return { creados: resultados.filter((r) => r.ok).length, resultados };
   }
@@ -566,18 +605,25 @@ export class ExpensesService {
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
-        throw new ConflictException('Ya existe una tarifa para ese aeródromo/modelo.');
+        throw new ConflictException(
+          'Ya existe una tarifa para ese aeródromo/modelo.',
+        );
       throw new Error(error.message);
     }
     return data!;
   }
 
-  async updateTarifaAerodromo(id: string, dto: UpdateTarifaAerodromoDto, userId: string) {
+  async updateTarifaAerodromo(
+    id: string,
+    dto: UpdateTarifaAerodromoDto,
+    userId: string,
+  ) {
     const patch: Record<string, unknown> = {
       updated_by: userId,
       updated_at: new Date().toISOString(),
     };
-    if (dto.codigo_iata !== undefined) patch.codigo_iata = dto.codigo_iata?.toUpperCase() || null;
+    if (dto.codigo_iata !== undefined)
+      patch.codigo_iata = dto.codigo_iata?.toUpperCase() || null;
     if (dto.modelo !== undefined) patch.modelo = dto.modelo || null;
     if (dto.monto !== undefined) patch.monto = dto.monto;
     if (dto.moneda !== undefined) patch.moneda = dto.moneda;
@@ -634,7 +680,9 @@ export class ExpensesService {
     const esTua = (c: string) => /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c);
     const hayIva = conceptos.some((c) => /\biva\b/i.test(c.concepto));
     const r2 = (n: number) => Math.round(n * 100) / 100;
-    const fbo = conceptos.filter((c) => esFbo(c.concepto)).reduce((a, c) => a + c.monto, 0);
+    const fbo = conceptos
+      .filter((c) => esFbo(c.concepto))
+      .reduce((a, c) => a + c.monto, 0);
     const tua = conceptos
       .filter((c) => esTua(c.concepto) && !esFbo(c.concepto))
       .reduce((a, c) => a + c.monto, 0);
@@ -654,13 +702,17 @@ export class ExpensesService {
       const suma = r2(conceptos.reduce((a, c) => a + c.monto, 0));
       if (Math.abs(suma - r2(total)) <= 0.05) return armar(r2(tua), r2(fbo));
     }
-    return conceptos.map((c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`);
+    return conceptos.map(
+      (c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`,
+    );
   }
 
   async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
-      throw new BadRequestException('El mecánico solo puede cargar combustible (GAS).');
+      throw new BadRequestException(
+        'El mecánico solo puede cargar combustible (GAS).',
+      );
     }
     // Un gasto INDIRECTO es de la operación, NO de un vuelo: ligarlo a uno lo
     // metería al reporte/reparto de ese vuelo y contaminaría sus números.
@@ -677,7 +729,10 @@ export class ExpensesService {
       | { conceptos?: Array<{ concepto?: unknown; monto?: unknown }> }
       | undefined;
     const conceptos = (ia?.conceptos ?? [])
-      .map((c) => ({ concepto: String(c.concepto ?? ''), monto: Number(c.monto) }))
+      .map((c) => ({
+        concepto: String(c.concepto ?? ''),
+        monto: Number(c.monto),
+      }))
       .filter((c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0);
     if (conceptos.length >= 2) {
       const lineas = this.desgloseLineas(conceptos, dto.monto, dto.moneda);
@@ -686,7 +741,11 @@ export class ExpensesService {
     }
     // Distintivo pedido por el cliente: quién sube el gasto (piloto vs oficina).
     let origen: string =
-      rol === Rol.PILOTO ? 'PILOTO' : rol === Rol.MECANICO ? 'MECANICO' : 'OFICINA';
+      rol === Rol.PILOTO
+        ? 'PILOTO'
+        : rol === Rol.MECANICO
+          ? 'MECANICO'
+          : 'OFICINA';
     // Backfill de oficina "como si lo hubiera subido el piloto": la oficina
     // carga gastos de vuelos pasados y deben quedar atribuidos al piloto del
     // vuelo (usuario_captura + origen = PILOTO), pero created_by conserva al
@@ -723,11 +782,19 @@ export class ExpensesService {
       aeronaveId =
         dto.aeronave_id ?? (vuelo.aeronave_id as string | null) ?? undefined;
     }
+    // Propina: sub-parte informativa del monto (monto = ticket + propina, es
+    // lo que se concilia contra el banco). Nunca puede exceder el total.
+    if (dto.propina != null && Number(dto.propina) > Number(dto.monto)) {
+      throw new BadRequestException(
+        'La propina no puede ser mayor que el monto total pagado.',
+      );
+    }
     const payload: Record<string, unknown> = {
       usuario_captura_id: capturaId,
       origen,
       categoria: dto.categoria,
       monto: dto.monto,
+      propina: dto.propina ?? 0,
       moneda: dto.moneda,
       tc_gasto: dto.tc_gasto,
       fecha_gasto: dto.fecha_gasto,
@@ -757,7 +824,9 @@ export class ExpensesService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
@@ -783,8 +852,13 @@ export class ExpensesService {
         tipo: 'gasto_registrado',
         titulo: 'Gasto registrado',
         cuerpo: `${dto.categoria} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
-        data: { gasto_id: (data as { id: string }).id, vuelo_id: dto.vuelo_id ?? null },
-        link: dto.vuelo_id ? `/admin/flights/${dto.vuelo_id}` : '/admin/expenses',
+        data: {
+          gasto_id: (data as { id: string }).id,
+          vuelo_id: dto.vuelo_id ?? null,
+        },
+        link: dto.vuelo_id
+          ? `/admin/flights/${dto.vuelo_id}`
+          : '/admin/expenses',
       },
       userId,
     );
@@ -850,8 +924,17 @@ export class ExpensesService {
         `moneda capturada ${gasto.moneda as string}, el ticket está en ${ai.moneda}`,
       );
     }
-    // Total: nunca se toca; diferencia → discrepancia.
-    if (ai.monto != null && Math.abs(Number(gasto.monto) - ai.monto) > 0.01) {
+    // Total: nunca se toca; diferencia → discrepancia. El ticket puede NO
+    // traer la propina impresa (se agrega en la terminal): la lectura IA es
+    // consistente si coincide con el total pagado O con el ticket (monto −
+    // propina) — si no se acepta esa segunda forma, el flujo feliz de
+    // propina dispararía una alerta falsa en cada sync.
+    const montoTicket = Number(gasto.monto) - Number(gasto.propina ?? 0);
+    if (
+      ai.monto != null &&
+      Math.abs(Number(gasto.monto) - ai.monto) > 0.01 &&
+      Math.abs(montoTicket - ai.monto) > 0.01
+    ) {
       discrepancias.push(
         `total capturado $${Number(gasto.monto).toFixed(2)} ${gasto.moneda}, la IA leyó $${ai.monto.toFixed(2)} ${ai.moneda ?? ''}`,
       );
@@ -895,9 +978,13 @@ export class ExpensesService {
     // Notas: bloque IA (desglose con la regla FBO+IVA + proveedor +
     // matrícula), añadido DESPUÉS de lo que el piloto escribió, y las ⚠
     // discrepancias.
+    // El desglose cuadra contra el TICKET (monto − propina): la propina de
+    // terminal no aparece en los renglones impresos.
     const lineas: string[] = this.desgloseLineas(
-      (ai.conceptos ?? []).filter((c) => c.concepto && Number.isFinite(c.monto)),
-      Number(gasto.monto),
+      (ai.conceptos ?? []).filter(
+        (c) => c.concepto && Number.isFinite(c.monto),
+      ),
+      montoTicket,
       (ai.moneda ?? gasto.moneda) as string,
     );
     const extras = [ai.matricula, ai.proveedor, ai.concepto]
@@ -1089,7 +1176,9 @@ export class ExpensesService {
   async assertOwnSameDay(id: string, userId: string): Promise<void> {
     const gasto = await this.findById(id);
     if (gasto.usuario_captura_id !== userId) {
-      throw new ForbiddenException('Solo puedes corregir gastos capturados por ti.');
+      throw new ForbiddenException(
+        'Solo puedes corregir gastos capturados por ti.',
+      );
     }
     if (gasto.conciliado === true) {
       throw new ConflictException(
@@ -1109,15 +1198,31 @@ export class ExpensesService {
 
   async update(id: string, dto: UpdateGastoDto, userId: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
+    // El invariante propina <= monto también vive aquí (el create no basta:
+    // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
+    if (dto.propina !== undefined || dto.monto !== undefined) {
+      const actual = await this.findById(id);
+      const monto = dto.monto ?? Number(actual.monto);
+      const propina = dto.propina ?? Number(actual.propina ?? 0);
+      if (Number(propina) > Number(monto)) {
+        throw new BadRequestException(
+          'La propina no puede ser mayor que el monto total pagado.',
+        );
+      }
+    }
+    // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
+    const { capturar_como_piloto: _cap, leer_con_ia: _ia, ...cols } = dto;
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .update({ ...dto, updated_by: userId })
+      .update({ ...cols, updated_by: userId })
       .eq('id', id)
       .select(COLS)
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referenced entity not found: ${error.message}`);
+        throw new BadRequestException(
+          `Referenced entity not found: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Gasto ${id} not found`);
@@ -1125,7 +1230,10 @@ export class ExpensesService {
   }
 
   async remove(id: string) {
-    const { error } = await this.supabase.service.from('gasto').delete().eq('id', id);
+    const { error } = await this.supabase.service
+      .from('gasto')
+      .delete()
+      .eq('id', id);
     if (error) throw new Error(error.message);
     return { deleted: true, id };
   }
