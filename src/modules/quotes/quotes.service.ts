@@ -1483,6 +1483,11 @@ export class QuotesService {
       const planFields: Record<string, unknown> = {
         origen_iata: e.origen_iata.toUpperCase(),
         destino_iata: e.destino_iata.toUpperCase(),
+        // Mismo aeropuerto = SOBREVUELO por definición (ej. ruta CUN→CUN de
+        // Zona Hotelera): sin la marca, la validación operativa de escalas
+        // rechazaría el tramo.
+        es_sobrevuelo:
+          e.origen_iata.toUpperCase() === e.destino_iata.toUpperCase(),
         millas_nauticas: e.millas_nauticas,
         pasajeros: e.es_ferry ? 0 : e.pasajeros,
         pasajeros_nombres: e.es_ferry ? [] : e.pasajeros_nombres,

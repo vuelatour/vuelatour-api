@@ -152,11 +152,7 @@ export class RoutesService {
           'tipo=SIMPLE requiere origen_iata, destino_iata y millas_nauticas',
         );
       }
-      if (dto.origen_iata.toUpperCase() === dto.destino_iata.toUpperCase()) {
-        throw new BadRequestException(
-          'origen_iata y destino_iata no pueden ser iguales',
-        );
-      }
+      // origen == destino permitido: es un SOBREVUELO (CUN→CUN).
       const { data, error } = await this.supabase.service
         .from('ruta_predefinida')
         .insert({
@@ -239,7 +235,9 @@ export class RoutesService {
           es_ferry: t.es_ferry ?? undefined,
           requiere_pernocta: t.requiere_pernocta ?? undefined,
           pernocta_costo_usd:
-            t.pernocta_costo_usd != null ? Number(t.pernocta_costo_usd) : undefined,
+            t.pernocta_costo_usd != null
+              ? Number(t.pernocta_costo_usd)
+              : undefined,
           tipo_parada: (t.tipo_parada ?? undefined) as
             | RouteTramoInputDto['tipo_parada']
             | undefined,
@@ -346,19 +344,10 @@ export class RoutesService {
           `Tramo ${i + 2}: origen (${norm[i + 1].origen_iata}) debe coincidir con destino del tramo ${i + 1} (${norm[i].destino_iata}).`,
         );
       }
-      if (norm[i].origen_iata === norm[i].destino_iata) {
-        throw new BadRequestException(
-          `Tramo ${i + 1}: origen y destino no pueden ser iguales.`,
-        );
-      }
     }
-    if (
-      norm[norm.length - 1].origen_iata === norm[norm.length - 1].destino_iata
-    ) {
-      throw new BadRequestException(
-        `Tramo ${norm.length}: origen y destino no pueden ser iguales.`,
-      );
-    }
+    // Mismo aeropuerto en un tramo = SOBREVUELO (ej. CUN→CUN Zona Hotelera /
+    // Isla Mujeres): válido, las millas definen el tiempo cobrado. Al usarse
+    // en una cotización, la escala nace marcada es_sobrevuelo.
     return norm;
   }
 
