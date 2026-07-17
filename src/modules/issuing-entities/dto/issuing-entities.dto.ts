@@ -107,3 +107,19 @@ export class UpdateIssuingEntityDto extends PartialType(
   @IsBoolean()
   activa?: boolean;
 }
+
+/**
+ * CSD del SAT en base64 (archivos DER .cer y .key). La contraseña de la
+ * llave NO viaja ni se guarda en BD: vive en el env CSD_PASSWORD del API.
+ */
+export class UploadCsdDto {
+  @ApiProperty({ description: 'Archivo .cer (DER) en base64' })
+  @IsString()
+  @Length(100, 40000)
+  cer_b64!: string;
+
+  @ApiProperty({ description: 'Archivo .key (DER) en base64' })
+  @IsString()
+  @Length(100, 40000)
+  key_b64!: string;
+}

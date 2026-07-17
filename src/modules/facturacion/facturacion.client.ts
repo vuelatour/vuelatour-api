@@ -87,6 +87,14 @@ export interface PreviewResult {
   error?: string | null;
 }
 
+export interface HealthResult {
+  ok: boolean;
+  pac?: string;
+  modo?: string;
+  detalle?: string;
+  error?: string | null;
+}
+
 /** Cliente HTTP hacia pyservices para timbrar CFDI 4.0 (FEL). */
 @Injectable()
 export class FacturacionClient implements OnModuleInit {
@@ -102,10 +110,14 @@ export class FacturacionClient implements OnModuleInit {
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 
   onModuleInit() {
-    this.baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    this.baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     this.token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     if (!this.baseUrl || !this.token) {
-      this.logger.log('Facturación: pyservices no configurado (timbrado deshabilitado)');
+      this.logger.log(
+        'Facturación: pyservices no configurado (timbrado deshabilitado)',
+      );
     }
   }
 
@@ -119,12 +131,20 @@ export class FacturacionClient implements OnModuleInit {
 
   /** Timbra una nota de crédito (CFDI tipo Egreso) relacionada a una factura. */
   async notaCredito(payload: TimbrarPayload): Promise<TimbrarResult> {
-    return this.post<TimbrarResult>('/facturacion/nota-credito', payload, 'nota-credito');
+    return this.post<TimbrarResult>(
+      '/facturacion/nota-credito',
+      payload,
+      'nota-credito',
+    );
   }
 
   /** Solicita la cancelación de un CFDI ante el SAT vía pyservices. */
   async cancelar(payload: CancelarPayload): Promise<CancelarResult> {
-    return this.post<CancelarResult>('/facturacion/cancelar', payload, 'cancelar');
+    return this.post<CancelarResult>(
+      '/facturacion/cancelar',
+      payload,
+      'cancelar',
+    );
   }
 
   /**
@@ -134,6 +154,42 @@ export class FacturacionClient implements OnModuleInit {
    */
   async preview(payload: PreviewPayload): Promise<PreviewResult> {
     return this.post<PreviewResult>('/facturacion/preview', payload, 'preview');
+  }
+
+  /**
+   * Prueba las credenciales del PAC sin consumir timbres (GET, timeout
+   * corto propio: es un diagnóstico, no una emisión).
+   */
+  async health(): Promise<HealthResult> {
+    if (!this.enabled) {
+      return {
+        ok: false,
+        detalle:
+          'Facturación no configurada (pyservices/credenciales ausentes).',
+      };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(`${this.baseUrl}/facturacion/health`, {
+        method: 'GET',
+        headers: { 'X-Internal-Token': this.token },
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        return { ok: false, detalle: `pyservices respondió ${res.status}` };
+      }
+      return (await res.json()) as HealthResult;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`health falló: ${msg}`);
+      return {
+        ok: false,
+        detalle: `No se pudo contactar al servicio de timbrado: ${msg}`,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   /** POST defensivo hacia pyservices (timeout + AbortController + token interno). */
@@ -153,7 +209,10 @@ export class FacturacionClient implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal-Token': this.token },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': this.token,
+        },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
@@ -164,7 +223,10 @@ export class FacturacionClient implements OnModuleInit {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`${op} falló: ${msg}`);
-      return { ok: false, error: `No se pudo contactar al servicio de timbrado: ${msg}` } as T;
+      return {
+        ok: false,
+        error: `No se pudo contactar al servicio de timbrado: ${msg}`,
+      } as T;
     } finally {
       clearTimeout(timer);
     }

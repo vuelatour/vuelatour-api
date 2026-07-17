@@ -20,6 +20,7 @@ import {
   CreateIssuingEntityDto,
   ListIssuingEntitiesQuery,
   UpdateIssuingEntityDto,
+  UploadCsdDto,
 } from './dto/issuing-entities.dto';
 import { IssuingEntitiesService } from './issuing-entities.service';
 
@@ -68,6 +69,19 @@ export class IssuingEntitiesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.entities.update(id, dto, c.userId);
+  }
+
+  @Post(':id/csd')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary: 'Sube el CSD (.cer/.key en base64) de la emisora (ADMIN)',
+  })
+  uploadCsd(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UploadCsdDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.entities.uploadCsd(id, dto, c.userId);
   }
 
   @Delete(':id')

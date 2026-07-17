@@ -40,20 +40,33 @@ export class InvoicesController {
   constructor(private readonly invoices: InvoicesService) {}
 
   @Get('pending')
-  @ApiOperation({ summary: 'Vuelos pagados pendientes de facturar (filtros: fecha, cliente).' })
+  @ApiOperation({
+    summary: 'Vuelos pagados pendientes de facturar (filtros: fecha, cliente).',
+  })
   pending(@Query() q: ListPendientesQuery) {
     return this.invoices.listPendientes(q);
   }
 
+  @Get('pac-health')
+  @ApiOperation({
+    summary: 'Prueba la conexión/credenciales con el PAC sin consumir timbres.',
+  })
+  pacHealth() {
+    return this.invoices.pacHealth();
+  }
+
   @Get()
-  @ApiOperation({ summary: 'Facturas emitidas (filtros: estado, entidad emisora).' })
+  @ApiOperation({
+    summary: 'Facturas emitidas (filtros: estado, entidad emisora).',
+  })
   list(@Query() q: ListFacturasQuery) {
     return this.invoices.listFacturas(q);
   }
 
   @Get('cierre')
   @ApiOperation({
-    summary: 'Paquete de cierre mensual (.zip): reporte por avión en Excel + XML/PDF de facturas',
+    summary:
+      'Paquete de cierre mensual (.zip): reporte por avión en Excel + XML/PDF de facturas',
   })
   async cierre(
     @Query('desde') desde: string,
@@ -68,7 +81,10 @@ export class InvoicesController {
 
   @Post('emitir')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Emite (timbra) el CFDI de un vuelo con la entidad emisora indicada.' })
+  @ApiOperation({
+    summary:
+      'Emite (timbra) el CFDI de un vuelo con la entidad emisora indicada.',
+  })
   emitir(@Body() dto: EmitirFacturaDto, @CurrentUser() c: AuthenticatedUser) {
     return this.invoices.emitir(dto, c.userId);
   }
@@ -92,14 +108,22 @@ export class InvoicesController {
 
   @Post('nota-credito')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Emite una nota de crédito (CFDI Egreso) relacionada a una factura.' })
-  notaCredito(@Body() dto: NotaCreditoDto, @CurrentUser() c: AuthenticatedUser) {
+  @ApiOperation({
+    summary:
+      'Emite una nota de crédito (CFDI Egreso) relacionada a una factura.',
+  })
+  notaCredito(
+    @Body() dto: NotaCreditoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.invoices.emitirNotaCredito(dto, c.userId);
   }
 
   @Post(':id/cancelar')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Cancela un CFDI timbrado ante el SAT (con motivo SAT).' })
+  @ApiOperation({
+    summary: 'Cancela un CFDI timbrado ante el SAT (con motivo SAT).',
+  })
   cancelar(
     @Param('id') id: string,
     @Body() dto: CancelarFacturaDto,
@@ -110,7 +134,10 @@ export class InvoicesController {
 
   @Post('file-urls')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Firma URLs de XML/PDF de facturas (bucket privado) para descarga.' })
+  @ApiOperation({
+    summary:
+      'Firma URLs de XML/PDF de facturas (bucket privado) para descarga.',
+  })
   fileUrls(@Body() dto: FacturaFileUrlsDto) {
     return this.invoices.signFacturaFiles(dto.paths);
   }
@@ -118,19 +145,28 @@ export class InvoicesController {
   // ============ Facturas recibidas (buzón) ============
 
   @Get('recibidas')
-  @ApiOperation({ summary: 'Lista de facturas recibidas (CFDI de proveedores).' })
+  @ApiOperation({
+    summary: 'Lista de facturas recibidas (CFDI de proveedores).',
+  })
   listRecibidas(@Query() q: ListRecibidasQuery) {
     return this.invoices.listRecibidas(q);
   }
 
   @Post('recibidas')
-  @ApiOperation({ summary: 'Sube un XML de CFDI recibido: lo parsea y lo registra.' })
-  crearRecibida(@Body() dto: CrearRecibidaDto, @CurrentUser() c: AuthenticatedUser) {
+  @ApiOperation({
+    summary: 'Sube un XML de CFDI recibido: lo parsea y lo registra.',
+  })
+  crearRecibida(
+    @Body() dto: CrearRecibidaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.invoices.crearRecibida(dto.xml_b64, c.userId);
   }
 
   @Patch('recibidas/:id')
-  @ApiOperation({ summary: 'Amarra/actualiza una factura recibida (gasto, avión, estado).' })
+  @ApiOperation({
+    summary: 'Amarra/actualiza una factura recibida (gasto, avión, estado).',
+  })
   updateRecibida(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateRecibidaDto,
@@ -162,7 +198,9 @@ export class InvoicesController {
 
   @Post('recibidas/file-urls')
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Firma URLs de los XML recibidos (bucket privado).' })
+  @ApiOperation({
+    summary: 'Firma URLs de los XML recibidos (bucket privado).',
+  })
   recibidaFileUrls(@Body() dto: RecibidaFileUrlsDto) {
     return this.invoices.signFacturaFiles(dto.paths);
   }
