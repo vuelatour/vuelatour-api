@@ -3564,13 +3564,27 @@ export class FlightsService {
     // Comisión bancaria: el banco deposita monto − comisión; sin registrarla,
     // el reporte no cuadraba con el estado de cuenta. `monto` sigue siendo el
     // BRUTO que pagó el cliente (cobrado/cobrosEnUsd intactos).
-    const comisionPct =
-      Number(dto.comision_banco_pct) > 0
+    // Comisión por MONTO directo (el estado de cuenta trae pesos, no %):
+    // manda sobre el %, y el % se deriva solo como referencia del reporte.
+    const comisionMontoDirecto =
+      Number(dto.comision_banco_monto) > 0
+        ? Math.round(Number(dto.comision_banco_monto) * 100) / 100
+        : null;
+    const comisionPct = comisionMontoDirecto
+      ? Math.round((comisionMontoDirecto / dto.monto) * 100 * 10000) / 10000
+      : Number(dto.comision_banco_pct) > 0
         ? Number(dto.comision_banco_pct)
         : null;
-    const comisionMonto = comisionPct
-      ? Math.round(dto.monto * (comisionPct / 100) * 100) / 100
-      : null;
+    const comisionMonto =
+      comisionMontoDirecto ??
+      (comisionPct
+        ? Math.round(dto.monto * (comisionPct / 100) * 100) / 100
+        : null);
+    if (comisionMonto != null && comisionMonto >= dto.monto) {
+      throw new BadRequestException(
+        'La comisión del banco no puede ser mayor o igual al monto del cobro.',
+      );
+    }
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
@@ -3665,20 +3679,37 @@ export class FlightsService {
     if (dto.notas !== undefined) patch.notas = dto.notas;
     // La comisión bancaria se recalcula si cambia el % (0 = quitarla) o si
     // cambia el monto de un cobro que ya tenía comisión.
-    const pctFinal =
-      dto.comision_banco_pct !== undefined
-        ? dto.comision_banco_pct > 0
-          ? dto.comision_banco_pct
-          : null
-        : Number(existing.comision_banco_pct) > 0
-          ? Number(existing.comision_banco_pct)
+    const montoFinal = dto.monto ?? Number(existing.monto);
+    if (dto.comision_banco_monto !== undefined) {
+      // Monto directo (0 = quitarla): manda sobre el %; el % queda derivado.
+      const cm =
+        dto.comision_banco_monto > 0
+          ? Math.round(dto.comision_banco_monto * 100) / 100
           : null;
-    if (dto.comision_banco_pct !== undefined || dto.monto !== undefined) {
-      const montoFinal = dto.monto ?? Number(existing.monto);
-      patch.comision_banco_pct = pctFinal;
-      patch.comision_banco_monto = pctFinal
-        ? Math.round(montoFinal * (pctFinal / 100) * 100) / 100
+      if (cm != null && cm >= montoFinal) {
+        throw new BadRequestException(
+          'La comisión del banco no puede ser mayor o igual al monto del cobro.',
+        );
+      }
+      patch.comision_banco_monto = cm;
+      patch.comision_banco_pct = cm
+        ? Math.round((cm / montoFinal) * 100 * 10000) / 10000
         : null;
+    } else {
+      const pctFinal =
+        dto.comision_banco_pct !== undefined
+          ? dto.comision_banco_pct > 0
+            ? dto.comision_banco_pct
+            : null
+          : Number(existing.comision_banco_pct) > 0
+            ? Number(existing.comision_banco_pct)
+            : null;
+      if (dto.comision_banco_pct !== undefined || dto.monto !== undefined) {
+        patch.comision_banco_pct = pctFinal;
+        patch.comision_banco_monto = pctFinal
+          ? Math.round(montoFinal * (pctFinal / 100) * 100) / 100
+          : null;
+      }
     }
 
     const { data, error } = await this.supabase.service

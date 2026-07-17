@@ -45,10 +45,22 @@ export class CreateCobroDto {
   })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 4 })
+  @IsNumber({ maxDecimalPlaces: 6 })
   @Min(0)
   @Max(20)
   comision_banco_pct?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Comisión del banco como MONTO directo en la moneda del cobro (el ' +
+      'estado de cuenta trae pesos, no %). Si viene, manda sobre el % (que ' +
+      'se deriva solo como referencia).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  comision_banco_monto?: number;
 
   @ApiPropertyOptional({
     description: 'Referencia bancaria, ticket, link, voucher BillPocket',
@@ -58,14 +70,18 @@ export class CreateCobroDto {
   @MaxLength(100)
   referencia?: string;
 
-  @ApiPropertyOptional({ description: 'Fecha real del cobro (puede diferir de la del vuelo). Default: now()' })
+  @ApiPropertyOptional({
+    description:
+      'Fecha real del cobro (puede diferir de la del vuelo). Default: now()',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   fecha_cobro?: Date;
 
   @ApiPropertyOptional({
-    description: 'Path del voucher en storage (cobro-vouchers). Obligatorio si método es tarjeta.',
+    description:
+      'Path del voucher en storage (cobro-vouchers). Obligatorio si método es tarjeta.',
   })
   @IsOptional()
   @IsString()
@@ -104,14 +120,25 @@ export class UpdateCobroDto {
   tc_usd_mxn?: number;
 
   @ApiPropertyOptional({
-    description: 'Comisión del banco en % (0 = quitarla). Recalcula el monto de comisión.',
+    description:
+      'Comisión del banco en % (0 = quitarla). Recalcula el monto de comisión.',
   })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 4 })
+  @IsNumber({ maxDecimalPlaces: 6 })
   @Min(0)
   @Max(20)
   comision_banco_pct?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Comisión del banco como MONTO directo (0 = quitarla). Manda sobre el %.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  comision_banco_monto?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
