@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
+import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 
 export interface TacometroVisionInput {
   /** Imagen en base64 (sin prefijo data:). Requiere mediaType. */
@@ -50,6 +51,8 @@ export interface GastoTicketVisionResult {
   tarjeta_terminacion: string | null;
   /** Renglones del ticket (incl. IVA como renglón si viene aparte; suma = total). */
   conceptos?: Array<{ concepto: string; monto: number }>;
+  /** Desglose compuesto (regla FBO/TUA) tal como se guardará en las notas. */
+  desglose_lineas?: string[];
   /** Matrícula de la aeronave si aparece en el documento (facturas de FBO). */
   matricula?: string | null;
   confianza: number;
@@ -326,7 +329,22 @@ export class VisionService implements OnModuleInit {
         }
         return { motivo } as GastoTicketVisionResult & { motivo: string };
       }
-      return (await res.json()) as GastoTicketVisionResult;
+      const ai = (await res.json()) as GastoTicketVisionResult;
+      // Desglose compuesto con la MISMA regla que se guardará en las notas
+      // (FBO/TUA con IVA): el panel lo muestra al capturar para que la
+      // oficina vea ANTES de guardar si la separación cuadró.
+      const conceptos = (ai.conceptos ?? []).filter(
+        (c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0,
+      );
+      if (ai.legible && ai.monto != null && conceptos.length >= 2) {
+        const propina = ai.propina != null && ai.propina > 0 ? ai.propina : 0;
+        ai.desglose_lineas = desgloseGastoLineas(
+          conceptos,
+          Math.round((ai.monto - propina) * 100) / 100,
+          ai.moneda ?? 'MXN',
+        );
+      }
+      return ai;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`readGastoTicket falló: ${msg}`);
