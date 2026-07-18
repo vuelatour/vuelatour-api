@@ -21,11 +21,14 @@ export class EnginesService {
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
   private async currentHobbs(aeronaveId: string): Promise<number> {
-    const { data } = await this.supabase.service
+    const { data, error } = await this.supabase.service
       .from('escala')
       .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
       .eq('vuelo.aeronave_id', aeronaveId)
       .neq('vuelo.estado', 'CANCELADO');
+    // Nunca degradar a hobbs=0 en silencio: re-anclaría aeronave_horas_ref
+    // en 0 y las horas vivas del motor se inflarían con todo el histórico.
+    if (error) throw new Error(error.message);
     let max = 0;
     for (const e of (data ?? []) as Array<Record<string, unknown>>) {
       for (const v of [e.taco_salida, e.taco_llegada]) {

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -443,6 +444,25 @@ export class ConciliacionService {
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
+    // Un cobro ya enlazado a OTRO movimiento no puede cuadrar una segunda
+    // línea del banco (el auto-match ya lo respeta; el manual también).
+    if (cobroId) {
+      const { data: yaEnlazado, error: ocupadoErr } =
+        await this.supabase.service
+          .from('movimiento_bancario')
+          .select('id')
+          .eq('cobro_id', cobroId)
+          .neq('id', movId)
+          .limit(1)
+          .maybeSingle();
+      if (ocupadoErr) throw new Error(ocupadoErr.message);
+      if (yaEnlazado) {
+        throw new ConflictException(
+          'Ese cobro ya está conciliado con otro movimiento bancario.',
+        );
+      }
+    }
+
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
       .update({
@@ -566,12 +586,38 @@ export class ConciliacionService {
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
     const prevGasto = (mov as { gasto_id: string | null }).gasto_id;
+
+    // Un gasto ya conciliado NO puede cuadrar una segunda línea del banco
+    // (doble conciliación). El auto-match ya lo respeta; el vínculo manual
+    // también debe hacerlo.
+    if (gastoId && gastoId !== prevGasto) {
+      const { data: gasto, error: gastoErr } = await this.supabase.service
+        .from('gasto')
+        .select('id, conciliado')
+        .eq('id', gastoId)
+        .maybeSingle();
+      if (gastoErr) throw new Error(gastoErr.message);
+      if (!gasto) throw new BadRequestException('Gasto no encontrado.');
+      if (gasto.conciliado === true) {
+        throw new ConflictException(
+          'Ese gasto ya está conciliado con otro movimiento bancario.',
+        );
+      }
+    }
+
     if (prevGasto && prevGasto !== gastoId) {
-      // Libera el gasto previamente vinculado.
-      await this.supabase.service
+      // Libera el gasto previamente vinculado. Si falla, se aborta: dejarlo
+      // conciliado=true sin movimiento lo sacaría de la conciliación en
+      // silencio (regla del repo: nada de fallos silenciosos en dinero).
+      const { error: liberaErr } = await this.supabase.service
         .from('gasto')
         .update({ conciliado: false, updated_by: userId })
         .eq('id', prevGasto);
+      if (liberaErr) {
+        throw new Error(
+          `No se pudo liberar el gasto previamente conciliado: ${liberaErr.message}`,
+        );
+      }
     }
 
     const { data, error } = await this.supabase.service
@@ -591,10 +637,17 @@ export class ConciliacionService {
     }
 
     if (gastoId) {
-      await this.supabase.service
+      // Si falla, se avisa: un gasto que sigue conciliado=false puede volver a
+      // matchearse con OTRO cargo (doble conciliación silenciosa).
+      const { error: marcaErr } = await this.supabase.service
         .from('gasto')
         .update({ conciliado: true, updated_by: userId })
         .eq('id', gastoId);
+      if (marcaErr) {
+        throw new Error(
+          `El movimiento quedó vinculado pero no se pudo marcar el gasto como conciliado: ${marcaErr.message}`,
+        );
+      }
     }
     return data!;
   }

@@ -293,17 +293,71 @@ export class ExpirationsService {
     return new Map((data as TipoInfo[]).map((t) => [t.id, t]));
   }
 
+  /**
+   * Horas de vida VIVAS por motor (invariante #1 del repo):
+   * horas_totales + max(0, hobbs actual del avión − aeronave_horas_ref).
+   * Leer solo horas_totales subestima y puede dejar pasar un documento
+   * por HORAS ya vencido al asignar el avión.
+   */
   private async loadMotorHoras(ids: string[]): Promise<Map<string, number>> {
     const unique = [...new Set(ids)];
     if (unique.length === 0) return new Map();
     const { data, error } = await this.supabase.service
       .from('motor')
-      .select('id, horas_totales')
+      .select('id, horas_totales, aeronave_horas_ref, aeronave_id')
       .in('id', unique);
     if (error) throw new Error(error.message);
-    return new Map(
-      (data ?? []).map((m) => [m.id as string, Number(m.horas_totales)]),
+    const motores = (data ?? []) as Array<{
+      id: string;
+      horas_totales: number | string;
+      aeronave_horas_ref: number | string | null;
+      aeronave_id: string | null;
+    }>;
+
+    const aeronaveIds = [
+      ...new Set(
+        motores.map((m) => m.aeronave_id).filter((a): a is string => !!a),
+      ),
+    ];
+    const hobbsPorAvion = new Map<string, number>();
+    await Promise.all(
+      aeronaveIds.map(async (a) =>
+        hobbsPorAvion.set(a, await this.currentHobbs(a)),
+      ),
     );
+
+    return new Map(
+      motores.map((m) => {
+        const ht = Number(m.horas_totales);
+        const ref =
+          m.aeronave_horas_ref != null ? Number(m.aeronave_horas_ref) : null;
+        const hobbs = m.aeronave_id
+          ? (hobbsPorAvion.get(m.aeronave_id) ?? 0)
+          : 0;
+        const vivas =
+          ref != null ? Number((ht + Math.max(0, hobbs - ref)).toFixed(1)) : ht;
+        return [m.id, vivas];
+      }),
+    );
+  }
+
+  /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
+  private async currentHobbs(aeronaveId: string): Promise<number> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
+      )
+      .eq('vuelo.aeronave_id', aeronaveId)
+      .neq('vuelo.estado', 'CANCELADO');
+    if (error) throw new Error(error.message);
+    let max = 0;
+    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v != null) max = Math.max(max, Number(v));
+      }
+    }
+    return Number(max.toFixed(1));
   }
 
   private enrich(

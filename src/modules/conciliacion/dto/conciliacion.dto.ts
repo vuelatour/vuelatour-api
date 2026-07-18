@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   IsArray,
   IsBoolean,
@@ -99,7 +100,7 @@ export class ListConciliacionQuery {
 
   @ApiPropertyOptional({ description: 'Filtra por estado de conciliación' })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   conciliado?: boolean;
 

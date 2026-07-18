@@ -467,11 +467,13 @@ export class AircraftService {
    * un ajuste de tacómetro posterior se refleja solo y no hay doble conteo.
    */
   private async horasVoladas(aeronaveId: string): Promise<number> {
-    const { data } = await this.supabase.service
+    const { data, error } = await this.supabase.service
       .from('escala')
       .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
       .eq('vuelo.aeronave_id', aeronaveId)
       .neq('vuelo.estado', 'CANCELADO');
+    // Nunca degradar a 0 en silencio: las horas son la fuente del overhaul.
+    if (error) throw new Error(error.message);
     let horas = 0;
     for (const e of (data ?? []) as Array<Record<string, unknown>>) {
       if (e.taco_salida == null || e.taco_llegada == null) continue;
@@ -483,11 +485,13 @@ export class AircraftService {
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
   private async currentHobbs(aeronaveId: string): Promise<number> {
-    const { data } = await this.supabase.service
+    const { data, error } = await this.supabase.service
       .from('escala')
       .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
       .eq('vuelo.aeronave_id', aeronaveId)
       .neq('vuelo.estado', 'CANCELADO');
+    // Nunca degradar a hobbs=0 en silencio: infla horas vivas de componentes.
+    if (error) throw new Error(error.message);
     let max = 0;
     for (const e of (data ?? []) as Array<Record<string, unknown>>) {
       for (const v of [e.taco_salida, e.taco_llegada]) {

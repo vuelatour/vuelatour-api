@@ -304,9 +304,26 @@ export class InvoicesService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
 
+    // Al reasignar/quitar el gasto, desamarra los anteriores (misma lógica
+    // que amarrarGastos): si no, quedan gastos "con factura" sin factura y
+    // el pre-cierre confía en ese estatus.
+    if (dto.gasto_id !== undefined) {
+      let unlink = this.supabase.service
+        .from('gasto')
+        .update({
+          factura_recibida_id: null,
+          estatus_comprobante: 'SIN_COMPROBANTE',
+          updated_by: userId,
+        })
+        .eq('factura_recibida_id', id);
+      if (dto.gasto_id) unlink = unlink.neq('id', dto.gasto_id);
+      const { error: uErr } = await unlink;
+      if (uErr) throw new Error(uErr.message);
+    }
+
     // El gasto amarrado (camino legacy 1:1) queda comprobado con FACTURA.
     if (dto.gasto_id) {
-      await this.supabase.service
+      const { error: lErr } = await this.supabase.service
         .from('gasto')
         .update({
           factura_recibida_id: id,
@@ -314,6 +331,7 @@ export class InvoicesService {
           updated_by: userId,
         })
         .eq('id', dto.gasto_id);
+      if (lErr) throw new Error(lErr.message);
     }
     return data;
   }
@@ -378,6 +396,17 @@ export class InvoicesService {
   }
 
   async deleteRecibida(id: string) {
+    // El FK gasto.factura_recibida_id es on delete set null: revertir
+    // también el estatus del comprobante (como amarrarGastos) o quedan
+    // gastos "con factura" apuntando a nada.
+    const { error: uErr } = await this.supabase.service
+      .from('gasto')
+      .update({
+        factura_recibida_id: null,
+        estatus_comprobante: 'SIN_COMPROBANTE',
+      })
+      .eq('factura_recibida_id', id);
+    if (uErr) throw new Error(uErr.message);
     const { error } = await this.supabase.service
       .from('factura_recibida')
       .delete()

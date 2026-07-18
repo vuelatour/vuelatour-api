@@ -469,7 +469,9 @@ export class InventoryService {
         userId,
       );
     } else if (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id) {
-      await this.revertirGastoPorDevolucion(itemId, dto, item.nombre, userId);
+      // Usar el costo USD ya resuelto arriba: en captura MXN el dto no trae
+      // costo_unitario_usd y la reversión quedaría en 0 en silencio.
+      await this.revertirGastoPorDevolucion(itemId, dto, costoUnitario, item.nombre, userId);
     }
 
     const stats = this.statsFromLayers(this.buildLayers(await this.movsForItem(itemId)));
@@ -608,11 +610,12 @@ export class InventoryService {
   private async revertirGastoPorDevolucion(
     itemId: string,
     dto: CreateMovimientoDto,
+    costoUnitarioUsd: number,
     itemNombre: string,
     userId: string,
   ): Promise<void> {
     try {
-      let porRevertir = round(Number(dto.cantidad) * Number(dto.costo_unitario_usd ?? 0), 2);
+      let porRevertir = round(Number(dto.cantidad) * costoUnitarioUsd, 2);
       if (porRevertir <= 0) return;
 
       // Gastos automáticos de este ítem+avión (via la liga al cardex).

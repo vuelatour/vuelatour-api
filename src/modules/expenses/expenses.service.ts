@@ -1182,6 +1182,15 @@ export class ExpensesService {
   }
 
   async remove(id: string) {
+    // Un gasto conciliado está amarrado a un movimiento bancario (FK con
+    // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
+    // nada y la conciliación se sobreestimaría en silencio.
+    const gasto = await this.findById(id);
+    if (gasto.conciliado === true) {
+      throw new ConflictException(
+        'Este gasto ya está conciliado con el banco; desconcíliaselo en Conciliación antes de eliminarlo.',
+      );
+    }
     const { error } = await this.supabase.service
       .from('gasto')
       .delete()

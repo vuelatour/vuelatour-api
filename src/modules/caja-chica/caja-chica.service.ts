@@ -4,6 +4,7 @@ import {
   CreateCajaMovimientoDto,
   CreateFondoDto,
   ListFondosQuery,
+  MonedaCaja,
   TipoMovimientoCaja,
   UpdateFondoDto,
 } from './dto/caja-chica.dto';
@@ -122,7 +123,7 @@ export class CajaChicaService {
       moneda: string;
     };
 
-    const [{ data: movs }, { data: gastos }] = await Promise.all([
+    const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
         .select(`${MOV_COLS}, autorizado:usuario!autorizado_por(nombre), registrado:usuario!registrado_por(nombre)`)
@@ -133,6 +134,11 @@ export class CajaChicaService {
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', fondo.usuario_id),
     ]);
+    // El saldo es dinero: nunca calcularlo con datos parciales.
+    if (movsRes.error) throw new Error(movsRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+    const movs = movsRes.data;
+    const gastos = gastosRes.data;
 
     const efectivo = (gastos ?? []).filter((g) => (g as { moneda: string }).moneda === fondo.moneda);
 
@@ -259,11 +265,17 @@ export class CajaChicaService {
   // ===== Movimientos =====
 
   async createMovimiento(fondoId: string, dto: CreateCajaMovimientoDto, userId: string) {
-    await this.findFondo(fondoId); // 404 si no existe
+    const fondo = (await this.findFondo(fondoId)) as { moneda: MonedaCaja }; // 404 si no existe
 
     if (dto.monto === 0) throw new BadRequestException('El monto no puede ser cero.');
     if (dto.tipo !== TipoMovimientoCaja.AJUSTE && dto.monto < 0) {
       throw new BadRequestException('REPOSICION y REINTEGRO requieren un monto positivo.');
+    }
+    // El saldo del fondo se calcula en una sola moneda: rechazar mezclas.
+    if (dto.moneda && dto.moneda !== fondo.moneda) {
+      throw new BadRequestException(
+        `El fondo maneja ${fondo.moneda}; registra el movimiento en esa moneda.`,
+      );
     }
 
     const { data, error } = await this.supabase.service
@@ -272,7 +284,7 @@ export class CajaChicaService {
         fondo_id: fondoId,
         tipo: dto.tipo,
         monto: dto.monto,
-        moneda: dto.moneda ?? 'MXN',
+        moneda: fondo.moneda,
         fecha: dto.fecha ?? undefined,
         autorizado_por: dto.autorizado_por ?? null,
         referencia: dto.referencia ?? null,
@@ -305,7 +317,7 @@ export class CajaChicaService {
     if (!fondo) return { fondo: null, saldo: 0, movimientos: [] };
 
     const fo = fondo as Record<string, unknown> & { id: string; moneda: string };
-    const [{ data: movs }, { data: gastos }] = await Promise.all([
+    const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
         .select(MOV_COLS)
@@ -319,11 +331,17 @@ export class CajaChicaService {
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', userId),
     ]);
+    // El saldo es dinero: nunca calcularlo con datos parciales.
+    if (movsRes.error) throw new Error(movsRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+    const movs = movsRes.data;
+    const gastos = gastosRes.data;
 
     const allMovs = await this.supabase.service
       .from('caja_chica_movimiento')
       .select('tipo, monto')
       .eq('fondo_id', fo.id);
+    if (allMovs.error) throw new Error(allMovs.error.message);
     const efectivo = (gastos ?? []).filter((g) => (g as { moneda: string }).moneda === fo.moneda);
     const saldo = this.saldoFromParts((allMovs.data ?? []) as CajaMov[], efectivo);
 

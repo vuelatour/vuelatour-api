@@ -751,7 +751,11 @@ export class QuotesService {
     if (typeof filters.es_externo === 'boolean')
       q = q.eq('es_externo', filters.es_externo);
     if (filters.q) {
-      const raw = filters.q.trim();
+      // En PostgREST `.or()` las comas separan condiciones y los paréntesis
+      // cierran el grupo: interpolarlos crudos rompe el parser (500) o inyecta
+      // filtros. Se sustituyen por `_` (comodín de UN carácter en ilike), que
+      // conserva el match ("Cancún, MX" sigue encontrando "Cancún, MX").
+      const raw = filters.q.trim().replace(/[,()]/g, '_');
       const term = `%${raw.toUpperCase()}%`;
       const conds = [`origen_iata.ilike.${term}`, `destino_iata.ilike.${term}`];
       // Folio exacto si es numérico.
@@ -972,7 +976,9 @@ export class QuotesService {
           orden: i + 1,
           origen_iata: e.origen_iata.toUpperCase(),
           destino_iata: e.destino_iata.toUpperCase(),
-          aeronave_id: dto.aeronave_id ?? null,
+          // Mismo guard que el vuelo (línea del insert): un vuelo externo no
+          // debe amarrar sus tramos al avión propio de referencia.
+          aeronave_id: dto.es_externo ? null : (dto.aeronave_id ?? null),
           pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
           pasajeros_nombres: e.pasajeros_nombres ?? [],
           es_ferry: e.es_ferry ?? false,
@@ -1533,10 +1539,16 @@ export class QuotesService {
     vuelo: Record<string, unknown>,
     userId: string,
   ): Promise<void> {
-    const { data: cobros } = await this.supabase.service
+    const { data: cobros, error: cobrosErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select('monto, moneda, tc_usd_mxn')
       .eq('vuelo_id', vueloId);
+    // Sin cobros leídos NO se toca la bandera: tratar el fallo como "0 cobros"
+    // apagaría `cobrado` de un vuelo ya pagado en silencio.
+    if (cobrosErr)
+      throw new Error(
+        `No se pudieron leer los cobros del vuelo para actualizar 'cobrado': ${cobrosErr.message}`,
+      );
     const { total_usd } = cobrosEnUsd(
       cobros ?? [],
       vuelo.tc_usd_mxn as number | null,

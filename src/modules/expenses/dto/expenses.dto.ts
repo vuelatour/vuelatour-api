@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   ArrayMinSize,
   IsArray,
@@ -384,7 +385,7 @@ export class ListGastosQuery {
     description: 'Solo gastos sin avión asignado (bandeja de pendientes).',
   })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   pendientes?: boolean;
 
@@ -392,7 +393,7 @@ export class ListGastosQuery {
     description: 'Solo gastos marcados como posible duplicado.',
   })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   duplicados?: boolean;
 

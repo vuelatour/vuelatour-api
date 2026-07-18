@@ -428,17 +428,24 @@ export class AlertsService {
     if (!fondos || fondos.length === 0) return;
 
     const usuarioIds = fondos.map((f) => f.usuario_id as string);
-    const [{ data: movs }, { data: gastos }] = await Promise.all([
+    // OJO: caja_chica_movimiento no tiene columna `estado`; el saldo suma
+    // TODOS los movimientos, igual que caja-chica.service.saldoFromParts.
+    const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
-        .select('fondo_id, tipo, monto, estado')
-        .eq('estado', 'AUTORIZADO'),
+        .select('fondo_id, tipo, monto'),
       this.supabase.service
         .from('gasto')
         .select('usuario_captura_id, monto, moneda')
         .eq('medio_pago', 'EFECTIVO')
         .in('usuario_captura_id', usuarioIds),
     ]);
+    // Un fallo parcial calcularía el saldo con la mitad de los datos y
+    // dispararía alertas falsas de fondo negativo: mejor lanzar.
+    if (movsRes.error) throw new Error(movsRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+    const movs = movsRes.data;
+    const gastos = gastosRes.data;
 
     for (const f of fondos) {
       let saldo = 0;
@@ -473,7 +480,9 @@ export class AlertsService {
       .from('gasto')
       .select('id, monto, moneda')
       .is('aeronave_id', null)
-      .neq('categoria', 'FIJO');
+      // FIJO e INDIRECTO no llevan avión por diseño: mismo criterio que la
+      // bandeja de pendientes de expenses.service, o el conteo no cuadra.
+      .not('categoria', 'in', '(FIJO,INDIRECTO)');
     if (error) throw new Error(error.message);
     const pendientes = data ?? [];
     if (pendientes.length === 0) return;

@@ -7,6 +7,7 @@ import {
   IsArray,
   IsBoolean,
   IsDate,
+  IsDateString,
   IsEnum,
   IsInt,
   IsNumber,
@@ -74,17 +75,21 @@ export class ListFlightsQuery {
   @IsBoolean()
   es_externo?: boolean;
 
-  @ApiPropertyOptional({ description: 'fecha_vuelo >= (ISO)' })
+  // String (no Date): una fecha simple debe cortarse en día CANCÚN; pasarla
+  // por `new Date()` la vuelve medianoche UTC y mueve vuelos de día/mes.
+  @ApiPropertyOptional({
+    description: 'fecha_vuelo >= (ISO con hora, o YYYY-MM-DD = día Cancún)',
+  })
   @IsOptional()
-  @Type(() => Date)
-  @IsDate()
-  desde?: Date;
+  @IsDateString()
+  desde?: string;
 
-  @ApiPropertyOptional({ description: 'fecha_vuelo <= (ISO)' })
+  @ApiPropertyOptional({
+    description: 'fecha_vuelo <= (ISO con hora, o YYYY-MM-DD = día Cancún)',
+  })
   @IsOptional()
-  @Type(() => Date)
-  @IsDate()
-  hasta?: Date;
+  @IsDateString()
+  hasta?: string;
 
   // Tope 500: el selector de vuelos del app (oficina) trae un lote grande y
   // filtra localmente por folio/cliente/ruta/piloto. Los listados paginados

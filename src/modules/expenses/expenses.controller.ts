@@ -42,9 +42,10 @@ export class ExpensesController {
   @ApiOperation({ summary: 'List gastos (with filters). Pilotos see only own captures.' })
   list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
-    // Pilotos y mecánicos solo ven sus propias capturas. El mecánico, además,
-    // solo combustible (GAS) — no ve el resto de gastos.
-    if ((c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) && !filters.usuario_captura_id) {
+    // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
+    // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
+    // mecánico, además, solo combustible (GAS) — no ve el resto de gastos.
+    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
       filters.usuario_captura_id = c.userId;
     }
     if (c.rol === Rol.MECANICO) {

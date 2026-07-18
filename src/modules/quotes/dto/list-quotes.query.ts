@@ -1,5 +1,6 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   IsBoolean,
   IsEnum,
@@ -39,7 +40,7 @@ export class ListQuotesQuery {
 
   @ApiPropertyOptional()
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   es_externo?: boolean;
 

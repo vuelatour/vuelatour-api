@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   IsBoolean,
   IsEnum,
@@ -28,7 +29,7 @@ export enum TipoMovimientoCaja {
 export class ListFondosQuery {
   @ApiPropertyOptional({ default: true })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   activo?: boolean;
 

@@ -497,8 +497,23 @@ export class FlightsService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean')
       q = q.eq('es_externo', filters.es_externo);
-    if (filters.desde) q = q.gte('fecha_vuelo', filters.desde.toISOString());
-    if (filters.hasta) q = q.lte('fecha_vuelo', filters.hasta.toISOString());
+    // Fecha simple (filtros del panel) = límites del DÍA CANCÚN (regla del
+    // repo); un ISO con hora (app) pasa tal cual.
+    const soloFecha = /^\d{4}-\d{2}-\d{2}$/;
+    if (filters.desde)
+      q = q.gte(
+        'fecha_vuelo',
+        soloFecha.test(filters.desde)
+          ? `${filters.desde}T00:00:00-05:00`
+          : filters.desde,
+      );
+    if (filters.hasta)
+      q = q.lte(
+        'fecha_vuelo',
+        soloFecha.test(filters.hasta)
+          ? `${filters.hasta}T23:59:59-05:00`
+          : filters.hasta,
+      );
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
@@ -904,6 +919,11 @@ export class FlightsService {
       dto.piloto_id !== undefined &&
       dto.piloto_id !== null &&
       dto.piloto_id !== '';
+    // Doc 4.3, mismo candado que assign(): documento crítico vencido bloquea
+    // también la asignación de piloto desde "Editar".
+    if (asignandoPiloto) {
+      await this.validateAssignTargets({ pilotoId: dto.piloto_id });
+    }
 
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
     if (dto.fecha_vuelo) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
@@ -1064,6 +1084,14 @@ export class FlightsService {
       .eq('id', flightId)
       .maybeSingle();
     const fecha = (flight?.fecha_vuelo as string | null) ?? null;
+    // Día del vuelo en CANCÚN (regla del repo): slice(0,10) del ISO UTC ponía
+    // los vuelos nocturnos (22:00 Cancún = día UTC siguiente) en el día
+    // equivocado para conflictos y descansos.
+    const dayCancun = fecha
+      ? new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'America/Cancun',
+        }).format(new Date(fecha))
+      : null;
 
     const { data: pilots } = await this.supabase.service
       .from('usuario')
@@ -1074,8 +1102,8 @@ export class FlightsService {
 
     // Conflicto: otro vuelo (no cancelado) del mismo piloto ese día.
     const conflicto = new Map<string, number>();
-    if (fecha) {
-      const day = fecha.slice(0, 10);
+    if (dayCancun) {
+      const day = dayCancun;
       const { data: sameDay } = await this.supabase.service
         .from('vuelo')
         .select('id, folio, piloto_id')
@@ -1139,8 +1167,8 @@ export class FlightsService {
 
     // Descanso marcado ese día (piloto_descanso): avisa igual que un conflicto.
     const descansa = new Map<string, string>();
-    if (fecha) {
-      const day = fecha.slice(0, 10);
+    if (dayCancun) {
+      const day = dayCancun;
       const { data: descansos } = await this.supabase.service
         .from('piloto_descanso')
         .select('piloto_id, fecha_inicio, fecha_fin, motivo')
@@ -2608,9 +2636,11 @@ export class FlightsService {
 
   /**
    * Copia el taco_llegada de un tramo como taco_salida del SIGUIENTE tramo
-   * comercial del mismo vuelo y misma aeronave, solo si ese siguiente tramo aún
-   * no tiene salida capturada. Best-effort: nunca pisa una lectura existente ni
-   * cruza aviones distintos (cada matrícula lleva su horómetro).
+   * (por orden, incluidos ferries operativos: excluirlos saltaba el ferry y
+   * sus horas se contaban DOS veces) del mismo vuelo y misma aeronave, solo si
+   * ese siguiente tramo aún no tiene salida capturada. Best-effort: nunca pisa
+   * una lectura existente ni cruza aviones distintos (cada matrícula lleva su
+   * horómetro).
    */
   private async propagarLlegadaASalidaSiguiente(
     vueloId: string,
@@ -2624,7 +2654,6 @@ export class FlightsService {
       .from('escala')
       .select('id, orden, aeronave_id, taco_salida')
       .eq('vuelo_id', vueloId)
-      .eq('solo_operativa', false)
       .gt('orden', orden)
       .order('orden', { ascending: true })
       .limit(1);

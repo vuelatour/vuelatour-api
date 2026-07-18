@@ -200,10 +200,14 @@ export class DashboardsService {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
 
-    const hoy = new Date().toISOString().slice(0, 10);
-    const en7dias = new Date();
-    en7dias.setUTCDate(en7dias.getUTCDate() + 7);
-    const hasta7 = en7dias.toISOString().slice(0, 10);
+    // Día actual en hora Cancún (regla del repo), no UTC: después de las
+    // 19:00 el "hoy" UTC ya es mañana y el tablero mostraba 0 solicitudes.
+    const diaCancun = (d: Date) =>
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
+        d,
+      );
+    const hoy = diaCancun(new Date());
+    const hasta7 = diaCancun(new Date(Date.now() + 7 * 86_400_000));
 
     const [pipeline, vuelosPeriodo, solicitudesHoy, vuelosSemana] =
       await Promise.all([
