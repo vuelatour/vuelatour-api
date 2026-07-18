@@ -85,6 +85,9 @@ export interface ReporteVueloPayload {
   tiempo_cobrable_hr?: number | null;
   subtotal_usd?: number;
   tuas_usd?: number;
+  /** Detalle de TUAS por aeropuerto CON su moneda (líneas del desglose
+   *  canónico, informativas; la fila numérica tuas_usd sigue cuadrando). */
+  tuas_detalle?: string[];
   iva_usd?: number;
   viaticos_pernocta_usd?: number;
   extras_total_usd?: number;
@@ -220,15 +223,20 @@ export class PyservicesService {
   }
 
   /** Reporte consolidado de un vuelo en Excel. */
-  async generateReporteVueloXlsx(payload: ReporteVueloPayload): Promise<Buffer> {
+  async generateReporteVueloXlsx(
+    payload: ReporteVueloPayload,
+  ): Promise<Buffer> {
     return this.postForBuffer('/pdf/reporte-vuelo-xlsx', payload);
   }
 
   /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */
   async parseFacturaRecibida(xmlB64: string): Promise<FacturaRecibidaParsed> {
-    return this.postForJson<FacturaRecibidaParsed>('/facturacion/parse-recibida', {
-      xml_b64: xmlB64,
-    });
+    return this.postForJson<FacturaRecibidaParsed>(
+      '/facturacion/parse-recibida',
+      {
+        xml_b64: xmlB64,
+      },
+    );
   }
 
   /** Sugerencia IA gasto→vuelo (elige entre candidatos deterministas). */
@@ -260,11 +268,16 @@ export class PyservicesService {
     }
     const res = await fetch(`${baseUrl}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Internal-Token': token,
+      },
       body: JSON.stringify(body),
     }).catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : 'error de red';
-      throw new BadGatewayException(`No se pudo contactar a pyservices: ${msg}`);
+      throw new BadGatewayException(
+        `No se pudo contactar a pyservices: ${msg}`,
+      );
     });
     if (!res.ok) {
       const detalle = await res.text().catch(() => '');

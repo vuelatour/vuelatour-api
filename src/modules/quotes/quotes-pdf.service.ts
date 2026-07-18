@@ -1,4 +1,8 @@
-import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
@@ -20,10 +24,14 @@ export class QuotesPdfService {
   ) {}
 
   async render(quote: Record<string, unknown>): Promise<Buffer> {
-    const baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     if (!baseUrl || !token) {
-      throw new ServiceUnavailableException('Generación de PDF no configurada (pyservices).');
+      throw new ServiceUnavailableException(
+        'Generación de PDF no configurada (pyservices).',
+      );
     }
 
     // Nombre del cliente (la fila de vuelo solo trae cliente_id).
@@ -35,19 +43,43 @@ export class QuotesPdfService {
         .eq('id', quote.cliente_id as string)
         .maybeSingle();
       if (data) {
-        cliente = ((data.razon_social_default as string) || (data.nombre as string)) ?? cliente;
+        cliente =
+          ((data.razon_social_default as string) || (data.nombre as string)) ??
+          cliente;
       }
     }
 
     const ivaRaw = num(quote.iva_pct) ?? 0;
     // Recibo del cliente: solo tramos COMERCIALES (los operativos internos no se cobran ni se muestran).
-    const escalas = ((quote.escalas as Array<Record<string, unknown>> | undefined) ?? []).filter(
+    const escalas = (
+      (quote.escalas as Array<Record<string, unknown>> | undefined) ?? []
+    ).filter(
       (e) => (e as { solo_operativa?: boolean }).solo_operativa !== true,
     );
 
+    // TUAS ligados al recibo CON su moneda (requisito del cliente): las líneas
+    // del desglose canónico ya traen aeropuerto, unitario, pax y moneda.
+    // Cotizaciones viejas sin snapshot → [] y la plantilla conserva la línea
+    // única "TUAS".
+    const snap = quote.calculo_snapshot as Record<string, unknown> | undefined;
+    const desglose = snap?.desglose;
+    const tuasDetalle = Array.isArray(desglose)
+      ? (desglose as Array<Record<string, unknown>>)
+          .filter(
+            (d) =>
+              d.clave === 'TUAS' &&
+              typeof d.concepto === 'string' &&
+              d.concepto,
+          )
+          .map((d) => d.concepto as string)
+      : [];
+
     const payload = {
       folio: String(quote.folio ?? ''),
-      fecha: (quote.fecha_confirmacion as string) ?? (quote.fecha_solicitud as string) ?? null,
+      fecha:
+        (quote.fecha_confirmacion as string) ??
+        (quote.fecha_solicitud as string) ??
+        null,
       cliente,
       origen: (quote.origen_iata as string) ?? '—',
       destino: (quote.destino_iata as string) ?? '—',
@@ -69,15 +101,26 @@ export class QuotesPdfService {
       })),
       tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
-      subtotal_usd: num(quote.subtotal_vuelo_usd) ?? 0,
+      subtotal_usd: (() => {
+        // Recibo del CLIENTE: el redondeo hacia arriba (ajuste > 0) se
+        // ABSORBE aquí para que la columna del desglose sume EXACTO el total
+        // sin revelar la cocina interna (regla: el redondeo nunca se lista).
+        const base = num(quote.subtotal_vuelo_usd) ?? 0;
+        const ajuste = num(quote.ajuste_final_usd) ?? 0;
+        return Math.round((base + (ajuste > 0 ? ajuste : 0)) * 100) / 100;
+      })(),
       tuas_usd: num(quote.tuas_usd) ?? 0,
-      extras: ((quote.extras as Array<Record<string, unknown>> | undefined) ?? []).map(
-        (e) => ({
-          concepto: (e.concepto as string) ?? '',
-          monto_usd: num(e.monto_usd) ?? 0,
-          aplica_iva: e.aplica_iva !== false,
-        }),
-      ),
+      tuas_detalle: tuasDetalle,
+      extras: (
+        (quote.extras as Array<Record<string, unknown>> | undefined) ?? []
+      ).map((e) => ({
+        concepto: (e.concepto as string) ?? '',
+        monto_usd: num(e.monto_usd) ?? 0,
+        // Moneda nativa del extra (los pagados en pesos se muestran "· $X MXN").
+        moneda: (e.moneda as string) ?? 'USD',
+        monto_nativo: num(e.monto_nativo),
+        aplica_iva: e.aplica_iva !== false,
+      })),
       extras_total_usd:
         num(
           (
@@ -102,6 +145,10 @@ export class QuotesPdfService {
       iva_pct: ivaRaw <= 1 ? ivaRaw * 100 : ivaRaw, // normaliza 0.16 → 16
       iva_usd: num(quote.iva_usd) ?? 0,
       total_usd: num(quote.monto_total_usd) ?? 0,
+      // Total MXN EXACTO por composición (vuelo.monto_total_mxn, ya persistido
+      // por el motor) + TC congelado de la cotización, para la línea final.
+      total_mxn: num(quote.monto_total_mxn),
+      tc_usd_mxn: num(quote.tc_usd_mxn),
       moneda: 'USD',
       notas: (quote.notas as string) ?? null,
     };
@@ -111,19 +158,26 @@ export class QuotesPdfService {
     try {
       const res = await fetch(`${baseUrl}/reportes/cotizacion`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Internal-Token': token },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': token,
+        },
         body: JSON.stringify(payload),
         signal: controller.signal,
       });
       if (!res.ok) {
-        throw new ServiceUnavailableException(`pyservices respondió ${res.status} al generar el PDF`);
+        throw new ServiceUnavailableException(
+          `pyservices respondió ${res.status} al generar el PDF`,
+        );
       }
       return Buffer.from(await res.arrayBuffer());
     } catch (err) {
       if (err instanceof ServiceUnavailableException) throw err;
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`render PDF falló: ${msg}`);
-      throw new ServiceUnavailableException(`No se pudo generar el PDF: ${msg}`);
+      throw new ServiceUnavailableException(
+        `No se pudo generar el PDF: ${msg}`,
+      );
     } finally {
       clearTimeout(timer);
     }

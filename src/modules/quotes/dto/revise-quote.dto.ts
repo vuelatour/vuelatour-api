@@ -40,7 +40,8 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
 
   @ApiPropertyOptional({
     type: [String],
-    description: 'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
+    description:
+      'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
   })
   @IsOptional()
   @IsArray()

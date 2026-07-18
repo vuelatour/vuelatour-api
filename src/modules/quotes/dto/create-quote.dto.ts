@@ -81,14 +81,18 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @IsBoolean()
   es_externo?: boolean;
 
-  @ApiPropertyOptional({ description: 'Operador externo (ej. XA-TIB). Requerido si es_externo.' })
+  @ApiPropertyOptional({
+    description: 'Operador externo (ej. XA-TIB). Requerido si es_externo.',
+  })
   @IsOptional()
   @IsString()
   @MinLength(2)
   @MaxLength(100)
   operador_externo?: string;
 
-  @ApiPropertyOptional({ description: 'Lo que cobra el operador externo (USD).' })
+  @ApiPropertyOptional({
+    description: 'Lo que cobra el operador externo (USD).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

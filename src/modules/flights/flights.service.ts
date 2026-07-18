@@ -1619,6 +1619,21 @@ export class FlightsService {
     }
     // TC pactado: sin él, un vuelo en USD no se puede facturar (CFDI en MXN).
     const tc = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
+    // Composición MXN de la cotización (renglones nativos en pesos): el
+    // findById no trae el snapshot — se lee aparte solo si hay TC.
+    let snapTotales: { mxn_nativos?: number; usd_de_mxn?: number } | undefined;
+    if (tc) {
+      const { data: snapRow } = await this.supabase.service
+        .from('vuelo')
+        .select('calculo_snapshot')
+        .eq('id', id)
+        .maybeSingle();
+      snapTotales = (
+        snapRow?.calculo_snapshot as {
+          totales?: { mxn_nativos?: number; usd_de_mxn?: number };
+        } | null
+      )?.totales;
+    }
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({
@@ -1631,8 +1646,21 @@ export class FlightsService {
         ...(tc
           ? {
               tc_usd_mxn: tc,
-              monto_total_mxn:
-                Math.round(Number(current.monto_total_usd) * tc * 100) / 100,
+              // Con renglones nativos en MXN (TUAS/extras en pesos), el MXN
+              // se recompone: componentes USD × tc + nativos TAL CUAL — la
+              // fórmula plana pisaría el total exacto por composición.
+              monto_total_mxn: (() => {
+                const nativos = Number(snapTotales?.mxn_nativos) || 0;
+                const usdDeMxn = Number(snapTotales?.usd_de_mxn) || 0;
+                const totalUsd = Number(current.monto_total_usd);
+                return nativos > 0
+                  ? Math.round(
+                      (Math.round((totalUsd - usdDeMxn) * tc * 100) / 100 +
+                        nativos) *
+                        100,
+                    ) / 100
+                  : Math.round(totalUsd * tc * 100) / 100;
+              })(),
             }
           : {}),
         updated_by: userId,

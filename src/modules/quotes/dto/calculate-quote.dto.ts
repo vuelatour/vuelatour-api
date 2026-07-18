@@ -6,6 +6,7 @@ import {
   IsBoolean,
   IsDate,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -151,11 +152,45 @@ export class ExtraConceptoDto {
   @Length(1, 120)
   concepto!: string;
 
-  @ApiProperty({ description: 'Monto en USD' })
+  @ApiProperty({
+    description:
+      'Monto NATIVO en la moneda del renglón (nombre legado: con moneda=MXN ' +
+      'es un monto en pesos que el motor convierte con el TC de la cotización).',
+  })
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   monto_usd!: number;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del renglón (default USD). MXN entra al total en pesos TAL CUAL ' +
+      '(sin re-convertir) y al canon USD con el TC de la cotización.',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  moneda?: 'USD' | 'MXN';
+
+  @ApiPropertyOptional({
+    description:
+      'Monto nativo persistido (re-cotización de renglones MXN ya guardados: ' +
+      'ahí monto_usd viene convertido y ESTE es el capturado en pesos).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  monto_nativo?: number;
+
+  @ApiPropertyOptional({
+    description: 'TC congelado informativo (se recalcula al cotizar).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  tc_aplicado?: number;
 
   @ApiPropertyOptional({
     description: 'Si entra a la base de IVA (default true)',
@@ -163,6 +198,28 @@ export class ExtraConceptoDto {
   @IsOptional()
   @IsBoolean()
   aplica_iva?: boolean;
+}
+
+/**
+ * TUA capturada por aeropuerto: monto unitario editable y moneda propia.
+ * Las tarifas cambian seguido y los brokers exigen pass-through exacto; los
+ * TUAS reales suelen pagarse en PESOS aunque el vuelo se cotice en USD.
+ */
+export class TuaLineaDto {
+  @ApiProperty({ description: 'IATA del aeropuerto al que aplica esta línea' })
+  @IsString()
+  @Length(3, 4)
+  iata!: string;
+
+  @ApiProperty({ description: 'Monto por pasajero en la moneda de la línea' })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  monto_pax!: number;
+
+  @ApiProperty({ enum: ['USD', 'MXN'] })
+  @IsIn(['USD', 'MXN'])
+  moneda!: 'USD' | 'MXN';
 }
 
 export class CalculateQuoteDto {
@@ -400,6 +457,19 @@ export class CalculateQuoteDto {
   @IsNumber()
   @Min(0)
   tuas_override_usd_pax?: number;
+
+  @ApiPropertyOptional({
+    type: [TuaLineaDto],
+    description:
+      'TUAS capturadas POR AEROPUERTO (monto unitario + moneda): mandan ' +
+      'sobre el catálogo y sobre tuas_override_usd_pax para ese aeropuerto. ' +
+      'monto_unitario × pax del tramo/vuelo = total de la línea.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => TuaLineaDto)
+  tuas_lineas?: TuaLineaDto[];
 
   @ApiPropertyOptional({
     description: 'Override de IVA (0.16 default si transferencia/tarjeta)',

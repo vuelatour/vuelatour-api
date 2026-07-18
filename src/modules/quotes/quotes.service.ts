@@ -83,7 +83,13 @@ export interface RutaSugerida {
 export interface TuasAeropuerto {
   iata: string;
   aplica: boolean;
+  /** Por pasajero en USD (canon; convertido si la línea es MXN). */
   usd_pax: number;
+  /** Por pasajero NATIVO en la moneda de la línea (capturable). */
+  monto_pax: number;
+  moneda: 'USD' | 'MXN';
+  /** TC congelado con el que se convirtió una línea MXN (null = USD puro). */
+  tc_aplicado: number | null;
   razon: string;
 }
 
@@ -198,42 +204,142 @@ export class QuotesService {
       ? this.aeropuertosUnicos(route.escalas)
       : [route.origen_iata, route.destino_iata];
 
+    // TC de la cotización: necesario para convertir líneas nativas en MXN
+    // (TUAS/extras que se pagan en pesos aunque el vuelo se cotice en USD).
+    const tcQuote = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
+    // Línea de TUA capturada por aeropuerto (monto unitario + moneda): manda
+    // sobre el catálogo y sobre el override global para ESE aeropuerto —
+    // pass-through exacto de lo que el aeropuerto nos cobró.
+    const lineaTua = (iata: string) =>
+      (dto.tuas_lineas ?? []).find(
+        (l) => l.iata.toUpperCase() === iata.toUpperCase(),
+      );
+    const resolveTua = async (iata: string): Promise<TuasAeropuerto> => {
+      const base = await this.computeTuas(
+        iata,
+        matriculaPrefix,
+        dto.pase_abordar ?? false,
+        dto.tuas_override_usd_pax,
+      );
+      const linea = lineaTua(iata);
+      if (!linea) {
+        return {
+          ...base,
+          monto_pax: base.usd_pax,
+          moneda: 'USD',
+          tc_aplicado: null,
+        };
+      }
+      if (
+        linea.moneda === 'MXN' &&
+        !tcQuote &&
+        base.aplica &&
+        linea.monto_pax > 0
+      ) {
+        throw new BadRequestException(
+          `TUA de ${iata} capturada en MXN: captura primero el tipo de cambio (MXN por USD) de la cotización.`,
+        );
+      }
+      if (linea.moneda === 'MXN' && !tcQuote) {
+        // Línea MXN inerte (no aplica o monto 0): no exigir un TC irrelevante.
+        return { ...base, monto_pax: 0, moneda: 'MXN', tc_aplicado: null };
+      }
+      const usdPax =
+        linea.moneda === 'USD' ? linea.monto_pax : linea.monto_pax / tcQuote!;
+      return {
+        iata: base.iata,
+        aplica: base.aplica,
+        usd_pax: base.aplica ? usdPax : 0,
+        monto_pax: base.aplica ? linea.monto_pax : 0,
+        moneda: linea.moneda,
+        tc_aplicado: linea.moneda === 'MXN' ? tcQuote : null,
+        razon: `${base.razon} · monto capturado`,
+      };
+    };
+
     const tuasAeropuertos: TuasAeropuerto[] = [];
     for (const iata of aeropuertosOrdenados) {
-      tuasAeropuertos.push(
-        await this.computeTuas(
-          iata,
-          matriculaPrefix,
-          dto.pase_abordar ?? false,
-          dto.tuas_override_usd_pax,
-        ),
-      );
+      tuasAeropuertos.push(await resolveTua(iata));
     }
+    const tuaPorIata = new Map(tuasAeropuertos.map((t) => [t.iata, t]));
 
     // TUAS total:
-    // - MULTIESCALA: por tramo no-ferry, usd_pax(aeropuerto de salida) × pax del tramo.
+    // - MULTIESCALA: por tramo no-ferry, monto(aeropuerto de salida) × pax del tramo.
     // - REDONDO/single-leg: aeropuertos únicos × pax global (modelo histórico, sin cambio).
+    // Cada FILA por aeropuerto acumula pax y totales NATIVOS: una fila MXN
+    // entra al total en pesos TAL CUAL y al canon USD convertida con el TC.
     const tramosTuas: number[] = [];
-    let tuasTotal = 0;
+    const tuasPaxPorIata = new Map<string, number>();
+    // Por aeropuerto: qué tramos le cobran TUA y con cuántos pax (para
+    // repartir el total de la FILA entre tramos sin descuadre de centavos).
+    const tramosPorIata = new Map<
+      string,
+      Array<{ idx: number; pax: number }>
+    >();
     if (route.escalas) {
-      for (const leg of route.escalas) {
-        const t = await this.computeTuas(
-          leg.origen_iata,
-          matriculaPrefix,
-          dto.pase_abordar ?? false,
-          dto.tuas_override_usd_pax,
-        );
-        const legTuas =
-          !leg.es_ferry && t.aplica ? round2(t.usd_pax * leg.pasajeros) : 0;
-        tramosTuas.push(legTuas);
-        tuasTotal += legTuas;
+      for (let idx = 0; idx < route.escalas.length; idx++) {
+        const leg = route.escalas[idx];
+        const t =
+          tuaPorIata.get(leg.origen_iata) ??
+          (await resolveTua(leg.origen_iata));
+        const paxLeg = !leg.es_ferry && t.aplica ? leg.pasajeros : 0;
+        tramosTuas.push(0);
+        if (paxLeg > 0) {
+          tuasPaxPorIata.set(
+            t.iata,
+            (tuasPaxPorIata.get(t.iata) ?? 0) + paxLeg,
+          );
+          const lista = tramosPorIata.get(t.iata) ?? [];
+          lista.push({ idx, pax: paxLeg });
+          tramosPorIata.set(t.iata, lista);
+        }
       }
     } else {
-      tuasTotal = tuasAeropuertos.reduce(
-        (acc, t) => acc + (t.aplica ? t.usd_pax * dto.pasajeros : 0),
-        0,
-      );
+      for (const t of tuasAeropuertos) {
+        if (t.aplica) {
+          tuasPaxPorIata.set(
+            t.iata,
+            (tuasPaxPorIata.get(t.iata) ?? 0) + dto.pasajeros,
+          );
+        }
+      }
     }
+    // Filas contables por aeropuerto (orden de aparición del itinerario).
+    const tuasFilas = tuasAeropuertos
+      .filter((t) => (tuasPaxPorIata.get(t.iata) ?? 0) > 0 && t.monto_pax > 0)
+      .map((t) => {
+        const pax = tuasPaxPorIata.get(t.iata)!;
+        const totalNativo = round2(t.monto_pax * pax);
+        const totalUsd =
+          t.moneda === 'MXN' ? round2(totalNativo / tcQuote!) : totalNativo;
+        return { ...t, pax, total_nativo: totalNativo, total_usd: totalUsd };
+      });
+    // El detalle por tramo se DERIVA de la fila (prorrateo por pax, residuo
+    // al último tramo del aeropuerto): la suma por tramos cuadra EXACTA con
+    // el total de TUAS — redondear tramo por tramo descuadraba ±1 centavo.
+    for (const f of tuasFilas) {
+      const legs = tramosPorIata.get(f.iata) ?? [];
+      let asignado = 0;
+      for (let i = 0; i < legs.length; i++) {
+        const monto =
+          i === legs.length - 1
+            ? round2(f.total_usd - asignado)
+            : round2((f.total_usd * legs[i].pax) / f.pax);
+        tramosTuas[legs[i].idx] = monto;
+        asignado = round2(asignado + monto);
+      }
+    }
+    const tuasTotal = tuasFilas.reduce((acc, f) => acc + f.total_usd, 0);
+    const tuasMxnNativo = round2(
+      tuasFilas
+        .filter((f) => f.moneda === 'MXN')
+        .reduce((acc, f) => acc + f.total_nativo, 0),
+    );
+    const tuasUsdDeMxn = round2(
+      tuasFilas
+        .filter((f) => f.moneda === 'MXN')
+        .reduce((acc, f) => acc + f.total_usd, 0),
+    );
 
     // Pernocta / viáticos: suma de tramos con pernocta (fuera de la base de IVA).
     const viaticosPernocta = (route.escalas ?? []).reduce(
@@ -243,16 +349,51 @@ export class QuotesService {
 
     // Conceptos extra (handler, comisariato, extensión de servicios…): los
     // gravados entran a la base de IVA; los no gravados se suman al final.
+    // Cada extra puede venir en USD o en MXN nativo (monto_usd = monto en la
+    // moneda del renglón, nombre legado): el MXN entra al total en pesos TAL
+    // CUAL y al canon USD convertido con el TC de la cotización.
     const extras = (dto.extras ?? [])
-      .map((e) => ({
-        concepto: e.concepto.trim(),
-        monto_usd: round2(Number(e.monto_usd) || 0),
-        aplica_iva: e.aplica_iva ?? true,
-      }))
+      .map((e) => {
+        const moneda: 'USD' | 'MXN' = e.moneda === 'MXN' ? 'MXN' : 'USD';
+        // Renglón MXN re-alimentado desde persistencia: monto_usd viene YA
+        // convertido y el capturado vive en monto_nativo — preferirlo evita
+        // tratar dólares como pesos al re-cotizar.
+        const montoNativo = round2(
+          Number(
+            moneda === 'MXN' && e.monto_nativo != null
+              ? e.monto_nativo
+              : e.monto_usd,
+          ) || 0,
+        );
+        if (moneda === 'MXN' && montoNativo > 0 && !tcQuote) {
+          throw new BadRequestException(
+            `Extra "${e.concepto}" capturado en MXN: captura primero el tipo de cambio (MXN por USD) de la cotización.`,
+          );
+        }
+        return {
+          concepto: e.concepto.trim(),
+          monto_usd:
+            moneda === 'MXN' ? round2(montoNativo / tcQuote!) : montoNativo,
+          moneda,
+          monto_nativo: montoNativo,
+          tc_aplicado: moneda === 'MXN' ? tcQuote : null,
+          aplica_iva: e.aplica_iva ?? true,
+        };
+      })
       .filter((e) => e.concepto.length > 0 && e.monto_usd > 0)
       // La comisión BillPocket la sintetiza el MOTOR (línea abajo): se
       // descarta cualquier copia persistida para no duplicarla al re-cotizar.
       .filter((e) => !e.concepto.startsWith(COMISION_BILLPOCKET_PREFIX));
+    const extrasMxnNativo = round2(
+      extras
+        .filter((e) => e.moneda === 'MXN')
+        .reduce((acc, e) => acc + e.monto_nativo, 0),
+    );
+    const extrasUsdDeMxn = round2(
+      extras
+        .filter((e) => e.moneda === 'MXN')
+        .reduce((acc, e) => acc + e.monto_usd, 0),
+    );
     const extrasConIva = extras
       .filter((e) => e.aplica_iva)
       .reduce((acc, e) => acc + e.monto_usd, 0);
@@ -343,6 +484,9 @@ export class QuotesService {
       extras.push({
         concepto: `${COMISION_BILLPOCKET_PREFIX} (${round2(comisionPct)}%)`,
         monto_usd: comisionR,
+        moneda: 'USD',
+        monto_nativo: comisionR,
+        tc_aplicado: null,
         aplica_iva: false,
       });
       extrasSinIvaRFinal = round2(extrasSinIvaR + comisionR);
@@ -369,12 +513,21 @@ export class QuotesService {
         }`,
         monto_usd: subtotalR,
       },
-      ...(tuasR > 0
-        ? [{ clave: 'TUAS', concepto: 'TUAS', monto_usd: tuasR }]
-        : []),
+      // Una línea POR AEROPUERTO con unitario, pax y moneda (pass-through
+      // auditable). La suma de filas (ya redondeadas) es exactamente tuasR.
+      ...tuasFilas.map((f) => ({
+        clave: 'TUAS',
+        concepto:
+          f.moneda === 'MXN'
+            ? `TUA ${f.iata} · $${f.monto_pax.toFixed(2)} MXN × ${f.pax} pax = $${f.total_nativo.toFixed(2)} MXN`
+            : `TUA ${f.iata} · $${f.monto_pax.toFixed(2)} × ${f.pax} pax`,
+        monto_usd: f.total_usd,
+      })),
       ...extras.map((e) => ({
         clave: 'EXTRA',
-        concepto: `${e.concepto}${e.aplica_iva ? '' : ' (sin IVA)'}`,
+        concepto: `${e.concepto}${
+          e.moneda === 'MXN' ? ` · $${e.monto_nativo.toFixed(2)} MXN` : ''
+        }${e.aplica_iva ? '' : ' (sin IVA)'}`,
         monto_usd: e.monto_usd,
       })),
       // El ajuste/descuento se lista ANTES del IVA porque reduce la base gravable.
@@ -417,14 +570,24 @@ export class QuotesService {
           destino: tuasAeropuertos[tuasAeropuertos.length - 1],
           intermedios: tuasAeropuertos.slice(1, -1),
           aeropuertos: tuasAeropuertos,
+          // Filas CONTABLES por aeropuerto (unitario, moneda, pax, totales y
+          // TC congelado): lo que se captura, se audita y se imprime.
+          filas: tuasFilas,
+          // Líneas CAPTURADAS tal cual (para re-alimentar revisiones/ajuste
+          // rápido sin perder el pass-through).
+          lineas_capturadas: dto.tuas_lineas ?? [],
           total_usd: tuasR,
+          total_mxn_nativo: tuasMxnNativo,
         }
       : {
           usd_pax_default: dto.tuas_override_usd_pax,
           pasajeros: dto.pasajeros,
           origen: tuasAeropuertos[0],
           destino: tuasAeropuertos[1],
+          filas: tuasFilas,
+          lineas_capturadas: dto.tuas_lineas ?? [],
           total_usd: tuasR,
+          total_mxn_nativo: tuasMxnNativo,
         };
 
     return {
@@ -506,6 +669,22 @@ export class QuotesService {
         ajuste_final_usd: ajusteFinal,
         iva_usd: iva,
         total_usd: total,
+        // TOTAL MXN EXACTO por composición: los componentes genuinamente USD
+        // se convierten con el TC (un solo redondeo) y los renglones NATIVOS
+        // en MXN entran en pesos TAL CUAL — así "vuelo USD @ TC + TUAS en
+        // pesos" cuadra al centavo con lo realmente pagado. Sin renglones
+        // MXN se reduce a total × tc (comportamiento histórico).
+        mxn_nativos: round2(tuasMxnNativo + extrasMxnNativo),
+        usd_de_mxn: round2(tuasUsdDeMxn + extrasUsdDeMxn),
+        total_mxn: tcQuote
+          ? round2(
+              Math.round(
+                (total - round2(tuasUsdDeMxn + extrasUsdDeMxn)) * tcQuote * 100,
+              ) /
+                100 +
+                round2(tuasMxnNativo + extrasMxnNativo),
+            )
+          : null,
       },
       meta: {
         calculado_at: new Date().toISOString(),
@@ -733,9 +912,7 @@ export class QuotesService {
       // TC declarado al cotizar (el pago puede entrar en pesos): habilita el
       // total MXN y sirve de respaldo para convertir cobros MXN sin TC.
       tc_usd_mxn: dto.tc_usd_mxn ?? null,
-      monto_total_mxn: dto.tc_usd_mxn
-        ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
-        : null,
+      monto_total_mxn: breakdown.totales.total_mxn ?? null,
       viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
       extras_total_usd: breakdown.totales.extras_total_usd,
       ajuste_final_usd: breakdown.totales.ajuste_final_usd,
@@ -919,9 +1096,7 @@ export class QuotesService {
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
         tc_usd_mxn: dto.tc_usd_mxn ?? null,
-        monto_total_mxn: dto.tc_usd_mxn
-          ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
-          : null,
+        monto_total_mxn: breakdown.totales.total_mxn ?? null,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
@@ -1109,6 +1284,10 @@ export class QuotesService {
         Number(metaSnapshot?.total_pactado_usd) > 0
           ? Number(metaSnapshot?.total_pactado_usd)
           : undefined,
+      // TUAS capturadas por aeropuerto (pass-through): se conservan tal cual.
+      tuas_lineas:
+        (snapshot as { tuas?: { lineas_capturadas?: unknown[] } } | null)?.tuas
+          ?.lineas_capturadas ?? undefined,
       motivo:
         dto.motivo?.trim() ||
         'Ajuste rápido desde el detalle (extras/pasajeros)',
@@ -1575,9 +1754,7 @@ export class QuotesService {
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
         tc_usd_mxn: dto.tc_usd_mxn ?? null,
-        monto_total_mxn: dto.tc_usd_mxn
-          ? Math.round(breakdown.totales.total_usd * dto.tc_usd_mxn * 100) / 100
-          : null,
+        monto_total_mxn: breakdown.totales.total_mxn ?? null,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,
         ajuste_final_usd: breakdown.totales.ajuste_final_usd,
@@ -1754,6 +1931,9 @@ export class QuotesService {
         iata,
         aplica: result.aplica,
         usd_pax: result.aplica ? usdPax : 0,
+        monto_pax: result.aplica ? usdPax : 0,
+        moneda: 'USD',
+        tc_aplicado: null,
         razon: result.razon,
       };
     } catch (e) {
@@ -1762,6 +1942,9 @@ export class QuotesService {
           iata,
           aplica: override !== undefined && override > 0,
           usd_pax: override ?? 0,
+          monto_pax: override ?? 0,
+          moneda: 'USD',
+          tc_aplicado: null,
           razon: `Aeropuerto ${iata} no registrado en catálogo${override !== undefined ? ' — usando override' : ' — TUAS no calculada'}`,
         };
       }

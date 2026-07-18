@@ -46,7 +46,9 @@ export class QuotesController {
 
   @Get()
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
-  @ApiOperation({ summary: 'List quotes (vuelos) with filters. No accesible a pilotos.' })
+  @ApiOperation({
+    summary: 'List quotes (vuelos) with filters. No accesible a pilotos.',
+  })
   list(@Query() q: ListQuotesQuery) {
     return this.quotes.list(q);
   }
@@ -73,14 +75,19 @@ export class QuotesController {
 
   @Get(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
-  @ApiOperation({ summary: 'Get vuelo/quote with current cotization snapshot. No accesible a pilotos.' })
+  @ApiOperation({
+    summary:
+      'Get vuelo/quote with current cotization snapshot. No accesible a pilotos.',
+  })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.quotes.findById(id);
   }
 
   @Get(':id/versions')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
-  @ApiOperation({ summary: 'Full version history of the quote. No accesible a pilotos.' })
+  @ApiOperation({
+    summary: 'Full version history of the quote. No accesible a pilotos.',
+  })
   versions(@Param('id', ParseUUIDPipe) id: string) {
     return this.quotes.findVersions(id);
   }
@@ -118,9 +125,13 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
-    summary: 'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version.',
+    summary:
+      'Confirm the quote (estado COTIZADO -> CONFIRMADO). Locks the current version.',
   })
-  confirm(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  confirm(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.quotes.confirm(id, c.userId);
   }
 
@@ -138,10 +149,13 @@ export class QuotesController {
 
   @Post(':id/pdf')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
-  @ApiOperation({ summary: 'Genera el PDF de la cotización (render en pyservices/WeasyPrint).' })
+  @ApiOperation({
+    summary:
+      'Genera el PDF de la cotización (render en pyservices/WeasyPrint).',
+  })
   async pdf(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const quote = await this.quotes.findById(id);
-    const pdf = await this.quotesPdf.render(quote as Record<string, unknown>);
+    const pdf = await this.quotesPdf.render(quote);
     res.set({
       'Content-Type': 'application/pdf',
       'Content-Disposition': `inline; filename="cotizacion-${(quote as { folio?: unknown }).folio ?? id}.pdf"`,

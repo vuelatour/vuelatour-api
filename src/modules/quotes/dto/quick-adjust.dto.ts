@@ -39,7 +39,9 @@ export class QuickAdjustQuoteDto {
   @Min(1)
   pasajeros?: number;
 
-  @ApiPropertyOptional({ description: 'Motivo del ajuste (queda en el historial de versiones).' })
+  @ApiPropertyOptional({
+    description: 'Motivo del ajuste (queda en el historial de versiones).',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(500)

@@ -9,7 +9,7 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, calculo_snapshot';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -28,11 +28,15 @@ export class FlightReportService {
   ) {}
 
   async pdf(flightId: string): Promise<Buffer> {
-    return this.pyservices.generateReporteVueloPdf(await this.buildPayload(flightId));
+    return this.pyservices.generateReporteVueloPdf(
+      await this.buildPayload(flightId),
+    );
   }
 
   async xlsx(flightId: string): Promise<Buffer> {
-    return this.pyservices.generateReporteVueloXlsx(await this.buildPayload(flightId));
+    return this.pyservices.generateReporteVueloXlsx(
+      await this.buildPayload(flightId),
+    );
   }
 
   /** Folio del vuelo (para nombrar el archivo descargado). */
@@ -55,36 +59,49 @@ export class FlightReportService {
     if (error) throw new Error(error.message);
     if (!v) throw new NotFoundException(`Vuelo ${flightId} not found`);
 
-    const [{ data: cliente }, { data: aeronave }, escalasRes, cobrosRes, gastosRes] =
-      await Promise.all([
-        v.cliente_id
-          ? sb.from('cliente').select('nombre').eq('id', v.cliente_id).maybeSingle()
-          : Promise.resolve({ data: null }),
-        v.aeronave_id
-          ? sb.from('aeronave').select('matricula, modelo').eq('id', v.aeronave_id).maybeSingle()
-          : Promise.resolve({ data: null }),
-        sb
-          .from('escala')
-          .select(
-            'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id',
-          )
-          .eq('vuelo_id', flightId)
-          .order('orden', { ascending: true }),
-        sb
-          .from('cobro_vuelo')
-          .select(
-            'monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_pct, comision_banco_monto',
-          )
-          .eq('vuelo_id', flightId)
-          .order('fecha_cobro', { ascending: true }),
-        sb
-          .from('gasto')
-          .select(
-            'fecha_gasto, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
-          )
-          .eq('vuelo_id', flightId)
-          .order('fecha_gasto', { ascending: true }),
-      ]);
+    const [
+      { data: cliente },
+      { data: aeronave },
+      escalasRes,
+      cobrosRes,
+      gastosRes,
+    ] = await Promise.all([
+      v.cliente_id
+        ? sb
+            .from('cliente')
+            .select('nombre')
+            .eq('id', v.cliente_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      v.aeronave_id
+        ? sb
+            .from('aeronave')
+            .select('matricula, modelo')
+            .eq('id', v.aeronave_id)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      sb
+        .from('escala')
+        .select(
+          'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id',
+        )
+        .eq('vuelo_id', flightId)
+        .order('orden', { ascending: true }),
+      sb
+        .from('cobro_vuelo')
+        .select(
+          'monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_pct, comision_banco_monto',
+        )
+        .eq('vuelo_id', flightId)
+        .order('fecha_cobro', { ascending: true }),
+      sb
+        .from('gasto')
+        .select(
+          'fecha_gasto, categoria, monto, moneda, tc_gasto, litros, lugar, notas, proveedor:proveedor_id(nombre)',
+        )
+        .eq('vuelo_id', flightId)
+        .order('fecha_gasto', { ascending: true }),
+    ]);
 
     // Un query fallido NO puede degradar a "sin datos": un reporte con cero
     // cobros de un vuelo pagado es una mentira numérica silenciosa (peor que
@@ -105,8 +122,12 @@ export class FlightReportService {
     const userIds = [v.piloto_id, v.copiloto_id].filter(Boolean) as string[];
     const nombrePorId = new Map<string, string>();
     if (userIds.length) {
-      const { data: us } = await sb.from('usuario').select('id, nombre').in('id', userIds);
-      for (const u of us ?? []) nombrePorId.set(u.id as string, u.nombre as string);
+      const { data: us } = await sb
+        .from('usuario')
+        .select('id, nombre')
+        .in('id', userIds);
+      for (const u of us ?? [])
+        nombrePorId.set(u.id as string, u.nombre as string);
     }
 
     const escalas = (escalasRes.data ?? []) as Array<Record<string, unknown>>;
@@ -154,20 +175,28 @@ export class FlightReportService {
     // maximizar (salir de otra base, pernoctar, aprovechar ferries). Las notas
     // explican el motivo del ahorro SIN captura extra: se derivan de los datos
     // que ya existen en las escalas.
-    const horasCotizadas = v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr);
+    const horasCotizadas =
+      v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr);
     const horasConDato = tramos.filter((t) => t.horas != null);
     const horasVoladas =
       horasConDato.length > 0
-        ? Number(horasConDato.reduce((acc, t) => acc + (t.horas ?? 0), 0).toFixed(1))
+        ? Number(
+            horasConDato.reduce((acc, t) => acc + (t.horas ?? 0), 0).toFixed(1),
+          )
         : null;
     const notasHoras: string[] = [];
-    const primerOrigen = (escalas[0]?.origen_iata as string | undefined) ?? null;
+    const primerOrigen =
+      (escalas[0]?.origen_iata as string | undefined) ?? null;
     if (primerOrigen && primerOrigen !== 'CUN') {
-      notasHoras.push(`El avión salió de ${primerOrigen} (no de CUN): se ahorró el posicionamiento.`);
+      notasHoras.push(
+        `El avión salió de ${primerOrigen} (no de CUN): se ahorró el posicionamiento.`,
+      );
     }
     for (const e of escalas) {
       if (e.requiere_pernocta === true) {
-        notasHoras.push(`Pernoctó en ${e.destino_iata as string}: el regreso no se voló el mismo día.`);
+        notasHoras.push(
+          `Pernoctó en ${e.destino_iata as string}: el regreso no se voló el mismo día.`,
+        );
       }
     }
     const ferries = escalas.filter((e) => e.es_ferry === true).length;
@@ -179,31 +208,37 @@ export class FlightReportService {
     if (horasCotizadas != null && horasVoladas != null) {
       const delta = Number((horasCotizadas - horasVoladas).toFixed(1));
       if (delta > 0) {
-        notasHoras.push(`Se volaron ${delta} hrs MENOS de las cotizadas: utilidad operativa a favor.`);
+        notasHoras.push(
+          `Se volaron ${delta} hrs MENOS de las cotizadas: utilidad operativa a favor.`,
+        );
       } else if (delta < 0) {
-        notasHoras.push(`Se volaron ${Math.abs(delta)} hrs MÁS de las cotizadas: revisar el itinerario.`);
+        notasHoras.push(
+          `Se volaron ${Math.abs(delta)} hrs MÁS de las cotizadas: revisar el itinerario.`,
+        );
       }
     }
 
-    const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map((c) => ({
-      fecha: (c.fecha_cobro as string) ?? null,
-      concepto: (c.metodo_cobro as string) ?? 'Cobro',
-      // La comisión bancaria del cobro se muestra en su renglón: el banco
-      // depositó monto − comisión (pedido del cliente: el reporte no cuadraba
-      // con el estado de cuenta).
-      detalle:
-        n(c.comision_banco_monto) > 0
-          ? `Comisión banco ${Number(c.comision_banco_pct ?? 0)}% − $${n(
-              c.comision_banco_monto,
-            ).toFixed(2)} ${(c.moneda as string) ?? ''}`.trim()
-          : null,
-      moneda: (c.moneda as string) ?? 'USD',
-      monto: n(c.monto),
-    }));
+    const cobros: ReporteVueloLineaPayload[] = (cobrosRes.data ?? []).map(
+      (c) => ({
+        fecha: (c.fecha_cobro as string) ?? null,
+        concepto: (c.metodo_cobro as string) ?? 'Cobro',
+        // La comisión bancaria del cobro se muestra en su renglón: el banco
+        // depositó monto − comisión (pedido del cliente: el reporte no cuadraba
+        // con el estado de cuenta).
+        detalle:
+          n(c.comision_banco_monto) > 0
+            ? `Comisión banco ${Number(c.comision_banco_pct ?? 0)}% − $${n(
+                c.comision_banco_monto,
+              ).toFixed(2)} ${(c.moneda as string) ?? ''}`.trim()
+            : null,
+        moneda: (c.moneda as string) ?? 'USD',
+        monto: n(c.monto),
+      }),
+    );
     // Total cobrado por la fuente canónica: cada cobro convertido a USD con su
     // TC (o el del vuelo). Antes se sumaban MXN y USD crudos → saldos absurdos.
     const conv = cobrosEnUsd(
-      (cobrosRes.data ?? []) as Array<Record<string, unknown>>,
+      cobrosRes.data ?? [],
       v.tc_usd_mxn as number | null,
     );
     const totalCobrado = conv.total_usd;
@@ -229,7 +264,10 @@ export class FlightReportService {
 
     const gastosRows = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
     const proveedorNombre = (g: Record<string, unknown>): string | null => {
-      const p = g.proveedor as { nombre?: string } | { nombre?: string }[] | null;
+      const p = g.proveedor as
+        | { nombre?: string }
+        | { nombre?: string }[]
+        | null;
       if (Array.isArray(p)) return p[0]?.nombre ?? null;
       return p?.nombre ?? null;
     };
@@ -268,7 +306,30 @@ export class FlightReportService {
         monto: n(g.monto),
       }));
 
-    const matricula = (aeronave as { matricula?: string; modelo?: string } | null);
+    const matricula = aeronave as {
+      matricula?: string;
+      modelo?: string;
+    } | null;
+
+    // TUAS ligados al reporte CON su moneda (requisito del cliente): las
+    // líneas del desglose canónico del snapshot traen aeropuerto, unitario,
+    // pax y moneda. Son sub-líneas INFORMATIVAS: la fila numérica "TUAS USD"
+    // sigue siendo la que cuadra la suma. Vuelos viejos sin snapshot → [].
+    const snap = v.calculo_snapshot as
+      | Record<string, unknown>
+      | null
+      | undefined;
+    const desgloseSnap = snap?.desglose;
+    const tuasDetalle = Array.isArray(desgloseSnap)
+      ? (desgloseSnap as Array<Record<string, unknown>>)
+          .filter(
+            (d) =>
+              d.clave === 'TUAS' &&
+              typeof d.concepto === 'string' &&
+              d.concepto,
+          )
+          .map((d) => d.concepto as string)
+      : [];
 
     // ===== Economía del vuelo (formato de los Excel de control del equipo:
     // "Balance VGV" / "Dinero <mes>") =====
@@ -315,7 +376,9 @@ export class FlightReportService {
     }
     gastosTotalUsd = Number(gastosTotalUsd.toFixed(2));
     combustibleTotalUsd = Number(combustibleTotalUsd.toFixed(2));
-    const costoVueloUsd = Number((gastosTotalUsd + combustibleTotalUsd).toFixed(2));
+    const costoVueloUsd = Number(
+      (gastosTotalUsd + combustibleTotalUsd).toFixed(2),
+    );
     if (gastosSinTcCount > 0) {
       notasHoras.push(
         `${gastosSinTcCount} gasto(s) en MXN por $${gastosSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio: no entran al balance USD — captura su TC en Gastos.`,
@@ -335,13 +398,21 @@ export class FlightReportService {
     const gananciaFinalUsd =
       remanenteUsd != null
         ? Number(
-            (remanenteUsd - n(v.comision_vendedor_usd) - comisionesBancoUsd).toFixed(2),
+            (
+              remanenteUsd -
+              n(v.comision_vendedor_usd) -
+              comisionesBancoUsd
+            ).toFixed(2),
           )
         : null;
     const horasParaGanancia =
-      horasCotizadas != null && horasCotizadas > 0 ? horasCotizadas : horasVoladas;
+      horasCotizadas != null && horasCotizadas > 0
+        ? horasCotizadas
+        : horasVoladas;
     const gananciaXHrUsd =
-      gananciaFinalUsd != null && horasParaGanancia != null && horasParaGanancia > 0
+      gananciaFinalUsd != null &&
+      horasParaGanancia != null &&
+      horasParaGanancia > 0
         ? Number((gananciaFinalUsd / horasParaGanancia).toFixed(2))
         : null;
     const gananciaPct =
@@ -356,8 +427,12 @@ export class FlightReportService {
       aeronave: matricula
         ? [matricula.matricula, matricula.modelo].filter(Boolean).join(' · ')
         : null,
-      piloto: v.piloto_id ? (nombrePorId.get(v.piloto_id as string) ?? null) : null,
-      copiloto: v.copiloto_id ? (nombrePorId.get(v.copiloto_id as string) ?? null) : null,
+      piloto: v.piloto_id
+        ? (nombrePorId.get(v.piloto_id as string) ?? null)
+        : null,
+      copiloto: v.copiloto_id
+        ? (nombrePorId.get(v.copiloto_id as string) ?? null)
+        : null,
       tipo: (v.tipo as string) ?? '',
       estado: (v.estado as string) ?? '',
       ruta,
@@ -367,9 +442,11 @@ export class FlightReportService {
       pasajeros_nombres: nombresATexto(v.pasajeros_nombres),
       tarifa_tipo: (v.tarifa_tipo as string) ?? null,
       tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
-      tiempo_cobrable_hr: v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
+      tiempo_cobrable_hr:
+        v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
       subtotal_usd: n(v.subtotal_vuelo_usd),
       tuas_usd: n(v.tuas_usd),
+      tuas_detalle: tuasDetalle,
       iva_usd: n(v.iva_usd),
       viaticos_pernocta_usd: n(v.viaticos_pernocta_usd),
       extras_total_usd: n(v.extras_total_usd),
@@ -380,10 +457,13 @@ export class FlightReportService {
       // Comisión del vendedor: se muestra DESPUÉS del total (el cliente paga
       // el total completo); neto = lo que queda a VuelaTour.
       comision_vendedor_usd: n(v.comision_vendedor_usd),
-      comision_vendedor_nombre: (v.comision_vendedor_nombre as string | null) ?? null,
+      comision_vendedor_nombre:
+        (v.comision_vendedor_nombre as string | null) ?? null,
       neto_vuelatour_usd:
         n(v.comision_vendedor_usd) > 0
-          ? Number((n(v.monto_total_usd) - n(v.comision_vendedor_usd)).toFixed(2))
+          ? Number(
+              (n(v.monto_total_usd) - n(v.comision_vendedor_usd)).toFixed(2),
+            )
           : null,
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
