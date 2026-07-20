@@ -139,6 +139,151 @@ export interface ReporteVueloPayload {
   notas?: string | null;
 }
 
+// ===== Balance por avión (réplica sistematizada del Excel "Balance N990GG") =====
+// El API calcula TODO el dinero; pyservices SOLO pinta el libro (null = celda
+// vacía, nunca 0 falso).
+
+export interface BalanceAvionCobroPayload {
+  fecha: string | null;
+  /** Monto de la parcialidad en MXN (null = USD sin TC: no convertible). */
+  monto_mxn: number | null;
+  metodo?: string | null;
+}
+
+export interface BalanceAvionVueloPayload {
+  folio: string;
+  cliente: string | null;
+  estado: string;
+  es_externo: boolean;
+  /** Fecha del vuelo (día Cancún, YYYY-MM-DD). */
+  fecha: string | null;
+  /** Fin del traslado si el vuelo es multi-día (día Cancún). */
+  fecha_fin: string | null;
+  ruta: string;
+  // Bloque VENTA
+  horas_cobradas: number;
+  tarifa_usd: number | null;
+  iva_hr_usd: number | null;
+  total_usd: number | null;
+  iva_usd: number | null;
+  tc_venta: number | null;
+  total_mxn: number | null;
+  iva_mxn: number | null;
+  subtotal_mxn: number | null;
+  // Bloque TIEMPO/TACO
+  tiempo_vuelo: number | null;
+  taco_inicio: number | null;
+  taco_fin: number | null;
+  // Bloque COSTOS (MXN)
+  gas_mxn: number | null;
+  gas_litros: number | null;
+  gas_precio_litro: number | null;
+  op_mxn: number | null;
+  piloto_mxn: number | null;
+  otros_mxn: number | null;
+  permiso_afac_mxn: number | null;
+  costo_total_mxn: number;
+  tc_costos: number | null;
+  // Bloque INDICADORES USD e IVA
+  costo_usd: number | null;
+  costo_usd_siva: number | null;
+  iva_pagado_usd: number | null;
+  iva_pagado_mxn: number | null;
+  remanente_mxn: number;
+  dif_iva_mxn: number;
+  comision_vendedor_mxn: number | null;
+  ganancia_mxn: number;
+  ganancia_usd: number | null;
+  costo_hr_usd: number | null;
+  costo_hr_usd_siva: number | null;
+  // Bloque STATUS DE COBROS
+  status_cobro: string;
+  cobros: BalanceAvionCobroPayload[];
+  cobrado_mxn: number;
+  por_cobrar_mxn: number;
+  por_cobrar_usd: number | null;
+}
+
+export interface BalanceAvionTotalesPayload {
+  horas_cobradas: number;
+  tiempo_vuelo: number;
+  total_mxn: number;
+  iva_mxn: number;
+  subtotal_mxn: number;
+  gas_mxn: number;
+  gas_litros: number;
+  op_mxn: number;
+  piloto_mxn: number;
+  otros_mxn: number;
+  permiso_afac_mxn: number;
+  costo_total_mxn: number;
+  remanente_mxn: number;
+  dif_iva_mxn: number;
+  comision_vendedor_mxn: number;
+  ganancia_mxn: number;
+  ganancia_usd: number;
+  cobrado_mxn: number;
+  por_cobrar_mxn: number;
+  por_cobrar_usd: number;
+  /** Promedio simple de los TC de costos (Z) no nulos del periodo. */
+  tc_promedio: number | null;
+  /** Promedio de costo por hora volada (AN) SOLO sobre no nulos. */
+  costo_hr_prom_usd: number | null;
+}
+
+export interface BalanceAvionGastoFilaPayload {
+  fecha: string | null;
+  detalle: string;
+  /** null = moneda extranjera sin TC (no convertible; va a pendientes). */
+  monto_mxn: number | null;
+  moneda_original: string | null;
+  monto_original: number | null;
+}
+
+export interface BalanceAvionHojaGastosPayload {
+  filas: BalanceAvionGastoFilaPayload[];
+  total_mxn: number;
+  /** total_mxn al TC promedio del periodo (null = sin TC en el periodo). */
+  usd: number | null;
+  /** usd / horas voladas del periodo. */
+  usd_hr: number | null;
+}
+
+export interface BalanceAvionSocioPayload {
+  nombre: string;
+  porcentaje: number;
+  monto_usd: number | null;
+}
+
+export interface BalanceAvionBalancePayload {
+  utilidad_antes_usd: number;
+  gastos_indirectos_usd: number | null;
+  otros_usd: number | null;
+  permisos_usd: number | null;
+  utilidad_despues_usd: number | null;
+  por_cobrar_usd: number;
+  utilidad_cobrada_usd: number | null;
+  socios: BalanceAvionSocioPayload[];
+}
+
+export interface BalanceAvionPayload {
+  generado: string;
+  matricula: string;
+  modelo: string | null;
+  periodo_desde: string;
+  periodo_hasta: string;
+  permiso_afac_usd_hr: number | null;
+  tc_promedio: number | null;
+  horas_voladas_hr: number;
+  vuelos: BalanceAvionVueloPayload[];
+  totales: BalanceAvionTotalesPayload;
+  gastos_indirectos: BalanceAvionHojaGastosPayload;
+  otros_gastos: BalanceAvionHojaGastosPayload;
+  permisos: BalanceAvionHojaGastosPayload;
+  balance: BalanceAvionBalancePayload;
+  pendientes: string[];
+}
+
 export interface GastoVueloSugerenciaPayload {
   gasto: {
     fecha: string | null;
@@ -229,6 +374,15 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/reporte-vuelo-xlsx', payload);
   }
 
+  /** Balance mensual por avión en Excel (libro de 6 hojas). */
+  async generateBalanceAvionXlsx(
+    payload: BalanceAvionPayload,
+  ): Promise<Buffer> {
+    // Libro grande (1 fila por vuelo + 3 ledgers): tope de 30s como el resto
+    // de renders pesados (quotes-pdf) para no colgar el request del panel.
+    return this.postForBuffer('/pdf/balance-avion-xlsx', payload, 30_000);
+  }
+
   /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */
   async parseFacturaRecibida(xmlB64: string): Promise<FacturaRecibidaParsed> {
     return this.postForJson<FacturaRecibidaParsed>(
@@ -288,7 +442,11 @@ export class PyservicesService {
     return (await res.json()) as T;
   }
 
-  private async postForBuffer(path: string, body: unknown): Promise<Buffer> {
+  private async postForBuffer(
+    path: string,
+    body: unknown,
+    timeoutMs?: number,
+  ): Promise<Buffer> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
@@ -299,28 +457,37 @@ export class PyservicesService {
       );
     }
 
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Internal-Token': token,
-      },
-      body: JSON.stringify(body),
-    }).catch((e: unknown) => {
-      const msg = e instanceof Error ? e.message : 'error de red';
-      throw new BadGatewayException(
-        `No se pudo contactar a pyservices: ${msg}`,
-      );
-    });
+    const controller = timeoutMs ? new AbortController() : null;
+    const timer = controller
+      ? setTimeout(() => controller.abort(), timeoutMs)
+      : null;
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': token,
+        },
+        body: JSON.stringify(body),
+        signal: controller?.signal,
+      }).catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : 'error de red';
+        throw new BadGatewayException(
+          `No se pudo contactar a pyservices: ${msg}`,
+        );
+      });
 
-    if (!res.ok) {
-      const detalle = await res.text().catch(() => '');
-      throw new BadGatewayException(
-        `pyservices respondio ${res.status}: ${detalle.slice(0, 300)}`,
-      );
+      if (!res.ok) {
+        const detalle = await res.text().catch(() => '');
+        throw new BadGatewayException(
+          `pyservices respondio ${res.status}: ${detalle.slice(0, 300)}`,
+        );
+      }
+
+      const arrayBuffer = await res.arrayBuffer();
+      return Buffer.from(arrayBuffer);
+    } finally {
+      if (timer) clearTimeout(timer);
     }
-
-    const arrayBuffer = await res.arrayBuffer();
-    return Buffer.from(arrayBuffer);
   }
 }

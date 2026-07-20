@@ -64,6 +64,15 @@ export class CreateAeronaveDto {
   reserva_overhaul_hr_usd?: number;
 
   @ApiPropertyOptional({
+    description:
+      'Aportación AFAC (USD por hora cobrada) por volar con matrícula extranjera. Vacío = no aplica. La usa el Balance por avión.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  permiso_afac_usd_hr?: number;
+
+  @ApiPropertyOptional({
     description: 'Color hex para UI (#XXXXXX)',
     example: '#3B82F6',
   })

@@ -12,6 +12,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import {
   ApiBearerAuth,
@@ -23,6 +24,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { BalanceAvionQuery } from './dto/balance-avion.query';
 import { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -42,13 +44,17 @@ import {
   CreateDiscrepanciaDto,
   UpdateDiscrepanciaDto,
 } from './dto/upsert-aeronave-discrepancia.dto';
+import { AircraftBalanceService } from './aircraft-balance.service';
 import { AircraftService } from './aircraft.service';
 
 @ApiTags('Aircraft')
 @ApiBearerAuth()
 @Controller({ path: 'aircraft', version: '1' })
 export class AircraftController {
-  constructor(private readonly aircraft: AircraftService) {}
+  constructor(
+    private readonly aircraft: AircraftService,
+    private readonly balance: AircraftBalanceService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List aircraft' })
@@ -87,6 +93,29 @@ export class AircraftController {
   })
   snapshot(@Param('id', ParseUUIDPipe) id: string) {
     return this.aircraft.getSnapshot(id);
+  }
+
+  @Get(':id/balance.xlsx')
+  // Mismos roles que el reparto (/v1/profit-sharing/xlsx): este libro trae
+  // utilidad y reparto de socios — misma sensibilidad que el cierre.
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Balance mensual del avión en Excel (réplica del control del equipo: venta/costos/indicadores por vuelo, hojas de gastos, balance y pendientes). Default: mes corriente en hora Cancún.',
+  })
+  async balanceXlsx(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: BalanceAvionQuery,
+  ): Promise<StreamableFile> {
+    const { buffer, matricula, desde, hasta } = await this.balance.xlsx(
+      id,
+      q.desde,
+      q.hasta,
+    );
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="balance-${matricula}-${desde}-a-${hasta}.xlsx"`,
+    });
   }
 
   @Get(':id/tacometros')
