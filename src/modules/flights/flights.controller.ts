@@ -284,7 +284,22 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.setFlightPlan(id, dto.foto_plan_vuelo_url, c.userId);
+    return this.flights.setFlightPlan(id, dto.foto_plan_vuelo_url, c.userId, c);
+  }
+
+  // Sin @Roles: cualquier rol autenticado que ve el detalle del vuelo (igual
+  // que GET :id); el PILOTO se restringe a sus vuelos vía assertAccess.
+  @Get(':id/plan-vuelo-url')
+  @ApiOperation({
+    summary:
+      'URL firmada (1 h) de la foto del plan de vuelo (bucket privado planes-vuelo). { url: null } si no hay foto.',
+  })
+  async planVueloUrl(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccess(id, c);
+    return this.flights.flightPlanUrl(id);
   }
 
   @Post(':id/complete')

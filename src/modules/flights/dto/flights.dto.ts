@@ -185,7 +185,11 @@ export class UpdatePermisoDto {
 }
 
 export class SetFlightPlanDto {
-  @ApiProperty({ description: 'URL/path en Storage de la foto del plan de vuelo' })
+  @ApiProperty({
+    description:
+      'PATH dentro del bucket privado planes-vuelo (p. ej. vuelo-<id>/plan-<ts>.jpg). ' +
+      'Para verla se firma vía GET :id/plan-vuelo-url (filas viejas con URL pública completa también se resuelven ahí).',
+  })
   @IsString()
   foto_plan_vuelo_url!: string;
 }

@@ -32,7 +32,7 @@ import type {
   UpdateEscalaDto,
 } from './dto/escalas.dto';
 import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
-import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
@@ -716,7 +716,7 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, es_externo, cliente:cliente_id(nombre)',
+        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, copiloto_id, es_externo, cliente:cliente_id(nombre)',
       )
       .eq('id', id)
       .maybeSingle();
@@ -736,6 +736,7 @@ export class FlightsService {
       fecha_vuelo: string | null;
       fecha_traslado_final: string | null;
       piloto_id: string | null;
+      copiloto_id: string | null;
       es_externo: boolean;
       cliente: { nombre: string } | { nombre: string }[] | null;
     };
@@ -747,13 +748,19 @@ export class FlightsService {
       (e) => (e as { solo_operativa?: boolean }).solo_operativa !== true,
     );
 
-    // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida) o
-    // a cualquier tramo (p. ej. solo el regreso de un redondo con pilotos distintos).
+    // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida),
+    // como COPILOTO (a nivel vuelo: acompaña todo el viaje, igual que en
+    // assertAccess y en el listado) o a cualquier tramo (p. ej. solo el
+    // regreso de un redondo con pilotos distintos).
     if (current.rol === Rol.PILOTO) {
       const asignadoATramo = todasEscalas.some(
         (e) => e.piloto_id === current.userId,
       );
-      if (v.piloto_id !== current.userId && !asignadoATramo) {
+      if (
+        v.piloto_id !== current.userId &&
+        v.copiloto_id !== current.userId &&
+        !asignadoATramo
+      ) {
         throw new ForbiddenException(
           'No puedes ver la cotización de un vuelo que no tienes asignado',
         );
@@ -827,13 +834,22 @@ export class FlightsService {
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
     );
-    const totalCobrado = cobros.reduce((acc, c) => acc + Number(c.monto), 0);
+    // total_cobrado SIEMPRE en USD vía la fuente única (invariante 2 del
+    // repo): la suma cruda mezclaba monedas y un cobro parcial en MXN
+    // inflaba el total — la app del piloto bloqueaba el cobro del saldo y el
+    // panel pintaba pendientes negativos. Los MXN sin TC quedan expuestos.
+    const conv = cobrosEnUsd(
+      cobros as CobroLike[],
+      Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null,
+    );
     return {
       ...vuelo,
       aeronave_matricula: aeronaveMatricula,
       escalas: escalasEnriquecidas,
       cobros,
-      total_cobrado: Math.round(totalCobrado * 100) / 100,
+      total_cobrado: Math.round(conv.total_usd * 100) / 100,
+      cobros_sin_tc_count: conv.sin_tc_count,
+      cobros_sin_tc_mxn: conv.sin_tc_mxn,
     };
   }
 
@@ -1084,7 +1100,12 @@ export class FlightsService {
    * Guarda la foto del plan de vuelo de salida (vuelos hacia/desde pistas con
    * permiso). La sube el piloto desde la app; opcional, no bloqueante.
    */
-  async setFlightPlan(id: string, fotoUrl: string, userId: string) {
+  async setFlightPlan(
+    id: string,
+    fotoUrl: string,
+    userId: string,
+    actor?: AuthenticatedUser,
+  ) {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({ foto_plan_vuelo_url: fotoUrl, updated_by: userId })
@@ -1093,7 +1114,50 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
-    return data;
+    // Misma redacción por rol que el resto de caminos que devuelven el vuelo:
+    // el piloto adjunta el plan y no debe recibir el costo del operador.
+    return this.redactVueloForRol(data, actor);
+  }
+
+  /**
+   * URL firmada (1 h) de la foto del plan de vuelo (bucket PRIVADO
+   * `planes-vuelo`). `foto_plan_vuelo_url` guarda el PATH dentro del bucket
+   * (p. ej. `vuelo-<id>/plan-<ts>.jpg`); filas viejas guardaron la URL
+   * pública completa (que da 400 al ser privado el bucket) — de esas se
+   * extrae el path después de `/planes-vuelo/` sin migrar datos.
+   */
+  async flightPlanUrl(id: string): Promise<{ url: string | null }> {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('foto_plan_vuelo_url')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    const raw = ((data.foto_plan_vuelo_url as string | null) ?? '').trim();
+    if (!raw) return { url: null };
+    let path = raw;
+    const marker = '/planes-vuelo/';
+    const idx = raw.indexOf(marker);
+    if (idx !== -1) {
+      // Compat: URL completa del bucket (pública o firmada) → solo el path.
+      const resto = raw.slice(idx + marker.length).split('?')[0];
+      try {
+        path = decodeURIComponent(resto);
+      } catch {
+        path = resto; // valor malformado: se intenta tal cual
+      }
+    }
+    const { data: signed, error: signErr } = await this.supabase.service.storage
+      .from('planes-vuelo')
+      .createSignedUrl(path, 3600);
+    if (signErr || !signed?.signedUrl) {
+      this.logger.warn(
+        `flightPlanUrl: no se pudo firmar "${path}" del vuelo ${id}: ${signErr?.message ?? 'sin URL'}`,
+      );
+      return { url: null };
+    }
+    return { url: signed.signedUrl };
   }
 
   /**
