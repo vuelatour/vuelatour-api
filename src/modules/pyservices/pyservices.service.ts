@@ -229,6 +229,8 @@ export interface BalanceAvionTotalesPayload {
   tc_promedio: number | null;
   /** Promedio de costo por hora volada (AN) SOLO sobre no nulos. */
   costo_hr_prom_usd: number | null;
+  /** TUAs/extras/pernocta cobrados: informativo al pie, van a la general. */
+  otros_ingresos_usd: number | null;
 }
 
 export interface BalanceAvionGastoFilaPayload {

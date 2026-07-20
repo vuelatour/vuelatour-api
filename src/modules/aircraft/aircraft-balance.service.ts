@@ -335,6 +335,9 @@ export class AircraftBalanceService {
     // ===== PASO 2: fila por vuelo =====
     const filasVuelo: BalanceAvionVueloPayload[] = [];
     const anValues: number[] = []; // costo hr USD (AN) para el promedio
+    // TUAs/extras/pernocta cobrados al cliente: NO van en las filas (regla
+    // del libro) — se acumulan para informarlos al pie (van a la general).
+    let otrosIngresosPeriodoUsd = 0;
     for (const v of vuelos) {
       const vEscalas = escalasPorVuelo.get(v.id) ?? [];
       const vCobros = cobrosPorVuelo.get(v.id) ?? [];
@@ -358,17 +361,35 @@ export class AircraftBalanceService {
       } ${ruta})`;
 
       // ----- Bloque VENTA -----
+      // REGLA DEL LIBRO (corrección 20-jul, indicación del cliente): la fila
+      // individual lleva SOLO lo del vuelo — horas cobradas × tarifa, con o
+      // sin IVA (fórmulas exactas del Excel original: I=D×H, J=D×G, L=I×K).
+      // TUAs/extras/pernocta/transportes son OTROS INGRESOS y van al control
+      // GENERAL, no a la fila: aquí solo se informa el acumulado del periodo
+      // al pie para trasladarlo a la general.
       const D = num(v.tiempo_cobrable_hr) ?? 0; // horas cobradas (0 sin cotización)
       const E = num(v.tarifa_hora_usd);
-      const totalUsd = num(v.monto_total_usd); // total del sistema (incluye TUAS/extras/pernocta)
-      const ivaUsd = num(v.iva_usd);
-      const G = D > 0 && ivaUsd != null ? round2(ivaUsd / D) : null;
+      const totalSistemaUsd = num(v.monto_total_usd); // total cotizado (con TUAS/extras)
+      const ivaSistemaUsd = num(v.iva_usd);
+      // Con/sin IVA por vuelo (columna G del libro): si la cotización lleva
+      // IVA, G = E×0.16; si no (sin factura), 0.
+      const conIva = (ivaSistemaUsd ?? 0) > 0;
+      const G = E != null ? (conIva ? round2(E * 0.16) : 0) : null;
+      const H = E != null ? round2(E + (G ?? 0)) : null;
+      const I = H != null && D > 0 ? round2(D * H) : null; // venta del vuelo
+      const J = G != null && D > 0 ? round2(D * G) : null; // IVA del vuelo
       const K = pos(v.tc_usd_mxn);
-      const L =
-        num(v.monto_total_mxn) ??
-        (totalUsd != null && K != null ? round2(totalUsd * K) : null);
-      const M = ivaUsd != null && K != null ? round2(ivaUsd * K) : null;
+      const L = I != null && K != null ? round2(I * K) : null;
+      const M = J != null && K != null ? round2(J * K) : null;
       const N = L != null ? round2(L - (M ?? 0)) : null;
+      // Otros ingresos del vuelo (TUAS/extras/pernocta/ajustes): diferencia
+      // entre el total cotizado del sistema y la venta por horas. Se acumula
+      // para informarlo al pie (va a la general, no a la fila).
+      const otrosIngresosUsd =
+        totalSistemaUsd != null && (I != null || D === 0)
+          ? round2(totalSistemaUsd - (I ?? 0))
+          : null;
+      if (otrosIngresosUsd != null) otrosIngresosPeriodoUsd += otrosIngresosUsd;
 
       // ----- Bloque TIEMPO/TACO (derivado de tacómetros, fuente única) -----
       // Solo tramos volados en ESTE avión: con asignación por tramo, un tramo
@@ -513,7 +534,7 @@ export class AircraftBalanceService {
       // ----- Pendientes de captura por vuelo (lista generosa) -----
       const cancelado = v.estado === 'CANCELADO';
       const yaVolo = v.estado === 'EN_VUELO' || v.estado === 'COMPLETADO';
-      if ((totalUsd ?? 0) === 0 && D === 0 && !cancelado) {
+      if ((totalSistemaUsd ?? 0) === 0 && D === 0 && !cancelado) {
         pendientes.push(
           `${etiqueta}: sin cotización — montos de venta en $0 (¿traslado/servicio o falta cotizar?)`,
         );
@@ -563,8 +584,8 @@ export class AircraftBalanceService {
         horas_cobradas: round2(D),
         tarifa_usd: r2(E),
         iva_hr_usd: G,
-        total_usd: r2(totalUsd),
-        iva_usd: r2(ivaUsd),
+        total_usd: I, // venta del vuelo = horas × tarifa c/IVA (regla del libro)
+        iva_usd: J,
         tc_venta: K,
         total_mxn: L,
         iva_mxn: M,
@@ -629,6 +650,8 @@ export class AircraftBalanceService {
       costo_hr_prom_usd: anValues.length
         ? round2(anValues.reduce((a, b) => a + b, 0) / anValues.length)
         : null,
+      // Informativo al pie: NO suma en las columnas (va al control general).
+      otros_ingresos_usd: round2(otrosIngresosPeriodoUsd),
     };
 
     // ===== Hojas de gastos (indirectos / otros / permisos) =====
