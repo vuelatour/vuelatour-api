@@ -44,6 +44,25 @@ interface VueloRow {
   cobrado: boolean;
   /** Comisión de quien vendió: se descuenta del ingreso (neto VuelaTour). */
   comision_vendedor_usd: string | null;
+  // Campos informativos para el desglose por avión (detalle.vuelos); no
+  // alteran ningún cálculo del reparto.
+  folio: number | null;
+  fecha_vuelo: string | null;
+  origen_iata: string | null;
+  destino_iata: string | null;
+  es_externo: boolean;
+}
+
+/** Grupo del reparto al que aporta una categoría de gasto (doc 4.8). */
+type GrupoGasto = 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'EXCLUIDO';
+
+interface GastoCategoriaAcc {
+  grupo: GrupoGasto;
+  /** Gastos que SÍ convirtieron a USD (los sin TC van en sin_tc_count). */
+  count: number;
+  usd: number;
+  sin_tc_count: number;
+  sin_tc_mxn: number;
 }
 interface CobroRow {
   vuelo_id: string;
@@ -262,6 +281,22 @@ export class ProfitSharingService {
     // esa parte no es de VuelaTour — se descuenta del ingreso a repartir. Se
     // hace efectiva contra lo cobrado (tope: lo cobrado del vuelo).
     let comisionesVenta = 0;
+    // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
+    // que los agregados (misma conversión cobrosEnUsd, mismo tope de comisión)
+    // para que la suma del detalle cuadre exacto con ingresos.*.
+    const detalleVuelos: Array<{
+      id: string;
+      folio: number | null;
+      fecha: string | null;
+      ruta: string;
+      es_externo: boolean;
+      total_usd: number;
+      cobrado_usd: number;
+      pendiente_usd: number;
+      comision_vendedor_usd: number;
+      cobrado: boolean;
+      cobros_sin_tc_mxn: number;
+    }> = [];
     for (const v of ctx.vuelos) {
       if (v.aeronave_id !== a.id) continue;
       const monto = Number(v.monto_total_usd ?? 0);
@@ -269,35 +304,94 @@ export class ProfitSharingService {
         ctx.cobrosPorVuelo.get(v.id) ?? [],
         v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
       );
-      cobrado += conv.total_usd;
-      cobrosSinTcMxn += conv.sin_tc_mxn;
-      pendiente += Math.max(0, monto - conv.total_usd);
-      comisionesVenta += Math.min(
+      const pendienteVuelo = Math.max(0, monto - conv.total_usd);
+      const comisionEfectiva = Math.min(
         Number(v.comision_vendedor_usd ?? 0),
         conv.total_usd,
       );
+      cobrado += conv.total_usd;
+      cobrosSinTcMxn += conv.sin_tc_mxn;
+      pendiente += pendienteVuelo;
+      comisionesVenta += comisionEfectiva;
       if (v.cobrado) vuelosCobrados += 1;
       else vuelosPendientes += 1;
+      detalleVuelos.push({
+        id: v.id,
+        folio: v.folio ?? null,
+        fecha: diaCancun(v.fecha_vuelo),
+        ruta: `${v.origen_iata ?? '—'} → ${v.destino_iata ?? '—'}`,
+        es_externo: v.es_externo === true,
+        total_usd: round2(monto),
+        cobrado_usd: conv.total_usd,
+        pendiente_usd: round2(pendienteVuelo),
+        comision_vendedor_usd: round2(comisionEfectiva),
+        cobrado: v.cobrado,
+        cobros_sin_tc_mxn: conv.sin_tc_mxn,
+      });
     }
+    detalleVuelos.sort(
+      (x, y) =>
+        // Fecha asc; los sin fecha al final. Folio como desempate estable.
+        (x.fecha ?? '9999-99-99').localeCompare(y.fecha ?? '9999-99-99') ||
+        (x.folio ?? 0) - (y.folio ?? 0),
+    );
 
+    // Gastos acumulados POR CATEGORÍA (misma conversión toUsd, mismo filtro
+    // de avión). Los agregados directos/indirectos/permisos/sin_tc se derivan
+    // de ESTE acumulador, así el desglose cuadra con ellos por construcción.
+    const porCategoria = new Map<string, GastoCategoriaAcc>();
+    for (const g of ctx.gastos) {
+      if (g.aeronave_id !== a.id) continue;
+      const grupo: GrupoGasto = DIRECTO.has(g.categoria)
+        ? 'DIRECTO'
+        : INDIRECTO.has(g.categoria)
+          ? 'INDIRECTO'
+          : PERMISO.has(g.categoria)
+            ? 'PERMISO'
+            : // FIJO se prorratea aparte; otras categorias no avion-especificas
+              // (p. ej. la categoría INDIRECTO de jul 2026) se EXCLUYEN del
+              // balance — se listan en el detalle solo por transparencia.
+              'EXCLUIDO';
+      const acc = porCategoria.get(g.categoria) ?? {
+        grupo,
+        count: 0,
+        usd: 0,
+        sin_tc_count: 0,
+        sin_tc_mxn: 0,
+      };
+      const usd = this.toUsd(g);
+      if (usd === null) {
+        acc.sin_tc_count += 1;
+        acc.sin_tc_mxn += Number(g.monto);
+      } else {
+        acc.count += 1;
+        acc.usd += usd;
+      }
+      porCategoria.set(g.categoria, acc);
+    }
     let directos = 0;
     let indirectos = 0;
     let permisos = 0;
     let sinTc = 0;
     let sinTcMxn = 0;
-    for (const g of ctx.gastos) {
-      if (g.aeronave_id !== a.id) continue;
-      const usd = this.toUsd(g);
-      if (usd === null) {
-        sinTc += 1;
-        sinTcMxn += Number(g.monto);
-        continue;
-      }
-      if (DIRECTO.has(g.categoria)) directos += usd;
-      else if (INDIRECTO.has(g.categoria)) indirectos += usd;
-      else if (PERMISO.has(g.categoria)) permisos += usd;
-      // FIJO se prorratea aparte; otras categorias no avion-especificas se ignoran.
+    for (const acc of porCategoria.values()) {
+      if (acc.grupo === 'DIRECTO') directos += acc.usd;
+      else if (acc.grupo === 'INDIRECTO') indirectos += acc.usd;
+      else if (acc.grupo === 'PERMISO') permisos += acc.usd;
+      // EXCLUIDO no suma al balance (comportamiento original del else).
+      sinTc += acc.sin_tc_count;
+      sinTcMxn += acc.sin_tc_mxn;
     }
+    const detalleGastos = [...porCategoria.entries()]
+      .map(([categoria, acc]) => ({
+        categoria,
+        grupo: acc.grupo,
+        count: acc.count,
+        usd: round2(acc.usd),
+        sin_tc_count: acc.sin_tc_count,
+        sin_tc_mxn: round2(acc.sin_tc_mxn),
+      }))
+      .sort((x, y) => y.usd - x.usd);
 
     // Reserva de overhaul DEL PERIODO = horas voladas del periodo × tarifa por
     // hora (sumada por motor: bimotor = 2 filas). Antes se multiplicaba por el
@@ -360,6 +454,19 @@ export class ProfitSharingService {
       saldo_disponible_usd: round2(saldo),
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
+      // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
+      // Sale de los mismos loops de arriba: sus sumas cuadran con los
+      // agregados. El PDF/XLSX del reparto no lo consume (mapea campos
+      // específicos en buildRepartoPayload).
+      detalle: {
+        vuelos: detalleVuelos,
+        gastos_por_categoria: detalleGastos,
+        reserva: {
+          horas_hr: horasPeriodo,
+          tarifa_hora_usd: round2(tarifaReserva),
+          monto_usd: round2(reservaOverhaul),
+        },
+      },
     };
   }
 
@@ -847,7 +954,7 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd',
+        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo',
       )
       .eq('estado', 'COMPLETADO')
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
@@ -921,4 +1028,12 @@ export class ProfitSharingService {
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
+}
+
+/** Día Cancún (YYYY-MM-DD) de un timestamptz; null si el vuelo no tiene fecha. */
+function diaCancun(iso: string | null): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
 }
