@@ -20,6 +20,17 @@
  *
  * Sin renglones FBO/TUA reconocibles, se listan tal cual.
  */
+/**
+ * Claves de concepto que algunos aeropuertos imprimen EN VEZ del nombre del
+ * servicio (renglones "Servicio (clave NNNNNN)"). Verificadas contra
+ * facturas reales capturadas en el sistema:
+ * - 230700 = TUA en Aeropuerto de Cozumel (ticket jul-2026: neto $1,484.44
+ *   × 1.16 = $1,721.95, cuadra exacto con la separación manual de oficina).
+ * Al confirmar claves nuevas de otros aeropuertos, agregarlas aquí (única
+ * fuente de la regla).
+ */
+const CLAVES_TUA = ['230700'];
+
 export function desgloseGastoLineas(
   conceptos: Array<{ concepto: string; monto: number }>,
   total: number,
@@ -27,8 +38,13 @@ export function desgloseGastoLineas(
 ): string[] {
   // FBO / FOB (así lo imprime ASUR en la tabla resumen).
   const esFbo = (c: string) => /\bf(?:bo|ob)\b/i.test(c);
-  // TUA / T.U.A. / TUAS con límites de palabra (no matchear "actual").
-  const esTua = (c: string) => /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c);
+  // TUA / T.U.A. / TUAS / "Uso de Aeropuerto" con límites de palabra (no
+  // matchear "actual"), o renglón "Servicio (clave NNNNNN)" con clave TUA
+  // conocida del catálogo de arriba.
+  const esTua = (c: string) =>
+    /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c) ||
+    /uso\s+de\s+aeropuerto/i.test(c) ||
+    CLAVES_TUA.some((clave) => new RegExp(`\\b${clave}\\b`).test(c));
   const hayIva = conceptos.some((c) => /\biva\b/i.test(c.concepto));
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const fbo = conceptos
