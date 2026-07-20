@@ -1093,7 +1093,12 @@ export class FlightsService {
       void this.notifications.notifyRole(Rol.ADMIN, payload, user.userId);
       void this.notifications.notifyRole(Rol.COORDINADOR, payload, user.userId);
     }
-    return data;
+    // Mismo espejo de redacción que setFlightPlan: el PILOTO actualiza el
+    // permiso y no debe recibir el costo del operador externo de vuelta.
+    return this.redactVueloForRol(
+      data,
+      { userId: user.userId, rol: user.rol } as AuthenticatedUser,
+    );
   }
 
   /**
