@@ -54,48 +54,77 @@ export class AircraftService {
    *  - finanzas: ingresos cobrados vs gastos por moneda.
    */
   async aircraftMetrics(id: string) {
-    await this.findById(id);
-    const now = new Date();
+    const aeronave = await this.findById(id);
+    // Cortes de mes/año SIEMPRE en hora Cancún (regla del repo): con Date.UTC
+    // un vuelo de las 7–11pm Cancún del último día del mes caía al mes
+    // siguiente. Se normaliza a ISO UTC para comparar contra timestamptz.
+    const [yyyy, mm] = this.hoyCancun().split('-');
     const startMonth = new Date(
-      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1),
+      `${yyyy}-${mm}-01T00:00:00-05:00`,
     ).toISOString();
-    const startYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1)).toISOString();
+    const startYear = new Date(`${yyyy}-01-01T00:00:00-05:00`).toISOString();
 
-    const [motorsRes, tallerRes, blocking, escalasRes, cobrosRes, gastosRes] =
-      await Promise.all([
-        this.supabase.service
-          .from('motor')
-          .select('posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref')
-          .eq('aeronave_id', id),
-        this.supabase.service
-          .from('mantenimiento')
-          .select('id')
-          .eq('aeronave_id', id)
-          .eq('estado', 'EN_TALLER')
-          .limit(1),
-        this.expirations.findBlockingExpirations({ aeronaveId: id }),
-        this.supabase.service
-          .from('escala')
-          .select(
-            'taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, aeronave_id, fecha_vuelo, estado)',
-          )
-          .eq('vuelo.aeronave_id', id)
-          .neq('vuelo.estado', 'CANCELADO'),
-        this.supabase.service
-          .from('cobro_vuelo')
-          .select('monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado)')
-          .eq('vuelo.aeronave_id', id)
-          .neq('vuelo.estado', 'CANCELADO'),
-        this.supabase.service
-          .from('gasto')
-          .select('monto, moneda')
-          .eq('aeronave_id', id),
-      ]);
+    const [
+      motorsRes,
+      tallerRes,
+      blocking,
+      escalas,
+      cobrosRes,
+      gastosRes,
+      squawksRes,
+      enVueloRes,
+    ] = await Promise.all([
+      this.supabase.service
+        .from('motor')
+        .select(
+          'posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
+        .eq('aeronave_id', id),
+      this.supabase.service
+        .from('mantenimiento')
+        .select('id')
+        .eq('aeronave_id', id)
+        .eq('estado', 'EN_TALLER')
+        .limit(1),
+      this.expirations.findBlockingExpirations({ aeronaveId: id }),
+      // Asignación por tramo (misma regla que horasVoladas/currentHobbs):
+      // filtrar solo por vuelo.aeronave_id atribuía horas de tramos volados
+      // en OTRO avión (redondos con ida/regreso en aviones distintos).
+      this.escalasDelAvion(
+        id,
+        'taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, aeronave_id, fecha_vuelo, estado)',
+      ),
+      this.supabase.service
+        .from('cobro_vuelo')
+        .select('monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado)')
+        .eq('vuelo.aeronave_id', id)
+        .neq('vuelo.estado', 'CANCELADO'),
+      this.supabase.service
+        .from('gasto')
+        .select('monto, moneda')
+        .eq('aeronave_id', id),
+      // Squawk ALTA sin resolver = avión no apto — MISMO criterio que el
+      // candado de asignación (flights.service.validateAssignTargets):
+      // BAJA/MEDIA no bloquean.
+      this.supabase.service
+        .from('aeronave_discrepancia')
+        .select('id, descripcion')
+        .eq('aeronave_id', id)
+        .neq('estado', 'RESUELTA')
+        .eq('severidad', 'ALTA'),
+      this.supabase.service
+        .from('vuelo')
+        .select('id')
+        .eq('aeronave_id', id)
+        .eq('estado', 'EN_VUELO')
+        .limit(1),
+    ]);
     if (motorsRes.error) throw new Error(motorsRes.error.message);
     if (tallerRes.error) throw new Error(tallerRes.error.message);
-    if (escalasRes.error) throw new Error(escalasRes.error.message);
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
+    if (squawksRes.error) throw new Error(squawksRes.error.message);
+    if (enVueloRes.error) throw new Error(enVueloRes.error.message);
 
     const enTaller = (tallerRes.data ?? []).length > 0;
 
@@ -103,13 +132,16 @@ export class AircraftService {
     let horasTotal = 0;
     let horasMes = 0;
     let horasAnio = 0;
-    let maxHobbs = 0; // último horómetro conocido (para horas de vida vivas)
+    // Último horómetro conocido (horas de vida vivas); null = sin tacos aún.
+    let maxHobbs: number | null = null;
     const vuelosTotal = new Set<string>();
     const vuelosMes = new Set<string>();
     const vuelosAnio = new Set<string>();
-    for (const e of (escalasRes.data ?? []) as Array<Record<string, unknown>>) {
-      if (e.taco_salida != null) maxHobbs = Math.max(maxHobbs, Number(e.taco_salida));
-      if (e.taco_llegada != null) maxHobbs = Math.max(maxHobbs, Number(e.taco_llegada));
+    for (const e of escalas) {
+      if (e.taco_salida != null)
+        maxHobbs = Math.max(maxHobbs ?? 0, Number(e.taco_salida));
+      if (e.taco_llegada != null)
+        maxHobbs = Math.max(maxHobbs ?? 0, Number(e.taco_llegada));
       if (e.taco_salida == null || e.taco_llegada == null) continue;
       const h = Number(e.taco_llegada) - Number(e.taco_salida);
       const v = e.vuelo as { id: string; fecha_vuelo: string | null };
@@ -133,9 +165,19 @@ export class AircraftService {
       .map((m: Record<string, unknown>) => ({
         posicion: m.posicion as string,
         numero_serie: m.numero_serie as string,
-        restantes: this.componenteEstado(m, maxHobbs, true).tbo_restante ?? 1,
+        restantes:
+          this.componenteEstado(m, maxHobbs ?? 0, true).tbo_restante ?? 1,
       }))
       .filter((m) => m.restantes <= 0);
+
+    // Discrepancias (squawks) ALTA sin resolver: bloquean el apto igual que
+    // bloquean asignar el avión a un vuelo.
+    const discrepanciasAltas = (
+      (squawksRes.data ?? []) as Array<Record<string, unknown>>
+    ).map((s) => ({
+      id: s.id as string,
+      descripcion: ((s.descripcion as string | null) ?? '').slice(0, 60),
+    }));
 
     // Finanzas por moneda: ingresos cobrados vs gastos.
     const byMoneda = new Map<string, { ingresos: number; gastos: number }>();
@@ -157,14 +199,47 @@ export class AircraftService {
       utilidad: v.ingresos - v.gastos,
     }));
 
+    // Razones dinámicas del semáforo (el panel las pinta tal cual).
+    const razones: string[] = [];
+    if (enTaller) razones.push('Servicio en taller');
+    for (const b of blocking)
+      razones.push(`Documento vencido: ${b.tipo_nombre}`);
+    for (const c of componentesVencidos)
+      razones.push(`TBO agotado: ${c.posicion} (${c.numero_serie})`);
+    for (const s of discrepanciasAltas)
+      razones.push(`Discrepancia ALTA sin resolver: ${s.descripcion}`);
+
+    // Próximo servicio por horas: MISMA regla que tacometroHistorial
+    // (this.proximoServicio sobre el programa cíclico del avión).
+    const intervalos = ((aeronave.servicio_intervalos as unknown[]) ?? []).map(
+      Number,
+    );
+    const baseServicio = Number(aeronave.servicio_horas_base ?? 0);
+    const prox = this.proximoServicio(intervalos, baseServicio, maxHobbs ?? 0);
+
     return {
       airworthiness: {
         apto:
-          blocking.length === 0 && !enTaller && componentesVencidos.length === 0,
+          blocking.length === 0 &&
+          !enTaller &&
+          componentesVencidos.length === 0 &&
+          discrepanciasAltas.length === 0,
         documentos_vencidos: blocking,
         en_taller: enTaller,
         componentes_vencidos: componentesVencidos,
+        discrepancias_altas: discrepanciasAltas,
+        razones,
       },
+      // Estado de HOY (contrato acordado con el panel: estos nombres exactos).
+      horas_actuales: maxHobbs != null ? Number(maxHobbs.toFixed(1)) : null,
+      en_vuelo: (enVueloRes.data ?? []).length > 0,
+      proximo_servicio: prox
+        ? {
+            titulo: `Servicio de ${prox.intervalo} hr`,
+            horas_objetivo: prox.a_las,
+            faltan_hr: prox.faltan,
+          }
+        : null,
       utilizacion: {
         horas_total: Number(horasTotal.toFixed(1)),
         horas_mes: Number(horasMes.toFixed(1)),
@@ -183,16 +258,16 @@ export class AircraftService {
    */
   async tacometroHistorial(id: string) {
     const aeronave = await this.findById(id);
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select(
+    // Asignación por tramo (regla de escalasDelAvion): filtrar solo por
+    // vuelo.aeronave_id mostraba tacos de tramos volados en OTRO avión y
+    // omitía tramos asignados a este. Se conserva el filtro original
+    // taco_salida != null (aquí, porque el helper no filtra por columnas).
+    const rows = (
+      await this.escalasDelAvion(
+        id,
         'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
       )
-      .eq('vuelo.aeronave_id', id)
-      .neq('vuelo.estado', 'CANCELADO')
-      .not('taco_salida', 'is', null);
-    if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    ).filter((e) => e.taco_salida != null);
 
     let horasActuales = 0;
     for (const e of rows) {
@@ -379,47 +454,52 @@ export class AircraftService {
       segurosRes,
       discrepanciasRes,
     ] = await Promise.all([
-        this.supabase.service
-          .from('motor')
-          .select(
-            'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas, aeronave_horas_ref',
-          )
-          .eq('aeronave_id', id)
-          .order('posicion'),
-        this.supabase.service
-          .from('helice')
-          .select('id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref')
-          .eq('aeronave_id', id)
-          .order('posicion'),
-        this.supabase.service
-          .from('aeronave_socio')
-          .select(
-            'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, usuario:socio_id(nombre, es_empresa, rol)',
-          )
-          .eq('aeronave_id', id)
-          .is('vigente_hasta', null)
-          .order('porcentaje', { ascending: false }),
-        this.supabase.service
-          .from('reserva_overhaul')
-          .select('id, motor_id, monto_por_hora_usd, horas_acumuladas')
-          .eq('aeronave_id', id),
-        this.supabase.service
-          .from('aeronave_imagen')
-          .select(IMAGEN_COLS)
-          .eq('aeronave_id', id)
-          .order('orden', { ascending: true })
-          .order('created_at', { ascending: true }),
-        this.supabase.service
-          .from('aeronave_seguro')
-          .select(SEGURO_COLS)
-          .eq('aeronave_id', id)
-          .order('vigente_hasta', { ascending: false }),
-        this.supabase.service
-          .from('aeronave_discrepancia')
-          .select(DISCREPANCIA_COLS)
-          .eq('aeronave_id', id)
-          .order('fecha_reporte', { ascending: false }),
-      ]);
+      this.supabase.service
+        .from('motor')
+        .select(
+          'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
+        .eq('aeronave_id', id)
+        .order('posicion'),
+      this.supabase.service
+        .from('helice')
+        .select(
+          'id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref',
+        )
+        .eq('aeronave_id', id)
+        .order('posicion'),
+      this.supabase.service
+        .from('aeronave_socio')
+        .select(
+          'id, socio_id, porcentaje, vigente_desde, vigente_hasta, notas, usuario:socio_id(nombre, es_empresa, rol)',
+        )
+        .eq('aeronave_id', id)
+        // Vigencia REAL: sin fecha de fin O con fin en el futuro (día
+        // Cancún). Filtrar solo IS NULL escondía socios con vigencia
+        // programada a futuro que HOY siguen siendo dueños.
+        .or(`vigente_hasta.is.null,vigente_hasta.gte.${this.hoyCancun()}`)
+        .order('porcentaje', { ascending: false }),
+      this.supabase.service
+        .from('reserva_overhaul')
+        .select('id, motor_id, monto_por_hora_usd, horas_acumuladas')
+        .eq('aeronave_id', id),
+      this.supabase.service
+        .from('aeronave_imagen')
+        .select(IMAGEN_COLS)
+        .eq('aeronave_id', id)
+        .order('orden', { ascending: true })
+        .order('created_at', { ascending: true }),
+      this.supabase.service
+        .from('aeronave_seguro')
+        .select(SEGURO_COLS)
+        .eq('aeronave_id', id)
+        .order('vigente_hasta', { ascending: false }),
+      this.supabase.service
+        .from('aeronave_discrepancia')
+        .select(DISCREPANCIA_COLS)
+        .eq('aeronave_id', id)
+        .order('fecha_reporte', { ascending: false }),
+    ]);
     if (motorsRes.error) throw new Error(motorsRes.error.message);
     if (propellersRes.error) throw new Error(propellersRes.error.message);
     if (ownersRes.error) throw new Error(ownersRes.error.message);
@@ -466,24 +546,25 @@ export class AircraftService {
    * avión, o si la escala no tiene avión propio y el vuelo (espejo) sí lo es.
    * Filtrar solo por `vuelo.aeronave_id` atribuía las horas/hobbs de un tramo
    * volado en OTRO avión (redondos con ida/regreso en aviones distintos).
-   * Siempre excluye vuelos CANCELADOS.
+   * Siempre excluye vuelos CANCELADOS. `select` permite pedir más columnas
+   * (debe incluir el embed `vuelo:vuelo_id!inner(aeronave_id, estado)` para
+   * que los filtros del join apliquen).
    */
   private async escalasDelAvion(
     aeronaveId: string,
+    select = 'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
   ): Promise<Array<Record<string, unknown>>> {
     const [propias, heredadas] = await Promise.all([
       // Tramos asignados explícitamente a este avión (escala.aeronave_id).
       this.supabase.service
         .from('escala')
-        .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)')
+        .select(select)
         .eq('aeronave_id', aeronaveId)
         .neq('vuelo.estado', 'CANCELADO'),
       // Tramos sin avión propio: heredan el del vuelo.
       this.supabase.service
         .from('escala')
-        .select(
-          'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
-        )
+        .select(select)
         .is('aeronave_id', null)
         .eq('vuelo.aeronave_id', aeronaveId)
         .neq('vuelo.estado', 'CANCELADO'),
@@ -491,9 +572,11 @@ export class AircraftService {
     // Nunca degradar a [] en silencio: estas escalas alimentan horas/hobbs.
     if (propias.error) throw new Error(propias.error.message);
     if (heredadas.error) throw new Error(heredadas.error.message);
+    // El select dinámico deja al cliente sin tipo inferido: normalizamos a
+    // Record<string, unknown> (los consumidores castean sus columnas).
     return [
-      ...((propias.data ?? []) as Array<Record<string, unknown>>),
-      ...((heredadas.data ?? []) as Array<Record<string, unknown>>),
+      ...((propias.data ?? []) as unknown as Array<Record<string, unknown>>),
+      ...((heredadas.data ?? []) as unknown as Array<Record<string, unknown>>),
     ];
   }
 
@@ -512,6 +595,13 @@ export class AircraftService {
       if (Number.isFinite(h) && h > 0) horas += h;
     }
     return Number(horas.toFixed(2));
+  }
+
+  /** Día actual (yyyy-mm-dd) en hora Cancún — regla del repo para cortes. */
+  private hoyCancun(): string {
+    return new Date().toLocaleDateString('en-CA', {
+      timeZone: 'America/Cancun',
+    });
   }
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
@@ -587,7 +677,10 @@ export class AircraftService {
       )
       .eq('aeronave_id', aeronaveId)
       .order('vigente_desde', { ascending: false });
-    if (!includeHistory) q = q.is('vigente_hasta', null);
+    // "Actuales" = vigencia real hoy (día Cancún): sin fin o fin a futuro,
+    // mismo criterio que el snapshot del avión.
+    if (!includeHistory)
+      q = q.or(`vigente_hasta.is.null,vigente_hasta.gte.${this.hoyCancun()}`);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     return data ?? [];

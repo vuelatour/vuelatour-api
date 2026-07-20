@@ -119,12 +119,21 @@ export class EnginesService {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
     // Al re-registrar horas (corrección/overhaul) se re-fija la referencia al
-    // Hobbs actual para que la acumulación parta de ahí.
+    // Hobbs actual para que la acumulación parta de ahí. PERO el form del
+    // panel reenvía TODOS los campos aunque no se toquen: si horas_totales
+    // llega con el MISMO valor guardado no es una corrección real, y
+    // re-anclar borraría las horas vivas acumuladas desde el último anclaje
+    // (horas vivas = horas_totales + hobbs − ref). Solo se re-ancla con un
+    // cambio real tecleado; si el valor es igual se ignora el campo.
     if (dto.horas_totales !== undefined) {
       const motor = await this.findById(id);
-      patch.aeronave_horas_ref = await this.currentHobbs(
-        motor.aeronave_id as string,
-      );
+      if (Number(dto.horas_totales) === Number(motor.horas_totales)) {
+        delete patch.horas_totales;
+      } else {
+        patch.aeronave_horas_ref = await this.currentHobbs(
+          motor.aeronave_id as string,
+        );
+      }
     }
     const { data, error } = await this.supabase.service
       .from('motor')

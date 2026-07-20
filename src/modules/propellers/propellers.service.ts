@@ -114,11 +114,19 @@ export class PropellersService {
   async update(id: string, dto: UpdatePropellerDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
+    // Re-anclar aeronave_horas_ref SOLO con cambio real de horas_totales: el
+    // form del panel reenvía todos los campos, y re-anclar con el mismo valor
+    // borraría las horas vivas acumuladas desde el último anclaje
+    // (horas vivas = horas_totales + hobbs − ref). Valor igual → se ignora.
     if (dto.horas_totales !== undefined) {
       const helice = await this.findById(id);
-      patch.aeronave_horas_ref = await this.currentHobbs(
-        helice.aeronave_id as string,
-      );
+      if (Number(dto.horas_totales) === Number(helice.horas_totales)) {
+        delete patch.horas_totales;
+      } else {
+        patch.aeronave_horas_ref = await this.currentHobbs(
+          helice.aeronave_id as string,
+        );
+      }
     }
     const { data, error } = await this.supabase.service
       .from('helice')
