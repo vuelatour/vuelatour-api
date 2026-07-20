@@ -388,6 +388,7 @@ export class ProfitSharingService {
     const [
       pendRes,
       completadosRes,
+      canceladosRes,
       gastosRes,
       movRes,
       revRes,
@@ -415,6 +416,14 @@ export class ProfitSharingService {
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
+      // Cancelados del periodo: pueden tener dinero vivo (cobros por cargo de
+      // cancelación y gastos provisionados) que el reparto ignora.
+      sb
+        .from('vuelo')
+        .select('id, folio, tc_usd_mxn')
+        .eq('estado', 'CANCELADO')
+        .gte('fecha_vuelo', desdeTs)
+        .lte('fecha_vuelo', hastaTs),
       // Gastos del periodo con huecos de datos.
       sb
         .from('gasto')
@@ -439,13 +448,16 @@ export class ProfitSharingService {
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
       // Aterrizajes fuera de CUN del periodo (candidatos a cuota de pista).
+      // Externos fuera: sus pistas las paga el operador externo (mismo
+      // criterio que expenses.pistasPendientes, o los conteos no cuadran).
       sb
         .from('escala')
         .select(
-          'id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)',
+          'id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado, es_externo)',
         )
         .neq('destino_iata', 'CUN')
         .neq('vuelo.estado', 'CANCELADO')
+        .eq('vuelo.es_externo', false)
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
       // Fechas de tramos: detectar tramos que "salen" antes que el anterior.
@@ -462,6 +474,7 @@ export class ProfitSharingService {
     for (const r of [
       pendRes,
       completadosRes,
+      canceladosRes,
       gastosRes,
       movRes,
       revRes,
@@ -574,6 +587,64 @@ export class ProfitSharingService {
           ).length;
         }
       }
+    }
+
+    // Dinero vivo en vuelos CANCELADOS del periodo: cobros registrados (cargo
+    // por cancelación que hoy queda FUERA del reparto) y gastos ligados (p.ej.
+    // pistas provisionadas de un vuelo que luego se canceló). Nadie los
+    // vigilaba: no alteran el reparto, pero la oficina debe revisarlos.
+    const cancelados = (canceladosRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
+    const cobrosEnCancelados: Array<{
+      id: string;
+      folio: number;
+      cobrado_usd: number;
+    }> = [];
+    let cobrosEnCanceladosUsd = 0;
+    let gastosEnCanceladosCount = 0;
+    const vuelosConGastoCancelado: Array<{ id: string; folio: number }> = [];
+    if (cancelados.length > 0) {
+      const idsCancelados = cancelados.map((v) => v.id as string);
+      const [cobrosCanc, gastosCancRes] = await Promise.all([
+        this.fetchCobros(idsCancelados),
+        sb.from('gasto').select('id, vuelo_id').in('vuelo_id', idsCancelados),
+      ]);
+      if (gastosCancRes.error) throw new Error(gastosCancRes.error.message);
+
+      const cobrosPorCancelado = new Map<string, CobroRow[]>();
+      for (const c of cobrosCanc) {
+        const list = cobrosPorCancelado.get(c.vuelo_id) ?? [];
+        list.push(c);
+        cobrosPorCancelado.set(c.vuelo_id, list);
+      }
+      const vuelosConGasto = new Set(
+        (gastosCancRes.data ?? []).map((g) => g.vuelo_id as string),
+      );
+      for (const v of cancelados) {
+        const lista = cobrosPorCancelado.get(v.id as string) ?? [];
+        if (lista.length > 0) {
+          // Fuente única de "cuánto se cobró en USD" (cobrosEnUsd); los MXN
+          // sin TC quedan fuera del monto pero el vuelo sí cuenta.
+          const conv = cobrosEnUsd(
+            lista,
+            v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+          );
+          cobrosEnCancelados.push({
+            id: v.id as string,
+            folio: v.folio as number,
+            cobrado_usd: conv.total_usd,
+          });
+          cobrosEnCanceladosUsd += conv.total_usd;
+        }
+        if (vuelosConGasto.has(v.id as string)) {
+          vuelosConGastoCancelado.push({
+            id: v.id as string,
+            folio: v.folio as number,
+          });
+        }
+      }
+      gastosEnCanceladosCount = (gastosCancRes.data ?? []).length;
     }
 
     const vuelosSinCompletar = (pendRes.data ?? []).map((v) => ({
@@ -690,6 +761,23 @@ export class ProfitSharingService {
         detalle:
           'El pago del freelance es gasto directo del vuelo (categoría "Piloto externo"): captúralo en Gastos y lígalo al vuelo, o el reparto saldrá inflado.',
         count: externosSinHonorario,
+      },
+      {
+        clave: 'cobros_en_cancelados',
+        titulo: 'Vuelos cancelados con cobros registrados',
+        detalle:
+          'Cargo por cancelación fuera del reparto — revisar tratamiento.',
+        count: cobrosEnCancelados.length,
+        monto_usd: round2(cobrosEnCanceladosUsd),
+        vuelos: cobrosEnCancelados,
+      },
+      {
+        clave: 'gastos_en_cancelados',
+        titulo: 'Gastos ligados a vuelos cancelados',
+        detalle:
+          'El vuelo se canceló pero sus gastos siguen vivos (p. ej. pistas provisionadas): bórralos o reasígnalos, o quedarán colgando fuera de toda vigilancia.',
+        count: gastosEnCanceladosCount,
+        vuelos: vuelosConGastoCancelado,
       },
       {
         clave: 'gastos_sin_tc',

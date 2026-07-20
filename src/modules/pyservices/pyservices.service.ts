@@ -410,7 +410,16 @@ export class PyservicesService {
     }
   }
 
-  private async postForJson<T>(path: string, body: unknown): Promise<T> {
+  /**
+   * POST JSON con timeout (default 60s): sin él, un pyservices colgado dejaba
+   * el request del panel esperando para siempre (sin AbortController no hay
+   * tope del lado Node).
+   */
+  private async postForJson<T>(
+    path: string,
+    body: unknown,
+    timeoutMs = 60_000,
+  ): Promise<T> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
@@ -420,32 +429,45 @@ export class PyservicesService {
         'pyservices no configurado (PYSERVICES_BASE_URL / INTERNAL_SHARED_TOKEN)',
       );
     }
-    const res = await fetch(`${baseUrl}${path}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Internal-Token': token,
-      },
-      body: JSON.stringify(body),
-    }).catch((e: unknown) => {
-      const msg = e instanceof Error ? e.message : 'error de red';
-      throw new BadGatewayException(
-        `No se pudo contactar a pyservices: ${msg}`,
-      );
-    });
-    if (!res.ok) {
-      const detalle = await res.text().catch(() => '');
-      throw new BadGatewayException(
-        `pyservices respondio ${res.status}: ${detalle.slice(0, 300)}`,
-      );
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(`${baseUrl}${path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': token,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      }).catch((e: unknown) => {
+        if (controller.signal.aborted) {
+          throw new BadGatewayException(
+            `pyservices no respondio en ${Math.round(timeoutMs / 1000)}s (${path})`,
+          );
+        }
+        const msg = e instanceof Error ? e.message : 'error de red';
+        throw new BadGatewayException(
+          `No se pudo contactar a pyservices: ${msg}`,
+        );
+      });
+      if (!res.ok) {
+        const detalle = await res.text().catch(() => '');
+        throw new BadGatewayException(
+          `pyservices respondio ${res.status}: ${detalle.slice(0, 300)}`,
+        );
+      }
+      return (await res.json()) as T;
+    } finally {
+      clearTimeout(timer);
     }
-    return (await res.json()) as T;
   }
 
+  /** POST que devuelve binario (PDF/Excel/zip). Timeout default 60s. */
   private async postForBuffer(
     path: string,
     body: unknown,
-    timeoutMs?: number,
+    timeoutMs = 60_000,
   ): Promise<Buffer> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
@@ -457,10 +479,8 @@ export class PyservicesService {
       );
     }
 
-    const controller = timeoutMs ? new AbortController() : null;
-    const timer = controller
-      ? setTimeout(() => controller.abort(), timeoutMs)
-      : null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${baseUrl}${path}`, {
         method: 'POST',
@@ -469,8 +489,13 @@ export class PyservicesService {
           'X-Internal-Token': token,
         },
         body: JSON.stringify(body),
-        signal: controller?.signal,
+        signal: controller.signal,
       }).catch((e: unknown) => {
+        if (controller.signal.aborted) {
+          throw new BadGatewayException(
+            `pyservices no respondio en ${Math.round(timeoutMs / 1000)}s (${path})`,
+          );
+        }
         const msg = e instanceof Error ? e.message : 'error de red';
         throw new BadGatewayException(
           `No se pudo contactar a pyservices: ${msg}`,
@@ -487,7 +512,7 @@ export class PyservicesService {
       const arrayBuffer = await res.arrayBuffer();
       return Buffer.from(arrayBuffer);
     } finally {
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
     }
   }
 }

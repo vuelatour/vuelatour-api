@@ -18,18 +18,39 @@ const COLS =
 export class PropellersService {
   constructor(private readonly supabase: SupabaseService) {}
 
-  /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
+  /**
+   * Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado.
+   * Regla de asignación por tramo: cuenta el tramo si `escala.aeronave_id` es
+   * este avión, o si la escala no tiene avión propio y el vuelo sí lo es —
+   * filtrar solo por `vuelo.aeronave_id` mezclaba lecturas de tramos volados
+   * en OTRO avión.
+   */
   private async currentHobbs(aeronaveId: string): Promise<number> {
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
-      .eq('vuelo.aeronave_id', aeronaveId)
-      .neq('vuelo.estado', 'CANCELADO');
+    const [propias, heredadas] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)')
+        .eq('aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+      this.supabase.service
+        .from('escala')
+        .select(
+          'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
+        )
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+    ]);
     // Nunca degradar a hobbs=0 en silencio: re-anclaría aeronave_horas_ref
     // en 0 y las horas vivas se inflarían con todo el histórico.
-    if (error) throw new Error(error.message);
+    if (propias.error) throw new Error(propias.error.message);
+    if (heredadas.error) throw new Error(heredadas.error.message);
+    const escalas = [
+      ...((propias.data ?? []) as Array<Record<string, unknown>>),
+      ...((heredadas.data ?? []) as Array<Record<string, unknown>>),
+    ];
     let max = 0;
-    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+    for (const e of escalas) {
       for (const v of [e.taco_salida, e.taco_llegada]) {
         if (v != null) max = Math.max(max, Number(v));
       }

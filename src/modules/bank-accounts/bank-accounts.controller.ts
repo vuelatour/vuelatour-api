@@ -30,7 +30,11 @@ export class BankAccountsController {
   constructor(private readonly accounts: BankAccountsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List bank accounts' })
+  // CLABE/número de cuenta = dato sensible. Mismos roles que las páginas del
+  // panel que las consumen (Cuentas bancarias, Conciliación y Tarjetas corp.
+  // son ADMIN/FACTURACION); la app del piloto/mecánico no las usa.
+  @Roles(Rol.ADMIN, Rol.FACTURACION)
+  @ApiOperation({ summary: 'List bank accounts (ADMIN/FACTURACION)' })
   list(@Query() q: ListBankAccountsQuery) {
     return this.accounts.list(q);
   }
@@ -46,7 +50,8 @@ export class BankAccountsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get bank account' })
+  @Roles(Rol.ADMIN, Rol.FACTURACION)
+  @ApiOperation({ summary: 'Get bank account (ADMIN/FACTURACION)' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.accounts.findById(id);
   }

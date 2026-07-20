@@ -97,7 +97,7 @@ export class FlightsController {
   list(@Query() q: ListFlightsQuery, @CurrentUser() c: AuthenticatedUser) {
     // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
     if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
-    return this.flights.list(q);
+    return this.flights.list(q, c);
   }
 
   @Post(':id/cubrir-externo')
@@ -170,7 +170,7 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.findById(id);
+    return this.flights.findById(id, c);
   }
 
   @Get(':id/snapshot')
@@ -180,7 +180,7 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.snapshot(id);
+    return this.flights.snapshot(id, c);
   }
 
   @Get(':id/ultimo-taco')
@@ -269,7 +269,7 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.start(id, c.userId);
+    return this.flights.start(id, c.userId, c);
   }
 
   @Patch(':id/flight-plan')
@@ -296,7 +296,7 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.complete(id, c.userId);
+    return this.flights.complete(id, c.userId, c);
   }
 
   @Delete(':id')

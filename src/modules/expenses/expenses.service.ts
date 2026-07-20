@@ -377,7 +377,7 @@ export class ExpensesService {
     const { data: escalas, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, hora_llegada, fecha_salida_plan, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo), vuelo:vuelo!vuelo_id(id, folio, estado, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo))',
+        'id, vuelo_id, orden, origen_iata, destino_iata, hora_llegada, fecha_salida_plan, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo), vuelo:vuelo!vuelo_id(id, folio, estado, es_externo, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo))',
       )
       .neq('destino_iata', 'CUN')
       .or(
@@ -399,11 +399,17 @@ export class ExpensesService {
         id: string;
         folio: string | null;
         estado: string;
+        es_externo: boolean | null;
         aeronave: { id: string; matricula: string; modelo: string } | null;
       } | null;
     };
+    // Vuelos de OPERADOR EXTERNO fuera: sus cuotas de pista las paga el
+    // operador (VuelaTour solo paga el costo pactado del vuelo).
     const filas = ((escalas ?? []) as unknown as EscalaRow[]).filter(
-      (e) => e.vuelo && e.vuelo.estado !== 'CANCELADO',
+      (e) =>
+        e.vuelo &&
+        e.vuelo.estado !== 'CANCELADO' &&
+        e.vuelo.es_externo !== true,
     );
     if (filas.length === 0) return { data: [] };
 

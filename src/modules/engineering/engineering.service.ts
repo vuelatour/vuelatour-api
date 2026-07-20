@@ -24,17 +24,38 @@ export class EngineeringService {
 
   // ===== Mantenimientos =====
 
-  /** Horas actuales de la aeronave (último Hobbs conocido = máximo tacómetro). */
+  /**
+   * Horas actuales de la aeronave (último Hobbs conocido = máximo tacómetro).
+   * Regla de asignación por tramo: cuenta el tramo si `escala.aeronave_id` es
+   * este avión, o si la escala no tiene avión propio y el vuelo sí lo es —
+   * filtrar solo por `vuelo.aeronave_id` mezclaba lecturas de tramos volados
+   * en OTRO avión.
+   */
   private async horasActualesAeronave(aeronaveId: string): Promise<number> {
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
-      .eq('vuelo.aeronave_id', aeronaveId)
-      .neq('vuelo.estado', 'CANCELADO');
+    const [propias, heredadas] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)')
+        .eq('aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+      this.supabase.service
+        .from('escala')
+        .select(
+          'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
+        )
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+    ]);
     // Nunca degradar a 0 en silencio: registraría horas de entrada falsas.
-    if (error) throw new Error(error.message);
+    if (propias.error) throw new Error(propias.error.message);
+    if (heredadas.error) throw new Error(heredadas.error.message);
+    const escalas = [
+      ...((propias.data ?? []) as Array<Record<string, unknown>>),
+      ...((heredadas.data ?? []) as Array<Record<string, unknown>>),
+    ];
     let max = 0;
-    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+    for (const e of escalas) {
       for (const v of [e.taco_salida, e.taco_llegada]) {
         if (v != null) max = Math.max(max, Number(v));
       }
@@ -54,12 +75,18 @@ export class EngineeringService {
   }
 
   async createMantenimiento(aeronaveId: string, dto: CreateMantenimientoDto, userId: string) {
+    // Compat con APKs viejos de la app: mandan `tipo` (PROGRAMADO/REALIZADO)
+    // en vez de `estado`. Se mapea REALIZADO→COMPLETADO solo cuando no viene
+    // `estado`; el `estado` explícito siempre gana. El DTO garantiza que al
+    // menos uno de los dos está presente.
+    const estado: EstadoMantenimiento =
+      dto.estado ?? (dto.tipo === 'REALIZADO' ? 'COMPLETADO' : 'PROGRAMADO');
     // Al entrar a taller / completarse, si no dieron las horas de entrada, se
     // toman las horas actuales del avión (último tacómetro) automáticamente.
     let horasEntrada = dto.horas_aeronave ?? null;
     if (
       horasEntrada == null &&
-      (dto.estado === 'EN_TALLER' || dto.estado === 'COMPLETADO')
+      (estado === 'EN_TALLER' || estado === 'COMPLETADO')
     ) {
       horasEntrada = await this.horasActualesAeronave(aeronaveId);
     }
@@ -67,8 +94,8 @@ export class EngineeringService {
       .from('mantenimiento')
       .insert({
         aeronave_id: aeronaveId,
-        estado: dto.estado,
-        tipo: tipoFromEstado(dto.estado),
+        estado,
+        tipo: tipoFromEstado(estado),
         pais: dto.pais ?? null,
         descripcion: dto.descripcion,
         fecha_programada: dto.fecha_programada ?? null,

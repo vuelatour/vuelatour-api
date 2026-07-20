@@ -39,8 +39,13 @@ export class NotificationsService {
     };
   }
 
-  /** Persiste y emite una notificación a un usuario. Best-effort. */
-  async notifyUser(usuarioId: string, n: NotificationInput): Promise<void> {
+  /**
+   * Persiste y emite una notificación a un usuario. Best-effort (nunca
+   * lanza). Devuelve `true` solo si la notificación quedó PERSISTIDA: los
+   * llamadores con reintento (alerts.dispatch) marcan su dedupe solo tras una
+   * entrega exitosa. La mayoría de llamadores puede ignorar el retorno.
+   */
+  async notifyUser(usuarioId: string, n: NotificationInput): Promise<boolean> {
     try {
       // Los pilotos EXTERNOS no tienen acceso al sistema (doc 3.7): no se les
       // genera notificación (ni fila, ni socket, ni push) por ningún camino.
@@ -49,7 +54,7 @@ export class NotificationsService {
         .select('es_piloto_externo')
         .eq('id', usuarioId)
         .maybeSingle();
-      if (target?.es_piloto_externo === true) return;
+      if (target?.es_piloto_externo === true) return false;
 
       const { data, error } = await this.supabase.service
         .from('notificacion')
@@ -66,22 +71,28 @@ export class NotificationsService {
       if (error) throw new Error(error.message);
       this.gateway.emitToUser(usuarioId, SOCKET_EVENT, data);
       void this.push.sendToUser(usuarioId, this.pushPayload(n));
+      return true;
     } catch (err) {
       this.logger.warn(
         `notifyUser(${usuarioId}) falló: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
   /**
    * Persiste una fila por cada usuario ACTIVO del rol y emite al room del rol.
    * `excludeUsuarioId` evita auto-notificar a quien disparó el evento.
+   * Best-effort (nunca lanza). Devuelve el NÚMERO de usuarios a los que quedó
+   * persistida la notificación (0 = sin destinatarios o falló): los
+   * llamadores con reintento (alerts.dispatch) marcan su dedupe solo tras una
+   * entrega exitosa. La mayoría de llamadores puede ignorar el retorno.
    */
   async notifyRole(
     rol: Rol,
     n: NotificationInput,
     excludeUsuarioId?: string,
-  ): Promise<void> {
+  ): Promise<number> {
     try {
       const { data: users, error: usersErr } = await this.supabase.service
         .from('usuario')
@@ -95,7 +106,7 @@ export class NotificationsService {
       const targets = (users ?? [])
         .map((u) => (u as { id: string }).id)
         .filter((id) => id !== excludeUsuarioId);
-      if (targets.length === 0) return;
+      if (targets.length === 0) return 0;
 
       const rows = targets.map((id) => ({
         usuario_id: id,
@@ -122,10 +133,12 @@ export class NotificationsService {
         link: n.link ?? null,
         created_at: new Date().toISOString(),
       });
+      return targets.length;
     } catch (err) {
       this.logger.warn(
         `notifyRole(${rol}) falló: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return 0;
     }
   }
 

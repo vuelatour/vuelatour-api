@@ -461,21 +461,52 @@ export class AircraftService {
   }
 
   /**
+   * Tramos (escalas) que pertenecen a ESTE avión, con la regla de la
+   * asignación por tramo: el tramo es del avión si `escala.aeronave_id` es el
+   * avión, o si la escala no tiene avión propio y el vuelo (espejo) sí lo es.
+   * Filtrar solo por `vuelo.aeronave_id` atribuía las horas/hobbs de un tramo
+   * volado en OTRO avión (redondos con ida/regreso en aviones distintos).
+   * Siempre excluye vuelos CANCELADOS.
+   */
+  private async escalasDelAvion(
+    aeronaveId: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    const [propias, heredadas] = await Promise.all([
+      // Tramos asignados explícitamente a este avión (escala.aeronave_id).
+      this.supabase.service
+        .from('escala')
+        .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)')
+        .eq('aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+      // Tramos sin avión propio: heredan el del vuelo.
+      this.supabase.service
+        .from('escala')
+        .select(
+          'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
+        )
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aeronaveId)
+        .neq('vuelo.estado', 'CANCELADO'),
+    ]);
+    // Nunca degradar a [] en silencio: estas escalas alimentan horas/hobbs.
+    if (propias.error) throw new Error(propias.error.message);
+    if (heredadas.error) throw new Error(heredadas.error.message);
+    return [
+      ...((propias.data ?? []) as Array<Record<string, unknown>>),
+      ...((heredadas.data ?? []) as Array<Record<string, unknown>>),
+    ];
+  }
+
+  /**
    * Horas voladas reales del avión, DERIVADAS de las escalas (suma de
    * taco_llegada − taco_salida en vuelos no cancelados). Fuente única para la
    * reserva de overhaul mostrada: nunca se incrementa un contador aparte, así
    * un ajuste de tacómetro posterior se refleja solo y no hay doble conteo.
    */
   private async horasVoladas(aeronaveId: string): Promise<number> {
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
-      .eq('vuelo.aeronave_id', aeronaveId)
-      .neq('vuelo.estado', 'CANCELADO');
-    // Nunca degradar a 0 en silencio: las horas son la fuente del overhaul.
-    if (error) throw new Error(error.message);
+    const escalas = await this.escalasDelAvion(aeronaveId);
     let horas = 0;
-    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+    for (const e of escalas) {
       if (e.taco_salida == null || e.taco_llegada == null) continue;
       const h = Number(e.taco_llegada) - Number(e.taco_salida);
       if (Number.isFinite(h) && h > 0) horas += h;
@@ -485,15 +516,9 @@ export class AircraftService {
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
   private async currentHobbs(aeronaveId: string): Promise<number> {
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select('taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)')
-      .eq('vuelo.aeronave_id', aeronaveId)
-      .neq('vuelo.estado', 'CANCELADO');
-    // Nunca degradar a hobbs=0 en silencio: infla horas vivas de componentes.
-    if (error) throw new Error(error.message);
+    const escalas = await this.escalasDelAvion(aeronaveId);
     let max = 0;
-    for (const e of (data ?? []) as Array<Record<string, unknown>>) {
+    for (const e of escalas) {
       for (const v of [e.taco_salida, e.taco_llegada]) {
         if (v != null) max = Math.max(max, Number(v));
       }

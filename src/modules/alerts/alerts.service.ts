@@ -206,14 +206,21 @@ export class AlertsService {
   /** Documentos/licencias/permisos próximos a vencer, por cada umbral configurado. */
   private async checkVencimientos(config: AlertConfig): Promise<void> {
     const umbrales = config.dias_anticipacion.length > 0 ? config.dias_anticipacion : [30, 15, 7];
+    // Día Cancún (no UTC): a las 8am Cancún ambos coinciden, pero el criterio
+    // de "hoy" del negocio es SIEMPRE hora Cancún.
+    const hoyCancun = this.hoyCancun();
     for (const d of umbrales) {
       const target = dateOnly(new Date(Date.now() + d * 86400 * 1000));
+      // VENTANA [hoy, target] y no fecha EXACTA: si el cron diario se pierde
+      // un día (deploy, caída), la alerta de esa fecha jamás salía. El dedupe
+      // por alerta_emitida (markIfNew) evita repetir las ya avisadas.
       const { data, error } = await this.supabase.service
         .from('vencimiento')
         .select(
           'id, fecha_vencimiento, referencia, tipo_documento(nombre), aeronave(matricula), piloto:usuario!piloto_id(nombre)',
         )
-        .eq('fecha_vencimiento', target);
+        .gte('fecha_vencimiento', hoyCancun)
+        .lte('fecha_vencimiento', target);
       if (error) throw new Error(error.message);
 
       for (const row of data ?? []) {
@@ -240,14 +247,18 @@ export class AlertsService {
   /** Mantenimientos programados próximos (por cada umbral configurado). */
   private async checkMantenimientos(config: AlertConfig): Promise<void> {
     const umbrales = config.dias_anticipacion.length > 0 ? config.dias_anticipacion : [15, 7, 1];
+    const hoyCancun = this.hoyCancun();
     for (const d of umbrales) {
       const target = dateOnly(new Date(Date.now() + d * 86400 * 1000));
+      // VENTANA [hoy, target] en vez de fecha exacta: un cron perdido ya no
+      // silencia la alerta para siempre (markIfNew deduplica las ya avisadas).
       const { data, error } = await this.supabase.service
         .from('mantenimiento')
         .select('id, descripcion, fecha_programada, aeronave_id, aeronave(matricula)')
         .eq('tipo', 'PROGRAMADO')
         .is('fecha_realizada', null)
-        .eq('fecha_programada', target);
+        .gte('fecha_programada', hoyCancun)
+        .lte('fecha_programada', target);
       if (error) throw new Error(error.message);
 
       for (const m of data ?? []) {
@@ -504,9 +515,7 @@ export class AlertsService {
    * del cierre sin que nadie lo note.
    */
   private async checkVuelosEstancados(config: AlertConfig): Promise<void> {
-    const hoyCancun = new Date().toLocaleDateString('en-CA', {
-      timeZone: 'America/Cancun',
-    });
+    const hoyCancun = this.hoyCancun();
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
@@ -533,6 +542,13 @@ export class AlertsService {
     }
   }
 
+  /** Día actual en hora Cancún (YYYY-MM-DD): el corte del negocio nunca es UTC. */
+  private hoyCancun(): string {
+    return new Date().toLocaleDateString('en-CA', {
+      timeZone: 'America/Cancun',
+    });
+  }
+
   /** Semana ISO (YYYY-Www) para deduplicar alertas que re-avisan semanalmente. */
   private isoWeek(d: Date): string {
     const date = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
@@ -547,27 +563,49 @@ export class AlertsService {
 
   /**
    * Persiste + emite por socket (siempre, para el centro de notificaciones) y
-   * envía email si el canal lo incluye. Deduplica por dedupeKey para no repetir.
+   * envía email si el canal lo incluye. Deduplica por dedupeKey para no
+   * repetir. La clave se marca DESPUÉS de una entrega exitosa: antes se
+   * consumía primero (markIfNew) y, si la entrega fallaba (BD/socket/email
+   * caídos), la alerta se perdía PARA SIEMPRE. Ahora, si nada se entregó, la
+   * clave queda libre y el siguiente run reintenta.
    */
   private async dispatch(
     config: AlertConfig,
     dedupeKey: string,
     notif: NotificationInput,
   ): Promise<void> {
-    const isNew = await this.markIfNew(dedupeKey, config.clave);
-    if (!isNew) return;
+    if (await this.yaEmitida(dedupeKey)) return;
 
     const roles = config.roles.length > 0 ? config.roles : ['ADMIN'];
+    // Entregas = notificaciones persistidas + correos enviados.
+    let entregas = 0;
     for (const rol of roles) {
-      await this.notifications.notifyRole(rol as Rol, notif);
+      entregas += await this.notifications.notifyRole(rol as Rol, notif);
     }
 
     if (config.canal === 'email' || config.canal === 'ambos') {
-      await this.emailToRoles(roles, notif);
+      try {
+        entregas += await this.emailToRoles(roles, notif);
+      } catch (err) {
+        // El email NO tumba el despacho: si el socket ya entregó, se marca
+        // igual (repetir el socket sería peor que perder el correo).
+        this.logger.warn(
+          `Email de alerta ${config.clave} (${dedupeKey}) falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
+
+    if (entregas === 0) {
+      this.logger.warn(
+        `Alerta ${config.clave} (${dedupeKey}) sin entregas: se reintentará en el siguiente run`,
+      );
+      return;
+    }
+    await this.markIfNew(dedupeKey, config.clave);
   }
 
-  private async emailToRoles(roles: string[], notif: NotificationInput): Promise<void> {
+  /** Correos por rol. Devuelve cuántos se enviaron (fallos por destinatario no tumban al resto). */
+  private async emailToRoles(roles: string[], notif: NotificationInput): Promise<number> {
     const { data, error } = await this.supabase.service
       .from('usuario')
       .select('email')
@@ -579,9 +617,33 @@ export class AlertsService {
     if (error) throw new Error(error.message);
     const emails = [...new Set((data ?? []).map((u) => (u as { email: string }).email).filter(Boolean))];
     const subject = `VuelaTour · ${notif.titulo}`;
+    let enviados = 0;
     for (const to of emails) {
-      await this.email.sendAlert(to, subject, notif.titulo, notif.cuerpo ?? '');
+      try {
+        await this.email.sendAlert(
+          to,
+          subject,
+          notif.titulo,
+          notif.cuerpo ?? '',
+        );
+        enviados += 1;
+      } catch (err) {
+        this.logger.warn(
+          `Email de alerta a ${to} falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
+    return enviados;
+  }
+
+  /** ¿La dedupeKey ya fue emitida antes? (consulta sin consumir la clave). */
+  private async yaEmitida(dedupeKey: string): Promise<boolean> {
+    const { count, error } = await this.supabase.service
+      .from('alerta_emitida')
+      .select('dedupe_key', { count: 'exact', head: true })
+      .eq('dedupe_key', dedupeKey);
+    if (error) throw new Error(error.message);
+    return (count ?? 0) > 0;
   }
 
   /** Inserta la dedupeKey; devuelve true solo si es nueva (no emitida antes). */

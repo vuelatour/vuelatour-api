@@ -137,11 +137,22 @@ export class FlightsService {
   ): Promise<number | null> {
     let max = incluir ?? null;
     if (aeronaveId) {
-      const { data } = await this.supabase.service
-        .from('escala')
-        .select('taco_salida, taco_llegada')
-        .eq('aeronave_id', aeronaveId);
-      for (const e of data ?? []) {
+      // Regla escala-primero (asignación por tramo): un tramo pertenece al
+      // avión si escala.aeronave_id lo dice, o si no tiene asignación propia
+      // y el vuelo es de este avión. Sin el segundo query, los tramos legados
+      // con aeronave_id null serían invisibles para el ancla del horómetro.
+      const [propias, heredadas] = await Promise.all([
+        this.supabase.service
+          .from('escala')
+          .select('taco_salida, taco_llegada')
+          .eq('aeronave_id', aeronaveId),
+        this.supabase.service
+          .from('escala')
+          .select('taco_salida, taco_llegada, vuelo!inner(aeronave_id)')
+          .is('aeronave_id', null)
+          .eq('vuelo.aeronave_id', aeronaveId),
+      ]);
+      for (const e of [...(propias.data ?? []), ...(heredadas.data ?? [])]) {
         for (const v of [e.taco_salida, e.taco_llegada]) {
           if (v !== null && v !== undefined) {
             const n = Number(v);
@@ -463,7 +474,7 @@ export class FlightsService {
 
   // ============ Vuelos ============
 
-  async list(filters: ListFlightsQuery) {
+  async list(filters: ListFlightsQuery, current?: AuthenticatedUser) {
     let q = this.supabase.service
       .from('vuelo')
       .select(
@@ -553,14 +564,20 @@ export class FlightsService {
     );
     const rowsConRuta = rows.map((r) => {
       const row = r as Record<string, unknown>;
-      return {
-        ...row,
-        ruta_iatas:
-          rutas.get(row.id as string) ??
-          [row.origen_iata as string, row.destino_iata as string].filter(
-            Boolean,
-          ),
-      };
+      // Misma redacción por rol que findById/snapshot: el listado es la ruta
+      // más usada por la app (el mecánico lista TODOS los vuelos) y sin esto
+      // el candado de costo_externo_usd quedaba abierto por aquí.
+      return this.redactVueloForRol(
+        {
+          ...row,
+          ruta_iatas:
+            rutas.get(row.id as string) ??
+            [row.origen_iata as string, row.destino_iata as string].filter(
+              Boolean,
+            ),
+        },
+        current,
+      );
     });
     return {
       data: rowsConRuta,
@@ -601,7 +618,31 @@ export class FlightsService {
     return out;
   }
 
-  async findById(id: string) {
+  /**
+   * Redacción por rol para la app de campo: PILOTO/MECANICO no reciben el
+   * costo pactado con el operador externo (dato financiero interno del
+   * margen). `operador_externo` y `notas_internas` NO se redactan: la app
+   * Flutter los pinta (nombre del operador en tarjetas/listas y notas
+   * internas en el detalle del vuelo). `comision_vendedor_*` no forma parte
+   * de VUELO_COLS, así que estos endpoints nunca lo devuelven. Sin `current`
+   * (llamadas internas / panel) se devuelve todo.
+   */
+  private redactVueloForRol<T extends Record<string, unknown>>(
+    vuelo: T,
+    current?: AuthenticatedUser,
+  ): T {
+    if (
+      !current ||
+      (current.rol !== Rol.PILOTO && current.rol !== Rol.MECANICO)
+    ) {
+      return vuelo;
+    }
+    const copia: Record<string, unknown> = { ...vuelo };
+    delete copia.costo_externo_usd;
+    return copia as T;
+  }
+
+  async findById(id: string, current?: AuthenticatedUser) {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(VUELO_COLS)
@@ -609,7 +650,7 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
-    return data;
+    return this.redactVueloForRol(data, current);
   }
 
   // ===== Aislamiento de pilotos (Tarea 15) =====
@@ -774,8 +815,8 @@ export class FlightsService {
     return (data as { matricula?: string } | null)?.matricula ?? null;
   }
 
-  async snapshot(id: string) {
-    const vuelo = await this.findById(id);
+  async snapshot(id: string, current?: AuthenticatedUser) {
+    const vuelo = await this.findById(id, current);
     const [escalas, cobros, aeronaveMatricula] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -1514,7 +1555,7 @@ export class FlightsService {
     return data;
   }
 
-  async start(id: string, updatedBy: string) {
+  async start(id: string, updatedBy: string, actor?: AuthenticatedUser) {
     const current = await this.findById(id);
     // Operación independiente de lo administrativo: el vuelo puede despegar
     // aunque la cotización siga abierta (RESERVA/COTIZADO). Los guards de
@@ -1556,10 +1597,14 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.syncFlight(id);
-    return data!;
+    return this.redactVueloForRol(data!, actor);
   }
 
-  async complete(id: string, updatedBy: string | null) {
+  async complete(
+    id: string,
+    updatedBy: string | null,
+    actor?: AuthenticatedUser,
+  ) {
     const current = await this.findById(id);
     if (current.estado !== 'EN_VUELO') {
       throw new ConflictException(
@@ -1575,13 +1620,30 @@ export class FlightsService {
     ) {
       throw new ConflictException(MSG_TACO);
     }
+    // CAS (compare-and-set): el UPDATE solo aplica si el vuelo SIGUE en
+    // EN_VUELO. Dos caminos pueden completar casi a la vez (cada llegada de
+    // syncEstadoDesdeTacos, el cron zombi, el botón del panel): sin la guarda,
+    // el segundo repetía los side-effects (recordTramoTiempos, calendario).
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({ estado: 'COMPLETADO', updated_by: updatedBy })
       .eq('id', id)
+      .eq('estado', 'EN_VUELO')
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    if (!data) {
+      // 0 filas: alguien movió el estado entre la lectura y el write.
+      const relectura = await this.findById(id);
+      if (relectura.estado === 'COMPLETADO') {
+        // Otro camino ya lo completó: éxito idempotente, sin duplicar
+        // side-effects (ese camino ya corrió calendario + recordTramoTiempos).
+        return this.redactVueloForRol(relectura, actor);
+      }
+      throw new ConflictException(
+        `Solo se completa vuelo desde EN_VUELO. Actual: ${relectura.estado as string}`,
+      );
+    }
     void this.calendar.syncFlight(id);
     // Las horas de motor/hélice/overhaul NO se incrementan aquí: son DERIVADAS
     // de las escalas (horas vivas = horas_totales + hobbs − ref). Incrementar
@@ -1594,7 +1656,7 @@ export class FlightsService {
       // El recálculo de promedios nunca debe impedir cerrar el vuelo.
       void err;
     }
-    return data!;
+    return this.redactVueloForRol(data, actor);
   }
 
   /**
@@ -2365,7 +2427,7 @@ export class FlightsService {
    */
   private async syncEstadoDesdeTacos(
     vueloId: string,
-    userId: string,
+    userId: string | null,
   ): Promise<void> {
     const current = await this.findById(vueloId);
     if (current.es_externo) return;
@@ -2661,6 +2723,9 @@ export class FlightsService {
     if (!sig) return;
     if (sig.taco_salida != null) return; // ya tiene salida: no se pisa
     if ((sig.aeronave_id ?? null) !== (aeronaveId ?? null)) return; // otro avión
+    // Guarda atómica además del check en memoria: si el piloto capturó la
+    // salida entre la lectura y este write, el UPDATE afecta 0 filas (no-op)
+    // y su lectura se respeta.
     await this.supabase.service
       .from('escala')
       .update({
@@ -2668,7 +2733,8 @@ export class FlightsService {
         taco_salida_origen: origen,
         updated_by: userId,
       })
-      .eq('id', sig.id as string);
+      .eq('id', sig.id as string)
+      .is('taco_salida', null);
   }
 
   /** Avisa a admin/coordinador que un piloto capturó tacómetro. */
@@ -3063,6 +3129,11 @@ export class FlightsService {
       estimado: false,
       salidaDeducida: false,
       llegadaDeducida: false,
+      // Qué campos RELLENÓ este proceso (estaban null al leer): solo esos se
+      // escriben; lo que ya tenía valor jamás se re-escribe (podría pisar una
+      // captura del piloto ocurrida entre la lectura y el write).
+      salidaRellenada: false,
+      llegadaRellenada: false,
     }));
     rows.sort((a, b) => a.orden - b.orden);
 
@@ -3076,6 +3147,7 @@ export class FlightsService {
           const prev = rows[i - 1];
           if (prev.llegada !== null && prev.aeronaveId === r.aeronaveId) {
             r.salida = prev.llegada;
+            r.salidaRellenada = true;
             r.cambios.push('salida tomada de la llegada del tramo anterior');
             // Si la llegada anterior fue deducida, esta salida también lo es.
             if (prev.llegadaDeducida) r.salidaDeducida = true;
@@ -3103,6 +3175,7 @@ export class FlightsService {
             }
             r.llegada =
               Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
+            r.llegadaRellenada = true;
             r.cambios.push(
               `llegada calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
@@ -3122,6 +3195,7 @@ export class FlightsService {
           ) {
             r.salida =
               Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
+            r.salidaRellenada = true;
             r.cambios.push(
               `salida calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
             );
@@ -3136,18 +3210,22 @@ export class FlightsService {
 
     const actualizadas: Array<Record<string, unknown>> = [];
     for (const r of rows) {
-      if (r.cambios.length === 0) continue;
-      const patch: Record<string, unknown> = {
-        taco_salida: r.salida,
-        taco_llegada: r.llegada,
-      };
-      if (
-        r.salidaDeducida ||
-        r.cambios.some((c) => c.startsWith('salida tomada'))
-      ) {
+      if (!r.salidaRellenada && !r.llegadaRellenada) continue;
+      // Solo se escriben los campos que estaban VACÍOS en la lectura, y el
+      // UPDATE lleva guarda condicional por campo: si el piloto (o el cron
+      // gemelo) capturó entre la lectura y este write, el UPDATE afecta 0
+      // filas y su lectura se respeta (0 filas NO es error).
+      const patch: Record<string, unknown> = {};
+      if (r.salidaRellenada) {
+        patch.taco_salida = r.salida;
+        // Origen en TODO camino de escritura: propagada de la llegada real
+        // anterior = dato exacto (PILOTO); estimada por promedio = DEDUCIDO.
         patch.taco_salida_origen = r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO';
       }
-      if (r.llegadaDeducida) patch.taco_llegada_origen = 'DEDUCIDO';
+      if (r.llegadaRellenada) {
+        patch.taco_llegada = r.llegada;
+        patch.taco_llegada_origen = 'DEDUCIDO';
+      }
       if (r.estimado) {
         patch.revision_requerida = true;
         patch.revision_motivo = opts?.soloVencidasA
@@ -3155,12 +3233,13 @@ export class FlightsService {
           : `Calculado automáticamente al cierre del día: ${r.cambios.join('; ')} — confirmar en oficina`;
       }
       if (userId) patch.updated_by = userId;
-      const { data, error } = await this.supabase.service
+      let query = this.supabase.service
         .from('escala')
         .update(patch)
-        .eq('id', r.id)
-        .select(ESCALA_COLS)
-        .maybeSingle();
+        .eq('id', r.id);
+      if (r.salidaRellenada) query = query.is('taco_salida', null);
+      if (r.llegadaRellenada) query = query.is('taco_llegada', null);
+      const { data, error } = await query.select(ESCALA_COLS).maybeSingle();
       if (error) {
         this.logger.warn(`fillTacoGaps escala ${r.id}: ${error.message}`);
         continue;
@@ -3387,6 +3466,11 @@ export class FlightsService {
    * un EN_VUELO cuya fecha ya pasó y que tiene todas sus lecturas (reales o
    * deducidas) se completa solo — sus horas, ingresos y reportes del mes no se
    * pierden porque el piloto olvidó el botón. La operación no se detiene.
+   * También rescata vuelos CONFIRMADO con fecha pasada y TODAS las llegadas
+   * completas (tacos que entraron por un camino que no derivó el estado, p.
+   * ej. correcciones de oficina previas al sync de confirmTaco): se les corre
+   * la misma sincronización derivada (CONFIRMADO→EN_VUELO→COMPLETADO por el
+   * camino normal, con sus side-effects estándar).
    */
   @Cron('55 4 * * *', { name: 'vuelos-zombi' })
   async cerrarVuelosZombis(): Promise<void> {
@@ -3396,8 +3480,8 @@ export class FlightsService {
       });
       const { data, error } = await this.supabase.service
         .from('vuelo')
-        .select('id, folio, fecha_vuelo')
-        .eq('estado', 'EN_VUELO')
+        .select('id, folio, fecha_vuelo, estado')
+        .in('estado', ['EN_VUELO', 'CONFIRMADO'])
         .eq('es_externo', false)
         .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`);
       if (error) throw new Error(error.message);
@@ -3405,12 +3489,20 @@ export class FlightsService {
         try {
           const escalas = await this.escalasTaco(v.id as string);
           if (this.faltanLlegadas(escalas)) {
-            this.logger.warn(
-              `Vuelo zombi #${v.folio as number} sigue EN_VUELO con llegadas incompletas — requiere oficina`,
-            );
+            // CONFIRMADO con llegadas incompletas no es zombi: puede que
+            // nunca haya volado (lo resuelve la oficina: capturar o cancelar).
+            if (v.estado === 'EN_VUELO') {
+              this.logger.warn(
+                `Vuelo zombi #${v.folio as number} sigue EN_VUELO con llegadas incompletas — requiere oficina`,
+              );
+            }
             continue;
           }
-          await this.complete(v.id as string, null);
+          if (v.estado === 'CONFIRMADO') {
+            await this.syncEstadoDesdeTacos(v.id as string, null);
+          } else {
+            await this.complete(v.id as string, null);
+          }
           this.logger.log(
             `Vuelo #${v.folio as number} completado automáticamente (cierre nocturno)`,
           );
@@ -3711,6 +3803,28 @@ export class FlightsService {
     }
   }
 
+  /**
+   * Candado de conciliación (réplica del lado gasto, expenses.remove): un
+   * cobro enlazado a un movimiento bancario ya cuadró una línea del banco.
+   * Cambiarle el dinero o borrarlo dejaría el movimiento "conciliado"
+   * apuntando a un número que ya no existe y la conciliación se
+   * sobreestimaría en silencio.
+   */
+  private async assertCobroSinConciliar(cobroId: string): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id')
+      .eq('cobro_id', cobroId)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (data) {
+      throw new ConflictException(
+        'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
+      );
+    }
+  }
+
   /** Corrige un cobro capturado mal (oficina) y recalcula la bandera cobrado. */
   async updateCobro(
     cobroId: string,
@@ -3724,6 +3838,17 @@ export class FlightsService {
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
     if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+
+    // Editar el DINERO de un cobro conciliado rompería el cuadre con el banco
+    // (la conciliación cruza por monto/neto y moneda). Referencia, fecha o
+    // notas sí se pueden corregir sin desvincular.
+    const tocaDinero =
+      dto.monto !== undefined ||
+      dto.moneda !== undefined ||
+      dto.tc_usd_mxn !== undefined ||
+      dto.comision_banco_pct !== undefined ||
+      dto.comision_banco_monto !== undefined;
+    if (tocaDinero) await this.assertCobroSinConciliar(cobroId);
 
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.monto !== undefined) patch.monto = dto.monto;
@@ -3789,6 +3914,9 @@ export class FlightsService {
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
     if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    // Mismo candado que expenses.remove: borrar un cobro conciliado dejaría
+    // el movimiento bancario cuadrado contra nada.
+    await this.assertCobroSinConciliar(cobroId);
     const { error } = await this.supabase.service
       .from('cobro_vuelo')
       .delete()

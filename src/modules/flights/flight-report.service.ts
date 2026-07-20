@@ -9,7 +9,7 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, calculo_snapshot';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, calculo_snapshot';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -373,6 +373,32 @@ export class FlightReportService {
       }
       if (g.categoria === 'GAS') combustibleTotalUsd += usd;
       else gastosTotalUsd += usd;
+    }
+    // Vuelo cubierto por OPERADOR EXTERNO: lo que se le paga es el costo
+    // principal del vuelo y no vive en `gasto` — sin restarlo, el reporte
+    // pintaba el ingreso completo como ganancia. `costo_externo_usd` ya está
+    // en USD (no requiere TC). Se suma a los gastos del vuelo (así el balance
+    // Venta − Gasolina − Gastos = REMANENTE sigue cuadrando exacto) y se pinta
+    // como línea visible en la lista de gastos.
+    const costoExternoUsd = v.es_externo === true ? n(v.costo_externo_usd) : 0;
+    if (costoExternoUsd > 0) {
+      // Anti doble-conteo: si el pago al operador además se captura como
+      // gasto del vuelo (p. ej. para conciliar la transferencia), este
+      // reporte lo contaría dos veces. No hay categoría dedicada para
+      // detectarlo, así que se AVISA cuando el externo trae gastos capturados.
+      if (gastos.length > 0) {
+        notasHoras.push(
+          `Vuelo externo con ${gastos.length} gasto(s) capturado(s) ADEMÁS del costo del operador: verifica que el pago al operador no esté también capturado como gasto (se contaría doble).`,
+        );
+      }
+      gastos.push({
+        fecha: null,
+        concepto: 'Costo operador externo',
+        detalle: (v.operador_externo as string | null) || null,
+        moneda: 'USD',
+        monto: costoExternoUsd,
+      });
+      gastosTotalUsd += costoExternoUsd;
     }
     gastosTotalUsd = Number(gastosTotalUsd.toFixed(2));
     combustibleTotalUsd = Number(combustibleTotalUsd.toFixed(2));

@@ -10,19 +10,44 @@ import {
   IsUUID,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 export const ESTADOS_MANTENIMIENTO = ['PROGRAMADO', 'EN_TALLER', 'COMPLETADO'] as const;
 export type EstadoMantenimiento = (typeof ESTADOS_MANTENIMIENTO)[number];
+export const TIPOS_MANTENIMIENTO_LEGADO = ['PROGRAMADO', 'REALIZADO'] as const;
+export type TipoMantenimientoLegado =
+  (typeof TIPOS_MANTENIMIENTO_LEGADO)[number];
 const PAISES_SERVICIO = ['MX', 'USA'] as const;
 
 export class CreateMantenimientoDto {
-  @ApiProperty({
+  @ApiPropertyOptional({
     enum: ESTADOS_MANTENIMIENTO,
-    description: 'Ciclo del servicio: programado → en taller → completado',
+    description:
+      'Ciclo del servicio: programado → en taller → completado. Opcional solo si viene `tipo` (compat app).',
   })
-  @IsIn(ESTADOS_MANTENIMIENTO)
-  estado!: EstadoMantenimiento;
+  // Compat con APKs viejos de la app: mandan `tipo` en vez de `estado`. Debe
+  // venir al menos uno; si vienen ambos, `estado` explícito gana (el mapeo
+  // vive en engineering.service). Se valida `estado` siempre que venga, y
+  // también cuando falten ambos (para exigir al menos uno).
+  @ValidateIf(
+    (o: CreateMantenimientoDto) =>
+      o.estado !== undefined || o.tipo === undefined,
+  )
+  @IsIn(ESTADOS_MANTENIMIENTO, {
+    message:
+      'Indica el estado del servicio (PROGRAMADO, EN_TALLER o COMPLETADO) o el tipo (PROGRAMADO/REALIZADO).',
+  })
+  estado?: EstadoMantenimiento;
+
+  @ApiPropertyOptional({
+    enum: TIPOS_MANTENIMIENTO_LEGADO,
+    description:
+      'Campo legado de la app: PROGRAMADO→estado PROGRAMADO, REALIZADO→estado COMPLETADO. Ignorado si viene `estado`.',
+  })
+  @IsOptional()
+  @IsIn(TIPOS_MANTENIMIENTO_LEGADO)
+  tipo?: TipoMantenimientoLegado;
 
   @ApiProperty()
   @IsString()

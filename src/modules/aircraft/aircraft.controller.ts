@@ -79,6 +79,10 @@ export class AircraftController {
   }
 
   @Get(':id/metrics')
+  // Trae el bloque de FINANZAS (utilidad por avión): espejo de los dashboards
+  // financieros (/v1/dashboards/overview). El detalle del avión en el panel lo
+  // pide best-effort (sin permiso, la card simplemente no se pinta).
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary: 'Métricas operativas: apto-para-volar, utilización (horas/vuelos) y finanzas',
   })

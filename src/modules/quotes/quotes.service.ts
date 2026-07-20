@@ -1124,10 +1124,21 @@ export class QuotesService {
         updated_by: userId,
       })
       .eq('id', vueloId)
+      // Candado optimista: el UPDATE solo aplica si la versión sigue siendo
+      // la que se leyó y el vuelo no se facturó en medio. Dos revisiones
+      // simultáneas (o revisar mientras facturación timbra) pisarían montos
+      // sin dejar rastro en el historial de versiones.
+      .eq('cotizacion_version', current.cotizacion_version)
+      .eq('facturado', false)
       .select(VUELO_COLS)
       .maybeSingle();
 
     if (error) throw new Error(error.message);
+    if (!updated) {
+      throw new ConflictException(
+        'La cotización cambió mientras editabas (otra revisión o facturación). Recarga e intenta de nuevo.',
+      );
+    }
     const pernoctasAntes = await this.pernoctaDestinos(vueloId);
     await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId, {
       inicio:
@@ -1140,11 +1151,7 @@ export class QuotesService {
         null,
     });
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
-    void this.notifyPernoctaCambiada(
-      updated!,
-      pernoctasAntes,
-      pernoctasDespues,
-    );
+    void this.notifyPernoctaCambiada(updated, pernoctasAntes, pernoctasDespues);
     await this.appendVersionHistory(
       vueloId,
       newVersion,
@@ -1156,12 +1163,12 @@ export class QuotesService {
     // El precio cambió: la bandera `cobrado` se recalcula con la fuente
     // canónica (un anticipo previo puede ahora cubrir —o dejar de cubrir— el
     // total). Antes quedaba obsoleta hasta el siguiente cobro.
-    await this.refreshCobradoTrasRecotizar(vueloId, updated!, userId);
+    await this.refreshCobradoTrasRecotizar(vueloId, updated, userId);
     // Refleja fechas/tramos nuevos en el calendario (admin lee en vivo; esto
     // mueve también los eventos de Google si el vuelo ya estaba sincronizado).
     void this.calendar.syncFlight(vueloId);
     const escalas = await this.findEscalas(vueloId);
-    return { ...updated!, escalas };
+    return { ...updated, escalas };
   }
 
   /**

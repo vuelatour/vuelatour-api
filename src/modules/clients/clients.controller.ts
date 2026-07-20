@@ -32,7 +32,11 @@ export class ClientsController {
   constructor(private readonly clients: ClientsService) {}
 
   @Get()
-  @ApiOperation({ summary: 'List clients (any active user)' })
+  // PII fiscal completa (RFC, domicilio, email): mismo set de roles que el
+  // cotizador (quotes.controller) y que ':id/tarifas' — sin pilotos ni
+  // mecánicos. La app móvil no consume /clients.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'List clients (no accesible a pilotos/mecánicos)' })
   list(@Query() q: ListClientesQuery) {
     return this.clients.list(q);
   }
@@ -45,7 +49,8 @@ export class ClientsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get client' })
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({ summary: 'Get client (no accesible a pilotos/mecánicos)' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.clients.findById(id);
   }

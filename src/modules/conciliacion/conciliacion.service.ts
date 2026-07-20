@@ -476,6 +476,12 @@ export class ConciliacionService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
+      // Índice único uq_mov_bancario_cobro: dos vínculos simultáneos al mismo
+      // cobro pasan el check previo (TOCTOU) pero solo uno gana en la BD.
+      if (error.code === '23505' || error.message?.includes('23505'))
+        throw new ConflictException(
+          'Ese cobro ya está vinculado a otro movimiento bancario.',
+        );
       if (error.code === '23503')
         throw new BadRequestException('Cobro no encontrado.');
       throw new Error(error.message);
@@ -631,6 +637,12 @@ export class ConciliacionService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
+      // Índice único uq_mov_bancario_gasto: dos vínculos simultáneos al mismo
+      // gasto pasan el check previo (TOCTOU) pero solo uno gana en la BD.
+      if (error.code === '23505' || error.message?.includes('23505'))
+        throw new ConflictException(
+          'Ese gasto ya está vinculado a otro movimiento bancario.',
+        );
       if (error.code === '23503')
         throw new BadRequestException('Gasto no encontrado.');
       throw new Error(error.message);
