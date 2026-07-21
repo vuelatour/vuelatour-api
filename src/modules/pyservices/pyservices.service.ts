@@ -322,6 +322,44 @@ export interface ZipPayload {
   archivos: ArchivoZipPayload[];
 }
 
+// ===== Carga masiva de combustibles (plantilla Excel + parseo del archivo) =====
+
+export interface PlantillaCombustiblePayload {
+  matriculas: string[];
+  proveedores: string[];
+  medios_pago: string[];
+  monedas: string[];
+  tipos_combustible: string[];
+}
+
+/**
+ * Fila CRUDA leída del Excel por pyservices (sin validación de negocio:
+ * cualquier campo puede venir null o con basura — el API valida todo).
+ */
+export interface FilaCombustibleCruda {
+  fila: number;
+  matricula: string | null;
+  /** 'YYYY-MM-DD' */
+  fecha: string | null;
+  /** 'HH:MM' o null */
+  hora: string | null;
+  litros: number | null;
+  monto: number | null;
+  moneda: string | null;
+  tipo_cambio: number | null;
+  tipo_combustible: string | null;
+  lugar: string | null;
+  proveedor: string | null;
+  medio_pago: string | null;
+  folio_vuelo: string | number | null;
+  comprobante: string | null;
+  notas: string | null;
+}
+
+export interface ParseCombustibleResult {
+  filas: FilaCombustibleCruda[];
+}
+
 export interface FacturaRecibidaParsed {
   uuid_fiscal: string | null;
   emisor_rfc: string | null;
@@ -385,6 +423,27 @@ export class PyservicesService {
     // Libro grande (1 fila por vuelo + 3 ledgers): tope de 30s como el resto
     // de renders pesados (quotes-pdf) para no colgar el request del panel.
     return this.postForBuffer('/pdf/balance-avion-xlsx', payload, 30_000);
+  }
+
+  /** Plantilla Excel de carga masiva de combustibles (catálogos → listas). */
+  async generarPlantillaCombustible(
+    payload: PlantillaCombustiblePayload,
+  ): Promise<Buffer> {
+    return this.postForBuffer('/gastos/plantilla-combustible', payload);
+  }
+
+  /**
+   * Parsea el Excel de carga masiva de combustibles. Devuelve filas CRUDAS:
+   * la validación de negocio vive en el API (expenses/combustible-masivo).
+   */
+  async parseCombustible(
+    archivoBase64: string,
+    filename: string,
+  ): Promise<ParseCombustibleResult> {
+    return this.postForJson<ParseCombustibleResult>(
+      '/gastos/parse-combustible',
+      { archivo_base64: archivoBase64, filename },
+    );
   }
 
   /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */

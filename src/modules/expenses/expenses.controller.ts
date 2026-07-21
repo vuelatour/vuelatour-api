@@ -30,13 +30,21 @@ import {
   UpdateGastoDto,
   UpdateTarifaAerodromoDto,
 } from './dto/expenses.dto';
+import {
+  CargaMasivaCombustibleDto,
+  PreviewCargaCombustibleDto,
+} from './dto/combustible-masivo.dto';
+import { CombustibleMasivoService } from './combustible-masivo.service';
 import { ExpensesService } from './expenses.service';
 
 @ApiTags('Expenses')
 @ApiBearerAuth()
 @Controller({ path: 'expenses', version: '1' })
 export class ExpensesController {
-  constructor(private readonly expenses: ExpensesService) {}
+  constructor(
+    private readonly expenses: ExpensesService,
+    private readonly combustibleMasivo: CombustibleMasivoService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'List gastos (with filters). Pilotos see only own captures.' })
@@ -168,6 +176,49 @@ export class ExpensesController {
   @ApiOperation({ summary: 'Elimina una tarifa de aeródromo.' })
   removeTarifa(@Param('id', ParseUUIDPipe) id: string) {
     return this.expenses.removeTarifaAerodromo(id);
+  }
+
+  // ===== Carga masiva de combustibles (Excel) — rutas literales antes de :id =====
+  // Roles = los de oficina que capturan gastos (el @Roles del create SIN
+  // piloto/mecánico: ellos cargan desde la app, no por Excel).
+
+  @Get('combustibles/plantilla.xlsx')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Plantilla Excel para la carga masiva de combustibles, con los catálogos reales (matrículas, proveedores, medios de pago) como listas.',
+  })
+  async plantillaCombustibles(): Promise<StreamableFile> {
+    const buffer = await this.combustibleMasivo.plantillaXlsx();
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: 'attachment; filename="plantilla-combustibles.xlsx"',
+    });
+  }
+
+  @Post('combustibles/carga-masiva/preview')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Valida el Excel llenado SIN crear nada: errores y advertencias por fila + datos normalizados (aeronave, vuelo, proveedor resueltos).',
+  })
+  previewCargaCombustibles(@Body() dto: PreviewCargaCombustibleDto) {
+    return this.combustibleMasivo.preview(dto);
+  }
+
+  @Post('combustibles/carga-masiva')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Crea los gastos GAS de las filas validadas. Re-valida TODO en servidor; procesa todas las filas y reporta creados vs errores por fila.',
+  })
+  cargaMasivaCombustibles(
+    @Body() dto: CargaMasivaCombustibleDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.combustibleMasivo.cargaMasiva(dto, c.userId, c.rol);
   }
 
   @Get(':id')

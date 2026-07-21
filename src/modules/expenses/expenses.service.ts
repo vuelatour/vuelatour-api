@@ -657,7 +657,14 @@ export class ExpensesService {
     return { ok: true };
   }
 
-  async create(dto: CreateGastoDto, userId: string, rol?: Rol) {
+  async create(
+    dto: CreateGastoDto,
+    userId: string,
+    rol?: Rol,
+    // notificar:false = flujos en lote (carga masiva de combustibles): una
+    // carga de 50 filas no debe disparar 50 push a admin.
+    opts?: { notificar?: boolean },
+  ) {
     // El mecánico solo puede cargar combustible (GAS).
     if (rol === Rol.MECANICO && dto.categoria !== 'GAS') {
       throw new BadRequestException(
@@ -802,22 +809,24 @@ export class ExpensesService {
     }
 
     // Aviso a admin: el piloto subió un gasto desde campo.
-    void this.notifications.notifyRole(
-      Rol.ADMIN,
-      {
-        tipo: 'gasto_registrado',
-        titulo: 'Gasto registrado',
-        cuerpo: `${dto.categoria} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
-        data: {
-          gasto_id: (data as { id: string }).id,
-          vuelo_id: dto.vuelo_id ?? null,
+    if (opts?.notificar !== false) {
+      void this.notifications.notifyRole(
+        Rol.ADMIN,
+        {
+          tipo: 'gasto_registrado',
+          titulo: 'Gasto registrado',
+          cuerpo: `${dto.categoria} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
+          data: {
+            gasto_id: (data as { id: string }).id,
+            vuelo_id: dto.vuelo_id ?? null,
+          },
+          link: dto.vuelo_id
+            ? `/admin/flights/${dto.vuelo_id}`
+            : '/admin/expenses',
         },
-        link: dto.vuelo_id
-          ? `/admin/flights/${dto.vuelo_id}`
-          : '/admin/expenses',
-      },
-      userId,
-    );
+        userId,
+      );
+    }
 
     return data!;
   }
