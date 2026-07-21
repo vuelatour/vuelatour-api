@@ -422,6 +422,34 @@ export class AircraftService {
       for (const a of rows) {
         a.imagen_principal_url = porAvion.get(a.id as string) ?? null;
       }
+
+      // Último tacómetro por avión (el horómetro solo sube: max de todas sus
+      // lecturas), en UNA consulta para todo el listado. Regla de asignación
+      // por tramo: la escala pertenece al avión de escala.aeronave_id, o al
+      // del vuelo cuando no tiene asignación propia.
+      const ids = new Set(rows.map((a) => a.id as string));
+      const { data: tacos } = await this.supabase.service
+        .from('escala')
+        .select(
+          'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id(aeronave_id)',
+        )
+        .or('taco_salida.not.is.null,taco_llegada.not.is.null');
+      const maxTaco = new Map<string, number>();
+      for (const e of tacos ?? []) {
+        const vuelo = e.vuelo as { aeronave_id?: string | null } | null;
+        const dueno =
+          (e.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null;
+        if (!dueno || !ids.has(dueno)) continue;
+        for (const v of [e.taco_salida, e.taco_llegada]) {
+          const n = Number(v);
+          if (Number.isFinite(n) && n > (maxTaco.get(dueno) ?? -Infinity)) {
+            maxTaco.set(dueno, n);
+          }
+        }
+      }
+      for (const a of rows) {
+        a.ultimo_taco = maxTaco.get(a.id as string) ?? null;
+      }
     }
 
     return {
