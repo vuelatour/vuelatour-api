@@ -569,10 +569,28 @@ export class AircraftBalanceService {
           `${etiqueta}: ${cobroSinTc} cobro(s) en USD sin TC (ni TC del vuelo) — parcialidad vacía en MXN`,
         );
       }
+      // Regla del cliente: NUNCA se cobran menos horas de las voladas. Si el
+      // tacómetro registró más de lo cotizado, hay que recotizar el vuelo
+      // (revisar cotización con las horas reales). Solo aplica con cotización
+      // (D>0; sin cotización ya sale su propio pendiente).
+      if (D > 0 && O != null && O - D > 0.01) {
+        pendientes.push(
+          `${etiqueta}: voló ${O.toFixed(2)} hr y solo se cobraron ${D.toFixed(
+            2,
+          )} — recotizar con las horas reales (lo cobrado no puede ser menor a lo volado)`,
+        );
+      }
 
+      const cliente = v.cliente_id
+        ? (clientePorId.get(v.cliente_id) ?? null)
+        : null;
       filasVuelo.push({
+        // CLAVE del libro: folio del sistema + nombre del cliente (el libro
+        // original usaba claves tipo "vt<apellido>"; el nombre real es más
+        // claro para el equipo y el folio amarra la fila al sistema).
+        clave: `#${folio}${cliente ? ` · ${cliente}` : ''}`,
         folio,
-        cliente: v.cliente_id ? (clientePorId.get(v.cliente_id) ?? null) : null,
+        cliente,
         estado: v.estado,
         es_externo: esExterno,
         fecha: diaCancun(v.fecha_vuelo),

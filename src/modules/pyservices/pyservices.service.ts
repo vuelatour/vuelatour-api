@@ -151,6 +151,8 @@ export interface BalanceAvionCobroPayload {
 }
 
 export interface BalanceAvionVueloPayload {
+  /** Columna CLAVE del libro: "#<folio> · <cliente>". */
+  clave: string;
   folio: string;
   cliente: string | null;
   estado: string;
