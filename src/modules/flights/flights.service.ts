@@ -54,6 +54,17 @@ const MIN_MUESTRAS = 3; // muestras mínimas para confiar en el promedio
 // no se detiene".
 const MSG_TACO = 'Debes registrar el tacómetro antes de continuar.';
 
+/**
+ * El equipo trabaja los tacómetros a 1 DECIMAL (regla del cliente, jul 2026):
+ * algunos horómetros (XB-ANU) muestran centésimas y las capturas quedaban con
+ * 2 decimales. TODA escritura de taco_salida/taco_llegada/valor_ia_propuesto
+ * pasa por aquí — así la cadena (propagación, deducción, horas derivadas)
+ * queda homogénea.
+ */
+function roundTaco(v: number | string): number {
+  return Math.round(Number(v) * 10) / 10;
+}
+
 interface EscalaTaco {
   orden: number;
   taco_salida: string | number | null;
@@ -2355,6 +2366,15 @@ export class FlightsService {
       throw new BadRequestException('Empty taco payload');
     }
 
+    // Normaliza a 1 decimal ANTES de validar: las validaciones, el patch y la
+    // propagación al siguiente tramo usan el mismo valor redondeado.
+    if (dto.taco_salida !== undefined)
+      dto.taco_salida = roundTaco(dto.taco_salida);
+    if (dto.taco_llegada !== undefined)
+      dto.taco_llegada = roundTaco(dto.taco_llegada);
+    if (dto.valor_ia_propuesto !== undefined && dto.valor_ia_propuesto !== null)
+      dto.valor_ia_propuesto = roundTaco(dto.valor_ia_propuesto);
+
     // Validate monotonicity: new taco_salida/llegada must be >= existing capture.
     // Excepción: una salida llenada por el SISTEMA (DEDUCIDO) puede venir mal
     // (avión que durmió fuera, historial sucio); la foto del piloto en el
@@ -2585,9 +2605,9 @@ export class FlightsService {
         );
         continue;
       }
-      patch[`taco_${which}`] = lectura;
+      patch[`taco_${which}`] = roundTaco(lectura);
       patch[`taco_${which}_origen`] = 'IA';
-      patch.valor_ia_propuesto = lectura;
+      patch.valor_ia_propuesto = roundTaco(lectura);
       const pct = Math.round((ia.confianza ?? 0) * 100);
       motivos.push(
         `Lectura de ${which} leída por IA al sincronizar (confianza ${pct}%) — confirmar en oficina`,
@@ -2652,6 +2672,12 @@ export class FlightsService {
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    // Regla de 1 decimal: normaliza lo tecleado por oficina antes de validar.
+    if (dto.taco_salida !== undefined && dto.taco_salida !== null)
+      dto.taco_salida = roundTaco(dto.taco_salida);
+    if (dto.taco_llegada !== undefined && dto.taco_llegada !== null)
+      dto.taco_llegada = roundTaco(dto.taco_llegada);
 
     const salida =
       dto.taco_salida ??
@@ -2801,7 +2827,7 @@ export class FlightsService {
     await this.supabase.service
       .from('escala')
       .update({
-        taco_salida: tacoLlegada,
+        taco_salida: roundTaco(tacoLlegada),
         taco_salida_origen: origen,
         updated_by: userId,
       })
@@ -3289,13 +3315,13 @@ export class FlightsService {
       // filas y su lectura se respeta (0 filas NO es error).
       const patch: Record<string, unknown> = {};
       if (r.salidaRellenada) {
-        patch.taco_salida = r.salida;
+        patch.taco_salida = roundTaco(r.salida as number);
         // Origen en TODO camino de escritura: propagada de la llegada real
         // anterior = dato exacto (PILOTO); estimada por promedio = DEDUCIDO.
         patch.taco_salida_origen = r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO';
       }
       if (r.llegadaRellenada) {
-        patch.taco_llegada = r.llegada;
+        patch.taco_llegada = roundTaco(r.llegada as number);
         patch.taco_llegada_origen = 'DEDUCIDO';
       }
       if (r.estimado) {
@@ -3617,7 +3643,7 @@ export class FlightsService {
     await this.supabase.service
       .from('escala')
       .update({
-        taco_salida: ultimo,
+        taco_salida: roundTaco(ultimo),
         taco_salida_origen: 'DEDUCIDO',
         updated_by: userId,
       })
