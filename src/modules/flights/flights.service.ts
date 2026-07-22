@@ -588,8 +588,12 @@ export class FlightsService {
   }
 
   /**
-   * Para un lote de vuelos, devuelve la cadena de puntos de la ruta REAL
-   * (origen del primer tramo + destino de cada tramo comercial, en orden).
+   * Para un lote de vuelos, devuelve la cadena de puntos de la ruta OPERATIVA
+   * completa (origen del primer tramo + destino de cada tramo, en orden),
+   * INCLUYENDO los tramos solo_operativa (ferry/posicionamiento): este módulo
+   * es la operación, y un reposicionamiento CUN→PCE se listaba como "CUN→CUN"
+   * (el espejo comercial) al excluirlos. La ruta COMERCIAL (solo tramos
+   * cobrables) vive en el listado de Cotizaciones, que tiene su propia copia.
    * Map vacío para vuelos sin escalas (el caller cae a origen/destino).
    */
   private async rutasIatasPorVuelo(
@@ -601,7 +605,6 @@ export class FlightsService {
       .from('escala')
       .select('vuelo_id, orden, origen_iata, destino_iata')
       .in('vuelo_id', vueloIds)
-      .eq('solo_operativa', false)
       .order('orden', { ascending: true });
     const porVuelo = new Map<string, Array<Record<string, unknown>>>();
     for (const e of data ?? []) {
