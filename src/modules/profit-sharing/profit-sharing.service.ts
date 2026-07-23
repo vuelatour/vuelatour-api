@@ -277,9 +277,12 @@ export class ProfitSharingService {
     let vuelosCobrados = 0;
     let vuelosPendientes = 0;
     let cobrosSinTcMxn = 0;
-    // Comisiones de venta (Itzy/Pablo/broker): el cliente paga el total, pero
-    // esa parte no es de VuelaTour — se descuenta del ingreso a repartir. Se
-    // hace efectiva contra lo cobrado (tope: lo cobrado del vuelo).
+    // Comisiones de venta (Itzy/Pablo/broker): el cliente paga el total —
+    // que desde jul 2026 YA incluye la comisión sumada al precio — pero esa
+    // parte no es de VuelaTour: se descuenta del ingreso a repartir y el
+    // neto queda ≈ precio base. Se hace efectiva contra lo cobrado (tope:
+    // lo cobrado del vuelo — este Math.min SÍ se queda: no se descuenta
+    // comisión de dinero que aún no entra).
     let comisionesVenta = 0;
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
     // que los agregados (misma conversión cobrosEnUsd, mismo tope de comisión)

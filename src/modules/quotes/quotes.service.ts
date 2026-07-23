@@ -102,7 +102,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -423,6 +423,25 @@ export class QuotesService {
     // reduce la base gravable para que el descuento también baje el IVA.
     const ajusteBase = round2(Number(dto.ajuste_final_usd) || 0);
 
+    // Comisión del VENDEDOR (Itzy/Pablo/broker) — regla nueva (jul 2026): se
+    // SUMA al precio del cliente (ya NO sale del precio; el cliente siempre
+    // la termina pagando). Entra al total como componente canónico PRE-IVA
+    // con su propio redondeo: si la cotización lleva IVA, la comisión
+    // también genera IVA (coherente con que el CFDI grava el total). El neto
+    // VuelaTour (total − comisión) ahora equivale al precio base.
+    // Modalidad POR_HORA: tarifa × horas cobradas, recalculada en cada
+    // calculate/revise (si cambian las horas, cambia); FIJA: monto tal cual.
+    const comisionVendedorModo: 'FIJA' | 'POR_HORA' =
+      dto.comision_vendedor_modo === 'POR_HORA' ? 'POR_HORA' : 'FIJA';
+    const comisionVendedorTarifaHr =
+      comisionVendedorModo === 'POR_HORA'
+        ? round2(Number(dto.comision_vendedor_tarifa_hr) || 0)
+        : null;
+    const comisionVendedor =
+      comisionVendedorModo === 'POR_HORA'
+        ? round2((comisionVendedorTarifaHr ?? 0) * tiempoCobrableHr)
+        : round2(Number(dto.comision_vendedor_usd) || 0);
+
     // Comisión BillPocket (no factura → sin IVA): porcentaje CUSTOM que la
     // terminal cobra (5%, 9%… tope 20%). Se cobra al cliente como línea sin
     // IVA sobre todo lo demás, sintetizada como "extra" para que fluya igual
@@ -434,10 +453,14 @@ export class QuotesService {
         : 0;
 
     // Cadena canónica de totales EN FUNCIÓN del ajuste (mismo orden de
-    // redondeo del invariante v1.3). Se usa para resolver el redondeo
-    // automático con exactitud de centavo.
+    // redondeo del invariante v1.3, ahora con la comisión del vendedor como
+    // componente pre-IVA). Se usa para resolver el redondeo automático con
+    // exactitud de centavo. El redondeo automático a $10 y el total pactado
+    // siguen siendo el ÚLTIMO paso (post-IVA), después de la comisión.
     const calcTotales = (ajuste: number) => {
-      const baseIva = round2(subtotalR + tuasR + extrasConIvaR + ajuste);
+      const baseIva = round2(
+        subtotalR + tuasR + extrasConIvaR + comisionVendedor + ajuste,
+      );
       const iva = round2(baseIva * ivaPct);
       const totalSinComision = round2(
         baseIva + iva + pernoctaR + extrasSinIvaR,
@@ -492,12 +515,6 @@ export class QuotesService {
       extrasSinIvaRFinal = round2(extrasSinIvaR + comisionR);
     }
     const total = tot.total;
-    // Comisión del vendedor (Itzy/Pablo/broker): sale del precio, no del
-    // cliente — solo meta/neto, el total canónico queda intacto.
-    const comisionVendedor = Math.min(
-      round2(Number(dto.comision_vendedor_usd) || 0),
-      total,
-    );
 
     // Desglose canónico para el balance: cada concepto cobrado al cliente como
     // línea independiente; la suma de las líneas ES el total.
@@ -530,6 +547,26 @@ export class QuotesService {
         }${e.aplica_iva ? '' : ' (sin IVA)'}`,
         monto_usd: e.monto_usd,
       })),
+      // Comisión del vendedor (jul 2026): componente canónico PRE-IVA que se
+      // SUMA al precio del cliente. Solo admin/balance — el PDF del cliente
+      // la absorbe en el subtotal (nunca se lista ahí).
+      ...(comisionVendedor > 0
+        ? [
+            {
+              clave: 'COMISION_VENDEDOR',
+              concepto: `Comisión del vendedor${
+                dto.comision_vendedor_nombre?.trim()
+                  ? ` (${dto.comision_vendedor_nombre.trim()})`
+                  : ''
+              }${
+                comisionVendedorModo === 'POR_HORA'
+                  ? ` · $${(comisionVendedorTarifaHr ?? 0).toFixed(2)}/hr × ${round4(tiempoCobrableHr)} hr`
+                  : ''
+              }`,
+              monto_usd: comisionVendedor,
+            },
+          ]
+        : []),
       // El ajuste/descuento se lista ANTES del IVA porque reduce la base gravable.
       ...(ajusteFinal !== 0
         ? [
@@ -708,13 +745,22 @@ export class QuotesService {
               ? round2(ajusteFinal - ajusteBase)
               : null,
         descuento_usd: ajusteBase < 0 ? round2(-ajusteBase) : null,
-        // Comisión del VENDEDOR: informativa (NO altera el desglose canónico —
-        // el cliente paga el total completo). El neto es lo que queda a
-        // VuelaTour y fluye a reparto/reportes. Interna: nunca al PDF cliente.
+        // Comisión del VENDEDOR (jul 2026): componente canónico del total —
+        // se SUMA al precio del cliente (línea COMISION_VENDEDOR del
+        // desglose). El neto VuelaTour (total − comisión) equivale al precio
+        // base y fluye a reparto/reportes. Interna: nunca al PDF cliente
+        // (ahí se absorbe en el subtotal). POR_HORA persiste modo+tarifa
+        // para recalcularse en revisiones si cambian las horas.
         comision_vendedor_usd: comisionVendedor > 0 ? comisionVendedor : null,
         comision_vendedor_nombre:
           comisionVendedor > 0
             ? dto.comision_vendedor_nombre?.trim() || null
+            : null,
+        comision_vendedor_modo:
+          comisionVendedor > 0 ? comisionVendedorModo : null,
+        comision_vendedor_tarifa_hr:
+          comisionVendedor > 0 && comisionVendedorModo === 'POR_HORA'
+            ? comisionVendedorTarifaHr
             : null,
         neto_vuelatour_usd:
           comisionVendedor > 0 ? round2(total - comisionVendedor) : null,
@@ -922,6 +968,9 @@ export class QuotesService {
       ajuste_final_usd: breakdown.totales.ajuste_final_usd,
       comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
       comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
+      comision_vendedor_modo: breakdown.meta.comision_vendedor_modo ?? null,
+      comision_vendedor_tarifa_hr:
+        breakdown.meta.comision_vendedor_tarifa_hr ?? null,
       metodo_cobro: dto.metodo_pago,
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       // Con ruta operativa: las escalas del vuelo son las del PILOTO y la
@@ -1064,6 +1113,22 @@ export class QuotesService {
     // La tarifa preferencial se resuelve SIEMPRE con el cliente real del
     // vuelo (no se confía en el que mande el front al revisar).
     dto.cliente_id = (current.cliente_id as string | null) ?? undefined;
+    // Comisión del vendedor: si la revisión no trae la modalidad, se
+    // re-resuelve desde lo persistido (patrón tarifa preferencial) — así una
+    // comisión POR_HORA se recalcula con las horas nuevas aunque el front no
+    // mande el modo. Quitar la comisión = enviar modo FIJA sin monto (o
+    // POR_HORA con tarifa 0).
+    if (dto.comision_vendedor_modo === undefined) {
+      dto.comision_vendedor_modo =
+        (current.comision_vendedor_modo as 'FIJA' | 'POR_HORA' | null) ??
+        undefined;
+      if (dto.comision_vendedor_tarifa_hr === undefined) {
+        dto.comision_vendedor_tarifa_hr =
+          Number(current.comision_vendedor_tarifa_hr) > 0
+            ? Number(current.comision_vendedor_tarifa_hr)
+            : undefined;
+      }
+    }
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
@@ -1109,6 +1174,9 @@ export class QuotesService {
         comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
         comision_vendedor_nombre:
           breakdown.meta.comision_vendedor_nombre ?? null,
+        comision_vendedor_modo: breakdown.meta.comision_vendedor_modo ?? null,
+        comision_vendedor_tarifa_hr:
+          breakdown.meta.comision_vendedor_tarifa_hr ?? null,
         metodo_cobro: dto.metodo_pago,
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
@@ -1251,7 +1319,9 @@ export class QuotesService {
       metodo_pago:
         (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
       // El ajuste rápido no debe borrar el TC pactado, la comisión BillPocket
-      // ni la comisión del vendedor.
+      // ni la comisión del vendedor: passthrough CONGELADO de modo + tarifa +
+      // monto efectivo persistidos (el ajuste rápido no cambia tramos, así
+      // que las horas — y una comisión POR_HORA — quedan idénticas).
       tc_usd_mxn:
         Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
       comision_billpocket_pct:
@@ -1259,6 +1329,13 @@ export class QuotesService {
       comision_vendedor_usd:
         Number(current.comision_vendedor_usd) > 0
           ? Number(current.comision_vendedor_usd)
+          : undefined,
+      comision_vendedor_modo:
+        (current.comision_vendedor_modo as 'FIJA' | 'POR_HORA' | null) ??
+        undefined,
+      comision_vendedor_tarifa_hr:
+        Number(current.comision_vendedor_tarifa_hr) > 0
+          ? Number(current.comision_vendedor_tarifa_hr)
           : undefined,
       comision_vendedor_nombre:
         (current.comision_vendedor_nombre as string | null) ?? undefined,

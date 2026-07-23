@@ -402,13 +402,33 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
-      'Comisión del VENDEDOR en USD (Itzy/Pablo/broker): sale del precio de venta, NO se suma al cliente. El cliente paga el total completo; el neto VuelaTour (total − comisión) es lo que fluye a reparto/reportes. Solo interna: jamás en el PDF del cliente.',
+      'Comisión del VENDEDOR en USD (Itzy/Pablo/broker) con modo FIJA. Regla jul 2026: se SUMA al precio del cliente (componente canónico pre-IVA: si la cotización lleva IVA, la comisión también lo genera). El neto VuelaTour (total − comisión) equivale al precio base. Interna: jamás como línea en el PDF del cliente (se absorbe en el subtotal).',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   comision_vendedor_usd?: number;
+
+  @ApiPropertyOptional({
+    enum: ['FIJA', 'POR_HORA'],
+    description:
+      'Modalidad de la comisión del vendedor (default FIJA). POR_HORA: comisión = comision_vendedor_tarifa_hr × horas cobradas, recalculada en cada revisión (si cambian las horas, cambia la comisión).',
+  })
+  @IsOptional()
+  @IsIn(['FIJA', 'POR_HORA'])
+  comision_vendedor_modo?: 'FIJA' | 'POR_HORA';
+
+  @ApiPropertyOptional({
+    description:
+      'Tarifa de la comisión del vendedor en USD por hora cobrada (solo modo POR_HORA, ej. 50 ⇒ $50/hr).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(10000)
+  comision_vendedor_tarifa_hr?: number;
 
   @ApiPropertyOptional({
     description: 'Quién vendió y cobra la comisión (Itzy, Pablo, broker…).',

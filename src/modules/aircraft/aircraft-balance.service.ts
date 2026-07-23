@@ -484,8 +484,11 @@ export class AircraftBalanceService {
       const AH = AG != null && z != null ? AG * z : null;
       const AI = round2((L ?? 0) - Y);
       const AJ = round2((M ?? 0) - (AH ?? 0));
-      // Comisión del vendedor: vuelo.comision_vendedor_usd (sale del precio,
-      // interna). A MXN con el TC de venta (K); sin K queda pendiente.
+      // Comisión del vendedor: vuelo.comision_vendedor_usd. Regla jul 2026:
+      // va SUMADA al precio del cliente — el ingreso que la cubre viaja en
+      // otros_ingresos (total sistema − venta por horas, al pie); aquí solo
+      // se descuenta el PAGO al vendedor de la fila. A MXN con el TC de
+      // venta (K); sin K queda pendiente.
       const comUsd = pos(v.comision_vendedor_usd);
       const AK = comUsd != null && K != null ? round2(comUsd * K) : null;
       if (comUsd != null && K == null) {

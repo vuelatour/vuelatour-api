@@ -480,8 +480,9 @@ export class FlightReportService {
       total_usd: n(v.monto_total_usd),
       total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
-      // Comisión del vendedor: se muestra DESPUÉS del total (el cliente paga
-      // el total completo); neto = lo que queda a VuelaTour.
+      // Comisión del vendedor: se muestra DESPUÉS del total (regla jul 2026:
+      // el total del cliente YA la incluye — se le suma al precio); neto =
+      // total − comisión = lo que queda a VuelaTour (≈ precio base).
       comision_vendedor_usd: n(v.comision_vendedor_usd),
       comision_vendedor_nombre:
         (v.comision_vendedor_nombre as string | null) ?? null,

@@ -74,6 +74,19 @@ export class QuotesPdfService {
           .map((d) => d.concepto as string)
       : [];
 
+    // Comisión del vendedor (regla jul 2026: se SUMA al precio del cliente):
+    // NUNCA se lista en el recibo — se absorbe en el subtotal (mismo
+    // mecanismo que el redondeo hacia arriba). Se toma la línea canónica
+    // PRE-IVA del snapshot (su IVA ya viene dentro de iva_usd, así que
+    // absorber solo el monto pre-IVA mantiene la columna sumando EXACTO el
+    // total). Cotizaciones viejas (comisión fuera del total) no traen la
+    // línea COMISION_VENDEDOR y no absorben nada.
+    const comisionEnTotalUsd = Array.isArray(desglose)
+      ? (desglose as Array<Record<string, unknown>>)
+          .filter((d) => d.clave === 'COMISION_VENDEDOR')
+          .reduce((acc, d) => acc + (num(d.monto_usd) ?? 0), 0)
+      : 0;
+
     const payload = {
       folio: String(quote.folio ?? ''),
       fecha:
@@ -102,12 +115,17 @@ export class QuotesPdfService {
       tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
       subtotal_usd: (() => {
-        // Recibo del CLIENTE: el redondeo hacia arriba (ajuste > 0) se
-        // ABSORBE aquí para que la columna del desglose sume EXACTO el total
-        // sin revelar la cocina interna (regla: el redondeo nunca se lista).
+        // Recibo del CLIENTE: el redondeo hacia arriba (ajuste > 0) y la
+        // comisión del vendedor (parte del total desde jul 2026) se ABSORBEN
+        // aquí para que la columna del desglose sume EXACTO el total sin
+        // revelar la cocina interna (regla: ninguno de los dos se lista).
         const base = num(quote.subtotal_vuelo_usd) ?? 0;
         const ajuste = num(quote.ajuste_final_usd) ?? 0;
-        return Math.round((base + (ajuste > 0 ? ajuste : 0)) * 100) / 100;
+        return (
+          Math.round(
+            (base + (ajuste > 0 ? ajuste : 0) + comisionEnTotalUsd) * 100,
+          ) / 100
+        );
       })(),
       tuas_usd: num(quote.tuas_usd) ?? 0,
       tuas_detalle: tuasDetalle,
