@@ -126,6 +126,16 @@ export class OperationalLegDto {
   @Min(0)
   pasajeros?: number;
 
+  @ApiPropertyOptional({
+    description:
+      'Nombres de pasajeros de este tramo (manifiesto por escala, opcional).',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  pasajeros_nombres?: string[];
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()

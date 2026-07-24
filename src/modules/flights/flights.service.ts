@@ -2384,11 +2384,15 @@ export class FlightsService {
             aeronave_id: dto.aeronave_id ?? null,
             piloto_id: dto.piloto_id ?? null,
             pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
-            pasajeros_nombres: e.pasajeros_nombres ?? [],
+            pasajeros_nombres: e.es_ferry ? [] : (e.pasajeros_nombres ?? []),
             es_ferry: e.es_ferry ?? false,
             es_sobrevuelo: e.es_sobrevuelo ?? false,
             solo_operativa: e.es_ferry ?? false,
-            requiere_pernocta: pernocta,
+            // Pernocta: la captura manual del formulario manda; la derivación
+            // por fechas (siguiente tramo sale otro día) la complementa.
+            requiere_pernocta: (e.requiere_pernocta ?? false) || pernocta,
+            tipo_parada: e.tipo_parada ?? 'NORMAL',
+            servicio_notas: e.servicio_notas ?? null,
             notas: e.notas ?? null,
             fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
             created_by: userId,
@@ -2482,11 +2486,25 @@ export class FlightsService {
         fecha_salida_plan: dto.fecha_salida_plan?.toISOString(),
         // Pasajeros por tramo (puede variar entre escalas). null = usa el
         // global del vuelo.
-        pasajeros: dto.pasajeros ?? null,
-        pasajeros_nombres: dto.pasajeros_nombres ?? [],
+        pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
+        pasajeros_nombres: dto.es_ferry ? [] : (dto.pasajeros_nombres ?? []),
         // Sobrevuelo por tramo (metadato operativo): el switch del editor lo manda.
         ...(dto.es_sobrevuelo !== undefined
           ? { es_sobrevuelo: dto.es_sobrevuelo }
+          : {}),
+        // Detalle operativo del tramo (paridad con el cotizador): ferry,
+        // pernocta y parada de servicio también se capturan al CREAR la
+        // escala — antes solo los aplicaba updateEscala y el switch de alta
+        // se perdía en silencio.
+        ...(dto.es_ferry !== undefined ? { es_ferry: dto.es_ferry } : {}),
+        ...(dto.requiere_pernocta !== undefined
+          ? { requiere_pernocta: dto.requiere_pernocta }
+          : {}),
+        ...(dto.tipo_parada !== undefined
+          ? { tipo_parada: dto.tipo_parada }
+          : {}),
+        ...(dto.servicio_notas !== undefined
+          ? { servicio_notas: dto.servicio_notas }
           : {}),
         notas: dto.notas,
         created_by: userId,
@@ -2539,6 +2557,8 @@ export class FlightsService {
         origen_iata: dto.origen_iata.toUpperCase(),
         destino_iata: dto.destino_iata.toUpperCase(),
         pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
+        // Manifiesto por tramo (un ferry vuela vacío: sin nombres).
+        pasajeros_nombres: dto.es_ferry ? [] : (dto.pasajeros_nombres ?? []),
         es_ferry: dto.es_ferry ?? false,
         es_sobrevuelo: dto.es_sobrevuelo ?? false,
         requiere_pernocta: dto.requiere_pernocta ?? false,

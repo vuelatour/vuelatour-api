@@ -1063,10 +1063,15 @@ export class QuotesService {
           // debe amarrar sus tramos al avión propio de referencia.
           aeronave_id: dto.es_externo ? null : (dto.aeronave_id ?? null),
           pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
-          pasajeros_nombres: e.pasajeros_nombres ?? [],
+          pasajeros_nombres: e.es_ferry ? [] : (e.pasajeros_nombres ?? []),
           es_ferry: e.es_ferry ?? false,
+          es_sobrevuelo: e.es_sobrevuelo ?? false,
           solo_operativa: e.es_ferry ?? false,
-          requiere_pernocta: pernocta,
+          // Pernocta: la captura manual del formulario manda; la derivación
+          // por fechas (siguiente tramo sale otro día) la complementa.
+          requiere_pernocta: (e.requiere_pernocta ?? false) || pernocta,
+          tipo_parada: e.tipo_parada ?? 'NORMAL',
+          servicio_notas: e.servicio_notas ?? null,
           notas: e.notas ?? null,
           fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
           created_by: userId,

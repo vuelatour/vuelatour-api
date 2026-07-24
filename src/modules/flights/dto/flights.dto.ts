@@ -461,6 +461,27 @@ export class ReservaEscalaDto {
   @MaxLength(120, { each: true })
   pasajeros_nombres?: string[];
 
+  @ApiPropertyOptional({
+    description:
+      'El piloto pernocta tras este tramo (además se marca sola si el siguiente tramo sale otro día).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiere_pernocta?: boolean;
+
+  @ApiPropertyOptional({ enum: ['NORMAL', 'SERVICIO'] })
+  @IsOptional()
+  @IsIn(['NORMAL', 'SERVICIO'])
+  tipo_parada?: 'NORMAL' | 'SERVICIO';
+
+  @ApiPropertyOptional({
+    description: 'Detalle de la parada de servicio/técnica',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  servicio_notas?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
