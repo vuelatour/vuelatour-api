@@ -48,6 +48,13 @@ const ESCALA_COLS =
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
 const DURATION_TOL_PCT = 0.4; // desviación de duración vs promedio histórico
 const MIN_MUESTRAS = 3; // muestras mínimas para confiar en el promedio
+// Fallback cuando el tramo aún no tiene histórico confiable: estimado por
+// distancia (millas por aerovía / velocidad crucero). Es una referencia
+// gruesa, por eso la tolerancia es MÁS ANCHA que la del histórico.
+const DURATION_EST_TOL_PCT = 0.6;
+// Lecturas "idénticas" al tramo anterior (foto/valor repetido, caso vuelo
+// #71). Los tacos van a 1 decimal, así que ±0.01 = mismo número.
+const TACO_REPETIDO_TOL_HR = 0.01;
 
 // Único candado de tacómetro vigente: COMPLETAR exige las LLEGADAS (la foto
 // del piloto). Iniciar nunca bloquea (la salida se autollena) — "la operación
@@ -824,29 +831,47 @@ export class FlightsService {
     };
   }
 
-  private async aeronaveMatricula(
+  /**
+   * Matrícula + velocidad crucero del avión del vuelo en UNA lectura: el
+   * snapshot usa la matrícula para el encabezado y la velocidad para el
+   * estimado de duración por distancia (fallback sin histórico).
+   */
+  private async aeronaveResumen(
     aeronaveId: string | null | undefined,
-  ): Promise<string | null> {
+  ): Promise<{
+    matricula: string | null;
+    velocidad_crucero_kts: number | null;
+  } | null> {
     if (!aeronaveId) return null;
     const { data } = await this.supabase.service
       .from('aeronave')
-      .select('matricula')
+      .select('matricula, velocidad_crucero_kts')
       .eq('id', aeronaveId)
       .maybeSingle();
-    return (data as { matricula?: string } | null)?.matricula ?? null;
+    if (!data) return null;
+    const row = data as {
+      matricula?: string;
+      velocidad_crucero_kts?: number | string | null;
+    };
+    const vel = Number(row.velocidad_crucero_kts);
+    return {
+      matricula: row.matricula ?? null,
+      velocidad_crucero_kts: Number.isFinite(vel) && vel > 0 ? vel : null,
+    };
   }
 
   async snapshot(id: string, current?: AuthenticatedUser) {
     const vuelo = await this.findById(id, current);
-    const [escalas, cobros, aeronaveMatricula] = await Promise.all([
+    const [escalas, cobros, aeronave] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
-      this.aeronaveMatricula(
+      this.aeronaveResumen(
         (vuelo as { aeronave_id?: string | null }).aeronave_id,
       ),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
+      aeronave?.velocidad_crucero_kts ?? null,
     );
     // total_cobrado SIEMPRE en USD vía la fuente única (invariante 2 del
     // repo): la suma cruda mezclaba monedas y un cobro parcial en MXN
@@ -858,7 +883,7 @@ export class FlightsService {
     );
     return {
       ...vuelo,
-      aeronave_matricula: aeronaveMatricula,
+      aeronave_matricula: aeronave?.matricula ?? null,
       escalas: escalasEnriquecidas,
       cobros,
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
@@ -913,13 +938,22 @@ export class FlightsService {
   }
 
   /**
-   * Adjunta a cada tramo el tiempo de vuelo estimado en minutos
-   * (`tramo_min_promedio`) según el histórico, SOLO si es confiable (>= muestras
-   * mínimas). La app del piloto lo usa para agendar un recordatorio local
-   * (offline) antes de la llegada. Null si aún no hay historial del tramo.
+   * Adjunta a cada tramo referencias de duración y de lectura (la app del
+   * piloto las usa para el recordatorio local offline y para VALIDAR EN VIVO
+   * al capturar — advertir, nunca bloquear):
+   *  - `tramo_min_promedio`: minutos según histórico, SOLO si es confiable
+   *    (>= MIN_MUESTRAS). Null si aún no hay historial del tramo.
+   *  - `tramo_min_estimado`: fallback SIEMPRE disponible = millas náuticas por
+   *    aerovía (distancia_tramo) / velocidad crucero del avión del vuelo.
+   *    Null si falta la distancia del par o la velocidad.
+   *  - `tramo_llegada_anterior`: taco_llegada del tramo previo del MISMO avión
+   *    (null en el primero) — para advertir una foto/valor repetido (caso
+   *    vuelo #71: la llegada del tramo 1 se capturó también como llegada del
+   *    tramo 2).
    */
   private async attachTramoEstimado(
     escalas: Array<Record<string, unknown>>,
+    velocidadCruceroKts: number | null,
   ): Promise<Array<Record<string, unknown>>> {
     if (escalas.length === 0) return escalas;
     const pares = [
@@ -930,22 +964,42 @@ export class FlightsService {
       ),
     ];
     const minPorPar = new Map<string, number>();
+    const estPorPar = new Map<string, number>();
     await Promise.all(
       pares.map(async (par) => {
         const [o, d] = par.split('|');
-        const t = await this.getTramoPromedio(o, d);
+        const [t, est] = await Promise.all([
+          this.getTramoPromedio(o, d),
+          this.getTramoMinEstimado(o, d, velocidadCruceroKts),
+        ]);
         if (t && t.muestras >= MIN_MUESTRAS && t.minutos_promedio > 0) {
           minPorPar.set(par, Math.round(t.minutos_promedio));
         }
+        if (est !== null) estPorPar.set(par, est);
       }),
     );
-    return escalas.map((e) => ({
-      ...e,
-      tramo_min_promedio:
-        minPorPar.get(
-          `${e.origen_iata as string}|${e.destino_iata as string}`,
-        ) ?? null,
-    }));
+    return escalas.map((e, i) => {
+      // Tramo previo del MISMO avión (cada matrícula lleva su horómetro):
+      // el más cercano hacia atrás por orden. listEscalas ya viene ordenado.
+      const prev = escalas
+        .slice(0, i)
+        .reverse()
+        .find(
+          (p) =>
+            ((p.aeronave_id as string | null) ?? null) ===
+            ((e.aeronave_id as string | null) ?? null),
+        );
+      const par = `${e.origen_iata as string}|${e.destino_iata as string}`;
+      return {
+        ...e,
+        tramo_min_promedio: minPorPar.get(par) ?? null,
+        tramo_min_estimado: estPorPar.get(par) ?? null,
+        tramo_llegada_anterior:
+          prev == null || prev.taco_llegada == null
+            ? null
+            : Number(prev.taco_llegada),
+      };
+    });
   }
 
   async update(id: string, dto: UpdateFlightDto, updatedBy: string) {
@@ -3021,9 +3075,63 @@ export class FlightsService {
   }
 
   /**
+   * Estimado de duración del tramo en MINUTOS a partir de la DISTANCIA
+   * (catálogo distancia_tramo, millas por aerovía) y la velocidad crucero de
+   * la aeronave. Es el fallback cuando el tramo aún no junta MIN_MUESTRAS de
+   * histórico: una referencia gruesa, pero suficiente para marcar en amarillo
+   * lecturas absurdas (foto repetida, taco de otro tramo). Null si falta la
+   * distancia del par o la velocidad. Nunca lanza: la referencia es opcional
+   * y jamás debe tumbar una captura.
+   */
+  private async getTramoMinEstimado(
+    origen: string,
+    destino: string,
+    velocidadKts: number | null,
+  ): Promise<number | null> {
+    if (!velocidadKts || velocidadKts <= 0) return null;
+    const { data, error } = await this.supabase.service
+      .from('distancia_tramo')
+      .select('millas_nauticas')
+      .eq('origen_iata', origen.toUpperCase())
+      .eq('destino_iata', destino.toUpperCase())
+      .maybeSingle();
+    if (error) {
+      this.logger.warn(
+        `getTramoMinEstimado ${origen}→${destino}: ${error.message}`,
+      );
+      return null;
+    }
+    const nm = data == null ? null : Number(data.millas_nauticas);
+    if (!nm || !Number.isFinite(nm) || nm <= 0) return null;
+    return Math.round((nm / velocidadKts) * 60);
+  }
+
+  /** Velocidad crucero (kts) de una aeronave; null si no está configurada. */
+  private async velocidadCruceroKts(
+    aeronaveId: string | null,
+  ): Promise<number | null> {
+    if (!aeronaveId) return null;
+    const { data } = await this.supabase.service
+      .from('aeronave')
+      .select('velocidad_crucero_kts')
+      .eq('id', aeronaveId)
+      .maybeSingle();
+    const vel = Number(
+      (data as { velocidad_crucero_kts?: number | string | null } | null)
+        ?.velocidad_crucero_kts,
+    );
+    return Number.isFinite(vel) && vel > 0 ? vel : null;
+  }
+
+  /**
    * Evalúa consistencia de la lectura y marca AMARILLO (revision_requerida) si:
-   * (a) la lectura manual difiere de la sugerida por IA más de AI_VS_MANUAL_TOL_HR, o
-   * (b) la duración taco (llegada − salida) se aleja del promedio histórico del tramo.
+   * (a) la lectura manual difiere de la sugerida por IA más de AI_VS_MANUAL_TOL_HR,
+   * (b) la duración taco (llegada − salida) se aleja del promedio histórico del
+   *     tramo — y si el tramo aún no tiene histórico confiable, del estimado
+   *     por distancia (tolerancia MÁS ANCHA: es referencia gruesa), o
+   * (c) la lectura repite la del tramo anterior del mismo avión (foto/valor
+   *     duplicado, caso real vuelo #71).
+   * Solo marca en amarillo para oficina — la operación NUNCA se bloquea aquí.
    * Persiste el resultado en la escala y devuelve la fila final.
    */
   private async applyConsistencyFlag(
@@ -3050,7 +3158,10 @@ export class FlightsService {
       }
     }
 
-    // (b) Duración vs promedio histórico.
+    // (b) Duración vs promedio histórico. Sin histórico confiable, contra el
+    // estimado por distancia (millas por aerovía / velocidad crucero) con
+    // tolerancia MÁS ANCHA — así el tramo SIEMPRE tiene una referencia y una
+    // foto repetida (duración ~0) no pasa en silencio.
     if (
       tacoSalida !== null &&
       tacoLlegada !== null &&
@@ -3071,6 +3182,73 @@ export class FlightsService {
         if (desv > DURATION_TOL_PCT) {
           motivos.push(
             `Duración ${Math.round(durMin)} min fuera de rango histórico (~${Math.round(tramo.minutos_promedio)} min)`,
+          );
+        }
+      } else {
+        const velocidad = await this.velocidadCruceroKts(
+          (escala.aeronave_id as string | null) ?? null,
+        );
+        const estimado = await this.getTramoMinEstimado(
+          escala.origen_iata as string,
+          escala.destino_iata as string,
+          velocidad,
+        );
+        if (estimado !== null && estimado > 0) {
+          const desv = Math.abs(durMin - estimado) / estimado;
+          if (desv > DURATION_EST_TOL_PCT) {
+            motivos.push(
+              `Duración ${Math.round(durMin)} min fuera del estimado de la ruta (~${estimado} min)`,
+            );
+          }
+        }
+      }
+    }
+
+    // (c) Lectura repetida del tramo anterior (caso real vuelo #71: el piloto
+    // capturó la llegada del tramo 1 también como llegada del tramo 2 —
+    // misma foto/valor — y nada lo advirtió). Se compara contra el tramo
+    // previo del MISMO avión (cada matrícula lleva su horómetro; se respeta
+    // escala.aeronave_id como en el resto de la cadena). El error de lectura
+    // se ignora a propósito: la referencia jamás tumba una captura.
+    if (
+      Number(escala.orden) > 1 &&
+      (tacoSalida !== null || tacoLlegada !== null)
+    ) {
+      const { data: previas } = await this.supabase.service
+        .from('escala')
+        .select('orden, aeronave_id, taco_salida, taco_llegada')
+        .eq('vuelo_id', escala.vuelo_id as string)
+        .lt('orden', Number(escala.orden))
+        .order('orden', { ascending: false });
+      const prev = (previas ?? []).find(
+        (p) =>
+          ((p.aeronave_id as string | null) ?? null) ===
+          ((escala.aeronave_id as string | null) ?? null),
+      );
+      if (prev) {
+        const prevLlegada =
+          prev.taco_llegada == null ? null : Number(prev.taco_llegada);
+        const prevSalida =
+          prev.taco_salida == null ? null : Number(prev.taco_salida);
+        if (
+          tacoLlegada !== null &&
+          prevLlegada !== null &&
+          Math.abs(tacoLlegada - prevLlegada) <= TACO_REPETIDO_TOL_HR
+        ) {
+          motivos.push(
+            'Lectura idéntica a la llegada del tramo anterior — ¿se repitió la foto o el valor?',
+          );
+        }
+        // La salida del tramo 1 la fotografía el piloto; en tramos 2+ una
+        // salida tecleada (oficina) igual a la SALIDA del tramo anterior
+        // implicaría un tramo previo de cero horas: valor repetido.
+        if (
+          tacoSalida !== null &&
+          prevSalida !== null &&
+          Math.abs(tacoSalida - prevSalida) <= TACO_REPETIDO_TOL_HR
+        ) {
+          motivos.push(
+            'Lectura de salida idéntica a la salida del tramo anterior — ¿se repitió la foto o el valor?',
           );
         }
       }
