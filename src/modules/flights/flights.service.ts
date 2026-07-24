@@ -4299,7 +4299,12 @@ export class FlightsService {
       cobros,
       vuelo.tc_usd_mxn as number | null,
     );
-    const cobradoDeberiaSer = total_usd >= Number(vuelo.monto_total_usd) - 1;
+    // Un vuelo SIN precio (total $0 = aún sin cotizar) nunca está "cobrado":
+    // 0 >= 0 marcaba cobrado=true y eso BLOQUEABA revisar la cotización
+    // justo del vuelo que más lo necesita (caso #38: reserva volada y
+    // completada por tacos, sin cotización ni cobros, atorada en amarillo).
+    const montoTotal = Number(vuelo.monto_total_usd);
+    const cobradoDeberiaSer = montoTotal > 0 && total_usd >= montoTotal - 1;
 
     if (cobradoDeberiaSer !== vuelo.cobrado) {
       await this.supabase.service
