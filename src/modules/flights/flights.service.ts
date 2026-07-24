@@ -862,12 +862,18 @@ export class FlightsService {
 
   async snapshot(id: string, current?: AuthenticatedUser) {
     const vuelo = await this.findById(id, current);
-    const [escalas, cobros, aeronave] = await Promise.all([
+    const aeronaveId =
+      ((vuelo as { aeronave_id?: string | null }).aeronave_id as
+        | string
+        | null) ?? null;
+    const [escalas, cobros, aeronave, ultimoTacoAvion] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
-      this.aeronaveResumen(
-        (vuelo as { aeronave_id?: string | null }).aeronave_id,
-      ),
+      this.aeronaveResumen(aeronaveId),
+      // Referencia para la app: validación en vivo de la SALIDA del tramo 1
+      // (excepción donde el piloto sí fotografía la salida) — el tacómetro
+      // nunca retrocede respecto al último taco conocido del avión.
+      this.ultimoTacoAeronave(aeronaveId, null),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -884,6 +890,7 @@ export class FlightsService {
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
+      ultimo_taco_avion: ultimoTacoAvion,
       escalas: escalasEnriquecidas,
       cobros,
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
