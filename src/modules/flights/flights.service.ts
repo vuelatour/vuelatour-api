@@ -528,6 +528,43 @@ export class FlightsService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean')
       q = q.eq('es_externo', filters.es_externo);
+    // Filtro de estado de COBRO (petición del cliente, jul 2026). PARCIAL y
+    // SIN_COBROS necesitan saber qué vuelos tienen cobros: una consulta de
+    // ids (la tabla de cobros es chica) antes de paginar.
+    if (filters.cobro) {
+      if (filters.cobro === 'COBRADO') {
+        q = q.eq('cobrado', true);
+      } else {
+        // Los tres restantes son "falta saldo": excluye cobrados y los $0
+        // (reservas/cotizaciones sin precio no son cuentas por cobrar).
+        q = q.eq('cobrado', false).gt('monto_total_usd', 0);
+        if (filters.cobro !== 'POR_COBRAR') {
+          const { data: conCobro, error: cobrosErr } =
+            await this.supabase.service
+              .from('cobro_vuelo')
+              .select('vuelo_id')
+              .limit(10000);
+          if (cobrosErr) throw new Error(cobrosErr.message);
+          const ids = [
+            ...new Set((conCobro ?? []).map((c) => c.vuelo_id as string)),
+          ];
+          if (filters.cobro === 'PARCIAL') {
+            // Con abonos y saldo pendiente.
+            if (ids.length === 0)
+              return {
+                data: [],
+                count: 0,
+                limit: filters.limit,
+                offset: filters.offset,
+              };
+            q = q.in('id', ids);
+          } else {
+            // SIN_COBROS: con precio y ni un cobro registrado.
+            if (ids.length > 0) q = q.not('id', 'in', `(${ids.join(',')})`);
+          }
+        }
+      }
+    }
     // Fecha simple (filtros del panel) = límites del DÍA CANCÚN (regla del
     // repo); un ISO con hora (app) pasa tal cual.
     const soloFecha = /^\d{4}-\d{2}-\d{2}$/;
@@ -947,7 +984,7 @@ export class FlightsService {
     // inflaba el total — la app del piloto bloqueaba el cobro del saldo y el
     // panel pintaba pendientes negativos. Los MXN sin TC quedan expuestos.
     const conv = cobrosEnUsd(
-      cobros as CobroLike[],
+      cobros,
       Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null,
     );
     // La app esconde la captura de tacómetros con esta bandera: true cuando el
@@ -1258,10 +1295,10 @@ export class FlightsService {
     }
     // Mismo espejo de redacción que setFlightPlan: el PILOTO actualiza el
     // permiso y no debe recibir el costo del operador externo de vuelta.
-    return this.redactVueloForRol(
-      data,
-      { userId: user.userId, rol: user.rol } as AuthenticatedUser,
-    );
+    return this.redactVueloForRol(data, {
+      userId: user.userId,
+      rol: user.rol,
+    } as AuthenticatedUser);
   }
 
   /**

@@ -9,6 +9,7 @@ import {
   IsDate,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsOptional,
@@ -74,6 +75,15 @@ export class ListFlightsQuery {
   @Type(() => Boolean)
   @IsBoolean()
   es_externo?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['COBRADO', 'POR_COBRAR', 'PARCIAL', 'SIN_COBROS'],
+    description:
+      'Estado de cobro: COBRADO (completo) · POR_COBRAR (falta saldo, con o sin abonos) · PARCIAL (con abonos y falta saldo) · SIN_COBROS (con precio y ni un cobro).',
+  })
+  @IsOptional()
+  @IsIn(['COBRADO', 'POR_COBRAR', 'PARCIAL', 'SIN_COBROS'])
+  cobro?: 'COBRADO' | 'POR_COBRAR' | 'PARCIAL' | 'SIN_COBROS';
 
   // String (no Date): una fecha simple debe cortarse en día CANCÚN; pasarla
   // por `new Date()` la vuelve medianoche UTC y mueve vuelos de día/mes.
