@@ -522,7 +522,9 @@ export class ProfitSharingService {
       // Completados del periodo (para cobros pendientes/parciales).
       sb
         .from('vuelo')
-        .select('id, folio, piloto_id, monto_total_usd, tc_usd_mxn, cobrado')
+        .select(
+          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, cobrado',
+        )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
@@ -768,6 +770,28 @@ export class ProfitSharingService {
     const completados = (completadosRes.data ?? []) as Array<
       Record<string, unknown>
     >;
+    // Clientes INTERNOS (reposicionamiento/demostración/servicio): operación
+    // propia sin cobro esperado — sus vuelos NO son cuentas por cobrar y se
+    // excluyen del regaño de cobranza (lookup en lote cliente_id→es_interno).
+    const clientesInternos = new Set<string>();
+    {
+      const clienteIds = [
+        ...new Set(
+          completados
+            .map((v) => v.cliente_id as string | null)
+            .filter((c): c is string => !!c),
+        ),
+      ];
+      if (clienteIds.length > 0) {
+        const { data: internos, error: intErr } = await sb
+          .from('cliente')
+          .select('id')
+          .in('id', clienteIds)
+          .eq('es_interno', true);
+        if (intErr) throw new Error(intErr.message);
+        for (const c of internos ?? []) clientesInternos.add(c.id as string);
+      }
+    }
     const ids = completados.map((v) => v.id as string);
     const cobros = await this.fetchCobros(ids);
     const porVuelo = new Map<string, CobroRow[]>();
@@ -784,6 +808,9 @@ export class ProfitSharingService {
       saldo_usd: number;
     }> = [];
     for (const v of completados) {
+      // Cliente interno: nunca aparece como "saldo por cobrar" (aunque la
+      // cotización llevara monto), es operación propia.
+      if (clientesInternos.has(v.cliente_id as string)) continue;
       const total = Number(v.monto_total_usd ?? 0);
       const conv = cobrosEnUsd(
         porVuelo.get(v.id as string) ?? [],

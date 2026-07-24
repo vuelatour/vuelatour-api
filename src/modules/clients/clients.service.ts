@@ -15,7 +15,7 @@ import type {
 // captura de la constancia (domicilio_fiscal, pais_residencia — extranjeros):
 // el panel los edita y la facturación los exige antes de timbrar.
 const COLS =
-  'id, nombre, telefono, email, razon_social_default, rfc, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, canal_origen, es_broker, notas, activo, created_at, updated_at';
+  'id, nombre, telefono, email, razon_social_default, rfc, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, canal_origen, es_broker, es_interno, notas, activo, created_at, updated_at';
 
 @Injectable()
 export class ClientsService {

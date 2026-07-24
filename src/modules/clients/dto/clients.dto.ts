@@ -170,6 +170,18 @@ export class CreateClienteDto {
   @IsBoolean()
   es_broker?: boolean;
 
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'Cliente INTERNO (operación propia: reposicionamiento, demostración, ' +
+      'servicio). Sus cotizaciones pueden ir en $0 sin hora mínima y sin ' +
+      'cobro esperado; sus vuelos cuentan como costo del avión y quedan ' +
+      'fuera de los avisos de cobranza.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_interno?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()

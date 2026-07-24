@@ -127,22 +127,33 @@ export class QuotesService {
   ) {}
 
   /**
-   * Tarifa por hora pactada con el cliente para una aeronave (USD/hr), o null
-   * si no tiene. Se administra desde el perfil del cliente en el panel.
+   * Contexto del cliente para el motor, resuelto en UNA sola lectura (embed
+   * cliente → tarifa_cliente_aeronave filtrado por la aeronave):
+   * - esInterno: pseudo-cliente de operación PROPIA (reposicionamiento,
+   *   demostración, servicio) — sin hora mínima, tarifa default 0 y total $0
+   *   válido; sus vuelos cuentan como COSTO del avión, no como venta.
+   * - tarifaPreferencial: tarifa por hora pactada con el cliente para esta
+   *   aeronave (USD/hr), o null si no tiene (se administra en su perfil).
    */
-  private async tarifaPreferencialCliente(
+  private async contextoCliente(
     clienteId: string,
     aeronaveId: string,
-  ): Promise<number | null> {
+  ): Promise<{ esInterno: boolean; tarifaPreferencial: number | null }> {
     const { data, error } = await this.supabase.service
-      .from('tarifa_cliente_aeronave')
-      .select('tarifa_hora_usd')
-      .eq('cliente_id', clienteId)
-      .eq('aeronave_id', aeronaveId)
+      .from('cliente')
+      .select('es_interno, tarifas:tarifa_cliente_aeronave(tarifa_hora_usd)')
+      .eq('id', clienteId)
+      .eq('tarifas.aeronave_id', aeronaveId)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    const tarifa = data ? Number(data.tarifa_hora_usd) : 0;
-    return tarifa > 0 ? tarifa : null;
+    const filas = (data?.tarifas ?? []) as Array<{
+      tarifa_hora_usd: number | string;
+    }>;
+    const tarifa = filas.length > 0 ? Number(filas[0].tarifa_hora_usd) : 0;
+    return {
+      esInterno: data?.es_interno === true,
+      tarifaPreferencial: tarifa > 0 ? tarifa : null,
+    };
   }
 
   /**
@@ -171,27 +182,46 @@ export class QuotesService {
     // SOBREVUELO (ej. sobrevolar la isla 0.5 hr): tiempo extra cobrable que
     // se suma ANTES del mínimo de 1 hr.
     const sobrevueloHr = Math.max(0, Number(dto.sobrevuelo_hr) || 0);
+    // CLIENTE INTERNO (jul 2026) + tarifa preferencial: UNA sola lectura.
+    // Interno = pseudo-cliente de operación PROPIA ("Vuelos de
+    // reposicionamiento", "Demostracion", "Servicio"): su cotización puede ir
+    // en $0 total y con el tiempo real (sin hora mínima) porque no hay cobro
+    // esperado — la operación (tacos/gastos) se registra normal y el vuelo
+    // cuenta como COSTO del avión en su balance individual.
+    const ctxCliente = dto.cliente_id
+      ? await this.contextoCliente(dto.cliente_id, dto.aeronave_id)
+      : { esInterno: false, tarifaPreferencial: null };
+    const esInterno = ctxCliente.esInterno;
+
     // Hora mínima de facturación (regla del cliente, jul 2026): un vuelo corto
     // se cobra como hora completa — si el total del vuelo (tiempo + calzos)
     // queda debajo de 1 hr, se facturan 1.0 hr (0.8 → 1.0 × tarifa). Por
-    // arriba de la hora se siguen cobrando las décimas reales.
+    // arriba de la hora se siguen cobrando las décimas reales. Cliente
+    // INTERNO: sin hora mínima — se registra el tiempo REAL (puede ser 0); la
+    // regla es de facturación a clientes y aquí no hay venta.
     const tiempoRealHr = tiempoVueloHr + calzosHr + sobrevueloHr;
-    const tiempoCobrableHr = Math.max(1, tiempoRealHr);
-    const minimoHoraAplicado = tiempoRealHr < 1;
+    const tiempoCobrableHr = esInterno
+      ? tiempoRealHr
+      : Math.max(1, tiempoRealHr);
+    const minimoHoraAplicado = !esInterno && tiempoRealHr < 1;
 
     // Tarifa efectiva: override manual > tarifa preferencial pactada con el
     // cliente para ESTA aeronave > tarifa default del avión (público/broker).
+    // Cliente INTERNO: default 0 sin exigir tarifa (el override sigue
+    // permitiendo cobrar una operación interna excepcional).
     const tarifaPreferencial =
-      dto.tarifa_hora_override_usd == null && dto.cliente_id
-        ? await this.tarifaPreferencialCliente(dto.cliente_id, dto.aeronave_id)
+      dto.tarifa_hora_override_usd == null
+        ? ctxCliente.tarifaPreferencial
         : null;
     const tarifaHora =
       dto.tarifa_hora_override_usd ??
       tarifaPreferencial ??
-      (dto.tipo_tarifa === TipoTarifa.PUBLICO
-        ? Number(aeronave.tarifa_hora_pub_usd)
-        : Number(aeronave.tarifa_hora_broker_usd));
-    if (!tarifaHora || tarifaHora <= 0) {
+      (esInterno
+        ? 0
+        : dto.tipo_tarifa === TipoTarifa.PUBLICO
+          ? Number(aeronave.tarifa_hora_pub_usd)
+          : Number(aeronave.tarifa_hora_broker_usd));
+    if (!esInterno && (!tarifaHora || tarifaHora <= 0)) {
       throw new BadRequestException(
         `Aeronave ${aeronave.matricula} no tiene tarifa ${dto.tipo_tarifa} configurada y no se proveyó tarifa_hora_override_usd`,
       );
@@ -726,6 +756,10 @@ export class QuotesService {
       meta: {
         calculado_at: new Date().toISOString(),
         version_motor: '1.3.1',
+        // CLIENTE INTERNO: trazabilidad de por qué el total puede ser $0 y no
+        // corrió la hora mínima. `undefined` (no false) para que el snapshot
+        // de clientes normales quede byte-idéntico (JSON omite el campo).
+        cliente_interno: esInterno || undefined,
         comision_billpocket_pct: comisionPct > 0 ? round2(comisionPct) : null,
         // PRECIO PACTADO (externos): se PERSISTE para que revisiones y ajuste
         // rápido lo conserven — sin esto, cualquier recálculo posterior
@@ -1637,7 +1671,11 @@ export class QuotesService {
       cobros ?? [],
       vuelo.tc_usd_mxn as number | null,
     );
-    const deberia = total_usd >= Number(vuelo.monto_total_usd) - 1;
+    // Mismo gate que refreshCobradoFlag: un total $0 (sin cotizar o cliente
+    // INTERNO) nunca queda "cobrado" — 0 >= −1 lo marcaba true y eso
+    // bloqueaba volver a revisar la cotización (revise rechaza cobrados).
+    const montoTotal = Number(vuelo.monto_total_usd);
+    const deberia = montoTotal > 0 && total_usd >= montoTotal - 1;
     if (deberia !== vuelo.cobrado) {
       await this.supabase.service
         .from('vuelo')

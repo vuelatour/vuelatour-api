@@ -269,19 +269,23 @@ export class AircraftBalanceService {
     const gastosAvion = (gastosAvionRes.data ?? []) as unknown as GastoRow[];
     const sociosAll = (sociosRes.data ?? []) as unknown as SocioRow[];
 
-    // Nombres de clientes (columna CLAVE del Excel).
+    // Nombres de clientes (columna CLAVE del Excel) + bandera de cliente
+    // INTERNO (reposicionamiento/demostración/servicio): venta $0 esperada,
+    // sin regaños de cobranza — la fila sí se queda (costos reales del avión).
     const clienteIds = [
       ...new Set(vuelos.map((v) => v.cliente_id).filter(Boolean)),
     ] as string[];
     const clientePorId = new Map<string, string>();
+    const clientesInternos = new Set<string>();
     if (clienteIds.length) {
       const { data: cls, error: clsErr } = await sb
         .from('cliente')
-        .select('id, nombre')
+        .select('id, nombre, es_interno')
         .in('id', clienteIds);
       if (clsErr) throw new Error(clsErr.message);
       for (const c of cls ?? []) {
         clientePorId.set(c.id as string, c.nombre as string);
+        if (c.es_interno === true) clientesInternos.add(c.id as string);
       }
     }
 
@@ -537,7 +541,17 @@ export class AircraftBalanceService {
       // ----- Pendientes de captura por vuelo (lista generosa) -----
       const cancelado = v.estado === 'CANCELADO';
       const yaVolo = v.estado === 'EN_VUELO' || v.estado === 'COMPLETADO';
-      if ((totalSistemaUsd ?? 0) === 0 && D === 0 && !cancelado) {
+      // Cliente INTERNO: venta $0 es lo esperado (operación propia) — no se
+      // regaña por cotización/cobranza; los pendientes OPERATIVOS (tacos,
+      // gas, TC) siguen aplicando igual.
+      const esClienteInterno =
+        v.cliente_id != null && clientesInternos.has(v.cliente_id);
+      if (
+        (totalSistemaUsd ?? 0) === 0 &&
+        D === 0 &&
+        !cancelado &&
+        !esClienteInterno
+      ) {
         pendientes.push(
           `${etiqueta}: sin cotización — montos de venta en $0 (¿traslado/servicio o falta cotizar?)`,
         );
@@ -575,8 +589,9 @@ export class AircraftBalanceService {
       // Regla del cliente: NUNCA se cobran menos horas de las voladas. Si el
       // tacómetro registró más de lo cotizado, hay que recotizar el vuelo
       // (revisar cotización con las horas reales). Solo aplica con cotización
-      // (D>0; sin cotización ya sale su propio pendiente).
-      if (D > 0 && O != null && O - D > 0.01) {
+      // (D>0; sin cotización ya sale su propio pendiente) y con cliente NO
+      // interno (interno no cobra: recotizar no cambiaría un peso).
+      if (D > 0 && O != null && O - D > 0.01 && !esClienteInterno) {
         pendientes.push(
           `${etiqueta}: voló ${O.toFixed(2)} hr y solo se cobraron ${D.toFixed(
             2,
