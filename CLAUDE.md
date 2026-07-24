@@ -32,6 +32,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    - La salida se llena sola: tramo 1 ← último taco del avión (en `start()` y
      en `captureTaco`); tramos 2+ ← propagación de la llegada anterior;
      huecos ← `fillTacoGaps` (nightly) / `deduceTacosEnVivo` (cada 10 min).
+   - Una salida DEDUCIDA es PROVISIONAL: la llegada real del tramo anterior
+     la CORRIGE al propagarse (guarda atómica por origen). Capturas reales
+     (PILOTO/OFICINA/IA) no se pisan jamás (caso vuelo #71, jul 2026: el cron
+     dedujo la salida del tramo 2 antes de existir la llegada del tramo 1).
    - EXCEPCIÓN (jul 2026): en el TRAMO 1 el piloto sí puede fotografiar la
      salida (arranque del vuelo); su captura PILOTO puede corregir hacia abajo
      una salida DEDUCIDO (la foto es evidencia; PILOTO/OFICINA no se bajan).
