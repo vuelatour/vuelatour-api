@@ -2812,27 +2812,44 @@ export class FlightsService {
   ): Promise<void> {
     const { data: siguientes } = await this.supabase.service
       .from('escala')
-      .select('id, orden, aeronave_id, taco_salida')
+      .select(
+        'id, orden, aeronave_id, taco_salida, taco_salida_origen, taco_llegada',
+      )
       .eq('vuelo_id', vueloId)
       .gt('orden', orden)
       .order('orden', { ascending: true })
       .limit(1);
     const sig = (siguientes ?? [])[0];
     if (!sig) return;
-    if (sig.taco_salida != null) return; // ya tiene salida: no se pisa
     if ((sig.aeronave_id ?? null) !== (aeronaveId ?? null)) return; // otro avión
+    const valor = roundTaco(tacoLlegada);
+    // La llegada REAL del tramo anterior es la salida física del siguiente.
+    // Una salida DEDUCIDA es provisional (el cron pudo llenarla con el último
+    // taco ANTES de que existiera esta llegada — caso real vuelo #71: quedó la
+    // salida del tramo 1 en vez de su llegada) — la evidencia la CORRIGE.
+    // Capturas reales (PILOTO/OFICINA/IA) no se pisan jamás.
+    const esDeducida = sig.taco_salida_origen === 'DEDUCIDO';
+    if (sig.taco_salida != null && !esDeducida) return; // captura real: no se pisa
+    if (sig.taco_salida != null && Number(sig.taco_salida) === valor) return; // ya está bien
+    // El constraint exige llegada > salida: si el tramo ya tiene llegada menor
+    // o igual al valor propagado, la cadena está rara — que la vea oficina.
+    if (sig.taco_llegada != null && Number(sig.taco_llegada) <= valor) return;
     // Guarda atómica además del check en memoria: si el piloto capturó la
     // salida entre la lectura y este write, el UPDATE afecta 0 filas (no-op)
-    // y su lectura se respeta.
-    await this.supabase.service
+    // y su lectura se respeta. Para corregir una DEDUCIDA, la guarda es por
+    // origen (solo pisa mientras SIGA siendo deducida).
+    let query = this.supabase.service
       .from('escala')
       .update({
-        taco_salida: roundTaco(tacoLlegada),
+        taco_salida: valor,
         taco_salida_origen: origen,
         updated_by: userId,
       })
-      .eq('id', sig.id as string)
-      .is('taco_salida', null);
+      .eq('id', sig.id as string);
+    query = esDeducida
+      ? query.eq('taco_salida_origen', 'DEDUCIDO')
+      : query.is('taco_salida', null);
+    await query;
   }
 
   /** Avisa a admin/coordinador que un piloto capturó tacómetro. */
