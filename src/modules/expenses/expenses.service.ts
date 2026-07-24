@@ -131,8 +131,9 @@ export class ExpensesService {
 
   /**
    * Sugerencia de asignación para un gasto de la bandeja: ¿a qué vuelo/avión
-   * pertenece? Candidatos DETERMINISTAS = vuelos donde el capturista voló
-   * (piloto/copiloto/por tramo) con fecha a ±3 días del gasto. Si hay
+   * pertenece? Candidatos DETERMINISTAS = vuelos donde el capturista voló o
+   * fue de apoyo (piloto/copiloto/apoyo/por tramo) con fecha a ±3 días del
+   * gasto. Si hay
    * exactamente UNO el mismo día → match por regla. Si hay varios → Claude
    * elige usando notas/lugar vs la ruta. Sin candidatos o sin IA → sin match
    * (la asignación queda manual: la IA propone, el humano confirma).
@@ -161,7 +162,7 @@ export class ExpensesService {
     const { data: vuelos, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, piloto_id, copiloto_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id)',
+        'id, folio, fecha_vuelo, piloto_id, copiloto_id, apoyo_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id)',
       )
       .neq('estado', 'CANCELADO')
       .eq('es_externo', false)
@@ -170,7 +171,14 @@ export class ExpensesService {
     if (error) throw new Error(error.message);
 
     const participo = (v: Record<string, unknown>): boolean => {
-      if (v.piloto_id === capturo || v.copiloto_id === capturo) return true;
+      // El APOYO va en el vuelo (maletas, facturas, cobros, gastos): sus
+      // gastos se sugieren igual que los del piloto/copiloto.
+      if (
+        v.piloto_id === capturo ||
+        v.copiloto_id === capturo ||
+        v.apoyo_id === capturo
+      )
+        return true;
       const escalas =
         (v.escalas as Array<Record<string, unknown>> | null) ?? [];
       return escalas.some((e) => e.piloto_id === capturo);

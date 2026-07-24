@@ -241,6 +241,18 @@ export class AssignFlightDto {
   @IsUUID()
   copiloto_id?: string | null;
 
+  @ApiPropertyOptional({
+    description:
+      'APOYO del vuelo (usuario rol PILOTO en tierra: maletas, facturas, ' +
+      'cobros, gastos). Ve y opera el vuelo igual que el piloto EXCEPTO ' +
+      'tacómetros. Enviar null para quitarlo.',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_o, v) => v !== null)
+  @IsUUID()
+  apoyo_id?: string | null;
+
   @ApiPropertyOptional({ description: 'Fecha programada del vuelo' })
   @IsOptional()
   @Type(() => Date)

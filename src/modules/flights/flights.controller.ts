@@ -453,7 +453,9 @@ export class FlightsController {
     @Body() dto: CaptureTacoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    await this.flights.assertAccessByLeg(legId, c);
+    // Valida acceso Y candado de APOYO en un paso (mismas lecturas que
+    // assertAccessByLeg): el apoyo opera todo el vuelo menos los tacómetros.
+    await this.flights.assertPuedeCapturarTaco(legId, c);
     return this.flights.captureTaco(legId, dto, c.userId);
   }
 
@@ -508,7 +510,8 @@ export class FlightsController {
     @Body() dto: TacoAiReadDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    await this.flights.assertAccessByLeg(legId, c);
+    // Mismo candado que la captura: el APOYO no lee/propone tacómetros.
+    await this.flights.assertPuedeCapturarTaco(legId, c);
     return this.flights.tacoAiRead(legId, dto);
   }
 

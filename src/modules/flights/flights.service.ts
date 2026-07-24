@@ -35,7 +35,7 @@ import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -506,9 +506,10 @@ export class FlightsService {
     if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
     if (filters.piloto_id) {
-      // Incluye vuelos donde el usuario es piloto o copiloto del vuelo (ida), o
-      // piloto de CUALQUIER tramo (p. ej. solo el regreso de un redondo con
-      // pilotos distintos). El copiloto va a nivel vuelo (todo el viaje).
+      // Incluye vuelos donde el usuario es piloto, copiloto o APOYO del vuelo
+      // (ida), o piloto de CUALQUIER tramo (p. ej. solo el regreso de un
+      // redondo con pilotos distintos). Copiloto y apoyo van a nivel vuelo
+      // (todo el viaje); el apoyo lo ve en su app igual que el piloto.
       const { data: legVuelos } = await this.supabase.service
         .from('escala')
         .select('vuelo_id')
@@ -519,6 +520,7 @@ export class FlightsService {
       const ors = [
         `piloto_id.eq.${filters.piloto_id}`,
         `copiloto_id.eq.${filters.piloto_id}`,
+        `apoyo_id.eq.${filters.piloto_id}`,
       ];
       if (ids.length) ors.push(`id.in.(${ids.join(',')})`);
       q = q.or(ors.join(','));
@@ -677,9 +679,11 @@ export class FlightsService {
   // ===== Aislamiento de pilotos (Tarea 15) =====
 
   /**
-   * Un PILOTO solo puede operar/ver vuelos asignados a él: al vuelo (ida) o a
-   * CUALQUIER tramo (p. ej. solo el regreso de un redondo). Otros roles no se
-   * restringen.
+   * Un PILOTO solo puede operar/ver vuelos asignados a él: al vuelo (ida,
+   * como piloto, copiloto o APOYO en tierra) o a CUALQUIER tramo (p. ej. solo
+   * el regreso de un redondo). El apoyo ve y opera TODO igual que el piloto
+   * — su único candado extra es el de tacómetros (assertPuedeCapturarTaco).
+   * Otros roles no se restringen.
    */
   async assertAccess(
     vueloId: string,
@@ -688,14 +692,15 @@ export class FlightsService {
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select('piloto_id, copiloto_id')
+      .select('piloto_id, copiloto_id, apoyo_id')
       .eq('id', vueloId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
     if (
       data.piloto_id === current.userId ||
-      data.copiloto_id === current.userId
+      data.copiloto_id === current.userId ||
+      data.apoyo_id === current.userId
     )
       return;
     // ¿Asignado a algún tramo de este vuelo?
@@ -728,6 +733,57 @@ export class FlightsService {
   }
 
   /**
+   * Candado de tacómetros del APOYO: sustituye a assertAccessByLeg en las
+   * rutas de taco del piloto (captura y lectura IA) — valida ACCESO y permiso
+   * de captura con las mismas lecturas (sin queries extra). El apoyo ve y
+   * opera el vuelo igual que el piloto, pero los tacómetros los captura quien
+   * vuela: si la ÚNICA relación del solicitante con el vuelo es apoyo_id (no
+   * es piloto, ni copiloto, ni piloto de tramo) se rechaza. confirmTaco es de
+   * oficina (roles admin) y no pasa por aquí. Otros roles no se restringen.
+   */
+  async assertPuedeCapturarTaco(
+    legId: string,
+    current: AuthenticatedUser,
+  ): Promise<void> {
+    if (current.rol !== Rol.PILOTO) return;
+    const { data: escala, error } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id')
+      .eq('id', legId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
+    const vueloId = escala.vuelo_id as string;
+    const { data, error: vErr } = await this.supabase.service
+      .from('vuelo')
+      .select('piloto_id, copiloto_id, apoyo_id')
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (vErr) throw new Error(vErr.message);
+    if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    if (
+      data.piloto_id === current.userId ||
+      data.copiloto_id === current.userId
+    )
+      return;
+    // ¿Piloto de algún tramo? (p. ej. solo el regreso de un redondo)
+    const { data: leg } = await this.supabase.service
+      .from('escala')
+      .select('id')
+      .eq('vuelo_id', vueloId)
+      .eq('piloto_id', current.userId)
+      .limit(1)
+      .maybeSingle();
+    if (leg) return;
+    if (data.apoyo_id === current.userId) {
+      throw new ForbiddenException(
+        'Vas de APOYO en este vuelo: los tacómetros los captura el piloto.',
+      );
+    }
+    throw new ForbiddenException('No tienes acceso a este vuelo');
+  }
+
+  /**
    * Vista de cotización SEGURA para el piloto: solo campos no sensibles
    * (cliente, ruta, pasajeros, fechas, escalas, monto total cobrable). Oculta
    * comisiones, plataforma de cobro, IVA desglosado, overrides, márgenes y
@@ -737,7 +793,7 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, copiloto_id, es_externo, cliente:cliente_id(nombre)',
+        'id, folio, tipo, estado, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, fecha_vuelo, fecha_traslado_final, piloto_id, copiloto_id, apoyo_id, es_externo, cliente:cliente_id(nombre)',
       )
       .eq('id', id)
       .maybeSingle();
@@ -758,6 +814,7 @@ export class FlightsService {
       fecha_traslado_final: string | null;
       piloto_id: string | null;
       copiloto_id: string | null;
+      apoyo_id: string | null;
       es_externo: boolean;
       cliente: { nombre: string } | { nombre: string }[] | null;
     };
@@ -770,9 +827,9 @@ export class FlightsService {
     );
 
     // Acceso: el piloto puede ver la cotización si está asignado al vuelo (ida),
-    // como COPILOTO (a nivel vuelo: acompaña todo el viaje, igual que en
-    // assertAccess y en el listado) o a cualquier tramo (p. ej. solo el
-    // regreso de un redondo con pilotos distintos).
+    // como COPILOTO o como APOYO (a nivel vuelo: acompañan todo el viaje,
+    // igual que en assertAccess y en el listado) o a cualquier tramo (p. ej.
+    // solo el regreso de un redondo con pilotos distintos).
     if (current.rol === Rol.PILOTO) {
       const asignadoATramo = todasEscalas.some(
         (e) => e.piloto_id === current.userId,
@@ -780,6 +837,7 @@ export class FlightsService {
       if (
         v.piloto_id !== current.userId &&
         v.copiloto_id !== current.userId &&
+        v.apoyo_id !== current.userId &&
         !asignadoATramo
       ) {
         throw new ForbiddenException(
@@ -866,15 +924,20 @@ export class FlightsService {
       ((vuelo as { aeronave_id?: string | null }).aeronave_id as
         | string
         | null) ?? null;
-    const [escalas, cobros, aeronave, ultimoTacoAvion] = await Promise.all([
-      this.listEscalas(id),
-      this.listCobros(id),
-      this.aeronaveResumen(aeronaveId),
-      // Referencia para la app: validación en vivo de la SALIDA del tramo 1
-      // (excepción donde el piloto sí fotografía la salida) — el tacómetro
-      // nunca retrocede respecto al último taco conocido del avión.
-      this.ultimoTacoAeronave(aeronaveId, null),
-    ]);
+    const apoyoId =
+      ((vuelo as { apoyo_id?: string | null }).apoyo_id as string | null) ??
+      null;
+    const [escalas, cobros, aeronave, ultimoTacoAvion, apoyoNombre] =
+      await Promise.all([
+        this.listEscalas(id),
+        this.listCobros(id),
+        this.aeronaveResumen(aeronaveId),
+        // Referencia para la app: validación en vivo de la SALIDA del tramo 1
+        // (excepción donde el piloto sí fotografía la salida) — el tacómetro
+        // nunca retrocede respecto al último taco conocido del avión.
+        this.ultimoTacoAeronave(aeronaveId, null),
+        this.nombreUsuario(apoyoId),
+      ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
       aeronave?.velocidad_crucero_kts ?? null,
@@ -887,9 +950,23 @@ export class FlightsService {
       cobros as CobroLike[],
       Number((vuelo as { tc_usd_mxn?: unknown }).tc_usd_mxn) || null,
     );
+    // La app esconde la captura de tacómetros con esta bandera: true cuando el
+    // solicitante va de APOYO y esa es su ÚNICA relación con el vuelo (no es
+    // piloto, ni copiloto, ni piloto de tramo) — misma regla que el candado
+    // del servidor (assertPuedeCapturarTaco).
+    const esApoyo =
+      current?.rol === Rol.PILOTO &&
+      apoyoId != null &&
+      apoyoId === current.userId &&
+      (vuelo as { piloto_id?: string | null }).piloto_id !== current.userId &&
+      (vuelo as { copiloto_id?: string | null }).copiloto_id !==
+        current.userId &&
+      !escalasEnriquecidas.some((e) => e.piloto_id === current.userId);
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
+      apoyo_nombre: apoyoNombre,
+      es_apoyo: esApoyo,
       ultimo_taco_avion: ultimoTacoAvion,
       escalas: escalasEnriquecidas,
       cobros,
@@ -897,6 +974,17 @@ export class FlightsService {
       cobros_sin_tc_count: conv.sin_tc_count,
       cobros_sin_tc_mxn: conv.sin_tc_mxn,
     };
+  }
+
+  /** Nombre de un usuario por id (lookup ligero; null si no hay id). */
+  private async nombreUsuario(userId: string | null): Promise<string | null> {
+    if (!userId) return null;
+    const { data } = await this.supabase.service
+      .from('usuario')
+      .select('nombre')
+      .eq('id', userId)
+      .maybeSingle();
+    return (data?.nombre as string | null) ?? null;
   }
 
   /**
@@ -1427,11 +1515,39 @@ export class FlightsService {
       await this.validateAssignTargets({ pilotoId: dto.copiloto_id! });
     }
 
+    // APOYO del vuelo (caso Jimmy): va en tierra (maletas, facturas, cobros,
+    // gastos) y opera el vuelo como el piloto EXCEPTO tacómetros. No vuela:
+    // no se le aplican los candados de piloto (documentos críticos de
+    // validateAssignTargets ni descansos/horas) — basta existir y estar
+    // ACTIVO. null/'' = quitarlo (patrón copiloto).
+    const asignandoApoyo =
+      dto.apoyo_id !== undefined &&
+      dto.apoyo_id !== null &&
+      dto.apoyo_id !== '';
+    if (asignandoApoyo) {
+      const pilotoFinal: string | null =
+        dto.piloto_id !== undefined
+          ? dto.piloto_id
+          : ((current as { piloto_id?: string | null }).piloto_id ?? null);
+      const copilotoFinal: string | null =
+        dto.copiloto_id !== undefined
+          ? dto.copiloto_id
+          : ((current as { copiloto_id?: string | null }).copiloto_id ?? null);
+      if (dto.apoyo_id === pilotoFinal || dto.apoyo_id === copilotoFinal) {
+        throw new BadRequestException(
+          'El apoyo debe ser distinto al piloto y al copiloto.',
+        );
+      }
+      await this.assertApoyoAsignable(dto.apoyo_id!);
+    }
+
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
     if (dto.copiloto_id !== undefined)
       patch.copiloto_id = dto.copiloto_id === '' ? null : dto.copiloto_id;
+    if (dto.apoyo_id !== undefined)
+      patch.apoyo_id = dto.apoyo_id === '' ? null : dto.apoyo_id;
     if (dto.fecha_vuelo !== undefined)
       patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
 
@@ -1469,7 +1585,60 @@ export class FlightsService {
     if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id) {
       void this.notifyPilotAssigned(dto.copiloto_id!, data!);
     }
+    // Y al apoyo recién asignado (opera el vuelo como el piloto, sin tacos).
+    if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id) {
+      void this.notifyApoyoAssigned(dto.apoyo_id!, data!);
+    }
     return data!;
+  }
+
+  /**
+   * Valida que un usuario pueda asignarse como APOYO: que exista y esté
+   * ACTIVO. A diferencia del piloto/copiloto (validateAssignTargets), al
+   * apoyo NO se le validan documentos críticos ni descansos/horas de vuelo —
+   * no vuela, va de apoyo en tierra.
+   */
+  private async assertApoyoAsignable(apoyoId: string): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('usuario')
+      .select('id, estado')
+      .eq('id', apoyoId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new BadRequestException('El usuario de apoyo no existe.');
+    }
+    if (data.estado !== 'ACTIVO') {
+      throw new ConflictException(
+        'El usuario de apoyo está inactivo; actívalo antes de asignarlo.',
+      );
+    }
+  }
+
+  /**
+   * Push al APOYO asignado: mismo tipo `vuelo_asignado` que el del piloto (la
+   * app ya lo sabe pintar y el link redirige al vuelo), con cuerpo propio —
+   * va de apoyo en tierra, no a volar.
+   */
+  private async notifyApoyoAssigned(
+    apoyoId: string,
+    vuelo: Record<string, unknown>,
+  ): Promise<void> {
+    const ruta = await this.rutaDeVuelo(vuelo);
+    const fecha = vuelo.fecha_vuelo
+      ? new Date(vuelo.fecha_vuelo as string).toLocaleString('es-MX', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+          timeZone: 'America/Cancun',
+        })
+      : 'fecha por definir';
+    void this.notifications.notifyUser(apoyoId, {
+      tipo: 'vuelo_asignado',
+      titulo: 'Vas de apoyo en un vuelo',
+      cuerpo: `Vas de APOYO en el vuelo #${vuelo.folio as number} · ${ruta} · ${fecha}`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+      link: `/flights/${vuelo.id as string}`,
+    });
   }
 
   /**
