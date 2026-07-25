@@ -32,6 +32,21 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    - La salida se llena sola: tramo 1 ← último taco del avión (en `start()` y
      en `captureTaco`); tramos 2+ ← propagación de la llegada anterior;
      huecos ← `fillTacoGaps` (nightly) / `deduceTacosEnVivo` (cada 10 min).
+   - **PRINCIPIO RECTOR: un valor DEDUCIDO es una promesa provisional, jamás
+     un candado contra la evidencia real: la evidencia SIEMPRE gana, el
+     deducido CEDE; y nunca se adivina sobre lo adivinado.** Concretamente:
+     la monotonía ("el taco nunca retrocede") NO aplica contra un DEDUCIDO
+     (la foto del piloto lo corrige hacia abajo, salida Y llegada); si una
+     llegada real contradice una salida DEDUCIDA (llegada ≤ salida), la
+     salida CEDE (se pone en null + `revision_requerida` y la propagación u
+     oficina la rellenan — el CHECK de BD tolera salida null); y la deducción
+     EN VIVO da UN solo salto desde lectura real (no deduce la llegada de un
+     tramo cuya salida sea DEDUCIDA, ni de esta corrida ni persistida ni
+     heredada por propagación) — solo el cierre nocturno rellena la cadena
+     completa. Una violación de CHECK (23514) en captura responde 409, nunca
+     500 (un 500 dispara el reintento del outbox de la app). Caso vuelo #73,
+     jul 2026: la cascada en vivo fabricó un tramo fantasma de 0.4 h y el
+     piloto no podía guardar su llegada real.
    - Una salida DEDUCIDA es PROVISIONAL: la llegada real del tramo anterior
      la CORRIGE al propagarse (guarda atómica por origen). Capturas reales
      (PILOTO/OFICINA/IA) no se pisan jamás (caso vuelo #71, jul 2026: el cron

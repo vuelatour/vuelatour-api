@@ -2642,7 +2642,7 @@ export class FlightsService {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, capturado_por',
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -2677,8 +2677,15 @@ export class FlightsService {
         );
       }
     }
+    // Simetría con la salida: una llegada DEDUCIDA (promesa provisional del
+    // sistema) CEDE ante la foto del piloto, incluso hacia abajo. El retroceso
+    // contra capturas reales (PILOTO/OFICINA/IA) sigue bloqueado.
     if (dto.taco_llegada !== undefined && current.taco_llegada !== null) {
-      if (Number(dto.taco_llegada) < Number(current.taco_llegada)) {
+      const llegadaCorregible = current.taco_llegada_origen === 'DEDUCIDO';
+      if (
+        Number(dto.taco_llegada) < Number(current.taco_llegada) &&
+        !llegadaCorregible
+      ) {
         throw new ConflictException(
           `La lectura de llegada (${dto.taco_llegada}) es menor a la ya registrada (${current.taco_llegada}). El tacómetro nunca retrocede; revisa la foto.`,
         );
@@ -2705,6 +2712,30 @@ export class FlightsService {
         `La salida (${dto.taco_salida}) no puede ser igual o mayor que la llegada ya registrada de este tramo (${current.taco_llegada}). La foto de la salida se toma ANTES de volar el tramo; si la que está mal es la llegada, corrígela la oficina.`,
       );
     }
+    // Camino solo-llegada contra una salida YA existente que la contradice
+    // (llegada <= salida). Sin esta guarda el CHECK de BD (llegada > salida)
+    // reventaba como 500 genérico (caso real vuelo #73: la cascada fabricó un
+    // tramo fantasma de 0.4 h y el piloto no podía guardar su llegada real).
+    // Un valor DEDUCIDO es una promesa provisional, jamás un candado contra
+    // la evidencia real: la evidencia SIEMPRE gana, el deducido CEDE.
+    let salidaDeducidaCede = false;
+    if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_salida === undefined &&
+      current.taco_salida != null &&
+      Number(dto.taco_llegada) <= Number(current.taco_salida)
+    ) {
+      if (current.taco_salida_origen === 'DEDUCIDO') {
+        // El deducido cede: se libera el asiento de la salida (la propagación
+        // de la llegada real del tramo anterior o la oficina lo rellenan — el
+        // sistema se auto-repara) y entra la llegada REAL del piloto.
+        salidaDeducidaCede = true;
+      } else {
+        throw new ConflictException(
+          `La llegada (${dto.taco_llegada}) debe ser mayor que la salida ya registrada (${current.taco_salida}). El tacómetro nunca retrocede; revisa la foto o repórtalo a oficina.`,
+        );
+      }
+    }
 
     const patch: Record<string, unknown> = {
       updated_by: userId,
@@ -2728,6 +2759,15 @@ export class FlightsService {
         patch.taco_salida = ultimo;
         patch.taco_salida_origen = 'DEDUCIDO';
       }
+    }
+    if (salidaDeducidaCede) {
+      // El CHECK de BD tolera salida NULL con llegada presente; nada de este
+      // request la rellena de vuelta (el auto-fill de arriba solo corre cuando
+      // current.taco_salida era null EN EL READ).
+      patch.taco_salida = null;
+      patch.taco_salida_origen = null;
+      patch.revision_requerida = true;
+      patch.revision_motivo = `Salida estimada retirada: la llegada real (${dto.taco_llegada}) la contradecía — confirmar salida en oficina`;
     }
     if (dto.taco_salida !== undefined) {
       patch.taco_salida = dto.taco_salida;
@@ -2756,10 +2796,28 @@ export class FlightsService {
       .eq('id', escalaId)
       .select(ESCALA_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Violación de CHECK (llegada > salida) = datos que no cuadran, NO un
+      // fallo transitorio: un 500 dispararía el reintento infinito del outbox
+      // de la app. Se responde 409 con explicación accionable.
+      if (
+        error.code === '23514' ||
+        /violates check constraint/i.test(error.message ?? '')
+      ) {
+        throw new ConflictException(
+          'Las lecturas no cuadran entre sí (la llegada debe ser mayor que la salida). Revisa los valores; si hay un estimado del sistema estorbando, la oficina puede corregirlo en Tacómetros en vivo.',
+        );
+      }
+      throw new Error(error.message);
+    }
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
 
-    let finalRow = await this.applyConsistencyFlag(data, userId);
+    // Si el deducido cedió, la fila YA quedó en AMARILLO con su motivo
+    // específico; applyConsistencyFlag recalcula desde cero y lo borraría
+    // (sin salida no hay duración que evaluar). Oficina la revisa igual.
+    let finalRow = salidaDeducidaCede
+      ? data
+      : await this.applyConsistencyFlag(data, userId);
     // Ahorra un paso: la llegada de un tramo es la salida del siguiente. Si se
     // capturó taco_llegada, se copia como taco_salida del próximo tramo comercial
     // (mismo avión, salida aún vacía) para que el piloto no la reescriba.
@@ -3651,6 +3709,18 @@ export class FlightsService {
       horaSalidaReal: (e.hora_salida as string | null) ?? null,
       salida: e.taco_salida === null ? null : Number(e.taco_salida),
       llegada: e.taco_llegada === null ? null : Number(e.taco_llegada),
+      // Orígenes YA guardados en BD: un DEDUCIDO persistido por una corrida
+      // anterior sigue siendo una adivinanza — nunca se adivina sobre lo
+      // adivinado (modo VIVO). Solo cuentan si el valor existe (origen sin
+      // valor sería un residuo).
+      salidaOrigenBD:
+        e.taco_salida === null
+          ? null
+          : ((e.taco_salida_origen as string | null) ?? null),
+      llegadaOrigenBD:
+        e.taco_llegada === null
+          ? null
+          : ((e.taco_llegada_origen as string | null) ?? null),
       cambios: [] as string[],
       estimado: false,
       salidaDeducida: false,
@@ -3675,13 +3745,29 @@ export class FlightsService {
             r.salida = prev.llegada;
             r.salidaRellenada = true;
             r.cambios.push('salida tomada de la llegada del tramo anterior');
-            // Si la llegada anterior fue deducida, esta salida también lo es.
-            if (prev.llegadaDeducida) r.salidaDeducida = true;
+            // Si la llegada anterior fue deducida (en esta corrida o ya
+            // persistida como DEDUCIDO en BD), esta salida hereda la marca:
+            // propagar una adivinanza no la convierte en dato.
+            if (prev.llegadaDeducida || prev.llegadaOrigenBD === 'DEDUCIDO')
+              r.salidaDeducida = true;
             changed = true;
           }
         }
         // (2) llegada ← salida + promedio histórico del tramo. Estimado.
         if (r.llegada === null && r.salida !== null) {
+          // Modo EN VIVO: UN solo salto desde una lectura real. Nunca se
+          // adivina sobre lo adivinado — si la salida de este tramo es
+          // DEDUCIDA (calculada en esta corrida, heredada por propagación o
+          // ya persistida en BD), su llegada queda esperando al piloto (caso
+          // real vuelo #73: la cascada fabricó un tramo fantasma de 0.4 h).
+          // El cierre NOCTURNO (sin soloVencidasA) sí rellena la cadena
+          // completa: a esa hora ya no va a llegar la foto.
+          if (
+            opts?.soloVencidasA &&
+            (r.salidaDeducida || r.salidaOrigenBD === 'DEDUCIDO')
+          ) {
+            continue;
+          }
           const tramo = await this.getTramoPromedio(r.origen, r.destino);
           if (
             tramo &&
