@@ -3998,6 +3998,15 @@ export class FlightsService {
    * la misma sincronización derivada (CONFIRMADO→EN_VUELO→COMPLETADO por el
    * camino normal, con sus side-effects estándar).
    */
+  // Segunda corrida MATUTINA (06:05 Cancún): el barrido de las 23:55 corre
+  // cuando los vuelos del día aún son "de hoy" y no los toca — un zombi de
+  // ayer (EN_VUELO con llegadas deducidas, caso #73) sobrevivía TODO el día
+  // siguiente en el dashboard del piloto hasta el barrido nocturno.
+  @Cron('5 11 * * *', { name: 'vuelos-zombi-matutino' })
+  async cerrarVuelosZombisMatutino(): Promise<void> {
+    return this.cerrarVuelosZombis();
+  }
+
   @Cron('55 4 * * *', { name: 'vuelos-zombi' })
   async cerrarVuelosZombis(): Promise<void> {
     try {
