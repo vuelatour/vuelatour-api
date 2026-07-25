@@ -78,6 +78,25 @@ interface EscalaTaco {
   taco_llegada: string | number | null;
 }
 
+/**
+ * Sugerencia de llegada pendiente (política del cliente, 25 jul 2026): el
+ * sistema YA NO escribe valores estimados por promedio — los devuelve como
+ * sugerencia para alertar (push al piloto, resumen nocturno a oficina). El
+ * valor_estimado es SOLO referencia; jamás se persiste.
+ */
+export interface TacoSugerencia {
+  escala_id: string;
+  vuelo_id: string;
+  folio: number;
+  tramo: string;
+  tipo: 'LLEGADA_VENCIDA';
+  valor_estimado: number;
+  minutos_promedio: number;
+  vencida_desde: string | null;
+  /** Piloto del tramo (o del vuelo) — uso interno para el push del cron. */
+  piloto_id: string | null;
+}
+
 const COBRO_COLS =
   'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
 
@@ -3603,16 +3622,19 @@ export class FlightsService {
     }
   }
 
-  // ===== Cierre del día: relleno de huecos de tacómetro =====
+  // ===== Cierre del día: tacómetros pendientes =====
 
   /**
    * Cron de cierre del día (23:45 Cancún = 04:45 UTC; Cancún no observa DST).
-   * Recorre los vuelos recientes COMPLETADOS/EN_VUELO con tacómetros
-   * incompletos y rellena los huecos con el promedio histórico del tramo
-   * (tramo_tiempo_promedio). Todo valor calculado queda en AMARILLO
-   * (revision_requerida) hasta que oficina lo confirme — acuerdo de la sesión
-   * con el cliente: la IA llena los huecos que dejan los pilotos y la oficina
-   * solo pasa de amarillo a verde.
+   * Política del cliente (25 jul 2026): el sistema YA NO rellena huecos con
+   * estimados por promedio (el cron calculaba lecturas, las subía, y chocaban
+   * con las fotos reales de los pilotos). Ahora recorre los vuelos recientes,
+   * corre la PROPAGACIÓN de lecturas reales (fillTacoGaps solo copia datos) y
+   * con las sugerencias pendientes manda UN resumen a ADMIN/COORDINADOR para
+   * que confirmen con los pilotos y capturen en Tacómetros en vivo.
+   * Consecuencia asumida: un vuelo sin llegadas REALES ya no se completa solo
+   * (complete() exige llegadas) — lo vigilan el cron zombi (warning), la
+   * alerta de "sigue EN VUELO" y el pre-cierre.
    */
   @Cron('45 4 * * *', { name: 'taco-fill-gaps' })
   async fillTacoGapsDelDia(): Promise<void> {
@@ -3620,19 +3642,39 @@ export class FlightsService {
       const desde = new Date(Date.now() - 48 * 3600 * 1000).toISOString();
       const { data, error } = await this.supabase.service
         .from('vuelo')
-        .select('id')
+        .select('id, folio')
         .in('estado', ['COMPLETADO', 'EN_VUELO'])
         .eq('es_externo', false)
         .gte('updated_at', desde);
       if (error) throw new Error(error.message);
+      const pendientes: TacoSugerencia[] = [];
       for (const v of data ?? []) {
         try {
-          await this.fillTacoGaps(v.id as string, null);
+          const res = await this.fillTacoGaps(v.id as string, null);
+          pendientes.push(...res.sugerencias);
         } catch (err) {
           this.logger.warn(
             `fillTacoGaps(${v.id as string}) falló: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
+      }
+      if (pendientes.length > 0) {
+        const n = pendientes.length;
+        const folios = [...new Set(pendientes.map((s) => s.folio))].sort(
+          (a, b) => a - b,
+        );
+        const payload = {
+          tipo: 'alerta_sistema',
+          titulo:
+            n === 1
+              ? '1 tramo del día sin lectura de llegada'
+              : `${n} tramos del día sin lectura de llegada`,
+          cuerpo: `${n === 1 ? '1 tramo del día quedó' : `${n} tramos del día quedaron`} sin lectura de llegada — confirmar con los pilotos y capturarlas en Tacómetros en vivo. Vuelos: ${folios.map((f) => `#${f}`).join(', ')}.`,
+          data: { count: n, folios },
+          link: '/admin/taco-live',
+        };
+        await this.notifications.notifyRole(Rol.ADMIN, payload);
+        await this.notifications.notifyRole(Rol.COORDINADOR, payload);
       }
     } catch (err) {
       this.logger.warn(
@@ -3642,10 +3684,12 @@ export class FlightsService {
   }
 
   /**
-   * Deducción EN VIVO (cada 10 min): para los vuelos del día (no cancelados),
-   * si una escala ya debió terminar y no llegó su lectura, se deduce con el
-   * promedio del tramo y queda en AMARILLO con leyenda "Deducido en vivo".
-   * La operación no se detiene: piloto > IA > deducción, y oficina confirma.
+   * Vigilante EN VIVO (cada 10 min): para los vuelos del día (no cancelados),
+   * si una escala ya debió terminar y no llegó su lectura, avisa al PILOTO
+   * del tramo con push (estimado del promedio SOLO como referencia). CERO
+   * escrituras de tacos — política del cliente (25 jul 2026): antes este cron
+   * deducía la llegada y la subía, y chocaba con la foto real del piloto.
+   * Un aviso por escala (dedupe `taco_vencido_<escala_id>` en alerta_emitida).
    */
   @Cron('*/10 * * * *', { name: 'taco-live-deduce' })
   async deduceTacosEnVivo(): Promise<void> {
@@ -3664,7 +3708,12 @@ export class FlightsService {
       if (error) throw new Error(error.message);
       for (const v of data ?? []) {
         try {
-          await this.fillTacoGaps(v.id as string, null, { soloVencidasA: now });
+          const res = await this.fillTacoGaps(v.id as string, null, {
+            soloVencidasA: now,
+          });
+          for (const s of res.sugerencias) {
+            await this.avisarTacoVencido(s);
+          }
         } catch (err) {
           this.logger.warn(
             `deduceTacosEnVivo(${v.id as string}): ${err instanceof Error ? err.message : String(err)}`,
@@ -3679,179 +3728,171 @@ export class FlightsService {
   }
 
   /**
-   * Rellena los huecos de tacómetro de UN vuelo:
-   *  - salida vacía ← llegada del tramo anterior (mismo avión): dato exacto,
-   *    no se marca.
-   *  - llegada vacía ← salida + promedio histórico del tramo: ESTIMADO, se
-   *    marca amarillo (revision_requerida) para confirmar en oficina.
-   *  - salida vacía ← llegada − promedio histórico: ESTIMADO, amarillo.
-   * Requiere al menos MIN_MUESTRAS vuelos históricos del tramo para estimar.
-   * Devuelve el resumen de lo actualizado.
+   * Push al piloto del tramo vencido, UNA sola vez por escala. Sigue el
+   * patrón de alerts.dispatch: la clave de dedupe se marca DESPUÉS de una
+   * entrega exitosa — si el push falla, el siguiente run reintenta.
+   */
+  private async avisarTacoVencido(s: TacoSugerencia): Promise<void> {
+    if (!s.piloto_id) return;
+    const dedupeKey = `taco_vencido_${s.escala_id}`;
+    const { count, error: countErr } = await this.supabase.service
+      .from('alerta_emitida')
+      .select('dedupe_key', { count: 'exact', head: true })
+      .eq('dedupe_key', dedupeKey);
+    if (countErr) throw new Error(countErr.message);
+    if ((count ?? 0) > 0) return; // ya avisada
+    const ok = await this.notifications.notifyUser(s.piloto_id, {
+      tipo: 'recordatorio_taco',
+      titulo: `Falta lectura de llegada · vuelo #${s.folio}`,
+      cuerpo: `Tu tramo ${s.tramo} ya debió terminar y no hay lectura de llegada — captura la foto del tacómetro. (Estimado de referencia: ~${s.valor_estimado.toFixed(1)})`,
+      data: { vuelo_id: s.vuelo_id, escala_id: s.escala_id, folio: s.folio },
+      link: `/flights/${s.vuelo_id}`,
+    });
+    if (!ok) return; // sin entrega (o piloto externo): la clave queda libre
+    const { error } = await this.supabase.service
+      .from('alerta_emitida')
+      .insert({ dedupe_key: dedupeKey, clave: 'taco_vencido' });
+    // 23505 = otra corrida la marcó en paralelo: mismo resultado, no es error.
+    if (error && error.code !== '23505') throw new Error(error.message);
+  }
+
+  /**
+   * Tacómetros de UN vuelo — política del cliente (25 jul 2026): el sistema
+   * NUNCA escribe valores ESTIMADOS (por promedio). Este método:
+   *  - PROPAGA copias de dato real: salida vacía ← llegada del tramo anterior
+   *    (mismo avión). Es una identidad física (el horómetro no se mueve con
+   *    el avión apagado), no una estimación — sin ella se rompe "una foto por
+   *    escala".
+   *  - DEVUELVE `sugerencias` de llegadas pendientes (salida presente, sin
+   *    llegada, promedio del tramo confiable): lo que ANTES escribía como
+   *    DEDUCIDO ahora es alerta/recomendación (push al piloto en vivo,
+   *    resumen nocturno a oficina). Requiere MIN_MUESTRAS para sugerir.
    */
   async fillTacoGaps(
     vueloId: string,
     userId: string | null,
     opts?: {
-      /** Modo EN VIVO: solo deduce llegadas cuya hora esperada de fin (salida
-       *  plan + promedio del tramo + margen) ya venció a este instante. Sin
-       *  esta opción (cierre del día) deduce todos los huecos. */
+      /** Modo EN VIVO: solo sugiere llegadas cuya hora esperada de fin
+       *  (salida real/plan + promedio del tramo + margen) ya venció a este
+       *  instante. Sin esta opción (cierre del día) sugiere todos los
+       *  pendientes calculables. */
       soloVencidasA?: Date;
     },
   ) {
-    const escalas = await this.listEscalas(vueloId);
-    const rows = escalas.map((e) => ({
+    const vuelo = await this.findById(vueloId);
+    const { data: escalasData, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select(ESCALA_COLS)
+      .eq('vuelo_id', vueloId)
+      .order('orden', { ascending: true });
+    if (escErr) throw new Error(escErr.message);
+    const rows = (escalasData ?? []).map((e) => ({
       id: e.id as string,
       orden: Number(e.orden),
       origen: e.origen_iata as string,
       destino: e.destino_iata as string,
       aeronaveId: (e.aeronave_id as string | null) ?? null,
+      pilotoId: (e.piloto_id as string | null) ?? null,
       fechaPlan: (e.fecha_salida_plan as string | null) ?? null,
       horaSalidaReal: (e.hora_salida as string | null) ?? null,
       salida: e.taco_salida === null ? null : Number(e.taco_salida),
       llegada: e.taco_llegada === null ? null : Number(e.taco_llegada),
-      // Orígenes YA guardados en BD: un DEDUCIDO persistido por una corrida
-      // anterior sigue siendo una adivinanza — nunca se adivina sobre lo
-      // adivinado (modo VIVO). Solo cuentan si el valor existe (origen sin
-      // valor sería un residuo).
-      salidaOrigenBD:
-        e.taco_salida === null
-          ? null
-          : ((e.taco_salida_origen as string | null) ?? null),
+      // Origen YA guardado en BD (solo cuenta si el valor existe; origen sin
+      // valor sería un residuo): un DEDUCIDO histórico sigue siendo
+      // provisional y la salida propagada desde él hereda la marca.
       llegadaOrigenBD:
         e.taco_llegada === null
           ? null
           : ((e.taco_llegada_origen as string | null) ?? null),
       cambios: [] as string[],
-      estimado: false,
       salidaDeducida: false,
-      llegadaDeducida: false,
-      // Qué campos RELLENÓ este proceso (estaban null al leer): solo esos se
-      // escriben; lo que ya tenía valor jamás se re-escribe (podría pisar una
-      // captura del piloto ocurrida entre la lectura y el write).
+      // Solo se escribe lo que RELLENÓ este proceso (estaba null al leer);
+      // lo que ya tenía valor jamás se re-escribe (podría pisar una captura
+      // del piloto ocurrida entre la lectura y el write).
       salidaRellenada: false,
-      llegadaRellenada: false,
     }));
     rows.sort((a, b) => a.orden - b.orden);
 
-    // Varias pasadas: un valor resuelto habilita el vecino (propagación en cadena).
-    for (let pass = 0; pass < rows.length + 1; pass++) {
-      let changed = false;
-      for (let i = 0; i < rows.length; i++) {
-        const r = rows[i];
-        // (1) salida ← llegada del tramo anterior (mismo avión). Dato exacto.
-        if (r.salida === null && i > 0) {
-          const prev = rows[i - 1];
-          if (prev.llegada !== null && prev.aeronaveId === r.aeronaveId) {
-            r.salida = prev.llegada;
-            r.salidaRellenada = true;
-            r.cambios.push('salida tomada de la llegada del tramo anterior');
-            // Si la llegada anterior fue deducida (en esta corrida o ya
-            // persistida como DEDUCIDO en BD), esta salida hereda la marca:
-            // propagar una adivinanza no la convierte en dato.
-            if (prev.llegadaDeducida || prev.llegadaOrigenBD === 'DEDUCIDO')
-              r.salidaDeducida = true;
-            changed = true;
-          }
-        }
-        // (2) llegada ← salida + promedio histórico del tramo. Estimado.
-        if (r.llegada === null && r.salida !== null) {
-          // Modo EN VIVO: UN solo salto desde una lectura real. Nunca se
-          // adivina sobre lo adivinado — si la salida de este tramo es
-          // DEDUCIDA (calculada en esta corrida, heredada por propagación o
-          // ya persistida en BD), su llegada queda esperando al piloto (caso
-          // real vuelo #73: la cascada fabricó un tramo fantasma de 0.4 h).
-          // El cierre NOCTURNO (sin soloVencidasA) sí rellena la cadena
-          // completa: a esa hora ya no va a llegar la foto.
-          if (
-            opts?.soloVencidasA &&
-            (r.salidaDeducida || r.salidaOrigenBD === 'DEDUCIDO')
-          ) {
-            continue;
-          }
-          const tramo = await this.getTramoPromedio(r.origen, r.destino);
-          if (
-            tramo &&
-            tramo.muestras >= MIN_MUESTRAS &&
-            tramo.minutos_promedio > 0
-          ) {
-            // Modo EN VIVO: solo si la escala ya debió terminar (hora de
-            // salida + promedio + 20 min de margen). Escalas futuras o en el
-            // aire siguen "esperando dato".
-            if (opts?.soloVencidasA) {
-              const base = r.horaSalidaReal ?? r.fechaPlan;
-              if (!base) continue;
-              const fin =
-                new Date(base).getTime() +
-                (tramo.minutos_promedio + 20) * 60_000;
-              if (fin > opts.soloVencidasA.getTime()) continue;
-            }
-            r.llegada =
-              Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10;
-            r.llegadaRellenada = true;
-            r.cambios.push(
-              `llegada calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
-            );
-            r.estimado = true;
-            r.llegadaDeducida = true;
-            changed = true;
-          }
-        }
-        // (3) salida ← llegada − promedio histórico del tramo. Estimado.
-        // Solo al cierre del día: en vivo no inventamos hacia atrás.
-        if (r.salida === null && r.llegada !== null && !opts?.soloVencidasA) {
-          const tramo = await this.getTramoPromedio(r.origen, r.destino);
-          if (
-            tramo &&
-            tramo.muestras >= MIN_MUESTRAS &&
-            tramo.minutos_promedio > 0
-          ) {
-            r.salida =
-              Math.round((r.llegada - tramo.minutos_promedio / 60) * 10) / 10;
-            r.salidaRellenada = true;
-            r.cambios.push(
-              `salida calculada con el promedio del tramo (~${Math.round(tramo.minutos_promedio)} min)`,
-            );
-            r.estimado = true;
-            r.salidaDeducida = true;
-            changed = true;
-          }
-        }
+    // (1) PROPAGACIÓN (única escritura que queda): salida ← llegada del tramo
+    // anterior (mismo avión). Copia de dato, no estimación. Una sola pasada
+    // ordenada basta: la llegada de la que se copia siempre viene de BD (ya
+    // no hay llegadas calculadas en memoria).
+    for (let i = 1; i < rows.length; i++) {
+      const r = rows[i];
+      if (r.salida !== null) continue;
+      const prev = rows[i - 1];
+      if (prev.llegada === null || prev.aeronaveId !== r.aeronaveId) continue;
+      r.salida = prev.llegada;
+      r.salidaRellenada = true;
+      r.cambios.push('salida tomada de la llegada del tramo anterior');
+      // Si la llegada anterior está persistida como DEDUCIDO (histórico),
+      // esta salida hereda la marca: propagar una adivinanza no la convierte
+      // en dato (y así sigue cediendo ante la evidencia real).
+      if (prev.llegadaOrigenBD === 'DEDUCIDO') r.salidaDeducida = true;
+    }
+
+    // (2) SUGERENCIAS (antes se escribían como DEDUCIDO, hoy solo se
+    // reportan): llegada pendiente = salida presente sin llegada, con
+    // promedio del tramo confiable. El valor es SOLO referencia — jamás se
+    // persiste, así que ya no hay riesgo de fabricar tramos fantasma
+    // (caso vuelo #73) y puede sugerirse también sobre una salida DEDUCIDA.
+    const sugerencias: TacoSugerencia[] = [];
+    for (const r of rows) {
+      if (r.llegada !== null || r.salida === null) continue;
+      const tramo = await this.getTramoPromedio(r.origen, r.destino);
+      if (
+        !tramo ||
+        tramo.muestras < MIN_MUESTRAS ||
+        tramo.minutos_promedio <= 0
+      ) {
+        continue;
       }
-      if (!changed) break;
+      // Hora esperada de fin: salida real (o plan) + promedio + 20 min de
+      // margen. En vivo solo se sugiere lo VENCIDO (escalas futuras o en el
+      // aire siguen "esperando dato").
+      const base = r.horaSalidaReal ?? r.fechaPlan;
+      const fin = base
+        ? new Date(
+            new Date(base).getTime() + (tramo.minutos_promedio + 20) * 60_000,
+          )
+        : null;
+      if (opts?.soloVencidasA) {
+        if (!fin || fin.getTime() > opts.soloVencidasA.getTime()) continue;
+      }
+      sugerencias.push({
+        escala_id: r.id,
+        vuelo_id: vueloId,
+        folio: Number(vuelo.folio),
+        tramo: `${r.origen}→${r.destino}`,
+        tipo: 'LLEGADA_VENCIDA',
+        valor_estimado:
+          Math.round((r.salida + tramo.minutos_promedio / 60) * 10) / 10,
+        minutos_promedio: tramo.minutos_promedio,
+        vencida_desde: fin ? fin.toISOString() : null,
+        piloto_id: r.pilotoId ?? (vuelo.piloto_id as string | null),
+      });
     }
 
     const actualizadas: Array<Record<string, unknown>> = [];
     for (const r of rows) {
-      if (!r.salidaRellenada && !r.llegadaRellenada) continue;
-      // Solo se escriben los campos que estaban VACÍOS en la lectura, y el
-      // UPDATE lleva guarda condicional por campo: si el piloto (o el cron
-      // gemelo) capturó entre la lectura y este write, el UPDATE afecta 0
-      // filas y su lectura se respeta (0 filas NO es error).
-      const patch: Record<string, unknown> = {};
-      if (r.salidaRellenada) {
-        patch.taco_salida = roundTaco(r.salida as number);
-        // Origen en TODO camino de escritura: propagada de la llegada real
-        // anterior = dato exacto (PILOTO); estimada por promedio = DEDUCIDO.
-        patch.taco_salida_origen = r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO';
-      }
-      if (r.llegadaRellenada) {
-        patch.taco_llegada = roundTaco(r.llegada as number);
-        patch.taco_llegada_origen = 'DEDUCIDO';
-      }
-      if (r.estimado) {
-        patch.revision_requerida = true;
-        patch.revision_motivo = opts?.soloVencidasA
-          ? `Deducido en vivo (la escala ya debió terminar y no llegó lectura): ${r.cambios.join('; ')} — confirmar en oficina`
-          : `Calculado automáticamente al cierre del día: ${r.cambios.join('; ')} — confirmar en oficina`;
-      }
+      if (!r.salidaRellenada) continue;
+      const patch: Record<string, unknown> = {
+        taco_salida: roundTaco(r.salida as number),
+        // Origen en TODO camino de escritura: propagada de una llegada real
+        // = dato exacto (PILOTO); de un DEDUCIDO histórico = DEDUCIDO.
+        taco_salida_origen: r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO',
+      };
       if (userId) patch.updated_by = userId;
-      let query = this.supabase.service
+      // Guarda condicional: si el piloto (o el cron gemelo) capturó entre la
+      // lectura y este write, el UPDATE afecta 0 filas y su lectura se
+      // respeta (0 filas NO es error).
+      const { data, error } = await this.supabase.service
         .from('escala')
         .update(patch)
-        .eq('id', r.id);
-      if (r.salidaRellenada) query = query.is('taco_salida', null);
-      if (r.llegadaRellenada) query = query.is('taco_llegada', null);
-      const { data, error } = await query.select(ESCALA_COLS).maybeSingle();
+        .eq('id', r.id)
+        .is('taco_salida', null)
+        .select(ESCALA_COLS)
+        .maybeSingle();
       if (error) {
         this.logger.warn(`fillTacoGaps escala ${r.id}: ${error.message}`);
         continue;
@@ -3863,16 +3904,15 @@ export class FlightsService {
           ruta: `${r.origen} → ${r.destino}`,
           taco_salida: r.salida,
           taco_llegada: r.llegada,
-          estimado: r.estimado,
           cambios: r.cambios,
         });
-        if (r.estimado) void this.notifyTacoCaptured(data);
       }
     }
     return {
       vuelo_id: vueloId,
       escalas_actualizadas: actualizadas.length,
       detalle: actualizadas,
+      sugerencias,
     };
   }
 
@@ -3986,6 +4026,14 @@ export class FlightsService {
         else if (salida != null || (base && new Date(base).getTime() < ahora))
           estado = 'EN_CURSO';
         else estado = 'ESPERANDO';
+        // RECOMENDACIÓN para la fila sin llegada (EN_CURSO/VENCIDA): llegada
+        // estimada = salida real + promedio del tramo, calculada AL VUELO —
+        // JAMÁS se persiste (política del cliente, 25 jul 2026). Oficina la
+        // usa como referencia al Ajustar. Sin salida no hay estimación.
+        const llegadaEstimada =
+          llegada == null && salida != null && prom != null
+            ? Math.round((salida + prom / 60) * 10) / 10
+            : null;
         filas.push({
           escala_id: e.id,
           orden: e.orden,
@@ -3995,6 +4043,8 @@ export class FlightsService {
           fecha_salida_plan: e.fecha_salida_plan ?? null,
           esperado_fin: esperadoFin,
           estado,
+          llegada_estimada: llegadaEstimada,
+          minutos_promedio: prom,
           taco_salida: salida,
           taco_salida_origen: e.taco_salida_origen ?? null,
           taco_llegada: llegada,
@@ -4075,9 +4125,13 @@ export class FlightsService {
 
   /**
    * Cierre nocturno de vuelos "zombi" (23:55 Cancún, tras el cierre de tacos):
-   * un EN_VUELO cuya fecha ya pasó y que tiene todas sus lecturas (reales o
-   * deducidas) se completa solo — sus horas, ingresos y reportes del mes no se
-   * pierden porque el piloto olvidó el botón. La operación no se detiene.
+   * un EN_VUELO cuya fecha ya pasó y que tiene todas sus LLEGADAS se completa
+   * solo — sus horas, ingresos y reportes del mes no se pierden porque el
+   * piloto olvidó el botón. Política del cliente (25 jul 2026): el sistema ya
+   * NO fabrica llegadas con promedios, así que un vuelo sin llegadas REALES
+   * queda EN_VUELO (warning abajo) hasta que el piloto suba su foto o la
+   * oficina capture en Tacómetros en vivo — lo vigilan la alerta de "sigue EN
+   * VUELO" (checkVuelosEstancados) y el pre-cierre.
    * También rescata vuelos CONFIRMADO con fecha pasada y TODAS las llegadas
    * completas (tacos que entraron por un camino que no derivó el estado, p.
    * ej. correcciones de oficina previas al sync de confirmTaco): se les corre

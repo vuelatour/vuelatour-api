@@ -29,23 +29,37 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    Nunca `T23:59:59` a secas (se interpreta UTC y mueve vuelos de mes).
 
 5. **Tacómetros — una foto por escala (solo LLEGADA)**:
-   - La salida se llena sola: tramo 1 ← último taco del avión (en `start()` y
-     en `captureTaco`); tramos 2+ ← propagación de la llegada anterior;
-     huecos ← `fillTacoGaps` (nightly) / `deduceTacosEnVivo` (cada 10 min).
-   - **PRINCIPIO RECTOR: un valor DEDUCIDO es una promesa provisional, jamás
-     un candado contra la evidencia real: la evidencia SIEMPRE gana, el
-     deducido CEDE; y nunca se adivina sobre lo adivinado.** Concretamente:
-     la monotonía ("el taco nunca retrocede") NO aplica contra un DEDUCIDO
-     (la foto del piloto lo corrige hacia abajo, salida Y llegada); si una
-     llegada real contradice una salida DEDUCIDA (llegada ≤ salida), la
-     salida CEDE (se pone en null + `revision_requerida` y la propagación u
-     oficina la rellenan — el CHECK de BD tolera salida null); y la deducción
-     EN VIVO da UN solo salto desde lectura real (no deduce la llegada de un
-     tramo cuya salida sea DEDUCIDA, ni de esta corrida ni persistida ni
-     heredada por propagación) — solo el cierre nocturno rellena la cadena
-     completa. Una violación de CHECK (23514) en captura responde 409, nunca
-     500 (un 500 dispara el reintento del outbox de la app). Caso vuelo #73,
-     jul 2026: la cascada en vivo fabricó un tramo fantasma de 0.4 h y el
+   - **PRINCIPIO RECTOR (política del cliente, 25 jul 2026): el sistema NUNCA
+     escribe valores ESTIMADOS (por promedio): las estimaciones son
+     alertas/recomendaciones** — push `recordatorio_taco` al piloto del tramo
+     vencido (`deduceTacosEnVivo`, cada 10 min, dedupe
+     `taco_vencido_<escala_id>` en `alerta_emitida`), resumen nocturno
+     `alerta_sistema` a ADMIN/COORDINADOR (`fillTacoGapsDelDia`) y
+     `llegada_estimada`/`minutos_promedio` calculadas AL VUELO en taco-live
+     (jamás persistidas) para que oficina las use al Ajustar. Solo se
+     escriben COPIAS de lecturas reales: propagación de llegada real → salida
+     siguiente, y salida del tramo 1 ← último taco real del avión (identidades
+     físicas — el horómetro no se mueve con el avión apagado; sin ellas se
+     rompe "una foto por escala"). Un vuelo sin llegadas REALES no se completa
+     solo: lo cierra el piloto con su foto o la oficina en taco-live — el cron
+     zombi lo deja EN_VUELO (`complete()` exige llegadas) y lo vigilan la
+     alerta de "sigue EN VUELO" y el pre-cierre. (Antes el cron fabricaba
+     lecturas con promedios y chocaban con las fotos de los pilotos.)
+   - La salida se llena sola con copias, no estimados: tramo 1 ← último taco
+     del avión (en `start()` y en `captureTaco`); tramos 2+ ← propagación de
+     la llegada anterior (`propagarLlegadaASalidaSiguiente` y `fillTacoGaps`).
+   - Los DEDUCIDO ya persistidos (históricos y las copias provisionales)
+     conservan sus reglas: **un valor DEDUCIDO es una promesa provisional,
+     jamás un candado contra la evidencia real — la evidencia SIEMPRE gana,
+     el deducido CEDE.** Concretamente: la monotonía ("el taco nunca
+     retrocede") NO aplica contra un DEDUCIDO (la foto del piloto lo corrige
+     hacia abajo, salida Y llegada); si una llegada real contradice una
+     salida DEDUCIDA (llegada ≤ salida), la salida CEDE (se pone en null +
+     `revision_requerida` y la propagación u oficina la rellenan — el CHECK
+     de BD tolera salida null). Una violación de CHECK (23514) en captura
+     responde 409, nunca 500 (un 500 dispara el reintento del outbox de la
+     app). Historia que motivó estas guardas y la política de jul 2026 — caso
+     vuelo #73: la deducción en vivo fabricó un tramo fantasma de 0.4 h y el
      piloto no podía guardar su llegada real.
    - Una salida DEDUCIDA es PROVISIONAL: la llegada real del tramo anterior
      la CORRIGE al propagarse (guarda atómica por origen). Capturas reales
@@ -86,10 +100,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
   `pre-cierre`, `resumen`) se declaran ANTES de las rutas `':id'` del mismo
   segmento, o Nest las captura como id.
-- Crones: deducción taco-live `*/10 * * * *`; cierre de tacos `45 4 * * *`
-  UTC (23:45 Cancún); vuelos zombi `55 4 * * *`; alertas diarias
-  `0 8 * * *` con `timeZone: America/Cancun`. Nuevas alertas necesitan fila
-  en `alerta_config` (migración) o `safe()` las salta.
+- Crones: aviso de tacos vencidos (push al piloto, sin escrituras)
+  `*/10 * * * *`; resumen nocturno de tacos `45 4 * * *` UTC (23:45 Cancún);
+  vuelos zombi `55 4 * * *`; alertas diarias `0 8 * * *` con
+  `timeZone: America/Cancun`. Nuevas alertas vía `alerts.service` necesitan
+  fila en `alerta_config` (migración) o `safe()` las salta; los avisos
+  directos (`notifyUser`/`notifyRole`) no la necesitan aunque deduplicen en
+  `alerta_emitida` (ej. `taco_vencido_<escala_id>`).
 - Notificaciones: `notifications.notifyUser/notifyRole`; dedupe de alertas vía
   `alerta_emitida` (`markIfNew`). Los tipos que la app Flutter sabe pintar:
   `vuelo_asignado, taco_capturado, cobro_registrado, gasto_registrado,

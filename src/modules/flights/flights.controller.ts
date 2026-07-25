@@ -479,7 +479,7 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Rellena los huecos de tacómetro del vuelo con el promedio histórico del tramo. Lo calculado queda en amarillo (revision_requerida) hasta confirmarse. También corre solo cada noche (cierre del día).',
+      'Propaga lecturas reales (llegada de un tramo → salida del siguiente) y devuelve sugerencias de llegadas pendientes calculadas con el promedio del tramo. YA NO escribe estimados (política del cliente, jul 2026): las sugerencias son solo referencia para capturar en Tacómetros en vivo.',
   })
   fillTacoGaps(
     @Param('id', ParseUUIDPipe) id: string,
