@@ -19,11 +19,12 @@ const VUELO_COLS =
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
 // GAS aparte (litros/$ x litro); PERMISO e INDIRECTO van a sus hojas propias.
-// Regla del cliente (27 jul 2026): la columna OTROS del libro es la bolsa de
-// FBO + categoría OTRO (comisariatos, varios) + TODO lo pagado en EFECTIVO
-// aunque su categoría sea taxi/comida/etc. El resto de categorías (incluidas
-// REFACCION y FIJO, que antes caían en OTROS) va a OPERACIONES. GAS conserva
-// SIEMPRE su columna propia (litros/precio) sin importar el medio de pago.
+// Regla del cliente (27 jul 2026, ajustada el mismo día): cada gasto va a su
+// columna POR CATEGORÍA sin importar el medio de pago (un taxi en efectivo es
+// PILOTO). OTROS = solo FBO + categoría OTRO (comisariatos, varios); mover
+// algo más a OTROS es decisión manual (se recategoriza el gasto). REFACCION y
+// FIJO van a OPERACIONES. GAS conserva SIEMPRE su columna (litros/precio).
+// El medio EFECTIVO solo se señala como "(efectivo)" en la nota de la celda.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
 const CAT_OTROS = new Set(['FBO', 'OTRO']);
 // Etiquetas humanas para el desglose en la nota de la celda.
@@ -496,31 +497,27 @@ export class AircraftBalanceService {
           usdSinTcMonto += num(g.monto) ?? 0;
           continue;
         }
-        const esEfectivo = g.medio_pago === 'EFECTIVO';
+        // "(efectivo)" en la nota es informativo: NO cambia la columna.
+        const sufijo = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
         if (g.categoria === 'GAS') {
-          // GAS conserva SIEMPRE su columna (litros / precio por litro),
-          // pague como pague; el medio se ve en la nota de la celda.
           tuvoGas = true;
           gasMxn = (gasMxn ?? 0) + mxn;
-          gasDetalle.push(lineaDetalle(g, mxn, esEfectivo ? ' (efectivo)' : ''));
+          gasDetalle.push(lineaDetalle(g, mxn, sufijo));
           const litros = pos(g.litros);
           if (litros != null) gasLitros = (gasLitros ?? 0) + litros;
           else gasSinLitros += 1;
-        } else if (esEfectivo || CAT_OTROS.has(g.categoria)) {
-          // Regla del cliente: OTROS = FBO + OTRO (comisariatos, varios) +
-          // todo lo pagado en EFECTIVO aunque sea taxi/comida/etc.
+        } else if (CAT_OTROS.has(g.categoria)) {
+          // OTROS = solo FBO + categoría OTRO (comisariatos, varios).
           otrosMxn = (otrosMxn ?? 0) + mxn;
-          otrosDetalle.push(
-            lineaDetalle(g, mxn, esEfectivo && !CAT_OTROS.has(g.categoria) ? ' (efectivo)' : ''),
-          );
+          otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
-          pilotoDetalle.push(lineaDetalle(g, mxn));
+          pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else {
           // OPERACIONES, ATERRIZAJE, TUAS, REFACCION, FIJO y cualquier
           // categoría futura no mapeada.
           opMxn = (opMxn ?? 0) + mxn;
-          opDetalle.push(lineaDetalle(g, mxn));
+          opDetalle.push(lineaDetalle(g, mxn, sufijo));
         }
       }
       const T =
