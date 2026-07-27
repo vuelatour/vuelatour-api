@@ -208,6 +208,8 @@ export class AircraftBalanceService {
                 'vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id',
               )
               .in('vuelo_id', vueloIds)
+              // Tramos cancelados fuera: ni horas ni "pendiente de captura".
+              .is('cancelada_at', null)
               .order('orden', { ascending: true })
           : Promise.resolve(vacio),
         vueloIds.length

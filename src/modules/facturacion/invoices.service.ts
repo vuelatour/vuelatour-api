@@ -467,6 +467,7 @@ export class InvoicesService {
           'vuelo_id',
           rows.map((v) => v.id as string),
         )
+        .is('cancelada_at', null)
         .order('orden', { ascending: true });
       const porVuelo = new Map<string, Array<Record<string, unknown>>>();
       for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {

@@ -12,7 +12,7 @@ const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendie
 const VUELO_SELECT =
   'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), ' +
-  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre))';
+  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre))';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -52,6 +52,7 @@ interface VueloRow {
     aeronave_id: string | null;
     piloto_id: string | null;
     estado_permiso: string | null;
+    cancelada_at: string | null;
     aeronave: { matricula: string } | { matricula: string }[] | null;
     piloto: { nombre: string } | { nombre: string }[] | null;
   }> | null;
@@ -132,8 +133,16 @@ export class CalendarSyncService implements OnModuleInit {
       // guardado en escala.google_calendar_id. El 1er tramo hereda fecha_vuelo y
       // el último fecha_traslado_final si no tienen fecha propia.
       const escalas = [...(vuelo.escalas ?? [])].sort((a, b) => a.orden - b.orden);
-      if (vuelo.tipo === 'MULTIESCALA' && escalas.length > 0) {
-        await this.syncLegs(vuelo, escalas);
+      // Un tramo CANCELADO no se agenda: su evento se elimina y no se re-crea.
+      for (const c of escalas) {
+        if (c.cancelada_at != null && c.google_calendar_id) {
+          await this.deleteEvent(c.google_calendar_id);
+          await this.saveLegEventId(c.id, null);
+        }
+      }
+      const activas = escalas.filter((e) => e.cancelada_at == null);
+      if (vuelo.tipo === 'MULTIESCALA' && activas.length > 0) {
+        await this.syncLegs(vuelo, activas);
         return;
       }
 
@@ -148,8 +157,15 @@ export class CalendarSyncService implements OnModuleInit {
       );
       await this.saveEventId(vueloId, 'google_calendar_id', idaId);
 
-      // REGRESO de redondo (en fecha_traslado_final): segundo evento.
-      const esRedondo = vuelo.tipo === 'REDONDO' && !!vuelo.fecha_traslado_final;
+      // REGRESO de redondo (en fecha_traslado_final): segundo evento. Si el
+      // tramo de regreso (orden 2) está cancelado, su evento sobra.
+      const regresoCancelado = escalas.some(
+        (e) => e.orden === 2 && e.cancelada_at != null,
+      );
+      const esRedondo =
+        vuelo.tipo === 'REDONDO' &&
+        !!vuelo.fecha_traslado_final &&
+        !regresoCancelado;
       if (esRedondo) {
         const regId = await this.upsertRaw(
           this.buildEvent(vuelo, 'regreso'),

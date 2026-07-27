@@ -194,6 +194,20 @@ export class AssignEscalaDto {
   fecha_salida_plan?: Date;
 }
 
+/**
+ * Cancelación de UN tramo (no voló): motivo obligatorio y auditable. El tramo
+ * queda fuera de horas/completitud/propagación pero visible con su motivo.
+ */
+export class CancelEscalaDto {
+  @ApiProperty({
+    description:
+      'Motivo de la cancelación del tramo (p. ej. "Avión en taller en MID por falla").',
+  })
+  @IsString()
+  @Length(3, 500)
+  motivo!: string;
+}
+
 export class UpdateEscalaPermisoDto {
   @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista del tramo' })
   @IsEnum(EstadoPermiso)

@@ -86,6 +86,9 @@ export class FlightReportService {
           'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id',
         )
         .eq('vuelo_id', flightId)
+        // Tramos cancelados fuera del reporte: no volaron (motivo visible en
+        // el detalle del vuelo).
+        .is('cancelada_at', null)
         .order('orden', { ascending: true }),
       sb
         .from('cobro_vuelo')

@@ -551,11 +551,13 @@ export class ProfitSharingService {
         .eq('conciliado', false)
         .gte('fecha', q.desde)
         .lte('fecha', q.hasta),
-      // Tacómetros en revisión (amarillos) de vuelos del periodo.
+      // Tacómetros en revisión (amarillos) de vuelos del periodo. Tramos
+      // cancelados fuera (no volaron: nada que revisar/capturar).
       sb
         .from('escala')
         .select('id, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
         .eq('revision_requerida', true)
+        .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
@@ -568,6 +570,7 @@ export class ProfitSharingService {
           'id, destino_iata, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado, es_externo)',
         )
         .neq('destino_iata', 'CUN')
+        .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
         .eq('vuelo.es_externo', false)
         .gte('vuelo.fecha_vuelo', desdeTs)
@@ -579,6 +582,7 @@ export class ProfitSharingService {
           'vuelo_id, orden, fecha_salida_plan, vuelo:vuelo_id!inner(folio, estado)',
         )
         .not('fecha_salida_plan', 'is', null)
+        .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),

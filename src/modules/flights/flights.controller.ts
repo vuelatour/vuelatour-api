@@ -21,6 +21,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import {
   AssignEscalaDto,
+  CancelEscalaDto,
   CaptureTacoDto,
   ConfirmTacoDto,
   CreateEscalaDto,
@@ -513,6 +514,35 @@ export class FlightsController {
     // Mismo candado que la captura: el APOYO no lee/propone tacómetros.
     await this.flights.assertPuedeCapturarTaco(legId, c);
     return this.flights.tacoAiRead(legId, dto);
+  }
+
+  @Post('legs/:legId/cancel')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Cancela UN tramo (no voló) con motivo auditable: anula sus lecturas provisionales (DEDUCIDO) y lo excluye de horas, completitud, propagación y calendario. Con lecturas/fotos REALES se rechaza (el tramo sí ocurrió).',
+  })
+  cancelLeg(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: CancelEscalaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.cancelEscala(legId, dto.motivo, c.userId);
+  }
+
+  @Post('legs/:legId/restore')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Restaura un tramo cancelado (vuelve a la ruta activa). Las lecturas anuladas no regresan: se recapturan o las ajusta oficina.',
+  })
+  restoreLeg(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.restoreEscala(legId, c.userId);
   }
 
   @Delete('legs/:legId')

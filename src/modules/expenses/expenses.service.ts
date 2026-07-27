@@ -388,6 +388,8 @@ export class ExpensesService {
         'id, vuelo_id, orden, origen_iata, destino_iata, hora_llegada, fecha_salida_plan, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo), vuelo:vuelo!vuelo_id(id, folio, estado, es_externo, aeronave_id, aeronave:aeronave!aeronave_id(id, matricula, modelo))',
       )
       .neq('destino_iata', 'CUN')
+      // Un tramo cancelado no aterrizó: no pre-provisiona cuota de pista.
+      .is('cancelada_at', null)
       .or(
         `and(hora_llegada.gte.${d1},hora_llegada.lte.${d2}),and(hora_llegada.is.null,fecha_salida_plan.gte.${d1},fecha_salida_plan.lte.${d2})`,
       )

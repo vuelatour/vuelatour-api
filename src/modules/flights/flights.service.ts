@@ -42,7 +42,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, cancelada_at, cancelada_motivo, cancelada_por, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -1790,11 +1790,16 @@ export class FlightsService {
   async assignEscala(legId: string, dto: AssignEscalaDto, updatedBy: string) {
     const { data: escala, error: escErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, aeronave_id, piloto_id')
+      .select('id, vuelo_id, orden, aeronave_id, piloto_id, cancelada_at')
       .eq('id', legId)
       .maybeSingle();
     if (escErr) throw new Error(escErr.message);
     if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
+    if (escala.cancelada_at) {
+      throw new ConflictException(
+        'Este tramo está cancelado: restáuralo antes de asignar avión/piloto.',
+      );
+    }
 
     const vuelo = await this.findById(escala.vuelo_id as string);
     // Operación independiente: asignable en cualquier estado operable.
@@ -2661,12 +2666,17 @@ export class FlightsService {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por',
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at',
       )
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (current.cancelada_at) {
+      throw new ConflictException(
+        'Este tramo está cancelado (no voló): no se capturan tacómetros. Si sí voló, restáuralo primero en el detalle del vuelo.',
+      );
+    }
 
     if (Object.keys(dto).length === 0) {
       throw new BadRequestException('Empty taco payload');
@@ -3031,11 +3041,18 @@ export class FlightsService {
   async confirmTaco(escalaId: string, dto: ConfirmTacoDto, userId: string) {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada')
+      .select(
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, cancelada_at',
+      )
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (current.cancelada_at) {
+      throw new ConflictException(
+        'Este tramo está cancelado (no voló): no hay tacómetro que confirmar. Si sí voló, restáuralo primero.',
+      );
+    }
 
     // Regla de 1 decimal: normaliza lo tecleado por oficina antes de validar.
     if (dto.taco_salida !== undefined && dto.taco_salida !== null)
@@ -3174,6 +3191,8 @@ export class FlightsService {
     userId: string,
     origen: 'PILOTO' | 'IA' | 'DEDUCIDO' | 'OFICINA' = 'PILOTO',
   ): Promise<void> {
+    // Un tramo cancelado no recibe propagación: la llegada salta al siguiente
+    // tramo ACTIVO (mismo avión) — p. ej. ida → (regreso cancelado) → ferry.
     const { data: siguientes } = await this.supabase.service
       .from('escala')
       .select(
@@ -3181,6 +3200,7 @@ export class FlightsService {
       )
       .eq('vuelo_id', vueloId)
       .gt('orden', orden)
+      .is('cancelada_at', null)
       .order('orden', { ascending: true })
       .limit(1);
     const sig = (siguientes ?? [])[0];
@@ -3292,11 +3312,16 @@ export class FlightsService {
   async tacoAiRead(escalaId: string, dto: TacoAiReadDto) {
     const { data: escala, error } = await this.supabase.service
       .from('escala')
-      .select('id, origen_iata, destino_iata, taco_salida, aeronave_id')
+      .select('id, origen_iata, destino_iata, taco_salida, aeronave_id, cancelada_at')
       .eq('id', escalaId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!escala) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (escala.cancelada_at) {
+      throw new ConflictException(
+        'Este tramo está cancelado (no voló): no se leen tacómetros.',
+      );
+    }
 
     // Ancla de magnitud para la IA: la última lectura conocida de la aeronave.
     // Evita que confunda la décima con un entero (1555.8 vs 15558.1).
@@ -3780,10 +3805,13 @@ export class FlightsService {
     },
   ) {
     const vuelo = await this.findById(vueloId);
+    // Tramos cancelados fuera de TODA la cadena: ni propagan, ni reciben
+    // propagación, ni generan sugerencias/avisos de llegada vencida.
     const { data: escalasData, error: escErr } = await this.supabase.service
       .from('escala')
       .select(ESCALA_COLS)
       .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
       .order('orden', { ascending: true });
     if (escErr) throw new Error(escErr.message);
     const rows = (escalasData ?? []).map((e) => ({
@@ -3997,9 +4025,10 @@ export class FlightsService {
     for (const v of vuelos ?? []) {
       const aeronave = unwrapOne(v.aeronave as { matricula?: string } | null);
       const piloto = unwrapOne(v.piloto as { nombre?: string } | null);
-      const escalas = [
-        ...((v.escalas as Array<Record<string, unknown>>) ?? []),
-      ].sort((a, b) => Number(a.orden) - Number(b.orden));
+      // Tramos cancelados fuera del tablero: no piden captura ni ajuste.
+      const escalas = [...((v.escalas as Array<Record<string, unknown>>) ?? [])]
+        .filter((e) => e.cancelada_at == null)
+        .sort((a, b) => Number(a.orden) - Number(b.orden));
       const filas = [] as Array<Record<string, unknown>>;
       for (const e of escalas) {
         const salida = e.taco_salida == null ? null : Number(e.taco_salida);
@@ -4209,6 +4238,7 @@ export class FlightsService {
       .from('escala')
       .select('id, taco_salida, taco_llegada')
       .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
       .order('orden', { ascending: true })
       .limit(1)
       .maybeSingle();
@@ -4228,10 +4258,12 @@ export class FlightsService {
   }
 
   private async escalasTaco(vueloId: string): Promise<EscalaTaco[]> {
+    // Tramos cancelados fuera: no exigen llegada ni cuentan para completar.
     const { data, error } = await this.supabase.service
       .from('escala')
       .select('orden, taco_salida, taco_llegada')
       .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
     return data ?? [];
@@ -4259,7 +4291,8 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select('vuelo_id, taco_salida, taco_llegada')
-      .in('vuelo_id', ids);
+      .in('vuelo_id', ids)
+      .is('cancelada_at', null);
     if (error) throw new Error(error.message);
 
     const acc = new Map<
@@ -4293,6 +4326,158 @@ export class FlightsService {
       if (it.signedUrl && it.path) map[it.path] = it.signedUrl;
     }
     return map;
+  }
+
+  /**
+   * Cancela UN tramo que no voló (caso #74: avión en taller en MID, el regreso
+   * nunca salió pero la cadena le fabricó lecturas DEDUCIDO):
+   *  - lecturas/fotos REALES (PILOTO/OFICINA/IA) → 409: el tramo sí ocurrió;
+   *    se corrige la ruta o se cancela el vuelo entero.
+   *  - lecturas provisionales (DEDUCIDO) se ANULAN: las horas derivadas del
+   *    tramo quedan en 0 sin tocar ningún lector (todas las sumas ignoran null).
+   *  - el tramo queda excluido de completitud/propagación/sugerencias/taco-live
+   *    (filtros por cancelada_at) y su evento de calendario se elimina.
+   *  - si el vuelo estaba EN_VUELO y las llegadas de los tramos ACTIVOS ya
+   *    están, el vuelo se completa solo (el tramo cancelado ya no lo detiene).
+   */
+  async cancelEscala(escalaId: string, motivo: string, userId: string) {
+    const { data: row, error: readErr } = await this.supabase.service
+      .from('escala')
+      .select(ESCALA_COLS)
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!row) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (row.cancelada_at) {
+      throw new ConflictException('Este tramo ya está cancelado.');
+    }
+    // Evidencia de que el tramo VOLÓ = su LLEGADA real (≠ DEDUCIDO) o
+    // cualquier FOTO propia. La SALIDA nunca cuenta como evidencia, de ningún
+    // origen: la llena el sistema (último taco / PROPAGACIÓN de la llegada
+    // del tramo anterior, que HEREDA el origen PILOTO — caso real #74: el
+    // regreso jamás voló pero su salida decía PILOTO por la propagación).
+    const llegadaReal =
+      row.taco_llegada !== null && row.taco_llegada_origen !== 'DEDUCIDO';
+    if (llegadaReal || row.foto_taco_salida_url || row.foto_taco_llegada_url) {
+      throw new ConflictException(
+        'El tramo tiene llegada o fotos reales de tacómetro: sí voló. Corrige la ruta con "Editar tramo" o cancela el vuelo completo.',
+      );
+    }
+    // Nunca dejar el vuelo sin tramos activos: para eso está cancelar el vuelo.
+    const { count: activos, error: cntErr } = await this.supabase.service
+      .from('escala')
+      .select('id', { count: 'exact', head: true })
+      .eq('vuelo_id', row.vuelo_id as string)
+      .is('cancelada_at', null)
+      .neq('id', escalaId);
+    if (cntErr) throw new Error(cntErr.message);
+    if ((activos ?? 0) === 0) {
+      throw new ConflictException(
+        'Es el único tramo activo del vuelo: cancela el vuelo completo, no el tramo.',
+      );
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update({
+        cancelada_at: new Date().toISOString(),
+        cancelada_motivo: motivo.trim(),
+        cancelada_por: userId,
+        // Los DEDUCIDO eran promesas provisionales de una operación que no
+        // ocurrió: se anulan para que las horas derivadas del tramo sean 0.
+        taco_salida: null,
+        taco_llegada: null,
+        taco_salida_origen: null,
+        taco_llegada_origen: null,
+        valor_ia_propuesto: null,
+        revision_requerida: false,
+        revision_motivo: null,
+        updated_by: userId,
+      })
+      .eq('id', escalaId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+
+    // El vuelo puede quedar completo ahora que este tramo no cuenta. Solo
+    // AVANZA (EN_VUELO → COMPLETADO); jamás inicia un vuelo por cancelar.
+    try {
+      const vuelo = await this.findById(row.vuelo_id as string);
+      if (
+        !vuelo.es_externo &&
+        vuelo.estado === 'EN_VUELO' &&
+        !this.faltanLlegadas(await this.escalasTaco(row.vuelo_id as string))
+      ) {
+        await this.complete(row.vuelo_id as string, userId);
+      }
+    } catch (err) {
+      // El cierre automático jamás bloquea la cancelación del tramo.
+      this.logger.warn(
+        `cancelEscala(${escalaId}): autocierre falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    void this.calendar.syncFlight(row.vuelo_id as string);
+    void this.notifyTramoCancelado(row, motivo.trim());
+    return data!;
+  }
+
+  /** Aviso al piloto del tramo (si hay) de que su tramo fue cancelado. */
+  private async notifyTramoCancelado(
+    escala: Record<string, unknown>,
+    motivo: string,
+  ): Promise<void> {
+    const pilotoId = (escala.piloto_id as string | null) ?? null;
+    if (!pilotoId) return;
+    try {
+      const vuelo = await this.findById(escala.vuelo_id as string);
+      await this.notifications.notifyUser(pilotoId, {
+        tipo: 'alerta_sistema',
+        titulo: `Tramo cancelado · vuelo #${vuelo.folio as number}`,
+        cuerpo: `El tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} se canceló: ${motivo}. Ya no aparece en tu itinerario ni pide tacómetro.`,
+        data: {
+          vuelo_id: escala.vuelo_id,
+          escala_id: escala.id,
+          folio: vuelo.folio,
+        },
+        link: `/flights/${escala.vuelo_id as string}`,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `notifyTramoCancelado falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Restaura un tramo cancelado a la ruta activa. Las lecturas anuladas al
+   * cancelar NO se recuperan: el tramo vuelve "sin capturar" y lo rellenan la
+   * propagación, el piloto u oficina (visible en Tacómetros en vivo).
+   */
+  async restoreEscala(escalaId: string, userId: string) {
+    const { data: row, error: readErr } = await this.supabase.service
+      .from('escala')
+      .select('id, vuelo_id, cancelada_at')
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!row) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (!row.cancelada_at) {
+      throw new ConflictException('Este tramo no está cancelado.');
+    }
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update({
+        cancelada_at: null,
+        cancelada_motivo: null,
+        cancelada_por: null,
+        updated_by: userId,
+      })
+      .eq('id', escalaId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(row.vuelo_id as string);
+    return data!;
   }
 
   async deleteEscala(escalaId: string) {

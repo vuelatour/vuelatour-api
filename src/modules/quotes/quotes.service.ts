@@ -1823,6 +1823,13 @@ export class QuotesService {
         if (fechaPlan != null || actual.fecha_salida_plan == null) {
           planFields.fecha_salida_plan = fechaPlan;
         }
+        // Re-cotizar redefine la ruta: si el tramo estaba CANCELADO
+        // (operación), el nuevo plan lo revive — el cotizador es la fuente
+        // de la ruta comercial y un tramo cancelado y cotizado a la vez
+        // sería contradictorio.
+        planFields.cancelada_at = null;
+        planFields.cancelada_motivo = null;
+        planFields.cancelada_por = null;
         const { error } = await this.supabase.service
           .from('escala')
           .update(planFields)
