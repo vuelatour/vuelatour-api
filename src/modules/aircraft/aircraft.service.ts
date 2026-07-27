@@ -5,6 +5,10 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ExpirationsService } from '../expirations/expirations.service';
+import {
+  PyservicesService,
+  type BitacoraTacoFilaPayload,
+} from '../pyservices/pyservices.service';
 import type { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import type { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import type { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -44,6 +48,7 @@ export class AircraftService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly expirations: ExpirationsService,
+    private readonly pyservices: PyservicesService,
   ) {}
 
   /**
@@ -578,16 +583,133 @@ export class AircraftService {
    * (debe incluir el embed `vuelo:vuelo_id!inner(aeronave_id, estado)` para
    * que los filtros del join apliquen).
    */
+  /**
+   * Tira imprimible de bitácora de tacómetros (formato MONOMOTOR, réplica de
+   * la hoja "Imprimir planeador" de la plantilla del equipo): una fila por
+   * VUELO con fecha, tacómetro inicial, horas voladas, tacómetro final y la
+   * ruta en minúsculas ("cun-pps-cun"). Se imprime, se recorta y se pega en
+   * la bitácora física del avión. Sin rango = todo el histórico.
+   */
+  async bitacoraTacoPdf(
+    id: string,
+    desde?: string,
+    hasta?: string,
+  ): Promise<{ buffer: Buffer; matricula: string }> {
+    const aeronave = await this.findById(id);
+    const rows = await this.escalasDelAvion(
+      id,
+      'orden, origen_iata, destino_iata, es_sobrevuelo, taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, fecha_vuelo, estado, aeronave_id)',
+    );
+
+    const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+    // Corte del rango en hora Cancún (regla transversal de periodos).
+    const desdeTs = desde
+      ? new Date(`${desde}T00:00:00-05:00`).getTime()
+      : null;
+    const hastaTs = hasta
+      ? new Date(`${hasta}T23:59:59-05:00`).getTime()
+      : null;
+
+    interface LegBitacora {
+      orden: number;
+      origen: string;
+      destino: string;
+      sobrevuelo: boolean;
+      salida: number | null;
+      llegada: number | null;
+    }
+    const porVuelo = new Map<string, { fecha: string; legs: LegBitacora[] }>();
+    for (const r of rows) {
+      const vuelo = unwrapOne(
+        r.vuelo as { id?: string; fecha_vuelo?: string | null } | null,
+      );
+      const fecha = vuelo?.fecha_vuelo ?? null;
+      if (!vuelo?.id || !fecha) continue; // sin fecha no hay renglón de bitácora
+      const ts = new Date(fecha).getTime();
+      if (desdeTs !== null && ts < desdeTs) continue;
+      if (hastaTs !== null && ts > hastaTs) continue;
+      const g =
+        porVuelo.get(vuelo.id) ??
+        porVuelo.set(vuelo.id, { fecha, legs: [] }).get(vuelo.id)!;
+      g.legs.push({
+        orden: Number(r.orden) || 0,
+        origen: String(r.origen_iata ?? ''),
+        destino: String(r.destino_iata ?? ''),
+        sobrevuelo: r.es_sobrevuelo === true,
+        salida: r.taco_salida == null ? null : Number(r.taco_salida),
+        llegada: r.taco_llegada == null ? null : Number(r.taco_llegada),
+      });
+    }
+
+    const filas: BitacoraTacoFilaPayload[] = [];
+    for (const { fecha, legs } of porVuelo.values()) {
+      legs.sort((a, b) => a.orden - b.orden);
+      // Tacómetro inicial = salida del primer tramo con lectura; final =
+      // llegada del último. Un vuelo aún sin llegadas no genera renglón
+      // (igual que a mano: la fila se escribe con el vuelo cerrado).
+      const inicial = legs.find((l) => l.salida != null)?.salida ?? null;
+      const final =
+        [...legs].reverse().find((l) => l.llegada != null)?.llegada ?? null;
+      if (inicial == null || final == null) continue;
+      const horas = legs.reduce(
+        (sum, l) =>
+          l.salida != null && l.llegada != null && l.llegada > l.salida
+            ? sum + (l.llegada - l.salida)
+            : sum,
+        0,
+      );
+      // Cadena de la ruta: origen del primer tramo + destino de cada tramo;
+      // un sobrevuelo (origen = destino) intercala "sobrevuelo" como en la
+      // plantilla manual; un salto de base (reposicionado fuera del vuelo)
+      // agrega el nuevo origen para no mentir la continuidad.
+      const tokens: string[] = [];
+      for (const l of legs) {
+        if (tokens.length === 0 || tokens[tokens.length - 1] !== l.origen) {
+          tokens.push(l.origen);
+        }
+        if (l.sobrevuelo) tokens.push('sobrevuelo');
+        tokens.push(l.destino);
+      }
+      filas.push({
+        fecha,
+        taco_inicial: Number(inicial.toFixed(1)),
+        horas: Number(horas.toFixed(1)),
+        taco_final: Number(final.toFixed(1)),
+        ruta: tokens.join('-').toLowerCase(),
+      });
+    }
+    // Cronológico como el libro físico; empates del día por tacómetro.
+    filas.sort(
+      (a, b) =>
+        new Date(a.fecha).getTime() - new Date(b.fecha).getTime() ||
+        a.taco_inicial - b.taco_inicial,
+    );
+
+    const buffer = await this.pyservices.generateBitacoraTacoPdf({
+      matricula: (aeronave.matricula as string) ?? '',
+      modelo: (aeronave.modelo as string) ?? null,
+      desde: desde ?? null,
+      hasta: hasta ?? null,
+      generado: new Date().toISOString(),
+      filas,
+    });
+    return { buffer, matricula: (aeronave.matricula as string) ?? 'avion' };
+  }
+
   private async escalasDelAvion(
     aeronaveId: string,
     select = 'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
   ): Promise<Array<Record<string, unknown>>> {
     const [propias, heredadas] = await Promise.all([
       // Tramos asignados explícitamente a este avión (escala.aeronave_id).
+      // Tramos CANCELADOS fuera: no volaron (sus tacos ya vienen en null,
+      // pero así tampoco aparecen en histórico/bitácora).
       this.supabase.service
         .from('escala')
         .select(select)
         .eq('aeronave_id', aeronaveId)
+        .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO'),
       // Tramos sin avión propio: heredan el del vuelo.
       this.supabase.service
@@ -595,6 +717,7 @@ export class AircraftService {
         .select(select)
         .is('aeronave_id', null)
         .eq('vuelo.aeronave_id', aeronaveId)
+        .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO'),
     ]);
     // Nunca degradar a [] en silencio: estas escalas alimentan horas/hobbs.

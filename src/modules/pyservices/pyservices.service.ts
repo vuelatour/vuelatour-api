@@ -66,6 +66,22 @@ export interface ReporteVueloTramoPayload {
   horas?: number | null;
   es_ferry?: boolean;
 }
+/** Fila de la tira de bitácora de tacómetros: UN vuelo (formato monomotor). */
+export interface BitacoraTacoFilaPayload {
+  fecha: string;
+  taco_inicial: number;
+  horas: number;
+  taco_final: number;
+  ruta: string;
+}
+export interface BitacoraTacoPayload {
+  matricula: string;
+  modelo?: string | null;
+  desde?: string | null;
+  hasta?: string | null;
+  generado?: string | null;
+  filas: BitacoraTacoFilaPayload[];
+}
 export interface ReporteVueloPayload {
   generado: string;
   folio: string;
@@ -407,6 +423,11 @@ export class PyservicesService {
   /** Reporte consolidado de un vuelo en PDF. */
   async generateReporteVueloPdf(payload: ReporteVueloPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/reporte-vuelo', payload);
+  }
+
+  /** Tira imprimible de bitácora de tacómetros del avión (monomotor). */
+  async generateBitacoraTacoPdf(payload: BitacoraTacoPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/bitacora-taco', payload);
   }
 
   /** Reporte consolidado de un vuelo en Excel. */

@@ -122,6 +122,29 @@ export class AircraftController {
     });
   }
 
+  @Get(':id/bitacora.pdf')
+  // Operativo (no trae dinero): quien administra tacómetros puede imprimirla.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Tira imprimible de bitácora de tacómetros (formato monomotor de la plantilla del equipo): una fila por vuelo con fecha, tacómetro inicial, horas, tacómetro final y ruta. Para recortar y pegar en la bitácora física. Sin rango = todo el histórico.',
+  })
+  async bitacoraPdf(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: BalanceAvionQuery,
+  ): Promise<StreamableFile> {
+    const { buffer, matricula } = await this.aircraft.bitacoraTacoPdf(
+      id,
+      q.desde,
+      q.hasta,
+    );
+    const rango = q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    return new StreamableFile(buffer, {
+      type: 'application/pdf',
+      disposition: `attachment; filename="bitacora-${matricula}${rango}.pdf"`,
+    });
+  }
+
   @Get(':id/tacometros')
   @ApiOperation({
     summary:
