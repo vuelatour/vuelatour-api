@@ -3,13 +3,17 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import { ProfitSharingQuery } from './dto/profit-sharing.dto';
+import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingService } from './profit-sharing.service';
 
 @ApiTags('Profit Sharing')
 @ApiBearerAuth()
 @Controller({ path: 'profit-sharing', version: '1' })
 export class ProfitSharingController {
-  constructor(private readonly profitSharing: ProfitSharingService) {}
+  constructor(
+    private readonly profitSharing: ProfitSharingService,
+    private readonly dinero: DineroReportService,
+  ) {}
 
   @Get()
   @Roles(Rol.ADMIN, Rol.ANALISTA)
@@ -40,6 +44,20 @@ export class ProfitSharingController {
     return new StreamableFile(buffer, {
       type: 'application/pdf',
       disposition: `inline; filename="reparto-${desde}-a-${hasta}.pdf"`,
+    });
+  }
+
+  @Get('dinero.xlsx')
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Libro «Dinero» del periodo: réplica del control manual del equipo (dinero-vlos + otros ingresos + otros gastos + utilidades). Filas coloreadas por avión, clave vt+cliente con la matrícula como nota. Costo proveedor/comisiones/pagos van vacíos hasta definir sus reglas.',
+  })
+  async dineroXlsx(@Query() q: ProfitSharingQuery): Promise<StreamableFile> {
+    const { buffer, desde, hasta } = await this.dinero.xlsx(q.desde, q.hasta);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="dinero-${desde}-a-${hasta}.xlsx"`,
     });
   }
 

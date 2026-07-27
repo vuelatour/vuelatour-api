@@ -90,6 +90,72 @@ export interface BitacoraTacoPayload {
   generado?: string | null;
   filas: BitacoraTacoFilaPayload[];
 }
+// ===== Libro "Dinero <periodo>" (réplica del control manual del equipo) =====
+export interface DineroCobroPagoPayload {
+  fecha?: string | null;
+  monto_mxn?: number | null;
+}
+export interface DineroVueloFilaPayload {
+  clave: string;
+  matricula?: string | null;
+  color?: string | null;
+  fecha?: string | null;
+  ruta: string;
+  tiempo?: number | null;
+  venta_hr_usd?: number | null;
+  venta_hr_mxn?: number | null;
+  iva_hr_usd?: number | null;
+  venta_hr_masiva_usd?: number | null;
+  total_cobrado_usd?: number | null;
+  iva_total_usd?: number | null;
+  tc_venta?: number | null;
+  total_cobrado_mxn?: number | null;
+  iva_total_mxn?: number | null;
+  total_siva_mxn?: number | null;
+  status_cobro?: string | null;
+  cobros?: DineroCobroPagoPayload[];
+  total_cobros_mxn?: number | null;
+  me_deben_mxn?: number | null;
+  factura_vuelatour?: string | null;
+}
+export interface DineroOtroIngresoFilaPayload {
+  clave: string;
+  fecha_vuelo?: string | null;
+  concepto_egreso?: string | null;
+  egreso_mxn?: number | null;
+  fecha_egreso?: string | null;
+  concepto_ingreso?: string | null;
+  ingreso_mxn?: number | null;
+  fecha_ingreso?: string | null;
+  remanente_mxn?: number | null;
+  factura?: string | null;
+}
+export interface DineroOtroGastoFilaPayload {
+  fecha?: string | null;
+  concepto: string;
+  monto_mxn?: number | null;
+  acumulado_mxn?: number | null;
+}
+export interface DineroUtilidadAvionPayload {
+  matricula: string;
+  gastos_indirectos_mxn?: number | null;
+  otros_gastos_mxn?: number | null;
+  permisos_mxn?: number | null;
+}
+export interface DineroXlsxPayload {
+  periodo_desde?: string | null;
+  periodo_hasta?: string | null;
+  generado?: string | null;
+  leyenda_colores?: { matricula: string; modelo?: string; color?: string | null }[];
+  vuelos: DineroVueloFilaPayload[];
+  otros_ingresos: DineroOtroIngresoFilaPayload[];
+  otros_gastos: DineroOtroGastoFilaPayload[];
+  utilidades_otros_ingresos_mxn?: number | null;
+  utilidades_otros_gastos_mxn?: number | null;
+  utilidades_tc?: number | null;
+  utilidades_aviones?: DineroUtilidadAvionPayload[];
+}
+
 export interface ReporteVueloPayload {
   generado: string;
   folio: string;
@@ -442,6 +508,11 @@ export class PyservicesService {
   /** Tira imprimible de bitácora de tacómetros del avión (monomotor). */
   async generateBitacoraTacoPdf(payload: BitacoraTacoPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/bitacora-taco', payload);
+  }
+
+  /** Libro «Dinero» del periodo (réplica del control manual del equipo). */
+  async generateDineroXlsx(payload: DineroXlsxPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/dinero-xlsx', payload, 30_000);
   }
 
   /** Reporte consolidado de un vuelo en Excel. */
