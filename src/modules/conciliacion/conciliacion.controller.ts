@@ -17,7 +17,9 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  ClasificarMovimientoDto,
   ConciliacionParseDto,
+  CrearClasificacionDto,
   ImportarMovimientosDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
@@ -92,6 +94,45 @@ export class ConciliacionController {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="conciliacion-${etiqueta}${rango}.xlsx"`,
     });
+  }
+
+  @Get('clasificaciones')
+  @ApiOperation({
+    summary:
+      'Catálogo de clasificaciones "sin vuelo" (comisión del banco, impuestos, personal…)',
+  })
+  clasificaciones() {
+    return this.conciliacion.listClasificaciones();
+  }
+
+  @Post('clasificaciones')
+  @ApiOperation({
+    summary:
+      'Crea una clasificación (o devuelve la existente con el mismo nombre): el diálogo del panel crea en el mismo espacio.',
+  })
+  crearClasificacion(
+    @Body() dto: CrearClasificacionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.crearClasificacion(dto.nombre, c.userId);
+  }
+
+  @Patch('movimientos/:id/clasificar')
+  @ApiOperation({
+    summary:
+      'Concilia el movimiento por CLASIFICACIÓN (no corresponde a ningún vuelo) con notas; null la quita y vuelve a Pendiente.',
+  })
+  clasificarMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ClasificarMovimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.clasificarMovimiento(
+      id,
+      dto.clasificacion_id ?? null,
+      dto.notas,
+      c.userId,
+    );
   }
 
   @Get('estados-cuenta')

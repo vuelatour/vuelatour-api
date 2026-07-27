@@ -156,3 +156,28 @@ export class ReporteConciliacionQuery {
   @IsISO8601()
   hasta?: string;
 }
+
+/** Alta de clasificación "sin vuelo" (o recuperación de la existente). */
+export class CrearClasificacionDto {
+  @ApiProperty({ description: 'Nombre de la clasificación (p. ej. "Comisión del banco")' })
+  @IsString()
+  @MaxLength(80)
+  nombre!: string;
+}
+
+/** Concilia por clasificación (sin gasto/cobro). null = quitarla. */
+export class ClasificarMovimientoDto {
+  @ApiPropertyOptional({
+    description: 'Clasificación a asignar. null para quitarla (vuelve a Pendiente).',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsUUID()
+  clasificacion_id?: string | null;
+
+  @ApiPropertyOptional({ description: 'Notas libres del movimiento' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notas?: string;
+}

@@ -19,7 +19,7 @@ import {
 } from './dto/conciliacion.dto';
 
 const MOV_COLS =
-  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, origen, notas, created_at';
+  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, clasificacion_id, origen, notas, created_at';
 const MATCH_DAYS = 3;
 /**
  * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
@@ -579,6 +579,8 @@ export class ConciliacionService {
         conciliado:
           cobroId !== null ||
           (mov as { gasto_id: string | null }).gasto_id !== null,
+        // Vincular un cobro real pisa la clasificación "sin vuelo".
+        clasificacion_id: null,
         updated_by: userId,
       })
       .eq('id', movId)
@@ -595,6 +597,104 @@ export class ConciliacionService {
         throw new BadRequestException('Cobro no encontrado.');
       throw new Error(error.message);
     }
+    return data!;
+  }
+
+  /** Catálogo de clasificaciones "sin vuelo" (activas, orden alfabético). */
+  async listClasificaciones() {
+    const { data, error } = await this.supabase.service
+      .from('conciliacion_clasificacion')
+      .select('id, nombre, activo')
+      .eq('activo', true)
+      .order('nombre', { ascending: true });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /**
+   * Crea una clasificación (o devuelve la existente si el nombre ya está,
+   * sin distinguir mayúsculas): el diálogo del panel crea "en el mismo
+   * espacio" y no debe fallar por un duplicado de dedo.
+   */
+  async crearClasificacion(nombre: string, userId: string) {
+    const limpio = nombre.trim().replace(/\s+/g, ' ');
+    if (limpio.length < 2) {
+      throw new BadRequestException('El nombre de la clasificación es muy corto.');
+    }
+    const { data: existente, error: exErr } = await this.supabase.service
+      .from('conciliacion_clasificacion')
+      .select('id, nombre, activo')
+      .ilike('nombre', limpio)
+      .maybeSingle();
+    if (exErr) throw new Error(exErr.message);
+    if (existente) return existente;
+    const { data, error } = await this.supabase.service
+      .from('conciliacion_clasificacion')
+      .insert({ nombre: limpio, created_by: userId })
+      .select('id, nombre, activo')
+      .maybeSingle();
+    if (error) {
+      // Carrera con el índice único lower(nombre): devuelve la ganadora.
+      if (error.code === '23505') {
+        const { data: otra } = await this.supabase.service
+          .from('conciliacion_clasificacion')
+          .select('id, nombre, activo')
+          .ilike('nombre', limpio)
+          .maybeSingle();
+        if (otra) return otra;
+      }
+      throw new Error(error.message);
+    }
+    return data!;
+  }
+
+  /**
+   * Concilia un movimiento por CLASIFICACIÓN (no corresponde a ningún
+   * gasto/cobro de vuelo: comisión del banco, impuestos, personal…), con
+   * notas opcionales. clasificacion_id null la quita y el movimiento vuelve
+   * a Pendiente. Excluyente con gasto/cobro vinculado.
+   */
+  async clasificarMovimiento(
+    movId: string,
+    clasificacionId: string | null,
+    notas: string | undefined,
+    userId: string,
+  ) {
+    const { data: mov, error: movErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id, gasto_id, cobro_id')
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
+    if (clasificacionId && (mov.gasto_id || mov.cobro_id)) {
+      throw new ConflictException(
+        'El movimiento ya está conciliado con un gasto/cobro: desvincúlalo antes de clasificarlo.',
+      );
+    }
+    if (clasificacionId) {
+      const { data: clasif, error: clErr } = await this.supabase.service
+        .from('conciliacion_clasificacion')
+        .select('id')
+        .eq('id', clasificacionId)
+        .maybeSingle();
+      if (clErr) throw new Error(clErr.message);
+      if (!clasif) throw new BadRequestException('Clasificación no encontrada.');
+    }
+    const patch: Record<string, unknown> = {
+      clasificacion_id: clasificacionId,
+      // Clasificar CONCILIA (deja de estar Pendiente); quitarla lo regresa.
+      conciliado: clasificacionId !== null,
+      updated_by: userId,
+    };
+    if (notas !== undefined) patch.notas = notas.trim() || null;
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .update(patch)
+      .eq('id', movId)
+      .select(MOV_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
     return data!;
   }
 
@@ -686,7 +786,7 @@ export class ConciliacionService {
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
-        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio))`,
+        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // Orden del estado de cuenta impreso: cronológico ascendente.
@@ -736,6 +836,8 @@ export class ConciliacionService {
           .filter(Boolean)
           .join(' · ');
       }
+      const clasif = unwrapOne(m.clasificacion as { nombre?: string } | null);
+      if (clasif?.nombre) return `Clasificación: ${clasif.nombre}`;
       return '';
     };
 
@@ -757,6 +859,7 @@ export class ConciliacionService {
         esCargo ? null : monto,
         ok ? 'Conciliado' : 'PENDIENTE',
         ok ? conQue(m) : '',
+        (m.notas as string | null) ?? '',
       ];
     });
 
@@ -775,6 +878,7 @@ export class ConciliacionService {
         { label: `Abono (${cuenta.moneda as string})`, tipo: 'money' },
         { label: 'Estatus', tipo: 'texto' },
         { label: 'Conciliado con', tipo: 'texto' },
+        { label: 'Notas', tipo: 'texto' },
       ],
       filas,
       totales: [
@@ -785,6 +889,7 @@ export class ConciliacionService {
         Number(totalAbonos.toFixed(2)),
         `${conciliados} conciliados`,
         `${pendientes} pendientes`,
+        null,
       ],
     });
     return { buffer, etiqueta: (cuenta.alias as string) ?? 'cuenta' };
@@ -796,7 +901,7 @@ export class ConciliacionService {
       .select(
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
-        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio))`,
+        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -867,6 +972,9 @@ export class ConciliacionService {
       .update({
         gasto_id: gastoId,
         conciliado: gastoId !== null,
+        // Vincular un gasto real pisa la clasificación "sin vuelo" (son
+        // excluyentes); al desvincular, el movimiento vuelve a pendiente.
+        clasificacion_id: null,
         updated_by: userId,
       })
       .eq('id', movId)
