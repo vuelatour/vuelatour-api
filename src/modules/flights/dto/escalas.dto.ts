@@ -208,6 +208,17 @@ export class CancelEscalaDto {
   motivo!: string;
 }
 
+/** Restauración de un tramo cancelado: motivo obligatorio y auditable. */
+export class RestoreEscalaDto {
+  @ApiProperty({
+    description:
+      'Motivo de la restauración (p. ej. "El avión salió del taller y sí voló el regreso").',
+  })
+  @IsString()
+  @Length(3, 500)
+  motivo!: string;
+}
+
 export class UpdateEscalaPermisoDto {
   @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista del tramo' })
   @IsEnum(EstadoPermiso)

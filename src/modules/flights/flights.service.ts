@@ -4502,14 +4502,16 @@ export class FlightsService {
   }
 
   /**
-   * Restaura un tramo cancelado a la ruta activa. Las lecturas anuladas al
-   * cancelar NO se recuperan: el tramo vuelve "sin capturar" y lo rellenan la
-   * propagación, el piloto u oficina (visible en Tacómetros en vivo).
+   * Restaura un tramo cancelado a la ruta activa (motivo obligatorio,
+   * sellado en las notas internas del vuelo — el de la CANCELACIÓN vivía en
+   * la escala y se limpia aquí). Las lecturas anuladas al cancelar NO se
+   * recuperan: el tramo vuelve "sin capturar" y lo rellenan la propagación,
+   * el piloto u oficina (visible en Tacómetros en vivo).
    */
-  async restoreEscala(escalaId: string, userId: string) {
+  async restoreEscala(escalaId: string, motivo: string, userId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, cancelada_at')
+      .select('id, vuelo_id, origen_iata, destino_iata, cancelada_at, cancelada_motivo')
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
@@ -4529,6 +4531,26 @@ export class FlightsService {
       .select(ESCALA_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Rastro auditable en las notas internas del vuelo (mismo patrón que la
+    // cancelación de vuelo): quedan el motivo original y el de restaurar.
+    try {
+      const vuelo = await this.findById(row.vuelo_id as string);
+      const sello =
+        `[Tramo ${row.origen_iata as string}→${row.destino_iata as string} restaurado ${new Date().toISOString()}] ` +
+        `${motivo.trim()} (cancelado antes por: ${((row.cancelada_motivo as string | null) ?? 's/motivo').trim()})`;
+      const previas = (vuelo.notas_internas as string | null)?.trim();
+      await this.supabase.service
+        .from('vuelo')
+        .update({
+          notas_internas: previas ? `${previas}\n${sello}` : sello,
+          updated_by: userId,
+        })
+        .eq('id', row.vuelo_id as string);
+    } catch (err) {
+      this.logger.warn(
+        `restoreEscala(${escalaId}): sello en notas falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     void this.calendar.syncFlight(row.vuelo_id as string);
     return data!;
   }

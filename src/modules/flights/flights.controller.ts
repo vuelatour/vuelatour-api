@@ -26,6 +26,7 @@ import {
   ConfirmTacoDto,
   CreateEscalaDto,
   OperationalLegDto,
+  RestoreEscalaDto,
   TacoAiReadDto,
   UpdateEscalaDto,
   UpdateEscalaPermisoDto,
@@ -549,13 +550,14 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Restaura un tramo cancelado (vuelve a la ruta activa). Las lecturas anuladas no regresan: se recapturan o las ajusta oficina.',
+      'Restaura un tramo cancelado (vuelve a la ruta activa) con motivo auditable (queda en notas internas del vuelo). Las lecturas anuladas no regresan: se recapturan o las ajusta oficina.',
   })
   restoreLeg(
     @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: RestoreEscalaDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.flights.restoreEscala(legId, c.userId);
+    return this.flights.restoreEscala(legId, dto.motivo, c.userId);
   }
 
   @Delete('legs/:legId')
