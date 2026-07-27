@@ -19,8 +19,28 @@ const VUELO_COLS =
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
 // GAS aparte (litros/$ x litro); PERMISO e INDIRECTO van a sus hojas propias.
-const CAT_OP = new Set(['OPERACIONES', 'ATERRIZAJE', 'TUAS', 'FBO']);
+// Regla del cliente (27 jul 2026): la columna OTROS del libro es la bolsa de
+// FBO + categoría OTRO (comisariatos, varios) + TODO lo pagado en EFECTIVO
+// aunque su categoría sea taxi/comida/etc. El resto de categorías (incluidas
+// REFACCION y FIJO, que antes caían en OTROS) va a OPERACIONES. GAS conserva
+// SIEMPRE su columna propia (litros/precio) sin importar el medio de pago.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
+const CAT_OTROS = new Set(['FBO', 'OTRO']);
+// Etiquetas humanas para el desglose en la nota de la celda.
+const CAT_LABEL: Record<string, string> = {
+  GAS: 'Gas',
+  ATERRIZAJE: 'Aterrizaje',
+  TUAS: 'TUAs',
+  FBO: 'FBO',
+  COMIDA: 'Comida',
+  HOTEL: 'Hotel',
+  TAXI: 'Taxi',
+  REFACCION: 'Refacción',
+  FIJO: 'Fijo',
+  OTRO: 'Otro',
+  OPERACIONES: 'Operaciones',
+  PILOTO_EXTERNO: 'Piloto externo',
+};
 
 interface VueloRow {
   id: string;
@@ -72,6 +92,7 @@ interface GastoRow {
   litros: string | number | null;
   fecha_gasto: string | null;
   notas: string | null;
+  medio_pago: string | null;
   proveedor: { nombre?: string } | { nombre?: string }[] | null;
 }
 
@@ -225,7 +246,7 @@ export class AircraftBalanceService {
           ? sb
               .from('gasto')
               .select(
-                'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, proveedor:proveedor_id(nombre)',
+                'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, proveedor:proveedor_id(nombre)',
               )
               .in('vuelo_id', vueloIds)
               .order('fecha_gasto', { ascending: true })
@@ -235,7 +256,7 @@ export class AircraftBalanceService {
         sb
           .from('gasto')
           .select(
-            'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, proveedor:proveedor_id(nombre)',
+            'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, proveedor:proveedor_id(nombre)',
           )
           .eq('aeronave_id', aircraftId)
           .is('vuelo_id', null)
@@ -440,6 +461,31 @@ export class AircraftBalanceService {
       let usdSinTcMonto = 0;
       let gasSinLitros = 0;
       let tuvoGas = false;
+      // Desglose por celda (nota de Excel): una línea por gasto, con la
+      // categoría, el proveedor/nota y el monto — "Comida · Starbucks — $206.00".
+      const gasDetalle: string[] = [];
+      const opDetalle: string[] = [];
+      const pilotoDetalle: string[] = [];
+      const otrosDetalle: string[] = [];
+      const lineaDetalle = (g: GastoRow, mxn: number, sufijo = ''): string => {
+        const prov = Array.isArray(g.proveedor)
+          ? g.proveedor[0]?.nombre
+          : g.proveedor?.nombre;
+        // Solo la primera línea de la nota, recortada: la nota de celda es un
+        // vistazo, no el expediente (ese vive en Gastos).
+        const nota = (g.notas ?? '').split('\n')[0].trim().slice(0, 60);
+        const etiqueta = [
+          `${CAT_LABEL[g.categoria] ?? g.categoria}${sufijo}`,
+          prov || null,
+          nota || null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+        return `${etiqueta} — $${round2(mxn).toLocaleString('es-MX', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        })}`;
+      };
       for (const g of vGastos) {
         // PERMISO va a su hoja (con o sin vuelo) y se excluye del costo del
         // vuelo para no contar doble; INDIRECTO no es costo directo.
@@ -450,19 +496,31 @@ export class AircraftBalanceService {
           usdSinTcMonto += num(g.monto) ?? 0;
           continue;
         }
+        const esEfectivo = g.medio_pago === 'EFECTIVO';
         if (g.categoria === 'GAS') {
+          // GAS conserva SIEMPRE su columna (litros / precio por litro),
+          // pague como pague; el medio se ve en la nota de la celda.
           tuvoGas = true;
           gasMxn = (gasMxn ?? 0) + mxn;
+          gasDetalle.push(lineaDetalle(g, mxn, esEfectivo ? ' (efectivo)' : ''));
           const litros = pos(g.litros);
           if (litros != null) gasLitros = (gasLitros ?? 0) + litros;
           else gasSinLitros += 1;
-        } else if (CAT_OP.has(g.categoria)) {
-          opMxn = (opMxn ?? 0) + mxn;
+        } else if (esEfectivo || CAT_OTROS.has(g.categoria)) {
+          // Regla del cliente: OTROS = FBO + OTRO (comisariatos, varios) +
+          // todo lo pagado en EFECTIVO aunque sea taxi/comida/etc.
+          otrosMxn = (otrosMxn ?? 0) + mxn;
+          otrosDetalle.push(
+            lineaDetalle(g, mxn, esEfectivo && !CAT_OTROS.has(g.categoria) ? ' (efectivo)' : ''),
+          );
         } else if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
+          pilotoDetalle.push(lineaDetalle(g, mxn));
         } else {
-          // OTRO, REFACCION, FIJO y cualquier categoría futura no mapeada.
-          otrosMxn = (otrosMxn ?? 0) + mxn;
+          // OPERACIONES, ATERRIZAJE, TUAS, REFACCION, FIJO y cualquier
+          // categoría futura no mapeada.
+          opMxn = (opMxn ?? 0) + mxn;
+          opDetalle.push(lineaDetalle(g, mxn));
         }
       }
       const T =
@@ -637,6 +695,10 @@ export class AircraftBalanceService {
         op_mxn: r2(opMxn),
         piloto_mxn: r2(pilotoMxn),
         otros_mxn: r2(otrosMxn),
+        gas_detalle: gasDetalle,
+        op_detalle: opDetalle,
+        piloto_detalle: pilotoDetalle,
+        otros_detalle: otrosDetalle,
         permiso_afac_mxn: X,
         costo_total_mxn: Y,
         tc_costos: z,

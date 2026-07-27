@@ -207,6 +207,12 @@ export interface BalanceAvionVueloPayload {
   permiso_afac_mxn: number | null;
   costo_total_mxn: number;
   tc_costos: number | null;
+  /** Desglose por celda (nota de Excel): una línea por gasto, p. ej.
+   *  "Comida · Starbucks — $206.00". Vacío = sin nota. */
+  gas_detalle?: string[];
+  op_detalle?: string[];
+  piloto_detalle?: string[];
+  otros_detalle?: string[];
   // Bloque INDICADORES USD e IVA
   costo_usd: number | null;
   costo_usd_siva: number | null;
