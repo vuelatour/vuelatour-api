@@ -3153,6 +3153,12 @@ export class FlightsService {
       patch.taco_llegada_origen = 'OFICINA';
     }
     if (dto.nota !== undefined) patch.nota_correccion = dto.nota;
+    // Foto adjuntada por oficina (evidencia que faltaba o reemplazo de una
+    // ilegible): mismo bucket taco-fotos que usa el piloto.
+    if (dto.foto_taco_salida_url !== undefined)
+      patch.foto_taco_salida_url = dto.foto_taco_salida_url;
+    if (dto.foto_taco_llegada_url !== undefined)
+      patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
 
     const { data, error } = await this.supabase.service
       .from('escala')

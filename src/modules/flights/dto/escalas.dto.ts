@@ -311,4 +311,20 @@ export class ConfirmTacoDto {
   @IsOptional()
   @IsString()
   nota?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Path (bucket taco-fotos) de la foto del tacómetro de SALIDA adjuntada por oficina (reemplaza la actual si había).',
+  })
+  @IsOptional()
+  @IsString()
+  foto_taco_salida_url?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Path (bucket taco-fotos) de la foto del tacómetro de LLEGADA adjuntada por oficina (reemplaza la actual si había).',
+  })
+  @IsOptional()
+  @IsString()
+  foto_taco_llegada_url?: string;
 }
