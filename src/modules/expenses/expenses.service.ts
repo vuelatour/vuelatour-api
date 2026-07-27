@@ -74,9 +74,29 @@ export class ExpensesService {
         Number(x.monto),
       ];
     });
+    // Resumen del periodo por categoría (y moneda: un total MXN+USD mezclado
+    // sería una mentira numérica): responde "¿cuánto se gastó en COMIDA este
+    // mes?" de un vistazo, arriba del listado.
+    const porCategoria = new Map<string, number>();
+    for (const g of data) {
+      const x = g as Record<string, unknown>;
+      const monto = Number(x.monto);
+      if (!Number.isFinite(monto)) continue;
+      const clave = `${(x.categoria as string) ?? '—'} (${(x.moneda as string) ?? '?'})`;
+      porCategoria.set(clave, (porCategoria.get(clave) ?? 0) + monto);
+    }
+    const resumen = [...porCategoria.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([clave, total]) => [clave, Math.round(total * 100) / 100]);
+    const rango =
+      filters.desde || filters.hasta
+        ? ` · ${filters.desde ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
+        : '';
     return this.pyservices.generateTablaXlsx({
       titulo: 'Gastos por avión / categoría',
-      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}${rango}`,
+      resumen_titulo: 'Total del periodo por categoría',
+      resumen,
       columnas,
       filas,
     });

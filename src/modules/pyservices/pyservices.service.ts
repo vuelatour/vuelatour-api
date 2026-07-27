@@ -45,6 +45,9 @@ export interface TablaXlsxPayload {
   columnas: TablaColumnaPayload[];
   filas: (string | number | null)[][];
   totales?: (string | number | null)[];
+  /** Bloque resumen arriba de la tabla: pares [etiqueta, valor]. */
+  resumen_titulo?: string;
+  resumen?: (string | number | null)[][];
 }
 
 export interface ReporteVueloLineaPayload {
