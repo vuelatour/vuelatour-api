@@ -139,3 +139,20 @@ export class LinkMovimientoCobroDto {
   @IsUUID()
   cobro_id?: string | null;
 }
+
+/** Reporte de conciliación en Excel (estado de cuenta + estatus por línea). */
+export class ReporteConciliacionQuery {
+  @ApiProperty({ description: 'Cuenta bancaria del reporte' })
+  @IsUUID()
+  cuenta_bancaria_id!: string;
+
+  @ApiPropertyOptional({ description: 'Inicio del periodo (YYYY-MM-DD)' })
+  @IsOptional()
+  @IsISO8601()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Fin del periodo (YYYY-MM-DD)' })
+  @IsOptional()
+  @IsISO8601()
+  hasta?: string;
+}

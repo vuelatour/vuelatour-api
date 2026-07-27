@@ -9,6 +9,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -21,6 +22,7 @@ import {
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
   ListConciliacionQuery,
+  ReporteConciliacionQuery,
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
 
@@ -49,6 +51,47 @@ export class ConciliacionController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.conciliacion.importar(dto, c.userId);
+  }
+
+  @Post('importar-async')
+  @ApiOperation({
+    summary:
+      'Importa como JOB del servidor: responde job_id de inmediato y el proceso (dedupe, archivo, insert, auto-conciliación) sigue en backend con progreso consultable — cerrar el navegador no lo corta.',
+  })
+  importarAsync(
+    @Body() dto: ImportarMovimientosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.importarAsync(dto, c.userId);
+  }
+
+  @Get('importar-status/:id')
+  @ApiOperation({
+    summary:
+      'Avance de un job de importación: estado, porcentaje, paso y resultado.',
+  })
+  importarStatus(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.importStatus(id);
+  }
+
+  @Get('reporte.xlsx')
+  @ApiOperation({
+    summary:
+      'Reporte de conciliación en Excel: el estado de cuenta con columna de estatus (Conciliado/PENDIENTE) y con qué se cruzó cada línea. Para revisar/imprimir el cierre de la cuenta.',
+  })
+  async reporteXlsx(
+    @Query() q: ReporteConciliacionQuery,
+  ): Promise<StreamableFile> {
+    const { buffer, etiqueta } = await this.conciliacion.reporteXlsx(
+      q.cuenta_bancaria_id,
+      q.desde,
+      q.hasta,
+    );
+    const rango = q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="conciliacion-${etiqueta}${rango}.xlsx"`,
+    });
   }
 
   @Get('estados-cuenta')

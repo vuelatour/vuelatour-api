@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 import type { EnvVars } from '../../config/env.schema';
 import {
   ConciliacionParseDto,
@@ -66,6 +67,7 @@ export class ConciliacionService {
   constructor(
     private readonly config: ConfigService<EnvVars, true>,
     private readonly supabase: SupabaseService,
+    private readonly pyservices: PyservicesService,
   ) {}
 
   /** Parsea el estado de cuenta en pyservices (sin persistir). */
@@ -118,6 +120,99 @@ export class ConciliacionService {
 
   /** Persiste los movimientos y auto-concilia los CARGO con gastos del mismo monto/fecha. */
   async importar(dto: ImportarMovimientosDto, userId: string) {
+    // Compat: importación síncrona (sin progreso). El panel usa importarAsync.
+    return this.ejecutarImport(dto, userId, async () => {});
+  }
+
+  /**
+   * Importación como JOB del servidor: responde de inmediato con job_id y el
+   * proceso (dedupe, archivo, insert y auto-conciliación) sigue en el backend
+   * aunque el navegador se cierre. El panel consulta el avance con
+   * importStatus (barra de porcentaje).
+   */
+  async importarAsync(dto: ImportarMovimientosDto, userId: string) {
+    const total = dto.movimientos.filter((m) => m.fecha).length;
+    if (total === 0) {
+      throw new BadRequestException(
+        'No hay movimientos con fecha para importar.',
+      );
+    }
+    const { data: job, error } = await this.supabase.service
+      .from('conciliacion_import_job')
+      .insert({
+        cuenta_bancaria_id: dto.cuenta_bancaria_id,
+        total_movimientos: total,
+        paso: 'Preparando importación…',
+        created_by: userId,
+      })
+      .select('id')
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503')
+        throw new BadRequestException('Cuenta bancaria no encontrada.');
+      throw new Error(error.message);
+    }
+    void this.correrImportJob(job!.id as string, dto, userId);
+    return { job_id: job!.id as string };
+  }
+
+  private async correrImportJob(
+    jobId: string,
+    dto: ImportarMovimientosDto,
+    userId: string,
+  ): Promise<void> {
+    const setJob = async (patch: Record<string, unknown>) => {
+      const { error } = await this.supabase.service
+        .from('conciliacion_import_job')
+        .update({ ...patch, updated_at: new Date().toISOString() })
+        .eq('id', jobId);
+      if (error)
+        this.logger.warn(`import job ${jobId}: ${error.message}`);
+    };
+    try {
+      const res = await this.ejecutarImport(
+        dto,
+        userId,
+        async (progreso, paso) => setJob({ progreso, paso }),
+      );
+      await setJob({
+        estado: 'LISTO',
+        progreso: 100,
+        paso: 'Terminado',
+        importados: res.importados,
+        conciliados_auto: res.conciliados_auto,
+        duplicados_omitidos: res.duplicados_omitidos,
+      });
+    } catch (err) {
+      // El job jamás queda colgado en PROCESANDO: el error se muestra tal
+      // cual en el panel para corregir (cuenta equivocada, archivo, etc.).
+      await setJob({
+        estado: 'ERROR',
+        paso: 'Error',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Estado de un job de importación (polling del panel). */
+  async importStatus(jobId: string) {
+    const { data, error } = await this.supabase.service
+      .from('conciliacion_import_job')
+      .select(
+        'id, estado, progreso, paso, total_movimientos, importados, conciliados_auto, duplicados_omitidos, error, created_at',
+      )
+      .eq('id', jobId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Job ${jobId} not found`);
+    return data;
+  }
+
+  private async ejecutarImport(
+    dto: ImportarMovimientosDto,
+    userId: string,
+    onProgress: (progreso: number, paso: string) => Promise<void>,
+  ) {
     const base = dto.movimientos
       .filter((m) => m.fecha)
       .map((m) => ({
@@ -136,6 +231,7 @@ export class ConciliacionService {
         'No hay movimientos con fecha para importar.',
       );
     }
+    await onProgress(5, 'Buscando duplicados…');
 
     // CANDADO DE RE-IMPORTACIÓN: el mismo estado de cuenta subido dos veces
     // duplicaría los movimientos e inflaría los pendientes para siempre (los
@@ -181,6 +277,7 @@ export class ConciliacionService {
       }
     }
 
+    await onProgress(18, 'Archivando el estado de cuenta…');
     // El archivo original se archiva DESPUÉS de validar y ANTES de insertar:
     // cada movimiento queda ligado a su estado de cuenta. Se archiva aunque
     // todo resulte duplicado (re-subir un estado de cuenta viejo solo para
@@ -205,6 +302,7 @@ export class ConciliacionService {
       estado_cuenta_id: estadoCuentaId,
     }));
 
+    await onProgress(30, `Guardando ${rows.length} movimientos…`);
     const { data: inserted, error } = await this.supabase.service
       .from('movimiento_bancario')
       .insert(rows)
@@ -219,9 +317,14 @@ export class ConciliacionService {
     // la cuenta USD jamás debe conciliar un gasto de $3,000 MXN.
     const monedaCuenta = await this.monedaCuenta(dto.cuenta_bancaria_id);
 
+    // Auto-conciliación: la parte lenta (una consulta por movimiento). El
+    // progreso avanza de 35 a 95, reportado por lotes para no duplicar el
+    // costo con updates del job en cada vuelta.
     let conciliadosAuto = 0;
-    for (const mov of inserted ?? []) {
-      const m = mov;
+    const lista = inserted ?? [];
+    const pasoLote = Math.max(1, Math.ceil(lista.length / 25));
+    for (let i = 0; i < lista.length; i++) {
+      const m = lista[i];
       const matched =
         m.tipo === TipoMovimientoBancario.CARGO
           ? await this.autoMatch(m.id, m.monto, m.fecha, monedaCuenta, userId)
@@ -233,6 +336,12 @@ export class ConciliacionService {
               userId,
             );
       if (matched) conciliadosAuto += 1;
+      if (i % pasoLote === 0 || i === lista.length - 1) {
+        await onProgress(
+          35 + Math.round(((i + 1) / lista.length) * 60),
+          `Conciliando ${i + 1} de ${lista.length}…`,
+        );
+      }
     }
 
     if (estadoCuentaId) {
@@ -552,6 +661,133 @@ export class ConciliacionService {
         monto_pendiente: Math.round(v.monto_pendiente * 100) / 100,
       };
     });
+  }
+
+  /**
+   * Reporte de conciliación en Excel: réplica del estado de cuenta (una fila
+   * por movimiento, cargos y abonos en columnas) con el ESTATUS de cada línea
+   * (Conciliado/PENDIENTE) y con qué se cruzó (gasto o cobro, con su vuelo).
+   * Para revisar/imprimir el cierre de la cuenta en el periodo.
+   */
+  async reporteXlsx(
+    cuentaBancariaId: string,
+    desde?: string,
+    hasta?: string,
+  ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    const { data: cuenta, error: ctaErr } = await this.supabase.service
+      .from('cuenta_bancaria')
+      .select('id, alias, banco, moneda')
+      .eq('id', cuentaBancariaId)
+      .maybeSingle();
+    if (ctaErr) throw new Error(ctaErr.message);
+    if (!cuenta)
+      throw new NotFoundException(`Cuenta ${cuentaBancariaId} not found`);
+
+    let q = this.supabase.service
+      .from('movimiento_bancario')
+      .select(
+        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio))`,
+      )
+      .eq('cuenta_bancaria_id', cuentaBancariaId)
+      // Orden del estado de cuenta impreso: cronológico ascendente.
+      .order('fecha', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(5000);
+    if (desde) q = q.gte('fecha', desde);
+    if (hasta) q = q.lte('fecha', hasta);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const movs = (data ?? []) as Array<Record<string, unknown>>;
+
+    const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+    const conQue = (m: Record<string, unknown>): string => {
+      const gasto = unwrapOne(
+        m.gasto as {
+          categoria?: string;
+          proveedor?: { nombre?: string } | { nombre?: string }[] | null;
+          vuelo?: { folio?: number } | { folio?: number }[] | null;
+        } | null,
+      );
+      if (gasto) {
+        const prov = unwrapOne(gasto.proveedor)?.nombre;
+        const folio = unwrapOne(gasto.vuelo)?.folio;
+        return [
+          `Gasto ${gasto.categoria ?? ''}`.trim(),
+          prov ?? null,
+          folio != null ? `vuelo #${folio}` : null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+      }
+      const cobro = unwrapOne(
+        m.cobro as {
+          metodo_cobro?: string;
+          vuelo?: { folio?: number } | { folio?: number }[] | null;
+        } | null,
+      );
+      if (cobro) {
+        const folio = unwrapOne(cobro.vuelo)?.folio;
+        return [
+          'Cobro',
+          folio != null ? `vuelo #${folio}` : null,
+          cobro.metodo_cobro ?? null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
+      }
+      return '';
+    };
+
+    let totalCargos = 0;
+    let totalAbonos = 0;
+    let conciliados = 0;
+    const filas = movs.map((m) => {
+      const monto = Number(m.monto) || 0;
+      const esCargo = m.tipo === 'CARGO';
+      if (esCargo) totalCargos += monto;
+      else totalAbonos += monto;
+      const ok = m.conciliado === true;
+      if (ok) conciliados += 1;
+      return [
+        (m.fecha as string) ?? '',
+        (m.descripcion as string | null) ?? '',
+        (m.referencia as string | null) ?? '',
+        esCargo ? monto : null,
+        esCargo ? null : monto,
+        ok ? 'Conciliado' : 'PENDIENTE',
+        ok ? conQue(m) : '',
+      ];
+    });
+
+    const pendientes = movs.length - conciliados;
+    const etiquetaCuenta = `${cuenta.alias as string} · ${cuenta.banco as string} (${cuenta.moneda as string})`;
+    const rango =
+      desde || hasta ? ` · ${desde ?? 'inicio'} a ${hasta ?? 'hoy'}` : '';
+    const buffer = await this.pyservices.generateTablaXlsx({
+      titulo: `Conciliación · ${etiquetaCuenta}`,
+      subtitulo: `${movs.length} movimientos · ${conciliados} conciliados · ${pendientes} pendientes${rango}`,
+      columnas: [
+        { label: 'Fecha', tipo: 'texto' },
+        { label: 'Descripción', tipo: 'texto' },
+        { label: 'Referencia', tipo: 'texto' },
+        { label: `Cargo (${cuenta.moneda as string})`, tipo: 'money' },
+        { label: `Abono (${cuenta.moneda as string})`, tipo: 'money' },
+        { label: 'Estatus', tipo: 'texto' },
+        { label: 'Conciliado con', tipo: 'texto' },
+      ],
+      filas,
+      totales: [
+        'Totales',
+        null,
+        null,
+        Number(totalCargos.toFixed(2)),
+        Number(totalAbonos.toFixed(2)),
+        `${conciliados} conciliados`,
+        `${pendientes} pendientes`,
+      ],
+    });
+    return { buffer, etiqueta: (cuenta.alias as string) ?? 'cuenta' };
   }
 
   async list(filters: ListConciliacionQuery) {
