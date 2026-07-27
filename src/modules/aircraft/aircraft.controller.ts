@@ -25,6 +25,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { BalanceAvionQuery } from './dto/balance-avion.query';
+import { BitacoraTacoQuery } from './dto/bitacora-taco.query';
 import { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -127,16 +128,18 @@ export class AircraftController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Tira imprimible de bitácora de tacómetros (formato monomotor de la plantilla del equipo): una fila por vuelo con fecha, tacómetro inicial, horas, tacómetro final y ruta. Para recortar y pegar en la bitácora física. Sin rango = todo el histórico.',
+      'Tira imprimible de bitácora de tacómetros (plantilla del equipo): una fila por vuelo con fecha, tacómetro inicial, horas, tacómetro final y ruta. formato=MOTOR_HELICE (bimotor) agrega tiempos de hélice derivados de helice_base (valor del primer renglón). Para recortar y pegar en la bitácora física. Sin rango = todo el histórico.',
   })
   async bitacoraPdf(
     @Param('id', ParseUUIDPipe) id: string,
-    @Query() q: BalanceAvionQuery,
+    @Query() q: BitacoraTacoQuery,
   ): Promise<StreamableFile> {
     const { buffer, matricula } = await this.aircraft.bitacoraTacoPdf(
       id,
       q.desde,
       q.hasta,
+      q.formato ?? 'PLANEADOR',
+      q.helice_base,
     );
     const rango = q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {

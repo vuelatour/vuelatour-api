@@ -594,6 +594,8 @@ export class AircraftService {
     id: string,
     desde?: string,
     hasta?: string,
+    formato: 'PLANEADOR' | 'MOTOR_HELICE' = 'PLANEADOR',
+    heliceBase?: number,
   ): Promise<{ buffer: Buffer; matricula: string }> {
     const aeronave = await this.findById(id);
     const rows = await this.escalasDelAvion(
@@ -686,9 +688,24 @@ export class AircraftService {
         a.taco_inicial - b.taco_inicial,
     );
 
+    // Formato bimotor (hoja "MOTOR - HÉLICE"): el tiempo de hélice corre
+    // parejo con el tacómetro, así que basta el valor del PRIMER renglón
+    // (lo aporta la oficina desde el libro, igual que en su plantilla) y el
+    // resto se deriva con offset constante. El sistema aún no lleva horas
+    // de vida de hélice (pendiente con el cliente) — no hay de dónde
+    // autollenarlo. Sin helice_base, las columnas salen con "—".
+    if (formato === 'MOTOR_HELICE' && heliceBase != null && filas.length > 0) {
+      const offset = heliceBase - filas[0].taco_inicial;
+      for (const f of filas) {
+        f.helice_inicial = Number((f.taco_inicial + offset).toFixed(1));
+        f.helice_final = Number((f.taco_final + offset).toFixed(1));
+      }
+    }
+
     const buffer = await this.pyservices.generateBitacoraTacoPdf({
       matricula: (aeronave.matricula as string) ?? '',
       modelo: (aeronave.modelo as string) ?? null,
+      formato,
       desde: desde ?? null,
       hasta: hasta ?? null,
       generado: new Date().toISOString(),

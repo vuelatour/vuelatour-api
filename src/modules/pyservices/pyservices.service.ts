@@ -66,17 +66,22 @@ export interface ReporteVueloTramoPayload {
   horas?: number | null;
   es_ferry?: boolean;
 }
-/** Fila de la tira de bitácora de tacómetros: UN vuelo (formato monomotor). */
+/** Fila de la tira de bitácora de tacómetros: UN vuelo. Los tiempos de
+ *  hélice solo van en el formato MOTOR_HELICE (bimotor). */
 export interface BitacoraTacoFilaPayload {
   fecha: string;
   taco_inicial: number;
   horas: number;
   taco_final: number;
   ruta: string;
+  helice_inicial?: number | null;
+  helice_final?: number | null;
 }
 export interface BitacoraTacoPayload {
   matricula: string;
   modelo?: string | null;
+  /** PLANEADOR (monomotor, default) | MOTOR_HELICE (bimotor). */
+  formato?: 'PLANEADOR' | 'MOTOR_HELICE';
   desde?: string | null;
   hasta?: string | null;
   generado?: string | null;
