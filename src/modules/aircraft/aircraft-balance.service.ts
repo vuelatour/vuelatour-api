@@ -502,8 +502,12 @@ export class AircraftBalanceService {
         if (g.categoria === 'GAS') {
           tuvoGas = true;
           gasMxn = (gasMxn ?? 0) + mxn;
-          gasDetalle.push(lineaDetalle(g, mxn, sufijo));
           const litros = pos(g.litros);
+          // La línea del gas lleva sus litros: la misma nota anota GAS TOTAL
+          // y GAS LITROS (se ve que son N cargas y de cuánto cada una).
+          gasDetalle.push(
+            `${lineaDetalle(g, mxn, sufijo)}${litros != null ? ` · ${litros} L` : ' · SIN LITROS'}`,
+          );
           if (litros != null) gasLitros = (gasLitros ?? 0) + litros;
           else gasSinLitros += 1;
         } else if (CAT_OTROS.has(g.categoria)) {
