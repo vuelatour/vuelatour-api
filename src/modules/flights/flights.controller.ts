@@ -184,6 +184,19 @@ export class FlightsController {
     return this.flights.snapshot(id, c);
   }
 
+  @Get(':id/anterior')
+  @ApiOperation({
+    summary:
+      'Vuelo anterior del mismo avión (por fecha, no cancelado): para auditar la cadena de tacómetros desde el detalle. { anterior: null } si no hay.',
+  })
+  async vueloAnterior(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccess(id, c);
+    return this.flights.vueloAnterior(id);
+  }
+
   @Get(':id/ultimo-taco')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({

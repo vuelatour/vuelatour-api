@@ -2483,6 +2483,53 @@ export class FlightsService {
     return data!;
   }
 
+  /**
+   * Vuelo ANTERIOR del mismo avión (por fecha, no cancelado): desde el
+   * detalle se audita la cadena de tacómetros — la salida del tramo 1 viene
+   * del último taco del avión, es decir, de este vuelo previo.
+   */
+  async vueloAnterior(id: string) {
+    const v = await this.findById(id);
+    const aeronaveId = (v.aeronave_id as string | null) ?? null;
+    const fecha = (v.fecha_vuelo as string | null) ?? null;
+    if (!aeronaveId || !fecha) return { anterior: null };
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, origen_iata, destino_iata, fecha_vuelo, estado')
+      .eq('aeronave_id', aeronaveId)
+      .neq('estado', 'CANCELADO')
+      .neq('id', id)
+      .lt('fecha_vuelo', fecha)
+      .order('fecha_vuelo', { ascending: false })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    const ant = (data ?? [])[0];
+    if (!ant) return { anterior: null };
+    // Ruta operativa encadenada (tramos activos) para identificarlo mejor.
+    const { data: escalas } = await this.supabase.service
+      .from('escala')
+      .select('orden, origen_iata, destino_iata')
+      .eq('vuelo_id', ant.id as string)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true });
+    const chain = escalas ?? [];
+    const ruta = chain.length
+      ? [
+          chain[0].origen_iata as string,
+          ...chain.map((e) => e.destino_iata as string),
+        ].join(' → ')
+      : `${ant.origen_iata as string} → ${ant.destino_iata as string}`;
+    return {
+      anterior: {
+        id: ant.id as string,
+        folio: ant.folio as number,
+        ruta,
+        fecha_vuelo: ant.fecha_vuelo as string | null,
+        estado: ant.estado as string,
+      },
+    };
+  }
+
   // ============ Escalas ============
 
   async listEscalas(vueloId: string) {
