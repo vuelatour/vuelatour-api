@@ -1114,6 +1114,11 @@ export class QuotesService {
         'No se puede revisar una cotización cancelada.',
       );
     }
+    // Vuelo de SERVICIO (regla del cliente, 27 jul 2026): mover el avión a
+    // taller/mantenimiento no es un viaje del cliente — no se cotiza ni se
+    // asigna a una cotización (quickAdjust queda cubierto: sin cotización
+    // previa rechaza solo). Cubre el "Cotizar" de reservas y la revisión.
+    await this.assertNoEsVueloDeServicio(vueloId);
     // Ventana de edición (pedido del cliente, jul 2026): la cotización —aún
     // CONFIRMADA— solo se ajusta mientras el vuelo sea del MES CORRIENTE o el
     // ANTERIOR (hora Cancún). Más atrás ya pertenece a cierres pasados y sus
@@ -1737,11 +1742,36 @@ export class QuotesService {
     }
   }
 
+  /**
+   * Vuelo de SERVICIO = itinerario con al menos un tramo de parada SERVICIO y
+   * CERO pasajeros en TODOS los tramos activos (taller/mantenimiento). El pax
+   * se evalúa por tramo con null=0 a propósito: vuelo.pasajeros tiene piso
+   * artificial de 1 en las reservas y el fallback "null hereda el global" es
+   * una convención de TUAS, no evidencia de que viajen personas.
+   */
+  private async assertNoEsVueloDeServicio(vueloId: string): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select('tipo_parada, pasajeros')
+      .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null);
+    if (error) throw new Error(error.message);
+    const escalas = data ?? [];
+    if (escalas.length === 0) return;
+    const tieneServicio = escalas.some((e) => e.tipo_parada === 'SERVICIO');
+    const sinPasajeros = escalas.every((e) => !(Number(e.pasajeros) > 0));
+    if (tieneServicio && sinPasajeros) {
+      throw new ConflictException(
+        'Vuelo de servicio (taller/parada técnica sin pasajeros): no se cotiza ni se asigna a una cotización. Si sí es un viaje del cliente, quita la marca de Servicio o captura los pasajeros del tramo.',
+      );
+    }
+  }
+
   private async findEscalas(vueloId: string) {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
