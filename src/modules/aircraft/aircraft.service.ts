@@ -300,11 +300,17 @@ export class AircraftService {
 
     const items = rows
       .map((e) => {
-        const v = e.vuelo as { folio?: number; fecha_vuelo?: string | null };
+        const v = e.vuelo as {
+          id?: string;
+          folio?: number;
+          fecha_vuelo?: string | null;
+        };
         const s = e.taco_salida == null ? null : Number(e.taco_salida);
         const l = e.taco_llegada == null ? null : Number(e.taco_llegada);
         return {
           escala_id: e.id as string,
+          // El folio en el panel enlaza al detalle del vuelo.
+          vuelo_id: v.id ?? null,
           folio: v.folio ?? null,
           fecha: (e.hora_salida as string | null) ?? v.fecha_vuelo ?? null,
           ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
