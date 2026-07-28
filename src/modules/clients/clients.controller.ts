@@ -34,7 +34,8 @@ export class ClientsController {
   @Get()
   // PII fiscal completa (RFC, domicilio, email): mismo set de roles que el
   // cotizador (quotes.controller) y que ':id/tarifas' — sin pilotos ni
-  // mecánicos. La app móvil no consume /clients.
+  // mecánicos. La app móvil solo lo consume desde el alta rápida de vuelo
+  // (usuarios de oficina ADMIN/COORDINADOR); al piloto nunca le llega.
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({ summary: 'List clients (no accesible a pilotos/mecánicos)' })
   list(@Query() q: ListClientesQuery) {
