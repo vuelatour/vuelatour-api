@@ -234,6 +234,19 @@ export class ExpensesController {
     return gasto;
   }
 
+  @Post(':id/visto-bueno')
+  @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Da el visto bueno de administración a un gasto prellenado con IA desde la app (marca quién y cuándo; quita la bandera de pendiente).',
+  })
+  async vistoBueno(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.darVistoBueno(id, c.userId);
+  }
+
   @Patch(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
   @ApiOperation({

@@ -201,6 +201,14 @@ export class CreateGastoDto {
   @IsOptional()
   @IsBoolean()
   capturar_como_piloto?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Capturado con prellenado de IA desde la app (flujo admin): queda pendiente del visto bueno de administración en el panel.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  requiere_visto_bueno?: boolean;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {

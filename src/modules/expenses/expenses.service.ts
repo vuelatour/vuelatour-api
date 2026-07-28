@@ -26,7 +26,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
@@ -687,6 +687,24 @@ export class ExpensesService {
     return { ok: true };
   }
 
+  /** Visto bueno de administración a un gasto prellenado con IA (app). */
+  async darVistoBueno(id: string, userId: string) {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .update({
+        requiere_visto_bueno: false,
+        visto_bueno_por: userId,
+        visto_bueno_at: new Date().toISOString(),
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .select(LIST_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Gasto ${id} not found`);
+    return data;
+  }
+
   async create(
     dto: CreateGastoDto,
     userId: string,
@@ -785,6 +803,9 @@ export class ExpensesService {
     const payload: Record<string, unknown> = {
       usuario_captura_id: capturaId,
       origen,
+      // Prellenado con IA desde la app (flujo admin): pendiente del visto
+      // bueno de administración en el panel. No bloquea nada.
+      requiere_visto_bueno: dto.requiere_visto_bueno === true,
       categoria: dto.categoria,
       monto: dto.monto,
       propina: dto.propina ?? 0,
