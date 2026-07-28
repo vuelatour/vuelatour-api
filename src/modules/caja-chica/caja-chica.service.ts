@@ -218,6 +218,47 @@ export class CajaChicaService {
     };
   }
 
+  /**
+   * Personas a las que se les puede abrir fondo. La verdad es la tabla
+   * `caja_chica_fondo` — NUNCA el flag `usuario.tiene_fondo_caja`: ese flag lo
+   * podía marcar la oficina a mano al invitar/editar al usuario y dejaba a la
+   * persona fuera del selector para siempre sin tener fondo (jul 2026: Luis
+   * Cáceres y Abraham Zamora). Aquí además se corrige el flag desincronizado.
+   */
+  async listElegibles() {
+    const [usuariosRes, fondosRes] = await Promise.all([
+      this.supabase.service
+        .from('usuario')
+        .select('id, nombre, email, rol, estado, es_piloto, tiene_fondo_caja')
+        .neq('estado', 'INACTIVO')
+        .order('nombre'),
+      this.supabase.service.from('caja_chica_fondo').select('usuario_id'),
+    ]);
+    if (usuariosRes.error) throw new Error(usuariosRes.error.message);
+    if (fondosRes.error) throw new Error(fondosRes.error.message);
+
+    const conFondo = new Set(
+      (fondosRes.data ?? []).map((f) => (f as { usuario_id: string }).usuario_id),
+    );
+    const usuarios = (usuariosRes.data ?? []) as Array<{
+      id: string;
+      tiene_fondo_caja: boolean;
+    }>;
+    const elegibles = usuarios.filter((u) => !conFondo.has(u.id));
+
+    // Auto-reparación del flag: si dice que tiene fondo y no existe la fila, se
+    // apaga (el usuario ya aparece en el selector aunque esta escritura falle).
+    const fantasmas = elegibles.filter((u) => u.tiene_fondo_caja).map((u) => u.id);
+    if (fantasmas.length > 0) {
+      await this.supabase.service
+        .from('usuario')
+        .update({ tiene_fondo_caja: false })
+        .in('id', fantasmas);
+    }
+
+    return { data: elegibles.map((u) => ({ ...u, tiene_fondo_caja: false })) };
+  }
+
   async createFondo(dto: CreateFondoDto, userId: string) {
     const { data, error } = await this.supabase.service
       .from('caja_chica_fondo')
@@ -231,8 +272,25 @@ export class CajaChicaService {
       .select(FONDO_COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23505')
+      // Ya existe fila para esa persona. Si el fondo estaba CERRADO se
+      // reabre (crear otro es imposible por el unique y el selector lo
+      // ofrecería en un bucle sin salida); si está activo, error claro.
+      if (error.code === '23505') {
+        const { data: existente } = await this.supabase.service
+          .from('caja_chica_fondo')
+          .select(FONDO_COLS)
+          .eq('usuario_id', dto.usuario_id)
+          .maybeSingle();
+        const fondo = existente as { id: string; activo: boolean } | null;
+        if (fondo && !fondo.activo) {
+          return this.updateFondo(
+            fondo.id,
+            { activo: true, notas: dto.notas } as UpdateFondoDto,
+            userId,
+          );
+        }
         throw new BadRequestException('Esa persona ya tiene un fondo de caja chica.');
+      }
       if (error.code === '23503') throw new BadRequestException('Usuario no encontrado.');
       throw new Error(error.message);
     }

@@ -36,6 +36,17 @@ export class CajaChicaController {
     return this.caja.getMyFondo(c.userId);
   }
 
+  @Get('elegibles')
+  @Roles(...GESTION)
+  @ApiOperation({
+    summary:
+      'Personas a las que se les puede abrir fondo (sin fila en caja_chica_fondo). ' +
+      'Se deriva de la tabla real, no del flag usuario.tiene_fondo_caja.',
+  })
+  elegibles() {
+    return this.caja.listElegibles();
+  }
+
   @Get('fondos')
   @Roles(...LECTURA)
   @ApiOperation({ summary: 'List funds with computed balance' })
