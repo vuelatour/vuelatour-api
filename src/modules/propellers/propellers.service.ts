@@ -111,6 +111,16 @@ export class PropellersService {
     return data!;
   }
 
+  async remove(id: string) {
+    const helice = await this.findById(id);
+    const { error } = await this.supabase.service
+      .from('helice')
+      .delete()
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+    return { deleted: true, id, numero_serie: helice.numero_serie };
+  }
+
   async update(id: string, dto: UpdatePropellerDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };

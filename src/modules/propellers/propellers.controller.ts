@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -54,5 +55,12 @@ export class PropellersController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.propellers.update(id, dto, c.userId);
+  }
+
+  @Delete(':id')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({ summary: 'Delete propeller (ADMIN)' })
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.propellers.remove(id);
   }
 }

@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -57,6 +58,16 @@ export class EnginesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.engines.update(id, dto, c.userId);
+  }
+
+  @Delete(':id')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Delete engine (ADMIN). Cascades traslados/vencimientos; reserva queda sin motor.',
+  })
+  remove(@Param('id', ParseUUIDPipe) id: string) {
+    return this.engines.remove(id);
   }
 
   @Post(':id/transplant')

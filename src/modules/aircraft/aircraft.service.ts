@@ -496,14 +496,14 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'id, posicion, numero_serie, tipo, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, aeronave_horas_ref, notas',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref',
+          'id, posicion, numero_serie, fabricante, modelo, horas_totales, tbo_horas, aeronave_horas_ref, notas',
         )
         .eq('aeronave_id', id)
         .order('posicion'),

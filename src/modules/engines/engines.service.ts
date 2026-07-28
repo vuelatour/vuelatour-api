@@ -152,6 +152,16 @@ export class EnginesService {
     return data;
   }
 
+  async remove(id: string) {
+    const motor = await this.findById(id);
+    const { error } = await this.supabase.service
+      .from('motor')
+      .delete()
+      .eq('id', id);
+    if (error) throw new Error(error.message);
+    return { deleted: true, id, numero_serie: motor.numero_serie };
+  }
+
   async transplant(id: string, dto: TransplantEngineDto, performedBy: string) {
     const motor = await this.findById(id);
 
