@@ -1235,6 +1235,15 @@ export class FlightsService {
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
     }
+    // El COPILOTO y el APOYO también se enteran al ser asignados: sin push
+    // abrían la app y "el vuelo no salía" (sí aparece en su listado, pero
+    // nadie les avisaba que existía).
+    if (dto.copiloto_id && dto.copiloto_id !== current.copiloto_id) {
+      void this.notifyPilotAssigned(dto.copiloto_id, data!);
+    }
+    if (dto.apoyo_id && dto.apoyo_id !== current.apoyo_id) {
+      void this.notifyPilotAssigned(dto.apoyo_id, data!);
+    }
     // Reagenda de último minuto (doc 4.3: "si Itzel cambia el vuelo a las 8am
     // y el piloto lo ve a las 10am es un problema grave"): si cambió la fecha
     // y el piloto es el MISMO, también se le avisa con push.
@@ -2528,6 +2537,40 @@ export class FlightsService {
         estado: ant.estado as string,
       },
     };
+  }
+
+  /**
+   * Resumen de gastos YA registrados en el vuelo, para la tripulación
+   * (piloto/copiloto/apoyo) en la app: con dos o tres personas capturando en
+   * el mismo vuelo, ver lo que ya subió cada quien evita duplicados. Lista
+   * ligera y sin datos sensibles (sin desgloses fiscales).
+   */
+  async gastosResumen(vueloId: string) {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(
+        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, usuario:usuario_captura_id(nombre)',
+      )
+      .eq('vuelo_id', vueloId)
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((g) => {
+      const usuario = Array.isArray(g.usuario) ? g.usuario[0] : g.usuario;
+      return {
+        id: g.id as string,
+        categoria: g.categoria as string,
+        monto: Number(g.monto),
+        moneda: g.moneda as string,
+        medio_pago: (g.medio_pago as string | null) ?? null,
+        fecha_gasto: (g.fecha_gasto as string | null) ?? null,
+        // Solo la primera línea de la nota (identificar el gasto, no el
+        // expediente completo).
+        nota: ((g.notas as string | null) ?? '').split('\n')[0].trim() || null,
+        capturado_por:
+          (usuario as { nombre?: string } | null)?.nombre ?? null,
+        created_at: g.created_at as string,
+      };
+    });
   }
 
   // ============ Escalas ============

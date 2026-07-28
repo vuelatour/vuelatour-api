@@ -208,6 +208,19 @@ export class FlightsController {
     return this.flights.ultimoTacoDeVuelo(id);
   }
 
+  @Get(':id/gastos-resumen')
+  @ApiOperation({
+    summary:
+      'Gastos YA registrados en el vuelo (lista ligera con quién capturó cada uno): la tripulación la ve en la app para no duplicar capturas. Mismo acceso que el detalle del vuelo.',
+  })
+  async gastosResumen(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccess(id, c);
+    return this.flights.gastosResumen(id);
+  }
+
   @Get(':id/quote-view')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
   @ApiOperation({
