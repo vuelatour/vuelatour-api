@@ -1235,15 +1235,6 @@ export class FlightsService {
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
     }
-    // El COPILOTO y el APOYO también se enteran al ser asignados: sin push
-    // abrían la app y "el vuelo no salía" (sí aparece en su listado, pero
-    // nadie les avisaba que existía).
-    if (dto.copiloto_id && dto.copiloto_id !== current.copiloto_id) {
-      void this.notifyPilotAssigned(dto.copiloto_id, data!);
-    }
-    if (dto.apoyo_id && dto.apoyo_id !== current.apoyo_id) {
-      void this.notifyPilotAssigned(dto.apoyo_id, data!);
-    }
     // Reagenda de último minuto (doc 4.3: "si Itzel cambia el vuelo a las 8am
     // y el piloto lo ve a las 10am es un problema grave"): si cambió la fecha
     // y el piloto es el MISMO, también se le avisa con push.
