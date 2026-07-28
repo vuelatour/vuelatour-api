@@ -4,6 +4,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { ListDescansosQuery } from '../pilots/dto/pilots.dto';
+import { PilotsService } from '../pilots/pilots.service';
 import { UpdateSelfDto } from '../users/dto/update-self.dto';
 import { UsersService } from '../users/users.service';
 import { CapturasQuery } from './dto/capturas.dto';
@@ -16,6 +18,7 @@ export class MeController {
   constructor(
     private readonly users: UsersService,
     private readonly capturas: MeCapturasService,
+    private readonly pilots: PilotsService,
   ) {}
 
   @Get()
@@ -40,6 +43,22 @@ export class MeController {
   })
   horas(@CurrentUser() current: AuthenticatedUser, @Query('mes') mes?: string) {
     return this.users.horasDelMes(current.userId, mes);
+  }
+
+  @Get('descansos')
+  @ApiOperation({
+    summary:
+      'Descansos marcados del usuario actual (para el calendario de la app). ' +
+      'Siempre filtra por el usuario autenticado: /pilots/descansos es de oficina.',
+  })
+  misDescansos(
+    @CurrentUser() current: AuthenticatedUser,
+    @Query() query: ListDescansosQuery,
+  ) {
+    return this.pilots.listDescansos({
+      ...query,
+      piloto_id: current.userId,
+    });
   }
 
   @Get('capturas')
