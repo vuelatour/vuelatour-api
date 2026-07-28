@@ -496,14 +496,14 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, aeronave_horas_ref, notas',
+          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, fabricante, modelo, horas_totales, tbo_horas, aeronave_horas_ref, notas',
+          'id, posicion, numero_serie, fabricante, modelo, horas_totales, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
@@ -799,7 +799,13 @@ export class AircraftService {
     c: Record<string, unknown>,
     hobbs: number,
     conTurm: boolean,
-  ): { horas_actuales: number; tbo_restante: number | null } {
+  ): {
+    horas_actuales: number;
+    tbo_restante: number | null;
+    horas_desde_overhaul: number;
+    vida_usada_pct: number | null;
+    hobbs_avion: number;
+  } {
     const ht = Number(c.horas_totales ?? 0);
     const ref = c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
     const horasActuales =
@@ -807,7 +813,23 @@ export class AircraftService {
     const tbo = Number(c.tbo_horas ?? 0);
     const desdeOverhaul = conTurm ? horasActuales - Number(c.turm ?? 0) : horasActuales;
     const tboRestante = tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;
-    return { horas_actuales: horasActuales, tbo_restante: tboRestante };
+    // Porcentaje de vida consumida del ciclo TBO (para la barra del panel);
+    // se calcula aquí para que el panel no invente su propia aritmética.
+    const vidaUsadaPct =
+      tbo > 0
+        ? Number(
+            (Math.min(100, Math.max(0, (desdeOverhaul / tbo) * 100)) || 0).toFixed(
+              1,
+            ),
+          )
+        : null;
+    return {
+      horas_actuales: horasActuales,
+      tbo_restante: tboRestante,
+      horas_desde_overhaul: Number(desdeOverhaul.toFixed(1)),
+      vida_usada_pct: vidaUsadaPct,
+      hobbs_avion: hobbs,
+    };
   }
 
   async create(dto: CreateAeronaveDto, createdBy: string) {
