@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   CreateCajaMovimientoDto,
@@ -49,14 +53,20 @@ export class CajaChicaService {
     const rows = fondos ?? [];
 
     const fondoIds = rows.map((f) => (f as { id: string }).id);
-    const usuarioIds = rows.map((f) => (f as { usuario_id: string }).usuario_id);
+    const usuarioIds = rows.map(
+      (f) => (f as { usuario_id: string }).usuario_id,
+    );
     const [movsByFondo, efectivoByUsuario] = await Promise.all([
       this.movsByFondos(fondoIds),
       this.efectivoByUsuarios(usuarioIds),
     ]);
 
     const data = rows.map((f) => {
-      const fo = f as Record<string, unknown> & { id: string; usuario_id: string; moneda: string };
+      const fo = f as Record<string, unknown> & {
+        id: string;
+        usuario_id: string;
+        moneda: string;
+      };
       const efectivo = (efectivoByUsuario.get(fo.usuario_id) ?? []).filter(
         (g) => g.moneda === fo.moneda,
       );
@@ -66,10 +76,17 @@ export class CajaChicaService {
       };
     });
 
-    return { data, count: count ?? 0, limit: filters.limit, offset: filters.offset };
+    return {
+      data,
+      count: count ?? 0,
+      limit: filters.limit,
+      offset: filters.offset,
+    };
   }
 
-  private async movsByFondos(fondoIds: string[]): Promise<Map<string, CajaMov[]>> {
+  private async movsByFondos(
+    fondoIds: string[],
+  ): Promise<Map<string, CajaMov[]>> {
     const map = new Map<string, CajaMov[]>();
     if (fondoIds.length === 0) return map;
     const { data, error } = await this.supabase.service
@@ -80,7 +97,7 @@ export class CajaChicaService {
     for (const m of data ?? []) {
       const k = (m as { fondo_id: string }).fondo_id;
       if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push(m as CajaMov);
+      map.get(k)!.push(m);
     }
     return map;
   }
@@ -99,7 +116,7 @@ export class CajaChicaService {
     for (const g of data ?? []) {
       const k = (g as { usuario_captura_id: string }).usuario_captura_id;
       if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push(g as { monto: number | string; moneda: string });
+      map.get(k)!.push(g);
     }
     return map;
   }
@@ -126,11 +143,17 @@ export class CajaChicaService {
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
-        .select(`${MOV_COLS}, autorizado:usuario!autorizado_por(nombre), registrado:usuario!registrado_por(nombre)`)
+        .select(
+          `${MOV_COLS}, autorizado:usuario!autorizado_por(nombre), registrado:usuario!registrado_por(nombre)`,
+        )
         .eq('fondo_id', id),
       this.supabase.service
         .from('gasto')
-        .select('id, monto, moneda, fecha_gasto, categoria, notas, foto_url')
+        // vuelo:vuelo_id(folio) — el historial enlaza al vuelo del gasto: la
+        // oficina audita "¿de qué vuelo salió este efectivo?" sin buscarlo.
+        .select(
+          'id, monto, moneda, fecha_gasto, categoria, notas, foto_url, vuelo_id, vuelo:vuelo_id(folio)',
+        )
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', fondo.usuario_id),
     ]);
@@ -140,7 +163,9 @@ export class CajaChicaService {
     const movs = movsRes.data;
     const gastos = gastosRes.data;
 
-    const efectivo = (gastos ?? []).filter((g) => (g as { moneda: string }).moneda === fondo.moneda);
+    const efectivo = (gastos ?? []).filter(
+      (g) => (g as { moneda: string }).moneda === fondo.moneda,
+    );
 
     type Entry = {
       id: string;
@@ -150,6 +175,9 @@ export class CajaChicaService {
       monto: number;
       descripcion: string | null;
       created_at: string;
+      /** Vuelo del gasto (si lo tiene): el panel enlaza a su detalle. */
+      vuelo_id: string | null;
+      vuelo_folio: number | null;
     };
 
     const entries: Entry[] = [
@@ -170,6 +198,8 @@ export class CajaChicaService {
           monto: this.signed(mm as unknown as CajaMov),
           descripcion: mm.notas ?? mm.referencia ?? null,
           created_at: mm.created_at,
+          vuelo_id: null,
+          vuelo_folio: null,
         };
       }),
       ...efectivo.map((g) => {
@@ -179,7 +209,11 @@ export class CajaChicaService {
           categoria: string;
           notas: string | null;
           monto: number | string;
+          vuelo_id: string | null;
+          vuelo: { folio: number } | { folio: number }[] | null;
         };
+        // PostgREST devuelve el embed como objeto o arreglo según la relación.
+        const vuelo = Array.isArray(gg.vuelo) ? gg.vuelo[0] : gg.vuelo;
         return {
           id: gg.id,
           fecha: gg.fecha_gasto,
@@ -188,6 +222,8 @@ export class CajaChicaService {
           monto: -Number(gg.monto),
           descripcion: gg.notas ?? gg.categoria,
           created_at: gg.fecha_gasto,
+          vuelo_id: gg.vuelo_id ?? null,
+          vuelo_folio: vuelo?.folio ?? null,
         };
       }),
     ];
@@ -237,9 +273,7 @@ export class CajaChicaService {
     if (usuariosRes.error) throw new Error(usuariosRes.error.message);
     if (fondosRes.error) throw new Error(fondosRes.error.message);
 
-    const conFondo = new Set(
-      (fondosRes.data ?? []).map((f) => (f as { usuario_id: string }).usuario_id),
-    );
+    const conFondo = new Set((fondosRes.data ?? []).map((f) => f.usuario_id));
     const usuarios = (usuariosRes.data ?? []) as Array<{
       id: string;
       tiene_fondo_caja: boolean;
@@ -248,7 +282,9 @@ export class CajaChicaService {
 
     // Auto-reparación del flag: si dice que tiene fondo y no existe la fila, se
     // apaga (el usuario ya aparece en el selector aunque esta escritura falle).
-    const fantasmas = elegibles.filter((u) => u.tiene_fondo_caja).map((u) => u.id);
+    const fantasmas = elegibles
+      .filter((u) => u.tiene_fondo_caja)
+      .map((u) => u.id);
     if (fantasmas.length > 0) {
       await this.supabase.service
         .from('usuario')
@@ -285,13 +321,16 @@ export class CajaChicaService {
         if (fondo && !fondo.activo) {
           return this.updateFondo(
             fondo.id,
-            { activo: true, notas: dto.notas } as UpdateFondoDto,
+            { activo: true, notas: dto.notas },
             userId,
           );
         }
-        throw new BadRequestException('Esa persona ya tiene un fondo de caja chica.');
+        throw new BadRequestException(
+          'Esa persona ya tiene un fondo de caja chica.',
+        );
       }
-      if (error.code === '23503') throw new BadRequestException('Usuario no encontrado.');
+      if (error.code === '23503')
+        throw new BadRequestException('Usuario no encontrado.');
       throw new Error(error.message);
     }
     await this.supabase.service
@@ -322,12 +361,19 @@ export class CajaChicaService {
 
   // ===== Movimientos =====
 
-  async createMovimiento(fondoId: string, dto: CreateCajaMovimientoDto, userId: string) {
+  async createMovimiento(
+    fondoId: string,
+    dto: CreateCajaMovimientoDto,
+    userId: string,
+  ) {
     const fondo = (await this.findFondo(fondoId)) as { moneda: MonedaCaja }; // 404 si no existe
 
-    if (dto.monto === 0) throw new BadRequestException('El monto no puede ser cero.');
+    if (dto.monto === 0)
+      throw new BadRequestException('El monto no puede ser cero.');
     if (dto.tipo !== TipoMovimientoCaja.AJUSTE && dto.monto < 0) {
-      throw new BadRequestException('REPOSICION y REINTEGRO requieren un monto positivo.');
+      throw new BadRequestException(
+        'REPOSICION y REINTEGRO requieren un monto positivo.',
+      );
     }
     // El saldo del fondo se calcula en una sola moneda: rechazar mezclas.
     if (dto.moneda && dto.moneda !== fondo.moneda) {
@@ -355,7 +401,9 @@ export class CajaChicaService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referencia no encontrada: ${error.message}`);
+        throw new BadRequestException(
+          `Referencia no encontrada: ${error.message}`,
+        );
       throw new Error(error.message);
     }
     return data!;
@@ -374,7 +422,10 @@ export class CajaChicaService {
     if (error) throw new Error(error.message);
     if (!fondo) return { fondo: null, saldo: 0, movimientos: [] };
 
-    const fo = fondo as Record<string, unknown> & { id: string; moneda: string };
+    const fo = fondo as Record<string, unknown> & {
+      id: string;
+      moneda: string;
+    };
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
@@ -400,8 +451,10 @@ export class CajaChicaService {
       .select('tipo, monto')
       .eq('fondo_id', fo.id);
     if (allMovs.error) throw new Error(allMovs.error.message);
-    const efectivo = (gastos ?? []).filter((g) => (g as { moneda: string }).moneda === fo.moneda);
-    const saldo = this.saldoFromParts((allMovs.data ?? []) as CajaMov[], efectivo);
+    const efectivo = (gastos ?? []).filter(
+      (g) => (g as { moneda: string }).moneda === fo.moneda,
+    );
+    const saldo = this.saldoFromParts(allMovs.data ?? [], efectivo);
 
     return { fondo, saldo, movimientos: movs ?? [] };
   }
