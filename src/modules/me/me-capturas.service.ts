@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CapturasQuery } from './dto/capturas.dto';
+import { soloPendientes } from '../../common/taco-motivo.util';
 
 /**
  * Historial de capturas del usuario de campo (piloto/mecánico/apoyo).
@@ -300,7 +301,8 @@ export class MeCapturasService {
       ruta: origen && destino ? `${origen} → ${destino}` : null,
       titulo: `Tacómetro ${partes.join(' / ')}${tramo}`,
       detalle: enRevision
-        ? (trunc(e.revision_motivo) ?? 'En revisión de oficina')
+        ? (trunc(soloPendientes(e.revision_motivo as string | null)) ??
+          'En revisión de oficina')
         : null,
       estado: enRevision ? 'EN_REVISION' : 'OK',
     };

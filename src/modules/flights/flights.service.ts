@@ -33,6 +33,12 @@ import type {
 } from './dto/escalas.dto';
 import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
+import {
+  PROCEDENCIA_PREFIX,
+  agregarProcedencia,
+  leerBitacora,
+  soloPendientes,
+} from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
@@ -95,32 +101,6 @@ function calidadLabel(c: 'ALTA' | 'MEDIA' | 'BAJA'): string {
     : c === 'MEDIA'
       ? 'calidad de foto regular'
       : 'calidad de foto BAJA (dígitos dudosos)';
-}
-
-/**
- * Bitácora de procedencia de la lectura dentro de `escala.revision_motivo`:
- * CÓMO y POR QUÉ entró ese número (IA con qué confianza y calidad de foto,
- * quién lo aceptó, quién lo confirmó). Vive en un bloque propio con este
- * prefijo para poder conservarla cuando se recalculan las inconsistencias, y
- * sobrevive a la confirmación (antes se borraba y el registro quedaba mudo).
- */
-const PROCEDENCIA_PREFIX = 'Registro: ';
-
-/** Extrae la bitácora previa (sin el prefijo). null si la fila no tiene. */
-function leerBitacora(motivo: string | null): string | null {
-  const chunk = (motivo ?? '')
-    .split('; ')
-    .map((c) => c.trim())
-    .find((c) => c.startsWith(PROCEDENCIA_PREFIX));
-  return chunk ? chunk.slice(PROCEDENCIA_PREFIX.length) : null;
-}
-
-/** Agrega una línea a la bitácora sin repetirla y sin crecer sin fin. */
-function agregarProcedencia(previo: string | null, linea: string): string {
-  const base = (previo ?? '').trim();
-  if (!base) return linea.slice(0, 1200);
-  if (base.includes(linea)) return base;
-  return `${base} · ${linea}`.slice(-1200);
 }
 
 interface EscalaTaco {
@@ -3522,8 +3502,10 @@ export class FlightsService {
       titulo: revision
         ? 'Tacómetro capturado · revisar'
         : 'Tacómetro capturado',
+      // Al piloto se le manda SOLO lo accionable: la bitácora de procedencia
+      // es para la oficina y haría el push interminable en el teléfono.
       cuerpo: revision
-        ? `${ruta} — ${(escala.revision_motivo as string) ?? 'requiere revisión'}`
+        ? `${ruta} — ${soloPendientes(escala.revision_motivo as string | null) ?? 'requiere revisión'}`
         : ruta,
       data: {
         escala_id: escala.id,
