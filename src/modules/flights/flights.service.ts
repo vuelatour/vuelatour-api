@@ -3219,8 +3219,8 @@ export class FlightsService {
       leerBitacora((escala.revision_motivo as string | null) ?? null),
     );
     patch.revision_motivo = [
-      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
       motivos.join('; '),
+      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
     ]
       .filter(Boolean)
       .join('; ');
@@ -3855,9 +3855,13 @@ export class FlightsService {
       .reduce<
         string | null
       >((acc, linea) => agregarProcedencia(acc, linea), bitacoraPrevia);
+    // Lo ACCIONABLE primero: la app del piloto (versiones anteriores a esta
+    // bitácora) pinta `revision_motivo` crudo cuando hay que revisar, y ahí
+    // debe leerse antes el problema que el historial. El panel no depende del
+    // orden: separa los bloques por el prefijo.
     const partes = [
-      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
       motivos.join('; ') || null,
+      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
     ].filter((p): p is string => !!p);
     const revisionMotivo = partes.length
       ? partes.join('; ').slice(0, 1800)
