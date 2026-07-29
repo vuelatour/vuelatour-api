@@ -72,6 +72,57 @@ function roundTaco(v: number | string): number {
   return Math.round(Number(v) * 10) / 10;
 }
 
+/**
+ * Calidad de la foto según la IA. pyservices ya la manda; si viene de una
+ * versión vieja se deduce de la confianza — NUNCA se asume ALTA en silencio:
+ * una lectura dudosa que se ve "segura" es justo lo que rompió el caso del
+ * 28 jul 2026 (foto borrosa, la IA leyó 1621.8 y el tambor decía .9).
+ */
+function calidadFoto(ia: {
+  confianza?: number | null;
+  calidad_foto?: string | null;
+}): 'ALTA' | 'MEDIA' | 'BAJA' {
+  const c = (ia.calidad_foto ?? '').toUpperCase();
+  if (c === 'ALTA' || c === 'MEDIA' || c === 'BAJA') return c;
+  const conf = Number(ia.confianza ?? 0);
+  return conf >= 0.9 ? 'ALTA' : conf < 0.7 ? 'BAJA' : 'MEDIA';
+}
+
+/** Etiqueta legible de la calidad para la nota de procedencia. */
+function calidadLabel(c: 'ALTA' | 'MEDIA' | 'BAJA'): string {
+  return c === 'ALTA'
+    ? 'calidad de foto buena'
+    : c === 'MEDIA'
+      ? 'calidad de foto regular'
+      : 'calidad de foto BAJA (dígitos dudosos)';
+}
+
+/**
+ * Bitácora de procedencia de la lectura dentro de `escala.revision_motivo`:
+ * CÓMO y POR QUÉ entró ese número (IA con qué confianza y calidad de foto,
+ * quién lo aceptó, quién lo confirmó). Vive en un bloque propio con este
+ * prefijo para poder conservarla cuando se recalculan las inconsistencias, y
+ * sobrevive a la confirmación (antes se borraba y el registro quedaba mudo).
+ */
+const PROCEDENCIA_PREFIX = 'Registro: ';
+
+/** Extrae la bitácora previa (sin el prefijo). null si la fila no tiene. */
+function leerBitacora(motivo: string | null): string | null {
+  const chunk = (motivo ?? '')
+    .split('; ')
+    .map((c) => c.trim())
+    .find((c) => c.startsWith(PROCEDENCIA_PREFIX));
+  return chunk ? chunk.slice(PROCEDENCIA_PREFIX.length) : null;
+}
+
+/** Agrega una línea a la bitácora sin repetirla y sin crecer sin fin. */
+function agregarProcedencia(previo: string | null, linea: string): string {
+  const base = (previo ?? '').trim();
+  if (!base) return linea.slice(0, 1200);
+  if (base.includes(linea)) return base;
+  return `${base} · ${linea}`.slice(-1200);
+}
+
 interface EscalaTaco {
   orden: number;
   taco_salida: string | number | null;
@@ -2557,8 +2608,7 @@ export class FlightsService {
         // Solo la primera línea de la nota (identificar el gasto, no el
         // expediente completo).
         nota: ((g.notas as string | null) ?? '').split('\n')[0].trim() || null,
-        capturado_por:
-          (usuario as { nombre?: string } | null)?.nombre ?? null,
+        capturado_por: (usuario as { nombre?: string } | null)?.nombre ?? null,
         created_at: g.created_at as string,
       };
     });
@@ -2574,7 +2624,36 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    const filas = data ?? [];
+
+    // Nombres de quien capturó / corrigió cada lectura: el detalle del vuelo
+    // muestra la MISMA procedencia que el tablero de tacómetros en vivo (la
+    // oficina preguntaba "¿quién confirmó esto?" y ahí no se veía). Aditivo:
+    // los consumidores internos ignoran estos campos.
+    const ids = new Set<string>();
+    for (const e of filas) {
+      if (e.capturado_por) ids.add(e.capturado_por as string);
+      if (e.corregido_por) ids.add(e.corregido_por as string);
+    }
+    const nombres = new Map<string, string>();
+    if (ids.size > 0) {
+      const { data: users } = await this.supabase.service
+        .from('usuario')
+        .select('id, nombre')
+        .in('id', [...ids]);
+      for (const u of users ?? []) {
+        nombres.set(u.id as string, (u.nombre as string) ?? '');
+      }
+    }
+    return filas.map((e) => ({
+      ...e,
+      capturado_por_nombre: e.capturado_por
+        ? (nombres.get(e.capturado_por as string) ?? null)
+        : null,
+      corregido_por_nombre: e.corregido_por
+        ? (nombres.get(e.corregido_por as string) ?? null)
+        : null,
+    }));
   }
 
   async createEscala(vueloId: string, dto: CreateEscalaDto, userId: string) {
@@ -2925,9 +3004,46 @@ export class FlightsService {
     // Si el deducido cedió, la fila YA quedó en AMARILLO con su motivo
     // específico; applyConsistencyFlag recalcula desde cero y lo borraría
     // (sin salida no hay duración que evaluar). Oficina la revisa igual.
+    // Procedencia de esta captura: qué leyó la IA, con qué confianza y calidad
+    // de foto, y quién la aceptó. Si la foto salió dudosa, la lectura queda en
+    // AMARILLO aunque los números cuadren — el caso del 28 jul 2026 (1621.8 vs
+    // 1621.9) pasó todas las validaciones numéricas sin avisar a nadie.
+    const procedencia: string[] = [];
+    let forzarRevision: string | null = null;
+    const lados: Array<'salida' | 'llegada'> = [];
+    if (dto.taco_salida !== undefined) lados.push('salida');
+    if (dto.taco_llegada !== undefined) lados.push('llegada');
+    if (lados.length > 0) {
+      const quien = (await this.nombreUsuario(userId)) ?? 'el piloto';
+      const lado = lados.join(' y ');
+      if (dto.ia_calidad_foto || dto.ia_confianza != null) {
+        const calidad = calidadFoto({
+          confianza: dto.ia_confianza,
+          calidad_foto: dto.ia_calidad_foto,
+        });
+        const pct =
+          dto.ia_confianza != null
+            ? `, confianza ${Math.round(Number(dto.ia_confianza) * 100)}%`
+            : '';
+        const nota = dto.ia_notas?.trim() ? ` — ${dto.ia_notas.trim()}` : '';
+        procedencia.push(
+          `${lado} leída con IA (${calidadLabel(calidad)}${pct})${nota} y aceptada por ${quien}`,
+        );
+        if (calidad === 'BAJA') {
+          forzarRevision =
+            'La foto quedó BORROSA/dudosa: la IA pudo equivocarse de dígito — verificar contra la foto antes de dar por buena la lectura';
+        }
+      } else {
+        procedencia.push(`${lado} capturada por ${quien}`);
+      }
+    }
+
     let finalRow = salidaDeducidaCede
       ? data
-      : await this.applyConsistencyFlag(data, userId);
+      : await this.applyConsistencyFlag(data, userId, {
+          procedencia,
+          forzarRevision,
+        });
     // Ahorra un paso: la llegada de un tramo es la salida del siguiente. Si se
     // capturó taco_llegada, se copia como taco_salida del próximo tramo comercial
     // (mismo avión, salida aún vacía) para que el piloto no la reescriba.
@@ -3014,6 +3130,7 @@ export class FlightsService {
     userId: string,
   ): Promise<Record<string, unknown>> {
     const motivos: string[] = [];
+    const bitacoraLineas: string[] = [];
     const patch: Record<string, unknown> = {};
     const tacoSalidaActual =
       escala.taco_salida === null ? null : Number(escala.taco_salida);
@@ -3064,8 +3181,15 @@ export class FlightsService {
       patch[`taco_${which}_origen`] = 'IA';
       patch.valor_ia_propuesto = roundTaco(lectura);
       const pct = Math.round((ia.confianza ?? 0) * 100);
+      const calidad = calidadFoto(ia);
+      const detalle = ia.notas?.trim() ? ` — ${ia.notas.trim()}` : '';
+      bitacoraLineas.push(
+        `${which} leída con IA al sincronizar (${calidadLabel(calidad)}, confianza ${pct}%)${detalle} · sin confirmar`,
+      );
       motivos.push(
-        `Lectura de ${which} leída por IA al sincronizar (confianza ${pct}%) — confirmar en oficina`,
+        calidad === 'BAJA'
+          ? `Lectura de ${which} leída por IA de una foto BORROSA (confianza ${pct}%): pudo equivocarse de dígito — verificar contra la foto`
+          : `Lectura de ${which} leída por IA al sincronizar (confianza ${pct}%) — confirmar en oficina`,
       );
     }
 
@@ -3088,7 +3212,16 @@ export class FlightsService {
 
     if (motivos.length === 0) return escala;
     patch.revision_requerida = true;
-    patch.revision_motivo = [escala.revision_motivo, motivos.join('; ')]
+    // Bitácora (cómo entró el número) primero y motivos de revisión después:
+    // el mismo formato que usa applyConsistencyFlag.
+    const bitacora = bitacoraLineas.reduce<string | null>(
+      (acc, linea) => agregarProcedencia(acc, linea),
+      leerBitacora((escala.revision_motivo as string | null) ?? null),
+    );
+    patch.revision_motivo = [
+      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
+      motivos.join('; '),
+    ]
       .filter(Boolean)
       .join('; ');
     patch.updated_by = userId;
@@ -3123,7 +3256,7 @@ export class FlightsService {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, cancelada_at',
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, cancelada_at, revision_motivo',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -3153,9 +3286,22 @@ export class FlightsService {
       );
     }
 
+    // La bitácora de procedencia NO se borra al confirmar: se le agrega quién
+    // confirmó. Antes quedaba en null y el registro perdía toda explicación de
+    // cómo había entrado el número (justo la duda de la oficina).
+    const quienConfirma = (await this.nombreUsuario(userId)) ?? 'oficina';
+    const corrige =
+      (dto.taco_salida !== undefined && dto.taco_salida !== null) ||
+      (dto.taco_llegada !== undefined && dto.taco_llegada !== null);
+    const bitacora = agregarProcedencia(
+      leerBitacora((current.revision_motivo as string | null) ?? null),
+      `${corrige ? 'corregida' : 'confirmada'} por ${quienConfirma} (oficina)${
+        dto.nota?.trim() ? `: ${dto.nota.trim()}` : ''
+      }`,
+    );
     const patch: Record<string, unknown> = {
       revision_requerida: false,
-      revision_motivo: null,
+      revision_motivo: `${PROCEDENCIA_PREFIX}${bitacora}`,
       corregido_por: userId,
       corregido_at: new Date().toISOString(),
       updated_by: userId,
@@ -3399,7 +3545,9 @@ export class FlightsService {
   async tacoAiRead(escalaId: string, dto: TacoAiReadDto) {
     const { data: escala, error } = await this.supabase.service
       .from('escala')
-      .select('id, origen_iata, destino_iata, taco_salida, aeronave_id, cancelada_at')
+      .select(
+        'id, origen_iata, destino_iata, taco_salida, aeronave_id, cancelada_at',
+      )
       .eq('id', escalaId)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -3431,6 +3579,9 @@ export class FlightsService {
         confianza: ia.confianza,
         legible: true,
         notas: ia.notas,
+        // La app avisa al piloto cuando la foto salió dudosa para que revise
+        // los dígitos ANTES de guardar (y queda escrito en la procedencia).
+        calidad_foto: calidadFoto(ia),
       };
     }
 
@@ -3556,9 +3707,20 @@ export class FlightsService {
    * Solo marca en amarillo para oficina — la operación NUNCA se bloquea aquí.
    * Persiste el resultado en la escala y devuelve la fila final.
    */
+  /**
+   * Recalcula el semáforo de la lectura y ESCRIBE su procedencia.
+   *
+   * `revision_motivo` guarda dos cosas separadas por "; ": primero la
+   * PROCEDENCIA (cómo entró el número: IA con qué confianza y calidad de foto,
+   * quién lo aceptó) y después las inconsistencias detectadas. La procedencia
+   * se conserva aunque la lectura quede en verde — es la bitácora que pedía la
+   * oficina ("¿cómo sé que este dato se subió bien y quién lo confirmó?").
+   * El AMARILLO lo prende solo `revision_requerida`, nunca el texto.
+   */
   private async applyConsistencyFlag(
     escala: Record<string, unknown>,
     userId: string,
+    extra?: { procedencia?: string[]; forzarRevision?: string | null },
   ): Promise<Record<string, unknown>> {
     const tacoSalida =
       escala.taco_salida === null ? null : Number(escala.taco_salida);
@@ -3676,8 +3838,30 @@ export class FlightsService {
       }
     }
 
+    // La foto dudosa es motivo de revisión aunque los números cuadren: el caso
+    // del 28 jul 2026 pasó TODAS las validaciones numéricas (1621.8 en vez de
+    // 1621.9 es un delta creíble) y nadie se enteró hasta ver la foto.
+    if (extra?.forzarRevision) motivos.push(extra.forzarRevision);
     const revisionRequerida = motivos.length > 0;
-    const revisionMotivo = revisionRequerida ? motivos.join('; ') : null;
+
+    // Procedencia: vive en su propio bloque con prefijo estable y SOBREVIVE
+    // aunque no haya nada que revisar. Las inconsistencias sí se recalculan
+    // desde cero en cada pasada.
+    const bitacoraPrevia = leerBitacora(
+      (escala.revision_motivo as string | null) ?? null,
+    );
+    const bitacora = (extra?.procedencia ?? [])
+      .filter(Boolean)
+      .reduce<
+        string | null
+      >((acc, linea) => agregarProcedencia(acc, linea), bitacoraPrevia);
+    const partes = [
+      bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
+      motivos.join('; ') || null,
+    ].filter((p): p is string => !!p);
+    const revisionMotivo = partes.length
+      ? partes.join('; ').slice(0, 1800)
+      : null;
     if (
       revisionRequerida === Boolean(escala.revision_requerida) &&
       revisionMotivo === (escala.revision_motivo ?? null)
@@ -4545,7 +4729,9 @@ export class FlightsService {
   async restoreEscala(escalaId: string, motivo: string, userId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, origen_iata, destino_iata, cancelada_at, cancelada_motivo')
+      .select(
+        'id, vuelo_id, origen_iata, destino_iata, cancelada_at, cancelada_motivo',
+      )
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);

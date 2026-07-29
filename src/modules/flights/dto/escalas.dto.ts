@@ -12,6 +12,7 @@ import {
   IsString,
   IsUUID,
   Length,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { EstadoPermiso } from './flights.dto';
@@ -59,7 +60,8 @@ export class CreateEscalaDto {
   pasajeros?: number;
 
   @ApiPropertyOptional({
-    description: 'Nombres de pasajeros de este tramo (manifiesto por escala, opcional).',
+    description:
+      'Nombres de pasajeros de este tramo (manifiesto por escala, opcional).',
     type: [String],
   })
   @IsOptional()
@@ -73,7 +75,8 @@ export class CreateEscalaDto {
   es_ferry?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+    description:
+      'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
   })
   @IsOptional()
   @IsBoolean()
@@ -89,12 +92,16 @@ export class CreateEscalaDto {
   @IsIn(['NORMAL', 'SERVICIO'])
   tipo_parada?: 'NORMAL' | 'SERVICIO';
 
-  @ApiPropertyOptional({ description: 'Detalle de la parada de servicio/técnica' })
+  @ApiPropertyOptional({
+    description: 'Detalle de la parada de servicio/técnica',
+  })
   @IsOptional()
   @IsString()
   servicio_notas?: string;
 
-  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @ApiPropertyOptional({
+    description: 'Fecha/hora planeada de salida del tramo',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
@@ -142,7 +149,8 @@ export class OperationalLegDto {
   es_ferry?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+    description:
+      'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
   })
   @IsOptional()
   @IsBoolean()
@@ -158,18 +166,24 @@ export class OperationalLegDto {
   @IsIn(['NORMAL', 'SERVICIO'])
   tipo_parada?: 'NORMAL' | 'SERVICIO';
 
-  @ApiPropertyOptional({ description: 'Detalle de la parada de servicio/técnica' })
+  @ApiPropertyOptional({
+    description: 'Detalle de la parada de servicio/técnica',
+  })
   @IsOptional()
   @IsString()
   servicio_notas?: string;
 
-  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @ApiPropertyOptional({
+    description: 'Fecha/hora planeada de salida del tramo',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   fecha_salida_plan?: Date;
 
-  @ApiPropertyOptional({ description: 'Instrucción/justificación operativa para el piloto' })
+  @ApiPropertyOptional({
+    description: 'Instrucción/justificación operativa para el piloto',
+  })
   @IsOptional()
   @IsString()
   notas?: string;
@@ -177,7 +191,9 @@ export class OperationalLegDto {
 
 /** Asignación de aeronave/piloto a UN tramo (ida o regreso por separado). */
 export class AssignEscalaDto {
-  @ApiPropertyOptional({ description: 'Aeronave asignada al tramo (solo si no es externo)' })
+  @ApiPropertyOptional({
+    description: 'Aeronave asignada al tramo (solo si no es externo)',
+  })
   @IsOptional()
   @IsUUID()
   aeronave_id?: string;
@@ -187,7 +203,9 @@ export class AssignEscalaDto {
   @IsUUID()
   piloto_id?: string;
 
-  @ApiPropertyOptional({ description: 'Fecha/hora planeada de salida del tramo' })
+  @ApiPropertyOptional({
+    description: 'Fecha/hora planeada de salida del tramo',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
@@ -220,27 +238,39 @@ export class RestoreEscalaDto {
 }
 
 export class UpdateEscalaPermisoDto {
-  @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista del tramo' })
+  @ApiProperty({
+    enum: EstadoPermiso,
+    description: 'Estado del permiso de pista del tramo',
+  })
   @IsEnum(EstadoPermiso)
   estado_permiso!: EstadoPermiso;
 }
 
 export class TacoAiReadDto {
-  @ApiProperty({ enum: ['salida', 'llegada'], description: '¿Qué lectura se está tomando?' })
+  @ApiProperty({
+    enum: ['salida', 'llegada'],
+    description: '¿Qué lectura se está tomando?',
+  })
   @IsIn(['salida', 'llegada'])
   which!: 'salida' | 'llegada';
 
-  @ApiPropertyOptional({ description: 'Imagen en base64 (sin prefijo data:). Requiere media_type.' })
+  @ApiPropertyOptional({
+    description: 'Imagen en base64 (sin prefijo data:). Requiere media_type.',
+  })
   @IsOptional()
   @IsString()
   image_base64?: string;
 
-  @ApiPropertyOptional({ enum: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'] })
+  @ApiPropertyOptional({
+    enum: ['image/jpeg', 'image/png', 'image/webp', 'image/gif'],
+  })
   @IsOptional()
   @IsIn(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
   media_type?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
 
-  @ApiPropertyOptional({ description: 'URL pública/firmada de la imagen (alternativa a base64)' })
+  @ApiPropertyOptional({
+    description: 'URL pública/firmada de la imagen (alternativa a base64)',
+  })
   @IsOptional()
   @IsString()
   image_url?: string;
@@ -261,21 +291,55 @@ export class CaptureTacoDto {
   @Min(0)
   taco_llegada?: number;
 
-  @ApiPropertyOptional({ description: 'URL pública/path de la foto del tacómetro de salida' })
+  @ApiPropertyOptional({
+    description: 'URL pública/path de la foto del tacómetro de salida',
+  })
   @IsOptional()
   @IsString()
   foto_taco_salida_url?: string;
 
-  @ApiPropertyOptional({ description: 'URL pública/path de la foto del tacómetro de llegada' })
+  @ApiPropertyOptional({
+    description: 'URL pública/path de la foto del tacómetro de llegada',
+  })
   @IsOptional()
   @IsString()
   foto_taco_llegada_url?: string;
 
-  @ApiPropertyOptional({ description: 'Valor propuesto por la IA antes de confirmación' })
+  @ApiPropertyOptional({
+    description: 'Valor propuesto por la IA antes de confirmación',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   valor_ia_propuesto?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Confianza 0..1 que reportó la IA al leer la foto (la app la reenvía tal cual). Queda escrita en la procedencia de la lectura.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  ia_confianza?: number;
+
+  @ApiPropertyOptional({
+    enum: ['ALTA', 'MEDIA', 'BAJA'],
+    description:
+      'Calidad de la FOTO según la IA. BAJA marca la lectura para revisión aunque el piloto la acepte: pudo equivocarse de dígito.',
+  })
+  @IsOptional()
+  @IsIn(['ALTA', 'MEDIA', 'BAJA'])
+  ia_calidad_foto?: 'ALTA' | 'MEDIA' | 'BAJA';
+
+  @ApiPropertyOptional({
+    description:
+      'Observación de la IA sobre la foto (reflejo, borrosa, dígito dudoso).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  ia_notas?: string;
 
   @ApiPropertyOptional({ description: 'Hora real de salida' })
   @IsOptional()
@@ -289,7 +353,9 @@ export class CaptureTacoDto {
   @IsDate()
   hora_llegada?: Date;
 
-  @ApiPropertyOptional({ description: 'Captura realizada offline (sincroniza después)' })
+  @ApiPropertyOptional({
+    description: 'Captura realizada offline (sincroniza después)',
+  })
   @IsOptional()
   @IsBoolean()
   capturado_offline?: boolean;
@@ -304,21 +370,27 @@ export class CaptureTacoDto {
 }
 
 export class ConfirmTacoDto {
-  @ApiPropertyOptional({ description: 'Corrección de la lectura de salida (opcional)' })
+  @ApiPropertyOptional({
+    description: 'Corrección de la lectura de salida (opcional)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   taco_salida?: number;
 
-  @ApiPropertyOptional({ description: 'Corrección de la lectura de llegada (opcional)' })
+  @ApiPropertyOptional({
+    description: 'Corrección de la lectura de llegada (opcional)',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   taco_llegada?: number;
 
-  @ApiPropertyOptional({ description: 'Nota de la revisión/corrección (auditoría)' })
+  @ApiPropertyOptional({
+    description: 'Nota de la revisión/corrección (auditoría)',
+  })
   @IsOptional()
   @IsString()
   nota?: string;

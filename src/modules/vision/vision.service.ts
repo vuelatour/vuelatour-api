@@ -18,6 +18,12 @@ export interface TacometroVisionResult {
   confianza: number;
   legible: boolean;
   notas: string;
+  /**
+   * Calidad de la FOTO para leer el instrumento. BAJA = la lectura puede traer
+   * dígitos equivocados (caso real 28 jul 2026: foto borrosa, la IA leyó
+   * 1621.8 y el tambor decía .9). Opcional: pyservices viejo no lo manda.
+   */
+  calidad_foto?: 'ALTA' | 'MEDIA' | 'BAJA';
   modelo: string;
 }
 
