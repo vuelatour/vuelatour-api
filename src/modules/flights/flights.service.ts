@@ -2627,6 +2627,13 @@ export class FlightsService {
     }
     return filas.map((e) => ({
       ...e,
+      // `revision_motivo` sale SOLO con lo accionable y la bitácora viaja
+      // aparte en `procedencia`. En la base viven juntos (una sola columna),
+      // pero la app del piloto pinta `revision_motivo` crudo y ahí el
+      // historial estorba — además así el contrato dice lo que significa cada
+      // cosa: motivo = por qué revisar, procedencia = cómo se registró.
+      revision_motivo: soloPendientes(e.revision_motivo as string | null),
+      procedencia: leerBitacora(e.revision_motivo as string | null),
       capturado_por_nombre: e.capturado_por
         ? (nombres.get(e.capturado_por as string) ?? null)
         : null,
@@ -4338,7 +4345,10 @@ export class FlightsService {
           valor_ia_propuesto:
             e.valor_ia_propuesto == null ? null : Number(e.valor_ia_propuesto),
           revision_requerida: Boolean(e.revision_requerida),
-          revision_motivo: e.revision_motivo ?? null,
+          // Mismo corte que listEscalas: motivo = por qué revisar,
+          // procedencia = cómo se registró la lectura.
+          revision_motivo: soloPendientes(e.revision_motivo as string | null),
+          procedencia: leerBitacora(e.revision_motivo as string | null),
           capturado_por_nombre: e.capturado_por
             ? (nombres.get(e.capturado_por as string) ?? null)
             : null,
