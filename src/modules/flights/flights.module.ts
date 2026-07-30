@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AirportsModule } from '../airports/airports.module';
 import { CalendarModule } from '../calendar/calendar.module';
 import { ExpirationsModule } from '../expirations/expirations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -11,6 +12,7 @@ import { FlightsService } from './flights.service';
 
 @Module({
   imports: [
+    AirportsModule,
     CalendarModule,
     ExpirationsModule,
     NotificationsModule,

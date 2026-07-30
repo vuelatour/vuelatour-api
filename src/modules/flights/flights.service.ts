@@ -32,6 +32,7 @@ import type {
   UpdateEscalaDto,
 } from './dto/escalas.dto';
 import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
+import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 import {
   PROCEDENCIA_PREFIX,
@@ -151,6 +152,7 @@ export class FlightsService {
     private readonly vision: VisionService,
     private readonly notifications: NotificationsService,
     private readonly expirations: ExpirationsService,
+    private readonly airports: AirportsService,
   ) {}
 
   private readonly logger = new Logger(FlightsService.name);
@@ -2507,6 +2509,11 @@ export class FlightsService {
       );
     }
 
+    // Permiso de pista: se deriva de los aeropuertos de la ruta. Antes solo
+    // se hacía al CREAR una cotización, así que las reservas —el flujo con el
+    // que hoy nacen casi todos los vuelos— nunca avisaban del permiso.
+    await this.airports.refreshPermisosDeVuelo(vueloId);
+
     if (dto.piloto_id) void this.notifyPilotAssigned(dto.piloto_id, data!);
     // El copiloto también recibe su aviso (ve todo el vuelo en su app).
     if (dto.copiloto_id) void this.notifyPilotAssigned(dto.copiloto_id, data!);
@@ -2690,6 +2697,8 @@ export class FlightsService {
         );
       throw new Error(error.message);
     }
+    // Un tramo nuevo puede meter una pista con permiso a la ruta.
+    await this.airports.refreshPermisosDeVuelo(vueloId);
     return data!;
   }
 
@@ -2744,6 +2753,8 @@ export class FlightsService {
       .maybeSingle();
     if (error)
       throw new Error(`Failed to insert operational leg: ${error.message}`);
+    // Un ferry/parada técnica también puede tocar una pista con permiso.
+    await this.airports.refreshPermisosDeVuelo(vueloId);
     void this.calendar.syncFlight(vueloId);
     return data!;
   }
@@ -2792,6 +2803,10 @@ export class FlightsService {
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+    // Cambió la ruta del tramo: puede entrar (o salir) una pista con permiso.
+    if (dto.origen_iata !== undefined || dto.destino_iata !== undefined) {
+      await this.airports.refreshPermisosDeVuelo(data.vuelo_id as string);
+    }
     // Espejo inverso: la salida plan del TRAMO 1 es la fecha del vuelo. Pasa
     // por update() para reusar el push de reagenda al piloto (doc 4.3) y el
     // sync de calendario. Los tramos 2+ solo refrescan el calendario.

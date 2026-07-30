@@ -1,6 +1,7 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -38,6 +39,8 @@ type AeronaveMatricula = 'XA' | 'XB' | 'N';
 
 @Injectable()
 export class AirportsService {
+  private readonly logger = new Logger(AirportsService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   async list(filters: ListAirportsQuery) {
@@ -139,7 +142,9 @@ export class AirportsService {
   async listDistancias() {
     const { data, error } = await this.supabase.service
       .from('distancia_tramo')
-      .select('id, origen_iata, destino_iata, millas_nauticas, fuente, notas, updated_at')
+      .select(
+        'id, origen_iata, destino_iata, millas_nauticas, fuente, notas, updated_at',
+      )
       .order('origen_iata', { ascending: true })
       .order('destino_iata', { ascending: true })
       .limit(2000);
@@ -175,13 +180,15 @@ export class AirportsService {
   }
 
   /** Carga masiva (archivo de distancias por aerovía de Alejandro). */
-  async importDistancias(tramos: Array<{
-    origen_iata: string;
-    destino_iata: string;
-    millas_nauticas: number;
-    fuente?: string;
-    notas?: string;
-  }>) {
+  async importDistancias(
+    tramos: Array<{
+      origen_iata: string;
+      destino_iata: string;
+      millas_nauticas: number;
+      fuente?: string;
+      notas?: string;
+    }>,
+  ) {
     const rows = tramos.map((t) => ({
       origen_iata: t.origen_iata.toUpperCase(),
       destino_iata: t.destino_iata.toUpperCase(),
@@ -209,7 +216,12 @@ export class AirportsService {
   async distanceNm(
     origenIata: string,
     destinoIata: string,
-  ): Promise<{ millas_nauticas: number | null; origen: string; destino: string; falta_coords: boolean }> {
+  ): Promise<{
+    millas_nauticas: number | null;
+    origen: string;
+    destino: string;
+    falta_coords: boolean;
+  }> {
     const codes = [origenIata.toUpperCase(), destinoIata.toUpperCase()];
     const { data, error } = await this.supabase.service
       .from('aeropuerto')
@@ -218,20 +230,41 @@ export class AirportsService {
     if (error) throw new Error(error.message);
 
     const byIata = new Map(
-      (data ?? []).map((a) => [a.iata as string, a as { latitud: number | null; longitud: number | null }]),
+      (data ?? []).map((a) => [
+        a.iata as string,
+        a as { latitud: number | null; longitud: number | null },
+      ]),
     );
     const o = byIata.get(codes[0]);
     const d = byIata.get(codes[1]);
 
     if (
-      !o || !d ||
-      o.latitud == null || o.longitud == null ||
-      d.latitud == null || d.longitud == null
+      !o ||
+      !d ||
+      o.latitud == null ||
+      o.longitud == null ||
+      d.latitud == null ||
+      d.longitud == null
     ) {
-      return { millas_nauticas: null, origen: codes[0], destino: codes[1], falta_coords: true };
+      return {
+        millas_nauticas: null,
+        origen: codes[0],
+        destino: codes[1],
+        falta_coords: true,
+      };
     }
-    const nm = haversineNm(Number(o.latitud), Number(o.longitud), Number(d.latitud), Number(d.longitud));
-    return { millas_nauticas: nm, origen: codes[0], destino: codes[1], falta_coords: false };
+    const nm = haversineNm(
+      Number(o.latitud),
+      Number(o.longitud),
+      Number(d.latitud),
+      Number(d.longitud),
+    );
+    return {
+      millas_nauticas: nm,
+      origen: codes[0],
+      destino: codes[1],
+      falta_coords: false,
+    };
   }
 
   /**
@@ -249,6 +282,124 @@ export class AirportsService {
       .limit(1);
     if (error) throw new Error(error.message);
     return (data ?? []).length > 0;
+  }
+
+  /** Subconjunto de IATAs que requieren permiso (una sola consulta). */
+  async permitRequiringSet(iatas: string[]): Promise<Set<string>> {
+    const codes = [
+      ...new Set(iatas.filter(Boolean).map((s) => s.toUpperCase())),
+    ];
+    if (codes.length === 0) return new Set();
+    const { data, error } = await this.supabase.service
+      .from('aeropuerto')
+      .select('iata')
+      .in('iata', codes)
+      .eq('requiere_permiso', true);
+    if (error) throw new Error(error.message);
+    return new Set((data ?? []).map((a) => (a.iata as string).toUpperCase()));
+  }
+
+  /**
+   * Recalcula el permiso de pista de un vuelo y de CADA uno de sus tramos a
+   * partir de `aeropuerto.requiere_permiso`.
+   *
+   * FUENTE ÚNICA: la llaman todos los caminos que crean o cambian una ruta
+   * (cotizar, revisar, reserva, agregar/editar tramo). Antes solo se derivaba
+   * al CREAR una cotización, así que los vuelos dados de alta como reserva —el
+   * flujo nuevo— nunca avisaban del permiso (jul 2026: 9 vuelos a HOL/PTU sin
+   * marcar, reportado por Itzel).
+   *
+   * Reglas:
+   * - Un permiso ya EMITIDO no se degrada a pendiente (el trámite ya se hizo).
+   * - Si la ruta deja de tocar pistas con permiso, vuelve a `no_aplica`.
+   * - Los tramos CANCELADOS no cuentan (no se van a volar).
+   * - Best-effort: si algo falla, se registra y NO se rompe la operación —
+   *   el aviso es importante, pero no puede impedir guardar un vuelo.
+   */
+  async refreshPermisosDeVuelo(vueloId: string): Promise<void> {
+    try {
+      const [vueloRes, escalasRes] = await Promise.all([
+        this.supabase.service
+          .from('vuelo')
+          .select('id, origen_iata, destino_iata, estado_permiso')
+          .eq('id', vueloId)
+          .maybeSingle(),
+        this.supabase.service
+          .from('escala')
+          .select('id, origen_iata, destino_iata, estado_permiso, cancelada_at')
+          .eq('vuelo_id', vueloId),
+      ]);
+      const vuelo = vueloRes.data as {
+        origen_iata: string | null;
+        destino_iata: string | null;
+        estado_permiso: string | null;
+      } | null;
+      if (!vuelo) return;
+      const escalas = (escalasRes.data ?? []) as Array<{
+        id: string;
+        origen_iata: string;
+        destino_iata: string;
+        estado_permiso: string | null;
+        cancelada_at: string | null;
+      }>;
+      const vivas = escalas.filter((e) => !e.cancelada_at);
+
+      const conPermiso = await this.permitRequiringSet([
+        vuelo.origen_iata ?? '',
+        vuelo.destino_iata ?? '',
+        ...vivas.flatMap((e) => [e.origen_iata, e.destino_iata]),
+      ]);
+
+      const nuevoEstado = (
+        iatas: string[],
+        actual: string | null,
+      ): 'no_aplica' | 'pendiente' | 'emitido' => {
+        const toca = iatas.some((i) => conPermiso.has((i ?? '').toUpperCase()));
+        if (!toca) return 'no_aplica';
+        return actual === 'emitido' ? 'emitido' : 'pendiente';
+      };
+
+      // 1) Cada tramo, según SUS aeropuertos.
+      const estadosTramos: string[] = [];
+      for (const e of vivas) {
+        const nuevo = nuevoEstado(
+          [e.origen_iata, e.destino_iata],
+          e.estado_permiso,
+        );
+        estadosTramos.push(nuevo);
+        if (nuevo !== (e.estado_permiso ?? 'no_aplica')) {
+          await this.supabase.service
+            .from('escala')
+            .update({ estado_permiso: nuevo })
+            .eq('id', e.id);
+        }
+      }
+
+      // 2) El vuelo: pendiente si CUALQUIER tramo lo está. Sin tramos, se
+      //    evalúa con el origen/destino del propio vuelo.
+      const vueloNuevo = vivas.length
+        ? estadosTramos.includes('pendiente')
+          ? 'pendiente'
+          : estadosTramos.includes('emitido')
+            ? 'emitido'
+            : 'no_aplica'
+        : nuevoEstado(
+            [vuelo.origen_iata ?? '', vuelo.destino_iata ?? ''],
+            vuelo.estado_permiso,
+          );
+      if (vueloNuevo !== (vuelo.estado_permiso ?? 'no_aplica')) {
+        await this.supabase.service
+          .from('vuelo')
+          .update({ estado_permiso: vueloNuevo })
+          .eq('id', vueloId);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `refreshPermisosDeVuelo(${vueloId}) falló: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**

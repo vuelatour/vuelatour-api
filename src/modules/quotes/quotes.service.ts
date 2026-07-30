@@ -1092,6 +1092,10 @@ export class QuotesService {
         fin: dto.fecha_traslado_final?.toISOString() ?? null,
       });
     }
+    // Permiso de pista POR TRAMO: el insert de arriba ya fijó el del vuelo,
+    // pero cada escala se marca según SUS aeropuertos (misma fuente única que
+    // usan reserva y edición de tramos).
+    await this.airports.refreshPermisosDeVuelo(vuelo!.id);
 
     await this.appendVersionHistory(
       vuelo!.id,
@@ -1262,6 +1266,9 @@ export class QuotesService {
         (current.fecha_traslado_final as string | null) ??
         null,
     });
+    // Al revisar, la ruta puede ganar o perder una pista con permiso — y las
+    // reservas llegan aquí con el permiso sin derivar (nacieron sin cotización).
+    await this.airports.refreshPermisosDeVuelo(vueloId);
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     void this.notifyPernoctaCambiada(updated, pernoctasAntes, pernoctasDespues);
     await this.appendVersionHistory(
