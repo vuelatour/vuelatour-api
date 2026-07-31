@@ -283,9 +283,9 @@ export class CaptureTacoDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  @Max(9999.99, {
+  @Max(9999.9, {
     message:
-      'La lectura de salida no puede pasar de 9999.99: el horómetro es de 4 dígitos. Revisa el número.',
+      'La lectura de salida no puede pasar de 9999.9: el horómetro es de 4 dígitos y una décima. Revisa el número.',
   })
   taco_salida?: number;
 
@@ -294,9 +294,9 @@ export class CaptureTacoDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  @Max(9999.99, {
+  @Max(9999.9, {
     message:
-      'La lectura de llegada no puede pasar de 9999.99: el horómetro es de 4 dígitos. Revisa el número.',
+      'La lectura de llegada no puede pasar de 9999.9: el horómetro es de 4 dígitos y una décima. Revisa el número.',
   })
   taco_llegada?: number;
 
@@ -320,9 +320,9 @@ export class CaptureTacoDto {
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Max(9999.99, {
+  @Max(9999.9, {
     message:
-      'valor_ia_propuesto no puede pasar de 9999.99 (horómetro de 4 dígitos).',
+      'valor_ia_propuesto no puede pasar de 9999.9 (horómetro de 4 dígitos y una décima).',
   })
   valor_ia_propuesto?: number;
 
@@ -390,9 +390,9 @@ export class ConfirmTacoDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  @Max(9999.99, {
+  @Max(9999.9, {
     message:
-      'La lectura de salida no puede pasar de 9999.99: el horómetro es de 4 dígitos. Revisa el número.',
+      'La lectura de salida no puede pasar de 9999.9: el horómetro es de 4 dígitos y una décima. Revisa el número.',
   })
   taco_salida?: number;
 
@@ -403,9 +403,9 @@ export class ConfirmTacoDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
-  @Max(9999.99, {
+  @Max(9999.9, {
     message:
-      'La lectura de llegada no puede pasar de 9999.99: el horómetro es de 4 dígitos. Revisa el número.',
+      'La lectura de llegada no puede pasar de 9999.9: el horómetro es de 4 dígitos y una décima. Revisa el número.',
   })
   taco_llegada?: number;
 
