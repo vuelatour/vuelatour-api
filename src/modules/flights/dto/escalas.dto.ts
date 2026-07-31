@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   IsArray,
   IsBoolean,
@@ -350,8 +350,15 @@ export class CaptureTacoDto {
       'Observación de la IA sobre la foto (reflejo, borrosa, dígito dudoso).',
   })
   @IsOptional()
+  // Se TRUNCA, no se rechaza: la nota es metadato auxiliar y un 400 por su
+  // largo BLOQUEABA la captura del piloto (caso real 31 jul 2026: "ia_notas
+  // must be shorter than or equal to 300 characters" impedía guardar la
+  // lectura). Las apps instaladas mandan la nota completa de la IA.
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.slice(0, 600) : value,
+  )
   @IsString()
-  @MaxLength(300)
+  @MaxLength(600)
   ia_notas?: string;
 
   @ApiPropertyOptional({ description: 'Hora real de salida' })
