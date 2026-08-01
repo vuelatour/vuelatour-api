@@ -23,6 +23,7 @@ import {
   AssignEscalaDto,
   CancelEscalaDto,
   CaptureTacoDto,
+  ClearTacoDto,
   ConfirmTacoDto,
   CreateEscalaDto,
   OperationalLegDto,
@@ -485,6 +486,21 @@ export class FlightsController {
     // assertAccessByLeg): el apoyo opera todo el vuelo menos los tacómetros.
     await this.flights.assertPuedeCapturarTaco(legId, c);
     return this.flights.captureTaco(legId, dto, c.userId);
+  }
+
+  @Post('legs/:legId/taco/clear')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Borra las lecturas de un tramo (por lado) para que el piloto las recapture. Limpia lectura, origen, foto y hora; si el vuelo estaba COMPLETADO y falta una llegada, regresa a EN_VUELO.',
+  })
+  clearTaco(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: ClearTacoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.clearTaco(legId, dto, c.userId);
   }
 
   @Post('legs/:legId/taco/confirm')

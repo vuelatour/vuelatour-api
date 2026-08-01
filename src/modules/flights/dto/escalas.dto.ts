@@ -389,6 +389,22 @@ export class CaptureTacoDto {
   pendiente_lectura?: boolean;
 }
 
+/**
+ * Borrado de lecturas de UN tramo (solo oficina): el piloto capturó en el
+ * vuelo/tramo equivocado y debe volver a subirlas. Se borra por lado.
+ */
+export class ClearTacoDto {
+  @ApiPropertyOptional({ description: 'Borrar la lectura de SALIDA' })
+  @IsOptional()
+  @IsBoolean()
+  salida?: boolean;
+
+  @ApiPropertyOptional({ description: 'Borrar la lectura de LLEGADA' })
+  @IsOptional()
+  @IsBoolean()
+  llegada?: boolean;
+}
+
 export class ConfirmTacoDto {
   @ApiPropertyOptional({
     description: 'Corrección de la lectura de salida (opcional)',

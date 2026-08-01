@@ -25,6 +25,7 @@ import type {
 import type {
   AssignEscalaDto,
   CaptureTacoDto,
+  ClearTacoDto,
   ConfirmTacoDto,
   CreateEscalaDto,
   OperationalLegDto,
@@ -3254,6 +3255,116 @@ export class FlightsService {
    * registra quién revisó. Permite corregir las lecturas en el mismo paso; si
    * se corrige la llegada, se propaga como salida del siguiente tramo.
    */
+  /**
+   * Borra las lecturas de UN tramo (solo oficina) para que el piloto las
+   * vuelva a capturar. Caso que lo motivó (1 ago 2026): el primer vuelo se
+   * demoró y el piloto capturó sus tacómetros en el vuelo equivocado — la
+   * oficina solo podía CORREGIR el número, no dejar el tramo limpio.
+   *
+   * Por cada lado borrado se limpian lectura, origen, foto y hora real; la
+   * bitácora de procedencia CONSERVA quién lo borró. Si el vuelo estaba
+   * COMPLETADO y ahora le falta una llegada, regresa a EN_VUELO (el estado se
+   * deriva de los tacómetros). El piloto del tramo recibe un push para
+   * recapturar.
+   */
+  async clearTaco(escalaId: string, dto: ClearTacoDto, userId: string) {
+    const { data: current, error: readErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, piloto_id, taco_salida, taco_llegada, revision_motivo',
+      )
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!current) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    const borrarSalida = dto.salida === true && current.taco_salida !== null;
+    const borrarLlegada = dto.llegada === true && current.taco_llegada !== null;
+    if (!borrarSalida && !borrarLlegada) {
+      throw new ConflictException(
+        'No hay lecturas que borrar en los lados seleccionados.',
+      );
+    }
+
+    const quien = (await this.nombreUsuario(userId)) ?? 'oficina';
+    const lados = [
+      ...(borrarSalida ? ['salida'] : []),
+      ...(borrarLlegada ? ['llegada'] : []),
+    ].join(' y ');
+    const bitacora = agregarProcedencia(
+      leerBitacora((current.revision_motivo as string | null) ?? null),
+      `${lados} borrada(s) por ${quien} (oficina) para recapturar`,
+    );
+
+    const patch: Record<string, unknown> = {
+      // Sin lecturas no hay nada que revisar: el tramo queda esperando la
+      // captura nueva (taco-live lo muestra en curso/vencido).
+      revision_requerida: false,
+      revision_motivo: `${PROCEDENCIA_PREFIX}${bitacora}`,
+      valor_ia_propuesto: null,
+      corregido_por: userId,
+      corregido_at: new Date().toISOString(),
+      updated_by: userId,
+    };
+    if (borrarSalida) {
+      patch.taco_salida = null;
+      patch.taco_salida_origen = null;
+      patch.foto_taco_salida_url = null;
+      patch.hora_salida = null;
+    }
+    if (borrarLlegada) {
+      patch.taco_llegada = null;
+      patch.taco_llegada_origen = null;
+      patch.foto_taco_llegada_url = null;
+      patch.hora_llegada = null;
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escalaId)
+      .select(ESCALA_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+
+    // Estado derivado: COMPLETADO exige todas las llegadas. Si el borrado
+    // dejó un hueco, el vuelo regresa a EN_VUELO para poder recapturar (la
+    // llegada nueva lo volverá a completar sola).
+    const vueloId = current.vuelo_id as string;
+    if (borrarLlegada) {
+      const vuelo = await this.findById(vueloId);
+      if (
+        vuelo.estado === 'COMPLETADO' &&
+        this.faltanLlegadas(await this.escalasTaco(vueloId))
+      ) {
+        await this.supabase.service
+          .from('vuelo')
+          .update({ estado: 'EN_VUELO', updated_by: userId })
+          .eq('id', vueloId)
+          .eq('estado', 'COMPLETADO');
+        void this.calendar.syncFlight(vueloId);
+      }
+    }
+
+    // Aviso al piloto del tramo: sin esto se entera hasta que alguien le
+    // hable. Best-effort.
+    const pilotoId =
+      (current.piloto_id as string | null) ??
+      ((await this.findById(vueloId)).piloto_id as string | null);
+    if (pilotoId) {
+      void this.notifications.notifyUser(pilotoId, {
+        tipo: 'recordatorio_taco',
+        titulo: 'Vuelve a capturar el tacómetro',
+        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string}: la oficina borró la lectura de ${lados} para que la subas de nuevo.`,
+        data: { escala_id: escalaId, vuelo_id: vueloId },
+        link: `/flights/${vueloId}`,
+      });
+    }
+
+    return data;
+  }
+
   async confirmTaco(escalaId: string, dto: ConfirmTacoDto, userId: string) {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
