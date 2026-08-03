@@ -37,9 +37,13 @@ export class MeController {
   }
 
   @Get('horas')
+  // Decisión del cliente (1 ago 2026): los PILOTOS no deben ver sus horas de
+  // vuelo — solo oficina. La app instalada degrada con un texto benigno
+  // ("Necesitas conexión…") al recibir 403; la app nueva ya ni lo pide.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Horas voladas del usuario actual (mes en curso o ?mes=YYYY-MM) vs límite informativo de 90 hrs/mes.',
+      'Horas voladas del usuario actual (mes en curso o ?mes=YYYY-MM) vs límite informativo de 90 hrs/mes. SOLO oficina: los pilotos no ven sus horas.',
   })
   horas(@CurrentUser() current: AuthenticatedUser, @Query('mes') mes?: string) {
     return this.users.horasDelMes(current.userId, mes);

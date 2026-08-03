@@ -61,7 +61,7 @@ export class ExpirationsController {
   }
 
   @Post()
-  @Roles(Rol.ADMIN)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Create expiration record (ADMIN)' })
   create(
     @Body() dto: CreateVencimientoDto,
@@ -77,7 +77,7 @@ export class ExpirationsController {
   }
 
   @Patch(':id')
-  @Roles(Rol.ADMIN)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Update expiration (ADMIN)' })
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -88,7 +88,7 @@ export class ExpirationsController {
   }
 
   @Delete(':id')
-  @Roles(Rol.ADMIN)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Delete expiration record (ADMIN)' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
