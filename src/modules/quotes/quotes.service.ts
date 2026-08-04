@@ -1181,6 +1181,20 @@ export class QuotesService {
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
 
+    // El avión del cotizador es la REFERENCIA de tarifa. Si la operación ya
+    // asignó un avión al tramo 1 (asignación por tramo), revisar el precio NO
+    // lo pisa: vuelo.aeronave_id espeja la ida y la tabla de vuelos refleja
+    // lo OPERACIONAL (caso vuelo #80: cotizado en XA-VGV, volado en N990GG —
+    // registrar el cobro lo regresaba al avión de la cotización).
+    const { data: ida } = await this.supabase.service
+      .from('escala')
+      .select('aeronave_id')
+      .eq('vuelo_id', vueloId)
+      .eq('orden', 1)
+      .maybeSingle();
+    const aeronaveOperativa =
+      (ida?.aeronave_id as string | null) ?? dto.aeronave_id;
+
     const { data: updated, error } = await this.supabase.service
       .from('vuelo')
       .update({
@@ -1188,7 +1202,7 @@ export class QuotesService {
         tipo: dto.tipo ?? current.tipo,
         // Vuelo cubierto por externo: el avión del DTO es solo la REFERENCIA
         // de tarifa para el cálculo; el vuelo se queda sin avión propio.
-        aeronave_id: current.es_externo ? null : dto.aeronave_id,
+        aeronave_id: current.es_externo ? null : aeronaveOperativa,
         ruta_id: breakdown.ruta.id,
         origen_iata: breakdown.ruta.origen_iata,
         destino_iata: breakdown.ruta.destino_iata,
