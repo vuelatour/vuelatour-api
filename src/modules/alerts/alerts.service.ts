@@ -142,6 +142,11 @@ export class AlertsService {
         `Espejo ida falló: ${err instanceof Error ? err.message : String(err)}`,
       ),
     );
+    await this.anclarRefsComponentes().catch((err: unknown) =>
+      this.logger.error(
+        `Ancla de componentes falló: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
     await this.safe('vencimiento', (c) => this.checkVencimientos(c));
     await this.safe('cobro_pendiente', (c) => this.checkCobrosPendientes(c));
     await this.safe('inventario_bajo', (c) => this.checkInventarioBajo(c));
@@ -163,6 +168,14 @@ export class AlertsService {
     } catch (err) {
       this.logger.error(
         `Espejo ida falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      await this.anclarRefsComponentes();
+      ejecutadas.push('ancla_componentes');
+    } catch (err) {
+      this.logger.error(
+        `Ancla de componentes falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
     for (const [clave, fn] of [
@@ -274,6 +287,63 @@ export class AlertsService {
     }
   }
 
+  /**
+   * Mantenimiento: ancla `aeronave_horas_ref` de motores/hélices que la tienen
+   * NULL (creados antes de que existiera la referencia). Sin ancla, las horas
+   * vivas NUNCA acumulan (el snapshot cae a la base capturada, casi siempre 0
+   * — caso reportado 4 ago 2026: toda la flota en ceros). Se ancla al hobbs
+   * ACTUAL: la base capturada se respeta y desde hoy acumula lo que vuele.
+   */
+  private async anclarRefsComponentes(): Promise<void> {
+    // Hobbs por avión con herencia del vuelo (tramos sin avión propio).
+    const { data: escalas, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
+      )
+      .neq('vuelo.estado', 'CANCELADO');
+    if (escErr) throw new Error(escErr.message);
+    const hobbsPorAvion = new Map<string, number>();
+    for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
+      const id =
+        (e.aeronave_id as string | null) ??
+        (unwrap(e.vuelo as { aeronave_id?: string | null } | null)
+          ?.aeronave_id as string | null);
+      if (!id) continue;
+      for (const v of [e.taco_salida, e.taco_llegada]) {
+        if (v == null) continue;
+        const num = Number(v);
+        if (Number.isFinite(num))
+          hobbsPorAvion.set(id, Math.max(hobbsPorAvion.get(id) ?? 0, num));
+      }
+    }
+    for (const tabla of ['motor', 'helice'] as const) {
+      const { data: comps, error } = await this.supabase.service
+        .from(tabla)
+        .select('id, aeronave_id, numero_serie')
+        .is('aeronave_horas_ref', null)
+        .not('aeronave_id', 'is', null);
+      if (error) throw new Error(error.message);
+      for (const c of comps ?? []) {
+        const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
+        const { error: upErr } = await this.supabase.service
+          .from(tabla)
+          .update({ aeronave_horas_ref: hobbs })
+          .eq('id', c.id as string)
+          .is('aeronave_horas_ref', null);
+        if (upErr) {
+          this.logger.error(
+            `Ancla de ${tabla} ${c.numero_serie as string} falló: ${upErr.message}`,
+          );
+          continue;
+        }
+        this.logger.warn(
+          `Ancla de ${tabla} ${c.numero_serie as string} fijada al hobbs ${hobbs}.`,
+        );
+      }
+    }
+  }
+
   /** Permiso de pista pendiente para un vuelo dentro de la ventana de anticipación. */
   private async checkPermisoPista(config: AlertConfig): Promise<void> {
     // Primero se pone al día el marcado; luego se avisa.
@@ -327,7 +397,7 @@ export class AlertsService {
       const { data, error } = await this.supabase.service
         .from('vencimiento')
         .select(
-          'id, fecha_vencimiento, referencia, tipo_documento(nombre), aeronave(matricula), piloto:usuario!piloto_id(nombre)',
+          'id, fecha_vencimiento, referencia, tipo_documento(nombre), aeronave(matricula), piloto:usuario!piloto_id(nombre), motor(numero_serie, posicion, aeronave:aeronave_id(matricula))',
         )
         .gte('fecha_vencimiento', hoyCancun)
         .lte('fecha_vencimiento', target);
@@ -353,7 +423,32 @@ export class AlertsService {
             | { nombre: string }[]
             | null,
         )?.nombre;
-        const entidad = aeronave ?? piloto ?? row.referencia ?? '';
+        // Vencimiento de MOTOR (p. ej. TBO calendario): nombra motor y avión.
+        const motor = unwrap(
+          row.motor as unknown as
+            | {
+                numero_serie: string;
+                posicion: string;
+                aeronave?:
+                  | { matricula: string }
+                  | { matricula: string }[]
+                  | null;
+              }
+            | {
+                numero_serie: string;
+                posicion: string;
+                aeronave?:
+                  | { matricula: string }
+                  | { matricula: string }[]
+                  | null;
+              }[]
+            | null,
+        );
+        const motorNombre = motor
+          ? `motor ${motor.numero_serie}${unwrap(motor.aeronave ?? null)?.matricula ? ` de ${unwrap(motor.aeronave ?? null)!.matricula}` : ''}`
+          : null;
+        const entidad =
+          aeronave ?? piloto ?? motorNombre ?? row.referencia ?? '';
         await this.dispatch(config, `venc:${row.id}:${d}`, {
           tipo: 'vencimiento',
           titulo: `Vence en ${d} días: ${tipo}`,
@@ -493,12 +588,16 @@ export class AlertsService {
     const { data: escalas } = await this.supabase.service
       .from('escala')
       .select(
-        'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(estado)',
+        'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
       )
       .neq('vuelo.estado', 'CANCELADO');
     const hobbsPorAvion = new Map<string, number>();
     for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
-      const id = e.aeronave_id as string | null;
+      // Tramo sin avión propio (asignación por tramo): hereda el del vuelo.
+      const id =
+        (e.aeronave_id as string | null) ??
+        (unwrap(e.vuelo as { aeronave_id?: string | null } | null)
+          ?.aeronave_id as string | null);
       if (!id) continue;
       for (const v of [e.taco_salida, e.taco_llegada]) {
         if (v == null) continue;
@@ -531,26 +630,34 @@ export class AlertsService {
       }
     }
 
-    // TBO de motores y hélices (horas vivas = horas_totales + hobbs − ref).
+    // TBO de motores y hélices: MISMO cálculo que el snapshot del avión
+    // (aircraft.componenteEstado) — no duplicar aritmética. OJO: `turm` solo
+    // existe en motor; pedirlo en helice hacía fallar la consulta en silencio
+    // (error ignorado) y las hélices nunca alertaban.
     for (const tabla of ['motor', 'helice'] as const) {
-      const { data: comps } = await this.supabase.service
+      // `turm` solo existe en motor; el select se pasa tipado como string
+      // plano porque el parser de tipos de supabase no entiende la unión.
+      const cols: string =
+        tabla === 'motor'
+          ? 'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)'
+          : 'id, aeronave_id, numero_serie, posicion, horas_totales, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)';
+      const { data: comps, error: compsErr } = await this.supabase.service
         .from(tabla)
-        .select(
-          'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)',
-        )
+        .select(cols)
         .not('aeronave_id', 'is', null);
-      for (const c of (comps ?? []) as Array<Record<string, unknown>>) {
+      if (compsErr) throw new Error(compsErr.message);
+      for (const c of (comps ?? []) as unknown as Array<
+        Record<string, unknown>
+      >) {
         const tbo = Number(c.tbo_horas ?? 0);
         if (tbo <= 0) continue;
         const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
-        const ref =
-          c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
-        const vivas =
-          ref != null
-            ? Number(c.horas_totales ?? 0) + Math.max(0, hobbs - ref)
-            : Number(c.horas_totales ?? 0);
-        const desdeOH = tabla === 'motor' ? vivas - Number(c.turm ?? 0) : vivas;
-        const restantes = Number((tbo - desdeOH).toFixed(1));
+        const estado = this.aircraft.componenteEstado(
+          c,
+          hobbs,
+          tabla === 'motor',
+        );
+        const restantes = estado.tbo_restante ?? tbo;
         const umbralTbo = Math.max(umbralHoras, 25);
         if (restantes <= umbralTbo) {
           const matricula =

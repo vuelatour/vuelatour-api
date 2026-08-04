@@ -186,7 +186,11 @@ export class AircraftService {
 
     // Finanzas por moneda: ingresos cobrados vs gastos.
     const byMoneda = new Map<string, { ingresos: number; gastos: number }>();
-    const bump = (moneda: string, key: 'ingresos' | 'gastos', monto: number) => {
+    const bump = (
+      moneda: string,
+      key: 'ingresos' | 'gastos',
+      monto: number,
+    ) => {
       const cur = byMoneda.get(moneda) ?? { ingresos: 0, gastos: 0 };
       cur[key] += monto;
       byMoneda.set(moneda, cur);
@@ -285,8 +289,10 @@ export class AircraftService {
     // el panel admin desde el histórico.
     const fotoPaths: string[] = [];
     for (const e of rows) {
-      if (e.foto_taco_salida_url) fotoPaths.push(e.foto_taco_salida_url as string);
-      if (e.foto_taco_llegada_url) fotoPaths.push(e.foto_taco_llegada_url as string);
+      if (e.foto_taco_salida_url)
+        fotoPaths.push(e.foto_taco_salida_url as string);
+      if (e.foto_taco_llegada_url)
+        fotoPaths.push(e.foto_taco_llegada_url as string);
     }
     const firmadas: Record<string, string> = {};
     if (fotoPaths.length > 0) {
@@ -341,12 +347,16 @@ export class AircraftService {
     const [motoresRes, helicesRes] = await Promise.all([
       this.supabase.service
         .from('motor')
-        .select('id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref')
+        .select(
+          'id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
-        .select('id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref')
+        .select(
+          'id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref',
+        )
         .eq('aeronave_id', id)
         .order('posicion'),
     ]);
@@ -425,7 +435,10 @@ export class AircraftService {
       const { data: imgs } = await this.supabase.service
         .from('aeronave_imagen')
         .select('aeronave_id, url')
-        .in('aeronave_id', rows.map((a) => a.id as string))
+        .in(
+          'aeronave_id',
+          rows.map((a) => a.id as string),
+        )
         .eq('es_principal', true);
       const porAvion = new Map(
         (imgs ?? []).map((i) => [i.aeronave_id as string, i.url as string]),
@@ -792,10 +805,18 @@ export class AircraftService {
 
   /**
    * Horas de vida vivas de un componente (motor/hélice) y horas restantes a su
-   * overhaul (TBO). El motor descuenta desde su último overhaul (turm); la
-   * hélice desde 0. Si no hay referencia/TBO, devuelve los valores que se puedan.
+   * overhaul (TBO). Si no hay referencia/TBO, devuelve los valores que se puedan.
+   *
+   * TURM = lectura del TACÓMETRO DEL AVIÓN en la última reparación mayor (así
+   * lo captura el mecánico: N990GG turm=4290.5 con taco 5543.9 → 1253.4 hrs
+   * desde overhaul). Restarlo de las horas de vida del motor —otra escala—
+   * daba 0 o negativos en toda la flota. Sin TURM capturado, el respaldo son
+   * las horas de vida (hélices, o motor recién anclado).
+   *
+   * Público a propósito: la alerta de TBO (alerts.service) usa ESTE cálculo —
+   * no duplicar la aritmética.
    */
-  private componenteEstado(
+  componenteEstado(
     c: Record<string, unknown>,
     hobbs: number,
     conTurm: boolean,
@@ -807,20 +828,23 @@ export class AircraftService {
     hobbs_avion: number;
   } {
     const ht = Number(c.horas_totales ?? 0);
-    const ref = c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
+    const ref =
+      c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
     const horasActuales =
       ref != null ? Number((ht + Math.max(0, hobbs - ref)).toFixed(1)) : ht;
     const tbo = Number(c.tbo_horas ?? 0);
-    const desdeOverhaul = conTurm ? horasActuales - Number(c.turm ?? 0) : horasActuales;
-    const tboRestante = tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;
+    const turm = conTurm ? Number(c.turm ?? 0) : 0;
+    const desdeOverhaul = turm > 0 ? Math.max(0, hobbs - turm) : horasActuales;
+    const tboRestante =
+      tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;
     // Porcentaje de vida consumida del ciclo TBO (para la barra del panel);
     // se calcula aquí para que el panel no invente su propia aritmética.
     const vidaUsadaPct =
       tbo > 0
         ? Number(
-            (Math.min(100, Math.max(0, (desdeOverhaul / tbo) * 100)) || 0).toFixed(
-              1,
-            ),
+            (
+              Math.min(100, Math.max(0, (desdeOverhaul / tbo) * 100)) || 0
+            ).toFixed(1),
           )
         : null;
     return {
@@ -959,7 +983,11 @@ export class AircraftService {
     return data ?? [];
   }
 
-  async createSeguro(aeronaveId: string, dto: CreateAeronaveSeguroDto, userId: string) {
+  async createSeguro(
+    aeronaveId: string,
+    dto: CreateAeronaveSeguroDto,
+    userId: string,
+  ) {
     await this.findById(aeronaveId);
     const { data, error } = await this.supabase.service
       .from('aeronave_seguro')
@@ -983,12 +1011,17 @@ export class AircraftService {
     return data;
   }
 
-  async updateSeguro(seguroId: string, dto: UpdateAeronaveSeguroDto, userId: string) {
+  async updateSeguro(
+    seguroId: string,
+    dto: UpdateAeronaveSeguroDto,
+    userId: string,
+  ) {
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.aseguradora !== undefined) patch.aseguradora = dto.aseguradora;
     if (dto.num_poliza !== undefined) patch.num_poliza = dto.num_poliza;
     if (dto.cobertura !== undefined) patch.cobertura = dto.cobertura;
-    if (dto.suma_asegurada_usd !== undefined) patch.suma_asegurada_usd = dto.suma_asegurada_usd;
+    if (dto.suma_asegurada_usd !== undefined)
+      patch.suma_asegurada_usd = dto.suma_asegurada_usd;
     if (dto.prima_usd !== undefined) patch.prima_usd = dto.prima_usd;
     if (dto.vigente_desde !== undefined)
       patch.vigente_desde = dto.vigente_desde.toISOString().slice(0, 10);
@@ -1030,7 +1063,11 @@ export class AircraftService {
     return data ?? [];
   }
 
-  async createDiscrepancia(aeronaveId: string, dto: CreateDiscrepanciaDto, userId: string) {
+  async createDiscrepancia(
+    aeronaveId: string,
+    dto: CreateDiscrepanciaDto,
+    userId: string,
+  ) {
     await this.findById(aeronaveId);
     const estado = dto.estado ?? 'ABIERTA';
     const { data, error } = await this.supabase.service
@@ -1045,7 +1082,9 @@ export class AircraftService {
         fecha_reporte: dto.fecha_reporte ?? null,
         resolucion: dto.resolucion ?? null,
         fecha_resolucion:
-          estado === 'RESUELTA' ? (dto.fecha_resolucion ?? new Date().toISOString().slice(0, 10)) : null,
+          estado === 'RESUELTA'
+            ? (dto.fecha_resolucion ?? new Date().toISOString().slice(0, 10))
+            : null,
         resuelto_por: estado === 'RESUELTA' ? userId : null,
         notas: dto.notas ?? null,
         created_by: userId,
@@ -1057,12 +1096,17 @@ export class AircraftService {
     return data;
   }
 
-  async updateDiscrepancia(id: string, dto: UpdateDiscrepanciaDto, userId: string) {
+  async updateDiscrepancia(
+    id: string,
+    dto: UpdateDiscrepanciaDto,
+    userId: string,
+  ) {
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.descripcion !== undefined) patch.descripcion = dto.descripcion;
     if (dto.severidad !== undefined) patch.severidad = dto.severidad;
     if (dto.vuelo_id !== undefined) patch.vuelo_id = dto.vuelo_id;
-    if (dto.fecha_reporte !== undefined) patch.fecha_reporte = dto.fecha_reporte;
+    if (dto.fecha_reporte !== undefined)
+      patch.fecha_reporte = dto.fecha_reporte;
     if (dto.resolucion !== undefined) patch.resolucion = dto.resolucion;
     if (dto.notas !== undefined) patch.notas = dto.notas;
     if (dto.estado !== undefined) {
@@ -1074,7 +1118,8 @@ export class AircraftService {
           dto.fecha_resolucion ?? new Date().toISOString().slice(0, 10);
       }
     }
-    if (dto.fecha_resolucion !== undefined) patch.fecha_resolucion = dto.fecha_resolucion;
+    if (dto.fecha_resolucion !== undefined)
+      patch.fecha_resolucion = dto.fecha_resolucion;
 
     const { data, error } = await this.supabase.service
       .from('aeronave_discrepancia')

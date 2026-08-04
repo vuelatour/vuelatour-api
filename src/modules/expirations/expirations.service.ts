@@ -103,10 +103,12 @@ export class ExpirationsService {
         piloto_id: dto.piloto_id ?? null,
         motor_id: dto.motor_id ?? null,
         vence_por: dto.vence_por,
+        // HORAS admite TAMBIÉN fecha calendario (pedido 4 ago 2026): un TBO
+        // vence por horas O por tiempo, lo que ocurra primero.
         fecha_vencimiento:
-          dto.vence_por === FormaVencimiento.FECHA
-            ? dto.fecha_vencimiento
-            : null,
+          dto.vence_por === FormaVencimiento.PERMANENTE
+            ? null
+            : (dto.fecha_vencimiento ?? null),
         horas_limite:
           dto.vence_por === FormaVencimiento.HORAS ? dto.horas_limite : null,
         umbral_alerta_dias: dto.umbral_alerta_dias ?? null,
@@ -160,9 +162,12 @@ export class ExpirationsService {
     this.assertVencePorCoherente(merged);
 
     const patch: Record<string, unknown> = { ...dto, updated_by: userId };
-    // Normaliza los campos de limite segun vence_por para no dejar datos cruzados.
+    // Normaliza los campos de limite segun vence_por para no dejar datos
+    // cruzados. HORAS conserva la fecha calendario opcional (TBO por tiempo).
     patch.fecha_vencimiento =
-      vencePor === FormaVencimiento.FECHA ? merged.fecha_vencimiento : null;
+      vencePor === FormaVencimiento.PERMANENTE
+        ? null
+        : (merged.fecha_vencimiento ?? null);
     patch.horas_limite =
       vencePor === FormaVencimiento.HORAS ? merged.horas_limite : null;
 
@@ -417,22 +422,55 @@ export class ExpirationsService {
     }
 
     if (row.vence_por === FormaVencimiento.HORAS && row.horas_limite) {
+      // Un TBO también puede vencer por CALENDARIO (fecha opcional, pedido
+      // 4 ago 2026): manda lo que ocurra primero — el estado más grave gana.
+      let porFecha: {
+        estado: EstadoVencimiento;
+        dias: number;
+      } | null = null;
+      if (row.fecha_vencimiento) {
+        const dias = this.diasHasta(row.fecha_vencimiento);
+        const umbral = row.umbral_alerta_dias ?? umbralTipo;
+        porFecha = {
+          dias,
+          estado:
+            dias < 0
+              ? EstadoVencimiento.VENCIDO
+              : dias <= umbral
+                ? EstadoVencimiento.PROXIMO
+                : EstadoVencimiento.VIGENTE,
+        };
+      }
       if (motorHoras === null) {
         return {
-          estado: EstadoVencimiento.INDETERMINADO,
-          dias_restantes: null,
+          estado: porFecha?.estado ?? EstadoVencimiento.INDETERMINADO,
+          dias_restantes: porFecha?.dias ?? null,
           horas_restantes: null,
         };
       }
       const restantes =
         Math.round((Number(row.horas_limite) - motorHoras) * 100) / 100;
-      const estado =
+      const porHoras =
         restantes <= 0
           ? EstadoVencimiento.VENCIDO
           : restantes <= HORAS_ALERTA
             ? EstadoVencimiento.PROXIMO
             : EstadoVencimiento.VIGENTE;
-      return { estado, dias_restantes: null, horas_restantes: restantes };
+      const severidad = [
+        EstadoVencimiento.VIGENTE,
+        EstadoVencimiento.PROXIMO,
+        EstadoVencimiento.VENCIDO,
+      ];
+      const estado =
+        porFecha != null &&
+        severidad.indexOf(porFecha.estado) > severidad.indexOf(porHoras)
+          ? porFecha.estado
+          : porHoras;
+      return {
+        estado,
+        dias_restantes: porFecha?.dias ?? null,
+        horas_restantes: restantes,
+      };
     }
 
     return {
