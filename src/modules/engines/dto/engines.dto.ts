@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsDateString,
   IsEnum,
   IsInt,
   IsNumber,
@@ -94,7 +95,8 @@ export class CreateEngineDto {
   horas_totales?: number;
 
   @ApiPropertyOptional({
-    description: 'Horas al último overhaul mayor',
+    description:
+      'TURM: tacómetro del avión en el último overhaul (misma escala que los tacos)',
     default: 0,
   })
   @IsOptional()
@@ -108,6 +110,14 @@ export class CreateEngineDto {
   @IsNumber()
   @Min(1)
   tbo_horas!: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Fecha límite CALENDARIO del overhaul (TBO por tiempo, ej. 12 años). null = solo por horas.',
+  })
+  @IsOptional()
+  @IsDateString()
+  tbo_fecha?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

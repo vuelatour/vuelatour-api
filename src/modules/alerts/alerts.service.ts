@@ -630,17 +630,15 @@ export class AlertsService {
       }
     }
 
-    // TBO de motores y hélices: MISMO cálculo que el snapshot del avión
-    // (aircraft.componenteEstado) — no duplicar aritmética. OJO: `turm` solo
-    // existe en motor; pedirlo en helice hacía fallar la consulta en silencio
-    // (error ignorado) y las hélices nunca alertaban.
+    // TBO de motores y hélices por HORAS y por CALENDARIO (tbo_fecha):
+    // MISMO cálculo que el snapshot del avión (aircraft.componenteEstado) —
+    // no duplicar aritmética. Ambas tablas llevan turm desde ago 2026.
+    const DIAS_AVISO_TBO_FECHA = 60;
     for (const tabla of ['motor', 'helice'] as const) {
-      // `turm` solo existe en motor; el select se pasa tipado como string
-      // plano porque el parser de tipos de supabase no entiende la unión.
+      // El select va tipado como string plano: el parser de tipos de
+      // supabase no entiende el embed con este nivel de columnas.
       const cols: string =
-        tabla === 'motor'
-          ? 'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)'
-          : 'id, aeronave_id, numero_serie, posicion, horas_totales, tbo_horas, aeronave_horas_ref, aeronave:aeronave_id(matricula)';
+        'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, aeronave:aeronave_id(matricula)';
       const { data: comps, error: compsErr } = await this.supabase.service
         .from(tabla)
         .select(cols)
@@ -649,34 +647,71 @@ export class AlertsService {
       for (const c of (comps ?? []) as unknown as Array<
         Record<string, unknown>
       >) {
+        const matricula =
+          unwrap(
+            c.aeronave as
+              | { matricula: string }
+              | { matricula: string }[]
+              | null,
+          )?.matricula ?? '';
+        const nombre = `${tabla === 'motor' ? 'Motor' : 'Hélice'} ${c.numero_serie as string} (${c.posicion as string})`;
+
         const tbo = Number(c.tbo_horas ?? 0);
-        if (tbo <= 0) continue;
-        const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
-        const estado = this.aircraft.componenteEstado(
-          c,
-          hobbs,
-          tabla === 'motor',
-        );
-        const restantes = estado.tbo_restante ?? tbo;
-        const umbralTbo = Math.max(umbralHoras, 25);
-        if (restantes <= umbralTbo) {
-          const matricula =
-            unwrap(
-              c.aeronave as
-                | { matricula: string }
-                | { matricula: string }[]
-                | null,
-            )?.matricula ?? '';
-          await this.dispatch(config, `tbo:${tabla}:${c.id as string}:${mes}`, {
-            tipo: 'vencimiento',
-            titulo:
-              restantes <= 0
-                ? `TBO AGOTADO: ${tabla} de ${matricula}`
-                : `TBO cerca (${restantes} hrs): ${tabla} de ${matricula}`,
-            cuerpo: `${tabla === 'motor' ? 'Motor' : 'Hélice'} ${c.numero_serie as string} (${c.posicion as string}) · ${restantes <= 0 ? 'overhaul vencido' : `quedan ${restantes} hrs de TBO`}.`,
-            data: { aeronave_id: c.aeronave_id, componente: tabla, id: c.id },
-            link: `/admin/aircraft/${c.aeronave_id as string}`,
-          });
+        if (tbo > 0) {
+          const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
+          const estado = this.aircraft.componenteEstado(c, hobbs, true);
+          const restantes = estado.tbo_restante ?? tbo;
+          const umbralTbo = Math.max(umbralHoras, 25);
+          if (restantes <= umbralTbo) {
+            await this.dispatch(
+              config,
+              `tbo:${tabla}:${c.id as string}:${mes}`,
+              {
+                tipo: 'vencimiento',
+                titulo:
+                  restantes <= 0
+                    ? `TBO AGOTADO: ${tabla} de ${matricula}`
+                    : `TBO cerca (${restantes} hrs): ${tabla} de ${matricula}`,
+                cuerpo: `${nombre} · ${restantes <= 0 ? 'overhaul vencido' : `quedan ${restantes} hrs de TBO`}.`,
+                data: {
+                  aeronave_id: c.aeronave_id,
+                  componente: tabla,
+                  id: c.id,
+                },
+                link: `/admin/aircraft/${c.aeronave_id as string}`,
+              },
+            );
+          }
+        }
+
+        // Límite CALENDARIO del overhaul ("TBO 12 años"): puede vencer por
+        // fecha aunque falten horas. Día en corte Cancún; re-alerta 1/mes.
+        if (c.tbo_fecha) {
+          const dias = Math.round(
+            (Date.parse(`${c.tbo_fecha as string}T00:00:00-05:00`) -
+              Date.now()) /
+              86_400_000,
+          );
+          if (dias <= DIAS_AVISO_TBO_FECHA) {
+            await this.dispatch(
+              config,
+              `tbofecha:${tabla}:${c.id as string}:${mes}`,
+              {
+                tipo: 'vencimiento',
+                titulo:
+                  dias < 0
+                    ? `Overhaul VENCIDO por fecha: ${tabla} de ${matricula}`
+                    : `Overhaul vence por fecha (${dias} d): ${tabla} de ${matricula}`,
+                cuerpo: `${nombre} · límite calendario ${c.tbo_fecha as string}${dias < 0 ? ' (ya venció)' : ''}.`,
+                data: {
+                  aeronave_id: c.aeronave_id,
+                  componente: tabla,
+                  id: c.id,
+                },
+                link: `/admin/aircraft/${c.aeronave_id as string}`,
+              },
+            );
+          }
         }
       }
     }

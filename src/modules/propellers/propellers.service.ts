@@ -12,7 +12,7 @@ import type {
 } from './dto/propellers.dto';
 
 const COLS =
-  'id, aeronave_id, posicion, numero_serie, fabricante, modelo, horas_totales, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at';
+  'id, aeronave_id, posicion, numero_serie, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at';
 
 @Injectable()
 export class PropellersService {

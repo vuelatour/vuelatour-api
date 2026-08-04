@@ -13,7 +13,7 @@ import type {
 } from './dto/engines.dto';
 
 const COLS =
-  'id, aeronave_id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at';
+  'id, aeronave_id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at';
 
 @Injectable()
 export class EnginesService {
@@ -180,7 +180,9 @@ export class EnginesService {
     // Congela las horas de vida acumuladas hasta el momento del traslado y
     // re-referencia al Hobbs del avión destino (cada avión lleva su propio Hobbs).
     const ref =
-      motor.aeronave_horas_ref != null ? Number(motor.aeronave_horas_ref) : null;
+      motor.aeronave_horas_ref != null
+        ? Number(motor.aeronave_horas_ref)
+        : null;
     const hobbsOrigen = await this.currentHobbs(aeronaveOrigenId);
     const horasVida =
       ref != null

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsDateString,
   IsEnum,
   IsInt,
   IsNumber,
@@ -82,6 +83,25 @@ export class CreatePropellerDto {
   @IsNumber()
   @Min(1)
   tbo_horas?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'TURM: tacómetro del avión en el último overhaul de la hélice (misma escala que los tacos)',
+    default: 0,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  turm?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Fecha límite CALENDARIO del overhaul (TBO por tiempo, ej. 6 años). null = solo por horas.',
+  })
+  @IsOptional()
+  @IsDateString()
+  tbo_fecha?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

@@ -509,14 +509,14 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
+          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, fabricante, modelo, horas_totales, tbo_horas, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
+          'id, posicion, numero_serie, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
@@ -566,9 +566,11 @@ export class AircraftService {
       ...m,
       ...this.componenteEstado(m, hobbs, true),
     }));
+    // Las hélices también llevan TURM (taco en su último overhaul) desde
+    // ago 2026: mismo cálculo de "desde overhaul" que los motores.
     const propellers = (propellersRes.data ?? []).map((p) => ({
       ...p,
-      ...this.componenteEstado(p, hobbs, false),
+      ...this.componenteEstado(p, hobbs, true),
     }));
 
     // Reserva de overhaul: horas mostradas = base manual + voladas DERIVADAS.
