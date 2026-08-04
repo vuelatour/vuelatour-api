@@ -49,13 +49,28 @@ export class ExpensesService {
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
   async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
     const { data } = await this.list({ ...filters, limit: 5000, offset: 0 });
+    // Etiquetas legibles (el reporte lo lee gente de oficina, no la BD).
+    const MEDIO_LABEL: Record<string, string> = {
+      EFECTIVO: 'Efectivo',
+      TARJETA_CORP: 'Tarjeta corporativa',
+      TRANSFERENCIA: 'Transferencia',
+      PERSONAL_PABLO: 'Personal Pablo',
+      PERSONAL_ALE: 'Personal Ale',
+      BODEGA: 'Bodega',
+    };
+    const COMP_LABEL: Record<string, string> = {
+      FACTURA: 'Facturado',
+      VALE: 'Por facturar',
+      SIN_COMPROBANTE: 'Sin comprobante',
+    };
     const columnas: TablaColumnaPayload[] = [
       { label: 'Fecha' },
       { label: 'Categoría' },
       { label: 'Avión' },
       { label: 'Proveedor' },
+      { label: 'Capturó' },
       { label: 'Medio pago' },
-      { label: 'Comprobante' },
+      { label: 'Facturado' },
       { label: 'Moneda' },
       { label: 'Monto', tipo: 'money' },
     ];
@@ -63,13 +78,17 @@ export class ExpensesService {
       const x = g as Record<string, unknown>;
       const aeronave = x.aeronave as { matricula?: string } | null;
       const proveedor = x.proveedor as { nombre?: string } | null;
+      const captura = x.captura as { nombre?: string } | null;
+      const medio = (x.medio_pago as string) ?? '';
+      const comp = (x.estatus_comprobante as string) ?? '';
       return [
         (x.fecha_gasto as string) ?? '',
         (x.categoria as string) ?? '',
         aeronave?.matricula ?? '(pendiente)',
         proveedor?.nombre ?? '',
-        (x.medio_pago as string) ?? '',
-        (x.estatus_comprobante as string) ?? '',
+        captura?.nombre ?? '',
+        MEDIO_LABEL[medio] ?? medio,
+        COMP_LABEL[comp] ?? comp,
         (x.moneda as string) ?? '',
         Number(x.monto),
       ];
@@ -85,9 +104,31 @@ export class ExpensesService {
       const clave = `${(x.categoria as string) ?? '—'} (${(x.moneda as string) ?? '?'})`;
       porCategoria.set(clave, (porCategoria.get(clave) ?? 0) + monto);
     }
-    const resumen = [...porCategoria.entries()]
+    const resumen: Array<[string, number]> = [...porCategoria.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([clave, total]) => [clave, Math.round(total * 100) / 100]);
+
+    // Reporte de EFECTIVOS por persona (pedido de oficina, ago 2026): cuánto
+    // trae cada quien en efectivo y cuánto de eso ya se facturó — por moneda,
+    // que un total MXN+USD mezclado sería mentira numérica.
+    const porPersona = new Map<string, number>();
+    for (const g of data) {
+      const x = g as Record<string, unknown>;
+      if ((x.medio_pago as string) !== 'EFECTIVO') continue;
+      const monto = Number(x.monto);
+      if (!Number.isFinite(monto)) continue;
+      const nombre =
+        ((x.captura as { nombre?: string } | null)?.nombre ?? 'Sin capturador');
+      const facturado =
+        (x.estatus_comprobante as string) === 'FACTURA'
+          ? 'facturado'
+          : 'POR FACTURAR';
+      const clave = `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
+      porPersona.set(clave, (porPersona.get(clave) ?? 0) + monto);
+    }
+    for (const [clave, total] of [...porPersona.entries()].sort()) {
+      resumen.push([clave, Math.round(total * 100) / 100]);
+    }
     const rango =
       filters.desde || filters.hasta
         ? ` · ${filters.desde ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
