@@ -135,6 +135,13 @@ export class AlertsService {
 
   @Cron('0 8 * * *', { timeZone: 'America/Cancun' })
   async runDaily(): Promise<void> {
+    // Mantenimiento (no es alerta, no requiere alerta_config): espejo
+    // vuelo↔ida antes de cualquier regla que lea el avión del vuelo.
+    await this.sincronizarEspejoIda().catch((err: unknown) =>
+      this.logger.error(
+        `Espejo ida falló: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
     await this.safe('vencimiento', (c) => this.checkVencimientos(c));
     await this.safe('cobro_pendiente', (c) => this.checkCobrosPendientes(c));
     await this.safe('inventario_bajo', (c) => this.checkInventarioBajo(c));
@@ -150,6 +157,14 @@ export class AlertsService {
   /** Dispara todas las reglas activas de inmediato (para pruebas / botón admin). */
   async runAll(): Promise<{ ejecutadas: string[] }> {
     const ejecutadas: string[] = [];
+    try {
+      await this.sincronizarEspejoIda();
+      ejecutadas.push('espejo_ida');
+    } catch (err) {
+      this.logger.error(
+        `Espejo ida falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     for (const [clave, fn] of [
       ['permiso_pista', (c: AlertConfig) => this.checkPermisoPista(c)],
       ['vencimiento', (c: AlertConfig) => this.checkVencimientos(c)],
@@ -211,6 +226,51 @@ export class AlertsService {
     if (error) throw new Error(error.message);
     for (const v of data ?? []) {
       await this.airports.refreshPermisosDeVuelo(v.id as string);
+    }
+  }
+
+  /**
+   * Mantenimiento del espejo vuelo↔ida: `vuelo.aeronave_id` debe reflejar el
+   * avión OPERATIVO del tramo 1 (asignación por tramo). Un bug de
+   * quotes.revise (corregido ago 2026) regresaba el vuelo al avión de la
+   * cotización al registrar un cobro/ajuste (vuelos #38/#59/#62/#64/#80) y la
+   * tabla de Vuelos mostraba un avión que no fue el que voló. Este barrido
+   * re-sincroniza cualquier divergencia; corre a diario y con el botón
+   * "Ejecutar ahora" de Admin→Alertas.
+   */
+  private async sincronizarEspejoIda(): Promise<void> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'vuelo_id, aeronave_id, vuelo!inner(folio, aeronave_id, es_externo)',
+      )
+      .eq('orden', 1)
+      .not('aeronave_id', 'is', null)
+      .limit(2000);
+    if (error) throw new Error(error.message);
+    for (const e of data ?? []) {
+      const raw = e.vuelo as unknown;
+      const v = (Array.isArray(raw) ? raw[0] : raw) as {
+        folio?: number;
+        aeronave_id?: string | null;
+        es_externo?: boolean;
+      } | null;
+      // Externos: el vuelo no lleva avión propio (referencia solo de tarifa).
+      if (!v || v.es_externo) continue;
+      if (v.aeronave_id === e.aeronave_id) continue;
+      const { error: upErr } = await this.supabase.service
+        .from('vuelo')
+        .update({ aeronave_id: e.aeronave_id })
+        .eq('id', e.vuelo_id as string);
+      if (upErr) {
+        this.logger.error(
+          `Espejo ida: no se pudo re-sincronizar el vuelo #${v.folio}: ${upErr.message}`,
+        );
+        continue;
+      }
+      this.logger.warn(
+        `Espejo ida: vuelo #${v.folio} re-sincronizado al avión del tramo 1.`,
+      );
     }
   }
 
