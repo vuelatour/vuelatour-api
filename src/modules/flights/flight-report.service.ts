@@ -353,13 +353,24 @@ export class FlightReportService {
     const tacoInicio = tacosSalida.length > 0 ? Math.min(...tacosSalida) : null;
     const tacoFin = tacosLlegada.length > 0 ? Math.max(...tacosLlegada) : null;
 
-    // Gastos a USD con la MISMA regla del reparto (fuente única de criterio):
-    // USD directo; MXN ÷ tc_gasto; sin TC no se inventa — se excluye y se
+    // Gastos a USD con la MISMA regla de cobros y del Balance por avión:
+    // USD directo; MXN ÷ tc_gasto; sin TC propio toma el T.C. del vuelo de
+    // RESPALDO (los gastos casi nunca traen TC capturado y el balance salía
+    // sin restar nada). Solo si tampoco hay T.C. del vuelo se excluye y se
     // reporta para que la oficina lo corrija.
+    const tcVuelo =
+      v.tc_usd_mxn != null && Number(v.tc_usd_mxn) > 0
+        ? Number(v.tc_usd_mxn)
+        : null;
+    let gastosTcVueloCount = 0;
     const gastoUsd = (g: Record<string, unknown>): number | null => {
       if (g.moneda === 'USD') return n(g.monto);
       if (g.tc_gasto != null && Number(g.tc_gasto) > 0) {
         return n(g.monto) / Number(g.tc_gasto);
+      }
+      if (tcVuelo != null) {
+        gastosTcVueloCount += 1;
+        return n(g.monto) / tcVuelo;
       }
       return null;
     };
@@ -408,9 +419,14 @@ export class FlightReportService {
     const costoVueloUsd = Number(
       (gastosTotalUsd + combustibleTotalUsd).toFixed(2),
     );
+    if (gastosTcVueloCount > 0) {
+      notasHoras.push(
+        `${gastosTcVueloCount} gasto(s) en MXN sin T.C. propio convertidos con el T.C. del vuelo (${tcVuelo}).`,
+      );
+    }
     if (gastosSinTcCount > 0) {
       notasHoras.push(
-        `${gastosSinTcCount} gasto(s) en MXN por $${gastosSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio: no entran al balance USD — captura su TC en Gastos.`,
+        `${gastosSinTcCount} gasto(s) en MXN por $${gastosSinTcMxn.toLocaleString('en-US')} SIN tipo de cambio (y el vuelo no tiene T.C.): no entran al balance USD — captura su TC en Gastos.`,
       );
     }
 
