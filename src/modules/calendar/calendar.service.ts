@@ -40,7 +40,7 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
+        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
       )
       // Trae vuelos cuya salida o regreso caiga en el rango, o que lo abarquen
       // completo (los tramos intermedios de un multiescala viven entre ambas fechas).
@@ -117,6 +117,7 @@ export class CalendarService {
           aeronave_id: string | null;
           piloto_id: string | null;
           estado_permiso: string | null;
+          cancelada_at: string | null;
           aeronave:
             | { matricula: string; color_calendario: string | null }
             | { matricula: string; color_calendario: string | null }[]
@@ -152,7 +153,10 @@ export class CalendarService {
         const aeronaveStr = v.es_externo
           ? (v.operador_externo ?? 'Externo')
           : (aeronave?.matricula ?? 'sin avión');
-        const esCancelado = v.estado === 'CANCELADO';
+        // Cancelado a nivel VUELO o el TRAMO del evento cancelado (no voló):
+        // ambos se quedan como historial en rojo y sin edición rápida.
+        const esCancelado =
+          v.estado === 'CANCELADO' || escala?.cancelada_at != null;
         // Un cancelado ya no acarrea pendientes: sin ⚠ de permiso/asignación.
         const permisoPendiente = !esCancelado && estadoPermiso === 'pendiente';
         const sinAsignar =
@@ -178,6 +182,9 @@ export class CalendarService {
           escala_id: escala?.id ?? null,
           folio: v.folio,
           estado: v.estado,
+          // Bandera única para los lectores (panel y app): cubre vuelo
+          // cancelado Y tramo cancelado sin duplicar la lógica allá.
+          cancelado: esCancelado,
           estado_permiso: estadoPermiso,
           es_externo: v.es_externo,
           sin_asignar: sinAsignar,
@@ -206,6 +213,10 @@ export class CalendarService {
         (a, b) => a.orden - b.orden,
       );
 
+      // Multiescala: los tramos cancelados individualmente NO entran a la
+      // cadena del día (no volaron); si TODOS los del día están cancelados,
+      // el día se pinta con el primero (cancelado, en rojo) como historial.
+      const escalasVivas = escalasOrdenadas.filter((e) => !e.cancelada_at);
       if (v.tipo === 'MULTIESCALA' && escalasOrdenadas.length > 0) {
         // UN evento por vuelo por DÍA (no por tramo): el itinerario del día se
         // muestra encadenado ("CZM-PCE-CZM-CUN"), como lo maneja el cliente en
@@ -216,7 +227,10 @@ export class CalendarService {
           new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
         type Grupo = { fecha: string; legs: typeof escalasOrdenadas };
         const grupos: Grupo[] = [];
-        escalasOrdenadas.forEach((e, i) => {
+        // La cadena se arma con los tramos VIVOS; si el vuelo entero quedó
+        // sin tramos vivos, se usa todo (evento cancelado como historial).
+        const base = escalasVivas.length > 0 ? escalasVivas : escalasOrdenadas;
+        base.forEach((e, i) => {
           const fecha = e.fecha_salida_plan ?? (i === 0 ? v.fecha_vuelo : null);
           const ultimo = grupos[grupos.length - 1];
           if (fecha && (!ultimo || dayOf(fecha) !== dayOf(ultimo.fecha))) {
@@ -256,12 +270,16 @@ export class CalendarService {
         destino: v.destino_iata,
       });
       if (ida) out.push(ida);
-      // REGRESO de vuelo redondo (orden 2, en fecha_traslado_final, IATAs invertidos).
+      // REGRESO de vuelo redondo (orden 2, IATAs invertidos). La hora REAL es
+      // la planeada del tramo (asignación por tramo la actualiza); el
+      // fecha_traslado_final del vuelo es el respaldo comercial — sin el
+      // fallback, cambiar la hora del regreso no se reflejaba aquí.
       if (v.tipo === 'REDONDO') {
         const regreso = buildEvent({
           idSuffix: ':regreso',
           escalaOrden: 2,
-          fecha: v.fecha_traslado_final,
+          fecha:
+            escalaPorOrden.get(2)?.fecha_salida_plan ?? v.fecha_traslado_final,
           tramo: 'regreso',
           origen: v.destino_iata,
           destino: v.origen_iata,
