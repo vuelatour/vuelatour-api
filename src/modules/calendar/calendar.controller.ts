@@ -19,7 +19,7 @@ export class CalendarController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
   @ApiOperation({
     summary:
-      'List flight events in a date range. Default: today → today+30 días. Excluye CANCELADOS. No accesible a pilotos.',
+      'List flight events in a date range. Default: today → today+30 días. Incluye CANCELADOS en rojo (historial de operaciones; incluir_cancelados=false los excluye). No accesible a pilotos.',
   })
   list(@Query() q: CalendarRangeQuery) {
     return this.calendar.listEvents(q);

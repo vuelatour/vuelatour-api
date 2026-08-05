@@ -9,6 +9,9 @@ const PERMISO_PENDIENTE_COLOR = '#F59E0B';
 const SIN_ASIGNAR_COLOR = '#8B5CF6';
 // Reserva tentativa: espacio apartado sin cotización ("espérame y te confirmo").
 const TENTATIVO_COLOR = '#64748B';
+// Vuelo CANCELADO: se queda en el calendario como historial de operaciones
+// (pedido del cliente, ago 2026) — en rojo y con la etiqueta CANCELADO.
+const CANCELADO_COLOR = '#EF4444';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -48,7 +51,11 @@ export class CalendarService {
       )
       .order('fecha_vuelo', { ascending: true });
 
-    if (!q.incluir_cancelados) {
+    // Los CANCELADOS se incluyen por defecto desde ago 2026: el calendario es
+    // el registro de operaciones del cliente ("existió la solicitud, luego se
+    // canceló"). Se pintan en rojo con etiqueta; `incluir_cancelados=false`
+    // permite excluirlos explícitamente.
+    if (q.incluir_cancelados === false) {
       query = query.neq('estado', 'CANCELADO');
     }
     if (q.aeronave_id) query = query.eq('aeronave_id', q.aeronave_id);
@@ -145,20 +152,25 @@ export class CalendarService {
         const aeronaveStr = v.es_externo
           ? (v.operador_externo ?? 'Externo')
           : (aeronave?.matricula ?? 'sin avión');
-        const permisoPendiente = estadoPermiso === 'pendiente';
+        const esCancelado = v.estado === 'CANCELADO';
+        // Un cancelado ya no acarrea pendientes: sin ⚠ de permiso/asignación.
+        const permisoPendiente = !esCancelado && estadoPermiso === 'pendiente';
         const sinAsignar =
           v.estado === 'CONFIRMADO' && !v.es_externo && (!aeronaveId || !pilotoId);
         const esTentativo = v.estado === 'RESERVA';
-        // El tentativo domina el color: es un espacio apartado, no un vuelo firme.
-        const color = esTentativo
-          ? TENTATIVO_COLOR
-          : sinAsignar
-            ? SIN_ASIGNAR_COLOR
-            : permisoPendiente
-              ? PERMISO_PENDIENTE_COLOR
-              : v.es_externo
-                ? EXTERNAL_COLOR
-                : (aeronave?.color_calendario ?? '#9CA3AF');
+        // El cancelado domina el color (historial); luego el tentativo (es un
+        // espacio apartado, no un vuelo firme).
+        const color = esCancelado
+          ? CANCELADO_COLOR
+          : esTentativo
+            ? TENTATIVO_COLOR
+            : sinAsignar
+              ? SIN_ASIGNAR_COLOR
+              : permisoPendiente
+                ? PERMISO_PENDIENTE_COLOR
+                : v.es_externo
+                  ? EXTERNAL_COLOR
+                  : (aeronave?.color_calendario ?? '#9CA3AF');
         const hora = horaOf(params.fecha);
         return {
           id: `${v.id}${params.idSuffix}`,
@@ -185,7 +197,7 @@ export class CalendarService {
           tramo: params.tramo,
           origen_iata: params.origen,
           destino_iata: params.destino,
-          title: `${esTentativo ? 'Tentativo · ' : ''}${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${params.pasajeros ?? v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
+          title: `${esCancelado ? 'CANCELADO · ' : esTentativo ? 'Tentativo · ' : ''}${params.prefijo ?? ''}${hora ? `${hora} · ` : ''}${aeronaveStr} ${params.origen}-${params.destino} (${params.pasajeros ?? v.pasajeros} pax)${sinAsignar ? ' ⚠ sin asignar' : permisoPendiente ? ' ⚠ permiso' : ''}`,
         };
       };
 
