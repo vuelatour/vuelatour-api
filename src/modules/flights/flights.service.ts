@@ -1332,8 +1332,21 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Flight ${id} not found`);
-    // Espejo: el tramo de ida (orden=1) refleja el permiso del vuelo.
-    await this.mirrorVueloToIdaEscala(id, { estado_permiso: estadoPermiso });
+    // El botón a NIVEL VUELO habla de todo el vuelo: propaga a TODOS los
+    // tramos vivos que requieren permiso (estado ≠ no_aplica), no solo a la
+    // ida. Espejar solo orden=1 dejaba el regreso pendiente (misma pista) y
+    // la re-derivación regresaba el vuelo a "pendiente"; y un vuelo cuyo
+    // único tramo vivo es orden=2 (ida cancelada, caso #96) no espejaba nada.
+    const { error: escErr } = await this.supabase.service
+      .from('escala')
+      .update({ estado_permiso: estadoPermiso, updated_by: user.userId })
+      .eq('vuelo_id', id)
+      .is('cancelada_at', null)
+      .neq('estado_permiso', 'no_aplica');
+    if (escErr)
+      this.logger.warn(
+        `No se pudo propagar el permiso a los tramos del vuelo ${id}: ${escErr.message}`,
+      );
     void this.calendar.syncFlight(id);
     if (estadoPermiso === 'emitido' && current.estado_permiso !== 'emitido') {
       const payload = {
