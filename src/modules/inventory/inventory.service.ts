@@ -201,8 +201,13 @@ export class InventoryService {
   private consumeFifo(layers: FifoLayer[], qty: number): number {
     const disponible = layers.reduce((s, l) => s + l.qty, 0);
     if (disponible + EPS < qty) {
+      // Sin nada en existencia el mensaje debe DECIR qué hacer: el stock se
+      // deriva del cardex, así que un ítem recién dado de alta arranca en 0
+      // aunque la pieza ya esté físicamente en la bodega (caso 6 ago 2026).
       throw new BadRequestException(
-        `Stock insuficiente: disponible ${round(disponible)}, salida solicitada ${qty}.`,
+        disponible <= EPS
+          ? 'Este ítem no tiene existencia registrada: captura primero una ENTRADA con la cantidad y su costo (aunque la pieza ya esté en bodega). El stock sale del cardex, no del alta del ítem.'
+          : `Stock insuficiente: disponible ${round(disponible)}, salida solicitada ${qty}.`,
       );
     }
     let need = qty;

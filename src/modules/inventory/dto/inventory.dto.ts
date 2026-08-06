@@ -11,6 +11,7 @@ import {
   IsPositive,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -123,11 +124,20 @@ export class CreateInventarioItemDto {
 
   @ApiPropertyOptional({
     maxLength: 30,
-    description: 'Presentación/unidad del stock: pieza, caja, bote, galón, litro, bolsa…',
+    description:
+      'Presentación/unidad del stock: pieza, caja, bote, galón, litro, bolsa… NO es la cantidad.',
   })
   @IsOptional()
   @IsString()
   @MaxLength(30)
+  // Caso real (6 ago 2026): capturaron "1" aquí creyendo que era la cantidad y
+  // el ítem quedó en stock 0 ("0 1" en la card). Un número solo NUNCA es una
+  // unidad de medida: se rechaza con el mensaje que dice dónde va la cantidad.
+  // La cadena vacía es válida (= sin unidad; el servicio la vuelve null).
+  @Matches(/^$|^(?!\s*[\d.,]+\s*$).+/, {
+    message:
+      'La unidad describe cómo se cuenta el stock (pieza, caja, litro), no un número. La cantidad se registra como ENTRADA de inventario.',
+  })
   unidad?: string;
 
   @ApiPropertyOptional()
