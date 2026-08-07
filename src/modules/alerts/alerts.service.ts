@@ -722,8 +722,13 @@ export class AlertsService {
     const hoy = dateOnly(new Date());
     const { data: fondos, error } = await this.supabase.service
       .from('caja_chica_fondo')
-      .select('id, usuario_id, moneda, activo, usuario:usuario_id(nombre)')
-      .eq('activo', true);
+      .select(
+        'id, usuario_id, moneda, activo, es_acumulada, usuario:usuario_id(nombre)',
+      )
+      .eq('activo', true)
+      // Las cajas ACUMULADAS funcionan al revés (el saldo es lo por reponer y
+      // crece con los gastos): "negativo" no significa sobregiro ahí.
+      .eq('es_acumulada', false);
     if (error) throw new Error(error.message);
     if (!fondos || fondos.length === 0) return;
 

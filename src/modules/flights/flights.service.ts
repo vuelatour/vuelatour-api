@@ -1017,17 +1017,35 @@ export class FlightsService {
     const apoyoId =
       ((vuelo as { apoyo_id?: string | null }).apoyo_id as string | null) ??
       null;
-    const [escalas, cobros, aeronave, ultimoTacoAvion, apoyoNombre] =
-      await Promise.all([
-        this.listEscalas(id),
-        this.listCobros(id),
-        this.aeronaveResumen(aeronaveId),
-        // Referencia para la app: validación en vivo de la SALIDA del tramo 1
-        // (excepción donde el piloto sí fotografía la salida) — el tacómetro
-        // nunca retrocede respecto al último taco conocido del avión.
-        this.ultimoTacoAeronave(aeronaveId, null),
-        this.nombreUsuario(apoyoId),
-      ]);
+    const pilotoId =
+      ((vuelo as { piloto_id?: string | null }).piloto_id as string | null) ??
+      null;
+    const copilotoId =
+      ((vuelo as { copiloto_id?: string | null }).copiloto_id as
+        | string
+        | null) ?? null;
+    const [
+      escalas,
+      cobros,
+      aeronave,
+      ultimoTacoAvion,
+      apoyoNombre,
+      pilotoNombre,
+      copilotoNombre,
+    ] = await Promise.all([
+      this.listEscalas(id),
+      this.listCobros(id),
+      this.aeronaveResumen(aeronaveId),
+      // Referencia para la app: validación en vivo de la SALIDA del tramo 1
+      // (excepción donde el piloto sí fotografía la salida) — el tacómetro
+      // nunca retrocede respecto al último taco conocido del avión.
+      this.ultimoTacoAeronave(aeronaveId, null),
+      this.nombreUsuario(apoyoId),
+      // La app pinta la asignación en el DETALLE: sin estos nombres el vuelo
+      // decía "Sin asignar" aunque el piloto sí estuviera asignado (#120).
+      this.nombreUsuario(pilotoId),
+      this.nombreUsuario(copilotoId),
+    ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
       aeronave?.velocidad_crucero_kts ?? null,
@@ -1055,6 +1073,8 @@ export class FlightsService {
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
+      piloto_nombre: pilotoNombre,
+      copiloto_nombre: copilotoNombre,
       apoyo_nombre: apoyoNombre,
       es_apoyo: esApoyo,
       ultimo_taco_avion: ultimoTacoAvion,

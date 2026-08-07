@@ -14,7 +14,7 @@ import {
 } from './dto/caja-chica.dto';
 
 const FONDO_COLS =
-  'id, usuario_id, moneda, activo, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
+  'id, usuario_id, moneda, activo, es_acumulada, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
 const MOV_COLS =
   'id, fondo_id, tipo, monto, moneda, fecha, autorizado_por, referencia, notas, registrado_por, created_at';
 
@@ -31,10 +31,22 @@ export class CajaChicaService {
     return m.tipo === TipoMovimientoCaja.REINTEGRO ? -monto : monto;
   }
 
-  private saldoFromParts(movs: CajaMov[], efectivo: EfectivoGasto[]): number {
+  /**
+   * Saldo del fondo. Modo clásico: lo entregado menos lo gastado. Modo
+   * ACUMULADO (es_acumulada, pedido 6 ago 2026): el número es lo POR REPONER
+   * al usuario — sube con cada gasto en efectivo y las REPOSICIONES lo
+   * regresan a cero. Es el mismo cálculo con el signo invertido; una sola
+   * fórmula para que jamás diverjan.
+   */
+  private saldoFromParts(
+    movs: CajaMov[],
+    efectivo: EfectivoGasto[],
+    esAcumulada = false,
+  ): number {
     const movTotal = movs.reduce((s, m) => s + this.signed(m), 0);
     const efectivoTotal = efectivo.reduce((s, g) => s + Number(g.monto), 0);
-    return round(movTotal - efectivoTotal, 2);
+    const saldo = round(movTotal - efectivoTotal, 2);
+    return esAcumulada ? round(-saldo, 2) : saldo;
   }
 
   // ===== Fondos =====
@@ -72,7 +84,11 @@ export class CajaChicaService {
       );
       return {
         ...fo,
-        saldo: this.saldoFromParts(movsByFondo.get(fo.id) ?? [], efectivo),
+        saldo: this.saldoFromParts(
+          movsByFondo.get(fo.id) ?? [],
+          efectivo,
+          fo.es_acumulada === true,
+        ),
       };
     });
 
@@ -301,6 +317,7 @@ export class CajaChicaService {
       .insert({
         usuario_id: dto.usuario_id,
         moneda: dto.moneda ?? 'MXN',
+        es_acumulada: dto.es_acumulada ?? false,
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,
@@ -454,7 +471,11 @@ export class CajaChicaService {
     const efectivo = (gastos ?? []).filter(
       (g) => (g as { moneda: string }).moneda === fo.moneda,
     );
-    const saldo = this.saldoFromParts(allMovs.data ?? [], efectivo);
+    const saldo = this.saldoFromParts(
+      allMovs.data ?? [],
+      efectivo,
+      (fo as { es_acumulada?: boolean }).es_acumulada === true,
+    );
 
     return { fondo, saldo, movimientos: movs ?? [] };
   }

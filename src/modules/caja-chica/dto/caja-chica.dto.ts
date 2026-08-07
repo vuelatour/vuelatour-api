@@ -59,6 +59,14 @@ export class CreateFondoDto {
   @IsEnum(MonedaCaja)
   moneda?: MonedaCaja;
 
+  @ApiPropertyOptional({
+    description:
+      'Caja ACUMULADA (al revés): el saldo es lo POR REPONER — sube al gastar y vuelve a 0 al reponer. Para admins/pilotos que gastan de su bolsa.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_acumulada?: boolean;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -70,6 +78,13 @@ export class UpdateFondoDto {
   @IsOptional()
   @IsBoolean()
   activo?: boolean;
+
+  @ApiPropertyOptional({
+    description: 'Cambiar el modo de la caja (acumulada / fondo clásico).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  es_acumulada?: boolean;
 
   @ApiPropertyOptional({ enum: MonedaCaja })
   @IsOptional()
