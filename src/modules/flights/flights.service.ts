@@ -3000,13 +3000,32 @@ export class FlightsService {
         current.orden as number,
         current.aeronave_id as string | null,
       );
-      if (
-        correcta != null &&
-        correcta !== Number(current.taco_salida) &&
-        correcta < Number(dto.taco_llegada)
-      ) {
-        patch.taco_salida = correcta;
-        patch.taco_salida_origen = 'DEDUCIDO';
+      if (correcta != null && correcta !== Number(current.taco_salida)) {
+        // Escritura APARTE con guarda por origen (no en el patch): si el
+        // piloto u oficina capturaron la salida real entre la lectura y este
+        // write, el UPDATE afecta 0 filas y la captura real no se pisa jamás.
+        const cabe = correcta < Number(dto.taco_llegada);
+        await this.supabase.service
+          .from('escala')
+          .update(
+            cabe
+              ? {
+                  taco_salida: correcta,
+                  taco_salida_origen: 'DEDUCIDO',
+                  updated_by: userId,
+                }
+              : {
+                  // No cabe bajo la llegada capturada: la copia vieja cede en
+                  // amarillo — jamás abandonar en silencio con el dato falso.
+                  taco_salida: null,
+                  taco_salida_origen: null,
+                  revision_requerida: true,
+                  revision_motivo: `Salida estimada retirada: la llegada real del tramo anterior (${correcta}) no cabe bajo la llegada capturada (${dto.taco_llegada}) — revisar ambas lecturas en oficina`,
+                  updated_by: userId,
+                },
+          )
+          .eq('id', escalaId)
+          .eq('taco_salida_origen', 'DEDUCIDO');
       }
     }
     if (salidaDeducidaCede) {
@@ -3450,9 +3469,11 @@ export class FlightsService {
     const llegada =
       dto.taco_llegada ??
       (current.taco_llegada === null ? null : Number(current.taco_llegada));
-    if (salida !== null && llegada !== null && llegada < salida) {
+    // El CHECK de BD es ESTRICTO (llegada > salida): la igualdad también
+    // revienta — mejor un 409 claro aquí que un 500 del CHECK.
+    if (salida !== null && llegada !== null && llegada <= salida) {
       throw new ConflictException(
-        'taco_llegada no puede ser menor a taco_salida',
+        `taco_llegada (${llegada}) debe ser MAYOR a taco_salida (${salida}): un tramo volado no puede quedar en 0.0 horas`,
       );
     }
 
@@ -3508,13 +3529,25 @@ export class FlightsService {
         current.orden as number,
         current.aeronave_id as string | null,
       );
-      if (
-        correcta != null &&
-        correcta !== Number(current.taco_salida) &&
-        correcta < Number(dto.taco_llegada)
-      ) {
-        patch.taco_salida = correcta;
-        patch.taco_salida_origen = 'DEDUCIDO';
+      if (correcta != null && correcta !== Number(current.taco_salida)) {
+        if (correcta >= Number(dto.taco_llegada)) {
+          // La oficina está viendo los números: mejor un error accionable
+          // que un estado a medias.
+          throw new ConflictException(
+            `La llegada tecleada (${dto.taco_llegada}) es menor o igual a la llegada real del tramo anterior (${correcta}): revisa ambas lecturas.`,
+          );
+        }
+        // Escritura APARTE con guarda por origen: una captura real
+        // concurrente (piloto/oficina) no se pisa jamás.
+        await this.supabase.service
+          .from('escala')
+          .update({
+            taco_salida: correcta,
+            taco_salida_origen: 'DEDUCIDO',
+            updated_by: userId,
+          })
+          .eq('id', escalaId)
+          .eq('taco_salida_origen', 'DEDUCIDO');
       }
     }
     if (dto.taco_salida !== undefined) {
@@ -3533,13 +3566,33 @@ export class FlightsService {
     if (dto.foto_taco_llegada_url !== undefined)
       patch.foto_taco_llegada_url = dto.foto_taco_llegada_url;
 
+    // Confirmar APAGA la vigilancia (revision_requerida=false): si el tramo
+    // quedaría sin salida, nadie volvería a mirarlo y sus horas voladas
+    // serían null en silencio. Mejor pedirla explícitamente.
+    const salidaFinal: unknown =
+      patch.taco_salida !== undefined ? patch.taco_salida : current.taco_salida;
+    if (salidaFinal == null) {
+      throw new ConflictException(
+        'Este tramo no tiene taco de salida: captúrala o ajústala antes de confirmar — sin ella el tramo queda sin horas voladas.',
+      );
+    }
+
     const { data, error } = await this.supabase.service
       .from('escala')
       .update(patch)
       .eq('id', escalaId)
       .select(ESCALA_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // CHECK taco_llegada > taco_salida (23514): datos que no cuadran = 409
+      // accionable, nunca 500 (un 500 dispara reintentos del outbox).
+      if ((error as { code?: string }).code === '23514') {
+        throw new ConflictException(
+          'Las lecturas no cuadran (la llegada debe ser mayor a la salida): revisa los números tecleados.',
+        );
+      }
+      throw new Error(error.message);
+    }
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
 
     if (llegada !== null) {
@@ -3620,7 +3673,9 @@ export class FlightsService {
   ): Promise<number | null> {
     const { data } = await this.supabase.service
       .from('escala')
-      .select('aeronave_id, taco_llegada')
+      .select(
+        'aeronave_id, taco_llegada, taco_llegada_origen, revision_requerida',
+      )
       .eq('vuelo_id', vueloId)
       .lt('orden', orden)
       .is('cancelada_at', null)
@@ -3628,8 +3683,28 @@ export class FlightsService {
       .limit(1);
     const ant = (data ?? [])[0];
     if (!ant || ant.taco_llegada == null) return null;
-    if ((ant.aeronave_id ?? null) !== (aeronaveId ?? null)) return null;
+    // Solo llegadas REALES y confirmadas viajan como copia: una llegada IA en
+    // amarillo (sin confirmar) o un DEDUCIDO histórico no son evidencia.
+    if (ant.taco_llegada_origen === 'DEDUCIDO') return null;
+    if (ant.revision_requerida === true) return null;
+    // Avión por tramo con herencia: un tramo sin avión propio pertenece al
+    // del vuelo — null vs id explícito del MISMO avión no son aviones
+    // distintos.
+    const vueloAeronave = await this.aeronaveDelVuelo(vueloId);
+    const antAvion = (ant.aeronave_id as string | null) ?? vueloAeronave;
+    const miAvion = aeronaveId ?? vueloAeronave;
+    if (antAvion !== miAvion) return null;
     return roundTaco(Number(ant.taco_llegada));
+  }
+
+  /** aeronave_id del vuelo (para resolver tramos con avión heredado). */
+  private async aeronaveDelVuelo(vueloId: string): Promise<string | null> {
+    const { data } = await this.supabase.service
+      .from('vuelo')
+      .select('aeronave_id')
+      .eq('id', vueloId)
+      .maybeSingle();
+    return (data?.aeronave_id as string | null) ?? null;
   }
 
   private async propagarLlegadaASalidaSiguiente(
@@ -3644,7 +3719,7 @@ export class FlightsService {
     const { data: siguientes } = await this.supabase.service
       .from('escala')
       .select(
-        'id, orden, aeronave_id, taco_salida, taco_salida_origen, taco_llegada',
+        'id, orden, aeronave_id, taco_salida, taco_salida_origen, taco_llegada, revision_motivo',
       )
       .eq('vuelo_id', vueloId)
       .gt('orden', orden)
@@ -3653,7 +3728,11 @@ export class FlightsService {
       .limit(1);
     const sig = (siguientes ?? [])[0];
     if (!sig) return;
-    if ((sig.aeronave_id ?? null) !== (aeronaveId ?? null)) return; // otro avión
+    // Avión con herencia del vuelo: null = el del vuelo, no "otro avión".
+    const vueloAeronave = await this.aeronaveDelVuelo(vueloId);
+    const sigAvion = (sig.aeronave_id as string | null) ?? vueloAeronave;
+    const miAvion = aeronaveId ?? vueloAeronave;
+    if (sigAvion !== miAvion) return; // otro avión
     const valor = roundTaco(tacoLlegada);
     // La llegada REAL del tramo anterior es la salida física del siguiente.
     // Una salida DEDUCIDA es provisional (el cron pudo llenarla con el último
@@ -3671,13 +3750,21 @@ export class FlightsService {
     // abandona en silencio dejando el dato viejo como si fuera bueno.
     if (sig.taco_llegada != null && Number(sig.taco_llegada) <= valor) {
       if (esDeducida) {
+        // La bitácora de procedencia ("Registro: …") sobrevive al cede: es la
+        // explicación histórica del dato, no una alerta.
+        const bitacora = leerBitacora(
+          (sig.revision_motivo as string | null) ?? null,
+        );
+        const motivo = `Salida estimada retirada: la llegada corregida del tramo anterior (${valor}) la contradice — revisar la llegada de este tramo y confirmar la salida en oficina`;
         await this.supabase.service
           .from('escala')
           .update({
             taco_salida: null,
             taco_salida_origen: null,
             revision_requerida: true,
-            revision_motivo: `Salida estimada retirada: la llegada corregida del tramo anterior (${valor}) la contradice — revisar la llegada de este tramo y confirmar la salida en oficina`,
+            revision_motivo: bitacora
+              ? `${motivo}; ${PROCEDENCIA_PREFIX}${bitacora}`
+              : motivo,
             updated_by: userId,
           })
           .eq('id', sig.id as string)
@@ -4347,8 +4434,10 @@ export class FlightsService {
         e.taco_llegada === null
           ? null
           : ((e.taco_llegada_origen as string | null) ?? null),
+      // Una llegada en AMARILLO (IA de sync offline sin confirmar) NO se
+      // propaga: la política dice que la lectura IA no viaja sin confirmación.
+      llegadaSinConfirmar: e.revision_requerida === true,
       cambios: [] as string[],
-      salidaDeducida: false,
       // Solo se escribe lo que RELLENÓ este proceso (estaba null al leer);
       // lo que ya tenía valor jamás se re-escribe (podría pisar una captura
       // del piloto ocurrida entre la lectura y el write).
@@ -4365,13 +4454,12 @@ export class FlightsService {
       if (r.salida !== null) continue;
       const prev = rows[i - 1];
       if (prev.llegada === null || prev.aeronaveId !== r.aeronaveId) continue;
+      // Llegada IA sin confirmar (amarilla): no se propaga — la política del
+      // cliente exige confirmación antes de que una lectura IA viaje.
+      if (prev.llegadaSinConfirmar) continue;
       r.salida = prev.llegada;
       r.salidaRellenada = true;
       r.cambios.push('salida tomada de la llegada del tramo anterior');
-      // Si la llegada anterior está persistida como DEDUCIDO (histórico),
-      // esta salida hereda la marca: propagar una adivinanza no la convierte
-      // en dato (y así sigue cediendo ante la evidencia real).
-      if (prev.llegadaOrigenBD === 'DEDUCIDO') r.salidaDeducida = true;
     }
 
     // (2) SUGERENCIAS (antes se escribían como DEDUCIDO, hoy solo se
@@ -4421,9 +4509,11 @@ export class FlightsService {
       if (!r.salidaRellenada) continue;
       const patch: Record<string, unknown> = {
         taco_salida: roundTaco(r.salida as number),
-        // Origen en TODO camino de escritura: propagada de una llegada real
-        // = dato exacto (PILOTO); de un DEDUCIDO histórico = DEDUCIDO.
-        taco_salida_origen: r.salidaDeducida ? 'DEDUCIDO' : 'PILOTO',
+        // La COPIA propagada es SIEMPRE DEDUCIDO (misma regla que
+        // propagarLlegadaASalidaSiguiente): etiquetarla PILOTO la volvía
+        // "captura real" imborrable y una corrección posterior de la llegada
+        // fuente ya no podía arreglarla (caso vuelo #123, cerrado ago 2026).
+        taco_salida_origen: 'DEDUCIDO',
       };
       if (userId) patch.updated_by = userId;
       // Guarda condicional: si el piloto (o el cron gemelo) capturó entre la
@@ -4871,9 +4961,10 @@ export class FlightsService {
     }
     // Evidencia de que el tramo VOLÓ = su LLEGADA real (≠ DEDUCIDO) o
     // cualquier FOTO propia. La SALIDA nunca cuenta como evidencia, de ningún
-    // origen: la llena el sistema (último taco / PROPAGACIÓN de la llegada
-    // del tramo anterior, que HEREDA el origen PILOTO — caso real #74: el
-    // regreso jamás voló pero su salida decía PILOTO por la propagación).
+    // origen: la llena el sistema (último taco / propagación de la llegada
+    // del tramo anterior, hoy siempre marcada DEDUCIDO — pero hay salidas
+    // históricas con origen heredado PILOTO, caso real #74: el regreso jamás
+    // voló y su salida decía PILOTO por la propagación vieja).
     const llegadaReal =
       row.taco_llegada !== null && row.taco_llegada_origen !== 'DEDUCIDO';
     if (llegadaReal || row.foto_taco_salida_url || row.foto_taco_llegada_url) {
