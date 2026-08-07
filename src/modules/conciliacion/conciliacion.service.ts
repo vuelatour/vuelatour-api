@@ -29,6 +29,13 @@ const MATCH_DAYS = 3;
  */
 const MEDIOS_BANCARIOS = ['TARJETA_CORP', 'TRANSFERENCIA'];
 
+// Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. El cruce
+// USD↔MXN solo se acepta si el TC implícito (cargo MXN ÷ gasto USD) cae en
+// esta banda plausible — fuera de ella es casi seguro otro gasto. Ajustar si
+// el peso se mueve de este rango.
+const TC_IMPLICITO_MIN = 15;
+const TC_IMPLICITO_MAX = 25;
+
 export interface ParsedStatement {
   movimientos: Array<{
     fecha: string | null;
@@ -50,6 +57,9 @@ export interface SugerenciaConciliacion {
   razon: string;
   /** Gastos candidatos considerados (para que el front muestre opciones). */
   candidatos: Array<{
+    /** USD = compra en dólares cuyo cargo llegó en pesos (TC implícito). */
+    moneda?: string;
+    tc_implicito?: number | null;
     id: string;
     fecha: string | null;
     monto: number;
@@ -166,8 +176,7 @@ export class ConciliacionService {
         .from('conciliacion_import_job')
         .update({ ...patch, updated_at: new Date().toISOString() })
         .eq('id', jobId);
-      if (error)
-        this.logger.warn(`import job ${jobId}: ${error.message}`);
+      if (error) this.logger.warn(`import job ${jobId}: ${error.message}`);
     };
     try {
       const res = await this.ejecutarImport(
@@ -469,11 +478,40 @@ export class ConciliacionService {
       .limit(2);
     if (moneda) q = q.eq('moneda', moneda);
     const { data, error } = await q;
-    if (error || !data || data.length !== 1) return false;
+    if (error) return false;
+    if (data && data.length === 1) {
+      await this.link(movId, data[0].id, userId);
+      return true;
+    }
+    if ((data ?? []).length > 1) return false;
 
-    const gastoId = data[0].id;
-    await this.link(movId, gastoId, userId);
-    return true;
+    // Sin candidato en la moneda de la cuenta. Cuenta MXN: puede ser una
+    // compra EN DÓLARES cuyo cargo llegó en pesos (Aircraft Spruce). Se
+    // acepta SOLO si hay exactamente un gasto USD sin conciliar cuyo TC
+    // implícito (cargo ÷ monto) es plausible — el vínculo guarda ese TC.
+    if (moneda === 'MXN' && monto > 0) {
+      const { data: usd, error: usdErr } = await this.supabase.service
+        .from('gasto')
+        .select('id, monto')
+        .eq('moneda', 'USD')
+        .eq('conciliado', false)
+        .in('medio_pago', MEDIOS_BANCARIOS)
+        .gte('fecha_gasto', iso(lo))
+        .lte('fecha_gasto', iso(hi))
+        .limit(25);
+      if (usdErr) return false;
+      const plausibles = (usd ?? []).filter((g) => {
+        const m = Number((g as { monto: unknown }).monto);
+        if (!(m > 0)) return false;
+        const tc = monto / m;
+        return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX;
+      });
+      if (plausibles.length === 1) {
+        await this.link(movId, plausibles[0].id as string, userId);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -619,7 +657,9 @@ export class ConciliacionService {
   async crearClasificacion(nombre: string, userId: string) {
     const limpio = nombre.trim().replace(/\s+/g, ' ');
     if (limpio.length < 2) {
-      throw new BadRequestException('El nombre de la clasificación es muy corto.');
+      throw new BadRequestException(
+        'El nombre de la clasificación es muy corto.',
+      );
     }
     const { data: existente, error: exErr } = await this.supabase.service
       .from('conciliacion_clasificacion')
@@ -679,7 +719,8 @@ export class ConciliacionService {
         .eq('id', clasificacionId)
         .maybeSingle();
       if (clErr) throw new Error(clErr.message);
-      if (!clasif) throw new BadRequestException('Clasificación no encontrada.');
+      if (!clasif)
+        throw new BadRequestException('Clasificación no encontrada.');
     }
     const patch: Record<string, unknown> = {
       clasificacion_id: clasificacionId,
@@ -926,21 +967,30 @@ export class ConciliacionService {
   async link(movId: string, gastoId: string | null, userId: string) {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id, gasto_id')
+      .select('id, gasto_id, monto, cuenta_bancaria_id')
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
     const prevGasto = (mov as { gasto_id: string | null }).gasto_id;
+    const movMonto = Math.abs(Number((mov as { monto: unknown }).monto)) || 0;
 
     // Un gasto ya conciliado NO puede cuadrar una segunda línea del banco
     // (doble conciliación). El auto-match ya lo respeta; el vínculo manual
     // también debe hacerlo.
+    type GastoLink = {
+      id: string;
+      conciliado: boolean;
+      moneda: string | null;
+      monto: number;
+      tc_gasto: number | null;
+    };
+    let gastoVinculado: GastoLink | null = null;
     if (gastoId && gastoId !== prevGasto) {
       const { data: gasto, error: gastoErr } = await this.supabase.service
         .from('gasto')
-        .select('id, conciliado')
+        .select('id, conciliado, moneda, monto, tc_gasto')
         .eq('id', gastoId)
         .maybeSingle();
       if (gastoErr) throw new Error(gastoErr.message);
@@ -950,15 +1000,32 @@ export class ConciliacionService {
           'Ese gasto ya está conciliado con otro movimiento bancario.',
         );
       }
+      gastoVinculado = gasto;
     }
 
     if (prevGasto && prevGasto !== gastoId) {
       // Libera el gasto previamente vinculado. Si falla, se aborta: dejarlo
       // conciliado=true sin movimiento lo sacaría de la conciliación en
       // silencio (regla del repo: nada de fallos silenciosos en dinero).
+      // Si su tc_gasto fue DERIVADO de este cargo (gasto USD con TC ≈ cargo
+      // MXN ÷ monto), también se limpia: era información de este vínculo.
+      const { data: prev } = await this.supabase.service
+        .from('gasto')
+        .select('moneda, monto, tc_gasto')
+        .eq('id', prevGasto)
+        .maybeSingle();
+      const limpiarTc =
+        prev?.moneda === 'USD' &&
+        prev.tc_gasto != null &&
+        Number(prev.monto) > 0 &&
+        Math.abs(Number(prev.tc_gasto) - movMonto / Number(prev.monto)) < 0.001;
       const { error: liberaErr } = await this.supabase.service
         .from('gasto')
-        .update({ conciliado: false, updated_by: userId })
+        .update({
+          conciliado: false,
+          ...(limpiarTc ? { tc_gasto: null } : {}),
+          updated_by: userId,
+        })
         .eq('id', prevGasto);
       if (liberaErr) {
         throw new Error(
@@ -993,11 +1060,38 @@ export class ConciliacionService {
     }
 
     if (gastoId) {
+      // Compra en DÓLARES conciliada contra un cargo en PESOS: el estado de
+      // cuenta REVELA el tipo de cambio real del banco (cargo MXN ÷ gasto
+      // USD). Se guarda como tc_gasto para que el balance por avión y los
+      // reportes usen los pesos exactos que se pagaron — sin capturas extra.
+      let tcDerivado: number | null = null;
+      if (
+        gastoVinculado?.moneda === 'USD' &&
+        gastoVinculado.tc_gasto == null &&
+        Number(gastoVinculado.monto) > 0 &&
+        movMonto > 0
+      ) {
+        const cuentaMoneda = await this.monedaCuenta(
+          (mov as { cuenta_bancaria_id: string }).cuenta_bancaria_id,
+        );
+        const tc = movMonto / Number(gastoVinculado.monto);
+        if (
+          cuentaMoneda === 'MXN' &&
+          tc >= TC_IMPLICITO_MIN &&
+          tc <= TC_IMPLICITO_MAX
+        ) {
+          tcDerivado = Math.round(tc * 10000) / 10000;
+        }
+      }
       // Si falla, se avisa: un gasto que sigue conciliado=false puede volver a
       // matchearse con OTRO cargo (doble conciliación silenciosa).
       const { error: marcaErr } = await this.supabase.service
         .from('gasto')
-        .update({ conciliado: true, updated_by: userId })
+        .update({
+          conciliado: true,
+          ...(tcDerivado != null ? { tc_gasto: tcDerivado } : {}),
+          updated_by: userId,
+        })
         .eq('id', gastoId);
       if (marcaErr) {
         throw new Error(
@@ -1138,7 +1232,7 @@ export class ConciliacionService {
     let query = this.supabase.service
       .from('gasto')
       .select(
-        'id, fecha_gasto, monto, proveedor:proveedor!proveedor_id(nombre)',
+        'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
       )
       .eq('conciliado', false)
       // Solo medios que tocan el banco (misma regla que autoMatch).
@@ -1152,22 +1246,53 @@ export class ConciliacionService {
     const { data, error } = await query;
     if (error) throw new Error(error.message);
 
-    return (data ?? []).map((g) => {
-      const row = g as {
-        id: string;
-        fecha_gasto: string | null;
-        monto: number;
-        proveedor: { nombre: string } | { nombre: string }[] | null;
-      };
-      const prov = Array.isArray(row.proveedor)
-        ? row.proveedor[0]
-        : row.proveedor;
+    type GastoRow = {
+      id: string;
+      fecha_gasto: string | null;
+      monto: number;
+      moneda?: string | null;
+      proveedor: { nombre: string } | { nombre: string }[] | null;
+    };
+    const aCandidato = (g: GastoRow, tcImplicito: number | null) => {
+      const prov = Array.isArray(g.proveedor) ? g.proveedor[0] : g.proveedor;
       return {
-        id: row.id,
-        fecha: row.fecha_gasto,
-        monto: Number(row.monto),
+        id: g.id,
+        fecha: g.fecha_gasto,
+        monto: Number(g.monto),
+        moneda: g.moneda ?? undefined,
+        tc_implicito: tcImplicito,
         proveedor: prov?.nombre ?? null,
       };
-    });
+    };
+    const propios = ((data ?? []) as GastoRow[]).map((g) =>
+      aCandidato(g, null),
+    );
+
+    // Cuenta en PESOS: una compra EN DÓLARES cuyo cargo llegó en MXN no cae
+    // en la banda del monto — se ofrece aparte si su TC implícito (cargo ÷
+    // gasto USD) es plausible, con el TC visible para que el operador decida.
+    if (moneda !== 'MXN' || !(monto > 0)) return propios;
+    const { data: usd, error: usdErr } = await this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
+      )
+      .eq('moneda', 'USD')
+      .eq('conciliado', false)
+      .in('medio_pago', MEDIOS_BANCARIOS)
+      .gte('fecha_gasto', iso(lo))
+      .lte('fecha_gasto', iso(hi))
+      .limit(15);
+    if (usdErr) return propios;
+    const cruzados = ((usd ?? []) as GastoRow[])
+      .map((g) => {
+        const m = Number(g.monto);
+        const tc = m > 0 ? monto / m : 0;
+        return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX
+          ? aCandidato(g, Math.round(tc * 10000) / 10000)
+          : null;
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null);
+    return [...propios, ...cruzados];
   }
 }
