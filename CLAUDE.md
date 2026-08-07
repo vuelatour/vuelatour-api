@@ -135,6 +135,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Candado de cobro anticipado (origen ≠ CUN), regla TUAS por tramo, monto de
   pernocta al piloto, costo de PILOTO como categoría del reparto (doc 4.8) —
   esperan reunión con el cliente.
+- **Multi-avión en el PRECIO** (viaje multi-día con tramos de aviones
+  distintos): hoy se cotiza con el avión principal (una tarifa/velocidad;
+  TUAS por su matrícula) y el reparto atribuye el 100% del ingreso a
+  `vuelo.aeronave_id` aunque las horas van por tramo. Tarifa por tramo +
+  prorrateo del ingreso requieren decisión del cliente.
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.
