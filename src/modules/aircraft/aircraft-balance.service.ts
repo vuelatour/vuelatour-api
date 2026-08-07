@@ -404,18 +404,33 @@ export class AircraftBalanceService {
       const conIva = (ivaSistemaUsd ?? 0) > 0;
       const G = E != null ? (conIva ? round2(E * 0.16) : 0) : null;
       const H = E != null ? round2(E + (G ?? 0)) : null;
-      const I = H != null && D > 0 ? round2(D * H) : null; // venta del vuelo
-      const J = G != null && D > 0 ? round2(D * G) : null; // IVA del vuelo
+      // Venta por horas (informativa) — el libro original la usaba como la
+      // fila entera, pero dejaba fuera TUAs/extras/ajustes.
+      const ventaHorasUsd = H != null && D > 0 ? round2(D * H) : null;
+      // TOTAL COBRADO AL CLIENTE = el DESGLOSE COMPLETO de la cotización
+      // (tiempo + TUAs + extras + pernocta + ajustes + IVA). Reporte del
+      // cliente 7 ago 2026 (vuelo #11): la fila decía 28,415.70 MXN cuando el
+      // cobro real fue 30,315.85 — faltaban los TUAs y el ajuste, y "por
+      // cobrar" quedaba negativo. Sin cotización, respaldo = horas × tarifa.
+      const I =
+        totalSistemaUsd != null && totalSistemaUsd !== 0
+          ? round2(totalSistemaUsd)
+          : ventaHorasUsd;
+      const J =
+        ivaSistemaUsd != null
+          ? round2(ivaSistemaUsd)
+          : G != null && D > 0
+            ? round2(D * G)
+            : null;
       const K = pos(v.tc_usd_mxn);
       const L = I != null && K != null ? round2(I * K) : null;
       const M = J != null && K != null ? round2(J * K) : null;
       const N = L != null ? round2(L - (M ?? 0)) : null;
-      // Otros ingresos del vuelo (TUAS/extras/pernocta/ajustes): diferencia
-      // entre el total cotizado del sistema y la venta por horas. Se acumula
-      // para informarlo al pie (va a la general, no a la fila).
+      // TUAs/extras/pernocta/ajustes del periodo (total − venta por horas):
+      // ahora es INFORMATIVO — ya están dentro de las filas, no se traslada.
       const otrosIngresosUsd =
-        totalSistemaUsd != null && (I != null || D === 0)
-          ? round2(totalSistemaUsd - (I ?? 0))
+        totalSistemaUsd != null && (ventaHorasUsd != null || D === 0)
+          ? round2(totalSistemaUsd - (ventaHorasUsd ?? 0))
           : null;
       if (otrosIngresosUsd != null) otrosIngresosPeriodoUsd += otrosIngresosUsd;
 
