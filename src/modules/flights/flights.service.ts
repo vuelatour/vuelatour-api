@@ -2984,6 +2984,30 @@ export class FlightsService {
         patch.taco_salida = ultimo;
         patch.taco_salida_origen = 'DEDUCIDO';
       }
+    } else if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_salida === undefined &&
+      current.taco_salida != null &&
+      current.taco_salida_origen === 'DEDUCIDO' &&
+      !salidaDeducidaCede
+    ) {
+      // La salida DEDUCIDA de este tramo puede haber quedado VIEJA (caso
+      // #123: se copió la llegada errónea del tramo anterior y el piloto la
+      // corrigió después). Editar la llegada de ESTE tramo la re-sincroniza
+      // con la llegada real del tramo anterior — la identidad física manda.
+      const correcta = await this.llegadaDelTramoAnterior(
+        current.vuelo_id as string,
+        current.orden as number,
+        current.aeronave_id as string | null,
+      );
+      if (
+        correcta != null &&
+        correcta !== Number(current.taco_salida) &&
+        correcta < Number(dto.taco_llegada)
+      ) {
+        patch.taco_salida = correcta;
+        patch.taco_salida_origen = 'DEDUCIDO';
+      }
     }
     if (salidaDeducidaCede) {
       // El CHECK de BD tolera salida NULL con llegada presente; nada de este
@@ -3402,7 +3426,7 @@ export class FlightsService {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, cancelada_at, revision_motivo',
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_salida_origen, taco_llegada, cancelada_at, revision_motivo',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -3469,6 +3493,29 @@ export class FlightsService {
         patch.taco_salida = ultimo;
         patch.taco_salida_origen = 'DEDUCIDO';
       }
+    } else if (
+      dto.taco_llegada !== undefined &&
+      dto.taco_llegada !== null &&
+      dto.taco_salida === undefined &&
+      current.taco_salida != null &&
+      current.taco_salida_origen === 'DEDUCIDO'
+    ) {
+      // Mismo re-sync que captureTaco (caso #123): al ajustar la llegada de
+      // un tramo cuya salida DEDUCIDA quedó vieja, se corrige con la llegada
+      // real del tramo anterior.
+      const correcta = await this.llegadaDelTramoAnterior(
+        current.vuelo_id as string,
+        current.orden as number,
+        current.aeronave_id as string | null,
+      );
+      if (
+        correcta != null &&
+        correcta !== Number(current.taco_salida) &&
+        correcta < Number(dto.taco_llegada)
+      ) {
+        patch.taco_salida = correcta;
+        patch.taco_salida_origen = 'DEDUCIDO';
+      }
     }
     if (dto.taco_salida !== undefined) {
       patch.taco_salida = dto.taco_salida;
@@ -3502,7 +3549,6 @@ export class FlightsService {
         current.aeronave_id as string | null,
         llegada,
         userId,
-        dto.taco_llegada !== undefined ? 'OFICINA' : 'PILOTO',
       );
     }
 
@@ -3562,13 +3608,36 @@ export class FlightsService {
    * una lectura existente ni cruza aviones distintos (cada matrícula lleva su
    * horómetro).
    */
+  /**
+   * Salida correcta de un tramo por identidad física: la LLEGADA REAL del
+   * tramo activo anterior del mismo avión (el horómetro no se mueve apagado).
+   * null si no hay tramo anterior con llegada.
+   */
+  private async llegadaDelTramoAnterior(
+    vueloId: string,
+    orden: number,
+    aeronaveId: string | null,
+  ): Promise<number | null> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select('aeronave_id, taco_llegada')
+      .eq('vuelo_id', vueloId)
+      .lt('orden', orden)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: false })
+      .limit(1);
+    const ant = (data ?? [])[0];
+    if (!ant || ant.taco_llegada == null) return null;
+    if ((ant.aeronave_id ?? null) !== (aeronaveId ?? null)) return null;
+    return roundTaco(Number(ant.taco_llegada));
+  }
+
   private async propagarLlegadaASalidaSiguiente(
     vueloId: string,
     orden: number,
     aeronaveId: string | null,
     tacoLlegada: number,
     userId: string,
-    origen: 'PILOTO' | 'IA' | 'DEDUCIDO' | 'OFICINA' = 'PILOTO',
   ): Promise<void> {
     // Un tramo cancelado no recibe propagación: la llegada salta al siguiente
     // tramo ACTIVO (mismo avión) — p. ej. ida → (regreso cancelado) → ferry.
@@ -3594,18 +3663,41 @@ export class FlightsService {
     const esDeducida = sig.taco_salida_origen === 'DEDUCIDO';
     if (sig.taco_salida != null && !esDeducida) return; // captura real: no se pisa
     if (sig.taco_salida != null && Number(sig.taco_salida) === valor) return; // ya está bien
-    // El constraint exige llegada > salida: si el tramo ya tiene llegada menor
-    // o igual al valor propagado, la cadena está rara — que la vea oficina.
-    if (sig.taco_llegada != null && Number(sig.taco_llegada) <= valor) return;
+    // El constraint exige llegada > salida: si el tramo siguiente ya tiene una
+    // llegada menor o igual al valor propagado, la copia deducida quedó
+    // CONTRADICHA por la corrección (caso vuelo #123: el piloto corrigió la
+    // llegada del tramo 1 y la salida vieja del tramo 2 se quedaba muda).
+    // El deducido CEDE: se retira, en amarillo, y oficina resuelve — jamás se
+    // abandona en silencio dejando el dato viejo como si fuera bueno.
+    if (sig.taco_llegada != null && Number(sig.taco_llegada) <= valor) {
+      if (esDeducida) {
+        await this.supabase.service
+          .from('escala')
+          .update({
+            taco_salida: null,
+            taco_salida_origen: null,
+            revision_requerida: true,
+            revision_motivo: `Salida estimada retirada: la llegada corregida del tramo anterior (${valor}) la contradice — revisar la llegada de este tramo y confirmar la salida en oficina`,
+            updated_by: userId,
+          })
+          .eq('id', sig.id as string)
+          .eq('taco_salida_origen', 'DEDUCIDO');
+      }
+      return;
+    }
     // Guarda atómica además del check en memoria: si el piloto capturó la
     // salida entre la lectura y este write, el UPDATE afecta 0 filas (no-op)
     // y su lectura se respeta. Para corregir una DEDUCIDA, la guarda es por
     // origen (solo pisa mientras SIGA siendo deducida).
+    //
+    // La copia se escribe SIEMPRE como DEDUCIDO (invariante: las copias son
+    // provisionales). Etiquetarla PILOTO/OFICINA la volvía "captura real" y
+    // una corrección posterior de la llegada origen ya no podía arreglarla.
     let query = this.supabase.service
       .from('escala')
       .update({
         taco_salida: valor,
-        taco_salida_origen: origen,
+        taco_salida_origen: 'DEDUCIDO',
         updated_by: userId,
       })
       .eq('id', sig.id as string);
