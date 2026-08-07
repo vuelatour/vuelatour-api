@@ -2976,8 +2976,11 @@ export class FlightsService {
       dto.taco_salida === undefined &&
       current.taco_salida == null
     ) {
+      // Avión con herencia: el tramo sin avión propio es del avión del vuelo
+      // — con el null crudo el ancla/relleno se apagaba en silencio.
       const ultimo = await this.ultimoTacoAeronave(
-        current.aeronave_id as string | null,
+        (current.aeronave_id as string | null) ??
+          (await this.aeronaveDelVuelo(current.vuelo_id as string)),
         null,
       );
       if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
@@ -3228,7 +3231,8 @@ export class FlightsService {
         continue;
       }
       const ultimo = await this.ultimoTacoAeronave(
-        escala.aeronave_id as string | null,
+        (escala.aeronave_id as string | null) ??
+          (await this.aeronaveDelVuelo(escala.vuelo_id as string)),
         tacoSalidaActual,
       );
       const ia = await this.vision.readTacometro({ imageUrl: signed, ultimo });
@@ -3280,7 +3284,8 @@ export class FlightsService {
       escala.foto_taco_salida_url == null
     ) {
       const ultimo = await this.ultimoTacoAeronave(
-        escala.aeronave_id as string | null,
+        (escala.aeronave_id as string | null) ??
+          (await this.aeronaveDelVuelo(escala.vuelo_id as string)),
         null,
       );
       if (ultimo != null && ultimo <= Number(patch.taco_llegada)) {
@@ -3506,8 +3511,11 @@ export class FlightsService {
       dto.taco_salida === undefined &&
       current.taco_salida == null
     ) {
+      // Avión con herencia: el tramo sin avión propio es del avión del vuelo
+      // — con el null crudo el ancla/relleno se apagaba en silencio.
       const ultimo = await this.ultimoTacoAeronave(
-        current.aeronave_id as string | null,
+        (current.aeronave_id as string | null) ??
+          (await this.aeronaveDelVuelo(current.vuelo_id as string)),
         null,
       );
       if (ultimo != null && ultimo <= Number(dto.taco_llegada)) {
@@ -3873,7 +3881,7 @@ export class FlightsService {
     const { data: escala, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, origen_iata, destino_iata, taco_salida, aeronave_id, cancelada_at',
+        'id, vuelo_id, origen_iata, destino_iata, taco_salida, aeronave_id, cancelada_at',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -3888,7 +3896,8 @@ export class FlightsService {
     // Ancla de magnitud para la IA: la última lectura conocida de la aeronave.
     // Evita que confunda la décima con un entero (1555.8 vs 15558.1).
     const ultimo = await this.ultimoTacoAeronave(
-      escala.aeronave_id as string | null,
+      (escala.aeronave_id as string | null) ??
+        (await this.aeronaveDelVuelo(escala.vuelo_id as string)),
       escala.taco_salida === null ? null : Number(escala.taco_salida),
     );
 
@@ -4416,12 +4425,16 @@ export class FlightsService {
       .is('cancelada_at', null)
       .order('orden', { ascending: true });
     if (escErr) throw new Error(escErr.message);
+    // Avión con herencia: un tramo sin avión propio pertenece al del vuelo.
+    // Comparar crudo (null vs id explícito del MISMO avión) saltaba la
+    // propagación en tramos ferry heredados (caso vuelo #116, ago 2026).
+    const vueloAeronave = (vuelo.aeronave_id as string | null) ?? null;
     const rows = (escalasData ?? []).map((e) => ({
       id: e.id as string,
       orden: Number(e.orden),
       origen: e.origen_iata as string,
       destino: e.destino_iata as string,
-      aeronaveId: (e.aeronave_id as string | null) ?? null,
+      aeronaveId: (e.aeronave_id as string | null) ?? vueloAeronave,
       pilotoId: (e.piloto_id as string | null) ?? null,
       fechaPlan: (e.fecha_salida_plan as string | null) ?? null,
       horaSalidaReal: (e.hora_salida as string | null) ?? null,
