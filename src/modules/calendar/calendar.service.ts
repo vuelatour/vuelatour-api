@@ -40,7 +40,7 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, fecha_traslado_final, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
       )
       // Trae vuelos cuya salida o regreso caiga en el rango, o que lo abarquen
       // completo (los tramos intermedios de un multiescala viven entre ambas fechas).

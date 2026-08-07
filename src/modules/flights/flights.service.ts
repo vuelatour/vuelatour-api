@@ -43,7 +43,7 @@ import {
 } from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -4803,15 +4803,31 @@ export class FlightsService {
       const hoyCancun = new Date().toLocaleDateString('en-CA', {
         timeZone: 'America/Cancun',
       });
+      const inicioHoy = `${hoyCancun}T00:00:00-05:00`;
+      // Eje = fecha_fin (fin derivado del itinerario, trigger en BD): un
+      // viaje MULTI-DÍA con tramos futuros no es zombi aunque su
+      // fecha_vuelo (día 1) ya haya pasado.
       const { data, error } = await this.supabase.service
         .from('vuelo')
-        .select('id, folio, fecha_vuelo, estado')
+        .select('id, folio, fecha_vuelo, fecha_fin, estado')
         .in('estado', ['EN_VUELO', 'CONFIRMADO'])
         .eq('es_externo', false)
-        .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`);
+        .lt('fecha_fin', inicioHoy);
       if (error) throw new Error(error.message);
       for (const v of data ?? []) {
         try {
+          // Doble guardia (por si fecha_fin quedara vieja): un tramo activo
+          // planeado para hoy o después = el viaje sigue en curso; ni
+          // cerrar ni regañar. El cierre prematuro dejaría el regreso
+          // fuera del vuelo (y del cierre mensual).
+          const { data: futuros } = await this.supabase.service
+            .from('escala')
+            .select('id')
+            .eq('vuelo_id', v.id as string)
+            .is('cancelada_at', null)
+            .gte('fecha_salida_plan', inicioHoy)
+            .limit(1);
+          if ((futuros ?? []).length > 0) continue;
           const escalas = await this.escalasTaco(v.id as string);
           if (this.faltanLlegadas(escalas)) {
             // CONFIRMADO con llegadas incompletas no es zombi: puede que
