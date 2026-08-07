@@ -117,7 +117,11 @@ export class AlertsService {
         .select('id', { count: 'exact', head: true })
         .eq('tipo', 'recordatorio_taco')
         .eq('data->>vuelo_id', v.id as string)
-        .eq('data->>umbral', String(umbral));
+        .eq('data->>umbral', String(umbral))
+        // Los avisos por TRAMO llevan escala_id: sin esta exclusión, un
+        // aviso de tramo emitido antes suprimía el recordatorio de capturar
+        // la salida del tramo 1 (mismo vuelo_id+umbral).
+        .is('data->>escala_id', null);
       if ((count ?? 0) > 0) continue;
 
       await this.notifications.notifyUser(v.piloto_id as string, {
@@ -129,6 +133,76 @@ export class AlertsService {
       });
       this.logger.log(
         `Recordatorio taco #${v.folio as number} · ${umbral} min → piloto ${v.piloto_id as string}`,
+      );
+    }
+
+    // Tramos 2+ (redondos y viajes multi-día): cada tramo avisa en SU día
+    // vía fecha_salida_plan — antes solo existía el aviso del tramo 1. La
+    // salida de estos tramos la llena el sistema (propagación), así que el
+    // aviso es operativo y pide capturar la LLEGADA al aterrizar, nunca
+    // foto de salida (invariante "una foto por escala").
+    const { data: tramos, error: errTramos } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, orden, origen_iata, destino_iata, fecha_salida_plan, piloto_id, taco_llegada, vuelo:vuelo_id!inner(id, folio, piloto_id, fecha_vuelo, estado, es_externo)',
+      )
+      .is('cancelada_at', null)
+      .gt('orden', 1)
+      .gte('fecha_salida_plan', desde)
+      .lte('fecha_salida_plan', hasta)
+      .eq('vuelo.es_externo', false)
+      .in('vuelo.estado', [
+        'RESERVA',
+        'SOLICITUD',
+        'COTIZADO',
+        'CONFIRMADO',
+        'EN_VUELO',
+      ]);
+    if (errTramos) throw new Error(errTramos.message);
+    for (const t of tramos ?? []) {
+      const vuelo = (Array.isArray(t.vuelo) ? t.vuelo[0] : t.vuelo) as Record<
+        string,
+        unknown
+      > | null;
+      if (!vuelo) continue;
+      // Piloto del tramo con herencia del vuelo (asignación por tramo).
+      const pilotoId =
+        (t.piloto_id as string | null) ?? (vuelo.piloto_id as string | null);
+      if (!pilotoId) continue;
+      if (t.taco_llegada !== null) continue; // ese tramo ya voló
+      // Fecha incoherente (tramo 2+ "antes" de la salida del vuelo, típico
+      // dato viejo tras reagendar la ida): mejor callar que avisar mal.
+      const salidaVuelo = vuelo.fecha_vuelo
+        ? new Date(vuelo.fecha_vuelo as string).getTime()
+        : null;
+      const salidaTramo = new Date(t.fecha_salida_plan as string).getTime();
+      if (salidaVuelo != null && salidaTramo <= salidaVuelo) continue;
+      const minutosTramo = (salidaTramo - now) / 60_000;
+      const umbral = AlertsService.TACO_UMBRALES.find(
+        (u) => minutosTramo <= u && minutosTramo > u - 1.5,
+      );
+      if (!umbral) continue;
+      const { count } = await this.supabase.service
+        .from('notificacion')
+        .select('id', { count: 'exact', head: true })
+        .eq('tipo', 'recordatorio_taco')
+        .eq('data->>escala_id', t.id as string)
+        .eq('data->>umbral', String(umbral));
+      if ((count ?? 0) > 0) continue;
+      await this.notifications.notifyUser(pilotoId, {
+        tipo: 'recordatorio_taco',
+        titulo: `Tu tramo sale en ${umbral} min`,
+        cuerpo: `${t.origen_iata as string} → ${t.destino_iata as string} (#${vuelo.folio as number}). Al aterrizar captura la llegada — la salida la llena el sistema.`,
+        data: {
+          vuelo_id: vuelo.id,
+          escala_id: t.id,
+          folio: vuelo.folio,
+          umbral,
+        },
+        link: `/flights/${vuelo.id as string}`,
+      });
+      this.logger.log(
+        `Recordatorio tramo ${t.origen_iata as string}→${t.destino_iata as string} #${vuelo.folio as number} · ${umbral} min → piloto ${pilotoId}`,
       );
     }
   }
@@ -233,7 +307,10 @@ export class AlertsService {
       .select('id')
       .neq('estado', 'CANCELADO')
       .not('fecha_vuelo', 'is', null)
-      .gte('fecha_vuelo', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
+      // fecha_fin: un viaje multi-día EN CURSO (día 1 ya pasado) también se
+      // re-deriva — su regreso puede necesitar permiso marcado a mitad del
+      // viaje.
+      .gte('fecha_fin', new Date(Date.now() - 24 * 3600 * 1000).toISOString())
       .lte('fecha_vuelo', hasta.toISOString())
       .limit(500);
     if (error) throw new Error(error.message);
@@ -378,6 +455,47 @@ export class AlertsService {
         link: `/admin/flights/${v.id}`,
       });
     }
+
+    // Tramos 2+ con permiso propio pendiente: el permiso del regreso (o de
+    // un tramo intermedio de un viaje multi-día) se evalúa contra SU
+    // fecha_salida_plan — el query de arriba solo ve la fecha del día 1.
+    const { data: tramos, error: errTramos } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, origen_iata, destino_iata, fecha_salida_plan, vuelo:vuelo_id!inner(id, folio, estado)',
+      )
+      .eq('estado_permiso', 'pendiente')
+      .gt('orden', 1)
+      .is('cancelada_at', null)
+      .not('fecha_salida_plan', 'is', null)
+      .gte('fecha_salida_plan', new Date().toISOString())
+      .lte('fecha_salida_plan', limite.toISOString())
+      // EN_VUELO incluido: el tramo 4 de un viaje multi-día entra a su
+      // ventana de 48h cuando el vuelo ya despegó el día 1.
+      .in('vuelo.estado', ['CONFIRMADO', 'COTIZADO', 'RESERVA', 'EN_VUELO']);
+    if (errTramos) throw new Error(errTramos.message);
+    for (const t of tramos ?? []) {
+      const vuelo = (Array.isArray(t.vuelo) ? t.vuelo[0] : t.vuelo) as Record<
+        string,
+        unknown
+      > | null;
+      if (!vuelo) continue;
+      const fecha = new Date(t.fecha_salida_plan as string).toLocaleString(
+        'es-MX',
+        {
+          dateStyle: 'short',
+          timeStyle: 'short',
+          timeZone: 'America/Cancun',
+        },
+      );
+      await this.dispatch(config, `permiso_pista:tramo:${t.id as string}`, {
+        tipo: 'permiso_pista',
+        titulo: 'Permiso de pista por vencer (tramo)',
+        cuerpo: `${t.origen_iata as string} → ${t.destino_iata as string} · folio #${vuelo.folio as number} · ese tramo vuela ${fecha} y su permiso sigue pendiente`,
+        data: { vuelo_id: vuelo.id, escala_id: t.id, folio: vuelo.folio },
+        link: `/admin/flights/${vuelo.id as string}`,
+      });
+    }
   }
 
   /** Documentos/licencias/permisos próximos a vencer, por cada umbral configurado. */
@@ -513,6 +631,13 @@ export class AlertsService {
         )
         .eq('estado', 'COMPLETADO')
         .eq('cobrado', false)
+        // Sin precio no hay cuenta por cobrar: los vuelos de Servicio y
+        // reservas a $0 generaban regaños de "$0 USD" cada 3 días. Trade-off
+        // consciente: un vuelo de cliente real completado SIN cotizar también
+        // calla aquí — lo vigilan el pre-cierre y el balance (en prod hay 26
+        // vuelos a $0 de clientes no internos; filtrar por es_interno
+        // soltaría esa avalancha de regaños de golpe).
+        .gt('monto_total_usd', 0)
         .lte('updated_at', corte);
       if (error) throw new Error(error.message);
 
@@ -811,14 +936,29 @@ export class AlertsService {
    */
   private async checkVuelosEstancados(config: AlertConfig): Promise<void> {
     const hoyCancun = this.hoyCancun();
-    const { data, error } = await this.supabase.service
-      .from('vuelo')
-      .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
-      .in('estado', ['COTIZADO', 'RESERVA', 'CONFIRMADO', 'EN_VUELO'])
-      .eq('es_externo', false)
-      .not('fecha_vuelo', 'is', null)
-      .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`);
-    if (error) throw new Error(error.message);
+    // Dos ejes a propósito: un EN_VUELO multi-día sigue en curso hasta su
+    // último tramo (fecha_fin), pero un vuelo PRE-VUELO (COTIZADO/RESERVA/
+    // CONFIRMADO) cuyo día 1 ya pasó significa que nadie capturó salida — no
+    // despegó, y esperar al fin del itinerario retrasaría el aviso días.
+    const [enVuelo, preVuelo] = await Promise.all([
+      this.supabase.service
+        .from('vuelo')
+        .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
+        .eq('estado', 'EN_VUELO')
+        .eq('es_externo', false)
+        .not('fecha_vuelo', 'is', null)
+        .lt('fecha_fin', `${hoyCancun}T00:00:00-05:00`),
+      this.supabase.service
+        .from('vuelo')
+        .select('id, folio, estado, origen_iata, destino_iata, fecha_vuelo')
+        .in('estado', ['COTIZADO', 'RESERVA', 'CONFIRMADO'])
+        .eq('es_externo', false)
+        .not('fecha_vuelo', 'is', null)
+        .lt('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`),
+    ]);
+    if (enVuelo.error) throw new Error(enVuelo.error.message);
+    if (preVuelo.error) throw new Error(preVuelo.error.message);
+    const data = [...(enVuelo.data ?? []), ...(preVuelo.data ?? [])];
 
     const semana = this.isoWeek(new Date());
     for (const v of data ?? []) {

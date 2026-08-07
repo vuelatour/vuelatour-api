@@ -546,12 +546,19 @@ export class FlightsService {
   // ============ Vuelos ============
 
   async list(filters: ListFlightsQuery, current?: AuthenticatedUser) {
+    // Embed ligero opt-in (viaje multi-día): fechas por tramo para que el
+    // calendario de la app pinte cada día del itinerario sin cargar el
+    // snapshot completo de cada vuelo.
+    const embedEscalas =
+      filters.embed === 'escalas_plan'
+        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at)'
+        : '';
+    // string plano: el parser TIPADO de supabase-js no digiere el template
+    // con embed condicional (truena en compilación, no en runtime).
+    const selectCols: string = `${VUELO_COLS}, aeronave:aeronave_id(matricula), cliente:cliente_id(nombre), piloto:piloto_id(nombre)${embedEscalas}`;
     let q = this.supabase.service
       .from('vuelo')
-      .select(
-        `${VUELO_COLS}, aeronave:aeronave_id(matricula), cliente:cliente_id(nombre), piloto:piloto_id(nombre)`,
-        { count: 'exact' },
-      )
+      .select(selectCols, { count: 'exact' })
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .order('fecha_solicitud', { ascending: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
@@ -621,9 +628,14 @@ export class FlightsService {
     // Fecha simple (filtros del panel) = límites del DÍA CANCÚN (regla del
     // repo); un ISO con hora (app) pasa tal cual.
     const soloFecha = /^\d{4}-\d{2}-\d{2}$/;
+    // Solapamiento de rango [fecha_vuelo, fecha_fin] (viaje multi-día): un
+    // vuelo cuenta en todo día que su itinerario toque — el home del piloto
+    // lo necesita para ver su viaje el día del regreso. OJO: este eje es
+    // SOLO del listado; el dinero del cierre mensual sigue en fecha_vuelo
+    // (reportes/pre-cierre no cambian).
     if (filters.desde)
       q = q.gte(
-        'fecha_vuelo',
+        'fecha_fin',
         soloFecha.test(filters.desde)
           ? `${filters.desde}T00:00:00-05:00`
           : filters.desde,
@@ -644,7 +656,7 @@ export class FlightsService {
       rel: { nombre?: string } | { nombre?: string }[] | null | undefined,
     ) => (Array.isArray(rel) ? rel[0]?.nombre : rel?.nombre) ?? null;
     const rows = (data ?? []).map((r) => {
-      const row = r as Record<string, unknown> & {
+      const row = r as unknown as Record<string, unknown> & {
         aeronave?: { matricula?: string } | { matricula?: string }[] | null;
         cliente?: { nombre?: string } | { nombre?: string }[] | null;
         piloto?: { nombre?: string } | { nombre?: string }[] | null;
@@ -1500,11 +1512,14 @@ export class FlightsService {
     const conflicto = new Map<string, number>();
     if (dayCancun) {
       const day = dayCancun;
+      // Solapamiento [fecha_vuelo, fecha_fin]: el piloto en el día 2..N de
+      // un viaje multi-día también está ocupado — con el eje viejo aparecía
+      // libre y se le podía doble-asignar sin aviso.
       const { data: sameDay } = await this.supabase.service
         .from('vuelo')
         .select('id, folio, piloto_id')
-        .gte('fecha_vuelo', `${day}T00:00:00-05:00`)
         .lte('fecha_vuelo', `${day}T23:59:59-05:00`)
+        .gte('fecha_fin', `${day}T00:00:00-05:00`)
         .neq('estado', 'CANCELADO')
         .neq('id', flightId)
         .not('piloto_id', 'is', null);
@@ -4334,13 +4349,18 @@ export class FlightsService {
       const hoyCancun = now.toLocaleDateString('en-CA', {
         timeZone: 'America/Cancun',
       });
+      // Solapamiento con HOY vía fecha_fin (viaje multi-día): el vuelo
+      // sigue "de hoy" todos los días de su itinerario — sin esto, el
+      // piloto no recibía el recordatorio del tramo de regreso del día 3.
+      // fillTacoGaps ya evalúa el vencimiento POR ESCALA (fecha_salida_plan),
+      // así que los días de estancia no generan avisos de más.
       const { data, error } = await this.supabase.service
         .from('vuelo')
         .select('id, fecha_vuelo, estado')
         .neq('estado', 'CANCELADO')
         .eq('es_externo', false)
-        .gte('fecha_vuelo', `${hoyCancun}T00:00:00-05:00`)
-        .lte('fecha_vuelo', `${hoyCancun}T23:59:59-05:00`);
+        .lte('fecha_vuelo', `${hoyCancun}T23:59:59-05:00`)
+        .gte('fecha_fin', `${hoyCancun}T00:00:00-05:00`);
       if (error) throw new Error(error.message);
       for (const v of data ?? []) {
         try {
@@ -4502,6 +4522,11 @@ export class FlightsService {
         : null;
       if (opts?.soloVencidasA) {
         if (!fin || fin.getTime() > opts.soloVencidasA.getTime()) continue;
+      } else if (fin && fin.getTime() > Date.now()) {
+        // Cierre del día: un tramo planeado a FUTURO (regreso de un viaje
+        // multi-día) no es "del día sin llegada" — reportarlo cada noche de
+        // la estancia era falsa alarma. Los tramos sin fecha se conservan.
+        continue;
       }
       sugerencias.push({
         escala_id: r.id,
@@ -4577,15 +4602,18 @@ export class FlightsService {
     const dia =
       fecha ??
       new Date().toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    // Solapamiento con el día vía fecha_fin: un viaje multi-día aparece en
+    // el tablero TODOS sus días (antes solo el día 1 y la oficina no podía
+    // confirmar el tramo de regreso desde aquí).
     const { data: vuelos, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        `id, folio, estado, fecha_vuelo, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
+        `id, folio, estado, fecha_vuelo, fecha_fin, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
       )
       .neq('estado', 'CANCELADO')
       .eq('es_externo', false)
-      .gte('fecha_vuelo', `${dia}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${dia}T23:59:59-05:00`)
+      .gte('fecha_fin', `${dia}T00:00:00-05:00`)
       .order('fecha_vuelo', { ascending: true });
     if (error) throw new Error(error.message);
 
@@ -4648,7 +4676,19 @@ export class FlightsService {
         .filter((e) => e.cancelada_at == null)
         .sort((a, b) => Number(a.orden) - Number(b.orden));
       const filas = [] as Array<Record<string, unknown>>;
+      // Día de cada tramo (Cancún): sin fecha propia hereda la del tramo
+      // anterior (mismo criterio que el calendario) y el tramo 1 cae al día
+      // del vuelo. Con esto la UI atenúa los tramos que no son del día
+      // consultado en un viaje multi-día.
+      const diaCancunDe = (iso: unknown): string | null =>
+        typeof iso === 'string' && iso
+          ? new Date(iso).toLocaleDateString('en-CA', {
+              timeZone: 'America/Cancun',
+            })
+          : null;
+      let diaTramo = diaCancunDe(v.fecha_vuelo);
       for (const e of escalas) {
+        diaTramo = diaCancunDe(e.fecha_salida_plan) ?? diaTramo;
         const salida = e.taco_salida == null ? null : Number(e.taco_salida);
         const llegada = e.taco_llegada == null ? null : Number(e.taco_llegada);
         const prom = await promedioDe(
@@ -4688,6 +4728,8 @@ export class FlightsService {
           destino_iata: e.destino_iata,
           es_ferry: e.es_ferry === true,
           fecha_salida_plan: e.fecha_salida_plan ?? null,
+          es_del_dia: diaTramo == null || diaTramo === dia,
+          dia_tramo: diaTramo,
           esperado_fin: esperadoFin,
           estado,
           llegada_estimada: llegadaEstimada,

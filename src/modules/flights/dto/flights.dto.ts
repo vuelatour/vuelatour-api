@@ -77,6 +77,15 @@ export class ListFlightsQuery {
   es_externo?: boolean;
 
   @ApiPropertyOptional({
+    enum: ['escalas_plan'],
+    description:
+      'Embed ligero opt-in: "escalas_plan" agrega escalas_plan[] (orden, ruta, fecha_salida_plan, es_ferry) a cada vuelo — el calendario de la app pinta el viaje multi-día por tramo.',
+  })
+  @IsOptional()
+  @IsIn(['escalas_plan'])
+  embed?: 'escalas_plan';
+
+  @ApiPropertyOptional({
     enum: ['COBRADO', 'POR_COBRAR', 'PARCIAL', 'SIN_COBROS'],
     description:
       'Estado de cobro: COBRADO (completo) · POR_COBRAR (falta saldo, con o sin abonos) · PARCIAL (con abonos y falta saldo) · SIN_COBROS (con precio y ni un cobro).',
