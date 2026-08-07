@@ -70,6 +70,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
      una salida DEDUCIDO (la foto es evidencia; PILOTO/OFICINA no se bajan).
    - `taco_salida_origen`/`taco_llegada_origen` ∈ {PILOTO, IA, DEDUCIDO,
      OFICINA} se setean en TODOS los caminos de escritura. No perderlos.
+   - El avión de un tramo se resuelve CON HERENCIA en todos los caminos de
+     tacos: `escala.aeronave_id ?? vuelo.aeronave_id`. Comparar el id crudo
+     (null vs id explícito del mismo avión) apaga propagación/anclas en
+     silencio (caso #116: tramo ferry heredado se quedó sin salida).
    - `start()` NUNCA bloquea por tacómetro; `complete()` solo exige LLEGADAS
      (`faltanLlegadas`) — las salidas son del sistema.
    - La lectura IA de sync offline queda amarilla (`revision_requerida`) y no
