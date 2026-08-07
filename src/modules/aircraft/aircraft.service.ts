@@ -274,7 +274,7 @@ export class AircraftService {
     const rows = (
       await this.escalasDelAvion(
         id,
-        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
+        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, fecha_salida_plan, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
       )
     ).filter((e) => e.taco_salida != null);
 
@@ -318,7 +318,15 @@ export class AircraftService {
           // El folio en el panel enlaza al detalle del vuelo.
           vuelo_id: v.id ?? null,
           folio: v.folio ?? null,
-          fecha: (e.hora_salida as string | null) ?? v.fecha_vuelo ?? null,
+          // Fecha OPERATIVA del tramo (plan del tramo o fecha del vuelo).
+          // hora_salida es el momento del TECLAZO: capturar tarde los tacos
+          // de un vuelo viejo (caso #59, cerrado el 7 ago siendo del 20 jul)
+          // fechaba la fila como de hoy y el avión "volaba" sin vuelo.
+          fecha:
+            (e.fecha_salida_plan as string | null) ??
+            v.fecha_vuelo ??
+            (e.hora_salida as string | null) ??
+            null,
           ruta: `${e.origen_iata as string} → ${e.destino_iata as string}`,
           taco_salida: s,
           taco_llegada: l,
