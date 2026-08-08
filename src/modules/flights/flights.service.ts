@@ -3763,7 +3763,31 @@ export class FlightsService {
     // salida del tramo 1 en vez de su llegada) — la evidencia la CORRIGE.
     // Capturas reales (PILOTO/OFICINA/IA) no se pisan jamás.
     const esDeducida = sig.taco_salida_origen === 'DEDUCIDO';
-    if (sig.taco_salida != null && !esDeducida) return; // captura real: no se pisa
+    if (sig.taco_salida != null && !esDeducida) {
+      // Captura real: no se pisa JAMÁS. Pero es la MISMA aguja física que la
+      // llegada del tramo anterior: si difieren, una de las dos lecturas
+      // está mal y se marca en amarillo (pasa cuando el piloto de la
+      // siguiente rotación fotografió su salida antes de que el anterior
+      // capturara su llegada — cambio de piloto a media jornada).
+      if (Number(sig.taco_salida) !== valor) {
+        const actual = (sig.revision_motivo as string | null) ?? '';
+        if (!actual.includes('no coincide con la salida capturada')) {
+          const motivo = `La llegada del tramo anterior (${valor}) no coincide con la salida capturada de este tramo (${Number(sig.taco_salida)}) — es la misma aguja: revisar ambas lecturas en oficina`;
+          const bitacora = leerBitacora(actual || null);
+          await this.supabase.service
+            .from('escala')
+            .update({
+              revision_requerida: true,
+              revision_motivo: bitacora
+                ? `${motivo}; ${PROCEDENCIA_PREFIX}${bitacora}`
+                : motivo,
+              updated_by: userId,
+            })
+            .eq('id', sig.id as string);
+        }
+      }
+      return;
+    }
     if (sig.taco_salida != null && Number(sig.taco_salida) === valor) return; // ya está bien
     // El constraint exige llegada > salida: si el tramo siguiente ya tiene una
     // llegada menor o igual al valor propagado, la copia deducida quedó

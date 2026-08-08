@@ -65,9 +65,14 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
      la CORRIGE al propagarse (guarda atómica por origen). Capturas reales
      (PILOTO/OFICINA/IA) no se pisan jamás (caso vuelo #71, jul 2026: el cron
      dedujo la salida del tramo 2 antes de existir la llegada del tramo 1).
-   - EXCEPCIÓN (jul 2026): en el TRAMO 1 el piloto sí puede fotografiar la
-     salida (arranque del vuelo); su captura PILOTO puede corregir hacia abajo
-     una salida DEDUCIDO (la foto es evidencia; PILOTO/OFICINA no se bajan).
+   - EXCEPCIÓN (jul 2026, ampliada ago 2026): en el TRAMO 1 y en el PRIMER
+     tramo de cada ROTACIÓN (tramo cuyo piloto difiere del anterior — cambio
+     de piloto a media jornada, caso #129) el piloto sí puede fotografiar la
+     salida; su captura PILOTO puede corregir hacia abajo una salida DEDUCIDO
+     (la foto es evidencia; PILOTO/OFICINA no se bajan). El server nunca
+     restringió la salida por orden — el gate es de la app. Si la llegada
+     real del tramo anterior luego NO coincide con esa salida fotografiada,
+     la propagación NO la pisa: marca el tramo en amarillo (misma aguja).
    - `taco_salida_origen`/`taco_llegada_origen` ∈ {PILOTO, IA, DEDUCIDO,
      OFICINA} se setean en TODOS los caminos de escritura. No perderlos.
    - El avión de un tramo se resuelve CON HERENCIA en todos los caminos de
