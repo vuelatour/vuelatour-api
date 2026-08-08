@@ -551,7 +551,7 @@ export class FlightsService {
     // snapshot completo de cada vuelo.
     const embedEscalas =
       filters.embed === 'escalas_plan'
-        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at)'
+        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at, piloto_id)'
         : '';
     // string plano: el parser TIPADO de supabase-js no digiere el template
     // con embed condicional (truena en compilación, no en runtime).
