@@ -663,6 +663,7 @@ export class ProfitSharingService {
     // pago del freelance es gasto DIRECTO del vuelo — si falta, la utilidad
     // del reparto sale inflada en silencio.
     let externosSinHonorario = 0;
+    let externosSinHonorarioVuelos: Array<{ id: string; folio: number }> = [];
     {
       const completadosRows = (completadosRes.data ?? []) as Array<
         Record<string, unknown>
@@ -698,9 +699,17 @@ export class ProfitSharingService {
           const cubiertos = new Set(
             (gastosPE ?? []).map((g) => g.vuelo_id as string),
           );
-          externosSinHonorario = vuelosExternos.filter(
+          const sinHonorario = vuelosExternos.filter(
             (v) => !cubiertos.has(v.id as string),
-          ).length;
+          );
+          externosSinHonorario = sinHonorario.length;
+          // Folios para el checklist: sin ellos el operador llegaba a
+          // Gastos sabiendo solo el conteo, sin poder identificar los
+          // vuelos (era la única clave por-vuelo sin su arreglo `vuelos`).
+          externosSinHonorarioVuelos = sinHonorario.map((v) => ({
+            id: v.id as string,
+            folio: v.folio as number,
+          }));
         }
       }
     }
@@ -902,6 +911,7 @@ export class ProfitSharingService {
         detalle:
           'El pago del freelance es gasto directo del vuelo (categoría "Piloto externo"): captúralo en Gastos y lígalo al vuelo, o el reparto saldrá inflado.',
         count: externosSinHonorario,
+        vuelos: externosSinHonorarioVuelos,
       },
       {
         clave: 'cobros_en_cancelados',
