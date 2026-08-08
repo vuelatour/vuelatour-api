@@ -431,9 +431,9 @@ export class AlertsService {
       .from('vuelo')
       .select('id, folio, origen_iata, destino_iata, fecha_vuelo')
       .eq('estado_permiso', 'pendiente')
-      // RESERVA incluida: con el flujo nuevo los vuelos nacen como reserva y
+      // RESERVA y SOLICITUD incluidas: los vuelos nacen en esos estados y
       // el permiso hay que tramitarlo ANTES de confirmar, no después.
-      .in('estado', ['CONFIRMADO', 'COTIZADO', 'RESERVA'])
+      .in('estado', ['CONFIRMADO', 'COTIZADO', 'RESERVA', 'SOLICITUD'])
       .not('fecha_vuelo', 'is', null)
       .gte('fecha_vuelo', new Date().toISOString())
       .lte('fecha_vuelo', limite.toISOString());
@@ -471,8 +471,15 @@ export class AlertsService {
       .gte('fecha_salida_plan', new Date().toISOString())
       .lte('fecha_salida_plan', limite.toISOString())
       // EN_VUELO incluido: el tramo 4 de un viaje multi-día entra a su
-      // ventana de 48h cuando el vuelo ya despegó el día 1.
-      .in('vuelo.estado', ['CONFIRMADO', 'COTIZADO', 'RESERVA', 'EN_VUELO']);
+      // ventana de 48h cuando el vuelo ya despegó el día 1. SOLICITUD igual
+      // que en el barrido del vuelo.
+      .in('vuelo.estado', [
+        'CONFIRMADO',
+        'COTIZADO',
+        'RESERVA',
+        'SOLICITUD',
+        'EN_VUELO',
+      ]);
     if (errTramos) throw new Error(errTramos.message);
     for (const t of tramos ?? []) {
       const vuelo = (Array.isArray(t.vuelo) ? t.vuelo[0] : t.vuelo) as Record<

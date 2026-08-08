@@ -841,6 +841,18 @@ export class ProfitSharingService {
       }
     }
 
+    // Completados SIN precio de cliente REAL: el gate de `cobrado` exige
+    // monto>0 y la alerta de cobranza los calla a propósito (Servicio/$0) —
+    // este renglón es su ÚNICA vigilancia: sin cotización no hay cuenta por
+    // cobrar y el ingreso del vuelo se pierde en silencio.
+    const vuelosSinPrecio = completados
+      .filter(
+        (v) =>
+          !clientesInternos.has(v.cliente_id as string) &&
+          !(Number(v.monto_total_usd ?? 0) > 0),
+      )
+      .map((v) => ({ id: v.id as string, folio: v.folio as number }));
+
     const gastos = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
     // FIJO e INDIRECTO no llevan avión por diseño: no bloquean el cierre.
     const sinAvion = gastos.filter(
@@ -890,6 +902,14 @@ export class ProfitSharingService {
           cobrosPendientes.reduce((acc, c) => acc + c.saldo_usd, 0),
         ),
         vuelos: cobrosPendientes,
+      },
+      {
+        clave: 'vuelos_sin_precio',
+        titulo: 'Vuelos completados sin cotizar (precio en $0)',
+        detalle:
+          'Se volaron pero su cotización quedó en $0: cotízalos para poder cobrarlos — sin precio no aparecen en cobranza ni en el reparto.',
+        count: vuelosSinPrecio.length,
+        vuelos: vuelosSinPrecio,
       },
       {
         clave: 'gastos_sin_avion',
