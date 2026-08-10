@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -17,6 +18,8 @@ const COLS =
 
 @Injectable()
 export class EnginesService {
+  private readonly logger = new Logger(EnginesService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   /**
@@ -154,11 +157,33 @@ export class EnginesService {
 
   async remove(id: string) {
     const motor = await this.findById(id);
+    // Sus vencimientos caen por ON DELETE CASCADE: recolectar las copias de
+    // documentos ANTES de borrar, o quedan huérfanas en el bucket para
+    // siempre (nadie más conoce esos paths).
+    const { data: vencs } = await this.supabase.service
+      .from('vencimiento')
+      .select('archivo_url')
+      .eq('motor_id', id)
+      .not('archivo_url', 'is', null);
     const { error } = await this.supabase.service
       .from('motor')
       .delete()
       .eq('id', id);
     if (error) throw new Error(error.message);
+    const paths = ((vencs ?? []) as Array<{ archivo_url: string | null }>)
+      .map((v) => v.archivo_url)
+      .filter((p): p is string => !!p);
+    if (paths.length > 0) {
+      // Best-effort: el motor ya se borró; un archivo residual no rompe nada.
+      const { error: stErr } = await this.supabase.service.storage
+        .from('documentos-flota')
+        .remove(paths);
+      if (stErr) {
+        this.logger.warn(
+          `No se pudieron borrar ${paths.length} documento(s) del motor ${id}: ${stErr.message}`,
+        );
+      }
+    }
     return { deleted: true, id, numero_serie: motor.numero_serie };
   }
 

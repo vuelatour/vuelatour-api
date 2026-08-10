@@ -238,7 +238,7 @@ export class EngineeringService {
     const { data: vencimientos, error: vErr } = await this.supabase.service
       .from('vencimiento')
       .select(
-        'id, fecha_vencimiento, vence_por, horas_limite, referencia, aeronave_id, critico, tipo_documento(nombre, es_critico), aeronave(matricula)',
+        'id, fecha_vencimiento, vence_por, horas_limite, referencia, aeronave_id, critico, archivo_url, tipo_documento(nombre, es_critico), aeronave(matricula), piloto:piloto_id(nombre), motor:motor_id(posicion, aeronave_id, aeronave:aeronave_id(matricula))',
       )
       .eq('vence_por', 'FECHA')
       .not('fecha_vencimiento', 'is', null)
@@ -261,6 +261,7 @@ export class EngineeringService {
     const vencs = (vencimientos ?? []).map((v) => {
       const row = v as Record<string, unknown> & {
         critico?: boolean | null;
+        archivo_url?: string | null;
         tipo_documento?:
           | { nombre?: string; es_critico?: boolean }
           | { nombre?: string; es_critico?: boolean }[]
@@ -269,8 +270,13 @@ export class EngineeringService {
       const tipo = Array.isArray(row.tipo_documento)
         ? (row.tipo_documento[0] ?? null)
         : (row.tipo_documento ?? null);
+      // El path del bucket no sale del API (este payload lo lee también el
+      // mecánico en la app): solo la bandera; el panel pide la URL firmada
+      // por id con GET /expirations/:id/archivo (solo oficina).
+      const { archivo_url, ...rest } = row;
       return {
-        ...row,
+        ...rest,
+        tiene_archivo: !!archivo_url,
         tipo_documento: tipo
           ? { ...tipo, es_critico: row.critico ?? tipo.es_critico ?? false }
           : null,

@@ -11,6 +11,7 @@ import {
   IsPositive,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -153,6 +154,13 @@ export class CreateVencimientoDto {
   @IsOptional()
   @ValidateIf((_, v) => v !== null)
   @IsString()
+  @MaxLength(300)
+  // Solo paths generados por el panel (un segmento bajo oficina/): impide
+  // persistir URLs externas o paths arbitrarios del bucket que luego se
+  // firmarían con la service key.
+  @Matches(/^oficina\/[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: 'archivo_url debe ser un path oficina/<archivo> del bucket',
+  })
   archivo_url?: string | null;
 
   @ApiPropertyOptional()

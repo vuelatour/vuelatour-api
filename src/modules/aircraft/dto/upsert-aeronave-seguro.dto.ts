@@ -5,8 +5,10 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 export class CreateAeronaveSeguroDto {
@@ -49,10 +51,18 @@ export class CreateAeronaveSeguroDto {
   @IsDate()
   vigente_hasta!: Date;
 
-  @ApiPropertyOptional({ description: 'URL/path del PDF de la póliza' })
+  @ApiPropertyOptional({
+    description:
+      'PATH en el bucket documentos-flota de la copia de la póliza; null explícito = quitar el archivo.',
+  })
   @IsOptional()
+  @ValidateIf((_, v) => v !== null)
   @IsString()
-  archivo_url?: string;
+  @MaxLength(300)
+  @Matches(/^oficina\/[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: 'archivo_url debe ser un path oficina/<archivo> del bucket',
+  })
+  archivo_url?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

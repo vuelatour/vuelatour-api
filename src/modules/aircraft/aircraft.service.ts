@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -45,6 +46,8 @@ const IMAGENES_BUCKET = 'aeronave-imagenes';
 
 @Injectable()
 export class AircraftService {
+  private readonly logger = new Logger(AircraftService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly expirations: ExpirationsService,
@@ -1026,6 +1029,15 @@ export class AircraftService {
     dto: UpdateAeronaveSeguroDto,
     userId: string,
   ) {
+    // Para limpiar el archivo anterior del bucket al reemplazar/quitar.
+    const { data: previo, error: prevErr } = await this.supabase.service
+      .from('aeronave_seguro')
+      .select('archivo_url')
+      .eq('id', seguroId)
+      .maybeSingle();
+    if (prevErr) throw new Error(prevErr.message);
+    if (!previo) throw new NotFoundException(`Seguro ${seguroId} not found`);
+
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.aseguradora !== undefined) patch.aseguradora = dto.aseguradora;
     if (dto.num_poliza !== undefined) patch.num_poliza = dto.num_poliza;
@@ -1048,16 +1060,77 @@ export class AircraftService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Seguro ${seguroId} not found`);
+    // Reemplazo/retiro del adjunto: borrar el anterior del bucket
+    // (best-effort, mismo patrón que expirations.update).
+    const anterior = previo.archivo_url as string | null;
+    if (
+      dto.archivo_url !== undefined &&
+      anterior &&
+      anterior !== dto.archivo_url
+    ) {
+      const { error: stErr } = await this.supabase.service.storage
+        .from('documentos-flota')
+        .remove([anterior]);
+      if (stErr) {
+        this.logger.warn(
+          `No se pudo borrar la póliza anterior del seguro ${seguroId}: ${stErr.message}`,
+        );
+      }
+    }
     return data;
   }
 
   async deleteSeguro(seguroId: string) {
+    const { data: previo } = await this.supabase.service
+      .from('aeronave_seguro')
+      .select('archivo_url')
+      .eq('id', seguroId)
+      .maybeSingle();
     const { error } = await this.supabase.service
       .from('aeronave_seguro')
       .delete()
       .eq('id', seguroId);
     if (error) throw new Error(error.message);
+    const path = previo?.archivo_url as string | null | undefined;
+    if (path) {
+      const { error: stErr } = await this.supabase.service.storage
+        .from('documentos-flota')
+        .remove([path]);
+      if (stErr) {
+        this.logger.warn(
+          `No se pudo borrar la póliza del seguro ${seguroId}: ${stErr.message}`,
+        );
+      }
+    }
     return { ok: true };
+  }
+
+  /**
+   * URL firmada (1 h) de la copia de la póliza. Mismo contrato que
+   * expirations.archivoSignedUrl: el bucket es privado y el panel pide la
+   * URL al momento de VER, nunca la persiste.
+   */
+  async seguroArchivoSignedUrl(seguroId: string): Promise<{ url: string }> {
+    const { data, error } = await this.supabase.service
+      .from('aeronave_seguro')
+      .select('archivo_url')
+      .eq('id', seguroId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Seguro ${seguroId} not found`);
+    const path = data.archivo_url as string | null;
+    if (!path) {
+      throw new NotFoundException('Este seguro no tiene archivo adjunto');
+    }
+    const { data: signed, error: signErr } = await this.supabase.service.storage
+      .from('documentos-flota')
+      .createSignedUrl(path, 3600);
+    if (signErr || !signed?.signedUrl) {
+      throw new NotFoundException(
+        `No se pudo firmar el archivo: ${signErr?.message ?? 'sin URL'}`,
+      );
+    }
+    return { url: signed.signedUrl };
   }
 
   // ============ Discrepancias (squawks) ============

@@ -273,6 +273,18 @@ export class AircraftController {
     return this.aircraft.deleteSeguro(seguroId);
   }
 
+  @Get('insurance/:seguroId/archivo')
+  // Documento sensible (póliza): SOLO oficina — mismo contrato que
+  // GET /expirations/:id/archivo.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'URL firmada (1 h) de la copia de la póliza en el bucket privado documentos-flota. 404 si el seguro no tiene archivo.',
+  })
+  insuranceArchivo(@Param('seguroId', ParseUUIDPipe) seguroId: string) {
+    return this.aircraft.seguroArchivoSignedUrl(seguroId);
+  }
+
   // ============ Discrepancias (squawks) ============
 
   @Get(':id/squawks')

@@ -9,6 +9,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   MaxLength,
   Min,
   ValidateIf,
@@ -241,5 +242,9 @@ export class CreateVencimientoDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(300)
+  @Matches(/^oficina\/[A-Za-z0-9][A-Za-z0-9._-]*$/, {
+    message: 'archivo_url debe ser un path oficina/<archivo> del bucket',
+  })
   archivo_url?: string;
 }
