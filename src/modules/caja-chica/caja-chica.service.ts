@@ -443,7 +443,7 @@ export class CajaChicaService {
       id: string;
       moneda: string;
     };
-    const [movsRes, gastosRes] = await Promise.all([
+    const [movsRes, gastosRes, gastosListaRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
         .select(MOV_COLS)
@@ -456,12 +456,34 @@ export class CajaChicaService {
         .select('monto, moneda')
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', userId),
+      // La LISTA visible de "mi caja" (la app la pinta agrupada por día,
+      // como la nota del cliente): los mismos gastos EFECTIVO que alimentan
+      // el saldo, con concepto y folio del vuelo. Recientes primero.
+      this.supabase.service
+        .from('gasto')
+        .select(
+          'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, vuelo:vuelo_id(folio)',
+        )
+        .eq('medio_pago', 'EFECTIVO')
+        .eq('usuario_captura_id', userId)
+        .order('fecha_gasto', { ascending: false })
+        .order('created_at', { ascending: false })
+        .limit(200),
     ]);
     // El saldo es dinero: nunca calcularlo con datos parciales.
     if (movsRes.error) throw new Error(movsRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
+    if (gastosListaRes.error) throw new Error(gastosListaRes.error.message);
     const movs = movsRes.data;
     const gastos = gastosRes.data;
+    const gastosLista = (gastosListaRes.data ?? []).map((g) => {
+      const vuelo = (Array.isArray(g.vuelo) ? g.vuelo[0] : g.vuelo) as {
+        folio?: number;
+      } | null;
+      const { vuelo: _omit, ...rest } = g as Record<string, unknown>;
+      void _omit;
+      return { ...rest, folio: vuelo?.folio ?? null };
+    });
 
     const allMovs = await this.supabase.service
       .from('caja_chica_movimiento')
@@ -477,7 +499,7 @@ export class CajaChicaService {
       (fo as { es_acumulada?: boolean }).es_acumulada === true,
     );
 
-    return { fondo, saldo, movimientos: movs ?? [] };
+    return { fondo, saldo, movimientos: movs ?? [], gastos: gastosLista };
   }
 }
 
