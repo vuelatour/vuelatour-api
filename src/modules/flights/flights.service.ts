@@ -1794,12 +1794,49 @@ export class FlightsService {
       const bloqueos =
         await this.expirations.findBlockingExpirations(objetivos);
       if (bloqueos.length > 0) {
+        // POLÍTICA (ago 2026, pedido del cliente): un documento crítico
+        // vencido ya NO impide asignar — la autoridad a veces autoriza
+        // vuelos limitados mientras se renueva. La visibilidad queda en el
+        // semáforo del avión (NO APTO con razones) y en este aviso a
+        // administración (dedupe diario por documento) para no perderlo de
+        // vista y arreglarlo rápido.
         const detalle = bloqueos
           .map((b) => `${b.tipo_nombre} (${b.objetivo})`)
           .join(', ');
-        throw new ConflictException(
-          `No se puede asignar: documento(s) crítico(s) vencido(s): ${detalle}`,
-        );
+        void (async () => {
+          try {
+            const hoy = new Date().toLocaleDateString('en-CA', {
+              timeZone: 'America/Cancun',
+            });
+            for (const b of bloqueos) {
+              const { error } = await this.supabase.service
+                .from('alerta_emitida')
+                .insert({
+                  dedupe_key: `asignado_con_critico:${b.id}:${hoy}`,
+                  clave: 'critico_vencido',
+                });
+              if (error) {
+                if (error.code === '23505') continue; // ya avisado hoy
+                throw new Error(error.message);
+              }
+              for (const rol of [Rol.ADMIN, Rol.COORDINADOR]) {
+                await this.notifications.notifyRole(rol, {
+                  tipo: 'alerta_sistema',
+                  titulo: 'Asignación con documento crítico vencido',
+                  cuerpo: `Se asignó con ${detalle} vencido(s). El avión se puede seguir usando si la autoridad lo permite, pero hay que renovarlo pronto.`,
+                  data: { vencimiento_id: b.id },
+                  link: '/admin/expirations',
+                });
+              }
+            }
+          } catch (err) {
+            this.logger.warn(
+              `Aviso de asignación con crítico vencido falló: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+        })();
       }
     }
     if (

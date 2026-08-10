@@ -222,6 +222,13 @@ export class AlertsService {
       ),
     );
     await this.safe('vencimiento', (c) => this.checkVencimientos(c));
+    // Directo (sin alerta_config): los documentos críticos YA VENCIDOS —
+    // checkVencimientos solo mira futuros y el vencido quedaba mudo.
+    await this.checkCriticosVencidos().catch((err: unknown) =>
+      this.logger.error(
+        `Críticos vencidos falló: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
     await this.safe('cobro_pendiente', (c) => this.checkCobrosPendientes(c));
     await this.safe('inventario_bajo', (c) => this.checkInventarioBajo(c));
     await this.safe('mantenimiento_programado', (c) =>
@@ -1098,6 +1105,50 @@ export class AlertsService {
   }
 
   /** Inserta la dedupeKey; devuelve true solo si es nueva (no emitida antes). */
+  /**
+   * Documentos CRÍTICOS ya vencidos (por fecha): aviso diario a admin y
+   * coordinación con dedupe SEMANAL por documento. Política ago 2026: el
+   * crítico vencido ya no bloquea la asignación (la autoridad puede
+   * autorizar vuelos limitados) — este aviso y el semáforo NO APTO del
+   * avión son la vigilancia para que se arregle rápido.
+   */
+  private async checkCriticosVencidos(): Promise<void> {
+    const hoy = this.hoyCancun();
+    const { data, error } = await this.supabase.service
+      .from('vencimiento')
+      .select(
+        'id, fecha_vencimiento, referencia, tipo:tipo_documento_id!inner(nombre, es_critico), aeronave:aeronave_id(matricula), piloto:usuario!piloto_id(nombre), motor:motor_id(numero_serie)',
+      )
+      .eq('tipo.es_critico', true)
+      .not('fecha_vencimiento', 'is', null)
+      .lt('fecha_vencimiento', hoy);
+    if (error) throw new Error(error.message);
+    const unwrap = <T>(v: T | T[] | null): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : v;
+    const semana = this.isoWeek(new Date());
+    for (const v of data ?? []) {
+      const tipo = unwrap(v.tipo as { nombre?: string } | null);
+      const aeronave = unwrap(v.aeronave as { matricula?: string } | null);
+      const piloto = unwrap(v.piloto as { nombre?: string } | null);
+      const motor = unwrap(v.motor as { numero_serie?: string } | null);
+      const objetivo =
+        aeronave?.matricula ??
+        piloto?.nombre ??
+        (motor?.numero_serie ? `motor ${motor.numero_serie}` : 'general');
+      const key = `critico_vencido:${v.id as string}:${semana}`;
+      if (!(await this.markIfNew(key, 'critico_vencido'))) continue;
+      for (const rol of [Rol.ADMIN, Rol.COORDINADOR]) {
+        await this.notifications.notifyRole(rol, {
+          tipo: 'alerta_sistema',
+          titulo: `${objetivo}: documento crítico VENCIDO`,
+          cuerpo: `${tipo?.nombre ?? 'Documento'} venció el ${v.fecha_vencimiento as string}. El avión se marca como pendiente de arreglo (se puede volar si la autoridad lo permite) — renuévalo cuanto antes.`,
+          data: { vencimiento_id: v.id },
+          link: '/admin/expirations',
+        });
+      }
+    }
+  }
+
   private async markIfNew(dedupeKey: string, clave: string): Promise<boolean> {
     const { error } = await this.supabase.service
       .from('alerta_emitida')
