@@ -52,6 +52,10 @@ export class ExpirationsController {
   }
 
   @Get()
+  // Metadatos internos (folios de póliza, aseguradora, fechas): solo oficina.
+  // La app del piloto no consume esta lista; ver GET /engineering/... para el
+  // detalle del avión.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
       'List expirations with computed estado (VIGENTE/PROXIMO/VENCIDO/...)',
@@ -71,6 +75,7 @@ export class ExpirationsController {
   }
 
   @Get(':id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Get expiration with computed estado' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.expirations.findById(id);
