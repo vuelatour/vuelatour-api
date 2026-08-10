@@ -11,6 +11,10 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
+import {
+  CONFIG_CAPTURA_TACO_FOTO_IA,
+  ConfiguracionService,
+} from '../configuracion/configuracion.service';
 import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { Rol } from '../../common/types/auth.types';
@@ -154,6 +158,7 @@ export class FlightsService {
     private readonly notifications: NotificationsService,
     private readonly expirations: ExpirationsService,
     private readonly airports: AirportsService,
+    private readonly configuracion: ConfiguracionService,
   ) {}
 
   private readonly logger = new Logger(FlightsService.name);
@@ -3296,11 +3301,21 @@ export class FlightsService {
           (await this.aeronaveDelVuelo(escala.vuelo_id as string)),
         tacoSalidaActual,
       );
-      const ia = await this.vision.readTacometro({ imageUrl: signed, ultimo });
+      // Con la bandera apagada no se gastan créditos: la foto queda como
+      // evidencia y el tramo en revisión para que oficina teclee la lectura
+      // (mismo camino que cuando la IA no está disponible).
+      const fotoIaActiva = await this.configuracion.isActiva(
+        CONFIG_CAPTURA_TACO_FOTO_IA,
+      );
+      const ia = fotoIaActiva
+        ? await this.vision.readTacometro({ imageUrl: signed, ultimo })
+        : null;
 
       if (!ia || !ia.legible || ia.lectura === null) {
         motivos.push(
-          `Foto de ${which} sincronizada sin lectura legible — capturar manualmente`,
+          fotoIaActiva
+            ? `Foto de ${which} sincronizada sin lectura legible — capturar manualmente`
+            : `Foto de ${which} sincronizada con la lectura IA desactivada — capturar manualmente`,
         );
         continue;
       }
@@ -3986,12 +4001,20 @@ export class FlightsService {
       escala.taco_salida === null ? null : Number(escala.taco_salida),
     );
 
-    const ia = await this.vision.readTacometro({
-      imageBase64: dto.image_base64,
-      mediaType: dto.media_type,
-      imageUrl: dto.image_url,
-      ultimo,
-    });
+    // Bandera global "captura_taco_foto_ia" apagada → no se gastan créditos
+    // de IA: se responde igual que cuando la visión no está disponible (la
+    // app con caché vieja cae a captura manual + sugerencia histórica).
+    const fotoIaActiva = await this.configuracion.isActiva(
+      CONFIG_CAPTURA_TACO_FOTO_IA,
+    );
+    const ia = fotoIaActiva
+      ? await this.vision.readTacometro({
+          imageBase64: dto.image_base64,
+          mediaType: dto.media_type,
+          imageUrl: dto.image_url,
+          ultimo,
+        })
+      : null;
 
     if (ia && ia.legible && ia.lectura !== null) {
       return {

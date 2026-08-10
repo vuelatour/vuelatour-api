@@ -4,6 +4,10 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import {
+  CONFIG_CAPTURA_TACO_FOTO_IA,
+  ConfiguracionService,
+} from '../configuracion/configuracion.service';
 import { ListDescansosQuery } from '../pilots/dto/pilots.dto';
 import { PilotsService } from '../pilots/pilots.service';
 import { UpdateSelfDto } from '../users/dto/update-self.dto';
@@ -19,12 +23,23 @@ export class MeController {
     private readonly users: UsersService,
     private readonly capturas: MeCapturasService,
     private readonly pilots: PilotsService,
+    private readonly configuracion: ConfiguracionService,
   ) {}
 
   @Get()
   @ApiOperation({ summary: 'Current authenticated user profile' })
-  me(@CurrentUser() current: AuthenticatedUser) {
-    return this.users.findByAuthId(current.authId);
+  async me(@CurrentUser() current: AuthenticatedUser) {
+    // Las banderas de comportamiento viajan DENTRO de /me: es el único read
+    // que la app consulta siempre al arrancar y cachea entero para offline —
+    // así el toggle llega al piloto sin plomería nueva.
+    const [usuario, capturaTacoFotoIa] = await Promise.all([
+      this.users.findByAuthId(current.authId),
+      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+    ]);
+    return {
+      ...usuario,
+      config: { captura_taco_foto_ia: capturaTacoFotoIa },
+    };
   }
 
   @Patch()

@@ -33,6 +33,7 @@ import { ExpensesModule } from './modules/expenses/expenses.module';
 import { PilotsModule } from './modules/pilots/pilots.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { AlertsModule } from './modules/alerts/alerts.module';
+import { ConfiguracionModule } from './modules/configuracion/configuracion.module';
 import { FacturacionModule } from './modules/facturacion/facturacion.module';
 import { EngineeringModule } from './modules/engineering/engineering.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
@@ -105,6 +106,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
     PilotsModule,
     RealtimeModule,
     AlertsModule,
+    ConfiguracionModule,
     FacturacionModule,
     EngineeringModule,
     InventoryModule,

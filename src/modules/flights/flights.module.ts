@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AirportsModule } from '../airports/airports.module';
 import { CalendarModule } from '../calendar/calendar.module';
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { ExpirationsModule } from '../expirations/expirations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
@@ -14,6 +15,7 @@ import { FlightsService } from './flights.service';
   imports: [
     AirportsModule,
     CalendarModule,
+    ConfiguracionModule,
     ExpirationsModule,
     NotificationsModule,
     PyservicesModule,
