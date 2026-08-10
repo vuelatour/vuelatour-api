@@ -44,11 +44,21 @@ export class MeController {
 
   @Patch()
   @ApiOperation({ summary: 'Update non-privileged fields of the current user' })
-  update(
+  async update(
     @Body() body: UpdateSelfDto,
     @CurrentUser() current: AuthenticatedUser,
   ) {
-    return this.users.updateSelf(current.authId, body, current.userId);
+    // MISMO shape que el GET: la app guarda esta respuesta en la misma llave
+    // de caché offline que /me — sin `config` la bandera revertía al default
+    // al editar el perfil (hallazgo de la revisión adversarial, ago 2026).
+    const [usuario, capturaTacoFotoIa] = await Promise.all([
+      this.users.updateSelf(current.authId, body, current.userId),
+      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+    ]);
+    return {
+      ...usuario,
+      config: { captura_taco_foto_ia: capturaTacoFotoIa },
+    };
   }
 
   @Get('horas')
