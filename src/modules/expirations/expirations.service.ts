@@ -16,7 +16,7 @@ import type {
 } from './dto/expirations.dto';
 
 const COLS =
-  'id, tipo_documento_id, aeronave_id, piloto_id, motor_id, vence_por, fecha_vencimiento, horas_limite, umbral_alerta_dias, referencia, archivo_url, notas, created_at, updated_at';
+  'id, tipo_documento_id, aeronave_id, piloto_id, motor_id, vence_por, fecha_vencimiento, horas_limite, umbral_alerta_dias, referencia, archivo_url, notas, critico, created_at, updated_at';
 
 /** Horas restantes a partir de las cuales un vencimiento por HORAS se marca PROXIMO. */
 const HORAS_ALERTA = 25;
@@ -39,6 +39,7 @@ interface VencimientoRow {
   fecha_vencimiento: string | null;
   horas_limite: string | null;
   umbral_alerta_dias: number | null;
+  critico: boolean | null;
 }
 
 @Injectable()
@@ -379,13 +380,20 @@ export class ExpirationsService {
       tipo?.umbral_alerta_dias ?? 30,
       motorHoras,
     );
+    // Crítico EFECTIVO: el override del DOCUMENTO manda sobre el tipo (las
+    // reglas de la autoridad cambian por semana; null = hereda del tipo).
+    const criticoEfectivo = row.critico ?? tipo?.es_critico ?? false;
     return {
       ...row,
+      critico_efectivo: criticoEfectivo,
       tipo: tipo
         ? {
             nombre: tipo.nombre,
             ambito: tipo.ambito,
-            es_critico: tipo.es_critico,
+            // El panel pinta el badge "Crítico" desde aquí: efectivo, no el
+            // crudo del tipo, para que el override se refleje en todas las
+            // listas sin tocar consumidores.
+            es_critico: criticoEfectivo,
           }
         : null,
       ...calc,

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsDateString,
   IsEnum,
   IsInt,
@@ -121,6 +122,14 @@ export class CreateVencimientoDto {
   horas_limite?: number;
 
   @ApiPropertyOptional({
+    description:
+      'Override por documento del es_critico del tipo (null = hereda). Las reglas cambian por semana; se ajusta sin tocar el catálogo.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  critico?: boolean | null;
+
+  @ApiPropertyOptional({
     description: 'Override del umbral de alerta del tipo (dias)',
   })
   @IsOptional()
@@ -166,7 +175,8 @@ export class ExtraerVencimientoDto {
   pdfBase64?: string;
 
   @ApiPropertyOptional({
-    description: 'Alternativa: imagen del documento en base64 (sin prefijo data:)',
+    description:
+      'Alternativa: imagen del documento en base64 (sin prefijo data:)',
   })
   @IsOptional()
   @IsString()

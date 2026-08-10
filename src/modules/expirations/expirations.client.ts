@@ -39,7 +39,9 @@ export class ExpirationsClient implements OnModuleInit {
   constructor(private readonly config: ConfigService<EnvVars, true>) {}
 
   onModuleInit() {
-    this.baseUrl = this.config.get('PYSERVICES_BASE_URL', { infer: true }).replace(/\/+$/, '');
+    this.baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
     this.token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     this.timeoutMs = this.config.get('PYSERVICES_TIMEOUT_MS', { infer: true });
     if (!this.baseUrl || !this.token) {
@@ -57,7 +59,9 @@ export class ExpirationsClient implements OnModuleInit {
    * Extrae matrícula, tipo, vigencia, vencimiento y emisor de un PDF o imagen.
    * Best-effort: null si pyservices no está activo, falta la fuente o falla.
    */
-  async extraer(input: VencimientoExtraerInput): Promise<VencimientoExtraerResult | null> {
+  async extraer(
+    input: VencimientoExtraerInput,
+  ): Promise<VencimientoExtraerResult | null> {
     if (!this.enabled) return null;
     if (!input.pdfBase64 && !input.imageBase64) {
       this.logger.warn('extraer vencimiento sin documento (ni pdf ni imagen)');
@@ -81,7 +85,9 @@ export class ExpirationsClient implements OnModuleInit {
         signal: controller.signal,
       });
       if (!res.ok) {
-        this.logger.warn(`pyservices /vencimientos/extraer respondió ${res.status}`);
+        this.logger.warn(
+          `pyservices /vencimientos/extraer respondió ${res.status}`,
+        );
         return null;
       }
       return (await res.json()) as VencimientoExtraerResult;

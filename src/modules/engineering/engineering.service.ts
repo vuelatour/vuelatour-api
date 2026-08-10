@@ -163,11 +163,33 @@ export class EngineeringService {
   async listVencimientos(aeronaveId: string) {
     const { data, error } = await this.supabase.service
       .from('vencimiento')
-      .select(`${VENC_COLS}, tipo_documento(nombre, es_critico)`)
+      .select(`${VENC_COLS}, critico, tipo_documento(nombre, es_critico)`)
       .eq('aeronave_id', aeronaveId)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    // Crítico EFECTIVO: el override del documento manda sobre el tipo (misma
+    // regla que expirations.enrich) — el panel pinta el badge desde aquí.
+    return (data ?? []).map((v) => {
+      const row = v as Record<string, unknown> & {
+        critico?: boolean | null;
+        tipo_documento?: { nombre?: string; es_critico?: boolean } | null;
+      };
+      const tipo = Array.isArray(row.tipo_documento)
+        ? ((row.tipo_documento[0] ?? null) as {
+            nombre?: string;
+            es_critico?: boolean;
+          } | null)
+        : (row.tipo_documento ?? null);
+      return {
+        ...row,
+        tipo_documento: tipo
+          ? {
+              ...tipo,
+              es_critico: row.critico ?? tipo.es_critico ?? false,
+            }
+          : null,
+      };
+    });
   }
 
   async createVencimiento(aeronaveId: string, dto: CreateVencimientoDto, userId: string) {
