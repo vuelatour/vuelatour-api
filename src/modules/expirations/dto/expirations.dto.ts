@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ValidateIf,
   IsBoolean,
   IsDateString,
   IsEnum,
@@ -145,10 +146,14 @@ export class CreateVencimientoDto {
   @MaxLength(100)
   referencia?: string;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    description:
+      'PATH en el bucket documentos-flota de la COPIA del documento; null explícito = quitar el archivo.',
+  })
   @IsOptional()
+  @ValidateIf((_, v) => v !== null)
   @IsString()
-  archivo_url?: string;
+  archivo_url?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

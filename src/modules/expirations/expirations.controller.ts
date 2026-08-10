@@ -76,6 +76,19 @@ export class ExpirationsController {
     return this.expirations.findById(id);
   }
 
+  @Get(':id/archivo')
+  // Documentos sensibles (licencias/seguros): SOLO oficina — el bucket es
+  // privado y esta firma usa service key. Sin @Roles, cualquier autenticado
+  // (piloto/mecánico con su JWT) podría descargarlos.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'URL firmada (1 h) de la copia del documento en el bucket privado documentos-flota. 404 si el vencimiento no tiene archivo.',
+  })
+  archivo(@Param('id', ParseUUIDPipe) id: string) {
+    return this.expirations.archivoSignedUrl(id);
+  }
+
   @Patch(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Update expiration (ADMIN)' })

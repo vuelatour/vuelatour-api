@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -44,6 +45,8 @@ interface VencimientoRow {
 
 @Injectable()
 export class ExpirationsService {
+  private readonly logger = new Logger(ExpirationsService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   async list(filters: ListVencimientosQuery) {
@@ -192,12 +195,25 @@ export class ExpirationsService {
   }
 
   async remove(id: string) {
-    await this.fetchRow(id);
+    const row = await this.fetchRow(id);
     const { error } = await this.supabase.service
       .from('vencimiento')
       .delete()
       .eq('id', id);
     if (error) throw new Error(error.message);
+    // Borra la copia del documento del bucket (evita huérfanos). Best-effort:
+    // el vencimiento ya se eliminó — un archivo residual no rompe nada.
+    const path = (row as { archivo_url?: string | null }).archivo_url;
+    if (path) {
+      const { error: storageErr } = await this.supabase.service.storage
+        .from('documentos-flota')
+        .remove([path]);
+      if (storageErr) {
+        this.logger.warn(
+          `No se pudo borrar el archivo del vencimiento ${id}: ${storageErr.message}`,
+        );
+      }
+    }
     return { deleted: true, id };
   }
 
@@ -261,6 +277,27 @@ export class ExpirationsService {
             ? ('piloto' as const)
             : ('motor' as const),
       }));
+  }
+
+  /**
+   * URL firmada (1 h) de la copia del documento. El bucket es privado: el
+   * panel pide esta URL al momento de VER, nunca la persiste.
+   */
+  async archivoSignedUrl(id: string): Promise<{ url: string }> {
+    const row = await this.fetchRow(id);
+    const path = (row as { archivo_url?: string | null }).archivo_url;
+    if (!path) {
+      throw new NotFoundException('Este vencimiento no tiene archivo adjunto');
+    }
+    const { data, error } = await this.supabase.service.storage
+      .from('documentos-flota')
+      .createSignedUrl(path, 3600);
+    if (error || !data?.signedUrl) {
+      throw new NotFoundException(
+        `No se pudo firmar el archivo: ${error?.message ?? 'sin URL'}`,
+      );
+    }
+    return { url: data.signedUrl };
   }
 
   // ============ helpers ============
