@@ -206,6 +206,10 @@ export class EngineeringService {
         umbral_alerta_dias: dto.umbral_alerta_dias ?? null,
         referencia: dto.referencia ?? null,
         notas: dto.notas ?? null,
+        // El DTO acepta estos dos (Swagger los documenta): descartarlos en
+        // silencio rompía el contrato del alta.
+        critico: dto.critico ?? null,
+        archivo_url: dto.archivo_url ?? null,
         created_by: userId,
         updated_by: userId,
       })
@@ -234,7 +238,7 @@ export class EngineeringService {
     const { data: vencimientos, error: vErr } = await this.supabase.service
       .from('vencimiento')
       .select(
-        'id, fecha_vencimiento, vence_por, horas_limite, referencia, aeronave_id, tipo_documento(nombre, es_critico), aeronave(matricula)',
+        'id, fecha_vencimiento, vence_por, horas_limite, referencia, aeronave_id, critico, tipo_documento(nombre, es_critico), aeronave(matricula)',
       )
       .eq('vence_por', 'FECHA')
       .not('fecha_vencimiento', 'is', null)
@@ -251,6 +255,27 @@ export class EngineeringService {
       .order('fecha_programada', { ascending: true });
     if (mErr) throw new Error(mErr.message);
 
-    return { vencimientos: vencimientos ?? [], mantenimientos: mantenimientos ?? [] };
+    // Crítico EFECTIVO también aquí (override ?? tipo): el ⚠ del home del
+    // panel, /admin/ingenieria y la app del mecánico salen de este payload y
+    // contradecían al badge del detalle del avión.
+    const vencs = (vencimientos ?? []).map((v) => {
+      const row = v as Record<string, unknown> & {
+        critico?: boolean | null;
+        tipo_documento?:
+          | { nombre?: string; es_critico?: boolean }
+          | { nombre?: string; es_critico?: boolean }[]
+          | null;
+      };
+      const tipo = Array.isArray(row.tipo_documento)
+        ? (row.tipo_documento[0] ?? null)
+        : (row.tipo_documento ?? null);
+      return {
+        ...row,
+        tipo_documento: tipo
+          ? { ...tipo, es_critico: row.critico ?? tipo.es_critico ?? false }
+          : null,
+      };
+    });
+    return { vencimientos: vencs, mantenimientos: mantenimientos ?? [] };
   }
 }

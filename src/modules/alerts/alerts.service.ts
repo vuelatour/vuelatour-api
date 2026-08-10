@@ -9,6 +9,8 @@ import {
   type NotificationInput,
 } from '../realtime/notifications.service';
 import { Rol } from '../../common/types/auth.types';
+import { ExpirationsService } from '../expirations/expirations.service';
+import { EstadoVencimiento } from '../expirations/dto/expirations.dto';
 
 export interface AlertConfig {
   clave: string;
@@ -39,6 +41,7 @@ export class AlertsService {
     private readonly airports: AirportsService,
     private readonly notifications: NotificationsService,
     private readonly email: EmailService,
+    private readonly expirations: ExpirationsService,
   ) {}
 
   // ===== Cron =====
@@ -1113,40 +1116,98 @@ export class AlertsService {
    * avión son la vigilancia para que se arregle rápido.
    */
   private async checkCriticosVencidos(): Promise<void> {
-    const hoy = this.hoyCancun();
-    const { data, error } = await this.supabase.service
-      .from('vencimiento')
-      .select(
-        'id, fecha_vencimiento, referencia, tipo:tipo_documento_id!inner(nombre, es_critico), aeronave:aeronave_id(matricula), piloto:usuario!piloto_id(nombre), motor:motor_id(numero_serie)',
-      )
-      .eq('tipo.es_critico', true)
-      .not('fecha_vencimiento', 'is', null)
-      .lt('fecha_vencimiento', hoy);
-    if (error) throw new Error(error.message);
-    const unwrap = <T>(v: T | T[] | null): T | null =>
-      Array.isArray(v) ? (v[0] ?? null) : v;
+    // Reusa el motor de vencimientos: computa el estado VENCIDO para FECHA
+    // Y por HORAS (motor), y `tipo.es_critico` ya es el EFECTIVO (override
+    // por documento ?? tipo). Así no se duplica la lógica ni se ignora el
+    // override, y los críticos vencidos por horas también se cubren.
+    const { data: vencidos } = await this.expirations.list({
+      estado: EstadoVencimiento.VENCIDO,
+      limit: 500,
+      offset: 0,
+    });
+    const criticos = vencidos.filter((v) => v.tipo?.es_critico === true);
+    if (criticos.length === 0) return;
+
+    // Nombres del objetivo (matrícula/piloto/motor) en lote.
+    const aeronaveIds = new Set<string>();
+    const pilotoIds = new Set<string>();
+    const motorIds = new Set<string>();
+    for (const v of criticos) {
+      if (v.aeronave_id) aeronaveIds.add(v.aeronave_id);
+      if (v.piloto_id) pilotoIds.add(v.piloto_id);
+      if (v.motor_id) motorIds.add(v.motor_id);
+    }
+    const [aeronaves, pilotos, motores] = await Promise.all([
+      aeronaveIds.size
+        ? this.supabase.service
+            .from('aeronave')
+            .select('id, matricula')
+            .in('id', [...aeronaveIds])
+        : Promise.resolve({ data: [] as { id: string; matricula: string }[] }),
+      pilotoIds.size
+        ? this.supabase.service
+            .from('usuario')
+            .select('id, nombre')
+            .in('id', [...pilotoIds])
+        : Promise.resolve({ data: [] as { id: string; nombre: string }[] }),
+      motorIds.size
+        ? this.supabase.service
+            .from('motor')
+            .select('id, numero_serie')
+            .in('id', [...motorIds])
+        : Promise.resolve({
+            data: [] as { id: string; numero_serie: string }[],
+          }),
+    ]);
+    const matPorId = new Map(
+      (aeronaves.data ?? []).map(
+        (a) => [a.id, a.matricula] as [string, string],
+      ),
+    );
+    const pilPorId = new Map(
+      (pilotos.data ?? []).map((p) => [p.id, p.nombre] as [string, string]),
+    );
+    const motPorId = new Map(
+      (motores.data ?? []).map(
+        (m) => [m.id, m.numero_serie] as [string, string],
+      ),
+    );
+
     const semana = this.isoWeek(new Date());
-    for (const v of data ?? []) {
-      const tipo = unwrap(v.tipo as { nombre?: string } | null);
-      const aeronave = unwrap(v.aeronave as { matricula?: string } | null);
-      const piloto = unwrap(v.piloto as { nombre?: string } | null);
-      const motor = unwrap(v.motor as { numero_serie?: string } | null);
-      const objetivo =
-        aeronave?.matricula ??
-        piloto?.nombre ??
-        (motor?.numero_serie ? `motor ${motor.numero_serie}` : 'general');
-      const key = `critico_vencido:${v.id as string}:${semana}`;
+    for (const v of criticos) {
+      const moSerie = v.motor_id ? motPorId.get(v.motor_id) : null;
+      const objetivo: string =
+        (v.aeronave_id ? matPorId.get(v.aeronave_id) : null) ??
+        (v.piloto_id ? pilPorId.get(v.piloto_id) : null) ??
+        (moSerie ? `motor ${moSerie}` : 'general');
+      // Redacción según el objetivo: "el avión" solo si es de aeronave.
+      const sujeto = v.aeronave_id
+        ? 'El avión se marca como pendiente de arreglo (se puede volar si la autoridad lo permite)'
+        : 'Queda como pendiente de arreglo';
+      const venceTxt = v.fecha_vencimiento
+        ? `venció el ${this.fmtFechaCorta(v.fecha_vencimiento)}`
+        : v.horas_limite != null
+          ? `superó su límite de ${v.horas_limite} h`
+          : 'está vencido';
+      const key = `critico_vencido:${v.id}:${semana}`;
       if (!(await this.markIfNew(key, 'critico_vencido'))) continue;
       for (const rol of [Rol.ADMIN, Rol.COORDINADOR]) {
         await this.notifications.notifyRole(rol, {
           tipo: 'alerta_sistema',
           titulo: `${objetivo}: documento crítico VENCIDO`,
-          cuerpo: `${tipo?.nombre ?? 'Documento'} venció el ${v.fecha_vencimiento as string}. El avión se marca como pendiente de arreglo (se puede volar si la autoridad lo permite) — renuévalo cuanto antes.`,
+          cuerpo: `${v.tipo?.nombre ?? 'Documento'} ${venceTxt}. ${sujeto} — renuévalo cuanto antes.`,
           data: { vencimiento_id: v.id },
           link: '/admin/expirations',
         });
       }
     }
+  }
+
+  /** Fecha corta es-MX (dd/mm/aaaa) desde un YYYY-MM-DD, sin corrimiento. */
+  private fmtFechaCorta(iso: string): string {
+    const s = iso.slice(0, 10);
+    const [y, m, d] = s.split('-');
+    return d && m && y ? `${d}/${m}/${y}` : s;
   }
 
   private async markIfNew(dedupeKey: string, clave: string): Promise<boolean> {

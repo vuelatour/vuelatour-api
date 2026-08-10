@@ -118,6 +118,9 @@ export class ExpirationsService {
         umbral_alerta_dias: dto.umbral_alerta_dias ?? null,
         referencia: dto.referencia ?? null,
         archivo_url: dto.archivo_url ?? null,
+        // Override de crítico también en el ALTA (el DTO lo documenta; solo
+        // update() lo respetaba y el alta lo descartaba en silencio).
+        critico: dto.critico ?? null,
         notas: dto.notas ?? null,
         created_by: userId,
         updated_by: userId,
@@ -191,6 +194,25 @@ export class ExpirationsService {
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Vencimiento ${id} not found`);
+    // Reemplazo/retiro del adjunto: el archivo ANTERIOR se borra del bucket
+    // (best-effort, service key). Sin esto quedaba huérfano para siempre —
+    // el dueño original es el único que podía borrarlo desde el navegador.
+    const archivoAnterior = (current as { archivo_url?: string | null })
+      .archivo_url;
+    if (
+      dto.archivo_url !== undefined &&
+      archivoAnterior &&
+      archivoAnterior !== dto.archivo_url
+    ) {
+      const { error: stErr } = await this.supabase.service.storage
+        .from('documentos-flota')
+        .remove([archivoAnterior]);
+      if (stErr) {
+        this.logger.warn(
+          `No se pudo borrar el archivo anterior del vencimiento ${id}: ${stErr.message}`,
+        );
+      }
+    }
     return this.findById(id);
   }
 

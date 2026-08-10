@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  IsBoolean,
   IsDateString,
   IsIn,
   IsInt,
@@ -13,7 +14,11 @@ import {
   ValidateIf,
 } from 'class-validator';
 
-export const ESTADOS_MANTENIMIENTO = ['PROGRAMADO', 'EN_TALLER', 'COMPLETADO'] as const;
+export const ESTADOS_MANTENIMIENTO = [
+  'PROGRAMADO',
+  'EN_TALLER',
+  'COMPLETADO',
+] as const;
 export type EstadoMantenimiento = (typeof ESTADOS_MANTENIMIENTO)[number];
 export const TIPOS_MANTENIMIENTO_LEGADO = ['PROGRAMADO', 'REALIZADO'] as const;
 export type TipoMantenimientoLegado =
@@ -54,7 +59,10 @@ export class CreateMantenimientoDto {
   @MaxLength(500)
   descripcion!: string;
 
-  @ApiPropertyOptional({ enum: PAISES_SERVICIO, description: 'País del servicio (MX/USA)' })
+  @ApiPropertyOptional({
+    enum: PAISES_SERVICIO,
+    description: 'País del servicio (MX/USA)',
+  })
   @IsOptional()
   @IsIn(PAISES_SERVICIO)
   pais?: 'MX' | 'USA';
@@ -69,14 +77,18 @@ export class CreateMantenimientoDto {
   @IsDateString()
   fecha_realizada?: string;
 
-  @ApiPropertyOptional({ description: 'Horas a las que ENTRÓ realmente (Hobbs).' })
+  @ApiPropertyOptional({
+    description: 'Horas a las que ENTRÓ realmente (Hobbs).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
   @Min(0)
   horas_aeronave?: number;
 
-  @ApiPropertyOptional({ description: 'Horas a las que DEBÍA entrar (umbral programado).' })
+  @ApiPropertyOptional({
+    description: 'Horas a las que DEBÍA entrar (umbral programado).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
@@ -129,14 +141,18 @@ export class UpdateMantenimientoDto {
   @IsDateString()
   fecha_realizada?: string;
 
-  @ApiPropertyOptional({ description: 'Horas a las que ENTRÓ realmente (Hobbs).' })
+  @ApiPropertyOptional({
+    description: 'Horas a las que ENTRÓ realmente (Hobbs).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
   @Min(0)
   horas_aeronave?: number;
 
-  @ApiPropertyOptional({ description: 'Horas a las que DEBÍA entrar (umbral programado).' })
+  @ApiPropertyOptional({
+    description: 'Horas a las que DEBÍA entrar (umbral programado).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 1 })
@@ -210,4 +226,20 @@ export class CreateVencimientoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Override por documento del es_critico del tipo (null = hereda).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  critico?: boolean | null;
+
+  @ApiPropertyOptional({
+    description:
+      'PATH de la copia del documento en el bucket documentos-flota.',
+  })
+  @IsOptional()
+  @IsString()
+  archivo_url?: string;
 }
