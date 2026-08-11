@@ -85,7 +85,8 @@ export class AircraftController {
   // pide best-effort (sin permiso, la card simplemente no se pinta).
   @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
-    summary: 'Métricas operativas: apto-para-volar, utilización (horas/vuelos) y finanzas',
+    summary:
+      'Métricas operativas: apto-para-volar, utilización (horas/vuelos) y finanzas',
   })
   metrics(@Param('id', ParseUUIDPipe) id: string) {
     return this.aircraft.aircraftMetrics(id);
@@ -141,7 +142,8 @@ export class AircraftController {
       q.formato ?? 'PLANEADOR',
       q.helice_base,
     );
-    const rango = q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    const rango =
+      q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {
       type: 'application/pdf',
       disposition: `attachment; filename="bitacora-${matricula}${rango}.pdf"`,
@@ -295,7 +297,9 @@ export class AircraftController {
 
   @Post(':id/squawks')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
-  @ApiOperation({ summary: 'Report a discrepancy/squawk (ADMIN/COORDINADOR/MECANICO)' })
+  @ApiOperation({
+    summary: 'Report a discrepancy/squawk (ADMIN/COORDINADOR/MECANICO)',
+  })
   createSquawk(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateDiscrepanciaDto,
@@ -306,7 +310,9 @@ export class AircraftController {
 
   @Patch('squawks/:squawkId')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
-  @ApiOperation({ summary: 'Update/resolve a discrepancy (ADMIN/COORDINADOR/MECANICO)' })
+  @ApiOperation({
+    summary: 'Update/resolve a discrepancy (ADMIN/COORDINADOR/MECANICO)',
+  })
   updateSquawk(
     @Param('squawkId', ParseUUIDPipe) squawkId: string,
     @Body() dto: UpdateDiscrepanciaDto,

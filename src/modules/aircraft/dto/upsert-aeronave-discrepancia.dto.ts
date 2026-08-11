@@ -1,8 +1,18 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { IsDateString, IsIn, IsOptional, IsString, IsUUID } from 'class-validator';
+import {
+  IsDateString,
+  IsIn,
+  IsOptional,
+  IsString,
+  IsUUID,
+} from 'class-validator';
 
 export const SEVERIDADES_DISCREPANCIA = ['BAJA', 'MEDIA', 'ALTA'] as const;
-export const ESTADOS_DISCREPANCIA = ['ABIERTA', 'EN_PROGRESO', 'RESUELTA'] as const;
+export const ESTADOS_DISCREPANCIA = [
+  'ABIERTA',
+  'EN_PROGRESO',
+  'RESUELTA',
+] as const;
 export type EstadoDiscrepancia = (typeof ESTADOS_DISCREPANCIA)[number];
 
 export class CreateDiscrepanciaDto {

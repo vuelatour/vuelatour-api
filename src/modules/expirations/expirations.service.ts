@@ -302,6 +302,59 @@ export class ExpirationsService {
   }
 
   /**
+   * Variante EN LOTE de findBlockingExpirations para el listado de aeronaves
+   * (semáforo APTO/NO APTO sin N+1): documentos CRÍTICOS VENCIDOS agrupados
+   * por aeronave (incluye los de sus motores). Misma lógica de enriquecido.
+   */
+  async findBlockingExpirationsBulk(
+    aeronaveIds: string[],
+  ): Promise<Map<string, Array<{ id: string; tipo_nombre: string }>>> {
+    const out = new Map<string, Array<{ id: string; tipo_nombre: string }>>();
+    for (const id of aeronaveIds) out.set(id, []);
+    if (aeronaveIds.length === 0) return out;
+
+    const { data: motores, error: mErr } = await this.supabase.service
+      .from('motor')
+      .select('id, aeronave_id')
+      .in('aeronave_id', aeronaveIds);
+    if (mErr) throw new Error(mErr.message);
+    const motorAvion = new Map(
+      (motores ?? []).map((m) => [m.id as string, m.aeronave_id as string]),
+    );
+
+    const orParts = [`aeronave_id.in.(${aeronaveIds.join(',')})`];
+    if (motorAvion.size > 0) {
+      orParts.push(`motor_id.in.(${[...motorAvion.keys()].join(',')})`);
+    }
+    const { data, error } = await this.supabase.service
+      .from('vencimiento')
+      .select(COLS)
+      .or(orParts.join(','));
+    if (error) throw new Error(error.message);
+
+    const rows = (data ?? []) as VencimientoRow[];
+    const tipos = await this.loadTipos(rows.map((r) => r.tipo_documento_id));
+    const horasMotor = await this.loadMotorHoras(
+      rows.map((r) => r.motor_id).filter((m): m is string => !!m),
+    );
+
+    for (const r of rows) {
+      const v = this.enrich(r, tipos, horasMotor);
+      if (v.estado !== EstadoVencimiento.VENCIDO || !v.tipo?.es_critico) {
+        continue;
+      }
+      const avionId =
+        v.aeronave_id ?? (v.motor_id ? motorAvion.get(v.motor_id) : null);
+      if (!avionId) continue;
+      out.get(avionId)?.push({
+        id: v.id,
+        tipo_nombre: v.tipo?.nombre ?? 'Documento',
+      });
+    }
+    return out;
+  }
+
+  /**
    * URL firmada (1 h) de la copia del documento. El bucket es privado: el
    * panel pide esta URL al momento de VER, nunca la persiste.
    */

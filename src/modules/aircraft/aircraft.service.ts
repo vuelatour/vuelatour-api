@@ -74,6 +74,8 @@ export class AircraftService {
 
     const [
       motorsRes,
+      helicesMetRes,
+      segurosMetRes,
       tallerRes,
       blocking,
       escalas,
@@ -87,6 +89,18 @@ export class AircraftService {
         .select(
           'posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
         )
+        .eq('aeronave_id', id),
+      // Las hélices también agotan TBO (llevan turm desde ago 2026): antes el
+      // semáforo solo revisaba motores y una hélice vencida quedaba en verde.
+      this.supabase.service
+        .from('helice')
+        .select(
+          'posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
+        .eq('aeronave_id', id),
+      this.supabase.service
+        .from('aeronave_seguro')
+        .select('vigente_hasta')
         .eq('aeronave_id', id),
       this.supabase.service
         .from('mantenimiento')
@@ -128,6 +142,8 @@ export class AircraftService {
         .limit(1),
     ]);
     if (motorsRes.error) throw new Error(motorsRes.error.message);
+    if (helicesMetRes.error) throw new Error(helicesMetRes.error.message);
+    if (segurosMetRes.error) throw new Error(segurosMetRes.error.message);
     if (tallerRes.error) throw new Error(tallerRes.error.message);
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
@@ -169,14 +185,32 @@ export class AircraftService {
     }
 
     // Componentes con overhaul agotado (TBO), usando horas de vida VIVAS.
-    const componentesVencidos = (motorsRes.data ?? [])
-      .map((m: Record<string, unknown>) => ({
+    // Motores Y hélices: ambos vencen TBO y ambos ponen el avión NO APTO.
+    const componentesVencidos = [
+      ...(motorsRes.data ?? []).map((m: Record<string, unknown>) => ({
+        tipo: 'Motor',
         posicion: m.posicion as string,
         numero_serie: m.numero_serie as string,
         restantes:
           this.componenteEstado(m, maxHobbs ?? 0, true).tbo_restante ?? 1,
-      }))
-      .filter((m) => m.restantes <= 0);
+      })),
+      ...(helicesMetRes.data ?? []).map((h: Record<string, unknown>) => ({
+        tipo: 'Hélice',
+        posicion: h.posicion as string,
+        numero_serie: h.numero_serie as string,
+        restantes:
+          this.componenteEstado(h, maxHobbs ?? 0, true).tbo_restante ?? 1,
+      })),
+    ].filter((c) => c.restantes <= 0);
+
+    // Póliza de seguro: si el avión tiene pólizas y TODAS vencieron, no
+    // está asegurado (misma regla que el listado).
+    const hoyPoliza = this.hoyCancun();
+    const ultimaVigencia = (segurosMetRes.data ?? [])
+      .map((s) => (s.vigente_hasta as string | null) ?? '')
+      .sort()
+      .at(-1);
+    const polizaVencida = !!ultimaVigencia && ultimaVigencia < hoyPoliza;
 
     // Discrepancias (squawks) ALTA sin resolver: bloquean el apto igual que
     // bloquean asignar el avión a un vuelo.
@@ -217,9 +251,11 @@ export class AircraftService {
     for (const b of blocking)
       razones.push(`Documento vencido: ${b.tipo_nombre}`);
     for (const c of componentesVencidos)
-      razones.push(`TBO agotado: ${c.posicion} (${c.numero_serie})`);
+      razones.push(`TBO agotado: ${c.tipo} ${c.posicion} (${c.numero_serie})`);
     for (const s of discrepanciasAltas)
       razones.push(`Discrepancia ALTA sin resolver: ${s.descripcion}`);
+    if (polizaVencida)
+      razones.push(`Póliza de seguro vencida (${ultimaVigencia})`);
 
     // Próximo servicio por horas: MISMA regla que tacometroHistorial
     // (this.proximoServicio sobre el programa cíclico del avión).
@@ -231,15 +267,12 @@ export class AircraftService {
 
     return {
       airworthiness: {
-        apto:
-          blocking.length === 0 &&
-          !enTaller &&
-          componentesVencidos.length === 0 &&
-          discrepanciasAltas.length === 0,
+        apto: razones.length === 0,
         documentos_vencidos: blocking,
         en_taller: enTaller,
         componentes_vencidos: componentesVencidos,
         discrepancias_altas: discrepanciasAltas,
+        poliza_vencida: polizaVencida,
         razones,
       },
       // Estado de HOY (contrato acordado con el panel: estos nombres exactos).
@@ -252,6 +285,9 @@ export class AircraftService {
             faltan_hr: prox.faltan,
           }
         : null,
+      // Distingue "sin programa capturado" de "sin datos": sin esto el KPI
+      // mostraba "—" y nadie notaba que el avión no se vigila por horas.
+      programa_configurado: intervalos.length > 0,
       utilizacion: {
         horas_total: Number(horasTotal.toFixed(1)),
         horas_mes: Number(horasMes.toFixed(1)),
@@ -366,7 +402,7 @@ export class AircraftService {
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, horas_totales, tbo_horas, aeronave_horas_ref',
+          'id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
@@ -379,11 +415,14 @@ export class AircraftService {
         ...this.componenteEstado(m, horasActuales, true),
         tbo_horas: m.tbo_horas != null ? Number(m.tbo_horas) : null,
       })),
+      // Las hélices también llevan TURM desde ago 2026: con conTurm=false el
+      // TSO caía al respaldo "horas de vida" y la app del mecánico mostraba
+      // un "restantes a overhaul" distinto al del panel.
       ...(helicesRes.data ?? []).map((h) => ({
         tipo: 'HELICE' as const,
         posicion: h.posicion as string,
         numero_serie: h.numero_serie as string,
-        ...this.componenteEstado(h, horasActuales, false),
+        ...this.componenteEstado(h, horasActuales, true),
         tbo_horas: h.tbo_horas != null ? Number(h.tbo_horas) : null,
       })),
     ];
@@ -418,6 +457,124 @@ export class AircraftService {
       }
     }
     return null;
+  }
+
+  /**
+   * Semáforo APTO/NO APTO en LOTE (para el listado, sin N+1). MISMOS
+   * ingredientes que aircraftMetrics: documentos críticos vencidos
+   * (aeronave + motores), servicio EN_TALLER, TBO agotado (motores Y
+   * hélices) y squawks ALTA sin resolver; más la póliza de seguro vencida
+   * (cuando el avión tiene pólizas registradas).
+   */
+  private async aptitudBulk(
+    ids: string[],
+    maxTaco: Map<string, number>,
+  ): Promise<Map<string, { apto: boolean; razones: string[] }>> {
+    const out = new Map<string, { apto: boolean; razones: string[] }>();
+    for (const id of ids) out.set(id, { apto: true, razones: [] });
+    if (ids.length === 0) return out;
+
+    const hoy = this.hoyCancun();
+    const [
+      tallerRes,
+      squawksRes,
+      motoresRes,
+      helicesRes,
+      segurosRes,
+      blocking,
+    ] = await Promise.all([
+      this.supabase.service
+        .from('mantenimiento')
+        .select('aeronave_id')
+        .in('aeronave_id', ids)
+        .eq('estado', 'EN_TALLER'),
+      this.supabase.service
+        .from('aeronave_discrepancia')
+        .select('aeronave_id, descripcion')
+        .in('aeronave_id', ids)
+        .neq('estado', 'RESUELTA')
+        .eq('severidad', 'ALTA'),
+      this.supabase.service
+        .from('motor')
+        .select(
+          'aeronave_id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
+        .in('aeronave_id', ids),
+      this.supabase.service
+        .from('helice')
+        .select(
+          'aeronave_id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+        )
+        .in('aeronave_id', ids),
+      this.supabase.service
+        .from('aeronave_seguro')
+        .select('aeronave_id, vigente_hasta')
+        .in('aeronave_id', ids),
+      this.expirations.findBlockingExpirationsBulk(ids),
+    ]);
+    if (tallerRes.error) throw new Error(tallerRes.error.message);
+    if (squawksRes.error) throw new Error(squawksRes.error.message);
+    if (motoresRes.error) throw new Error(motoresRes.error.message);
+    if (helicesRes.error) throw new Error(helicesRes.error.message);
+    if (segurosRes.error) throw new Error(segurosRes.error.message);
+
+    const marca = (id: string | null | undefined, razon: string) => {
+      if (!id) return;
+      const s = out.get(id);
+      if (!s) return;
+      s.apto = false;
+      s.razones.push(razon);
+    };
+
+    for (const [avionId, docs] of blocking) {
+      for (const d of docs)
+        marca(avionId, `Documento vencido: ${d.tipo_nombre}`);
+    }
+    for (const t of tallerRes.data ?? []) {
+      const s = out.get(t.aeronave_id as string);
+      // Una sola razón de taller aunque haya varios servicios abiertos.
+      if (s && !s.razones.includes('Servicio en taller')) {
+        marca(t.aeronave_id as string, 'Servicio en taller');
+      }
+    }
+    for (const comp of [
+      ...(motoresRes.data ?? []).map((m) => ({ ...m, _tipo: 'Motor' })),
+      ...(helicesRes.data ?? []).map((h) => ({ ...h, _tipo: 'Hélice' })),
+    ]) {
+      const avionId = comp.aeronave_id as string;
+      const estado = this.componenteEstado(
+        comp,
+        maxTaco.get(avionId) ?? 0,
+        true,
+      );
+      if ((estado.tbo_restante ?? 1) <= 0) {
+        marca(
+          avionId,
+          `TBO agotado: ${comp._tipo} ${comp.posicion as string} (${comp.numero_serie as string})`,
+        );
+      }
+    }
+    for (const s of squawksRes.data ?? []) {
+      marca(
+        s.aeronave_id as string,
+        `Discrepancia ALTA sin resolver: ${((s.descripcion as string | null) ?? '').slice(0, 60)}`,
+      );
+    }
+    // Póliza de seguro: si el avión tiene pólizas y TODAS vencieron, no está
+    // asegurado. (El documento crítico "Seguro" de vencimientos también lo
+    // cubre cuando se captura ahí; ambas fuentes suman, no se pisan.)
+    const vigencias = new Map<string, string>();
+    for (const seg of segurosRes.data ?? []) {
+      const avionId = seg.aeronave_id as string;
+      const hasta = (seg.vigente_hasta as string | null) ?? '';
+      if (hasta > (vigencias.get(avionId) ?? '')) vigencias.set(avionId, hasta);
+    }
+    for (const [avionId, hasta] of vigencias) {
+      if (hasta && hasta < hoy) {
+        marca(avionId, `Póliza de seguro vencida (${hasta})`);
+      }
+    }
+    return out;
   }
 
   async list(filters: ListAeronavesQuery) {
@@ -463,14 +620,20 @@ export class AircraftService {
       // por tramo: la escala pertenece al avión de escala.aeronave_id, o al
       // del vuelo cuando no tiene asignación propia.
       const ids = new Set(rows.map((a) => a.id as string));
-      const { data: tacos } = await this.supabase.service
-        .from('escala')
-        .select(
-          'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id(aeronave_id)',
-        )
-        .or('taco_salida.not.is.null,taco_llegada.not.is.null');
+      // Paginado: sin .range() PostgREST trunca a 1000 filas y el max se
+      // calcularía sobre un subconjunto arbitrario, en silencio.
+      const tacos = await this.fetchTodas((from, to) =>
+        this.supabase.service
+          .from('escala')
+          .select(
+            'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id(aeronave_id)',
+          )
+          .or('taco_salida.not.is.null,taco_llegada.not.is.null')
+          .order('id', { ascending: true })
+          .range(from, to),
+      );
       const maxTaco = new Map<string, number>();
-      for (const e of tacos ?? []) {
+      for (const e of tacos) {
         const vuelo = e.vuelo as { aeronave_id?: string | null } | null;
         const dueno =
           (e.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null;
@@ -482,8 +645,14 @@ export class AircraftService {
           }
         }
       }
+      // Semáforo APTO/NO APTO en lote (petición del cliente: verlo en la
+      // lista, no solo en el detalle).
+      const aptitud = await this.aptitudBulk([...ids], maxTaco);
       for (const a of rows) {
         a.ultimo_taco = maxTaco.get(a.id as string) ?? null;
+        const apt = aptitud.get(a.id as string);
+        a.apto = apt?.apto ?? true;
+        a.no_apto_razones = apt?.razones ?? [];
       }
     }
 
@@ -593,8 +762,16 @@ export class AircraftService {
       ),
     }));
 
+    // Semáforo APTO/NO APTO también en el snapshot: /metrics lleva gate de
+    // roles financieros (ADMIN/ANALISTA/SOCIO) y el COORDINADOR — que asigna
+    // vuelos y captura squawks — se quedaba sin ver el NO APTO en el detalle.
+    const aptitud = (await this.aptitudBulk([id], new Map([[id, hobbs]]))).get(
+      id,
+    );
+
     return {
       ...aeronave,
+      airworthiness: aptitud ?? { apto: true, razones: [] },
       motors,
       propellers,
       owners: ownersRes.data ?? [],
@@ -746,6 +923,34 @@ export class AircraftService {
     return { buffer, matricula: (aeronave.matricula as string) ?? 'avion' };
   }
 
+  /**
+   * Trae TODAS las filas de una consulta paginando en bloques de 1000:
+   * PostgREST trunca a 1000 por default y el excedente se perdía EN SILENCIO
+   * (último taco / horas calculados sobre un subconjunto arbitrario — hoy
+   * van ~230 escalas, pero al ritmo actual el tope llegaba en meses).
+   */
+  private async fetchTodas(
+    builder: (
+      from: number,
+      to: number,
+    ) => PromiseLike<{
+      data: unknown[] | null;
+      error: { message: string } | null;
+    }>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const PAGE = 1000;
+    const out: Array<Record<string, unknown>> = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await builder(from, from + PAGE - 1);
+      // Nunca degradar a [] en silencio: estas filas alimentan horas/hobbs.
+      if (error) throw new Error(error.message);
+      const chunk = (data ?? []) as Array<Record<string, unknown>>;
+      out.push(...chunk);
+      if (chunk.length < PAGE) break;
+    }
+    return out;
+  }
+
   private async escalasDelAvion(
     aeronaveId: string,
     select = 'taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
@@ -754,30 +959,32 @@ export class AircraftService {
       // Tramos asignados explícitamente a este avión (escala.aeronave_id).
       // Tramos CANCELADOS fuera: no volaron (sus tacos ya vienen en null,
       // pero así tampoco aparecen en histórico/bitácora).
-      this.supabase.service
-        .from('escala')
-        .select(select)
-        .eq('aeronave_id', aeronaveId)
-        .is('cancelada_at', null)
-        .neq('vuelo.estado', 'CANCELADO'),
+      this.fetchTodas((from, to) =>
+        this.supabase.service
+          .from('escala')
+          .select(select)
+          .eq('aeronave_id', aeronaveId)
+          .is('cancelada_at', null)
+          .neq('vuelo.estado', 'CANCELADO')
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
       // Tramos sin avión propio: heredan el del vuelo.
-      this.supabase.service
-        .from('escala')
-        .select(select)
-        .is('aeronave_id', null)
-        .eq('vuelo.aeronave_id', aeronaveId)
-        .is('cancelada_at', null)
-        .neq('vuelo.estado', 'CANCELADO'),
+      this.fetchTodas((from, to) =>
+        this.supabase.service
+          .from('escala')
+          .select(select)
+          .is('aeronave_id', null)
+          .eq('vuelo.aeronave_id', aeronaveId)
+          .is('cancelada_at', null)
+          .neq('vuelo.estado', 'CANCELADO')
+          .order('id', { ascending: true })
+          .range(from, to),
+      ),
     ]);
-    // Nunca degradar a [] en silencio: estas escalas alimentan horas/hobbs.
-    if (propias.error) throw new Error(propias.error.message);
-    if (heredadas.error) throw new Error(heredadas.error.message);
     // El select dinámico deja al cliente sin tipo inferido: normalizamos a
     // Record<string, unknown> (los consumidores castean sus columnas).
-    return [
-      ...((propias.data ?? []) as unknown as Array<Record<string, unknown>>),
-      ...((heredadas.data ?? []) as unknown as Array<Record<string, unknown>>),
-    ];
+    return [...propias, ...heredadas];
   }
 
   /**

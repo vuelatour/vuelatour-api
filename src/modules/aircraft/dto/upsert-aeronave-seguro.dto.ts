@@ -70,4 +70,6 @@ export class CreateAeronaveSeguroDto {
   notas?: string;
 }
 
-export class UpdateAeronaveSeguroDto extends PartialType(CreateAeronaveSeguroDto) {}
+export class UpdateAeronaveSeguroDto extends PartialType(
+  CreateAeronaveSeguroDto,
+) {}
