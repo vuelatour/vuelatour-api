@@ -16,7 +16,9 @@ export class ProfitSharingController {
   ) {}
 
   @Get()
-  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  // SOCIO: su rol declara "Lectura + PDFs de reparto" y el menú del panel le
+  // ofrece esta página — sin él aquí, el destinatario del reparto veía 403.
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary: 'Compute the profit-sharing breakdown per aircraft for a period',
   })
@@ -35,7 +37,7 @@ export class ProfitSharingController {
   }
 
   @Get('pdf')
-  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary: 'Profit-sharing report PDF (rendered by vuelatour-pyservices)',
   })

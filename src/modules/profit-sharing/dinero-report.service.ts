@@ -64,14 +64,16 @@ export class DineroReportService {
     const d1 = `${desde}T00:00:00-05:00`;
     const d2 = `${hasta}T23:59:59-05:00`;
 
-    // Vuelos del periodo (todos los aviones; cancelados fuera: el libro
-    // manual solo registra vuelos que ocurrieron).
+    // Vuelos del periodo (todos los aviones). El libro manual solo registra
+    // vuelos que ocurrieron o están en firme: las solicitudes/cotizaciones/
+    // reservas que nunca se confirmaron NO son ventas (inflaban ventas y
+    // "me deben", y descuadraban contra el reparto, que solo usa COMPLETADO).
     const vuelosRes = await sb
       .from('vuelo')
       .select(
         'id, folio, cliente_id, aeronave_id, estado, es_externo, fecha_vuelo, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, calculo_snapshot',
       )
-      .neq('estado', 'CANCELADO')
+      .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'])
       .gte('fecha_vuelo', d1)
       .lte('fecha_vuelo', d2)
       .order('fecha_vuelo', { ascending: true });

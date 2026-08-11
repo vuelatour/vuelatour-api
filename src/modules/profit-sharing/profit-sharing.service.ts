@@ -51,6 +51,8 @@ interface VueloRow {
   origen_iata: string | null;
   destino_iata: string | null;
   es_externo: boolean;
+  /** Solo externos: lo que cobra el operador dueño del avión. */
+  costo_externo_usd: string | null;
 }
 
 /** Grupo del reparto al que aporta una categoría de gasto (doc 4.8). */
@@ -133,6 +135,10 @@ export class ProfitSharingService {
         gastos_sin_tc_mxn: a.gastos.gastos_sin_tc_mxn,
         cobros_sin_tc_mxn: a.ingresos.cobros_sin_tc_mxn,
         reserva_incompleta: a.reserva_overhaul_incompleta,
+        // El PDF/XLSX a socios es el reporte VITAL: si las vigencias de
+        // socios traslapan mal (total ≠ 100%), la advertencia debe viajar
+        // impresa — la web ya lo delataba con un badge, el papel no.
+        reparto_porcentaje_total: a.reparto_porcentaje_total,
         reparto: a.reparto.map((r) => ({
           socio_nombre: r.socio_nombre,
           porcentaje: r.porcentaje,
@@ -172,7 +178,22 @@ export class ProfitSharingService {
 
     const aeronaves = await this.fetchAeronaves(q.aeronave_id);
     if (aeronaves.length === 0) {
-      return { periodo: { desde: q.desde, hasta: q.hasta }, aviones: [] };
+      // MISMO shape que la respuesta normal: el panel lee gastos_sin_tc y
+      // externos antes de revisar aviones.length (sin esto crasheaba antes
+      // de llegar a su propio EmptyState).
+      return {
+        periodo: { desde: q.desde, hasta: q.hasta },
+        gastos_sin_tc: { count: 0, monto_mxn: 0 },
+        externos: {
+          vuelos: 0,
+          cobrado_usd: 0,
+          costo_usd: 0,
+          utilidad_usd: 0,
+          sin_costo_count: 0,
+          cobros_sin_tc_mxn: 0,
+        },
+        aviones: [],
+      };
     }
 
     const [vuelos, gastos, socios, reservas] = await Promise.all([
@@ -248,9 +269,43 @@ export class ProfitSharingService {
       }),
     );
 
+    // Vuelos EXTERNOS del periodo (aeronave_id null: no entran a ninguna
+    // card por avión). Su dinero cobrado ANTES desaparecía del reparto sin
+    // rastro; aquí se hace visible como bloque informativo — la utilidad
+    // externa NO se distribuye entre socios (el vuelo no es de un avión de
+    // la flota) hasta que el cliente decida su tratamiento.
+    let extCobrado = 0;
+    let extCosto = 0;
+    let extSinCosto = 0;
+    let extSinTcMxn = 0;
+    const externosVuelos = vuelos.filter((v) => v.es_externo === true);
+    for (const v of externosVuelos) {
+      const conv = cobrosEnUsd(
+        cobrosPorVuelo.get(v.id) ?? [],
+        v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+      );
+      extCobrado += conv.total_usd;
+      extSinTcMxn += conv.sin_tc_mxn;
+      if (v.costo_externo_usd == null) {
+        extSinCosto += 1;
+      } else {
+        extCosto += Number(v.costo_externo_usd);
+      }
+    }
+    const extCobradoR = round2(extCobrado);
+    const extCostoR = round2(extCosto);
+
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
+      externos: {
+        vuelos: externosVuelos.length,
+        cobrado_usd: extCobradoR,
+        costo_usd: extCostoR,
+        utilidad_usd: round2(extCobradoR - extCostoR),
+        sin_costo_count: extSinCosto,
+        cobros_sin_tc_mxn: round2(extSinTcMxn),
+      },
       aviones,
     };
   }
@@ -406,38 +461,68 @@ export class ProfitSharingService {
     const reservaOverhaul = horasPeriodo * tarifaReserva;
     const reservaIncompleta = horasPeriodo > 0 && tarifaReserva <= 0;
 
-    const saldo =
-      cobrado -
-      comisionesVenta -
-      directos -
-      indirectos -
-      permisos -
-      ctx.otrosPorAvion -
-      reservaOverhaul;
+    // Disciplina v1.3 (redondear ANTES de sumar): el saldo se calcula con los
+    // MISMOS componentes redondeados que se publican, así la cascada del PDF
+    // cuadra al centavo (antes difería 1-3 ¢ por decimales largos de TC).
+    const cobradoR = round2(cobrado);
+    const comisionesR = round2(comisionesVenta);
+    const directosR = round2(directos);
+    const indirectosR = round2(indirectos);
+    const permisosR = round2(permisos);
+    const otrosR = round2(ctx.otrosPorAvion);
+    const reservaR = round2(reservaOverhaul);
+    const saldo = round2(
+      cobradoR -
+        comisionesR -
+        directosR -
+        indirectosR -
+        permisosR -
+        otrosR -
+        reservaR,
+    );
 
-    const reparto = ctx.socios
-      .filter(
-        (s) =>
-          s.aeronave_id === a.id &&
-          s.vigente_desde <= ctx.periodo.hasta &&
-          (s.vigente_hasta === null || s.vigente_hasta >= ctx.periodo.desde),
-      )
-      .map((s) => {
-        const pct = Number(s.porcentaje);
-        return {
-          socio_id: s.socio_id,
-          socio_nombre: ctx.nombres.get(s.socio_id) ?? 'Socio',
-          porcentaje: pct,
-          monto_usd: round2((pct / 100) * saldo),
-        };
-      });
-    const repartoPct = reparto.reduce((acc, r) => acc + r.porcentaje, 0);
+    // Reparto por residuo mayor (en centavos): con porcentajes que suman 100,
+    // la suma de las partes da EXACTO el saldo (antes 50/50 de 100.01 daba
+    // 50.01 + 50.01 = 100.02). Con ≠100% se reparte proporcional tal cual y
+    // el badge/advertencia de porcentajes lo delata.
+    const vigentes = ctx.socios.filter(
+      (s) =>
+        s.aeronave_id === a.id &&
+        s.vigente_desde <= ctx.periodo.hasta &&
+        (s.vigente_hasta === null || s.vigente_hasta >= ctx.periodo.desde),
+    );
+    const saldoCents = Math.round(saldo * 100);
+    const partes = vigentes.map((s) => {
+      const pct = Number(s.porcentaje);
+      const exacto = (pct / 100) * saldoCents;
+      return {
+        s,
+        pct,
+        cents: Math.floor(exacto),
+        resto: exacto - Math.floor(exacto),
+      };
+    });
+    const repartoPct = partes.reduce((acc, p) => acc + p.pct, 0);
+    let faltan =
+      Math.round((repartoPct / 100) * saldoCents) -
+      partes.reduce((acc, p) => acc + p.cents, 0);
+    for (const p of [...partes].sort((x, y) => y.resto - x.resto)) {
+      if (faltan <= 0) break;
+      p.cents += 1;
+      faltan -= 1;
+    }
+    const reparto = partes.map((p) => ({
+      socio_id: p.s.socio_id,
+      socio_nombre: ctx.nombres.get(p.s.socio_id) ?? 'Socio',
+      porcentaje: p.pct,
+      monto_usd: p.cents / 100,
+    }));
 
     return {
       aeronave: { id: a.id, matricula: a.matricula, modelo: a.modelo },
       ingresos: {
-        cobrado_usd: round2(cobrado),
-        comisiones_venta_usd: round2(comisionesVenta),
+        cobrado_usd: cobradoR,
+        comisiones_venta_usd: comisionesR,
         pendiente_cobro_usd: round2(pendiente),
         vuelos_cobrados: vuelosCobrados,
         vuelos_pendientes: vuelosPendientes,
@@ -445,16 +530,16 @@ export class ProfitSharingService {
       },
       horas_voladas_hr: horasPeriodo,
       gastos: {
-        directos_usd: round2(directos),
-        indirectos_usd: round2(indirectos),
-        permisos_usd: round2(permisos),
-        otros_prorrateados_usd: round2(ctx.otrosPorAvion),
+        directos_usd: directosR,
+        indirectos_usd: indirectosR,
+        permisos_usd: permisosR,
+        otros_prorrateados_usd: otrosR,
         gastos_sin_tc_count: sinTc,
         gastos_sin_tc_mxn: round2(sinTcMxn),
       },
-      reserva_overhaul_usd: round2(reservaOverhaul),
+      reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
-      saldo_disponible_usd: round2(saldo),
+      saldo_disponible_usd: saldo,
       reparto,
       reparto_porcentaje_total: round2(repartoPct),
       // Desglose ADITIVO del avión (vuelo por vuelo y gasto por categoría).
@@ -861,6 +946,12 @@ export class ProfitSharingService {
         g.categoria !== 'FIJO' &&
         g.categoria !== 'INDIRECTO',
     );
+    // El caso inverso: un FIJO capturado CON avión se prorratea igual entre
+    // toda la flota (el pool no mira aeronave_id) y en el detalle del avión
+    // asignado aparece EXCLUIDO — doble lectura silenciosa. Aviso, no candado.
+    const fijosConAvion = gastos.filter(
+      (g) => g.aeronave_id != null && g.categoria === 'FIJO',
+    );
     const sinTc = gastos.filter(
       (g) => g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0),
     );
@@ -917,6 +1008,13 @@ export class ProfitSharingService {
         detalle:
           'No se restan a ningún avión en el reparto. Meta: bandeja vacía.',
         count: sinAvion.length,
+      },
+      {
+        clave: 'fijos_con_avion',
+        titulo: 'Gastos FIJOS capturados con avión',
+        detalle:
+          'Los FIJOS se prorratean entre TODA la flota aunque tengan avión: quítales el avión o cámbiales la categoría para que resten donde corresponde.',
+        count: fijosConAvion.length,
       },
       {
         clave: 'pistas_sin_gasto',
@@ -1018,7 +1116,7 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo',
+        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd',
       )
       .eq('estado', 'COMPLETADO')
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
