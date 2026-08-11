@@ -625,7 +625,7 @@ export class ProfitSharingService {
       sb
         .from('gasto')
         .select(
-          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_comprobante',
+          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_comprobante, medio_pago, conciliado, duplicado_sospechado',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -958,6 +958,20 @@ export class ProfitSharingService {
     const sinComprobante = gastos.filter(
       (g) => g.estatus_comprobante !== 'FACTURA',
     );
+    // Posibles duplicados con el flag aún encendido: cada uno resta DOBLE al
+    // reparto hasta que alguien lo resuelva (borrar el repetido o marcar
+    // "No es duplicado" en Gastos → pestaña Duplicados).
+    const duplicadosSinResolver = gastos.filter(
+      (g) => g.duplicado_sospechado === true,
+    );
+    // El espejo que faltaba: los MOVIMIENTOS sin conciliar ya se vigilan,
+    // pero un GASTO bancario que nadie cruzó (p. ej. el sobrante de un
+    // duplicado cuya pareja ya se concilió) era invisible para siempre.
+    const bancariosSinConciliar = gastos.filter(
+      (g) =>
+        (g.medio_pago === 'TARJETA_CORP' || g.medio_pago === 'TRANSFERENCIA') &&
+        g.conciliado !== true,
+    );
     const movs = (movRes.data ?? []) as Array<Record<string, unknown>>;
 
     const items = [
@@ -1015,6 +1029,20 @@ export class ProfitSharingService {
         detalle:
           'Los FIJOS se prorratean entre TODA la flota aunque tengan avión: quítales el avión o cámbiales la categoría para que resten donde corresponde.',
         count: fijosConAvion.length,
+      },
+      {
+        clave: 'duplicados_sin_resolver',
+        titulo: 'Posibles gastos duplicados sin resolver',
+        detalle:
+          'Cada duplicado resta DOBLE al reparto. Revísalos en Gastos → pestaña Duplicados: borra el repetido o marca "No es duplicado".',
+        count: duplicadosSinResolver.length,
+      },
+      {
+        clave: 'gastos_bancarios_sin_conciliar',
+        titulo: 'Gastos bancarios sin conciliar al corte',
+        detalle:
+          'Tarjeta corporativa o transferencia sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
+        count: bancariosSinConciliar.length,
       },
       {
         clave: 'pistas_sin_gasto',

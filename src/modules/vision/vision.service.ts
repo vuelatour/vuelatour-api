@@ -51,6 +51,8 @@ export interface GastoTicketVisionResult {
   moneda: 'MXN' | 'USD' | null;
   fecha: string | null;
   proveedor: string | null;
+  /** Folio/remisión impreso en el ticket (llave anti-duplicados). */
+  folio?: string | null;
   concepto: string | null;
   categoria_sugerida: string | null;
   medio_pago: 'EFECTIVO' | 'TARJETA_CORP' | 'TRANSFERENCIA' | null;
@@ -102,6 +104,8 @@ export interface CombustibleTicketVisionResult {
   total: number | null;
   moneda: 'MXN' | 'USD' | null;
   aeropuerto: string | null;
+  /** Folio/remisión impreso en el ticket (ej. "Remision: 2622242310" de ASA). */
+  folio?: string | null;
   tipo_combustible: 'TURBOSINA' | 'AVGAS' | null;
   fecha: string | null;
   /** Hora de la carga HH:MM (24h) — clave para ligar el ticket al vuelo. */

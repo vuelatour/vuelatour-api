@@ -69,6 +69,15 @@ export class CreateGastoDto {
   @IsEnum(CategoriaGasto)
   categoria!: CategoriaGasto;
 
+  @ApiPropertyOptional({
+    description:
+      'Folio / número de remisión del ticket o factura (ej. remisión ASA). Con 4+ caracteres alfanuméricos es CANDADO anti-duplicados: otro gasto con el mismo folio se rechaza con 409.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  folio_ticket?: string;
+
   @ApiProperty({ description: 'Monto del gasto' })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })

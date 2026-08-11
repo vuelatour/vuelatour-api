@@ -26,14 +26,28 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
 const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio)`;
 
-/** Ventana en días para considerar dos gastos como posible duplicado. */
-const DUP_DAYS = 3;
+/** Ventana en días para considerar dos gastos como posible duplicado.
+ *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
+ *  mismo ticket capturado "días después" por otra persona se escapaba. */
+const DUP_DAYS = 7;
+const DUP_DAYS_SIN_PROVEEDOR = 3;
+
+/** Normalización del folio del ticket: la MISMA regla que la columna
+ *  generada `folio_ticket_norm` de la BD (solo alfanumérico, mayúsculas). */
+function normalizarFolio(folio: string | null | undefined): string | null {
+  const norm = (folio ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  return norm.length > 0 ? norm : null;
+}
+
+/** Largo mínimo del folio normalizado para el candado duro (los cortos son
+ *  demasiado genéricos para rechazar; solo llevan el flag blando). */
+const FOLIO_CANDADO_MIN = 4;
 
 @Injectable()
 export class ExpensesService {
@@ -867,10 +881,16 @@ export class ExpensesService {
       foto_url: dto.foto_url,
       valor_ia_extraido: dto.valor_ia_extraido,
       duplicado_sospechado: await this.looksLikeDuplicate(dto),
+      folio_ticket: dto.folio_ticket?.trim() || null,
       notas,
       created_by: userId,
       updated_by: userId,
     };
+
+    // CANDADO por folio/remisión: el mismo ticket capturado dos veces trae
+    // el mismo folio, sin importar quién ni cuántos días después. El pre-check
+    // da el mensaje con detalle; el índice único de la BD cubre la carrera.
+    await this.assertFolioTicketLibre(dto.folio_ticket);
 
     const { data, error } = await this.supabase.service
       .from('gasto')
@@ -881,6 +901,10 @@ export class ExpensesService {
       if (error.code === '23503')
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
+        );
+      if (error.code === '23505')
+        throw new ConflictException(
+          `Ya existe un gasto con el folio/remisión "${dto.folio_ticket}": es el mismo pago capturado dos veces. Si de verdad es otro ticket, corrige el folio.`,
         );
       throw new Error(error.message);
     }
@@ -1013,6 +1037,32 @@ export class ExpensesService {
         patch.litros = (ai as { litros?: number }).litros;
       }
     }
+    // Folio/remisión del ticket: llenar si falta. Si el folio leído YA existe
+    // en otro gasto, NO se escribe (el índice único reventaría el patch):
+    // se marca posible duplicado y queda la nota — es justo el caso "dos
+    // personas capturaron el mismo ticket" detectado por la foto.
+    if (!gasto.folio_ticket && ai.folio) {
+      const folioLeido = String(ai.folio).slice(0, 60);
+      const norm = normalizarFolio(folioLeido);
+      if (norm && norm.length >= FOLIO_CANDADO_MIN) {
+        const { data: repetido } = await this.supabase.service
+          .from('gasto')
+          .select('id')
+          .eq('folio_ticket_norm', norm)
+          .neq('id', gastoId)
+          .limit(1);
+        if ((repetido ?? []).length > 0) {
+          patch.duplicado_sospechado = true;
+          discrepancias.push(
+            `el folio ${folioLeido} del ticket YA está capturado en otro gasto — posible pago duplicado`,
+          );
+        } else {
+          patch.folio_ticket = folioLeido;
+        }
+      } else if (norm) {
+        patch.folio_ticket = folioLeido;
+      }
+    }
     // Matrícula del documento → avión (saca el gasto de la bandeja solo).
     if (ai.matricula) {
       const { data: aviones } = await this.supabase.service
@@ -1083,14 +1133,56 @@ export class ExpensesService {
    * - CON proveedor: mismo proveedor + monto + moneda, fecha ±DUP_DAYS
    *   (regla del diseño funcional).
    * - SIN proveedor (capturas del piloto/mecánico desde la app): misma
-   *   categoría + monto + moneda, fecha ±1 día — ventana corta para no marcar
-   *   falsos positivos (dos taxis iguales en días distintos).
+   *   categoría + monto + moneda, fecha ±DUP_DAYS_SIN_PROVEEDOR — ventana más
+   *   corta para no marcar falsos positivos (dos taxis iguales en días
+   *   distintos).
    * El flag NUNCA bloquea: la app avisa al capturista y el admin lo lista.
+   * El candado DURO es aparte y por folio (assertFolioTicketLibre).
    */
+  /**
+   * CANDADO DURO anti-duplicados por folio/remisión: si otro gasto ya tiene
+   * el MISMO folio normalizado (4+ alfanuméricos), 409 con un mensaje que
+   * identifica al gasto existente. Usa la columna generada folio_ticket_norm
+   * (misma regla que el índice único, que cubre la carrera). Los folios
+   * cortos no bloquean: demasiado genéricos — solo llevan el flag blando.
+   */
+  private async assertFolioTicketLibre(
+    folio: string | null | undefined,
+    excluirId?: string,
+  ): Promise<void> {
+    const norm = normalizarFolio(folio);
+    if (!norm || norm.length < FOLIO_CANDADO_MIN) return;
+    let q = this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, monto, moneda, categoria, captura:usuario!usuario_captura_id(nombre)',
+      )
+      .eq('folio_ticket_norm', norm)
+      .limit(1);
+    if (excluirId) q = q.neq('id', excluirId);
+    const { data, error } = await q;
+    // Consulta caída: no frenar aquí — el índice único de la BD es el candado real.
+    if (error) return;
+    const dup = (data ?? [])[0] as
+      | {
+          fecha_gasto: string;
+          monto: string;
+          moneda: string;
+          categoria: string;
+          captura: { nombre?: string } | { nombre?: string }[] | null;
+        }
+      | undefined;
+    if (!dup) return;
+    const cap = Array.isArray(dup.captura) ? dup.captura[0] : dup.captura;
+    throw new ConflictException(
+      `El folio/remisión "${folio}" ya está capturado: gasto ${dup.categoria} de $${Number(dup.monto).toFixed(2)} ${dup.moneda} con fecha ${dup.fecha_gasto}${cap?.nombre ? ` (capturó ${cap.nombre})` : ''}. Es el mismo pago dos veces — si de verdad es otro ticket, corrige el folio.`,
+    );
+  }
+
   private async looksLikeDuplicate(dto: CreateGastoDto): Promise<boolean> {
     const base = new Date(`${dto.fecha_gasto}T00:00:00Z`);
     if (Number.isNaN(base.getTime())) return false;
-    const dias = dto.proveedor_id ? DUP_DAYS : 1;
+    const dias = dto.proveedor_id ? DUP_DAYS : DUP_DAYS_SIN_PROVEEDOR;
     const lo = new Date(base);
     lo.setUTCDate(lo.getUTCDate() - dias);
     const hi = new Date(base);
@@ -1267,10 +1359,18 @@ export class ExpensesService {
         );
       }
     }
+    // Mismo candado del create: corregir el folio hacia uno ya capturado
+    // también es duplicar el pago (se excluye el propio gasto).
+    if (dto.folio_ticket !== undefined) {
+      await this.assertFolioTicketLibre(dto.folio_ticket, id);
+    }
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
+    if (dto.folio_ticket !== undefined) {
+      cols.folio_ticket = dto.folio_ticket?.trim() || null;
+    }
     const { data, error } = await this.supabase.service
       .from('gasto')
       .update({ ...cols, updated_by: userId })
@@ -1281,6 +1381,10 @@ export class ExpensesService {
       if (error.code === '23503')
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
+        );
+      if (error.code === '23505')
+        throw new ConflictException(
+          `Ya existe un gasto con el folio/remisión "${dto.folio_ticket}": es el mismo pago capturado dos veces. Si de verdad es otro ticket, corrige el folio.`,
         );
       throw new Error(error.message);
     }
