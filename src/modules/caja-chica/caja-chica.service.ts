@@ -437,7 +437,15 @@ export class CajaChicaService {
       .eq('activo', true)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!fondo) return { fondo: null, saldo: 0, movimientos: [] };
+    if (!fondo) {
+      return {
+        fondo: null,
+        saldo: 0,
+        movimientos: [],
+        gastos: [],
+        efectivo_otras_monedas: [],
+      };
+    }
 
     const fo = fondo as Record<string, unknown> & {
       id: string;
@@ -499,7 +507,26 @@ export class CajaChicaService {
       (fo as { es_acumulada?: boolean }).es_acumulada === true,
     );
 
-    return { fondo, saldo, movimientos: movs ?? [], gastos: gastosLista };
+    // Efectivo capturado en OTRA moneda: no alimenta el saldo del fondo (una
+    // caja = una moneda y los movimientos de reposición se rechazan en otra
+    // divisa), pero también es dinero del capturista que se repone aparte —
+    // sin esto un gasto en USD quedaba invisible en el resumen.
+    const otras = new Map<string, number>();
+    for (const g of gastos ?? []) {
+      if (g.moneda === fo.moneda) continue;
+      otras.set(g.moneda, (otras.get(g.moneda) ?? 0) + Number(g.monto));
+    }
+    const efectivoOtrasMonedas = [...otras.entries()].map(
+      ([moneda, total]) => ({ moneda, total: round(total) }),
+    );
+
+    return {
+      fondo,
+      saldo,
+      movimientos: movs ?? [],
+      gastos: gastosLista,
+      efectivo_otras_monedas: efectivoOtrasMonedas,
+    };
   }
 }
 
