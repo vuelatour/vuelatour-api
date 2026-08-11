@@ -84,9 +84,9 @@ export class PilotsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Detalle de un piloto: próximos vuelos, vuelos del mes, capturas y gastos recientes.',
+      'Detalle de un piloto: stats del mes (?mes=YYYY-MM, default corriente), activos/próximos, capturas y gastos recientes.',
   })
-  getOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.pilots.findById(id);
+  getOne(@Param('id', ParseUUIDPipe) id: string, @Query('mes') mes?: string) {
+    return this.pilots.findById(id, mes);
   }
 }

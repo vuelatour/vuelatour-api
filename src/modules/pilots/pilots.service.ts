@@ -44,6 +44,30 @@ export class PilotsService {
     return { desdeTs: `${ym}-01T00:00:00-05:00`, desdeFecha: `${ym}-01` };
   }
 
+  /** Rango COMPLETO de un mes (YYYY-MM) en hora Cancún; inválido/ausente =
+   *  mes corriente. Permite consultar estadísticas de meses pasados. */
+  private rangoMesCancun(mes?: string): {
+    ym: string;
+    desdeTs: string;
+    hastaTs: string;
+    desdeFecha: string;
+    hastaFecha: string;
+  } {
+    const ym = /^\d{4}-(0[1-9]|1[0-2])$/.test(mes ?? '')
+      ? (mes as string)
+      : this.hoyCancun().slice(0, 7);
+    const [y, m] = ym.split('-').map(Number);
+    const ultimoDia = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const hastaFecha = `${ym}-${String(ultimoDia).padStart(2, '0')}`;
+    return {
+      ym,
+      desdeTs: `${ym}-01T00:00:00-05:00`,
+      hastaTs: `${hastaFecha}T23:59:59-05:00`,
+      desdeFecha: `${ym}-01`,
+      hastaFecha,
+    };
+  }
+
   /**
    * Condición OR de vuelos donde el usuario participa en CUALQUIER rol:
    * piloto del vuelo, copiloto, APOYO o piloto de algún TRAMO (p. ej. solo el
@@ -113,6 +137,7 @@ export class PilotsService {
           vuelos_proximos: 0,
           capturas_mes: 0,
           gastos_mes: 0,
+          horas_mes: 0,
           ultimo_vuelo: null,
         },
       })),
@@ -180,7 +205,7 @@ export class PilotsService {
   /**
    * Detalle del piloto: perfil + próximos vuelos + actividad reciente.
    */
-  async findById(id: string) {
+  async findById(id: string, mes?: string) {
     const { data: pilot, error } = await this.supabase.service
       .from('usuario')
       .select(USUARIO_COLS)
@@ -191,7 +216,11 @@ export class PilotsService {
     if (error) throw new Error(`Failed to load pilot: ${error.message}`);
     if (!pilot) throw new NotFoundException(`Pilot ${id} not found`);
 
-    const { desdeTs, desdeFecha } = this.mesActualCancun();
+    // Las stats son DEL MES elegido (?mes=YYYY-MM; default mes corriente):
+    // el expediente permite revisar meses pasados. Activos/próximos y las
+    // listas de recientes no dependen del mes.
+    const { ym, desdeTs, hastaTs, desdeFecha, hastaFecha } =
+      this.rangoMesCancun(mes);
     const hoy = this.hoyCancun();
     const hoyTs = `${hoy}T00:00:00-05:00`;
     const orRoles = await this.orRolesPiloto(id);
@@ -239,6 +268,7 @@ export class PilotsService {
         .or(orRoles)
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
+        .lte('fecha_vuelo', hastaTs)
         .limit(1000),
       this.supabase.service
         .from('gasto')
@@ -254,7 +284,8 @@ export class PilotsService {
         .from('gasto')
         .select('id', { count: 'exact', head: true })
         .eq('usuario_captura_id', id)
-        .gte('fecha_gasto', desdeFecha),
+        .gte('fecha_gasto', desdeFecha)
+        .lte('fecha_gasto', hastaFecha),
       this.supabase.service
         .from('escala')
         .select(
@@ -267,7 +298,8 @@ export class PilotsService {
         .from('escala')
         .select('id', { count: 'exact', head: true })
         .eq('capturado_por', id)
-        .gte('sincronizado_at', desdeTs),
+        .gte('sincronizado_at', desdeTs)
+        .lte('sincronizado_at', hastaTs),
       this.supabase.service
         .from('fondo_caja')
         .select('id, tipo, medio_pago_asociado, monto_asignado, moneda, activo')
@@ -283,7 +315,7 @@ export class PilotsService {
         .limit(5),
       // Horas del mes (Cancún, por tramo con herencia): fuente única
       // users.horasDelMes — la misma del dashboard y de /me/horas.
-      this.users.horasDelMes(id),
+      this.users.horasDelMes(id, ym),
     ]);
 
     if (activosRes.error) throw new Error(activosRes.error.message);
@@ -374,7 +406,8 @@ export class PilotsService {
             continue;
           }
           total += usd;
-          if ((p.fecha_gasto as string) >= desdeFecha) mes += usd;
+          const f = p.fecha_gasto as string;
+          if (f >= desdeFecha && f <= hastaFecha) mes += usd;
         }
         honorarios = {
           total_usd: Math.round(total * 100) / 100,
@@ -399,6 +432,7 @@ export class PilotsService {
     return {
       ...pilot,
       stats: {
+        mes: ym,
         vuelos_mes: vuelosMes.length,
         vuelos_proximos: activosRes.data?.length ?? 0,
         capturas_mes: capturasCountRes.count ?? 0,
@@ -433,37 +467,47 @@ export class PilotsService {
     const { desdeTs, desdeFecha } = this.mesActualCancun();
     const hoyTs = `${this.hoyCancun()}T00:00:00-05:00`;
 
-    const [vuelosMes, vuelosProximos, capturas, gastos] = await Promise.all([
-      // Sin filtrar por piloto: la flota vuela pocos vuelos al mes y así se
-      // cuentan también copiloto/apoyo/tramo (mismo criterio del expediente).
-      this.supabase.service
-        .from('vuelo')
-        .select(
-          'id, piloto_id, copiloto_id, apoyo_id, fecha_vuelo, escalas:escala(piloto_id)',
-        )
-        .eq('estado', 'COMPLETADO')
-        .gte('fecha_vuelo', desdeTs),
-      // EN_VUELO cuenta siempre (ya despegó y desaparecía del conteo).
-      this.supabase.service
-        .from('vuelo')
-        .select(
-          'id, piloto_id, copiloto_id, apoyo_id, estado, fecha_vuelo, fecha_fin, escalas:escala(piloto_id)',
-        )
-        .in('estado', ['RESERVA', 'CONFIRMADO', 'EN_VUELO'])
-        .or(
-          `estado.eq.EN_VUELO,fecha_vuelo.gte.${hoyTs},fecha_fin.gte.${hoyTs}`,
-        ),
-      this.supabase.service
-        .from('escala')
-        .select('id, capturado_por')
-        .in('capturado_por', pilotIds)
-        .gte('sincronizado_at', desdeTs),
-      this.supabase.service
-        .from('gasto')
-        .select('id, usuario_captura_id')
-        .in('usuario_captura_id', pilotIds)
-        .gte('fecha_gasto', desdeFecha),
-    ]);
+    const [vuelosMes, vuelosProximos, capturas, gastos, escalasHoras] =
+      await Promise.all([
+        // Sin filtrar por piloto: la flota vuela pocos vuelos al mes y así se
+        // cuentan también copiloto/apoyo/tramo (mismo criterio del expediente).
+        this.supabase.service
+          .from('vuelo')
+          .select(
+            'id, piloto_id, copiloto_id, apoyo_id, fecha_vuelo, escalas:escala(piloto_id)',
+          )
+          .eq('estado', 'COMPLETADO')
+          .gte('fecha_vuelo', desdeTs),
+        // EN_VUELO cuenta siempre (ya despegó y desaparecía del conteo).
+        this.supabase.service
+          .from('vuelo')
+          .select(
+            'id, piloto_id, copiloto_id, apoyo_id, estado, fecha_vuelo, fecha_fin, escalas:escala(piloto_id)',
+          )
+          .in('estado', ['RESERVA', 'CONFIRMADO', 'EN_VUELO'])
+          .or(
+            `estado.eq.EN_VUELO,fecha_vuelo.gte.${hoyTs},fecha_fin.gte.${hoyTs}`,
+          ),
+        this.supabase.service
+          .from('escala')
+          .select('id, capturado_por')
+          .in('capturado_por', pilotIds)
+          .gte('sincronizado_at', desdeTs),
+        this.supabase.service
+          .from('gasto')
+          .select('id, usuario_captura_id')
+          .in('usuario_captura_id', pilotIds)
+          .gte('fecha_gasto', desdeFecha),
+        // Horas voladas del mes por piloto (misma regla que users.horasDelMes:
+        // piloto del TRAMO con herencia del vuelo, cancelados fuera).
+        this.supabase.service
+          .from('escala')
+          .select(
+            'piloto_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(piloto_id, estado, fecha_vuelo)',
+          )
+          .neq('vuelo.estado', 'CANCELADO')
+          .gte('vuelo.fecha_vuelo', desdeTs),
+      ]);
 
     const stats = new Map<
       string,
@@ -472,6 +516,7 @@ export class PilotsService {
         vuelos_proximos: number;
         capturas_mes: number;
         gastos_mes: number;
+        horas_mes: number;
         ultimo_vuelo: string | null;
       }
     >();
@@ -482,8 +527,22 @@ export class PilotsService {
         vuelos_proximos: 0,
         capturas_mes: 0,
         gastos_mes: 0,
+        horas_mes: 0,
         ultimo_vuelo: null,
       });
+    }
+
+    for (const e of escalasHoras.data ?? []) {
+      if (e.taco_salida == null || e.taco_llegada == null) continue;
+      const h = Number(e.taco_llegada) - Number(e.taco_salida);
+      if (!Number.isFinite(h) || h <= 0) continue;
+      const vuelo = (Array.isArray(e.vuelo) ? e.vuelo[0] : e.vuelo) as {
+        piloto_id?: string | null;
+      } | null;
+      const pilotoTramo =
+        (e.piloto_id as string | null) ?? vuelo?.piloto_id ?? null;
+      const s = pilotoTramo ? stats.get(pilotoTramo) : undefined;
+      if (s) s.horas_mes = Math.round((s.horas_mes + h) * 10) / 10;
     }
 
     // Ids de pilotos que participan en un vuelo, en CUALQUIER rol.
