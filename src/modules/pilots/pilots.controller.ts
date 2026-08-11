@@ -32,7 +32,8 @@ export class PilotsController {
   @Get()
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
-    summary: 'Lista pilotos con métricas agregadas (vuelos mes/próximos, capturas, gastos).',
+    summary:
+      'Lista pilotos con métricas agregadas (vuelos mes/próximos, capturas, gastos).',
   })
   list(@Query() q: ListPilotsQuery) {
     return this.pilots.list(q);
@@ -53,7 +54,9 @@ export class PilotsController {
 
   @Get('descansos')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
-  @ApiOperation({ summary: 'Descansos de pilotos en un rango (para el calendario).' })
+  @ApiOperation({
+    summary: 'Descansos de pilotos en un rango (para el calendario).',
+  })
   listDescansos(@Query() q: ListDescansosQuery) {
     return this.pilots.listDescansos(q);
   }
@@ -80,7 +83,8 @@ export class PilotsController {
   @Get(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
-    summary: 'Detalle de un piloto: próximos vuelos, vuelos del mes, capturas y gastos recientes.',
+    summary:
+      'Detalle de un piloto: próximos vuelos, vuelos del mes, capturas y gastos recientes.',
   })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.pilots.findById(id);

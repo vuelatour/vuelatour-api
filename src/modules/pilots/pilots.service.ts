@@ -4,8 +4,10 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { UsersService } from '../users/users.service';
 import type {
   CreateDescansoDto,
   CreatePilotoExternoDto,
@@ -17,14 +19,64 @@ const USUARIO_COLS =
   'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
 
 const VUELO_COLS =
-  'id, folio, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, cobrado';
+  'id, folio, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_fin, cobrado, piloto_id, copiloto_id, apoyo_id';
 
 @Injectable()
 export class PilotsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly calendarSync: CalendarSyncService,
+    private readonly users: UsersService,
   ) {}
+
+  /** Hoy en hora Cancún (YYYY-MM-DD) — la operación vive en UTC−5. */
+  private hoyCancun(): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+    }).format(new Date());
+  }
+
+  /** Corte del MES CORRIENTE en hora Cancún (invariante #4: nunca el mes del
+   *  servidor — Railway corre en UTC y movía la noche del 31 al mes
+   *  siguiente). */
+  private mesActualCancun(): { desdeTs: string; desdeFecha: string } {
+    const ym = this.hoyCancun().slice(0, 7);
+    return { desdeTs: `${ym}-01T00:00:00-05:00`, desdeFecha: `${ym}-01` };
+  }
+
+  /**
+   * Condición OR de vuelos donde el usuario participa en CUALQUIER rol:
+   * piloto del vuelo, copiloto, APOYO o piloto de algún TRAMO (p. ej. solo el
+   * regreso de un redondo). MISMO criterio que GET /v1/flights?piloto_id —
+   * sin esto, el expediente decía 0 vuelos para pilotos de rotación.
+   */
+  private async orRolesPiloto(id: string): Promise<string> {
+    const { data: legVuelos } = await this.supabase.service
+      .from('escala')
+      .select('vuelo_id')
+      .eq('piloto_id', id);
+    const ids = [
+      ...new Set((legVuelos ?? []).map((e) => e.vuelo_id as string)),
+    ];
+    const ors = [
+      `piloto_id.eq.${id}`,
+      `copiloto_id.eq.${id}`,
+      `apoyo_id.eq.${id}`,
+    ];
+    if (ids.length) ors.push(`id.in.(${ids.join(',')})`);
+    return ors.join(',');
+  }
+
+  /** Rol del usuario en un vuelo (para etiquetarlo en el expediente). */
+  private rolEnVuelo(
+    v: { piloto_id?: unknown; copiloto_id?: unknown; apoyo_id?: unknown },
+    id: string,
+  ): 'PILOTO' | 'COPILOTO' | 'APOYO' | 'TRAMO' {
+    if (v.piloto_id === id) return 'PILOTO';
+    if (v.copiloto_id === id) return 'COPILOTO';
+    if (v.apoyo_id === id) return 'APOYO';
+    return 'TRAMO';
+  }
 
   /**
    * Lista pilotos (rol=PILOTO) con métricas agregadas: vuelos del mes,
@@ -139,105 +191,278 @@ export class PilotsService {
     if (error) throw new Error(`Failed to load pilot: ${error.message}`);
     if (!pilot) throw new NotFoundException(`Pilot ${id} not found`);
 
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const { desdeTs, desdeFecha } = this.mesActualCancun();
+    const hoy = this.hoyCancun();
+    const hoyTs = `${hoy}T00:00:00-05:00`;
+    const orRoles = await this.orRolesPiloto(id);
+    const esExterno =
+      (pilot as { es_piloto_externo?: boolean }).es_piloto_externo === true;
 
-    const [proximosRes, completadosRes, gastosRes, capturasRes, fondoRes] =
-      await Promise.all([
-        this.supabase.service
-          .from('vuelo')
-          .select(VUELO_COLS)
-          .eq('piloto_id', id)
-          .in('estado', ['CONFIRMADO', 'EN_VUELO'])
-          .gte('fecha_vuelo', now.toISOString())
-          .order('fecha_vuelo', { ascending: true })
-          .limit(5),
-        this.supabase.service
-          .from('vuelo')
-          .select(VUELO_COLS)
-          .eq('piloto_id', id)
-          .eq('estado', 'COMPLETADO')
-          .gte('fecha_vuelo', monthStart)
-          .order('fecha_vuelo', { ascending: false })
-          .limit(20),
-        this.supabase.service
-          .from('gasto')
-          .select('id, categoria, monto, moneda, fecha_gasto, foto_url, vuelo_id, aeronave_id, created_at')
-          .eq('usuario_captura_id', id)
-          .gte('fecha_gasto', monthStart.slice(0, 10))
-          .order('created_at', { ascending: false })
-          .limit(10),
-        this.supabase.service
-          .from('escala')
-          .select('id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, sincronizado_at, capturado_offline')
-          .eq('capturado_por', id)
-          .gte('sincronizado_at', monthStart)
-          .order('sincronizado_at', { ascending: false })
-          .limit(10),
-        this.supabase.service
-          .from('fondo_caja')
-          .select('id, tipo, medio_pago_asociado, monto_asignado, moneda, activo')
-          .eq('usuario_id', id)
-          .eq('activo', true),
-      ]);
+    const [
+      activosRes,
+      completadosRes,
+      completadosMesRes,
+      gastosRes,
+      gastosCountRes,
+      capturasRes,
+      capturasCountRes,
+      fondoRes,
+      descansosRes,
+      horas,
+    ] = await Promise.all([
+      // ACTIVOS Y PRÓXIMOS: EN_VUELO siempre (un vuelo en curso ya despegó y
+      // desaparecía del expediente) + confirmados/reservas cuyo VIAJE aún no
+      // termina — eje [fecha_vuelo, fecha_fin] para multi-día.
+      this.supabase.service
+        .from('vuelo')
+        .select(VUELO_COLS)
+        .or(orRoles)
+        .in('estado', ['RESERVA', 'CONFIRMADO', 'EN_VUELO'])
+        .or(
+          `estado.eq.EN_VUELO,fecha_vuelo.gte.${hoyTs},fecha_fin.gte.${hoyTs}`,
+        )
+        .order('fecha_vuelo', { ascending: true })
+        .limit(5),
+      // Historial visible (recientes SIN acotar al mes: el expediente antes
+      // quedaba vacío el día 1). El corte de mes vive en los COUNTS.
+      this.supabase.service
+        .from('vuelo')
+        .select(VUELO_COLS)
+        .or(orRoles)
+        .eq('estado', 'COMPLETADO')
+        .order('fecha_vuelo', { ascending: false })
+        .limit(20),
+      // Completados del MES para stats y cobrado (ids completos, no top-20).
+      this.supabase.service
+        .from('vuelo')
+        .select('id, tc_usd_mxn, fecha_vuelo')
+        .or(orRoles)
+        .eq('estado', 'COMPLETADO')
+        .gte('fecha_vuelo', desdeTs)
+        .limit(1000),
+      this.supabase.service
+        .from('gasto')
+        .select(
+          'id, categoria, monto, moneda, fecha_gasto, foto_url, vuelo_id, aeronave_id, created_at',
+        )
+        .eq('usuario_captura_id', id)
+        .order('created_at', { ascending: false })
+        .limit(10),
+      // Los COUNTS de stats van aparte con count exacto: derivarlos de las
+      // listas recortadas topaba el mes en 10/10/20 y contradecía la lista.
+      this.supabase.service
+        .from('gasto')
+        .select('id', { count: 'exact', head: true })
+        .eq('usuario_captura_id', id)
+        .gte('fecha_gasto', desdeFecha),
+      this.supabase.service
+        .from('escala')
+        .select(
+          'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, sincronizado_at, capturado_offline',
+        )
+        .eq('capturado_por', id)
+        .order('sincronizado_at', { ascending: false })
+        .limit(10),
+      this.supabase.service
+        .from('escala')
+        .select('id', { count: 'exact', head: true })
+        .eq('capturado_por', id)
+        .gte('sincronizado_at', desdeTs),
+      this.supabase.service
+        .from('fondo_caja')
+        .select('id, tipo, medio_pago_asociado, monto_asignado, moneda, activo')
+        .eq('usuario_id', id)
+        .eq('activo', true),
+      // Descansos vigentes o futuros: al asignar vuelos importa saberlos aquí.
+      this.supabase.service
+        .from('piloto_descanso')
+        .select('id, fecha_inicio, fecha_fin, motivo')
+        .eq('piloto_id', id)
+        .gte('fecha_fin', hoy)
+        .order('fecha_inicio', { ascending: true })
+        .limit(5),
+      // Horas del mes (Cancún, por tramo con herencia): fuente única
+      // users.horasDelMes — la misma del dashboard y de /me/horas.
+      this.users.horasDelMes(id),
+    ]);
 
-    if (proximosRes.error) throw new Error(proximosRes.error.message);
+    if (activosRes.error) throw new Error(activosRes.error.message);
     if (completadosRes.error) throw new Error(completadosRes.error.message);
+    if (completadosMesRes.error)
+      throw new Error(completadosMesRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
+    if (gastosCountRes.error) throw new Error(gastosCountRes.error.message);
     if (capturasRes.error) throw new Error(capturasRes.error.message);
+    if (capturasCountRes.error) throw new Error(capturasCountRes.error.message);
     if (fondoRes.error) throw new Error(fondoRes.error.message);
+    if (descansosRes.error) throw new Error(descansosRes.error.message);
 
-    const completados = completadosRes.data ?? [];
-    const totalCobradoMes = completados
-      .filter((v) => v.cobrado)
-      .reduce((acc, v) => acc + Number(v.monto_total_usd ?? 0), 0);
+    // Cobrado del mes = DINERO RECIBIDO vía cobrosEnUsd (fuente única,
+    // invariante #2) — antes sumaba el precio cotizado de los marcados
+    // cobrados: los parciales contaban $0 y luego el precio completo.
+    const vuelosMes = completadosMesRes.data ?? [];
+    let totalCobradoMes = 0;
+    let cobradoSinTcMxn = 0;
+    if (vuelosMes.length > 0) {
+      const { data: cobros, error: cobrosErr } = await this.supabase.service
+        .from('cobro_vuelo')
+        .select('vuelo_id, monto, moneda, tc_usd_mxn')
+        .in(
+          'vuelo_id',
+          vuelosMes.map((v) => v.id as string),
+        );
+      if (cobrosErr) throw new Error(cobrosErr.message);
+      const porVuelo = new Map<string, typeof cobros>();
+      for (const c of cobros ?? []) {
+        const list = porVuelo.get(c.vuelo_id as string) ?? [];
+        list.push(c);
+        porVuelo.set(c.vuelo_id as string, list);
+      }
+      for (const v of vuelosMes) {
+        const conv = cobrosEnUsd(
+          porVuelo.get(v.id as string) ?? [],
+          v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+        );
+        totalCobradoMes += conv.total_usd;
+        cobradoSinTcMxn += conv.sin_tc_mxn;
+      }
+    }
+
+    // Honorarios del piloto EXTERNO: gastos categoría PILOTO_EXTERNO ligados
+    // a SUS vuelos (los captura oficina — doc 3.7 "se les paga la tarifa que
+    // ellos dictan"). Sin esto su expediente quedaba casi vacío.
+    let honorarios: {
+      total_usd: number;
+      mes_usd: number;
+      sin_tc_mxn: number;
+      recientes: unknown[];
+    } | null = null;
+    if (esExterno) {
+      const { data: vuelosTodos } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio')
+        .or(orRoles)
+        .limit(1000);
+      const folios = new Map<string, number | null>(
+        (vuelosTodos ?? []).map((v) => [
+          v.id as string,
+          (v.folio as number | null) ?? null,
+        ]),
+      );
+      const ids = (vuelosTodos ?? []).map((v) => v.id as string);
+      if (ids.length > 0) {
+        const { data: pagos, error: pagosErr } = await this.supabase.service
+          .from('gasto')
+          .select('id, monto, moneda, tc_gasto, fecha_gasto, vuelo_id')
+          .eq('categoria', 'PILOTO_EXTERNO')
+          .in('vuelo_id', ids)
+          .order('fecha_gasto', { ascending: false })
+          .limit(1000);
+        if (pagosErr) throw new Error(pagosErr.message);
+        let total = 0;
+        let mes = 0;
+        let sinTc = 0;
+        for (const p of pagos ?? []) {
+          const usd =
+            p.moneda === 'USD'
+              ? Number(p.monto)
+              : Number(p.tc_gasto) > 0
+                ? Number(p.monto) / Number(p.tc_gasto)
+                : null;
+          if (usd === null) {
+            sinTc += Number(p.monto);
+            continue;
+          }
+          total += usd;
+          if ((p.fecha_gasto as string) >= desdeFecha) mes += usd;
+        }
+        honorarios = {
+          total_usd: Math.round(total * 100) / 100,
+          mes_usd: Math.round(mes * 100) / 100,
+          sin_tc_mxn: Math.round(sinTc * 100) / 100,
+          recientes: (pagos ?? []).slice(0, 10).map((p) => ({
+            ...p,
+            folio: folios.get(p.vuelo_id as string) ?? null,
+          })),
+        };
+      } else {
+        honorarios = { total_usd: 0, mes_usd: 0, sin_tc_mxn: 0, recientes: [] };
+      }
+    }
+
+    const conRol = (v: Record<string, unknown>) => ({
+      ...v,
+      rol: this.rolEnVuelo(v, id),
+    });
+    const completados = (completadosRes.data ?? []).map(conRol);
 
     return {
       ...pilot,
       stats: {
-        vuelos_mes: completados.length,
-        vuelos_proximos: proximosRes.data?.length ?? 0,
-        capturas_mes: capturasRes.data?.length ?? 0,
-        gastos_mes: gastosRes.data?.length ?? 0,
+        vuelos_mes: vuelosMes.length,
+        vuelos_proximos: activosRes.data?.length ?? 0,
+        capturas_mes: capturasCountRes.count ?? 0,
+        gastos_mes: gastosCountRes.count ?? 0,
         total_cobrado_mes_usd: Math.round(totalCobradoMes * 100) / 100,
-        ultimo_vuelo: completados[0]?.fecha_vuelo ?? null,
+        cobrado_sin_tc_mxn: Math.round(cobradoSinTcMxn * 100) / 100,
+        ultimo_vuelo:
+          vuelosMes.length > 0
+            ? (vuelosMes
+                .map((v) => v.fecha_vuelo as string)
+                .sort()
+                .at(-1) ?? null)
+            : ((completados[0] as { fecha_vuelo?: string | null } | undefined)
+                ?.fecha_vuelo ?? null),
+        horas_mes: horas.horas,
+        horas_limite: horas.limite,
+        horas_restantes: horas.restantes,
       },
-      vuelos_proximos: proximosRes.data ?? [],
+      vuelos_proximos: (activosRes.data ?? []).map(conRol),
       vuelos_completados_mes: completados,
       gastos_recientes: gastosRes.data ?? [],
       capturas_recientes: capturasRes.data ?? [],
       fondos: fondoRes.data ?? [],
+      descansos_proximos: descansosRes.data ?? [],
+      honorarios,
     };
   }
 
   private async bulkStats(pilotIds: string[]): Promise<Map<string, unknown>> {
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    const monthStartDate = monthStart.slice(0, 10);
+    // Cortes en hora CANCÚN (invariante #4) — antes el mes empezaba en la
+    // medianoche UTC del servidor y la noche del 31 caía en el mes siguiente.
+    const { desdeTs, desdeFecha } = this.mesActualCancun();
+    const hoyTs = `${this.hoyCancun()}T00:00:00-05:00`;
 
     const [vuelosMes, vuelosProximos, capturas, gastos] = await Promise.all([
+      // Sin filtrar por piloto: la flota vuela pocos vuelos al mes y así se
+      // cuentan también copiloto/apoyo/tramo (mismo criterio del expediente).
       this.supabase.service
         .from('vuelo')
-        .select('id, piloto_id, fecha_vuelo')
-        .in('piloto_id', pilotIds)
+        .select(
+          'id, piloto_id, copiloto_id, apoyo_id, fecha_vuelo, escalas:escala(piloto_id)',
+        )
         .eq('estado', 'COMPLETADO')
-        .gte('fecha_vuelo', monthStart),
+        .gte('fecha_vuelo', desdeTs),
+      // EN_VUELO cuenta siempre (ya despegó y desaparecía del conteo).
       this.supabase.service
         .from('vuelo')
-        .select('id, piloto_id')
-        .in('piloto_id', pilotIds)
-        .in('estado', ['CONFIRMADO', 'EN_VUELO'])
-        .gte('fecha_vuelo', now.toISOString()),
+        .select(
+          'id, piloto_id, copiloto_id, apoyo_id, estado, fecha_vuelo, fecha_fin, escalas:escala(piloto_id)',
+        )
+        .in('estado', ['RESERVA', 'CONFIRMADO', 'EN_VUELO'])
+        .or(
+          `estado.eq.EN_VUELO,fecha_vuelo.gte.${hoyTs},fecha_fin.gte.${hoyTs}`,
+        ),
       this.supabase.service
         .from('escala')
         .select('id, capturado_por')
         .in('capturado_por', pilotIds)
-        .gte('sincronizado_at', monthStart),
+        .gte('sincronizado_at', desdeTs),
       this.supabase.service
         .from('gasto')
         .select('id, usuario_captura_id')
         .in('usuario_captura_id', pilotIds)
-        .gte('fecha_gasto', monthStartDate),
+        .gte('fecha_gasto', desdeFecha),
     ]);
 
     const stats = new Map<
@@ -261,17 +486,36 @@ export class PilotsService {
       });
     }
 
+    // Ids de pilotos que participan en un vuelo, en CUALQUIER rol.
+    const participantes = (v: Record<string, unknown>): Set<string> => {
+      const out = new Set<string>();
+      for (const key of ['piloto_id', 'copiloto_id', 'apoyo_id'] as const) {
+        const val = v[key];
+        if (typeof val === 'string') out.add(val);
+      }
+      const escalas = (v.escalas ?? []) as Array<{ piloto_id?: string | null }>;
+      for (const e of escalas) {
+        if (e.piloto_id) out.add(e.piloto_id);
+      }
+      return out;
+    };
+
     for (const v of vuelosMes.data ?? []) {
-      const s = stats.get(v.piloto_id);
-      if (!s) continue;
-      s.vuelos_mes += 1;
-      if (!s.ultimo_vuelo || (v.fecha_vuelo && v.fecha_vuelo > s.ultimo_vuelo)) {
-        s.ultimo_vuelo = v.fecha_vuelo ?? null;
+      for (const pid of participantes(v)) {
+        const s = stats.get(pid);
+        if (!s) continue;
+        s.vuelos_mes += 1;
+        const fecha = (v as { fecha_vuelo?: string | null }).fecha_vuelo;
+        if (!s.ultimo_vuelo || (fecha && fecha > s.ultimo_vuelo)) {
+          s.ultimo_vuelo = fecha ?? null;
+        }
       }
     }
     for (const v of vuelosProximos.data ?? []) {
-      const s = stats.get(v.piloto_id);
-      if (s) s.vuelos_proximos += 1;
+      for (const pid of participantes(v)) {
+        const s = stats.get(pid);
+        if (s) s.vuelos_proximos += 1;
+      }
     }
     for (const c of capturas.data ?? []) {
       const s = stats.get(c.capturado_por);
@@ -290,7 +534,9 @@ export class PilotsService {
   async listDescansos(q: ListDescansosQuery) {
     let query = this.supabase.service
       .from('piloto_descanso')
-      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)')
+      .select(
+        'id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)',
+      )
       .order('fecha_inicio', { ascending: true });
     if (q.piloto_id) query = query.eq('piloto_id', q.piloto_id);
     // Solapamiento con el rango pedido: inicio <= hasta y fin >= desde.
@@ -300,15 +546,24 @@ export class PilotsService {
     if (error) throw new Error(error.message);
     return (data ?? []).map((d) => {
       const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
-      return { ...d, piloto_nombre: (piloto as { nombre?: string } | null)?.nombre ?? null };
+      return {
+        ...d,
+        piloto_nombre: (piloto as { nombre?: string } | null)?.nombre ?? null,
+      };
     });
   }
 
-  async createDescanso(pilotoId: string, dto: CreateDescansoDto, userId: string) {
+  async createDescanso(
+    pilotoId: string,
+    dto: CreateDescansoDto,
+    userId: string,
+  ) {
     const inicio = dto.fecha_inicio.slice(0, 10);
     const fin = dto.fecha_fin.slice(0, 10);
     if (fin < inicio) {
-      throw new BadRequestException('fecha_fin no puede ser anterior a fecha_inicio');
+      throw new BadRequestException(
+        'fecha_fin no puede ser anterior a fecha_inicio',
+      );
     }
     const { data, error } = await this.supabase.service
       .from('piloto_descanso')
@@ -323,7 +578,8 @@ export class PilotsService {
       .select('id, piloto_id, fecha_inicio, fecha_fin, motivo')
       .maybeSingle();
     if (error) {
-      if (error.code === '23503') throw new NotFoundException('Piloto no encontrado');
+      if (error.code === '23503')
+        throw new NotFoundException('Piloto no encontrado');
       throw new Error(error.message);
     }
 
@@ -364,7 +620,9 @@ export class PilotsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Descanso ${id} not found`);
-    void this.calendarSync.removeDescansoEvent(data.google_calendar_id as string | null);
+    void this.calendarSync.removeDescansoEvent(
+      data.google_calendar_id as string | null,
+    );
     return { ok: true };
   }
 }

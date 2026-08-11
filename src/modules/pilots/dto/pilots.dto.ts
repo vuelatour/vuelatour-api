@@ -1,5 +1,14 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
+
+/** 'true'/'false' de query string → boolean real. `@Type(() => Boolean)` es
+ *  una trampa: Boolean('false') === true y el filtro llegaba INVERTIDO. */
+const boolQuery = ({ value }: { value: unknown }): boolean | undefined =>
+  value === true || value === 'true'
+    ? true
+    : value === false || value === 'false'
+      ? false
+      : undefined;
 import {
   IsBoolean,
   IsEmail,
@@ -27,9 +36,11 @@ export class ListPilotsQuery {
   @IsEnum(EstadoUsuario)
   estado?: EstadoUsuario;
 
-  @ApiPropertyOptional({ description: 'true = solo pilotos externos / false = solo base' })
+  @ApiPropertyOptional({
+    description: 'true = solo pilotos externos / false = solo base',
+  })
   @IsOptional()
-  @Type(() => Boolean)
+  @Transform(boolQuery)
   @IsBoolean()
   externo?: boolean;
 
