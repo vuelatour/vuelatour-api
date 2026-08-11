@@ -513,8 +513,9 @@ export class CajaChicaService {
     // sin esto un gasto en USD quedaba invisible en el resumen.
     const otras = new Map<string, number>();
     for (const g of gastos ?? []) {
-      if (g.moneda === fo.moneda) continue;
-      otras.set(g.moneda, (otras.get(g.moneda) ?? 0) + Number(g.monto));
+      const moneda = String(g.moneda ?? '');
+      if (!moneda || moneda === fo.moneda) continue;
+      otras.set(moneda, (otras.get(moneda) ?? 0) + Number(g.monto));
     }
     const efectivoOtrasMonedas = [...otras.entries()].map(
       ([moneda, total]) => ({ moneda, total: round(total) }),
