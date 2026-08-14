@@ -2890,6 +2890,13 @@ export class FlightsService {
       patch.servicio_notas = dto.servicio_notas;
     if (dto.fecha_salida_plan !== undefined)
       patch.fecha_salida_plan = dto.fecha_salida_plan?.toISOString() ?? null;
+    // Un ferry vuela vacío (misma regla que replaceEscalas): si el caller
+    // marca ferry sin mandar pasajeros/manifiesto, se limpian aquí — la app
+    // vieja los omitía y quedaban nombres fantasma en tramos ferry.
+    if (dto.es_ferry === true) {
+      if (dto.pasajeros === undefined) patch.pasajeros = 0;
+      if (dto.pasajeros_nombres === undefined) patch.pasajeros_nombres = [];
+    }
 
     const { data, error } = await this.supabase.service
       .from('escala')
