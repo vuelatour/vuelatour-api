@@ -14,11 +14,16 @@ import {
 } from './dto/caja-chica.dto';
 
 const FONDO_COLS =
-  'id, usuario_id, moneda, activo, es_acumulada, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
+  'id, usuario_id, moneda, activo, es_acumulada, monto_fondo, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
 const MOV_COLS =
   'id, fondo_id, tipo, monto, moneda, fecha, autorizado_por, referencia, notas, registrado_por, created_at';
 
-type CajaMov = { tipo: string; monto: number | string };
+type CajaMov = {
+  tipo: string;
+  monto: number | string;
+  fecha?: string;
+  created_at?: string;
+};
 type EfectivoGasto = { monto: number | string };
 
 @Injectable()
@@ -47,6 +52,30 @@ export class CajaChicaService {
     const efectivoTotal = efectivo.reduce((s, g) => s + Number(g.monto), 0);
     const saldo = round(movTotal - efectivoTotal, 2);
     return esAcumulada ? round(-saldo, 2) : saldo;
+  }
+
+  /**
+   * Última REPOSICIÓN del fondo (fecha y monto) — null si nunca ha habido.
+   * Pedido de oficina 14-ago: verla de un vistazo en lista y detalle.
+   */
+  private ultimaReposicion(
+    movs: CajaMov[],
+  ): { fecha: string; monto: number } | null {
+    let mejor: CajaMov | null = null;
+    for (const m of movs) {
+      if (m.tipo !== TipoMovimientoCaja.REPOSICION || !m.fecha) continue;
+      if (
+        !mejor ||
+        m.fecha > mejor.fecha! ||
+        (m.fecha === mejor.fecha &&
+          (m.created_at ?? '') > (mejor.created_at ?? ''))
+      ) {
+        mejor = m;
+      }
+    }
+    return mejor
+      ? { fecha: mejor.fecha!, monto: Number(mejor.monto) }
+      : null;
   }
 
   // ===== Fondos =====
@@ -89,6 +118,7 @@ export class CajaChicaService {
           efectivo,
           fo.es_acumulada === true,
         ),
+        ultima_reposicion: this.ultimaReposicion(movsByFondo.get(fo.id) ?? []),
       };
     });
 
@@ -107,7 +137,8 @@ export class CajaChicaService {
     if (fondoIds.length === 0) return map;
     const { data, error } = await this.supabase.service
       .from('caja_chica_movimiento')
-      .select('fondo_id, tipo, monto')
+      // fecha/created_at: para derivar la última reposición sin otra query.
+      .select('fondo_id, tipo, monto, fecha, created_at')
       .in('fondo_id', fondoIds);
     if (error) throw new Error(error.message);
     for (const m of data ?? []) {
@@ -267,6 +298,7 @@ export class CajaChicaService {
       saldo: corrido,
       movimientos: movs ?? [],
       historial: historialAsc.reverse(),
+      ultima_reposicion: this.ultimaReposicion((movs ?? []) as CajaMov[]),
     };
   }
 
@@ -318,6 +350,7 @@ export class CajaChicaService {
         usuario_id: dto.usuario_id,
         moneda: dto.moneda ?? 'MXN',
         es_acumulada: dto.es_acumulada ?? false,
+        monto_fondo: dto.monto_fondo,
         notas: dto.notas,
         created_by: userId,
         updated_by: userId,

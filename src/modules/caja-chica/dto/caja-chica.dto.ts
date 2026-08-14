@@ -67,6 +67,15 @@ export class CreateFondoDto {
   @IsBoolean()
   es_acumulada?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Monto nominal del fondo ("su caja es de $6,000"): habilita "por reponer" = fondo − saldo en el panel. Opcional.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  monto_fondo?: number;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsString()
@@ -90,6 +99,14 @@ export class UpdateFondoDto {
   @IsOptional()
   @IsEnum(MonedaCaja)
   moneda?: MonedaCaja;
+
+  @ApiPropertyOptional({
+    description: 'Monto nominal del fondo (a cuánto se repone).',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0.01)
+  monto_fondo?: number;
 
   @ApiPropertyOptional()
   @IsOptional()
