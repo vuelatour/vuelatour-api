@@ -111,6 +111,11 @@ export class ExpensesController {
       'Capture a gasto. Pilotos/mecánicos lo usan desde la app móvil. El mecánico solo carga combustible.',
   })
   create(@Body() dto: CreateGastoDto, @CurrentUser() c: AuthenticatedUser) {
+    // El semáforo de facturación es seguimiento de OFICINA: piloto/mecánico
+    // no pueden fijarlo (si pudieran, un gasto se afirmaría "facturado" sin
+    // que oficina viera factura alguna — candado multicapa).
+    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO)
+      delete dto.estatus_facturacion;
     return this.expenses.create(dto, c.userId, c.rol);
   }
 
@@ -260,6 +265,8 @@ export class ExpensesController {
   ) {
     if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
       await this.expenses.assertOwnSameDay(id, c.userId);
+      // Seguimiento de OFICINA: el piloto/mecánico no marca facturado.
+      delete dto.estatus_facturacion;
     }
     return this.expenses.update(id, dto, c.userId);
   }

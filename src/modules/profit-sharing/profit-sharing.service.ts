@@ -625,7 +625,7 @@ export class ProfitSharingService {
       sb
         .from('gasto')
         .select(
-          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_comprobante, medio_pago, conciliado, duplicado_sospechado',
+          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -955,8 +955,14 @@ export class ProfitSharingService {
     const sinTc = gastos.filter(
       (g) => g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0),
     );
-    const sinComprobante = gastos.filter(
-      (g) => g.estatus_comprobante !== 'FACTURA',
+    // Seguimiento de oficina (estatus_facturacion), NO el comprobante del
+    // piloto: la app marca FACTURA con cualquier foto, aunque sea un ticket.
+    // BODEGA se excluye: es cargo contable del puente de inventario y su
+    // factura vive en la ENTRADA del cardex — jamás tendrá factura propia
+    // (dejarlo contaría ruido eterno en el pre-cierre).
+    const sinFacturar = gastos.filter(
+      (g) =>
+        g.estatus_facturacion !== 'FACTURADA' && g.medio_pago !== 'BODEGA',
     );
     // Posibles duplicados con el flag aún encendido: cada uno resta DOBLE al
     // reparto hasta que alguien lo resuelva (borrar el repetido o marcar
@@ -1085,9 +1091,11 @@ export class ProfitSharingService {
       },
       {
         clave: 'gastos_sin_comprobante',
-        titulo: 'Gastos sin factura (VALE / sin comprobante)',
-        detalle: 'Aparecerán así en el paquete del contador.',
-        count: sinComprobante.length,
+        titulo: 'Gastos sin facturar (pendientes o solicitados)',
+        detalle:
+          'Sin factura en mano — márcalos con el semáforo en Gastos. El ' +
+          'seguimiento arrancó en ago 2026: lo anterior nace "Pendiente".',
+        count: sinFacturar.length,
       },
       {
         clave: 'sin_conciliar',

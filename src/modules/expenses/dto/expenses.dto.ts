@@ -7,6 +7,7 @@ import {
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsIn,
   IsInt,
   IsNumber,
   IsObject,
@@ -62,6 +63,17 @@ export enum EstatusComprobante {
   FACTURA = 'FACTURA',
   VALE = 'VALE',
   SIN_COMPROBANTE = 'SIN_COMPROBANTE',
+}
+
+/**
+ * Seguimiento de facturación de OFICINA — independiente del comprobante que
+ * entregó el piloto (la app marca FACTURA con cualquier foto, aunque sea un
+ * ticket, así que ese campo NO dice si ya se facturó).
+ */
+export enum EstatusFacturacion {
+  PENDIENTE = 'PENDIENTE',
+  SOLICITADA = 'SOLICITADA',
+  FACTURADA = 'FACTURADA',
 }
 
 export class CreateGastoDto {
@@ -150,6 +162,11 @@ export class CreateGastoDto {
   @IsOptional()
   @IsEnum(EstatusComprobante)
   estatus_comprobante?: EstatusComprobante;
+
+  @ApiPropertyOptional({ enum: EstatusFacturacion })
+  @IsOptional()
+  @IsEnum(EstatusFacturacion)
+  estatus_facturacion?: EstatusFacturacion;
 
   @ApiPropertyOptional({ description: 'URL/path en Supabase Storage' })
   @IsOptional()
@@ -418,6 +435,14 @@ export class ListGastosQuery {
   @IsOptional()
   @IsEnum(EstatusComprobante)
   estatus_comprobante?: EstatusComprobante;
+
+  @ApiPropertyOptional({
+    description:
+      'PENDIENTE | SOLICITADA | FACTURADA | NO_FACTURADA (= pendiente o solicitada)',
+  })
+  @IsOptional()
+  @IsIn([...Object.values(EstatusFacturacion), 'NO_FACTURADA'])
+  estatus_facturacion?: string;
 
   @ApiPropertyOptional({ enum: MedioPago })
   @IsOptional()

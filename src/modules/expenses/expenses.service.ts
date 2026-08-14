@@ -26,7 +26,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
@@ -72,10 +72,17 @@ export class ExpensesService {
       PERSONAL_ALE: 'Personal Ale',
       BODEGA: 'Bodega',
     };
+    // Comprobante = qué entregó el piloto (documento físico); Facturación =
+    // seguimiento de oficina (¿ya tenemos factura?). Son cosas distintas.
     const COMP_LABEL: Record<string, string> = {
-      FACTURA: 'Facturado',
-      VALE: 'Por facturar',
+      FACTURA: 'Factura',
+      VALE: 'Vale',
       SIN_COMPROBANTE: 'Sin comprobante',
+    };
+    const FACT_LABEL: Record<string, string> = {
+      PENDIENTE: 'Pendiente',
+      SOLICITADA: 'Solicitada',
+      FACTURADA: 'Facturada',
     };
     const columnas: TablaColumnaPayload[] = [
       { label: 'Fecha' },
@@ -84,7 +91,8 @@ export class ExpensesService {
       { label: 'Proveedor' },
       { label: 'Capturó' },
       { label: 'Medio pago' },
-      { label: 'Facturado' },
+      { label: 'Comprobante' },
+      { label: 'Facturación' },
       { label: 'Moneda' },
       { label: 'Monto', tipo: 'money' },
     ];
@@ -95,6 +103,7 @@ export class ExpensesService {
       const captura = x.captura as { nombre?: string } | null;
       const medio = (x.medio_pago as string) ?? '';
       const comp = (x.estatus_comprobante as string) ?? '';
+      const fact = (x.estatus_facturacion as string) ?? '';
       return [
         (x.fecha_gasto as string) ?? '',
         (x.categoria as string) ?? '',
@@ -103,6 +112,7 @@ export class ExpensesService {
         captura?.nombre ?? '',
         MEDIO_LABEL[medio] ?? medio,
         COMP_LABEL[comp] ?? comp,
+        FACT_LABEL[fact] ?? fact,
         (x.moneda as string) ?? '',
         Number(x.monto),
       ];
@@ -133,8 +143,10 @@ export class ExpensesService {
       if (!Number.isFinite(monto)) continue;
       const nombre =
         ((x.captura as { nombre?: string } | null)?.nombre ?? 'Sin capturador');
+      // Fuente: estatus_facturacion (seguimiento de oficina). El comprobante
+      // NO sirve aquí: la app marca FACTURA con cualquier foto.
       const facturado =
-        (x.estatus_comprobante as string) === 'FACTURA'
+        (x.estatus_facturacion as string) === 'FACTURADA'
           ? 'facturado'
           : 'POR FACTURAR';
       const clave = `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
@@ -172,6 +184,12 @@ export class ExpensesService {
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
     if (filters.estatus_comprobante)
       q = q.eq('estatus_comprobante', filters.estatus_comprobante);
+    // NO_FACTURADA = pendiente o solicitada (para "todo lo que falta por
+    // facturar" en un solo filtro; lo usa el link del pre-cierre).
+    if (filters.estatus_facturacion === 'NO_FACTURADA')
+      q = q.neq('estatus_facturacion', 'FACTURADA');
+    else if (filters.estatus_facturacion)
+      q = q.eq('estatus_facturacion', filters.estatus_facturacion);
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
@@ -878,6 +896,9 @@ export class ExpensesService {
       lugar: dto.lugar,
       fecha_hora_carga: dto.fecha_hora_carga,
       estatus_comprobante: dto.estatus_comprobante ?? 'SIN_COMPROBANTE',
+      // Sin valor explícito se omite la llave: manda el default de la BD
+      // (PENDIENTE) y el trigger del amarre de factura recibida.
+      estatus_facturacion: dto.estatus_facturacion,
       foto_url: dto.foto_url,
       valor_ia_extraido: dto.valor_ia_extraido,
       duplicado_sospechado: await this.looksLikeDuplicate(dto),

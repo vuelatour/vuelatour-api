@@ -305,14 +305,14 @@ export class InvoicesService {
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
 
     // Al reasignar/quitar el gasto, desamarra los anteriores (misma lógica
-    // que amarrarGastos): si no, quedan gastos "con factura" sin factura y
-    // el pre-cierre confía en ese estatus.
+    // que amarrarGastos). El estatus_comprobante NO se toca: registra qué
+    // entregó el piloto; el seguimiento "¿ya facturé?" vive en
+    // estatus_facturacion y lo sincroniza el trigger de la BD con el amarre.
     if (dto.gasto_id !== undefined) {
       let unlink = this.supabase.service
         .from('gasto')
         .update({
           factura_recibida_id: null,
-          estatus_comprobante: 'SIN_COMPROBANTE',
           updated_by: userId,
         })
         .eq('factura_recibida_id', id);
@@ -321,13 +321,12 @@ export class InvoicesService {
       if (uErr) throw new Error(uErr.message);
     }
 
-    // El gasto amarrado (camino legacy 1:1) queda comprobado con FACTURA.
+    // El gasto amarrado (camino legacy 1:1): el trigger lo marca FACTURADA.
     if (dto.gasto_id) {
       const { error: lErr } = await this.supabase.service
         .from('gasto')
         .update({
           factura_recibida_id: id,
-          estatus_comprobante: 'FACTURA',
           updated_by: userId,
         })
         .eq('id', dto.gasto_id);
@@ -352,12 +351,13 @@ export class InvoicesService {
     if (!recibida)
       throw new NotFoundException(`Factura recibida ${recibidaId} not found`);
 
-    // Desamarra los gastos que ya no están en la lista (vuelven a SIN_COMPROBANTE).
+    // Desamarra los gastos que ya no están en la lista. estatus_comprobante
+    // NO se toca (es el registro de qué entregó el piloto); el trigger de la
+    // BD regresa estatus_facturacion a PENDIENTE al quitar el amarre.
     let unlink = this.supabase.service
       .from('gasto')
       .update({
         factura_recibida_id: null,
-        estatus_comprobante: 'SIN_COMPROBANTE',
         updated_by: userId,
       })
       .eq('factura_recibida_id', recibidaId);
@@ -368,11 +368,11 @@ export class InvoicesService {
     if (uErr) throw new Error(uErr.message);
 
     if (gastoIds.length > 0) {
+      // El trigger marca FACTURADA los gastos que reciben el amarre.
       const { error: lErr } = await this.supabase.service
         .from('gasto')
         .update({
           factura_recibida_id: recibidaId,
-          estatus_comprobante: 'FACTURA',
           updated_by: userId,
         })
         .in('id', gastoIds);
@@ -396,14 +396,13 @@ export class InvoicesService {
   }
 
   async deleteRecibida(id: string) {
-    // El FK gasto.factura_recibida_id es on delete set null: revertir
-    // también el estatus del comprobante (como amarrarGastos) o quedan
-    // gastos "con factura" apuntando a nada.
+    // El FK gasto.factura_recibida_id es on delete set null, pero se limpia
+    // explícito ANTES del delete para que el trigger de la BD regrese
+    // estatus_facturacion a PENDIENTE (el comprobante del piloto no se toca).
     const { error: uErr } = await this.supabase.service
       .from('gasto')
       .update({
         factura_recibida_id: null,
-        estatus_comprobante: 'SIN_COMPROBANTE',
       })
       .eq('factura_recibida_id', id);
     if (uErr) throw new Error(uErr.message);

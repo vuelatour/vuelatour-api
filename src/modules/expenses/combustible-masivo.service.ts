@@ -7,6 +7,7 @@ import { Rol } from '../../common/types/auth.types';
 import {
   CategoriaGasto,
   EstatusComprobante,
+  EstatusFacturacion,
   MedioPago,
   Moneda,
   TipoCombustible,
@@ -213,6 +214,13 @@ export class CombustibleMasivoService {
             lugar: fila.lugar,
             fecha_hora_carga: fila.fecha_hora_carga,
             estatus_comprobante: fila.estatus_comprobante,
+            // Aquí la señal SÍ es confiable (a diferencia de la foto del
+            // piloto): el comprobante lo teclea OFICINA desde las facturas
+            // del proveedor — FACTURA en la plantilla = ya facturado.
+            estatus_facturacion:
+              fila.estatus_comprobante === EstatusComprobante.FACTURA
+                ? EstatusFacturacion.FACTURADA
+                : undefined,
             notas: fila.notas,
           },
           userId,
