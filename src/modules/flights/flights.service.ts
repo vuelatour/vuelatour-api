@@ -40,9 +40,12 @@ import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 import {
+  CORRECCION_BAJA_PREFIX,
   PROCEDENCIA_PREFIX,
   agregarProcedencia,
+  correccionesBajaPendientes,
   leerBitacora,
+  motivoDirecto,
   soloPendientes,
 } from '../../common/taco-motivo.util';
 
@@ -2935,7 +2938,7 @@ export class FlightsService {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at',
+        'id, vuelo_id, orden, aeronave_id, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, capturado_por, cancelada_at, revision_motivo, vuelo:vuelo_id(fecha_vuelo, fecha_fin)',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -2961,31 +2964,85 @@ export class FlightsService {
       dto.valor_ia_propuesto = roundTaco(dto.valor_ia_propuesto);
 
     // Validate monotonicity: new taco_salida/llegada must be >= existing capture.
-    // Excepción: una salida llenada por el SISTEMA (DEDUCIDO) puede venir mal
-    // (avión que durmió fuera, historial sucio); la foto del piloto en el
-    // tramo 1 es evidencia y puede corregirla hacia abajo.
-    if (dto.taco_salida !== undefined && current.taco_salida !== null) {
-      const salidaCorregible = current.taco_salida_origen === 'DEDUCIDO';
-      if (
-        Number(dto.taco_salida) < Number(current.taco_salida) &&
-        !salidaCorregible
-      ) {
-        throw new ConflictException(
-          `La lectura de salida (${dto.taco_salida}) es menor a la ya registrada (${current.taco_salida}). El tacómetro nunca retrocede; revisa la foto.`,
-        );
-      }
+    // Excepciones al "nunca retrocede" del MISMO campo del MISMO tramo:
+    // - DEDUCIDO (promesa provisional del sistema) siempre cede ante la foto.
+    // - La lectura PROPIA del capturador (PILOTO/IA) SÍ puede corregirse a la
+    //   baja en vuelos RECIENTES (bug 17-ago: el piloto tecleó 5548.5, la
+    //   foto real decía 5547.8 y el 409 lo dejaba sin poder corregir NI
+    //   cambiar la foto; obligar a llamar a oficina dejaba el dato malo
+    //   guardado). JAMÁS en silencio: el tramo queda AMARILLO — atómico con
+    //   el valor y PEGAJOSO hasta que oficina confirme.
+    // - Lo corregido por OFICINA es palabra final: no se mueve desde la app
+    //   en NINGUNA dirección (permitir la subida abría un bypass: subir
+    //   primero re-etiquetaba el origen y luego se podía bajar).
+    if (
+      dto.taco_salida !== undefined &&
+      current.taco_salida !== null &&
+      current.taco_salida_origen === 'OFICINA' &&
+      Number(dto.taco_salida) !== Number(current.taco_salida)
+    ) {
+      throw new ConflictException(
+        `La salida (${current.taco_salida}) ya fue corregida por la oficina y no puede cambiarse desde la app. Repórtalo a oficina para ajustarla.`,
+      );
     }
-    // Simetría con la salida: una llegada DEDUCIDA (promesa provisional del
-    // sistema) CEDE ante la foto del piloto, incluso hacia abajo. El retroceso
-    // contra capturas reales (PILOTO/OFICINA/IA) sigue bloqueado.
-    if (dto.taco_llegada !== undefined && current.taco_llegada !== null) {
-      const llegadaCorregible = current.taco_llegada_origen === 'DEDUCIDO';
-      if (
-        Number(dto.taco_llegada) < Number(current.taco_llegada) &&
-        !llegadaCorregible
-      ) {
+    if (
+      dto.taco_llegada !== undefined &&
+      current.taco_llegada !== null &&
+      current.taco_llegada_origen === 'OFICINA' &&
+      Number(dto.taco_llegada) !== Number(current.taco_llegada)
+    ) {
+      throw new ConflictException(
+        `La llegada (${current.taco_llegada}) ya fue corregida por la oficina y no puede cambiarse desde la app. Repórtalo a oficina para ajustarla.`,
+      );
+    }
+    const correccionesALaBaja: string[] = [];
+    let llegadaBajadaDesde: number | null = null;
+    if (
+      dto.taco_salida !== undefined &&
+      current.taco_salida !== null &&
+      current.taco_salida_origen !== 'DEDUCIDO' &&
+      Number(dto.taco_salida) < Number(current.taco_salida)
+    ) {
+      correccionesALaBaja.push(
+        `salida ${current.taco_salida} → ${dto.taco_salida}`,
+      );
+    }
+    if (
+      dto.taco_llegada !== undefined &&
+      current.taco_llegada !== null &&
+      current.taco_llegada_origen !== 'DEDUCIDO' &&
+      Number(dto.taco_llegada) < Number(current.taco_llegada)
+    ) {
+      llegadaBajadaDesde = Number(current.taco_llegada);
+      correccionesALaBaja.push(
+        `llegada ${current.taco_llegada} → ${dto.taco_llegada}`,
+      );
+    }
+    if (correccionesALaBaja.length > 0) {
+      // Solo vuelos recientes: sin cierre mensual persistido, bajar horas de
+      // un periodo ya repartido movería números ya pagados sin que nadie
+      // tenga motivo para abrir ese vuelo viejo. Más de 7 días = con oficina.
+      const vuelo = current.vuelo as {
+        fecha_vuelo?: string | null;
+        fecha_fin?: string | null;
+      } | null;
+      const fechaRef = vuelo?.fecha_fin ?? vuelo?.fecha_vuelo ?? null;
+      // fecha_vuelo/fecha_fin son timestamptz: convertir AMBOS lados a día
+      // Cancún antes de restar, o el conteo sale hasta un día corto.
+      const aDiaCancun = (iso: string) =>
+        new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
+          new Date(iso),
+        );
+      const hoy = aDiaCancun(new Date().toISOString());
+      const dias =
+        fechaRef != null
+          ? Math.floor(
+              (Date.parse(hoy) - Date.parse(aDiaCancun(fechaRef))) / 86400000,
+            )
+          : null;
+      if (dias == null || dias > 7) {
         throw new ConflictException(
-          `La lectura de llegada (${dto.taco_llegada}) es menor a la ya registrada (${current.taco_llegada}). El tacómetro nunca retrocede; revisa la foto.`,
+          'Esta lectura es de hace más de 7 días: la corrección a la baja se hace con la oficina (Tacómetros en vivo).',
         );
       }
     }
@@ -3096,7 +3153,10 @@ export class FlightsService {
                   taco_salida: null,
                   taco_salida_origen: null,
                   revision_requerida: true,
-                  revision_motivo: `Salida estimada retirada: la llegada real del tramo anterior (${correcta}) no cabe bajo la llegada capturada (${dto.taco_llegada}) — revisar ambas lecturas en oficina`,
+                  revision_motivo: motivoDirecto(
+                    (current.revision_motivo as string | null) ?? null,
+                    `Salida estimada retirada: la llegada real del tramo anterior (${correcta}) no cabe bajo la llegada capturada (${dto.taco_llegada}) — revisar ambas lecturas en oficina`,
+                  ),
                   updated_by: userId,
                 },
           )
@@ -3104,22 +3164,32 @@ export class FlightsService {
           .eq('taco_salida_origen', 'DEDUCIDO');
       }
     }
+    let alertaCede: string | null = null;
     if (salidaDeducidaCede) {
       // El CHECK de BD tolera salida NULL con llegada presente; nada de este
       // request la rellena de vuelta (el auto-fill de arriba solo corre cuando
-      // current.taco_salida era null EN EL READ).
+      // current.taco_salida era null EN EL READ). El motivo se arma en el
+      // bloque centralizado de abajo: conserva chunks pegajosos y bitácora,
+      // y se fusiona con la corrección a la baja si vienen juntos.
       patch.taco_salida = null;
       patch.taco_salida_origen = null;
       patch.revision_requerida = true;
-      patch.revision_motivo = `Salida estimada retirada: la llegada real (${dto.taco_llegada}) la contradecía — confirmar salida en oficina`;
+      alertaCede = `Salida estimada retirada: la llegada real (${dto.taco_llegada}) la contradecía — confirmar salida en oficina`;
     }
     if (dto.taco_salida !== undefined) {
       patch.taco_salida = dto.taco_salida;
-      patch.taco_salida_origen = 'PILOTO';
+      // Reenviar el MISMO valor no degrada el sello de OFICINA a PILOTO
+      // (outbox idéntico tras una confirmación): con valor distinto ya
+      // habría tronado el candado de arriba.
+      if (current.taco_salida_origen !== 'OFICINA') {
+        patch.taco_salida_origen = 'PILOTO';
+      }
     }
     if (dto.taco_llegada !== undefined) {
       patch.taco_llegada = dto.taco_llegada;
-      patch.taco_llegada_origen = 'PILOTO';
+      if (current.taco_llegada_origen !== 'OFICINA') {
+        patch.taco_llegada_origen = 'PILOTO';
+      }
     }
     if (dto.foto_taco_salida_url !== undefined)
       patch.foto_taco_salida_url = dto.foto_taco_salida_url;
@@ -3133,6 +3203,42 @@ export class FlightsService {
       patch.hora_llegada = dto.hora_llegada.toISOString();
     if (dto.capturado_offline !== undefined)
       patch.capturado_offline = dto.capturado_offline;
+
+    const alertaCorreccion =
+      correccionesALaBaja.length > 0
+        ? `${CORRECCION_BAJA_PREFIX}${correccionesALaBaja.join(' · ')}`
+        : null;
+    if (alertaCorreccion || alertaCede) {
+      // Amarillo ATÓMICO con el valor (mismo update: si la request muere
+      // después, el reintento idéntico del outbox ya no detectaría la baja y
+      // la corrección quedaría sin rastro) y PEGAJOSO (applyConsistencyFlag
+      // conserva el chunk entre recálculos; solo confirmTaco lo retira).
+      // Conserva chunks pegajosos previos y la bitácora; en el camino del
+      // cede (que se salta el recálculo) la corrección también se asienta en
+      // la bitácora — historial permanente que sobrevive a la confirmación.
+      const previo = (current.revision_motivo as string | null) ?? null;
+      let bitacoraPrev = leerBitacora(previo);
+      if (salidaDeducidaCede && correccionesALaBaja.length > 0) {
+        for (const c of correccionesALaBaja) {
+          bitacoraPrev = agregarProcedencia(
+            bitacoraPrev,
+            `corregida a la baja: ${c}`,
+          );
+        }
+      }
+      patch.revision_requerida = true;
+      patch.revision_motivo = [
+        alertaCorreccion,
+        alertaCede,
+        ...correccionesBajaPendientes(previo).filter(
+          (c) => c !== alertaCorreccion,
+        ),
+        bitacoraPrev ? `${PROCEDENCIA_PREFIX}${bitacoraPrev}` : null,
+      ]
+        .filter((p): p is string => !!p)
+        .join('; ')
+        .slice(0, 1800);
+    }
 
     const { data, error } = await this.supabase.service
       .from('escala')
@@ -3192,6 +3298,14 @@ export class FlightsService {
         procedencia.push(`${lado} capturada por ${quien}`);
       }
     }
+    // La corrección a la baja también se asienta en la BITÁCORA (historial
+    // permanente: sobrevive a la confirmación de oficina, a diferencia del
+    // chunk pegajoso de alerta que confirmTaco retira al confirmar).
+    if (correccionesALaBaja.length > 0) {
+      procedencia.push(
+        ...correccionesALaBaja.map((c) => `corregida a la baja: ${c}`),
+      );
+    }
 
     let finalRow = salidaDeducidaCede
       ? data
@@ -3210,6 +3324,23 @@ export class FlightsService {
         Number(dto.taco_llegada),
         userId,
       );
+    }
+    // La llegada corregida A LA BAJA pudo ser ANCLA (último taco del avión)
+    // de la salida DEDUCIDA de un vuelo POSTERIOR: re-sincronizar esas copias
+    // para que las horas del vuelo hijo no queden infladas en silencio.
+    if (llegadaBajadaDesde != null && dto.taco_llegada !== undefined) {
+      const avionCorreccion =
+        (current.aeronave_id as string | null) ??
+        (await this.aeronaveDelVuelo(current.vuelo_id as string));
+      if (avionCorreccion) {
+        await this.resincronizarAnclasDeCorreccion(
+          escalaId,
+          avionCorreccion,
+          llegadaBajadaDesde,
+          Number(dto.taco_llegada),
+          userId,
+        );
+      }
     }
     // Sincronización offline con foto pero sin lectura confirmada por el
     // piloto: el servidor intenta leer la foto con IA. La lectura IA nunca se
@@ -3387,6 +3518,11 @@ export class FlightsService {
     );
     patch.revision_motivo = [
       motivos.join('; '),
+      // Chunks pegajosos (corrección a la baja pendiente): sobreviven a esta
+      // reescritura — solo confirmTaco los retira.
+      ...correccionesBajaPendientes(
+        (escala.revision_motivo as string | null) ?? null,
+      ),
       bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
     ]
       .filter(Boolean)
@@ -3695,6 +3831,27 @@ export class FlightsService {
         userId,
       );
     }
+    // Oficina bajó la llegada: re-sincronizar las anclas de vuelos
+    // POSTERIORES que copiaron el valor viejo (mismo hueco que la corrección
+    // a la baja del piloto — la copia DEDUCIDA quedaba inflada en silencio).
+    if (
+      dto.taco_llegada != null &&
+      current.taco_llegada != null &&
+      Number(dto.taco_llegada) < Number(current.taco_llegada)
+    ) {
+      const avionCorreccion =
+        (current.aeronave_id as string | null) ??
+        (await this.aeronaveDelVuelo(current.vuelo_id as string));
+      if (avionCorreccion) {
+        await this.resincronizarAnclasDeCorreccion(
+          escalaId,
+          avionCorreccion,
+          Number(current.taco_llegada),
+          Number(dto.taco_llegada),
+          userId,
+        );
+      }
+    }
 
     // Estado derivado también cuando captura la OFICINA (caso piloto externo,
     // doc 3.7: Itzel sube los tacómetros): sin esto, un vuelo cuyas lecturas
@@ -3798,6 +3955,79 @@ export class FlightsService {
     return (data?.aeronave_id as string | null) ?? null;
   }
 
+  /**
+   * Una llegada corregida A LA BAJA pudo haber sido ancla (último taco del
+   * avión) de la salida DEDUCIDA de un vuelo POSTERIOR del mismo avión:
+   * re-sincroniza esas copias con el valor corregido (o las retira en
+   * AMARILLO si ya no caben bajo su llegada). Sin esto, las horas del vuelo
+   * hijo quedaban mal en silencio con el valor erróneo. Guarda atómica por
+   * origen: una captura real hecha en medio jamás se pisa.
+   */
+  private async resincronizarAnclasDeCorreccion(
+    escalaId: string,
+    aeronaveId: string,
+    viejo: number,
+    nuevo: number,
+    userId: string,
+  ): Promise<void> {
+    const { data } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, aeronave_id, taco_llegada, revision_motivo, vuelo:vuelo_id(aeronave_id)',
+      )
+      .eq('taco_salida', viejo)
+      .eq('taco_salida_origen', 'DEDUCIDO')
+      .neq('id', escalaId)
+      .is('cancelada_at', null);
+    for (const raw of data ?? []) {
+      const e = raw as Record<string, unknown> & {
+        vuelo?: { aeronave_id?: string | null } | null;
+      };
+      // Mismo avión, con herencia (escala sin avión propio = avión del vuelo).
+      const avion =
+        (e.aeronave_id as string | null) ?? e.vuelo?.aeronave_id ?? null;
+      if (avion !== aeronaveId) continue;
+      const llegada = e.taco_llegada == null ? null : Number(e.taco_llegada);
+      const cabe = llegada == null || nuevo < llegada;
+      const previoHijo = (e.revision_motivo as string | null) ?? null;
+      const lineaBitacora = `salida estimada re-anclada por corrección de la lectura origen (${viejo} → ${nuevo})`;
+      await this.supabase.service
+        .from('escala')
+        .update(
+          cabe
+            ? {
+                taco_salida: nuevo,
+                taco_salida_origen: 'DEDUCIDO',
+                revision_requerida: true,
+                revision_motivo: motivoDirecto(
+                  previoHijo,
+                  `La salida estimada venía de una lectura que se corrigió (${viejo} → ${nuevo}) — verificar en oficina`,
+                  lineaBitacora,
+                ),
+                updated_by: userId,
+              }
+            : {
+                // No cabe bajo la llegada capturada del tramo hijo: la copia
+                // cede en amarillo — jamás quedarse con el dato falso.
+                taco_salida: null,
+                taco_salida_origen: null,
+                revision_requerida: true,
+                revision_motivo: motivoDirecto(
+                  previoHijo,
+                  `Salida estimada retirada: la lectura de la que venía se corrigió (${viejo} → ${nuevo}) y ya no cabe bajo la llegada — confirmar salida en oficina`,
+                  lineaBitacora,
+                ),
+                updated_by: userId,
+              },
+        )
+        .eq('id', e.id as string)
+        // Guarda doble: solo mientras SIGA deducida Y con el valor viejo —
+        // una re-deducción concurrente con otro valor no se pisa.
+        .eq('taco_salida_origen', 'DEDUCIDO')
+        .eq('taco_salida', viejo);
+    }
+  }
+
   private async propagarLlegadaASalidaSiguiente(
     vueloId: string,
     orden: number,
@@ -3841,14 +4071,14 @@ export class FlightsService {
         const actual = (sig.revision_motivo as string | null) ?? '';
         if (!actual.includes('no coincide con la salida capturada')) {
           const motivo = `La llegada del tramo anterior (${valor}) no coincide con la salida capturada de este tramo (${Number(sig.taco_salida)}) — es la misma aguja: revisar ambas lecturas en oficina`;
-          const bitacora = leerBitacora(actual || null);
           await this.supabase.service
             .from('escala')
             .update({
               revision_requerida: true,
-              revision_motivo: bitacora
-                ? `${motivo}; ${PROCEDENCIA_PREFIX}${bitacora}`
-                : motivo,
+              // motivoDirecto: conserva bitácora Y chunks pegajosos del
+              // tramo siguiente (una corrección a la baja pendiente ahí no
+              // debe borrarse por este aviso).
+              revision_motivo: motivoDirecto(actual || null, motivo),
               updated_by: userId,
             })
             .eq('id', sig.id as string);
@@ -3865,11 +4095,9 @@ export class FlightsService {
     // abandona en silencio dejando el dato viejo como si fuera bueno.
     if (sig.taco_llegada != null && Number(sig.taco_llegada) <= valor) {
       if (esDeducida) {
-        // La bitácora de procedencia ("Registro: …") sobrevive al cede: es la
-        // explicación histórica del dato, no una alerta.
-        const bitacora = leerBitacora(
-          (sig.revision_motivo as string | null) ?? null,
-        );
+        // La bitácora de procedencia ("Registro: …") y los chunks pegajosos
+        // sobreviven al cede (motivoDirecto): son la explicación histórica
+        // del dato y la evidencia de correcciones sin revisar.
         const motivo = `Salida estimada retirada: la llegada corregida del tramo anterior (${valor}) la contradice — revisar la llegada de este tramo y confirmar la salida en oficina`;
         await this.supabase.service
           .from('escala')
@@ -3877,9 +4105,10 @@ export class FlightsService {
             taco_salida: null,
             taco_salida_origen: null,
             revision_requerida: true,
-            revision_motivo: bitacora
-              ? `${motivo}; ${PROCEDENCIA_PREFIX}${bitacora}`
-              : motivo,
+            revision_motivo: motivoDirecto(
+              (sig.revision_motivo as string | null) ?? null,
+              motivo,
+            ),
             updated_by: userId,
           })
           .eq('id', sig.id as string)
@@ -4293,6 +4522,14 @@ export class FlightsService {
     // del 28 jul 2026 pasó TODAS las validaciones numéricas (1621.8 en vez de
     // 1621.9 es un delta creíble) y nadie se enteró hasta ver la foto.
     if (extra?.forzarRevision) motivos.push(extra.forzarRevision);
+    // Correcciones a la baja pendientes de oficina: PEGAJOSAS — se conservan
+    // entre recálculos (la siguiente captura del tramo NO las apaga); solo
+    // confirmTaco las retira al reconstruir el motivo desde cero.
+    for (const c of correccionesBajaPendientes(
+      (escala.revision_motivo as string | null) ?? null,
+    )) {
+      if (!motivos.includes(c)) motivos.push(c);
+    }
     const revisionRequerida = motivos.length > 0;
 
     // Procedencia: vive en su propio bloque con prefijo estable y SOBREVIVE

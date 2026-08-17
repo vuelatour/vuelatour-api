@@ -14,6 +14,48 @@
  */
 export const PROCEDENCIA_PREFIX = 'Registro: ';
 
+/**
+ * Prefijo estable de una corrección A LA BAJA pendiente de oficina. Es
+ * PEGAJOSA: applyConsistencyFlag la conserva entre recálculos (una captura
+ * posterior del mismo tramo NO la apaga) y solo confirmTaco la retira al
+ * reconstruir el motivo — sin esto, el amarillo de una corrección moría en
+ * silencio con la siguiente captura.
+ */
+export const CORRECCION_BAJA_PREFIX =
+  'Corrección a la baja pendiente de oficina: ';
+
+/** Chunks de corrección a la baja aún pendientes en un revision_motivo. */
+export function correccionesBajaPendientes(
+  motivo: string | null | undefined,
+): string[] {
+  return partes(motivo).filter((c) => c.startsWith(CORRECCION_BAJA_PREFIX));
+}
+
+/**
+ * Motivo para ESCRITORES DIRECTOS de revision_motivo (updates que no pasan
+ * por el recálculo de consistencia): pone la alerta nueva al frente y
+ * CONSERVA los chunks pegajosos (corrección a la baja pendiente) y la
+ * bitácora del motivo previo — un escritor directo jamás debe borrar la
+ * evidencia de una corrección sin revisar.
+ */
+export function motivoDirecto(
+  previo: string | null | undefined,
+  alerta: string,
+  bitacoraExtra?: string,
+): string {
+  const bitacora = bitacoraExtra
+    ? agregarProcedencia(leerBitacora(previo), bitacoraExtra)
+    : leerBitacora(previo);
+  return [
+    alerta,
+    ...correccionesBajaPendientes(previo).filter((c) => c !== alerta),
+    bitacora ? `${PROCEDENCIA_PREFIX}${bitacora}` : null,
+  ]
+    .filter((p): p is string => !!p)
+    .join('; ')
+    .slice(0, 1800);
+}
+
 const partes = (motivo: string | null | undefined): string[] =>
   (motivo ?? '')
     .split('; ')
