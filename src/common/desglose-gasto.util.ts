@@ -31,43 +31,89 @@
  */
 const CLAVES_TUA = ['230700'];
 
-export function desgloseGastoLineas(
+// FBO / FOB (así lo imprime ASUR en la tabla resumen).
+const esFbo = (c: string) => /\bf(?:bo|ob)\b/i.test(c);
+// TUA / T.U.A. / TUAS / "Uso de Aeropuerto" con límites de palabra (no
+// matchear "actual"), o renglón "Servicio (clave NNNNNN)" con clave TUA
+// conocida del catálogo de arriba.
+const esTua = (c: string) =>
+  /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c) ||
+  /uso\s+de\s+aeropuerto/i.test(c) ||
+  CLAVES_TUA.some((clave) => new RegExp(`\\b${clave}\\b`).test(c));
+
+export interface DesglosePartes {
+  operacion: number;
+  tua: number;
+  fbo: number;
+}
+
+/**
+ * Partes NUMÉRICAS de la separación (la MISMA regla que las líneas de
+ * texto): TUA y FBO con su IVA incluido, Operación = total − separados.
+ * `null` cuando la factura no trae renglones TUA/FBO reconocibles o los
+ * montos no cuadran — el caller trata el gasto como un solo monto.
+ *
+ * La usan las notas del gasto (vía desgloseGastoLineas) y el Balance por
+ * avión: el TUA es un TRASLADO al pasajero, no costo de operar el avión —
+ * regla del libro manual del cliente (17-ago-2026).
+ */
+export function desgloseGastoPartes(
   conceptos: Array<{ concepto: string; monto: number }>,
   total: number,
-  moneda: string,
-): string[] {
-  // FBO / FOB (así lo imprime ASUR en la tabla resumen).
-  const esFbo = (c: string) => /\bf(?:bo|ob)\b/i.test(c);
-  // TUA / T.U.A. / TUAS / "Uso de Aeropuerto" con límites de palabra (no
-  // matchear "actual"), o renglón "Servicio (clave NNNNNN)" con clave TUA
-  // conocida del catálogo de arriba.
-  const esTua = (c: string) =>
-    /\bt\.?\s?u\.?\s?a\.?s?\b/i.test(c) ||
-    /uso\s+de\s+aeropuerto/i.test(c) ||
-    CLAVES_TUA.some((clave) => new RegExp(`\\b${clave}\\b`).test(c));
-  const hayIva = conceptos.some((c) => /\biva\b/i.test(c.concepto));
+): DesglosePartes | null {
+  // Normalización ANTES de calcular (mismos filtros que la composición de
+  // notas en expenses.service): los lectores del balance/Libro Dinero pasan
+  // el jsonb CRUDO — montos string/0/negativos divergían del texto impreso.
+  const limpios = conceptos
+    .map((c) => ({
+      concepto: String(c?.concepto ?? ''),
+      monto: Number(c?.monto),
+    }))
+    .filter((c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0);
+  const hayIva = limpios.some((c) => /\biva\b/i.test(c.concepto));
   const r2 = (n: number) => Math.round(n * 100) / 100;
-  const fbo = conceptos
+  const fbo = limpios
     .filter((c) => esFbo(c.concepto))
     .reduce((a, c) => a + c.monto, 0);
-  const tua = conceptos
+  const tua = limpios
     .filter((c) => esTua(c.concepto) && !esFbo(c.concepto))
     .reduce((a, c) => a + c.monto, 0);
-  const armar = (tuaConIva: number, fboConIva: number): string[] => {
+  // Coherencia: si la separación deja Operación NEGATIVA (monto del gasto
+  // editado tras la captura IA, pago parcial, moneda distinta), las partes NO
+  // cuadran y se descartan — restar un TUA mayor que el gasto a la columna
+  // del balance sería peor que no separar.
+  const armar = (
+    tuaConIva: number,
+    fboConIva: number,
+  ): DesglosePartes | null => {
     const operacion = r2(total - tuaConIva - fboConIva);
-    const lineas = [`Operación - $${operacion.toFixed(2)} ${moneda}`];
-    if (tuaConIva > 0)
-      lineas.push(`TUA (IVA incluido) - $${tuaConIva.toFixed(2)} ${moneda}`);
-    if (fboConIva > 0)
-      lineas.push(`FBO (IVA incluido) - $${fboConIva.toFixed(2)} ${moneda}`);
-    return lineas;
+    return operacion >= 0
+      ? { operacion, tua: tuaConIva, fbo: fboConIva }
+      : null;
   };
   if ((fbo > 0 || tua > 0) && total > 0) {
     // (a) Netos + IVA aparte → separar con IVA (neto × 1.16).
     if (hayIva) return armar(r2(tua * 1.16), r2(fbo * 1.16));
     // (b) Tabla resumen: montos YA con IVA que suman el total → tal cual.
-    const suma = r2(conceptos.reduce((a, c) => a + c.monto, 0));
+    const suma = r2(limpios.reduce((a, c) => a + c.monto, 0));
     if (Math.abs(suma - r2(total)) <= 0.05) return armar(r2(tua), r2(fbo));
+  }
+  return null;
+}
+
+export function desgloseGastoLineas(
+  conceptos: Array<{ concepto: string; monto: number }>,
+  total: number,
+  moneda: string,
+): string[] {
+  const partes = desgloseGastoPartes(conceptos, total);
+  if (partes) {
+    const lineas = [`Operación - $${partes.operacion.toFixed(2)} ${moneda}`];
+    if (partes.tua > 0)
+      lineas.push(`TUA (IVA incluido) - $${partes.tua.toFixed(2)} ${moneda}`);
+    if (partes.fbo > 0)
+      lineas.push(`FBO (IVA incluido) - $${partes.fbo.toFixed(2)} ${moneda}`);
+    return lineas;
   }
   return conceptos.map(
     (c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`,

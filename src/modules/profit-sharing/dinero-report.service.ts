@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
 import {
   PyservicesService,
   type DineroOtroGastoFilaPayload,
@@ -106,7 +107,9 @@ export class DineroReportService {
         vueloIds.length
           ? sb
               .from('gasto')
-              .select('vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto')
+              .select(
+                'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, valor_ia_extraido',
+              )
               .in('vuelo_id', vueloIds)
           : Promise.resolve({ data: [], error: null } as const),
         vueloIds.length
@@ -274,6 +277,10 @@ export class DineroReportService {
         desglose?: { clave?: string; concepto?: string; monto_usd?: number }[];
       } | null;
       const gastosV = gastosPorVuelo.get(v.id as string) ?? [];
+      // El desglose canónico emite UNA línea TUAS POR AEROPUERTO: el egreso
+      // (lo pagado) se adjunta SOLO a la primera — repetirlo en cada línea
+      // duplicaba el total de la columna egreso de la hoja.
+      let egresoTuasAsignado = false;
       for (const linea of snapshot?.desglose ?? []) {
         const claveLinea = String(linea.clave ?? '');
         if (!/^(TUAS|EXTRA|PERNOCTA)/.test(claveLinea)) continue;
@@ -283,18 +290,54 @@ export class DineroReportService {
         let egresoMxn: number | null = null;
         let conceptoEgreso: string | null = null;
         let fechaEgreso: string | null = null;
-        if (claveLinea === 'TUAS') {
-          const gastoTuas = gastosV.filter((g) => g.categoria === 'TUAS');
-          if (gastoTuas.length > 0) {
-            let suma = 0;
-            for (const g of gastoTuas) {
-              const monto = num(g.monto) ?? 0;
-              const tcg = pos(g.tc_gasto);
-              suma += g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : 0;
+        if (claveLinea === 'TUAS' && !egresoTuasAsignado) {
+          // TUA pagado al aeropuerto: gastos con categoría TUAS + la parte
+          // TUA EMBEBIDA en facturas de aeródromo leídas por IA (regla
+          // canónica de desglose-gasto.util — caso ASUR "aterrizaje,
+          // pernocta, TUA y plataforma": antes solo se detectaba la
+          // categoría exacta y ese TUA quedaba fuera del egreso).
+          let suma = 0;
+          let hubo = false;
+          for (const g of gastosV) {
+            const monto = num(g.monto) ?? 0;
+            let parte = 0;
+            if (g.categoria === 'TUAS') {
+              parte = monto;
+            } else if (
+              monto > 0 &&
+              // Mismo criterio que el Balance por avión: el TUA embebido
+              // solo se separa en facturas de aeródromo/handling — nunca en
+              // GAS ni en gastos del piloto.
+              !['GAS', 'COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO'].includes(
+                g.categoria as string,
+              )
+            ) {
+              const partes = desgloseGastoPartes(
+                (
+                  g as {
+                    valor_ia_extraido?: {
+                      conceptos?: Array<{ concepto: string; monto: number }>;
+                    } | null;
+                  }
+                ).valor_ia_extraido?.conceptos ?? [],
+                r2(monto - (num((g as { propina?: unknown }).propina) ?? 0)) ??
+                  monto,
+              );
+              if (partes && partes.tua > 0) parte = partes.tua;
             }
+            if (parte <= 0) continue;
+            const tcg = pos(g.tc_gasto);
+            const parteMxn =
+              g.moneda === 'MXN' ? parte : tcg != null ? parte * tcg : 0;
+            if (parteMxn <= 0) continue;
+            suma += parteMxn;
+            hubo = true;
+            fechaEgreso ??= (g.fecha_gasto as string) ?? null;
+          }
+          if (hubo) {
             egresoMxn = r2(suma);
             conceptoEgreso = 'tuas pagadas';
-            fechaEgreso = (gastoTuas[0].fecha_gasto as string) ?? null;
+            egresoTuasAsignado = true;
           }
         }
         otrosIngresos.push({

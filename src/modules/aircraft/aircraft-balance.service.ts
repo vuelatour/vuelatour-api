@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
 import {
   PyservicesService,
   type BalanceAvionCobroPayload,
@@ -88,6 +89,7 @@ interface GastoRow {
   vuelo_id: string | null;
   categoria: string;
   monto: string | number | null;
+  propina: string | number | null;
   moneda: string | null;
   tc_gasto: string | number | null;
   litros: string | number | null;
@@ -95,6 +97,10 @@ interface GastoRow {
   notas: string | null;
   medio_pago: string | null;
   proveedor: { nombre?: string } | { nombre?: string }[] | null;
+  /** Lectura IA de la factura: conceptos para separar el TUA embebido. */
+  valor_ia_extraido: {
+    conceptos?: Array<{ concepto: string; monto: number }>;
+  } | null;
 }
 
 interface SocioRow {
@@ -247,7 +253,7 @@ export class AircraftBalanceService {
           ? sb
               .from('gasto')
               .select(
-                'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, proveedor:proveedor_id(nombre)',
+                'vuelo_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, valor_ia_extraido, proveedor:proveedor_id(nombre)',
               )
               .in('vuelo_id', vueloIds)
               .order('fecha_gasto', { ascending: true })
@@ -257,7 +263,7 @@ export class AircraftBalanceService {
         sb
           .from('gasto')
           .select(
-            'vuelo_id, categoria, monto, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, proveedor:proveedor_id(nombre)',
+            'vuelo_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, valor_ia_extraido, proveedor:proveedor_id(nombre)',
           )
           .eq('aeronave_id', aircraftId)
           .is('vuelo_id', null)
@@ -483,7 +489,17 @@ export class AircraftBalanceService {
       const opDetalle: string[] = [];
       const pilotoDetalle: string[] = [];
       const otrosDetalle: string[] = [];
-      const lineaDetalle = (g: GastoRow, mxn: number, sufijo = ''): string => {
+      const fmtMonto = (n: number) =>
+        round2(n).toLocaleString('es-MX', {
+          minimumFractionDigits: 2,
+          maximumFractionDigits: 2,
+        });
+      const lineaDetalle = (
+        g: GastoRow,
+        mxn: number,
+        sufijo = '',
+        montoTexto?: string,
+      ): string => {
         const prov = Array.isArray(g.proveedor)
           ? g.proveedor[0]?.nombre
           : g.proveedor?.nombre;
@@ -497,15 +513,32 @@ export class AircraftBalanceService {
         ]
           .filter(Boolean)
           .join(' · ');
-        return `${etiqueta} — $${round2(mxn).toLocaleString('es-MX', {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })}`;
+        return `${etiqueta} — ${montoTexto ?? `$${fmtMonto(mxn)}`}`;
       };
       for (const g of vGastos) {
         // PERMISO va a su hoja (con o sin vuelo) y se excluye del costo del
         // vuelo para no contar doble; INDIRECTO no es costo directo.
         if (g.categoria === 'PERMISO' || g.categoria === 'INDIRECTO') continue;
+        if (g.categoria === 'TUAS') {
+          // REGLA DEL LIBRO (17-ago-2026): el TUA es un TRASLADO al pasajero,
+          // JAMÁS costo de operar el avión — no entra a columnas ni al costo
+          // total, y tampoco a "USD sin TC" (capturarle TC no lo metería a
+          // ningún costo). Queda visible en la nota de la celda para que el
+          // dinero no desaparezca del vistazo.
+          const mxnTua = gastoMxn(g);
+          const sufijoTua = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
+          opDetalle.push(
+            lineaDetalle(
+              g,
+              mxnTua ?? 0,
+              sufijoTua,
+              mxnTua != null
+                ? `TUA $${fmtMonto(mxnTua)} (no suma al costo)`
+                : `TUA $${fmtMonto(num(g.monto) ?? 0)} ${g.moneda ?? 'USD'} sin TC (no suma al costo)`,
+            ),
+          );
+          continue;
+        }
         const mxn = gastoMxn(g);
         if (mxn == null) {
           usdSinTc += 1;
@@ -514,6 +547,23 @@ export class AircraftBalanceService {
         }
         // "(efectivo)" en la nota es informativo: NO cambia la columna.
         const sufijo = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
+        // Parte TUA EMBEBIDA en la factura (leída por IA — caso ASUR
+        // "aterrizaje, pernocta, TUA y plataforma"): a la columna va SOLO la
+        // operación y la nota lleva las partes POR SEPARADO, sin sumarlas —
+        // como el libro manual. Aplica a OPERACIONES/afines y a OTROS (los
+        // FBO adelantan TUAs); nunca a GAS/PILOTO.
+        const separarTua = (): { opParte: number; tuaParte: number } | null => {
+          const montoNativo = num(g.monto) ?? 0;
+          if (montoNativo <= 0) return null;
+          const partes = desgloseGastoPartes(
+            g.valor_ia_extraido?.conceptos ?? [],
+            round2(montoNativo - (num(g.propina) ?? 0)),
+          );
+          if (!partes || partes.tua <= 0) return null;
+          // Conversión proporcional a MXN con el MISMO factor del gasto.
+          const tuaParte = round2((partes.tua * mxn) / montoNativo);
+          return { opParte: round2(mxn - tuaParte), tuaParte };
+        };
         if (g.categoria === 'GAS') {
           tuvoGas = true;
           gasMxn = (gasMxn ?? 0) + mxn;
@@ -527,16 +577,42 @@ export class AircraftBalanceService {
           else gasSinLitros += 1;
         } else if (CAT_OTROS.has(g.categoria)) {
           // OTROS = solo FBO + categoría OTRO (comisariatos, varios).
-          otrosMxn = (otrosMxn ?? 0) + mxn;
-          otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
+          const sep = separarTua();
+          if (sep) {
+            otrosMxn = (otrosMxn ?? 0) + sep.opParte;
+            otrosDetalle.push(
+              lineaDetalle(
+                g,
+                mxn,
+                sufijo,
+                `$${fmtMonto(sep.opParte)} · TUA $${fmtMonto(sep.tuaParte)} (el TUA no suma al costo)`,
+              ),
+            );
+          } else {
+            otrosMxn = (otrosMxn ?? 0) + mxn;
+            otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
+          }
         } else if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
           pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else {
-          // OPERACIONES, ATERRIZAJE, TUAS, REFACCION, FIJO y cualquier
-          // categoría futura no mapeada.
-          opMxn = (opMxn ?? 0) + mxn;
-          opDetalle.push(lineaDetalle(g, mxn, sufijo));
+          // OPERACIONES, ATERRIZAJE, REFACCION, FIJO y cualquier categoría
+          // futura no mapeada.
+          const sep = separarTua();
+          if (sep) {
+            opMxn = (opMxn ?? 0) + sep.opParte;
+            opDetalle.push(
+              lineaDetalle(
+                g,
+                mxn,
+                sufijo,
+                `Op $${fmtMonto(sep.opParte)} · TUA $${fmtMonto(sep.tuaParte)} (el TUA no suma al costo)`,
+              ),
+            );
+          } else {
+            opMxn = (opMxn ?? 0) + mxn;
+            opDetalle.push(lineaDetalle(g, mxn, sufijo));
+          }
         }
       }
       const T =
