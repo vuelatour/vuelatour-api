@@ -4988,6 +4988,26 @@ export class FlightsService {
       for (const u of us ?? []) nombres.set(u.id as string, u.nombre as string);
     }
 
+    // Matrícula por TRAMO (vuelos con aviones mezclados): cada tramo puede
+    // volar en otro avión (escala.aeronave_id) y cada matrícula lleva SU
+    // horómetro — sin esto el tablero mezclaba lecturas de dos aviones sin
+    // decir cuál era cuál.
+    const aeronaveIds = new Set<string>();
+    for (const v of vuelos ?? []) {
+      for (const e of (v.escalas as Array<Record<string, unknown>>) ?? []) {
+        if (e.aeronave_id) aeronaveIds.add(e.aeronave_id as string);
+      }
+    }
+    const matriculas = new Map<string, string>();
+    if (aeronaveIds.size) {
+      const { data: avs } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula')
+        .in('id', [...aeronaveIds]);
+      for (const a of avs ?? [])
+        matriculas.set(a.id as string, a.matricula as string);
+    }
+
     const promedios = new Map<string, number | null>();
     const promedioDe = async (o: string, d: string): Promise<number | null> => {
       const k = `${o}-${d}`;
@@ -5063,6 +5083,10 @@ export class FlightsService {
           orden: e.orden,
           origen_iata: e.origen_iata,
           destino_iata: e.destino_iata,
+          // Avión de ESTE tramo (null = hereda el del vuelo).
+          aeronave_matricula: e.aeronave_id
+            ? (matriculas.get(e.aeronave_id as string) ?? null)
+            : null,
           es_ferry: e.es_ferry === true,
           fecha_salida_plan: e.fecha_salida_plan ?? null,
           es_del_dia: diaTramo == null || diaTramo === dia,
