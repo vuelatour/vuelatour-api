@@ -73,6 +73,19 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
      restringió la salida por orden — el gate es de la app. Si la llegada
      real del tramo anterior luego NO coincide con esa salida fotografiada,
      la propagación NO la pisa: marca el tramo en amarillo (misma aguja).
+   - CORRECCIÓN A LA BAJA (17 ago 2026): una lectura PROPIA (origen
+     PILOTO/IA) SÍ puede corregirse hacia abajo desde la app en vuelos de
+     ≤7 días (el piloto se equivoca y la foto real es menor) — JAMÁS en
+     silencio: amarillo ATÓMICO (en el mismo update del valor) y PEGAJOSO
+     (chunk `CORRECCION_BAJA_PREFIX` que `applyConsistencyFlag` conserva
+     entre recálculos; solo `confirmTaco` lo retira) + valor anterior en la
+     bitácora. Lo de origen OFICINA no se mueve desde la app en NINGUNA
+     dirección (y reenviar el MISMO valor no degrada el sello a PILOTO).
+     TODO escritor directo de `revision_motivo` usa `motivoDirecto`
+     (conserva chunks pegajosos + bitácora) o el siguiente recálculo pone
+     verde sin revisión. Al bajar una llegada (piloto u oficina),
+     `resincronizarAnclasDeCorreccion` re-ancla las salidas DEDUCIDAS de
+     vuelos POSTERIORES del avión ancladas al valor viejo.
    - `taco_salida_origen`/`taco_llegada_origen` ∈ {PILOTO, IA, DEDUCIDO,
      OFICINA} se setean en TODOS los caminos de escritura. No perderlos.
    - El avión de un tramo se resuelve CON HERENCIA en todos los caminos de
