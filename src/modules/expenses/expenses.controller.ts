@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -114,9 +115,26 @@ export class ExpensesController {
     // El semáforo de facturación es seguimiento de OFICINA: piloto/mecánico
     // no pueden fijarlo (si pudieran, un gasto se afirmaría "facturado" sin
     // que oficina viera factura alguna — candado multicapa).
-    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO)
+    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
       delete dto.estatus_facturacion;
+      this.assertFotoPropia(dto.foto_url, c.userId);
+    }
     return this.expenses.create(dto, c.userId, c.rol);
+  }
+
+  /**
+   * La foto del gasto de un piloto/mecánico debe ser una SUBIDA PROPIA: la
+   * app sube a gasto-fotos con path `<uid>/<yyyy-MM>/<uuid>.ext`. Sin este
+   * candado, un PATCH podía apuntar el gasto a la foto de OTRO usuario (la
+   * política de lectura del bucket no filtra por dueño) o a un string basura
+   * que el panel intentaría firmar sin éxito.
+   */
+  private assertFotoPropia(fotoUrl: string | undefined, userId: string) {
+    if (fotoUrl && !fotoUrl.startsWith(`${userId}/`)) {
+      throw new BadRequestException(
+        'La foto del comprobante debe ser una subida tuya.',
+      );
+    }
   }
 
   @Post('photo-urls')
@@ -267,6 +285,8 @@ export class ExpensesController {
       await this.expenses.assertOwnSameDay(id, c.userId);
       // Seguimiento de OFICINA: el piloto/mecánico no marca facturado.
       delete dto.estatus_facturacion;
+      // Reemplazo de foto (pedido 17-ago): solo con una subida PROPIA.
+      this.assertFotoPropia(dto.foto_url, c.userId);
     }
     return this.expenses.update(id, dto, c.userId);
   }
