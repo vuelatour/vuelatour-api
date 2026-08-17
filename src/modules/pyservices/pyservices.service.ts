@@ -287,10 +287,11 @@ export interface BalanceAvionVueloPayload {
   costo_usd_siva: number | null;
   iva_pagado_usd: number | null;
   iva_pagado_mxn: number | null;
-  remanente_mxn: number;
-  dif_iva_mxn: number;
+  /** null en fila COMPARTIDA (multi-avión): la venta vive en otro balance. */
+  remanente_mxn: number | null;
+  dif_iva_mxn: number | null;
   comision_vendedor_mxn: number | null;
-  ganancia_mxn: number;
+  ganancia_mxn: number | null;
   ganancia_usd: number | null;
   costo_hr_usd: number | null;
   costo_hr_usd_siva: number | null;
