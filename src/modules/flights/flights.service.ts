@@ -138,7 +138,7 @@ export interface TacoSugerencia {
 }
 
 const COBRO_COLS =
-  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
+  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
 const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
@@ -5669,6 +5669,7 @@ export class FlightsService {
         tc_usd_mxn: tcCobro,
         comision_banco_pct: comisionPct,
         comision_banco_monto: comisionMonto,
+        cuenta_destino: dto.cuenta_destino?.trim() || null,
         referencia: dto.referencia,
         fecha_cobro: dto.fecha_cobro?.toISOString(),
         foto_voucher_url: dto.foto_voucher_url,
@@ -5786,6 +5787,8 @@ export class FlightsService {
     if (dto.metodo_cobro !== undefined) patch.metodo_cobro = dto.metodo_cobro;
     if (dto.tc_usd_mxn !== undefined) patch.tc_usd_mxn = dto.tc_usd_mxn;
     if (dto.referencia !== undefined) patch.referencia = dto.referencia;
+    if (dto.cuenta_destino !== undefined)
+      patch.cuenta_destino = dto.cuenta_destino.trim() || null;
     if (dto.fecha_cobro !== undefined)
       patch.fecha_cobro = dto.fecha_cobro.toISOString();
     if (dto.notas !== undefined) patch.notas = dto.notas;

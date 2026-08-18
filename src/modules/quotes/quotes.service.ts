@@ -102,7 +102,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -154,6 +154,25 @@ export class QuotesService {
       esInterno: data?.es_interno === true,
       tarifaPreferencial: tarifa > 0 ? tarifa : null,
     };
+  }
+
+  /**
+   * Método OTRO (manual, 18-ago-2026): exige el nombre escrito por la
+   * oficina; con cualquier otro método el detalle se LIMPIA (cambiar de
+   * OTRO a Transferencia no debe dejar un letrero viejo).
+   */
+  private resolverMetodoDetalle(dto: {
+    metodo_pago: MetodoPago;
+    metodo_pago_detalle?: string;
+  }): string | null {
+    if (dto.metodo_pago !== MetodoPago.OTRO) return null;
+    const detalle = dto.metodo_pago_detalle?.trim();
+    if (!detalle) {
+      throw new BadRequestException(
+        'Con el método "Otro" escribe cuál es (ej. PayPal, depósito en ventanilla).',
+      );
+    }
+    return detalle;
   }
 
   /**
@@ -1006,6 +1025,7 @@ export class QuotesService {
       comision_vendedor_tarifa_hr:
         breakdown.meta.comision_vendedor_tarifa_hr ?? null,
       metodo_cobro: dto.metodo_pago,
+      metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       // Con ruta operativa: las escalas del vuelo son las del PILOTO y la
       // cotización nunca las pisa (replaceEscalas hace early-return).
@@ -1240,6 +1260,7 @@ export class QuotesService {
         comision_vendedor_tarifa_hr:
           breakdown.meta.comision_vendedor_tarifa_hr ?? null,
         metodo_cobro: dto.metodo_pago,
+        metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
         notas: dto.notas ?? current.notas,
         calculo_snapshot: breakdown,
         // Cotizar una RESERVA o SOLICITUD la convierte en COTIZADO; los estados
@@ -1437,6 +1458,9 @@ export class QuotesService {
       pase_abordar: current.pase_abordar === true,
       metodo_pago:
         (current.metodo_cobro as MetodoPago) ?? MetodoPago.TRANSFERENCIA,
+      // Método OTRO: el nombre manual pactado viaja congelado.
+      metodo_pago_detalle:
+        (current.metodo_cobro_detalle as string | null) ?? undefined,
       // El ajuste rápido no debe borrar el TC pactado, la comisión BillPocket
       // ni la comisión del vendedor: passthrough CONGELADO de modo + tarifa +
       // monto efectivo persistidos (el ajuste rápido no cambia tramos, así

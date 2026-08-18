@@ -33,6 +33,14 @@ export enum MetodoPago {
   CHEQUE = 'CHEQUE',
   EFECTIVO = 'EFECTIVO',
   DOLARES = 'DOLARES',
+  /**
+   * Método MANUAL (18-ago-2026): la oficina escribe cuál es en
+   * `metodo_pago_detalle`. Sin IVA por default (el override de IVA es la
+   * válvula), fuera de la whitelist del piloto (solo oficina lo registra),
+   * fuera del auto-match de conciliación y de la bandeja de Facturas
+   * pre-cobro; timbra con FormaPago SAT 99 (Por definir).
+   */
+  OTRO = 'OTRO',
 }
 
 export enum TipoVuelo {
@@ -369,6 +377,15 @@ export class CalculateQuoteDto {
   @ApiProperty({ enum: MetodoPago, description: 'Determina si aplica IVA' })
   @IsEnum(MetodoPago)
   metodo_pago!: MetodoPago;
+
+  @ApiPropertyOptional({
+    description:
+      'Nombre MANUAL del método cuando metodo_pago = OTRO (ej. "PayPal", "Depósito en ventanilla"). Obligatorio con OTRO al crear/revisar.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  metodo_pago_detalle?: string;
 
   @ApiPropertyOptional({
     description:

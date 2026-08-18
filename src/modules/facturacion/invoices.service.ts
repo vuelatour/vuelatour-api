@@ -119,6 +119,7 @@ const FORMA_PAGO_SAT: Record<string, string> = {
   TRANSFERENCIA: '03',
   HSBC_LINK: '03', // el link HSBC liquida vía transferencia/SPEI
   BILLPOCKET: '04', // terminal = tarjeta de crédito
+  OTRO: '99', // método manual: "Por definir" — el operador corrige al timbrar
 };
 
 interface CancelarInput {

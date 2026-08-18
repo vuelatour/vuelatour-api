@@ -63,6 +63,17 @@ export class CreateCobroDto {
   comision_banco_monto?: number;
 
   @ApiPropertyOptional({
+    description:
+      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque): texto ' +
+      'libre, típicamente el alias de la cuenta bancaria. Informativo para ' +
+      'tesorería y conciliación.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  cuenta_destino?: string;
+
+  @ApiPropertyOptional({
     description: 'Referencia bancaria, ticket, link, voucher BillPocket',
   })
   @IsOptional()
@@ -139,6 +150,17 @@ export class UpdateCobroDto {
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(0)
   comision_banco_monto?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque): texto ' +
+      'libre, típicamente el alias de la cuenta bancaria. Informativo para ' +
+      'tesorería y conciliación.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  cuenta_destino?: string;
 
   @ApiPropertyOptional()
   @IsOptional()
