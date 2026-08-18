@@ -241,6 +241,8 @@ export interface BalanceAvionCobroPayload {
 }
 
 export interface BalanceAvionVueloPayload {
+  /** Balance GENERAL: la fila se tiñe con el color del avión. */
+  avion_color?: string | null;
   /** Columna CLAVE del libro: "#<folio> · <cliente>". */
   clave: string;
   folio: string;
@@ -339,6 +341,8 @@ export interface BalanceAvionGastoFilaPayload {
   monto_mxn: number | null;
   moneda_original: string | null;
   monto_original: number | null;
+  /** Balance GENERAL: la fila se tiñe con el color del avión. */
+  avion_color?: string | null;
 }
 
 export interface BalanceAvionHojaGastosPayload {
@@ -370,6 +374,8 @@ export interface BalanceAvionBalancePayload {
 /** Fila del RESUMEN del balance general (= totales del libro de un avión). */
 export interface BalanceGeneralResumenFilaPayload {
   matricula: string;
+  /** Color del avión (aeronave.color_calendario) — leyenda del libro. */
+  color: string | null;
   vuelos: number;
   horas: number | null;
   horas_cobradas: number | null;
@@ -381,13 +387,19 @@ export interface BalanceGeneralResumenFilaPayload {
   pendientes: number;
 }
 
-/** Balance GENERAL: libros individuales concatenados + hoja RESUMEN. */
+/**
+ * Balance GENERAL (regla del cliente, 18-ago): UN solo juego de hojas con
+ * los datos de todos los aviones JUNTOS (filas teñidas con el color de cada
+ * avión). `consolidado` = el libro FLOTA; `aviones` alimenta los bloques de
+ * la hoja "balance" (los socios son por avión).
+ */
 export interface BalanceGeneralPayload {
   generado: string;
   periodo_desde: string;
   periodo_hasta: string;
   resumen: BalanceGeneralResumenFilaPayload[];
   resumen_totales: BalanceGeneralResumenFilaPayload;
+  consolidado: BalanceAvionPayload;
   aviones: BalanceAvionPayload[];
 }
 
@@ -395,6 +407,8 @@ export interface BalanceAvionPayload {
   generado: string;
   matricula: string;
   modelo: string | null;
+  /** Color del avión (aeronave.color_calendario) — bloques del general. */
+  avion_color?: string | null;
   periodo_desde: string;
   periodo_hasta: string;
   permiso_afac_usd_hr: number | null;

@@ -215,7 +215,7 @@ export class AircraftBalanceService {
     }
     const { data: aviones, error } = await this.supabase.service
       .from('aeronave')
-      .select('id, matricula')
+      .select('id, matricula, color_calendario')
       .order('matricula');
     if (error) throw new Error(error.message);
 
@@ -241,9 +241,13 @@ export class AircraftBalanceService {
         t.costo_total_mxn !== 0 ||
         (t.total_mxn ?? 0) !== 0;
       if (!actividad) continue;
+      // Color del avión (leyenda + filas teñidas — como la tabla "Color
+      // calendario" del equipo; editable en el apartado del avión).
+      p.avion_color = (a.color_calendario as string | null) ?? null;
       libros.push(p);
       resumen.push({
         matricula: p.matricula,
+        color: p.avion_color,
         vuelos: p.vuelos.length,
         horas: t.tiempo_vuelo,
         horas_cobradas: t.horas_cobradas,
@@ -264,6 +268,110 @@ export class AircraftBalanceService {
       acc.porCobrar += t.por_cobrar_mxn ?? 0;
       acc.pendientes += p.pendientes.length;
     }
+    // ===== CONSOLIDADO (regla del cliente, 18-ago): UN solo juego de hojas
+    // con los datos de TODOS los aviones juntos. Cada fila viaja con el
+    // color de su avión; las sumas son sumas de los totales por avión (los
+    // dos campos de PROMEDIO son promedio simple de los no nulos — mismo
+    // criterio que la nota al pie del libro individual).
+    const sumT = (f: (t: BalanceAvionPayload['totales']) => number | null) =>
+      round2(libros.reduce((s, p) => s + (f(p.totales) ?? 0), 0));
+    const avgT = (f: (t: BalanceAvionPayload['totales']) => number | null) => {
+      const vals = libros
+        .map((p) => f(p.totales))
+        .filter((x): x is number => x != null);
+      return vals.length
+        ? round2(vals.reduce((s, x) => s + x, 0) / vals.length)
+        : null;
+    };
+    const totalesFlota: BalanceAvionPayload['totales'] = {
+      horas_cobradas: sumT((t) => t.horas_cobradas),
+      tiempo_vuelo: sumT((t) => t.tiempo_vuelo),
+      total_mxn: sumT((t) => t.total_mxn),
+      iva_mxn: sumT((t) => t.iva_mxn),
+      subtotal_mxn: sumT((t) => t.subtotal_mxn),
+      gas_mxn: sumT((t) => t.gas_mxn),
+      gas_litros: sumT((t) => t.gas_litros),
+      op_mxn: sumT((t) => t.op_mxn),
+      piloto_mxn: sumT((t) => t.piloto_mxn),
+      otros_mxn: sumT((t) => t.otros_mxn),
+      permiso_afac_mxn: sumT((t) => t.permiso_afac_mxn),
+      costo_total_mxn: sumT((t) => t.costo_total_mxn),
+      remanente_mxn: sumT((t) => t.remanente_mxn),
+      dif_iva_mxn: sumT((t) => t.dif_iva_mxn),
+      comision_vendedor_mxn: sumT((t) => t.comision_vendedor_mxn),
+      ganancia_mxn: sumT((t) => t.ganancia_mxn),
+      ganancia_usd: sumT((t) => t.ganancia_usd),
+      cobrado_mxn: sumT((t) => t.cobrado_mxn),
+      por_cobrar_mxn: sumT((t) => t.por_cobrar_mxn),
+      por_cobrar_usd: sumT((t) => t.por_cobrar_usd),
+      tc_promedio: avgT((t) => t.tc_promedio),
+      costo_hr_prom_usd: avgT((t) => t.costo_hr_prom_usd),
+      otros_ingresos_usd: sumT((t) => t.otros_ingresos_usd),
+    };
+    const porFecha = (
+      x: { fecha: string | null },
+      y: { fecha: string | null },
+    ) => String(x.fecha ?? '').localeCompare(String(y.fecha ?? ''));
+    const hojaFlota = (
+      pick: (p: BalanceAvionPayload) => BalanceAvionPayload['gastos_indirectos'],
+    ): BalanceAvionPayload['gastos_indirectos'] => {
+      const filas = libros
+        .flatMap((p) =>
+          pick(p).filas.map((f) => ({
+            ...f,
+            detalle: `${p.matricula} · ${f.detalle ?? ''}`,
+            avion_color: p.avion_color ?? null,
+          })),
+        )
+        .sort(porFecha);
+      const totalMxn = round2(
+        libros.reduce((s, p) => s + (pick(p).total_mxn ?? 0), 0),
+      );
+      const usd = round2(libros.reduce((s, p) => s + (pick(p).usd ?? 0), 0));
+      const horas = totalesFlota.tiempo_vuelo;
+      return {
+        filas,
+        total_mxn: totalMxn,
+        usd,
+        usd_hr: horas > 0 && usd !== 0 ? round2(usd / horas) : null,
+      };
+    };
+    const consolidado: BalanceAvionPayload = {
+      generado: new Date().toISOString(),
+      matricula: 'FLOTA',
+      modelo: null,
+      avion_color: null,
+      periodo_desde: d,
+      periodo_hasta: h,
+      permiso_afac_usd_hr: null,
+      tc_promedio: totalesFlota.tc_promedio,
+      horas_voladas_hr: totalesFlota.tiempo_vuelo,
+      vuelos: libros
+        .flatMap((p) =>
+          p.vuelos.map((v) => ({ ...v, avion_color: p.avion_color ?? null })),
+        )
+        .sort(porFecha),
+      totales: totalesFlota,
+      gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
+      otros_gastos: hojaFlota((p) => p.otros_gastos),
+      permisos: hojaFlota((p) => p.permisos),
+      // La hoja "balance" del general se pinta por BLOQUES desde `aviones`
+      // (los socios son por avión): este campo no se renderiza.
+      balance: {
+        utilidad_antes_usd: 0,
+        gastos_indirectos_usd: null,
+        otros_usd: null,
+        permisos_usd: null,
+        utilidad_despues_usd: null,
+        por_cobrar_usd: 0,
+        utilidad_cobrada_usd: null,
+        socios: [],
+      },
+      pendientes: libros.flatMap((p) =>
+        p.pendientes.map((texto) => `${p.matricula}: ${texto}`),
+      ),
+    };
+
     const buffer = await this.pyservices.generateBalanceGeneralXlsx({
       generado: new Date().toISOString(),
       periodo_desde: d,
@@ -271,6 +379,7 @@ export class AircraftBalanceService {
       resumen,
       resumen_totales: {
         matricula: 'TOTALES',
+        color: null,
         vuelos: acc.vuelos,
         horas: round2(acc.horas),
         horas_cobradas: round2(acc.horasCobradas),
@@ -281,6 +390,7 @@ export class AircraftBalanceService {
         por_cobrar_mxn: round2(acc.porCobrar),
         pendientes: acc.pendientes,
       },
+      consolidado,
       aviones: libros,
     });
     return { buffer, desde: d, hasta: h };
