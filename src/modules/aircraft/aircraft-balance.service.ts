@@ -859,22 +859,34 @@ export class AircraftBalanceService {
         }
         // "(efectivo)" en la nota es informativo: NO cambia la columna.
         const sufijo = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
-        // Parte TUA EMBEBIDA en la factura (leída por IA — caso ASUR
-        // "aterrizaje, pernocta, TUA y plataforma"): a la columna va SOLO la
-        // operación y la nota lleva las partes POR SEPARADO, sin sumarlas —
-        // como el libro manual. Aplica a OPERACIONES/afines y a OTROS (los
-        // FBO adelantan TUAs); nunca a GAS/PILOTO.
-        const separarTua = (): { opParte: number; tuaParte: number } | null => {
+        // Partes TUA/FBO EMBEBIDAS en la factura (leídas por IA — caso ASUR
+        // "aterrizaje, pernocta, TUA, plataforma, servicio FBO"): el desglose
+        // MANDA sobre la categoría que eligió el capturista. Regla del libro
+        // manual (TUA 17-ago-2026, FBO 18-ago-2026): a OPERACIONES va SOLO la
+        // operación, el FBO se separa a la columna OTROS (SÍ es costo — ej.
+        // factura $154.14 = Op $67.14 + FBO $87.00) y el TUA no suma a ningún
+        // costo (traslado al pasajero); la nota lleva las partes POR SEPARADO.
+        // Nunca aplica a GAS/PILOTO.
+        const separarPartes = (): {
+          opParte: number;
+          tuaParte: number;
+          fboParte: number;
+        } | null => {
           const montoNativo = num(g.monto) ?? 0;
           if (montoNativo <= 0) return null;
           const partes = desgloseGastoPartes(
             g.valor_ia_extraido?.conceptos ?? [],
             round2(montoNativo - (num(g.propina) ?? 0)),
           );
-          if (!partes || partes.tua <= 0) return null;
-          // Conversión proporcional a MXN con el MISMO factor del gasto.
+          if (!partes || (partes.tua <= 0 && partes.fbo <= 0)) return null;
+          // Conversión proporcional a MXN con el MISMO factor del gasto; la
+          // operación cierra por diferencia para que las partes SUMEN el
+          // gasto exacto (fiabilidad numérica del libro).
           const tuaParte = round2((partes.tua * mxn) / montoNativo);
-          return { opParte: round2(mxn - tuaParte), tuaParte };
+          const fboParte = round2((partes.fbo * mxn) / montoNativo);
+          const opParte = round2(mxn - tuaParte - fboParte);
+          if (opParte < 0) return null; // no cuadra: mejor no separar
+          return { opParte, tuaParte, fboParte };
         };
         if (g.categoria === 'GAS') {
           tuvoGas = true;
@@ -887,40 +899,61 @@ export class AircraftBalanceService {
           );
           if (litros != null) gasLitros = (gasLitros ?? 0) + litros;
           else gasSinLitros += 1;
-        } else if (CAT_OTROS.has(g.categoria)) {
-          // OTROS = solo FBO + categoría OTRO (comisariatos, varios).
-          const sep = separarTua();
-          if (sep) {
-            otrosMxn = (otrosMxn ?? 0) + sep.opParte;
-            otrosDetalle.push(
-              lineaDetalle(
-                g,
-                mxn,
-                sufijo,
-                `$${fmtMonto(sep.opParte)} · TUA $${fmtMonto(sep.tuaParte)} (el TUA no suma al costo)`,
-              ),
-            );
-          } else {
-            otrosMxn = (otrosMxn ?? 0) + mxn;
-            otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
-          }
         } else if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
           pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else {
-          // OPERACIONES, ATERRIZAJE, REFACCION, FIJO y cualquier categoría
-          // futura no mapeada.
-          const sep = separarTua();
+          // OPERACIONES, ATERRIZAJE, REFACCION, FIJO, FBO, OTRO y cualquier
+          // categoría futura no mapeada. Con desglose IA reconocible la
+          // factura se REPARTE entre columnas (op → OPERACIONES, FBO →
+          // OTROS, TUA → solo nota); sin desglose, la categoría decide la
+          // columna completa como siempre.
+          const sep = separarPartes();
           if (sep) {
-            opMxn = (opMxn ?? 0) + sep.opParte;
-            opDetalle.push(
-              lineaDetalle(
-                g,
-                mxn,
-                sufijo,
-                `Op $${fmtMonto(sep.opParte)} · TUA $${fmtMonto(sep.tuaParte)} (el TUA no suma al costo)`,
-              ),
-            );
+            const trozos = [
+              sep.opParte > 0 ? `Op $${fmtMonto(sep.opParte)}` : null,
+              sep.fboParte > 0
+                ? `FBO $${fmtMonto(sep.fboParte)} (en OTROS)`
+                : null,
+              sep.tuaParte > 0
+                ? `TUA $${fmtMonto(sep.tuaParte)} (no suma al costo)`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · ');
+            if (sep.opParte > 0) {
+              opMxn = (opMxn ?? 0) + sep.opParte;
+              opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
+            }
+            if (sep.fboParte > 0) {
+              otrosMxn = (otrosMxn ?? 0) + sep.fboParte;
+              otrosDetalle.push(
+                lineaDetalle(
+                  g,
+                  sep.fboParte,
+                  sufijo,
+                  [
+                    sep.opParte > 0
+                      ? `FBO $${fmtMonto(sep.fboParte)} (la operación va en OPERACIONES)`
+                      : `FBO $${fmtMonto(sep.fboParte)}`,
+                    sep.opParte <= 0 && sep.tuaParte > 0
+                      ? `TUA $${fmtMonto(sep.tuaParte)} (no suma al costo)`
+                      : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · '),
+                ),
+              );
+            }
+            // Factura que quedó SOLO en TUA (op y FBO en cero): no toca
+            // columnas, pero el dinero no desaparece del vistazo.
+            if (sep.opParte <= 0 && sep.fboParte <= 0) {
+              opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
+            }
+          } else if (CAT_OTROS.has(g.categoria)) {
+            // OTROS = solo FBO + categoría OTRO (comisariatos, varios).
+            otrosMxn = (otrosMxn ?? 0) + mxn;
+            otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
           } else {
             opMxn = (opMxn ?? 0) + mxn;
             opDetalle.push(lineaDetalle(g, mxn, sufijo));
