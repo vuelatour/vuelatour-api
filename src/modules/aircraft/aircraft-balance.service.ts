@@ -12,6 +12,7 @@ import {
   type BalanceAvionHojaGastosPayload,
   type BalanceAvionPayload,
   type BalanceAvionVueloPayload,
+  type TablaColumnaPayload,
 } from '../pyservices/pyservices.service';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
@@ -188,6 +189,136 @@ export class AircraftBalanceService {
     const payload = await this.buildPayload(aircraftId, d, h);
     const buffer = await this.pyservices.generateBalanceAvionXlsx(payload);
     return { buffer, matricula: payload.matricula, desde: d, hasta: h };
+  }
+
+  /**
+   * Balance GENERAL de la flota (pedido 18-ago): una fila por avión con los
+   * TOTALES de su libro del periodo — MISMO motor y números que el balance
+   * por avión (cero cálculos paralelos: cada fila ES la fila TOTALES de ese
+   * libro). Vuelos multi-avión no se duplican en la suma de flota: horas y
+   * costos van al avión de cada tramo y la venta solo al principal. Render:
+   * tabla genérica de pyservices (sin cambios en py).
+   */
+  async xlsxGeneral(
+    desde?: string,
+    hasta?: string,
+  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    const def = this.mesCorrienteCancun();
+    const d = desde ?? def.desde;
+    const h = hasta ?? def.hasta;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || !/^\d{4}-\d{2}-\d{2}$/.test(h)) {
+      throw new BadRequestException('desde/hasta deben ser YYYY-MM-DD');
+    }
+    if (d > h) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const { data: aviones, error } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula')
+      .order('matricula');
+    if (error) throw new Error(error.message);
+
+    const filas: Array<Array<string | number | null>> = [];
+    const acc = {
+      vuelos: 0,
+      horas: 0,
+      horasCobradas: 0,
+      venta: 0,
+      gas: 0,
+      op: 0,
+      piloto: 0,
+      otros: 0,
+      afac: 0,
+      costo: 0,
+      ganancia: 0,
+      cobrado: 0,
+      porCobrar: 0,
+      pendientes: 0,
+    };
+    for (const a of aviones ?? []) {
+      const p = await this.buildPayload(a.id as string, d, h);
+      const t = p.totales;
+      // Aviones sin actividad en el periodo: fuera (ruido en el general).
+      const actividad =
+        p.vuelos.length > 0 ||
+        t.costo_total_mxn !== 0 ||
+        (t.total_mxn ?? 0) !== 0;
+      if (!actividad) continue;
+      filas.push([
+        p.matricula,
+        p.vuelos.length,
+        t.tiempo_vuelo,
+        t.horas_cobradas,
+        t.total_mxn,
+        t.gas_mxn,
+        t.op_mxn,
+        t.piloto_mxn,
+        t.otros_mxn,
+        t.permiso_afac_mxn,
+        t.costo_total_mxn,
+        t.ganancia_mxn,
+        t.cobrado_mxn,
+        t.por_cobrar_mxn,
+        p.pendientes.length,
+      ]);
+      acc.vuelos += p.vuelos.length;
+      acc.horas += t.tiempo_vuelo ?? 0;
+      acc.horasCobradas += t.horas_cobradas ?? 0;
+      acc.venta += t.total_mxn ?? 0;
+      acc.gas += t.gas_mxn ?? 0;
+      acc.op += t.op_mxn ?? 0;
+      acc.piloto += t.piloto_mxn ?? 0;
+      acc.otros += t.otros_mxn ?? 0;
+      acc.afac += t.permiso_afac_mxn ?? 0;
+      acc.costo += t.costo_total_mxn ?? 0;
+      acc.ganancia += t.ganancia_mxn ?? 0;
+      acc.cobrado += t.cobrado_mxn ?? 0;
+      acc.porCobrar += t.por_cobrar_mxn ?? 0;
+      acc.pendientes += p.pendientes.length;
+    }
+    const columnas: TablaColumnaPayload[] = [
+      { label: 'Avión' },
+      { label: 'Vuelos', tipo: 'entero' },
+      { label: 'Horas voladas', tipo: 'numero' },
+      { label: 'Horas cobradas', tipo: 'numero' },
+      { label: 'Venta MXN', tipo: 'money' },
+      { label: 'Gas MXN', tipo: 'money' },
+      { label: 'Operaciones MXN', tipo: 'money' },
+      { label: 'Piloto MXN', tipo: 'money' },
+      { label: 'Otros MXN', tipo: 'money' },
+      { label: 'AFAC (prov.) MXN', tipo: 'money' },
+      { label: 'Costo total MXN', tipo: 'money' },
+      { label: 'Ganancia MXN', tipo: 'money' },
+      { label: 'Cobrado MXN', tipo: 'money' },
+      { label: 'Por cobrar MXN', tipo: 'money' },
+      { label: 'Pendientes', tipo: 'entero' },
+    ];
+    const buffer = await this.pyservices.generateTablaXlsx({
+      titulo: 'Balance general de flota',
+      subtitulo:
+        `${d} a ${h} · cada fila = los TOTALES del balance de ese avión ` +
+        '(el detalle vive en su libro individual)',
+      columnas,
+      filas,
+      totales: [
+        'TOTALES',
+        acc.vuelos,
+        round2(acc.horas),
+        round2(acc.horasCobradas),
+        round2(acc.venta),
+        round2(acc.gas),
+        round2(acc.op),
+        round2(acc.piloto),
+        round2(acc.otros),
+        round2(acc.afac),
+        round2(acc.costo),
+        round2(acc.ganancia),
+        round2(acc.cobrado),
+        round2(acc.porCobrar),
+        acc.pendientes,
+      ],
+    });
+    return { buffer, desde: d, hasta: h };
   }
 
   /** Periodo default: mes corriente EN HORA CANCÚN (no UTC). */

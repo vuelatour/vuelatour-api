@@ -73,6 +73,27 @@ export class AircraftController {
     return this.aircraft.create(dto, current.userId);
   }
 
+  // OJO: ruta literal ANTES de las rutas ':id' o Nest la captura como id.
+  @Get('balance-general.xlsx')
+  // Mismos roles que el balance por avión: trae utilidad de toda la flota.
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Balance GENERAL de la flota: una fila por avión con los TOTALES de su libro del periodo (mismo motor que el balance por avión) + totales de flota. Default: mes corriente en hora Cancún.',
+  })
+  async balanceGeneralXlsx(
+    @Query() q: BalanceAvionQuery,
+  ): Promise<StreamableFile> {
+    const { buffer, desde, hasta } = await this.balance.xlsxGeneral(
+      q.desde,
+      q.hasta,
+    );
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="balance-general-${desde}-a-${hasta}.xlsx"`,
+    });
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one aircraft' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
