@@ -117,20 +117,25 @@ export class ExpensesController {
     // que oficina viera factura alguna — candado multicapa).
     if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
       delete dto.estatus_facturacion;
-      this.assertFotoPropia(dto.foto_url, c.userId);
+      this.assertFotoPropia(dto.foto_url, c.authId);
     }
     return this.expenses.create(dto, c.userId, c.rol);
   }
 
   /**
    * La foto del gasto de un piloto/mecánico debe ser una SUBIDA PROPIA: la
-   * app sube a gasto-fotos con path `<uid>/<yyyy-MM>/<uuid>.ext`. Sin este
-   * candado, un PATCH podía apuntar el gasto a la foto de OTRO usuario (la
-   * política de lectura del bucket no filtra por dueño) o a un string basura
-   * que el panel intentaría firmar sin éxito.
+   * app sube a gasto-fotos con path `<AUTH uid>/<yyyy-MM>/<uuid>.ext`. Sin
+   * este candado, un PATCH podía apuntar el gasto a la foto de OTRO usuario
+   * (la política de lectura del bucket no filtra por dueño) o a un string
+   * basura que el panel intentaría firmar sin éxito.
+   *
+   * OJO (bug 18-ago): el prefijo del path es el `supabase_auth_id`
+   * (c.authId, el sub del JWT con el que la app sube al Storage) — NUNCA
+   * `usuario.id` (c.userId): son ids distintos y comparar contra userId
+   * bloqueó TODAS las capturas con foto de pilotos.
    */
-  private assertFotoPropia(fotoUrl: string | undefined, userId: string) {
-    if (fotoUrl && !fotoUrl.startsWith(`${userId}/`)) {
+  private assertFotoPropia(fotoUrl: string | undefined, authId: string) {
+    if (fotoUrl && !fotoUrl.startsWith(`${authId}/`)) {
       throw new BadRequestException(
         'La foto del comprobante debe ser una subida tuya.',
       );
@@ -286,7 +291,7 @@ export class ExpensesController {
       // Seguimiento de OFICINA: el piloto/mecánico no marca facturado.
       delete dto.estatus_facturacion;
       // Reemplazo de foto (pedido 17-ago): solo con una subida PROPIA.
-      this.assertFotoPropia(dto.foto_url, c.userId);
+      this.assertFotoPropia(dto.foto_url, c.authId);
     }
     return this.expenses.update(id, dto, c.userId);
   }
