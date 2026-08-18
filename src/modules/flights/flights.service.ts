@@ -328,6 +328,14 @@ export class FlightsService {
         `No se puede reasignar un vuelo ${original.estado as string}.`,
       );
     }
+    // Cubierto por externo: clonar aquí dejaría un vuelo con avión propio Y
+    // es_externo=true (estado imposible). El camino soportado es Editar
+    // externo → "Regresar a vuelo propio" y luego asignar.
+    if (original.es_externo === true) {
+      throw new ConflictException(
+        'Vuelo cubierto por externo: primero regrésalo a vuelo propio (Editar externo → Regresar a vuelo propio).',
+      );
+    }
     if (original.aeronave_id === dto.aeronave_id) {
       throw new BadRequestException(
         'Selecciona una aeronave distinta a la actual.',

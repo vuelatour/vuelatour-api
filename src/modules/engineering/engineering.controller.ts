@@ -63,6 +63,15 @@ export class EngineeringController {
     return this.engineering.listVencimientos(id);
   }
 
+  @Get('aircraft/:id/expirations-eliminadas')
+  @ApiOperation({
+    summary:
+      'Documentos ELIMINADOS del avión (borrado suave): quién/cuándo, restaurables',
+  })
+  listExpirationsEliminadas(@Param('id', ParseUUIDPipe) id: string) {
+    return this.engineering.listVencimientosEliminados(id);
+  }
+
   @Post('aircraft/:id/expirations')
   @ApiOperation({ summary: 'Registra un vencimiento (alimenta las alertas)' })
   createExpiration(

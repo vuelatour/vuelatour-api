@@ -163,15 +163,28 @@ export class EngineeringService {
   async listVencimientos(aeronaveId: string) {
     const { data, error } = await this.supabase.service
       .from('vencimiento')
-      .select(`${VENC_COLS}, critico, tipo_documento(nombre, es_critico)`)
+      .select(
+        `${VENC_COLS}, critico, updated_at, created_by, updated_by, tipo_documento(nombre, es_critico)`,
+      )
       .eq('aeronave_id', aeronaveId)
+      .is('deleted_at', null)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: false });
     if (error) throw new Error(error.message);
+    // Bitácora visible (pedido del mecánico, 18-ago-2026): quién registró y
+    // quién editó al último cada documento — una sola consulta de nombres.
+    const nombres = await this.nombresUsuarios(
+      (data ?? []).flatMap((v) => [
+        (v as { created_by?: string | null }).created_by,
+        (v as { updated_by?: string | null }).updated_by,
+      ]),
+    );
     // Crítico EFECTIVO: el override del documento manda sobre el tipo (misma
     // regla que expirations.enrich) — el panel pinta el badge desde aquí.
     return (data ?? []).map((v) => {
       const row = v as Record<string, unknown> & {
         critico?: boolean | null;
+        created_by?: string | null;
+        updated_by?: string | null;
         tipo_documento?: { nombre?: string; es_critico?: boolean } | null;
       };
       const tipo = Array.isArray(row.tipo_documento)
@@ -182,6 +195,12 @@ export class EngineeringService {
         : (row.tipo_documento ?? null);
       return {
         ...row,
+        registrado_por: row.created_by
+          ? (nombres.get(row.created_by) ?? null)
+          : null,
+        actualizado_por: row.updated_by
+          ? (nombres.get(row.updated_by) ?? null)
+          : null,
         tipo_documento: tipo
           ? {
               ...tipo,
@@ -190,6 +209,58 @@ export class EngineeringService {
           : null,
       };
     });
+  }
+
+  /**
+   * Documentos ELIMINADOS del avión (borrado suave): quién y cuándo, para la
+   * sección "Eliminados" de la ficha — de ahí ADMIN/COORDINADOR restauran
+   * sin recapturar (pedido del mecánico tras perder Bianual/Batería ELT).
+   */
+  async listVencimientosEliminados(aeronaveId: string) {
+    const { data, error } = await this.supabase.service
+      .from('vencimiento')
+      .select(
+        `${VENC_COLS}, critico, deleted_at, deleted_by, tipo_documento(nombre, es_critico)`,
+      )
+      .eq('aeronave_id', aeronaveId)
+      .not('deleted_at', 'is', null)
+      .order('deleted_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    const nombres = await this.nombresUsuarios(
+      (data ?? []).map((v) => (v as { deleted_by?: string | null }).deleted_by),
+    );
+    return (data ?? []).map((v) => {
+      const row = v as Record<string, unknown> & {
+        deleted_by?: string | null;
+        tipo_documento?: { nombre?: string } | { nombre?: string }[] | null;
+      };
+      const tipo = Array.isArray(row.tipo_documento)
+        ? (row.tipo_documento[0] ?? null)
+        : (row.tipo_documento ?? null);
+      return {
+        ...row,
+        tipo_documento: tipo,
+        eliminado_por: row.deleted_by
+          ? (nombres.get(row.deleted_by) ?? null)
+          : null,
+      };
+    });
+  }
+
+  /** Nombres de usuario por id (para las bitácoras de documentos). */
+  private async nombresUsuarios(
+    ids: Array<string | null | undefined>,
+  ): Promise<Map<string, string>> {
+    const unicos = [...new Set(ids.filter((x): x is string => !!x))];
+    if (unicos.length === 0) return new Map();
+    const { data, error } = await this.supabase.service
+      .from('usuario')
+      .select('id, nombre')
+      .in('id', unicos);
+    if (error) throw new Error(error.message);
+    return new Map(
+      (data ?? []).map((u) => [u.id as string, u.nombre as string]),
+    );
   }
 
   async createVencimiento(aeronaveId: string, dto: CreateVencimientoDto, userId: string) {
@@ -241,6 +312,7 @@ export class EngineeringService {
         'id, fecha_vencimiento, vence_por, horas_limite, referencia, aeronave_id, critico, archivo_url, tipo_documento(nombre, es_critico), aeronave(matricula), piloto:piloto_id(nombre), motor:motor_id(posicion, aeronave_id, aeronave:aeronave_id(matricula))',
       )
       .eq('vence_por', 'FECHA')
+      .is('deleted_at', null)
       .not('fecha_vencimiento', 'is', null)
       .lte('fecha_vencimiento', limite)
       .order('fecha_vencimiento', { ascending: true });

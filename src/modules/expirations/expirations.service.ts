@@ -53,6 +53,9 @@ export class ExpirationsService {
     let q = this.supabase.service
       .from('vencimiento')
       .select(COLS)
+      // Borrado suave (18-ago-2026): los eliminados no aparecen en NINGÚN
+      // lector; ADMIN los restaura desde la ficha del avión.
+      .is('deleted_at', null)
       .order('fecha_vencimiento', { ascending: true, nullsFirst: false })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
@@ -216,27 +219,41 @@ export class ExpirationsService {
     return this.findById(id);
   }
 
-  async remove(id: string) {
-    const row = await this.fetchRow(id);
+  /**
+   * Borrado SUAVE (18-ago-2026, pedido del mecánico tras perder documentos
+   * sin rastro): marca deleted_at/deleted_by, CONSERVA el archivo del bucket
+   * (sin él, restaurar dejaría el documento sin adjunto) y todo queda
+   * recuperable con restore(). Los lectores filtran deleted_at is null.
+   */
+  async remove(id: string, userId: string) {
+    await this.fetchRow(id); // 404 si no existe o ya está eliminado
     const { error } = await this.supabase.service
       .from('vencimiento')
-      .delete()
+      .update({
+        deleted_at: new Date().toISOString(),
+        deleted_by: userId,
+        updated_by: userId,
+      })
       .eq('id', id);
     if (error) throw new Error(error.message);
-    // Borra la copia del documento del bucket (evita huérfanos). Best-effort:
-    // el vencimiento ya se eliminó — un archivo residual no rompe nada.
-    const path = (row as { archivo_url?: string | null }).archivo_url;
-    if (path) {
-      const { error: storageErr } = await this.supabase.service.storage
-        .from('documentos-flota')
-        .remove([path]);
-      if (storageErr) {
-        this.logger.warn(
-          `No se pudo borrar el archivo del vencimiento ${id}: ${storageErr.message}`,
-        );
-      }
-    }
     return { deleted: true, id };
+  }
+
+  /** Restaura un vencimiento eliminado (ADMIN/COORDINADOR). */
+  async restore(id: string, userId: string) {
+    const { data, error } = await this.supabase.service
+      .from('vencimiento')
+      .update({ deleted_at: null, deleted_by: null, updated_by: userId })
+      .eq('id', id)
+      .not('deleted_at', 'is', null)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data)
+      throw new NotFoundException(
+        `Vencimiento ${id} no está eliminado (o no existe)`,
+      );
+    return this.findById(id);
   }
 
   /**
@@ -276,6 +293,7 @@ export class ExpirationsService {
     const { data, error } = await this.supabase.service
       .from('vencimiento')
       .select(COLS)
+      .is('deleted_at', null)
       .or(orParts.join(','));
     if (error) throw new Error(error.message);
 
@@ -329,6 +347,7 @@ export class ExpirationsService {
     const { data, error } = await this.supabase.service
       .from('vencimiento')
       .select(COLS)
+      .is('deleted_at', null)
       .or(orParts.join(','));
     if (error) throw new Error(error.message);
 
@@ -382,6 +401,7 @@ export class ExpirationsService {
       .from('vencimiento')
       .select(COLS)
       .eq('id', id)
+      .is('deleted_at', null)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Vencimiento ${id} not found`);

@@ -534,6 +534,7 @@ export class AlertsService {
         .select(
           'id, fecha_vencimiento, referencia, tipo_documento(nombre), aeronave(matricula), piloto:usuario!piloto_id(nombre), motor(numero_serie, posicion, aeronave:aeronave_id(matricula))',
         )
+        .is('deleted_at', null)
         .gte('fecha_vencimiento', hoyCancun)
         .lte('fecha_vencimiento', target);
       if (error) throw new Error(error.message);

@@ -108,8 +108,25 @@ export class ExpirationsController {
   @Delete(':id')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Delete expiration record (ADMIN)' })
-  remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.expirations.remove(id);
+  @ApiOperation({
+    summary:
+      'Borrado SUAVE del vencimiento (queda bitácora de quién/cuándo y se puede restaurar)',
+  })
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expirations.remove(id, c.userId);
+  }
+
+  @Post(':id/restaurar')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Restaura un vencimiento eliminado' })
+  restore(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expirations.restore(id, c.userId);
   }
 }
