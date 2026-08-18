@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { AircraftService } from './aircraft.service';
 import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
 import {
   PyservicesService,
@@ -166,6 +167,7 @@ export class AircraftBalanceService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    private readonly aircraft: AircraftService,
   ) {}
 
   async xlsx(
@@ -429,7 +431,9 @@ export class AircraftBalanceService {
 
     const { data: avion, error: avionErr } = await sb
       .from('aeronave')
-      .select('id, matricula, modelo, permiso_afac_usd_hr')
+      .select(
+        'id, matricula, modelo, permiso_afac_usd_hr, servicio_intervalos, servicio_horas_base',
+      )
       .eq('id', aircraftId)
       .maybeSingle();
     if (avionErr) throw new Error(avionErr.message);
@@ -1422,6 +1426,41 @@ export class AircraftBalanceService {
       pendientes.push(
         `Avión ${avion.matricula as string}: sin vuelos en el periodo ${desde} a ${hasta}`,
       );
+    }
+    // Servicio por horas (pedido del mecánico, 18-ago-2026): la hoja de
+    // pendientes también avisa el PRÓXIMO servicio del programa — mismo
+    // cálculo que la ficha del avión y la alerta push (proximoServicio,
+    // cada intervalo cuenta desde la base y manda el más cercano). El
+    // tacómetro usado es el último del PERIODO: el libro es el cierre del
+    // mes y así se lee (con el mes corriente = el hobbs actual).
+    const intervalosServicio = (
+      (avion.servicio_intervalos as unknown[]) ?? []
+    ).map(Number);
+    let maxTacoPeriodo = 0;
+    for (const e of escalas) {
+      if (
+        ((e.aeronave_id ?? avionPorVuelo.get(e.vuelo_id)) ?? null) !==
+        aircraftId
+      )
+        continue;
+      for (const t of [num(e.taco_salida), num(e.taco_llegada)])
+        if (t != null && t > maxTacoPeriodo) maxTacoPeriodo = t;
+    }
+    if (intervalosServicio.filter((n) => n > 0).length === 0) {
+      pendientes.push(
+        `Avión ${avion.matricula as string}: sin programa de servicio por horas configurado (ficha del avión → Programa de servicio)`,
+      );
+    } else if (maxTacoPeriodo > 0) {
+      const prox = this.aircraft.proximoServicio(
+        intervalosServicio,
+        Number(avion.servicio_horas_base ?? 0),
+        maxTacoPeriodo,
+      );
+      if (prox) {
+        pendientes.push(
+          `Avión ${avion.matricula as string}: próximo servicio de ${prox.intervalo} h a las ${prox.a_las} — faltan ${prox.faltan} h (último tacómetro del periodo: ${maxTacoPeriodo.toFixed(1)})`,
+        );
+      }
     }
 
     return {

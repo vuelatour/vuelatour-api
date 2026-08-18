@@ -438,25 +438,46 @@ export class AircraftService {
   }
 
   /**
-   * Próximo umbral de servicio: recorre la secuencia de intervalos (cíclica)
-   * desde `base` y devuelve el primer umbral por encima de `horas`. Null si no
-   * hay programa configurado.
+   * Próximo umbral de servicio. REGLA DEL MECÁNICO (18-ago-2026): cada
+   * intervalo del programa es su PROPIO ciclo desde la base — 50 h en
+   * base+50k, 100 h en base+100k, 200 h en base+200k — y manda el hito MÁS
+   * CERCANO (el intervalo chico es el más restrictivo y JAMÁS se salta).
+   * Antes la secuencia se recorría ENCADENADA (base+50, +100, +200 y
+   * repetir): el avión "caminaba" 350 h por vuelta y el próximo servicio
+   * podía salir a 200 h saltándose los intermedios (caso: horas 2204.7 con
+   * base 1700 decía "200 h a las 2400" en vez de "50 h a las 2250").
+   * Cuando varios ciclos caen en el MISMO hito, se reporta el intervalo
+   * MAYOR (el servicio de 200 h incluye al de 50/100). Null sin programa.
    */
   proximoServicio(intervalos: number[], base: number, horas: number) {
-    const ints = intervalos.filter((n) => Number(n) > 0).map(Number);
+    const ints = [
+      ...new Set(intervalos.map(Number).filter((n) => Number.isFinite(n) && n > 0)),
+    ];
     if (ints.length === 0) return null;
-    let acc = base;
-    for (let i = 0; i < 100000; i++) {
-      acc += ints[i % ints.length];
-      if (acc > horas) {
-        return {
-          a_las: Number(acc.toFixed(1)),
-          intervalo: ints[i % ints.length],
-          faltan: Number((acc - horas).toFixed(1)),
-        };
+    // Primer múltiplo de cada intervalo ESTRICTAMENTE arriba de `horas`
+    // (horas por debajo de la base — base recién editada a futuro — cae al
+    // primer hito base+intervalo).
+    const r1 = (n: number) => Number(n.toFixed(1));
+    let aLas: number | null = null;
+    let intervalo = 0;
+    for (const int of ints) {
+      const pasos =
+        horas < base ? 1 : Math.floor((r1(horas) - r1(base)) / int) + 1;
+      const hito = r1(base + int * pasos);
+      if (aLas == null || hito < aLas - 0.05) {
+        aLas = hito;
+        intervalo = int;
+      } else if (Math.abs(hito - aLas) <= 0.05 && int > intervalo) {
+        // Hitos coincidentes: gana la etiqueta del servicio mayor.
+        intervalo = int;
       }
     }
-    return null;
+    if (aLas == null) return null;
+    return {
+      a_las: aLas,
+      intervalo,
+      faltan: r1(aLas - horas),
+    };
   }
 
   /**
