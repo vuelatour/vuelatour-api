@@ -10,6 +10,7 @@ import {
   ListFondosQuery,
   MonedaCaja,
   TipoMovimientoCaja,
+  UpdateCajaMovimientoDto,
   UpdateFondoDto,
 } from './dto/caja-chica.dto';
 
@@ -457,6 +458,68 @@ export class CajaChicaService {
       throw new Error(error.message);
     }
     return data!;
+  }
+
+  /**
+   * Corrige un movimiento ya registrado (caso Mari, 18-ago: el ingreso quedó
+   * sin la fecha real y no había forma de corregirlo). El saldo del fondo es
+   * DERIVADO de los movimientos: editar recalcula solo. La moneda no se
+   * toca — la del fondo manda.
+   */
+  async updateMovimiento(
+    id: string,
+    dto: UpdateCajaMovimientoDto,
+    userId: string,
+  ) {
+    const { data: mov, error: readErr } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select(MOV_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    const tipo = dto.tipo ?? (mov.tipo as TipoMovimientoCaja);
+    const monto = dto.monto ?? Number(mov.monto);
+    if (monto === 0)
+      throw new BadRequestException('El monto no puede ser cero.');
+    if (tipo !== TipoMovimientoCaja.AJUSTE && monto < 0) {
+      throw new BadRequestException(
+        'REPOSICION y REINTEGRO requieren un monto positivo.',
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .update({
+        tipo,
+        monto,
+        ...(dto.fecha !== undefined ? { fecha: dto.fecha } : {}),
+        ...(dto.autorizado_por !== undefined
+          ? { autorizado_por: dto.autorizado_por || null }
+          : {}),
+        ...(dto.referencia !== undefined
+          ? { referencia: dto.referencia || null }
+          : {}),
+        ...(dto.notas !== undefined ? { notas: dto.notas || null } : {}),
+        updated_by: userId,
+      })
+      .eq('id', id)
+      .select(MOV_COLS)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data!;
+  }
+
+  /** Elimina un movimiento (la UI confirma): el saldo recalcula solo. */
+  async removeMovimiento(id: string) {
+    const { data, error } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .delete()
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Movimiento ${id} not found`);
+    return { ok: true };
   }
 
   // ===== App del piloto =====

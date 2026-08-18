@@ -153,3 +153,12 @@ export class CreateCajaMovimientoDto {
   @IsString()
   notas?: string;
 }
+
+/**
+ * Corrección de un movimiento ya registrado (caso Mari, 18-ago: el ingreso
+ * quedó sin la fecha real y no había forma de corregirlo). La moneda no se
+ * edita: la del fondo manda.
+ */
+export class UpdateCajaMovimientoDto extends PartialType(
+  CreateCajaMovimientoDto,
+) {}

@@ -1,7 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -17,6 +20,7 @@ import {
   CreateCajaMovimientoDto,
   CreateFondoDto,
   ListFondosQuery,
+  UpdateCajaMovimientoDto,
   UpdateFondoDto,
 } from './dto/caja-chica.dto';
 import { CajaChicaService } from './caja-chica.service';
@@ -88,5 +92,29 @@ export class CajaChicaController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.caja.createMovimiento(id, dto, c.userId);
+  }
+
+  @Patch('movimientos/:id')
+  @Roles(...GESTION)
+  @ApiOperation({
+    summary:
+      'Corrige un movimiento (fecha/monto/tipo/notas). El saldo es derivado: recalcula solo.',
+  })
+  updateMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateCajaMovimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.caja.updateMovimiento(id, dto, c.userId);
+  }
+
+  @Delete('movimientos/:id')
+  @Roles(...GESTION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Elimina un movimiento de caja (la UI confirma antes).',
+  })
+  removeMovimiento(@Param('id', ParseUUIDPipe) id: string) {
+    return this.caja.removeMovimiento(id);
   }
 }
