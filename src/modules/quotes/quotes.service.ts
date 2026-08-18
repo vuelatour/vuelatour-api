@@ -1334,19 +1334,73 @@ export class QuotesService {
         'El vuelo no tiene aeronave asignada; usa "Revisar" para cotizar completo.',
       );
     }
-    const escalas = (current.escalas ?? []) as Array<Record<string, unknown>>;
+    // TRAMOS PARA PRECIAR: normalmente los del vuelo (== los cotizados). Con
+    // itinerario OPERATIVO las escalas son la RUTA DEL PILOTO (otra base y
+    // usualmente SIN millas): re-preciar con ellas colapsaba el tiempo al
+    // mínimo de 1 hr (caso #141, 18-ago-2026: 2.9065 hr → 1 hr y el total
+    // cayó de $6,300 a $3,249). La ruta COMERCIAL congelada vive en
+    // snapshot.ruta.escalas — con itinerario operativo se precia con ELLA;
+    // replaceEscalas hace early-return en ese modo, así que los tramos del
+    // piloto no se tocan.
+    const esOperativo =
+      (current as { itinerario_operativo?: boolean }).itinerario_operativo ===
+      true;
+    const rutaCotizada = (
+      snapshot as {
+        ruta?: { escalas?: Array<Record<string, unknown>> };
+      } | null
+    )?.ruta?.escalas;
+    const escalas = (
+      esOperativo && (rutaCotizada?.length ?? 0) > 0
+        ? rutaCotizada!
+        : ((current.escalas ?? []) as Array<Record<string, unknown>>)
+    ) as Array<Record<string, unknown>>;
     if (escalas.length === 0) {
       throw new BadRequestException(
         'La cotización no tiene tramos registrados; usa "Revisar".',
+      );
+    }
+    // Guarda de fiabilidad: si los tramos elegidos no traen millas pero la
+    // cotización vigente SÍ cobraba horas de vuelo, el recálculo produciría
+    // un total falso (mínimo 1 hr). Mejor un error claro que un precio malo.
+    const millasTotal = escalas.reduce(
+      (s, e) => s + (Number(e.millas_nauticas) || 0),
+      0,
+    );
+    const sobrevueloPactado = Number(snapshot?.tiempos?.sobrevuelo_hr) || 0;
+    const tiemposVigentes = (
+      snapshot as {
+        tiempos?: { vuelo_hr?: number | null; cobrable_hr?: number | null };
+      } | null
+    )?.tiempos;
+    const vueloHrVigente = Number(tiemposVigentes?.vuelo_hr) || 0;
+    const cobrableVigente = Number(tiemposVigentes?.cobrable_hr) || 0;
+    // (a) La cotización cobraba horas POR MILLAS y los tramos ya no las
+    // traen (aplica también con sobrevuelo mixto). (b) Snapshot al mínimo
+    // sin base alguna (contaminado por un ajuste previo del bug): repreciar
+    // perpetuaría el precio malo en silencio. Sobrevuelo PURO (vuelo_hr 0 +
+    // sobrevuelo pactado) y cliente interno en 0 pasan de largo.
+    const perdioMillas = millasTotal <= 0 && vueloHrVigente > 0;
+    const minimoSinBase =
+      millasTotal <= 0 &&
+      sobrevueloPactado <= 0 &&
+      vueloHrVigente <= 0 &&
+      cobrableVigente > 0;
+    if (perdioMillas || minimoSinBase) {
+      throw new BadRequestException(
+        'Los tramos con los que se cotizó ya no conservan sus millas: usa "Revisar" para recotizar la ruta comercial completa.',
       );
     }
 
     const oldPax = Number(current.pasajeros);
     const newPax = dto.pasajeros ?? oldPax;
     const reviseDto = {
-      // Vuelo cubierto por externo: sin avión propio; se re-precia con el
-      // avión de REFERENCIA con el que se cotizó (vive en el snapshot).
-      aeronave_id: (current.aeronave_id ?? snapshot?.aeronave?.id) as string,
+      // AVIÓN DE REFERENCIA con el que se PACTÓ el precio (snapshot): manda
+      // sobre el operativo — la velocidad de crucero y el prefijo de
+      // matrícula (TUAS) del avión asignado por operación cambiarían las
+      // horas/el precio en silencio. La asignación OPERATIVA no se toca:
+      // revise() la protege con el espejo del tramo 1 (caso #80).
+      aeronave_id: (snapshot?.aeronave?.id ?? current.aeronave_id) as string,
       tipo: TipoVuelo.MULTIESCALA,
       // Tramos tal como están persistidos. Si cambia el pax global, los tramos
       // que usaban el global anterior lo heredan (los personalizados se quedan).
@@ -1815,12 +1869,19 @@ export class QuotesService {
   ): Promise<void> {
     // Vuelo con itinerario OPERATIVO capturado (Nueva cotización · paso 1):
     // TODAS sus escalas son la ruta real del piloto; la ruta comercial de la
-    // cotización solo sirve para el precio y NO gestiona escalas.
-    const { data: vueloFlag } = await this.supabase.service
+    // cotización solo sirve para el precio y NO gestiona escalas. OJO: si la
+    // lectura del flag falla NO se puede seguir — fallar "abierto" aquí
+    // pisaría la ruta del piloto con la comercial (el ajuste rápido ahora
+    // precia con los tramos del snapshot, que son DISTINTOS).
+    const { data: vueloFlag, error: flagErr } = await this.supabase.service
       .from('vuelo')
       .select('itinerario_operativo')
       .eq('id', vueloId)
       .maybeSingle();
+    if (flagErr)
+      throw new Error(
+        `Failed to read itinerario_operativo: ${flagErr.message}`,
+      );
     if (vueloFlag?.itinerario_operativo === true) return;
 
     // Solo gestionamos los tramos COMERCIALES (cotizados). Los operativos
