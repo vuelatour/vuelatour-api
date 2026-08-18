@@ -367,6 +367,30 @@ export interface BalanceAvionBalancePayload {
   socios: BalanceAvionSocioPayload[];
 }
 
+/** Fila del RESUMEN del balance general (= totales del libro de un avión). */
+export interface BalanceGeneralResumenFilaPayload {
+  matricula: string;
+  vuelos: number;
+  horas: number | null;
+  horas_cobradas: number | null;
+  venta_mxn: number | null;
+  costo_mxn: number | null;
+  ganancia_mxn: number | null;
+  cobrado_mxn: number | null;
+  por_cobrar_mxn: number | null;
+  pendientes: number;
+}
+
+/** Balance GENERAL: libros individuales concatenados + hoja RESUMEN. */
+export interface BalanceGeneralPayload {
+  generado: string;
+  periodo_desde: string;
+  periodo_hasta: string;
+  resumen: BalanceGeneralResumenFilaPayload[];
+  resumen_totales: BalanceGeneralResumenFilaPayload;
+  aviones: BalanceAvionPayload[];
+}
+
 export interface BalanceAvionPayload {
   generado: string;
   matricula: string;
@@ -530,6 +554,13 @@ export class PyservicesService {
     // Libro grande (1 fila por vuelo + 3 ledgers): tope de 30s como el resto
     // de renders pesados (quotes-pdf) para no colgar el request del panel.
     return this.postForBuffer('/pdf/balance-avion-xlsx', payload, 30_000);
+  }
+
+  async generateBalanceGeneralXlsx(
+    payload: BalanceGeneralPayload,
+  ): Promise<Buffer> {
+    // Varios libros completos en un workbook: tope más holgado.
+    return this.postForBuffer('/pdf/balance-general-xlsx', payload, 60_000);
   }
 
   /** Plantilla Excel de carga masiva de combustibles (catálogos → listas). */
