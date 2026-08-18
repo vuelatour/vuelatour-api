@@ -76,6 +76,7 @@ interface EscalaRow {
   taco_salida: string | number | null;
   taco_llegada: string | number | null;
   aeronave_id: string | null;
+  fecha_salida_plan: string | null;
 }
 
 interface CobroRow {
@@ -350,7 +351,17 @@ export class AircraftBalanceService {
         .flatMap((p) =>
           p.vuelos.map((v) => ({ ...v, avion_color: p.avion_color ?? null })),
         )
-        .sort(porFecha),
+        // Cronológico REAL entre aviones: orden_ts (salida planeada del
+        // primer tramo del avión de la fila) desempata los días con varios
+        // vuelos; fecha sola dejaba las filas en orden arbitrario y la
+        // cadena de tacómetros parecía rota.
+        .sort(
+          (x, y) =>
+            String(x.orden_ts ?? x.fecha ?? '').localeCompare(
+              String(y.orden_ts ?? y.fecha ?? ''),
+            ) ||
+            (Number(x.folio) || 0) - (Number(y.folio) || 0),
+        ),
       totales: totalesFlota,
       gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
       otros_gastos: hojaFlota((p) => p.otros_gastos),
@@ -483,7 +494,7 @@ export class AircraftBalanceService {
           ? sb
               .from('escala')
               .select(
-                'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id',
+                'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan',
               )
               .in('vuelo_id', vueloIds)
               // Tramos cancelados fuera: ni horas ni "pendiente de captura".
@@ -575,6 +586,34 @@ export class AircraftBalanceService {
       list.push(e);
       escalasPorVuelo.set(e.vuelo_id, list);
     }
+
+    // Orden CRONOLÓGICO de las filas (caso #136/#105/#138, 18-ago-2026): con
+    // varios vuelos el mismo día, fecha_vuelo trae la hora del tramo 1 del
+    // VUELO — en una fila COMPARTIDA esa es la hora del OTRO avión y la
+    // cadena de tacómetros sale desordenada. La fila se ordena por la salida
+    // PLANEADA más temprana de los tramos de ESTE avión (herencia incluida);
+    // sin tramos propios con plan cae a fecha_vuelo, y el folio desempata.
+    const ordenTsPorVuelo = new Map<string, number>();
+    for (const v of vuelos) {
+      const planes = (escalasPorVuelo.get(v.id) ?? [])
+        .filter((e) => (e.aeronave_id ?? v.aeronave_id) === aircraftId)
+        .map((e) => Date.parse(e.fecha_salida_plan ?? ''))
+        .filter((t) => Number.isFinite(t));
+      const respaldo = Date.parse(v.fecha_vuelo ?? '');
+      ordenTsPorVuelo.set(
+        v.id,
+        planes.length
+          ? Math.min(...planes)
+          : Number.isFinite(respaldo)
+            ? respaldo
+            : 0,
+      );
+    }
+    vuelos.sort(
+      (a, b) =>
+        (ordenTsPorVuelo.get(a.id) ?? 0) - (ordenTsPorVuelo.get(b.id) ?? 0) ||
+        (a.folio ?? 0) - (b.folio ?? 0),
+    );
 
     // Matrículas para los avisos de vuelos multi-avión (fila compartida y
     // "tramos también en X").
@@ -1174,6 +1213,10 @@ export class AircraftBalanceService {
         estado: v.estado,
         es_externo: esExterno,
         fecha: diaCancun(v.fecha_vuelo),
+        // Llave interna de orden cronológico (salida planeada de los tramos
+        // de ESTE avión): el consolidado de flota ordena con ella — no se
+        // pinta en el Excel.
+        orden_ts: new Date(ordenTsPorVuelo.get(v.id) ?? 0).toISOString(),
         fecha_fin:
           diaCancun(v.fecha_traslado_final) !== diaCancun(v.fecha_vuelo)
             ? diaCancun(v.fecha_traslado_final)

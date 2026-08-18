@@ -243,6 +243,12 @@ export interface BalanceAvionCobroPayload {
 export interface BalanceAvionVueloPayload {
   /** Balance GENERAL: la fila se tiñe con el color del avión. */
   avion_color?: string | null;
+  /**
+   * Llave interna de orden cronológico (ISO): salida planeada más temprana
+   * de los tramos del avión de la fila. Solo ordena (individual y
+   * consolidado de flota) — pyservices no la pinta.
+   */
+  orden_ts?: string | null;
   /** Columna CLAVE del libro: "#<folio> · <cliente>". */
   clave: string;
   folio: string;
