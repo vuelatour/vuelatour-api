@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -15,9 +16,9 @@ import {
 } from './dto/caja-chica.dto';
 
 const FONDO_COLS =
-  'id, usuario_id, moneda, activo, es_acumulada, monto_fondo, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
+  'id, usuario_id, moneda, activo, es_acumulada, monto_fondo, fondo_origen_id, notas, created_at, updated_at, usuario:usuario!usuario_id(nombre, email, rol)';
 const MOV_COLS =
-  'id, fondo_id, tipo, monto, moneda, fecha, autorizado_por, referencia, notas, registrado_por, created_at';
+  'id, fondo_id, tipo, monto, moneda, fecha, autorizado_por, referencia, notas, registrado_por, espejo_de_id, created_at';
 
 type CajaMov = {
   tipo: string;
@@ -393,14 +394,54 @@ export class CajaChicaService {
 
   async updateFondo(id: string, dto: UpdateFondoDto, userId: string) {
     if (Object.keys(dto).length === 0) return this.findFondo(id);
+    // CAJAS VINCULADAS (20-ago-2026): validar el vínculo ANTES de escribir.
+    // `retroactivo` es una instrucción, no una columna — se separa del patch.
+    const { retroactivo, ...patch } = dto;
+    if (dto.fondo_origen_id != null) {
+      await this.validarVinculo(id, dto.fondo_origen_id);
+    }
+    // Con vínculos vivos, ni cerrar la madre ni cambiar monedas: los espejos
+    // copiarían montos crudos a otra denominación o caerían en una caja
+    // invisible (hallazgos adversariales 20-ago).
+    if (dto.activo === false || dto.moneda !== undefined) {
+      const { data: hijas, error: hijasErr } = await this.supabase.service
+        .from('caja_chica_fondo')
+        .select('id')
+        .eq('fondo_origen_id', id)
+        .limit(1);
+      if (hijasErr) throw new Error(hijasErr.message);
+      const esMadre = (hijas ?? []).length > 0;
+      if (dto.activo === false && esMadre) {
+        throw new BadRequestException(
+          'Esta caja fondea otras cajas: quita esos vínculos (Usuarios) antes de cerrarla.',
+        );
+      }
+      if (dto.moneda !== undefined) {
+        const actual = (await this.findFondo(id)) as {
+          moneda: string;
+          fondo_origen_id?: string | null;
+        };
+        if (
+          dto.moneda !== actual.moneda &&
+          (esMadre || actual.fondo_origen_id)
+        ) {
+          throw new BadRequestException(
+            'Esta caja está vinculada (fondea o es fondeada): quita el vínculo antes de cambiar la moneda.',
+          );
+        }
+      }
+    }
     const { data, error } = await this.supabase.service
       .from('caja_chica_fondo')
-      .update({ ...dto, updated_by: userId })
+      .update({ ...patch, updated_by: userId })
       .eq('id', id)
       .select(FONDO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Fondo ${id} not found`);
+    if (dto.fondo_origen_id != null && retroactivo === true) {
+      await this.crearEspejosRetroactivos(id, dto.fondo_origen_id, userId);
+    }
     if (typeof dto.activo === 'boolean') {
       await this.supabase.service
         .from('usuario')
@@ -457,7 +498,148 @@ export class CajaChicaService {
         );
       throw new Error(error.message);
     }
+    // Caja VINCULADA: la REPOSICIÓN genera su REINTEGRO espejo en la caja
+    // madre — si el espejo no se puede escribir, la reposición se REVIERTE
+    // (jamás dinero entregado sin descontar de la madre en silencio).
+    const origenId = (fondo as { fondo_origen_id?: string | null })
+      .fondo_origen_id;
+    if (dto.tipo === TipoMovimientoCaja.REPOSICION && origenId) {
+      try {
+        await this.insertarEspejo(
+          data as { id: string; monto: number | string; fecha: string | null },
+          fondoId,
+          origenId,
+          userId,
+        );
+      } catch (e) {
+        await this.supabase.service
+          .from('caja_chica_movimiento')
+          .delete()
+          .eq('id', (data as { id: string }).id);
+        throw e;
+      }
+    }
     return data!;
+  }
+
+  /** Nombre del dueño de un fondo (para las notas de los espejos). */
+  private async nombreDeFondo(fondoId: string): Promise<string> {
+    const { data } = await this.supabase.service
+      .from('caja_chica_fondo')
+      .select('usuario:usuario!usuario_id(nombre)')
+      .eq('id', fondoId)
+      .maybeSingle();
+    const u = data?.usuario as { nombre?: string } | { nombre?: string }[] | null;
+    const nombre = Array.isArray(u) ? u[0]?.nombre : u?.nombre;
+    return nombre ?? 'caja vinculada';
+  }
+
+  /** Inserta el REINTEGRO espejo de una reposición en la caja madre. */
+  private async insertarEspejo(
+    mov: { id: string; monto: number | string; fecha: string | null },
+    fondoHijaId: string,
+    origenId: string,
+    userId: string,
+  ) {
+    const nombre = await this.nombreDeFondo(fondoHijaId);
+    const origen = (await this.findFondo(origenId)) as {
+      moneda: string;
+      activo: boolean;
+    };
+    // Madre CERRADA: el descuento caería en una caja invisible (la lista
+    // oculta las cerradas). Error claro; la reposición de la hija se
+    // revierte en createMovimiento.
+    if (origen.activo !== true) {
+      throw new BadRequestException(
+        'La caja madre que fondea esta caja está cerrada: reábrela o quita el vínculo (Usuarios) antes de registrar la reposición.',
+      );
+    }
+    const { error } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .insert({
+        fondo_id: origenId,
+        tipo: TipoMovimientoCaja.REINTEGRO,
+        monto: Number(mov.monto),
+        moneda: origen.moneda,
+        fecha: mov.fecha ?? undefined,
+        referencia: `Fondeo a ${nombre}`,
+        notas: 'Espejo automático de la reposición en la caja vinculada.',
+        espejo_de_id: mov.id,
+        registrado_por: userId,
+        created_by: userId,
+        updated_by: userId,
+      });
+    if (error) throw new Error(`No se pudo registrar el espejo: ${error.message}`);
+  }
+
+  /**
+   * Valida el vínculo caja hija → caja madre: existe y está activa, misma
+   * moneda, sin auto-vínculo ni ciclos (A→B→A dejaría espejos confusos).
+   */
+  private async validarVinculo(fondoId: string, origenId: string) {
+    if (fondoId === origenId)
+      throw new BadRequestException('Una caja no puede fondearse a sí misma.');
+    const hijo = (await this.findFondo(fondoId)) as { moneda: string };
+    const origen = (await this.findFondo(origenId)) as {
+      moneda: string;
+      activo: boolean;
+      fondo_origen_id?: string | null;
+    };
+    if (origen.activo !== true)
+      throw new BadRequestException('La caja madre está cerrada.');
+    if (origen.moneda !== hijo.moneda)
+      throw new BadRequestException(
+        'Las dos cajas deben manejar la misma moneda.',
+      );
+    // Ciclos: sube por la cadena de orígenes desde la madre propuesta.
+    let cursor = origen.fondo_origen_id ?? null;
+    for (let i = 0; i < 10 && cursor; i++) {
+      if (cursor === fondoId)
+        throw new BadRequestException(
+          'Vínculo circular: esa caja (directa o indirectamente) se fondea desde esta.',
+        );
+      const { data } = await this.supabase.service
+        .from('caja_chica_fondo')
+        .select('fondo_origen_id')
+        .eq('id', cursor)
+        .maybeSingle();
+      cursor = (data?.fondo_origen_id as string | null) ?? null;
+    }
+  }
+
+  /**
+   * Espejos RETROACTIVOS al vincular: cada REPOSICIÓN ya registrada en la
+   * caja hija sin espejo genera su REINTEGRO en la madre — así el fondeo
+   * histórico ("el fondo que les di salió de mi caja") queda descontado.
+   */
+  private async crearEspejosRetroactivos(
+    fondoId: string,
+    origenId: string,
+    userId: string,
+  ) {
+    const { data: repos, error } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('id, monto, fecha')
+      .eq('fondo_id', fondoId)
+      .eq('tipo', TipoMovimientoCaja.REPOSICION);
+    if (error) throw new Error(error.message);
+    const ids = (repos ?? []).map((m) => m.id as string);
+    if (ids.length === 0) return;
+    const { data: conEspejo, error: espErr } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('espejo_de_id')
+      .in('espejo_de_id', ids);
+    if (espErr) throw new Error(espErr.message);
+    const ya = new Set((conEspejo ?? []).map((m) => m.espejo_de_id as string));
+    for (const m of repos ?? []) {
+      if (ya.has(m.id as string)) continue;
+      await this.insertarEspejo(
+        m as { id: string; monto: number | string; fecha: string | null },
+        fondoId,
+        origenId,
+        userId,
+      );
+    }
   }
 
   /**
@@ -478,6 +660,13 @@ export class CajaChicaService {
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    // Un ESPEJO sigue a su origen: se corrige desde la reposición de la
+    // caja vinculada, nunca directo (divergirían los dos lados).
+    if ((mov as { espejo_de_id?: string | null }).espejo_de_id) {
+      throw new ConflictException(
+        'Este movimiento es el espejo de un fondeo automático: corrígelo desde la reposición de la caja vinculada.',
+      );
+    }
     const tipo = dto.tipo ?? (mov.tipo as TipoMovimientoCaja);
     const monto = dto.monto ?? Number(mov.monto);
     if (monto === 0)
@@ -506,11 +695,72 @@ export class CajaChicaService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Sincroniza el ESPEJO en la caja madre (si esta reposición lo tiene):
+    // mismo monto y fecha; si el movimiento dejó de ser REPOSICIÓN, el
+    // espejo se elimina (el fondeo ya no existe).
+    const { data: espejo, error: espErr } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('id')
+      .eq('espejo_de_id', id)
+      .maybeSingle();
+    if (espErr) throw new Error(espErr.message);
+    if (espejo) {
+      if (tipo === TipoMovimientoCaja.REPOSICION) {
+        const { error: syncErr } = await this.supabase.service
+          .from('caja_chica_movimiento')
+          .update({
+            monto,
+            ...(dto.fecha !== undefined ? { fecha: dto.fecha } : {}),
+            updated_by: userId,
+          })
+          .eq('id', espejo.id as string);
+        if (syncErr) throw new Error(syncErr.message);
+      } else {
+        const { error: delErr } = await this.supabase.service
+          .from('caja_chica_movimiento')
+          .delete()
+          .eq('id', espejo.id as string);
+        if (delErr) throw new Error(delErr.message);
+      }
+    } else if (
+      tipo === TipoMovimientoCaja.REPOSICION &&
+      (mov as { tipo: string }).tipo !== TipoMovimientoCaja.REPOSICION
+    ) {
+      // SOLO cuando el movimiento CAMBIÓ a reposición en ESTA edición. Una
+      // reposición pre-vínculo que se corrige (fecha/notas — caso Mari) NO
+      // genera espejo en silencio: el histórico solo se descuenta con el
+      // opt-in "retroactivo" al vincular (hallazgo adversarial 20-ago).
+      const fondo = (await this.findFondo(
+        (mov as { fondo_id: string }).fondo_id,
+      )) as { fondo_origen_id?: string | null };
+      if (fondo.fondo_origen_id) {
+        await this.insertarEspejo(
+          data as { id: string; monto: number | string; fecha: string | null },
+          (mov as { fondo_id: string }).fondo_id,
+          fondo.fondo_origen_id,
+          userId,
+        );
+      }
+    }
     return data!;
   }
 
-  /** Elimina un movimiento (la UI confirma): el saldo recalcula solo. */
+  /** Elimina un movimiento (la UI confirma): el saldo recalcula solo.
+   * Borrar una REPOSICIÓN de caja vinculada arrastra su espejo (CASCADE);
+   * el espejo directo no se borra — se quita desde su origen. */
   async removeMovimiento(id: string) {
+    const { data: mov, error: readErr } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('id, espejo_de_id')
+      .eq('id', id)
+      .maybeSingle();
+    if (readErr) throw new Error(readErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${id} not found`);
+    if (mov.espejo_de_id) {
+      throw new ConflictException(
+        'Este movimiento es el espejo de un fondeo automático: elimina (o corrige) la reposición de la caja vinculada y el espejo se va con ella.',
+      );
+    }
     const { data, error } = await this.supabase.service
       .from('caja_chica_movimiento')
       .delete()

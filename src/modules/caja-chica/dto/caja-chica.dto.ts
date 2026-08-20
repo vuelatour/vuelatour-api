@@ -13,6 +13,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 export enum MonedaCaja {
@@ -87,6 +88,23 @@ export class UpdateFondoDto {
   @IsOptional()
   @IsBoolean()
   activo?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Caja MADRE que fondea a esta (null = quitar el vínculo): cada REPOSICIÓN aquí genera un REINTEGRO espejo en la madre. Se configura desde Usuarios.',
+  })
+  @IsOptional()
+  @ValidateIf((o: UpdateFondoDto) => o.fondo_origen_id !== null)
+  @IsUUID()
+  fondo_origen_id?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Al vincular: genera también los espejos de las REPOSICIONES YA registradas en esta caja (descuenta el fondeo histórico de la madre).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  retroactivo?: boolean;
 
   @ApiPropertyOptional({
     description: 'Cambiar el modo de la caja (acumulada / fondo clásico).',
