@@ -1743,6 +1743,33 @@ export class FlightsService {
     if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id) {
       void this.notifyApoyoAssigned(dto.apoyo_id!, data!);
     }
+    // Reagenda por assign (20-ago-2026, invariante doc 4.3): PATCH ya
+    // avisaba al piloto cuando cambia la fecha con el MISMO piloto, pero la
+    // edición rápida de la app y el calendario reagendan por AQUÍ y el
+    // piloto no se enteraba ("si Itzel cambia el vuelo a las 8am y el piloto
+    // lo ve a las 10am es un problema grave").
+    const fechaCambioAssign =
+      dto.fecha_vuelo !== undefined &&
+      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
+    const pilotoFinalAssign = (data?.piloto_id as string | null) ?? null;
+    if (
+      fechaCambioAssign &&
+      pilotoFinalAssign &&
+      pilotoFinalAssign === current.piloto_id
+    ) {
+      const nueva = new Date(dto.fecha_vuelo!).toLocaleString('es-MX', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+        timeZone: 'America/Cancun',
+      });
+      void this.notifications.notifyUser(pilotoFinalAssign, {
+        tipo: 'vuelo_asignado',
+        titulo: `Vuelo #${current.folio as number} reagendado`,
+        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${nueva} (hora Cancún).`,
+        data: { vuelo_id: id, folio: current.folio },
+        link: `/flights/${id}`,
+      });
+    }
     return data!;
   }
 
@@ -2013,6 +2040,30 @@ export class FlightsService {
           (data as { destino_iata?: string }).destino_iata ??
           vuelo.destino_iata,
       });
+    }
+    // Reagenda del TRAMO (20-ago-2026, doc 4.3): si cambió la salida y el
+    // piloto EFECTIVO del tramo (con herencia del vuelo) es el mismo, se le
+    // avisa — la edición de horas por tramo de la app pasa por aquí.
+    if (dto.fecha_salida_plan !== undefined && !asignandoPiloto) {
+      const pilotoTramo =
+        (escala.piloto_id as string | null) ??
+        (vuelo.piloto_id as string | null);
+      if (pilotoTramo) {
+        const nueva = dto.fecha_salida_plan.toLocaleString('es-MX', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+          timeZone: 'America/Cancun',
+        });
+        const o = (data as { origen_iata?: string }).origen_iata ?? '';
+        const d = (data as { destino_iata?: string }).destino_iata ?? '';
+        void this.notifications.notifyUser(pilotoTramo, {
+          tipo: 'vuelo_asignado',
+          titulo: `Vuelo #${vuelo.folio as number}: tramo reagendado`,
+          cuerpo: `${o} → ${d} ahora sale ${nueva} (hora Cancún).`,
+          data: { vuelo_id: escala.vuelo_id, folio: vuelo.folio },
+          link: `/flights/${escala.vuelo_id as string}`,
+        });
+      }
     }
     return data!;
   }
