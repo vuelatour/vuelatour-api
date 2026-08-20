@@ -1,8 +1,21 @@
-import { Controller, Get, HttpCode, HttpStatus, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
-import { CalendarRangeQuery } from './dto/calendar.dto';
+import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CalendarRangeQuery, CreateEventoFlotaDto } from './dto/calendar.dto';
 import { CalendarService } from './calendar.service';
 import { CalendarSyncService } from './calendar-sync.service';
 
@@ -23,6 +36,27 @@ export class CalendarController {
   })
   list(@Query() q: CalendarRangeQuery) {
     return this.calendar.listEvents(q);
+  }
+
+  @Post('eventos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Agenda un evento NO-vuelo (lavado, trámite, visita) que sale en el calendario de flota.',
+  })
+  createEvento(
+    @Body() dto: CreateEventoFlotaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.calendar.createEvento(dto, c.userId);
+  }
+
+  @Delete('eventos/:id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Elimina un evento NO-vuelo del calendario.' })
+  removeEvento(@Param('id', ParseUUIDPipe) id: string) {
+    return this.calendar.removeEvento(id);
   }
 
   @Post('resync')

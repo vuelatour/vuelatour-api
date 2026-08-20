@@ -1,6 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import type { CalendarRangeQuery } from './dto/calendar.dto';
+import type {
+  CalendarRangeQuery,
+  CreateEventoFlotaDto,
+} from './dto/calendar.dto';
 
 const EXTERNAL_COLOR = '#FFB6C1';
 // Color de alerta para vuelos con permiso de pista pendiente. Configurable.
@@ -328,6 +335,82 @@ export class CalendarService {
         } as unknown as (typeof events)[number]);
       }
     }
+    // Eventos NO-vuelo (21-ago-2026: lavado, trámites, visitas): salen junto
+    // a vuelos y descansos. Con avión toman su color de calendario; sin
+    // avión, azul cielo propio (leyenda "Evento"). Multi-día = un evento por
+    // día, igual que los descansos.
+    const EVENTO_COLOR = '#0EA5E9';
+    let eq = this.supabase.service
+      .from('evento_flota')
+      .select(
+        'id, titulo, fecha, fecha_fin, aeronave_id, responsable_id, notas, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
+      )
+      .lte('fecha', to.toISOString())
+      .or(`fecha_fin.is.null,fecha_fin.gte.${from.toISOString()}`)
+      .gte('fecha', new Date(from.getTime() - 40 * 86_400_000).toISOString());
+    if (q.aeronave_id) eq = eq.eq('aeronave_id', q.aeronave_id);
+    const { data: eventosFlota } =
+      q.solo_externos || q.piloto_id ? { data: [] } : await eq;
+    const diaCancun = (iso: string) =>
+      new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Cancun',
+      }).format(new Date(iso));
+    for (const ev of eventosFlota ?? []) {
+      const aero = Array.isArray(ev.aeronave) ? ev.aeronave[0] : ev.aeronave;
+      const resp = Array.isArray(ev.responsable)
+        ? ev.responsable[0]
+        : ev.responsable;
+      const matricula =
+        (aero as { matricula?: string } | null)?.matricula ?? null;
+      const color =
+        (aero as { color_calendario?: string } | null)?.color_calendario ??
+        EVENTO_COLOR;
+      const nombre = (resp as { nombre?: string } | null)?.nombre ?? null;
+      const iniDia = diaCancun(ev.fecha as string);
+      const finDia = ev.fecha_fin
+        ? diaCancun(ev.fecha_fin as string)
+        : iniDia;
+      const hora = new Intl.DateTimeFormat('es-MX', {
+        timeZone: 'America/Cancun',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      }).format(new Date(ev.fecha as string));
+      const ini = new Date(`${iniDia}T12:00:00Z`);
+      const fin = new Date(`${finDia}T12:00:00Z`);
+      for (let t = ini.getTime(); t <= fin.getTime(); t += 86_400_000) {
+        const day = new Date(t).toISOString().slice(0, 10);
+        if (day < fromDay || day > toDay) continue;
+        events.push({
+          id: `evento:${ev.id as string}:${day}`,
+          tipo_evento: 'evento',
+          evento_id: ev.id,
+          titulo: ev.titulo,
+          notas: ev.notas ?? null,
+          vuelo_id: null,
+          escala_id: null,
+          folio: null,
+          // La app y el panel leen la fecha SIEMPRE de esta llave; el primer
+          // día conserva la hora real, los siguientes van a mediodía UTC
+          // (mismo truco de los descansos para caer en el día Cancún).
+          fecha_vuelo:
+            day === iniDia ? (ev.fecha as string) : `${day}T12:00:00Z`,
+          hora: day === iniDia ? hora : null,
+          estado: 'EVENTO',
+          estado_permiso: null,
+          es_externo: false,
+          cancelado: false,
+          sin_asignar: false,
+          title: `Evento · ${ev.titulo as string}${matricula ? ` · ${matricula}` : ''}`,
+          color,
+          aeronave_id: ev.aeronave_id ?? null,
+          aeronave_matricula: matricula,
+          piloto_id: ev.responsable_id ?? null,
+          piloto_nombre: nombre,
+        } as unknown as (typeof events)[number]);
+      }
+    }
+
     events.sort((a, b) =>
       String((a as { fecha_vuelo?: string }).fecha_vuelo ?? '').localeCompare(
         String((b as { fecha_vuelo?: string }).fecha_vuelo ?? ''),
@@ -340,5 +423,49 @@ export class CalendarService {
       count: events.length,
       events,
     };
+  }
+
+  /** Alta de un evento NO-vuelo (oficina). */
+  async createEvento(dto: CreateEventoFlotaDto, userId: string) {
+    if (dto.fecha_fin && dto.fecha_fin < dto.fecha) {
+      throw new BadRequestException(
+        'La fecha fin no puede ser anterior al inicio.',
+      );
+    }
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .insert({
+        titulo: dto.titulo.trim(),
+        fecha: dto.fecha.toISOString(),
+        fecha_fin: dto.fecha_fin?.toISOString() ?? null,
+        aeronave_id: dto.aeronave_id ?? null,
+        responsable_id: dto.responsable_id ?? null,
+        notas: dto.notas?.trim() || null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select('id, titulo, fecha')
+      .maybeSingle();
+    if (error) {
+      if (error.code === '23503')
+        throw new BadRequestException(
+          `Referencia no encontrada: ${error.message}`,
+        );
+      throw new Error(error.message);
+    }
+    return data!;
+  }
+
+  /** Elimina un evento NO-vuelo (la UI confirma antes). */
+  async removeEvento(id: string) {
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .delete()
+      .eq('id', id)
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Evento ${id} not found`);
+    return { ok: true };
   }
 }
