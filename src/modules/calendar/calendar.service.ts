@@ -9,7 +9,8 @@ import type {
   CreateEventoFlotaDto,
 } from './dto/calendar.dto';
 
-const EXTERNAL_COLOR = '#FFB6C1';
+// Paleta del equipo (21-ago-2026): externos en rosa pálido #F0DCDB.
+const EXTERNAL_COLOR = '#F0DCDB';
 // Color de alerta para vuelos con permiso de pista pendiente. Configurable.
 const PERMISO_PENDIENTE_COLOR = '#F59E0B';
 // Vuelo propio confirmado pero todavía SIN avión asignado (acción pendiente).
