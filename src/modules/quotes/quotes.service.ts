@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
+import { tripulacionDeVuelo } from '../../common/tripulacion.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   CalculateQuoteDto,
@@ -1306,6 +1307,17 @@ export class QuotesService {
     await this.airports.refreshPermisosDeVuelo(vueloId);
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     void this.notifyPernoctaCambiada(updated, pernoctasAntes, pernoctasDespues);
+    // Reagenda desde el cotizador (21-ago): cambiar fecha_vuelo al revisar
+    // también avisa a la tripulación (doc 4.3).
+    if (
+      dto.fecha_vuelo !== undefined &&
+      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null)
+    ) {
+      void this.notificarTripulacion(updated, {
+        titulo: `Vuelo #${current.folio as number} reagendado`,
+        cuerpo: `${updated.origen_iata as string} → ${updated.destino_iata as string} ahora sale ${dto.fecha_vuelo.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Cancun' })} (hora Cancún).`,
+      });
+    }
     await this.appendVersionHistory(
       vueloId,
       newVersion,
@@ -1551,6 +1563,11 @@ export class QuotesService {
     await this.ensureRedondoEscalas(data!, userId);
     void this.calendar.syncFlight(vueloId);
     void this.sendConfirmationEmail(data!);
+    // Tripulación ya asignada (21-ago): el vuelo queda EN FIRME.
+    void this.notificarTripulacion(data!, {
+      titulo: `Vuelo #${data!.folio as number} confirmado`,
+      cuerpo: `El cliente confirmó ${data!.origen_iata as string} → ${data!.destino_iata as string}${data!.fecha_vuelo ? ` del ${new Date(data!.fecha_vuelo as string).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Cancun' })}` : ''}: queda en firme.`,
+    });
     return data!;
   }
 
@@ -1668,6 +1685,13 @@ export class QuotesService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     void this.calendar.removeFlight(vueloId);
+    // Tripulación completa (21-ago): cancelar desde la cotización también
+    // avisa — antes este camino no notificaba a nadie.
+    void this.notificarTripulacion(data!, {
+      titulo: `Vuelo #${data!.folio as number} CANCELADO`,
+      cuerpo: `${data!.origen_iata as string} → ${data!.destino_iata as string} se canceló${motivo ? `. Motivo: ${motivo}` : '.'}`,
+      tipo: 'alerta_sistema',
+    });
     return data!;
   }
 
@@ -1808,22 +1832,47 @@ export class QuotesService {
    * asignados (al vuelo o a cualquier tramo) por socket/push — para que nadie
    * asuma que pernocta donde no es (o que NO pernocta donde sí).
    */
+  /**
+   * Aviso a TODA la tripulación del vuelo (piloto, copiloto, apoyo y
+   * pilotos de tramo) — auditoría 21-ago-2026. Best-effort.
+   */
+  private async notificarTripulacion(
+    vuelo: Record<string, unknown>,
+    n: { titulo: string; cuerpo: string; tipo?: string },
+  ): Promise<void> {
+    try {
+      const ids = await tripulacionDeVuelo(
+        this.supabase.service,
+        vuelo.id as string,
+        vuelo,
+      );
+      for (const id of ids) {
+        void this.notifications.notifyUser(id, {
+          tipo: n.tipo ?? 'vuelo_asignado',
+          titulo: n.titulo,
+          cuerpo: n.cuerpo,
+          data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+          link: `/flights/${vuelo.id as string}`,
+        });
+      }
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo avisar a la tripulación del vuelo ${vuelo.id as string}: ${(e as Error).message}`,
+      );
+    }
+  }
+
   private async notifyPernoctaCambiada(
     vuelo: Record<string, unknown>,
     antes: string[],
     despues: string[],
   ): Promise<void> {
     if (JSON.stringify(antes) === JSON.stringify(despues)) return;
-    const { data: legs } = await this.supabase.service
-      .from('escala')
-      .select('piloto_id')
-      .eq('vuelo_id', vuelo.id as string)
-      .not('piloto_id', 'is', null);
-    const pilotos = new Set<string>(
-      [
-        ...(legs ?? []).map((l) => l.piloto_id as string),
-        vuelo.piloto_id as string | null,
-      ].filter((p): p is string => !!p),
+    // Toda la tripulación (copiloto y apoyo también pernoctan) — 21-ago.
+    const pilotos = await tripulacionDeVuelo(
+      this.supabase.service,
+      vuelo.id as string,
+      vuelo,
     );
     if (pilotos.size === 0) return;
     const cuerpo =

@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
+import { tripulacionDeVuelo } from '../../common/tripulacion.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
@@ -294,12 +295,23 @@ export class FlightsService {
         'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
       );
     }
+    // Aviso a la tripulación ANTES de borrar (21-ago): después ya no hay a
+    // quién consultar. Se resuelve la lista ahora y se manda al final.
+    const tripulacion = await this.tripulacionDeVuelo(id, vuelo);
     // Quita eventos de Google antes de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) throw new Error(error.message);
+    for (const uid of tripulacion) {
+      void this.notifications.notifyUser(uid, {
+        tipo: 'alerta_sistema',
+        titulo: `Vuelo #${vuelo.folio as number} eliminado`,
+        cuerpo: `${vuelo.origen_iata as string} → ${vuelo.destino_iata as string} del ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)} se eliminó del sistema: ya no vas.`,
+        data: { folio: vuelo.folio },
+      });
+    }
     return { deleted: true, id };
   }
 
@@ -504,9 +516,14 @@ export class FlightsService {
 
     void this.calendar.syncFlight(id);
     void this.calendar.syncFlight((clon as { id: string }).id);
-    const pilotoId = (clon as { piloto_id?: string | null }).piloto_id;
-    if (pilotoId)
-      void this.notifyPilotAssigned(pilotoId, clon as Record<string, unknown>);
+    // TODA la tripulación del clon (piloto, copiloto, apoyo, pilotos de
+    // tramo) se entera del cambio de avión y del folio nuevo — antes solo el
+    // piloto recibía un "Nuevo vuelo asignado" sin contexto (21-ago).
+    const clonRow = clon as Record<string, unknown>;
+    void this.notificarTripulacion(clonRow, {
+      titulo: `Vuelo #${original.folio as number}: cambio de avión`,
+      cuerpo: `${original.origen_iata as string} → ${original.destino_iata as string} ahora vuela en ${matricula} como vuelo #${clonRow.folio as number} (el #${original.folio as number} quedó cancelado). Misma fecha y tripulación.`,
+    });
     return clon!;
   }
 
@@ -514,6 +531,7 @@ export class FlightsService {
   private async notifyPilotAssigned(
     pilotoId: string,
     vuelo: Record<string, unknown>,
+    rol: 'piloto' | 'copiloto' = 'piloto',
   ): Promise<void> {
     const [{ data: piloto }, pernoctas, ruta] = await Promise.all([
       this.supabase.service
@@ -536,12 +554,17 @@ export class FlightsService {
     // Socket + push al piloto (independiente del email).
     void this.notifications.notifyUser(pilotoId, {
       tipo: 'vuelo_asignado',
-      titulo: 'Nuevo vuelo asignado',
-      cuerpo: `${ruta} · folio #${vuelo.folio as number}${pernoctaTxt}`,
-      data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas },
+      titulo:
+        rol === 'copiloto' ? 'Vas de copiloto en un vuelo' : 'Nuevo vuelo asignado',
+      cuerpo: `${rol === 'copiloto' ? 'Vas de COPILOTO · ' : ''}${ruta} · folio #${vuelo.folio as number} · ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)}${pernoctaTxt}`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas, rol },
       link: `/flights/${vuelo.id as string}`,
     });
 
+    // El correo de asignación es del piloto TITULAR (plantilla "tu vuelo"):
+    // al copiloto le basta el push — evita que reciba un correo como si
+    // fuera el responsable del vuelo (auditoría 21-ago-2026).
+    if (rol === 'copiloto') return;
     const email = (piloto as { email: string | null } | null)?.email;
     if (!email) return;
     void this.email.sendPilotAssignment({
@@ -1317,26 +1340,39 @@ export class FlightsService {
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
     }
+    // Piloto REEMPLAZADO o quitado: el anterior también se entera (21-ago).
+    if (
+      dto.piloto_id !== undefined &&
+      current.piloto_id &&
+      current.piloto_id !== dto.piloto_id
+    ) {
+      this.notificarQuitado(
+        current.piloto_id as string,
+        data!,
+        'piloto',
+        `${current.origen_iata as string} → ${current.destino_iata as string}`,
+      );
+    }
     // Reagenda de último minuto (doc 4.3: "si Itzel cambia el vuelo a las 8am
     // y el piloto lo ve a las 10am es un problema grave"): si cambió la fecha
-    // y el piloto es el MISMO, también se le avisa con push.
+    // se avisa a TODA la tripulación vigente (piloto, copiloto, apoyo y
+    // pilotos de tramo) — el recién asignado ya recibió su aviso.
     const fechaCambio =
       dto.fecha_vuelo !== undefined &&
       dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
-    const pilotoFinal = (data?.piloto_id as string | null) ?? null;
-    if (fechaCambio && pilotoFinal && pilotoFinal === current.piloto_id) {
-      const nueva = new Date(dto.fecha_vuelo!).toLocaleString('es-MX', {
-        dateStyle: 'short',
-        timeStyle: 'short',
-        timeZone: 'America/Cancun',
-      });
-      void this.notifications.notifyUser(pilotoFinal, {
-        tipo: 'vuelo_asignado',
-        titulo: `Vuelo #${current.folio as number} reagendado`,
-        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${nueva} (hora Cancún).`,
-        data: { vuelo_id: id, folio: current.folio },
-        link: `/flights/${id}`,
-      });
+    if (fechaCambio) {
+      const excluir =
+        asignandoPiloto && dto.piloto_id !== current.piloto_id
+          ? [dto.piloto_id!]
+          : [];
+      void this.notificarTripulacion(
+        data!,
+        {
+          titulo: `Vuelo #${current.folio as number} reagendado`,
+          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${this.fechaCancunTxt(dto.fecha_vuelo)} (hora Cancún).`,
+        },
+        excluir,
+      );
     }
     // Permiso de pista emitido (pendiente → emitido): avisa a admin/coordinador.
     if (
@@ -1737,7 +1773,7 @@ export class FlightsService {
     }
     // Avisa también al copiloto recién asignado (ve todo el vuelo).
     if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id) {
-      void this.notifyPilotAssigned(dto.copiloto_id!, data!);
+      void this.notifyPilotAssigned(dto.copiloto_id!, data!, 'copiloto');
     }
     // Y al apoyo recién asignado (opera el vuelo como el piloto, sin tacos).
     if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id) {
@@ -1748,27 +1784,72 @@ export class FlightsService {
     // edición rápida de la app y el calendario reagendan por AQUÍ y el
     // piloto no se enteraba ("si Itzel cambia el vuelo a las 8am y el piloto
     // lo ve a las 10am es un problema grave").
+    // QUITADOS / REEMPLAZADOS (auditoría 21-ago-2026): el que deja de ir
+    // también se entera — antes se le cambiaba el vuelo en silencio.
+    const ruta = `${current.origen_iata as string} → ${current.destino_iata as string}`;
+    if (
+      dto.piloto_id !== undefined &&
+      current.piloto_id &&
+      current.piloto_id !== dto.piloto_id
+    ) {
+      this.notificarQuitado(current.piloto_id as string, data!, 'piloto', ruta);
+    }
+    if (
+      dto.copiloto_id !== undefined &&
+      current.copiloto_id &&
+      current.copiloto_id !== dto.copiloto_id
+    ) {
+      this.notificarQuitado(current.copiloto_id as string, data!, 'copiloto', ruta);
+    }
+    if (
+      dto.apoyo_id !== undefined &&
+      current.apoyo_id &&
+      current.apoyo_id !== dto.apoyo_id
+    ) {
+      this.notificarQuitado(current.apoyo_id as string, data!, 'apoyo', ruta);
+    }
+    // Los recién asignados ya recibieron su aviso con la fecha/avión
+    // actuales: los demás cambios (fecha, avión) van al RESTO de la
+    // tripulación — copiloto, apoyo y pilotos de tramo incluidos.
+    const reciénAvisados = new Set<string>();
+    if (asignandoPiloto && dto.piloto_id !== current.piloto_id)
+      reciénAvisados.add(dto.piloto_id!);
+    if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id)
+      reciénAvisados.add(dto.copiloto_id!);
+    if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id)
+      reciénAvisados.add(dto.apoyo_id!);
     const fechaCambioAssign =
       dto.fecha_vuelo !== undefined &&
       dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
-    const pilotoFinalAssign = (data?.piloto_id as string | null) ?? null;
-    if (
-      fechaCambioAssign &&
-      pilotoFinalAssign &&
-      pilotoFinalAssign === current.piloto_id
-    ) {
-      const nueva = new Date(dto.fecha_vuelo!).toLocaleString('es-MX', {
-        dateStyle: 'short',
-        timeStyle: 'short',
-        timeZone: 'America/Cancun',
-      });
-      void this.notifications.notifyUser(pilotoFinalAssign, {
-        tipo: 'vuelo_asignado',
-        titulo: `Vuelo #${current.folio as number} reagendado`,
-        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${nueva} (hora Cancún).`,
-        data: { vuelo_id: id, folio: current.folio },
-        link: `/flights/${id}`,
-      });
+    if (fechaCambioAssign) {
+      // Reagenda (doc 4.3): a TODA la tripulación vigente.
+      void this.notificarTripulacion(
+        data!,
+        {
+          titulo: `Vuelo #${current.folio as number} reagendado`,
+          cuerpo: `${ruta} ahora sale ${this.fechaCancunTxt(dto.fecha_vuelo)} (hora Cancún).`,
+        },
+        reciénAvisados,
+      );
+    }
+    const avionCambio =
+      dto.aeronave_id !== undefined &&
+      dto.aeronave_id !== null &&
+      dto.aeronave_id !== current.aeronave_id;
+    if (avionCambio) {
+      const { data: av } = await this.supabase.service
+        .from('aeronave')
+        .select('matricula')
+        .eq('id', dto.aeronave_id as string)
+        .maybeSingle();
+      void this.notificarTripulacion(
+        data!,
+        {
+          titulo: `Vuelo #${current.folio as number}: cambio de avión`,
+          cuerpo: `${ruta} ahora vuela en ${(av?.matricula as string | undefined) ?? 'otro avión'}.`,
+        },
+        reciénAvisados,
+      );
     }
     return data!;
   }
@@ -1801,6 +1882,82 @@ export class FlightsService {
    * app ya lo sabe pintar y el link redirige al vuelo), con cuerpo propio —
    * va de apoyo en tierra, no a volar.
    */
+  // ===== Tripulación: un solo punto de aviso (auditoría 21-ago-2026) =====
+  // Regla del cliente: "cuando en un vuelo se agregue, edite o cancele algo
+  // que involucre a un tripulante (piloto, copiloto, ayudante) SIEMPRE se le
+  // avisa al involucrado". Antes solo se avisaba al asignado NUEVO; el
+  // quitado/reemplazado, el copiloto, el apoyo y los pilotos de otros tramos
+  // no se enteraban de fechas, avión ni cancelaciones.
+
+  /**
+   * Tripulación EFECTIVA del vuelo: piloto, copiloto y apoyo del vuelo más
+   * los pilotos explícitos de los tramos vivos. Los externos los filtra
+   * notifyUser (sin acceso al sistema).
+   */
+  private tripulacionDeVuelo(
+    vueloId: string,
+    vuelo?: Record<string, unknown> | null,
+  ): Promise<Set<string>> {
+    return tripulacionDeVuelo(this.supabase.service, vueloId, vuelo);
+  }
+
+  /**
+   * Avisa a TODA la tripulación del vuelo (menos `excluir`: los que ya
+   * recibieron otro aviso en la misma acción, p. ej. el recién asignado).
+   * Best-effort: jamás tumba la operación que lo dispara.
+   */
+  private async notificarTripulacion(
+    vuelo: Record<string, unknown>,
+    n: { titulo: string; cuerpo: string; tipo?: string },
+    excluir: Iterable<string> = [],
+  ): Promise<void> {
+    try {
+      const fuera = new Set(excluir);
+      const ids = await this.tripulacionDeVuelo(vuelo.id as string, vuelo);
+      for (const id of ids) {
+        if (fuera.has(id)) continue;
+        void this.notifications.notifyUser(id, {
+          tipo: n.tipo ?? 'vuelo_asignado',
+          titulo: n.titulo,
+          cuerpo: n.cuerpo,
+          data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+          link: `/flights/${vuelo.id as string}`,
+        });
+      }
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo avisar a la tripulación del vuelo ${vuelo.id as string}: ${(e as Error).message}`,
+      );
+    }
+  }
+
+  /** Aviso al tripulante que fue QUITADO o reemplazado en un vuelo/tramo. */
+  private notificarQuitado(
+    usuarioId: string | null | undefined,
+    vuelo: Record<string, unknown>,
+    rol: 'piloto' | 'copiloto' | 'apoyo',
+    detalle?: string,
+  ): void {
+    if (!usuarioId) return;
+    void this.notifications.notifyUser(usuarioId, {
+      tipo: 'vuelo_asignado',
+      titulo: `Ya no vas en el vuelo #${vuelo.folio as number}`,
+      cuerpo: `Te quitaron como ${rol} del vuelo #${vuelo.folio as number}${detalle ? ` · ${detalle}` : ''}. Si tienes duda, confirma con la oficina.`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio, quitado: rol },
+      link: `/flights/${vuelo.id as string}`,
+    });
+  }
+
+  /** Fecha legible en Cancún para los avisos. */
+  private fechaCancunTxt(iso: string | Date | null | undefined): string {
+    if (!iso) return 'fecha por definir';
+    return new Date(iso).toLocaleString('es-MX', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      timeZone: 'America/Cancun',
+    });
+  }
+
   private async notifyApoyoAssigned(
     apoyoId: string,
     vuelo: Record<string, unknown>,
@@ -2041,29 +2198,58 @@ export class FlightsService {
           vuelo.destino_iata,
       });
     }
-    // Reagenda del TRAMO (20-ago-2026, doc 4.3): si cambió la salida y el
-    // piloto EFECTIVO del tramo (con herencia del vuelo) es el mismo, se le
-    // avisa — la edición de horas por tramo de la app pasa por aquí.
-    if (dto.fecha_salida_plan !== undefined && !asignandoPiloto) {
-      const pilotoTramo =
-        (escala.piloto_id as string | null) ??
-        (vuelo.piloto_id as string | null);
-      if (pilotoTramo) {
-        const nueva = dto.fecha_salida_plan.toLocaleString('es-MX', {
-          dateStyle: 'short',
-          timeStyle: 'short',
-          timeZone: 'America/Cancun',
-        });
-        const o = (data as { origen_iata?: string }).origen_iata ?? '';
-        const d = (data as { destino_iata?: string }).destino_iata ?? '';
-        void this.notifications.notifyUser(pilotoTramo, {
-          tipo: 'vuelo_asignado',
+    const o = (data as { origen_iata?: string }).origen_iata ?? '';
+    const d = (data as { destino_iata?: string }).destino_iata ?? '';
+    const tramoTxt = `${o} → ${d}`;
+    // Piloto del TRAMO reemplazado/quitado: el anterior se entera (21-ago).
+    if (
+      dto.piloto_id !== undefined &&
+      escala.piloto_id &&
+      escala.piloto_id !== dto.piloto_id
+    ) {
+      this.notificarQuitado(
+        escala.piloto_id as string,
+        vuelo as Record<string, unknown>,
+        'piloto',
+        `tramo ${tramoTxt}`,
+      );
+    }
+    const reciénAvisado =
+      asignandoPiloto && dto.piloto_id !== escala.piloto_id
+        ? [dto.piloto_id!]
+        : [];
+    // Reagenda del TRAMO (doc 4.3): a TODA la tripulación vigente (el piloto
+    // efectivo del tramo por herencia, copiloto, apoyo y los demás tramos) —
+    // la edición de horas por tramo de la app pasa por aquí.
+    if (dto.fecha_salida_plan !== undefined) {
+      void this.notificarTripulacion(
+        vuelo as Record<string, unknown>,
+        {
           titulo: `Vuelo #${vuelo.folio as number}: tramo reagendado`,
-          cuerpo: `${o} → ${d} ahora sale ${nueva} (hora Cancún).`,
-          data: { vuelo_id: escala.vuelo_id, folio: vuelo.folio },
-          link: `/flights/${escala.vuelo_id as string}`,
-        });
-      }
+          cuerpo: `${tramoTxt} ahora sale ${this.fechaCancunTxt(dto.fecha_salida_plan)} (hora Cancún).`,
+        },
+        reciénAvisado,
+      );
+    }
+    // Cambio de avión del tramo: todos se enteran.
+    if (
+      dto.aeronave_id !== undefined &&
+      dto.aeronave_id !== null &&
+      dto.aeronave_id !== escala.aeronave_id
+    ) {
+      const { data: av } = await this.supabase.service
+        .from('aeronave')
+        .select('matricula')
+        .eq('id', dto.aeronave_id)
+        .maybeSingle();
+      void this.notificarTripulacion(
+        vuelo as Record<string, unknown>,
+        {
+          titulo: `Vuelo #${vuelo.folio as number}: cambio de avión`,
+          cuerpo: `El tramo ${tramoTxt} ahora vuela en ${(av?.matricula as string | undefined) ?? 'otro avión'}.`,
+        },
+        reciénAvisado,
+      );
     }
     return data!;
   }
@@ -2252,6 +2438,13 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     // El calendario elimina el evento cuando el vuelo pasa a CANCELADO.
     void this.calendar.syncFlight(id);
+    // Tripulación completa (21-ago): nadie debe presentarse a un vuelo que
+    // ya no existe.
+    void this.notificarTripulacion(data!, {
+      titulo: `Vuelo #${current.folio as number} CANCELADO`,
+      cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} del ${this.fechaCancunTxt(current.fecha_vuelo as string | null)} se canceló. Motivo: ${motivo.trim()}`,
+      tipo: 'alerta_sistema',
+    });
     return data!;
   }
 
@@ -2302,6 +2495,9 @@ export class FlightsService {
         aeronave_id: null,
         piloto_id: null,
         copiloto_id: null,
+        // El apoyo también sale: el vuelo lo opera un tercero (hueco
+        // detectado en la auditoría de notificaciones, 21-ago-2026).
+        apoyo_id: null,
         ...(tc
           ? {
               tc_usd_mxn: tc,
@@ -2328,12 +2524,24 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Tripulación ANTES de soltar los tramos: a todos se les avisa que el
+    // vuelo lo cubre un externo y ya no van (21-ago).
+    const tripulacionPrevia = await this.tripulacionDeVuelo(id, current);
     // Los tramos sueltan avión/piloto propios (la ruta se conserva).
     await this.supabase.service
       .from('escala')
       .update({ aeronave_id: null, piloto_id: null })
       .eq('vuelo_id', id);
     void this.calendar.syncFlight(id);
+    for (const uid of tripulacionPrevia) {
+      void this.notifications.notifyUser(uid, {
+        tipo: 'vuelo_asignado',
+        titulo: `Ya no vas en el vuelo #${current.folio as number}`,
+        cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} lo cubre ${dto.operador_externo.trim()} (operador externo): quedaste fuera de ese vuelo.`,
+        data: { vuelo_id: id, folio: current.folio },
+        link: `/flights/${id}`,
+      });
+    }
     return data!;
   }
 
@@ -2678,7 +2886,8 @@ export class FlightsService {
 
     if (dto.piloto_id) void this.notifyPilotAssigned(dto.piloto_id, data!);
     // El copiloto también recibe su aviso (ve todo el vuelo en su app).
-    if (dto.copiloto_id) void this.notifyPilotAssigned(dto.copiloto_id, data!);
+    if (dto.copiloto_id)
+      void this.notifyPilotAssigned(dto.copiloto_id, data!, 'copiloto');
     void this.calendar.syncFlight(vueloId);
     return data!;
   }
@@ -2861,6 +3070,7 @@ export class FlightsService {
     }
     // Un tramo nuevo puede meter una pista con permiso a la ruta.
     await this.airports.refreshPermisosDeVuelo(vueloId);
+    void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
     return data!;
   }
 
@@ -2918,7 +3128,24 @@ export class FlightsService {
     // Un ferry/parada técnica también puede tocar una pista con permiso.
     await this.airports.refreshPermisosDeVuelo(vueloId);
     void this.calendar.syncFlight(vueloId);
+    void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
     return data!;
+  }
+
+  /** Tramo agregado a un vuelo (21-ago): la tripulación se entera. */
+  private async notificarTramoNuevo(
+    vueloId: string,
+    escala: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      const vuelo = await this.findById(vueloId);
+      void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+        titulo: `Tramo nuevo · vuelo #${vuelo.folio as number}`,
+        cuerpo: `Se agregó el tramo ${escala.origen_iata as string} → ${escala.destino_iata as string}${escala.fecha_salida_plan ? ` (sale ${this.fechaCancunTxt(escala.fecha_salida_plan as string)})` : ''}${escala.es_ferry === true ? ' · ferry' : ''}.`,
+      });
+    } catch {
+      /* best-effort */
+    }
   }
 
   async updateEscala(escalaId: string, dto: UpdateEscalaDto, userId: string) {
@@ -2988,6 +3215,17 @@ export class FlightsService {
         );
       } else {
         void this.calendar.syncFlight(data.vuelo_id as string);
+        // Tramos 2+ (21-ago): la reagenda del tramo también se avisa a la
+        // tripulación (antes solo refrescaba el calendario).
+        try {
+          const vuelo = await this.findById(data.vuelo_id as string);
+          void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+            titulo: `Vuelo #${vuelo.folio as number}: tramo reagendado`,
+            cuerpo: `${data.origen_iata as string} → ${data.destino_iata as string} ahora sale ${this.fechaCancunTxt(dto.fecha_salida_plan)} (hora Cancún).`,
+          });
+        } catch {
+          /* best-effort */
+        }
       }
     }
     return data;
@@ -5526,21 +5764,30 @@ export class FlightsService {
     escala: Record<string, unknown>,
     motivo: string,
   ): Promise<void> {
-    const pilotoId = (escala.piloto_id as string | null) ?? null;
-    if (!pilotoId) return;
+    // A TODA la tripulación (21-ago): antes solo al piloto explícito del
+    // tramo — si heredaba del vuelo, nadie se enteraba; y copiloto/apoyo
+    // tampoco. El piloto explícito del tramo entra aunque ya no esté en
+    // los "vivos" (el tramo acaba de cancelarse).
     try {
       const vuelo = await this.findById(escala.vuelo_id as string);
-      await this.notifications.notifyUser(pilotoId, {
-        tipo: 'alerta_sistema',
-        titulo: `Tramo cancelado · vuelo #${vuelo.folio as number}`,
-        cuerpo: `El tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} se canceló: ${motivo}. Ya no aparece en tu itinerario ni pide tacómetro.`,
-        data: {
-          vuelo_id: escala.vuelo_id,
-          escala_id: escala.id,
-          folio: vuelo.folio,
-        },
-        link: `/flights/${escala.vuelo_id as string}`,
-      });
+      const ids = await this.tripulacionDeVuelo(
+        escala.vuelo_id as string,
+        vuelo,
+      );
+      if (escala.piloto_id) ids.add(escala.piloto_id as string);
+      for (const uid of ids) {
+        void this.notifications.notifyUser(uid, {
+          tipo: 'alerta_sistema',
+          titulo: `Tramo cancelado · vuelo #${vuelo.folio as number}`,
+          cuerpo: `El tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} se canceló: ${motivo}. Ya no aparece en el itinerario ni pide tacómetro.`,
+          data: {
+            vuelo_id: escala.vuelo_id,
+            escala_id: escala.id,
+            folio: vuelo.folio,
+          },
+          link: `/flights/${escala.vuelo_id as string}`,
+        });
+      }
     } catch (err) {
       this.logger.warn(
         `notifyTramoCancelado falló: ${err instanceof Error ? err.message : String(err)}`,
@@ -5601,6 +5848,18 @@ export class FlightsService {
       );
     }
     void this.calendar.syncFlight(row.vuelo_id as string);
+    // Tramo de vuelta (21-ago): quien recibió "tramo cancelado" debe saber
+    // que se restauró — a toda la tripulación, como la cancelación.
+    try {
+      const vuelo = await this.findById(row.vuelo_id as string);
+      void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+        titulo: `Tramo restaurado · vuelo #${vuelo.folio as number}`,
+        cuerpo: `El tramo ${row.origen_iata as string} → ${row.destino_iata as string} vuelve al itinerario. Motivo: ${motivo.trim()}`,
+        tipo: 'alerta_sistema',
+      });
+    } catch {
+      /* best-effort */
+    }
     return data!;
   }
 
