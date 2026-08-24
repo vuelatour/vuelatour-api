@@ -245,6 +245,161 @@ export class FlightsService {
   }
 
   /**
+   * DETALLE de la última lectura de tacómetro del avión (la de mayor valor:
+   * el horómetro solo sube): valor, lado, origen y de qué vuelo/tramo salió.
+   * La app la pinta INFORMATIVA en la captura del piloto — compara contra el
+   * tacómetro físico y avisa al equipo si no cuadra (pedido 24-ago-2026).
+   *
+   * Reglas (ronda adversarial 24-ago):
+   * - Tramos cancelados fuera (`cancelada_at`); los vuelos CANCELADO **sí
+   *   cuentan** si la lectura es real — cancel() a nivel vuelo no anula tacos
+   *   y esa lectura es historia física del horómetro (caso #180: excluirla
+   *   desalineaba la card del auto-relleno y del tacómetro físico). Solo se
+   *   descarta DEDUCIDO de vuelo cancelado (promesa de un vuelo que no fue).
+   * - Top-N por lado en SQL (no bajar todo el historial: el cap de 1000
+   *   filas de PostgREST haría silenciosamente incompleto el máximo).
+   * - Si alguna query falla se devuelve null: mejor sin card que afirmar un
+   *   "último taco" viejo calculado con la mitad de los datos.
+   */
+  private async ultimoTacoAeronaveDetalle(aeronaveId: string | null): Promise<{
+    valor: number;
+    lado: 'SALIDA' | 'LLEGADA';
+    origen: string | null;
+    vuelo_id: string | null;
+    folio: number | null;
+    fecha_vuelo: string | null;
+    ruta: string | null;
+    escala_id: string | null;
+  } | null> {
+    if (!aeronaveId) return null;
+    type Row = {
+      id: string;
+      origen_iata: string | null;
+      destino_iata: string | null;
+      taco_salida: number | string | null;
+      taco_llegada: number | string | null;
+      taco_salida_origen: string | null;
+      taco_llegada_origen: string | null;
+      hora_salida: string | null;
+      hora_llegada: string | null;
+      fecha_salida_plan: string | null;
+      vuelo: {
+        id: string;
+        folio: number | null;
+        fecha_vuelo: string | null;
+        estado: string | null;
+        aeronave_id?: string | null;
+      } | null;
+    };
+    const cols =
+      'id, origen_iata, destino_iata, taco_salida, taco_llegada, ' +
+      'taco_salida_origen, taco_llegada_origen, ' +
+      'hora_salida, hora_llegada, fecha_salida_plan, ' +
+      'vuelo!inner(id, folio, fecha_vuelo, estado, aeronave_id)';
+    // Misma regla escala-primero con herencia que `ultimoTacoAeronave`:
+    // 4 queries chiquitas (top 5 por lado, propias y heredadas).
+    const porLado = (campo: 'taco_salida' | 'taco_llegada') => {
+      const propias = this.supabase.service
+        .from('escala')
+        .select(cols)
+        .eq('aeronave_id', aeronaveId)
+        .is('cancelada_at', null)
+        .not(campo, 'is', null)
+        .order(campo, { ascending: false, nullsFirst: false })
+        .limit(5);
+      const heredadas = this.supabase.service
+        .from('escala')
+        .select(cols)
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aeronaveId)
+        .is('cancelada_at', null)
+        .not(campo, 'is', null)
+        .order(campo, { ascending: false, nullsFirst: false })
+        .limit(5);
+      return [propias, heredadas];
+    };
+    const resultados = await Promise.all([
+      ...porLado('taco_llegada'),
+      ...porLado('taco_salida'),
+    ]);
+    if (resultados.some((r) => r.error)) return null;
+    // Dedupe por escala: una misma fila puede venir en varias queries.
+    const filas = new Map<string, Row>();
+    for (const r of resultados) {
+      for (const f of (r.data ?? []) as unknown as Row[]) filas.set(f.id, f);
+    }
+    let mejor: {
+      valor: number;
+      lado: 'SALIDA' | 'LLEGADA';
+      origen: string | null;
+      fecha: string | null;
+      fila: Row;
+    } | null = null;
+    const esReal = (o: string | null) => o !== null && o !== 'DEDUCIDO';
+    for (const fila of filas.values()) {
+      const lados: [
+        'LLEGADA' | 'SALIDA',
+        number | string | null,
+        string | null,
+        string | null,
+      ][] = [
+        [
+          'LLEGADA',
+          fila.taco_llegada,
+          fila.taco_llegada_origen,
+          fila.hora_llegada,
+        ],
+        ['SALIDA', fila.taco_salida, fila.taco_salida_origen, fila.hora_salida],
+      ];
+      for (const [lado, crudo, origen, horaLado] of lados) {
+        if (crudo === null || crudo === undefined) continue;
+        const n = Number(crudo);
+        if (Number.isNaN(n)) continue;
+        // Un DEDUCIDO de vuelo cancelado es la promesa de un vuelo que no
+        // fue: no sirve de referencia. Las lecturas REALES de vuelos
+        // cancelados sí (el horómetro físico ya está en ese valor).
+        if (fila.vuelo?.estado === 'CANCELADO' && !esReal(origen)) continue;
+        const fecha =
+          horaLado ?? fila.fecha_salida_plan ?? fila.vuelo?.fecha_vuelo ?? null;
+        // Desempate DETERMINISTA a valor igual (las queries no traen orden
+        // garantizado entre filas): evidencia real sobre DEDUCIDO, luego
+        // LLEGADA sobre SALIDA (la llegada es la lectura original; la salida
+        // siguiente es su copia), luego la fecha más reciente.
+        let gana = false;
+        if (mejor === null || n > mejor.valor) {
+          gana = true;
+        } else if (n === mejor.valor) {
+          if (!esReal(mejor.origen) && esReal(origen)) gana = true;
+          else if (esReal(origen) === esReal(mejor.origen)) {
+            if (lado === 'LLEGADA' && mejor.lado === 'SALIDA') gana = true;
+            else if (lado === mejor.lado && (fecha ?? '') > (mejor.fecha ?? ''))
+              gana = true;
+          }
+        }
+        if (gana)
+          mejor = { valor: n, lado, origen: origen ?? null, fecha, fila };
+      }
+    }
+    if (!mejor) return null;
+    const f = mejor.fila;
+    return {
+      valor: mejor.valor,
+      lado: mejor.lado,
+      origen: mejor.origen,
+      vuelo_id: f.vuelo?.id ?? null,
+      folio: f.vuelo?.folio ?? null,
+      // Fecha del LADO elegido (un viaje multi-día puede llegar días después
+      // de su fecha_vuelo); cae a la fecha del vuelo si el tramo no la tiene.
+      fecha_vuelo: mejor.fecha,
+      ruta:
+        f.origen_iata && f.destino_iata
+          ? `${f.origen_iata} → ${f.destino_iata}`
+          : null,
+      escala_id: f.id ?? null,
+    };
+  }
+
+  /**
    * Última lectura de tacómetro del AVIÓN del vuelo (historial completo del
    * horómetro, que solo sube). El panel la usa para PRECARGAR la salida al
    * capturar/corregir tacos en oficina — antes había que ir a buscar la
@@ -555,7 +710,9 @@ export class FlightsService {
     void this.notifications.notifyUser(pilotoId, {
       tipo: 'vuelo_asignado',
       titulo:
-        rol === 'copiloto' ? 'Vas de copiloto en un vuelo' : 'Nuevo vuelo asignado',
+        rol === 'copiloto'
+          ? 'Vas de copiloto en un vuelo'
+          : 'Nuevo vuelo asignado',
       cuerpo: `${rol === 'copiloto' ? 'Vas de COPILOTO · ' : ''}${ruta} · folio #${vuelo.folio as number} · ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)}${pernoctaTxt}`,
       data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas, rol },
       link: `/flights/${vuelo.id as string}`,
@@ -1080,6 +1237,7 @@ export class FlightsService {
       cobros,
       aeronave,
       ultimoTacoAvion,
+      ultimoTacoDetalle,
       apoyoNombre,
       pilotoNombre,
       copilotoNombre,
@@ -1091,6 +1249,9 @@ export class FlightsService {
       // (excepción donde el piloto sí fotografía la salida) — el tacómetro
       // nunca retrocede respecto al último taco conocido del avión.
       this.ultimoTacoAeronave(aeronaveId, null),
+      // Informativo para el piloto: último taco del avión con procedencia,
+      // para cotejar contra el tacómetro físico antes de capturar.
+      this.ultimoTacoAeronaveDetalle(aeronaveId),
       this.nombreUsuario(apoyoId),
       // La app pinta la asignación en el DETALLE: sin estos nombres el vuelo
       // decía "Sin asignar" aunque el piloto sí estuviera asignado (#120).
@@ -1129,6 +1290,7 @@ export class FlightsService {
       apoyo_nombre: apoyoNombre,
       es_apoyo: esApoyo,
       ultimo_taco_avion: ultimoTacoAvion,
+      ultimo_taco_avion_detalle: ultimoTacoDetalle,
       escalas: escalasEnriquecidas,
       cobros,
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
@@ -1799,7 +1961,12 @@ export class FlightsService {
       current.copiloto_id &&
       current.copiloto_id !== dto.copiloto_id
     ) {
-      this.notificarQuitado(current.copiloto_id as string, data!, 'copiloto', ruta);
+      this.notificarQuitado(
+        current.copiloto_id as string,
+        data!,
+        'copiloto',
+        ruta,
+      );
     }
     if (
       dto.apoyo_id !== undefined &&
@@ -2209,7 +2376,7 @@ export class FlightsService {
     ) {
       this.notificarQuitado(
         escala.piloto_id as string,
-        vuelo as Record<string, unknown>,
+        vuelo,
         'piloto',
         `tramo ${tramoTxt}`,
       );
@@ -2223,7 +2390,7 @@ export class FlightsService {
     // la edición de horas por tramo de la app pasa por aquí.
     if (dto.fecha_salida_plan !== undefined) {
       void this.notificarTripulacion(
-        vuelo as Record<string, unknown>,
+        vuelo,
         {
           titulo: `Vuelo #${vuelo.folio as number}: tramo reagendado`,
           cuerpo: `${tramoTxt} ahora sale ${this.fechaCancunTxt(dto.fecha_salida_plan)} (hora Cancún).`,
@@ -2243,7 +2410,7 @@ export class FlightsService {
         .eq('id', dto.aeronave_id)
         .maybeSingle();
       void this.notificarTripulacion(
-        vuelo as Record<string, unknown>,
+        vuelo,
         {
           titulo: `Vuelo #${vuelo.folio as number}: cambio de avión`,
           cuerpo: `El tramo ${tramoTxt} ahora vuela en ${(av?.matricula as string | undefined) ?? 'otro avión'}.`,
@@ -3139,7 +3306,7 @@ export class FlightsService {
   ): Promise<void> {
     try {
       const vuelo = await this.findById(vueloId);
-      void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+      void this.notificarTripulacion(vuelo, {
         titulo: `Tramo nuevo · vuelo #${vuelo.folio as number}`,
         cuerpo: `Se agregó el tramo ${escala.origen_iata as string} → ${escala.destino_iata as string}${escala.fecha_salida_plan ? ` (sale ${this.fechaCancunTxt(escala.fecha_salida_plan as string)})` : ''}${escala.es_ferry === true ? ' · ferry' : ''}.`,
       });
@@ -3219,7 +3386,7 @@ export class FlightsService {
         // tripulación (antes solo refrescaba el calendario).
         try {
           const vuelo = await this.findById(data.vuelo_id as string);
-          void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+          void this.notificarTripulacion(vuelo, {
             titulo: `Vuelo #${vuelo.folio as number}: tramo reagendado`,
             cuerpo: `${data.origen_iata as string} → ${data.destino_iata as string} ahora sale ${this.fechaCancunTxt(dto.fecha_salida_plan)} (hora Cancún).`,
           });
@@ -5852,7 +6019,7 @@ export class FlightsService {
     // que se restauró — a toda la tripulación, como la cancelación.
     try {
       const vuelo = await this.findById(row.vuelo_id as string);
-      void this.notificarTripulacion(vuelo as Record<string, unknown>, {
+      void this.notificarTripulacion(vuelo, {
         titulo: `Tramo restaurado · vuelo #${vuelo.folio as number}`,
         cuerpo: `El tramo ${row.origen_iata as string} → ${row.destino_iata as string} vuelve al itinerario. Motivo: ${motivo.trim()}`,
         tipo: 'alerta_sistema',
