@@ -262,6 +262,17 @@ export class ExpensesController {
     return gasto;
   }
 
+  @Post(':id/reanalizar-ia')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Reanaliza el comprobante guardado con la IA de visión. SOLO-LECTURA: devuelve la lectura para prellenar el formulario; valor_ia_extraido se guarda junto con el PATCH cuando el humano confirma.',
+  })
+  async reanalizarIA(@Param('id', ParseUUIDPipe) id: string) {
+    return this.expenses.reanalizarConIA(id);
+  }
+
   @Post(':id/visto-bueno')
   @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({

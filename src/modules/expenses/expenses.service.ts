@@ -975,6 +975,91 @@ export class ExpensesService {
    * completa: desglose→notas, fecha del ticket, categoría (solo si quedó
    * OTRO), tarjeta, litros/lugar en GAS, matrícula→aeronave si estaba vacía.
    */
+  /**
+   * Reanaliza el comprobante YA GUARDADO de un gasto con la IA de visión
+   * (botón del panel, 24-ago-2026): gastos capturados antes de una mejora
+   * del prompt (p. ej. la separación Operación/TUA/FBO) se quedaban con la
+   * lectura vieja pegada. SOLO-LECTURA a propósito: no persiste nada — la
+   * lectura vuelve al panel para prellenar el formulario y `valor_ia_extraido`
+   * se guarda JUNTO con el PATCH cuando el humano confirma (misma
+   * transacción que las notas: sin divergencia notas↔jsonb, y Cancelar
+   * de verdad descarta; ronda adversarial 24-ago).
+   *
+   * Multi-hoja: el alta admin de la app guarda las hojas 2..N en
+   * `valor_ia_extraido.fotos_adicionales` — se mandan TODAS a la IA (leer
+   * solo la hoja 1 daría un total parcial que parece bueno).
+   */
+  async reanalizarConIA(gastoId: string) {
+    const gasto = (await this.findById(gastoId)) as {
+      foto_url?: string | null;
+      valor_ia_extraido?: { fotos_adicionales?: unknown } | null;
+    };
+    const path = gasto.foto_url ?? null;
+    if (!path) {
+      throw new BadRequestException('El gasto no tiene comprobante que analizar');
+    }
+    const fotosAdicionales = Array.isArray(
+      gasto.valor_ia_extraido?.fotos_adicionales,
+    )
+      ? (gasto.valor_ia_extraido.fotos_adicionales as unknown[]).filter(
+          (f): f is string => typeof f === 'string' && f.length > 0,
+        )
+      : [];
+    const paths = [path, ...fotosAdicionales];
+    const urls = await this.signPhotos(paths);
+    if (!urls[path]) {
+      throw new BadRequestException('No se pudo firmar el comprobante');
+    }
+    const lower = path.toLowerCase();
+    let lectura: Awaited<ReturnType<VisionService['readGastoTicket']>>;
+    if (lower.endsWith('.pdf')) {
+      const b64 = await this.descargarBase64(urls[path]);
+      lectura = b64 ? await this.vision.readGastoTicket({ pdfBase64: b64 }) : null;
+    } else if (/\.(xlsx|xls|csv)$/.test(lower)) {
+      const b64 = await this.descargarBase64(urls[path]);
+      lectura = b64
+        ? await this.vision.readGastoTicket({
+            excelBase64: b64,
+            excelFilename: path.split('/').pop() ?? 'comprobante.xlsx',
+          })
+        : null;
+    } else if (fotosAdicionales.length > 0) {
+      // Factura multi-hoja: todas las páginas juntas (Claude las descarga).
+      lectura = await this.vision.readGastoTicket({
+        images: paths
+          .filter((pp) => urls[pp])
+          .map((pp) => ({ imageUrl: urls[pp] })),
+      });
+    } else {
+      // Imagen: Claude descarga la URL firmada — sin re-subir bytes.
+      lectura = await this.vision.readGastoTicket({ imageUrl: urls[path] });
+    }
+    if (!lectura) return { disponible: false as const };
+    if (lectura.motivo && lectura.monto === undefined) {
+      return { disponible: false as const, motivo: lectura.motivo };
+    }
+    // Las hojas adicionales viven SOLO en este jsonb: la llave se conserva
+    // en la lectura que el panel guardará (perderla dejaría fotos huérfanas).
+    return {
+      disponible: true as const,
+      ...lectura,
+      ...(fotosAdicionales.length > 0
+        ? { fotos_adicionales: fotosAdicionales }
+        : {}),
+    };
+  }
+
+  /** Bytes de una URL firmada del bucket, en base64 (PDF/Excel a la IA). */
+  private async descargarBase64(url: string): Promise<string | null> {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) return null;
+      return Buffer.from(await res.arrayBuffer()).toString('base64');
+    } catch {
+      return null;
+    }
+  }
+
   private async enriquecerGastoConIA(
     gastoId: string,
     fotoPath: string,
@@ -997,15 +1082,11 @@ export class ExpensesService {
     // oficina — los pilotos también se equivocan y debe quedar visible.
     const discrepancias: string[] = [];
 
-    // Categoría: solo se llena si el piloto dejó la genérica; si eligió una
-    // específica y la IA ve otra, discrepancia.
-    if (gasto.categoria === 'OTRO' && ai.categoria_sugerida) {
-      patch.categoria = ai.categoria_sugerida;
-    } else if (
-      ai.categoria_sugerida &&
-      gasto.categoria !== 'OTRO' &&
-      ai.categoria_sugerida !== gasto.categoria
-    ) {
+    // Categoría: la app ya NO preselecciona OTRO (24-ago) — un OTRO que
+    // llega es elección deliberada (p. ej. comisariato de pasajeros). La IA
+    // nunca pisa la categoría: toda diferencia queda como discrepancia
+    // visible para que oficina decida en Verificar.
+    if (ai.categoria_sugerida && ai.categoria_sugerida !== gasto.categoria) {
       discrepancias.push(
         `categoría capturada ${gasto.categoria as string}, la IA sugiere ${ai.categoria_sugerida}`,
       );
@@ -1368,12 +1449,24 @@ export class ExpensesService {
 
   async update(id: string, dto: UpdateGastoDto, userId: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
+    const necesitaActual =
+      dto.propina !== undefined ||
+      dto.monto !== undefined ||
+      dto.categoria !== undefined ||
+      dto.vuelo_id !== undefined;
+    const actual = necesitaActual
+      ? ((await this.findById(id)) as {
+          monto?: unknown;
+          propina?: unknown;
+          categoria?: string;
+          vuelo_id?: string | null;
+        })
+      : null;
     // El invariante propina <= monto también vive aquí (el create no basta:
     // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
     if (dto.propina !== undefined || dto.monto !== undefined) {
-      const actual = await this.findById(id);
-      const monto = dto.monto ?? Number(actual.monto);
-      const propina = dto.propina ?? Number(actual.propina ?? 0);
+      const monto = dto.monto ?? Number(actual?.monto);
+      const propina = dto.propina ?? Number(actual?.propina ?? 0);
       if (Number(propina) > Number(monto)) {
         throw new BadRequestException(
           'La propina no puede ser mayor que el monto total pagado.',
@@ -1385,6 +1478,21 @@ export class ExpensesService {
     if (dto.folio_ticket !== undefined) {
       await this.assertFolioTicketLibre(dto.folio_ticket, id);
     }
+    // INDIRECTO jamás se liga a un vuelo (regla 18-ago: no es costo de un
+    // vuelo; va a la hoja de indirectos). Se valida el estado FUSIONADO:
+    // reclasificar a INDIRECTO un gasto con vuelo, o ligar vuelo a un
+    // INDIRECTO, se rechaza con instrucción clara.
+    if (dto.categoria !== undefined || dto.vuelo_id !== undefined) {
+      const categoriaEfectiva = dto.categoria ?? actual?.categoria;
+      const vueloEfectivo =
+        dto.vuelo_id !== undefined ? dto.vuelo_id : actual?.vuelo_id;
+      if (categoriaEfectiva === 'INDIRECTO' && vueloEfectivo) {
+        throw new BadRequestException(
+          'Un gasto INDIRECTO no se liga a un vuelo: quítale el vuelo primero (o usa otra categoría).',
+        );
+      }
+    }
+
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
     delete cols.capturar_como_piloto;
