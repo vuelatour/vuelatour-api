@@ -5789,6 +5789,57 @@ export class FlightsService {
    * Estado de captura de tacómetro por vuelo (para el badge en admin).
    * `falta` = sin escalas, o algún tramo sin salida/llegada.
    */
+  /**
+   * Total cobrado (USD) por vuelo, en lote, para el semáforo de cobro de las
+   * tablas de vuelos/cotizaciones (mismo patrón que tacoStatus). Fuente
+   * única cobrosEnUsd con el tc del vuelo de respaldo: un MXN sin TC no se
+   * suma — viaja en sin_tc_count para que el semáforo lo advierta en vez de
+   * pintar "sin cobro" un vuelo ya pagado en pesos.
+   */
+  async cobroStatus(
+    ids: string[],
+  ): Promise<Record<string, { total_cobrado: number; sin_tc_count: number }>> {
+    const out: Record<string, { total_cobrado: number; sin_tc_count: number }> =
+      {};
+    if (ids.length === 0) return out;
+    const [cobrosRes, vuelosRes] = await Promise.all([
+      this.supabase.service
+        .from('cobro_vuelo')
+        .select('vuelo_id, monto, moneda, tc_usd_mxn')
+        .in('vuelo_id', ids)
+        // Anti-cap de PostgREST (1000 filas): 200 vuelos con muchos abonos
+        // truncarían el total EN SILENCIO y pintarían "parcial" un pagado.
+        .limit(10000),
+      this.supabase.service.from('vuelo').select('id, tc_usd_mxn').in('id', ids),
+    ]);
+    if (cobrosRes.error) throw new Error(cobrosRes.error.message);
+    if (vuelosRes.error) throw new Error(vuelosRes.error.message);
+    const tcPorVuelo = new Map<string, number | null>();
+    for (const v of vuelosRes.data ?? []) {
+      tcPorVuelo.set(v.id as string, Number(v.tc_usd_mxn) || null);
+    }
+    const grupos = new Map<
+      string,
+      { monto: unknown; moneda: unknown; tc_usd_mxn: unknown }[]
+    >();
+    for (const c of cobrosRes.data ?? []) {
+      const list = grupos.get(c.vuelo_id as string) ?? [];
+      list.push(c);
+      grupos.set(c.vuelo_id as string, list);
+    }
+    for (const id of ids) {
+      const conv = cobrosEnUsd(
+        (grupos.get(id) ?? []) as Parameters<typeof cobrosEnUsd>[0],
+        tcPorVuelo.get(id) ?? null,
+      );
+      out[id] = {
+        total_cobrado: Math.round(conv.total_usd * 100) / 100,
+        sin_tc_count: conv.sin_tc_count,
+      };
+    }
+    return out;
+  }
+
   async tacoStatus(ids: string[]): Promise<Record<string, { falta: boolean }>> {
     const out: Record<string, { falta: boolean }> = {};
     if (ids.length === 0) return out;

@@ -410,6 +410,50 @@ export class AircraftBalanceService {
   }
 
   /** Periodo default: mes corriente EN HORA CANCÚN (no UTC). */
+  /**
+   * Última llegada de tacómetro del avión ANTES del periodo (siembra de la
+   * cadena de saltos): el horómetro solo sube, así que max(taco_llegada)
+   * previa = la última cronológica — sin ordenar por columna embebida.
+   * Misma herencia escala-primero que el resto del libro. null si no hay.
+   */
+  private async ultimaLlegadaAntesDe(
+    aircraftId: string,
+    desde: string,
+  ): Promise<number | null> {
+    const corte = `${desde}T00:00:00-05:00`;
+    const sb = this.supabase.service;
+    const [propias, heredadas] = await Promise.all([
+      sb
+        .from('escala')
+        .select('taco_llegada, vuelo:vuelo_id!inner(fecha_vuelo)')
+        .eq('aeronave_id', aircraftId)
+        .is('cancelada_at', null)
+        .not('taco_llegada', 'is', null)
+        .lt('vuelo.fecha_vuelo', corte)
+        .order('taco_llegada', { ascending: false })
+        .limit(1),
+      sb
+        .from('escala')
+        .select('taco_llegada, vuelo:vuelo_id!inner(fecha_vuelo, aeronave_id)')
+        .is('aeronave_id', null)
+        .eq('vuelo.aeronave_id', aircraftId)
+        .is('cancelada_at', null)
+        .not('taco_llegada', 'is', null)
+        .lt('vuelo.fecha_vuelo', corte)
+        .order('taco_llegada', { ascending: false })
+        .limit(1),
+    ]);
+    // Best-effort: sin siembra la primera fila simplemente no se valida.
+    if (propias.error || heredadas.error) return null;
+    const candidatos = [
+      ...(propias.data ?? []),
+      ...(heredadas.data ?? []),
+    ]
+      .map((e) => Number((e as { taco_llegada: unknown }).taco_llegada))
+      .filter((n) => Number.isFinite(n));
+    return candidatos.length ? Math.max(...candidatos) : null;
+  }
+
   private mesCorrienteCancun(): { desde: string; hasta: string } {
     const hoy = new Intl.DateTimeFormat('en-CA', {
       timeZone: 'America/Cancun',
@@ -819,6 +863,21 @@ export class AircraftBalanceService {
         .filter((x): x is number => x != null);
       const P = salidas.length ? salidas[0] : null;
       const Q = llegadas.length ? llegadas[llegadas.length - 1] : null;
+      // Salto INTERNO: la salida de un tramo no empalma con la llegada del
+      // tramo anterior DEL MISMO vuelo (el error de captura más común — un
+      // dígito mal tecleado infla las horas facturadas y P/Q siguen
+      // empalmando con los vuelos vecinos, así que la cadena no lo ve).
+      let saltoInterno: string | null = null;
+      for (let i = 1; i < escalasDelAvion.length; i++) {
+        const sal = num(escalasDelAvion[i].taco_salida);
+        const lleg = num(escalasDelAvion[i - 1].taco_llegada);
+        if (sal == null || lleg == null) continue;
+        if (Math.abs(sal - lleg) > 0.004) {
+          const e = escalasDelAvion[i];
+          saltoInterno = `${(e.origen_iata as string) ?? '?'}→${(e.destino_iata as string) ?? '?'}: salida ${sal} vs llegada previa ${lleg}`;
+          break;
+        }
+      }
 
       // ----- Bloque COSTOS (MXN) -----
       // Conversión de un gasto USD a MXN: tc_gasto ?? Z del vuelo ?? TC
@@ -1244,6 +1303,8 @@ export class AircraftBalanceService {
         tiempo_vuelo: O,
         taco_inicio: P,
         taco_fin: Q,
+        salto_taco_interno: saltoInterno != null,
+        salto_taco_interno_detalle: saltoInterno,
         gas_mxn: r2(gasMxn),
         gas_litros: gasLitros,
         gas_precio_litro: T,
@@ -1277,6 +1338,39 @@ export class AircraftBalanceService {
         por_cobrar_mxn: porCobrarMxn,
         por_cobrar_usd: porCobrarUsd,
       });
+    }
+
+    // ===== Saltos en la cadena de tacómetros (24-ago-2026) =====
+    // Mismo amarillo que el detalle del avión en el panel: el taco INICIAL de
+    // una fila debe empalmar con el taco FINAL de la fila anterior del avión
+    // (filasVuelo ya viene en orden cronológico por orden_ts; las COMPARTIDO
+    // traen tacos propios y entran a la cadena). Tolerancia 0.004: los
+    // valores llegan de numeric y el estricto daría falsos positivos por
+    // flotante; cualquier diferencia real (>= 0.01 del horómetro) marca.
+    {
+      // Siembra: última llegada del avión ANTES del periodo (la costura
+      // entre meses es justo donde el cierre necesita la señal). El
+      // horómetro solo sube → max(taco_llegada) previo = el último
+      // cronológico, sin depender de ordenar por columna embebida.
+      let tacoFinPrevio: number | null = await this.ultimaLlegadaAntesDe(
+        aircraftId,
+        desde,
+      );
+      for (const fila of filasVuelo) {
+        if (fila.taco_inicio != null && tacoFinPrevio != null) {
+          const salta = Math.abs(fila.taco_inicio - tacoFinPrevio) > 0.004;
+          fila.salto_taco_inicio = salta;
+          fila.salto_taco_esperado = salta ? tacoFinPrevio : null;
+        }
+        if (fila.taco_fin != null) {
+          tacoFinPrevio = fila.taco_fin;
+        } else if (fila.taco_inicio != null) {
+          // Llegada sin capturar: la cadena se corta (compararse contra un
+          // fin de 2+ filas atrás señalaría al vuelo equivocado; el hueco
+          // real ya lo vigila la hoja de pendientes).
+          tacoFinPrevio = null;
+        }
+      }
     }
 
     // ===== Totales del periodo (suma de no nulos; promedios SOLO no nulos) =====

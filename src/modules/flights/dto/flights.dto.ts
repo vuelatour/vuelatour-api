@@ -35,6 +35,15 @@ export class TacoStatusDto {
   ids!: string[];
 }
 
+export class CobroStatusDto {
+  @ApiProperty({ type: [String], description: 'IDs de vuelo a evaluar' })
+  @IsArray()
+  @ArrayNotEmpty()
+  @ArrayMaxSize(200)
+  @IsUUID('all', { each: true })
+  ids!: string[];
+}
+
 export class VoucherUrlsDto {
   @ApiProperty({ type: [String], description: 'Paths de vouchers en cobro-vouchers a firmar' })
   @IsArray()

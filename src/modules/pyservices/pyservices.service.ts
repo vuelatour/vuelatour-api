@@ -274,6 +274,15 @@ export interface BalanceAvionVueloPayload {
   tiempo_vuelo: number | null;
   taco_inicio: number | null;
   taco_fin: number | null;
+  /** Salto en la cadena: el taco inicial NO empalma con el final de la fila
+   *  anterior del avión (mismo amarillo que el detalle del avión en el panel). */
+  salto_taco_inicio?: boolean;
+  /** Valor con el que debía empalmar (taco final anterior), para la nota. */
+  salto_taco_esperado?: number | null;
+  /** Salto INTERNO: un tramo del vuelo no empalma con el anterior (infla
+   *  las horas sin romper la cadena entre vuelos). */
+  salto_taco_interno?: boolean;
+  salto_taco_interno_detalle?: string | null;
   // Bloque COSTOS (MXN)
   gas_mxn: number | null;
   gas_litros: number | null;

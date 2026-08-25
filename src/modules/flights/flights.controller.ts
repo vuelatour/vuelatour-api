@@ -42,6 +42,7 @@ import {
   ListFlightsQuery,
   SetFlightPlanDto,
   TacoStatusDto,
+  CobroStatusDto,
   UpdateFlightDto,
   UpdatePermisoDto,
   VoucherUrlsDto,
@@ -670,6 +671,19 @@ export class FlightsController {
   })
   tacoStatus(@Body() dto: TacoStatusDto) {
     return this.flights.tacoStatus(dto.ids);
+  }
+
+  @Post('cobro-status')
+  // Mismo conjunto que ve las listas (GET /quotes incluye SOCIO): sin él,
+  // su columna de cobro quedaría degradada con un 403 por carga.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Para una lista de vuelos, total cobrado en USD (fuente única cobrosEnUsd) — semáforo de cobro de las tablas de vuelos/cotizaciones.',
+  })
+  cobroStatus(@Body() dto: CobroStatusDto) {
+    return this.flights.cobroStatus(dto.ids);
   }
 
   @Post('cobro-voucher-urls')
