@@ -1550,7 +1550,7 @@ export class FlightsService {
         data!,
         {
           titulo: `Vuelo #${current.folio as number} reagendado`,
-          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ${partes.join(" y ")} (hora Cancún).`,
+          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ${partes.join(' y ')} (hora Cancún).`,
         },
         excluir,
       );
