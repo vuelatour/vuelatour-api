@@ -478,7 +478,7 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
-      'Tiempo de VUELO deseado (hr): sustituye al calculado (NM ÷ kts) cuando se pacta cobrar un tiempo distinto. Calzos, sobrevuelo y el mínimo de 1 hr aplican igual encima.',
+      'DEPRECADO (26-ago, nunca usado en prod): se aceptaba para no romper borradores abiertos; el motor lo IGNORA. Usa tiempo_cobrable_override_hr.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -486,6 +486,17 @@ export class CalculateQuoteDto {
   @Min(0)
   @Max(24)
   tiempo_vuelo_override_hr?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'COBRABLE pactado a mano (hr): sustituye la SUMA final (vuelo + calzos + sobrevuelo y el mínimo de 1 hr). Vuelo y calzos siguen calculados e intocables; esto decide el total de horas que se cobran.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(48)
+  tiempo_cobrable_override_hr?: number;
 
   @ApiPropertyOptional({
     description: 'Tarifa por hora override (USD). Si null, usa la del avión.',

@@ -197,17 +197,7 @@ export class QuotesService {
         `Aeronave ${aeronave.matricula} no tiene velocidad_crucero_kts válida`,
       );
     }
-    // Tiempo de vuelo DESEADO (25-ago): la oficina puede pactar cobrar un
-    // tiempo distinto al calculado (NM ÷ kts) — p. ej. cobrar más en un
-    // trayecto corto. Calzos/sobrevuelo/mínimo aplican igual encima; el
-    // calculado queda en el snapshot para transparencia.
-    const tiempoVueloCalculadoHr = nmTotal / velocidadKts;
-    const tiempoVueloOverride =
-      dto.tiempo_vuelo_override_hr != null &&
-      Number(dto.tiempo_vuelo_override_hr) > 0
-        ? Number(dto.tiempo_vuelo_override_hr)
-        : null;
-    const tiempoVueloHr = tiempoVueloOverride ?? tiempoVueloCalculadoHr;
+    const tiempoVueloHr = nmTotal / velocidadKts;
     const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
     // SOBREVUELO (ej. sobrevolar la isla 0.5 hr): tiempo extra cobrable que
     // se suma ANTES del mínimo de 1 hr.
@@ -230,10 +220,18 @@ export class QuotesService {
     // INTERNO: sin hora mínima — se registra el tiempo REAL (puede ser 0); la
     // regla es de facturación a clientes y aquí no hay venta.
     const tiempoRealHr = tiempoVueloHr + calzosHr + sobrevueloHr;
-    const tiempoCobrableHr = esInterno
-      ? tiempoRealHr
-      : Math.max(1, tiempoRealHr);
-    const minimoHoraAplicado = !esInterno && tiempoRealHr < 1;
+    // COBRABLE pactado (26-ago, corrige al 25-ago): vuelo y calzos quedan
+    // calculados e intocables — lo que la oficina decide a mano es la SUMA
+    // final: aceptar la regla (mínimo 1 hr) o pactar otro total de horas.
+    const cobrableOverride =
+      dto.tiempo_cobrable_override_hr != null &&
+      Number(dto.tiempo_cobrable_override_hr) > 0
+        ? Number(dto.tiempo_cobrable_override_hr)
+        : null;
+    const cobrableRegla = esInterno ? tiempoRealHr : Math.max(1, tiempoRealHr);
+    const tiempoCobrableHr = cobrableOverride ?? cobrableRegla;
+    const minimoHoraAplicado =
+      !esInterno && cobrableOverride == null && tiempoRealHr < 1;
 
     // Tarifa efectiva: override manual > tarifa preferencial pactada con el
     // cliente para ESTA aeronave > tarifa default del avión (público/broker).
@@ -707,11 +705,11 @@ export class QuotesService {
       },
       tiempos: {
         vuelo_hr: round4(tiempoVueloHr),
-        // Transparencia del tiempo pactado: el calculado real (NM ÷ kts) y
-        // la bandera viajan en el snapshot — el panel los muestra y el
-        // ajuste rápido/revisión CONSERVAN el pactado (no re-derivar).
-        vuelo_hr_calculado: round4(tiempoVueloCalculadoHr),
-        vuelo_proviene_de_override: tiempoVueloOverride != null,
+        // Transparencia del cobrable pactado: lo que daría la regla y la
+        // bandera viajan en el snapshot — el panel los muestra y el ajuste
+        // rápido/revisión CONSERVAN el pactado (no re-derivar).
+        cobrable_hr_regla: round4(cobrableRegla),
+        cobrable_proviene_de_override: cobrableOverride != null,
         calzos_hr: round4(calzosHr),
         sobrevuelo_hr: round4(sobrevueloHr),
         cobrable_hr: round4(tiempoCobrableHr),
@@ -1412,8 +1410,8 @@ export class QuotesService {
       };
       tiempos?: {
         sobrevuelo_hr?: number | null;
-        vuelo_hr?: number | null;
-        vuelo_proviene_de_override?: boolean | null;
+        cobrable_hr?: number | null;
+        cobrable_proviene_de_override?: boolean | null;
       };
       tuas?: { usd_pax_default?: number | null };
       aeronave?: { id?: string | null };
@@ -1566,12 +1564,12 @@ export class QuotesService {
         Number(snapshot?.tiempos?.sobrevuelo_hr) > 0
           ? Number(snapshot?.tiempos?.sobrevuelo_hr)
           : undefined,
-      // El tiempo de vuelo PACTADO también se conserva (si no, el ajuste
-      // rápido re-derivaría NM ÷ kts y tiraría las horas extra en silencio).
-      tiempo_vuelo_override_hr:
-        snapshot?.tiempos?.vuelo_proviene_de_override === true &&
-        Number(snapshot?.tiempos?.vuelo_hr) > 0
-          ? Number(snapshot?.tiempos?.vuelo_hr)
+      // El COBRABLE pactado también se conserva (si no, el ajuste rápido
+      // re-aplicaría la regla y movería las horas pactadas en silencio).
+      tiempo_cobrable_override_hr:
+        snapshot?.tiempos?.cobrable_proviene_de_override === true &&
+        Number(snapshot?.tiempos?.cobrable_hr) > 0
+          ? Number(snapshot?.tiempos?.cobrable_hr)
           : undefined,
       tuas_override_usd_pax:
         snapshot?.tuas?.usd_pax_default != null
