@@ -477,6 +477,17 @@ export class CalculateQuoteDto {
   sobrevuelo_hr?: number;
 
   @ApiPropertyOptional({
+    description:
+      'Tiempo de VUELO deseado (hr): sustituye al calculado (NM ÷ kts) cuando se pacta cobrar un tiempo distinto. Calzos, sobrevuelo y el mínimo de 1 hr aplican igual encima.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  @Max(24)
+  tiempo_vuelo_override_hr?: number;
+
+  @ApiPropertyOptional({
     description: 'Tarifa por hora override (USD). Si null, usa la del avión.',
   })
   @IsOptional()
