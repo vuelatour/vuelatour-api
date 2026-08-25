@@ -1,3 +1,4 @@
+import { NotificationsService } from '../realtime/notifications.service';
 import {
   BadRequestException,
   Injectable,
@@ -29,7 +30,10 @@ function unwrap<T>(value: T | T[] | null | undefined): T | null {
 
 @Injectable()
 export class CalendarService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    private readonly notifications: NotificationsService,
+  ) {}
 
   async listEvents(q: CalendarRangeQuery) {
     const now = new Date();
@@ -454,6 +458,15 @@ export class CalendarService {
         );
       throw new Error(error.message);
     }
+    // Auditoría 26-ago: el responsable asignado nunca se enteraba del evento.
+    if (dto.responsable_id && dto.responsable_id !== userId) {
+      void this.notifications.notifyUser(dto.responsable_id, {
+        tipo: 'alerta_sistema',
+        titulo: 'Evento asignado',
+        cuerpo: `${dto.titulo.trim()} · ${dto.fecha.toLocaleDateString('es-MX', { timeZone: 'America/Cancun', dateStyle: 'medium' })}`,
+        data: { evento_id: (data?.id as string) ?? '' },
+      });
+    }
     return data!;
   }
 
@@ -463,10 +476,19 @@ export class CalendarService {
       .from('evento_flota')
       .delete()
       .eq('id', id)
-      .select('id')
+      .select('id, titulo, fecha, responsable_id')
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Evento ${id} not found`);
+    // El responsable también debe saber que el evento se quitó (26-ago).
+    if (data.responsable_id) {
+      void this.notifications.notifyUser(data.responsable_id as string, {
+        tipo: 'alerta_sistema',
+        titulo: 'Evento cancelado',
+        cuerpo: `Se quitó del calendario: ${(data.titulo as string) ?? 'evento'}.`,
+        data: { evento_id: id },
+      });
+    }
     return { ok: true };
   }
 }

@@ -1,3 +1,4 @@
+import { NotificationsService } from '../realtime/notifications.service';
 import {
   BadRequestException,
   ConflictException,
@@ -27,6 +28,7 @@ export class PilotsService {
     private readonly supabase: SupabaseService,
     private readonly calendarSync: CalendarSyncService,
     private readonly users: UsersService,
+    private readonly notifications: NotificationsService,
   ) {}
 
   /** Hoy en hora Cancún (YYYY-MM-DD) — la operación vive en UTC−5. */
@@ -641,6 +643,16 @@ export class PilotsService {
         throw new NotFoundException('Piloto no encontrado');
       throw new Error(error.message);
     }
+    // Auditoría 26-ago: si OFICINA le pone el descanso al piloto, el piloto
+    // debe enterarse (si lo capturó él mismo, no se auto-avisa).
+    if (pilotoId !== userId) {
+      void this.notifications.notifyUser(pilotoId, {
+        tipo: 'alerta_sistema',
+        titulo: 'Descanso registrado',
+        cuerpo: `Del ${inicio} al ${fin}${dto.motivo ? ` · ${dto.motivo}` : ''}. Esos días no se te asignan vuelos.`,
+        data: { descanso_id: (data?.id as string) ?? '' },
+      });
+    }
 
     // Espejo en el Google Calendar compartido (best-effort, no bloquea).
     void (async () => {
@@ -675,13 +687,23 @@ export class PilotsService {
       .from('piloto_descanso')
       .delete()
       .eq('id', id)
-      .select('id, google_calendar_id')
+      .select('id, google_calendar_id, piloto_id, fecha_inicio, fecha_fin')
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Descanso ${id} not found`);
     void this.calendarSync.removeDescansoEvent(
       data.google_calendar_id as string | null,
     );
+    // El piloto debe saber que su descanso se quitó (26-ago): esos días
+    // vuelve a ser asignable.
+    if (data.piloto_id) {
+      void this.notifications.notifyUser(data.piloto_id as string, {
+        tipo: 'alerta_sistema',
+        titulo: 'Descanso eliminado',
+        cuerpo: `Se quitó tu descanso del ${data.fecha_inicio as string} al ${data.fecha_fin as string}: esos días ya puedes tener vuelos.`,
+        data: { descanso_id: id },
+      });
+    }
     return { ok: true };
   }
 }

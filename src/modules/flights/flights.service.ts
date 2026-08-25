@@ -1521,17 +1521,36 @@ export class FlightsService {
     // pilotos de tramo) — el recién asignado ya recibió su aviso.
     const fechaCambio =
       dto.fecha_vuelo !== undefined &&
-      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
-    if (fechaCambio) {
+      this.fechaCambia(dto.fecha_vuelo, current.fecha_vuelo);
+    // El REGRESO también es reagenda (26-ago): cambiar fecha_traslado_final
+    // era mudo y el tramo de regreso conservaba su fecha vieja en el
+    // calendario de la app.
+    const regresoCambio =
+      dto.fecha_traslado_final !== undefined &&
+      dto.fecha_traslado_final !== null &&
+      this.fechaCambia(dto.fecha_traslado_final, current.fecha_traslado_final);
+    if (regresoCambio) {
+      await this.mirrorRegresoAUltimaEscala(id, dto.fecha_traslado_final!);
+    }
+    if (fechaCambio || regresoCambio) {
       const excluir =
         asignandoPiloto && dto.piloto_id !== current.piloto_id
           ? [dto.piloto_id!]
           : [];
+      const partes: string[] = [];
+      if (fechaCambio) {
+        partes.push(`ahora sale ${this.fechaCancunTxt(dto.fecha_vuelo)}`);
+      }
+      if (regresoCambio) {
+        partes.push(
+          `el REGRESO ahora sale ${this.fechaCancunTxt(dto.fecha_traslado_final)}`,
+        );
+      }
       void this.notificarTripulacion(
         data!,
         {
           titulo: `Vuelo #${current.folio as number} reagendado`,
-          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ahora sale ${this.fechaCancunTxt(dto.fecha_vuelo)} (hora Cancún).`,
+          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ${partes.join(" y ")} (hora Cancún).`,
         },
         excluir,
       );
@@ -1987,7 +2006,7 @@ export class FlightsService {
       reciénAvisados.add(dto.apoyo_id!);
     const fechaCambioAssign =
       dto.fecha_vuelo !== undefined &&
-      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null);
+      this.fechaCambia(dto.fecha_vuelo, current.fecha_vuelo);
     if (fechaCambioAssign) {
       // Reagenda (doc 4.3): a TODA la tripulación vigente.
       void this.notificarTripulacion(
@@ -2116,6 +2135,43 @@ export class FlightsService {
   }
 
   /** Fecha legible en Cancún para los avisos. */
+  /** PostgREST devuelve '+00:00' sin milisegundos: comparar fechas por
+   *  INSTANTE, no por string — el string crudo nunca era igual y disparaba
+   *  avisos de "reagendado" falsos (auditoría 26-ago). */
+  private fechaCambia(nueva: Date, actual: unknown): boolean {
+    if (!actual) return true;
+    const t = new Date(actual as string).getTime();
+    return Number.isNaN(t) || nueva.getTime() !== t;
+  }
+
+  /** Espeja fecha_traslado_final a la ÚLTIMA escala viva (orden > 1): el
+   *  calendario de la app prefiere la fecha de la escala — sin el espejo,
+   *  el regreso reagendado seguía mostrando la fecha vieja. Best-effort. */
+  private async mirrorRegresoAUltimaEscala(
+    vueloId: string,
+    fecha: Date,
+  ): Promise<void> {
+    try {
+      const { data } = await this.supabase.service
+        .from('escala')
+        .select('id, orden')
+        .eq('vuelo_id', vueloId)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!data || Number(data.orden) <= 1) return; // sin tramo de regreso
+      await this.supabase.service
+        .from('escala')
+        .update({ fecha_salida_plan: fecha.toISOString() })
+        .eq('id', data.id as string);
+    } catch (err) {
+      this.logger.warn(
+        `mirrorRegresoAUltimaEscala falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   private fechaCancunTxt(iso: string | Date | null | undefined): string {
     if (!iso) return 'fecha por definir';
     return new Date(iso).toLocaleString('es-MX', {
@@ -3325,6 +3381,44 @@ export class FlightsService {
       if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
       return data;
     }
+    // Fila PREVIA (26-ago): el panel y la app en edición mandan TODO
+    // explícito, así que sin comparar contra lo anterior cada guardado
+    // disparaba "tramo reagendado" falso, y el cambio de RUTA era mudo.
+    const { data: prev, error: prevErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, vuelo:vuelo_id(estado)',
+      )
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (prevErr) throw new Error(prevErr.message);
+    if (!prev) throw new NotFoundException(`Escala ${escalaId} not found`);
+    const estadoVuelo =
+      ((prev as { vuelo?: { estado?: string } }).vuelo?.estado as string) ??
+      null;
+    const fechaTramoCambia =
+      dto.fecha_salida_plan instanceof Date &&
+      this.fechaCambia(
+        dto.fecha_salida_plan,
+        (prev as { fecha_salida_plan?: unknown }).fecha_salida_plan,
+      );
+    // Reagendar tramos de un vuelo cerrado divergiría del candado de
+    // update() (que lanzaría 409 DESPUÉS de persistir la escala).
+    if (
+      fechaTramoCambia &&
+      (estadoVuelo === 'COMPLETADO' || estadoVuelo === 'CANCELADO')
+    ) {
+      throw new ConflictException(
+        `No se puede reagendar un tramo de un vuelo ${estadoVuelo}.`,
+      );
+    }
+    // La fecha del tramo 1 ES la fecha del vuelo: limpiarla aquí dejaría el
+    // espejo roto. Se valida ANTES de persistir.
+    if (dto.fecha_salida_plan === null && Number(prev.orden) === 1) {
+      throw new BadRequestException(
+        'La fecha del tramo 1 es la fecha del vuelo: cámbiala editando el vuelo.',
+      );
+    }
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.orden !== undefined) patch.orden = dto.orden;
     if (dto.origen_iata) patch.origen_iata = dto.origen_iata.toUpperCase();
@@ -3367,13 +3461,34 @@ export class FlightsService {
     }
     if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
     // Cambió la ruta del tramo: puede entrar (o salir) una pista con permiso.
+    const rutaCambia =
+      (dto.origen_iata !== undefined &&
+        dto.origen_iata.toUpperCase() !== (prev.origen_iata as string)) ||
+      (dto.destino_iata !== undefined &&
+        dto.destino_iata.toUpperCase() !== (prev.destino_iata as string));
     if (dto.origen_iata !== undefined || dto.destino_iata !== undefined) {
       await this.airports.refreshPermisosDeVuelo(data.vuelo_id as string);
+    }
+    // Cambio de RUTA del tramo (26-ago): antes era mudo — el piloto volaba
+    // con el itinerario viejo en la cabeza.
+    if (rutaCambia) {
+      try {
+        const vuelo = await this.findById(data.vuelo_id as string);
+        void this.notificarTripulacion(vuelo, {
+          titulo: `Vuelo #${vuelo.folio as number}: cambió la ruta de un tramo`,
+          cuerpo: `El tramo ${prev.origen_iata as string} → ${prev.destino_iata as string} ahora es ${data.origen_iata as string} → ${data.destino_iata as string}.`,
+        });
+      } catch {
+        /* best-effort */
+      }
+      void this.calendar.syncFlight(data.vuelo_id as string);
     }
     // Espejo inverso: la salida plan del TRAMO 1 es la fecha del vuelo. Pasa
     // por update() para reusar el push de reagenda al piloto (doc 4.3) y el
     // sync de calendario. Los tramos 2+ solo refrescan el calendario.
-    if (dto.fecha_salida_plan instanceof Date) {
+    // OJO (26-ago): solo si la fecha REALMENTE cambió — la app manda todo
+    // explícito y cada edición disparaba "reagendado" falso.
+    if (dto.fecha_salida_plan instanceof Date && fechaTramoCambia) {
       if (Number(data.orden) === 1) {
         await this.update(
           data.vuelo_id as string,
@@ -3393,6 +3508,22 @@ export class FlightsService {
         } catch {
           /* best-effort */
         }
+      }
+    } else if (
+      dto.fecha_salida_plan === null &&
+      (prev as { fecha_salida_plan?: unknown }).fecha_salida_plan != null
+    ) {
+      // Limpiar la fecha de un tramo también es un cambio de agenda
+      // (el caso orden=1 ya se rechazó antes de persistir).
+      void this.calendar.syncFlight(data.vuelo_id as string);
+      try {
+        const vuelo = await this.findById(data.vuelo_id as string);
+        void this.notificarTripulacion(vuelo, {
+          titulo: `Vuelo #${vuelo.folio as number}: tramo sin fecha`,
+          cuerpo: `Se quitó la fecha del tramo ${data.origen_iata as string} → ${data.destino_iata as string}: hereda el día del tramo anterior.`,
+        });
+      } catch {
+        /* best-effort */
       }
     }
     return data;
@@ -5981,6 +6112,10 @@ export class FlightsService {
   private async notifyTramoCancelado(
     escala: Record<string, unknown>,
     motivo: string,
+    encabezado: { titulo: string; accion: string } = {
+      titulo: 'Tramo cancelado',
+      accion: 'se canceló',
+    },
   ): Promise<void> {
     // A TODA la tripulación (21-ago): antes solo al piloto explícito del
     // tramo — si heredaba del vuelo, nadie se enteraba; y copiloto/apoyo
@@ -5996,8 +6131,8 @@ export class FlightsService {
       for (const uid of ids) {
         void this.notifications.notifyUser(uid, {
           tipo: 'alerta_sistema',
-          titulo: `Tramo cancelado · vuelo #${vuelo.folio as number}`,
-          cuerpo: `El tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} se canceló: ${motivo}. Ya no aparece en el itinerario ni pide tacómetro.`,
+          titulo: `${encabezado.titulo} · vuelo #${vuelo.folio as number}`,
+          cuerpo: `El tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} ${encabezado.accion}: ${motivo}. Ya no aparece en el itinerario ni pide tacómetro.`,
           data: {
             vuelo_id: escala.vuelo_id,
             escala_id: escala.id,
@@ -6084,7 +6219,9 @@ export class FlightsService {
   async deleteEscala(escalaId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
-      .select('id, taco_salida, taco_llegada')
+      .select(
+        'id, vuelo_id, piloto_id, origen_iata, destino_iata, taco_salida, taco_llegada',
+      )
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
@@ -6099,6 +6236,21 @@ export class FlightsService {
       .delete()
       .eq('id', escalaId);
     if (error) throw new Error(error.message);
+    // Auditoría 26-ago: borrar un tramo era MUDO — ni la tripulación ni el
+    // piloto del tramo se enteraban, el calendario quedaba obsoleto y las
+    // alertas de permiso no se re-derivaban. Mismo epílogo que cancelEscala.
+    void this.calendar.syncFlight(row.vuelo_id as string);
+    try {
+      await this.airports.refreshPermisosDeVuelo(row.vuelo_id as string);
+    } catch (err) {
+      this.logger.warn(
+        `refreshPermisosDeVuelo tras deleteEscala falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    void this.notifyTramoCancelado(row, 'oficina lo quitó del itinerario', {
+      titulo: 'Tramo eliminado',
+      accion: 'se eliminó',
+    });
     return { deleted: true, id: escalaId };
   }
 

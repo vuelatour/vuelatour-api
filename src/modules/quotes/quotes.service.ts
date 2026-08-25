@@ -103,7 +103,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -1322,16 +1322,59 @@ export class QuotesService {
     await this.airports.refreshPermisosDeVuelo(vueloId);
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     void this.notifyPernoctaCambiada(updated, pernoctasAntes, pernoctasDespues);
-    // Reagenda desde el cotizador (21-ago): cambiar fecha_vuelo al revisar
-    // también avisa a la tripulación (doc 4.3).
-    if (
-      dto.fecha_vuelo !== undefined &&
-      dto.fecha_vuelo.toISOString() !== (current.fecha_vuelo as string | null)
-    ) {
+    // Reagenda desde el cotizador (21-ago; ampliada 26-ago): fecha de salida
+    // Y del REGRESO avisan a la tripulación (doc 4.3), comparando por
+    // INSTANTE (el string crudo de PostgREST nunca era igual).
+    const fechaTxt = (d: Date) =>
+      d.toLocaleString('es-MX', {
+        dateStyle: 'short',
+        timeStyle: 'short',
+        timeZone: 'America/Cancun',
+      });
+    const cambia = (nueva: Date | undefined, actual: unknown): boolean => {
+      if (nueva === undefined) return false;
+      if (!actual) return true;
+      const t = new Date(actual as string).getTime();
+      return Number.isNaN(t) || nueva.getTime() !== t;
+    };
+    const salidaCambio = cambia(dto.fecha_vuelo, current.fecha_vuelo);
+    const regresoCambio = cambia(
+      dto.fecha_traslado_final,
+      current.fecha_traslado_final,
+    );
+    if (salidaCambio || regresoCambio) {
+      const partes: string[] = [];
+      if (salidaCambio) partes.push(`ahora sale ${fechaTxt(dto.fecha_vuelo!)}`);
+      if (regresoCambio)
+        partes.push(
+          `el REGRESO ahora sale ${fechaTxt(dto.fecha_traslado_final!)}`,
+        );
       void this.notificarTripulacion(updated, {
         titulo: `Vuelo #${current.folio as number} reagendado`,
-        cuerpo: `${updated.origen_iata as string} → ${updated.destino_iata as string} ahora sale ${dto.fecha_vuelo.toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short', timeZone: 'America/Cancun' })} (hora Cancún).`,
+        cuerpo: `${updated.origen_iata as string} → ${updated.destino_iata as string} ${partes.join(' y ')} (hora Cancún).`,
       });
+    }
+    // Cambio de AVIÓN al revisar (26-ago, paridad con assign): la referencia
+    // operativa del cotizador puede pisar vuelo.aeronave_id sin que nadie
+    // se enterara.
+    if (
+      !current.es_externo &&
+      updated.aeronave_id &&
+      updated.aeronave_id !== current.aeronave_id
+    ) {
+      try {
+        const { data: av } = await this.supabase.service
+          .from('aeronave')
+          .select('matricula')
+          .eq('id', updated.aeronave_id as string)
+          .maybeSingle();
+        void this.notificarTripulacion(updated, {
+          titulo: `Vuelo #${current.folio as number}: cambio de avión`,
+          cuerpo: `Ahora vuela en ${(av?.matricula as string) ?? 'otra aeronave'} (${updated.origen_iata as string} → ${updated.destino_iata as string}).`,
+        });
+      } catch {
+        /* best-effort */
+      }
     }
     await this.appendVersionHistory(
       vueloId,
@@ -1988,7 +2031,9 @@ export class QuotesService {
     // se tocan aquí: ni se reordenan ni se borran al re-cotizar.
     const { data: existing, error: exErr } = await this.supabase.service
       .from('escala')
-      .select('id, orden, taco_salida, taco_llegada, fecha_salida_plan')
+      .select(
+        'id, orden, taco_salida, taco_llegada, fecha_salida_plan, piloto_id, cancelada_at, origen_iata, destino_iata',
+      )
       .eq('vuelo_id', vueloId)
       .eq('solo_operativa', false);
     if (exErr) throw new Error(`Failed to read escalas: ${exErr.message}`);
@@ -1999,6 +2044,15 @@ export class QuotesService {
       e.taco_salida != null || e.taco_llegada != null;
 
     const total = escalas?.length ?? 0;
+    // Cambios que la tripulación DEBE saber (auditoría 26-ago): tramos
+    // revividos, agregados y eliminados por la re-cotización. Se junta TODO
+    // en un solo aviso al final (re-cotizar toca varios tramos a la vez y
+    // un push por tramo sería spam).
+    const cambios = {
+      revividos: [] as string[],
+      agregados: [] as string[],
+      eliminados: [] as { ruta: string; piloto_id: string | null }[],
+    };
     for (let idx = 0; idx < total; idx++) {
       const e = escalas![idx];
       const orden = idx + 1;
@@ -2038,6 +2092,11 @@ export class QuotesService {
         // (operación), el nuevo plan lo revive — el cotizador es la fuente
         // de la ruta comercial y un tramo cancelado y cotizado a la vez
         // sería contradictorio.
+        if (actual.cancelada_at != null) {
+          cambios.revividos.push(
+            `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
+          );
+        }
         planFields.cancelada_at = null;
         planFields.cancelada_motivo = null;
         planFields.cancelada_por = null;
@@ -2057,6 +2116,9 @@ export class QuotesService {
         });
         if (error)
           throw new Error(`Failed to insert escala ${orden}: ${error.message}`);
+        cambios.agregados.push(
+          `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
+        );
       }
     }
 
@@ -2077,6 +2139,52 @@ export class QuotesService {
         .eq('id', s.id as string);
       if (error)
         throw new Error(`Failed to delete escala sobrante: ${error.message}`);
+      cambios.eliminados.push({
+        ruta: `${(s.origen_iata as string) ?? '?'} → ${(s.destino_iata as string) ?? '?'}`,
+        piloto_id: (s.piloto_id as string | null) ?? null,
+      });
+    }
+
+    // Aviso consolidado del itinerario (26-ago): antes revivir/agregar/
+    // eliminar tramos al re-cotizar era completamente mudo. En create()
+    // el vuelo nace sin tripulación y no sale nada.
+    if (
+      cambios.revividos.length ||
+      cambios.agregados.length ||
+      cambios.eliminados.length
+    ) {
+      try {
+        const vuelo = await this.findById(vueloId);
+        const partes: string[] = [];
+        if (cambios.agregados.length)
+          partes.push(`tramos nuevos: ${cambios.agregados.join(', ')}`);
+        if (cambios.revividos.length)
+          partes.push(`tramos restaurados: ${cambios.revividos.join(', ')}`);
+        if (cambios.eliminados.length)
+          partes.push(
+            `tramos eliminados: ${cambios.eliminados.map((x) => x.ruta).join(', ')}`,
+          );
+        void this.notificarTripulacion(vuelo, {
+          titulo: `Vuelo #${vuelo.folio as number}: cambió el itinerario`,
+          cuerpo: `Al re-cotizar: ${partes.join(' · ')}.`,
+        });
+        // El piloto EXPLÍCITO de un tramo eliminado puede ya no estar en la
+        // tripulación vigente: aviso directo (patrón "quitado").
+        for (const el of cambios.eliminados) {
+          if (!el.piloto_id) continue;
+          void this.notifications.notifyUser(el.piloto_id, {
+            tipo: 'alerta_sistema',
+            titulo: `Tramo eliminado · vuelo #${vuelo.folio as number}`,
+            cuerpo: `El tramo ${el.ruta} que tenías asignado se eliminó al re-cotizar.`,
+            data: { vuelo_id: vueloId, folio: vuelo.folio },
+            link: `/flights/${vueloId}`,
+          });
+        }
+      } catch (err) {
+        this.logger.warn(
+          `aviso de itinerario en replaceEscalas falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
   }
 
