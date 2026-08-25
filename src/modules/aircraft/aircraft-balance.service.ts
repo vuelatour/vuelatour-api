@@ -887,9 +887,12 @@ export class AircraftBalanceService {
               g,
               mxnTua ?? 0,
               sufijoTua,
+              // Mismo vocabulario que el desglose de las notas del gasto;
+              // la regla "no suma al costo" vive en el pie ** de la hoja
+              // (leyendas distintas parecían texto inventado — 24-ago).
               mxnTua != null
-                ? `TUA $${fmtMonto(mxnTua)} (no suma al costo)`
-                : `TUA $${fmtMonto(num(g.monto) ?? 0)} ${g.moneda ?? 'USD'} sin TC (no suma al costo)`,
+                ? `TUA $${fmtMonto(mxnTua)}**`
+                : `TUA $${fmtMonto(num(g.monto) ?? 0)} ${g.moneda ?? 'USD'} sin TC**`,
             ),
           );
           continue;
@@ -953,13 +956,16 @@ export class AircraftBalanceService {
           // columna completa como siempre.
           const sep = separarPartes();
           if (sep) {
+            // Espejo EXACTO del desglose impreso en las notas del gasto
+            // (Operación / TUA (IVA incluido)): leyendas distintas hacían
+            // dudar de la fuente. La regla del TUA vive en el pie **.
             const trozos = [
-              sep.opParte > 0 ? `Op $${fmtMonto(sep.opParte)}` : null,
+              sep.opParte > 0 ? `Operación $${fmtMonto(sep.opParte)}` : null,
               sep.fboParte > 0
                 ? `FBO $${fmtMonto(sep.fboParte)} (en OTROS)`
                 : null,
               sep.tuaParte > 0
-                ? `TUA $${fmtMonto(sep.tuaParte)} (no suma al costo)`
+                ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
                 : null,
             ]
               .filter(Boolean)
@@ -980,7 +986,7 @@ export class AircraftBalanceService {
                       ? `FBO $${fmtMonto(sep.fboParte)} (la operación va en OPERACIONES)`
                       : `FBO $${fmtMonto(sep.fboParte)}`,
                     sep.opParte <= 0 && sep.tuaParte > 0
-                      ? `TUA $${fmtMonto(sep.tuaParte)} (no suma al costo)`
+                      ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
                       : null,
                   ]
                     .filter(Boolean)
