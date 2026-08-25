@@ -10,10 +10,12 @@ export interface PushInput {
   data?: Record<string, string>;
 }
 
+// Solo códigos que de verdad significan "este token murió". OJO:
+// 'messaging/invalid-argument' es un error de PAYLOAD, no de token — estaba
+// aquí y un payload malo podía borrar tokens VÁLIDOS en masa (25-ago).
 const INVALID_TOKEN_CODES = new Set([
   'messaging/registration-token-not-registered',
   'messaging/invalid-registration-token',
-  'messaging/invalid-argument',
 ]);
 
 /**
@@ -84,22 +86,43 @@ export class PushService implements OnModuleInit {
     try {
       const { data, error } = await this.supabase.service
         .from('dispositivo_push')
-        .select('token')
+        .select('token, plataforma')
         .eq('usuario_id', usuarioId);
       if (error) throw new Error(error.message);
 
-      const tokens = (data ?? []).map((d) => (d as { token: string }).token);
+      const filas = (data ?? []) as { token: string; plataforma: string | null }[];
+      const tokens = filas.map((d) => d.token);
       if (tokens.length === 0) return;
 
       const res = await this.messaging.sendEachForMulticast({
         tokens,
         notification: { title: push.title, body: push.body },
         data: push.data ?? {},
+        // iOS/APNs: prioridad alta + sonido; sin este bloque el banner llega
+        // mudo (o de plano no se muestra) y "parece que no llegó" (25-ago).
+        apns: {
+          headers: {
+            'apns-priority': '10',
+            'apns-push-type': 'alert',
+          },
+          payload: {
+            aps: { sound: 'default' },
+          },
+        },
+        android: {
+          priority: 'high',
+        },
       });
 
       const stale: string[] = [];
       res.responses.forEach((r, i) => {
-        if (!r.success && r.error && INVALID_TOKEN_CODES.has(r.error.code)) {
+        if (r.success) return;
+        // El fallo era INVISIBLE (nadie consultaba failureCount): un iOS sin
+        // llave APNs en Firebase fallaba por token, en silencio, siempre.
+        this.logger.warn(
+          `push a ${usuarioId} falló [${filas[i]?.plataforma ?? '?'} …${tokens[i].slice(-8)}]: ${r.error?.code ?? '?'} ${r.error?.message ?? ''}`,
+        );
+        if (r.error && INVALID_TOKEN_CODES.has(r.error.code)) {
           stale.push(tokens[i]);
         }
       });
