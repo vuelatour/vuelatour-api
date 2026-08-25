@@ -40,7 +40,7 @@ const DISCREPANCIA_COLS =
   'id, aeronave_id, vuelo_id, descripcion, severidad, estado, reportado_por, fecha_reporte, resolucion, fecha_resolucion, resuelto_por, notas, created_at, updated_at';
 
 const IMAGEN_COLS =
-  'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, size_bytes, content_type, created_at, updated_at';
+  'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, etiqueta, size_bytes, content_type, created_at, updated_at';
 
 const IMAGENES_BUCKET = 'aeronave-imagenes';
 
@@ -1548,11 +1548,21 @@ export class AircraftService {
     if (dto.es_principal === true && !current.es_principal) {
       await this.unsetPrincipal(current.aeronave_id as string);
     }
+    // Etiqueta del PDF (EXTERIOR/INTERIOR): única por aeronave — se limpia
+    // de la imagen que la tuviera antes (índice único parcial en BD).
+    if (dto.etiqueta === 'EXTERIOR' || dto.etiqueta === 'INTERIOR') {
+      await this.supabase.service
+        .from('aeronave_imagen')
+        .update({ etiqueta: null, updated_by: userId })
+        .eq('aeronave_id', current.aeronave_id as string)
+        .eq('etiqueta', dto.etiqueta);
+    }
 
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.alt_text !== undefined) patch.alt_text = dto.alt_text;
     if (dto.orden !== undefined) patch.orden = dto.orden;
     if (dto.es_principal !== undefined) patch.es_principal = dto.es_principal;
+    if (dto.etiqueta !== undefined) patch.etiqueta = dto.etiqueta;
 
     const { data, error } = await this.supabase.service
       .from('aeronave_imagen')

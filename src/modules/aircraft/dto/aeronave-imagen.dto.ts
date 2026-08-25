@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -70,6 +71,13 @@ export class UpdateAeronaveImagenDto {
   @IsInt()
   @Min(0)
   orden?: number;
+
+  /** Uso en el PDF de cotización: EXTERIOR / INTERIOR (una por aeronave);
+   *  null = quitar la etiqueta. */
+  @ApiPropertyOptional({ enum: ['EXTERIOR', 'INTERIOR'] })
+  @IsOptional()
+  @IsIn(['EXTERIOR', 'INTERIOR'])
+  etiqueta?: 'EXTERIOR' | 'INTERIOR' | null;
 }
 
 export class ReorderAeronaveImagenesDto {

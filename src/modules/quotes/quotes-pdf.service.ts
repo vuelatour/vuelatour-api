@@ -49,6 +49,54 @@ export class QuotesPdfService {
       }
     }
 
+    // Aeronave cotizada (26-ago): matrícula + fotos EXTERIOR/INTERIOR desde
+    // la galería aeronave_imagen (etiqueta; bucket público → fetch directo).
+    // Best-effort: sin avión o sin fotos etiquetadas, el PDF sale sin sección.
+    let matricula: string | null = null;
+    let fotoExterior: string | null = null;
+    let fotoInterior: string | null = null;
+    if (quote.aeronave_id) {
+      const [{ data: av }, { data: imgs }] = await Promise.all([
+        this.supabase.service
+          .from('aeronave')
+          .select('matricula')
+          .eq('id', quote.aeronave_id as string)
+          .maybeSingle(),
+        this.supabase.service
+          .from('aeronave_imagen')
+          .select('url, etiqueta, content_type')
+          .eq('aeronave_id', quote.aeronave_id as string)
+          .in('etiqueta', ['EXTERIOR', 'INTERIOR']),
+      ]);
+      matricula = (av?.matricula as string) ?? null;
+      const descargar = async (
+        url: string | null | undefined,
+        mime: string | null | undefined,
+      ): Promise<string | null> => {
+        if (!url) return null;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return null;
+          const buf = Buffer.from(await res.arrayBuffer());
+          // 8 MB por foto: el payload viaja en JSON a pyservices.
+          if (buf.byteLength > 8 * 1024 * 1024) return null;
+          return `data:${mime || 'image/jpeg'};base64,${buf.toString('base64')}`;
+        } catch {
+          return null;
+        }
+      };
+      const ext = (imgs ?? []).find((i) => i.etiqueta === 'EXTERIOR');
+      const int_ = (imgs ?? []).find((i) => i.etiqueta === 'INTERIOR');
+      fotoExterior = await descargar(
+        ext?.url as string,
+        ext?.content_type as string,
+      );
+      fotoInterior = await descargar(
+        int_?.url as string,
+        int_?.content_type as string,
+      );
+    }
+
     const ivaRaw = num(quote.iva_pct) ?? 0;
     // Recibo del cliente: solo tramos COMERCIALES (los operativos internos no se cobran ni se muestran).
     const escalas = (
@@ -86,6 +134,51 @@ export class QuotesPdfService {
           .filter((d) => d.clave === 'COMISION_VENDEDOR')
           .reduce((acc, d) => acc + (num(d.monto_usd) ?? 0), 0)
       : 0;
+
+    // Coordenadas de los aeropuertos del itinerario para el MAPA del PDF.
+    const iatas = [
+      ...new Set(
+        escalas.flatMap((e) => [
+          (e.origen_iata as string) ?? '',
+          (e.destino_iata as string) ?? '',
+        ]),
+      ),
+    ].filter(Boolean);
+    const coordPorIata = new Map<string, { lat: number; lon: number }>();
+    if (iatas.length > 0) {
+      const { data: aps } = await this.supabase.service
+        .from('aeropuerto')
+        .select('iata, latitud, longitud')
+        .in('iata', iatas);
+      for (const a of aps ?? []) {
+        const lat = num(a.latitud);
+        const lon = num(a.longitud);
+        if (lat != null && lon != null) {
+          coordPorIata.set((a.iata as string).toUpperCase(), { lat, lon });
+        }
+      }
+    }
+    const mapaPuntos = escalas
+      .map((e, i) => {
+        const o = coordPorIata.get(
+          ((e.origen_iata as string) ?? '').toUpperCase(),
+        );
+        const d = coordPorIata.get(
+          ((e.destino_iata as string) ?? '').toUpperCase(),
+        );
+        if (!o || !d) return null;
+        return {
+          orden: num(e.orden) ?? i + 1,
+          origen_iata: (e.origen_iata as string) ?? '',
+          destino_iata: (e.destino_iata as string) ?? '',
+          o_lat: o.lat,
+          o_lon: o.lon,
+          d_lat: d.lat,
+          d_lon: d.lon,
+          es_ferry: e.es_ferry === true,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
 
     const payload = {
       folio: String(quote.folio ?? ''),
@@ -169,6 +262,11 @@ export class QuotesPdfService {
       tc_usd_mxn: num(quote.tc_usd_mxn),
       moneda: 'USD',
       notas: (quote.notas as string) ?? null,
+      // PDF profesional (26-ago): matrícula, fotos y mapa de ruta.
+      matricula,
+      foto_exterior: fotoExterior,
+      foto_interior: fotoInterior,
+      mapa_puntos: mapaPuntos,
     };
 
     const controller = new AbortController();
