@@ -938,6 +938,34 @@ export class ExpensesService {
         'La carga de combustible necesita el avión: selecciona la aeronave (o un vuelo del cual tomarla).',
       );
     }
+    // TARJETA CORP "por detrás" (26-ago): el usuario solo elige "Tarjeta
+    // corporativa" en la app — la TERMINACIÓN se sella sola con este orden:
+    // (1) valor explícito del cliente (APK viejo con selector / oficina),
+    // (2) la que la IA leyó en el VOUCHER (máxima fidelidad: es la tarjeta
+    //     que de verdad pagó), (3) la tarjeta ASIGNADA al capturador en el
+    // catálogo (vínculo de Tarjetas corp.; con varias, la más reciente).
+    // Así el tablero "por tarjeta" queda completo sin confundir a nadie; si
+    // el voucher contradice lo sellado, la discrepancia IA lo grita.
+    let tarjetaTerminacion = dto.tarjeta_terminacion;
+    if (!tarjetaTerminacion && String(dto.medio_pago) === 'TARJETA_CORP') {
+      const iaTerm = (
+        dto.valor_ia_extraido as { tarjeta_terminacion?: unknown } | undefined
+      )?.tarjeta_terminacion;
+      if (typeof iaTerm === 'string' && /^\d{4}$/.test(iaTerm)) {
+        tarjetaTerminacion = iaTerm;
+      } else {
+        const { data: tj } = await this.supabase.service
+          .from('tarjeta_corporativa')
+          .select('terminacion')
+          .eq('usuario_id', capturaId)
+          .eq('activa', true)
+          .order('updated_at', { ascending: false })
+          .limit(1);
+        tarjetaTerminacion =
+          (tj?.[0]?.terminacion as string | undefined) ?? undefined;
+      }
+    }
+
     // VALIDACIÓN DE MATRÍCULA (26-ago, caso ASUR Mérida vuelo #105): si la
     // IA leyó una matrícula en el comprobante y NO es la del avión al que
     // quedó el gasto (elegido o HEREDADO del vuelo — en cambios de avión a
@@ -985,7 +1013,7 @@ export class ExpensesService {
       tc_gasto: dto.tc_gasto,
       fecha_gasto: dto.fecha_gasto,
       medio_pago: dto.medio_pago,
-      tarjeta_terminacion: dto.tarjeta_terminacion,
+      tarjeta_terminacion: tarjetaTerminacion,
       vuelo_id: dto.vuelo_id,
       escala_id: dto.escala_id,
       aeronave_id: aeronaveId,
