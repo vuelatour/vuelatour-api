@@ -74,7 +74,7 @@ export class QuotesPdfService {
           .in('etiqueta', ['EXTERIOR', 'INTERIOR']),
       ]);
       matricula = (av?.matricula as string) ?? null;
-      avion = (av as Record<string, unknown> | null) ?? null;
+      avion = av ?? null;
       const descargar = async (
         url: string | null | undefined,
         mime: string | null | undefined,
@@ -295,7 +295,7 @@ export class QuotesPdfService {
         const kts = num(avion?.velocidad_crucero_kts);
         if (!kts || kts <= 0) return null;
         for (const e of escalas) {
-          const mn = num((e as Record<string, unknown>).millas_nauticas);
+          const mn = num(e.millas_nauticas);
           if (mn != null && mn > 0) max = Math.max(max ?? 0, mn / kts);
         }
         return max;
