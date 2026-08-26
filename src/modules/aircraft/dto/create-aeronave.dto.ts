@@ -1,5 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsIn,
@@ -12,7 +14,41 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateNested,
 } from 'class-validator';
+
+/**
+ * Etapa del programa cíclico de servicio: intervalo en horas + tareas mayores
+ * de la etapa (cambio de aceite, filtros, ...). Sustituye a la captura por
+ * comas del panel, que descartaba el texto en silencio.
+ */
+export class ServicioEtapaDto {
+  @ApiProperty({ description: 'Intervalo de la etapa en horas', example: 50 })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  intervalo_hr!: number;
+
+  @ApiPropertyOptional({
+    description: 'Nombre de la etapa (ej. "Servicio 100 hrs / Anual")',
+    maxLength: 80,
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  nombre?: string;
+
+  @ApiPropertyOptional({
+    description: 'Tareas mayores de la etapa',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(40)
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  tareas?: string[];
+}
 
 export class CreateAeronaveDto {
   @ApiProperty({ example: 'XB-PEV', maxLength: 10 })
@@ -116,6 +152,35 @@ export class CreateAeronaveDto {
   @IsNumber()
   @Min(0)
   servicio_horas_base?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Etapas del programa de servicio con sus tareas. Fuente de verdad del programa: al mandarlas, servicio_intervalos se deriva de aquí (no mandar ambos).',
+    type: [ServicioEtapaDto],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(12)
+  @ValidateNested({ each: true })
+  @Type(() => ServicioEtapaDto)
+  servicio_etapas?: ServicioEtapaDto[];
+
+  @ApiPropertyOptional({
+    description:
+      'Horas TOTALES del planeador cuando el tacómetro marcaba planeador_taco_ref (tiempo total = base + hobbs − ref). 0/0 = usar el tacómetro tal cual.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  planeador_horas_base?: number;
+
+  @ApiPropertyOptional({
+    description: 'Lectura del tacómetro al capturar planeador_horas_base.',
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  planeador_taco_ref?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

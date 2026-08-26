@@ -96,14 +96,25 @@ export class CreateEngineDto {
 
   @ApiPropertyOptional({
     description:
-      'TURM: tacómetro del avión en el último overhaul (misma escala que los tacos)',
+      'LEGADO: tacómetro del avión en el último overhaul (escala del taco del avión; no sobrevive traslados). Usar turm_componente.',
     default: 0,
+    deprecated: true,
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   turm?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'TURM en marco del COMPONENTE (como la bitácora física): horas de vida del motor en su último overhaul. TSO = horas de vida − TURM. Viaja con el motor al trasladarlo.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  turm_componente?: number;
 
   @ApiProperty({ description: 'Time Between Overhauls (horas)', example: 1700 })
   @Type(() => Number)
@@ -126,6 +137,36 @@ export class CreateEngineDto {
 }
 
 export class UpdateEngineDto extends PartialType(CreateEngineDto) {}
+
+export class OverhaulEngineDto {
+  @ApiPropertyOptional({
+    description: 'Fecha del overhaul (YYYY-MM-DD); default hoy (Cancún)',
+  })
+  @IsOptional()
+  @IsDateString()
+  fecha?: string;
+
+  @ApiPropertyOptional({
+    description: 'Notas / taller / referencia del overhaul',
+  })
+  @IsOptional()
+  @IsString()
+  motivo?: string;
+
+  @ApiPropertyOptional({ description: 'Nuevo TBO en horas (si cambió)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  tbo_horas?: number;
+
+  @ApiPropertyOptional({
+    description: 'Nuevo límite calendario del overhaul (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  tbo_fecha?: string | null;
+}
 
 export class TransplantEngineDto {
   @ApiProperty({ description: 'Nueva aeronave destino' })

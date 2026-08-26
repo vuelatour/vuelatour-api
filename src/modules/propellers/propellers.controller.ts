@@ -17,6 +17,8 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreatePropellerDto,
   ListPropellersQuery,
+  OverhaulPropellerDto,
+  TransplantPropellerDto,
   UpdatePropellerDto,
 } from './dto/propellers.dto';
 import { PropellersService } from './propellers.service';
@@ -62,5 +64,42 @@ export class PropellersController {
   @ApiOperation({ summary: 'Delete propeller (ADMIN)' })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.propellers.remove(id);
+  }
+
+  @Post(':id/transplant')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Move propeller to another aircraft (ADMIN). La vida viaja con la hélice; queda en bitácora.',
+  })
+  transplant(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TransplantPropellerDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.propellers.transplant(id, dto, c.userId);
+  }
+
+  @Post(':id/overhaul')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Registrar overhaul (ADMIN): TSO a 0, TSN congelado, ancla al Hobbs actual; queda en bitácora.',
+  })
+  overhaul(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: OverhaulPropellerDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.propellers.overhaul(id, dto, c.userId);
+  }
+
+  @Get(':id/eventos')
+  @ApiOperation({
+    summary:
+      'Bitácora de la hélice: instalaciones, traslados, overhauls y ajustes de base.',
+  })
+  eventos(@Param('id', ParseUUIDPipe) id: string) {
+    return this.propellers.listEventos(id);
   }
 }

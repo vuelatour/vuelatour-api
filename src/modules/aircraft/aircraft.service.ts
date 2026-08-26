@@ -31,7 +31,9 @@ import type {
 } from './dto/upsert-aeronave-discrepancia.dto';
 
 const AERONAVE_COLS =
-  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, permiso_afac_usd_hr, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, created_at, updated_at';
+  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, permiso_afac_usd_hr, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, planeador_horas_base, planeador_taco_ref, created_at, updated_at';
+
+const ETAPA_COLS = 'id, intervalo_hr, nombre, tareas';
 
 const SEGURO_COLS =
   'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
@@ -87,7 +89,7 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .eq('aeronave_id', id),
       // Las hélices también agotan TBO (llevan turm desde ago 2026): antes el
@@ -95,7 +97,7 @@ export class AircraftService {
       this.supabase.service
         .from('helice')
         .select(
-          'posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .eq('aeronave_id', id),
       this.supabase.service
@@ -258,12 +260,19 @@ export class AircraftService {
       razones.push(`Póliza de seguro vencida (${ultimaVigencia})`);
 
     // Próximo servicio por horas: MISMA regla que tacometroHistorial
-    // (this.proximoServicio sobre el programa cíclico del avión).
+    // (this.proximoServicio sobre el programa cíclico del avión), enriquecida
+    // con las tareas de la(s) etapa(s) del hito.
     const intervalos = ((aeronave.servicio_intervalos as unknown[]) ?? []).map(
       Number,
     );
     const baseServicio = Number(aeronave.servicio_horas_base ?? 0);
-    const prox = this.proximoServicio(intervalos, baseServicio, maxHobbs ?? 0);
+    const etapasServicio = await this.etapasDeServicio(id);
+    const prox = this.proximoServicioDetallado(
+      intervalos,
+      baseServicio,
+      maxHobbs ?? 0,
+      etapasServicio,
+    );
 
     return {
       airworthiness: {
@@ -277,12 +286,15 @@ export class AircraftService {
       },
       // Estado de HOY (contrato acordado con el panel: estos nombres exactos).
       horas_actuales: maxHobbs != null ? Number(maxHobbs.toFixed(1)) : null,
+      tiempo_total_planeador:
+        maxHobbs != null ? this.tiempoTotalPlaneador(aeronave, maxHobbs) : null,
       en_vuelo: (enVueloRes.data ?? []).length > 0,
       proximo_servicio: prox
         ? {
-            titulo: `Servicio de ${prox.intervalo} hr`,
+            titulo: prox.nombre ?? `Servicio de ${prox.intervalo} hr`,
             horas_objetivo: prox.a_las,
             faltan_hr: prox.faltan,
+            tareas: prox.tareas,
           }
         : null,
       // Distingue "sin programa capturado" de "sin datos": sin esto el KPI
@@ -389,26 +401,28 @@ export class AircraftService {
       Number,
     );
     const base = Number(aeronave.servicio_horas_base ?? 0);
+    const etapas = await this.etapasDeServicio(id);
 
     // Motores y hélices con horas de vida vivas + estatus de overhaul (TBO).
     const [motoresRes, helicesRes] = await Promise.all([
       this.supabase.service
         .from('motor')
         .select(
-          'id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'id, posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'id, posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
     ]);
     const componentes = [
       ...(motoresRes.data ?? []).map((m) => ({
+        id: m.id as string,
         tipo: 'MOTOR' as const,
         posicion: m.posicion as string,
         numero_serie: m.numero_serie as string,
@@ -419,6 +433,7 @@ export class AircraftService {
       // TSO caía al respaldo "horas de vida" y la app del mecánico mostraba
       // un "restantes a overhaul" distinto al del panel.
       ...(helicesRes.data ?? []).map((h) => ({
+        id: h.id as string,
         tipo: 'HELICE' as const,
         posicion: h.posicion as string,
         numero_serie: h.numero_serie as string,
@@ -429,9 +444,23 @@ export class AircraftService {
 
     return {
       horas_actuales: Number(horasActuales.toFixed(1)),
+      // Tiempo TOTAL del planeador (base capturada + delta del taco); con
+      // base 0/0 equivale al tacómetro.
+      tiempo_total_planeador: this.tiempoTotalPlaneador(
+        aeronave,
+        horasActuales,
+      ),
+      planeador_horas_base: Number(aeronave.planeador_horas_base ?? 0),
+      planeador_taco_ref: Number(aeronave.planeador_taco_ref ?? 0),
       servicio_intervalos: intervalos,
       servicio_horas_base: base,
-      proximo_servicio: this.proximoServicio(intervalos, base, horasActuales),
+      servicio_etapas: etapas,
+      proximo_servicio: this.proximoServicioDetallado(
+        intervalos,
+        base,
+        horasActuales,
+        etapas,
+      ),
       componentes,
       historial: items,
     };
@@ -451,7 +480,9 @@ export class AircraftService {
    */
   proximoServicio(intervalos: number[], base: number, horas: number) {
     const ints = [
-      ...new Set(intervalos.map(Number).filter((n) => Number.isFinite(n) && n > 0)),
+      ...new Set(
+        intervalos.map(Number).filter((n) => Number.isFinite(n) && n > 0),
+      ),
     ];
     if (ints.length === 0) return null;
     // Primer múltiplo de cada intervalo ESTRICTAMENTE arriba de `horas`
@@ -478,6 +509,151 @@ export class AircraftService {
       intervalo,
       faltan: r1(aLas - horas),
     };
+  }
+
+  /** Etapas del programa de servicio (intervalo + nombre + tareas). */
+  async etapasDeServicio(aeronaveId: string): Promise<
+    Array<{
+      id: string;
+      intervalo_hr: number;
+      nombre: string | null;
+      tareas: string[];
+    }>
+  > {
+    const { data, error } = await this.supabase.service
+      .from('aeronave_servicio_etapa')
+      .select(ETAPA_COLS)
+      .eq('aeronave_id', aeronaveId)
+      .order('intervalo_hr');
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((e) => ({
+      id: e.id as string,
+      intervalo_hr: Number(e.intervalo_hr),
+      nombre: (e.nombre as string | null) ?? null,
+      tareas: (e.tareas as string[] | null) ?? [],
+    }));
+  }
+
+  /**
+   * Próximo servicio ENRIQUECIDO con las tareas de la(s) etapa(s) que caen en
+   * ese hito. Regla del mecánico: en hitos coincidentes el servicio mayor
+   * incluye a los menores — las tareas se UNEN (menor→mayor, sin duplicados).
+   */
+  proximoServicioDetallado(
+    intervalos: number[],
+    base: number,
+    horas: number,
+    etapas: Array<{
+      intervalo_hr: number;
+      nombre: string | null;
+      tareas: string[];
+    }>,
+  ) {
+    const prox = this.proximoServicio(intervalos, base, horas);
+    if (!prox) return null;
+    const r1 = (n: number) => Number(n.toFixed(1));
+    const ints = [
+      ...new Set(
+        intervalos.map(Number).filter((n) => Number.isFinite(n) && n > 0),
+      ),
+    ];
+    // Todos los intervalos cuyo próximo hito coincide con el hito ganador.
+    const incluidos = ints
+      .filter((int) => {
+        const pasos =
+          horas < base ? 1 : Math.floor((r1(horas) - r1(base)) / int) + 1;
+        return Math.abs(r1(base + int * pasos) - prox.a_las) <= 0.05;
+      })
+      .sort((a, b) => a - b);
+    const tareas: string[] = [];
+    for (const int of incluidos) {
+      const etapa = etapas.find((e) => Math.abs(e.intervalo_hr - int) <= 0.05);
+      for (const t of etapa?.tareas ?? []) {
+        if (!tareas.includes(t)) tareas.push(t);
+      }
+    }
+    const etapaGanadora = etapas.find(
+      (e) => Math.abs(e.intervalo_hr - prox.intervalo) <= 0.05,
+    );
+    return {
+      ...prox,
+      nombre: etapaGanadora?.nombre ?? null,
+      etapas_incluidas: incluidos,
+      tareas,
+    };
+  }
+
+  /**
+   * Tiempo TOTAL del planeador (célula): horas base capturadas + lo volado
+   * desde que el tacómetro marcaba la referencia. Con base/ref en 0 equivale
+   * al tacómetro (comportamiento histórico); el taco sigue siendo el eje
+   * operativo — esto solo agrega la base real del avión (bitácoras previas).
+   */
+  tiempoTotalPlaneador(
+    aeronave: Record<string, unknown>,
+    hobbs: number,
+  ): number {
+    const base = Number(aeronave.planeador_horas_base ?? 0);
+    const ref = Number(aeronave.planeador_taco_ref ?? 0);
+    return Number((base + Math.max(0, hobbs - ref)).toFixed(1));
+  }
+
+  /**
+   * Sincroniza las etapas del programa con la tabla y deriva
+   * aeronave.servicio_intervalos (columna de lectura para app/alertas/panel).
+   * Único camino de escritura del programa: etapas y arreglo jamás divergen.
+   */
+  private async syncServicioEtapas(
+    aeronaveId: string,
+    etapas: Array<{ intervalo_hr: number; nombre?: string; tareas?: string[] }>,
+    userId: string,
+  ): Promise<number[]> {
+    // Dedupe por intervalo (el último gana) y orden ascendente.
+    const porIntervalo = new Map<
+      number,
+      { intervalo_hr: number; nombre?: string; tareas?: string[] }
+    >();
+    for (const e of etapas) {
+      const int = Number(Number(e.intervalo_hr).toFixed(2));
+      if (Number.isFinite(int) && int > 0) porIntervalo.set(int, e);
+    }
+    const limpias = [...porIntervalo.values()].sort(
+      (a, b) => Number(a.intervalo_hr) - Number(b.intervalo_hr),
+    );
+    const intervalos = limpias.map((e) => Number(e.intervalo_hr));
+
+    // Borrar etapas que ya no están y upsert de las vigentes.
+    const del = this.supabase.service
+      .from('aeronave_servicio_etapa')
+      .delete()
+      .eq('aeronave_id', aeronaveId);
+    const { error: delErr } = await (intervalos.length > 0
+      ? del.not(
+          'intervalo_hr',
+          'in',
+          `(${intervalos.map((i) => i.toString()).join(',')})`,
+        )
+      : del);
+    if (delErr) throw new Error(delErr.message);
+
+    if (limpias.length > 0) {
+      const { error: upErr } = await this.supabase.service
+        .from('aeronave_servicio_etapa')
+        .upsert(
+          limpias.map((e) => ({
+            aeronave_id: aeronaveId,
+            intervalo_hr: e.intervalo_hr,
+            nombre: e.nombre?.trim() || null,
+            tareas: (e.tareas ?? [])
+              .map((t) => t.trim())
+              .filter((t) => t.length > 0),
+            updated_by: userId,
+          })),
+          { onConflict: 'aeronave_id,intervalo_hr' },
+        );
+      if (upErr) throw new Error(upErr.message);
+    }
+    return intervalos;
   }
 
   /**
@@ -518,13 +694,13 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'aeronave_id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'aeronave_id, posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .in('aeronave_id', ids),
       this.supabase.service
         .from('helice')
         .select(
-          'aeronave_id, posicion, numero_serie, horas_totales, turm, tbo_horas, aeronave_horas_ref',
+          'aeronave_id, posicion, numero_serie, horas_totales, turm, tso_base, tbo_horas, aeronave_horas_ref',
         )
         .in('aeronave_id', ids),
       this.supabase.service
@@ -710,14 +886,14 @@ export class AircraftService {
       this.supabase.service
         .from('motor')
         .select(
-          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
+          'id, posicion, numero_serie, tipo, fabricante, modelo, horas_totales, turm, tso_base, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
       this.supabase.service
         .from('helice')
         .select(
-          'id, posicion, numero_serie, fabricante, modelo, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
+          'id, posicion, numero_serie, fabricante, modelo, horas_totales, turm, tso_base, tbo_horas, tbo_fecha, aeronave_horas_ref, notas, created_at, updated_at, actualizado_por:updated_by(nombre)',
         )
         .eq('aeronave_id', id)
         .order('posicion'),
@@ -1033,7 +1209,9 @@ export class AircraftService {
   }
 
   /** Horas actuales (último Hobbs) de un avión = máximo tacómetro registrado. */
-  private async currentHobbs(aeronaveId: string): Promise<number> {
+  // Público a propósito: engines/propellers usan ESTE eje de horas (no
+  // duplicar la regla de asignación por tramo).
+  async currentHobbs(aeronaveId: string): Promise<number> {
     const escalas = await this.escalasDelAvion(aeronaveId);
     let max = 0;
     for (const e of escalas) {
@@ -1065,17 +1243,35 @@ export class AircraftService {
     horas_actuales: number;
     tbo_restante: number | null;
     horas_desde_overhaul: number;
+    turm_componente: number | null;
     vida_usada_pct: number | null;
     hobbs_avion: number;
   } {
     const ht = Number(c.horas_totales ?? 0);
     const ref =
       c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
-    const horasActuales =
-      ref != null ? Number((ht + Math.max(0, hobbs - ref)).toFixed(1)) : ht;
+    const delta = ref != null ? Math.max(0, hobbs - ref) : 0;
+    const horasActuales = Number((ht + delta).toFixed(1));
     const tbo = Number(c.tbo_horas ?? 0);
+    // TSO canónico: tso_base viaja CON el componente (marco del componente,
+    // anclado en aeronave_horas_ref) y sobrevive traslados entre aviones.
+    // Respaldo legado: turm en escala del taco del avión (TSO = hobbs − turm),
+    // solo válido mientras el componente no se haya movido de avión.
+    // Sin overhaul registrado: TSO = TSN (horas de vida).
+    const tsoBase = c.tso_base != null ? Number(c.tso_base) : null;
     const turm = conTurm ? Number(c.turm ?? 0) : 0;
-    const desdeOverhaul = turm > 0 ? Math.max(0, hobbs - turm) : horasActuales;
+    const desdeOverhaul =
+      tsoBase != null
+        ? Math.max(0, tsoBase + delta)
+        : turm > 0
+          ? Math.max(0, hobbs - turm)
+          : horasActuales;
+    // TURM en marco del componente (como la bitácora física AFAC): horas de
+    // vida del componente en su último overhaul. Null = sin overhaul.
+    const tuvoOverhaul = tsoBase != null || turm > 0;
+    const turmComponente = tuvoOverhaul
+      ? Number(Math.max(0, horasActuales - desdeOverhaul).toFixed(1))
+      : null;
     const tboRestante =
       tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;
     // Porcentaje de vida consumida del ciclo TBO (para la barra del panel);
@@ -1092,15 +1288,17 @@ export class AircraftService {
       horas_actuales: horasActuales,
       tbo_restante: tboRestante,
       horas_desde_overhaul: Number(desdeOverhaul.toFixed(1)),
+      turm_componente: turmComponente,
       vida_usada_pct: vidaUsadaPct,
       hobbs_avion: hobbs,
     };
   }
 
   async create(dto: CreateAeronaveDto, createdBy: string) {
+    const { servicio_etapas, ...rest } = dto;
     const { data, error } = await this.supabase.service
       .from('aeronave')
-      .insert({ ...dto, created_by: createdBy, updated_by: createdBy })
+      .insert({ ...rest, created_by: createdBy, updated_by: createdBy })
       .select(AERONAVE_COLS)
       .maybeSingle();
     if (error) {
@@ -1108,14 +1306,57 @@ export class AircraftService {
         throw new BadRequestException('matricula already exists');
       throw new Error(error.message);
     }
+    if (servicio_etapas !== undefined) {
+      return this.update(
+        (data as { id: string }).id,
+        { servicio_etapas },
+        createdBy,
+      );
+    }
     return data!;
   }
 
   async update(id: string, dto: UpdateAeronaveDto, updatedBy: string) {
     if (Object.keys(dto).length === 0) return this.findById(id);
+    const { servicio_etapas, ...rest } = dto;
+    const patch: Record<string, unknown> = { ...rest, updated_by: updatedBy };
+    // Programa de servicio: las etapas (con tareas) son la fuente de verdad y
+    // servicio_intervalos se deriva de ellas — un solo camino de escritura.
+    if (servicio_etapas !== undefined) {
+      patch.servicio_intervalos = await this.syncServicioEtapas(
+        id,
+        servicio_etapas,
+        updatedBy,
+      );
+    } else if (rest.servicio_intervalos !== undefined) {
+      // Camino legado (solo números): sincroniza etapas CONSERVANDO nombre y
+      // tareas de los intervalos que se quedan.
+      const actuales = await this.etapasDeServicio(id);
+      const etapas = [
+        ...new Set(
+          (rest.servicio_intervalos ?? [])
+            .map(Number)
+            .filter((n) => Number.isFinite(n) && n > 0),
+        ),
+      ].map((int) => {
+        const previa = actuales.find(
+          (e) => Math.abs(e.intervalo_hr - int) <= 0.05,
+        );
+        return {
+          intervalo_hr: int,
+          nombre: previa?.nombre ?? undefined,
+          tareas: previa?.tareas ?? [],
+        };
+      });
+      patch.servicio_intervalos = await this.syncServicioEtapas(
+        id,
+        etapas,
+        updatedBy,
+      );
+    }
     const { data, error } = await this.supabase.service
       .from('aeronave')
-      .update({ ...dto, updated_by: updatedBy })
+      .update(patch)
       .eq('id', id)
       .select(AERONAVE_COLS)
       .maybeSingle();

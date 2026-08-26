@@ -86,14 +86,25 @@ export class CreatePropellerDto {
 
   @ApiPropertyOptional({
     description:
-      'TURM: tacómetro del avión en el último overhaul de la hélice (misma escala que los tacos)',
+      'LEGADO: tacómetro del avión en el último overhaul (escala del taco del avión; no sobrevive traslados). Usar turm_componente.',
     default: 0,
+    deprecated: true,
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   turm?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'TURM en marco del COMPONENTE (como la bitácora física): horas de vida de la hélice en su último overhaul. TSO = horas de vida − TURM. Viaja con la hélice al trasladarla.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  turm_componente?: number;
 
   @ApiPropertyOptional({
     description:
@@ -110,3 +121,51 @@ export class CreatePropellerDto {
 }
 
 export class UpdatePropellerDto extends PartialType(CreatePropellerDto) {}
+
+export class TransplantPropellerDto {
+  @ApiProperty({ description: 'Nueva aeronave destino' })
+  @IsUUID()
+  aeronave_destino_id!: string;
+
+  @ApiProperty({
+    enum: PosicionHelice,
+    description: 'Posición en la aeronave destino',
+  })
+  @IsEnum(PosicionHelice)
+  posicion_destino!: PosicionHelice;
+
+  @ApiProperty({ description: 'Motivo del traslado' })
+  @IsString()
+  @MinLength(3)
+  motivo!: string;
+}
+
+export class OverhaulPropellerDto {
+  @ApiPropertyOptional({
+    description: 'Fecha del overhaul (YYYY-MM-DD); default hoy (Cancún)',
+  })
+  @IsOptional()
+  @IsDateString()
+  fecha?: string;
+
+  @ApiPropertyOptional({
+    description: 'Notas / taller / referencia del overhaul',
+  })
+  @IsOptional()
+  @IsString()
+  motivo?: string;
+
+  @ApiPropertyOptional({ description: 'Nuevo TBO en horas (si cambió)' })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  tbo_horas?: number;
+
+  @ApiPropertyOptional({
+    description: 'Nuevo límite calendario del overhaul (YYYY-MM-DD)',
+  })
+  @IsOptional()
+  @IsDateString()
+  tbo_fecha?: string | null;
+}

@@ -750,22 +750,48 @@ export class AlertsService {
       }
     }
 
+    // Tareas de cada etapa (una consulta para toda la flota): el aviso dice
+    // QUÉ incluye el servicio, no solo el número.
+    const { data: etapasRows } = await this.supabase.service
+      .from('aeronave_servicio_etapa')
+      .select('aeronave_id, intervalo_hr, nombre, tareas');
+    const etapasPorAvion = new Map<
+      string,
+      Array<{ intervalo_hr: number; nombre: string | null; tareas: string[] }>
+    >();
+    for (const e of (etapasRows ?? []) as Array<Record<string, unknown>>) {
+      const lista = etapasPorAvion.get(e.aeronave_id as string) ?? [];
+      lista.push({
+        intervalo_hr: Number(e.intervalo_hr),
+        nombre: (e.nombre as string | null) ?? null,
+        tareas: (e.tareas as string[] | null) ?? [],
+      });
+      etapasPorAvion.set(e.aeronave_id as string, lista);
+    }
+
     for (const a of aviones ?? []) {
       const hobbs = hobbsPorAvion.get(a.id as string) ?? 0;
       if (hobbs <= 0) continue;
-      const prox = this.aircraft.proximoServicio(
+      const prox = this.aircraft.proximoServicioDetallado(
         (a.servicio_intervalos as number[] | null) ?? [],
         Number(a.servicio_horas_base ?? 0),
         hobbs,
+        etapasPorAvion.get(a.id as string) ?? [],
       );
       if (prox && prox.faltan <= umbralHoras) {
+        const tareasTxt =
+          prox.tareas.length > 0
+            ? ` Incluye: ${prox.tareas.slice(0, 4).join(', ')}${
+                prox.tareas.length > 4 ? '…' : ''
+              }.`
+            : '';
         await this.dispatch(
           config,
           `servicio:${a.id as string}:${prox.a_las}:${mes}`,
           {
             tipo: 'mantenimiento_programado',
             titulo: `Servicio por horas cerca: ${a.matricula as string}`,
-            cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.`,
+            cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt}`,
             data: { aeronave_id: a.id, a_las: prox.a_las },
             link: `/admin/aircraft/${a.id as string}`,
           },
@@ -781,7 +807,7 @@ export class AlertsService {
       // El select va tipado como string plano: el parser de tipos de
       // supabase no entiende el embed con este nivel de columnas.
       const cols: string =
-        'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tbo_horas, tbo_fecha, aeronave_horas_ref, aeronave:aeronave_id(matricula)';
+        'id, aeronave_id, numero_serie, posicion, horas_totales, turm, tso_base, tbo_horas, tbo_fecha, aeronave_horas_ref, aeronave:aeronave_id(matricula)';
       const { data: comps, error: compsErr } = await this.supabase.service
         .from(tabla)
         .select(cols)

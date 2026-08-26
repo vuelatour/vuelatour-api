@@ -1,6 +1,8 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsDateString,
   IsIn,
@@ -113,6 +115,41 @@ export class CreateMantenimientoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Etapa del programa cíclico que cubre este servicio (ej. 50, 100, 200). Null = fuera del programa.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0.1)
+  etapa_intervalo_hr?: number;
+
+  @ApiPropertyOptional({
+    description: 'Tareas ejecutadas (checklist de la etapa + tareas libres).',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(60)
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  tareas_realizadas?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Motor al que aplica el servicio (opcional).',
+  })
+  @IsOptional()
+  @IsUUID()
+  motor_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'Hélice a la que aplica el servicio (opcional).',
+  })
+  @IsOptional()
+  @IsUUID()
+  helice_id?: string;
 }
 
 export class UpdateMantenimientoDto {
@@ -177,6 +214,44 @@ export class UpdateMantenimientoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Etapa del programa cíclico que cubre este servicio. null explícito la limpia.',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 1 })
+  @Min(0.1)
+  etapa_intervalo_hr?: number | null;
+
+  @ApiPropertyOptional({
+    description: 'Tareas ejecutadas (checklist de la etapa + tareas libres).',
+    type: [String],
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(60)
+  @IsString({ each: true })
+  @MaxLength(120, { each: true })
+  tareas_realizadas?: string[];
+
+  @ApiPropertyOptional({
+    description: 'Motor al que aplica (null explícito lo limpia).',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  motor_id?: string | null;
+
+  @ApiPropertyOptional({
+    description: 'Hélice a la que aplica (null explícito la limpia).',
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsUUID()
+  helice_id?: string | null;
 }
 
 export class CreateVencimientoDto {

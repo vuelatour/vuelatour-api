@@ -316,7 +316,9 @@ export class AircraftBalanceService {
       y: { fecha: string | null },
     ) => String(x.fecha ?? '').localeCompare(String(y.fecha ?? ''));
     const hojaFlota = (
-      pick: (p: BalanceAvionPayload) => BalanceAvionPayload['gastos_indirectos'],
+      pick: (
+        p: BalanceAvionPayload,
+      ) => BalanceAvionPayload['gastos_indirectos'],
     ): BalanceAvionPayload['gastos_indirectos'] => {
       const filas = libros
         .flatMap((p) =>
@@ -361,8 +363,7 @@ export class AircraftBalanceService {
           (x, y) =>
             String(x.orden_ts ?? x.fecha ?? '').localeCompare(
               String(y.orden_ts ?? y.fecha ?? ''),
-            ) ||
-            (Number(x.folio) || 0) - (Number(y.folio) || 0),
+            ) || (Number(x.folio) || 0) - (Number(y.folio) || 0),
         ),
       totales: totalesFlota,
       gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
@@ -445,10 +446,7 @@ export class AircraftBalanceService {
     ]);
     // Best-effort: sin siembra la primera fila simplemente no se valida.
     if (propias.error || heredadas.error) return null;
-    const candidatos = [
-      ...(propias.data ?? []),
-      ...(heredadas.data ?? []),
-    ]
+    const candidatos = [...(propias.data ?? []), ...(heredadas.data ?? [])]
       .map((e) => Number((e as { taco_llegada: unknown }).taco_llegada))
       .filter((n) => Number.isFinite(n));
     return candidatos.length ? Math.max(...candidatos) : null;
@@ -1250,10 +1248,9 @@ export class AircraftBalanceService {
       // para no duplicar el aviso.
       if (!esCompartido) {
         const avionesDelVuelo = new Set(
-          [
-            v.aeronave_id,
-            ...vEscalas.map((e) => e.aeronave_id),
-          ].filter((x): x is string => x != null),
+          [v.aeronave_id, ...vEscalas.map((e) => e.aeronave_id)].filter(
+            (x): x is string => x != null,
+          ),
         );
         for (const g of gastosPorVuelo.get(v.id) ?? []) {
           const avionG = avionDelGasto(g);
@@ -1539,8 +1536,7 @@ export class AircraftBalanceService {
     let maxTacoPeriodo = 0;
     for (const e of escalas) {
       if (
-        ((e.aeronave_id ?? avionPorVuelo.get(e.vuelo_id)) ?? null) !==
-        aircraftId
+        (e.aeronave_id ?? avionPorVuelo.get(e.vuelo_id) ?? null) !== aircraftId
       )
         continue;
       for (const t of [num(e.taco_salida), num(e.taco_llegada)])

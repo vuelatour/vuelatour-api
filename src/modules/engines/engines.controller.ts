@@ -17,6 +17,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateEngineDto,
   ListEnginesQuery,
+  OverhaulEngineDto,
   TransplantEngineDto,
   UpdateEngineDto,
 } from './dto/engines.dto';
@@ -87,5 +88,28 @@ export class EnginesController {
   @ApiOperation({ summary: 'Transplant history for this engine' })
   history(@Param('id', ParseUUIDPipe) id: string) {
     return this.engines.listTransplants(id);
+  }
+
+  @Post(':id/overhaul')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Registrar overhaul (ADMIN): TSO a 0, TSN congelado, ancla al Hobbs actual; queda en bitácora.',
+  })
+  overhaul(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: OverhaulEngineDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.engines.overhaul(id, dto, c.userId);
+  }
+
+  @Get(':id/eventos')
+  @ApiOperation({
+    summary:
+      'Bitácora del motor: instalaciones, traslados, overhauls y ajustes de base.',
+  })
+  eventos(@Param('id', ParseUUIDPipe) id: string) {
+    return this.engines.listEventos(id);
   }
 }

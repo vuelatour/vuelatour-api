@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import type {
   CreateMantenimientoDto,
@@ -8,10 +12,12 @@ import type {
 } from './dto/engineering.dto';
 
 const MANT_COLS =
-  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, horas_programadas, costo_usd, proveedor, notas, created_at';
+  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, horas_programadas, costo_usd, proveedor, notas, etapa_intervalo_hr, tareas_realizadas, motor_id, helice_id, created_at';
 
 /** El campo legado `tipo` (NOT NULL) se mantiene en sync con el nuevo `estado`. */
-function tipoFromEstado(estado: EstadoMantenimiento): 'PROGRAMADO' | 'REALIZADO' {
+function tipoFromEstado(
+  estado: EstadoMantenimiento,
+): 'PROGRAMADO' | 'REALIZADO' {
   return estado === 'COMPLETADO' ? 'REALIZADO' : 'PROGRAMADO';
 }
 
@@ -63,6 +69,39 @@ export class EngineeringService {
     return Number(max.toFixed(1));
   }
 
+  /**
+   * El componente (motor/hélice) de un servicio debe pertenecer al avión del
+   * servicio — cruzarlos silenciosamente ensuciaría la bitácora.
+   */
+  private async validarComponenteDelAvion(
+    aeronaveId: string,
+    motorId?: string | null,
+    heliceId?: string | null,
+  ): Promise<void> {
+    if (motorId) {
+      const { data } = await this.supabase.service
+        .from('motor')
+        .select('aeronave_id')
+        .eq('id', motorId)
+        .maybeSingle();
+      if (!data || data.aeronave_id !== aeronaveId)
+        throw new BadRequestException(
+          'El motor indicado no pertenece a esta aeronave',
+        );
+    }
+    if (heliceId) {
+      const { data } = await this.supabase.service
+        .from('helice')
+        .select('aeronave_id')
+        .eq('id', heliceId)
+        .maybeSingle();
+      if (!data || data.aeronave_id !== aeronaveId)
+        throw new BadRequestException(
+          'La hélice indicada no pertenece a esta aeronave',
+        );
+    }
+  }
+
   async listMantenimientos(aeronaveId: string) {
     const { data, error } = await this.supabase.service
       .from('mantenimiento')
@@ -74,7 +113,11 @@ export class EngineeringService {
     return data ?? [];
   }
 
-  async createMantenimiento(aeronaveId: string, dto: CreateMantenimientoDto, userId: string) {
+  async createMantenimiento(
+    aeronaveId: string,
+    dto: CreateMantenimientoDto,
+    userId: string,
+  ) {
     // Compat con APKs viejos de la app: mandan `tipo` (PROGRAMADO/REALIZADO)
     // en vez de `estado`. Se mapea REALIZADO→COMPLETADO solo cuando no viene
     // `estado`; el `estado` explícito siempre gana. El DTO garantiza que al
@@ -90,6 +133,11 @@ export class EngineeringService {
     ) {
       horasEntrada = await this.horasActualesAeronave(aeronaveId);
     }
+    await this.validarComponenteDelAvion(
+      aeronaveId,
+      dto.motor_id,
+      dto.helice_id,
+    );
     const { data, error } = await this.supabase.service
       .from('mantenimiento')
       .insert({
@@ -105,6 +153,12 @@ export class EngineeringService {
         costo_usd: dto.costo_usd ?? null,
         proveedor: dto.proveedor ?? null,
         notas: dto.notas ?? null,
+        etapa_intervalo_hr: dto.etapa_intervalo_hr ?? null,
+        tareas_realizadas: (dto.tareas_realizadas ?? [])
+          .map((t) => t.trim())
+          .filter((t) => t.length > 0),
+        motor_id: dto.motor_id ?? null,
+        helice_id: dto.helice_id ?? null,
         created_by: userId,
       })
       .select(MANT_COLS)
@@ -122,13 +176,38 @@ export class EngineeringService {
     }
     if (dto.descripcion !== undefined) patch.descripcion = dto.descripcion;
     if (dto.pais !== undefined) patch.pais = dto.pais;
-    if (dto.fecha_programada !== undefined) patch.fecha_programada = dto.fecha_programada;
-    if (dto.fecha_realizada !== undefined) patch.fecha_realizada = dto.fecha_realizada;
-    if (dto.horas_aeronave !== undefined) patch.horas_aeronave = dto.horas_aeronave;
-    if (dto.horas_programadas !== undefined) patch.horas_programadas = dto.horas_programadas;
+    if (dto.fecha_programada !== undefined)
+      patch.fecha_programada = dto.fecha_programada;
+    if (dto.fecha_realizada !== undefined)
+      patch.fecha_realizada = dto.fecha_realizada;
+    if (dto.horas_aeronave !== undefined)
+      patch.horas_aeronave = dto.horas_aeronave;
+    if (dto.horas_programadas !== undefined)
+      patch.horas_programadas = dto.horas_programadas;
     if (dto.costo_usd !== undefined) patch.costo_usd = dto.costo_usd;
     if (dto.proveedor !== undefined) patch.proveedor = dto.proveedor;
     if (dto.notas !== undefined) patch.notas = dto.notas;
+    if (dto.etapa_intervalo_hr !== undefined)
+      patch.etapa_intervalo_hr = dto.etapa_intervalo_hr;
+    if (dto.tareas_realizadas !== undefined)
+      patch.tareas_realizadas = dto.tareas_realizadas
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+    if (dto.motor_id !== undefined || dto.helice_id !== undefined) {
+      const { data: actual } = await this.supabase.service
+        .from('mantenimiento')
+        .select('aeronave_id')
+        .eq('id', id)
+        .maybeSingle();
+      if (!actual) throw new NotFoundException(`Mantenimiento ${id} not found`);
+      await this.validarComponenteDelAvion(
+        actual.aeronave_id as string,
+        dto.motor_id,
+        dto.helice_id,
+      );
+      if (dto.motor_id !== undefined) patch.motor_id = dto.motor_id;
+      if (dto.helice_id !== undefined) patch.helice_id = dto.helice_id;
+    }
 
     // Al pasar a EN_TALLER/COMPLETADO sin horas de entrada, se toman las horas
     // actuales del avión automáticamente (solo si aún no estaban registradas).
@@ -152,7 +231,11 @@ export class EngineeringService {
     const { data, error } =
       Object.keys(patch).length === 0
         ? await query.select(MANT_COLS).eq('id', id).maybeSingle()
-        : await query.update(patch).eq('id', id).select(MANT_COLS).maybeSingle();
+        : await query
+            .update(patch)
+            .eq('id', id)
+            .select(MANT_COLS)
+            .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Mantenimiento ${id} not found`);
     return data;
@@ -263,7 +346,11 @@ export class EngineeringService {
     );
   }
 
-  async createVencimiento(aeronaveId: string, dto: CreateVencimientoDto, userId: string) {
+  async createVencimiento(
+    aeronaveId: string,
+    dto: CreateVencimientoDto,
+    userId: string,
+  ) {
     const { data, error } = await this.supabase.service
       .from('vencimiento')
       .insert({
@@ -304,7 +391,9 @@ export class EngineeringService {
 
   /** Vencimientos por fecha de toda la flota dentro de la ventana (incluye vencidos). */
   async fleetUpcoming(dias: number) {
-    const limite = new Date(Date.now() + dias * 86400 * 1000).toISOString().slice(0, 10);
+    const limite = new Date(Date.now() + dias * 86400 * 1000)
+      .toISOString()
+      .slice(0, 10);
 
     const { data: vencimientos, error: vErr } = await this.supabase.service
       .from('vencimiento')
@@ -320,7 +409,9 @@ export class EngineeringService {
 
     const { data: mantenimientos, error: mErr } = await this.supabase.service
       .from('mantenimiento')
-      .select('id, descripcion, fecha_programada, estado, aeronave_id, aeronave(matricula)')
+      .select(
+        'id, descripcion, fecha_programada, estado, aeronave_id, etapa_intervalo_hr, aeronave(matricula)',
+      )
       .neq('estado', 'COMPLETADO')
       .not('fecha_programada', 'is', null)
       .lte('fecha_programada', limite)

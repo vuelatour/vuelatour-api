@@ -29,7 +29,9 @@ export class EngineeringController {
 
   @Get('aircraft/:id/maintenance')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
-  @ApiOperation({ summary: 'Mantenimientos (programados/realizados) de una aeronave' })
+  @ApiOperation({
+    summary: 'Mantenimientos (programados/realizados) de una aeronave',
+  })
   listMaintenance(@Param('id', ParseUUIDPipe) id: string) {
     return this.engineering.listMantenimientos(id);
   }
@@ -48,7 +50,8 @@ export class EngineeringController {
   @Patch('maintenance/:mid')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
   @ApiOperation({
-    summary: 'Actualiza/transiciona un servicio (programado → en taller → completado)',
+    summary:
+      'Actualiza/transiciona un servicio (programado → en taller → completado)',
   })
   updateMaintenance(
     @Param('mid', ParseUUIDPipe) mid: string,
@@ -58,7 +61,9 @@ export class EngineeringController {
   }
 
   @Get('aircraft/:id/expirations')
-  @ApiOperation({ summary: 'Permisos/licencias/servicios (vencimientos) de una aeronave' })
+  @ApiOperation({
+    summary: 'Permisos/licencias/servicios (vencimientos) de una aeronave',
+  })
   listExpirations(@Param('id', ParseUUIDPipe) id: string) {
     return this.engineering.listVencimientos(id);
   }
@@ -83,14 +88,18 @@ export class EngineeringController {
   }
 
   @Get('document-types')
-  @ApiOperation({ summary: 'Catálogo de tipos de documento (para crear vencimientos)' })
+  @ApiOperation({
+    summary: 'Catálogo de tipos de documento (para crear vencimientos)',
+  })
   documentTypes() {
     return this.engineering.documentTypes();
   }
 
   @Get('upcoming')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
-  @ApiOperation({ summary: 'Dashboard de flota: vencimientos y mantenimientos próximos.' })
+  @ApiOperation({
+    summary: 'Dashboard de flota: vencimientos y mantenimientos próximos.',
+  })
   upcoming(@Query('dias') dias?: string) {
     const d = Math.min(Math.max(Number(dias) || 60, 1), 365);
     return this.engineering.fleetUpcoming(d);

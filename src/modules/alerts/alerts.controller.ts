@@ -1,4 +1,13 @@
-import { Body, Controller, Get, HttpCode, HttpStatus, Param, Patch, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Patch,
+  Post,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -15,14 +24,18 @@ export class AlertsController {
 
   @Get('config')
   @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Lista la configuración de las alertas programadas' })
+  @ApiOperation({
+    summary: 'Lista la configuración de las alertas programadas',
+  })
   listConfig() {
     return this.alerts.listConfig();
   }
 
   @Patch('config/:clave')
   @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Actualiza una alerta (activa, canal, roles, anticipación)' })
+  @ApiOperation({
+    summary: 'Actualiza una alerta (activa, canal, roles, anticipación)',
+  })
   updateConfig(
     @Param('clave') clave: string,
     @Body() dto: UpdateAlertConfigDto,
