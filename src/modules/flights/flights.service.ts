@@ -2140,6 +2140,52 @@ export class FlightsService {
           ? dto.fecha_vuelo.toISOString()
           : undefined,
     });
+    // REGLA 26-ago-2026: reasignar el PILOTO a nivel VUELO aplica a TODOS
+    // los tramos (antes solo se espejaba la ida y en un redondo el regreso
+    // se quedaba con el piloto viejo en silencio). La reasignación POR TRAMO
+    // (assignEscala) sigue tocando solo ese tramo — así se arman las
+    // rotaciones. Los pilotos que pierden sus tramos reciben aviso.
+    if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
+      const { data: tramosVivos } = await this.supabase.service
+        .from('escala')
+        .select('id, orden, piloto_id, origen_iata, destino_iata')
+        .eq('vuelo_id', id)
+        .is('cancelada_at', null);
+      const salientes = new Map<string, string[]>();
+      for (const t of tramosVivos ?? []) {
+        const pid = t.piloto_id as string | null;
+        if (
+          pid &&
+          pid !== dto.piloto_id &&
+          pid !== (current.piloto_id as string | null)
+        ) {
+          const lista = salientes.get(pid) ?? [];
+          lista.push(
+            `${(t.origen_iata as string) ?? '?'} → ${(t.destino_iata as string) ?? '?'}`,
+          );
+          salientes.set(pid, lista);
+        }
+      }
+      const { error: tramosErr } = await this.supabase.service
+        .from('escala')
+        .update({ piloto_id: dto.piloto_id, updated_by: updatedBy })
+        .eq('vuelo_id', id)
+        .is('cancelada_at', null);
+      if (tramosErr) {
+        this.logger.warn(
+          `assign ${id}: no se pudo aplicar el piloto a todos los tramos: ${tramosErr.message}`,
+        );
+      } else {
+        for (const [uid, tramos] of salientes) {
+          void this.notificarQuitado(
+            uid,
+            data!,
+            'piloto',
+            `tramo(s) ${tramos.join(', ')} reasignado(s) al nuevo piloto`,
+          );
+        }
+      }
+    }
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
