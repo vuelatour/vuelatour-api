@@ -647,7 +647,23 @@ export class ExpensesService {
         });
         continue;
       }
+      // Whitelist: una "pista" solo puede ser OPERACIONES o ATERRIZAJE.
+      // El DTO acepta todo el enum y este insert va DIRECTO a la tabla (no
+      // pasa por create()): sin esta guarda, un PERSONAL_DUENO o INDIRECTO
+      // ligado a escala/vuelo/avión contaminaría balance y reparto en
+      // silencio (verificación adversarial 26-ago).
       const categoria = item.categoria ?? 'OPERACIONES';
+      if (
+        categoria !== CategoriaGasto.OPERACIONES &&
+        categoria !== CategoriaGasto.ATERRIZAJE
+      ) {
+        resultados.push({
+          escala_id: item.escala_id,
+          ok: false,
+          error: `Categoría ${categoria} no aplica a gastos de pista`,
+        });
+        continue;
+      }
       const { data: dup } = await this.supabase.service
         .from('gasto')
         .select('id')
@@ -830,10 +846,10 @@ export class ExpensesService {
     // de la empresa (candado espejo en update()).
     if (
       dto.categoria === CategoriaGasto.PERSONAL_DUENO &&
-      (dto.vuelo_id || dto.aeronave_id)
+      (dto.vuelo_id || dto.aeronave_id || dto.escala_id)
     ) {
       throw new BadRequestException(
-        'Un gasto personal del dueño no lleva vuelo ni avión: quítalos o usa otra categoría.',
+        'Un gasto personal del dueño no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
       );
     }
     // El piloto ya NO ve ni edita desglose en la app (solo el total): el
@@ -1235,7 +1251,14 @@ export class ExpensesService {
       const match = (aviones ?? []).find(
         (a) => norm(a.matricula as string) === norm(ai.matricula!),
       );
-      if (match && !gasto.aeronave_id) {
+      if (
+        match &&
+        !gasto.aeronave_id &&
+        // Un gasto PERSONAL del dueño JAMÁS recibe avión — ni siquiera si el
+        // comprobante trae una matrícula (compra del dueño en el FBO): este
+        // update va directo a la tabla y brincaría el candado de update().
+        gasto.categoria !== 'PERSONAL_DUENO'
+      ) {
         patch.aeronave_id = match.id;
       } else if (match && gasto.aeronave_id && match.id !== gasto.aeronave_id) {
         discrepancias.push(
@@ -1515,6 +1538,7 @@ export class ExpensesService {
       dto.categoria !== undefined ||
       dto.vuelo_id !== undefined ||
       dto.aeronave_id !== undefined ||
+      dto.escala_id !== undefined ||
       dto.moneda !== undefined;
     const actual = necesitaActual
       ? ((await this.findById(id)) as {
@@ -1523,6 +1547,7 @@ export class ExpensesService {
           categoria?: string;
           vuelo_id?: string | null;
           aeronave_id?: string | null;
+          escala_id?: string | null;
           moneda?: string;
         })
       : null;
@@ -1583,16 +1608,19 @@ export class ExpensesService {
     if (
       dto.categoria !== undefined ||
       dto.vuelo_id !== undefined ||
-      dto.aeronave_id !== undefined
+      dto.aeronave_id !== undefined ||
+      dto.escala_id !== undefined
     ) {
       const catEf = dto.categoria ?? actual?.categoria;
       const vueloEf =
         dto.vuelo_id !== undefined ? dto.vuelo_id : actual?.vuelo_id;
       const avionEf =
         dto.aeronave_id !== undefined ? dto.aeronave_id : actual?.aeronave_id;
-      if (catEf === 'PERSONAL_DUENO' && (vueloEf || avionEf)) {
+      const escalaEf =
+        dto.escala_id !== undefined ? dto.escala_id : actual?.escala_id;
+      if (catEf === 'PERSONAL_DUENO' && (vueloEf || avionEf || escalaEf)) {
         throw new BadRequestException(
-          'Un gasto personal del dueño no lleva vuelo ni avión: quítalos o usa otra categoría.',
+          'Un gasto personal del dueño no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
         );
       }
     }
