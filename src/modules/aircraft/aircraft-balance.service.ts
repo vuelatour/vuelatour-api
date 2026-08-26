@@ -78,6 +78,11 @@ interface EscalaRow {
   taco_llegada: string | number | null;
   aeronave_id: string | null;
   fecha_salida_plan: string | null;
+  /** Observaciones del equipo sobre las lecturas (Tacómetros en vivo). */
+  taco_salida_obs: string | null;
+  taco_llegada_obs: string | null;
+  taco_obs_updated_by: string | null;
+  taco_obs_updated_at: string | null;
 }
 
 interface CobroRow {
@@ -613,7 +618,7 @@ export class AircraftBalanceService {
         ? sb
             .from('escala')
             .select(
-              'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan',
+              'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at',
             )
             .in('vuelo_id', vueloIds)
             // Tramos cancelados fuera: ni horas ni "pendiente de captura".
@@ -691,6 +696,26 @@ export class AircraftBalanceService {
     }
 
     const escalas = (escalasRes.data ?? []) as unknown as EscalaRow[];
+    // Autores de las observaciones de taco (una sola consulta de nombres).
+    const obsAutores = new Map<string, string>();
+    {
+      const ids = [
+        ...new Set(
+          escalas
+            .map((e) => e.taco_obs_updated_by)
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      if (ids.length > 0) {
+        const { data: usuarios } = await sb
+          .from('usuario')
+          .select('id, nombre')
+          .in('id', ids);
+        for (const u of usuarios ?? []) {
+          obsAutores.set(u.id as string, (u.nombre as string) ?? 'equipo');
+        }
+      }
+    }
     const cobros = (cobrosRes.data ?? []) as unknown as CobroRow[];
     const gastosVuelo = (gastosVueloRes.data ?? []) as unknown as GastoRow[];
     const gastosAvion = (gastosAvionRes.data ?? []) as unknown as GastoRow[];
@@ -943,6 +968,20 @@ export class AircraftBalanceService {
       // Herencia del avión del tramo (escala.aeronave_id ?? vuelo.aeronave_id):
       // en la fila del principal, los tramos sin avión propio son suyos; en la
       // fila COMPARTIDA solo cuentan los tramos explícitamente de este avión.
+      // Observaciones del equipo sobre las lecturas de los tramos de ESTE
+      // avión: van a las celdas TACO INICIO (salidas) y TACO FINAL
+      // (llegadas) del Excel — ámbar + nota con quién y cuándo.
+      const obsLinea = (e: EscalaRow, lado: 'salida' | 'llegada'): string => {
+        const texto =
+          lado === 'salida' ? e.taco_salida_obs : e.taco_llegada_obs;
+        const autor = e.taco_obs_updated_by
+          ? (obsAutores.get(e.taco_obs_updated_by) ?? 'equipo')
+          : 'equipo';
+        const fechaObs = diaCancun(e.taco_obs_updated_at);
+        return `${e.origen_iata ?? '?'}→${e.destino_iata ?? '?'} ${lado}: ${
+          texto ?? ''
+        } — ${autor}${fechaObs ? `, ${fechaObs}` : ''}`;
+      };
       const escalasDelAvion = vEscalas.filter(
         (e) => (e.aeronave_id ?? v.aeronave_id) === aircraftId,
       );
@@ -1460,6 +1499,12 @@ export class AircraftBalanceService {
         subtotal_mxn: N,
         tiempo_vuelo: O,
         taco_inicio: P,
+        taco_inicio_obs: escalasDelAvion
+          .filter((e) => (e.taco_salida_obs ?? '').trim().length > 0)
+          .map((e) => obsLinea(e, 'salida')),
+        taco_fin_obs: escalasDelAvion
+          .filter((e) => (e.taco_llegada_obs ?? '').trim().length > 0)
+          .map((e) => obsLinea(e, 'llegada')),
         taco_fin: Q,
         salto_taco_interno: saltoInterno != null,
         salto_taco_interno_detalle: saltoInterno,

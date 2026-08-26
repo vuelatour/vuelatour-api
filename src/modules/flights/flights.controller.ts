@@ -31,6 +31,7 @@ import {
   TacoAiReadDto,
   UpdateEscalaDto,
   UpdateEscalaPermisoDto,
+  TacoObsDto,
 } from './dto/escalas.dto';
 import {
   AssignFlightDto,
@@ -487,6 +488,21 @@ export class FlightsController {
     // assertAccessByLeg): el apoyo opera todo el vuelo menos los tacómetros.
     await this.flights.assertPuedeCapturarTaco(legId, c);
     return this.flights.captureTaco(legId, dto, c.userId);
+  }
+
+  @Post('legs/:legId/taco-obs')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Observación del equipo sobre las lecturas de un tramo (por lado). No toca valores ni revisión: se muestra en taco-live, histórico del avión y Excel del balance (ámbar + nota).',
+  })
+  tacoObs(
+    @Param('legId', ParseUUIDPipe) legId: string,
+    @Body() dto: TacoObsDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.tacoObs(legId, dto, c.userId);
   }
 
   @Post('legs/:legId/taco/clear')

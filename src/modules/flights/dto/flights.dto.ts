@@ -45,7 +45,10 @@ export class CobroStatusDto {
 }
 
 export class VoucherUrlsDto {
-  @ApiProperty({ type: [String], description: 'Paths de vouchers en cobro-vouchers a firmar' })
+  @ApiProperty({
+    type: [String],
+    description: 'Paths de vouchers en cobro-vouchers a firmar',
+  })
   @IsArray()
   @ArrayMaxSize(200)
   @IsString({ each: true })
@@ -150,7 +153,9 @@ export class UpdateFlightDto {
   @IsDate()
   fecha_vuelo?: Date;
 
-  @ApiPropertyOptional({ description: 'Fecha de traslado final / regreso a base' })
+  @ApiPropertyOptional({
+    description: 'Fecha de traslado final / regreso a base',
+  })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
@@ -168,14 +173,18 @@ export class UpdateFlightDto {
   @MaxLength(2000)
   notas_internas?: string;
 
-  @ApiPropertyOptional({ enum: EstadoPermiso, description: 'Estado del permiso de pista' })
+  @ApiPropertyOptional({
+    enum: EstadoPermiso,
+    description: 'Estado del permiso de pista',
+  })
   @IsOptional()
   @IsEnum(EstadoPermiso)
   estado_permiso?: EstadoPermiso;
 
   @ApiPropertyOptional({
     type: [String],
-    description: 'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
+    description:
+      'Nombres de los pasajeros (manifiesto, para tramitar permisos).',
   })
   @IsOptional()
   @IsArray()
@@ -207,7 +216,10 @@ export class UpdateFlightDto {
 }
 
 export class UpdatePermisoDto {
-  @ApiProperty({ enum: EstadoPermiso, description: 'Estado del permiso de pista' })
+  @ApiProperty({
+    enum: EstadoPermiso,
+    description: 'Estado del permiso de pista',
+  })
   @IsEnum(EstadoPermiso)
   estado_permiso!: EstadoPermiso;
 }
@@ -238,7 +250,9 @@ export class ReassignAircraftDto {
   @IsUUID()
   aeronave_id!: string;
 
-  @ApiPropertyOptional({ description: 'Motivo del cambio (queda en el vuelo cancelado)' })
+  @ApiPropertyOptional({
+    description: 'Motivo del cambio (queda en el vuelo cancelado)',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(500)
@@ -452,14 +466,16 @@ export class ReservaEscalaDto {
   hora_salida?: Date;
 
   @ApiPropertyOptional({
-    description: 'Ferry/posicionamiento (sin pasajeros): no se cotiza ni se muestra al cliente',
+    description:
+      'Ferry/posicionamiento (sin pasajeros): no se cotiza ni se muestra al cliente',
   })
   @IsOptional()
   @IsBoolean()
   es_ferry?: boolean;
 
   @ApiPropertyOptional({
-    description: 'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
+    description:
+      'Tramo de sobrevuelo (recorrido sobre una zona, no un traslado normal).',
   })
   @IsOptional()
   @IsBoolean()
@@ -512,13 +528,18 @@ export class CreateReservaDto {
   @IsUUID()
   cliente_id!: string;
 
-  @ApiPropertyOptional({ description: 'Requerido si no se envía escalas_operacion' })
+  @ApiPropertyOptional({
+    description: 'Requerido si no se envía escalas_operacion',
+  })
   @ValidateIf((o: CreateReservaDto) => !o.escalas_operacion?.length)
   @IsString()
   @Length(3, 4)
   origen_iata?: string;
 
-  @ApiPropertyOptional({ description: 'Destino tentativo. Requerido si no se envía escalas_operacion' })
+  @ApiPropertyOptional({
+    description:
+      'Destino tentativo. Requerido si no se envía escalas_operacion',
+  })
   @ValidateIf((o: CreateReservaDto) => !o.escalas_operacion?.length)
   @IsString()
   @Length(3, 4)
@@ -571,12 +592,17 @@ export class CreateReservaDto {
   @IsUUID()
   copiloto_id?: string;
 
-  @ApiPropertyOptional({ description: 'Vuelo abierto: el itinerario/precio se cierra al final' })
+  @ApiPropertyOptional({
+    description: 'Vuelo abierto: el itinerario/precio se cierra al final',
+  })
   @IsOptional()
   @IsBoolean()
   cotizacion_abierta?: boolean;
 
-  @ApiPropertyOptional({ type: [String], description: 'Nombres de los pasajeros (si ya se conocen).' })
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Nombres de los pasajeros (si ya se conocen).',
+  })
   @IsOptional()
   @IsArray()
   @IsString({ each: true })

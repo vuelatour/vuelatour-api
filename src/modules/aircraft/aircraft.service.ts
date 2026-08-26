@@ -325,9 +325,30 @@ export class AircraftService {
     const rows = (
       await this.escalasDelAvion(
         id,
-        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, fecha_salida_plan, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
+        'id, origen_iata, destino_iata, taco_salida, taco_llegada, hora_salida, hora_llegada, fecha_salida_plan, foto_taco_salida_url, foto_taco_llegada_url, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, aeronave_id, estado)',
       )
     ).filter((e) => e.taco_salida != null);
+
+    // Autores de las observaciones de taco (una consulta de nombres).
+    const obsAutores = new Map<string, string>();
+    {
+      const ids = [
+        ...new Set(
+          rows
+            .map((e) => e.taco_obs_updated_by as string | null)
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      if (ids.length > 0) {
+        const { data: usuarios } = await this.supabase.service
+          .from('usuario')
+          .select('id, nombre')
+          .in('id', ids);
+        for (const u of usuarios ?? []) {
+          obsAutores.set(u.id as string, (u.nombre as string) ?? 'equipo');
+        }
+      }
+    }
 
     let horasActuales = 0;
     for (const e of rows) {
@@ -387,6 +408,17 @@ export class AircraftService {
             : null,
           foto_llegada_url: e.foto_taco_llegada_url
             ? (firmadas[e.foto_taco_llegada_url as string] ?? null)
+            : null,
+          // Observaciones del equipo (Tacómetros en vivo): el histórico las
+          // muestra con quién y cuándo; el Excel del balance las pinta en
+          // ámbar con nota en la celda.
+          taco_salida_obs: (e.taco_salida_obs as string | null) ?? null,
+          taco_llegada_obs: (e.taco_llegada_obs as string | null) ?? null,
+          taco_obs_por: e.taco_obs_updated_by
+            ? (obsAutores.get(e.taco_obs_updated_by as string) ?? null)
+            : null,
+          taco_obs_fecha: e.taco_obs_updated_at
+            ? String(e.taco_obs_updated_at).slice(0, 10)
             : null,
         };
       })

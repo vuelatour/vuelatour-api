@@ -15,6 +15,7 @@ import {
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 import { EstadoPermiso } from './flights.dto';
 
@@ -393,6 +394,30 @@ export class CaptureTacoDto {
  * Borrado de lecturas de UN tramo (solo oficina): el piloto capturó en el
  * vuelo/tramo equivocado y debe volver a subirlas. Se borra por lado.
  */
+export class TacoObsDto {
+  @ApiPropertyOptional({
+    description:
+      'Observación del equipo sobre la lectura de SALIDA (null/vacío la borra). Se muestra en histórico y Excel.',
+    maxLength: 300,
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(300)
+  taco_salida_obs?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Observación del equipo sobre la lectura de LLEGADA (null/vacío la borra).',
+    maxLength: 300,
+  })
+  @IsOptional()
+  @ValidateIf((_, v) => v !== null)
+  @IsString()
+  @MaxLength(300)
+  taco_llegada_obs?: string | null;
+}
+
 export class ClearTacoDto {
   @ApiPropertyOptional({ description: 'Borrar la lectura de SALIDA' })
   @IsOptional()

@@ -310,6 +310,9 @@ export interface BalanceAvionVueloPayload {
    *  las horas sin romper la cadena entre vuelos). */
   salto_taco_interno?: boolean;
   salto_taco_interno_detalle?: string | null;
+  /** Observaciones del equipo (Tacómetros en vivo): líneas formateadas. */
+  taco_inicio_obs?: string[];
+  taco_fin_obs?: string[];
   // Bloque COSTOS (MXN)
   gas_mxn: number | null;
   gas_litros: number | null;

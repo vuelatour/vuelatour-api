@@ -58,7 +58,7 @@ const VUELO_COLS =
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, notas, cancelada_at, cancelada_motivo, cancelada_por, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at, notas, cancelada_at, cancelada_motivo, cancelada_por, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -4162,6 +4162,43 @@ export class FlightsService {
    * deriva de los tacómetros). El piloto del tramo recibe un push para
    * recapturar.
    */
+  /**
+   * Observación del EQUIPO sobre una lectura de taco (pedido 26-ago-2026):
+   * texto deliberado que explica la lectura (recalibración, brinco
+   * justificado, verificación). NO toca valores, estado, revisión ni
+   * bitácora técnica — solo las columnas de observación. Se muestra en
+   * Tacómetros en vivo, en el histórico del avión y en el Excel del
+   * balance (celda ámbar + nota con quién y cuándo).
+   */
+  async tacoObs(
+    escalaId: string,
+    dto: { taco_salida_obs?: string | null; taco_llegada_obs?: string | null },
+    userId: string,
+  ) {
+    const patch: Record<string, unknown> = {
+      taco_obs_updated_by: userId,
+      taco_obs_updated_at: new Date().toISOString(),
+      updated_by: userId,
+    };
+    if (dto.taco_salida_obs !== undefined) {
+      patch.taco_salida_obs = dto.taco_salida_obs?.trim() || null;
+    }
+    if (dto.taco_llegada_obs !== undefined) {
+      patch.taco_llegada_obs = dto.taco_llegada_obs?.trim() || null;
+    }
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .update(patch)
+      .eq('id', escalaId)
+      .select(
+        'id, vuelo_id, taco_salida_obs, taco_llegada_obs, taco_obs_updated_at',
+      )
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+    return data;
+  }
+
   async clearTaco(escalaId: string, dto: ClearTacoDto, userId: string) {
     const { data: current, error: readErr } = await this.supabase.service
       .from('escala')
@@ -5563,6 +5600,7 @@ export class FlightsService {
           paths.push(e.foto_taco_llegada_url as string);
         if (e.corregido_por) userIds.add(e.corregido_por as string);
         if (e.capturado_por) userIds.add(e.capturado_por as string);
+        if (e.taco_obs_updated_by) userIds.add(e.taco_obs_updated_by as string);
       }
     }
     const signed: Record<string, string> = {};
@@ -5709,6 +5747,16 @@ export class FlightsService {
             : null,
           corregido_at: e.corregido_at ?? null,
           nota_correccion: e.nota_correccion ?? null,
+          // Observaciones del equipo por lectura (van al histórico del
+          // avión y al Excel del balance en ámbar con nota).
+          taco_salida_obs: e.taco_salida_obs ?? null,
+          taco_llegada_obs: e.taco_llegada_obs ?? null,
+          taco_obs_por: e.taco_obs_updated_by
+            ? (nombres.get(e.taco_obs_updated_by as string) ?? null)
+            : null,
+          taco_obs_fecha: e.taco_obs_updated_at
+            ? String(e.taco_obs_updated_at).slice(0, 10)
+            : null,
           foto_salida_url: e.foto_taco_salida_url
             ? (signed[e.foto_taco_salida_url as string] ?? null)
             : null,
@@ -5941,7 +5989,10 @@ export class FlightsService {
         // Anti-cap de PostgREST (1000 filas): 200 vuelos con muchos abonos
         // truncarían el total EN SILENCIO y pintarían "parcial" un pagado.
         .limit(10000),
-      this.supabase.service.from('vuelo').select('id, tc_usd_mxn').in('id', ids),
+      this.supabase.service
+        .from('vuelo')
+        .select('id, tc_usd_mxn')
+        .in('id', ids),
     ]);
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (vuelosRes.error) throw new Error(vuelosRes.error.message);
@@ -5960,7 +6011,7 @@ export class FlightsService {
     }
     for (const id of ids) {
       const conv = cobrosEnUsd(
-        (grupos.get(id) ?? []) as Parameters<typeof cobrosEnUsd>[0],
+        grupos.get(id) ?? [],
         tcPorVuelo.get(id) ?? null,
       );
       out[id] = {
