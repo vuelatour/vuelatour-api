@@ -994,6 +994,8 @@ export class ProfitSharingService {
         g.aeronave_id == null &&
         g.categoria !== 'FIJO' &&
         g.categoria !== 'INDIRECTO' &&
+        // PERSONAL_DUENO jamás lleva avión (gasto personal del dueño).
+        g.categoria !== 'PERSONAL_DUENO' &&
         !(g.categoria === 'OTRO' && g.vuelo_id == null) &&
         !repartosPre.has(g.id as string),
     );
@@ -1022,7 +1024,11 @@ export class ProfitSharingService {
         !repartosPre.has(g.id as string),
     );
     const sinTc = gastos.filter(
-      (g) => g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0),
+      // PERSONAL_DUENO no entra al balance USD: su TC no bloquea el cierre.
+      (g) =>
+        g.moneda === 'MXN' &&
+        !(Number(g.tc_gasto) > 0) &&
+        g.categoria !== 'PERSONAL_DUENO',
     );
     // Seguimiento de oficina (estatus_facturacion), NO el comprobante del
     // piloto: la app marca FACTURA con cualquier foto, aunque sea un ticket.
@@ -1030,13 +1036,20 @@ export class ProfitSharingService {
     // factura vive en la ENTRADA del cardex — jamás tendrá factura propia
     // (dejarlo contaría ruido eterno en el pre-cierre).
     const sinFacturar = gastos.filter(
-      (g) => g.estatus_facturacion !== 'FACTURADA' && g.medio_pago !== 'BODEGA',
+      // PERSONAL_DUENO: la factura a la empresa no aplica (gasto del dueño).
+      (g) =>
+        g.estatus_facturacion !== 'FACTURADA' &&
+        g.medio_pago !== 'BODEGA' &&
+        g.categoria !== 'PERSONAL_DUENO',
     );
     // Posibles duplicados con el flag aún encendido: cada uno resta DOBLE al
     // reparto hasta que alguien lo resuelva (borrar el repetido o marcar
     // "No es duplicado" en Gastos → pestaña Duplicados).
     const duplicadosSinResolver = gastos.filter(
-      (g) => g.duplicado_sospechado === true,
+      // Los PERSONAL_DUENO duplicados no tocan el reparto: se resuelven en
+      // la bandeja Gastos → Duplicados, no estorban el cierre.
+      (g) =>
+        g.duplicado_sospechado === true && g.categoria !== 'PERSONAL_DUENO',
     );
     // El espejo que faltaba: los MOVIMIENTOS sin conciliar ya se vigilan,
     // pero un GASTO bancario que nadie cruzó (p. ej. el sobrante de un

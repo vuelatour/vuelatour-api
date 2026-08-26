@@ -142,6 +142,9 @@ export class DineroReportService {
           'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)',
         )
         .is('vuelo_id', null)
+        // PERSONAL_DUENO fuera: es gasto personal del dueño, no del mes de
+        // la empresa (réplica del Excel del cliente).
+        .neq('categoria', 'PERSONAL_DUENO')
         .gte('fecha_gasto', desde)
         .lte('fecha_gasto', hasta)
         .order('fecha_gasto', { ascending: true }),

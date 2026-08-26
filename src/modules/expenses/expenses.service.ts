@@ -207,9 +207,11 @@ export class ExpensesService {
       // OTRO sin vuelo tampoco es pendiente (26-ago): sin reparto es gasto
       // de la EMPRESA a propósito — se administra en la pantalla Otros
       // gastos, no en esta bandeja.
+      // PERSONAL_DUENO tampoco (26-ago): jamás lleva avión/vuelo — dejarlo
+      // aquí sería un pendiente eterno (se administra en Gastos personales).
       q = q
         .is('aeronave_id', null)
-        .not('categoria', 'in', '(FIJO,INDIRECTO)')
+        .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO)')
         .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
@@ -405,7 +407,9 @@ export class ExpensesService {
         'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
       )
       .is('aeronave_id', null)
-      .not('categoria', 'in', '(FIJO,INDIRECTO)')
+      // Mismo universo que la bandeja: PERSONAL_DUENO jamás tendrá vuelo —
+      // sugerirle uno quemaría llamadas de IA en un imposible.
+      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO)')
       .or('categoria.neq.OTRO,vuelo_id.not.is.null')
       .order('fecha_gasto', { ascending: false })
       .limit(15);
@@ -819,6 +823,17 @@ export class ExpensesService {
     if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
       throw new BadRequestException(
         'Un gasto INDIRECTO no se liga a un vuelo; usa otra categoría o quita el vuelo.',
+      );
+    }
+    // Un gasto PERSONAL del dueño NO es de la empresa ni de los aviones:
+    // con vuelo o avión entraría a reportes/balances y contaminaría dinero
+    // de la empresa (candado espejo en update()).
+    if (
+      dto.categoria === CategoriaGasto.PERSONAL_DUENO &&
+      (dto.vuelo_id || dto.aeronave_id)
+    ) {
+      throw new BadRequestException(
+        'Un gasto personal del dueño no lleva vuelo ni avión: quítalos o usa otra categoría.',
       );
     }
     // El piloto ya NO ve ni edita desglose en la app (solo el total): el
@@ -1558,6 +1573,27 @@ export class ExpensesService {
             'El gasto está repartido entre aviones: el avión individual no aplica — edita el reparto en Otros gastos.',
           );
         }
+      }
+    }
+    // Candado espejo de create(): PERSONAL_DUENO (gasto personal del dueño)
+    // jamás lleva vuelo ni avión — se valida el estado EFECTIVO tras el
+    // merge (cambiar la categoría hacia PERSONAL con vuelo/avión vivos, o
+    // ligar vuelo/avión a un PERSONAL existente, ambos contaminarían
+    // balances de la empresa).
+    if (
+      dto.categoria !== undefined ||
+      dto.vuelo_id !== undefined ||
+      dto.aeronave_id !== undefined
+    ) {
+      const catEf = dto.categoria ?? actual?.categoria;
+      const vueloEf =
+        dto.vuelo_id !== undefined ? dto.vuelo_id : actual?.vuelo_id;
+      const avionEf =
+        dto.aeronave_id !== undefined ? dto.aeronave_id : actual?.aeronave_id;
+      if (catEf === 'PERSONAL_DUENO' && (vueloEf || avionEf)) {
+        throw new BadRequestException(
+          'Un gasto personal del dueño no lleva vuelo ni avión: quítalos o usa otra categoría.',
+        );
       }
     }
     // El invariante propina <= monto también vive aquí (el create no basta:

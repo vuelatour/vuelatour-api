@@ -39,6 +39,13 @@ export enum CategoriaGasto {
    *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir
    *  su tratamiento con el equipo (hoja "gastos indirectos" de su control). */
   INDIRECTO = 'INDIRECTO',
+  /** Gasto PERSONAL del dueño (26-ago-2026): lo captura el personal de
+   *  VuelaTour pero NO es de la empresa ni de los aviones — seguimiento en
+   *  la pantalla "Gastos personales". SIEMPRE sin vuelo y sin avión (candado
+   *  en create/update); fuera de balances, reparto, Libro Dinero, tablero de
+   *  gastos y pre-cierre. Conciliación y caja chica SÍ lo ven (el dinero
+   *  salió de verdad del banco/fondo). */
+  PERSONAL_DUENO = 'PERSONAL_DUENO',
   OTRO = 'OTRO',
 }
 

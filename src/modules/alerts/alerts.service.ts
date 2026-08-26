@@ -960,7 +960,8 @@ export class AlertsService {
       // el conteo no cuadra): FIJO e INDIRECTO no llevan avión por diseño,
       // y OTRO sin vuelo tampoco es pendiente (26-ago: sin reparto es gasto
       // de la EMPRESA — se administra en Otros gastos).
-      .not('categoria', 'in', '(FIJO,INDIRECTO)')
+      // (y PERSONAL_DUENO: gasto personal del dueño, jamás lleva avión).
+      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO)')
       .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     if (error) throw new Error(error.message);
     // Los repartidos manualmente (gasto_reparto) ya están asignados.

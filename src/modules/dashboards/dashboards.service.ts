@@ -703,6 +703,10 @@ export class DashboardsService {
       .select(
         'id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion',
       )
+      // Gastos PERSONALES del dueño fuera del tablero de gastos de la
+      // empresa (26-ago); el tablero de TARJETAS sí los conserva — el cargo
+      // en la tarjeta corporativa es real, sea de quien sea el gasto.
+      .neq('categoria', 'PERSONAL_DUENO')
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
