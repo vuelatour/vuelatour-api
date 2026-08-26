@@ -211,8 +211,27 @@ export class AlertsService {
     }
   }
 
+  /** Candado en proceso: el cron de las 8:00 y el botón "Ejecutar ahora"
+   *  entrelazados duplicaban efectos con escritura (p. ej. el mantenimiento
+   *  auto-creado: dos SELECT "no existe" → dos INSERT). Una instancia de
+   *  Railway ⇒ el mutex en memoria basta. */
+  private barridoEnCurso = false;
+
   @Cron('0 8 * * *', { timeZone: 'America/Cancun' })
   async runDaily(): Promise<void> {
+    if (this.barridoEnCurso) {
+      this.logger.warn('runDaily saltado: ya hay un barrido en curso');
+      return;
+    }
+    this.barridoEnCurso = true;
+    try {
+      await this.runDailyInner();
+    } finally {
+      this.barridoEnCurso = false;
+    }
+  }
+
+  private async runDailyInner(): Promise<void> {
     // Mantenimiento (no es alerta, no requiere alerta_config): espejo
     // vuelo↔ida antes de cualquier regla que lea el avión del vuelo.
     await this.sincronizarEspejoIda().catch((err: unknown) =>
@@ -246,6 +265,20 @@ export class AlertsService {
 
   /** Dispara todas las reglas activas de inmediato (para pruebas / botón admin). */
   async runAll(): Promise<{ ejecutadas: string[] }> {
+    if (this.barridoEnCurso) {
+      // Mismo candado que runDaily: mejor responder "en curso" que duplicar
+      // inserciones del barrido entrelazado.
+      return { ejecutadas: ['(saltado: ya hay un barrido en curso)'] };
+    }
+    this.barridoEnCurso = true;
+    try {
+      return await this.runAllInner();
+    } finally {
+      this.barridoEnCurso = false;
+    }
+  }
+
+  private async runAllInner(): Promise<{ ejecutadas: string[] }> {
     const ejecutadas: string[] = [];
     try {
       await this.sincronizarEspejoIda();
@@ -791,7 +824,7 @@ export class AlertsService {
         const { data: mantsHito, error: mhErr } = await this.supabase.service
           .from('mantenimiento')
           .select(
-            'id, estado, horas_programadas, etapa_intervalo_hr, fecha_realizada',
+            'id, estado, horas_programadas, etapa_intervalo_hr, fecha_realizada, horas_aeronave',
           )
           .eq('aeronave_id', a.id as string);
         if (mhErr) throw new Error(mhErr.message);
@@ -801,8 +834,21 @@ export class AlertsService {
         };
         const yaExiste = (mantsHito ?? []).some((m) => {
           if (cerca(m.horas_programadas, prox.a_las)) return true;
-          if (m.estado === 'COMPLETADO' || m.fecha_realizada != null)
-            return false;
+          if (m.estado === 'COMPLETADO' || m.fecha_realizada != null) {
+            // Servicio de la MISMA etapa ya HECHO dentro del ciclo actual
+            // (entró a horas ∈ (hito − intervalo, hito]): el hito está
+            // cubierto aunque el hobbs no lo rebase todavía — no re-crear
+            // lo que el mecánico acaba de terminar (verificación 26-ago).
+            const ha =
+              m.horas_aeronave == null ? null : Number(m.horas_aeronave);
+            return (
+              cerca(m.etapa_intervalo_hr, prox.intervalo) &&
+              ha != null &&
+              Number.isFinite(ha) &&
+              ha > prox.a_las - prox.intervalo &&
+              ha <= prox.a_las + 0.05
+            );
+          }
           return (
             m.horas_programadas == null &&
             cerca(m.etapa_intervalo_hr, prox.intervalo)
