@@ -436,7 +436,9 @@ export interface BalanceGeneralResumenFilaPayload {
   costo_mxn: number | null;
   /** "Gasto de combustible" del mes (hoja combustible del avión). */
   combustible_mxn?: number | null;
-  /** DESPUÉS de combustible: venta − costo − combustible = ganancia. */
+  /** Comisiones de vendedor del periodo (la ganancia ya las netea). */
+  comisiones_mxn?: number | null;
+  /** VENTA − COSTO − COMBUSTIBLE − COMISIONES = GANANCIA (leyenda impresa). */
   ganancia_mxn: number | null;
   cobrado_mxn: number | null;
   por_cobrar_mxn: number | null;

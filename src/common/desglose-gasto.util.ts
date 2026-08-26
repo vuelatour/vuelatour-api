@@ -92,8 +92,21 @@ export function desgloseGastoPartes(
       : null;
   };
   if ((fbo > 0 || tua > 0) && total > 0) {
-    // (a) Netos + IVA aparte → separar con IVA (neto × 1.16).
-    if (hayIva) return armar(r2(tua * 1.16), r2(fbo * 1.16));
+    // (a) Netos + IVA aparte → separar con IVA (neto × 1.16), PERO solo si
+    // la lectura IA es COHERENTE: los netos × 1.16 deben sumar el total
+    // (tolerancia $1). Caso real 26-ago (gasto 45007a9c): la IA leyó un TUA
+    // $25 arriba y la separación mandaba ~$30 a la hoja equivocada — mejor
+    // no separar que separar con números que no cuadran (mismo criterio
+    // conservador que la forma b).
+    if (hayIva) {
+      const netos = r2(
+        limpios
+          .filter((c) => !/\biva\b/i.test(c.concepto))
+          .reduce((a, c) => a + c.monto, 0),
+      );
+      if (Math.abs(r2(netos * 1.16) - r2(total)) > 1) return null;
+      return armar(r2(tua * 1.16), r2(fbo * 1.16));
+    }
     // (b) Tabla resumen: montos YA con IVA que suman el total → tal cual.
     const suma = r2(limpios.reduce((a, c) => a + c.monto, 0));
     if (Math.abs(suma - r2(total)) <= 0.05) return armar(r2(tua), r2(fbo));
