@@ -434,21 +434,33 @@ export class CalendarService {
       if (q.aeronave_id) mq = mq.eq('aeronave_id', q.aeronave_id);
       const { data: mants, error: mErr } = await mq;
       if (mErr) throw new Error(mErr.message);
-      for (const m of (mants ?? []) as Array<Record<string, unknown>>) {
-        const aero = Array.isArray(m.aeronave) ? m.aeronave[0] : m.aeronave;
-        const matricula =
-          (aero as { matricula?: string } | null)?.matricula ?? null;
-        const enTaller = (m.estado as string) === 'EN_TALLER';
-        const desc = String(m.descripcion ?? 'Servicio');
+      interface MantRow {
+        id: string;
+        descripcion: string | null;
+        estado: string | null;
+        fecha_programada: string;
+        aeronave_id: string | null;
+        aeronave:
+          | { matricula?: string | null }
+          | Array<{ matricula?: string | null }>
+          | null;
+      }
+      for (const m of (mants ?? []) as unknown as MantRow[]) {
+        const aero = Array.isArray(m.aeronave)
+          ? (m.aeronave[0] ?? null)
+          : m.aeronave;
+        const matricula = aero?.matricula ?? null;
+        const enTaller = m.estado === 'EN_TALLER';
+        const desc = m.descripcion ?? 'Servicio';
         events.push({
-          id: `mant:${m.id as string}`,
+          id: `mant:${m.id}`,
           tipo_evento: 'mantenimiento',
           mantenimiento_id: m.id,
           titulo: desc,
           vuelo_id: null,
           escala_id: null,
           folio: null,
-          fecha_vuelo: `${m.fecha_programada as string}T12:00:00Z`,
+          fecha_vuelo: `${m.fecha_programada}T12:00:00Z`,
           hora: null,
           estado: enTaller ? 'EN_TALLER' : 'PROGRAMADO',
           estado_permiso: null,
@@ -461,7 +473,7 @@ export class CalendarService {
           aeronave_matricula: matricula,
           piloto_id: null,
           piloto_nombre: null,
-        } as unknown as (typeof events)[number]);
+        });
       }
     }
 
