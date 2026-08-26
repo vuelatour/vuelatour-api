@@ -1234,6 +1234,100 @@ export class AircraftService {
   }
 
   /** Día actual (yyyy-mm-dd) en hora Cancún — regla del repo para cortes. */
+  /**
+   * Detalle del GASTO DE COMBUSTIBLE del avión por mes (regla 26-ago-2026:
+   * el gas se controla POR AVIÓN, ya no por vuelo). MISMO filtro que la hoja
+   * "combustible" del balance y que el reparto a socios: aeronave_id CRUDO +
+   * categoría GAS + eje fecha_gasto — así los totales de la card cuadran
+   * EXACTO con el Excel del mes. Solo agrega por moneda NATIVA (MXN/USD):
+   * la conversión formal a una moneda vive en el balance (tc_gasto ?? tc del
+   * vuelo ?? tc promedio) y no se duplica aquí (fuente única de cálculo).
+   */
+  async combustibleMensual(id: string, meses = 12) {
+    await this.findById(id); // 404 limpio si el avión no existe
+
+    // Ventana móvil: primer día del mes (meses−1) atrás … fin del mes
+    // corriente, en día Cancún (fecha_gasto es DATE capturada en ese eje).
+    const hoy = this.hoyCancun();
+    const [y, m] = hoy.split('-').map(Number);
+    const idx = y * 12 + (m - 1) - (meses - 1);
+    const desde = `${String(Math.floor(idx / 12)).padStart(4, '0')}-${String(
+      (idx % 12) + 1,
+    ).padStart(2, '0')}-01`;
+    // Cota superior EXCLUSIVA = 1º del mes siguiente: cubre cargas del mes
+    // corriente con fecha posterior a hoy sin fabricar "31 de septiembre".
+    const sig = y * 12 + m; // índice del mes siguiente
+    const limSup = `${String(Math.floor(sig / 12)).padStart(4, '0')}-${String(
+      (sig % 12) + 1,
+    ).padStart(2, '0')}-01`;
+
+    // Sin cap de PostgREST (default 1000): paginar hasta cubrir todo el
+    // rango (patrón anti-cap del repo — un mes incompleto es una mentira).
+    interface Row {
+      fecha_gasto: string;
+      monto: number | string;
+      moneda: string;
+      litros: number | string | null;
+    }
+    const rows: Row[] = [];
+    const PAGE = 1000;
+    for (;;) {
+      const { data, error } = await this.supabase.service
+        .from('gasto')
+        .select('fecha_gasto, monto, moneda, litros')
+        .eq('aeronave_id', id)
+        .eq('categoria', 'GAS')
+        .gte('fecha_gasto', desde)
+        .lt('fecha_gasto', limSup)
+        .order('fecha_gasto', { ascending: true })
+        .order('id', { ascending: true })
+        .range(rows.length, rows.length + PAGE - 1);
+      if (error) {
+        throw new Error(`Combustible mensual: ${error.message}`);
+      }
+      rows.push(...((data ?? []) as unknown as Row[]));
+      if (!data || data.length < PAGE) break;
+    }
+
+    // Agregado por mes en moneda NATIVA. Solo meses con cargas.
+    const porMes = new Map<
+      string,
+      {
+        mes: string;
+        cargas: number;
+        litros: number;
+        sin_litros: number;
+        mxn: number;
+        usd: number;
+      }
+    >();
+    for (const r of rows) {
+      const mes = r.fecha_gasto.slice(0, 7);
+      let acc = porMes.get(mes);
+      if (!acc) {
+        acc = { mes, cargas: 0, litros: 0, sin_litros: 0, mxn: 0, usd: 0 };
+        porMes.set(mes, acc);
+      }
+      acc.cargas += 1;
+      const litros = r.litros == null ? null : Number(r.litros);
+      if (litros != null && litros > 0) acc.litros += litros;
+      else acc.sin_litros += 1;
+      const monto = Number(r.monto) || 0;
+      if (r.moneda === 'USD') acc.usd += monto;
+      else acc.mxn += monto;
+    }
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+    const meses_ = [...porMes.values()]
+      .sort((a, b) => (a.mes < b.mes ? 1 : -1))
+      .map((x) => ({
+        ...x,
+        litros: round2(x.litros),
+        mxn: round2(x.mxn),
+        usd: round2(x.usd),
+      }));
+    return { desde, hasta: hoy.slice(0, 7), meses: meses_ };
+  }
+
   private hoyCancun(): string {
     return new Date().toLocaleDateString('en-CA', {
       timeZone: 'America/Cancun',

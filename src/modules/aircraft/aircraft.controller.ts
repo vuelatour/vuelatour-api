@@ -113,6 +113,18 @@ export class AircraftController {
     return this.aircraft.aircraftMetrics(id);
   }
 
+  @Get(':id/combustible-mensual')
+  // Dinero del avión: mismos roles que /metrics. El expediente del panel lo
+  // pide best-effort (sin permiso, la card simplemente no se pinta).
+  @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Gasto de combustible (GAS) del avión agrupado por mes — últimos 12 meses en moneda nativa; mismo filtro (aeronave_id + fecha_gasto) que la hoja combustible del balance y el reparto.',
+  })
+  combustibleMensual(@Param('id', ParseUUIDPipe) id: string) {
+    return this.aircraft.combustibleMensual(id);
+  }
+
   @Get(':id/snapshot')
   @ApiOperation({
     summary:
