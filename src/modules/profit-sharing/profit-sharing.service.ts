@@ -666,7 +666,7 @@ export class ProfitSharingService {
       sb
         .from('gasto')
         .select(
-          'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado',
+          'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -1059,6 +1059,28 @@ export class ProfitSharingService {
         (g.medio_pago === 'TARJETA_CORP' || g.medio_pago === 'TRANSFERENCIA') &&
         g.conciliado !== true,
     );
+    // Matrícula del comprobante ≠ avión asignado (26-ago, cruce ASUR MID):
+    // en cambios de avión a media jornada el recibo trae la matrícula REAL y
+    // la herencia del vuelo puede colgar el gasto en el avión equivocado —
+    // el costo resta en el balance que no es. Red mensual del aviso que ya
+    // salta en la captura.
+    const { data: flotaPre } = await sb
+      .from('aeronave')
+      .select('id, matricula');
+    const normMat = (m: string) => m.toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const avionPorMatricula = new Map(
+      (flotaPre ?? []).map((a) => [
+        normMat(a.matricula as string),
+        a.id as string,
+      ]),
+    );
+    const matriculaCruzada = gastos.filter((g) => {
+      const mIa = g.matricula_ia;
+      if (typeof mIa !== 'string' || !mIa.trim() || g.aeronave_id == null)
+        return false;
+      const delRecibo = avionPorMatricula.get(normMat(mIa));
+      return delRecibo != null && delRecibo !== g.aeronave_id;
+    });
     const movs = (movRes.data ?? []) as Array<Record<string, unknown>>;
 
     const items = [
@@ -1134,6 +1156,13 @@ export class ProfitSharingService {
         detalle:
           'Los FIJOS se prorratean entre TODA la flota aunque tengan avión: quítales el avión o cámbiales la categoría para que resten donde corresponde.',
         count: fijosConAvion.length,
+      },
+      {
+        clave: 'matricula_recibo_distinta',
+        titulo: 'Gastos cuyo comprobante trae OTRA matrícula',
+        detalle:
+          'La IA leyó en el recibo una matrícula distinta al avión asignado (típico en cambios de avión a media jornada): el costo puede estar restando en el avión equivocado. Corrige el avión del gasto en Gastos.',
+        count: matriculaCruzada.length,
       },
       {
         clave: 'duplicados_sin_resolver',

@@ -938,6 +938,31 @@ export class ExpensesService {
         'La carga de combustible necesita el avión: selecciona la aeronave (o un vuelo del cual tomarla).',
       );
     }
+    // VALIDACIÓN DE MATRÍCULA (26-ago, caso ASUR Mérida vuelo #105): si la
+    // IA leyó una matrícula en el comprobante y NO es la del avión al que
+    // quedó el gasto (elegido o HEREDADO del vuelo — en cambios de avión a
+    // media jornada la herencia cuelga el gasto en el avión principal), se
+    // advierte de inmediato: ⚠ en notas + visto bueno pendiente + aviso a
+    // oficina. No bloquea: el recibo puede traer una matrícula ajena real.
+    let discrepanciaMatricula: string | null = null;
+    const matriculaIA = (
+      dto.valor_ia_extraido as { matricula?: unknown } | undefined
+    )?.matricula;
+    if (typeof matriculaIA === 'string' && matriculaIA.trim() && aeronaveId) {
+      const { data: flotaMat } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula');
+      const normMat = (m: string) => m.toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const delRecibo = (flotaMat ?? []).find(
+        (a) => normMat(a.matricula as string) === normMat(matriculaIA),
+      );
+      if (delRecibo && delRecibo.id !== aeronaveId) {
+        const asignada = (flotaMat ?? []).find((a) => a.id === aeronaveId);
+        discrepanciaMatricula = `el comprobante trae la matrícula ${delRecibo.matricula as string} pero el gasto quedó en ${(asignada?.matricula as string | undefined) ?? 'otro avión'}`;
+        const linea = `⚠ ${discrepanciaMatricula} — revisar`;
+        notas = notas ? `${notas}\n${linea}` : linea;
+      }
+    }
     // Propina: sub-parte informativa del monto (monto = ticket + propina, es
     // lo que se concilia contra el banco). Nunca puede exceder el total.
     if (dto.propina != null && Number(dto.propina) > Number(dto.monto)) {
@@ -949,8 +974,10 @@ export class ExpensesService {
       usuario_captura_id: capturaId,
       origen,
       // Prellenado con IA desde la app (flujo admin): pendiente del visto
-      // bueno de administración en el panel. No bloquea nada.
-      requiere_visto_bueno: dto.requiere_visto_bueno === true,
+      // bueno de administración en el panel. No bloquea nada. Una matrícula
+      // que no coincide con el avión asignado también exige visto bueno.
+      requiere_visto_bueno:
+        dto.requiere_visto_bueno === true || discrepanciaMatricula != null,
       categoria: dto.categoria,
       monto: dto.monto,
       propina: dto.propina ?? 0,
@@ -1000,6 +1027,20 @@ export class ExpensesService {
           `Ya existe un gasto con el folio/remisión "${dto.folio_ticket}": es el mismo pago capturado dos veces. Si de verdad es otro ticket, corrige el folio.`,
         );
       throw new Error(error.message);
+    }
+
+    // Aviso inmediato a oficina del cruce de matrícula (no solo en notas):
+    // mismo canal que las discrepancias del enriquecimiento IA.
+    if (discrepanciaMatricula && data && opts?.notificar !== false) {
+      const avisoMat = {
+        tipo: 'alerta_sistema',
+        titulo: 'Matrícula del comprobante no coincide',
+        cuerpo: `${dto.categoria} · $${Number(dto.monto).toFixed(2)} ${dto.moneda}: ${discrepanciaMatricula}. Corrige el avión del gasto si aplica.`,
+        data: { gasto_id: data.id as string },
+        link: '/admin/expenses',
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, avisoMat);
+      void this.notifications.notifyRole(Rol.ANALISTA, avisoMat);
     }
 
     // Captura OFFLINE con foto: el piloto no tuvo IA en campo — el servidor
