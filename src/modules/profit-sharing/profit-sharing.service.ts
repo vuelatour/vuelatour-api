@@ -946,6 +946,10 @@ export class ProfitSharingService {
         g.categoria !== 'FIJO' &&
         g.categoria !== 'INDIRECTO',
     );
+    // COMBUSTIBLE sin avión (26-ago-2026): con el modelo "gas por avión/mes"
+    // el aeronave_id es la ÚNICA liga del combustible al balance y al
+    // reparto — una carga sin avión es dinero invisible. BLOQUEA el cierre.
+    const gasSinAvion = sinAvion.filter((g) => g.categoria === 'GAS');
     // El caso inverso: un FIJO capturado CON avión se prorratea igual entre
     // toda la flota (el pool no mira aeronave_id) y en el detalle del avión
     // asignado aparece EXCLUIDO — doble lectura silenciosa. Aviso, no candado.
@@ -961,8 +965,7 @@ export class ProfitSharingService {
     // factura vive en la ENTRADA del cardex — jamás tendrá factura propia
     // (dejarlo contaría ruido eterno en el pre-cierre).
     const sinFacturar = gastos.filter(
-      (g) =>
-        g.estatus_facturacion !== 'FACTURADA' && g.medio_pago !== 'BODEGA',
+      (g) => g.estatus_facturacion !== 'FACTURADA' && g.medio_pago !== 'BODEGA',
     );
     // Posibles duplicados con el flag aún encendido: cada uno resta DOBLE al
     // reparto hasta que alguien lo resuelva (borrar el repetido o marcar
@@ -1021,6 +1024,17 @@ export class ProfitSharingService {
           'Se volaron pero su cotización quedó en $0: cotízalos para poder cobrarlos — sin precio no aparecen en cobranza ni en el reparto.',
         count: vuelosSinPrecio.length,
         vuelos: vuelosSinPrecio,
+      },
+      {
+        clave: 'combustible_sin_avion',
+        titulo: 'Cargas de combustible sin avión',
+        detalle:
+          'El combustible se controla por avión/mes: sin aeronave no resta ' +
+          'en ningún balance ni en el reparto. Asigna el avión en Combustibles.',
+        count: gasSinAvion.length,
+        monto_mxn: round2(
+          gasSinAvion.reduce((acc, g) => acc + Number(g.monto ?? 0), 0),
+        ),
       },
       {
         clave: 'gastos_sin_avion',
@@ -1107,11 +1121,13 @@ export class ProfitSharingService {
     ];
 
     // Lo único que BLOQUEA números: vuelos sin completar, tacos amarillos,
-    // gastos sin TC. El resto es aviso (cobranza/conciliación son procesos).
+    // gastos sin TC y combustible sin avión (el gas del mes es por avión).
+    // El resto es aviso (cobranza/conciliación son procesos).
     const bloqueantes = [
       'vuelos_sin_completar',
       'tacos_en_revision',
       'gastos_sin_tc',
+      'combustible_sin_avion',
     ];
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))

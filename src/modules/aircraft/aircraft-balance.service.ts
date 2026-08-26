@@ -230,6 +230,7 @@ export class AircraftBalanceService {
       horasCobradas: 0,
       venta: 0,
       costo: 0,
+      combustible: 0,
       ganancia: 0,
       cobrado: 0,
       porCobrar: 0,
@@ -248,6 +249,12 @@ export class AircraftBalanceService {
       // calendario" del equipo; editable en el apartado del avión).
       p.avion_color = (a.color_calendario as string | null) ?? null;
       libros.push(p);
+      // "Gasto de combustible" del mes: columna propia en el RESUMEN y la
+      // ganancia del resumen queda DESPUÉS de combustible (aritmética entre
+      // columnas: venta − costo − combustible = ganancia).
+      const combustibleMxn = p.combustible?.total_mxn ?? 0;
+      const gananciaMxn =
+        t.ganancia_mxn != null ? round2(t.ganancia_mxn - combustibleMxn) : null;
       resumen.push({
         matricula: p.matricula,
         color: p.avion_color,
@@ -256,7 +263,8 @@ export class AircraftBalanceService {
         horas_cobradas: t.horas_cobradas,
         venta_mxn: t.total_mxn,
         costo_mxn: t.costo_total_mxn,
-        ganancia_mxn: t.ganancia_mxn,
+        combustible_mxn: combustibleMxn,
+        ganancia_mxn: gananciaMxn,
         cobrado_mxn: t.cobrado_mxn,
         por_cobrar_mxn: t.por_cobrar_mxn,
         pendientes: p.pendientes.length,
@@ -266,7 +274,8 @@ export class AircraftBalanceService {
       acc.horasCobradas += t.horas_cobradas ?? 0;
       acc.venta += t.total_mxn ?? 0;
       acc.costo += t.costo_total_mxn ?? 0;
-      acc.ganancia += t.ganancia_mxn ?? 0;
+      acc.combustible += combustibleMxn;
+      acc.ganancia += gananciaMxn ?? 0;
       acc.cobrado += t.cobrado_mxn ?? 0;
       acc.porCobrar += t.por_cobrar_mxn ?? 0;
       acc.pendientes += p.pendientes.length;
@@ -369,10 +378,33 @@ export class AircraftBalanceService {
       gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
       otros_gastos: hojaFlota((p) => p.otros_gastos),
       permisos: hojaFlota((p) => p.permisos),
+      // Hoja COMBUSTIBLE de flota: mismas filas por avión (con litros) +
+      // totales de litros y $/L promedio del periodo.
+      combustible: (() => {
+        const vaciaCombustible = {
+          filas: [],
+          total_mxn: 0,
+          usd: 0,
+          usd_hr: null,
+        };
+        const base = hojaFlota((p) => p.combustible ?? vaciaCombustible);
+        const litrosTotalFlota = round2(
+          libros.reduce((s, p) => s + (p.combustible?.litros_total ?? 0), 0),
+        );
+        return {
+          ...base,
+          litros_total: litrosTotalFlota,
+          precio_litro_prom:
+            litrosTotalFlota > 0 && base.total_mxn > 0
+              ? round2(base.total_mxn / litrosTotalFlota)
+              : null,
+        };
+      })(),
       // La hoja "balance" del general se pinta por BLOQUES desde `aviones`
       // (los socios son por avión): este campo no se renderiza.
       balance: {
         utilidad_antes_usd: 0,
+        combustible_usd: null,
         gastos_indirectos_usd: null,
         otros_usd: null,
         permisos_usd: null,
@@ -381,9 +413,14 @@ export class AircraftBalanceService {
         utilidad_cobrada_usd: null,
         socios: [],
       },
-      pendientes: libros.flatMap((p) =>
-        p.pendientes.map((texto) => `${p.matricula}: ${texto}`),
-      ),
+      pendientes: [
+        // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
+        // en el reparto — el dinero jamás desaparece en silencio.
+        ...(await this.pendienteGasSinAvion(d, h)),
+        ...libros.flatMap((p) =>
+          p.pendientes.map((texto) => `${p.matricula}: ${texto}`),
+        ),
+      ],
     };
 
     const buffer = await this.pyservices.generateBalanceGeneralXlsx({
@@ -399,6 +436,7 @@ export class AircraftBalanceService {
         horas_cobradas: round2(acc.horasCobradas),
         venta_mxn: round2(acc.venta),
         costo_mxn: round2(acc.costo),
+        combustible_mxn: round2(acc.combustible),
         ganancia_mxn: round2(acc.ganancia),
         cobrado_mxn: round2(acc.cobrado),
         por_cobrar_mxn: round2(acc.porCobrar),
@@ -534,56 +572,78 @@ export class AircraftBalanceService {
     const vueloIds = vuelos.map((v) => v.id);
 
     const vacio = { data: [], error: null } as const;
-    const [escalasRes, cobrosRes, gastosVueloRes, gastosAvionRes, sociosRes] =
-      await Promise.all([
-        vueloIds.length
-          ? sb
-              .from('escala')
-              .select(
-                'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan',
-              )
-              .in('vuelo_id', vueloIds)
-              // Tramos cancelados fuera: ni horas ni "pendiente de captura".
-              .is('cancelada_at', null)
-              .order('orden', { ascending: true })
-          : Promise.resolve(vacio),
-        vueloIds.length
-          ? sb
-              .from('cobro_vuelo')
-              .select(
-                'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro',
-              )
-              .in('vuelo_id', vueloIds)
-              .order('fecha_cobro', { ascending: true })
-          : Promise.resolve(vacio),
-        vueloIds.length
-          ? sb
-              .from('gasto')
-              .select(
-                'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
-              )
-              .in('vuelo_id', vueloIds)
-              .order('fecha_gasto', { ascending: true })
-          : Promise.resolve(vacio),
-        // Gastos del avión SIN vuelo en el periodo (fecha_gasto es DATE:
-        // comparación de días, sin componente horaria).
-        sb
-          .from('gasto')
-          .select(
-            'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
-          )
-          .eq('aeronave_id', aircraftId)
-          .is('vuelo_id', null)
-          .gte('fecha_gasto', desde)
-          .lte('fecha_gasto', hasta)
-          .order('fecha_gasto', { ascending: true }),
-        sb
-          .from('aeronave_socio')
-          .select(
-            'socio_id, porcentaje, vigente_desde, vigente_hasta, usuario:socio_id(nombre)',
-          )
-          .eq('aeronave_id', aircraftId),
-      ]);
+    const [
+      escalasRes,
+      cobrosRes,
+      gastosVueloRes,
+      gastosAvionRes,
+      gastosGasRes,
+      sociosRes,
+    ] = await Promise.all([
+      vueloIds.length
+        ? sb
+            .from('escala')
+            .select(
+              'id, vuelo_id, orden, origen_iata, destino_iata, taco_salida, taco_llegada, aeronave_id, fecha_salida_plan',
+            )
+            .in('vuelo_id', vueloIds)
+            // Tramos cancelados fuera: ni horas ni "pendiente de captura".
+            .is('cancelada_at', null)
+            .order('orden', { ascending: true })
+        : Promise.resolve(vacio),
+      vueloIds.length
+        ? sb
+            .from('cobro_vuelo')
+            .select(
+              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro',
+            )
+            .in('vuelo_id', vueloIds)
+            .order('fecha_cobro', { ascending: true })
+        : Promise.resolve(vacio),
+      vueloIds.length
+        ? sb
+            .from('gasto')
+            .select(
+              'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+            )
+            .in('vuelo_id', vueloIds)
+            .order('fecha_gasto', { ascending: true })
+        : Promise.resolve(vacio),
+      // Gastos del avión SIN vuelo en el periodo (fecha_gasto es DATE:
+      // comparación de días, sin componente horaria).
+      sb
+        .from('gasto')
+        .select(
+          'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+        )
+        .eq('aeronave_id', aircraftId)
+        .is('vuelo_id', null)
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+      // COMBUSTIBLE del avión en el MES (regla 26-ago-2026): el gas se
+      // controla POR AVIÓN + fecha_gasto, con o sin vuelo — mismo eje y
+      // mismo filtro CRUDO por aeronave_id que usa el reparto a socios
+      // (profit-sharing), para que la hoja "combustible" y el reparto den
+      // EXACTAMENTE el mismo dinero. Ya no se persigue la asignación por
+      // vuelo (el vuelo_id del gasto queda informativo).
+      sb
+        .from('gasto')
+        .select(
+          'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+        )
+        .eq('aeronave_id', aircraftId)
+        .eq('categoria', 'GAS')
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+      sb
+        .from('aeronave_socio')
+        .select(
+          'socio_id, porcentaje, vigente_desde, vigente_hasta, usuario:socio_id(nombre)',
+        )
+        .eq('aeronave_id', aircraftId),
+    ]);
     // Un query fallido NO degrada a "sin datos": un balance sin cobros o sin
     // gastos de un mes real es una mentira numérica silenciosa.
     for (const [nombre, res] of [
@@ -591,6 +651,7 @@ export class AircraftBalanceService {
       ['cobros', cobrosRes],
       ['gastos de vuelos', gastosVueloRes],
       ['gastos del avión', gastosAvionRes],
+      ['combustible', gastosGasRes],
       ['socios', sociosRes],
     ] as const) {
       if (res.error) {
@@ -604,6 +665,7 @@ export class AircraftBalanceService {
     const cobros = (cobrosRes.data ?? []) as unknown as CobroRow[];
     const gastosVuelo = (gastosVueloRes.data ?? []) as unknown as GastoRow[];
     const gastosAvion = (gastosAvionRes.data ?? []) as unknown as GastoRow[];
+    const gastosGas = (gastosGasRes.data ?? []) as unknown as GastoRow[];
     const sociosAll = (sociosRes.data ?? []) as unknown as SocioRow[];
 
     // Nombres de clientes (columna CLAVE del Excel) + bandera de cliente
@@ -886,18 +948,13 @@ export class AircraftBalanceService {
         const tc = pos(g.tc_gasto) ?? z ?? tcPromedio;
         return tc != null ? monto * tc : null;
       };
-      let gasMxn: number | null = null;
-      let gasLitros: number | null = null;
       let opMxn: number | null = null;
       let pilotoMxn: number | null = null;
       let otrosMxn: number | null = null;
       let usdSinTc = 0;
       let usdSinTcMonto = 0;
-      let gasSinLitros = 0;
-      let tuvoGas = false;
       // Desglose por celda (nota de Excel): una línea por gasto, con la
       // categoría, el proveedor/nota y el monto — "Comida · Starbucks — $206.00".
-      const gasDetalle: string[] = [];
       const opDetalle: string[] = [];
       const pilotoDetalle: string[] = [];
       const otrosDetalle: string[] = [];
@@ -930,7 +987,15 @@ export class AircraftBalanceService {
       for (const g of vGastos) {
         // PERMISO va a su hoja (con o sin vuelo) y se excluye del costo del
         // vuelo para no contar doble; INDIRECTO no es costo directo.
-        if (g.categoria === 'PERMISO' || g.categoria === 'INDIRECTO') continue;
+        // GAS (26-ago-2026): el combustible dejó de ser costo POR VUELO — se
+        // controla por avión/mes en su propia hoja "combustible" y resta UNA
+        // sola vez en la cascada del balance (como indirectos/otros/permisos).
+        if (
+          g.categoria === 'PERMISO' ||
+          g.categoria === 'INDIRECTO' ||
+          g.categoria === 'GAS'
+        )
+          continue;
         if (g.categoria === 'TUAS') {
           // REGLA DEL LIBRO (17-ago-2026): el TUA es un TRASLADO al pasajero,
           // JAMÁS costo de operar el avión — no entra a columnas ni al costo
@@ -991,18 +1056,7 @@ export class AircraftBalanceService {
           if (opParte < 0) return null; // no cuadra: mejor no separar
           return { opParte, tuaParte, fboParte };
         };
-        if (g.categoria === 'GAS') {
-          tuvoGas = true;
-          gasMxn = (gasMxn ?? 0) + mxn;
-          const litros = pos(g.litros);
-          // La línea del gas lleva sus litros: la misma nota anota GAS TOTAL
-          // y GAS LITROS (se ve que son N cargas y de cuánto cada una).
-          gasDetalle.push(
-            `${lineaDetalle(g, mxn, sufijo)}${litros != null ? ` · ${litros} L` : ' · SIN LITROS'}`,
-          );
-          if (litros != null) gasLitros = (gasLitros ?? 0) + litros;
-          else gasSinLitros += 1;
-        } else if (CAT_PILOTO.has(g.categoria)) {
+        if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
           pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else {
@@ -1066,22 +1120,15 @@ export class AircraftBalanceService {
           }
         }
       }
-      const T =
-        gasMxn != null && gasLitros != null && gasLitros > 0
-          ? round2(gasMxn / gasLitros)
-          : null;
       // Provisión AFAC (X) = tarifa USD/hr × TC de costos × horas COBRADAS —
       // solo si el avión tiene la config Y hay TC Y hay horas cobradas.
       const X =
         permisoAfacUsdHr != null && z != null && D > 0
           ? round2(permisoAfacUsdHr * z * D)
           : null;
+      // Y sin combustible (26-ago-2026): el gas resta en su hoja mensual.
       const Y = round2(
-        (gasMxn ?? 0) +
-          (opMxn ?? 0) +
-          (pilotoMxn ?? 0) +
-          (otrosMxn ?? 0) +
-          (X ?? 0),
+        (opMxn ?? 0) + (pilotoMxn ?? 0) + (otrosMxn ?? 0) + (X ?? 0),
       );
 
       // ----- Bloque INDICADORES USD e IVA -----
@@ -1168,18 +1215,8 @@ export class AircraftBalanceService {
       if ((L ?? 0) > 0 && vCobros.length === 0) {
         pendientes.push(`${etiqueta}: sin cobros registrados`);
       }
-      // En fila COMPARTIDA no se regaña por gas: los flujos de captura hoy
-      // sellan el avión PRINCIPAL en el gasto, así que el gas de este tramo
-      // suele vivir (correctamente detectable solo a mano) en el otro
-      // balance — regañar aquí invitaría a capturar doble.
-      if (!tuvoGas && usdSinTc === 0 && yaVolo && !esExterno && !esCompartido) {
-        pendientes.push(`${etiqueta}: sin gastos de combustible (GAS)`);
-      }
-      if (gasSinLitros > 0) {
-        pendientes.push(
-          `${etiqueta}: ${gasSinLitros} gasto(s) GAS sin litros — precio por litro incompleto`,
-        );
-      }
+      // (El combustible ya no se vigila POR VUELO: la vigilancia es mensual
+      // por avión — ver pendientes de la hoja "combustible".)
       if (O == null && !esExterno && !cancelado) {
         pendientes.push(
           yaVolo
@@ -1302,13 +1339,15 @@ export class AircraftBalanceService {
         taco_fin: Q,
         salto_taco_interno: saltoInterno != null,
         salto_taco_interno_detalle: saltoInterno,
-        gas_mxn: r2(gasMxn),
-        gas_litros: gasLitros,
-        gas_precio_litro: T,
+        // Combustible fuera de la fila (hoja mensual "combustible"): los
+        // campos gas_* se conservan en el contrato (py viejo los ignora).
+        gas_mxn: null,
+        gas_litros: null,
+        gas_precio_litro: null,
         op_mxn: r2(opMxn),
         piloto_mxn: r2(pilotoMxn),
         otros_mxn: r2(otrosMxn),
-        gas_detalle: gasDetalle,
+        gas_detalle: [],
         op_detalle: opDetalle,
         piloto_detalle: pilotoDetalle,
         otros_detalle: otrosDetalle,
@@ -1418,8 +1457,13 @@ export class AircraftBalanceService {
       ...gastosAvion.filter((g) => g.categoria === 'INDIRECTO'),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'INDIRECTO'),
     ];
+    // GAS fuera de "otros gastos": el combustible tiene su propia hoja
+    // mensual — dejarlo aquí lo contaría DOS veces en la cascada.
     const filasOtros = gastosAvion.filter(
-      (g) => g.categoria !== 'INDIRECTO' && g.categoria !== 'PERMISO',
+      (g) =>
+        g.categoria !== 'INDIRECTO' &&
+        g.categoria !== 'PERMISO' &&
+        g.categoria !== 'GAS',
     );
     // Permisos: pagos reales de PERMISO del avión, CON o SIN vuelo.
     const filasPermisos = [
@@ -1447,13 +1491,64 @@ export class AircraftBalanceService {
       'permisos',
       pendientes,
     );
+    // ===== Hoja COMBUSTIBLE (26-ago-2026): el gas del avión en el MES =====
+    // Eje fecha_gasto + aeronave_id crudo (idéntico al reparto a socios);
+    // con o sin vuelo. Litros y $/L viven aquí, ya no por vuelo.
+    const hojaCombustibleBase = this.buildHoja(
+      gastosGas,
+      tcPromedio,
+      horasVoladas,
+      'combustible',
+      pendientes,
+    );
+    const litrosPorFila = [...gastosGas]
+      .sort((a, b) => (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? ''))
+      .map((g) => pos(g.litros));
+    let litrosAcum = 0;
+    for (const l of litrosPorFila) litrosAcum += l ?? 0;
+    const litrosTotal = round2(litrosAcum);
+    const hojaCombustible = {
+      ...hojaCombustibleBase,
+      filas: hojaCombustibleBase.filas.map((f, i) => ({
+        ...f,
+        litros: litrosPorFila[i] ?? null,
+      })),
+      litros_total: litrosTotal,
+      precio_litro_prom:
+        litrosTotal > 0 && hojaCombustibleBase.total_mxn > 0
+          ? round2(hojaCombustibleBase.total_mxn / litrosTotal)
+          : null,
+    };
+    // Vigilancia MENSUAL del combustible (sustituye a los regaños por vuelo):
+    // un avión que voló sin una sola carga en el mes es captura faltante.
+    if (horasVoladas > 0 && gastosGas.length === 0) {
+      pendientes.push(
+        `Avión ${avion.matricula as string}: voló ${horasVoladas.toFixed(
+          1,
+        )} hr en el periodo y no hay NINGUNA carga de combustible capturada`,
+      );
+    }
+    const gasSinLitrosMes = gastosGas.filter(
+      (g) => pos(g.litros) == null,
+    ).length;
+    if (gasSinLitrosMes > 0) {
+      pendientes.push(
+        `Avión ${avion.matricula as string}: ${gasSinLitrosMes} carga(s) de combustible sin litros — el $/litro del mes queda incompleto`,
+      );
+    }
 
     // ===== Balance (todo USD; null se propaga si falta TC) =====
     const utilidadAntes = totales.ganancia_usd;
-    const hojasUsd = [hojaIndirectos.usd, hojaOtros.usd, hojaPermisos.usd];
+    const hojasUsd = [
+      hojaCombustible.usd,
+      hojaIndirectos.usd,
+      hojaOtros.usd,
+      hojaPermisos.usd,
+    ];
     const utilidadDespues = hojasUsd.every((u) => u != null)
       ? round2(
           utilidadAntes -
+            (hojaCombustible.usd ?? 0) -
             (hojaIndirectos.usd ?? 0) -
             (hojaOtros.usd ?? 0) -
             (hojaPermisos.usd ?? 0),
@@ -1575,8 +1670,10 @@ export class AircraftBalanceService {
       gastos_indirectos: hojaIndirectos,
       otros_gastos: hojaOtros,
       permisos: hojaPermisos,
+      combustible: hojaCombustible,
       balance: {
         utilidad_antes_usd: utilidadAntes,
+        combustible_usd: hojaCombustible.usd,
         gastos_indirectos_usd: hojaIndirectos.usd,
         otros_usd: hojaOtros.usd,
         permisos_usd: hojaPermisos.usd,
@@ -1594,6 +1691,44 @@ export class AircraftBalanceService {
    * al TC promedio del periodo. Un gasto USD sin TC (ni tc_gasto ni promedio)
    * queda con monto_mxn null Y se reporta en pendientes — nunca desaparece.
    */
+  /**
+   * Cargas de combustible del periodo SIN avión: invisibles para el balance
+   * de todos los aviones Y para el reparto (que filtra aeronave_id crudo).
+   * Se gritan al frente del consolidado — asignarles avión es el paso #1.
+   */
+  private async pendienteGasSinAvion(
+    desde: string,
+    hasta: string,
+  ): Promise<string[]> {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('monto, moneda')
+      .eq('categoria', 'GAS')
+      .is('aeronave_id', null)
+      .gte('fecha_gasto', desde)
+      .lte('fecha_gasto', hasta);
+    if (error) throw new Error(error.message);
+    const filas = data ?? [];
+    if (filas.length === 0) return [];
+    const porMoneda = new Map<string, number>();
+    for (const g of filas) {
+      const m = (g.moneda as string) ?? 'MXN';
+      porMoneda.set(m, (porMoneda.get(m) ?? 0) + (num(g.monto) ?? 0));
+    }
+    const montos = [...porMoneda.entries()]
+      .map(
+        ([m, t]) =>
+          `$${round2(t).toLocaleString('es-MX', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} ${m}`,
+      )
+      .join(' + ');
+    return [
+      `FLOTA: ${filas.length} carga(s) de combustible SIN avión por ${montos} — no aparecen en el balance de ningún avión ni en el reparto; asígnales aeronave en Combustibles`,
+    ];
+  }
+
   private buildHoja(
     gastos: GastoRow[],
     tcPromedio: number | null,

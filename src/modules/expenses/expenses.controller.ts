@@ -48,7 +48,9 @@ export class ExpensesController {
   ) {}
 
   @Get()
-  @ApiOperation({ summary: 'List gastos (with filters). Pilotos see only own captures.' })
+  @ApiOperation({
+    summary: 'List gastos (with filters). Pilotos see only own captures.',
+  })
   list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
@@ -96,7 +98,9 @@ export class ExpensesController {
 
   @Get('export')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
-  @ApiOperation({ summary: 'Gastos por avión/categoría en Excel (respeta filtros)' })
+  @ApiOperation({
+    summary: 'Gastos por avión/categoría en Excel (respeta filtros)',
+  })
   async export(@Query() q: ListGastosQuery): Promise<StreamableFile> {
     const buffer = await this.expenses.listXlsx(q);
     return new StreamableFile(buffer, {
@@ -145,7 +149,10 @@ export class ExpensesController {
   @Post('photo-urls')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Firma URLs de fotos de recibos (bucket privado) para el panel admin.' })
+  @ApiOperation({
+    summary:
+      'Firma URLs de fotos de recibos (bucket privado) para el panel admin.',
+  })
   photoUrls(@Body() dto: PhotoUrlsDto) {
     return this.expenses.signPhotos(dto.paths);
   }
@@ -169,13 +176,18 @@ export class ExpensesController {
     summary:
       'Crea los gastos de pista confirmados (origen SISTEMA, un gasto por aterrizaje, SIN_COMPROBANTE hasta amarrar la factura).',
   })
-  generarPistas(@Body() dto: GenerarPistasDto, @CurrentUser() c: AuthenticatedUser) {
+  generarPistas(
+    @Body() dto: GenerarPistasDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.expenses.generarPistas(dto, c.userId);
   }
 
   @Get('tarifas-aerodromo')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
-  @ApiOperation({ summary: 'Tarifario de cuotas de aterrizaje por aeródromo/modelo.' })
+  @ApiOperation({
+    summary: 'Tarifario de cuotas de aterrizaje por aeródromo/modelo.',
+  })
   listTarifas() {
     return this.expenses.listTarifasAerodromo();
   }
@@ -183,7 +195,10 @@ export class ExpensesController {
   @Post('tarifas-aerodromo')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @ApiOperation({ summary: 'Agrega una tarifa de aeródromo.' })
-  createTarifa(@Body() dto: CreateTarifaAerodromoDto, @CurrentUser() c: AuthenticatedUser) {
+  createTarifa(
+    @Body() dto: CreateTarifaAerodromoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     return this.expenses.createTarifaAerodromo(dto, c.userId);
   }
 
@@ -250,12 +265,18 @@ export class ExpensesController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get gasto by id. Piloto/mecánico solo ven sus propias capturas.' })
-  async getOne(@Param('id', ParseUUIDPipe) id: string, @CurrentUser() c: AuthenticatedUser) {
+  @ApiOperation({
+    summary: 'Get gasto by id. Piloto/mecánico solo ven sus propias capturas.',
+  })
+  async getOne(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     const gasto = await this.expenses.findById(id);
     if (
       (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) &&
-      (gasto as { usuario_captura_id: string | null }).usuario_captura_id !== c.userId
+      (gasto as { usuario_captura_id: string | null }).usuario_captura_id !==
+        c.userId
     ) {
       throw new ForbiddenException('No tienes acceso a este gasto');
     }

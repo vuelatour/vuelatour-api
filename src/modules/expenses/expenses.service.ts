@@ -142,7 +142,7 @@ export class ExpensesService {
       const monto = Number(x.monto);
       if (!Number.isFinite(monto)) continue;
       const nombre =
-        ((x.captura as { nombre?: string } | null)?.nombre ?? 'Sin capturador');
+        (x.captura as { nombre?: string } | null)?.nombre ?? 'Sin capturador';
       // Fuente: estatus_facturacion (seguimiento de oficina). El comprobante
       // NO sirve aquí: la app marca FACTURA con cualquier foto.
       const facturado =
@@ -866,6 +866,25 @@ export class ExpensesService {
       aeronaveId =
         dto.aeronave_id ?? (vuelo.aeronave_id as string | null) ?? undefined;
     }
+    // Herencia vuelo→avión al ESCRIBIR (misma regla que la lectura del
+    // balance): el dinero de un gasto ligado a un vuelo pertenece al avión de
+    // ese vuelo. Sin esto, el reparto (que filtra por aeronave_id CRUDO) no lo
+    // veía — un gasto con vuelo pero sin avión era invisible para los socios.
+    if (!aeronaveId && dto.vuelo_id) {
+      const { data: vueloRef } = await this.supabase.service
+        .from('vuelo')
+        .select('aeronave_id')
+        .eq('id', dto.vuelo_id)
+        .maybeSingle();
+      aeronaveId = (vueloRef?.aeronave_id as string | null) ?? undefined;
+    }
+    // El combustible se controla POR AVIÓN (gasto mensual del avión en el
+    // balance): una carga sin avión sería invisible para balance y reparto.
+    if (dto.categoria === CategoriaGasto.GAS && !aeronaveId) {
+      throw new BadRequestException(
+        'La carga de combustible necesita el avión: selecciona la aeronave (o un vuelo del cual tomarla).',
+      );
+    }
     // Propina: sub-parte informativa del monto (monto = ticket + propina, es
     // lo que se concilia contra el banco). Nunca puede exceder el total.
     if (dto.propina != null && Number(dto.propina) > Number(dto.monto)) {
@@ -996,7 +1015,9 @@ export class ExpensesService {
     };
     const path = gasto.foto_url ?? null;
     if (!path) {
-      throw new BadRequestException('El gasto no tiene comprobante que analizar');
+      throw new BadRequestException(
+        'El gasto no tiene comprobante que analizar',
+      );
     }
     const fotosAdicionales = Array.isArray(
       gasto.valor_ia_extraido?.fotos_adicionales,
@@ -1014,7 +1035,9 @@ export class ExpensesService {
     let lectura: Awaited<ReturnType<VisionService['readGastoTicket']>>;
     if (lower.endsWith('.pdf')) {
       const b64 = await this.descargarBase64(urls[path]);
-      lectura = b64 ? await this.vision.readGastoTicket({ pdfBase64: b64 }) : null;
+      lectura = b64
+        ? await this.vision.readGastoTicket({ pdfBase64: b64 })
+        : null;
     } else if (/\.(xlsx|xls|csv)$/.test(lower)) {
       const b64 = await this.descargarBase64(urls[path]);
       lectura = b64
@@ -1453,13 +1476,15 @@ export class ExpensesService {
       dto.propina !== undefined ||
       dto.monto !== undefined ||
       dto.categoria !== undefined ||
-      dto.vuelo_id !== undefined;
+      dto.vuelo_id !== undefined ||
+      dto.aeronave_id !== undefined;
     const actual = necesitaActual
       ? ((await this.findById(id)) as {
           monto?: unknown;
           propina?: unknown;
           categoria?: string;
           vuelo_id?: string | null;
+          aeronave_id?: string | null;
         })
       : null;
     // El invariante propina <= monto también vive aquí (el create no basta:
@@ -1493,10 +1518,43 @@ export class ExpensesService {
       }
     }
 
+    // El combustible se controla POR AVIÓN: quitarle el avión (o cambiar a
+    // GAS un gasto sin avión) lo dejaría fuera del balance y del reparto.
+    if (dto.categoria !== undefined || dto.aeronave_id !== undefined) {
+      const categoriaEf = dto.categoria ?? actual?.categoria;
+      const aeronaveEf =
+        dto.aeronave_id !== undefined ? dto.aeronave_id : actual?.aeronave_id;
+      const vueloEf =
+        dto.vuelo_id !== undefined ? dto.vuelo_id : actual?.vuelo_id;
+      if (categoriaEf === 'GAS' && !aeronaveEf && !vueloEf) {
+        throw new BadRequestException(
+          'La carga de combustible necesita el avión: asigna la aeronave antes de quitarla.',
+        );
+      }
+    }
+    // Herencia vuelo→avión también al LIGAR un vuelo por PATCH (el flujo
+    // "Asignar vuelo" del panel no sellaba el avión y la carga seguía
+    // invisible para el reparto).
+    let aeronaveHeredada: string | null = null;
+    if (
+      dto.vuelo_id &&
+      dto.aeronave_id === undefined &&
+      actual &&
+      !actual.aeronave_id
+    ) {
+      const { data: vueloRef } = await this.supabase.service
+        .from('vuelo')
+        .select('aeronave_id')
+        .eq('id', dto.vuelo_id)
+        .maybeSingle();
+      aeronaveHeredada = (vueloRef?.aeronave_id as string | null) ?? null;
+    }
+
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
+    if (aeronaveHeredada) cols.aeronave_id = aeronaveHeredada;
     if (dto.folio_ticket !== undefined) {
       cols.folio_ticket = dto.folio_ticket?.trim() || null;
     }

@@ -141,15 +141,42 @@ export interface DineroUtilidadAvionPayload {
   gastos_indirectos_mxn?: number | null;
   otros_gastos_mxn?: number | null;
   permisos_mxn?: number | null;
+  /** "Gasto de combustible" del mes del avión (pestaña Combustible). */
+  combustible_mxn?: number | null;
+}
+
+/** Fila de la pestaña "Combustible" del Libro Dinero (26-ago-2026). */
+export interface DineroCombustibleFilaPayload {
+  fecha?: string | null;
+  /** Matrícula del avión ('—' = carga sin avión, pendiente de asignar). */
+  matricula: string;
+  avion_color?: string | null;
+  concepto: string;
+  litros?: number | null;
+  monto_mxn?: number | null;
+  acumulado_mxn?: number | null;
 }
 export interface DineroXlsxPayload {
   periodo_desde?: string | null;
   periodo_hasta?: string | null;
   generado?: string | null;
-  leyenda_colores?: { matricula: string; modelo?: string; color?: string | null }[];
+  leyenda_colores?: {
+    matricula: string;
+    modelo?: string;
+    color?: string | null;
+  }[];
   vuelos: DineroVueloFilaPayload[];
   otros_ingresos: DineroOtroIngresoFilaPayload[];
   otros_gastos: DineroOtroGastoFilaPayload[];
+  /** Pestaña "Combustible": el gas del mes por avión (26-ago-2026). */
+  combustible?: DineroCombustibleFilaPayload[];
+  combustible_total_mxn?: number | null;
+  combustible_litros?: number | null;
+  combustible_precio_litro?: number | null;
+  /** Cargas del mes sin avión (van marcadas en la pestaña). */
+  combustible_sin_avion?: number;
+  /** "Gasto de combustible" del mes: resta en la hoja utilidades. */
+  utilidades_combustible_mxn?: number | null;
   utilidades_otros_ingresos_mxn?: number | null;
   utilidades_otros_gastos_mxn?: number | null;
   utilidades_tc?: number | null;
@@ -356,6 +383,8 @@ export interface BalanceAvionGastoFilaPayload {
   monto_mxn: number | null;
   moneda_original: string | null;
   monto_original: number | null;
+  /** Litros de la carga (solo hoja "combustible"). */
+  litros?: number | null;
   /** Balance GENERAL: la fila se tiñe con el color del avión. */
   avion_color?: string | null;
 }
@@ -369,6 +398,13 @@ export interface BalanceAvionHojaGastosPayload {
   usd_hr: number | null;
 }
 
+/** Hoja "combustible" (26-ago-2026): el gas del avión POR MES, con litros. */
+export interface BalanceAvionHojaCombustiblePayload extends BalanceAvionHojaGastosPayload {
+  litros_total: number;
+  /** total_mxn / litros_total (null si no hay litros capturados). */
+  precio_litro_prom: number | null;
+}
+
 export interface BalanceAvionSocioPayload {
   nombre: string;
   porcentaje: number;
@@ -377,6 +413,8 @@ export interface BalanceAvionSocioPayload {
 
 export interface BalanceAvionBalancePayload {
   utilidad_antes_usd: number;
+  /** "Gasto de combustible" del mes (hoja combustible al TC promedio). */
+  combustible_usd?: number | null;
   gastos_indirectos_usd: number | null;
   otros_usd: number | null;
   permisos_usd: number | null;
@@ -396,6 +434,9 @@ export interface BalanceGeneralResumenFilaPayload {
   horas_cobradas: number | null;
   venta_mxn: number | null;
   costo_mxn: number | null;
+  /** "Gasto de combustible" del mes (hoja combustible del avión). */
+  combustible_mxn?: number | null;
+  /** DESPUÉS de combustible: venta − costo − combustible = ganancia. */
   ganancia_mxn: number | null;
   cobrado_mxn: number | null;
   por_cobrar_mxn: number | null;
@@ -434,6 +475,8 @@ export interface BalanceAvionPayload {
   gastos_indirectos: BalanceAvionHojaGastosPayload;
   otros_gastos: BalanceAvionHojaGastosPayload;
   permisos: BalanceAvionHojaGastosPayload;
+  /** Hoja mensual de combustible (26-ago-2026). Opcional por skew de deploy. */
+  combustible?: BalanceAvionHojaCombustiblePayload;
   balance: BalanceAvionBalancePayload;
   pendientes: string[];
 }

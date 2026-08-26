@@ -66,7 +66,8 @@ export class ProfitSharingController {
   @Get('xlsx')
   @Roles(Rol.ADMIN, Rol.ANALISTA)
   @ApiOperation({
-    summary: 'Reporte mensual por avión en Excel (rendered by vuelatour-pyservices)',
+    summary:
+      'Reporte mensual por avión en Excel (rendered by vuelatour-pyservices)',
   })
   async xlsx(@Query() q: ProfitSharingQuery): Promise<StreamableFile> {
     const { buffer, desde, hasta } = await this.profitSharing.repartoXlsx(q);

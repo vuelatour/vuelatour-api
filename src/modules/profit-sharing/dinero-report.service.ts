@@ -3,6 +3,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
 import {
   PyservicesService,
+  type DineroCombustibleFilaPayload,
   type DineroOtroGastoFilaPayload,
   type DineroOtroIngresoFilaPayload,
   type DineroUtilidadAvionPayload,
@@ -46,7 +47,10 @@ export class DineroReportService {
     desde: string,
     hasta: string,
   ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(desde) || !/^\d{4}-\d{2}-\d{2}$/.test(hasta)) {
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(desde) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(hasta)
+    ) {
       throw new BadRequestException('desde/hasta deben ser YYYY-MM-DD');
     }
     if (desde > hasta) {
@@ -82,54 +86,86 @@ export class DineroReportService {
     const vuelos = (vuelosRes.data ?? []) as Array<Record<string, unknown>>;
     const vueloIds = vuelos.map((v) => v.id as string);
 
-    const [aeronavesRes, clientesRes, escalasRes, cobrosRes, gastosVuelo, facturasRes, gastosSinVuelo] =
-      await Promise.all([
-        sb
-          .from('aeronave')
-          .select('id, matricula, modelo, color_calendario')
-          .order('matricula'),
-        sb.from('cliente').select('id, nombre'),
-        vueloIds.length
-          ? sb
-              .from('escala')
-              .select('vuelo_id, orden, origen_iata, destino_iata, es_sobrevuelo, tipo_parada, pasajeros')
-              .in('vuelo_id', vueloIds)
-              .is('cancelada_at', null)
-              .order('orden', { ascending: true })
-          : Promise.resolve({ data: [], error: null } as const),
-        vueloIds.length
-          ? sb
-              .from('cobro_vuelo')
-              .select('vuelo_id, monto, moneda, tc_usd_mxn, fecha_cobro')
-              .in('vuelo_id', vueloIds)
-              .order('fecha_cobro', { ascending: true })
-          : Promise.resolve({ data: [], error: null } as const),
-        vueloIds.length
-          ? sb
-              .from('gasto')
-              .select(
-                'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, valor_ia_extraido',
-              )
-              .in('vuelo_id', vueloIds)
-          : Promise.resolve({ data: [], error: null } as const),
-        vueloIds.length
-          ? sb
-              .from('factura')
-              .select('vuelo_id, serie, folio, estado')
-              .in('vuelo_id', vueloIds)
-              .neq('estado', 'CANCELADA')
-          : Promise.resolve({ data: [], error: null } as const),
-        // "Otros gastos" del mes: sin vuelo (pensión, cera, nómina, etc.).
-        // fecha_gasto es DATE: comparación de días, sin componente horaria.
-        sb
-          .from('gasto')
-          .select('categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)')
-          .is('vuelo_id', null)
-          .gte('fecha_gasto', desde)
-          .lte('fecha_gasto', hasta)
-          .order('fecha_gasto', { ascending: true }),
-      ]);
-    for (const r of [aeronavesRes, clientesRes, escalasRes, cobrosRes, gastosVuelo, facturasRes, gastosSinVuelo]) {
+    const [
+      aeronavesRes,
+      clientesRes,
+      escalasRes,
+      cobrosRes,
+      gastosVuelo,
+      facturasRes,
+      gastosSinVuelo,
+      gastosGasRes,
+    ] = await Promise.all([
+      sb
+        .from('aeronave')
+        .select('id, matricula, modelo, color_calendario')
+        .order('matricula'),
+      sb.from('cliente').select('id, nombre'),
+      vueloIds.length
+        ? sb
+            .from('escala')
+            .select(
+              'vuelo_id, orden, origen_iata, destino_iata, es_sobrevuelo, tipo_parada, pasajeros',
+            )
+            .in('vuelo_id', vueloIds)
+            .is('cancelada_at', null)
+            .order('orden', { ascending: true })
+        : Promise.resolve({ data: [], error: null } as const),
+      vueloIds.length
+        ? sb
+            .from('cobro_vuelo')
+            .select('vuelo_id, monto, moneda, tc_usd_mxn, fecha_cobro')
+            .in('vuelo_id', vueloIds)
+            .order('fecha_cobro', { ascending: true })
+        : Promise.resolve({ data: [], error: null } as const),
+      vueloIds.length
+        ? sb
+            .from('gasto')
+            .select(
+              'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, valor_ia_extraido',
+            )
+            .in('vuelo_id', vueloIds)
+        : Promise.resolve({ data: [], error: null } as const),
+      vueloIds.length
+        ? sb
+            .from('factura')
+            .select('vuelo_id, serie, folio, estado')
+            .in('vuelo_id', vueloIds)
+            .neq('estado', 'CANCELADA')
+        : Promise.resolve({ data: [], error: null } as const),
+      // "Otros gastos" del mes: sin vuelo (pensión, cera, nómina, etc.).
+      // fecha_gasto es DATE: comparación de días, sin componente horaria.
+      sb
+        .from('gasto')
+        .select(
+          'categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)',
+        )
+        .is('vuelo_id', null)
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+      // COMBUSTIBLE del mes (pestaña propia, 26-ago-2026): TODO el gas del
+      // periodo por fecha_gasto, con o sin vuelo — mismo eje que el reparto.
+      sb
+        .from('gasto')
+        .select(
+          'categoria, monto, litros, moneda, tc_gasto, fecha_gasto, lugar, notas, aeronave_id, proveedor:proveedor_id(nombre)',
+        )
+        .eq('categoria', 'GAS')
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+    ]);
+    for (const r of [
+      aeronavesRes,
+      clientesRes,
+      escalasRes,
+      cobrosRes,
+      gastosVuelo,
+      facturasRes,
+      gastosSinVuelo,
+      gastosGasRes,
+    ]) {
       if (r.error) throw new Error(r.error.message);
     }
 
@@ -149,20 +185,30 @@ export class DineroReportService {
     const escalasPorVuelo = new Map<string, Array<Record<string, unknown>>>();
     for (const e of (escalasRes.data ?? []) as Array<Record<string, unknown>>) {
       const vid = e.vuelo_id as string;
-      (escalasPorVuelo.get(vid) ?? escalasPorVuelo.set(vid, []).get(vid)!).push(e);
+      (escalasPorVuelo.get(vid) ?? escalasPorVuelo.set(vid, []).get(vid)!).push(
+        e,
+      );
     }
     const cobrosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
     for (const c of (cobrosRes.data ?? []) as Array<Record<string, unknown>>) {
       const vid = c.vuelo_id as string;
-      (cobrosPorVuelo.get(vid) ?? cobrosPorVuelo.set(vid, []).get(vid)!).push(c);
+      (cobrosPorVuelo.get(vid) ?? cobrosPorVuelo.set(vid, []).get(vid)!).push(
+        c,
+      );
     }
     const gastosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
-    for (const g of (gastosVuelo.data ?? []) as Array<Record<string, unknown>>) {
+    for (const g of (gastosVuelo.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
       const vid = g.vuelo_id as string;
-      (gastosPorVuelo.get(vid) ?? gastosPorVuelo.set(vid, []).get(vid)!).push(g);
+      (gastosPorVuelo.get(vid) ?? gastosPorVuelo.set(vid, []).get(vid)!).push(
+        g,
+      );
     }
     const facturaPorVuelo = new Map<string, string>();
-    for (const f of (facturasRes.data ?? []) as Array<Record<string, unknown>>) {
+    for (const f of (facturasRes.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
       const vid = f.vuelo_id as string;
       if (!vid || facturaPorVuelo.has(vid)) continue;
       const etiqueta = [f.serie, f.folio].filter(Boolean).join('-');
@@ -192,7 +238,8 @@ export class DineroReportService {
       for (const l of legs) {
         const o = String(l.origen_iata ?? '');
         const d = String(l.destino_iata ?? '');
-        if (tokens.length === 0 || tokens[tokens.length - 1] !== o) tokens.push(o);
+        if (tokens.length === 0 || tokens[tokens.length - 1] !== o)
+          tokens.push(o);
         if (l.es_sobrevuelo === true) tokens.push('sobrevuelo');
         tokens.push(d);
       }
@@ -221,8 +268,10 @@ export class DineroReportService {
         sumaTc += tc;
         nTc += 1;
       }
-      const ivaHr = ivaUsd != null && horas != null && horas > 0 ? ivaUsd / horas : null;
-      const totalMxnCalc = totalMxn ?? (totalUsd != null && tc != null ? totalUsd * tc : null);
+      const ivaHr =
+        ivaUsd != null && horas != null && horas > 0 ? ivaUsd / horas : null;
+      const totalMxnCalc =
+        totalMxn ?? (totalUsd != null && tc != null ? totalUsd * tc : null);
       const ivaMxn = ivaUsd != null && tc != null ? ivaUsd * tc : null;
 
       // Cobros a MXN (misma regla del balance: MXN directo; USD × su TC o el
@@ -251,9 +300,7 @@ export class DineroReportService {
         venta_hr_usd: r2(tarifa),
         venta_hr_mxn: r2(tarifa != null && tc != null ? tarifa * tc : null),
         iva_hr_usd: r2(ivaHr),
-        venta_hr_masiva_usd: r2(
-          tarifa != null ? tarifa + (ivaHr ?? 0) : null,
-        ),
+        venta_hr_masiva_usd: r2(tarifa != null ? tarifa + (ivaHr ?? 0) : null),
         total_cobrado_usd: r2(totalUsd),
         iva_total_usd: r2(ivaUsd),
         tc_venta: tc != null ? Math.round(tc * 10000) / 10000 : null,
@@ -362,11 +409,15 @@ export class DineroReportService {
     const indirectosPorAvion = new Map<string, number>();
     const otrosPorAvion = new Map<string, number>();
     const permisosPorAvion = new Map<string, number>();
-    for (const g of (gastosSinVuelo.data ?? []) as Array<Record<string, unknown>>) {
+    for (const g of (gastosSinVuelo.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
+      // GAS fuera de "otros gastos" (26-ago-2026): el combustible tiene su
+      // pestaña propia — dejarlo aquí lo contaría DOS veces en utilidades.
+      if (g.categoria === 'GAS') continue;
       const monto = num(g.monto) ?? 0;
       const tcg = pos(g.tc_gasto);
-      const mxn =
-        g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
+      const mxn = g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
       const prov = unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre;
       const nota = ((g.notas as string | null) ?? '').split('\n')[0].trim();
       const concepto = [
@@ -397,18 +448,66 @@ export class DineroReportService {
       }
     }
 
+    // ===== Pestaña COMBUSTIBLE (26-ago-2026): el gas del mes por avión =====
+    // Con o sin vuelo, eje fecha_gasto — mismo filtro crudo por aeronave_id
+    // que el reparto. Las cargas SIN avión se listan (el dinero jamás
+    // desaparece) marcadas para asignarles aeronave.
+    const combustibleFilas: DineroCombustibleFilaPayload[] = [];
+    const combustiblePorAvion = new Map<string, number>();
+    let combustibleAcum = 0;
+    let combustibleLitros = 0;
+    let combustibleSinAvion = 0;
+    for (const g of (gastosGasRes.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
+      const monto = num(g.monto) ?? 0;
+      const tcg = pos(g.tc_gasto);
+      const mxn = g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
+      const prov = unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre;
+      const nota = ((g.notas as string | null) ?? '').split('\n')[0].trim();
+      const aid = g.aeronave_id as string | null;
+      const avion = aid ? aviones.get(aid) : undefined;
+      const litros = pos(g.litros);
+      const concepto = [
+        (g.lugar as string | null) || null,
+        prov ?? null,
+        nota || null,
+        mxn == null ? '(USD sin TC — no suma)' : null,
+        !aid ? 'SIN AVIÓN — asignar aeronave en Combustibles' : null,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      if (mxn != null) combustibleAcum += mxn;
+      if (litros != null) combustibleLitros += litros;
+      if (!aid) combustibleSinAvion += 1;
+      combustibleFilas.push({
+        fecha: (g.fecha_gasto as string) ?? null,
+        matricula: avion?.matricula ?? '—',
+        avion_color: avion?.color ?? null,
+        concepto,
+        litros: r2(litros),
+        monto_mxn: r2(mxn),
+        acumulado_mxn: r2(combustibleAcum),
+      });
+      if (aid && mxn != null) {
+        combustiblePorAvion.set(aid, (combustiblePorAvion.get(aid) ?? 0) + mxn);
+      }
+    }
+
     // ===== Hoja 4: utilidades (lo computable hoy) =====
     const utilidadesAviones: DineroUtilidadAvionPayload[] = [];
     for (const [id, a] of aviones) {
       const ind = indirectosPorAvion.get(id);
       const otr = otrosPorAvion.get(id);
       const per = permisosPorAvion.get(id);
-      if (ind == null && otr == null && per == null) continue;
+      const comb = combustiblePorAvion.get(id);
+      if (ind == null && otr == null && per == null && comb == null) continue;
       utilidadesAviones.push({
         matricula: a.matricula,
         gastos_indirectos_mxn: r2(ind ?? null),
         otros_gastos_mxn: r2(otr ?? null),
         permisos_mxn: r2(per ?? null),
+        combustible_mxn: r2(comb ?? null),
       });
     }
     const totalOtrosIngresos = otrosIngresos.reduce(
@@ -428,9 +527,21 @@ export class DineroReportService {
       vuelos: filas,
       otros_ingresos: otrosIngresos,
       otros_gastos: otrosGastos,
+      combustible: combustibleFilas,
+      combustible_total_mxn: r2(combustibleAcum),
+      combustible_litros: r2(combustibleLitros),
+      combustible_precio_litro:
+        combustibleLitros > 0 && combustibleAcum > 0
+          ? r2(combustibleAcum / combustibleLitros)
+          : null,
+      combustible_sin_avion: combustibleSinAvion,
+      // "Gasto de combustible" del mes: resta en la hoja utilidades (incluye
+      // las cargas sin avión — el dinero no se esconde mientras se asignan).
+      utilidades_combustible_mxn: r2(combustibleAcum),
       utilidades_otros_ingresos_mxn: r2(totalOtrosIngresos),
       utilidades_otros_gastos_mxn: r2(acumulado),
-      utilidades_tc: nTc > 0 ? Math.round((sumaTc / nTc) * 10000) / 10000 : null,
+      utilidades_tc:
+        nTc > 0 ? Math.round((sumaTc / nTc) * 10000) / 10000 : null,
       utilidades_aviones: utilidadesAviones,
     };
   }
