@@ -31,7 +31,7 @@ import type {
 } from './dto/upsert-aeronave-discrepancia.dto';
 
 const AERONAVE_COLS =
-  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, permiso_afac_usd_hr, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, planeador_horas_base, planeador_taco_ref, created_at, updated_at';
+  'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, motor_hp, caracteristicas, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, permiso_afac_usd_hr, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, planeador_horas_base, planeador_taco_ref, created_at, updated_at';
 
 const ETAPA_COLS = 'id, intervalo_hr, nombre, tareas';
 

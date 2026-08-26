@@ -55,11 +55,16 @@ export class QuotesPdfService {
     let matricula: string | null = null;
     let fotoExterior: string | null = null;
     let fotoInterior: string | null = null;
+    // Ficha comercial (26-ago v2): la hoja del avión lleva modelo, tarjeta
+    // "De un vistazo" y características — todo de la fila de aeronave.
+    let avion: Record<string, unknown> | null = null;
     if (quote.aeronave_id) {
       const [{ data: av }, { data: imgs }] = await Promise.all([
         this.supabase.service
           .from('aeronave')
-          .select('matricula')
+          .select(
+            'matricula, modelo, velocidad_crucero_kts, asientos, num_motores, motor_hp, caracteristicas',
+          )
           .eq('id', quote.aeronave_id as string)
           .maybeSingle(),
         this.supabase.service
@@ -69,6 +74,7 @@ export class QuotesPdfService {
           .in('etiqueta', ['EXTERIOR', 'INTERIOR']),
       ]);
       matricula = (av?.matricula as string) ?? null;
+      avion = (av as Record<string, unknown> | null) ?? null;
       const descargar = async (
         url: string | null | undefined,
         mime: string | null | undefined,
@@ -266,6 +272,34 @@ export class QuotesPdfService {
       matricula,
       foto_exterior: fotoExterior,
       foto_interior: fotoInterior,
+      // Ficha comercial "De un vistazo" (26-ago v2). El tiempo por tramo es
+      // el del tramo MÁS LARGO: tiempo_hr del snapshot (motor canónico);
+      // sin tramos calculados (REDONDO simple/viejas), aproximación
+      // millas/velocidad SOLO para display — jamás para cobrar.
+      avion_modelo: (avion?.modelo as string | null) ?? null,
+      avion_velocidad_kts: num(avion?.velocidad_crucero_kts),
+      avion_pasajeros: num(avion?.asientos),
+      avion_num_motores: num(avion?.num_motores),
+      avion_motor_hp: num(avion?.motor_hp),
+      avion_caracteristicas: (avion?.caracteristicas as string[] | null) ?? [],
+      avion_tiempo_tramo_hr: (() => {
+        const tramosSnap =
+          ((quote.calculo_snapshot as Record<string, unknown> | undefined)
+            ?.tramos as Array<Record<string, unknown>> | undefined) ?? [];
+        let max: number | null = null;
+        for (const t of tramosSnap) {
+          const th = num(t.tiempo_hr);
+          if (th != null && th > 0) max = Math.max(max ?? 0, th);
+        }
+        if (max != null) return max;
+        const kts = num(avion?.velocidad_crucero_kts);
+        if (!kts || kts <= 0) return null;
+        for (const e of escalas) {
+          const mn = num((e as Record<string, unknown>).millas_nauticas);
+          if (mn != null && mn > 0) max = Math.max(max ?? 0, mn / kts);
+        }
+        return max;
+      })(),
       mapa_puntos: mapaPuntos,
     };
 

@@ -81,6 +81,25 @@ export class CreateAeronaveDto {
   @Min(1)
   asientos!: number;
 
+  @ApiPropertyOptional({
+    description: 'Potencia por motor (HP) — ficha comercial del PDF',
+  })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  motor_hp?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Características comerciales (tira del PDF de cotización), es-MX',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(8)
+  @IsString({ each: true })
+  @MaxLength(80, { each: true })
+  caracteristicas?: string[];
+
   @ApiPropertyOptional({ description: 'Tarifa pública USD/hora' })
   @IsOptional()
   @IsNumber()
