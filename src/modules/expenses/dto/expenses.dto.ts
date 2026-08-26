@@ -18,6 +18,7 @@ import {
   MaxLength,
   Min,
   ValidateNested,
+  ArrayMaxSize,
 } from 'class-validator';
 
 export enum CategoriaGasto {
@@ -382,6 +383,47 @@ export class SugerirVueloQuery {
   @ApiProperty({ description: 'Momento de la carga (ISO 8601)' })
   @IsDateString()
   fecha_hora!: string;
+}
+
+export class RepartoItemDto {
+  @ApiProperty({ description: 'Aeronave que absorbe esta parte del gasto' })
+  @IsUUID()
+  aeronave_id!: string;
+
+  @ApiProperty({ description: 'Monto en la MONEDA del gasto', example: 500 })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  monto!: number;
+}
+
+export class PutRepartoDto {
+  @ApiProperty({
+    description:
+      'Reparto COMPLETO del gasto entre aviones (reemplaza el anterior; [] lo limpia). Σ montos <= gasto.monto; el remanente queda como gasto de la empresa VuelaTour.',
+    type: [RepartoItemDto],
+  })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => RepartoItemDto)
+  items!: RepartoItemDto[];
+}
+
+export class ListOtrosGastosQuery {
+  @ApiPropertyOptional({
+    description: 'fecha_gasto >= (YYYY-MM-DD); default inicio del mes Cancún',
+  })
+  @IsOptional()
+  @IsDateString()
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'fecha_gasto <= (YYYY-MM-DD); default fin del mes Cancún',
+  })
+  @IsOptional()
+  @IsDateString()
+  hasta?: string;
 }
 
 export class ListGastosQuery {

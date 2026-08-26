@@ -8,6 +8,10 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import {
+  CATEGORIAS_REPARTIBLES,
+  fetchRepartos,
+} from '../../common/gasto-reparto.util';
 import { NotificationsService } from '../realtime/notifications.service';
 import {
   PyservicesService,
@@ -30,7 +34,7 @@ const COLS =
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
-const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio)`;
+const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula))`;
 
 /** Ventana en días para considerar dos gastos como posible duplicado.
  *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
@@ -107,7 +111,10 @@ export class ExpensesService {
       return [
         (x.fecha_gasto as string) ?? '',
         (x.categoria as string) ?? '',
-        aeronave?.matricula ?? '(pendiente)',
+        // Gasto repartido entre aviones: no está "pendiente" de nada.
+        Array.isArray(x.repartos) && x.repartos.length > 0
+          ? `Repartido (${x.repartos.length})`
+          : (aeronave?.matricula ?? '(pendiente)'),
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
         MEDIO_LABEL[medio] ?? medio,
@@ -197,7 +204,13 @@ export class ExpensesService {
     // FIJO e INDIRECTO se excluyen: por diseño no llevan avión/vuelo — no son
     // "pendientes de resolver" (mismo criterio que el pre-cierre).
     if (filters.pendientes === true) {
-      q = q.is('aeronave_id', null).not('categoria', 'in', '(FIJO,INDIRECTO)');
+      // OTRO sin vuelo tampoco es pendiente (26-ago): sin reparto es gasto
+      // de la EMPRESA a propósito — se administra en la pantalla Otros
+      // gastos, no en esta bandeja.
+      q = q
+        .is('aeronave_id', null)
+        .not('categoria', 'in', '(FIJO,INDIRECTO)')
+        .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
 
@@ -392,11 +405,20 @@ export class ExpensesService {
         'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
       )
       .is('aeronave_id', null)
-      .neq('categoria', 'FIJO')
+      .not('categoria', 'in', '(FIJO,INDIRECTO)')
+      .or('categoria.neq.OTRO,vuelo_id.not.is.null')
       .order('fecha_gasto', { ascending: false })
       .limit(15);
     if (error) throw new Error(error.message);
-    const pendientes = (data ?? []) as Array<Record<string, unknown>>;
+    // Mismo universo que la bandeja (simetría); los repartidos manualmente
+    // (gasto_reparto) tampoco reciben sugerencia de vuelo.
+    const repartosSug = await fetchRepartos(
+      this.supabase.service,
+      ((data ?? []) as Array<{ id: string }>).map((g) => g.id),
+    );
+    const pendientes = ((data ?? []) as Array<Record<string, unknown>>).filter(
+      (g) => !repartosSug.has(g.id as string),
+    );
 
     const resumen = (g: Record<string, unknown>) => {
       const cap = g.captura as
@@ -1477,7 +1499,8 @@ export class ExpensesService {
       dto.monto !== undefined ||
       dto.categoria !== undefined ||
       dto.vuelo_id !== undefined ||
-      dto.aeronave_id !== undefined;
+      dto.aeronave_id !== undefined ||
+      dto.moneda !== undefined;
     const actual = necesitaActual
       ? ((await this.findById(id)) as {
           monto?: unknown;
@@ -1485,8 +1508,58 @@ export class ExpensesService {
           categoria?: string;
           vuelo_id?: string | null;
           aeronave_id?: string | null;
+          moneda?: string;
         })
       : null;
+    // Gasto con REPARTO MANUAL (gasto_reparto): mutar monto/categoría/vuelo/
+    // moneda reubicaría dinero ya atribuido a aviones en silencio — se exige
+    // quitar o corregir el reparto primero (pantalla Otros gastos).
+    if (
+      dto.monto !== undefined ||
+      dto.categoria !== undefined ||
+      dto.vuelo_id !== undefined ||
+      dto.moneda !== undefined ||
+      dto.aeronave_id !== undefined
+    ) {
+      const repartosDe = await fetchRepartos(this.supabase.service, [id]);
+      const filas = repartosDe.get(id);
+      if (filas && filas.length > 0) {
+        const suma = Math.round(
+          filas.reduce((acc, r) => acc + r.monto, 0) * 100,
+        );
+        if (
+          dto.monto !== undefined &&
+          Math.round(Number(dto.monto) * 100) < suma
+        ) {
+          throw new BadRequestException(
+            `El gasto está repartido entre aviones por $${(suma / 100).toFixed(2)}: baja o quita el reparto en Otros gastos antes de reducir el monto.`,
+          );
+        }
+        if (
+          dto.categoria !== undefined &&
+          !CATEGORIAS_REPARTIBLES.has(dto.categoria)
+        ) {
+          throw new BadRequestException(
+            'El gasto está repartido entre aviones: quita el reparto en Otros gastos antes de cambiarlo a esa categoría.',
+          );
+        }
+        if (dto.vuelo_id) {
+          throw new BadRequestException(
+            'El gasto está repartido entre aviones: quita el reparto en Otros gastos antes de ligarlo a un vuelo.',
+          );
+        }
+        if (dto.moneda !== undefined && dto.moneda !== actual?.moneda) {
+          throw new BadRequestException(
+            'El gasto está repartido entre aviones (montos en su moneda): quita el reparto antes de cambiar la moneda.',
+          );
+        }
+        if (dto.aeronave_id) {
+          throw new BadRequestException(
+            'El gasto está repartido entre aviones: el avión individual no aplica — edita el reparto en Otros gastos.',
+          );
+        }
+      }
+    }
     // El invariante propina <= monto también vive aquí (el create no basta:
     // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
     if (dto.propina !== undefined || dto.monto !== undefined) {
@@ -1579,7 +1652,7 @@ export class ExpensesService {
     return data;
   }
 
-  async remove(id: string) {
+  async remove(id: string, rol?: Rol) {
     // Un gasto conciliado está amarrado a un movimiento bancario (FK con
     // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
     // nada y la conciliación se sobreestimaría en silencio.
@@ -1589,11 +1662,253 @@ export class ExpensesService {
         'Este gasto ya está conciliado con el banco; desconcíliaselo en Conciliación antes de eliminarlo.',
       );
     }
+    // Gasto REPARTIDO entre aviones: el reparto es acto de oficina — el
+    // piloto/mecánico no puede tirar la atribución de N aviones al borrar su
+    // captura (cascade); la oficina sí puede y se le informa en la respuesta.
+    const repartosDel = await fetchRepartos(this.supabase.service, [id]);
+    const filasReparto = repartosDel.get(id) ?? [];
+    if (
+      filasReparto.length > 0 &&
+      (rol === Rol.PILOTO || rol === Rol.MECANICO)
+    ) {
+      throw new ConflictException(
+        'La oficina ya repartió este gasto entre aviones: pídeles a ellos eliminarlo o corregirlo.',
+      );
+    }
     const { error } = await this.supabase.service
       .from('gasto')
       .delete()
       .eq('id', id);
     if (error) throw new Error(error.message);
-    return { deleted: true, id };
+    return {
+      deleted: true,
+      id,
+      reparto_eliminado:
+        filasReparto.length > 0 ? filasReparto.length : undefined,
+    };
+  }
+
+  // ===== Reparto MANUAL de gastos generales entre aviones (26-ago-2026) ====
+
+  /**
+   * Gastos GENERALES del periodo (sin vuelo, categorías OTRO/FIJO/INDIRECTO)
+   * con su reparto embebido + resumen del mes: total, asignado a aviones y
+   * gasto de la EMPRESA VuelaTour (remanentes + no asignados), por moneda.
+   * Alimenta la pantalla "Otros gastos".
+   */
+  async listOtrosGastos(desdeQ?: string, hastaQ?: string) {
+    // Default: mes corriente en hora Cancún (mismo helper que el balance).
+    const hoy = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date());
+    const [y, m] = hoy.split('-').map(Number);
+    const fin = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const desde = desdeQ ?? `${hoy.slice(0, 7)}-01`;
+    const hasta =
+      hastaQ ?? `${hoy.slice(0, 7)}-${String(fin).padStart(2, '0')}`;
+    if (desde > hasta) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(LIST_COLS)
+      .is('vuelo_id', null)
+      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO'])
+      .gte('fecha_gasto', desde)
+      .lte('fecha_gasto', hasta)
+      .order('fecha_gasto', { ascending: false })
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    const gastos = (data ?? []) as Array<Record<string, unknown>>;
+    const r2 = (n: number) => Math.round(n * 100) / 100;
+    const resumen = new Map<
+      string,
+      { total: number; asignado: number; empresa: number }
+    >();
+    for (const g of gastos) {
+      const moneda = (g.moneda as string) ?? 'MXN';
+      const acc = resumen.get(moneda) ?? { total: 0, asignado: 0, empresa: 0 };
+      const monto = Number(g.monto ?? 0);
+      const filas = (g.repartos as Array<{ monto: unknown }> | null) ?? [];
+      const sumaReparto = filas.reduce((a, r) => a + Number(r.monto), 0);
+      // Asignado = reparto manual; sin reparto, un gasto con avión propio
+      // cuenta entero a ese avión (comportamiento clásico); sin nada =
+      // empresa completa.
+      const asignado =
+        filas.length > 0
+          ? Math.min(sumaReparto, monto)
+          : g.aeronave_id
+            ? monto
+            : 0;
+      acc.total += monto;
+      acc.asignado += asignado;
+      acc.empresa += Math.max(0, monto - asignado);
+      resumen.set(moneda, acc);
+    }
+    return {
+      periodo: { desde, hasta },
+      data: gastos,
+      resumen: [...resumen.entries()].map(([moneda, v]) => ({
+        moneda,
+        total: r2(v.total),
+        asignado_aviones: r2(v.asignado),
+        empresa: r2(v.empresa),
+      })),
+    };
+  }
+
+  /** Reparto actual de un gasto (items + suma + remanente de empresa). */
+  async getReparto(gastoId: string) {
+    const gasto = (await this.findById(gastoId)) as Record<string, unknown>;
+    const { data, error } = await this.supabase.service
+      .from('gasto_reparto')
+      .select('aeronave_id, monto, aeronave:aeronave_id(matricula)')
+      .eq('gasto_id', gastoId)
+      .order('monto', { ascending: false });
+    if (error) throw new Error(error.message);
+    const items = (data ?? []).map((r) => ({
+      aeronave_id: r.aeronave_id as string,
+      monto: Number(r.monto),
+      matricula:
+        (
+          (Array.isArray(r.aeronave) ? r.aeronave[0] : r.aeronave) as {
+            matricula?: string;
+          } | null
+        )?.matricula ?? null,
+    }));
+    const suma = Math.round(items.reduce((a, i) => a + i.monto, 0) * 100) / 100;
+    const monto = Number(gasto.monto ?? 0);
+    return {
+      gasto: {
+        id: gasto.id,
+        categoria: gasto.categoria,
+        monto,
+        moneda: gasto.moneda,
+        fecha_gasto: gasto.fecha_gasto,
+        notas: gasto.notas,
+      },
+      items,
+      suma,
+      remanente_empresa: Math.round((monto - suma) * 100) / 100,
+    };
+  }
+
+  /**
+   * Reemplaza el reparto completo de un gasto (idempotente: upsert de los
+   * aviones vigentes + borrado de los que salieron — nunca hay estado
+   * intermedio vacío). items = [] limpia el reparto (el gasto vuelve a ser
+   * 100% de la empresa, o de su avión propio si lo tiene).
+   * Candados: solo gastos SIN vuelo de categorías OTRO/FIJO/INDIRECTO;
+   * montos > 0 en la MONEDA del gasto; aviones sin repetir;
+   * Σ montos <= gasto.monto (a centavos). El remanente se DERIVA, jamás se
+   * persiste.
+   */
+  async putReparto(
+    gastoId: string,
+    items: Array<{ aeronave_id: string; monto: number }>,
+    userId: string,
+  ) {
+    const gasto = (await this.findById(gastoId)) as Record<string, unknown>;
+    if (gasto.vuelo_id) {
+      throw new BadRequestException(
+        'Este gasto está ligado a un vuelo: su avión se controla por el vuelo, no por reparto manual.',
+      );
+    }
+    if (!CATEGORIAS_REPARTIBLES.has(gasto.categoria as string)) {
+      throw new BadRequestException(
+        'Solo los gastos generales (OTRO, FIJO, INDIRECTO) se reparten entre aviones.',
+      );
+    }
+    const ids = items.map((i) => i.aeronave_id);
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException(
+        'Hay un avión repetido en el reparto: junta sus montos en una sola línea.',
+      );
+    }
+    const sumaCents = items.reduce((a, i) => a + Math.round(i.monto * 100), 0);
+    const montoCents = Math.round(Number(gasto.monto ?? 0) * 100);
+    if (sumaCents > montoCents) {
+      throw new BadRequestException(
+        `El reparto suma $${(sumaCents / 100).toFixed(2)} y el gasto es de $${(
+          montoCents / 100
+        ).toFixed(
+          2,
+        )} ${gasto.moneda as string}: ajusta los montos (lo no asignado queda como gasto de VuelaTour).`,
+      );
+    }
+    const sb = this.supabase.service;
+    // Solo aviones ACTIVOS: un parcial hacia un avión inactivo restaría CERO
+    // veces (el reparto a socios solo enumera activos) sin ser empresa —
+    // dinero invisible (verificación 26-ago).
+    if (ids.length > 0) {
+      const { data: activas, error: actErr } = await sb
+        .from('aeronave')
+        .select('id')
+        .in('id', ids)
+        .eq('activa', true);
+      if (actErr) throw new Error(actErr.message);
+      const okIds = new Set((activas ?? []).map((a) => a.id as string));
+      const malas = ids.filter((i) => !okIds.has(i));
+      if (malas.length > 0) {
+        throw new BadRequestException(
+          'Alguna aeronave del reparto no existe o está inactiva: solo se reparte entre aviones activos.',
+        );
+      }
+    }
+    // Reemplazo sin estado intermedio vacío: UPDATE de las filas que siguen
+    // (conserva created_by original), INSERT de las nuevas (sella created_by)
+    // y DELETE de las que salieron.
+    const { data: previas, error: prevErr } = await sb
+      .from('gasto_reparto')
+      .select('aeronave_id')
+      .eq('gasto_id', gastoId);
+    if (prevErr) throw new Error(prevErr.message);
+    const previasIds = new Set(
+      (previas ?? []).map((p) => p.aeronave_id as string),
+    );
+    for (const item of items) {
+      const monto = Math.round(item.monto * 100) / 100;
+      if (previasIds.has(item.aeronave_id)) {
+        const { error: upErr } = await sb
+          .from('gasto_reparto')
+          .update({ monto, updated_by: userId })
+          .eq('gasto_id', gastoId)
+          .eq('aeronave_id', item.aeronave_id);
+        if (upErr) throw new Error(upErr.message);
+      } else {
+        const { error: insErr } = await sb.from('gasto_reparto').insert({
+          gasto_id: gastoId,
+          aeronave_id: item.aeronave_id,
+          monto,
+          created_by: userId,
+          updated_by: userId,
+        });
+        if (insErr) {
+          if (insErr.code === '23503')
+            throw new BadRequestException(
+              'Alguna aeronave del reparto no existe.',
+            );
+          throw new Error(insErr.message);
+        }
+      }
+    }
+    const del = sb.from('gasto_reparto').delete().eq('gasto_id', gastoId);
+    const { error: delErr } = await (ids.length > 0
+      ? del.not('aeronave_id', 'in', `(${ids.join(',')})`)
+      : del);
+    if (delErr) throw new Error(delErr.message);
+    // El reparto SUSTITUYE al avión único: limpiar gasto.aeronave_id evita
+    // el chip confuso "avión clásico + reparto" (los lectores igual ignoran
+    // aeronave_id cuando hay reparto — esto es solo claridad de UI).
+    if (items.length > 0 && gasto.aeronave_id) {
+      await sb
+        .from('gasto')
+        .update({ aeronave_id: null, updated_by: userId })
+        .eq('id', gastoId);
+    }
+    return this.getReparto(gastoId);
   }
 }

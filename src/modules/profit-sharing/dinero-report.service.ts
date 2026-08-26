@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
+import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   PyservicesService,
   type DineroCombustibleFilaPayload,
@@ -138,7 +139,7 @@ export class DineroReportService {
       sb
         .from('gasto')
         .select(
-          'categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)',
+          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)',
         )
         .is('vuelo_id', null)
         .gte('fecha_gasto', desde)
@@ -404,6 +405,17 @@ export class DineroReportService {
     }
 
     // ===== Hoja 3: otros gastos del mes (sin vuelo), con acumulado =====
+    // Reparto MANUAL (gasto_reparto, 26-ago-2026): la FILA del libro y el
+    // acumulado NO cambian (el pago es uno); solo la ATRIBUCIÓN por avión de
+    // la hoja utilidades usa los parciales — el remanente queda en el
+    // acumulado general (gasto de la EMPRESA VuelaTour), sin acreditarse a
+    // ningún avión. Misma regla que el reparto a socios y el balance.
+    const repartosDinero = await fetchRepartos(
+      sb,
+      ((gastosSinVuelo.data ?? []) as Array<Record<string, unknown>>).map(
+        (g) => g.id as string,
+      ),
+    );
     const otrosGastos: DineroOtroGastoFilaPayload[] = [];
     let acumulado = 0;
     const indirectosPorAvion = new Map<string, number>();
@@ -420,10 +432,14 @@ export class DineroReportService {
       const mxn = g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
       const prov = unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre;
       const nota = ((g.notas as string | null) ?? '').split('\n')[0].trim();
+      const filasReparto = repartosDinero.get(g.id as string);
       const concepto = [
         String(g.categoria ?? '').toLowerCase(),
         prov ?? null,
         nota || null,
+        filasReparto
+          ? `repartido entre ${filasReparto.length} avión(es)`
+          : null,
         mxn == null ? '(USD sin TC — no suma)' : null,
       ]
         .filter(Boolean)
@@ -435,16 +451,31 @@ export class DineroReportService {
         monto_mxn: r2(mxn),
         acumulado_mxn: r2(acumulado),
       });
-      // Cortes por avión para la hoja utilidades.
-      const aid = g.aeronave_id as string | null;
-      if (aid && mxn != null) {
+      // Cortes por avión para la hoja utilidades. Con reparto manual, los
+      // PARCIALES mandan (aeronave_id del gasto se ignora — regla binaria);
+      // cada parcial convierte con la MISMA regla del padre (moneda +
+      // tc_gasto): sin TC no se acredita (ya está en el aviso del libro).
+      const acreditar = (aid: string, monto_: number) => {
         if (g.categoria === 'INDIRECTO') {
-          indirectosPorAvion.set(aid, (indirectosPorAvion.get(aid) ?? 0) + mxn);
+          indirectosPorAvion.set(
+            aid,
+            (indirectosPorAvion.get(aid) ?? 0) + monto_,
+          );
         } else if (g.categoria === 'PERMISO') {
-          permisosPorAvion.set(aid, (permisosPorAvion.get(aid) ?? 0) + mxn);
+          permisosPorAvion.set(aid, (permisosPorAvion.get(aid) ?? 0) + monto_);
         } else {
-          otrosPorAvion.set(aid, (otrosPorAvion.get(aid) ?? 0) + mxn);
+          otrosPorAvion.set(aid, (otrosPorAvion.get(aid) ?? 0) + monto_);
         }
+      };
+      if (filasReparto && filasReparto.length > 0) {
+        for (const r of filasReparto) {
+          const mxnParcial =
+            g.moneda === 'MXN' ? r.monto : tcg != null ? r.monto * tcg : null;
+          if (mxnParcial != null) acreditar(r.aeronave_id, mxnParcial);
+        }
+      } else {
+        const aid = g.aeronave_id as string | null;
+        if (aid && mxn != null) acreditar(aid, mxn);
       }
     }
 

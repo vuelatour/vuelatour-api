@@ -13,6 +13,7 @@ import {
   Post,
   Query,
   StreamableFile,
+  Put,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -30,6 +31,8 @@ import {
   SugerirVueloQuery,
   UpdateGastoDto,
   UpdateTarifaAerodromoDto,
+  ListOtrosGastosQuery,
+  PutRepartoDto,
 } from './dto/expenses.dto';
 import {
   CargaMasivaCombustibleDto,
@@ -158,6 +161,16 @@ export class ExpensesController {
   }
 
   // ===== Gastos de pista (cuotas de aeródromo) — rutas literales antes de :id =====
+
+  @Get('otros-gastos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
+  })
+  otrosGastos(@Query() q: ListOtrosGastosQuery) {
+    return this.expenses.listOtrosGastos(q.desde, q.hasta);
+  }
 
   @Get('pistas/pendientes')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
@@ -294,6 +307,29 @@ export class ExpensesController {
     return this.expenses.reanalizarConIA(id);
   }
 
+  @Get(':id/reparto')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary: 'Reparto del gasto entre aviones (items + remanente de empresa).',
+  })
+  getReparto(@Param('id', ParseUUIDPipe) id: string) {
+    return this.expenses.getReparto(id);
+  }
+
+  @Put(':id/reparto')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Reemplaza el reparto del gasto entre aviones ([] lo limpia). Solo gastos generales sin vuelo; Σ <= monto; el remanente es gasto de la empresa VuelaTour.',
+  })
+  putReparto(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PutRepartoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.putReparto(id, dto.items, c.userId);
+  }
+
   @Post(':id/visto-bueno')
   @Roles(Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
@@ -342,6 +378,6 @@ export class ExpensesController {
     if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
       await this.expenses.assertOwnSameDay(id, c.userId);
     }
-    return this.expenses.remove(id);
+    return this.expenses.remove(id, c.rol);
   }
 }

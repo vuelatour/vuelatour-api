@@ -6,6 +6,7 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from './aircraft.service';
 import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
+import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   PyservicesService,
   type BalanceAvionCobroPayload,
@@ -95,6 +96,7 @@ interface CobroRow {
 }
 
 interface GastoRow {
+  id?: string;
   vuelo_id: string | null;
   /** Tramo del gasto (pre-provisión de pistas): su avión manda. */
   escala_id: string | null;
@@ -114,6 +116,8 @@ interface GastoRow {
   valor_ia_extraido: {
     conceptos?: Array<{ concepto: string; monto: number }>;
   } | null;
+  /** Clon parcial del reparto manual (gasto_reparto). */
+  es_reparto_parcial?: boolean;
 }
 
 interface SocioRow {
@@ -638,7 +642,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -648,7 +652,7 @@ export class AircraftBalanceService {
       sb
         .from('gasto')
         .select(
-          'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
         )
         .eq('aeronave_id', aircraftId)
         .is('vuelo_id', null)
@@ -664,7 +668,7 @@ export class AircraftBalanceService {
       sb
         .from('gasto')
         .select(
-          'vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
         )
         .eq('aeronave_id', aircraftId)
         .eq('categoria', 'GAS')
@@ -718,8 +722,65 @@ export class AircraftBalanceService {
     }
     const cobros = (cobrosRes.data ?? []) as unknown as CobroRow[];
     const gastosVuelo = (gastosVueloRes.data ?? []) as unknown as GastoRow[];
-    const gastosAvion = (gastosAvionRes.data ?? []) as unknown as GastoRow[];
+    const gastosAvionCrudos = (gastosAvionRes.data ??
+      []) as unknown as GastoRow[];
     const gastosGas = (gastosGasRes.data ?? []) as unknown as GastoRow[];
+
+    // ===== REPARTO MANUAL (gasto_reparto, 26-ago-2026) =====
+    // Regla única (misma que el reparto a socios): el reparto GANA sobre
+    // aeronave_id. (1) Un gasto de ESTE avión que fue repartido se EXCLUYE
+    // (sus parciales mandan); (2) los PARCIALES hacia este avión entran como
+    // filas sintéticas con el monto parcial y la moneda/TC del padre — un
+    // gasto SIN avión repartido hacia acá no entraba con el filtro crudo.
+    // El remanente no se carga a nadie (gasto de la EMPRESA VuelaTour).
+    const repartosHaciaAvionRes = await sb
+      .from('gasto_reparto')
+      .select(
+        'aeronave_id, monto, gasto:gasto_id!inner(id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre))',
+      )
+      .eq('aeronave_id', aircraftId)
+      .is('gasto.vuelo_id', null)
+      .gte('gasto.fecha_gasto', desde)
+      .lte('gasto.fecha_gasto', hasta);
+    if (repartosHaciaAvionRes.error) {
+      throw new Error(
+        `Balance ${avion.matricula as string}: fallo al leer repartos: ${repartosHaciaAvionRes.error.message}`,
+      );
+    }
+    const repartidosIds = await fetchRepartos(
+      sb,
+      gastosAvionCrudos.map((g) => g.id ?? '').filter(Boolean),
+    );
+    const parcialesAvion: GastoRow[] = (
+      (repartosHaciaAvionRes.data ?? []) as Array<Record<string, unknown>>
+    ).map((r) => {
+      const padre = (Array.isArray(r.gasto)
+        ? r.gasto[0]
+        : r.gasto) as unknown as GastoRow;
+      const nota = (padre.notas ?? '').split('\n')[0].trim();
+      return {
+        ...padre,
+        aeronave_id: aircraftId,
+        monto: Number(r.monto),
+        notas: [
+          nota || null,
+          `reparto manual: $${Number(r.monto).toLocaleString('es-MX', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} de $${Number(padre.monto).toLocaleString('es-MX', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} ${padre.moneda ?? 'MXN'}`,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        es_reparto_parcial: true,
+      };
+    });
+    const gastosAvion: GastoRow[] = [
+      ...gastosAvionCrudos.filter((g) => !g.id || !repartidosIds.has(g.id)),
+      ...parcialesAvion,
+    ];
     const sociosAll = (sociosRes.data ?? []) as unknown as SocioRow[];
 
     // Nombres de clientes (columna CLAVE del Excel) + bandera de cliente

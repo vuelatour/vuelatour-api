@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { fetchRepartos } from '../../common/gasto-reparto.util';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
@@ -955,11 +956,21 @@ export class AlertsService {
       .from('gasto')
       .select('id, monto, moneda')
       .is('aeronave_id', null)
-      // FIJO e INDIRECTO no llevan avión por diseño: mismo criterio que la
-      // bandeja de pendientes de expenses.service, o el conteo no cuadra.
-      .not('categoria', 'in', '(FIJO,INDIRECTO)');
+      // MISMO criterio que la bandeja de pendientes de expenses.service (o
+      // el conteo no cuadra): FIJO e INDIRECTO no llevan avión por diseño,
+      // y OTRO sin vuelo tampoco es pendiente (26-ago: sin reparto es gasto
+      // de la EMPRESA — se administra en Otros gastos).
+      .not('categoria', 'in', '(FIJO,INDIRECTO)')
+      .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     if (error) throw new Error(error.message);
-    const pendientes = data ?? [];
+    // Los repartidos manualmente (gasto_reparto) ya están asignados.
+    const repartosAl = await fetchRepartos(
+      this.supabase.service,
+      (data ?? []).map((g) => g.id as string),
+    );
+    const pendientes = (data ?? []).filter(
+      (g) => !repartosAl.has(g.id as string),
+    );
     if (pendientes.length === 0) return;
 
     await this.dispatch(config, `gastos_sin_avion:${hoy}`, {

@@ -1,4 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  expandirConReparto,
+  fetchRepartos,
+} from '../../common/gasto-reparto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import {
@@ -32,10 +36,13 @@ interface VueloOpsRow {
 }
 
 interface GastoRow {
+  id?: string;
+  /** Clon parcial del reparto manual (gasto_reparto). */
+  es_reparto_parcial?: boolean;
   aeronave_id: string | null;
   usuario_captura_id: string | null;
   categoria: string;
-  monto: string;
+  monto: string | number;
   moneda: string;
   tc_gasto: string | null;
   medio_pago: string | null;
@@ -307,27 +314,55 @@ export class DashboardsService {
       }
       const h = horasPorVuelo.get(v.id) ?? 0;
       if (h > 0) {
-        horasPorAvion.set(v.aeronave_id, (horasPorAvion.get(v.aeronave_id) ?? 0) + h);
+        horasPorAvion.set(
+          v.aeronave_id,
+          (horasPorAvion.get(v.aeronave_id) ?? 0) + h,
+        );
       }
     }
 
-    // Gasto en USD por avión (mismo criterio que el motor de reparto).
+    // Gasto en USD por avión (mismo criterio que el motor de reparto,
+    // INCLUIDO el reparto manual gasto_reparto: los parciales mandan y el
+    // remanente es gasto de la EMPRESA — entra al total, no a un avión).
+    const repartosDash = await fetchRepartos(
+      this.supabase.service,
+      gastos.map((g) => g.id ?? '').filter(Boolean),
+    );
+    const { atribuciones, empresa } = expandirConReparto(gastos, repartosDash);
     const gastoPorAvion = new Map<string, number>();
     let sinTc = 0;
     let gastoSinAvion = 0;
-    for (const g of gastos) {
+    let gastoEmpresa = 0;
+    // Un gasto repartido SIN TC debe contar UNA vez en el aviso (por padre,
+    // no por parcial) — verificación 26-ago: antes contaba CERO veces y el
+    // dinero desaparecía del tablero sin bandera.
+    const padresSinTc = new Set<string>();
+    for (const e of empresa) {
+      const usd = this.toUsd({ ...e.gasto, monto: e.remanente });
+      if (usd === null) {
+        if (e.gasto.id) padresSinTc.add(e.gasto.id);
+        continue;
+      }
+      gastoEmpresa += usd;
+    }
+    for (const g of atribuciones) {
       const usd = this.toUsd(g);
       if (usd === null) {
-        sinTc += 1;
+        if (!g.es_reparto_parcial) sinTc += 1;
+        else if (g.id) padresSinTc.add(g.id);
         continue;
       }
       if (!g.aeronave_id) {
         gastoSinAvion += usd;
         continue;
       }
-      gastoPorAvion.set(g.aeronave_id, (gastoPorAvion.get(g.aeronave_id) ?? 0) + usd);
+      gastoPorAvion.set(
+        g.aeronave_id,
+        (gastoPorAvion.get(g.aeronave_id) ?? 0) + usd,
+      );
     }
 
+    sinTc += padresSinTc.size;
     const aviones = aeronaves.map((a) => {
       const gastoUsd = round2(gastoPorAvion.get(a.id) ?? 0);
       const horas = round2(horasPorAvion.get(a.id) ?? 0);
@@ -353,9 +388,11 @@ export class DashboardsService {
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
       resumen: {
-        gastos_totales_usd: round2(totalGasto + gastoSinAvion),
+        gastos_totales_usd: round2(totalGasto + gastoSinAvion + gastoEmpresa),
         gastos_avion_usd: round2(totalGasto),
         gastos_sin_avion_usd: round2(gastoSinAvion),
+        // Remanentes de repartos manuales: gasto de la EMPRESA VuelaTour.
+        gastos_empresa_usd: round2(gastoEmpresa),
         horas_voladas: round2(totalHoras),
         costo_hora_promedio_usd:
           totalHoras > 0 ? round2(totalGasto / totalHoras) : null,
@@ -487,7 +524,10 @@ export class DashboardsService {
 
     const pilotos = pilotoIds
       .map((id) => {
-        const periodo = periodoPorPiloto.get(id) ?? { horas: 0, vuelos: new Set<string>() };
+        const periodo = periodoPorPiloto.get(id) ?? {
+          horas: 0,
+          vuelos: new Set<string>(),
+        };
         const horasMes = round2(mesPorPiloto.get(id)?.horas ?? 0);
         return {
           piloto_id: id,
@@ -510,7 +550,8 @@ export class DashboardsService {
         horas_periodo_total: round2(
           pilotos.reduce((acc, p) => acc + p.horas_periodo, 0),
         ),
-        pilotos_con_actividad: pilotos.filter((p) => p.horas_periodo > 0).length,
+        pilotos_con_actividad: pilotos.filter((p) => p.horas_periodo > 0)
+          .length,
         pilotos_sobre_limite: pilotos.filter((p) => p.excede_limite).length,
       },
       pilotos,
@@ -521,7 +562,7 @@ export class DashboardsService {
 
   /** Convierte un gasto a USD. null = no se pudo (MXN sin tc_gasto). */
   private toUsd(g: {
-    monto: string;
+    monto: string | number;
     moneda: string;
     tc_gasto: string | null;
   }): number | null {
@@ -553,7 +594,11 @@ export class DashboardsService {
       for (const e of (data as EscalaTacoRow[] | null) ?? []) {
         const salida = e.taco_salida === null ? NaN : Number(e.taco_salida);
         const llegada = e.taco_llegada === null ? NaN : Number(e.taco_llegada);
-        if (Number.isFinite(salida) && Number.isFinite(llegada) && llegada > salida) {
+        if (
+          Number.isFinite(salida) &&
+          Number.isFinite(llegada) &&
+          llegada > salida
+        ) {
           out.set(e.vuelo_id, (out.get(e.vuelo_id) ?? 0) + (llegada - salida));
         }
       }
@@ -596,7 +641,7 @@ export class DashboardsService {
       .gte('fecha_solicitud', `${desde}T00:00:00-05:00`)
       .lte('fecha_solicitud', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
-    return (data as VueloOpsRow[] | null) ?? [];
+    return data ?? [];
   }
 
   private async fetchSolicitudesHoy(hoy: string): Promise<number> {
@@ -634,7 +679,7 @@ export class DashboardsService {
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
     if (error) throw new Error(error.message);
-    return (data as never) ?? [];
+    return data ?? [];
   }
 
   private async fetchAeronavesActivas(): Promise<
@@ -646,7 +691,7 @@ export class DashboardsService {
       .eq('activa', true)
       .order('matricula', { ascending: true });
     if (error) throw new Error(error.message);
-    return (data as never) ?? [];
+    return data ?? [];
   }
 
   private async fetchGastosPeriodo(
@@ -656,12 +701,12 @@ export class DashboardsService {
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(
-        'aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion',
+        'id, aeronave_id, usuario_captura_id, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion',
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
-    return (data as GastoRow[] | null) ?? [];
+    return data ?? [];
   }
 
   private async fetchGastosTarjeta(
@@ -677,7 +722,7 @@ export class DashboardsService {
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
-    return (data as GastoRow[] | null) ?? [];
+    return data ?? [];
   }
 
   private async fetchVuelosHoras(
@@ -692,7 +737,7 @@ export class DashboardsService {
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
-    return (data as VueloHorasRow[] | null) ?? [];
+    return data ?? [];
   }
 
   private async fetchVuelosCompletadosConPiloto(
@@ -708,7 +753,7 @@ export class DashboardsService {
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
-    return (data as Array<{ id: string; piloto_id: string | null }> | null) ?? [];
+    return data ?? [];
   }
 
   /**
@@ -735,7 +780,11 @@ export class DashboardsService {
       for (const e of (data as Array<Record<string, unknown>> | null) ?? []) {
         const salida = e.taco_salida === null ? NaN : Number(e.taco_salida);
         const llegada = e.taco_llegada === null ? NaN : Number(e.taco_llegada);
-        if (!Number.isFinite(salida) || !Number.isFinite(llegada) || llegada <= salida) {
+        if (
+          !Number.isFinite(salida) ||
+          !Number.isFinite(llegada) ||
+          llegada <= salida
+        ) {
           continue;
         }
         const pid =

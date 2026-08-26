@@ -69,7 +69,9 @@ export class DashboardsController {
   @Get('horas-piloto/export')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({ summary: 'Horas por piloto en Excel' })
-  async horasPilotoExport(@Query() q: HorasPilotoQuery): Promise<StreamableFile> {
+  async horasPilotoExport(
+    @Query() q: HorasPilotoQuery,
+  ): Promise<StreamableFile> {
     const buffer = await this.dashboards.horasPilotoXlsx(q);
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

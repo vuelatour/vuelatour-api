@@ -3,6 +3,10 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import {
+  expandirConReparto,
+  fetchRepartos,
+} from '../../common/gasto-reparto.util';
 
 /** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
 const DIRECTO = new Set([
@@ -56,7 +60,7 @@ interface VueloRow {
 }
 
 /** Grupo del reparto al que aporta una categoría de gasto (doc 4.8). */
-type GrupoGasto = 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'EXCLUIDO';
+type GrupoGasto = 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'FIJO' | 'EXCLUIDO';
 
 interface GastoCategoriaAcc {
   grupo: GrupoGasto;
@@ -79,11 +83,14 @@ interface EscalaHorasRow {
   taco_llegada: string | null;
 }
 interface GastoRow {
+  id: string;
   aeronave_id: string | null;
   categoria: string;
-  monto: string;
+  monto: string | number;
   moneda: string;
   tc_gasto: string | null;
+  /** Clon parcial generado por el reparto manual (gasto_reparto). */
+  es_reparto_parcial?: boolean;
 }
 interface SocioRow {
   aeronave_id: string;
@@ -236,12 +243,27 @@ export class ProfitSharingService {
     // Conteo de aviones activos para prorratear los gastos fijos.
     const activos = await this.countAeronavesActivas();
 
-    // Pool de gastos fijos (sueldos, seguros) de todo el periodo.
+    // REPARTO MANUAL (26-ago-2026, gasto_reparto): el reparto GANA sobre
+    // aeronave_id — el gasto repartido se sustituye por sus PARCIALES (uno
+    // por avión, moneda/TC del padre) y el remanente queda como gasto de la
+    // EMPRESA (no se carga a nadie). Regla única en gasto-reparto.util.
+    const repartos = await fetchRepartos(
+      this.supabase.service,
+      gastos.map((g) => g.id),
+    );
+    const { atribuciones: gastosAtribuidos } = expandirConReparto(
+      gastos,
+      repartos,
+    );
+
+    // Pool de gastos fijos (sueldos, seguros) de todo el periodo. Un FIJO
+    // con reparto MANUAL sale del pool (sus parciales van directo al avión
+    // elegido; contar ambos lo restaría DOBLE).
     let fijoPoolUsd = 0;
     let sinTcCount = 0;
     let sinTcMxn = 0;
-    for (const g of gastos) {
-      if (g.categoria !== FIJO) continue;
+    for (const g of gastosAtribuidos) {
+      if (g.categoria !== FIJO || g.es_reparto_parcial) continue;
       const usd = this.toUsd(g);
       if (usd === null) {
         sinTcCount += 1;
@@ -260,7 +282,7 @@ export class ProfitSharingService {
         vuelos,
         cobrosPorVuelo,
         horasPorAvion,
-        gastos,
+        gastos: gastosAtribuidos,
         socios,
         reservas,
         nombres,
@@ -400,17 +422,32 @@ export class ProfitSharingService {
     const porCategoria = new Map<string, GastoCategoriaAcc>();
     for (const g of ctx.gastos) {
       if (g.aeronave_id !== a.id) continue;
-      const grupo: GrupoGasto = DIRECTO.has(g.categoria)
-        ? 'DIRECTO'
-        : INDIRECTO.has(g.categoria)
+      // Parciales del reparto MANUAL (gasto_reparto): la categoría
+      // INDIRECTO repartida SÍ cuenta (grupo INDIRECTO — esta feature ES la
+      // decisión que estaba pendiente; SIN reparto sigue EXCLUIDA = empresa,
+      // idéntico a antes). Un FIJO repartido va al grupo FIJO manual (suma
+      // en otros_prorrateados junto al pool — mismo campo de la cascada).
+      const grupo: GrupoGasto =
+        g.es_reparto_parcial && g.categoria === 'INDIRECTO'
           ? 'INDIRECTO'
-          : PERMISO.has(g.categoria)
-            ? 'PERMISO'
-            : // FIJO se prorratea aparte; otras categorias no avion-especificas
-              // (p. ej. la categoría INDIRECTO de jul 2026) se EXCLUYEN del
-              // balance — se listan en el detalle solo por transparencia.
-              'EXCLUIDO';
-      const acc = porCategoria.get(g.categoria) ?? {
+          : g.es_reparto_parcial && g.categoria === FIJO
+            ? 'FIJO'
+            : DIRECTO.has(g.categoria)
+              ? 'DIRECTO'
+              : INDIRECTO.has(g.categoria)
+                ? 'INDIRECTO'
+                : PERMISO.has(g.categoria)
+                  ? 'PERMISO'
+                  : // FIJO se prorratea aparte; otras categorias no
+                    // avion-especificas SIN reparto (p. ej. la categoría
+                    // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
+                    'EXCLUIDO';
+      // Clave separada para parciales: el detalle muestra "OTRO (repartido)"
+      // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
+      const clave = g.es_reparto_parcial
+        ? `${g.categoria} (repartido)`
+        : g.categoria;
+      const acc = porCategoria.get(clave) ?? {
         grupo,
         count: 0,
         usd: 0,
@@ -425,17 +462,19 @@ export class ProfitSharingService {
         acc.count += 1;
         acc.usd += usd;
       }
-      porCategoria.set(g.categoria, acc);
+      porCategoria.set(clave, acc);
     }
     let directos = 0;
     let indirectos = 0;
     let permisos = 0;
+    let fijoManual = 0;
     let sinTc = 0;
     let sinTcMxn = 0;
     for (const acc of porCategoria.values()) {
       if (acc.grupo === 'DIRECTO') directos += acc.usd;
       else if (acc.grupo === 'INDIRECTO') indirectos += acc.usd;
       else if (acc.grupo === 'PERMISO') permisos += acc.usd;
+      else if (acc.grupo === 'FIJO') fijoManual += acc.usd;
       // EXCLUIDO no suma al balance (comportamiento original del else).
       sinTc += acc.sin_tc_count;
       sinTcMxn += acc.sin_tc_mxn;
@@ -469,7 +508,9 @@ export class ProfitSharingService {
     const directosR = round2(directos);
     const indirectosR = round2(indirectos);
     const permisosR = round2(permisos);
-    const otrosR = round2(ctx.otrosPorAvion);
+    // Pool automático + FIJO repartido a mano hacia ESTE avión: mismo campo
+    // de la cascada (otros_prorrateados) — el PDF/XLSX no cambia de shape.
+    const otrosR = round2(ctx.otrosPorAvion + fijoManual);
     const reservaR = round2(reservaOverhaul);
     const saldo = round2(
       cobradoR -
@@ -625,7 +666,7 @@ export class ProfitSharingService {
       sb
         .from('gasto')
         .select(
-          'id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado',
+          'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -939,13 +980,32 @@ export class ProfitSharingService {
       .map((v) => ({ id: v.id as string, folio: v.folio as number }));
 
     const gastos = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
+    // Repartos manuales del periodo: un gasto con filas en gasto_reparto YA
+    // está asignado (misma regla que la bandeja de Gastos — simetría).
+    const repartosPre = await fetchRepartos(
+      this.supabase.service,
+      gastos.map((g) => g.id as string),
+    );
     // FIJO e INDIRECTO no llevan avión por diseño: no bloquean el cierre.
+    // OTRO sin vuelo tampoco: sin reparto es gasto de la EMPRESA VuelaTour
+    // a propósito (regla 26-ago — se reparte en la pantalla Otros gastos).
     const sinAvion = gastos.filter(
       (g) =>
         g.aeronave_id == null &&
         g.categoria !== 'FIJO' &&
-        g.categoria !== 'INDIRECTO',
+        g.categoria !== 'INDIRECTO' &&
+        !(g.categoria === 'OTRO' && g.vuelo_id == null) &&
+        !repartosPre.has(g.id as string),
     );
+    // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el
+    // monto a la baja DESPUÉS de repartir) — el sobrante restaría dinero
+    // inexistente a los aviones. Aviso para corregir en Otros gastos.
+    const repartosIncoherentes = gastos.filter((g) => {
+      const filas = repartosPre.get(g.id as string);
+      if (!filas) return false;
+      const suma = filas.reduce((acc, r) => acc + r.monto, 0);
+      return Math.round(suma * 100) > Math.round(Number(g.monto ?? 0) * 100);
+    });
     // COMBUSTIBLE sin avión (26-ago-2026): con el modelo "gas por avión/mes"
     // el aeronave_id es la ÚNICA liga del combustible al balance y al
     // reparto — una carga sin avión es dinero invisible. BLOQUEA el cierre.
@@ -954,7 +1014,12 @@ export class ProfitSharingService {
     // toda la flota (el pool no mira aeronave_id) y en el detalle del avión
     // asignado aparece EXCLUIDO — doble lectura silenciosa. Aviso, no candado.
     const fijosConAvion = gastos.filter(
-      (g) => g.aeronave_id != null && g.categoria === 'FIJO',
+      // Un FIJO REPARTIDO a mano no es doble lectura: salió del pool y sus
+      // parciales van al avión elegido (verificación 26-ago).
+      (g) =>
+        g.aeronave_id != null &&
+        g.categoria === 'FIJO' &&
+        !repartosPre.has(g.id as string),
     );
     const sinTc = gastos.filter(
       (g) => g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0),
@@ -1035,6 +1100,13 @@ export class ProfitSharingService {
         monto_mxn: round2(
           gasSinAvion.reduce((acc, g) => acc + Number(g.monto ?? 0), 0),
         ),
+      },
+      {
+        clave: 'repartos_incoherentes',
+        titulo: 'Repartos de gasto que suman MÁS que el gasto',
+        detalle:
+          'Se editó el monto después de repartir: corrige el reparto en Otros gastos (restaría dinero inexistente).',
+        count: repartosIncoherentes.length,
       },
       {
         clave: 'gastos_sin_avion',
@@ -1202,7 +1274,7 @@ export class ProfitSharingService {
   private async fetchGastos(desde: string, hasta: string): Promise<GastoRow[]> {
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select('aeronave_id, categoria, monto, moneda, tc_gasto')
+      .select('id, aeronave_id, categoria, monto, moneda, tc_gasto')
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
