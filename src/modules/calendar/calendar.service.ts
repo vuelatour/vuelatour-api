@@ -416,6 +416,55 @@ export class CalendarService {
       }
     }
 
+    // MANTENIMIENTOS con fecha (26-ago): PROGRAMADO ámbar / EN_TALLER rojo,
+    // un pin en su fecha_programada (DATE → mediodía UTC = día Cancún, mismo
+    // truco de descansos/eventos). OPT-IN vía incluir_mantenimientos: el APK
+    // viejo no conoce el tipo y no debe recibirlo. Vista de piloto no aplica.
+    if (q.incluir_mantenimientos === true && !q.piloto_id && !q.solo_externos) {
+      let mq = this.supabase.service
+        .from('mantenimiento')
+        .select(
+          'id, descripcion, estado, fecha_programada, horas_programadas, etapa_intervalo_hr, aeronave_id, aeronave:aeronave_id(matricula, color_calendario)',
+        )
+        .neq('estado', 'COMPLETADO')
+        .not('fecha_programada', 'is', null)
+        .gte('fecha_programada', fromDay)
+        .lte('fecha_programada', toDay)
+        .order('fecha_programada', { ascending: true });
+      if (q.aeronave_id) mq = mq.eq('aeronave_id', q.aeronave_id);
+      const { data: mants, error: mErr } = await mq;
+      if (mErr) throw new Error(mErr.message);
+      for (const m of (mants ?? []) as Array<Record<string, unknown>>) {
+        const aero = Array.isArray(m.aeronave) ? m.aeronave[0] : m.aeronave;
+        const matricula =
+          (aero as { matricula?: string } | null)?.matricula ?? null;
+        const enTaller = (m.estado as string) === 'EN_TALLER';
+        const desc = String(m.descripcion ?? 'Servicio');
+        events.push({
+          id: `mant:${m.id as string}`,
+          tipo_evento: 'mantenimiento',
+          mantenimiento_id: m.id,
+          titulo: desc,
+          vuelo_id: null,
+          escala_id: null,
+          folio: null,
+          fecha_vuelo: `${m.fecha_programada as string}T12:00:00Z`,
+          hora: null,
+          estado: enTaller ? 'EN_TALLER' : 'PROGRAMADO',
+          estado_permiso: null,
+          es_externo: false,
+          cancelado: false,
+          sin_asignar: false,
+          title: `Servicio · ${matricula ?? 'avión'} · ${desc}`,
+          color: enTaller ? '#EF4444' : '#F59E0B',
+          aeronave_id: m.aeronave_id ?? null,
+          aeronave_matricula: matricula,
+          piloto_id: null,
+          piloto_nombre: null,
+        } as unknown as (typeof events)[number]);
+      }
+    }
+
     events.sort((a, b) =>
       String((a as { fecha_vuelo?: string }).fecha_vuelo ?? '').localeCompare(
         String((b as { fecha_vuelo?: string }).fecha_vuelo ?? ''),

@@ -780,6 +780,61 @@ export class AlertsService {
         etapasPorAvion.get(a.id as string) ?? [],
       );
       if (prox && prox.faltan <= umbralHoras) {
+        // El sistema DEJA CREADO el mantenimiento (PROGRAMADO, sin fecha):
+        // el mecánico solo confirma cuándo entra al taller (app/panel) y con
+        // fecha aparece en el calendario y en los recordatorios por fecha.
+        // Idempotente por EXISTENCIA (no por alerta_emitida): mismo avión +
+        // mismo hito (horas_programadas) en cualquier estado — un COMPLETADO
+        // del hito también cuenta (el avión aún no rebasa el hito y el
+        // próximo cálculo sigue apuntando ahí); una entrada MANUAL abierta de
+        // la misma etapa sin horas también (no duplicar la del mecánico).
+        const { data: mantsHito, error: mhErr } = await this.supabase.service
+          .from('mantenimiento')
+          .select(
+            'id, estado, horas_programadas, etapa_intervalo_hr, fecha_realizada',
+          )
+          .eq('aeronave_id', a.id as string);
+        if (mhErr) throw new Error(mhErr.message);
+        const cerca = (v: unknown, obj: number) => {
+          const n = v == null ? null : Number(v);
+          return n != null && Number.isFinite(n) && Math.abs(n - obj) < 0.05;
+        };
+        const yaExiste = (mantsHito ?? []).some((m) => {
+          if (cerca(m.horas_programadas, prox.a_las)) return true;
+          if (m.estado === 'COMPLETADO' || m.fecha_realizada != null)
+            return false;
+          return (
+            m.horas_programadas == null &&
+            cerca(m.etapa_intervalo_hr, prox.intervalo)
+          );
+        });
+        let mantenimientoId: string | null = null;
+        if (!yaExiste) {
+          const nombreServicio =
+            prox.nombre ?? `Servicio de ${prox.intervalo} h`;
+          const { data: creado, error: crErr } = await this.supabase.service
+            .from('mantenimiento')
+            .insert({
+              aeronave_id: a.id,
+              estado: 'PROGRAMADO',
+              tipo: 'PROGRAMADO',
+              descripcion: nombreServicio,
+              horas_programadas: prox.a_las,
+              etapa_intervalo_hr: prox.intervalo,
+              notas: `Creado automáticamente por el programa de servicio: faltan ${prox.faltan} h para el hito de ${prox.a_las} h (tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`,
+            })
+            .select('id')
+            .single();
+          if (crErr) {
+            // No tirar el barrido de toda la flota por un insert: la alerta
+            // sale igual y el siguiente run reintenta la creación.
+            this.logger.warn(
+              `No se pudo crear el mantenimiento automático de ${a.matricula as string}: ${crErr.message}`,
+            );
+          } else {
+            mantenimientoId = creado.id as string;
+          }
+        }
         const tareasTxt =
           prox.tareas.length > 0
             ? ` Incluye: ${prox.tareas.slice(0, 4).join(', ')}${
@@ -792,8 +847,12 @@ export class AlertsService {
           {
             tipo: 'mantenimiento_programado',
             titulo: `Servicio por horas cerca: ${a.matricula as string}`,
-            cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt}`,
-            data: { aeronave_id: a.id, a_las: prox.a_las },
+            cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
+            data: {
+              aeronave_id: a.id,
+              a_las: prox.a_las,
+              ...(mantenimientoId ? { mantenimiento_id: mantenimientoId } : {}),
+            },
             link: `/admin/aircraft/${a.id as string}`,
           },
         );

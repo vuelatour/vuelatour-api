@@ -51,6 +51,15 @@ export class CalendarRangeQuery {
   @Transform(boolQuery)
   @IsBoolean()
   solo_externos?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Incluir mantenimientos PROGRAMADO/EN_TALLER con fecha (tipo_evento "mantenimiento"). OPT-IN a propósito: el APK viejo no conoce ese tipo — panel y app nueva lo piden explícito.',
+  })
+  @IsOptional()
+  @Transform(boolQuery)
+  @IsBoolean()
+  incluir_mantenimientos?: boolean;
 }
 
 /**

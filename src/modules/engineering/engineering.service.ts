@@ -390,7 +390,7 @@ export class EngineeringService {
   // ===== Dashboard consolidado de flota =====
 
   /** Vencimientos por fecha de toda la flota dentro de la ventana (incluye vencidos). */
-  async fleetUpcoming(dias: number) {
+  async fleetUpcoming(dias: number, incluirSinFecha = false) {
     const limite = new Date(Date.now() + dias * 86400 * 1000)
       .toISOString()
       .slice(0, 10);
@@ -445,6 +445,25 @@ export class EngineeringService {
           : null,
       };
     });
-    return { vencimientos: vencs, mantenimientos: mantenimientos ?? [] };
+    // PROGRAMADO sin fecha (auto-creados por el programa de horas): van AL
+    // FRENTE — son los accionables ("confirma la fecha"). Solo para clientes
+    // que lo piden (app nueva); el APK viejo no maneja fecha null aquí.
+    let sinFecha: typeof mantenimientos = [];
+    if (incluirSinFecha) {
+      const { data: sf, error: sfErr } = await this.supabase.service
+        .from('mantenimiento')
+        .select(
+          'id, descripcion, fecha_programada, estado, aeronave_id, etapa_intervalo_hr, aeronave(matricula)',
+        )
+        .neq('estado', 'COMPLETADO')
+        .is('fecha_programada', null)
+        .order('created_at', { ascending: false });
+      if (sfErr) throw new Error(sfErr.message);
+      sinFecha = sf ?? [];
+    }
+    return {
+      vencimientos: vencs,
+      mantenimientos: [...sinFecha, ...(mantenimientos ?? [])],
+    };
   }
 }

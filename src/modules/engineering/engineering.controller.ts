@@ -100,8 +100,14 @@ export class EngineeringController {
   @ApiOperation({
     summary: 'Dashboard de flota: vencimientos y mantenimientos próximos.',
   })
-  upcoming(@Query('dias') dias?: string) {
+  upcoming(
+    @Query('dias') dias?: string,
+    // sin_fecha=true (app nueva): incluye también los PROGRAMADO SIN fecha
+    // (los auto-creados por el programa de horas, pendientes de confirmar).
+    // Opt-in: el APK viejo no maneja fecha_programada null en estas filas.
+    @Query('sin_fecha') sinFecha?: string,
+  ) {
     const d = Math.min(Math.max(Number(dias) || 60, 1), 365);
-    return this.engineering.fleetUpcoming(d);
+    return this.engineering.fleetUpcoming(d, sinFecha === 'true');
   }
 }
