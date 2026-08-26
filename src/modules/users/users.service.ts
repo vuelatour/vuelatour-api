@@ -129,11 +129,34 @@ export class UsersService {
     }
     const usuario = data as UsuarioRow;
     // Aviso de invitación por correo (best-effort, no bloquea la creación).
+    // Va ANTES del vínculo de tarjeta: si aquel truena, el invitado igual
+    // recibe su correo (verificación 26-ago — el reintento daría 409).
     void this.email.sendUserInvitation({
       to: usuario.email,
       nombre: usuario.nombre,
       rol: usuario.rol,
     });
+    // Alta con tarjeta (invite-pilot): vincular la tarjeta real del catálogo.
+    // Best-effort tras el insert: si la terminación no existe, el usuario YA
+    // quedó creado y con su invitación enviada — se limpia el espejo y el
+    // 400 lo explica para que el admin no reintente el alta (daría 409).
+    if (dto.tarjeta_terminacion) {
+      try {
+        await this.sincronizarTarjeta(
+          usuario.id,
+          dto.tarjeta_terminacion,
+          createdBy,
+        );
+      } catch {
+        await this.supabase.service
+          .from('usuario')
+          .update({ tarjeta_terminacion: '' })
+          .eq('id', usuario.id);
+        throw new BadRequestException(
+          `El usuario quedó creado y su invitación enviada, pero la tarjeta **** ${dto.tarjeta_terminacion} no se pudo vincular (no está en Tarjetas corp. o está inactiva): asígnala después desde Editar usuario.`,
+        );
+      }
+    }
     return usuario;
   }
 
@@ -164,6 +187,78 @@ export class UsersService {
     return { ok: true, sent, email: user.email };
   }
 
+  /**
+   * Lado usuario del vínculo tarjeta↔usuario (26-ago): asignar una
+   * terminación aquí VINCULA la tarjeta real del catálogo (fuente única:
+   * tarjeta_corporativa.usuario_id) y desvincula al dueño anterior; las
+   * demás tarjetas del usuario se sueltan (esta pantalla asigna "LA tarjeta
+   * del usuario" — multi-tarjeta se maneja desde Tarjetas corp.). "" =
+   * desvincular todas. Terminación fuera del catálogo → 400: primero se
+   * registra la tarjeta. El espejo usuario.tarjeta_terminacion lo escribe el
+   * patch normal del caller; el del dueño anterior se recalcula aquí.
+   */
+  private async sincronizarTarjeta(
+    userId: string,
+    terminacion: string,
+    updatedBy: string,
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    if (terminacion === '') {
+      const { error } = await sb
+        .from('tarjeta_corporativa')
+        .update({ usuario_id: null, updated_by: updatedBy })
+        .eq('usuario_id', userId);
+      if (error) throw new Error(error.message);
+      return;
+    }
+    const { data: tarjeta, error: tErr } = await sb
+      .from('tarjeta_corporativa')
+      .select('id, usuario_id, activa')
+      .eq('terminacion', terminacion)
+      .maybeSingle();
+    if (tErr) throw new Error(tErr.message);
+    if (!tarjeta || tarjeta.activa !== true) {
+      throw new BadRequestException(
+        `La tarjeta **** ${terminacion} no está registrada (o está inactiva) en Tarjetas corp.: regístrala primero o deja el campo vacío.`,
+      );
+    }
+    const prevOwner = (tarjeta.usuario_id as string | null) ?? null;
+    // Ya es SU tarjeta: nada que hacer. Sin esto, cada guardado del diálogo
+    // (que manda la terminación aunque no cambie) desvinculaba las DEMÁS
+    // tarjetas del usuario y bumpeaba updated_at (verificación 26-ago).
+    if (prevOwner === userId) return;
+    const { error: e1 } = await sb
+      .from('tarjeta_corporativa')
+      .update({ usuario_id: null, updated_by: updatedBy })
+      .eq('usuario_id', userId)
+      .neq('id', tarjeta.id as string);
+    if (e1) throw new Error(e1.message);
+    const { error: e2 } = await sb
+      .from('tarjeta_corporativa')
+      .update({ usuario_id: userId, updated_by: updatedBy })
+      .eq('id', tarjeta.id as string);
+    if (e2) throw new Error(e2.message);
+    // El dueño anterior pierde esta tarjeta: su espejo se recalcula desde el
+    // catálogo (otra tarjeta suya vinculada, o vacío).
+    if (prevOwner && prevOwner !== userId) {
+      const { data: otra } = await sb
+        .from('tarjeta_corporativa')
+        .select('terminacion')
+        .eq('usuario_id', prevOwner)
+        .eq('activa', true)
+        .order('updated_at', { ascending: false })
+        .limit(1);
+      const { error: e3 } = await sb
+        .from('usuario')
+        .update({
+          tarjeta_terminacion:
+            ((otra?.[0]?.terminacion as string | undefined) ?? '') || '',
+        })
+        .eq('id', prevOwner);
+      if (e3) throw new Error(e3.message);
+    }
+  }
+
   async update(id: string, patch: UpdateUsuarioDto, updatedBy: string): Promise<UsuarioRow> {
     if (Object.keys(patch).length === 0) {
       return this.findById(id);
@@ -187,6 +282,20 @@ export class UsersService {
       const current = await this.findById(id);
       if (current.es_piloto_externo && !current.supabase_auth_id) {
         extra.estado = 'INVITADO';
+      }
+    }
+    // Vínculo de tarjeta: primero el catálogo (400 si la terminación no
+    // existe → no se escribe nada del usuario). null explícito = desvincular
+    // (el "" del form lo tira stripEmpty en el panel; null sobrevive) y el
+    // espejo del usuario se normaliza a ''.
+    if (patch.tarjeta_terminacion !== undefined) {
+      await this.sincronizarTarjeta(
+        id,
+        patch.tarjeta_terminacion ?? '',
+        updatedBy,
+      );
+      if (patch.tarjeta_terminacion === null) {
+        extra.tarjeta_terminacion = '';
       }
     }
     const { data, error } = await this.supabase.service
