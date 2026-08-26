@@ -47,6 +47,7 @@ import {
   UpdateFlightDto,
   UpdatePermisoDto,
   VoucherUrlsDto,
+  PurgeFlightDto,
 } from './dto/flights.dto';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
@@ -354,6 +355,20 @@ export class FlightsController {
   })
   remove(@Param('id', ParseUUIDPipe) id: string) {
     return this.flights.deleteFlight(id);
+  }
+
+  @Delete(':id/purge')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Borrado DEFINITIVO de un vuelo CANCELADO (solo ADMIN). Candados: sin cobros, sin gastos ligados, sin factura. Deja bitácora forense en vuelo_eliminado y limpia calendario/fotos.',
+  })
+  purge(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PurgeFlightDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.purgeFlight(id, dto.motivo, c.userId);
   }
 
   @Post(':id/reassign-aircraft')

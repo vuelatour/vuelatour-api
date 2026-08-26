@@ -234,6 +234,17 @@ export class SetFlightPlanDto {
   foto_plan_vuelo_url!: string;
 }
 
+export class PurgeFlightDto {
+  @ApiProperty({
+    description:
+      'Motivo del borrado DEFINITIVO (queda en la bitácora vuelo_eliminado).',
+  })
+  @IsString()
+  @MinLength(5)
+  @MaxLength(500)
+  motivo!: string;
+}
+
 export class CancelFlightDto {
   @ApiProperty({
     description: 'Motivo de la cancelación. Queda auditado en notas_internas.',

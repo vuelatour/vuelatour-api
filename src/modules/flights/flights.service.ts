@@ -471,6 +471,198 @@ export class FlightsService {
   }
 
   /**
+   * Borrado DEFINITIVO de un vuelo CANCELADO (solo ADMIN, pedido 26-ago).
+   * A diferencia de deleteFlight (borradores sin actividad), aquí el vuelo
+   * SÍ tuvo historia — por eso los candados son duros y queda huella:
+   * - Solo estado CANCELADO (lo operativo se cancela, no se borra).
+   * - CERO dinero colgando: cobros (RESTRICT en BD) y factura (NO ACTION)
+   *   bloquean; los gastos ligados se rechazan AQUÍ porque su FK es
+   *   SET NULL y quedarían huérfanos en silencio (reasignar/borrar antes).
+   * - Bitácora forense en vuelo_eliminado (quién, cuándo, motivo, snapshot
+   *   crudo del vuelo y sus tramos) ANTES de borrar.
+   * - Limpieza: eventos de Google Calendar, fotos de taco (taco-fotos) y
+   *   planes de vuelo (planes-vuelo) best-effort, notificaciones ligadas, y
+   *   squawks desligados a propósito (la discrepancia es del avión).
+   */
+  async purgeFlight(
+    id: string,
+    motivo: string,
+    userId: string,
+  ): Promise<{ deleted: true; id: string; folio: number | null }> {
+    const sb = this.supabase.service;
+    const { data: vuelo, error: vErr } = await sb
+      .from('vuelo')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (vErr) throw new Error(vErr.message);
+    if (!vuelo) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (vuelo.estado !== 'CANCELADO') {
+      throw new ConflictException(
+        'Solo un vuelo CANCELADO se puede eliminar definitivamente. Cancélalo primero (o usa el borrado normal si es un borrador sin actividad).',
+      );
+    }
+    const folio = (vuelo.folio as number | null) ?? null;
+    const [cobrosRes, gastosRes, facturasRes, escalasRes] = await Promise.all([
+      sb
+        .from('cobro_vuelo')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id),
+      sb
+        .from('gasto')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id),
+      sb
+        .from('factura')
+        .select('id', { count: 'exact', head: true })
+        .eq('vuelo_id', id),
+      sb.from('escala').select('*').eq('vuelo_id', id).order('orden'),
+    ]);
+    if (escalasRes.error) throw new Error(escalasRes.error.message);
+    const escalas = (escalasRes.data ?? []) as Array<Record<string, unknown>>;
+    if ((cobrosRes.count ?? 0) > 0) {
+      throw new ConflictException(
+        `El vuelo #${folio ?? '?'} tiene ${cobrosRes.count} cobro(s) registrados — el dinero jamás se borra en cascada. Elimina o reasigna los cobros primero.`,
+      );
+    }
+    if ((facturasRes.count ?? 0) > 0) {
+      throw new ConflictException(
+        `El vuelo #${folio ?? '?'} tiene factura ligada (CFDI): no se puede eliminar de la base.`,
+      );
+    }
+    if ((gastosRes.count ?? 0) > 0) {
+      throw new ConflictException(
+        `El vuelo #${folio ?? '?'} tiene ${gastosRes.count} gasto(s) ligados que quedarían huérfanos. Reasígnalos a otro vuelo/avión o elimínalos primero (Gastos).`,
+      );
+    }
+
+    // Nombres para la bitácora (best-effort).
+    const [clienteRes, aeronaveRes] = await Promise.all([
+      vuelo.cliente_id
+        ? sb
+            .from('cliente')
+            .select('nombre')
+            .eq('id', vuelo.cliente_id as string)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      vuelo.aeronave_id
+        ? sb
+            .from('aeronave')
+            .select('matricula')
+            .eq('id', vuelo.aeronave_id as string)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+
+    // Fotos de storage: recolectar los paths ANTES del delete (los tramos
+    // caen por CASCADE y nadie más conoce esos paths) — patrón engines.
+    const tacoPaths: string[] = [];
+    const planPaths: string[] = [];
+    const planPath = (raw: unknown): string | null => {
+      const txt = String(raw ?? '').trim();
+      if (!txt) return null;
+      const marker = '/planes-vuelo/';
+      const idx = txt.indexOf(marker);
+      if (idx === -1) return txt;
+      const resto = txt.slice(idx + marker.length).split('?')[0];
+      try {
+        return decodeURIComponent(resto);
+      } catch {
+        return resto;
+      }
+    };
+    for (const e of escalas) {
+      if (e.foto_taco_salida_url)
+        tacoPaths.push(e.foto_taco_salida_url as string);
+      if (e.foto_taco_llegada_url)
+        tacoPaths.push(e.foto_taco_llegada_url as string);
+      const p = planPath(e.foto_plan_vuelo_url);
+      if (p) planPaths.push(p);
+    }
+    const pv = planPath(vuelo.foto_plan_vuelo_url);
+    if (pv) planPaths.push(pv);
+
+    // Bitácora forense ANTES de borrar (si el delete falla, se revierte).
+    const { data: bitacora, error: bitErr } = await sb
+      .from('vuelo_eliminado')
+      .insert({
+        vuelo_id: id,
+        folio,
+        cliente_nombre:
+          (clienteRes.data as { nombre?: string } | null)?.nombre ?? null,
+        matricula:
+          (aeronaveRes.data as { matricula?: string } | null)?.matricula ??
+          null,
+        fecha_vuelo: vuelo.fecha_vuelo ?? null,
+        estado: vuelo.estado,
+        tramos: escalas.length,
+        motivo: motivo.trim(),
+        snapshot: { vuelo, escalas },
+        eliminado_por: userId,
+      })
+      .select('id')
+      .maybeSingle();
+    if (bitErr) throw new Error(bitErr.message);
+
+    // Eventos de Google Calendar ANTES de perder los IDs.
+    await this.calendar.removeFlight(id).catch(() => undefined);
+    // Squawks: la discrepancia es del AVIÓN — se desliga a propósito (el
+    // SET NULL lo haría igual; hacerlo explícito documenta la intención).
+    await sb
+      .from('aeronave_discrepancia')
+      .update({ vuelo_id: null })
+      .eq('vuelo_id', id);
+    await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
+    await sb.from('escala').delete().eq('vuelo_id', id);
+    const { error } = await sb.from('vuelo').delete().eq('id', id);
+    if (error) {
+      // Revertir la bitácora: el vuelo sigue existiendo.
+      if (bitacora?.id) {
+        await sb.from('vuelo_eliminado').delete().eq('id', bitacora.id);
+      }
+      if (error.code === '23503') {
+        throw new ConflictException(
+          'La base bloqueó el borrado: el vuelo tiene cobros o factura ligados (capturados mientras confirmabas).',
+        );
+      }
+      throw new Error(error.message);
+    }
+
+    // Notificaciones ligadas al vuelo (referencia débil por jsonb): fuera —
+    // apuntarían a un 404. Best-effort.
+    try {
+      await sb.from('notificacion').delete().eq('data->>vuelo_id', id);
+    } catch {
+      // Best-effort: una notificación residual no rompe nada.
+    }
+    // Fotos: best-effort (el vuelo ya no existe; un residuo no rompe nada).
+    if (tacoPaths.length > 0) {
+      const { error: stErr } = await sb.storage
+        .from('taco-fotos')
+        .remove(tacoPaths);
+      if (stErr) {
+        this.logger.warn(
+          `purgeFlight #${folio ?? '?'}: ${tacoPaths.length} foto(s) de taco sin borrar: ${stErr.message}`,
+        );
+      }
+    }
+    if (planPaths.length > 0) {
+      const { error: stErr } = await sb.storage
+        .from('planes-vuelo')
+        .remove(planPaths);
+      if (stErr) {
+        this.logger.warn(
+          `purgeFlight #${folio ?? '?'}: ${planPaths.length} plan(es) de vuelo sin borrar: ${stErr.message}`,
+        );
+      }
+    }
+    this.logger.log(
+      `Vuelo #${folio ?? '?'} (${id}) eliminado DEFINITIVAMENTE por ${userId}: ${motivo.trim()}`,
+    );
+    return { deleted: true, id, folio };
+  }
+
+  /**
    * Reasignación de aeronave de último minuto (acordado en reunión 10 jun):
    * el vuelo original queda CANCELADO conservando sus gastos (esa matrícula
    * los absorbe: factura de operación, combustible…), y se crea un CLON con
