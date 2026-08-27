@@ -358,19 +358,24 @@ export class CubrirExternoDto {
   tc_usd_mxn?: number;
 
   @ApiPropertyOptional({
-    description: 'Modelo del avión externo (ej. HAWKER 400 A); sale en el PDF.',
+    description:
+      'Modelo del avión externo (ej. HAWKER 400 A); sale en el PDF. ' +
+      "'' explícito = borrar la ficha (omitir la clave = conservar).",
   })
   @IsOptional()
   @IsString()
+  @ValidateIf((o: CubrirExternoDto) => (o.avion_externo_modelo ?? '') !== '')
   @MinLength(2)
   @MaxLength(80)
   avion_externo_modelo?: string;
 
   @ApiPropertyOptional({
-    description: 'Matrícula del avión externo (ej. XA-REG).',
+    description:
+      "Matrícula del avión externo (ej. XA-REG). '' explícito = borrarla.",
   })
   @IsOptional()
   @IsString()
+  @ValidateIf((o: CubrirExternoDto) => (o.avion_externo_matricula ?? '') !== '')
   @MinLength(2)
   @MaxLength(20)
   avion_externo_matricula?: string;

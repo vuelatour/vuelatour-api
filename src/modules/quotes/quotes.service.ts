@@ -859,7 +859,10 @@ export class QuotesService {
             tipo_parada: leg.tipo_parada,
             servicio_notas: leg.servicio_notas,
             pdf_oculto: leg.pdf_oculto,
-            monto_externo_usd: round2(leg.monto_externo_usd),
+            monto_externo_usd:
+              esExternoManual && leg.monto_externo_usd > 0
+                ? round2(leg.monto_externo_usd)
+                : null,
           }))
         : null,
       iva: {
