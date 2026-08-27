@@ -1071,23 +1071,14 @@ export class QuotesService {
 
     if ((dto.escalas_operacion?.length ?? 0) > 0) {
       // Ruta OPERATIVA (mismas semánticas que la reserva del vuelo rápido):
-      // ferry → solo_operativa (el piloto lo ve, el cliente no) y pernocta
-      // automática si el siguiente tramo sale otro día (hora Cancún).
+      // ferry → solo_operativa (el piloto lo ve, el cliente no). La pernocta
+      // es SOLO manual (27-ago, regla del cliente): la derivación automática
+      // por salto de fecha marcaba pernoctas que nadie pidió.
       const itinerario = dto.escalas_operacion!;
-      const dayCancun = (d: Date): string =>
-        d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
       const fechaEfectiva = (i: number): Date | null =>
         itinerario[i]?.hora_salida ??
         (i === 0 ? (dto.fecha_vuelo ?? null) : null);
       const legs = itinerario.map((e, i) => {
-        let referencia: Date | null = null;
-        for (let j = i; j >= 0 && !referencia; j--)
-          referencia = fechaEfectiva(j);
-        const siguiente = itinerario[i + 1]?.hora_salida ?? null;
-        const pernocta =
-          referencia != null &&
-          siguiente != null &&
-          dayCancun(siguiente) > dayCancun(referencia);
         return {
           vuelo_id: vuelo!.id as string,
           orden: i + 1,
@@ -1101,9 +1092,9 @@ export class QuotesService {
           es_ferry: e.es_ferry ?? false,
           es_sobrevuelo: e.es_sobrevuelo ?? false,
           solo_operativa: e.es_ferry ?? false,
-          // Pernocta: la captura manual del formulario manda; la derivación
-          // por fechas (siguiente tramo sale otro día) la complementa.
-          requiere_pernocta: (e.requiere_pernocta ?? false) || pernocta,
+          // Pernocta: SOLO la captura manual (27-ago) — sin derivación por
+          // salto de fecha.
+          requiere_pernocta: e.requiere_pernocta ?? false,
           tipo_parada: e.tipo_parada ?? 'NORMAL',
           servicio_notas: e.servicio_notas ?? null,
           notas: e.notas ?? null,
@@ -1798,6 +1789,10 @@ export class QuotesService {
     for (const v of data ?? []) {
       const legs = (v.escalas ?? []).slice().sort((a, b) => a.orden - b.orden);
       if (legs.length === 0) continue;
+      // Solo se sugieren rutas con MILLAS en TODOS los tramos (27-ago):
+      // aplicar una sugerencia con millas en 0 dejaba el tiempo (y el
+      // precio) sin calcular y la oficina no entendía por qué.
+      if (legs.some((l) => !(Number(l.millas_nauticas) > 0))) continue;
       const clave = legs
         .map((l) => `${l.origen_iata}-${l.destino_iata}`)
         .join('|');
@@ -1986,7 +1981,7 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });

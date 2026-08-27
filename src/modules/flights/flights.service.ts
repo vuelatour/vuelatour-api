@@ -3245,25 +3245,12 @@ export class FlightsService {
     // pero no se cotizan ni se muestran al cliente). Sin itinerario, el
     // comportamiento clásico: ida (+ regreso invertido si hay fecha).
     const vueloId = data!.id as string;
-    // Pernocta automática: si el siguiente tramo sale OTRO día (hora por tramo
-    // capturada), el piloto duerme en el destino de este tramo — se marca
-    // requiere_pernocta sin captura manual.
-    const dayCancun = (d: Date): string =>
-      d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    // Pernocta SOLO manual (27-ago, regla del cliente): la derivación
+    // automática por salto de fecha marcaba pernoctas que nadie pidió.
     const fechaEfectiva = (i: number): Date | null =>
       itinerario[i]?.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null);
     const legs = itinerario.length
       ? itinerario.map((e, i) => {
-          // Última fecha conocida hasta este tramo (un tramo sin hora se asume
-          // del mismo día que el anterior).
-          let referencia: Date | null = null;
-          for (let j = i; j >= 0 && !referencia; j--)
-            referencia = fechaEfectiva(j);
-          const siguiente = itinerario[i + 1]?.hora_salida ?? null;
-          const pernocta =
-            referencia != null &&
-            siguiente != null &&
-            dayCancun(siguiente) > dayCancun(referencia);
           return {
             vuelo_id: vueloId,
             orden: i + 1,
@@ -3276,9 +3263,8 @@ export class FlightsService {
             es_ferry: e.es_ferry ?? false,
             es_sobrevuelo: e.es_sobrevuelo ?? false,
             solo_operativa: e.es_ferry ?? false,
-            // Pernocta: la captura manual del formulario manda; la derivación
-            // por fechas (siguiente tramo sale otro día) la complementa.
-            requiere_pernocta: (e.requiere_pernocta ?? false) || pernocta,
+            // Pernocta: SOLO la captura manual (27-ago).
+            requiere_pernocta: e.requiere_pernocta ?? false,
             tipo_parada: e.tipo_parada ?? 'NORMAL',
             servicio_notas: e.servicio_notas ?? null,
             notas: e.notas ?? null,
