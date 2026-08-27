@@ -107,9 +107,11 @@ export class QuotesPdfService {
     // Recibo del cliente: la lista para TÍTULO/ITINERARIO/MAPA sale del
     // snapshot del cálculo (la ruta COMERCIAL exacta que configuró oficina,
     // con la bandera pdf_oculto por tramo — 27-ago); cotizaciones viejas sin
-    // tramos en snapshot caen a las escalas del vuelo. Los ferry y los
-    // tramos ocultos no se muestran (el precio NO cambia: ya está en el
-    // desglose del snapshot).
+    // tramos en snapshot caen a las escalas del vuelo. QUIÉN decide si un
+    // tramo se muestra es SOLO el switch pdf_oculto (regla 27-ago v2: los
+    // ferry también salen si su switch está prendido — antes se filtraban
+    // solos y "Mostrar en PDF" parecía roto). El precio NO cambia: ya está
+    // en el desglose del snapshot.
     const tramosSnap = (
       (quote.calculo_snapshot as Record<string, unknown> | undefined)
         ?.tramos as Array<Record<string, unknown>> | undefined
@@ -117,7 +119,7 @@ export class QuotesPdfService {
     const escalas: Array<Record<string, unknown>> =
       tramosSnap && tramosSnap.length > 0
         ? tramosSnap
-            .filter((t) => t.es_ferry !== true && t.pdf_oculto !== true)
+            .filter((t) => t.pdf_oculto !== true)
             .map((t, i) => ({
               orden: num(t.orden) ?? i + 1,
               origen_iata: (t.origen as string) ?? '',
