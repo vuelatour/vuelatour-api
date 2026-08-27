@@ -107,6 +107,14 @@ export class EscalaInputDto {
   requiere_pernocta?: boolean;
 
   @ApiPropertyOptional({
+    description:
+      'Ocultar ESTE tramo del PDF de la cotización (título/itinerario/mapa). No afecta el precio: el tramo se sigue cobrando (27-ago).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pdf_oculto?: boolean;
+
+  @ApiPropertyOptional({
     description: 'Costo de pernocta/viáticos del tramo (USD). Default si null.',
   })
   @IsOptional()

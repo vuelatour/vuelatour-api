@@ -43,6 +43,8 @@ export interface ResolvedLeg {
   notas: string | null;
   /** Fecha/hora planeada de salida del tramo (ISO). Null = sin definir aún. */
   fecha_salida_plan: string | null;
+  /** Ocultar este tramo del PDF (título/itinerario/mapa); el precio no cambia. */
+  pdf_oculto: boolean;
 }
 
 interface ResolvedRoute {
@@ -65,6 +67,8 @@ interface RawLeg {
   es_ferry?: boolean | null;
   requiere_pernocta?: boolean | null;
   pernocta_costo_usd?: number | string | null;
+  /** Ocultar este tramo del PDF (27-ago). */
+  pdf_oculto?: boolean | null;
   tipo_parada?: string | null;
   servicio_notas?: string | null;
   notas?: string | null;
@@ -744,6 +748,7 @@ export class QuotesService {
             pernocta_usd: round2(leg.pernocta_costo_usd),
             tipo_parada: leg.tipo_parada,
             servicio_notas: leg.servicio_notas,
+            pdf_oculto: leg.pdf_oculto,
           }))
         : null,
       iva: {
@@ -1989,7 +1994,7 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
+        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -2081,6 +2086,7 @@ export class QuotesService {
         tipo_parada: e.tipo_parada,
         servicio_notas: e.servicio_notas,
         notas: e.notas,
+        pdf_oculto: e.pdf_oculto === true,
         updated_by: userId,
       };
       const actual = porOrden.get(orden);
@@ -2265,6 +2271,7 @@ export class QuotesService {
         tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
         servicio_notas: l.servicio_notas ?? null,
         notas: l.notas ?? null,
+        pdf_oculto: l.pdf_oculto === true,
         fecha_salida_plan:
           l.fecha_salida_plan instanceof Date
             ? l.fecha_salida_plan.toISOString()

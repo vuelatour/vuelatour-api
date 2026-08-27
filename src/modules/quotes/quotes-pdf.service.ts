@@ -104,12 +104,39 @@ export class QuotesPdfService {
     }
 
     const ivaRaw = num(quote.iva_pct) ?? 0;
-    // Recibo del cliente: solo tramos COMERCIALES (los operativos internos no se cobran ni se muestran).
-    const escalas = (
-      (quote.escalas as Array<Record<string, unknown>> | undefined) ?? []
-    ).filter(
-      (e) => (e as { solo_operativa?: boolean }).solo_operativa !== true,
-    );
+    // Recibo del cliente: la lista para TÍTULO/ITINERARIO/MAPA sale del
+    // snapshot del cálculo (la ruta COMERCIAL exacta que configuró oficina,
+    // con la bandera pdf_oculto por tramo — 27-ago); cotizaciones viejas sin
+    // tramos en snapshot caen a las escalas del vuelo. Los ferry y los
+    // tramos ocultos no se muestran (el precio NO cambia: ya está en el
+    // desglose del snapshot).
+    const tramosSnap = (
+      (quote.calculo_snapshot as Record<string, unknown> | undefined)
+        ?.tramos as Array<Record<string, unknown>> | undefined
+    )?.filter((t) => t && typeof t === 'object');
+    const escalas: Array<Record<string, unknown>> =
+      tramosSnap && tramosSnap.length > 0
+        ? tramosSnap
+            .filter((t) => t.es_ferry !== true && t.pdf_oculto !== true)
+            .map((t, i) => ({
+              orden: num(t.orden) ?? i + 1,
+              origen_iata: (t.origen as string) ?? '',
+              destino_iata: (t.destino as string) ?? '',
+              millas_nauticas: t.millas,
+              pasajeros: t.pasajeros,
+              es_ferry: t.es_ferry === true,
+              requiere_pernocta: t.requiere_pernocta === true,
+              pernocta_costo_usd: t.pernocta_usd,
+              tipo_parada: t.tipo_parada,
+              servicio_notas: t.servicio_notas,
+            }))
+        : (
+            (quote.escalas as Array<Record<string, unknown>> | undefined) ?? []
+          ).filter(
+            (e) =>
+              (e as { solo_operativa?: boolean }).solo_operativa !== true &&
+              (e as { pdf_oculto?: boolean }).pdf_oculto !== true,
+          );
 
     // TUAS ligados al recibo CON su moneda (requisito del cliente): las líneas
     // del desglose canónico ya traen aeropuerto, unitario, pax y moneda.
