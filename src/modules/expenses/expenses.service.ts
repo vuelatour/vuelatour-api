@@ -211,7 +211,7 @@ export class ExpensesService {
       // aquí sería un pendiente eterno (se administra en Gastos personales).
       q = q
         .is('aeronave_id', null)
-        .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO)')
+        .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA)')
         .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
@@ -409,7 +409,7 @@ export class ExpensesService {
       .is('aeronave_id', null)
       // Mismo universo que la bandeja: PERSONAL_DUENO jamás tendrá vuelo —
       // sugerirle uno quemaría llamadas de IA en un imposible.
-      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO)')
+      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA)')
       .or('categoria.neq.OTRO,vuelo_id.not.is.null')
       .order('fecha_gasto', { ascending: false })
       .limit(15);
@@ -850,6 +850,17 @@ export class ExpensesService {
     ) {
       throw new BadRequestException(
         'Un gasto personal del dueño no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
+      );
+    }
+    // Gasolina de VEHÍCULOS: gasto de la empresa — con avión/vuelo entraría
+    // al balance del avión (justo la contaminación que motivó la categoría,
+    // caso XB-ANU 27-ago). El avión se asigna, si acaso, con reparto manual.
+    if (
+      dto.categoria === CategoriaGasto.GASOLINA &&
+      (dto.vuelo_id || dto.aeronave_id || dto.escala_id)
+    ) {
+      throw new BadRequestException(
+        'La gasolina de vehículos no lleva vuelo, avión ni escala (para combustible de aviación usa GAS): quítalos o usa otra categoría.',
       );
     }
     // El piloto ya NO ve ni edita desglose en la app (solo el total): el
@@ -1692,6 +1703,11 @@ export class ExpensesService {
           'Un gasto personal del dueño no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
         );
       }
+      if (catEf === 'GASOLINA' && (vueloEf || avionEf || escalaEf)) {
+        throw new BadRequestException(
+          'La gasolina de vehículos no lleva vuelo, avión ni escala (para combustible de aviación usa GAS): quítalos o usa otra categoría.',
+        );
+      }
     }
     // El invariante propina <= monto también vive aquí (el create no basta:
     // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
@@ -1849,7 +1865,7 @@ export class ExpensesService {
       .from('gasto')
       .select(LIST_COLS)
       .is('vuelo_id', null)
-      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO'])
+      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO', 'GASOLINA'])
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta)
       .order('fecha_gasto', { ascending: false })

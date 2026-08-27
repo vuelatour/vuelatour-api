@@ -428,7 +428,10 @@ export class ProfitSharingService {
       // idéntico a antes). Un FIJO repartido va al grupo FIJO manual (suma
       // en otros_prorrateados junto al pool — mismo campo de la cascada).
       const grupo: GrupoGasto =
-        g.es_reparto_parcial && g.categoria === 'INDIRECTO'
+        // GASOLINA repartida a mano cuenta como "otros gastos" del avión
+        // (mismo grupo que INDIRECTO repartido); sin reparto = EXCLUIDO.
+        g.es_reparto_parcial &&
+        (g.categoria === 'INDIRECTO' || g.categoria === 'GASOLINA')
           ? 'INDIRECTO'
           : g.es_reparto_parcial && g.categoria === FIJO
             ? 'FIJO'
@@ -996,6 +999,9 @@ export class ProfitSharingService {
         g.categoria !== 'INDIRECTO' &&
         // PERSONAL_DUENO jamás lleva avión (gasto personal del dueño).
         g.categoria !== 'PERSONAL_DUENO' &&
+        // GASOLINA (vehículos) tampoco: gasto de la empresa, se reparte a
+        // mano en Otros gastos si acaso.
+        g.categoria !== 'GASOLINA' &&
         !(g.categoria === 'OTRO' && g.vuelo_id == null) &&
         !repartosPre.has(g.id as string),
     );

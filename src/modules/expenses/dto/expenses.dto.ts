@@ -39,6 +39,12 @@ export enum CategoriaGasto {
    *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir
    *  su tratamiento con el equipo (hoja "gastos indirectos" de su control). */
   INDIRECTO = 'INDIRECTO',
+  /** Gasolina de VEHÍCULOS de la empresa (27-ago): gasolinera Pemex/Gulf
+   *  (Magna/Premium/Regular), NO combustible de aviación. Gasto de la
+   *  EMPRESA: sin vuelo ni avión (candados create/update); visible en Otros
+   *  gastos y repartible a mano. Nació porque los coches cargaban como GAS
+   *  y contaminaban balances de aviones. */
+  GASOLINA = 'GASOLINA',
   /** Gasto PERSONAL del dueño (26-ago-2026): lo captura el personal de
    *  VuelaTour pero NO es de la empresa ni de los aviones — seguimiento en
    *  la pantalla "Gastos personales". SIEMPRE sin vuelo y sin avión (candado
