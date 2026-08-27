@@ -15,6 +15,8 @@ import {
   type BalanceAvionPayload,
   type BalanceAvionVueloPayload,
   type BalanceGeneralResumenFilaPayload,
+  type BalanceHojaOtrosMovimientosPayload,
+  type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
@@ -446,6 +448,9 @@ export class AircraftBalanceService {
         utilidad_cobrada_usd: null,
         socios: [],
       },
+      // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
+      // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL.
+      otros_movimientos: await this.buildOtrosMovimientos(d, h),
       pendientes: [
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
@@ -2015,6 +2020,442 @@ export class AircraftBalanceService {
    * reparto. Caso real ago-2026: $50,347 MXN de dos externos (verificación
    * 26-ago). El tratamiento definitivo espera decisión del cliente.
    */
+
+  /**
+   * Pestaña "Otros movimientos" del Balance GENERAL (28-ago, réplica de la
+   * hoja manual "dinero otros ingresos" del cliente): por vuelo, los
+   * conceptos cobrados al cliente (líneas TUAS/EXTRA/PERNOCTA del desglose
+   * canónico v1.3, en MXN con el TC de venta) apareados con lo PAGADO solo
+   * cuando el mapeo es ESTRUCTURAL — TUAS ↔ gastos TUAS + TUA embebido
+   * (misma regla probada del Libro Dinero), PERNOCTA ↔ gastos HOTEL del
+   * vuelo, comisión bancaria de los cobros ↔ línea BillPocket. El resto de
+   * conceptos queda como filas adyacentes por clave (el equipo los lee
+   * juntos; el sistema jamás afirma un apareo que no puede garantizar).
+   * Además: filas SUELTAS con el dinero hoy invisible en este Excel —
+   * gastos sin vuelo NI avión NI reparto, GAS sin avión y los gastos de
+   * vuelos EXTERNOS sin avión (caso $50,347 ago-2026).
+   */
+  private async buildOtrosMovimientos(
+    desde: string,
+    hasta: string,
+  ): Promise<BalanceHojaOtrosMovimientosPayload> {
+    const sb = this.supabase.service;
+    const { data: vuelosData, error: vErr } = await sb
+      .from('vuelo')
+      .select(
+        'id, folio, cliente_id, aeronave_id, es_externo, operador_externo, fecha_vuelo, tc_usd_mxn, monto_total_usd, monto_total_mxn, calculo_snapshot, cliente:cliente_id(nombre)',
+      )
+      .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'])
+      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
+      .order('fecha_vuelo', { ascending: true });
+    if (vErr) throw new Error(vErr.message);
+    const vuelos = (vuelosData ?? []) as Array<Record<string, unknown>>;
+    const vueloIds = vuelos.map((v) => v.id as string);
+
+    const vacio = { data: [], error: null } as const;
+    const [avionesRes, gastosRes, cobrosRes, facturasRes, sueltosRes, gasRes] =
+      await Promise.all([
+        sb.from('aeronave').select('id, matricula, color_calendario'),
+        vueloIds.length
+          ? sb
+              .from('gasto')
+              .select(
+                'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, valor_ia_extraido',
+              )
+              .in('vuelo_id', vueloIds)
+          : Promise.resolve(vacio),
+        vueloIds.length
+          ? sb
+              .from('cobro_vuelo')
+              .select(
+                'vuelo_id, moneda, tc_usd_mxn, fecha_cobro, comision_banco_monto',
+              )
+              .in('vuelo_id', vueloIds)
+              .order('fecha_cobro', { ascending: true })
+          : Promise.resolve(vacio),
+        vueloIds.length
+          ? sb
+              .from('factura')
+              .select('vuelo_id, serie, folio, estado')
+              .in('vuelo_id', vueloIds)
+              .neq('estado', 'CANCELADA')
+          : Promise.resolve(vacio),
+        // Gastos de EMPRESA hoy invisibles en este Excel: sin vuelo, sin
+        // avión (PERSONAL_DUENO fuera; GAS tiene su fila propia abajo).
+        sb
+          .from('gasto')
+          .select(
+            'id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, proveedor:proveedor_id(nombre)',
+          )
+          .is('vuelo_id', null)
+          .is('aeronave_id', null)
+          .neq('categoria', 'PERSONAL_DUENO')
+          .neq('categoria', 'GAS')
+          .gte('fecha_gasto', desde)
+          .lte('fecha_gasto', hasta)
+          .order('fecha_gasto', { ascending: true }),
+        // GAS sin avión (mismo universo que pendienteGasSinAvion).
+        sb
+          .from('gasto')
+          .select('id, monto, moneda, tc_gasto, fecha_gasto, lugar')
+          .eq('categoria', 'GAS')
+          .is('aeronave_id', null)
+          .gte('fecha_gasto', desde)
+          .lte('fecha_gasto', hasta)
+          .order('fecha_gasto', { ascending: true }),
+      ]);
+    for (const r of [avionesRes, gastosRes, cobrosRes, facturasRes, sueltosRes, gasRes]) {
+      if (r.error) throw new Error(r.error.message);
+    }
+    const aviones = new Map(
+      ((avionesRes.data ?? []) as Array<Record<string, unknown>>).map((a) => [
+        a.id as string,
+        {
+          matricula: a.matricula as string,
+          color: (a.color_calendario as string | null) ?? null,
+        },
+      ]),
+    );
+    const gastosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
+    for (const g of (gastosRes.data ?? []) as Array<Record<string, unknown>>) {
+      const vid = g.vuelo_id as string;
+      (gastosPorVuelo.get(vid) ?? gastosPorVuelo.set(vid, []).get(vid)!).push(
+        g,
+      );
+    }
+    const cobrosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
+    for (const c of (cobrosRes.data ?? []) as Array<Record<string, unknown>>) {
+      const vid = c.vuelo_id as string;
+      (cobrosPorVuelo.get(vid) ?? cobrosPorVuelo.set(vid, []).get(vid)!).push(
+        c,
+      );
+    }
+    const facturaPorVuelo = new Map<string, string>();
+    for (const f of (facturasRes.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
+      const vid = f.vuelo_id as string;
+      if (!vid || facturaPorVuelo.has(vid)) continue;
+      const etiqueta = [f.serie, f.folio].filter(Boolean).join('-');
+      if (etiqueta) facturaPorVuelo.set(vid, etiqueta);
+    }
+
+    // TC promedio del periodo (fallback de gastos sueltos sin TC propio).
+    const tcs: number[] = [];
+    const tcDe = (v: Record<string, unknown>): number | null => {
+      const totalUsd = num(v.monto_total_usd);
+      const totalMxn = num(v.monto_total_mxn);
+      return (
+        pos(v.tc_usd_mxn) ??
+        (totalMxn != null && totalUsd != null && totalUsd > 0
+          ? totalMxn / totalUsd
+          : null)
+      );
+    };
+    for (const v of vuelos) {
+      const tc = tcDe(v);
+      if (tc != null) tcs.push(tc);
+    }
+    const tcPromedio = tcs.length
+      ? tcs.reduce((a, b) => a + b, 0) / tcs.length
+      : null;
+
+    // Clave del libro manual: vt + primer nombre del cliente + folio (el
+    // folio da la traza al vuelo; el libro manual lleva su propio contador).
+    const claveDe = (v: Record<string, unknown>): string => {
+      const cli = Array.isArray(v.cliente) ? v.cliente[0] : v.cliente;
+      const nombre = (
+        (cli as { nombre?: string } | null)?.nombre ?? ''
+      ).trim();
+      const primera = nombre.split(/\s+/)[0] ?? '';
+      const limpia = primera.toLowerCase().replace(/[^a-záéíóúüñ0-9]/gi, '');
+      return `vt${limpia}${String(v.folio ?? '')}`;
+    };
+    // Regla del workbook (misma que buildHoja): MXN directo; USD con su
+    // tc_gasto propio o el TC promedio del periodo; sin ninguno → null (la
+    // fila sale visible con la nota, jamás sumada en falso).
+    const gastoMxn = (g: Record<string, unknown>, monto: number) =>
+      g.moneda === 'MXN'
+        ? monto
+        : (pos(g.tc_gasto) ?? tcPromedio) != null
+          ? monto * (pos(g.tc_gasto) ?? tcPromedio)!
+          : null;
+
+    const filas: BalanceOtroMovimientoFilaPayload[] = [];
+    for (const v of vuelos) {
+      const avion = aviones.get(v.aeronave_id as string);
+      const externoSinAvion = v.es_externo === true && !v.aeronave_id;
+      const tc = tcDe(v);
+      const clave = claveDe(v);
+      const color = avion?.color ?? null;
+      const factura = facturaPorVuelo.get(v.id as string) ?? null;
+      // timestamptz → DÍA Cancún (un vuelo vespertino se corría al día UTC).
+      const fechaVuelo = diaCancun((v.fecha_vuelo as string) ?? null);
+      const gastosV = gastosPorVuelo.get(v.id as string) ?? [];
+      const snapshot = v.calculo_snapshot as {
+        desglose?: { clave?: string; concepto?: string; monto_usd?: number }[];
+      } | null;
+
+      const base = {
+        clave,
+        avion_color: color,
+        fecha_vuelo: fechaVuelo,
+        factura,
+      };
+      const filaVacia = {
+        ...base,
+        concepto_egreso: null as string | null,
+        egreso_mxn: null as number | null,
+        fecha_egreso: null as string | null,
+        concepto_ingreso: null as string | null,
+        ingreso_mxn: null as number | null,
+        fecha_ingreso: null as string | null,
+        remanente_mxn: null as number | null,
+      };
+
+      // ===== INGRESOS: líneas TUAS/EXTRA/PERNOCTA del desglose canónico
+      // (misma regla que la hoja "Otros ingresos" del Libro Dinero). =====
+      // El egreso TUAS se adjunta SOLO a la primera línea TUAS (una línea
+      // por aeropuerto: repetirlo duplicaba la columna egreso).
+      let egresoTuasAsignado = false;
+      let egresoPernoctaAsignado = false;
+      let comisionBancoAsignada = false;
+
+      // Comisión bancaria de los cobros del vuelo, a MXN (MXN directo; USD
+      // con su TC propio o el de venta; sin TC no se suma en falso).
+      let comisionBancoMxn = 0;
+      let comisionSinTc = false;
+      let fechaComision: string | null = null;
+      for (const c of cobrosPorVuelo.get(v.id as string) ?? []) {
+        const monto = num(c.comision_banco_monto);
+        if (monto == null || monto <= 0) continue;
+        const tcc = pos(c.tc_usd_mxn) ?? tc;
+        const mxn = c.moneda === 'MXN' ? monto : tcc != null ? monto * tcc : null;
+        if (mxn == null) {
+          // Cobro USD sin ningún TC: la comisión no se convierte — se deja
+          // RASTRO (nota en la fila) en vez de desaparecer en silencio.
+          comisionSinTc = true;
+          continue;
+        }
+        comisionBancoMxn += mxn;
+        // timestamptz → DÍA Cancún.
+        fechaComision ??= diaCancun((c.fecha_cobro as string) ?? null);
+      }
+
+      for (const linea of snapshot?.desglose ?? []) {
+        const claveLinea = String(linea.clave ?? '');
+        if (!/^(TUAS|EXTRA|PERNOCTA)/.test(claveLinea)) continue;
+        const montoUsd = num(linea.monto_usd);
+        if (montoUsd == null || montoUsd === 0) continue;
+        const ingresoMxn = tc != null ? r2(montoUsd * tc) : null;
+        let egresoMxn: number | null = null;
+        let conceptoEgreso: string | null = null;
+        let fechaEgreso: string | null = null;
+        // Externos sin avión: TODOS sus gastos salen como filas propias
+        // abajo — aparearlos aquí además los contaría dos veces.
+        if (claveLinea === 'TUAS' && !egresoTuasAsignado && !externoSinAvion) {
+          let suma = 0;
+          let hubo = false;
+          for (const g of gastosV) {
+            const monto = num(g.monto) ?? 0;
+            let parte = 0;
+            if (g.categoria === 'TUAS') {
+              parte = monto;
+            } else if (
+              monto > 0 &&
+              !['GAS', 'COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO'].includes(
+                g.categoria as string,
+              )
+            ) {
+              const partes = desgloseGastoPartes(
+                (
+                  g as {
+                    valor_ia_extraido?: {
+                      conceptos?: Array<{ concepto: string; monto: number }>;
+                    } | null;
+                  }
+                ).valor_ia_extraido?.conceptos ?? [],
+                round2(monto - (num(g.propina) ?? 0)),
+              );
+              if (partes && partes.tua > 0) parte = partes.tua;
+            }
+            if (parte <= 0) continue;
+            const parteMxn = gastoMxn(g, parte);
+            if (parteMxn == null || parteMxn <= 0) continue;
+            suma += parteMxn;
+            hubo = true;
+            fechaEgreso ??= (g.fecha_gasto as string) ?? null;
+          }
+          if (hubo) {
+            egresoMxn = r2(suma);
+            conceptoEgreso = 'tuas pagadas';
+            egresoTuasAsignado = true;
+          }
+        } else if (
+          claveLinea === 'PERNOCTA' &&
+          !egresoPernoctaAsignado &&
+          !externoSinAvion
+        ) {
+          // Viáticos de pernocta cobrados ↔ hoteles pagados del vuelo
+          // (apareo estructural: la categoría HOTEL es el costo real).
+          let suma = 0;
+          let hubo = false;
+          for (const g of gastosV) {
+            if (g.categoria !== 'HOTEL') continue;
+            const mxn = gastoMxn(g, num(g.monto) ?? 0);
+            if (mxn == null || mxn <= 0) continue;
+            suma += mxn;
+            hubo = true;
+            fechaEgreso ??= (g.fecha_gasto as string) ?? null;
+          }
+          if (hubo) {
+            egresoMxn = r2(suma);
+            conceptoEgreso = 'hotel pagado';
+            egresoPernoctaAsignado = true;
+          }
+        } else if (
+          claveLinea === 'EXTRA' &&
+          String(linea.concepto ?? '').startsWith('Comisión BillPocket') &&
+          !comisionBancoAsignada &&
+          comisionBancoMxn > 0
+        ) {
+          // La comisión cobrada al cliente (línea BillPocket) contra lo que
+          // el banco realmente descontó de los cobros.
+          egresoMxn = r2(comisionBancoMxn);
+          conceptoEgreso = `comisión del banco${
+            comisionSinTc ? ' (parcial: cobro USD sin TC)' : ''
+          }`;
+          fechaEgreso = fechaComision;
+          comisionBancoAsignada = true;
+        }
+        filas.push({
+          ...filaVacia,
+          concepto_egreso: conceptoEgreso,
+          egreso_mxn: egresoMxn,
+          fecha_egreso: fechaEgreso,
+          concepto_ingreso: `${String(linea.concepto ?? claveLinea).toLowerCase()}${
+            ingresoMxn == null ? ' (USD sin TC de venta)' : ''
+          }`,
+          ingreso_mxn: ingresoMxn,
+          fecha_ingreso: fechaVuelo,
+          // Coherencia de columnas: Σremanente == Σingreso − Σegreso aunque
+          // un lado falte (el egreso pagado es real y resta igual).
+          remanente_mxn:
+            ingresoMxn != null || egresoMxn != null
+              ? r2((ingresoMxn ?? 0) - (egresoMxn ?? 0))
+              : null,
+        });
+      }
+
+      // Banco que descontó comisión SIN línea BillPocket que la cubra
+      // (transferencia HSBC, links): fila de solo-egreso — el costo existe
+      // aunque no se haya cobrado al cliente.
+      if ((comisionBancoMxn > 0 || comisionSinTc) && !comisionBancoAsignada) {
+        const egreso = comisionBancoMxn > 0 ? r2(comisionBancoMxn) : null;
+        filas.push({
+          ...filaVacia,
+          concepto_egreso: `comisión bancaria${
+            comisionSinTc
+              ? comisionBancoMxn > 0
+                ? ' (parcial: cobro USD sin TC)'
+                : ' (USD sin TC)'
+              : ''
+          }`,
+          egreso_mxn: egreso,
+          fecha_egreso: fechaComision,
+          remanente_mxn: egreso != null ? r2(-egreso) : null,
+        });
+      }
+
+      // Vuelo EXTERNO sin avión: sus gastos no viven en ningún libro por
+      // avión — aquí salen TODOS como filas de solo-egreso bajo su clave.
+      if (externoSinAvion) {
+        for (const g of gastosV) {
+          // GAS lo posee la fila suelta "gas sin avión" (contarlo aquí
+          // también duplicaría el egreso); un gasto con avión propio ya
+          // vive en las hojas de ese avión de ESTE mismo workbook.
+          if (g.categoria === 'GAS' || g.aeronave_id != null) continue;
+          const monto = num(g.monto) ?? 0;
+          if (monto <= 0) continue;
+          const mxn = gastoMxn(g, monto);
+          const sinTc = mxn == null;
+          filas.push({
+            ...filaVacia,
+            concepto_egreso: `${String(g.categoria ?? '').toLowerCase()}${
+              g.lugar ? ` · ${g.lugar as string}` : ''
+            }${sinTc ? ' (USD sin TC)' : ''}`,
+            egreso_mxn: r2(mxn),
+            fecha_egreso: (g.fecha_gasto as string) ?? null,
+            remanente_mxn: mxn != null ? r2(-mxn) : null,
+          });
+        }
+      }
+    }
+
+    // ===== Filas SUELTAS: dinero sin avión y sin vuelo (hoy invisible en
+    // este Excel; el grito de pendientes se conserva). Sin TC propio se usa
+    // el promedio del periodo; sin ninguno, la fila sale con egreso vacío y
+    // la nota (USD sin TC) — visible, jamás sumada en falso. =====
+    const sueltas: BalanceOtroMovimientoFilaPayload[] = [];
+    const sueltaDe = (
+      g: Record<string, unknown>,
+      clave: string,
+    ): BalanceOtroMovimientoFilaPayload => {
+      const monto = num(g.monto) ?? 0;
+      const mxn = gastoMxn(g, monto);
+      const sinTc = mxn == null;
+      const prov = Array.isArray(g.proveedor) ? g.proveedor[0] : g.proveedor;
+      const proveedor = (prov as { nombre?: string } | null)?.nombre ?? null;
+      return {
+        clave,
+        avion_color: null,
+        fecha_vuelo: null,
+        concepto_egreso: `${String(g.categoria ?? clave).toLowerCase()}${
+          proveedor ? ` · ${proveedor}` : g.lugar ? ` · ${g.lugar as string}` : ''
+        }${sinTc ? ' (USD sin TC)' : ''}`,
+        egreso_mxn: r2(mxn),
+        fecha_egreso: (g.fecha_gasto as string) ?? null,
+        concepto_ingreso: null,
+        ingreso_mxn: null,
+        fecha_ingreso: null,
+        remanente_mxn: mxn != null ? r2(-mxn) : null,
+        factura: null,
+      };
+    };
+    const sueltos = (sueltosRes.data ?? []) as Array<Record<string, unknown>>;
+    if (sueltos.length) {
+      // El reparto manual GANA: un gasto repartido ya vive en los libros de
+      // sus aviones — aquí solo entra lo que nadie reclama.
+      const repartos = await fetchRepartos(
+        sb,
+        sueltos.map((g) => g.id as string),
+      );
+      for (const g of sueltos) {
+        const partes = repartos.get(g.id as string) ?? [];
+        if (partes.length === 0) {
+          sueltas.push(sueltaDe(g, 'empresa'));
+          continue;
+        }
+        // Reparto PARCIAL: los parciales viven en las hojas de sus aviones;
+        // el remanente de empresa (Σ < monto) no vive en NINGUNA — sale
+        // aquí (misma moneda del gasto).
+        const asignado = partes.reduce((a, x) => a + (num(x.monto) ?? 0), 0);
+        const remanente = round2((num(g.monto) ?? 0) - asignado);
+        if (remanente > 0) {
+          sueltas.push(
+            sueltaDe({ ...g, monto: remanente }, 'empresa (remanente de reparto)'),
+          );
+        }
+      }
+    }
+    for (const g of (gasRes.data ?? []) as Array<Record<string, unknown>>) {
+      sueltas.push(sueltaDe(g, 'gas sin avión'));
+    }
+
+    return { filas, filas_sueltas: sueltas };
+  }
+
   private async pendienteExternosSinAvion(
     desde: string,
     hasta: string,

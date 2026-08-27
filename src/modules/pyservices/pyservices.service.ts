@@ -464,6 +464,31 @@ export interface BalanceGeneralPayload {
   aviones: BalanceAvionPayload[];
 }
 
+/** Fila de la pestaña "Otros movimientos" (28-ago, hoja manual del cliente):
+ *  egreso (lo pagado) apareado por concepto ESTRUCTURAL con el ingreso (lo
+ *  cobrado al cliente) y su remanente. Lados opcionales: una fila puede ser
+ *  solo-ingreso o solo-egreso. */
+export interface BalanceOtroMovimientoFilaPayload {
+  clave: string;
+  avion_color: string | null;
+  fecha_vuelo: string | null;
+  concepto_egreso: string | null;
+  egreso_mxn: number | null;
+  fecha_egreso: string | null;
+  concepto_ingreso: string | null;
+  ingreso_mxn: number | null;
+  fecha_ingreso: string | null;
+  remanente_mxn: number | null;
+  factura: string | null;
+}
+
+export interface BalanceHojaOtrosMovimientosPayload {
+  /** Filas ligadas a vuelos (agrupadas por clave). */
+  filas: BalanceOtroMovimientoFilaPayload[];
+  /** Movimientos SIN avión y SIN vuelo (gastos de empresa hoy invisibles). */
+  filas_sueltas: BalanceOtroMovimientoFilaPayload[];
+}
+
 export interface BalanceAvionPayload {
   generado: string;
   matricula: string;
@@ -483,6 +508,8 @@ export interface BalanceAvionPayload {
   /** Hoja mensual de combustible (26-ago-2026). Opcional por skew de deploy. */
   combustible?: BalanceAvionHojaCombustiblePayload;
   balance: BalanceAvionBalancePayload;
+  /** Pestaña "Otros movimientos" (28-ago): solo la manda el GENERAL. */
+  otros_movimientos?: BalanceHojaOtrosMovimientosPayload;
   pendientes: string[];
 }
 
