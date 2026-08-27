@@ -28,6 +28,7 @@ export const CATEGORIAS_REPARTIBLES = new Set([
   'FIJO',
   'INDIRECTO',
   'GASOLINA',
+  'VISITA',
 ]);
 
 /**

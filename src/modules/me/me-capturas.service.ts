@@ -234,8 +234,8 @@ export class MeCapturasService {
       ? litros != null && Number.isFinite(litros) && litros > 0
         ? `Combustible ${fmtLitros.format(litros)} L · ${monto}`
         : `Combustible · ${monto}`
-      : // PERSONAL_DUENO se lee mal crudo en Mis registros (26-ago).
-        `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria} · ${monto}`;
+      : // Códigos crudos que se leen mal en Mis registros.
+        `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria === 'VISITA' ? 'de visita' : categoria} · ${monto}`;
     const vueloId = (g.vuelo_id as string | null) ?? null;
     return {
       tipo: esCombustible ? 'COMBUSTIBLE' : 'GASTO',

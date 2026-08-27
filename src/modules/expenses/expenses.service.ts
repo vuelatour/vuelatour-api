@@ -19,7 +19,7 @@ import {
 } from '../pyservices/pyservices.service';
 import { VisionService } from '../vision/vision.service';
 import { Rol } from '../../common/types/auth.types';
-import { CategoriaGasto } from './dto/expenses.dto';
+import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import type {
   CreateGastoDto,
   CreateTarifaAerodromoDto,
@@ -211,7 +211,11 @@ export class ExpensesService {
       // aquí sería un pendiente eterno (se administra en Gastos personales).
       q = q
         .is('aeronave_id', null)
-        .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA)')
+        .not(
+          'categoria',
+          'in',
+          '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA,VISITA)',
+        )
         .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
@@ -409,7 +413,7 @@ export class ExpensesService {
       .is('aeronave_id', null)
       // Mismo universo que la bandeja: PERSONAL_DUENO jamás tendrá vuelo —
       // sugerirle uno quemaría llamadas de IA en un imposible.
-      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA)')
+      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA,VISITA)')
       .or('categoria.neq.OTRO,vuelo_id.not.is.null')
       .order('fecha_gasto', { ascending: false })
       .limit(15);
@@ -834,6 +838,24 @@ export class ExpensesService {
         'El mecánico solo puede cargar combustible (GAS).',
       );
     }
+    // VISITANTE (27-ago): SOLO gastos de visita — la categoría se fija en
+    // VISITA sin fricción (la app ni la muestra) y el medio queda acotado a
+    // su fondo (EFECTIVO) o su tarjeta corporativa.
+    if (rol === Rol.VISITANTE) {
+      dto.categoria = CategoriaGasto.VISITA;
+      // Y jamás liga vuelo/avión/escala (su app ni los muestra).
+      delete dto.vuelo_id;
+      delete dto.aeronave_id;
+      delete dto.escala_id;
+      if (
+        dto.medio_pago !== MedioPago.EFECTIVO &&
+        dto.medio_pago !== MedioPago.TARJETA_CORP
+      ) {
+        throw new BadRequestException(
+          'El visitante paga con su fondo (efectivo) o su tarjeta corporativa.',
+        );
+      }
+    }
     // Un gasto INDIRECTO es de la operación, NO de un vuelo: ligarlo a uno lo
     // metería al reporte/reparto de ese vuelo y contaminaría sus números.
     if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
@@ -861,6 +883,15 @@ export class ExpensesService {
     ) {
       throw new BadRequestException(
         'La gasolina de vehículos no lleva vuelo, avión ni escala (para combustible de aviación usa GAS): quítalos o usa otra categoría.',
+      );
+    }
+    // Gastos de VISITA: jamás de un vuelo/avión (mismo patrón).
+    if (
+      dto.categoria === CategoriaGasto.VISITA &&
+      (dto.vuelo_id || dto.aeronave_id || dto.escala_id)
+    ) {
+      throw new BadRequestException(
+        'Un gasto de visita no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
       );
     }
     // El piloto ya NO ve ni edita desglose en la app (solo el total): el
@@ -893,7 +924,9 @@ export class ExpensesService {
         ? 'PILOTO'
         : rol === Rol.MECANICO
           ? 'MECANICO'
-          : 'OFICINA';
+          : rol === Rol.VISITANTE
+            ? 'VISITANTE'
+            : 'OFICINA';
     // Backfill de oficina "como si lo hubiera subido el piloto": la oficina
     // carga gastos de vuelos pasados y deben quedar atribuidos al piloto del
     // vuelo (usuario_captura + origen = PILOTO), pero created_by conserva al
@@ -1334,10 +1367,13 @@ export class ExpensesService {
       if (
         match &&
         !gasto.aeronave_id &&
-        // Un gasto PERSONAL del dueño JAMÁS recibe avión — ni siquiera si el
-        // comprobante trae una matrícula (compra del dueño en el FBO): este
-        // update va directo a la tabla y brincaría el candado de update().
-        gasto.categoria !== 'PERSONAL_DUENO'
+        // Un gasto PERSONAL del dueño, GASOLINA (vehículos) o VISITA JAMÁS
+        // recibe avión — ni siquiera si el comprobante trae una matrícula:
+        // este update va directo a la tabla y brincaría el candado de
+        // update().
+        gasto.categoria !== 'PERSONAL_DUENO' &&
+        gasto.categoria !== 'GASOLINA' &&
+        gasto.categoria !== 'VISITA'
       ) {
         patch.aeronave_id = match.id;
       } else if (match && gasto.aeronave_id && match.id !== gasto.aeronave_id) {
@@ -1708,6 +1744,11 @@ export class ExpensesService {
           'La gasolina de vehículos no lleva vuelo, avión ni escala (para combustible de aviación usa GAS): quítalos o usa otra categoría.',
         );
       }
+      if (catEf === 'VISITA' && (vueloEf || avionEf || escalaEf)) {
+        throw new BadRequestException(
+          'Un gasto de visita no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
+        );
+      }
     }
     // El invariante propina <= monto también vive aquí (el create no basta:
     // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
@@ -1818,7 +1859,7 @@ export class ExpensesService {
     const filasReparto = repartosDel.get(id) ?? [];
     if (
       filasReparto.length > 0 &&
-      (rol === Rol.PILOTO || rol === Rol.MECANICO)
+      (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE)
     ) {
       throw new ConflictException(
         'La oficina ya repartió este gasto entre aviones: pídeles a ellos eliminarlo o corregirlo.',
@@ -1865,7 +1906,7 @@ export class ExpensesService {
       .from('gasto')
       .select(LIST_COLS)
       .is('vuelo_id', null)
-      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO', 'GASOLINA'])
+      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO', 'GASOLINA', 'VISITA'])
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta)
       .order('fecha_gasto', { ascending: false })

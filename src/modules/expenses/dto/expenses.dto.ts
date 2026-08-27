@@ -39,6 +39,10 @@ export enum CategoriaGasto {
    *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir
    *  su tratamiento con el equipo (hoja "gastos indirectos" de su control). */
   INDIRECTO = 'INDIRECTO',
+  /** Gastos de VISITA de trabajo (27-ago): los captura el rol VISITANTE
+   *  (la app se la fija sola). Patrón GASOLINA: sin vuelo/avión/escala,
+   *  visible en Otros gastos, repartible a mano, fuera de pendientes. */
+  VISITA = 'VISITA',
   /** Gasolina de VEHÍCULOS de la empresa (27-ago): gasolinera Pemex/Gulf
    *  (Magna/Premium/Regular), NO combustible de aviación. Gasto de la
    *  EMPRESA: sin vuelo ni avión (candados create/update); visible en Otros

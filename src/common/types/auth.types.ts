@@ -6,6 +6,9 @@ export enum Rol {
   PILOTO = 'PILOTO',
   SOCIO = 'SOCIO',
   MECANICO = 'MECANICO',
+  /** Visitante de trabajo (27-ago): SOLO registra gastos desde la app
+   *  (fondo de caja + tarjeta); cero acceso a vuelos y ve solo lo propio. */
+  VISITANTE = 'VISITANTE',
 }
 
 export enum EstadoUsuario {

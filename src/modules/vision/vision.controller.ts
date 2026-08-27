@@ -30,7 +30,14 @@ export class VisionController {
   }
 
   @Post('gasto-ticket')
-  @Roles(Rol.PILOTO, Rol.MECANICO, Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @Roles(
+    Rol.PILOTO,
+    Rol.MECANICO,
+    Rol.ADMIN,
+    Rol.COORDINADOR,
+    Rol.FACTURACION,
+    Rol.VISITANTE,
+  )
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:

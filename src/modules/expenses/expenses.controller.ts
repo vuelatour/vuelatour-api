@@ -59,7 +59,11 @@ export class ExpensesController {
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
     // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
     // mecánico, además, solo combustible (GAS) — no ve el resto de gastos.
-    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
       filters.usuario_captura_id = c.userId;
     }
     if (c.rol === Rol.MECANICO) {
@@ -113,7 +117,14 @@ export class ExpensesController {
   }
 
   @Post()
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
+  @Roles(
+    Rol.ADMIN,
+    Rol.COORDINADOR,
+    Rol.FACTURACION,
+    Rol.PILOTO,
+    Rol.MECANICO,
+    Rol.VISITANTE,
+  )
   @ApiOperation({
     summary:
       'Capture a gasto. Pilotos/mecánicos lo usan desde la app móvil. El mecánico solo carga combustible.',
@@ -122,7 +133,11 @@ export class ExpensesController {
     // El semáforo de facturación es seguimiento de OFICINA: piloto/mecánico
     // no pueden fijarlo (si pudieran, un gasto se afirmaría "facturado" sin
     // que oficina viera factura alguna — candado multicapa).
-    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
       delete dto.estatus_facturacion;
       this.assertFotoPropia(dto.foto_url, c.authId);
     }
@@ -287,7 +302,9 @@ export class ExpensesController {
   ) {
     const gasto = await this.expenses.findById(id);
     if (
-      (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) &&
+      (c.rol === Rol.PILOTO ||
+        c.rol === Rol.MECANICO ||
+        c.rol === Rol.VISITANTE) &&
       (gasto as { usuario_captura_id: string | null }).usuario_captura_id !==
         c.userId
     ) {
@@ -344,7 +361,14 @@ export class ExpensesController {
   }
 
   @Patch(':id')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO, Rol.MECANICO)
+  @Roles(
+    Rol.ADMIN,
+    Rol.COORDINADOR,
+    Rol.FACTURACION,
+    Rol.PILOTO,
+    Rol.MECANICO,
+    Rol.VISITANTE,
+  )
   @ApiOperation({
     summary:
       'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo el mismo día (doc 5.2/5.3).',
@@ -354,18 +378,30 @@ export class ExpensesController {
     @Body() dto: UpdateGastoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
       await this.expenses.assertOwnSameDay(id, c.userId);
-      // Seguimiento de OFICINA: el piloto/mecánico no marca facturado.
+      // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
       // Reemplazo de foto (pedido 17-ago): solo con una subida PROPIA.
       this.assertFotoPropia(dto.foto_url, c.authId);
+    }
+    if (c.rol === Rol.VISITANTE) {
+      // El gasto del visitante ES de visita: no se reclasifica ni se liga a
+      // vuelo/avión/escala desde su sesión (candado espejo del create).
+      dto.categoria = CategoriaGasto.VISITA;
+      delete dto.vuelo_id;
+      delete dto.aeronave_id;
+      delete dto.escala_id;
     }
     return this.expenses.update(id, dto, c.userId);
   }
 
   @Delete(':id')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO, Rol.MECANICO)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO, Rol.MECANICO, Rol.VISITANTE)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
@@ -375,7 +411,11 @@ export class ExpensesController {
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    if (c.rol === Rol.PILOTO || c.rol === Rol.MECANICO) {
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
       await this.expenses.assertOwnSameDay(id, c.userId);
     }
     return this.expenses.remove(id, c.rol);

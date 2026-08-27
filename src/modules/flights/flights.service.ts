@@ -1179,6 +1179,10 @@ export class FlightsService {
     vueloId: string,
     current: AuthenticatedUser,
   ): Promise<void> {
+    // El VISITANTE no tiene NADA de vuelos (27-ago).
+    if (current.rol === Rol.VISITANTE) {
+      throw new ForbiddenException('El visitante no tiene acceso a vuelos.');
+    }
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('vuelo')
@@ -1211,6 +1215,9 @@ export class FlightsService {
     legId: string,
     current: AuthenticatedUser,
   ): Promise<void> {
+    if (current.rol === Rol.VISITANTE) {
+      throw new ForbiddenException('El visitante no tiene acceso a vuelos.');
+    }
     if (current.rol !== Rol.PILOTO) return;
     const { data, error } = await this.supabase.service
       .from('escala')

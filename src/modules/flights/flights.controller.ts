@@ -12,6 +12,7 @@ import {
   Post,
   Query,
   StreamableFile,
+  ForbiddenException,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -101,6 +102,11 @@ export class FlightsController {
       'List flights with filters. El piloto solo ve sus vuelos asignados.',
   })
   list(@Query() q: ListFlightsQuery, @CurrentUser() c: AuthenticatedUser) {
+    // El VISITANTE no tiene NADA de vuelos (27-ago): 403 duro aunque la app
+    // ni le muestre la pantalla.
+    if (c.rol === Rol.VISITANTE) {
+      throw new ForbiddenException('El visitante no tiene acceso a vuelos.');
+    }
     // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
     if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
     return this.flights.list(q, c);
