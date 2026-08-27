@@ -51,7 +51,7 @@ import {
 } from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -2927,6 +2927,8 @@ export class FlightsService {
     dto: {
       operador_externo: string;
       costo_externo_usd: number;
+      avion_externo_modelo?: string;
+      avion_externo_matricula?: string;
       tc_usd_mxn?: number;
     },
     userId: string,
@@ -2959,7 +2961,21 @@ export class FlightsService {
       .update({
         es_externo: true,
         operador_externo: dto.operador_externo.trim(),
-        costo_externo_usd: dto.costo_externo_usd,
+        // 0 = aún sin pactar: null para que el reparto lo delate
+        // (sin_costo_count) en vez de fingir utilidad completa.
+        costo_externo_usd:
+          Number(dto.costo_externo_usd) > 0 ? dto.costo_externo_usd : null,
+        // Solo si el diálogo los mandó: re-cubrir para actualizar el costo
+        // no debe wipear la ficha capturada en el cotizador.
+        ...(dto.avion_externo_modelo !== undefined
+          ? { avion_externo_modelo: dto.avion_externo_modelo.trim() || null }
+          : {}),
+        ...(dto.avion_externo_matricula !== undefined
+          ? {
+              avion_externo_matricula:
+                dto.avion_externo_matricula.trim() || null,
+            }
+          : {}),
         aeronave_id: null,
         piloto_id: null,
         copiloto_id: null,
@@ -3035,6 +3051,8 @@ export class FlightsService {
         es_externo: false,
         operador_externo: null,
         costo_externo_usd: null,
+        avion_externo_modelo: null,
+        avion_externo_matricula: null,
         updated_by: userId,
       })
       .eq('id', id)

@@ -73,13 +73,7 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   notas?: string;
 
   // ---- Vuelo CUBIERTO por operador externo (flujo normal del cotizador) ----
-  @ApiPropertyOptional({
-    description:
-      'El vuelo lo cubre un operador externo: la cotización al cliente es normal, pero el vuelo nace es_externo (sin avión propio, sin tacómetros; estado manual).',
-  })
-  @IsOptional()
-  @IsBoolean()
-  es_externo?: boolean;
+  // es_externo ahora vive en CalculateQuoteDto (el motor lo necesita).
 
   @ApiPropertyOptional({
     description: 'Operador externo (ej. XA-TIB). Requerido si es_externo.',

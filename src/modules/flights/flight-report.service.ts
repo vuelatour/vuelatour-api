@@ -395,6 +395,11 @@ export class FlightReportService {
     // Venta − Gasolina − Gastos = REMANENTE sigue cuadrando exacto) y se pinta
     // como línea visible en la lista de gastos.
     const costoExternoUsd = v.es_externo === true ? n(v.costo_externo_usd) : 0;
+    if (v.es_externo === true && v.costo_externo_usd == null) {
+      notasHoras.push(
+        'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
+      );
+    }
     if (costoExternoUsd > 0) {
       // Anti doble-conteo: si el pago al operador además se captura como
       // gasto del vuelo (p. ej. para conciliar la transferencia), este

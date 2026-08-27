@@ -302,6 +302,18 @@ export class QuotesPdfService {
       notas: (quote.notas as string) ?? null,
       // PDF profesional (26-ago): matrícula, fotos y mapa de ruta.
       matricula,
+      // Avión EXTERNO (28-ago, venta broker): ficha capturada a mano — el
+      // cliente ve "HAWKER 400 A · XA-REG" como en la cotización manual;
+      // jamás la palabra "externo" (doc §9.1: el cliente no lo sabe).
+      avion_externo:
+        quote.es_externo === true
+          ? [
+              (quote.avion_externo_modelo as string | null)?.trim(),
+              (quote.avion_externo_matricula as string | null)?.trim(),
+            ]
+              .filter((x): x is string => !!x)
+              .join(' · ') || null
+          : null,
       foto_exterior: fotoExterior,
       foto_interior: fotoInterior,
       // Ficha comercial "De un vistazo" (26-ago v2). El tiempo por tramo es
