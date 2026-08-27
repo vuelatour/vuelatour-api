@@ -103,7 +103,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -1041,6 +1041,10 @@ export class QuotesService {
       metodo_cobro: dto.metodo_pago,
       metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
+      // Presentación del PDF (27-ago): tarifa/hr apagada e itinerario
+      // prendido por defecto; configurables por cotización.
+      pdf_mostrar_tarifa: dto.pdf_mostrar_tarifa ?? false,
+      pdf_mostrar_itinerario: dto.pdf_mostrar_itinerario ?? true,
       // Con ruta operativa: las escalas del vuelo son las del PILOTO y la
       // cotización nunca las pisa (replaceEscalas hace early-return).
       itinerario_operativo: (dto.escalas_operacion?.length ?? 0) > 0,
@@ -1276,6 +1280,10 @@ export class QuotesService {
             : current.estado,
         cotizacion_abierta:
           dto.cotizacion_abierta ?? current.cotizacion_abierta ?? false,
+        pdf_mostrar_tarifa:
+          dto.pdf_mostrar_tarifa ?? current.pdf_mostrar_tarifa ?? false,
+        pdf_mostrar_itinerario:
+          dto.pdf_mostrar_itinerario ?? current.pdf_mostrar_itinerario ?? true,
         ...(dto.extras !== undefined ? { extras: breakdown.extras ?? [] } : {}),
         updated_by: userId,
       })

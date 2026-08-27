@@ -213,6 +213,9 @@ export class QuotesPdfService {
       })),
       tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
+      // Presentación configurable por cotización (27-ago).
+      mostrar_tarifa_hora: quote.pdf_mostrar_tarifa === true,
+      mostrar_itinerario: quote.pdf_mostrar_itinerario !== false,
       subtotal_usd: (() => {
         // Recibo del CLIENTE: el redondeo hacia arriba (ajuste > 0) y la
         // comisión del vendedor (parte del total desde jul 2026) se ABSORBEN

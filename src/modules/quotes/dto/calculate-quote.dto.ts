@@ -356,6 +356,22 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
+      'PDF: mostrar la tarifa por hora en el desglose (default APAGADO — la regla de ocultar horas/tarifa se vuelve configurable por cotización, 27-ago).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pdf_mostrar_tarifa?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'PDF: mostrar la tabla del itinerario de tramos (default PRENDIDO).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pdf_mostrar_itinerario?: boolean;
+
+  @ApiPropertyOptional({
+    description:
       'Ajuste final del total: negativo = descuento ("ciérramelo en 750"), positivo = redondeo hacia arriba. Fuera de la base de IVA.',
   })
   @IsOptional()
