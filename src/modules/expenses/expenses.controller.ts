@@ -181,7 +181,7 @@ export class ExpensesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
+      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO/GASOLINA/VISITA) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
   })
   otrosGastos(@Query() q: ListOtrosGastosQuery) {
     return this.expenses.listOtrosGastos(q.desde, q.hasta);
@@ -386,6 +386,10 @@ export class ExpensesController {
       await this.expenses.assertOwnSameDay(id, c.userId);
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
+      // Ni concilia ni desmarca duplicados (27-ago): un gasto "conciliado"
+      // sin movimiento bancario sobreestima la conciliación en silencio.
+      delete dto.conciliado;
+      delete dto.duplicado_sospechado;
       // Reemplazo de foto (pedido 17-ago): solo con una subida PROPIA.
       this.assertFotoPropia(dto.foto_url, c.authId);
     }

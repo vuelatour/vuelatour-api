@@ -31,6 +31,8 @@ export class IssuingEntitiesController {
   constructor(private readonly entities: IssuingEntitiesService) {}
 
   @Get()
+  // Lectura de OFICINA: expone RFC, dirección fiscal y paths del CSD.
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
     summary: 'List razones sociales emisoras (Aerocharter, Aerodinamica)',
   })
@@ -49,12 +51,14 @@ export class IssuingEntitiesController {
   }
 
   @Get('codigo/:codigo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({ summary: 'Get entity by code (AEROCHARTER | AERODINAMICA)' })
   getByCodigo(@Param('codigo') codigo: string) {
     return this.entities.findByCodigo(codigo);
   }
 
   @Get(':id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({ summary: 'Get entity' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.entities.findById(id);

@@ -1881,7 +1881,8 @@ export class ExpensesService {
   // ===== Reparto MANUAL de gastos generales entre aviones (26-ago-2026) ====
 
   /**
-   * Gastos GENERALES del periodo (sin vuelo, categorías OTRO/FIJO/INDIRECTO)
+   * Gastos GENERALES del periodo (sin vuelo, categorías OTRO/FIJO/
+   * INDIRECTO/GASOLINA/VISITA)
    * con su reparto embebido + resumen del mes: total, asignado a aviones y
    * gasto de la EMPRESA VuelaTour (remanentes + no asignados), por moneda.
    * Alimenta la pantalla "Otros gastos".
@@ -1991,7 +1992,8 @@ export class ExpensesService {
    * aviones vigentes + borrado de los que salieron — nunca hay estado
    * intermedio vacío). items = [] limpia el reparto (el gasto vuelve a ser
    * 100% de la empresa, o de su avión propio si lo tiene).
-   * Candados: solo gastos SIN vuelo de categorías OTRO/FIJO/INDIRECTO;
+   * Candados: solo gastos SIN vuelo de categorías repartibles
+   * (OTRO/FIJO/INDIRECTO/GASOLINA/VISITA);
    * montos > 0 en la MONEDA del gasto; aviones sin repetir;
    * Σ montos <= gasto.monto (a centavos). El remanente se DERIVA, jamás se
    * persiste.
@@ -2009,7 +2011,7 @@ export class ExpensesService {
     }
     if (!CATEGORIAS_REPARTIBLES.has(gasto.categoria as string)) {
       throw new BadRequestException(
-        'Solo los gastos generales (OTRO, FIJO, INDIRECTO) se reparten entre aviones.',
+        'Solo los gastos generales (OTRO, FIJO, INDIRECTO, GASOLINA, VISITA) se reparten entre aviones.',
       );
     }
     const ids = items.map((i) => i.aeronave_id);
