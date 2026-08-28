@@ -50,6 +50,7 @@ import {
   UpdatePermisoDto,
   VoucherUrlsDto,
   PurgeFlightDto,
+  RevertirExternoDto,
 } from './dto/flights.dto';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
@@ -160,9 +161,10 @@ export class FlightsController {
   })
   revertirExterno(
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RevertirExternoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.flights.revertirExterno(id, c.userId);
+    return this.flights.revertirExterno(id, c.userId, dto);
   }
 
   @Post('external')
@@ -460,17 +462,20 @@ export class FlightsController {
   }
 
   @Post(':id/operational-legs')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @ApiOperation({
     summary:
       'Agrega un tramo OPERATIVO interno (ferry, parada técnica, pernocta operativa) a la ruta real. No se cotiza ni se cobra ni se muestra al cliente; no recalcula el precio.',
   })
-  createOperationalLeg(
+  async createOperationalLeg(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: OperationalLegDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.flights.createOperationalLeg(id, dto, c.userId);
+    // PILOTO (28-ago): solo en vuelo COMPLETADO y solo la tripulación del vuelo
+    // (el cliente pidió seguir a otro destino); el service lo valida.
+    await this.flights.assertAccess(id, c);
+    return this.flights.createOperationalLeg(id, dto, c.userId, c);
   }
 
   @Post(':id/legs/:legId/assign')

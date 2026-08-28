@@ -3124,7 +3124,11 @@ export class FlightsService {
    * y el vuelo queda listo para asignar avión y piloto propios (tacómetros y
    * gastos vuelven a aplicar). La cotización del cliente no se toca.
    */
-  async revertirExterno(id: string, userId: string) {
+  async revertirExterno(
+    id: string,
+    userId: string,
+    dto?: { aeronave_id?: string },
+  ) {
     const current = await this.findById(id);
     if (current.es_externo !== true) {
       throw new ConflictException('El vuelo no está cubierto por externo.');
@@ -3134,6 +3138,31 @@ export class FlightsService {
         `No se puede regresar a vuelo propio en estado ${current.estado as string}.`,
       );
     }
+    // Regla de BD (vuelo_check): un vuelo propio SIEMPRE tiene avión. Un
+    // externo sin avión de referencia (jet ajeno, caso #214) necesita que la
+    // oficina elija el avión propio aquí — antes chocaba con el CHECK y el
+    // panel mostraba un 400 genérico sin explicar nada.
+    const aeronaveId =
+      dto?.aeronave_id ?? (current.aeronave_id as string | null) ?? null;
+    if (!aeronaveId) {
+      throw new BadRequestException(
+        'Para regresarlo a vuelo propio elige el avión propio que lo volará (el vuelo externo no tenía avión de referencia).',
+      );
+    }
+    if (dto?.aeronave_id && dto.aeronave_id !== current.aeronave_id) {
+      const { data: av, error: avErr } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula, activa')
+        .eq('id', dto.aeronave_id)
+        .maybeSingle();
+      if (avErr) throw new Error(avErr.message);
+      if (!av) throw new NotFoundException('Avión no encontrado.');
+      if (av.activa === false) {
+        throw new BadRequestException(
+          `El avión ${av.matricula as string} está inactivo.`,
+        );
+      }
+    }
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .update({
@@ -3142,12 +3171,18 @@ export class FlightsService {
         costo_externo_usd: null,
         avion_externo_modelo: null,
         avion_externo_matricula: null,
+        aeronave_id: aeronaveId,
         updated_by: userId,
       })
       .eq('id', id)
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Espejo vuelo ↔ tramo 1 y permisos de pista por matrícula.
+    if (aeronaveId !== current.aeronave_id) {
+      await this.mirrorVueloToIdaEscala(id, { aeronave_id: aeronaveId });
+      await this.airports.refreshPermisosDeVuelo(id);
+    }
     void this.calendar.syncFlight(id);
     return data!;
   }
@@ -3583,7 +3618,8 @@ export class FlightsService {
   }
 
   async createEscala(vueloId: string, dto: CreateEscalaDto, userId: string) {
-    await this.findById(vueloId);
+    const vuelo = await this.findById(vueloId);
+    await this.assertTramoAgregable(vuelo, dto.motivo);
     const { data, error } = await this.supabase.service
       .from('escala')
       .insert({
@@ -3631,8 +3667,126 @@ export class FlightsService {
     }
     // Un tramo nuevo puede meter una pista con permiso a la ruta.
     await this.airports.refreshPermisosDeVuelo(vueloId);
+    await this.reabrirTrasTramoNuevo(
+      vuelo,
+      data as Record<string, unknown>,
+      dto.motivo,
+      userId,
+    );
     void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
     return data!;
+  }
+
+  /**
+   * ¿Se puede agregar un tramo a este vuelo? (regla 28-ago)
+   * - CANCELADO: nunca (restaurar primero).
+   * - COMPLETADO: sí, con MOTIVO obligatorio — "al terminar la ruta el
+   *   cliente quiso seguir a otro lado" es parte del mismo vuelo. El vuelo
+   *   vuelve a EN_VUELO (reabrirTrasTramoNuevo).
+   * - PILOTO: solo en vuelo COMPLETADO y solo si es tripulación del vuelo
+   *   (piloto/copiloto/apoyo del vuelo o piloto de algún tramo); antes de
+   *   eso los tramos los agrega la oficina.
+   */
+  private async assertTramoAgregable(
+    vuelo: Record<string, unknown>,
+    motivo: string | undefined,
+    current?: AuthenticatedUser,
+  ): Promise<void> {
+    const estado = vuelo.estado as string;
+    if (estado === 'CANCELADO') {
+      throw new ConflictException(
+        'El vuelo está CANCELADO: restáuralo antes de agregar tramos.',
+      );
+    }
+    if (estado === 'COMPLETADO' && !motivo?.trim()) {
+      throw new BadRequestException(
+        'El vuelo ya está COMPLETADO: indica el motivo del tramo extra (p. ej. "el cliente pidió seguir a Holbox").',
+      );
+    }
+    if (current?.rol === Rol.PILOTO) {
+      if (estado !== 'COMPLETADO') {
+        throw new ForbiddenException(
+          'Antes de completar el vuelo los tramos los agrega la oficina; el piloto solo agrega un tramo extra cuando el vuelo ya se completó y el cliente sigue.',
+        );
+      }
+      const { data: legs } = await this.supabase.service
+        .from('escala')
+        .select('piloto_id')
+        .eq('vuelo_id', vuelo.id as string);
+      const tripulacion = new Set(
+        [
+          vuelo.piloto_id,
+          vuelo.copiloto_id,
+          vuelo.apoyo_id,
+          ...(legs ?? []).map((l) => l.piloto_id),
+        ].filter((x): x is string => typeof x === 'string'),
+      );
+      if (!tripulacion.has(current.userId)) {
+        throw new ForbiddenException(
+          'Solo la tripulación del vuelo puede agregarle un tramo extra.',
+        );
+      }
+    }
+  }
+
+  /**
+   * Tramo agregado a un vuelo COMPLETADO (28-ago): el vuelo vuelve a
+   * EN_VUELO (se completa de nuevo cuando el piloto capture la llegada del
+   * tramo nuevo — complete() exige llegadas), la salida del tramo nuevo se
+   * rellena con la ÚLTIMA llegada real del vuelo (identidad física: el
+   * horómetro no se mueve con el avión apagado) y el motivo queda en las
+   * notas internas para el cierre.
+   */
+  private async reabrirTrasTramoNuevo(
+    vuelo: Record<string, unknown>,
+    escala: Record<string, unknown>,
+    motivo: string | undefined,
+    userId: string,
+  ): Promise<void> {
+    if ((vuelo.estado as string) !== 'COMPLETADO') return;
+    const vueloId = vuelo.id as string;
+    const { data: prev } = await this.supabase.service
+      .from('escala')
+      .select('orden, aeronave_id, taco_llegada')
+      .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
+      .not('taco_llegada', 'is', null)
+      .neq('id', escala.id as string)
+      .order('orden', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (prev && prev.taco_llegada != null) {
+      try {
+        await this.propagarLlegadaASalidaSiguiente(
+          vueloId,
+          Number(prev.orden),
+          (prev.aeronave_id as string | null) ??
+            (vuelo.aeronave_id as string | null) ??
+            null,
+          Number(prev.taco_llegada),
+          userId,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `reabrirTrasTramoNuevo ${vueloId}: no se propagó la salida (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    }
+    const hoy = new Date().toLocaleDateString('es-MX', {
+      timeZone: 'America/Cancun',
+    });
+    const linea = `[${hoy}] Tramo ${escala.origen_iata as string} → ${escala.destino_iata as string} agregado tras completar el vuelo: ${(motivo ?? '').trim()}`;
+    const notas = (vuelo.notas_internas as string | null) ?? '';
+    const { error } = await this.supabase.service
+      .from('vuelo')
+      .update({
+        estado: 'EN_VUELO',
+        notas_internas: notas ? `${notas}\n${linea}` : linea,
+        updated_by: userId,
+      })
+      .eq('id', vueloId);
+    if (error) throw new Error(error.message);
+    void this.calendar.syncFlight(vueloId);
   }
 
   // Los tramos operativos internos viven en un rango de orden propio (>=100)
@@ -3649,8 +3803,10 @@ export class FlightsService {
     vueloId: string,
     dto: OperationalLegDto,
     userId: string,
+    current?: AuthenticatedUser,
   ) {
-    await this.findById(vueloId);
+    const vuelo = await this.findById(vueloId);
+    await this.assertTramoAgregable(vuelo, dto.motivo, current);
     const { data: existentes } = await this.supabase.service
       .from('escala')
       .select('orden')
@@ -3688,6 +3844,12 @@ export class FlightsService {
       throw new Error(`Failed to insert operational leg: ${error.message}`);
     // Un ferry/parada técnica también puede tocar una pista con permiso.
     await this.airports.refreshPermisosDeVuelo(vueloId);
+    await this.reabrirTrasTramoNuevo(
+      vuelo,
+      data as Record<string, unknown>,
+      dto.motivo,
+      userId,
+    );
     void this.calendar.syncFlight(vueloId);
     void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
     return data!;

@@ -108,6 +108,16 @@ export class CreateEscalaDto {
   @Type(() => Date)
   @IsDate()
   fecha_salida_plan?: Date;
+
+  @ApiPropertyOptional({
+    maxLength: 300,
+    description:
+      'Motivo del tramo extra. OBLIGATORIO cuando el vuelo ya está COMPLETADO (el cliente pidió seguir a otro destino): el vuelo vuelve a EN_VUELO y el motivo queda en las notas internas.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  motivo?: string;
 }
 
 export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
@@ -189,6 +199,16 @@ export class OperationalLegDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 300,
+    description:
+      'Motivo del tramo extra. OBLIGATORIO cuando el vuelo ya está COMPLETADO (el cliente pidió seguir a otro destino): el vuelo vuelve a EN_VUELO y el motivo queda en las notas internas.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  motivo?: string;
 }
 
 /** Asignación de aeronave/piloto a UN tramo (ida o regreso por separado). */

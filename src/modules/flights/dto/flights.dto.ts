@@ -397,8 +397,7 @@ export class CombinarVuelosDto {
   tramo_ferry_id!: string;
 
   @ApiProperty({
-    description:
-      'Tramo ferry del ANFITRIÓN que se cancela: su regreso vacío.',
+    description: 'Tramo ferry del ANFITRIÓN que se cancela: su regreso vacío.',
   })
   @IsUUID()
   tramo_ferry_anfitrion_id!: string;
@@ -693,4 +692,16 @@ export class CreateReservaDto {
   @IsString()
   @MaxLength(2000)
   notas_internas?: string;
+}
+
+/** Regreso a vuelo propio (28-ago): un vuelo propio SIEMPRE tiene avión (regla
+ *  de BD): si el externo no tenía avión de referencia, hay que elegirlo aquí. */
+export class RevertirExternoDto {
+  @ApiPropertyOptional({
+    description:
+      'Avión propio que volará el vuelo. Obligatorio si el vuelo externo no tenía avión de referencia.',
+  })
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string;
 }
