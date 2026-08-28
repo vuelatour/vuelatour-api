@@ -901,11 +901,12 @@ export class ProfitSharingService {
         .eq('estado', 'CANCELADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
-      // Gastos del periodo con huecos de datos.
+      // Gastos del periodo con huecos de datos. El embed del vuelo solo
+      // sirve para reconocer el GAS de un externo sin avión (abajo).
       sb
         .from('gasto')
         .select(
-          'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula',
+          'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula, vuelo:vuelo_id(es_externo, aeronave_id)',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -1295,7 +1296,20 @@ export class ProfitSharingService {
     // COMBUSTIBLE sin avión (26-ago-2026): con el modelo "gas por avión/mes"
     // el aeronave_id es la ÚNICA liga del combustible al balance y al
     // reparto — una carga sin avión es dinero invisible. BLOQUEA el cierre.
-    const gasSinAvion = sinAvion.filter((g) => g.categoria === 'GAS');
+    // Excepción (verificación 28-ago): el GAS de un vuelo EXTERNO sin avión
+    // de referencia vive en la hoja "combustible" del libro EXTERNOS del
+    // Balance general — no es dinero invisible y no debe bloquear el cierre
+    // (mismo filtro que aircraft-balance.pendienteGasSinAvion).
+    const esGasDeExternoSinAvion = (g: Record<string, unknown>): boolean => {
+      const raw: unknown = g.vuelo;
+      const v: unknown = Array.isArray(raw) ? (raw as unknown[])[0] : raw;
+      if (!v || typeof v !== 'object') return false;
+      const row = v as { es_externo?: unknown; aeronave_id?: unknown };
+      return row.es_externo === true && row.aeronave_id == null;
+    };
+    const gasSinAvion = sinAvion.filter(
+      (g) => g.categoria === 'GAS' && !esGasDeExternoSinAvion(g),
+    );
     // El caso inverso: un FIJO capturado CON avión se prorratea igual entre
     // toda la flota (el pool no mira aeronave_id) y en el detalle del avión
     // asignado aparece EXCLUIDO — doble lectura silenciosa. Aviso, no candado.

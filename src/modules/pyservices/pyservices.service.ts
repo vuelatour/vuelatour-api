@@ -316,7 +316,15 @@ export interface BalanceAvionVueloPayload {
   folio: string;
   cliente: string | null;
   estado: string;
+  /**
+   * Vuelo cubierto por un operador AJENO. Con avión de referencia vive en
+   * el libro de ese avión; sin avión, en el libro EXTERNOS del general
+   * (regla 28-ago tarde: "un vuelo más"). pyservices pinta la clave en
+   * gris/itálica. Su costo del operador va en OPERACIONES (op_detalle).
+   */
   es_externo: boolean;
+  /** Operador ajeno (texto libre, p. ej. XA-TYV); solo si es_externo. */
+  operador_externo?: string | null;
   /** Fecha del vuelo (día Cancún, YYYY-MM-DD). */
   fecha: string | null;
   /** Fin del traslado si el vuelo es multi-día (día Cancún). */
