@@ -22,6 +22,7 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
   AssignFlightDto,
+  CombinarVuelosDto,
   CreateExternalFlightDto,
   CreateReservaDto,
   ListFlightsQuery,
@@ -51,7 +52,7 @@ import {
 } from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -701,6 +702,16 @@ export class FlightsService {
       );
     }
     await this.validateAssignTargets({ aeronaveId: dto.aeronave_id });
+    // Vuelo COMBINADO: cambiar de avión rompe la premisa de la combinación
+    // (el avión que pernocta ya no es el que vuela) — la liga se rompe en
+    // ambos ANTES de clonar y el clon nace sin ella.
+    if (original.combinado_con_id) {
+      await this.romperCombinacion(
+        id,
+        `Se cambió de avión el vuelo #${original.folio as number}, que estaba combinado.`,
+        userId,
+      );
+    }
 
     const { data: aeronave } = await sb
       .from('aeronave')
@@ -720,6 +731,9 @@ export class FlightsService {
       'updated_at',
       'google_calendar_id',
       'foto_plan_vuelo_url',
+      // La liga de combinación no viaja al clon (el original la rompió ya;
+      // el spread de `original` se leyó ANTES de romperla).
+      'combinado_con_id',
       // GENERATED ALWAYS en la BD (se calcula sola del origen): insertarla revienta.
       'pago_anticipado_req',
     ]) {
@@ -745,7 +759,9 @@ export class FlightsService {
     const { data: legs } = await sb
       .from('escala')
       .select(
-        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, estado_permiso',
+        // cancelada_* viaja al clon (28-ago): sin esto, un tramo cancelado
+        // del original (p.ej. ferry de un vuelo combinado) renacía VIVO.
+        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, aeronave_id, estado_permiso, cancelada_at, cancelada_motivo, cancelada_por',
       )
       .eq('vuelo_id', id)
       .order('orden', { ascending: true });
@@ -754,7 +770,11 @@ export class FlightsService {
         legs.map((l) => ({
           ...l,
           vuelo_id: (clon as { id: string }).id,
-          aeronave_id: dto.aeronave_id,
+          // Un tramo cancelado conserva el avión con el que se canceló.
+          aeronave_id:
+            (l as { cancelada_at?: string | null }).cancelada_at != null
+              ? ((l as { aeronave_id?: string | null }).aeronave_id ?? null)
+              : dto.aeronave_id,
           created_by: userId,
           updated_by: userId,
         })),
@@ -2588,11 +2608,23 @@ export class FlightsService {
     if (fields.fecha_salida_plan !== undefined)
       patch.fecha_salida_plan = fields.fecha_salida_plan;
     if (Object.keys(patch).length === 0) return;
+    // La "ida" efectiva es el PRIMER TRAMO ACTIVO (vuelos combinados,
+    // 28-ago): con la ida ferry cancelada, espejar al orden=1 reescribía el
+    // historial del tramo cancelado y dejaba viva la semilla con la que el
+    // cron del espejo revertía el avión del vuelo.
+    const { data: ida } = await this.supabase.service
+      .from('escala')
+      .select('id')
+      .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (!ida) return;
     const { error } = await this.supabase.service
       .from('escala')
       .update(patch)
-      .eq('vuelo_id', vueloId)
-      .eq('orden', 1);
+      .eq('id', ida.id as string);
     if (error)
       this.logger.warn(
         `No se pudo espejar la ida del vuelo ${vueloId}: ${error.message}`,
@@ -2932,6 +2964,23 @@ export class FlightsService {
       throw new ConflictException(
         `No se puede cancelar un vuelo en estado ${current.estado}`,
       );
+    }
+    // Vuelo COMBINADO (28-ago): cancelarlo deja al otro colgando (su ferry
+    // sigue cancelado y el avión que iba a cubrirlo ya no va). La liga se
+    // rompe en ambos con sello y oficina recibe el aviso para restaurar el
+    // ferry del otro — sin esto el hueco se descubría el día del vuelo.
+    if (current.combinado_con_id) {
+      try {
+        await this.romperCombinacion(
+          id,
+          `Se canceló el vuelo #${current.folio as number}, que estaba combinado: restaura el ferry del vuelo pareja o vuelve a combinarlo.`,
+          updatedBy,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `cancel(${id}): romper combinación falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     const sello = `[Cancelado ${new Date().toISOString()}] ${motivo.trim()}`;
     const previas = (current.notas_internas as string | null)?.trim();
@@ -6207,14 +6256,18 @@ export class FlightsService {
   ): Promise<void> {
     const { data } = await this.supabase.service
       .from('escala')
-      .select('id, taco_salida, taco_llegada')
+      .select('id, taco_salida, taco_llegada, aeronave_id')
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
       .order('orden', { ascending: true })
       .limit(1)
       .maybeSingle();
     if (!data || data.taco_salida != null) return;
-    const ultimo = await this.ultimoTacoAeronave(aeronaveId, null);
+    // Avión EFECTIVO del tramo (28-ago): en un vuelo combinado el tramo lo
+    // vuela otro avión que el del nivel vuelo momentos antes del assign —
+    // anclar con el avión equivocado sembraría el horómetro de otro tacómetro.
+    const efectivo = (data.aeronave_id as string | null) ?? aeronaveId;
+    const ultimo = await this.ultimoTacoAeronave(efectivo, null);
     if (ultimo == null) return;
     // Nunca dejar salida > llegada (p. ej. si la llegada ya se capturó).
     if (data.taco_llegada != null && ultimo > Number(data.taco_llegada)) return;
@@ -6365,6 +6418,437 @@ export class FlightsService {
    *  - si el vuelo estaba EN_VUELO y las llegadas de los tramos ACTIVOS ya
    *    están, el vuelo se completa solo (el tramo cancelado ya no lo detiene).
    */
+
+  /**
+   * COMBINAR vuelos (28-ago, estrategia de pernocta aprovechada): el avión
+   * del ANFITRIÓN llevó pax al destino y pernocta; este vuelo (el CUBIERTO)
+   * cancela su ida ferry y lo vuela ese mismo avión al día siguiente. Se
+   * cancelan los DOS ferries (regreso del anfitrión + ida del cubierto),
+   * el cubierto se reasigna al avión (y opcionalmente al piloto) del
+   * anfitrión, ambos quedan con itinerario_operativo (la cotización jamás
+   * reescribe/revive sus tramos) y ligados por combinado_con_id. Los
+   * PRECIOS de ambos clientes quedan INTACTOS: el margen es de la empresa.
+   */
+  async combinarVuelos(
+    cubiertoId: string,
+    dto: CombinarVuelosDto,
+    userId: string,
+  ) {
+    if (cubiertoId === dto.vuelo_anfitrion_id) {
+      throw new BadRequestException('Elige dos vuelos distintos.');
+    }
+    const [cubierto, anfitrion] = await Promise.all([
+      this.findById(cubiertoId),
+      this.findById(dto.vuelo_anfitrion_id),
+    ]);
+    const ESTADOS_CUBIERTO = ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'];
+    if (!ESTADOS_CUBIERTO.includes(cubierto.estado as string)) {
+      throw new ConflictException(
+        `El vuelo a cubrir está ${cubierto.estado as string}: solo se combinan vuelos que aún no vuelan.`,
+      );
+    }
+    if (anfitrion.estado === 'CANCELADO') {
+      throw new ConflictException('El vuelo anfitrión está cancelado.');
+    }
+    if (cubierto.es_externo || anfitrion.es_externo) {
+      throw new BadRequestException('Los vuelos externos no se combinan.');
+    }
+    if (cubierto.combinado_con_id || anfitrion.combinado_con_id) {
+      throw new ConflictException('Alguno de los vuelos ya está combinado.');
+    }
+
+    // Tramos ferry a cancelar: deben ser de SU vuelo y estar vivos.
+    const leerTramo = async (id: string, vueloId: string, rol: string) => {
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .select(
+          'id, vuelo_id, orden, origen_iata, destino_iata, cancelada_at, fecha_salida_plan, es_ferry, taco_llegada, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url',
+        )
+        .eq('id', id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data || data.vuelo_id !== vueloId) {
+        throw new BadRequestException(`El tramo ${rol} no es de ese vuelo.`);
+      }
+      if (data.cancelada_at) {
+        throw new ConflictException(`El tramo ${rol} ya está cancelado.`);
+      }
+      if (data.es_ferry !== true) {
+        throw new BadRequestException(
+          `El tramo ${rol} no es un ferry: solo los tramos vacíos se cancelan al combinar.`,
+        );
+      }
+      // PRE-validación de cancelabilidad (mismos candados de cancelEscala):
+      // combinar no es transaccional — nada se muta hasta que TODO valida.
+      const llegadaReal =
+        data.taco_llegada !== null && data.taco_llegada_origen !== 'DEDUCIDO';
+      if (
+        llegadaReal ||
+        data.foto_taco_salida_url ||
+        data.foto_taco_llegada_url
+      ) {
+        throw new ConflictException(
+          `El tramo ${rol} tiene evidencia de que voló: no se puede combinar.`,
+        );
+      }
+      return data;
+    };
+    const [ferryCubierto, ferryAnfitrion] = await Promise.all([
+      leerTramo(dto.tramo_ferry_id, cubiertoId, 'del vuelo a cubrir'),
+      leerTramo(
+        dto.tramo_ferry_anfitrion_id,
+        dto.vuelo_anfitrion_id,
+        'del anfitrión',
+      ),
+    ]);
+    // Geometría CON ROL: el ferry del cubierto debe ser su PRIMER tramo
+    // activo (su ida de posicionamiento) y el del anfitrión su ÚLTIMO (su
+    // regreso vacío). Sin el rol, un par invertido en la base (toda ida
+    // sale de CUN y todo regreso llega a CUN) pasaba la geometría y un clic
+    // cancelaba los tramos EQUIVOCADOS.
+    const bordes = async (vueloId: string) => {
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .select('id, orden')
+        .eq('vuelo_id', vueloId)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: true });
+      if (error) throw new Error(error.message);
+      return { primero: data?.[0] ?? null, ultimo: data?.[data.length - 1] ?? null, total: data?.length ?? 0 };
+    };
+    const [bCub, bAnf] = await Promise.all([
+      bordes(cubiertoId),
+      bordes(dto.vuelo_anfitrion_id),
+    ]);
+    if (bCub.primero?.id !== dto.tramo_ferry_id) {
+      throw new BadRequestException(
+        'El ferry del vuelo a cubrir debe ser su PRIMER tramo activo (la ida de posicionamiento).',
+      );
+    }
+    if (bAnf.ultimo?.id !== dto.tramo_ferry_anfitrion_id) {
+      throw new BadRequestException(
+        'El ferry del anfitrión debe ser su ÚLTIMO tramo activo (el regreso vacío).',
+      );
+    }
+    // Cancelar jamás debe dejar un vuelo sin tramos activos (candado de
+    // cancelEscala, pre-validado aquí para no mutar a medias).
+    if (bCub.total < 2 || bAnf.total < 2) {
+      throw new ConflictException(
+        'Ambos vuelos necesitan al menos otro tramo activo además del ferry a cancelar.',
+      );
+    }
+    const P = (ferryAnfitrion.origen_iata as string).toUpperCase();
+    if ((ferryCubierto.destino_iata as string).toUpperCase() !== P) {
+      throw new BadRequestException(
+        `Los ferries no coinciden: el del anfitrión sale de ${P} y el del vuelo a cubrir llega a ${(ferryCubierto.destino_iata as string).toUpperCase()}.`,
+      );
+    }
+
+    // Avión (y piloto) EFECTIVOS del anfitrión: primer tramo activo con
+    // herencia — es el fierro que de verdad duerme en P.
+    const { data: idaAnf } = await this.supabase.service
+      .from('escala')
+      .select('aeronave_id, piloto_id')
+      .eq('vuelo_id', dto.vuelo_anfitrion_id)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    const avionId =
+      (idaAnf?.aeronave_id as string | null) ??
+      (anfitrion.aeronave_id as string | null);
+    if (!avionId) {
+      throw new BadRequestException(
+        'El vuelo anfitrión no tiene avión asignado: asígnalo primero.',
+      );
+    }
+    const pilotoId =
+      (idaAnf?.piloto_id as string | null) ??
+      (anfitrion.piloto_id as string | null);
+
+    const { data: avionRow } = await this.supabase.service
+      .from('aeronave')
+      .select('matricula')
+      .eq('id', avionId)
+      .maybeSingle();
+    const matricula = (avionRow?.matricula as string) ?? 'el avión';
+
+    // 0) Asignabilidad ANTES de mutar (taller/squawk ALTA rechazan): si
+    //    assign() fuera a tronar, debe tronar AHORA — no con los ferries ya
+    //    cancelados y el estado a medias (no hay transacción).
+    await this.validateAssignTargets({
+      aeronaveId: avionId,
+      ...(dto.aplicar_piloto !== false && pilotoId
+        ? { pilotoId }
+        : {}),
+    });
+    // Avión ANTERIOR del cubierto: el blanket de abajo solo pisa herencia
+    // (null) o ese avión — una rotación por tramo deliberada se respeta.
+    const avionViejoCubierto = (cubierto.aeronave_id as string | null) ?? null;
+
+    // 1) Cancelar los ferries (candados de evidencia de cancelEscala:
+    //    jamás se cancela un tramo que sí voló — pre-validado arriba).
+    await this.cancelEscala(
+      dto.tramo_ferry_id,
+      `Combinado con vuelo #${anfitrion.folio as number}: lo cubre ${matricula} que pernocta en ${P}.`,
+      userId,
+    );
+    await this.cancelEscala(
+      dto.tramo_ferry_anfitrion_id,
+      `Combinado con vuelo #${cubierto.folio as number}: ${matricula} pernocta en ${P} y cubre su salida.`,
+      userId,
+    );
+
+    // 2) Reasignar el vuelo cubierto al avión (y piloto) del anfitrión —
+    //    assign() valida documentos/squawks y avisa a la tripulación.
+    await this.assign(
+      cubiertoId,
+      {
+        aeronave_id: avionId,
+        ...(dto.aplicar_piloto !== false && pilotoId
+          ? { piloto_id: pilotoId }
+          : {}),
+      } as AssignFlightDto,
+      userId,
+    );
+    // El avión también en los tramos vivos del cubierto (assign solo espeja
+    // la ida) — pero SOLO los heredados (null) o los del avión viejo: una
+    // rotación por tramo deliberada hacia OTRO avión no se pisa.
+    {
+      let q = this.supabase.service
+        .from('escala')
+        .update({ aeronave_id: avionId, updated_by: userId })
+        .eq('vuelo_id', cubiertoId)
+        .is('cancelada_at', null);
+      q = avionViejoCubierto
+        ? q.or(`aeronave_id.is.null,aeronave_id.eq.${avionViejoCubierto}`)
+        : q.is('aeronave_id', null);
+      const { error: blanketErr } = await q;
+      if (blanketErr) throw new Error(blanketErr.message);
+    }
+
+    // 3) Sellos: liga simétrica + itinerario operativo (la cotización ya no
+    //    gestiona estas escalas: revisar precios jamás revive los ferries).
+    const sello = (otro: number) =>
+      `[Combinado] Con el vuelo #${otro}: ${matricula} pernocta en ${P}. Los ferries de ambos se cancelaron a propósito; los precios no cambian.`;
+    const marcar = async (id: string, otroId: string, otroFolio: number) => {
+      const { data: v } = await this.supabase.service
+        .from('vuelo')
+        .select('notas_internas')
+        .eq('id', id)
+        .maybeSingle();
+      const notas = (v?.notas_internas as string | null)?.trim();
+      const { error: selloErr } = await this.supabase.service
+        .from('vuelo')
+        .update({
+          combinado_con_id: otroId,
+          itinerario_operativo: true,
+          notas_internas: notas
+            ? `${notas}\n${sello(otroFolio)}`
+            : sello(otroFolio),
+          updated_by: userId,
+        })
+        .eq('id', id);
+      // supabase-js NO lanza: sin este check una liga a medias (un vuelo
+      // ligado y el otro no) pasaba en silencio.
+      if (selloErr) throw new Error(selloErr.message);
+    };
+    await marcar(
+      cubiertoId,
+      dto.vuelo_anfitrion_id,
+      anfitrion.folio as number,
+    );
+    await marcar(dto.vuelo_anfitrion_id, cubiertoId, cubierto.folio as number);
+
+    // 4) Pernocta OPERATIVA en el último tramo vivo del anfitrión: señal al
+    //    piloto (la app la pinta); JAMÁS toca la cotización (congelada).
+    if (dto.marcar_pernocta !== false) {
+      const { data: ultimo } = await this.supabase.service
+        .from('escala')
+        .select('id')
+        .eq('vuelo_id', dto.vuelo_anfitrion_id)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (ultimo) {
+        const { error: pernErr } = await this.supabase.service
+          .from('escala')
+          .update({ requiere_pernocta: true, updated_by: userId })
+          .eq('id', ultimo.id as string);
+        if (pernErr) throw new Error(pernErr.message);
+      }
+    }
+
+    // Si la ida ferry cancelada salía un día ANTES que el primer tramo vivo
+    // (posicionamiento con pernocta propia), fecha_vuelo quedaba anclada a
+    // un día en el que ya no se opera nada: se avanza al primer tramo vivo.
+    {
+      const { data: primero } = await this.supabase.service
+        .from('escala')
+        .select('fecha_salida_plan')
+        .eq('vuelo_id', cubiertoId)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: true })
+        .limit(1)
+        .maybeSingle();
+      const plan = primero?.fecha_salida_plan as string | null;
+      const dia = (iso: string) =>
+        new Date(iso).toLocaleDateString('en-CA', {
+          timeZone: 'America/Cancun',
+        });
+      if (
+        plan &&
+        cubierto.fecha_vuelo &&
+        dia(plan) > dia(cubierto.fecha_vuelo as string)
+      ) {
+        const { error: fvErr } = await this.supabase.service
+          .from('vuelo')
+          .update({ fecha_vuelo: plan, updated_by: userId })
+          .eq('id', cubiertoId);
+        if (fvErr) throw new Error(fvErr.message);
+      }
+    }
+
+    void this.calendar.syncFlight(cubiertoId);
+    void this.calendar.syncFlight(dto.vuelo_anfitrion_id);
+    return {
+      vuelo: await this.findById(cubiertoId),
+      anfitrion: await this.findById(dto.vuelo_anfitrion_id),
+    };
+  }
+
+  /**
+   * Candidatos para combinar ESTE vuelo (el cubierto): otros vuelos vivos
+   * cuyo ferry de REGRESO (su último tramo activo) sale del MISMO
+   * aeropuerto al que llega el ferry de IDA de este vuelo (su primer tramo
+   * activo), hasta 3 días antes. Los ferries se filtran por EVIDENCIA de
+   * vuelo (llegada real o fotos, criterio de cancelEscala) — jamás por
+   * taco_salida, que la propagación llena con DEDUCIDO justo en el caso
+   * estrella (el anfitrión ya voló y su avión duerme allá).
+   */
+  async candidatosCombinacion(cubiertoId: string) {
+    const cubierto = await this.findById(cubiertoId);
+    if (
+      cubierto.es_externo ||
+      cubierto.combinado_con_id ||
+      !['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'].includes(
+        cubierto.estado as string,
+      )
+    )
+      return { data: [] };
+    const dia = (iso: string | null): string | null =>
+      iso
+        ? new Date(iso).toLocaleDateString('en-CA', {
+            timeZone: 'America/Cancun',
+          })
+        : null;
+    const hoy = dia(new Date().toISOString())!;
+    const sinEvidencia = (e: Record<string, unknown>) =>
+      (e.taco_llegada == null || e.taco_llegada_origen === 'DEDUCIDO') &&
+      !e.foto_taco_salida_url &&
+      !e.foto_taco_llegada_url;
+
+    // Ferry de IDA del cubierto = su PRIMER tramo activo (si no es ferry,
+    // este vuelo no tiene posicionamiento que ahorrar).
+    const { data: activosCub, error: acErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, orden, origen_iata, destino_iata, es_ferry, fecha_salida_plan, taco_llegada, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url',
+      )
+      .eq('vuelo_id', cubiertoId)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true });
+    if (acErr) throw new Error(acErr.message);
+    const idaCub = activosCub?.[0];
+    if (
+      !idaCub ||
+      idaCub.es_ferry !== true ||
+      (activosCub?.length ?? 0) < 2 ||
+      !sinEvidencia(idaCub as Record<string, unknown>)
+    )
+      return { data: [] };
+    const P = (idaCub.destino_iata as string).toUpperCase();
+    const fechaCubierto = dia(
+      (idaCub.fecha_salida_plan as string | null) ??
+        (cubierto.fecha_vuelo as string | null),
+    );
+    // Combinaciones del pasado no existen.
+    if (fechaCubierto && fechaCubierto < hoy) return { data: [] };
+
+    // Ferries de OTROS vuelos que salen de P: candidatos a regreso vacío.
+    const { data: otros, error: otErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, taco_llegada, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo!vuelo_id(id, folio, estado, es_externo, combinado_con_id, aeronave_id, fecha_vuelo, cliente:cliente_id(nombre))',
+      )
+      .eq('es_ferry', true)
+      .eq('origen_iata', P)
+      .is('cancelada_at', null)
+      .neq('vuelo_id', cubiertoId)
+      .limit(200);
+    if (otErr) throw new Error(otErr.message);
+
+    const out: Array<Record<string, unknown>> = [];
+    for (const o of otros ?? []) {
+      const rawV = o.vuelo as unknown;
+      const v = (Array.isArray(rawV) ? rawV[0] : rawV) as Record<
+        string,
+        unknown
+      > | null;
+      if (!v) continue;
+      // El anfitrión EN_VUELO es el caso estrella (ya voló, duerme en P).
+      if (
+        !['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO', 'EN_VUELO'].includes(
+          v.estado as string,
+        )
+      )
+        continue;
+      if (v.es_externo === true || v.combinado_con_id) continue;
+      if (!sinEvidencia(o as Record<string, unknown>)) continue;
+      // ROL: debe ser el ÚLTIMO tramo activo de su vuelo (su regreso vacío).
+      const { data: bordes } = await this.supabase.service
+        .from('escala')
+        .select('id')
+        .eq('vuelo_id', o.vuelo_id as string)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: false })
+        .limit(2);
+      if (bordes?.[0]?.id !== o.id || (bordes?.length ?? 0) < 2) continue;
+      const fechaAnf = dia(
+        (o.fecha_salida_plan as string | null) ??
+          (v.fecha_vuelo as string | null),
+      );
+      // Ventana: el anfitrión deja el avión en P entre 0 y 3 días antes.
+      if (fechaCubierto && fechaAnf) {
+        const diff =
+          (Date.parse(fechaCubierto) - Date.parse(fechaAnf)) / 86_400_000;
+        if (diff < 0 || diff > 3) continue;
+      }
+      const rawC = (v.cliente ?? null) as unknown;
+      const cli = (Array.isArray(rawC) ? rawC[0] : rawC) as {
+        nombre?: string;
+      } | null;
+      out.push({
+        vuelo_id: v.id,
+        folio: v.folio,
+        cliente_nombre: cli?.nombre ?? null,
+        fecha: fechaAnf,
+        aeropuerto: P,
+        tramo_ferry_anfitrion_id: o.id,
+        tramo_ferry_id: idaCub.id,
+        noches:
+          fechaCubierto && fechaAnf
+            ? Math.round(
+                (Date.parse(fechaCubierto) - Date.parse(fechaAnf)) /
+                  86_400_000,
+              )
+            : null,
+      });
+    }
+    return { data: out };
+  }
+
   async cancelEscala(escalaId: string, motivo: string, userId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
@@ -6442,6 +6926,62 @@ export class FlightsService {
         `cancelEscala(${escalaId}): autocierre falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    // Multi-día fantasma (28-ago, vuelos combinados): si el tramo cancelado
+    // era el regreso que sostenía fecha_traslado_final, el GREATEST de
+    // fecha_fin la conservaba y el vuelo seguía "activo" un día de más en
+    // taco-live/calendario/crones. Si ya ningún tramo ACTIVO sale en (o
+    // después de) esa fecha, se retrae.
+    try {
+      const { data: v } = await this.supabase.service
+        .from('vuelo')
+        .select('fecha_traslado_final')
+        .eq('id', row.vuelo_id as string)
+        .maybeSingle();
+      const fin = v?.fecha_traslado_final as string | null;
+      if (fin) {
+        const { data: vivos } = await this.supabase.service
+          .from('escala')
+          .select('fecha_salida_plan')
+          .eq('vuelo_id', row.vuelo_id as string)
+          .is('cancelada_at', null);
+        const dia = (iso: string): string =>
+          new Date(iso).toLocaleDateString('en-CA', {
+            timeZone: 'America/Cancun',
+          });
+        const diaFin = dia(fin);
+        // Un tramo vivo SIN fecha propia puede SER el regreso que la
+        // sostiene (patrón de la migración 20260807000002): con cualquiera
+        // así, no se retrae — mejor un multi-día de más que perder la
+        // fecha comercial del regreso (caso real #203).
+        const haySinFecha = (vivos ?? []).some(
+          (e) => e.fecha_salida_plan == null,
+        );
+        const sostienen = (vivos ?? []).some(
+          (e) =>
+            e.fecha_salida_plan != null &&
+            dia(e.fecha_salida_plan as string) >= diaFin,
+        );
+        if (!haySinFecha && !sostienen) {
+          await this.supabase.service
+            .from('vuelo')
+            .update({ fecha_traslado_final: null, updated_by: userId })
+            .eq('id', row.vuelo_id as string);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `cancelEscala(${escalaId}): retracción de fecha_traslado_final falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // El permiso a nivel vuelo pudo depender SOLO del tramo cancelado:
+    // re-derivar de inmediato (antes quedaba 'pendiente' hasta el cron).
+    void this.airports
+      .refreshPermisosDeVuelo(row.vuelo_id as string)
+      .catch((err: unknown) =>
+        this.logger.warn(
+          `cancelEscala(${escalaId}): refresh de permisos falló: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
     void this.calendar.syncFlight(row.vuelo_id as string);
     void this.notifyTramoCancelado(row, motivo.trim());
     return data!;
@@ -6494,6 +7034,47 @@ export class FlightsService {
    * recuperan: el tramo vuelve "sin capturar" y lo rellenan la propagación,
    * el piloto u oficina (visible en Tacómetros en vivo).
    */
+  /** Rompe la liga de combinación en AMBOS vuelos con sello auditable. */
+  private async romperCombinacion(
+    vueloId: string,
+    motivo: string,
+    userId: string,
+  ): Promise<void> {
+    const { data: v } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, combinado_con_id, notas_internas')
+      .eq('id', vueloId)
+      .maybeSingle();
+    const otroId = v?.combinado_con_id as string | null;
+    if (!otroId) return;
+    const sello = `[Combinación deshecha] ${motivo}`;
+    const limpiar = async (id: string) => {
+      const { data: row } = await this.supabase.service
+        .from('vuelo')
+        .select('notas_internas')
+        .eq('id', id)
+        .maybeSingle();
+      const notas = (row?.notas_internas as string | null)?.trim();
+      const { error } = await this.supabase.service
+        .from('vuelo')
+        .update({
+          combinado_con_id: null,
+          notas_internas: notas ? `${notas}\n${sello}` : sello,
+          updated_by: userId,
+        })
+        .eq('id', id);
+      if (error) throw new Error(error.message);
+    };
+    await limpiar(vueloId);
+    await limpiar(otroId);
+    void this.notifications.notifyRole(Rol.ADMIN, {
+      titulo: 'Combinación de vuelos deshecha',
+      cuerpo: `${motivo} Revisa avión, ferries y pernocta de ambos vuelos.`,
+      tipo: 'alerta_sistema',
+      link: `/admin/flights/${vueloId}`,
+    });
+  }
+
   async restoreEscala(escalaId: string, motivo: string, userId: string) {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
@@ -6519,6 +7100,27 @@ export class FlightsService {
       .select(ESCALA_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
+    // Vuelo COMBINADO (28-ago): restaurar un ferry cancelado deshace la
+    // estrategia — la liga se rompe en AMBOS vuelos con sello y aviso a
+    // oficina (dejarla viva mentía "combinado" con el ferry ya de vuelta).
+    try {
+      const { data: vRow } = await this.supabase.service
+        .from('vuelo')
+        .select('folio, combinado_con_id')
+        .eq('id', row.vuelo_id as string)
+        .maybeSingle();
+      if (vRow?.combinado_con_id) {
+        await this.romperCombinacion(
+          row.vuelo_id as string,
+          `Se restauró el tramo ${row.origen_iata as string}→${row.destino_iata as string} del vuelo #${vRow.folio as number}, que estaba combinado.`,
+          userId,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `restoreEscala(${escalaId}): romper combinación falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     // Rastro auditable en las notas internas del vuelo (mismo patrón que la
     // cancelación de vuelo): quedan el motivo original y el de restaurar.
     try {

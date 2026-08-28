@@ -292,12 +292,14 @@ export class DashboardsService {
       this.fetchVuelosHoras(q.desde, q.hasta),
     ]);
 
-    // Horas voladas por vuelo (suma de escalas con taco completo).
-    const horasPorVuelo = await this.horasPorVuelo(vuelos.map((v) => v.id));
+    // Horas voladas por avión EFECTIVO del tramo (herencia, 28-ago).
+    const horasPorAvion = await this.horasPorAvion(
+      vuelos.map((v) => ({ id: v.id, aeronave_id: v.aeronave_id ?? null })),
+    );
 
-    // Agrega ingresos cobrados y horas por avión (solo COMPLETADOS aportan horas).
+    // Agrega ingresos cobrados y conteo por avión (las horas ya vienen por
+    // tramo con herencia en horasPorAvion).
     const ingresosPorAvion = new Map<string, number>();
-    const horasPorAvion = new Map<string, number>();
     const vuelosPorAvion = new Map<string, number>();
     for (const v of vuelos) {
       if (!v.aeronave_id) continue;
@@ -310,13 +312,6 @@ export class DashboardsService {
           v.aeronave_id,
           (ingresosPorAvion.get(v.aeronave_id) ?? 0) +
             Number(v.monto_total_usd ?? 0),
-        );
-      }
-      const h = horasPorVuelo.get(v.id) ?? 0;
-      if (h > 0) {
-        horasPorAvion.set(
-          v.aeronave_id,
-          (horasPorAvion.get(v.aeronave_id) ?? 0) + h,
         );
       }
     }
@@ -578,28 +573,41 @@ export class DashboardsService {
    * con ambas lecturas. Devuelve un mapa vuelo_id → horas. Pagina los IDs para
    * no exceder el límite de la consulta `in`.
    */
-  private async horasPorVuelo(
-    vueloIds: string[],
+  /**
+   * Horas por AVIÓN EFECTIVO del tramo (28-ago): escala.aeronave_id ??
+   * vuelo.aeronave_id, tramos cancelados fuera — antes todas las horas del
+   * vuelo caían al avión del nivel vuelo y un vuelo mixto/combinado las
+   * atribuía al avión equivocado (único lector de horas sin herencia).
+   */
+  private async horasPorAvion(
+    vuelos: Array<{ id: string; aeronave_id: string | null }>,
   ): Promise<Map<string, number>> {
     const out = new Map<string, number>();
-    if (vueloIds.length === 0) return out;
+    if (vuelos.length === 0) return out;
+    const avionDelVuelo = new Map(vuelos.map((v) => [v.id, v.aeronave_id]));
+    const vueloIds = vuelos.map((v) => v.id);
     const CHUNK = 200;
     for (let i = 0; i < vueloIds.length; i += CHUNK) {
       const slice = vueloIds.slice(i, i + CHUNK);
       const { data, error } = await this.supabase.service
         .from('escala')
-        .select('vuelo_id, taco_salida, taco_llegada')
-        .in('vuelo_id', slice);
+        .select('vuelo_id, aeronave_id, taco_salida, taco_llegada')
+        .in('vuelo_id', slice)
+        .is('cancelada_at', null);
       if (error) throw new Error(error.message);
       for (const e of (data as EscalaTacoRow[] | null) ?? []) {
         const salida = e.taco_salida === null ? NaN : Number(e.taco_salida);
         const llegada = e.taco_llegada === null ? NaN : Number(e.taco_llegada);
+        const avion =
+          ((e as { aeronave_id?: string | null }).aeronave_id ?? null) ??
+          (avionDelVuelo.get(e.vuelo_id) ?? null);
         if (
+          avion &&
           Number.isFinite(salida) &&
           Number.isFinite(llegada) &&
           llegada > salida
         ) {
-          out.set(e.vuelo_id, (out.get(e.vuelo_id) ?? 0) + (llegada - salida));
+          out.set(avion, (out.get(avion) ?? 0) + (llegada - salida));
         }
       }
     }

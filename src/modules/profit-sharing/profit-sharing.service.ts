@@ -1343,7 +1343,11 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select('vuelo_id, aeronave_id, taco_salida, taco_llegada')
-      .in('vuelo_id', vueloIds);
+      .in('vuelo_id', vueloIds)
+      // Tramos cancelados fuera (28-ago, cinturón): cancelEscala anula sus
+      // lecturas, pero si un residuo conservara tacos sumaría horas de una
+      // operación que no ocurrió.
+      .is('cancelada_at', null);
     if (error) throw new Error(error.message);
     return data ?? [];
   }

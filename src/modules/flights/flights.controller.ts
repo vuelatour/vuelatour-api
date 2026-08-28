@@ -35,6 +35,7 @@ import {
   TacoObsDto,
 } from './dto/escalas.dto';
 import {
+  CombinarVuelosDto,
   AssignFlightDto,
   CancelFlightDto,
   CreateExternalFlightDto,
@@ -110,6 +111,31 @@ export class FlightsController {
     // Aislamiento (Tarea 15): el piloto siempre se filtra a sus propios vuelos.
     if (c.rol === Rol.PILOTO) q.piloto_id = c.userId;
     return this.flights.list(q, c);
+  }
+
+  @Get(':id/combinar-candidatos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      'Candidatos para combinar este vuelo (anfitriones cuyo avión pernocta en el destino del ferry de ida).',
+  })
+  candidatosCombinacion(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.candidatosCombinacion(id);
+  }
+
+  @Post(':id/combinar')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Combina este vuelo con un anfitrión (estrategia de pernocta): cancela ambos ferries, reasigna avión/piloto y liga los vuelos. Los precios no cambian.',
+  })
+  combinar(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CombinarVuelosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.combinarVuelos(id, dto, c.userId);
   }
 
   @Post(':id/cubrir-externo')

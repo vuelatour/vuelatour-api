@@ -106,12 +106,16 @@ export class AlertsService {
       );
       if (!umbral) continue;
 
-      // ¿Ya se capturó el tacómetro de salida (tramo orden=1)?
+      // ¿Ya se capturó el tacómetro de salida? PRIMER TRAMO ACTIVO (28-ago):
+      // en un vuelo combinado el orden=1 es el ferry cancelado con salida
+      // null para siempre — leerlo crudo repetía el recordatorio de más.
       const { data: primerTramo } = await this.supabase.service
         .from('escala')
         .select('taco_salida')
         .eq('vuelo_id', v.id as string)
-        .eq('orden', 1)
+        .is('cancelada_at', null)
+        .order('orden', { ascending: true })
+        .limit(1)
         .maybeSingle();
       if (primerTramo && primerTramo.taco_salida !== null) continue;
 
@@ -260,6 +264,9 @@ export class AlertsService {
     await this.safe('servicio_horas', (c) => this.checkServicioPorHoras(c));
     await this.safe('caja_negativa', (c) => this.checkCajaNegativa(c));
     await this.safe('gastos_sin_avion', (c) => this.checkGastosSinAvion(c));
+    await this.safe('combinacion_oportunidad', (c) =>
+      this.checkCombinacionOportunidad(c),
+    );
     await this.safe('vuelo_estancado', (c) => this.checkVuelosEstancados(c));
   }
 
@@ -372,17 +379,192 @@ export class AlertsService {
    * re-sincroniza cualquier divergencia; corre a diario y con el botón
    * "Ejecutar ahora" de Admin→Alertas.
    */
-  private async sincronizarEspejoIda(): Promise<void> {
+
+  /**
+   * DETECTOR de combinaciones (28-ago, estrategia de pernocta): si un vuelo
+   * deja el avión en P (su ÚLTIMO tramo activo es un ferry que sale de P) y
+   * otro necesita salir de P (su PRIMER tramo activo es un ferry que llega
+   * a P) entre 0 y 3 días después, se pueden combinar. Los ferries se
+   * filtran por EVIDENCIA de vuelo (llegada real ≠ DEDUCIDO o fotos) — no
+   * por taco_salida, que la propagación llena con DEDUCIDO justo en el caso
+   * estrella (el anfitrión ya voló y su avión duerme en P). Solo AVISA
+   * (dedupe por par): combinar es acción de oficina.
+   */
+  private async checkCombinacionOportunidad(config: AlertConfig) {
+    const dia = (iso: string | null): string | null =>
+      iso
+        ? new Date(iso).toLocaleDateString('en-CA', {
+            timeZone: 'America/Cancun',
+          })
+        : null;
+    const hoy = dia(new Date().toISOString())!;
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'vuelo_id, aeronave_id, vuelo!inner(folio, aeronave_id, es_externo)',
+        'id, vuelo_id, orden, es_ferry, origen_iata, destino_iata, fecha_salida_plan, taco_llegada, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, vuelo:vuelo!vuelo_id(id, folio, estado, es_externo, combinado_con_id, fecha_vuelo, aeronave:aeronave_id(matricula))',
       )
-      .eq('orden', 1)
-      .not('aeronave_id', 'is', null)
-      .limit(2000);
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(4000);
     if (error) throw new Error(error.message);
+
+    interface Tramo {
+      escalaId: string;
+      orden: number;
+      esFerry: boolean;
+      origen: string;
+      destino: string;
+      fecha: string | null;
+      sinEvidencia: boolean;
+    }
+    interface VueloAgg {
+      vueloId: string;
+      folio: number;
+      estado: string;
+      matricula: string | null;
+      tramos: Tramo[];
+    }
+    const porVuelo = new Map<string, VueloAgg>();
     for (const e of data ?? []) {
+      const raw = e.vuelo as unknown;
+      const v = (Array.isArray(raw) ? raw[0] : raw) as Record<
+        string,
+        unknown
+      > | null;
+      if (!v || v.es_externo === true || v.combinado_con_id) continue;
+      const rawA = (v.aeronave ?? null) as unknown;
+      const av = (Array.isArray(rawA) ? rawA[0] : rawA) as {
+        matricula?: string;
+      } | null;
+      const agg =
+        porVuelo.get(v.id as string) ??
+        (porVuelo
+          .set(v.id as string, {
+            vueloId: v.id as string,
+            folio: v.folio as number,
+            estado: v.estado as string,
+            matricula: av?.matricula ?? null,
+            tramos: [],
+          })
+          .get(v.id as string) as VueloAgg);
+      agg.tramos.push({
+        escalaId: e.id as string,
+        orden: e.orden as number,
+        esFerry: e.es_ferry === true,
+        origen: (e.origen_iata as string).toUpperCase(),
+        destino: (e.destino_iata as string).toUpperCase(),
+        fecha: dia(
+          (e.fecha_salida_plan as string | null) ??
+            (v.fecha_vuelo as string | null),
+        ),
+        sinEvidencia:
+          (e.taco_llegada == null || e.taco_llegada_origen === 'DEDUCIDO') &&
+          !e.foto_taco_salida_url &&
+          !e.foto_taco_llegada_url,
+      });
+    }
+
+    interface Punta {
+      vueloId: string;
+      folio: number;
+      matricula: string | null;
+      aeropuerto: string;
+      fecha: string;
+    }
+    const anfitriones: Punta[] = [];
+    const cubiertos: Punta[] = [];
+    const limite14 = 14 * 86_400_000;
+    for (const agg of porVuelo.values()) {
+      if (agg.tramos.length < 2) continue;
+      const primero = agg.tramos[0];
+      const ultimo = agg.tramos[agg.tramos.length - 1];
+      // ANFITRIÓN: último tramo activo = ferry sin evidencia que sale de P.
+      // EN_VUELO incluido (ya voló y su avión duerme en P: el caso estrella);
+      // su ferry pudo planearse ayer — se admite hasta 3 días atrás.
+      if (
+        ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO', 'EN_VUELO'].includes(
+          agg.estado,
+        ) &&
+        ultimo.esFerry &&
+        ultimo.sinEvidencia &&
+        ultimo.fecha &&
+        Date.parse(hoy) - Date.parse(ultimo.fecha) <= 3 * 86_400_000 &&
+        Date.parse(ultimo.fecha) - Date.parse(hoy) <= limite14
+      ) {
+        anfitriones.push({
+          vueloId: agg.vueloId,
+          folio: agg.folio,
+          matricula: agg.matricula,
+          aeropuerto: ultimo.origen,
+          fecha: ultimo.fecha,
+        });
+      }
+      // CUBIERTO: primer tramo activo = ferry sin evidencia que llega a P,
+      // de HOY en adelante (el pasado no se combina).
+      if (
+        ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'].includes(
+          agg.estado,
+        ) &&
+        primero.esFerry &&
+        primero.sinEvidencia &&
+        primero.fecha &&
+        primero.fecha >= hoy &&
+        Date.parse(primero.fecha) - Date.parse(hoy) <= limite14
+      ) {
+        cubiertos.push({
+          vueloId: agg.vueloId,
+          folio: agg.folio,
+          matricula: agg.matricula,
+          aeropuerto: primero.destino,
+          fecha: primero.fecha,
+        });
+      }
+    }
+
+    for (const anf of anfitriones) {
+      for (const cub of cubiertos) {
+        if (cub.vueloId === anf.vueloId) continue;
+        if (cub.aeropuerto !== anf.aeropuerto) continue;
+        const noches =
+          (Date.parse(cub.fecha) - Date.parse(anf.fecha)) / 86_400_000;
+        if (noches < 0 || noches > 3) continue;
+        await this.dispatch(
+          config,
+          `combinacion_${anf.vueloId}_${cub.vueloId}`,
+          {
+            titulo: `Oportunidad: combinar #${anf.folio} y #${cub.folio}`,
+            cuerpo: `El vuelo #${anf.folio} deja ${anf.matricula ?? 'su avión'} en ${anf.aeropuerto} el ${anf.fecha} y el #${cub.folio} necesita salir de ${anf.aeropuerto} el ${cub.fecha}. Combínalos desde el detalle del vuelo #${cub.folio}: el avión pernocta, se cancelan los dos ferries y el margen es de la empresa.`,
+            tipo: 'alerta_sistema',
+            link: `/admin/flights/${cub.vueloId}`,
+          },
+        );
+      }
+    }
+  }
+
+  private async sincronizarEspejoIda(): Promise<void> {
+    // PRIMER TRAMO ACTIVO por vuelo (vuelos combinados, 28-ago): leer el
+    // orden=1 a secas re-sincronizaba el vuelo con el avión de un ferry
+    // CANCELADO y revertía a diario la reasignación al avión que sí vuela.
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'vuelo_id, orden, aeronave_id, vuelo!inner(folio, aeronave_id, es_externo)',
+      )
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(4000);
+    if (error) throw new Error(error.message);
+    const vistos = new Set<string>();
+    for (const e of data ?? []) {
+      // Solo el PRIMER tramo activo de cada vuelo (vienen ordenados por
+      // orden). OJO: se elige el primero ANTES de mirar su avión — filtrar
+      // por avión primero haría que un tramo 1 heredado (null) cediera la
+      // semilla al tramo 2 y el espejo pisara el vuelo con el avión de una
+      // rotación.
+      if (vistos.has(e.vuelo_id as string)) continue;
+      vistos.add(e.vuelo_id as string);
+      if (e.aeronave_id == null) continue;
       const raw = e.vuelo as unknown;
       const v = (Array.isArray(raw) ? raw[0] : raw) as {
         folio?: number;

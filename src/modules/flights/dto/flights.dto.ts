@@ -381,6 +381,45 @@ export class CubrirExternoDto {
   avion_externo_matricula?: string;
 }
 
+export class CombinarVuelosDto {
+  @ApiProperty({
+    description:
+      'Vuelo ANFITRIÓN: el que ya lleva pax al destino y cuyo avión pernocta.',
+  })
+  @IsUUID()
+  vuelo_anfitrion_id!: string;
+
+  @ApiProperty({
+    description:
+      'Tramo ferry de ESTE vuelo (el cubierto) que se cancela: su ida vacía.',
+  })
+  @IsUUID()
+  tramo_ferry_id!: string;
+
+  @ApiProperty({
+    description:
+      'Tramo ferry del ANFITRIÓN que se cancela: su regreso vacío.',
+  })
+  @IsUUID()
+  tramo_ferry_anfitrion_id!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Asignar también el piloto del anfitrión (el que pernocta) a este vuelo. Default true.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aplicar_piloto?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Marcar pernocta OPERATIVA en el último tramo activo del anfitrión (solo señal al piloto; jamás toca precios). Default true.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  marcar_pernocta?: boolean;
+}
+
 export class CreateExternalFlightDto {
   @ApiProperty()
   @IsUUID()

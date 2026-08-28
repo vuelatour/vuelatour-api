@@ -111,7 +111,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -1369,11 +1369,16 @@ export class QuotesService {
     // lo pisa: vuelo.aeronave_id espeja la ida y la tabla de vuelos refleja
     // lo OPERACIONAL (caso vuelo #80: cotizado en XA-VGV, volado en N990GG —
     // registrar el cobro lo regresaba al avión de la cotización).
+    // Primer tramo ACTIVO (vuelos combinados, 28-ago): con la ida ferry
+    // cancelada, leer el orden=1 a secas rebotaba el avión del vuelo al del
+    // tramo cancelado al revisar el precio.
     const { data: ida } = await this.supabase.service
       .from('escala')
       .select('aeronave_id')
       .eq('vuelo_id', vueloId)
-      .eq('orden', 1)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true })
+      .limit(1)
       .maybeSingle();
     const aeronaveOperativa =
       (ida?.aeronave_id as string | null) ?? dto.aeronave_id;

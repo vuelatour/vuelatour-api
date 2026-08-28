@@ -9,7 +9,7 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, calculo_snapshot';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, combinado_con_id, calculo_snapshot';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -395,6 +395,16 @@ export class FlightReportService {
     // Venta − Gasolina − Gastos = REMANENTE sigue cuadrando exacto) y se pinta
     // como línea visible en la lista de gastos.
     const costoExternoUsd = v.es_externo === true ? n(v.costo_externo_usd) : 0;
+    if (v.combinado_con_id) {
+      const { data: otro } = await this.supabase.service
+        .from('vuelo')
+        .select('folio')
+        .eq('id', v.combinado_con_id as string)
+        .maybeSingle();
+      notasHoras.push(
+        `Vuelo COMBINADO con #${(otro?.folio as number | undefined) ?? '?'} (estrategia de pernocta): los tramos ferry de ambos se cancelaron a propósito y un solo avión cubrió los dos. Los precios de ambos clientes quedaron intactos.`,
+      );
+    }
     if (v.es_externo === true && v.costo_externo_usd == null) {
       notasHoras.push(
         'Vuelo externo SIN costo del operador capturado: la ganancia mostrada es BRUTA (no se ha restado lo que cobra el operador).',
