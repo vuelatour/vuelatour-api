@@ -28,6 +28,8 @@ export interface CapturaItem {
   id: string;
   /** ISO: cuándo quedó el registro en el servidor. */
   fecha: string;
+  /** Fecha del TICKET (YYYY-MM-DD, solo gastos): la app avisa si el año no cuadra. */
+  fecha_gasto?: string | null;
   vuelo_id: string | null;
   vuelo_folio: number | null;
   ruta: string | null;
@@ -97,7 +99,7 @@ export class MeCapturasService {
     let gastosQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, vuelo_id, categoria, monto, moneda, litros, lugar, notas, duplicado_sospechado, created_at, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
+        'id, vuelo_id, categoria, monto, moneda, litros, lugar, notas, duplicado_sospechado, created_at, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
@@ -251,6 +253,9 @@ export class MeCapturasService {
       tipo: esCombustible ? 'COMBUSTIBLE' : 'GASTO',
       id: g.id as string,
       fecha: g.created_at as string,
+      // Fecha del TICKET (28-ago): la app la muestra junto a la de captura
+      // y avisa cuando el año no cuadra (la IA leyó 2025 en una visita 2026).
+      fecha_gasto: (g.fecha_gasto as string | null) ?? null,
       vuelo_id: vueloId,
       vuelo_folio: vueloId ? (folios.get(vueloId) ?? null) : null,
       ruta: vueloId ? (rutas.get(vueloId) ?? null) : null,
