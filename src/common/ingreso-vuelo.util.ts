@@ -295,13 +295,23 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
 /**
  * Parte del AVIÓN de un monto cobrado (USD): prorrateo proporcional. Con el
  * vuelo pagado completo devuelve exactamente `avion_usd`; con pago parcial,
- * la proporción; un sobrecobro se reparte en la misma proporción.
+ * la proporción. SOBRECOBRO (regla del cliente 28-ago-2026): lo cobrado por
+ * encima del total NO es del avión — va a VuelaTour ("Otros movimientos" del
+ * Balance general, como los extras), así que la parte del avión se TOPA en
+ * `avion_usd`.
  */
 export function cobradoParteAvion(
   cobradoUsd: number,
   p: ParticionIngreso,
 ): number {
-  return round2(cobradoUsd * p.factor_avion);
+  const parte = round2(cobradoUsd * p.factor_avion);
+  return p.total_usd > 0 ? Math.min(parte, p.avion_usd) : parte;
+}
+
+/** Exceso cobrado sobre el total del vuelo (sobrecobro); 0 si no lo hay. */
+export function sobrecobroUsd(cobradoUsd: number, p: ParticionIngreso): number {
+  if (p.total_usd <= 0) return 0;
+  return Math.max(0, round2(cobradoUsd - p.total_usd));
 }
 
 /** Complemento de `cobradoParteAvion`: lo cobrado que pertenece a VuelaTour. */

@@ -2,6 +2,7 @@ import {
   cobradoParteAvion,
   cobradoParteVuelatour,
   particionIngresoVuelo,
+  sobrecobroUsd,
 } from './ingreso-vuelo.util';
 
 // Vuelo real #192 (prod, ago-2026): 3.1667 hr × $700 + TUAS 250 + extras
@@ -56,6 +57,15 @@ describe('particionIngresoVuelo', () => {
     expect(cobradoParteVuelatour(4320, p)).toBe(1740);
     expect(cobradoParteAvion(2160, p)).toBe(1290);
     expect(cobradoParteAvion(0, p)).toBe(0);
+  });
+
+  it('sobrecobro: la parte del avión se topa en su venta y el exceso es de VuelaTour', () => {
+    const p = particionIngresoVuelo(V192);
+    expect(cobradoParteAvion(4500, p)).toBe(2580); // topado
+    expect(cobradoParteVuelatour(4500, p)).toBe(1920); // 1740 + 180 de exceso
+    expect(sobrecobroUsd(4500, p)).toBe(180);
+    expect(sobrecobroUsd(4320, p)).toBe(0);
+    expect(sobrecobroUsd(1000, p)).toBe(0);
   });
 
   it('sin IVA (efectivo) y con comisión del vendedor dentro de la venta del avión', () => {

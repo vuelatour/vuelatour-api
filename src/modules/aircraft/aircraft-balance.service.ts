@@ -15,6 +15,7 @@ import {
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   cobradoParteAvion,
+  sobrecobroUsd,
   particionIngresoVuelo,
   type ParticionIngreso,
 } from '../../common/ingreso-vuelo.util';
@@ -55,7 +56,7 @@ const CAT_LABEL: Record<string, string> = {
   FBO: 'FBO',
   COMIDA: 'Comida',
   HOTEL: 'Hotel',
-  TAXI: 'Taxi',
+  TAXI: 'Taxi / estacionamiento',
   REFACCION: 'Refacción',
   FIJO: 'Fijo',
   OTRO: 'Otro',
@@ -143,6 +144,8 @@ interface GastoRow {
   litros: string | number | null;
   fecha_gasto: string | null;
   notas: string | null;
+  /** Aeropuerto/lugar del gasto (IATA o texto libre): nota "Op CUN $x". */
+  lugar?: string | null;
   medio_pago: string | null;
   proveedor: { nombre?: string } | { nombre?: string }[] | null;
   /** Lectura IA de la factura: conceptos para separar el TUA embebido. */
@@ -749,7 +752,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -759,7 +762,7 @@ export class AircraftBalanceService {
       sb
         .from('gasto')
         .select(
-          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
         )
         .eq('aeronave_id', aircraftId)
         .is('vuelo_id', null)
@@ -775,7 +778,7 @@ export class AircraftBalanceService {
       sb
         .from('gasto')
         .select(
-          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+          'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
         )
         .eq('aeronave_id', aircraftId)
         .eq('categoria', 'GAS')
@@ -843,7 +846,7 @@ export class AircraftBalanceService {
     const repartosHaciaAvionRes = await sb
       .from('gasto_reparto')
       .select(
-        'aeronave_id, monto, gasto:gasto_id!inner(id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre))',
+        'aeronave_id, monto, gasto:gasto_id!inner(id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre))',
       )
       .eq('aeronave_id', aircraftId)
       .is('gasto.vuelo_id', null)
@@ -1023,6 +1026,38 @@ export class AircraftBalanceService {
     // vuelos propios con precio. Vive en la pestaña "Otros movimientos" del
     // Balance general; aquí solo se informa al pie (no suma en columnas).
     let otrosIngresosPeriodoUsd = 0;
+    // Aeropuerto de cada gasto de OPERACIÓN (nota "Op CUN $x · Op MHL $y"
+    // como el libro manual del cliente, 28-ago): se resuelve por `lugar`,
+    // por el tramo (escala_id → destino) o por el texto de la nota/proveedor
+    // contra el catálogo (IATA, ciudad, nombre) de los aeropuertos de la ruta.
+    const { data: catAeropuertos } = await sb
+      .from('aeropuerto')
+      .select('iata, nombre, ciudad');
+    const aeropuertoPorIata = new Map<
+      string,
+      { iata: string; tokens: string[] }
+    >();
+    const normalizar = (t: unknown): string =>
+      (typeof t === 'string' ? t : '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase();
+    for (const a of (catAeropuertos ?? []) as Array<{
+      iata: string;
+      nombre: string | null;
+      ciudad: string | null;
+    }>) {
+      const iata = String(a.iata ?? '').toUpperCase();
+      if (!iata) continue;
+      const tokens = [normalizar(a.ciudad), normalizar(a.nombre)]
+        .map((x) => x.trim())
+        .filter((x) => x.length >= 4);
+      aeropuertoPorIata.set(iata, { iata, tokens });
+    }
+    const escalaPorId = new Map<string, EscalaRow>();
+    for (const list of escalasPorVuelo.values())
+      for (const e of list) escalaPorId.set(e.id, e);
+
     for (const v of vuelos) {
       const vEscalas = escalasPorVuelo.get(v.id) ?? [];
       // Fila COMPARTIDA: este avión solo voló algunos tramos; la venta y sus
@@ -1216,6 +1251,47 @@ export class AircraftBalanceService {
       let opMxn: number | null = null;
       let pilotoMxn: number | null = null;
       let otrosMxn: number | null = null;
+      // Operación por aeropuerto (clave = IATA o '' = sin aeropuerto).
+      const opPorAeropuerto = new Map<string, number>();
+      const iatasRuta = [
+        ...new Set(
+          vEscalas
+            .flatMap((e) => [e.origen_iata, e.destino_iata])
+            .filter((x): x is string => !!x)
+            .map((x) => x.toUpperCase()),
+        ),
+      ];
+      const aeropuertoDeGasto = (g: GastoRow): string => {
+        const candidatos = iatasRuta.length
+          ? iatasRuta
+          : [...aeropuertoPorIata.keys()];
+        const buscar = (texto: string): string | null => {
+          const t = normalizar(texto);
+          if (!t) return null;
+          for (const iata of candidatos) {
+            if (new RegExp(`(^|[^a-z])${iata.toLowerCase()}([^a-z]|$)`).test(t))
+              return iata;
+          }
+          for (const iata of candidatos) {
+            const cat = aeropuertoPorIata.get(iata);
+            if (cat?.tokens.some((tok) => t.includes(tok))) return iata;
+          }
+          return null;
+        };
+        const porLugar = g.lugar ? buscar(String(g.lugar)) : null;
+        if (porLugar) return porLugar;
+        const esc = g.escala_id ? escalaPorId.get(g.escala_id) : undefined;
+        if (esc?.destino_iata) return esc.destino_iata.toUpperCase();
+        const prov = Array.isArray(g.proveedor)
+          ? g.proveedor[0]?.nombre
+          : g.proveedor?.nombre;
+        return buscar(`${(g.notas ?? '').split('\n')[0]} ${prov ?? ''}`) ?? '';
+      };
+      const sumarOp = (g: GastoRow, monto: number) => {
+        opMxn = (opMxn ?? 0) + monto;
+        const k = aeropuertoDeGasto(g);
+        opPorAeropuerto.set(k, (opPorAeropuerto.get(k) ?? 0) + monto);
+      };
       // TUA pagado de la fila (categoría TUAS + parte embebida): SOLO
       // informativo (regla 7, 28-ago) — no entra a Y ni a ninguna hoja.
       let tuaPagadoMxn: number | null = null;
@@ -1374,7 +1450,7 @@ export class AircraftBalanceService {
               tuaPagadoMxn = (tuaPagadoMxn ?? 0) + sep.tuaParte;
             }
             if (sep.opParte > 0) {
-              opMxn = (opMxn ?? 0) + sep.opParte;
+              sumarOp(g, sep.opParte);
               opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
             }
             if (sep.fboParte > 0) {
@@ -1407,10 +1483,24 @@ export class AircraftBalanceService {
             otrosMxn = (otrosMxn ?? 0) + mxn;
             otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
           } else {
-            opMxn = (opMxn ?? 0) + mxn;
+            sumarOp(g, mxn);
             opDetalle.push(lineaDetalle(g, mxn, sufijo));
           }
         }
+      }
+      // Encabezado de la nota de OPERACIONES por aeropuerto ("Op CUN $x ·
+      // Op MHL $y"), el formato del libro manual del cliente; lo que no se
+      // pudo ubicar sale como "Op (sin aeropuerto)". Solo si hay operación.
+      if ((opMxn ?? 0) > 0 && opPorAeropuerto.size > 0) {
+        const orden = (k: string) => {
+          const i = iatasRuta.indexOf(k);
+          return i < 0 ? 999 : i;
+        };
+        const partes = [...opPorAeropuerto.entries()]
+          .filter(([, m]) => m > 0)
+          .sort((a, b) => orden(a[0]) - orden(b[0]))
+          .map(([k, m]) => `Op ${k || '(sin aeropuerto)'} $${fmtMonto(m)}`);
+        if (partes.length) opDetalle.unshift(partes.join(' · '));
       }
       // Provisión AFAC (X) = tarifa USD/hr × TC de costos × horas COBRADAS —
       // solo si el avión tiene la config Y hay TC Y hay horas cobradas.
@@ -2300,7 +2390,7 @@ export class AircraftBalanceService {
         ? sb
             .from('cobro_vuelo')
             .select(
-              'vuelo_id, moneda, tc_usd_mxn, fecha_cobro, comision_banco_monto',
+              'vuelo_id, monto, moneda, tc_usd_mxn, fecha_cobro, comision_banco_monto',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_cobro', { ascending: true })
@@ -2377,6 +2467,11 @@ export class AircraftBalanceService {
         g,
       );
     }
+    const fmtMontoOM = (n: number) =>
+      round2(n).toLocaleString('es-MX', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
     const cobrosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
     for (const c of (cobrosRes.data ?? []) as Array<Record<string, unknown>>) {
       const vid = c.vuelo_id as string;
@@ -2726,6 +2821,43 @@ export class AircraftBalanceService {
           fecha_egreso: fechaComision,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
         });
+      }
+
+      // SOBRECOBRO (regla del cliente 28-ago-2026): lo cobrado por encima de
+      // la cotización no es del avión (cobradoParteAvion lo topa) — es
+      // ingreso de VuelaTour y sale aquí como los extras. Misma fuente que
+      // el reparto (cobrosEnUsd + partición).
+      {
+        const vCobrosOM = (cobrosPorVuelo.get(v.id as string) ?? []) as Array<{
+          monto: string | number | null;
+          moneda: string | null;
+          tc_usd_mxn: string | number | null;
+          fecha_cobro: string | null;
+        }>;
+        if (vCobrosOM.length > 0 && p.total_usd > 0) {
+          const cobradoUsd = cobrosEnUsd(
+            vCobrosOM.map((c) => ({
+              monto: c.monto,
+              moneda: c.moneda,
+              tc_usd_mxn: c.tc_usd_mxn,
+            })),
+            tc ?? undefined,
+          ).total_usd;
+          const exceso = sobrecobroUsd(cobradoUsd, p);
+          if (exceso >= 0.01) {
+            const ingreso = tc != null ? r2(exceso * tc) : null;
+            const ultimo = vCobrosOM[vCobrosOM.length - 1];
+            filas.push({
+              ...filaVacia,
+              concepto_ingreso: `sobrecobro (cobrado $${fmtMontoOM(exceso)} USD por encima de la cotización)${
+                ingreso == null ? ' (USD sin TC de venta)' : ''
+              }`,
+              ingreso_mxn: ingreso,
+              fecha_ingreso: diaCancun(ultimo?.fecha_cobro ?? null),
+              remanente_mxn: ingreso,
+            });
+          }
+        }
       }
 
       // Vuelo EXTERNO sin avión: ni su venta ni sus gastos viven en ningún
