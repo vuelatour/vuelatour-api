@@ -2652,6 +2652,7 @@ export class AircraftBalanceService {
     const tipoDe = (c: string): string => {
       const t = c.toLowerCase();
       if (t.startsWith('tua')) return 'TUAs';
+      if (t.startsWith('viáticos pernocta')) return 'pernocta';
       if (t.startsWith('iva')) return 'IVA';
       if (t.startsWith('viáticos') || t.startsWith('viaticos'))
         return 'pernocta';
@@ -2690,7 +2691,7 @@ export class AircraftBalanceService {
       const concepto =
         rows.length === 1
           ? rows[0][cKey]
-          : `${tipos.join(' + ')} (${rows.length} conceptos, ver nota)${
+          : `${tipos.join(' + ')}${key === 'ingreso' ? ' con IVA' : ''} · ${rows.length} conceptos (ver nota)${
               sinTc.length ? ' (parcial: USD sin TC)' : ''
             }`;
       const fecha =
@@ -2701,7 +2702,7 @@ export class AircraftBalanceService {
       const nota = rows
         .map(
           (f) =>
-            `${f[cKey] ?? ''}: ${f[mKey] != null ? `$${fmt(f[mKey] ?? 0)}` : '—'}`,
+            `${f[cKey] ?? ''} = ${f[mKey] != null ? `$${fmt(f[mKey] ?? 0)}` : '—'}`,
         )
         .join('\n');
       return { concepto, monto, fecha, nota };
@@ -3098,11 +3099,65 @@ export class AircraftBalanceService {
         fechaComision ??= diaCancun((c.fecha_cobro as string) ?? null);
       }
 
-      for (const linea of snapshot?.desglose ?? []) {
-        const claveLinea = String(linea.clave ?? '');
-        if (!/^(TUAS|EXTRA|PERNOCTA)/.test(claveLinea)) continue;
-        const montoUsd = num(linea.monto_usd);
-        if (montoUsd == null || montoUsd === 0) continue;
+      // Líneas de VuelaTour del desglose con su IVA YA SUMADO (pedido del
+      // cliente 28-ago tarde: "TUA MHL = $500" y se entiende, sin renglón
+      // aparte de IVA). El IVA de VuelaTour (p.iva_vuelatour_usd) se
+      // reparte proporcional entre las líneas GRAVADAS (TUAS y extras sin
+      // "(sin IVA)"; la pernocta no grava) y los centavos de redondeo se
+      // absorben en la última línea: Σ líneas == p.vuelatour_usd exacto.
+      const lineasVT = (snapshot?.desglose ?? [])
+        .filter((l) => /^(TUAS|EXTRA|PERNOCTA)/.test(String(l.clave ?? '')))
+        .map((l) => ({
+          clave: String(l.clave ?? ''),
+          concepto: String(l.concepto ?? l.clave ?? ''),
+          montoUsd: num(l.monto_usd) ?? 0,
+        }))
+        .filter((l) => l.montoUsd !== 0);
+      const gravada = (l: { clave: string; concepto: string }) =>
+        l.clave === 'TUAS' ||
+        (l.clave === 'EXTRA' && !/\(sin IVA\)\s*$/i.test(l.concepto));
+      const baseGravada = round2(
+        lineasVT.filter(gravada).reduce((a, l) => a + l.montoUsd, 0),
+      );
+      const ivaVT = p.inconsistente ? 0 : p.iva_vuelatour_usd;
+      const lineasConIva = lineasVT.map((l) => ({
+        ...l,
+        totalUsd: round2(
+          l.montoUsd +
+            (gravada(l) && baseGravada > 0
+              ? round2((ivaVT * l.montoUsd) / baseGravada)
+              : 0),
+        ),
+      }));
+      if (
+        lineasConIva.length > 0 &&
+        !p.inconsistente &&
+        p.fuente === 'desglose'
+      ) {
+        const ultima = lineasConIva[lineasConIva.length - 1];
+        const residuo = round2(
+          p.vuelatour_usd - lineasConIva.reduce((a, l) => a + l.totalUsd, 0),
+        );
+        if (Math.abs(residuo) >= 0.005)
+          ultima.totalUsd = round2(ultima.totalUsd + residuo);
+      }
+      const etiquetaCorta = (l: {
+        clave: string;
+        concepto: string;
+      }): string => {
+        if (l.clave === 'TUAS') {
+          const m = /^TUA\s+([A-Za-z]{3})/i.exec(l.concepto);
+          return m ? `TUA ${m[1].toUpperCase()}` : 'TUA';
+        }
+        if (l.clave === 'PERNOCTA') return 'viáticos pernocta';
+        return l.concepto
+          .replace(/\s*\(sin IVA\)\s*$/i, '')
+          .split(' · ')[0]
+          .trim();
+      };
+      for (const linea of lineasConIva) {
+        const claveLinea = linea.clave;
+        const montoUsd = linea.totalUsd;
         sumLineasUsd += montoUsd;
         const ingresoMxn = tc != null ? r2(montoUsd * tc) : null;
         let egresoMxn: number | null = null;
@@ -3164,7 +3219,7 @@ export class AircraftBalanceService {
           concepto_egreso: conceptoEgreso,
           egreso_mxn: egresoMxn,
           fecha_egreso: fechaEgreso,
-          concepto_ingreso: `${String(linea.concepto ?? claveLinea).toLowerCase()}${
+          concepto_ingreso: `${etiquetaCorta(linea)}${
             ingresoMxn == null ? ' (USD sin TC de venta)' : ''
           }`,
           ingreso_mxn: ingresoMxn,
@@ -3178,10 +3233,10 @@ export class AircraftBalanceService {
         });
       }
 
-      // Cierre del ingreso de VuelaTour (regla 28-ago): IVA de TUAS/extras
-      // + centavos de redondeo — lo que la partición atribuye a VuelaTour y
-      // NO está en las líneas listadas arriba. UNA fila por vuelo, solo si
-      // mueve ≥ 1 centavo. Si el desglose no cuadró (p.inconsistente) la
+      // Cierre del ingreso de VuelaTour: con desglose v1.3 el IVA y el
+      // redondeo YA van dentro de cada línea (arriba), así que este residuo
+      // es 0 y no sale fila. Solo queda para los casos sin líneas: UNA fila
+      // por vuelo, solo si mueve ≥ 1 centavo. Si el desglose no cuadró (p.inconsistente) la
       // venta del avión lleva el total COMPLETO y esta fila NEUTRALIZA las
       // líneas de arriba (el cuadre se conserva; el balance lo grita). Sin
       // snapshot v1.3 (fuente 'columnas') no hay líneas que listar: esta
