@@ -492,6 +492,21 @@ export class ListGastosQuery {
   hasta?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Fecha de CAPTURA >= (YYYY-MM-DD, día Cancún): lo que se subió desde esa fecha aunque el ticket traiga otra.',
+  })
+  @IsOptional()
+  @IsDateString()
+  capturado_desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fecha de CAPTURA <= (YYYY-MM-DD, día Cancún)',
+  })
+  @IsOptional()
+  @IsDateString()
+  capturado_hasta?: string;
+
+  @ApiPropertyOptional({
     description: 'Solo gastos sin avión asignado (bandeja de pendientes).',
   })
   @IsOptional()

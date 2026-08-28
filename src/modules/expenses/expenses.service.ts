@@ -203,6 +203,12 @@ export class ExpensesService {
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
+    // Fecha de CAPTURA (28-ago): "lo que subieron esta semana" aunque el
+    // ticket traiga otra fecha — así el panel muestra lo mismo que la app.
+    if (filters.capturado_desde)
+      q = q.gte('created_at', `${filters.capturado_desde}T00:00:00-05:00`);
+    if (filters.capturado_hasta)
+      q = q.lte('created_at', `${filters.capturado_hasta}T23:59:59-05:00`);
     // Pendiente = sin avión asignado (la bandeja debe quedar siempre vacía).
     // FIJO e INDIRECTO se excluyen: por diseño no llevan avión/vuelo — no son
     // "pendientes de resolver" (mismo criterio que el pre-cierre).
@@ -899,6 +905,11 @@ export class ExpensesService {
         );
       }
     }
+    // Fecha del ticket razonable en capturas de CAMPO (28-ago): la IA leyó
+    // "26/08/2025" en un ticket de la visita de 2026 y el gasto quedó un año
+    // atrás, invisible en el panel. En vez de guardar en silencio, se rechaza
+    // con el dato a la vista para que corrijan el año en la app.
+    this.assertFechaRazonable(dto.fecha_gasto, rol);
     // Un gasto INDIRECTO es de la operación, NO de un vuelo: ligarlo a uno lo
     // metería al reporte/reparto de ese vuelo y contaminaría sus números.
     if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
@@ -1689,7 +1700,39 @@ export class ExpensesService {
     }
   }
 
+  /**
+   * Capturas de CAMPO (piloto/mecánico/visitante): la fecha del gasto no
+   * puede estar a más de 120 días atrás ni a más de 1 día a futuro (hora
+   * Cancún). La oficina no se restringe: sí captura tickets viejos y cargas
+   * históricas a propósito.
+   */
+  private assertFechaRazonable(fecha: string | undefined, rol?: Rol): void {
+    if (!fecha) return;
+    if (rol !== Rol.PILOTO && rol !== Rol.MECANICO && rol !== Rol.VISITANTE)
+      return;
+    const hoy = new Date().toLocaleDateString('en-CA', {
+      timeZone: 'America/Cancun',
+    });
+    const dia = fecha.slice(0, 10);
+    const ms = Date.parse(`${dia}T12:00:00Z`) - Date.parse(`${hoy}T12:00:00Z`);
+    if (!Number.isFinite(ms)) return;
+    const dias = Math.round(ms / 86_400_000);
+    const bonita = dia.split('-').reverse().join('/');
+    if (dias > 1) {
+      throw new BadRequestException(
+        `La fecha del gasto (${bonita}) está en el futuro: revísala antes de guardar.`,
+      );
+    }
+    if (dias < -120) {
+      throw new BadRequestException(
+        `La fecha del gasto (${bonita}) es de hace más de 4 meses: revisa el AÑO del ticket antes de guardar (¿es ${hoy.slice(0, 4)}?).`,
+      );
+    }
+  }
+
   async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
+    if (dto.fecha_gasto !== undefined)
+      this.assertFechaRazonable(dto.fecha_gasto, rol);
     if (Object.keys(dto).length === 0) return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
     // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
