@@ -510,6 +510,8 @@ export class AircraftBalanceService {
             ...f,
             detalle: `${p.matricula} · ${f.detalle ?? ''}`,
             avion_color: p.avion_color ?? null,
+            // Secciones por matrícula en la hoja "combustible" (28-ago).
+            matricula: p.matricula,
           })),
         )
         .sort(porFecha);

@@ -472,6 +472,11 @@ export interface BalanceAvionGastoFilaPayload {
   litros?: number | null;
   /** Balance GENERAL: la fila se tiñe con el color del avión. */
   avion_color?: string | null;
+  /**
+   * Matrícula del avión de la fila (hoja "combustible" del GENERAL, 28-ago):
+   * pyservices agrupa la hoja en SECCIONES por matrícula con subtotal.
+   */
+  matricula?: string | null;
 }
 
 export interface BalanceAvionHojaGastosPayload {
