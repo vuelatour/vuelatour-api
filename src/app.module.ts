@@ -38,6 +38,7 @@ import { ConfiguracionModule } from './modules/configuracion/configuracion.modul
 import { FacturacionModule } from './modules/facturacion/facturacion.module';
 import { EngineeringModule } from './modules/engineering/engineering.module';
 import { InventoryModule } from './modules/inventory/inventory.module';
+import { ComprasModule } from './modules/compras/compras.module';
 import { CajaChicaModule } from './modules/caja-chica/caja-chica.module';
 import { ConciliacionModule } from './modules/conciliacion/conciliacion.module';
 // Módulos complementarios de dramirez (treasury/cash-funds quedaron en historial; los reemplazan caja-chica/conciliacion).
@@ -111,6 +112,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
     FacturacionModule,
     EngineeringModule,
     InventoryModule,
+    ComprasModule,
     CajaChicaModule,
     ConciliacionModule,
     DocumentTypesModule,

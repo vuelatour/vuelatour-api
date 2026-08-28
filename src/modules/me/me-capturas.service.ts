@@ -34,6 +34,11 @@ export interface CapturaItem {
   titulo: string;
   detalle: string | null;
   estado: EstadoCaptura;
+  /** Solo GASTO/COMBUSTIBLE (28-ago): compra de refacciones de la que este
+   *  gasto es un pago; null si no está ligado. Campos aditivos. */
+  compra?: { id: string; folio: number } | null;
+  /** MERCANCIA | ENVIO | IMPUESTOS | OTRO; null sin compra. */
+  compra_rol?: string | null;
 }
 
 type Row = Record<string, unknown>;
@@ -92,7 +97,7 @@ export class MeCapturasService {
     let gastosQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, vuelo_id, categoria, monto, moneda, litros, lugar, notas, duplicado_sospechado, created_at, proveedor:proveedor!proveedor_id(nombre)',
+        'id, vuelo_id, categoria, monto, moneda, litros, lugar, notas, duplicado_sospechado, created_at, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
@@ -237,6 +242,11 @@ export class MeCapturasService {
       : // Códigos crudos que se leen mal en Mis registros.
         `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria === 'VISITA' ? 'de visita' : categoria} · ${monto}`;
     const vueloId = (g.vuelo_id as string | null) ?? null;
+    const compraRow = flatten(g.compra);
+    const compra =
+      compraRow && typeof compraRow.id === 'string'
+        ? { id: compraRow.id, folio: Number(compraRow.folio) }
+        : null;
     return {
       tipo: esCombustible ? 'COMBUSTIBLE' : 'GASTO',
       id: g.id as string,
@@ -247,6 +257,8 @@ export class MeCapturasService {
       titulo,
       detalle: detalleDe(flatten(g.proveedor)?.nombre, g.lugar, g.notas),
       estado: g.duplicado_sospechado === true ? 'POSIBLE_DUPLICADO' : 'OK',
+      compra,
+      compra_rol: compra ? ((g.compra_rol as string | null) ?? null) : null,
     };
   }
 

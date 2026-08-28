@@ -30,11 +30,13 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
-// capturó y folio del vuelo (para linkear al detalle).
-const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula))`;
+// capturó y folio del vuelo (para linkear al detalle). `compra` = la compra
+// de refacciones de la que este gasto es un PAGO (28-ago): el equipo la ve
+// como "un solo gasto"; se liga/desliga SOLO desde /v1/compras.
+const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))`;
 
 /** Ventana en días para considerar dos gastos como posible duplicado.
  *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
@@ -101,7 +103,7 @@ export class ExpensesService {
       { label: 'Monto', tipo: 'money' },
     ];
     const filas = data.map((g) => {
-      const x = g as Record<string, unknown>;
+      const x = g;
       const aeronave = x.aeronave as { matricula?: string } | null;
       const proveedor = x.proveedor as { nombre?: string } | null;
       const captura = x.captura as { nombre?: string } | null;
@@ -129,7 +131,7 @@ export class ExpensesService {
     // mes?" de un vistazo, arriba del listado.
     const porCategoria = new Map<string, number>();
     for (const g of data) {
-      const x = g as Record<string, unknown>;
+      const x = g;
       const monto = Number(x.monto);
       if (!Number.isFinite(monto)) continue;
       const clave = `${(x.categoria as string) ?? '—'} (${(x.moneda as string) ?? '?'})`;
@@ -144,7 +146,7 @@ export class ExpensesService {
     // que un total MXN+USD mezclado sería mentira numérica.
     const porPersona = new Map<string, number>();
     for (const g of data) {
-      const x = g as Record<string, unknown>;
+      const x = g;
       if ((x.medio_pago as string) !== 'EFECTIVO') continue;
       const monto = Number(x.monto);
       if (!Number.isFinite(monto)) continue;
@@ -186,6 +188,7 @@ export class ExpensesService {
 
     if (filters.vuelo_id) q = q.eq('vuelo_id', filters.vuelo_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
+    if (filters.compra_id) q = q.eq('compra_id', filters.compra_id);
     if (filters.usuario_captura_id)
       q = q.eq('usuario_captura_id', filters.usuario_captura_id);
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
@@ -222,12 +225,52 @@ export class ExpensesService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    await this.anexarPagosDeCompra(rows);
     return {
-      data: data ?? [],
+      data: rows,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /**
+   * `compra.n_pagos` = cuántos gastos componen la compra de la que este
+   * gasto es un pago (el panel lo usa para mostrar "1 de N" y para avisar
+   * antes de desligar el último). Conteo REAL en una sola consulta sobre
+   * las compras de la página; los gastos sin compra no cambian.
+   */
+  private async anexarPagosDeCompra(
+    rows: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const ids = Array.from(
+      new Set(
+        rows
+          .map((r) => r.compra_id)
+          .filter((v): v is string => typeof v === 'string'),
+      ),
+    );
+    if (ids.length === 0) return;
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select('compra_id')
+      .in('compra_id', ids);
+    if (error) throw new Error(error.message);
+    const conteo = new Map<string, number>();
+    for (const g of (data ?? []) as Array<{ compra_id: string | null }>) {
+      if (!g.compra_id) continue;
+      conteo.set(g.compra_id, (conteo.get(g.compra_id) ?? 0) + 1);
+    }
+    for (const r of rows) {
+      const compraId = r.compra_id;
+      if (typeof compraId !== 'string') continue;
+      const compra = (r.compra as Record<string, unknown> | null) ?? null;
+      r.compra = {
+        ...(compra ?? { id: compraId }),
+        n_pagos: conteo.get(compraId) ?? 0,
+      };
+    }
   }
 
   async findById(id: string) {
@@ -1869,6 +1912,22 @@ export class ExpensesService {
     if (gasto.conciliado === true) {
       throw new ConflictException(
         'Este gasto ya está conciliado con el banco; desconcíliaselo en Conciliación antes de eliminarlo.',
+      );
+    }
+    // PAGO de una compra de refacciones (28-ago): la FK es `set null`, así
+    // que borrarlo dejaría la compra sin ese pago EN SILENCIO (su costo
+    // prorrateado en bodega ya no cuadraría con nada). Se desliga primero
+    // desde Compras, con intención.
+    const compraId = (gasto.compra_id as string | null) ?? null;
+    if (compraId) {
+      const { data: compra } = await this.supabase.service
+        .from('compra')
+        .select('folio')
+        .eq('id', compraId)
+        .maybeSingle();
+      const folio = (compra as { folio?: number } | null)?.folio;
+      throw new ConflictException(
+        `Este gasto es un pago de la compra #${folio ?? '?'} de refacciones; quítalo primero desde Compras.`,
       );
     }
     // Gasto REPARTIDO entre aviones: el reparto es acto de oficina — el

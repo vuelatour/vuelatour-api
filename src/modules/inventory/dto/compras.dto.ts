@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  ArrayMinSize,
   IsArray,
   IsIn,
   IsISO8601,
@@ -15,7 +16,10 @@ import {
 } from 'class-validator';
 
 export class ExtraerCompraDto {
-  @ApiProperty({ description: 'PDF de la factura/orden de compra en base64 (sin prefijo data:)' })
+  @ApiProperty({
+    description:
+      'PDF de la factura/orden de compra en base64 (sin prefijo data:)',
+  })
   @IsString()
   pdf_base64!: string;
 }
@@ -65,7 +69,9 @@ export class ImportarCompraDto {
   @IsIn(['MXN', 'USD'])
   moneda?: 'MXN' | 'USD';
 
-  @ApiPropertyOptional({ description: 'Tipo de cambio de la compra (MXN por USD).' })
+  @ApiPropertyOptional({
+    description: 'Tipo de cambio de la compra (MXN por USD).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
@@ -83,8 +89,29 @@ export class ImportarCompraDto {
   @MaxLength(100)
   referencia?: string;
 
-  @ApiProperty({ type: [ImportarLineaDto] })
+  @ApiPropertyOptional({
+    description:
+      'Shipping impreso en la factura (moneda de la compra). Va a cargos_factura de la COMPRA y se prorratea al costo de cada línea.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  shipping_usd?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Impuestos impresos en la factura (moneda de la compra). Va a cargos_factura de la COMPRA y se prorratea al costo de cada línea.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  impuestos_usd?: number;
+
+  @ApiProperty({ type: [ImportarLineaDto], minItems: 1 })
   @IsArray()
+  @ArrayMinSize(1, { message: 'La compra debe traer al menos una línea.' })
   @ValidateNested({ each: true })
   @Type(() => ImportarLineaDto)
   lineas!: ImportarLineaDto[];

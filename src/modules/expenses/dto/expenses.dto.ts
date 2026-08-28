@@ -464,6 +464,13 @@ export class ListGastosQuery {
   @IsUUID()
   aeronave_id?: string;
 
+  @ApiPropertyOptional({
+    description: 'Pagos de una compra de refacciones (gasto.compra_id).',
+  })
+  @IsOptional()
+  @IsUUID()
+  compra_id?: string;
+
   @ApiPropertyOptional()
   @IsOptional()
   @IsUUID()
