@@ -744,6 +744,52 @@ export class ConciliacionService {
    * conciliados y cuánto dinero sigue pendiente. "Faltan N por conciliar" deja
    * de descubrirse revisando la lista a mano.
    */
+  /**
+   * El INVERSO de la bandeja de movimientos (28-ago, pedido del cliente):
+   * gastos pagados por BANCO (tarjeta corporativa / transferencia) que no
+   * cruzaron con ninguna línea de los estados de cuenta importados. Motivos
+   * típicos: el periodo del banco aún no se importa, la fecha/monto del
+   * gasto no coincide, o el cargo nunca llegó al banco. Default: últimos
+   * 90 días por fecha_gasto (DATE, sin componente horaria).
+   */
+  async gastosSinBanco(desde?: string, hasta?: string) {
+    const d =
+      desde ??
+      new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    let q = this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, categoria, monto, moneda, tc_gasto, medio_pago, tarjeta_terminacion, lugar, conciliado, proveedor:proveedor!proveedor_id(nombre), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio)',
+        { count: 'exact' },
+      )
+      .in('medio_pago', MEDIOS_BANCARIOS)
+      .eq('conciliado', false)
+      .gte('fecha_gasto', d)
+      .order('fecha_gasto', { ascending: false })
+      .limit(500);
+    if (hasta) q = q.lte('fecha_gasto', hasta);
+    const { data, count, error } = await q;
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    // Totales por moneda NATIVA (jamás convertir aquí: es un listado de
+    // faltantes, no un balance).
+    const porMoneda = new Map<string, number>();
+    for (const g of rows) {
+      const mon = (g.moneda as string) ?? 'MXN';
+      porMoneda.set(mon, (porMoneda.get(mon) ?? 0) + Number(g.monto));
+    }
+    return {
+      data: rows,
+      total: count ?? rows.length,
+      desde: d,
+      hasta: hasta ?? null,
+      por_moneda: [...porMoneda.entries()].map(([moneda, monto]) => ({
+        moneda,
+        monto: Math.round(monto * 100) / 100,
+      })),
+    };
+  }
+
   async resumen(desde?: string, hasta?: string) {
     let q = this.supabase.service
       .from('movimiento_bancario')

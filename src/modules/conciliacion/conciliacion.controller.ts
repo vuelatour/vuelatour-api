@@ -89,7 +89,8 @@ export class ConciliacionController {
       q.desde,
       q.hasta,
     );
-    const rango = q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    const rango =
+      q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="conciliacion-${etiqueta}${rango}.xlsx"`,
@@ -157,6 +158,18 @@ export class ConciliacionController {
   })
   list(@Query() q: ListConciliacionQuery) {
     return this.conciliacion.list(q);
+  }
+
+  @Get('gastos-sin-banco')
+  @ApiOperation({
+    summary:
+      'Gastos BANCARIOS (tarjeta/transferencia) que NO aparecen en ningún estado de cuenta: sin conciliar tras los cruces. Default: últimos 90 días.',
+  })
+  gastosSinBanco(
+    @Query('desde') desde?: string,
+    @Query('hasta') hasta?: string,
+  ) {
+    return this.conciliacion.gastosSinBanco(desde, hasta);
   }
 
   @Get('resumen')
