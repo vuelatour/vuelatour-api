@@ -317,6 +317,13 @@ export interface BalanceAvionVueloPayload {
   cliente: string | null;
   estado: string;
   /**
+   * true en filas CANCELADO (regla 28-ago tarde): la venta es lo REALMENTE
+   * cobrado (cargo por cancelación / anticipo retenido; 100 % del avión, sin
+   * partición), nada queda por cobrar y los costos reales se listan igual.
+   * total_cotizacion_* viaja solo informativo. pyservices puede rotularla.
+   */
+  cancelado?: boolean;
+  /**
    * Vuelo cubierto por un operador AJENO. Con avión de referencia vive en
    * el libro de ese avión; sin avión, en el libro EXTERNOS del general
    * (regla 28-ago tarde: "un vuelo más"). pyservices pinta la clave en
@@ -338,6 +345,7 @@ export interface BalanceAvionVueloPayload {
    * VENTA DEL AVIÓN (regla 28-ago): tiempo + ajuste + comisión vendedor +
    * IVA proporcional (particionIngresoVuelo). TUAS/extras/pernocta y su IVA
    * quedan FUERA (otros_ingresos_usd). Sin cotización: horas × tarifa.
+   * CANCELADO: lo realmente cobrado (cobrosEnUsd), sin partición.
    */
   total_usd: number | null;
   /** IVA de la venta del avión (proporcional). */
@@ -351,7 +359,8 @@ export interface BalanceAvionVueloPayload {
   venta_factor?: number | null;
   /** Ingreso de VUELATOUR de la fila: TUAS + extras + pernocta + su IVA
    *  (+ redondeo), EXCLUIDO de total_usd. total_usd + otros_ingresos_usd ==
-   *  total_cotizacion_usd. */
+   *  total_cotizacion_usd (no aplica en CANCELADO: 0 — su venta son los
+   *  cobros retenidos y la cotización es solo referencia). */
   otros_ingresos_usd?: number | null;
   /** TUA pagado del vuelo (categoría TUAS + parte embebida), MXN. SOLO
    *  informativo (regla 7, 28-ago): no suma en OP ni en ninguna hoja. null si 0. */
@@ -628,6 +637,8 @@ export interface GastoVueloSugerenciaPayload {
     fecha_vuelo: string | null;
     matricula: string | null;
     ruta: string | null;
+    /** CANCELADO = ya no vuela (la IA lo elige solo con evidencia clara). */
+    estado: string | null;
   }>;
 }
 

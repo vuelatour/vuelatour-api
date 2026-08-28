@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import { particionIngresoVuelo } from '../../common/ingreso-vuelo.util';
@@ -77,7 +78,11 @@ export class DineroReportService {
     // Vuelos del periodo (todos los aviones). El libro manual solo registra
     // vuelos que ocurrieron o están en firme: las solicitudes/cotizaciones/
     // reservas que nunca se confirmaron NO son ventas (inflaban ventas y
-    // "me deben", y descuadraban contra el reparto, que solo usa COMPLETADO).
+    // "me deben", y descuadraban contra el reparto). Los CANCELADOS entran
+    // SOLO si tienen dinero real ligado — cobros retenidos o gastos (regla
+    // del cliente 28-ago-2026, misma que el reparto); los cancelados "en
+    // seco" se filtran abajo, ya con cobros/gastos en mano, para no meter
+    // ruido en la hoja.
     const vuelosRes = await sb
       .from('vuelo')
       .select(
@@ -85,13 +90,15 @@ export class DineroReportService {
         // particionIngresoVuelo (venta del avión vs ingreso de VuelaTour).
         'id, folio, cliente_id, aeronave_id, estado, es_externo, fecha_vuelo, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, iva_pct, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, calculo_snapshot, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, tuas_usd, extras_total_usd, viaticos_pernocta_usd',
       )
-      .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'])
+      .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO', 'CANCELADO'])
       .gte('fecha_vuelo', d1)
       .lte('fecha_vuelo', d2)
       .order('fecha_vuelo', { ascending: true });
     if (vuelosRes.error) throw new Error(vuelosRes.error.message);
-    const vuelos = (vuelosRes.data ?? []) as Array<Record<string, unknown>>;
-    const vueloIds = vuelos.map((v) => v.id as string);
+    const vuelosPeriodo = (vuelosRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
+    const vueloIds = vuelosPeriodo.map((v) => v.id as string);
 
     const [
       aeronavesRes,
@@ -224,6 +231,14 @@ export class DineroReportService {
       const etiqueta = [f.serie, f.folio].filter(Boolean).join('-');
       if (etiqueta) facturaPorVuelo.set(vid, etiqueta);
     }
+    // Cancelados sin cobros ni gastos: fuera (ver arriba). Un cancelado con
+    // dinero se queda y su fila se arma con reglas propias (abajo).
+    const vuelos = vuelosPeriodo.filter(
+      (v) =>
+        v.estado !== 'CANCELADO' ||
+        cobrosPorVuelo.has(v.id as string) ||
+        gastosPorVuelo.has(v.id as string),
+    );
 
     // CLAVE del libro: "vt" + primer nombre del cliente en minúsculas
     // (vtchacon, vtmagaña). Vuelo de SERVICIO (tramo de taller sin pax) →
@@ -263,8 +278,16 @@ export class DineroReportService {
     let nTc = 0;
     for (const v of vuelos) {
       const avion = aviones.get(v.aeronave_id as string);
-      const horas = num(v.tiempo_cobrable_hr);
-      const tarifa = num(v.tarifa_hora_usd);
+      // VUELO CANCELADO con dinero (regla del cliente, 28-ago-2026): la
+      // "venta" es lo COBRADO y no reembolsado (cargo por cancelación /
+      // anticipo retenido, fuente única cobrosEnUsd), no la cotización; no
+      // hay tiempo ni tarifa por hora (el servicio no se prestó), el IVA se
+      // deriva de lo retenido con el iva_pct del vuelo, la cotización queda
+      // solo informativa en total_cliente_* y "me deben" es 0 (ya no es una
+      // cuenta por cobrar). Misma regla que el reparto.
+      const esCancelado = v.estado === 'CANCELADO';
+      const horas = esCancelado ? null : num(v.tiempo_cobrable_hr);
+      const tarifa = esCancelado ? null : num(v.tarifa_hora_usd);
       const totalUsd = num(v.monto_total_usd);
       const totalMxn = num(v.monto_total_mxn);
       // REGLA 6 (cliente, 28-ago-2026): las columnas de VENTA de esta hoja
@@ -275,16 +298,38 @@ export class DineroReportService {
       // total_cliente_* y "me deben" sigue sobre ese total (la deuda del
       // cliente es completa).
       const p = particionIngresoVuelo(v);
-      const conPrecio = p.total_usd > 0;
-      // Sin precio (cliente interno / $0): como siempre, columnas crudas.
-      const ventaUsd = conPrecio ? p.avion_usd : totalUsd;
-      const ivaUsd = conPrecio ? p.iva_avion_usd : num(v.iva_usd);
+      const conPrecio = !esCancelado && p.total_usd > 0;
       // TC de venta: el pactado; si no, derivado del total MXN por composición.
       const tc =
         pos(v.tc_usd_mxn) ??
         (totalMxn != null && totalUsd != null && totalUsd > 0
           ? totalMxn / totalUsd
           : null);
+      // Lo retenido en USD (solo cancelados; los MXN sin TC quedan fuera del
+      // monto, como en todo el sistema, pero se ven en la lista de cobros).
+      const retenidoUsd = esCancelado
+        ? cobrosEnUsd(cobrosPorVuelo.get(v.id as string) ?? [], tc).total_usd
+        : null;
+      // IVA retenido: iva_pct del vuelo (fracción 0.16 o porcentaje 16); sin
+      // IVA en la cotización, nada que derivar.
+      const ivaPctCrudo = num(v.iva_pct);
+      const ivaFrac =
+        ivaPctCrudo != null && ivaPctCrudo > 0
+          ? ivaPctCrudo > 1
+            ? ivaPctCrudo / 100
+            : ivaPctCrudo
+          : null;
+      // Sin precio (cliente interno / $0): como siempre, columnas crudas.
+      const ventaUsd =
+        retenidoUsd != null ? retenidoUsd : conPrecio ? p.avion_usd : totalUsd;
+      const ivaUsd =
+        retenidoUsd != null
+          ? ivaFrac != null
+            ? r2n(retenidoUsd - retenidoUsd / (1 + ivaFrac))
+            : null
+          : conPrecio
+            ? p.iva_avion_usd
+            : num(v.iva_usd);
       if (tc != null) {
         sumaTc += tc;
         nTc += 1;
@@ -298,13 +343,18 @@ export class DineroReportService {
       const totalMxnCalc =
         totalMxn ?? (totalUsd != null && tc != null ? totalUsd * tc : null);
       // Venta del avión en MXN con el MISMO TC. Sin parte VuelaTour el avión
-      // ES el total del cliente (idéntico a antes, al centavo).
+      // ES el total del cliente (idéntico a antes, al centavo). Cancelado: lo
+      // retenido × TC (sin TC no se inventa).
       const ventaMxn =
-        conPrecio && p.vuelatour_usd > 0
+        retenidoUsd != null
           ? tc != null
-            ? r2n(p.avion_usd * tc)
+            ? r2n(retenidoUsd * tc)
             : null
-          : totalMxnCalc;
+          : conPrecio && p.vuelatour_usd > 0
+            ? tc != null
+              ? r2n(p.avion_usd * tc)
+              : null
+            : totalMxnCalc;
       const ivaMxn = ivaUsd != null && tc != null ? ivaUsd * tc : null;
 
       // Cobros a MXN (misma regla del balance: MXN directo; USD × su TC o el
@@ -320,15 +370,27 @@ export class DineroReportService {
         return { fecha: (c.fecha_cobro as string) ?? null, monto_mxn: r2(mxn) };
       });
       const totalCobros = cobros.reduce((s, c) => s + (c.monto_mxn ?? 0), 0);
-      const meDeben =
-        totalMxnCalc != null ? Math.max(0, totalMxnCalc - totalCobros) : null;
+      // Cancelado: nada por cobrar (lo retenido ES la venta).
+      const meDeben = esCancelado
+        ? 0
+        : totalMxnCalc != null
+          ? Math.max(0, totalMxnCalc - totalCobros)
+          : null;
+      // El schema no tiene columna de estado: el cancelado se marca en la
+      // RUTA (columna de texto que ya pinta la hoja) y en el status de cobro.
+      const rutaBase = rutaDe(v.id as string);
+      const ruta = esCancelado
+        ? rutaBase
+          ? `${rutaBase} · CANCELADO`
+          : 'CANCELADO'
+        : rutaBase;
 
       filas.push({
         clave: claveDe(v),
         matricula: avion?.matricula ?? (v.es_externo ? 'EXTERNO' : null),
         color: avion?.color ?? null,
         fecha: (v.fecha_vuelo as string) ?? null,
-        ruta: rutaDe(v.id as string),
+        ruta,
         tiempo: horas,
         venta_hr_usd: r2(tarifa),
         venta_hr_mxn: r2(tarifa != null && tc != null ? tarifa * tc : null),
@@ -341,9 +403,14 @@ export class DineroReportService {
         total_cobrado_mxn: r2(ventaMxn),
         iva_total_mxn: r2(ivaMxn),
         total_siva_mxn: r2(ventaMxn != null ? ventaMxn - (ivaMxn ?? 0) : null),
+        // Cancelado: la cotización se conserva aquí solo como referencia.
         total_cliente_usd: r2(conPrecio ? p.total_usd : totalUsd),
         total_cliente_mxn: r2(totalMxnCalc),
-        status_cobro: v.cobrado === true ? 'COBRADO' : 'PENDIENTE',
+        status_cobro: esCancelado
+          ? 'CANCELADO'
+          : v.cobrado === true
+            ? 'COBRADO'
+            : 'PENDIENTE',
         cobros,
         total_cobros_mxn: r2(totalCobros),
         me_deben_mxn: r2(meDeben),
@@ -411,6 +478,9 @@ export class DineroReportService {
       // vuelo no lleva línea TUAS (partición inconsistente, cotizado sin
       // TUAS, TUA que apareció en la factura del aeródromo…) sale al final
       // del vuelo como fila de SOLO-egreso — antes desaparecía de la hoja.
+      // Vuelo CANCELADO: sin líneas de ingreso (conPrecio=false: no se
+      // vendió TUAS/extras/pernocta); el TUA que sí se pagó sale igual como
+      // solo-egreso.
       let tuaPagadoMxn = 0;
       let tuaPagadoHubo = false;
       let tuaSinTc = false;
@@ -559,7 +629,9 @@ export class DineroReportService {
         otrosIngresos.push({
           clave: claveDe(v),
           fecha_vuelo: (v.fecha_vuelo as string) ?? null,
-          concepto_egreso: conceptoTuasPagadas('sin línea TUAS cobrada'),
+          concepto_egreso: conceptoTuasPagadas(
+            esCancelado ? 'vuelo cancelado' : 'sin línea TUAS cobrada',
+          ),
           egreso_mxn: egreso,
           fecha_egreso: fechaTua,
           concepto_ingreso: null,

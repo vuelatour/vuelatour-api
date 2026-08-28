@@ -7379,9 +7379,13 @@ export class FlightsService {
     rol?: Rol,
   ) {
     const vuelo = await this.findById(vueloId);
-    // Cargo por cancelación (Itzel): la oficina SÍ puede registrar un cobro en
-    // un vuelo cancelado (ej. cliente canceló por clima y se le cobra algo);
-    // el piloto en campo no.
+    // REGLA (cliente, 28-ago-2026): un vuelo CANCELADO puede tener cobros
+    // reales — cargo por cancelación o anticipo retenido que NO se reembolsa.
+    // La oficina (ADMIN/COORDINADOR/FACTURACION) SÍ los registra aquí y ese
+    // dinero entra al 100 % como venta del avión en el reparto y en el Libro
+    // Dinero (profit-sharing / dinero-report). El PILOTO en campo no: si se
+    // canceló, ya no hay cobro de campo que hacer. Un cobro que luego se
+    // reembolsa se corrige/elimina (updateCobro/deleteCobro), no se deja.
     if (vuelo.estado === 'CANCELADO' && rol === Rol.PILOTO) {
       throw new ConflictException(
         'El vuelo está CANCELADO; los cargos por cancelación los registra la oficina.',
@@ -7516,6 +7520,16 @@ export class FlightsService {
     // 0 >= 0 marcaba cobrado=true y eso BLOQUEABA revisar la cotización
     // justo del vuelo que más lo necesita (caso #38: reserva volada y
     // completada por tacos, sin cotización ni cobros, atorada en amarillo).
+    //
+    // Vuelo CANCELADO (28-ago): la bandera se calcula IGUAL contra la
+    // cotización, a sabiendas de que un cargo por cancelación parcial deja
+    // cobrado=false aunque no haya nada más por cobrar. Se deja así a
+    // propósito: `cobrado` es "pagó la cotización completa" (sirve para
+    // candados de revisión de cotización), y ningún lector de dinero la usa
+    // como fuente — el reparto, el Libro Dinero y el semáforo parten de
+    // cobrosEnUsd y tratan el cancelado por su cuenta (pendiente 0, cobrado
+    // = lo retenido). Forzarla a true mentiría ("pagó todo") y forzarla a
+    // false por ser cancelado ocultaría un anticipo retenido del 100 %.
     const montoTotal = Number(vuelo.monto_total_usd);
     const cobradoDeberiaSer = montoTotal > 0 && total_usd >= montoTotal - 1;
 

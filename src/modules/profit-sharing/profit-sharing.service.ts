@@ -68,6 +68,13 @@ interface AeronaveRow {
 interface VueloRow {
   id: string;
   aeronave_id: string | null;
+  /**
+   * COMPLETADO o CANCELADO (regla del cliente 28-ago-2026): un cancelado
+   * puede tener dinero real — cobros NO reembolsados (cargo por cancelación /
+   * anticipo retenido) y gastos (se voló a recoger, cancelaron, ferry de
+   * regreso) — y ambos cuentan en el reparto.
+   */
+  estado: string;
   monto_total_usd: string | null;
   tc_usd_mxn: string | null;
   cobrado: boolean;
@@ -366,6 +373,11 @@ export class ProfitSharingService {
       );
       extCobrado += conv.total_usd;
       extSinTcMxn += conv.sin_tc_mxn;
+      // Externo CANCELADO (28-ago): lo retenido al cliente sí es ingreso; el
+      // costo pactado con el operador NO se resta (el servicio no se prestó;
+      // si el operador cobró penalización va como gasto del vuelo) ni se
+      // reclama como "sin costo".
+      if (v.estado === 'CANCELADO') continue;
       if (v.costo_externo_usd == null) {
         extSinCosto += 1;
       } else {
@@ -520,6 +532,12 @@ export class ProfitSharingService {
       comision_vendedor_usd: number;
       cobrado: boolean;
       cobros_sin_tc_mxn: number;
+      /**
+       * ADITIVO (28-ago-2026): vuelo CANCELADO con dinero real. Su cobro
+       * retenido entra al 100 % como venta del avión (venta_avion_usd ==
+       * cobrado_avion_usd), sin partición VuelaTour ni pendiente.
+       */
+      cancelado: boolean;
     }> = [];
     for (const v of ctx.vuelos) {
       if (v.aeronave_id !== a.id) continue;
@@ -528,23 +546,42 @@ export class ProfitSharingService {
         ctx.cobrosPorVuelo.get(v.id) ?? [],
         v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
       );
-      const cobradoAvion = cobradoParteAvion(conv.total_usd, p);
-      const cobradoVT = round2(conv.total_usd - cobradoAvion);
-      const pendienteAvion = Math.max(0, round2(p.avion_usd - cobradoAvion));
-      const pendienteBrutoVuelo = Math.max(
-        0,
-        round2(p.total_usd - conv.total_usd),
-      );
-      const pendienteVT = Math.max(0, round2(p.vuelatour_usd - cobradoVT));
-      const comisionEfectiva = Math.min(
-        Number(v.comision_vendedor_usd ?? 0),
-        cobradoAvion,
-      );
+      // VUELO CANCELADO (regla del cliente, 28-ago-2026): lo cobrado y NO
+      // reembolsado (cargo por cancelación / anticipo retenido) es ingreso
+      // real del avión — entra al 100 % como venta del avión, SIN partición
+      // (no se vendieron TUAS/extras/pernocta: el servicio no se prestó),
+      // SIN pendiente (la cotización ya no es una cuenta por cobrar) y SIN
+      // comisión del vendedor (no hubo venta que comisionar). Sus gastos
+      // entran como los de cualquier vuelo (por categoría, abajo).
+      const esCancelado = v.estado === 'CANCELADO';
+      // Cancelado sin cobros (ni USD ni MXN sin TC): no aporta ingreso ni
+      // cuenta como vuelo del reparto — sus gastos, si los hay, ya entran por
+      // categoría abajo (ctx.gastos por aeronave_id). Así detalle.vuelos ==
+      // vuelos_cobrados + vuelos_pendientes por construcción.
+      if (esCancelado && conv.total_usd <= 0 && conv.sin_tc_mxn <= 0) continue;
+      const cobradoAvion = esCancelado
+        ? conv.total_usd
+        : cobradoParteAvion(conv.total_usd, p);
+      const cobradoVT = esCancelado ? 0 : round2(conv.total_usd - cobradoAvion);
+      const pendienteAvion = esCancelado
+        ? 0
+        : Math.max(0, round2(p.avion_usd - cobradoAvion));
+      const pendienteBrutoVuelo = esCancelado
+        ? 0
+        : Math.max(0, round2(p.total_usd - conv.total_usd));
+      const pendienteVT = esCancelado
+        ? 0
+        : Math.max(0, round2(p.vuelatour_usd - cobradoVT));
+      const comisionEfectiva = esCancelado
+        ? 0
+        : Math.min(Number(v.comision_vendedor_usd ?? 0), cobradoAvion);
       cobrado += cobradoAvion;
       cobradoBruto += conv.total_usd;
       otrosIngresosVT += cobradoVT;
       otrosIngresosVTPendiente += pendienteVT;
-      if (p.vuelatour_usd > 0) {
+      // Un cancelado no aporta al bloque informativo de ingreso VuelaTour
+      // (ni conteo ni desglose cotizado): nada de eso se vendió.
+      if (!esCancelado && p.vuelatour_usd > 0) {
         vuelosConOtrosIngresos += 1;
         desgloseVT.tuas_usd += p.tuas_usd;
         desgloseVT.extras_usd += p.extras_usd;
@@ -555,7 +592,11 @@ export class ProfitSharingService {
       pendiente += pendienteAvion;
       pendienteBruto += pendienteBrutoVuelo;
       comisionesVenta += comisionEfectiva;
-      if (v.cobrado) vuelosCobrados += 1;
+      // Conteos: un cancelado nunca es "pendiente" (no hay saldo por cobrar);
+      // cuenta como cobrado solo si de verdad retuvo dinero.
+      if (esCancelado) {
+        vuelosCobrados += 1; // ya se filtró arriba: siempre retuvo dinero
+      } else if (v.cobrado) vuelosCobrados += 1;
       else vuelosPendientes += 1;
       detalleVuelos.push({
         id: v.id,
@@ -563,21 +604,28 @@ export class ProfitSharingService {
         fecha: diaCancun(v.fecha_vuelo),
         ruta: `${v.origen_iata ?? '—'} → ${v.destino_iata ?? '—'}`,
         es_externo: v.es_externo === true,
-        total_usd: p.total_usd,
+        // Cancelado: el total del cliente es lo retenido (la cotización ya
+        // no es deuda) — así el pie del panel (Σ venta) cuadra con la card.
+        total_usd: esCancelado ? conv.total_usd : p.total_usd,
         cobrado_usd: conv.total_usd,
         pendiente_usd: pendienteBrutoVuelo,
-        venta_avion_usd: p.avion_usd,
+        venta_avion_usd: esCancelado ? cobradoAvion : p.avion_usd,
         cobrado_avion_usd: cobradoAvion,
         pendiente_avion_usd: pendienteAvion,
         otros_ingresos_vuelatour_usd: cobradoVT,
-        otros_ingresos_vuelatour_cotizado_usd: p.vuelatour_usd,
+        otros_ingresos_vuelatour_cotizado_usd: esCancelado
+          ? 0
+          : p.vuelatour_usd,
         otros_ingresos_vuelatour_pendiente_usd: pendienteVT,
         cobrado_bruto_usd: conv.total_usd,
         particion_fuente: p.fuente,
-        particion_inconsistente: p.inconsistente,
+        particion_inconsistente: esCancelado ? false : p.inconsistente,
         comision_vendedor_usd: round2(comisionEfectiva),
-        cobrado: v.cobrado,
+        // Cancelado con dinero retenido = cobrado (no hay saldo pendiente);
+        // los cancelados sin cobros ya no llegan aquí.
+        cobrado: esCancelado || v.cobrado,
         cobros_sin_tc_mxn: conv.sin_tc_mxn,
+        cancelado: esCancelado,
       });
     }
     detalleVuelos.sort(
@@ -893,8 +941,9 @@ export class ProfitSharingService {
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
-      // Cancelados del periodo: pueden tener dinero vivo (cobros por cargo de
-      // cancelación y gastos provisionados) que el reparto ignora.
+      // Cancelados del periodo: pueden tener dinero real (cobros retenidos y
+      // gastos) que YA cuenta en el reparto (regla 28-ago) — aquí solo se
+      // enumeran para que la oficina confirme que ese dinero es de verdad.
       sb
         .from('vuelo')
         .select('id, folio, tc_usd_mxn')
@@ -1102,10 +1151,15 @@ export class ProfitSharingService {
       }
     }
 
-    // Dinero vivo en vuelos CANCELADOS del periodo: cobros registrados (cargo
-    // por cancelación que hoy queda FUERA del reparto) y gastos ligados (p.ej.
-    // pistas provisionadas de un vuelo que luego se canceló). Nadie los
-    // vigilaba: no alteran el reparto, pero la oficina debe revisarlos.
+    // Dinero real en vuelos CANCELADOS del periodo (regla del cliente,
+    // 28-ago-2026): los cobros registrados (cargo por cancelación / anticipo
+    // retenido) entran al reparto al 100 % como venta del avión y los gastos
+    // ligados (se voló a recoger, ferry de regreso, pistas) restan como los de
+    // cualquier vuelo. Estos dos renglones son INFORMATIVOS (no bloquean):
+    // la oficina confirma que un cobro no fue reembolsado y que un gasto
+    // corresponde a una operación que sí ocurrió (una pista provisionada de
+    // un vuelo que jamás despegó se borra). NO se listan en cobros_pendientes:
+    // un cancelado no tiene saldo por cobrar.
     const cancelados = (canceladosRes.data ?? []) as Array<
       Record<string, unknown>
     >;
@@ -1499,20 +1553,23 @@ export class ProfitSharingService {
         count: externosSinHonorario,
         vuelos: externosSinHonorarioVuelos,
       },
+      // Informativos (no bloquean): el dinero de vuelos cancelados YA cuenta
+      // en el reparto; solo se pide confirmar que sea real.
       {
         clave: 'cobros_en_cancelados',
-        titulo: 'Vuelos cancelados con cobros registrados',
+        titulo:
+          'Vuelos cancelados con cobros retenidos (ya cuentan en el reparto)',
         detalle:
-          'Cargo por cancelación fuera del reparto — revisar tratamiento.',
+          'Cargo por cancelación o anticipo no reembolsado: entra al 100 % como venta del avión, sin saldo pendiente. Confirma que no se haya devuelto al cliente; si se reembolsó, corrige o elimina el cobro en el detalle del vuelo.',
         count: cobrosEnCancelados.length,
         monto_usd: round2(cobrosEnCanceladosUsd),
         vuelos: cobrosEnCancelados,
       },
       {
         clave: 'gastos_en_cancelados',
-        titulo: 'Gastos ligados a vuelos cancelados',
+        titulo: 'Gastos ligados a vuelos cancelados (ya restan en el reparto)',
         detalle:
-          'El vuelo se canceló pero sus gastos siguen vivos (p. ej. pistas provisionadas): bórralos o reasígnalos, o quedarán colgando fuera de toda vigilancia.',
+          'Se voló a recoger, ferry de regreso, pistas… son costo real del avión y ya se descuentan. Confirma que correspondan a algo que sí ocurrió: una pista provisionada de un vuelo que nunca despegó se borra en Gastos.',
         count: gastosEnCanceladosCount,
         vuelos: vuelosConGastoCancelado,
       },
@@ -1580,17 +1637,20 @@ export class ProfitSharingService {
   }
 
   /**
-   * Solo vuelos COMPLETADOS (los que realmente volaron): las cotizaciones que
-   * nunca se cerraron no inflan el "pendiente de cobro" de los socios. Cortes
-   * en hora Cancún (UTC−5): un vuelo nocturno del día 31 pertenece a SU mes.
+   * Vuelos COMPLETADOS (los que realmente volaron) y CANCELADOS (regla del
+   * cliente 28-ago-2026: sus cobros retenidos y sus gastos son dinero real y
+   * entran al reparto — ver `computeAvion`). Las cotizaciones/reservas que
+   * nunca se cerraron siguen fuera: no inflan el "pendiente de cobro" de los
+   * socios. Cortes en hora Cancún (UTC−5): un vuelo nocturno del día 31
+   * pertenece a SU mes.
    */
   private async fetchVuelos(desde: string, hasta: string): Promise<VueloRow[]> {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+        'id, aeronave_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
       )
-      .eq('estado', 'COMPLETADO')
+      .in('estado', ['COMPLETADO', 'CANCELADO'])
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`);
     if (error) throw new Error(error.message);
@@ -1617,7 +1677,11 @@ export class ProfitSharingService {
       .in('vuelo_id', vueloIds)
       // Tramos cancelados fuera (28-ago, cinturón): cancelEscala anula sus
       // lecturas, pero si un residuo conservara tacos sumaría horas de una
-      // operación que no ocurrió.
+      // operación que no ocurrió. Los tramos vivos de un vuelo CANCELADO sí
+      // entran: solo suman si tienen salida Y llegada, y la llegada siempre
+      // es evidencia real (el sistema jamás la estima) — si el avión voló a
+      // recoger y regresó ferry, esas horas movieron el horómetro y cuentan
+      // en la reserva de overhaul.
       .is('cancelada_at', null);
     if (error) throw new Error(error.message);
     return data ?? [];

@@ -316,7 +316,10 @@ export class ExpensesService {
       );
     }
 
-    // Vuelos propios no cancelados en ±3 días de la fecha del gasto.
+    // Vuelos propios en ±3 días de la fecha del gasto. Los CANCELADOS
+    // también (regla del cliente 28-ago-2026): el piloto que voló a recoger,
+    // le cancelaron y regresó ferry SÍ gastó en ese vuelo — su gasto se liga
+    // ahí y cuenta en el balance/reparto. Solo quedan fuera los externos.
     const base = new Date(`${fecha}T12:00:00-05:00`);
     const lo = new Date(base.getTime() - 3 * 86400_000).toISOString();
     const hi = new Date(base.getTime() + 3 * 86400_000).toISOString();
@@ -325,7 +328,6 @@ export class ExpensesService {
       .select(
         'id, folio, fecha_vuelo, piloto_id, copiloto_id, apoyo_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id)',
       )
-      .neq('estado', 'CANCELADO')
       .eq('es_externo', false)
       .gte('fecha_vuelo', lo)
       .lte('fecha_vuelo', hi);
@@ -372,6 +374,7 @@ export class ExpensesService {
         aeronave_id: (v.aeronave_id as string | null) ?? null,
         matricula: matriculaDe(v),
         ruta: rutaDe(v),
+        estado: (v.estado as string | null) ?? null,
       }));
 
     if (candidatos.length === 0) {
@@ -390,11 +393,27 @@ export class ExpensesService {
     const mismoDia = candidatos.filter(
       (c) => diaCancun(c.fecha_vuelo) === fecha,
     );
-    if (mismoDia.length === 1) {
+    // Un CANCELADO del mismo día (p. ej. el original de un cambio de avión,
+    // que conserva fecha y piloto) NO compite con el vuelo vivo: gana el
+    // vivo; el cancelado solo se sugiere cuando es el único del día (sus
+    // gastos sí cuentan en el balance) y sigue en `candidatos` para elegirlo
+    // a mano.
+    const vivosDia = mismoDia.filter((c) => c.estado !== 'CANCELADO');
+    if (vivosDia.length === 1) {
+      return {
+        sugerido: vivosDia[0],
+        confianza: 0.95,
+        razon: 'Único vuelo (no cancelado) del piloto ese día.',
+        fuente: 'regla' as const,
+        candidatos,
+      };
+    }
+    if (vivosDia.length === 0 && mismoDia.length === 1) {
       return {
         sugerido: mismoDia[0],
-        confianza: 0.95,
-        razon: 'Único vuelo del piloto ese día.',
+        confianza: 0.8,
+        razon:
+          'Único vuelo del piloto ese día (CANCELADO: el gasto cuenta igual en su balance).',
         fuente: 'regla' as const,
         candidatos,
       };
@@ -422,6 +441,7 @@ export class ExpensesService {
         fecha_vuelo: c.fecha_vuelo,
         matricula: c.matricula,
         ruta: c.ruta,
+        estado: c.estado,
       })),
     });
     if (!ia) {
@@ -586,7 +606,10 @@ export class ExpensesService {
       } | null;
     };
     // Vuelos de OPERADOR EXTERNO fuera: sus cuotas de pista las paga el
-    // operador (VuelaTour solo paga el costo pactado del vuelo).
+    // operador (VuelaTour solo paga el costo pactado del vuelo). Vuelos
+    // CANCELADOS también fuera A PROPÓSITO (28-ago): esto es PRE-PROVISIÓN
+    // — un cancelado no debe proponer pistas; si de verdad aterrizó (voló a
+    // recoger), la pista se captura como gasto normal ligado al vuelo.
     const filas = ((escalas ?? []) as unknown as EscalaRow[]).filter(
       (e) =>
         e.vuelo &&
@@ -1021,6 +1044,10 @@ export class ExpensesService {
     // balance): el dinero de un gasto ligado a un vuelo pertenece al avión de
     // ese vuelo. Sin esto, el reparto (que filtra por aeronave_id CRUDO) no lo
     // veía — un gasto con vuelo pero sin avión era invisible para los socios.
+    // A PROPÓSITO no hay candado por estado del vuelo (ni aquí ni en
+    // update()): un vuelo CANCELADO acepta gastos — incluido GAS — porque
+    // el avión pudo volar a recoger y regresar ferry (regla del cliente
+    // 28-ago-2026); esos gastos cuentan en balance y reparto.
     if (!aeronaveId && dto.vuelo_id) {
       const { data: vueloRef } = await this.supabase.service
         .from('vuelo')
@@ -1576,12 +1603,15 @@ export class ExpensesService {
     const desde = new Date(t - 7 * 86_400_000).toISOString();
     const hasta = new Date(t + 14 * 86_400_000).toISOString();
 
+    // Los CANCELADOS entran al universo (28-ago): una carga hecha para un
+    // vuelo que luego se canceló (o que voló a recoger y regresó ferry) es
+    // gasto real de ese vuelo. Abajo NO se proponen como "siguiente salida":
+    // un vuelo que ya no va no se "previene".
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
         'id, folio, origen_iata, destino_iata, estado, fecha_vuelo, fecha_traslado_final, aeronave_id, escalas:escala(aeronave_id, fecha_salida_plan, hora_salida, hora_llegada)',
       )
-      .neq('estado', 'CANCELADO')
       .not('fecha_vuelo', 'is', null)
       .gte('fecha_vuelo', desde)
       .lte('fecha_vuelo', hasta)
@@ -1637,14 +1667,20 @@ export class ExpensesService {
     });
 
     // 1) Carga en ruta: cae dentro de la ventana del vuelo (o va en el aire).
-    const enRuta = deAvion.find(
-      (c) =>
-        (t >= c.inicio - VENTANA_ANTES_MS && t <= c.fin + VENTANA_DESPUES_MS) ||
-        (c.v.estado === 'EN_VUELO' && t >= c.inicio - VENTANA_ANTES_MS),
-    );
+    //    Si un CANCELADO y un vuelo vivo se traslapan (cancelaron el de la
+    //    mañana y el avión salió a otro chárter), gana el vivo: el cancelado
+    //    solo se sugiere cuando es el único cuya ventana contiene la carga.
+    const dentro = (c: (typeof deAvion)[number]) =>
+      (t >= c.inicio - VENTANA_ANTES_MS && t <= c.fin + VENTANA_DESPUES_MS) ||
+      (c.v.estado === 'EN_VUELO' && t >= c.inicio - VENTANA_ANTES_MS);
+    const enRuta =
+      deAvion.find((c) => c.v.estado !== 'CANCELADO' && dentro(c)) ??
+      deAvion.find(dentro);
     // 2) Previno: la siguiente salida de la aeronave después de la carga.
+    //    Un CANCELADO no es una salida por venir (ver arriba); sí puede ser
+    //    "en ruta" o "anterior" y siempre aparece entre los candidatos.
     const siguiente = deAvion
-      .filter((c) => c.inicio >= t)
+      .filter((c) => c.inicio >= t && c.v.estado !== 'CANCELADO')
       .sort((a, b) => a.inicio - b.inicio)[0];
     // 3) Fallback: el vuelo más cercano hacia atrás.
     const anterior = deAvion
