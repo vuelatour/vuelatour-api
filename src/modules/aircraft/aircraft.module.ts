@@ -3,10 +3,11 @@ import { AircraftController } from './aircraft.controller';
 import { AircraftBalanceService } from './aircraft-balance.service';
 import { AircraftService } from './aircraft.service';
 import { ExpirationsModule } from '../expirations/expirations.module';
+import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 
 @Module({
-  imports: [ExpirationsModule, PyservicesModule],
+  imports: [ExpirationsModule, PyservicesModule, TipoCambioModule],
   controllers: [AircraftController],
   providers: [AircraftService, AircraftBalanceService],
   exports: [AircraftService],

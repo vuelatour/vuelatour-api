@@ -21,6 +21,7 @@ import { PropellersModule } from './modules/propellers/propellers.module';
 import { ClientsModule } from './modules/clients/clients.module';
 import { ProvidersModule } from './modules/providers/providers.module';
 import { BankAccountsModule } from './modules/bank-accounts/bank-accounts.module';
+import { TipoCambioModule } from './modules/tipo-cambio/tipo-cambio.module';
 import { MultasModule } from './modules/multas/multas.module';
 import { CardsModule } from './modules/cards/cards.module';
 import { AirportsModule } from './modules/airports/airports.module';
@@ -117,6 +118,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
     ProfitSharingModule,
     DashboardsModule,
     MultasModule,
+    TipoCambioModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

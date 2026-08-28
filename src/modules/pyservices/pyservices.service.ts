@@ -294,6 +294,8 @@ export interface BalanceAvionVueloPayload {
   total_usd: number | null;
   iva_usd: number | null;
   tc_venta: number | null;
+  /** true = TC no capturado en la cotización: se usó el oficial (Banxico FIX) del día de la cotización. */
+  tc_venta_oficial?: boolean;
   total_mxn: number | null;
   iva_mxn: number | null;
   subtotal_mxn: number | null;

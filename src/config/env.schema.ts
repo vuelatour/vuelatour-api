@@ -70,6 +70,11 @@ export const envSchema = z.object({
   // ===== Push (Firebase Cloud Messaging / APNs) =====
   // JSON del service account de Firebase (una sola línea). Vacío = push deshabilitado.
   FCM_SERVICE_ACCOUNT_JSON: z.string().default(''),
+
+  // ===== Tipo de cambio oficial (Banxico SIE) =====
+  // Token gratuito de https://www.banxico.org.mx/SieAPIRest — vacío = el
+  // balance deja el TC vacío cuando la cotización no lo capturó (como antes).
+  BANXICO_TOKEN: z.string().default(''),
 });
 
 export type EnvVars = z.infer<typeof envSchema>;

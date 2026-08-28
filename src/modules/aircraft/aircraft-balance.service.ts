@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from './aircraft.service';
+import { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
 import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
@@ -21,7 +22,7 @@ import {
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, fecha_vuelo, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado';
+  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado';
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
 // GAS aparte (litros/$ x litro); PERMISO e INDIRECTO van a sus hojas propias.
@@ -58,6 +59,8 @@ interface VueloRow {
   tipo: string | null;
   es_externo: boolean | null;
   fecha_vuelo: string | null;
+  /** Día de la cotización: base del TC oficial de respaldo (27-ago). */
+  fecha_solicitud?: string | null;
   fecha_traslado_final: string | null;
   origen_iata: string | null;
   destino_iata: string | null;
@@ -179,6 +182,7 @@ export class AircraftBalanceService {
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
     private readonly aircraft: AircraftService,
+    private readonly tipoCambio: TipoCambioService,
   ) {}
 
   async xlsx(
@@ -877,6 +881,19 @@ export class AircraftBalanceService {
       gastosPorVuelo.set(g.vuelo_id, list);
     }
 
+    // ===== PASO 0: TC OFICIAL de respaldo (pedido 27-ago) =====
+    // Vuelo sin TC capturado en la cotización: se usa el oficial (Banxico
+    // FIX = DOF) del día de la COTIZACIÓN (fecha_solicitud; si no, el del
+    // vuelo). La fila queda MARCADA (tc_venta_oficial) y el Excel la pinta.
+    const tcOficialPorVuelo = new Map<string, number>();
+    for (const v of vuelos) {
+      if (pos(v.tc_usd_mxn) != null) continue;
+      const dia = diaCancun(v.fecha_solicitud ?? v.fecha_vuelo);
+      if (!dia) continue;
+      const tc = await this.tipoCambio.oficialPara(dia);
+      if (tc != null) tcOficialPorVuelo.set(v.id, tc);
+    }
+
     // ===== PASO 1: TC de costos (Z) por vuelo =====
     // Promedio simple de tc_gasto de los gastos MXN del vuelo con TC (el TC
     // del día realmente registrado); fallback el TC de venta (K); sino null.
@@ -888,7 +905,7 @@ export class AircraftBalanceService {
         .filter((x): x is number => x != null);
       const z = tcs.length
         ? tcs.reduce((a, b) => a + b, 0) / tcs.length
-        : pos(v.tc_usd_mxn);
+        : (pos(v.tc_usd_mxn) ?? tcOficialPorVuelo.get(v.id) ?? null);
       zPorVuelo.set(v.id, z);
     }
     const zs = [...zPorVuelo.values()].filter((z): z is number => z != null);
@@ -1016,7 +1033,9 @@ export class AircraftBalanceService {
           : G != null && D > 0
             ? round2(D * G)
             : null;
-      const K = pos(v.tc_usd_mxn);
+      const kCapturado = pos(v.tc_usd_mxn);
+      const K = kCapturado ?? tcOficialPorVuelo.get(v.id) ?? null;
+      const kOficial = kCapturado == null && K != null;
       const L = I != null && K != null ? round2(I * K) : null;
       const M = J != null && K != null ? round2(J * K) : null;
       const N = L != null ? round2(L - (M ?? 0)) : null;
@@ -1560,6 +1579,7 @@ export class AircraftBalanceService {
         total_usd: I, // total del sistema: desglose completo c/TUAs y extras (7-ago)
         iva_usd: J,
         tc_venta: K,
+        tc_venta_oficial: kOficial,
         total_mxn: L,
         iva_mxn: M,
         subtotal_mxn: N,
@@ -1878,6 +1898,11 @@ export class AircraftBalanceService {
         `Avión ${avion.matricula as string}: provisión permiso AFAC no configurada (campo "Aportación AFAC USD/hr" en la ficha del avión) — columna PERMISO AFAC vacía`,
       );
     }
+    if (tcOficialPorVuelo.size > 0) {
+      pendientes.push(
+        `Avión ${avion.matricula as string}: ${tcOficialPorVuelo.size} vuelo(s) sin tipo de cambio en la cotización — se usó el TC oficial (Banxico FIX / DOF) del día de la cotización; celdas marcadas en azul claro en la hoja maestra`,
+      );
+    }
     if (tcPromedio == null && vuelos.length > 0) {
       pendientes.push(
         `Avión ${avion.matricula as string}: sin TC de costos en ningún vuelo del periodo — indicadores USD vacíos`,
@@ -2105,7 +2130,14 @@ export class AircraftBalanceService {
           .lte('fecha_gasto', hasta)
           .order('fecha_gasto', { ascending: true }),
       ]);
-    for (const r of [avionesRes, gastosRes, cobrosRes, facturasRes, sueltosRes, gasRes]) {
+    for (const r of [
+      avionesRes,
+      gastosRes,
+      cobrosRes,
+      facturasRes,
+      sueltosRes,
+      gasRes,
+    ]) {
       if (r.error) throw new Error(r.error.message);
     }
     const aviones = new Map(
@@ -2165,9 +2197,7 @@ export class AircraftBalanceService {
     // folio da la traza al vuelo; el libro manual lleva su propio contador).
     const claveDe = (v: Record<string, unknown>): string => {
       const cli = Array.isArray(v.cliente) ? v.cliente[0] : v.cliente;
-      const nombre = (
-        (cli as { nombre?: string } | null)?.nombre ?? ''
-      ).trim();
+      const nombre = ((cli as { nombre?: string } | null)?.nombre ?? '').trim();
       const primera = nombre.split(/\s+/)[0] ?? '';
       const limpia = primera.toLowerCase().replace(/[^a-záéíóúüñ0-9]/gi, '');
       return `vt${limpia}${String(v.folio ?? '')}`;
@@ -2231,7 +2261,8 @@ export class AircraftBalanceService {
         const monto = num(c.comision_banco_monto);
         if (monto == null || monto <= 0) continue;
         const tcc = pos(c.tc_usd_mxn) ?? tc;
-        const mxn = c.moneda === 'MXN' ? monto : tcc != null ? monto * tcc : null;
+        const mxn =
+          c.moneda === 'MXN' ? monto : tcc != null ? monto * tcc : null;
         if (mxn == null) {
           // Cobro USD sin ningún TC: la comisión no se convierte — se deja
           // RASTRO (nota en la fila) en vez de desaparecer en silencio.
@@ -2412,7 +2443,11 @@ export class AircraftBalanceService {
         avion_color: null,
         fecha_vuelo: null,
         concepto_egreso: `${String(g.categoria ?? clave).toLowerCase()}${
-          proveedor ? ` · ${proveedor}` : g.lugar ? ` · ${g.lugar as string}` : ''
+          proveedor
+            ? ` · ${proveedor}`
+            : g.lugar
+              ? ` · ${g.lugar as string}`
+              : ''
         }${sinTc ? ' (USD sin TC)' : ''}`,
         egreso_mxn: r2(mxn),
         fecha_egreso: (g.fecha_gasto as string) ?? null,
@@ -2444,7 +2479,10 @@ export class AircraftBalanceService {
         const remanente = round2((num(g.monto) ?? 0) - asignado);
         if (remanente > 0) {
           sueltas.push(
-            sueltaDe({ ...g, monto: remanente }, 'empresa (remanente de reparto)'),
+            sueltaDe(
+              { ...g, monto: remanente },
+              'empresa (remanente de reparto)',
+            ),
           );
         }
       }
