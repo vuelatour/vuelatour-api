@@ -1460,6 +1460,7 @@ export class FlightsService {
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
       aeronave?.velocidad_crucero_kts ?? null,
+      (vuelo.aeronave_id as string | null) ?? null,
     );
     // total_cobrado SIEMPRE en USD vía la fuente única (invariante 2 del
     // repo): la suma cruda mezclaba monedas y un cobro parcial en MXN
@@ -1571,6 +1572,7 @@ export class FlightsService {
   private async attachTramoEstimado(
     escalas: Array<Record<string, unknown>>,
     velocidadCruceroKts: number | null,
+    vueloAeronaveId: string | null = null,
   ): Promise<Array<Record<string, unknown>>> {
     if (escalas.length === 0) return escalas;
     const pares = [
@@ -1598,14 +1600,16 @@ export class FlightsService {
     return escalas.map((e, i) => {
       // Tramo previo del MISMO avión (cada matrícula lleva su horómetro):
       // el más cercano hacia atrás por orden. listEscalas ya viene ordenado.
+      // Avión EFECTIVO con herencia (caso #116 / barrido 28-ago): comparar
+      // crudo trataba la ida espejada ('X') y el regreso heredado (null)
+      // como aviones DISTINTOS y tramo_llegada_anterior salía null — la
+      // guarda del caso #71 (llegada repetida) se apagaba en el redondo.
+      const efectivo = (x: Record<string, unknown>) =>
+        ((x.aeronave_id as string | null) ?? vueloAeronaveId) ?? null;
       const prev = escalas
         .slice(0, i)
         .reverse()
-        .find(
-          (p) =>
-            ((p.aeronave_id as string | null) ?? null) ===
-            ((e.aeronave_id as string | null) ?? null),
-        );
+        .find((p) => efectivo(p) === efectivo(e));
       const par = `${e.origen_iata as string}|${e.destino_iata as string}`;
       return {
         ...e,
@@ -1949,15 +1953,32 @@ export class FlightsService {
       // libre y se le podía doble-asignar sin aviso.
       const { data: sameDay } = await this.supabase.service
         .from('vuelo')
-        .select('id, folio, piloto_id')
+        .select(
+          'id, folio, piloto_id, copiloto_id, apoyo_id, escalas:escala(piloto_id, cancelada_at)',
+        )
         .lte('fecha_vuelo', `${day}T23:59:59-05:00`)
         .gte('fecha_fin', `${day}T00:00:00-05:00`)
         .neq('estado', 'CANCELADO')
-        .neq('id', flightId)
-        .not('piloto_id', 'is', null);
+        .neq('id', flightId);
       for (const f of sameDay ?? []) {
-        if (f.piloto_id)
-          conflicto.set(f.piloto_id as string, f.folio as number);
+        // Ocupación COMPLETA del día (barrido 28-ago): piloto del vuelo,
+        // copiloto/apoyo y las rotaciones por TRAMO — antes un piloto
+        // asignado solo a un tramo de otro vuelo aparecía libre.
+        const ocupados = [
+          f.piloto_id as string | null,
+          f.copiloto_id as string | null,
+          f.apoyo_id as string | null,
+          ...((f.escalas as Array<{
+            piloto_id: string | null;
+            cancelada_at: string | null;
+          }> | null) ?? [])
+            .filter((e) => e.cancelada_at == null)
+            .map((e) => e.piloto_id),
+        ];
+        for (const uid of ocupados) {
+          if (uid && !conflicto.has(uid))
+            conflicto.set(uid, f.folio as number);
+        }
       }
     }
 
@@ -2670,13 +2691,19 @@ export class FlightsService {
     const d = (data as { destino_iata?: string }).destino_iata ?? '';
     const tramoTxt = `${o} → ${d}`;
     // Piloto del TRAMO reemplazado/quitado: el anterior se entera (21-ago).
+    // EFECTIVO con herencia (barrido 28-ago): un tramo sin piloto propio lo
+    // volaba el del vuelo — armar la rotación asignando a otro lo saca de
+    // ESE tramo y antes nadie le avisaba (escala.piloto_id era null).
+    const pilotoPrevioEfectivo =
+      (escala.piloto_id as string | null) ??
+      (vuelo.piloto_id as string | null);
     if (
       dto.piloto_id !== undefined &&
-      escala.piloto_id &&
-      escala.piloto_id !== dto.piloto_id
+      pilotoPrevioEfectivo &&
+      pilotoPrevioEfectivo !== dto.piloto_id
     ) {
       this.notificarQuitado(
-        escala.piloto_id as string,
+        pilotoPrevioEfectivo,
         vuelo,
         'piloto',
         `tramo ${tramoTxt}`,
@@ -2741,10 +2768,22 @@ export class FlightsService {
       .maybeSingle();
     if (escErr) throw new Error(escErr.message);
     if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
-    if (user.rol === Rol.PILOTO && escala.piloto_id !== user.userId) {
-      throw new ForbiddenException(
-        'Solo el piloto asignado puede actualizar el permiso de este tramo',
-      );
+    if (user.rol === Rol.PILOTO) {
+      // Piloto EFECTIVO con herencia (barrido 28-ago): un tramo sin piloto
+      // propio lo vuela el del vuelo — antes recibía 403 en su propio tramo.
+      const { data: v } = await this.supabase.service
+        .from('vuelo')
+        .select('piloto_id')
+        .eq('id', escala.vuelo_id as string)
+        .maybeSingle();
+      const efectivo =
+        (escala.piloto_id as string | null) ??
+        ((v?.piloto_id as string | null) ?? null);
+      if (efectivo !== user.userId) {
+        throw new ForbiddenException(
+          'Solo el piloto asignado puede actualizar el permiso de este tramo',
+        );
+      }
     }
     const { data, error } = await this.supabase.service
       .from('escala')

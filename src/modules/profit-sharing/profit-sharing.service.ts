@@ -799,13 +799,37 @@ export class ProfitSharingService {
       const completadosRows = (completadosRes.data ?? []) as Array<
         Record<string, unknown>
       >;
+      // Pilotos EFECTIVOS del vuelo: nivel vuelo + rotaciones por TRAMO
+      // (barrido 28-ago: un externo que cubre solo un tramo — caso #129 —
+      // escapaba a esta vigilancia y la utilidad quedaba inflada).
+      const pilotosPorVuelo = new Map<string, Set<string>>();
+      for (const v of completadosRows) {
+        const set = new Set<string>();
+        if (v.piloto_id) set.add(v.piloto_id as string);
+        pilotosPorVuelo.set(v.id as string, set);
+      }
+      if (completadosRows.length > 0) {
+        const { data: legsRot, error: legsErr } = await sb
+          .from('escala')
+          .select('vuelo_id, piloto_id')
+          .in(
+            'vuelo_id',
+            completadosRows.map((v) => v.id as string),
+          )
+          .not('piloto_id', 'is', null)
+          .is('cancelada_at', null);
+        if (legsErr) throw new Error(legsErr.message);
+        for (const l of legsRot ?? []) {
+          pilotosPorVuelo
+            .get(l.vuelo_id as string)
+            ?.add(l.piloto_id as string);
+        }
+      }
       const pilotoIds = [
         ...new Set(
-          completadosRows
-            .map((v) => v.piloto_id as string | null)
-            .filter(Boolean),
+          [...pilotosPorVuelo.values()].flatMap((set) => [...set]),
         ),
-      ] as string[];
+      ];
       if (pilotoIds.length > 0) {
         const { data: exts, error: extErr } = await sb
           .from('usuario')
@@ -815,7 +839,9 @@ export class ProfitSharingService {
         if (extErr) throw new Error(extErr.message);
         const externos = new Set((exts ?? []).map((u) => u.id as string));
         const vuelosExternos = completadosRows.filter((v) =>
-          externos.has(v.piloto_id as string),
+          [...(pilotosPorVuelo.get(v.id as string) ?? [])].some((pid) =>
+            externos.has(pid),
+          ),
         );
         if (vuelosExternos.length > 0) {
           const { data: gastosPE, error: gpeErr } = await sb

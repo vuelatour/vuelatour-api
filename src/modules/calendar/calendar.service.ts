@@ -69,8 +69,34 @@ export class CalendarService {
     if (q.incluir_cancelados === false) {
       query = query.neq('estado', 'CANCELADO');
     }
-    if (q.aeronave_id) query = query.eq('aeronave_id', q.aeronave_id);
-    if (q.piloto_id) query = query.eq('piloto_id', q.piloto_id);
+    // Filtros con asignación por TRAMO (barrido 28-ago, patrón de
+    // flights.list): un piloto/avión asignado solo a un tramo de otro vuelo
+    // quedaba fuera del filtro. Ningún consumidor los manda hoy, pero el
+    // primero que los adopte los necesita correctos.
+    if (q.aeronave_id) {
+      const { data: legsAv } = await this.supabase.service
+        .from('escala')
+        .select('vuelo_id')
+        .eq('aeronave_id', q.aeronave_id)
+        .is('cancelada_at', null);
+      const ids = [...new Set((legsAv ?? []).map((l) => l.vuelo_id as string))];
+      query = ids.length
+        ? query.or(
+            `aeronave_id.eq.${q.aeronave_id},id.in.(${ids.join(',')})`,
+          )
+        : query.eq('aeronave_id', q.aeronave_id);
+    }
+    if (q.piloto_id) {
+      const { data: legsPi } = await this.supabase.service
+        .from('escala')
+        .select('vuelo_id')
+        .eq('piloto_id', q.piloto_id)
+        .is('cancelada_at', null);
+      const ids = [...new Set((legsPi ?? []).map((l) => l.vuelo_id as string))];
+      query = ids.length
+        ? query.or(`piloto_id.eq.${q.piloto_id},id.in.(${ids.join(',')})`)
+        : query.eq('piloto_id', q.piloto_id);
+    }
     if (q.solo_externos) query = query.eq('es_externo', true);
 
     const { data, error } = await query;
@@ -153,8 +179,13 @@ export class CalendarService {
       }): Record<string, unknown> | null => {
         if (!inRange(params.fecha)) return null;
         const escala = escalaPorOrden.get(params.escalaOrden);
-        const aeronaveId = escala?.aeronave_id ?? (escala ? null : v.aeronave_id);
-        const pilotoId = escala?.piloto_id ?? (escala ? null : v.piloto_id);
+        // HERENCIA CANÓNICA (regla del repo, bug 28-ago): un tramo sin
+        // avión/piloto propio HEREDA el del vuelo — el detalle lo pinta
+        // "(del vuelo)" y está ASIGNADO. Antes los ids resolvían a null
+        // cuando la escala existía (los NOMBRES sí heredaban): la tarjeta
+        // mostraba al piloto y a la vez "⚠ Falta asignar".
+        const aeronaveId = escala?.aeronave_id ?? v.aeronave_id;
+        const pilotoId = escala?.piloto_id ?? v.piloto_id;
         const aeronave = unwrap(escala?.aeronave ?? v.aeronave);
         const piloto = unwrap(escala?.piloto ?? v.piloto);
         const estadoPermiso = escala
