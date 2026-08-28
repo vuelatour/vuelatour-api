@@ -8,6 +8,10 @@ import {
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
+import {
+  particionIngresoVuelo,
+  type VueloIngresoInput,
+} from '../../common/ingreso-vuelo.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
@@ -1075,7 +1079,12 @@ export class QuotesService {
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
     // Adjuntar escalas plan (sin tacometros - es lo que se mostro al cotizar).
     const escalas = await this.findEscalas(id);
-    return { ...data, escalas };
+    // Partición del ingreso (regla 28-ago, fuente única): venta del AVIÓN vs
+    // ingreso de VuelaTour — el panel la muestra en "Desglose para balance".
+    const particion_ingreso = particionIngresoVuelo(
+      data as unknown as VueloIngresoInput,
+    );
+    return { ...data, escalas, particion_ingreso };
   }
 
   async findVersions(vueloId: string) {

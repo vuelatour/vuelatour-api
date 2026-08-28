@@ -2343,6 +2343,96 @@ export class AircraftBalanceService {
    * solo-egreso: misma regla que flight-report y el bloque `externos` del
    * reparto) y de TODOS sus gastos (menos GAS, que tiene fila suelta propia).
    */
+  /**
+   * Colapsa las filas (una por concepto) de un vuelo de "Otros movimientos"
+   * en UNA sola: ingresos sumados / egresos sumados, y el detalle en
+   * `nota_ingreso` / `nota_egreso` (comentario de la celda en el Excel).
+   * Un concepto sin MXN (USD sin TC) NO se suma: se marca en el concepto y
+   * queda listado en la nota sin monto. El remanente = ingreso − egreso.
+   */
+  private colapsarFilasDeVuelo(
+    filasVuelo: BalanceOtroMovimientoFilaPayload[],
+    fmt: (n: number) => string,
+  ): BalanceOtroMovimientoFilaPayload {
+    const tipoDe = (c: string): string => {
+      const t = c.toLowerCase();
+      if (t.startsWith('tua')) return 'TUAs';
+      if (t.startsWith('iva')) return 'IVA';
+      if (t.startsWith('viáticos') || t.startsWith('viaticos')) return 'pernocta';
+      if (t.startsWith('sobrecobro')) return 'sobrecobro';
+      if (t.startsWith('venta externo')) return 'venta externo';
+      if (t.startsWith('hotel')) return 'hotel';
+      if (t.startsWith('comisión') || t.startsWith('comision')) return 'comisión bancaria';
+      if (t.startsWith('costo operador')) return 'costo operador';
+      if (t.startsWith('ajuste')) return 'ajuste';
+      return c.includes('extra') || /^(espera|catering|transfer)/.test(t)
+        ? 'extras'
+        : t.split(' ')[0];
+    };
+    const lado = (
+      key: 'ingreso' | 'egreso',
+    ): {
+      concepto: string | null;
+      monto: number | null;
+      fecha: string | null;
+      nota: string | null;
+    } => {
+      const cKey = `concepto_${key}` as const;
+      const mKey = `${key}_mxn` as const;
+      const fKey = `fecha_${key}` as const;
+      const rows = filasVuelo.filter((f) => f[cKey]);
+      if (rows.length === 0)
+        return { concepto: null, monto: null, fecha: null, nota: null };
+      const conMonto = rows.filter((f) => f[mKey] != null);
+      const sinTc = rows.filter(
+        (f) => f[mKey] == null && !/referencia, no suma/.test(f[cKey] ?? ''),
+      );
+      const monto =
+        conMonto.length > 0
+          ? round2(conMonto.reduce((a, f) => a + (f[mKey] ?? 0), 0))
+          : null;
+      const tipos = [...new Set(rows.map((f) => tipoDe(f[cKey] ?? '')))];
+      const concepto =
+        rows.length === 1
+          ? rows[0][cKey]
+          : `${tipos.join(' + ')} (${rows.length} conceptos, ver nota)${
+              sinTc.length ? ' (parcial: USD sin TC)' : ''
+            }`;
+      const fecha =
+        rows.map((f) => f[fKey]).filter((x): x is string => !!x).sort()[0] ??
+        null;
+      const nota = rows
+        .map(
+          (f) =>
+            `${f[cKey] ?? ''}: ${f[mKey] != null ? `$${fmt(f[mKey] ?? 0)}` : '—'}`,
+        )
+        .join('\n');
+      return { concepto, monto, fecha, nota };
+    };
+    const ing = lado('ingreso');
+    const egr = lado('egreso');
+    const base = filasVuelo[0];
+    return {
+      clave: base.clave,
+      avion_color: base.avion_color,
+      estado: base.estado,
+      fecha_vuelo: base.fecha_vuelo,
+      factura: base.factura,
+      concepto_ingreso: ing.concepto,
+      ingreso_mxn: ing.monto,
+      fecha_ingreso: ing.fecha,
+      nota_ingreso: ing.nota,
+      concepto_egreso: egr.concepto,
+      egreso_mxn: egr.monto,
+      fecha_egreso: egr.fecha,
+      nota_egreso: egr.nota,
+      remanente_mxn:
+        ing.monto == null && egr.monto == null
+          ? null
+          : round2((ing.monto ?? 0) - (egr.monto ?? 0)),
+    };
+  }
+
   private async buildOtrosMovimientos(
     desde: string,
     hasta: string,
@@ -2557,6 +2647,9 @@ export class AircraftBalanceService {
       const snapshot = v.calculo_snapshot as {
         desglose?: { clave?: string; concepto?: string; monto_usd?: number }[];
       } | null;
+      // Las filas de ESTE vuelo se generan línea por línea y al final se
+      // colapsan en UNA (pedido del cliente 28-ago, ver abajo).
+      const inicioFilasVuelo = filas.length;
 
       const base = {
         clave,
@@ -2938,6 +3031,20 @@ export class AircraftBalanceService {
             remanente_mxn: mxn != null ? r2(-mxn) : null,
           });
         }
+      }
+
+      // ===== UNA FILA POR VUELO (pedido del cliente, tarde del 28-ago):
+      // los ingresos del vuelo van SUMADOS en una celda y los egresos en
+      // otra, con el desglose línea por línea en la NOTA de cada celda
+      // (pyservices la pinta como comentario de Excel). Ahorra espacio y se
+      // lee mejor; el dinero es el mismo: Σ de las líneas que ya se
+      // calcularon arriba. Un concepto sin TC no se suma en falso: la celda
+      // lleva "(parcial: USD sin TC)" y la nota lo muestra sin monto.
+      const filasVuelo = filas.splice(inicioFilasVuelo);
+      if (filasVuelo.length > 1) {
+        filas.push(this.colapsarFilasDeVuelo(filasVuelo, fmtMontoOM));
+      } else if (filasVuelo.length === 1) {
+        filas.push(filasVuelo[0]);
       }
     }
 

@@ -560,6 +560,12 @@ export interface BalanceOtroMovimientoFilaPayload {
   fecha_ingreso: string | null;
   remanente_mxn: number | null;
   factura: string | null;
+  /**
+   * Desglose línea por línea de la celda (una fila por vuelo, 28-ago):
+   * pyservices lo pinta como COMENTARIO de la celda de ingreso / egreso.
+   */
+  nota_ingreso?: string | null;
+  nota_egreso?: string | null;
 }
 
 export interface BalanceHojaOtrosMovimientosPayload {
