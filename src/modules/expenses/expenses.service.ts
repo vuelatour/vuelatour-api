@@ -30,11 +30,11 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, created_at, updated_at';
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle).
-const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula))`;
+const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula))`;
 
 /** Ventana en días para considerar dos gastos como posible duplicado.
  *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
@@ -1646,8 +1646,27 @@ export class ExpensesService {
     }
   }
 
-  async update(id: string, dto: UpdateGastoDto, userId: string) {
+  async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
     if (Object.keys(dto).length === 0) return this.findById(id);
+    // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
+    // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
+    // el sello se LIMPIA (la información cambió: oficina debe re-confirmar).
+    const sello: Record<string, unknown> = {};
+    if (dto.verificado === true) {
+      sello.verificado_por = userId;
+      sello.verificado_at = new Date().toISOString();
+    } else if (dto.verificado === false) {
+      sello.verificado_por = null;
+      sello.verificado_at = null;
+    } else if (
+      rol === Rol.PILOTO ||
+      rol === Rol.MECANICO ||
+      rol === Rol.VISITANTE
+    ) {
+      sello.verificado_por = null;
+      sello.verificado_at = null;
+    }
+    delete dto.verificado;
     const necesitaActual =
       dto.propina !== undefined ||
       dto.monto !== undefined ||
@@ -1823,7 +1842,7 @@ export class ExpensesService {
     }
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .update({ ...cols, updated_by: userId })
+      .update({ ...cols, ...sello, updated_by: userId })
       .eq('id', id)
       .select(COLS)
       .maybeSingle();

@@ -54,7 +54,10 @@ export class ExpensesController {
   @ApiOperation({
     summary: 'List gastos (with filters). Pilotos see only own captures.',
   })
-  list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
+  async list(
+    @Query() q: ListGastosQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     const filters = { ...q };
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
     // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
@@ -68,6 +71,21 @@ export class ExpensesController {
     }
     if (c.rol === Rol.MECANICO) {
       filters.categoria = CategoriaGasto.GAS;
+    }
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
+      // El sello de confirmación es del PANEL (28-ago): a la app ni viaja.
+      const res = await this.expenses.list(filters);
+      for (const g of (res as { data?: Array<Record<string, unknown>> })
+        .data ?? []) {
+        delete g.verificado_por;
+        delete g.verificado_at;
+        delete g.verificador;
+      }
+      return res;
     }
     return this.expenses.list(filters);
   }
@@ -310,6 +328,16 @@ export class ExpensesController {
     ) {
       throw new ForbiddenException('No tienes acceso a este gasto');
     }
+    if (
+      c.rol === Rol.PILOTO ||
+      c.rol === Rol.MECANICO ||
+      c.rol === Rol.VISITANTE
+    ) {
+      const g = gasto as Record<string, unknown>;
+      delete g.verificado_por;
+      delete g.verificado_at;
+      delete g.verificador;
+    }
     return gasto;
   }
 
@@ -390,6 +418,9 @@ export class ExpensesController {
       // sin movimiento bancario sobreestima la conciliación en silencio.
       delete dto.conciliado;
       delete dto.duplicado_sospechado;
+      // La confirmación es de OFICINA (28-ago): un rol de campo no puede
+      // sellarse a sí mismo (y su edición LIMPIA el sello en el service).
+      delete dto.verificado;
       // Reemplazo de foto (pedido 17-ago): solo con una subida PROPIA.
       this.assertFotoPropia(dto.foto_url, c.authId);
     }
@@ -401,7 +432,7 @@ export class ExpensesController {
       delete dto.aeronave_id;
       delete dto.escala_id;
     }
-    return this.expenses.update(id, dto, c.userId);
+    return this.expenses.update(id, dto, c.userId, c.rol);
   }
 
   @Delete(':id')

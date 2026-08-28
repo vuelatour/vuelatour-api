@@ -253,6 +253,16 @@ export class CreateGastoDto {
   @IsOptional()
   @IsBoolean()
   requiere_visto_bueno?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'true al guardar el diálogo Verificar del panel: sella verificado_por/' +
+      'verificado_at con quien confirma. false = retirar la confirmación. ' +
+      'Solo oficina (los roles de campo no pueden mandarlo).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  verificado?: boolean;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {
