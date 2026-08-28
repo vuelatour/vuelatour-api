@@ -3,13 +3,16 @@ import { Type } from 'class-transformer';
 import {
   IsDate,
   IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
+import { CUENTAS_COBRO } from '../../../common/cuentas-cobro';
 import { Moneda } from '../../bank-accounts/dto/bank-accounts.dto';
 import { MetodoPago } from '../../quotes/dto/calculate-quote.dto';
 
@@ -64,13 +67,17 @@ export class CreateCobroDto {
 
   @ApiPropertyOptional({
     description:
-      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque): texto ' +
-      'libre, típicamente el alias de la cuenta bancaria. Informativo para ' +
-      'tesorería y conciliación.',
+      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque). Lista ' +
+      'fija del cliente (28-ago-2026): Paywise · HSBC Dólares · HSBC Pesos · ' +
+      'Scotiabank Dólares · Scotiabank Pesos.',
+    enum: CUENTAS_COBRO,
   })
   @IsOptional()
-  @IsString()
-  @MaxLength(120)
+  @ValidateIf((o: { cuenta_destino?: string }) => !!o.cuenta_destino)
+  @IsIn(CUENTAS_COBRO, {
+    message:
+      'cuenta_destino debe ser una de: Paywise, HSBC Dólares, HSBC Pesos, Scotiabank Dólares, Scotiabank Pesos',
+  })
   cuenta_destino?: string;
 
   @ApiPropertyOptional({
@@ -153,14 +160,19 @@ export class UpdateCobroDto {
 
   @ApiPropertyOptional({
     description:
-      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque): texto ' +
-      'libre, típicamente el alias de la cuenta bancaria. Informativo para ' +
-      'tesorería y conciliación.',
+      'A qué CUENTA llegó el cobro (transferencia/HSBC link/cheque). Lista ' +
+      'fija del cliente (28-ago-2026): Paywise · HSBC Dólares · HSBC Pesos · ' +
+      'Scotiabank Dólares · Scotiabank Pesos.',
+    enum: CUENTAS_COBRO,
+    nullable: true,
   })
   @IsOptional()
-  @IsString()
-  @MaxLength(120)
-  cuenta_destino?: string;
+  @ValidateIf((o: { cuenta_destino?: string }) => !!o.cuenta_destino)
+  @IsIn(CUENTAS_COBRO, {
+    message:
+      'cuenta_destino debe ser una de: Paywise, HSBC Dólares, HSBC Pesos, Scotiabank Dólares, Scotiabank Pesos',
+  })
+  cuenta_destino?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

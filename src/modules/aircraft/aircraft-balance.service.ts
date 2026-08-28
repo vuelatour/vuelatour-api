@@ -6,8 +6,18 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from './aircraft.service';
 import { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
-import { desgloseGastoPartes } from '../../common/desglose-gasto.util';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import {
+  CATS_SIN_TUA_EMBEBIDO,
+  desgloseGastoPartes,
+  tuaEmbebidoDeGasto,
+} from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+import {
+  cobradoParteAvion,
+  particionIngresoVuelo,
+  type ParticionIngreso,
+} from '../../common/ingreso-vuelo.util';
 import {
   PyservicesService,
   type BalanceAvionCobroPayload,
@@ -22,10 +32,13 @@ import {
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado';
+  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_pct, iva_usd, subtotal_vuelo_usd, ajuste_final_usd, tuas_usd, extras_total_usd, viaticos_pernocta_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado, calculo_snapshot';
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
 // GAS aparte (litros/$ x litro); PERMISO e INDIRECTO van a sus hojas propias.
+// TUAS (regla 28-ago-2026): SOLO nota en la celda de OPERACIÓN — no suman en
+// OP ni restan en ninguna hoja (el par TUA cobrado↔pagado vive en la pestaña
+// "Otros movimientos" del Balance general).
 // Regla del cliente (27 jul 2026, ajustada el mismo día): cada gasto va a su
 // columna POR CATEGORÍA sin importar el medio de pago (un taxi en efectivo es
 // PILOTO). OTROS = solo FBO + categoría OTRO (comisariatos, varios); mover
@@ -66,12 +79,23 @@ interface VueloRow {
   destino_iata: string | null;
   tiempo_cobrable_hr: string | number | null;
   tarifa_hora_usd: string | number | null;
+  /** % de IVA de la cotización (fracción, ej. 0.16). */
+  iva_pct?: string | number | null;
   iva_usd: string | number | null;
+  /** Componentes del desglose (columnas persistidas): respaldo de la
+   *  partición del ingreso cuando no hay snapshot v1.3. */
+  subtotal_vuelo_usd?: string | number | null;
+  ajuste_final_usd?: string | number | null;
+  tuas_usd?: string | number | null;
+  extras_total_usd?: string | number | null;
+  viaticos_pernocta_usd?: string | number | null;
   monto_total_usd: string | number | null;
   monto_total_mxn: string | number | null;
   tc_usd_mxn: string | number | null;
   comision_vendedor_usd: string | number | null;
   cobrado: boolean | null;
+  /** Snapshot del cotizador v1.3 (jsonb): desglose canónico e IVA. */
+  calculo_snapshot?: unknown;
 }
 
 interface EscalaRow {
@@ -98,6 +122,10 @@ interface CobroRow {
   tc_usd_mxn: string | number | null;
   metodo_cobro: string | null;
   fecha_cobro: string | null;
+  /** Comisión bancaria del cobro, en la MONEDA del cobro. */
+  comision_banco_monto?: string | number | null;
+  comision_banco_pct?: string | number | null;
+  cuenta_destino?: string | null;
 }
 
 interface GastoRow {
@@ -165,6 +193,18 @@ function diaCancun(iso: string | null): string | null {
 }
 
 /**
+ * % de IVA REAL de la cotización como fracción (0.16): snapshot v1.3 →
+ * columna iva_pct → 0.16 por default. Un valor en puntos (16) se normaliza.
+ */
+function ivaPctDe(v: VueloRow): number {
+  const snap = v.calculo_snapshot as {
+    iva?: { porcentaje?: unknown } | null;
+  } | null;
+  const raw = pos(snap?.iva?.porcentaje) ?? pos(v.iva_pct) ?? 0.16;
+  return raw > 1 ? raw / 100 : raw;
+}
+
+/**
  * Balance mensual POR AVIÓN: réplica sistematizada del Excel de control del
  * equipo ("Balance N990GG"). El API calcula TODO el dinero (fórmulas del
  * contrato, verificadas contra el libro original); pyservices solo pinta el
@@ -218,8 +258,10 @@ export class AircraftBalanceService {
    * al frente (una fila por avión = los TOTALES de su libro + fila TOTALES
    * de flota) y UN solo juego de hojas con los datos de TODOS los aviones
    * JUNTOS — reporte horas, combustible (mensual, 26-ago), gastos
-   * indirectos, otros gastos (incluye TUAS), permisos, balance (bloques por
-   * avión) y pendientes. Mismo motor y números que el individual; cero
+   * indirectos (del avión sin vuelo), otros gastos (administrativos
+   * repartidos), permisos, balance (bloques por avión), otros movimientos
+   * (ingreso de VuelaTour: TUAS/extras/pernocta cobrados vs pagados, regla
+   * 28-ago) y pendientes. Mismo motor y números que el individual; cero
    * cálculos paralelos. Vuelos multi-avión no se duplican en la suma:
    * horas/costos van al avión de cada tramo y la venta solo al principal.
    */
@@ -257,8 +299,12 @@ export class AircraftBalanceService {
       porCobrar: 0,
       pendientes: 0,
     };
+    // UN memo de TC oficial por día para TODOS los libros y la pestaña
+    // "Otros movimientos" (latencia, 28-ago): un mismo día se consulta una
+    // sola vez a Banxico/DOF en todo el general. Cero cambio numérico.
+    const memoTc = new Map<string, Promise<number | null>>();
     for (const a of aviones ?? []) {
-      const p = await this.buildPayload(a.id as string, d, h);
+      const p = await this.buildPayload(a.id as string, d, h, memoTc);
       const t = p.totales;
       // Aviones sin actividad en el periodo: fuera (ruido en el general).
       // "Actividad" incluye el dinero de las HOJAS (verificación 26-ago:
@@ -334,6 +380,8 @@ export class AircraftBalanceService {
         ? round2(vals.reduce((s, x) => s + x, 0) / vals.length)
         : null;
     };
+    // TUA pagado de flota: null cuando la suma es 0 (celda vacía, no "$0").
+    const tuaPagadoFlota = sumT((t) => t.tua_pagado_mxn ?? null);
     const totalesFlota: BalanceAvionPayload['totales'] = {
       horas_cobradas: sumT((t) => t.horas_cobradas),
       tiempo_vuelo: sumT((t) => t.tiempo_vuelo),
@@ -358,6 +406,12 @@ export class AircraftBalanceService {
       tc_promedio: avgT((t) => t.tc_promedio),
       costo_hr_prom_usd: avgT((t) => t.costo_hr_prom_usd),
       otros_ingresos_usd: sumT((t) => t.otros_ingresos_usd),
+      // Campos 28-ago (total del cliente, cobrado real, TUA nota, comisión
+      // bancaria): sumas igual que el resto.
+      cobrado_real_mxn: sumT((t) => t.cobrado_real_mxn ?? null),
+      total_cotizacion_mxn: sumT((t) => t.total_cotizacion_mxn ?? null),
+      tua_pagado_mxn: tuaPagadoFlota !== 0 ? tuaPagadoFlota : null,
+      comision_banco_mxn: sumT((t) => t.comision_banco_mxn ?? null),
     };
     const porFecha = (
       x: { fecha: string | null },
@@ -454,7 +508,7 @@ export class AircraftBalanceService {
       },
       // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
       // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL.
-      otros_movimientos: await this.buildOtrosMovimientos(d, h),
+      otros_movimientos: await this.buildOtrosMovimientos(d, h, memoTc),
       pendientes: [
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
@@ -463,6 +517,9 @@ export class AircraftBalanceService {
         // balance (el vuelo no vive en ningún libro) — decisión de dónde
         // colgarlos pendiente del cliente; mientras, se gritan aquí.
         ...(await this.pendienteExternosSinAvion(d, h)),
+        // Externos sin avión con precio pero SIN costo del operador: su
+        // venta en "Otros movimientos" queda como remanente BRUTO.
+        ...(await this.pendienteExternosSinCosto(d, h)),
         ...libros.flatMap((p) =>
           p.pendientes.map((texto) => `${p.matricula}: ${texto}`),
         ),
@@ -549,10 +606,51 @@ export class AircraftBalanceService {
     };
   }
 
+  /**
+   * TC OFICIAL de respaldo por vuelo — FUENTE ÚNICA de la cadena (28-ago):
+   * solo para vuelos SIN tc_usd_mxn capturado → Banxico FIX / DOF del día
+   * Cancún de la COTIZACIÓN (fecha_solicitud; si no, el del vuelo). La usan
+   * la hoja maestra (PASO 0 de buildPayload) y la pestaña "Otros
+   * movimientos" del general: un mismo vuelo se convierte con el MISMO K
+   * en ambos lados (antes la pestaña usaba monto_total_mxn/monto_total_usd
+   * sin respaldo oficial y los pesos no cuadraban entre hojas).
+   */
+  private async tcOficialPorVuelos(
+    vuelos: ReadonlyArray<{
+      id: string;
+      tc_usd_mxn?: unknown;
+      fecha_solicitud?: unknown;
+      fecha_vuelo?: unknown;
+    }>,
+    // Memo por DÍA compartido entre libros (latencia, 28-ago): el general
+    // llamaba oficialPara(dia) en serie por cada vuelo sin TC, por cada
+    // avión y otra vez para la pestaña. Mismo día → misma promesa; cero
+    // cambio numérico.
+    memoPorDia: Map<string, Promise<number | null>> = new Map(),
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const str = (x: unknown): string | null =>
+      typeof x === 'string' && x ? x : null;
+    for (const v of vuelos) {
+      if (pos(v.tc_usd_mxn) != null) continue;
+      const dia = diaCancun(str(v.fecha_solicitud) ?? str(v.fecha_vuelo));
+      if (!dia) continue;
+      let tcPromise = memoPorDia.get(dia);
+      if (!tcPromise) {
+        tcPromise = this.tipoCambio.oficialPara(dia);
+        memoPorDia.set(dia, tcPromise);
+      }
+      const tc = await tcPromise;
+      if (tc != null) out.set(v.id, tc);
+    }
+    return out;
+  }
+
   private async buildPayload(
     aircraftId: string,
     desde: string,
     hasta: string,
+    memoTc: Map<string, Promise<number | null>> = new Map(),
   ): Promise<BalanceAvionPayload> {
     const sb = this.supabase.service;
 
@@ -642,7 +740,7 @@ export class AircraftBalanceService {
         ? sb
             .from('cobro_vuelo')
             .select(
-              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro',
+              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_monto, comision_banco_pct, cuenta_destino',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_cobro', { ascending: true })
@@ -885,14 +983,8 @@ export class AircraftBalanceService {
     // Vuelo sin TC capturado en la cotización: se usa el oficial (Banxico
     // FIX = DOF) del día de la COTIZACIÓN (fecha_solicitud; si no, el del
     // vuelo). La fila queda MARCADA (tc_venta_oficial) y el Excel la pinta.
-    const tcOficialPorVuelo = new Map<string, number>();
-    for (const v of vuelos) {
-      if (pos(v.tc_usd_mxn) != null) continue;
-      const dia = diaCancun(v.fecha_solicitud ?? v.fecha_vuelo);
-      if (!dia) continue;
-      const tc = await this.tipoCambio.oficialPara(dia);
-      if (tc != null) tcOficialPorVuelo.set(v.id, tc);
-    }
+    // MISMA cadena que "Otros movimientos" del general (tcOficialPorVuelos).
+    const tcOficialPorVuelo = await this.tcOficialPorVuelos(vuelos, memoTc);
 
     // ===== PASO 1: TC de costos (Z) por vuelo =====
     // Promedio simple de tc_gasto de los gastos MXN del vuelo con TC (el TC
@@ -924,22 +1016,13 @@ export class AircraftBalanceService {
     // ===== PASO 2: fila por vuelo =====
     const filasVuelo: BalanceAvionVueloPayload[] = [];
     const anValues: number[] = []; // costo hr USD (AN) para el promedio
-    // TUAs/extras/pernocta cobrados al cliente: desde el 7-ago YA van
-    // DENTRO del total de cada fila (desglose completo de la cotización);
-    // este acumulado del pie es INFORMATIVO (no se traslada a ningún lado).
+    // INGRESO DE VUELATOUR (regla del cliente, 28-ago-2026): TUAS + extras
+    // + pernocta cobrados + su IVA quedan FUERA de la venta de cada fila
+    // (particionIngresoVuelo, fuente única). Este acumulado es lo EXCLUIDO:
+    // Σ filas.total_usd + otros_ingresos_usd == Σ monto_total_usd de los
+    // vuelos propios con precio. Vive en la pestaña "Otros movimientos" del
+    // Balance general; aquí solo se informa al pie (no suma en columnas).
     let otrosIngresosPeriodoUsd = 0;
-    // Partes TUA EMBEBIDAS en facturas (desglose IA): regla del cliente
-    // (26-ago-2026) — los TUAS van a la hoja "otros gastos" del balance.
-    // La parte ya viene convertida a MXN con el MISMO factor del gasto
-    // (cierra por diferencia contra las partes de OPERACIONES/OTROS: nada
-    // se cuenta doble ni se pierde). Se acumulan aquí y se funden a la hoja.
-    const tuaEmbebidoFilas: Array<{
-      fecha: string | null;
-      detalle: string;
-      monto_mxn: number | null;
-      moneda_original: string | null;
-      monto_original: number | null;
-    }> = [];
     for (const v of vuelos) {
       const vEscalas = escalasPorVuelo.get(v.id) ?? [];
       // Fila COMPARTIDA: este avión solo voló algunos tramos; la venta y sus
@@ -998,11 +1081,15 @@ export class AircraftBalanceService {
       } ${ruta})`;
 
       // ----- Bloque VENTA -----
-      // REGLA DEL LIBRO (7-ago, reporte del cliente vuelo #11): el TOTAL de
-      // la fila es el DESGLOSE COMPLETO de la cotización (tiempo + TUAs +
-      // extras + pernocta + ajustes, con su IVA) — cuadra contra los cobros.
-      // La venta por horas (D×H) queda como columna informativa; el
-      // acumulado de TUAs/extras del pie es solo informativo.
+      // REGLA DEL CLIENTE (28-ago-2026, sustituye a la del 7-ago): el TOTAL
+      // de la fila es la VENTA DEL AVIÓN = tiempo de vuelo + ajuste +
+      // comisión del vendedor + el IVA proporcional de esas partes
+      // (particionIngresoVuelo, fuente única — jamás recalcular a mano).
+      // TUAS, extras y pernocta con su IVA son INGRESO DE VUELATOUR: salen de
+      // la fila (otros_ingresos_usd) y viven en la pestaña "Otros
+      // movimientos" del general. La venta por horas (D×H) queda como
+      // columna informativa. La comisión del vendedor sigue DENTRO de la
+      // venta y se netea en AK (tratamiento del 23-jul, sin cambio).
       // Fila compartida: la VENTA completa va en el balance del principal —
       // aquí todo el bloque venta queda vacío (no repartir es a propósito:
       // el prorrateo del precio es decisión pendiente del cliente).
@@ -1010,42 +1097,55 @@ export class AircraftBalanceService {
       const E = esCompartido ? null : num(v.tarifa_hora_usd);
       const totalSistemaUsd = esCompartido ? null : num(v.monto_total_usd);
       const ivaSistemaUsd = esCompartido ? null : num(v.iva_usd);
+      // Partición del ingreso (null en fila compartida: sin venta aquí).
+      // pPrecio = la partición SOLO cuando hay precio (> 0); sin precio la
+      // fila cae al respaldo horas × tarifa como siempre.
+      const p: ParticionIngreso | null = esCompartido
+        ? null
+        : particionIngresoVuelo(v);
+      const pPrecio = p != null && p.total_usd > 0 ? p : null;
       // Con/sin IVA por vuelo (columna G del libro): si la cotización lleva
-      // IVA, G = E×0.16; si no (sin factura), 0.
+      // IVA, G = E × iva_pct REAL de la cotización (snapshot/columna; 0.16
+      // si no hay dato); si no (sin factura / efectivo), 0.
       const conIva = (ivaSistemaUsd ?? 0) > 0;
-      const G = E != null ? (conIva ? round2(E * 0.16) : 0) : null;
+      const G = E != null ? (conIva ? round2(E * ivaPctDe(v)) : 0) : null;
       const H = E != null ? round2(E + (G ?? 0)) : null;
       // Venta por horas (informativa) — el libro original la usaba como la
-      // fila entera, pero dejaba fuera TUAs/extras/ajustes.
+      // fila entera.
       const ventaHorasUsd = H != null && D > 0 ? round2(D * H) : null;
-      // TOTAL COBRADO AL CLIENTE = el DESGLOSE COMPLETO de la cotización
-      // (tiempo + TUAs + extras + pernocta + ajustes + IVA). Reporte del
-      // cliente 7 ago 2026 (vuelo #11): la fila decía 28,415.70 MXN cuando el
-      // cobro real fue 30,315.85 — faltaban los TUAs y el ajuste, y "por
-      // cobrar" quedaba negativo. Sin cotización, respaldo = horas × tarifa.
-      const I =
-        totalSistemaUsd != null && totalSistemaUsd !== 0
-          ? round2(totalSistemaUsd)
-          : ventaHorasUsd;
+      // VENTA DEL AVIÓN (I) y su IVA proporcional (J). Sin cotización,
+      // respaldo = horas × tarifa. Si el desglose no cuadra con el total
+      // (pPrecio.inconsistente) la partición devuelve el total COMPLETO al
+      // avión (no inventa dinero) y se avisa en pendientes.
+      const I = pPrecio != null ? pPrecio.avion_usd : ventaHorasUsd;
       const J =
-        ivaSistemaUsd != null
-          ? round2(ivaSistemaUsd)
-          : G != null && D > 0
-            ? round2(D * G)
-            : null;
+        pPrecio != null
+          ? pPrecio.iva_avion_usd
+          : ivaSistemaUsd != null
+            ? round2(ivaSistemaUsd)
+            : G != null && D > 0
+              ? round2(D * G)
+              : null;
       const kCapturado = pos(v.tc_usd_mxn);
       const K = kCapturado ?? tcOficialPorVuelo.get(v.id) ?? null;
       const kOficial = kCapturado == null && K != null;
       const L = I != null && K != null ? round2(I * K) : null;
       const M = J != null && K != null ? round2(J * K) : null;
       const N = L != null ? round2(L - (M ?? 0)) : null;
-      // TUAs/extras/pernocta/ajustes del periodo (total − venta por horas):
-      // ahora es INFORMATIVO — ya están dentro de las filas, no se traslada.
-      const otrosIngresosUsd =
-        totalSistemaUsd != null && (ventaHorasUsd != null || D === 0)
-          ? round2(totalSistemaUsd - (ventaHorasUsd ?? 0))
-          : null;
+      // Ingreso de VUELATOUR de la fila (TUAS + extras + pernocta + su IVA +
+      // centavos de redondeo), EXCLUIDO de I: cierra al centavo contra el
+      // total del cliente (I + otrosIngresosUsd == monto_total_usd).
+      const otrosIngresosUsd = p != null ? p.vuelatour_usd : null;
       if (otrosIngresosUsd != null) otrosIngresosPeriodoUsd += otrosIngresosUsd;
+      // Total de la cotización (lo que paga el cliente) y factor de venta —
+      // informativos al lado de la venta del avión para que el cruce se vea.
+      const totalCotizacionUsd =
+        totalSistemaUsd != null ? round2(totalSistemaUsd) : null;
+      const totalCotizacionMxn =
+        totalCotizacionUsd != null && K != null
+          ? round2(totalCotizacionUsd * K)
+          : null;
+      const ventaFactor = p != null ? p.factor_avion : null;
 
       // ----- Bloque TIEMPO/TACO (derivado de tacómetros, fuente única) -----
       // Solo tramos volados en ESTE avión: con asignación por tramo, un tramo
@@ -1116,6 +1216,9 @@ export class AircraftBalanceService {
       let opMxn: number | null = null;
       let pilotoMxn: number | null = null;
       let otrosMxn: number | null = null;
+      // TUA pagado de la fila (categoría TUAS + parte embebida): SOLO
+      // informativo (regla 7, 28-ago) — no entra a Y ni a ninguna hoja.
+      let tuaPagadoMxn: number | null = null;
       let usdSinTc = 0;
       let usdSinTcMonto = 0;
       // Desglose por celda (nota de Excel): una línea por gasto, con la
@@ -1162,13 +1265,14 @@ export class AircraftBalanceService {
         )
           continue;
         if (g.categoria === 'TUAS') {
-          // REGLA DEL CLIENTE (26-ago-2026): los TUAS van a la hoja "OTROS
-          // GASTOS" del balance (antes, 17-ago, solo quedaban de nota y no
-          // restaban en ningún lado — pero la VENTA de la fila sí incluye
-          // los TUAs cobrados al cliente, así que la utilidad se inflaba).
-          // No entra a las columnas de costo del vuelo (no es costo de
-          // operar el avión); resta UNA vez vía la hoja. La nota de la celda
-          // se conserva como vistazo.
+          // REGLA DEL CLIENTE (28-ago-2026, sustituye a la del 26-ago): el
+          // TUA pagado es SOLO NOTA en la celda de OPERACIÓN — no suma en OP
+          // ni resta en ninguna hoja. Coherente con la venta: el TUA cobrado
+          // al cliente tampoco está en la venta de la fila (es ingreso de
+          // VuelaTour) y el par cobrado↔pagado vive en "Otros movimientos"
+          // del general. Se acumula un informativo por fila (tua_pagado_mxn)
+          // que NO entra a ningún total de dinero. Misma cadena de TC que la
+          // nota (tc_gasto ?? z ?? tcPromedio).
           const mxnTua = gastoMxn(g);
           const sufijoTua = g.medio_pago === 'EFECTIVO' ? ' (efectivo)' : '';
           opDetalle.push(
@@ -1177,44 +1281,21 @@ export class AircraftBalanceService {
               mxnTua ?? 0,
               sufijoTua,
               // Mismo vocabulario que el desglose de las notas del gasto;
-              // la regla "va en OTROS GASTOS" vive en el pie ** de la hoja
-              // (leyendas distintas parecían texto inventado — 24-ago).
+              // la regla "solo nota" vive en el pie ** de la hoja (leyendas
+              // distintas parecían texto inventado — 24-ago).
               mxnTua != null
                 ? `TUA $${fmtMonto(mxnTua)}**`
                 : `TUA $${fmtMonto(num(g.monto) ?? 0)} ${g.moneda ?? 'USD'} sin TC**`,
             ),
           );
-          // La fila de la hoja "otros gastos" nace AQUÍ, pre-convertida con
-          // el MISMO monto de la nota (misma cadena de TC: tc_gasto ?? z ??
-          // tcPromedio) y la MISMA atribución de avión (avionDelGasto,
-          // escala-primero) — una sola regla para nota y resta; dos rutas
-          // divergían por avión y por TC (verificación 26-ago).
-          {
-            const provNombre = Array.isArray(g.proveedor)
-              ? g.proveedor[0]?.nombre
-              : g.proveedor?.nombre;
-            tuaEmbebidoFilas.push({
-              fecha: g.fecha_gasto ?? null,
-              detalle: [
-                'TUA',
-                provNombre || null,
-                `vuelo #${folio}`,
-                g.notas?.split('\n')[0]?.trim() || null,
-              ]
-                .filter(Boolean)
-                .join(' · '),
-              monto_mxn: mxnTua,
-              moneda_original: g.moneda !== 'MXN' ? (g.moneda ?? null) : null,
-              monto_original:
-                g.moneda !== 'MXN' ? round2(num(g.monto) ?? 0) : null,
-            });
-            if (mxnTua == null) {
-              pendientes.push(
-                `Hoja "otros gastos" (${g.fecha_gasto ?? 'sin fecha'}): TUA en ${
-                  g.moneda ?? 'USD'
-                } por $${(num(g.monto) ?? 0).toLocaleString('en-US')} sin ningún TC — fila sin monto MXN`,
-              );
-            }
+          if (mxnTua != null) {
+            tuaPagadoMxn = (tuaPagadoMxn ?? 0) + mxnTua;
+          } else {
+            pendientes.push(
+              `${etiqueta}: TUA en ${g.moneda ?? 'USD'} por $${(
+                num(g.monto) ?? 0
+              ).toLocaleString('en-US')} sin ningún TC — la nota queda sin MXN`,
+            );
           }
           continue;
         }
@@ -1233,12 +1314,18 @@ export class AircraftBalanceService {
         // operación, el FBO se separa a la columna OTROS (SÍ es costo — ej.
         // factura $154.14 = Op $67.14 + FBO $87.00) y el TUA no suma a ningún
         // costo (traslado al pasajero); la nota lleva las partes POR SEPARADO.
-        // Nunca aplica a GAS/PILOTO.
+        // Exclusión ÚNICA: CATS_SIN_TUA_EMBEBIDO (la misma que usa
+        // tuaEmbebidoDeGasto en "Otros movimientos" del general — el TUA
+        // pagado de un vuelo debe ser el MISMO número en ambas hojas).
         const separarPartes = (): {
           opParte: number;
           tuaParte: number;
           fboParte: number;
         } | null => {
+          // Un parcial del reparto manual jamás se separa: sus renglones IA
+          // son de la factura completa y no cuadran con el parcial.
+          if (g.es_reparto_parcial || CATS_SIN_TUA_EMBEBIDO.has(g.categoria))
+            return null;
           const montoNativo = num(g.monto) ?? 0;
           if (montoNativo <= 0) return null;
           const partes = desgloseGastoPartes(
@@ -1280,26 +1367,11 @@ export class AircraftBalanceService {
             ]
               .filter(Boolean)
               .join(' · ');
-            // Regla 26-ago-2026: la parte TUA embebida va a la hoja "otros
-            // gastos" (resta UNA vez ahí); las partes de operación/FBO se
-            // quedan en las columnas del vuelo — nada se cuenta doble.
+            // Regla 28-ago-2026: la parte TUA embebida es SOLO NOTA (no
+            // resta en ninguna hoja); las partes de operación/FBO se quedan
+            // en las columnas del vuelo. Informativo por fila.
             if (sep.tuaParte > 0) {
-              const provNombre = Array.isArray(g.proveedor)
-                ? g.proveedor[0]?.nombre
-                : g.proveedor?.nombre;
-              tuaEmbebidoFilas.push({
-                fecha: g.fecha_gasto ?? null,
-                detalle: [
-                  'TUA (IVA incluido)',
-                  provNombre || null,
-                  `vuelo #${folio}`,
-                ]
-                  .filter(Boolean)
-                  .join(' · '),
-                monto_mxn: sep.tuaParte,
-                moneda_original: null,
-                monto_original: null,
-              });
+              tuaPagadoMxn = (tuaPagadoMxn ?? 0) + sep.tuaParte;
             }
             if (sep.opParte > 0) {
               opMxn = (opMxn ?? 0) + sep.opParte;
@@ -1361,10 +1433,10 @@ export class AircraftBalanceService {
       const AI = esCompartido ? null : round2((L ?? 0) - Y);
       const AJ = esCompartido ? null : round2((M ?? 0) - (AH ?? 0));
       // Comisión del vendedor: vuelo.comision_vendedor_usd. Regla jul 2026:
-      // va SUMADA al precio del cliente — el ingreso que la cubre viaja en
-      // otros_ingresos (total sistema − venta por horas, al pie); aquí solo
-      // se descuenta el PAGO al vendedor de la fila. A MXN con el TC de
-      // venta (K); sin K queda pendiente.
+      // va SUMADA al precio del cliente — el ingreso que la cubre viaja
+      // DENTRO de la venta del avión (I, regla 28-ago); aquí solo se
+      // descuenta el PAGO al vendedor de la fila. A MXN con el TC de venta
+      // (K); sin K queda pendiente.
       const comUsd = pos(v.comision_vendedor_usd);
       const AK = comUsd != null && K != null ? round2(comUsd * K) : null;
       if (comUsd != null && K == null) {
@@ -1389,25 +1461,75 @@ export class AircraftBalanceService {
 
       // ----- Bloque STATUS DE COBROS -----
       let cobroSinTc = 0;
+      let comisionSinTc = 0;
       const cobrosOut: BalanceAvionCobroPayload[] = vCobros.map((c) => {
         const monto = num(c.monto) ?? 0;
+        // TC del cobro: el propio; si no, el de venta (K).
+        const tcCobro = pos(c.tc_usd_mxn) ?? K;
         let mxn: number | null;
         if (c.moneda === 'MXN') {
           mxn = round2(monto);
         } else {
-          const tc = pos(c.tc_usd_mxn) ?? K;
-          mxn = tc != null ? round2(monto * tc) : null;
+          mxn = tcCobro != null ? round2(monto * tcCobro) : null;
         }
         if (mxn == null) cobroSinTc += 1;
+        // Comisión bancaria (punto 9 del cliente, 28-ago): viene en la
+        // MONEDA del cobro; MXN directo, USD × TC del cobro; sin TC → null
+        // (jamás se suma en falso — se avisa en pendientes).
+        const comision = pos(c.comision_banco_monto);
+        let comisionMxn: number | null = null;
+        if (comision != null) {
+          comisionMxn =
+            c.moneda === 'MXN'
+              ? round2(comision)
+              : tcCobro != null
+                ? round2(comision * tcCobro)
+                : null;
+          if (comisionMxn == null) comisionSinTc += 1;
+        }
         return {
           fecha: diaCancun(c.fecha_cobro),
           monto_mxn: mxn,
           metodo: c.metodo_cobro ?? null,
+          comision_mxn: comisionMxn,
+          cuenta: c.cuenta_destino?.trim() || null,
         };
       });
-      const cobradoMxn = round2(
+      // Lo cobrado REAL (parcialidades tal cual) vs lo que cuenta para el
+      // AVIÓN (regla 28-ago): el cobro se prorratea con el factor de la
+      // partición (venta del avión / total del cliente) — la parte de
+      // TUAS/extras/pernocta cobrada es ingreso de VuelaTour, no del avión.
+      // Con el vuelo pagado completo y el mismo TC, cobradoMxn == L.
+      const cobradoRealMxn = round2(
         cobrosOut.reduce((acc, c) => acc + (c.monto_mxn ?? 0), 0),
       );
+      // Parte del AVIÓN de lo cobrado: la MISMA fuente que el reparto a
+      // socios (cobrosEnUsd con K de respaldo → cobradoParteAvion) y UNA
+      // sola conversión a MXN. Antes se redondeaba dos veces (Σ round2(cobro
+      // × TC) × factor → round2) y ~17% de los vuelos pagados completos
+      // quedaban con POR COBRAR $0.01 en rojo junto a "Cobrado". Sin K o sin
+      // partición (fila compartida) cae al prorrateo del MXN real.
+      let cobradoMxn: number;
+      if (K != null && p != null) {
+        const cobradoAvionUsd = cobradoParteAvion(
+          cobrosEnUsd(vCobros, K).total_usd,
+          p,
+        );
+        cobradoMxn = round2(cobradoAvionUsd * K);
+      } else {
+        cobradoMxn = round2(cobradoRealMxn * (ventaFactor ?? 1));
+      }
+      // Red de seguridad: pagado COMPLETO (lo depositado == total del
+      // cliente al centavo) → la parte del avión es L EXACTO, sin flotante.
+      // Solo con precio (> 0): sin cotización, 0 == 0 no es "pagado".
+      if (
+        L != null &&
+        totalCotizacionMxn != null &&
+        totalCotizacionMxn > 0 &&
+        Math.abs(cobradoRealMxn - totalCotizacionMxn) <= 0.01
+      ) {
+        cobradoMxn = L;
+      }
       const porCobrarMxn = round2((L ?? 0) - cobradoMxn);
       const porCobrarUsd = K != null ? round2(porCobrarMxn / K) : null;
       const statusCobro =
@@ -1439,8 +1561,30 @@ export class AircraftBalanceService {
           `${etiqueta}: sin cotización — montos de venta en $0 (¿traslado/servicio o falta cotizar?)`,
         );
       }
+      // Partición del ingreso (regla 28-ago): si el desglose no cuadra, la
+      // fila lleva el total completo (no se inventa dinero) y se grita; sin
+      // snapshot v1.3 la partición se estima con las columnas persistidas.
+      if (pPrecio != null && pPrecio.inconsistente) {
+        pendientes.push(
+          `${etiqueta}: el desglose de la cotización no cuadra con el total — la fila lleva el total completo; revisar la cotización`,
+        );
+      }
+      if (
+        pPrecio != null &&
+        pPrecio.fuente === 'columnas' &&
+        pPrecio.tuas_usd + pPrecio.extras_usd + pPrecio.pernocta_usd > 0
+      ) {
+        pendientes.push(
+          `${etiqueta}: sin desglose canónico (snapshot viejo): partición estimada con columnas`,
+        );
+      }
       if ((L ?? 0) > 0 && vCobros.length === 0) {
         pendientes.push(`${etiqueta}: sin cobros registrados`);
+      }
+      if (comisionSinTc > 0) {
+        pendientes.push(
+          `${etiqueta}: ${comisionSinTc} comisión(es) bancaria(s) en USD sin TC (ni TC del vuelo) — no entra al total de comisiones`,
+        );
       }
       // (El combustible ya no se vigila POR VUELO: la vigilancia es mensual
       // por avión — ver pendientes de la hoja "combustible".)
@@ -1518,13 +1662,14 @@ export class AircraftBalanceService {
       // esconderlo.
       if (esCompartido && Y > 0) {
         pendientes.push(
-          // OJO: aplica a los costos de COLUMNAS (Y). Las partes/gastos TUA
-          // de esta fila SÍ restan (hoja "otros gastos" de ESTE avión) y el
-          // GAS resta en su hoja mensual — solo Y espera el prorrateo.
+          // OJO: aplica a los costos de COLUMNAS (Y). El GAS resta en su
+          // hoja mensual; los TUA pagados son solo nota (regla 28-ago) y
+          // viven en "Otros movimientos" del general — solo Y espera el
+          // prorrateo.
           `${etiqueta} (fila compartida): $${Y.toLocaleString('es-MX', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
-          })} MXN de costos de columnas de este avión no restan en ninguna utilidad — prorrateo multi-avión pendiente de decisión del cliente (los TUA y el combustible de la fila sí restan en sus hojas)`,
+          })} MXN de costos de columnas de este avión no restan en ninguna utilidad — prorrateo multi-avión pendiente de decisión del cliente (el combustible de la fila sí resta en su hoja mensual; los TUA pagados son solo nota aquí: viven en "Otros movimientos" del Balance general, que lista vuelos de TODOS los estados)`,
         );
       }
       // Gasto asignado a un avión que NO vuela ningún tramo del vuelo: no
@@ -1576,13 +1721,24 @@ export class AircraftBalanceService {
         horas_cobradas: round2(D),
         tarifa_usd: r2(E),
         iva_hr_usd: G,
-        total_usd: I, // total del sistema: desglose completo c/TUAs y extras (7-ago)
+        total_usd: I, // venta del AVIÓN: tiempo + ajuste + IVA proporcional (regla 28-ago)
         iva_usd: J,
         tc_venta: K,
         tc_venta_oficial: kOficial,
         total_mxn: L,
         iva_mxn: M,
         subtotal_mxn: N,
+        // Total del CLIENTE y partición (informativos, regla 28-ago):
+        // total_usd + otros_ingresos_usd == total_cotizacion_usd.
+        total_cotizacion_usd: totalCotizacionUsd,
+        total_cotizacion_mxn: totalCotizacionMxn,
+        venta_factor: ventaFactor,
+        otros_ingresos_usd: otrosIngresosUsd,
+        // TUA pagado (solo nota; null si no hubo).
+        tua_pagado_mxn:
+          tuaPagadoMxn != null && round2(tuaPagadoMxn) !== 0
+            ? round2(tuaPagadoMxn)
+            : null,
         tiempo_vuelo: O,
         taco_inicio: P,
         taco_inicio_obs: escalasDelAvion
@@ -1626,6 +1782,7 @@ export class AircraftBalanceService {
         status_cobro: esCompartido ? '—' : statusCobro,
         cobros: cobrosOut,
         cobrado_mxn: cobradoMxn,
+        cobrado_real_mxn: cobradoRealMxn,
         por_cobrar_mxn: porCobrarMxn,
         por_cobrar_usd: porCobrarUsd,
       });
@@ -1668,6 +1825,7 @@ export class AircraftBalanceService {
     const sum = (f: (r: BalanceAvionVueloPayload) => number | null): number =>
       round2(filasVuelo.reduce((acc, r) => acc + (f(r) ?? 0), 0));
     const horasVoladas = sum((r) => r.tiempo_vuelo);
+    const tuaPagadoPeriodo = sum((r) => r.tua_pagado_mxn ?? null);
     const totales = {
       horas_cobradas: sum((r) => r.horas_cobradas),
       tiempo_vuelo: horasVoladas,
@@ -1687,19 +1845,46 @@ export class AircraftBalanceService {
       ganancia_mxn: sum((r) => r.ganancia_mxn),
       ganancia_usd: sum((r) => r.ganancia_usd),
       cobrado_mxn: sum((r) => r.cobrado_mxn),
+      cobrado_real_mxn: sum((r) => r.cobrado_real_mxn ?? null),
+      total_cotizacion_mxn: sum((r) => r.total_cotizacion_mxn ?? null),
       por_cobrar_mxn: sum((r) => r.por_cobrar_mxn),
       por_cobrar_usd: sum((r) => r.por_cobrar_usd),
       tc_promedio: tcPromedio != null ? round2(tcPromedio) : null,
       costo_hr_prom_usd: anValues.length
         ? round2(anValues.reduce((a, b) => a + b, 0) / anValues.length)
         : null,
-      // Informativo al pie: NO suma en las columnas (va al control general).
+      // Ingreso de VuelaTour EXCLUIDO de las filas (regla 28-ago): no suma
+      // en las columnas; va a "Otros movimientos" del general.
       otros_ingresos_usd: round2(otrosIngresosPeriodoUsd),
+      // TUA pagado (solo nota, regla 7): informativo, fuera de Y y de la
+      // cascada. null cuando no hubo (celda vacía, no "$0").
+      tua_pagado_mxn: tuaPagadoPeriodo !== 0 ? tuaPagadoPeriodo : null,
+      // Comisiones bancarias convertibles de los cobros de las filas.
+      comision_banco_mxn: round2(
+        filasVuelo.reduce(
+          (acc, r) =>
+            acc + r.cobros.reduce((a, c) => a + (c.comision_mxn ?? 0), 0),
+          0,
+        ),
+      ),
     };
 
-    // ===== Hojas de gastos (indirectos / otros / permisos) =====
-    // INDIRECTO ligado a vuelo no debería existir, pero si existe NO se pierde:
-    // cae a su hoja igual que los sin vuelo.
+    // ===== Hojas de gastos: clasificación por ORIGEN (regla 28-ago-2026,
+    // sustituye a la clasificación solo por categoría) =====
+    //  - GAS → hoja "combustible" (query mensual aparte, abajo). Dejarlo en
+    //    otra hoja lo contaría DOS veces en la cascada.
+    //  - PERMISO → hoja "permisos" (con o sin vuelo).
+    //  - Parcial de un REPARTO MANUAL (es_reparto_parcial: FIJO/OTRO/
+    //    INDIRECTO/GASOLINA/VISITA de la empresa repartidos a mano) → hoja
+    //    "otros gastos": administrativos repartidos, la parte de este avión.
+    //  - Resto con aeronave_id DIRECTO y SIN vuelo (INDIRECTO, OTRO, FIJO,
+    //    REFACCION, OPERACIONES, …) → hoja "gastos indirectos": gastos que
+    //    no se pueden ligar a un vuelo pero sí al avión.
+    //  - TUAS sin vuelo → FUERA (regla 7: el TUA no resta en ninguna hoja;
+    //    se lista en "Otros movimientos" del general y se avisa aquí).
+    //  - INDIRECTO ligado a vuelo no debería existir, pero si existe NO se
+    //    pierde: cae a indirectos (defensa).
+    // La cascada no cambia: suma las 4 hojas.
     // Con vuelos COMPARTIDOS en la lista, gastosVuelo trae también gastos del
     // OTRO avión: las hojas solo cargan los de ESTE (herencia por gasto).
     const avionPorVuelo = new Map(vuelos.map((v) => [v.id, v.aeronave_id]));
@@ -1708,28 +1893,44 @@ export class AircraftBalanceService {
         (g.aeronave_id ??
           (g.vuelo_id ? avionPorVuelo.get(g.vuelo_id) : null)) === aircraftId,
     );
+    // Categorías con destino propio (o sin destino: TUAS).
+    const HOJAS_APARTE = new Set(['GAS', 'PERMISO', 'TUAS']);
     const filasIndirectos = [
-      ...gastosAvion.filter((g) => g.categoria === 'INDIRECTO'),
+      ...gastosAvion.filter(
+        (g) => g.es_reparto_parcial !== true && !HOJAS_APARTE.has(g.categoria),
+      ),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'INDIRECTO'),
     ];
-    // GAS fuera de "otros gastos": el combustible tiene su propia hoja
-    // mensual — dejarlo aquí lo contaría DOS veces en la cascada.
-    // TUAS (regla 26-ago-2026): van a esta hoja — ya no suman en las
-    // columnas del vuelo (la venta de la fila sí incluye los TUAs cobrados;
-    // sin esta salida la utilidad se inflaba). Los TUAS CON vuelo entran
-    // pre-convertidos desde el row-loop (tuaEmbebidoFilas: misma atribución
-    // de avión y mismo TC que su nota de celda); aquí solo los SIN vuelo.
     const filasOtros = gastosAvion.filter(
-      (g) =>
-        g.categoria !== 'INDIRECTO' &&
-        g.categoria !== 'PERMISO' &&
-        g.categoria !== 'GAS',
+      (g) => g.es_reparto_parcial === true && !HOJAS_APARTE.has(g.categoria),
     );
     // Permisos: pagos reales de PERMISO del avión, CON o SIN vuelo.
     const filasPermisos = [
       ...gastosAvion.filter((g) => g.categoria === 'PERMISO'),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'PERMISO'),
     ];
+    // TUAS sin vuelo (regla 7): no restan en ninguna hoja — se avisa para
+    // que el dinero no parezca perdido (viven en "Otros movimientos").
+    const tuasSinVuelo = gastosAvion.filter((g) => g.categoria === 'TUAS');
+    if (tuasSinVuelo.length > 0) {
+      const porMoneda = new Map<string, number>();
+      for (const g of tuasSinVuelo) {
+        const m = g.moneda ?? 'MXN';
+        porMoneda.set(m, (porMoneda.get(m) ?? 0) + (num(g.monto) ?? 0));
+      }
+      const montos = [...porMoneda.entries()]
+        .map(
+          ([m, t]) =>
+            `$${round2(t).toLocaleString('es-MX', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })} ${m}`,
+        )
+        .join(' + ');
+      pendientes.push(
+        `Avión ${avion.matricula as string}: ${tuasSinVuelo.length} gasto(s) TUAS sin vuelo por ${montos} — no restan en ninguna hoja (regla 28-ago: el TUA es solo nota); viven en "Otros movimientos" del Balance general (pestaña que lista vuelos de TODOS los estados) — liga cada gasto a su vuelo si lo tiene`,
+      );
+    }
     const hojaIndirectos = this.buildHoja(
       filasIndirectos,
       tcPromedio,
@@ -1737,41 +1938,13 @@ export class AircraftBalanceService {
       'gastos indirectos',
       pendientes,
     );
-    let hojaOtros = this.buildHoja(
+    const hojaOtros = this.buildHoja(
       filasOtros,
       tcPromedio,
       horasVoladas,
       'otros gastos',
       pendientes,
     );
-    // Partes TUA embebidas (ya en MXN con el factor exacto del gasto): se
-    // funden al ledger y el resumen de la hoja se recalcula con las MISMAS
-    // fórmulas de buildHoja (usd = total/tcPromedio; usd_hr = usd/horas).
-    if (tuaEmbebidoFilas.length > 0) {
-      const filasMerged = [...hojaOtros.filas, ...tuaEmbebidoFilas].sort(
-        (a, b) => String(a.fecha ?? '').localeCompare(String(b.fecha ?? '')),
-      );
-      const totalMxn = round2(
-        hojaOtros.total_mxn +
-          tuaEmbebidoFilas.reduce((s, f) => s + (f.monto_mxn ?? 0), 0),
-      );
-      // Misma regla que buildHoja: una fila sin MXN (sin TC) anula el USD
-      // de la hoja — la cascada queda pendiente, no numérica a medias.
-      const usd = filasMerged.some((f) => f.monto_mxn == null)
-        ? null
-        : totalMxn === 0
-          ? 0
-          : tcPromedio != null
-            ? round2(totalMxn / tcPromedio)
-            : null;
-      hojaOtros = {
-        filas: filasMerged,
-        total_mxn: totalMxn,
-        usd,
-        usd_hr:
-          usd != null && horasVoladas > 0 ? round2(usd / horasVoladas) : null,
-      };
-    }
     const hojaPermisos = this.buildHoja(
       filasPermisos,
       tcPromedio,
@@ -1890,7 +2063,7 @@ export class AircraftBalanceService {
     // ===== Pendientes a nivel avión =====
     if (hojaIndirectos.filas.length === 0) {
       pendientes.push(
-        `Avión ${avion.matricula as string}: sin gastos INDIRECTOS en el periodo — verificar que no falte captura`,
+        `Avión ${avion.matricula as string}: sin gastos del avión sin vuelo (indirectos) en el periodo — verificar que no falte captura`,
       );
     }
     if (permisoAfacUsdHr == null) {
@@ -2042,8 +2215,10 @@ export class AircraftBalanceService {
   /**
    * Gastos ligados a vuelos SIN avión (externos con aeronave null): el vuelo
    * no vive en ningún libro y el gasto no resta en ningún balance ni en el
-   * reparto. Caso real ago-2026: $50,347 MXN de dos externos (verificación
-   * 26-ago). El tratamiento definitivo espera decisión del cliente.
+   * reparto — su único lugar es "Otros movimientos" del general (venta +
+   * gastos del externo). Caso real ago-2026: $50,347 MXN de dos externos
+   * (verificación 26-ago). El tratamiento definitivo espera decisión del
+   * cliente.
    */
 
   /**
@@ -2052,25 +2227,49 @@ export class AircraftBalanceService {
    * conceptos cobrados al cliente (líneas TUAS/EXTRA/PERNOCTA del desglose
    * canónico v1.3, en MXN con el TC de venta) apareados con lo PAGADO solo
    * cuando el mapeo es ESTRUCTURAL — TUAS ↔ gastos TUAS + TUA embebido
-   * (misma regla probada del Libro Dinero), PERNOCTA ↔ gastos HOTEL del
-   * vuelo, comisión bancaria de los cobros ↔ línea BillPocket. El resto de
+   * (tuaEmbebidoDeGasto, misma regla del Libro Dinero), PERNOCTA ↔ gastos
+   * HOTEL del vuelo (solo REFERENCIA: el hotel ya resta en PILOTO del
+   * avión), comisión bancaria de los cobros ↔ línea BillPocket. El resto de
    * conceptos queda como filas adyacentes por clave (el equipo los lee
    * juntos; el sistema jamás afirma un apareo que no puede garantizar).
    * Además: filas SUELTAS con el dinero hoy invisible en este Excel —
-   * gastos sin vuelo NI avión NI reparto, GAS sin avión y los gastos de
-   * vuelos EXTERNOS sin avión (caso $50,347 ago-2026).
+   * gastos sin vuelo NI avión NI reparto, GAS sin avión, TUAS sin vuelo y
+   * los gastos de vuelos EXTERNOS sin avión (caso $50,347 ago-2026).
+   *
+   * Reglas 28-ago (6 y 7): el ingreso de VUELATOUR (TUAS + extras +
+   * pernocta + su IVA) sale de particionIngresoVuelo — la MISMA fuente que
+   * la venta del avión de la hoja maestra — y una fila de cierre por vuelo
+   * ("iva y redondeo de tuas/extras") garantiza Σ venta del avión + Σ
+   * ingresos de esta pestaña == Σ total del cliente. El TUA PAGADO no resta
+   * en ninguna hoja por avión: esta pestaña es su único lugar (apareado con
+   * la línea TUAS cobrada, solo-egreso sin ella, suelto sin vuelo).
+   *
+   * Universo: los MISMOS vuelos que la hoja maestra (TODOS los estados —
+   * CANCELADO/COTIZADO/RESERVA incluidos — y el mismo K de venta vía
+   * tcOficialPorVuelos); cada fila por vuelo lleva `estado` para que el
+   * Excel pinte los cancelados. Externos SIN avión: su venta del avión
+   * (p.avion_usd) no vive en ningún libro — aquí sale como fila de ingreso
+   * seguida del COSTO DEL OPERADOR (vuelo.costo_externo_usd, fila de
+   * solo-egreso: misma regla que flight-report y el bloque `externos` del
+   * reparto) y de TODOS sus gastos (menos GAS, que tiene fila suelta propia).
    */
   private async buildOtrosMovimientos(
     desde: string,
     hasta: string,
+    memoTc: Map<string, Promise<number | null>> = new Map(),
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
       .from('vuelo')
       .select(
-        'id, folio, cliente_id, aeronave_id, es_externo, operador_externo, fecha_vuelo, tc_usd_mxn, monto_total_usd, monto_total_mxn, calculo_snapshot, cliente:cliente_id(nombre)',
+        'id, folio, cliente_id, aeronave_id, estado, es_externo, operador_externo, costo_externo_usd, fecha_vuelo, fecha_solicitud, tc_usd_mxn, monto_total_usd, monto_total_mxn, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot, cliente:cliente_id(nombre)',
       )
-      .in('estado', ['CONFIRMADO', 'EN_VUELO', 'COMPLETADO'])
+      // MISMO universo que la hoja maestra (buildPayload): TODOS los
+      // estados, CANCELADO/COTIZADO/RESERVA incluidos. Filtrar por estado
+      // aquí hacía desaparecer del general el TUA pagado y el ingreso de
+      // VuelaTour de un cancelado con precio, y rompía la identidad Σ venta
+      // avión + Σ ingresos de esta pestaña == Σ total del cliente. Cada
+      // fila viaja con `estado` y pyservices lo pinta (CANCELADO en rojo).
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
       .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
       .order('fecha_vuelo', { ascending: true });
@@ -2079,57 +2278,78 @@ export class AircraftBalanceService {
     const vueloIds = vuelos.map((v) => v.id as string);
 
     const vacio = { data: [], error: null } as const;
-    const [avionesRes, gastosRes, cobrosRes, facturasRes, sueltosRes, gasRes] =
-      await Promise.all([
-        sb.from('aeronave').select('id, matricula, color_calendario'),
-        vueloIds.length
-          ? sb
-              .from('gasto')
-              .select(
-                'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, valor_ia_extraido',
-              )
-              .in('vuelo_id', vueloIds)
-          : Promise.resolve(vacio),
-        vueloIds.length
-          ? sb
-              .from('cobro_vuelo')
-              .select(
-                'vuelo_id, moneda, tc_usd_mxn, fecha_cobro, comision_banco_monto',
-              )
-              .in('vuelo_id', vueloIds)
-              .order('fecha_cobro', { ascending: true })
-          : Promise.resolve(vacio),
-        vueloIds.length
-          ? sb
-              .from('factura')
-              .select('vuelo_id, serie, folio, estado')
-              .in('vuelo_id', vueloIds)
-              .neq('estado', 'CANCELADA')
-          : Promise.resolve(vacio),
-        // Gastos de EMPRESA hoy invisibles en este Excel: sin vuelo, sin
-        // avión (PERSONAL_DUENO fuera; GAS tiene su fila propia abajo).
-        sb
-          .from('gasto')
-          .select(
-            'id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, proveedor:proveedor_id(nombre)',
-          )
-          .is('vuelo_id', null)
-          .is('aeronave_id', null)
-          .neq('categoria', 'PERSONAL_DUENO')
-          .neq('categoria', 'GAS')
-          .gte('fecha_gasto', desde)
-          .lte('fecha_gasto', hasta)
-          .order('fecha_gasto', { ascending: true }),
-        // GAS sin avión (mismo universo que pendienteGasSinAvion).
-        sb
-          .from('gasto')
-          .select('id, monto, moneda, tc_gasto, fecha_gasto, lugar')
-          .eq('categoria', 'GAS')
-          .is('aeronave_id', null)
-          .gte('fecha_gasto', desde)
-          .lte('fecha_gasto', hasta)
-          .order('fecha_gasto', { ascending: true }),
-      ]);
+    const [
+      avionesRes,
+      gastosRes,
+      cobrosRes,
+      facturasRes,
+      sueltosRes,
+      gasRes,
+      tuasSinVueloRes,
+    ] = await Promise.all([
+      sb.from('aeronave').select('id, matricula, color_calendario'),
+      vueloIds.length
+        ? sb
+            .from('gasto')
+            .select(
+              'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, valor_ia_extraido',
+            )
+            .in('vuelo_id', vueloIds)
+        : Promise.resolve(vacio),
+      vueloIds.length
+        ? sb
+            .from('cobro_vuelo')
+            .select(
+              'vuelo_id, moneda, tc_usd_mxn, fecha_cobro, comision_banco_monto',
+            )
+            .in('vuelo_id', vueloIds)
+            .order('fecha_cobro', { ascending: true })
+        : Promise.resolve(vacio),
+      vueloIds.length
+        ? sb
+            .from('factura')
+            .select('vuelo_id, serie, folio, estado')
+            .in('vuelo_id', vueloIds)
+            .neq('estado', 'CANCELADA')
+        : Promise.resolve(vacio),
+      // Gastos de EMPRESA hoy invisibles en este Excel: sin vuelo, sin
+      // avión (PERSONAL_DUENO fuera; GAS tiene su fila propia abajo).
+      sb
+        .from('gasto')
+        .select(
+          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, proveedor:proveedor_id(nombre)',
+        )
+        .is('vuelo_id', null)
+        .is('aeronave_id', null)
+        .neq('categoria', 'PERSONAL_DUENO')
+        .neq('categoria', 'GAS')
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+      // GAS sin avión (mismo universo que pendienteGasSinAvion).
+      sb
+        .from('gasto')
+        .select('id, monto, moneda, tc_gasto, fecha_gasto, lugar')
+        .eq('categoria', 'GAS')
+        .is('aeronave_id', null)
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+      // TUAS sin vuelo CON avión (regla 7, 28-ago): fuera de las hojas del
+      // avión (solo aviso ahí) — aquí es su único lugar. Los TUAS sin
+      // vuelo SIN avión ya vienen en `sueltos`.
+      sb
+        .from('gasto')
+        .select(
+          'id, aeronave_id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, proveedor:proveedor_id(nombre)',
+        )
+        .eq('categoria', 'TUAS')
+        .is('vuelo_id', null)
+        .not('aeronave_id', 'is', null)
+        .gte('fecha_gasto', desde)
+        .lte('fecha_gasto', hasta)
+        .order('fecha_gasto', { ascending: true }),
+    ]);
     for (const r of [
       avionesRes,
       gastosRes,
@@ -2137,6 +2357,7 @@ export class AircraftBalanceService {
       facturasRes,
       sueltosRes,
       gasRes,
+      tuasSinVueloRes,
     ]) {
       if (r.error) throw new Error(r.error.message);
     }
@@ -2173,6 +2394,20 @@ export class AircraftBalanceService {
       if (etiqueta) facturaPorVuelo.set(vid, etiqueta);
     }
 
+    // TC de VENTA por vuelo: la MISMA cadena que la hoja maestra (K =
+    // tc_usd_mxn capturado ?? TC oficial Banxico del día de la cotización,
+    // vía tcOficialPorVuelos) — un vuelo se convierte con el mismo K en
+    // ambos lados. monto_total_mxn/monto_total_usd queda como ÚLTIMO
+    // respaldo (vuelos viejos sin TC ni FIX del día).
+    const tcOficial = await this.tcOficialPorVuelos(
+      vuelos.map((v) => ({
+        id: v.id as string,
+        tc_usd_mxn: v.tc_usd_mxn,
+        fecha_solicitud: v.fecha_solicitud,
+        fecha_vuelo: v.fecha_vuelo,
+      })),
+      memoTc,
+    );
     // TC promedio del periodo (fallback de gastos sueltos sin TC propio).
     const tcs: number[] = [];
     const tcDe = (v: Record<string, unknown>): number | null => {
@@ -2180,6 +2415,7 @@ export class AircraftBalanceService {
       const totalMxn = num(v.monto_total_mxn);
       return (
         pos(v.tc_usd_mxn) ??
+        tcOficial.get(v.id as string) ??
         (totalMxn != null && totalUsd != null && totalUsd > 0
           ? totalMxn / totalUsd
           : null)
@@ -2232,6 +2468,9 @@ export class AircraftBalanceService {
         avion_color: color,
         fecha_vuelo: fechaVuelo,
         factura,
+        // Estado del vuelo (mismo universo que la maestra): pyservices pinta
+        // CANCELADO en rojo. Las filas sueltas (sin vuelo) no lo llevan.
+        estado: (v.estado as string | null) ?? null,
       };
       const filaVacia = {
         ...base,
@@ -2245,12 +2484,78 @@ export class AircraftBalanceService {
       };
 
       // ===== INGRESOS: líneas TUAS/EXTRA/PERNOCTA del desglose canónico
-      // (misma regla que la hoja "Otros ingresos" del Libro Dinero). =====
+      // (misma regla que la hoja "Otros ingresos" del Libro Dinero) + UNA
+      // fila de cierre por vuelo con el IVA de esos conceptos y el redondeo
+      // (regla 28-ago): la parte de VuelaTour sale de particionIngresoVuelo
+      // (la MISMA fuente única que la venta del avión de la hoja maestra),
+      // así Σ venta del avión + Σ ingresos de esta pestaña == Σ total del
+      // cliente, al centavo. =====
+      const p = particionIngresoVuelo({
+        monto_total_usd: num(v.monto_total_usd),
+        subtotal_vuelo_usd: num(v.subtotal_vuelo_usd),
+        ajuste_final_usd: num(v.ajuste_final_usd),
+        comision_vendedor_usd: num(v.comision_vendedor_usd),
+        iva_usd: num(v.iva_usd),
+        iva_pct: num(v.iva_pct),
+        tuas_usd: num(v.tuas_usd),
+        extras_total_usd: num(v.extras_total_usd),
+        viaticos_pernocta_usd: num(v.viaticos_pernocta_usd),
+        calculo_snapshot: v.calculo_snapshot,
+      });
+      // Σ USD de las líneas que SÍ se listan abajo (base del cierre).
+      let sumLineasUsd = 0;
       // El egreso TUAS se adjunta SOLO a la primera línea TUAS (una línea
       // por aeropuerto: repetirlo duplicaba la columna egreso).
       let egresoTuasAsignado = false;
       let egresoPernoctaAsignado = false;
       let comisionBancoAsignada = false;
+
+      // TUA PAGADO del vuelo (categoría TUAS + parte TUA embebida en
+      // facturas de aeródromo vía tuaEmbebidoDeGasto — FUENTE ÚNICA, misma
+      // exclusión CATS_SIN_TUA_EMBEBIDO que la fila del vuelo en la hoja
+      // maestra), a MXN con la regla del workbook. Regla 7 (28-ago): el TUA
+      // pagado no resta en ninguna hoja por avión — ESTA pestaña es su único
+      // lugar: apareado con la línea TUAS cobrada o, sin línea, como fila de
+      // solo-egreso. Externos sin avión: TODOS sus gastos salen como filas
+      // propias abajo (aparearlos aquí además los contaría dos veces).
+      let tuaPagadoMxn = 0;
+      let tuaPagadoHubo = false;
+      let tuaSinTc = false;
+      let fechaTua: string | null = null;
+      if (!externoSinAvion) {
+        for (const g of gastosV) {
+          const monto = num(g.monto) ?? 0;
+          const parte =
+            g.categoria === 'TUAS'
+              ? monto
+              : tuaEmbebidoDeGasto({
+                  vuelo_id: (g.vuelo_id as string | null) ?? null,
+                  categoria: (g.categoria as string | null) ?? null,
+                  monto: g.monto as string | number | null,
+                  propina: g.propina as string | number | null,
+                  valor_ia_extraido: g.valor_ia_extraido,
+                  es_reparto_parcial: g.es_reparto_parcial === true,
+                });
+          if (parte <= 0) continue;
+          const parteMxn = gastoMxn(g, parte);
+          if (parteMxn == null) {
+            // USD sin ningún TC: rastro en la fila, jamás sumado en falso.
+            tuaSinTc = true;
+            continue;
+          }
+          if (parteMxn <= 0) continue;
+          tuaPagadoMxn += parteMxn;
+          tuaPagadoHubo = true;
+          fechaTua ??= (g.fecha_gasto as string) ?? null;
+        }
+      }
+      const conceptoTuasPagadas = `tuas pagadas${
+        tuaSinTc
+          ? tuaPagadoHubo
+            ? ' (parcial: USD sin TC)'
+            : ' (USD sin TC)'
+          : ''
+      }`;
 
       // Comisión bancaria de los cobros del vuelo, a MXN (MXN directo; USD
       // con su TC propio o el de venta; sin TC no se suma en falso).
@@ -2279,50 +2584,22 @@ export class AircraftBalanceService {
         if (!/^(TUAS|EXTRA|PERNOCTA)/.test(claveLinea)) continue;
         const montoUsd = num(linea.monto_usd);
         if (montoUsd == null || montoUsd === 0) continue;
+        sumLineasUsd += montoUsd;
         const ingresoMxn = tc != null ? r2(montoUsd * tc) : null;
         let egresoMxn: number | null = null;
         let conceptoEgreso: string | null = null;
         let fechaEgreso: string | null = null;
-        // Externos sin avión: TODOS sus gastos salen como filas propias
-        // abajo — aparearlos aquí además los contaría dos veces.
-        if (claveLinea === 'TUAS' && !egresoTuasAsignado && !externoSinAvion) {
-          let suma = 0;
-          let hubo = false;
-          for (const g of gastosV) {
-            const monto = num(g.monto) ?? 0;
-            let parte = 0;
-            if (g.categoria === 'TUAS') {
-              parte = monto;
-            } else if (
-              monto > 0 &&
-              !['GAS', 'COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO'].includes(
-                g.categoria as string,
-              )
-            ) {
-              const partes = desgloseGastoPartes(
-                (
-                  g as {
-                    valor_ia_extraido?: {
-                      conceptos?: Array<{ concepto: string; monto: number }>;
-                    } | null;
-                  }
-                ).valor_ia_extraido?.conceptos ?? [],
-                round2(monto - (num(g.propina) ?? 0)),
-              );
-              if (partes && partes.tua > 0) parte = partes.tua;
-            }
-            if (parte <= 0) continue;
-            const parteMxn = gastoMxn(g, parte);
-            if (parteMxn == null || parteMxn <= 0) continue;
-            suma += parteMxn;
-            hubo = true;
-            fechaEgreso ??= (g.fecha_gasto as string) ?? null;
-          }
-          if (hubo) {
-            egresoMxn = r2(suma);
-            conceptoEgreso = 'tuas pagadas';
-            egresoTuasAsignado = true;
-          }
+        // TUA cobrado ↔ TUA pagado (pre-calculado arriba; en externos sin
+        // avión nunca hay pagado aquí).
+        if (
+          claveLinea === 'TUAS' &&
+          !egresoTuasAsignado &&
+          (tuaPagadoHubo || tuaSinTc)
+        ) {
+          egresoMxn = tuaPagadoHubo ? r2(tuaPagadoMxn) : null;
+          conceptoEgreso = conceptoTuasPagadas;
+          fechaEgreso = fechaTua;
+          egresoTuasAsignado = true;
         } else if (
           claveLinea === 'PERNOCTA' &&
           !egresoPernoctaAsignado &&
@@ -2341,8 +2618,16 @@ export class AircraftBalanceService {
             fechaEgreso ??= (g.fecha_gasto as string) ?? null;
           }
           if (hubo) {
-            egresoMxn = r2(suma);
-            conceptoEgreso = 'hotel pagado';
+            // REFERENCIA, no egreso: el hotel YA resta en la columna PILOTO
+            // del avión en la hoja maestra — sumarlo aquí también duplicaba
+            // el costo en la narrativa. Decisión pendiente del cliente: si
+            // el hotel debe SALIR del avión, este egreso se vuelve real y la
+            // columna PILOTO lo suelta (una sola regla, nunca las dos).
+            egresoMxn = null;
+            conceptoEgreso = `hotel pagado $${round2(suma).toLocaleString(
+              'es-MX',
+              { minimumFractionDigits: 2, maximumFractionDigits: 2 },
+            )} — ya resta en PILOTO del avión (referencia, no suma)`;
             egresoPernoctaAsignado = true;
           }
         } else if (
@@ -2379,6 +2664,50 @@ export class AircraftBalanceService {
         });
       }
 
+      // Cierre del ingreso de VuelaTour (regla 28-ago): IVA de TUAS/extras
+      // + centavos de redondeo — lo que la partición atribuye a VuelaTour y
+      // NO está en las líneas listadas arriba. UNA fila por vuelo, solo si
+      // mueve ≥ 1 centavo. Si el desglose no cuadró (p.inconsistente) la
+      // venta del avión lleva el total COMPLETO y esta fila NEUTRALIZA las
+      // líneas de arriba (el cuadre se conserva; el balance lo grita). Sin
+      // snapshot v1.3 (fuente 'columnas') no hay líneas que listar: esta
+      // fila lleva TODO el ingreso de VuelaTour y lo dice en el concepto.
+      const residuoUsd = round2(p.vuelatour_usd - sumLineasUsd);
+      const residuoMxn = tc != null ? r2(residuoUsd * tc) : null;
+      if (
+        residuoMxn != null
+          ? Math.abs(residuoMxn) >= 0.01
+          : Math.abs(residuoUsd) >= 0.01
+      ) {
+        const sinTcVenta = residuoMxn == null ? ' (USD sin TC de venta)' : '';
+        filas.push({
+          ...filaVacia,
+          concepto_ingreso: p.inconsistente
+            ? 'ajuste: desglose de la cotización inconsistente (la venta del avión lleva el total completo)'
+            : p.fuente === 'columnas'
+              ? `tuas/extras/pernocta cobrados + iva (sin desglose canónico: estimado con columnas)${sinTcVenta}`
+              : `iva y redondeo de tuas/extras${sinTcVenta}`,
+          ingreso_mxn: residuoMxn,
+          fecha_ingreso: fechaVuelo,
+          remanente_mxn: residuoMxn,
+        });
+      }
+
+      // TUA pagado SIN línea TUAS cobrada en el desglose (vuelo cotizado sin
+      // TUAS, TUA que apareció en la factura del aeródromo…): fila de
+      // solo-egreso — el pago existe aunque no se haya trasladado al
+      // cliente (patrón de la comisión bancaria sin línea BillPocket).
+      if ((tuaPagadoHubo || tuaSinTc) && !egresoTuasAsignado) {
+        const egreso = tuaPagadoHubo ? r2(tuaPagadoMxn) : null;
+        filas.push({
+          ...filaVacia,
+          concepto_egreso: conceptoTuasPagadas,
+          egreso_mxn: egreso,
+          fecha_egreso: fechaTua,
+          remanente_mxn: egreso != null ? r2(-egreso) : null,
+        });
+      }
+
       // Banco que descontó comisión SIN línea BillPocket que la cubra
       // (transferencia HSBC, links): fila de solo-egreso — el costo existe
       // aunque no se haya cobrado al cliente.
@@ -2399,23 +2728,79 @@ export class AircraftBalanceService {
         });
       }
 
-      // Vuelo EXTERNO sin avión: sus gastos no viven en ningún libro por
-      // avión — aquí salen TODOS como filas de solo-egreso bajo su clave.
+      // Vuelo EXTERNO sin avión: ni su venta ni sus gastos viven en ningún
+      // libro por avión — aquí sale UNA fila de ingreso con la venta del
+      // avión ajeno (la parte de VuelaTour ya salió arriba como en cualquier
+      // vuelo) y luego TODOS sus gastos como filas de solo-egreso bajo su
+      // clave. Así el general no pierde ese dinero y la identidad Σ venta
+      // avión + Σ ingresos de esta pestaña == Σ total del cliente se cumple.
       if (externoSinAvion) {
+        const opRaw = v.operador_externo;
+        const operador =
+          (typeof opRaw === 'string' && opRaw.trim()) || 'operador ¿?';
+        // Costo del OPERADOR externo (lo que VuelaTour le paga): vive en
+        // vuelo.costo_externo_usd, NO en `gasto` — MISMA regla que el
+        // reporte por vuelo (flight-report) y el bloque `externos` del
+        // reparto. Ya está en USD; a MXN con el K de venta del vuelo. Sin
+        // restarlo, la venta del avión ajeno quedaba como utilidad fantasma.
+        const costoOperadorUsd = pos(v.costo_externo_usd);
+        if (p.avion_usd !== 0) {
+          const ventaMxn = tc != null ? r2(p.avion_usd * tc) : null;
+          filas.push({
+            ...filaVacia,
+            concepto_ingreso: `venta externo sin avión (${operador} · tramos pactados + ajuste + iva)${
+              ventaMxn == null ? ' (USD sin TC de venta)' : ''
+            }${
+              costoOperadorUsd == null
+                ? ' (sin costo del operador capturado: remanente BRUTO)'
+                : ''
+            }`,
+            ingreso_mxn: ventaMxn,
+            fecha_ingreso: fechaVuelo,
+            remanente_mxn: ventaMxn,
+          });
+        }
+        if (costoOperadorUsd != null) {
+          // Anti doble conteo (sin categoría para detectarlo): si la oficina
+          // ADEMÁS capturó la transferencia al operador como `gasto` del
+          // vuelo, ese gasto sale abajo como fila propia y el costo se
+          // restaría DOS veces. El reporte por vuelo avisa en ese caso; aquí
+          // no hay señal fiable — regla: el pago al operador se captura en
+          // "Cubrir con externo → costo", NO como gasto del vuelo.
+          const costoMxn = tc != null ? r2(costoOperadorUsd * tc) : null;
+          filas.push({
+            ...filaVacia,
+            concepto_egreso: `costo operador externo (${operador})${
+              costoMxn == null ? ' (USD sin TC de venta)' : ''
+            }`,
+            egreso_mxn: costoMxn,
+            fecha_egreso: fechaVuelo,
+            remanente_mxn: costoMxn != null ? r2(-costoMxn) : null,
+          });
+        }
         for (const g of gastosV) {
           // GAS lo posee la fila suelta "gas sin avión" (contarlo aquí
-          // también duplicaría el egreso); un gasto con avión propio ya
-          // vive en las hojas de ese avión de ESTE mismo workbook.
-          if (g.categoria === 'GAS' || g.aeronave_id != null) continue;
+          // también duplicaría el egreso). Un gasto CON avión propio NO se
+          // salta: el libro del avión solo lee gastos de SUS vuelos y los
+          // sin vuelo de su fecha — un gasto de un vuelo externo ajeno con
+          // aeronave_id no entra ahí, así que este es su único lugar (se
+          // antepone la matrícula y la fila toma el color del avión).
+          if (g.categoria === 'GAS') continue;
           const monto = num(g.monto) ?? 0;
           if (monto <= 0) continue;
           const mxn = gastoMxn(g, monto);
           const sinTc = mxn == null;
+          const avG = g.aeronave_id
+            ? aviones.get(g.aeronave_id as string)
+            : undefined;
           filas.push({
             ...filaVacia,
-            concepto_egreso: `${String(g.categoria ?? '').toLowerCase()}${
-              g.lugar ? ` · ${g.lugar as string}` : ''
-            }${sinTc ? ' (USD sin TC)' : ''}`,
+            avion_color: avG?.color ?? filaVacia.avion_color,
+            concepto_egreso: `${avG ? `${avG.matricula} · ` : ''}${String(
+              g.categoria ?? '',
+            ).toLowerCase()}${g.lugar ? ` · ${g.lugar as string}` : ''}${
+              sinTc ? ' (USD sin TC)' : ''
+            }`,
             egreso_mxn: r2(mxn),
             fecha_egreso: (g.fecha_gasto as string) ?? null,
             remanente_mxn: mxn != null ? r2(-mxn) : null,
@@ -2469,7 +2854,11 @@ export class AircraftBalanceService {
       for (const g of sueltos) {
         const partes = repartos.get(g.id as string) ?? [];
         if (partes.length === 0) {
-          sueltas.push(sueltaDe(g, 'empresa'));
+          // TUAS sin vuelo (regla 7): clave propia — no restan en ninguna
+          // hoja por avión; aquí es su único lugar.
+          sueltas.push(
+            sueltaDe(g, g.categoria === 'TUAS' ? 'tuas sin vuelo' : 'empresa'),
+          );
           continue;
         }
         // Reparto PARCIAL: los parciales viven en las hojas de sus aviones;
@@ -2489,6 +2878,22 @@ export class AircraftBalanceService {
     }
     for (const g of (gasRes.data ?? []) as Array<Record<string, unknown>>) {
       sueltas.push(sueltaDe(g, 'gas sin avión'));
+    }
+    // TUAS sin vuelo CON avión (regla 7, 28-ago): el libro del avión solo
+    // los avisa (no restan en ninguna hoja) — aquí es su único lugar, con la
+    // matrícula en el concepto y el color del avión.
+    for (const g of (tuasSinVueloRes.data ?? []) as Array<
+      Record<string, unknown>
+    >) {
+      const av = aviones.get(g.aeronave_id as string);
+      const base = sueltaDe(g, 'tuas sin vuelo');
+      sueltas.push({
+        ...base,
+        avion_color: av?.color ?? null,
+        concepto_egreso: `${av?.matricula ?? 'avión ¿?'} · ${
+          base.concepto_egreso ?? 'tuas'
+        }`,
+      });
     }
 
     return { filas, filas_sueltas: sueltas };
@@ -2536,7 +2941,37 @@ export class AircraftBalanceService {
       )
       .join(' + ');
     return [
-      `FLOTA: ${filas.length} gasto(s) de vuelos EXTERNOS sin avión (${[...folios].join(', ')}) por ${montos} — no aparecen en el balance de ningún avión ni en el reparto (tratamiento pendiente de decisión)`,
+      `FLOTA: ${filas.length} gasto(s) de vuelos EXTERNOS sin avión (${[...folios].join(', ')}) por ${montos} — no aparecen en el balance de ningún avión ni en el reparto; viven solo en "Otros movimientos" del Balance general (tratamiento pendiente de decisión)`,
+    ];
+  }
+
+  /**
+   * Vuelos EXTERNOS sin avión del periodo CON precio pero SIN costo del
+   * operador (vuelo.costo_externo_usd null o 0): su venta sale en "Otros
+   * movimientos" como remanente BRUTO (no hay nada que restar). Mismo eje
+   * que la pestaña: fecha_vuelo con cortes Cancún, TODOS los estados. Se
+   * registra en el general junto a pendienteExternosSinAvion.
+   */
+  private async pendienteExternosSinCosto(
+    desde: string,
+    hasta: string,
+  ): Promise<string[]> {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('folio')
+      .eq('es_externo', true)
+      .is('aeronave_id', null)
+      .gt('monto_total_usd', 0)
+      .or('costo_externo_usd.is.null,costo_externo_usd.eq.0')
+      .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
+      .lte('fecha_vuelo', `${hasta}T23:59:59-05:00`)
+      .order('fecha_vuelo', { ascending: true });
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as Array<{ folio?: number | null }>;
+    if (filas.length === 0) return [];
+    const folios = filas.map((v) => `#${v.folio ?? '?'}`).join(', ');
+    return [
+      `FLOTA: ${filas.length} vuelo(s) externo(s) sin costo del operador capturado (${folios}) — su venta en 'Otros movimientos' queda como remanente BRUTO (Detalle del vuelo → Cubrir con externo → costo)`,
     ];
   }
 

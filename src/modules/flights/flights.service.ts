@@ -1625,7 +1625,7 @@ export class FlightsService {
       // como aviones DISTINTOS y tramo_llegada_anterior salía null — la
       // guarda del caso #71 (llegada repetida) se apagaba en el redondo.
       const efectivo = (x: Record<string, unknown>) =>
-        ((x.aeronave_id as string | null) ?? vueloAeronaveId) ?? null;
+        (x.aeronave_id as string | null) ?? vueloAeronaveId ?? null;
       const prev = escalas
         .slice(0, i)
         .reverse()
@@ -1988,16 +1988,17 @@ export class FlightsService {
           f.piloto_id as string | null,
           f.copiloto_id as string | null,
           f.apoyo_id as string | null,
-          ...((f.escalas as Array<{
-            piloto_id: string | null;
-            cancelada_at: string | null;
-          }> | null) ?? [])
+          ...(
+            (f.escalas as Array<{
+              piloto_id: string | null;
+              cancelada_at: string | null;
+            }> | null) ?? []
+          )
             .filter((e) => e.cancelada_at == null)
             .map((e) => e.piloto_id),
         ];
         for (const uid of ocupados) {
-          if (uid && !conflicto.has(uid))
-            conflicto.set(uid, f.folio as number);
+          if (uid && !conflicto.has(uid)) conflicto.set(uid, f.folio as number);
         }
       }
     }
@@ -2727,8 +2728,7 @@ export class FlightsService {
     // volaba el del vuelo — armar la rotación asignando a otro lo saca de
     // ESE tramo y antes nadie le avisaba (escala.piloto_id era null).
     const pilotoPrevioEfectivo =
-      (escala.piloto_id as string | null) ??
-      (vuelo.piloto_id as string | null);
+      (escala.piloto_id as string | null) ?? (vuelo.piloto_id as string | null);
     if (
       dto.piloto_id !== undefined &&
       pilotoPrevioEfectivo &&
@@ -2810,7 +2810,8 @@ export class FlightsService {
         .maybeSingle();
       const efectivo =
         (escala.piloto_id as string | null) ??
-        ((v?.piloto_id as string | null) ?? null);
+        (v?.piloto_id as string | null) ??
+        null;
       if (efectivo !== user.userId) {
         throw new ForbiddenException(
           'Solo el piloto asignado puede actualizar el permiso de este tramo',
@@ -6514,7 +6515,11 @@ export class FlightsService {
         .is('cancelada_at', null)
         .order('orden', { ascending: true });
       if (error) throw new Error(error.message);
-      return { primero: data?.[0] ?? null, ultimo: data?.[data.length - 1] ?? null, total: data?.length ?? 0 };
+      return {
+        primero: data?.[0] ?? null,
+        ultimo: data?.[data.length - 1] ?? null,
+        total: data?.length ?? 0,
+      };
     };
     const [bCub, bAnf] = await Promise.all([
       bordes(cubiertoId),
@@ -6578,9 +6583,7 @@ export class FlightsService {
     //    cancelados y el estado a medias (no hay transacción).
     await this.validateAssignTargets({
       aeronaveId: avionId,
-      ...(dto.aplicar_piloto !== false && pilotoId
-        ? { pilotoId }
-        : {}),
+      ...(dto.aplicar_piloto !== false && pilotoId ? { pilotoId } : {}),
     });
     // Avión ANTERIOR del cubierto: el blanket de abajo solo pisa herencia
     // (null) o ese avión — una rotación por tramo deliberada se respeta.
@@ -6608,7 +6611,7 @@ export class FlightsService {
         ...(dto.aplicar_piloto !== false && pilotoId
           ? { piloto_id: pilotoId }
           : {}),
-      } as AssignFlightDto,
+      },
       userId,
     );
     // El avión también en los tramos vivos del cubierto (assign solo espeja
@@ -6653,11 +6656,7 @@ export class FlightsService {
       // ligado y el otro no) pasaba en silencio.
       if (selloErr) throw new Error(selloErr.message);
     };
-    await marcar(
-      cubiertoId,
-      dto.vuelo_anfitrion_id,
-      anfitrion.folio as number,
-    );
+    await marcar(cubiertoId, dto.vuelo_anfitrion_id, anfitrion.folio as number);
     await marcar(dto.vuelo_anfitrion_id, cubiertoId, cubierto.folio as number);
 
     // 4) Pernocta OPERATIVA en el último tramo vivo del anfitrión: señal al
@@ -6765,7 +6764,7 @@ export class FlightsService {
       !idaCub ||
       idaCub.es_ferry !== true ||
       (activosCub?.length ?? 0) < 2 ||
-      !sinEvidencia(idaCub as Record<string, unknown>)
+      !sinEvidencia(idaCub)
     )
       return { data: [] };
     const P = (idaCub.destino_iata as string).toUpperCase();
@@ -6799,13 +6798,17 @@ export class FlightsService {
       if (!v) continue;
       // El anfitrión EN_VUELO es el caso estrella (ya voló, duerme en P).
       if (
-        !['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO', 'EN_VUELO'].includes(
-          v.estado as string,
-        )
+        ![
+          'RESERVA',
+          'SOLICITUD',
+          'COTIZADO',
+          'CONFIRMADO',
+          'EN_VUELO',
+        ].includes(v.estado as string)
       )
         continue;
       if (v.es_externo === true || v.combinado_con_id) continue;
-      if (!sinEvidencia(o as Record<string, unknown>)) continue;
+      if (!sinEvidencia(o)) continue;
       // ROL: debe ser el ÚLTIMO tramo activo de su vuelo (su regreso vacío).
       const { data: bordes } = await this.supabase.service
         .from('escala')
@@ -6840,8 +6843,7 @@ export class FlightsService {
         noches:
           fechaCubierto && fechaAnf
             ? Math.round(
-                (Date.parse(fechaCubierto) - Date.parse(fechaAnf)) /
-                  86_400_000,
+                (Date.parse(fechaCubierto) - Date.parse(fechaAnf)) / 86_400_000,
               )
             : null,
       });
@@ -7416,8 +7418,10 @@ export class FlightsService {
     if (dto.metodo_cobro !== undefined) patch.metodo_cobro = dto.metodo_cobro;
     if (dto.tc_usd_mxn !== undefined) patch.tc_usd_mxn = dto.tc_usd_mxn;
     if (dto.referencia !== undefined) patch.referencia = dto.referencia;
+    // `null` pasa IsOptional y salta el @ValidateIf: `.trim()` directo
+    // tronaba. Vacío/null = quitar la cuenta.
     if (dto.cuenta_destino !== undefined)
-      patch.cuenta_destino = dto.cuenta_destino.trim() || null;
+      patch.cuenta_destino = (dto.cuenta_destino ?? '').trim() || null;
     if (dto.fecha_cobro !== undefined)
       patch.fecha_cobro = dto.fecha_cobro.toISOString();
     if (dto.notas !== undefined) patch.notas = dto.notas;

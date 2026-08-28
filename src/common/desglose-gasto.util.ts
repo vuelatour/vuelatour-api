@@ -132,3 +132,63 @@ export function desgloseGastoLineas(
     (c) => `${c.concepto} - $${c.monto.toFixed(2)} ${moneda}`,
   );
 }
+
+/**
+ * Categorías donde JAMÁS se separa un TUA embebido (regla 7, 28-ago-2026):
+ * GAS/PERMISO/INDIRECTO tienen hoja propia, TUAS es el TUA entero (no
+ * embebido) y las categorías del piloto no traen factura de aeródromo.
+ * FUENTE ÚNICA: la usan el Balance por avión (fila del vuelo y pestaña
+ * Otros movimientos), el reparto a socios y el Libro Dinero.
+ */
+export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
+  'GAS',
+  'PERMISO',
+  'INDIRECTO',
+  'TUAS',
+  'COMIDA',
+  'HOTEL',
+  'TAXI',
+  'PILOTO_EXTERNO',
+  'PERSONAL_DUENO',
+  'GASOLINA',
+  'VISITA',
+]);
+
+export interface GastoParaTuaEmbebido {
+  vuelo_id?: string | null;
+  categoria?: string | null;
+  monto?: string | number | null;
+  propina?: string | number | null;
+  valor_ia_extraido?: unknown;
+  es_reparto_parcial?: boolean;
+}
+
+/**
+ * Parte TUA EMBEBIDA (con su IVA) de una factura de aeródromo/handling, en la
+ * MONEDA del gasto; 0 si no hay nada que separar. Regla 7 (28-ago-2026): el
+ * TUA es un traslado al pasajero, no costo del avión — su egreso vive en
+ * Otros movimientos del Balance general. Base del desglose = monto − propina
+ * (la propina no sale de la factura pero SÍ sigue siendo costo del avión).
+ * Solo gastos CON vuelo; los parciales del reparto manual quedan fuera (sus
+ * renglones IA son de la factura completa y no cuadran con el parcial).
+ */
+export function tuaEmbebidoDeGasto(g: GastoParaTuaEmbebido): number {
+  if (g.es_reparto_parcial || !g.vuelo_id) return 0;
+  if (!g.categoria || CATS_SIN_TUA_EMBEBIDO.has(g.categoria)) return 0;
+  const monto = Number(g.monto);
+  if (!(monto > 0)) return 0;
+  const base = Math.round((monto - (Number(g.propina) || 0)) * 100) / 100;
+  if (base <= 0) return 0;
+  const ia = g.valor_ia_extraido as
+    | { conceptos?: Array<{ concepto?: string; monto?: number }> | null }
+    | null
+    | undefined;
+  const conceptos = Array.isArray(ia?.conceptos) ? ia.conceptos : [];
+  if (conceptos.length === 0) return 0;
+  const partes = desgloseGastoPartes(
+    conceptos as Parameters<typeof desgloseGastoPartes>[0],
+    base,
+  );
+  if (!partes || !(partes.tua > 0)) return 0;
+  return Math.min(partes.tua, monto);
+}

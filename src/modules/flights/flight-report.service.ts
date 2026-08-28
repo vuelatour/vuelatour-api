@@ -6,10 +6,12 @@ import {
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { particionIngresoVuelo } from '../../common/ingreso-vuelo.util';
 
-/** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio). */
+/** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio
+ *  e iva_pct/calculo_snapshot para la partición venta avión / VuelaTour). */
 const REPORTE_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, combinado_con_id, calculo_snapshot';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, origen_iata, destino_iata, pasajeros, pasajeros_nombres, fecha_vuelo, fecha_traslado_final, monto_total_usd, monto_total_mxn, tc_usd_mxn, tarifa_tipo, tarifa_hora_usd, tiempo_cobrable_hr, subtotal_vuelo_usd, tuas_usd, iva_usd, iva_pct, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, metodo_cobro, combinado_con_id, calculo_snapshot';
 
 function n(v: unknown): number {
   const x = Number(v);
@@ -451,6 +453,21 @@ export class FlightReportService {
     // sin IVA.
     const ventaUsd = n(v.monto_total_usd);
     const ventaSinIvaUsd = Number((ventaUsd - n(v.iva_usd)).toFixed(2));
+    // Partición del ingreso (regla 6, 28-ago-2026): venta del AVIÓN vs
+    // ingreso de VuelaTour (TUAS/extras/pernocta + su IVA). INFORMATIVA en
+    // este reporte: remanente/ganancia siguen sobre la economía COMPLETA
+    // del vuelo (todo lo que pagó el cliente contra todo lo que costó), pero
+    // se rotula que la venta del avión ≠ total del cliente.
+    const particion = particionIngresoVuelo(v);
+    if (particion.vuelatour_usd > 0) {
+      notasHoras.push(
+        `Venta del avión $${particion.avion_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} ≠ total del cliente $${particion.total_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })}: los $${particion.vuelatour_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} de TUAS/extras/pernocta (con su IVA) son ingreso de VuelaTour (Otros movimientos), no del avión. El remanente y la ganancia de este reporte son de la economía completa del vuelo.`,
+      );
+    } else if (particion.inconsistente) {
+      notasHoras.push(
+        'El desglose de la cotización no cuadra con el total: no se pudo separar la venta del avión de los extras (todo el total se muestra como venta del avión). Revisa la cotización.',
+      );
+    }
     const hayEconomia = ventaUsd > 0 || costoVueloUsd > 0;
     const remanenteUsd = hayEconomia
       ? Number((ventaUsd - costoVueloUsd).toFixed(2))
@@ -512,6 +529,11 @@ export class FlightReportService {
       extras_total_usd: n(v.extras_total_usd),
       ajuste_final_usd: n(v.ajuste_final_usd),
       total_usd: n(v.monto_total_usd),
+      // Informativos (regla 6): venta del AVIÓN y parte de VuelaTour; suman
+      // exacto el total (cierre por diferencia en particionIngresoVuelo).
+      venta_avion_usd: particion.total_usd > 0 ? particion.avion_usd : null,
+      otros_ingresos_vuelatour_usd:
+        particion.total_usd > 0 ? particion.vuelatour_usd : null,
       total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
       // Comisión del vendedor: se muestra DESPUÉS del total (regla jul 2026:

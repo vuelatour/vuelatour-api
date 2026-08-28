@@ -7,6 +7,11 @@ import {
   expandirConReparto,
   fetchRepartos,
 } from '../../common/gasto-reparto.util';
+import {
+  cobradoParteAvion,
+  particionIngresoVuelo,
+} from '../../common/ingreso-vuelo.util';
+import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 
 /** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
 const DIRECTO = new Set([
@@ -16,7 +21,10 @@ const DIRECTO = new Set([
   // cuotas de VIP SAESA no restaban en el reparto e inflaban la utilidad.
   'OPERACIONES',
   'ATERRIZAJE',
-  'TUAS',
+  // 'TUAS' YA NO está aquí (regla 7 del cliente, 28-ago-2026): el TUA pagado
+  // al aeropuerto es un traslado al pasajero, no costo del avión — su egreso
+  // vive en "Otros movimientos" del Balance general (apareado con el TUA
+  // cobrado, que tampoco es venta del avión). Ver TUAS_CAT abajo.
   'FBO',
   'COMIDA',
   'HOTEL',
@@ -34,6 +42,23 @@ const INDIRECTO = new Set(['REFACCION']);
 const PERMISO = new Set(['PERMISO']);
 /** Sueldos, seguros: se prorratean entre aviones activos. */
 const FIJO = 'FIJO';
+/**
+ * TUA pagado (regla 7, 28-ago-2026): grupo EXCLUIDO del reparto — solo nota de
+ * operación; el egreso se aparea con el TUA cobrado en Otros movimientos.
+ */
+const TUAS_CAT = 'TUAS';
+const TUAS_CLAVE_DETALLE = 'TUAS (egreso VuelaTour — Otros movimientos)';
+/**
+ * TUA EMBEBIDO en facturas de aeródromo/handling (leído por IA): esa parte se
+ * descuenta del costo del avión con la FUENTE ÚNICA `tuaEmbebidoDeGasto`
+ * (toda categoría CON vuelo salvo CATS_SIN_TUA_EMBEBIDO) — la MISMA regla que
+ * el Balance por avión y el Libro Dinero. Antes este archivo traía su propia
+ * lista blanca de 4 categorías y el reparto divergía del balance.
+ */
+const TUA_EMBEBIDO_CLAVE_DETALLE = 'TUA embebido (excluido)';
+/** Leyenda del bloque informativo `otros_ingresos_vuelatour` (regla 6). */
+const OTROS_INGRESOS_LEYENDA =
+  'Ingreso de VuelaTour (TUAS, extras y pernocta cobrados con su IVA): vive en Otros movimientos del Balance general; no se reparte.';
 
 interface AeronaveRow {
   id: string;
@@ -48,6 +73,16 @@ interface VueloRow {
   cobrado: boolean;
   /** Comisión de quien vendió: se descuenta del ingreso (neto VuelaTour). */
   comision_vendedor_usd: string | null;
+  // Insumos de `particionIngresoVuelo` (venta del avión vs ingreso de
+  // VuelaTour — regla 6). Sin snapshot el util cae a estas columnas.
+  subtotal_vuelo_usd: string | null;
+  ajuste_final_usd: string | null;
+  iva_usd: string | null;
+  iva_pct: string | null;
+  tuas_usd: string | null;
+  extras_total_usd: string | null;
+  viaticos_pernocta_usd: string | null;
+  calculo_snapshot: unknown;
   // Campos informativos para el desglose por avión (detalle.vuelos); no
   // alteran ningún cálculo del reparto.
   folio: number | null;
@@ -85,10 +120,17 @@ interface EscalaHorasRow {
 interface GastoRow {
   id: string;
   aeronave_id: string | null;
+  vuelo_id: string | null;
   categoria: string;
   monto: string | number;
   moneda: string;
   tc_gasto: string | null;
+  /** Propina (ya incluida en `monto`): fuera de la base del desglose IA. */
+  propina?: string | number | null;
+  /** Renglones leídos por IA de la factura (para separar el TUA embebido). */
+  valor_ia_extraido?: {
+    conceptos?: Array<{ concepto: string; monto: number }> | null;
+  } | null;
   /** Clon parcial generado por el reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
 }
@@ -125,12 +167,21 @@ export class ProfitSharingService {
         month: '2-digit',
         day: '2-digit',
       }).format(new Date()),
+      // Informativo global (regla 6): ingreso de VuelaTour cobrado en vuelos
+      // de la flota — vive en Otros movimientos, no entra a ninguna cascada.
+      otros_ingresos_vuelatour_total_usd:
+        result.otros_ingresos_vuelatour.cobrado_usd,
       aviones: result.aviones.map((a) => ({
         matricula: a.aeronave.matricula,
         modelo: a.aeronave.modelo,
+        // Venta del AVIÓN cobrada (sin TUAS/extras/pernocta ni su IVA).
         ingresos_cobrado_usd: a.ingresos.cobrado_usd,
+        otros_ingresos_vuelatour_usd: a.ingresos.otros_ingresos_vuelatour_usd,
         comisiones_venta_usd: a.ingresos.comisiones_venta_usd,
         pendiente_cobro_usd: a.ingresos.pendiente_cobro_usd,
+        // Deuda completa del cliente (informativa: el pendiente de arriba es
+        // solo la parte del avión).
+        pendiente_bruto_usd: a.ingresos.pendiente_bruto_usd,
         horas_voladas_hr: a.horas_voladas_hr,
         gastos_directos_usd: a.gastos.directos_usd,
         gastos_indirectos_usd: a.gastos.indirectos_usd,
@@ -198,6 +249,13 @@ export class ProfitSharingService {
           utilidad_usd: 0,
           sin_costo_count: 0,
           cobros_sin_tc_mxn: 0,
+        },
+        otros_ingresos_vuelatour: {
+          vuelos: 0,
+          cobrado_usd: 0,
+          pendiente_usd: 0,
+          desglose: { tuas_usd: 0, extras_usd: 0, pernocta_usd: 0, iva_usd: 0 },
+          leyenda: OTROS_INGRESOS_LEYENDA,
         },
         aviones: [],
       };
@@ -317,6 +375,34 @@ export class ProfitSharingService {
     const extCobradoR = round2(extCobrado);
     const extCostoR = round2(extCosto);
 
+    // INGRESO DE VUELATOUR del periodo (regla 6, 28-ago-2026): TUAS + extras
+    // + pernocta cobrados (+ su IVA) en vuelos de la FLOTA. Sale de los
+    // mismos acumuladores por avión (misma partición, mismos cobros), así
+    // Σ cobrado_bruto == Σ venta avión cobrada + este bloque, al centavo.
+    // Bloque INFORMATIVO: no se reparte ni entra a ninguna cascada; su lugar
+    // contable es la pestaña Otros movimientos del Balance general. Los
+    // vuelos EXTERNOS (bloque `externos`) quedan fuera a propósito: su
+    // dinero no se parte (no hay avión de flota que repartir).
+    const otrosIngresosVuelatour = aviones.reduce(
+      (acc, a) => {
+        const oi = a.detalle.otros_ingresos_vuelatour;
+        acc.vuelos += oi.vuelos;
+        acc.cobrado_usd += a.ingresos.otros_ingresos_vuelatour_usd;
+        acc.pendiente_usd += a.ingresos.otros_ingresos_vuelatour_pendiente_usd;
+        acc.desglose.tuas_usd += oi.desglose.tuas_usd;
+        acc.desglose.extras_usd += oi.desglose.extras_usd;
+        acc.desglose.pernocta_usd += oi.desglose.pernocta_usd;
+        acc.desglose.iva_usd += oi.desglose.iva_usd;
+        return acc;
+      },
+      {
+        vuelos: 0,
+        cobrado_usd: 0,
+        pendiente_usd: 0,
+        desglose: { tuas_usd: 0, extras_usd: 0, pernocta_usd: 0, iva_usd: 0 },
+      },
+    );
+
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
@@ -327,6 +413,20 @@ export class ProfitSharingService {
         utilidad_usd: round2(extCobradoR - extCostoR),
         sin_costo_count: extSinCosto,
         cobros_sin_tc_mxn: round2(extSinTcMxn),
+      },
+      otros_ingresos_vuelatour: {
+        vuelos: otrosIngresosVuelatour.vuelos,
+        cobrado_usd: round2(otrosIngresosVuelatour.cobrado_usd),
+        pendiente_usd: round2(otrosIngresosVuelatour.pendiente_usd),
+        // Desglose PRE-IVA cotizado (no cobrado) de los vuelos con precio del
+        // periodo + su IVA: para entender de qué se compone el bloque.
+        desglose: {
+          tuas_usd: round2(otrosIngresosVuelatour.desglose.tuas_usd),
+          extras_usd: round2(otrosIngresosVuelatour.desglose.extras_usd),
+          pernocta_usd: round2(otrosIngresosVuelatour.desglose.pernocta_usd),
+          iva_usd: round2(otrosIngresosVuelatour.desglose.iva_usd),
+        },
+        leyenda: OTROS_INGRESOS_LEYENDA,
       },
       aviones,
     };
@@ -349,8 +449,34 @@ export class ProfitSharingService {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
     // cobro_vuelo en USD (fuente canónica), no el monto cotizado del vuelo.
     // Un vuelo pagado al 90% aporta su 90% y deja el resto como pendiente.
-    let cobrado = 0;
-    let pendiente = 0;
+    //
+    // REGLA 6 (cliente, 28-ago-2026): del total que paga el cliente solo la
+    // VENTA DEL AVIÓN (tiempo + ajuste + comisión del vendedor + su IVA) es
+    // del avión y se reparte. TUAS/extras/pernocta cobrados (+ su IVA) son
+    // ingreso de VuelaTour (Otros movimientos del Balance general) y quedan
+    // FUERA de la cascada. La partición es la fuente única
+    // `particionIngresoVuelo`; lo cobrado se PRORRATEA con `factor_avion`
+    // (= avion_usd exacto con el vuelo pagado completo; parcial en
+    // proporción). El factor NO se topa: un SOBRECOBRO se reparte en la
+    // misma proporción avión/VuelaTour, así el bruto cobrado siempre es
+    // parte avión + parte VuelaTour al centavo y nada desaparece.
+    let cobrado = 0; // venta del avión cobrada (lo que SÍ se reparte)
+    let cobradoBruto = 0; // todo lo cobrado al cliente (avión + VuelaTour)
+    let pendiente = 0; // parte del avión aún no cobrada
+    // Deuda COMPLETA del cliente (avión + VuelaTour): misma fórmula que el
+    // pre-cierre `cobros_pendientes` — Σ max(0, total − cobrado) por vuelo.
+    let pendienteBruto = 0;
+    let otrosIngresosVT = 0; // parte de VuelaTour cobrada (informativa)
+    let otrosIngresosVTPendiente = 0;
+    let vuelosConOtrosIngresos = 0;
+    // Desglose PRE-IVA cotizado (+ IVA) de la parte VuelaTour de TODOS los
+    // vuelos con precio del periodo — informativo, no es lo cobrado.
+    const desgloseVT = {
+      tuas_usd: 0,
+      extras_usd: 0,
+      pernocta_usd: 0,
+      iva_usd: 0,
+    };
     let vuelosCobrados = 0;
     let vuelosPendientes = 0;
     let cobrosSinTcMxn = 0;
@@ -358,12 +484,21 @@ export class ProfitSharingService {
     // que desde jul 2026 YA incluye la comisión sumada al precio — pero esa
     // parte no es de VuelaTour: se descuenta del ingreso a repartir y el
     // neto queda ≈ precio base. Se hace efectiva contra lo cobrado (tope:
-    // lo cobrado del vuelo — este Math.min SÍ se queda: no se descuenta
-    // comisión de dinero que aún no entra).
+    // lo cobrado de la VENTA DEL AVIÓN, que es donde viaja la comisión —
+    // este Math.min SÍ se queda: no se descuenta comisión de dinero que aún
+    // no entra).
     let comisionesVenta = 0;
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
-    // que los agregados (misma conversión cobrosEnUsd, mismo tope de comisión)
-    // para que la suma del detalle cuadre exacto con ingresos.*.
+    // que los agregados (misma conversión cobrosEnUsd, misma partición,
+    // mismo tope de comisión) para que la suma del detalle cuadre exacto con
+    // ingresos.*. total_usd/cobrado_usd/pendiente_usd conservan su sentido
+    // de siempre (total del CLIENTE y lo cobrado BRUTO — el panel los suma);
+    // los campos *_avion_* y otros_ingresos_vuelatour_* son ADITIVOS.
+    // otros_ingresos_vuelatour_usd es lo COBRADO de la parte VuelaTour
+    // (Σ detalle == ingresos.otros_ingresos_vuelatour_usd: el pie del detalle
+    // del panel cuadra con la card); lo COTIZADO y lo PENDIENTE van en sus
+    // propios campos — antes viajaba lo cotizado bajo el nombre del cobrado
+    // y el pie no cuadraba con la card.
     const detalleVuelos: Array<{
       id: string;
       folio: number | null;
@@ -373,25 +508,52 @@ export class ProfitSharingService {
       total_usd: number;
       cobrado_usd: number;
       pendiente_usd: number;
+      venta_avion_usd: number;
+      cobrado_avion_usd: number;
+      pendiente_avion_usd: number;
+      otros_ingresos_vuelatour_usd: number;
+      otros_ingresos_vuelatour_cotizado_usd: number;
+      otros_ingresos_vuelatour_pendiente_usd: number;
+      cobrado_bruto_usd: number;
+      particion_fuente: 'desglose' | 'columnas' | 'sin_precio';
+      particion_inconsistente: boolean;
       comision_vendedor_usd: number;
       cobrado: boolean;
       cobros_sin_tc_mxn: number;
     }> = [];
     for (const v of ctx.vuelos) {
       if (v.aeronave_id !== a.id) continue;
-      const monto = Number(v.monto_total_usd ?? 0);
+      const p = particionIngresoVuelo(v);
       const conv = cobrosEnUsd(
         ctx.cobrosPorVuelo.get(v.id) ?? [],
         v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
       );
-      const pendienteVuelo = Math.max(0, monto - conv.total_usd);
+      const cobradoAvion = cobradoParteAvion(conv.total_usd, p);
+      const cobradoVT = round2(conv.total_usd - cobradoAvion);
+      const pendienteAvion = Math.max(0, round2(p.avion_usd - cobradoAvion));
+      const pendienteBrutoVuelo = Math.max(
+        0,
+        round2(p.total_usd - conv.total_usd),
+      );
+      const pendienteVT = Math.max(0, round2(p.vuelatour_usd - cobradoVT));
       const comisionEfectiva = Math.min(
         Number(v.comision_vendedor_usd ?? 0),
-        conv.total_usd,
+        cobradoAvion,
       );
-      cobrado += conv.total_usd;
+      cobrado += cobradoAvion;
+      cobradoBruto += conv.total_usd;
+      otrosIngresosVT += cobradoVT;
+      otrosIngresosVTPendiente += pendienteVT;
+      if (p.vuelatour_usd > 0) {
+        vuelosConOtrosIngresos += 1;
+        desgloseVT.tuas_usd += p.tuas_usd;
+        desgloseVT.extras_usd += p.extras_usd;
+        desgloseVT.pernocta_usd += p.pernocta_usd;
+        desgloseVT.iva_usd += p.iva_vuelatour_usd;
+      }
       cobrosSinTcMxn += conv.sin_tc_mxn;
-      pendiente += pendienteVuelo;
+      pendiente += pendienteAvion;
+      pendienteBruto += pendienteBrutoVuelo;
       comisionesVenta += comisionEfectiva;
       if (v.cobrado) vuelosCobrados += 1;
       else vuelosPendientes += 1;
@@ -401,9 +563,18 @@ export class ProfitSharingService {
         fecha: diaCancun(v.fecha_vuelo),
         ruta: `${v.origen_iata ?? '—'} → ${v.destino_iata ?? '—'}`,
         es_externo: v.es_externo === true,
-        total_usd: round2(monto),
+        total_usd: p.total_usd,
         cobrado_usd: conv.total_usd,
-        pendiente_usd: round2(pendienteVuelo),
+        pendiente_usd: pendienteBrutoVuelo,
+        venta_avion_usd: p.avion_usd,
+        cobrado_avion_usd: cobradoAvion,
+        pendiente_avion_usd: pendienteAvion,
+        otros_ingresos_vuelatour_usd: cobradoVT,
+        otros_ingresos_vuelatour_cotizado_usd: p.vuelatour_usd,
+        otros_ingresos_vuelatour_pendiente_usd: pendienteVT,
+        cobrado_bruto_usd: conv.total_usd,
+        particion_fuente: p.fuente,
+        particion_inconsistente: p.inconsistente,
         comision_vendedor_usd: round2(comisionEfectiva),
         cobrado: v.cobrado,
         cobros_sin_tc_mxn: conv.sin_tc_mxn,
@@ -420,6 +591,12 @@ export class ProfitSharingService {
     // de avión). Los agregados directos/indirectos/permisos/sin_tc se derivan
     // de ESTE acumulador, así el desglose cuadra con ellos por construcción.
     const porCategoria = new Map<string, GastoCategoriaAcc>();
+    // TUA EMBEBIDO en facturas de aeródromo (regla 7): se descuenta del costo
+    // del avión ANTES de convertir y se acumula para una fila informativa
+    // del detalle (transparencia: el total de la categoría ya no es la suma
+    // cruda de sus gastos).
+    let tuaEmbebidoUsd = 0;
+    let tuaEmbebidoCount = 0;
     for (const g of ctx.gastos) {
       if (g.aeronave_id !== a.id) continue;
       // Parciales del reparto MANUAL (gasto_reparto): la categoría
@@ -427,31 +604,37 @@ export class ProfitSharingService {
       // decisión que estaba pendiente; SIN reparto sigue EXCLUIDA = empresa,
       // idéntico a antes). Un FIJO repartido va al grupo FIJO manual (suma
       // en otros_prorrateados junto al pool — mismo campo de la cascada).
+      const esTuas = g.categoria === TUAS_CAT;
       const grupo: GrupoGasto =
-        // GASOLINA repartida a mano cuenta como "otros gastos" del avión
-        // (mismo grupo que INDIRECTO repartido); sin reparto = EXCLUIDO.
-        g.es_reparto_parcial &&
-        (g.categoria === 'INDIRECTO' ||
-          g.categoria === 'GASOLINA' ||
-          g.categoria === 'VISITA')
-          ? 'INDIRECTO'
-          : g.es_reparto_parcial && g.categoria === FIJO
-            ? 'FIJO'
-            : DIRECTO.has(g.categoria)
-              ? 'DIRECTO'
-              : INDIRECTO.has(g.categoria)
-                ? 'INDIRECTO'
-                : PERMISO.has(g.categoria)
-                  ? 'PERMISO'
-                  : // FIJO se prorratea aparte; otras categorias no
-                    // avion-especificas SIN reparto (p. ej. la categoría
-                    // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
-                    'EXCLUIDO';
+        // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
+        esTuas
+          ? 'EXCLUIDO'
+          : // GASOLINA repartida a mano cuenta como "otros gastos" del avión
+            // (mismo grupo que INDIRECTO repartido); sin reparto = EXCLUIDO.
+            g.es_reparto_parcial &&
+              (g.categoria === 'INDIRECTO' ||
+                g.categoria === 'GASOLINA' ||
+                g.categoria === 'VISITA')
+            ? 'INDIRECTO'
+            : g.es_reparto_parcial && g.categoria === FIJO
+              ? 'FIJO'
+              : DIRECTO.has(g.categoria)
+                ? 'DIRECTO'
+                : INDIRECTO.has(g.categoria)
+                  ? 'INDIRECTO'
+                  : PERMISO.has(g.categoria)
+                    ? 'PERMISO'
+                    : // FIJO se prorratea aparte; otras categorias no
+                      // avion-especificas SIN reparto (p. ej. la categoría
+                      // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
+                      'EXCLUIDO';
       // Clave separada para parciales: el detalle muestra "OTRO (repartido)"
       // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
-      const clave = g.es_reparto_parcial
-        ? `${g.categoria} (repartido)`
-        : g.categoria;
+      const clave = esTuas
+        ? TUAS_CLAVE_DETALLE
+        : g.es_reparto_parcial
+          ? `${g.categoria} (repartido)`
+          : g.categoria;
       const acc = porCategoria.get(clave) ?? {
         grupo,
         count: 0,
@@ -459,15 +642,38 @@ export class ProfitSharingService {
         sin_tc_count: 0,
         sin_tc_mxn: 0,
       };
-      const usd = this.toUsd(g);
+      // Monto EFECTIVO del avión = monto − TUA embebido (en la moneda del
+      // gasto), convertido con la MISMA regla/TC de siempre. Sin TC el gasto
+      // entero sigue en sin_tc_* (nada se convierte a medias).
+      const tuaEmbebido = tuaEmbebidoDeGasto(g);
+      const usd = this.toUsd(
+        tuaEmbebido > 0
+          ? { ...g, monto: round2(Number(g.monto) - tuaEmbebido) }
+          : g,
+      );
       if (usd === null) {
         acc.sin_tc_count += 1;
         acc.sin_tc_mxn += Number(g.monto);
       } else {
         acc.count += 1;
         acc.usd += usd;
+        if (tuaEmbebido > 0) {
+          tuaEmbebidoCount += 1;
+          tuaEmbebidoUsd += this.toUsd({ ...g, monto: tuaEmbebido }) ?? 0;
+        }
       }
       porCategoria.set(clave, acc);
+    }
+    if (tuaEmbebidoCount > 0) {
+      // Fila informativa (grupo EXCLUIDO: no suma a ningún agregado): cuánto
+      // TUA embebido se le quitó al costo del avión en este periodo.
+      porCategoria.set(TUA_EMBEBIDO_CLAVE_DETALLE, {
+        grupo: 'EXCLUIDO',
+        count: tuaEmbebidoCount,
+        usd: tuaEmbebidoUsd,
+        sin_tc_count: 0,
+        sin_tc_mxn: 0,
+      });
     }
     let directos = 0;
     let indirectos = 0;
@@ -567,9 +773,25 @@ export class ProfitSharingService {
     return {
       aeronave: { id: a.id, matricula: a.matricula, modelo: a.modelo },
       ingresos: {
+        // VENTA DEL AVIÓN cobrada (regla 6): mismo nombre de siempre — el
+        // PDF/XLSX/panel no cambian y la cascada saldo = cobrado − comisiones
+        // − gastos − reserva conserva su fórmula; solo cambia lo que entra.
         cobrado_usd: cobradoR,
+        // ADITIVOS: bruto cobrado al cliente y la parte de VuelaTour
+        // (cobrado_bruto == cobrado + otros_ingresos_vuelatour al centavo).
+        cobrado_bruto_usd: round2(cobradoBruto),
+        otros_ingresos_vuelatour_usd: round2(otrosIngresosVT),
+        otros_ingresos_vuelatour_pendiente_usd: round2(
+          otrosIngresosVTPendiente,
+        ),
         comisiones_venta_usd: comisionesR,
+        // Parte del AVIÓN aún no cobrada (coherente con la cascada: es lo que
+        // le falta al avión para repartir). El nombre se conserva (PDF/XLSX/
+        // panel); la deuda COMPLETA del cliente va ADITIVA abajo.
         pendiente_cobro_usd: round2(pendiente),
+        // Deuda completa del cliente (avión + TUAS/extras/pernocta + IVA) =
+        // Σ detalle.vuelos[].pendiente_usd; misma fórmula que el pre-cierre.
+        pendiente_bruto_usd: round2(pendienteBruto),
         vuelos_cobrados: vuelosCobrados,
         vuelos_pendientes: vuelosPendientes,
         cobros_sin_tc_mxn: round2(cobrosSinTcMxn),
@@ -599,6 +821,17 @@ export class ProfitSharingService {
           horas_hr: horasPeriodo,
           tarifa_hora_usd: round2(tarifaReserva),
           monto_usd: round2(reservaOverhaul),
+        },
+        // Composición de la parte VuelaTour de este avión (alimenta el
+        // bloque global `otros_ingresos_vuelatour` de compute()).
+        otros_ingresos_vuelatour: {
+          vuelos: vuelosConOtrosIngresos,
+          desglose: {
+            tuas_usd: round2(desgloseVT.tuas_usd),
+            extras_usd: round2(desgloseVT.extras_usd),
+            pernocta_usd: round2(desgloseVT.pernocta_usd),
+            iva_usd: round2(desgloseVT.iva_usd),
+          },
         },
       },
     };
@@ -650,11 +883,12 @@ export class ProfitSharingService {
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs)
         .order('fecha_vuelo', { ascending: true }),
-      // Completados del periodo (para cobros pendientes/parciales).
+      // Completados del periodo (para cobros pendientes/parciales y para la
+      // partición venta avión / VuelaTour — aviso extras_sin_desglose).
       sb
         .from('vuelo')
         .select(
-          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, cobrado',
+          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -820,15 +1054,11 @@ export class ProfitSharingService {
           .is('cancelada_at', null);
         if (legsErr) throw new Error(legsErr.message);
         for (const l of legsRot ?? []) {
-          pilotosPorVuelo
-            .get(l.vuelo_id as string)
-            ?.add(l.piloto_id as string);
+          pilotosPorVuelo.get(l.vuelo_id as string)?.add(l.piloto_id as string);
         }
       }
       const pilotoIds = [
-        ...new Set(
-          [...pilotosPorVuelo.values()].flatMap((set) => [...set]),
-        ),
+        ...new Set([...pilotosPorVuelo.values()].flatMap((set) => [...set])),
       ];
       if (pilotoIds.length > 0) {
         const { data: exts, error: extErr } = await sb
@@ -1010,6 +1240,25 @@ export class ProfitSharingService {
       )
       .map((v) => ({ id: v.id as string, folio: v.folio as number }));
 
+    // Extras SIN desglose exacto (regla 6): la venta del avión se separa de
+    // TUAS/extras/pernocta con el desglose canónico del snapshot; si el
+    // vuelo con precio no lo tiene (fuente 'columnas') y trae extras, o el
+    // desglose no cuadra con el total (inconsistente → todo al avión), la
+    // partición es aproximada. Aviso NO bloqueante: el dinero no se pierde
+    // (cierre por diferencia), solo puede quedar mal repartido entre avión
+    // y VuelaTour hasta revisar la cotización.
+    const extrasSinDesglose = completados
+      .filter((v) => {
+        if (!(Number(v.monto_total_usd ?? 0) > 0)) return false;
+        const p = particionIngresoVuelo(v);
+        return (
+          p.inconsistente ||
+          (p.fuente === 'columnas' &&
+            round2(p.tuas_usd + p.extras_usd + p.pernocta_usd) > 0)
+        );
+      })
+      .map((v) => ({ id: v.id as string, folio: v.folio as number }));
+
     const gastos = (gastosRes.data ?? []) as Array<Record<string, unknown>>;
     // Repartos manuales del periodo: un gasto con filas en gasto_reparto YA
     // está asignado (misma regla que la bandeja de Gastos — simetría).
@@ -1145,7 +1394,7 @@ export class ProfitSharingService {
         clave: 'cobros_pendientes',
         titulo: 'Vuelos completados con saldo por cobrar',
         detalle:
-          'Solo se reparte lo cobrado: este dinero queda fuera del reparto.',
+          'Solo se reparte lo cobrado: la parte del avión de este saldo queda fuera del reparto (el resto —TUAS/extras/pernocta— es ingreso de VuelaTour, tampoco cobrado).',
         count: cobrosPendientes.length,
         monto_usd: round2(
           cobrosPendientes.reduce((acc, c) => acc + c.saldo_usd, 0),
@@ -1159,6 +1408,14 @@ export class ProfitSharingService {
           'Se volaron pero su cotización quedó en $0: cotízalos para poder cobrarlos — sin precio no aparecen en cobranza ni en el reparto.',
         count: vuelosSinPrecio.length,
         vuelos: vuelosSinPrecio,
+      },
+      {
+        clave: 'extras_sin_desglose',
+        titulo: 'Vuelos con TUAS/extras sin desglose exacto',
+        detalle:
+          'No se puede separar con exactitud la venta del avión de los extras (TUAS/extras/pernocta son ingreso de VuelaTour, no del avión): revisa la cotización en el detalle del vuelo para regenerar el desglose. Mientras tanto se usan las columnas del vuelo, o todo el total va al avión si el desglose no cuadra.',
+        count: extrasSinDesglose.length,
+        vuelos: extrasSinDesglose,
       },
       {
         clave: 'combustible_sin_avion',
@@ -1317,7 +1574,7 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd',
+        'id, aeronave_id, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
       )
       .eq('estado', 'COMPLETADO')
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
@@ -1355,7 +1612,11 @@ export class ProfitSharingService {
   private async fetchGastos(desde: string, hasta: string): Promise<GastoRow[]> {
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select('id, aeronave_id, categoria, monto, moneda, tc_gasto')
+      // propina + valor_ia_extraido: para separar el TUA embebido en
+      // facturas de aeródromo (regla 7) con la misma regla del balance.
+      .select(
+        'id, aeronave_id, vuelo_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido',
+      )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);

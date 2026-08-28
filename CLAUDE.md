@@ -108,8 +108,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    `movimiento_bancario.cobro_id`.
 
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
-   `BODEGA` (moneda USD, costo FIFO) ligado por `inventario_movimiento_id`;
-   la devolución lo revierte. No duplicar ese costo en otro lado.
+   `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se
+   compraron en pesos — moneda operativa del cliente —, si no USD;
+   `tc_gasto` = TC ponderado de las capas) ligado por
+   `inventario_movimiento_id`; la devolución lo revierte en la moneda nativa
+   de la devolución (peso contra peso; TC solo si la moneda difiere).
+   No duplicar ese costo en otro lado. Caso aceites 28-ago-2026: una entrada
+   en pesos capturada como USD multiplicó ×17 el costo del avión.
 
 9. **Candados de rol**: el PILOTO solo registra cobros con método ∈
    {EFECTIVO, DOLARES, BILLPOCKET, HSBC_LINK} (se valida el del vuelo Y el del

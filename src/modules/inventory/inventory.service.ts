@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   PyservicesService,
@@ -35,9 +40,60 @@ type MovForFifo = {
 
 // cost = costo USD interno (reparto); costMxn = costo en pesos por unidad
 // (para VER el valorizado en MXN, la moneda operativa del cliente).
-type FifoLayer = { qty: number; cost: number; costMxn: number };
+type FifoLayer = {
+  qty: number;
+  cost: number;
+  costMxn: number;
+  /** El costo en pesos es REAL (compra en MXN, o USD con TC) y no el USD copiado. */
+  pesosExactos: boolean;
+  /** La capa se COMPRÓ en pesos. */
+  enMxn: boolean;
+};
 
 const EPS = 1e-9;
+
+/**
+ * Resto de una DEVOLUCION que NO se pudo revertir contra los gastos de bodega
+ * (viaja en la respuesta de createMovimiento como `reversion_pendiente`).
+ */
+export interface ReversionPendiente {
+  /** Monto que quedó sin revertir, en la moneda nativa de la devolución. */
+  sin_revertir: number;
+  moneda: 'MXN' | 'USD';
+  /** Gastos en otra moneda que se saltaron por no tener NINGÚN TC. */
+  gastos_sin_tc: number;
+}
+
+/** Campos de costo de un movimiento (lo mínimo para expresarlo en pesos). */
+type MovCosto = Pick<
+  MovForFifo,
+  'costo_unitario_usd' | 'moneda' | 'costo_unitario_mxn' | 'tc_usd_mxn'
+>;
+
+/**
+ * Costo unitario en PESOS de un movimiento — lo que el cliente VE (bodega se
+ * maneja en MXN): capturado en MXN → costo_unitario_mxn; en USD con TC →
+ * usd × TC; sin TC → el número USD tal cual (no pasa cuando todo se maneja en
+ * pesos). FUENTE ÚNICA: la usan las capas FIFO (buildLayers) y el Excel del
+ * cardex — no duplicar el criterio.
+ */
+function costoUnitarioMxnDe(m: MovCosto): {
+  mxn: number;
+  /** El costo en pesos es REAL (compra en MXN, o USD con TC), no el USD copiado. */
+  pesosExactos: boolean;
+  /** La capa/movimiento se capturó en pesos. */
+  enMxn: boolean;
+} {
+  const usd = Number(m.costo_unitario_usd);
+  const enMxn = m.moneda === 'MXN' && m.costo_unitario_mxn != null;
+  const conTc = m.tc_usd_mxn != null && Number(m.tc_usd_mxn) > 0;
+  const mxn = enMxn
+    ? Number(m.costo_unitario_mxn)
+    : conTc
+      ? round(usd * Number(m.tc_usd_mxn), 2)
+      : usd;
+  return { mxn, pesosExactos: enMxn || conTc, enMxn };
+}
 
 @Injectable()
 export class InventoryService {
@@ -84,7 +140,18 @@ export class InventoryService {
         x.valor_mxn as number,
       ];
     });
-    const totales = ['TOTAL', null, null, null, null, null, null, null, null, valor_total_mxn];
+    const totales = [
+      'TOTAL',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      valor_total_mxn,
+    ];
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
       subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
@@ -96,14 +163,26 @@ export class InventoryService {
 
   /** Cardex (movimientos de inventario) en Excel. */
   async movimientosXlsx(filters: ListMovimientosQuery): Promise<Buffer> {
-    const { data } = await this.listMovimientos({ ...filters, limit: 5000, offset: 0 });
+    const { data } = await this.listMovimientos({
+      ...filters,
+      limit: 5000,
+      offset: 0,
+    });
+    // El cliente maneja bodega en PESOS: el costo visible va en MXN con el
+    // MISMO criterio de las capas FIFO (costoUnitarioMxnDe); el USD interno
+    // (el que alimenta el reparto) se exporta etiquetado para que nadie lo
+    // lea como pesos (caso aceites 28-ago-2026: una columna "Costo unit." sin
+    // moneda mostraba 94.71 donde el cliente esperaba ~1,658 MXN).
     const columnas: TablaColumnaPayload[] = [
       { label: 'Fecha' },
       { label: 'Tipo' },
       { label: 'Ítem' },
       { label: 'No. parte' },
       { label: 'Cantidad', tipo: 'numero' },
-      { label: 'Costo unit.', tipo: 'money' },
+      { label: 'Costo unit. (MXN)', tipo: 'money' },
+      { label: 'Moneda captura' },
+      { label: 'TC', tipo: 'numero' },
+      { label: 'Costo unit. USD (interno)', tipo: 'money' },
       { label: 'Avión' },
       { label: 'Proveedor' },
       { label: 'Referencia' },
@@ -113,13 +192,27 @@ export class InventoryService {
       const item = x.item as { nombre?: string; numero_parte?: string } | null;
       const aeronave = x.aeronave as { matricula?: string } | null;
       const proveedor = x.proveedor as { nombre?: string } | null;
+      const costo: MovCosto = {
+        costo_unitario_usd: x.costo_unitario_usd as number | string,
+        moneda: x.moneda as string | null,
+        costo_unitario_mxn: x.costo_unitario_mxn as number | string | null,
+        tc_usd_mxn: x.tc_usd_mxn as number | string | null,
+      };
+      const tc = Number(costo.tc_usd_mxn);
       return [
         (x.fecha_movimiento as string) ?? '',
         (x.tipo as string) ?? '',
         item?.nombre ?? '',
         item?.numero_parte ?? '',
         Number(x.cantidad),
-        x.costo_unitario_usd != null ? Number(x.costo_unitario_usd) : null,
+        costo.costo_unitario_usd != null
+          ? round(costoUnitarioMxnDe(costo).mxn, 2)
+          : null,
+        costo.moneda === 'MXN' ? 'MXN' : 'USD',
+        Number.isFinite(tc) && tc > 0 ? round(tc, 4) : null,
+        costo.costo_unitario_usd != null
+          ? Number(costo.costo_unitario_usd)
+          : null,
         aeronave?.matricula ?? '',
         proveedor?.nombre ?? '',
         (x.referencia as string) ?? '',
@@ -140,7 +233,11 @@ export class InventoryService {
     return [...movs].sort((a, b) => {
       if (a.fecha_movimiento !== b.fecha_movimiento)
         return a.fecha_movimiento < b.fecha_movimiento ? -1 : 1;
-      return a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0;
+      return a.created_at < b.created_at
+        ? -1
+        : a.created_at > b.created_at
+          ? 1
+          : 0;
     });
   }
 
@@ -162,17 +259,15 @@ export class InventoryService {
           if (layer.qty <= EPS) layers.shift();
         }
       } else {
-        const usd = Number(m.costo_unitario_usd);
-        // Costo en pesos de la capa: el capturado en MXN si la compra fue en
-        // pesos; si fue USD, se reconvierte con su TC (o cae al número USD si
-        // no hay TC — no pasa cuando todo se maneja en pesos).
-        const mxn =
-          m.moneda === 'MXN' && m.costo_unitario_mxn != null
-            ? Number(m.costo_unitario_mxn)
-            : m.tc_usd_mxn != null && Number(m.tc_usd_mxn) > 0
-              ? round(usd * Number(m.tc_usd_mxn), 2)
-              : usd;
-        layers.push({ qty: cant, cost: usd, costMxn: mxn });
+        // Costo en pesos de la capa: criterio único (costoUnitarioMxnDe).
+        const { mxn, pesosExactos, enMxn } = costoUnitarioMxnDe(m);
+        layers.push({
+          qty: cant,
+          cost: Number(m.costo_unitario_usd),
+          costMxn: mxn,
+          pesosExactos,
+          enMxn,
+        });
       }
     }
     return layers;
@@ -197,8 +292,17 @@ export class InventoryService {
     };
   }
 
-  /** Consume `qty` de las capas FIFO. Devuelve el costo total o lanza si no alcanza. */
-  private consumeFifo(layers: FifoLayer[], qty: number): number {
+  /**
+   * Consume `qty` de las capas FIFO. Devuelve el costo total en USD (interno)
+   * y en MXN (`mxn` = null si alguna capa consumida no tiene pesos reales);
+   * `todoMxn` = todas las capas consumidas se COMPRARON en pesos — el gasto
+   * de bodega sale entonces en MXN, la moneda operativa del cliente. Lanza
+   * si no alcanza.
+   */
+  private consumeFifo(
+    layers: FifoLayer[],
+    qty: number,
+  ): { usd: number; mxn: number | null; todoMxn: boolean } {
     const disponible = layers.reduce((s, l) => s + l.qty, 0);
     if (disponible + EPS < qty) {
       // Sin nada en existencia el mensaje debe DECIR qué hacer: el stock se
@@ -211,23 +315,35 @@ export class InventoryService {
       );
     }
     let need = qty;
-    let total = 0;
+    let usd = 0;
+    let mxn = 0;
+    let pesosExactos = true;
+    let todoMxn = true;
     for (const layer of layers) {
       if (need <= EPS) break;
       const take = Math.min(need, layer.qty);
-      total += take * layer.cost;
+      usd += take * layer.cost;
+      mxn += take * layer.costMxn;
+      if (!layer.pesosExactos) pesosExactos = false;
+      if (!layer.enMxn) todoMxn = false;
       need -= take;
     }
-    return total;
+    return {
+      usd,
+      mxn: pesosExactos ? mxn : null,
+      todoMxn: todoMxn && pesosExactos,
+    };
   }
 
   private async movsForItem(itemId: string): Promise<MovForFifo[]> {
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select('tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at')
+      .select(
+        'tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at',
+      )
       .eq('item_id', itemId);
     if (error) throw new Error(error.message);
-    return (data ?? []) as MovForFifo[];
+    return data ?? [];
   }
 
   // ===== Ítems =====
@@ -244,7 +360,9 @@ export class InventoryService {
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
     if (filters.q) {
       const term = `%${filters.q}%`;
-      q = q.or(`nombre.ilike.${term},numero_parte.ilike.${term},codigo.ilike.${term}`);
+      q = q.or(
+        `nombre.ilike.${term},numero_parte.ilike.${term},codigo.ilike.${term}`,
+      );
     }
 
     const { data: items, error, count } = await q;
@@ -255,12 +373,18 @@ export class InventoryService {
     const ids = rows.map((r) => (r as { id: string }).id);
     const movsByItem = await this.movsByItems(ids);
     let data = rows.map((r) => {
-      const it = r as Record<string, unknown> & { id: string; stock_minimo: number | null };
-      const stats = this.statsFromLayers(this.buildLayers(movsByItem.get(it.id) ?? []));
+      const it = r as Record<string, unknown> & {
+        id: string;
+        stock_minimo: number | null;
+      };
+      const stats = this.statsFromLayers(
+        this.buildLayers(movsByItem.get(it.id) ?? []),
+      );
       return {
         ...it,
         ...stats,
-        bajo_stock: it.stock_minimo != null && stats.stock < Number(it.stock_minimo),
+        bajo_stock:
+          it.stock_minimo != null && stats.stock < Number(it.stock_minimo),
       };
     });
 
@@ -282,18 +406,22 @@ export class InventoryService {
     };
   }
 
-  private async movsByItems(itemIds: string[]): Promise<Map<string, MovForFifo[]>> {
+  private async movsByItems(
+    itemIds: string[],
+  ): Promise<Map<string, MovForFifo[]>> {
     const map = new Map<string, MovForFifo[]>();
     if (itemIds.length === 0) return map;
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select('item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at')
+      .select(
+        'item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at',
+      )
       .in('item_id', itemIds);
     if (error) throw new Error(error.message);
     for (const m of data ?? []) {
       const k = (m as { item_id: string }).item_id;
       if (!map.has(k)) map.set(k, []);
-      map.get(k)!.push(m as MovForFifo);
+      map.get(k)!.push(m);
     }
     return map;
   }
@@ -322,7 +450,7 @@ export class InventoryService {
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
 
-    const stats = this.statsFromLayers(this.buildLayers((movs ?? []) as unknown as MovForFifo[]));
+    const stats = this.statsFromLayers(this.buildLayers(movs ?? []));
     return { ...item, ...stats, movimientos: movs ?? [] };
   }
 
@@ -356,7 +484,9 @@ export class InventoryService {
     let fotoAnterior: string | null = null;
     if (dto.foto_storage_path !== undefined) {
       const current = await this.findItem(id);
-      const previa = (current as { foto_storage_path?: string | null }).foto_storage_path ?? null;
+      const previa =
+        (current as { foto_storage_path?: string | null }).foto_storage_path ??
+        null;
       if (previa && previa !== dto.foto_storage_path) fotoAnterior = previa;
     }
     const { data, error } = await this.supabase.service
@@ -382,7 +512,11 @@ export class InventoryService {
 
   // ===== Movimientos (cardex) =====
 
-  async createMovimiento(itemId: string, dto: CreateMovimientoDto, userId: string) {
+  async createMovimiento(
+    itemId: string,
+    dto: CreateMovimientoDto,
+    userId: string,
+  ) {
     const item = (await this.findItem(itemId)) as { nombre: string }; // 404 si no existe
 
     let costoUnitario: number;
@@ -405,9 +539,18 @@ export class InventoryService {
         );
       }
       const layers = this.buildLayers(await this.movsForItem(itemId));
-      const total = this.consumeFifo(layers, dto.cantidad);
-      costoUnitario = round(total / dto.cantidad, 4);
-      moneda = 'USD'; // el costo FIFO es interno, siempre USD
+      const consumo = this.consumeFifo(layers, dto.cantidad);
+      costoUnitario = round(consumo.usd / dto.cantidad, 4);
+      // El costo FIFO interno sigue en USD, pero si las capas consumidas se
+      // compraron en PESOS la salida se expresa en MXN (moneda 'MXN' +
+      // costo_unitario_mxn + TC ponderado) para que el cardex y el gasto de
+      // bodega digan lo que realmente se pagó. Caso aceites 28-ago-2026: una
+      // entrada en pesos capturada como USD multiplicó ×17 el costo del avión.
+      if (consumo.mxn != null) {
+        costoMxn = round(consumo.mxn / dto.cantidad, 4);
+        tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
+      }
+      moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
     } else if (moneda === 'MXN') {
       if (dto.costo_unitario_mxn == null || !(Number(dto.tc_usd_mxn) > 0)) {
         throw new BadRequestException(
@@ -436,7 +579,9 @@ export class InventoryService {
         moneda,
         costo_unitario_mxn: costoMxn,
         tc_usd_mxn: tc,
-        para_flota: dto.tipo === TipoMovimientoInventario.SALIDA && dto.para_flota === true,
+        para_flota:
+          dto.tipo === TipoMovimientoInventario.SALIDA &&
+          dto.para_flota === true,
         aeronave_id: dto.aeronave_id ?? null,
         proveedor_id: dto.proveedor_id ?? null,
         fecha_movimiento: dto.fecha_movimiento ?? undefined,
@@ -452,7 +597,9 @@ export class InventoryService {
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
-        throw new BadRequestException(`Referencia no encontrada: ${error.message}`);
+        throw new BadRequestException(
+          `Referencia no encontrada: ${error.message}`,
+        );
       throw new Error(error.message);
     }
 
@@ -461,7 +608,14 @@ export class InventoryService {
     // costo FIFO para que llegue al reporte mensual del avión y al reparto.
     // La DEVOLUCION con avión revierte ese cargo.
     let gastoGenerado: Record<string, unknown> | null = null;
-    if (dto.tipo === TipoMovimientoInventario.SALIDA && dto.para_flota === true) {
+    // Resto de una DEVOLUCION que no se pudo revertir (null = todo revertido):
+    // viaja como `reversion_pendiente` para que el dinero no se pierda en
+    // silencio (la UI puede ignorarlo; el warn en el log se conserva).
+    let reversionPendiente: ReversionPendiente | null = null;
+    if (
+      dto.tipo === TipoMovimientoInventario.SALIDA &&
+      dto.para_flota === true
+    ) {
       gastoGenerado = await this.crearGastosDeSalidaFlota(
         data as Record<string, unknown>,
         item.nombre,
@@ -473,18 +627,30 @@ export class InventoryService {
         item.nombre,
         userId,
       );
-    } else if (dto.tipo === TipoMovimientoInventario.DEVOLUCION && dto.aeronave_id) {
+    } else if (
+      dto.tipo === TipoMovimientoInventario.DEVOLUCION &&
+      dto.aeronave_id
+    ) {
       // Usar el costo USD ya resuelto arriba: en captura MXN el dto no trae
       // costo_unitario_usd y la reversión quedaría en 0 en silencio.
-      await this.revertirGastoPorDevolucion(itemId, dto, costoUnitario, item.nombre, userId);
+      reversionPendiente = await this.revertirGastoPorDevolucion(
+        itemId,
+        dto,
+        costoUnitario,
+        item.nombre,
+        userId,
+      );
     }
 
-    const stats = this.statsFromLayers(this.buildLayers(await this.movsForItem(itemId)));
+    const stats = this.statsFromLayers(
+      this.buildLayers(await this.movsForItem(itemId)),
+    );
     return {
       ...data,
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
+      reversion_pendiente: reversionPendiente,
     };
   }
 
@@ -500,7 +666,7 @@ export class InventoryService {
     itemNombre: string,
     userId: string,
   ): Promise<Record<string, unknown> | null> {
-    const monto = round(Number(mov.cantidad) * Number(mov.costo_unitario_usd), 2);
+    const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
 
     const { data, error } = await this.supabase.service
@@ -509,7 +675,8 @@ export class InventoryService {
         usuario_captura_id: userId,
         categoria: 'REFACCION',
         monto,
-        moneda: 'USD',
+        moneda,
+        tc_gasto: tcGasto,
         fecha_gasto: mov.fecha_movimiento,
         medio_pago: 'BODEGA',
         estatus_comprobante: 'SIN_COMPROBANTE',
@@ -548,7 +715,7 @@ export class InventoryService {
     itemNombre: string,
     userId: string,
   ): Promise<Record<string, unknown> | null> {
-    const monto = round(Number(mov.cantidad) * Number(mov.costo_unitario_usd), 2);
+    const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
 
     const { data: aviones, error: avErr } = await this.supabase.service
@@ -573,7 +740,8 @@ export class InventoryService {
       origen: 'SISTEMA',
       categoria: 'REFACCION',
       monto: i === 0 ? primero : base,
-      moneda: 'USD',
+      moneda,
+      tc_gasto: tcGasto,
       fecha_gasto: mov.fecha_movimiento,
       medio_pago: 'BODEGA',
       estatus_comprobante: 'SIN_COMPROBANTE',
@@ -581,7 +749,7 @@ export class InventoryService {
       proveedor_id: mov.proveedor_id ?? null,
       inventario_movimiento_id: mov.id,
       notas:
-        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO $${monto.toFixed(2)})` +
+        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
       created_by: userId,
       updated_by: userId,
@@ -611,6 +779,21 @@ export class InventoryService {
    * reciente, hasta cubrir el monto devuelto. Best-effort: las devoluciones son
    * excepcionales (≈1%) y cualquier resto se ajusta desde /admin/expenses.
    * Las salidas de FLOTA no se revierten aquí: se corrigen desde Gastos.
+   *
+   * El monto por revertir se lleva en la MONEDA NATIVA de la devolución (MXN
+   * si se capturó en pesos; si no, USD) y cada gasto se convierte SOLO cuando
+   * su moneda difiere: con el tc_gasto de ESE gasto o, si no lo trae (gasto
+   * de bodega USD histórico), con el TC tecleado en la devolución
+   * (`tc_usd_mxn`, obligatorio en captura MXN). Peso contra peso, dólar
+   * contra dólar: antes todo se pasaba a USD con el TC de la devolución y se
+   * comparaba contra el tc_gasto del gasto — dos TC distintos dejaban
+   * centavos (o pesos) sin cuadrar. Sin NINGÚN TC el gasto se salta y se
+   * cuenta en `gastos_sin_tc` (antes ese `continue` era silencioso y una
+   * devolución MXN contra un gasto USD sin TC no revertía nada).
+   *
+   * Devuelve el RESTO que no se pudo revertir (null cuando se revirtió todo)
+   * para que `createMovimiento` lo exponga como `reversion_pendiente`: el
+   * dinero jamás desaparece en silencio (además del warn en el log).
    */
   private async revertirGastoPorDevolucion(
     itemId: string,
@@ -618,11 +801,19 @@ export class InventoryService {
     costoUnitarioUsd: number,
     itemNombre: string,
     userId: string,
-  ): Promise<void> {
+  ): Promise<ReversionPendiente | null> {
+    const devEnMxn = dto.moneda === 'MXN' && dto.costo_unitario_mxn != null;
+    const monedaDev: 'MXN' | 'USD' = devEnMxn ? 'MXN' : 'USD';
+    let porRevertir = round(
+      Number(dto.cantidad) *
+        (devEnMxn ? Number(dto.costo_unitario_mxn) : costoUnitarioUsd),
+      2,
+    );
+    if (porRevertir <= 0) return null;
+    // TC de respaldo para gastos en OTRA moneda sin tc_gasto propio.
+    const tcDev = Number(dto.tc_usd_mxn);
+    let sinTc = 0;
     try {
-      let porRevertir = round(Number(dto.cantidad) * costoUnitarioUsd, 2);
-      if (porRevertir <= 0) return;
-
       // Gastos automáticos de este ítem+avión (via la liga al cardex).
       const { data: movs } = await this.supabase.service
         .from('inventario_movimiento')
@@ -631,43 +822,75 @@ export class InventoryService {
         .eq('tipo', 'SALIDA')
         .eq('aeronave_id', dto.aeronave_id!);
       const movIds = (movs ?? []).map((m) => m.id as string);
-      if (movIds.length === 0) return;
 
-      const { data: gastos } = await this.supabase.service
-        .from('gasto')
-        .select('id, monto')
-        .in('inventario_movimiento_id', movIds)
-        .order('fecha_gasto', { ascending: false })
-        .order('created_at', { ascending: false });
+      if (movIds.length > 0) {
+        const { data: gastos } = await this.supabase.service
+          .from('gasto')
+          .select('id, monto, moneda, tc_gasto')
+          .in('inventario_movimiento_id', movIds)
+          .order('fecha_gasto', { ascending: false })
+          .order('created_at', { ascending: false });
 
-      for (const g of gastos ?? []) {
-        if (porRevertir <= 0) break;
-        const monto = Number(g.monto);
-        if (monto <= porRevertir + EPS) {
-          await this.supabase.service.from('gasto').delete().eq('id', g.id as string);
-          porRevertir = round(porRevertir - monto, 2);
-        } else {
-          await this.supabase.service
-            .from('gasto')
-            .update({
-              monto: round(monto - porRevertir, 2),
-              notas: `Ajustado por devolución a bodega de ${itemNombre}`,
-              updated_by: userId,
-            })
-            .eq('id', g.id as string);
-          porRevertir = 0;
+        for (const g of gastos ?? []) {
+          if (porRevertir <= 0) break;
+          const monto = Number(g.monto);
+          const monedaG: 'MXN' | 'USD' = g.moneda === 'MXN' ? 'MXN' : 'USD';
+          // `aDev` = multiplicador gasto → moneda de la devolución. Misma
+          // moneda: 1 (sin TC de por medio). Distinta: con el tc_gasto del
+          // gasto o, sin él, el TC de la devolución; sin ninguno no se puede
+          // cuadrar y queda al ajuste manual (contado en gastos_sin_tc).
+          let aDev: number;
+          if (monedaG === monedaDev) {
+            aDev = 1;
+          } else {
+            const tcG = Number(g.tc_gasto);
+            const tcUsar = tcG > 0 ? tcG : tcDev > 0 ? tcDev : 0;
+            if (!(tcUsar > 0)) {
+              sinTc += 1;
+              continue;
+            }
+            aDev = monedaG === 'MXN' ? 1 / tcUsar : tcUsar;
+          }
+          const montoEnDev = round(monto * aDev, 2);
+          if (montoEnDev <= porRevertir + EPS) {
+            await this.supabase.service
+              .from('gasto')
+              .delete()
+              .eq('id', g.id as string);
+            porRevertir = round(porRevertir - montoEnDev, 2);
+          } else {
+            await this.supabase.service
+              .from('gasto')
+              .update({
+                monto: round(monto - porRevertir / aDev, 2),
+                notas: `Ajustado por devolución a bodega de ${itemNombre}`,
+                updated_by: userId,
+              })
+              .eq('id', g.id as string);
+            porRevertir = 0;
+          }
         }
-      }
-      if (porRevertir > 0) {
-        this.logger.warn(
-          `DEVOLUCION de ${itemNombre}: quedaron $${porRevertir} USD sin revertir (no hay gastos automáticos suficientes). Ajustar manualmente.`,
-        );
       }
     } catch (err) {
       this.logger.error(
         `revertirGastoPorDevolucion falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    if (porRevertir > 0) {
+      const motivo =
+        sinTc > 0
+          ? `${sinTc} gasto(s) en otra moneda sin TC`
+          : 'no hay gastos automáticos suficientes';
+      this.logger.warn(
+        `DEVOLUCION de ${itemNombre}: quedaron $${porRevertir} ${monedaDev} sin revertir (${motivo}). Ajustar manualmente.`,
+      );
+      return {
+        sin_revertir: porRevertir,
+        moneda: monedaDev,
+        gastos_sin_tc: sinTc,
+      };
+    }
+    return null;
   }
 
   async listMovimientos(filters: ListMovimientosQuery) {
@@ -701,4 +924,26 @@ export class InventoryService {
 function round(n: number, decimals = 3): number {
   const f = 10 ** decimals;
   return Math.round((n + Number.EPSILON) * f) / f;
+}
+
+/**
+ * Monto/moneda del gasto de bodega que nace de una SALIDA: en MXN cuando la
+ * salida quedó expresada en pesos (todas las capas consumidas se compraron en
+ * pesos); si no, en USD. `tc_gasto` = TC ponderado de las capas (si lo hay)
+ * para que el balance en pesos reproduzca lo realmente pagado.
+ */
+function montoGastoDeSalida(mov: Record<string, unknown>): {
+  monto: number;
+  moneda: 'MXN' | 'USD';
+  tcGasto: number | null;
+} {
+  const cant = Number(mov.cantidad);
+  const enMxn = mov.moneda === 'MXN' && mov.costo_unitario_mxn != null;
+  const tc = Number(mov.tc_usd_mxn);
+  const tcGasto = Number.isFinite(tc) && tc > 0 ? tc : null;
+  const monto = round(
+    cant * Number(enMxn ? mov.costo_unitario_mxn : mov.costo_unitario_usd),
+    2,
+  );
+  return { monto, moneda: enMxn ? 'MXN' : 'USD', tcGasto };
 }

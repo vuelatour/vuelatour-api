@@ -18,6 +18,12 @@ export interface RepartoAvionPayload {
   modelo: string;
   ingresos_cobrado_usd: number;
   pendiente_cobro_usd: number;
+  /**
+   * Deuda COMPLETA del cliente pendiente de cobro (total de la cotización −
+   * cobrado, USD), SIN partir entre avión y VuelaTour. Informativo: lo que
+   * el cliente aún debe; `pendiente_cobro_usd` es solo la parte del AVIÓN.
+   */
+  pendiente_bruto_usd?: number;
   gastos_directos_usd: number;
   gastos_indirectos_usd: number;
   permisos_usd: number;
@@ -25,6 +31,12 @@ export interface RepartoAvionPayload {
   reserva_overhaul_usd: number;
   saldo_usd: number;
   reparto: RepartoSocioPayload[];
+  /**
+   * Ingreso de VUELATOUR excluido del reparto del avión (regla 28-ago):
+   * TUAS + extras + pernocta cobrados + su IVA (particionIngresoVuelo).
+   * Informativo: no entra a saldo_usd ni al reparto de socios.
+   */
+  otros_ingresos_vuelatour_usd?: number;
 }
 
 export interface RepartoPdfPayload {
@@ -32,6 +44,8 @@ export interface RepartoPdfPayload {
   periodo_hasta: string;
   generado: string;
   aviones: RepartoAvionPayload[];
+  /** Σ otros_ingresos_vuelatour_usd de todos los aviones (informativo). */
+  otros_ingresos_vuelatour_total_usd?: number;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';
@@ -117,6 +131,13 @@ export interface DineroVueloFilaPayload {
   total_cobros_mxn?: number | null;
   me_deben_mxn?: number | null;
   factura_vuelatour?: string | null;
+  /**
+   * Total que paga el CLIENTE (monto_total_usd y su MXN): informativo al
+   * lado de la venta del avión — regla 28-ago (la venta excluye TUAS/
+   * extras/pernocta; el cruce venta + ingreso VuelaTour == total cliente).
+   */
+  total_cliente_usd?: number | null;
+  total_cliente_mxn?: number | null;
 }
 export interface DineroOtroIngresoFilaPayload {
   clave: string;
@@ -254,6 +275,13 @@ export interface ReporteVueloPayload {
   /** Ganancia / venta sin IVA. */
   ganancia_pct?: number | null;
   notas?: string | null;
+  /**
+   * Partición del ingreso (regla 28-ago, particionIngresoVuelo): venta del
+   * AVIÓN (tiempo + ajuste + comisión vendedor + IVA proporcional) e
+   * ingreso de VUELATOUR (TUAS + extras + pernocta + su IVA). Suman total_usd.
+   */
+  venta_avion_usd?: number | null;
+  otros_ingresos_vuelatour_usd?: number | null;
 }
 
 // ===== Balance por avión (réplica sistematizada del Excel "Balance N990GG") =====
@@ -262,9 +290,16 @@ export interface ReporteVueloPayload {
 
 export interface BalanceAvionCobroPayload {
   fecha: string | null;
-  /** Monto de la parcialidad en MXN (null = USD sin TC: no convertible). */
+  /** Monto REAL de la parcialidad en MXN (null = USD sin TC: no convertible). */
   monto_mxn: number | null;
   metodo?: string | null;
+  /**
+   * Comisión bancaria del cobro a MXN (punto 9 del cliente, 28-ago): MXN
+   * directo; USD × (TC del cobro ?? TC de venta); sin TC → null.
+   */
+  comision_mxn?: number | null;
+  /** Cuenta destino del cobro (cobro_vuelo.cuenta_destino). */
+  cuenta?: string | null;
 }
 
 export interface BalanceAvionVueloPayload {
@@ -291,9 +326,28 @@ export interface BalanceAvionVueloPayload {
   horas_cobradas: number;
   tarifa_usd: number | null;
   iva_hr_usd: number | null;
+  /**
+   * VENTA DEL AVIÓN (regla 28-ago): tiempo + ajuste + comisión vendedor +
+   * IVA proporcional (particionIngresoVuelo). TUAS/extras/pernocta y su IVA
+   * quedan FUERA (otros_ingresos_usd). Sin cotización: horas × tarifa.
+   */
   total_usd: number | null;
+  /** IVA de la venta del avión (proporcional). */
   iva_usd: number | null;
   tc_venta: number | null;
+  /** Total que paga el CLIENTE (monto_total_usd) — informativo. */
+  total_cotizacion_usd?: number | null;
+  /** total_cotizacion_usd × TC de venta. */
+  total_cotizacion_mxn?: number | null;
+  /** avion_usd / total_usd de la partición (1 sin precio); prorratea cobros. */
+  venta_factor?: number | null;
+  /** Ingreso de VUELATOUR de la fila: TUAS + extras + pernocta + su IVA
+   *  (+ redondeo), EXCLUIDO de total_usd. total_usd + otros_ingresos_usd ==
+   *  total_cotizacion_usd. */
+  otros_ingresos_usd?: number | null;
+  /** TUA pagado del vuelo (categoría TUAS + parte embebida), MXN. SOLO
+   *  informativo (regla 7, 28-ago): no suma en OP ni en ninguna hoja. null si 0. */
+  tua_pagado_mxn?: number | null;
   /** true = TC no capturado en la cotización: se usó el oficial (Banxico FIX) del día de la cotización. */
   tc_venta_oficial?: boolean;
   total_mxn: number | null;
@@ -347,7 +401,11 @@ export interface BalanceAvionVueloPayload {
   // Bloque STATUS DE COBROS
   status_cobro: string;
   cobros: BalanceAvionCobroPayload[];
+  /** Lo cobrado que cuenta para el AVIÓN = cobrado_real_mxn × venta_factor. */
   cobrado_mxn: number;
+  /** Σ parcialidades REALES en MXN (sin prorratear). */
+  cobrado_real_mxn?: number | null;
+  /** total_mxn − cobrado_mxn (venta del avión pendiente). */
   por_cobrar_mxn: number;
   por_cobrar_usd: number | null;
 }
@@ -377,8 +435,22 @@ export interface BalanceAvionTotalesPayload {
   tc_promedio: number | null;
   /** Promedio de costo por hora volada (AN) SOLO sobre no nulos. */
   costo_hr_prom_usd: number | null;
-  /** TUAs/extras/pernocta cobrados: informativo al pie, van a la general. */
+  /**
+   * Ingreso de VUELATOUR del periodo (regla 28-ago): TUAS + extras +
+   * pernocta cobrados + su IVA, EXCLUIDOS de las filas. Cuadre: Σ
+   * filas.total_usd + otros_ingresos_usd == Σ monto_total_usd de los vuelos
+   * propios con precio. Va a la pestaña "Otros movimientos" del general.
+   */
   otros_ingresos_usd: number | null;
+  /** Σ cobrado_real_mxn de las filas (parcialidades tal cual). */
+  cobrado_real_mxn?: number | null;
+  /** Σ total_cotizacion_mxn de las filas (total del cliente en MXN). */
+  total_cotizacion_mxn?: number | null;
+  /** Σ tua_pagado_mxn: informativo, NO resta en ninguna hoja ni cascada.
+   *  null cuando no hubo TUA pagado (celda vacía, no "$0"). */
+  tua_pagado_mxn?: number | null;
+  /** Σ comisiones bancarias convertibles de los cobros de las filas. */
+  comision_banco_mxn?: number | null;
 }
 
 export interface BalanceAvionGastoFilaPayload {
@@ -473,6 +545,12 @@ export interface BalanceGeneralPayload {
 export interface BalanceOtroMovimientoFilaPayload {
   clave: string;
   avion_color: string | null;
+  /**
+   * Estado del vuelo de la fila (CANCELADO se pinta en rojo). undefined en
+   * las filas sueltas (sin vuelo). La pestaña lista vuelos de TODOS los
+   * estados — el MISMO universo que la hoja maestra del balance.
+   */
+  estado?: string | null;
   fecha_vuelo: string | null;
   concepto_egreso: string | null;
   egreso_mxn: number | null;

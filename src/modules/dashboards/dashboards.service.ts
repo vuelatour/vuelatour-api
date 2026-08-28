@@ -124,7 +124,16 @@ export class DashboardsService {
 
     // Financiero: se agrega del motor de reparto.
     let ingresosCobrados = 0;
+    // "Pendiente de cobro" = deuda REAL del cliente (avión + TUAS/extras/
+    // pernocta + IVA), misma fórmula que el pre-cierre (pendiente_bruto_usd
+    // del reparto). `pendiente_cobro_usd` es SOLO la parte del avión (lo que
+    // le falta al avión para repartir): sumarla aquí contradecía el
+    // pre-cierre y escondía deuda. Va ADITIVA como *_avion_usd.
     let ingresosPendientes = 0;
+    let ingresosPendientesAvion = 0;
+    // Parte VuelaTour cobrada (TUAS/extras/pernocta + IVA), informativa:
+    // cobrado_usd es la venta del avión; con esto se ve el bruto cobrado.
+    let otrosIngresosVuelatour = 0;
     let gastos = 0;
     let saldo = 0;
     const porAvion = profit.aviones.map((a) => {
@@ -135,7 +144,9 @@ export class DashboardsService {
         a.gastos.otros_prorrateados_usd +
         a.reserva_overhaul_usd;
       ingresosCobrados += a.ingresos.cobrado_usd;
-      ingresosPendientes += a.ingresos.pendiente_cobro_usd;
+      ingresosPendientes += a.ingresos.pendiente_bruto_usd;
+      ingresosPendientesAvion += a.ingresos.pendiente_cobro_usd;
+      otrosIngresosVuelatour += a.ingresos.otros_ingresos_vuelatour_usd;
       gastos += gastosAvion;
       saldo += a.saldo_disponible_usd;
       return {
@@ -178,6 +189,8 @@ export class DashboardsService {
       resumen: {
         ingresos_cobrados_usd: round2(ingresosCobrados),
         ingresos_pendientes_usd: round2(ingresosPendientes),
+        ingresos_pendientes_avion_usd: round2(ingresosPendientesAvion),
+        otros_ingresos_vuelatour_usd: round2(otrosIngresosVuelatour),
         gastos_totales_usd: round2(gastos),
         saldo_disponible_usd: round2(saldo),
         vuelos_periodo: vuelosPeriodo.length,
@@ -598,9 +611,14 @@ export class DashboardsService {
       for (const e of (data as EscalaTacoRow[] | null) ?? []) {
         const salida = e.taco_salida === null ? NaN : Number(e.taco_salida);
         const llegada = e.taco_llegada === null ? NaN : Number(e.taco_llegada);
+        // Avión del tramo con herencia: el del tramo o el del vuelo.
+        // (`a ?? b ?? null` ≡ `(a ?? null) ?? (b ?? null)`; la forma con
+        // paréntesis la rechazaba prettier y la sin ellos tsc 5.9 —
+        // `null ??` es "siempre nullish".)
         const avion =
-          ((e as { aeronave_id?: string | null }).aeronave_id ?? null) ??
-          (avionDelVuelo.get(e.vuelo_id) ?? null);
+          (e as { aeronave_id?: string | null }).aeronave_id ??
+          avionDelVuelo.get(e.vuelo_id) ??
+          null;
         if (
           avion &&
           Number.isFinite(salida) &&
