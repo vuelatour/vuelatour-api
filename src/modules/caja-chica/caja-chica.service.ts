@@ -75,9 +75,7 @@ export class CajaChicaService {
         mejor = m;
       }
     }
-    return mejor
-      ? { fecha: mejor.fecha!, monto: Number(mejor.monto) }
-      : null;
+    return mejor ? { fecha: mejor.fecha!, monto: Number(mejor.monto) } : null;
   }
 
   // ===== Fondos =====
@@ -529,7 +527,10 @@ export class CajaChicaService {
       .select('usuario:usuario!usuario_id(nombre)')
       .eq('id', fondoId)
       .maybeSingle();
-    const u = data?.usuario as { nombre?: string } | { nombre?: string }[] | null;
+    const u = data?.usuario as
+      | { nombre?: string }
+      | { nombre?: string }[]
+      | null;
     const nombre = Array.isArray(u) ? u[0]?.nombre : u?.nombre;
     return nombre ?? 'caja vinculada';
   }
@@ -569,7 +570,8 @@ export class CajaChicaService {
         created_by: userId,
         updated_by: userId,
       });
-    if (error) throw new Error(`No se pudo registrar el espejo: ${error.message}`);
+    if (error)
+      throw new Error(`No se pudo registrar el espejo: ${error.message}`);
   }
 
   /**
@@ -847,11 +849,52 @@ export class CajaChicaService {
     const efectivo = (gastos ?? []).filter(
       (g) => (g as { moneda: string }).moneda === fo.moneda,
     );
+    const esAcumulada =
+      (fo as { es_acumulada?: boolean }).es_acumulada === true;
     const saldo = this.saldoFromParts(
       allMovs.data ?? [],
       efectivo,
-      (fo as { es_acumulada?: boolean }).es_acumulada === true,
+      esAcumulada,
     );
+    // Lectura para el usuario (pedido 29-ago: "que diga lo usado, lo
+    // disponible y el total asignado", no un saldo en negativo). Cálculo
+    // ADITIVO sobre el mismo saldo (fuente única):
+    //  · asignado  = monto nominal del fondo.
+    //  · entregado = Σ reposiciones/ajustes − reintegros registrados.
+    //  · gastado   = Σ gastos en EFECTIVO del capturista (misma moneda).
+    //  · Con entregas registradas: disponible = saldo (entregado − gastado)
+    //    y usado = asignado − saldo (= lo por reponer).
+    //  · Fondo nominal sin entregas registradas (el caso típico del
+    //    VISITANTE: la oficina asignó $5,000 pero no capturó la entrega):
+    //    el saldo sale en negativo (−gastado); para la persona el fondo SÍ
+    //    existe → usado = gastado y disponible = asignado − gastado.
+    //  · Caja ACUMULADA: usado = lo por reponer (= saldo) y disponible =
+    //    asignado − usado.
+    const asignado = round(
+      Number((fo as { monto_fondo?: unknown }).monto_fondo ?? 0),
+    );
+    const entregadoTotal = round(
+      (allMovs.data ?? []).reduce(
+        (acc, m) => acc + this.signed(m as CajaMov),
+        0,
+      ),
+    );
+    const gastadoTotal = round(
+      efectivo.reduce((acc, g) => acc + Number(g.monto), 0),
+    );
+    let usado: number;
+    let disponible: number;
+    if (esAcumulada) {
+      usado = Math.max(0, saldo);
+      disponible = asignado > 0 ? round(asignado - usado) : 0;
+    } else if (entregadoTotal > 0) {
+      disponible = saldo;
+      usado =
+        asignado > 0 ? Math.max(0, round(asignado - saldo)) : gastadoTotal;
+    } else {
+      usado = gastadoTotal;
+      disponible = asignado > 0 ? round(asignado - gastadoTotal) : saldo;
+    }
 
     // Efectivo capturado en OTRA moneda: no alimenta el saldo del fondo (una
     // caja = una moneda y los movimientos de reposición se rechazan en otra
@@ -870,6 +913,12 @@ export class CajaChicaService {
     return {
       fondo,
       saldo,
+      // ADITIVOS (29-ago): lectura amable del fondo; la app vieja los ignora.
+      asignado,
+      usado,
+      disponible,
+      entregado_total: entregadoTotal,
+      gastado_total: gastadoTotal,
       movimientos: movs ?? [],
       gastos: gastosLista,
       efectivo_otras_monedas: efectivoOtrasMonedas,
