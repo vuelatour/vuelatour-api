@@ -173,6 +173,23 @@ export class InventoryController {
     });
   }
 
+  // Sufijo literal declarado ANTES de 'items/:id' (convención del repo).
+  @Get('items/:id/cardex-libro.xlsx')
+  @Roles(...OFICINA)
+  @ApiOperation({
+    summary:
+      'Cardex del ítem en formato LIBRO (Excel): bloque ENTRADAS | bloque SALIDAS con venta, remanente y ganancia FIFO por salida.',
+  })
+  async cardexLibro(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.inventory.cardexLibroXlsx(id);
+    return new StreamableFile(buffer, {
+      type: XLSX_MIME,
+      disposition: `attachment; filename="${filename}"`,
+    });
+  }
+
   @Get('items/:id')
   @Roles(...OFICINA)
   @ApiOperation({ summary: 'Item detail with cardex + FIFO stats + empaques' })

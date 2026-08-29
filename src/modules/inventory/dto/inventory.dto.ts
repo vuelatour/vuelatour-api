@@ -276,6 +276,25 @@ export class CreateInventarioItemDto {
   notas?: string;
 
   @ApiPropertyOptional({
+    description:
+      'Precio de VENTA unitario al avión (decisión del cliente 29-ago-2026): la SALIDA carga este precio como gasto BODEGA; el costo FIFO queda para el inventario. Sin precio (o 0) la salida se carga a costo FIFO como siempre. null = quitar el precio. Viaja JUNTO con precio_venta_moneda.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  precio_venta?: number | null;
+
+  @ApiPropertyOptional({
+    enum: ['MXN', 'USD'],
+    description:
+      'Moneda del precio de venta. OBLIGATORIA si viaja precio_venta > 0; sin precio se ignora (el panel siempre manda el par).',
+  })
+  @IsOptional()
+  @IsIn(['MXN', 'USD'])
+  precio_venta_moneda?: 'MXN' | 'USD' | null;
+
+  @ApiPropertyOptional({
     type: [EmpaqueInputDto],
     description:
       'Empaques (cajas) que se crean junto con el ítem. Para editar después usa /items/:id/empaques.',
@@ -388,6 +407,25 @@ export class CreateMovimientoDto {
   @IsNumber()
   @IsPositive()
   tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'SALIDA: precio de VENTA unitario que paga el avión (default: el precio_venta del ítem). > 0 activa el cargo a precio de venta; 0 explícito o ausente sin precio en el ítem = cargo a costo FIFO (comportamiento de siempre). En otros tipos se ignora.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  venta_unitaria?: number;
+
+  @ApiPropertyOptional({
+    enum: ['MXN', 'USD'],
+    description:
+      'Moneda de la venta (default: la del precio de venta del ítem, o MXN — la moneda operativa de bodega).',
+  })
+  @IsOptional()
+  @IsIn(['MXN', 'USD'])
+  venta_moneda?: 'MXN' | 'USD';
 
   @ApiPropertyOptional({
     description:

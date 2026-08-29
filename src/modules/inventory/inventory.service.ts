@@ -8,6 +8,8 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   PyservicesService,
+  type CardexLibroEntradaPayload,
+  type CardexLibroSalidaPayload,
   type TablaColumnaPayload,
 } from '../pyservices/pyservices.service';
 import {
@@ -26,7 +28,7 @@ import { normalizarCodigo } from './inventario-codigo.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 
 const ITEM_COLS =
-  'id, nombre, marca, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, descripcion, notas, foto_url, foto_storage_path, fotos_adicionales, activo, created_at, updated_at';
+  'id, nombre, marca, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, precio_venta, precio_venta_moneda, descripcion, notas, foto_url, foto_storage_path, fotos_adicionales, activo, created_at, updated_at';
 
 /** Empaques (cajas) del ítem: factor = unidades por empaque; codigo = barras de la caja. */
 const EMPAQUE_COLS =
@@ -38,7 +40,7 @@ const MOV_JOINS =
 /** Bucket PÚBLICO de fotos de producto (el cliente sube; el API borra). */
 const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
-  'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+  'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
 
 type EmpaqueRow = {
   id: string;
@@ -251,6 +253,124 @@ export class InventoryService {
     });
   }
 
+  /**
+   * Cardex de UN ítem en formato LIBRO (réplica del cuaderno del cliente):
+   * bloque ENTRADAS | bloque SALIDAS lado a lado, con stock corriente,
+   * venta, remanente y ganancia FIFO por salida. Todo se calcula AQUÍ
+   * (pyservices SOLO renderiza). Montos en PESOS con el criterio único
+   * costoUnitarioMxnDe; salida SIN precio de venta = el avión pagó el costo
+   * FIFO, así que el libro la registra "vendida al costo" (ganancia 0).
+   */
+  async cardexLibroXlsx(
+    itemId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const item = (await this.findItem(itemId)) as {
+      nombre: string;
+      numero_parte?: string | null;
+      unidad?: string | null;
+    };
+    const { data, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select(`${MOV_COLS}, para_flota, ${MOV_JOINS}`)
+      .eq('item_id', itemId);
+    if (error) throw new Error(error.message);
+    const movs = (data ?? []) as MovForFifo[];
+    const walk = this.walkCardex(movs);
+
+    const entradas: CardexLibroEntradaPayload[] = [];
+    const salidas: CardexLibroSalidaPayload[] = [];
+    let totalCompra = 0;
+    let totalVenta = 0;
+    let totalGanancia = 0;
+    for (const m of this.sortChrono(movs)) {
+      const x = m as MovForFifo & MovVenta & Record<string, unknown>;
+      const info = m.id ? walk.get(m.id) : undefined;
+      const cant = Number(m.cantidad);
+      const ref =
+        typeof x.referencia === 'string' && x.referencia
+          ? ` · ref ${x.referencia}`
+          : '';
+      if (m.tipo === (TipoMovimientoInventario.SALIDA as string)) {
+        const costoMxnFifo = info?.costoMxnFifo ?? null;
+        const venta = ventaYGananciaDe(x, costoMxnFifo);
+        const aCosto = venta.ventaUnitMxn == null;
+        const unit =
+          venta.ventaUnitMxn ??
+          (costoMxnFifo != null && cant > 0
+            ? round(costoMxnFifo / cant, 2)
+            : null);
+        const total = venta.ventaTotalMxn ?? costoMxnFifo;
+        const ganancia = venta.gananciaMxn ?? (total != null ? 0 : null);
+        const vendidoA =
+          x.para_flota === true
+            ? 'FLOTA'
+            : (nombreDeJoin(x.aeronave, 'matricula') ?? '—');
+        salidas.push({
+          fecha: String(m.fecha_movimiento ?? ''),
+          cantidad: cant,
+          descripcion: `${item.nombre}${aCosto ? ' · a costo FIFO' : ''}${ref}`,
+          venta_unitaria: unit,
+          venta_total: total,
+          remanente: info?.stockDespues ?? 0,
+          ganancia,
+          vendido_a: vendidoA,
+        });
+        if (total != null) totalVenta = round(totalVenta + total, 2);
+        if (ganancia != null)
+          totalGanancia = round(totalGanancia + ganancia, 2);
+      } else {
+        // ENTRADA en su lugar natural; DEVOLUCION/AJUSTE también SUMAN stock
+        // (así los procesa buildLayers) y van de este lado con su nota.
+        const { mxn } = costoUnitarioMxnDe(x);
+        const unit = round(mxn, 2);
+        const total = round(mxn * cant, 2);
+        const pref =
+          m.tipo === (TipoMovimientoInventario.DEVOLUCION as string)
+            ? 'DEVOLUCIÓN — '
+            : m.tipo === (TipoMovimientoInventario.AJUSTE as string)
+              ? 'AJUSTE — '
+              : '';
+        const origen =
+          nombreDeJoin(x.proveedor, 'nombre') ??
+          nombreDeJoin(x.aeronave, 'matricula');
+        entradas.push({
+          fecha: String(m.fecha_movimiento ?? ''),
+          cantidad: cant,
+          descripcion: `${pref}${item.nombre}${origen ? ` · ${origen}` : ''}${ref}`,
+          valor_compra_unitario: unit,
+          valor_compra_total: total,
+          stock_despues: info?.stockDespues ?? 0,
+        });
+        // Total de COMPRA = solo las ENTRADAS (una devolución o un ajuste
+        // regresan valor al stock, pero no son una compra).
+        if (m.tipo === (TipoMovimientoInventario.ENTRADA as string))
+          totalCompra = round(totalCompra + total, 2);
+      }
+    }
+
+    const buffer = await this.pyservices.generateCardexLibroXlsx({
+      titulo: `Cardex — ${item.nombre}`,
+      item_nombre: item.nombre,
+      numero_parte: item.numero_parte ?? null,
+      unidad: item.unidad ?? null,
+      generado: hoyCancun(),
+      moneda: 'MXN',
+      entradas,
+      salidas,
+      total_compra: totalCompra,
+      total_venta: totalVenta,
+      total_ganancia: totalGanancia,
+    });
+    const slug =
+      item.nombre
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^A-Za-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .toLowerCase() || 'item';
+    return { buffer, filename: `cardex-libro-${slug}.xlsx` };
+  }
+
   // ===== Cálculo FIFO =====
 
   /** Orden cronológico estable: fecha_movimiento y, a igualdad, created_at. */
@@ -358,6 +478,54 @@ export class InventoryService {
       mxn: pesosExactos ? mxn : null,
       todoMxn: todoMxn && pesosExactos,
     };
+  }
+
+  /**
+   * Recorre el cardex en orden cronológico llevando el STOCK corriente y, por
+   * cada SALIDA, el costo FIFO en PESOS de las capas que consumió (mismo
+   * criterio de buildLayers/costoUnitarioMxnDe — no inventa otro FIFO, lo
+   * reproduce paso a paso para poder reportarlo POR MOVIMIENTO). Lo usan el
+   * cardex formato libro y la ganancia por salida del detalle del ítem.
+   */
+  private walkCardex(
+    movs: MovForFifo[],
+  ): Map<string, { stockDespues: number; costoMxnFifo: number | null }> {
+    const out = new Map<
+      string,
+      { stockDespues: number; costoMxnFifo: number | null }
+    >();
+    const layers: FifoLayer[] = [];
+    let stock = 0;
+    for (const m of this.sortChrono(movs)) {
+      const cant = Number(m.cantidad);
+      if (m.tipo === (TipoMovimientoInventario.SALIDA as string)) {
+        let need = cant;
+        let mxn = 0;
+        while (need > EPS && layers.length > 0) {
+          const layer = layers[0];
+          const take = Math.min(need, layer.qty);
+          mxn += take * layer.costMxn;
+          layer.qty -= take;
+          need -= take;
+          if (layer.qty <= EPS) layers.shift();
+        }
+        stock = round(stock - cant);
+        if (m.id)
+          out.set(m.id, { stockDespues: stock, costoMxnFifo: round(mxn, 2) });
+      } else {
+        const { mxn, pesosExactos, enMxn } = costoUnitarioMxnDe(m);
+        layers.push({
+          qty: cant,
+          cost: Number(m.costo_unitario_usd),
+          costMxn: mxn,
+          pesosExactos,
+          enMxn,
+        });
+        stock = round(stock + cant);
+        if (m.id) out.set(m.id, { stockDespues: stock, costoMxnFifo: null });
+      }
+    }
+    return out;
   }
 
   private async movsForItem(itemId: string): Promise<MovForFifo[]> {
@@ -478,7 +646,20 @@ export class InventoryService {
     if (error) throw new Error(error.message);
 
     const stats = this.statsFromLayers(this.buildLayers(movs ?? []));
-    return { ...item, ...stats, movimientos: movs ?? [] };
+    // Ganancia por SALIDA con venta (venta total MXN − costo FIFO MXN de las
+    // capas consumidas): ADITIVO — solo aparece cuando la salida llevó precio
+    // de venta; el resto de filas viaja intacto.
+    const walk = this.walkCardex(movs ?? []);
+    const movimientos = (movs ?? []).map((m) => {
+      const x = m as Record<string, unknown> & { id: string; tipo: string };
+      if (x.tipo !== (TipoMovimientoInventario.SALIDA as string)) return m;
+      const { gananciaMxn } = ventaYGananciaDe(
+        x as unknown as MovVenta,
+        walk.get(x.id)?.costoMxnFifo ?? null,
+      );
+      return gananciaMxn != null ? { ...x, ganancia_mxn: gananciaMxn } : m;
+    });
+    return { ...item, ...stats, movimientos };
   }
 
   /**
@@ -487,12 +668,41 @@ export class InventoryService {
    * las 2 consultas por código sería redundante — el índice único y el
    * trigger de la BD siguen siendo la última defensa (409 legible).
    */
+  /**
+   * Valida y normaliza el PAR precio_venta / precio_venta_moneda (viajan
+   * juntos): un precio > 0 exige su moneda (400 legible); un precio null o 0
+   * limpia AMBOS (0 no es un precio de venta: dejaría al avión sin cargo en
+   * silencio); la moneda sola se ignora (el panel siempre manda el par y su
+   * select trae MXN por default aunque no haya precio).
+   */
+  private resolverPrecioVenta(dto: {
+    precio_venta?: number | null;
+    precio_venta_moneda?: 'MXN' | 'USD' | null;
+  }): { precio: number | null; moneda: 'MXN' | 'USD' | null } {
+    if (dto.precio_venta == null || !(Number(dto.precio_venta) > 0)) {
+      return { precio: null, moneda: null };
+    }
+    if (
+      dto.precio_venta_moneda !== 'MXN' &&
+      dto.precio_venta_moneda !== 'USD'
+    ) {
+      throw new BadRequestException(
+        'Captura la moneda del precio de venta (MXN o USD) junto con el precio.',
+      );
+    }
+    return {
+      precio: round(Number(dto.precio_venta), 4),
+      moneda: dto.precio_venta_moneda,
+    };
+  }
+
   async createItem(
     dto: CreateInventarioItemDto,
     userId: string,
     opts: { codigosYaVerificados?: boolean } = {},
   ) {
     const codigo = normalizarCodigo(dto.codigo);
+    const precioVenta = this.resolverPrecioVenta(dto);
     const empaques = this.prepararEmpaques(dto.empaques ?? [], codigo);
     // Un código identifica UNA cosa en bodega: se verifica aquí (409 legible)
     // y además lo bloquea el trigger de la BD (ítem ↔ empaque).
@@ -514,6 +724,8 @@ export class InventoryService {
         stock_minimo: dto.stock_minimo ?? 0,
         ubicacion: dto.ubicacion ?? 'Bodega Cancún',
         unidad: dto.unidad || null,
+        precio_venta: precioVenta.precio,
+        precio_venta_moneda: precioVenta.moneda,
         descripcion: dto.descripcion || null,
         notas: dto.notas,
         foto_url: dto.foto_url || null,
@@ -582,6 +794,15 @@ export class InventoryService {
     if (dto.descripcion !== undefined)
       cambios.descripcion = dto.descripcion || null;
     if (dto.unidad !== undefined) cambios.unidad = dto.unidad || null;
+    // Precio de venta: el PAR viaja junto (precio → exige moneda; null/0 →
+    // limpia ambos). La moneda SOLA no dice nada: no se toca.
+    if (dto.precio_venta !== undefined) {
+      const precioVenta = this.resolverPrecioVenta(dto);
+      cambios.precio_venta = precioVenta.precio;
+      cambios.precio_venta_moneda = precioVenta.moneda;
+    } else if (dto.precio_venta_moneda !== undefined) {
+      delete cambios.precio_venta_moneda;
+    }
     if (dto.fotos_adicionales !== undefined)
       cambios.fotos_adicionales = fotosPlanas(dto.fotos_adicionales);
 
@@ -1056,7 +1277,11 @@ export class InventoryService {
     dto: CreateMovimientoDto,
     userId: string,
   ) {
-    const item = (await this.findItem(itemId)) as { nombre: string }; // 404 si no existe
+    const item = (await this.findItem(itemId)) as {
+      nombre: string;
+      precio_venta?: number | string | null;
+      precio_venta_moneda?: 'MXN' | 'USD' | null;
+    }; // 404 si no existe
 
     // Captura POR EMPAQUE (caja): la cantidad del cardex SIEMPRE va en
     // UNIDADES = cantidad_empaques × factor (fuente única del FIFO y del
@@ -1117,6 +1342,13 @@ export class InventoryService {
     let moneda: 'MXN' | 'USD' = dto.moneda ?? 'USD';
     let costoMxn: number | null = null;
     let tc: number | null = null;
+    // VENTA (decisión del cliente 29-ago-2026): en SALIDA el avión paga el
+    // PRECIO DE VENTA (el capturado en la salida, o el del ítem como default);
+    // el costo FIFO queda para el inventario (capas/valorizado intactos). Sin
+    // precio no cambia NADA: el gasto sale a costo FIFO como siempre. Un 0
+    // explícito en venta_unitaria = "esta salida va a costo FIFO".
+    let ventaUnitaria: number | null = null;
+    let ventaMoneda: 'MXN' | 'USD' | null = null;
 
     if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       if (!dto.aeronave_id && dto.para_flota !== true) {
@@ -1142,6 +1374,20 @@ export class InventoryService {
         tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
       }
       moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
+      // Precio de venta efectivo: el del DTO (> 0) gana; sin campo en el DTO
+      // se hereda el del ítem. La moneda del DTO acompaña a SU precio; la del
+      // ítem al suyo (jamás cruzar precio de una fuente con moneda de otra).
+      if (dto.venta_unitaria != null) {
+        if (Number(dto.venta_unitaria) > 0) {
+          ventaUnitaria = round(Number(dto.venta_unitaria), 4);
+          ventaMoneda =
+            dto.venta_moneda ??
+            (item.precio_venta_moneda === 'USD' ? 'USD' : 'MXN');
+        }
+      } else if (Number(item.precio_venta) > 0) {
+        ventaUnitaria = round(Number(item.precio_venta), 4);
+        ventaMoneda = item.precio_venta_moneda === 'USD' ? 'USD' : 'MXN';
+      }
     } else {
       const costo = this.resolverCostoEntrada(dto);
       costoUnitario = costo.costoUnitario;
@@ -1164,6 +1410,10 @@ export class InventoryService {
         moneda,
         costo_unitario_mxn: costoMxn,
         tc_usd_mxn: tc,
+        // Venta al avión (solo SALIDA con precio): el gasto BODEGA sale de
+        // aquí (montoGastoDeSalida); null = la salida se cargó a costo FIFO.
+        venta_unitaria: ventaUnitaria,
+        venta_moneda: ventaUnitaria != null ? ventaMoneda : null,
         para_flota:
           dto.tipo === TipoMovimientoInventario.SALIDA &&
           dto.para_flota === true,
@@ -1394,7 +1644,7 @@ export class InventoryService {
     userId: string,
     presentacion: string | null = null,
   ): Promise<Record<string, unknown> | null> {
-    const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
+    const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
 
     const { data, error } = await this.supabase.service
@@ -1412,7 +1662,7 @@ export class InventoryService {
         proveedor_id: mov.proveedor_id ?? null,
         inventario_movimiento_id: mov.id,
         notas:
-          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (costo FIFO)` +
+          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'})` +
           (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
         created_by: userId,
         updated_by: userId,
@@ -1459,10 +1709,11 @@ export class InventoryService {
 
   /**
    * SALIDA "para todas las matrículas" (aceites/consumibles de flota): el
-   * costo FIFO total se PRORRATEA en partes iguales entre los aviones
-   * ACTIVOS — un gasto REFACCION medio BODEGA por avión, todos ligados al
-   * mismo movimiento. Los centavos de diferencia se ajustan en el primer
-   * avión para que la suma sea EXACTA al costo de la salida.
+   * cargo total (PRECIO DE VENTA si la salida lo lleva; si no, costo FIFO —
+   * misma fuente única montoGastoDeSalida) se PRORRATEA en partes iguales
+   * entre los aviones ACTIVOS — un gasto REFACCION medio BODEGA por avión,
+   * todos ligados al mismo movimiento. Los centavos de diferencia se ajustan
+   * en el primer avión para que la suma sea EXACTA al total de la salida.
    */
   private async crearGastosDeSalidaFlota(
     mov: Record<string, unknown>,
@@ -1470,7 +1721,7 @@ export class InventoryService {
     userId: string,
     presentacion: string | null = null,
   ): Promise<Record<string, unknown> | null> {
-    const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
+    const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
 
     const { data: aviones, error: avErr } = await this.supabase.service
@@ -1506,7 +1757,7 @@ export class InventoryService {
       proveedor_id: mov.proveedor_id ?? null,
       inventario_movimiento_id: mov.id,
       notas:
-        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (costo FIFO $${monto.toFixed(2)} ${moneda})` +
+        `Salida de bodega (toda la flota, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'} $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
       created_by: userId,
       updated_by: userId,
@@ -1554,6 +1805,11 @@ export class InventoryService {
    * Devuelve el RESTO que no se pudo revertir (null cuando se revirtió todo)
    * para que `createMovimiento` lo exponga como `reversion_pendiente`: el
    * dinero jamás desaparece en silencio (además del warn en el log).
+   *
+   * VENTA (29-ago-2026): la reversión casa contra `gasto.monto` — LO QUE
+   * REALMENTE SE CARGÓ al avión, sea precio de venta o costo FIFO — así que
+   * los gastos a precio de venta se revierten igual (se borran/reducen hasta
+   * cubrir el monto devuelto); no hay que distinguirlos aquí.
    */
   private async revertirGastoPorDevolucion(
     itemId: string,
@@ -1724,24 +1980,98 @@ function pathsDeFotos(raw: unknown): string[] {
     .filter((p): p is string => !!p);
 }
 
+/** Campos de VENTA de una salida (lo mínimo para expresarla en pesos). */
+type MovVenta = {
+  cantidad: number | string;
+  venta_unitaria?: number | string | null;
+  venta_moneda?: string | null;
+  tc_usd_mxn?: number | string | null;
+};
+
 /**
- * Monto/moneda del gasto de bodega que nace de una SALIDA: en MXN cuando la
- * salida quedó expresada en pesos (todas las capas consumidas se compraron en
- * pesos); si no, en USD. `tc_gasto` = TC ponderado de las capas (si lo hay)
- * para que el balance en pesos reproduzca lo realmente pagado.
+ * Venta en PESOS y ganancia de una SALIDA — criterio único (cardex formato
+ * libro y detalle del ítem): venta MXN va tal cual; venta USD se expresa en
+ * pesos con el TC ponderado FIFO de la salida (mov.tc_usd_mxn) y, sin TC, el
+ * número tal cual (mismo último recurso de costoUnitarioMxnDe — no pasa
+ * cuando todo se maneja en pesos). Ganancia = venta total MXN − costo FIFO
+ * MXN de las capas consumidas. Sin venta (salida cargada a costo) todo va
+ * null: no hay ganancia que reportar.
+ */
+function ventaYGananciaDe(
+  mov: MovVenta,
+  costoMxnFifo: number | null,
+): {
+  ventaUnitMxn: number | null;
+  ventaTotalMxn: number | null;
+  gananciaMxn: number | null;
+} {
+  const cant = Number(mov.cantidad);
+  const venta = mov.venta_unitaria != null ? Number(mov.venta_unitaria) : null;
+  if (venta == null || !(venta > 0)) {
+    return { ventaUnitMxn: null, ventaTotalMxn: null, gananciaMxn: null };
+  }
+  const tc = Number(mov.tc_usd_mxn);
+  const unit =
+    mov.venta_moneda === 'USD'
+      ? tc > 0
+        ? round(venta * tc, 2)
+        : venta
+      : venta;
+  const total = round(unit * cant, 2);
+  return {
+    ventaUnitMxn: round(unit, 2),
+    ventaTotalMxn: total,
+    gananciaMxn: costoMxnFifo != null ? round(total - costoMxnFifo, 2) : null,
+  };
+}
+
+/** Campo de un join embebido de supabase (objeto o arreglo), o null. */
+function nombreDeJoin(raw: unknown, campo: string): string | null {
+  const o = Array.isArray(raw) ? (raw[0] as unknown) : raw;
+  if (!o || typeof o !== 'object') return null;
+  const v = (o as Record<string, unknown>)[campo];
+  return typeof v === 'string' && v ? v : null;
+}
+
+/**
+ * Monto/moneda del gasto de bodega que nace de una SALIDA — FUENTE ÚNICA del
+ * monto/moneda/TC del cargo al avión (salida individual Y prorrateo de flota).
+ *
+ * CARGO A PRECIO DE VENTA (decisión del cliente 29-ago-2026): si la salida
+ * lleva `venta_unitaria`, el avión paga venta_unitaria × cantidad en
+ * `venta_moneda` (el costo FIFO queda SOLO para el inventario: capas,
+ * valorizado y cardex no cambian). CRITERIO DE TC de la venta: `tc_gasto`
+ * lleva el TC ponderado FIFO de las capas consumidas (mov.tc_usd_mxn) como
+ * REFERENCIA — es el TC real de lo que costó la pieza y permite expresar el
+ * gasto en la otra moneda para el reparto/balance; si las capas no traían TC,
+ * queda null y los lectores aplican su respaldo de siempre (TC del día /
+ * `vuelo.tc_usd_mxn`). Sin venta, NADA cambia: costo FIFO exacto como hoy
+ * (en MXN cuando todas las capas consumidas se compraron en pesos, si no
+ * USD; `tc_gasto` = TC ponderado de las capas).
  */
 function montoGastoDeSalida(mov: Record<string, unknown>): {
   monto: number;
   moneda: 'MXN' | 'USD';
   tcGasto: number | null;
+  /** true = el cargo salió del PRECIO DE VENTA (no del costo FIFO). */
+  esVenta: boolean;
 } {
   const cant = Number(mov.cantidad);
-  const enMxn = mov.moneda === 'MXN' && mov.costo_unitario_mxn != null;
   const tc = Number(mov.tc_usd_mxn);
   const tcGasto = Number.isFinite(tc) && tc > 0 ? tc : null;
+  const venta = mov.venta_unitaria != null ? Number(mov.venta_unitaria) : null;
+  if (venta != null && venta > 0) {
+    return {
+      monto: round(cant * venta, 2),
+      moneda: mov.venta_moneda === 'USD' ? 'USD' : 'MXN',
+      tcGasto,
+      esVenta: true,
+    };
+  }
+  const enMxn = mov.moneda === 'MXN' && mov.costo_unitario_mxn != null;
   const monto = round(
     cant * Number(enMxn ? mov.costo_unitario_mxn : mov.costo_unitario_usd),
     2,
   );
-  return { monto, moneda: enMxn ? 'MXN' : 'USD', tcGasto };
+  return { monto, moneda: enMxn ? 'MXN' : 'USD', tcGasto, esVenta: false };
 }

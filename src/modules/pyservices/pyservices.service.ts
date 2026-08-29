@@ -635,6 +635,9 @@ export interface BalanceAvionTotalesPayload {
 
 export interface BalanceAvionGastoFilaPayload {
   fecha: string | null;
+  /** Categoría del gasto (etiqueta amable es-MX) — columna CATEGORÍA de las
+   *  hojas de gastos (29-ago-2026). null = API sin el dato. */
+  categoria?: string | null;
   detalle: string;
   /** null = moneda extranjera sin TC (no convertible; va a pendientes). */
   monto_mxn: number | null;
@@ -649,6 +652,14 @@ export interface BalanceAvionGastoFilaPayload {
    * pyservices agrupa la hoja en SECCIONES por matrícula con subtotal.
    */
   matricula?: string | null;
+  /** Movimiento de cardex ligado (solo hoja "refacciones", 29-ago): el
+   *  GENERAL lo usa para el costo FIFO; pyservices lo ignora. */
+  inventario_movimiento_id?: string | null;
+  /** Solo hoja "refacciones" del GENERAL (29-ago): costo FIFO de la salida
+   *  y VENTA al avión (= monto del gasto). pyservices pinta GANANCIA =
+   *  venta − costo (0 mientras la salida se cargue a costo). */
+  costo_mxn?: number | null;
+  venta_mxn?: number | null;
 }
 
 export interface BalanceAvionHojaGastosPayload {
@@ -678,6 +689,10 @@ export interface BalanceAvionBalancePayload {
   /** "Gasto de combustible" del mes (hoja combustible al TC promedio). */
   combustible_usd?: number | null;
   gastos_indirectos_usd: number | null;
+  /** Hoja "refacciones" (29-ago): salidas de inventario, ANTES dentro de
+   *  gastos indirectos — indirectos + refacciones == lo de antes (la
+   *  utilidad no cambia). Opcional por skew de deploy. */
+  refacciones_usd?: number | null;
   otros_usd: number | null;
   permisos_usd: number | null;
   utilidad_despues_usd: number | null;
@@ -722,6 +737,13 @@ export interface BalanceGeneralPayload {
   resumen_totales: BalanceGeneralResumenFilaPayload;
   consolidado: BalanceAvionPayload;
   aviones: BalanceAvionPayload[];
+  /**
+   * Hoja "gastos VuelaTour" (29-ago-2026): gastos de EMPRESA — sin vuelo ni
+   * avión (≠PERSONAL_DUENO, ≠GAS) sin reparto + remanentes de reparto
+   * manual. Egresos de VuelaTour: FUERA de toda cascada por avión; antes
+   * salían como filas sueltas de "Otros movimientos". Opcional por skew.
+   */
+  gastos_empresa?: BalanceAvionHojaGastosPayload;
 }
 
 /** Fila de la pestaña "Otros movimientos" (28-ago, hoja manual del cliente):
@@ -775,6 +797,10 @@ export interface BalanceAvionPayload {
   vuelos: BalanceAvionVueloPayload[];
   totales: BalanceAvionTotalesPayload;
   gastos_indirectos: BalanceAvionHojaGastosPayload;
+  /** Hoja "refacciones" (29-ago-2026): salidas de inventario (gasto
+   *  REFACCION medio BODEGA ligado al cardex), separadas de "gastos
+   *  indirectos". Opcional por skew de deploy. */
+  refacciones?: BalanceAvionHojaGastosPayload;
   otros_gastos: BalanceAvionHojaGastosPayload;
   permisos: BalanceAvionHojaGastosPayload;
   /** Hoja mensual de combustible (26-ago-2026). Opcional por skew de deploy. */
@@ -952,7 +978,7 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/reporte-vuelo-xlsx', payload);
   }
 
-  /** Balance mensual por avión en Excel (libro de 6 hojas). */
+  /** Balance mensual por avión en Excel (libro de 9 hojas). */
   async generateBalanceAvionXlsx(
     payload: BalanceAvionPayload,
   ): Promise<Buffer> {
@@ -1142,4 +1168,59 @@ export class PyservicesService {
       clearTimeout(timer);
     }
   }
+
+  /**
+   * Cardex de un ítem de inventario en formato LIBRO (réplica del cuaderno
+   * del cliente): bloque ENTRADAS | bloque SALIDAS con venta y ganancia.
+   * El payload llega YA calculado del API (pyservices solo renderiza).
+   */
+  async generateCardexLibroXlsx(payload: CardexLibroPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/cardex-libro-xlsx', payload);
+  }
+}
+
+// ===== Cardex formato libro (venta de refacciones, 29-ago-2026) =====
+
+/** Fila del bloque ENTRADAS del cardex libro (montos en MXN). */
+export interface CardexLibroEntradaPayload {
+  fecha: string;
+  cantidad: number;
+  /** Ítem + referencia/proveedor (DEVOLUCION/AJUSTE llegan con su prefijo). */
+  descripcion: string;
+  valor_compra_unitario: number | null;
+  valor_compra_total: number | null;
+  /** Stock corriente DESPUÉS de este movimiento. */
+  stock_despues: number;
+}
+
+/** Fila del bloque SALIDAS del cardex libro (montos en MXN). */
+export interface CardexLibroSalidaPayload {
+  fecha: string;
+  cantidad: number;
+  descripcion: string;
+  /** Precio al que se vendió (o el costo FIFO si la salida fue "a costo"). */
+  venta_unitaria: number | null;
+  venta_total: number | null;
+  /** Stock corriente DESPUÉS de la salida. */
+  remanente: number;
+  /** Venta total MXN − costo FIFO MXN de las capas consumidas. */
+  ganancia: number | null;
+  /** Matrícula del avión, 'FLOTA' en salidas para toda la flota. */
+  vendido_a: string;
+}
+
+export interface CardexLibroPayload {
+  titulo: string;
+  item_nombre: string;
+  numero_parte?: string | null;
+  unidad?: string | null;
+  /** Fecha de generación (día Cancún, YYYY-MM-DD). */
+  generado?: string | null;
+  /** Moneda de TODOS los montos del libro (hoy siempre 'MXN'). */
+  moneda: string;
+  entradas: CardexLibroEntradaPayload[];
+  salidas: CardexLibroSalidaPayload[];
+  total_compra: number;
+  total_venta: number;
+  total_ganancia: number;
 }
