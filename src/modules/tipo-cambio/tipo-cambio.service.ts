@@ -29,6 +29,20 @@ const OPEN_ER_API_URL = 'https://open.er-api.com/v6/latest/USD';
 const FRANKFURTER_URL = 'https://api.frankfurter.dev/v1';
 const TIMEOUT_MS = 6000;
 
+/** Etiqueta legible de la fuente del TC oficial (celdas/notas de reportes). */
+export function fuenteTcLegible(fuente: string | null | undefined): string {
+  switch (fuente) {
+    case FUENTE_DIARIA:
+      return 'open.er-api';
+    case FUENTE_HISTORICA:
+      return 'BCE (frankfurter)';
+    case 'BANXICO_FIX':
+      return 'Banxico FIX (histórico)';
+    default:
+      return fuente ?? 'TC oficial';
+  }
+}
+
 export interface TipoCambioDetalle {
   /** TC USD→MXN vigente para la fecha pedida. */
   tc: number;

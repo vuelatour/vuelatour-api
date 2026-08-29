@@ -73,6 +73,23 @@ export interface RepartoAvionPayload {
   otros_ingresos_vuelatour_desglose?: RepartoOtrosIngresosDesglosePayload;
   /** Detalle de vuelos del avión (vacío = el PDF no lo imprime). */
   vuelos?: RepartoVueloLineaPayload[];
+  /**
+   * ADITIVOS (29-ago-2026): gastos MXN sin tc_gasto convertidos con el TC
+   * oficial de referencia del día del gasto, y vuelos cuyos cobros MXN sin
+   * TC se convirtieron con el TC oficial del día de la cotización. Ya están
+   * DENTRO de los montos; solo alimentan una nota del PDF/XLSX.
+   */
+  gastos_tc_oficial?: { count: number; monto_mxn: number };
+  cobros_tc_oficial_count?: number;
+}
+
+/** Resumen global del TC oficial de respaldo usado en el periodo (nota). */
+export interface RepartoTcOficialPayload {
+  vuelos: number;
+  gastos: { count: number; monto_mxn: number };
+  /** Fuentes legibles ("open.er-api", "BCE (frankfurter)"). */
+  fuentes: string[];
+  leyenda: string;
 }
 
 export interface RepartoPdfPayload {
@@ -84,6 +101,8 @@ export interface RepartoPdfPayload {
   otros_ingresos_vuelatour_total_usd?: number;
   /** Composición del Σ anterior (Σ de los desgloses por avión). */
   otros_ingresos_vuelatour_desglose?: RepartoOtrosIngresosDesglosePayload;
+  /** Nota global del TC oficial de respaldo (29-ago); opcional. */
+  tc_oficial?: RepartoTcOficialPayload;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';

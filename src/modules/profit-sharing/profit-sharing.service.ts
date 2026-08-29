@@ -1,6 +1,11 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
+import {
+  fuenteTcLegible,
+  TipoCambioService,
+  type TipoCambioDetalle,
+} from '../tipo-cambio/tipo-cambio.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
@@ -65,6 +70,14 @@ const TUAS_CLAVE_DETALLE = 'TUAS (egreso VuelaTour — Otros movimientos)';
  * lista blanca de 4 categorías y el reparto divergía del balance.
  */
 const TUA_EMBEBIDO_CLAVE_DETALLE = 'TUA embebido (excluido)';
+/**
+ * Leyenda del bloque informativo `tc_oficial` (regla del cliente, 29-ago-2026):
+ * una cotización sin TC (no se sabía cuándo volaría) y un gasto MXN sin TC
+ * capturado se convierten con el TC oficial de referencia del día — la MISMA
+ * cadena que el Balance por avión/general (tc capturado ?? oficial del día).
+ */
+const TC_OFICIAL_LEYENDA =
+  'Cobros y gastos en MXN sin tipo de cambio capturado se convierten con el TC oficial de referencia (open.er-api / BCE) del día de la cotización o del gasto; capturar el TC en el vuelo o en el gasto lo sustituye.';
 /** Leyenda del bloque informativo `otros_ingresos_vuelatour` (regla 6). */
 const OTROS_INGRESOS_LEYENDA =
   'Ingreso de VuelaTour (TUAS, extras, pernocta y comisión del vendedor cobrados con su IVA): vive en Otros movimientos del Balance general; no se reparte.';
@@ -136,6 +149,12 @@ interface VueloRow {
   // alteran ningún cálculo del reparto.
   folio: number | null;
   fecha_vuelo: string | null;
+  /**
+   * Día de la COTIZACIÓN: sin tc_usd_mxn, los cobros MXN sin TC se convierten
+   * con el TC oficial de ese día (fecha_solicitud ?? fecha_vuelo, hora
+   * Cancún) — misma cadena que el balance (`tcOficialPorVuelos`).
+   */
+  fecha_solicitud: string | null;
   origen_iata: string | null;
   destino_iata: string | null;
   es_externo: boolean;
@@ -153,6 +172,9 @@ interface GastoCategoriaAcc {
   usd: number;
   sin_tc_count: number;
   sin_tc_mxn: number;
+  /** De `count`: los MXN convertidos con el TC oficial del día del gasto. */
+  tc_oficial_count: number;
+  tc_oficial_mxn: number;
 }
 interface CobroRow {
   vuelo_id: string;
@@ -189,6 +211,8 @@ interface GastoRow {
   monto: string | number;
   moneda: string;
   tc_gasto: string | null;
+  /** Día del gasto (date): TC oficial de respaldo cuando es MXN sin tc_gasto. */
+  fecha_gasto?: string | null;
   /** Propina (ya incluida en `monto`): fuera de la base del desglose IA. */
   propina?: string | number | null;
   /** Renglones leídos por IA de la factura (para separar el TUA embebido). */
@@ -216,6 +240,7 @@ export class ProfitSharingService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    private readonly tipoCambio: TipoCambioService,
   ) {}
 
   /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
@@ -240,6 +265,9 @@ export class ProfitSharingService {
       // de pyservices (app/schemas/reparto.py).
       otros_ingresos_vuelatour_desglose:
         result.otros_ingresos_vuelatour.desglose,
+      // ADITIVO (29-ago-2026): cuántos vuelos/gastos del periodo se
+      // convirtieron con el TC oficial de referencia (nota en PDF/XLSX).
+      tc_oficial: result.tc_oficial,
       aviones: result.aviones.map((a) => ({
         matricula: a.aeronave.matricula,
         modelo: a.aeronave.modelo,
@@ -264,6 +292,10 @@ export class ProfitSharingService {
         // Advertencias de integridad: montos que NO pudieron entrar al balance.
         gastos_sin_tc_mxn: a.gastos.gastos_sin_tc_mxn,
         cobros_sin_tc_mxn: a.ingresos.cobros_sin_tc_mxn,
+        // ADITIVOS (29-ago): convertidos con el TC oficial del día — ya
+        // DENTRO de los montos de arriba; solo alimentan una nota.
+        gastos_tc_oficial: a.gastos.gastos_tc_oficial,
+        cobros_tc_oficial_count: a.ingresos.cobros_tc_oficial_count,
         reserva_incompleta: a.reserva_overhaul_incompleta,
         // El PDF/XLSX a socios es el reporte VITAL: si las vigencias de
         // socios traslapan mal (total ≠ 100%), la advertencia debe viajar
@@ -329,6 +361,13 @@ export class ProfitSharingService {
       return {
         periodo: { desde: q.desde, hasta: q.hasta },
         gastos_sin_tc: { count: 0, monto_mxn: 0 },
+        gastos_tc_oficial: { count: 0, monto_mxn: 0 },
+        tc_oficial: {
+          vuelos: 0,
+          gastos: { count: 0, monto_mxn: 0 },
+          fuentes: [] as string[],
+          leyenda: TC_OFICIAL_LEYENDA,
+        },
         externos: {
           vuelos: 0,
           cobrado_usd: 0,
@@ -337,6 +376,7 @@ export class ProfitSharingService {
           utilidad_usd: 0,
           sin_costo_count: 0,
           cobros_sin_tc_mxn: 0,
+          cobros_tc_oficial_count: 0,
         },
         otros_ingresos_vuelatour: {
           vuelos: 0,
@@ -376,6 +416,19 @@ export class ProfitSharingService {
       list.push(c);
       cobrosPorVuelo.set(c.vuelo_id, list);
     }
+
+    // TC OFICIAL DE RESPALDO (regla del cliente, 29-ago-2026) — UNA sola
+    // resolución por día para todo el cómputo: (a) vuelos sin tc_usd_mxn con
+    // cobros MXN sin TC → TC oficial del día de la COTIZACIÓN; (b) gastos
+    // MXN sin tc_gasto → TC oficial del día del GASTO. Misma cadena que el
+    // Balance por avión (tc capturado ?? oficial del día). Sin dato (sin
+    // red) el monto sigue en sin_tc_* como siempre — jamás se inventa.
+    const tcOficial = await this.resolverTcOficial(
+      vuelos.filter((v) =>
+        cobrosNecesitanTc(cobrosPorVuelo.get(v.id) ?? [], v.tc_usd_mxn),
+      ),
+      gastos,
+    );
 
     // Horas voladas del periodo por avión (por tramo: el avión de la escala
     // puede diferir del principal del vuelo). Base de la reserva de overhaul.
@@ -466,14 +519,20 @@ export class ProfitSharingService {
     let fijoPoolUsd = 0;
     let sinTcCount = 0;
     let sinTcMxn = 0;
+    let fijosTcOficialCount = 0;
+    let fijosTcOficialMxn = 0;
     for (const g of gastosAtribuidos) {
       if (g.categoria !== FIJO || g.es_reparto_parcial) continue;
-      const usd = this.toUsd(g);
-      if (usd === null) {
+      const conv = this.toUsd(g, tcOficial.gasto);
+      if (conv === null) {
         sinTcCount += 1;
         sinTcMxn += Number(g.monto);
       } else {
-        fijoPoolUsd += usd;
+        fijoPoolUsd += conv.usd;
+        if (conv.oficial) {
+          fijosTcOficialCount += 1;
+          fijosTcOficialMxn += Number(g.monto);
+        }
       }
     }
     const otrosPorAvion = activos > 0 ? fijoPoolUsd / activos : 0;
@@ -505,6 +564,8 @@ export class ProfitSharingService {
         nombres,
         otrosPorAvion,
         periodo: q,
+        tcOficialVuelo: tcOficial.vuelo,
+        tcOficialGasto: tcOficial.gasto,
       }),
     );
 
@@ -518,12 +579,17 @@ export class ProfitSharingService {
     let extComisionVendedor = 0;
     let extSinCosto = 0;
     let extSinTcMxn = 0;
+    let extTcOficialCount = 0;
     const externosVuelos = vuelos.filter((v) => v.es_externo === true);
     for (const v of externosVuelos) {
+      // Misma cadena de TC que los aviones de flota y el balance:
+      // capturado en la cotización ?? oficial del día de la cotización.
+      const tcOficialExt = tcOficial.vuelo.get(v.id);
       const conv = cobrosEnUsd(
         cobrosPorVuelo.get(v.id) ?? [],
-        v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+        pos(v.tc_usd_mxn) ?? tcOficialExt?.tc ?? null,
       );
+      if (tcOficialExt != null) extTcOficialCount += 1;
       extCobrado += conv.total_usd;
       extSinTcMxn += conv.sin_tc_mxn;
       // Externo CANCELADO (28-ago): lo retenido al cliente sí es ingreso; el
@@ -584,9 +650,47 @@ export class ProfitSharingService {
       },
     );
 
+    // Agregado global INFORMATIVO del TC oficial (29-ago): Σ por avión
+    // (cobros en el avión que reporta, gastos por avión) + pool de FIJOS +
+    // externos. Los montos ya están DENTRO de las cifras del reparto; este
+    // bloque solo dice cuántos se convirtieron así y con qué fuente.
+    const tcOficialVuelos =
+      aviones.reduce((acc, a) => acc + a.ingresos.cobros_tc_oficial_count, 0) +
+      extTcOficialCount;
+    const tcOficialGastos = aviones.reduce(
+      (acc, a) => ({
+        count: acc.count + a.gastos.gastos_tc_oficial.count,
+        monto_mxn: acc.monto_mxn + a.gastos.gastos_tc_oficial.monto_mxn,
+      }),
+      { count: fijosTcOficialCount, monto_mxn: fijosTcOficialMxn },
+    );
+    const tcOficialFuentes = [
+      ...new Set(
+        [...tcOficial.vuelo.values(), ...tcOficial.gasto.values()].map((d) =>
+          fuenteTcLegible(d.fuente),
+        ),
+      ),
+    ].sort();
+
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
       gastos_sin_tc: { count: sinTcCount, monto_mxn: round2(sinTcMxn) },
+      // ADITIVO (29-ago): FIJOS del pool convertidos con el TC oficial del
+      // día del gasto (ya dentro de otros_prorrateados; NO están en
+      // gastos_sin_tc).
+      gastos_tc_oficial: {
+        count: fijosTcOficialCount,
+        monto_mxn: round2(fijosTcOficialMxn),
+      },
+      tc_oficial: {
+        vuelos: tcOficialVuelos,
+        gastos: {
+          count: tcOficialGastos.count,
+          monto_mxn: round2(tcOficialGastos.monto_mxn),
+        },
+        fuentes: tcOficialFuentes,
+        leyenda: TC_OFICIAL_LEYENDA,
+      },
       externos: {
         vuelos: externosVuelos.length,
         cobrado_usd: extCobradoR,
@@ -597,6 +701,9 @@ export class ProfitSharingService {
         utilidad_usd: round2(extCobradoR - extCostoR - extComisionVendedorR),
         sin_costo_count: extSinCosto,
         cobros_sin_tc_mxn: round2(extSinTcMxn),
+        // ADITIVO (29-ago): externos cuyos cobros MXN sin TC se convirtieron
+        // con el TC oficial del día de la cotización.
+        cobros_tc_oficial_count: extTcOficialCount,
       },
       otros_ingresos_vuelatour: {
         vuelos: otrosIngresosVuelatour.vuelos,
@@ -643,6 +750,13 @@ export class ProfitSharingService {
       nombres: Map<string, string>;
       otrosPorAvion: number;
       periodo: ProfitSharingQuery;
+      /**
+       * TC oficial de respaldo (29-ago): vuelo.id → detalle (solo vuelos sin
+       * tc_usd_mxn con cobros MXN sin TC) y gasto.id → detalle (solo MXN sin
+       * tc_gasto). Vacíos = todo capturado o sin red.
+       */
+      tcOficialVuelo: Map<string, TipoCambioDetalle>;
+      tcOficialGasto: Map<string, TipoCambioDetalle>;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -690,6 +804,10 @@ export class ProfitSharingService {
     let vuelosCobrados = 0;
     let vuelosPendientes = 0;
     let cobrosSinTcMxn = 0;
+    // Vuelos cuyos cobros MXN sin TC se convirtieron con el TC oficial del
+    // día de la cotización (29-ago): informativo, mismo criterio de conteo
+    // que cobros_sin_tc (una vez, en el avión que reporta).
+    let cobrosTcOficialCount = 0;
     // REGLA A (cliente, 28-ago-2026 tarde): la comisión del vendedor
     // (Itzy/Pablo/broker) es INGRESO DE VUELATOUR, como un extra — el
     // cliente la paga sumada al precio (regla 23-jul) y VuelaTour se la paga
@@ -756,6 +874,12 @@ export class ProfitSharingService {
       /** Ruta de los tramos VENDIDOS de este avión ("CUN→MID"), solo multi. */
       tramos_ruta_avion?: string;
       participacion_fuente?: ParticipacionAeronave['fuente'];
+      /**
+       * ADITIVO (29-ago-2026): presente solo cuando los cobros MXN sin TC de
+       * este vuelo se convirtieron con el TC oficial de referencia del día
+       * de la cotización (tc, día real del dato y fuente legible).
+       */
+      tc_oficial?: { tc: number; fecha_dato: string; fuente: string };
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -765,9 +889,13 @@ export class ProfitSharingService {
       if (!part || factor <= 0) continue;
       const reportaVT = avionQueReporta(part) === a.id;
       const p = particionIngresoVuelo(v);
+      // TC de respaldo para cobros MXN sin TC propio: el de la cotización;
+      // si no lo hay, el oficial del día de la cotización (29-ago; el mapa
+      // solo trae vuelos que lo necesitan). Misma cadena que el balance.
+      const tcOficialVuelo = ctx.tcOficialVuelo.get(v.id);
       const conv = cobrosEnUsd(
         ctx.cobrosPorVuelo.get(v.id) ?? [],
-        v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+        pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
       );
       // VUELO CANCELADO (regla del cliente, 28-ago-2026): lo cobrado y NO
       // reembolsado (cargo por cancelación / anticipo retenido) es ingreso
@@ -846,6 +974,7 @@ export class ProfitSharingService {
         // MXN sin TC no se puede repartir (no convirtió): el aviso viaja
         // una sola vez, con el avión que reporta el vuelo.
         cobrosSinTcMxn += conv.sin_tc_mxn;
+        if (tcOficialVuelo != null) cobrosTcOficialCount += 1;
       }
       // CONTEOS (verificación 28-ago): SOLO en el avión que reporta el
       // vuelo — el KPI de flota del panel suma vuelos_cobrados/pendientes de
@@ -927,6 +1056,13 @@ export class ProfitSharingService {
           : undefined,
         tramos_ruta_avion: tramosRutaAvion || undefined,
         participacion_fuente: part.fuente,
+        tc_oficial: tcOficialVuelo
+          ? {
+              tc: tcOficialVuelo.tc,
+              fecha_dato: tcOficialVuelo.fecha_dato,
+              fuente: fuenteTcLegible(tcOficialVuelo.fuente),
+            }
+          : undefined,
       });
     }
     detalleVuelos.sort(
@@ -1002,25 +1138,35 @@ export class ProfitSharingService {
         usd: 0,
         sin_tc_count: 0,
         sin_tc_mxn: 0,
+        tc_oficial_count: 0,
+        tc_oficial_mxn: 0,
       };
       // Monto EFECTIVO del avión = monto − TUA embebido (en la moneda del
-      // gasto), convertido con la MISMA regla/TC de siempre. Sin TC el gasto
-      // entero sigue en sin_tc_* (nada se convierte a medias).
+      // gasto), convertido con la MISMA regla/TC de siempre (tc_gasto ??
+      // oficial del día del gasto). Sin TC el gasto entero sigue en sin_tc_*
+      // (nada se convierte a medias).
       const tuaEmbebido = tuaEmbebidoDeGasto(g);
-      const usd = this.toUsd(
+      const conv = this.toUsd(
         tuaEmbebido > 0
           ? { ...g, monto: round2(Number(g.monto) - tuaEmbebido) }
           : g,
+        ctx.tcOficialGasto,
       );
-      if (usd === null) {
+      if (conv === null) {
         acc.sin_tc_count += 1;
         acc.sin_tc_mxn += Number(g.monto);
       } else {
         acc.count += 1;
-        acc.usd += usd;
+        acc.usd += conv.usd;
+        if (conv.oficial) {
+          acc.tc_oficial_count += 1;
+          acc.tc_oficial_mxn += Number(g.monto);
+        }
         if (tuaEmbebido > 0) {
           tuaEmbebidoCount += 1;
-          tuaEmbebidoUsd += this.toUsd({ ...g, monto: tuaEmbebido }) ?? 0;
+          tuaEmbebidoUsd +=
+            this.toUsd({ ...g, monto: tuaEmbebido }, ctx.tcOficialGasto)?.usd ??
+            0;
         }
       }
       porCategoria.set(clave, acc);
@@ -1034,6 +1180,8 @@ export class ProfitSharingService {
         usd: tuaEmbebidoUsd,
         sin_tc_count: 0,
         sin_tc_mxn: 0,
+        tc_oficial_count: 0,
+        tc_oficial_mxn: 0,
       });
     }
     let directos = 0;
@@ -1042,6 +1190,8 @@ export class ProfitSharingService {
     let fijoManual = 0;
     let sinTc = 0;
     let sinTcMxn = 0;
+    let tcOficialCount = 0;
+    let tcOficialMxn = 0;
     for (const acc of porCategoria.values()) {
       if (acc.grupo === 'DIRECTO') directos += acc.usd;
       else if (acc.grupo === 'INDIRECTO') indirectos += acc.usd;
@@ -1050,6 +1200,8 @@ export class ProfitSharingService {
       // EXCLUIDO no suma al balance (comportamiento original del else).
       sinTc += acc.sin_tc_count;
       sinTcMxn += acc.sin_tc_mxn;
+      tcOficialCount += acc.tc_oficial_count;
+      tcOficialMxn += acc.tc_oficial_mxn;
     }
     const detalleGastos = [...porCategoria.entries()]
       .map(([categoria, acc]) => ({
@@ -1059,6 +1211,9 @@ export class ProfitSharingService {
         usd: round2(acc.usd),
         sin_tc_count: acc.sin_tc_count,
         sin_tc_mxn: round2(acc.sin_tc_mxn),
+        // ADITIVOS (29-ago): de `count`, los convertidos con TC oficial.
+        tc_oficial_count: acc.tc_oficial_count,
+        tc_oficial_mxn: round2(acc.tc_oficial_mxn),
       }))
       .sort((x, y) => y.usd - x.usd);
 
@@ -1160,6 +1315,11 @@ export class ProfitSharingService {
         vuelos_cobrados: vuelosCobrados,
         vuelos_pendientes: vuelosPendientes,
         cobros_sin_tc_mxn: round2(cobrosSinTcMxn),
+        // ADITIVO (29-ago): vuelos (contados en el avión que reporta) cuyos
+        // cobros MXN sin TC entraron con el TC oficial del día de la
+        // cotización — ya DENTRO de cobrado_usd; cobros_sin_tc_mxn solo
+        // conserva lo que ni así convirtió.
+        cobros_tc_oficial_count: cobrosTcOficialCount,
       },
       horas_voladas_hr: horasPeriodo,
       gastos: {
@@ -1169,6 +1329,13 @@ export class ProfitSharingService {
         otros_prorrateados_usd: otrosR,
         gastos_sin_tc_count: sinTc,
         gastos_sin_tc_mxn: round2(sinTcMxn),
+        // ADITIVO (29-ago): gastos MXN sin tc_gasto convertidos con el TC
+        // oficial del día del gasto (ya dentro de los montos de arriba; NO
+        // están en gastos_sin_tc_*). Σ detalle.gastos_por_categoria.
+        gastos_tc_oficial: {
+          count: tcOficialCount,
+          monto_mxn: round2(tcOficialMxn),
+        },
       },
       reserva_overhaul_usd: reservaR,
       reserva_overhaul_incompleta: reservaIncompleta,
@@ -1204,13 +1371,132 @@ export class ProfitSharingService {
     };
   }
 
-  /** Convierte un gasto a USD. null = no se pudo (MXN sin tc_gasto). */
-  private toUsd(g: GastoRow): number | null {
-    if (g.moneda === 'USD') return Number(g.monto);
-    if (g.tc_gasto && Number(g.tc_gasto) > 0) {
-      return Number(g.monto) / Number(g.tc_gasto);
+  /**
+   * Convierte un gasto a USD. null = no se pudo (MXN sin tc_gasto NI TC
+   * oficial del día del gasto). `oficial` = true cuando el TC vino del
+   * respaldo oficial (regla del cliente, 29-ago-2026) — solo para contarlo
+   * en gastos_tc_oficial; el monto entra igual que uno con TC capturado.
+   */
+  private toUsd(
+    g: GastoRow,
+    tcOficialGasto: Map<string, TipoCambioDetalle>,
+  ): { usd: number; oficial: boolean } | null {
+    if (g.moneda === 'USD') return { usd: Number(g.monto), oficial: false };
+    const propio = pos(g.tc_gasto);
+    if (propio != null) {
+      return { usd: Number(g.monto) / propio, oficial: false };
+    }
+    // El mapa solo trae gastos MXN sin tc_gasto (resolverTcOficial); un
+    // parcial del reparto manual comparte el id (y la fecha) del padre.
+    const oficial = tcOficialGasto.get(g.id)?.tc;
+    if (oficial != null && oficial > 0) {
+      return { usd: Number(g.monto) / oficial, oficial: true };
     }
     return null;
+  }
+
+  /**
+   * TC OFICIAL de respaldo (regla del cliente, 29-ago-2026): por VUELO (sin
+   * tc_usd_mxn → día Cancún de la cotización: fecha_solicitud, si no
+   * fecha_vuelo) y por GASTO (MXN sin tc_gasto → día del gasto, columna
+   * date). Un solo lote de días para ambos: cada día se consulta UNA vez
+   * (`tcOficialPorDias`). Devuelve el DETALLE (tc, fuente, día real del
+   * dato) para que el reparto diga de dónde salió cada conversión.
+   */
+  private async resolverTcOficial(
+    vuelos: ReadonlyArray<
+      Pick<VueloRow, 'id' | 'tc_usd_mxn' | 'fecha_solicitud' | 'fecha_vuelo'>
+    >,
+    gastos: ReadonlyArray<
+      Pick<GastoRow, 'id' | 'moneda' | 'tc_gasto' | 'fecha_gasto'>
+    >,
+  ): Promise<{
+    vuelo: Map<string, TipoCambioDetalle>;
+    gasto: Map<string, TipoCambioDetalle>;
+  }> {
+    const diaVuelo = new Map<string, string>();
+    for (const v of vuelos) {
+      if (pos(v.tc_usd_mxn) != null) continue;
+      const dia = diaCancun(v.fecha_solicitud ?? v.fecha_vuelo);
+      if (dia) diaVuelo.set(v.id, dia);
+    }
+    const diaGasto = new Map<string, string>();
+    for (const g of gastos) {
+      if (g.moneda !== 'MXN' || pos(g.tc_gasto) != null) continue;
+      const dia = diaDeFecha(g.fecha_gasto ?? null);
+      if (dia) diaGasto.set(g.id, dia);
+    }
+    const porDia = await this.tcOficialPorDias([
+      ...diaVuelo.values(),
+      ...diaGasto.values(),
+    ]);
+    const vuelo = new Map<string, TipoCambioDetalle>();
+    for (const [id, dia] of diaVuelo) {
+      const det = porDia.get(dia);
+      if (det) vuelo.set(id, det);
+    }
+    const gasto = new Map<string, TipoCambioDetalle>();
+    for (const [id, dia] of diaGasto) {
+      const det = porDia.get(dia);
+      if (det) gasto.set(id, det);
+    }
+    return { vuelo, gasto };
+  }
+
+  /**
+   * TC oficial de referencia por DÍA (open.er-api diario / BCE-frankfurter
+   * histórico, vía `TipoCambioService.oficialDetallePara`) — mismo patrón
+   * que `tcOficialPorVuelos` del balance: todas las promesas se crean
+   * primero (un día = una consulta) y se esperan con concurrencia acotada
+   * (~5) para no saturar a los proveedores. `oficialDetallePara` nunca
+   * lanza; el catch es defensa: un día sin dato → sin respaldo (el monto
+   * sigue en sin_tc_*, jamás se inventa un número ni se rompe el reparto).
+   */
+  private async tcOficialPorDias(
+    dias: Iterable<string>,
+  ): Promise<Map<string, TipoCambioDetalle>> {
+    const MAX_CONCURRENTES = 5;
+    let activos = 0;
+    const cola: Array<() => void> = [];
+    const adquirir = (): Promise<void> =>
+      new Promise<void>((res) => {
+        if (activos < MAX_CONCURRENTES) {
+          activos += 1;
+          res();
+        } else {
+          cola.push(() => {
+            activos += 1;
+            res();
+          });
+        }
+      });
+    const liberar = (): void => {
+      activos -= 1;
+      const siguiente = cola.shift();
+      if (siguiente) siguiente();
+    };
+    const promesas = new Map<string, Promise<TipoCambioDetalle | null>>();
+    for (const dia of new Set(dias)) {
+      promesas.set(
+        dia,
+        (async (): Promise<TipoCambioDetalle | null> => {
+          await adquirir();
+          try {
+            return await this.tipoCambio.oficialDetallePara(dia);
+          } catch {
+            return null;
+          } finally {
+            liberar();
+          }
+        })(),
+      );
+    }
+    const out = new Map<string, TipoCambioDetalle>();
+    for (const [dia, p] of promesas) {
+      const det = await p;
+      if (det != null && det.tc > 0) out.set(dia, det);
+    }
+    return out;
   }
 
   /**
@@ -1254,8 +1540,10 @@ export class ProfitSharingService {
       // partición venta avión / VuelaTour — aviso extras_sin_desglose).
       sb
         .from('vuelo')
+        // fecha_vuelo/fecha_solicitud: día del TC oficial de respaldo
+        // (29-ago) para cobros MXN sin TC de cotizaciones sin tc_usd_mxn.
         .select(
-          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -1265,7 +1553,7 @@ export class ProfitSharingService {
       // enumeran para que la oficina confirme que ese dinero es de verdad.
       sb
         .from('vuelo')
-        .select('id, folio, tc_usd_mxn')
+        .select('id, folio, tc_usd_mxn, fecha_vuelo, fecha_solicitud')
         .eq('estado', 'CANCELADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
@@ -1276,7 +1564,7 @@ export class ProfitSharingService {
         .select(
           // escala embebida: avión RESOLUBLE del gasto (`avionDelGasto`) para
           // el bloqueante de combustible sin avión.
-          'id, vuelo_id, aeronave_id, escala_id, categoria, monto, moneda, tc_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula, escala:escala_id(aeronave_id), vuelo:vuelo_id(es_externo, aeronave_id)',
+          'id, vuelo_id, aeronave_id, escala_id, categoria, monto, moneda, tc_gasto, fecha_gasto, estatus_facturacion, medio_pago, conciliado, duplicado_sospechado, matricula_ia:valor_ia_extraido->>matricula, escala:escala_id(aeronave_id), vuelo:vuelo_id(es_externo, aeronave_id)',
         )
         .gte('fecha_gasto', q.desde)
         .lte('fecha_gasto', q.hasta),
@@ -1484,6 +1772,56 @@ export class ProfitSharingService {
     const cancelados = (canceladosRes.data ?? []) as Array<
       Record<string, unknown>
     >;
+    const completados = (completadosRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
+    // COBROS de cancelados + completados (una consulta) y TC OFICIAL de
+    // respaldo (regla del cliente, 29-ago-2026): un vuelo sin tc_usd_mxn con
+    // cobros MXN sin TC se convierte con el TC oficial del día de la
+    // cotización — la MISMA cadena que el reparto (`compute`) y el balance.
+    // Antes esos cobros no convertían y el vuelo salía como "saldo por
+    // cobrar" en falso. Lo que ni así convierte se lista en `cobros_sin_tc`.
+    const cobrosPre = await this.fetchCobros(
+      [...cancelados, ...completados].map((v) => v.id as string),
+    );
+    const cobrosPorVueloPre = new Map<string, CobroRow[]>();
+    for (const c of cobrosPre) {
+      const list = cobrosPorVueloPre.get(c.vuelo_id) ?? [];
+      list.push(c);
+      cobrosPorVueloPre.set(c.vuelo_id, list);
+    }
+    const tcOficialPre = await this.resolverTcOficial(
+      [...cancelados, ...completados]
+        .map((v) => ({
+          id: v.id as string,
+          tc_usd_mxn: (v.tc_usd_mxn as string | null) ?? null,
+          fecha_solicitud: (v.fecha_solicitud as string | null) ?? null,
+          fecha_vuelo: (v.fecha_vuelo as string | null) ?? null,
+        }))
+        .filter((v) =>
+          cobrosNecesitanTc(cobrosPorVueloPre.get(v.id) ?? [], v.tc_usd_mxn),
+        ),
+      [],
+    );
+    /** cobrosEnUsd con la cadena tc de cotización ?? TC oficial del día. */
+    const convCobros = (v: Record<string, unknown>) =>
+      cobrosEnUsd(
+        cobrosPorVueloPre.get(v.id as string) ?? [],
+        pos(v.tc_usd_mxn) ?? tcOficialPre.vuelo.get(v.id as string)?.tc ?? null,
+      );
+    const cobrosTcOficialVuelos: Array<{ id: string; folio: number }> = [];
+    const cobrosSinTcVuelos: Array<{ id: string; folio: number }> = [];
+    let cobrosSinTcMxn = 0;
+    for (const v of [...cancelados, ...completados]) {
+      const conv = convCobros(v);
+      const ref = { id: v.id as string, folio: v.folio as number };
+      if (tcOficialPre.vuelo.has(ref.id)) cobrosTcOficialVuelos.push(ref);
+      if (conv.sin_tc_mxn > 0) {
+        cobrosSinTcVuelos.push(ref);
+        cobrosSinTcMxn += conv.sin_tc_mxn;
+      }
+    }
+
     const cobrosEnCancelados: Array<{
       id: string;
       folio: number;
@@ -1494,30 +1832,22 @@ export class ProfitSharingService {
     const vuelosConGastoCancelado: Array<{ id: string; folio: number }> = [];
     if (cancelados.length > 0) {
       const idsCancelados = cancelados.map((v) => v.id as string);
-      const [cobrosCanc, gastosCancRes] = await Promise.all([
-        this.fetchCobros(idsCancelados),
-        sb.from('gasto').select('id, vuelo_id').in('vuelo_id', idsCancelados),
-      ]);
+      const gastosCancRes = await sb
+        .from('gasto')
+        .select('id, vuelo_id')
+        .in('vuelo_id', idsCancelados);
       if (gastosCancRes.error) throw new Error(gastosCancRes.error.message);
 
-      const cobrosPorCancelado = new Map<string, CobroRow[]>();
-      for (const c of cobrosCanc) {
-        const list = cobrosPorCancelado.get(c.vuelo_id) ?? [];
-        list.push(c);
-        cobrosPorCancelado.set(c.vuelo_id, list);
-      }
       const vuelosConGasto = new Set(
         (gastosCancRes.data ?? []).map((g) => g.vuelo_id as string),
       );
       for (const v of cancelados) {
-        const lista = cobrosPorCancelado.get(v.id as string) ?? [];
+        const lista = cobrosPorVueloPre.get(v.id as string) ?? [];
         if (lista.length > 0) {
-          // Fuente única de "cuánto se cobró en USD" (cobrosEnUsd); los MXN
-          // sin TC quedan fuera del monto pero el vuelo sí cuenta.
-          const conv = cobrosEnUsd(
-            lista,
-            v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
-          );
+          // Fuente única de "cuánto se cobró en USD" (cobrosEnUsd, con el
+          // TC oficial de respaldo); los MXN que ni así convierten quedan
+          // fuera del monto pero el vuelo sí cuenta.
+          const conv = convCobros(v);
           cobrosEnCancelados.push({
             id: v.id as string,
             folio: v.folio as number,
@@ -1543,9 +1873,6 @@ export class ProfitSharingService {
     }));
 
     // Cobros pendientes con SALDO real (soporta pago parcial).
-    const completados = (completadosRes.data ?? []) as Array<
-      Record<string, unknown>
-    >;
     // Clientes INTERNOS (reposicionamiento/demostración/servicio): operación
     // propia sin cobro esperado — sus vuelos NO son cuentas por cobrar y se
     // excluyen del regaño de cobranza (lookup en lote cliente_id→es_interno).
@@ -1568,14 +1895,6 @@ export class ProfitSharingService {
         for (const c of internos ?? []) clientesInternos.add(c.id as string);
       }
     }
-    const ids = completados.map((v) => v.id as string);
-    const cobros = await this.fetchCobros(ids);
-    const porVuelo = new Map<string, CobroRow[]>();
-    for (const c of cobros) {
-      const list = porVuelo.get(c.vuelo_id) ?? [];
-      list.push(c);
-      porVuelo.set(c.vuelo_id, list);
-    }
     const cobrosPendientes: Array<{
       id: string;
       folio: number;
@@ -1588,10 +1907,7 @@ export class ProfitSharingService {
       // cotización llevara monto), es operación propia.
       if (clientesInternos.has(v.cliente_id as string)) continue;
       const total = Number(v.monto_total_usd ?? 0);
-      const conv = cobrosEnUsd(
-        porVuelo.get(v.id as string) ?? [],
-        v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
-      );
+      const conv = convCobros(v);
       const saldo = round2(total - conv.total_usd);
       if (saldo > 1) {
         cobrosPendientes.push({
@@ -1738,6 +2054,26 @@ export class ProfitSharingService {
         !(Number(g.tc_gasto) > 0) &&
         g.categoria !== 'PERSONAL_DUENO',
     );
+    // TC oficial del día del gasto (29-ago): los MXN sin TC que SÍ tienen
+    // referencia oficial YA entran al reparto y al balance (informativo);
+    // solo bloquean el cierre los que ni así convierten (sin red / sin dato).
+    const tcOficialGastosPre = await this.resolverTcOficial(
+      [],
+      sinTc.map((g) => ({
+        id: g.id as string,
+        moneda: g.moneda as string,
+        tc_gasto: (g.tc_gasto as string | null) ?? null,
+        fecha_gasto: (g.fecha_gasto as string | null) ?? null,
+      })),
+    );
+    const sinTcConOficial = sinTc.filter((g) =>
+      tcOficialGastosPre.gasto.has(g.id as string),
+    );
+    const sinTcSinOficial = sinTc.filter(
+      (g) => !tcOficialGastosPre.gasto.has(g.id as string),
+    );
+    const sumaMxn = (lista: Array<Record<string, unknown>>) =>
+      round2(lista.reduce((acc, g) => acc + Number(g.monto), 0));
     // Seguimiento de oficina (estatus_facturacion), NO el comprobante del
     // piloto: la app marca FACTURA con cualquier foto, aunque sea un ticket.
     // BODEGA se excluye: es cargo contable del puente de inventario y su
@@ -1920,6 +2256,8 @@ export class ProfitSharingService {
         count: cobrosEnCancelados.length,
         monto_usd: round2(cobrosEnCanceladosUsd),
         vuelos: cobrosEnCancelados,
+        // ADITIVO: el panel lo pinta como aviso informativo, no pendiente.
+        informativo: true,
       },
       {
         clave: 'gastos_en_cancelados',
@@ -1928,13 +2266,45 @@ export class ProfitSharingService {
           'Se voló a recoger, ferry de regreso, pistas… son costo real del avión y ya se descuentan. Confirma que correspondan a algo que sí ocurrió: una pista provisionada de un vuelo que nunca despegó se borra en Gastos.',
         count: gastosEnCanceladosCount,
         vuelos: vuelosConGastoCancelado,
+        informativo: true,
+      },
+      // Informativos (29-ago): lo que YA se convirtió con el TC oficial de
+      // referencia del día (open.er-api / BCE). No bloquean: el dinero sí
+      // está en el reparto y en el balance; capturar el TC lo sustituye.
+      {
+        clave: 'gastos_tc_oficial',
+        titulo: 'Gastos MXN sin TC capturado (convertidos con el TC oficial)',
+        detalle:
+          'Se convierten con el TC oficial de referencia del día del gasto (open.er-api / BCE) y ya restan en el reparto y en el balance. Si quieres usar el TC real del pago, captúralo en Gastos.',
+        count: sinTcConOficial.length,
+        monto_mxn: sumaMxn(sinTcConOficial),
+        informativo: true,
+      },
+      {
+        clave: 'cobros_tc_oficial',
+        titulo: 'Vuelos con cobros MXN sin TC (convertidos con el TC oficial)',
+        detalle:
+          'La cotización no trae tipo de cambio: sus cobros en pesos se convierten con el TC oficial de referencia del día de la cotización (open.er-api / BCE) y ya cuentan como cobrados. Capturar el TC en el vuelo o en el cobro lo sustituye.',
+        count: cobrosTcOficialVuelos.length,
+        vuelos: cobrosTcOficialVuelos,
+        informativo: true,
       },
       {
         clave: 'gastos_sin_tc',
         titulo: 'Gastos MXN sin tipo de cambio',
-        detalle: 'Quedan FUERA del balance USD hasta capturarles TC.',
-        count: sinTc.length,
-        monto_mxn: round2(sinTc.reduce((acc, g) => acc + Number(g.monto), 0)),
+        detalle:
+          'Sin TC capturado ni TC oficial de referencia disponible para su fecha: quedan FUERA del balance USD hasta capturarles TC.',
+        count: sinTcSinOficial.length,
+        monto_mxn: sumaMxn(sinTcSinOficial),
+      },
+      {
+        clave: 'cobros_sin_tc',
+        titulo: 'Vuelos con cobros MXN sin tipo de cambio',
+        detalle:
+          'Cobros en pesos sin TC en el cobro, en la cotización ni TC oficial de referencia para su fecha: NO cuentan como cobrados hasta capturarles TC en el vuelo.',
+        count: cobrosSinTcVuelos.length,
+        monto_mxn: round2(cobrosSinTcMxn),
+        vuelos: cobrosSinTcVuelos,
       },
       {
         clave: 'gastos_sin_comprobante',
@@ -1954,12 +2324,14 @@ export class ProfitSharingService {
     ];
 
     // Lo único que BLOQUEA números: vuelos sin completar, tacos amarillos,
-    // gastos sin TC y combustible sin avión (el gas del mes es por avión).
-    // El resto es aviso (cobranza/conciliación son procesos).
+    // gastos/cobros MXN que no convierten ni con el TC oficial (29-ago) y
+    // combustible sin avión (el gas del mes es por avión). El resto es
+    // aviso (cobranza/conciliación son procesos).
     const bloqueantes = [
       'vuelos_sin_completar',
       'tacos_en_revision',
       'gastos_sin_tc',
+      'cobros_sin_tc',
       'combustible_sin_avion',
     ];
     const listo = items
@@ -2004,7 +2376,9 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+        // fecha_solicitud: día de la cotización para el TC oficial de
+        // respaldo (29-ago) cuando la cotización no trae tc_usd_mxn.
+        'id, aeronave_id, cliente_id, estado, monto_total_usd, tc_usd_mxn, cobrado, comision_vendedor_usd, folio, fecha_vuelo, fecha_solicitud, origen_iata, destino_iata, es_externo, costo_externo_usd, subtotal_vuelo_usd, ajuste_final_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
       )
       .in('estado', ['COMPLETADO', 'CANCELADO'])
       .gte('fecha_vuelo', `${desde}T00:00:00-05:00`)
@@ -2099,8 +2473,9 @@ export class ProfitSharingService {
       // propina + valor_ia_extraido: para separar el TUA embebido en
       // facturas de aeródromo (regla 7) con la misma regla del balance.
       // escala_id: avión del gasto por tramo (Regla B, avionDelGasto).
+      // fecha_gasto: día del TC oficial de respaldo (29-ago) en MXN sin TC.
       .select(
-        'id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido',
+        'id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, fecha_gasto',
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
@@ -2156,10 +2531,40 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
+/** Número positivo o null (TCs y divisores; numeric de PostgREST llega string). */
+function pos(v: unknown): number | null {
+  if (v == null || v === '') return null;
+  const x = Number(v);
+  return Number.isFinite(x) && x > 0 ? x : null;
+}
+
 /** Día Cancún (YYYY-MM-DD) de un timestamptz; null si el vuelo no tiene fecha. */
 function diaCancun(iso: string | null): string | null {
   if (!iso) return null;
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return null;
   return d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+}
+
+/**
+ * Día (YYYY-MM-DD) de una columna `date` (fecha de pared: se respeta tal
+ * cual — pasarla por `new Date` la interpretaría en UTC y en Cancún sería el
+ * día ANTERIOR) o de un timestamptz (día Cancún).
+ */
+function diaDeFecha(fecha: string | null): string | null {
+  if (!fecha) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fecha)) return fecha;
+  return diaCancun(fecha);
+}
+
+/**
+ * ¿Algún cobro MXN sin TC propio y sin TC de cotización? Solo esos vuelos
+ * piden el TC oficial del día (evita consultar días que nadie usaría).
+ */
+function cobrosNecesitanTc(cobros: CobroRow[], tcVuelo: unknown): boolean {
+  if (pos(tcVuelo) != null) return false;
+  return cobros.some(
+    (c) =>
+      c.moneda === 'MXN' && pos(c.tc_usd_mxn) == null && Number(c.monto) > 0,
+  );
 }
