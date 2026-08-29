@@ -442,6 +442,52 @@ export class CreateMovimientoDto {
   notas?: string;
 }
 
+/**
+ * Corrección del COSTO de una ENTRADA de cardex (caso carga masiva
+ * [CARGA-INV-AGO29]: entradas a $0 que el cliente completa con el precio
+ * real). SOLO viaja costo/moneda/TC — cantidad, fecha y tipo JAMÁS se
+ * editan (romperían el FIFO); mandar otro campo = 400 (forbidNonWhitelisted).
+ * La moneda es OBLIGATORIA para que el operador diga en qué capturó (caso
+ * aceites 28-ago-2026: pesos capturados como USD multiplicaron ×17 el costo).
+ */
+export class UpdateMovimientoCostoDto {
+  @ApiProperty({
+    enum: ['MXN', 'USD'],
+    description:
+      'Moneda de la captura del costo. MXN exige costo_unitario_mxn + tc_usd_mxn; USD exige costo_unitario_usd.',
+  })
+  @IsIn(['MXN', 'USD'])
+  moneda!: 'MXN' | 'USD';
+
+  @ApiPropertyOptional({
+    description: 'Costo unitario en USD (requerido si moneda=USD).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_unitario_usd?: number;
+
+  @ApiPropertyOptional({
+    description: 'Costo unitario en PESOS (requerido si moneda=MXN).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_unitario_mxn?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Tipo de cambio de la compra (MXN por USD). Requerido si moneda=MXN; opcional en USD (expresa la capa en pesos reales).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  tc_usd_mxn?: number;
+}
+
 export class ListMovimientosQuery {
   @ApiPropertyOptional()
   @IsOptional()
@@ -467,6 +513,15 @@ export class ListMovimientosQuery {
   @IsOptional()
   @IsISO8601()
   hasta?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'true = solo movimientos con costo USD en 0 (entradas de la carga masiva pendientes de costo real).',
+  })
+  @IsOptional()
+  @Type(() => Boolean)
+  @IsBoolean()
+  sin_costo?: boolean;
 
   @ApiPropertyOptional({ default: 100 })
   @IsOptional()

@@ -26,6 +26,7 @@ import {
   ListMovimientosQuery,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
+  UpdateMovimientoCostoDto,
 } from './dto/inventory.dto';
 import { ExtraerCompraDto, ImportarCompraDto } from './dto/compras.dto';
 import { InventoryService } from './inventory.service';
@@ -260,5 +261,20 @@ export class InventoryController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.inventory.createMovimiento(id, dto, c.userId);
+  }
+
+  @Patch('items/:id/movimientos/:movId')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Corrige el COSTO de una ENTRADA (moneda/costo/TC; cantidad/fecha/tipo jamás). 409 si nace de una compra (se corrige desde la compra) o si el FIFO ya consumió unidades de esa capa.',
+  })
+  updateCostoMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('movId', ParseUUIDPipe) movId: string,
+    @Body() dto: UpdateMovimientoCostoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.updateCostoEntrada(id, movId, dto, c.userId);
   }
 }

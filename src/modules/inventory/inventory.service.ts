@@ -20,6 +20,7 @@ import {
   TipoMovimientoInventario,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
+  UpdateMovimientoCostoDto,
 } from './dto/inventory.dto';
 import { normalizarCodigo } from './inventario-codigo.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
@@ -50,6 +51,8 @@ type EmpaqueRow = {
 
 /** Movimiento mínimo necesario para reconstruir el cardex FIFO. */
 type MovForFifo = {
+  /** Presente cuando hace falta localizar una capa concreta (updateCostoEntrada). */
+  id?: string;
   tipo: string;
   cantidad: number | string;
   costo_unitario_usd: number | string;
@@ -361,7 +364,7 @@ export class InventoryService {
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
       .select(
-        'tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at',
+        'id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, fecha_movimiento, created_at',
       )
       .eq('item_id', itemId);
     if (error) throw new Error(error.message);
@@ -1004,6 +1007,50 @@ export class InventoryService {
 
   // ===== Movimientos (cardex) =====
 
+  /**
+   * Resuelve el costo de un movimiento que APILA capa (ENTRADA / DEVOLUCION /
+   * AJUSTE) según la moneda de captura. FUENTE ÚNICA: la usan
+   * createMovimiento y updateCostoEntrada — no duplicar el criterio.
+   * MXN exige costo_unitario_mxn + tc_usd_mxn (> 0) y deriva el USD interno;
+   * USD exige costo_unitario_usd, costoMxn queda null (la captura fue en
+   * dólares) y el TC se conserva si viene, para expresar la capa en pesos
+   * reales (costoUnitarioMxnDe = usd × tc).
+   */
+  private resolverCostoEntrada(dto: {
+    moneda?: 'MXN' | 'USD';
+    costo_unitario_usd?: number;
+    costo_unitario_mxn?: number;
+    tc_usd_mxn?: number;
+  }): {
+    costoUnitario: number;
+    moneda: 'MXN' | 'USD';
+    costoMxn: number | null;
+    tc: number | null;
+  } {
+    const moneda: 'MXN' | 'USD' = dto.moneda ?? 'USD';
+    if (moneda === 'MXN') {
+      if (dto.costo_unitario_mxn == null || !(Number(dto.tc_usd_mxn) > 0)) {
+        throw new BadRequestException(
+          'Captura en MXN: se requieren costo_unitario_mxn y tc_usd_mxn (tipo de cambio de la compra).',
+        );
+      }
+      const costoMxn = dto.costo_unitario_mxn;
+      const tc = Number(dto.tc_usd_mxn);
+      return { costoUnitario: round(costoMxn / tc, 4), moneda, costoMxn, tc };
+    }
+    if (dto.costo_unitario_usd == null) {
+      throw new BadRequestException(
+        'costo_unitario_usd es requerido para ENTRADA, DEVOLUCION y AJUSTE.',
+      );
+    }
+    return {
+      costoUnitario: dto.costo_unitario_usd,
+      moneda,
+      costoMxn: null,
+      tc: Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null,
+    };
+  }
+
   async createMovimiento(
     itemId: string,
     dto: CreateMovimientoDto,
@@ -1095,27 +1142,12 @@ export class InventoryService {
         tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
       }
       moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
-    } else if (moneda === 'MXN') {
-      if (dto.costo_unitario_mxn == null || !(Number(dto.tc_usd_mxn) > 0)) {
-        throw new BadRequestException(
-          'Captura en MXN: se requieren costo_unitario_mxn y tc_usd_mxn (tipo de cambio de la compra).',
-        );
-      }
-      costoMxn = dto.costo_unitario_mxn;
-      tc = Number(dto.tc_usd_mxn);
-      costoUnitario = round(costoMxn / tc, 4);
     } else {
-      if (dto.costo_unitario_usd == null) {
-        throw new BadRequestException(
-          'costo_unitario_usd es requerido para ENTRADA, DEVOLUCION y AJUSTE.',
-        );
-      }
-      costoUnitario = dto.costo_unitario_usd;
-      // Captura en USD con TC conocido (compra Aircraft Spruce pagada en
-      // pesos): se conserva para que el cardex exprese la capa en pesos
-      // reales (costoUnitarioMxnDe = usd × tc). costoMxn sigue null: la
-      // captura fue en dólares.
-      if (Number(dto.tc_usd_mxn) > 0) tc = Number(dto.tc_usd_mxn);
+      const costo = this.resolverCostoEntrada(dto);
+      costoUnitario = costo.costoUnitario;
+      moneda = costo.moneda;
+      costoMxn = costo.costoMxn;
+      tc = costo.tc;
     }
 
     const { data, error } = await this.supabase.service
@@ -1221,6 +1253,135 @@ export class InventoryService {
   }
 
   /**
+   * Corrige el COSTO de una ENTRADA de cardex (caso carga masiva
+   * [CARGA-INV-AGO29]: 63 entradas a $0 que el cliente completa con el
+   * precio real). SOLO costo/moneda/TC — cantidad, fecha y tipo jamás.
+   * Candados: la entrada que nace de una COMPRA se corrige desde la compra
+   * (ahí se prorratean envío/impuestos), y una capa ya consumida por el FIFO
+   * no se toca (su costo ya viajó a los gastos del avión).
+   */
+  async updateCostoEntrada(
+    itemId: string,
+    movId: string,
+    dto: UpdateMovimientoCostoDto,
+    userId: string,
+  ) {
+    // (i) El movimiento debe existir Y ser de este ítem; solo ENTRADA.
+    const { data: mov, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select(MOV_COLS)
+      .eq('id', movId)
+      .eq('item_id', itemId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!mov) {
+      throw new NotFoundException(
+        `Movimiento ${movId} no encontrado en este ítem`,
+      );
+    }
+    const actual = mov as Record<string, unknown>;
+    if (actual.tipo !== (TipoMovimientoInventario.ENTRADA as string)) {
+      throw new BadRequestException(
+        'Solo se corrige el costo de una ENTRADA: el de las salidas lo calcula el FIFO, y devoluciones/ajustes se corrigen con un movimiento nuevo.',
+      );
+    }
+
+    // (ii) Candado de COMPRA: su costo lo calcula compras.service (factura +
+    // envío/impuestos prorrateados); corregirlo aquí lo descuadraría.
+    const { data: linea, error: eLinea } = await this.supabase.service
+      .from('compra_linea')
+      .select('id, compra:compra!compra_id(folio)')
+      .eq('inventario_movimiento_id', movId)
+      .maybeSingle();
+    if (eLinea) throw new Error(eLinea.message);
+    if (linea) {
+      const compraRaw = (linea as Record<string, unknown>).compra;
+      const compra = Array.isArray(compraRaw)
+        ? (compraRaw[0] as { folio?: number } | undefined)
+        : (compraRaw as { folio?: number } | null);
+      throw new ConflictException(
+        `Esta entrada nace de la compra #${compra?.folio ?? '?'}: corrige el costo desde la compra (ahí se prorratean envío e impuestos).`,
+      );
+    }
+
+    // (iii) Candado FIFO: si las salidas ya consumieron unidades de ESTA capa,
+    // su costo ya viajó a los gastos de avión y cambiarlo aquí descuadraría.
+    // E_prev = capas apiladas ANTES de esta entrada (ENTRADA + DEVOLUCION +
+    // AJUSTE — omitir devoluciones/ajustes daría falsos "ya consumidos");
+    // S_total = todas las SALIDAS (el FIFO consume de la capa más vieja, así
+    // que una salida posterior también puede haber llegado a esta capa).
+    const movs = this.sortChrono(await this.movsForItem(itemId));
+    const idx = movs.findIndex((m) => m.id === movId);
+    if (idx < 0) {
+      throw new NotFoundException(
+        `Movimiento ${movId} no encontrado en el cardex del ítem`,
+      );
+    }
+    const salida = TipoMovimientoInventario.SALIDA as string;
+    const entradasPrevias = movs
+      .slice(0, idx)
+      .filter((m) => m.tipo !== salida)
+      .reduce((s, m) => s + Number(m.cantidad), 0);
+    const salidasTotales = movs
+      .filter((m) => m.tipo === salida)
+      .reduce((s, m) => s + Number(m.cantidad), 0);
+    if (salidasTotales > entradasPrevias + EPS) {
+      const consumidas = round(
+        Math.min(Number(actual.cantidad), salidasTotales - entradasPrevias),
+      );
+      throw new ConflictException(
+        `No se puede corregir: ${consumidas} de las ${round(Number(actual.cantidad))} unidades de esta entrada ya salieron de bodega y su costo FIFO ya viajó a los gastos del avión. Ajusta con una DEVOLUCION/AJUSTE o corrige el gasto directamente.`,
+      );
+    }
+
+    // (iv) Costo nuevo con el MISMO criterio de createMovimiento.
+    const costo = this.resolverCostoEntrada(dto);
+
+    // (v) Bitácora en las notas: el costo anterior no se pierde en silencio.
+    const enMxnAntes =
+      actual.moneda === 'MXN' && actual.costo_unitario_mxn != null;
+    const montoAntes = round(
+      Number(
+        enMxnAntes ? actual.costo_unitario_mxn : actual.costo_unitario_usd,
+      ),
+      4,
+    );
+    const notaCorreccion = `Costo corregido ${hoyCancun()}: antes $${montoAntes} ${enMxnAntes ? 'MXN' : 'USD'}`;
+    const notas = textoNoVacio(actual.notas)
+      ? `${actual.notas} · ${notaCorreccion}`
+      : notaCorreccion;
+
+    const { data: updated, error: eUpd } = await this.supabase.service
+      .from('inventario_movimiento')
+      .update({
+        costo_unitario_usd: round(costo.costoUnitario, 4),
+        moneda: costo.moneda,
+        // Moneda USD ⇒ pesos en null: la captura fue en dólares.
+        costo_unitario_mxn:
+          costo.costoMxn != null ? round(costo.costoMxn, 4) : null,
+        tc_usd_mxn: costo.tc,
+        notas,
+        updated_by: userId,
+        // updated_at lo pone el trigger de la BD.
+      })
+      .eq('id', movId)
+      .select(MOV_COLS)
+      .maybeSingle();
+    if (eUpd) throw new Error(eUpd.message);
+
+    // (vi) Stats recalculadas (mismo patrón que createMovimiento).
+    const stats = this.statsFromLayers(
+      this.buildLayers(await this.movsForItem(itemId)),
+    );
+    return {
+      ...(updated as Record<string, unknown>),
+      stock_resultante: stats.stock,
+      valor_usd: stats.valor_usd,
+      valor_mxn: stats.valor_mxn,
+    };
+  }
+
+  /**
    * Crea el gasto REFACCION del avión a partir de una SALIDA de bodega.
    * medio_pago 'BODEGA': el dinero salió del banco al COMPRAR la pieza, no al
    * consumirla, así que este cargo no debe cruzarse con la conciliación
@@ -1259,15 +1420,41 @@ export class InventoryService {
       .select('id, monto, moneda, categoria')
       .maybeSingle();
     if (error) {
-      // El movimiento de cardex ya quedó registrado; no lo revertimos, pero el
-      // cargo económico debe quedar visible como pendiente para no descuadrar
-      // el reporte del avión en silencio.
-      this.logger.error(
-        `SALIDA ${mov.id as string}: no se pudo crear el gasto REFACCION (${error.message}). Capturarlo manualmente.`,
+      // COMPENSACIÓN (29-ago): el stock NO puede bajar sin su cargo — antes
+      // se dejaba el movimiento y el gasto "pendiente de capturar a mano"
+      // (descuadre silencioso). Se revierte la SALIDA y se lanza claro;
+      // reintentar la salida es seguro.
+      await this.revertirMovimientoSinGasto(mov.id as string, 'SALIDA');
+      throw new Error(
+        `La salida de bodega se revirtió: no se pudo crear el gasto REFACCION del avión (${error.message}). El stock no baja sin su cargo — intenta la salida de nuevo.`,
       );
-      return null;
     }
     return data;
+  }
+
+  /**
+   * COMPENSACIÓN del puente inventario→gastos (29-ago): borra el movimiento
+   * de cardex recién insertado cuando su gasto no se pudo crear. Si el
+   * borrado también falla, solo se loguea fuerte — el error original se
+   * lanza igual y el descuadre queda visible en el log (nada silencioso).
+   */
+  private async revertirMovimientoSinGasto(
+    movId: string,
+    contexto: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .delete()
+      .eq('id', movId);
+    if (error) {
+      this.logger.error(
+        `${contexto} ${movId}: el gasto no se creó Y la reversión del movimiento falló (${error.message}). El stock bajó SIN cargo: capturar el gasto manualmente.`,
+      );
+    } else {
+      this.logger.warn(
+        `${contexto} ${movId} revertida: su gasto REFACCION no se pudo crear (compensación).`,
+      );
+    }
   }
 
   /**
@@ -1292,10 +1479,12 @@ export class InventoryService {
       .eq('activa', true)
       .order('matricula');
     if (avErr || !aviones || aviones.length === 0) {
-      this.logger.error(
-        `SALIDA flota ${mov.id as string}: sin aviones activos para prorratear (${avErr?.message ?? 'lista vacía'}). Capturar el gasto manualmente.`,
+      // Mismo patrón que la salida individual (29-ago): sin gastos no hay
+      // cargo — el stock no puede bajar sin él.
+      await this.revertirMovimientoSinGasto(mov.id as string, 'SALIDA flota');
+      throw new Error(
+        `La salida de bodega (flota) se revirtió: no hay aviones activos para prorratear el costo (${avErr?.message ?? 'lista vacía'}).`,
       );
-      return null;
     }
 
     const n = aviones.length;
@@ -1328,10 +1517,13 @@ export class InventoryService {
       .insert(filas)
       .select('id, monto, moneda, categoria');
     if (error) {
-      this.logger.error(
-        `SALIDA flota ${mov.id as string}: no se pudieron crear los gastos prorrateados (${error.message}). Capturarlos manualmente.`,
+      // COMPENSACIÓN (29-ago): mismo invariante que la salida individual —
+      // el stock no baja sin su cargo. Insert en lote = o entran todos los
+      // gastos o ninguno; se revierte el movimiento y se lanza claro.
+      await this.revertirMovimientoSinGasto(mov.id as string, 'SALIDA flota');
+      throw new Error(
+        `La salida de bodega (flota) se revirtió: no se pudieron crear los gastos prorrateados (${error.message}). Intenta la salida de nuevo.`,
       );
-      return null;
     }
     return {
       prorrateado: true,
@@ -1477,6 +1669,8 @@ export class InventoryService {
     if (filters.tipo) q = q.eq('tipo', filters.tipo);
     if (filters.desde) q = q.gte('fecha_movimiento', filters.desde);
     if (filters.hasta) q = q.lte('fecha_movimiento', filters.hasta);
+    // Pendientes de costo real (carga masiva a $0): solo cuando viene true.
+    if (filters.sin_costo === true) q = q.eq('costo_unitario_usd', 0);
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
