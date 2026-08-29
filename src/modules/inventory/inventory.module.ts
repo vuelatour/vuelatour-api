@@ -3,11 +3,12 @@ import { PyservicesModule } from '../pyservices/pyservices.module';
 import { InventoryController } from './inventory.controller';
 import { InventoryService } from './inventory.service';
 import { ComprasService } from './compras.service';
+import { InventarioMasivoService } from './inventario-masivo.service';
 
 @Module({
   imports: [PyservicesModule],
   controllers: [InventoryController],
-  providers: [InventoryService, ComprasService],
+  providers: [InventoryService, ComprasService, InventarioMasivoService],
   exports: [InventoryService],
 })
 export class InventoryModule {}

@@ -1039,7 +1039,13 @@ export class ComprasService {
             moneda: compra.moneda,
             ...(compra.moneda === 'MXN'
               ? { costo_unitario_mxn: final, tc_usd_mxn: tc as number }
-              : { costo_unitario_usd: final }),
+              : {
+                  costo_unitario_usd: final,
+                  // ENTRADA en USD con TC conocido: createMovimiento lo
+                  // conserva para que el cardex exprese la capa en pesos
+                  // reales (costoUnitarioMxnDe usa usd × tc).
+                  ...(tc ? { tc_usd_mxn: tc } : {}),
+                }),
             proveedor_id: compra.proveedor_id ?? undefined,
             fecha_movimiento: fecha,
             fecha_orden: fecha,
@@ -1048,15 +1054,6 @@ export class ComprasService {
           userId,
         )) as { id: string };
         creadas.push(mov.id);
-        // ENTRADA en USD con TC conocido: se guarda el TC para que el cardex
-        // exprese la capa en pesos reales (costoUnitarioMxnDe usa usd × tc).
-        if (compra.moneda === 'USD' && tc) {
-          const { error } = await svc
-            .from('inventario_movimiento')
-            .update({ tc_usd_mxn: tc, updated_by: userId })
-            .eq('id', mov.id);
-          if (error) throw new Error(error.message);
-        }
         // Reclamo ATÓMICO de la línea: solo liga si NADIE la ligó antes
         // (otra sesión/proceso recibiendo la misma compra). Si no ligó, la
         // ENTRADA recién creada sobra y se deshace en el catch.

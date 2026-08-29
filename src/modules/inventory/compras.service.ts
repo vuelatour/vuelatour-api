@@ -259,7 +259,12 @@ export class ComprasService {
                   costo_unitario_mxn: linea.costo_unitario_final,
                   tc_usd_mxn: tc as number,
                 }
-              : { costo_unitario_usd: linea.costo_unitario_final }),
+              : {
+                  costo_unitario_usd: linea.costo_unitario_final,
+                  // Capa USD con TC conocido: createMovimiento lo conserva
+                  // y el cardex la expresa en pesos reales.
+                  ...(tc ? { tc_usd_mxn: tc } : {}),
+                }),
             proveedor_id: dto.proveedor_id,
             fecha_movimiento: fechaCompra,
             fecha_orden: dto.fecha_orden,
@@ -268,14 +273,6 @@ export class ComprasService {
           userId,
         )) as { id: string };
         movIds.push(mov.id);
-        if (moneda === 'USD' && tc) {
-          // Capa USD con TC conocido: el cardex la expresa en pesos reales.
-          const { error: eTc } = await svc
-            .from('inventario_movimiento')
-            .update({ tc_usd_mxn: tc, updated_by: userId })
-            .eq('id', mov.id);
-          if (eTc) throw new Error(eTc.message);
-        }
 
         const { error: eLinea } = await svc.from('compra_linea').insert({
           compra_id: compraId,

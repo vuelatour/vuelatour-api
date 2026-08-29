@@ -1,7 +1,8 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   IsArray,
   IsEnum,
   IsOptional,
@@ -28,29 +29,41 @@ export class ImagenFuenteDto {
   @IsString()
   imageBase64?: string;
 
-  @ApiPropertyOptional({ enum: ImageMediaType, description: 'Requerido si se envía imageBase64' })
+  @ApiPropertyOptional({
+    enum: ImageMediaType,
+    description: 'Requerido si se envía imageBase64',
+  })
   @IsOptional()
   @IsEnum(ImageMediaType)
   mediaType?: ImageMediaType;
 
-  @ApiPropertyOptional({ description: 'Alternativa: URL pública o firmada de la imagen' })
+  @ApiPropertyOptional({
+    description: 'Alternativa: URL pública o firmada de la imagen',
+  })
   @IsOptional()
   @IsString()
   imageUrl?: string;
 }
 
 export class GastoTicketDto {
-  @ApiPropertyOptional({ description: 'Imagen del ticket en base64 (sin prefijo data:)' })
+  @ApiPropertyOptional({
+    description: 'Imagen del ticket en base64 (sin prefijo data:)',
+  })
   @IsOptional()
   @IsString()
   imageBase64?: string;
 
-  @ApiPropertyOptional({ enum: ImageMediaType, description: 'Requerido si se envía imageBase64' })
+  @ApiPropertyOptional({
+    enum: ImageMediaType,
+    description: 'Requerido si se envía imageBase64',
+  })
   @IsOptional()
   @IsEnum(ImageMediaType)
   mediaType?: ImageMediaType;
 
-  @ApiPropertyOptional({ description: 'Alternativa: URL pública o firmada de la imagen' })
+  @ApiPropertyOptional({
+    description: 'Alternativa: URL pública o firmada de la imagen',
+  })
   @IsOptional()
   @IsString()
   imageUrl?: string;
@@ -68,7 +81,8 @@ export class GastoTicketDto {
   images?: ImagenFuenteDto[];
 
   @ApiPropertyOptional({
-    description: 'Factura en PDF (base64, sin prefijo data:). Alternativa a las imágenes.',
+    description:
+      'Factura en PDF (base64, sin prefijo data:). Alternativa a las imágenes.',
   })
   @IsOptional()
   @IsString()
@@ -82,7 +96,9 @@ export class GastoTicketDto {
   @IsString()
   excelBase64?: string;
 
-  @ApiPropertyOptional({ description: 'Nombre del archivo Excel/CSV (decide el parser).' })
+  @ApiPropertyOptional({
+    description: 'Nombre del archivo Excel/CSV (decide el parser).',
+  })
   @IsOptional()
   @IsString()
   excelFilename?: string;
@@ -120,4 +136,36 @@ export class ConstanciaFiscalDto {
   @IsOptional()
   @IsEnum(ImageMediaType)
   mediaType?: ImageMediaType;
+}
+
+/**
+ * Ficha de un producto de inventario a partir de VARIAS fotos del MISMO
+ * producto (frente, etiqueta, código de barras, caja). La IA llena nombre,
+ * marca, número de parte, código de barras (leyendo los dígitos impresos),
+ * contenido, unidad, categoría (de las existentes) y, si alguna foto es la
+ * caja, el empaque. Los códigos ya escaneados viajan como verdad.
+ */
+export class InventarioItemVisionDto {
+  @ApiProperty({
+    type: [ImagenFuenteDto],
+    description: 'Fotos del mismo producto (1 a 8): imageBase64 + mediaType.',
+  })
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Manda al menos una foto del producto.' })
+  @ArrayMaxSize(8)
+  @ValidateNested({ each: true })
+  @Type(() => ImagenFuenteDto)
+  images!: ImagenFuenteDto[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Códigos ya leídos con el escáner (el primero = unidad salvo que una foto muestre que es la caja). La IA no los reinventa.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @IsString({ each: true })
+  @MaxLength(60, { each: true })
+  codigos_escaneados?: string[];
 }

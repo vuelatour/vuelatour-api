@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -12,19 +13,40 @@ import {
 import {
   CreateInventarioItemDto,
   CreateMovimientoDto,
+  EmpaqueInputDto,
+  FotoInventarioDto,
   ListInventarioQuery,
   ListMovimientosQuery,
   TipoMovimientoInventario,
+  UpdateEmpaqueDto,
   UpdateInventarioItemDto,
 } from './dto/inventory.dto';
+import { normalizarCodigo } from './inventario-codigo.util';
+import { hoyCancun } from '../../common/fecha-cancun.util';
 
 const ITEM_COLS =
-  'id, nombre, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, notas, foto_url, foto_storage_path, activo, created_at, updated_at';
+  'id, nombre, marca, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, descripcion, notas, foto_url, foto_storage_path, fotos_adicionales, activo, created_at, updated_at';
+
+/** Empaques (cajas) del ítem: factor = unidades por empaque; codigo = barras de la caja. */
+const EMPAQUE_COLS =
+  'id, item_id, nombre, factor, codigo, activo, created_at, updated_at';
+/** Joins del cardex: avión, proveedor y el empaque con que se capturó. */
+const MOV_JOINS =
+  'aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre), empaque:inventario_item_empaque!empaque_id(nombre, factor)';
 
 /** Bucket PÚBLICO de fotos de producto (el cliente sube; el API borra). */
 const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
-  'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+  'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+
+type EmpaqueRow = {
+  id: string;
+  item_id: string;
+  nombre: string;
+  factor: number | string;
+  codigo: string | null;
+  activo: boolean;
+};
 
 /** Movimiento mínimo necesario para reconstruir el cardex FIFO. */
 type MovForFifo = {
@@ -249,7 +271,7 @@ export class InventoryService {
     const layers: FifoLayer[] = [];
     for (const m of this.sortChrono(movs)) {
       const cant = Number(m.cantidad);
-      if (m.tipo === TipoMovimientoInventario.SALIDA) {
+      if (m.tipo === (TipoMovimientoInventario.SALIDA as string)) {
         let need = cant;
         while (need > EPS && layers.length > 0) {
           const layer = layers[0];
@@ -371,7 +393,10 @@ export class InventoryService {
 
     // Stock + valorizado por ítem (un solo barrido del cardex de los ítems listados).
     const ids = rows.map((r) => (r as { id: string }).id);
-    const movsByItem = await this.movsByItems(ids);
+    const [movsByItem, empaquesByItem] = await Promise.all([
+      this.movsByItems(ids),
+      this.empaquesByItems(ids),
+    ]);
     let data = rows.map((r) => {
       const it = r as Record<string, unknown> & {
         id: string;
@@ -382,6 +407,7 @@ export class InventoryService {
       );
       return {
         ...it,
+        empaques: empaquesByItem.get(it.id) ?? [],
         ...stats,
         bajo_stock:
           it.stock_minimo != null && stats.stock < Number(it.stock_minimo),
@@ -437,14 +463,12 @@ export class InventoryService {
     return data;
   }
 
-  /** Detalle del ítem con cardex completo y stats FIFO. */
+  /** Detalle del ítem con empaques, cardex completo y stats FIFO. */
   async getItemDetail(id: string) {
-    const item = await this.findItem(id);
+    const item = await this.findItemConEmpaques(id);
     const { data: movs, error } = await this.supabase.service
       .from('inventario_movimiento')
-      .select(
-        `${MOV_COLS}, aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre)`,
-      )
+      .select(`${MOV_COLS}, ${MOV_JOINS}`)
       .eq('item_id', id)
       .order('fecha_movimiento', { ascending: false })
       .order('created_at', { ascending: false });
@@ -454,60 +478,528 @@ export class InventoryService {
     return { ...item, ...stats, movimientos: movs ?? [] };
   }
 
-  async createItem(dto: CreateInventarioItemDto, userId: string) {
+  /**
+   * `opts.codigosYaVerificados`: la alta masiva ya cruzó los códigos contra
+   * TODA la bodega en una sola carga (validarFilasInventario); repetir aquí
+   * las 2 consultas por código sería redundante — el índice único y el
+   * trigger de la BD siguen siendo la última defensa (409 legible).
+   */
+  async createItem(
+    dto: CreateInventarioItemDto,
+    userId: string,
+    opts: { codigosYaVerificados?: boolean } = {},
+  ) {
+    const codigo = normalizarCodigo(dto.codigo);
+    const empaques = this.prepararEmpaques(dto.empaques ?? [], codigo);
+    // Un código identifica UNA cosa en bodega: se verifica aquí (409 legible)
+    // y además lo bloquea el trigger de la BD (ítem ↔ empaque).
+    if (!opts.codigosYaVerificados) {
+      if (codigo) await this.assertCodigoLibre(codigo);
+      for (const e of empaques) {
+        if (e.codigo) await this.assertCodigoLibre(e.codigo);
+      }
+    }
+
     const { data, error } = await this.supabase.service
       .from('inventario_item')
       .insert({
         nombre: dto.nombre,
+        marca: dto.marca || null,
         numero_parte: dto.numero_parte,
-        codigo: dto.codigo,
+        codigo,
         categoria: dto.categoria,
         stock_minimo: dto.stock_minimo ?? 0,
         ubicacion: dto.ubicacion ?? 'Bodega Cancún',
         unidad: dto.unidad || null,
+        descripcion: dto.descripcion || null,
         notas: dto.notas,
         foto_url: dto.foto_url || null,
         foto_storage_path: dto.foto_storage_path || null,
+        fotos_adicionales: fotosPlanas(dto.fotos_adicionales),
         created_by: userId,
         updated_by: userId,
       })
       .select(ITEM_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    return data!;
+    if (error) throw this.errorDeCodigo(error, codigo);
+    const item = data as Record<string, unknown> & { id: string };
+    if (empaques.length === 0) return { ...item, empaques: [] as EmpaqueRow[] };
+
+    const { data: creados, error: eEmp } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .insert(
+        empaques.map((e) => ({
+          item_id: item.id,
+          nombre: e.nombre,
+          factor: e.factor,
+          codigo: e.codigo,
+          activo: true,
+          created_by: userId,
+          updated_by: userId,
+        })),
+      )
+      .select(EMPAQUE_COLS);
+    if (eEmp) {
+      // Alta atómica para el operador: sin ítem a medias (todavía no tiene
+      // cardex, así que el borrado es limpio).
+      await this.supabase.service
+        .from('inventario_item')
+        .delete()
+        .eq('id', item.id);
+      throw this.errorDeCodigo(
+        eEmp,
+        empaques
+          .map((e) => e.codigo)
+          .filter(Boolean)
+          .join(', '),
+      );
+    }
+    return { ...item, empaques: (creados ?? []) as EmpaqueRow[] };
   }
 
   async updateItem(id: string, dto: UpdateInventarioItemDto, userId: string) {
-    if (Object.keys(dto).length === 0) return this.findItem(id);
-    // Si cambia (o se quita) la foto, el archivo anterior se borra del bucket
-    // BEST-EFFORT con la service key — el cliente nunca borra de Storage.
-    let fotoAnterior: string | null = null;
-    if (dto.foto_storage_path !== undefined) {
-      const current = await this.findItem(id);
-      const previa =
-        (current as { foto_storage_path?: string | null }).foto_storage_path ??
-        null;
-      if (previa && previa !== dto.foto_storage_path) fotoAnterior = previa;
+    if (Object.keys(dto).length === 0) return this.findItemConEmpaques(id);
+    // Columnas NOT NULL: un null/vacío llegaba a la BD como 23502 (500).
+    if (dto.nombre !== undefined && !textoNoVacio(dto.nombre))
+      throw new BadRequestException('El nombre del ítem no puede ir vacío.');
+    if (dto.categoria !== undefined && !textoNoVacio(dto.categoria))
+      throw new BadRequestException('La categoría del ítem no puede ir vacía.');
+    if (dto.ubicacion !== undefined && !textoNoVacio(dto.ubicacion))
+      throw new BadRequestException('La ubicación no puede ir vacía.');
+    const cambios: Record<string, unknown> = { ...dto, updated_by: userId };
+    if (dto.nombre !== undefined) cambios.nombre = dto.nombre.trim();
+    if (dto.categoria !== undefined) cambios.categoria = dto.categoria.trim();
+    if (dto.ubicacion !== undefined) cambios.ubicacion = dto.ubicacion.trim();
+    if (dto.codigo !== undefined) {
+      const codigo = normalizarCodigo(dto.codigo);
+      if (codigo) await this.assertCodigoLibre(codigo, { itemId: id });
+      cambios.codigo = codigo;
+    }
+    if (dto.marca !== undefined) cambios.marca = dto.marca || null;
+    if (dto.descripcion !== undefined)
+      cambios.descripcion = dto.descripcion || null;
+    if (dto.unidad !== undefined) cambios.unidad = dto.unidad || null;
+    if (dto.fotos_adicionales !== undefined)
+      cambios.fotos_adicionales = fotosPlanas(dto.fotos_adicionales);
+
+    // Las fotos que dejan de estar referenciadas (principal o adicionales) se
+    // borran del bucket BEST-EFFORT con la service key — el cliente nunca
+    // borra de Storage. Una foto que solo cambia de lugar (principal ↔
+    // adicional) se conserva.
+    let porBorrar: string[] = [];
+    if (
+      dto.foto_storage_path !== undefined ||
+      dto.fotos_adicionales !== undefined
+    ) {
+      const actual = (await this.findItem(id)) as {
+        foto_storage_path?: string | null;
+        fotos_adicionales?: unknown;
+      };
+      const previas = [
+        actual.foto_storage_path ?? null,
+        ...pathsDeFotos(actual.fotos_adicionales),
+      ];
+      const nuevas = new Set<string | null>([
+        dto.foto_storage_path !== undefined
+          ? (dto.foto_storage_path ?? null)
+          : (actual.foto_storage_path ?? null),
+        ...(dto.fotos_adicionales !== undefined
+          ? fotosPlanas(dto.fotos_adicionales).map((f) => f.path)
+          : pathsDeFotos(actual.fotos_adicionales)),
+      ]);
+      porBorrar = previas.filter((p): p is string => !!p && !nuevas.has(p));
+    }
+
+    const { data, error } = await this.supabase.service
+      .from('inventario_item')
+      .update(cambios)
+      .eq('id', id)
+      .select(ITEM_COLS)
+      .maybeSingle();
+    if (error) throw this.errorDeCodigo(error, cambios.codigo as string | null);
+    if (!data) throw new NotFoundException(`Ítem ${id} not found`);
+    if (porBorrar.length > 0) {
+      void this.supabase.service.storage
+        .from(FOTOS_BUCKET)
+        .remove(porBorrar)
+        .catch(() => undefined);
+    }
+    return {
+      ...(data as Record<string, unknown>),
+      empaques: await this.listEmpaques(id),
+    };
+  }
+
+  // ===== Empaques (cajas) y códigos de barras =====
+
+  /** Categorías reales de bodega (distintas, orden alfabético es-MX). */
+  async listCategorias(): Promise<string[]> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_item')
+      .select('categoria')
+      .limit(5000);
+    if (error) throw new Error(error.message);
+    const set = new Set<string>();
+    for (const r of data ?? []) {
+      const c = String((r as { categoria?: unknown }).categoria ?? '').trim();
+      if (c) set.add(c);
+    }
+    return [...set].sort((a, b) => a.localeCompare(b, 'es'));
+  }
+
+  async listEmpaques(itemId: string): Promise<EmpaqueRow[]> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .select(EMPAQUE_COLS)
+      .eq('item_id', itemId)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  private async empaquesByItems(
+    itemIds: string[],
+  ): Promise<Map<string, EmpaqueRow[]>> {
+    const map = new Map<string, EmpaqueRow[]>();
+    if (itemIds.length === 0) return map;
+    const { data, error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .select(EMPAQUE_COLS)
+      .in('item_id', itemIds)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(error.message);
+    for (const e of (data ?? []) as EmpaqueRow[]) {
+      if (!map.has(e.item_id)) map.set(e.item_id, []);
+      map.get(e.item_id)!.push(e);
+    }
+    return map;
+  }
+
+  /** Ítem + sus empaques (forma que exponen GET items/:id y el lookup por código). */
+  async findItemConEmpaques(id: string) {
+    const item = await this.findItem(id);
+    return {
+      ...(item as Record<string, unknown>),
+      empaques: await this.listEmpaques(id),
+    };
+  }
+
+  private async findEmpaqueDeItem(
+    itemId: string,
+    empaqueId: string,
+  ): Promise<EmpaqueRow> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .select(EMPAQUE_COLS)
+      .eq('id', empaqueId)
+      .eq('item_id', itemId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data)
+      throw new NotFoundException('El empaque no existe o no es de este ítem.');
+    return data;
+  }
+
+  /**
+   * Normaliza y valida los empaques de un alta: nombre, factor > 0, código
+   * sin espacios, distinto al de la unidad y sin repetirse entre sí.
+   */
+  private prepararEmpaques(
+    lista: EmpaqueInputDto[],
+    codigoItem: string | null,
+  ): Array<{ nombre: string; factor: number; codigo: string | null }> {
+    const vistos = new Set<string>();
+    return lista.map((e) => {
+      const nombre = (e.nombre ?? '').trim();
+      if (!nombre)
+        throw new BadRequestException(
+          'Cada empaque necesita un nombre (ej. "Caja de 6").',
+        );
+      const factor = Number(e.factor);
+      if (!(factor > 0))
+        throw new BadRequestException(
+          `Empaque "${nombre}": las unidades por empaque deben ser mayores a 0.`,
+        );
+      const codigo = normalizarCodigo(e.codigo);
+      if (codigo) {
+        if (codigoItem && codigo === codigoItem)
+          throw new BadRequestException(
+            `El código ${codigo} del empaque "${nombre}" es el mismo que el de la unidad: la caja debe tener su propio código de barras.`,
+          );
+        if (vistos.has(codigo))
+          throw new BadRequestException(
+            `El código ${codigo} se repite en dos empaques.`,
+          );
+        vistos.add(codigo);
+      }
+      return { nombre, factor: round(factor, 4), codigo };
+    });
+  }
+
+  /**
+   * 409 si el código ya identifica otra cosa en bodega (ítem o empaque). El
+   * mensaje dice DÓNDE está para que el operador lo ubique: el índice único
+   * de la BD (empaques) y el trigger (ítem ↔ empaque) son la última defensa,
+   * pero `inventario_item.codigo` no tiene índice único, así que esta
+   * verificación es la que evita dos productos con el mismo código.
+   */
+  private async assertCodigoLibre(
+    codigo: string,
+    opts: { itemId?: string; empaqueId?: string } = {},
+  ): Promise<void> {
+    let qi = this.supabase.service
+      .from('inventario_item')
+      .select('id, nombre')
+      .eq('codigo', codigo)
+      .limit(1);
+    if (opts.itemId) qi = qi.neq('id', opts.itemId);
+    const { data: it, error: eIt } = await qi.maybeSingle();
+    if (eIt) throw new Error(eIt.message);
+    if (it) {
+      throw new ConflictException(
+        `El código ${codigo} ya está registrado en el producto "${(it as { nombre?: string }).nombre ?? ''}".`,
+      );
+    }
+    let qe = this.supabase.service
+      .from('inventario_item_empaque')
+      .select('id, nombre, item:inventario_item!item_id(nombre)')
+      .eq('codigo', codigo)
+      .limit(1);
+    if (opts.empaqueId) qe = qe.neq('id', opts.empaqueId);
+    const { data: em, error: eEm } = await qe.maybeSingle();
+    if (eEm) throw new Error(eEm.message);
+    if (em) {
+      const x = em as {
+        nombre?: string;
+        item?: { nombre?: string } | { nombre?: string }[] | null;
+      };
+      const dueno = Array.isArray(x.item) ? x.item[0]?.nombre : x.item?.nombre;
+      throw new ConflictException(
+        `El código ${codigo} ya es el del empaque "${x.nombre ?? ''}" de "${dueno ?? ''}".`,
+      );
+    }
+  }
+
+  /** Error de BD → HTTP legible (23505 = código repetido, 23503 = referencia). */
+  private errorDeCodigo(
+    error: { code?: string; message: string },
+    codigo?: string | null,
+  ): Error {
+    if (error.code === '23505') {
+      // El trigger de la BD ya trae un mensaje en español ("El código X ya
+      // pertenece a…"); el índice único, no.
+      return new ConflictException(
+        error.message.startsWith('El código')
+          ? error.message
+          : `El código ${codigo ?? ''} ya está registrado en bodega (otro producto o empaque).`,
+      );
+    }
+    if (error.code === '23503')
+      return new BadRequestException(
+        `Referencia no encontrada: ${error.message}`,
+      );
+    if (error.code === '23502')
+      return new BadRequestException(
+        `Falta un dato obligatorio: ${error.message}`,
+      );
+    return new Error(error.message);
+  }
+
+  /**
+   * Escaneo → ¿qué es este código? ITEM (unidad) o EMPAQUE (caja) con el
+   * detalle completo del ítem (como GET items/:id). 404 "Código no
+   * registrado" para que la app ofrezca darlo de alta. Solo resuelve ítems
+   * y empaques ACTIVOS (y empaques de ítems activos): un ítem eliminado
+   * libera su código (softDeleteItem), pero si algo quedó inactivo con
+   * código por otra vía, el escáner no debe abrirlo ni preseleccionarlo.
+   */
+  async buscarPorCodigo(codigoRaw: string) {
+    const codigo = normalizarCodigo(codigoRaw);
+    if (!codigo) throw new BadRequestException('Código vacío.');
+    const { data: it, error: eIt } = await this.supabase.service
+      .from('inventario_item')
+      .select('id')
+      .eq('codigo', codigo)
+      .eq('activo', true)
+      .limit(1)
+      .maybeSingle<{ id: string }>();
+    if (eIt) throw new Error(eIt.message);
+    if (it) {
+      return {
+        tipo: 'ITEM' as const,
+        item: await this.getItemDetail(it.id),
+        empaque: null,
+      };
+    }
+    const { data: em, error: eEm } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .select(`${EMPAQUE_COLS}, item:inventario_item!item_id(activo)`)
+      .eq('codigo', codigo)
+      .eq('activo', true)
+      .limit(1)
+      .maybeSingle();
+    if (eEm) throw new Error(eEm.message);
+    if (em && itemActivoDe(em.item)) {
+      const e = em as EmpaqueRow;
+      return {
+        tipo: 'EMPAQUE' as const,
+        item: await this.getItemDetail(e.item_id),
+        empaque: {
+          id: e.id,
+          nombre: e.nombre,
+          factor: Number(e.factor),
+          codigo: e.codigo,
+          activo: e.activo,
+        },
+      };
+    }
+    throw new NotFoundException('Código no registrado');
+  }
+
+  async createEmpaque(itemId: string, dto: EmpaqueInputDto, userId: string) {
+    const item = (await this.findItem(itemId)) as { codigo?: string | null };
+    const [e] = this.prepararEmpaques([dto], item.codigo ?? null);
+    if (e.codigo) await this.assertCodigoLibre(e.codigo);
+    const { data, error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .insert({
+        item_id: itemId,
+        nombre: e.nombre,
+        factor: e.factor,
+        codigo: e.codigo,
+        activo: true,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(EMPAQUE_COLS)
+      .maybeSingle();
+    if (error) throw this.errorDeCodigo(error, e.codigo);
+    return data as EmpaqueRow;
+  }
+
+  async updateEmpaque(
+    itemId: string,
+    empaqueId: string,
+    dto: UpdateEmpaqueDto,
+    userId: string,
+  ) {
+    const item = (await this.findItem(itemId)) as { codigo?: string | null };
+    await this.findEmpaqueDeItem(itemId, empaqueId);
+    const cambios: Record<string, unknown> = { updated_by: userId };
+    if (dto.nombre !== undefined) {
+      // null llega con el DTO parcial: nunca .trim() sobre él (era 500).
+      const nombre = textoNoVacio(dto.nombre) ? dto.nombre.trim() : '';
+      if (!nombre)
+        throw new BadRequestException('El empaque necesita un nombre.');
+      cambios.nombre = nombre;
+    }
+    if (dto.factor !== undefined) {
+      if (!(Number(dto.factor) > 0))
+        throw new BadRequestException(
+          'Las unidades por empaque deben ser mayores a 0.',
+        );
+      cambios.factor = round(Number(dto.factor), 4);
+    }
+    if (dto.codigo !== undefined) {
+      const codigo = normalizarCodigo(dto.codigo);
+      if (codigo) {
+        if (item.codigo && codigo === item.codigo)
+          throw new BadRequestException(
+            `El código ${codigo} es el de la unidad: la caja debe tener su propio código de barras.`,
+          );
+        await this.assertCodigoLibre(codigo, { empaqueId });
+      }
+      cambios.codigo = codigo;
+    }
+    if (dto.activo !== undefined) cambios.activo = dto.activo;
+    const { data, error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .update(cambios)
+      .eq('id', empaqueId)
+      .eq('item_id', itemId)
+      .select(EMPAQUE_COLS)
+      .maybeSingle();
+    if (error) throw this.errorDeCodigo(error, cambios.codigo as string | null);
+    if (!data) throw new NotFoundException('Empaque no encontrado.');
+    return data as EmpaqueRow;
+  }
+
+  /** Borra un empaque SIN movimientos; con cardex → 409 (desactivar). */
+  async deleteEmpaque(itemId: string, empaqueId: string) {
+    const e = await this.findEmpaqueDeItem(itemId, empaqueId);
+    const { count, error: eCount } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select('id', { count: 'exact', head: true })
+      .eq('empaque_id', empaqueId);
+    if (eCount) throw new Error(eCount.message);
+    if ((count ?? 0) > 0) {
+      throw new ConflictException(
+        `El empaque "${e.nombre}" ya tiene ${count} movimiento(s) en el cardex: desactívalo (activo=false) en vez de borrarlo.`,
+      );
+    }
+    const { error } = await this.supabase.service
+      .from('inventario_item_empaque')
+      .delete()
+      .eq('id', empaqueId)
+      .eq('item_id', itemId);
+    if (error) throw new Error(error.message);
+    return { ok: true, id: empaqueId };
+  }
+
+  /**
+   * Borrado suave. El código de barras se LIBERA (codigo = null) y sus
+   * empaques se desactivan liberando también los suyos: un ítem eliminado
+   * no puede seguir dueño de un código que el operador querrá reutilizar al
+   * dar de alta el producto de nuevo (antes el código quedaba bloqueado para
+   * siempre y GET /codigo abría el ítem eliminado). Queda rastro en notas.
+   */
+  async softDeleteItem(id: string, userId: string) {
+    const item = (await this.findItem(id)) as {
+      codigo?: string | null;
+      notas?: string | null;
+    };
+    const empaques = await this.listEmpaques(id);
+    const fecha = hoyCancun().split('-').reverse().join('-'); // dd-mm-aaaa
+    const rastro: string[] = [];
+    if (item.codigo)
+      rastro.push(
+        `Código de barras liberado: ${item.codigo} (eliminado ${fecha})`,
+      );
+    for (const e of empaques) {
+      if (e.codigo)
+        rastro.push(
+          `Código de barras del empaque "${e.nombre}" liberado: ${e.codigo} (eliminado ${fecha})`,
+        );
+    }
+    const notas =
+      rastro.length > 0
+        ? [item.notas?.trim(), ...rastro].filter(Boolean).join('\n')
+        : undefined;
+
+    if (empaques.length > 0) {
+      const { error: eEmp } = await this.supabase.service
+        .from('inventario_item_empaque')
+        .update({ activo: false, codigo: null, updated_by: userId })
+        .eq('item_id', id);
+      if (eEmp) throw new Error(eEmp.message);
     }
     const { data, error } = await this.supabase.service
       .from('inventario_item')
-      .update({ ...dto, updated_by: userId })
+      .update({
+        activo: false,
+        codigo: null,
+        ...(notas !== undefined ? { notas } : {}),
+        updated_by: userId,
+      })
       .eq('id', id)
       .select(ITEM_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Ítem ${id} not found`);
-    if (fotoAnterior) {
-      void this.supabase.service.storage
-        .from(FOTOS_BUCKET)
-        .remove([fotoAnterior])
-        .catch(() => undefined);
-    }
-    return data;
-  }
-
-  async softDeleteItem(id: string, userId: string) {
-    return this.updateItem(id, { activo: false }, userId);
+    return {
+      ...(data as Record<string, unknown>),
+      empaques: await this.listEmpaques(id),
+    };
   }
 
   // ===== Movimientos (cardex) =====
@@ -518,6 +1010,58 @@ export class InventoryService {
     userId: string,
   ) {
     const item = (await this.findItem(itemId)) as { nombre: string }; // 404 si no existe
+
+    // Captura POR EMPAQUE (caja): la cantidad del cardex SIEMPRE va en
+    // UNIDADES = cantidad_empaques × factor (fuente única del FIFO y del
+    // gasto de bodega, que no cambian); el empaque y el nº de cajas se
+    // guardan solo como trazabilidad.
+    let empaque: { id: string; nombre: string; factor: number } | null = null;
+    let cantidad: number;
+    if (dto.empaque_id != null || dto.cantidad_empaques != null) {
+      if (!dto.empaque_id || !(Number(dto.cantidad_empaques) > 0)) {
+        throw new BadRequestException(
+          'Para capturar por empaque manda empaque_id y cantidad_empaques (> 0).',
+        );
+      }
+      const e = await this.findEmpaqueDeItem(itemId, dto.empaque_id);
+      if (e.activo === false) {
+        throw new BadRequestException(
+          `El empaque "${e.nombre}" está inactivo: captura por unidades o reactívalo.`,
+        );
+      }
+      empaque = { id: e.id, nombre: e.nombre, factor: Number(e.factor) };
+      const calculada = round(
+        Number(dto.cantidad_empaques) * empaque.factor,
+        2,
+      );
+      if (!(calculada > 0)) {
+        throw new BadRequestException(
+          'La cantidad en unidades resultó 0: revisa las unidades por empaque.',
+        );
+      }
+      // La cantidad la calcula el API (round2). Si el cliente mandó la suya y
+      // difiere ≤ 0.011 se ignora en silencio (redondeo con factores
+      // decimales: 2.5 × 0.946 = 2.365 → 2.37 vs 2.36 del cliente); solo
+      // una diferencia mayor es un error real de captura.
+      if (dto.cantidad != null && Math.abs(dto.cantidad - calculada) > 0.011) {
+        throw new BadRequestException(
+          `La cantidad enviada (${dto.cantidad}) no coincide con ${dto.cantidad_empaques} × ${empaque.nombre} (${empaque.factor} c/u) = ${calculada} unidades.`,
+        );
+      }
+      cantidad = calculada;
+    } else {
+      if (dto.cantidad == null || !(dto.cantidad > 0)) {
+        throw new BadRequestException(
+          'cantidad (en unidades) es requerida, o captura por empaque con empaque_id + cantidad_empaques.',
+        );
+      }
+      cantidad = dto.cantidad;
+    }
+    const presentacion = empaque
+      ? `${round(Number(dto.cantidad_empaques), 2)} × ${empaque.nombre}`
+      : null;
+    // DTO normalizado (cantidad resuelta) para el resto del flujo.
+    const d: CreateMovimientoDto = { ...dto, cantidad };
 
     let costoUnitario: number;
     // Captura en PESOS (default operativo del cliente) o en USD (compras tipo
@@ -539,15 +1083,15 @@ export class InventoryService {
         );
       }
       const layers = this.buildLayers(await this.movsForItem(itemId));
-      const consumo = this.consumeFifo(layers, dto.cantidad);
-      costoUnitario = round(consumo.usd / dto.cantidad, 4);
+      const consumo = this.consumeFifo(layers, cantidad);
+      costoUnitario = round(consumo.usd / cantidad, 4);
       // El costo FIFO interno sigue en USD, pero si las capas consumidas se
       // compraron en PESOS la salida se expresa en MXN (moneda 'MXN' +
       // costo_unitario_mxn + TC ponderado) para que el cardex y el gasto de
       // bodega digan lo que realmente se pagó. Caso aceites 28-ago-2026: una
       // entrada en pesos capturada como USD multiplicó ×17 el costo del avión.
       if (consumo.mxn != null) {
-        costoMxn = round(consumo.mxn / dto.cantidad, 4);
+        costoMxn = round(consumo.mxn / cantidad, 4);
         tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
       }
       moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
@@ -567,6 +1111,11 @@ export class InventoryService {
         );
       }
       costoUnitario = dto.costo_unitario_usd;
+      // Captura en USD con TC conocido (compra Aircraft Spruce pagada en
+      // pesos): se conserva para que el cardex exprese la capa en pesos
+      // reales (costoUnitarioMxnDe = usd × tc). costoMxn sigue null: la
+      // captura fue en dólares.
+      if (Number(dto.tc_usd_mxn) > 0) tc = Number(dto.tc_usd_mxn);
     }
 
     const { data, error } = await this.supabase.service
@@ -574,7 +1123,11 @@ export class InventoryService {
       .insert({
         item_id: itemId,
         tipo: dto.tipo,
-        cantidad: dto.cantidad,
+        cantidad,
+        empaque_id: empaque?.id ?? null,
+        cantidad_empaques: empaque
+          ? round(Number(dto.cantidad_empaques), 2)
+          : null,
         costo_unitario_usd: costoUnitario,
         moneda,
         costo_unitario_mxn: costoMxn,
@@ -584,11 +1137,19 @@ export class InventoryService {
           dto.para_flota === true,
         aeronave_id: dto.aeronave_id ?? null,
         proveedor_id: dto.proveedor_id ?? null,
-        fecha_movimiento: dto.fecha_movimiento ?? undefined,
+        // Día Cancún explícito: el default current_date de la BD es UTC y de
+        // las 19:00 a las 23:59 de Cancún fechaba la SALIDA "mañana", ANTES
+        // de la ENTRADA del mismo día en el orden del cardex.
+        fecha_movimiento: dto.fecha_movimiento ?? hoyCancun(),
         fecha_orden: dto.fecha_orden ?? null,
         fecha_cargo_banco: dto.fecha_cargo_banco ?? null,
         referencia: dto.referencia ?? null,
-        notas: dto.notas ?? null,
+        // Por empaque: las notas arrancan con "N × <empaque>" (trazabilidad).
+        notas: presentacion
+          ? dto.notas
+            ? `${presentacion} · ${dto.notas}`
+            : presentacion
+          : (dto.notas ?? null),
         registrado_por: userId,
         created_by: userId,
         updated_by: userId,
@@ -620,12 +1181,14 @@ export class InventoryService {
         data as Record<string, unknown>,
         item.nombre,
         userId,
+        presentacion,
       );
     } else if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       gastoGenerado = await this.crearGastoDeSalida(
         data as Record<string, unknown>,
         item.nombre,
         userId,
+        presentacion,
       );
     } else if (
       dto.tipo === TipoMovimientoInventario.DEVOLUCION &&
@@ -635,7 +1198,7 @@ export class InventoryService {
       // costo_unitario_usd y la reversión quedaría en 0 en silencio.
       reversionPendiente = await this.revertirGastoPorDevolucion(
         itemId,
-        dto,
+        d,
         costoUnitario,
         item.nombre,
         userId,
@@ -647,6 +1210,9 @@ export class InventoryService {
     );
     return {
       ...data,
+      empaque: empaque
+        ? { nombre: empaque.nombre, factor: empaque.factor }
+        : null,
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
@@ -665,6 +1231,7 @@ export class InventoryService {
     mov: Record<string, unknown>,
     itemNombre: string,
     userId: string,
+    presentacion: string | null = null,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
@@ -684,7 +1251,7 @@ export class InventoryService {
         proveedor_id: mov.proveedor_id ?? null,
         inventario_movimiento_id: mov.id,
         notas:
-          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO)` +
+          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (costo FIFO)` +
           (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
         created_by: userId,
         updated_by: userId,
@@ -714,6 +1281,7 @@ export class InventoryService {
     mov: Record<string, unknown>,
     itemNombre: string,
     userId: string,
+    presentacion: string | null = null,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
@@ -749,7 +1317,7 @@ export class InventoryService {
       proveedor_id: mov.proveedor_id ?? null,
       inventario_movimiento_id: mov.id,
       notas:
-        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre} (costo FIFO $${monto.toFixed(2)} ${moneda})` +
+        `Salida de bodega (toda la flota, 1/${n} del costo): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (costo FIFO $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
       created_by: userId,
       updated_by: userId,
@@ -897,7 +1465,7 @@ export class InventoryService {
     let q = this.supabase.service
       .from('inventario_movimiento')
       .select(
-        `${MOV_COLS}, item:inventario_item!item_id(nombre, numero_parte, categoria), aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre)`,
+        `${MOV_COLS}, item:inventario_item!item_id(nombre, numero_parte, categoria), ${MOV_JOINS}`,
         { count: 'exact' },
       )
       .order('fecha_movimiento', { ascending: false })
@@ -924,6 +1492,42 @@ export class InventoryService {
 function round(n: number, decimals = 3): number {
   const f = 10 ** decimals;
   return Math.round((n + Number.EPSILON) * f) / f;
+}
+
+/** true si es un string con algo más que espacios (null/undefined/'' → false). */
+function textoNoVacio(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
+
+/** `activo` del ítem embebido en un join de supabase (objeto o arreglo). */
+function itemActivoDe(raw: unknown): boolean {
+  const it = Array.isArray(raw) ? (raw[0] as unknown) : raw;
+  return (
+    !!it &&
+    typeof it === 'object' &&
+    (it as { activo?: unknown }).activo !== false
+  );
+}
+
+/** Fotos adicionales como jsonb plano [{url, path}] (sin instancias de DTO). */
+function fotosPlanas(
+  fotos: FotoInventarioDto[] | null | undefined,
+): Array<{ url: string; path: string }> {
+  return (fotos ?? []).map((f) => ({ url: f.url, path: f.path }));
+}
+
+/** Paths de un jsonb de fotos (tolerante a basura). */
+function pathsDeFotos(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((f) =>
+      f &&
+      typeof f === 'object' &&
+      typeof (f as { path?: unknown }).path === 'string'
+        ? (f as { path: string }).path
+        : null,
+    )
+    .filter((p): p is string => !!p);
 }
 
 /**

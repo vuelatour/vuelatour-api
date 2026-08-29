@@ -10,14 +10,22 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
-import { ConstanciaFiscalDto, GastoTicketDto } from './dto/vision.dto';
+import { InventoryService } from '../inventory/inventory.service';
+import {
+  ConstanciaFiscalDto,
+  GastoTicketDto,
+  InventarioItemVisionDto,
+} from './dto/vision.dto';
 import { VisionService } from './vision.service';
 
 @ApiTags('Vision')
 @ApiBearerAuth()
 @Controller({ path: 'vision', version: '1' })
 export class VisionController {
-  constructor(private readonly vision: VisionService) {}
+  constructor(
+    private readonly vision: VisionService,
+    private readonly inventory: InventoryService,
+  ) {}
 
   @Get('health')
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
@@ -108,6 +116,42 @@ export class VisionController {
       imageUrl: dto.imageUrl,
     });
     if (!result) return { disponible: false };
+    return { disponible: true, ...result };
+  }
+
+  @Post('inventario-item')
+  // Quienes operan bodega desde el panel/app (COORDINADOR incluido; SOCIO
+  // solo consulta).
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.MECANICO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Ficha de un producto de inventario desde varias fotos (nombre, marca, No. parte, código de barras, categoría, unidad, contenido, descripción y empaque/caja) para pre-llenar el alta. Best-effort: disponible=false (+motivo) si la IA no responde.',
+  })
+  async inventarioItem(@Body() dto: InventarioItemVisionDto) {
+    for (const img of dto.images) {
+      if (img.imageBase64 && !img.mediaType) {
+        throw new BadRequestException(
+          'mediaType es requerido con cada imageBase64.',
+        );
+      }
+      if (!img.imageBase64 && !img.imageUrl) {
+        throw new BadRequestException(
+          'Cada foto necesita imageBase64 (+mediaType) o imageUrl.',
+        );
+      }
+    }
+    // Las categorías reales de bodega: la IA elige entre ellas (o propone).
+    const categorias = await this.inventory.listCategorias();
+    const result = await this.vision.readInventarioItem({
+      images: dto.images,
+      categorias,
+      codigosEscaneados: dto.codigos_escaneados,
+    });
+    if (!result) return { disponible: false };
+    if (result.motivo && result.nombre === undefined) {
+      return { disponible: false, motivo: result.motivo };
+    }
     return { disponible: true, ...result };
   }
 }

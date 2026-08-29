@@ -2,6 +2,7 @@ import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import { normalizarCodigo } from '../inventory/inventario-codigo.util';
 
 export interface TacometroVisionInput {
   /** Imagen en base64 (sin prefijo data:). Requiere mediaType. */
@@ -119,6 +120,42 @@ export interface CombustibleTicketVisionResult {
   legible: boolean;
   notas: string;
   modelo: string;
+}
+
+export interface InventarioItemVisionInput {
+  /** Fotos del MISMO producto desde distintos ángulos / la caja (1–8). */
+  images: Array<{
+    imageBase64?: string;
+    mediaType?: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+    imageUrl?: string;
+  }>;
+  /** Categorías existentes en bodega: la IA elige una (o propone una corta). */
+  categorias: string[];
+  /** Códigos ya escaneados: verdad para la IA (no los reinventa). */
+  codigosEscaneados?: string[];
+}
+
+/** Respuesta de pyservices POST /vision/inventario-item (todo opcional/null). */
+export interface InventarioItemVisionResult {
+  nombre: string | null;
+  marca: string | null;
+  numero_parte: string | null;
+  /** Código de barras de la UNIDAD, dígitos seguidos sin espacios. */
+  codigo_barras: string | null;
+  categoria: string | null;
+  unidad: string | null;
+  /** Contenido / presentación de la unidad (ej. "946 mL"). */
+  contenido: string | null;
+  descripcion: string | null;
+  /** Si alguna foto es la caja: nombre 'Caja de N', factor N y su código. */
+  empaque: {
+    nombre: string | null;
+    factor: number | null;
+    codigo_barras: string | null;
+  } | null;
+  confianza: number;
+  notas_ia: string | null;
+  modelo?: string;
 }
 
 /**
@@ -471,6 +508,87 @@ export class VisionService implements OnModuleInit {
         `readCombustibleTicket falló: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Ficha de un producto de inventario desde varias fotos (mismo patrón que
+   * readGastoTicket: best-effort, y si falla devuelve el MOTIVO legible para
+   * que la app lo muestre en vez de un genérico "no se pudo leer"). Los
+   * códigos de barras que regresa pasan por `normalizarCodigo` (sin
+   * espacios, UPC-A canónico): la misma fuente única que el escáner y el
+   * alta, para que lo que la IA lee coincida con lo que se busca.
+   */
+  async readInventarioItem(
+    input: InventarioItemVisionInput,
+  ): Promise<(InventarioItemVisionResult & { motivo?: string }) | null> {
+    if (!this.enabled) return null;
+    const images = (input.images ?? []).filter(
+      (i) => i.imageBase64 || i.imageUrl,
+    );
+    if (images.length === 0) return null;
+
+    const controller = new AbortController();
+    // Varias fotos = documento: mismo margen que las facturas multi-página.
+    const timer = setTimeout(
+      () => controller.abort(),
+      images.length > 1 ? Math.max(this.timeoutMs, 150_000) : this.timeoutMs,
+    );
+    try {
+      const res = await fetch(`${this.baseUrl}/vision/inventario-item`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Internal-Token': this.token,
+        },
+        body: JSON.stringify({
+          images: images.map((i) => ({
+            image_base64: i.imageBase64,
+            media_type: i.mediaType,
+            image_url: i.imageUrl,
+          })),
+          categorias: input.categorias ?? [],
+          codigos_escaneados: input.codigosEscaneados?.length
+            ? input.codigosEscaneados
+            : undefined,
+        }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const detalle = await res.text().catch(() => '');
+        this.logger.warn(
+          `pyservices /vision/inventario-item respondió ${res.status}: ${detalle.slice(0, 200)}`,
+        );
+        let motivo = `pyservices ${res.status}`;
+        try {
+          const j = JSON.parse(detalle) as { detail?: string };
+          if (j.detail) motivo = j.detail;
+        } catch {
+          /* texto plano */
+        }
+        return { motivo } as InventarioItemVisionResult & { motivo: string };
+      }
+      const ai = (await res.json()) as InventarioItemVisionResult;
+      ai.codigo_barras = normalizarCodigo(ai.codigo_barras);
+      if (ai.empaque) {
+        ai.empaque.codigo_barras = normalizarCodigo(ai.empaque.codigo_barras);
+        const f = Number(ai.empaque.factor);
+        ai.empaque.factor = Number.isFinite(f) && f > 0 ? f : null;
+        // Un "empaque" sin factor ni código no aporta nada: se descarta.
+        if (ai.empaque.factor == null && !ai.empaque.codigo_barras)
+          ai.empaque = null;
+      }
+      return ai;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`readInventarioItem falló: ${msg}`);
+      return {
+        motivo: msg.includes('abort')
+          ? 'La lectura tardó demasiado (timeout API→pyservices)'
+          : `Sin conexión con pyservices: ${msg.slice(0, 120)}`,
+      } as InventarioItemVisionResult & { motivo: string };
     } finally {
       clearTimeout(timer);
     }
