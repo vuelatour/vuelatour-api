@@ -170,7 +170,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   usa service key).
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
-- Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096`.
+- Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el
+  Dockerfile lo fija en la etapa de build: sin él Railway se queda sin
+  memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
 
