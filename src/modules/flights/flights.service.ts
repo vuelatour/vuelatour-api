@@ -54,7 +54,11 @@ import type {
   TacoAiReadDto,
   UpdateEscalaDto,
 } from './dto/escalas.dto';
-import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
+import type {
+  CreateCobroDto,
+  CreateReembolsoDto,
+  UpdateCobroDto,
+} from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 import {
@@ -8159,6 +8163,144 @@ export class FlightsService {
   }
 
   /**
+   * REEMBOLSO (29-ago-2026): fila de `cobro_vuelo` con MONTO NEGATIVO (el
+   * CHECK de BD permite <> 0) — mismo camino que createCobro (insert +
+   * idempotencia + bandera cobrado) para que TODOS los lectores de dinero
+   * (cobrosEnUsd: bandera, semáforo, reporte por vuelo, reparto, pre-cierre,
+   * Libro Dinero, balance) lo RESTEN sin código nuevo.
+   * Candados: no puede dejar el cobrado NETO del vuelo en negativo; SÍ se
+   * permite en vuelo CANCELADO (devolver un anticipo); motivo obligatorio
+   * (queda en notas). Sin comisión bancaria ni voucher (esa lógica asume
+   * cobro positivo: un reembolso mal capturado se ELIMINA y se recaptura).
+   * El CARGO bancario del reembolso queda FUERA de la conciliación en v1
+   * (el auto-match solo cruza ABONOS con cobros positivos); se concilia a
+   * mano si hace falta.
+   */
+  async createReembolso(
+    vueloId: string,
+    dto: CreateReembolsoDto,
+    userId: string,
+  ) {
+    const vuelo = await this.findById(vueloId);
+    // Un reembolso en MXN debe poder convertir a USD (TC del DTO o el de la
+    // cotización): sin TC no se puede vigilar el candado del neto y la fila
+    // caería a sin_tc_* en NEGATIVO (ruido para el supervisor).
+    const esMxn = (dto.moneda as string) === 'MXN';
+    const tcReembolso =
+      dto.tc_usd_mxn ??
+      (esMxn && Number(vuelo.tc_usd_mxn) > 0
+        ? Number(vuelo.tc_usd_mxn)
+        : undefined);
+    if (esMxn && !tcReembolso) {
+      throw new BadRequestException(
+        'Un reembolso en pesos necesita tipo de cambio: captura tc_usd_mxn (este vuelo no tiene TC de cotización de respaldo).',
+      );
+    }
+    // Candado: reembolso ≤ cobrado NETO del vuelo (fuente única cobrosEnUsd,
+    // que ya resta reembolsos previos). Tolerancia de 1 centavo por redondeo.
+    const cobros = await this.listCobros(vueloId);
+    const neto = cobrosEnUsd(
+      cobros,
+      vuelo.tc_usd_mxn as number | null,
+    ).total_usd;
+    const reembolsoUsd = !esMxn
+      ? dto.monto
+      : Math.round((dto.monto / (tcReembolso as number)) * 100) / 100;
+    if (reembolsoUsd > neto + 0.01) {
+      throw new BadRequestException(
+        `El reembolso equivale a $${reembolsoUsd.toLocaleString('en-US')} USD y lo cobrado neto del vuelo es $${neto.toLocaleString('en-US')} USD: no puede quedar un cobrado negativo. Revisa el monto (o elimina/corrige cobros mal capturados).`,
+      );
+    }
+    const montoNegado = -Math.abs(dto.monto);
+    // Misma ventana anti-doble-captura que createCobro cuando no viaja llave
+    // de idempotencia (doble clic del panel).
+    if (!dto.client_request_id) {
+      const { data: gemelos } = await this.supabase.service
+        .from('cobro_vuelo')
+        .select('id, created_at')
+        .eq('vuelo_id', vueloId)
+        .eq('monto', montoNegado)
+        .eq('moneda', dto.moneda)
+        .eq('metodo_cobro', dto.metodo_cobro)
+        .gte('created_at', new Date(Date.now() - 90_000).toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1);
+      const gemelo = (gemelos ?? [])[0];
+      if (gemelo) {
+        throw new ConflictException(
+          'Parece el mismo reembolso repetido: ya hay un reembolso idéntico de este vuelo hace menos de 90 segundos.',
+        );
+      }
+    }
+    const motivo = dto.motivo.trim();
+    const { data: cobro, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .insert({
+        vuelo_id: vueloId,
+        // NEGATIVO = reembolso: cobrosEnUsd lo RESTA en todos los lectores.
+        monto: montoNegado,
+        moneda: dto.moneda,
+        metodo_cobro: dto.metodo_cobro,
+        tc_usd_mxn: tcReembolso,
+        cuenta_destino: dto.cuenta_destino?.trim() || null,
+        referencia: dto.referencia,
+        fecha_cobro: dto.fecha_cobro?.toISOString(),
+        registrado_por: userId,
+        notas: `Reembolso: ${motivo}`,
+        client_request_id: dto.client_request_id ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(COBRO_COLS)
+      .maybeSingle();
+    if (error) {
+      // Reintento con la misma llave: devolver el reembolso YA registrado.
+      if (
+        error.code === '23505' &&
+        dto.client_request_id &&
+        error.message.includes('uq_cobro_vuelo_client_request')
+      ) {
+        const { data: existente, error: exErr } = await this.supabase.service
+          .from('cobro_vuelo')
+          .select(COBRO_COLS)
+          .eq('client_request_id', dto.client_request_id)
+          .maybeSingle();
+        if (!exErr && existente) {
+          this.logger.log(
+            `Reembolso idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el existente ${existente.id as string}.`,
+          );
+          return existente;
+        }
+      }
+      throw new Error(error.message);
+    }
+    // Best-effort igual que createCobro: el dinero YA está escrito.
+    try {
+      await this.refreshCobradoFlag(vueloId, userId);
+    } catch (err) {
+      this.logger.error(
+        `createReembolso ${vueloId}: el reembolso ${(cobro?.id as string) ?? '?'} quedó registrado pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const payload = {
+      // Tipo que la app Flutter ya sabe pintar (mismo canal que los cobros).
+      tipo: 'cobro_registrado',
+      titulo: 'Reembolso registrado',
+      cuerpo: `${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')} devueltos · folio #${vuelo.folio} · ${motivo}`,
+      data: {
+        vuelo_id: vueloId,
+        folio: vuelo.folio as number,
+        monto: montoNegado,
+        moneda: dto.moneda,
+      },
+      link: `/admin/flights/${vueloId}`,
+    };
+    void this.notifications.notifyRole(Rol.ADMIN, payload, userId);
+    void this.notifications.notifyRole(Rol.FACTURACION, payload, userId);
+    return cobro!;
+  }
+
+  /**
    * Recalcula la bandera `cobrado` con la fuente canónica (cobrosEnUsd): un
    * cobro MXN sin TC usa el tc_cotizacion del vuelo como respaldo, así un
    * vuelo pagado en pesos sí se marca cobrado. Tolerancia de 1 USD por
@@ -8251,6 +8393,14 @@ export class FlightsService {
       dto.tc_usd_mxn !== undefined ||
       dto.comision_banco_pct !== undefined ||
       dto.comision_banco_monto !== undefined;
+    // REEMBOLSO (monto negativo, 29-ago): su dinero NO se edita por PATCH —
+    // la lógica de comisión/candados de este método asume cobro positivo y
+    // el DTO forzaría monto ≥ 0.01 (convertiría el reembolso en cobro).
+    if (Number(existing.monto) < 0 && tocaDinero) {
+      throw new BadRequestException(
+        'Este movimiento es un reembolso: no se corrige su dinero — elimínalo y recaptúralo con el monto correcto.',
+      );
+    }
     if (tocaDinero) await this.assertCobroSinConciliar(cobroId);
 
     const patch: Record<string, unknown> = { updated_by: userId };

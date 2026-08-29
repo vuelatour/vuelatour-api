@@ -545,6 +545,10 @@ export class ConciliacionService {
     let q = this.supabase.service
       .from('cobro_vuelo')
       .select('id, monto, comision_banco_monto')
+      // Solo cobros POSITIVOS: un REEMBOLSO (monto negativo, 29-ago) sale
+      // como CARGO en el banco, no como abono — queda FUERA de la
+      // conciliación automática en v1 (se cruza a mano si hace falta).
+      .gt('monto', 0)
       .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'])
       .gte('fecha_cobro', lo.toISOString())
       .lte('fecha_cobro', hi.toISOString())

@@ -123,6 +123,85 @@ export class CreateCobroDto {
   client_request_id?: string;
 }
 
+/**
+ * REEMBOLSO de un cobro (29-ago-2026): se persiste como fila de `cobro_vuelo`
+ * con MONTO NEGATIVO (el CHECK de BD permite <> 0) — así TODOS los lectores
+ * (cobrosEnUsd, bandera cobrado, semáforo, reporte por vuelo, reparto,
+ * Libro Dinero, balance) lo RESTAN sin código nuevo. El monto del DTO viaja
+ * POSITIVO (lo que se devuelve) y el service lo niega al insertar. Sin
+ * comisión bancaria (la lógica de comisión asume cobro positivo; el cargo
+ * bancario del reembolso se registra aparte si aplica) y sin voucher.
+ */
+export class CreateReembolsoDto {
+  @ApiProperty({
+    description: 'Monto DEVUELTO al cliente (positivo, en moneda del cobro).',
+  })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  monto!: number;
+
+  @ApiProperty({ enum: Moneda })
+  @IsEnum(Moneda)
+  moneda!: Moneda;
+
+  @ApiProperty({ enum: MetodoPago, description: 'Cómo se devolvió el dinero.' })
+  @IsEnum(MetodoPago)
+  metodo_cobro!: MetodoPago;
+
+  @ApiPropertyOptional({
+    description:
+      'TC del reembolso (MXN). Si falta, se usa el TC de la cotización del vuelo.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({
+    description: 'De qué CUENTA salió la devolución (misma lista fija).',
+    enum: CUENTAS_COBRO,
+  })
+  @IsOptional()
+  @ValidateIf((o: { cuenta_destino?: string }) => !!o.cuenta_destino)
+  @IsIn(CUENTAS_COBRO, {
+    message:
+      'cuenta_destino debe ser una de: Paywise, HSBC Dólares, HSBC Pesos, Scotiabank Dólares, Scotiabank Pesos',
+  })
+  cuenta_destino?: string;
+
+  @ApiPropertyOptional({ description: 'Referencia bancaria del reembolso.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(100)
+  referencia?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fecha real del reembolso. Default: now()',
+  })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  fecha_cobro?: Date;
+
+  @ApiProperty({
+    description:
+      'MOTIVO del reembolso (obligatorio): por qué se devuelve el dinero — queda en las notas del movimiento.',
+  })
+  @IsString()
+  @MaxLength(500)
+  motivo!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA (uuid v4): un reintento con la misma llave devuelve el reembolso YA registrado.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+}
+
 /** Corrección de un cobro por oficina; todo opcional (patch). */
 export class UpdateCobroDto {
   @ApiPropertyOptional()

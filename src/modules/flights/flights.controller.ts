@@ -19,7 +19,11 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
-import { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
+import {
+  CreateCobroDto,
+  CreateReembolsoDto,
+  UpdateCobroDto,
+} from './dto/cobros.dto';
 import {
   AssignEscalaDto,
   CancelEscalaDto,
@@ -709,11 +713,26 @@ export class FlightsController {
     return this.flights.createCobro(id, dto, c.userId, c.rol);
   }
 
+  @Post(':id/refunds')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Registra un REEMBOLSO al cliente: fila de cobro_vuelo con monto NEGATIVO (todos los lectores lo restan vía cobrosEnUsd). Candado: no puede dejar el cobrado neto del vuelo en negativo; permitido en CANCELADO (devolver anticipo). Motivo obligatorio.',
+  })
+  async createRefund(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateReembolsoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    await this.flights.assertAccess(id, c);
+    return this.flights.createReembolso(id, dto, c.userId);
+  }
+
   @Patch('cobros/:cobroId')
   @Roles(Rol.ADMIN, Rol.FACTURACION)
   @ApiOperation({
     summary:
-      'Corrige un cobro capturado mal (oficina). Recalcula la bandera cobrado con la fuente canónica.',
+      'Corrige un cobro capturado mal (oficina). Recalcula la bandera cobrado con la fuente canónica. Un REEMBOLSO (monto negativo) no admite corrección de dinero: se elimina y se recaptura.',
   })
   updatePayment(
     @Param('cobroId', ParseUUIDPipe) cobroId: string,

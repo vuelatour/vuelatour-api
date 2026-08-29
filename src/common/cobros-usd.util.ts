@@ -13,6 +13,10 @@
  *   tc_cotizacion del vuelo).
  * - MXN sin ningún TC → NO se suma, pero se reporta en `sin_tc_mxn` para que
  *   el supervisor lo vea (nunca desaparece en silencio).
+ * - Monto NEGATIVO = REEMBOLSO (29-ago-2026): RESTA con las mismas reglas de
+ *   conversión (todos los lectores — bandera cobrado, reporte por vuelo,
+ *   reparto, pre-cierre, balance — heredan la resta de aquí). Solo se
+ *   descarta el 0 / no numérico.
  */
 
 export interface CobroLike {
@@ -41,7 +45,8 @@ export function cobrosEnUsd(
     tcFallback != null && Number(tcFallback) > 0 ? Number(tcFallback) : null;
   for (const c of cobros) {
     const monto = Number(c.monto);
-    if (!Number.isFinite(monto) || monto <= 0) continue;
+    // negativo = reembolso, RESTA (29-ago); solo se descarta 0 / no finito.
+    if (!Number.isFinite(monto) || monto === 0) continue;
     if (c.moneda === 'USD') {
       total += monto;
       continue;
