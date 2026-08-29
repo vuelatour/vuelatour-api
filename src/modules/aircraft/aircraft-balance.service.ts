@@ -2826,8 +2826,13 @@ export class AircraftBalanceService {
     //    otra hoja lo contaría DOS veces en la cascada.
     //  - PERMISO → hoja "permisos" (con o sin vuelo).
     //  - Parcial de un REPARTO MANUAL (es_reparto_parcial: FIJO/OTRO/
-    //    INDIRECTO/GASOLINA/VISITA de la empresa repartidos a mano) → hoja
+    //    GASOLINA/VISITA de la empresa repartidos a mano) → hoja
     //    "otros gastos": administrativos repartidos, la parte de este avión.
+    //    EXCEPCIÓN (29-ago-2026, reclasificación COSMÉTICA): el parcial de
+    //    categoría INDIRECTO va a la hoja "gastos indirectos" — el cliente
+    //    lo busca por su categoría — conservando su nota "reparto manual:
+    //    $X de $Y". El cuadre NO cambia: la cascada suma AMBAS hojas, mover
+    //    la fila mueve su total de hoja y la suma de las dos es idéntica.
     //  - Resto con aeronave_id DIRECTO y SIN vuelo (INDIRECTO, OTRO, FIJO,
     //    REFACCION, OPERACIONES, …) → hoja "gastos indirectos": gastos que
     //    no se pueden ligar a un vuelo pero sí al avión.
@@ -2859,12 +2864,17 @@ export class AircraftBalanceService {
     const HOJAS_APARTE = new Set(['GAS', 'PERMISO', 'TUAS']);
     const filasIndirectos = [
       ...gastosAvion.filter(
-        (g) => g.es_reparto_parcial !== true && !HOJAS_APARTE.has(g.categoria),
+        (g) =>
+          !HOJAS_APARTE.has(g.categoria) &&
+          (g.es_reparto_parcial !== true || g.categoria === 'INDIRECTO'),
       ),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'INDIRECTO'),
     ];
     const filasOtros = gastosAvion.filter(
-      (g) => g.es_reparto_parcial === true && !HOJAS_APARTE.has(g.categoria),
+      (g) =>
+        g.es_reparto_parcial === true &&
+        g.categoria !== 'INDIRECTO' &&
+        !HOJAS_APARTE.has(g.categoria),
     );
     // Permisos: pagos reales de PERMISO del avión, CON o SIN vuelo.
     const filasPermisos = [

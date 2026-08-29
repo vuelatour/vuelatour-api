@@ -1009,9 +1009,13 @@ export class DineroReportService {
       // (regla 8, 28-ago-2026 — la MISMA del Balance por avión, antes era
       // solo por categoría y los cortes no cuadraban con el balance):
       //  - PERMISO → permisos (con o sin reparto).
-      //  - Parcial de un reparto MANUAL (FIJO/OTRO/INDIRECTO/GASOLINA/
-      //    VISITA de la empresa repartidos a mano) → otros gastos: la parte
-      //    de este avión de un gasto administrativo.
+      //  - Parcial de un reparto MANUAL (FIJO/OTRO/GASOLINA/VISITA de la
+      //    empresa repartidos a mano) → otros gastos: la parte de este
+      //    avión de un gasto administrativo. EXCEPCIÓN (29-ago-2026,
+      //    reclasificación COSMÉTICA, espejo del Balance por avión): el
+      //    parcial de categoría INDIRECTO acredita a "gastos indirectos"
+      //    — el cliente lo busca por su categoría; el cuadre no cambia
+      //    (utilidades resta AMBOS cortes), solo cambia de columna.
       //  - aeronave_id DIRECTO sin vuelo (INDIRECTO, REFACCION, OTRO, FIJO,
       //    OPERACIONES, …) → gastos indirectos: no se ligan a un vuelo pero
       //    sí al avión.
@@ -1024,7 +1028,7 @@ export class DineroReportService {
         const destino =
           g.categoria === 'PERMISO'
             ? permisosPorAvion
-            : parcial
+            : parcial && g.categoria !== 'INDIRECTO'
               ? otrosPorAvion
               : indirectosPorAvion;
         destino.set(aid, (destino.get(aid) ?? 0) + monto_);
