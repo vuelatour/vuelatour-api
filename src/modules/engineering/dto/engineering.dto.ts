@@ -150,6 +150,17 @@ export class CreateMantenimientoDto {
   @IsOptional()
   @IsUUID()
   helice_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por ' +
+      'captura). Un reintento (timeout tras commit, outbox de la app) con ' +
+      'la misma llave devuelve el mantenimiento YA creado en vez de crear ' +
+      'un servicio duplicado. Índice único uq_mantenimiento_client_request.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
 export class UpdateMantenimientoDto {

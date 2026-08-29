@@ -88,6 +88,7 @@ export class FlightReportService {
       escalasRes,
       cobrosRes,
       gastosRes,
+      apoyosRes,
     ] = await Promise.all([
       v.cliente_id
         ? sb
@@ -106,7 +107,7 @@ export class FlightReportService {
       sb
         .from('escala')
         .select(
-          'orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id',
+          'id, orden, origen_iata, destino_iata, pasajeros, pasajeros_nombres, taco_salida, taco_llegada, solo_operativa, es_ferry, requiere_pernocta, aeronave_id, piloto_id, copiloto_id',
         )
         .eq('vuelo_id', flightId)
         // Tramos cancelados fuera del reporte: no volaron (motivo visible en
@@ -127,6 +128,13 @@ export class FlightReportService {
         )
         .eq('vuelo_id', flightId)
         .order('fecha_gasto', { ascending: true }),
+      // Tripulación de apoyo 0..N (29-ago): del vuelo y por tramo. Aditivo
+      // e informativo: si falla, el reporte sale sin apoyos (no es dinero).
+      sb
+        .from('vuelo_apoyo')
+        .select('escala_id, usuario_id, created_at')
+        .eq('vuelo_id', flightId)
+        .order('created_at', { ascending: true }),
     ]);
 
     // Un query fallido NO puede degradar a "sin datos": un reporte con cero
@@ -144,8 +152,22 @@ export class FlightReportService {
       }
     }
 
-    // Nombres de piloto/copiloto.
-    const userIds = [v.piloto_id, v.copiloto_id].filter(Boolean) as string[];
+    // Nombres de piloto/copiloto (del vuelo y por tramo) y de los apoyos.
+    const apoyosRows = (
+      apoyosRes.error ? [] : (apoyosRes.data ?? [])
+    ) as Array<{
+      escala_id: string | null;
+      usuario_id: string;
+      created_at?: string | null;
+    }>;
+    const userIds = [
+      v.piloto_id,
+      v.copiloto_id,
+      ...((escalasRes.data ?? []) as Array<Record<string, unknown>>).flatMap(
+        (e) => [e.piloto_id, e.copiloto_id],
+      ),
+      ...apoyosRows.map((a) => a.usuario_id),
+    ].filter(Boolean) as string[];
     const nombrePorId = new Map<string, string>();
     if (userIds.length) {
       const { data: us } = await sb
@@ -177,9 +199,21 @@ export class FlightReportService {
       return typeof v === 'string' && v.trim() ? v : null;
     };
 
+    const nombreDe = (id: unknown): string | null =>
+      typeof id === 'string' && id ? (nombrePorId.get(id) ?? null) : null;
+    const apoyosVuelo = apoyosRows
+      .filter((a) => a.escala_id == null)
+      .map((a) => nombreDe(a.usuario_id))
+      .filter((x): x is string => !!x);
     const tramos = escalas.map((e, idx) => {
       const s = e.taco_salida == null ? null : n(e.taco_salida);
       const l = e.taco_llegada == null ? null : n(e.taco_llegada);
+      // Tripulación por tramo (29-ago): piloto/copiloto EFECTIVOS (herencia
+      // del vuelo) y apoyos efectivos (del vuelo ∪ del tramo).
+      const apoyosTramo = apoyosRows
+        .filter((a) => a.escala_id === (e.id as string))
+        .map((a) => nombreDe(a.usuario_id))
+        .filter((x): x is string => !!x && !apoyosVuelo.includes(x));
       return {
         // Numeración VISIBLE secuencial: el orden interno puede ser >=100
         // (tramos operativos agregados a mano, para que el cotizador no los
@@ -192,6 +226,9 @@ export class FlightReportService {
         taco_llegada: l,
         horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
         es_ferry: e.es_ferry === true,
+        piloto: nombreDe(e.piloto_id) ?? nombreDe(v.piloto_id),
+        copiloto: nombreDe(e.copiloto_id) ?? nombreDe(v.copiloto_id),
+        apoyos: [...apoyosVuelo, ...apoyosTramo],
       };
     });
 
@@ -582,6 +619,8 @@ export class FlightReportService {
       copiloto: v.copiloto_id
         ? (nombrePorId.get(v.copiloto_id as string) ?? null)
         : null,
+      // Apoyos de nivel vuelo (29-ago, aditivo; los por tramo van en tramos[]).
+      apoyos: apoyosVuelo,
       tipo: (v.tipo as string) ?? '',
       estado: (v.estado as string) ?? '',
       ruta,

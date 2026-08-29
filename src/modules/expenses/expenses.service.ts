@@ -359,7 +359,7 @@ export class ExpensesService {
     const { data: vuelos, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, piloto_id, copiloto_id, apoyo_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id)',
+        'id, folio, fecha_vuelo, piloto_id, copiloto_id, apoyo_id, estado, aeronave_id, aeronave:aeronave_id(matricula), escalas:escala(orden, origen_iata, destino_iata, piloto_id, copiloto_id), apoyos:vuelo_apoyo(usuario_id)',
       )
       .eq('es_externo', false)
       .gte('fecha_vuelo', lo)
@@ -375,9 +375,15 @@ export class ExpensesService {
         v.apoyo_id === capturo
       )
         return true;
+      // 29-ago: apoyos 0..N (vuelo o tramo) y copiloto por tramo.
+      const apoyos =
+        (v.apoyos as Array<{ usuario_id?: string | null }> | null) ?? [];
+      if (apoyos.some((a) => a.usuario_id === capturo)) return true;
       const escalas =
         (v.escalas as Array<Record<string, unknown>> | null) ?? [];
-      return escalas.some((e) => e.piloto_id === capturo);
+      return escalas.some(
+        (e) => e.piloto_id === capturo || e.copiloto_id === capturo,
+      );
     };
     const rutaDe = (v: Record<string, unknown>): string | null => {
       const escalas = [
@@ -988,7 +994,11 @@ export class ExpensesService {
     // "26/08/2025" en un ticket de la visita de 2026 y el gasto quedó un año
     // atrás, invisible en el panel. En vez de guardar en silencio, se rechaza
     // con el dato a la vista para que corrijan el año en la app.
-    this.assertFechaRazonable(dto.fecha_gasto, rol);
+    this.assertFechaRazonable(
+      dto.fecha_gasto,
+      rol,
+      dto.permitir_fecha_antigua === true,
+    );
     // REGLA B (28-ago): un gasto enlazado a un TRAMO pertenece al avión de
     // ese tramo. Se resuelve UNA vez aquí (vuelo del tramo + avión con
     // herencia) y de aquí salen la herencia y el aviso de discrepancia.
@@ -1244,6 +1254,9 @@ export class ExpensesService {
       valor_ia_extraido: dto.valor_ia_extraido,
       duplicado_sospechado: await this.looksLikeDuplicate(dto),
       folio_ticket: dto.folio_ticket?.trim() || null,
+      // Idempotencia (29-ago): un reintento con la misma llave colisiona en
+      // uq_gasto_client_request y devuelve la fila EXISTENTE (abajo).
+      client_request_id: dto.client_request_id ?? null,
       notas,
       created_by: userId,
       updated_by: userId,
@@ -1253,6 +1266,21 @@ export class ExpensesService {
     // el mismo folio, sin importar quién ni cuántos días después. El pre-check
     // da el mensaje con detalle; el índice único de la BD cubre la carrera.
     await this.assertFolioTicketLibre(dto.folio_ticket);
+
+    // CANDADO DE VENTANA (29-ago, mientras vivan APKs sin llave de
+    // idempotencia): un payload SIN client_request_id NI folio_ticket que es
+    // IDÉNTICO a un gasto del mismo capturista creado hace < 90 s es casi
+    // seguro el reintento del outbox/doble tap (pares reales en prod con
+    // 3-5 s de diferencia). Con notas distintas o con llave/folio JAMÁS
+    // bloquea.
+    if (!dto.client_request_id && !dto.folio_ticket?.trim()) {
+      await this.assertNoCapturaRepetida(
+        dto,
+        capturaId,
+        notas ?? null,
+        aeronaveId ?? null,
+      );
+    }
 
     const { data, error } = await this.supabase.service
       .from('gasto')
@@ -1264,10 +1292,31 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
-      if (error.code === '23505')
+      if (error.code === '23505') {
+        // Colisión de la LLAVE DE IDEMPOTENCIA: el gasto YA se creó en un
+        // intento anterior (timeout tras commit / doble flush del outbox).
+        // Se devuelve la fila existente con el mismo shape que un alta
+        // normal: el reintento se vuelve inocuo.
+        if (
+          dto.client_request_id &&
+          error.message.includes('uq_gasto_client_request')
+        ) {
+          const { data: existente, error: exErr } = await this.supabase.service
+            .from('gasto')
+            .select(COLS)
+            .eq('client_request_id', dto.client_request_id)
+            .maybeSingle();
+          if (!exErr && existente) {
+            this.logger.log(
+              `Gasto idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el gasto existente ${existente.id as string} (sin duplicar).`,
+            );
+            return existente;
+          }
+        }
         throw new ConflictException(
           `Ya existe un gasto con el folio/remisión "${dto.folio_ticket}": es el mismo pago capturado dos veces. Si de verdad es otro ticket, corrige el folio.`,
         );
+      }
       throw new Error(error.message);
     }
 
@@ -1684,6 +1733,65 @@ export class ExpensesService {
     return `${AVISO_AVION_TRAMO_PREFIX}${matEleg} pero el tramo ${tramo.tramo} lo voló ${matTramo}: en balance y reparto cuenta al avión del tramo — revisar`;
   }
 
+  /**
+   * CANDADO DE VENTANA anti-reintento (29-ago-2026, auditoría "ya lo había
+   * guardado y no está"): SOLO para payloads sin llave de idempotencia y sin
+   * folio (APKs viejos). Si el MISMO capturista tiene un gasto IDÉNTICO
+   * (vuelo + monto + moneda + categoría + notas normalizadas) creado hace
+   * menos de 90 s, el segundo insert es casi seguro el reintento del outbox
+   * o un doble tap → 409 con el dato a la vista. Dos gastos reales seguidos
+   * (dos taxis iguales) se distinguen cambiando la nota o esperando.
+   * Consulta caída = no frenar (best-effort; el candado real futuro es la
+   * llave).
+   */
+  private async assertNoCapturaRepetida(
+    dto: CreateGastoDto,
+    capturaId: string,
+    notasFinales: string | null,
+    aeronaveId: string | null,
+  ): Promise<void> {
+    const desde = new Date(Date.now() - 90_000).toISOString();
+    let q = this.supabase.service
+      .from('gasto')
+      .select('id, created_at, notas')
+      .eq('usuario_captura_id', capturaId)
+      .eq('categoria', dto.categoria)
+      .eq('moneda', dto.moneda)
+      .eq('monto', dto.monto)
+      .gte('created_at', desde)
+      .order('created_at', { ascending: false })
+      .limit(5);
+    q = dto.vuelo_id ? q.eq('vuelo_id', dto.vuelo_id) : q.is('vuelo_id', null);
+    // El avión sellado también debe coincidir (un reintento hereda el mismo):
+    // sin esto, una carga masiva con dos aviones al mismo monto chocaría.
+    q = aeronaveId
+      ? q.eq('aeronave_id', aeronaveId)
+      : q.is('aeronave_id', null);
+    const { data, error } = await q;
+    if (error) return; // best-effort: no frenar capturas por una consulta caída
+    const norm = (s: unknown): string =>
+      String(s ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    const gemelo = (data ?? []).find(
+      (g) => norm(g.notas) === norm(notasFinales),
+    );
+    if (!gemelo) return;
+    const segundos = Math.max(
+      1,
+      Math.round(
+        (Date.now() - new Date(gemelo.created_at as string).getTime()) / 1000,
+      ),
+    );
+    this.logger.warn(
+      `Captura repetida bloqueada: gasto idéntico ${gemelo.id as string} del mismo capturista hace ${segundos} s (sin client_request_id ni folio).`,
+    );
+    throw new ConflictException(
+      `Parece la misma captura repetida (hace ${segundos} s). Si son dos gastos reales, cambia la nota o espera un momento.`,
+    );
+  }
+
   private async assertFolioTicketLibre(
     folio: string | null | undefined,
     excluirId?: string,
@@ -1895,13 +2003,19 @@ export class ExpensesService {
   /**
    * Capturas de CAMPO (piloto/mecánico/visitante): la fecha del gasto no
    * puede estar a más de 120 días atrás ni a más de 1 día a futuro (hora
-   * Cancún). La oficina no se restringe: sí captura tickets viejos y cargas
-   * históricas a propósito.
+   * Cancún). La OFICINA tiene su propia banda, más ancha (auditoría 29-ago:
+   * dos gastos con año 2025 quedaron fuera de TODOS los cortes): más de
+   * 365 días atrás o más de 30 días a futuro se rechaza con 400 — salvo
+   * `permitir_fecha_antigua === true` (carga histórica deliberada).
    */
-  private assertFechaRazonable(fecha: string | undefined, rol?: Rol): void {
+  private assertFechaRazonable(
+    fecha: string | undefined,
+    rol?: Rol,
+    permitirAntigua = false,
+  ): void {
     if (!fecha) return;
-    if (rol !== Rol.PILOTO && rol !== Rol.MECANICO && rol !== Rol.VISITANTE)
-      return;
+    const esCampo =
+      rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
     const hoy = new Date().toLocaleDateString('en-CA', {
       timeZone: 'America/Cancun',
     });
@@ -1910,21 +2024,41 @@ export class ExpensesService {
     if (!Number.isFinite(ms)) return;
     const dias = Math.round(ms / 86_400_000);
     const bonita = dia.split('-').reverse().join('/');
-    if (dias > 1) {
+    if (esCampo) {
+      if (dias > 1) {
+        throw new BadRequestException(
+          `La fecha del gasto (${bonita}) está en el futuro: revísala antes de guardar.`,
+        );
+      }
+      if (dias < -120) {
+        throw new BadRequestException(
+          `La fecha del gasto (${bonita}) es de hace más de 4 meses: revisa el AÑO del ticket antes de guardar (¿es ${hoy.slice(0, 4)}?).`,
+        );
+      }
+      return;
+    }
+    // Oficina: banda ancha pero con tope — el "año equivocado" (2025 en un
+    // ticket de 2026) es el error real que esconde gastos de los cortes.
+    if (permitirAntigua) return;
+    if (dias > 30) {
       throw new BadRequestException(
-        `La fecha del gasto (${bonita}) está en el futuro: revísala antes de guardar.`,
+        `La fecha del gasto (${bonita}) está a más de 30 días en el futuro: revisa el AÑO/mes antes de guardar.`,
       );
     }
-    if (dias < -120) {
+    if (dias < -365) {
       throw new BadRequestException(
-        `La fecha del gasto (${bonita}) es de hace más de 4 meses: revisa el AÑO del ticket antes de guardar (¿es ${hoy.slice(0, 4)}?).`,
+        `La fecha del gasto (${bonita}) es de hace más de un año: casi siempre es el AÑO equivocado del ticket (¿es ${hoy.slice(0, 4)}?). Si de verdad es una carga histórica, marca "permitir fecha antigua".`,
       );
     }
   }
 
   async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
     if (dto.fecha_gasto !== undefined)
-      this.assertFechaRazonable(dto.fecha_gasto, rol);
+      this.assertFechaRazonable(
+        dto.fecha_gasto,
+        rol,
+        dto.permitir_fecha_antigua === true,
+      );
     if (Object.keys(dto).length === 0) return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
     // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
@@ -2194,6 +2328,10 @@ export class ExpensesService {
     const cols: Record<string, unknown> = { ...dto };
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
+    delete cols.permitir_fecha_antigua;
+    // La llave de idempotencia se fija SOLO al crear: reescribirla en un
+    // PATCH podría colisionar con otra captura o robarle su llave.
+    delete cols.client_request_id;
     if (aeronaveHeredada) cols.aeronave_id = aeronaveHeredada;
     else if (escalaAutoLimpiada && dto.aeronave_id === undefined) {
       // El vuelo nuevo no tiene avión (externo sin referencia): el avión

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsDate,
@@ -224,6 +225,32 @@ export class AssignEscalaDto {
   @IsOptional()
   @IsUUID()
   piloto_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Copiloto de ESTE tramo (rotación). null = hereda el copiloto del ' +
+      'vuelo (misma herencia que el piloto del tramo). Debe estar ACTIVO y ' +
+      'ser distinto del piloto efectivo del tramo.',
+    nullable: true,
+  })
+  @IsOptional()
+  @ValidateIf((_o, v) => v !== null)
+  @IsUUID()
+  copiloto_id?: string | null;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Apoyos SOLO de este tramo (0..N). REEMPLAZA la lista del tramo ' +
+      '([] = ninguno); los apoyos de nivel vuelo NO se tocan desde aquí ' +
+      '(siguen siendo efectivos en el tramo). Cada uno ACTIVO y distinto ' +
+      'del piloto/copiloto efectivos del tramo.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  apoyo_ids?: string[];
 
   @ApiPropertyOptional({
     description: 'Fecha/hora planeada de salida del tramo',

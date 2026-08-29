@@ -204,13 +204,16 @@ export class FlightsController {
   }
 
   @Get(':id')
-  @ApiOperation({ summary: 'Get flight summary' })
+  @ApiOperation({
+    summary:
+      'Get flight summary (+ apoyos 0..N y mi_tripulacion del solicitante, aditivo 29-ago)',
+  })
   async getOne(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.findById(id, c);
+    return this.flights.detalle(id, c);
   }
 
   @Get(':id/snapshot')
@@ -316,7 +319,7 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Assign aircraft / pilot / fecha to a flight (COTIZADO or CONFIRMADO)',
+      'Assign aircraft / pilot / copiloto / apoyos (apoyo_ids 0..N, reemplaza la lista de nivel vuelo; apoyo_id legado = [apoyo_id]) / fecha to a flight (COTIZADO or CONFIRMADO)',
   })
   assign(
     @Param('id', ParseUUIDPipe) id: string,
@@ -387,8 +390,11 @@ export class FlightsController {
     summary:
       'Elimina un vuelo SIN actividad (solicitud fantasma). Si tiene cobros/gastos/tacómetros, se rechaza: cancélalo.',
   })
-  remove(@Param('id', ParseUUIDPipe) id: string) {
-    return this.flights.deleteFlight(id);
+  remove(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.deleteFlight(id, c.userId);
   }
 
   @Delete(':id/purge')
@@ -482,7 +488,7 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Asigna aeronave/piloto a UN tramo (ida o regreso por separado). El tramo de ida (orden=1) se espeja en el vuelo.',
+      'Asigna aeronave/piloto/copiloto (null = hereda del vuelo)/apoyos del tramo (apoyo_ids reemplaza SOLO los de ese tramo) a UN tramo (ida o regreso por separado). El tramo de ida (orden=1) espeja avión/piloto/fecha en el vuelo.',
   })
   assignLeg(
     @Param('legId', ParseUUIDPipe) legId: string,

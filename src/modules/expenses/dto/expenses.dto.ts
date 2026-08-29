@@ -263,6 +263,28 @@ export class CreateGastoDto {
   @IsOptional()
   @IsBoolean()
   verificado?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por ' +
+      'captura). Un reintento (timeout tras commit, doble flush del outbox, ' +
+      'doble tap) con la misma llave devuelve el gasto YA creado en vez de ' +
+      'duplicar dinero. Índice único uq_gasto_client_request.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Solo OFICINA: confirma a propósito una fecha_gasto de hace más de ' +
+      '365 días (carga histórica real). Sin esta bandera, una fecha tan ' +
+      'vieja se rechaza con 400 — casi siempre es el AÑO equivocado del ' +
+      'ticket y el gasto quedaría fuera de todos los cortes.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  permitir_fecha_antigua?: boolean;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {

@@ -178,4 +178,10 @@ export interface PreviewCargaCombustibleResult {
 export interface CargaMasivaCombustibleResult {
   creados: number;
   errores: Array<{ fila: number; error: string }>;
+  /**
+   * Filas OMITIDAS por ser idénticas a un gasto GAS ya existente (misma
+   * matrícula + fecha + litros + monto + folio de vuelo) — 29-ago: un
+   * reintento del archivo tras un corte/timeout es inocuo, no duplica.
+   */
+  saltadas: Array<{ fila: number; aviso: string }>;
 }

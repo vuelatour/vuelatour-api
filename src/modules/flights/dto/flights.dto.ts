@@ -296,15 +296,30 @@ export class AssignFlightDto {
 
   @ApiPropertyOptional({
     description:
-      'APOYO del vuelo (usuario rol PILOTO en tierra: maletas, facturas, ' +
-      'cobros, gastos). Ve y opera el vuelo igual que el piloto EXCEPTO ' +
-      'tacómetros. Enviar null para quitarlo.',
+      'LEGADO (29-ago-2026): apoyo único del vuelo. Si viene sin apoyo_ids ' +
+      'se traduce a apoyo_ids = [apoyo_id] (null/"" = ninguno). La fuente ' +
+      'única es la lista `apoyo_ids`.',
     nullable: true,
   })
   @IsOptional()
   @ValidateIf((_o, v) => v !== null)
   @IsUUID()
   apoyo_id?: string | null;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Tripulación de APOYO de TODO el vuelo (0..N usuarios en tierra: ' +
+      'maletas, facturas, cobros, gastos). Ven y operan el vuelo igual que ' +
+      'el piloto EXCEPTO tacómetros. REEMPLAZA la lista de nivel vuelo ' +
+      '([] = ninguno); los apoyos por tramo no se tocan desde aquí. ' +
+      'Cada uno debe estar ACTIVO y ser distinto del piloto y del copiloto.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  apoyo_ids?: string[];
 
   @ApiPropertyOptional({ description: 'Fecha programada del vuelo' })
   @IsOptional()

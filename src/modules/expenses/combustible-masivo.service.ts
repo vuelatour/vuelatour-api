@@ -182,7 +182,44 @@ export class CombustibleMasivoService {
       proveedoresOk = new Set((data ?? []).map((p) => p.id as string));
     }
 
+    // CANDADO ANTI-REINTENTO (29-ago): si el commit se cortó a medias y la
+    // oficina vuelve a subir el MISMO archivo, las filas que ya entraron se
+    // SALTAN con aviso (no se duplican). Identidad exacta: aeronave + fecha
+    // + litros + monto + vuelo ligado. Se precargan los GAS existentes de
+    // esas fechas una sola vez.
+    const claveGas = (
+      aeronaveId: string,
+      fecha: string,
+      litros: number | null,
+      monto: number,
+      vueloId: string | null,
+    ) =>
+      `${aeronaveId}|${fecha}|${litros == null ? '' : Number(litros).toFixed(2)}|${Number(monto).toFixed(2)}|${vueloId ?? ''}`;
+    const existentesKeys = new Set<string>();
+    const fechasBatch = [...new Set(dto.filas.map((f) => f.fecha_gasto))];
+    if (aeronaveIds.length > 0 && fechasBatch.length > 0) {
+      const { data: gasExistentes, error: gasErr } = await this.supabase.service
+        .from('gasto')
+        .select('aeronave_id, fecha_gasto, litros, monto, vuelo_id')
+        .eq('categoria', 'GAS')
+        .in('aeronave_id', aeronaveIds)
+        .in('fecha_gasto', fechasBatch);
+      if (gasErr) throw new Error(gasErr.message);
+      for (const g of gasExistentes ?? []) {
+        existentesKeys.add(
+          claveGas(
+            g.aeronave_id as string,
+            g.fecha_gasto as string,
+            g.litros == null ? null : Number(g.litros),
+            Number(g.monto),
+            (g.vuelo_id as string | null) ?? null,
+          ),
+        );
+      }
+    }
+
     const errores: Array<{ fila: number; error: string }> = [];
+    const saltadas: Array<{ fila: number; aviso: string }> = [];
     let creados = 0;
     // En orden y una por una: si una fila falla, las demás siguen.
     for (const fila of dto.filas) {
@@ -195,6 +232,20 @@ export class CombustibleMasivoService {
       );
       if (errs.length > 0) {
         errores.push({ fila: fila.fila, error: errs.join(' ') });
+        continue;
+      }
+      const clave = claveGas(
+        fila.aeronave_id,
+        fila.fecha_gasto,
+        fila.litros ?? null,
+        fila.monto,
+        fila.vuelo_id ?? null,
+      );
+      if (existentesKeys.has(clave)) {
+        saltadas.push({
+          fila: fila.fila,
+          aviso: `Ya existe un gasto GAS idéntico (${fila.matricula ?? 'misma matrícula'} · ${fila.fecha_gasto} · ${fila.litros ?? '?'} L · $${fila.monto.toFixed(2)}): fila omitida para no duplicar.`,
+        });
         continue;
       }
       try {
@@ -230,6 +281,9 @@ export class CombustibleMasivoService {
           { notificar: false },
         );
         creados += 1;
+        // La fila recién creada también cuenta como existente: dos renglones
+        // idénticos dentro del MISMO archivo tampoco se duplican.
+        existentesKeys.add(clave);
       } catch (err) {
         errores.push({
           fila: fila.fila,
@@ -240,9 +294,9 @@ export class CombustibleMasivoService {
     }
 
     this.logger.log(
-      `Carga masiva de combustibles: ${creados} gastos creados, ${errores.length} filas con error (usuario ${userId})`,
+      `Carga masiva de combustibles: ${creados} gastos creados, ${saltadas.length} filas omitidas (idénticas a gastos existentes), ${errores.length} filas con error (usuario ${userId})`,
     );
-    return { creados, errores };
+    return { creados, errores, saltadas };
   }
 
   // ===== Normalización y validación =====

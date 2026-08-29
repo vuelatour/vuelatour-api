@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Max,
   MaxLength,
   Min,
@@ -109,6 +110,17 @@ export class CreateCobroDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por ' +
+      'captura). Un reintento (timeout tras commit, doble flush del outbox, ' +
+      'doble tap) con la misma llave devuelve el cobro YA registrado en vez ' +
+      'de duplicar dinero. Índice único uq_cobro_vuelo_client_request.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
 /** Corrección de un cobro por oficina; todo opcional (patch). */

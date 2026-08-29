@@ -161,6 +161,19 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Espejo vuelo↔tramo 1: `aeronave_id/piloto_id/fecha` del vuelo se reflejan en
   la escala orden=1 (`mirrorVueloToIdaEscala`) y viceversa. Reagendar
   `fecha_vuelo` con el mismo piloto → push al piloto (doc 4.3).
+- **Tripulación por tramo (29-ago-2026)** — fuente única
+  `src/common/tripulacion.util.ts`: copiloto del tramo =
+  `escala.copiloto_id ?? vuelo.copiloto_id` (misma herencia que el piloto;
+  asignar copiloto a nivel VUELO limpia los overrides de tramo, igual que
+  el piloto). Apoyos 0..N viven en `vuelo_apoyo` (`escala_id` null = todo
+  el vuelo; con valor = solo ese tramo; efectivos = vuelo ∪ tramo).
+  `vuelo.apoyo_id` es SOLO el espejo del primer apoyo de nivel vuelo: lo
+  escribe únicamente `syncApoyoEspejo` (toda escritura en `vuelo_apoyo`
+  termina ahí — `reemplazarApoyos`/`clonarApoyos` ya lo hacen). Acceso y
+  candado de tacómetros salen de `miTripulacion` (apoyo NUNCA captura
+  tacos; piloto/copiloto del vuelo o de un tramo sí). Lectores nuevos de
+  "quién va" usan `tripulacionDeVuelo`/`cargarTripulacion`, jamás
+  `apoyo_id` a mano.
 
 ## Migraciones y despliegue
 

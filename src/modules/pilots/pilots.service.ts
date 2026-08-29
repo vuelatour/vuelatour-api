@@ -22,6 +22,13 @@ const USUARIO_COLS =
 const VUELO_COLS =
   'id, folio, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_fin, cobrado, piloto_id, copiloto_id, apoyo_id';
 
+/** Vuelos donde el usuario participa POR TRAMO o como apoyo (29-ago). */
+interface RolTramoCtx {
+  tramoPiloto: Set<string>;
+  tramoCopiloto: Set<string>;
+  apoyo: Set<string>;
+}
+
 @Injectable()
 export class PilotsService {
   constructor(
@@ -76,13 +83,36 @@ export class PilotsService {
    * regreso de un redondo). MISMO criterio que GET /v1/flights?piloto_id —
    * sin esto, el expediente decía 0 vuelos para pilotos de rotación.
    */
-  private async orRolesPiloto(id: string): Promise<string> {
-    const { data: legVuelos } = await this.supabase.service
-      .from('escala')
-      .select('vuelo_id')
-      .eq('piloto_id', id);
+  private async orRolesPiloto(id: string): Promise<{
+    or: string;
+    ctx: RolTramoCtx;
+  }> {
+    // 29-ago: también copiloto de un TRAMO (escala.copiloto_id) y apoyo
+    // 0..N (vuelo_apoyo, del vuelo o de un tramo) — el espejo apoyo_id solo
+    // trae al primero.
+    const [{ data: legVuelos }, { data: apoyoVuelos }] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select('vuelo_id, piloto_id, copiloto_id, cancelada_at')
+        .or(`piloto_id.eq.${id},copiloto_id.eq.${id}`),
+      this.supabase.service
+        .from('vuelo_apoyo')
+        .select('vuelo_id')
+        .eq('usuario_id', id),
+    ]);
+    const ctx: RolTramoCtx = {
+      tramoPiloto: new Set<string>(),
+      tramoCopiloto: new Set<string>(),
+      apoyo: new Set<string>(),
+    };
+    for (const e of legVuelos ?? []) {
+      const vid = e.vuelo_id as string;
+      if (e.piloto_id === id) ctx.tramoPiloto.add(vid);
+      if (e.copiloto_id === id) ctx.tramoCopiloto.add(vid);
+    }
+    for (const a of apoyoVuelos ?? []) ctx.apoyo.add(a.vuelo_id as string);
     const ids = [
-      ...new Set((legVuelos ?? []).map((e) => e.vuelo_id as string)),
+      ...new Set([...ctx.tramoPiloto, ...ctx.tramoCopiloto, ...ctx.apoyo]),
     ];
     const ors = [
       `piloto_id.eq.${id}`,
@@ -90,17 +120,31 @@ export class PilotsService {
       `apoyo_id.eq.${id}`,
     ];
     if (ids.length) ors.push(`id.in.(${ids.join(',')})`);
-    return ors.join(',');
+    return { or: ors.join(','), ctx };
   }
 
-  /** Rol del usuario en un vuelo (para etiquetarlo en el expediente). */
+  /**
+   * Rol del usuario en un vuelo (para etiquetarlo en el expediente). Con
+   * tripulación por tramo (29-ago): copiloto SOLO de un tramo cuenta como
+   * COPILOTO; piloto de un tramo sigue siendo TRAMO (rotación); apoyo desde
+   * vuelo_apoyo (vuelo o tramo) = APOYO.
+   */
   private rolEnVuelo(
-    v: { piloto_id?: unknown; copiloto_id?: unknown; apoyo_id?: unknown },
+    v: {
+      id?: unknown;
+      piloto_id?: unknown;
+      copiloto_id?: unknown;
+      apoyo_id?: unknown;
+    },
     id: string,
+    ctx?: RolTramoCtx,
   ): 'PILOTO' | 'COPILOTO' | 'APOYO' | 'TRAMO' {
     if (v.piloto_id === id) return 'PILOTO';
     if (v.copiloto_id === id) return 'COPILOTO';
-    if (v.apoyo_id === id) return 'APOYO';
+    const vid = typeof v.id === 'string' ? v.id : '';
+    if (ctx?.tramoPiloto.has(vid)) return 'TRAMO';
+    if (ctx?.tramoCopiloto.has(vid)) return 'COPILOTO';
+    if (v.apoyo_id === id || ctx?.apoyo.has(vid)) return 'APOYO';
     return 'TRAMO';
   }
 
@@ -225,7 +269,7 @@ export class PilotsService {
       this.rangoMesCancun(mes);
     const hoy = this.hoyCancun();
     const hoyTs = `${hoy}T00:00:00-05:00`;
-    const orRoles = await this.orRolesPiloto(id);
+    const { or: orRoles, ctx: rolCtx } = await this.orRolesPiloto(id);
     const esExterno =
       (pilot as { es_piloto_externo?: boolean }).es_piloto_externo === true;
 
@@ -427,7 +471,7 @@ export class PilotsService {
 
     const conRol = (v: Record<string, unknown>) => ({
       ...v,
-      rol: this.rolEnVuelo(v, id),
+      rol: this.rolEnVuelo(v, id, rolCtx),
     });
     const completados = (completadosRes.data ?? []).map(conRol);
 
@@ -476,7 +520,7 @@ export class PilotsService {
         this.supabase.service
           .from('vuelo')
           .select(
-            'id, piloto_id, copiloto_id, apoyo_id, fecha_vuelo, escalas:escala(piloto_id)',
+            'id, piloto_id, copiloto_id, apoyo_id, fecha_vuelo, escalas:escala(piloto_id, copiloto_id), apoyos:vuelo_apoyo(usuario_id)',
           )
           .eq('estado', 'COMPLETADO')
           .gte('fecha_vuelo', desdeTs),
@@ -484,7 +528,7 @@ export class PilotsService {
         this.supabase.service
           .from('vuelo')
           .select(
-            'id, piloto_id, copiloto_id, apoyo_id, estado, fecha_vuelo, fecha_fin, escalas:escala(piloto_id)',
+            'id, piloto_id, copiloto_id, apoyo_id, estado, fecha_vuelo, fecha_fin, escalas:escala(piloto_id, copiloto_id), apoyos:vuelo_apoyo(usuario_id)',
           )
           .in('estado', ['RESERVA', 'CONFIRMADO', 'EN_VUELO'])
           .or(
@@ -554,9 +598,18 @@ export class PilotsService {
         const val = v[key];
         if (typeof val === 'string') out.add(val);
       }
-      const escalas = (v.escalas ?? []) as Array<{ piloto_id?: string | null }>;
+      const escalas = (v.escalas ?? []) as Array<{
+        piloto_id?: string | null;
+        copiloto_id?: string | null;
+      }>;
       for (const e of escalas) {
         if (e.piloto_id) out.add(e.piloto_id);
+        if (e.copiloto_id) out.add(e.copiloto_id);
+      }
+      // Apoyos 0..N (29-ago): vuelo_apoyo, del vuelo o de un tramo.
+      const apoyos = (v.apoyos ?? []) as Array<{ usuario_id?: string | null }>;
+      for (const a of apoyos) {
+        if (a.usuario_id) out.add(a.usuario_id);
       }
       return out;
     };

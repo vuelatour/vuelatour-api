@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -26,6 +27,8 @@ const VENC_COLS =
 
 @Injectable()
 export class EngineeringService {
+  private readonly logger = new Logger(EngineeringService.name);
+
   constructor(private readonly supabase: SupabaseService) {}
 
   // ===== Mantenimientos =====
@@ -159,11 +162,36 @@ export class EngineeringService {
           .filter((t) => t.length > 0),
         motor_id: dto.motor_id ?? null,
         helice_id: dto.helice_id ?? null,
+        // Idempotencia (29-ago): un reintento con la misma llave colisiona
+        // en uq_mantenimiento_client_request y devuelve la fila existente.
+        client_request_id: dto.client_request_id ?? null,
         created_by: userId,
       })
       .select(MANT_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Reintento con la misma llave de idempotencia (timeout tras commit /
+      // outbox de la app): se devuelve el mantenimiento YA creado con el
+      // mismo shape que un alta normal — el reintento se vuelve inocuo.
+      if (
+        error.code === '23505' &&
+        dto.client_request_id &&
+        error.message.includes('uq_mantenimiento_client_request')
+      ) {
+        const { data: existente, error: exErr } = await this.supabase.service
+          .from('mantenimiento')
+          .select(MANT_COLS)
+          .eq('client_request_id', dto.client_request_id)
+          .maybeSingle();
+        if (!exErr && existente) {
+          this.logger.log(
+            `Mantenimiento idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el existente ${existente.id as string} (sin duplicar).`,
+          );
+          return existente;
+        }
+      }
+      throw new Error(error.message);
+    }
     return data;
   }
 
