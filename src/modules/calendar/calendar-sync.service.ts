@@ -1,5 +1,6 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { calendar_v3, google } from 'googleapis';
 import { JWT } from 'google-auth-library';
 import type { EnvVars } from '../../config/env.schema';
@@ -8,6 +9,9 @@ import { SupabaseService } from '../supabase/supabase.service';
 const EXTERNAL_COLOR_ID = '4'; // Flamingo (pinkish) — externos
 const DEFAULT_COLOR_ID = '9'; // Blueberry — vuelos propios
 const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendiente
+// Eventos no-vuelo de la flota: Peacock, el color de Google más cercano al
+// azul cielo #0EA5E9 que usa el calendario interno para estos eventos.
+const EVENTO_FLOTA_COLOR_ID = '7';
 
 const VUELO_SELECT =
   'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, google_calendar_id, google_calendar_regreso_id, ' +
@@ -116,17 +120,22 @@ export class CalendarSyncService implements OnModuleInit {
   /**
    * Create or update the Calendar event for a flight. Stores the event id back
    * on vuelo.google_calendar_id. No-op when sync is disabled.
+   *
+   * Devuelve `true` si el vuelo quedó sincronizado (o no había nada que hacer)
+   * y `false` si falló — SOLO informativo para el resumen del cron de
+   * reconciliación: los errores se tragan y loguean aquí como siempre y los
+   * ~30 hooks `void this.calendar.syncFlight(...)` lo ignoran sin cambios.
    */
-  async syncFlight(vueloId: string): Promise<void> {
-    if (!this.enabled || !this.calendar) return;
+  async syncFlight(vueloId: string): Promise<boolean> {
+    if (!this.enabled || !this.calendar) return true;
     try {
       const vuelo = await this.loadVuelo(vueloId);
-      if (!vuelo) return;
+      if (!vuelo) return true;
 
       // Cancelled flights are removed from the calendar instead of upserted.
       if (vuelo.estado === 'CANCELADO') {
         await this.removeFlight(vueloId);
-        return;
+        return true;
       }
 
       // Itinerario personalizado (MULTIESCALA con escalas): un evento por tramo,
@@ -143,11 +152,11 @@ export class CalendarSyncService implements OnModuleInit {
       const activas = escalas.filter((e) => e.cancelada_at == null);
       if (vuelo.tipo === 'MULTIESCALA' && activas.length > 0) {
         await this.syncLegs(vuelo, activas);
-        return;
+        return true;
       }
 
       // Without a date there is nothing meaningful to place on a calendar.
-      if (!vuelo.fecha_vuelo) return;
+      if (!vuelo.fecha_vuelo) return true;
 
       // IDA (en fecha_vuelo).
       const idaId = await this.upsertRaw(
@@ -178,10 +187,12 @@ export class CalendarSyncService implements OnModuleInit {
         await this.deleteEvent(vuelo.google_calendar_regreso_id);
         await this.saveEventId(vueloId, 'google_calendar_regreso_id', null);
       }
+      return true;
     } catch (err) {
       this.logger.error(
         `syncFlight(${vueloId}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
+      return false;
     }
   }
 
@@ -204,6 +215,142 @@ export class CalendarSyncService implements OnModuleInit {
     }
     this.logger.log(`resync: ${ids.length} vuelos re-sincronizados con Google.`);
     return { enabled: true, total: ids.length };
+  }
+
+  /**
+   * Reconciliación nocturna (05:15 UTC ≈ 00:15 Cancún) de la VENTANA operativa
+   * [hoy−7d, hoy+60d] contra Google: recoge mutaciones que no pasan por un
+   * hook directo (p. ej. `refreshPermisosDeVuelo` cambia `estado_permiso` sin
+   * re-sync) y repara eventos borrados a mano en Calendar. Reusa la
+   * idempotencia de syncFlight/upsertRaw y va SECUENCIAL a propósito para no
+   * saturar la API (mismo criterio que resyncRedondos, que recorre TODOS los
+   * vuelos y por eso NO se usa aquí). Best-effort: nunca lanza.
+   */
+  @Cron('15 5 * * *', { name: 'calendar-reconcile-ventana' })
+  async reconcileVentana(): Promise<void> {
+    if (!this.enabled || !this.calendar) return;
+    const ahora = Date.now();
+    const desdeIso = new Date(ahora - 7 * 86_400_000).toISOString();
+    const hastaIso = new Date(ahora + 60 * 86_400_000).toISOString();
+    const desdeDia = this.diaCancun(desdeIso);
+    const hastaDia = this.diaCancun(hastaIso);
+    let sincronizados = 0;
+    let errores = 0;
+    try {
+      // 1) Vuelos no cancelados cuyo rango [fecha_vuelo, coalesce(fecha_fin,
+      //    fecha_vuelo)] SOLAPA la ventana (viajes multi-día incluidos).
+      const { data: vuelos, error: vErr } = await this.supabase.service
+        .from('vuelo')
+        .select('id')
+        .neq('estado', 'CANCELADO')
+        .not('fecha_vuelo', 'is', null)
+        .lte('fecha_vuelo', hastaIso)
+        .or(
+          `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha_vuelo.gte.${desdeIso})`,
+        );
+      if (vErr) {
+        errores++;
+        this.logger.warn(
+          `reconcileVentana: vuelos no consultados (${vErr.message})`,
+        );
+      }
+      for (const v of (vuelos ?? []) as { id: string }[]) {
+        if (await this.syncFlight(v.id)) sincronizados++;
+        else errores++;
+      }
+
+      // 2) Descansos de piloto que tocan la ventana (columnas DATE en Cancún).
+      const { data: descansos, error: dErr } = await this.supabase.service
+        .from('piloto_descanso')
+        .select(
+          'id, fecha_inicio, fecha_fin, motivo, google_calendar_id, piloto:usuario!piloto_id(nombre)',
+        )
+        .lte('fecha_inicio', hastaDia)
+        .gte('fecha_fin', desdeDia);
+      if (dErr) {
+        errores++;
+        this.logger.warn(
+          `reconcileVentana: descansos no consultados (${dErr.message})`,
+        );
+      }
+      for (const d of (descansos ?? []) as unknown as Array<{
+        id: string;
+        fecha_inicio: string;
+        fecha_fin: string;
+        motivo: string | null;
+        google_calendar_id: string | null;
+        piloto: { nombre: string } | { nombre: string }[] | null;
+      }>) {
+        const eventId = await this.upsertDescansoEvent({
+          piloto_nombre: unwrap(d.piloto)?.nombre ?? 'Piloto',
+          fecha_inicio: d.fecha_inicio,
+          fecha_fin: d.fecha_fin,
+          motivo: d.motivo,
+          google_calendar_id: d.google_calendar_id,
+        });
+        // Evento recreado (lo borraron del lado de Calendar): persistir el id
+        // nuevo o cada noche nacería otro duplicado.
+        if (eventId && eventId !== d.google_calendar_id) {
+          const { error } = await this.supabase.service
+            .from('piloto_descanso')
+            .update({ google_calendar_id: eventId })
+            .eq('id', d.id);
+          if (error) {
+            this.logger.error(
+              `Failed to persist descanso google_calendar_id for ${d.id}: ${error.message}`,
+            );
+          }
+        }
+        sincronizados++;
+      }
+
+      // 3) Eventos NO-vuelo de la flota en la ventana.
+      const { data: eventos, error: eErr } = await this.supabase.service
+        .from('evento_flota')
+        .select(
+          'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula), responsable:usuario!responsable_id(nombre)',
+        )
+        .lte('fecha', hastaIso)
+        .or(
+          `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha.gte.${desdeIso})`,
+        );
+      if (eErr) {
+        errores++;
+        this.logger.warn(
+          `reconcileVentana: eventos de flota no consultados (${eErr.message})`,
+        );
+      }
+      for (const ev of (eventos ?? []) as unknown as Array<{
+        id: string;
+        titulo: string | null;
+        fecha: string;
+        fecha_fin: string | null;
+        notas: string | null;
+        google_calendar_id: string | null;
+        aeronave: { matricula: string } | { matricula: string }[] | null;
+        responsable: { nombre: string } | { nombre: string }[] | null;
+      }>) {
+        await this.upsertEventoFlotaEvent({
+          id: ev.id,
+          titulo: ev.titulo ?? 'Evento',
+          fecha: ev.fecha,
+          fecha_fin: ev.fecha_fin,
+          aeronave_matricula: unwrap(ev.aeronave)?.matricula ?? null,
+          responsable_nombre: unwrap(ev.responsable)?.nombre ?? null,
+          notas: ev.notas,
+          google_calendar_id: ev.google_calendar_id,
+        });
+        sincronizados++;
+      }
+
+      this.logger.log(
+        `reconcileVentana [${desdeDia} → ${hastaDia}]: ${sincronizados} sincronizados, ${errores} con error.`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `reconcileVentana failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -312,6 +459,77 @@ export class CalendarSyncService implements OnModuleInit {
   /** Borra el evento de un descanso del calendario compartido. Best-effort. */
   async removeDescansoEvent(eventId: string | null | undefined): Promise<void> {
     if (eventId) await this.deleteEvent(eventId);
+  }
+
+  /**
+   * Evento de día completo en el calendario compartido para un evento NO-vuelo
+   * de la flota (lavado, trámite, visita…). Mismo patrón que los descansos,
+   * con una diferencia: el id de Google lo persiste ESTE servicio en
+   * `evento_flota.google_calendar_id` (contrato de la migración 20260829:
+   * esa columna solo la escribe calendar-sync). Best-effort.
+   */
+  async upsertEventoFlotaEvent(ev: {
+    id: string;
+    titulo: string;
+    fecha: string; // ISO timestamptz (inicio)
+    fecha_fin?: string | null; // ISO timestamptz (fin INCLUSIVO); null = un día
+    aeronave_matricula?: string | null;
+    responsable_nombre?: string | null;
+    notas?: string | null;
+    google_calendar_id?: string | null;
+  }): Promise<string | null> {
+    if (!this.enabled || !this.calendar) return ev.google_calendar_id ?? null;
+    try {
+      // Día operativo en Cancún (mismo criterio que el calendario interno).
+      const iniDia = this.diaCancun(ev.fecha);
+      const finDia = ev.fecha_fin ? this.diaCancun(ev.fecha_fin) : iniDia;
+      // Google usa fin EXCLUSIVO en eventos de día completo: fin + 1 día.
+      const fin = new Date(`${finDia}T12:00:00Z`);
+      fin.setUTCDate(fin.getUTCDate() + 1);
+      const extras = [ev.aeronave_matricula, ev.responsable_nombre].filter(
+        (s): s is string => !!s,
+      );
+      const event: calendar_v3.Schema$Event = {
+        summary: `📌 ${ev.titulo}${extras.length > 0 ? ` · ${extras.join(' · ')}` : ''}`,
+        description: [
+          ev.aeronave_matricula ? `Aeronave: ${ev.aeronave_matricula}` : null,
+          ev.responsable_nombre
+            ? `Responsable: ${ev.responsable_nombre}`
+            : null,
+          ev.notas ? `Notas: ${ev.notas}` : null,
+          `VuelaTour · evento ${ev.id}`,
+        ]
+          .filter(Boolean)
+          .join('\n'),
+        colorId: EVENTO_FLOTA_COLOR_ID,
+        start: { date: iniDia },
+        end: { date: fin.toISOString().slice(0, 10) },
+        transparency: 'transparent',
+        // Ancla de idempotencia — reconoce nuestros propios eventos.
+        extendedProperties: { private: { vuelatour_evento_id: ev.id } },
+      };
+      const eventId = await this.upsertRaw(
+        event,
+        ev.google_calendar_id ?? null,
+        'evento flota',
+      );
+      if (eventId !== (ev.google_calendar_id ?? null)) {
+        await this.saveEventoFlotaEventId(ev.id, eventId);
+      }
+      return eventId;
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo sincronizar el evento de flota ${ev.id} a Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return ev.google_calendar_id ?? null;
+    }
+  }
+
+  /** Borra el evento de flota del calendario compartido. Best-effort. */
+  async removeEventoFlotaEvent(
+    ev: { google_calendar_id?: string | null } | null | undefined,
+  ): Promise<void> {
+    if (ev?.google_calendar_id) await this.deleteEvent(ev.google_calendar_id);
   }
 
   private async deleteEvent(eventId: string): Promise<void> {
@@ -519,5 +737,27 @@ export class CalendarSyncService implements OnModuleInit {
         `Failed to persist escala google_calendar_id for ${escalaId}: ${error.message}`,
       );
     }
+  }
+
+  private async saveEventoFlotaEventId(
+    eventoId: string,
+    eventId: string | null,
+  ): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('evento_flota')
+      .update({ google_calendar_id: eventId })
+      .eq('id', eventoId);
+    if (error) {
+      this.logger.error(
+        `Failed to persist evento_flota google_calendar_id for ${eventoId}: ${error.message}`,
+      );
+    }
+  }
+
+  /** Día calendario en Cancún (YYYY-MM-DD) de un instante ISO. */
+  private diaCancun(iso: string): string {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Cancun',
+    }).format(new Date(iso));
   }
 }

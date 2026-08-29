@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CalendarSyncService } from './calendar-sync.service';
 import type {
   CalendarRangeQuery,
   CreateEventoFlotaDto,
@@ -33,6 +34,7 @@ export class CalendarService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly notifications: NotificationsService,
+    private readonly calendarSync: CalendarSyncService,
   ) {}
 
   async listEvents(q: CalendarRangeQuery) {
@@ -52,7 +54,8 @@ export class CalendarService {
     let query = this.supabase.service
       .from('vuelo')
       .select(
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))',
+        // copiloto/apoyos (29-ago, aditivo): tripulación por tramo en el evento.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -81,21 +84,35 @@ export class CalendarService {
         .is('cancelada_at', null);
       const ids = [...new Set((legsAv ?? []).map((l) => l.vuelo_id as string))];
       query = ids.length
-        ? query.or(
-            `aeronave_id.eq.${q.aeronave_id},id.in.(${ids.join(',')})`,
-          )
+        ? query.or(`aeronave_id.eq.${q.aeronave_id},id.in.(${ids.join(',')})`)
         : query.eq('aeronave_id', q.aeronave_id);
     }
     if (q.piloto_id) {
-      const { data: legsPi } = await this.supabase.service
-        .from('escala')
-        .select('vuelo_id')
-        .eq('piloto_id', q.piloto_id)
-        .is('cancelada_at', null);
-      const ids = [...new Set((legsPi ?? []).map((l) => l.vuelo_id as string))];
-      query = ids.length
-        ? query.or(`piloto_id.eq.${q.piloto_id},id.in.(${ids.join(',')})`)
-        : query.eq('piloto_id', q.piloto_id);
+      // 29-ago: también copiloto (vuelo o tramo) y apoyo (vuelo_apoyo).
+      const [{ data: legsPi }, { data: apoyosPi }] = await Promise.all([
+        this.supabase.service
+          .from('escala')
+          .select('vuelo_id')
+          .or(`piloto_id.eq.${q.piloto_id},copiloto_id.eq.${q.piloto_id}`)
+          .is('cancelada_at', null),
+        this.supabase.service
+          .from('vuelo_apoyo')
+          .select('vuelo_id')
+          .eq('usuario_id', q.piloto_id),
+      ]);
+      const ids = [
+        ...new Set([
+          ...(legsPi ?? []).map((l) => l.vuelo_id as string),
+          ...(apoyosPi ?? []).map((a) => a.vuelo_id as string),
+        ]),
+      ];
+      const ors = [
+        `piloto_id.eq.${q.piloto_id}`,
+        `copiloto_id.eq.${q.piloto_id}`,
+        `apoyo_id.eq.${q.piloto_id}`,
+      ];
+      if (ids.length) ors.push(`id.in.(${ids.join(',')})`);
+      query = query.or(ors.join(','));
     }
     if (q.solo_externos) query = query.eq('es_externo', true);
 
@@ -133,6 +150,7 @@ export class CalendarService {
         monto_total_usd: string;
         aeronave_id: string | null;
         piloto_id: string | null;
+        copiloto_id: string | null;
         cliente_id: string;
         operador_externo: string | null;
         estado_permiso: string | null;
@@ -142,7 +160,13 @@ export class CalendarService {
           | { matricula: string; color_calendario: string | null }[]
           | null;
         piloto: { nombre: string } | { nombre: string }[] | null;
+        copiloto: { nombre: string } | { nombre: string }[] | null;
         cliente: { nombre: string } | { nombre: string }[] | null;
+        apoyos: Array<{
+          escala_id: string | null;
+          usuario_id: string;
+          usuario: { nombre: string } | { nombre: string }[] | null;
+        }> | null;
         escalas: Array<{
           id: string;
           orden: number;
@@ -153,6 +177,7 @@ export class CalendarService {
           pasajeros: number | null;
           aeronave_id: string | null;
           piloto_id: string | null;
+          copiloto_id: string | null;
           estado_permiso: string | null;
           cancelada_at: string | null;
           aeronave:
@@ -160,10 +185,13 @@ export class CalendarService {
             | { matricula: string; color_calendario: string | null }[]
             | null;
           piloto: { nombre: string } | { nombre: string }[] | null;
+          copiloto: { nombre: string } | { nombre: string }[] | null;
         }> | null;
       };
       const cliente = unwrap(v.cliente);
-      const escalaPorOrden = new Map((v.escalas ?? []).map((e) => [e.orden, e]));
+      const escalaPorOrden = new Map(
+        (v.escalas ?? []).map((e) => [e.orden, e]),
+      );
 
       // Construye un evento usando la asignación del TRAMO (escala), con respaldo
       // en la asignación a nivel de vuelo cuando el tramo no exista todavía.
@@ -188,6 +216,31 @@ export class CalendarService {
         const pilotoId = escala?.piloto_id ?? v.piloto_id;
         const aeronave = unwrap(escala?.aeronave ?? v.aeronave);
         const piloto = unwrap(escala?.piloto ?? v.piloto);
+        // Copiloto con la MISMA herencia que el piloto; apoyos efectivos del
+        // tramo = los del vuelo ∪ los del tramo (29-ago, aditivo).
+        const copilotoId = escala?.copiloto_id ?? v.copiloto_id;
+        const copiloto = unwrap(escala?.copiloto ?? v.copiloto);
+        const apoyosVistos = new Set<string>();
+        const apoyos = (v.apoyos ?? [])
+          .filter(
+            (a) =>
+              a.escala_id == null ||
+              (escala != null && a.escala_id === escala.id),
+          )
+          .sort(
+            (a, b) =>
+              (a.escala_id == null ? 0 : 1) - (b.escala_id == null ? 0 : 1),
+          )
+          .filter((a) => {
+            if (apoyosVistos.has(a.usuario_id)) return false;
+            apoyosVistos.add(a.usuario_id);
+            return true;
+          })
+          .map((a) => ({
+            id: a.usuario_id,
+            nombre: unwrap(a.usuario)?.nombre ?? null,
+            origen: a.escala_id == null ? 'vuelo' : 'tramo',
+          }));
         const estadoPermiso = escala
           ? (escala.estado_permiso ?? null)
           : v.estado_permiso;
@@ -202,7 +255,9 @@ export class CalendarService {
         // Un cancelado ya no acarrea pendientes: sin ⚠ de permiso/asignación.
         const permisoPendiente = !esCancelado && estadoPermiso === 'pendiente';
         const sinAsignar =
-          v.estado === 'CONFIRMADO' && !v.es_externo && (!aeronaveId || !pilotoId);
+          v.estado === 'CONFIRMADO' &&
+          !v.es_externo &&
+          (!aeronaveId || !pilotoId);
         const esTentativo = v.estado === 'RESERVA';
         // El cancelado domina el color (historial); luego el tentativo (es un
         // espacio apartado, no un vuelo firme).
@@ -238,6 +293,9 @@ export class CalendarService {
           operador_externo: v.operador_externo,
           piloto_id: pilotoId,
           piloto_nombre: piloto?.nombre ?? null,
+          copiloto_id: copilotoId ?? null,
+          copiloto_nombre: copiloto?.nombre ?? null,
+          apoyos,
           pasajeros: params.pasajeros ?? v.pasajeros,
           monto_total_usd: Number(v.monto_total_usd),
           google_calendar_id: v.google_calendar_id,
@@ -266,7 +324,9 @@ export class CalendarService {
         // el tramo anterior; si sale otro día, abre un evento nuevo (pernocta
         // o viaje multi-día).
         const dayOf = (iso: string): string =>
-          new Date(iso).toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+          new Date(iso).toLocaleDateString('en-CA', {
+            timeZone: 'America/Cancun',
+          });
         type Grupo = { fecha: string; legs: typeof escalasOrdenadas };
         const grupos: Grupo[] = [];
         // La cadena se arma con los tramos VIVOS; si el vuelo entero quedó
@@ -282,7 +342,10 @@ export class CalendarService {
           }
         });
         grupos.forEach((g, gi) => {
-          const puntos = [g.legs[0].origen_iata, ...g.legs.map((l) => l.destino_iata)];
+          const puntos = [
+            g.legs[0].origen_iata,
+            ...g.legs.map((l) => l.destino_iata),
+          ];
           const pax = g.legs
             .filter((l) => !l.es_ferry)
             .reduce((m, l) => Math.max(m, l.pasajeros ?? 0), 0);
@@ -339,7 +402,9 @@ export class CalendarService {
     const toDay = to.toISOString().slice(0, 10);
     let dq = this.supabase.service
       .from('piloto_descanso')
-      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)')
+      .select(
+        'id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)',
+      )
       .lte('fecha_inicio', toDay)
       .gte('fecha_fin', fromDay);
     if (q.piloto_id) dq = dq.eq('piloto_id', q.piloto_id);
@@ -368,7 +433,7 @@ export class CalendarService {
           color: DESCANSO_COLOR,
           piloto_id: d.piloto_id,
           piloto_nombre: nombre,
-        } as unknown as (typeof events)[number]);
+        });
       }
     }
     // Eventos NO-vuelo (21-ago-2026: lavado, trámites, visitas): salen junto
@@ -403,9 +468,7 @@ export class CalendarService {
         EVENTO_COLOR;
       const nombre = (resp as { nombre?: string } | null)?.nombre ?? null;
       const iniDia = diaCancun(ev.fecha as string);
-      const finDia = ev.fecha_fin
-        ? diaCancun(ev.fecha_fin as string)
-        : iniDia;
+      const finDia = ev.fecha_fin ? diaCancun(ev.fecha_fin as string) : iniDia;
       const hora = new Intl.DateTimeFormat('es-MX', {
         timeZone: 'America/Cancun',
         hour: '2-digit',
@@ -443,7 +506,7 @@ export class CalendarService {
           aeronave_matricula: matricula,
           piloto_id: ev.responsable_id ?? null,
           piloto_nombre: nombre,
-        } as unknown as (typeof events)[number]);
+        });
       }
     }
 
@@ -559,6 +622,45 @@ export class CalendarService {
         data: { evento_id: (data?.id as string) ?? '' },
       });
     }
+    // Espejo en el Google Calendar compartido (best-effort, patrón descansos
+    // de pilots.service): nunca bloquea el alta. El google_calendar_id lo
+    // persiste calendar-sync (única pluma de esas columnas).
+    const eventoId = (data?.id as string | undefined) ?? null;
+    if (eventoId) {
+      void (async () => {
+        try {
+          let matricula: string | null = null;
+          if (dto.aeronave_id) {
+            const { data: av } = await this.supabase.service
+              .from('aeronave')
+              .select('matricula')
+              .eq('id', dto.aeronave_id)
+              .maybeSingle();
+            matricula = (av?.matricula as string | undefined) ?? null;
+          }
+          let responsable: string | null = null;
+          if (dto.responsable_id) {
+            const { data: resp } = await this.supabase.service
+              .from('usuario')
+              .select('nombre')
+              .eq('id', dto.responsable_id)
+              .maybeSingle();
+            responsable = (resp?.nombre as string | undefined) ?? null;
+          }
+          await this.calendarSync.upsertEventoFlotaEvent({
+            id: eventoId,
+            titulo: dto.titulo.trim(),
+            fecha: dto.fecha.toISOString(),
+            fecha_fin: dto.fecha_fin?.toISOString() ?? null,
+            aeronave_matricula: matricula,
+            responsable_nombre: responsable,
+            notas: dto.notas?.trim() || null,
+          });
+        } catch {
+          /* best-effort */
+        }
+      })();
+    }
     return data!;
   }
 
@@ -568,10 +670,14 @@ export class CalendarService {
       .from('evento_flota')
       .delete()
       .eq('id', id)
-      .select('id, titulo, fecha, responsable_id')
+      .select('id, titulo, fecha, responsable_id, google_calendar_id')
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Evento ${id} not found`);
+    // Su espejo en Google también se quita (best-effort, fire-and-forget).
+    void this.calendarSync.removeEventoFlotaEvent({
+      google_calendar_id: (data.google_calendar_id as string | null) ?? null,
+    });
     // El responsable también debe saber que el evento se quitó (26-ago).
     if (data.responsable_id) {
       void this.notifications.notifyUser(data.responsable_id as string, {

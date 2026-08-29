@@ -1316,15 +1316,27 @@ export class QuotesService {
         .from('escala')
         .insert(legs);
       if (legsErr) {
-        this.logger.warn(
-          `No se pudieron crear las escalas operativas del vuelo ${vuelo!.id}: ${legsErr.message}`,
+        // COMPENSACIÓN (29-ago): jamás responder 201 con un vuelo SIN tramos
+        // — parecía guardado y luego "no estaba" (calendario/asignación no lo
+        // ven). Se borra el vuelo recién insertado y se lanza claro.
+        await this.compensarVueloSinEscalas(vuelo!.id as string);
+        throw new Error(
+          `No se pudieron crear los tramos del itinerario y la cotización se descartó completa (nada quedó a medias): ${legsErr.message}. Intenta guardarla de nuevo.`,
         );
       }
     } else if (breakdown.ruta.escalas) {
-      await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId, {
-        inicio: dto.fecha_vuelo?.toISOString() ?? null,
-        fin: dto.fecha_traslado_final?.toISOString() ?? null,
-      });
+      try {
+        await this.replaceEscalas(vuelo!.id, breakdown.ruta.escalas, userId, {
+          inicio: dto.fecha_vuelo?.toISOString() ?? null,
+          fin: dto.fecha_traslado_final?.toISOString() ?? null,
+        });
+      } catch (err) {
+        // Misma compensación: cotización sin tramos = fantasma.
+        await this.compensarVueloSinEscalas(vuelo!.id as string);
+        throw new Error(
+          `No se pudieron crear los tramos de la cotización y se descartó completa (nada quedó a medias): ${err instanceof Error ? err.message : String(err)}. Intenta guardarla de nuevo.`,
+        );
+      }
     }
     // Permiso de pista POR TRAMO: el insert de arriba ya fijó el del vuelo,
     // pero cada escala se marca según SUS aeropuertos (misma fuente única que
@@ -1562,16 +1574,30 @@ export class QuotesService {
       );
     }
     const pernoctasAntes = await this.pernoctaDestinos(vueloId);
-    await this.replaceEscalas(vueloId, breakdown.ruta.escalas ?? null, userId, {
-      inicio:
-        dto.fecha_vuelo?.toISOString() ??
-        (current.fecha_vuelo as string | null) ??
-        null,
-      fin:
-        dto.fecha_traslado_final?.toISOString() ??
-        (current.fecha_traslado_final as string | null) ??
-        null,
-    });
+    try {
+      await this.replaceEscalas(
+        vueloId,
+        breakdown.ruta.escalas ?? null,
+        userId,
+        {
+          inicio:
+            dto.fecha_vuelo?.toISOString() ??
+            (current.fecha_vuelo as string | null) ??
+            null,
+          fin:
+            dto.fecha_traslado_final?.toISOString() ??
+            (current.fecha_traslado_final as string | null) ??
+            null,
+        },
+      );
+    } catch (err) {
+      // NUNCA warn-only (auditoría 29-ago): el usuario debe saber qué quedó
+      // aplicado — los MONTOS ya se escribieron (versión nueva), los TRAMOS
+      // no. Reintentar "Revisar" vuelve a escribir los tramos.
+      throw new Error(
+        `Los montos de la cotización #${current.folio as number} YA se actualizaron (versión ${newVersion}), pero los TRAMOS no se pudieron escribir: ${err instanceof Error ? err.message : String(err)}. Vuelve a guardar la revisión para completar el itinerario.`,
+      );
+    }
     // Al revisar, la ruta puede ganar o perder una pista con permiso — y las
     // reservas llegan aquí con el permiso sin derivar (nacieron sin cotización).
     await this.airports.refreshPermisosDeVuelo(vueloId);
@@ -1631,14 +1657,24 @@ export class QuotesService {
         /* best-effort */
       }
     }
-    await this.appendVersionHistory(
-      vueloId,
-      newVersion,
-      dto,
-      breakdown,
-      dto.motivo,
-      userId,
-    );
+    try {
+      await this.appendVersionHistory(
+        vueloId,
+        newVersion,
+        dto,
+        breakdown,
+        dto.motivo,
+        userId,
+      );
+    } catch (err) {
+      // NUNCA warn-only (auditoría 29-ago): la revisión (montos y tramos) YA
+      // quedó aplicada; solo falta el renglón del historial de versiones. El
+      // mensaje dice exactamente qué quedó para que oficina no re-aplique a
+      // ciegas.
+      throw new Error(
+        `La revisión de la cotización #${current.folio as number} SÍ quedó aplicada (versión ${newVersion}: montos y tramos), pero el HISTORIAL de versiones no se pudo escribir: ${err instanceof Error ? err.message : String(err)}. No re-captures los montos; reporta este error.`,
+      );
+    }
     // El precio cambió: la bandera `cobrado` se recalcula con la fuente
     // canónica (un anticipo previo puede ahora cubrir —o dejar de cubrir— el
     // total). Antes quedaba obsoleta hasta el siguiente cobro.
@@ -1870,6 +1906,10 @@ export class QuotesService {
         'Ajuste rápido desde el detalle (extras/pasajeros)',
     } as unknown as ReviseQuoteDto;
 
+    // El espejo en Google Calendar viaja con revise(): su cola hace
+    // `void this.calendar.syncFlight(vueloId)` tras aplicar la revisión (sin
+    // early-returns antes), así que un cambio de pasajeros —que sale en el
+    // summary del evento— queda sincronizado sin un segundo disparo aquí.
     return this.revise(vueloId, reviseDto, userId);
   }
 
@@ -2324,6 +2364,39 @@ export class QuotesService {
    * nuevos) y borra los sobrantes solo si no tienen tacómetro capturado. Esto
    * permite re-cotizar vuelos abiertos ya volados sin perder datos.
    */
+  /**
+   * COMPENSACIÓN de create() (29-ago): si el insert de escalas falló, el
+   * vuelo recién creado se BORRA (junto con tramos parciales, si alcanzó a
+   * escribir alguno) para no dejar una cotización fantasma con 201. Si el
+   * borrado también falla solo se loguea fuerte: el error original se lanza
+   * igual y el pre-cierre/panel ven el vuelo incompleto (no desaparece nada
+   * en silencio).
+   */
+  private async compensarVueloSinEscalas(vueloId: string): Promise<void> {
+    try {
+      await this.supabase.service
+        .from('cotizacion_version_history')
+        .delete()
+        .eq('vuelo_id', vueloId);
+      await this.supabase.service
+        .from('escala')
+        .delete()
+        .eq('vuelo_id', vueloId);
+      const { error } = await this.supabase.service
+        .from('vuelo')
+        .delete()
+        .eq('id', vueloId);
+      if (error) throw new Error(error.message);
+      this.logger.warn(
+        `Vuelo ${vueloId} revertido: sus escalas no se pudieron crear (compensación de create).`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Vuelo ${vueloId} quedó SIN tramos y la compensación falló: ${err instanceof Error ? err.message : String(err)}. Revisarlo/borrarlo a mano.`,
+      );
+    }
+  }
+
   private async replaceEscalas(
     vueloId: string,
     escalas: ResolvedLeg[] | null,

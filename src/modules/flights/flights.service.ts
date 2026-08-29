@@ -8,7 +8,23 @@ import {
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
-import { tripulacionDeVuelo } from '../../common/tripulacion.util';
+import {
+  apoyosDeVuelo,
+  apoyosDeVuelos,
+  apoyosEfectivosDeTramo,
+  apoyosNivelVuelo,
+  apoyosDeTramo,
+  cargarTripulacion,
+  clonarApoyos,
+  copilotoEfectivo,
+  miTripulacion,
+  pilotoEfectivo,
+  reemplazarApoyos,
+  syncApoyoEspejo,
+  tripulacionDeVuelo,
+  type MiTripulacion,
+  type VueloApoyoRow,
+} from '../../common/tripulacion.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
@@ -78,7 +94,7 @@ export type { ParticipacionAvionItem };
 // ver syncVueloFromIdaEscala / mirrorVueloToIdaEscala). El resto de los tramos son
 // independientes.
 const ESCALA_COLS =
-  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at, notas, cancelada_at, cancelada_motivo, cancelada_por, created_at, updated_at';
+  'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, copiloto_id, estado_permiso, fecha_salida_plan, foto_plan_vuelo_url, google_calendar_id, pasajeros, pasajeros_nombres, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, solo_operativa, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, foto_taco_salida_url, foto_taco_llegada_url, valor_ia_propuesto, revision_requerida, revision_motivo, hora_salida, hora_llegada, capturado_offline, sincronizado_at, capturado_por, corregido_por, nota_correccion, corregido_at, taco_salida_obs, taco_llegada_obs, taco_obs_updated_by, taco_obs_updated_at, notas, cancelada_at, cancelada_motivo, cancelada_por, created_at, updated_at';
 
 // Umbrales de consistencia para la marca AMARILLA (revisión manual).
 const AI_VS_MANUAL_TOL_HR = 0.3; // |lectura manual − sugerida IA| en horas
@@ -440,8 +456,13 @@ export class FlightsService {
    * Elimina un vuelo SIN actividad (solicitudes/apartados fantasma que nunca
    * se confirmaron). Bloqueado si tiene cobros, gastos o tacómetros: esos se
    * cancelan (no se borran) para no perder el rastro contable.
+   * SIEMPRE deja fila en `vuelo_eliminado` (auditoría 29-ago: 8 folios
+   * desaparecieron sin bitácora y nadie podía saber que fue un borrado).
    */
-  async deleteFlight(id: string): Promise<{ deleted: true; id: string }> {
+  async deleteFlight(
+    id: string,
+    userId: string | null = null,
+  ): Promise<{ deleted: true; id: string }> {
     const vuelo = await this.findById(id);
     if (vuelo.cobrado || vuelo.facturado) {
       throw new ConflictException(
@@ -473,12 +494,31 @@ export class FlightsService {
     // Aviso a la tripulación ANTES de borrar (21-ago): después ya no hay a
     // quién consultar. Se resuelve la lista ahora y se manda al final.
     const tripulacion = await this.tripulacionDeVuelo(id, vuelo);
+    // Bitácora forense ANTES de borrar (29-ago): snapshot CRUDO del vuelo y
+    // sus tramos (montos y fechas incluidos). Sin bitácora no hay borrado;
+    // si el DELETE falla, se revierte.
+    const [{ data: vueloRaw }, { data: escalasRaw }] = await Promise.all([
+      sb.from('vuelo').select('*').eq('id', id).maybeSingle(),
+      sb.from('escala').select('*').eq('vuelo_id', id).order('orden'),
+    ]);
+    const bitacoraId = await this.escribirBitacoraVueloEliminado(
+      (vueloRaw as Record<string, unknown> | null) ?? vuelo,
+      (escalasRaw ?? []) as Array<Record<string, unknown>>,
+      'eliminado desde panel',
+      userId,
+    );
     // Quita eventos de Google antes de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
     await sb.from('escala').delete().eq('vuelo_id', id);
     const { error } = await sb.from('vuelo').delete().eq('id', id);
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Revertir la bitácora: el vuelo sigue existiendo.
+      if (bitacoraId) {
+        await sb.from('vuelo_eliminado').delete().eq('id', bitacoraId);
+      }
+      throw new Error(error.message);
+    }
     for (const uid of tripulacion) {
       void this.notifications.notifyUser(uid, {
         tipo: 'alerta_sistema',
@@ -504,6 +544,66 @@ export class FlightsService {
    *   planes de vuelo (planes-vuelo) best-effort, notificaciones ligadas, y
    *   squawks desligados a propósito (la discrepancia es del avión).
    */
+  /**
+   * Escribe la fila forense en `vuelo_eliminado` — la usa TODO camino que
+   * borra un vuelo (purge de cancelados Y borrado de borradores del panel;
+   * auditoría 29-ago: 8 folios desaparecieron sin que nadie pudiera saber
+   * que fue un borrado). El snapshot crudo del vuelo trae los montos
+   * (monto_total_usd, subtotal, iva) y las fechas; se resuelven nombre del
+   * cliente y matrícula para lectura rápida. Lanza si no se puede escribir:
+   * SIN bitácora NO hay borrado. Devuelve el id para revertirla si el
+   * DELETE del vuelo falla después.
+   */
+  private async escribirBitacoraVueloEliminado(
+    vuelo: Record<string, unknown>,
+    escalas: Array<Record<string, unknown>>,
+    motivo: string,
+    userId: string | null,
+  ): Promise<string | null> {
+    const sb = this.supabase.service;
+    // Nombres para la bitácora (best-effort).
+    const [clienteRes, aeronaveRes] = await Promise.all([
+      vuelo.cliente_id
+        ? sb
+            .from('cliente')
+            .select('nombre')
+            .eq('id', vuelo.cliente_id as string)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+      vuelo.aeronave_id
+        ? sb
+            .from('aeronave')
+            .select('matricula')
+            .eq('id', vuelo.aeronave_id as string)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+    ]);
+    const { data, error } = await sb
+      .from('vuelo_eliminado')
+      .insert({
+        vuelo_id: vuelo.id as string,
+        folio: (vuelo.folio as number | null) ?? null,
+        cliente_nombre:
+          (clienteRes.data as { nombre?: string } | null)?.nombre ?? null,
+        matricula:
+          (aeronaveRes.data as { matricula?: string } | null)?.matricula ??
+          null,
+        fecha_vuelo: vuelo.fecha_vuelo ?? null,
+        estado: vuelo.estado,
+        tramos: escalas.length,
+        motivo: motivo.trim(),
+        snapshot: { vuelo, escalas },
+        eliminado_por: userId,
+      })
+      .select('id')
+      .maybeSingle();
+    if (error)
+      throw new Error(
+        `No se pudo escribir la bitácora de borrado del vuelo #${(vuelo.folio as number | null) ?? '?'}: ${error.message}. El vuelo NO se borró.`,
+      );
+    return (data?.id as string) ?? null;
+  }
+
   async purgeFlight(
     id: string,
     motivo: string,
@@ -556,24 +656,6 @@ export class FlightsService {
       );
     }
 
-    // Nombres para la bitácora (best-effort).
-    const [clienteRes, aeronaveRes] = await Promise.all([
-      vuelo.cliente_id
-        ? sb
-            .from('cliente')
-            .select('nombre')
-            .eq('id', vuelo.cliente_id as string)
-            .maybeSingle()
-        : Promise.resolve({ data: null }),
-      vuelo.aeronave_id
-        ? sb
-            .from('aeronave')
-            .select('matricula')
-            .eq('id', vuelo.aeronave_id as string)
-            .maybeSingle()
-        : Promise.resolve({ data: null }),
-    ]);
-
     // Fotos de storage: recolectar los paths ANTES del delete (los tramos
     // caen por CASCADE y nadie más conoce esos paths) — patrón engines.
     const tacoPaths: string[] = [];
@@ -603,26 +685,12 @@ export class FlightsService {
     if (pv) planPaths.push(pv);
 
     // Bitácora forense ANTES de borrar (si el delete falla, se revierte).
-    const { data: bitacora, error: bitErr } = await sb
-      .from('vuelo_eliminado')
-      .insert({
-        vuelo_id: id,
-        folio,
-        cliente_nombre:
-          (clienteRes.data as { nombre?: string } | null)?.nombre ?? null,
-        matricula:
-          (aeronaveRes.data as { matricula?: string } | null)?.matricula ??
-          null,
-        fecha_vuelo: vuelo.fecha_vuelo ?? null,
-        estado: vuelo.estado,
-        tramos: escalas.length,
-        motivo: motivo.trim(),
-        snapshot: { vuelo, escalas },
-        eliminado_por: userId,
-      })
-      .select('id')
-      .maybeSingle();
-    if (bitErr) throw new Error(bitErr.message);
+    const bitacoraId = await this.escribirBitacoraVueloEliminado(
+      vuelo as Record<string, unknown>,
+      escalas,
+      motivo,
+      userId,
+    );
 
     // Eventos de Google Calendar ANTES de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
@@ -637,8 +705,8 @@ export class FlightsService {
     const { error } = await sb.from('vuelo').delete().eq('id', id);
     if (error) {
       // Revertir la bitácora: el vuelo sigue existiendo.
-      if (bitacora?.id) {
-        await sb.from('vuelo_eliminado').delete().eq('id', bitacora.id);
+      if (bitacoraId) {
+        await sb.from('vuelo_eliminado').delete().eq('id', bitacoraId);
       }
       if (error.code === '23503') {
         throw new ConflictException(
@@ -780,23 +848,55 @@ export class FlightsService {
       .select(
         // cancelada_* viaja al clon (28-ago): sin esto, un tramo cancelado
         // del original (p.ej. ferry de un vuelo combinado) renacía VIVO.
-        'orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, aeronave_id, estado_permiso, cancelada_at, cancelada_motivo, cancelada_por',
+        // copiloto_id (29-ago): la rotación de copilotos por tramo también
+        // viaja; el `id` solo sirve para mapear los apoyos por tramo.
+        'id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, es_ferry, es_sobrevuelo, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, piloto_id, copiloto_id, aeronave_id, estado_permiso, cancelada_at, cancelada_motivo, cancelada_por',
       )
       .eq('vuelo_id', id)
       .order('orden', { ascending: true });
+    const escalasOrigen = new Map<number, string>();
+    const escalasClon = new Map<number, string>();
     if (legs && legs.length > 0) {
-      await sb.from('escala').insert(
-        legs.map((l) => ({
-          ...l,
-          vuelo_id: (clon as { id: string }).id,
-          // Un tramo cancelado conserva el avión con el que se canceló.
-          aeronave_id:
-            (l as { cancelada_at?: string | null }).cancelada_at != null
-              ? ((l as { aeronave_id?: string | null }).aeronave_id ?? null)
-              : dto.aeronave_id,
-          created_by: userId,
-          updated_by: userId,
-        })),
+      const { data: nuevas } = await sb
+        .from('escala')
+        .insert(
+          legs.map((l) => {
+            const { id: escalaOrigenId, ...resto } = l as Record<
+              string,
+              unknown
+            > & { id: string };
+            escalasOrigen.set(Number(l.orden), escalaOrigenId);
+            return {
+              ...resto,
+              vuelo_id: (clon as { id: string }).id,
+              // Un tramo cancelado conserva el avión con el que se canceló.
+              aeronave_id:
+                (l as { cancelada_at?: string | null }).cancelada_at != null
+                  ? ((l as { aeronave_id?: string | null }).aeronave_id ?? null)
+                  : dto.aeronave_id,
+              created_by: userId,
+              updated_by: userId,
+            };
+          }),
+        )
+        .select('id, orden');
+      for (const n of nuevas ?? []) {
+        escalasClon.set(Number(n.orden), n.id as string);
+      }
+    }
+    // Apoyos (vuelo y por tramo) viajan al clon — TODA la tripulación se
+    // conserva, no solo el espejo `apoyo_id` que copió el spread.
+    try {
+      await clonarApoyos(sb, {
+        origenId: id,
+        clonId: (clon as { id: string }).id,
+        escalasOrigen,
+        escalasClon,
+        createdBy: userId,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `reassignAircraft ${id}: no se pudieron clonar los apoyos: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
 
@@ -978,7 +1078,7 @@ export class FlightsService {
     // snapshot completo de cada vuelo.
     const embedEscalas =
       filters.embed === 'escalas_plan'
-        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at, piloto_id)'
+        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at, piloto_id, copiloto_id)'
         : '';
     // string plano: el parser TIPADO de supabase-js no digiere el template
     // con embed condicional (truena en compilación, no en runtime).
@@ -997,12 +1097,25 @@ export class FlightsService {
       // (ida), o piloto de CUALQUIER tramo (p. ej. solo el regreso de un
       // redondo con pilotos distintos). Copiloto y apoyo van a nivel vuelo
       // (todo el viaje); el apoyo lo ve en su app igual que el piloto.
-      const { data: legVuelos } = await this.supabase.service
-        .from('escala')
-        .select('vuelo_id')
-        .eq('piloto_id', filters.piloto_id);
+      // 29-ago: también copiloto de un TRAMO y apoyo (del vuelo o de un
+      // tramo) desde `vuelo_apoyo` — el espejo apoyo_id solo trae al primero.
+      const [{ data: legVuelos }, { data: apoyoVuelos }] = await Promise.all([
+        this.supabase.service
+          .from('escala')
+          .select('vuelo_id')
+          .or(
+            `piloto_id.eq.${filters.piloto_id},copiloto_id.eq.${filters.piloto_id}`,
+          ),
+        this.supabase.service
+          .from('vuelo_apoyo')
+          .select('vuelo_id')
+          .eq('usuario_id', filters.piloto_id),
+      ]);
       const ids = [
-        ...new Set((legVuelos ?? []).map((e) => e.vuelo_id as string)),
+        ...new Set([
+          ...(legVuelos ?? []).map((e) => e.vuelo_id as string),
+          ...(apoyoVuelos ?? []).map((a) => a.vuelo_id as string),
+        ]),
       ];
       const ors = [
         `piloto_id.eq.${filters.piloto_id}`,
@@ -1108,9 +1221,15 @@ export class FlightsService {
     });
     // Ruta COMPLETA por vuelo (origen → escalas → destino) para los listados:
     // se resuelve en lote desde las escalas comerciales, no solo origen/destino.
-    const rutas = await this.rutasIatasPorVuelo(
-      rows.map((r) => (r as Record<string, unknown>).id as string),
+    const idsVuelos = rows.map(
+      (r) => (r as Record<string, unknown>).id as string,
     );
+    const [rutas, apoyosPorVuelo] = await Promise.all([
+      this.rutasIatasPorVuelo(idsVuelos),
+      // Apoyos de nivel vuelo (29-ago, aditivo): las tarjetas pintan la
+      // lista completa, no solo el espejo apoyo_id.
+      this.apoyosPorVuelo(idsVuelos),
+    ]);
     const rowsConRuta = rows.map((r) => {
       const row = r as Record<string, unknown>;
       // Misma redacción por rol que findById/snapshot: el listado es la ruta
@@ -1119,6 +1238,7 @@ export class FlightsService {
       return this.redactVueloForRol(
         {
           ...row,
+          apoyos: apoyosPorVuelo.get(row.id as string) ?? [],
           ruta_iatas:
             rutas.get(row.id as string) ??
             [row.origen_iata as string, row.destino_iata as string].filter(
@@ -1223,29 +1343,148 @@ export class FlightsService {
       throw new ForbiddenException('El visitante no tiene acceso a vuelos.');
     }
     if (current.rol !== Rol.PILOTO) return;
-    const { data, error } = await this.supabase.service
-      .from('vuelo')
-      .select('piloto_id, copiloto_id, apoyo_id')
-      .eq('id', vueloId)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
-    if (
-      data.piloto_id === current.userId ||
-      data.copiloto_id === current.userId ||
-      data.apoyo_id === current.userId
-    )
-      return;
-    // ¿Asignado a algún tramo de este vuelo?
-    const { data: leg } = await this.supabase.service
-      .from('escala')
-      .select('id')
-      .eq('vuelo_id', vueloId)
-      .eq('piloto_id', current.userId)
-      .limit(1)
-      .maybeSingle();
-    if (!leg) {
+    // Tripulación por tramo (29-ago): piloto/copiloto del vuelo o de algún
+    // tramo, o apoyo (del vuelo o de un tramo) — fuente única miTripulacion.
+    const rel = await this.relacionConVuelo(vueloId, current.userId);
+    if (!rel.es_tripulante) {
       throw new ForbiddenException('No tienes acceso a este vuelo');
+    }
+  }
+
+  /**
+   * Relación del usuario con el vuelo (fuente única `miTripulacion`): la
+   * usan assertAccess, el candado de tacómetros, la vista de cotización y el
+   * snapshot (`mi_tripulacion` para la app). 404 si el vuelo no existe.
+   */
+  private async relacionConVuelo(
+    vueloId: string,
+    userId: string,
+  ): Promise<MiTripulacion> {
+    const carga = await cargarTripulacion(this.supabase.service, vueloId);
+    if (!carga) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    return miTripulacion(userId, carga.vuelo, carga.escalas, carga.apoyos);
+  }
+
+  /** Nombre + rol de varios usuarios en UNA consulta (tripulación). */
+  private async usuariosInfo(
+    ids: string[],
+  ): Promise<Map<string, { id: string; nombre: string; rol: string | null }>> {
+    const out = new Map<
+      string,
+      { id: string; nombre: string; rol: string | null }
+    >();
+    const unicos = [...new Set(ids.filter(Boolean))];
+    if (unicos.length === 0) return out;
+    const { data } = await this.supabase.service
+      .from('usuario')
+      .select('id, nombre, rol')
+      .in('id', unicos);
+    for (const u of data ?? []) {
+      out.set(u.id as string, {
+        id: u.id as string,
+        nombre: (u.nombre as string) ?? '',
+        rol: (u.rol as string | null) ?? null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Apoyos de NIVEL VUELO con nombre/rol, en orden de alta (el primero es el
+   * espejo `apoyo_id`). Payload aditivo `apoyos: [{ id, nombre, rol }]`.
+   */
+  private async apoyosInfoDeVuelo(
+    vueloId: string,
+    filas?: VueloApoyoRow[],
+  ): Promise<Array<{ id: string; nombre: string; rol: string | null }>> {
+    const rows = filas ?? (await apoyosDeVuelo(this.supabase.service, vueloId));
+    const ids = apoyosNivelVuelo(rows);
+    const info = await this.usuariosInfo(ids);
+    return ids.map(
+      (id) => info.get(id) ?? { id, nombre: 'Usuario', rol: null },
+    );
+  }
+
+  /** Igual que apoyosInfoDeVuelo pero en lote (listados). */
+  private async apoyosPorVuelo(
+    vueloIds: string[],
+  ): Promise<
+    Map<string, Array<{ id: string; nombre: string; rol: string | null }>>
+  > {
+    const out = new Map<
+      string,
+      Array<{ id: string; nombre: string; rol: string | null }>
+    >();
+    if (vueloIds.length === 0) return out;
+    let porVuelo: Map<string, VueloApoyoRow[]>;
+    try {
+      porVuelo = await apoyosDeVuelos(this.supabase.service, vueloIds);
+    } catch (err) {
+      // Aditivo: un fallo aquí no tumba el listado (la app vieja ni lo lee).
+      this.logger.warn(
+        `apoyosPorVuelo: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return out;
+    }
+    const todos = new Set<string>();
+    for (const filas of porVuelo.values()) {
+      for (const id of apoyosNivelVuelo(filas)) todos.add(id);
+    }
+    const info = await this.usuariosInfo([...todos]);
+    for (const [vid, filas] of porVuelo) {
+      out.set(
+        vid,
+        apoyosNivelVuelo(filas).map(
+          (id) => info.get(id) ?? { id, nombre: 'Usuario', rol: null },
+        ),
+      );
+    }
+    return out;
+  }
+
+  /**
+   * Detalle del vuelo (GET :id): el resumen de findById + `apoyos` (lista
+   * de nivel vuelo) + `mi_tripulacion` del solicitante. Aditivo sobre el
+   * contrato previo (apoyo_id/apoyo_nombre siguen viajando).
+   */
+  async detalle(id: string, current?: AuthenticatedUser) {
+    const vuelo = await this.findById(id, current);
+    const filas = await apoyosDeVuelo(this.supabase.service, id);
+    const apoyos = await this.apoyosInfoDeVuelo(id, filas);
+    let mi_tripulacion: MiTripulacion | null = null;
+    if (current) {
+      const { data: escalas } = await this.supabase.service
+        .from('escala')
+        .select('id, piloto_id, copiloto_id, cancelada_at')
+        .eq('vuelo_id', id);
+      mi_tripulacion = miTripulacion(
+        current.userId,
+        vuelo,
+        escalas ?? [],
+        filas,
+      );
+    }
+    return { ...vuelo, apoyos, mi_tripulacion };
+  }
+
+  /**
+   * Valida una lista de APOYOS (vuelo o tramo): sin duplicados, cada uno
+   * existe y está ACTIVO, y ninguno es el piloto/copiloto efectivos.
+   */
+  private async assertApoyosAsignables(
+    ids: string[],
+    excluir: { piloto: string | null; copiloto: string | null },
+  ): Promise<void> {
+    if (new Set(ids).size !== ids.length) {
+      throw new BadRequestException('Hay un apoyo repetido en la lista.');
+    }
+    for (const id of ids) {
+      if (id === excluir.piloto || id === excluir.copiloto) {
+        throw new BadRequestException(
+          'El apoyo debe ser distinto al piloto y al copiloto.',
+        );
+      }
+      await this.assertApoyoAsignable(id);
     }
   }
 
@@ -1290,28 +1529,11 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
     const vueloId = escala.vuelo_id as string;
-    const { data, error: vErr } = await this.supabase.service
-      .from('vuelo')
-      .select('piloto_id, copiloto_id, apoyo_id')
-      .eq('id', vueloId)
-      .maybeSingle();
-    if (vErr) throw new Error(vErr.message);
-    if (!data) throw new NotFoundException(`Vuelo ${vueloId} not found`);
-    if (
-      data.piloto_id === current.userId ||
-      data.copiloto_id === current.userId
-    )
-      return;
-    // ¿Piloto de algún tramo? (p. ej. solo el regreso de un redondo)
-    const { data: leg } = await this.supabase.service
-      .from('escala')
-      .select('id')
-      .eq('vuelo_id', vueloId)
-      .eq('piloto_id', current.userId)
-      .limit(1)
-      .maybeSingle();
-    if (leg) return;
-    if (data.apoyo_id === current.userId) {
+    // Fuente única (29-ago): piloto/copiloto del vuelo o de algún tramo
+    // (con herencia) capturan; el apoyo — del vuelo o del tramo — no.
+    const rel = await this.relacionConVuelo(vueloId, current.userId);
+    if (rel.puede_capturar_tacos) return;
+    if (rel.apoyo) {
       throw new ForbiddenException(
         'Vas de APOYO en este vuelo: los tacómetros los captura el piloto.',
       );
@@ -1367,15 +1589,9 @@ export class FlightsService {
     // igual que en assertAccess y en el listado) o a cualquier tramo (p. ej.
     // solo el regreso de un redondo con pilotos distintos).
     if (current.rol === Rol.PILOTO) {
-      const asignadoATramo = todasEscalas.some(
-        (e) => e.piloto_id === current.userId,
-      );
-      if (
-        v.piloto_id !== current.userId &&
-        v.copiloto_id !== current.userId &&
-        v.apoyo_id !== current.userId &&
-        !asignadoATramo
-      ) {
+      // 29-ago: copiloto de tramo y apoyos (vuelo/tramo) también la ven.
+      const rel = await this.relacionConVuelo(id, current.userId);
+      if (!rel.es_tripulante) {
         throw new ForbiddenException(
           'No puedes ver la cotización de un vuelo que no tienes asignado',
         );
@@ -1405,6 +1621,7 @@ export class FlightsService {
         destino_iata: e.destino_iata,
         // Datos operativos por tramo (sin financieros) para que el piloto vea su tramo.
         piloto_id: e.piloto_id ?? null,
+        copiloto_id: (e as { copiloto_id?: string | null }).copiloto_id ?? null,
         estado_permiso: e.estado_permiso ?? null,
         fecha_salida_plan: e.fecha_salida_plan ?? null,
         // Detalle por tramo: el piloto necesita ver cuánta gente sube en cada
@@ -1480,6 +1697,7 @@ export class FlightsService {
       pilotoNombre,
       copilotoNombre,
       snapRow,
+      apoyosRows,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -1508,6 +1726,8 @@ export class FlightsService {
         .eq('id', id)
         .maybeSingle()
         .then((r) => r.data),
+      // Tripulación de apoyo 0..N (29-ago): fuente única vuelo_apoyo.
+      apoyosDeVuelo(this.supabase.service, id),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -1526,14 +1746,27 @@ export class FlightsService {
     // solicitante va de APOYO y esa es su ÚNICA relación con el vuelo (no es
     // piloto, ni copiloto, ni piloto de tramo) — misma regla que el candado
     // del servidor (assertPuedeCapturarTaco).
+    // 29-ago: fuente única miTripulacion (copiloto por tramo y apoyos por
+    // vuelo/tramo incluidos). `mi_tripulacion` viaja completo para la app.
+    const miTrip = current
+      ? miTripulacion(
+          current.userId,
+          vuelo,
+          escalasEnriquecidas as Array<{
+            id: string;
+            piloto_id?: string | null;
+            copiloto_id?: string | null;
+            cancelada_at?: string | null;
+          }>,
+          apoyosRows,
+        )
+      : null;
     const esApoyo =
       current?.rol === Rol.PILOTO &&
-      apoyoId != null &&
-      apoyoId === current.userId &&
-      (vuelo as { piloto_id?: string | null }).piloto_id !== current.userId &&
-      (vuelo as { copiloto_id?: string | null }).copiloto_id !==
-        current.userId &&
-      !escalasEnriquecidas.some((e) => e.piloto_id === current.userId);
+      miTrip != null &&
+      miTrip.apoyo &&
+      !miTrip.puede_capturar_tacos;
+    const apoyos = await this.apoyosInfoDeVuelo(id, apoyosRows);
     // Participación por avión (regla B 28-ago): con tramos en aviones
     // distintos, la venta del avión se reparte entre ellos; aquí solo se
     // EXPONE (app/panel lo etiquetan). Se pasan TODAS las escalas — la
@@ -1554,6 +1787,8 @@ export class FlightsService {
       copiloto_nombre: copilotoNombre,
       apoyo_nombre: apoyoNombre,
       es_apoyo: esApoyo,
+      apoyos,
+      mi_tripulacion: miTrip,
       ultimo_taco_avion: ultimoTacoAvion,
       ultimo_taco_avion_detalle: ultimoTacoDetalle,
       escalas: escalasEnriquecidas,
@@ -2071,7 +2306,7 @@ export class FlightsService {
       const { data: sameDay } = await this.supabase.service
         .from('vuelo')
         .select(
-          'id, folio, piloto_id, copiloto_id, apoyo_id, escalas:escala(piloto_id, cancelada_at)',
+          'id, folio, piloto_id, copiloto_id, apoyo_id, escalas:escala(piloto_id, copiloto_id, cancelada_at), apoyos:vuelo_apoyo(usuario_id)',
         )
         .lte('fecha_vuelo', `${day}T23:59:59-05:00`)
         .gte('fecha_fin', `${day}T00:00:00-05:00`)
@@ -2080,19 +2315,24 @@ export class FlightsService {
       for (const f of sameDay ?? []) {
         // Ocupación COMPLETA del día (barrido 28-ago): piloto del vuelo,
         // copiloto/apoyo y las rotaciones por TRAMO — antes un piloto
-        // asignado solo a un tramo de otro vuelo aparecía libre.
+        // asignado solo a un tramo de otro vuelo aparecía libre. 29-ago:
+        // copilotos de tramo y TODOS los apoyos (vuelo_apoyo).
+        const tramos =
+          (f.escalas as Array<{
+            piloto_id: string | null;
+            copiloto_id: string | null;
+            cancelada_at: string | null;
+          }> | null) ?? [];
         const ocupados = [
           f.piloto_id as string | null,
           f.copiloto_id as string | null,
           f.apoyo_id as string | null,
-          ...(
-            (f.escalas as Array<{
-              piloto_id: string | null;
-              cancelada_at: string | null;
-            }> | null) ?? []
-          )
+          ...tramos
             .filter((e) => e.cancelada_at == null)
-            .map((e) => e.piloto_id),
+            .flatMap((e) => [e.piloto_id, e.copiloto_id]),
+          ...(
+            (f.apoyos as Array<{ usuario_id: string | null }> | null) ?? []
+          ).map((a) => a.usuario_id),
         ];
         for (const uid of ocupados) {
           if (uid && !conflicto.has(uid)) conflicto.set(uid, f.folio as number);
@@ -2224,16 +2464,22 @@ export class FlightsService {
       await this.validateAssignTargets({ pilotoId: dto.copiloto_id! });
     }
 
-    // APOYO del vuelo (caso Jimmy): va en tierra (maletas, facturas, cobros,
-    // gastos) y opera el vuelo como el piloto EXCEPTO tacómetros. No vuela:
-    // no se le aplican los candados de piloto (documentos críticos de
-    // validateAssignTargets ni descansos/horas) — basta existir y estar
-    // ACTIVO. null/'' = quitarlo (patrón copiloto).
-    const asignandoApoyo =
-      dto.apoyo_id !== undefined &&
-      dto.apoyo_id !== null &&
-      dto.apoyo_id !== '';
-    if (asignandoApoyo) {
+    // APOYOS del vuelo (caso Jimmy; lista 0..N desde el 29-ago-2026): van en
+    // tierra (maletas, facturas, cobros, gastos) y operan el vuelo como el
+    // piloto EXCEPTO tacómetros. No vuelan: no se les aplican los candados
+    // de piloto (documentos críticos de validateAssignTargets ni
+    // descansos/horas) — basta existir y estar ACTIVO. `apoyo_ids` REEMPLAZA
+    // la lista de nivel vuelo ([] = ninguno); el `apoyo_id` legado (app
+    // vieja) se traduce a la lista: null/'' = ninguno.
+    const apoyoIds: string[] | undefined =
+      dto.apoyo_ids !== undefined
+        ? [...new Set(dto.apoyo_ids)]
+        : dto.apoyo_id !== undefined
+          ? dto.apoyo_id
+            ? [dto.apoyo_id]
+            : []
+          : undefined;
+    if (apoyoIds !== undefined) {
       const pilotoFinal: string | null =
         dto.piloto_id !== undefined
           ? dto.piloto_id
@@ -2242,12 +2488,10 @@ export class FlightsService {
         dto.copiloto_id !== undefined
           ? dto.copiloto_id
           : ((current as { copiloto_id?: string | null }).copiloto_id ?? null);
-      if (dto.apoyo_id === pilotoFinal || dto.apoyo_id === copilotoFinal) {
-        throw new BadRequestException(
-          'El apoyo debe ser distinto al piloto y al copiloto.',
-        );
-      }
-      await this.assertApoyoAsignable(dto.apoyo_id!);
+      await this.assertApoyosAsignables(apoyoIds, {
+        piloto: pilotoFinal,
+        copiloto: copilotoFinal,
+      });
     }
 
     const patch: Record<string, unknown> = { updated_by: updatedBy };
@@ -2255,13 +2499,29 @@ export class FlightsService {
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
     if (dto.copiloto_id !== undefined)
       patch.copiloto_id = dto.copiloto_id === '' ? null : dto.copiloto_id;
-    if (dto.apoyo_id !== undefined)
-      patch.apoyo_id = dto.apoyo_id === '' ? null : dto.apoyo_id;
+    // `apoyo_id` ya NO se escribe aquí: es el espejo que mantiene
+    // syncApoyoEspejo tras escribir vuelo_apoyo (más abajo).
     if (dto.fecha_vuelo !== undefined)
       patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
 
-    if (Object.keys(patch).length === 1) {
+    if (Object.keys(patch).length === 1 && apoyoIds === undefined) {
       throw new BadRequestException('Empty assign payload');
+    }
+
+    // Apoyos: solo la DIFERENCIA se escribe y se avisa (altas/bajas). Va
+    // antes del update del vuelo para que el espejo apoyo_id ya esté
+    // sincronizado cuando se lea `data`.
+    let apoyosAltas: string[] = [];
+    let apoyosBajas: string[] = [];
+    if (apoyoIds !== undefined) {
+      const r = await reemplazarApoyos(this.supabase.service, {
+        vueloId: id,
+        escalaId: null,
+        usuarioIds: apoyoIds,
+        createdBy: updatedBy,
+      });
+      apoyosAltas = r.altas;
+      apoyosBajas = r.bajas;
     }
 
     const { data, error } = await this.supabase.service
@@ -2318,16 +2578,71 @@ export class FlightsService {
         .eq('vuelo_id', id)
         .is('cancelada_at', null);
       if (tramosErr) {
-        this.logger.warn(
-          `assign ${id}: no se pudo aplicar el piloto a todos los tramos: ${tramosErr.message}`,
+        // NUNCA warn-only (auditoría 29-ago): un vuelo con piloto nuevo y
+        // tramos con el piloto viejo es una divergencia silenciosa (el viejo
+        // sigue viendo/capturando tramos que ya no son suyos). El vuelo YA
+        // quedó actualizado — reintentar la asignación es seguro (idempotente).
+        throw new Error(
+          `El piloto del vuelo SÍ se actualizó, pero no se pudo aplicar a sus tramos: ${tramosErr.message}. Vuelve a asignar al piloto para emparejar los tramos.`,
         );
-      } else {
-        for (const [uid, tramos] of salientes) {
+      }
+      for (const [uid, tramos] of salientes) {
+        void this.notificarQuitado(
+          uid,
+          data!,
+          'piloto',
+          `tramo(s) ${tramos.join(', ')} reasignado(s) al nuevo piloto`,
+        );
+      }
+    }
+    // COPILOTO a nivel vuelo (29-ago): misma regla que el piloto — aplica a
+    // TODOS los tramos. Los tramos con copiloto propio (rotación) vuelven a
+    // heredar y sus copilotos salientes reciben aviso.
+    if (
+      dto.copiloto_id !== undefined &&
+      dto.copiloto_id !== current.copiloto_id
+    ) {
+      const nuevoCop = dto.copiloto_id || null;
+      const { data: tramosCop } = await this.supabase.service
+        .from('escala')
+        .select('id, copiloto_id, origen_iata, destino_iata')
+        .eq('vuelo_id', id)
+        .is('cancelada_at', null)
+        .not('copiloto_id', 'is', null);
+      const salientesCop = new Map<string, string[]>();
+      for (const t of tramosCop ?? []) {
+        const cid = t.copiloto_id as string | null;
+        if (
+          cid &&
+          cid !== nuevoCop &&
+          cid !== (current.copiloto_id as string | null)
+        ) {
+          const lista = salientesCop.get(cid) ?? [];
+          lista.push(
+            `${(t.origen_iata as string) ?? '?'} → ${(t.destino_iata as string) ?? '?'}`,
+          );
+          salientesCop.set(cid, lista);
+        }
+      }
+      if ((tramosCop ?? []).length > 0) {
+        const { error: copErr } = await this.supabase.service
+          .from('escala')
+          .update({ copiloto_id: null, updated_by: updatedBy })
+          .eq('vuelo_id', id)
+          .is('cancelada_at', null);
+        if (copErr) {
+          // Misma regla que el piloto (29-ago): nunca warn-only — los tramos
+          // con copiloto propio viejo divergirían del vuelo en silencio.
+          throw new Error(
+            `El copiloto del vuelo SÍ se actualizó, pero no se pudieron limpiar los copilotos de tramo: ${copErr.message}. Vuelve a asignar al copiloto para emparejar los tramos.`,
+          );
+        }
+        for (const [uid, tramos] of salientesCop) {
           void this.notificarQuitado(
             uid,
             data!,
-            'piloto',
-            `tramo(s) ${tramos.join(', ')} reasignado(s) al nuevo piloto`,
+            'copiloto',
+            `tramo(s) ${tramos.join(', ')} reasignado(s) al nuevo copiloto`,
           );
         }
       }
@@ -2340,9 +2655,10 @@ export class FlightsService {
     if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id) {
       void this.notifyPilotAssigned(dto.copiloto_id!, data!, 'copiloto');
     }
-    // Y al apoyo recién asignado (opera el vuelo como el piloto, sin tacos).
-    if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id) {
-      void this.notifyApoyoAssigned(dto.apoyo_id!, data!);
+    // Y a los apoyos recién asignados (operan el vuelo como el piloto, sin
+    // tacos). Solo los que CAMBIAN: altas aquí, bajas más abajo.
+    for (const uid of apoyosAltas) {
+      void this.notifyApoyoAssigned(uid, data!);
     }
     // Reagenda por assign (20-ago-2026, invariante doc 4.3): PATCH ya
     // avisaba al piloto cuando cambia la fecha con el MISMO piloto, pero la
@@ -2371,23 +2687,18 @@ export class FlightsService {
         ruta,
       );
     }
-    if (
-      dto.apoyo_id !== undefined &&
-      current.apoyo_id &&
-      current.apoyo_id !== dto.apoyo_id
-    ) {
-      this.notificarQuitado(current.apoyo_id as string, data!, 'apoyo', ruta);
+    for (const uid of apoyosBajas) {
+      this.notificarQuitado(uid, data!, 'apoyo', ruta);
     }
     // Los recién asignados ya recibieron su aviso con la fecha/avión
     // actuales: los demás cambios (fecha, avión) van al RESTO de la
-    // tripulación — copiloto, apoyo y pilotos de tramo incluidos.
+    // tripulación — copiloto, apoyos y pilotos de tramo incluidos.
     const reciénAvisados = new Set<string>();
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id)
       reciénAvisados.add(dto.piloto_id!);
     if (asignandoCopiloto && dto.copiloto_id !== current.copiloto_id)
       reciénAvisados.add(dto.copiloto_id!);
-    if (asignandoApoyo && dto.apoyo_id !== current.apoyo_id)
-      reciénAvisados.add(dto.apoyo_id!);
+    for (const uid of apoyosAltas) reciénAvisados.add(uid);
     const fechaCambioAssign =
       dto.fecha_vuelo !== undefined &&
       this.fechaCambia(dto.fecha_vuelo, current.fecha_vuelo);
@@ -2431,18 +2742,26 @@ export class FlightsService {
    * no vuela, va de apoyo en tierra.
    */
   private async assertApoyoAsignable(apoyoId: string): Promise<void> {
+    await this.assertUsuarioActivo(apoyoId, 'apoyo');
+  }
+
+  /** Existe y está ACTIVO (apoyo, copiloto de tramo). */
+  private async assertUsuarioActivo(
+    usuarioId: string,
+    etiqueta: 'apoyo' | 'copiloto',
+  ): Promise<void> {
     const { data, error } = await this.supabase.service
       .from('usuario')
       .select('id, estado')
-      .eq('id', apoyoId)
+      .eq('id', usuarioId)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) {
-      throw new BadRequestException('El usuario de apoyo no existe.');
+      throw new BadRequestException(`El usuario de ${etiqueta} no existe.`);
     }
     if (data.estado !== 'ACTIVO') {
       throw new ConflictException(
-        'El usuario de apoyo está inactivo; actívalo antes de asignarlo.',
+        `El usuario de ${etiqueta} está inactivo; actívalo antes de asignarlo.`,
       );
     }
   }
@@ -2568,6 +2887,8 @@ export class FlightsService {
   private async notifyApoyoAssigned(
     apoyoId: string,
     vuelo: Record<string, unknown>,
+    /** Texto del tramo cuando el apoyo es SOLO de ese tramo ('CUN → CZM'). */
+    tramo?: string,
   ): Promise<void> {
     const ruta = await this.rutaDeVuelo(vuelo);
     const fecha = vuelo.fecha_vuelo
@@ -2580,8 +2901,10 @@ export class FlightsService {
     void this.notifications.notifyUser(apoyoId, {
       tipo: 'vuelo_asignado',
       titulo: 'Vas de apoyo en un vuelo',
-      cuerpo: `Vas de APOYO en el vuelo #${vuelo.folio as number} · ${ruta} · ${fecha}`,
-      data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+      cuerpo: tramo
+        ? `Vas de APOYO en el tramo ${tramo} del vuelo #${vuelo.folio as number} · ${ruta} · ${fecha}`
+        : `Vas de APOYO en el vuelo #${vuelo.folio as number} · ${ruta} · ${fecha}`,
+      data: { vuelo_id: vuelo.id, folio: vuelo.folio, rol: 'apoyo' },
       link: `/flights/${vuelo.id as string}`,
     });
   }
@@ -2737,7 +3060,9 @@ export class FlightsService {
   async assignEscala(legId: string, dto: AssignEscalaDto, updatedBy: string) {
     const { data: escala, error: escErr } = await this.supabase.service
       .from('escala')
-      .select('id, vuelo_id, orden, aeronave_id, piloto_id, cancelada_at')
+      .select(
+        'id, vuelo_id, orden, aeronave_id, piloto_id, copiloto_id, cancelada_at',
+      )
       .eq('id', legId)
       .maybeSingle();
     if (escErr) throw new Error(escErr.message);
@@ -2769,13 +3094,60 @@ export class FlightsService {
       pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
     });
 
+    // Tripulación POR TRAMO (29-ago-2026). Copiloto: `copiloto_id` con valor
+    // = copiloto propio del tramo (rotación); null = vuelve a heredar el del
+    // vuelo (misma herencia que el piloto del tramo). Apoyos: `apoyo_ids`
+    // REEMPLAZA los apoyos SOLO de este tramo; los de nivel vuelo no se
+    // tocan desde aquí (siguen siendo efectivos en el tramo).
+    const pilotoEfectivoFinal: string | null =
+      dto.piloto_id !== undefined && dto.piloto_id
+        ? dto.piloto_id
+        : pilotoEfectivo(escala, vuelo);
+    const copilotoPrevioEfectivo = copilotoEfectivo(escala, vuelo);
+    const copilotoFinalEfectivo: string | null =
+      dto.copiloto_id !== undefined
+        ? dto.copiloto_id || ((vuelo.copiloto_id as string | null) ?? null)
+        : copilotoPrevioEfectivo;
+    if (dto.copiloto_id) {
+      if (dto.copiloto_id === pilotoEfectivoFinal) {
+        throw new BadRequestException(
+          'El copiloto del tramo debe ser distinto al piloto del tramo.',
+        );
+      }
+      await this.assertUsuarioActivo(dto.copiloto_id, 'copiloto');
+      await this.validateAssignTargets({ pilotoId: dto.copiloto_id });
+    }
+    const apoyoIdsTramo =
+      dto.apoyo_ids !== undefined ? [...new Set(dto.apoyo_ids)] : undefined;
+    if (apoyoIdsTramo !== undefined) {
+      await this.assertApoyosAsignables(apoyoIdsTramo, {
+        piloto: pilotoEfectivoFinal,
+        copiloto: copilotoFinalEfectivo,
+      });
+    }
+
     const patch: Record<string, unknown> = { updated_by: updatedBy };
     if (dto.aeronave_id !== undefined) patch.aeronave_id = dto.aeronave_id;
     if (dto.piloto_id !== undefined) patch.piloto_id = dto.piloto_id;
+    if (dto.copiloto_id !== undefined)
+      patch.copiloto_id = dto.copiloto_id || null;
     if (dto.fecha_salida_plan !== undefined)
       patch.fecha_salida_plan = dto.fecha_salida_plan.toISOString();
-    if (Object.keys(patch).length === 1) {
+    if (Object.keys(patch).length === 1 && apoyoIdsTramo === undefined) {
       throw new BadRequestException('Empty assign payload');
+    }
+
+    let apoyosAltasTramo: string[] = [];
+    let apoyosBajasTramo: string[] = [];
+    if (apoyoIdsTramo !== undefined) {
+      const r = await reemplazarApoyos(this.supabase.service, {
+        vueloId: escala.vuelo_id as string,
+        escalaId: legId,
+        usuarioIds: apoyoIdsTramo,
+        createdBy: updatedBy,
+      });
+      apoyosAltasTramo = r.altas;
+      apoyosBajasTramo = r.bajas;
     }
 
     const { data, error } = await this.supabase.service
@@ -2838,10 +3210,41 @@ export class FlightsService {
         `tramo ${tramoTxt}`,
       );
     }
-    const reciénAvisado =
-      asignandoPiloto && dto.piloto_id !== escala.piloto_id
-        ? [dto.piloto_id!]
-        : [];
+    const reciénAvisado: string[] = [];
+    if (asignandoPiloto && dto.piloto_id !== escala.piloto_id) {
+      reciénAvisado.push(dto.piloto_id!);
+    }
+    // Copiloto del TRAMO (29-ago): el efectivo nuevo se entera de que va en
+    // ESE tramo; el efectivo previo (propio o heredado) de que sale de él.
+    if (
+      dto.copiloto_id !== undefined &&
+      copilotoFinalEfectivo !== copilotoPrevioEfectivo
+    ) {
+      if (copilotoFinalEfectivo) {
+        reciénAvisado.push(copilotoFinalEfectivo);
+        void this.notifyPilotAssigned(
+          copilotoFinalEfectivo,
+          { ...vuelo, origen_iata: o, destino_iata: d },
+          'copiloto',
+        );
+      }
+      if (copilotoPrevioEfectivo) {
+        this.notificarQuitado(
+          copilotoPrevioEfectivo,
+          vuelo,
+          'copiloto',
+          `tramo ${tramoTxt}`,
+        );
+      }
+    }
+    // Apoyos del TRAMO (29-ago): solo los que cambian.
+    for (const uid of apoyosAltasTramo) {
+      reciénAvisado.push(uid);
+      void this.notifyApoyoAssigned(uid, vuelo, tramoTxt);
+    }
+    for (const uid of apoyosBajasTramo) {
+      this.notificarQuitado(uid, vuelo, 'apoyo', `tramo ${tramoTxt}`);
+    }
     // Reagenda del TRAMO (doc 4.3): a TODA la tripulación vigente (el piloto
     // efectivo del tramo por herencia, copiloto, apoyo y los demás tramos) —
     // la edición de horas por tramo de la app pasa por aquí.
@@ -3197,11 +3600,24 @@ export class FlightsService {
     // Tripulación ANTES de soltar los tramos: a todos se les avisa que el
     // vuelo lo cubre un externo y ya no van (21-ago).
     const tripulacionPrevia = await this.tripulacionDeVuelo(id, current);
-    // Los tramos sueltan avión/piloto propios (la ruta se conserva).
+    // Los tramos sueltan avión/piloto/copiloto propios (la ruta se conserva)
+    // y los apoyos (vuelo y tramos) salen: el externo opera con su gente.
     await this.supabase.service
       .from('escala')
-      .update({ aeronave_id: null, piloto_id: null })
+      .update({ aeronave_id: null, piloto_id: null, copiloto_id: null })
       .eq('vuelo_id', id);
+    try {
+      const { error: apErr } = await this.supabase.service
+        .from('vuelo_apoyo')
+        .delete()
+        .eq('vuelo_id', id);
+      if (apErr) throw new Error(apErr.message);
+      await syncApoyoEspejo(this.supabase.service, id);
+    } catch (err) {
+      this.logger.warn(
+        `cubrirExterno ${id}: no se pudieron soltar los apoyos: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     void this.calendar.syncFlight(id);
     for (const uid of tripulacionPrevia) {
       void this.notifications.notifyUser(uid, {
@@ -3373,13 +3789,49 @@ export class FlightsService {
           })),
         );
       if (escErr) {
-        this.logger.warn(
-          `Vuelo externo ${data.id as string}: no se pudieron crear los tramos: ${escErr.message}`,
+        // COMPENSACIÓN (29-ago): jamás responder 201 con un vuelo SIN tramos
+        // (parecía guardado y "no estaba"). Se borra el vuelo recién
+        // insertado y se lanza claro; reintentar el alta es seguro.
+        await this.compensarVueloSinEscalas(data.id as string, 'externo');
+        throw new Error(
+          `No se pudieron crear los tramos del vuelo externo y el alta se descartó completa (nada quedó a medias): ${escErr.message}. Intenta guardarlo de nuevo.`,
         );
       }
     }
     if (data?.id) void this.calendar.syncFlight(data.id as string);
     return data!;
+  }
+
+  /**
+   * COMPENSACIÓN de las altas multi-paso (29-ago): si los tramos no se
+   * pudieron insertar, el vuelo recién creado se BORRA (con los tramos
+   * parciales, si alcanzó a escribir alguno) para no dejar un vuelo fantasma
+   * con 201. Si el borrado también falla, solo se loguea fuerte — el error
+   * original se lanza igual y el vuelo incompleto queda visible (nada
+   * desaparece en silencio).
+   */
+  private async compensarVueloSinEscalas(
+    vueloId: string,
+    contexto: string,
+  ): Promise<void> {
+    try {
+      await this.supabase.service
+        .from('escala')
+        .delete()
+        .eq('vuelo_id', vueloId);
+      const { error } = await this.supabase.service
+        .from('vuelo')
+        .delete()
+        .eq('id', vueloId);
+      if (error) throw new Error(error.message);
+      this.logger.warn(
+        `Vuelo ${vueloId} (${contexto}) revertido: sus tramos no se pudieron crear (compensación).`,
+      );
+    } catch (err) {
+      this.logger.error(
+        `Vuelo ${vueloId} (${contexto}) quedó SIN tramos y la compensación falló: ${err instanceof Error ? err.message : String(err)}. Revisarlo/borrarlo a mano.`,
+      );
+    }
   }
 
   /**
@@ -3567,8 +4019,12 @@ export class FlightsService {
       .from('escala')
       .insert(legs);
     if (legsErr) {
-      this.logger.warn(
-        `Reserva ${vueloId}: no se pudieron crear los tramos tentativos: ${legsErr.message}`,
+      // COMPENSACIÓN (29-ago): una reserva sin tramos no aparece en la
+      // asignación por tramo ni en el calendario por tramo — "parecía
+      // guardada y no estaba". Se borra el vuelo y se lanza claro.
+      await this.compensarVueloSinEscalas(vueloId, 'reserva');
+      throw new Error(
+        `No se pudieron crear los tramos de la reserva y el alta se descartó completa (nada quedó a medias): ${legsErr.message}. Intenta guardarla de nuevo.`,
       );
     }
 
@@ -3668,50 +4124,71 @@ export class FlightsService {
   // ============ Escalas ============
 
   async listEscalas(vueloId: string) {
-    await this.findById(vueloId);
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .select(ESCALA_COLS)
-      .eq('vuelo_id', vueloId)
-      .order('orden', { ascending: true });
+    const vuelo = await this.findById(vueloId);
+    const [{ data, error }, apoyosRows] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select(ESCALA_COLS)
+        .eq('vuelo_id', vueloId)
+        .order('orden', { ascending: true }),
+      // Tripulación por tramo (29-ago): apoyos del vuelo y de cada tramo.
+      // Best-effort: sin la tabla (o con error) las escalas siguen saliendo.
+      apoyosDeVuelo(this.supabase.service, vueloId).catch((err: unknown) => {
+        this.logger.warn(
+          `listEscalas(${vueloId}): apoyos no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return [] as VueloApoyoRow[];
+      }),
+    ]);
     if (error) throw new Error(error.message);
     const filas = data ?? [];
 
     // Nombres de quien capturó / corrigió cada lectura: el detalle del vuelo
     // muestra la MISMA procedencia que el tablero de tacómetros en vivo (la
     // oficina preguntaba "¿quién confirmó esto?" y ahí no se veía). Aditivo:
-    // los consumidores internos ignoran estos campos.
+    // los consumidores internos ignoran estos campos. La misma consulta trae
+    // los nombres del copiloto efectivo y de los apoyos (29-ago).
     const ids = new Set<string>();
     for (const e of filas) {
       if (e.capturado_por) ids.add(e.capturado_por as string);
       if (e.corregido_por) ids.add(e.corregido_por as string);
+      const cop = copilotoEfectivo(e, vuelo);
+      if (cop) ids.add(cop);
     }
-    const nombres = new Map<string, string>();
-    if (ids.size > 0) {
-      const { data: users } = await this.supabase.service
-        .from('usuario')
-        .select('id, nombre')
-        .in('id', [...ids]);
-      for (const u of users ?? []) {
-        nombres.set(u.id as string, (u.nombre as string) ?? '');
-      }
-    }
-    return filas.map((e) => ({
-      ...e,
-      // `revision_motivo` sale SOLO con lo accionable y la bitácora viaja
-      // aparte en `procedencia`. En la base viven juntos (una sola columna),
-      // pero la app del piloto pinta `revision_motivo` crudo y ahí el
-      // historial estorba — además así el contrato dice lo que significa cada
-      // cosa: motivo = por qué revisar, procedencia = cómo se registró.
-      revision_motivo: soloPendientes(e.revision_motivo as string | null),
-      procedencia: leerBitacora(e.revision_motivo as string | null),
-      capturado_por_nombre: e.capturado_por
-        ? (nombres.get(e.capturado_por as string) ?? null)
-        : null,
-      corregido_por_nombre: e.corregido_por
-        ? (nombres.get(e.corregido_por as string) ?? null)
-        : null,
-    }));
+    for (const a of apoyosRows) ids.add(a.usuario_id);
+    const info = await this.usuariosInfo([...ids]);
+    const nombreDe = (id: string | null | undefined): string | null =>
+      id ? (info.get(id)?.nombre ?? null) : null;
+    const apoyoItem = (id: string) => ({
+      id,
+      nombre: info.get(id)?.nombre ?? 'Usuario',
+      rol: info.get(id)?.rol ?? null,
+    });
+    return filas.map((e) => {
+      const copilotoEfectivoId = copilotoEfectivo(e, vuelo);
+      return {
+        ...e,
+        // `revision_motivo` sale SOLO con lo accionable y la bitácora viaja
+        // aparte en `procedencia`. En la base viven juntos (una sola columna),
+        // pero la app del piloto pinta `revision_motivo` crudo y ahí el
+        // historial estorba — además así el contrato dice lo que significa cada
+        // cosa: motivo = por qué revisar, procedencia = cómo se registró.
+        revision_motivo: soloPendientes(e.revision_motivo as string | null),
+        procedencia: leerBitacora(e.revision_motivo as string | null),
+        capturado_por_nombre: nombreDe(e.capturado_por as string | null),
+        corregido_por_nombre: nombreDe(e.corregido_por as string | null),
+        // Tripulación por tramo (29-ago, aditivo). `copiloto_id` crudo viene
+        // en ESCALA_COLS (null = hereda); aquí va el EFECTIVO con nombre y
+        // los apoyos: solo del tramo y efectivos (vuelo ∪ tramo, con origen).
+        copiloto_efectivo_id: copilotoEfectivoId,
+        copiloto_nombre: nombreDe(copilotoEfectivoId),
+        apoyos_tramo: apoyosDeTramo(e.id as string, apoyosRows).map(apoyoItem),
+        apoyos_efectivos: apoyosEfectivosDeTramo(
+          e.id as string,
+          apoyosRows,
+        ).map((a) => ({ ...apoyoItem(a.usuario_id), origen: a.origen })),
+      };
+    });
   }
 
   async createEscala(vueloId: string, dto: CreateEscalaDto, userId: string) {
@@ -3770,6 +4247,11 @@ export class FlightsService {
       dto.motivo,
       userId,
     );
+    // Tramo nuevo = itinerario nuevo en Google Calendar, estuviera o no el
+    // vuelo COMPLETADO (reabrirTrasTramoNuevo ya no sincroniza: el sync vive
+    // en sus callers para dispararse exactamente UNA vez por alta). Va DESPUÉS
+    // de reabrir para que el evento pinte el estado fresco.
+    void this.calendar.syncFlight(vueloId);
     void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
     return data!;
   }
@@ -3806,19 +4288,12 @@ export class FlightsService {
           'Antes de completar el vuelo los tramos los agrega la oficina; el piloto solo agrega un tramo extra cuando el vuelo ya se completó y el cliente sigue.',
         );
       }
-      const { data: legs } = await this.supabase.service
-        .from('escala')
-        .select('piloto_id')
-        .eq('vuelo_id', vuelo.id as string);
-      const tripulacion = new Set(
-        [
-          vuelo.piloto_id,
-          vuelo.copiloto_id,
-          vuelo.apoyo_id,
-          ...(legs ?? []).map((l) => l.piloto_id),
-        ].filter((x): x is string => typeof x === 'string'),
+      // Fuente única (29-ago): copiloto de tramo y apoyos incluidos.
+      const rel = await this.relacionConVuelo(
+        vuelo.id as string,
+        current.userId,
       );
-      if (!tripulacion.has(current.userId)) {
+      if (!rel.es_tripulante) {
         throw new ForbiddenException(
           'Solo la tripulación del vuelo puede agregarle un tramo extra.',
         );
@@ -3883,7 +4358,9 @@ export class FlightsService {
       })
       .eq('id', vueloId);
     if (error) throw new Error(error.message);
-    void this.calendar.syncFlight(vueloId);
+    // El sync a Google lo disparan los CALLERS (createEscala y
+    // createOperationalLeg) incondicionalmente tras este método: así corre
+    // exactamente UNA vez por alta, pase o no el vuelo por esta reapertura.
   }
 
   // Los tramos operativos internos viven en un rango de orden propio (>=100)
@@ -7268,6 +7745,20 @@ export class FlightsService {
         vuelo,
       );
       if (escala.piloto_id) ids.add(escala.piloto_id as string);
+      // 29-ago: el copiloto propio y los apoyos SOLO de ese tramo también
+      // (ya no cuentan como tripulación vigente, pero deben enterarse).
+      if (escala.copiloto_id) ids.add(escala.copiloto_id as string);
+      try {
+        const apoyos = await apoyosDeVuelo(
+          this.supabase.service,
+          escala.vuelo_id as string,
+        );
+        for (const uid of apoyosDeTramo(escala.id as string, apoyos)) {
+          ids.add(uid);
+        }
+      } catch {
+        /* best-effort */
+      }
       for (const uid of ids) {
         void this.notifications.notifyUser(uid, {
           tipo: 'alerta_sistema',
@@ -7555,6 +8046,40 @@ export class FlightsService {
         'La comisión del banco no puede ser mayor o igual al monto del cobro.',
       );
     }
+    // CANDADO DE VENTANA (29-ago, mientras vivan APKs sin llave de
+    // idempotencia): un cobro IDÉNTICO (vuelo + monto + moneda + método) del
+    // que ya existe uno creado hace < 90 s es casi seguro el reintento del
+    // outbox o un doble tap. Con client_request_id JAMÁS bloquea (la llave
+    // resuelve el reintento de forma exacta).
+    if (!dto.client_request_id) {
+      const { data: gemelos } = await this.supabase.service
+        .from('cobro_vuelo')
+        .select('id, created_at')
+        .eq('vuelo_id', vueloId)
+        .eq('monto', dto.monto)
+        .eq('moneda', dto.moneda)
+        .eq('metodo_cobro', dto.metodo_cobro)
+        .gte('created_at', new Date(Date.now() - 90_000).toISOString())
+        .order('created_at', { ascending: false })
+        .limit(1);
+      const gemelo = (gemelos ?? [])[0];
+      if (gemelo) {
+        const segundos = Math.max(
+          1,
+          Math.round(
+            (Date.now() - new Date(gemelo.created_at as string).getTime()) /
+              1000,
+          ),
+        );
+        this.logger.warn(
+          `Cobro repetido bloqueado: cobro idéntico ${gemelo.id as string} del vuelo ${vueloId} hace ${segundos} s (sin client_request_id).`,
+        );
+        throw new ConflictException(
+          `Parece el mismo cobro repetido (hace ${segundos} s): ya hay un cobro idéntico de este vuelo. Si de verdad son dos cobros del mismo monto, espera un momento e inténtalo de nuevo.`,
+        );
+      }
+    }
+
     const { data: cobro, error } = await this.supabase.service
       .from('cobro_vuelo')
       .insert({
@@ -7571,15 +8096,49 @@ export class FlightsService {
         foto_voucher_url: dto.foto_voucher_url,
         registrado_por: userId,
         notas: dto.notas,
+        // Idempotencia (29-ago): la misma llave colisiona en
+        // uq_cobro_vuelo_client_request y devuelve el cobro existente.
+        client_request_id: dto.client_request_id ?? null,
         created_by: userId,
         updated_by: userId,
       })
       .select(COBRO_COLS)
       .maybeSingle();
-    if (error) throw new Error(error.message);
+    if (error) {
+      // Reintento con la misma llave de idempotencia: el cobro YA existe —
+      // se devuelve tal cual (mismo shape/status que un alta normal), sin
+      // duplicar dinero ni disparar avisos otra vez.
+      if (
+        error.code === '23505' &&
+        dto.client_request_id &&
+        error.message.includes('uq_cobro_vuelo_client_request')
+      ) {
+        const { data: existente, error: exErr } = await this.supabase.service
+          .from('cobro_vuelo')
+          .select(COBRO_COLS)
+          .eq('client_request_id', dto.client_request_id)
+          .maybeSingle();
+        if (!exErr && existente) {
+          this.logger.log(
+            `Cobro idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el cobro existente ${existente.id as string} (sin duplicar).`,
+          );
+          return existente;
+        }
+      }
+      throw new Error(error.message);
+    }
 
-    // Auto-mark cobrado=true si la suma de cobros >= monto_total_usd
-    await this.refreshCobradoFlag(vueloId, userId);
+    // Auto-mark cobrado=true si la suma de cobros >= monto_total_usd.
+    // BEST-EFFORT: el dinero YA está escrito — un fallo aquí jamás debe
+    // responder 5xx (dispararía el reintento del outbox y duplicaría el
+    // cobro). La bandera se autocorrige en el siguiente cobro/revisión.
+    try {
+      await this.refreshCobradoFlag(vueloId, userId);
+    } catch (err) {
+      this.logger.error(
+        `createCobro ${vueloId}: el cobro ${(cobro?.id as string) ?? '?'} quedó registrado pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     const payload = {
       tipo: 'cobro_registrado',
@@ -7633,10 +8192,17 @@ export class FlightsService {
     const cobradoDeberiaSer = montoTotal > 0 && total_usd >= montoTotal - 1;
 
     if (cobradoDeberiaSer !== vuelo.cobrado) {
-      await this.supabase.service
+      // El error del UPDATE se revisa y se LANZA (antes era silencioso): los
+      // llamadores post-escritura de dinero lo atrapan y loguean (best-effort);
+      // los demás sí deben enterarse de que la bandera no se pudo refrescar.
+      const { error } = await this.supabase.service
         .from('vuelo')
         .update({ cobrado: cobradoDeberiaSer, updated_by: userId })
         .eq('id', vueloId);
+      if (error)
+        throw new Error(
+          `refreshCobradoFlag ${vueloId}: no se pudo actualizar la bandera cobrado: ${error.message}`,
+        );
     }
   }
 
@@ -7742,7 +8308,15 @@ export class FlightsService {
       .select(COBRO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    // Best-effort: la corrección del cobro YA quedó escrita — nunca 5xx por
+    // la bandera (se autocorrige en la siguiente escritura/revisión).
+    try {
+      await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    } catch (err) {
+      this.logger.error(
+        `updateCobro ${cobroId}: el cobro quedó corregido pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return data!;
   }
 
@@ -7763,7 +8337,15 @@ export class FlightsService {
       .delete()
       .eq('id', cobroId);
     if (error) throw new Error(error.message);
-    await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    // Best-effort: el cobro YA se borró — nunca 5xx por la bandera (se
+    // autocorrige en la siguiente escritura/revisión).
+    try {
+      await this.refreshCobradoFlag(existing.vuelo_id as string, userId);
+    } catch (err) {
+      this.logger.error(
+        `deleteCobro ${cobroId}: el cobro quedó eliminado pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     return { ok: true };
   }
 }
