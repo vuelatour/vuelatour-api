@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { diaCancun } from '../../common/fecha-cancun.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CapturasQuery } from './dto/capturas.dto';
 import { soloPendientes } from '../../common/taco-motivo.util';
@@ -30,6 +31,19 @@ export interface CapturaItem {
   fecha: string;
   /** Fecha del TICKET (YYYY-MM-DD, solo gastos): la app avisa si el año no cuadra. */
   fecha_gasto?: string | null;
+  /** Fecha del COBRO (YYYY-MM-DD, solo cobros). */
+  fecha_cobro?: string | null;
+  /**
+   * Día (YYYY-MM-DD, Cancún) con el que la app AGRUPA la lista (29-ago):
+   * gastos = fecha del ticket; cobros = fecha del cobro; tacómetros y
+   * mantenimientos = día de captura. El orden del API es por este día.
+   */
+  fecha_dia?: string;
+  /** Medio de pago del gasto / método del cobro (badge en la app). */
+  medio_pago?: string | null;
+  /** Monto y moneda numéricos (total del día en la app). */
+  monto?: number | null;
+  moneda?: string | null;
   vuelo_id: string | null;
   vuelo_folio: number | null;
   ruta: string | null;
@@ -89,8 +103,18 @@ export class MeCapturasService {
   async capturas(
     userId: string,
     query: CapturasQuery,
-  ): Promise<{ data: CapturaItem[]; count: number }> {
+  ): Promise<{
+    data: CapturaItem[];
+    count: number;
+    offset: number;
+    limit: number;
+    has_more: boolean;
+  }> {
     const limit = query.limit ?? 60;
+    const offset = query.offset ?? 0;
+    // Para que el merge de 4 fuentes sea correcto con paginado, cada fuente
+    // debe traer al menos offset + limit filas (top-N global).
+    const tope = offset + limit;
     // Corte de día SIEMPRE en hora Cancún (invariante del repo).
     const desdeIso = query.desde ? `${query.desde}T00:00:00-05:00` : null;
     const desdeMs = desdeIso ? new Date(desdeIso).getTime() : null;
@@ -99,7 +123,7 @@ export class MeCapturasService {
     let gastosQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, vuelo_id, categoria, monto, moneda, litros, lugar, notas, duplicado_sospechado, created_at, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
+        'id, vuelo_id, categoria, monto, moneda, medio_pago, litros, lugar, notas, duplicado_sospechado, created_at, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
@@ -107,7 +131,7 @@ export class MeCapturasService {
     let cobrosQ = this.supabase.service
       .from('cobro_vuelo')
       .select(
-        'id, vuelo_id, monto, moneda, metodo_cobro, referencia, notas, created_at',
+        'id, vuelo_id, monto, moneda, metodo_cobro, referencia, notas, created_at, fecha_cobro',
       )
       .eq('registrado_por', userId);
     if (desdeIso) cobrosQ = cobrosQ.gte('created_at', desdeIso);
@@ -133,13 +157,20 @@ export class MeCapturasService {
       .eq('created_by', userId);
     if (desdeIso) mantQ = mantQ.gte('created_at', desdeIso);
 
-    // Traer `limit` por fuente basta: el top-limit del merge nunca necesita
-    // más de `limit` filas de una sola fuente.
+    // Traer `tope` (offset + limit) por fuente basta: el top-N del merge
+    // nunca necesita más filas de una sola fuente. Los gastos se ordenan por
+    // fecha del TICKET (así se agrupa la lista, 29-ago) y luego por captura.
     const [gastos, cobros, tacos, mants] = await Promise.all([
-      gastosQ.order('created_at', { ascending: false }).limit(limit),
-      cobrosQ.order('created_at', { ascending: false }).limit(limit),
-      tacosQ.order('updated_at', { ascending: false }).limit(limit),
-      mantQ.order('created_at', { ascending: false }).limit(limit),
+      gastosQ
+        .order('fecha_gasto', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false })
+        .limit(tope),
+      cobrosQ
+        .order('fecha_cobro', { ascending: false, nullsFirst: false })
+        .order('created_at', { ascending: false })
+        .limit(tope),
+      tacosQ.order('updated_at', { ascending: false }).limit(tope),
+      mantQ.order('created_at', { ascending: false }).limit(tope),
     ]);
     for (const r of [gastos, cobros, tacos, mants]) {
       if (r.error) throw new Error(r.error.message);
@@ -167,15 +198,39 @@ export class MeCapturasService {
       ...mantRows.map((m) => this.itemMantenimiento(m)),
     ];
 
+    // Día de agrupación (Cancún): ticket → cobro → captura. Las fechas de
+    // pared (YYYY-MM-DD) se respetan tal cual; los timestamps se pasan a día
+    // Cancún (pasar una fecha de pared por new Date la movía al día anterior).
+    const diaDe = (v: string | null | undefined): string | null => {
+      if (!v) return null;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+      const t = new Date(v);
+      return Number.isNaN(t.getTime()) ? null : diaCancun(v);
+    };
+    for (const i of items) {
+      i.fecha_dia =
+        diaDe(i.fecha_gasto) ?? diaDe(i.fecha_cobro) ?? diaDe(i.fecha) ?? '';
+    }
+
     const conCorte =
       desdeMs == null
         ? items
         : items.filter((i) => new Date(i.fecha).getTime() >= desdeMs);
+    // Orden: día de agrupación desc y, dentro del día, captura más reciente
+    // primero (misma lectura que "Mi caja chica").
     conCorte.sort(
-      (a, b) => new Date(b.fecha).getTime() - new Date(a.fecha).getTime(),
+      (a, b) =>
+        (b.fecha_dia ?? '').localeCompare(a.fecha_dia ?? '') ||
+        new Date(b.fecha).getTime() - new Date(a.fecha).getTime(),
     );
-    const data = conCorte.slice(0, limit);
-    return { data, count: data.length };
+    const data = conCorte.slice(offset, offset + limit);
+    return {
+      data,
+      count: data.length,
+      offset,
+      limit,
+      has_more: conCorte.length > offset + limit,
+    };
   }
 
   /**
@@ -262,6 +317,9 @@ export class MeCapturasService {
       titulo,
       detalle: detalleDe(flatten(g.proveedor)?.nombre, g.lugar, g.notas),
       estado: g.duplicado_sospechado === true ? 'POSIBLE_DUPLICADO' : 'OK',
+      medio_pago: (g.medio_pago as string | null) ?? null,
+      monto: Number.isFinite(Number(g.monto)) ? Number(g.monto) : null,
+      moneda: (g.moneda as string | null) ?? null,
       compra,
       compra_rol: compra ? ((g.compra_rol as string | null) ?? null) : null,
     };
@@ -284,6 +342,10 @@ export class MeCapturasService {
       titulo: `Cobro ${monto} · ${(c.metodo_cobro as string) ?? 's/método'}`,
       detalle: detalleDe(c.referencia, c.notas),
       estado: 'OK',
+      fecha_cobro: (c.fecha_cobro as string | null) ?? null,
+      medio_pago: (c.metodo_cobro as string | null) ?? null,
+      monto: Number.isFinite(Number(c.monto)) ? Number(c.monto) : null,
+      moneda: (c.moneda as string | null) ?? null,
     };
   }
 

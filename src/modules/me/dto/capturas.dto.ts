@@ -11,6 +11,14 @@ export class CapturasQuery {
   @Max(200)
   limit: number = 60;
 
+  /** Paginado (29-ago): la app carga de 50 en 50 al llegar al final. */
+  @ApiPropertyOptional({ default: 0, minimum: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  offset: number = 0;
+
   @ApiPropertyOptional({
     description:
       'Solo capturas desde este día (YYYY-MM-DD, corte a las 00:00 hora Cancún).',
