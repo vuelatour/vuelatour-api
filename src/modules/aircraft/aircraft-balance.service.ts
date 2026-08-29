@@ -76,7 +76,26 @@ const CAT_LABEL: Record<string, string> = {
   OTRO: 'Otro',
   OPERACIONES: 'Operaciones',
   PILOTO_EXTERNO: 'Piloto externo',
+  NOMINA: 'Nómina',
+  SERVICIOS: 'Servicios',
 };
+// Etiqueta amable de la columna CATEGORÍA de las hojas de gastos (29-ago):
+// overrides locales → CAT_LABEL → capitalizado. Solo presentación (la
+// clasificación por hoja usa la categoría CRUDA, nunca esta etiqueta).
+const CATEGORIA_HOJA_LABEL: Record<string, string> = {
+  INDIRECTO: 'Gastos indirectos',
+  OTRO: 'Otros gastos',
+  NOMINA: 'Nómina',
+  SERVICIOS: 'Servicios',
+};
+function etiquetaCategoria(cat: string | null | undefined): string | null {
+  if (!cat) return null;
+  return (
+    CATEGORIA_HOJA_LABEL[cat] ??
+    CAT_LABEL[cat] ??
+    cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()
+  );
+}
 
 interface VueloRow {
   id: string;
@@ -167,6 +186,9 @@ interface GastoRow {
   escala_id: string | null;
   /** Avión del gasto (herencia: null = el del vuelo). */
   aeronave_id: string | null;
+  /** Salida de inventario ligada (puente bodega→gastos): con valor, el
+   *  gasto va a la hoja "refacciones" (29-ago), no a "gastos indirectos". */
+  inventario_movimiento_id?: string | null;
   categoria: string;
   monto: string | number | null;
   propina: string | number | null;
@@ -385,11 +407,16 @@ export class AircraftBalanceService {
    * Balance GENERAL de la flota (regla 18-ago, consolidado): hoja RESUMEN
    * al frente (una fila por avión = los TOTALES de su libro + fila TOTALES
    * de flota) y UN solo juego de hojas con los datos de TODOS los aviones
-   * JUNTOS — reporte horas, combustible (mensual, 26-ago), gastos
-   * indirectos (del avión sin vuelo), otros gastos (administrativos
-   * repartidos), permisos, balance (bloques por avión), otros movimientos
-   * (ingreso de VuelaTour: TUAS/extras/pernocta cobrados vs pagados, regla
-   * 28-ago) y pendientes. Mismo motor y números que el individual; cero
+   * JUNTOS — reporte horas, otros movimientos (ingreso de VuelaTour:
+   * TUAS/extras/pernocta cobrados vs pagados, regla 28-ago), cobranza,
+   * otros gastos (administrativos repartidos), refacciones (salidas de
+   * inventario, con costo FIFO vs venta al avión — 29-ago), gastos
+   * VuelaTour (gastos de EMPRESA sin vuelo ni avión — 29-ago), balance
+   * (bloques por avión) y pendientes. Desde el 29-ago el RENDERER del
+   * general ya no pinta las hojas combustible / gastos indirectos /
+   * permisos (viven en el libro INDIVIDUAL de cada avión); el API las
+   * sigue calculando TODAS — restan igual en la cascada de la hoja
+   * "balance". Mismo motor y números que el individual; cero
    * cálculos paralelos. Vuelos multi-avión no se duplican en la suma:
    * horas/costos van al avión de cada tramo y la VENTA DEL AVIÓN se
    * reparte entre los aviones en partes iguales por tramo vendido (regla B
@@ -549,6 +576,10 @@ export class AircraftBalanceService {
     // (maestra, cobranza, totales) y al RESUMEN como una fila más; no a los
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
     registrar(await this.buildPayload(null, d, h, memoTc), null, false);
+    // Hoja "refacciones" del GENERAL (29-ago): cada fila se completa con el
+    // costo FIFO del movimiento de cardex ligado y la venta al avión (el
+    // libro individual pinta la hoja sin esas columnas).
+    await this.llenarCostoVentaRefacciones(libros);
     // ===== CONSOLIDADO (regla del cliente, 18-ago): UN solo juego de hojas
     // con los datos de TODOS los aviones juntos. Cada fila viaja con el
     // color de su avión; las sumas son sumas de los totales por avión (los
@@ -629,6 +660,22 @@ export class AircraftBalanceService {
         usd_hr: horas > 0 && usd !== 0 ? round2(usd / horas) : null,
       };
     };
+    // ===== Gastos de EMPRESA (29-ago): hoja "gastos VuelaTour" del general.
+    // MISMA lectura que alimenta las filas sueltas de "Otros movimientos"
+    // (gastosEmpresaYSueltos, fuente única — el dinero aparece UNA vez):
+    // aquí los gastos de empresa como ledger; en "Otros movimientos" solo
+    // quedan "gas sin avión" y "tuas sin vuelo". Egresos de VuelaTour:
+    // FUERA de toda cascada por avión.
+    const empresaYSueltos = await this.gastosEmpresaYSueltos(d, h);
+    const pendientesEmpresa: string[] = [];
+    const hojaGastosEmpresa = this.buildHoja(
+      empresaYSueltos.empresa,
+      totalesFlota.tc_promedio,
+      // Sin horas: el gasto de empresa no es "por hora volada" de nadie.
+      0,
+      'gastos VuelaTour',
+      pendientesEmpresa,
+    );
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
       matricula: 'FLOTA',
@@ -655,6 +702,12 @@ export class AircraftBalanceService {
         ),
       totales: totalesFlota,
       gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
+      // Hoja "refacciones" (29-ago): salidas de inventario de toda la flota,
+      // con costo FIFO vs venta al avión por fila (llenarCostoVentaRefacciones).
+      refacciones: hojaFlota(
+        (p) =>
+          p.refacciones ?? { filas: [], total_mxn: 0, usd: 0, usd_hr: null },
+      ),
       otros_gastos: hojaFlota((p) => p.otros_gastos),
       permisos: hojaFlota((p) => p.permisos),
       // Hoja COMBUSTIBLE de flota: mismas filas por avión (con litros) +
@@ -693,12 +746,22 @@ export class AircraftBalanceService {
         socios: [],
       },
       // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
-      // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL.
-      otros_movimientos: await this.buildOtrosMovimientos(d, h, memoTc),
+      // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL. Desde el
+      // 29-ago sus filas sueltas ya NO llevan los gastos de empresa (viven
+      // en la hoja "gastos VuelaTour" — misma lectura, el dinero UNA vez).
+      otros_movimientos: await this.buildOtrosMovimientos(
+        d,
+        h,
+        memoTc,
+        empresaYSueltos,
+      ),
       pendientes: [
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
         ...(await this.pendienteGasSinAvion(d, h)),
+        // Hoja "gastos VuelaTour": gastos de empresa en USD sin ningún TC
+        // (fila sin MXN) — mismos gritos que las hojas de gastos.
+        ...pendientesEmpresa,
         // Gastos de vuelos que no caen en NINGÚN libro (externo sin avión y
         // SIN fecha de vuelo): red de seguridad de la verificación 28-ago.
         ...(await this.pendienteGastosVueloSinLibro(d, h)),
@@ -735,6 +798,9 @@ export class AircraftBalanceService {
       // Bloques de la hoja "balance" (socios por avión): SOLO aviones
       // reales — el libro EXTERNOS no genera bloque.
       aviones: librosAviones,
+      // Hoja "gastos VuelaTour" (29-ago): gastos de EMPRESA del periodo —
+      // egresos de VuelaTour, fuera de toda cascada por avión.
+      gastos_empresa: hojaGastosEmpresa,
     });
     return { buffer, desde: d, hasta: h };
   }
@@ -1089,7 +1155,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -1101,7 +1167,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .eq('aeronave_id', aircraftId)
             .is('vuelo_id', null)
@@ -2829,18 +2895,23 @@ export class AircraftBalanceService {
     //    GASOLINA/VISITA de la empresa repartidos a mano) → hoja
     //    "otros gastos": administrativos repartidos, la parte de este avión.
     //    EXCEPCIÓN (29-ago-2026, reclasificación COSMÉTICA): el parcial de
-    //    categoría INDIRECTO va a la hoja "gastos indirectos" — el cliente
-    //    lo busca por su categoría — conservando su nota "reparto manual:
-    //    $X de $Y". El cuadre NO cambia: la cascada suma AMBAS hojas, mover
-    //    la fila mueve su total de hoja y la suma de las dos es idéntica.
+    //    categoría INDIRECTO — y NOMINA (repartible desde el 29-ago) — va a
+    //    la hoja "gastos indirectos" — el cliente los busca por su
+    //    categoría — conservando su nota "reparto manual: $X de $Y". El
+    //    cuadre NO cambia: la cascada suma AMBAS hojas, mover la fila mueve
+    //    su total de hoja y la suma de las dos es idéntica.
     //  - Resto con aeronave_id DIRECTO y SIN vuelo (INDIRECTO, OTRO, FIJO,
-    //    REFACCION, OPERACIONES, …) → hoja "gastos indirectos": gastos que
-    //    no se pueden ligar a un vuelo pero sí al avión.
+    //    REFACCION, OPERACIONES, NOMINA, SERVICIOS, …) → hoja "gastos
+    //    indirectos": gastos que no se pueden ligar a un vuelo pero sí al
+    //    avión. EXCEPCIÓN (29-ago-2026): un gasto con
+    //    inventario_movimiento_id (REFACCION medio BODEGA de una salida de
+    //    inventario) va a la hoja "refacciones" — misma cascada
+    //    (indirectos + refacciones == lo de antes; la utilidad no cambia).
     //  - TUAS sin vuelo → FUERA (regla 7: el TUA no resta en ninguna hoja;
     //    se lista en "Otros movimientos" del general y se avisa aquí).
     //  - INDIRECTO ligado a vuelo no debería existir, pero si existe NO se
     //    pierde: cae a indirectos (defensa).
-    // La cascada no cambia: suma las 4 hojas.
+    // La cascada no cambia: suma las 5 hojas.
     // Con vuelos COMPARTIDOS en la lista, gastosVuelo trae también gastos del
     // OTRO avión: las hojas solo cargan los de ESTE (herencia por gasto).
     // EXTERNOS: todos los gastos de sus vuelos (misma regla que la fila) —
@@ -2862,18 +2933,32 @@ export class AircraftBalanceService {
         );
     // Categorías con destino propio (o sin destino: TUAS).
     const HOJAS_APARTE = new Set(['GAS', 'PERMISO', 'TUAS']);
-    const filasIndirectos = [
+    // Parciales que se buscan por su categoría (excepción 29-ago): van a
+    // "gastos indirectos" junto a los directos — espejo en el Libro Dinero
+    // (dinero-report.acreditar).
+    const PARCIAL_A_INDIRECTOS = new Set(['INDIRECTO', 'NOMINA']);
+    const filasIndirectosTodas = [
       ...gastosAvion.filter(
         (g) =>
           !HOJAS_APARTE.has(g.categoria) &&
-          (g.es_reparto_parcial !== true || g.categoria === 'INDIRECTO'),
+          (g.es_reparto_parcial !== true ||
+            PARCIAL_A_INDIRECTOS.has(g.categoria)),
       ),
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'INDIRECTO'),
     ];
+    // Hoja "refacciones" (29-ago): salidas de inventario (gasto ligado a un
+    // movimiento de cardex) SALEN de "gastos indirectos" a hoja propia. La
+    // cascada suma ambas: indirectos + refacciones == lo de antes.
+    const filasRefacciones = filasIndirectosTodas.filter(
+      (g) => g.inventario_movimiento_id != null,
+    );
+    const filasIndirectos = filasIndirectosTodas.filter(
+      (g) => g.inventario_movimiento_id == null,
+    );
     const filasOtros = gastosAvion.filter(
       (g) =>
         g.es_reparto_parcial === true &&
-        g.categoria !== 'INDIRECTO' &&
+        !PARCIAL_A_INDIRECTOS.has(g.categoria) &&
         !HOJAS_APARTE.has(g.categoria),
     );
     // Permisos: pagos reales de PERMISO del avión, CON o SIN vuelo.
@@ -2910,6 +2995,27 @@ export class AircraftBalanceService {
       'gastos indirectos',
       pendientes,
     );
+    // Hoja "refacciones": mismo ledger + el id del movimiento de cardex por
+    // fila (mismo orden estable por fecha que buildHoja — patrón de los
+    // litros de combustible): el GENERAL lo usa para el costo FIFO.
+    const hojaRefaccionesBase = this.buildHoja(
+      filasRefacciones,
+      tcPromedio,
+      horasVoladas,
+      'refacciones',
+      pendientes,
+    );
+    const refaccionesOrdenadas = [...filasRefacciones].sort((a, b) =>
+      (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? ''),
+    );
+    const hojaRefacciones = {
+      ...hojaRefaccionesBase,
+      filas: hojaRefaccionesBase.filas.map((f, i) => ({
+        ...f,
+        inventario_movimiento_id:
+          refaccionesOrdenadas[i]?.inventario_movimiento_id ?? null,
+      })),
+    };
     const hojaOtros = this.buildHoja(
       filasOtros,
       tcPromedio,
@@ -3013,10 +3119,13 @@ export class AircraftBalanceService {
     }
 
     // ===== Balance (todo USD; null se propaga si falta TC) =====
+    // Refacciones (29-ago) restan como hoja propia: indirectos + refacciones
+    // == los indirectos de antes — la utilidad NO cambia.
     const utilidadAntes = totales.ganancia_usd;
     const hojasUsd = [
       hojaCombustible.usd,
       hojaIndirectos.usd,
+      hojaRefacciones.usd,
       hojaOtros.usd,
       hojaPermisos.usd,
     ];
@@ -3025,6 +3134,7 @@ export class AircraftBalanceService {
           utilidadAntes -
             (hojaCombustible.usd ?? 0) -
             (hojaIndirectos.usd ?? 0) -
+            (hojaRefacciones.usd ?? 0) -
             (hojaOtros.usd ?? 0) -
             (hojaPermisos.usd ?? 0),
         )
@@ -3160,6 +3270,7 @@ export class AircraftBalanceService {
       vuelos: filasVuelo,
       totales,
       gastos_indirectos: hojaIndirectos,
+      refacciones: hojaRefacciones,
       otros_gastos: hojaOtros,
       permisos: hojaPermisos,
       combustible: hojaCombustible,
@@ -3167,6 +3278,7 @@ export class AircraftBalanceService {
         utilidad_antes_usd: utilidadAntes,
         combustible_usd: hojaCombustible.usd,
         gastos_indirectos_usd: hojaIndirectos.usd,
+        refacciones_usd: hojaRefacciones.usd,
         otros_usd: hojaOtros.usd,
         permisos_usd: hojaPermisos.usd,
         utilidad_despues_usd: utilidadDespues,
@@ -3283,6 +3395,179 @@ export class AircraftBalanceService {
         filas,
       )} de vuelos que no caen en ningún libro de este periodo (${folios}) — asigna fecha en Detalle del vuelo`,
     ];
+  }
+
+  /**
+   * Hoja "refacciones" del GENERAL (29-ago): completa cada fila con el
+   * COSTO FIFO del movimiento de cardex ligado y la VENTA al avión (= el
+   * monto del gasto, ya en MXN en la fila); pyservices pinta GANANCIA =
+   * venta − costo (0 mientras la salida se cargue a costo — aún sin precio
+   * de venta). Solo el general las lleva; el libro individual pinta la
+   * hoja sin estas columnas. Conversión del costo con la MISMA cadena que
+   * la venta de la fila (moneda del movimiento; USD × tc del movimiento ??
+   * TC promedio del libro); sin ningún TC el costo queda VACÍO — jamás un
+   * número falso. Una salida para TODA LA FLOTA (para_flota) se prorrateó
+   * 1/N entre los aviones activos: su costo sigue la MISMA proporción del
+   * monto de cada gasto ligado (Σ partes == costo de la salida).
+   */
+  private async llenarCostoVentaRefacciones(
+    libros: BalanceAvionPayload[],
+  ): Promise<void> {
+    const movIds = [
+      ...new Set(
+        libros
+          .flatMap((p) => p.refacciones?.filas ?? [])
+          .map((f) => f.inventario_movimiento_id)
+          .filter((x): x is string => !!x),
+      ),
+    ];
+    if (movIds.length === 0) return;
+    const sb = this.supabase.service;
+    const { data: movs, error } = await sb
+      .from('inventario_movimiento')
+      .select(
+        'id, cantidad, moneda, costo_unitario_usd, costo_unitario_mxn, tc_usd_mxn, para_flota',
+      )
+      .in('id', movIds);
+    if (error) throw new Error(error.message);
+    const movPorId = new Map(
+      ((movs ?? []) as Array<Record<string, unknown>>).map((m) => [
+        m.id as string,
+        m,
+      ]),
+    );
+    // Σ monto NATIVO de TODOS los gastos ligados a cada movimiento
+    // para_flota (todos comparten la moneda del movimiento): base del
+    // prorrateo del costo.
+    const idsFlota = [...movPorId.values()]
+      .filter((m) => m.para_flota === true)
+      .map((m) => m.id as string);
+    const sumaMontoPorMov = new Map<string, number>();
+    if (idsFlota.length > 0) {
+      const { data: hermanos, error: hErr } = await sb
+        .from('gasto')
+        .select('inventario_movimiento_id, monto')
+        .in('inventario_movimiento_id', idsFlota);
+      if (hErr) throw new Error(hErr.message);
+      for (const g of (hermanos ?? []) as Array<Record<string, unknown>>) {
+        const mid = g.inventario_movimiento_id as string;
+        sumaMontoPorMov.set(
+          mid,
+          (sumaMontoPorMov.get(mid) ?? 0) + (num(g.monto) ?? 0),
+        );
+      }
+    }
+    for (const p of libros) {
+      for (const f of p.refacciones?.filas ?? []) {
+        const movId = f.inventario_movimiento_id ?? null;
+        const mov = movId ? movPorId.get(movId) : undefined;
+        // VENTA al avión = el monto del gasto (la fila ya lo trae en MXN).
+        f.venta_mxn = f.monto_mxn;
+        if (!mov || !movId) continue;
+        const cantidad = num(mov.cantidad) ?? 0;
+        const enMxn =
+          mov.moneda === 'MXN' && num(mov.costo_unitario_mxn) != null;
+        let costoTotalMxn: number | null;
+        if (enMxn) {
+          costoTotalMxn = round2(cantidad * (num(mov.costo_unitario_mxn) ?? 0));
+        } else {
+          const costoUsd = cantidad * (num(mov.costo_unitario_usd) ?? 0);
+          const tc = pos(mov.tc_usd_mxn) ?? p.tc_promedio;
+          costoTotalMxn = tc != null ? round2(costoUsd * tc) : null;
+        }
+        if (costoTotalMxn == null) continue; // sin TC: costo vacío
+        if (mov.para_flota === true) {
+          const total = sumaMontoPorMov.get(movId) ?? 0;
+          const nativo = f.monto_original ?? f.monto_mxn;
+          f.costo_mxn =
+            total > 0 && nativo != null
+              ? round2((costoTotalMxn * nativo) / total)
+              : null;
+        } else {
+          f.costo_mxn = costoTotalMxn;
+        }
+      }
+    }
+  }
+
+  /**
+   * Gastos de EMPRESA del periodo (29-ago-2026) — FUENTE ÚNICA para la
+   * hoja "gastos VuelaTour" del general Y las filas sueltas de "Otros
+   * movimientos" (una sola lectura; el dinero aparece UNA vez): gastos sin
+   * vuelo NI avión (PERSONAL_DUENO fuera — dinero personal del dueño; GAS
+   * fuera — fila propia "gas sin avión" en Otros movimientos).
+   *  - `empresa`: los que nadie reparte (≠ TUAS) + el REMANENTE de un
+   *    reparto manual parcial (los parciales viven en las hojas de sus
+   *    aviones; Σ < monto ⇒ el resto es de la empresa) → hoja "gastos
+   *    VuelaTour": egresos de VuelaTour, FUERA de toda cascada por avión.
+   *  - `tuasSueltos`: TUAS sin vuelo sin avión sin reparto — regla 7
+   *    (28-ago): no restan en ninguna hoja; su único lugar sigue siendo la
+   *    fila suelta "tuas sin vuelo" de "Otros movimientos".
+   */
+  private async gastosEmpresaYSueltos(
+    desde: string,
+    hasta: string,
+  ): Promise<{ empresa: GastoRow[]; tuasSueltos: GastoRow[] }> {
+    const sb = this.supabase.service;
+    const { data, error } = await sb
+      .from('gasto')
+      .select(
+        'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, lugar, proveedor:proveedor_id(nombre)',
+      )
+      .is('vuelo_id', null)
+      .is('aeronave_id', null)
+      .neq('categoria', 'PERSONAL_DUENO')
+      .neq('categoria', 'GAS')
+      .gte('fecha_gasto', desde)
+      .lte('fecha_gasto', hasta)
+      .order('fecha_gasto', { ascending: true });
+    if (error) throw new Error(error.message);
+    const sueltos = (data ?? []) as Array<Record<string, unknown>>;
+    const empresa: GastoRow[] = [];
+    const tuasSueltos: GastoRow[] = [];
+    if (sueltos.length === 0) return { empresa, tuasSueltos };
+    // El reparto manual GANA: un gasto repartido ya vive en los libros de
+    // sus aviones — aquí solo entra lo que nadie reclama.
+    const repartos = await fetchRepartos(
+      sb,
+      sueltos.map((g) => g.id as string),
+    );
+    const fmt = (n: number) =>
+      round2(n).toLocaleString('es-MX', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      });
+    for (const g of sueltos) {
+      const fila = g as unknown as GastoRow;
+      const partes = repartos.get(g.id as string) ?? [];
+      if (partes.length === 0) {
+        // TUAS sin vuelo (regla 7): no restan en ninguna hoja — fila
+        // suelta de "Otros movimientos" (su único lugar).
+        if (fila.categoria === 'TUAS') tuasSueltos.push(fila);
+        else empresa.push(fila);
+        continue;
+      }
+      // Reparto PARCIAL: los parciales viven en las hojas de sus aviones;
+      // el remanente (Σ < monto) es de la EMPRESA — misma moneda del gasto.
+      const asignado = partes.reduce((a, x) => a + (num(x.monto) ?? 0), 0);
+      const remanente = round2((num(fila.monto) ?? 0) - asignado);
+      if (remanente > 0) {
+        const nota = (fila.notas ?? '').split('\n')[0].trim();
+        empresa.push({
+          ...fila,
+          monto: remanente,
+          notas: [
+            nota || null,
+            `remanente de reparto: $${fmt(remanente)} de $${fmt(
+              num(fila.monto) ?? 0,
+            )} ${fila.moneda ?? 'MXN'} (los parciales viven en las hojas de sus aviones)`,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+        });
+      }
+    }
+    return { empresa, tuasSueltos };
   }
 
   /**
@@ -3404,8 +3689,11 @@ export class AircraftBalanceService {
    * gasto para ese pago — regla A, 28-ago tarde). El resto de conceptos
    * queda como filas adyacentes por clave (el equipo los lee juntos; el
    * sistema jamás afirma un apareo que no puede garantizar).
-   * Además: filas SUELTAS con el dinero hoy invisible en este Excel —
-   * gastos sin vuelo NI avión NI reparto, GAS sin avión y TUAS sin vuelo.
+   * Además: filas SUELTAS con el dinero hoy invisible en este Excel — GAS
+   * sin avión y TUAS sin vuelo. (29-ago: los gastos de EMPRESA — sin vuelo
+   * NI avión NI reparto, y los remanentes de reparto — ya NO salen aquí:
+   * viven en la hoja "gastos VuelaTour" del general, `empresaYSueltos`
+   * viene de la MISMA lectura — el dinero aparece UNA vez.)
    *
    * Reglas 28-ago (6 y 7): el ingreso de VUELATOUR (TUAS + extras +
    * pernocta + comisión del vendedor + su IVA) sale de
@@ -3436,7 +3724,10 @@ export class AircraftBalanceService {
   private async buildOtrosMovimientos(
     desde: string,
     hasta: string,
-    memoTc: Map<string, Promise<TipoCambioDetalle | null>> = new Map(),
+    memoTc: Map<string, Promise<TipoCambioDetalle | null>>,
+    // Subconjuntos de gastosEmpresaYSueltos (lectura compartida con la hoja
+    // "gastos VuelaTour"): aquí solo se pintan los TUAS sueltos.
+    empresaYSueltos: { empresa: GastoRow[]; tuasSueltos: GastoRow[] },
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
@@ -3466,7 +3757,6 @@ export class AircraftBalanceService {
       gastosRes,
       cobrosRes,
       facturasRes,
-      sueltosRes,
       gasRes,
       tuasSinVueloRes,
     ] = await Promise.all([
@@ -3495,20 +3785,8 @@ export class AircraftBalanceService {
             .in('vuelo_id', vueloIds)
             .neq('estado', 'CANCELADA')
         : Promise.resolve(vacio),
-      // Gastos de EMPRESA hoy invisibles en este Excel: sin vuelo, sin
-      // avión (PERSONAL_DUENO fuera; GAS tiene su fila propia abajo).
-      sb
-        .from('gasto')
-        .select(
-          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, lugar, proveedor:proveedor_id(nombre)',
-        )
-        .is('vuelo_id', null)
-        .is('aeronave_id', null)
-        .neq('categoria', 'PERSONAL_DUENO')
-        .neq('categoria', 'GAS')
-        .gte('fecha_gasto', desde)
-        .lte('fecha_gasto', hasta)
-        .order('fecha_gasto', { ascending: true }),
+      // (29-ago: los gastos de EMPRESA sin vuelo ni avión ya vienen leídos
+      // en `empresaYSueltos` — lectura compartida con "gastos VuelaTour".)
       // GAS sin avión (mismo universo que pendienteGasSinAvion: el de un
       // externo sin avión se excluye abajo — vive en el libro EXTERNOS; el
       // que resuelve avión por su tramo/vuelo también — vive en la hoja
@@ -3543,7 +3821,6 @@ export class AircraftBalanceService {
       gastosRes,
       cobrosRes,
       facturasRes,
-      sueltosRes,
       gasRes,
       tuasSinVueloRes,
     ]) {
@@ -4178,38 +4455,14 @@ export class AircraftBalanceService {
         factura: null,
       };
     };
-    const sueltos = (sueltosRes.data ?? []) as Array<Record<string, unknown>>;
-    if (sueltos.length) {
-      // El reparto manual GANA: un gasto repartido ya vive en los libros de
-      // sus aviones — aquí solo entra lo que nadie reclama.
-      const repartos = await fetchRepartos(
-        sb,
-        sueltos.map((g) => g.id as string),
+    // Gastos de EMPRESA (29-ago): ya no salen aquí — viven en la hoja
+    // "gastos VuelaTour" del general (gastosEmpresaYSueltos, misma
+    // lectura). Aquí solo quedan los TUAS sin vuelo sin avión (regla 7: su
+    // único lugar) y el "gas sin avión" de abajo.
+    for (const g of empresaYSueltos.tuasSueltos) {
+      sueltas.push(
+        sueltaDe(g as unknown as Record<string, unknown>, 'tuas sin vuelo'),
       );
-      for (const g of sueltos) {
-        const partes = repartos.get(g.id as string) ?? [];
-        if (partes.length === 0) {
-          // TUAS sin vuelo (regla 7): clave propia — no restan en ninguna
-          // hoja por avión; aquí es su único lugar.
-          sueltas.push(
-            sueltaDe(g, g.categoria === 'TUAS' ? 'tuas sin vuelo' : 'empresa'),
-          );
-          continue;
-        }
-        // Reparto PARCIAL: los parciales viven en las hojas de sus aviones;
-        // el remanente de empresa (Σ < monto) no vive en NINGUNA — sale
-        // aquí (misma moneda del gasto).
-        const asignado = partes.reduce((a, x) => a + (num(x.monto) ?? 0), 0);
-        const remanente = round2((num(g.monto) ?? 0) - asignado);
-        if (remanente > 0) {
-          sueltas.push(
-            sueltaDe(
-              { ...g, monto: remanente },
-              'empresa (remanente de reparto)',
-            ),
-          );
-        }
-      }
     }
     for (const g of (gasRes.data ?? []) as Array<Record<string, unknown>>) {
       // GAS de un vuelo EXTERNO sin avión: hoja "combustible" del libro
@@ -4285,6 +4538,10 @@ export class AircraftBalanceService {
         }
         return {
           fecha: g.fecha_gasto ?? null,
+          // Columna CATEGORÍA (29-ago): etiqueta amable es-MX — solo
+          // presentación (la clasificación por hoja ya se hizo arriba con
+          // la categoría cruda).
+          categoria: etiquetaCategoria(g.categoria),
           detalle,
           monto_mxn: mxn,
           moneda_original: g.moneda !== 'MXN' ? (g.moneda ?? null) : null,

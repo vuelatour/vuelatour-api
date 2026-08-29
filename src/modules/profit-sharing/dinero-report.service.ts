@@ -1013,9 +1013,10 @@ export class DineroReportService {
       //    empresa repartidos a mano) → otros gastos: la parte de este
       //    avión de un gasto administrativo. EXCEPCIÓN (29-ago-2026,
       //    reclasificación COSMÉTICA, espejo del Balance por avión): el
-      //    parcial de categoría INDIRECTO acredita a "gastos indirectos"
-      //    — el cliente lo busca por su categoría; el cuadre no cambia
-      //    (utilidades resta AMBOS cortes), solo cambia de columna.
+      //    parcial de categoría INDIRECTO — y NOMINA (repartible desde el
+      //    29-ago) — acredita a "gastos indirectos" — el cliente los busca
+      //    por su categoría; el cuadre no cambia (utilidades resta AMBOS
+      //    cortes), solo cambia de columna.
       //  - aeronave_id DIRECTO sin vuelo (INDIRECTO, REFACCION, OTRO, FIJO,
       //    OPERACIONES, …) → gastos indirectos: no se ligan a un vuelo pero
       //    sí al avión.
@@ -1028,7 +1029,7 @@ export class DineroReportService {
         const destino =
           g.categoria === 'PERMISO'
             ? permisosPorAvion
-            : parcial && g.categoria !== 'INDIRECTO'
+            : parcial && g.categoria !== 'INDIRECTO' && g.categoria !== 'NOMINA'
               ? otrosPorAvion
               : indirectosPorAvion;
         destino.set(aid, (destino.get(aid) ?? 0) + monto_);
