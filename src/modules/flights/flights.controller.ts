@@ -56,6 +56,7 @@ import {
   PurgeFlightDto,
   RevertirExternoDto,
 } from './dto/flights.dto';
+import { CobroReciboService } from './cobro-recibo.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
 
@@ -66,6 +67,7 @@ export class FlightsController {
   constructor(
     private readonly flights: FlightsService,
     private readonly report: FlightReportService,
+    private readonly recibo: CobroReciboService,
   ) {}
 
   // ============ Vuelos ============
@@ -753,6 +755,33 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.deleteCobro(cobroId, c.userId);
+  }
+
+  @Get('cobros/:cobroId/recibo.pdf')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.SOCIO, Rol.PILOTO)
+  @ApiOperation({
+    summary:
+      'Recibo de pago del cobro en PDF (documento NO fiscal, no sustituye al CFDI). ' +
+      'Folio REC-<folio>-<n> con n = posición del cobro entre los positivos del vuelo ' +
+      '(por fecha de captura): eliminar un cobro RENUMERA los recibos posteriores — ' +
+      'aceptado por ser un comprobante no fiscal. Un reembolso no genera recibo (409). ' +
+      'Vuelo CANCELADO con cobro real (cargo por cancelación) SÍ tiene recibo.',
+  })
+  async reciboCobroPdf(
+    @Param('cobroId', ParseUUIDPipe) cobroId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    // El PILOTO solo saca recibos de SUS vuelos (mismo candado que el resto
+    // de accesos por vuelo: miTripulacion vía assertAccess).
+    if (c.rol === Rol.PILOTO) {
+      const vueloId = await this.recibo.vueloIdDeCobro(cobroId);
+      await this.flights.assertAccess(vueloId, c);
+    }
+    const { buffer, folioRecibo } = await this.recibo.pdf(cobroId);
+    return new StreamableFile(buffer, {
+      type: 'application/pdf',
+      disposition: `attachment; filename="recibo-${folioRecibo}.pdf"`,
+    });
   }
 
   @Post('taco-status')

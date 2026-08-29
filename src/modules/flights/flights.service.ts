@@ -179,7 +179,8 @@ export interface TacoSugerencia {
   piloto_id: string | null;
 }
 
-const COBRO_COLS =
+// Exportado: cobro-recibo.service lee el cobro con las MISMAS columnas.
+export const COBRO_COLS =
   'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.

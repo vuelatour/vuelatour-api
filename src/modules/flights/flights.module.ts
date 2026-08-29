@@ -7,6 +7,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { VisionModule } from '../vision/vision.module';
+import { CobroReciboService } from './cobro-recibo.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
@@ -23,7 +24,7 @@ import { FlightsService } from './flights.service';
     VisionModule,
   ],
   controllers: [FlightsController],
-  providers: [FlightsService, FlightReportService],
+  providers: [FlightsService, FlightReportService, CobroReciboService],
   exports: [FlightsService],
 })
 export class FlightsModule {}

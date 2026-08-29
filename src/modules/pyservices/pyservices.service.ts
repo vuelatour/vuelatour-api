@@ -172,6 +172,41 @@ export interface BitacoraTacoPayload {
   generado?: string | null;
   filas: BitacoraTacoFilaPayload[];
 }
+// ===== Recibo de pago por cobro (PDF NO fiscal). Espejo de
+// ReciboPdfRequest en pyservices (todo con default allá: skew tolerante). =====
+export interface ReciboAbonoPdfPayload {
+  fecha?: string | null;
+  /** Negativo = reembolso (se pinta restando, con su etiqueta). */
+  monto?: number;
+  moneda?: string;
+  /** "Abono" / "Reembolso". */
+  etiqueta?: string | null;
+}
+export interface ReciboPdfPayload {
+  folio_recibo?: string;
+  empresa?: string;
+  cliente?: string;
+  vuelo_folio?: string;
+  ruta?: string;
+  fecha_vuelo?: string | null;
+  fecha_cobro?: string | null;
+  /** BRUTO que pagó el cliente, en su moneda (sin comisión bancaria). */
+  monto?: number;
+  moneda?: string;
+  tc_usd_mxn?: number | null;
+  equivalente_usd?: number | null;
+  /** Método YA legible ("Transferencia", "BillPocket"…). */
+  metodo?: string;
+  cuenta_destino?: string | null;
+  referencia?: string | null;
+  total_cotizacion_usd?: number;
+  cobrado_a_la_fecha_usd?: number;
+  saldo_pendiente_usd?: number;
+  liquidado?: boolean;
+  sin_tc_nota?: string | null;
+  notas?: string | null;
+  cobros_previos?: ReciboAbonoPdfPayload[];
+}
 // ===== Libro "Dinero <periodo>" (réplica del control manual del equipo) =====
 export interface DineroCobroPagoPayload {
   fecha?: string | null;
@@ -964,6 +999,11 @@ export class PyservicesService {
   /** Tira imprimible de bitácora de tacómetros del avión (monomotor). */
   async generateBitacoraTacoPdf(payload: BitacoraTacoPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/bitacora-taco', payload);
+  }
+
+  /** Recibo de pago de UN cobro en PDF (documento NO fiscal). */
+  async generateReciboPdf(payload: ReciboPdfPayload): Promise<Buffer> {
+    return this.postForBuffer('/pdf/recibo', payload);
   }
 
   /** Libro «Dinero» del periodo (réplica del control manual del equipo). */
