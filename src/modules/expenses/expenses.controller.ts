@@ -200,7 +200,7 @@ export class ExpensesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO/GASOLINA/VISITA) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
+      'Gastos GENERALES del periodo (sin vuelo: OTRO/FIJO/INDIRECTO/NOMINA/GASOLINA/VISITA) con su reparto entre aviones y el resumen del mes (asignado vs gasto de la empresa VuelaTour).',
   })
   otrosGastos(@Query() q: ListOtrosGastosQuery) {
     return this.expenses.listOtrosGastos(q.desde, q.hasta);

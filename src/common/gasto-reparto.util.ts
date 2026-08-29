@@ -23,10 +23,14 @@ export interface GastoRepartoFila {
 /** Categorías de gasto que aceptan reparto manual (generales, sin vuelo). */
 // GASOLINA (27-ago): gasolina de vehículos — gasto de la empresa,
 // repartible a mano igual que OTRO/FIJO/INDIRECTO (trigger BD en sync).
+// NOMINA (29-ago): nómina/sueldos — mismo tratamiento que INDIRECTO
+// (trigger BD ya la acepta). SERVICIOS NO va aquí: es gasto DIRECTO del
+// avión (como REFACCION), no se reparte.
 export const CATEGORIAS_REPARTIBLES = new Set([
   'OTRO',
   'FIJO',
   'INDIRECTO',
+  'NOMINA',
   'GASOLINA',
   'VISITA',
 ]);

@@ -52,7 +52,11 @@ const DIRECTO = new Set([
 // OJO: la CATEGORÍA de gasto 'INDIRECTO' (captura sin vuelo, jul 2026) NO
 // está en ningún set A PROPÓSITO: cae al else y el reparto la ignora hasta
 // que el equipo decida su tratamiento. No "arreglarlo" sin esa decisión.
-const INDIRECTO = new Set(['REFACCION']);
+// NOMINA (29-ago) es espejo EXACTO de la categoría INDIRECTO: tampoco está
+// en ningún set (sin repartir = EXCLUIDA, gasto de la empresa); repartida a
+// mano SÍ cuenta al avión (grupo INDIRECTO, ver compute).
+// SERVICIOS (29-ago) es espejo de REFACCION: gasto directo del avión.
+const INDIRECTO = new Set(['REFACCION', 'SERVICIOS']);
 const PERMISO = new Set(['PERMISO']);
 /** Sueldos, seguros: se prorratean entre aviones activos. */
 const FIJO = 'FIJO';
@@ -1108,8 +1112,10 @@ export class ProfitSharingService {
           ? 'EXCLUIDO'
           : // GASOLINA repartida a mano cuenta como "otros gastos" del avión
             // (mismo grupo que INDIRECTO repartido); sin reparto = EXCLUIDO.
+            // NOMINA (29-ago): mismo tratamiento que INDIRECTO.
             g.es_reparto_parcial &&
               (g.categoria === 'INDIRECTO' ||
+                g.categoria === 'NOMINA' ||
                 g.categoria === 'GASOLINA' ||
                 g.categoria === 'VISITA')
             ? 'INDIRECTO'
@@ -1972,6 +1978,9 @@ export class ProfitSharingService {
         g.aeronave_id == null &&
         g.categoria !== 'FIJO' &&
         g.categoria !== 'INDIRECTO' &&
+        // NOMINA (29-ago): como INDIRECTO, sin avión por diseño. SERVICIOS
+        // NO se exenta: sin avión SÍ bloquea (como REFACCION).
+        g.categoria !== 'NOMINA' &&
         // PERSONAL_DUENO jamás lleva avión (gasto personal del dueño).
         g.categoria !== 'PERSONAL_DUENO' &&
         // GASOLINA (vehículos) tampoco: gasto de la empresa, se reparte a

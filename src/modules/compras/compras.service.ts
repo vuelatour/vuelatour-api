@@ -66,6 +66,10 @@ const CATEGORIAS_NO_LIGABLES = [
   'TUAS',
   'PERMISO',
   'FIJO',
+  // NOMINA y SERVICIOS (29-ago): sueldos y servicios al avión — nada que
+  // ver con el costo de bodega de una refacción.
+  'NOMINA',
+  'SERVICIOS',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 

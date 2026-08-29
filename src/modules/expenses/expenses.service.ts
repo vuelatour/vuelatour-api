@@ -252,12 +252,16 @@ export class ExpensesService {
       // gastos, no en esta bandeja.
       // PERSONAL_DUENO tampoco (26-ago): jamás lleva avión/vuelo — dejarlo
       // aquí sería un pendiente eterno (se administra en Gastos personales).
+      // NOMINA (29-ago): como INDIRECTO, sin avión por diseño — fuera de la
+      // bandeja. SERVICIOS NO se excluye: como REFACCION, sin avión SÍ es
+      // pendiente. Misma cadena literal en sugerirAsignaciones y en
+      // alerts.service (pre-cierre) o el conteo no cuadra.
       q = q
         .is('aeronave_id', null)
         .not(
           'categoria',
           'in',
-          '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA,VISITA)',
+          '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
         )
         .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     }
@@ -522,7 +526,11 @@ export class ExpensesService {
       .is('aeronave_id', null)
       // Mismo universo que la bandeja: PERSONAL_DUENO jamás tendrá vuelo —
       // sugerirle uno quemaría llamadas de IA en un imposible.
-      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA,VISITA)')
+      .not(
+        'categoria',
+        'in',
+        '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
+      )
       .or('categoria.neq.OTRO,vuelo_id.not.is.null')
       .order('fecha_gasto', { ascending: false })
       .limit(15);
@@ -1019,6 +1027,19 @@ export class ExpensesService {
     if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
       throw new BadRequestException(
         'Un gasto INDIRECTO no se liga a un vuelo; usa otra categoría o quita el vuelo.',
+      );
+    }
+    // NOMINA (29-ago): espejo de INDIRECTO — sin vuelo (avión opcional).
+    if (dto.categoria === CategoriaGasto.NOMINA && dto.vuelo_id) {
+      throw new BadRequestException(
+        'Un gasto de NÓMINA no se liga a un vuelo; usa otra categoría o quita el vuelo.',
+      );
+    }
+    // SERVICIOS (29-ago): servicio AL AVIÓN — avión permitido/esperado, pero
+    // sin vuelo (no es un gasto de operación de un vuelo concreto).
+    if (dto.categoria === CategoriaGasto.SERVICIOS && dto.vuelo_id) {
+      throw new BadRequestException(
+        'Un gasto de SERVICIOS no se liga a un vuelo (es del avión); quita el vuelo o usa otra categoría.',
       );
     }
     // Un gasto PERSONAL del dueño NO es de la empresa ni de los aviones:
@@ -2266,6 +2287,18 @@ export class ExpensesService {
           'Un gasto INDIRECTO no se liga a un vuelo: quítale el vuelo primero (o usa otra categoría).',
         );
       }
+      // NOMINA (29-ago): espejo de INDIRECTO — sin vuelo (avión opcional).
+      if (categoriaEfectiva === 'NOMINA' && vueloEfectivo) {
+        throw new BadRequestException(
+          'Un gasto de NÓMINA no se liga a un vuelo: quítale el vuelo primero (o usa otra categoría).',
+        );
+      }
+      // SERVICIOS (29-ago): gasto del AVIÓN sin vuelo (avión permitido).
+      if (categoriaEfectiva === 'SERVICIOS' && vueloEfectivo) {
+        throw new BadRequestException(
+          'Un gasto de SERVICIOS no se liga a un vuelo (es del avión): quítale el vuelo primero (o usa otra categoría).',
+        );
+      }
     }
 
     // El combustible se controla POR AVIÓN: quitarle el avión (o cambiar a
@@ -2465,7 +2498,16 @@ export class ExpensesService {
       .from('gasto')
       .select(LIST_COLS)
       .is('vuelo_id', null)
-      .in('categoria', ['OTRO', 'FIJO', 'INDIRECTO', 'GASOLINA', 'VISITA'])
+      // NOMINA (29-ago) se administra aquí como los indirectos; SERVICIOS
+      // no: es gasto directo del avión (vive en el tablero normal).
+      .in('categoria', [
+        'OTRO',
+        'FIJO',
+        'INDIRECTO',
+        'NOMINA',
+        'GASOLINA',
+        'VISITA',
+      ])
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta)
       .order('fecha_gasto', { ascending: false })
@@ -2551,7 +2593,7 @@ export class ExpensesService {
    * intermedio vacío). items = [] limpia el reparto (el gasto vuelve a ser
    * 100% de la empresa, o de su avión propio si lo tiene).
    * Candados: solo gastos SIN vuelo de categorías repartibles
-   * (OTRO/FIJO/INDIRECTO/GASOLINA/VISITA);
+   * (OTRO/FIJO/INDIRECTO/NOMINA/GASOLINA/VISITA);
    * montos > 0 en la MONEDA del gasto; aviones sin repetir;
    * Σ montos <= gasto.monto (a centavos). El remanente se DERIVA, jamás se
    * persiste.
@@ -2585,7 +2627,7 @@ export class ExpensesService {
     }
     if (!CATEGORIAS_REPARTIBLES.has(gasto.categoria as string)) {
       throw new BadRequestException(
-        'Solo los gastos generales (OTRO, FIJO, INDIRECTO, GASOLINA, VISITA) se reparten entre aviones.',
+        'Solo los gastos generales (OTRO, FIJO, INDIRECTO, NOMINA, GASOLINA, VISITA) se reparten entre aviones.',
       );
     }
     const ids = items.map((i) => i.aeronave_id);

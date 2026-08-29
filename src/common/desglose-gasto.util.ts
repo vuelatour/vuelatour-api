@@ -144,6 +144,10 @@ export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
   'GAS',
   'PERMISO',
   'INDIRECTO',
+  // NOMINA y SERVICIOS (29-ago): nómina y servicios al avión no traen
+  // factura de aeródromo con TUA embebido.
+  'NOMINA',
+  'SERVICIOS',
   'TUAS',
   'COMIDA',
   'HOTEL',

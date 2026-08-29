@@ -297,7 +297,7 @@ export class MeCapturasService {
         ? `Combustible ${fmtLitros.format(litros)} L · ${monto}`
         : `Combustible · ${monto}`
       : // Códigos crudos que se leen mal en Mis registros.
-        `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria === 'VISITA' ? 'de visita' : categoria} · ${monto}`;
+        `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria === 'VISITA' ? 'de visita' : categoria === 'NOMINA' ? 'de nómina' : categoria === 'SERVICIOS' ? 'de servicios' : categoria} · ${monto}`;
     const vueloId = (g.vuelo_id as string | null) ?? null;
     const compraRow = flatten(g.compra);
     const compra =

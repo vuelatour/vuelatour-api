@@ -49,6 +49,14 @@ export enum CategoriaGasto {
    *  gastos y repartible a mano. Nació porque los coches cargaban como GAS
    *  y contaminaban balances de aviones. */
   GASOLINA = 'GASOLINA',
+  /** Nómina / sueldos del personal (29-ago-2026): se clasifica junto a los
+   *  gastos INDIRECTOS (sin vuelo; avión opcional) y SÍ es repartible a mano
+   *  entre aviones (`gasto_reparto`; el trigger de BD ya la acepta). */
+  NOMINA = 'NOMINA',
+  /** Servicios AL AVIÓN (29-ago-2026): mantenimientos/servicios contratados
+   *  — gasto DIRECTO del avión SIN vuelo (avión permitido y esperado; como
+   *  REFACCION queda pendiente hasta tener avión). NO es repartible. */
+  SERVICIOS = 'SERVICIOS',
   /** Gasto PERSONAL del dueño (26-ago-2026): lo captura el personal de
    *  VuelaTour pero NO es de la empresa ni de los aviones — seguimiento en
    *  la pantalla "Gastos personales". SIEMPRE sin vuelo y sin avión (candado

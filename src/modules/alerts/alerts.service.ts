@@ -1248,7 +1248,13 @@ export class AlertsService {
       // y OTRO sin vuelo tampoco es pendiente (26-ago: sin reparto es gasto
       // de la EMPRESA — se administra en Otros gastos).
       // (y PERSONAL_DUENO: gasto personal del dueño, jamás lleva avión).
-      .not('categoria', 'in', '(FIJO,INDIRECTO,PERSONAL_DUENO,GASOLINA,VISITA)')
+      // NOMINA (29-ago) como INDIRECTO; SERVICIOS NO se excluye (sin avión
+      // sí es pendiente, como REFACCION).
+      .not(
+        'categoria',
+        'in',
+        '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
+      )
       .or('categoria.neq.OTRO,vuelo_id.not.is.null');
     if (error) throw new Error(error.message);
     // Los repartidos manualmente (gasto_reparto) ya están asignados.
