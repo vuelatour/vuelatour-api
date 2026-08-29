@@ -32,6 +32,42 @@ export const CATEGORIAS_REPARTIBLES = new Set([
 ]);
 
 /**
+ * Reparte un monto (en CENTAVOS enteros) según porcentajes (hasta 2
+ * decimales) — disciplina de centavos del reparto masivo. Los porcentajes se
+ * trabajan como CENTÉSIMAS DE PUNTO enteras (25.13 % → 2513): toda la
+ * aritmética queda en enteros y no arrastra floats. Base por línea =
+ * floor(montoCents × centésimas / 10000); el residuo contra el objetivo
+ * (round del total asignado) se reparte de a centavo por MAYOR RESTO
+ * (empate: orden de las líneas). Con Σ = 100.00 % el resultado suma
+ * exactamente montoCents; con menos, suma round(montoCents × Σ%/100).
+ */
+export function repartirPorcentajeCents(
+  montoCents: number,
+  porcentajes: number[],
+): number[] {
+  const centesimas = porcentajes.map((p) => Math.round(p * 100));
+  const partes = centesimas.map((c, idx) => {
+    const exacto = montoCents * c; // entero exacto, en diezmilésimas de centavo
+    const base = Math.floor(exacto / 10000);
+    return { idx, cents: base, resto: exacto % 10000 };
+  });
+  // Objetivo = round(montoCents × Σcentésimas / 10000), en enteros puros.
+  const prod = montoCents * centesimas.reduce((a, c) => a + c, 0);
+  const restoProd = prod % 10000;
+  const objetivo = (prod - restoProd) / 10000 + (restoProd >= 5000 ? 1 : 0);
+  let faltan = objetivo - partes.reduce((a, x) => a + x.cents, 0);
+  const orden = [...partes].sort((a, b) =>
+    b.resto !== a.resto ? b.resto - a.resto : a.idx - b.idx,
+  );
+  for (const x of orden) {
+    if (faltan <= 0) break;
+    x.cents += 1;
+    faltan -= 1;
+  }
+  return partes.map((x) => x.cents);
+}
+
+/**
  * Filas de gasto_reparto para un conjunto de gastos, en chunks (PostgREST
  * limita el .in()). Devuelve Map<gasto_id, filas[]>.
  */

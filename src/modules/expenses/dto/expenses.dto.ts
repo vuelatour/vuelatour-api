@@ -459,6 +459,47 @@ export class PutRepartoDto {
   items!: RepartoItemDto[];
 }
 
+export class RepartoMasivoLineaDto {
+  @ApiProperty({ description: 'Aeronave que absorbe este porcentaje' })
+  @IsUUID()
+  aeronave_id!: string;
+
+  @ApiProperty({
+    description:
+      'Porcentaje del monto de CADA gasto (hasta 2 decimales, 0.01–100)',
+    example: 25,
+  })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0.01)
+  @Max(100)
+  porcentaje!: number;
+}
+
+export class RepartoMasivoDto {
+  @ApiProperty({
+    type: [String],
+    description: 'Gastos generales a los que se aplica el reparto (1–200)',
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(200)
+  @IsUUID(undefined, { each: true })
+  gasto_ids!: string[];
+
+  @ApiProperty({
+    description:
+      'Reparto porcentual entre aviones (Σ <= 100.00; lo no asignado queda como gasto de la empresa VuelaTour). Reemplaza el reparto vigente de cada gasto.',
+    type: [RepartoMasivoLineaDto],
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => RepartoMasivoLineaDto)
+  items!: RepartoMasivoLineaDto[];
+}
+
 export class ListOtrosGastosQuery {
   @ApiPropertyOptional({
     description: 'fecha_gasto >= (YYYY-MM-DD); default inicio del mes Cancún',

@@ -11,6 +11,7 @@ import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
+  repartirPorcentajeCents,
 } from '../../common/gasto-reparto.util';
 import { NotificationsService } from '../realtime/notifications.service';
 import {
@@ -2561,6 +2562,22 @@ export class ExpensesService {
     userId: string,
   ) {
     const gasto = (await this.findById(gastoId)) as Record<string, unknown>;
+    await this.reemplazarRepartoDeGasto(gasto, items, userId);
+    return this.getReparto(gastoId);
+  }
+
+  /**
+   * Núcleo del reemplazo de reparto de UN gasto (candados + escritura).
+   * Lo comparten putReparto y putRepartoMasivo: los candados viven aquí y
+   * SOLO aquí (categoría repartible, sin vuelo, aviones activos sin repetir,
+   * Σ ≤ monto, reemplazo sin estado intermedio, limpieza de aeronave_id).
+   */
+  private async reemplazarRepartoDeGasto(
+    gasto: Record<string, unknown>,
+    items: Array<{ aeronave_id: string; monto: number }>,
+    userId: string,
+  ) {
+    const gastoId = gasto.id as string;
     if (gasto.vuelo_id) {
       throw new BadRequestException(
         'Este gasto está ligado a un vuelo: su avión se controla por el vuelo, no por reparto manual.',
@@ -2658,6 +2675,114 @@ export class ExpensesService {
         .update({ aeronave_id: null, updated_by: userId })
         .eq('id', gastoId);
     }
-    return this.getReparto(gastoId);
+  }
+
+  /**
+   * REPARTO MASIVO: aplica el MISMO reparto porcentual a varios gastos
+   * generales de una vez (reemplaza el reparto vigente de cada uno).
+   * Porcentaje → centavos por gasto con `repartirPorcentajeCents`
+   * (centésimas de punto ENTERAS + residuo por mayor resto: con Σ = 100 %
+   * cada gasto queda repartido al centavo exacto). Procesa TODOS los gastos
+   * y reporta éxitos vs errores por gasto (patrón carga masiva de
+   * combustibles): un gasto inválido no tumba el lote ni se omite en
+   * silencio. Una línea que cae a $0.00 (porcentaje chico × monto chico)
+   * manda el gasto a errores — el CHECK monto>0 de gasto_reparto no admite
+   * ceros y omitir la línea callado mentiría el reparto pedido.
+   */
+  async putRepartoMasivo(
+    dto: {
+      gasto_ids: string[];
+      items: Array<{ aeronave_id: string; porcentaje: number }>;
+    },
+    userId: string,
+  ) {
+    const avionIds = dto.items.map((i) => i.aeronave_id);
+    if (new Set(avionIds).size !== avionIds.length) {
+      throw new BadRequestException(
+        'Hay un avión repetido en el reparto: junta sus porcentajes en una sola línea.',
+      );
+    }
+    // Σ porcentajes ≤ 100.00 en CENTÉSIMAS enteras (nunca sumar floats:
+    // 33.33+33.33+33.34 en float no da 100 exacto).
+    const centesimas = dto.items.map((i) => Math.round(i.porcentaje * 100));
+    const totalCentesimas = centesimas.reduce((a, c) => a + c, 0);
+    if (totalCentesimas > 10000) {
+      throw new BadRequestException(
+        `Los porcentajes suman ${(totalCentesimas / 100).toFixed(2)}% y el máximo es 100.00%: ajusta las líneas (lo no asignado queda como gasto de VuelaTour).`,
+      );
+    }
+    // Aviones ACTIVOS validados UNA vez para todo el lote (mismo candado que
+    // el reparto individual, que igual lo re-verifica por gasto).
+    const sb = this.supabase.service;
+    const { data: activas, error: actErr } = await sb
+      .from('aeronave')
+      .select('id')
+      .in('id', avionIds)
+      .eq('activa', true);
+    if (actErr) throw new Error(actErr.message);
+    const okIds = new Set((activas ?? []).map((a) => a.id as string));
+    if (avionIds.some((i) => !okIds.has(i))) {
+      throw new BadRequestException(
+        'Alguna aeronave del reparto no existe o está inactiva: solo se reparte entre aviones activos.',
+      );
+    }
+    const gastoIds = [...new Set(dto.gasto_ids)];
+    const { data: gastosData, error: gErr } = await sb
+      .from('gasto')
+      .select('id, vuelo_id, categoria, monto, moneda, aeronave_id')
+      .in('id', gastoIds);
+    if (gErr) throw new Error(gErr.message);
+    const porId = new Map(
+      ((gastosData ?? []) as Array<Record<string, unknown>>).map((g) => [
+        g.id as string,
+        g,
+      ]),
+    );
+    const errores: Array<{ gasto_id: string; error: string }> = [];
+    let exitos = 0;
+    const porcentajes = dto.items.map((i) => i.porcentaje);
+    for (const gastoId of gastoIds) {
+      const gasto = porId.get(gastoId);
+      if (!gasto) {
+        errores.push({ gasto_id: gastoId, error: 'El gasto no existe.' });
+        continue;
+      }
+      const montoCents = Math.round(Number(gasto.monto ?? 0) * 100);
+      const partes = repartirPorcentajeCents(montoCents, porcentajes);
+      const lineaCero = partes.findIndex((c) => c <= 0);
+      if (lineaCero >= 0) {
+        errores.push({
+          gasto_id: gastoId,
+          error: `El ${dto.items[lineaCero].porcentaje}% de $${(
+            montoCents / 100
+          ).toFixed(
+            2,
+          )} ${(gasto.moneda as string) ?? ''} queda en $0.00: este gasto necesita reparto manual.`,
+        });
+        continue;
+      }
+      const items = dto.items.map((i, idx) => ({
+        aeronave_id: i.aeronave_id,
+        monto: partes[idx] / 100,
+      }));
+      try {
+        await this.reemplazarRepartoDeGasto(gasto, items, userId);
+        exitos += 1;
+      } catch (err) {
+        errores.push({
+          gasto_id: gastoId,
+          error:
+            err instanceof BadRequestException
+              ? err.message
+              : err instanceof Error
+                ? err.message
+                : 'No se pudo aplicar el reparto.',
+        });
+      }
+    }
+    this.logger.log(
+      `Reparto masivo: ${exitos} gastos repartidos, ${errores.length} con error (usuario ${userId})`,
+    );
+    return { procesados: gastoIds.length, exitos, errores };
   }
 }

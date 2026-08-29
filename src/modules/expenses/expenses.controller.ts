@@ -33,6 +33,7 @@ import {
   UpdateTarifaAerodromoDto,
   ListOtrosGastosQuery,
   PutRepartoDto,
+  RepartoMasivoDto,
 } from './dto/expenses.dto';
 import {
   CargaMasivaCombustibleDto,
@@ -308,6 +309,22 @@ export class ExpensesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.combustibleMasivo.cargaMasiva(dto, c.userId, c.rol);
+  }
+
+  // ===== Reparto masivo — ruta literal antes de :id =====
+
+  @Post('reparto-masivo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Aplica el MISMO reparto porcentual entre aviones a varios gastos generales (reemplaza el reparto vigente de cada uno). Procesa todos y reporta éxitos vs errores por gasto.',
+  })
+  repartoMasivo(
+    @Body() dto: RepartoMasivoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.putRepartoMasivo(dto, c.userId);
   }
 
   @Get(':id')
