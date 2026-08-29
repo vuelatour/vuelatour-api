@@ -79,7 +79,7 @@ export class ConciliacionController {
   @Get('reporte.xlsx')
   @ApiOperation({
     summary:
-      'Reporte de conciliación en Excel: el estado de cuenta con columna de estatus (Conciliado/PENDIENTE) y con qué se cruzó cada línea. Para revisar/imprimir el cierre de la cuenta.',
+      'Reporte de conciliación en Excel: el estado de cuenta con matrícula por línea, estatus (Conciliado/PENDIENTE), con qué se cruzó y los montos sin conciliar en naranja. Filtro de estado = las 4 pestañas de la página (sin_banco = gastos bancarios que no aparecen en el banco).',
   })
   async reporteXlsx(
     @Query() q: ReporteConciliacionQuery,
@@ -88,12 +88,14 @@ export class ConciliacionController {
       q.cuenta_bancaria_id,
       q.desde,
       q.hasta,
+      q.estado,
     );
-    const rango =
-      q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
+    // El nombre dice qué filtro se exportó (sin_banco → "gastos-sin-banco").
+    const sufijoEstado =
+      q.estado !== 'todos' ? `-${q.estado.replace(/_/g, '-')}` : '';
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="conciliacion-${etiqueta}${rango}.xlsx"`,
+      disposition: `attachment; filename="conciliacion-${etiqueta}${sufijoEstado}-${q.desde}-a-${q.hasta}.xlsx"`,
     });
   }
 

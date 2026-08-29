@@ -119,6 +119,12 @@ export interface TablaXlsxPayload {
   /** Bloque resumen arriba de la tabla: pares [etiqueta, valor]. */
   resumen_titulo?: string;
   resumen?: (string | number | null)[][];
+  /**
+   * ADITIVO: celdas de `filas` a resaltar (índices 0-based relativos a
+   * `filas`; color hex sin "#", default naranja ED7D31). P. ej. los montos
+   * SIN conciliar del reporte de conciliación. Omitirlo = render de siempre.
+   */
+  resaltes?: { fila: number; col: number; color?: string }[];
 }
 
 export interface ReporteVueloLineaPayload {
@@ -139,6 +145,11 @@ export interface ReporteVueloTramoPayload {
   taco_llegada?: number | null;
   horas?: number | null;
   es_ferry?: boolean;
+  // Tripulación por tramo (29-ago, aditivo; pyservices ignora lo que no
+  // conoce): piloto/copiloto EFECTIVOS y apoyos efectivos (nombres).
+  piloto?: string | null;
+  copiloto?: string | null;
+  apoyos?: string[];
 }
 /** Fila de la tira de bitácora de tacómetros: UN vuelo. Los tiempos de
  *  hélice solo van en el formato MOTOR_HELICE (bimotor). */
@@ -285,6 +296,8 @@ export interface ReporteVueloPayload {
   aeronave?: string | null;
   piloto?: string | null;
   copiloto?: string | null;
+  /** Apoyos de nivel vuelo (nombres; 29-ago, aditivo). */
+  apoyos?: string[];
   tipo?: string;
   estado?: string;
   ruta?: string;

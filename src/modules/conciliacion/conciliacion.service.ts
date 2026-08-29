@@ -11,11 +11,17 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import type { EnvVars } from '../../config/env.schema';
+import { avionDelGasto } from '../../common/participacion-aeronave.util';
+import {
+  fetchRepartos,
+  type GastoRepartoFila,
+} from '../../common/gasto-reparto.util';
 import {
   ConciliacionParseDto,
   ImportarMovimientosDto,
   ListConciliacionQuery,
   TipoMovimientoBancario,
+  type ReporteConciliacionEstado,
 } from './dto/conciliacion.dto';
 
 const MOV_COLS =
@@ -853,14 +859,26 @@ export class ConciliacionService {
   /**
    * Reporte de conciliación en Excel: réplica del estado de cuenta (una fila
    * por movimiento, cargos y abonos en columnas) con el ESTATUS de cada línea
-   * (Conciliado/PENDIENTE) y con qué se cruzó (gasto o cobro, con su vuelo).
-   * Para revisar/imprimir el cierre de la cuenta en el periodo.
+   * (Conciliado/PENDIENTE), la MATRÍCULA del avión de la línea y con qué se
+   * cruzó (gasto o cobro, con su vuelo). Los montos SIN conciliar van
+   * resaltados en naranja. `estado` refleja las 4 pestañas de la página;
+   * `sin_banco` cambia de universo (gastos bancarios que no aparecen en el
+   * banco) y ahí la cuenta bancaria se IGNORA.
    */
   async reporteXlsx(
-    cuentaBancariaId: string,
-    desde?: string,
-    hasta?: string,
+    cuentaBancariaId: string | undefined,
+    desde: string,
+    hasta: string,
+    estado: ReporteConciliacionEstado = 'todos',
   ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    if (estado === 'sin_banco') {
+      return this.reporteGastosSinBancoXlsx(desde, hasta);
+    }
+    if (!cuentaBancariaId) {
+      throw new BadRequestException(
+        'cuenta_bancaria_id es requerida (salvo estado=sin_banco).',
+      );
+    }
     const { data: cuenta, error: ctaErr } = await this.supabase.service
       .from('cuenta_bancaria')
       .select('id, alias, banco, moneda')
@@ -873,21 +891,83 @@ export class ConciliacionService {
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
-        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
+        // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
+        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
+      // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
       // Orden del estado de cuenta impreso: cronológico ascendente.
       .order('fecha', { ascending: true })
       .order('created_at', { ascending: true })
       .limit(5000);
-    if (desde) q = q.gte('fecha', desde);
-    if (hasta) q = q.lte('fecha', hasta);
+    // Filtro de estado (mismas pestañas del panel). En movimiento_bancario
+    // "pendiente" y "no conciliado" son el MISMO booleano.
+    if (estado === 'pendientes') q = q.eq('conciliado', false);
+    if (estado === 'conciliados') q = q.eq('conciliado', true);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
     const movs = (data ?? []) as Array<Record<string, unknown>>;
 
     const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
       Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+
+    // Mapas para la matrícula: repartos manuales de los gastos ligados y
+    // aeronave/escala (patrón del Libro Dinero; la herencia escala→vuelo la
+    // aplica avionDelGasto).
+    const [repartos, mapas] = await Promise.all([
+      fetchRepartos(
+        this.supabase.service,
+        movs
+          .map((m) => m.gasto_id as string | null)
+          .filter((id): id is string => !!id),
+      ),
+      this.cargarMapasAvion(
+        movs
+          .map(
+            (m) =>
+              unwrapOne(m.gasto as { escala_id?: string | null } | null)
+                ?.escala_id ?? null,
+          )
+          .filter((id): id is string => !!id),
+      ),
+    ]);
+
+    const matriculaDeMov = (m: Record<string, unknown>): string => {
+      const gasto = unwrapOne(
+        m.gasto as {
+          escala_id?: string | null;
+          aeronave_id?: string | null;
+          vuelo?:
+            | { aeronave_id?: string | null }
+            | { aeronave_id?: string | null }[]
+            | null;
+        } | null,
+      );
+      if (gasto) {
+        return this.matriculaDeGasto(
+          m.gasto_id as string | null,
+          gasto,
+          unwrapOne(gasto.vuelo)?.aeronave_id ?? null,
+          repartos,
+          mapas,
+        );
+      }
+      // Línea de COBRO: el avión (principal) de su vuelo.
+      const cobro = unwrapOne(
+        m.cobro as {
+          vuelo?:
+            | { aeronave_id?: string | null }
+            | { aeronave_id?: string | null }[]
+            | null;
+        } | null,
+      );
+      const avionId = unwrapOne(cobro?.vuelo)?.aeronave_id ?? null;
+      return avionId ? (mapas.matriculas.get(avionId) ?? '') : '';
+    };
+
     const conQue = (m: Record<string, unknown>): string => {
       const gasto = unwrapOne(
         m.gasto as {
@@ -931,17 +1011,23 @@ export class ConciliacionService {
     let totalCargos = 0;
     let totalAbonos = 0;
     let conciliados = 0;
-    const filas = movs.map((m) => {
+    // Montos SIN conciliar en NARANJA: celda de Cargo o Abono según cuál
+    // tenga valor (índices 0-based NUEVOS tras insertar Matrícula: Cargo=4,
+    // Abono=5).
+    const resaltes: { fila: number; col: number }[] = [];
+    const filas = movs.map((m, i) => {
       const monto = Number(m.monto) || 0;
       const esCargo = m.tipo === 'CARGO';
       if (esCargo) totalCargos += monto;
       else totalAbonos += monto;
       const ok = m.conciliado === true;
       if (ok) conciliados += 1;
+      else resaltes.push({ fila: i, col: esCargo ? 4 : 5 });
       return [
         (m.fecha as string) ?? '',
         (m.descripcion as string | null) ?? '',
         (m.referencia as string | null) ?? '',
+        matriculaDeMov(m),
         esCargo ? monto : null,
         esCargo ? null : monto,
         ok ? 'Conciliado' : 'PENDIENTE',
@@ -952,15 +1038,19 @@ export class ConciliacionService {
 
     const pendientes = movs.length - conciliados;
     const etiquetaCuenta = `${cuenta.alias as string} · ${cuenta.banco as string} (${cuenta.moneda as string})`;
-    const rango =
-      desde || hasta ? ` · ${desde ?? 'inicio'} a ${hasta ?? 'hoy'}` : '';
+    const etiquetaEstado = {
+      todos: 'todos',
+      pendientes: 'solo pendientes',
+      conciliados: 'solo conciliados',
+    }[estado];
     const buffer = await this.pyservices.generateTablaXlsx({
       titulo: `Conciliación · ${etiquetaCuenta}`,
-      subtitulo: `${movs.length} movimientos · ${conciliados} conciliados · ${pendientes} pendientes${rango}`,
+      subtitulo: `${movs.length} movimientos (${etiquetaEstado}) · ${conciliados} conciliados · ${pendientes} pendientes · ${desde} a ${hasta}`,
       columnas: [
         { label: 'Fecha', tipo: 'texto' },
         { label: 'Descripción', tipo: 'texto' },
         { label: 'Referencia', tipo: 'texto' },
+        { label: 'Matrícula', tipo: 'texto' },
         { label: `Cargo (${cuenta.moneda as string})`, tipo: 'money' },
         { label: `Abono (${cuenta.moneda as string})`, tipo: 'money' },
         { label: 'Estatus', tipo: 'texto' },
@@ -972,14 +1062,188 @@ export class ConciliacionService {
         'Totales',
         null,
         null,
+        null,
         Number(totalCargos.toFixed(2)),
         Number(totalAbonos.toFixed(2)),
         `${conciliados} conciliados`,
         `${pendientes} pendientes`,
         null,
       ],
+      resaltes,
     });
     return { buffer, etiqueta: (cuenta.alias as string) ?? 'cuenta' };
+  }
+
+  /**
+   * Rama estado=sin_banco del reporte (los "no conciliados" del cliente):
+   * gastos BANCARIOS (tarjeta corporativa / transferencia) que NO cruzaron
+   * con ninguna línea del banco — MISMO criterio que gastosSinBanco, pero
+   * con el rango desde/hasta obligatorio sobre fecha_gasto (sin el cap de
+   * 90 días). Aquí TODO está sin conciliar: todos los montos van en naranja.
+   */
+  private async reporteGastosSinBancoXlsx(
+    desde: string,
+    hasta: string,
+  ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(
+        'id, fecha_gasto, categoria, monto, moneda, medio_pago, tarjeta_terminacion, lugar, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)',
+      )
+      .in('medio_pago', MEDIOS_BANCARIOS)
+      .eq('conciliado', false)
+      // fecha_gasto es DATE: comparación de días, sin componente horaria.
+      .gte('fecha_gasto', desde)
+      .lte('fecha_gasto', hasta)
+      .order('fecha_gasto', { ascending: true })
+      .limit(5000);
+    if (error) throw new Error(error.message);
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+
+    const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+
+    const [repartos, mapas] = await Promise.all([
+      fetchRepartos(
+        this.supabase.service,
+        rows.map((g) => g.id as string),
+      ),
+      this.cargarMapasAvion(
+        rows
+          .map((g) => g.escala_id as string | null)
+          .filter((id): id is string => !!id),
+      ),
+    ]);
+
+    // Totales por moneda NATIVA (jamás convertir aquí: es un listado de
+    // faltantes, no un balance — misma regla que la pestaña del panel).
+    const porMoneda = new Map<string, number>();
+    const filas = rows.map((g) => {
+      const monto = Number(g.monto) || 0;
+      const mon = (g.moneda as string | null) ?? 'MXN';
+      porMoneda.set(mon, (porMoneda.get(mon) ?? 0) + monto);
+      const vuelo = unwrapOne(
+        g.vuelo as { folio?: number; aeronave_id?: string | null } | null,
+      );
+      return [
+        (g.fecha_gasto as string) ?? '',
+        (g.categoria as string | null) ?? '',
+        unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre ??
+          (g.lugar as string | null) ??
+          '',
+        g.medio_pago === 'TARJETA_CORP'
+          ? `Tarjeta${g.tarjeta_terminacion ? ` **** ${g.tarjeta_terminacion as string}` : ''}`
+          : 'Transferencia',
+        unwrapOne(g.captura as { nombre?: string } | null)?.nombre ?? '',
+        vuelo?.folio != null ? `#${vuelo.folio}` : '',
+        this.matriculaDeGasto(
+          g.id as string,
+          {
+            escala_id: (g.escala_id as string | null) ?? null,
+            aeronave_id: (g.aeronave_id as string | null) ?? null,
+          },
+          vuelo?.aeronave_id ?? null,
+          repartos,
+          mapas,
+        ),
+        monto,
+        mon,
+      ];
+    });
+
+    const buffer = await this.pyservices.generateTablaXlsx({
+      titulo: 'Conciliación · Gastos sin banco',
+      subtitulo: `${rows.length} gastos bancarios (tarjeta/transferencia) sin cruzar con el banco · ${desde} a ${hasta}`,
+      columnas: [
+        { label: 'Fecha', tipo: 'texto' },
+        { label: 'Categoría', tipo: 'texto' },
+        { label: 'Proveedor', tipo: 'texto' },
+        { label: 'Medio', tipo: 'texto' },
+        { label: 'Capturó', tipo: 'texto' },
+        { label: 'Vuelo', tipo: 'texto' },
+        { label: 'Matrícula', tipo: 'texto' },
+        { label: 'Monto', tipo: 'money' },
+        { label: 'Moneda', tipo: 'texto' },
+      ],
+      filas,
+      // Nada de esta pestaña está conciliado: TODOS los montos en naranja
+      // (col 7 = Monto, 0-based).
+      resaltes: filas.map((_, i) => ({ fila: i, col: 7 })),
+      resumen_titulo: 'Total sin conciliar por moneda',
+      resumen: [...porMoneda.entries()].map(([moneda, monto]) => [
+        moneda,
+        Math.round(monto * 100) / 100,
+      ]),
+    });
+    // El controller añade "-sin-banco": el archivo queda
+    // "conciliacion-gastos-sin-banco-<desde>-a-<hasta>.xlsx".
+    return { buffer, etiqueta: 'gastos' };
+  }
+
+  /**
+   * Matrícula de un GASTO para reportes: si tiene reparto manual, el reparto
+   * GANA (unión de matrículas con «+»; el remanente es de la empresa, sin
+   * matrícula); si no, avionDelGasto (fuente única: escala CON herencia →
+   * gasto → vuelo).
+   */
+  private matriculaDeGasto(
+    gastoId: string | null | undefined,
+    gasto: { escala_id?: string | null; aeronave_id?: string | null },
+    vueloAeronaveId: string | null | undefined,
+    repartos: Map<string, GastoRepartoFila[]>,
+    mapas: {
+      matriculas: Map<string, string>;
+      escalaPorId: Map<string, { aeronave_id: string | null }>;
+    },
+  ): string {
+    const filasReparto = gastoId ? repartos.get(gastoId) : undefined;
+    if (filasReparto && filasReparto.length > 0) {
+      const mats = [
+        ...new Set(
+          filasReparto
+            .map((f) => mapas.matriculas.get(f.aeronave_id))
+            .filter((x): x is string => !!x),
+        ),
+      ];
+      return mats.join(' + ');
+    }
+    const avionId = avionDelGasto(gasto, mapas.escalaPorId, vueloAeronaveId);
+    return avionId ? (mapas.matriculas.get(avionId) ?? '') : '';
+  }
+
+  /**
+   * Mapas para resolver matrículas: aeronave id→matrícula (toda la flota) y
+   * escala id→avión CRUDO. El mapa de escalas incluye TAMBIÉN las canceladas
+   * (un gasto de un tramo cancelado sigue siendo de ese avión); la herencia
+   * escala→vuelo la aplica avionDelGasto, no este loader.
+   */
+  private async cargarMapasAvion(escalaIds: string[]): Promise<{
+    matriculas: Map<string, string>;
+    escalaPorId: Map<string, { aeronave_id: string | null }>;
+  }> {
+    const { data: aviones, error: avErr } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula');
+    if (avErr) throw new Error(avErr.message);
+    const matriculas = new Map(
+      (aviones ?? []).map((a) => [a.id as string, a.matricula as string]),
+    );
+    const escalaPorId = new Map<string, { aeronave_id: string | null }>();
+    const unicos = [...new Set(escalaIds)];
+    const CHUNK = 200;
+    for (let i = 0; i < unicos.length; i += CHUNK) {
+      const { data, error } = await this.supabase.service
+        .from('escala')
+        .select('id, aeronave_id')
+        .in('id', unicos.slice(i, i + CHUNK));
+      if (error) throw new Error(error.message);
+      for (const e of data ?? []) {
+        escalaPorId.set(e.id as string, {
+          aeronave_id: (e.aeronave_id as string | null) ?? null,
+        });
+      }
+    }
+    return { matriculas, escalaPorId };
   }
 
   async list(filters: ListConciliacionQuery) {

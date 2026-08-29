@@ -5,6 +5,7 @@ import {
   IsArray,
   IsBoolean,
   IsEnum,
+  IsIn,
   IsInt,
   IsISO8601,
   IsNumber,
@@ -140,21 +141,47 @@ export class LinkMovimientoCobroDto {
   cobro_id?: string | null;
 }
 
+/**
+ * Filtro de estado del reporte de conciliación: las MISMAS 4 pestañas de la
+ * página. OJO: en movimiento_bancario "pendiente" y "no conciliado" son el
+ * mismo booleano; los "no conciliados" del cliente son la pestaña roja de
+ * gastos sin banco (`sin_banco`), que es OTRO universo (tabla gasto).
+ */
+export const REPORTE_CONCILIACION_ESTADOS = [
+  'todos',
+  'pendientes',
+  'conciliados',
+  'sin_banco',
+] as const;
+export type ReporteConciliacionEstado =
+  (typeof REPORTE_CONCILIACION_ESTADOS)[number];
+
 /** Reporte de conciliación en Excel (estado de cuenta + estatus por línea). */
 export class ReporteConciliacionQuery {
-  @ApiProperty({ description: 'Cuenta bancaria del reporte' })
+  @ApiPropertyOptional({
+    description:
+      'Cuenta bancaria del reporte. Requerida salvo estado=sin_banco (esa pestaña lista gastos, no movimientos de una cuenta).',
+  })
+  @IsOptional()
   @IsUUID()
-  cuenta_bancaria_id!: string;
+  cuenta_bancaria_id?: string;
 
-  @ApiPropertyOptional({ description: 'Inicio del periodo (YYYY-MM-DD)' })
-  @IsOptional()
+  @ApiProperty({ description: 'Inicio del periodo (YYYY-MM-DD), obligatorio' })
   @IsISO8601()
-  desde?: string;
+  desde!: string;
 
-  @ApiPropertyOptional({ description: 'Fin del periodo (YYYY-MM-DD)' })
-  @IsOptional()
+  @ApiProperty({ description: 'Fin del periodo (YYYY-MM-DD), obligatorio' })
   @IsISO8601()
-  hasta?: string;
+  hasta!: string;
+
+  @ApiPropertyOptional({
+    enum: REPORTE_CONCILIACION_ESTADOS,
+    default: 'todos',
+    description: 'Mismo filtro que las pestañas de la página de conciliación.',
+  })
+  @IsOptional()
+  @IsIn([...REPORTE_CONCILIACION_ESTADOS])
+  estado: ReporteConciliacionEstado = 'todos';
 }
 
 /** Alta de clasificación "sin vuelo" (o recuperación de la existente). */
