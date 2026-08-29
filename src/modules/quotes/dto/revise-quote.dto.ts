@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsDate,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -56,7 +57,9 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
-      'Lo que cobra el avión/operador externo (USD, interno). null o 0 = sin costo capturado.',
+      'Lo que cobra el avión/operador externo, en SU moneda (nombre legado; ' +
+      'ver costo_externo_moneda). null o 0 = limpiar el costo (las 4 ' +
+      'columnas). El server DERIVA vuelo.costo_externo_usd.',
     nullable: true,
   })
   @ValidateIf((_, v) => v !== undefined && v !== null)
@@ -64,6 +67,28 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   @IsNumber()
   @Min(0)
   costo_externo_usd?: number | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Alias preferido de costo_externo_usd: el monto en su moneda; null o ' +
+      '0 = limpiar. Este gana si vienen ambos.',
+    nullable: true,
+  })
+  @ValidateIf((_, v) => v !== undefined && v !== null)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_monto?: number | null;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del costo del externo (default USD). MXN exige TC: el ' +
+      'tc_usd_mxn de la revisión o el ya persistido en el vuelo.',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  costo_externo_moneda?: 'USD' | 'MXN';
 
   @ApiPropertyOptional({
     type: [String],

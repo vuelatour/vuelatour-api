@@ -354,11 +354,38 @@ export class CubrirExternoDto {
   @MaxLength(100)
   operador_externo!: string;
 
-  @ApiProperty({ description: 'Lo que cobra el operador externo (USD)' })
+  @ApiProperty({
+    description:
+      'Lo que cobra el operador externo, en SU moneda (nombre legado: con ' +
+      'costo_externo_moneda=MXN es un monto en PESOS). El server DERIVA ' +
+      'vuelo.costo_externo_usd (fuente única de los lectores).',
+  })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  costo_externo_usd!: number;
+  costo_externo_usd?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Alias preferido de costo_externo_usd: el monto en su moneda. Mandar ' +
+      'uno de los dos (este gana si vienen ambos).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_monto?: number;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del costo del externo (default USD). MXN exige TC: el ' +
+      'tc_usd_mxn del diálogo o el ya persistido en el vuelo (sin TC, 400).',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  costo_externo_moneda?: 'USD' | 'MXN';
 
   @ApiPropertyOptional({
     description:
@@ -445,11 +472,37 @@ export class CreateExternalFlightDto {
   @MaxLength(100)
   operador_externo!: string;
 
-  @ApiProperty({ description: 'Lo que cobra el operador externo (USD)' })
+  @ApiProperty({
+    description:
+      'Lo que cobra el operador externo, en SU moneda (nombre legado; ver ' +
+      'costo_externo_moneda). El server DERIVA vuelo.costo_externo_usd.',
+  })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  costo_externo_usd!: number;
+  costo_externo_usd?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Alias preferido de costo_externo_usd: el monto en su moneda. Mandar ' +
+      'uno de los dos (este gana si vienen ambos).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_monto?: number;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del costo del externo (default USD). MXN exige el tc_usd_mxn ' +
+      'del alta (sin TC, 400).',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  costo_externo_moneda?: 'USD' | 'MXN';
 
   @ApiProperty({ description: 'Monto total cobrado al cliente (USD)' })
   @Type(() => Number)

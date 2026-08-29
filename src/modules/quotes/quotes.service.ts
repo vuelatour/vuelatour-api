@@ -27,6 +27,7 @@ import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import { tripulacionDeVuelo } from '../../common/tripulacion.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -39,7 +40,15 @@ import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
-/** Tramo con sus detalles ya resueltos (defaults aplicados). */
+/**
+ * Tramo con sus detalles ya resueltos (defaults aplicados).
+ *
+ * NOTA (29-ago-2026): el modo "monto pactado por tramo" de externos sin
+ * referencia se ELIMINÓ — todo vuelo externo se cotiza por el flujo NORMAL
+ * (avión de referencia para tarifa/velocidad; extras/ajuste/total pactado
+ * para aterrizar el precio). La columna BD `escala.monto_externo_usd` queda
+ * huérfana/DEPRECADA (0 filas la usaban en prod): sin lectores ni escritores.
+ */
 export interface ResolvedLeg {
   origen_iata: string;
   destino_iata: string;
@@ -58,8 +67,6 @@ export interface ResolvedLeg {
   fecha_salida_plan: string | null;
   /** Ocultar este tramo del PDF (título/itinerario/mapa); el precio no cambia. */
   pdf_oculto: boolean;
-  /** Monto pactado del tramo (USD) — solo externo sin avión de referencia. */
-  monto_externo_usd: number;
 }
 
 interface ResolvedRoute {
@@ -84,8 +91,6 @@ interface RawLeg {
   pernocta_costo_usd?: number | string | null;
   /** Ocultar este tramo del PDF (27-ago). */
   pdf_oculto?: boolean | null;
-  /** Monto pactado del tramo (28-ago, externo sin referencia). */
-  monto_externo_usd?: number | string | null;
   tipo_parada?: string | null;
   servicio_notas?: string | null;
   notas?: string | null;
@@ -132,7 +137,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -209,41 +214,26 @@ export class QuotesService {
    * Pure calculation, no persistence. Returns the full breakdown.
    */
   async calculate(dto: CalculateQuoteDto) {
-    // AVIÓN EXTERNO SIN REFERENCIA (28-ago, venta broker de jet ajeno): sin
-    // avión del catálogo no hay tarifa ni velocidad — el precio del servicio
-    // es la SUMA de los montos pactados por tramo (monto_externo_usd), y el
-    // resto del canon v1.3 (extras, IVA por método, ajuste/pactado) aplica
-    // idéntico. TUAS solo con línea capturada (no hay matrícula de catálogo).
-    const esExternoManual = dto.es_externo === true && !dto.aeronave_id;
-    const aeronave = esExternoManual
-      ? null
-      : await this.aircraft.findById(dto.aeronave_id!);
-    if (aeronave && !aeronave.activa)
-      throw new BadRequestException('Aeronave inactiva');
+    // NOTA (29-ago-2026): el modo "externo sin referencia con monto pactado
+    // por tramo" se ELIMINÓ. Todo vuelo — externo incluido — se cotiza por
+    // el flujo NORMAL: aeronave_id es la referencia de tarifa/velocidad (en
+    // externos, la ficha del avión AJENO vive en vuelo.avion_externo_*) y el
+    // precio se aterriza con extras/ajuste/total pactado del canon v1.3.
+    const aeronave = await this.aircraft.findById(dto.aeronave_id);
+    if (!aeronave.activa) throw new BadRequestException('Aeronave inactiva');
 
     const route = await this.resolveRoute(dto);
-    if (esExternoManual && !route.escalas) {
-      throw new BadRequestException(
-        'El avión externo sin referencia se cotiza por tramos: captura el itinerario (MULTIESCALA) con el monto pactado de cada tramo.',
-      );
-    }
-    const matriculaPrefix = aeronave
-      ? this.derivarMatriculaPrefix(aeronave.matricula)
-      : null;
-    if (!esExternoManual && route.escalas) {
-      // El DTO ya no exige millas > 0 (el externo manual no las usa): la
-      // regla vive AQUÍ para dar un mensaje claro — un tramo sin millas en
-      // una cotización normal dejaría tiempo y precio en 0 en silencio.
+    const matriculaPrefix = this.derivarMatriculaPrefix(aeronave.matricula);
+    if (route.escalas) {
+      // El DTO tolera millas 0 (borradores legados): la regla vive AQUÍ para
+      // dar un mensaje claro — un tramo sin millas dejaría tiempo y precio
+      // en 0 en silencio.
       const sinMillas = route.escalas.find((l) => !(l.millas_nauticas > 0));
       if (sinMillas) {
         throw new BadRequestException(
           `El tramo ${sinMillas.origen_iata} → ${sinMillas.destino_iata} no tiene millas náuticas: captúralas para calcular tiempo y precio.`,
         );
       }
-      // Montos pactados solo existen en el modo externo sin referencia: si
-      // vinieran en una cotización con avión, ni se persisten ni viajan al
-      // snapshot (mina latente si el vuelo luego se cubre con externo).
-      for (const l of route.escalas) l.monto_externo_usd = 0;
     }
 
     // El "redondo automático" (×2) se eliminó: las millas son SIEMPRE la suma
@@ -251,18 +241,14 @@ export class QuotesService {
     // legacy que dependían de duplicar millas.
     const nmTotal = Number(route.millas_nauticas);
 
-    const velocidadKts = aeronave ? Number(aeronave.velocidad_crucero_kts) : 0;
-    if (aeronave && (!velocidadKts || velocidadKts <= 0)) {
+    const velocidadKts = Number(aeronave.velocidad_crucero_kts);
+    if (!velocidadKts || velocidadKts <= 0) {
       throw new BadRequestException(
         `Aeronave ${aeronave.matricula} no tiene velocidad_crucero_kts válida`,
       );
     }
-    // Externo manual: sin velocidad no hay tiempo derivado — el precio no
-    // depende de horas (montos pactados) y el cobrable queda en 0.
-    const tiempoVueloHr = esExternoManual ? 0 : nmTotal / velocidadKts;
-    const calzosHr = esExternoManual
-      ? 0
-      : route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
+    const tiempoVueloHr = nmTotal / velocidadKts;
+    const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
     // SOBREVUELO (ej. sobrevolar la isla 0.5 hr): tiempo extra cobrable que
     // se suma ANTES del mínimo de 1 hr.
     const sobrevueloHr = Math.max(0, Number(dto.sobrevuelo_hr) || 0);
@@ -293,14 +279,10 @@ export class QuotesService {
       Number(dto.tiempo_cobrable_override_hr) > 0
         ? Number(dto.tiempo_cobrable_override_hr)
         : null;
-    const cobrableRegla =
-      esInterno || esExternoManual ? tiempoRealHr : Math.max(1, tiempoRealHr);
+    const cobrableRegla = esInterno ? tiempoRealHr : Math.max(1, tiempoRealHr);
     const tiempoCobrableHr = cobrableOverride ?? cobrableRegla;
     const minimoHoraAplicado =
-      !esInterno &&
-      !esExternoManual &&
-      cobrableOverride == null &&
-      tiempoRealHr < 1;
+      !esInterno && cobrableOverride == null && tiempoRealHr < 1;
 
     // Tarifa efectiva: override manual > tarifa preferencial pactada con el
     // cliente para ESTA aeronave > tarifa default del avión (público/broker).
@@ -310,37 +292,20 @@ export class QuotesService {
       dto.tarifa_hora_override_usd == null
         ? ctxCliente.tarifaPreferencial
         : null;
-    const tarifaHora = esExternoManual
-      ? 0
-      : (dto.tarifa_hora_override_usd ??
-        tarifaPreferencial ??
-        (esInterno
-          ? 0
-          : dto.tipo_tarifa === TipoTarifa.PUBLICO
-            ? Number(aeronave!.tarifa_hora_pub_usd)
-            : Number(aeronave!.tarifa_hora_broker_usd)));
-    if (!esInterno && !esExternoManual && (!tarifaHora || tarifaHora <= 0)) {
+    const tarifaHora =
+      dto.tarifa_hora_override_usd ??
+      tarifaPreferencial ??
+      (esInterno
+        ? 0
+        : dto.tipo_tarifa === TipoTarifa.PUBLICO
+          ? Number(aeronave.tarifa_hora_pub_usd)
+          : Number(aeronave.tarifa_hora_broker_usd));
+    if (!esInterno && (!tarifaHora || tarifaHora <= 0)) {
       throw new BadRequestException(
-        `Aeronave ${aeronave!.matricula} no tiene tarifa ${dto.tipo_tarifa} configurada y no se proveyó tarifa_hora_override_usd`,
+        `Aeronave ${aeronave.matricula} no tiene tarifa ${dto.tipo_tarifa} configurada y no se proveyó tarifa_hora_override_usd`,
       );
     }
-    // Externo manual: cada monto de tramo se redondea PRIMERO y el subtotal
-    // es la suma exacta (mismo principio del canon v1.3).
-    const montosTramos = esExternoManual
-      ? (route.escalas ?? []).map((l) => round2(l.monto_externo_usd))
-      : null;
-    const subtotal = esExternoManual
-      ? montosTramos!.reduce((acc, m) => round2(acc + m), 0)
-      : tiempoCobrableHr * tarifaHora;
-    if (
-      esExternoManual &&
-      subtotal <= 0 &&
-      !(Number(dto.total_pactado_usd) > 0)
-    ) {
-      throw new BadRequestException(
-        'Captura el monto pactado de al menos un tramo (o el total pactado) del avión externo.',
-      );
-    }
+    const subtotal = tiempoCobrableHr * tarifaHora;
 
     // TUAS por cada aeropuerto único del itinerario (preserva orden de aparición),
     // para mostrar el desglose por aeropuerto.
@@ -359,26 +324,13 @@ export class QuotesService {
         (l) => l.iata.toUpperCase() === iata.toUpperCase(),
       );
     const resolveTua = async (iata: string): Promise<TuasAeropuerto> => {
-      // Sin avión de catálogo (externo manual) no hay tarifario por
-      // matrícula: la TUA solo existe si oficina capturó la línea.
-      const lineaBase = lineaTua(iata);
-      const base: TuasAeropuerto = matriculaPrefix
-        ? await this.computeTuas(
-            iata,
-            matriculaPrefix,
-            dto.pase_abordar ?? false,
-            dto.tuas_override_usd_pax,
-          )
-        : {
-            iata,
-            aplica: !!lineaBase && lineaBase.monto_pax > 0,
-            usd_pax: 0,
-            monto_pax: 0,
-            moneda: 'USD',
-            tc_aplicado: null,
-            razon: 'Avión externo: TUA solo con línea capturada',
-          };
-      const linea = lineaBase;
+      const base: TuasAeropuerto = await this.computeTuas(
+        iata,
+        matriculaPrefix,
+        dto.pase_abordar ?? false,
+        dto.tuas_override_usd_pax,
+      );
+      const linea = lineaTua(iata);
       if (!linea) {
         return {
           ...base,
@@ -590,16 +542,6 @@ export class QuotesService {
     // calculate/revise (si cambian las horas, cambia); FIJA: monto tal cual.
     const comisionVendedorModo: 'FIJA' | 'POR_HORA' =
       dto.comision_vendedor_modo === 'POR_HORA' ? 'POR_HORA' : 'FIJA';
-    if (
-      esExternoManual &&
-      comisionVendedorModo === 'POR_HORA' &&
-      Number(dto.comision_vendedor_tarifa_hr) > 0 &&
-      !(Number(dto.tiempo_cobrable_override_hr) > 0)
-    ) {
-      throw new BadRequestException(
-        'La comisión del vendedor POR HORA no aplica en avión externo con monto pactado (no hay horas): usa comisión FIJA.',
-      );
-    }
     const comisionVendedorTarifaHr =
       comisionVendedorModo === 'POR_HORA'
         ? round2(Number(dto.comision_vendedor_tarifa_hr) || 0)
@@ -690,25 +632,13 @@ export class QuotesService {
       concepto: string;
       monto_usd: number;
     }> = [
-      // Externo manual: una línea POR TRAMO con su monto pactado (la suma de
-      // líneas redondeadas ES subtotalR); si no, la línea única tiempo×tarifa.
-      ...(esExternoManual
-        ? (route.escalas ?? [])
-            .map((leg, i) => ({
-              clave: 'TIEMPO_VUELO',
-              concepto: `Tramo ${leg.origen_iata} → ${leg.destino_iata} · monto pactado`,
-              monto_usd: montosTramos![i],
-            }))
-            .filter((l) => l.monto_usd !== 0)
-        : [
-            {
-              clave: 'TIEMPO_VUELO',
-              concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr${
-                minimoHoraAplicado ? ' (mínimo 1 hr)' : ''
-              }`,
-              monto_usd: subtotalR,
-            },
-          ]),
+      {
+        clave: 'TIEMPO_VUELO',
+        concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr${
+          minimoHoraAplicado ? ' (mínimo 1 hr)' : ''
+        }`,
+        monto_usd: subtotalR,
+      },
       // Una línea POR AEROPUERTO con unitario, pax y moneda (pass-through
       // auditable). La suma de filas (ya redondeadas) es exactamente tuasR.
       ...tuasFilas.map((f) => ({
@@ -807,23 +737,15 @@ export class QuotesService {
         };
 
     return {
-      // Externo manual: la "aeronave" del snapshot es la ficha del avión
-      // AJENO capturada a mano (id null = no es de la flota).
-      aeronave: aeronave
-        ? {
-            id: aeronave.id,
-            matricula: aeronave.matricula,
-            modelo: aeronave.modelo,
-            pais_registro: aeronave.pais_registro,
-            velocidad_crucero_kts: velocidadKts,
-          }
-        : {
-            id: null,
-            matricula: dto.avion_externo_matricula?.trim() ?? null,
-            modelo: dto.avion_externo_modelo?.trim() ?? null,
-            pais_registro: null,
-            velocidad_crucero_kts: 0,
-          },
+      // Siempre el avión del catálogo (en externos, la REFERENCIA de tarifa;
+      // la ficha del avión AJENO vive en vuelo.avion_externo_*).
+      aeronave: {
+        id: aeronave.id,
+        matricula: aeronave.matricula,
+        modelo: aeronave.modelo,
+        pais_registro: aeronave.pais_registro,
+        velocidad_crucero_kts: velocidadKts,
+      },
       ruta: {
         id: route.ruta_id,
         origen_iata: route.origen_iata,
@@ -880,10 +802,6 @@ export class QuotesService {
             tipo_parada: leg.tipo_parada,
             servicio_notas: leg.servicio_notas,
             pdf_oculto: leg.pdf_oculto,
-            monto_externo_usd:
-              esExternoManual && leg.monto_externo_usd > 0
-                ? round2(leg.monto_externo_usd)
-                : null,
           }))
         : null,
       iva: {
@@ -1193,6 +1111,17 @@ export class QuotesService {
     ];
     const requierePermiso = await this.airports.anyRequiresPermit(iatas);
 
+    // Costo del operador externo CON MONEDA (29-ago): lo capturado es
+    // {monto, moneda}; costo_externo_usd se DERIVA aquí (fuente única
+    // resolverCostoExterno) con el TC de la cotización como respaldo del MXN.
+    const costoExterno = dto.es_externo
+      ? resolverCostoExterno({
+          monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
+          moneda: dto.costo_externo_moneda,
+          tcVuelo: dto.tc_usd_mxn,
+        })
+      : { monto: null, moneda: null, tc: null, usd: null };
+
     const insertPayload = {
       cliente_id: dto.cliente_id,
       aeronave_id: dto.es_externo ? null : dto.aeronave_id,
@@ -1209,11 +1138,12 @@ export class QuotesService {
         ? (dto.avion_externo_matricula?.trim() ?? null)
         : null,
       // null (no 0) cuando aún no se pacta: el reparto lo delata en
-      // sin_costo_count — un 0 fingía utilidad = todo lo cobrado.
-      costo_externo_usd:
-        dto.es_externo && Number(dto.costo_externo_usd) > 0
-          ? dto.costo_externo_usd
-          : null,
+      // sin_costo_count — un 0 fingía utilidad = todo lo cobrado. Las 4
+      // columnas se escriben JUNTAS; el usd es el DERIVADO que leen todos.
+      costo_externo_usd: costoExterno.usd,
+      costo_externo_monto: costoExterno.monto,
+      costo_externo_moneda: costoExterno.moneda,
+      costo_externo_tc: costoExterno.tc,
       cotizacion_version: 1,
       origen_iata: breakdown.ruta.origen_iata,
       destino_iata: breakdown.ruta.destino_iata,
@@ -1423,29 +1353,11 @@ export class QuotesService {
             : undefined;
       }
     }
-    // es_externo se ANCLA a lo persistido (patrón cliente_id): decide la
-    // rama del motor y un front malformado podía repreciar un vuelo propio
-    // como externo-manual (o al revés) en silencio.
+    // es_externo se ANCLA a lo persistido (patrón cliente_id): un front
+    // malformado podía marcar externo un vuelo propio (o al revés) en
+    // silencio. El revise de un externo EXIGE el avión de referencia
+    // (aeronave_id) — el motor ya no tiene modo sin referencia.
     dto.es_externo = current.es_externo === true;
-    if (
-      dto.es_externo &&
-      !dto.aeronave_id &&
-      dto.escalas?.length &&
-      dto.escalas.every((e) => e.monto_externo_usd === undefined)
-    ) {
-      // Defensa del monto pactado: si el front no re-mandó NINGÚN monto,
-      // se rehidratan de las escalas persistidas (por orden) — sin esto un
-      // revise con total_pactado los borraría todos en silencio.
-      const persistidas = await this.findEscalas(vueloId);
-      dto.escalas.forEach((e, i) => {
-        const p = persistidas.filter((x) => x.solo_operativa !== true)[i] as
-          | { monto_externo_usd?: number | string | null }
-          | undefined;
-        if (p && Number(p.monto_externo_usd) > 0) {
-          e.monto_externo_usd = Number(p.monto_externo_usd);
-        }
-      });
-    }
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
@@ -1494,13 +1406,30 @@ export class QuotesService {
         ...(current.es_externo && dto.operador_externo?.trim()
           ? { operador_externo: dto.operador_externo.trim() }
           : {}),
-        ...(current.es_externo && dto.costo_externo_usd !== undefined
-          ? {
-              costo_externo_usd:
-                Number(dto.costo_externo_usd) > 0
-                  ? Number(dto.costo_externo_usd)
-                  : null,
-            }
+        ...(current.es_externo &&
+        (dto.costo_externo_monto !== undefined ||
+          dto.costo_externo_usd !== undefined)
+          ? (() => {
+              // Costo del externo CON MONEDA (29-ago): costo_externo_usd es
+              // DERIVADO (fuente única resolverCostoExterno) y las 4
+              // columnas viajan JUNTAS. null/0 = limpiar (las 4). TC de
+              // respaldo del MXN: el de esta revisión o el ya persistido.
+              const c = resolverCostoExterno({
+                monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
+                moneda: dto.costo_externo_moneda,
+                tcVuelo:
+                  dto.tc_usd_mxn ??
+                  (Number(current.tc_usd_mxn) > 0
+                    ? Number(current.tc_usd_mxn)
+                    : null),
+              });
+              return {
+                costo_externo_usd: c.usd,
+                costo_externo_monto: c.monto,
+                costo_externo_moneda: c.moneda,
+                costo_externo_tc: c.tc,
+              };
+            })()
           : {}),
         ruta_id: breakdown.ruta.id,
         origen_iata: breakdown.ruta.origen_iata,
@@ -1815,13 +1744,9 @@ export class QuotesService {
         servicio_notas: (e.servicio_notas as string | null) ?? undefined,
         notas: (e.notas as string | null) ?? undefined,
         // Preservar lo que el ajuste rápido NO gestiona: sin esto el UPDATE
-        // de replaceEscalas los normalizaba a false/null y destapaba tramos
-        // ocultos del PDF (bug 28-ago) o borraba montos pactados.
+        // de replaceEscalas lo normalizaba a false y destapaba tramos
+        // ocultos del PDF (bug 28-ago).
         pdf_oculto: e.pdf_oculto === true,
-        monto_externo_usd:
-          Number(e.monto_externo_usd) > 0
-            ? Number(e.monto_externo_usd)
-            : undefined,
         fecha_salida_plan: e.fecha_salida_plan
           ? new Date(e.fecha_salida_plan as string)
           : undefined,
@@ -2297,7 +2222,7 @@ export class QuotesService {
       .select(
         // aeronave_id: avión del TRAMO (null = hereda el del vuelo) — lo
         // necesita la participación por avión (regla B 28-ago).
-        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, monto_externo_usd, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
+        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -2475,7 +2400,6 @@ export class QuotesService {
         servicio_notas: e.servicio_notas,
         notas: e.notas,
         pdf_oculto: e.pdf_oculto === true,
-        monto_externo_usd: e.monto_externo_usd > 0 ? e.monto_externo_usd : null,
         updated_by: userId,
       };
       const actual = porOrden.get(orden);
@@ -2661,7 +2585,6 @@ export class QuotesService {
         servicio_notas: l.servicio_notas ?? null,
         notas: l.notas ?? null,
         pdf_oculto: l.pdf_oculto === true,
-        monto_externo_usd: round2(Number(l.monto_externo_usd) || 0),
         fecha_salida_plan:
           l.fecha_salida_plan instanceof Date
             ? l.fecha_salida_plan.toISOString()

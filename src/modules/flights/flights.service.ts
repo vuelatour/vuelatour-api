@@ -72,6 +72,7 @@ import {
   particionIngresoVuelo,
   type VueloIngresoInput,
 } from '../../common/ingreso-vuelo.util';
+import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   CORRECCION_BAJA_PREFIX,
   PROCEDENCIA_PREFIX,
@@ -83,7 +84,7 @@ import {
 } from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
 
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
@@ -1315,6 +1316,11 @@ export class FlightsService {
     }
     const copia: Record<string, unknown> = { ...vuelo };
     delete copia.costo_externo_usd;
+    // El costo con moneda (29-ago) también: si solo se borrara el usd, el
+    // monto NATIVO (y su TC) se fugarían a la app de campo.
+    delete copia.costo_externo_monto;
+    delete copia.costo_externo_moneda;
+    delete copia.costo_externo_tc;
     return copia as T;
   }
 
@@ -3519,7 +3525,9 @@ export class FlightsService {
     id: string,
     dto: {
       operador_externo: string;
-      costo_externo_usd: number;
+      costo_externo_usd?: number;
+      costo_externo_monto?: number;
+      costo_externo_moneda?: 'USD' | 'MXN';
       avion_externo_modelo?: string;
       avion_externo_matricula?: string;
       tc_usd_mxn?: number;
@@ -3534,6 +3542,14 @@ export class FlightsService {
     }
     // TC pactado: sin él, un vuelo en USD no se puede facturar (CFDI en MXN).
     const tc = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
+    // Costo del externo CON MONEDA (29-ago): costo_externo_usd queda DERIVADO
+    // (fuente única resolverCostoExterno; los lectores no cambian). TC del
+    // MXN: el del diálogo, o el ya persistido en el vuelo de respaldo.
+    const costoExterno = resolverCostoExterno({
+      monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
+      moneda: dto.costo_externo_moneda,
+      tcVuelo: tc ?? (current.tc_usd_mxn as number | null),
+    });
     // Composición MXN de la cotización (renglones nativos en pesos): el
     // findById no trae el snapshot — se lee aparte solo si hay TC.
     let snapTotales: { mxn_nativos?: number; usd_de_mxn?: number } | undefined;
@@ -3555,9 +3571,12 @@ export class FlightsService {
         es_externo: true,
         operador_externo: dto.operador_externo.trim(),
         // 0 = aún sin pactar: null para que el reparto lo delate
-        // (sin_costo_count) en vez de fingir utilidad completa.
-        costo_externo_usd:
-          Number(dto.costo_externo_usd) > 0 ? dto.costo_externo_usd : null,
+        // (sin_costo_count) en vez de fingir utilidad completa. Las 4
+        // columnas del costo viajan JUNTAS (usd = derivado).
+        costo_externo_usd: costoExterno.usd,
+        costo_externo_monto: costoExterno.monto,
+        costo_externo_moneda: costoExterno.moneda,
+        costo_externo_tc: costoExterno.tc,
         // Solo si el diálogo los mandó: re-cubrir para actualizar el costo
         // no debe wipear la ficha capturada en el cotizador.
         ...(dto.avion_externo_modelo !== undefined
@@ -3686,6 +3705,9 @@ export class FlightsService {
         es_externo: false,
         operador_externo: null,
         costo_externo_usd: null,
+        costo_externo_monto: null,
+        costo_externo_moneda: null,
+        costo_externo_tc: null,
         avion_externo_modelo: null,
         avion_externo_matricula: null,
         aeronave_id: aeronaveId,
@@ -3723,12 +3745,22 @@ export class FlightsService {
       legs.length > 0
         ? legs[legs.length - 1].destino_iata
         : dto.destino_iata.toUpperCase();
+    // Costo del externo CON MONEDA (29-ago): usd DERIVADO (fuente única);
+    // el TC pactado del alta respalda un costo en MXN.
+    const costoExterno = resolverCostoExterno({
+      monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
+      moneda: dto.costo_externo_moneda,
+      tcVuelo: dto.tc_usd_mxn,
+    });
     const payload = {
       cliente_id: dto.cliente_id,
       aeronave_id: null,
       es_externo: true,
       operador_externo: dto.operador_externo,
-      costo_externo_usd: dto.costo_externo_usd,
+      costo_externo_usd: costoExterno.usd,
+      costo_externo_monto: costoExterno.monto,
+      costo_externo_moneda: costoExterno.moneda,
+      costo_externo_tc: costoExterno.tc,
       tipo: legs.length > 1 ? 'MULTIESCALA' : 'REDONDO',
       estado: 'CONFIRMADO',
       cotizacion_version: 1,

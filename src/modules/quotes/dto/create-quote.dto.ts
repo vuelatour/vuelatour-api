@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsDate,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
@@ -85,13 +86,38 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   operador_externo?: string;
 
   @ApiPropertyOptional({
-    description: 'Lo que cobra el operador externo (USD).',
+    description:
+      'Lo que cobra el operador externo, en SU moneda (nombre legado: con ' +
+      'costo_externo_moneda=MXN es un monto en PESOS). El server DERIVA ' +
+      'vuelo.costo_externo_usd — fuente única de los lectores — con el TC ' +
+      'de la cotización (tc_usd_mxn) cuando la moneda es MXN.',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   costo_externo_usd?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Alias preferido de costo_externo_usd: el monto en su moneda. Mandar ' +
+      'uno de los dos (este gana si vienen ambos).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_monto?: number;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del costo del externo (default USD). MXN exige TC: el ' +
+      'tc_usd_mxn de la cotización (sin él, 400).',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  costo_externo_moneda?: 'USD' | 'MXN';
 
   @ApiPropertyOptional({
     description: 'Notas internas del equipo (no van al cliente)',

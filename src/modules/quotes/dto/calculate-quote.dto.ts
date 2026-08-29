@@ -67,9 +67,8 @@ export class EscalaInputDto {
   @ApiProperty({ description: 'Millas nauticas del tramo (one-way)' })
   @Type(() => Number)
   @IsNumber()
-  // 0 permitido SOLO para el externo con monto pactado (el precio no usa
-  // millas); en cotizaciones normales el MOTOR exige millas > 0 con mensaje
-  // es-MX claro (antes: 400 críptico del validador).
+  // Se tolera 0 en el DTO (borradores/payloads legados): el MOTOR exige
+  // millas > 0 con mensaje es-MX claro (antes: 400 críptico del validador).
   @Min(0)
   millas_nauticas!: number;
 
@@ -117,17 +116,11 @@ export class EscalaInputDto {
   @IsBoolean()
   pdf_oculto?: boolean;
 
-  @ApiPropertyOptional({
-    description:
-      'Monto pactado del tramo (USD). Solo se usa en cotizaciones de avión ' +
-      'EXTERNO sin avión de referencia: el subtotal es la suma de estos montos.',
-  })
-  @IsOptional()
-  @Type(() => Number)
-  @IsNumber()
-  @Min(0)
-  @Max(1_000_000)
-  monto_externo_usd?: number;
+  // ELIMINADO (29-ago-2026): `monto_externo_usd` (monto pactado por tramo del
+  // externo SIN avión de referencia). El modo se retiró del motor — los
+  // externos se cotizan por el flujo NORMAL (tarifa de referencia, extras,
+  // ajuste/total pactado). La columna BD `escala.monto_externo_usd` queda
+  // huérfana/DEPRECADA (0 filas la usaban en prod): no leerla ni escribirla.
 
   @ApiPropertyOptional({
     description: 'Costo de pernocta/viáticos del tramo (USD). Default si null.',
@@ -256,27 +249,27 @@ export class TuaLineaDto {
 export class CalculateQuoteDto {
   @ApiProperty({
     description:
-      'Aeronave que vuela la ruta (o la REFERENCIA de tarifa en externos). ' +
-      'Opcional SOLO para vuelo externo con monto pactado por tramo.',
+      'Aeronave que vuela la ruta (o la REFERENCIA de tarifa/velocidad en ' +
+      'vuelos externos). SIEMPRE obligatoria — el modo "externo sin ' +
+      'referencia con monto pactado por tramo" se eliminó (29-ago-2026).',
   })
-  @ValidateIf(
-    (o: CalculateQuoteDto) => o.es_externo !== true || o.aeronave_id != null,
-  )
-  @IsUUID()
-  aeronave_id?: string;
+  @IsUUID(undefined, {
+    message:
+      'Selecciona el avión de la cotización (en vuelos externos, el avión de referencia de tarifa).',
+  })
+  aeronave_id!: string;
 
   // ---- Vuelo cubierto por operador EXTERNO (broker) ----
-  // Vive aquí (no solo en CreateQuoteDto) porque el MOTOR lo necesita: sin
-  // avión de referencia el precio es la suma de montos pactados por tramo.
+  // Vive aquí (no solo en CreateQuoteDto) porque revise() lo ancla a lo
+  // persistido y la persistencia del costo del externo lo consulta.
   @ApiPropertyOptional({
     description:
       'El vuelo lo cubre un operador externo: la cotización al cliente es ' +
-      'normal, pero el vuelo nace es_externo (sin avión propio, sin ' +
-      'tacómetros; estado manual). Sin aeronave_id, cada tramo debe traer ' +
-      'monto_externo_usd (precio manual).',
+      'normal (aeronave_id = referencia de tarifa), pero el vuelo nace ' +
+      'es_externo (sin avión propio, sin tacómetros; estado manual).',
   })
   // Transform explícito: con enableImplicitConversion, 'false' (string)
-  // sería Boolean('false') = true y desactivaría el candado de aeronave_id.
+  // sería Boolean('false') = true y marcaría externo un vuelo propio.
   @Transform(({ value }) => value === true || value === 'true')
   @IsOptional()
   @IsBoolean()
