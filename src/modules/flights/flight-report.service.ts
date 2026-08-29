@@ -6,7 +6,28 @@ import {
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
-import { particionIngresoVuelo } from '../../common/ingreso-vuelo.util';
+import {
+  pagoVendedorUsd,
+  particionIngresoVuelo,
+} from '../../common/ingreso-vuelo.util';
+import {
+  participacionPorAeronave,
+  repartirUsd,
+} from '../../common/participacion-aeronave.util';
+
+/** Etiqueta legible de la fuente del peso del reparto multi-avión. */
+function fuenteParticipacionLabel(fuente: string): string {
+  switch (fuente) {
+    case 'tacos':
+      return 'horas reales de tacómetro';
+    case 'cotizacion':
+      return 'horas cotizadas por tramo';
+    case 'tramos':
+      return 'partes iguales por tramo';
+    default:
+      return 'tramos';
+  }
+}
 
 /** Columnas del vuelo necesarias para el reporte (incluye el desglose de precio
  *  e iva_pct/calculo_snapshot para la partición venta avión / VuelaTour). */
@@ -448,39 +469,90 @@ export class FlightReportService {
     }
 
     // Como el Excel del equipo: REMANENTE = venta (total c/IVA) − costo;
-    // GANANCIA = remanente − comisión vendedor − comisiones bancarias;
+    // GANANCIA = remanente − PAGO AL VENDEDOR − comisiones bancarias;
     // GANANCIA X HR sobre horas COBRADAS (fallback voladas); % sobre venta
-    // sin IVA.
+    // sin IVA. El pago al vendedor se resta UNA sola vez (aquí): el costo
+    // del vuelo (gastos + combustible) no lo contiene — no existe categoría
+    // de gasto de comisión de venta — y la venta es el total del cliente,
+    // que incluye la comisión (regla 23-jul). Pago = comisión + su IVA
+    // cuando la cotización grava (`pagoVendedorUsd`, fuente única — misma
+    // cifra que la provisión de Otros movimientos y del Libro Dinero).
     const ventaUsd = n(v.monto_total_usd);
     const ventaSinIvaUsd = Number((ventaUsd - n(v.iva_usd)).toFixed(2));
-    // Partición del ingreso (regla 6, 28-ago-2026): venta del AVIÓN vs
-    // ingreso de VuelaTour (TUAS/extras/pernocta + su IVA). INFORMATIVA en
-    // este reporte: remanente/ganancia siguen sobre la economía COMPLETA
-    // del vuelo (todo lo que pagó el cliente contra todo lo que costó), pero
-    // se rotula que la venta del avión ≠ total del cliente.
+    // Partición del ingreso (regla 6 + Regla A, 28-ago-2026): venta del
+    // AVIÓN (tiempo + ajuste + su IVA) vs ingreso de VuelaTour (TUAS/extras/
+    // pernocta/comisión del vendedor + su IVA). INFORMATIVA en este reporte:
+    // remanente/ganancia siguen sobre la economía COMPLETA del vuelo (todo lo
+    // que pagó el cliente contra todo lo que costó), pero se rotula que la
+    // venta del avión ≠ total del cliente.
     const particion = particionIngresoVuelo(v);
     if (particion.vuelatour_usd > 0) {
       notasHoras.push(
-        `Venta del avión $${particion.avion_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} ≠ total del cliente $${particion.total_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })}: los $${particion.vuelatour_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} de TUAS/extras/pernocta (con su IVA) son ingreso de VuelaTour (Otros movimientos), no del avión. El remanente y la ganancia de este reporte son de la economía completa del vuelo.`,
+        `Venta del avión $${particion.avion_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} ≠ total del cliente $${particion.total_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })}: los $${particion.vuelatour_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })} de TUAS/extras/pernocta/comisión del vendedor (con su IVA) son ingreso de VuelaTour (Otros movimientos), no del avión. El remanente y la ganancia de este reporte son de la economía completa del vuelo.`,
       );
     } else if (particion.inconsistente) {
       notasHoras.push(
         'El desglose de la cotización no cuadra con el total: no se pudo separar la venta del avión de los extras (todo el total se muestra como venta del avión). Revisa la cotización.',
       );
     }
+    // REGLA B (28-ago-2026): vuelo MULTI-AVIÓN — la venta del avión se
+    // reparte entre los aviones que volaron sus tramos (fuente única
+    // participacionPorAeronave; centavos exactos con repartirUsd). Externos
+    // no se reparten (sin avión de flota).
+    const participacion =
+      v.es_externo === true ? null : participacionPorAeronave(v, escalas);
+    let participacionAviones: ReporteVueloPayload['participacion_aviones'];
+    if (participacion?.multi_avion && particion.total_usd > 0) {
+      const ids = [...participacion.factores.keys()];
+      const { data: avs, error: avsErr } = await sb
+        .from('aeronave')
+        .select('id, matricula')
+        .in('id', ids);
+      if (avsErr) {
+        throw new Error(
+          `Reporte del vuelo ${flightId}: fallo al leer aeronaves: ${avsErr.message}`,
+        );
+      }
+      const matriculaPorId = new Map(
+        (avs ?? []).map((a) => [a.id as string, a.matricula as string]),
+      );
+      const partes = repartirUsd(particion.avion_usd, participacion);
+      participacionAviones = ids.map((id) => ({
+        aeronave_id: id,
+        matricula: matriculaPorId.get(id) ?? '?',
+        factor: participacion.factores.get(id) ?? 0,
+        tramos: participacion.tramos_por_avion.get(id) ?? 0,
+        venta_usd: partes.get(id) ?? 0,
+      }));
+      notasHoras.push(
+        `Venta del avión repartida por ${fuenteParticipacionLabel(participacion.fuente)}: ${participacionAviones
+          .map(
+            (pa) =>
+              `${pa.matricula} ${Math.round(pa.factor * 10000) / 100} % ($${pa.venta_usd.toLocaleString('en-US', { minimumFractionDigits: 2 })})`,
+          )
+          .join(
+            ' · ',
+          )}. Los gastos van al avión del tramo al que están ligados; el ingreso de VuelaTour no se reparte.`,
+      );
+    }
     const hayEconomia = ventaUsd > 0 || costoVueloUsd > 0;
     const remanenteUsd = hayEconomia
       ? Number((ventaUsd - costoVueloUsd).toFixed(2))
       : null;
+    // CANCELADO (verificación 28-ago; misma regla que el balance, el reparto
+    // y "Otros movimientos"): el servicio no se prestó y la comisión no se
+    // cobró — NO se provisiona pago al vendedor ni se resta de la ganancia;
+    // el neto de VuelaTour es lo retenido (cobros no reembolsados).
+    const cancelado = v.estado === 'CANCELADO';
+    const pagoVendedor = cancelado ? 0 : pagoVendedorUsd(particion);
+    if (cancelado && particion.comision_vendedor_usd > 0) {
+      notasHoras.push(
+        'Vuelo CANCELADO: la comisión del vendedor no se provisiona ni se resta (el servicio no se prestó); el neto de VuelaTour es lo retenido.',
+      );
+    }
     const gananciaFinalUsd =
       remanenteUsd != null
-        ? Number(
-            (
-              remanenteUsd -
-              n(v.comision_vendedor_usd) -
-              comisionesBancoUsd
-            ).toFixed(2),
-          )
+        ? Number((remanenteUsd - pagoVendedor - comisionesBancoUsd).toFixed(2))
         : null;
     const horasParaGanancia =
       horasCotizadas != null && horasCotizadas > 0
@@ -534,20 +606,33 @@ export class FlightReportService {
       venta_avion_usd: particion.total_usd > 0 ? particion.avion_usd : null,
       otros_ingresos_vuelatour_usd:
         particion.total_usd > 0 ? particion.vuelatour_usd : null,
+      // Regla B: reparto de la venta del avión entre aviones (solo multi).
+      participacion_aviones: participacionAviones,
       total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
       // Comisión del vendedor: se muestra DESPUÉS del total (regla jul 2026:
-      // el total del cliente YA la incluye — se le suma al precio); neto =
-      // total − comisión = lo que queda a VuelaTour (≈ precio base).
+      // el total del cliente YA la incluye — se le suma al precio). Regla A
+      // (28-ago tarde): es ingreso de VuelaTour que se paga al vendedor — no
+      // costo del avión; este reporte (economía completa) resta ese pago
+      // una vez. pago_vendedor_usd = comisión + su IVA cuando grava
+      // (`pagoVendedorUsd`); neto = total − pago = precio base con su IVA.
       comision_vendedor_usd: n(v.comision_vendedor_usd),
       comision_vendedor_nombre:
         (v.comision_vendedor_nombre as string | null) ?? null,
+      // CANCELADO con comisión: pago 0 explícito (no se provisiona) y el
+      // neto es lo retenido; sin comisión, null como siempre.
+      pago_vendedor_usd:
+        pagoVendedor > 0
+          ? pagoVendedor
+          : cancelado && particion.comision_vendedor_usd > 0
+            ? 0
+            : null,
       neto_vuelatour_usd:
-        n(v.comision_vendedor_usd) > 0
-          ? Number(
-              (n(v.monto_total_usd) - n(v.comision_vendedor_usd)).toFixed(2),
-            )
-          : null,
+        pagoVendedor > 0
+          ? Number((particion.total_usd - pagoVendedor).toFixed(2))
+          : cancelado && particion.comision_vendedor_usd > 0
+            ? Number(totalCobrado.toFixed(2))
+            : null,
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
       horas_cotizadas_hr: horasCotizadas,

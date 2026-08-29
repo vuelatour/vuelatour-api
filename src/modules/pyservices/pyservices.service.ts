@@ -13,6 +13,38 @@ export interface RepartoSocioPayload {
   monto_usd: number;
 }
 
+/**
+ * Composición COTIZADA (pre-IVA + su IVA) del ingreso de VuelaTour — nombres
+ * exactos de `RepartoOtrosIngresosDesglose` (pyservices app/schemas/reparto.py).
+ * Solo informativo: nada de esto se reparte.
+ */
+export interface RepartoOtrosIngresosDesglosePayload {
+  tuas_usd: number;
+  extras_usd: number;
+  pernocta_usd: number;
+  /** Comisión del vendedor (pre-IVA): ingreso de VuelaTour, no del avión. */
+  comision_usd: number;
+  iva_usd: number;
+}
+
+/**
+ * Un vuelo del avión en el PDF/XLSX del reparto — nombres exactos de
+ * `RepartoVueloLinea` (pyservices). `cobrado_usd`/`pendiente_usd` son la
+ * PARTE DEL AVIÓN (venta del avión); `participacion` < 1 = multi-avión.
+ */
+export interface RepartoVueloLineaPayload {
+  folio: number | string | null;
+  cliente: string | null;
+  fecha: string | null;
+  estado: string | null;
+  cobrado_usd: number;
+  pendiente_usd: number;
+  participacion: number;
+  multi_avion: boolean;
+  /** Tramos de este avión ("CUN→MID"); informativo. */
+  tramos_avion: string | null;
+}
+
 export interface RepartoAvionPayload {
   matricula: string;
   modelo: string;
@@ -37,6 +69,10 @@ export interface RepartoAvionPayload {
    * Informativo: no entra a saldo_usd ni al reparto de socios.
    */
   otros_ingresos_vuelatour_usd?: number;
+  /** Composición cotizada del bloque anterior (incluye comision_usd). */
+  otros_ingresos_vuelatour_desglose?: RepartoOtrosIngresosDesglosePayload;
+  /** Detalle de vuelos del avión (vacío = el PDF no lo imprime). */
+  vuelos?: RepartoVueloLineaPayload[];
 }
 
 export interface RepartoPdfPayload {
@@ -46,6 +82,8 @@ export interface RepartoPdfPayload {
   aviones: RepartoAvionPayload[];
   /** Σ otros_ingresos_vuelatour_usd de todos los aviones (informativo). */
   otros_ingresos_vuelatour_total_usd?: number;
+  /** Composición del Σ anterior (Σ de los desgloses por avión). */
+  otros_ingresos_vuelatour_desglose?: RepartoOtrosIngresosDesglosePayload;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';
@@ -138,6 +176,13 @@ export interface DineroVueloFilaPayload {
    */
   total_cliente_usd?: number | null;
   total_cliente_mxn?: number | null;
+  /**
+   * Regla B (28-ago-2026, vuelo multi-avión): fracción de la venta del
+   * avión que lleva ESTA fila (1 en vuelos de un solo avión) y si el vuelo
+   * emitió una fila por avión (la clave lleva el sufijo "(50 % N4142R)").
+   */
+  participacion?: number | null;
+  multi_avion?: boolean;
 }
 export interface DineroOtroIngresoFilaPayload {
   clave: string;
@@ -145,6 +190,8 @@ export interface DineroOtroIngresoFilaPayload {
   concepto_egreso?: string | null;
   egreso_mxn?: number | null;
   fecha_egreso?: string | null;
+  /** Nota/comentario de la celda del egreso (p. ej. "PROVISIÓN…"). */
+  nota_egreso?: string | null;
   concepto_ingreso?: string | null;
   ingreso_mxn?: number | null;
   fecha_ingreso?: string | null;
@@ -198,7 +245,15 @@ export interface DineroXlsxPayload {
   combustible_sin_avion?: number;
   /** "Gasto de combustible" del mes: resta en la hoja utilidades. */
   utilidades_combustible_mxn?: number | null;
+  /**
+   * Otros ingresos del mes NETOS de la provisión del pago al vendedor
+   * (Σ ingreso_mxn de la hoja "otros ingresos" − Σ egresos provisionados
+   * de comisión): ese egreso no es gasto de ninguna otra hoja, así que si
+   * no se descuenta aquí la utilidad lo cuenta como ingreso puro.
+   */
   utilidades_otros_ingresos_mxn?: number | null;
+  /** Provisión del pago al vendedor ya descontada arriba (informativo). */
+  utilidades_comision_vendedor_provisionada_mxn?: number | null;
   utilidades_otros_gastos_mxn?: number | null;
   utilidades_tc?: number | null;
   utilidades_aviones?: DineroUtilidadAvionPayload[];
@@ -233,9 +288,15 @@ export interface ReporteVueloPayload {
   total_usd?: number;
   total_mxn?: number | null;
   tc_usd_mxn?: number | null;
-  // Comisión del vendedor (interna): neto = total − comisión, lo de VuelaTour.
+  // Comisión del vendedor (interna, pre-IVA).
   comision_vendedor_usd?: number;
   comision_vendedor_nombre?: string | null;
+  /**
+   * Lo que VuelaTour paga al vendedor: comisión + su IVA cuando la
+   * cotización grava (`pagoVendedorUsd`, fuente única). null sin comisión.
+   */
+  pago_vendedor_usd?: number | null;
+  /** total − pago_vendedor_usd (neto de VuelaTour = precio base con su IVA). */
   neto_vuelatour_usd?: number | null;
   metodo_cobro?: string | null;
   tramos?: ReporteVueloTramoPayload[];
@@ -277,11 +338,28 @@ export interface ReporteVueloPayload {
   notas?: string | null;
   /**
    * Partición del ingreso (regla 28-ago, particionIngresoVuelo): venta del
-   * AVIÓN (tiempo + ajuste + comisión vendedor + IVA proporcional) e
-   * ingreso de VUELATOUR (TUAS + extras + pernocta + su IVA). Suman total_usd.
+   * AVIÓN (tiempo + ajuste + IVA proporcional) e ingreso de VUELATOUR (TUAS
+   * + extras + pernocta + comisión del vendedor + su IVA). Suman total_usd.
    */
   venta_avion_usd?: number | null;
   otros_ingresos_vuelatour_usd?: number | null;
+  /**
+   * Regla B (28-ago-2026): vuelo MULTI-AVIÓN — reparto de la venta del
+   * avión entre los aviones que volaron sus tramos (participacionPorAeronave
+   * + repartirUsd; Σ venta_usd == venta_avion_usd). Solo viaja cuando
+   * participa más de un avión.
+   */
+  participacion_aviones?: ReporteVueloParticipacionPayload[];
+}
+export interface ReporteVueloParticipacionPayload {
+  aeronave_id: string;
+  matricula: string;
+  /** Fracción (0, 1], 4 decimales. */
+  factor: number;
+  /** Tramos activos que voló este avión. */
+  tramos: number;
+  /** Parte de la venta del avión (USD, centavos por residuo mayor). */
+  venta_usd: number;
 }
 
 // ===== Balance por avión (réplica sistematizada del Excel "Balance N990GG") =====
@@ -290,7 +368,10 @@ export interface ReporteVueloPayload {
 
 export interface BalanceAvionCobroPayload {
   fecha: string | null;
-  /** Monto REAL de la parcialidad en MXN (null = USD sin TC: no convertible). */
+  /** Monto REAL de la parcialidad en MXN (null = USD sin TC: no convertible).
+   *  MULTI-AVIÓN: la parte de ESTA FILA (`parteFilaDeCobro`: parte del
+   *  avión por tramo + la parte VuelaTour en la fila que reporta; Σ entre
+   *  libros == el depósito). */
   monto_mxn: number | null;
   metodo?: string | null;
   /**
@@ -313,6 +394,12 @@ export interface BalanceAvionVueloPayload {
   orden_ts?: string | null;
   /** Columna CLAVE del libro: "#<folio> · <cliente>". */
   clave: string;
+  /**
+   * Id del vuelo (28-ago): el consolidado de flota deduplica con él el
+   * conteo de VUELOS del RESUMEN (un multi-avión es una fila por libro).
+   * Solo interno — pyservices no lo pinta.
+   */
+  vuelo_id?: string;
   folio: string;
   cliente: string | null;
   estado: string;
@@ -323,6 +410,13 @@ export interface BalanceAvionVueloPayload {
    * total_cotizacion_* viaja solo informativo. pyservices puede rotularla.
    */
   cancelado?: boolean;
+  /**
+   * true (28-ago) = vuelo AJENO cuyo único tramo de este avión se CANCELÓ y
+   * que entra al libro solo por los gastos ligados a ese tramo (factor 0:
+   * sin venta, cobros ni horas; la ruta dice "TRAMO CANCELADO (solo
+   * gastos)"). Solo informativo para pyservices.
+   */
+  solo_gastos_tramo_cancelado?: boolean;
   /**
    * Vuelo cubierto por un operador AJENO. Con avión de referencia vive en
    * el libro de ese avión; sin avión, en el libro EXTERNOS del general
@@ -342,12 +436,30 @@ export interface BalanceAvionVueloPayload {
   tarifa_usd: number | null;
   iva_hr_usd: number | null;
   /**
-   * VENTA DEL AVIÓN (regla 28-ago): tiempo + ajuste + comisión vendedor +
-   * IVA proporcional (particionIngresoVuelo). TUAS/extras/pernocta y su IVA
-   * quedan FUERA (otros_ingresos_usd). Sin cotización: horas × tarifa.
-   * CANCELADO: lo realmente cobrado (cobrosEnUsd), sin partición.
+   * VENTA DEL AVIÓN (regla 28-ago): tiempo + ajuste + IVA proporcional
+   * (particionIngresoVuelo). TUAS/extras/pernocta/comisión del vendedor y
+   * su IVA quedan FUERA (otros_ingresos_usd). Sin cotización: horas ×
+   * tarifa. CANCELADO: lo realmente cobrado (cobrosEnUsd), sin partición.
+   * MULTI-AVIÓN (regla B, 28-ago tarde): la PARTE de este avión
+   * (`participacion`; Σ partes entre libros == venta del vuelo exacta).
    */
   total_usd: number | null;
+  /**
+   * Fracción de este avión en la venta del vuelo (regla B): 1 en vuelos de
+   * un solo avión; en multi-avión la parte por tramo (horas cobradas,
+   * venta, IVA, cobros y por cobrar de la fila ya vienen repartidos).
+   */
+  participacion?: number;
+  /** true = vuelo con tramos en más de un avión (la ruta dice el %). */
+  multi_avion?: boolean;
+  /**
+   * Peso del reparto: 'tramos' = partes iguales por tramo VENDIDO (regla
+   * literal del cliente, 28-ago: ida/regreso mitad y mitad; los tramos
+   * operativos/ferry no venden), 'unico' = un solo avión. 'tacos' y
+   * 'cotizacion' quedan reservados en el tipo: participacionPorAeronave ya
+   * no los emite (nunca horas, ni reales ni cotizadas).
+   */
+  participacion_fuente?: 'tacos' | 'cotizacion' | 'tramos' | 'unico';
   /** IVA de la venta del avión (proporcional). */
   iva_usd: number | null;
   tc_venta: number | null;
@@ -365,8 +477,15 @@ export interface BalanceAvionVueloPayload {
   /** TUA pagado del vuelo (categoría TUAS + parte embebida), MXN. SOLO
    *  informativo (regla 7, 28-ago): no suma en OP ni en ninguna hoja. null si 0. */
   tua_pagado_mxn?: number | null;
-  /** true = TC no capturado en la cotización: se usó el oficial (Banxico FIX) del día de la cotización. */
+  /** true = TC no capturado en la cotización: se usó el TC oficial de
+   *  referencia (open.er-api / BCE) del día de la cotización. */
   tc_venta_oficial?: boolean;
+  /** Fuente legible del TC oficial de la fila (solo con tc_venta_oficial):
+   *  "open.er-api" / "BCE (frankfurter)" / "Banxico FIX (histórico)". */
+  tc_venta_oficial_fuente?: string;
+  /** Día real del dato del TC oficial (YYYY-MM-DD; ≤ día de la cotización
+   *  en fines de semana/festivos). Solo con tc_venta_oficial. */
+  tc_venta_oficial_fecha?: string;
   total_mxn: number | null;
   iva_mxn: number | null;
   subtotal_mxn: number | null;
@@ -407,9 +526,12 @@ export interface BalanceAvionVueloPayload {
   costo_usd_siva: number | null;
   iva_pagado_usd: number | null;
   iva_pagado_mxn: number | null;
-  /** null en fila COMPARTIDA (multi-avión): la venta vive en otro balance. */
+  /** null solo en una fila COMPARTIDA sin participación en la venta. */
   remanente_mxn: number | null;
   dif_iva_mxn: number | null;
+  /** SIEMPRE null (regla A, 28-ago tarde): la comisión del vendedor ya no
+   *  es costo del avión — vive en "Otros movimientos" del general. Campo
+   *  conservado por compatibilidad de shape. */
   comision_vendedor_mxn: number | null;
   ganancia_mxn: number | null;
   ganancia_usd: number | null;
@@ -418,11 +540,20 @@ export interface BalanceAvionVueloPayload {
   // Bloque STATUS DE COBROS
   status_cobro: string;
   cobros: BalanceAvionCobroPayload[];
-  /** Lo cobrado que cuenta para el AVIÓN = cobrado_real_mxn × venta_factor. */
+  /** Lo cobrado que cuenta para el AVIÓN (cobrosEnUsd → cobradoParteAvion
+   *  → parte multi-avión → × TC de venta). */
   cobrado_mxn: number;
-  /** Σ parcialidades REALES en MXN (sin prorratear). */
+  /** Σ parcialidades REALES en MXN (sin prorratear entre avión/VuelaTour);
+   *  en multi-avión, la parte de ESTA FILA del MXN real del vuelo
+   *  (`parteFilaDeCobro`: parte del avión por tramo + la parte VuelaTour en
+   *  la fila que reporta; una sola partición; las líneas de `cobros` suman
+   *  exactamente esto). Difiere de cobrado_mxn en filas repartidas (caminos
+   *  USD vs MXN distintos a propósito; la fila que reporta lleva además lo
+   *  cobrado de VuelaTour). */
   cobrado_real_mxn?: number | null;
-  /** total_mxn − cobrado_mxn (venta del avión pendiente). */
+  /** total_mxn − cobrado_mxn TAL CUAL (semántica del libro): NEGATIVO =
+   *  sobrecobro o cobros en un vuelo sin TC/sin precio — se muestra, no se
+   *  topa en 0. */
   por_cobrar_mxn: number;
   por_cobrar_usd: number | null;
 }
@@ -535,9 +666,10 @@ export interface BalanceGeneralResumenFilaPayload {
   costo_mxn: number | null;
   /** "Gasto de combustible" del mes (hoja combustible del avión). */
   combustible_mxn?: number | null;
-  /** Comisiones de vendedor del periodo (la ganancia ya las netea). */
+  /** SIEMPRE 0 (regla A, 28-ago tarde): la comisión del vendedor ya no es
+   *  costo del avión. Campo conservado por compatibilidad de shape. */
   comisiones_mxn?: number | null;
-  /** VENTA − COSTO − COMBUSTIBLE − COMISIONES = GANANCIA (leyenda impresa). */
+  /** VENTA − COSTO − COMBUSTIBLE = GANANCIA (leyenda impresa). */
   ganancia_mxn: number | null;
   cobrado_mxn: number | null;
   por_cobrar_mxn: number | null;
@@ -695,6 +827,33 @@ export interface ParseCombustibleResult {
   filas: FilaCombustibleCruda[];
 }
 
+// ===== Alta masiva de inventario (plantilla Excel + parseo del archivo) =====
+
+export interface PlantillaInventarioPayload {
+  /** Categorías ya usadas en bodega (lista desplegable). */
+  categorias: string[];
+  /** Unidades de medida sugeridas (pieza, botella, litro…). */
+  unidades: string[];
+  monedas: string[];
+}
+
+/**
+ * Fila CRUDA del Excel de inventario leída por pyservices (sin validación de
+ * negocio: el API valida todo en inventory/inventario-masivo). Claves
+ * snake_case de las columnas de la plantilla: nombre, marca, categoria,
+ * numero_parte, codigo, unidad, descripcion, ubicacion, stock_minimo,
+ * existencia_inicial, costo_unitario, moneda, tipo_cambio, empaque_nombre,
+ * empaque_factor, empaque_codigo, notas — el API tolera alias.
+ */
+export interface FilaInventarioCruda {
+  fila: number;
+  [columna: string]: string | number | boolean | null | undefined;
+}
+
+export interface ParseInventarioResult {
+  filas: FilaInventarioCruda[];
+}
+
 export interface FacturaRecibidaParsed {
   uuid_fiscal: string | null;
   emisor_rfc: string | null;
@@ -796,6 +955,27 @@ export class PyservicesService {
       '/gastos/parse-combustible',
       { archivo_base64: archivoBase64, filename },
     );
+  }
+
+  /** Plantilla Excel del alta masiva de inventario (categorías → listas). */
+  async generarPlantillaInventario(
+    payload: PlantillaInventarioPayload,
+  ): Promise<Buffer> {
+    return this.postForBuffer('/inventario/plantilla', payload);
+  }
+
+  /**
+   * Parsea el Excel/CSV del alta masiva de inventario. Devuelve filas CRUDAS:
+   * la validación de negocio vive en el API (inventory/inventario-masivo).
+   */
+  async parseInventario(
+    archivoBase64: string,
+    filename: string,
+  ): Promise<ParseInventarioResult> {
+    return this.postForJson<ParseInventarioResult>('/inventario/parse', {
+      archivo_base64: archivoBase64,
+      filename,
+    });
   }
 
   /** Parsea un CFDI recibido (XML de proveedor) y devuelve sus datos. */

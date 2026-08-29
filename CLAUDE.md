@@ -122,6 +122,25 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    Cancún (`assertOwnSameDay`). Squawk severidad ALTA sin resolver bloquea
    asignar el avión.
 
+10. **Partición del ingreso y participación por avión — fuentes únicas.**
+    `particionIngresoVuelo` (`src/common/ingreso-vuelo.util.ts`): venta del
+    AVIÓN = tiempo + ajuste + su IVA; TUAS, extras, pernocta y la COMISIÓN
+    DEL VENDEDOR (+ su IVA) son ingreso de VuelaTour (regla 28-ago-2026):
+    los libros por avión (balance, reparto, Libro Dinero) ni la cobran ni la
+    descuentan; vive en "Otros movimientos"/"otros ingresos" como ingreso +
+    egreso apareado (provisión del pago al vendedor). En vuelos
+    MULTI-AVIÓN (tramos en aviones distintos) la venta del avión y lo que
+    deriva de ella se REPARTE con `participacionPorAeronave` +
+    `repartirUsd` (`src/common/participacion-aeronave.util.ts`: PARTES
+    IGUALES POR TRAMO VENDIDO — nunca horas, ni cotizadas ni tacos; los
+    tramos operativos/ferry no reparten; centavos por residuo mayor). La
+    parte de VuelaTour y los avisos del vuelo los reporta UNA vez
+    `avionQueReporta`. Los gastos NO se reparten: van al avión del tramo
+    (`avionDelGasto`: escala → gasto → vuelo, y `expenses.service` sella el
+    avión del tramo al capturar). El pago al vendedor es `pagoVendedorUsd`
+    (comisión + su IVA) en todos los lectores. Ningún lector recalcula estas
+    particiones a mano.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -158,11 +177,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Candado de cobro anticipado (origen ≠ CUN), regla TUAS por tramo, monto de
   pernocta al piloto, costo de PILOTO como categoría del reparto (doc 4.8) —
   esperan reunión con el cliente.
-- **Multi-avión en el PRECIO** (viaje multi-día con tramos de aviones
-  distintos): hoy se cotiza con el avión principal (una tarifa/velocidad;
-  TUAS por su matrícula) y el reparto atribuye el 100% del ingreso a
-  `vuelo.aeronave_id` aunque las horas van por tramo. Tarifa por tramo +
-  prorrateo del ingreso requieren decisión del cliente.
+- **Multi-avión en el PRECIO**: el precio sigue cotizándose con el avión
+  principal (una tarifa/velocidad; TUAS por su matrícula) — tarifa por
+  tramo sigue pendiente. El REPARTO del ingreso entre aviones YA está
+  decidido (28-ago-2026): ver invariante 10.
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.

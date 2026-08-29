@@ -5,16 +5,21 @@
  * El precio que paga el cliente (`vuelo.monto_total_usd`) tiene dos dueños:
  *
  *   • VENTA DEL AVIÓN  = tiempo de vuelo (tarifa × horas cobradas) + ajuste /
- *     descuento + comisión del vendedor + el IVA proporcional de esas tres
- *     partes. Es lo que entra al balance por avión y al reparto de dueños.
- *     (La comisión del vendedor conserva su tratamiento del 23-jul: viaja
- *     dentro de la venta y cada lector la descuenta como costo — neto del
- *     avión = precio base.)
+ *     descuento + el IVA proporcional de esas dos partes. Es lo que entra al
+ *     balance por avión y al reparto de dueños.
  *
- *   • INGRESO DE VUELATOUR = TUAS + extras + viáticos de pernocta cobrados +
- *     su IVA (+ los centavos de redondeo). NO es venta del avión: vive solo en
- *     la pestaña "Otros movimientos" del Balance general, apareado con lo que
- *     se pagó (TUA al aeropuerto, hotel, comisión BillPocket…).
+ *   • INGRESO DE VUELATOUR = TUAS + extras + viáticos de pernocta + COMISIÓN
+ *     DEL VENDEDOR cobrados + su IVA (+ los centavos de redondeo). NO es
+ *     venta del avión: vive solo en la pestaña "Otros movimientos" del
+ *     Balance general, apareado con lo que se pagó (TUA al aeropuerto,
+ *     hotel, comisión BillPocket, pago al vendedor…).
+ *
+ *   Regla del cliente 28-ago-2026 (tarde): la comisión del vendedor "se
+ *   considera también como un extra" — el cliente la paga sumada al precio
+ *   (regla 23-jul) y VuelaTour se la paga al vendedor; el avión ni la cobra
+ *   ni la descuenta. Antes viajaba dentro de la venta del avión y cada
+ *   lector la restaba como costo (AK del balance, comisiones del reparto):
+ *   ese costo desaparece de los libros por avión junto con el ingreso.
  *
  * Disciplina v1.3: el avión se calcula con las líneas del desglose canónico
  * (`calculo_snapshot.desglose`) y la parte de VuelaTour se CIERRA POR
@@ -43,13 +48,18 @@ export interface VueloIngresoInput {
 export interface ParticionIngreso {
   /** Total cobrado al cliente (= `monto_total_usd`, redondeado a centavos). */
   total_usd: number;
-  /** Venta del AVIÓN: tiempo + ajuste + comisión vendedor + IVA proporcional. */
+  /** Venta del AVIÓN: tiempo + ajuste + IVA proporcional. */
   avion_usd: number;
-  /** Ingreso de VUELATOUR: TUAS + extras + pernocta + su IVA (+ residuo). */
+  /** Ingreso de VUELATOUR: TUAS + extras + pernocta + comisión del vendedor + su IVA (+ residuo). */
   vuelatour_usd: number;
   iva_total_usd: number;
   iva_avion_usd: number;
   iva_vuelatour_usd: number;
+  /**
+   * Fracción de IVA con la que se cotizó (0.16) — 0 si la cotización no
+   * grava. La usa `pagoVendedorUsd` para la provisión del pago al vendedor.
+   */
+  iva_frac: number;
   /** Componentes PRE-IVA (informativos, ya redondeados). */
   tiempo_usd: number;
   ajuste_usd: number;
@@ -135,6 +145,7 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
     iva_total_usd: 0,
     iva_avion_usd: 0,
     iva_vuelatour_usd: 0,
+    iva_frac: 0,
     tiempo_usd: 0,
     ajuste_usd: 0,
     comision_vendedor_usd: 0,
@@ -160,6 +171,7 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
   let pernocta: number;
   let fuente: ParticionIngreso['fuente'];
   let inconsistente = false;
+  let ivaFrac = 0;
 
   if (snap.lineas) {
     const suma = (clave: string) =>
@@ -197,11 +209,13 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
     // automático a $10 o delta al precio pactado) que NO están en la base, y
     // el meta no siempre las separa (pactado → redondeo_auto_usd null). Por
     // eso la parte gravable del avión se DERIVA de la base: base − TUAS −
-    // extras gravados == tiempo + comisión + ajuste pre-IVA, sin depender del
-    // meta. Sin base (snapshot viejo) cae a tiempo + comisión + (ajuste −
-    // redondeo automático).
+    // extras gravados − comisión == tiempo + ajuste pre-IVA, sin depender
+    // del meta. Sin base (snapshot viejo) cae a tiempo + (ajuste − redondeo
+    // automático). La comisión del vendedor grava, pero su IVA es de
+    // VuelaTour (regla 28-ago tarde).
     if (ivaTotal > 0) {
       const ivaPct = snap.ivaPct ?? ivaFraccion(v.iva_pct) ?? 0.16;
+      ivaFrac = ivaPct;
       let prop: number;
       if (snap.baseIva != null && snap.baseIva > 0) {
         const extrasGravados = round2(
@@ -217,11 +231,13 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
             0,
           ),
         );
-        const gravableAvion = round2(snap.baseIva - tuas - extrasGravados);
+        const gravableAvion = round2(
+          snap.baseIva - tuas - extrasGravados - comision,
+        );
         prop = round2(ivaTotal * (gravableAvion / snap.baseIva));
       } else {
         const gravableAvion = round2(
-          tiempo + comision + round2(ajuste - snap.redondeoAuto),
+          tiempo + round2(ajuste - snap.redondeoAuto),
         );
         prop = round2(gravableAvion * ivaPct);
       }
@@ -250,17 +266,19 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
     }
     if (ivaTotal > 0) {
       const ivaPct = ivaFraccion(v.iva_pct) ?? 0.16;
+      ivaFrac = ivaPct;
       ivaAvion = Math.min(
         ivaTotal,
-        Math.max(0, round2((tiempo + ajuste + comision) * ivaPct)),
+        Math.max(0, round2((tiempo + ajuste) * ivaPct)),
       );
     } else {
       ivaAvion = 0;
     }
   }
 
-  let avion = round2(tiempo + ajuste + comision + ivaAvion);
-  // Cierre por diferencia: TUAS + extras + pernocta + su IVA + centavos.
+  let avion = round2(tiempo + ajuste + ivaAvion);
+  // Cierre por diferencia: TUAS + extras + pernocta + comisión del vendedor
+  // + su IVA + centavos.
   let vuelatour = round2(total - avion);
   if (inconsistente || vuelatour < -0.005 || avion < 0) {
     // Nunca inventar dinero: si la partición no cierra, el total completo
@@ -279,6 +297,7 @@ export function particionIngresoVuelo(v: VueloIngresoInput): ParticionIngreso {
     iva_total_usd: ivaTotal,
     iva_avion_usd: ivaAvion,
     iva_vuelatour_usd: ivaVuelatour,
+    iva_frac: ivaFrac,
     tiempo_usd: tiempo,
     ajuste_usd: ajuste,
     comision_vendedor_usd: comision,
@@ -320,4 +339,36 @@ export function cobradoParteVuelatour(
   p: ParticionIngreso,
 ): number {
   return round2(cobradoUsd - cobradoParteAvion(cobradoUsd, p));
+}
+
+/**
+ * PAGO AL VENDEDOR — única fuente (verificación 28-ago: Otros movimientos y
+ * el Libro Dinero provisionaban comisión + IVA mientras el reporte por vuelo
+ * y `meta.neto_vuelatour_usd` restaban solo la comisión pre-IVA).
+ *
+ * Regla: el cliente paga la comisión SUMADA al precio y, cuando la
+ * cotización grava, también su IVA; VuelaTour le paga al vendedor la
+ * comisión con ese IVA (el vendedor factura) — neto de VuelaTour = precio
+ * base con su IVA. Si el cliente decide que el vendedor cobra sin IVA,
+ * cambiar SOLO `PAGO_VENDEDOR_CON_IVA`.
+ */
+export const PAGO_VENDEDOR_CON_IVA = true;
+
+/** IVA que grava la comisión del vendedor (0 si la cotización no lleva IVA). */
+export function ivaComisionVendedorUsd(p: ParticionIngreso): number {
+  if (p.comision_vendedor_usd <= 0 || p.iva_total_usd <= 0 || p.iva_frac <= 0)
+    return 0;
+  return Math.min(
+    p.iva_vuelatour_usd,
+    round2(p.comision_vendedor_usd * p.iva_frac),
+  );
+}
+
+/** Lo que VuelaTour paga al vendedor por este vuelo (USD). 0 sin comisión. */
+export function pagoVendedorUsd(p: ParticionIngreso): number {
+  if (p.comision_vendedor_usd <= 0) return 0;
+  return round2(
+    p.comision_vendedor_usd +
+      (PAGO_VENDEDOR_CON_IVA ? ivaComisionVendedorUsd(p) : 0),
+  );
 }

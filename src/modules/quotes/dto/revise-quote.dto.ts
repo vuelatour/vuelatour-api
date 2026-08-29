@@ -3,10 +3,13 @@ import { Type } from 'class-transformer';
 import {
   IsArray,
   IsDate,
+  IsNumber,
   IsOptional,
   IsString,
   MaxLength,
+  Min,
   MinLength,
+  ValidateIf,
 } from 'class-validator';
 import { CalculateQuoteDto } from './calculate-quote.dto';
 
@@ -37,6 +40,30 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   @Type(() => Date)
   @IsDate()
   fecha_traslado_final?: Date;
+
+  // ---- Vuelo cubierto por operador externo (regla 28-ago): al revisar se
+  // editan aquí mismo el operador y lo que cobra el avión externo (costo,
+  // interno — distinto del precio pactado con el cliente). Solo aplican si
+  // el vuelo ya es externo; en un vuelo propio se ignoran.
+  @ApiPropertyOptional({
+    description: 'Operador externo que cubre el vuelo (solo vuelos externos).',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  operador_externo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Lo que cobra el avión/operador externo (USD, interno). null o 0 = sin costo capturado.',
+    nullable: true,
+  })
+  @ValidateIf((_, v) => v !== undefined && v !== null)
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_usd?: number | null;
 
   @ApiPropertyOptional({
     type: [String],

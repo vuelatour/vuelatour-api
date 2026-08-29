@@ -42,6 +42,17 @@ import type { CreateCobroDto, UpdateCobroDto } from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 import {
+  participacionAvionesItems,
+  participacionPorAeronave,
+  type EscalaParticipacionInput,
+  type FuenteParticipacion,
+  type ParticipacionAvionItem,
+} from '../../common/participacion-aeronave.util';
+import {
+  particionIngresoVuelo,
+  type VueloIngresoInput,
+} from '../../common/ingreso-vuelo.util';
+import {
   CORRECCION_BAJA_PREFIX,
   PROCEDENCIA_PREFIX,
   agregarProcedencia,
@@ -53,6 +64,14 @@ import {
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+
+/**
+ * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
+ * y del detalle de cotización; regla B 28-ago). Tipo y mapper viven en la
+ * fuente única `participacion-aeronave.util` (mismo contrato que antes; se
+ * re-exporta por compatibilidad).
+ */
+export type { ParticipacionAvionItem };
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -1460,6 +1479,7 @@ export class FlightsService {
       apoyoNombre,
       pilotoNombre,
       copilotoNombre,
+      snapRow,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -1476,6 +1496,18 @@ export class FlightsService {
       // decía "Sin asignar" aunque el piloto sí estuviera asignado (#120).
       this.nombreUsuario(pilotoId),
       this.nombreUsuario(copilotoId),
+      // calculo_snapshot NO va en VUELO_COLS (jsonb pesado para listados):
+      // aquí alimenta, junto con las columnas de precio, la partición de la
+      // venta del avión por participante (regla B 28-ago,
+      // `particionIngresoVuelo` rama desglose / columnas).
+      this.supabase.service
+        .from('vuelo')
+        .select(
+          'calculo_snapshot, monto_total_usd, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd',
+        )
+        .eq('id', id)
+        .maybeSingle()
+        .then((r) => r.data),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -1502,9 +1534,22 @@ export class FlightsService {
       (vuelo as { copiloto_id?: string | null }).copiloto_id !==
         current.userId &&
       !escalasEnriquecidas.some((e) => e.piloto_id === current.userId);
+    // Participación por avión (regla B 28-ago): con tramos en aviones
+    // distintos, la venta del avión se reparte entre ellos; aquí solo se
+    // EXPONE (app/panel lo etiquetan). Se pasan TODAS las escalas — la
+    // fuente única excluye las canceladas. Sin avión → [].
+    const participacion = await this.participacionAvionesDe(
+      {
+        ...((snapRow ?? {}) as VueloIngresoInput),
+        aeronave_id: aeronaveId,
+        calculo_snapshot: snapRow?.calculo_snapshot,
+      },
+      escalas,
+    );
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
+      ...participacion,
       piloto_nombre: pilotoNombre,
       copiloto_nombre: copilotoNombre,
       apoyo_nombre: apoyoNombre,
@@ -1516,6 +1561,58 @@ export class FlightsService {
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
       cobros_sin_tc_count: conv.sin_tc_count,
       cobros_sin_tc_mxn: conv.sin_tc_mxn,
+    };
+  }
+
+  /**
+   * Participación por AVIÓN del vuelo (regla B 28-ago, fuente única
+   * `participacionPorAeronave`): en un vuelo multi-avión la venta del avión
+   * se reparte entre los aviones de sus tramos; aquí solo se EXPONE para
+   * app/panel (etiqueta "· 50 % (tramos también en N4142R)"). Un solo avión
+   * → un elemento con factor 1; sin avión → []. Matrículas en UNA consulta.
+   * `venta_avion_usd` = parte de la venta del avión (`repartirUsd` sobre
+   * `particionIngresoVuelo(v).avion_usd`; null sin precio). `horas` queda
+   * siempre null (el peso es por tramos vendidos, nunca por horas).
+   * Espejo del helper homónimo de quotes.service (detalle de cotización).
+   */
+  private async participacionAvionesDe(
+    vuelo: {
+      aeronave_id?: string | null;
+      calculo_snapshot?: unknown;
+    } & VueloIngresoInput,
+    escalas: EscalaParticipacionInput[],
+  ): Promise<{
+    participacion_aviones: ParticipacionAvionItem[];
+    participacion_fuente: FuenteParticipacion;
+  }> {
+    const p = participacionPorAeronave(
+      {
+        aeronave_id: vuelo.aeronave_id ?? null,
+        calculo_snapshot: vuelo.calculo_snapshot,
+      },
+      escalas,
+    );
+    const particion = particionIngresoVuelo(vuelo);
+    const ids = [...p.factores.keys()];
+    const matriculaPorId = new Map<string, string>();
+    if (ids.length > 0) {
+      const { data } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula')
+        .in('id', ids);
+      for (const a of data ?? []) {
+        matriculaPorId.set(a.id as string, a.matricula as string);
+      }
+    }
+    return {
+      // Mapper único (fuente única): principal primero, venta del avión
+      // repartida al centavo, horas siempre null.
+      participacion_aviones: participacionAvionesItems(
+        p,
+        particion.total_usd > 0 ? particion.avion_usd : null,
+        matriculaPorId,
+      ),
+      participacion_fuente: p.fuente,
     };
   }
 
@@ -7382,10 +7479,12 @@ export class FlightsService {
     // REGLA (cliente, 28-ago-2026): un vuelo CANCELADO puede tener cobros
     // reales — cargo por cancelación o anticipo retenido que NO se reembolsa.
     // La oficina (ADMIN/COORDINADOR/FACTURACION) SÍ los registra aquí y ese
-    // dinero entra al 100 % como venta del avión en el reparto y en el Libro
-    // Dinero (profit-sharing / dinero-report). El PILOTO en campo no: si se
-    // canceló, ya no hay cobro de campo que hacer. Un cobro que luego se
-    // reembolsa se corrige/elimina (updateCobro/deleteCobro), no se deja.
+    // dinero entra como venta del avión en el reparto y en el Libro Dinero
+    // (profit-sharing / dinero-report) — repartido entre los aviones de sus
+    // tramos si hubo más de uno (regla B 28-ago) y sin comisión del vendedor
+    // (en cancelados no aplica). El PILOTO en campo no: si se canceló, ya no
+    // hay cobro de campo que hacer. Un cobro que luego se reembolsa se
+    // corrige/elimina (updateCobro/deleteCobro), no se deja.
     if (vuelo.estado === 'CANCELADO' && rol === Rol.PILOTO) {
       throw new ConflictException(
         'El vuelo está CANCELADO; los cargos por cancelación los registra la oficina.',

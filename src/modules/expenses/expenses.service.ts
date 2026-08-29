@@ -32,6 +32,27 @@ import type {
 const COLS =
   'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, created_at, updated_at';
 
+/**
+ * Prefijo del aviso ⚠ "avión del gasto ≠ avión del tramo" que se anexa a
+ * `notas` (ver `avisoAvionDistintoAlTramo`). Es la clave para RETIRAR el
+ * aviso anterior al recalcularlo (nunca se apilan dos, ni queda uno viejo
+ * cuando el tramo cambió o se limpió).
+ */
+const AVISO_AVION_TRAMO_PREFIX = '⚠ el gasto se asignó a ';
+
+/** Notas sin ninguna línea de aviso avión≠tramo (null si no queda nada). */
+function quitarAvisoAvionTramo(
+  notas: string | null | undefined,
+): string | null {
+  if (!notas) return null;
+  const limpias = notas
+    .split('\n')
+    .filter((l) => !l.trim().startsWith(AVISO_AVION_TRAMO_PREFIX))
+    .join('\n')
+    .replace(/\n+$/, '');
+  return limpias.trim() ? limpias : null;
+}
+
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
 // capturó y folio del vuelo (para linkear al detalle). `compra` = la compra
 // de refacciones de la que este gasto es un PAGO (28-ago): el equipo la ve
@@ -54,6 +75,18 @@ function normalizarFolio(folio: string | null | undefined): string | null {
 /** Largo mínimo del folio normalizado para el candado duro (los cortos son
  *  demasiado genéricos para rechazar; solo llevan el flag blando). */
 const FOLIO_CANDADO_MIN = 4;
+
+/** Tramo al que se enlaza un gasto, con su avión YA resuelto con herencia
+ *  (`escala.aeronave_id ?? vuelo.aeronave_id`) — regla B 28-ago-2026. */
+interface TramoGastoRef {
+  escala_id: string;
+  vuelo_id: string;
+  /** Avión que voló el tramo (herencia aplicada); null si el vuelo no tiene. */
+  aeronave_id: string | null;
+  matricula: string | null;
+  /** Etiqueta "CUN→MID" para mensajes. */
+  tramo: string;
+}
 
 @Injectable()
 export class ExpensesService {
@@ -774,6 +807,9 @@ export class ExpensesService {
           medio_pago: item.medio_pago ?? 'TRANSFERENCIA',
           vuelo_id: esc.vuelo_id,
           escala_id: esc.id,
+          // Avión del TRAMO con herencia (regla B 28-ago, misma prioridad
+          // que create()/`avionDelGasto`): la pista la pagó el avión que
+          // aterrizó, no el principal del vuelo.
           aeronave_id:
             (esc.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null,
           proveedor_id: item.proveedor_id ?? prov?.id ?? null,
@@ -896,6 +932,26 @@ export class ExpensesService {
     return data;
   }
 
+  /**
+   * Alta de un gasto (app y panel; la carga masiva de combustibles también
+   * pasa por aquí).
+   *
+   * AVIÓN DEL GASTO — regla del cliente 28-ago-2026 (vuelos multi-avión):
+   * "los gastos van al avión que realizó el tramo al que están enlazados".
+   * `gasto.aeronave_id` se sella con esta prioridad, la MISMA que leen
+   * balance/reparto/Libro Dinero vía `avionDelGasto`
+   * (`common/participacion-aeronave.util`):
+   *   1. avión explícito del DTO (se respeta; si difiere del avión del tramo
+   *      se deja aviso ⚠ en notas, sin bloquear — los lectores cuentan el
+   *      gasto al avión del TRAMO);
+   *   2. avión del TRAMO (`escala.aeronave_id ?? vuelo.aeronave_id`, herencia
+   *      de todo el sistema) cuando el gasto trae `escala_id`;
+   *   3. avión del VUELO cuando solo trae `vuelo_id`.
+   * Un `escala_id` sin `vuelo_id` sella también el vuelo del tramo; un
+   * tramo de OTRO vuelo se rechaza. Los demás caminos que sellan avión desde
+   * un vuelo (`generarPistas`, `update` al ligar vuelo/tramo) aplican la
+   * misma herencia por tramo.
+   */
   async create(
     dto: CreateGastoDto,
     userId: string,
@@ -933,6 +989,20 @@ export class ExpensesService {
     // atrás, invisible en el panel. En vez de guardar en silencio, se rechaza
     // con el dato a la vista para que corrijan el año en la app.
     this.assertFechaRazonable(dto.fecha_gasto, rol);
+    // REGLA B (28-ago): un gasto enlazado a un TRAMO pertenece al avión de
+    // ese tramo. Se resuelve UNA vez aquí (vuelo del tramo + avión con
+    // herencia) y de aquí salen la herencia y el aviso de discrepancia.
+    // Antes que los candados de categoría: un tramo implica vuelo.
+    let tramoRef: TramoGastoRef | null = null;
+    if (dto.escala_id) {
+      tramoRef = await this.resolverTramoGasto(dto.escala_id);
+      if (dto.vuelo_id && dto.vuelo_id !== tramoRef.vuelo_id) {
+        throw new BadRequestException(
+          `El tramo ${tramoRef.tramo} no pertenece al vuelo seleccionado: corrige el vuelo o la escala.`,
+        );
+      }
+      dto.vuelo_id = tramoRef.vuelo_id;
+    }
     // Un gasto INDIRECTO es de la operación, NO de un vuelo: ligarlo a uno lo
     // metería al reporte/reparto de ese vuelo y contaminaría sus números.
     if (dto.categoria === CategoriaGasto.INDIRECTO && dto.vuelo_id) {
@@ -1036,26 +1106,44 @@ export class ExpensesService {
       }
       capturaId = vuelo.piloto_id as string;
       origen = 'PILOTO';
-      // La aeronave del vuelo (si no se envió) para que el costo caiga en ella.
+      // El avión del tramo (o del vuelo) si no se envió, para que el costo
+      // caiga en él.
       aeronaveId =
-        dto.aeronave_id ?? (vuelo.aeronave_id as string | null) ?? undefined;
+        dto.aeronave_id ??
+        tramoRef?.aeronave_id ??
+        (vuelo.aeronave_id as string | null) ??
+        undefined;
     }
-    // Herencia vuelo→avión al ESCRIBIR (misma regla que la lectura del
-    // balance): el dinero de un gasto ligado a un vuelo pertenece al avión de
-    // ese vuelo. Sin esto, el reparto (que filtra por aeronave_id CRUDO) no lo
+    // Herencia tramo/vuelo→avión al ESCRIBIR (misma regla que la lectura del
+    // balance, `avionDelGasto`): el dinero de un gasto ligado a un tramo
+    // pertenece al avión que VOLÓ ese tramo (`escala.aeronave_id ??
+    // vuelo.aeronave_id`, regla B 28-ago); con solo vuelo, al avión del
+    // vuelo. Sin esto, el reparto (que filtra por aeronave_id CRUDO) no lo
     // veía — un gasto con vuelo pero sin avión era invisible para los socios.
     // A PROPÓSITO no hay candado por estado del vuelo (ni aquí ni en
     // update()): un vuelo CANCELADO acepta gastos — incluido GAS — porque
     // el avión pudo volar a recoger y regresar ferry (regla del cliente
     // 28-ago-2026); esos gastos cuentan en balance y reparto.
     if (!aeronaveId && dto.vuelo_id) {
-      const { data: vueloRef } = await this.supabase.service
-        .from('vuelo')
-        .select('aeronave_id')
-        .eq('id', dto.vuelo_id)
-        .maybeSingle();
-      aeronaveId = (vueloRef?.aeronave_id as string | null) ?? undefined;
+      if (tramoRef) {
+        aeronaveId = tramoRef.aeronave_id ?? undefined;
+      } else {
+        const { data: vueloRef } = await this.supabase.service
+          .from('vuelo')
+          .select('aeronave_id')
+          .eq('id', dto.vuelo_id)
+          .maybeSingle();
+        aeronaveId = (vueloRef?.aeronave_id as string | null) ?? undefined;
+      }
     }
+    // Avión EXPLÍCITO distinto al del tramo: se respeta lo que mandó el
+    // usuario (puede ser deliberado), pero queda aviso — balance, reparto y
+    // Libro Dinero cuentan el gasto al avión del TRAMO (`avionDelGasto`).
+    const avisoTramo = await this.avisoAvionDistintoAlTramo(
+      dto.aeronave_id,
+      tramoRef,
+    );
+    if (avisoTramo) notas = notas ? `${notas}\n${avisoTramo}` : avisoTramo;
     // El combustible se controla POR AVIÓN (gasto mensual del avión en el
     // balance): una carga sin avión sería invisible para balance y reparto.
     if (dto.categoria === CategoriaGasto.GAS && !aeronaveId) {
@@ -1093,8 +1181,9 @@ export class ExpensesService {
 
     // VALIDACIÓN DE MATRÍCULA (26-ago, caso ASUR Mérida vuelo #105): si la
     // IA leyó una matrícula en el comprobante y NO es la del avión al que
-    // quedó el gasto (elegido o HEREDADO del vuelo — en cambios de avión a
-    // media jornada la herencia cuelga el gasto en el avión principal), se
+    // quedó el gasto (elegido o HEREDADO del tramo/vuelo — sin escala, en
+    // cambios de avión a media jornada la herencia cuelga el gasto en el
+    // avión principal; con escala ya cae en el avión del tramo), se
     // advierte de inmediato: ⚠ en notas + visto bueno pendiente + aviso a
     // oficina. No bloquea: el recibo puede traer una matrícula ajena real.
     let discrepanciaMatricula: string | null = null;
@@ -1528,6 +1617,73 @@ export class ExpensesService {
    * (misma regla que el índice único, que cubre la carrera). Los folios
    * cortos no bloquean: demasiado genéricos — solo llevan el flag blando.
    */
+  /**
+   * Resuelve el tramo (escala) al que se enlaza un gasto: vuelo dueño y avión
+   * CON HERENCIA (`escala.aeronave_id ?? vuelo.aeronave_id`, regla de todo
+   * el sistema). Es la misma resolución que `avionDelGasto` aplica al LEER
+   * (balance por avión, reparto, Libro Dinero): sellar aquí lo mismo evita
+   * que la lista/filtros del panel (aeronave_id crudo) digan otro avión.
+   */
+  private async resolverTramoGasto(escalaId: string): Promise<TramoGastoRef> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(aeronave_id, aeronave:aeronave!aeronave_id(matricula))',
+      )
+      .eq('id', escalaId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new BadRequestException(
+        'La escala (tramo) seleccionada no existe.',
+      );
+    }
+    const propia = data.aeronave as unknown as { matricula: string } | null;
+    const vuelo = data.vuelo as unknown as {
+      aeronave_id: string | null;
+      aeronave: { matricula: string } | null;
+    } | null;
+    const aeronaveId =
+      (data.aeronave_id as string | null) ?? vuelo?.aeronave_id ?? null;
+    return {
+      escala_id: data.id as string,
+      vuelo_id: data.vuelo_id as string,
+      aeronave_id: aeronaveId,
+      matricula: data.aeronave_id
+        ? (propia?.matricula ?? null)
+        : (vuelo?.aeronave?.matricula ?? null),
+      tramo: `${data.origen_iata as string}→${data.destino_iata as string}`,
+    };
+  }
+
+  /**
+   * Aviso ⚠ para notas cuando el usuario manda un avión EXPLÍCITO distinto
+   * al que voló el tramo del gasto. No bloquea (puede ser deliberado), pero
+   * deja claro que balance/reparto cuentan el gasto al avión del TRAMO
+   * (`avionDelGasto`). Null si no hay tramo, no hay avión explícito o
+   * coinciden.
+   */
+  private async avisoAvionDistintoAlTramo(
+    aeronaveIdExplicita: string | undefined,
+    tramo: TramoGastoRef | null,
+  ): Promise<string | null> {
+    if (
+      !aeronaveIdExplicita ||
+      !tramo?.aeronave_id ||
+      tramo.aeronave_id === aeronaveIdExplicita
+    ) {
+      return null;
+    }
+    const { data: elegida } = await this.supabase.service
+      .from('aeronave')
+      .select('matricula')
+      .eq('id', aeronaveIdExplicita)
+      .maybeSingle();
+    const matEleg = (elegida?.matricula as string | undefined) ?? 'otro avión';
+    const matTramo = tramo.matricula ?? 'otro avión';
+    return `${AVISO_AVION_TRAMO_PREFIX}${matEleg} pero el tramo ${tramo.tramo} lo voló ${matTramo}: en balance y reparto cuenta al avión del tramo — revisar`;
+  }
+
   private async assertFolioTicketLibre(
     folio: string | null | undefined,
     excluirId?: string,
@@ -1806,8 +1962,63 @@ export class ExpensesService {
           aeronave_id?: string | null;
           escala_id?: string | null;
           moneda?: string;
+          notas?: string | null;
         })
       : null;
+    // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.
+    // Quitar el vuelo (null) sin decir nada del tramo también quita el
+    // tramo: una escala no vive sin su vuelo. Un tramo (nuevo o ya ligado)
+    // sella el vuelo si faltaba y se rechaza si es de OTRO vuelo. La
+    // herencia del AVIÓN del tramo se aplica más abajo, pasados los candados
+    // (que así ven el vuelo efectivo). El DTO tipa string, pero el panel
+    // manda null para "quitar" (IsOptional lo deja pasar): vista con null.
+    const dtoNull = dto as {
+      vuelo_id?: string | null;
+      escala_id?: string | null;
+    };
+    if (
+      dtoNull.vuelo_id === null &&
+      dtoNull.escala_id === undefined &&
+      actual?.escala_id
+    ) {
+      dtoNull.escala_id = null;
+    }
+    const escalaEf: string | null | undefined =
+      dtoNull.escala_id !== undefined
+        ? dtoNull.escala_id
+        : (actual?.escala_id ?? null);
+    let tramoRef: TramoGastoRef | null = null;
+    // Religar el gasto a OTRO vuelo sin decir nada del tramo (flujo "Asignar
+    // vuelo" del panel / sugerencias IA: mandan solo vuelo_id) cuando el
+    // gasto traía un tramo del vuelo ANTERIOR: el tramo viejo se LIMPIA solo
+    // (una escala no vive fuera de su vuelo) y el avión se re-hereda del
+    // vuelo nuevo — antes respondía 400 y la oficina no podía corregir el
+    // vuelo desde la bandeja. El 400 se conserva solo cuando el DTO manda
+    // EXPLÍCITAMENTE una escala que no es del vuelo efectivo.
+    let escalaAutoLimpiada = false;
+    if (
+      actual &&
+      escalaEf &&
+      (dto.escala_id !== undefined ||
+        dto.vuelo_id !== undefined ||
+        dto.aeronave_id !== undefined)
+    ) {
+      tramoRef = await this.resolverTramoGasto(escalaEf);
+      const vueloEf =
+        dto.vuelo_id !== undefined ? dto.vuelo_id : (actual.vuelo_id ?? null);
+      if (vueloEf && vueloEf !== tramoRef.vuelo_id) {
+        if (dto.escala_id !== undefined) {
+          throw new BadRequestException(
+            `El tramo ${tramoRef.tramo} no pertenece al vuelo del gasto: corrige el vuelo o quita la escala.`,
+          );
+        }
+        dtoNull.escala_id = null;
+        tramoRef = null;
+        escalaAutoLimpiada = true;
+      } else if (!vueloEf) {
+        dto.vuelo_id = tramoRef.vuelo_id;
+      }
+    }
     // Gasto con REPARTO MANUAL (gasto_reparto): mutar monto/categoría/vuelo/
     // moneda reubicaría dinero ya atribuido a aviones en silencio — se exige
     // quitar o corregir el reparto primero (pantalla Otros gastos).
@@ -1936,29 +2147,80 @@ export class ExpensesService {
         );
       }
     }
-    // Herencia vuelo→avión también al LIGAR un vuelo por PATCH (el flujo
-    // "Asignar vuelo" del panel no sellaba el avión y la carga seguía
-    // invisible para el reparto).
+    // Herencia tramo/vuelo→avión también por PATCH (el flujo "Asignar
+    // vuelo" del panel no sellaba el avión y la carga seguía invisible para
+    // el reparto). Misma prioridad que create()/`avionDelGasto`:
+    //  - con TRAMO: el avión del tramo (`escala.aeronave_id ??
+    //    vuelo.aeronave_id`) se sella al cambiar de tramo, al ligar vuelo o
+    //    si el gasto no tenía avión — un avión explícito del usuario se
+    //    respeta (con aviso ⚠ abajo si difiere del tramo);
+    //  - solo VUELO: el avión del vuelo cuando el gasto no tenía avión.
     let aeronaveHeredada: string | null = null;
-    if (
-      dto.vuelo_id &&
-      dto.aeronave_id === undefined &&
-      actual &&
-      !actual.aeronave_id
-    ) {
-      const { data: vueloRef } = await this.supabase.service
-        .from('vuelo')
-        .select('aeronave_id')
-        .eq('id', dto.vuelo_id)
-        .maybeSingle();
-      aeronaveHeredada = (vueloRef?.aeronave_id as string | null) ?? null;
+    if (actual && dto.aeronave_id === undefined) {
+      if (
+        tramoRef?.aeronave_id &&
+        (dto.escala_id !== undefined || dto.vuelo_id || !actual.aeronave_id)
+      ) {
+        aeronaveHeredada = tramoRef.aeronave_id;
+      } else if (
+        !tramoRef &&
+        dto.vuelo_id &&
+        // Tramo auto-limpiado: el avión sellado venía del tramo VIEJO — se
+        // re-hereda del vuelo nuevo aunque el gasto ya tuviera avión.
+        (escalaAutoLimpiada || !actual.aeronave_id)
+      ) {
+        const { data: vueloRef } = await this.supabase.service
+          .from('vuelo')
+          .select('aeronave_id')
+          .eq('id', dto.vuelo_id)
+          .maybeSingle();
+        aeronaveHeredada = (vueloRef?.aeronave_id as string | null) ?? null;
+      }
     }
+    // Aviso contra el avión EFECTIVO tras el merge (explícito del DTO →
+    // heredado → el que ya tenía el gasto): así el aviso siempre es
+    // verdadero — los lectores cuentan el gasto al avión del tramo
+    // (`avionDelGasto`) y esto lo dice cuando difiere.
+    const avionEfectivo =
+      dto.aeronave_id !== undefined
+        ? (dto.aeronave_id ?? undefined)
+        : (aeronaveHeredada ?? actual?.aeronave_id ?? undefined);
+    const avisoTramo = await this.avisoAvionDistintoAlTramo(
+      avionEfectivo,
+      tramoRef,
+    );
 
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
     if (aeronaveHeredada) cols.aeronave_id = aeronaveHeredada;
+    else if (escalaAutoLimpiada && dto.aeronave_id === undefined) {
+      // El vuelo nuevo no tiene avión (externo sin referencia): el avión
+      // sellado por el tramo viejo ya no aplica (libro EXTERNOS).
+      cols.aeronave_id = null;
+    }
+    // Aviso ⚠ avión ≠ tramo: UNA sola vez y sin apilar — se retira cualquier
+    // aviso anterior del mismo tipo (otro avión, otro tramo, tramo ya
+    // limpiado) antes de poner el vigente; repetir el PATCH no cambia nada.
+    // También al QUITAR el tramo (escala_id: null) o DESLIGAR el vuelo
+    // (vuelo_id: null → el tramo se limpia arriba): sin tramo el aviso es
+    // falso y se quedaba pegado (verificación 28-ago).
+    const tramoQuitado =
+      dtoNull.escala_id === null || dtoNull.vuelo_id === null;
+    if (avisoTramo || tramoRef !== null || escalaAutoLimpiada || tramoQuitado) {
+      const notasBase =
+        dto.notas !== undefined ? dto.notas : (actual?.notas ?? null);
+      const sinAvisoViejo = quitarAvisoAvionTramo(notasBase);
+      const notasNuevas = avisoTramo
+        ? sinAvisoViejo
+          ? `${sinAvisoViejo}\n${avisoTramo}`
+          : avisoTramo
+        : sinAvisoViejo;
+      if ((notasNuevas ?? null) !== (notasBase ?? null)) {
+        cols.notas = notasNuevas;
+      }
+    }
     if (dto.folio_ticket !== undefined) {
       cols.folio_ticket = dto.folio_ticket?.trim() || null;
     }

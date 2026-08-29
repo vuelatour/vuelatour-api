@@ -9,9 +9,18 @@ import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
 import {
+  PAGO_VENDEDOR_CON_IVA,
+  pagoVendedorUsd,
   particionIngresoVuelo,
   type VueloIngresoInput,
 } from '../../common/ingreso-vuelo.util';
+import {
+  participacionAvionesItems,
+  participacionPorAeronave,
+  type EscalaParticipacionInput,
+  type FuenteParticipacion,
+  type ParticipacionAvionItem,
+} from '../../common/participacion-aeronave.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
@@ -107,6 +116,14 @@ export interface TuasAeropuerto {
 }
 
 const IVA_DEFAULT = 0.16;
+/**
+ * Elemento de `participacion_aviones` (campo ADITIVO del detalle de
+ * cotización y del snapshot del vuelo; regla B 28-ago). Tipo y mapper viven
+ * en la fuente única `participacion-aeronave.util` (mismo contrato que
+ * antes; se re-exporta por compatibilidad).
+ */
+export type { ParticipacionAvionItem };
+
 /** Prefijo del extra sintetizado por el motor para la comisión de BillPocket. */
 const COMISION_BILLPOCKET_PREFIX = 'Comisión BillPocket';
 const CALZOS_HR_POR_ATERRIZAJE = 0.15;
@@ -938,9 +955,13 @@ export class QuotesService {
         // Comisión del VENDEDOR (jul 2026): componente canónico del total —
         // se SUMA al precio del cliente (línea COMISION_VENDEDOR del
         // desglose). El neto VuelaTour (total − comisión) equivale al precio
-        // base y fluye a reparto/reportes. Interna: nunca al PDF cliente
-        // (ahí se absorbe en el subtotal). POR_HORA persiste modo+tarifa
-        // para recalcularse en revisiones si cambian las horas.
+        // base (regla 23-jul). Para balance/reparto (regla 28-ago tarde,
+        // `particionIngresoVuelo`) la comisión es INGRESO DE VUELATOUR —como
+        // TUAs/extras/pernocta—, no venta del avión: los libros por avión ni
+        // la cobran ni la descuentan; "Otros movimientos" la lista con su
+        // pago al vendedor. Interna: nunca al PDF cliente (ahí se absorbe en
+        // el subtotal). POR_HORA persiste modo+tarifa para recalcularse en
+        // revisiones si cambian las horas.
         comision_vendedor_usd: comisionVendedor > 0 ? comisionVendedor : null,
         comision_vendedor_nombre:
           comisionVendedor > 0
@@ -952,8 +973,21 @@ export class QuotesService {
           comisionVendedor > 0 && comisionVendedorModo === 'POR_HORA'
             ? comisionVendedorTarifaHr
             : null,
+        // Neto = total − PAGO al vendedor (comisión + su IVA cuando la
+        // cotización grava; misma regla que `pagoVendedorUsd`, la fuente
+        // única del reporte por vuelo, Otros movimientos y el Libro Dinero).
         neto_vuelatour_usd:
-          comisionVendedor > 0 ? round2(total - comisionVendedor) : null,
+          comisionVendedor > 0
+            ? round2(
+                total -
+                  round2(
+                    comisionVendedor +
+                      (PAGO_VENDEDOR_CON_IVA
+                        ? round2(comisionVendedor * ivaPct)
+                        : 0),
+                  ),
+              )
+            : null,
       },
     };
   }
@@ -1079,12 +1113,43 @@ export class QuotesService {
     if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
     // Adjuntar escalas plan (sin tacometros - es lo que se mostro al cotizar).
     const escalas = await this.findEscalas(id);
-    // Partición del ingreso (regla 28-ago, fuente única): venta del AVIÓN vs
-    // ingreso de VuelaTour — el panel la muestra en "Desglose para balance".
-    const particion_ingreso = particionIngresoVuelo(
+    // Partición del ingreso (regla 28-ago, fuente única): venta del AVIÓN
+    // (tiempo + ajuste + su IVA) vs ingreso de VuelaTour (TUAs/extras/
+    // pernocta/comisión del vendedor) — el panel la muestra en "Desglose
+    // para balance".
+    const particion = particionIngresoVuelo(
       data as unknown as VueloIngresoInput,
     );
-    return { ...data, escalas, particion_ingreso };
+    // PAGO AL VENDEDOR y NETO de VuelaTour — misma regla que el balance
+    // ("Otros movimientos") y el reporte por vuelo (verificación 28-ago):
+    // pago = comisión + su IVA (`pagoVendedorUsd`, fuente única; 0 con
+    // partición inconsistente), neto = total − pago. Campos ADITIVOS en
+    // `particion_ingreso` para que el panel ya no lea el
+    // `meta.neto_vuelatour_usd` persistido (total − comisión pre-IVA, que
+    // solo se regenera al revisar): #132 mostraba 5,491.86 contra 5,358.74
+    // del reporte por vuelo. null sin comisión.
+    const pagoVendedor = particion.inconsistente
+      ? 0
+      : pagoVendedorUsd(particion);
+    const particion_ingreso = {
+      ...particion,
+      pago_vendedor_usd: pagoVendedor > 0 ? pagoVendedor : null,
+      neto_vuelatour_usd:
+        pagoVendedor > 0
+          ? Math.round((particion.total_usd - pagoVendedor) * 100) / 100
+          : null,
+    };
+    // Participación por avión (regla B 28-ago): con tramos en aviones
+    // distintos, la venta del avión se reparte entre ellos. Se pasan TODAS
+    // las escalas (la fuente única excluye las canceladas).
+    const participacion = await this.participacionAvionesDe(
+      data as unknown as {
+        aeronave_id?: string | null;
+        calculo_snapshot?: unknown;
+      } & VueloIngresoInput,
+      escalas,
+    );
+    return { ...data, escalas, particion_ingreso, ...participacion };
   }
 
   async findVersions(vueloId: string) {
@@ -1407,6 +1472,22 @@ export class QuotesService {
           ? {
               avion_externo_matricula:
                 dto.avion_externo_matricula?.trim() || null,
+            }
+          : {}),
+        // Regla 28-ago (tarde): al cotizar/revisar un externo se capturan
+        // TANTO lo que cobra el avión externo (costo, interno) COMO lo
+        // pactado con el cliente — no son lo mismo. El operador solo se
+        // reescribe si viene con texto; el costo se puede limpiar (null) y
+        // el reparto lo delata en sin_costo_count.
+        ...(current.es_externo && dto.operador_externo?.trim()
+          ? { operador_externo: dto.operador_externo.trim() }
+          : {}),
+        ...(current.es_externo && dto.costo_externo_usd !== undefined
+          ? {
+              costo_externo_usd:
+                Number(dto.costo_externo_usd) > 0
+                  ? Number(dto.costo_externo_usd)
+                  : null,
             }
           : {}),
         ruta_id: breakdown.ruta.id,
@@ -2174,12 +2255,66 @@ export class QuotesService {
     const { data, error } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, monto_externo_usd, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
+        // aeronave_id: avión del TRAMO (null = hereda el del vuelo) — lo
+        // necesita la participación por avión (regla B 28-ago).
+        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, monto_externo_usd, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
     if (error) throw new Error(error.message);
     return data ?? [];
+  }
+
+  /**
+   * Participación por AVIÓN del vuelo (regla B 28-ago, fuente única
+   * `participacionPorAeronave`): en un vuelo multi-avión la venta del avión
+   * se reparte entre los aviones de sus tramos; aquí solo se EXPONE (el
+   * panel pinta "· 50 % (tramos también en N4142R)"). Un solo avión →
+   * un elemento con factor 1; sin avión → []. Matrículas en UNA consulta.
+   * `venta_avion_usd` = parte de la venta del avión (`repartirUsd` sobre
+   * `particionIngresoVuelo(v).avion_usd`; null sin precio). `horas` queda
+   * siempre null (el peso es por tramos vendidos, nunca por horas).
+   * Espejo del helper homónimo de flights.service (snapshot del vuelo).
+   */
+  private async participacionAvionesDe(
+    vuelo: {
+      aeronave_id?: string | null;
+      calculo_snapshot?: unknown;
+    } & VueloIngresoInput,
+    escalas: EscalaParticipacionInput[],
+  ): Promise<{
+    participacion_aviones: ParticipacionAvionItem[];
+    participacion_fuente: FuenteParticipacion;
+  }> {
+    const p = participacionPorAeronave(
+      {
+        aeronave_id: vuelo.aeronave_id ?? null,
+        calculo_snapshot: vuelo.calculo_snapshot,
+      },
+      escalas,
+    );
+    const particion = particionIngresoVuelo(vuelo);
+    const ids = [...p.factores.keys()];
+    const matriculaPorId = new Map<string, string>();
+    if (ids.length > 0) {
+      const { data } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula')
+        .in('id', ids);
+      for (const a of data ?? []) {
+        matriculaPorId.set(a.id as string, a.matricula as string);
+      }
+    }
+    return {
+      // Mapper único (fuente única): principal primero, venta del avión
+      // repartida al centavo, horas siempre null.
+      participacion_aviones: participacionAvionesItems(
+        p,
+        particion.total_usd > 0 ? particion.avion_usd : null,
+        matriculaPorId,
+      ),
+      participacion_fuente: p.fuente,
+    };
   }
 
   /**
