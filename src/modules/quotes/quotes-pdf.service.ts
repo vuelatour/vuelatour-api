@@ -26,8 +26,20 @@ export interface EscalasPdfVisibles {
   ruta: string | null;
   fechaTrasladoInicial: string | null;
   fechaTrasladoFinal: string | null;
-  /** Máximo tiempo_hr del snapshot entre tramos VISIBLES ("De un vistazo"). */
+  /**
+   * Máximo tiempo_hr del snapshot entre TODOS los tramos cotizados — los
+   * ocultos INCLUIDOS (decisión del cliente 2-sep: horas y TUAS del recibo
+   * SIN ajuste por tramos ocultos; el filtro pdf_oculto es solo del
+   * itinerario/mapa/ruta). Alimenta "De un vistazo".
+   */
   tiempoTramoSnapMaxHr: number | null;
+  /**
+   * Máximo millas_nauticas entre TODOS los tramos comerciales (mismo criterio
+   * 2-sep). Fallback de "De un vistazo" cuando el snapshot no trae tiempo_hr
+   * (REDONDO simple / cotizaciones viejas): el render lo divide entre la
+   * velocidad de crucero SOLO para display, jamás para cobrar.
+   */
+  millasTramoMaxNm: number | null;
 }
 
 /**
@@ -51,6 +63,10 @@ export interface EscalasPdfVisibles {
  *   inicial/final toma la `fecha_salida_plan` del primer/último VISIBLE
  *   (fallback: los campos del vuelo, como siempre) — default propuesto;
  *   pendiente confirmar con el cliente si las fechas de contrato se quedan.
+ * - EXCEPCIÓN (decisión del cliente 2-sep): las HORAS del "De un vistazo"
+ *   (`tiempoTramoSnapMaxHr` / `millasTramoMaxNm`) NO se filtran — salen de
+ *   TODOS los tramos cotizados, ocultos incluidos (igual que los TUAS, que
+ *   ya salían completos del desglose canónico).
  */
 export function escalasVisiblesPdf(
   quote: Record<string, unknown>,
@@ -82,14 +98,20 @@ export function escalasVisiblesPdf(
   let ordenPrimeraReal: number | null = null;
   let ordenUltimaReal: number | null = null;
   let tiempoTramoSnapMaxHr: number | null = null;
+  let millasTramoMaxNm: number | null = null;
   if (tramosSnap && tramosSnap.length > 0) {
     ordenPrimeraReal = num(tramosSnap[0].orden) ?? 1;
     ordenUltimaReal = num(tramosSnap[tramosSnap.length - 1].orden) ?? null;
+    // Horas del "De un vistazo" con TODOS los tramos — ocultos incluidos
+    // (decisión del cliente 2-sep: horas y TUAS sin ajuste por ocultos).
     for (const t of tramosSnap) {
-      if (ocultoSnap(t)) continue;
       const th = num(t.tiempo_hr);
       if (th != null && th > 0) {
         tiempoTramoSnapMaxHr = Math.max(tiempoTramoSnapMaxHr ?? 0, th);
+      }
+      const mn = num(t.millas);
+      if (mn != null && mn > 0) {
+        millasTramoMaxNm = Math.max(millasTramoMaxNm ?? 0, mn);
       }
     }
     visibles = tramosSnap
@@ -112,6 +134,14 @@ export function escalasVisiblesPdf(
     );
     ordenPrimeraReal = base.length > 0 ? num(base[0].orden) : null;
     ordenUltimaReal = base.length > 0 ? num(base[base.length - 1].orden) : null;
+    // Mismo criterio 2-sep: las millas del fallback salen de TODOS los
+    // tramos comerciales, no solo de los visibles.
+    for (const e of base) {
+      const mn = num(e.millas_nauticas);
+      if (mn != null && mn > 0) {
+        millasTramoMaxNm = Math.max(millasTramoMaxNm ?? 0, mn);
+      }
+    }
     visibles = base.filter((e) => e.pdf_oculto !== true);
   }
 
@@ -160,6 +190,7 @@ export function escalasVisiblesPdf(
     fechaTrasladoInicial,
     fechaTrasladoFinal,
     tiempoTramoSnapMaxHr,
+    millasTramoMaxNm,
   };
 }
 
@@ -265,6 +296,7 @@ export class QuotesPdfService {
       fechaTrasladoInicial,
       fechaTrasladoFinal,
       tiempoTramoSnapMaxHr,
+      millasTramoMaxNm,
     } = escalasVisiblesPdf(quote);
 
     // TUAS ligados al recibo CON su moneda (requisito del cliente): las líneas
@@ -458,17 +490,15 @@ export class QuotesPdfService {
       avion_motor_hp: num(avion?.motor_hp),
       avion_caracteristicas: (avion?.caracteristicas as string[] | null) ?? [],
       avion_tiempo_tramo_hr: (() => {
-        // Máximo SOLO entre tramos VISIBLES (un tramo oculto no debe asomar
-        // ni como "Tiempo de vuelo por tramo" del De un vistazo).
+        // Máximo entre TODOS los tramos de la cotización, ocultos incluidos
+        // (decisión del cliente 2-sep: horas y TUAS del recibo SIN ajuste
+        // por tramos ocultos — pdf_oculto solo filtra itinerario/mapa/ruta).
         if (tiempoTramoSnapMaxHr != null) return tiempoTramoSnapMaxHr;
         const kts = num(avion?.velocidad_crucero_kts);
         if (!kts || kts <= 0) return null;
-        let max: number | null = null;
-        for (const e of escalas) {
-          const mn = num(e.millas_nauticas);
-          if (mn != null && mn > 0) max = Math.max(max ?? 0, mn / kts);
-        }
-        return max;
+        return millasTramoMaxNm != null && millasTramoMaxNm > 0
+          ? millasTramoMaxNm / kts
+          : null;
       })(),
       mapa_puntos: mapaPuntos,
     };

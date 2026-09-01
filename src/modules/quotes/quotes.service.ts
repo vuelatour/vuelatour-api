@@ -65,8 +65,15 @@ export interface ResolvedLeg {
   notas: string | null;
   /** Fecha/hora planeada de salida del tramo (ISO). Null = sin definir aún. */
   fecha_salida_plan: string | null;
-  /** Ocultar este tramo del PDF (título/itinerario/mapa); el precio no cambia. */
-  pdf_oculto: boolean;
+  /**
+   * Ocultar este tramo del PDF (título/itinerario/mapa); el precio no cambia.
+   * NULL = la bandera NO viajó en el DTO: `replaceEscalas` CONSERVA el valor
+   * vivo de la escala (bug 1-sep "apago la visibilidad, vuelvo a entrar y
+   * está activada": el editor rehidrata del snapshot y un guardado sin la
+   * bandera la normalizaba a false, destapando el tramo). La bandera solo
+   * cambia cuando viaja EXPLÍCITA.
+   */
+  pdf_oculto: boolean | null;
 }
 
 interface ResolvedRoute {
@@ -801,6 +808,9 @@ export class QuotesService {
             pernocta_usd: round2(leg.pernocta_costo_usd),
             tipo_parada: leg.tipo_parada,
             servicio_notas: leg.servicio_notas,
+            // Puede ser NULL ("no viajó en el DTO"): el snapshot NO lo fuerza
+            // a false — el PDF de todos modos prioriza la escala VIVA
+            // (escalasVisiblesPdf) y null ahí cae al snapshot sin ocultar.
             pdf_oculto: leg.pdf_oculto,
           }))
         : null,
@@ -1838,6 +1848,48 @@ export class QuotesService {
     return this.revise(vueloId, reviseDto, userId);
   }
 
+  /**
+   * Prende/apaga la visibilidad de UN tramo en el PDF de la cotización
+   * escribiendo `escala.pdf_oculto` y NADA más: sin recálculo, sin versionar
+   * y sin tocar el snapshot — presentación pura (regla 27-ago: el tramo
+   * oculto se sigue cobrando) y el PDF lee la escala VIVA
+   * (`escalasVisiblesPdf` prioriza `escala.pdf_oculto` sobre el snapshot).
+   * Nace por el bug 1-sep ("apago la visibilidad, vuelvo a entrar y está
+   * activada"): el toggle ya no depende de que un guardado del cotizador
+   * arrastre la bandera — se escribe directo en la fuente de verdad.
+   */
+  async setPdfVisibilidad(
+    vueloId: string,
+    escalaId: string,
+    oculto: boolean,
+    userId: string,
+  ): Promise<{ id: string; orden: number; pdf_oculto: boolean }> {
+    // La escala debe pertenecer AL vuelo de la URL (nunca ocultar tramos de
+    // otro vuelo por id suelto).
+    const { data: escala, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select('id, orden, vuelo_id')
+      .eq('id', escalaId)
+      .eq('vuelo_id', vueloId)
+      .maybeSingle();
+    if (escErr) throw new Error(`Failed to read escala: ${escErr.message}`);
+    if (!escala) {
+      throw new NotFoundException(
+        'La escala no existe o no pertenece a este vuelo.',
+      );
+    }
+    const { error } = await this.supabase.service
+      .from('escala')
+      .update({ pdf_oculto: oculto === true, updated_by: userId })
+      .eq('id', escalaId);
+    if (error) throw new Error(`Failed to update pdf_oculto: ${error.message}`);
+    return {
+      id: escala.id as string,
+      orden: Number(escala.orden),
+      pdf_oculto: oculto === true,
+    };
+  }
+
   async confirm(vueloId: string, userId: string) {
     const current = await this.findById(vueloId);
     if (current.estado !== 'COTIZADO') {
@@ -2399,9 +2451,18 @@ export class QuotesService {
         tipo_parada: e.tipo_parada,
         servicio_notas: e.servicio_notas,
         notas: e.notas,
-        pdf_oculto: e.pdf_oculto === true,
         updated_by: userId,
       };
+      // Bug 1-sep ("apago la visibilidad del tramo, vuelvo a entrar y está
+      // activada"): el editor del panel rehidrata del SNAPSHOT, así que un
+      // guardado que no trae la bandera NO debe pisar el valor VIVO de la
+      // escala (que pudo cambiar con el PATCH pdf-visibilidad). La bandera
+      // solo cambia cuando viaja EXPLÍCITA en el DTO; si no viaja (null), se
+      // omite la columna y el UPDATE conserva lo que hay. En INSERT de tramo
+      // nuevo, omitirla usa el default de BD (false = visible).
+      if (e.pdf_oculto != null) {
+        planFields.pdf_oculto = e.pdf_oculto === true;
+      }
       const actual = porOrden.get(orden);
       if (actual) {
         // No pisar con null una fecha ya planeada/asignada al tramo.
@@ -2584,7 +2645,9 @@ export class QuotesService {
         tipo_parada: l.tipo_parada === 'SERVICIO' ? 'SERVICIO' : 'NORMAL',
         servicio_notas: l.servicio_notas ?? null,
         notas: l.notas ?? null,
-        pdf_oculto: l.pdf_oculto === true,
+        // NO normalizar la ausencia a false: null = "no viajó" y la escala
+        // viva conserva su pdf_oculto (ver doc de ResolvedLeg, bug 1-sep).
+        pdf_oculto: l.pdf_oculto == null ? null : l.pdf_oculto === true,
         fecha_salida_plan:
           l.fecha_salida_plan instanceof Date
             ? l.fecha_salida_plan.toISOString()

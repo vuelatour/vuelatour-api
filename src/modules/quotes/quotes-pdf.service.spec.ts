@@ -124,7 +124,9 @@ describe('escalasVisiblesPdf', () => {
     });
     expect(r.escalas).toEqual([]);
     expect(r.ruta).toBeNull();
-    expect(r.tiempoTramoSnapMaxHr).toBeNull();
+    // Las horas del "De un vistazo" NO se filtran (decisión 2-sep): aun con
+    // todo oculto salen del snapshot completo.
+    expect(r.tiempoTramoSnapMaxHr).toBe(1);
   });
 
   it('todos ocultos menos uno: queda ese único tramo como 1', () => {
@@ -181,16 +183,40 @@ describe('escalasVisiblesPdf', () => {
     expect(visible.ruta).toBe('CUN → CZM → CUN');
   });
 
-  it('el tiempo por tramo del De un vistazo ignora los ocultos', () => {
+  it('el tiempo por tramo del De un vistazo sale de TODOS los tramos, ocultos incluidos (decisión 2-sep: horas y TUAS sin ajuste)', () => {
     const r = escalasVisiblesPdf({
       calculo_snapshot: {
         tramos: [
-          tramo(1, 'CUN', 'AZP', { tiempo_hr: 3.4, pdf_oculto: true }),
+          tramo(1, 'CUN', 'AZP', {
+            tiempo_hr: 3.4,
+            millas: 850,
+            pdf_oculto: true,
+          }),
           tramo(2, 'AZP', 'CZM', { tiempo_hr: 1.2 }),
         ],
       },
       escalas: [],
     });
-    expect(r.tiempoTramoSnapMaxHr).toBe(1.2);
+    expect(r.tiempoTramoSnapMaxHr).toBe(3.4);
+    // El fallback por millas usa el mismo criterio (todos los tramos).
+    expect(r.millasTramoMaxNm).toBe(850);
+  });
+
+  it('rama fallback: las millas para el De un vistazo también salen de TODOS los tramos comerciales (2-sep)', () => {
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {},
+      escalas: [
+        escala(1, 'CUN', 'AZP', { millas_nauticas: 850, pdf_oculto: true }),
+        escala(2, 'AZP', 'CUN', { millas_nauticas: 850, pdf_oculto: true }),
+        escala(3, 'CUN', 'CZM', { millas_nauticas: 30 }),
+        // Operativas/canceladas siguen fuera (no son tramos cotizados).
+        escala(4, 'CZM', 'MID', {
+          millas_nauticas: 5000,
+          solo_operativa: true,
+        }),
+      ],
+    });
+    expect(r.millasTramoMaxNm).toBe(850);
+    expect(r.ruta).toBe('CUN → CZM');
   });
 });

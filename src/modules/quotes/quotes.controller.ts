@@ -6,6 +6,7 @@ import {
   HttpStatus,
   Param,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   Res,
@@ -19,6 +20,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
+import { PdfVisibilidadDto } from './dto/pdf-visibilidad.dto';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
@@ -119,6 +121,25 @@ export class QuotesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.quotes.quickAdjust(id, dto, c.userId);
+  }
+
+  // Sub-ruta de ':id': va con las demás rutas ':id/...' (las literales del
+  // segmento — calculate, rutas-sugeridas — ya están declaradas antes de
+  // ':id', convención del repo).
+  @Patch(':id/escalas/:escalaId/pdf-visibilidad')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Prende/apaga la visibilidad de un tramo en el PDF (escribe escala.pdf_oculto y nada más: sin recálculo ni snapshot — el PDF lee la escala viva). Mismos roles que revise.',
+  })
+  pdfVisibilidad(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('escalaId', ParseUUIDPipe) escalaId: string,
+    @Body() dto: PdfVisibilidadDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotes.setPdfVisibilidad(id, escalaId, dto.oculto, c.userId);
   }
 
   @Post(':id/confirm')
