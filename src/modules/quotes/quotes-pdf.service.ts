@@ -6,11 +6,161 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
+import { puntosRutaVisible } from '../../common/ruta-visible.util';
 
 function num(v: unknown): number | null {
   if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Vista de tramos PARA EL PDF del cliente: visibles renumerados 1..N, la
+ * línea de ruta ya resuelta y las fechas de traslado ajustadas cuando el
+ * primer/último tramo real quedó oculto.
+ */
+export interface EscalasPdfVisibles {
+  /** Tramos visibles RENUMERADOS 1..N (jamás exponen la posición original). */
+  escalas: Array<Record<string, unknown>>;
+  /** "CUN → AZP → BZE → CZM → CUN" uniendo solo puntos visibles; null sin tramos. */
+  ruta: string | null;
+  fechaTrasladoInicial: string | null;
+  fechaTrasladoFinal: string | null;
+  /** Máximo tiempo_hr del snapshot entre tramos VISIBLES ("De un vistazo"). */
+  tiempoTramoSnapMaxHr: number | null;
+}
+
+/**
+ * ÚNICO lugar donde se filtra `pdf_oculto` para el PDF de cotización: el
+ * título (ruta), TRASLADOS, la tabla de itinerario y el mapa salen TODOS de
+ * aquí. Presentación PURA (regla 27-ago): jamás toca el motor v1.3, el
+ * desglose canónico ni los totales — el tramo oculto se sigue cobrando.
+ *
+ * Reglas:
+ * - La lista base sale del snapshot (ruta COMERCIAL congelada que configuró
+ *   oficina); sin tramos en snapshot (REDONDO simple / cotizaciones viejas)
+ *   cae a las escalas del vuelo, sin `solo_operativa` ni canceladas
+ *   (regla 27-jul: los lectores excluyen cancelados).
+ * - El switch `pdf_oculto` MANDA desde la escala VIVA (cruce por `orden`):
+ *   el snapshot solo se regenera en calculate/revise/quickAdjust, así que un
+ *   toggle hecho fuera de "Revisar" (o una cotización pre-27-ago) solo vive
+ *   en la escala. Sin escala viva de ese orden, decide el snapshot.
+ * - Los visibles se RENUMERAN 1..N consecutivos ANTES de armar mapa y
+ *   payload: el cliente jamás ve la posición original (delataría ocultos).
+ * - Si el primer/último tramo real quedó oculto, la fecha de traslado
+ *   inicial/final toma la `fecha_salida_plan` del primer/último VISIBLE
+ *   (fallback: los campos del vuelo, como siempre) — default propuesto;
+ *   pendiente confirmar con el cliente si las fechas de contrato se quedan.
+ */
+export function escalasVisiblesPdf(
+  quote: Record<string, unknown>,
+): EscalasPdfVisibles {
+  // Escalas VIVAS por orden (fuente de verdad del switch pdf_oculto y de la
+  // fecha_salida_plan por tramo; findEscalas ya las trae ordenadas).
+  const escalasVivas =
+    (quote.escalas as Array<Record<string, unknown>> | undefined) ?? [];
+  const vivaPorOrden = new Map<number, Record<string, unknown>>();
+  for (const e of escalasVivas) {
+    const o = num(e.orden);
+    if (o != null && !vivaPorOrden.has(o)) vivaPorOrden.set(o, e);
+  }
+  const ocultoSnap = (t: Record<string, unknown>): boolean => {
+    const viva = vivaPorOrden.get(num(t.orden) ?? Number.NaN);
+    if (viva && viva.pdf_oculto != null) return viva.pdf_oculto === true;
+    return t.pdf_oculto === true;
+  };
+
+  const tramosSnap = (
+    (quote.calculo_snapshot as Record<string, unknown> | undefined)?.tramos as
+      | Array<Record<string, unknown>>
+      | undefined
+  )?.filter((t) => t && typeof t === 'object');
+
+  // Lista visible CON su orden ORIGINAL (para cruzar fechas y detectar si el
+  // primer/último tramo real quedó oculto); se renumera al final.
+  let visibles: Array<Record<string, unknown>>;
+  let ordenPrimeraReal: number | null = null;
+  let ordenUltimaReal: number | null = null;
+  let tiempoTramoSnapMaxHr: number | null = null;
+  if (tramosSnap && tramosSnap.length > 0) {
+    ordenPrimeraReal = num(tramosSnap[0].orden) ?? 1;
+    ordenUltimaReal = num(tramosSnap[tramosSnap.length - 1].orden) ?? null;
+    for (const t of tramosSnap) {
+      if (ocultoSnap(t)) continue;
+      const th = num(t.tiempo_hr);
+      if (th != null && th > 0) {
+        tiempoTramoSnapMaxHr = Math.max(tiempoTramoSnapMaxHr ?? 0, th);
+      }
+    }
+    visibles = tramosSnap
+      .filter((t) => !ocultoSnap(t))
+      .map((t) => ({
+        orden: num(t.orden) ?? 0,
+        origen_iata: (t.origen as string) ?? '',
+        destino_iata: (t.destino as string) ?? '',
+        millas_nauticas: t.millas,
+        pasajeros: t.pasajeros,
+        es_ferry: t.es_ferry === true,
+        requiere_pernocta: t.requiere_pernocta === true,
+        pernocta_costo_usd: t.pernocta_usd,
+        tipo_parada: t.tipo_parada,
+        servicio_notas: t.servicio_notas,
+      }));
+  } else {
+    const base = escalasVivas.filter(
+      (e) => e.solo_operativa !== true && e.cancelada_at == null,
+    );
+    ordenPrimeraReal = base.length > 0 ? num(base[0].orden) : null;
+    ordenUltimaReal = base.length > 0 ? num(base[base.length - 1].orden) : null;
+    visibles = base.filter((e) => e.pdf_oculto !== true);
+  }
+
+  // Fechas de traslado: si el primer/último tramo REAL quedó oculto, la fecha
+  // del vuelo delataría un tramo que el cliente no debe ver — se usa la
+  // fecha_salida_plan del primer/último VISIBLE (fallback: campos del vuelo).
+  const fechaPlanDeOrden = (orden: unknown): string | null => {
+    const viva = vivaPorOrden.get(num(orden) ?? Number.NaN);
+    const f = viva?.fecha_salida_plan;
+    return typeof f === 'string' && f ? f : null;
+  };
+  let fechaTrasladoInicial = (quote.fecha_vuelo as string) ?? null;
+  const primera = visibles[0];
+  if (
+    primera &&
+    ordenPrimeraReal != null &&
+    num(primera.orden) !== ordenPrimeraReal
+  ) {
+    fechaTrasladoInicial =
+      fechaPlanDeOrden(primera.orden) ?? fechaTrasladoInicial;
+  }
+  let fechaTrasladoFinal = (quote.fecha_traslado_final as string) ?? null;
+  const ultima = visibles[visibles.length - 1];
+  if (
+    ultima &&
+    ordenUltimaReal != null &&
+    num(ultima.orden) !== ordenUltimaReal
+  ) {
+    fechaTrasladoFinal = fechaPlanDeOrden(ultima.orden) ?? fechaTrasladoFinal;
+  }
+
+  // Línea de ruta uniendo SOLO puntos visibles (helper compartido con el
+  // recibo de cobro). Con todo oculto queda null: pyservices degrada el
+  // título a origen→destino del vuelo, sin tabla ni mapa (esperado).
+  const ruta =
+    visibles.length > 0 ? puntosRutaVisible(visibles).join(' → ') : null;
+
+  // RENUMERAR 1..N consecutivos — SOLO el payload del PDF; jamás escala.orden
+  // ni snapshot.tramos[].orden (orden es clave del UPSERT de replaceEscalas,
+  // del espejo vuelo↔tramo1 y del cruce snapshot↔escala de arriba).
+  const escalas = visibles.map((e, i) => ({ ...e, orden: i + 1 }));
+
+  return {
+    escalas,
+    ruta,
+    fechaTrasladoInicial,
+    fechaTrasladoFinal,
+    tiempoTramoSnapMaxHr,
+  };
 }
 
 /** Genera el PDF de cotización delegando el render a pyservices (WeasyPrint). */
@@ -104,41 +254,18 @@ export class QuotesPdfService {
     }
 
     const ivaRaw = num(quote.iva_pct) ?? 0;
-    // Recibo del cliente: la lista para TÍTULO/ITINERARIO/MAPA sale del
-    // snapshot del cálculo (la ruta COMERCIAL exacta que configuró oficina,
-    // con la bandera pdf_oculto por tramo — 27-ago); cotizaciones viejas sin
-    // tramos en snapshot caen a las escalas del vuelo. QUIÉN decide si un
-    // tramo se muestra es SOLO el switch pdf_oculto (regla 27-ago v2: los
-    // ferry también salen si su switch está prendido — antes se filtraban
-    // solos y "Mostrar en PDF" parecía roto). El precio NO cambia: ya está
-    // en el desglose del snapshot.
-    const tramosSnap = (
-      (quote.calculo_snapshot as Record<string, unknown> | undefined)
-        ?.tramos as Array<Record<string, unknown>> | undefined
-    )?.filter((t) => t && typeof t === 'object');
-    const escalas: Array<Record<string, unknown>> =
-      tramosSnap && tramosSnap.length > 0
-        ? tramosSnap
-            .filter((t) => t.pdf_oculto !== true)
-            .map((t, i) => ({
-              orden: num(t.orden) ?? i + 1,
-              origen_iata: (t.origen as string) ?? '',
-              destino_iata: (t.destino as string) ?? '',
-              millas_nauticas: t.millas,
-              pasajeros: t.pasajeros,
-              es_ferry: t.es_ferry === true,
-              requiere_pernocta: t.requiere_pernocta === true,
-              pernocta_costo_usd: t.pernocta_usd,
-              tipo_parada: t.tipo_parada,
-              servicio_notas: t.servicio_notas,
-            }))
-        : (
-            (quote.escalas as Array<Record<string, unknown>> | undefined) ?? []
-          ).filter(
-            (e) =>
-              (e as { solo_operativa?: boolean }).solo_operativa !== true &&
-              (e as { pdf_oculto?: boolean }).pdf_oculto !== true,
-          );
+    // Recibo del cliente: la lista para TÍTULO/TRASLADOS/ITINERARIO/MAPA sale
+    // COMPLETA de escalasVisiblesPdf (único punto de filtrado de pdf_oculto,
+    // regla 27-ago; los ferry también salen si su switch está prendido) —
+    // visibles renumerados 1..N, ruta con huecos unidos y fechas de traslado
+    // ajustadas. El precio NO cambia: ya está en el desglose del snapshot.
+    const {
+      escalas,
+      ruta,
+      fechaTrasladoInicial,
+      fechaTrasladoFinal,
+      tiempoTramoSnapMaxHr,
+    } = escalasVisiblesPdf(quote);
 
     // TUAS ligados al recibo CON su moneda (requisito del cliente): las líneas
     // del desglose canónico ya traen aeropuerto, unitario, pax y moneda.
@@ -226,8 +353,12 @@ export class QuotesPdfService {
       destino: (quote.destino_iata as string) ?? '—',
       tipo: (quote.tipo as string) ?? 'REDONDO',
       pasajeros: num(quote.pasajeros) ?? 1,
-      fecha_traslado_inicial: (quote.fecha_vuelo as string) ?? null,
-      fecha_traslado_final: (quote.fecha_traslado_final as string) ?? null,
+      fecha_traslado_inicial: fechaTrasladoInicial,
+      fecha_traslado_final: fechaTrasladoFinal,
+      // Ruta VISIBLE ya resuelta (con tramos ocultos, une los puntos que
+      // quedan). Campo ADITIVO: pyservices lo usa para el título y conserva
+      // su walk actual como fallback (skew tolerante en ambos sentidos).
+      ruta,
       escalas: escalas.map((e) => ({
         orden: num(e.orden) ?? 0,
         origen: (e.origen_iata as string) ?? '',
@@ -327,17 +458,12 @@ export class QuotesPdfService {
       avion_motor_hp: num(avion?.motor_hp),
       avion_caracteristicas: (avion?.caracteristicas as string[] | null) ?? [],
       avion_tiempo_tramo_hr: (() => {
-        const tramosSnap =
-          ((quote.calculo_snapshot as Record<string, unknown> | undefined)
-            ?.tramos as Array<Record<string, unknown>> | undefined) ?? [];
-        let max: number | null = null;
-        for (const t of tramosSnap) {
-          const th = num(t.tiempo_hr);
-          if (th != null && th > 0) max = Math.max(max ?? 0, th);
-        }
-        if (max != null) return max;
+        // Máximo SOLO entre tramos VISIBLES (un tramo oculto no debe asomar
+        // ni como "Tiempo de vuelo por tramo" del De un vistazo).
+        if (tiempoTramoSnapMaxHr != null) return tiempoTramoSnapMaxHr;
         const kts = num(avion?.velocidad_crucero_kts);
         if (!kts || kts <= 0) return null;
+        let max: number | null = null;
         for (const e of escalas) {
           const mn = num(e.millas_nauticas);
           if (mn != null && mn > 0) max = Math.max(max ?? 0, mn / kts);

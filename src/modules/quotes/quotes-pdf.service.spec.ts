@@ -1,0 +1,196 @@
+import { escalasVisiblesPdf } from './quotes-pdf.service';
+
+/**
+ * escalasVisiblesPdf: ÚNICO punto de filtrado de pdf_oculto para el PDF de
+ * cotización — visibles renumerados 1..N, ruta con huecos unidos y fechas de
+ * traslado que no delatan tramos ocultos. Presentación pura: nada de esto
+ * toca precios/desglose/totales.
+ */
+
+/** Tramo del snapshot (ruta comercial congelada por calculate/revise). */
+function tramo(
+  orden: number,
+  origen: string,
+  destino: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return { orden, origen, destino, millas: 100, tiempo_hr: 1, ...extra };
+}
+
+/** Escala viva (findEscalas). */
+function escala(
+  orden: number,
+  origen: string,
+  destino: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    orden,
+    origen_iata: origen,
+    destino_iata: destino,
+    solo_operativa: false,
+    pdf_oculto: false,
+    cancelada_at: null,
+    fecha_salida_plan: `2026-09-0${orden}T10:00:00.000Z`,
+    ...extra,
+  };
+}
+
+describe('escalasVisiblesPdf', () => {
+  it('filtra los ocultos, renumera 1..N y une los huecos de la ruta', () => {
+    // Caso del cliente: visibles 1, 4 y 5 → la ruta une lo que queda.
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'AZP'),
+          tramo(2, 'AZP', 'TGZ', { pdf_oculto: true }),
+          tramo(3, 'TGZ', 'BZE', { pdf_oculto: true }),
+          tramo(4, 'BZE', 'CZM'),
+          tramo(5, 'CZM', 'CUN'),
+        ],
+      },
+      escalas: [],
+    });
+    expect(r.escalas.map((e) => e.orden)).toEqual([1, 2, 3]);
+    expect(
+      r.escalas.map(
+        (e) => `${e.origen_iata as string}→${e.destino_iata as string}`,
+      ),
+    ).toEqual(['CUN→AZP', 'BZE→CZM', 'CZM→CUN']);
+    // Jamás la posición original (4, 5) — delataría los ocultos.
+    expect(r.escalas.some((e) => (e.orden as number) > 3)).toBe(false);
+    expect(r.ruta).toBe('CUN → AZP → BZE → CZM → CUN');
+  });
+
+  it('oculto el PRIMER tramo: la ruta arranca en el primer visible y el traslado inicial usa su fecha_salida_plan', () => {
+    const r = escalasVisiblesPdf({
+      fecha_vuelo: '2026-09-01T08:00:00.000Z',
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'AZP', { pdf_oculto: true }),
+          tramo(2, 'AZP', 'CZM'),
+          tramo(3, 'CZM', 'CUN'),
+        ],
+      },
+      escalas: [
+        escala(1, 'CUN', 'AZP', { pdf_oculto: true }),
+        escala(2, 'AZP', 'CZM'),
+        escala(3, 'CZM', 'CUN'),
+      ],
+    });
+    expect(r.ruta).toBe('AZP → CZM → CUN');
+    expect(r.escalas.map((e) => e.orden)).toEqual([1, 2]);
+    // La fecha del vuelo delataría el tramo oculto CUN→AZP.
+    expect(r.fechaTrasladoInicial).toBe('2026-09-02T10:00:00.000Z');
+  });
+
+  it('oculto el ÚLTIMO tramo: el traslado final usa la fecha del último visible (fallback a la del vuelo si no hay)', () => {
+    const base = {
+      fecha_vuelo: '2026-09-01T08:00:00.000Z',
+      fecha_traslado_final: '2026-09-03T18:00:00.000Z',
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'CZM'),
+          tramo(2, 'CZM', 'MID'),
+          tramo(3, 'MID', 'CUN', { pdf_oculto: true }),
+        ],
+      },
+    };
+    const conVivas = escalasVisiblesPdf({
+      ...base,
+      escalas: [
+        escala(1, 'CUN', 'CZM'),
+        escala(2, 'CZM', 'MID'),
+        escala(3, 'MID', 'CUN', { pdf_oculto: true }),
+      ],
+    });
+    expect(conVivas.ruta).toBe('CUN → CZM → MID');
+    expect(conVivas.fechaTrasladoFinal).toBe('2026-09-02T10:00:00.000Z');
+    expect(conVivas.fechaTrasladoInicial).toBe('2026-09-01T08:00:00.000Z');
+    // Sin escalas vivas (no hay fecha por tramo): conserva la del vuelo.
+    const sinVivas = escalasVisiblesPdf({ ...base, escalas: [] });
+    expect(sinVivas.fechaTrasladoFinal).toBe('2026-09-03T18:00:00.000Z');
+  });
+
+  it('todos ocultos: degrada a escalas=[] y ruta null (título cae a origen→destino del vuelo, sin tabla ni mapa)', () => {
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'CZM', { pdf_oculto: true }),
+          tramo(2, 'CZM', 'CUN', { pdf_oculto: true }),
+        ],
+      },
+      escalas: [],
+    });
+    expect(r.escalas).toEqual([]);
+    expect(r.ruta).toBeNull();
+    expect(r.tiempoTramoSnapMaxHr).toBeNull();
+  });
+
+  it('todos ocultos menos uno: queda ese único tramo como 1', () => {
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'CZM', { pdf_oculto: true }),
+          tramo(2, 'CZM', 'CUN'),
+        ],
+      },
+      escalas: [],
+    });
+    expect(r.escalas.map((e) => e.orden)).toEqual([1]);
+    expect(r.ruta).toBe('CZM → CUN');
+  });
+
+  it('rama fallback (sin snapshot.tramos): filtra solo_operativa, canceladas (regla 27-jul) y ocultas; renumera', () => {
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {},
+      escalas: [
+        escala(1, 'CUN', 'CZM'),
+        escala(2, 'CZM', 'MID', { pdf_oculto: true }),
+        escala(3, 'MID', 'CTM', { cancelada_at: '2026-08-30T00:00:00.000Z' }),
+        escala(4, 'CTM', 'CUN', { solo_operativa: true }),
+        escala(5, 'CUN', 'AZP'),
+      ],
+    });
+    expect(r.escalas.map((e) => e.orden)).toEqual([1, 2]);
+    expect(r.ruta).toBe('CUN → CZM → CUN → AZP');
+  });
+
+  it('snapshot desfasado: manda el pdf_oculto de la escala VIVA (toggle sin Revisar y pre-27-ago)', () => {
+    // Snapshot dice visible, la escala dice oculto → OCULTO.
+    const oculta = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [tramo(1, 'CUN', 'CZM'), tramo(2, 'CZM', 'CUN')],
+      },
+      escalas: [
+        escala(1, 'CUN', 'CZM'),
+        escala(2, 'CZM', 'CUN', { pdf_oculto: true }),
+      ],
+    });
+    expect(oculta.ruta).toBe('CUN → CZM');
+    // Snapshot dice oculto, la escala lo volvió a mostrar → VISIBLE.
+    const visible = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'CZM'),
+          tramo(2, 'CZM', 'CUN', { pdf_oculto: true }),
+        ],
+      },
+      escalas: [escala(1, 'CUN', 'CZM'), escala(2, 'CZM', 'CUN')],
+    });
+    expect(visible.ruta).toBe('CUN → CZM → CUN');
+  });
+
+  it('el tiempo por tramo del De un vistazo ignora los ocultos', () => {
+    const r = escalasVisiblesPdf({
+      calculo_snapshot: {
+        tramos: [
+          tramo(1, 'CUN', 'AZP', { tiempo_hr: 3.4, pdf_oculto: true }),
+          tramo(2, 'AZP', 'CZM', { tiempo_hr: 1.2 }),
+        ],
+      },
+      escalas: [],
+    });
+    expect(r.tiempoTramoSnapMaxHr).toBe(1.2);
+  });
+});

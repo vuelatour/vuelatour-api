@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import {
   PyservicesService,
   type ReciboAbonoPdfPayload,
@@ -94,7 +95,7 @@ export class CobroReciboService {
         .maybeSingle(),
       sb
         .from('escala')
-        .select('orden, origen_iata, destino_iata, solo_operativa')
+        .select('orden, origen_iata, destino_iata, solo_operativa, pdf_oculto')
         .eq('vuelo_id', vueloId)
         // Tramos cancelados fuera de la ruta: no volaron.
         .is('cancelada_at', null)
@@ -129,15 +130,17 @@ export class CobroReciboService {
 
     // Ruta COMERCIAL "CUN → CZM → CUN" (misma regla que el reporte por
     // vuelo): tramos no operativos; sin ellos, todos; sin escalas, el vuelo.
+    // Los tramos con pdf_oculto NUNCA aparecen en papel del cliente (regla
+    // 27-ago): se une lo visible con puntosRutaVisible — el MISMO walk que el
+    // PDF de cotización (un intermedio oculto no rompe la cadena ni delata su
+    // posición). Con todo oculto, degrada al origen→destino del vuelo.
     const escalas = (escalasRes.data ?? []) as Array<Record<string, unknown>>;
-    const comerciales = escalas.filter((e) => e.solo_operativa !== true);
-    const rutaLegs = comerciales.length > 0 ? comerciales : escalas;
+    const visibles = escalas.filter((e) => e.pdf_oculto !== true);
+    const comerciales = visibles.filter((e) => e.solo_operativa !== true);
+    const rutaLegs = comerciales.length > 0 ? comerciales : visibles;
     const ruta =
       rutaLegs.length > 0
-        ? [
-            rutaLegs[0].origen_iata as string,
-            ...rutaLegs.map((e) => e.destino_iata as string),
-          ].join(' → ')
+        ? puntosRutaVisible(rutaLegs).join(' → ')
         : `${v.origen_iata as string} → ${v.destino_iata as string}`;
 
     // Folio legible REC-<folio>-<n>: n = posición 1-based del cobro entre
