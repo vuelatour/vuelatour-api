@@ -78,6 +78,11 @@ export enum MedioPago {
   PERSONAL_PABLO = 'PERSONAL_PABLO',
   PERSONAL_ALE = 'PERSONAL_ALE',
   TRANSFERENCIA = 'TRANSFERENCIA',
+  /** PayWise (2-sep-2026): medio BANCARIO — sus cargos aparecen en el estado
+   *  de cuenta, así que entra a la conciliación automática, a "gastos sin
+   *  banco" y al pre-cierre de bancarios sin conciliar, como TARJETA_CORP y
+   *  TRANSFERENCIA. Caja chica NO lo cuenta (esa solo mira EFECTIVO). */
+  PAYWISE = 'PAYWISE',
 }
 
 export enum TipoCombustible {

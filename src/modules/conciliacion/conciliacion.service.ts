@@ -30,11 +30,13 @@ const MOV_COLS =
 const MATCH_DAYS = 3;
 /**
  * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
- * estado de cuenta. EFECTIVO sale de caja chica (del cajón), BODEGA es un
- * cargo contable de inventario y los PERSONAL_* llegan al banco después como
- * reintegro, no como el gasto original. Cruzarlos generaba matches falsos.
+ * estado de cuenta (PAYWISE entró el 2-sep-2026: sus cargos también aparecen
+ * en el estado de cuenta). EFECTIVO sale de caja chica (del cajón), BODEGA es
+ * un cargo contable de inventario y los PERSONAL_* llegan al banco después
+ * como reintegro, no como el gasto original. Cruzarlos generaba matches
+ * falsos.
  */
-const MEDIOS_BANCARIOS = ['TARJETA_CORP', 'TRANSFERENCIA'];
+const MEDIOS_BANCARIOS = ['TARJETA_CORP', 'TRANSFERENCIA', 'PAYWISE'];
 
 // Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. El cruce
 // USD↔MXN solo se acepta si el TC implícito (cargo MXN ÷ gasto USD) cae en
@@ -772,7 +774,8 @@ export class ConciliacionService {
    */
   /**
    * El INVERSO de la bandeja de movimientos (28-ago, pedido del cliente):
-   * gastos pagados por BANCO (tarjeta corporativa / transferencia) que no
+   * gastos pagados por BANCO (tarjeta corporativa / transferencia / PayWise)
+   * que no
    * cruzaron con ninguna línea de los estados de cuenta importados. Motivos
    * típicos: el periodo del banco aún no se importa, la fecha/monto del
    * gasto no coincide, o el cargo nunca llegó al banco. Default: últimos
@@ -1096,7 +1099,8 @@ export class ConciliacionService {
 
   /**
    * Rama estado=sin_banco del reporte (los "no conciliados" del cliente):
-   * gastos BANCARIOS (tarjeta corporativa / transferencia) que NO cruzaron
+   * gastos BANCARIOS (tarjeta corporativa / transferencia / PayWise) que NO
+   * cruzaron
    * con ninguna línea del banco — MISMO criterio que gastosSinBanco, pero
    * con el rango desde/hasta obligatorio sobre fecha_gasto (sin el cap de
    * 90 días). Aquí TODO está sin conciliar: todos los montos van en naranja.
@@ -1153,7 +1157,9 @@ export class ConciliacionService {
           '',
         g.medio_pago === 'TARJETA_CORP'
           ? `Tarjeta${g.tarjeta_terminacion ? ` **** ${g.tarjeta_terminacion as string}` : ''}`
-          : 'Transferencia',
+          : g.medio_pago === 'PAYWISE'
+            ? 'PayWise'
+            : 'Transferencia',
         unwrapOne(g.captura as { nombre?: string } | null)?.nombre ?? '',
         vuelo?.folio != null ? `#${vuelo.folio}` : '',
         this.matriculaDeGasto(
@@ -1173,7 +1179,7 @@ export class ConciliacionService {
 
     const buffer = await this.pyservices.generateTablaXlsx({
       titulo: 'Conciliación · Gastos sin banco',
-      subtitulo: `${rows.length} gastos bancarios (tarjeta/transferencia) sin cruzar con el banco · ${desde} a ${hasta}`,
+      subtitulo: `${rows.length} gastos bancarios (tarjeta/transferencia/PayWise) sin cruzar con el banco · ${desde} a ${hasta}`,
       columnas: [
         { label: 'Fecha', tipo: 'texto' },
         { label: 'Categoría', tipo: 'texto' },

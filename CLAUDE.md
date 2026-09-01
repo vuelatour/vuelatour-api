@@ -102,10 +102,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    escalas del piloto). `replaceEscalas` es UPSERT: no destruye tacos.
 
 7. **Conciliación**: auto-match solo `medio_pago IN (TARJETA_CORP,
-   TRANSFERENCIA)` + moneda de la cuenta. `BODEGA` (cargo contable de
-   inventario), `EFECTIVO` (caja chica) y `PERSONAL_*` (reintegros) nunca se
-   cruzan con el banco. ABONOS se cruzan con `cobro_vuelo` vía
-   `movimiento_bancario.cobro_id`.
+   TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
+   el 2-sep-2026; caja chica sigue mirando SOLO EFECTIVO). `BODEGA` (cargo
+   contable de inventario), `EFECTIVO` (caja chica) y `PERSONAL_*`
+   (reintegros) nunca se cruzan con el banco. ABONOS se cruzan con
+   `cobro_vuelo` vía `movimiento_bancario.cobro_id`.
 
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
    `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se

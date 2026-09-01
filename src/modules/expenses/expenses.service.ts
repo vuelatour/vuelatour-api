@@ -123,6 +123,7 @@ export class ExpensesService {
       EFECTIVO: 'Efectivo',
       TARJETA_CORP: 'Tarjeta corporativa',
       TRANSFERENCIA: 'Transferencia',
+      PAYWISE: 'PayWise',
       PERSONAL_PABLO: 'Personal Pablo',
       PERSONAL_ALE: 'Personal Ale',
       BODEGA: 'Bodega',

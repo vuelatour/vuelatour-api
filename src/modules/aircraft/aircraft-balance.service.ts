@@ -79,12 +79,15 @@ const CAT_LABEL: Record<string, string> = {
   PILOTO_EXTERNO: 'Piloto externo',
   NOMINA: 'Nómina',
   SERVICIOS: 'Servicios',
+  // Renombre 1-sep-2026 (pedido del cliente): solo la ETIQUETA cambia, el
+  // código del enum sigue siendo INDIRECTO.
+  INDIRECTO: 'Gastos indirectos de avión',
 };
 // Etiqueta amable de la columna CATEGORÍA de las hojas de gastos (29-ago):
 // overrides locales → CAT_LABEL → capitalizado. Solo presentación (la
 // clasificación por hoja usa la categoría CRUDA, nunca esta etiqueta).
 const CATEGORIA_HOJA_LABEL: Record<string, string> = {
-  INDIRECTO: 'Gastos indirectos',
+  INDIRECTO: 'Gastos indirectos de avión',
   OTRO: 'Otros gastos',
   NOMINA: 'Nómina',
   SERVICIOS: 'Servicios',
@@ -3002,7 +3005,7 @@ export class AircraftBalanceService {
       filasIndirectos,
       tcPromedio,
       horasVoladas,
-      'gastos indirectos',
+      'gastos indirectos de avión',
       pendientes,
     );
     // Hoja "refacciones": mismo ledger + el id del movimiento de cardex por

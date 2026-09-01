@@ -2107,9 +2107,13 @@ export class ProfitSharingService {
     // El espejo que faltaba: los MOVIMIENTOS sin conciliar ya se vigilan,
     // pero un GASTO bancario que nadie cruzó (p. ej. el sobrante de un
     // duplicado cuya pareja ya se concilió) era invisible para siempre.
+    // Mismo set que MEDIOS_BANCARIOS de conciliación (invariante 7):
+    // medios cuyo cargo aparece en el estado de cuenta.
     const bancariosSinConciliar = gastos.filter(
       (g) =>
-        (g.medio_pago === 'TARJETA_CORP' || g.medio_pago === 'TRANSFERENCIA') &&
+        (g.medio_pago === 'TARJETA_CORP' ||
+          g.medio_pago === 'TRANSFERENCIA' ||
+          g.medio_pago === 'PAYWISE') &&
         g.conciliado !== true,
     );
     // Matrícula del comprobante ≠ avión asignado (26-ago, cruce ASUR MID):
@@ -2236,7 +2240,7 @@ export class ProfitSharingService {
         clave: 'gastos_bancarios_sin_conciliar',
         titulo: 'Gastos bancarios sin conciliar al corte',
         detalle:
-          'Tarjeta corporativa o transferencia sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
+          'Tarjeta corporativa, transferencia o PayWise sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
         count: bancariosSinConciliar.length,
       },
       {
