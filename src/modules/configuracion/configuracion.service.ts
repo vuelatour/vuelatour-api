@@ -1,10 +1,19 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import type { UpdateConfiguracionDto } from './dto/configuracion.dto';
 
-const COLS = 'clave, activa, descripcion, updated_at';
+const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
 
 /** Claves conocidas (no regar strings sueltos por el código). */
 export const CONFIG_CAPTURA_TACO_FOTO_IA = 'captura_taco_foto_ia';
+export const CONFIG_DIAS_EDICION_GASTOS_CAMPO = 'dias_edicion_gastos_campo';
+
+/** Fila cacheada de una bandera: estado on/off + valor numérico opcional. */
+type ConfigRow = { activa: boolean; valor_numerico: number | null };
 
 /**
  * Banderas globales de comportamiento del sistema (tabla
@@ -14,7 +23,7 @@ export const CONFIG_CAPTURA_TACO_FOTO_IA = 'captura_taco_foto_ia';
  */
 @Injectable()
 export class ConfiguracionService {
-  private cache: { data: Map<string, boolean>; at: number } | null = null;
+  private cache: { data: Map<string, ConfigRow>; at: number } | null = null;
   private static readonly TTL_MS = 60_000;
 
   constructor(private readonly supabase: SupabaseService) {}
@@ -29,32 +38,66 @@ export class ConfiguracionService {
   }
 
   /**
+   * Fila cacheada de una bandera. Best-effort: una consulta caída jamás tira
+   * /me ni una captura — responde el último valor conocido (o nada, y el
+   * llamador aplica su default).
+   */
+  private async cachedRow(clave: string): Promise<ConfigRow | undefined> {
+    const now = Date.now();
+    if (!this.cache || now - this.cache.at > ConfiguracionService.TTL_MS) {
+      const { data, error } = await this.supabase.service
+        .from('configuracion_sistema')
+        .select('clave, activa, valor_numerico');
+      if (error) return this.cache?.data.get(clave);
+      this.cache = {
+        data: new Map(
+          (data ?? []).map((r) => [
+            r.clave as string,
+            {
+              activa: r.activa as boolean,
+              valor_numerico:
+                r.valor_numerico == null ? null : Number(r.valor_numerico),
+            },
+          ]),
+        ),
+        at: now,
+      };
+    }
+    return this.cache.data.get(clave);
+  }
+
+  /**
    * Valor de una bandera con default seguro si la fila no existe. Best-effort:
    * una consulta caída jamás tira /me ni una captura — responde el último
    * valor conocido o el default.
    */
   async isActiva(clave: string, porDefecto = true): Promise<boolean> {
-    const now = Date.now();
-    if (!this.cache || now - this.cache.at > ConfiguracionService.TTL_MS) {
-      const { data, error } = await this.supabase.service
-        .from('configuracion_sistema')
-        .select('clave, activa');
-      if (error) return this.cache?.data.get(clave) ?? porDefecto;
-      this.cache = {
-        data: new Map(
-          (data ?? []).map((r) => [r.clave as string, r.activa as boolean]),
-        ),
-        at: now,
-      };
-    }
-    return this.cache.data.get(clave) ?? porDefecto;
+    return (await this.cachedRow(clave))?.activa ?? porDefecto;
   }
 
-  async update(clave: string, activa: boolean, userId: string) {
+  /**
+   * Valor NUMÉRICO de una bandera (p.ej. días de la ventana de edición de
+   * gastos). Mismo caché y mismo best-effort que `isActiva`; si la fila no
+   * existe o su valor es null, responde el default.
+   */
+  async numero(clave: string, porDefecto: number): Promise<number> {
+    return (await this.cachedRow(clave))?.valor_numerico ?? porDefecto;
+  }
+
+  async update(clave: string, dto: UpdateConfiguracionDto, userId: string) {
+    const patch: Record<string, unknown> = {};
+    if (dto.activa !== undefined) patch.activa = dto.activa;
+    if (dto.valor_numerico !== undefined)
+      patch.valor_numerico = dto.valor_numerico;
+    if (Object.keys(patch).length === 0) {
+      throw new BadRequestException(
+        'Nada que actualizar: manda activa y/o valor_numerico.',
+      );
+    }
     const { data, error } = await this.supabase.service
       .from('configuracion_sistema')
       .update({
-        activa,
+        ...patch,
         updated_at: new Date().toISOString(),
         updated_by: userId,
       })

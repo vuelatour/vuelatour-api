@@ -268,6 +268,16 @@ export class FlightsController {
     return this.flights.gastosResumen(id);
   }
 
+  @Get(':id/gastos-historial')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Historial de gastos del vuelo (capturas, ediciones con diff y borrados) desde gasto_bitacora; incluye gastos ya eliminados vía su snapshot. Solo oficina.',
+  })
+  gastosHistorial(@Param('id', ParseUUIDPipe) id: string) {
+    return this.flights.gastosHistorial(id);
+  }
+
   @Get(':id/quote-view')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.PILOTO)
   @ApiOperation({

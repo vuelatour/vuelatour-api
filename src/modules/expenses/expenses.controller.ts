@@ -416,7 +416,7 @@ export class ExpensesController {
   )
   @ApiOperation({
     summary:
-      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo el mismo día (doc 5.2/5.3).',
+      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de la ventana de edición (doc 5.2/5.3, config dias_edicion_gastos_campo).',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -428,7 +428,7 @@ export class ExpensesController {
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      await this.expenses.assertOwnSameDay(id, c.userId);
+      await this.expenses.assertOwnEnVentana(id, c.userId);
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
       // Ni concilia ni desmarca duplicados (27-ago): un gasto "conciliado"
@@ -457,7 +457,7 @@ export class ExpensesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo del mismo día.',
+      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo dentro de la ventana de edición.',
   })
   async remove(
     @Param('id', ParseUUIDPipe) id: string,
@@ -468,8 +468,8 @@ export class ExpensesController {
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      await this.expenses.assertOwnSameDay(id, c.userId);
+      await this.expenses.assertOwnEnVentana(id, c.userId);
     }
-    return this.expenses.remove(id, c.rol);
+    return this.expenses.remove(id, c.userId, c.rol);
   }
 }

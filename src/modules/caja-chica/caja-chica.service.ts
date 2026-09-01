@@ -78,6 +78,34 @@ export class CajaChicaService {
     return mejor ? { fecha: mejor.fecha!, monto: Number(mejor.monto) } : null;
   }
 
+  /**
+   * Fecha (YYYY-MM-DD) de la ÚLTIMA reposición del fondo ACTIVO del usuario —
+   * null si no tiene fondo activo, si el fondo es de OTRA moneda o si nunca se
+   * le ha repuesto. La usa `expenses.assertOwnEnVentana` (candado 1-sep-2026):
+   * un gasto EFECTIVO con fecha ≤ esta ya quedó saldado en una reposición de
+   * caja chica y no se corrige/borra desde la app — solo oficina.
+   */
+  async fechaUltimaReposicionDe(
+    usuarioId: string,
+    moneda: string,
+  ): Promise<string | null> {
+    const { data: fondo, error } = await this.supabase.service
+      .from('caja_chica_fondo')
+      .select('id, moneda')
+      .eq('usuario_id', usuarioId)
+      .eq('activo', true)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!fondo || (fondo as { moneda: string }).moneda !== moneda) return null;
+    const { data: movs, error: movErr } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('tipo, monto, fecha, created_at')
+      .eq('fondo_id', (fondo as { id: string }).id)
+      .eq('tipo', TipoMovimientoCaja.REPOSICION);
+    if (movErr) throw new Error(movErr.message);
+    return this.ultimaReposicion(movs ?? [])?.fecha ?? null;
+  }
+
   // ===== Fondos =====
 
   async listFondos(filters: ListFondosQuery) {
@@ -815,10 +843,12 @@ export class CajaChicaService {
       // La LISTA visible de "mi caja" (la app la pinta agrupada por día,
       // como la nota del cliente): los mismos gastos EFECTIVO que alimentan
       // el saldo, con concepto y folio del vuelo. Recientes primero.
+      // `created_at` (aditivo, 1-sep-2026): la app gatea Corregir/Borrar por
+      // fecha de CAPTURA (ventana de edición), no por fecha del ticket.
       this.supabase.service
         .from('gasto')
         .select(
-          'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, vuelo:vuelo_id(folio)',
+          'id, fecha_gasto, monto, moneda, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
         )
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', userId)

@@ -7,6 +7,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CajaChicaService } from '../caja-chica/caja-chica.service';
+import {
+  CONFIG_DIAS_EDICION_GASTOS_CAMPO,
+  ConfiguracionService,
+} from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 import {
   CATEGORIAS_REPARTIBLES,
@@ -98,6 +103,8 @@ export class ExpensesService {
     private readonly notifications: NotificationsService,
     private readonly pyservices: PyservicesService,
     private readonly vision: VisionService,
+    private readonly configuracion: ConfiguracionService,
+    private readonly cajaChica: CajaChicaService,
   ) {}
 
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
@@ -1995,11 +2002,15 @@ export class ExpensesService {
   }
 
   /**
-   * Regla del doc 5.2/5.3: el CAPTURISTA (piloto/mecánico) corrige o borra su
-   * gasto SOLO el mismo día de la captura (hora Cancún) y solo si aún no está
-   * conciliado. Después, únicamente oficina. Lanza si no cumple.
+   * Regla del doc 5.2/5.3, ampliada 1-sep-2026: el CAPTURISTA (piloto/
+   * mecánico/visitante) corrige o borra su gasto SOLO dentro de la VENTANA de
+   * edición — N días (pared Cancún) desde la CAPTURA, con N en
+   * `configuracion_sistema.dias_edicion_gastos_campo` (0 = solo el mismo día,
+   * la regla original) — y solo si aún no está conciliado ni entró ya a una
+   * REPOSICIÓN de su caja chica. Después, únicamente oficina. Lanza si no
+   * cumple.
    */
-  async assertOwnSameDay(id: string, userId: string): Promise<void> {
+  async assertOwnEnVentana(id: string, userId: string): Promise<void> {
     const gasto = await this.findById(id);
     if (gasto.usuario_captura_id !== userId) {
       throw new ForbiddenException(
@@ -2011,13 +2022,44 @@ export class ExpensesService {
         'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
       );
     }
-    const dia = (iso: string | Date) =>
-      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Cancun' }).format(
-        typeof iso === 'string' ? new Date(iso) : iso,
+    // Candado "ya repuesto" (1-sep): un gasto EFECTIVO cuya fecha quedó
+    // cubierta por la ÚLTIMA reposición de la caja chica del capturista ya
+    // está saldado — tocarlo descuadraría un corte que ya se pagó, aunque
+    // siga dentro de la ventana de días.
+    if (gasto.medio_pago === MedioPago.EFECTIVO) {
+      const ultima = await this.cajaChica.fechaUltimaReposicionDe(
+        gasto.usuario_captura_id as string,
+        gasto.moneda as string,
       );
-    if (dia(gasto.created_at as string) !== dia(new Date())) {
+      const diaGasto = String(gasto.fecha_gasto ?? '').slice(0, 10);
+      if (ultima && diaGasto && diaGasto <= ultima) {
+        throw new ConflictException(
+          'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
+        );
+      }
+    }
+    // Ventana de edición: días TRANSCURRIDOS en pared Cancún desde la
+    // captura (mismo patrón que assertFechaRazonable: día calendario a
+    // mediodía UTC + Math.round — jamás diferencia cruda de ms, que cojea
+    // con las horas sueltas del día).
+    const n = Math.max(
+      0,
+      Math.trunc(
+        await this.configuracion.numero(CONFIG_DIAS_EDICION_GASTOS_CAMPO, 14),
+      ),
+    );
+    const enCancun = (d: Date) =>
+      d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
+    const hoy = enCancun(new Date());
+    const capturado = enCancun(new Date(gasto.created_at as string));
+    const ms =
+      Date.parse(`${hoy}T12:00:00Z`) - Date.parse(`${capturado}T12:00:00Z`);
+    const dias = Math.round(ms / 86_400_000);
+    if (dias > n) {
       throw new ForbiddenException(
-        'Los gastos solo se corrigen el mismo día. Pide el ajuste a oficina.',
+        n === 0
+          ? 'Los gastos solo se corrigen el mismo día. Pide el ajuste a oficina.'
+          : `Los gastos solo se corrigen dentro de los ${n} días siguientes a su captura. Pide el ajuste a oficina.`,
       );
     }
   }
@@ -2417,7 +2459,7 @@ export class ExpensesService {
     return data;
   }
 
-  async remove(id: string, rol?: Rol) {
+  async remove(id: string, userId: string, rol?: Rol) {
     // Un gasto conciliado está amarrado a un movimiento bancario (FK con
     // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
     // nada y la conciliación se sobreestimaría en silencio.
@@ -2456,6 +2498,14 @@ export class ExpensesService {
         'La oficina ya repartió este gasto entre aviones: pídeles a ellos eliminarlo o corregirlo.',
       );
     }
+    // Atribución del borrado en la bitácora (1-sep): el trigger de BD toma
+    // OLD.updated_by como actor del DELETE, así que se sella ANTES de borrar.
+    // Ese update tiene diff de negocio vacío → el trigger NO inserta fila.
+    const { error: selloErr } = await this.supabase.service
+      .from('gasto')
+      .update({ updated_by: userId })
+      .eq('id', id);
+    if (selloErr) throw new Error(selloErr.message);
     const { error } = await this.supabase.service
       .from('gasto')
       .delete()

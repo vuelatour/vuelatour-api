@@ -6,6 +6,7 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CONFIG_CAPTURA_TACO_FOTO_IA,
+  CONFIG_DIAS_EDICION_GASTOS_CAMPO,
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
 import { ListDescansosQuery } from '../pilots/dto/pilots.dto';
@@ -32,13 +33,17 @@ export class MeController {
     // Las banderas de comportamiento viajan DENTRO de /me: es el único read
     // que la app consulta siempre al arrancar y cachea entero para offline —
     // así el toggle llega al piloto sin plomería nueva.
-    const [usuario, capturaTacoFotoIa] = await Promise.all([
+    const [usuario, capturaTacoFotoIa, diasEdicionGastos] = await Promise.all([
       this.users.findByAuthId(current.authId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+      this.configuracion.numero(CONFIG_DIAS_EDICION_GASTOS_CAMPO, 14),
     ]);
     return {
       ...usuario,
-      config: { captura_taco_foto_ia: capturaTacoFotoIa },
+      config: {
+        captura_taco_foto_ia: capturaTacoFotoIa,
+        dias_edicion_gastos_campo: diasEdicionGastos,
+      },
     };
   }
 
@@ -51,13 +56,17 @@ export class MeController {
     // MISMO shape que el GET: la app guarda esta respuesta en la misma llave
     // de caché offline que /me — sin `config` la bandera revertía al default
     // al editar el perfil (hallazgo de la revisión adversarial, ago 2026).
-    const [usuario, capturaTacoFotoIa] = await Promise.all([
+    const [usuario, capturaTacoFotoIa, diasEdicionGastos] = await Promise.all([
       this.users.updateSelf(current.authId, body, current.userId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+      this.configuracion.numero(CONFIG_DIAS_EDICION_GASTOS_CAMPO, 14),
     ]);
     return {
       ...usuario,
-      config: { captura_taco_foto_ia: capturaTacoFotoIa },
+      config: {
+        captura_taco_foto_ia: capturaTacoFotoIa,
+        dias_edicion_gastos_campo: diasEdicionGastos,
+      },
     };
   }
 

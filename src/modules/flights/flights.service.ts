@@ -4135,7 +4135,7 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(
-        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, usuario:usuario_captura_id(nombre)',
+        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, usuario_captura_id, usuario:usuario_captura_id(nombre)',
       )
       .eq('vuelo_id', vueloId)
       .order('created_at', { ascending: false });
@@ -4153,9 +4153,143 @@ export class FlightsService {
         // expediente completo).
         nota: ((g.notas as string | null) ?? '').split('\n')[0].trim() || null,
         capturado_por: (usuario as { nombre?: string } | null)?.nombre ?? null,
+        // Aditivo (1-sep-2026): id de quien capturó y fecha de CAPTURA — la
+        // app gatea Corregir/Borrar por dueño + ventana de edición.
+        capturado_por_id: (g.usuario_captura_id as string | null) ?? null,
+        capturado_at: g.created_at as string,
         created_at: g.created_at as string,
       };
     });
+  }
+
+  /**
+   * Historial de cambios de los gastos del vuelo (1-sep-2026, solo oficina):
+   * la bitácora del trigger de BD (`gasto_bitacora`) — que incluye gastos ya
+   * BORRADOS, sin FK a propósito — más los gastos vivos del vuelo. Un gasto
+   * capturado ANTES del trigger no tiene fila INSERT: se sintetiza una con
+   * los datos del propio gasto (o de su snapshot de DELETE) marcada
+   * `sintetizado: true`, para que todo historial arranque en la captura.
+   */
+  async gastosHistorial(vueloId: string) {
+    const [bitRes, gastosRes] = await Promise.all([
+      this.supabase.service
+        .from('gasto_bitacora')
+        .select('gasto_id, accion, actor_id, diff, snapshot, created_at')
+        .eq('vuelo_id', vueloId)
+        .order('created_at', { ascending: true }),
+      this.supabase.service
+        .from('gasto')
+        .select('id, categoria, monto, moneda, created_by, created_at')
+        .eq('vuelo_id', vueloId),
+    ]);
+    if (bitRes.error) throw new Error(bitRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+    const bitacora = (bitRes.data ?? []) as Array<{
+      gasto_id: string;
+      accion: 'INSERT' | 'UPDATE' | 'DELETE';
+      actor_id: string | null;
+      diff: Record<string, unknown> | null;
+      snapshot: Record<string, unknown> | null;
+      created_at: string;
+    }>;
+    const vivos = (gastosRes.data ?? []) as Array<{
+      id: string;
+      categoria: string;
+      monto: number | string;
+      moneda: string;
+      created_by: string | null;
+      created_at: string;
+    }>;
+
+    // Descripción legible por gasto: el estado ACTUAL si vive; si ya se
+    // borró, el snapshot de la bitácora (el DELETE lo guarda completo).
+    const etiqueta = (
+      categoria: unknown,
+      monto: unknown,
+      moneda: unknown,
+    ): string | null => {
+      if (typeof categoria !== 'string' || monto == null) return null;
+      const mon = typeof moneda === 'string' ? moneda : '';
+      return `${categoria} · ${Number(monto)} ${mon}`.trim();
+    };
+    const descripcion = new Map<string, string | null>();
+    for (const b of bitacora) {
+      if (!b.snapshot) continue;
+      const d = etiqueta(
+        b.snapshot.categoria,
+        b.snapshot.monto,
+        b.snapshot.moneda,
+      );
+      if (d) descripcion.set(b.gasto_id, d);
+    }
+    for (const g of vivos) {
+      descripcion.set(g.id, etiqueta(g.categoria, g.monto, g.moneda));
+    }
+
+    type Evento = {
+      gasto_id: string;
+      accion: 'INSERT' | 'UPDATE' | 'DELETE';
+      actor_id: string | null;
+      created_at: string;
+      diff: Record<string, unknown>;
+      sintetizado?: true;
+    };
+    const eventos: Evento[] = bitacora.map((b) => ({
+      gasto_id: b.gasto_id,
+      accion: b.accion,
+      actor_id: b.actor_id ?? null,
+      created_at: b.created_at,
+      diff: b.diff ?? {},
+    }));
+
+    // INSERT sintetizado para el histórico pre-trigger: gastos vivos sin fila
+    // INSERT y gastos borrados cuyo snapshot conserva captura y capturista.
+    const conInsert = new Set(
+      bitacora.filter((b) => b.accion === 'INSERT').map((b) => b.gasto_id),
+    );
+    for (const g of vivos) {
+      if (conInsert.has(g.id)) continue;
+      conInsert.add(g.id);
+      eventos.push({
+        gasto_id: g.id,
+        accion: 'INSERT',
+        actor_id: g.created_by ?? null,
+        created_at: g.created_at,
+        diff: {},
+        sintetizado: true,
+      });
+    }
+    for (const b of bitacora) {
+      if (conInsert.has(b.gasto_id) || !b.snapshot?.created_at) continue;
+      conInsert.add(b.gasto_id);
+      eventos.push({
+        gasto_id: b.gasto_id,
+        accion: 'INSERT',
+        actor_id: (b.snapshot.created_by as string | null) ?? null,
+        created_at: b.snapshot.created_at as string,
+        diff: {},
+        sintetizado: true,
+      });
+    }
+    eventos.sort((a, b) =>
+      a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
+    );
+
+    const info = await this.usuariosInfo(
+      eventos
+        .map((e) => e.actor_id)
+        .filter((x): x is string => typeof x === 'string' && x.length > 0),
+    );
+    return eventos.map((e) => ({
+      gasto_id: e.gasto_id,
+      accion: e.accion,
+      actor_id: e.actor_id,
+      actor_nombre: e.actor_id ? (info.get(e.actor_id)?.nombre ?? null) : null,
+      created_at: e.created_at,
+      ...(e.sintetizado ? { sintetizado: true as const } : {}),
+      diff: e.diff,
+      descripcion_gasto: descripcion.get(e.gasto_id) ?? null,
+    }));
   }
 
   // ============ Escalas ============

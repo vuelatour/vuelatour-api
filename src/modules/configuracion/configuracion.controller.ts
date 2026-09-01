@@ -23,12 +23,14 @@ export class ConfiguracionController {
 
   @Patch(':clave')
   @Roles(Rol.ADMIN)
-  @ApiOperation({ summary: 'Activa/desactiva una bandera global (ADMIN)' })
+  @ApiOperation({
+    summary: 'Actualiza una bandera global: activa y/o valor_numerico (ADMIN)',
+  })
   update(
     @Param('clave') clave: string,
     @Body() dto: UpdateConfiguracionDto,
     @CurrentUser() current: AuthenticatedUser,
   ) {
-    return this.config.update(clave, dto.activa, current.userId);
+    return this.config.update(clave, dto, current.userId);
   }
 }
