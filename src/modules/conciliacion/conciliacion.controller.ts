@@ -40,8 +40,11 @@ export class ConciliacionController {
   @ApiOperation({
     summary: 'Parsea un estado de cuenta (CSV/Excel/PDF) sin persistir',
   })
-  parse(@Body() dto: ConciliacionParseDto) {
-    return this.conciliacion.parse(dto);
+  parse(
+    @Body() dto: ConciliacionParseDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.parse(dto, c.userId);
   }
 
   @Post('importar')
@@ -213,7 +216,10 @@ export class ConciliacionController {
     summary:
       'Sugiere por IA el gasto más probable para un movimiento sin conciliar y ambiguo (ADMIN). Best-effort: disponible=false si la IA no está disponible.',
   })
-  sugerir(@Param('id', ParseUUIDPipe) id: string) {
-    return this.conciliacion.sugerir(id);
+  sugerir(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.sugerir(id, c.userId);
   }
 }

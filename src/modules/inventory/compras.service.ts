@@ -7,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseService } from '../supabase/supabase.service';
+import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
 import type { EnvVars } from '../../config/env.schema';
 import { calcularCompra, type CargoFactura } from '../compras/compras.calculo';
 import { InventoryService } from './inventory.service';
@@ -31,6 +32,8 @@ export interface CompraExtraida {
   confianza: number;
   notas: string;
   modelo: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 /** Lo mínimo para ubicar/crear un ítem del inventario. */
@@ -112,9 +115,13 @@ export class ComprasService {
     private readonly config: ConfigService<EnvVars, true>,
     private readonly supabase: SupabaseService,
     private readonly inventory: InventoryService,
+    private readonly iaUso: IaUsoService,
   ) {}
 
-  async extraer(dto: ExtraerCompraDto): Promise<CompraExtraida> {
+  async extraer(
+    dto: ExtraerCompraDto,
+    userId?: string,
+  ): Promise<CompraExtraida> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
@@ -142,7 +149,11 @@ export class ComprasService {
           `pyservices respondió ${res.status} al extraer el PDF`,
         );
       }
-      return (await res.json()) as CompraExtraida;
+      const body = (await res.json()) as CompraExtraida;
+      this.iaUso.registrar('COMPRA_PDF', body.uso_ia, {
+        usuarioId: userId ?? null,
+      });
+      return body;
     } catch (err) {
       if (err instanceof ServiceUnavailableException) throw err;
       const msg = err instanceof Error ? err.message : String(err);

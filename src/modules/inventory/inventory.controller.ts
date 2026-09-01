@@ -61,8 +61,11 @@ export class InventoryController {
   @ApiOperation({
     summary: 'Extrae líneas de producto de un PDF de compra (IA)',
   })
-  extraerCompra(@Body() dto: ExtraerCompraDto) {
-    return this.compras.extraer(dto);
+  extraerCompra(
+    @Body() dto: ExtraerCompraDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.compras.extraer(dto, c.userId);
   }
 
   @Post('compras/importar')

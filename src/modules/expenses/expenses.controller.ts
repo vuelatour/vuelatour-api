@@ -365,8 +365,11 @@ export class ExpensesController {
     summary:
       'Reanaliza el comprobante guardado con la IA de visión. SOLO-LECTURA: devuelve la lectura para prellenar el formulario; valor_ia_extraido se guarda junto con el PATCH cuando el humano confirma.',
   })
-  async reanalizarIA(@Param('id', ParseUUIDPipe) id: string) {
-    return this.expenses.reanalizarConIA(id);
+  async reanalizarIA(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.reanalizarConIA(id, c.userId);
   }
 
   @Get(':id/reparto')

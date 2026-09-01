@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
+import type { UsoIaPayload } from '../ia-uso/ia-uso.service';
 
 export interface VencimientoExtraerInput {
   /** PDF en base64 (sin prefijo data:). */
@@ -19,6 +20,8 @@ export interface VencimientoExtraerResult {
   confianza: number;
   notas: string;
   modelo: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 /**

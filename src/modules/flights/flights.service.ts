@@ -5286,7 +5286,17 @@ export class FlightsService {
         CONFIG_CAPTURA_TACO_FOTO_IA,
       );
       const ia = fotoIaActiva
-        ? await this.vision.readTacometro({ imageUrl: signed, ultimo })
+        ? await this.vision.readTacometro(
+            { imageUrl: signed, ultimo },
+            {
+              usuarioId: userId,
+              contexto: {
+                escala_id: escala.id as string,
+                origen: 'sync_offline',
+                which,
+              },
+            },
+          )
         : null;
 
       if (!ia || !ia.legible || ia.lectura === null) {
@@ -6090,7 +6100,7 @@ export class FlightsService {
    * falla o la foto sale ilegible, cae a una sugerencia histórica (solo para la
    * lectura de llegada, cuando ya hay taco_salida) — nunca bloquea al piloto.
    */
-  async tacoAiRead(escalaId: string, dto: TacoAiReadDto) {
+  async tacoAiRead(escalaId: string, dto: TacoAiReadDto, userId?: string) {
     const { data: escala, error } = await this.supabase.service
       .from('escala')
       .select(
@@ -6121,12 +6131,22 @@ export class FlightsService {
       CONFIG_CAPTURA_TACO_FOTO_IA,
     );
     const ia = fotoIaActiva
-      ? await this.vision.readTacometro({
-          imageBase64: dto.image_base64,
-          mediaType: dto.media_type,
-          imageUrl: dto.image_url,
-          ultimo,
-        })
+      ? await this.vision.readTacometro(
+          {
+            imageBase64: dto.image_base64,
+            mediaType: dto.media_type,
+            imageUrl: dto.image_url,
+            ultimo,
+          },
+          {
+            usuarioId: userId ?? null,
+            contexto: {
+              escala_id: escalaId,
+              vuelo_id: escala.vuelo_id as string,
+              origen: 'app_prellenado',
+            },
+          },
+        )
       : null;
 
     if (ia && ia.legible && ia.lectura !== null) {

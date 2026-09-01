@@ -647,7 +647,7 @@ export class FlightsController {
   ) {
     // Mismo candado que la captura: el APOYO no lee/propone tacómetros.
     await this.flights.assertPuedeCapturarTaco(legId, c);
-    return this.flights.tacoAiRead(legId, dto);
+    return this.flights.tacoAiRead(legId, dto, c.userId);
   }
 
   @Post('legs/:legId/cancel')

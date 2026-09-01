@@ -10,6 +10,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
+import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
 import type { EnvVars } from '../../config/env.schema';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
 import {
@@ -54,6 +55,8 @@ export interface ParsedStatement {
   formato: string;
   notas: string;
   modelo: string | null;
+  /** Consumo de tokens (solo PDF; CSV/Excel no usan IA). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface SugerenciaConciliacion {
@@ -84,10 +87,14 @@ export class ConciliacionService {
     private readonly config: ConfigService<EnvVars, true>,
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    private readonly iaUso: IaUsoService,
   ) {}
 
   /** Parsea el estado de cuenta en pyservices (sin persistir). */
-  async parse(dto: ConciliacionParseDto): Promise<ParsedStatement> {
+  async parse(
+    dto: ConciliacionParseDto,
+    userId?: string,
+  ): Promise<ParsedStatement> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
@@ -121,7 +128,16 @@ export class ConciliacionService {
           `pyservices respondió ${res.status} al parsear: ${detail.slice(0, 200)}`,
         );
       }
-      return (await res.json()) as ParsedStatement;
+      const body = (await res.json()) as ParsedStatement;
+      // SOLO el camino PDF gasta IA (CSV/Excel son pandas): sin uso_ia no hay
+      // nada que registrar.
+      if (body.uso_ia) {
+        this.iaUso.registrar('ESTADO_CUENTA_PDF', body.uso_ia, {
+          usuarioId: userId ?? null,
+          contexto: { filename: dto.filename },
+        });
+      }
+      return body;
     } catch (err) {
       if (err instanceof ServiceUnavailableException) throw err;
       const msg = err instanceof Error ? err.message : String(err);
@@ -1423,7 +1439,10 @@ export class ConciliacionService {
    * Best-effort: si pyservices no está configurado o falla, devuelve
    * disponible=false con los candidatos para que el operador elija a mano.
    */
-  async sugerir(movId: string): Promise<SugerenciaConciliacion> {
+  async sugerir(
+    movId: string,
+    userId?: string,
+  ): Promise<SugerenciaConciliacion> {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select('id, fecha, monto, descripcion, conciliado, cuenta_bancaria_id')
@@ -1499,7 +1518,12 @@ export class ConciliacionService {
         gasto_id_sugerido: string | null;
         confianza: number;
         razon: string;
+        uso_ia?: UsoIaPayload | null;
       };
+      this.iaUso.registrar('CONCILIACION_SUGERIR', data.uso_ia, {
+        usuarioId: userId ?? null,
+        contexto: { movimiento_id: movId },
+      });
       // Solo aceptamos un id que esté realmente entre los candidatos.
       const sugerido = candidatos.some((c) => c.id === data.gasto_id_sugerido)
         ? data.gasto_id_sugerido

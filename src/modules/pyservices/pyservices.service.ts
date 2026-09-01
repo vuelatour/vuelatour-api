@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
+import type { UsoIaPayload } from '../ia-uso/ia-uso.service';
 
 export interface RepartoSocioPayload {
   socio_nombre: string;
@@ -916,6 +917,8 @@ export interface GastoVueloSugerenciaResult {
   confianza: number;
   razon: string;
   modelo: string;
+  /** Consumo de tokens (aditivo; None en el early-return sin candidatos). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface ArchivoZipPayload {

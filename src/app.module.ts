@@ -12,6 +12,7 @@ import { AuthGuard } from './common/guards/auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { RequestIdMiddleware } from './common/middleware/request-id.middleware';
 import { SupabaseModule } from './modules/supabase/supabase.module';
+import { IaUsoModule } from './modules/ia-uso/ia-uso.module';
 import { HealthModule } from './modules/health/health.module';
 import { UsersModule } from './modules/users/users.module';
 import { MeModule } from './modules/me/me.module';
@@ -87,6 +88,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
       }),
     }),
     SupabaseModule,
+    IaUsoModule,
     AuthModule,
     HealthModule,
     UsersModule,

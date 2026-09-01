@@ -3,6 +3,18 @@ import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 import { normalizarCodigo } from '../inventory/inventario-codigo.util';
+import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
+
+/**
+ * Datos de registro del consumo de IA de una lectura (best-effort). El call
+ * site decide la CATEGORÍA (ej. /vision/gasto sirve a GASTO_TICKET y a
+ * REANALISIS); sin `categoria` se usa el default del método.
+ */
+export interface RegistroVision {
+  categoria?: string;
+  usuarioId?: string | null;
+  contexto?: Record<string, unknown>;
+}
 
 export interface TacometroVisionInput {
   /** Imagen en base64 (sin prefijo data:). Requiere mediaType. */
@@ -26,6 +38,8 @@ export interface TacometroVisionResult {
    */
   calidad_foto?: 'ALTA' | 'MEDIA' | 'BAJA';
   modelo: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface GastoTicketVisionInput {
@@ -68,6 +82,8 @@ export interface GastoTicketVisionResult {
   legible: boolean;
   notas: string;
   modelo: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface ConstanciaFiscalVisionInput {
@@ -91,6 +107,8 @@ export interface ConstanciaFiscalVisionResult {
   domicilio: string | null;
   confianza: number;
   motivo?: string | null;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface CombustibleTicketVisionInput {
@@ -120,6 +138,8 @@ export interface CombustibleTicketVisionResult {
   legible: boolean;
   notas: string;
   modelo: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 export interface InventarioItemVisionInput {
@@ -156,6 +176,8 @@ export interface InventarioItemVisionResult {
   confianza: number;
   notas_ia: string | null;
   modelo?: string;
+  /** Consumo de tokens (aditivo; pyservices viejo no lo manda). */
+  uso_ia?: UsoIaPayload | null;
 }
 
 /**
@@ -171,7 +193,10 @@ export class VisionService implements OnModuleInit {
   private token = '';
   private timeoutMs = 30000;
 
-  constructor(private readonly config: ConfigService<EnvVars, true>) {}
+  constructor(
+    private readonly config: ConfigService<EnvVars, true>,
+    private readonly iaUso: IaUsoService,
+  ) {}
 
   onModuleInit() {
     this.baseUrl = this.config
@@ -243,6 +268,17 @@ export class VisionService implements OnModuleInit {
         signal: controller.signal,
       });
       const detalle = await res.text().catch(() => '');
+      if (res.ok) {
+        // El ping usa una imagen REAL: consume tokens y también se registra.
+        try {
+          const body = JSON.parse(detalle) as { uso_ia?: UsoIaPayload | null };
+          this.iaUso.registrar('TACOMETRO', body.uso_ia, {
+            contexto: { origen: 'health' },
+          });
+        } catch {
+          /* respuesta no-JSON: sin registro */
+        }
+      }
       return {
         ...base,
         pyservices_responde: res.ok,
@@ -263,6 +299,7 @@ export class VisionService implements OnModuleInit {
 
   async readTacometro(
     input: TacometroVisionInput,
+    reg?: RegistroVision,
   ): Promise<TacometroVisionResult | null> {
     if (!this.enabled) return null;
     if (!input.imageBase64 && !input.imageUrl) {
@@ -297,6 +334,10 @@ export class VisionService implements OnModuleInit {
         return null;
       }
       const data = (await res.json()) as TacometroVisionResult;
+      this.iaUso.registrar(reg?.categoria ?? 'TACOMETRO', data.uso_ia, {
+        usuarioId: reg?.usuarioId,
+        contexto: reg?.contexto,
+      });
       return data;
     } catch (err) {
       this.logger.warn(
@@ -315,6 +356,7 @@ export class VisionService implements OnModuleInit {
    */
   async readGastoTicket(
     input: GastoTicketVisionInput,
+    reg?: RegistroVision,
   ): Promise<(GastoTicketVisionResult & { motivo?: string }) | null> {
     if (!this.enabled) return null;
     if (
@@ -377,6 +419,10 @@ export class VisionService implements OnModuleInit {
         return { motivo } as GastoTicketVisionResult & { motivo: string };
       }
       const ai = (await res.json()) as GastoTicketVisionResult;
+      this.iaUso.registrar(reg?.categoria ?? 'GASTO_TICKET', ai.uso_ia, {
+        usuarioId: reg?.usuarioId,
+        contexto: reg?.contexto,
+      });
       // Desglose compuesto con la MISMA regla que se guardará en las notas
       // (FBO/TUA con IVA): el panel lo muestra al capturar para que la
       // oficina vea ANTES de guardar si la separación cuadró.
@@ -413,6 +459,7 @@ export class VisionService implements OnModuleInit {
    */
   async readConstanciaFiscal(
     input: ConstanciaFiscalVisionInput,
+    reg?: RegistroVision,
   ): Promise<
     (ConstanciaFiscalVisionResult & { motivo?: string | null }) | null
   > {
@@ -456,7 +503,12 @@ export class VisionService implements OnModuleInit {
         }
         return { motivo } as ConstanciaFiscalVisionResult & { motivo: string };
       }
-      return (await res.json()) as ConstanciaFiscalVisionResult;
+      const data = (await res.json()) as ConstanciaFiscalVisionResult;
+      this.iaUso.registrar(reg?.categoria ?? 'CONSTANCIA_FISCAL', data.uso_ia, {
+        usuarioId: reg?.usuarioId,
+        contexto: reg?.contexto,
+      });
+      return data;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`readConstanciaFiscal falló: ${msg}`);
@@ -476,6 +528,7 @@ export class VisionService implements OnModuleInit {
    */
   async readCombustibleTicket(
     input: CombustibleTicketVisionInput,
+    reg?: RegistroVision,
   ): Promise<CombustibleTicketVisionResult | null> {
     if (!this.enabled) return null;
     if (!input.imageBase64 && !input.imageUrl) return null;
@@ -502,7 +555,13 @@ export class VisionService implements OnModuleInit {
         );
         return null;
       }
-      return (await res.json()) as CombustibleTicketVisionResult;
+      const data = (await res.json()) as CombustibleTicketVisionResult;
+      this.iaUso.registrar(
+        reg?.categoria ?? 'COMBUSTIBLE_TICKET',
+        data.uso_ia,
+        { usuarioId: reg?.usuarioId, contexto: reg?.contexto },
+      );
+      return data;
     } catch (err) {
       this.logger.warn(
         `readCombustibleTicket falló: ${err instanceof Error ? err.message : String(err)}`,
@@ -523,6 +582,7 @@ export class VisionService implements OnModuleInit {
    */
   async readInventarioItem(
     input: InventarioItemVisionInput,
+    reg?: RegistroVision,
   ): Promise<(InventarioItemVisionResult & { motivo?: string }) | null> {
     if (!this.enabled) return null;
     const images = (input.images ?? []).filter(
@@ -571,6 +631,10 @@ export class VisionService implements OnModuleInit {
         return { motivo } as InventarioItemVisionResult & { motivo: string };
       }
       const ai = (await res.json()) as InventarioItemVisionResult;
+      this.iaUso.registrar(reg?.categoria ?? 'INVENTARIO_ITEM', ai.uso_ia, {
+        usuarioId: reg?.usuarioId,
+        contexto: reg?.contexto,
+      });
       ai.codigo_barras = normalizarCodigo(ai.codigo_barras);
       if (ai.empaque) {
         ai.empaque.codigo_barras = normalizarCodigo(ai.empaque.codigo_barras);

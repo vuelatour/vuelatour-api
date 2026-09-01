@@ -24,6 +24,7 @@ import {
 } from './dto/expirations.dto';
 import { ExpirationsClient } from './expirations.client';
 import { ExpirationsService } from './expirations.service';
+import { IaUsoService } from '../ia-uso/ia-uso.service';
 
 @ApiTags('Expirations')
 @ApiBearerAuth()
@@ -32,6 +33,7 @@ export class ExpirationsController {
   constructor(
     private readonly expirations: ExpirationsService,
     private readonly extractor: ExpirationsClient,
+    private readonly iaUso: IaUsoService,
   ) {}
 
   @Post('extraer')
@@ -41,13 +43,19 @@ export class ExpirationsController {
     summary:
       'Extrae por IA los datos de un documento de vencimiento renovado (PDF/imagen) para pre-llenar el alta. Best-effort: si la IA no está disponible regresa disponible=false.',
   })
-  async extraer(@Body() dto: ExtraerVencimientoDto) {
+  async extraer(
+    @Body() dto: ExtraerVencimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
     const result = await this.extractor.extraer({
       pdfBase64: dto.pdfBase64,
       imageBase64: dto.imageBase64,
       mediaType: dto.mediaType,
     });
     if (!result) return { disponible: false };
+    this.iaUso.registrar('VENCIMIENTO_DOC', result.uso_ia, {
+      usuarioId: c.userId,
+    });
     return { disponible: true, ...result };
   }
 

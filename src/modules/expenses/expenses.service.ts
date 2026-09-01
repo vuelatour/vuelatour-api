@@ -30,6 +30,7 @@ import {
   type TablaColumnaPayload,
 } from '../pyservices/pyservices.service';
 import { VisionService } from '../vision/vision.service';
+import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import type {
@@ -111,6 +112,7 @@ export class ExpensesService {
     private readonly vision: VisionService,
     private readonly configuracion: ConfiguracionService,
     private readonly cajaChica: CajaChicaService,
+    private readonly iaUso: IaUsoService,
   ) {}
 
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
@@ -501,6 +503,12 @@ export class ExpensesService {
         estado: c.estado,
       })),
     });
+    // Consumo IA: el barrido sugerirAsignaciones hereda este registro.
+    if (ia) {
+      this.iaUso.registrar('GASTO_VUELO_SUGERIR', ia.uso_ia, {
+        contexto: { gasto_id: gastoId },
+      });
+    }
     if (!ia) {
       return {
         sugerido: null,
@@ -1432,7 +1440,14 @@ export class ExpensesService {
    * `valor_ia_extraido.fotos_adicionales` — se mandan TODAS a la IA (leer
    * solo la hoja 1 daría un total parcial que parece bueno).
    */
-  async reanalizarConIA(gastoId: string) {
+  async reanalizarConIA(gastoId: string, userId?: string) {
+    // Misma ruta /vision/gasto que la captura, pero categoría propia en el
+    // registro de consumo: la decide el call site, nunca pyservices.
+    const reg = {
+      categoria: 'REANALISIS',
+      usuarioId: userId ?? null,
+      contexto: { gasto_id: gastoId },
+    };
     const gasto = (await this.findById(gastoId)) as {
       foto_url?: string | null;
       valor_ia_extraido?: { fotos_adicionales?: unknown } | null;
@@ -1460,26 +1475,35 @@ export class ExpensesService {
     if (lower.endsWith('.pdf')) {
       const b64 = await this.descargarBase64(urls[path]);
       lectura = b64
-        ? await this.vision.readGastoTicket({ pdfBase64: b64 })
+        ? await this.vision.readGastoTicket({ pdfBase64: b64 }, reg)
         : null;
     } else if (/\.(xlsx|xls|csv)$/.test(lower)) {
       const b64 = await this.descargarBase64(urls[path]);
       lectura = b64
-        ? await this.vision.readGastoTicket({
-            excelBase64: b64,
-            excelFilename: path.split('/').pop() ?? 'comprobante.xlsx',
-          })
+        ? await this.vision.readGastoTicket(
+            {
+              excelBase64: b64,
+              excelFilename: path.split('/').pop() ?? 'comprobante.xlsx',
+            },
+            reg,
+          )
         : null;
     } else if (fotosAdicionales.length > 0) {
       // Factura multi-hoja: todas las páginas juntas (Claude las descarga).
-      lectura = await this.vision.readGastoTicket({
-        images: paths
-          .filter((pp) => urls[pp])
-          .map((pp) => ({ imageUrl: urls[pp] })),
-      });
+      lectura = await this.vision.readGastoTicket(
+        {
+          images: paths
+            .filter((pp) => urls[pp])
+            .map((pp) => ({ imageUrl: urls[pp] })),
+        },
+        reg,
+      );
     } else {
       // Imagen: Claude descarga la URL firmada — sin re-subir bytes.
-      lectura = await this.vision.readGastoTicket({ imageUrl: urls[path] });
+      lectura = await this.vision.readGastoTicket(
+        { imageUrl: urls[path] },
+        reg,
+      );
     }
     if (!lectura) return { disponible: false as const };
     if (lectura.motivo && lectura.monto === undefined) {
@@ -1515,7 +1539,13 @@ export class ExpensesService {
     const urls = await this.signPhotos([fotoPath]);
     const imageUrl = urls[fotoPath];
     if (!imageUrl) return;
-    const ai = await this.vision.readGastoTicket({ imageUrl });
+    const ai = await this.vision.readGastoTicket(
+      { imageUrl },
+      {
+        usuarioId: userId,
+        contexto: { gasto_id: gastoId, origen: 'offline_enriquecimiento' },
+      },
+    );
     if (!ai || ai.monto === undefined || !ai.legible) return;
 
     const gasto = await this.findById(gastoId);
