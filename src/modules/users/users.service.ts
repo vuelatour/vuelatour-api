@@ -91,6 +91,24 @@ export class UsersService {
   }
 
   /**
+   * Permiso TEMPORAL "gastos sin límite de tiempo" (1-sep-2026, caso Luis
+   * Cáceres): mientras `now() < gastos_sin_limite_hasta` el usuario de campo
+   * queda exento de los candados de TIEMPO de gastos (los aplica
+   * `expenses.service`). Select puntual: la columna NO viaja en `COLUMNS`
+   * (solo la consumen /me — para que la app pueda explicárselo al usuario —
+   * y los candados de gastos). Devuelve el ISO tal cual o null.
+   */
+  async gastosSinLimiteHasta(usuarioId: string): Promise<string | null> {
+    const { data, error } = await this.supabase.service
+      .from('usuario')
+      .select('gastos_sin_limite_hasta')
+      .eq('id', usuarioId)
+      .maybeSingle();
+    if (error) throw new Error(`Failed to load usuario: ${error.message}`);
+    return (data?.gastos_sin_limite_hasta as string | null) ?? null;
+  }
+
+  /**
    * Crea un usuario sin sesión de Supabase Auth todavía. Se usa para "invitar"
    * a un piloto: queda en estado INVITADO con supabase_auth_id=null. Al primer
    * login con Google, un trigger / proceso de provisión enlaza el auth_id.

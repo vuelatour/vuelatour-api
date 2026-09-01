@@ -1022,8 +1022,9 @@ export class ExpensesService {
       dto.permitir_fecha_antigua === true,
     );
     // Regla SEMANAL de captura (1-sep): solo roles de CAMPO — la oficina
-    // (vuelos pasados, cargas masivas, cargas históricas) queda exenta.
-    await this.assertCapturaEnSemana(dto.fecha_gasto, rol);
+    // (vuelos pasados, cargas masivas, cargas históricas) queda exenta, y un
+    // permiso temporal `gastos_sin_limite_hasta` vigente también exime.
+    await this.assertCapturaEnSemana(dto.fecha_gasto, rol, userId);
     // REGLA B (28-ago): un gasto enlazado a un TRAMO pertenece al avión de
     // ese tramo. Se resuelve UNA vez aquí (vuelo del tramo + avión con
     // herencia) y de aquí salen la herencia y el aviso de discrepancia.
@@ -2011,6 +2012,32 @@ export class ExpensesService {
   }
 
   /**
+   * Permiso TEMPORAL "sin límite de tiempo" (1-sep-2026, caso Luis Cáceres):
+   * `usuario.gastos_sin_limite_hasta` (timestamptz) exime al usuario de campo
+   * de los candados de TIEMPO de gastos (ventana semanal de edición, candado
+   * de captura semanal y candado de reposición de caja chica) mientras
+   * `now() < hasta` — p.ej. Luis capturando el fin de semana atrasado el
+   * 1-sep. Los candados de PROPIEDAD (solo sus gastos) y de CONCILIADO con el
+   * banco se CONSERVAN: el permiso relaja el "cuándo", nunca el "qué".
+   * Expira solo (null o pasado = regla normal); la oficina lo pone/renueva
+   * directo en la columna. Select puntual sin caché: se consulta solo al
+   * capturar/corregir y así la revocación surte efecto inmediato.
+   */
+  private async sinLimiteVigente(userId: string): Promise<boolean> {
+    if (!userId) return false;
+    const { data } = await this.supabase.service
+      .from('usuario')
+      .select('gastos_sin_limite_hasta')
+      .eq('id', userId)
+      .maybeSingle();
+    // Error o sin fila → sin permiso (fail-closed a la regla normal).
+    const hasta = data?.gastos_sin_limite_hasta as string | null | undefined;
+    if (!hasta) return false;
+    const ms = Date.parse(hasta);
+    return Number.isFinite(ms) && ms > Date.now();
+  }
+
+  /**
    * Regla SEMANAL (audio del equipo, 1-sep-2026 — sustituye la ventana de N
    * días): el CAPTURISTA (piloto/mecánico/visitante) corrige o borra su gasto
    * mientras hoy ≤ domingo de la semana de CAPTURA (lunes→domingo, pared
@@ -2032,6 +2059,10 @@ export class ExpensesService {
         'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
       );
     }
+    // Permiso temporal sin límite (caso Luis, 1-sep): salta SOLO los candados
+    // de TIEMPO que siguen (reposición de caja chica y semana de edición).
+    // Dueño y conciliado ya se validaron arriba y aplican SIEMPRE.
+    if (await this.sinLimiteVigente(userId)) return;
     // Candado "ya repuesto" (1-sep): un gasto EFECTIVO cuya fecha quedó
     // cubierta por la ÚLTIMA reposición de la caja chica del capturista ya
     // está saldado — tocarlo descuadraría un corte que ya se pagó, aunque
@@ -2126,16 +2157,21 @@ export class ExpensesService {
    * La OFICINA queda exenta (captura de vuelos pasados, cargas masivas e
    * históricas van por ahí). Vive junto a `assertFechaRazonable`: aquella
    * acota el disparate (año equivocado), esta acota la semana operativa.
+   * Un permiso temporal `gastos_sin_limite_hasta` vigente (caso Luis, 1-sep)
+   * también exenta al capturista de campo mientras dure.
    */
   private async assertCapturaEnSemana(
     fecha: string | undefined,
     rol?: Rol,
+    userId?: string,
   ): Promise<void> {
     const esCampo =
       rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
     if (!esCampo || !fecha) return;
     const dia = fecha.slice(0, 10);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return; // formato lo valida el DTO
+    // Permiso temporal sin límite: exento del candado semanal mientras dure.
+    if (userId && (await this.sinLimiteVigente(userId))) return;
     const gracia = graciaSaneada(
       await this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
     );
@@ -2158,8 +2194,9 @@ export class ExpensesService {
         dto.permitir_fecha_antigua === true,
       );
       // Mover la fecha a una semana ya cerrada equivale a capturar en ella:
-      // mismo candado semanal que en el alta (oficina exenta).
-      await this.assertCapturaEnSemana(dto.fecha_gasto, rol);
+      // mismo candado semanal que en el alta (oficina exenta y permiso
+      // temporal `gastos_sin_limite_hasta` también).
+      await this.assertCapturaEnSemana(dto.fecha_gasto, rol, userId);
     }
     if (Object.keys(dto).length === 0) return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA

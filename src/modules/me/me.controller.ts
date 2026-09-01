@@ -33,16 +33,22 @@ export class MeController {
     // Las banderas de comportamiento viajan DENTRO de /me: es el único read
     // que la app consulta siempre al arrancar y cachea entero para offline —
     // así el toggle llega al piloto sin plomería nueva.
-    const [usuario, capturaTacoFotoIa, diasGraciaSemana] = await Promise.all([
-      this.users.findByAuthId(current.authId),
-      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
-      this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
-    ]);
+    const [usuario, capturaTacoFotoIa, diasGraciaSemana, sinLimiteHasta] =
+      await Promise.all([
+        this.users.findByAuthId(current.authId),
+        this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+        this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
+        this.users.gastosSinLimiteHasta(current.userId),
+      ]);
     return {
       ...usuario,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,
+        // Permiso temporal (1-sep, caso Luis): mientras ahora < esta fecha,
+        // los candados de TIEMPO de gastos no aplican a este usuario; la app
+        // lo usa solo para no regañarlo en la UI. ISO o null (= regla normal).
+        gastos_sin_limite_hasta: sinLimiteHasta,
       },
     };
   }
@@ -56,16 +62,20 @@ export class MeController {
     // MISMO shape que el GET: la app guarda esta respuesta en la misma llave
     // de caché offline que /me — sin `config` la bandera revertía al default
     // al editar el perfil (hallazgo de la revisión adversarial, ago 2026).
-    const [usuario, capturaTacoFotoIa, diasGraciaSemana] = await Promise.all([
-      this.users.updateSelf(current.authId, body, current.userId),
-      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
-      this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
-    ]);
+    const [usuario, capturaTacoFotoIa, diasGraciaSemana, sinLimiteHasta] =
+      await Promise.all([
+        this.users.updateSelf(current.authId, body, current.userId),
+        this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+        this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
+        this.users.gastosSinLimiteHasta(current.userId),
+      ]);
     return {
       ...usuario,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,
+        // MISMO shape que el GET (ver nota de la llave de caché offline).
+        gastos_sin_limite_hasta: sinLimiteHasta,
       },
     };
   }
