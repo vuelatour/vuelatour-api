@@ -416,7 +416,7 @@ export class ExpensesController {
   )
   @ApiOperation({
     summary:
-      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de la ventana de edición (doc 5.2/5.3, config dias_edicion_gastos_campo).',
+      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana).',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -457,7 +457,7 @@ export class ExpensesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo dentro de la ventana de edición.',
+      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo dentro de su semana de captura (lunes→domingo + gracia).',
   })
   async remove(
     @Param('id', ParseUUIDPipe) id: string,

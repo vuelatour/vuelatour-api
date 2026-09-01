@@ -10,7 +10,13 @@ const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
 
 /** Claves conocidas (no regar strings sueltos por el código). */
 export const CONFIG_CAPTURA_TACO_FOTO_IA = 'captura_taco_foto_ia';
-export const CONFIG_DIAS_EDICION_GASTOS_CAMPO = 'dias_edicion_gastos_campo';
+/**
+ * Días de gracia de la SEMANA de gastos (regla 1-sep-2026, audio del equipo):
+ * los roles de campo capturan/corrigen dentro del bloque lunes→domingo en
+ * pared Cancún, y tras el domingo tienen estos días extra para lo de la
+ * semana pasada (1 = hasta el lunes). Default 1 en los consumidores.
+ */
+export const CONFIG_DIAS_GRACIA_GASTOS_SEMANA = 'dias_gracia_gastos_semana';
 
 /** Fila cacheada de una bandera: estado on/off + valor numérico opcional. */
 type ConfigRow = { activa: boolean; valor_numerico: number | null };

@@ -9,10 +9,16 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import { CajaChicaService } from '../caja-chica/caja-chica.service';
 import {
-  CONFIG_DIAS_EDICION_GASTOS_CAMPO,
+  CONFIG_DIAS_GRACIA_GASTOS_SEMANA,
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import {
+  graciaSaneada,
+  limiteCapturaMin,
+  limiteEdicion,
+} from '../../common/semana-gastos.util';
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
@@ -1015,6 +1021,9 @@ export class ExpensesService {
       rol,
       dto.permitir_fecha_antigua === true,
     );
+    // Regla SEMANAL de captura (1-sep): solo roles de CAMPO — la oficina
+    // (vuelos pasados, cargas masivas, cargas históricas) queda exenta.
+    await this.assertCapturaEnSemana(dto.fecha_gasto, rol);
     // REGLA B (28-ago): un gasto enlazado a un TRAMO pertenece al avión de
     // ese tramo. Se resuelve UNA vez aquí (vuelo del tramo + avión con
     // herencia) y de aquí salen la herencia y el aviso de discrepancia.
@@ -2002,13 +2011,14 @@ export class ExpensesService {
   }
 
   /**
-   * Regla del doc 5.2/5.3, ampliada 1-sep-2026: el CAPTURISTA (piloto/
-   * mecánico/visitante) corrige o borra su gasto SOLO dentro de la VENTANA de
-   * edición — N días (pared Cancún) desde la CAPTURA, con N en
-   * `configuracion_sistema.dias_edicion_gastos_campo` (0 = solo el mismo día,
-   * la regla original) — y solo si aún no está conciliado ni entró ya a una
-   * REPOSICIÓN de su caja chica. Después, únicamente oficina. Lanza si no
-   * cumple.
+   * Regla SEMANAL (audio del equipo, 1-sep-2026 — sustituye la ventana de N
+   * días): el CAPTURISTA (piloto/mecánico/visitante) corrige o borra su gasto
+   * mientras hoy ≤ domingo de la semana de CAPTURA (lunes→domingo, pared
+   * Cancún) + días de gracia (`dias_gracia_gastos_semana`, default 1 = hasta
+   * el lunes siguiente; lo capturado en lunes de gracia pertenece a la semana
+   * nueva → editable hasta SU lunes) — y solo si aún no está conciliado ni
+   * entró ya a una REPOSICIÓN de su caja chica. Después, únicamente oficina.
+   * Lanza si no cumple.
    */
   async assertOwnEnVentana(id: string, userId: string): Promise<void> {
     const gasto = await this.findById(id);
@@ -2038,28 +2048,20 @@ export class ExpensesService {
         );
       }
     }
-    // Ventana de edición: días TRANSCURRIDOS en pared Cancún desde la
-    // captura (mismo patrón que assertFechaRazonable: día calendario a
-    // mediodía UTC + Math.round — jamás diferencia cruda de ms, que cojea
-    // con las horas sueltas del día).
-    const n = Math.max(
-      0,
-      Math.trunc(
-        await this.configuracion.numero(CONFIG_DIAS_EDICION_GASTOS_CAMPO, 14),
-      ),
+    // Semana de edición: la semana (lunes→domingo, pared Cancún) es la de la
+    // CAPTURA (created_at) + días de gracia. Cálculo en el helper puro
+    // `semana-gastos.util` (patrón en-CA + T12:00:00Z, con spec propio).
+    const gracia = graciaSaneada(
+      await this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
     );
-    const enCancun = (d: Date) =>
-      d.toLocaleDateString('en-CA', { timeZone: 'America/Cancun' });
-    const hoy = enCancun(new Date());
-    const capturado = enCancun(new Date(gasto.created_at as string));
-    const ms =
-      Date.parse(`${hoy}T12:00:00Z`) - Date.parse(`${capturado}T12:00:00Z`);
-    const dias = Math.round(ms / 86_400_000);
-    if (dias > n) {
+    const capturado = diaCancun(gasto.created_at as string);
+    if (hoyCancun() > limiteEdicion(capturado, gracia)) {
       throw new ForbiddenException(
-        n === 0
-          ? 'Los gastos solo se corrigen el mismo día. Pide el ajuste a oficina.'
-          : `Los gastos solo se corrigen dentro de los ${n} días siguientes a su captura. Pide el ajuste a oficina.`,
+        gracia === 1
+          ? 'Los gastos solo se corrigen dentro de su semana (hasta el lunes siguiente). Pide el ajuste a oficina.'
+          : gracia === 0
+            ? 'Los gastos solo se corrigen dentro de su semana (lunes a domingo). Pide el ajuste a oficina.'
+            : `Los gastos solo se corrigen dentro de su semana (hasta ${gracia} días después del domingo). Pide el ajuste a oficina.`,
       );
     }
   }
@@ -2116,13 +2118,49 @@ export class ExpensesService {
     }
   }
 
+  /**
+   * Regla SEMANAL de CAPTURA (audio del equipo, 1-sep-2026): un rol de CAMPO
+   * (piloto/mecánico/visitante) solo captura gastos de su semana en curso
+   * (lunes→domingo, pared Cancún); en los primeros `dias_gracia_gastos_semana`
+   * días de la semana (default 1 = el lunes) todavía acepta la semana pasada.
+   * La OFICINA queda exenta (captura de vuelos pasados, cargas masivas e
+   * históricas van por ahí). Vive junto a `assertFechaRazonable`: aquella
+   * acota el disparate (año equivocado), esta acota la semana operativa.
+   */
+  private async assertCapturaEnSemana(
+    fecha: string | undefined,
+    rol?: Rol,
+  ): Promise<void> {
+    const esCampo =
+      rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
+    if (!esCampo || !fecha) return;
+    const dia = fecha.slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dia)) return; // formato lo valida el DTO
+    const gracia = graciaSaneada(
+      await this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
+    );
+    if (dia < limiteCapturaMin(hoyCancun(), gracia)) {
+      throw new BadRequestException(
+        gracia === 1
+          ? 'Los gastos se capturan dentro de su semana (lunes a domingo). El lunes aún puedes capturar los de la semana pasada; después ya solo los de la semana en curso.'
+          : gracia === 0
+            ? 'Los gastos se capturan dentro de su semana (lunes a domingo). Los de semanas pasadas los captura la oficina.'
+            : `Los gastos se capturan dentro de su semana (lunes a domingo). En los primeros ${gracia} días de la semana aún puedes capturar los de la semana pasada; después ya solo los de la semana en curso.`,
+      );
+    }
+  }
+
   async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
-    if (dto.fecha_gasto !== undefined)
+    if (dto.fecha_gasto !== undefined) {
       this.assertFechaRazonable(
         dto.fecha_gasto,
         rol,
         dto.permitir_fecha_antigua === true,
       );
+      // Mover la fecha a una semana ya cerrada equivale a capturar en ella:
+      // mismo candado semanal que en el alta (oficina exenta).
+      await this.assertCapturaEnSemana(dto.fecha_gasto, rol);
+    }
     if (Object.keys(dto).length === 0) return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
     // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
