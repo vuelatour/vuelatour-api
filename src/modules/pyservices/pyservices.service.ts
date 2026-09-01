@@ -759,6 +759,41 @@ export interface BalanceGeneralResumenFilaPayload {
 }
 
 /**
+ * Fila del bloque POR ÍTEM de la hoja "inventario" del Balance GENERAL
+ * (tiendita, 30-ago-2026). EXISTENCIA y VALOR A COSTO son A HOY (todo el
+ * cardex FIFO), no una foto al corte del periodo; el resto es del periodo.
+ * null = celda vacía (sin actividad de ese tipo), nunca un 0 falso.
+ */
+export interface BalanceInventarioItemFilaPayload {
+  /** Nombre del ítem (+ ' · nº de parte' cuando lo tiene). */
+  nombre: string;
+  existencia: number | null;
+  valor_costo_mxn: number | null;
+  /** Cantidad y costo de las ENTRADAs del periodo (compras reales; una
+   *  DEVOLUCION/AJUSTE suma stock pero no es compra). */
+  compradas_cant: number | null;
+  compradas_costo_mxn: number | null;
+  salidas_cant: number | null;
+  /** Σ venta de las salidas CON precio (lo cargado a los aviones). */
+  vendido_mxn: number | null;
+  /** vendido − costo FIFO consumido por esas salidas. */
+  utilidad_mxn: number | null;
+  /** Matrículas a las que se aplicó en el periodo (únicas, ' + '). */
+  matriculas: string | null;
+}
+
+/** Hoja "inventario" del Balance GENERAL (tiendita): bloque por ítem +
+ *  totales; el bloque 2 (detalle de salidas) sale de `refacciones`. */
+export interface BalanceHojaInventarioPayload {
+  filas: BalanceInventarioItemFilaPayload[];
+  total_piezas: number | null;
+  total_valor_mxn: number | null;
+  total_compras_mxn: number | null;
+  total_vendido_mxn: number | null;
+  total_utilidad_mxn: number | null;
+}
+
+/**
  * Balance GENERAL (regla del cliente, 18-ago): UN solo juego de hojas con
  * los datos de todos los aviones JUNTOS (filas teñidas con el color de cada
  * avión). `consolidado` = el libro FLOTA; `aviones` alimenta los bloques de
@@ -779,6 +814,15 @@ export interface BalanceGeneralPayload {
    * salían como filas sueltas de "Otros movimientos". Opcional por skew.
    */
   gastos_empresa?: BalanceAvionHojaGastosPayload;
+  /**
+   * Hoja "inventario" (tiendita, 30-ago-2026): resumen POR ÍTEM del periodo
+   * (InventoryService.resumenTiendita — mismo FIFO del cardex, cero cálculo
+   * paralelo). Sustituye a la hoja "refacciones" SOLO en el render del
+   * general (su detalle de salidas pasa a ser el bloque 2 de esta hoja); el
+   * libro INDIVIDUAL conserva la suya. Opcional por skew: un py viejo lo
+   * ignora y un API viejo no lo manda (pyservices pinta "refacciones").
+   */
+  inventario?: BalanceHojaInventarioPayload;
 }
 
 /** Fila de la pestaña "Otros movimientos" (28-ago, hoja manual del cliente):

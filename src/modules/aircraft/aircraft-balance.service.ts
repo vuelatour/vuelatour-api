@@ -44,6 +44,7 @@ import {
   type BalanceHojaOtrosMovimientosPayload,
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
+import { InventoryService } from '../inventory/inventory.service';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
@@ -373,6 +374,7 @@ export class AircraftBalanceService {
     private readonly pyservices: PyservicesService,
     private readonly aircraft: AircraftService,
     private readonly tipoCambio: TipoCambioService,
+    private readonly inventory: InventoryService,
   ) {}
 
   async xlsx(
@@ -580,6 +582,12 @@ export class AircraftBalanceService {
     // costo FIFO del movimiento de cardex ligado y la venta al avión (el
     // libro individual pinta la hoja sin esas columnas).
     await this.llenarCostoVentaRefacciones(libros);
+    // Hoja "inventario" del GENERAL (tiendita, 30-ago): resumen POR ÍTEM del
+    // periodo (FIFO fuente única de InventoryService). En el render del
+    // general SUSTITUYE a la hoja "refacciones" (cuyo detalle de salidas pasa
+    // a ser su bloque 2); `consolidado.refacciones` se sigue mandando: lo usa
+    // ese bloque 2, la cascada de "balance" y el libro individual.
+    const inventarioTiendita = await this.inventory.resumenTiendita(d, h);
     // ===== CONSOLIDADO (regla del cliente, 18-ago): UN solo juego de hojas
     // con los datos de TODOS los aviones juntos. Cada fila viaja con el
     // color de su avión; las sumas son sumas de los totales por avión (los
@@ -801,6 +809,8 @@ export class AircraftBalanceService {
       // Hoja "gastos VuelaTour" (29-ago): gastos de EMPRESA del periodo —
       // egresos de VuelaTour, fuera de toda cascada por avión.
       gastos_empresa: hojaGastosEmpresa,
+      // Hoja "inventario" (tiendita, 30-ago): resumen por ítem del periodo.
+      inventario: inventarioTiendita,
     });
     return { buffer, desde: d, hasta: h };
   }

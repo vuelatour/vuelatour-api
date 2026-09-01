@@ -8,6 +8,8 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   PyservicesService,
+  type BalanceHojaInventarioPayload,
+  type BalanceInventarioItemFilaPayload,
   type CardexLibroEntradaPayload,
   type CardexLibroSalidaPayload,
   type TablaColumnaPayload,
@@ -371,10 +373,168 @@ export class InventoryService {
     return { buffer, filename: `cardex-libro-${slug}.xlsx` };
   }
 
+  /**
+   * Resumen "tiendita" para la hoja `inventario` del BALANCE GENERAL
+   * (30-ago-2026): una fila POR ÍTEM con su existencia ACTUAL y valor a
+   * costo (stock FIFO A HOY — todo el cardex, no una foto al corte), lo
+   * COMPRADO en el periodo (solo ENTRADAs: una DEVOLUCION/AJUSTE regresa
+   * stock pero no es compra — mismo criterio que el total de compra del
+   * cardex libro), las salidas del periodo, lo VENDIDO a los aviones
+   * (Σ venta de las salidas CON precio — criterio único ventaYGananciaDe),
+   * la utilidad (vendido − costo FIFO consumido) y las matrículas a las que
+   * se aplicó. FUENTES ÚNICAS: buildLayers/statsFromLayers para stock y
+   * valorizado, walkCardex + costoUnitarioMxnDe para los pesos — cero FIFO
+   * paralelo. La consulta trae el historial COMPLETO (el FIFO lo necesita);
+   * el corte desde/hasta se aplica EN MEMORIA sobre fecha_movimiento
+   * (string YYYY-MM-DD, mismo eje que listMovimientos). Solo ítems con
+   * actividad en el periodo O con stock/valor vivo; los eliminados con
+   * movimiento del periodo SÍ cuentan (su dinero ya viajó).
+   */
+  async resumenTiendita(
+    desde: string,
+    hasta: string,
+  ): Promise<BalanceHojaInventarioPayload> {
+    type MovTiendita = MovForFifo & {
+      id: string;
+      item_id: string;
+      venta_unitaria?: number | string | null;
+      venta_moneda?: string | null;
+      para_flota?: boolean | null;
+      aeronave?: unknown;
+    };
+    // para_flota NO está en la lista base de columnas de movimiento:
+    // seleccionarlo explícito (como el cardex libro) o el "FLOTA" de las
+    // salidas prorrateadas se perdería en silencio.
+    const { data, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select(
+        'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, fecha_movimiento, created_at, para_flota, aeronave:aeronave!aeronave_id(matricula)',
+      );
+    if (error) throw new Error(error.message);
+    const porItem = new Map<string, MovTiendita[]>();
+    for (const m of (data ?? []) as MovTiendita[]) {
+      if (!porItem.has(m.item_id)) porItem.set(m.item_id, []);
+      porItem.get(m.item_id)!.push(m);
+    }
+    const ids = [...porItem.keys()];
+    const nombrePorItem = new Map<
+      string,
+      { nombre: string; numero_parte: string | null }
+    >();
+    if (ids.length > 0) {
+      // SIN filtrar activo: un ítem eliminado con cardex sigue contando.
+      const { data: items, error: eItems } = await this.supabase.service
+        .from('inventario_item')
+        .select('id, nombre, numero_parte')
+        .in('id', ids);
+      if (eItems) throw new Error(eItems.message);
+      for (const it of (items ?? []) as Array<{
+        id: string;
+        nombre: string;
+        numero_parte: string | null;
+      }>) {
+        nombrePorItem.set(it.id, {
+          nombre: it.nombre,
+          numero_parte: it.numero_parte,
+        });
+      }
+    }
+
+    const enPeriodo = (m: MovTiendita) =>
+      m.fecha_movimiento >= desde && m.fecha_movimiento <= hasta;
+    const filas: BalanceInventarioItemFilaPayload[] = [];
+    for (const [itemId, movs] of porItem) {
+      const stats = this.statsFromLayers(this.buildLayers(movs));
+      const actividadPeriodo = movs.some(enPeriodo);
+      if (!actividadPeriodo && stats.stock <= 0 && stats.valor_mxn === 0) {
+        continue;
+      }
+      const walk = this.walkCardex(movs);
+      let compradasCant = 0;
+      let compradasCosto = 0;
+      let salidasCant = 0;
+      let hayCompra = false;
+      let haySalida = false;
+      let vendido: number | null = null;
+      let utilidad: number | null = null;
+      const matriculas = new Set<string>();
+      for (const m of this.sortChrono(movs)) {
+        if (!enPeriodo(m)) continue;
+        const cant = Number(m.cantidad);
+        if (m.tipo === (TipoMovimientoInventario.SALIDA as string)) {
+          haySalida = true;
+          salidasCant = round(salidasCant + cant);
+          const venta = ventaYGananciaDe(
+            m,
+            walk.get(m.id)?.costoMxnFifo ?? null,
+          );
+          // Solo salidas CON venta suman a vendido/utilidad (una salida a
+          // costo FIFO no es una venta de la tiendita).
+          if (venta.ventaTotalMxn != null) {
+            vendido = round((vendido ?? 0) + venta.ventaTotalMxn, 2);
+          }
+          if (venta.gananciaMxn != null) {
+            utilidad = round((utilidad ?? 0) + venta.gananciaMxn, 2);
+          }
+          matriculas.add(
+            m.para_flota === true
+              ? 'FLOTA'
+              : (nombreDeJoin(m.aeronave, 'matricula') ?? '—'),
+          );
+        } else if (m.tipo === (TipoMovimientoInventario.ENTRADA as string)) {
+          hayCompra = true;
+          compradasCant = round(compradasCant + cant);
+          compradasCosto = round(
+            compradasCosto + round(cant * costoUnitarioMxnDe(m).mxn, 2),
+            2,
+          );
+        }
+      }
+      const info = nombrePorItem.get(itemId);
+      const nombre = info
+        ? info.numero_parte
+          ? `${info.nombre} · ${info.numero_parte}`
+          : info.nombre
+        : 'Ítem eliminado';
+      filas.push({
+        nombre,
+        existencia: stats.stock,
+        valor_costo_mxn: stats.valor_mxn,
+        compradas_cant: hayCompra ? compradasCant : null,
+        compradas_costo_mxn: hayCompra ? compradasCosto : null,
+        salidas_cant: haySalida ? salidasCant : null,
+        vendido_mxn: vendido,
+        utilidad_mxn: utilidad,
+        matriculas: matriculas.size > 0 ? [...matriculas].join(' + ') : null,
+      });
+    }
+    filas.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    return {
+      filas,
+      total_piezas: round(filas.reduce((s, f) => s + (f.existencia ?? 0), 0)),
+      total_valor_mxn: round(
+        filas.reduce((s, f) => s + (f.valor_costo_mxn ?? 0), 0),
+        2,
+      ),
+      total_compras_mxn: round(
+        filas.reduce((s, f) => s + (f.compradas_costo_mxn ?? 0), 0),
+        2,
+      ),
+      total_vendido_mxn: round(
+        filas.reduce((s, f) => s + (f.vendido_mxn ?? 0), 0),
+        2,
+      ),
+      total_utilidad_mxn: round(
+        filas.reduce((s, f) => s + (f.utilidad_mxn ?? 0), 0),
+        2,
+      ),
+    };
+  }
+
   // ===== Cálculo FIFO =====
 
   /** Orden cronológico estable: fecha_movimiento y, a igualdad, created_at. */
-  private sortChrono(movs: MovForFifo[]): MovForFifo[] {
+  private sortChrono<T extends MovForFifo>(movs: T[]): T[] {
     return [...movs].sort((a, b) => {
       if (a.fecha_movimiento !== b.fecha_movimiento)
         return a.fecha_movimiento < b.fecha_movimiento ? -1 : 1;
