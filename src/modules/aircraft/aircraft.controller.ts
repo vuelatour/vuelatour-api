@@ -162,7 +162,7 @@ export class AircraftController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Tira imprimible de bitácora de tacómetros (plantilla del equipo): una fila por vuelo con fecha, tacómetro inicial, horas, tacómetro final y ruta. formato=MOTOR_HELICE (bimotor) agrega tiempos de hélice derivados de helice_base (valor del primer renglón). Para recortar y pegar en la bitácora física. Sin rango = todo el histórico.',
+      'Bitácoras de vuelo imprimibles del avión (plantilla del equipo): una PÁGINA por libro —planeador, motor y hélice (tiras=PLANEADOR,MOTOR,HELICE; default las tres)— con una fila por vuelo: fecha, tacómetro inicial, tiempo acumulado del componente, horas, tacómetro final y ruta. Los tiempos salen de la base capturada (planeador: ficha del avión; motor/hélice: ficha del componente); helice_base = tiempo de hélice del primer renglón cuando la hélice no tiene ficha. formato es DEPRECADO (compatibilidad). Para recortar y pegar en cada bitácora física. Sin rango = todo el histórico.',
   })
   async bitacoraPdf(
     @Param('id', ParseUUIDPipe) id: string,
@@ -172,14 +172,13 @@ export class AircraftController {
       id,
       q.desde,
       q.hasta,
-      q.formato ?? 'PLANEADOR',
-      q.helice_base,
+      { tiras: q.tiras, formato: q.formato, heliceBase: q.helice_base },
     );
     const rango =
       q.desde || q.hasta ? `-${q.desde ?? ''}-a-${q.hasta ?? ''}` : '';
     return new StreamableFile(buffer, {
       type: 'application/pdf',
-      disposition: `attachment; filename="bitacora-${matricula}${rango}.pdf"`,
+      disposition: `attachment; filename="bitacoras-${matricula}${rango}.pdf"`,
     });
   }
 

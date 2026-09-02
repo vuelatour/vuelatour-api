@@ -152,26 +152,40 @@ export interface ReporteVueloTramoPayload {
   copiloto?: string | null;
   apoyos?: string[];
 }
-/** Fila de la tira de bitácora de tacómetros: UN vuelo. Los tiempos de
- *  hélice solo van en el formato MOTOR_HELICE (bimotor). */
-export interface BitacoraTacoFilaPayload {
+// ===== Bitácoras de vuelo del avión (PDF): una TIRA (página) por libro —
+// planeador, motor, hélice — con las mismas filas y distinto tiempo
+// acumulado. Espejo de BitacoraTacoRequest/BitacoraTira en pyservices. =====
+export type BitacoraTiraTipo = 'PLANEADOR' | 'MOTOR' | 'HELICE';
+/** Fila de una tira: UN vuelo. tiempo_* = acumulado del componente derivado
+ *  del tacómetro (null ⇒ el PDF pinta "—" para llenarlo a mano). */
+export interface BitacoraTiraFilaPayload {
   fecha: string;
   taco_inicial: number;
   horas: number;
   taco_final: number;
+  tiempo_inicial: number | null;
+  tiempo_final: number | null;
   ruta: string;
-  helice_inicial?: number | null;
-  helice_final?: number | null;
+}
+export interface BitacoraTiraPayload {
+  tipo: BitacoraTiraTipo;
+  /** "Bitácora de planeador", "Bitácora de motor izquierdo", ... */
+  titulo: string;
+  /** Encabezado de las columnas de tiempo: "Tiempo planeador", ... */
+  etiqueta: string;
+  /** Origen de la base (gris chico bajo el encabezado) o null. */
+  nota: string | null;
+  /** false ⇒ solo las columnas de tacómetro (sin columnas de tiempo). */
+  con_tiempo: boolean;
+  filas: BitacoraTiraFilaPayload[];
 }
 export interface BitacoraTacoPayload {
   matricula: string;
-  modelo?: string | null;
-  /** PLANEADOR (monomotor, default) | MOTOR_HELICE (bimotor). */
-  formato?: 'PLANEADOR' | 'MOTOR_HELICE';
-  desde?: string | null;
-  hasta?: string | null;
-  generado?: string | null;
-  filas: BitacoraTacoFilaPayload[];
+  modelo: string | null;
+  desde: string | null;
+  hasta: string | null;
+  generado: string;
+  tiras: BitacoraTiraPayload[];
 }
 // ===== Recibo de pago por cobro (PDF NO fiscal). Espejo de
 // ReciboPdfRequest en pyservices (todo con default allá: skew tolerante). =====
@@ -1045,7 +1059,7 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/reporte-vuelo', payload);
   }
 
-  /** Tira imprimible de bitácora de tacómetros del avión (monomotor). */
+  /** Bitácoras de vuelo del avión (planeador / motor / hélice), una página por tira. */
   async generateBitacoraTacoPdf(payload: BitacoraTacoPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/bitacora-taco', payload);
   }

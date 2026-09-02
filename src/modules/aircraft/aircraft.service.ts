@@ -6,10 +6,16 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ExpirationsService } from '../expirations/expirations.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 import {
-  PyservicesService,
-  type BitacoraTacoFilaPayload,
-} from '../pyservices/pyservices.service';
+  horasVivasComponente,
+  tiempoPlaneador,
+} from '../../common/horas-componente.util';
+import {
+  construirTiras,
+  resolverTirasSolicitadas,
+  type FilaBaseBitacora,
+} from './bitacora-tiras.util';
 import type { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import type { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import type { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -625,9 +631,9 @@ export class AircraftService {
     aeronave: Record<string, unknown>,
     hobbs: number,
   ): number {
-    const base = Number(aeronave.planeador_horas_base ?? 0);
-    const ref = Number(aeronave.planeador_taco_ref ?? 0);
-    return Number((base + Math.max(0, hobbs - ref)).toFixed(1));
+    // Aritmética compartida con la bitácora impresa (horas-componente.util);
+    // aquí SIEMPRE con recorte: el "hoy" nunca resta por una ref mal anclada.
+    return tiempoPlaneador(aeronave, hobbs, { recortar: true });
   }
 
   /**
@@ -1022,24 +1028,46 @@ export class AircraftService {
    * que los filtros del join apliquen).
    */
   /**
-   * Tira imprimible de bitácora de tacómetros (formato MONOMOTOR, réplica de
-   * la hoja "Imprimir planeador" de la plantilla del equipo): una fila por
-   * VUELO con fecha, tacómetro inicial, horas voladas, tacómetro final y la
-   * ruta en minúsculas ("cun-pps-cun"). Se imprime, se recorta y se pega en
-   * la bitácora física del avión. Sin rango = todo el histórico.
+   * Bitácoras de vuelo imprimibles del avión (réplica de la plantilla del
+   * equipo): UNA fila por VUELO con fecha, tacómetro inicial, horas voladas,
+   * tacómetro final y la ruta en minúsculas ("cun-pps-cun"); una PÁGINA por
+   * libro (planeador, motor, hélice), todas con las mismas filas y distinto
+   * tiempo acumulado — los tiempos de planeador, motor y hélice difieren
+   * porque cada uno tiene su propia base (ficha del avión / del componente).
+   * Se imprime, se recorta y se pega en cada bitácora física. Sin rango =
+   * todo el histórico. La derivación de tiempos vive en bitacora-tiras.util.
    */
   async bitacoraTacoPdf(
     id: string,
     desde?: string,
     hasta?: string,
-    formato: 'PLANEADOR' | 'MOTOR_HELICE' = 'PLANEADOR',
-    heliceBase?: number,
+    opts: {
+      tiras?: readonly string[];
+      /** DEPRECADO: solo cuenta sin `tiras` (ver resolverTirasSolicitadas). */
+      formato?: 'PLANEADOR' | 'MOTOR_HELICE';
+      heliceBase?: number;
+    } = {},
   ): Promise<{ buffer: Buffer; matricula: string }> {
     const aeronave = await this.findById(id);
-    const rows = await this.escalasDelAvion(
-      id,
-      'orden, origen_iata, destino_iata, es_sobrevuelo, taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, fecha_vuelo, estado, aeronave_id)',
-    );
+    // Escalas + fichas de motores/hélices (horas ancladas a un tacómetro): de
+    // ahí salen los tiempos de cada libro. Solo las columnas de la bitácora.
+    const [rows, motoresRes, helicesRes] = await Promise.all([
+      this.escalasDelAvion(
+        id,
+        'orden, origen_iata, destino_iata, es_sobrevuelo, taco_salida, taco_llegada, vuelo:vuelo_id!inner(id, fecha_vuelo, estado, aeronave_id)',
+      ),
+      this.supabase.service
+        .from('motor')
+        .select('posicion, numero_serie, horas_totales, aeronave_horas_ref')
+        .eq('aeronave_id', id),
+      this.supabase.service
+        .from('helice')
+        .select('posicion, numero_serie, horas_totales, aeronave_horas_ref')
+        .eq('aeronave_id', id),
+    ]);
+    // Nunca degradar a "sin ficha" en silencio: cambiaría los tiempos impresos.
+    if (motoresRes.error) throw new Error(motoresRes.error.message);
+    if (helicesRes.error) throw new Error(helicesRes.error.message);
 
     const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
       Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
@@ -1074,15 +1102,15 @@ export class AircraftService {
         porVuelo.set(vuelo.id, { fecha, legs: [] }).get(vuelo.id)!;
       g.legs.push({
         orden: Number(r.orden) || 0,
-        origen: String(r.origen_iata ?? ''),
-        destino: String(r.destino_iata ?? ''),
+        origen: typeof r.origen_iata === 'string' ? r.origen_iata : '',
+        destino: typeof r.destino_iata === 'string' ? r.destino_iata : '',
         sobrevuelo: r.es_sobrevuelo === true,
         salida: r.taco_salida == null ? null : Number(r.taco_salida),
         llegada: r.taco_llegada == null ? null : Number(r.taco_llegada),
       });
     }
 
-    const filas: BitacoraTacoFilaPayload[] = [];
+    const filas: FilaBaseBitacora[] = [];
     for (const { fecha, legs } of porVuelo.values()) {
       legs.sort((a, b) => a.orden - b.orden);
       // Tacómetro inicial = salida del primer tramo con lectura; final =
@@ -1126,28 +1154,29 @@ export class AircraftService {
         a.taco_inicial - b.taco_inicial,
     );
 
-    // Formato bimotor (hoja "MOTOR - HÉLICE"): el tiempo de hélice corre
-    // parejo con el tacómetro, así que basta el valor del PRIMER renglón
-    // (lo aporta la oficina desde el libro, igual que en su plantilla) y el
-    // resto se deriva con offset constante. El sistema aún no lleva horas
-    // de vida de hélice (pendiente con el cliente) — no hay de dónde
-    // autollenarlo. Sin helice_base, las columnas salen con "—".
-    if (formato === 'MOTOR_HELICE' && heliceBase != null && filas.length > 0) {
-      const offset = heliceBase - filas[0].taco_inicial;
-      for (const f of filas) {
-        f.helice_inicial = Number((f.taco_inicial + offset).toFixed(1));
-        f.helice_final = Number((f.taco_final + offset).toFixed(1));
-      }
-    }
+    // Una tira por libro pedido (default: planeador, motor y hélice), todas
+    // con las MISMAS filas; el tiempo de cada componente se deriva del
+    // tacómetro con su base (ficha del avión / motor / hélice) o, para la
+    // hélice sin ficha, con el valor del primer renglón tecleado por oficina.
+    const tiras = construirTiras({
+      tiras: resolverTirasSolicitadas({
+        tiras: opts.tiras,
+        formato: opts.formato,
+      }),
+      filasBase: filas,
+      aeronave,
+      motores: motoresRes.data ?? [],
+      helices: helicesRes.data ?? [],
+      heliceBase: opts.heliceBase ?? null,
+    });
 
     const buffer = await this.pyservices.generateBitacoraTacoPdf({
       matricula: (aeronave.matricula as string) ?? '',
       modelo: (aeronave.modelo as string) ?? null,
-      formato,
       desde: desde ?? null,
       hasta: hasta ?? null,
       generado: new Date().toISOString(),
-      filas,
+      tiras,
     });
     return { buffer, matricula: (aeronave.matricula as string) ?? 'avion' };
   }
@@ -1373,11 +1402,11 @@ export class AircraftService {
     vida_usada_pct: number | null;
     hobbs_avion: number;
   } {
-    const ht = Number(c.horas_totales ?? 0);
-    const ref =
-      c.aeronave_horas_ref != null ? Number(c.aeronave_horas_ref) : null;
-    const delta = ref != null ? Math.max(0, hobbs - ref) : 0;
-    const horasActuales = Number((ht + delta).toFixed(1));
+    // Aritmética única (horas-componente.util), compartida con la bitácora
+    // impresa; aquí SIEMPRE recortada a 0: el "hoy" nunca resta vida.
+    const { delta, horas: horasActuales } = horasVivasComponente(c, hobbs, {
+      recortar: true,
+    });
     const tbo = Number(c.tbo_horas ?? 0);
     // TSO canónico: tso_base viaja CON el componente (marco del componente,
     // anclado en aeronave_horas_ref) y sobrevive traslados entre aviones.
