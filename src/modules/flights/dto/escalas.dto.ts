@@ -259,6 +259,17 @@ export class AssignEscalaDto {
   @Type(() => Date)
   @IsDate()
   fecha_salida_plan?: Date;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita (2-sep-2026): asignar la aeronave al tramo ' +
+      'AUNQUE tenga discrepancia (squawk) ALTA sin resolver. Sin ella se ' +
+      'rechaza con 409 SQUAWK_ALTA_SIN_RESOLVER (details.discrepancias trae ' +
+      'la lista); al aceptar se avisa al mecánico.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 }
 
 /**

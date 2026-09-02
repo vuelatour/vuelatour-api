@@ -268,6 +268,16 @@ export class ReassignAircraftDto {
   @IsString()
   @MaxLength(500)
   motivo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita (2-sep-2026): reasignar AUNQUE la aeronave ' +
+      'tenga discrepancia (squawk) ALTA sin resolver. Sin ella se rechaza ' +
+      'con 409 SQUAWK_ALTA_SIN_RESOLVER; al aceptar se avisa al mecánico.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 }
 
 export class AssignFlightDto {
@@ -326,6 +336,17 @@ export class AssignFlightDto {
   @Type(() => Date)
   @IsDate()
   fecha_vuelo?: Date;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita (2-sep-2026): asignar la aeronave AUNQUE ' +
+      'tenga discrepancia (squawk) ALTA sin resolver. Sin ella se rechaza ' +
+      'con 409 SQUAWK_ALTA_SIN_RESOLVER (details.discrepancias trae la ' +
+      'lista); al aceptar se avisa al mecánico.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 }
 
 /** Tramo de un vuelo EXTERNO multiescala (solo ruta; sin tacos ni pax por tramo). */
@@ -459,6 +480,17 @@ export class CombinarVuelosDto {
   @IsOptional()
   @IsBoolean()
   marcar_pernocta?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita (2-sep-2026): combinar AUNQUE el avión del ' +
+      'anfitrión tenga discrepancia (squawk) ALTA sin resolver. Sin ella se ' +
+      'rechaza con 409 SQUAWK_ALTA_SIN_RESOLVER ANTES de tocar nada; al ' +
+      'aceptar se avisa al mecánico.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 }
 
 export class CreateExternalFlightDto {
@@ -760,6 +792,16 @@ export class CreateReservaDto {
   @IsString()
   @MaxLength(2000)
   notas_internas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirmación explícita (2-sep-2026): apartar con la aeronave AUNQUE ' +
+      'tenga discrepancia (squawk) ALTA sin resolver. Sin ella se rechaza ' +
+      'con 409 SQUAWK_ALTA_SIN_RESOLVER; al aceptar se avisa al mecánico.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 }
 
 /** Regreso a vuelo propio (28-ago): un vuelo propio SIEMPRE tiene avión (regla

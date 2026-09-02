@@ -120,8 +120,20 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 9. **Candados de rol**: el PILOTO solo registra cobros con método ∈
    {EFECTIVO, DOLARES, BILLPOCKET, HSBC_LINK} (se valida el del vuelo Y el del
    DTO); piloto/mecánico solo editan/borran SU gasto y SOLO el mismo día
-   Cancún (`assertOwnSameDay`). Squawk severidad ALTA sin resolver bloquea
-   asignar el avión.
+   Cancún (`assertOwnSameDay`). Squawk severidad ALTA sin resolver: **CAMBIO
+   CONSCIENTE 2-sep-2026 — ya NO bloquea a secas asignar el avión: exige
+   confirmación y avisa al mecánico.** Por default `validateAssignTargets`
+   rechaza con 409 ESTRUCTURADO (code `SQUAWK_ALTA_SIN_RESOLVER` +
+   `details.discrepancias`, para que el panel ofrezca el confirm); con
+   `aceptar_discrepancia_alta: true` en el DTO (assign, assignEscala,
+   reassign-aircraft, reserva, combinar — combinar lo reenvía a su pre-check
+   Y a su assign interno, no es transaccional) la asignación procede A
+   SABIENDAS y `notificarSquawkAceptado` avisa al MECANICO (espejo
+   ADMIN/COORDINADOR, tipo `alerta_sistema`, dedupe directo
+   `squawk_alta_aceptado:<vuelo>:<avión>:<díaCancún>` en `alerta_emitida`,
+   marca DESPUÉS de entregar) y sella la bitácora en `notas_internas`.
+   Taller sigue bloqueando sin excepción; `revertirExterno` sigue SIN pasar
+   por este candado (hueco conocido, pendiente de decisión).
 
 10. **Partición del ingreso y participación por avión — fuentes únicas.**
     `particionIngresoVuelo` (`src/common/ingreso-vuelo.util.ts`): venta del
@@ -161,7 +173,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   alerta_sistema`. Links `/flights/<id>` redirigen al vuelo en la app.
 - Espejo vuelo↔tramo 1: `aeronave_id/piloto_id/fecha` del vuelo se reflejan en
   la escala orden=1 (`mirrorVueloToIdaEscala`) y viceversa. Reagendar
-  `fecha_vuelo` con el mismo piloto → push al piloto (doc 4.3).
+  `fecha_vuelo` con el mismo piloto → push al piloto (doc 4.3). Cambiar la
+  AERONAVE a nivel vuelo (2-sep-2026) aplica a todos los tramos vivos con
+  blanket SELECTIVO (pisa herencia null o el avión viejo; una rotación
+  deliberada a OTRO avión se respeta — mismo patrón que combinarVuelos).
 - **Tripulación por tramo (29-ago-2026)** — fuente única
   `src/common/tripulacion.util.ts`: copiloto del tramo =
   `escala.copiloto_id ?? vuelo.copiloto_id` (misma herencia que el piloto;

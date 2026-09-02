@@ -765,7 +765,11 @@ export class FlightsService {
    */
   async reassignAircraft(
     id: string,
-    dto: { aeronave_id: string; motivo?: string },
+    dto: {
+      aeronave_id: string;
+      motivo?: string;
+      aceptar_discrepancia_alta?: boolean;
+    },
     userId: string,
   ) {
     const sb = this.supabase.service;
@@ -794,7 +798,10 @@ export class FlightsService {
         'Selecciona una aeronave distinta a la actual.',
       );
     }
-    await this.validateAssignTargets({ aeronaveId: dto.aeronave_id });
+    const squawksAceptados = await this.validateAssignTargets(
+      { aeronaveId: dto.aeronave_id },
+      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+    );
     // Vuelo COMBINADO: cambiar de avión rompe la premisa de la combinación
     // (el avión que pernocta ya no es el que vuela) — la liga se rompe en
     // ambos ANTES de clonar y el clon nace sin ella.
@@ -1015,6 +1022,12 @@ export class FlightsService {
     void this.notificarTripulacion(clonRow, {
       titulo: `Vuelo #${original.folio as number}: cambio de avión`,
       cuerpo: `${original.origen_iata as string} → ${original.destino_iata as string} ahora vuela en ${matricula} como vuelo #${clonRow.folio as number} (el #${original.folio as number} quedó cancelado). Misma fecha y tripulación.`,
+    });
+    // Reasignación aceptada CON squawk ALTA abierto: el aviso al mecánico
+    // referencia el folio del CLON (el vuelo que sí sale) y menciona que el
+    // original quedó cancelado.
+    this.notificarSquawkAceptado(clonRow, dto.aeronave_id, squawksAceptados, {
+      folioOriginalCancelado: (original as { folio: number }).folio,
     });
     return clon!;
   }
@@ -2453,10 +2466,13 @@ export class FlightsService {
       dto.piloto_id !== '';
 
     // Doc 4.3: no se asigna avión/piloto con documento crítico vencido ni avión en taller.
-    await this.validateAssignTargets({
-      aeronaveId: dto.aeronave_id,
-      pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
-    });
+    const squawksAceptados = await this.validateAssignTargets(
+      {
+        aeronaveId: dto.aeronave_id,
+        pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+      },
+      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+    );
 
     // Copiloto (segundo piloto del viaje): valida que exista y no choque con el
     // piloto principal. null = quitarlo.
@@ -2658,6 +2674,36 @@ export class FlightsService {
         }
       }
     }
+    // AERONAVE a nivel vuelo = TODOS los tramos (2-sep-2026, "cambio simple"
+    // de avión, espejo de la regla del piloto/copiloto): pero SOLO pisa los
+    // tramos heredados (null) o los del avión viejo — una rotación por tramo
+    // deliberada hacia OTRO avión se respeta (mismo blanket selectivo que
+    // combinarVuelos). Antes solo se espejaba la ida y un tramo con override
+    // conservaba el avión viejo en silencio (gastos/tacos anclados a él).
+    if (
+      dto.aeronave_id !== undefined &&
+      dto.aeronave_id !== null &&
+      dto.aeronave_id !== current.aeronave_id
+    ) {
+      const avionViejo = (current.aeronave_id as string | null) ?? null;
+      let q = this.supabase.service
+        .from('escala')
+        .update({ aeronave_id: dto.aeronave_id, updated_by: updatedBy })
+        .eq('vuelo_id', id)
+        .is('cancelada_at', null);
+      q = avionViejo
+        ? q.or(`aeronave_id.is.null,aeronave_id.eq.${avionViejo}`)
+        : q.is('aeronave_id', null);
+      const { error: avionErr } = await q;
+      if (avionErr) {
+        // Misma regla que piloto/copiloto: nunca warn-only — el vuelo YA
+        // quedó con el avión nuevo y los tramos conservarían el viejo en
+        // silencio. Reintentar la asignación es seguro (idempotente).
+        throw new Error(
+          `El avión del vuelo SÍ se actualizó, pero no se pudo aplicar a sus tramos: ${avionErr.message}. Vuelve a asignar el avión para emparejar los tramos.`,
+        );
+      }
+    }
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
       void this.notifyPilotAssigned(dto.piloto_id!, data!);
@@ -2742,6 +2788,11 @@ export class FlightsService {
         },
         reciénAvisados,
       );
+    }
+    // Asignación aceptada CON squawk ALTA abierto: avisar al mecánico
+    // (después del write exitoso; dedupe diario dentro del helper).
+    if (dto.aeronave_id && squawksAceptados.length > 0) {
+      this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
     }
     return data!;
   }
@@ -2923,11 +2974,21 @@ export class FlightsService {
   /**
    * Valida que un avión/piloto pueda asignarse (doc 4.3): sin documento crítico
    * vencido y sin la aeronave en taller. Reutilizable por vuelo y por tramo.
+   *
+   * Squawk ALTA (regla 2-sep-2026, "avisar sin bloquear"): sin
+   * `aceptarDiscrepanciaAlta` el 409 sale ESTRUCTURADO (code
+   * `SQUAWK_ALTA_SIN_RESOLVER` + `details.discrepancias`) para que el panel
+   * ofrezca el confirm; con la bandera NO lanza y DEVUELVE la lista de
+   * squawks aceptados — el caller DEBE avisar al mecánico tras el write
+   * exitoso (`notificarSquawkAceptado`).
    */
-  private async validateAssignTargets(targets: {
-    aeronaveId?: string | null;
-    pilotoId?: string | null;
-  }): Promise<void> {
+  private async validateAssignTargets(
+    targets: {
+      aeronaveId?: string | null;
+      pilotoId?: string | null;
+    },
+    opts?: { aceptarDiscrepanciaAlta?: boolean },
+  ): Promise<{ id: string; descripcion: string }[]> {
     const objetivos: { aeronaveId?: string; pilotoId?: string } = {};
     if (targets.aeronaveId) objetivos.aeronaveId = targets.aeronaveId;
     if (targets.pilotoId) objetivos.pilotoId = targets.pilotoId;
@@ -2947,8 +3008,12 @@ export class FlightsService {
         'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
       );
     }
-    // Un squawk de severidad ALTA sin resolver = avión no apto (doc 4.3): no
-    // se asigna hasta resolver la discrepancia. BAJA/MEDIA no bloquean.
+    // Un squawk de severidad ALTA sin resolver = avión no apto (doc 4.3).
+    // BAJA/MEDIA no bloquean. CAMBIO CONSCIENTE 2-sep-2026: ya no bloquea a
+    // secas — sin confirmación se rechaza con 409 estructurado (el panel
+    // detecta el code y ofrece el confirm); con `aceptar_discrepancia_alta`
+    // la asignación procede A SABIENDAS y el caller avisa al mecánico.
+    let squawksAceptados: { id: string; descripcion: string }[] = [];
     if (targets.aeronaveId) {
       const { data: squawks } = await this.supabase.service
         .from('aeronave_discrepancia')
@@ -2956,13 +3021,27 @@ export class FlightsService {
         .eq('aeronave_id', targets.aeronaveId)
         .neq('estado', 'RESUELTA')
         .eq('severidad', 'ALTA')
-        .limit(3);
+        .limit(10);
       if (squawks && squawks.length > 0) {
-        throw new ConflictException(
-          `No se puede asignar: discrepancia de severidad ALTA sin resolver (${squawks
-            .map((s) => String(s.descripcion).slice(0, 60))
-            .join('; ')}).`,
-        );
+        const lista = squawks.map((s) => ({
+          id: s.id as string,
+          descripcion: String(s.descripcion),
+        }));
+        if (opts?.aceptarDiscrepanciaAlta !== true) {
+          throw new ConflictException({
+            message: `No se puede asignar: discrepancia de severidad ALTA sin resolver (${lista
+              .map((s) => s.descripcion.slice(0, 60))
+              .join(
+                '; ',
+              )}). Puedes asignar de todas formas confirmando; se avisará al mecánico.`,
+            error: 'SQUAWK_ALTA_SIN_RESOLVER',
+            details: {
+              aeronave_id: targets.aeronaveId,
+              discrepancias: lista,
+            },
+          });
+        }
+        squawksAceptados = lista;
       }
     }
 
@@ -3015,6 +3094,107 @@ export class FlightsService {
         }
       })();
     }
+    return squawksAceptados;
+  }
+
+  /**
+   * Aviso al MECANICO (con espejo a ADMIN/COORDINADOR) cuando la oficina
+   * asigna un avión CON discrepancia ALTA abierta a sabiendas
+   * (`aceptar_discrepancia_alta`, regla 2-sep-2026). Best-effort: se llama
+   * DESPUÉS del write exitoso y jamás tumba la asignación. Dedupe directo en
+   * `alerta_emitida` (aviso directo: NO necesita fila en `alerta_config`)
+   * con clave `squawk_alta_aceptado:<vueloId>:<aeronaveId>:<díaCancún>`; la
+   * marca se inserta DESPUÉS de entregar (23505 de una carrera = benigno,
+   * mismo patrón que el aviso de críticos vencidos). Deja constancia en
+   * `notas_internas` del vuelo (bitácora auditable del repo, mismo patrón
+   * que el sello de vuelos combinados).
+   */
+  private notificarSquawkAceptado(
+    vuelo: Record<string, unknown>,
+    aeronaveId: string,
+    squawks: { id: string; descripcion: string }[],
+    opts?: {
+      /** reassignAircraft: el aviso nombra el folio del CLON (el vuelo que
+       *  sí sale) y menciona que el original quedó cancelado. */
+      folioOriginalCancelado?: number;
+    },
+  ): void {
+    if (squawks.length === 0) return;
+    void (async () => {
+      try {
+        const vueloId = vuelo.id as string;
+        const hoy = new Date().toLocaleDateString('en-CA', {
+          timeZone: 'America/Cancun',
+        });
+        const dedupeKey = `squawk_alta_aceptado:${vueloId}:${aeronaveId}:${hoy}`;
+        // Pre-chequeo: no re-avisar si ya salió hoy (mismo vuelo re-asignado
+        // varias veces en el día no debe spamear al mecánico).
+        const { count } = await this.supabase.service
+          .from('alerta_emitida')
+          .select('dedupe_key', { count: 'exact', head: true })
+          .eq('dedupe_key', dedupeKey);
+        if ((count ?? 0) > 0) return;
+        const [{ data: av }, ruta] = await Promise.all([
+          this.supabase.service
+            .from('aeronave')
+            .select('matricula')
+            .eq('id', aeronaveId)
+            .maybeSingle(),
+          this.rutaDeVuelo(vuelo),
+        ]);
+        const matricula = (av?.matricula as string | undefined) ?? 'El avión';
+        const descripciones = squawks
+          .map((s) => s.descripcion.slice(0, 80))
+          .join('; ');
+        const contexto =
+          opts?.folioOriginalCancelado !== undefined
+            ? ` (viene del #${opts.folioOriginalCancelado}, que quedó cancelado por el cambio de avión)`
+            : '';
+        const payload = {
+          tipo: 'alerta_sistema',
+          titulo: 'Vuelo asignado con discrepancia ALTA abierta',
+          cuerpo: `${matricula} vuela el vuelo #${vuelo.folio as number}${contexto} (${ruta}) el ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)} con discrepancia(s) ALTA sin resolver: ${descripciones}. Hay que resolverla(s) antes del vuelo.`,
+          data: {
+            vuelo_id: vueloId,
+            folio: vuelo.folio,
+            aeronave_id: aeronaveId,
+            discrepancia_ids: squawks.map((s) => s.id),
+          },
+          link: `/flights/${vueloId}`,
+        };
+        // El MECANICO es el destinatario principal; ADMIN/COORDINADOR van de
+        // espejo (mismo criterio que el aviso de críticos vencidos).
+        for (const rol of [Rol.MECANICO, Rol.ADMIN, Rol.COORDINADOR]) {
+          await this.notifications.notifyRole(rol, payload);
+        }
+        // Bitácora en el vuelo: sello auditable en notas_internas.
+        const { data: v } = await this.supabase.service
+          .from('vuelo')
+          .select('notas_internas')
+          .eq('id', vueloId)
+          .maybeSingle();
+        const notas = (v?.notas_internas as string | null)?.trim();
+        const sello = `[Discrepancia ALTA aceptada ${hoy}] Se asignó ${matricula} con discrepancia(s) ALTA abierta(s): ${descripciones}. Confirmado por oficina; se avisó al mecánico.`;
+        await this.supabase.service
+          .from('vuelo')
+          .update({ notas_internas: notas ? `${notas}\n${sello}` : sello })
+          .eq('id', vueloId);
+        // Marca DESPUÉS de entregar: si el push falla arriba, el siguiente
+        // intento del día reintenta en vez de quedar mudo.
+        await this.supabase.service
+          .from('alerta_emitida')
+          .insert({ dedupe_key: dedupeKey, clave: 'squawk_alta_aceptado' })
+          .then(({ error }) => {
+            if (error && error.code !== '23505') throw error;
+          });
+      } catch (err) {
+        this.logger.warn(
+          `Aviso de squawk ALTA aceptado falló: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    })();
   }
 
   /**
@@ -3100,10 +3280,13 @@ export class FlightsService {
       dto.piloto_id !== null &&
       dto.piloto_id !== '';
 
-    await this.validateAssignTargets({
-      aeronaveId: dto.aeronave_id,
-      pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
-    });
+    const squawksAceptados = await this.validateAssignTargets(
+      {
+        aeronaveId: dto.aeronave_id,
+        pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+      },
+      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+    );
 
     // Tripulación POR TRAMO (29-ago-2026). Copiloto: `copiloto_id` con valor
     // = copiloto propio del tramo (rotación); null = vuelve a heredar el del
@@ -3288,6 +3471,11 @@ export class FlightsService {
         },
         reciénAvisado,
       );
+    }
+    // Asignación de tramo aceptada CON squawk ALTA abierto: avisar al
+    // mecánico (después del write; dedupe diario dentro del helper).
+    if (dto.aeronave_id && squawksAceptados.length > 0) {
+      this.notificarSquawkAceptado(vuelo, dto.aeronave_id, squawksAceptados);
     }
     return data!;
   }
@@ -3879,11 +4067,18 @@ export class FlightsService {
    * y el calendario por tramo funcionen desde el día uno.
    */
   async createReserva(dto: CreateReservaDto, userId: string) {
+    // El vuelo aún no existe al validar: con `aceptar_discrepancia_alta` se
+    // valida aquí, se crea, y el aviso al mecánico sale al final con el
+    // vuelo ya insertado.
+    let squawksAceptados: { id: string; descripcion: string }[] = [];
     if (dto.aeronave_id || dto.piloto_id) {
-      await this.validateAssignTargets({
-        aeronaveId: dto.aeronave_id,
-        pilotoId: dto.piloto_id,
-      });
+      squawksAceptados = await this.validateAssignTargets(
+        {
+          aeronaveId: dto.aeronave_id,
+          pilotoId: dto.piloto_id,
+        },
+        { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+      );
     }
     // Copiloto (2 pilotos volando): debe ser un piloto válido y distinto del
     // titular. Se valida aparte para dar un mensaje claro.
@@ -4074,6 +4269,11 @@ export class FlightsService {
     // El copiloto también recibe su aviso (ve todo el vuelo en su app).
     if (dto.copiloto_id)
       void this.notifyPilotAssigned(dto.copiloto_id, data!, 'copiloto');
+    // Reserva aceptada CON squawk ALTA abierto: avisar al mecánico con el
+    // vuelo ya insertado (dedupe diario dentro del helper).
+    if (dto.aeronave_id && squawksAceptados.length > 0) {
+      this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
+    }
     void this.calendar.syncFlight(vueloId);
     return data!;
   }
@@ -7507,11 +7707,17 @@ export class FlightsService {
 
     // 0) Asignabilidad ANTES de mutar (taller/squawk ALTA rechazan): si
     //    assign() fuera a tronar, debe tronar AHORA — no con los ferries ya
-    //    cancelados y el estado a medias (no hay transacción).
-    await this.validateAssignTargets({
-      aeronaveId: avionId,
-      ...(dto.aplicar_piloto !== false && pilotoId ? { pilotoId } : {}),
-    });
+    //    cancelados y el estado a medias (no hay transacción). El flag de
+    //    aceptación viaja AQUÍ y al assign interno de abajo: si solo se
+    //    pasara a uno, el flujo aceptado reventaría a medias con los
+    //    ferries ya cancelados.
+    await this.validateAssignTargets(
+      {
+        aeronaveId: avionId,
+        ...(dto.aplicar_piloto !== false && pilotoId ? { pilotoId } : {}),
+      },
+      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+    );
     // Avión ANTERIOR del cubierto: el blanket de abajo solo pisa herencia
     // (null) o ese avión — una rotación por tramo deliberada se respeta.
     const avionViejoCubierto = (cubierto.aeronave_id as string | null) ?? null;
@@ -7530,7 +7736,8 @@ export class FlightsService {
     );
 
     // 2) Reasignar el vuelo cubierto al avión (y piloto) del anfitrión —
-    //    assign() valida documentos/squawks y avisa a la tripulación.
+    //    assign() valida documentos/squawks, avisa a la tripulación y (con
+    //    el flag) al mecánico si hay squawk ALTA aceptado.
     await this.assign(
       cubiertoId,
       {
@@ -7538,6 +7745,7 @@ export class FlightsService {
         ...(dto.aplicar_piloto !== false && pilotoId
           ? { piloto_id: pilotoId }
           : {}),
+        aceptar_discrepancia_alta: dto.aceptar_discrepancia_alta,
       },
       userId,
     );
