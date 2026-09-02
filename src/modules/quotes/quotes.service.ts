@@ -2522,11 +2522,6 @@ export class QuotesService {
       const planFields: Record<string, unknown> = {
         origen_iata: e.origen_iata.toUpperCase(),
         destino_iata: e.destino_iata.toUpperCase(),
-        // Mismo aeropuerto = SOBREVUELO por definición (ej. ruta CUN→CUN de
-        // Zona Hotelera): sin la marca, la validación operativa de escalas
-        // rechazaría el tramo.
-        es_sobrevuelo:
-          e.origen_iata.toUpperCase() === e.destino_iata.toUpperCase(),
         millas_nauticas: e.millas_nauticas,
         pasajeros: e.es_ferry ? 0 : e.pasajeros,
         pasajeros_nombres: e.es_ferry ? [] : e.pasajeros_nombres,
@@ -2549,6 +2544,26 @@ export class QuotesService {
         planFields.pdf_oculto = e.pdf_oculto === true;
       }
       const actual = porOrden.get(orden);
+      // SEMÁNTICA 2-sep-2026 (cliente): el sobrevuelo es una BANDERA del
+      // tramo ORTOGONAL al destino — un CUN→CZM puede llevarla igual que un
+      // CUN→CUN — y NUNCA deriva ni restringe el destino (millas/tiempo
+      // salen de origen→destino normal; el COBRO del sobrevuelo es
+      // `sobrevuelo_hr` del motor v1.3 y no mira esta bandera). El
+      // cotizador no tiene switch (a propósito), así que aquí solo se
+      // SUGIERE un default: tramo NUEVO o cuya ruta CAMBIÓ ⇒ mismo
+      // aeropuerto = sobrevuelo (lo que promete la ruta rápida "CUN, CUN" y
+      // exige la validación operativa de flights.create). Con la ruta
+      // igual la columna se OMITE y el UPDATE conserva la marca viva: un
+      // sobrevuelo CUN→CZM prendido en la hoja de escala del panel o en la
+      // app ya no se pierde al re-cotizar (antes se re-derivaba SIEMPRE de
+      // origen == destino). Un CUN→CUN existente sigue marcado igual.
+      const origenUp = e.origen_iata.toUpperCase();
+      const destinoUp = e.destino_iata.toUpperCase();
+      const rutaCambio =
+        !actual ||
+        String(actual.origen_iata ?? '').toUpperCase() !== origenUp ||
+        String(actual.destino_iata ?? '').toUpperCase() !== destinoUp;
+      if (rutaCambio) planFields.es_sobrevuelo = origenUp === destinoUp;
       if (actual) {
         // No pisar con null una fecha ya planeada/asignada al tramo.
         if (fechaPlan != null || actual.fecha_salida_plan == null) {

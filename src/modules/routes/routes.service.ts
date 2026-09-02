@@ -347,7 +347,9 @@ export class RoutesService {
     }
     // Mismo aeropuerto en un tramo = SOBREVUELO (ej. CUN→CUN Zona Hotelera /
     // Isla Mujeres): válido, las millas definen el tiempo cobrado. Al usarse
-    // en una cotización, la escala nace marcada es_sobrevuelo.
+    // en una cotización, la escala nace marcada es_sobrevuelo por DEFAULT
+    // (2-sep-2026: la bandera es ortogonal al destino y la oficina la puede
+    // apagar/prender en la hoja de escala — ver quotes.replaceEscalas).
     return norm;
   }
 
