@@ -414,9 +414,12 @@ export class AircraftBalanceService {
    * de flota) y UN solo juego de hojas con los datos de TODOS los aviones
    * JUNTOS — reporte horas, otros movimientos (ingreso de VuelaTour:
    * TUAS/extras/pernocta cobrados vs pagados, regla 28-ago), cobranza,
-   * otros gastos (administrativos repartidos), refacciones (salidas de
-   * inventario, con costo FIFO vs venta al avión — 29-ago), gastos
-   * VuelaTour (gastos de EMPRESA sin vuelo ni avión — 29-ago), balance
+   * otros gastos (gastos de EMPRESA sin vuelo ni avión — 29-ago;
+   * 1-sep-2026: antes "gastos VuelaTour"), repartidos a aviones
+   * (administrativos repartidos; 1-sep-2026: antes "otros gastos" — los
+   * renombres son SOLO del renderer del general, los campos del payload
+   * no cambian), refacciones (salidas de
+   * inventario, con costo FIFO vs venta al avión — 29-ago), balance
    * (bloques por avión) y pendientes. Desde el 29-ago el RENDERER del
    * general ya no pinta las hojas combustible / gastos indirectos /
    * permisos (viven en el libro INDIVIDUAL de cada avión); el API las
@@ -671,7 +674,9 @@ export class AircraftBalanceService {
         usd_hr: horas > 0 && usd !== 0 ? round2(usd / horas) : null,
       };
     };
-    // ===== Gastos de EMPRESA (29-ago): hoja "gastos VuelaTour" del general.
+    // ===== Gastos de EMPRESA (29-ago): hoja "otros gastos" del general
+    // (1-sep-2026: antes se llamaba "gastos VuelaTour"; solo cambió el
+    // nombre de la hoja en el renderer — `gastos_empresa` sigue igual).
     // MISMA lectura que alimenta las filas sueltas de "Otros movimientos"
     // (gastosEmpresaYSueltos, fuente única — el dinero aparece UNA vez):
     // aquí los gastos de empresa como ledger; en "Otros movimientos" solo
@@ -684,7 +689,9 @@ export class AircraftBalanceService {
       totalesFlota.tc_promedio,
       // Sin horas: el gasto de empresa no es "por hora volada" de nadie.
       0,
-      'gastos VuelaTour',
+      // Nombre con el que los pendientes citan la hoja en el GENERAL
+      // (1-sep-2026: antes 'gastos VuelaTour').
+      'otros gastos',
       pendientesEmpresa,
     );
     const consolidado: BalanceAvionPayload = {
@@ -759,7 +766,8 @@ export class AircraftBalanceService {
       // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
       // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL. Desde el
       // 29-ago sus filas sueltas ya NO llevan los gastos de empresa (viven
-      // en la hoja "gastos VuelaTour" — misma lectura, el dinero UNA vez).
+      // en la hoja "otros gastos" del general, antes "gastos VuelaTour" —
+      // misma lectura, el dinero UNA vez).
       otros_movimientos: await this.buildOtrosMovimientos(
         d,
         h,
@@ -770,7 +778,8 @@ export class AircraftBalanceService {
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
         ...(await this.pendienteGasSinAvion(d, h)),
-        // Hoja "gastos VuelaTour": gastos de empresa en USD sin ningún TC
+        // Hoja "otros gastos" del general (antes "gastos VuelaTour"):
+        // gastos de empresa en USD sin ningún TC
         // (fila sin MXN) — mismos gritos que las hojas de gastos.
         ...pendientesEmpresa,
         // Gastos de vuelos que no caen en NINGÚN libro (externo sin avión y
@@ -809,7 +818,8 @@ export class AircraftBalanceService {
       // Bloques de la hoja "balance" (socios por avión): SOLO aviones
       // reales — el libro EXTERNOS no genera bloque.
       aviones: librosAviones,
-      // Hoja "gastos VuelaTour" (29-ago): gastos de EMPRESA del periodo —
+      // Hoja "otros gastos" del general (29-ago; renombrada 1-sep-2026,
+      // antes "gastos VuelaTour"): gastos de EMPRESA del periodo —
       // egresos de VuelaTour, fuera de toda cascada por avión.
       gastos_empresa: hojaGastosEmpresa,
       // Hoja "inventario" (tiendita, 30-ago): resumen por ítem del periodo.
@@ -3505,7 +3515,8 @@ export class AircraftBalanceService {
 
   /**
    * Gastos de EMPRESA del periodo (29-ago-2026) — FUENTE ÚNICA para la
-   * hoja "gastos VuelaTour" del general Y las filas sueltas de "Otros
+   * hoja "otros gastos" del general (antes "gastos VuelaTour",
+   * 1-sep-2026) Y las filas sueltas de "Otros
    * movimientos" (una sola lectura; el dinero aparece UNA vez): gastos sin
    * vuelo NI avión (PERSONAL_DUENO fuera — dinero personal del dueño; GAS
    * fuera — fila propia "gas sin avión" en Otros movimientos).
@@ -3705,7 +3716,8 @@ export class AircraftBalanceService {
    * Además: filas SUELTAS con el dinero hoy invisible en este Excel — GAS
    * sin avión y TUAS sin vuelo. (29-ago: los gastos de EMPRESA — sin vuelo
    * NI avión NI reparto, y los remanentes de reparto — ya NO salen aquí:
-   * viven en la hoja "gastos VuelaTour" del general, `empresaYSueltos`
+   * viven en la hoja "otros gastos" del general (antes "gastos
+   * VuelaTour"), `empresaYSueltos`
    * viene de la MISMA lectura — el dinero aparece UNA vez.)
    *
    * Reglas 28-ago (6 y 7): el ingreso de VUELATOUR (TUAS + extras +
@@ -3739,7 +3751,7 @@ export class AircraftBalanceService {
     hasta: string,
     memoTc: Map<string, Promise<TipoCambioDetalle | null>>,
     // Subconjuntos de gastosEmpresaYSueltos (lectura compartida con la hoja
-    // "gastos VuelaTour"): aquí solo se pintan los TUAS sueltos.
+    // "otros gastos" del general): aquí solo se pintan los TUAS sueltos.
     empresaYSueltos: { empresa: GastoRow[]; tuasSueltos: GastoRow[] },
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
@@ -3799,7 +3811,8 @@ export class AircraftBalanceService {
             .neq('estado', 'CANCELADA')
         : Promise.resolve(vacio),
       // (29-ago: los gastos de EMPRESA sin vuelo ni avión ya vienen leídos
-      // en `empresaYSueltos` — lectura compartida con "gastos VuelaTour".)
+      // en `empresaYSueltos` — lectura compartida con la hoja "otros
+      // gastos" del general.)
       // GAS sin avión (mismo universo que pendienteGasSinAvion: el de un
       // externo sin avión se excluye abajo — vive en el libro EXTERNOS; el
       // que resuelve avión por su tramo/vuelo también — vive en la hoja
@@ -4469,8 +4482,9 @@ export class AircraftBalanceService {
       };
     };
     // Gastos de EMPRESA (29-ago): ya no salen aquí — viven en la hoja
-    // "gastos VuelaTour" del general (gastosEmpresaYSueltos, misma
-    // lectura). Aquí solo quedan los TUAS sin vuelo sin avión (regla 7: su
+    // "otros gastos" del general (gastosEmpresaYSueltos, misma
+    // lectura; antes "gastos VuelaTour"). Aquí solo quedan los TUAS sin
+    // vuelo sin avión (regla 7: su
     // único lugar) y el "gas sin avión" de abajo.
     for (const g of empresaYSueltos.tuasSueltos) {
       sueltas.push(

@@ -600,6 +600,13 @@ export class QuotesService {
     // y más económicos, el total se acuerda a mano): línea de AJUSTE directa
     // post-IVA — el MISMO mecanismo del redondeo automático — para aterrizar
     // EXACTO en lo pactado. Manda sobre el redondeo (sería redundante).
+    // ELIMINADO DEL COTIZADOR (decisión del cliente, 2-sep-2026: "no tiene
+    // por qué existir"): la CAPTURA manual desapareció del panel y
+    // create()/revise() descartan un pactado NUEVO. Esta rama se CONSERVA
+    // porque quickAdjust y la revisión del panel REHIDRATAN el pactado ya
+    // persistido por este mismo campo del DTO (indistinguibles de una
+    // captura manual): sin ella, los folios vivos 24/69/148 perderían su
+    // total acordado al primer ajuste. NO retirarla sin migrar esos folios.
     const pactado = round2(Number(dto.total_pactado_usd) || 0);
     if (pactado > 0) {
       const extra = round2(pactado - tot.total);
@@ -1107,6 +1114,13 @@ export class QuotesService {
         'Indica el operador externo que cubre el vuelo.',
       );
     }
+    // PRECIO PACTADO eliminado del cotizador (decisión del cliente,
+    // 2-sep-2026): una cotización NUEVA jamás nace con total pactado. El
+    // campo del DTO subsiste SOLO como canal de rehidratación de
+    // revise()/quickAdjust para folios que ya lo tenían persistido
+    // (24/69/148); aquí se descarta en silencio (el panel ya no lo manda y
+    // un cliente crudo del API tampoco puede colarlo).
+    dto.total_pactado_usd = undefined;
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
 
@@ -1368,6 +1382,21 @@ export class QuotesService {
     // silencio. El revise de un externo EXIGE el avión de referencia
     // (aeronave_id) — el motor ya no tiene modo sin referencia.
     dto.es_externo = current.es_externo === true;
+    // PRECIO PACTADO eliminado del cotizador (decisión del cliente,
+    // 2-sep-2026): el valor del DTO solo se acepta como REHIDRATACIÓN de un
+    // pactado YA persistido (el panel al revisar y quickAdjust re-envían el
+    // del snapshot — no son distinguibles de una captura manual, así que se
+    // ancla a lo persistido). Sin pactado vigente, se descarta: no puede
+    // nacer uno nuevo por API. Omitirlo con pactado vigente SÍ lo suelta
+    // (p. ej. "todo en $0" del panel), igual que antes.
+    const pactadoVigente = Number(
+      (
+        current.calculo_snapshot as {
+          meta?: { total_pactado_usd?: number | null };
+        } | null
+      )?.meta?.total_pactado_usd,
+    );
+    if (!(pactadoVigente > 0)) dto.total_pactado_usd = undefined;
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
@@ -1823,6 +1852,9 @@ export class QuotesService {
       // conserva el ajuste manual tal cual. Con PRECIO PACTADO, el ajuste
       // manual previo era el delta al pactado: viaja solo el descuento y el
       // pactado re-genera su ajuste exacto (el total acordado NO se mueve).
+      // (2-sep-2026: la captura manual del pactado se eliminó del cotizador;
+      // este passthrough y la revisión del panel son las únicas vías vivas —
+      // revise() lo ancla a lo persistido, así que este re-envío pasa.)
       ajuste_final_usd:
         metaSnapshot?.redondeo_automatico === true ||
         Number(metaSnapshot?.total_pactado_usd) > 0

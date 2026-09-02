@@ -474,9 +474,17 @@ export class CalculateQuoteDto {
   @IsBoolean()
   redondeo_automatico?: boolean;
 
+  // LEGADO — decisión del cliente 2-sep-2026: la opción "Precio pactado con
+  // el cliente (total, USD)" se ELIMINÓ del cotizador. La propiedad NO se
+  // borra del DTO (forbidNonWhitelisted respondería 400 a la rehidratación
+  // del panel y de quickAdjust — indistinguible de una captura manual): queda
+  // SOLO como canal de rehidratación del pactado ya persistido en
+  // calculo_snapshot.meta (folios vivos 24/69/148). create() la descarta
+  // siempre y revise() la ancla a lo persistido: un valor manual NUEVO ya no
+  // surte efecto en nada que se guarde.
   @ApiPropertyOptional({
     description:
-      'Precio TOTAL pactado con el cliente (vuelos cubiertos por externo: el total se acuerda a mano). El motor genera la línea de ajuste directa para aterrizar EXACTO en este monto; manda sobre el redondeo automático.',
+      'LEGADO (2-sep-2026: la captura se eliminó del cotizador). Solo rehidrata el precio pactado YA persistido de folios viejos — revise() lo ignora si el folio no traía pactado y create() lo descarta siempre. En calculate (preview sin persistencia) se respeta para que el preview de esos folios cuadre.',
   })
   @IsOptional()
   @Type(() => Number)

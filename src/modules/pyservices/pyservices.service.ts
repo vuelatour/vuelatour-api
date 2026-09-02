@@ -809,7 +809,9 @@ export interface BalanceGeneralPayload {
   consolidado: BalanceAvionPayload;
   aviones: BalanceAvionPayload[];
   /**
-   * Hoja "gastos VuelaTour" (29-ago-2026): gastos de EMPRESA — sin vuelo ni
+   * Hoja "otros gastos" del GENERAL (29-ago-2026; renombrada el
+   * 1-sep-2026 — antes "gastos VuelaTour"; solo cambió el nombre de la
+   * hoja en el renderer, este campo NO): gastos de EMPRESA — sin vuelo ni
    * avión (≠PERSONAL_DUENO, ≠GAS) sin reparto + remanentes de reparto
    * manual. Egresos de VuelaTour: FUERA de toda cascada por avión; antes
    * salían como filas sueltas de "Otros movimientos". Opcional por skew.
