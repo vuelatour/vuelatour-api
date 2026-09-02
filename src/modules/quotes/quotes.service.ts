@@ -1313,9 +1313,23 @@ export class QuotesService {
 
   async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
     const current = await this.findById(vueloId);
-    if (current.estado === 'CANCELADO') {
+    // CANCELADO sí se revisa (decisión del equipo, 1-sep-2026): el vuelo no
+    // salió pero la parte financiera existió — oficina corrige el desglose
+    // para efectos financieros/documentales. En balances la venta de un
+    // cancelado es LO COBRADO (regla 28-ago), no el total cotizado, así que
+    // editar el total NO mueve reparto/libro/balance — por eso el gate de
+    // "ya cobrado" NO aplica en cancelados. La FACTURADA sí bloquea (el CFDI
+    // ancla los montos) con mensaje propio: sin este gate explícito, el
+    // candado optimista .eq('facturado', false) del UPDATE rebotaría con el
+    // mensaje confuso de "la cotización cambió mientras editabas". Revisar
+    // JAMÁS saca al vuelo de CANCELADO (el UPDATE de estado solo promueve
+    // SOLICITUD/RESERVA→COTIZADO) ni revive tramos cancelados, no avisa a la
+    // tripulación (el vuelo no va) y el calendario sigue su flujo de
+    // cancelados (syncFlight → removeFlight idempotente).
+    const esCancelado = current.estado === 'CANCELADO';
+    if (esCancelado && current.facturado) {
       throw new ConflictException(
-        'No se puede revisar una cotización cancelada.',
+        'La cotización cancelada ya tiene CFDI emitida; cancela la factura primero.',
       );
     }
     // Vuelo de SERVICIO (regla del cliente, 27 jul 2026): mover el avión a
@@ -1348,6 +1362,8 @@ export class QuotesService {
     // Ajustes de última hora (extras, pax/TUAs, cierre de abiertas): la
     // cotización se puede revisar en cualquier estado mientras NO se haya
     // cobrado ni facturado. Cada revisión queda versionada en el historial.
+    // CANCELADO queda FUERA de esta lista a propósito (1-sep-2026): en un
+    // cancelado la venta es lo cobrado real, editar el total es seguro.
     const estadoAvanzado =
       current.estado === 'CONFIRMADO' ||
       current.estado === 'EN_VUELO' ||
@@ -1568,9 +1584,22 @@ export class QuotesService {
     }
     // Al revisar, la ruta puede ganar o perder una pista con permiso — y las
     // reservas llegan aquí con el permiso sin derivar (nacieron sin cotización).
-    await this.airports.refreshPermisosDeVuelo(vueloId);
+    // En CANCELADO no se re-deriva (1-sep-2026): el cron de 90 días
+    // (refrescarPermisosProximos) excluye cancelados y un 'pendiente' recién
+    // sembrado quedaría zombi en la ficha sin nadie que lo re-derive.
+    if (!esCancelado) {
+      await this.airports.refreshPermisosDeVuelo(vueloId);
+    }
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
-    void this.notifyPernoctaCambiada(updated, pernoctasAntes, pernoctasDespues);
+    // Avisos a tripulación SOLO con el vuelo vivo (1-sep-2026): en un
+    // CANCELADO nadie debe recibir pernoctas/reagendas de un vuelo que no va.
+    if (!esCancelado) {
+      void this.notifyPernoctaCambiada(
+        updated,
+        pernoctasAntes,
+        pernoctasDespues,
+      );
+    }
     // Reagenda desde el cotizador (21-ago; ampliada 26-ago): fecha de salida
     // Y del REGRESO avisan a la tripulación (doc 4.3), comparando por
     // INSTANTE (el string crudo de PostgREST nunca era igual).
@@ -1591,7 +1620,7 @@ export class QuotesService {
       dto.fecha_traslado_final,
       current.fecha_traslado_final,
     );
-    if (salidaCambio || regresoCambio) {
+    if (!esCancelado && (salidaCambio || regresoCambio)) {
       const partes: string[] = [];
       if (salidaCambio) partes.push(`ahora sale ${fechaTxt(dto.fecha_vuelo!)}`);
       if (regresoCambio)
@@ -1605,8 +1634,9 @@ export class QuotesService {
     }
     // Cambio de AVIÓN al revisar (26-ago, paridad con assign): la referencia
     // operativa del cotizador puede pisar vuelo.aeronave_id sin que nadie
-    // se enterara.
+    // se enterara. En CANCELADO no se avisa (1-sep-2026).
     if (
+      !esCancelado &&
       !current.es_externo &&
       updated.aeronave_id &&
       updated.aeronave_id !== current.aeronave_id
@@ -1645,10 +1675,17 @@ export class QuotesService {
     }
     // El precio cambió: la bandera `cobrado` se recalcula con la fuente
     // canónica (un anticipo previo puede ahora cubrir —o dejar de cubrir— el
-    // total). Antes quedaba obsoleta hasta el siguiente cobro.
-    await this.refreshCobradoTrasRecotizar(vueloId, updated, userId);
+    // total). Antes quedaba obsoleta hasta el siguiente cobro. En CANCELADO
+    // no se toca (1-sep-2026): ahí "cobrado = total cubierto" no significa
+    // nada (la venta ES lo cobrado), el semáforo prioriza cancelado y
+    // flipear la bandera solo mete ruido.
+    if (!esCancelado) {
+      await this.refreshCobradoTrasRecotizar(vueloId, updated, userId);
+    }
     // Refleja fechas/tramos nuevos en el calendario (admin lee en vivo; esto
     // mueve también los eventos de Google si el vuelo ya estaba sincronizado).
+    // Con el vuelo CANCELADO, syncFlight hace removeFlight (idempotente): el
+    // flujo actual de cancelados se conserva tal cual.
     void this.calendar.syncFlight(vueloId);
     const escalas = await this.findEscalas(vueloId);
     return { ...updated, escalas };
@@ -1681,6 +1718,16 @@ export class QuotesService {
     if (current.estado === 'RESERVA') {
       throw new ConflictException(
         'La reserva aún no tiene precios: cotízala primero (botón Cotizar).',
+      );
+    }
+    // CANCELADO (1-sep-2026): revise() ya acepta canceladas, pero el ajuste
+    // rápido es para extras de última hora de vuelos VIVOS — el camino de
+    // una cancelada es el cotizador completo ("Revisar"), donde el aviso
+    // ámbar explica que el vuelo no se reactiva. El panel esconde la card;
+    // este gate cierra también la puerta por API.
+    if (current.estado === 'CANCELADO') {
+      throw new ConflictException(
+        'El vuelo está cancelado: usa "Revisar" para ajustar la cotización completa.',
       );
     }
     if (!current.aeronave_id) {
@@ -2420,7 +2467,7 @@ export class QuotesService {
     // precia con los tramos del snapshot, que son DISTINTOS).
     const { data: vueloFlag, error: flagErr } = await this.supabase.service
       .from('vuelo')
-      .select('itinerario_operativo')
+      .select('itinerario_operativo, estado')
       .eq('id', vueloId)
       .maybeSingle();
     if (flagErr)
@@ -2428,6 +2475,12 @@ export class QuotesService {
         `Failed to read itinerario_operativo: ${flagErr.message}`,
       );
     if (vueloFlag?.itinerario_operativo === true) return;
+    // Vuelo CANCELADO (decisión 1-sep-2026): la revisión de una cancelada es
+    // financiera/documental — los tramos NO reviven (conservan su
+    // cancelada_at/motivo/por: evidencias por tramo y vuelos combinados con
+    // espejo = primer tramo ACTIVO dependen de eso) y la tripulación NO
+    // recibe avisos de un vuelo que no va.
+    const vueloCancelado = vueloFlag?.estado === 'CANCELADO';
 
     // Solo gestionamos los tramos COMERCIALES (cotizados). Los operativos
     // internos (solo_operativa=true) los administra operaciones aparte y NUNCA
@@ -2504,15 +2557,19 @@ export class QuotesService {
         // Re-cotizar redefine la ruta: si el tramo estaba CANCELADO
         // (operación), el nuevo plan lo revive — el cotizador es la fuente
         // de la ruta comercial y un tramo cancelado y cotizado a la vez
-        // sería contradictorio.
-        if (actual.cancelada_at != null) {
-          cambios.revividos.push(
-            `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
-          );
+        // sería contradictorio. EXCEPCIÓN (1-sep-2026): con el VUELO
+        // CANCELADO nada revive — se omiten las columnas y el UPDATE
+        // conserva la cancelación del tramo tal cual.
+        if (!vueloCancelado) {
+          if (actual.cancelada_at != null) {
+            cambios.revividos.push(
+              `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
+            );
+          }
+          planFields.cancelada_at = null;
+          planFields.cancelada_motivo = null;
+          planFields.cancelada_por = null;
         }
-        planFields.cancelada_at = null;
-        planFields.cancelada_motivo = null;
-        planFields.cancelada_por = null;
         const { error } = await this.supabase.service
           .from('escala')
           .update(planFields)
@@ -2560,11 +2617,14 @@ export class QuotesService {
 
     // Aviso consolidado del itinerario (26-ago): antes revivir/agregar/
     // eliminar tramos al re-cotizar era completamente mudo. En create()
-    // el vuelo nace sin tripulación y no sale nada.
+    // el vuelo nace sin tripulación y no sale nada. Con el vuelo CANCELADO
+    // no se avisa (1-sep-2026): la revisión es financiera/documental y la
+    // tripulación no debe recibir pushes de un vuelo que no va.
     if (
-      cambios.revividos.length ||
-      cambios.agregados.length ||
-      cambios.eliminados.length
+      !vueloCancelado &&
+      (cambios.revividos.length ||
+        cambios.agregados.length ||
+        cambios.eliminados.length)
     ) {
       try {
         const vuelo = await this.findById(vueloId);
