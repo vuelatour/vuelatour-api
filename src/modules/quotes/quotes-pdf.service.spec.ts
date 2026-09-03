@@ -30,6 +30,8 @@ function escala(
     destino_iata: destino,
     solo_operativa: false,
     pdf_oculto: false,
+    // Fecha SOLO del PDF (3-sep): sin captura por default.
+    pdf_fecha: null,
     cancelada_at: null,
     fecha_salida_plan: `2026-09-0${orden}T10:00:00.000Z`,
     ...extra,
@@ -218,5 +220,85 @@ describe('escalasVisiblesPdf', () => {
     });
     expect(r.millasTramoMaxNm).toBe(850);
     expect(r.ruta).toBe('CUN → CZM');
+  });
+
+  describe('fecha del tramo SOLO para el PDF (pdf_fecha, 3-sep)', () => {
+    it('sale de la escala VIVA por orden; el oculto no la expone y sobrevive la renumeración', () => {
+      const r = escalasVisiblesPdf({
+        calculo_snapshot: {
+          tramos: [
+            tramo(1, 'CUN', 'CZM'),
+            tramo(2, 'CZM', 'MID'),
+            tramo(3, 'MID', 'CUN'),
+          ],
+        },
+        escalas: [
+          escala(1, 'CUN', 'CZM', { pdf_fecha: '2026-09-05' }),
+          escala(2, 'CZM', 'MID', {
+            pdf_oculto: true,
+            pdf_fecha: '2026-09-06',
+          }),
+          escala(3, 'MID', 'CUN'),
+        ],
+      });
+      // El tramo 3 real se renumera a 2 y conserva SU fecha (null): la
+      // fecha no se desplaza con la renumeración.
+      expect(r.escalas.map((e) => [e.orden, e.pdf_fecha])).toEqual([
+        [1, '2026-09-05'],
+        [2, null],
+      ]);
+      // La fecha del tramo oculto jamás viaja al payload.
+      expect(JSON.stringify(r)).not.toContain('2026-09-06');
+    });
+
+    it('sin pdf_fecha NO hay fallback a fecha_salida_plan ni a la fecha del vuelo', () => {
+      const r = escalasVisiblesPdf({
+        fecha_vuelo: '2026-09-01T08:00:00.000Z',
+        calculo_snapshot: {
+          tramos: [tramo(1, 'CUN', 'CZM'), tramo(2, 'CZM', 'CUN')],
+        },
+        escalas: [escala(1, 'CUN', 'CZM'), escala(2, 'CZM', 'CUN')],
+      });
+      expect(r.escalas.map((e) => e.pdf_fecha)).toEqual([null, null]);
+      // Sin escalas vivas tampoco inventa nada.
+      const sinVivas = escalasVisiblesPdf({
+        fecha_vuelo: '2026-09-01T08:00:00.000Z',
+        calculo_snapshot: {
+          tramos: [tramo(1, 'CUN', 'CZM'), tramo(2, 'CZM', 'CUN')],
+        },
+        escalas: [],
+      });
+      expect(sinVivas.escalas.map((e) => e.pdf_fecha)).toEqual([null, null]);
+    });
+
+    it('es fecha de PARED: el string viaja tal cual (recortado a YYYY-MM-DD si el driver trae hora)', () => {
+      const r = escalasVisiblesPdf({
+        calculo_snapshot: { tramos: [tramo(1, 'CUN', 'CZM')] },
+        escalas: [
+          escala(1, 'CUN', 'CZM', { pdf_fecha: '2026-09-05T00:00:00' }),
+        ],
+      });
+      expect(r.escalas[0].pdf_fecha).toBe('2026-09-05');
+    });
+
+    it('rama fallback (sin snapshot.tramos): mismo par — fecha viva, oculto no la expone, sin fallback', () => {
+      const r = escalasVisiblesPdf({
+        fecha_vuelo: '2026-09-01T08:00:00.000Z',
+        calculo_snapshot: {},
+        escalas: [
+          escala(1, 'CUN', 'CZM', { pdf_fecha: '2026-09-05' }),
+          escala(2, 'CZM', 'MID', {
+            pdf_oculto: true,
+            pdf_fecha: '2026-09-06',
+          }),
+          escala(3, 'MID', 'CUN'),
+        ],
+      });
+      expect(r.escalas.map((e) => [e.orden, e.pdf_fecha])).toEqual([
+        [1, '2026-09-05'],
+        [2, null],
+      ]);
+      expect(JSON.stringify(r)).not.toContain('2026-09-06');
+    });
   });
 });

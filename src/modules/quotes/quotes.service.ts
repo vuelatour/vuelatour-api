@@ -37,6 +37,7 @@ import {
 } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
+import { PdfVisibilidadDto } from './dto/pdf-visibilidad.dto';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
@@ -1928,26 +1929,41 @@ export class QuotesService {
   }
 
   /**
-   * Prende/apaga la visibilidad de UN tramo en el PDF de la cotización
-   * escribiendo `escala.pdf_oculto` y NADA más: sin recálculo, sin versionar
-   * y sin tocar el snapshot — presentación pura (regla 27-ago: el tramo
-   * oculto se sigue cobrando) y el PDF lee la escala VIVA
-   * (`escalasVisiblesPdf` prioriza `escala.pdf_oculto` sobre el snapshot).
-   * Nace por el bug 1-sep ("apago la visibilidad, vuelvo a entrar y está
-   * activada"): el toggle ya no depende de que un guardado del cotizador
-   * arrastre la bandera — se escribe directo en la fuente de verdad.
+   * Presentación PDF de UN tramo: `escala.pdf_oculto` (ojito) y/o
+   * `escala.pdf_fecha` (fecha SOLO para el PDF del cliente, 3-sep-2026).
+   * Escribe esas columnas y NADA más: sin recálculo, sin versionar y sin
+   * tocar el snapshot — presentación pura (regla 27-ago: el tramo oculto se
+   * sigue cobrando; la fecha del PDF NO toca `fecha_salida_plan` ni las
+   * fechas del vuelo) y el PDF lee la escala VIVA (`escalasVisiblesPdf`
+   * prioriza la escala sobre el snapshot). Nace por el bug 1-sep ("apago la
+   * visibilidad, vuelvo a entrar y está activada"): el toggle ya no depende
+   * de que un guardado del cotizador arrastre la bandera — se escribe
+   * directo en la fuente de verdad.
+   *
+   * Patch PARCIAL: clave omitida (undefined) = no tocar; `pdf_fecha: null` =
+   * quitar la fecha; el string YYYY-MM-DD (fecha de PARED, ya validada por
+   * el DTO) va TAL CUAL a la columna `date` — jamás `new Date()` ni
+   * `toISOString()` (asumirían UTC y moverían el día).
    */
   async setPdfVisibilidad(
     vueloId: string,
     escalaId: string,
-    oculto: boolean,
+    dto: PdfVisibilidadDto,
     userId: string,
-  ): Promise<{ id: string; orden: number; pdf_oculto: boolean }> {
-    // La escala debe pertenecer AL vuelo de la URL (nunca ocultar tramos de
+  ): Promise<{
+    id: string;
+    orden: number;
+    pdf_oculto: boolean;
+    pdf_fecha: string | null;
+  }> {
+    if (dto.oculto === undefined && dto.pdf_fecha === undefined) {
+      throw new BadRequestException('Indica oculto y/o pdf_fecha.');
+    }
+    // La escala debe pertenecer AL vuelo de la URL (nunca tocar tramos de
     // otro vuelo por id suelto).
     const { data: escala, error: escErr } = await this.supabase.service
       .from('escala')
-      .select('id, orden, vuelo_id')
+      .select('id, orden, vuelo_id, pdf_oculto, pdf_fecha')
       .eq('id', escalaId)
       .eq('vuelo_id', vueloId)
       .maybeSingle();
@@ -1957,15 +1973,32 @@ export class QuotesService {
         'La escala no existe o no pertenece a este vuelo.',
       );
     }
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.oculto !== undefined) patch.pdf_oculto = dto.oculto === true;
+    if (dto.pdf_fecha !== undefined) patch.pdf_fecha = dto.pdf_fecha;
     const { error } = await this.supabase.service
       .from('escala')
-      .update({ pdf_oculto: oculto === true, updated_by: userId })
+      .update(patch)
       .eq('id', escalaId);
-    if (error) throw new Error(`Failed to update pdf_oculto: ${error.message}`);
+    if (error) {
+      throw new Error(`Failed to update presentación PDF: ${error.message}`);
+    }
+    // Estado FINAL (lo tocado + lo que ya había): el panel pinta con esto.
+    const previaOculto: unknown = escala.pdf_oculto;
+    const previaFecha: unknown = escala.pdf_fecha;
+    const pdfOcultoFinal =
+      dto.oculto !== undefined ? dto.oculto === true : previaOculto === true;
+    const pdfFechaFinal: string | null =
+      dto.pdf_fecha !== undefined
+        ? dto.pdf_fecha
+        : typeof previaFecha === 'string'
+          ? previaFecha
+          : null;
     return {
       id: escala.id as string,
       orden: Number(escala.orden),
-      pdf_oculto: oculto === true,
+      pdf_oculto: pdfOcultoFinal,
+      pdf_fecha: pdfFechaFinal ? pdfFechaFinal.slice(0, 10) : null,
     };
   }
 
@@ -2353,7 +2386,9 @@ export class QuotesService {
       .select(
         // aeronave_id: avión del TRAMO (null = hereda el del vuelo) — lo
         // necesita la participación por avión (regla B 28-ago).
-        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
+        // pdf_fecha: fecha SOLO del PDF del cliente (date → 'YYYY-MM-DD' |
+        // null, 3-sep); presentación pura, la lee escalasVisiblesPdf.
+        'id, vuelo_id, orden, origen_iata, destino_iata, aeronave_id, millas_nauticas, pasajeros, pasajeros_nombres, es_ferry, solo_operativa, pdf_oculto, pdf_fecha, requiere_pernocta, pernocta_costo_usd, tipo_parada, servicio_notas, fecha_salida_plan, taco_salida, taco_llegada, hora_salida, hora_llegada, notas, cancelada_at',
       )
       .eq('vuelo_id', vueloId)
       .order('orden', { ascending: true });
@@ -2543,6 +2578,9 @@ export class QuotesService {
       if (e.pdf_oculto != null) {
         planFields.pdf_oculto = e.pdf_oculto === true;
       }
+      // pdf_fecha (fecha SOLO del PDF, 3-sep) NO viaja en planFields a
+      // propósito: el UPDATE la conserva sola (se edita solo por PATCH
+      // pdf-visibilidad; no vive en el DTO ni en el snapshot).
       const actual = porOrden.get(orden);
       // SEMÁNTICA 2-sep-2026 (cliente): el sobrevuelo es una BANDERA del
       // tramo ORTOGONAL al destino — un CUN→CZM puede llevarla igual que un

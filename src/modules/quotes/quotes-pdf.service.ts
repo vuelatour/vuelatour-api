@@ -20,7 +20,11 @@ function num(v: unknown): number | null {
  * primer/último tramo real quedó oculto.
  */
 export interface EscalasPdfVisibles {
-  /** Tramos visibles RENUMERADOS 1..N (jamás exponen la posición original). */
+  /**
+   * Tramos visibles RENUMERADOS 1..N (jamás exponen la posición original).
+   * Cada uno trae `pdf_fecha` ('YYYY-MM-DD' | null): la fecha de PARED que
+   * el cliente ve en el PDF para ese tramo (3-sep), sacada de la escala viva.
+   */
   escalas: Array<Record<string, unknown>>;
   /** "CUN → AZP → BZE → CZM → CUN" uniendo solo puntos visibles; null sin tramos. */
   ruta: string | null;
@@ -67,6 +71,13 @@ export interface EscalasPdfVisibles {
  *   (`tiempoTramoSnapMaxHr` / `millasTramoMaxNm`) NO se filtran — salen de
  *   TODOS los tramos cotizados, ocultos incluidos (igual que los TUAS, que
  *   ya salían completos del desglose canónico).
+ * - FECHA DEL TRAMO EN EL PDF (3-sep-2026): `pdf_fecha ?? null` de la escala
+ *   VIVA cruzada por `orden` — fecha de PARED ('YYYY-MM-DD') que se imprime
+ *   tal cual, SIN fallback a `fecha_salida_plan`/`fecha_vuelo` (esas son
+ *   operativas y llevan hora/zona; si oficina no captura fecha, el PDF no
+ *   imprime ninguna). Los ocultos ya se filtraron antes de renumerar, así
+ *   que su fecha jamás viaja al payload. Presentación pura: no toca la ruta
+ *   operativa, el snapshot ni el precio.
  */
 export function escalasVisiblesPdf(
   quote: Record<string, unknown>,
@@ -84,6 +95,16 @@ export function escalasVisiblesPdf(
     const viva = vivaPorOrden.get(num(t.orden) ?? Number.NaN);
     if (viva && viva.pdf_oculto != null) return viva.pdf_oculto === true;
     return t.pdf_oculto === true;
+  };
+  // Fecha SOLO para el PDF (3-sep): sale de la escala VIVA por orden
+  // (`escala.pdf_fecha`, columna date → 'YYYY-MM-DD'); slice(0, 10) es
+  // defensivo por si el driver devolviera un timestamp. Sin captura = null:
+  // NUNCA cae a fecha_salida_plan/fecha_vuelo (operativas, con hora/zona) y
+  // jamás pasa por new Date() (asumiría UTC y movería el día).
+  const fechaPdfDeOrden = (orden: unknown): string | null => {
+    const viva = vivaPorOrden.get(num(orden) ?? Number.NaN);
+    const f = viva?.pdf_fecha;
+    return typeof f === 'string' && f ? f.slice(0, 10) : null;
   };
 
   const tramosSnap = (
@@ -127,6 +148,7 @@ export function escalasVisiblesPdf(
         pernocta_costo_usd: t.pernocta_usd,
         tipo_parada: t.tipo_parada,
         servicio_notas: t.servicio_notas,
+        pdf_fecha: fechaPdfDeOrden(t.orden),
       }));
   } else {
     const base = escalasVivas.filter(
@@ -142,7 +164,9 @@ export function escalasVisiblesPdf(
         millasTramoMaxNm = Math.max(millasTramoMaxNm ?? 0, mn);
       }
     }
-    visibles = base.filter((e) => e.pdf_oculto !== true);
+    visibles = base
+      .filter((e) => e.pdf_oculto !== true)
+      .map((e) => ({ ...e, pdf_fecha: fechaPdfDeOrden(e.orden) }));
   }
 
   // Fechas de traslado: si el primer/último tramo REAL quedó oculto, la fecha
@@ -402,6 +426,10 @@ export class QuotesPdfService {
         pernocta_usd: num(e.pernocta_costo_usd) ?? 0,
         tipo_parada: (e.tipo_parada as string) ?? 'NORMAL',
         servicio_notas: (e.servicio_notas as string) ?? null,
+        // Fecha de PARED SOLO para el PDF (3-sep): 'YYYY-MM-DD' | null, la
+        // pinta pyservices sin hora ni zona. Campo ADITIVO (la plantilla
+        // vieja lo ignora); sin fecha en ningún tramo no hay columna.
+        fecha: (e.pdf_fecha as string | null | undefined) ?? null,
       })),
       tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),

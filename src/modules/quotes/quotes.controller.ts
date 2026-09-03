@@ -131,7 +131,7 @@ export class QuotesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Prende/apaga la visibilidad de un tramo en el PDF (escribe escala.pdf_oculto y nada más: sin recálculo ni snapshot — el PDF lee la escala viva). Mismos roles que revise.',
+      'Presentación PDF de un tramo: prende/apaga su visibilidad (escala.pdf_oculto) y/o fija la fecha que verá el cliente en el PDF (escala.pdf_fecha, solo fecha YYYY-MM-DD; null = quitarla). Patch parcial (misma ruta que el toggle: {oculto} sigue valiendo), sin recálculo ni snapshot — el PDF lee la escala viva; no toca la ruta operativa ni las fechas de vuelo. Mismos roles que revise.',
   })
   pdfVisibilidad(
     @Param('id', ParseUUIDPipe) id: string,
@@ -139,7 +139,7 @@ export class QuotesController {
     @Body() dto: PdfVisibilidadDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.quotes.setPdfVisibilidad(id, escalaId, dto.oculto, c.userId);
+    return this.quotes.setPdfVisibilidad(id, escalaId, dto, c.userId);
   }
 
   @Post(':id/confirm')
