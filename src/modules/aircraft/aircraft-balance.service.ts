@@ -51,7 +51,8 @@ const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, operador_externo, costo_externo_usd, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_pct, iva_usd, subtotal_vuelo_usd, ajuste_final_usd, tuas_usd, extras_total_usd, viaticos_pernocta_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado, calculo_snapshot';
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
-// GAS aparte (litros/$ x litro); PERMISO e INDIRECTO van a sus hojas propias.
+// GAS aparte (litros/$ x litro); PERMISO a la hoja "permisos" e INDIRECTO a
+// la hoja "Gastos Indirectos".
 // TUAS (regla 28-ago-2026): SOLO nota en la celda de OPERACIÓN — no suman en
 // OP ni restan en ninguna hoja (el par TUA cobrado↔pagado vive en la pestaña
 // "Otros movimientos" del Balance general).
@@ -191,7 +192,7 @@ interface GastoRow {
   /** Avión del gasto (herencia: null = el del vuelo). */
   aeronave_id: string | null;
   /** Salida de inventario ligada (puente bodega→gastos): con valor, el
-   *  gasto va a la hoja "refacciones" (29-ago), no a "gastos indirectos". */
+   *  gasto va a la hoja "refacciones" (29-ago), no a "Gastos Indirectos". */
   inventario_movimiento_id?: string | null;
   categoria: string;
   monto: string | number | null;
@@ -409,22 +410,28 @@ export class AircraftBalanceService {
   }
 
   /**
-   * Balance GENERAL de la flota (regla 18-ago, consolidado): hoja RESUMEN
+   * Balance GENERAL de la flota — "Balance general VuelaTour" desde el
+   * 2-sep-2026 (regla 18-ago, consolidado): hoja RESUMEN
    * al frente (una fila por avión = los TOTALES de su libro + fila TOTALES
    * de flota) y UN solo juego de hojas con los datos de TODOS los aviones
    * JUNTOS — reporte horas, otros movimientos (ingreso de VuelaTour:
    * TUAS/extras/pernocta cobrados vs pagados, regla 28-ago), cobranza,
    * otros gastos (gastos de EMPRESA sin vuelo ni avión — 29-ago;
    * 1-sep-2026: antes "gastos VuelaTour"), repartidos a aviones
-   * (administrativos repartidos; 1-sep-2026: antes "otros gastos" — los
+   * (administrativos repartidos a mano — alimentada por `otros_gastos` de
+   * cada avión; 1-sep-2026: antes "otros gastos" — los
    * renombres son SOLO del renderer del general, los campos del payload
-   * no cambian), refacciones (salidas de
-   * inventario, con costo FIFO vs venta al avión — 29-ago), balance
+   * no cambian), inventario (tiendita, 30-ago: resumen por ítem del
+   * periodo + detalle de salidas con costo FIFO vs venta al avión;
+   * sustituye a la antigua hoja refacciones del general), balance
    * (bloques por avión) y pendientes. Desde el 29-ago el RENDERER del
-   * general ya no pinta las hojas combustible / gastos indirectos /
-   * permisos (viven en el libro INDIVIDUAL de cada avión); el API las
+   * general ya no pinta las hojas combustible / Gastos Indirectos /
+   * permisos (viven en el libro INDIVIDUAL de cada avión; desde el
+   * 2-sep-2026 el individual pinta `gastos_indirectos` + `otros_gastos`
+   * JUNTOS en su única pestaña "Gastos Indirectos" — fusión de
+   * presentación en pyservices, el payload no cambia); el API las
    * sigue calculando TODAS — restan igual en la cascada de la hoja
-   * "balance". Mismo motor y números que el individual; cero
+   * "balance" (cada lista UNA vez). Mismo motor y números que el individual; cero
    * cálculos paralelos. Vuelos multi-avión no se duplican en la suma:
    * horas/costos van al avión de cada tramo y la VENTA DEL AVIÓN se
    * reparte entre los aviones en partes iguales por tramo vendido (regla B
@@ -2911,22 +2918,36 @@ export class AircraftBalanceService {
 
     // ===== Hojas de gastos: clasificación por ORIGEN (regla 28-ago-2026,
     // sustituye a la clasificación solo por categoría) =====
+    // OJO (2-sep-2026, pedido del cliente — Ale y Pablo se confundían con
+    // dos pestañas): el libro INDIVIDUAL pinta las listas `gastos_indirectos`
+    // Y `otros_gastos` JUNTAS en UNA sola pestaña "Gastos Indirectos"
+    // (fusión de PRESENTACIÓN en pyservices: filas ordenadas por fecha,
+    // totales = suma de los dos totales que ya viajan). El contrato del
+    // payload NO cambió: `otros_gastos` sigue viajando aparte porque
+    // alimenta la hoja "repartidos a aviones" del Balance general
+    // VuelaTour, y la cascada de utilidad resta cada lista UNA vez (restar
+    // `otros_usd` además de `gastos_indirectos_usd` cuenta doble). La
+    // separación de abajo es, por tanto, de ORIGEN/contrato — no de
+    // pestañas del libro individual.
     //  - GAS → hoja "combustible" (query mensual aparte, abajo). Dejarlo en
     //    otra hoja lo contaría DOS veces en la cascada.
     //  - PERMISO → hoja "permisos" (con o sin vuelo).
     //  - Parcial de un REPARTO MANUAL (es_reparto_parcial: FIJO/OTRO/
-    //    GASOLINA/VISITA de la empresa repartidos a mano) → hoja
-    //    "otros gastos": administrativos repartidos, la parte de este avión.
+    //    GASOLINA/VISITA de la empresa repartidos a mano) → lista
+    //    `otros_gastos`: administrativos repartidos, la parte de este avión
+    //    (filas con la nota "reparto manual: $X de $Y"; el individual las
+    //    pinta resaltadas dentro de "Gastos Indirectos", el general en
+    //    "repartidos a aviones").
     //    EXCEPCIÓN (29-ago-2026, reclasificación COSMÉTICA): el parcial de
     //    categoría INDIRECTO — y NOMINA (repartible desde el 29-ago) — va a
-    //    la hoja "gastos indirectos" — el cliente los busca por su
+    //    la lista `gastos_indirectos` — el cliente los busca por su
     //    categoría — conservando su nota "reparto manual: $X de $Y". El
-    //    cuadre NO cambia: la cascada suma AMBAS hojas, mover la fila mueve
-    //    su total de hoja y la suma de las dos es idéntica.
+    //    cuadre NO cambia: la cascada suma AMBAS listas, mover la fila mueve
+    //    su total de lista y la suma de las dos es idéntica.
     //  - Resto con aeronave_id DIRECTO y SIN vuelo (INDIRECTO, OTRO, FIJO,
-    //    REFACCION, OPERACIONES, NOMINA, SERVICIOS, …) → hoja "gastos
-    //    indirectos": gastos que no se pueden ligar a un vuelo pero sí al
-    //    avión. EXCEPCIÓN (29-ago-2026): un gasto con
+    //    REFACCION, OPERACIONES, NOMINA, SERVICIOS, …) → lista
+    //    `gastos_indirectos`: gastos que no se pueden ligar a un vuelo pero
+    //    sí al avión. EXCEPCIÓN (29-ago-2026): un gasto con
     //    inventario_movimiento_id (REFACCION medio BODEGA de una salida de
     //    inventario) va a la hoja "refacciones" — misma cascada
     //    (indirectos + refacciones == lo de antes; la utilidad no cambia).
@@ -2934,7 +2955,8 @@ export class AircraftBalanceService {
     //    se lista en "Otros movimientos" del general y se avisa aquí).
     //  - INDIRECTO ligado a vuelo no debería existir, pero si existe NO se
     //    pierde: cae a indirectos (defensa).
-    // La cascada no cambia: suma las 5 hojas.
+    // La cascada no cambia: suma las 5 listas (combustible, indirectos,
+    // refacciones, otros, permisos), cada una UNA vez.
     // Con vuelos COMPARTIDOS en la lista, gastosVuelo trae también gastos del
     // OTRO avión: las hojas solo cargan los de ESTE (herencia por gasto).
     // EXTERNOS: todos los gastos de sus vuelos (misma regla que la fila) —
@@ -2956,9 +2978,11 @@ export class AircraftBalanceService {
         );
     // Categorías con destino propio (o sin destino: TUAS).
     const HOJAS_APARTE = new Set(['GAS', 'PERMISO', 'TUAS']);
-    // Parciales que se buscan por su categoría (excepción 29-ago): van a
-    // "gastos indirectos" junto a los directos — espejo en el Libro Dinero
-    // (dinero-report.acreditar).
+    // Parciales que se buscan por su categoría (excepción 29-ago): van a la
+    // lista `gastos_indirectos` junto a los directos — espejo en el Libro
+    // Dinero (dinero-report.acreditar). Desde el 2-sep-2026 el individual
+    // pinta ambas listas en la misma pestaña "Gastos Indirectos"; la
+    // distinción sigue importando para "repartidos a aviones" del general.
     const PARCIAL_A_INDIRECTOS = new Set(['INDIRECTO', 'NOMINA']);
     const filasIndirectosTodas = [
       ...gastosAvion.filter(
@@ -2970,7 +2994,7 @@ export class AircraftBalanceService {
       ...gastosVueloDelAvion.filter((g) => g.categoria === 'INDIRECTO'),
     ];
     // Hoja "refacciones" (29-ago): salidas de inventario (gasto ligado a un
-    // movimiento de cardex) SALEN de "gastos indirectos" a hoja propia. La
+    // movimiento de cardex) SALEN de "Gastos Indirectos" a hoja propia. La
     // cascada suma ambas: indirectos + refacciones == lo de antes.
     const filasRefacciones = filasIndirectosTodas.filter(
       (g) => g.inventario_movimiento_id != null,
@@ -3011,11 +3035,16 @@ export class AircraftBalanceService {
         `${etiquetaAvion}: ${tuasSinVuelo.length} gasto(s) TUAS sin vuelo por ${montos} — no restan en ninguna hoja (regla 28-ago: el TUA es solo nota); viven en "Otros movimientos" del Balance general (pestaña que lista vuelos de TODOS los estados) — liga cada gasto a su vuelo si lo tiene`,
       );
     }
+    // Nombre de PESTAÑA con el que los pendientes citan la hoja (2-sep-2026):
+    // el libro individual pinta `gastos_indirectos` y `otros_gastos` en UNA
+    // sola pestaña "Gastos Indirectos" (antes 'gastos indirectos de avión' y
+    // 'otros gastos'). En el general las filas de `otros_gastos` viven en
+    // "repartidos a aviones"; el prefijo "Avión X:" del pendiente ubica.
     const hojaIndirectos = this.buildHoja(
       filasIndirectos,
       tcPromedio,
       horasVoladas,
-      'gastos indirectos de avión',
+      'Gastos Indirectos',
       pendientes,
     );
     // Hoja "refacciones": mismo ledger + el id del movimiento de cardex por
@@ -3039,11 +3068,13 @@ export class AircraftBalanceService {
           refaccionesOrdenadas[i]?.inventario_movimiento_id ?? null,
       })),
     };
+    // Misma pestaña que `gastos_indirectos` en el individual (2-sep-2026);
+    // la lista viaja aparte para "repartidos a aviones" del general.
     const hojaOtros = this.buildHoja(
       filasOtros,
       tcPromedio,
       horasVoladas,
-      'otros gastos',
+      'Gastos Indirectos',
       pendientes,
     );
     const hojaPermisos = this.buildHoja(
@@ -3194,7 +3225,7 @@ export class AircraftBalanceService {
     // aplican al libro EXTERNOS: no es un avión) =====
     if (!modoExternos && hojaIndirectos.filas.length === 0) {
       pendientes.push(
-        `${etiquetaAvion}: sin gastos del avión sin vuelo (indirectos) en el periodo — verificar que no falte captura`,
+        `${etiquetaAvion}: sin gastos del avión sin vuelo (indirectos, hoja "Gastos Indirectos") en el periodo — verificar que no falte captura`,
       );
     }
     if (!modoExternos && permisoAfacUsdHr == null) {
@@ -3313,11 +3344,6 @@ export class AircraftBalanceService {
     };
   }
 
-  /**
-   * Hoja tipo ledger (gastos indirectos / otros / permisos): filas + resumen
-   * al TC promedio del periodo. Un gasto USD sin TC (ni tc_gasto ni promedio)
-   * queda con monto_mxn null Y se reporta en pendientes — nunca desaparece.
-   */
   /**
    * Cargas de combustible del periodo SIN avión: invisibles para el balance
    * de todos los aviones Y para el reparto (que filtra aeronave_id crudo).
@@ -4522,6 +4548,15 @@ export class AircraftBalanceService {
     return { filas, filas_sueltas: sueltas };
   }
 
+  /**
+   * Hoja tipo ledger (listas `gastos_indirectos` / `otros_gastos` /
+   * `refacciones` / `permisos` y los gastos de empresa del general): filas
+   * + resumen al TC promedio del periodo. `nombreHoja` es la PESTAÑA con la
+   * que los pendientes citan la hoja (desde el 2-sep-2026
+   * `gastos_indirectos` y `otros_gastos` citan la misma: "Gastos
+   * Indirectos"). Un gasto USD sin TC (ni tc_gasto ni promedio) queda con
+   * monto_mxn null Y se reporta en pendientes — nunca desaparece.
+   */
   private buildHoja(
     gastos: GastoRow[],
     tcPromedio: number | null,

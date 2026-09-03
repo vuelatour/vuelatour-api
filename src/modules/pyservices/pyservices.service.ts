@@ -738,11 +738,21 @@ export interface BalanceAvionBalancePayload {
   utilidad_antes_usd: number;
   /** "Gasto de combustible" del mes (hoja combustible al TC promedio). */
   combustible_usd?: number | null;
+  /** Total USD de la lista `gastos_indirectos`. Desde el 2-sep-2026 el
+   *  libro INDIVIDUAL pinta UNA sola fila "(−) GASTOS INDIRECTOS USD" =
+   *  gastos_indirectos_usd + otros_usd (la suma la hace pyservices; el API
+   *  NO la precalcula: cada lista resta UNA vez en utilidad_despues_usd). */
   gastos_indirectos_usd: number | null;
   /** Hoja "refacciones" (29-ago): salidas de inventario, ANTES dentro de
-   *  gastos indirectos — indirectos + refacciones == lo de antes (la
+   *  Gastos Indirectos — indirectos + refacciones == lo de antes (la
    *  utilidad no cambia). Opcional por skew de deploy. */
   refacciones_usd?: number | null;
+  /** Total USD de la lista `otros_gastos` (administrativos de la empresa
+   *  repartidos a mano a este avión). Sigue viajando APARTE: el general lo
+   *  cita en el comentario de su fila "(−) GASTOS INDIRECTOS USD" y pinta
+   *  su detalle en "repartidos a aviones"; el individual ya lo lleva
+   *  sumado en esa misma fila. Restarlo además de gastos_indirectos_usd
+   *  fuera de la cascada cuenta doble. */
   otros_usd: number | null;
   permisos_usd: number | null;
   utilidad_despues_usd: number | null;
@@ -892,11 +902,22 @@ export interface BalanceAvionPayload {
   horas_voladas_hr: number;
   vuelos: BalanceAvionVueloPayload[];
   totales: BalanceAvionTotalesPayload;
+  /** Gastos con avión y SIN vuelo (salvo GAS → combustible, PERMISO →
+   *  permisos y salidas de inventario → refacciones) + parciales de reparto
+   *  manual de categoría INDIRECTO/NOMINA. Desde el 2-sep-2026 el libro
+   *  INDIVIDUAL pinta esta lista Y `otros_gastos` JUNTAS en una sola
+   *  pestaña "Gastos Indirectos" (fusión de presentación en pyservices; el
+   *  contrato no cambió). */
   gastos_indirectos: BalanceAvionHojaGastosPayload;
   /** Hoja "refacciones" (29-ago-2026): salidas de inventario (gasto
-   *  REFACCION medio BODEGA ligado al cardex), separadas de "gastos
-   *  indirectos". Opcional por skew de deploy. */
+   *  REFACCION medio BODEGA ligado al cardex), separadas de "Gastos
+   *  Indirectos". Opcional por skew de deploy. */
   refacciones?: BalanceAvionHojaGastosPayload;
+  /** Parte de este avión de los gastos administrativos de la empresa
+   *  repartidos a mano (filas "reparto manual: $X de $Y"). Sigue viajando
+   *  APARTE porque alimenta la hoja "repartidos a aviones" del Balance
+   *  general VuelaTour; en el individual se pinta dentro de "Gastos
+   *  Indirectos". La cascada resta cada lista UNA vez. */
   otros_gastos: BalanceAvionHojaGastosPayload;
   permisos: BalanceAvionHojaGastosPayload;
   /** Hoja mensual de combustible (26-ago-2026). Opcional por skew de deploy. */
@@ -1081,7 +1102,10 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/reporte-vuelo-xlsx', payload);
   }
 
-  /** Balance mensual por avión en Excel (libro de 9 hojas). */
+  /** Balance mensual por avión en Excel — libro INDIVIDUAL: reporte horas,
+   *  cobranza, combustible, Gastos Indirectos (= gastos_indirectos +
+   *  otros_gastos, fusionados por pyservices desde el 2-sep-2026),
+   *  refacciones, permisos, balance y pendientes de captura. */
   async generateBalanceAvionXlsx(
     payload: BalanceAvionPayload,
   ): Promise<Buffer> {
@@ -1090,6 +1114,7 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/balance-avion-xlsx', payload, 30_000);
   }
 
+  /** Balance general VuelaTour (toda la flota) en Excel. */
   async generateBalanceGeneralXlsx(
     payload: BalanceGeneralPayload,
   ): Promise<Buffer> {

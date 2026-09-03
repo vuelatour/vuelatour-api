@@ -79,7 +79,7 @@ export class AircraftController {
   @Roles(Rol.ADMIN, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Balance GENERAL de la flota: una fila por avión con los TOTALES de su libro del periodo (mismo motor que el balance por avión) + totales de flota. Default: mes corriente en hora Cancún.',
+      'Balance general VuelaTour: consolidado de toda la flota en un solo libro — RESUMEN con una fila por avión (los TOTALES de su libro del periodo, mismo motor que el balance por avión) + totales de flota, y un juego de hojas con los datos de todos los aviones juntos. Default: mes corriente en hora Cancún.',
   })
   async balanceGeneralXlsx(
     @Query() q: BalanceAvionQuery,
@@ -90,7 +90,7 @@ export class AircraftController {
     );
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="balance-general-${desde}-a-${hasta}.xlsx"`,
+      disposition: `attachment; filename="balance-general-vuelatour-${desde}-a-${hasta}.xlsx"`,
     });
   }
 

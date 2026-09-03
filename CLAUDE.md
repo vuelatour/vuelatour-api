@@ -153,6 +153,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     avión del tramo al capturar). El pago al vendedor es `pagoVendedorUsd`
     (comisión + su IVA) en todos los lectores. Ningún lector recalcula estas
     particiones a mano.
+    **Balance por avión (Excel, 2-sep-2026)**: la hoja "Gastos Indirectos"
+    del libro INDIVIDUAL = `gastos_indirectos` + `otros_gastos` pintados
+    JUNTOS por pyservices (fusión de presentación); el contrato del payload
+    y la cascada de `utilidad_despues_usd` NO cambian (cada lista resta UNA
+    vez; `otros_gastos` sigue viajando aparte porque alimenta "repartidos
+    a aviones" del Balance general VuelaTour). Restar `otros_usd` además de
+    `gastos_indirectos_usd` cuenta doble.
 
 ## Convenciones NestJS
 
