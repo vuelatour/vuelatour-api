@@ -161,7 +161,11 @@ export class CreateGastoDto {
   @IsDateString()
   fecha_gasto!: string;
 
-  @ApiProperty({ enum: MedioPago })
+  @ApiProperty({
+    enum: MedioPago,
+    description:
+      'Obligatorio, sin valor por defecto (la app y el panel no preseleccionan).',
+  })
   @IsEnum(MedioPago)
   medio_pago!: MedioPago;
 

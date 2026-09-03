@@ -33,6 +33,13 @@ import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  acoplarTarjetaEnUpdate,
+  cruzarMedioConIa,
+  etiquetaMedioPago,
+  mensajeCheckGasto,
+  terminacionPrevia,
+} from './medio-tarjeta.util';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import type {
   CreateGastoDto,
@@ -120,15 +127,7 @@ export class ExpensesService {
   async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
     const { data } = await this.list({ ...filters, limit: 5000, offset: 0 });
     // Etiquetas legibles (el reporte lo lee gente de oficina, no la BD).
-    const MEDIO_LABEL: Record<string, string> = {
-      EFECTIVO: 'Efectivo',
-      TARJETA_CORP: 'Tarjeta corporativa',
-      TRANSFERENCIA: 'Transferencia',
-      PAYWISE: 'PayWise',
-      PERSONAL_PABLO: 'Personal Pablo',
-      PERSONAL_ALE: 'Personal Ale',
-      BODEGA: 'Bodega',
-    };
+    // Medio de pago: fuente única `etiquetaMedioPago` (medio-tarjeta.util).
     // Comprobante = qué entregó el piloto (documento físico); Facturación =
     // seguimiento de oficina (¿ya tenemos factura?). Son cosas distintas.
     const COMP_LABEL: Record<string, string> = {
@@ -170,7 +169,7 @@ export class ExpensesService {
           : (aeronave?.matricula ?? '(pendiente)'),
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
-        MEDIO_LABEL[medio] ?? medio,
+        etiquetaMedioPago(medio),
         COMP_LABEL[comp] ?? comp,
         FACT_LABEL[fact] ?? fact,
         (x.moneda as string) ?? '',
@@ -1210,31 +1209,32 @@ export class ExpensesService {
         'La carga de combustible necesita el avión: selecciona la aeronave (o un vuelo del cual tomarla).',
       );
     }
-    // TARJETA CORP "por detrás" (26-ago): el usuario solo elige "Tarjeta
-    // corporativa" en la app — la TERMINACIÓN se sella sola con este orden:
-    // (1) valor explícito del cliente (APK viejo con selector / oficina),
-    // (2) la que la IA leyó en el VOUCHER (máxima fidelidad: es la tarjeta
-    //     que de verdad pagó), (3) la tarjeta ASIGNADA al capturador en el
-    // catálogo (vínculo de Tarjetas corp.; con varias, la más reciente).
-    // Así el tablero "por tarjeta" queda completo sin confundir a nadie; si
-    // el voucher contradice lo sellado, la discrepancia IA lo grita.
-    let tarjetaTerminacion = dto.tarjeta_terminacion;
-    if (!tarjetaTerminacion && String(dto.medio_pago) === 'TARJETA_CORP') {
-      const iaTerm = (
-        dto.valor_ia_extraido as { tarjeta_terminacion?: unknown } | undefined
-      )?.tarjeta_terminacion;
-      if (typeof iaTerm === 'string' && /^\d{4}$/.test(iaTerm)) {
-        tarjetaTerminacion = iaTerm;
-      } else {
-        const { data: tj } = await this.supabase.service
-          .from('tarjeta_corporativa')
-          .select('terminacion')
-          .eq('usuario_id', capturaId)
-          .eq('activa', true)
-          .order('updated_at', { ascending: false })
-          .limit(1);
-        tarjetaTerminacion =
-          (tj?.[0]?.terminacion as string | undefined) ?? undefined;
+    // Terminación de la tarjeta: fuente única `sellarTarjetaTerminacion`
+    // (explícita → voucher IA → tarjeta asignada al capturador; null con
+    // cualquier medio ≠ TARJETA_CORP, como exige el CHECK gasto_check).
+    const tarjetaTerminacion = await this.sellarTarjetaTerminacion({
+      medioPago: dto.medio_pago,
+      explicita: dto.tarjeta_terminacion,
+      valorIa: dto.valor_ia_extraido,
+      capturaId,
+    });
+    // MEDIO vs comprobante (3-sep, reporte de pilotos): la app ya NO
+    // preselecciona EFECTIVO ni deja que la IA pise el medio elegido; el
+    // medio es del humano y aquí JAMÁS se reescribe. Si un rol de CAMPO
+    // capturó un medio de bolsillo (efectivo/personal) y el comprobante que
+    // leyó la IA parece pago con tarjeta/transferencia — o la tarjeta
+    // sellada no es la del voucher —, queda ⚠ en notas sin bloquear (mismo
+    // patrón que el aviso avión≠tramo). Offline lo hace el enriquecimiento.
+    const esCampo =
+      rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
+    if (esCampo) {
+      const cruce = cruzarMedioConIa(
+        { medio_pago: dto.medio_pago, tarjeta_terminacion: tarjetaTerminacion },
+        dto.valor_ia_extraido,
+      );
+      if (cruce.discrepancia) {
+        const linea = `⚠ ${cruce.discrepancia} — revisar`;
+        notas = notas ? `${notas}\n${linea}` : linea;
       }
     }
 
@@ -1341,6 +1341,10 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
+      // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500
+      // (un 500 dispara el reintento del outbox de la app y se repetiría).
+      if (error.code === '23514')
+        throw new ConflictException(mensajeCheckGasto(error));
       if (error.code === '23505') {
         // Colisión de la LLAVE DE IDEMPOTENCIA: el gasto YA se creó en un
         // intento anterior (timeout tras commit / doble flush del outbox).
@@ -1426,7 +1430,8 @@ export class ExpensesService {
    * que el piloto no pudo llenar. REGLAS: lo manual NUNCA se pisa (el monto
    * jamás se toca; si la IA lee otro total, se anota para revisión). Se
    * completa: desglose→notas, fecha del ticket, categoría (solo si quedó
-   * OTRO), tarjeta, litros/lugar en GAS, matrícula→aeronave si estaba vacía.
+   * OTRO), tarjeta (solo con medio TARJETA_CORP; el medio jamás se pisa),
+   * litros/lugar en GAS, matrícula→aeronave si estaba vacía.
    */
   /**
    * Reanaliza el comprobante YA GUARDADO de un gasto con la IA de visión
@@ -1601,18 +1606,22 @@ export class ExpensesService {
         `total capturado $${Number(gasto.monto).toFixed(2)} ${gasto.moneda}, la IA leyó $${ai.monto.toFixed(2)} ${ai.moneda ?? ''}`,
       );
     }
-    // Tarjeta: llenar si falta; discrepancia si difiere.
-    if (!gasto.tarjeta_terminacion && ai.tarjeta_terminacion) {
-      patch.tarjeta_terminacion = ai.tarjeta_terminacion;
-    } else if (
-      ai.tarjeta_terminacion &&
-      gasto.tarjeta_terminacion &&
-      ai.tarjeta_terminacion !== gasto.tarjeta_terminacion
-    ) {
-      discrepancias.push(
-        `tarjeta capturada •${gasto.tarjeta_terminacion as string}, el voucher dice •${ai.tarjeta_terminacion}`,
-      );
+    // Medio y tarjeta (3-sep): el medio_pago JAMÁS se reescribe desde la IA
+    // (lo eligió el piloto; la app ya no lo preselecciona). La terminación
+    // solo se sella con TARJETA_CORP — con otro medio el CHECK gasto_check
+    // (23514) tiraba TODO el enriquecimiento (desglose, folio, litros) con
+    // un simple warn. Medio de bolsillo con voucher bancario → ⚠.
+    const cruce = cruzarMedioConIa(
+      {
+        medio_pago: gasto.medio_pago as string | null,
+        tarjeta_terminacion: gasto.tarjeta_terminacion as string | null,
+      },
+      ai,
+    );
+    if (cruce.sellarTerminacion) {
+      patch.tarjeta_terminacion = cruce.sellarTerminacion;
     }
+    if (cruce.discrepancia) discrepancias.push(cruce.discrepancia);
     if (gasto.categoria === 'GAS' || ai.categoria_sugerida === 'GAS') {
       if (gasto.litros == null && (ai as { litros?: number }).litros != null) {
         patch.litros = (ai as { litros?: number }).litros;
@@ -1783,6 +1792,42 @@ export class ExpensesService {
    * (`avionDelGasto`). Null si no hay tramo, no hay avión explícito o
    * coinciden.
    */
+  /**
+   * Terminación que se SELLA en `tarjeta_terminacion` — fuente única de
+   * create y update (3-sep-2026). "TARJETA CORP por detrás" (26-ago): el
+   * usuario solo elige "Tarjeta corporativa" y la terminación se resuelve
+   * en este orden: (1) valor explícito del cliente (oficina / APK viejo con
+   * selector), (2) la que la IA leyó en el VOUCHER (máxima fidelidad: es la
+   * tarjeta que de verdad pagó), (3) la tarjeta ASIGNADA al capturador en
+   * el catálogo (vínculo de Tarjetas corp.; con varias, la más reciente).
+   * Así el tablero "por tarjeta" queda completo sin confundir a nadie; si
+   * el voucher contradice lo sellado, `cruzarMedioConIa` lo grita. Con
+   * cualquier otro medio devuelve null: el CHECK `gasto_check` exige
+   * terminación null fuera de TARJETA_CORP (antes un EFECTIVO con
+   * terminación reventaba en 500).
+   */
+  private async sellarTarjetaTerminacion(args: {
+    medioPago: string | null | undefined;
+    explicita: string | null | undefined;
+    valorIa: unknown;
+    capturaId: string | null | undefined;
+  }): Promise<string | null> {
+    const previa = terminacionPrevia(
+      args.medioPago,
+      args.explicita,
+      args.valorIa,
+    );
+    if (!previa.buscarAsignada || !args.capturaId) return previa.terminacion;
+    const { data: tj } = await this.supabase.service
+      .from('tarjeta_corporativa')
+      .select('terminacion')
+      .eq('usuario_id', args.capturaId)
+      .eq('activa', true)
+      .order('updated_at', { ascending: false })
+      .limit(1);
+    return (tj?.[0]?.terminacion as string | undefined) ?? null;
+  }
+
   private async avisoAvionDistintoAlTramo(
     aeronaveIdExplicita: string | undefined,
     tramo: TramoGastoRef | null,
@@ -2257,7 +2302,10 @@ export class ExpensesService {
       dto.vuelo_id !== undefined ||
       dto.aeronave_id !== undefined ||
       dto.escala_id !== undefined ||
-      dto.moneda !== undefined;
+      dto.moneda !== undefined ||
+      // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
+      // el gasto o se sella (voucher IA → tarjeta del capturador).
+      (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
     const actual = necesitaActual
       ? ((await this.findById(id)) as {
           monto?: unknown;
@@ -2268,6 +2316,9 @@ export class ExpensesService {
           escala_id?: string | null;
           moneda?: string;
           notas?: string | null;
+          tarjeta_terminacion?: string | null;
+          usuario_captura_id?: string | null;
+          valor_ia_extraido?: unknown;
         })
       : null;
     // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.
@@ -2515,6 +2566,32 @@ export class ExpensesService {
     // La llave de idempotencia se fija SOLO al crear: reescribirla en un
     // PATCH podría colisionar con otra captura o robarle su llave.
     delete cols.client_request_id;
+    // Acoplamiento medio↔tarjeta (3-sep): el CHECK gasto_check exige
+    // terminación null salvo TARJETA_CORP. Cambiar a otro medio LIMPIA la
+    // tarjeta (antes: 500 y oficina no podía corregir un medio mal
+    // capturado); cambiar a TARJETA_CORP sin terminación la sella con la
+    // misma regla que el alta (voucher IA → tarjeta asignada al capturador).
+    if (cols.tarjeta_terminacion === '') cols.tarjeta_terminacion = null;
+    const acople = acoplarTarjetaEnUpdate(
+      {
+        medio_pago: dto.medio_pago,
+        tarjeta_terminacion: cols.tarjeta_terminacion as
+          | string
+          | null
+          | undefined,
+      },
+      actual,
+    );
+    if (acople === 'limpiar') {
+      cols.tarjeta_terminacion = null;
+    } else if (acople === 'sellar') {
+      cols.tarjeta_terminacion = await this.sellarTarjetaTerminacion({
+        medioPago: MedioPago.TARJETA_CORP,
+        explicita: null,
+        valorIa: dto.valor_ia_extraido ?? actual?.valor_ia_extraido,
+        capturaId: actual?.usuario_captura_id ?? null,
+      });
+    }
     if (aeronaveHeredada) cols.aeronave_id = aeronaveHeredada;
     else if (escalaAutoLimpiada && dto.aeronave_id === undefined) {
       // El vuelo nuevo no tiene avión (externo sin referencia): el avión
@@ -2556,6 +2633,9 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
+      // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500.
+      if (error.code === '23514')
+        throw new ConflictException(mensajeCheckGasto(error));
       if (error.code === '23505')
         throw new ConflictException(
           `Ya existe un gasto con el folio/remisión "${dto.folio_ticket}": es el mismo pago capturado dos veces. Si de verdad es otro ticket, corrige el folio.`,
