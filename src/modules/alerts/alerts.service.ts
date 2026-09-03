@@ -12,6 +12,21 @@ import {
 import { Rol } from '../../common/types/auth.types';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { EstadoVencimiento } from '../expirations/dto/expirations.dto';
+import {
+  avisoEventoBase,
+  claveRecordatorio90,
+  claveVispera,
+  cuerpoEvento,
+  diaSiguienteCancun,
+  EVENTO_FLOTA_COLS,
+  horaCancun,
+  mapEventoRow,
+  rangoDiaCancun,
+  RECORDATORIO_EVENTO_MIN,
+  ventanaRecordatorio90,
+  type EventoFlotaRow,
+  type EventoInterno,
+} from '../calendar/evento-flota.util';
 
 export interface AlertConfig {
   clave: string;
@@ -211,6 +226,116 @@ export class AlertsService {
       });
       this.logger.log(
         `Recordatorio tramo ${t.origen_iata as string}→${t.destino_iata as string} #${vuelo.folio as number} · ${umbral} min → piloto ${pilotoId}`,
+      );
+    }
+  }
+
+  // ===== Recordatorios de eventos NO-vuelo (3-sep-2026) =====
+  //
+  // Incidente "Llenar Bitácora": el responsable recibió un solo aviso al
+  // agendar (que además no le llegó) y nadie le recordó la cita. Dos
+  // recordatorios directos (notifyUser, sin alerta_config) con dedupe en
+  // alerta_emitida, patrón avisarTacoVencido: consultar ANTES, marcar
+  // DESPUÉS de notifyUser === true, tolerar 23505. Multi-día: solo la fecha
+  // de inicio. Selección de ventana en helpers puros (evento-flota.util).
+
+  private eventoRecordatoriosEnCurso = false;
+
+  /** 90 min antes: eventos con responsable y fecha en [now+89, now+91]. La
+   *  clave lleva la fecha al minuto: reagendar la hora vuelve a avisar. */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async runEventoRecordatorios(): Promise<void> {
+    if (this.eventoRecordatoriosEnCurso) return;
+    this.eventoRecordatoriosEnCurso = true;
+    try {
+      const { desde, hasta } = ventanaRecordatorio90(Date.now());
+      const eventos = await this.eventosConResponsableEntre(desde, hasta);
+      for (const ev of eventos) {
+        await this.avisarRecordatorioEvento(
+          ev,
+          claveRecordatorio90(ev.id, ev.fecha),
+          'evento_90m',
+          `En ${RECORDATORIO_EVENTO_MIN} min · ${ev.titulo}`,
+          cuerpoEvento(
+            ev,
+            `En ${RECORDATORIO_EVENTO_MIN} min · ${horaCancun(ev.fecha)}`,
+          ),
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `runEventoRecordatorios falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      this.eventoRecordatoriosEnCurso = false;
+    }
+  }
+
+  /** Víspera (18:00 Cancún): eventos cuyo inicio cae en el día Cancún de
+   *  MAÑANA. Clave por evento+día. */
+  @Cron('0 18 * * *', { timeZone: 'America/Cancun' })
+  async runEventosVispera(): Promise<void> {
+    try {
+      const dia = diaSiguienteCancun();
+      const { desdeTs, hastaTs } = rangoDiaCancun(dia);
+      const eventos = await this.eventosConResponsableEntre(desdeTs, hastaTs);
+      for (const ev of eventos) {
+        await this.avisarRecordatorioEvento(
+          ev,
+          claveVispera(ev.id, dia),
+          'evento_vispera',
+          `Mañana · ${ev.titulo}`,
+          cuerpoEvento(ev, `Mañana ${horaCancun(ev.fecha)}`),
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `runEventosVispera falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  private async eventosConResponsableEntre(
+    desde: string,
+    hasta: string,
+  ): Promise<EventoInterno[]> {
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .select(EVENTO_FLOTA_COLS)
+      .not('responsable_id', 'is', null)
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
+      .order('fecha', { ascending: true });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as unknown as EventoFlotaRow[]).map(mapEventoRow);
+  }
+
+  private async avisarRecordatorioEvento(
+    ev: EventoInterno,
+    dedupeKey: string,
+    clave: string,
+    titulo: string,
+    cuerpo: string,
+  ): Promise<void> {
+    if (!ev.responsable_id) return;
+    try {
+      if (await this.yaEmitida(dedupeKey)) return;
+      const ok = await this.notifications.notifyUser(ev.responsable_id, {
+        tipo: 'recordatorio_evento',
+        titulo,
+        cuerpo,
+        ...avisoEventoBase(ev),
+      });
+      if (!ok) return; // sin entrega (o externo): la clave queda libre
+      // markIfNew tolera 23505 (otra corrida la marcó): mismo resultado.
+      await this.markIfNew(dedupeKey, clave);
+      this.logger.log(
+        `Recordatorio evento "${ev.titulo}" (${clave}) → ${ev.responsable_id}`,
+      );
+    } catch (err) {
+      // Un evento con problema (BD) no frena a los demás del mismo minuto.
+      this.logger.warn(
+        `Recordatorio evento ${ev.id} (${clave}) falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

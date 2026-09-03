@@ -4,6 +4,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CalendarService } from '../calendar/calendar.service';
+import { MisEventosQuery } from '../calendar/dto/calendar.dto';
 import {
   CONFIG_CAPTURA_TACO_FOTO_IA,
   CONFIG_DIAS_GRACIA_GASTOS_SEMANA,
@@ -11,6 +13,7 @@ import {
 } from '../configuracion/configuracion.service';
 import { ListDescansosQuery } from '../pilots/dto/pilots.dto';
 import { PilotsService } from '../pilots/pilots.service';
+import { PushService } from '../realtime/push.service';
 import { UpdateSelfDto } from '../users/dto/update-self.dto';
 import { UsersService } from '../users/users.service';
 import { CapturasQuery } from './dto/capturas.dto';
@@ -25,7 +28,23 @@ export class MeController {
     private readonly capturas: MeCapturasService,
     private readonly pilots: PilotsService,
     private readonly configuracion: ConfiguracionService,
+    private readonly calendar: CalendarService,
+    private readonly push: PushService,
   ) {}
+
+  /** Dispositivos push del propio usuario (0 = este teléfono no recibe
+   *  avisos; la app lo muestra en rojo en Perfil). Best-effort: nunca
+   *  tumba /me. */
+  private async misDispositivos(userId: string): Promise<number> {
+    try {
+      return (
+        (await this.push.contarDispositivosPorUsuario([userId])).get(userId) ??
+        0
+      );
+    } catch {
+      return 0;
+    }
+  }
 
   @Get()
   @ApiOperation({ summary: 'Current authenticated user profile' })
@@ -33,15 +52,23 @@ export class MeController {
     // Las banderas de comportamiento viajan DENTRO de /me: es el único read
     // que la app consulta siempre al arrancar y cachea entero para offline —
     // así el toggle llega al piloto sin plomería nueva.
-    const [usuario, capturaTacoFotoIa, diasGraciaSemana, sinLimiteHasta] =
-      await Promise.all([
-        this.users.findByAuthId(current.authId),
-        this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
-        this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
-        this.users.gastosSinLimiteHasta(current.userId),
-      ]);
+    const [
+      usuario,
+      capturaTacoFotoIa,
+      diasGraciaSemana,
+      sinLimiteHasta,
+      pushDispositivos,
+    ] = await Promise.all([
+      this.users.findByAuthId(current.authId),
+      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+      this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
+      this.users.gastosSinLimiteHasta(current.userId),
+      this.misDispositivos(current.userId),
+    ]);
     return {
       ...usuario,
+      // Top-level a propósito (3-sep-2026): `config` conserva su shape.
+      push_dispositivos: pushDispositivos,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,
@@ -62,15 +89,22 @@ export class MeController {
     // MISMO shape que el GET: la app guarda esta respuesta en la misma llave
     // de caché offline que /me — sin `config` la bandera revertía al default
     // al editar el perfil (hallazgo de la revisión adversarial, ago 2026).
-    const [usuario, capturaTacoFotoIa, diasGraciaSemana, sinLimiteHasta] =
-      await Promise.all([
-        this.users.updateSelf(current.authId, body, current.userId),
-        this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
-        this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
-        this.users.gastosSinLimiteHasta(current.userId),
-      ]);
+    const [
+      usuario,
+      capturaTacoFotoIa,
+      diasGraciaSemana,
+      sinLimiteHasta,
+      pushDispositivos,
+    ] = await Promise.all([
+      this.users.updateSelf(current.authId, body, current.userId),
+      this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
+      this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
+      this.users.gastosSinLimiteHasta(current.userId),
+      this.misDispositivos(current.userId),
+    ]);
     return {
       ...usuario,
+      push_dispositivos: pushDispositivos,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,
@@ -107,6 +141,23 @@ export class MeController {
       ...query,
       piloto_id: current.userId,
     });
+  }
+
+  @Get('eventos')
+  @ApiOperation({
+    summary:
+      'Eventos NO-vuelo donde el usuario actual es RESPONSABLE (citas: lavado, trámite, "llenar bitácora"…). Rango en días Cancún ?desde&hasta (default hoy-7 → hoy+90); una fila por evento, sin expandir por día. Siempre filtra por el usuario autenticado; VISITANTE recibe [].',
+  })
+  misEventos(
+    @CurrentUser() current: AuthenticatedUser,
+    @Query() query: MisEventosQuery,
+  ) {
+    if (current.rol === Rol.VISITANTE) return [];
+    return this.calendar.listEventosDeResponsable(
+      current.userId,
+      query.desde,
+      query.hasta,
+    );
   }
 
   @Get('capturas')

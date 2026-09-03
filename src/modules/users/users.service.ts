@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { EmailService } from '../notifications/email.service';
+import { PushService } from '../realtime/push.service';
 import type { CreateUsuarioDto } from './dto/create-usuario.dto';
 import type { ListUsuariosQuery } from './dto/list-usuarios.query';
 import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
@@ -32,6 +33,7 @@ export class UsersService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly email: EmailService,
+    private readonly push: PushService,
   ) {}
 
   async list(filters: ListUsuariosQuery) {
@@ -58,8 +60,23 @@ export class UsersService {
     const { data, error, count } = await query;
     if (error) throw new Error(`Failed to list usuarios: ${error.message}`);
 
+    // push_dispositivos (3-sep-2026): la oficina ve quién NO tiene la app
+    // registrada (badge "Sin app") — una consulta agrupada, best-effort.
+    const filas = (data ?? []) as UsuarioRow[];
+    let conteo = new Map<string, number>();
+    try {
+      conteo = await this.push.contarDispositivosPorUsuario(
+        filas.map((u) => u.id),
+      );
+    } catch {
+      /* la lista no se cae por el conteo: se reporta 0 */
+    }
+
     return {
-      data: (data ?? []) as UsuarioRow[],
+      data: filas.map((u) => ({
+        ...u,
+        push_dispositivos: conteo.get(u.id) ?? 0,
+      })),
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,

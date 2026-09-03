@@ -1,4 +1,4 @@
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsBoolean,
@@ -6,6 +6,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   MaxLength,
 } from 'class-validator';
 
@@ -98,4 +99,29 @@ export class CreateEventoFlotaDto {
   @IsString()
   @MaxLength(500)
   notas?: string;
+}
+
+/**
+ * Edición de un evento NO-vuelo (3-sep-2026). Todo opcional: `undefined` =
+ * no tocar; `null` en avión/responsable/fin/notas = limpiar. Cambiar de
+ * responsable avisa al nuevo y al anterior; cambios de fecha/avión/título/
+ * notas avisan 'evento_actualizado' al responsable vigente.
+ */
+export class UpdateEventoFlotaDto extends PartialType(CreateEventoFlotaDto) {}
+
+/** Rango de GET /v1/me/eventos: días YYYY-MM-DD Cancún (default hoy-7 → hoy+90). */
+export class MisEventosQuery {
+  @ApiPropertyOptional({ description: 'Desde (YYYY-MM-DD, día Cancún)' })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'desde debe ser una fecha YYYY-MM-DD',
+  })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Hasta (YYYY-MM-DD, día Cancún)' })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'hasta debe ser una fecha YYYY-MM-DD',
+  })
+  hasta?: string;
 }

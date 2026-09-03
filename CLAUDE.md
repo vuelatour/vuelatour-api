@@ -169,7 +169,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Crones: aviso de tacos vencidos (push al piloto, sin escrituras)
   `*/10 * * * *`; resumen nocturno de tacos `45 4 * * *` UTC (23:45 Cancún);
   vuelos zombi `55 4 * * *`; alertas diarias `0 8 * * *` con
-  `timeZone: America/Cancun`. Nuevas alertas vía `alerts.service` necesitan
+  `timeZone: America/Cancun`; recordatorios de eventos NO-vuelo
+  (`recordatorio_evento` al responsable): 90 min antes cada minuto
+  (`runEventoRecordatorios`, dedupe `evento_90m:<evento>:<fecha al minuto>`
+  — reagendar vuelve a avisar) y víspera `0 18 * * *` Cancún
+  (`runEventosVispera`, dedupe `evento_vispera:<evento>:<día>`); multi-día
+  solo avisa el inicio. Nuevas alertas vía `alerts.service` necesitan
   fila en `alerta_config` (migración) o `safe()` las salta; los avisos
   directos (`notifyUser`/`notifyRole`) no la necesitan aunque deduplicen en
   `alerta_emitida` (ej. `taco_vencido_<escala_id>`).
@@ -177,7 +182,24 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   `alerta_emitida` (`markIfNew`). Los tipos que la app Flutter sabe pintar:
   `vuelo_asignado, taco_capturado, cobro_registrado, gasto_registrado,
   permiso_emitido, mantenimiento_programado, recordatorio_taco,
-  alerta_sistema`. Links `/flights/<id>` redirigen al vuelo en la app.
+  alerta_sistema, evento_asignado, evento_actualizado, evento_cancelado,
+  recordatorio_evento`. Links `/flights/<id>` redirigen al vuelo en la app;
+  `/me/eventos?dia=YYYY-MM-DD` abre Mis vuelos en ese día.
+  `notifyUserDetallado` devuelve además `push_dispositivos`/`plataformas`
+  (fila persistida ≠ push entregado: sin dispositivo no llega nada y
+  `push.sendToUser` lo deja en `warn`).
+- **Eventos NO-vuelo (`evento_flota`, incidente 3-sep-2026)**: helpers puros
+  en `calendar/evento-flota.util.ts` (cuerpo canónico "jue 3 sep, 09:45 ·
+  título · matrícula · notas", `data`+`link`, rangos Cancún, ventanas de
+  recordatorio). POST/PATCH `/calendar/eventos` devuelven `aviso`
+  ({responsable_id, nombre, notificado, push_dispositivos, plataformas} |
+  null) — `push_dispositivos === 0` ⇒ la oficina avisa por otro medio;
+  GET `/calendar` expone `responsable_push_dispositivos` y con `piloto_id`
+  filtra eventos por responsable (antes los omitía). El responsable los
+  lee en `GET /me/eventos` (una fila por evento, solapamiento
+  [fecha, coalesce(fecha_fin, fecha)] en cortes Cancún). Cambiar de
+  responsable avisa al nuevo (`evento_asignado`) y al anterior
+  (`evento_cancelado`); única exclusión de auto-aviso: actor = responsable.
 - Espejo vuelo↔tramo 1: `aeronave_id/piloto_id/fecha` del vuelo se reflejan en
   la escala orden=1 (`mirrorVueloToIdaEscala`) y viceversa. Reagendar
   `fecha_vuelo` con el mismo piloto → push al piloto (doc 4.3). Cambiar la

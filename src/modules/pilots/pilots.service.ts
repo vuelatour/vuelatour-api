@@ -8,6 +8,7 @@ import {
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { CalendarService } from '../calendar/calendar.service';
 import { UsersService } from '../users/users.service';
 import type {
   CreateDescansoDto,
@@ -34,6 +35,7 @@ export class PilotsService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly calendarSync: CalendarSyncService,
+    private readonly calendar: CalendarService,
     private readonly users: UsersService,
     private readonly notifications: NotificationsService,
   ) {}
@@ -284,6 +286,7 @@ export class PilotsService {
       fondoRes,
       descansosRes,
       horas,
+      eventosProximos,
     ] = await Promise.all([
       // ACTIVOS Y PRÓXIMOS: EN_VUELO siempre (un vuelo en curso ya despegó y
       // desaparecía del expediente) + confirmados/reservas cuyo VIAJE aún no
@@ -362,6 +365,9 @@ export class PilotsService {
       // Horas del mes (Cancún, por tramo con herencia): fuente única
       // users.horasDelMes — la misma del dashboard y de /me/horas.
       this.users.horasDelMes(id, ym),
+      // Eventos NO-vuelo donde es responsable (3-sep-2026): hoy → +60 días,
+      // máx 10, mismo shape que GET /v1/me/eventos. Best-effort.
+      this.calendar.eventosProximosDe(id).catch(() => []),
     ]);
 
     if (activosRes.error) throw new Error(activosRes.error.message);
@@ -503,6 +509,7 @@ export class PilotsService {
       capturas_recientes: capturasRes.data ?? [],
       fondos: fondoRes.data ?? [],
       descansos_proximos: descansosRes.data ?? [],
+      eventos_proximos: eventosProximos,
       honorarios,
     };
   }

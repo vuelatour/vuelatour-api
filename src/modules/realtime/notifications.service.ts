@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { Rol } from '../../common/types/auth.types';
-import { PushService } from './push.service';
+import { PushService, type DispositivoPush } from './push.service';
 import { RealtimeGateway } from './realtime.gateway';
 
 export interface NotificationInput {
@@ -11,6 +11,27 @@ export interface NotificationInput {
   data?: Record<string, unknown>;
   link?: string;
 }
+
+/**
+ * Resultado de entrega de una notificación a un usuario (3-sep-2026): la
+ * fila persistida NO garantiza que al usuario le llegue nada — sin
+ * dispositivos registrados el push se omite. Los llamadores que informan a
+ * la oficina (eventos de flota) muestran este detalle.
+ */
+export interface EntregaNotificacion {
+  /** true = fila persistida en `notificacion` (y socket/push disparados). */
+  notificado: boolean;
+  /** Dispositivos del usuario en `dispositivo_push` al momento del envío. */
+  push_dispositivos: number;
+  /** Plataformas distintas de esos dispositivos ('android', 'ios', …). */
+  plataformas: string[];
+}
+
+const SIN_ENTREGA: EntregaNotificacion = {
+  notificado: false,
+  push_dispositivos: 0,
+  plataformas: [],
+};
 
 const NOTIF_COLS = 'id, usuario_id, tipo, titulo, cuerpo, data, link, leida, created_at, read_at';
 const SOCKET_EVENT = 'notification';
@@ -32,8 +53,17 @@ export class NotificationsService {
       data: {
         tipo: n.tipo,
         link: n.link ?? '',
+        // FCM exige strings: null/undefined viajan como '' (antes "null");
+        // objetos como JSON (antes "[object Object]").
         ...Object.fromEntries(
-          Object.entries(n.data ?? {}).map(([k, v]) => [k, String(v)]),
+          Object.entries(n.data ?? {}).map(([k, v]) => [
+            k,
+            v == null
+              ? ''
+              : typeof v === 'object'
+                ? JSON.stringify(v)
+                : String(v as string | number | boolean),
+          ]),
         ),
       },
     };
@@ -46,6 +76,19 @@ export class NotificationsService {
    * entrega exitosa. La mayoría de llamadores puede ignorar el retorno.
    */
   async notifyUser(usuarioId: string, n: NotificationInput): Promise<boolean> {
+    return (await this.notifyUserDetallado(usuarioId, n)).notificado;
+  }
+
+  /**
+   * Igual que `notifyUser`, pero devuelve el DETALLE de entrega: si quedó la
+   * fila y cuántos dispositivos push tenía el usuario (0 = no le llegará
+   * nada al teléfono aunque la campana de la app lo muestre al abrirla).
+   * Best-effort: nunca lanza.
+   */
+  async notifyUserDetallado(
+    usuarioId: string,
+    n: NotificationInput,
+  ): Promise<EntregaNotificacion> {
     try {
       // Los pilotos EXTERNOS no tienen acceso al sistema (doc 3.7): no se les
       // genera notificación (ni fila, ni socket, ni push) por ningún camino.
@@ -54,7 +97,7 @@ export class NotificationsService {
         .select('es_piloto_externo')
         .eq('id', usuarioId)
         .maybeSingle();
-      if (target?.es_piloto_externo === true) return false;
+      if (target?.es_piloto_externo === true) return SIN_ENTREGA;
 
       const { data, error } = await this.supabase.service
         .from('notificacion')
@@ -70,13 +113,35 @@ export class NotificationsService {
         .maybeSingle();
       if (error) throw new Error(error.message);
       this.gateway.emitToUser(usuarioId, SOCKET_EVENT, data);
-      void this.push.sendToUser(usuarioId, this.pushPayload(n));
-      return true;
+
+      // Dispositivos: una lectura que el push reutiliza (no consulta doble).
+      // Si falla, la notificación ya quedó: se reporta 0 y el push consulta
+      // por su cuenta.
+      let dispositivos: DispositivoPush[] | undefined;
+      try {
+        dispositivos = await this.push.dispositivosDe(usuarioId);
+      } catch (err) {
+        this.logger.warn(
+          `dispositivosDe(${usuarioId}) falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      void this.push.sendToUser(usuarioId, this.pushPayload(n), dispositivos);
+      return {
+        notificado: true,
+        push_dispositivos: dispositivos?.length ?? 0,
+        plataformas: [
+          ...new Set(
+            (dispositivos ?? [])
+              .map((d) => d.plataforma)
+              .filter((p): p is string => !!p),
+          ),
+        ],
+      };
     } catch (err) {
       this.logger.warn(
         `notifyUser(${usuarioId}) falló: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return false;
+      return SIN_ENTREGA;
     }
   }
 

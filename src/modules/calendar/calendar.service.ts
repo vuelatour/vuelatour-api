@@ -1,15 +1,44 @@
-import { NotificationsService } from '../realtime/notifications.service';
+import {
+  NotificationsService,
+  type EntregaNotificacion,
+} from '../realtime/notifications.service';
 import {
   BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import { PushService } from '../realtime/push.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from './calendar-sync.service';
 import type {
   CalendarRangeQuery,
   CreateEventoFlotaDto,
+  UpdateEventoFlotaDto,
 } from './dto/calendar.dto';
+import {
+  aEventoMe,
+  avisoEventoBase,
+  cambiosRelevantes,
+  cuerpoEvento,
+  EVENTO_FLOTA_COLS,
+  horaCancun,
+  mapEventoRow,
+  rangoMisEventos,
+  sumarDias,
+  type EventoFlotaRow,
+  type EventoInterno,
+  type EventoMe,
+} from './evento-flota.util';
+
+/**
+ * Resultado del aviso al responsable de un evento (POST/PATCH eventos):
+ * la oficina ve si el aviso pudo llegar al teléfono (3-sep-2026).
+ */
+export interface AvisoEvento extends EntregaNotificacion {
+  responsable_id: string;
+  nombre: string | null;
+}
 
 // Paleta del equipo (21-ago-2026): externos en rosa pálido #F0DCDB.
 const EXTERNAL_COLOR = '#F0DCDB';
@@ -35,6 +64,7 @@ export class CalendarService {
     private readonly supabase: SupabaseService,
     private readonly notifications: NotificationsService,
     private readonly calendarSync: CalendarSyncService,
+    private readonly push: PushService,
   ) {}
 
   async listEvents(q: CalendarRangeQuery) {
@@ -443,69 +473,71 @@ export class CalendarService {
     const EVENTO_COLOR = '#0EA5E9';
     let eq = this.supabase.service
       .from('evento_flota')
-      .select(
-        'id, titulo, fecha, fecha_fin, aeronave_id, responsable_id, notas, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
-      )
+      .select(EVENTO_FLOTA_COLS)
       .lte('fecha', to.toISOString())
       .or(`fecha_fin.is.null,fecha_fin.gte.${from.toISOString()}`)
       .gte('fecha', new Date(from.getTime() - 40 * 86_400_000).toISOString());
     if (q.aeronave_id) eq = eq.eq('aeronave_id', q.aeronave_id);
-    const { data: eventosFlota } =
-      q.solo_externos || q.piloto_id ? { data: [] } : await eq;
-    const diaCancun = (iso: string) =>
-      new Intl.DateTimeFormat('en-CA', {
-        timeZone: 'America/Cancun',
-      }).format(new Date(iso));
-    for (const ev of eventosFlota ?? []) {
-      const aero = Array.isArray(ev.aeronave) ? ev.aeronave[0] : ev.aeronave;
-      const resp = Array.isArray(ev.responsable)
-        ? ev.responsable[0]
-        : ev.responsable;
-      const matricula =
-        (aero as { matricula?: string } | null)?.matricula ?? null;
-      const color =
-        (aero as { color_calendario?: string } | null)?.color_calendario ??
-        EVENTO_COLOR;
-      const nombre = (resp as { nombre?: string } | null)?.nombre ?? null;
-      const iniDia = diaCancun(ev.fecha as string);
-      const finDia = ev.fecha_fin ? diaCancun(ev.fecha_fin as string) : iniDia;
-      const hora = new Intl.DateTimeFormat('es-MX', {
-        timeZone: 'America/Cancun',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: false,
-      }).format(new Date(ev.fecha as string));
+    // FIX 3-sep-2026 (incidente "Llenar Bitácora"): con piloto_id los eventos
+    // se OMITÍAN por completo y la vista por piloto no mostraba lo que le
+    // tocaba. Ahora se filtran por responsable, con el mismo cap de -40 días
+    // y la misma expansión multi-día.
+    if (q.piloto_id) eq = eq.eq('responsable_id', q.piloto_id);
+    const { data: eventosFlota, error: evErr } = q.solo_externos
+      ? { data: [], error: null }
+      : await eq;
+    if (evErr) throw new Error(evErr.message);
+    const eventosMap = (
+      (eventosFlota ?? []) as unknown as EventoFlotaRow[]
+    ).map(mapEventoRow);
+    // Entregabilidad del aviso (3-sep): la oficina ve si el responsable tiene
+    // la app registrada — UNA consulta agrupada, no N+1.
+    const conteoPush = await this.push.contarDispositivosPorUsuario(
+      eventosMap
+        .map((e) => e.responsable_id)
+        .filter((id): id is string => !!id),
+    );
+    for (const ev of eventosMap) {
+      const matricula = ev.aeronave_matricula;
+      const color = ev.aeronave_color ?? EVENTO_COLOR;
+      const iniDia = diaCancun(ev.fecha);
+      const finDia = ev.fecha_fin ? diaCancun(ev.fecha_fin) : iniDia;
+      const hora = horaCancun(ev.fecha);
       const ini = new Date(`${iniDia}T12:00:00Z`);
       const fin = new Date(`${finDia}T12:00:00Z`);
       for (let t = ini.getTime(); t <= fin.getTime(); t += 86_400_000) {
         const day = new Date(t).toISOString().slice(0, 10);
         if (day < fromDay || day > toDay) continue;
         events.push({
-          id: `evento:${ev.id as string}:${day}`,
+          id: `evento:${ev.id}:${day}`,
           tipo_evento: 'evento',
           evento_id: ev.id,
           titulo: ev.titulo,
-          notas: ev.notas ?? null,
+          notas: ev.notas,
           vuelo_id: null,
           escala_id: null,
           folio: null,
           // La app y el panel leen la fecha SIEMPRE de esta llave; el primer
           // día conserva la hora real, los siguientes van a mediodía UTC
           // (mismo truco de los descansos para caer en el día Cancún).
-          fecha_vuelo:
-            day === iniDia ? (ev.fecha as string) : `${day}T12:00:00Z`,
+          fecha_vuelo: day === iniDia ? ev.fecha : `${day}T12:00:00Z`,
           hora: day === iniDia ? hora : null,
           estado: 'EVENTO',
           estado_permiso: null,
           es_externo: false,
           cancelado: false,
           sin_asignar: false,
-          title: `Evento · ${ev.titulo as string}${matricula ? ` · ${matricula}` : ''}`,
+          title: `Evento · ${ev.titulo}${matricula ? ` · ${matricula}` : ''}`,
           color,
-          aeronave_id: ev.aeronave_id ?? null,
+          aeronave_id: ev.aeronave_id,
           aeronave_matricula: matricula,
-          piloto_id: ev.responsable_id ?? null,
-          piloto_nombre: nombre,
+          piloto_id: ev.responsable_id,
+          piloto_nombre: ev.responsable_nombre,
+          // null = sin responsable; 0 = el responsable NO tiene la app
+          // registrada (la oficina debe avisarle por otro medio).
+          responsable_push_dispositivos: ev.responsable_id
+            ? (conteoPush.get(ev.responsable_id) ?? 0)
+            : null,
         });
       }
     }
@@ -585,7 +617,105 @@ export class CalendarService {
     };
   }
 
-  /** Alta de un evento NO-vuelo (oficina). */
+  // ===== Eventos NO-vuelo (evento_flota) =====
+  //
+  // Incidente 3-sep-2026 ("Llenar Bitácora"): el aviso al responsable era un
+  // `alerta_sistema` sin hora/avión/link, el piloto no tenía dispositivo
+  // push, su app no leía eventos y la oficina no supo que no le llegó nada.
+  // Desde entonces: 4 tipos propios (evento_asignado / evento_actualizado /
+  // evento_cancelado / recordatorio_evento), cuerpo SIEMPRE con hora Cancún,
+  // matrícula y notas, link a /me/eventos?dia=…, y POST/PATCH devuelven el
+  // resultado de entrega (`aviso`) para que la oficina confirme por otro
+  // medio cuando el responsable no tiene la app registrada.
+
+  /** Fila completa (embeds incluidos) o null. */
+  private async cargarEvento(id: string): Promise<EventoInterno | null> {
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .select(EVENTO_FLOTA_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? mapEventoRow(data) : null;
+  }
+
+  /**
+   * Aviso al responsable con detalle de entrega. `null` si no hay
+   * responsable o si el actor ES el responsable (quien se agenda algo a sí
+   * mismo ya lo sabe — única exclusión de auto-aviso que se conserva).
+   */
+  private async avisarResponsable(
+    ev: EventoInterno,
+    actorId: string,
+    tipo: 'evento_asignado' | 'evento_actualizado',
+  ): Promise<AvisoEvento | null> {
+    if (!ev.responsable_id || ev.responsable_id === actorId) return null;
+    const entrega = await this.notifications.notifyUserDetallado(
+      ev.responsable_id,
+      {
+        tipo,
+        titulo:
+          tipo === 'evento_asignado'
+            ? 'Te asignaron un evento'
+            : 'Evento actualizado',
+        cuerpo: cuerpoEvento(ev),
+        ...avisoEventoBase(ev),
+      },
+    );
+    return {
+      responsable_id: ev.responsable_id,
+      nombre: ev.responsable_nombre,
+      ...entrega,
+    };
+  }
+
+  /** `aviso` cuando NO se mandó nada (PATCH sin cambios relevantes): la
+   *  oficina igual ve si el responsable tiene la app registrada. */
+  private async avisoSinEnvio(ev: EventoInterno): Promise<AvisoEvento | null> {
+    if (!ev.responsable_id) return null;
+    let dispositivos: { plataforma: string | null }[] = [];
+    try {
+      dispositivos = await this.push.dispositivosDe(ev.responsable_id);
+    } catch {
+      /* best-effort: se reporta 0 */
+    }
+    return {
+      responsable_id: ev.responsable_id,
+      nombre: ev.responsable_nombre,
+      notificado: false,
+      push_dispositivos: dispositivos.length,
+      plataformas: [
+        ...new Set(
+          dispositivos.map((d) => d.plataforma).filter((p): p is string => !!p),
+        ),
+      ],
+    };
+  }
+
+  /**
+   * Espejo en el Google Calendar compartido (best-effort, patrón descansos
+   * de pilots.service): nunca bloquea. Con `google_calendar_id` actualiza;
+   * sin él crea (si la sync está apagada, calendar-sync hace no-op). El id
+   * de Google lo persiste calendar-sync (única pluma de esa columna).
+   */
+  private espejoGoogle(ev: EventoInterno): void {
+    void this.calendarSync
+      .upsertEventoFlotaEvent({
+        id: ev.id,
+        titulo: ev.titulo,
+        fecha: ev.fecha,
+        fecha_fin: ev.fecha_fin,
+        aeronave_matricula: ev.aeronave_matricula,
+        responsable_nombre: ev.responsable_nombre,
+        notas: ev.notas,
+        google_calendar_id: ev.google_calendar_id,
+      })
+      .catch(() => undefined);
+  }
+
+  private static readonly REFERENCIA_ROTA = '23503';
+
+  /** Alta de un evento NO-vuelo (oficina o app). */
   async createEvento(dto: CreateEventoFlotaDto, userId: string) {
     if (dto.fecha_fin && dto.fecha_fin < dto.fecha) {
       throw new BadRequestException(
@@ -604,89 +734,201 @@ export class CalendarService {
         created_by: userId,
         updated_by: userId,
       })
-      .select('id, titulo, fecha')
+      .select(EVENTO_FLOTA_COLS)
       .maybeSingle();
     if (error) {
-      if (error.code === '23503')
+      if (error.code === CalendarService.REFERENCIA_ROTA)
         throw new BadRequestException(
           `Referencia no encontrada: ${error.message}`,
         );
       throw new Error(error.message);
     }
-    // Auditoría 26-ago: el responsable asignado nunca se enteraba del evento.
-    if (dto.responsable_id && dto.responsable_id !== userId) {
-      void this.notifications.notifyUser(dto.responsable_id, {
-        tipo: 'alerta_sistema',
-        titulo: 'Evento asignado',
-        cuerpo: `${dto.titulo.trim()} · ${dto.fecha.toLocaleDateString('es-MX', { timeZone: 'America/Cancun', dateStyle: 'medium' })}`,
-        data: { evento_id: (data?.id as string) ?? '' },
-      });
+    if (!data) throw new Error('No se pudo crear el evento');
+    const ev = mapEventoRow(data);
+    // Se ESPERA el aviso: la respuesta le dice a la oficina si llegó.
+    const aviso = await this.avisarResponsable(ev, userId, 'evento_asignado');
+    this.espejoGoogle(ev);
+    return {
+      ...aEventoMe(ev),
+      responsable_nombre: ev.responsable_nombre,
+      aviso,
+    };
+  }
+
+  /**
+   * Edición de un evento NO-vuelo. `undefined` = no tocar; `null` = limpiar
+   * (avión, responsable, fin, notas). Valida fin ≥ inicio con los valores
+   * RESULTANTES, sella updated_by, re-sincroniza Google y avisa:
+   *  - responsable nuevo ≠ anterior → evento_asignado al nuevo y
+   *    evento_cancelado ("Ya no te toca") al anterior;
+   *  - mismo responsable y cambia fecha/fin/avión/título/notas →
+   *    evento_actualizado.
+   */
+  async updateEvento(id: string, dto: UpdateEventoFlotaDto, userId: string) {
+    const prev = await this.cargarEvento(id);
+    if (!prev) throw new NotFoundException(`Evento ${id} not found`);
+
+    const fecha = dto.fecha instanceof Date ? dto.fecha : new Date(prev.fecha);
+    if (Number.isNaN(fecha.getTime())) {
+      throw new BadRequestException('Fecha inválida.');
     }
-    // Espejo en el Google Calendar compartido (best-effort, patrón descansos
-    // de pilots.service): nunca bloquea el alta. El google_calendar_id lo
-    // persiste calendar-sync (única pluma de esas columnas).
-    const eventoId = (data?.id as string | undefined) ?? null;
-    if (eventoId) {
-      void (async () => {
-        try {
-          let matricula: string | null = null;
-          if (dto.aeronave_id) {
-            const { data: av } = await this.supabase.service
-              .from('aeronave')
-              .select('matricula')
-              .eq('id', dto.aeronave_id)
-              .maybeSingle();
-            matricula = (av?.matricula as string | undefined) ?? null;
-          }
-          let responsable: string | null = null;
-          if (dto.responsable_id) {
-            const { data: resp } = await this.supabase.service
-              .from('usuario')
-              .select('nombre')
-              .eq('id', dto.responsable_id)
-              .maybeSingle();
-            responsable = (resp?.nombre as string | undefined) ?? null;
-          }
-          await this.calendarSync.upsertEventoFlotaEvent({
-            id: eventoId,
-            titulo: dto.titulo.trim(),
-            fecha: dto.fecha.toISOString(),
-            fecha_fin: dto.fecha_fin?.toISOString() ?? null,
-            aeronave_matricula: matricula,
-            responsable_nombre: responsable,
-            notas: dto.notas?.trim() || null,
-          });
-        } catch {
-          /* best-effort */
-        }
-      })();
+    const fechaFin =
+      dto.fecha_fin === undefined
+        ? prev.fecha_fin
+          ? new Date(prev.fecha_fin)
+          : null
+        : (dto.fecha_fin ?? null);
+    if (fechaFin && fechaFin < fecha) {
+      throw new BadRequestException(
+        'La fecha fin no puede ser anterior al inicio.',
+      );
     }
-    return data!;
+    const patch: Record<string, unknown> = {
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    };
+    if (dto.titulo !== undefined) {
+      const titulo = typeof dto.titulo === 'string' ? dto.titulo.trim() : '';
+      if (!titulo) throw new BadRequestException('El título es obligatorio.');
+      patch.titulo = titulo;
+    }
+    if (dto.fecha !== undefined) patch.fecha = fecha.toISOString();
+    if (dto.fecha_fin !== undefined)
+      patch.fecha_fin = fechaFin?.toISOString() ?? null;
+    if (dto.aeronave_id !== undefined)
+      patch.aeronave_id = dto.aeronave_id ?? null;
+    if (dto.responsable_id !== undefined)
+      patch.responsable_id = dto.responsable_id ?? null;
+    if (dto.notas !== undefined) patch.notas = dto.notas?.trim() || null;
+
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .update(patch)
+      .eq('id', id)
+      .select(EVENTO_FLOTA_COLS)
+      .maybeSingle();
+    if (error) {
+      if (error.code === CalendarService.REFERENCIA_ROTA)
+        throw new BadRequestException(
+          `Referencia no encontrada: ${error.message}`,
+        );
+      throw new Error(error.message);
+    }
+    if (!data) throw new NotFoundException(`Evento ${id} not found`);
+    const next = mapEventoRow(data);
+
+    let aviso: AvisoEvento | null = null;
+    if (prev.responsable_id !== next.responsable_id) {
+      // El anterior deja de tenerlo en su agenda: se le avisa con los datos
+      // que él conocía (fecha/avión previos).
+      if (prev.responsable_id && prev.responsable_id !== userId) {
+        void this.notifications.notifyUser(prev.responsable_id, {
+          tipo: 'evento_cancelado',
+          titulo: 'Evento cancelado',
+          cuerpo: `Ya no te toca: ${cuerpoEvento(prev)}`,
+          ...avisoEventoBase(prev),
+        });
+      }
+      aviso = await this.avisarResponsable(next, userId, 'evento_asignado');
+    } else if (next.responsable_id && next.responsable_id !== userId) {
+      aviso = cambiosRelevantes(prev, next)
+        ? await this.avisarResponsable(next, userId, 'evento_actualizado')
+        : await this.avisoSinEnvio(next);
+    }
+    this.espejoGoogle(next);
+    return {
+      ...aEventoMe(next),
+      responsable_nombre: next.responsable_nombre,
+      aviso,
+    };
   }
 
   /** Elimina un evento NO-vuelo (la UI confirma antes). */
   async removeEvento(id: string) {
-    const { data, error } = await this.supabase.service
+    const ev = await this.cargarEvento(id);
+    if (!ev) throw new NotFoundException(`Evento ${id} not found`);
+    const { error } = await this.supabase.service
       .from('evento_flota')
       .delete()
-      .eq('id', id)
-      .select('id, titulo, fecha, responsable_id, google_calendar_id')
-      .maybeSingle();
+      .eq('id', id);
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Evento ${id} not found`);
     // Su espejo en Google también se quita (best-effort, fire-and-forget).
     void this.calendarSync.removeEventoFlotaEvent({
-      google_calendar_id: (data.google_calendar_id as string | null) ?? null,
+      google_calendar_id: ev.google_calendar_id,
     });
-    // El responsable también debe saber que el evento se quitó (26-ago).
-    if (data.responsable_id) {
-      void this.notifications.notifyUser(data.responsable_id as string, {
-        tipo: 'alerta_sistema',
+    // El responsable también debe saber que el evento se quitó (26-ago);
+    // con hora/avión para que reconozca CUÁL (3-sep).
+    if (ev.responsable_id) {
+      void this.notifications.notifyUser(ev.responsable_id, {
+        tipo: 'evento_cancelado',
         titulo: 'Evento cancelado',
-        cuerpo: `Se quitó del calendario: ${(data.titulo as string) ?? 'evento'}.`,
-        data: { evento_id: id },
+        cuerpo: `Se quitó del calendario: ${cuerpoEvento(ev)}`,
+        ...avisoEventoBase(ev),
       });
     }
     return { ok: true };
+  }
+
+  /**
+   * Eventos donde el usuario es RESPONSABLE (GET /v1/me/eventos): una fila
+   * por evento (sin expandir por día). Solapamiento de
+   * [fecha, coalesce(fecha_fin, fecha)] con el rango en cortes Cancún.
+   */
+  async listEventosDeResponsable(
+    usuarioId: string,
+    desde?: string,
+    hasta?: string,
+  ): Promise<EventoMe[]> {
+    const r = rangoMisEventos(desde, hasta);
+    if (
+      Number.isNaN(Date.parse(r.desdeTs)) ||
+      Number.isNaN(Date.parse(r.hastaTs))
+    ) {
+      throw new BadRequestException(
+        'desde/hasta deben ser fechas válidas YYYY-MM-DD.',
+      );
+    }
+    if (r.hasta < r.desde) {
+      throw new BadRequestException(
+        'hasta debe ser igual o posterior a desde.',
+      );
+    }
+    return this.eventosDeResponsableEntre(usuarioId, r.desdeTs, r.hastaTs);
+  }
+
+  /** Expediente del piloto: eventos de hoy → +`dias` días (máx `max`). */
+  async eventosProximosDe(
+    usuarioId: string,
+    dias = 60,
+    max = 10,
+  ): Promise<EventoMe[]> {
+    const hoy = hoyCancun();
+    const r = rangoMisEventos(hoy, sumarDias(hoy, dias), hoy);
+    return this.eventosDeResponsableEntre(usuarioId, r.desdeTs, r.hastaTs, max);
+  }
+
+  private async eventosDeResponsableEntre(
+    usuarioId: string,
+    desdeTs: string,
+    hastaTs: string,
+    limit?: number,
+  ): Promise<EventoMe[]> {
+    // Mismo instante en Z para el `.or()` (PostgREST lo parsea sin ruido).
+    const desdeIso = new Date(desdeTs).toISOString();
+    let q = this.supabase.service
+      .from('evento_flota')
+      .select(EVENTO_FLOTA_COLS)
+      .eq('responsable_id', usuarioId)
+      .lte('fecha', hastaTs)
+      .or(
+        `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha.gte.${desdeIso})`,
+      )
+      .order('fecha', { ascending: true });
+    if (limit) q = q.limit(limit);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as unknown as EventoFlotaRow[])
+      .map(mapEventoRow)
+      .map(aEventoMe);
   }
 }

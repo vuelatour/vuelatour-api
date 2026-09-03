@@ -10,6 +10,12 @@ export interface PushInput {
   data?: Record<string, string>;
 }
 
+/** Fila de `dispositivo_push` (token FCM/APNs + plataforma). */
+export interface DispositivoPush {
+  token: string;
+  plataforma: string | null;
+}
+
 // Solo códigos que de verdad significan "este token murió". OJO:
 // 'messaging/invalid-argument' es un error de PAYLOAD, no de token — estaba
 // aquí y un payload malo podía borrar tokens VÁLIDOS en masa (25-ago).
@@ -80,19 +86,61 @@ export class PushService implements OnModuleInit {
     if (error) throw new Error(error.message);
   }
 
-  /** Envía push a todos los dispositivos de un usuario. Limpia tokens inválidos. */
-  async sendToUser(usuarioId: string, push: PushInput): Promise<void> {
+  /** Dispositivos registrados de un usuario (tokens + plataforma). */
+  async dispositivosDe(usuarioId: string): Promise<DispositivoPush[]> {
+    const { data, error } = await this.supabase.service
+      .from('dispositivo_push')
+      .select('token, plataforma')
+      .eq('usuario_id', usuarioId);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /**
+   * Conteo de dispositivos por usuario en UNA consulta (calendario, lista
+   * de usuarios, /me): la oficina necesita saber a quién NO le puede llegar
+   * un push (incidente 3-sep-2026: el responsable de un evento no tenía la
+   * app registrada y nadie lo supo). Los ids sin fila no aparecen (= 0).
+   */
+  async contarDispositivosPorUsuario(
+    usuarioIds: string[],
+  ): Promise<Map<string, number>> {
+    const conteo = new Map<string, number>();
+    const ids = [...new Set(usuarioIds.filter((id) => !!id))];
+    if (ids.length === 0) return conteo;
+    const { data, error } = await this.supabase.service
+      .from('dispositivo_push')
+      .select('usuario_id')
+      .in('usuario_id', ids);
+    if (error) throw new Error(error.message);
+    for (const row of (data ?? []) as { usuario_id: string }[]) {
+      conteo.set(row.usuario_id, (conteo.get(row.usuario_id) ?? 0) + 1);
+    }
+    return conteo;
+  }
+
+  /**
+   * Envía push a todos los dispositivos de un usuario. Limpia tokens
+   * inválidos. `dispositivos` permite reusar la lectura que ya hizo el
+   * llamador (notifyUserDetallado) y evitar la segunda consulta.
+   */
+  async sendToUser(
+    usuarioId: string,
+    push: PushInput,
+    dispositivos?: DispositivoPush[],
+  ): Promise<void> {
     if (!this.messaging) return;
     try {
-      const { data, error } = await this.supabase.service
-        .from('dispositivo_push')
-        .select('token, plataforma')
-        .eq('usuario_id', usuarioId);
-      if (error) throw new Error(error.message);
-
-      const filas = (data ?? []) as { token: string; plataforma: string | null }[];
+      const filas = dispositivos ?? (await this.dispositivosDe(usuarioId));
       const tokens = filas.map((d) => d.token);
-      if (tokens.length === 0) return;
+      if (tokens.length === 0) {
+        // Nunca más en silencio (3-sep-2026): un usuario sin dispositivo no
+        // recibe NADA por push aunque la notificación quede persistida.
+        this.logger.warn(
+          `push a ${usuarioId} omitido: sin dispositivos registrados en dispositivo_push · "${push.title}"`,
+        );
+        return;
+      }
 
       const res = await this.messaging.sendEachForMulticast({
         tokens,
