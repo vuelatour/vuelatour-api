@@ -5,6 +5,7 @@ import {
   type ReporteVueloLineaPayload,
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   pagoVendedorUsd,
@@ -351,10 +352,10 @@ export class FlightReportService {
       .filter((g) => g.categoria !== 'GAS')
       .map((g) => ({
         fecha: (g.fecha_gasto as string) ?? null,
-        concepto:
-          g.categoria === 'PILOTO_EXTERNO'
-            ? 'Piloto externo'
-            : ((g.categoria as string) ?? 'OTRO'),
+        // Etiqueta humana homologada (fuente única categoria-gasto.util).
+        concepto: etiquetaCategoriaGasto(
+          (g.categoria as string | null) ?? 'OTRO',
+        ),
         // El detalle incluye el DESGLOSE que compone el servidor (Operación /
         // TUA / FBO con IVA) — el cliente lo pidió explícitamente EN el
         // reporte. Se aplana a una línea para el PDF/Excel.

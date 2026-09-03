@@ -32,6 +32,7 @@ import {
 import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import type {
   CreateGastoDto,
@@ -162,7 +163,7 @@ export class ExpensesService {
       const fact = (x.estatus_facturacion as string) ?? '';
       return [
         (x.fecha_gasto as string) ?? '',
-        (x.categoria as string) ?? '',
+        etiquetaCategoriaGasto(x.categoria as string | null),
         // Gasto repartido entre aviones: no está "pendiente" de nada.
         Array.isArray(x.repartos) && x.repartos.length > 0
           ? `Repartido (${x.repartos.length})`
@@ -184,7 +185,7 @@ export class ExpensesService {
       const x = g;
       const monto = Number(x.monto);
       if (!Number.isFinite(monto)) continue;
-      const clave = `${(x.categoria as string) ?? '—'} (${(x.moneda as string) ?? '?'})`;
+      const clave = `${etiquetaCategoriaGasto(x.categoria as string | null) || '—'} (${(x.moneda as string) ?? '?'})`;
       porCategoria.set(clave, (porCategoria.get(clave) ?? 0) + monto);
     }
     const resumen: Array<[string, number]> = [...porCategoria.entries()]
@@ -806,7 +807,7 @@ export class ExpensesService {
         resultados.push({
           escala_id: item.escala_id,
           ok: false,
-          error: `Categoría ${categoria} no aplica a gastos de pista`,
+          error: `Categoría ${etiquetaCategoriaGasto(categoria)} no aplica a gastos de pista`,
         });
         continue;
       }
@@ -820,7 +821,7 @@ export class ExpensesService {
         resultados.push({
           escala_id: item.escala_id,
           ok: false,
-          error: `Ya existe un gasto ${categoria} para ese aterrizaje`,
+          error: `Ya existe un gasto de ${etiquetaCategoriaGasto(categoria)} para ese aterrizaje`,
         });
         continue;
       }
@@ -1374,7 +1375,7 @@ export class ExpensesService {
       const avisoMat = {
         tipo: 'alerta_sistema',
         titulo: 'Matrícula del comprobante no coincide',
-        cuerpo: `${dto.categoria} · $${Number(dto.monto).toFixed(2)} ${dto.moneda}: ${discrepanciaMatricula}. Corrige el avión del gasto si aplica.`,
+        cuerpo: `${etiquetaCategoriaGasto(dto.categoria)} · $${Number(dto.monto).toFixed(2)} ${dto.moneda}: ${discrepanciaMatricula}. Corrige el avión del gasto si aplica.`,
         data: { gasto_id: data.id as string },
         link: '/admin/expenses',
       };
@@ -1404,7 +1405,7 @@ export class ExpensesService {
         {
           tipo: 'gasto_registrado',
           titulo: 'Gasto registrado',
-          cuerpo: `${dto.categoria} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
+          cuerpo: `${etiquetaCategoriaGasto(dto.categoria)} · ${dto.moneda} ${Number(dto.monto).toLocaleString('en-US')}`,
           data: {
             gasto_id: (data as { id: string }).id,
             vuelo_id: dto.vuelo_id ?? null,
@@ -1566,7 +1567,7 @@ export class ExpensesService {
     // visible para que oficina decida en Verificar.
     if (ai.categoria_sugerida && ai.categoria_sugerida !== gasto.categoria) {
       discrepancias.push(
-        `categoría capturada ${gasto.categoria as string}, la IA sugiere ${ai.categoria_sugerida}`,
+        `categoría capturada ${etiquetaCategoriaGasto(gasto.categoria as string)}, la IA sugiere ${etiquetaCategoriaGasto(ai.categoria_sugerida)}`,
       );
     }
     // Fecha: NO se pisa; si el ticket trae otra, discrepancia.
@@ -1705,7 +1706,7 @@ export class ExpensesService {
       const aviso = {
         tipo: 'alerta_sistema',
         titulo: 'Gasto con discrepancias IA vs captura',
-        cuerpo: `${gasto.categoria as string} · $${Number(gasto.monto).toFixed(2)} ${gasto.moneda as string}: ${discrepancias[0]}${discrepancias.length > 1 ? ` (+${discrepancias.length - 1} más)` : ''}`,
+        cuerpo: `${etiquetaCategoriaGasto(gasto.categoria as string)} · $${Number(gasto.monto).toFixed(2)} ${gasto.moneda as string}: ${discrepancias[0]}${discrepancias.length > 1 ? ` (+${discrepancias.length - 1} más)` : ''}`,
         data: { gasto_id: gastoId },
         link: '/admin/expenses',
       };
@@ -1891,7 +1892,7 @@ export class ExpensesService {
     if (!dup) return;
     const cap = Array.isArray(dup.captura) ? dup.captura[0] : dup.captura;
     throw new ConflictException(
-      `El folio/remisión "${folio}" ya está capturado: gasto ${dup.categoria} de $${Number(dup.monto).toFixed(2)} ${dup.moneda} con fecha ${dup.fecha_gasto}${cap?.nombre ? ` (capturó ${cap.nombre})` : ''}. Es el mismo pago dos veces — si de verdad es otro ticket, corrige el folio.`,
+      `El folio/remisión "${folio}" ya está capturado: gasto ${etiquetaCategoriaGasto(dup.categoria)} de $${Number(dup.monto).toFixed(2)} ${dup.moneda} con fecha ${dup.fecha_gasto}${cap?.nombre ? ` (capturó ${cap.nombre})` : ''}. Es el mismo pago dos veces — si de verdad es otro ticket, corrige el folio.`,
     );
   }
 

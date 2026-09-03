@@ -7,6 +7,7 @@ import {
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   expandirConReparto,
@@ -171,6 +172,10 @@ type GrupoGasto = 'DIRECTO' | 'INDIRECTO' | 'PERMISO' | 'FIJO' | 'EXCLUIDO';
 
 interface GastoCategoriaAcc {
   grupo: GrupoGasto;
+  /** Código CRUDO de la categoría base (la clave del mapa puede llevar
+   *  sufijo " (repartido)" o ser la nota de TUAS); null en la fila
+   *  informativa del TUA embebido. Solo alimenta `etiqueta` del detalle. */
+  categoria: string | null;
   /** Gastos que SÍ convirtieron a USD (los sin TC van en sin_tc_count). */
   count: number;
   usd: number;
@@ -1140,6 +1145,7 @@ export class ProfitSharingService {
           : g.categoria;
       const acc = porCategoria.get(clave) ?? {
         grupo,
+        categoria: g.categoria,
         count: 0,
         usd: 0,
         sin_tc_count: 0,
@@ -1182,6 +1188,7 @@ export class ProfitSharingService {
       // TUA embebido se le quitó al costo del avión en este periodo.
       porCategoria.set(TUA_EMBEBIDO_CLAVE_DETALLE, {
         grupo: 'EXCLUIDO',
+        categoria: null,
         count: tuaEmbebidoCount,
         usd: tuaEmbebidoUsd,
         sin_tc_count: 0,
@@ -1212,6 +1219,17 @@ export class ProfitSharingService {
     const detalleGastos = [...porCategoria.entries()]
       .map(([categoria, acc]) => ({
         categoria,
+        // ADITIVO (2-sep-2026): etiqueta humana de la categoría BASE con el
+        // mismo sufijo de la clave (" (repartido)", la nota de TUAS). La
+        // clave `categoria` sigue siendo el código crudo — nadie la compara
+        // contra esta etiqueta; la fila informativa del TUA embebido la
+        // conserva tal cual.
+        etiqueta:
+          acc.categoria == null
+            ? categoria
+            : categoria.startsWith(acc.categoria)
+              ? `${etiquetaCategoriaGasto(acc.categoria)}${categoria.slice(acc.categoria.length)}`
+              : etiquetaCategoriaGasto(acc.categoria),
         grupo: acc.grupo,
         count: acc.count,
         usd: round2(acc.usd),

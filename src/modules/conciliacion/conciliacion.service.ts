@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
 import type { EnvVars } from '../../config/env.schema';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
 import {
   fetchRepartos,
@@ -1002,8 +1003,13 @@ export class ConciliacionService {
       if (gasto) {
         const prov = unwrapOne(gasto.proveedor)?.nombre;
         const folio = unwrapOne(gasto.vuelo)?.folio;
+        // "Gasto Comida"; una etiqueta que ya empieza con "Gasto…" no se
+        // duplica (fuente única categoria-gasto.util).
+        const etiquetaCat = etiquetaCategoriaGasto(gasto.categoria);
         return [
-          `Gasto ${gasto.categoria ?? ''}`.trim(),
+          /^gasto/i.test(etiquetaCat)
+            ? etiquetaCat
+            : `Gasto ${etiquetaCat}`.trim(),
           prov ?? null,
           folio != null ? `vuelo #${folio}` : null,
         ]

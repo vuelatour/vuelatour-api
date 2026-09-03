@@ -9,6 +9,7 @@ import {
   TipoCambioService,
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
@@ -64,43 +65,11 @@ const VUELO_COLS =
 // El medio EFECTIVO solo se señala como "(efectivo)" en la nota de la celda.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
 const CAT_OTROS = new Set(['FBO', 'OTRO']);
-// Etiquetas humanas para el desglose en la nota de la celda.
-const CAT_LABEL: Record<string, string> = {
-  GAS: 'Gas',
-  ATERRIZAJE: 'Aterrizaje',
-  TUAS: 'TUAs',
-  FBO: 'FBO',
-  COMIDA: 'Comida',
-  HOTEL: 'Hotel',
-  TAXI: 'Taxi / estacionamiento',
-  REFACCION: 'Refacción',
-  FIJO: 'Fijo',
-  OTRO: 'Otro',
-  OPERACIONES: 'Operaciones',
-  PILOTO_EXTERNO: 'Piloto externo',
-  NOMINA: 'Nómina',
-  SERVICIOS: 'Servicios',
-  // Renombre 1-sep-2026 (pedido del cliente): solo la ETIQUETA cambia, el
-  // código del enum sigue siendo INDIRECTO.
-  INDIRECTO: 'Gastos indirectos de avión',
-};
-// Etiqueta amable de la columna CATEGORÍA de las hojas de gastos (29-ago):
-// overrides locales → CAT_LABEL → capitalizado. Solo presentación (la
-// clasificación por hoja usa la categoría CRUDA, nunca esta etiqueta).
-const CATEGORIA_HOJA_LABEL: Record<string, string> = {
-  INDIRECTO: 'Gastos indirectos de avión',
-  OTRO: 'Otros gastos',
-  NOMINA: 'Nómina',
-  SERVICIOS: 'Servicios',
-};
-function etiquetaCategoria(cat: string | null | undefined): string | null {
-  if (!cat) return null;
-  return (
-    CATEGORIA_HOJA_LABEL[cat] ??
-    CAT_LABEL[cat] ??
-    cat.charAt(0).toUpperCase() + cat.slice(1).toLowerCase()
-  );
-}
+// Etiquetas humanas de categoría (nota de celda, pendientes, columna
+// CATEGORÍA de las hojas, concepto de Otros movimientos): fuente única
+// `etiquetaCategoriaGasto` (src/common/categoria-gasto.util.ts, 2-sep-2026).
+// Solo presentación: la clasificación por hoja/columna usa la categoría
+// CRUDA, nunca la etiqueta.
 
 interface VueloRow {
   id: string;
@@ -2004,7 +1973,7 @@ export class AircraftBalanceService {
             ? (matriculaPorAvion.get(g.aeronave_id) ?? null)
             : null;
         const etiqueta = [
-          `${CAT_LABEL[g.categoria] ?? g.categoria}${sufijo}`,
+          `${etiquetaCategoriaGasto(g.categoria)}${sufijo}`,
           prov || null,
           nota || null,
           avionSellado ? `sellado a ${avionSellado}` : null,
@@ -2690,7 +2659,7 @@ export class AircraftBalanceService {
           const avionG = avionDelGastoV(g);
           if (avionG != null && !avionesDelVuelo.has(avionG)) {
             pendientes.push(
-              `${etiqueta}: gasto ${CAT_LABEL[g.categoria] ?? g.categoria} por $${(
+              `${etiqueta}: gasto ${etiquetaCategoriaGasto(g.categoria)} por $${(
                 num(g.monto) ?? 0
               ).toLocaleString('es-MX')} ${g.moneda ?? ''} asignado a ${
                 matriculaPorAvion.get(avionG) ?? 'otro avión'
@@ -4491,7 +4460,7 @@ export class AircraftBalanceService {
         clave,
         avion_color: null,
         fecha_vuelo: null,
-        concepto_egreso: `${String(g.categoria ?? clave).toLowerCase()}${
+        concepto_egreso: `${etiquetaCategoriaGasto(g.categoria as string | null) || clave}${
           proveedor
             ? ` · ${proveedor}`
             : g.lugar
@@ -4603,7 +4572,7 @@ export class AircraftBalanceService {
           // Columna CATEGORÍA (29-ago): etiqueta amable es-MX — solo
           // presentación (la clasificación por hoja ya se hizo arriba con
           // la categoría cruda).
-          categoria: etiquetaCategoria(g.categoria),
+          categoria: etiquetaCategoriaGasto(g.categoria) || null,
           detalle,
           monto_mxn: mxn,
           moneda_original: g.moneda !== 'MXN' ? (g.moneda ?? null) : null,

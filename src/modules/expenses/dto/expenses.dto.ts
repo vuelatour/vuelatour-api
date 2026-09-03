@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
+import { descripcionCategoriasGasto } from '../../../common/categoria-gasto.util';
 import {
   ArrayMinSize,
   IsArray,
@@ -108,7 +109,12 @@ export enum EstatusFacturacion {
 }
 
 export class CreateGastoDto {
-  @ApiProperty({ enum: CategoriaGasto })
+  @ApiProperty({
+    enum: CategoriaGasto,
+    // Código → etiqueta (UI) → destino por default, derivado de la fuente
+    // única src/common/categoria-gasto.util.ts (sin duplicar textos).
+    description: descripcionCategoriasGasto(),
+  })
   @IsEnum(CategoriaGasto)
   categoria!: CategoriaGasto;
 

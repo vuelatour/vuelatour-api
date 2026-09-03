@@ -34,6 +34,7 @@ import {
 } from '../configuracion/configuracion.service';
 import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
@@ -4412,7 +4413,7 @@ export class FlightsService {
     ): string | null => {
       if (typeof categoria !== 'string' || monto == null) return null;
       const mon = typeof moneda === 'string' ? moneda : '';
-      return `${categoria} · ${Number(monto)} ${mon}`.trim();
+      return `${etiquetaCategoriaGasto(categoria)} · ${Number(monto)} ${mon}`.trim();
     };
     const descripcion = new Map<string, string | null>();
     for (const b of bitacora) {

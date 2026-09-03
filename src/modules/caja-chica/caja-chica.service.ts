@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import {
   CreateCajaMovimientoDto,
   CreateFondoDto,
@@ -295,7 +296,7 @@ export class CajaChicaService {
           origen: 'gasto' as const,
           tipo: 'GASTO',
           monto: -Number(gg.monto),
-          descripcion: gg.notas ?? gg.categoria,
+          descripcion: gg.notas ?? etiquetaCategoriaGasto(gg.categoria),
           created_at: gg.fecha_gasto,
           vuelo_id: gg.vuelo_id ?? null,
           vuelo_folio: vuelo?.folio ?? null,

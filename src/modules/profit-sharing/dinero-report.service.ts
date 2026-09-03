@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
@@ -987,7 +988,7 @@ export class DineroReportService {
       const nota = ((g.notas as string | null) ?? '').split('\n')[0].trim();
       const filasReparto = repartosDinero.get(g.id as string);
       const concepto = [
-        String(g.categoria ?? '').toLowerCase(),
+        etiquetaCategoriaGasto(g.categoria as string | null),
         prov ?? null,
         nota || null,
         filasReparto

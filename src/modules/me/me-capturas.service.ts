@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { diaCancun } from '../../common/fecha-cancun.util';
+import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CapturasQuery } from './dto/capturas.dto';
 import { soloPendientes } from '../../common/taco-motivo.util';
@@ -289,6 +290,9 @@ export class MeCapturasService {
     rutas: Map<string, string>,
   ): CapturaItem {
     const categoria = (g.categoria as string) ?? 'GASTO';
+    // Etiqueta humana homologada (fuente única categoria-gasto.util); la
+    // comparación de abajo sigue usando el código crudo.
+    const etiquetaCat = etiquetaCategoriaGasto(categoria);
     const monto = `$${fmtMonto.format(Number(g.monto))} ${g.moneda as string}`;
     const esCombustible = categoria === 'GAS';
     const litros = g.litros == null ? null : Number(g.litros);
@@ -296,8 +300,9 @@ export class MeCapturasService {
       ? litros != null && Number.isFinite(litros) && litros > 0
         ? `Combustible ${fmtLitros.format(litros)} L · ${monto}`
         : `Combustible · ${monto}`
-      : // Códigos crudos que se leen mal en Mis registros.
-        `Gasto ${categoria === 'PERSONAL_DUENO' ? 'Personal del dueño' : categoria === 'VISITA' ? 'de visita' : categoria === 'NOMINA' ? 'de nómina' : categoria === 'SERVICIOS' ? 'de servicios' : categoria} · ${monto}`;
+      : // "Gasto Comida · $…"; una etiqueta que ya empieza con "Gasto…"
+        // (Gasto fijo, Gasto personal del dueño) no se duplica.
+        `${/^gasto/i.test(etiquetaCat) ? etiquetaCat : `Gasto ${etiquetaCat}`} · ${monto}`;
     const vueloId = (g.vuelo_id as string | null) ?? null;
     const compraRow = flatten(g.compra);
     const compra =
