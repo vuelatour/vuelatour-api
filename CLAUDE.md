@@ -161,6 +161,42 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     a aviones" del Balance general VuelaTour). Restar `otros_usd` además de
     `gastos_indirectos_usd` cuenta doble.
 
+11. **Cotización de GRUPO (4-sep-2026, `src/modules/groups/`)** — varios
+    aviones para un mismo cliente y UN total. La cabecera `vuelo_grupo` NO
+    tiene dinero ni estado: guarda cliente, fecha, plantilla de ruta, extras
+    del grupo (`cantidad × unitario`, `por_persona`, reparto POR_PAX /
+    PROPORCIONAL / ANCLA), ajuste, ancla y preferencias del PDF. Cada avión
+    es un VUELO HIJO normal (`vuelo.grupo_id/grupo_posicion/grupo_pax`) que
+    pasa por `QuotesService.calculate()` con SU avión; el total del grupo se
+    LEE sumando los desgloses persistidos de los hijos vivos
+    (`consolidarDesgloses`). Reparto de ajuste/extras y de cobros con
+    `repartirUsd` (Σ exacta, residuo al ancla). Sin índice único
+    (grupo_id, grupo_posicion) A PROPÓSITO: `reassignAircraft` clona antes
+    de cancelar (`payloadClonVuelo` conserva la liga y mueve el ancla).
+    `revise` ancla los extras `origen='GRUPO'` salvo `opts.desdeGrupo`, y
+    con `desdeGrupo` conserva los extras propios del hijo
+    (`mezclarExtrasDesdeGrupo`). 409 estructurados: CAPACIDAD_EXCEDIDA
+    (también en quotes.create/revise de vuelos propios), PAX_NO_CUADRAN,
+    PILOTO_DUPLICADO, AERONAVE_EN_TALLER, HIJOS_CONGELADOS
+    (+`solo_editables`), REVISION_A_MEDIAS (`details.creados` con vuelo_id:
+    el reintento NO recrea). Nada del grupo es transaccional salvo la
+    compensación total de `create`. `precio_desactualizado` en
+    `calculo_snapshot.meta.grupo` cuando el avión efectivo ≠ cotizado;
+    alerta diaria `grupo_desincronizado`.
+    **Sobre de cobro (Fase 2)**: `cobro_grupo` es el pago único del cliente
+    y se PARTE en N `cobro_vuelo` (`cobro_grupo_id`, `grupo_factor`) por el
+    MISMO `createCobro`/`createReembolso` (`particionCobroGrupo`: LIQUIDACION
+    si cubre Σ saldos ±1 USD, si no PROPORCIONAL por precio; MANUAL con Σ
+    exacta; comisión con los mismos pesos). `cobrosEnUsd` y TODO el dinero
+    por vuelo leen SOLO `cobro_vuelo`: el sobre NUNCA entra a una suma. Las
+    partes se editan/borran solo desde el grupo (409 COBRO_DE_GRUPO). El
+    banco enlaza al SOBRE (`movimiento_bancario.cobro_grupo_id`, excluyente
+    con `cobro_id`); "conciliado" se decide SIEMPRE con
+    `cobroEstaConciliado` (`src/common/cobro-conciliado.util.ts`). Quitar o
+    reemplazar un avión NO re-parte solo: avisa (decisión del cliente
+    pendiente). PDF del cliente vía pyservices `/reportes/cotizacion-grupo`
+    (nunca COMISION_VENDEDOR ni redondeo como línea).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
