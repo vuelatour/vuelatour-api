@@ -460,6 +460,12 @@ export class QuotesPdfService {
         moneda: (e.moneda as string) ?? 'USD',
         monto_nativo: num(e.monto_nativo),
         aplica_iva: e.aplica_iva !== false,
+        // cantidad × unitario (4-sep-2026, ADITIVO y solo cuando existen:
+        // pyservices pinta "9 × $85.00" si la plantilla lo soporta y los
+        // ignora si no — skew tolerante).
+        ...(num(e.cantidad) != null && num(e.unitario) != null
+          ? { cantidad: num(e.cantidad), unitario: num(e.unitario) }
+          : {}),
       })),
       extras_total_usd:
         num(

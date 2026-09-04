@@ -44,6 +44,14 @@ export class ListQuotesQuery {
   @IsBoolean()
   es_externo?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Solo los hijos de una cotización de GRUPO (vuelo.grupo_id). Cada fila trae grupo_posicion, grupo_pax y el embed grupo {id, folio, nombre, pasajeros_total}.',
+  })
+  @IsOptional()
+  @IsUUID()
+  grupo_id?: string;
+
   @ApiPropertyOptional({ description: 'Búsqueda por folio, origen, destino' })
   @IsOptional()
   @IsString()

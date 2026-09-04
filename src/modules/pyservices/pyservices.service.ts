@@ -1031,6 +1031,116 @@ export interface ParseInventarioResult {
   filas: FilaInventarioCruda[];
 }
 
+/**
+ * PDF de COTIZACIÓN DE GRUPO (4-sep-2026) → pyservices
+ * `POST /reportes/cotizacion-grupo`. Contrato ADITIVO y skew-tolerante:
+ * todo lo que no exista en la plantilla se ignora. El dinero viene YA
+ * consolidado desde el API (Σ de los desgloses canónicos de los hijos
+ * vivos; comisión del vendedor y redondeo hacia arriba ABSORBIDOS en
+ * `servicio_aereo_usd`, igual que el PDF de cotización de un avión);
+ * pyservices solo pinta.
+ */
+export interface CotizacionGrupoPdfAvion {
+  posicion: number;
+  modelo: string | null;
+  /** Matrícula real; la plantilla aplica su regla vigente de mostrarla o no. */
+  matricula: string | null;
+  asientos: number | null;
+  pasajeros: number;
+  rotaciones: number;
+  tiempo_hr: number | null;
+  /** ISO de la salida planeada (tramo 1 del hijo) o null. */
+  salida_estimada: string | null;
+  /** Total del hijo (USD); pintar SOLO con `mostrar_subtotal_por_avion`. */
+  subtotal_usd: number | null;
+  /** Tarifa/hr del hijo; pintar SOLO con `mostrar_tarifa`. */
+  tarifa_hora_usd: number | null;
+  velocidad_kts: number | null;
+  num_motores: number | null;
+  motor_hp: number | null;
+  caracteristicas: string[];
+  /** data URI base64 (mismo mecanismo que /reportes/cotizacion) o null. Solo el primer avión de cada modelo las trae. */
+  foto_exterior: string | null;
+  foto_interior: string | null;
+  foto_exterior_url: string | null;
+  foto_interior_url: string | null;
+}
+
+export interface CotizacionGrupoPdfRequest {
+  /** "G-12" */
+  folio_grupo: string;
+  folio: number;
+  nombre: string;
+  cliente: string;
+  /** ISO de la salida del grupo. */
+  fecha: string | null;
+  pasajeros_total: number;
+  aviones_total: number;
+  /** "CUN → CZA → CUN" (solo tramos visibles de la plantilla). */
+  ruta: string | null;
+  itinerario: Array<{
+    orden: number;
+    origen: string;
+    destino: string;
+    es_ferry: boolean;
+    requiere_pernocta: boolean;
+    tipo_parada: string;
+    servicio_notas: string | null;
+    /** 'YYYY-MM-DD' de pared o null. */
+    fecha: string | null;
+  }>;
+  mapa_puntos: Array<{
+    orden: number;
+    origen_iata: string;
+    destino_iata: string;
+    o_lat: number;
+    o_lon: number;
+    d_lat: number;
+    d_lon: number;
+    es_ferry: boolean;
+  }>;
+  /** Líneas consolidadas ya "aptas para el cliente" (sin comisión del vendedor ni redondeo como línea). */
+  desglose_consolidado: Array<{
+    clave: string;
+    concepto: string;
+    monto_usd: number;
+    cantidad?: number;
+    unitario?: number;
+    moneda?: string;
+  }>;
+  servicio_aereo_usd: number;
+  horas_total_hr: number;
+  tuas_usd: number;
+  tuas_detalle: string[];
+  extras: Array<{
+    concepto: string;
+    monto_usd: number;
+    cantidad?: number;
+    unitario?: number;
+    moneda: string;
+    aplica_iva: boolean;
+  }>;
+  extras_total_usd: number;
+  viaticos_pernocta_usd: number;
+  descuento_usd: number;
+  subtotal_usd: number;
+  iva_pct: number;
+  iva_usd: number;
+  total_usd: number;
+  total_mxn: number | null;
+  tc_usd_mxn: number | null;
+  precio_por_persona_usd: number | null;
+  moneda: 'USD';
+  mostrar_precio_por_persona: boolean;
+  mostrar_tarifa: boolean;
+  mostrar_anexo_aviones: boolean;
+  mostrar_subtotal_por_avion: boolean;
+  mostrar_itinerario: boolean;
+  aviones: CotizacionGrupoPdfAvion[];
+  notas: string | null;
+  condiciones: string | null;
+}
+
 export interface FacturaRecibidaParsed {
   uuid_fiscal: string | null;
   emisor_rfc: string | null;
@@ -1088,6 +1198,14 @@ export class PyservicesService {
   /** Recibo de pago de UN cobro en PDF (documento NO fiscal). */
   async generateReciboPdf(payload: ReciboPdfPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/recibo', payload);
+  }
+
+  /** PDF único de una COTIZACIÓN DE GRUPO (total consolidado + anexo de flota). */
+  async generateCotizacionGrupoPdf(
+    payload: CotizacionGrupoPdfRequest,
+  ): Promise<Buffer> {
+    // Hasta 7 aviones con fotos: mismo tope que el PDF de cotización.
+    return this.postForBuffer('/reportes/cotizacion-grupo', payload, 30_000);
   }
 
   /** Libro «Dinero» del periodo (réplica del control manual del equipo). */

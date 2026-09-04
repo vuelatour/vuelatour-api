@@ -1,5 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+import {
+  diagnosticoGrupo,
+  normalizarExtrasGrupo,
+  type HijoDiagnostico,
+} from '../groups/grupo-armador.util';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
@@ -393,6 +398,9 @@ export class AlertsService {
       this.checkCombinacionOportunidad(c),
     );
     await this.safe('vuelo_estancado', (c) => this.checkVuelosEstancados(c));
+    await this.safe('grupo_desincronizado', (c) =>
+      this.checkGrupoDesincronizado(c),
+    );
   }
 
   /** Dispara todas las reglas activas de inmediato (para pruebas / botón admin). */
@@ -441,6 +449,10 @@ export class AlertsService {
       ['caja_negativa', (c: AlertConfig) => this.checkCajaNegativa(c)],
       ['gastos_sin_avion', (c: AlertConfig) => this.checkGastosSinAvion(c)],
       ['vuelo_estancado', (c: AlertConfig) => this.checkVuelosEstancados(c)],
+      [
+        'grupo_desincronizado',
+        (c: AlertConfig) => this.checkGrupoDesincronizado(c),
+      ],
     ] as const) {
       const ran = await this.safe(clave, fn);
       if (ran) ejecutadas.push(clave);
@@ -561,17 +573,17 @@ export class AlertsService {
       const av = (Array.isArray(rawA) ? rawA[0] : rawA) as {
         matricula?: string;
       } | null;
-      const agg =
-        porVuelo.get(v.id as string) ??
-        (porVuelo
-          .set(v.id as string, {
-            vueloId: v.id as string,
-            folio: v.folio as number,
-            estado: v.estado as string,
-            matricula: av?.matricula ?? null,
-            tramos: [],
-          })
-          .get(v.id as string) as VueloAgg);
+      let agg = porVuelo.get(v.id as string);
+      if (!agg) {
+        agg = {
+          vueloId: v.id as string,
+          folio: v.folio as number,
+          estado: v.estado as string,
+          matricula: av?.matricula ?? null,
+          tramos: [],
+        };
+        porVuelo.set(v.id as string, agg);
+      }
       agg.tramos.push({
         escalaId: e.id as string,
         orden: e.orden as number,
@@ -1448,6 +1460,89 @@ export class AlertsService {
         data: { vuelo_id: v.id, folio: v.folio, estado: v.estado },
         link: `/admin/flights/${v.id as string}`,
       });
+    }
+  }
+
+  /**
+   * COTIZACIÓN DE GRUPO desincronizada (4-sep-2026): grupos vivos por volar
+   * (o volados hace ≤ 7 días) cuyos hijos vivos no cuadran con la cabecera
+   * — Σ grupo_pax ≠ pasajeros_total, un hijo con `precio_desactualizado`
+   * (la operación cambió el avión sin recotizar) o extras del grupo
+   * editados fuera del grupo. Diagnóstico = fuente única `diagnosticoGrupo`
+   * (la misma que pinta `avisos` en GET /grupos/:id). Dedupe semanal por
+   * grupo (como los zombis): la oficina corrige desde el grupo.
+   */
+  private async checkGrupoDesincronizado(config: AlertConfig): Promise<void> {
+    const hoy = this.hoyCancun();
+    const desde = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+    const { data: grupos, error } = await this.supabase.service
+      .from('vuelo_grupo')
+      .select('id, folio, nombre, pasajeros_total, extras_grupo, fecha_vuelo')
+      .is('cancelado_at', null)
+      .gte('fecha_vuelo', desde)
+      .order('fecha_vuelo', { ascending: true })
+      .limit(200);
+    if (error) throw new Error(error.message);
+    if (!grupos || grupos.length === 0) return;
+    const { data: hijos, error: hErr } = await this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, folio, grupo_id, grupo_posicion, grupo_pax, estado, extras, calculo_snapshot',
+      )
+      .in(
+        'grupo_id',
+        grupos.map((g) => g.id as string),
+      )
+      .neq('estado', 'CANCELADO');
+    if (hErr) throw new Error(hErr.message);
+    const porGrupo = new Map<string, HijoDiagnostico[]>();
+    for (const h of hijos ?? []) {
+      const gid = h.grupo_id as string;
+      const lista = porGrupo.get(gid) ?? [];
+      lista.push({
+        posicion: (h.grupo_posicion as number | null) ?? null,
+        folio: (h.folio as number | null) ?? null,
+        grupo_pax: (h.grupo_pax as number | null) ?? null,
+        extras: h.extras,
+        calculo_snapshot: h.calculo_snapshot,
+      });
+      porGrupo.set(gid, lista);
+    }
+    const semana = this.isoWeek(new Date());
+    for (const g of grupos) {
+      const lista = porGrupo.get(g.id as string) ?? [];
+      if (lista.length === 0) continue;
+      const problemas = diagnosticoGrupo(
+        {
+          pasajeros_total: Number(g.pasajeros_total) || 0,
+          extras_grupo: normalizarExtrasGrupo(g.extras_grupo),
+        },
+        lista,
+      );
+      if (problemas.length === 0) continue;
+      const detalle = problemas
+        .slice(0, 4)
+        .map((p) => p.detalle)
+        .join(' ');
+      await this.dispatch(
+        config,
+        `grupo_desincronizado:${g.id as string}:${semana}`,
+        {
+          tipo: 'alerta_sistema',
+          titulo: `Grupo G-${g.folio as number} desincronizado (${problemas.length} pendiente${problemas.length === 1 ? '' : 's'})`,
+          cuerpo: `${g.nombre as string} · ${this.fmtFechaCorta((g.fecha_vuelo as string | null) ?? hoy)}: ${detalle} Corrígelo desde el detalle del grupo (revisar/recotizar).`,
+          data: {
+            grupo_id: g.id,
+            grupo_folio: g.folio,
+            problemas: problemas.map((p) => ({
+              tipo: p.tipo,
+              folio: p.folio ?? null,
+              posicion: p.posicion ?? null,
+            })),
+          },
+          link: `/admin/quotes/grupo/${g.id as string}`,
+        },
+      );
     }
   }
 

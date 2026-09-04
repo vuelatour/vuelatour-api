@@ -75,6 +75,25 @@ import {
 } from '../../common/ingreso-vuelo.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
+  avisosCapacidad,
+  excesoDeCapacidad,
+  type EscalaCapacidadInput,
+} from '../../common/capacidad-aeronave.util';
+import {
+  avionOcupadoEnFecha,
+  avisoAvionOcupado,
+} from '../../common/avion-ocupado.util';
+import {
+  avisoBajaHijoDeGrupo,
+  contextoGrupoDeVuelo,
+  datosGrupo,
+  totalAvionesDeGrupo,
+  type AccionBajaHijo,
+  type ContextoGrupo,
+} from '../../common/grupo-contexto.util';
+import { payloadClonVuelo } from './clon-vuelo.util';
+import { marcarPrecioDesactualizado } from './grupo-precio.util';
+import {
   CORRECCION_BAJA_PREFIX,
   PROCEDENCIA_PREFIX,
   agregarProcedencia,
@@ -85,7 +104,7 @@ import {
 } from '../../common/taco-motivo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
 
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
@@ -501,6 +520,8 @@ export class FlightsService {
     // Aviso a la tripulación ANTES de borrar (21-ago): después ya no hay a
     // quién consultar. Se resuelve la lista ahora y se manda al final.
     const tripulacion = await this.tripulacionDeVuelo(id, vuelo);
+    // Hijo de GRUPO (4-sep): el contexto se resuelve ANTES de borrar.
+    const ctxGrupo = await contextoGrupoDeVuelo(this.supabase.service, vuelo);
     // Bitácora forense ANTES de borrar (29-ago): snapshot CRUDO del vuelo y
     // sus tramos (montos y fechas incluidos). Sin bitácora no hay borrado;
     // si el DELETE falla, se revierte.
@@ -534,6 +555,7 @@ export class FlightsService {
         data: { folio: vuelo.folio },
       });
     }
+    if (ctxGrupo) void this.avisarBajaHijoDeGrupo(vuelo, 'eliminado', ctxGrupo);
     return { deleted: true, id };
   }
 
@@ -698,6 +720,11 @@ export class FlightsService {
       motivo,
       userId,
     );
+    // Hijo de GRUPO (4-sep): contexto resuelto ANTES de borrar la fila.
+    const ctxGrupo = await contextoGrupoDeVuelo(
+      sb,
+      vuelo as Record<string, unknown>,
+    );
 
     // Eventos de Google Calendar ANTES de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
@@ -754,6 +781,13 @@ export class FlightsService {
     this.logger.log(
       `Vuelo #${folio ?? '?'} (${id}) eliminado DEFINITIVAMENTE por ${userId}: ${motivo.trim()}`,
     );
+    if (ctxGrupo) {
+      void this.avisarBajaHijoDeGrupo(
+        vuelo as Record<string, unknown>,
+        'purgado',
+        ctxGrupo,
+      );
+    }
     return { deleted: true, id, folio };
   }
 
@@ -822,33 +856,30 @@ export class FlightsService {
     const matricula = (aeronave?.matricula as string) ?? 'otra aeronave';
 
     // 1) Clon con la nueva aeronave (folio/ids/google nuevos, sin capturas).
-    const clonPayload: Record<string, unknown> = {
-      ...(original as Record<string, unknown>),
-    };
-    for (const k of [
-      'id',
-      'folio',
-      'created_at',
-      'updated_at',
-      'google_calendar_id',
-      'foto_plan_vuelo_url',
-      // La liga de combinación no viaja al clon (el original la rompió ya;
-      // el spread de `original` se leyó ANTES de romperla).
-      'combinado_con_id',
-      // GENERATED ALWAYS en la BD (se calcula sola del origen): insertarla revienta.
-      'pago_anticipado_req',
-    ]) {
-      delete clonPayload[k];
+    //    Helper puro con spec (4-sep-2026): la liga de GRUPO
+    //    (grupo_id/grupo_posicion/grupo_pax) VIAJA al clon — el hijo cambia
+    //    de avión, no de grupo; el original cancelado queda fuera del
+    //    consolidado (los lectores excluyen cancelados).
+    const clonPayload = payloadClonVuelo(original as Record<string, unknown>, {
+      aeronaveId: dto.aeronave_id,
+      userId,
+      matricula,
+    });
+    // Hijo de GRUPO: el precio del clon sigue calculado con el avión del
+    // snapshot — se marca `meta.grupo.precio_desactualizado` (sin tocar
+    // dinero) para que el panel ofrezca recotizar (precedente caso #80).
+    const grupoIdOriginal =
+      ((original as Record<string, unknown>).grupo_id as
+        | string
+        | null
+        | undefined) ?? null;
+    if (grupoIdOriginal) {
+      const marca = marcarPrecioDesactualizado(
+        (original as Record<string, unknown>).calculo_snapshot,
+        dto.aeronave_id,
+      );
+      if (marca.cambio) clonPayload.calculo_snapshot = marca.snapshot;
     }
-    clonPayload.aeronave_id = dto.aeronave_id;
-    clonPayload.created_by = userId;
-    clonPayload.updated_by = userId;
-    clonPayload.notas_internas = [
-      (original.notas_internas as string | null) ?? '',
-      `Reasignado desde el vuelo #${original.folio as number} (cambio de aeronave a ${matricula}).`,
-    ]
-      .filter(Boolean)
-      .join('\n');
     const { data: clon, error: e1 } = await sb
       .from('vuelo')
       .insert(clonPayload)
@@ -996,6 +1027,22 @@ export class FlightsService {
       .from('cobro_vuelo')
       .update({ vuelo_id: (clon as { id: string }).id })
       .eq('vuelo_id', id);
+    // 4b) Hijo de GRUPO (4-sep-2026): si el original era el avión ANCLA del
+    //     grupo (residuos de centavos / extras ANCLA), el ancla pasa al clon
+    //     — un ancla CANCELADA dejaría al grupo sin dónde caer los residuos.
+    //     Best-effort: el clon ya existe y conserva su liga de grupo.
+    if (grupoIdOriginal) {
+      const { error: anclaErr } = await sb
+        .from('vuelo_grupo')
+        .update({ vuelo_ancla_id: clonId, updated_by: userId })
+        .eq('id', grupoIdOriginal)
+        .eq('vuelo_ancla_id', id);
+      if (anclaErr) {
+        this.logger.warn(
+          `reassignAircraft ${id}: no se pudo mover el ancla del grupo al clon: ${anclaErr.message}`,
+        );
+      }
+    }
 
     // 5) Original queda cancelado con el motivo auditable.
     const motivoFinal = [
@@ -1033,13 +1080,154 @@ export class FlightsService {
     return clon!;
   }
 
+  /**
+   * AVISOS de operación al asignar un avión (4-sep-2026; NUNCA candado —
+   * la operación manda y la oficina decide): (a) CAPACIDAD, pax de cada
+   * tramo vivo no-ferry vs asientos del avión que lo vuela (herencia
+   * `escala.aeronave_id ?? aeronaveId`; con `soloEscalaId` solo ese tramo);
+   * (b) DOBLE RESERVA, otro vuelo vivo del mismo avión que solape
+   * [fecha_vuelo, fecha_fin] en días Cancún. Van en `avisos[]` de la
+   * respuesta y al log. Best-effort: un error de lectura no tumba la
+   * asignación (ya escrita).
+   */
+  private async avisosOperacionAvion(p: {
+    vueloId: string;
+    aeronaveId: string;
+    fechaVuelo: string | Date | null | undefined;
+    fechaFin?: string | Date | null;
+    paxDefault?: number | null;
+    soloEscalaId?: string;
+  }): Promise<string[]> {
+    const avisos: string[] = [];
+    try {
+      const sb = this.supabase.service;
+      let q = sb
+        .from('escala')
+        .select(
+          'id, orden, origen_iata, destino_iata, aeronave_id, pasajeros, es_ferry, cancelada_at',
+        )
+        .eq('vuelo_id', p.vueloId)
+        .is('cancelada_at', null);
+      if (p.soloEscalaId) q = q.eq('id', p.soloEscalaId);
+      const { data: escalas } = await q;
+      const tramos: EscalaCapacidadInput[] = (escalas ?? []).map((e) => ({
+        orden: Number(e.orden),
+        origen_iata: (e.origen_iata as string | null) ?? null,
+        destino_iata: (e.destino_iata as string | null) ?? null,
+        aeronave_id: p.soloEscalaId
+          ? p.aeronaveId
+          : ((e.aeronave_id as string | null) ?? null),
+        pasajeros: e.pasajeros == null ? null : Number(e.pasajeros),
+        es_ferry: e.es_ferry === true,
+        cancelada_at: null,
+      }));
+      const ids = new Set<string>([p.aeronaveId]);
+      for (const t of tramos) if (t.aeronave_id) ids.add(t.aeronave_id);
+      const { data: avs } = await sb
+        .from('aeronave')
+        .select('id, matricula, asientos')
+        .in('id', [...ids]);
+      const fichas = new Map<
+        string,
+        { matricula: string | null; asientos: number | null }
+      >();
+      for (const a of avs ?? []) {
+        fichas.set(a.id as string, {
+          matricula: (a.matricula as string | null) ?? null,
+          asientos: a.asientos == null ? null : Number(a.asientos),
+        });
+      }
+      avisos.push(
+        ...avisosCapacidad(
+          excesoDeCapacidad(tramos, fichas, {
+            aeronaveVueloId: p.aeronaveId,
+            paxDefault: p.paxDefault ?? null,
+          }),
+        ),
+      );
+      const ocupados = await avionOcupadoEnFecha(sb, {
+        aeronaveId: p.aeronaveId,
+        fechaVuelo: p.fechaVuelo,
+        fechaFin: p.fechaFin,
+        excluirVueloId: p.vueloId,
+      });
+      const aviso = avisoAvionOcupado(
+        fichas.get(p.aeronaveId)?.matricula ?? null,
+        ocupados,
+      );
+      if (aviso) avisos.push(aviso);
+      for (const a of avisos) this.logger.warn(`Vuelo ${p.vueloId}: ${a}`);
+    } catch (err) {
+      this.logger.warn(
+        `avisosOperacionAvion ${p.vueloId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return avisos;
+  }
+
+  /**
+   * Hijo de GRUPO (4-sep-2026, precedente #80): tras un cambio de avión por
+   * operación, compara el avión EFECTIVO de sus tramos vivos (herencia
+   * `escala.aeronave_id ?? vuelo.aeronave_id`) contra el avión con el que
+   * se COTIZÓ (`snapshot.aeronave.id`) y marca/limpia
+   * `meta.grupo.precio_desactualizado` (fuente única
+   * `marcarPrecioDesactualizado`; merge aditivo, sin tocar dinero; candado
+   * optimista por versión para no pisar una revisión concurrente). Un vuelo
+   * sin grupo o sin precio no se toca. Best-effort.
+   */
+  private async marcarPrecioDesactualizadoGrupo(
+    vueloId: string,
+  ): Promise<void> {
+    try {
+      const sb = this.supabase.service;
+      const { data: v } = await sb
+        .from('vuelo')
+        .select(
+          'grupo_id, aeronave_id, cotizacion_version, calculo_snapshot, escalas:escala(aeronave_id, cancelada_at)',
+        )
+        .eq('id', vueloId)
+        .maybeSingle();
+      if (!v?.grupo_id) return;
+      const snapAvion =
+        (v.calculo_snapshot as { aeronave?: { id?: string | null } } | null)
+          ?.aeronave?.id ?? null;
+      if (!snapAvion) return;
+      const vivas = (
+        (v.escalas as Array<{
+          aeronave_id: string | null;
+          cancelada_at: string | null;
+        }> | null) ?? []
+      ).filter((e) => e.cancelada_at == null);
+      const avionVuelo = (v.aeronave_id as string | null) ?? null;
+      const efectivos = vivas.length
+        ? vivas.map((e) => e.aeronave_id ?? avionVuelo)
+        : [avionVuelo];
+      const distinto = efectivos.find((a) => a && a !== snapAvion) ?? null;
+      const marca = marcarPrecioDesactualizado(
+        v.calculo_snapshot,
+        distinto ?? snapAvion,
+      );
+      if (!marca.cambio) return;
+      const { error } = await sb
+        .from('vuelo')
+        .update({ calculo_snapshot: marca.snapshot })
+        .eq('id', vueloId)
+        .eq('cotizacion_version', v.cotizacion_version as number);
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      this.logger.warn(
+        `precio_desactualizado ${vueloId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   /** Envía aviso de asignación al piloto (best-effort), con info de pernocta. */
   private async notifyPilotAssigned(
     pilotoId: string,
     vuelo: Record<string, unknown>,
     rol: 'piloto' | 'copiloto' = 'piloto',
   ): Promise<void> {
-    const [{ data: piloto }, pernoctas, ruta] = await Promise.all([
+    const [{ data: piloto }, pernoctas, ruta, grupo] = await Promise.all([
       this.supabase.service
         .from('usuario')
         .select('nombre, email, es_piloto_externo')
@@ -1047,6 +1235,8 @@ export class FlightsService {
         .maybeSingle(),
       this.pernoctasDeVuelo(vuelo.id as string),
       this.rutaDeVuelo(vuelo),
+      // Contexto de GRUPO (4-sep-2026): "Grupo G-12 · avión 3 de 7 · 44 pax".
+      contextoGrupoDeVuelo(this.supabase.service, vuelo),
     ]);
     // Piloto externo (doc 3.7): sin acceso al sistema — ni push ni email; la
     // coordinación con él es por WhatsApp fuera del sistema.
@@ -1057,6 +1247,7 @@ export class FlightsService {
       pernoctas.length > 0
         ? ` · 🌙 Pernocta en ${pernoctas.join(', ')}`
         : ' · Sin pernocta';
+    const grupoTxt = grupo ? ` · ${grupo.texto}` : '';
     // Socket + push al piloto (independiente del email).
     void this.notifications.notifyUser(pilotoId, {
       tipo: 'vuelo_asignado',
@@ -1064,8 +1255,14 @@ export class FlightsService {
         rol === 'copiloto'
           ? 'Vas de copiloto en un vuelo'
           : 'Nuevo vuelo asignado',
-      cuerpo: `${rol === 'copiloto' ? 'Vas de COPILOTO · ' : ''}${ruta} · folio #${vuelo.folio as number} · ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)}${pernoctaTxt}`,
-      data: { vuelo_id: vuelo.id, folio: vuelo.folio, pernoctas, rol },
+      cuerpo: `${rol === 'copiloto' ? 'Vas de COPILOTO · ' : ''}${ruta} · folio #${vuelo.folio as number} · ${this.fechaCancunTxt(vuelo.fecha_vuelo as string | null)}${pernoctaTxt}${grupoTxt}`,
+      data: {
+        vuelo_id: vuelo.id,
+        folio: vuelo.folio,
+        pernoctas,
+        rol,
+        ...(grupo ? { grupo: datosGrupo(grupo) } : {}),
+      },
       link: `/flights/${vuelo.id as string}`,
     });
 
@@ -1148,6 +1345,8 @@ export class FlightsService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean')
       q = q.eq('es_externo', filters.es_externo);
+    // Hijos de una cotización de GRUPO (4-sep-2026).
+    if (filters.grupo_id) q = q.eq('grupo_id', filters.grupo_id);
     // Filtro de estado de COBRO (petición del cliente, jul 2026). PARCIAL y
     // SIN_COBROS necesitan saber qué vuelos tienen cobros: una consulta de
     // ids (la tabla de cobros es chica) antes de paginar.
@@ -1792,6 +1991,15 @@ export class FlightsService {
       miTrip.apoyo &&
       !miTrip.puede_capturar_tacos;
     const apoyos = await this.apoyosInfoDeVuelo(id, apoyosRows);
+    // Grupo (4-sep-2026): aviones vivos del grupo para "avión k de N" (la
+    // liga y el embed `grupo {id, folio, nombre, pasajeros_total}` ya
+    // vienen en VUELO_COLS).
+    const grupoId =
+      ((vuelo as { grupo_id?: string | null }).grupo_id as string | null) ??
+      null;
+    const grupoTotalAviones = grupoId
+      ? await totalAvionesDeGrupo(this.supabase.service, grupoId)
+      : null;
     // Participación por avión (regla B 28-ago): con tramos en aviones
     // distintos, la venta del avión se reparte entre ellos; aquí solo se
     // EXPONE (app/panel lo etiquetan). Se pasan TODAS las escalas — la
@@ -1816,6 +2024,7 @@ export class FlightsService {
       mi_tripulacion: miTrip,
       ultimo_taco_avion: ultimoTacoAvion,
       ultimo_taco_avion_detalle: ultimoTacoDetalle,
+      grupo_total_aviones: grupoTotalAviones,
       escalas: escalasEnriquecidas,
       cobros,
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
@@ -2298,13 +2507,30 @@ export class FlightsService {
    * del mes del vuelo vs. el límite informativo de 90 hrs (doc 5.6/5.10).
    */
   async pilotosDisponibilidad(flightId: string) {
-    const LIMITE_HORAS_MES = 90;
     const { data: flight } = await this.supabase.service
       .from('vuelo')
       .select('id, fecha_vuelo')
       .eq('id', flightId)
       .maybeSingle();
-    const fecha = (flight?.fecha_vuelo as string | null) ?? null;
+    return this.pilotosDisponibilidadEnFecha(
+      (flight?.fecha_vuelo as string | null) ?? null,
+      flightId,
+    );
+  }
+
+  /**
+   * Disponibilidad de pilotos para una FECHA (4-sep-2026): la misma lógica
+   * que `pilotosDisponibilidad` sin exigir un vuelo existente — el armador
+   * de la cotización de GRUPO la usa ANTES de crear los N hijos.
+   * `excluirVueloId` deja fuera el propio vuelo al buscar conflictos.
+   */
+  async pilotosDisponibilidadEnFecha(
+    fecha: string | Date | null,
+    excluirVueloId: string | null = null,
+  ) {
+    const LIMITE_HORAS_MES = 90;
+    if (fecha instanceof Date) fecha = fecha.toISOString();
+    const flightId = excluirVueloId;
     // Día del vuelo en CANCÚN (regla del repo): slice(0,10) del ISO UTC ponía
     // los vuelos nocturnos (22:00 Cancún = día UTC siguiente) en el día
     // equivocado para conflictos y descansos.
@@ -2328,15 +2554,16 @@ export class FlightsService {
       // Solapamiento [fecha_vuelo, fecha_fin]: el piloto en el día 2..N de
       // un viaje multi-día también está ocupado — con el eje viejo aparecía
       // libre y se le podía doble-asignar sin aviso.
-      const { data: sameDay } = await this.supabase.service
+      let qDia = this.supabase.service
         .from('vuelo')
         .select(
           'id, folio, piloto_id, copiloto_id, apoyo_id, escalas:escala(piloto_id, copiloto_id, cancelada_at), apoyos:vuelo_apoyo(usuario_id)',
         )
         .lte('fecha_vuelo', `${day}T23:59:59-05:00`)
         .gte('fecha_fin', `${day}T00:00:00-05:00`)
-        .neq('estado', 'CANCELADO')
-        .neq('id', flightId);
+        .neq('estado', 'CANCELADO');
+      if (flightId) qDia = qDia.neq('id', flightId);
+      const { data: sameDay } = await qDia;
       for (const f of sameDay ?? []) {
         // Ocupación COMPLETA del día (barrido 28-ago): piloto del vuelo,
         // copiloto/apoyo y las rotaciones por TRAMO — antes un piloto
@@ -2795,7 +3022,25 @@ export class FlightsService {
     if (dto.aeronave_id && squawksAceptados.length > 0) {
       this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
     }
-    return data!;
+    // AVISOS (4-sep-2026, nunca candado): capacidad de asientos por tramo y
+    // doble reserva del avión. En un hijo de GRUPO, cambiar el avión sin
+    // recotizar deja el precio desactualizado (bandera en el snapshot).
+    const avisos = dto.aeronave_id
+      ? await this.avisosOperacionAvion({
+          vueloId: id,
+          aeronaveId: dto.aeronave_id,
+          fechaVuelo:
+            dto.fecha_vuelo ?? (current.fecha_vuelo as string | null) ?? null,
+          // El RETURNING ya trae la fecha_fin recalculada por el trigger.
+          fechaFin:
+            (data as { fecha_fin?: string | null }).fecha_fin ??
+            (current.fecha_fin as string | null) ??
+            null,
+          paxDefault: Number(current.pasajeros) || null,
+        })
+      : [];
+    if (avionCambio) await this.marcarPrecioDesactualizadoGrupo(id);
+    return { ...data!, avisos };
   }
 
   /**
@@ -2865,14 +3110,24 @@ export class FlightsService {
   ): Promise<void> {
     try {
       const fuera = new Set(excluir);
-      const ids = await this.tripulacionDeVuelo(vuelo.id as string, vuelo);
+      const [ids, grupo] = await Promise.all([
+        this.tripulacionDeVuelo(vuelo.id as string, vuelo),
+        // Contexto de GRUPO (4-sep-2026): el piloto sabe que su vuelo es el
+        // avión k de N del grupo ("Grupo G-12 · avión 3 de 7 · 44 pax").
+        contextoGrupoDeVuelo(this.supabase.service, vuelo),
+      ]);
+      const cuerpo = grupo ? `${n.cuerpo} · ${grupo.texto}` : n.cuerpo;
       for (const id of ids) {
         if (fuera.has(id)) continue;
         void this.notifications.notifyUser(id, {
           tipo: n.tipo ?? 'vuelo_asignado',
           titulo: n.titulo,
-          cuerpo: n.cuerpo,
-          data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+          cuerpo,
+          data: {
+            vuelo_id: vuelo.id,
+            folio: vuelo.folio,
+            ...(grupo ? { grupo: datosGrupo(grupo) } : {}),
+          },
           link: `/flights/${vuelo.id as string}`,
         });
       }
@@ -2983,7 +3238,12 @@ export class FlightsService {
    * squawks aceptados — el caller DEBE avisar al mecánico tras el write
    * exitoso (`notificarSquawkAceptado`).
    */
-  private async validateAssignTargets(
+  /**
+   * Público desde el 4-sep-2026: el armador de la cotización de GRUPO
+   * (GroupsService) valida taller/squawk/documentos de cada avión y piloto
+   * ANTES de crear los N hijos con exactamente esta regla.
+   */
+  async validateAssignTargets(
     targets: {
       aeronaveId?: string | null;
       pilotoId?: string | null;
@@ -3110,7 +3370,7 @@ export class FlightsService {
    * `notas_internas` del vuelo (bitácora auditable del repo, mismo patrón
    * que el sello de vuelos combinados).
    */
-  private notificarSquawkAceptado(
+  notificarSquawkAceptado(
     vuelo: Record<string, unknown>,
     aeronaveId: string,
     squawks: { id: string; descripcion: string }[],
@@ -3478,7 +3738,23 @@ export class FlightsService {
     if (dto.aeronave_id && squawksAceptados.length > 0) {
       this.notificarSquawkAceptado(vuelo, dto.aeronave_id, squawksAceptados);
     }
-    return data!;
+    // AVISOS (4-sep-2026, nunca candado): capacidad del TRAMO y doble
+    // reserva del avión en la ventana del vuelo; hijo de GRUPO → bandera
+    // precio_desactualizado si el avión efectivo ya no es el cotizado.
+    const avisos = dto.aeronave_id
+      ? await this.avisosOperacionAvion({
+          vueloId: escala.vuelo_id as string,
+          aeronaveId: dto.aeronave_id,
+          fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
+          fechaFin: (vuelo.fecha_fin as string | null) ?? null,
+          paxDefault: Number(vuelo.pasajeros) || null,
+          soloEscalaId: legId,
+        })
+      : [];
+    if (dto.aeronave_id && dto.aeronave_id !== escala.aeronave_id) {
+      await this.marcarPrecioDesactualizadoGrupo(escala.vuelo_id as string);
+    }
+    return { ...data!, avisos };
   }
 
   /**
@@ -3659,7 +3935,19 @@ export class FlightsService {
    * vuelos que quedaron atorados (p. ej. CONFIRMADO con fecha pasada y sin
    * tacómetros). El motivo se guarda auditado en notas_internas.
    */
-  async cancel(id: string, motivo: string, updatedBy: string) {
+  /**
+   * `opts.silenciarAvisoGrupo` (4-sep-2026): el GRUPO cancela a sus hijos
+   * a sabiendas (cancelar grupo / quitar avión) — no hace falta avisar a
+   * oficina de cada hijo; sin la bandera, cancelar un hijo desde el
+   * detalle del vuelo sí avisa ("el avión 3 de 7 del grupo G-12 fue
+   * cancelado").
+   */
+  async cancel(
+    id: string,
+    motivo: string,
+    updatedBy: string,
+    opts: { silenciarAvisoGrupo?: boolean } = {},
+  ) {
     const current = await this.findById(id);
     if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
       throw new ConflictException(
@@ -3702,7 +3990,36 @@ export class FlightsService {
       cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} del ${this.fechaCancunTxt(current.fecha_vuelo as string | null)} se canceló. Motivo: ${motivo.trim()}`,
       tipo: 'alerta_sistema',
     });
+    if (!opts.silenciarAvisoGrupo) {
+      void this.avisarBajaHijoDeGrupo(data!, 'cancelado');
+    }
     return data!;
+  }
+
+  /**
+   * Hijo de GRUPO dado de baja FUERA del grupo (cancel/delete/purge desde
+   * el detalle del vuelo): aviso `alerta_sistema` a ADMIN/COORDINADOR. La
+   * liga no se rompe (el consolidado ya excluye cancelados). Best-effort.
+   * `ctx` viene pre-resuelto cuando el vuelo ya no existe (delete/purge).
+   */
+  private async avisarBajaHijoDeGrupo(
+    vuelo: Record<string, unknown>,
+    accion: AccionBajaHijo,
+    ctxPrevio?: ContextoGrupo | null,
+  ): Promise<void> {
+    try {
+      const ctx =
+        ctxPrevio ?? (await contextoGrupoDeVuelo(this.supabase.service, vuelo));
+      if (!ctx) return;
+      const aviso = avisoBajaHijoDeGrupo(ctx, vuelo, accion);
+      for (const rol of [Rol.ADMIN, Rol.COORDINADOR]) {
+        await this.notifications.notifyRole(rol, aviso);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Aviso de baja de hijo de grupo (${accion}) falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -4277,8 +4594,27 @@ export class FlightsService {
     if (dto.aeronave_id && squawksAceptados.length > 0) {
       this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
     }
+    // AVISOS (4-sep-2026, nunca candado): doble reserva del avión en la
+    // ventana de la reserva (fecha de salida → regreso / último tramo) y
+    // capacidad de los tramos recién creados.
+    const finCandidatos = [
+      dto.fecha_traslado_final,
+      ...itinerario.map((e) => e.hora_salida),
+    ].filter((d): d is Date => d instanceof Date);
+    const fechaFinReserva = finCandidatos.length
+      ? new Date(Math.max(...finCandidatos.map((d) => d.getTime())))
+      : null;
+    const avisos = dto.aeronave_id
+      ? await this.avisosOperacionAvion({
+          vueloId,
+          aeronaveId: dto.aeronave_id,
+          fechaVuelo: dto.fecha_vuelo,
+          fechaFin: fechaFinReserva,
+          paxDefault: pasajeros,
+        })
+      : [];
     void this.calendar.syncFlight(vueloId);
-    return data!;
+    return { ...data!, avisos };
   }
 
   /**
@@ -7045,7 +7381,8 @@ export class FlightsService {
     const { data: vuelos, error } = await this.supabase.service
       .from('vuelo')
       .select(
-        `id, folio, estado, fecha_vuelo, fecha_fin, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
+        // grupo_* (4-sep-2026): el tablero agrupa los hijos por "G-12".
+        `id, folio, estado, fecha_vuelo, fecha_fin, grupo_id, grupo_posicion, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), escalas:escala(${ESCALA_COLS})`,
       )
       .neq('estado', 'CANCELADO')
       .eq('es_externo', false)
@@ -7240,6 +7577,11 @@ export class FlightsService {
         fecha_vuelo: v.fecha_vuelo,
         matricula: aeronave?.matricula ?? null,
         piloto_nombre: piloto?.nombre ?? null,
+        // Grupo (4-sep-2026, aditivo): cabecera "G-12 · avión k".
+        grupo_id: (v.grupo_id as string | null) ?? null,
+        grupo_folio:
+          unwrapOne(v.grupo as { folio?: number | null } | null)?.folio ?? null,
+        grupo_posicion: (v.grupo_posicion as number | null) ?? null,
         escalas: filas,
       });
     }

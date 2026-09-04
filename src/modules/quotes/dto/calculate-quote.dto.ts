@@ -179,12 +179,74 @@ export class ExtraConceptoDto {
   @ApiProperty({
     description:
       'Monto NATIVO en la moneda del renglón (nombre legado: con moneda=MXN ' +
-      'es un monto en pesos que el motor convierte con el TC de la cotización).',
+      'es un monto en pesos que el motor convierte con el TC de la cotización). ' +
+      'Opcional cuando vienen cantidad y unitario: ahí el motor lo DERIVA ' +
+      '(round2(cantidad × unitario)) y lo que se mande aquí se ignora.',
   })
+  @ValidateIf(
+    (o: ExtraConceptoDto) =>
+      !(o.unitario != null && (o.cantidad != null || o.por_persona === true)),
+  )
   @Type(() => Number)
   @IsNumber()
   @Min(0)
   monto_usd!: number;
+
+  // ---- cantidad × unitario (4-sep-2026, base de la cotización de grupo) ----
+  // Todos opcionales y retrocompatibles: un extra "de monto" sigue igual.
+  @ApiPropertyOptional({
+    description:
+      'Cantidad (ej. 9 personas del tour). Con `unitario`, el motor deriva el ' +
+      'monto = round2(cantidad × unitario) y el desglose lo pinta ' +
+      '"Concepto · 9 × $85.00".',
+    minimum: 0,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  cantidad?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Precio unitario NATIVO en la moneda del renglón (USD o MXN según `moneda`).',
+    minimum: 0,
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  unitario?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Extra POR PERSONA: en una cotización de un avión la cantidad se liga a ' +
+      'los pasajeros del vuelo en cada recálculo (cambia el pax, cambia el ' +
+      'extra). En una línea de GRUPO la cantidad la fija el grupo (grupo_pax).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  por_persona?: boolean;
+
+  @ApiPropertyOptional({
+    enum: ['GRUPO', 'VUELO'],
+    description:
+      "Origen del renglón: 'GRUPO' = materializado desde la cotización de " +
+      'grupo (revise/ajuste del hijo lo CONSERVAN tal cual; solo el grupo lo ' +
+      "edita); 'VUELO' (default) = propio de esta cotización.",
+  })
+  @IsOptional()
+  @IsIn(['GRUPO', 'VUELO'])
+  origen?: 'GRUPO' | 'VUELO';
+
+  @ApiPropertyOptional({
+    description:
+      'Id del extra en la cabecera del grupo (vuelo_grupo.extras_grupo[].id) ' +
+      'del que se materializó esta línea; permite consolidar Σ partes.',
+  })
+  @IsOptional()
+  @IsUUID()
+  grupo_extra_id?: string;
 
   @ApiPropertyOptional({
     enum: ['USD', 'MXN'],

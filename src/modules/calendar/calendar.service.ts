@@ -85,7 +85,8 @@ export class CalendarService {
       .from('vuelo')
       .select(
         // copiloto/apoyos (29-ago, aditivo): tripulación por tramo en el evento.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        // grupo_* (4-sep-2026, aditivo): banda "G-12 · 3/7" del calendario.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -149,6 +150,28 @@ export class CalendarService {
     const { data, error } = await query;
     if (error) throw new Error(error.message);
 
+    // Grupo (4-sep-2026): aviones VIVOS por grupo presente en el rango, en
+    // UNA consulta — el evento pinta "avión k de N" (cancelados no cuentan).
+    const grupoIds = [
+      ...new Set(
+        (data ?? [])
+          .map((r) => (r as { grupo_id?: string | null }).grupo_id)
+          .filter((x): x is string => !!x),
+      ),
+    ];
+    const totalPorGrupo = new Map<string, number>();
+    if (grupoIds.length > 0) {
+      const { data: hijos } = await this.supabase.service
+        .from('vuelo')
+        .select('grupo_id')
+        .in('grupo_id', grupoIds)
+        .neq('estado', 'CANCELADO');
+      for (const h of hijos ?? []) {
+        const g = h.grupo_id as string;
+        totalPorGrupo.set(g, (totalPorGrupo.get(g) ?? 0) + 1);
+      }
+    }
+
     const fromMs = from.getTime();
     const toMs = to.getTime();
     const inRange = (iso: string | null): boolean => {
@@ -185,6 +208,10 @@ export class CalendarService {
         operador_externo: string | null;
         estado_permiso: string | null;
         google_calendar_id: string | null;
+        grupo_id: string | null;
+        grupo_posicion: number | null;
+        grupo_pax: number | null;
+        grupo: { folio: number | null } | { folio: number | null }[] | null;
         aeronave:
           | { matricula: string; color_calendario: string | null }
           | { matricula: string; color_calendario: string | null }[]
@@ -329,6 +356,14 @@ export class CalendarService {
           pasajeros: params.pasajeros ?? v.pasajeros,
           monto_total_usd: Number(v.monto_total_usd),
           google_calendar_id: v.google_calendar_id,
+          // Grupo (4-sep-2026, aditivo): null en vuelos normales.
+          grupo_id: v.grupo_id ?? null,
+          grupo_folio: unwrap(v.grupo)?.folio ?? null,
+          grupo_posicion: v.grupo_posicion ?? null,
+          grupo_pax: v.grupo_pax ?? null,
+          grupo_total: v.grupo_id
+            ? (totalPorGrupo.get(v.grupo_id) ?? null)
+            : null,
           fecha_vuelo: params.fecha,
           hora,
           tramo: params.tramo,

@@ -47,6 +47,7 @@ import { DocumentTypesModule } from './modules/document-types/document-types.mod
 import { ExpirationsModule } from './modules/expirations/expirations.module';
 import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
 import { DashboardsModule } from './modules/dashboards/dashboards.module';
+import { GroupsModule } from './modules/groups/groups.module';
 
 @Module({
   imports: [
@@ -123,6 +124,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
     DashboardsModule,
     MultasModule,
     TipoCambioModule,
+    GroupsModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

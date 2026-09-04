@@ -89,6 +89,14 @@ export class ListFlightsQuery {
   es_externo?: boolean;
 
   @ApiPropertyOptional({
+    description:
+      'Solo los hijos de una cotización de GRUPO (vuelo.grupo_id). Cada fila trae grupo_posicion, grupo_pax y el embed grupo {id, folio, nombre, pasajeros_total}.',
+  })
+  @IsOptional()
+  @IsUUID()
+  grupo_id?: string;
+
+  @ApiPropertyOptional({
     enum: ['escalas_plan'],
     description:
       'Embed ligero opt-in: "escalas_plan" agrega escalas_plan[] (orden, ruta, fecha_salida_plan, es_ferry) a cada vuelo — el calendario de la app pinta el viaje multi-día por tramo.',

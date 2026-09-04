@@ -26,11 +26,32 @@ import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import { tripulacionDeVuelo } from '../../common/tripulacion.util';
+import {
+  avisoBajaHijoDeGrupo,
+  contextoGrupoDeVuelo,
+  datosGrupo,
+} from '../../common/grupo-contexto.util';
+import { Rol } from '../../common/types/auth.types';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
+  conflictoCapacidad,
+  excesoDeCapacidad,
+  type EscalaCapacidadInput,
+} from '../../common/capacidad-aeronave.util';
+import {
+  anclarExtrasDeGrupo,
+  cantidadEfectiva,
+  etiquetaCantidadUnitario,
+  formatoMonto,
+  mezclarExtrasDesdeGrupo,
+  montoDerivado,
+  tieneCantidadUnitario,
+} from './extras-grupo.util';
+import {
   CalculateQuoteDto,
   EscalaInputDto,
+  ExtraConceptoDto,
   MetodoPago,
   TipoTarifa,
   TipoVuelo,
@@ -128,6 +149,53 @@ export interface TuasAeropuerto {
   razon: string;
 }
 
+/**
+ * Extra ya resuelto por el motor (viaja a `snapshot.extras[]` y a
+ * `vuelo.extras`). Los campos de cantidad × unitario / grupo (4-sep-2026)
+ * solo se escriben cuando existen: un extra "de monto" queda byte-idéntico
+ * a como se persistía antes.
+ */
+export interface ExtraCalculado {
+  concepto: string;
+  /** Canon USD (nombre legado). */
+  monto_usd: number;
+  moneda: 'USD' | 'MXN';
+  monto_nativo: number;
+  tc_aplicado: number | null;
+  aplica_iva: boolean;
+  cantidad?: number;
+  unitario?: number;
+  por_persona?: boolean;
+  origen?: 'GRUPO' | 'VUELO';
+  grupo_extra_id?: string;
+}
+
+/**
+ * `calculo_snapshot.meta.grupo` (ADITIVO, solo informativo — ningún lector
+ * lo usa para dinero): contexto del hijo dentro de la cotización de grupo.
+ * `precio_desactualizado` la escribe flights.service cuando la operación
+ * cambia el avión efectivo del hijo sin recotizar (precedente caso #80);
+ * revisar la cotización la limpia.
+ */
+export interface MetaGrupoSnapshot {
+  id: string;
+  folio: number | null;
+  posicion: number;
+  total_aviones: number | null;
+  pax: number;
+  precio_desactualizado?: boolean;
+}
+
+/** Liga de grupo que el escritor INTERNO (GroupsService) pasa a create/revise. */
+export interface GrupoHijoOpts {
+  id: string;
+  folio?: number | null;
+  posicion: number;
+  /** Personas que ESTE avión transporta en el grupo (≠ vuelo.pasajeros). */
+  pax: number;
+  total_aviones?: number | null;
+}
+
 const IVA_DEFAULT = 0.16;
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del detalle de
@@ -145,7 +213,7 @@ const CALZOS_HR_POR_ATERRIZAJE = 0.15;
 const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -469,19 +537,35 @@ export class QuotesService {
     // Cada extra puede venir en USD o en MXN nativo (monto_usd = monto en la
     // moneda del renglón, nombre legado): el MXN entra al total en pesos TAL
     // CUAL y al canon USD convertido con el TC de la cotización.
-    const extras = (dto.extras ?? [])
-      .map((e) => {
+    const extras: ExtraCalculado[] = (dto.extras ?? [])
+      .map((e): ExtraCalculado => {
         const moneda: 'USD' | 'MXN' = e.moneda === 'MXN' ? 'MXN' : 'USD';
+        // cantidad × unitario (4-sep-2026, base de la cotización de grupo):
+        // el monto NATIVO se DERIVA — round2(cantidad × unitario) — y lo que
+        // traiga monto_usd se ignora. `por_persona` liga la cantidad a los
+        // pax del vuelo en cada recálculo (una línea de GRUPO conserva la
+        // cantidad que le fijó el grupo: grupo_pax, no vuelo.pasajeros).
+        const conCantidad =
+          tieneCantidadUnitario(e) ||
+          (e.por_persona === true &&
+            e.unitario != null &&
+            Number(e.unitario) >= 0);
+        const cantidad = conCantidad
+          ? cantidadEfectiva(e, dto.pasajeros)
+          : null;
+        const unitario = conCantidad ? round2(Number(e.unitario) || 0) : null;
         // Renglón MXN re-alimentado desde persistencia: monto_usd viene YA
         // convertido y el capturado vive en monto_nativo — preferirlo evita
         // tratar dólares como pesos al re-cotizar.
-        const montoNativo = round2(
-          Number(
-            moneda === 'MXN' && e.monto_nativo != null
-              ? e.monto_nativo
-              : e.monto_usd,
-          ) || 0,
-        );
+        const montoNativo = conCantidad
+          ? montoDerivado(cantidad!, unitario!)
+          : round2(
+              Number(
+                moneda === 'MXN' && e.monto_nativo != null
+                  ? e.monto_nativo
+                  : e.monto_usd,
+              ) || 0,
+            );
         if (moneda === 'MXN' && montoNativo > 0 && !tcQuote) {
           throw new BadRequestException(
             `Extra "${e.concepto}" capturado en MXN: captura primero el tipo de cambio (MXN por USD) de la cotización.`,
@@ -495,6 +579,15 @@ export class QuotesService {
           monto_nativo: montoNativo,
           tc_aplicado: moneda === 'MXN' ? tcQuote : null,
           aplica_iva: e.aplica_iva ?? true,
+          // Solo cuando existen (los extras "de monto" quedan idénticos).
+          ...(conCantidad ? { cantidad: cantidad!, unitario: unitario! } : {}),
+          ...(e.por_persona != null
+            ? { por_persona: e.por_persona === true }
+            : {}),
+          ...(e.origen === 'GRUPO' || e.origen === 'VUELO'
+            ? { origen: e.origen }
+            : {}),
+          ...(e.grupo_extra_id ? { grupo_extra_id: e.grupo_extra_id } : {}),
         };
       })
       .filter((e) => e.concepto.length > 0 && e.monto_usd > 0)
@@ -664,10 +757,20 @@ export class QuotesService {
             : `TUA ${f.iata} · $${f.monto_pax.toFixed(2)} × ${f.pax} pax`,
         monto_usd: f.total_usd,
       })),
+      // Con cantidad × unitario el concepto se pinta "Tour · 9 × $85.00"
+      // (es-MX, 2 decimales; en MXN además el total en pesos).
       ...extras.map((e) => ({
         clave: 'EXTRA',
         concepto: `${e.concepto}${
-          e.moneda === 'MXN' ? ` · $${e.monto_nativo.toFixed(2)} MXN` : ''
+          e.cantidad != null && e.unitario != null
+            ? ` · ${etiquetaCantidadUnitario(e.cantidad, e.unitario, e.moneda)}${
+                e.moneda === 'MXN'
+                  ? ` = $${formatoMonto(e.monto_nativo)} MXN`
+                  : ''
+              }`
+            : e.moneda === 'MXN'
+              ? ` · $${e.monto_nativo.toFixed(2)} MXN`
+              : ''
         }${e.aplica_iva ? '' : ' (sin IVA)'}`,
         monto_usd: e.monto_usd,
       })),
@@ -865,6 +968,10 @@ export class QuotesService {
       meta: {
         calculado_at: new Date().toISOString(),
         version_motor: '1.3.1',
+        // Contexto de GRUPO del hijo (4-sep-2026, aditivo e informativo):
+        // lo escriben create()/revise() cuando el escritor es el grupo;
+        // `undefined` deja el snapshot de una cotización normal idéntico.
+        grupo: undefined as MetaGrupoSnapshot | undefined,
         // CLIENTE INTERNO: trazabilidad de por qué el total puede ser $0 y no
         // corrió la hora mínima. `undefined` (no false) para que el snapshot
         // de clientes normales quede byte-idéntico (JSON omite el campo).
@@ -930,6 +1037,135 @@ export class QuotesService {
 
   // ============ Persistence ============
 
+  /** `meta.grupo` del snapshot a partir de la liga que manda el grupo. */
+  private metaGrupo(g: GrupoHijoOpts): MetaGrupoSnapshot {
+    return {
+      id: g.id,
+      folio: g.folio ?? null,
+      posicion: g.posicion,
+      total_aviones: g.total_aviones ?? null,
+      pax: g.pax,
+    };
+  }
+
+  /** Matrícula y asientos por avión en UNA consulta (capacidad). */
+  private async fichaAsientos(
+    ids: string[],
+  ): Promise<
+    Map<string, { matricula: string | null; asientos: number | null }>
+  > {
+    const out = new Map<
+      string,
+      { matricula: string | null; asientos: number | null }
+    >();
+    if (ids.length === 0) return out;
+    const { data, error } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula, asientos')
+      .in('id', ids);
+    if (error) throw new Error(error.message);
+    for (const a of data ?? []) {
+      out.set(a.id as string, {
+        matricula: (a.matricula as string | null) ?? null,
+        asientos: a.asientos == null ? null : Number(a.asientos),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * CAPACIDAD (4-sep-2026, fuente única `excesoDeCapacidad`): 409
+   * estructurado `CAPACIDAD_EXCEDIDA` {aeronave_id, matricula, asientos,
+   * pax, tramos[]} cuando algún tramo no-ferry lleva más pax que asientos
+   * tiene su avión (herencia `escala.aeronave_id ?? aeronaveVueloId`). Un
+   * avión sin asientos en catálogo no bloquea.
+   */
+  private async assertCapacidadAeronave(
+    escalas: EscalaCapacidadInput[],
+    aeronaveVueloId: string | null,
+    paxDefault: number,
+  ): Promise<void> {
+    const ids = new Set<string>();
+    for (const e of escalas) {
+      const a = e.aeronave_id ?? aeronaveVueloId;
+      if (a) ids.add(a);
+    }
+    if (ids.size === 0) return;
+    const fichas = await this.fichaAsientos([...ids]);
+    const conflicto = conflictoCapacidad(
+      excesoDeCapacidad(escalas, fichas, { aeronaveVueloId, paxDefault }),
+    );
+    if (conflicto) throw new ConflictException(conflicto);
+  }
+
+  /** Tramos a validar al CREAR: los cotizados y, si vienen, los operativos. */
+  private escalasParaCapacidad(
+    breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
+    escalasOperacion?: Array<{
+      origen_iata: string;
+      destino_iata: string;
+      pasajeros?: number | null;
+      es_ferry?: boolean | null;
+    }>,
+  ): EscalaCapacidadInput[] {
+    const comerciales = (breakdown.ruta.escalas ?? []).map((l, i) => ({
+      orden: i + 1,
+      origen_iata: l.origen_iata,
+      destino_iata: l.destino_iata,
+      pasajeros: l.pasajeros,
+      es_ferry: l.es_ferry,
+    }));
+    const operativas = (escalasOperacion ?? []).map((e, i) => ({
+      orden: 1000 + i + 1,
+      origen_iata: e.origen_iata.toUpperCase(),
+      destino_iata: e.destino_iata.toUpperCase(),
+      pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
+      es_ferry: e.es_ferry === true,
+    }));
+    return [...comerciales, ...operativas];
+  }
+
+  /**
+   * Tramos a validar al REVISAR: con itinerario operativo, las escalas
+   * persistidas (ruta del piloto, con su avión por tramo); si no, los tramos
+   * cotizados con el avión del tramo persistido del mismo orden (null =
+   * hereda el operativo del vuelo).
+   */
+  private escalasParaCapacidadRevise(
+    breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
+    current: {
+      escalas?: unknown;
+      itinerario_operativo?: boolean | null;
+    },
+  ): EscalaCapacidadInput[] {
+    const persistidas = (
+      Array.isArray(current.escalas) ? current.escalas : []
+    ) as Array<Record<string, unknown>>;
+    if (current.itinerario_operativo === true) {
+      return persistidas.map((e) => ({
+        orden: Number(e.orden),
+        origen_iata: (e.origen_iata as string | null) ?? null,
+        destino_iata: (e.destino_iata as string | null) ?? null,
+        aeronave_id: (e.aeronave_id as string | null) ?? null,
+        pasajeros: e.pasajeros == null ? null : Number(e.pasajeros),
+        es_ferry: e.es_ferry === true,
+        cancelada_at: (e.cancelada_at as string | null) ?? null,
+      }));
+    }
+    const porOrden = new Map(
+      persistidas.map((e) => [Number(e.orden), e] as const),
+    );
+    return (breakdown.ruta.escalas ?? []).map((l, i) => ({
+      orden: i + 1,
+      origen_iata: l.origen_iata,
+      destino_iata: l.destino_iata,
+      aeronave_id:
+        (porOrden.get(i + 1)?.aeronave_id as string | null | undefined) ?? null,
+      pasajeros: l.pasajeros,
+      es_ferry: l.es_ferry,
+    }));
+  }
+
   /**
    * Pax representativo del vuelo (para vuelo.pasajeros, que muchos lectores usan):
    * el máximo de pax entre tramos no-ferry. Si no hay tramos, usa el pax global.
@@ -956,6 +1192,8 @@ export class QuotesService {
     if (filters.estado) q = q.eq('estado', filters.estado);
     if (typeof filters.es_externo === 'boolean')
       q = q.eq('es_externo', filters.es_externo);
+    // Hijos de una cotización de GRUPO (4-sep-2026).
+    if (filters.grupo_id) q = q.eq('grupo_id', filters.grupo_id);
     if (filters.q) {
       // En PostgREST `.or()` las comas separan condiciones y los paréntesis
       // cierran el grupo: interpolarlos crudos rompe el parser (500) o inyecta
@@ -1053,9 +1291,7 @@ export class QuotesService {
     // (tiempo + ajuste + su IVA) vs ingreso de VuelaTour (TUAs/extras/
     // pernocta/comisión del vendedor) — el panel la muestra en "Desglose
     // para balance".
-    const particion = particionIngresoVuelo(
-      data as unknown as VueloIngresoInput,
-    );
+    const particion = particionIngresoVuelo(data);
     // PAGO AL VENDEDOR y NETO de VuelaTour — misma regla que el balance
     // ("Otros movimientos") y el reporte por vuelo (verificación 28-ago):
     // pago = comisión + su IVA (`pagoVendedorUsd`, fuente única; 0 con
@@ -1078,13 +1314,7 @@ export class QuotesService {
     // Participación por avión (regla B 28-ago): con tramos en aviones
     // distintos, la venta del avión se reparte entre ellos. Se pasan TODAS
     // las escalas (la fuente única excluye las canceladas).
-    const participacion = await this.participacionAvionesDe(
-      data as unknown as {
-        aeronave_id?: string | null;
-        calculo_snapshot?: unknown;
-      } & VueloIngresoInput,
-      escalas,
-    );
+    const participacion = await this.participacionAvionesDe(data, escalas);
     return { ...data, escalas, particion_ingreso, ...participacion };
   }
 
@@ -1099,7 +1329,17 @@ export class QuotesService {
     return data ?? [];
   }
 
-  async create(dto: CreateQuoteDto, userId: string) {
+  /**
+   * `opts.grupo` (vía INTERNA, nunca por DTO público): el hijo nace ligado a
+   * la cotización de grupo — escribe `grupo_id/grupo_posicion/grupo_pax` y
+   * `calculo_snapshot.meta.grupo` (informativo). El precio del hijo es el
+   * canon v1.3 de siempre: la cabecera del grupo NO tiene dinero propio.
+   */
+  async create(
+    dto: CreateQuoteDto,
+    userId: string,
+    opts: { grupo?: GrupoHijoOpts } = {},
+  ) {
     // cliente_id ahora también existe (opcional) en CalculateQuoteDto y
     // class-validator hereda ese @IsOptional: se re-valida aquí lo obligatorio.
     if (!dto.cliente_id) {
@@ -1124,6 +1364,19 @@ export class QuotesService {
     dto.total_pactado_usd = undefined;
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
+    if (opts.grupo) breakdown.meta.grupo = this.metaGrupo(opts.grupo);
+    // CAPACIDAD (4-sep-2026): en un vuelo PROPIO los pax de cada tramo
+    // no-ferry deben caber en el avión que lo vuela (aquí, el de la
+    // cotización — los tramos nacen heredándolo). 409 estructurado
+    // CAPACIDAD_EXCEDIDA; aplica también a clientes internos. El externo no
+    // se valida: el avión del DTO es solo referencia de tarifa.
+    if (!dto.es_externo) {
+      await this.assertCapacidadAeronave(
+        this.escalasParaCapacidad(breakdown, dto.escalas_operacion),
+        dto.aeronave_id,
+        reprPax,
+      );
+    }
 
     // Permiso de pista: pendiente si origen/destino (o algún tramo) requiere permiso.
     const iatas = [
@@ -1215,6 +1468,14 @@ export class QuotesService {
       notas: dto.notas,
       notas_internas: dto.notas_internas,
       calculo_snapshot: breakdown,
+      // Liga de GRUPO (solo el escritor interno la manda).
+      ...(opts.grupo
+        ? {
+            grupo_id: opts.grupo.id,
+            grupo_posicion: opts.grupo.posicion,
+            grupo_pax: opts.grupo.pax,
+          }
+        : {}),
       created_by: userId,
       updated_by: userId,
     };
@@ -1312,7 +1573,19 @@ export class QuotesService {
     return { ...vuelo!, escalas };
   }
 
-  async revise(vueloId: string, dto: ReviseQuoteDto, userId: string) {
+  /**
+   * `opts` (vía INTERNA, nunca por DTO público — 4-sep-2026):
+   * - `desdeGrupo`: el escritor es el grupo → los extras origen='GRUPO' que
+   *   manda REEMPLAZAN a los persistidos (sin él, se ANCLAN: ver
+   *   `anclarExtrasDeGrupo`).
+   * - `grupo`: re-sella `meta.grupo` (posición/pax/total actualizados).
+   */
+  async revise(
+    vueloId: string,
+    dto: ReviseQuoteDto,
+    userId: string,
+    opts: { desdeGrupo?: boolean; grupo?: GrupoHijoOpts } = {},
+  ) {
     const current = await this.findById(vueloId);
     // CANCELADO sí se revisa (decisión del equipo, 1-sep-2026): el vuelo no
     // salió pero la parte financiera existió — oficina corrige el desglose
@@ -1399,6 +1672,25 @@ export class QuotesService {
     // silencio. El revise de un externo EXIGE el avión de referencia
     // (aeronave_id) — el motor ya no tiene modo sin referencia.
     dto.es_externo = current.es_externo === true;
+    // EXTRAS DE GRUPO (4-sep-2026): un hijo CONSERVA sus líneas
+    // origen='GRUPO' persistidas (patrón cliente_id): lo que mande el panel
+    // para esas líneas se descarta y omitirlas no las borra — solo el
+    // escritor del grupo (`desdeGrupo`) las reemplaza. quickAdjust pasa por
+    // aquí, así que queda cubierto.
+    if (!opts.desdeGrupo) {
+      const anclados = anclarExtrasDeGrupo(current.extras, dto.extras);
+      if (anclados !== undefined) {
+        dto.extras = anclados as unknown as ExtraConceptoDto[];
+      }
+    } else {
+      // El grupo manda SOLO sus líneas materializadas: las propias del hijo
+      // (catering de ese avión, etc.) se conservan — re-materializar jamás
+      // borra en silencio lo capturado en el hijo (auditoría 29-ago).
+      dto.extras = mezclarExtrasDesdeGrupo(
+        current.extras,
+        dto.extras,
+      ) as unknown as ExtraConceptoDto[];
+    }
     // PRECIO PACTADO eliminado del cotizador (decisión del cliente,
     // 2-sep-2026): el valor del DTO solo se acepta como REHIDRATACIÓN de un
     // pactado YA persistido (el panel al revisar y quickAdjust re-envían el
@@ -1417,6 +1709,22 @@ export class QuotesService {
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
+    // meta.grupo (4-sep-2026): calculate() regenera el snapshot completo —
+    // el contexto de grupo del hijo se arrastra del snapshot vigente (o lo
+    // re-sella el grupo). Recotizar RESUELVE el "precio desactualizado"
+    // (el precio vuelve a corresponder al avión): la bandera se limpia.
+    const metaGrupoPrevio = (
+      current.calculo_snapshot as {
+        meta?: { grupo?: MetaGrupoSnapshot | null };
+      } | null
+    )?.meta?.grupo;
+    if (opts.grupo) {
+      breakdown.meta.grupo = this.metaGrupo(opts.grupo);
+    } else if (metaGrupoPrevio) {
+      const { precio_desactualizado: _pd, ...resto } = metaGrupoPrevio;
+      void _pd;
+      breakdown.meta.grupo = resto;
+    }
 
     // El avión del cotizador es la REFERENCIA de tarifa. Si la operación ya
     // asignó un avión al tramo 1 (asignación por tramo), revisar el precio NO
@@ -1436,6 +1744,17 @@ export class QuotesService {
       .maybeSingle();
     const aeronaveOperativa =
       (ida?.aeronave_id as string | null) ?? dto.aeronave_id;
+    // CAPACIDAD (4-sep-2026): vuelo PROPIO — pax por tramo ≤ asientos del
+    // avión que lo vuela (avión del tramo persistido con herencia del
+    // OPERATIVO que quedará en vuelo.aeronave_id). 409 CAPACIDAD_EXCEDIDA
+    // antes de escribir nada; clientes internos incluidos.
+    if (!current.es_externo) {
+      await this.assertCapacidadAeronave(
+        this.escalasParaCapacidadRevise(breakdown, current),
+        aeronaveOperativa,
+        reprPax,
+      );
+    }
 
     const { data: updated, error } = await this.supabase.service
       .from('vuelo')
@@ -1752,11 +2071,10 @@ export class QuotesService {
         ruta?: { escalas?: Array<Record<string, unknown>> };
       } | null
     )?.ruta?.escalas;
-    const escalas = (
+    const escalas: Array<Record<string, unknown>> =
       esOperativo && (rutaCotizada?.length ?? 0) > 0
         ? rutaCotizada!
-        : ((current.escalas ?? []) as Array<Record<string, unknown>>)
-    ) as Array<Record<string, unknown>>;
+        : (current.escalas ?? []);
     if (escalas.length === 0) {
       throw new BadRequestException(
         'La cotización no tiene tramos registrados; usa "Revisar".',
@@ -1770,11 +2088,10 @@ export class QuotesService {
       0,
     );
     const sobrevueloPactado = Number(snapshot?.tiempos?.sobrevuelo_hr) || 0;
-    const tiemposVigentes = (
-      snapshot as {
-        tiempos?: { vuelo_hr?: number | null; cobrable_hr?: number | null };
-      } | null
-    )?.tiempos;
+    const tiemposVigentes: {
+      vuelo_hr?: number | null;
+      cobrable_hr?: number | null;
+    } | null = snapshot?.tiempos ?? null;
     const vueloHrVigente = Number(tiemposVigentes?.vuelo_hr) || 0;
     const cobrableVigente = Number(tiemposVigentes?.cobrable_hr) || 0;
     // (a) La cotización cobraba horas POR MILLAS y los tramos ya no las
@@ -2153,7 +2470,51 @@ export class QuotesService {
       cuerpo: `${data!.origen_iata as string} → ${data!.destino_iata as string} se canceló${motivo ? `. Motivo: ${motivo}` : '.'}`,
       tipo: 'alerta_sistema',
     });
+    // Hijo de GRUPO cancelado fuera del grupo (4-sep): oficina se entera.
+    void (async () => {
+      try {
+        const ctx = await contextoGrupoDeVuelo(this.supabase.service, data);
+        if (!ctx) return;
+        const aviso = avisoBajaHijoDeGrupo(ctx, data!, 'cancelado');
+        for (const rol of [Rol.ADMIN, Rol.COORDINADOR]) {
+          await this.notifications.notifyRole(rol, aviso);
+        }
+      } catch (err) {
+        this.logger.warn(
+          `Aviso de baja de hijo de grupo falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    })();
     return data!;
+  }
+
+  // ===== Vía INTERNA de la cotización de GRUPO (GroupsService) =====
+
+  /**
+   * Crea un HIJO de grupo: `create()` de siempre (precio canon v1.3,
+   * tramos, permisos, historial, calendario) + la liga
+   * grupo_id/grupo_posicion/grupo_pax y `meta.grupo` del snapshot.
+   */
+  async createParaGrupo(
+    dto: CreateQuoteDto,
+    userId: string,
+    grupo: GrupoHijoOpts,
+  ) {
+    return this.create(dto, userId, { grupo });
+  }
+
+  /**
+   * Revisa un HIJO desde el grupo: la lista de extras enviada REEMPLAZA a
+   * las líneas origen='GRUPO' persistidas (`desdeGrupo`) y `meta.grupo` se
+   * re-sella. Mismos candados que `revise()` (cobrado/facturado/ventana).
+   */
+  async reviseParaGrupo(
+    vueloId: string,
+    dto: ReviseQuoteDto,
+    userId: string,
+    grupo: GrupoHijoOpts,
+  ) {
+    return this.revise(vueloId, dto, userId, { desdeGrupo: true, grupo });
   }
 
   /**
@@ -2306,17 +2667,22 @@ export class QuotesService {
     n: { titulo: string; cuerpo: string; tipo?: string },
   ): Promise<void> {
     try {
-      const ids = await tripulacionDeVuelo(
-        this.supabase.service,
-        vuelo.id as string,
-        vuelo,
-      );
+      const [ids, grupo] = await Promise.all([
+        tripulacionDeVuelo(this.supabase.service, vuelo.id as string, vuelo),
+        // Contexto de GRUPO (4-sep-2026): "Grupo G-12 · avión 3 de 7 · 44 pax".
+        contextoGrupoDeVuelo(this.supabase.service, vuelo),
+      ]);
+      const cuerpo = grupo ? `${n.cuerpo} · ${grupo.texto}` : n.cuerpo;
       for (const id of ids) {
         void this.notifications.notifyUser(id, {
           tipo: n.tipo ?? 'vuelo_asignado',
           titulo: n.titulo,
-          cuerpo: n.cuerpo,
-          data: { vuelo_id: vuelo.id, folio: vuelo.folio },
+          cuerpo,
+          data: {
+            vuelo_id: vuelo.id,
+            folio: vuelo.folio,
+            ...(grupo ? { grupo: datosGrupo(grupo) } : {}),
+          },
           link: `/flights/${vuelo.id as string}`,
         });
       }
