@@ -26,6 +26,9 @@ import {
   ValidateNested,
 } from 'class-validator';
 
+/** Fecha de pared YYYY-MM-DD (día Cancún): el eje de `fecha_movimiento`. */
+const FECHA_DIA_CANCUN = /^\d{4}-\d{2}-\d{2}$/;
+
 export enum TipoMovimientoInventario {
   ENTRADA = 'ENTRADA',
   SALIDA = 'SALIDA',
@@ -76,6 +79,22 @@ export class ListInventarioQuery {
   @IsBoolean()
   bajo_stock?: boolean;
 
+  @ApiPropertyOptional({
+    description:
+      'Acota las VENTAS/ganancia por ítem desde esta fecha (YYYY-MM-DD, día Cancún). El stock/FIFO siempre es de todo el cardex. Sin desde/hasta = acumulado histórico.',
+  })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Acota las VENTAS/ganancia por ítem hasta esta fecha (YYYY-MM-DD, día Cancún).',
+  })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
+
   @ApiPropertyOptional({ default: 100 })
   @IsOptional()
   @Type(() => Number)
@@ -90,6 +109,22 @@ export class ListInventarioQuery {
   @IsInt()
   @Min(0)
   offset: number = 0;
+}
+
+/** GET items/:id/resumen — corte opcional (YYYY-MM-DD, día Cancún) sobre fecha_movimiento. */
+export class ResumenItemQuery {
+  @ApiPropertyOptional({
+    description:
+      'Desde (YYYY-MM-DD, día Cancún): acota las filas y lo que suma; el FIFO corre sobre todo el cardex.',
+  })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Hasta (YYYY-MM-DD, día Cancún).' })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
 }
 
 /** Foto extra del producto en el bucket PÚBLICO `inventario-fotos`. */

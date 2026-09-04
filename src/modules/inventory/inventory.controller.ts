@@ -24,6 +24,7 @@ import {
   ImportarInventarioDto,
   ListInventarioQuery,
   ListMovimientosQuery,
+  ResumenItemQuery,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
   UpdateMovimientoCostoDto,
@@ -191,6 +192,21 @@ export class InventoryController {
       type: XLSX_MIME,
       disposition: `attachment; filename="${filename}"`,
     });
+  }
+
+  // Resumen del producto para el detalle del panel (4-sep-2026). Literal
+  // ANTES de 'items/:id'.
+  @Get('items/:id/resumen')
+  @Roles(...OFICINA)
+  @ApiOperation({
+    summary:
+      'Resumen del producto: bloques COMPRAS | VENTAS (los mismos del cardex libro), RESUMEN por día (existencia al cierre + utilidad del día) y totales — mismo FIFO/ganancia que la hoja Inventario del Balance general. Montos en MXN. desde/hasta opcionales (YYYY-MM-DD, día Cancún).',
+  })
+  resumenItem(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: ResumenItemQuery,
+  ) {
+    return this.inventory.resumenItem(id, q);
   }
 
   @Get('items/:id')
