@@ -131,6 +131,12 @@ export class LinkMovimientoDto {
   gasto_id?: string | null;
 }
 
+/**
+ * Liga de un ABONO: cobro de vuelo (`cobro_id`) O sobre de cobro de GRUPO
+ * (`cobro_grupo_id`), excluyentes (400 si vienen ambos). Ambos null/ausentes
+ * = desvincular (limpia las dos ligas). Una PARTE de sobre (cobro_vuelo con
+ * cobro_grupo_id) nunca se acepta: 409 COBRO_DE_GRUPO.
+ */
 export class LinkMovimientoCobroDto {
   @ApiPropertyOptional({
     description: 'Cobro de vuelo a vincular. null para desvincular.',
@@ -139,6 +145,29 @@ export class LinkMovimientoCobroDto {
   @IsOptional()
   @IsUUID()
   cobro_id?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Sobre de cobro de GRUPO (cobro_grupo) a vincular; excluyente con cobro_id. null para desvincular.',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsUUID()
+  cobro_grupo_id?: string | null;
+}
+
+/** Candidatos (cobros de vuelo + sobres de grupo) para conciliar un ABONO a mano. */
+export class CandidatosCobroQuery {
+  @ApiPropertyOptional({
+    default: 60,
+    description: 'Ventana ±días alrededor de la fecha del abono (1..180).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  dias: number = 60;
 }
 
 /**

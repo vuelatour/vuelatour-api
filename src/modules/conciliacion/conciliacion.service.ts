@@ -19,6 +19,12 @@ import {
   type GastoRepartoFila,
 } from '../../common/gasto-reparto.util';
 import {
+  esParteDeSobre,
+  filtroLigaCobros,
+  MOV_LIGA_COLS,
+  type MovimientoLiga,
+} from '../../common/cobro-conciliado.util';
+import {
   ConciliacionParseDto,
   ImportarMovimientosDto,
   ListConciliacionQuery,
@@ -26,9 +32,98 @@ import {
   type ReporteConciliacionEstado,
 } from './dto/conciliacion.dto';
 
+// `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
+// (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
 const MOV_COLS =
-  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, clasificacion_id, origen, notas, created_at';
+  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, origen, notas, created_at';
 const MATCH_DAYS = 3;
+/**
+ * Métodos de cobro que llegan al banco como ABONO y se cruzan SOLOS
+ * (auto-match): misma lista para cobro_vuelo y para los sobres de grupo.
+ */
+const METODOS_ABONO_AUTO = ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'];
+/**
+ * Candidatos MANUALES: + BILLPOCKET (el depósito de la terminal también
+ * aparece en el estado de cuenta; el panel ya lo ofrecía a mano).
+ */
+const METODOS_ABONO_MANUAL = [...METODOS_ABONO_AUTO, 'BILLPOCKET'];
+/** Ventana default (±días) de candidatos manuales: la misma que usaba el panel. */
+const CANDIDATOS_DIAS_DEFAULT = 60;
+const CANDIDATOS_MAX = 60;
+/** Embed del sobre de grupo en movimiento_bancario (lista y reporte). */
+const SOBRE_EMBED =
+  'cobro_grupo:cobro_grupo!cobro_grupo_id(id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre))';
+
+/**
+ * Sobre de cobro de GRUPO tal como lo expone conciliación (lista de
+ * movimientos y candidatos): forma ADITIVA junto a los cobros normales.
+ */
+export interface SobreConciliacion {
+  tipo: 'SOBRE_GRUPO';
+  cobro_grupo_id: string;
+  grupo_id: string;
+  grupo_folio: number | null;
+  grupo_nombre: string | null;
+  /** BRUTO (moneda nativa). */
+  monto: number;
+  moneda: string;
+  metodo: string;
+  /** Alias de `metodo` (paridad con cobro_vuelo). */
+  metodo_cobro: string;
+  fecha: string;
+  /** Alias de `fecha` (paridad con cobro_vuelo). */
+  fecha_cobro: string;
+  referencia: string | null;
+  comision_banco_monto: number | null;
+  /** Lo que depositó el banco: monto − comisión. */
+  neto: number;
+  /** Partes (aviones) en las que se partió el sobre. */
+  aviones_n: number;
+}
+
+/** Cobro de vuelo candidato a conciliar un ABONO a mano. */
+export interface CandidatoCobroVuelo {
+  tipo: 'COBRO_VUELO';
+  /** = cobro_id (lo que se manda a PATCH movimientos/:id/cobro). */
+  id: string;
+  cobro_id: string;
+  vuelo_id: string;
+  folio: number | null;
+  cliente: string | null;
+  fecha_cobro: string;
+  monto: number;
+  moneda: string;
+  metodo_cobro: string;
+  referencia: string | null;
+  comision_banco_monto: number | null;
+  neto: number;
+  /** |neto − monto del abono| (0 = cuadra exacto). */
+  dif_monto: number;
+}
+
+/** Sobre de grupo candidato (se manda `cobro_grupo_id` al PATCH). */
+export interface CandidatoSobreGrupo extends SobreConciliacion {
+  /** = cobro_grupo_id. */
+  id: string;
+  cliente: string | null;
+  dif_monto: number;
+}
+
+export type CandidatoCobro = CandidatoCobroVuelo | CandidatoSobreGrupo;
+
+/** Entrada de linkCobro: cobro de vuelo O sobre de grupo (excluyentes); ambos null = desvincular. */
+export interface LigaCobroInput {
+  cobro_id?: string | null;
+  cobro_grupo_id?: string | null;
+}
+
+function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
+  return Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+}
+
+function r2(x: number): number {
+  return Math.round(x * 100) / 100;
+}
 /**
  * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
  * estado de cuenta (PAYWISE entró el 2-sep-2026: sus cargos también aparecen
@@ -539,11 +634,31 @@ export class ConciliacionService {
     return false;
   }
 
+  /** Ventana [fecha − días, fecha + días] en UTC (fecha = DATE del banco). */
+  private ventanaAbono(
+    fecha: string,
+    dias: number,
+  ): { lo: string; hi: string } {
+    const base = new Date(`${fecha}T00:00:00Z`);
+    const lo = new Date(base);
+    lo.setUTCDate(lo.getUTCDate() - dias);
+    const hi = new Date(base);
+    hi.setUTCDate(hi.getUTCDate() + dias);
+    return { lo: lo.toISOString(), hi: hi.toISOString() };
+  }
+
   /**
    * ABONO = entrada de dinero. Se cruza contra los COBROS de vuelos (HSBC
    * link, transferencia) del mismo monto/moneda ±N días que aún no estén
    * enlazados a otro movimiento. Con esto la mitad "ingresos" del estado de
    * cuenta también se concilia sola.
+   *
+   * SOBRES de grupo (4-sep-2026): el pago único de un grupo es UN abono del
+   * banco → el candidato es el `cobro_grupo` (bruto o neto), nunca sus
+   * partes (`cobro_vuelo.cobro_grupo_id`, excluidas de la consulta: una
+   * parte de $2,060.16 cuadraría en falso con un depósito ajeno del mismo
+   * monto). Candidato ÚNICO entre cobros y sobres: si empatan un cobro y un
+   * sobre, es ambiguo y no se cruza.
    */
   private async autoMatchAbono(
     movId: string,
@@ -552,11 +667,7 @@ export class ConciliacionService {
     moneda: string | null,
     userId: string,
   ): Promise<boolean> {
-    const base = new Date(`${fecha}T00:00:00Z`);
-    const lo = new Date(base);
-    lo.setUTCDate(lo.getUTCDate() - MATCH_DAYS);
-    const hi = new Date(base);
-    hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
+    const { lo, hi } = this.ventanaAbono(fecha, MATCH_DAYS);
 
     // El banco deposita monto − comisión bancaria: el abono real es el NETO.
     // Se matchea por bruto (cobros sin comisión) O por neto (con comisión) —
@@ -568,50 +679,90 @@ export class ConciliacionService {
       // como CARGO en el banco, no como abono — queda FUERA de la
       // conciliación automática en v1 (se cruza a mano si hace falta).
       .gt('monto', 0)
-      .in('metodo_cobro', ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'])
-      .gte('fecha_cobro', lo.toISOString())
-      .lte('fecha_cobro', hi.toISOString())
+      // Las PARTES de un sobre nunca son candidatas: se concilia el sobre.
+      .is('cobro_grupo_id', null)
+      .in('metodo_cobro', METODOS_ABONO_AUTO)
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
       // Orden estable: si la ventana excede el tope, el corte es determinista.
       .order('fecha_cobro', { ascending: true })
       .limit(50);
-    if (moneda) q = q.eq('moneda', moneda);
-    const { data, error } = await q;
-    if (error || !data || data.length === 0) return false;
+    let qs = this.supabase.service
+      .from('cobro_grupo')
+      .select('id, monto, comision_banco_monto')
+      .gt('monto', 0)
+      .in('metodo_cobro', METODOS_ABONO_AUTO)
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(50);
+    if (moneda) {
+      q = q.eq('moneda', moneda);
+      qs = qs.eq('moneda', moneda);
+    }
+    const [cobrosRes, sobresRes] = await Promise.all([q, qs]);
+    if (cobrosRes.error || sobresRes.error) return false;
 
-    const r2 = (x: number) => Math.round(x * 100) / 100;
     const matchea = (c: { monto: unknown; comision_banco_monto: unknown }) => {
       const bruto = Number(c.monto);
       const comision = Number(c.comision_banco_monto) || 0;
       if (comision > 0) return r2(bruto - comision) === r2(monto);
       return r2(bruto) === r2(monto);
     };
-    const candidatos = (
-      data as Array<{
-        id: string;
-        monto: unknown;
-        comision_banco_monto: unknown;
-      }>
-    ).filter(matchea);
-    if (candidatos.length === 0) return false;
+    type Cand = { id: string; monto: unknown; comision_banco_monto: unknown };
+    const cobroIds = ((cobrosRes.data ?? []) as Cand[])
+      .filter(matchea)
+      .map((c) => c.id);
+    const sobreIds = ((sobresRes.data ?? []) as Cand[])
+      .filter(matchea)
+      .map((c) => c.id);
+    if (cobroIds.length === 0 && sobreIds.length === 0) return false;
 
-    // Descarta cobros ya enlazados a otro movimiento; exige candidato único.
-    const ids = candidatos.map((c) => c.id);
-    const { data: yaEnlazados } = await this.supabase.service
-      .from('movimiento_bancario')
-      .select('cobro_id')
-      .in('cobro_id', ids);
-    const ocupados = new Set(
-      (yaEnlazados ?? []).map((m) => m.cobro_id as string),
+    // Descarta cobros/sobres ya enlazados a otro movimiento; exige candidato
+    // único ENTRE AMBOS universos.
+    const filtro = filtroLigaCobros(cobroIds, sobreIds);
+    const { data: yaEnlazados } = filtro
+      ? await this.supabase.service
+          .from('movimiento_bancario')
+          .select(MOV_LIGA_COLS)
+          .or(filtro)
+      : { data: [] as MovimientoLiga[] };
+    const ocupadosCobro = new Set<string>();
+    const ocupadosSobre = new Set<string>();
+    for (const m of (yaEnlazados ?? []) as MovimientoLiga[]) {
+      if (typeof m.cobro_id === 'string') ocupadosCobro.add(m.cobro_id);
+      if (typeof m.cobro_grupo_id === 'string')
+        ocupadosSobre.add(m.cobro_grupo_id);
+    }
+    const libresCobro = cobroIds.filter((id) => !ocupadosCobro.has(id));
+    const libresSobre = sobreIds.filter((id) => !ocupadosSobre.has(id));
+    if (libresCobro.length + libresSobre.length !== 1) return false;
+
+    await this.linkCobro(
+      movId,
+      libresCobro.length === 1
+        ? { cobro_id: libresCobro[0] }
+        : { cobro_grupo_id: libresSobre[0] },
+      userId,
     );
-    const libres = ids.filter((id) => !ocupados.has(id));
-    if (libres.length !== 1) return false;
-
-    await this.linkCobro(movId, libres[0], userId);
     return true;
   }
 
-  /** Vincula (o desvincula si cobroId es null) un ABONO con un cobro de vuelo. */
-  async linkCobro(movId: string, cobroId: string | null, userId: string) {
+  /**
+   * Vincula un ABONO con un cobro de vuelo (`cobro_id`) O con el SOBRE de un
+   * grupo (`cobro_grupo_id`) — excluyentes (CHECK
+   * movimiento_bancario_cobro_excluyente). Ambos null = desvincular (limpia
+   * las dos ligas). Una PARTE de sobre jamás se enlaza: 409 COBRO_DE_GRUPO
+   * («concilia contra el sobre del grupo G-n»).
+   */
+  async linkCobro(movId: string, liga: LigaCobroInput, userId: string) {
+    const cobroId = liga.cobro_id ?? null;
+    const sobreId = liga.cobro_grupo_id ?? null;
+    if (cobroId && sobreId) {
+      throw new BadRequestException(
+        'Indica un cobro de vuelo O un sobre de grupo, no los dos.',
+      );
+    }
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select('id, gasto_id')
@@ -620,9 +771,37 @@ export class ConciliacionService {
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
-    // Un cobro ya enlazado a OTRO movimiento no puede cuadrar una segunda
-    // línea del banco (el auto-match ya lo respeta; el manual también).
     if (cobroId) {
+      const { data: cobro, error: cobroErr } = await this.supabase.service
+        .from('cobro_vuelo')
+        .select(
+          'id, cobro_grupo_id, sobre:cobro_grupo!cobro_grupo_id(grupo:vuelo_grupo!grupo_id(folio))',
+        )
+        .eq('id', cobroId)
+        .maybeSingle();
+      if (cobroErr) throw new Error(cobroErr.message);
+      if (!cobro) throw new BadRequestException('Cobro no encontrado.');
+      if (esParteDeSobre(cobro)) {
+        const sobre = unwrapOne(
+          cobro.sobre as {
+            grupo?: { folio?: unknown } | { folio?: unknown }[] | null;
+          } | null,
+        );
+        const folioRaw = unwrapOne(sobre?.grupo)?.folio;
+        const grupoFolio = folioRaw == null ? null : Number(folioRaw);
+        const g = `G-${grupoFolio ?? '?'}`;
+        throw new ConflictException({
+          message: `Este cobro es parte del sobre del grupo ${g}: concilia el abono contra el sobre del grupo ${g}, no contra sus partes.`,
+          error: 'COBRO_DE_GRUPO',
+          details: {
+            cobro_id: cobroId,
+            cobro_grupo_id: cobro.cobro_grupo_id as string,
+            grupo_folio: grupoFolio,
+          },
+        });
+      }
+      // Un cobro ya enlazado a OTRO movimiento no puede cuadrar una segunda
+      // línea del banco (el auto-match ya lo respeta; el manual también).
       const { data: yaEnlazado, error: ocupadoErr } =
         await this.supabase.service
           .from('movimiento_bancario')
@@ -639,12 +818,40 @@ export class ConciliacionService {
       }
     }
 
+    if (sobreId) {
+      const { data: sobre, error: sobreErr } = await this.supabase.service
+        .from('cobro_grupo')
+        .select('id')
+        .eq('id', sobreId)
+        .maybeSingle();
+      if (sobreErr) throw new Error(sobreErr.message);
+      if (!sobre) {
+        throw new BadRequestException('Cobro de grupo (sobre) no encontrado.');
+      }
+      const { data: yaEnlazado, error: ocupadoErr } =
+        await this.supabase.service
+          .from('movimiento_bancario')
+          .select('id')
+          .eq('cobro_grupo_id', sobreId)
+          .neq('id', movId)
+          .limit(1)
+          .maybeSingle();
+      if (ocupadoErr) throw new Error(ocupadoErr.message);
+      if (yaEnlazado) {
+        throw new ConflictException(
+          'Ese sobre de grupo ya está conciliado con otro movimiento bancario.',
+        );
+      }
+    }
+
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
       .update({
         cobro_id: cobroId,
+        cobro_grupo_id: sobreId,
         conciliado:
           cobroId !== null ||
+          sobreId !== null ||
           (mov as { gasto_id: string | null }).gasto_id !== null,
         // Vincular un cobro real pisa la clasificación "sin vuelo".
         clasificacion_id: null,
@@ -654,17 +861,285 @@ export class ConciliacionService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
-      // Índice único uq_mov_bancario_cobro: dos vínculos simultáneos al mismo
-      // cobro pasan el check previo (TOCTOU) pero solo uno gana en la BD.
+      // Índices únicos uq_mov_bancario_cobro / uq_mov_bancario_cobro_grupo:
+      // dos vínculos simultáneos al mismo cobro/sobre pasan el check previo
+      // (TOCTOU) pero solo uno gana en la BD.
       if (error.code === '23505' || error.message?.includes('23505'))
         throw new ConflictException(
-          'Ese cobro ya está vinculado a otro movimiento bancario.',
+          sobreId
+            ? 'Ese sobre de grupo ya está vinculado a otro movimiento bancario.'
+            : 'Ese cobro ya está vinculado a otro movimiento bancario.',
         );
       if (error.code === '23503')
-        throw new BadRequestException('Cobro no encontrado.');
+        throw new BadRequestException(
+          sobreId ? 'Cobro de grupo no encontrado.' : 'Cobro no encontrado.',
+        );
+      if (error.code === '23514')
+        throw new BadRequestException(
+          'Un movimiento no puede ligar un cobro de vuelo y un sobre de grupo a la vez.',
+        );
       throw new Error(error.message);
     }
     return data!;
+  }
+
+  /** Partes (cobro_vuelo) por sobre: cuántos aviones recibieron parte. */
+  private async contarPartesPorSobre(
+    sobreIds: string[],
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const ids = [...new Set(sobreIds.filter(Boolean))];
+    if (ids.length === 0) return out;
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('cobro_grupo_id')
+      .in('cobro_grupo_id', ids)
+      .limit(10000);
+    if (error) throw new Error(error.message);
+    for (const p of data ?? []) {
+      const sid = p.cobro_grupo_id as string;
+      out.set(sid, (out.get(sid) ?? 0) + 1);
+    }
+    return out;
+  }
+
+  /** Fila cruda de cobro_grupo (+ grupo embebido) → forma pública SOBRE_GRUPO. */
+  private normalizarSobre(
+    raw: Record<string, unknown>,
+    avionesN: number,
+  ): SobreConciliacion {
+    const grupo = unwrapOne(
+      raw.grupo as { folio?: unknown; nombre?: unknown } | null,
+    );
+    const monto = Number(raw.monto) || 0;
+    const comision = Number(raw.comision_banco_monto) || 0;
+    const metodo = (raw.metodo_cobro as string) ?? '';
+    const fecha = (raw.fecha_cobro as string) ?? '';
+    return {
+      tipo: 'SOBRE_GRUPO',
+      cobro_grupo_id: raw.id as string,
+      grupo_id: raw.grupo_id as string,
+      grupo_folio: grupo?.folio == null ? null : Number(grupo.folio),
+      grupo_nombre: typeof grupo?.nombre === 'string' ? grupo.nombre : null,
+      monto: r2(monto),
+      moneda: (raw.moneda as string) ?? 'USD',
+      metodo,
+      metodo_cobro: metodo,
+      fecha,
+      fecha_cobro: fecha,
+      referencia: (raw.referencia as string | null) ?? null,
+      comision_banco_monto: comision > 0 ? r2(comision) : null,
+      neto: r2(monto - (comision > 0 ? comision : 0)),
+      aviones_n: avionesN,
+    };
+  }
+
+  /**
+   * Movimientos con el embed `cobro_grupo` (SOBRE_EMBED) → cada fila gana
+   * `cobro_grupo: SobreConciliacion | null` (aditivo; `cobro` y `gasto`
+   * siguen igual).
+   */
+  private async normalizarSobresEnMovs(
+    movs: Array<Record<string, unknown>>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const crudos = new Map<string, Record<string, unknown>>();
+    for (const m of movs) {
+      const raw = unwrapOne<Record<string, unknown>>(
+        m.cobro_grupo as Record<string, unknown> | null,
+      );
+      if (raw && typeof raw.id === 'string') crudos.set(raw.id, raw);
+    }
+    if (crudos.size === 0) {
+      return movs.map((m) => ({ ...m, cobro_grupo: null }));
+    }
+    const partes = await this.contarPartesPorSobre([...crudos.keys()]);
+    return movs.map((m) => {
+      const raw = unwrapOne<Record<string, unknown>>(
+        m.cobro_grupo as Record<string, unknown> | null,
+      );
+      return {
+        ...m,
+        cobro_grupo:
+          raw && typeof raw.id === 'string'
+            ? this.normalizarSobre(raw, partes.get(raw.id) ?? 0)
+            : null,
+      };
+    });
+  }
+
+  /**
+   * Candidatos para conciliar un ABONO a mano: cobros de vuelo Y sobres de
+   * grupo (misma moneda que la cuenta, métodos que llegan al banco, sin
+   * conciliar con OTRO movimiento) en ±`dias`, ordenados por cercanía del
+   * NETO al monto del abono y luego por fecha. Las PARTES de un sobre nunca
+   * se ofrecen (se concilia el sobre, que es lo que depositó el cliente).
+   */
+  async candidatosCobro(
+    movId: string,
+    dias: number = CANDIDATOS_DIAS_DEFAULT,
+  ): Promise<{
+    movimiento: {
+      id: string;
+      fecha: string;
+      monto: number;
+      tipo: string;
+      moneda: string | null;
+      cobro_id: string | null;
+      cobro_grupo_id: string | null;
+    };
+    candidatos: CandidatoCobro[];
+    exactos: number;
+  }> {
+    const { data: mov, error: movErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(
+        'id, fecha, monto, tipo, cuenta_bancaria_id, cobro_id, cobro_grupo_id',
+      )
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
+    if (mov.tipo !== TipoMovimientoBancario.ABONO) {
+      throw new BadRequestException(
+        'Solo un ABONO (entrada de dinero) se concilia contra cobros de vuelo o sobres de grupo.',
+      );
+    }
+    const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id as string);
+    const { lo, hi } = this.ventanaAbono(mov.fecha as string, dias);
+
+    let qc = this.supabase.service
+      .from('cobro_vuelo')
+      .select(
+        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+      )
+      .gt('monto', 0)
+      .is('cobro_grupo_id', null)
+      .in('metodo_cobro', METODOS_ABONO_MANUAL)
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(300);
+    let qs = this.supabase.service
+      .from('cobro_grupo')
+      .select(
+        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, cliente:cliente_id(nombre))',
+      )
+      .gt('monto', 0)
+      .in('metodo_cobro', METODOS_ABONO_MANUAL)
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(100);
+    if (moneda) {
+      qc = qc.eq('moneda', moneda);
+      qs = qs.eq('moneda', moneda);
+    }
+    const [cobrosRes, sobresRes] = await Promise.all([qc, qs]);
+    if (cobrosRes.error) throw new Error(cobrosRes.error.message);
+    if (sobresRes.error) throw new Error(sobresRes.error.message);
+    const cobros = (cobrosRes.data ?? []) as Array<Record<string, unknown>>;
+    const sobres = (sobresRes.data ?? []) as Array<Record<string, unknown>>;
+
+    // Ya conciliados con OTRO movimiento (fuente única: MOV_LIGA_COLS).
+    const filtro = filtroLigaCobros(
+      cobros.map((c) => c.id as string),
+      sobres.map((s) => s.id as string),
+    );
+    const ocupadosCobro = new Set<string>();
+    const ocupadosSobre = new Set<string>();
+    if (filtro) {
+      const { data: ligas, error: ligasErr } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select(MOV_LIGA_COLS)
+        .or(filtro);
+      if (ligasErr) throw new Error(ligasErr.message);
+      for (const m of (ligas ?? []) as MovimientoLiga[]) {
+        if (m.id === movId) continue;
+        if (typeof m.cobro_id === 'string') ocupadosCobro.add(m.cobro_id);
+        if (typeof m.cobro_grupo_id === 'string')
+          ocupadosSobre.add(m.cobro_grupo_id);
+      }
+    }
+    const partesN = await this.contarPartesPorSobre(
+      sobres.map((s) => s.id as string),
+    );
+
+    const montoMov = Number(mov.monto) || 0;
+    const refMs = Date.parse(`${mov.fecha as string}T00:00:00Z`);
+    const candidatos: CandidatoCobro[] = [
+      ...cobros
+        .filter((c) => !ocupadosCobro.has(c.id as string))
+        .map((c): CandidatoCobroVuelo => {
+          const vuelo = unwrapOne(
+            c.vuelo as {
+              folio?: unknown;
+              cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+            } | null,
+          );
+          const cliente = unwrapOne(vuelo?.cliente);
+          const bruto = Number(c.monto) || 0;
+          const comision = Number(c.comision_banco_monto) || 0;
+          const neto = r2(bruto - (comision > 0 ? comision : 0));
+          return {
+            tipo: 'COBRO_VUELO',
+            id: c.id as string,
+            cobro_id: c.id as string,
+            vuelo_id: c.vuelo_id as string,
+            folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+            cliente:
+              typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+            fecha_cobro: c.fecha_cobro as string,
+            monto: r2(bruto),
+            moneda: c.moneda as string,
+            metodo_cobro: c.metodo_cobro as string,
+            referencia: (c.referencia as string | null) ?? null,
+            comision_banco_monto: comision > 0 ? r2(comision) : null,
+            neto,
+            dif_monto: r2(Math.abs(neto - montoMov)),
+          };
+        }),
+      ...sobres
+        .filter((s) => !ocupadosSobre.has(s.id as string))
+        .map((s): CandidatoSobreGrupo => {
+          const norm = this.normalizarSobre(
+            s,
+            partesN.get(s.id as string) ?? 0,
+          );
+          const grupo = unwrapOne(
+            s.grupo as {
+              cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+            } | null,
+          );
+          const cliente = unwrapOne(grupo?.cliente);
+          return {
+            ...norm,
+            id: norm.cobro_grupo_id,
+            cliente:
+              typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+            dif_monto: r2(Math.abs(norm.neto - montoMov)),
+          };
+        }),
+    ]
+      .sort(
+        (a, b) =>
+          a.dif_monto - b.dif_monto ||
+          Math.abs(Date.parse(a.fecha_cobro) - refMs) -
+            Math.abs(Date.parse(b.fecha_cobro) - refMs),
+      )
+      .slice(0, CANDIDATOS_MAX);
+    return {
+      movimiento: {
+        id: mov.id as string,
+        fecha: mov.fecha as string,
+        monto: r2(montoMov),
+        tipo: mov.tipo as string,
+        moneda,
+        cobro_id: (mov.cobro_id as string | null) ?? null,
+        cobro_grupo_id: (mov.cobro_grupo_id as string | null) ?? null,
+      },
+      candidatos,
+      exactos: candidatos.filter((c) => c.dif_monto === 0).length,
+    };
   }
 
   /** Catálogo de clasificaciones "sin vuelo" (activas, orden alfabético). */
@@ -731,12 +1206,15 @@ export class ConciliacionService {
   ) {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id, gasto_id, cobro_id')
+      .select('id, gasto_id, cobro_id, cobro_grupo_id')
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
-    if (clasificacionId && (mov.gasto_id || mov.cobro_id)) {
+    if (
+      clasificacionId &&
+      (mov.gasto_id || mov.cobro_id || mov.cobro_grupo_id)
+    ) {
       throw new ConflictException(
         'El movimiento ya está conciliado con un gasto/cobro: desvincúlalo antes de clasificarlo.',
       );
@@ -917,7 +1395,7 @@ export class ConciliacionService {
       .select(
         // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
         // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
-        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
@@ -933,10 +1411,8 @@ export class ConciliacionService {
     if (estado === 'conciliados') q = q.eq('conciliado', true);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    const movs = (data ?? []) as Array<Record<string, unknown>>;
-
-    const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
-      Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+    // Sobres de grupo normalizados (SOBRE_GRUPO con aviones_n).
+    const movs = await this.normalizarSobresEnMovs(data ?? []);
 
     // Mapas para la matrícula: repartos manuales de los gastos ligados y
     // aeronave/escala (patrón del Libro Dinero; la herencia escala→vuelo la
@@ -979,6 +1455,13 @@ export class ConciliacionService {
           mapas,
         );
       }
+      // SOBRE de grupo: el pago cubre N aviones (no hay UNA matrícula).
+      const sobre = m.cobro_grupo as SobreConciliacion | null;
+      if (sobre) {
+        return sobre.aviones_n > 0
+          ? `${sobre.aviones_n} avión${sobre.aviones_n === 1 ? '' : 'es'}`
+          : '';
+      }
       // Línea de COBRO: el avión (principal) de su vuelo.
       const cobro = unwrapOne(
         m.cobro as {
@@ -1015,6 +1498,10 @@ export class ConciliacionService {
         ]
           .filter(Boolean)
           .join(' · ');
+      }
+      const sobre = m.cobro_grupo as SobreConciliacion | null;
+      if (sobre) {
+        return `Cobro grupo G-${sobre.grupo_folio ?? '?'} · ${sobre.metodo}`;
       }
       const cobro = unwrapOne(
         m.cobro as {
@@ -1284,7 +1771,7 @@ export class ConciliacionService {
       .select(
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
-        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -1298,7 +1785,8 @@ export class ConciliacionService {
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
     return {
-      data: data ?? [],
+      // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
+      data: await this.normalizarSobresEnMovs(data ?? []),
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,

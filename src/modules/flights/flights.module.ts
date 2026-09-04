@@ -25,6 +25,7 @@ import { FlightsService } from './flights.service';
   ],
   controllers: [FlightsController],
   providers: [FlightsService, FlightReportService, CobroReciboService],
-  exports: [FlightsService],
+  // CobroReciboService: GroupsModule lo usa para el recibo del SOBRE de grupo.
+  exports: [FlightsService, CobroReciboService],
 })
 export class FlightsModule {}

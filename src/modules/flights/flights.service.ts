@@ -27,7 +27,10 @@ import {
 } from '../../common/tripulacion.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
-import { NotificationsService } from '../realtime/notifications.service';
+import {
+  NotificationsService,
+  type NotificationInput,
+} from '../realtime/notifications.service';
 import {
   CONFIG_CAPTURA_TACO_FOTO_IA,
   ConfiguracionService,
@@ -63,6 +66,14 @@ import type {
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
 import {
+  filtroLigaCobros,
+  movimientoDeCobro,
+  MOV_LIGA_COLS,
+  sobreDeCobro,
+  type CobroConciliable,
+  type MovimientoLiga,
+} from '../../common/cobro-conciliado.util';
+import {
   participacionAvionesItems,
   participacionPorAeronave,
   type EscalaParticipacionInput,
@@ -91,7 +102,8 @@ import {
   type AccionBajaHijo,
   type ContextoGrupo,
 } from '../../common/grupo-contexto.util';
-import { payloadClonVuelo } from './clon-vuelo.util';
+import { patchCobrosAlClon, payloadClonVuelo } from './clon-vuelo.util';
+import { resolverComisionBancaria } from './comision-bancaria.util';
 import { marcarPrecioDesactualizado } from './grupo-precio.util';
 import {
   CORRECCION_BAJA_PREFIX,
@@ -200,8 +212,48 @@ export interface TacoSugerencia {
 }
 
 // Exportado: cobro-recibo.service lee el cobro con las MISMAS columnas.
+// `cobro_grupo_id`/`grupo_factor` (4-sep-2026): parte de un SOBRE de grupo —
+// aditivo para todos los lectores (cobrosEnUsd los ignora).
 export const COBRO_COLS =
-  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at';
+  'id, vuelo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, fecha_cobro, foto_voucher_url, registrado_por, notas, created_at, updated_at, cobro_grupo_id, grupo_factor';
+
+/**
+ * Opciones INTERNAS del SOBRE de grupo (4-sep-2026): la parte de un sobre se
+ * escribe por el MISMO camino que el cobro/reembolso por vuelo (insert +
+ * comisión + refreshCobradoFlag) con su liga `cobro_grupo_id`/`grupo_factor`;
+ * el aviso `cobro_registrado` lo manda UNA vez el grupo (`silenciarPush`) y
+ * la ventana anti-duplicado de 90 s vive en el sobre, no en cada parte.
+ * Solo GroupsService las usa; jamás llegan desde un DTO.
+ */
+export interface CobroParteDeSobreOpts {
+  cobro_grupo_id: string;
+  grupo_factor: number | null;
+  silenciarPush?: boolean;
+}
+
+/** Resumen del sobre que viaja en cada parte (lectura aditiva del panel). */
+export interface CobroGrupoResumen {
+  id: string;
+  grupo_id: string;
+  grupo_folio: number | null;
+  monto_total: number;
+  moneda: string;
+}
+
+/**
+ * Fila de cobro_vuelo (COBRO_COLS) + campos ADITIVOS; sigue siendo CobroLike:
+ * - `cobro_grupo`: resumen del sobre del que es parte (null en cobros
+ *   normales).
+ * - `conciliado` / `movimiento_bancario_id`: fuente única
+ *   `cobro-conciliado.util` (liga directa `cobro_id` o, si es parte de un
+ *   sobre, la liga del sobre `cobro_grupo_id`). Es el badge del detalle.
+ */
+export interface CobroConSobre extends CobroLike {
+  [k: string]: unknown;
+  cobro_grupo: CobroGrupoResumen | null;
+  conciliado: boolean;
+  movimiento_bancario_id: string | null;
+}
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
 const METODOS_TARJETA = new Set(['BILLPOCKET', 'HSBC_LINK']);
@@ -1023,9 +1075,12 @@ export class FlightsService {
 
     // 4) Cobros del cliente → al vuelo que sí sale. (Los GASTOS se quedan: esa
     //    matrícula los absorbe y el siguiente vuelo solo paga su remanente.)
+    //    UPDATE en sitio de `vuelo_id` (helper con spec): una parte de un
+    //    SOBRE de grupo viaja con `cobro_grupo_id`/`grupo_factor` intactos y
+    //    su conciliación (el banco enlaza al sobre) sigue válida en el clon.
     await sb
       .from('cobro_vuelo')
-      .update({ vuelo_id: (clon as { id: string }).id })
+      .update(patchCobrosAlClon(clonId))
       .eq('vuelo_id', id);
     // 4b) Hijo de GRUPO (4-sep-2026): si el original era el avión ANCLA del
     //     grupo (residuos de centavos / extras ANCLA), el ancla pasa al clon
@@ -8701,7 +8756,121 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .order('fecha_cobro', { ascending: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    return this.adjuntarSobres(data ?? []);
+  }
+
+  /**
+   * Lectura ADITIVA (sobre de grupo, 4-sep-2026): cada cobro que es parte de
+   * un sobre viaja con `cobro_grupo {id, grupo_id, grupo_folio, monto_total,
+   * moneda}` (null en cobros normales) para que panel/app pinten "parte de
+   * G-12 · $2,060.16 de $10,800.76" y oculten Editar/Eliminar. No cambia
+   * ningún número: cobrosEnUsd ignora el campo.
+   */
+  private async adjuntarSobres(
+    cobros: Array<Record<string, unknown>>,
+  ): Promise<CobroConSobre[]> {
+    if (cobros.length === 0) return [];
+    const ids = [
+      ...new Set(
+        cobros
+          .map((c) => c.cobro_grupo_id)
+          .filter((x): x is string => typeof x === 'string' && x.length > 0),
+      ),
+    ];
+    const cobroIds = cobros
+      .map((c) => c.id)
+      .filter((x): x is string => typeof x === 'string' && x.length > 0);
+    // Liga con el banco (fuente única cobro-conciliado.util): los cobros
+    // normales por `cobro_id`, las partes de sobre por el `cobro_grupo_id`
+    // de su sobre — una sola consulta con ambas columnas.
+    const filtro = filtroLigaCobros(cobroIds, ids);
+    const [sobresRes, movsRes] = await Promise.all([
+      ids.length > 0
+        ? this.supabase.service
+            .from('cobro_grupo')
+            .select(
+              'id, grupo_id, monto, moneda, grupo:vuelo_grupo!grupo_id(folio)',
+            )
+            .in('id', ids)
+        : Promise.resolve({ data: [], error: null }),
+      filtro
+        ? this.supabase.service
+            .from('movimiento_bancario')
+            .select(MOV_LIGA_COLS)
+            .or(filtro)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (sobresRes.error) throw new Error(sobresRes.error.message);
+    if (movsRes.error) throw new Error(movsRes.error.message);
+    const movs = (movsRes.data ?? []) as MovimientoLiga[];
+    const porId = new Map<string, CobroGrupoResumen>();
+    for (const s of (sobresRes.data ?? []) as Array<Record<string, unknown>>) {
+      const g = s.grupo as { folio?: unknown } | { folio?: unknown }[] | null;
+      const folioRaw = Array.isArray(g) ? g[0]?.folio : g?.folio;
+      porId.set(s.id as string, {
+        id: s.id as string,
+        grupo_id: s.grupo_id as string,
+        grupo_folio: folioRaw == null ? null : Number(folioRaw),
+        monto_total: Number(s.monto) || 0,
+        moneda: (s.moneda as string) ?? 'USD',
+      });
+    }
+    return cobros.map((c) => {
+      const mov = movimientoDeCobro(
+        { id: c.id as string, cobro_grupo_id: c.cobro_grupo_id },
+        movs,
+      );
+      return {
+        ...c,
+        cobro_grupo:
+          typeof c.cobro_grupo_id === 'string'
+            ? (porId.get(c.cobro_grupo_id) ?? null)
+            : null,
+        conciliado: mov !== null,
+        movimiento_bancario_id:
+          mov && typeof mov.id === 'string' ? mov.id : null,
+      };
+    });
+  }
+
+  /**
+   * Destinatarios ÚNICOS del aviso `cobro_registrado` (oficina: ADMIN y
+   * FACTURACION, sin el actor). Lo usan el cobro por vuelo, el reembolso y
+   * el SOBRE de grupo (un solo aviso por sobre, no uno por parte).
+   */
+  notificarCobroRegistrado(payload: NotificationInput, actorId: string): void {
+    void this.notifications.notifyRole(Rol.ADMIN, payload, actorId);
+    void this.notifications.notifyRole(Rol.FACTURACION, payload, actorId);
+  }
+
+  /**
+   * Una parte de un SOBRE de grupo se edita/borra SOLO desde el grupo (el
+   * sobre concilia con el banco como un todo y Σ partes == sobre es
+   * invariante): 409 estructurado `COBRO_DE_GRUPO` para que el panel mande
+   * a "Cobros del grupo".
+   */
+  private async assertNoEsParteDeSobre(cobro: {
+    cobro_grupo_id?: unknown;
+  }): Promise<void> {
+    const sobreId = cobro.cobro_grupo_id;
+    if (typeof sobreId !== 'string' || !sobreId) return;
+    const { data } = await this.supabase.service
+      .from('cobro_grupo')
+      .select('id, grupo_id, grupo:vuelo_grupo!grupo_id(folio)')
+      .eq('id', sobreId)
+      .maybeSingle();
+    const g = data?.grupo as { folio?: unknown } | { folio?: unknown }[] | null;
+    const folioRaw = Array.isArray(g) ? g[0]?.folio : g?.folio;
+    const folio = folioRaw == null ? null : Number(folioRaw);
+    throw new ConflictException({
+      message: `Este cobro es parte del sobre del grupo G-${folio ?? '?'}: edítalo o elimínalo desde el grupo (Cobros del grupo).`,
+      error: 'COBRO_DE_GRUPO',
+      details: {
+        cobro_grupo_id: sobreId,
+        grupo_id: (data?.grupo_id as string | undefined) ?? null,
+        grupo_folio: folio,
+      },
+    });
   }
 
   async createCobro(
@@ -8709,6 +8878,7 @@ export class FlightsService {
     dto: CreateCobroDto,
     userId: string,
     rol?: Rol,
+    sobre?: CobroParteDeSobreOpts,
   ) {
     const vuelo = await this.findById(vueloId);
     // REGLA (cliente, 28-ago-2026): un vuelo CANCELADO puede tener cobros
@@ -8771,21 +8941,15 @@ export class FlightsService {
     // BRUTO que pagó el cliente (cobrado/cobrosEnUsd intactos).
     // Comisión por MONTO directo (el estado de cuenta trae pesos, no %):
     // manda sobre el %, y el % se deriva solo como referencia del reporte.
-    const comisionMontoDirecto =
-      Number(dto.comision_banco_monto) > 0
-        ? Math.round(Number(dto.comision_banco_monto) * 100) / 100
-        : null;
-    const comisionPct = comisionMontoDirecto
-      ? Math.round((comisionMontoDirecto / dto.monto) * 100 * 10000) / 10000
-      : Number(dto.comision_banco_pct) > 0
-        ? Number(dto.comision_banco_pct)
-        : null;
-    const comisionMonto =
-      comisionMontoDirecto ??
-      (comisionPct
-        ? Math.round(dto.monto * (comisionPct / 100) * 100) / 100
-        : null);
-    if (comisionMonto != null && comisionMonto >= dto.monto) {
+    // Regla ÚNICA (comision-bancaria.util): la comparte el sobre de grupo.
+    const comision = resolverComisionBancaria(
+      dto.monto,
+      dto.comision_banco_pct,
+      dto.comision_banco_monto,
+    );
+    const comisionPct = comision.pct;
+    const comisionMonto = comision.monto;
+    if (comision.excede) {
       throw new BadRequestException(
         'La comisión del banco no puede ser mayor o igual al monto del cobro.',
       );
@@ -8794,8 +8958,10 @@ export class FlightsService {
     // idempotencia): un cobro IDÉNTICO (vuelo + monto + moneda + método) del
     // que ya existe uno creado hace < 90 s es casi seguro el reintento del
     // outbox o un doble tap. Con client_request_id JAMÁS bloquea (la llave
-    // resuelve el reintento de forma exacta).
-    if (!dto.client_request_id) {
+    // resuelve el reintento de forma exacta). Una PARTE de sobre tampoco
+    // pasa por aquí: la ventana e idempotencia viven en el sobre (re-partir
+    // un sobre recrea partes idénticas en segundos y no es un duplicado).
+    if (!dto.client_request_id && !sobre) {
       const { data: gemelos } = await this.supabase.service
         .from('cobro_vuelo')
         .select('id, created_at')
@@ -8843,6 +9009,9 @@ export class FlightsService {
         // Idempotencia (29-ago): la misma llave colisiona en
         // uq_cobro_vuelo_client_request y devuelve el cobro existente.
         client_request_id: dto.client_request_id ?? null,
+        // Parte de un SOBRE de grupo (4-sep): liga + peso informativo.
+        cobro_grupo_id: sobre?.cobro_grupo_id ?? null,
+        grupo_factor: sobre?.grupo_factor ?? null,
         created_by: userId,
         updated_by: userId,
       })
@@ -8896,8 +9065,8 @@ export class FlightsService {
       },
       link: `/admin/flights/${vueloId}`,
     };
-    void this.notifications.notifyRole(Rol.ADMIN, payload, userId);
-    void this.notifications.notifyRole(Rol.FACTURACION, payload, userId);
+    // Parte de un sobre: el grupo avisa UNA vez por sobre, no N veces.
+    if (!sobre?.silenciarPush) this.notificarCobroRegistrado(payload, userId);
 
     return cobro!;
   }
@@ -8920,6 +9089,7 @@ export class FlightsService {
     vueloId: string,
     dto: CreateReembolsoDto,
     userId: string,
+    sobre?: CobroParteDeSobreOpts,
   ) {
     const vuelo = await this.findById(vueloId);
     // Un reembolso en MXN debe poder convertir a USD (TC del DTO o el de la
@@ -8953,8 +9123,9 @@ export class FlightsService {
     }
     const montoNegado = -Math.abs(dto.monto);
     // Misma ventana anti-doble-captura que createCobro cuando no viaja llave
-    // de idempotencia (doble clic del panel).
-    if (!dto.client_request_id) {
+    // de idempotencia (doble clic del panel). Parte de sobre: la ventana
+    // vive en el sobre.
+    if (!dto.client_request_id && !sobre) {
       const { data: gemelos } = await this.supabase.service
         .from('cobro_vuelo')
         .select('id, created_at')
@@ -8988,6 +9159,8 @@ export class FlightsService {
         registrado_por: userId,
         notas: `Reembolso: ${motivo}`,
         client_request_id: dto.client_request_id ?? null,
+        cobro_grupo_id: sobre?.cobro_grupo_id ?? null,
+        grupo_factor: sobre?.grupo_factor ?? null,
         created_by: userId,
         updated_by: userId,
       })
@@ -9035,8 +9208,7 @@ export class FlightsService {
       },
       link: `/admin/flights/${vueloId}`,
     };
-    void this.notifications.notifyRole(Rol.ADMIN, payload, userId);
-    void this.notifications.notifyRole(Rol.FACTURACION, payload, userId);
+    if (!sobre?.silenciarPush) this.notificarCobroRegistrado(payload, userId);
     return cobro!;
   }
 
@@ -9095,17 +9267,26 @@ export class FlightsService {
    * apuntando a un número que ya no existe y la conciliación se
    * sobreestimaría en silencio.
    */
-  private async assertCobroSinConciliar(cobroId: string): Promise<void> {
+  private async assertCobroSinConciliar(
+    cobro: CobroConciliable,
+  ): Promise<void> {
+    // Fuente única cobro-conciliado.util: liga directa (`cobro_id`) o, si
+    // el cobro es parte de un sobre de grupo, la liga del sobre
+    // (`cobro_grupo_id`) — el banco enlaza al sobre, nunca a la parte.
+    const sobreId = sobreDeCobro(cobro);
+    const filtro = filtroLigaCobros([cobro.id], sobreId ? [sobreId] : []);
+    if (!filtro) return;
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id')
-      .eq('cobro_id', cobroId)
-      .limit(1)
-      .maybeSingle();
+      .select(MOV_LIGA_COLS)
+      .or(filtro);
     if (error) throw new Error(error.message);
-    if (data) {
+    const mov = movimientoDeCobro(cobro, (data ?? []) as MovimientoLiga[]);
+    if (mov) {
       throw new ConflictException(
-        'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
+        sobreId && typeof mov.cobro_grupo_id === 'string'
+          ? 'Este cobro es parte de un sobre de grupo conciliado con un movimiento bancario. Desvincula el sobre primero en Conciliación.'
+          : 'Este cobro está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
       );
     }
   }
@@ -9118,11 +9299,13 @@ export class FlightsService {
   ): Promise<Record<string, unknown>> {
     const { data: existing, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, vuelo_id, monto, comision_banco_pct')
+      .select('id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id')
       .eq('id', cobroId)
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
     if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    // Parte de un SOBRE de grupo: se corrige desde el grupo (409 COBRO_DE_GRUPO).
+    await this.assertNoEsParteDeSobre(existing);
 
     // Editar el DINERO de un cobro conciliado rompería el cuadre con el banco
     // (la conciliación cruza por monto/neto y moneda). Referencia, fecha o
@@ -9141,7 +9324,12 @@ export class FlightsService {
         'Este movimiento es un reembolso: no se corrige su dinero — elimínalo y recaptúralo con el monto correcto.',
       );
     }
-    if (tocaDinero) await this.assertCobroSinConciliar(cobroId);
+    if (tocaDinero) {
+      await this.assertCobroSinConciliar({
+        id: cobroId,
+        cobro_grupo_id: existing.cobro_grupo_id,
+      });
+    }
 
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.monto !== undefined) patch.monto = dto.monto;
@@ -9214,14 +9402,20 @@ export class FlightsService {
   async deleteCobro(cobroId: string, userId: string): Promise<{ ok: true }> {
     const { data: existing, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, vuelo_id')
+      .select('id, vuelo_id, cobro_grupo_id')
       .eq('id', cobroId)
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
     if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    // Parte de un SOBRE de grupo: se elimina desde el grupo (borra el sobre
+    // completo o re-parte) — 409 COBRO_DE_GRUPO.
+    await this.assertNoEsParteDeSobre(existing);
     // Mismo candado que expenses.remove: borrar un cobro conciliado dejaría
     // el movimiento bancario cuadrado contra nada.
-    await this.assertCobroSinConciliar(cobroId);
+    await this.assertCobroSinConciliar({
+      id: cobroId,
+      cobro_grupo_id: existing.cobro_grupo_id,
+    });
     const { error } = await this.supabase.service
       .from('cobro_vuelo')
       .delete()

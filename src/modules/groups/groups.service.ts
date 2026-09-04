@@ -9,9 +9,23 @@ import {
   avionOcupadoEnFecha,
   avisoAvionOcupado,
 } from '../../common/avion-ocupado.util';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import {
+  movimientoDeSobre,
+  MOV_LIGA_COLS,
+  type MovimientoLiga,
+} from '../../common/cobro-conciliado.util';
 import { diaCancun } from '../../common/fecha-cancun.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
-import { FlightsService } from '../flights/flights.service';
+import { resolverComisionBancaria } from '../flights/comision-bancaria.util';
+import type {
+  CreateCobroDto,
+  CreateReembolsoDto,
+} from '../flights/dto/cobros.dto';
+import {
+  FlightsService,
+  type CobroParteDeSobreOpts,
+} from '../flights/flights.service';
 import type {
   CalculateQuoteDto,
   EscalaInputDto,
@@ -24,6 +38,7 @@ import type { ReviseQuoteDto } from '../quotes/dto/revise-quote.dto';
 import { QuotesService, type GrupoHijoOpts } from '../quotes/quotes.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { ArmarGrupoDto, AvionGrupoDto } from './dto/armar-grupo.dto';
+import type { CreateCobroGrupoDto } from './dto/cobro-grupo.dto';
 import type { CreateGrupoDto } from './dto/create-grupo.dto';
 import type {
   QuitarAvionDto,
@@ -53,6 +68,16 @@ import {
   type ProblemaGrupo,
   type TramoHijo,
 } from './grupo-armador.util';
+import {
+  cuadreSobre,
+  diagnosticoSobres,
+  ParticionCobroError,
+  particionCobroGrupo,
+  semaforoCobroGrupo,
+  type HijoParticionCobro,
+  type ParticionCobroResult,
+  type SemaforoCobro,
+} from './particion-cobro.util';
 
 // ===== Tipos de filas =====
 
@@ -155,6 +180,119 @@ export interface HijoRow {
 interface FichaRow extends FichaAvionArmador {
   velocidad_crucero_kts: number | null;
   pais_registro: string | null;
+}
+
+// ===== SOBRE de cobro (Fase 2, 4-sep-2026) =====
+
+const SOBRE_COLS =
+  'id, grupo_id, monto, moneda, metodo_cobro, tc_usd_mxn, comision_banco_pct, comision_banco_monto, cuenta_destino, referencia, foto_voucher_url, fecha_cobro, modo_particion, registrado_por, notas, client_request_id, created_at, updated_at';
+
+const PARTE_COLS =
+  'id, vuelo_id, cobro_grupo_id, monto, moneda, tc_usd_mxn, comision_banco_monto, grupo_factor, fecha_cobro, created_at';
+
+interface SobreRow {
+  id: string;
+  grupo_id: string;
+  monto: number | string;
+  moneda: string;
+  metodo_cobro: string;
+  tc_usd_mxn: number | string | null;
+  comision_banco_pct: number | string | null;
+  comision_banco_monto: number | string | null;
+  cuenta_destino: string | null;
+  referencia: string | null;
+  foto_voucher_url: string | null;
+  fecha_cobro: string;
+  modo_particion: string;
+  registrado_por: string | null;
+  notas: string | null;
+  client_request_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ParteRow {
+  id: string;
+  vuelo_id: string;
+  cobro_grupo_id: string;
+  monto: number | string;
+  moneda: string;
+  tc_usd_mxn: number | string | null;
+  comision_banco_monto: number | string | null;
+  grupo_factor: number | string | null;
+  fecha_cobro: string;
+  created_at: string;
+}
+
+export interface ParteSobreSalida {
+  cobro_vuelo_id: string;
+  vuelo_id: string;
+  folio: number | null;
+  posicion: number | null;
+  matricula: string | null;
+  monto: number;
+  factor: number | null;
+  comision_banco_monto: number | null;
+  /** La parte quedó en un hijo CANCELADO (quitado del grupo): re-partir. */
+  cancelado: boolean;
+}
+
+/** Sobre con sus partes — shape de GET /grupos/:id/cobros y de findOne.cobros. */
+export interface SobreSalida {
+  id: string;
+  grupo_id: string;
+  monto: number;
+  moneda: string;
+  metodo_cobro: string;
+  tc_usd_mxn: number | null;
+  comision_banco_pct: number | null;
+  comision_banco_monto: number | null;
+  /** monto − comisión (por diferencia; nunca se guarda). */
+  neto: number;
+  cuenta_destino: string | null;
+  referencia: string | null;
+  foto_voucher_url: string | null;
+  fecha_cobro: string;
+  modo_particion: string;
+  registrado_por: string | null;
+  notas: string | null;
+  client_request_id: string | null;
+  created_at: string;
+  updated_at: string;
+  es_reembolso: boolean;
+  partes: ParteSobreSalida[];
+  partes_suma: number;
+  /** Σ partes == monto (invariante del sobre). */
+  cuadra: boolean;
+  partes_en_cancelados: number;
+  /** Existe movimiento_bancario.cobro_grupo_id = sobre (el banco enlaza al sobre). */
+  conciliado: boolean;
+  movimiento_bancario_id: string | null;
+  recibo_disponible: boolean;
+}
+
+/** Entrada mínima para partir un sobre (DTO nuevo o sobre existente al re-partir). */
+interface EntradaSobre {
+  monto: number;
+  moneda: string;
+  tc_usd_mxn?: number | null;
+  comision_banco_pct?: number | null;
+  comision_banco_monto?: number | null;
+  modo?: 'AUTO' | 'MANUAL' | null;
+  particion_manual?: Array<{ vuelo_id: string; monto: number }> | null;
+}
+
+interface PreparacionSobre {
+  particion: ParticionCobroResult;
+  comision: { pct: number | null; monto: number | null };
+  avisos: string[];
+}
+
+function fmtMonto(n: number): string {
+  return n.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 interface SnapshotMin {
@@ -1509,19 +1647,24 @@ export class GroupsService {
   private hijoCongelado(h: HijoRow): string | null {
     if (h.facturado) return 'ya facturado';
     if (estadoAvanzado(h.estado) && h.cobrado) return 'ya cobrado';
-    if (h.fecha_vuelo) {
-      const ahoraCancun = new Date(Date.now() - 5 * 3_600_000);
-      const inicioMesAnterior =
-        Date.UTC(
-          ahoraCancun.getUTCFullYear(),
-          ahoraCancun.getUTCMonth() - 1,
-          1,
-        ) +
-        5 * 3_600_000;
-      if (new Date(h.fecha_vuelo).getTime() < inicioMesAnterior)
-        return 'mes cerrado';
-    }
+    if (this.hijoEnMesCerrado(h)) return 'mes cerrado';
     return null;
+  }
+
+  /**
+   * "Mes cerrado" = fecha_vuelo del hijo anterior al inicio del mes pasado
+   * en hora Cancún (UTC−5). Regla ÚNICA para el candado de revisión del
+   * grupo y para eliminar/re-partir un sobre de cobro: se evalúa por
+   * separado de `hijoCongelado` porque ahí 'ya facturado'/'ya cobrado'
+   * ganan y ocultarían el mes cerrado.
+   */
+  private hijoEnMesCerrado(h: HijoRow): boolean {
+    if (!h.fecha_vuelo) return false;
+    const ahoraCancun = new Date(Date.now() - 5 * 3_600_000);
+    const inicioMesAnterior =
+      Date.UTC(ahoraCancun.getUTCFullYear(), ahoraCancun.getUTCMonth() - 1, 1) +
+      5 * 3_600_000;
+    return new Date(h.fecha_vuelo).getTime() < inicioMesAnterior;
   }
 
   private async gastosPorHijo(ids: string[]) {
@@ -1667,6 +1810,15 @@ export class GroupsService {
         .filter((a) => !a.cancelado)
         .reduce((acc, a) => acc + a.cobrado_usd, 0),
     );
+    // SOBRES de cobro (Fase 2): agrupación + conciliación; el dinero sigue
+    // saliendo de cobrosEnUsd por hijo (cobrado_usd/semáforos de arriba).
+    const sobres = await this.sobresDeGrupo(cab.id, hijos, fichas);
+    const semaforoGrupo = semaforoCobroGrupo(
+      aviones
+        .filter((a) => !a.cancelado)
+        .map((a) => a.semaforo_cobro as SemaforoCobro),
+    );
+    const problemasSobres = this.problemasDeSobres(cab.folio, sobres);
     const estado: EstadoGrupo = estadoGrupoDe(hijos, cab.cancelado_at);
     const cliente = unwrap(cab.cliente);
     const { cliente: _c, ...cabPlano } = cab;
@@ -1692,6 +1844,8 @@ export class GroupsService {
       consolidado,
       cobrado_usd: cobradoTotal,
       saldo_usd: round2(consolidado.total_usd - cobradoTotal),
+      semaforo_cobro_grupo: semaforoGrupo,
+      cobros: sobres,
       operacion: {
         llegadas_faltantes: aviones
           .filter((a) => !a.cancelado)
@@ -1716,8 +1870,8 @@ export class GroupsService {
             estado_permiso: a.estado_permiso,
           })),
       },
-      problemas,
-      avisos: problemas.map((p) => p.detalle),
+      problemas: [...problemas, ...problemasSobres],
+      avisos: [...problemas, ...problemasSobres].map((p) => p.detalle),
     };
   }
 
@@ -2516,6 +2670,10 @@ export class GroupsService {
       }
     }
     const motivo = dto.motivo?.trim() || 'Quitado del grupo';
+    // Partes de SOBRE en el hijo que sale: se quedan en el vuelo cancelado
+    // (fuera del cobrado del grupo) hasta que oficina re-parta — decisión
+    // pendiente del cliente, por eso NO se re-parte solo: se avisa.
+    const partesSobre = await this.contarPartesDeSobre(vueloId);
     await this.flights.cancel(
       vueloId,
       `${motivo} (grupo G-${cab.folio})`,
@@ -2525,6 +2683,11 @@ export class GroupsService {
       },
     );
     const avisos: string[] = [];
+    if (partesSobre > 0) {
+      avisos.push(
+        `El avión #${hijo.folio} tiene ${partesSobre} cobro(s) de sobre: re-parte los sobres desde Cobros del grupo para que ese dinero pase a los aviones que sí vuelan.`,
+      );
+    }
     if (rematerializar) {
       // El hijo YA está cancelado: un fallo al re-repartir no puede
       // responder 4xx como si nada hubiera pasado — se informa y el grupo
@@ -2596,6 +2759,14 @@ export class GroupsService {
       avisos.push(
         `El vuelo #${hijo.folio} quedó cancelado; el avión ${hijo.grupo_posicion ?? ''} ahora es el #${clon.folio}.`,
       );
+      // Las partes de sobre viajan al clon (UPDATE de vuelo_id): el dinero
+      // sigue en el avión vivo; solo si el precio cambia conviene re-partir.
+      const partesSobre = await this.contarPartesDeSobre(clon.id);
+      if (partesSobre > 0) {
+        avisos.push(
+          `Tiene ${partesSobre} cobro(s) de sobre: pasaron al vuelo #${clon.folio}. Si recotizas y cambia el precio, re-parte los sobres desde Cobros del grupo.`,
+        );
+      }
       if (dto.piloto_id) {
         const r = (await this.flights.assign(
           clon.id,
@@ -2709,6 +2880,844 @@ export class GroupsService {
         armado.ctx.aviones.length,
       ),
     );
+  }
+
+  // =====================================================================
+  // SOBRE de cobro del grupo (Fase 2, 4-sep-2026)
+  //
+  // Un pago único del cliente = `cobro_grupo` (el sobre) partido en N
+  // `cobro_vuelo` por el MISMO camino que el cobro por vuelo
+  // (flights.createCobro / createReembolso con opts internos): cada peso
+  // vive en exactamente UN cobro_vuelo, cobrosEnUsd sigue leyendo solo
+  // cobro_vuelo, y el banco concilia contra el sobre (1 abono ↔ 1 sobre).
+  // =====================================================================
+
+  private async cargarSobre(id: string): Promise<SobreRow> {
+    const { data, error } = await this.supabase.service
+      .from('cobro_grupo')
+      .select(SOBRE_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException(`Cobro de grupo ${id} no encontrado`);
+    }
+    return data;
+  }
+
+  private async cargarSobresDeGrupo(grupoId: string): Promise<SobreRow[]> {
+    const { data, error } = await this.supabase.service
+      .from('cobro_grupo')
+      .select(SOBRE_COLS)
+      .eq('grupo_id', grupoId)
+      .order('fecha_cobro', { ascending: false })
+      .order('created_at', { ascending: false });
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  private async cargarPartes(sobreIds: string[]): Promise<ParteRow[]> {
+    if (sobreIds.length === 0) return [];
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select(PARTE_COLS)
+      .in('cobro_grupo_id', sobreIds)
+      .limit(10000);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /**
+   * Abonos del banco enlazados a estos sobres (uq_mov_bancario_cobro_grupo:
+   * 1 ↔ 1). La decisión "conciliado" la toma la fuente única
+   * `cobro-conciliado.util` (movimientoDeSobre) sobre estas filas.
+   */
+  private async movimientosDeSobres(
+    sobreIds: string[],
+  ): Promise<MovimientoLiga[]> {
+    if (sobreIds.length === 0) return [];
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(MOV_LIGA_COLS)
+      .in('cobro_grupo_id', sobreIds);
+    if (error) throw new Error(error.message);
+    return data ?? [];
+  }
+
+  /**
+   * Candado de conciliación del SOBRE (espejo de assertCobroSinConciliar):
+   * el banco enlaza al sobre, así que borrarlo dejaría el movimiento
+   * "conciliado" contra nada. Las partes nunca tienen movimiento propio.
+   */
+  private async assertSobreSinConciliar(sobreId: string): Promise<void> {
+    const mov = movimientoDeSobre(
+      sobreId,
+      await this.movimientosDeSobres([sobreId]),
+    );
+    const movId = mov && typeof mov.id === 'string' ? mov.id : null;
+    if (movId) {
+      throw new ConflictException({
+        message:
+          'Este cobro del grupo está conciliado con un movimiento bancario. Desvincúlalo primero en Conciliación.',
+        error: 'COBRO_CONCILIADO',
+        details: { cobro_grupo_id: sobreId, movimiento_bancario_id: movId },
+      });
+    }
+  }
+
+  /** Partes de sobre que viven en un vuelo (aviso al quitar/reemplazar). */
+  private async contarPartesDeSobre(vueloId: string): Promise<number> {
+    const { count, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('id', { count: 'exact', head: true })
+      .eq('vuelo_id', vueloId)
+      .not('cobro_grupo_id', 'is', null);
+    if (error) {
+      this.logger.warn(`contarPartesDeSobre ${vueloId}: ${error.message}`);
+      return 0;
+    }
+    return count ?? 0;
+  }
+
+  private armarSobreSalida(
+    sobre: SobreRow,
+    partes: ParteRow[],
+    hijosPorId: Map<string, HijoRow>,
+    fichas: Map<string, FichaRow>,
+    movs: ReadonlyArray<MovimientoLiga>,
+  ): SobreSalida {
+    const monto = round2(num(sobre.monto));
+    const propias: ParteSobreSalida[] = partes
+      .filter((p) => p.cobro_grupo_id === sobre.id)
+      .map((p) => {
+        const h = hijosPorId.get(p.vuelo_id);
+        return {
+          cobro_vuelo_id: p.id,
+          vuelo_id: p.vuelo_id,
+          folio: h?.folio ?? null,
+          posicion: h?.grupo_posicion ?? null,
+          matricula: h?.aeronave_id
+            ? (fichas.get(h.aeronave_id)?.matricula ?? null)
+            : null,
+          monto: round2(num(p.monto)),
+          factor: p.grupo_factor == null ? null : Number(p.grupo_factor),
+          comision_banco_monto:
+            p.comision_banco_monto == null
+              ? null
+              : round2(num(p.comision_banco_monto)),
+          cancelado: h?.estado === 'CANCELADO',
+        };
+      })
+      .sort(
+        (a, b) =>
+          (a.posicion ?? 9999) - (b.posicion ?? 9999) ||
+          (a.folio ?? 0) - (b.folio ?? 0),
+      );
+    // Cuadre Σ partes == sobre: misma función pura que el pre-cierre y la
+    // alerta diaria (cuadreSobre).
+    const cuadre = cuadreSobre({ monto, partes: propias });
+    const comision =
+      sobre.comision_banco_monto == null
+        ? null
+        : round2(num(sobre.comision_banco_monto));
+    const mov = movimientoDeSobre(sobre.id, movs);
+    const movId = mov && typeof mov.id === 'string' ? mov.id : null;
+    return {
+      id: sobre.id,
+      grupo_id: sobre.grupo_id,
+      monto,
+      moneda: sobre.moneda,
+      metodo_cobro: sobre.metodo_cobro,
+      tc_usd_mxn: sobre.tc_usd_mxn == null ? null : Number(sobre.tc_usd_mxn),
+      comision_banco_pct:
+        sobre.comision_banco_pct == null
+          ? null
+          : Number(sobre.comision_banco_pct),
+      comision_banco_monto: comision,
+      neto: comision == null ? monto : round2(monto - comision),
+      cuenta_destino: sobre.cuenta_destino,
+      referencia: sobre.referencia,
+      foto_voucher_url: sobre.foto_voucher_url,
+      fecha_cobro: sobre.fecha_cobro,
+      modo_particion: sobre.modo_particion,
+      registrado_por: sobre.registrado_por,
+      notas: sobre.notas,
+      client_request_id: sobre.client_request_id,
+      created_at: sobre.created_at,
+      updated_at: sobre.updated_at,
+      es_reembolso: monto < 0,
+      partes: propias,
+      partes_suma: cuadre.suma_partes,
+      cuadra: cuadre.cuadra,
+      partes_en_cancelados: cuadre.partes_en_cancelados,
+      conciliado: movId != null,
+      movimiento_bancario_id: movId,
+      recibo_disponible: monto > 0,
+    };
+  }
+
+  /** Sobres del grupo con sus partes (una consulta por tabla). */
+  private async sobresDeGrupo(
+    grupoId: string,
+    hijos: HijoRow[],
+    fichas: Map<string, FichaRow>,
+  ): Promise<SobreSalida[]> {
+    const sobres = await this.cargarSobresDeGrupo(grupoId);
+    if (sobres.length === 0) return [];
+    const ids = sobres.map((s) => s.id);
+    const [partes, movs] = await Promise.all([
+      this.cargarPartes(ids),
+      this.movimientosDeSobres(ids),
+    ]);
+    const hijosPorId = new Map(hijos.map((h) => [h.id, h]));
+    return sobres.map((s) =>
+      this.armarSobreSalida(s, partes, hijosPorId, fichas, movs),
+    );
+  }
+
+  private async sobrePorId(sobreId: string): Promise<SobreSalida> {
+    const sobre = await this.cargarSobre(sobreId);
+    const hijos = await this.cargarHijos(sobre.grupo_id);
+    const [fichas, partes, movs] = await Promise.all([
+      this.cargarFichas(hijos.map((h) => h.aeronave_id ?? '').filter(Boolean)),
+      this.cargarPartes([sobreId]),
+      this.movimientosDeSobres([sobreId]),
+    ]);
+    return this.armarSobreSalida(
+      sobre,
+      partes,
+      new Map(hijos.map((h) => [h.id, h])),
+      fichas,
+      movs,
+    );
+  }
+
+  /**
+   * Problemas tipo SOBRE del grupo — fuente única `diagnosticoSobres`
+   * (particion-cobro.util): el MISMO texto que la alerta diaria
+   * `grupo_desincronizado` y el pre-cierre (`sobres_descuadrados`).
+   */
+  private problemasDeSobres(
+    grupoFolio: number | null,
+    sobres: ReadonlyArray<SobreSalida>,
+  ): ProblemaGrupo[] {
+    return diagnosticoSobres(
+      grupoFolio,
+      sobres.map((s) => ({
+        id: s.id,
+        monto: s.monto,
+        moneda: s.moneda,
+        fecha_cobro: s.fecha_cobro,
+        partes: s.partes,
+      })),
+    );
+  }
+
+  /** GET /v1/grupos/:id/cobros */
+  async listarCobros(grupoId: string) {
+    const cab = await this.cargarCabecera(grupoId);
+    const hijos = await this.cargarHijos(grupoId);
+    const fichas = await this.cargarFichas(
+      hijos.map((h) => h.aeronave_id ?? '').filter(Boolean),
+    );
+    const cobros = await this.sobresDeGrupo(grupoId, hijos, fichas);
+    return {
+      grupo_id: cab.id,
+      folio_texto: `G-${cab.folio}`,
+      cobros,
+      avisos: this.problemasDeSobres(cab.folio, cobros).map((p) => p.detalle),
+    };
+  }
+
+  private traducirParticionError(err: unknown): Error {
+    if (err instanceof ParticionCobroError) {
+      if (err.code === 'REEMBOLSO_EXCEDE') {
+        return new ConflictException({
+          message: err.message,
+          error: 'REEMBOLSO_EXCEDE',
+          details: err.details,
+        });
+      }
+      return new BadRequestException({
+        message: err.message,
+        error: err.code,
+        details: err.details,
+      });
+    }
+    return err instanceof Error ? err : new Error(String(err));
+  }
+
+  /**
+   * Resuelve TC, comisión (regla única) y la partición del sobre con los
+   * saldos VIVOS de cada hijo (fuente única cobroStatus → cobrosEnUsd). Al
+   * re-partir, lo cobrado se mide SIN las partes del propio sobre.
+   */
+  private async prepararSobre(
+    cab: CabeceraRow,
+    entrada: EntradaSobre,
+    opts: { excluirSobreId?: string } = {},
+  ): Promise<PreparacionSobre> {
+    const hijos = await this.cargarHijos(cab.id);
+    const ids = hijos.map((h) => h.id);
+    const [fichas, cobrado, viejas] = await Promise.all([
+      this.cargarFichas(hijos.map((h) => h.aeronave_id ?? '').filter(Boolean)),
+      ids.length
+        ? this.flights.cobroStatus(ids)
+        : Promise.resolve(
+            {} as Record<
+              string,
+              { total_cobrado: number; sin_tc_count: number }
+            >,
+          ),
+      opts.excluirSobreId
+        ? this.cargarPartes([opts.excluirSobreId])
+        : Promise.resolve([] as ParteRow[]),
+    ]);
+    const restar = new Map<string, number>();
+    for (const h of hijos) {
+      const propias = viejas.filter((p) => p.vuelo_id === h.id);
+      if (propias.length > 0) {
+        restar.set(
+          h.id,
+          cobrosEnUsd(propias, num(h.tc_usd_mxn) || null).total_usd,
+        );
+      }
+    }
+    const esMxn = entrada.moneda === 'MXN';
+    const tcDto = Number(entrada.tc_usd_mxn);
+    const tc =
+      tcDto > 0
+        ? tcDto
+        : esMxn && num(cab.tc_usd_mxn) > 0
+          ? num(cab.tc_usd_mxn)
+          : null;
+    const monto = round2(num(entrada.monto));
+    if (
+      monto < 0 &&
+      (num(entrada.comision_banco_pct) > 0 ||
+        num(entrada.comision_banco_monto) > 0)
+    ) {
+      throw new BadRequestException(
+        'Un reembolso del grupo no lleva comisión bancaria: el cargo del banco se registra aparte.',
+      );
+    }
+    const comision =
+      monto > 0
+        ? resolverComisionBancaria(
+            monto,
+            entrada.comision_banco_pct,
+            entrada.comision_banco_monto,
+          )
+        : { pct: null, monto: null, excede: false };
+    if (comision.excede) {
+      throw new BadRequestException(
+        'La comisión del banco no puede ser mayor o igual al monto del cobro.',
+      );
+    }
+    const avisos: string[] = [];
+    const hijosParticion: HijoParticionCobro[] = hijos.map((h) => {
+      const c = cobrado[h.id];
+      if (c?.sin_tc_count && h.estado !== 'CANCELADO') {
+        avisos.push(
+          `El avión ${h.grupo_posicion ?? '?'} (#${h.folio}) tiene ${c.sin_tc_count} cobro(s) en MXN sin tipo de cambio: no cuentan en su saldo.`,
+        );
+      }
+      return {
+        vuelo_id: h.id,
+        folio: h.folio,
+        posicion: h.grupo_posicion,
+        matricula: h.aeronave_id
+          ? (fichas.get(h.aeronave_id)?.matricula ?? null)
+          : null,
+        total_usd: num(h.monto_total_usd),
+        cobrado_usd: round2((c?.total_cobrado ?? 0) - (restar.get(h.id) ?? 0)),
+        es_ancla: cab.vuelo_ancla_id === h.id,
+        cancelado: h.estado === 'CANCELADO',
+      };
+    });
+    let particion: ParticionCobroResult;
+    try {
+      particion = particionCobroGrupo({
+        monto,
+        moneda: esMxn ? 'MXN' : 'USD',
+        tc,
+        comision_banco_monto: comision.monto,
+        hijos: hijosParticion,
+        modo: entrada.modo ?? 'AUTO',
+        particion_manual: entrada.particion_manual ?? null,
+      });
+    } catch (err) {
+      throw this.traducirParticionError(err);
+    }
+    return {
+      particion,
+      comision: { pct: comision.pct, monto: comision.monto },
+      avisos: [...avisos, ...particion.avisos],
+    };
+  }
+
+  /** POST /v1/grupos/:id/cobros/previsualizar (sin escribir). */
+  async previsualizarCobro(grupoId: string, dto: CreateCobroGrupoDto) {
+    const cab = await this.cargarCabecera(grupoId);
+    if (cab.cancelado_at) {
+      throw new ConflictException(
+        'El grupo está cancelado: los cargos por cancelación se registran en cada vuelo.',
+      );
+    }
+    const prep = await this.prepararSobre(cab, dto);
+    const p = prep.particion;
+    return {
+      grupo_id: cab.id,
+      folio_texto: `G-${cab.folio}`,
+      modo_particion: p.modo_particion,
+      monto: p.monto,
+      moneda: p.moneda,
+      monto_usd: p.monto_usd,
+      tc_usd_mxn: p.tc,
+      comision_banco_pct: prep.comision.pct,
+      comision_banco_monto: prep.comision.monto,
+      neto:
+        prep.comision.monto == null
+          ? p.monto
+          : round2(p.monto - prep.comision.monto),
+      partes: p.partes,
+      verificacion: p.verificacion,
+      avisos: prep.avisos,
+    };
+  }
+
+  /**
+   * Escribe UNA parte por el mismo camino que el cobro/reembolso por vuelo
+   * (comisión, TC, refreshCobradoFlag; sin push ni ventana: son del sobre).
+   */
+  private async crearParte(
+    cab: CabeceraRow,
+    sobre: SobreRow,
+    parte: {
+      vuelo_id: string;
+      monto: number;
+      factor: number | null;
+      comision_banco_monto: number | null;
+      tc: number | null;
+    },
+    userId: string,
+  ): Promise<void> {
+    const opts: CobroParteDeSobreOpts = {
+      cobro_grupo_id: sobre.id,
+      grupo_factor: parte.factor,
+      silenciarPush: true,
+    };
+    const fecha = sobre.fecha_cobro ? new Date(sobre.fecha_cobro) : undefined;
+    const moneda = sobre.moneda as CreateCobroDto['moneda'];
+    const metodo = sobre.metodo_cobro as CreateCobroDto['metodo_cobro'];
+    if (parte.monto > 0) {
+      const dtoParte: CreateCobroDto = {
+        monto: parte.monto,
+        moneda,
+        metodo_cobro: metodo,
+        tc_usd_mxn: parte.tc ?? undefined,
+        comision_banco_monto: parte.comision_banco_monto ?? undefined,
+        cuenta_destino: sobre.cuenta_destino ?? undefined,
+        referencia: sobre.referencia ?? undefined,
+        fecha_cobro: fecha,
+        foto_voucher_url: sobre.foto_voucher_url ?? undefined,
+        notas: sobre.notas ?? undefined,
+      };
+      await this.flights.createCobro(
+        parte.vuelo_id,
+        dtoParte,
+        userId,
+        undefined,
+        opts,
+      );
+      return;
+    }
+    const dtoReembolso: CreateReembolsoDto = {
+      monto: Math.abs(parte.monto),
+      moneda,
+      metodo_cobro: metodo,
+      tc_usd_mxn: parte.tc ?? undefined,
+      cuenta_destino: sobre.cuenta_destino ?? undefined,
+      referencia: sobre.referencia ?? undefined,
+      fecha_cobro: fecha,
+      motivo:
+        sobre.notas?.trim() || `Reembolso del sobre del grupo G-${cab.folio}`,
+    };
+    await this.flights.createReembolso(
+      parte.vuelo_id,
+      dtoReembolso,
+      userId,
+      opts,
+    );
+  }
+
+  private async escribirPartes(
+    cab: CabeceraRow,
+    sobre: SobreRow,
+    prep: PreparacionSobre,
+    userId: string,
+  ): Promise<void> {
+    for (const parte of prep.particion.partes) {
+      try {
+        await this.crearParte(
+          cab,
+          sobre,
+          {
+            vuelo_id: parte.vuelo_id,
+            monto: parte.monto,
+            factor: parte.factor,
+            comision_banco_monto: parte.comision_banco_monto,
+            tc: prep.particion.tc,
+          },
+          userId,
+        );
+      } catch (err) {
+        throw new Error(
+          `avión ${parte.posicion ?? '?'} (#${parte.folio ?? '?'}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  /** Borra todas las partes del sobre; devuelve los vuelos tocados. */
+  private async borrarPartes(sobreId: string): Promise<string[]> {
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .delete()
+      .eq('cobro_grupo_id', sobreId)
+      .select('vuelo_id');
+    if (error) throw new Error(error.message);
+    return [...new Set((data ?? []).map((r) => r.vuelo_id as string))];
+  }
+
+  /** Bandera `cobrado` de cada hijo tocado — best-effort (el dinero ya está). */
+  private async refrescarCobrado(
+    vueloIds: string[],
+    userId: string,
+  ): Promise<void> {
+    for (const id of new Set(vueloIds)) {
+      try {
+        await this.flights.refreshCobradoFlag(id, userId);
+      } catch (err) {
+        this.logger.error(
+          `refrescarCobrado ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Revierte un sobre a medio escribir: partes + sobre (best-effort, con
+   * log). Devuelve `true` solo si NO quedó nada en BD — el mensaje al
+   * operador depende de eso (jamás decir "no se guardó nada" en falso).
+   */
+  private async compensarSobre(
+    sobreId: string,
+    userId: string,
+  ): Promise<boolean> {
+    try {
+      const vuelos = await this.borrarPartes(sobreId);
+      const { error } = await this.supabase.service
+        .from('cobro_grupo')
+        .delete()
+        .eq('id', sobreId);
+      if (error) throw new Error(error.message);
+      await this.refrescarCobrado(vuelos, userId);
+      return true;
+    } catch (err) {
+      this.logger.error(
+        `compensarSobre ${sobreId}: no se pudo revertir por completo (${err instanceof Error ? err.message : String(err)}). El sobre puede quedar descuadrado: elimínalo desde Cobros del grupo.`,
+      );
+      return false;
+    }
+  }
+
+  private assertPartesFueraDeMesCerrado(
+    cab: CabeceraRow,
+    hijos: HijoRow[],
+    partes: ParteRow[],
+    accion: string,
+  ): void {
+    const conParte = new Set(partes.map((p) => p.vuelo_id));
+    const cerrados = hijos.filter(
+      (h) => conParte.has(h.id) && this.hijoEnMesCerrado(h),
+    );
+    if (cerrados.length > 0) {
+      throw new ConflictException({
+        message: `No se puede ${accion} el cobro del grupo G-${cab.folio}: tiene partes en vuelos de un mes ya cerrado (${cerrados
+          .map((h) => `#${h.folio}`)
+          .join(', ')}).`,
+        error: 'MES_CERRADO',
+        details: cerrados.map((h) => ({
+          vuelo_id: h.id,
+          folio: h.folio,
+          posicion: h.grupo_posicion,
+          fecha_vuelo: h.fecha_vuelo,
+        })),
+      });
+    }
+  }
+
+  /**
+   * POST /v1/grupos/:id/cobros — registra el sobre y sus N partes.
+   * Idempotente por client_request_id (devuelve el existente con
+   * `idempotente: true` → 200). Compensación total si falla una parte.
+   */
+  async registrarCobro(
+    grupoId: string,
+    dto: CreateCobroGrupoDto,
+    userId: string,
+  ): Promise<{ sobre: SobreSalida; idempotente: boolean }> {
+    const sb = this.supabase.service;
+    const cab = await this.cargarCabecera(grupoId);
+    if (cab.cancelado_at) {
+      throw new ConflictException(
+        'El grupo está cancelado: los cargos por cancelación se registran en cada vuelo.',
+      );
+    }
+    if (dto.client_request_id) {
+      const { data: ya, error } = await sb
+        .from('cobro_grupo')
+        .select('id')
+        .eq('client_request_id', dto.client_request_id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (ya) {
+        this.logger.log(
+          `Sobre idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el sobre ${ya.id as string}.`,
+        );
+        return {
+          sobre: await this.sobrePorId(ya.id as string),
+          idempotente: true,
+        };
+      }
+    }
+    const prep = await this.prepararSobre(cab, dto);
+    const p = prep.particion;
+    // Ventana anti-duplicado de 90 s a nivel SOBRE (doble clic sin llave).
+    if (!dto.client_request_id) {
+      const { data: gemelos } = await sb
+        .from('cobro_grupo')
+        .select('id, created_at')
+        .eq('grupo_id', cab.id)
+        .eq('monto', p.monto)
+        .eq('moneda', p.moneda)
+        .eq('metodo_cobro', dto.metodo_cobro)
+        .gte('created_at', new Date(Date.now() - 90_000).toISOString())
+        .limit(1);
+      if ((gemelos ?? []).length > 0) {
+        throw new ConflictException(
+          'Parece el mismo cobro del grupo repetido: ya hay uno idéntico registrado hace menos de 90 segundos. Si de verdad son dos pagos iguales, espera un momento e inténtalo de nuevo.',
+        );
+      }
+    }
+    const { data: sobreData, error: insErr } = await sb
+      .from('cobro_grupo')
+      .insert({
+        grupo_id: cab.id,
+        monto: p.monto,
+        moneda: p.moneda,
+        metodo_cobro: dto.metodo_cobro,
+        tc_usd_mxn: p.tc,
+        comision_banco_pct: prep.comision.pct,
+        comision_banco_monto: prep.comision.monto,
+        cuenta_destino: dto.cuenta_destino?.trim() || null,
+        referencia: dto.referencia?.trim() || null,
+        foto_voucher_url: dto.foto_voucher_url ?? null,
+        fecha_cobro: (dto.fecha_cobro ?? new Date()).toISOString(),
+        modo_particion: p.modo_particion,
+        registrado_por: userId,
+        notas: dto.notas?.trim() || null,
+        client_request_id: dto.client_request_id ?? null,
+        created_by: userId,
+        updated_by: userId,
+      })
+      .select(SOBRE_COLS)
+      .maybeSingle();
+    if (insErr) {
+      if (
+        insErr.code === '23505' &&
+        dto.client_request_id &&
+        insErr.message.includes('uq_cobro_grupo_client_request')
+      ) {
+        const { data: ya } = await sb
+          .from('cobro_grupo')
+          .select('id')
+          .eq('client_request_id', dto.client_request_id)
+          .maybeSingle();
+        if (ya) {
+          return {
+            sobre: await this.sobrePorId(ya.id as string),
+            idempotente: true,
+          };
+        }
+      }
+      throw new Error(insErr.message);
+    }
+    const sobre = sobreData as SobreRow;
+    try {
+      await this.escribirPartes(cab, sobre, prep, userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `registrarCobro G-${cab.folio}: falló una parte (${msg}); se revierte el sobre ${sobre.id}.`,
+      );
+      const revertido = await this.compensarSobre(sobre.id, userId);
+      throw new ConflictException(
+        revertido
+          ? `No se pudo registrar el cobro del grupo G-${cab.folio}: ${msg}. No se guardó nada.`
+          : `No se pudo registrar el cobro del grupo G-${cab.folio}: ${msg}. El sobre quedó a medias: revísalo en Cobros del grupo (elimínalo o re-pártelo) antes de volver a capturarlo.`,
+      );
+    }
+    // UN aviso por sobre (no uno por avión), a quien hoy recibe cobro_registrado.
+    const n = p.partes.length;
+    this.flights.notificarCobroRegistrado(
+      {
+        tipo: 'cobro_registrado',
+        titulo: p.monto < 0 ? 'Reembolso registrado' : 'Cobro registrado',
+        cuerpo: `Grupo G-${cab.folio} · $${fmtMonto(Math.abs(p.monto))} ${p.moneda} · ${n} avión${n === 1 ? '' : 'es'}`,
+        data: {
+          grupo_id: cab.id,
+          grupo_folio: cab.folio,
+          cobro_grupo_id: sobre.id,
+          monto: p.monto,
+          moneda: p.moneda,
+          aviones: n,
+          modo_particion: p.modo_particion,
+        },
+        link: `/admin/quotes/grupo/${cab.id}`,
+      },
+      userId,
+    );
+    return { sobre: await this.sobrePorId(sobre.id), idempotente: false };
+  }
+
+  /** DELETE /v1/grupos/cobros/:cobroGrupoId — borra las N partes y el sobre. */
+  async eliminarCobro(cobroGrupoId: string, userId: string) {
+    const sobre = await this.cargarSobre(cobroGrupoId);
+    const cab = await this.cargarCabecera(sobre.grupo_id);
+    await this.assertSobreSinConciliar(sobre.id);
+    const [partes, hijos] = await Promise.all([
+      this.cargarPartes([sobre.id]),
+      this.cargarHijos(cab.id),
+    ]);
+    this.assertPartesFueraDeMesCerrado(cab, hijos, partes, 'eliminar');
+    const vuelos = await this.borrarPartes(sobre.id);
+    const { error } = await this.supabase.service
+      .from('cobro_grupo')
+      .delete()
+      .eq('id', sobre.id);
+    if (error) {
+      this.logger.error(
+        `eliminarCobro ${sobre.id}: las ${partes.length} partes se eliminaron pero el sobre no: ${error.message}`,
+      );
+      throw new Error(error.message);
+    }
+    await this.refrescarCobrado(vuelos, userId);
+    return {
+      ok: true as const,
+      cobro_grupo_id: sobre.id,
+      grupo_id: cab.id,
+      partes_eliminadas: partes.length,
+      vuelos,
+    };
+  }
+
+  /**
+   * POST /v1/grupos/cobros/:id/repartir — regenera las partes SOLO entre los
+   * hijos vivos con la regla AUTO (un avión se canceló o se agregó). Segura
+   * porque el banco enlaza al sobre, no a las partes. Si falla, las partes
+   * anteriores se restauran por el mismo camino.
+   */
+  async repartirCobro(cobroGrupoId: string, userId: string) {
+    const sb = this.supabase.service;
+    const sobre = await this.cargarSobre(cobroGrupoId);
+    const cab = await this.cargarCabecera(sobre.grupo_id);
+    if (cab.cancelado_at) {
+      throw new ConflictException(
+        'El grupo está cancelado: no se re-parten sus cobros.',
+      );
+    }
+    const [partesViejas, hijos] = await Promise.all([
+      this.cargarPartes([sobre.id]),
+      this.cargarHijos(cab.id),
+    ]);
+    this.assertPartesFueraDeMesCerrado(cab, hijos, partesViejas, 're-partir');
+    const prep = await this.prepararSobre(
+      cab,
+      {
+        monto: num(sobre.monto),
+        moneda: sobre.moneda,
+        tc_usd_mxn: sobre.tc_usd_mxn == null ? null : Number(sobre.tc_usd_mxn),
+        comision_banco_pct:
+          sobre.comision_banco_pct == null
+            ? null
+            : Number(sobre.comision_banco_pct),
+        comision_banco_monto:
+          sobre.comision_banco_monto == null
+            ? null
+            : Number(sobre.comision_banco_monto),
+        modo: 'AUTO',
+      },
+      { excluirSobreId: sobre.id },
+    );
+    const vuelosViejos = await this.borrarPartes(sobre.id);
+    try {
+      await this.escribirPartes(cab, sobre, prep, userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      try {
+        await this.borrarPartes(sobre.id);
+        for (const v of partesViejas) {
+          await this.crearParte(
+            cab,
+            sobre,
+            {
+              vuelo_id: v.vuelo_id,
+              monto: round2(num(v.monto)),
+              factor: v.grupo_factor == null ? null : Number(v.grupo_factor),
+              comision_banco_monto:
+                v.comision_banco_monto == null
+                  ? null
+                  : round2(num(v.comision_banco_monto)),
+              tc: v.tc_usd_mxn == null ? null : Number(v.tc_usd_mxn),
+            },
+            userId,
+          );
+        }
+        await this.refrescarCobrado(vuelosViejos, userId);
+      } catch (err2) {
+        this.logger.error(
+          `repartirCobro ${sobre.id}: no se restauraron las partes anteriores: ${err2 instanceof Error ? err2.message : String(err2)}`,
+        );
+        throw new ConflictException(
+          `No se pudo re-partir el cobro del grupo G-${cab.folio}: ${msg}. Además no se pudieron restaurar las partes anteriores: revisa el sobre en Cobros del grupo.`,
+        );
+      }
+      throw new ConflictException(
+        `No se pudo re-partir el cobro del grupo G-${cab.folio}: ${msg}. Las partes anteriores se conservaron.`,
+      );
+    }
+    const { error: updErr } = await sb
+      .from('cobro_grupo')
+      .update({
+        modo_particion: prep.particion.modo_particion,
+        updated_by: userId,
+      })
+      .eq('id', sobre.id);
+    if (updErr) {
+      this.logger.warn(`repartirCobro ${sobre.id}: ${updErr.message}`);
+    }
+    // Los hijos que RECIBIERON parte ya se refrescaron en createCobro; los
+    // que la PERDIERON (cancelados) se refrescan aquí.
+    await this.refrescarCobrado(vuelosViejos, userId);
+    const avisos = [...prep.avisos];
+    if (prep.particion.modo_particion !== sobre.modo_particion) {
+      avisos.push(
+        `El sobre pasó de ${sobre.modo_particion} a ${prep.particion.modo_particion}.`,
+      );
+    }
+    return { sobre: await this.sobrePorId(sobre.id), avisos };
   }
 
   /** Día Cancún de la salida del grupo (para etiquetas). */

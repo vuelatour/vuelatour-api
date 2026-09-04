@@ -882,10 +882,20 @@ export interface HijoDiagnostico {
 }
 
 export interface ProblemaGrupo {
-  tipo: 'PAX' | 'PRECIO_DESACTUALIZADO' | 'EXTRAS';
+  /**
+   * SOBRE (4-sep-2026, Fase 2): un sobre de cobro del grupo no cuadra con sus
+   * partes o tiene partes en hijos cancelados — lo produce
+   * `diagnosticoSobres` (particion-cobro.util), misma lista que el resto.
+   */
+  tipo: 'PAX' | 'PRECIO_DESACTUALIZADO' | 'EXTRAS' | 'SOBRE';
   detalle: string;
   folio?: number | null;
   posicion?: number | null;
+  /** Solo tipo SOBRE: el cobro_grupo afectado y su cuadre. */
+  sobre_id?: string | null;
+  monto?: number | null;
+  suma_partes?: number | null;
+  partes_en_cancelados?: number | null;
 }
 
 /**

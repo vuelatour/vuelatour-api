@@ -4,7 +4,12 @@ import {
   diagnosticoGrupo,
   normalizarExtrasGrupo,
   type HijoDiagnostico,
+  type ProblemaGrupo,
 } from '../groups/grupo-armador.util';
+import {
+  diagnosticoSobres,
+  type SobreDiagnostico,
+} from '../groups/particion-cobro.util';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
@@ -1508,17 +1513,30 @@ export class AlertsService {
       });
       porGrupo.set(gid, lista);
     }
+    // SOBRES de cobro (Fase 2, 4-sep-2026): Σ partes == sobre y ninguna
+    // parte en un hijo CANCELADO (se consultan las partes de TODOS los hijos,
+    // cancelados incluidos — justo ahí está el problema). Misma fuente única
+    // `diagnosticoSobres` que el detalle del grupo y el pre-cierre.
+    const sobresPorGrupo = await this.sobresParaDiagnostico(
+      grupos.map((g) => g.id as string),
+    );
     const semana = this.isoWeek(new Date());
     for (const g of grupos) {
       const lista = porGrupo.get(g.id as string) ?? [];
-      if (lista.length === 0) continue;
-      const problemas = diagnosticoGrupo(
-        {
-          pasajeros_total: Number(g.pasajeros_total) || 0,
-          extras_grupo: normalizarExtrasGrupo(g.extras_grupo),
-        },
-        lista,
-      );
+      const sobresGrupo = sobresPorGrupo.get(g.id as string) ?? [];
+      if (lista.length === 0 && sobresGrupo.length === 0) continue;
+      const problemas: ProblemaGrupo[] = [
+        ...(lista.length > 0
+          ? diagnosticoGrupo(
+              {
+                pasajeros_total: Number(g.pasajeros_total) || 0,
+                extras_grupo: normalizarExtrasGrupo(g.extras_grupo),
+              },
+              lista,
+            )
+          : []),
+        ...diagnosticoSobres((g.folio as number | null) ?? null, sobresGrupo),
+      ];
       if (problemas.length === 0) continue;
       const detalle = problemas
         .slice(0, 4)
@@ -1538,12 +1556,65 @@ export class AlertsService {
               tipo: p.tipo,
               folio: p.folio ?? null,
               posicion: p.posicion ?? null,
+              sobre_id: p.sobre_id ?? null,
             })),
           },
           link: `/admin/quotes/grupo/${g.id as string}`,
         },
       );
     }
+  }
+
+  /** Sobres de cobro de estos grupos con sus partes (monto + si el hijo está cancelado). */
+  private async sobresParaDiagnostico(
+    grupoIds: string[],
+  ): Promise<Map<string, SobreDiagnostico[]>> {
+    const out = new Map<string, SobreDiagnostico[]>();
+    if (grupoIds.length === 0) return out;
+    const { data: sobres, error } = await this.supabase.service
+      .from('cobro_grupo')
+      .select('id, grupo_id, monto, moneda, fecha_cobro')
+      .in('grupo_id', grupoIds)
+      .limit(2000);
+    if (error) throw new Error(error.message);
+    if (!sobres || sobres.length === 0) return out;
+    const { data: partes, error: pErr } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('cobro_grupo_id, monto, vuelo:vuelo!vuelo_id(estado)')
+      .in(
+        'cobro_grupo_id',
+        sobres.map((s) => s.id as string),
+      )
+      .limit(10000);
+    if (pErr) throw new Error(pErr.message);
+    const partesPorSobre = new Map<
+      string,
+      Array<{ monto: number; cancelado: boolean }>
+    >();
+    for (const p of (partes ?? []) as Array<Record<string, unknown>>) {
+      const sid = p.cobro_grupo_id as string;
+      const lista = partesPorSobre.get(sid) ?? [];
+      lista.push({
+        monto: Number(p.monto) || 0,
+        cancelado:
+          unwrap(p.vuelo as { estado?: string } | { estado?: string }[] | null)
+            ?.estado === 'CANCELADO',
+      });
+      partesPorSobre.set(sid, lista);
+    }
+    for (const s of sobres) {
+      const gid = s.grupo_id as string;
+      const lista = out.get(gid) ?? [];
+      lista.push({
+        id: s.id as string,
+        monto: Number(s.monto) || 0,
+        moneda: (s.moneda as string) ?? 'USD',
+        fecha_cobro: (s.fecha_cobro as string | null) ?? null,
+        partes: partesPorSobre.get(s.id as string) ?? [],
+      });
+      out.set(gid, lista);
+    }
+    return out;
   }
 
   /** Día actual en hora Cancún (YYYY-MM-DD): el corte del negocio nunca es UTC. */

@@ -19,6 +19,7 @@ import {
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
+import { cuadreSobre } from '../groups/particion-cobro.util';
 import {
   avionDelGasto,
   avionQueReporta,
@@ -1545,6 +1546,8 @@ export class ProfitSharingService {
       revRes,
       pistasRes,
       legsRes,
+      sobresRes,
+      gruposRes,
     ] = await Promise.all([
       // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
       sb
@@ -1567,7 +1570,8 @@ export class ProfitSharingService {
         // fecha_vuelo/fecha_solicitud: día del TC oficial de respaldo
         // (29-ago) para cobros MXN sin TC de cotizaciones sin tc_usd_mxn.
         .select(
-          'id, folio, piloto_id, cliente_id, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+          // grupo_id (4-sep-2026): folio del grupo ADITIVO en cobros_pendientes.
+          'id, folio, piloto_id, cliente_id, grupo_id, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -1634,6 +1638,25 @@ export class ProfitSharingService {
         .neq('vuelo.estado', 'CANCELADO')
         .gte('vuelo.fecha_vuelo', desdeTs)
         .lte('vuelo.fecha_vuelo', hastaTs),
+      // SOBRES de cobro de GRUPO del periodo (Fase 2, 4-sep-2026): el
+      // invariante Σ partes == sobre se vigila aquí (aviso, no bloquea). El
+      // sobre NO es dinero (cobrosEnUsd solo lee cobro_vuelo).
+      sb
+        .from('cobro_grupo')
+        .select(
+          'id, grupo_id, monto, moneda, fecha_cobro, grupo:vuelo_grupo!grupo_id(folio)',
+        )
+        .gte('fecha_cobro', desdeTs)
+        .lte('fecha_cobro', hastaTs)
+        .limit(2000),
+      // Grupos VIVOS del periodo: saldo por cobrar del grupo completo.
+      sb
+        .from('vuelo_grupo')
+        .select('id, folio, nombre, cliente_id, fecha_vuelo')
+        .is('cancelado_at', null)
+        .gte('fecha_vuelo', desdeTs)
+        .lte('fecha_vuelo', hastaTs)
+        .limit(500),
     ]);
     for (const r of [
       pendRes,
@@ -1644,6 +1667,8 @@ export class ProfitSharingService {
       revRes,
       pistasRes,
       legsRes,
+      sobresRes,
+      gruposRes,
     ]) {
       if (r.error) throw new Error(r.error.message);
     }
@@ -1799,6 +1824,12 @@ export class ProfitSharingService {
     const completados = (completadosRes.data ?? []) as Array<
       Record<string, unknown>
     >;
+    const gruposPeriodo = (gruposRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
+    const sobresPeriodo = (sobresRes.data ?? []) as Array<
+      Record<string, unknown>
+    >;
     // COBROS de cancelados + completados (una consulta) y TC OFICIAL de
     // respaldo (regla del cliente, 29-ago-2026): un vuelo sin tc_usd_mxn con
     // cobros MXN sin TC se convierte con el TC oficial del día de la
@@ -1902,11 +1933,13 @@ export class ProfitSharingService {
     // excluyen del regaño de cobranza (lookup en lote cliente_id→es_interno).
     const clientesInternos = new Set<string>();
     {
+      // También los clientes de los GRUPOS del periodo (grupo_con_saldo).
       const clienteIds = [
         ...new Set(
-          completados
-            .map((v) => v.cliente_id as string | null)
-            .filter((c): c is string => !!c),
+          [
+            ...completados.map((v) => v.cliente_id as string | null),
+            ...gruposPeriodo.map((g) => g.cliente_id as string | null),
+          ].filter((c): c is string => !!c),
         ),
       ];
       if (clienteIds.length > 0) {
@@ -1919,12 +1952,35 @@ export class ProfitSharingService {
         for (const c of internos ?? []) clientesInternos.add(c.id as string);
       }
     }
+    // Folio del grupo del hijo (ADITIVO, presentación): el panel pinta
+    // "vuelo #243 · G-12" en los cobros pendientes de un grupo.
+    const grupoFolioPorId = new Map<string, number>();
+    {
+      const grupoIds = [
+        ...new Set(
+          completados
+            .map((v) => v.grupo_id as string | null)
+            .filter((g): g is string => !!g),
+        ),
+      ];
+      if (grupoIds.length > 0) {
+        const { data: gruposDeHijos, error: gErr } = await sb
+          .from('vuelo_grupo')
+          .select('id, folio')
+          .in('id', grupoIds);
+        if (gErr) throw new Error(gErr.message);
+        for (const g of gruposDeHijos ?? []) {
+          grupoFolioPorId.set(g.id as string, Number(g.folio));
+        }
+      }
+    }
     const cobrosPendientes: Array<{
       id: string;
       folio: number;
       total_usd: number;
       cobrado_usd: number;
       saldo_usd: number;
+      grupo_folio: number | null;
     }> = [];
     for (const v of completados) {
       // Cliente interno: nunca aparece como "saldo por cobrar" (aunque la
@@ -1940,6 +1996,149 @@ export class ProfitSharingService {
           total_usd: round2(total),
           cobrado_usd: conv.total_usd,
           saldo_usd: saldo,
+          grupo_folio:
+            typeof v.grupo_id === 'string'
+              ? (grupoFolioPorId.get(v.grupo_id) ?? null)
+              : null,
+        });
+      }
+    }
+
+    // ===== GRUPOS (Fase 2, 4-sep-2026) =====
+    // grupo_con_saldo: grupos VIVOS del periodo cuyos hijos vivos (cualquier
+    // estado salvo CANCELADO) suman saldo > 1 USD — se suma a los avisos por
+    // vuelo. Dinero = cobrosEnUsd por hijo con la MISMA cadena de TC
+    // (cotización ?? TC oficial del día); el sobre nunca se lee como dinero.
+    const gruposConSaldo: Array<{
+      grupo_id: string;
+      grupo_folio: number;
+      nombre: string | null;
+      aviones: number;
+      total_usd: number;
+      cobrado_usd: number;
+      saldo_usd: number;
+    }> = [];
+    if (gruposPeriodo.length > 0) {
+      const { data: hijosG, error: hgErr } = await sb
+        .from('vuelo')
+        .select(
+          'id, folio, grupo_id, estado, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud',
+        )
+        .in(
+          'grupo_id',
+          gruposPeriodo.map((g) => g.id as string),
+        )
+        .neq('estado', 'CANCELADO');
+      if (hgErr) throw new Error(hgErr.message);
+      const hijosGrupo = (hijosG ?? []) as Array<Record<string, unknown>>;
+      const cobrosHijos = await this.fetchCobros(
+        hijosGrupo.map((h) => h.id as string),
+      );
+      const cobrosPorHijo = new Map<string, CobroRow[]>();
+      for (const c of cobrosHijos) {
+        const list = cobrosPorHijo.get(c.vuelo_id) ?? [];
+        list.push(c);
+        cobrosPorHijo.set(c.vuelo_id, list);
+      }
+      const tcOficialHijos = await this.resolverTcOficial(
+        hijosGrupo
+          .map((h) => ({
+            id: h.id as string,
+            tc_usd_mxn: (h.tc_usd_mxn as string | null) ?? null,
+            fecha_solicitud: (h.fecha_solicitud as string | null) ?? null,
+            fecha_vuelo: (h.fecha_vuelo as string | null) ?? null,
+          }))
+          .filter((h) =>
+            cobrosNecesitanTc(cobrosPorHijo.get(h.id) ?? [], h.tc_usd_mxn),
+          ),
+        [],
+      );
+      for (const g of gruposPeriodo) {
+        if (clientesInternos.has(g.cliente_id as string)) continue;
+        const hijos = hijosGrupo.filter((h) => h.grupo_id === g.id);
+        if (hijos.length === 0) continue;
+        // Un grupo que nunca se confirmó (todos sus hijos COTIZADO/RESERVA)
+        // no es "saldo por cobrar": lo vigila `vuelos_no_completados` por
+        // vuelo. Aquí solo grupos que sí operaron (o iban a operar).
+        if (
+          !hijos.some((h) => h.estado !== 'COTIZADO' && h.estado !== 'RESERVA')
+        )
+          continue;
+        let total = 0;
+        let cobrado = 0;
+        for (const h of hijos) {
+          total += Number(h.monto_total_usd ?? 0);
+          cobrado += cobrosEnUsd(
+            cobrosPorHijo.get(h.id as string) ?? [],
+            pos(h.tc_usd_mxn) ??
+              tcOficialHijos.vuelo.get(h.id as string)?.tc ??
+              null,
+          ).total_usd;
+        }
+        const saldo = round2(total - cobrado);
+        if (saldo > 1) {
+          gruposConSaldo.push({
+            grupo_id: g.id as string,
+            grupo_folio: Number(g.folio),
+            nombre: (g.nombre as string | null) ?? null,
+            aviones: hijos.length,
+            total_usd: round2(total),
+            cobrado_usd: round2(cobrado),
+            saldo_usd: saldo,
+          });
+        }
+      }
+    }
+
+    // sobres_descuadrados: Σ partes ≠ sobre o partes en hijos CANCELADOS —
+    // misma función pura (cuadreSobre) que el detalle del grupo y la alerta.
+    const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
+      Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
+    const sobresDescuadrados: Array<{
+      sobre_id: string;
+      grupo_id: string;
+      grupo_folio: number | null;
+      fecha_cobro: string | null;
+      monto: number;
+      moneda: string;
+      suma_partes: number;
+      partes_en_cancelados: number;
+    }> = [];
+    if (sobresPeriodo.length > 0) {
+      const { data: partesS, error: psErr } = await sb
+        .from('cobro_vuelo')
+        .select('cobro_grupo_id, monto, vuelo:vuelo_id(estado)')
+        .in(
+          'cobro_grupo_id',
+          sobresPeriodo.map((s) => s.id as string),
+        )
+        .limit(10000);
+      if (psErr) throw new Error(psErr.message);
+      const partes = (partesS ?? []) as Array<Record<string, unknown>>;
+      for (const s of sobresPeriodo) {
+        const propias = partes
+          .filter((p) => p.cobro_grupo_id === s.id)
+          .map((p) => ({
+            monto: Number(p.monto) || 0,
+            cancelado:
+              unwrapOne(p.vuelo as { estado?: string } | null)?.estado ===
+              'CANCELADO',
+          }));
+        const cuadre = cuadreSobre({
+          monto: Number(s.monto) || 0,
+          partes: propias,
+        });
+        if (!cuadre.descuadrado) continue;
+        const grupo = unwrapOne(s.grupo as { folio?: unknown } | null);
+        sobresDescuadrados.push({
+          sobre_id: s.id as string,
+          grupo_id: s.grupo_id as string,
+          grupo_folio: grupo?.folio == null ? null : Number(grupo.folio),
+          fecha_cobro: (s.fecha_cobro as string | null) ?? null,
+          monto: round2(Number(s.monto) || 0),
+          moneda: (s.moneda as string) ?? 'USD',
+          suma_partes: cuadre.suma_partes,
+          partes_en_cancelados: cuadre.partes_en_cancelados,
         });
       }
     }
@@ -2191,6 +2390,26 @@ export class ProfitSharingService {
           cobrosPendientes.reduce((acc, c) => acc + c.saldo_usd, 0),
         ),
         vuelos: cobrosPendientes,
+      },
+      // GRUPOS (Fase 2): avisos de grupo ADEMÁS de los avisos por vuelo.
+      {
+        clave: 'grupo_con_saldo',
+        titulo: 'Grupos con saldo por cobrar',
+        detalle:
+          'Cotizaciones de GRUPO (varios aviones) del periodo cuyos aviones aún deben: registra el sobre del grupo (Cobros del grupo) o los cobros por avión. Se suma a los vuelos con saldo de arriba.',
+        count: gruposConSaldo.length,
+        monto_usd: round2(
+          gruposConSaldo.reduce((acc, g) => acc + g.saldo_usd, 0),
+        ),
+        grupos: gruposConSaldo,
+      },
+      {
+        clave: 'sobres_descuadrados',
+        titulo: 'Sobres de cobro de grupo descuadrados',
+        detalle:
+          'La suma de las partes por avión no coincide con el sobre, o hay partes en aviones cancelados: re-parte el sobre desde Cobros del grupo antes de cerrar (el banco concilia contra el sobre; el reparto lee las partes).',
+        count: sobresDescuadrados.length,
+        sobres: sobresDescuadrados,
       },
       {
         clave: 'vuelos_sin_precio',

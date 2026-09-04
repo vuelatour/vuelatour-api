@@ -221,6 +221,14 @@ export interface ReciboPdfPayload {
   sin_tc_nota?: string | null;
   notas?: string | null;
   cobros_previos?: ReciboAbonoPdfPayload[];
+  // ===== Recibo del SOBRE de grupo (4-sep-2026), campos ADITIVOS: el
+  // schema de pyservices los ignora hasta que la plantilla los pinte. =====
+  /** "G-12" cuando el recibo es de un sobre de grupo. */
+  grupo_folio?: string | null;
+  /** Aeronaves vivas del grupo. */
+  aviones_n?: number | null;
+  /** Pasajeros totales del grupo. */
+  pasajeros_total?: number | null;
 }
 // ===== Libro "Dinero <periodo>" (réplica del control manual del equipo) =====
 export interface DineroCobroPagoPayload {

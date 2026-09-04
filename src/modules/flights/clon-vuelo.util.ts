@@ -41,3 +41,14 @@ export function payloadClonVuelo(
     .join('\n');
   return clon;
 }
+
+/**
+ * Patch con el que los COBROS del original pasan al clon (paso 4 de
+ * `reassignAircraft`): SOLO cambia `vuelo_id` — UPDATE en sitio, jamás
+ * borrar+insertar. Así una parte de un SOBRE de grupo (4-sep-2026) conserva
+ * `cobro_grupo_id`/`grupo_factor` y la conciliación del sobre (el banco
+ * enlaza al sobre, no al hijo) sigue válida en el clon.
+ */
+export function patchCobrosAlClon(clonId: string): { vuelo_id: string } {
+  return { vuelo_id: clonId };
+}

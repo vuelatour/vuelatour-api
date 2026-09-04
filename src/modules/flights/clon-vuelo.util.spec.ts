@@ -1,4 +1,8 @@
-import { CAMPOS_NO_CLONABLES, payloadClonVuelo } from './clon-vuelo.util';
+import {
+  CAMPOS_NO_CLONABLES,
+  patchCobrosAlClon,
+  payloadClonVuelo,
+} from './clon-vuelo.util';
 
 describe('payloadClonVuelo (reassignAircraft)', () => {
   const original = {
@@ -49,5 +53,24 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     for (const k of ['grupo_id', 'grupo_posicion', 'grupo_pax']) {
       expect(CAMPOS_NO_CLONABLES).not.toContain(k);
     }
+  });
+});
+
+describe('patchCobrosAlClon (cobros del original → clon)', () => {
+  it('solo toca vuelo_id: cobro_grupo_id / grupo_factor / client_request_id se conservan', () => {
+    const patch = patchCobrosAlClon('v-clon');
+    expect(patch).toEqual({ vuelo_id: 'v-clon' });
+    expect(Object.keys(patch)).toEqual(['vuelo_id']);
+    const parteDeSobre = {
+      id: 'c-1',
+      vuelo_id: 'v-orig',
+      cobro_grupo_id: 'sobre-1',
+      grupo_factor: 0.190741,
+      client_request_id: null,
+    };
+    expect({ ...parteDeSobre, ...patch }).toEqual({
+      ...parteDeSobre,
+      vuelo_id: 'v-clon',
+    });
   });
 });

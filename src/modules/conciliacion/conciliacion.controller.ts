@@ -17,6 +17,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  CandidatosCobroQuery,
   ClasificarMovimientoDto,
   ConciliacionParseDto,
   CrearClasificacionDto,
@@ -199,14 +200,33 @@ export class ConciliacionController {
   @Patch('movimientos/:id/cobro')
   @ApiOperation({
     summary:
-      'Vincula o desvincula un ABONO con un cobro de vuelo (conciliación de ingresos)',
+      'Vincula o desvincula un ABONO con un cobro de vuelo (cobro_id) O con el SOBRE de un grupo (cobro_grupo_id), excluyentes; ambos null = desvincular. Una parte de sobre responde 409 COBRO_DE_GRUPO.',
   })
   linkCobro(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: LinkMovimientoCobroDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.conciliacion.linkCobro(id, dto.cobro_id ?? null, c.userId);
+    return this.conciliacion.linkCobro(
+      id,
+      {
+        cobro_id: dto.cobro_id ?? null,
+        cobro_grupo_id: dto.cobro_grupo_id ?? null,
+      },
+      c.userId,
+    );
+  }
+
+  @Get('movimientos/:id/candidatos-cobro')
+  @ApiOperation({
+    summary:
+      'Candidatos para conciliar un ABONO a mano: cobros de vuelo (COBRO_VUELO) y sobres de grupo (SOBRE_GRUPO) de la moneda de la cuenta, métodos bancarios, sin conciliar con otro movimiento, ordenados por cercanía del NETO al monto. Las partes de un sobre nunca se ofrecen.',
+  })
+  candidatosCobro(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: CandidatosCobroQuery,
+  ) {
+    return this.conciliacion.candidatosCobro(id, q.dias);
   }
 
   @Post('movimientos/:id/sugerir')
