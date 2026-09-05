@@ -99,7 +99,7 @@ export class ListFlightsQuery {
   @ApiPropertyOptional({
     enum: ['escalas_plan'],
     description:
-      'Embed ligero opt-in: "escalas_plan" agrega escalas_plan[] (orden, ruta, fecha_salida_plan, es_ferry) a cada vuelo — el calendario de la app pinta el viaje multi-día por tramo.',
+      'Embed ligero opt-in: "escalas_plan" agrega escalas_plan[] (orden, ruta, fecha_salida_plan, es_ferry, cancelada_at, aeronave_id/aeronave_matricula, piloto_id/piloto_nombre, copiloto_id/copiloto_nombre EXPLÍCITOS del tramo, pasajeros_nombres, notas) a cada vuelo — el calendario de la app pinta el viaje multi-día por tramo. Sin embed cada vuelo ya trae pasajeros_nombres_tramos[], notas_tramos[], tripulacion_nombres[] y apoyos_tramo[] (buscador de la app, 5-sep-2026).',
   })
   @IsOptional()
   @IsIn(['escalas_plan'])

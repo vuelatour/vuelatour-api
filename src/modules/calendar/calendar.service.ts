@@ -7,6 +7,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { nombresUnicos, textosDeJson } from '../../common/busqueda-vuelo.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import { PushService } from '../realtime/push.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -86,7 +87,9 @@ export class CalendarService {
       .select(
         // copiloto/apoyos (29-ago, aditivo): tripulación por tramo en el evento.
         // grupo_* (4-sep-2026, aditivo): banda "G-12 · 3/7" del calendario.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        // pasajeros_nombres/notas/notas_internas/motivo_cancelacion, razón social
+        // y modelo (5-sep-2026, aditivo): buscador del calendario de la app.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -200,6 +203,10 @@ export class CalendarService {
         origen_iata: string;
         destino_iata: string;
         pasajeros: number;
+        pasajeros_nombres: unknown;
+        notas: string | null;
+        notas_internas: string | null;
+        motivo_cancelacion: string | null;
         monto_total_usd: string;
         aeronave_id: string | null;
         piloto_id: string | null;
@@ -213,12 +220,23 @@ export class CalendarService {
         grupo_pax: number | null;
         grupo: { folio: number | null } | { folio: number | null }[] | null;
         aeronave:
-          | { matricula: string; color_calendario: string | null }
-          | { matricula: string; color_calendario: string | null }[]
+          | {
+              matricula: string;
+              color_calendario: string | null;
+              modelo?: string | null;
+            }
+          | {
+              matricula: string;
+              color_calendario: string | null;
+              modelo?: string | null;
+            }[]
           | null;
         piloto: { nombre: string } | { nombre: string }[] | null;
         copiloto: { nombre: string } | { nombre: string }[] | null;
-        cliente: { nombre: string } | { nombre: string }[] | null;
+        cliente:
+          | { nombre: string; razon_social_default?: string | null }
+          | { nombre: string; razon_social_default?: string | null }[]
+          | null;
         apoyos: Array<{
           escala_id: string | null;
           usuario_id: string;
@@ -237,9 +255,19 @@ export class CalendarService {
           copiloto_id: string | null;
           estado_permiso: string | null;
           cancelada_at: string | null;
+          pasajeros_nombres: unknown;
+          notas: string | null;
           aeronave:
-            | { matricula: string; color_calendario: string | null }
-            | { matricula: string; color_calendario: string | null }[]
+            | {
+                matricula: string;
+                color_calendario: string | null;
+                modelo?: string | null;
+              }
+            | {
+                matricula: string;
+                color_calendario: string | null;
+                modelo?: string | null;
+              }[]
             | null;
           piloto: { nombre: string } | { nombre: string }[] | null;
           copiloto: { nombre: string } | { nombre: string }[] | null;
@@ -261,9 +289,24 @@ export class CalendarService {
         destino: string;
         prefijo?: string;
         pasajeros?: number;
+        /** Tramos del evento (día encadenado); default: la escala del orden. */
+        legs?: Array<{ pasajeros_nombres?: unknown; notas?: string | null }>;
       }): Record<string, unknown> | null => {
         if (!inRange(params.fecha)) return null;
         const escala = escalaPorOrden.get(params.escalaOrden);
+        // Buscador (5-sep-2026, aditivo): manifiesto del evento = el de sus
+        // tramos si lo hay, si no el del vuelo; notas de esos tramos.
+        const legsDelEvento = params.legs ?? (escala ? [escala] : []);
+        const pasajerosTramos = nombresUnicos(
+          ...legsDelEvento.map((l) => textosDeJson(l.pasajeros_nombres)),
+        );
+        const pasajerosNombres =
+          pasajerosTramos.length > 0
+            ? pasajerosTramos
+            : textosDeJson(v.pasajeros_nombres);
+        const notasTramos = nombresUnicos(
+          legsDelEvento.map((l) => l.notas ?? null),
+        );
         // HERENCIA CANÓNICA (regla del repo, bug 28-ago): un tramo sin
         // avión/piloto propio HEREDA el del vuelo — el detalle lo pinta
         // "(del vuelo)" y está ASIGNADO. Antes los ids resolvían a null
@@ -353,6 +396,15 @@ export class CalendarService {
           copiloto_id: copilotoId ?? null,
           copiloto_nombre: copiloto?.nombre ?? null,
           apoyos,
+          // Buscador del calendario (5-sep-2026, aditivo).
+          tipo: v.tipo,
+          cliente_razon_social: cliente?.razon_social_default ?? null,
+          aeronave_modelo: aeronave?.modelo ?? null,
+          pasajeros_nombres: pasajerosNombres,
+          notas: v.notas ?? null,
+          notas_internas: v.notas_internas ?? null,
+          notas_tramos: notasTramos,
+          motivo_cancelacion: v.motivo_cancelacion ?? null,
           pasajeros: params.pasajeros ?? v.pasajeros,
           monto_total_usd: Number(v.monto_total_usd),
           google_calendar_id: v.google_calendar_id,
@@ -424,6 +476,7 @@ export class CalendarService {
             destino: puntos[puntos.length - 1],
             prefijo: todoFerry ? 'Ferry · ' : undefined,
             pasajeros: pax,
+            legs: g.legs,
           });
           if (ev) out.push(ev);
         });

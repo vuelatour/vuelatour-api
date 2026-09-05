@@ -114,9 +114,18 @@ import {
   motivoDirecto,
   soloPendientes,
 } from '../../common/taco-motivo.util';
+import {
+  apoyoItem,
+  apoyosTramoConNombre,
+  resumirEscalasPorVuelo,
+  tripulacionNombres,
+  unwrapRel,
+  type InfoUsuarios,
+  type ResumenEscalas,
+} from '../../common/busqueda-vuelo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
 
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
@@ -1350,11 +1359,11 @@ export class FlightsService {
     // snapshot completo de cada vuelo.
     const embedEscalas =
       filters.embed === 'escalas_plan'
-        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at, piloto_id, copiloto_id)'
+        ? ', escalas_plan:escala(orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, cancelada_at, aeronave_id, piloto_id, copiloto_id, pasajeros_nombres, notas, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))'
         : '';
     // string plano: el parser TIPADO de supabase-js no digiere el template
     // con embed condicional (truena en compilación, no en runtime).
-    const selectCols: string = `${VUELO_COLS}, aeronave:aeronave_id(matricula), cliente:cliente_id(nombre), piloto:piloto_id(nombre)${embedEscalas}`;
+    const selectCols: string = `${VUELO_COLS}, aeronave:aeronave_id(matricula, modelo), cliente:cliente_id(nombre, razon_social_default), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre)${embedEscalas}`;
     let q = this.supabase.service
       .from('vuelo')
       .select(selectCols, { count: 'exact' })
@@ -1466,55 +1475,118 @@ export class FlightsService {
     if (error) throw new Error(error.message);
     // Aplana matrícula + nombre de cliente/piloto para el listado (móvil/portal):
     // el selector de vuelos del app los usa para buscar e identificar el vuelo.
-    const flatten = (
-      rel: { nombre?: string } | { nombre?: string }[] | null | undefined,
-    ) => (Array.isArray(rel) ? rel[0]?.nombre : rel?.nombre) ?? null;
+    // 5-sep-2026 (buscador de la app, aditivo): también modelo del avión,
+    // razón social del cliente y nombre del copiloto; con `embed=escalas_plan`
+    // cada tramo trae matrícula y nombres de piloto/copiloto EXPLÍCITOS
+    // (null = hereda del vuelo, misma semántica que los ids).
+    type Rel = { nombre?: string } | { nombre?: string }[] | null | undefined;
+    const flatten = (rel: Rel) => unwrapRel(rel)?.nombre ?? null;
+    type EscalaPlanRow = Record<string, unknown> & {
+      aeronave?: { matricula?: string } | { matricula?: string }[] | null;
+      piloto?: Rel;
+      copiloto?: Rel;
+    };
+    const aplanarEscalaPlan = (e: EscalaPlanRow) => {
+      const { aeronave, piloto, copiloto, ...restoTramo } = e;
+      return {
+        ...restoTramo,
+        aeronave_matricula: unwrapRel(aeronave)?.matricula ?? null,
+        piloto_nombre: flatten(piloto),
+        copiloto_nombre: flatten(copiloto),
+      };
+    };
     const rows = (data ?? []).map((r) => {
       const row = r as unknown as Record<string, unknown> & {
-        aeronave?: { matricula?: string } | { matricula?: string }[] | null;
-        cliente?: { nombre?: string } | { nombre?: string }[] | null;
-        piloto?: { nombre?: string } | { nombre?: string }[] | null;
+        aeronave?:
+          | { matricula?: string; modelo?: string | null }
+          | { matricula?: string; modelo?: string | null }[]
+          | null;
+        cliente?:
+          | { nombre?: string; razon_social_default?: string | null }
+          | { nombre?: string; razon_social_default?: string | null }[]
+          | null;
+        piloto?: Rel;
+        copiloto?: Rel;
+        escalas_plan?: EscalaPlanRow[] | null;
       };
-      const a = row.aeronave;
-      const matricula = Array.isArray(a) ? a[0]?.matricula : a?.matricula;
+      const a = unwrapRel(row.aeronave);
+      const cli = unwrapRel(row.cliente);
       const {
         aeronave: _omit,
         cliente: _omitCli,
         piloto: _omitPil,
+        copiloto: _omitCop,
         ...rest
       } = row;
       void _omit;
       void _omitCli;
       void _omitPil;
+      void _omitCop;
       return {
         ...rest,
-        aeronave_matricula: matricula ?? null,
-        cliente_nombre: flatten(row.cliente),
+        ...(Array.isArray(row.escalas_plan)
+          ? { escalas_plan: row.escalas_plan.map(aplanarEscalaPlan) }
+          : {}),
+        aeronave_matricula: a?.matricula ?? null,
+        aeronave_modelo: a?.modelo ?? null,
+        cliente_nombre: cli?.nombre ?? null,
+        cliente_razon_social: cli?.razon_social_default ?? null,
         piloto_nombre: flatten(row.piloto),
+        copiloto_nombre: flatten(row.copiloto),
       };
     });
     // Ruta COMPLETA por vuelo (origen → escalas → destino) para los listados:
     // se resuelve en lote desde las escalas comerciales, no solo origen/destino.
+    // 5-sep-2026 (buscador de la app): la MISMA lectura de escalas trae el
+    // manifiesto y las notas por tramo y los ids explícitos de piloto/copiloto
+    // de tramo; con las filas de vuelo_apoyo se resuelven TODOS los nombres en
+    // una consulta a usuario (`tripulacion_nombres`, `apoyos_tramo`). Siguen
+    // siendo 3 consultas por lote (escala, vuelo_apoyo, usuario), nunca N+1.
     const idsVuelos = rows.map(
       (r) => (r as Record<string, unknown>).id as string,
     );
-    const [rutas, apoyosPorVuelo] = await Promise.all([
-      this.rutasIatasPorVuelo(idsVuelos),
-      // Apoyos de nivel vuelo (29-ago, aditivo): las tarjetas pintan la
-      // lista completa, no solo el espejo apoyo_id.
-      this.apoyosPorVuelo(idsVuelos),
+    const [resumenEscalas, apoyosFilas] = await Promise.all([
+      this.resumenEscalasPorVuelo(idsVuelos),
+      // Apoyos (29-ago, aditivo): las tarjetas pintan la lista completa de
+      // nivel vuelo, no solo el espejo apoyo_id.
+      this.apoyosFilasPorVuelo(idsVuelos),
     ]);
+    const idsUsuarios = new Set<string>();
+    for (const filas of apoyosFilas.values()) {
+      for (const f of filas) if (f.usuario_id) idsUsuarios.add(f.usuario_id);
+    }
+    for (const r of resumenEscalas.values()) {
+      for (const id of r.piloto_ids) idsUsuarios.add(id);
+      for (const id of r.copiloto_ids) idsUsuarios.add(id);
+    }
+    const info: InfoUsuarios = await this.usuariosInfo([...idsUsuarios]);
     const rowsConRuta = rows.map((r) => {
       const row = r as Record<string, unknown>;
+      const vid = row.id as string;
+      const resumen = resumenEscalas.get(vid);
+      const filas = apoyosFilas.get(vid) ?? [];
       // Misma redacción por rol que findById/snapshot: el listado es la ruta
       // más usada por la app (el mecánico lista TODOS los vuelos) y sin esto
       // el candado de costo_externo_usd quedaba abierto por aquí.
       return this.redactVueloForRol(
         {
           ...row,
-          apoyos: apoyosPorVuelo.get(row.id as string) ?? [],
+          apoyos: apoyosNivelVuelo(filas).map((id) => apoyoItem(id, info)),
+          apoyos_tramo: apoyosTramoConNombre(filas, info),
+          tripulacion_nombres: tripulacionNombres({
+            piloto_nombre: (row.piloto_nombre as string | null) ?? null,
+            copiloto_nombre: (row.copiloto_nombre as string | null) ?? null,
+            apoyoIds: filas.map((f) => f.usuario_id),
+            tramoIds: [
+              ...(resumen?.piloto_ids ?? []),
+              ...(resumen?.copiloto_ids ?? []),
+            ],
+            info,
+          }),
+          pasajeros_nombres_tramos: resumen?.pasajeros_nombres_tramos ?? [],
+          notas_tramos: resumen?.notas_tramos ?? [],
           ruta_iatas:
-            rutas.get(row.id as string) ??
+            resumen?.ruta_iatas ??
             [row.origen_iata as string, row.destino_iata as string].filter(
               Boolean,
             ),
@@ -1538,30 +1610,22 @@ export class FlightsService {
    * (el espejo comercial) al excluirlos. La ruta COMERCIAL (solo tramos
    * cobrables) vive en el listado de Cotizaciones, que tiene su propia copia.
    * Map vacío para vuelos sin escalas (el caller cae a origen/destino).
+   * 5-sep-2026: la misma lectura resume además manifiesto y notas por tramo
+   * e ids explícitos de piloto/copiloto de tramo (buscador de la app); la
+   * lógica pura vive en `busqueda-vuelo.util` (con spec).
    */
-  private async rutasIatasPorVuelo(
+  private async resumenEscalasPorVuelo(
     vueloIds: string[],
-  ): Promise<Map<string, string[]>> {
-    const out = new Map<string, string[]>();
-    if (vueloIds.length === 0) return out;
+  ): Promise<Map<string, ResumenEscalas>> {
+    if (vueloIds.length === 0) return new Map();
     const { data } = await this.supabase.service
       .from('escala')
-      .select('vuelo_id, orden, origen_iata, destino_iata')
+      .select(
+        'vuelo_id, orden, origen_iata, destino_iata, piloto_id, copiloto_id, pasajeros_nombres, notas, cancelada_at',
+      )
       .in('vuelo_id', vueloIds)
       .order('orden', { ascending: true });
-    const porVuelo = new Map<string, Array<Record<string, unknown>>>();
-    for (const e of data ?? []) {
-      const vid = e.vuelo_id as string;
-      (porVuelo.get(vid) ?? porVuelo.set(vid, []).get(vid)!).push(e);
-    }
-    for (const [vid, legs] of porVuelo) {
-      if (legs.length === 0) continue;
-      out.set(vid, [
-        legs[0].origen_iata as string,
-        ...legs.map((l) => l.destino_iata as string),
-      ]);
-    }
-    return out;
+    return resumirEscalasPorVuelo(data ?? []);
   }
 
   /**
@@ -1684,41 +1748,23 @@ export class FlightsService {
     );
   }
 
-  /** Igual que apoyosInfoDeVuelo pero en lote (listados). */
-  private async apoyosPorVuelo(
+  /**
+   * Filas de `vuelo_apoyo` por vuelo en lote (listados). Best-effort: un
+   * fallo aquí no tumba el listado (la app vieja ni lo lee). Los nombres los
+   * resuelve `list()` en UNA consulta junto con la tripulación de tramo.
+   */
+  private async apoyosFilasPorVuelo(
     vueloIds: string[],
-  ): Promise<
-    Map<string, Array<{ id: string; nombre: string; rol: string | null }>>
-  > {
-    const out = new Map<
-      string,
-      Array<{ id: string; nombre: string; rol: string | null }>
-    >();
-    if (vueloIds.length === 0) return out;
-    let porVuelo: Map<string, VueloApoyoRow[]>;
+  ): Promise<Map<string, VueloApoyoRow[]>> {
+    if (vueloIds.length === 0) return new Map();
     try {
-      porVuelo = await apoyosDeVuelos(this.supabase.service, vueloIds);
+      return await apoyosDeVuelos(this.supabase.service, vueloIds);
     } catch (err) {
-      // Aditivo: un fallo aquí no tumba el listado (la app vieja ni lo lee).
       this.logger.warn(
-        `apoyosPorVuelo: ${err instanceof Error ? err.message : String(err)}`,
+        `apoyosFilasPorVuelo: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return out;
+      return new Map();
     }
-    const todos = new Set<string>();
-    for (const filas of porVuelo.values()) {
-      for (const id of apoyosNivelVuelo(filas)) todos.add(id);
-    }
-    const info = await this.usuariosInfo([...todos]);
-    for (const [vid, filas] of porVuelo) {
-      out.set(
-        vid,
-        apoyosNivelVuelo(filas).map(
-          (id) => info.get(id) ?? { id, nombre: 'Usuario', rol: null },
-        ),
-      );
-    }
-    return out;
   }
 
   /**
@@ -1930,23 +1976,48 @@ export class FlightsService {
     aeronaveId: string | null | undefined,
   ): Promise<{
     matricula: string | null;
+    modelo: string | null;
     velocidad_crucero_kts: number | null;
   } | null> {
     if (!aeronaveId) return null;
     const { data } = await this.supabase.service
       .from('aeronave')
-      .select('matricula, velocidad_crucero_kts')
+      .select('matricula, modelo, velocidad_crucero_kts')
       .eq('id', aeronaveId)
       .maybeSingle();
     if (!data) return null;
     const row = data as {
       matricula?: string;
+      modelo?: string | null;
       velocidad_crucero_kts?: number | string | null;
     };
     const vel = Number(row.velocidad_crucero_kts);
     return {
       matricula: row.matricula ?? null,
+      modelo: row.modelo ?? null,
       velocidad_crucero_kts: Number.isFinite(vel) && vel > 0 ? vel : null,
+    };
+  }
+
+  /** Nombre + razón social del cliente del vuelo en UNA lectura (snapshot). */
+  private async clienteResumen(clienteId: string | null | undefined): Promise<{
+    nombre: string | null;
+    razon_social_default: string | null;
+  } | null> {
+    if (!clienteId) return null;
+    const { data } = await this.supabase.service
+      .from('cliente')
+      .select('nombre, razon_social_default')
+      .eq('id', clienteId)
+      .maybeSingle();
+    if (!data) return null;
+    const row = data as {
+      nombre?: string | null;
+      razon_social_default?: string | null;
+    };
+    return {
+      nombre: row.nombre ?? null,
+      razon_social_default: row.razon_social_default ?? null,
     };
   }
 
@@ -1966,6 +2037,9 @@ export class FlightsService {
       ((vuelo as { copiloto_id?: string | null }).copiloto_id as
         | string
         | null) ?? null;
+    const clienteId =
+      ((vuelo as { cliente_id?: string | null }).cliente_id as string | null) ??
+      null;
     const [
       escalas,
       cobros,
@@ -1977,6 +2051,7 @@ export class FlightsService {
       copilotoNombre,
       snapRow,
       apoyosRows,
+      clienteResumen,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -2007,6 +2082,9 @@ export class FlightsService {
         .then((r) => r.data),
       // Tripulación de apoyo 0..N (29-ago): fuente única vuelo_apoyo.
       apoyosDeVuelo(this.supabase.service, id),
+      // Cliente con razón social (5-sep-2026, buscador de la app): findById
+      // no embebe cliente (VUELO_COLS se usa en escrituras), se lee aparte.
+      this.clienteResumen(clienteId),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -2070,6 +2148,11 @@ export class FlightsService {
     return {
       ...vuelo,
       aeronave_matricula: aeronave?.matricula ?? null,
+      // Buscador de la app (5-sep-2026, aditivo): modelo y cliente con razón
+      // social en el detalle, paridad con el listado.
+      aeronave_modelo: aeronave?.modelo ?? null,
+      cliente_nombre: clienteResumen?.nombre ?? null,
+      cliente_razon_social: clienteResumen?.razon_social_default ?? null,
       ...participacion,
       piloto_nombre: pilotoNombre,
       copiloto_nombre: copilotoNombre,
