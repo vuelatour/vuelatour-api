@@ -22,6 +22,10 @@ import {
   type ParticipacionAvionItem,
 } from '../../common/participacion-aeronave.util';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  modeloCotizadoDe,
+  modelosCotizados,
+} from '../../common/modelos-cotizados.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
@@ -221,6 +225,13 @@ function round2(n: number): number {
 
 function round4(n: number): number {
   return Math.round(n * 10000) / 10000;
+}
+
+/** Ficha mínima de un avión para el detalle (cotizado vs operativo). */
+export interface FichaAvionMin {
+  id: string;
+  matricula: string | null;
+  modelo: string | null;
 }
 
 @Injectable()
@@ -2777,11 +2788,16 @@ export class QuotesService {
     vuelo: {
       aeronave_id?: string | null;
       calculo_snapshot?: unknown;
+      es_externo?: boolean | null;
+      avion_externo_modelo?: string | null;
     } & VueloIngresoInput,
     escalas: EscalaParticipacionInput[],
   ): Promise<{
     participacion_aviones: ParticipacionAvionItem[];
     participacion_fuente: FuenteParticipacion;
+    aeronave_cotizada: FichaAvionMin | null;
+    aeronave_operativa: FichaAvionMin | null;
+    modelos_cotizados: string[];
   }> {
     const p = participacionPorAeronave(
       {
@@ -2791,17 +2807,45 @@ export class QuotesService {
       escalas,
     );
     const particion = particionIngresoVuelo(vuelo);
-    const ids = [...p.factores.keys()];
+    // Avión COTIZADO (snapshot: con el que se pactó el precio) vs OPERATIVO
+    // (vuelo.aeronave_id): el panel dice «cotizado en Seneca V · opera
+    // XB-ANU» y el PDF imprime el MODELO cotizado (feedback 4-sep). Una sola
+    // consulta cubre participación + ambos aviones.
+    const snapAeronave = (
+      vuelo.calculo_snapshot as {
+        aeronave?: { id?: unknown; matricula?: unknown; modelo?: unknown };
+      } | null
+    )?.aeronave;
+    const cotizadaId =
+      typeof snapAeronave?.id === 'string' ? snapAeronave.id : null;
+    const ids = [
+      ...new Set(
+        [...p.factores.keys(), vuelo.aeronave_id ?? null, cotizadaId].filter(
+          (x): x is string => !!x,
+        ),
+      ),
+    ];
     const matriculaPorId = new Map<string, string>();
+    const modeloPorId = new Map<string, string | null>();
     if (ids.length > 0) {
       const { data } = await this.supabase.service
         .from('aeronave')
-        .select('id, matricula')
+        .select('id, matricula, modelo')
         .in('id', ids);
       for (const a of data ?? []) {
         matriculaPorId.set(a.id as string, a.matricula as string);
+        modeloPorId.set(a.id as string, (a.modelo as string | null) ?? null);
       }
     }
+    const ficha = (id: string | null): FichaAvionMin | null =>
+      id && matriculaPorId.has(id)
+        ? {
+            id,
+            matricula: matriculaPorId.get(id) ?? null,
+            modelo: modeloPorId.get(id) ?? null,
+          }
+        : null;
+    const cotizada = ficha(cotizadaId);
     return {
       // Mapper único (fuente única): principal primero, venta del avión
       // repartida al centavo, horas siempre null.
@@ -2811,6 +2855,24 @@ export class QuotesService {
         matriculaPorId,
       ),
       participacion_fuente: p.fuente,
+      // Sin ficha en catálogo (avión dado de baja): el snapshot sigue
+      // diciendo con qué modelo se cotizó.
+      aeronave_cotizada:
+        cotizada ??
+        (cotizadaId
+          ? {
+              id: cotizadaId,
+              matricula:
+                typeof snapAeronave?.matricula === 'string'
+                  ? snapAeronave.matricula
+                  : null,
+              modelo: modeloCotizadoDe(vuelo),
+            }
+          : null),
+      aeronave_operativa: vuelo.es_externo
+        ? null
+        : ficha(vuelo.aeronave_id ?? null),
+      modelos_cotizados: modelosCotizados(vuelo, escalas, modeloPorId),
     };
   }
 

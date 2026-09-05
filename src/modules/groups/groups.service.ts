@@ -54,6 +54,7 @@ import {
   estadoGrupoDe,
   materializarExtras,
   normalizarExtrasGrupo,
+  normalizarTuasLineas,
   proponerFlota,
   repartirAjuste,
   round2,
@@ -67,6 +68,7 @@ import {
   type PlantillaTramo,
   type ProblemaGrupo,
   type TramoHijo,
+  type TuaLineaGrupo,
 } from './grupo-armador.util';
 import {
   cuadreSobre,
@@ -82,7 +84,7 @@ import {
 // ===== Tipos de filas =====
 
 const CABECERA_COLS =
-  'id, folio, cliente_id, nombre, fecha_vuelo, fecha_fin, pasajeros_total, escalas_plantilla, tarifa_tipo, metodo_cobro, pase_abordar, tc_usd_mxn, extras_grupo, ajuste_grupo_usd, vuelo_ancla_id, version, notas, notas_internas, pdf_mostrar_anexo_aviones, pdf_mostrar_subtotal_por_avion, pdf_mostrar_precio_por_persona, pdf_mostrar_tarifa, cancelado_at, cancelado_motivo, created_at, updated_at, created_by, updated_by, cliente:cliente!cliente_id(id, nombre, razon_social_default, es_interno)';
+  'id, folio, cliente_id, nombre, fecha_vuelo, fecha_fin, pasajeros_total, escalas_plantilla, tarifa_tipo, metodo_cobro, pase_abordar, tc_usd_mxn, extras_grupo, ajuste_grupo_usd, tuas_lineas, vuelo_ancla_id, version, notas, notas_internas, pdf_mostrar_anexo_aviones, pdf_mostrar_subtotal_por_avion, pdf_mostrar_precio_por_persona, pdf_mostrar_tarifa, cancelado_at, cancelado_motivo, created_at, updated_at, created_by, updated_by, cliente:cliente!cliente_id(id, nombre, razon_social_default, es_interno)';
 
 const HIJO_COLS =
   'id, folio, estado, aeronave_id, piloto_id, copiloto_id, grupo_id, grupo_posicion, grupo_pax, pasajeros, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, facturado, cotizacion_version, cotizacion_abierta, fecha_vuelo, fecha_fin, estado_permiso, extras, calculo_snapshot, tarifa_hora_usd, tiempo_cobrable_hr, ajuste_final_usd, metodo_cobro, metodo_cobro_detalle, notas_internas, es_externo, origen_iata, destino_iata, itinerario_operativo, escalas:escala(id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, pasajeros, es_ferry, solo_operativa, cancelada_at, taco_llegada, fecha_salida_plan)';
@@ -109,6 +111,8 @@ export interface CabeceraRow {
   tc_usd_mxn: number | string | null;
   extras_grupo: unknown;
   ajuste_grupo_usd: number | string | null;
+  /** TUAS capturadas por aeropuerto (jsonb; ver normalizarTuasLineas). */
+  tuas_lineas: unknown;
   vuelo_ancla_id: string | null;
   version: number;
   notas: string | null;
@@ -337,6 +341,8 @@ interface ArmadoCtx {
   pase_abordar: boolean;
   extras: ExtraGrupoDef[];
   ajuste_grupo_usd: number;
+  /** TUAS capturadas por aeropuerto: viajan tal cual al motor de cada hijo. */
+  tuas_lineas: TuaLineaGrupo[];
   aviones: AvionCtx[];
   anclaKey: string | null;
 }
@@ -661,6 +667,11 @@ export class GroupsService {
     if (ctx.metodo_pago_detalle)
       dto.metodo_pago_detalle = ctx.metodo_pago_detalle;
     if (ctx.tc_usd_mxn) dto.tc_usd_mxn = ctx.tc_usd_mxn;
+    // TUAS capturadas del grupo (5-sep): MISMA línea que el cotizador de un
+    // avión; cada hijo resuelve su exención por prefijo con SU matrícula.
+    if (ctx.tuas_lineas.length > 0) {
+      dto.tuas_lineas = ctx.tuas_lineas.map((l) => ({ ...l }));
+    }
     if (avion.tarifa_hora_override_usd != null)
       dto.tarifa_hora_override_usd = avion.tarifa_hora_override_usd;
     if (avion.tiempo_cobrable_override_hr != null)
@@ -786,16 +797,18 @@ export class GroupsService {
   private consolidadoDe(
     hijos: Map<string, HijoCalculado>,
     pasajerosTotal: number,
+    extrasDefs: ExtraGrupoDef[],
   ): Consolidado {
     const lista: HijoConsolidable[] = [...hijos.values()].map((h) => ({
       key: h.avion.key,
       posicion: h.avion.posicion,
       matricula: h.ficha.matricula,
+      modelo: h.ficha.modelo,
       calculo_snapshot: h.calculo,
       total_usd: h.calculo.totales.total_usd,
       total_mxn: h.calculo.totales.total_mxn ?? null,
     }));
-    return consolidarDesgloses(lista, pasajerosTotal);
+    return consolidarDesgloses(lista, pasajerosTotal, extrasDefs);
   }
 
   /**
@@ -1130,6 +1143,7 @@ export class GroupsService {
       pase_abordar: dto.pase_abordar === true,
       extras,
       ajuste_grupo_usd: round2(Number(dto.ajuste_grupo_usd) || 0),
+      tuas_lineas: normalizarTuasLineas(dto.tuas_lineas),
       aviones,
       anclaKey: opts.anclaKey ?? null,
     };
@@ -1160,7 +1174,7 @@ export class GroupsService {
         sin_asignar: sinAsignar,
         faltan: faltanPilotos,
       },
-      consolidado: this.consolidadoDe(hijos, pasajerosTotal),
+      consolidado: this.consolidadoDe(hijos, pasajerosTotal, ctx.extras),
     };
   }
 
@@ -1259,6 +1273,7 @@ export class GroupsService {
       pase_abordar: ctx.pase_abordar,
       extras_grupo: ctx.extras,
       ajuste_grupo_usd: ctx.ajuste_grupo_usd,
+      tuas_lineas: ctx.tuas_lineas,
       aviones: ctx.aviones.map((a) => {
         const h = hijos.get(a.key)!;
         const av = avisosPorAvion.get(a.key)!;
@@ -1484,6 +1499,7 @@ export class GroupsService {
         tc_usd_mxn: ctx.tc_usd_mxn ?? null,
         extras_grupo: ctx.extras,
         ajuste_grupo_usd: ctx.ajuste_grupo_usd,
+        tuas_lineas: ctx.tuas_lineas,
         notas: dto.notas ?? null,
         notas_internas: dto.notas_internas ?? null,
         pdf_mostrar_anexo_aviones: dto.pdf_mostrar_anexo_aviones ?? true,
@@ -1789,11 +1805,15 @@ export class GroupsService {
         matricula: h.aeronave_id
           ? (fichas.get(h.aeronave_id)?.matricula ?? null)
           : null,
+        modelo: h.aeronave_id
+          ? (fichas.get(h.aeronave_id)?.modelo ?? null)
+          : null,
         calculo_snapshot: h.calculo_snapshot,
         total_usd: num(h.monto_total_usd),
         total_mxn: h.monto_total_mxn == null ? null : num(h.monto_total_mxn),
       })),
       cab.pasajeros_total,
+      extrasDefs,
     );
     const problemas: ProblemaGrupo[] = diagnosticoGrupo(
       { pasajeros_total: cab.pasajeros_total, extras_grupo: extrasDefs },
@@ -1830,6 +1850,7 @@ export class GroupsService {
       ajuste_grupo_usd: num(cab.ajuste_grupo_usd),
       escalas_plantilla: plantilla,
       extras_grupo: extrasDefs,
+      tuas_lineas: normalizarTuasLineas(cab.tuas_lineas),
       cliente: cliente
         ? {
             id: cliente.id,
@@ -2028,6 +2049,8 @@ export class GroupsService {
           cab.extras_grupo,
         )) as ArmarGrupoDto['extras_grupo'],
       ajuste_grupo_usd: dto?.ajuste_grupo_usd ?? num(cab.ajuste_grupo_usd),
+      // Omitido = se conservan las capturadas; [] explícito = catálogo.
+      tuas_lineas: dto?.tuas_lineas ?? normalizarTuasLineas(cab.tuas_lineas),
     };
   }
 
@@ -2223,6 +2246,7 @@ export class GroupsService {
         tc_usd_mxn: ctx.tc_usd_mxn ?? null,
         extras_grupo: ctx.extras,
         ajuste_grupo_usd: ctx.ajuste_grupo_usd,
+        tuas_lineas: ctx.tuas_lineas,
         version: cab.version + 1,
         ...(dto.notas !== undefined ? { notas: dto.notas } : {}),
         ...(dto.notas_internas !== undefined

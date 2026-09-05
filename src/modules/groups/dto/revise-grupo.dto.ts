@@ -22,6 +22,7 @@ import {
   EscalaInputDto,
   MetodoPago,
   TipoTarifa,
+  TuaLineaDto,
 } from '../../quotes/dto/calculate-quote.dto';
 import { AvionGrupoDto, ExtraGrupoDto } from './armar-grupo.dto';
 
@@ -112,6 +113,18 @@ export class ReviseGrupoDto {
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   ajuste_grupo_usd?: number;
+
+  @ApiPropertyOptional({
+    type: [TuaLineaDto],
+    description:
+      'Reemplaza las TUAS capturadas por aeropuerto de la cabecera (omitido = se conservan; [] = volver al catálogo).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => TuaLineaDto)
+  tuas_lineas?: TuaLineaDto[];
 
   @ApiPropertyOptional({ type: [AvionGrupoDto] })
   @IsOptional()

@@ -23,6 +23,7 @@ import {
   EscalaInputDto,
   MetodoPago,
   TipoTarifa,
+  TuaLineaDto,
 } from '../../quotes/dto/calculate-quote.dto';
 
 /**
@@ -246,6 +247,18 @@ export class ArmarGrupoDto {
   @ValidateNested({ each: true })
   @Type(() => ExtraGrupoDto)
   extras_grupo?: ExtraGrupoDto[];
+
+  @ApiPropertyOptional({
+    type: [TuaLineaDto],
+    description:
+      'TUAS capturadas POR AEROPUERTO (unitario + moneda), MISMA línea que el cotizador de un avión. Se pasan tal cual al motor de CADA hijo (cada avión resuelve su exención XA/XB/N). Una línea MXN exige tc_usd_mxn. Vacío/omitido = catálogo.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @ValidateNested({ each: true })
+  @Type(() => TuaLineaDto)
+  tuas_lineas?: TuaLineaDto[];
 
   @ApiPropertyOptional({
     description:

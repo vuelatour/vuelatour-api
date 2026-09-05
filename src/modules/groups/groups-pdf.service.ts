@@ -97,14 +97,25 @@ export class GroupsPdfService {
     );
     const descuento =
       consolidado.ajuste_usd < 0 ? round2(-consolidado.ajuste_usd) : 0;
-    const linea = (l: LineaConsolidada) => ({
-      clave: l.clave,
-      concepto: l.concepto,
-      monto_usd: l.monto_usd,
-      ...(l.cantidad != null ? { cantidad: l.cantidad } : {}),
-      ...(l.unitario != null ? { unitario: l.unitario } : {}),
-      ...(l.moneda ? { moneda: l.moneda } : {}),
-    });
+    // TUAS (5-sep): con unitario UNIFORME entre aviones la línea viaja como
+    // "TUA CZA" + cantidad (pax gravados) × unitario nativo — pyservices la
+    // pinta «TUA CZA · 44 pax × $20.85» igual que un extra; sin unitario común
+    // se queda el concepto completo. El monto NO cambia.
+    const linea = (l: LineaConsolidada) => {
+      const tuaConUnitario =
+        l.clave === 'TUAS' &&
+        !!l.iata &&
+        l.cantidad != null &&
+        l.unitario != null;
+      return {
+        clave: l.clave,
+        concepto: tuaConUnitario ? `TUA ${l.iata}` : l.concepto,
+        monto_usd: l.monto_usd,
+        ...(l.cantidad != null ? { cantidad: l.cantidad } : {}),
+        ...(l.unitario != null ? { unitario: l.unitario } : {}),
+        ...(l.moneda ? { moneda: l.moneda } : {}),
+      };
+    };
     const desgloseCliente = [
       {
         clave: 'TIEMPO_VUELO',

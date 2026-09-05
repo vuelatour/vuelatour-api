@@ -7,6 +7,7 @@ import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
+import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
 
 function num(v: unknown): number | null {
   if (v == null) return null;
@@ -398,6 +399,28 @@ export class QuotesPdfService {
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
 
+    // MODELO COTIZADO (feedback del cliente 4-sep): el PDF muestra el TIPO
+    // de avión que se cotizó (snapshot), NUNCA la matrícula — a veces se
+    // cotiza en un avión y la ruta operativa va en otro. Con tramos en
+    // aviones distintos, los modelos distintos. `modelos_cotizados` ya viene
+    // resuelto por findById (fuente única modelos-cotizados.util); fallback
+    // al snapshot si el render se llama con una fila cruda.
+    const aeronaveCotizadaModelo = modeloCotizadoDe({
+      es_externo: quote.es_externo === true,
+      avion_externo_modelo:
+        typeof quote.avion_externo_modelo === 'string'
+          ? quote.avion_externo_modelo
+          : null,
+      calculo_snapshot: quote.calculo_snapshot,
+    });
+    const modelosCotizadosPdf = Array.isArray(quote.modelos_cotizados)
+      ? (quote.modelos_cotizados as unknown[]).filter(
+          (m): m is string => typeof m === 'string' && m.trim().length > 0,
+        )
+      : aeronaveCotizadaModelo
+        ? [aeronaveCotizadaModelo]
+        : [];
+
     const payload = {
       folio: String(quote.folio ?? ''),
       fecha:
@@ -405,6 +428,10 @@ export class QuotesPdfService {
         (quote.fecha_solicitud as string) ??
         null,
       cliente,
+      // Campos ADITIVOS (pyservices los ignora hasta que la plantilla los
+      // pinte): modelo del avión COTIZADO y lista de modelos distintos.
+      aeronave_cotizada_modelo: aeronaveCotizadaModelo,
+      modelos_cotizados: modelosCotizadosPdf,
       origen: (quote.origen_iata as string) ?? '—',
       destino: (quote.destino_iata as string) ?? '—',
       tipo: (quote.tipo as string) ?? 'REDONDO',
