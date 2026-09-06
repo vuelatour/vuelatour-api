@@ -10,11 +10,59 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
   ValidateIf,
 } from 'class-validator';
+
+/** Tope por default / máximo de filas del historial de MI caja. */
+export const MI_CAJA_HISTORIAL_LIMIT_DEFAULT = 500;
+export const MI_CAJA_HISTORIAL_LIMIT_MAX = 1000;
+/** Ventana por default del historial de MI caja: últimos 6 meses. */
+export const MI_CAJA_HISTORIAL_MESES_ATRAS = 6;
+
+/**
+ * GET /v1/me/caja-chica/movimientos (5-sep-2026): ventana en días Cancún
+ * sobre las fechas de pared del libro (`caja_chica_movimiento.fecha` y
+ * `gasto.fecha_gasto` son `date`). Default: últimos 6 meses, hasta abierto.
+ * El saldo corrido SIEMPRE se calcula sobre el libro completo; la ventana
+ * solo recorta lo que se devuelve.
+ */
+export class MiCajaHistorialQuery {
+  @ApiPropertyOptional({
+    description: 'Desde (YYYY-MM-DD, día Cancún). Default: hoy − 6 meses.',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'desde debe ser una fecha YYYY-MM-DD',
+  })
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Hasta (YYYY-MM-DD, día Cancún, inclusive). Default: abierto.',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'hasta debe ser una fecha YYYY-MM-DD',
+  })
+  hasta?: string;
+
+  @ApiPropertyOptional({
+    default: MI_CAJA_HISTORIAL_LIMIT_DEFAULT,
+    minimum: 1,
+    maximum: MI_CAJA_HISTORIAL_LIMIT_MAX,
+    description:
+      'Máximo de movimientos devueltos (los más recientes de la ventana). `count` trae el total de la ventana.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MI_CAJA_HISTORIAL_LIMIT_MAX)
+  limit: number = MI_CAJA_HISTORIAL_LIMIT_DEFAULT;
+}
 
 export enum MonedaCaja {
   MXN = 'MXN',
@@ -155,7 +203,9 @@ export class CreateCajaMovimientoDto {
   @IsISO8601()
   fecha?: string;
 
-  @ApiPropertyOptional({ description: 'Quién autoriza (ej. Ale en una reposición)' })
+  @ApiPropertyOptional({
+    description: 'Quién autoriza (ej. Ale en una reposición)',
+  })
   @IsOptional()
   @IsUUID()
   autorizado_por?: string;

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { CajaChicaModule } from '../caja-chica/caja-chica.module';
 import { CalendarModule } from '../calendar/calendar.module';
 import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { PilotsModule } from '../pilots/pilots.module';
@@ -14,6 +15,7 @@ import { MeController } from './me.controller';
     ConfiguracionModule,
     CalendarModule,
     RealtimeModule,
+    CajaChicaModule,
   ],
   controllers: [MeController],
   providers: [MeCapturasService],

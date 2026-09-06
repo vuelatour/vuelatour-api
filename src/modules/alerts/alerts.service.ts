@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { saldoCaja } from '../../common/caja-chica-saldo.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   diagnosticoGrupo,
@@ -1333,7 +1334,8 @@ export class AlertsService {
 
     const usuarioIds = fondos.map((f) => f.usuario_id as string);
     // OJO: caja_chica_movimiento no tiene columna `estado`; el saldo suma
-    // TODOS los movimientos, igual que caja-chica.service.saldoFromParts.
+    // TODOS los movimientos con `saldoCaja` (common/caja-chica-saldo.util),
+    // la misma función del panel y de la app.
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
@@ -1352,17 +1354,18 @@ export class AlertsService {
     const gastos = gastosRes.data;
 
     for (const f of fondos) {
-      let saldo = 0;
-      for (const m of (movs ?? []) as Array<Record<string, unknown>>) {
-        if (m.fondo_id !== f.id) continue;
-        const monto = Number(m.monto);
-        saldo += m.tipo === 'REINTEGRO' ? -monto : monto;
-      }
-      for (const g of (gastos ?? []) as Array<Record<string, unknown>>) {
-        if (g.usuario_captura_id !== f.usuario_id || g.moneda !== f.moneda)
-          continue;
-        saldo -= Number(g.monto);
-      }
+      // Misma fórmula que el panel y la app (fuente única, 5-sep-2026).
+      const movsDelFondo = ((movs ?? []) as Array<Record<string, unknown>>)
+        .filter((m) => m.fondo_id === f.id)
+        .map((m) => ({ tipo: String(m.tipo), monto: Number(m.monto) }));
+      const efectivoDelUsuario = (
+        (gastos ?? []) as Array<Record<string, unknown>>
+      )
+        .filter(
+          (g) => g.usuario_captura_id === f.usuario_id && g.moneda === f.moneda,
+        )
+        .map((g) => ({ monto: Number(g.monto) }));
+      const saldo = saldoCaja(movsDelFondo, efectivoDelUsuario);
       if (saldo < 0) {
         const nombre =
           unwrap(f.usuario as { nombre: string } | { nombre: string }[] | null)

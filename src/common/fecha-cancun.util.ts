@@ -29,3 +29,18 @@ export function diaCancun(iso: string): string {
   if (Number.isNaN(d.getTime())) throw new Error(`Fecha inválida: ${iso}`);
   return hoyCancun(d);
 }
+
+/**
+ * Resta meses calendario a una fecha de pared YYYY-MM-DD (sin zona: mediodía
+ * UTC). Si el día no existe en el mes destino, JS lo desborda al siguiente
+ * (31-mar − 1 mes → 3-mar): aceptable para ventanas "últimos N meses".
+ */
+export function restarMeses(dia: string, meses: number): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
+  if (!m) throw new Error(`Fecha inválida: ${dia}`);
+  const d = new Date(
+    Date.UTC(Number(m[1]), Number(m[2]) - 1 - meses, Number(m[3]), 12),
+  );
+  if (Number.isNaN(d.getTime())) throw new Error(`Fecha inválida: ${dia}`);
+  return d.toISOString().slice(0, 10);
+}

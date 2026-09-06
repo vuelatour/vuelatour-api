@@ -4,6 +4,8 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { CajaChicaService } from '../caja-chica/caja-chica.service';
+import { MiCajaHistorialQuery } from '../caja-chica/dto/caja-chica.dto';
 import { CalendarService } from '../calendar/calendar.service';
 import { MisEventosQuery } from '../calendar/dto/calendar.dto';
 import {
@@ -30,6 +32,7 @@ export class MeController {
     private readonly configuracion: ConfiguracionService,
     private readonly calendar: CalendarService,
     private readonly push: PushService,
+    private readonly cajaChica: CajaChicaService,
   ) {}
 
   /** Dispositivos push del propio usuario (0 = este teléfono no recibe
@@ -158,6 +161,24 @@ export class MeController {
       query.desde,
       query.hasta,
     );
+  }
+
+  @Get('caja-chica/movimientos')
+  // Sin @Roles a propósito: es "lo mío" (igual que GET /caja-chica/me) y el
+  // VISITANTE también tiene fondo; el prefijo /v1/me está en su lista.
+  @ApiOperation({
+    summary:
+      'Historial de MI caja chica (5-sep-2026): reposiciones/ajustes/reintegros + gastos en EFECTIVO unificados, ' +
+      'fecha desc, con el saldo corrido del libro (`saldo_despues`, mismo signo que el panel) y el acumulado POR REPONER ' +
+      'en positivo (`por_reponer_despues`: regresa a 0 tras una reposición completa). Ventana ?desde&hasta en días Cancún ' +
+      '(default últimos 6 meses) y ?limit (default 500); `count` = total de la ventana. Siempre filtra por el usuario ' +
+      'autenticado; sin fondo activo → fondo:null y lista vacía.',
+  })
+  miCajaMovimientos(
+    @CurrentUser() current: AuthenticatedUser,
+    @Query() query: MiCajaHistorialQuery,
+  ) {
+    return this.cajaChica.getMyHistorial(current.userId, query);
   }
 
   @Get('capturas')

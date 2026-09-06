@@ -5,11 +5,27 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  CONCEPTO_CAJA,
+  TIPO_GASTO_CAJA,
+  efectoMovimientoCaja,
+  historialConSaldo,
+  lecturaFondo,
+  porReponerCaja,
+  round2,
+  saldoCaja,
+  type EntradaConSaldo,
+  type EntradaHistorialCaja,
+} from '../../common/caja-chica-saldo.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
 import {
   CreateCajaMovimientoDto,
   CreateFondoDto,
   ListFondosQuery,
+  MI_CAJA_HISTORIAL_LIMIT_DEFAULT,
+  MI_CAJA_HISTORIAL_MESES_ATRAS,
+  MiCajaHistorialQuery,
   MonedaCaja,
   TipoMovimientoCaja,
   UpdateCajaMovimientoDto,
@@ -27,35 +43,52 @@ type CajaMov = {
   fecha?: string;
   created_at?: string;
 };
-type EfectivoGasto = { monto: number | string };
 
+type FondoRow = Record<string, unknown> & {
+  id: string;
+  usuario_id: string;
+  moneda: string;
+  es_acumulada?: boolean;
+  monto_fondo?: number | string | null;
+  usuario?: unknown;
+};
+
+/** Entrada del libro unificado (movimiento de caja o gasto en efectivo). */
+type EntradaLibro = EntradaHistorialCaja & {
+  id: string;
+  tipo: string;
+  moneda: string;
+  /** Mismo criterio que el panel: mov → notas ?? referencia; gasto → notas ?? etiqueta de categoría. */
+  descripcion: string | null;
+  notas: string | null;
+  referencia: string | null;
+  categoria: string | null;
+  lugar: string | null;
+  vuelo_id: string | null;
+  vuelo_folio: number | null;
+  registrado_por_nombre: string | null;
+  autorizado_por_nombre: string | null;
+};
+
+/** PostgREST devuelve el embed como objeto o arreglo según la relación. */
+function unwrapEmbed<T>(v: unknown): T | null {
+  const x: unknown = Array.isArray(v) ? (v as unknown[])[0] : v;
+  return x && typeof x === 'object' ? (x as T) : null;
+}
+
+function nombreEmbed(v: unknown): string | null {
+  const n = unwrapEmbed<{ nombre?: unknown }>(v)?.nombre;
+  return typeof n === 'string' && n ? n : null;
+}
+
+/**
+ * El saldo del fondo (y el saldo corrido del historial) se calcula SOLO con
+ * `src/common/caja-chica-saldo.util.ts` — fuente única compartida con la
+ * alerta de caja en negativo. Aquí no hay fórmulas de dinero.
+ */
 @Injectable()
 export class CajaChicaService {
   constructor(private readonly supabase: SupabaseService) {}
-
-  /** Efecto con signo de un movimiento de caja. AJUSTE conserva su signo. */
-  private signed(m: CajaMov): number {
-    const monto = Number(m.monto);
-    return m.tipo === TipoMovimientoCaja.REINTEGRO ? -monto : monto;
-  }
-
-  /**
-   * Saldo del fondo. Modo clásico: lo entregado menos lo gastado. Modo
-   * ACUMULADO (es_acumulada, pedido 6 ago 2026): el número es lo POR REPONER
-   * al usuario — sube con cada gasto en efectivo y las REPOSICIONES lo
-   * regresan a cero. Es el mismo cálculo con el signo invertido; una sola
-   * fórmula para que jamás diverjan.
-   */
-  private saldoFromParts(
-    movs: CajaMov[],
-    efectivo: EfectivoGasto[],
-    esAcumulada = false,
-  ): number {
-    const movTotal = movs.reduce((s, m) => s + this.signed(m), 0);
-    const efectivoTotal = efectivo.reduce((s, g) => s + Number(g.monto), 0);
-    const saldo = round(movTotal - efectivoTotal, 2);
-    return esAcumulada ? round(-saldo, 2) : saldo;
-  }
 
   /**
    * Última REPOSICIÓN del fondo (fecha y monto) — null si nunca ha habido.
@@ -142,7 +175,7 @@ export class CajaChicaService {
       );
       return {
         ...fo,
-        saldo: this.saldoFromParts(
+        saldo: saldoCaja(
           movsByFondo.get(fo.id) ?? [],
           efectivo,
           fo.es_acumulada === true,
@@ -208,27 +241,32 @@ export class CajaChicaService {
     return data;
   }
 
-  /** Detalle con historial unificado (movimientos + gastos efectivo) y saldo corrido. */
-  async getFondoDetail(id: string) {
-    const fondo = (await this.findFondo(id)) as Record<string, unknown> & {
-      id: string;
-      usuario_id: string;
-      moneda: string;
-    };
-
+  /**
+   * Libro del fondo: movimientos de caja (con nombres de quien registró y
+   * autorizó) + gastos en EFECTIVO del dueño en la moneda del fondo,
+   * unificados y con saldo corrido ASC (`historialConSaldo`, fuente única).
+   * Lo usan el detalle del panel y el historial del piloto en la app: mismo
+   * libro, misma cifra por fila.
+   */
+  private async cargarLibro(fondo: FondoRow): Promise<{
+    movs: Record<string, unknown>[];
+    efectivo: { monto: number | string }[];
+    historial: EntradaConSaldo<EntradaLibro>[];
+  }> {
     const [movsRes, gastosRes] = await Promise.all([
       this.supabase.service
         .from('caja_chica_movimiento')
         .select(
           `${MOV_COLS}, autorizado:usuario!autorizado_por(nombre), registrado:usuario!registrado_por(nombre)`,
         )
-        .eq('fondo_id', id),
+        .eq('fondo_id', fondo.id),
       this.supabase.service
         .from('gasto')
         // vuelo:vuelo_id(folio) — el historial enlaza al vuelo del gasto: la
         // oficina audita "¿de qué vuelo salió este efectivo?" sin buscarlo.
+        // `created_at`: desempate dentro del día (orden de captura).
         .select(
-          'id, monto, moneda, fecha_gasto, categoria, notas, foto_url, vuelo_id, vuelo:vuelo_id(folio)',
+          'id, monto, moneda, fecha_gasto, categoria, lugar, notas, vuelo_id, created_at, vuelo:vuelo_id(folio)',
         )
         .eq('medio_pago', 'EFECTIVO')
         .eq('usuario_captura_id', fondo.usuario_id),
@@ -236,98 +274,126 @@ export class CajaChicaService {
     // El saldo es dinero: nunca calcularlo con datos parciales.
     if (movsRes.error) throw new Error(movsRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
-    const movs = movsRes.data;
-    const gastos = gastosRes.data;
+    const movs = (movsRes.data ?? []) as Record<string, unknown>[];
+    const efectivo = (
+      (gastosRes.data ?? []) as Record<string, unknown>[]
+    ).filter((g) => g.moneda === fondo.moneda);
+    const duenoNombre = nombreEmbed(fondo.usuario);
 
-    const efectivo = (gastos ?? []).filter(
-      (g) => (g as { moneda: string }).moneda === fondo.moneda,
-    );
-
-    type Entry = {
-      id: string;
-      fecha: string;
-      origen: 'caja' | 'gasto';
-      tipo: string;
-      monto: number;
-      descripcion: string | null;
-      created_at: string;
-      /** Vuelo del gasto (si lo tiene): el panel enlaza a su detalle. */
-      vuelo_id: string | null;
-      vuelo_folio: number | null;
-    };
-
-    const entries: Entry[] = [
-      ...(movs ?? []).map((m) => {
-        const mm = m as Record<string, unknown> & {
+    const entradas: EntradaLibro[] = [
+      ...movs.map((m): EntradaLibro => {
+        const mm = m as {
           id: string;
           tipo: string;
+          monto: number | string;
+          moneda: string;
           fecha: string;
           created_at: string;
           notas: string | null;
           referencia: string | null;
+          autorizado?: unknown;
+          registrado?: unknown;
         };
         return {
           id: mm.id,
           fecha: mm.fecha,
-          origen: 'caja' as const,
+          origen: 'caja',
           tipo: mm.tipo,
-          monto: this.signed(mm as unknown as CajaMov),
+          monto: efectoMovimientoCaja(mm),
+          moneda: mm.moneda,
           descripcion: mm.notas ?? mm.referencia ?? null,
-          created_at: mm.created_at,
+          notas: mm.notas ?? null,
+          referencia: mm.referencia ?? null,
+          categoria: null,
+          lugar: null,
           vuelo_id: null,
           vuelo_folio: null,
+          created_at: mm.created_at,
+          registrado_por_nombre: nombreEmbed(mm.registrado),
+          autorizado_por_nombre: nombreEmbed(mm.autorizado),
         };
       }),
-      ...efectivo.map((g) => {
-        const gg = g as Record<string, unknown> & {
+      ...efectivo.map((g): EntradaLibro => {
+        const gg = g as {
           id: string;
           fecha_gasto: string;
           categoria: string;
+          lugar: string | null;
           notas: string | null;
           monto: number | string;
+          moneda: string;
           vuelo_id: string | null;
-          vuelo: { folio: number } | { folio: number }[] | null;
+          created_at: string | null;
+          vuelo: unknown;
         };
-        // PostgREST devuelve el embed como objeto o arreglo según la relación.
-        const vuelo = Array.isArray(gg.vuelo) ? gg.vuelo[0] : gg.vuelo;
+        const vuelo = unwrapEmbed<{ folio?: number }>(gg.vuelo);
         return {
           id: gg.id,
           fecha: gg.fecha_gasto,
-          origen: 'gasto' as const,
-          tipo: 'GASTO',
+          origen: 'gasto',
+          tipo: TIPO_GASTO_CAJA,
           monto: -Number(gg.monto),
+          moneda: gg.moneda,
           descripcion: gg.notas ?? etiquetaCategoriaGasto(gg.categoria),
-          created_at: gg.fecha_gasto,
+          notas: gg.notas ?? null,
+          referencia: null,
+          categoria: gg.categoria ?? null,
+          lugar: gg.lugar ?? null,
           vuelo_id: gg.vuelo_id ?? null,
           vuelo_folio: vuelo?.folio ?? null,
+          created_at: gg.created_at ?? gg.fecha_gasto,
+          registrado_por_nombre: duenoNombre,
+          autorizado_por_nombre: null,
         };
       }),
     ];
 
-    // Saldo corrido en orden cronológico ascendente.
-    entries.sort((a, b) =>
-      a.fecha !== b.fecha
-        ? a.fecha < b.fecha
-          ? -1
-          : 1
-        : a.created_at < b.created_at
-          ? -1
-          : a.created_at > b.created_at
-            ? 1
-            : 0,
-    );
-    let corrido = 0;
-    const historialAsc = entries.map((e) => {
-      corrido = round(corrido + e.monto, 2);
-      return { ...e, saldo: corrido };
+    const historial = historialConSaldo(entradas, {
+      esAcumulada: fondo.es_acumulada === true,
+      montoFondo: fondo.monto_fondo ?? null,
     });
+    return {
+      movs,
+      efectivo: efectivo as { monto: number | string }[],
+      historial,
+    };
+  }
+
+  /** Detalle con historial unificado (movimientos + gastos efectivo) y saldo corrido. */
+  async getFondoDetail(id: string) {
+    const fondo = (await this.findFondo(id)) as FondoRow;
+    const { movs, efectivo, historial } = await this.cargarLibro(fondo);
+    const ultimo = historial[historial.length - 1];
+    const esAcumulada = fondo.es_acumulada === true;
 
     return {
       ...fondo,
-      saldo: corrido,
-      movimientos: movs ?? [],
-      historial: historialAsc.reverse(),
-      ultima_reposicion: this.ultimaReposicion((movs ?? []) as CajaMov[]),
+      // MISMO valor y signo que `listFondos` y `/caja-chica/me` (`saldoCaja`):
+      // en caja ACUMULADA es positivo = por reponer (la card "Por reponer"
+      // del panel lo pinta en ámbar cuando > 0). Antes salía el saldo CRUDO
+      // del libro (negativo) y la lista decía +250 mientras el detalle decía
+      // −250 para el mismo fondo (revisión adversarial 5-sep).
+      saldo: saldoCaja(movs as CajaMov[], efectivo, esAcumulada),
+      // Saldo crudo del libro (mismo signo que la columna Saldo del historial).
+      saldo_libro: ultimo?.saldo ?? 0,
+      movimientos: movs,
+      // Shape del panel (`HistorialEntry`); `por_reponer` es ADITIVO (5-sep).
+      historial: historial
+        .map((e) => ({
+          id: e.id,
+          fecha: e.fecha,
+          origen: e.origen,
+          tipo: e.tipo,
+          monto: e.monto,
+          descripcion: e.descripcion,
+          created_at: e.created_at,
+          vuelo_id: e.vuelo_id,
+          vuelo_folio: e.vuelo_folio,
+          saldo: e.saldo,
+          por_reponer: e.por_reponer,
+        }))
+        .reverse(),
+      ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
     };
   }
 
@@ -882,50 +948,33 @@ export class CajaChicaService {
     );
     const esAcumulada =
       (fo as { es_acumulada?: boolean }).es_acumulada === true;
-    const saldo = this.saldoFromParts(
-      allMovs.data ?? [],
-      efectivo,
-      esAcumulada,
-    );
+    const saldo = saldoCaja(allMovs.data ?? [], efectivo, esAcumulada);
     // Lectura para el usuario (pedido 29-ago: "que diga lo usado, lo
     // disponible y el total asignado", no un saldo en negativo). Cálculo
-    // ADITIVO sobre el mismo saldo (fuente única):
+    // ADITIVO sobre el mismo saldo — reglas en `lecturaFondo` (fuente única
+    // con /me/caja-chica/movimientos):
     //  · asignado  = monto nominal del fondo.
     //  · entregado = Σ reposiciones/ajustes − reintegros registrados.
     //  · gastado   = Σ gastos en EFECTIVO del capturista (misma moneda).
-    //  · Con entregas registradas: disponible = saldo (entregado − gastado)
-    //    y usado = asignado − saldo (= lo por reponer).
-    //  · Fondo nominal sin entregas registradas (el caso típico del
-    //    VISITANTE: la oficina asignó $5,000 pero no capturó la entrega):
-    //    el saldo sale en negativo (−gastado); para la persona el fondo SÍ
-    //    existe → usado = gastado y disponible = asignado − gastado.
-    //  · Caja ACUMULADA: usado = lo por reponer (= saldo) y disponible =
-    //    asignado − usado.
-    const asignado = round(
+    const asignado = round2(
       Number((fo as { monto_fondo?: unknown }).monto_fondo ?? 0),
     );
-    const entregadoTotal = round(
+    const entregadoTotal = round2(
       (allMovs.data ?? []).reduce(
-        (acc, m) => acc + this.signed(m as CajaMov),
+        (acc, m) => acc + efectoMovimientoCaja(m as CajaMov),
         0,
       ),
     );
-    const gastadoTotal = round(
+    const gastadoTotal = round2(
       efectivo.reduce((acc, g) => acc + Number(g.monto), 0),
     );
-    let usado: number;
-    let disponible: number;
-    if (esAcumulada) {
-      usado = Math.max(0, saldo);
-      disponible = asignado > 0 ? round(asignado - usado) : 0;
-    } else if (entregadoTotal > 0) {
-      disponible = saldo;
-      usado =
-        asignado > 0 ? Math.max(0, round(asignado - saldo)) : gastadoTotal;
-    } else {
-      usado = gastadoTotal;
-      disponible = asignado > 0 ? round(asignado - gastadoTotal) : saldo;
-    }
+    const { usado, disponible } = lecturaFondo({
+      saldo,
+      asignado,
+      entregadoTotal,
+      gastadoTotal,
+      esAcumulada,
+    });
 
     // Efectivo capturado en OTRA moneda: no alimenta el saldo del fondo (una
     // caja = una moneda y los movimientos de reposición se rechazan en otra
@@ -938,7 +987,7 @@ export class CajaChicaService {
       otras.set(moneda, (otras.get(moneda) ?? 0) + Number(g.monto));
     }
     const efectivoOtrasMonedas = [...otras.entries()].map(
-      ([moneda, total]) => ({ moneda, total: round(total) }),
+      ([moneda, total]) => ({ moneda, total: round2(total) }),
     );
 
     return {
@@ -955,9 +1004,146 @@ export class CajaChicaService {
       efectivo_otras_monedas: efectivoOtrasMonedas,
     };
   }
-}
 
-function round(n: number, decimals = 2): number {
-  const f = 10 ** decimals;
-  return Math.round((n + Number.EPSILON) * f) / f;
+  // ===== Historial de MI caja (app, 5-sep-2026) =====
+
+  /**
+   * GET /v1/me/caja-chica/movimientos: el MISMO libro que ve la oficina en
+   * el detalle del fondo (`cargarLibro` → `historialConSaldo`, fuente única),
+   * en orden DESC (fecha, y dentro del día: caja antes que gastos, captura
+   * más reciente primero) y con dos cifras por fila:
+   *  · `saldo_despues`: saldo crudo del libro tras el movimiento (mismo
+   *    signo que la columna Saldo del panel — negativo en caja acumulada).
+   *  · `por_reponer_despues`: POSITIVO, lo que falta por reponer tras ese
+   *    movimiento; regresa a 0 con una reposición completa (decisión del
+   *    cliente 5-sep: coherente con la tarjeta POR REPONER de la app).
+   * El corrido se calcula sobre el libro COMPLETO; ?desde/?hasta (días
+   * Cancún sobre las fechas de pared) solo recortan lo devuelto. Solo el
+   * fondo ACTIVO del usuario autenticado; sin fondo → fondo:null y [].
+   */
+  async getMyHistorial(userId: string, query: MiCajaHistorialQuery) {
+    const limit = query.limit ?? MI_CAJA_HISTORIAL_LIMIT_DEFAULT;
+    const desde =
+      query.desde ?? restarMeses(hoyCancun(), MI_CAJA_HISTORIAL_MESES_ATRAS);
+    const hasta = query.hasta ?? null;
+    // Fecha de pared REAL (Date.parse acepta '2026-02-31' y lo desborda a
+    // marzo): se exige que el calendario devuelva el mismo día.
+    const valida = (d: string) => {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(d);
+      if (!m) return false;
+      const dt = new Date(
+        Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])),
+      );
+      return !Number.isNaN(dt.getTime()) && dt.toISOString().slice(0, 10) === d;
+    };
+    if (!valida(desde) || (hasta !== null && !valida(hasta))) {
+      throw new BadRequestException(
+        'desde/hasta deben ser fechas válidas YYYY-MM-DD.',
+      );
+    }
+    if (hasta !== null && hasta < desde) {
+      throw new BadRequestException(
+        'hasta debe ser igual o posterior a desde.',
+      );
+    }
+
+    const { data: fondo, error } = await this.supabase.service
+      .from('caja_chica_fondo')
+      .select(FONDO_COLS)
+      .eq('usuario_id', userId)
+      .eq('activo', true)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!fondo) {
+      return {
+        fondo: null,
+        desde,
+        hasta,
+        count: 0,
+        limit,
+        truncado: false,
+        movimientos: [],
+      };
+    }
+
+    const fo = fondo as FondoRow;
+    const { movs, efectivo, historial } = await this.cargarLibro(fo);
+    const esAcumulada = fo.es_acumulada === true;
+    const asignado = round2(Number(fo.monto_fondo ?? 0));
+    const saldoLibro =
+      historial.length > 0 ? historial[historial.length - 1].saldo : 0;
+    // Mismo `saldo` que GET /caja-chica/me (acumulada: positivo = por reponer).
+    const saldo = saldoCaja(movs as CajaMov[], efectivo, esAcumulada);
+    const entregadoTotal = round2(
+      movs.reduce((acc, m) => acc + efectoMovimientoCaja(m as CajaMov), 0),
+    );
+    const gastadoTotal = round2(
+      efectivo.reduce((acc, g) => acc + Number(g.monto), 0),
+    );
+    const { usado, disponible } = lecturaFondo({
+      saldo,
+      asignado,
+      entregadoTotal,
+      gastadoTotal,
+      esAcumulada,
+    });
+    const porReponer = porReponerCaja(saldoLibro, entregadoTotal, {
+      esAcumulada,
+      montoFondo: fo.monto_fondo ?? null,
+    });
+
+    const enVentana = historial.filter(
+      (e) => e.fecha >= desde && (hasta === null || e.fecha <= hasta),
+    );
+    const recientes = [...enVentana].reverse().slice(0, limit);
+
+    return {
+      fondo: {
+        id: fo.id,
+        moneda: fo.moneda,
+        es_acumulada: esAcumulada,
+        monto_fondo: asignado > 0 ? asignado : null,
+        saldo,
+        saldo_libro: saldoLibro,
+        por_reponer: porReponer,
+        usado,
+        disponible,
+        asignado,
+        ultima_reposicion: this.ultimaReposicion(movs as CajaMov[]),
+      },
+      desde,
+      hasta,
+      count: enVentana.length,
+      limit,
+      truncado: enVentana.length > limit,
+      movimientos: recientes.map((e) => ({
+        id: e.id,
+        origen: e.origen,
+        tipo: e.tipo,
+        // Fecha de pared YYYY-MM-DD (columna `date`): la app agrupa por este
+        // día tal cual, sin convertir zona (diaDesdeFechaSimple).
+        fecha: e.fecha,
+        created_at: e.created_at,
+        monto: e.monto,
+        moneda: e.moneda,
+        concepto: CONCEPTO_CAJA[e.tipo] ?? e.tipo,
+        descripcion: e.descripcion,
+        nota: e.notas,
+        referencia: e.referencia,
+        categoria: e.categoria,
+        categoria_label: e.categoria
+          ? etiquetaCategoriaGasto(e.categoria)
+          : null,
+        lugar: e.lugar,
+        folio_vuelo: e.vuelo_folio,
+        vuelo_id: e.vuelo_id,
+        gasto_id: e.origen === 'gasto' ? e.id : null,
+        movimiento_id: e.origen === 'caja' ? e.id : null,
+        saldo_despues: e.saldo,
+        por_reponer_despues: e.por_reponer,
+        registrado_por_nombre: e.registrado_por_nombre,
+        autorizado_por_nombre: e.autorizado_por_nombre,
+      })),
+    };
+  }
 }

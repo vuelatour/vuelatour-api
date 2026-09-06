@@ -1,4 +1,20 @@
-import { diaCancun, hoyCancun } from './fecha-cancun.util';
+import { diaCancun, hoyCancun, restarMeses } from './fecha-cancun.util';
+
+describe('restarMeses', () => {
+  it('resta meses calendario a una fecha de pared', () => {
+    expect(restarMeses('2026-09-05', 6)).toBe('2026-03-05');
+    expect(restarMeses('2026-03-05', 6)).toBe('2025-09-05');
+    expect(restarMeses('2026-09-05', 0)).toBe('2026-09-05');
+  });
+
+  it('día inexistente en el mes destino: desborda al siguiente (nunca falla)', () => {
+    expect(restarMeses('2026-03-31', 1)).toBe('2026-03-03');
+  });
+
+  it('fecha inválida → error legible', () => {
+    expect(() => restarMeses('2026-9-5', 6)).toThrow(/Fecha inválida/);
+  });
+});
 
 describe('hoyCancun', () => {
   afterEach(() => jest.useRealTimers());
