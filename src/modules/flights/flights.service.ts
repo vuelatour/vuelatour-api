@@ -7798,15 +7798,19 @@ export class FlightsService {
         timeZone: 'America/Cancun',
       });
       const inicioHoy = `${hoyCancun}T00:00:00-05:00`;
-      // Eje = fecha_fin (fin derivado del itinerario, trigger en BD): un
-      // viaje MULTI-DÍA con tramos futuros no es zombi aunque su
-      // fecha_vuelo (día 1) ya haya pasado.
+      // Eje = fecha_vuelo (día 1) + la doble guardia de abajo sobre los
+      // tramos vivos: un viaje MULTI-DÍA con tramos futuros no es zombi.
+      // Antes el eje era fecha_fin, pero fecha_fin también absorbe el
+      // "traslado final" capturado a mano (fecha_traslado_final): un vuelo
+      // con TODAS sus llegadas y un traslado final fechado días después
+      // (caso #242, 7-sep-2026) se quedaba EN_VUELO y aparecía "atorado" en
+      // la app del piloto hasta que esa fecha pasara.
       const { data, error } = await this.supabase.service
         .from('vuelo')
         .select('id, folio, fecha_vuelo, fecha_fin, estado')
         .in('estado', ['EN_VUELO', 'CONFIRMADO'])
         .eq('es_externo', false)
-        .lt('fecha_fin', inicioHoy);
+        .lt('fecha_vuelo', inicioHoy);
       if (error) throw new Error(error.message);
       for (const v of data ?? []) {
         try {
@@ -8776,6 +8780,25 @@ export class FlightsService {
       );
     }
     void this.calendar.syncFlight(row.vuelo_id as string);
+    // Estado derivado (7-sep-2026, caso #233): el tramo restaurado puede traer
+    // sus tacos completos (se canceló DESPUÉS de volar, p. ej. al dividir el
+    // vuelo) y el vuelo quedaba EN_VUELO para siempre porque ningún camino
+    // volvía a derivar. Mismo bloque que cancelEscala: solo AVANZA
+    // (EN_VUELO → COMPLETADO), jamás inicia ni regresa un estado; best-effort.
+    try {
+      const vuelo = await this.findById(row.vuelo_id as string);
+      if (
+        !vuelo.es_externo &&
+        vuelo.estado === 'EN_VUELO' &&
+        !this.faltanLlegadas(await this.escalasTaco(row.vuelo_id as string))
+      ) {
+        await this.complete(row.vuelo_id as string, userId);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `restoreEscala(${escalaId}): cierre derivado falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     // Tramo de vuelta (21-ago): quien recibió "tramo cancelado" debe saber
     // que se restauró — a toda la tripulación, como la cancelación.
     try {

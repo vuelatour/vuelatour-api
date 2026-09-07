@@ -390,7 +390,10 @@ export class FlightsController {
   @Post(':id/complete')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Transition EN_VUELO -> COMPLETADO' })
+  @ApiOperation({
+    summary:
+      'Transition EN_VUELO -> COMPLETADO (manual; el cierre automático de zombis corre 23:55 y 06:05 Cancún sobre fecha_vuelo)',
+  })
   async complete(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() c: AuthenticatedUser,
