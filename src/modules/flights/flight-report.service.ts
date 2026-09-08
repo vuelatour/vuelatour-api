@@ -6,6 +6,7 @@ import {
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   pagoVendedorUsd,
@@ -225,7 +226,7 @@ export class FlightReportService {
         pasajeros_nombres: nombresATexto(e.pasajeros_nombres),
         taco_salida: s,
         taco_llegada: l,
-        horas: s != null && l != null ? Number((l - s).toFixed(1)) : null,
+        horas: horasTacoDe(s, l),
         es_ferry: e.es_ferry === true,
         piloto: nombreDe(e.piloto_id) ?? nombreDe(v.piloto_id),
         copiloto: nombreDe(e.copiloto_id) ?? nombreDe(v.copiloto_id),
@@ -241,13 +242,7 @@ export class FlightReportService {
     // que ya existen en las escalas.
     const horasCotizadas =
       v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr);
-    const horasConDato = tramos.filter((t) => t.horas != null);
-    const horasVoladas =
-      horasConDato.length > 0
-        ? Number(
-            horasConDato.reduce((acc, t) => acc + (t.horas ?? 0), 0).toFixed(1),
-          )
-        : null;
+    const horasVoladas = sumaHorasTaco(tramos.map((t) => t.horas));
     const notasHoras: string[] = [];
     const primerOrigen =
       (escalas[0]?.origen_iata as string | undefined) ?? null;

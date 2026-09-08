@@ -1149,6 +1149,306 @@ export interface CotizacionGrupoPdfRequest {
   condiciones: string | null;
 }
 
+// ===== PDF «Cotización interna» (8-sep-2026) — UNA hoja para la oficina =====
+// NUNCA se manda al cliente. Todo lo que viaja aquí ya está calculado por
+// las fuentes únicas del API (desglose canónico v1.3 del snapshot,
+// cobrosEnUsd, particionIngresoVuelo/pagoVendedorUsd, participación por
+// avión, horas de taco por escala); pyservices SOLO pinta — las
+// "operaciones" (h × tarifa, pax × unitario, cantidad × unitario, % comisión
+// → neto) se mandan como campos para que la plantilla las escriba sin
+// recalcular. Nombres exactos del pydantic `CotizacionInternaPdfRequest`
+// (aditivo, extra="ignore").
+
+/** Tramo del itinerario (escala VIVA — canceladas incluidas y marcadas; sin filtro pdf_oculto). */
+export interface CotizacionInternaTramoPdf {
+  /** Numeración VISIBLE 1..N (idx + 1). */
+  orden: number;
+  /** `escala.orden` real (≥ 100 = tramo operativo agregado a mano). */
+  orden_real: number;
+  origen: string;
+  destino: string;
+  /** `escala.pasajeros` (0 en ferry); null sin dato. */
+  pasajeros: number | null;
+  /** `escala.fecha_salida_plan` ISO (pintar en hora Cancún). */
+  fecha_plan: string | null;
+  /** Horas REALES de salida/llegada (ISO) si las hay. */
+  hora_salida: string | null;
+  hora_llegada: string | null;
+  /** Avión del tramo CON HERENCIA (`escala.aeronave_id ?? vuelo.aeronave_id`); externo → matrícula ajena. */
+  matricula: string | null;
+  /** Piloto EFECTIVO del tramo (herencia del vuelo), nombre. */
+  piloto: string | null;
+  taco_salida: number | null;
+  taco_llegada: number | null;
+  /** PILOTO | IA | DEDUCIDO | OFICINA | null. */
+  taco_salida_origen: string | null;
+  taco_llegada_origen: string | null;
+  /** `taco_llegada − taco_salida` a 1 decimal (patrón del reporte por vuelo); null sin ambos. */
+  horas_taco: number | null;
+  /** `snapshot.tramos[orden == escala.orden].tiempo_hr` (mismo origen/destino); null sin cruce. */
+  horas_cotizadas: number | null;
+  es_ferry: boolean;
+  solo_operativa: boolean;
+  es_sobrevuelo: boolean;
+  requiere_pernocta: boolean;
+  /** `escala.pernocta_costo_usd`. */
+  pernocta_usd: number;
+  cancelado: boolean;
+  cancelada_motivo: string | null;
+  /** Tramo en amarillo (revisión de tacómetro pendiente). */
+  revision_requerida: boolean;
+}
+
+/**
+ * Línea del desglose canónico v1.3 (`snapshot.desglose`, orden canónico,
+ * Σ monto_usd == total_usd exacto) ENRIQUECIDA con la operación que la
+ * produjo. Claves: TIEMPO_VUELO, TUAS, EXTRA, COMISION_VENDEDOR, AJUSTE,
+ * IVA, PERNOCTA. Los TUAS EXENTOS viajan como líneas sintéticas
+ * (`exento: true`, monto 0) justo después de los TUAS cobrados: no alteran
+ * la suma.
+ */
+export interface CotizacionInternaLineaPdf {
+  clave: string;
+  concepto: string;
+  monto_usd: number;
+  /** TIEMPO_VUELO: horas cobrables · TUAS: pax · EXTRA: cantidad · COMISION POR_HORA: horas. */
+  cantidad?: number;
+  /** TIEMPO_VUELO: tarifa/hr · TUAS: monto por pax NATIVO · EXTRA: unitario · COMISION POR_HORA: tarifa/hr. */
+  unitario?: number;
+  /** Moneda NATIVA del unitario/monto_nativo ('USD' | 'MXN'). */
+  moneda?: string;
+  /** Total en moneda nativa (TUAS/extras en MXN). */
+  monto_nativo?: number;
+  /** TC congelado con el que se convirtió una línea MXN. */
+  tc_aplicado?: number | null;
+  /** EXTRA: grava IVA o no. */
+  aplica_iva?: boolean;
+  exento: boolean;
+}
+
+/** Un cobro de `cobro_vuelo` (parte de sobre incluida) con su liga bancaria. */
+export interface CotizacionInternaCobroPdf {
+  /** `cobro_vuelo.fecha_cobro` ISO. */
+  fecha: string | null;
+  /** `metodo_cobro` crudo (BILLPOCKET, HSBC_LINK, TRANSFERENCIA, CHEQUE, EFECTIVO, DOLARES, OTRO, PAYWISE). */
+  metodo: string;
+  /** Etiqueta es-MX del método. */
+  metodo_label: string;
+  /** BRUTO que pagó el cliente (negativo = reembolso). */
+  monto: number;
+  moneda: string;
+  /** `cobro_vuelo.tc_usd_mxn` (null en USD o sin captura). */
+  tc: number | null;
+  /** Equivalente USD por `cobrosEnUsd` (TC del cobro o del vuelo); null si MXN sin ningún TC. */
+  monto_usd: number | null;
+  comision_pct: number | null;
+  /** Comisión del banco en la moneda del cobro. */
+  comision_monto: number | null;
+  /** `monto − comision_monto` (= monto sin comisión). Regla comision-bancaria.util. */
+  neto: number;
+  referencia: string | null;
+  cuenta_destino: string | null;
+  notas: string | null;
+  /** Fuente única cobro-conciliado.util (liga directa o del sobre). */
+  conciliado: boolean;
+  es_reembolso: boolean;
+  /** Parte de un SOBRE de grupo: folio "G-12" | null. */
+  sobre_grupo_folio: string | null;
+  sobre_grupo_monto_total: number | null;
+  sobre_grupo_moneda: string | null;
+  grupo_factor: number | null;
+  registrado_por: string | null;
+}
+
+export interface CotizacionInternaGastoCategoriaPdf {
+  categoria: string;
+  /** `etiquetaCategoriaGasto` (fuente única de etiquetas). */
+  etiqueta: string;
+  total_usd: number;
+  n: number;
+}
+
+export interface CotizacionInternaFacturaPdf {
+  serie: string | null;
+  folio: string | null;
+  uuid_fiscal: string | null;
+  estado: string | null;
+  total: number | null;
+  moneda: string | null;
+  fecha_timbrado: string | null;
+  facturado_a_nombre: string | null;
+  cancelada: boolean;
+}
+
+export interface CotizacionInternaPdfRequest {
+  // ---- (1) Cabecera ----
+  folio: string;
+  version: number | null;
+  /** Estado crudo (RESERVA…CANCELADO) y su etiqueta es-MX. */
+  estado: string;
+  estado_label: string;
+  tipo: string | null;
+  cliente: string;
+  razon_social: string | null;
+  cliente_rfc: string | null;
+  es_broker: boolean;
+  /** Fecha de cotización: `fecha_solicitud` (fallback `created_at`), ISO. */
+  fecha: string | null;
+  fecha_confirmacion: string | null;
+  /** 'PUBLICO' | 'BROKER' | null y su etiqueta. */
+  tarifa_tipo: string | null;
+  tarifa_tipo_label: string | null;
+  tarifa_hora_usd: number | null;
+  tarifa_override: boolean;
+  tarifa_preferencial: boolean;
+  /** `vuelo.metodo_cobro` crudo (+ detalle si OTRO) y etiqueta. */
+  metodo_cobro: string | null;
+  metodo_cobro_detalle: string | null;
+  metodo_cobro_label: string | null;
+  tc_usd_mxn: number | null;
+  /** Vendedor con comisión (`comision_vendedor_nombre`). */
+  vendedor: string | null;
+  /** Usuario que creó la cotización (`vuelo.created_by` → nombre). */
+  cotizado_por: string | null;
+  aeronave_cotizada_modelo: string | null;
+  aeronave_cotizada_matricula: string | null;
+  /** "Modelo · Matrícula" del avión OPERATIVO SOLO si difiere del cotizado; null si es el mismo. */
+  aeronave_operativa: string | null;
+  /** Vuelo cubierto por externo: "Modelo · Matrícula" (+ operador). */
+  avion_externo: string | null;
+  operador_externo: string | null;
+  piloto: string | null;
+  copiloto: string | null;
+  /** Apoyos de nivel vuelo (nombres). */
+  apoyos: string[];
+  fecha_traslado_inicial: string | null;
+  fecha_traslado_final: string | null;
+  pasajeros: number;
+  /** "CUN → HOL → CUN" de los tramos vivos no cancelados (puntosRutaVisible). */
+  ruta: string | null;
+  itinerario_operativo: boolean;
+  cotizacion_abierta: boolean;
+  es_interno: boolean;
+  es_externo: boolean;
+  /** Vuelo hijo de una cotización de GRUPO. */
+  grupo_folio: string | null;
+  grupo_posicion: number | null;
+  grupo_total_aviones: number | null;
+  combinado_con_folio: string | null;
+
+  // ---- (2) Itinerario y horas ----
+  tramos: CotizacionInternaTramoPdf[];
+  /** `snapshot.tiempos`: vuelo + calzos + sobrevuelo (tiempo real cotizado). */
+  horas_cotizadas_hr: number | null;
+  vuelo_hr: number | null;
+  calzos_hr: number | null;
+  sobrevuelo_hr: number | null;
+  /** Σ `horas_taco` de tramos no cancelados con dato; null sin tacos. */
+  horas_voladas_hr: number | null;
+  /** voladas − cotizadas (1 decimal); null si falta alguna. Solo se pinta. */
+  delta_horas_hr: number | null;
+  /** Horas COBRADAS (`snapshot.tiempos.cobrable_hr` ?? `vuelo.tiempo_cobrable_hr`). */
+  tiempo_cobrable_hr: number | null;
+  hora_minima_aplicada: boolean;
+  cobrable_override: boolean;
+
+  // ---- (3) Desglose interno completo ----
+  lineas: CotizacionInternaLineaPdf[];
+  /** IATAs sin TUA (exentos / $0). */
+  tuas_exentos: string[];
+  /** Servicio aéreo = horas cobrables × tarifa (`snapshot.totales.subtotal_vuelo_usd`). */
+  subtotal_vuelo_usd: number;
+  tuas_usd: number;
+  extras_total_usd: number;
+  viaticos_pernocta_usd: number;
+  comision_vendedor_usd: number;
+  comision_vendedor_nombre: string | null;
+  /** 'FIJA' | 'POR_HORA' | null. */
+  comision_vendedor_modo: string | null;
+  comision_vendedor_tarifa_hr: number | null;
+  /** IVA que grava la comisión (`ivaComisionVendedorUsd`). */
+  iva_comision_vendedor_usd: number;
+  /** Pago al vendedor = comisión + su IVA (`pagoVendedorUsd`); 0 en CANCELADO con comisión; null sin comisión. */
+  pago_vendedor_usd: number | null;
+  /** total − pago al vendedor; null sin comisión. */
+  neto_vuelatour_usd: number | null;
+  /** Línea AJUSTE tal cual (negativo = descuento; positivo = redondeo/pactado). */
+  ajuste_final_usd: number;
+  /** Descuento base capturado (positivo) y redondeo automático a $10 (`snapshot.meta`). */
+  descuento_usd: number | null;
+  redondeo_auto_usd: number | null;
+  total_pactado_usd: number | null;
+  comision_billpocket_pct: number | null;
+  /** Subtotal pre-IVA = total − IVA (como el recibo del cliente). */
+  subtotal_usd: number;
+  /** Porcentaje (16, no 0.16). */
+  iva_pct: number;
+  iva_base_usd: number | null;
+  iva_usd: number;
+  iva_nota: string | null;
+  total_usd: number;
+  total_mxn: number | null;
+  /** Renglones nativos en pesos dentro del total MXN (TUAS/extras en MXN). */
+  mxn_nativos: number | null;
+  version_motor: string | null;
+  calculado_at: string | null;
+  /** Partición del ingreso (`particionIngresoVuelo`): venta del AVIÓN vs ingreso VuelaTour; suman total_usd. */
+  venta_avion_usd: number | null;
+  otros_ingresos_vuelatour_usd: number | null;
+  iva_avion_usd: number | null;
+  iva_vuelatour_usd: number | null;
+  /** 'desglose' | 'columnas' | 'sin_precio'. */
+  particion_fuente: string;
+  particion_inconsistente: boolean;
+  /** Multi-avión: reparto de la venta del avión (Σ venta_usd == venta_avion_usd). Vacío con un solo avión. */
+  participacion_aviones: ReporteVueloParticipacionPayload[];
+
+  // ---- (4) Cobros ----
+  cobros: CotizacionInternaCobroPdf[];
+  /** `cobrosEnUsd` de todos los cobros (reembolsos restan). */
+  total_cobrado_usd: number;
+  cobros_sin_tc_count: number;
+  cobros_sin_tc_mxn: number;
+  /** Comisiones bancarias convertidas a USD con la misma regla. */
+  comision_banco_usd: number;
+  total_cobrado_neto_usd: number | null;
+  /** total_usd − total_cobrado_usd (negativo = sobrecobro). */
+  saldo_usd: number;
+  cobrado_flag: boolean;
+  /** Semáforo (espejo del panel): color + key + label. */
+  semaforo_cobro: 'verde' | 'amarillo' | 'rojo' | 'gris';
+  semaforo_cobro_key: string;
+  semaforo_cobro_label: string;
+
+  // ---- (5) Gastos ----
+  gastos_por_categoria: CotizacionInternaGastoCategoriaPdf[];
+  /** Σ gastos del vuelo en USD (+ costo del operador externo); null sin gastos. */
+  gastos_total_usd: number | null;
+  gastos_sin_tc_count: number;
+  gastos_sin_tc_mxn: number;
+  costo_externo_usd: number | null;
+  /** REFERENCIA: (cobrado si > 0, si no total) − gastos − costo externo; null sin gastos. */
+  utilidad_bruta_usd: number | null;
+  utilidad_base: 'cobrado' | 'total';
+
+  // ---- (6) Notas y facturación ----
+  notas_cliente: string | null;
+  notas_internas: string | null;
+  facturado: boolean;
+  facturas: CotizacionInternaFacturaPdf[];
+  /** Resumen CFDI: estado de la factura vigente (o "Facturado" por bandera) | null. */
+  cfdi_estatus: string | null;
+  /** "A-123" | UUID | null. */
+  cfdi_folio: string | null;
+
+  // ---- (7) Pie ----
+  /** ISO del instante de generación (pyservices lo pinta en hora Cancún). */
+  generado: string;
+  /** "YYYY-MM-DD HH:mm" ya en hora Cancún (`fechaHoraCancun`). */
+  generado_cancun: string;
+  generado_por: string | null;
+}
+
 export interface FacturaRecibidaParsed {
   uuid_fiscal: string | null;
   emisor_rfc: string | null;
@@ -1214,6 +1514,16 @@ export class PyservicesService {
   ): Promise<Buffer> {
     // Hasta 7 aviones con fotos: mismo tope que el PDF de cotización.
     return this.postForBuffer('/reportes/cotizacion-grupo', payload, 30_000);
+  }
+
+  /**
+   * PDF «Cotización interna» (8-sep-2026): UNA hoja para la oficina con el
+   * desglose completo (comisión, horas, cobros, gastos). Jamás al cliente.
+   */
+  async generateCotizacionInternaPdf(
+    payload: CotizacionInternaPdfRequest,
+  ): Promise<Buffer> {
+    return this.postForBuffer('/reportes/cotizacion-interna', payload, 30_000);
   }
 
   /** Libro «Dinero» del periodo (réplica del control manual del equipo). */

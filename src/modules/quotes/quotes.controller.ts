@@ -25,6 +25,7 @@ import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
 import { QuotesPdfService } from './quotes-pdf.service';
+import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 
 @ApiTags('Quotes')
 @ApiBearerAuth()
@@ -33,6 +34,7 @@ export class QuotesController {
   constructor(
     private readonly quotes: QuotesService,
     private readonly quotesPdf: QuotesPdfService,
+    private readonly quotesPdfInterno: QuotesPdfInternoService,
   ) {}
 
   @Post('calculate')
@@ -177,10 +179,30 @@ export class QuotesController {
   async pdf(@Param('id', ParseUUIDPipe) id: string, @Res() res: Response) {
     const quote = await this.quotes.findById(id);
     const pdf = await this.quotesPdf.render(quote);
+    const folio = (quote as { folio?: number | string | null }).folio ?? id;
     res.set({
       'Content-Type': 'application/pdf',
-      'Content-Disposition': `inline; filename="cotizacion-${(quote as { folio?: unknown }).folio ?? id}.pdf"`,
+      'Content-Disposition': `inline; filename="cotizacion-${folio}.pdf"`,
     });
     res.send(pdf);
+  }
+
+  @Post(':id/pdf-interno')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'PDF «Cotización interna» (USO INTERNO, una hoja, sin fotos): desglose canónico completo con comisión del vendedor, horas cotizadas vs tacómetros por tramo, cobros con comisión bancaria/neto/conciliación, gastos por categoría y CFDI. Jamás se manda al cliente. Sin SOCIO ni PILOTO.',
+  })
+  async pdfInterno(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+    @Res() res: Response,
+  ) {
+    const { buffer, folio } = await this.quotesPdfInterno.render(id, c);
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="cotizacion-interna-${folio.replace(/[^A-Za-z0-9_-]+/g, '')}.pdf"`,
+    });
+    res.send(buffer);
   }
 }
