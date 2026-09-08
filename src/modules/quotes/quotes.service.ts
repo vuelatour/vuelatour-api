@@ -23,6 +23,7 @@ import {
 } from '../../common/participacion-aeronave.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
+  avionesDeTramos,
   modeloCotizadoDe,
   modelosCotizados,
 } from '../../common/modelos-cotizados.util';
@@ -54,7 +55,6 @@ import {
 } from './extras-grupo.util';
 import {
   CalculateQuoteDto,
-  EscalaInputDto,
   ExtraConceptoDto,
   MetodoPago,
   TipoTarifa,
@@ -62,7 +62,11 @@ import {
 } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
-import { PdfVisibilidadDto } from './dto/pdf-visibilidad.dto';
+import {
+  PdfPresentacionVueloDto,
+  PdfVisibilidadDto,
+} from './dto/pdf-visibilidad.dto';
+import type { PreviewQuoteDto } from './dto/preview-quote.dto';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 
@@ -100,6 +104,14 @@ export interface ResolvedLeg {
    * cambia cuando viaja EXPLÍCITA.
    */
   pdf_oculto: boolean | null;
+  /**
+   * Fecha de PARED (YYYY-MM-DD) SOLO para el PDF (D4, 8-sep-2026). AUSENTE
+   * (undefined) = "no viajó": `replaceEscalas` conserva la fecha viva de la
+   * escala (misma semántica que `pdf_oculto` null); `null` = sin fecha.
+   * Solo se escribe en el tramo cuando viaja, así el snapshot de una
+   * cotización que no la manda queda byte-idéntico.
+   */
+  pdf_fecha?: string | null;
 }
 
 interface ResolvedRoute {
@@ -124,6 +136,8 @@ interface RawLeg {
   pernocta_costo_usd?: number | string | null;
   /** Ocultar este tramo del PDF (27-ago). */
   pdf_oculto?: boolean | null;
+  /** Fecha SOLO del PDF (D4, 8-sep): undefined = conservar la viva. */
+  pdf_fecha?: string | null;
   tipo_parada?: string | null;
   servicio_notas?: string | null;
   notas?: string | null;
@@ -201,6 +215,8 @@ export interface GrupoHijoOpts {
 }
 
 const IVA_DEFAULT = 0.16;
+/** Salida del motor v1.3 (`calculate()`); ES el `calculo_snapshot`. */
+type Breakdown = Awaited<ReturnType<QuotesService['calculate']>>;
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del detalle de
  * cotización y del snapshot del vuelo; regla B 28-ago). Tipo y mapper viven
@@ -1191,6 +1207,186 @@ export class QuotesService {
     return noFerry.length ? Math.max(...noFerry) : fallback;
   }
 
+  /**
+   * Columnas de `vuelo` que salen del BREAKDOWN del motor (+ tarifa/método
+   * del DTO). FUENTE ÚNICA del mapeo fila←breakdown: la usan create(),
+   * revise() y el quote-like de la vista previa (8-sep-2026), así lo que se
+   * ve en la hoja es exactamente lo que se persistiría.
+   */
+  private camposDesdeBreakdown(
+    dto: CalculateQuoteDto,
+    breakdown: Breakdown,
+    reprPax: number,
+  ) {
+    return {
+      ruta_id: breakdown.ruta.id,
+      origen_iata: breakdown.ruta.origen_iata,
+      destino_iata: breakdown.ruta.destino_iata,
+      millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
+      es_redondo_auto: breakdown.ruta.es_redondo_auto,
+      num_aterrizajes: breakdown.ruta.num_aterrizajes,
+      pasajeros: reprPax,
+      tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
+      tarifa_tipo: dto.tipo_tarifa,
+      tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
+      subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
+      tuas_usd: breakdown.totales.tuas_total_usd,
+      iva_pct: breakdown.iva.porcentaje,
+      iva_usd: breakdown.iva.monto_usd,
+      monto_total_usd: breakdown.totales.total_usd,
+      // TC declarado al cotizar (el pago puede entrar en pesos): habilita el
+      // total MXN y sirve de respaldo para convertir cobros MXN sin TC.
+      tc_usd_mxn: dto.tc_usd_mxn ?? null,
+      monto_total_mxn: breakdown.totales.total_mxn ?? null,
+      viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
+      extras_total_usd: breakdown.totales.extras_total_usd,
+      ajuste_final_usd: breakdown.totales.ajuste_final_usd,
+      comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
+      comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
+      comision_vendedor_modo: breakdown.meta.comision_vendedor_modo ?? null,
+      comision_vendedor_tarifa_hr:
+        breakdown.meta.comision_vendedor_tarifa_hr ?? null,
+      metodo_cobro: dto.metodo_pago,
+      metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
+      calculo_snapshot: breakdown,
+    };
+  }
+
+  /**
+   * ANCLAJES de una revisión a lo PERSISTIDO (extraído de revise(), 8-sep;
+   * lo reutiliza la vista previa "sucia" de una cotización guardada para
+   * que la hoja muestre lo que revise() guardaría). Muta el DTO.
+   */
+  private anclarRevisionAlPersistido(
+    dto: CalculateQuoteDto,
+    current: Record<string, unknown>,
+    opts: { desdeGrupo?: boolean },
+  ): void {
+    // La tarifa preferencial se resuelve SIEMPRE con el cliente real del
+    // vuelo (no se confía en el que mande el front al revisar).
+    dto.cliente_id = (current.cliente_id as string | null) ?? undefined;
+    // Comisión del vendedor: si la revisión no trae la modalidad, se
+    // re-resuelve desde lo persistido (patrón tarifa preferencial) — así una
+    // comisión POR_HORA se recalcula con las horas nuevas aunque el front no
+    // mande el modo. Quitar la comisión = enviar modo FIJA sin monto (o
+    // POR_HORA con tarifa 0).
+    if (dto.comision_vendedor_modo === undefined) {
+      dto.comision_vendedor_modo =
+        (current.comision_vendedor_modo as 'FIJA' | 'POR_HORA' | null) ??
+        undefined;
+      if (dto.comision_vendedor_tarifa_hr === undefined) {
+        dto.comision_vendedor_tarifa_hr =
+          Number(current.comision_vendedor_tarifa_hr) > 0
+            ? Number(current.comision_vendedor_tarifa_hr)
+            : undefined;
+      }
+    }
+    // es_externo se ANCLA a lo persistido (patrón cliente_id): un front
+    // malformado podía marcar externo un vuelo propio (o al revés) en
+    // silencio. El revise de un externo EXIGE el avión de referencia
+    // (aeronave_id) — el motor ya no tiene modo sin referencia.
+    dto.es_externo = current.es_externo === true;
+    // EXTRAS DE GRUPO (4-sep-2026): un hijo CONSERVA sus líneas
+    // origen='GRUPO' persistidas (patrón cliente_id): lo que mande el panel
+    // para esas líneas se descarta y omitirlas no las borra — solo el
+    // escritor del grupo (`desdeGrupo`) las reemplaza. quickAdjust pasa por
+    // aquí, así que queda cubierto.
+    if (!opts.desdeGrupo) {
+      const anclados = anclarExtrasDeGrupo(current.extras, dto.extras);
+      if (anclados !== undefined) {
+        dto.extras = anclados as unknown as ExtraConceptoDto[];
+      }
+    } else {
+      // El grupo manda SOLO sus líneas materializadas: las propias del hijo
+      // (catering de ese avión, etc.) se conservan — re-materializar jamás
+      // borra en silencio lo capturado en el hijo (auditoría 29-ago).
+      dto.extras = mezclarExtrasDesdeGrupo(
+        current.extras,
+        dto.extras,
+      ) as unknown as ExtraConceptoDto[];
+    }
+    // PRECIO PACTADO eliminado del cotizador (decisión del cliente,
+    // 2-sep-2026): el valor del DTO solo se acepta como REHIDRATACIÓN de un
+    // pactado YA persistido (el panel al revisar y quickAdjust re-envían el
+    // del snapshot — no son distinguibles de una captura manual, así que se
+    // ancla a lo persistido). Sin pactado vigente, se descarta: no puede
+    // nacer uno nuevo por API. Omitirlo con pactado vigente SÍ lo suelta
+    // (p. ej. "todo en $0" del panel), igual que antes.
+    const pactadoVigente = Number(
+      (
+        current.calculo_snapshot as {
+          meta?: { total_pactado_usd?: number | null };
+        } | null
+      )?.meta?.total_pactado_usd,
+    );
+    if (!(pactadoVigente > 0)) dto.total_pactado_usd = undefined;
+  }
+
+  /**
+   * D3 (8-sep-2026, "el dinero manda"): una cotización con DINERO cobrado
+   * NO se revisa en NINGÚN estado (antes el API solo bloqueaba `cobrado` en
+   * CONFIRMADO+ y el panel bloqueaba `cobrado` siempre; ahora el API es la
+   * fuente). "Dinero cobrado" = el NETO de `cobro_vuelo` por `cobrosEnUsd`
+   * (fuente única: los reembolsos son cobros negativos y RESTAN) ≠ 0, o
+   * algún cobro MXN sin TC (no convertible: se expone, jamás se ignora).
+   * Así el camino que dice el mensaje funciona de verdad: eliminar el cobro
+   * O reembolsarlo completo deja el neto en 0 y la revisión se abre (con
+   * "existe alguna fila" un reembolso jamás destrababa). EXCEPCIÓN
+   * (decisión 1-sep-2026): CANCELADO — ahí la venta ES lo cobrado y editar
+   * el desglose es documental; la CFDI sí lo bloquea aparte. 409
+   * ESTRUCTURADO `COTIZACION_COBRADA` (details: cobros, cobrado_usd,
+   * sin_tc_*, link a los cobros) para que el panel ofrezca el camino.
+   * Falla CERRADO: sin poder leer los cobros no se revisa.
+   */
+  private async assertSinCobros(
+    current: Record<string, unknown>,
+  ): Promise<void> {
+    if (current.estado === 'CANCELADO') return;
+    const vueloId = current.id as string;
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select('id, monto, moneda, tc_usd_mxn')
+      .eq('vuelo_id', vueloId);
+    if (error) {
+      throw new Error(
+        `No se pudieron leer los cobros del vuelo para validar la revisión: ${error.message}`,
+      );
+    }
+    const cobros = data ?? [];
+    if (cobros.length === 0) return;
+    const { total_usd, sin_tc_count, sin_tc_mxn } = cobrosEnUsd(
+      cobros,
+      current.tc_usd_mxn as number | null,
+    );
+    // Neto 0 (cobro reembolsado completo) y nada sin TC: no hay dinero
+    // retenido → se puede revisar (regla de arriba).
+    if (total_usd === 0 && sin_tc_count === 0) return;
+    const folio = current.folio as number | null;
+    const n = cobros.length;
+    const usdTxt = total_usd.toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
+    const sinTc =
+      sin_tc_count > 0
+        ? ` y ${sin_tc_count} en MXN sin tipo de cambio ($${sin_tc_mxn.toLocaleString('en-US', { minimumFractionDigits: 2 })} MXN)`
+        : '';
+    throw new ConflictException({
+      message: `La cotización${folio != null ? ` #${folio}` : ''} ya tiene ${n} cobro${n === 1 ? '' : 's'} registrado${n === 1 ? '' : 's'} (neto $${usdTxt} USD${sinTc}): mientras exista dinero cobrado no se puede revisar. Elimina o reembolsa el cobro en "Cobros del vuelo" y vuelve a intentar.`,
+      error: 'COTIZACION_COBRADA',
+      details: {
+        vuelo_id: vueloId,
+        folio,
+        estado: current.estado ?? null,
+        cobros: n,
+        cobrado_usd: total_usd,
+        sin_tc_count,
+        sin_tc_mxn,
+        link: `/admin/quotes/${vueloId}#cobros-vuelo`,
+      },
+    });
+  }
+
   async list(filters: ListQuotesQuery) {
     let q = this.supabase.service
       .from('vuelo')
@@ -1341,6 +1537,236 @@ export class QuotesService {
   }
 
   /**
+   * Quote-like para la VISTA PREVIA de la hoja 1 (`POST /quotes/preview-html`,
+   * rediseño del cotizador 8-sep-2026). NUNCA persiste ni notifica.
+   *
+   * - `quote_id` + `sucio=false` → la fila de `findById` TAL CUAL (mismo
+   *   objeto que recibe el PDF ⇒ payload byte-idéntico salvo fotos).
+   * - Si no → `calculate(dto)` con los MISMOS anclajes de revise() cuando hay
+   *   cotización base (cliente, comisión, es_externo, extras GRUPO, pactado;
+   *   y `meta.grupo` arrastrado) o el descarte de create() (pactado) si es
+   *   alta; la fila se arma con `camposDesdeBreakdown` (fuente única) + los
+   *   datos de presentación del body (traslados, notas, toggles, externo) y
+   *   las escalas en memoria con el MISMO resultado que dejaría
+   *   `replaceEscalas`: ojito/fecha PDF de `escalas_pdf` (por orden) >
+   *   tramo del DTO > escala viva > default; con itinerario OPERATIVO las
+   *   escalas vivas (ruta del piloto) se quedan y solo se sobreponen
+   *   ojito/fecha explícitos.
+   */
+  async quoteLikeParaPreview(
+    dto: PreviewQuoteDto,
+  ): Promise<Record<string, unknown>> {
+    const current = (
+      dto.quote_id ? await this.findById(dto.quote_id) : null
+    ) as Record<string, unknown> | null;
+    if (dto.sucio === false) {
+      if (!current) {
+        throw new BadRequestException(
+          'Para la vista previa de una cotización guardada (sucio=false) manda quote_id.',
+        );
+      }
+      return current;
+    }
+    if (current) {
+      this.anclarRevisionAlPersistido(dto, current, {});
+    } else {
+      // Alta: create() descarta siempre el pactado.
+      dto.total_pactado_usd = undefined;
+    }
+    const breakdown = await this.calculate(dto);
+    const reprPax = this.representativePax(breakdown, dto.pasajeros);
+    // meta.grupo del hijo: se arrastra del snapshot vigente (como revise()
+    // sin opts.grupo), limpiando "precio desactualizado".
+    const metaGrupoPrevio = (
+      current?.calculo_snapshot as {
+        meta?: { grupo?: MetaGrupoSnapshot | null };
+      } | null
+    )?.meta?.grupo;
+    if (metaGrupoPrevio) {
+      const { precio_desactualizado: _pd, ...resto } = metaGrupoPrevio;
+      void _pd;
+      breakdown.meta.grupo = resto;
+    }
+    const esExterno = dto.es_externo === true;
+    const vivas = (
+      Array.isArray(current?.escalas) ? current.escalas : []
+    ) as Array<Record<string, unknown>>;
+    // Avión que quedaría en vuelo.aeronave_id: como revise(), el OPERATIVO
+    // del primer tramo activo manda sobre la referencia del cotizador.
+    const primerActivo = vivas.find((e) => e.cancelada_at == null);
+    const aeronaveOperativa = current
+      ? ((primerActivo?.aeronave_id as string | null | undefined) ??
+        dto.aeronave_id)
+      : dto.aeronave_id;
+    const fechaInicio =
+      dto.fecha_traslado_inicial?.toISOString() ??
+      (current?.fecha_vuelo as string | null | undefined) ??
+      null;
+    const fechaFin =
+      dto.fecha_traslado_final?.toISOString() ??
+      (current?.fecha_traslado_final as string | null | undefined) ??
+      null;
+
+    // ---- Escalas en memoria (mismo resultado que dejaría replaceEscalas) ----
+    const legs = breakdown.ruta.escalas ?? [];
+    const pdfPorOrden = new Map(
+      (dto.escalas_pdf ?? []).map((e) => [e.orden, e] as const),
+    );
+    const vivaPorOrden = new Map<number, Record<string, unknown>>();
+    for (const e of vivas) {
+      if (e.solo_operativa === true) continue;
+      const o = Number(e.orden);
+      if (Number.isFinite(o) && !vivaPorOrden.has(o)) vivaPorOrden.set(o, e);
+    }
+    const fechaPdfViva = (viva?: Record<string, unknown>): string | null => {
+      const f = viva?.pdf_fecha;
+      return typeof f === 'string' && f ? f.slice(0, 10) : null;
+    };
+    const vueloCancelado = current?.estado === 'CANCELADO';
+    let escalas: Array<Record<string, unknown>>;
+    if (current?.itinerario_operativo === true) {
+      // replaceEscalas hace early-return: la ruta del piloto se queda tal
+      // cual; solo el ojito/fecha EXPLÍCITOS se sobreponen por orden.
+      escalas = vivas.map((e) => {
+        const p = pdfPorOrden.get(Number(e.orden));
+        if (!p) return e;
+        return {
+          ...e,
+          ...(p.pdf_oculto !== undefined ? { pdf_oculto: p.pdf_oculto } : {}),
+          ...(p.pdf_fecha !== undefined ? { pdf_fecha: p.pdf_fecha } : {}),
+        };
+      });
+    } else {
+      escalas = legs.map((e, i) => {
+        const orden = i + 1;
+        const viva = vivaPorOrden.get(orden);
+        const p = pdfPorOrden.get(orden);
+        const fechaPlan =
+          e.fecha_salida_plan ??
+          (i === 0 ? fechaInicio : i === legs.length - 1 ? fechaFin : null);
+        return {
+          id: viva?.id ?? null,
+          vuelo_id: current?.id ?? null,
+          orden,
+          origen_iata: e.origen_iata,
+          destino_iata: e.destino_iata,
+          aeronave_id: viva?.aeronave_id ?? null,
+          millas_nauticas: e.millas_nauticas,
+          pasajeros: e.es_ferry ? 0 : e.pasajeros,
+          pasajeros_nombres: e.es_ferry ? [] : e.pasajeros_nombres,
+          es_ferry: e.es_ferry,
+          solo_operativa: false,
+          // Ojito: explícito del panel > tramo del DTO (null = no viajó) >
+          // escala viva > default de BD (visible).
+          pdf_oculto:
+            p?.pdf_oculto ?? e.pdf_oculto ?? viva?.pdf_oculto === true,
+          // Fecha PDF: misma cascada (undefined = no viajó).
+          pdf_fecha:
+            p && p.pdf_fecha !== undefined
+              ? p.pdf_fecha
+              : e.pdf_fecha !== undefined
+                ? e.pdf_fecha
+                : fechaPdfViva(viva),
+          requiere_pernocta: e.requiere_pernocta,
+          pernocta_costo_usd: e.requiere_pernocta ? e.pernocta_costo_usd : null,
+          tipo_parada: e.tipo_parada,
+          servicio_notas: e.servicio_notas,
+          notas: e.notas,
+          // No pisar con null una fecha ya planeada (regla de replaceEscalas).
+          fecha_salida_plan:
+            fechaPlan ??
+            (viva?.fecha_salida_plan as string | null | undefined) ??
+            null,
+          taco_salida: viva?.taco_salida ?? null,
+          taco_llegada: viva?.taco_llegada ?? null,
+          hora_salida: viva?.hora_salida ?? null,
+          hora_llegada: viva?.hora_llegada ?? null,
+          // Con el VUELO cancelado nada revive (1-sep).
+          cancelada_at: vueloCancelado
+            ? ((viva?.cancelada_at as string | null | undefined) ?? null)
+            : null,
+        };
+      });
+      // Lo que replaceEscalas NO toca y sigue vivo: tramos operativos del
+      // piloto y sobrantes con tacómetro capturado.
+      for (const e of vivas) {
+        const o = Number(e.orden);
+        if (e.solo_operativa === true) {
+          escalas.push(e);
+        } else if (
+          o > legs.length &&
+          (e.taco_salida != null || e.taco_llegada != null)
+        ) {
+          escalas.push(e);
+        }
+      }
+      escalas.sort((a, b) => Number(a.orden) - Number(b.orden));
+    }
+
+    const ahora = new Date().toISOString();
+    const fila: Record<string, unknown> = {
+      ...(current ?? {}),
+      id: current?.id ?? null,
+      folio: current?.folio ?? null,
+      cliente_id: dto.cliente_id ?? null,
+      aeronave_id: esExterno ? null : aeronaveOperativa,
+      tipo: dto.tipo ?? current?.tipo ?? TipoVuelo.REDONDO,
+      estado: current?.estado ?? 'COTIZADO',
+      es_externo: esExterno,
+      operador_externo: esExterno
+        ? dto.operador_externo?.trim() || current?.operador_externo || null
+        : null,
+      avion_externo_modelo: esExterno
+        ? dto.avion_externo_modelo !== undefined
+          ? dto.avion_externo_modelo.trim() || null
+          : (current?.avion_externo_modelo ?? null)
+        : null,
+      avion_externo_matricula: esExterno
+        ? dto.avion_externo_matricula !== undefined
+          ? dto.avion_externo_matricula.trim() || null
+          : (current?.avion_externo_matricula ?? null)
+        : null,
+      cotizacion_version: Number(current?.cotizacion_version ?? 0) + 1,
+      ...this.camposDesdeBreakdown(dto, breakdown, reprPax),
+      pase_abordar: dto.pase_abordar ?? false,
+      cotizacion_abierta:
+        dto.cotizacion_abierta ?? current?.cotizacion_abierta ?? false,
+      pdf_mostrar_tarifa:
+        dto.pdf_mostrar_tarifa ?? current?.pdf_mostrar_tarifa ?? false,
+      pdf_mostrar_itinerario:
+        dto.pdf_mostrar_itinerario ?? current?.pdf_mostrar_itinerario ?? true,
+      itinerario_operativo: current?.itinerario_operativo === true,
+      // revise(): los extras persistidos solo se reescriben si viajaron.
+      extras:
+        dto.extras !== undefined || !current
+          ? (breakdown.extras ?? [])
+          : current.extras,
+      fecha_solicitud: current?.fecha_solicitud ?? ahora,
+      fecha_confirmacion: current?.fecha_confirmacion ?? null,
+      fecha_vuelo: fechaInicio,
+      fecha_traslado_final: fechaFin,
+      notas: dto.notas ?? current?.notas ?? null,
+      escalas,
+    };
+    // Modelos cotizados (fuente única modelos-cotizados.util): con tramos en
+    // aviones distintos hace falta el modelo de cada uno (una consulta);
+    // con un solo avión basta el modelo del snapshot.
+    const idsAviones = avionesDeTramos(fila, escalas);
+    const modeloPorId = new Map<string, string | null>();
+    if (idsAviones.length >= 2) {
+      const { data } = await this.supabase.service
+        .from('aeronave')
+        .select('id, modelo')
+        .in('id', idsAviones);
+      for (const a of data ?? []) {
+        modeloPorId.set(a.id as string, (a.modelo as string | null) ?? null);
+      }
+    }
+    fila.modelos_cotizados = modelosCotizados(fila, escalas, modeloPorId);
+    return fila;
+  }
+
+  /**
    * `opts.grupo` (vía INTERNA, nunca por DTO público): el hijo nace ligado a
    * la cotización de grupo — escribe `grupo_id/grupo_posicion/grupo_pax` y
    * `calculo_snapshot.meta.grupo` (informativo). El precio del hijo es el
@@ -1373,6 +1799,19 @@ export class QuotesService {
     // (24/69/148); aquí se descarta en silencio (el panel ya no lo manda y
     // un cliente crudo del API tampoco puede colarlo).
     dto.total_pactado_usd = undefined;
+    // IDEMPOTENCIA (8-sep-2026): reintento con la misma llave (doble clic,
+    // timeout tras commit) → la cotización YA creada, sin duplicar. El
+    // pre-check evita correr el motor; la carrera pura la cierra el índice
+    // único (23505 más abajo).
+    if (dto.client_request_id) {
+      const yaId = await this.vueloIdPorClientRequest(dto.client_request_id);
+      if (yaId) {
+        this.logger.log(
+          `Cotización idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el vuelo ${yaId} (sin duplicar).`,
+        );
+        return { ...(await this.findById(yaId)), idempotente: true as const };
+      }
+    }
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     if (opts.grupo) breakdown.meta.grupo = this.metaGrupo(opts.grupo);
@@ -1414,7 +1853,6 @@ export class QuotesService {
     const insertPayload = {
       cliente_id: dto.cliente_id,
       aeronave_id: dto.es_externo ? null : dto.aeronave_id,
-      ruta_id: breakdown.ruta.id,
       tipo: dto.tipo ?? TipoVuelo.REDONDO,
       estado: 'COTIZADO',
       es_externo: dto.es_externo === true,
@@ -1434,36 +1872,11 @@ export class QuotesService {
       costo_externo_moneda: costoExterno.moneda,
       costo_externo_tc: costoExterno.tc,
       cotizacion_version: 1,
-      origen_iata: breakdown.ruta.origen_iata,
-      destino_iata: breakdown.ruta.destino_iata,
-      millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
-      es_redondo_auto: breakdown.ruta.es_redondo_auto,
-      num_aterrizajes: breakdown.ruta.num_aterrizajes,
-      pasajeros: reprPax,
+      // Ruta, montos, comisión, método y snapshot: mapeo ÚNICO fila←breakdown
+      // (compartido con revise() y la vista previa).
+      ...this.camposDesdeBreakdown(dto, breakdown, reprPax),
       pasajeros_nombres: dto.pasajeros_nombres ?? [],
       pase_abordar: dto.pase_abordar ?? false,
-      tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
-      tarifa_tipo: dto.tipo_tarifa,
-      tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
-      subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
-      tuas_usd: breakdown.totales.tuas_total_usd,
-      iva_pct: breakdown.iva.porcentaje,
-      iva_usd: breakdown.iva.monto_usd,
-      monto_total_usd: breakdown.totales.total_usd,
-      // TC declarado al cotizar (el pago puede entrar en pesos): habilita el
-      // total MXN y sirve de respaldo para convertir cobros MXN sin TC.
-      tc_usd_mxn: dto.tc_usd_mxn ?? null,
-      monto_total_mxn: breakdown.totales.total_mxn ?? null,
-      viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
-      extras_total_usd: breakdown.totales.extras_total_usd,
-      ajuste_final_usd: breakdown.totales.ajuste_final_usd,
-      comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
-      comision_vendedor_nombre: breakdown.meta.comision_vendedor_nombre ?? null,
-      comision_vendedor_modo: breakdown.meta.comision_vendedor_modo ?? null,
-      comision_vendedor_tarifa_hr:
-        breakdown.meta.comision_vendedor_tarifa_hr ?? null,
-      metodo_cobro: dto.metodo_pago,
-      metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
       cotizacion_abierta: dto.cotizacion_abierta ?? false,
       // Presentación del PDF (27-ago): tarifa/hr apagada e itinerario
       // prendido por defecto; configurables por cotización.
@@ -1478,7 +1891,6 @@ export class QuotesService {
       fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
       notas: dto.notas,
       notas_internas: dto.notas_internas,
-      calculo_snapshot: breakdown,
       // Liga de GRUPO (solo el escritor interno la manda).
       ...(opts.grupo
         ? {
@@ -1486,6 +1898,11 @@ export class QuotesService {
             grupo_posicion: opts.grupo.posicion,
             grupo_pax: opts.grupo.pax,
           }
+        : {}),
+      // Llave de idempotencia (solo cuando viaja: el insert sin ella queda
+      // idéntico al de siempre).
+      ...(dto.client_request_id
+        ? { client_request_id: dto.client_request_id }
         : {}),
       created_by: userId,
       updated_by: userId,
@@ -1498,6 +1915,21 @@ export class QuotesService {
       .maybeSingle();
 
     if (error) {
+      // Carrera con la misma llave (dos altas simultáneas): el índice único
+      // rechazó la segunda — se devuelve la primera, sin duplicar.
+      if (
+        error.code === '23505' &&
+        dto.client_request_id &&
+        error.message.includes('uq_vuelo_client_request')
+      ) {
+        const yaId = await this.vueloIdPorClientRequest(dto.client_request_id);
+        if (yaId) {
+          return {
+            ...(await this.findById(yaId)),
+            idempotente: true as const,
+          };
+        }
+      }
       if (error.code === '23503')
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
@@ -1598,6 +2030,24 @@ export class QuotesService {
     opts: { desdeGrupo?: boolean; grupo?: GrupoHijoOpts } = {},
   ) {
     const current = await this.findById(vueloId);
+    // IDEMPOTENCIA (8-sep-2026): la misma llave ya creó una versión → se
+    // devuelve la cotización VIGENTE sin candados ni motor ni versión nueva
+    // (doble clic / reintento del panel). Va ANTES de los candados: un
+    // reintento tras un guardado exitoso no debe rebotar con "ya cobrado".
+    if (dto.client_request_id) {
+      const ya = await this.versionPorClientRequest(dto.client_request_id);
+      if (ya) {
+        if (ya.vuelo_id !== vueloId) {
+          throw new ConflictException(
+            'client_request_id ya se usó para revisar otra cotización; genera una llave nueva.',
+          );
+        }
+        this.logger.log(
+          `Revisión idempotente: reintento con client_request_id ${dto.client_request_id} → cotización ${vueloId} v${ya.version} ya aplicada (sin crear otra versión).`,
+        );
+        return { ...current, idempotente: true as const };
+      }
+    }
     // CANCELADO sí se revisa (decisión del equipo, 1-sep-2026): el vuelo no
     // salió pero la parte financiera existió — oficina corrige el desglose
     // para efectos financieros/documentales. En balances la venta de un
@@ -1645,78 +2095,24 @@ export class QuotesService {
       }
     }
     // Ajustes de última hora (extras, pax/TUAs, cierre de abiertas): la
-    // cotización se puede revisar en cualquier estado mientras NO se haya
-    // cobrado ni facturado. Cada revisión queda versionada en el historial.
-    // CANCELADO queda FUERA de esta lista a propósito (1-sep-2026): en un
-    // cancelado la venta es lo cobrado real, editar el total es seguro.
-    const estadoAvanzado =
-      current.estado === 'CONFIRMADO' ||
-      current.estado === 'EN_VUELO' ||
-      current.estado === 'COMPLETADO';
-    if (estadoAvanzado && (current.cobrado || current.facturado)) {
+    // cotización se puede revisar en cualquier estado mientras NO tenga
+    // dinero cobrado ni CFDI. D3 (8-sep-2026): el candado de cobro pasa de
+    // "cobrado en CONFIRMADO+" a "cobros NETOS ≠ 0 (o MXN sin TC), en
+    // cualquier estado" (409 estructurado COTIZACION_COBRADA, ver
+    // assertSinCobros); la CFDI bloquea también en cualquier estado (antes
+    // solo el candado optimista lo rebotaba con un mensaje confuso).
+    // CANCELADO queda FUERA a propósito (1-sep-2026): en un cancelado la
+    // venta es lo cobrado real, editar el total es seguro.
+    if (!esCancelado && current.facturado) {
       throw new ConflictException(
-        'El vuelo ya fue cobrado/facturado; la cotización ya no puede ajustarse.',
+        `La cotización #${current.folio as number} ya tiene CFDI emitida; cancela la factura antes de revisarla.`,
       );
     }
+    await this.assertSinCobros(current);
 
-    // La tarifa preferencial se resuelve SIEMPRE con el cliente real del
-    // vuelo (no se confía en el que mande el front al revisar).
-    dto.cliente_id = (current.cliente_id as string | null) ?? undefined;
-    // Comisión del vendedor: si la revisión no trae la modalidad, se
-    // re-resuelve desde lo persistido (patrón tarifa preferencial) — así una
-    // comisión POR_HORA se recalcula con las horas nuevas aunque el front no
-    // mande el modo. Quitar la comisión = enviar modo FIJA sin monto (o
-    // POR_HORA con tarifa 0).
-    if (dto.comision_vendedor_modo === undefined) {
-      dto.comision_vendedor_modo =
-        (current.comision_vendedor_modo as 'FIJA' | 'POR_HORA' | null) ??
-        undefined;
-      if (dto.comision_vendedor_tarifa_hr === undefined) {
-        dto.comision_vendedor_tarifa_hr =
-          Number(current.comision_vendedor_tarifa_hr) > 0
-            ? Number(current.comision_vendedor_tarifa_hr)
-            : undefined;
-      }
-    }
-    // es_externo se ANCLA a lo persistido (patrón cliente_id): un front
-    // malformado podía marcar externo un vuelo propio (o al revés) en
-    // silencio. El revise de un externo EXIGE el avión de referencia
-    // (aeronave_id) — el motor ya no tiene modo sin referencia.
-    dto.es_externo = current.es_externo === true;
-    // EXTRAS DE GRUPO (4-sep-2026): un hijo CONSERVA sus líneas
-    // origen='GRUPO' persistidas (patrón cliente_id): lo que mande el panel
-    // para esas líneas se descarta y omitirlas no las borra — solo el
-    // escritor del grupo (`desdeGrupo`) las reemplaza. quickAdjust pasa por
-    // aquí, así que queda cubierto.
-    if (!opts.desdeGrupo) {
-      const anclados = anclarExtrasDeGrupo(current.extras, dto.extras);
-      if (anclados !== undefined) {
-        dto.extras = anclados as unknown as ExtraConceptoDto[];
-      }
-    } else {
-      // El grupo manda SOLO sus líneas materializadas: las propias del hijo
-      // (catering de ese avión, etc.) se conservan — re-materializar jamás
-      // borra en silencio lo capturado en el hijo (auditoría 29-ago).
-      dto.extras = mezclarExtrasDesdeGrupo(
-        current.extras,
-        dto.extras,
-      ) as unknown as ExtraConceptoDto[];
-    }
-    // PRECIO PACTADO eliminado del cotizador (decisión del cliente,
-    // 2-sep-2026): el valor del DTO solo se acepta como REHIDRATACIÓN de un
-    // pactado YA persistido (el panel al revisar y quickAdjust re-envían el
-    // del snapshot — no son distinguibles de una captura manual, así que se
-    // ancla a lo persistido). Sin pactado vigente, se descarta: no puede
-    // nacer uno nuevo por API. Omitirlo con pactado vigente SÍ lo suelta
-    // (p. ej. "todo en $0" del panel), igual que antes.
-    const pactadoVigente = Number(
-      (
-        current.calculo_snapshot as {
-          meta?: { total_pactado_usd?: number | null };
-        } | null
-      )?.meta?.total_pactado_usd,
-    );
-    if (!(pactadoVigente > 0)) dto.total_pactado_usd = undefined;
+    // Anclajes a lo persistido (cliente, comisión, es_externo, extras de
+    // GRUPO, pactado): fuente única compartida con la vista previa.
+    this.anclarRevisionAlPersistido(dto, current, opts);
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
@@ -1817,13 +2213,9 @@ export class QuotesService {
               };
             })()
           : {}),
-        ruta_id: breakdown.ruta.id,
-        origen_iata: breakdown.ruta.origen_iata,
-        destino_iata: breakdown.ruta.destino_iata,
-        millas_nauticas_one_way: breakdown.ruta.millas_nauticas_base,
-        es_redondo_auto: breakdown.ruta.es_redondo_auto,
-        num_aterrizajes: breakdown.ruta.num_aterrizajes,
-        pasajeros: reprPax,
+        // Ruta, montos, comisión, método y snapshot: mapeo ÚNICO
+        // fila←breakdown (compartido con create() y la vista previa).
+        ...this.camposDesdeBreakdown(dto, breakdown, reprPax),
         ...(dto.fecha_vuelo !== undefined
           ? { fecha_vuelo: dto.fecha_vuelo.toISOString() }
           : {}),
@@ -1834,29 +2226,7 @@ export class QuotesService {
           ? { pasajeros_nombres: dto.pasajeros_nombres }
           : {}),
         pase_abordar: dto.pase_abordar ?? false,
-        tiempo_cobrable_hr: breakdown.tiempos.cobrable_hr,
-        tarifa_tipo: dto.tipo_tarifa,
-        tarifa_hora_usd: breakdown.tarifa.usd_por_hora,
-        subtotal_vuelo_usd: breakdown.totales.subtotal_vuelo_usd,
-        tuas_usd: breakdown.totales.tuas_total_usd,
-        iva_pct: breakdown.iva.porcentaje,
-        iva_usd: breakdown.iva.monto_usd,
-        monto_total_usd: breakdown.totales.total_usd,
-        tc_usd_mxn: dto.tc_usd_mxn ?? null,
-        monto_total_mxn: breakdown.totales.total_mxn ?? null,
-        viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
-        extras_total_usd: breakdown.totales.extras_total_usd,
-        ajuste_final_usd: breakdown.totales.ajuste_final_usd,
-        comision_vendedor_usd: breakdown.meta.comision_vendedor_usd ?? 0,
-        comision_vendedor_nombre:
-          breakdown.meta.comision_vendedor_nombre ?? null,
-        comision_vendedor_modo: breakdown.meta.comision_vendedor_modo ?? null,
-        comision_vendedor_tarifa_hr:
-          breakdown.meta.comision_vendedor_tarifa_hr ?? null,
-        metodo_cobro: dto.metodo_pago,
-        metodo_cobro_detalle: this.resolverMetodoDetalle(dto),
         notas: dto.notas ?? current.notas,
-        calculo_snapshot: breakdown,
         // Cotizar una RESERVA o SOLICITUD la convierte en COTIZADO; los estados
         // avanzados (abierta) conservan su estado al ajustar el precio.
         estado:
@@ -1884,6 +2254,18 @@ export class QuotesService {
 
     if (error) throw new Error(error.message);
     if (!updated) {
+      // Carrera con la MISMA llave (dos "Guardar" simultáneos): el primero
+      // ya aplicó la versión y este rebotó en el candado optimista → es el
+      // mismo intento, se devuelve lo vigente sin error.
+      if (dto.client_request_id) {
+        const ya = await this.versionPorClientRequest(dto.client_request_id);
+        if (ya && ya.vuelo_id === vueloId) {
+          return {
+            ...(await this.findById(vueloId)),
+            idempotente: true as const,
+          };
+        }
+      }
       throw new ConflictException(
         'La cotización cambió mientras editabas (otra revisión o facturación). Recarga e intenta de nuevo.',
       );
@@ -1994,6 +2376,7 @@ export class QuotesService {
         breakdown,
         dto.motivo,
         userId,
+        dto.client_request_id ?? null,
       );
     } catch (err) {
       // NUNCA warn-only (auditoría 29-ago): la revisión (montos y tramos) YA
@@ -2284,8 +2667,15 @@ export class QuotesService {
     pdf_oculto: boolean;
     pdf_fecha: string | null;
   }> {
-    if (dto.oculto === undefined && dto.pdf_fecha === undefined) {
-      throw new BadRequestException('Indica oculto y/o pdf_fecha.');
+    const tocaEscala = dto.oculto !== undefined || dto.pdf_fecha !== undefined;
+    const tocaVuelo =
+      dto.notas !== undefined ||
+      dto.pdf_mostrar_tarifa !== undefined ||
+      dto.pdf_mostrar_itinerario !== undefined;
+    if (!tocaEscala && !tocaVuelo) {
+      throw new BadRequestException(
+        'Indica oculto, pdf_fecha, notas, pdf_mostrar_tarifa y/o pdf_mostrar_itinerario.',
+      );
     }
     // La escala debe pertenecer AL vuelo de la URL (nunca tocar tramos de
     // otro vuelo por id suelto).
@@ -2301,16 +2691,23 @@ export class QuotesService {
         'La escala no existe o no pertenece a este vuelo.',
       );
     }
-    const patch: Record<string, unknown> = { updated_by: userId };
-    if (dto.oculto !== undefined) patch.pdf_oculto = dto.oculto === true;
-    if (dto.pdf_fecha !== undefined) patch.pdf_fecha = dto.pdf_fecha;
-    const { error } = await this.supabase.service
-      .from('escala')
-      .update(patch)
-      .eq('id', escalaId);
-    if (error) {
-      throw new Error(`Failed to update presentación PDF: ${error.message}`);
+    if (tocaEscala) {
+      const patch: Record<string, unknown> = { updated_by: userId };
+      if (dto.oculto !== undefined) patch.pdf_oculto = dto.oculto === true;
+      if (dto.pdf_fecha !== undefined) patch.pdf_fecha = dto.pdf_fecha;
+      const { error } = await this.supabase.service
+        .from('escala')
+        .update(patch)
+        .eq('id', escalaId);
+      if (error) {
+        throw new Error(`Failed to update presentación PDF: ${error.message}`);
+      }
     }
+    // D5 (8-sep): notas del cliente y toggles del PDF a nivel VUELO por la
+    // misma ruta (sin versión ni notificación).
+    const vuelo = tocaVuelo
+      ? await this.setPdfPresentacionVuelo(vueloId, dto, userId)
+      : null;
     // Estado FINAL (lo tocado + lo que ya había): el panel pinta con esto.
     const previaOculto: unknown = escala.pdf_oculto;
     const previaFecha: unknown = escala.pdf_fecha;
@@ -2327,6 +2724,85 @@ export class QuotesService {
       orden: Number(escala.orden),
       pdf_oculto: pdfOcultoFinal,
       pdf_fecha: pdfFechaFinal ? pdfFechaFinal.slice(0, 10) : null,
+      // Aditivo: estado final de nivel vuelo cuando se tocó (D5).
+      ...(vuelo ? { vuelo } : {}),
+    };
+  }
+
+  /**
+   * Presentación PDF a nivel VUELO (D5, 8-sep-2026): `vuelo.notas` (las que
+   * ve el cliente), `pdf_mostrar_tarifa` y `pdf_mostrar_itinerario` dejan de
+   * crear versión — son presentación pura como el ojito: sin recálculo, sin
+   * snapshot, sin versión, sin avisos a tripulación. `PATCH
+   * /quotes/:id/pdf-visibilidad` (y la ruta por escala con estos campos).
+   * Patch PARCIAL: clave omitida = no tocar; notas '' o null = quitarlas.
+   * Sin candado de facturado/cobrado a propósito (no toca dinero).
+   */
+  async setPdfPresentacionVuelo(
+    vueloId: string,
+    dto: PdfPresentacionVueloDto,
+    userId: string,
+  ): Promise<{
+    id: string;
+    notas: string | null;
+    pdf_mostrar_tarifa: boolean;
+    pdf_mostrar_itinerario: boolean;
+  }> {
+    if (
+      dto.notas === undefined &&
+      dto.pdf_mostrar_tarifa === undefined &&
+      dto.pdf_mostrar_itinerario === undefined
+    ) {
+      throw new BadRequestException(
+        'Indica notas, pdf_mostrar_tarifa y/o pdf_mostrar_itinerario.',
+      );
+    }
+    const { data: vuelo, error: vErr } = await this.supabase.service
+      .from('vuelo')
+      .select('id, notas, pdf_mostrar_tarifa, pdf_mostrar_itinerario')
+      .eq('id', vueloId)
+      .maybeSingle();
+    if (vErr) throw new Error(`Failed to read vuelo: ${vErr.message}`);
+    if (!vuelo) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (dto.notas !== undefined) {
+      // '' / null = quitar las notas; el texto viaja tal cual (sin trim: la
+      // hoja imprime lo que oficina escribió).
+      patch.notas =
+        dto.notas == null || dto.notas.trim() === '' ? null : dto.notas;
+    }
+    if (dto.pdf_mostrar_tarifa !== undefined) {
+      patch.pdf_mostrar_tarifa = dto.pdf_mostrar_tarifa === true;
+    }
+    if (dto.pdf_mostrar_itinerario !== undefined) {
+      patch.pdf_mostrar_itinerario = dto.pdf_mostrar_itinerario === true;
+    }
+    const { error } = await this.supabase.service
+      .from('vuelo')
+      .update(patch)
+      .eq('id', vueloId);
+    if (error) {
+      throw new Error(
+        `Failed to update presentación PDF del vuelo: ${error.message}`,
+      );
+    }
+    const notasPrev: unknown = vuelo.notas;
+    return {
+      id: vuelo.id as string,
+      notas:
+        dto.notas !== undefined
+          ? (patch.notas as string | null)
+          : typeof notasPrev === 'string'
+            ? notasPrev
+            : null,
+      pdf_mostrar_tarifa:
+        dto.pdf_mostrar_tarifa !== undefined
+          ? dto.pdf_mostrar_tarifa === true
+          : vuelo.pdf_mostrar_tarifa === true,
+      pdf_mostrar_itinerario:
+        dto.pdf_mostrar_itinerario !== undefined
+          ? dto.pdf_mostrar_itinerario === true
+          : vuelo.pdf_mostrar_itinerario !== false,
     };
   }
 
@@ -3006,9 +3482,13 @@ export class QuotesService {
       if (e.pdf_oculto != null) {
         planFields.pdf_oculto = e.pdf_oculto === true;
       }
-      // pdf_fecha (fecha SOLO del PDF, 3-sep) NO viaja en planFields a
-      // propósito: el UPDATE la conserva sola (se edita solo por PATCH
-      // pdf-visibilidad; no vive en el DTO ni en el snapshot).
+      // pdf_fecha (fecha SOLO del PDF, 3-sep; capturable al crear/revisar
+      // desde el 8-sep, D4): misma semántica que pdf_oculto — solo se
+      // escribe cuando VIAJA (null = quitarla); ausente, el UPDATE la
+      // conserva (el PATCH pdf-visibilidad sigue siendo la otra vía).
+      if (e.pdf_fecha !== undefined) {
+        planFields.pdf_fecha = e.pdf_fecha;
+      }
       const actual = porOrden.get(orden);
       // SEMÁNTICA 2-sep-2026 (cliente): el sobrevuelo es una BANDERA del
       // tramo ORTOGONAL al destino — un CUN→CZM puede llevarla igual que un
@@ -3149,12 +3629,15 @@ export class QuotesService {
     breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
     motivo: string,
     userId: string,
+    clientRequestId: string | null = null,
   ): Promise<void> {
     const { error } = await this.supabase.service
       .from('cotizacion_version_history')
       .insert({
         vuelo_id: vueloId,
         version,
+        // Llave de idempotencia de la revisión (8-sep): solo cuando viaja.
+        ...(clientRequestId ? { client_request_id: clientRequestId } : {}),
         aeronave_id: dto.aeronave_id,
         ruta_id: breakdown.ruta.id,
         origen_iata: breakdown.ruta.origen_iata,
@@ -3186,6 +3669,32 @@ export class QuotesService {
       throw new Error(
         `Failed to write cotizacion version history: ${error.message}`,
       );
+  }
+
+  /** Vuelo ya creado con esa llave de idempotencia (o null). */
+  private async vueloIdPorClientRequest(key: string): Promise<string | null> {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id')
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data?.id as string | undefined) ?? null;
+  }
+
+  /** Versión ya creada con esa llave de idempotencia (o null). */
+  private async versionPorClientRequest(
+    key: string,
+  ): Promise<{ vuelo_id: string; version: number } | null> {
+    const { data, error } = await this.supabase.service
+      .from('cotizacion_version_history')
+      .select('vuelo_id, version')
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data
+      ? { vuelo_id: data.vuelo_id as string, version: Number(data.version) }
+      : null;
   }
 
   /**
@@ -3221,6 +3730,10 @@ export class QuotesService {
         // NO normalizar la ausencia a false: null = "no viajó" y la escala
         // viva conserva su pdf_oculto (ver doc de ResolvedLeg, bug 1-sep).
         pdf_oculto: l.pdf_oculto == null ? null : l.pdf_oculto === true,
+        // pdf_fecha (D4): solo cuando VIAJA (undefined = conservar la viva;
+        // null = sin fecha). Una plantilla de ruta o quickAdjust no la
+        // mandan → la escala conserva lo suyo.
+        ...(l.pdf_fecha !== undefined ? { pdf_fecha: l.pdf_fecha } : {}),
         fecha_salida_plan:
           l.fecha_salida_plan instanceof Date
             ? l.fecha_salida_plan.toISOString()

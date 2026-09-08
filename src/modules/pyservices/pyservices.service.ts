@@ -1498,6 +1498,23 @@ export class PyservicesService {
     return this.postForBuffer('/reportes/cotizacion-interna', payload, 30_000);
   }
 
+  /**
+   * Vista previa HTML de la HOJA 1 de la cotización (rediseño del cotizador,
+   * 8-sep-2026): MISMO payload que `/reportes/cotizacion` (sin fotos) y
+   * MISMO `_build_html` de pyservices con `solo_hoja_1=True` (CSS de
+   * pantalla, sin @page, sin WeasyPrint). Devuelve el HTML tal cual
+   * (`text/html; charset=utf-8`); el API lo proxea con `Cache-Control:
+   * no-store`.
+   */
+  async generateCotizacionPreviewHtml(payload: unknown): Promise<string> {
+    const buf = await this.postForBuffer(
+      '/reportes/cotizacion/preview-html',
+      payload,
+      30_000,
+    );
+    return buf.toString('utf8');
+  }
+
   /** Libro «Dinero» del periodo (réplica del control manual del equipo). */
   async generateDineroXlsx(payload: DineroXlsxPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/dinero-xlsx', payload, 30_000);

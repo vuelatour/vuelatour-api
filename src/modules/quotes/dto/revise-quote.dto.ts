@@ -7,6 +7,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
   MinLength,
@@ -15,14 +16,32 @@ import {
 import { CalculateQuoteDto } from './calculate-quote.dto';
 
 export class ReviseQuoteDto extends CalculateQuoteDto {
+  // Tope 1000 (8-sep-2026, D1 del rediseño): el panel arma el motivo como
+  // resumen automático del diff + chip humano + texto libre; 500 se quedaba
+  // corto. Columna `text`, sin migración.
   @ApiProperty({
-    description: 'Razón de la revisión',
-    example: 'Cliente solicitó cambiar avión a Kodiak',
+    description:
+      'Razón de la revisión (chip humano + texto libre; el panel antepone el resumen automático del cambio).',
+    example: 'Cliente pidió · pax 4→6 · +Handler $1,500',
   })
   @IsString()
   @MinLength(3)
-  @MaxLength(500)
+  @MaxLength(1000)
   motivo!: string;
+
+  /**
+   * Idempotencia (8-sep-2026): llave única por intento de "Guardar". Si ya
+   * existe una versión con esa llave (`cotizacion_version_history.
+   * client_request_id`, índice único parcial), se devuelve la cotización
+   * vigente SIN crear otra versión (200).
+   */
+  @ApiPropertyOptional({
+    description:
+      'Llave de idempotencia (uuid) por intento de guardar: repetirla devuelve la cotización vigente (200) sin crear otra versión.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 
   @ApiPropertyOptional()
   @IsOptional()

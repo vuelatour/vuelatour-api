@@ -22,6 +22,9 @@ export const CAMPOS_NO_CLONABLES: readonly string[] = [
   'combinado_con_id',
   // GENERATED ALWAYS en la BD (se calcula sola del origen): insertarla revienta.
   'pago_anticipado_req',
+  // Llave de idempotencia del ALTA (8-sep-2026, índice único parcial
+  // uq_vuelo_client_request): clonarla reventaría el INSERT por duplicado.
+  'client_request_id',
 ];
 
 export function payloadClonVuelo(

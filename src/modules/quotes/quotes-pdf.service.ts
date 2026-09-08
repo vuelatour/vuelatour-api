@@ -4,10 +4,13 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { PyservicesService } from '../pyservices/pyservices.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
+import type { PreviewQuoteDto } from './dto/preview-quote.dto';
+import { QuotesService } from './quotes.service';
 
 function num(v: unknown): number | null {
   if (v == null) return null;
@@ -219,7 +222,35 @@ export function escalasVisiblesPdf(
   };
 }
 
-/** Genera el PDF de cotización delegando el render a pyservices (WeasyPrint). */
+/**
+ * Fila de cotización TAL COMO la devuelve `QuotesService.findById` (VUELO_COLS
+ * + `escalas` vivas + `modelos_cotizados`, opcional) — o un quote-like
+ * armado EN MEMORIA con el mismo mapeo (`quoteLikeParaPreview`). Es la
+ * ÚNICA entrada del armador del PDF: lo que se ve en la vista previa es lo
+ * que imprime el PDF porque ambos pasan por `armarPayloadPdf`.
+ */
+export type QuoteLike = Record<string, unknown>;
+
+export interface ArmarPayloadPdfOpts {
+  /**
+   * true (PDF): descarga las fotos EXTERIOR/INTERIOR de `aeronave_imagen`
+   * como data-URI. false (vista previa de la hoja 1): ni consulta la galería
+   * ni descarga nada → `foto_exterior`/`foto_interior` = null; TODO lo demás
+   * del payload es byte-idéntico.
+   */
+  conFotos?: boolean;
+}
+
+/**
+ * PDF de cotización delegando el render a pyservices (WeasyPrint) y vista
+ * previa HTML de la hoja 1 (mismo payload, mismo `_build_html`).
+ *
+ * Refactor 8-sep-2026 (rediseño del cotizador): `render()` se partió en
+ * `cargarQuoteLike` (fila) → `armarPayloadPdf` (payload, SIN cambios de
+ * contrato) → `renderPdf` (POST /reportes/cotizacion). La vista previa
+ * reutiliza el armador con `conFotos:false` y manda a
+ * /reportes/cotizacion/preview-html. Ninguna réplica del PDF en otro lado.
+ */
 @Injectable()
 export class QuotesPdfService {
   private readonly logger = new Logger(QuotesPdfService.name);
@@ -227,18 +258,49 @@ export class QuotesPdfService {
   constructor(
     private readonly config: ConfigService<EnvVars, true>,
     private readonly supabase: SupabaseService,
+    private readonly quotes: QuotesService,
+    private readonly pyservices: PyservicesService,
   ) {}
 
-  async render(quote: Record<string, unknown>): Promise<Buffer> {
-    const baseUrl = this.config
-      .get('PYSERVICES_BASE_URL', { infer: true })
-      .replace(/\/+$/, '');
-    const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
-    if (!baseUrl || !token) {
-      throw new ServiceUnavailableException(
-        'Generación de PDF no configurada (pyservices).',
-      );
-    }
+  /** Fila + escalas + modelos cotizados de una cotización guardada (404 si no existe). */
+  async cargarQuoteLike(id: string): Promise<QuoteLike> {
+    return this.quotes.findById(id);
+  }
+
+  /** PDF completo (2 hojas, con fotos) de una cotización — contrato intacto. */
+  async render(quote: QuoteLike): Promise<Buffer> {
+    const payload = await this.armarPayloadPdf(quote, { conFotos: true });
+    return this.renderPdf(payload);
+  }
+
+  /**
+   * Vista previa HTML de la HOJA 1 desde un quote-like (persistido o en
+   * memoria): mismo armador sin fotos → pyservices `_build_html(...,
+   * solo_hoja_1=True)`.
+   */
+  async renderPreviewHtml(quote: QuoteLike): Promise<string> {
+    const payload = await this.armarPayloadPdf(quote, { conFotos: false });
+    return this.pyservices.generateCotizacionPreviewHtml(payload);
+  }
+
+  /**
+   * `POST /v1/quotes/preview-html`: con `quote_id` + `sucio=false` el
+   * quote-like es EXACTAMENTE la fila que recibe el PDF; si no, el motor
+   * corre con el DTO y el quote-like se arma en memoria (nunca persiste).
+   */
+  async previewHtml(dto: PreviewQuoteDto): Promise<string> {
+    const quote = await this.quotes.quoteLikeParaPreview(dto);
+    return this.renderPreviewHtml(quote);
+  }
+
+  /**
+   * Payload de `/reportes/cotizacion` (y de la vista previa) a partir de un
+   * quote-like. Consultas: `cliente` (nombre), `aeronave` (matrícula y ficha
+   * hoja 2), `aeronave_imagen` + descarga (solo `conFotos`), `aeropuerto`
+   * (coordenadas del mapa). Sin escrituras.
+   */
+  async armarPayloadPdf(quote: QuoteLike, opts: ArmarPayloadPdfOpts = {}) {
+    const conFotos = opts.conFotos !== false;
 
     // Nombre del cliente (la fila de vuelo solo trae cliente_id).
     let cliente = 'Cliente';
@@ -265,6 +327,9 @@ export class QuotesPdfService {
     // "De un vistazo" y características — todo de la fila de aeronave.
     let avion: Record<string, unknown> | null = null;
     if (quote.aeronave_id) {
+      // La ficha del avión SÍ hace falta aun sin fotos (vista previa de la
+      // hoja 1): `matricula` alimenta la sublínea VGV; la galería solo con
+      // `conFotos` (una consulta y dos descargas menos por tecleo).
       const [{ data: av }, { data: imgs }] = await Promise.all([
         this.supabase.service
           .from('aeronave')
@@ -273,11 +338,15 @@ export class QuotesPdfService {
           )
           .eq('id', quote.aeronave_id as string)
           .maybeSingle(),
-        this.supabase.service
-          .from('aeronave_imagen')
-          .select('url, etiqueta, content_type')
-          .eq('aeronave_id', quote.aeronave_id as string)
-          .in('etiqueta', ['EXTERIOR', 'INTERIOR']),
+        conFotos
+          ? this.supabase.service
+              .from('aeronave_imagen')
+              .select('url, etiqueta, content_type')
+              .eq('aeronave_id', quote.aeronave_id as string)
+              .in('etiqueta', ['EXTERIOR', 'INTERIOR'])
+          : Promise.resolve({
+              data: null as Array<Record<string, unknown>> | null,
+            }),
       ]);
       matricula = (av?.matricula as string) ?? null;
       avion = av ?? null;
@@ -297,16 +366,18 @@ export class QuotesPdfService {
           return null;
         }
       };
-      const ext = (imgs ?? []).find((i) => i.etiqueta === 'EXTERIOR');
-      const int_ = (imgs ?? []).find((i) => i.etiqueta === 'INTERIOR');
-      fotoExterior = await descargar(
-        ext?.url as string,
-        ext?.content_type as string,
-      );
-      fotoInterior = await descargar(
-        int_?.url as string,
-        int_?.content_type as string,
-      );
+      if (conFotos) {
+        const ext = (imgs ?? []).find((i) => i.etiqueta === 'EXTERIOR');
+        const int_ = (imgs ?? []).find((i) => i.etiqueta === 'INTERIOR');
+        fotoExterior = await descargar(
+          ext?.url as string,
+          ext?.content_type as string,
+        );
+        fotoInterior = await descargar(
+          int_?.url as string,
+          int_?.content_type as string,
+        );
+      }
     }
 
     const ivaRaw = num(quote.iva_pct) ?? 0;
@@ -422,7 +493,10 @@ export class QuotesPdfService {
         : [];
 
     const payload = {
-      folio: String(quote.folio ?? ''),
+      folio:
+        typeof quote.folio === 'number' || typeof quote.folio === 'string'
+          ? String(quote.folio)
+          : '',
       fecha:
         (quote.fecha_confirmacion as string) ??
         (quote.fecha_solicitud as string) ??
@@ -563,7 +637,20 @@ export class QuotesPdfService {
       })(),
       mapa_puntos: mapaPuntos,
     };
+    return payload;
+  }
 
+  /** POST /reportes/cotizacion (WeasyPrint) → PDF. 503 ante cualquier fallo. */
+  async renderPdf(payload: CotizacionPdfPayload): Promise<Buffer> {
+    const baseUrl = this.config
+      .get('PYSERVICES_BASE_URL', { infer: true })
+      .replace(/\/+$/, '');
+    const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
+    if (!baseUrl || !token) {
+      throw new ServiceUnavailableException(
+        'Generación de PDF no configurada (pyservices).',
+      );
+    }
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 30000);
     try {
@@ -594,3 +681,8 @@ export class QuotesPdfService {
     }
   }
 }
+
+/** Payload EXACTO que viaja a pyservices (`CotizacionPdfRequest`). */
+export type CotizacionPdfPayload = Awaited<
+  ReturnType<QuotesPdfService['armarPayloadPdf']>
+>;

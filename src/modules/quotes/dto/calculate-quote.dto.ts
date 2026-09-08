@@ -8,11 +8,13 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsISO8601,
   IsNumber,
   IsOptional,
   IsString,
   IsUUID,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -115,6 +117,28 @@ export class EscalaInputDto {
   @IsOptional()
   @IsBoolean()
   pdf_oculto?: boolean;
+
+  /**
+   * Fecha de PARED (YYYY-MM-DD) SOLO para el PDF del cliente (D4, 8-sep-2026:
+   * el ojito y la fecha también se capturan al CREAR). Mismas reglas que
+   * `PATCH pdf-visibilidad`: `null` = sin fecha; OMITIDA (undefined) = "no
+   * viajó" y `replaceEscalas` CONSERVA la fecha viva de la escala (igual que
+   * `pdf_oculto`, bug 1-sep). Presentación pura: no toca `fecha_salida_plan`
+   * ni el precio. Tipado `string | null` a propósito (sin conversión
+   * implícita del null a texto).
+   */
+  @ApiPropertyOptional({
+    example: '2026-09-05',
+    nullable: true,
+    description:
+      'Fecha (YYYY-MM-DD, sin hora) SOLO para el PDF del cliente. null = sin fecha; omitida = conservar la de la escala viva. No cambia la ruta operativa ni el precio.',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'pdf_fecha debe ser YYYY-MM-DD',
+  })
+  @IsISO8601({ strict: true }, { message: 'pdf_fecha inválida (YYYY-MM-DD)' })
+  pdf_fecha?: string | null;
 
   // ELIMINADO (29-ago-2026): `monto_externo_usd` (monto pactado por tramo del
   // externo SIN avión de referencia). El modo se retiró del motor — los

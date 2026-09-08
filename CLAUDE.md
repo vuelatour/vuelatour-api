@@ -197,6 +197,28 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     pendiente). PDF del cliente vía pyservices `/reportes/cotizacion-grupo`
     (nunca COMISION_VENDEDOR ni redondeo como línea).
 
+12. **Cotizador: vista previa, idempotencia y candado de cobro (8-sep-2026).**
+    - `POST /quotes/preview-html` NUNCA persiste: con `quote_id`+`sucio=false`
+      el quote-like es la fila de `findById` TAL CUAL (payload byte-idéntico
+      al PDF salvo fotos); si no, `calculate()` + `camposDesdeBreakdown`
+      (fuente ÚNICA del mapeo fila←breakdown, compartida con create/revise) +
+      escalas en memoria con la misma cascada de `replaceEscalas`. El PDF y la
+      preview pasan por el MISMO `QuotesPdfService.armarPayloadPdf` — jamás
+      una réplica de la hoja 1 en otro lado.
+    - `client_request_id` en create/revise (índices únicos parciales
+      `uq_vuelo_client_request` / `uq_cot_version_client_request`): la misma
+      llave devuelve la cotización/versión YA creada (200, `idempotente:true`)
+      sin motor ni escrituras; no se clona en `reassignAircraft`.
+    - D3: `revise` (y `quickAdjust`) rebota 409 estructurado
+      `COTIZACION_COBRADA` cuando el NETO de `cobro_vuelo` por `cobrosEnUsd`
+      ≠ 0 o hay MXN sin TC — en CUALQUIER estado salvo CANCELADO. Un cobro
+      reembolsado completo (neto 0) sí deja revisar. La CFDI bloquea en
+      cualquier estado no cancelado.
+    - D4/D5: `pdf_oculto`/`pdf_fecha` viajan por tramo en create/revise
+      (omitidos = conservar la escala viva) y `PATCH :id/pdf-visibilidad`
+      (+ la ruta por escala) mueve notas/toggles del PDF SIN versión,
+      snapshot ni avisos: presentación pura.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

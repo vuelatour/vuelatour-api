@@ -1,16 +1,67 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsBoolean, IsISO8601, IsOptional, Matches } from 'class-validator';
+import {
+  IsBoolean,
+  IsISO8601,
+  IsOptional,
+  IsString,
+  Matches,
+  MaxLength,
+} from 'class-validator';
+
+/**
+ * Presentación PDF a NIVEL VUELO (D5, 8-sep-2026): notas del cliente y los
+ * toggles "tarifa/hr" e "itinerario" dejan de crear versión — son
+ * presentación pura, igual que el ojito. Body de
+ * `PATCH :id/pdf-visibilidad` y campos aditivos de
+ * `PATCH :id/escalas/:escalaId/pdf-visibilidad`. Patch PARCIAL: la clave que
+ * no viaja no se toca; el service exige al menos una (400 si viene vacío).
+ * Sin recálculo, sin snapshot, sin versión, sin notificación.
+ */
+export class PdfPresentacionVueloDto {
+  /**
+   * Notas visibles para el cliente (se imprimen en el PDF). `''` o `null` =
+   * quitar las notas; omitida = no tocar. Tipado `string | null` a
+   * propósito (sin conversión implícita del null a texto).
+   */
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      "Notas visibles para el cliente (PDF). '' o null = quitarlas; omitida = no tocar. No crea versión.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(2000)
+  notas?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'PDF: mostrar la tarifa por hora en el desglose. Omitido = no tocar. No crea versión.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pdf_mostrar_tarifa?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'PDF: mostrar la tabla del itinerario de tramos. Omitido = no tocar. No crea versión.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  pdf_mostrar_itinerario?: boolean;
+}
 
 /**
  * Body de `PATCH :id/escalas/:escalaId/pdf-visibilidad`: PRESENTACIÓN PDF
  * del tramo — `escala.pdf_oculto` (ojito) y/o `escala.pdf_fecha` (fecha
- * SOLO para el PDF del cliente, 3-sep-2026). Ambas son presentación pura:
- * el precio no cambia, no se versiona y el snapshot NO se toca — el PDF lee
- * la escala viva. Bug 1-sep: el switch ya no depende de que un guardado del
+ * SOLO para el PDF del cliente, 3-sep-2026) — y, desde el 8-sep (D5), los
+ * campos de nivel VUELO heredados de `PdfPresentacionVueloDto` (notas del
+ * cliente y toggles del PDF). Todo es presentación pura: el precio no
+ * cambia, no se versiona y el snapshot NO se toca — el PDF lee la escala y
+ * la fila vivas. Bug 1-sep: el switch ya no depende de que un guardado del
  * cotizador arrastre la bandera. Patch PARCIAL: la clave que no viaja no se
  * toca; el service exige al menos una (400 si el body viene vacío).
  */
-export class PdfVisibilidadDto {
+export class PdfVisibilidadDto extends PdfPresentacionVueloDto {
   @ApiPropertyOptional({
     description:
       'true = ocultar el tramo del PDF del cliente (título/itinerario/mapa); false = volverlo a mostrar. Omitido = no tocar.',

@@ -20,7 +20,11 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
-import { PdfVisibilidadDto } from './dto/pdf-visibilidad.dto';
+import {
+  PdfPresentacionVueloDto,
+  PdfVisibilidadDto,
+} from './dto/pdf-visibilidad.dto';
+import { PreviewQuoteDto } from './dto/preview-quote.dto';
 import { QuickAdjustQuoteDto } from './dto/quick-adjust.dto';
 import { ReviseQuoteDto } from './dto/revise-quote.dto';
 import { QuotesService } from './quotes.service';
@@ -48,6 +52,23 @@ export class QuotesController {
     return this.quotes.calculate(dto);
   }
 
+  // Ruta LITERAL antes de ':id' (convención del repo).
+  @Post('preview-html')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Vista previa HTML de la HOJA 1 del PDF del cliente (rediseño del cotizador, 8-sep-2026): mismo payload y misma plantilla que el PDF, sin fotos, sin persistir. Con quote_id + sucio=false se arma desde la fila y el snapshot guardados (sin motor); si no, corre calculate() con el body y arma el quote-like en memoria. Errores del motor = los de /calculate (400). text/html; Cache-Control: no-store.',
+  })
+  async previewHtml(@Body() dto: PreviewQuoteDto, @Res() res: Response) {
+    const html = await this.quotesPdf.previewHtml(dto);
+    res.set({
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.send(html);
+  }
+
   @Get()
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
@@ -61,10 +82,18 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Persist a quote (creates vuelo in estado=COTIZADO con cotizacion v1). ADMIN o COORDINADOR.',
+      'Persist a quote (creates vuelo in estado=COTIZADO con cotizacion v1). ADMIN o COORDINADOR. 201; con client_request_id repetido devuelve la cotización ya creada (200, sin duplicar).',
   })
-  create(@Body() dto: CreateQuoteDto, @CurrentUser() c: AuthenticatedUser) {
-    return this.quotes.create(dto, c.userId);
+  async create(
+    @Body() dto: CreateQuoteDto,
+    @CurrentUser() c: AuthenticatedUser,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const r = await this.quotes.create(dto, c.userId);
+    if ('idempotente' in r && r.idempotente === true) {
+      res.status(HttpStatus.OK);
+    }
+    return r;
   }
 
   @Get('rutas-sugeridas')
@@ -100,14 +129,19 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Revise quote (creates new version, increments cotizacion_version). Permitida mientras no se haya cobrado/facturado.',
+      'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO); 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión.',
   })
-  revise(
+  async revise(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ReviseQuoteDto,
     @CurrentUser() c: AuthenticatedUser,
+    @Res({ passthrough: true }) res: Response,
   ) {
-    return this.quotes.revise(id, dto, c.userId);
+    const r = await this.quotes.revise(id, dto, c.userId);
+    if ('idempotente' in r && r.idempotente === true) {
+      res.status(HttpStatus.OK);
+    }
+    return r;
   }
 
   @Post(':id/ajuste')
@@ -142,6 +176,21 @@ export class QuotesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.quotes.setPdfVisibilidad(id, escalaId, dto, c.userId);
+  }
+
+  @Patch(':id/pdf-visibilidad')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Presentación PDF a nivel VUELO (D5, 8-sep-2026): notas del cliente y toggles pdf_mostrar_tarifa / pdf_mostrar_itinerario SIN crear versión ni notificar (presentación pura, como el ojito). Patch parcial; 400 con body vacío. Mismos roles que revise.',
+  })
+  pdfPresentacionVuelo(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: PdfPresentacionVueloDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotes.setPdfPresentacionVuelo(id, dto, c.userId);
   }
 
   @Post(':id/confirm')

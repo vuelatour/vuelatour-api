@@ -2,12 +2,12 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
-  IsBoolean,
   IsDate,
   IsIn,
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   MaxLength,
   Min,
   MinLength,
@@ -126,4 +126,18 @@ export class CreateQuoteDto extends CalculateQuoteDto {
   @IsString()
   @MaxLength(2000)
   notas_internas?: string;
+
+  /**
+   * Idempotencia (8-sep-2026, patrón gasto/cobro): llave única por intento de
+   * "Guardar". Repetir la misma llave devuelve la cotización YA creada
+   * (200, sin duplicar); vive en `vuelo.client_request_id` (índice único
+   * parcial `uq_vuelo_client_request`).
+   */
+  @ApiPropertyOptional({
+    description:
+      'Llave de idempotencia (uuid) generada por el panel por intento de guardar: repetirla devuelve la cotización ya creada (200) en vez de crear otra.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }

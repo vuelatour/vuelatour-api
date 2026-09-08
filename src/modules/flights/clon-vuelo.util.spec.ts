@@ -22,6 +22,7 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     updated_at: '2026-09-02T00:00:00Z',
     notas_internas: 'nota previa',
     calculo_snapshot: { meta: { grupo: { id: 'g-1', posicion: 3 } } },
+    client_request_id: '11111111-2222-4333-8444-555555555555',
   };
 
   it('conserva la liga de GRUPO (grupo_id / grupo_posicion / grupo_pax) y el snapshot', () => {
@@ -53,6 +54,16 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     for (const k of ['grupo_id', 'grupo_posicion', 'grupo_pax']) {
       expect(CAMPOS_NO_CLONABLES).not.toContain(k);
     }
+  });
+
+  it('no clona la llave de idempotencia del alta (uq_vuelo_client_request reventaría el INSERT)', () => {
+    const c = payloadClonVuelo(original, {
+      aeronaveId: 'av-nueva',
+      userId: 'u-1',
+      matricula: 'N4142R',
+    });
+    expect(c).not.toHaveProperty('client_request_id');
+    expect(CAMPOS_NO_CLONABLES).toContain('client_request_id');
   });
 });
 
