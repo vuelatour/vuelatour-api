@@ -9,32 +9,34 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   armarCotizacionInternaPayload,
+  type AeropuertoInternoRow,
   type CobroInternoRow,
   type EscalaInternaRow,
-  type FichaAvionInterna,
 } from './quotes-pdf-interno.util';
 import { QuotesService } from './quotes.service';
 
-/** Escala con tacos, tripulación y cancelación (lo que el interno pinta por tramo). */
+/**
+ * Escala mínima: SOLO lo que fecha cada tramo cotizado (plan / fecha de
+ * pared del PDF) y lo que identifica el par para el cruce con el snapshot.
+ * Nada operativo (tacos, tripulación): eso vive en el reporte del vuelo.
+ */
 const ESCALA_INTERNA_COLS =
-  'id, orden, origen_iata, destino_iata, aeronave_id, piloto_id, copiloto_id, pasajeros, es_ferry, es_sobrevuelo, solo_operativa, requiere_pernocta, pernocta_costo_usd, fecha_salida_plan, taco_salida, taco_llegada, taco_salida_origen, taco_llegada_origen, hora_salida, hora_llegada, revision_requerida, cancelada_at, cancelada_motivo';
-
-const FACTURA_INTERNA_COLS =
-  'id, serie, folio, uuid_fiscal, estado, total, moneda, fecha_timbrado, facturado_a_nombre, cancelada_at, created_at';
+  'id, orden, origen_iata, destino_iata, fecha_salida_plan, pdf_fecha, solo_operativa, cancelada_at';
 
 /**
- * PDF «Cotización interna» (8-sep-2026): hermano de QuotesPdfService para
- * la OFICINA — una hoja, sin fotos, con la cocina completa (comisión del
- * vendedor, horas cotizadas vs tacos, cobros con comisión bancaria y neto,
- * gastos, CFDI). NUNCA se manda al cliente.
+ * PDF «Cotización interna» v2 (8-sep-2026): hermano de QuotesPdfService para
+ * la OFICINA — una hoja, sin fotos, SOLO lo de la cotización (tabla de
+ * tramos con nombre de ciudad, desglose canónico, TUAS cobradas, comisión
+ * del vendedor con su pago, cobros con comisión bancaria y neto). NUNCA se
+ * manda al cliente.
  *
  * Aquí solo se CARGAN los insumos (cada uno desde su fuente única:
- * `quotes.findById` → snapshot canónico + fichas cotizada/operativa;
- * `flights.listCobros` → cobros con sobre y conciliado; escalas vivas con
- * tacos; gastos con su TC; facturas; nombres) y se delega el armado al
- * helper PURO `armarCotizacionInternaPayload`. Ningún query fallido degrada
- * a "sin datos": un interno con cero cobros de un vuelo pagado sería una
- * mentira numérica.
+ * `quotes.findById` → snapshot canónico + ficha cotizada; `flights.listCobros`
+ * → cobros con sobre y conciliado; escalas mínimas para fechar tramos;
+ * catálogo de aeropuertos para el nombre de ciudad; nombres) y se delega el
+ * armado al helper PURO `armarCotizacionInternaPayload`. Ningún query fallido
+ * degrada a "sin datos": un interno con cero cobros de un vuelo pagado sería
+ * una mentira numérica.
  */
 @Injectable()
 export class QuotesPdfInternoService {
@@ -60,54 +62,36 @@ export class QuotesPdfInternoService {
     user: AuthenticatedUser | null,
   ): Promise<CotizacionInternaPdfRequest> {
     // findById: VUELO_COLS + escalas plan + particion_ingreso +
-    // participacion_aviones + aeronave_cotizada/operativa (404 si no existe).
+    // aeronave_cotizada/operativa (404 si no existe).
     const quote = (await this.quotes.findById(quoteId)) as Record<
       string,
       unknown
     >;
     const sb = this.supabase.service;
 
-    const [
-      escalasRes,
-      cobros,
-      gastosRes,
-      facturasRes,
-      clienteRes,
-      creadoRes,
-      apoyos,
-    ] = await Promise.all([
-      sb
-        .from('escala')
-        .select(ESCALA_INTERNA_COLS)
-        .eq('vuelo_id', quoteId)
-        .order('orden', { ascending: true }),
-      // Fuente única de cobros por vuelo: COBRO_COLS + sobre de grupo +
-      // conciliado (cobro-conciliado.util).
-      this.flights.listCobros(quoteId),
-      sb
-        .from('gasto')
-        .select('categoria, monto, moneda, tc_gasto')
-        .eq('vuelo_id', quoteId),
-      sb
-        .from('factura')
-        .select(FACTURA_INTERNA_COLS)
-        .eq('vuelo_id', quoteId)
-        .order('created_at', { ascending: true }),
-      quote.cliente_id
-        ? sb
-            .from('cliente')
-            .select('nombre, razon_social_default, rfc, es_broker')
-            .eq('id', quote.cliente_id as string)
-            .maybeSingle()
-        : Promise.resolve({ data: null, error: null }),
-      // created_by no viaja en VUELO_COLS: lectura mínima aparte.
-      sb.from('vuelo').select('created_by').eq('id', quoteId).maybeSingle(),
-      apoyosDeVuelo(sb, quoteId),
-    ]);
+    const [escalasRes, cobros, clienteRes, creadoRes, apoyos] =
+      await Promise.all([
+        sb
+          .from('escala')
+          .select(ESCALA_INTERNA_COLS)
+          .eq('vuelo_id', quoteId)
+          .order('orden', { ascending: true }),
+        // Fuente única de cobros por vuelo: COBRO_COLS + sobre de grupo +
+        // conciliado (cobro-conciliado.util).
+        this.flights.listCobros(quoteId),
+        quote.cliente_id
+          ? sb
+              .from('cliente')
+              .select('nombre, razon_social_default, rfc, es_broker')
+              .eq('id', quote.cliente_id as string)
+              .maybeSingle()
+          : Promise.resolve({ data: null, error: null }),
+        // created_by no viaja en VUELO_COLS: lectura mínima aparte.
+        sb.from('vuelo').select('created_by').eq('id', quoteId).maybeSingle(),
+        apoyosDeVuelo(sb, quoteId),
+      ]);
     for (const [nombre, res] of [
       ['escalas', escalasRes],
-      ['gastos', gastosRes],
-      ['facturas', facturasRes],
       ['cliente', clienteRes],
       ['vuelo', creadoRes],
     ] as const) {
@@ -123,70 +107,81 @@ export class QuotesPdfInternoService {
         ? creadoRes.data.created_by
         : null;
 
-    // Nombres (piloto/copiloto del vuelo y por tramo, apoyos, quién cotizó,
-    // quién registró cada cobro) en UNA consulta.
+    // Nombres (piloto/copiloto del vuelo, apoyos, quién cotizó, quién
+    // registró cada cobro) en UNA consulta.
     const userIds = [
       quote.piloto_id,
       quote.copiloto_id,
       creadoPorId,
-      ...escalas.flatMap((e) => [e.piloto_id, e.copiloto_id]),
       ...apoyos.map((a) => a.usuario_id),
       ...(cobros as CobroInternoRow[]).map((c) => c.registrado_por),
     ].filter((x): x is string => typeof x === 'string' && x.length > 0);
-    const nombrePorId = new Map<string, string>();
-    if (userIds.length > 0) {
-      const { data: us, error } = await sb
-        .from('usuario')
-        .select('id, nombre')
-        .in('id', [...new Set(userIds)]);
-      if (error) {
-        throw new Error(
-          `Cotización interna ${quoteId}: fallo al leer usuarios: ${error.message}`,
-        );
-      }
-      for (const u of us ?? []) {
-        nombrePorId.set(u.id as string, u.nombre as string);
-      }
-    }
 
-    // Fichas de avión (tramos con herencia, cotizado, operativo,
-    // participación multi-avión) en UNA consulta.
-    const snapAeronave = (
-      quote.calculo_snapshot as { aeronave?: { id?: unknown } } | null
-    )?.aeronave;
-    const aeronaveIds = [
-      quote.aeronave_id,
-      typeof snapAeronave?.id === 'string' ? snapAeronave.id : null,
-      ...escalas.map((e) => e.aeronave_id),
-    ].filter((x): x is string => typeof x === 'string' && x.length > 0);
-    const aeronavePorId = new Map<string, FichaAvionInterna>();
-    if (aeronaveIds.length > 0) {
-      const { data: avs, error } = await sb
-        .from('aeronave')
-        .select('id, matricula, modelo')
-        .in('id', [...new Set(aeronaveIds)]);
-      if (error) {
-        throw new Error(
-          `Cotización interna ${quoteId}: fallo al leer aeronaves: ${error.message}`,
-        );
-      }
-      for (const a of avs ?? []) {
-        aeronavePorId.set(a.id as string, {
-          matricula: (a.matricula as string | null) ?? null,
-          modelo: (a.modelo as string | null) ?? null,
-        });
-      }
+    // Aeropuertos del itinerario COTIZADO (snapshot.tramos) + escalas +
+    // origen/destino del vuelo: nombre de ciudad para la tabla de tramos.
+    const snapTramos = (
+      quote.calculo_snapshot as {
+        tramos?: Array<{ origen?: unknown; destino?: unknown }> | null;
+      } | null
+    )?.tramos;
+    const iatas = [
+      ...(Array.isArray(snapTramos)
+        ? snapTramos.flatMap((t) => [t?.origen, t?.destino])
+        : []),
+      ...escalas.flatMap((e) => [e.origen_iata, e.destino_iata]),
+      quote.origen_iata,
+      quote.destino_iata,
+    ]
+      .filter((x): x is string => typeof x === 'string' && x.trim().length > 0)
+      .map((x) => x.trim().toUpperCase());
+
+    const [usuariosRes, aeropuertosRes] = await Promise.all([
+      userIds.length > 0
+        ? sb
+            .from('usuario')
+            .select('id, nombre')
+            .in('id', [...new Set(userIds)])
+        : Promise.resolve({ data: [], error: null }),
+      iatas.length > 0
+        ? sb
+            .from('aeropuerto')
+            .select('iata, nombre, ciudad')
+            .in('iata', [...new Set(iatas)])
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (usuariosRes.error) {
+      throw new Error(
+        `Cotización interna ${quoteId}: fallo al leer usuarios: ${usuariosRes.error.message}`,
+      );
+    }
+    if (aeropuertosRes.error) {
+      throw new Error(
+        `Cotización interna ${quoteId}: fallo al leer aeropuertos: ${aeropuertosRes.error.message}`,
+      );
+    }
+    const nombrePorId = new Map<string, string>();
+    for (const u of usuariosRes.data ?? []) {
+      nombrePorId.set(u.id as string, u.nombre as string);
+    }
+    const aeropuertoPorIata = new Map<string, AeropuertoInternoRow>();
+    for (const a of aeropuertosRes.data ?? []) {
+      const iata =
+        typeof a.iata === 'string' ? a.iata.trim().toUpperCase() : '';
+      if (!iata) continue;
+      aeropuertoPorIata.set(iata, {
+        iata,
+        nombre: (a.nombre as string | null) ?? null,
+        ciudad: (a.ciudad as string | null) ?? null,
+      });
     }
 
     return armarCotizacionInternaPayload({
       quote,
       escalas,
       cobros,
-      gastos: gastosRes.data ?? [],
-      facturas: facturasRes.data ?? [],
       cliente: clienteRes.data ?? null,
       nombrePorId,
-      aeronavePorId,
+      aeropuertoPorIata,
       apoyos,
       creadoPorId,
       generadoPor: user?.nombre ?? null,

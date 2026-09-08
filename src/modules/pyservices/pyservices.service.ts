@@ -1149,63 +1149,79 @@ export interface CotizacionGrupoPdfRequest {
   condiciones: string | null;
 }
 
-// ===== PDF «Cotización interna» (8-sep-2026) — UNA hoja para la oficina =====
-// NUNCA se manda al cliente. Todo lo que viaja aquí ya está calculado por
-// las fuentes únicas del API (desglose canónico v1.3 del snapshot,
-// cobrosEnUsd, particionIngresoVuelo/pagoVendedorUsd, participación por
-// avión, horas de taco por escala); pyservices SOLO pinta — las
-// "operaciones" (h × tarifa, pax × unitario, cantidad × unitario, % comisión
-// → neto) se mandan como campos para que la plantilla las escriba sin
-// recalcular. Nombres exactos del pydantic `CotizacionInternaPdfRequest`
-// (aditivo, extra="ignore").
+// ===== PDF «Cotización interna» v2 (8-sep-2026) — UNA hoja para la oficina =====
+// NUNCA se manda al cliente. Feedback de administración (8-sep, con su formato
+// de siempre): SOLO lo de la COTIZACIÓN — fecha protagonista = día del vuelo,
+// tabla de tramos desglosados (RUTA con nombre de ciudad · FECHA · MILLAS ·
+// TIEMPO DE VUELO con calzos · COSTO POR HORA · TOTAL POR TRAMO), desglose
+// canónico, TUAS solo las COBRADAS, cobros compactos, notas internas. Nada
+// de operación (tacos, horas voladas, avión operativo, piloto del tramo,
+// traslados) ni partición/gastos/utilidad/CFDI: eso vive en el reporte del
+// vuelo. Todo lo que viaja ya está calculado por las fuentes únicas del API
+// (desglose canónico v1.3 del snapshot, cobrosEnUsd, pagoVendedorUsd);
+// pyservices SOLO pinta. Nombres exactos del pydantic
+// `CotizacionInternaPdfRequest` (aditivo, extra="ignore").
 
-/** Tramo del itinerario (escala VIVA — canceladas incluidas y marcadas; sin filtro pdf_oculto). */
-export interface CotizacionInternaTramoPdf {
-  /** Numeración VISIBLE 1..N (idx + 1). */
+/**
+ * Tramo COTIZADO (`snapshot.tramos[]`, ruta comercial congelada — ocultos
+ * incluidos, sin tramos operativos ni cancelaciones): una fila de la tabla
+ * de administración. `tiempo_hr` es el tiempo COBRABLE del tramo e INCLUYE
+ * el calzo (0.15 h por aterrizaje) tal cual lo congeló el motor.
+ */
+export interface CotizacionInternaTramoCotizadoPdf {
+  /** Numeración 1..N. */
   orden: number;
-  /** `escala.orden` real (≥ 100 = tramo operativo agregado a mano). */
-  orden_real: number;
-  origen: string;
-  destino: string;
-  /** `escala.pasajeros` (0 en ferry); null sin dato. */
-  pasajeros: number | null;
-  /** `escala.fecha_salida_plan` ISO (pintar en hora Cancún). */
-  fecha_plan: string | null;
-  /** Horas REALES de salida/llegada (ISO) si las hay. */
-  hora_salida: string | null;
-  hora_llegada: string | null;
-  /** Avión del tramo CON HERENCIA (`escala.aeronave_id ?? vuelo.aeronave_id`); externo → matrícula ajena. */
-  matricula: string | null;
-  /** Piloto EFECTIVO del tramo (herencia del vuelo), nombre. */
-  piloto: string | null;
-  taco_salida: number | null;
-  taco_llegada: number | null;
-  /** PILOTO | IA | DEDUCIDO | OFICINA | null. */
-  taco_salida_origen: string | null;
-  taco_llegada_origen: string | null;
-  /** `taco_llegada − taco_salida` a 1 decimal (patrón del reporte por vuelo); null sin ambos. */
-  horas_taco: number | null;
-  /** `snapshot.tramos[orden == escala.orden].tiempo_hr` (mismo origen/destino); null sin cruce. */
-  horas_cotizadas: number | null;
+  /** "Cancun-Merida": ciudad del catálogo de aeropuertos (fallback nombre, fallback IATA). */
+  ruta: string;
+  origen_iata: string;
+  destino_iata: string;
+  origen_nombre: string;
+  destino_nombre: string;
+  /** Día del tramo YYYY-MM-DD (pared Cancún): `escala.fecha_salida_plan` → `escala.pdf_fecha` → fecha del tramo anterior → `vuelo.fecha_vuelo`. */
+  fecha: string | null;
+  /** Millas náuticas del tramo (`snapshot.tramos[].millas`). */
+  millas: number | null;
+  /** Horas cobrables del tramo CON calzos (decimal, 4 dec.). */
+  tiempo_hr: number;
+  /** Mismo tiempo como "hh:mm" (1.3 → "01:18"). */
+  tiempo_hhmm: string;
+  /** Tarifa USD/hr aplicada al tramo: la del snapshot por tramo si algún día viaja, si no la ÚNICA del vuelo (`snapshot.tarifa.usd_por_hora`). */
+  tarifa_hora_usd: number | null;
+  /** Costo del tramo: `snapshot.tramos[].total_usd` si existe; si no `round2(tiempo_hr × tarifa)` (único cálculo nuevo, en el API). */
+  total_usd: number;
+  /** Pax del tramo (0 en ferry). */
+  pax: number | null;
   es_ferry: boolean;
-  solo_operativa: boolean;
-  es_sobrevuelo: boolean;
-  requiere_pernocta: boolean;
-  /** `escala.pernocta_costo_usd`. */
+  /** `requiere_pernocta` del tramo. */
+  pernocta: boolean;
   pernocta_usd: number;
-  cancelado: boolean;
-  cancelada_motivo: string | null;
-  /** Tramo en amarillo (revisión de tacómetro pendiente). */
-  revision_requerida: boolean;
+  /** TUAS prorrateados al tramo por el motor (informativo; la línea canónica es por aeropuerto). */
+  tuas_usd: number;
+  /** true = fila ÚNICA de respaldo (snapshot anterior al desglose por tramo o cotización sin snapshot). */
+  consolidado: boolean;
+}
+
+/** TUA COBRADA (`snapshot.tuas.filas`: el motor ya excluye las exentas / $0). */
+export interface CotizacionInternaTuaCobradaPdf {
+  iata: string;
+  pax: number;
+  /** Monto por pax en moneda NATIVA. */
+  unitario: number;
+  /** 'USD' | 'MXN'. */
+  moneda: string;
+  /** pax × unitario en moneda nativa. */
+  total_nativo: number;
+  /** TC congelado con el que se convirtió (null en USD). */
+  tc_aplicado: number | null;
+  /** Igual a la línea TUAS del desglose canónico. */
+  total_usd: number;
 }
 
 /**
  * Línea del desglose canónico v1.3 (`snapshot.desglose`, orden canónico,
  * Σ monto_usd == total_usd exacto) ENRIQUECIDA con la operación que la
  * produjo. Claves: TIEMPO_VUELO, TUAS, EXTRA, COMISION_VENDEDOR, AJUSTE,
- * IVA, PERNOCTA. Los TUAS EXENTOS viajan como líneas sintéticas
- * (`exento: true`, monto 0) justo después de los TUAS cobrados: no alteran
- * la suma.
+ * IVA, PERNOCTA. Solo líneas reales: los TUAS exentos NO viajan.
  */
 export interface CotizacionInternaLineaPdf {
   clave: string;
@@ -1223,7 +1239,6 @@ export interface CotizacionInternaLineaPdf {
   tc_aplicado?: number | null;
   /** EXTRA: grava IVA o no. */
   aplica_iva?: boolean;
-  exento: boolean;
 }
 
 /** Un cobro de `cobro_vuelo` (parte de sobre incluida) con su liga bancaria. */
@@ -1260,26 +1275,6 @@ export interface CotizacionInternaCobroPdf {
   registrado_por: string | null;
 }
 
-export interface CotizacionInternaGastoCategoriaPdf {
-  categoria: string;
-  /** `etiquetaCategoriaGasto` (fuente única de etiquetas). */
-  etiqueta: string;
-  total_usd: number;
-  n: number;
-}
-
-export interface CotizacionInternaFacturaPdf {
-  serie: string | null;
-  folio: string | null;
-  uuid_fiscal: string | null;
-  estado: string | null;
-  total: number | null;
-  moneda: string | null;
-  fecha_timbrado: string | null;
-  facturado_a_nombre: string | null;
-  cancelada: boolean;
-}
-
 export interface CotizacionInternaPdfRequest {
   // ---- (1) Cabecera ----
   folio: string;
@@ -1292,7 +1287,11 @@ export interface CotizacionInternaPdfRequest {
   razon_social: string | null;
   cliente_rfc: string | null;
   es_broker: boolean;
-  /** Fecha de cotización: `fecha_solicitud` (fallback `created_at`), ISO. */
+  /** FECHA PROTAGONISTA: día del vuelo YYYY-MM-DD (pared Cancún de `vuelo.fecha_vuelo`). */
+  fecha_vuelo: string | null;
+  /** Último día del viaje YYYY-MM-DD (`vuelo.fecha_fin`) SOLO si es multi-día y difiere; null si no. */
+  fecha_vuelo_fin: string | null;
+  /** Fecha de cotización (`fecha_solicitud`, fallback `created_at`), ISO — se pinta en pequeño. */
   fecha: string | null;
   fecha_confirmacion: string | null;
   /** 'PUBLICO' | 'BROKER' | null y su etiqueta. */
@@ -1310,10 +1309,9 @@ export interface CotizacionInternaPdfRequest {
   vendedor: string | null;
   /** Usuario que creó la cotización (`vuelo.created_by` → nombre). */
   cotizado_por: string | null;
+  /** Avión COTIZADO (snapshot); sin snapshot cae al avión del vuelo. Matrícula SIEMPRE visible aquí. */
   aeronave_cotizada_modelo: string | null;
   aeronave_cotizada_matricula: string | null;
-  /** "Modelo · Matrícula" del avión OPERATIVO SOLO si difiere del cotizado; null si es el mismo. */
-  aeronave_operativa: string | null;
   /** Vuelo cubierto por externo: "Modelo · Matrícula" (+ operador). */
   avion_externo: string | null;
   operador_externo: string | null;
@@ -1321,10 +1319,8 @@ export interface CotizacionInternaPdfRequest {
   copiloto: string | null;
   /** Apoyos de nivel vuelo (nombres). */
   apoyos: string[];
-  fecha_traslado_inicial: string | null;
-  fecha_traslado_final: string | null;
   pasajeros: number;
-  /** "CUN → HOL → CUN" de los tramos vivos no cancelados (puntosRutaVisible). */
+  /** "CUN → HOL → CUN" de los tramos COTIZADOS (puntosRutaVisible; ocultos incluidos). */
   ruta: string | null;
   itinerario_operativo: boolean;
   cotizacion_abierta: boolean;
@@ -1336,26 +1332,31 @@ export interface CotizacionInternaPdfRequest {
   grupo_total_aviones: number | null;
   combinado_con_folio: string | null;
 
-  // ---- (2) Itinerario y horas ----
-  tramos: CotizacionInternaTramoPdf[];
+  // ---- (2) Tramos cotizados y horas ----
+  tramos_cotizados: CotizacionInternaTramoCotizadoPdf[];
+  /** Σ `tiempo_hr` de la tabla (4 dec.) y su "hh:mm". */
+  tramos_tiempo_total_hr: number;
+  tramos_tiempo_total_hhmm: string;
+  /** Σ `total_usd` de la tabla (fila TOTAL). */
+  tramos_total_usd: number;
+  /** Línea TIEMPO_VUELO canónica − Σ tramos (0 si cuadra). Σ tramos + ajuste == servicio aéreo del desglose. */
+  tramos_ajuste_usd: number;
+  /** "Hora mínima 1.0 h" · "Sobrevuelo 0.5 h" · "Horas pactadas 2 h" · "Redondeo" · null cuando el ajuste es 0. */
+  tramos_ajuste_motivo: string | null;
   /** `snapshot.tiempos`: vuelo + calzos + sobrevuelo (tiempo real cotizado). */
   horas_cotizadas_hr: number | null;
   vuelo_hr: number | null;
   calzos_hr: number | null;
   sobrevuelo_hr: number | null;
-  /** Σ `horas_taco` de tramos no cancelados con dato; null sin tacos. */
-  horas_voladas_hr: number | null;
-  /** voladas − cotizadas (1 decimal); null si falta alguna. Solo se pinta. */
-  delta_horas_hr: number | null;
   /** Horas COBRADAS (`snapshot.tiempos.cobrable_hr` ?? `vuelo.tiempo_cobrable_hr`). */
   tiempo_cobrable_hr: number | null;
   hora_minima_aplicada: boolean;
   cobrable_override: boolean;
 
-  // ---- (3) Desglose interno completo ----
+  // ---- (3) Desglose interno ----
   lineas: CotizacionInternaLineaPdf[];
-  /** IATAs sin TUA (exentos / $0). */
-  tuas_exentos: string[];
+  /** Solo las TUAS que SE COBRARON (pax × unitario nativo → USD). Las exentas no viajan. */
+  tuas_cobradas: CotizacionInternaTuaCobradaPdf[];
   /** Servicio aéreo = horas cobrables × tarifa (`snapshot.totales.subtotal_vuelo_usd`). */
   subtotal_vuelo_usd: number;
   tuas_usd: number;
@@ -1370,8 +1371,6 @@ export interface CotizacionInternaPdfRequest {
   iva_comision_vendedor_usd: number;
   /** Pago al vendedor = comisión + su IVA (`pagoVendedorUsd`); 0 en CANCELADO con comisión; null sin comisión. */
   pago_vendedor_usd: number | null;
-  /** total − pago al vendedor; null sin comisión. */
-  neto_vuelatour_usd: number | null;
   /** Línea AJUSTE tal cual (negativo = descuento; positivo = redondeo/pactado). */
   ajuste_final_usd: number;
   /** Descuento base capturado (positivo) y redondeo automático a $10 (`snapshot.meta`). */
@@ -1392,16 +1391,6 @@ export interface CotizacionInternaPdfRequest {
   mxn_nativos: number | null;
   version_motor: string | null;
   calculado_at: string | null;
-  /** Partición del ingreso (`particionIngresoVuelo`): venta del AVIÓN vs ingreso VuelaTour; suman total_usd. */
-  venta_avion_usd: number | null;
-  otros_ingresos_vuelatour_usd: number | null;
-  iva_avion_usd: number | null;
-  iva_vuelatour_usd: number | null;
-  /** 'desglose' | 'columnas' | 'sin_precio'. */
-  particion_fuente: string;
-  particion_inconsistente: boolean;
-  /** Multi-avión: reparto de la venta del avión (Σ venta_usd == venta_avion_usd). Vacío con un solo avión. */
-  participacion_aviones: ReporteVueloParticipacionPayload[];
 
   // ---- (4) Cobros ----
   cobros: CotizacionInternaCobroPdf[];
@@ -1420,28 +1409,11 @@ export interface CotizacionInternaPdfRequest {
   semaforo_cobro_key: string;
   semaforo_cobro_label: string;
 
-  // ---- (5) Gastos ----
-  gastos_por_categoria: CotizacionInternaGastoCategoriaPdf[];
-  /** Σ gastos del vuelo en USD (+ costo del operador externo); null sin gastos. */
-  gastos_total_usd: number | null;
-  gastos_sin_tc_count: number;
-  gastos_sin_tc_mxn: number;
-  costo_externo_usd: number | null;
-  /** REFERENCIA: (cobrado si > 0, si no total) − gastos − costo externo; null sin gastos. */
-  utilidad_bruta_usd: number | null;
-  utilidad_base: 'cobrado' | 'total';
-
-  // ---- (6) Notas y facturación ----
+  // ---- (5) Notas ----
   notas_cliente: string | null;
   notas_internas: string | null;
-  facturado: boolean;
-  facturas: CotizacionInternaFacturaPdf[];
-  /** Resumen CFDI: estado de la factura vigente (o "Facturado" por bandera) | null. */
-  cfdi_estatus: string | null;
-  /** "A-123" | UUID | null. */
-  cfdi_folio: string | null;
 
-  // ---- (7) Pie ----
+  // ---- (6) Pie ----
   /** ISO del instante de generación (pyservices lo pinta en hora Cancún). */
   generado: string;
   /** "YYYY-MM-DD HH:mm" ya en hora Cancún (`fechaHoraCancun`). */

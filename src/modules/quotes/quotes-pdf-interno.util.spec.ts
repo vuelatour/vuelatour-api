@@ -1,20 +1,25 @@
 import {
   armarCotizacionInternaPayload,
-  horasTacoDe,
+  horasAHhmm,
+  nombreCortoAeropuerto,
+  type AeropuertoInternoRow,
   type CobroInternoRow,
   type CotizacionInternaInsumos,
   type EscalaInternaRow,
 } from './quotes-pdf-interno.util';
 
 /**
- * Armador del PDF «Cotización interna» con el caso de la foto del cliente
- * (8-sep-2026): Seneca N4142R, 4 tramos de 0.4 h de tacómetro (= 1.6 h),
+ * Armador del PDF «Cotización interna» v2 (feedback de administración
+ * 8-sep-2026): SOLO lo de la cotización. Caso base = foto del cliente:
+ * Seneca N4142R, 4 tramos CUN↔CZM de 0.4 h cotizadas (con calzo) × $1,000
+ * = $400 c/u (Σ $1,600 == TIEMPO_VUELO), TUA CZM cobrada ($80) y CUN exenta,
  * comisión del vendedor "Saab" $280, cobro Paywise en MXN con comisión
  * bancaria 8.857 % = $3,236.36 → neto $33,303.64. Nada se recalcula: el
- * armador solo LEE el snapshot y las fuentes únicas.
+ * armador solo LEE el snapshot y las fuentes únicas; el único número nuevo es
+ * el total por tramo (tiempo × tarifa) y su ajuste explícito contra la línea
+ * canónica.
  */
 const SENECA = 'aaaaaaaa-0000-0000-0000-00000000a142';
-const KODIAK = 'aaaaaaaa-0000-0000-0000-00000000k621';
 const PILOTO = 'uuuuuuuu-0000-0000-0000-000000000001';
 const VENDEDOR_USR = 'uuuuuuuu-0000-0000-0000-000000000002';
 const ADMIN = 'uuuuuuuu-0000-0000-0000-000000000003';
@@ -30,6 +35,15 @@ function snapshot(
       modelo: 'Seneca V',
       pais_registro: 'US',
       velocidad_crucero_kts: 170,
+    },
+    ruta: {
+      ruta_id: null,
+      origen_iata: 'CUN',
+      destino_iata: 'CUN',
+      millas_nauticas_base: 240,
+      millas_nauticas_totales: 240,
+      es_redondo_auto: false,
+      num_aterrizajes: 4,
     },
     tiempos: {
       vuelo_hr: 1.0,
@@ -86,54 +100,10 @@ function snapshot(
       total_mxn_nativo: 0,
     },
     tramos: [
-      {
-        orden: 1,
-        origen: 'CUN',
-        destino: 'CZM',
-        millas: 60,
-        pasajeros: 4,
-        es_ferry: false,
-        tiempo_hr: 0.4,
-        tuas_usd: 0,
-        requiere_pernocta: false,
-        pernocta_usd: 0,
-      },
-      {
-        orden: 2,
-        origen: 'CZM',
-        destino: 'CUN',
-        millas: 60,
-        pasajeros: 4,
-        es_ferry: false,
-        tiempo_hr: 0.4,
-        tuas_usd: 80,
-        requiere_pernocta: false,
-        pernocta_usd: 0,
-      },
-      {
-        orden: 3,
-        origen: 'CUN',
-        destino: 'CZM',
-        millas: 60,
-        pasajeros: 4,
-        es_ferry: false,
-        tiempo_hr: 0.4,
-        tuas_usd: 0,
-        requiere_pernocta: false,
-        pernocta_usd: 0,
-      },
-      {
-        orden: 4,
-        origen: 'CZM',
-        destino: 'CUN',
-        millas: 60,
-        pasajeros: 4,
-        es_ferry: false,
-        tiempo_hr: 0.4,
-        tuas_usd: 0,
-        requiere_pernocta: false,
-        pernocta_usd: 0,
-      },
+      tramoSnap(1, 'CUN', 'CZM'),
+      tramoSnap(2, 'CZM', 'CUN', { tuas_usd: 80 }),
+      tramoSnap(3, 'CUN', 'CZM'),
+      tramoSnap(4, 'CZM', 'CUN'),
     ],
     iva: {
       aplica_por_metodo_pago: true,
@@ -199,6 +169,110 @@ function snapshot(
   };
 }
 
+/** Tramo del snapshot (millas 60 @ 170 kts + calzo 0.15 → 0.4 h redondeado como el motor). */
+function tramoSnap(
+  orden: number,
+  origen: string,
+  destino: string,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    orden,
+    origen,
+    destino,
+    millas: 60,
+    pasajeros: 4,
+    es_ferry: false,
+    tiempo_hr: 0.4,
+    tuas_usd: 0,
+    requiere_pernocta: false,
+    pernocta_usd: 0,
+    tipo_parada: null,
+    servicio_notas: null,
+    pdf_oculto: false,
+    ...extra,
+  };
+}
+
+/**
+ * Snapshot "solo servicio aéreo" (sin TUAS/extras/comisión/IVA) para probar
+ * la conciliación tramos ↔ TIEMPO_VUELO con distintos tiempos.
+ */
+function snapshotSoloTiempo(args: {
+  tramos: Array<Record<string, unknown>>;
+  tiempos: Record<string, unknown>;
+  tarifa?: number;
+  tiempoVueloUsd: number;
+  meta?: Record<string, unknown>;
+}): Record<string, unknown> {
+  const tarifa = args.tarifa ?? 1000;
+  return snapshot({
+    tramos: args.tramos,
+    tiempos: {
+      cobrable_proviene_de_override: false,
+      sobrevuelo_hr: 0,
+      minimo_hora_aplicado: false,
+      ...args.tiempos,
+    },
+    tarifa: {
+      tipo: 'PUBLICO',
+      usd_por_hora: tarifa,
+      proviene_de_override: false,
+      preferencial_cliente: false,
+    },
+    tuas: { pasajeros: 4, aeropuertos: [], filas: [], total_usd: 0 },
+    extras: [],
+    iva: { porcentaje: 0, base_usd: 0, monto_usd: 0, nota: null },
+    desglose: [
+      {
+        clave: 'TIEMPO_VUELO',
+        concepto: 'Tiempo de vuelo',
+        monto_usd: args.tiempoVueloUsd,
+      },
+    ],
+    totales: {
+      subtotal_vuelo_usd: args.tiempoVueloUsd,
+      tuas_total_usd: 0,
+      viaticos_pernocta_usd: 0,
+      extras_total_usd: 0,
+      ajuste_final_usd: 0,
+      iva_usd: 0,
+      total_usd: args.tiempoVueloUsd,
+      total_mxn: null,
+    },
+    meta: {
+      version_motor: '1.3.1',
+      comision_vendedor_usd: 0,
+      comision_vendedor_nombre: null,
+      comision_vendedor_modo: null,
+      ...(args.meta ?? {}),
+    },
+  });
+}
+
+/** Columnas espejo del vuelo para un snapshot "solo servicio aéreo". */
+function quoteSoloTiempo(
+  snap: Record<string, unknown>,
+  tiempoVueloUsd: number,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return quote({
+    calculo_snapshot: snap,
+    subtotal_vuelo_usd: tiempoVueloUsd,
+    tuas_usd: 0,
+    extras_total_usd: 0,
+    comision_vendedor_usd: 0,
+    comision_vendedor_nombre: null,
+    comision_vendedor_modo: null,
+    iva_usd: 0,
+    iva_pct: 0,
+    monto_total_usd: tiempoVueloUsd,
+    monto_total_mxn: null,
+    extras: [],
+    ...extra,
+  });
+}
+
 /** Fila de vuelo como la devuelve quotes.findById (VUELO_COLS + fichas). */
 function quote(extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -208,7 +282,7 @@ function quote(extra: Record<string, unknown> = {}): Record<string, unknown> {
     aeronave_id: SENECA,
     piloto_id: PILOTO,
     copiloto_id: null,
-    tipo: 'REDONDO',
+    tipo: 'MULTIESCALA',
     estado: 'COMPLETADO',
     es_externo: false,
     cotizacion_version: 3,
@@ -248,8 +322,10 @@ function quote(extra: Record<string, unknown> = {}): Record<string, unknown> {
       },
     ],
     fecha_solicitud: '2026-08-28T16:00:00.000Z',
+    // 09:00 Cancún del 3-sep.
     fecha_vuelo: '2026-09-03T14:00:00.000Z',
     fecha_traslado_final: '2026-09-03T20:00:00.000Z',
+    fecha_fin: null,
     fecha_confirmacion: '2026-08-29T10:00:00.000Z',
     facturado: false,
     cobrado: false,
@@ -267,6 +343,7 @@ function quote(extra: Record<string, unknown> = {}): Record<string, unknown> {
   };
 }
 
+/** Escala mínima (solo lo que fecha el tramo): plan a las 11/12/13/14 Z del 3-sep = madrugada/mañana Cancún. */
 function escala(
   orden: number,
   origen: string,
@@ -278,56 +355,20 @@ function escala(
     orden,
     origen_iata: origen,
     destino_iata: destino,
-    aeronave_id: null,
-    piloto_id: null,
-    copiloto_id: null,
-    pasajeros: 4,
-    es_ferry: false,
-    es_sobrevuelo: false,
-    solo_operativa: false,
-    requiere_pernocta: false,
-    pernocta_costo_usd: 0,
     fecha_salida_plan: `2026-09-03T1${orden}:00:00.000Z`,
-    taco_salida: null,
-    taco_llegada: null,
-    taco_salida_origen: null,
-    taco_llegada_origen: null,
-    hora_salida: null,
-    hora_llegada: null,
-    revision_requerida: false,
+    pdf_fecha: null,
+    solo_operativa: false,
     cancelada_at: null,
-    cancelada_motivo: null,
     ...extra,
   };
 }
 
-/** 4 tramos con 0.4 h de taco cada uno (foto del cliente). */
-function escalasConTacos(): EscalaInternaRow[] {
+function escalasPlan(): EscalaInternaRow[] {
   return [
-    escala(1, 'CUN', 'CZM', {
-      taco_salida: 1200.0,
-      taco_llegada: 1200.4,
-      taco_salida_origen: 'DEDUCIDO',
-      taco_llegada_origen: 'PILOTO',
-    }),
-    escala(2, 'CZM', 'CUN', {
-      taco_salida: 1200.4,
-      taco_llegada: 1200.8,
-      taco_salida_origen: 'DEDUCIDO',
-      taco_llegada_origen: 'PILOTO',
-    }),
-    escala(3, 'CUN', 'CZM', {
-      taco_salida: 1200.8,
-      taco_llegada: 1201.2,
-      taco_salida_origen: 'DEDUCIDO',
-      taco_llegada_origen: 'PILOTO',
-    }),
-    escala(4, 'CZM', 'CUN', {
-      taco_salida: 1201.2,
-      taco_llegada: 1201.6,
-      taco_salida_origen: 'DEDUCIDO',
-      taco_llegada_origen: 'PILOTO',
-    }),
+    escala(1, 'CUN', 'CZM'),
+    escala(2, 'CZM', 'CUN'),
+    escala(3, 'CUN', 'CZM'),
+    escala(4, 'CZM', 'CUN'),
   ];
 }
 
@@ -356,15 +397,53 @@ function cobroPaywise(extra: Partial<CobroInternoRow> = {}): CobroInternoRow {
   };
 }
 
+/** Catálogo `aeropuerto` como está en prod (comas, espacios sobrantes, minúsculas, nulos). */
+function aeropuertos(): Map<string, AeropuertoInternoRow> {
+  return new Map<string, AeropuertoInternoRow>([
+    [
+      'CUN',
+      {
+        iata: 'CUN',
+        nombre: 'Aeropuerto Internacional de Cancun',
+        ciudad: 'Cancun',
+      },
+    ],
+    [
+      'CZM',
+      {
+        iata: 'CZM',
+        nombre: 'Aeropuerto Internacional de Cozumel',
+        ciudad: 'Cozumel',
+      },
+    ],
+    [
+      'MID',
+      {
+        iata: 'MID',
+        nombre: 'Aeropuerto Internacional de Merida',
+        ciudad: 'Merida',
+      },
+    ],
+    [
+      'TGZ',
+      {
+        iata: 'TGZ',
+        nombre: 'TUXTLA Angel Albino Corzo',
+        ciudad: 'Tuxtla Gutierrez, Chiapas, MX',
+      },
+    ],
+    ['FCQ', { iata: 'FCQ', nombre: 'Felipe Carrillo Puerto', ciudad: null }],
+    ['CET', { iata: 'CET', nombre: 'TOLEDO', ciudad: 'cozumel' }],
+  ]);
+}
+
 function insumos(
   over: Partial<CotizacionInternaInsumos> = {},
 ): CotizacionInternaInsumos {
   return {
     quote: quote(),
-    escalas: escalasConTacos(),
+    escalas: escalasPlan(),
     cobros: [cobroPaywise()],
-    gastos: [],
-    facturas: [],
     cliente: {
       nombre: 'Juan Pérez',
       razon_social_default: 'Viajes Caribe SA de CV',
@@ -376,10 +455,7 @@ function insumos(
       [VENDEDOR_USR, 'Saab'],
       [ADMIN, 'Ana Admin'],
     ]),
-    aeronavePorId: new Map([
-      [SENECA, { matricula: 'N4142R', modelo: 'Seneca V' }],
-      [KODIAK, { matricula: 'N621TX', modelo: 'Kodiak 100' }],
-    ]),
+    aeropuertoPorIata: aeropuertos(),
     apoyos: [],
     creadoPorId: ADMIN,
     generadoPor: 'Ana Admin',
@@ -388,8 +464,36 @@ function insumos(
   };
 }
 
+/** Claves retiradas del contrato v2 (operación / partición / gastos / CFDI / traslados). */
+const CLAVES_RETIRADAS = [
+  'aeronave_operativa',
+  'fecha_traslado_inicial',
+  'fecha_traslado_final',
+  'tramos',
+  'horas_voladas_hr',
+  'delta_horas_hr',
+  'tuas_exentos',
+  'neto_vuelatour_usd',
+  'venta_avion_usd',
+  'otros_ingresos_vuelatour_usd',
+  'iva_avion_usd',
+  'iva_vuelatour_usd',
+  'particion_fuente',
+  'particion_inconsistente',
+  'participacion_aviones',
+  'gastos_por_categoria',
+  'gastos_total_usd',
+  'costo_externo_usd',
+  'utilidad_bruta_usd',
+  'utilidad_base',
+  'facturado',
+  'facturas',
+  'cfdi_estatus',
+  'cfdi_folio',
+];
+
 describe('armarCotizacionInternaPayload — cabecera y pie', () => {
-  it('cabecera completa: folio/versión/estado, cliente y razón social, avión cotizado con matrícula, piloto, TC, vendedor, quién cotizó', () => {
+  it('cabecera: fecha del VUELO protagonista (día Cancún), fecha de cotización en pequeño, cliente, avión cotizado con matrícula, piloto, TC, vendedor; nada operativo ni de partición viaja', () => {
     const p = armarCotizacionInternaPayload(insumos());
     expect(p.folio).toBe('1042');
     expect(p.version).toBe(3);
@@ -398,7 +502,11 @@ describe('armarCotizacionInternaPayload — cabecera y pie', () => {
     expect(p.cliente).toBe('Juan Pérez');
     expect(p.razon_social).toBe('Viajes Caribe SA de CV');
     expect(p.cliente_rfc).toBe('VCA010101AAA');
+    // 2026-09-03T14:00Z = 09:00 Cancún → mismo día.
+    expect(p.fecha_vuelo).toBe('2026-09-03');
+    expect(p.fecha_vuelo_fin).toBeNull();
     expect(p.fecha).toBe('2026-08-28T16:00:00.000Z');
+    expect(p.fecha_confirmacion).toBe('2026-08-29T10:00:00.000Z');
     expect(p.tarifa_tipo).toBe('PUBLICO');
     expect(p.tarifa_tipo_label).toBe('Público');
     expect(p.tarifa_hora_usd).toBe(1000);
@@ -409,12 +517,9 @@ describe('armarCotizacionInternaPayload — cabecera y pie', () => {
     // La matrícula SIEMPRE se ve en el interno (no aplica la regla VGV del cliente).
     expect(p.aeronave_cotizada_modelo).toBe('Seneca V');
     expect(p.aeronave_cotizada_matricula).toBe('N4142R');
-    // Mismo avión operativo que el cotizado → no se repite.
-    expect(p.aeronave_operativa).toBeNull();
     expect(p.piloto).toBe('Luis Ramírez');
     expect(p.copiloto).toBeNull();
-    expect(p.fecha_traslado_inicial).toBe('2026-09-03T14:00:00.000Z');
-    expect(p.fecha_traslado_final).toBe('2026-09-03T20:00:00.000Z');
+    expect(p.pasajeros).toBe(4);
     expect(p.ruta).toBe('CUN → CZM → CUN → CZM → CUN');
     expect(p.notas_cliente).toBe('Cliente pide agua fría');
     expect(p.notas_internas).toBe('Cobrado en Paywise el 3 sep');
@@ -422,24 +527,23 @@ describe('armarCotizacionInternaPayload — cabecera y pie', () => {
     expect(p.generado).toBe('2026-09-08T19:32:00.000Z');
     expect(p.generado_cancun).toBe('2026-09-08 14:32');
     expect(p.generado_por).toBe('Ana Admin');
+    for (const k of CLAVES_RETIRADAS) expect(p).not.toHaveProperty(k);
   });
 
-  it('avión operativo distinto del cotizado se anuncia; externo muestra el avión ajeno y no operativo', () => {
-    const otro = armarCotizacionInternaPayload(
-      insumos({
-        quote: quote({
-          aeronave_id: KODIAK,
-          aeronave_operativa: {
-            id: KODIAK,
-            matricula: 'N621TX',
-            modelo: 'Kodiak 100',
-          },
-        }),
-      }),
+  it('viaje multi-día: fecha_vuelo_fin solo cuando el último día (Cancún) difiere', () => {
+    const multi = armarCotizacionInternaPayload(
+      insumos({ quote: quote({ fecha_fin: '2026-09-05T20:00:00.000Z' }) }),
     );
-    expect(otro.aeronave_cotizada_matricula).toBe('N4142R');
-    expect(otro.aeronave_operativa).toBe('Kodiak 100 · N621TX');
+    expect(multi.fecha_vuelo).toBe('2026-09-03');
+    expect(multi.fecha_vuelo_fin).toBe('2026-09-05');
+    // 2026-09-04T03:00Z = 22:00 Cancún del 3-sep → mismo día, no se repite.
+    const mismoDia = armarCotizacionInternaPayload(
+      insumos({ quote: quote({ fecha_fin: '2026-09-04T03:00:00.000Z' }) }),
+    );
+    expect(mismoDia.fecha_vuelo_fin).toBeNull();
+  });
 
+  it('externo: avión ajeno y operador; el cotizado sigue siendo el del snapshot', () => {
     const externo = armarCotizacionInternaPayload(
       insumos({
         quote: quote({
@@ -455,21 +559,441 @@ describe('armarCotizacionInternaPayload — cabecera y pie', () => {
     expect(externo.es_externo).toBe(true);
     expect(externo.avion_externo).toBe('Hawker 400 · XA-REG');
     expect(externo.operador_externo).toBe('Aerolíneas del Sur');
-    expect(externo.aeronave_operativa).toBeNull();
-    // Tramos sin avión propio vuelan en el avión ajeno.
-    expect(externo.tramos[0].matricula).toBe('XA-REG');
-    expect(externo.costo_externo_usd).toBe(1500);
-    expect(externo.participacion_aviones).toEqual([]);
+    expect(externo.aeronave_cotizada_matricula).toBe('N4142R');
+  });
+
+  it('sin snapshot ni ficha cotizada: el avión cotizado cae al avión del vuelo', () => {
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({ calculo_snapshot: null, aeronave_cotizada: null }),
+      }),
+    );
+    expect(p.aeronave_cotizada_modelo).toBe('Seneca V');
+    expect(p.aeronave_cotizada_matricula).toBe('N4142R');
+  });
+});
+
+describe('armarCotizacionInternaPayload — tramos cotizados (tabla de administración)', () => {
+  it('foto del cliente: 4 tramos de 0.4 h (con calzo) × $1,000 = $400 c/u, ruta con ciudad, hh:mm, fecha del plan por tramo; Σ == TIEMPO_VUELO sin ajuste', () => {
+    const p = armarCotizacionInternaPayload(insumos());
+    expect(p.tramos_cotizados).toHaveLength(4);
+    expect(p.tramos_cotizados[0]).toEqual({
+      orden: 1,
+      ruta: 'Cancun-Cozumel',
+      origen_iata: 'CUN',
+      destino_iata: 'CZM',
+      origen_nombre: 'Cancun',
+      destino_nombre: 'Cozumel',
+      fecha: '2026-09-03',
+      millas: 60,
+      tiempo_hr: 0.4,
+      tiempo_hhmm: '00:24',
+      tarifa_hora_usd: 1000,
+      total_usd: 400,
+      pax: 4,
+      es_ferry: false,
+      pernocta: false,
+      pernocta_usd: 0,
+      tuas_usd: 0,
+      consolidado: false,
+    });
+    expect(p.tramos_cotizados.map((t) => t.ruta)).toEqual([
+      'Cancun-Cozumel',
+      'Cozumel-Cancun',
+      'Cancun-Cozumel',
+      'Cozumel-Cancun',
+    ]);
+    expect(p.tramos_cotizados.map((t) => t.fecha)).toEqual([
+      '2026-09-03',
+      '2026-09-03',
+      '2026-09-03',
+      '2026-09-03',
+    ]);
+    expect(p.tramos_cotizados[1].tuas_usd).toBe(80);
+    expect(p.tramos_tiempo_total_hr).toBe(1.6);
+    expect(p.tramos_tiempo_total_hhmm).toBe('01:36');
+    expect(p.tramos_total_usd).toBe(1600);
+    expect(p.tramos_ajuste_usd).toBe(0);
+    expect(p.tramos_ajuste_motivo).toBeNull();
+    const tiempoVuelo = p.lineas.find((l) => l.clave === 'TIEMPO_VUELO')!;
+    expect(p.tramos_total_usd + p.tramos_ajuste_usd).toBe(
+      tiempoVuelo.monto_usd,
+    );
+    // Escalares de horas del snapshot siguen (son de la cotización).
+    expect(p.horas_cotizadas_hr).toBe(1.6);
+    expect(p.vuelo_hr).toBe(1.0);
+    expect(p.calzos_hr).toBe(0.6);
+    expect(p.tiempo_cobrable_hr).toBe(1.6);
+    expect(p.hora_minima_aplicada).toBe(false);
+    expect(p.cobrable_override).toBe(false);
+  });
+
+  it('ejemplo del formato de administración: Cancun-Merida, 157 millas, 1.3 h × $900 = $1,170 → "01:18", fecha 26-jun del plan', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [
+        tramoSnap(1, 'CUN', 'MID', {
+          millas: 157,
+          pasajeros: 3,
+          tiempo_hr: 1.3,
+        }),
+      ],
+      tiempos: { vuelo_hr: 1.15, calzos_hr: 0.15, cobrable_hr: 1.3 },
+      tarifa: 900,
+      tiempoVueloUsd: 1170,
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 1170, {
+          tarifa_hora_usd: 900,
+          tiempo_cobrable_hr: 1.3,
+          fecha_vuelo: '2026-06-26T13:00:00.000Z',
+        }),
+        escalas: [
+          escala(1, 'CUN', 'MID', {
+            fecha_salida_plan: '2026-06-26T13:00:00.000Z',
+          }),
+        ],
+        cobros: [],
+      }),
+    );
+    expect(p.tramos_cotizados).toHaveLength(1);
+    expect(p.tramos_cotizados[0]).toMatchObject({
+      ruta: 'Cancun-Merida',
+      fecha: '2026-06-26',
+      millas: 157,
+      tiempo_hr: 1.3,
+      tiempo_hhmm: '01:18',
+      tarifa_hora_usd: 900,
+      total_usd: 1170,
+      pax: 3,
+    });
+    expect(p.tramos_total_usd).toBe(1170);
+    expect(p.tramos_ajuste_usd).toBe(0);
+    expect(p.tramos_ajuste_motivo).toBeNull();
+    expect(p.fecha_vuelo).toBe('2026-06-26');
+  });
+
+  it('hora mínima: 2 tramos de 0.4 h (0.8 h) cobrados como 1.0 h → Σ tramos $800 y ajuste +$200 "Hora mínima 1.0 h" (Σ + ajuste == canónico)', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [tramoSnap(1, 'CUN', 'CZM'), tramoSnap(2, 'CZM', 'CUN')],
+      tiempos: {
+        vuelo_hr: 0.5,
+        calzos_hr: 0.3,
+        cobrable_hr_regla: 1,
+        cobrable_hr: 1,
+        minimo_hora_aplicado: true,
+      },
+      tiempoVueloUsd: 1000,
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 1000, { tiempo_cobrable_hr: 1 }),
+        escalas: [escala(1, 'CUN', 'CZM'), escala(2, 'CZM', 'CUN')],
+        cobros: [],
+      }),
+    );
+    expect(p.tramos_cotizados.map((t) => t.total_usd)).toEqual([400, 400]);
+    expect(p.tramos_tiempo_total_hr).toBe(0.8);
+    expect(p.tramos_total_usd).toBe(800);
+    expect(p.tramos_ajuste_usd).toBe(200);
+    expect(p.tramos_ajuste_motivo).toBe('Hora mínima 1.0 h');
+    expect(p.hora_minima_aplicada).toBe(true);
+    expect(p.tramos_total_usd + p.tramos_ajuste_usd).toBe(1000);
+    // El desglose canónico NO se toca: la línea sigue en $1,000.
+    expect(p.lineas.find((l) => l.clave === 'TIEMPO_VUELO')!.monto_usd).toBe(
+      1000,
+    );
+    expect(p.subtotal_vuelo_usd).toBe(1000);
+  });
+
+  it('sobrevuelo: horas globales fuera de los tramos → ajuste con motivo "Sobrevuelo 0.5 h"', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [
+        tramoSnap(1, 'CUN', 'CZM'),
+        tramoSnap(2, 'CZM', 'CUN'),
+        tramoSnap(3, 'CUN', 'CZM'),
+        tramoSnap(4, 'CZM', 'CUN'),
+      ],
+      tiempos: {
+        vuelo_hr: 1.0,
+        calzos_hr: 0.6,
+        sobrevuelo_hr: 0.5,
+        cobrable_hr_regla: 2.1,
+        cobrable_hr: 2.1,
+      },
+      tiempoVueloUsd: 2100,
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 2100, { tiempo_cobrable_hr: 2.1 }),
+        cobros: [],
+      }),
+    );
+    expect(p.tramos_total_usd).toBe(1600);
+    expect(p.tramos_ajuste_usd).toBe(500);
+    expect(p.tramos_ajuste_motivo).toBe('Sobrevuelo 0.5 h');
+    expect(p.sobrevuelo_hr).toBe(0.5);
+    expect(p.horas_cotizadas_hr).toBe(2.1);
+  });
+
+  it('horas pactadas a mano (cobrable override): motivo "Horas pactadas 2 h"', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [
+        tramoSnap(1, 'CUN', 'CZM'),
+        tramoSnap(2, 'CZM', 'CUN'),
+        tramoSnap(3, 'CUN', 'CZM'),
+        tramoSnap(4, 'CZM', 'CUN'),
+      ],
+      tiempos: {
+        vuelo_hr: 1.0,
+        calzos_hr: 0.6,
+        cobrable_hr_regla: 1.6,
+        cobrable_hr: 2,
+        cobrable_proviene_de_override: true,
+      },
+      tiempoVueloUsd: 2000,
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 2000, { tiempo_cobrable_hr: 2 }),
+        cobros: [],
+      }),
+    );
+    expect(p.tramos_total_usd).toBe(1600);
+    expect(p.tramos_ajuste_usd).toBe(400);
+    expect(p.tramos_ajuste_motivo).toBe('Horas pactadas 2 h');
+    expect(p.cobrable_override).toBe(true);
+  });
+
+  it('redondeo del motor: 3 × round2(0.4167 h × $950) = $1,187.61 vs canónico $1,187.60 → ajuste −0.01 "Redondeo" (nunca se reparte entre tramos)', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [
+        tramoSnap(1, 'CUN', 'MID', { millas: 45, tiempo_hr: 0.4167 }),
+        tramoSnap(2, 'MID', 'CZM', { millas: 45, tiempo_hr: 0.4167 }),
+        tramoSnap(3, 'CZM', 'CUN', { millas: 45, tiempo_hr: 0.4167 }),
+      ],
+      tiempos: { vuelo_hr: 0.8001, calzos_hr: 0.45, cobrable_hr: 1.2501 },
+      tarifa: 950,
+      tiempoVueloUsd: 1187.6,
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 1187.6, {
+          tarifa_hora_usd: 950,
+          tiempo_cobrable_hr: 1.2501,
+        }),
+        escalas: [],
+        cobros: [],
+      }),
+    );
+    expect(p.tramos_cotizados.map((t) => t.total_usd)).toEqual([
+      395.87, 395.87, 395.87,
+    ]);
+    expect(p.tramos_cotizados.map((t) => t.tiempo_hhmm)).toEqual([
+      '00:25',
+      '00:25',
+      '00:25',
+    ]);
+    expect(p.tramos_total_usd).toBe(1187.61);
+    expect(p.tramos_ajuste_usd).toBe(-0.01);
+    expect(p.tramos_ajuste_motivo).toBe('Redondeo');
+    expect(p.tramos_tiempo_total_hr).toBe(1.2501);
+    expect(p.tramos_tiempo_total_hhmm).toBe('01:15');
+  });
+
+  it('cliente interno (tarifa $0): tabla en $0, sin ajuste ni motivo', () => {
+    const snap = snapshotSoloTiempo({
+      tramos: [tramoSnap(1, 'CUN', 'CZM'), tramoSnap(2, 'CZM', 'CUN')],
+      tiempos: { vuelo_hr: 0.5, calzos_hr: 0.3, cobrable_hr: 0.8 },
+      tarifa: 0,
+      tiempoVueloUsd: 0,
+      meta: { cliente_interno: true },
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quoteSoloTiempo(snap, 0, {
+          tarifa_hora_usd: 0,
+          tiempo_cobrable_hr: 0.8,
+        }),
+        cobros: [],
+      }),
+    );
+    expect(p.es_interno).toBe(true);
+    expect(p.tramos_cotizados.map((t) => t.total_usd)).toEqual([0, 0]);
+    expect(p.tramos_cotizados[0].tarifa_hora_usd).toBe(0);
+    expect(p.tramos_total_usd).toBe(0);
+    expect(p.tramos_ajuste_usd).toBe(0);
+    expect(p.tramos_ajuste_motivo).toBeNull();
+  });
+
+  it('fecha del tramo: plan de la escala → pdf_fecha → hereda del anterior → día del vuelo; instantes en día Cancún; escala de otro par no cruza', () => {
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        escalas: [
+          escala(1, 'CUN', 'CZM', {
+            fecha_salida_plan: '2026-09-03T14:00:00.000Z',
+          }),
+          escala(2, 'CZM', 'CUN', {
+            fecha_salida_plan: null,
+            pdf_fecha: '2026-09-04',
+          }),
+          escala(3, 'CUN', 'CZM', { fecha_salida_plan: null }),
+          // 03:30 Z del 5-sep = 22:30 Cancún del 4-sep.
+          escala(4, 'CZM', 'CUN', {
+            fecha_salida_plan: '2026-09-05T03:30:00.000Z',
+          }),
+        ],
+      }),
+    );
+    expect(p.tramos_cotizados.map((t) => t.fecha)).toEqual([
+      '2026-09-03',
+      '2026-09-04',
+      '2026-09-04', // hereda del tramo anterior (mismo día)
+      '2026-09-04',
+    ]);
+
+    // Sin escalas: todos al día del vuelo.
+    const sinEscalas = armarCotizacionInternaPayload(insumos({ escalas: [] }));
+    expect(sinEscalas.tramos_cotizados.map((t) => t.fecha)).toEqual([
+      '2026-09-03',
+      '2026-09-03',
+      '2026-09-03',
+      '2026-09-03',
+    ]);
+
+    // Itinerario operativo distinto (otra base): la escala con el mismo
+    // orden pero otro par NO fecha el tramo cotizado.
+    const ajena = armarCotizacionInternaPayload(
+      insumos({
+        escalas: [
+          escala(1, 'MID', 'CUN', {
+            fecha_salida_plan: '2026-09-10T14:00:00.000Z',
+          }),
+        ],
+      }),
+    );
+    expect(ajena.tramos_cotizados[0].fecha).toBe('2026-09-03');
+  });
+
+  it('nombre de aeropuerto: ciudad del catálogo recortada a la coma, sin espacios, inicial mayúscula; fallback nombre; fallback IATA (también en la fila)', () => {
+    expect(
+      nombreCortoAeropuerto('TGZ', {
+        ciudad: 'Tuxtla Gutierrez, Chiapas, MX',
+        nombre: 'TUXTLA Angel Albino Corzo',
+      }),
+    ).toBe('Tuxtla Gutierrez');
+    expect(nombreCortoAeropuerto('CPE', { ciudad: 'Campeche ' })).toBe(
+      'Campeche',
+    );
+    expect(
+      nombreCortoAeropuerto('CET', { nombre: 'TOLEDO', ciudad: 'cozumel' }),
+    ).toBe('Cozumel');
+    expect(
+      nombreCortoAeropuerto('FCQ', {
+        nombre: 'Felipe Carrillo Puerto',
+        ciudad: null,
+      }),
+    ).toBe('Felipe Carrillo Puerto');
+    expect(
+      nombreCortoAeropuerto('PLJ', { nombre: 'Placencia, BZ', ciudad: null }),
+    ).toBe('Placencia');
+    expect(nombreCortoAeropuerto('ROA', undefined)).toBe('ROA');
+    expect(nombreCortoAeropuerto('FLL', { nombre: '', ciudad: '  ' })).toBe(
+      'FLL',
+    );
+
+    // En la tabla: ROA no está en el catálogo cargado → IATA en la ruta.
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          calculo_snapshot: snapshot({
+            tramos: [
+              tramoSnap(1, 'CUN', 'ROA'),
+              tramoSnap(2, 'ROA', 'TGZ'),
+              tramoSnap(3, 'TGZ', 'CUN'),
+            ],
+          }),
+        }),
+        escalas: [],
+      }),
+    );
+    expect(p.tramos_cotizados.map((t) => t.ruta)).toEqual([
+      'Cancun-ROA',
+      'ROA-Tuxtla Gutierrez',
+      'Tuxtla Gutierrez-Cancun',
+    ]);
+    expect(p.tramos_cotizados[0].destino_nombre).toBe('ROA');
+    expect(p.ruta).toBe('CUN → ROA → TGZ → CUN');
+  });
+
+  it('helper horasAHhmm: minutos redondeados, dos dígitos', () => {
+    expect(horasAHhmm(1.3)).toBe('01:18');
+    expect(horasAHhmm(0.4)).toBe('00:24');
+    expect(horasAHhmm(2.1)).toBe('02:06');
+    expect(horasAHhmm(1.2501)).toBe('01:15');
+    expect(horasAHhmm(0)).toBe('00:00');
+    expect(horasAHhmm(10.5)).toBe('10:30');
+  });
+
+  it('respaldo: snapshot sin tramos → UNA fila consolidada con vuelo+calzos del snapshot; sin snapshot (motor viejo) → fila con el servicio aéreo del vuelo, ajuste 0', () => {
+    const viejoSnap = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({ calculo_snapshot: snapshot({ tramos: null }) }),
+      }),
+    );
+    expect(viejoSnap.tramos_cotizados).toHaveLength(1);
+    expect(viejoSnap.tramos_cotizados[0]).toMatchObject({
+      orden: 1,
+      consolidado: true,
+      ruta: 'Cancun-Cozumel-Cancun-Cozumel-Cancun',
+      origen_iata: 'CUN',
+      destino_iata: 'CUN',
+      fecha: '2026-09-03',
+      millas: 240,
+      tiempo_hr: 1.6, // vuelo 1.0 + calzos 0.6
+      tiempo_hhmm: '01:36',
+      tarifa_hora_usd: 1000,
+      total_usd: 1600,
+      pax: 4,
+    });
+    expect(viejoSnap.tramos_total_usd).toBe(1600);
+    expect(viejoSnap.tramos_ajuste_usd).toBe(0);
+    expect(viejoSnap.ruta).toBe('CUN → CZM → CUN → CZM → CUN');
+
+    const sinSnapshot = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          calculo_snapshot: null,
+          tipo: 'REDONDO',
+          origen_iata: 'CUN',
+          destino_iata: 'CZM',
+          es_redondo_auto: true,
+          millas_nauticas_one_way: 60,
+        }),
+        escalas: [],
+      }),
+    );
+    expect(sinSnapshot.tramos_cotizados).toHaveLength(1);
+    expect(sinSnapshot.tramos_cotizados[0]).toMatchObject({
+      consolidado: true,
+      ruta: 'Cancun-Cozumel-Cancun',
+      millas: 120,
+      tiempo_hr: 1.6, // tiempo_cobrable_hr del vuelo
+      tarifa_hora_usd: 1000,
+      total_usd: 1600, // subtotal_vuelo_usd tal cual
+    });
+    expect(sinSnapshot.ruta).toBe('CUN → CZM → CUN');
+    expect(sinSnapshot.tramos_ajuste_usd).toBe(0);
+    expect(sinSnapshot.tramos_ajuste_motivo).toBeNull();
   });
 });
 
 describe('armarCotizacionInternaPayload — desglose canónico', () => {
-  it('líneas canónicas → payload con la operación de cada una; Σ == total; comisión visible con pago al vendedor c/IVA', () => {
+  it('líneas canónicas con su operación; Σ == total; TUAS solo las COBRADAS (la exenta CUN no viaja); comisión con pago al vendedor c/IVA', () => {
     const p = armarCotizacionInternaPayload(insumos());
     expect(p.lineas.map((l) => l.clave)).toEqual([
       'TIEMPO_VUELO',
       'TUAS',
-      'TUAS', // CUN exento (sintética, $0)
       'EXTRA',
       'COMISION_VENDEDOR',
       'IVA',
@@ -477,6 +1001,9 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
     const suma = p.lineas.reduce((acc, l) => acc + l.monto_usd, 0);
     expect(Math.round(suma * 100) / 100).toBe(2470.8);
     expect(p.total_usd).toBe(2470.8);
+    // Ya no hay líneas sintéticas ni bandera de exento.
+    expect(p.lineas.every((l) => !('exento' in l))).toBe(true);
+    expect(p).not.toHaveProperty('tuas_exentos');
 
     const tiempo = p.lineas[0];
     expect(tiempo).toMatchObject({
@@ -484,7 +1011,6 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
       unitario: 1000,
       moneda: 'USD',
       monto_usd: 1600,
-      exento: false,
     });
     const tua = p.lineas[1];
     expect(tua).toMatchObject({
@@ -495,17 +1021,18 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
       monto_nativo: 80,
       monto_usd: 80,
     });
-    const exento = p.lineas[2];
-    expect(exento).toMatchObject({
-      clave: 'TUAS',
-      monto_usd: 0,
-      exento: true,
-      cantidad: 4,
-      unitario: 0,
-    });
-    expect(exento.concepto).toBe('TUA CUN · exento · Matrícula N exenta');
-    expect(p.tuas_exentos).toEqual(['CUN']);
-    const extra = p.lineas[3];
+    expect(p.tuas_cobradas).toEqual([
+      {
+        iata: 'CZM',
+        pax: 4,
+        unitario: 20,
+        moneda: 'USD',
+        total_nativo: 80,
+        tc_aplicado: null,
+        total_usd: 80,
+      },
+    ]);
+    const extra = p.lineas[2];
     expect(extra).toMatchObject({
       cantidad: 2,
       unitario: 85,
@@ -513,7 +1040,7 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
       aplica_iva: true,
       monto_usd: 170,
     });
-    const comision = p.lineas[4];
+    const comision = p.lineas[3];
     expect(comision).toMatchObject({
       concepto: 'Comisión del vendedor (Saab)',
       monto_usd: 280,
@@ -526,7 +1053,6 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
     // pagoVendedorUsd = comisión + su IVA (280 × 0.16 = 44.80).
     expect(p.iva_comision_vendedor_usd).toBe(44.8);
     expect(p.pago_vendedor_usd).toBe(324.8);
-    expect(p.neto_vuelatour_usd).toBe(2146);
 
     expect(p.subtotal_vuelo_usd).toBe(1600);
     expect(p.tuas_usd).toBe(80);
@@ -536,12 +1062,74 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
     expect(p.iva_base_usd).toBe(2130);
     expect(p.iva_usd).toBe(340.8);
     expect(p.total_mxn).toBe(36543.13);
-    // Partición (particionIngresoVuelo): avión = 1600 + IVA prop. (1600/2130 × 340.8 = 256).
-    expect(p.venta_avion_usd).toBe(1856);
-    expect(p.otros_ingresos_vuelatour_usd).toBe(614.8);
-    expect(p.particion_fuente).toBe('desglose');
-    expect(p.particion_inconsistente).toBe(false);
-    expect(p.participacion_aviones).toEqual([]);
+  });
+
+  it('TUA cobrada en MXN: unitario nativo, TC congelado y el USD de la línea canónica; la exenta sigue fuera', () => {
+    const snap = snapshot({
+      tuas: {
+        pasajeros: 4,
+        aeropuertos: [
+          {
+            iata: 'CUN',
+            aplica: false,
+            monto_pax: 0,
+            razon: 'Matrícula N exenta',
+          },
+          { iata: 'MID', aplica: true, monto_pax: 350, moneda: 'MXN' },
+        ],
+        filas: [
+          {
+            iata: 'MID',
+            aplica: true,
+            usd_pax: 20.5,
+            monto_pax: 350,
+            moneda: 'MXN',
+            tc_aplicado: 17.07,
+            razon: 'TUAS aplica',
+            pax: 4,
+            total_nativo: 1400,
+            total_usd: 82.02,
+          },
+        ],
+        total_usd: 82.02,
+        total_mxn_nativo: 1400,
+      },
+      desglose: [
+        {
+          clave: 'TIEMPO_VUELO',
+          concepto: 'Tiempo de vuelo · 1.6 hr × $1000/hr',
+          monto_usd: 1600,
+        },
+        {
+          clave: 'TUAS',
+          concepto: 'TUA MID · $350.00 MXN × 4 pax = $1400.00 MXN',
+          monto_usd: 82.02,
+        },
+      ],
+    });
+    const p = armarCotizacionInternaPayload(
+      insumos({ quote: quote({ calculo_snapshot: snap }), cobros: [] }),
+    );
+    expect(p.lineas.map((l) => l.clave)).toEqual(['TIEMPO_VUELO', 'TUAS']);
+    expect(p.lineas[1]).toMatchObject({
+      cantidad: 4,
+      unitario: 350,
+      moneda: 'MXN',
+      monto_nativo: 1400,
+      tc_aplicado: 17.07,
+      monto_usd: 82.02,
+    });
+    expect(p.tuas_cobradas).toEqual([
+      {
+        iata: 'MID',
+        pax: 4,
+        unitario: 350,
+        moneda: 'MXN',
+        total_nativo: 1400,
+        tc_aplicado: 17.07,
+        total_usd: 82.02,
+      },
+    ]);
   });
 
   it('comisión POR_HORA lleva su operación (hr × tarifa) y el descuento/redondeo viajan del meta', () => {
@@ -607,18 +1195,10 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
     expect(Math.round(suma * 100) / 100).toBe(2354.8);
   });
 
-  it('cotización sin snapshot (motor viejo): líneas desde las columnas espejo, misma suma que la partición por columnas', () => {
+  it('cotización sin snapshot (motor viejo): líneas desde las columnas espejo, sin TUAS por aeropuerto', () => {
     const p = armarCotizacionInternaPayload(
       insumos({
-        quote: quote({
-          calculo_snapshot: null,
-          aeronave_cotizada: null,
-          aeronave_operativa: {
-            id: SENECA,
-            matricula: 'N4142R',
-            modelo: 'Seneca V',
-          },
-        }),
+        quote: quote({ calculo_snapshot: null, aeronave_cotizada: null }),
       }),
     );
     expect(p.lineas.map((l) => [l.clave, l.monto_usd])).toEqual([
@@ -629,14 +1209,11 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
       ['IVA', 340.8],
     ]);
     expect(p.lineas[0]).toMatchObject({ cantidad: 1.6, unitario: 1000 });
-    expect(p.particion_fuente).toBe('columnas');
     expect(p.pago_vendedor_usd).toBe(324.8);
     expect(p.iva_pct).toBe(16);
     expect(p.horas_cotizadas_hr).toBe(1.6); // cae a tiempo_cobrable_hr
-    expect(p.tuas_exentos).toEqual([]);
-    // Sin ficha cotizada ni snapshot: se anuncia el avión operativo como tal.
-    expect(p.aeronave_cotizada_matricula).toBeNull();
-    expect(p.aeronave_operativa).toBe('Seneca V · N4142R');
+    expect(p.tuas_cobradas).toEqual([]);
+    expect(p.tuas_usd).toBe(80); // el escalar sigue diciendo que hubo TUAS
   });
 
   it('CANCELADO con comisión: pago al vendedor 0 explícito (no se provisiona)', () => {
@@ -644,119 +1221,9 @@ describe('armarCotizacionInternaPayload — desglose canónico', () => {
       insumos({ quote: quote({ estado: 'CANCELADO' }), cobros: [] }),
     );
     expect(p.pago_vendedor_usd).toBe(0);
-    expect(p.neto_vuelatour_usd).toBeNull();
     expect(p.iva_comision_vendedor_usd).toBe(0);
     expect(p.semaforo_cobro).toBe('gris');
     expect(p.semaforo_cobro_label).toBe('—');
-  });
-});
-
-describe('armarCotizacionInternaPayload — itinerario y horas', () => {
-  it('con tacos: 4 × 0.4 h = 1.6 h voladas, horas cotizadas por tramo cruzadas por orden y par origen/destino', () => {
-    const p = armarCotizacionInternaPayload(insumos());
-    expect(p.tramos).toHaveLength(4);
-    expect(p.tramos.map((t) => t.horas_taco)).toEqual([0.4, 0.4, 0.4, 0.4]);
-    expect(p.tramos.map((t) => t.horas_cotizadas)).toEqual([
-      0.4, 0.4, 0.4, 0.4,
-    ]);
-    expect(p.tramos[0]).toMatchObject({
-      orden: 1,
-      orden_real: 1,
-      origen: 'CUN',
-      destino: 'CZM',
-      pasajeros: 4,
-      matricula: 'N4142R', // herencia del vuelo
-      piloto: 'Luis Ramírez', // herencia del vuelo
-      taco_salida: 1200,
-      taco_llegada: 1200.4,
-      taco_salida_origen: 'DEDUCIDO',
-      taco_llegada_origen: 'PILOTO',
-      cancelado: false,
-    });
-    expect(p.horas_voladas_hr).toBe(1.6);
-    expect(p.horas_cotizadas_hr).toBe(1.6); // vuelo 1.0 + calzos 0.6
-    expect(p.delta_horas_hr).toBe(0); // voladas − cotizadas, ya calculado aquí
-    expect(p.vuelo_hr).toBe(1.0);
-    expect(p.calzos_hr).toBe(0.6);
-    expect(p.tiempo_cobrable_hr).toBe(1.6);
-    expect(p.hora_minima_aplicada).toBe(false);
-  });
-
-  it('sin tacos: horas_taco null por tramo y horas_voladas null (nunca 0 falso); cotizadas intactas', () => {
-    const sinTacos = escalasConTacos().map((e) => ({
-      ...e,
-      taco_salida: null,
-      taco_llegada: null,
-    }));
-    const p = armarCotizacionInternaPayload(insumos({ escalas: sinTacos }));
-    expect(p.tramos.every((t) => t.horas_taco === null)).toBe(true);
-    expect(p.horas_voladas_hr).toBeNull();
-    expect(p.delta_horas_hr).toBeNull();
-    expect(p.horas_cotizadas_hr).toBe(1.6);
-  });
-
-  it('tramo cancelado se marca y NO suma horas; tramo operativo de otra base no hereda horas cotizadas ajenas', () => {
-    const escalas = [
-      // Ferry operativo agregado a mano (orden 100) desde otra base.
-      escala(100, 'MID', 'CUN', {
-        es_ferry: true,
-        solo_operativa: true,
-        taco_salida: 1199.0,
-        taco_llegada: 1200.0,
-        pasajeros: 0,
-      }),
-      ...escalasConTacos().map((e, i) =>
-        i === 3
-          ? {
-              ...e,
-              cancelada_at: '2026-09-03T19:00:00.000Z',
-              cancelada_motivo: 'Cliente se quedó',
-            }
-          : e,
-      ),
-    ];
-    const p = armarCotizacionInternaPayload(insumos({ escalas }));
-    // Numeración visible 1..5, orden real conservado.
-    expect(p.tramos.map((t) => t.orden)).toEqual([1, 2, 3, 4, 5]);
-    expect(p.tramos.map((t) => t.orden_real)).toEqual([1, 2, 3, 4, 100]);
-    const ferry = p.tramos[4];
-    expect(ferry).toMatchObject({
-      es_ferry: true,
-      solo_operativa: true,
-      pasajeros: 0,
-      horas_taco: 1.0,
-      horas_cotizadas: null,
-    });
-    const cancelado = p.tramos[3];
-    expect(cancelado).toMatchObject({
-      cancelado: true,
-      cancelada_motivo: 'Cliente se quedó',
-      horas_taco: 0.4,
-    });
-    // 0.4 × 3 vivos + 1.0 ferry = 2.2 (el cancelado no suma).
-    expect(p.horas_voladas_hr).toBe(2.2);
-    // La ruta ignora el cancelado.
-    expect(p.ruta).toBe('CUN → CZM → CUN → CZM → MID → CUN');
-  });
-
-  it('sin escalas vivas cae al itinerario del snapshot (sin tacos)', () => {
-    const p = armarCotizacionInternaPayload(insumos({ escalas: [] }));
-    expect(p.tramos).toHaveLength(4);
-    expect(p.tramos[1]).toMatchObject({
-      origen: 'CZM',
-      destino: 'CUN',
-      horas_cotizadas: 0.4,
-      horas_taco: null,
-      matricula: 'N4142R',
-    });
-    expect(p.horas_voladas_hr).toBeNull();
-  });
-
-  it('helper horasTacoDe: 1 decimal, null sin ambos', () => {
-    expect(horasTacoDe(1200, 1200.4)).toBe(0.4);
-    expect(horasTacoDe('1200', '')).toBeNull();
-    expect(horasTacoDe('1200.0', '1201.65')).toBe(1.7);
-    expect(horasTacoDe(1200, null)).toBeNull();
   });
 });
 
@@ -796,7 +1263,7 @@ describe('armarCotizacionInternaPayload — cobros', () => {
     expect(p.semaforo_cobro_key).toBe('COBRADO');
   });
 
-  it('sin cobros: lista vacía, cobrado 0, saldo = total, semáforo rojo; sin gastos → utilidad null', () => {
+  it('sin cobros: lista vacía, cobrado 0, saldo = total, semáforo rojo', () => {
     const p = armarCotizacionInternaPayload(insumos({ cobros: [] }));
     expect(p.cobros).toEqual([]);
     expect(p.total_cobrado_usd).toBe(0);
@@ -805,8 +1272,6 @@ describe('armarCotizacionInternaPayload — cobros', () => {
     expect(p.total_cobrado_neto_usd).toBeNull();
     expect(p.semaforo_cobro).toBe('rojo');
     expect(p.semaforo_cobro_label).toBe('Sin cobro');
-    expect(p.gastos_total_usd).toBeNull();
-    expect(p.utilidad_bruta_usd).toBeNull();
   });
 
   it('abono parcial USD + reembolso + parte de sobre de grupo + MXN sin TC (se expone, no se suma); orden cronológico', () => {
@@ -898,170 +1363,7 @@ describe('armarCotizacionInternaPayload — cobros', () => {
   });
 });
 
-describe('armarCotizacionInternaPayload — multi-avión, gastos y CFDI', () => {
-  it('multi-avión: ida en Seneca, regreso en Kodiak → mitad y mitad de la venta del avión (repartirUsd, Σ exacta)', () => {
-    const escalas = [
-      escala(1, 'CUN', 'CZM', {
-        aeronave_id: SENECA,
-        taco_salida: 1200,
-        taco_llegada: 1200.4,
-      }),
-      escala(2, 'CZM', 'CUN', {
-        aeronave_id: KODIAK,
-        taco_salida: 500,
-        taco_llegada: 500.6,
-      }),
-    ];
-    const p = armarCotizacionInternaPayload(insumos({ escalas }));
-    expect(p.participacion_aviones).toHaveLength(2);
-    expect(p.participacion_aviones[0]).toMatchObject({
-      aeronave_id: SENECA,
-      matricula: 'N4142R',
-      factor: 0.5,
-      tramos: 1,
-      venta_usd: 928,
-    });
-    expect(p.participacion_aviones[1]).toMatchObject({
-      aeronave_id: KODIAK,
-      matricula: 'N621TX',
-      factor: 0.5,
-      tramos: 1,
-      venta_usd: 928,
-    });
-    const suma = p.participacion_aviones.reduce(
-      (acc, a) => acc + a.venta_usd,
-      0,
-    );
-    expect(suma).toBe(p.venta_avion_usd);
-    // Matrícula por tramo con el avión de cada uno.
-    expect(p.tramos.map((t) => t.matricula)).toEqual(['N4142R', 'N621TX']);
-    expect(p.horas_voladas_hr).toBe(1.0);
-  });
-
-  it('gastos por categoría en USD (MXN ÷ tc_gasto, respaldo TC del vuelo, sin TC se expone) + utilidad bruta de referencia sobre lo cobrado', () => {
-    const p = armarCotizacionInternaPayload(
-      insumos({
-        gastos: [
-          { categoria: 'GAS', monto: 100, moneda: 'USD', tc_gasto: null },
-          { categoria: 'GAS', monto: 1479, moneda: 'MXN', tc_gasto: 14.79 }, // 100 USD
-          { categoria: 'COMIDA', monto: 295.8, moneda: 'MXN', tc_gasto: null }, // respaldo TC vuelo → 20 USD
-          {
-            categoria: 'PERSONAL_DUENO',
-            monto: 999,
-            moneda: 'USD',
-            tc_gasto: null,
-          }, // fuera
-        ],
-      }),
-    );
-    expect(p.gastos_por_categoria).toEqual([
-      {
-        categoria: 'GAS',
-        etiqueta: 'Gasavión / Turbosina',
-        total_usd: 200,
-        n: 2,
-      },
-      { categoria: 'COMIDA', etiqueta: 'Comida', total_usd: 20, n: 1 },
-    ]);
-    expect(p.gastos_total_usd).toBe(220);
-    expect(p.gastos_sin_tc_count).toBe(0);
-    expect(p.utilidad_base).toBe('cobrado');
-    // 2,470.59 cobrado − 220.
-    expect(p.utilidad_bruta_usd).toBe(2250.59);
-
-    const sinTc = armarCotizacionInternaPayload(
-      insumos({
-        quote: quote({ tc_usd_mxn: null }),
-        cobros: [],
-        gastos: [
-          { categoria: 'HOTEL', monto: 1500, moneda: 'MXN', tc_gasto: null },
-        ],
-      }),
-    );
-    expect(sinTc.gastos_por_categoria).toEqual([]);
-    expect(sinTc.gastos_sin_tc_count).toBe(1);
-    expect(sinTc.gastos_sin_tc_mxn).toBe(1500);
-    expect(sinTc.gastos_total_usd).toBe(0);
-    expect(sinTc.utilidad_base).toBe('total');
-    expect(sinTc.utilidad_bruta_usd).toBe(2470.8);
-  });
-
-  it('externo: el costo del operador entra a los gastos y a la utilidad', () => {
-    const p = armarCotizacionInternaPayload(
-      insumos({
-        quote: quote({
-          es_externo: true,
-          costo_externo_usd: 1500,
-          aeronave_operativa: null,
-        }),
-        gastos: [
-          { categoria: 'FBO', monto: 50, moneda: 'USD', tc_gasto: null },
-        ],
-      }),
-    );
-    expect(p.gastos_total_usd).toBe(1550);
-    expect(p.utilidad_bruta_usd).toBe(920.59);
-  });
-
-  it('CFDI: factura vigente manda; cancelada se etiqueta; sin factura y bandera facturado se aclara', () => {
-    const timbrada = armarCotizacionInternaPayload(
-      insumos({
-        facturas: [
-          {
-            serie: 'A',
-            folio: 120,
-            uuid_fiscal: 'uuid-1',
-            estado: 'TIMBRADA',
-            total: 36543.13,
-            moneda: 'MXN',
-            fecha_timbrado: '2026-09-04T12:00:00.000Z',
-            facturado_a_nombre: 'Viajes Caribe',
-            cancelada_at: '2026-09-05T12:00:00.000Z',
-          },
-          {
-            serie: 'A',
-            folio: 121,
-            uuid_fiscal: 'uuid-2',
-            estado: 'TIMBRADA',
-            total: 36543.13,
-            moneda: 'MXN',
-            fecha_timbrado: '2026-09-05T13:00:00.000Z',
-            facturado_a_nombre: 'Viajes Caribe',
-            cancelada_at: null,
-          },
-        ],
-      }),
-    );
-    expect(timbrada.facturas).toHaveLength(2);
-    expect(timbrada.facturas[0].cancelada).toBe(true);
-    expect(timbrada.cfdi_estatus).toBe('TIMBRADA');
-    expect(timbrada.cfdi_folio).toBe('A-121');
-
-    const cancelada = armarCotizacionInternaPayload(
-      insumos({
-        facturas: [
-          {
-            serie: null,
-            folio: null,
-            uuid_fiscal: 'uuid-9',
-            estado: 'TIMBRADA',
-            cancelada_at: '2026-09-05T12:00:00.000Z',
-          },
-        ],
-      }),
-    );
-    expect(cancelada.cfdi_estatus).toBe('CANCELADA');
-    expect(cancelada.cfdi_folio).toBe('uuid-9');
-
-    const bandera = armarCotizacionInternaPayload(
-      insumos({ quote: quote({ facturado: true }) }),
-    );
-    expect(bandera.cfdi_estatus).toContain('Facturado');
-    expect(bandera.cfdi_folio).toBeNull();
-    const nada = armarCotizacionInternaPayload(insumos());
-    expect(nada.cfdi_estatus).toBeNull();
-  });
-
+describe('armarCotizacionInternaPayload — grupo y combinado', () => {
   it('hijo de grupo y vuelo combinado se anuncian', () => {
     const p = armarCotizacionInternaPayload(
       insumos({

@@ -1,48 +1,49 @@
 /**
- * ARMADOR PURO del payload del PDF «Cotización interna» (8-sep-2026).
+ * ARMADOR PURO del payload del PDF «Cotización interna» v2 (8-sep-2026,
+ * feedback de administración con la foto de su formato de siempre).
  *
- * Documento de UNA hoja para la oficina (administración imprime la
- * cotización SIN fotos ni fichas de avión y CON toda la cocina interna:
- * comisión del vendedor, horas cotizadas vs tacos, cobros con comisión
- * bancaria y neto, gastos). JAMÁS se manda al cliente.
+ * Documento de UNA hoja para la oficina con SOLO lo de la COTIZACIÓN:
+ * fecha protagonista = día del vuelo; tabla de tramos desglosados (RUTA con
+ * nombre de ciudad, FECHA del tramo, MILLAS, TIEMPO DE VUELO con calzos,
+ * COSTO POR HORA, TOTAL POR TRAMO + fila TOTAL); desglose canónico; TUAS
+ * solo las COBRADAS; cobros compactos; notas internas. NADA de operación
+ * (tacos, horas voladas, avión operativo, piloto del tramo, traslados) ni de
+ * partición / gastos / utilidad / CFDI — eso vive en el reporte del vuelo.
+ * JAMÁS se manda al cliente.
  *
  * Disciplina de números (regla del workspace: fuentes únicas, nada de
  * cálculos paralelos):
  *  - Desglose = `calculo_snapshot.desglose` canónico v1.3 tal cual (orden y
  *    montos intactos; Σ == total). Aquí solo se ENRIQUECE cada línea con la
- *    operación que la produjo (cantidad × unitario) leída del mismo snapshot
- *    (`tiempos`, `tarifa`, `tuas.filas`, `extras`, `meta`) para que la
- *    plantilla la escriba sin recalcular. Los TUAS exentos viajan como
- *    líneas sintéticas a $0 (`exento: true`): no alteran la suma.
- *  - Cobrado = `cobrosEnUsd`; partición = `particionIngresoVuelo`; pago al
- *    vendedor = `pagoVendedorUsd`; multi-avión = `participacionPorAeronave`
- *    + `repartirUsd`; conciliado = lo que ya trae `FlightsService.listCobros`
- *    (fuente única cobro-conciliado.util); semáforo = espejo del panel
- *    (`semaforo-cobro.util`).
- *  - Horas voladas por tramo = `taco_llegada − taco_salida` a 1 decimal
- *    (mismo patrón que el reporte por vuelo); el total suma solo tramos no
- *    cancelados con dato.
+ *    operación que la produjo (cantidad × unitario) leída del mismo snapshot.
+ *  - Tramos = `snapshot.tramos[]` (ruta comercial congelada; `tiempo_hr` YA
+ *    incluye el calzo de 0.15 h del tramo). El ÚNICO número nuevo es
+ *    `total_usd = round2(tiempo_hr × tarifa)` por tramo. La diferencia contra
+ *    la línea TIEMPO_VUELO canónica NO se esconde ni se reparte: viaja como
+ *    `tramos_ajuste_usd` con su motivo (hora mínima / sobrevuelo / horas
+ *    pactadas / redondeo) para que Σ tramos + ajuste == servicio aéreo y el
+ *    desglose siga intacto (invariante 3 del repo).
+ *  - TUAS cobradas = `snapshot.tuas.filas` (el motor ya excluye exentas/$0).
+ *  - Cobrado = `cobrosEnUsd`; pago al vendedor = `pagoVendedorUsd`
+ *    (`particionIngresoVuelo` se usa SOLO para eso); conciliado = lo que ya
+ *    trae `FlightsService.listCobros` (fuente única cobro-conciliado.util);
+ *    semáforo = espejo del panel (`semaforo-cobro.util`).
  *  - Neto de un cobro = `monto − comision_banco_monto` (regla
  *    comision-bancaria.util: el neto nunca se persiste).
+ *  - Fechas de pared en día Cancún (`diaCancun`, YYYY-MM-DD): pyservices
+ *    trata esas cadenas como pared y no las reconvierte.
  *
  * Sin BD ni Nest: `QuotesPdfInternoService` carga los insumos y llama a
  * `armarCotizacionInternaPayload`; los specs lo prueban con snapshots
  * simulados.
  */
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
-import { fechaHoraCancun } from '../../common/fecha-cancun.util';
-import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
+import { diaCancun, fechaHoraCancun } from '../../common/fecha-cancun.util';
 import {
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
-import {
-  participacionPorAeronave,
-  repartirUsd,
-  type EscalaParticipacionInput,
-} from '../../common/participacion-aeronave.util';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { estadoCobroSemaforo } from '../../common/semaforo-cobro.util';
 import {
@@ -51,12 +52,10 @@ import {
 } from '../../common/tripulacion.util';
 import type {
   CotizacionInternaCobroPdf,
-  CotizacionInternaFacturaPdf,
-  CotizacionInternaGastoCategoriaPdf,
   CotizacionInternaLineaPdf,
   CotizacionInternaPdfRequest,
-  CotizacionInternaTramoPdf,
-  ReporteVueloParticipacionPayload,
+  CotizacionInternaTramoCotizadoPdf,
+  CotizacionInternaTuaCobradaPdf,
 } from '../pyservices/pyservices.service';
 
 // ===== Insumos (lo que carga el servicio) =====
@@ -64,31 +63,23 @@ import type {
 /** Fila de `vuelo` como la devuelve `QuotesService.findById` (VUELO_COLS + extras). */
 export type QuoteInternaRow = Record<string, unknown>;
 
-/** Escala VIVA con tacos y tripulación (query propia del servicio, orden asc, canceladas incluidas). */
+/**
+ * Escala del vuelo (query mínima del servicio, orden asc): SOLO se usa para
+ * fechar cada tramo cotizado (`fecha_salida_plan` / `pdf_fecha`) cruzando
+ * por orden y par origen/destino, y como respaldo de ruta cuando el
+ * snapshot no trae tramos. Nada operativo (tacos, tripulación) entra aquí.
+ */
 export interface EscalaInternaRow {
   id?: string | null;
   orden: number | string | null;
   origen_iata: string | null;
   destino_iata: string | null;
-  aeronave_id?: string | null;
-  piloto_id?: string | null;
-  copiloto_id?: string | null;
-  pasajeros?: number | string | null;
-  es_ferry?: boolean | null;
-  es_sobrevuelo?: boolean | null;
-  solo_operativa?: boolean | null;
-  requiere_pernocta?: boolean | null;
-  pernocta_costo_usd?: number | string | null;
+  /** Instante operativo (timestamptz) → se pinta como día Cancún. */
   fecha_salida_plan?: string | null;
-  taco_salida?: number | string | null;
-  taco_llegada?: number | string | null;
-  taco_salida_origen?: string | null;
-  taco_llegada_origen?: string | null;
-  hora_salida?: string | null;
-  hora_llegada?: string | null;
-  revision_requerida?: boolean | null;
+  /** Fecha de PARED capturada a mano solo para PDF (date YYYY-MM-DD). */
+  pdf_fecha?: string | null;
+  solo_operativa?: boolean | null;
   cancelada_at?: string | null;
-  cancelada_motivo?: string | null;
 }
 
 /** Fila de `FlightsService.listCobros` (COBRO_COLS + cobro_grupo + conciliado). */
@@ -116,26 +107,6 @@ export interface CobroInternoRow {
   [k: string]: unknown;
 }
 
-export interface GastoInternoRow {
-  categoria?: string | null;
-  monto?: number | string | null;
-  moneda?: string | null;
-  tc_gasto?: number | string | null;
-}
-
-export interface FacturaInternaRow {
-  serie?: string | null;
-  folio?: string | number | null;
-  uuid_fiscal?: string | null;
-  estado?: string | null;
-  total?: number | string | null;
-  moneda?: string | null;
-  fecha_timbrado?: string | null;
-  facturado_a_nombre?: string | null;
-  cancelada_at?: string | null;
-  created_at?: string | null;
-}
-
 export interface ClienteInternoRow {
   nombre?: string | null;
   razon_social_default?: string | null;
@@ -143,22 +114,22 @@ export interface ClienteInternoRow {
   es_broker?: boolean | null;
 }
 
-export interface FichaAvionInterna {
-  matricula: string | null;
-  modelo: string | null;
+/** Fila del catálogo `aeropuerto` (`iata, nombre, ciudad`). */
+export interface AeropuertoInternoRow {
+  iata?: string | null;
+  nombre?: string | null;
+  ciudad?: string | null;
 }
 
 export interface CotizacionInternaInsumos {
   quote: QuoteInternaRow;
   escalas: EscalaInternaRow[];
   cobros: CobroInternoRow[];
-  gastos: GastoInternoRow[];
-  facturas: FacturaInternaRow[];
   cliente: ClienteInternoRow | null;
   /** usuario.id → nombre (piloto, copiloto, apoyos, created_by, registrado_por). */
   nombrePorId: ReadonlyMap<string, string>;
-  /** aeronave.id → ficha (tramos, cotizado, operativo, participación). */
-  aeronavePorId: ReadonlyMap<string, FichaAvionInterna>;
+  /** IATA (mayúsculas) → ficha del catálogo, para el nombre de ciudad de la tabla. */
+  aeropuertoPorIata: ReadonlyMap<string, AeropuertoInternoRow>;
   apoyos: VueloApoyoRow[];
   /** `vuelo.created_by` (no viene en VUELO_COLS). */
   creadoPorId: string | null;
@@ -196,9 +167,6 @@ const TARIFA_LABEL: Record<string, string> = {
   BROKER: 'Broker',
 };
 
-/** Categorías que NO son dinero de la empresa (fuera de todo total). */
-const CATEGORIAS_FUERA = new Set(['PERSONAL_DUENO']);
-
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === '') return null;
   const n = Number(v);
@@ -209,10 +177,6 @@ function str(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim();
   return t ? t : null;
-}
-
-function round1(n: number): number {
-  return Number(n.toFixed(1));
 }
 
 function round2(n: number): number {
@@ -249,14 +213,54 @@ function folioTexto(v: unknown): string | null {
   return str(v);
 }
 
-/** Re-export: la fuente única vive en `src/common/horas-taco.util.ts`. */
-export { horasTacoDe };
+/** Día Cancún YYYY-MM-DD de un ISO/date; null si viene vacío o inválido (nunca lanza). */
+function diaSeguro(v: unknown): string | null {
+  const s = str(v);
+  if (!s) return null;
+  try {
+    return diaCancun(s);
+  } catch {
+    return null;
+  }
+}
 
 /** Etiqueta "Modelo · Matrícula" (lo que haya). */
-function fichaTexto(f: FichaAvionInterna | null | undefined): string | null {
-  if (!f) return null;
+function fichaTexto(f: {
+  modelo: string | null;
+  matricula: string | null;
+}): string | null {
   const t = [str(f.modelo), str(f.matricula)].filter(Boolean).join(' · ');
   return t || null;
+}
+
+/** Horas decimales → "hh:mm" (1.3 → "01:18", 0.4 → "00:24"); nunca negativo. */
+export function horasAHhmm(h: number): string {
+  const m = Math.max(0, Math.round(h * 60));
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+/** Horas para texto: hasta 2 decimales sin ceros de relleno ("0.5", "2", "1.25"). */
+function horasTexto(h: number): string {
+  return String(Number(h.toFixed(2)));
+}
+
+/**
+ * Nombre CORTO de un aeropuerto para la tabla de tramos ("Cancun", "Merida"
+ * como en el formato de administración): `ciudad` del catálogo recortada al
+ * primer segmento antes de la coma ("Tuxtla Gutierrez, Chiapas, MX" →
+ * "Tuxtla Gutierrez"), sin espacios sobrantes y con inicial mayúscula
+ * ("cozumel" → "Cozumel"); sin ciudad cae al `nombre` con la misma regla;
+ * sin ninguno, el IATA.
+ */
+export function nombreCortoAeropuerto(
+  iata: string,
+  ficha: AeropuertoInternoRow | null | undefined,
+): string {
+  const primero = (v: unknown): string =>
+    typeof v === 'string' ? (v.split(',')[0] ?? '').trim() : '';
+  const base = primero(ficha?.ciudad) || primero(ficha?.nombre);
+  if (!base) return iata;
+  return base.charAt(0).toUpperCase() + base.slice(1);
 }
 
 // ===== Armador =====
@@ -268,11 +272,9 @@ export function armarCotizacionInternaPayload(
     quote: q,
     escalas,
     cobros,
-    gastos,
-    facturas,
     cliente,
     nombrePorId,
-    aeronavePorId,
+    aeropuertoPorIata,
     apoyos,
     creadoPorId,
     generadoPor,
@@ -285,6 +287,7 @@ export function armarCotizacionInternaPayload(
   const tiempos = obj(snap?.tiempos);
   const tarifa = obj(snap?.tarifa);
   const tuas = obj(snap?.tuas);
+  const rutaSnap = obj(snap?.ruta);
   const ivaSnap = obj(snap?.iva);
   const totales = obj(snap?.totales);
   const meta = obj(snap?.meta);
@@ -294,15 +297,16 @@ export function armarCotizacionInternaPayload(
   const esExterno = q.es_externo === true;
   const esInterno = meta?.cliente_interno === true;
   const tcVuelo = num(q.tc_usd_mxn);
-  const aeronaveId = str(q.aeronave_id);
 
-  // ---- Horas ----
+  // ---- Horas (snapshot.tiempos) ----
   const tiempoCobrable =
     num(tiempos?.cobrable_hr) ?? num(q.tiempo_cobrable_hr) ?? null;
   const tarifaHora = num(tarifa?.usd_por_hora) ?? num(q.tarifa_hora_usd);
   const vueloHr = num(tiempos?.vuelo_hr);
   const calzosHr = num(tiempos?.calzos_hr);
   const sobrevueloHr = num(tiempos?.sobrevuelo_hr);
+  const horaMinima = tiempos?.minimo_hora_aplicado === true;
+  const cobrableOverride = tiempos?.cobrable_proviene_de_override === true;
   let horasCotizadas: number | null = null;
   if (vueloHr != null) {
     horasCotizadas = round4(vueloHr + (calzosHr ?? 0) + (sobrevueloHr ?? 0));
@@ -316,16 +320,11 @@ export function armarCotizacionInternaPayload(
     horasCotizadas = tiempoCobrable;
   }
 
-  // ---- Itinerario (escalas VIVAS; sin escalas cae al snapshot) ----
-  const snapPorOrden = new Map<number, Record<string, unknown>>();
-  for (const t of tramosSnap) {
-    const o = num(t.orden);
-    if (o != null && !snapPorOrden.has(o)) snapPorOrden.set(o, t);
-  }
+  // ---- Avión cotizado (snapshot); sin snapshot cae al avión del vuelo ----
   const cotizada = obj(q.aeronave_cotizada);
   const snapAeronave = obj(snap?.aeronave);
-  const cotizadaId = str(cotizada?.id) ?? str(snapAeronave?.id);
-  const fichaCotizada: FichaAvionInterna | null = cotizada
+  const operativaRaw = obj(q.aeronave_operativa);
+  const fichaCotizada = cotizada
     ? { matricula: str(cotizada.matricula), modelo: str(cotizada.modelo) }
     : snapAeronave
       ? {
@@ -337,115 +336,12 @@ export function armarCotizacionInternaPayload(
             matricula: str(q.avion_externo_matricula),
             modelo: str(q.avion_externo_modelo),
           }
-        : null;
-  const matriculaDeTramo = (escalaAeronaveId: unknown): string | null => {
-    const id = str(escalaAeronaveId) ?? aeronaveId;
-    if (str(escalaAeronaveId) == null && esExterno) {
-      // Tramo sin avión propio en un vuelo cubierto por externo: vuela el
-      // avión AJENO (el aeronave_id del vuelo es solo referencia de tarifa).
-      return str(q.avion_externo_matricula);
-    }
-    return id ? (aeronavePorId.get(id)?.matricula ?? null) : null;
-  };
-  const escalasOrdenadas = [...escalas].sort(
-    (a, b) => (num(a.orden) ?? 0) - (num(b.orden) ?? 0),
-  );
-  let tramos: CotizacionInternaTramoPdf[];
-  if (escalasOrdenadas.length > 0) {
-    tramos = escalasOrdenadas.map((e, idx) => {
-      const ordenReal = num(e.orden) ?? idx + 1;
-      const ts = snapPorOrden.get(ordenReal);
-      // Cruce snapshot ↔ escala por orden Y mismo par origen/destino: con
-      // itinerario operativo (ferries intercalados, otra base) el orden no
-      // identifica el mismo tramo y se atribuirían horas ajenas.
-      const horasCot =
-        ts &&
-        str(ts.origen) === str(e.origen_iata) &&
-        str(ts.destino) === str(e.destino_iata)
-          ? num(ts.tiempo_hr)
+        : operativaRaw
+          ? {
+              matricula: str(operativaRaw.matricula),
+              modelo: str(operativaRaw.modelo),
+            }
           : null;
-      const esFerry = e.es_ferry === true;
-      return {
-        orden: idx + 1,
-        orden_real: ordenReal,
-        origen: str(e.origen_iata) ?? '',
-        destino: str(e.destino_iata) ?? '',
-        pasajeros: esFerry ? 0 : num(e.pasajeros),
-        fecha_plan: str(e.fecha_salida_plan),
-        hora_salida: str(e.hora_salida),
-        hora_llegada: str(e.hora_llegada),
-        matricula: matriculaDeTramo(e.aeronave_id),
-        piloto: nombreDe(e.piloto_id) ?? nombreDe(q.piloto_id),
-        taco_salida: num(e.taco_salida),
-        taco_llegada: num(e.taco_llegada),
-        taco_salida_origen: str(e.taco_salida_origen),
-        taco_llegada_origen: str(e.taco_llegada_origen),
-        horas_taco: horasTacoDe(e.taco_salida, e.taco_llegada),
-        horas_cotizadas: horasCot,
-        es_ferry: esFerry,
-        solo_operativa: e.solo_operativa === true,
-        es_sobrevuelo: e.es_sobrevuelo === true,
-        requiere_pernocta: e.requiere_pernocta === true,
-        pernocta_usd: num(e.pernocta_costo_usd) ?? 0,
-        cancelado: e.cancelada_at != null,
-        cancelada_motivo: str(e.cancelada_motivo),
-        revision_requerida: e.revision_requerida === true,
-      };
-    });
-  } else {
-    tramos = tramosSnap.map((t, idx) => {
-      const esFerry = t.es_ferry === true;
-      return {
-        orden: idx + 1,
-        orden_real: num(t.orden) ?? idx + 1,
-        origen: str(t.origen) ?? '',
-        destino: str(t.destino) ?? '',
-        pasajeros: esFerry ? 0 : num(t.pasajeros),
-        fecha_plan: null,
-        hora_salida: null,
-        hora_llegada: null,
-        matricula: fichaCotizada?.matricula ?? null,
-        piloto: nombreDe(q.piloto_id),
-        taco_salida: null,
-        taco_llegada: null,
-        taco_salida_origen: null,
-        taco_llegada_origen: null,
-        horas_taco: null,
-        horas_cotizadas: num(t.tiempo_hr),
-        es_ferry: esFerry,
-        solo_operativa: false,
-        es_sobrevuelo: false,
-        requiere_pernocta: t.requiere_pernocta === true,
-        pernocta_usd: num(t.pernocta_usd) ?? 0,
-        cancelado: false,
-        cancelada_motivo: null,
-        revision_requerida: false,
-      };
-    });
-  }
-  // Voladas = Σ tacos de tramos NO cancelados (fuente única horas-taco.util).
-  const horasVoladas = sumaHorasTaco(
-    tramos.filter((t) => !t.cancelado).map((t) => t.horas_taco),
-  );
-  // Δ voladas − cotizadas ya calculado aquí: la plantilla solo lo pinta.
-  const deltaHoras =
-    horasVoladas != null && horasCotizadas != null
-      ? round1(horasVoladas - horasCotizadas)
-      : null;
-  const vivas = escalasOrdenadas.filter((e) => e.cancelada_at == null);
-  const ruta =
-    vivas.length > 0
-      ? puntosRutaVisible(vivas).join(' → ')
-      : tramos.length > 0
-        ? puntosRutaVisible(
-            tramos.map((t) => ({
-              origen_iata: t.origen,
-              destino_iata: t.destino,
-            })),
-          ).join(' → ')
-        : [str(q.origen_iata), str(q.destino_iata)]
-            .filter(Boolean)
-            .join(' → ') || null;
 
   // ---- Desglose canónico enriquecido ----
   const filasTuas = arr(tuas?.filas);
@@ -467,7 +363,6 @@ export function armarCotizacionInternaPayload(
         clave,
         concepto: str(d.concepto) ?? clave,
         monto_usd: num(d.monto_usd) ?? 0,
-        exento: false,
       };
       if (clave === 'TIEMPO_VUELO') {
         if (tiempoCobrable != null && tarifaHora != null) {
@@ -551,7 +446,7 @@ export function armarCotizacionInternaPayload(
     ): CotizacionInternaLineaPdf[] => {
       const n = num(v);
       return n != null && n !== 0
-        ? [{ clave, concepto, monto_usd: round2(n), exento: false }]
+        ? [{ clave, concepto, monto_usd: round2(n) }]
         : [];
     };
     const tiempoLinea = col(
@@ -586,48 +481,217 @@ export function armarCotizacionInternaPayload(
       ),
     ];
   }
-  // TUAS EXENTOS: aeropuertos del itinerario cotizado sin fila cobrada.
-  const iatasCobradas = new Set(
-    filasTuas.map((f) => str(f.iata)?.toUpperCase()).filter(Boolean),
+  // Servicio aéreo canónico (línea TIEMPO_VUELO): el ancla contra la que se
+  // concilia la tabla de tramos.
+  const montoTiempoVuelo = round2(
+    lineas.find((l) => l.clave === 'TIEMPO_VUELO')?.monto_usd ??
+      num(totales?.subtotal_vuelo_usd) ??
+      num(q.subtotal_vuelo_usd) ??
+      0,
   );
-  const tuasExentos: string[] = [];
-  const razonExento = new Map<string, string | null>();
-  const aeropuertosTuas: unknown[] = Array.isArray(tuas?.aeropuertos)
-    ? tuas.aeropuertos
-    : [];
-  for (const a of aeropuertosTuas) {
-    const iata =
-      (typeof a === 'string' ? a : str(obj(a)?.iata))?.toUpperCase() ?? null;
-    if (!iata || iatasCobradas.has(iata) || tuasExentos.includes(iata))
-      continue;
-    tuasExentos.push(iata);
-    razonExento.set(iata, str(obj(a)?.razon));
-  }
-  if (tuasExentos.length > 0) {
-    const paxVuelo = num(tuas?.pasajeros) ?? num(q.pasajeros);
-    const sinteticas: CotizacionInternaLineaPdf[] = tuasExentos.map((iata) => ({
-      clave: 'TUAS',
-      concepto: `TUA ${iata} · exento${razonExento.get(iata) ? ` · ${razonExento.get(iata)}` : ''}`,
-      monto_usd: 0,
-      ...(paxVuelo != null ? { cantidad: paxVuelo, unitario: 0 } : {}),
-      moneda: 'USD',
-      exento: true,
-    }));
-    let pos = -1;
-    lineas.forEach((l, i) => {
-      if (l.clave === 'TUAS' || (pos < 0 && l.clave === 'TIEMPO_VUELO'))
-        pos = i;
-    });
-    lineas.splice(pos + 1, 0, ...sinteticas);
-  }
 
-  // ---- Totales, IVA, partición ----
+  // ---- TUAS cobradas (solo las que se cobraron; las exentas no viajan) ----
+  const tuasCobradas: CotizacionInternaTuaCobradaPdf[] = filasTuas
+    .filter(
+      (f) => (num(f.total_usd) ?? 0) > 0 || (num(f.total_nativo) ?? 0) > 0,
+    )
+    .map((f) => ({
+      iata: (str(f.iata) ?? '').toUpperCase(),
+      pax: num(f.pax) ?? 0,
+      unitario: num(f.monto_pax) ?? 0,
+      moneda: str(f.moneda) ?? 'USD',
+      total_nativo: num(f.total_nativo) ?? num(f.total_usd) ?? 0,
+      tc_aplicado: num(f.tc_aplicado),
+      total_usd: round2(num(f.total_usd) ?? 0),
+    }));
+
+  // ---- Tramos cotizados (snapshot.tramos; fechas desde las escalas) ----
+  const fechaVuelo = diaSeguro(q.fecha_vuelo);
+  const fechaFin = diaSeguro(q.fecha_fin);
+  const escalasOrdenadas = [...escalas].sort(
+    (a, b) => (num(a.orden) ?? 0) - (num(b.orden) ?? 0),
+  );
+  const nombreDeIata = (iata: string): string =>
+    nombreCortoAeropuerto(iata, aeropuertoPorIata.get(iata.toUpperCase()));
+  // Cruce snapshot ↔ escala por orden Y mismo par origen/destino: con
+  // itinerario operativo (ferries intercalados, otra base) el orden no
+  // identifica el mismo tramo y se fecharía con un tramo ajeno.
+  const escalaDeTramo = (
+    orden: number,
+    o: string,
+    d: string,
+  ): EscalaInternaRow | undefined =>
+    escalasOrdenadas.find(
+      (e) =>
+        num(e.orden) === orden &&
+        (str(e.origen_iata) ?? '').toUpperCase() === o &&
+        (str(e.destino_iata) ?? '').toUpperCase() === d,
+    );
+  let tramosCot: CotizacionInternaTramoCotizadoPdf[];
+  let puntosRuta: string[];
+  if (tramosSnap.length > 0) {
+    let ultimaFecha: string | null = null;
+    tramosCot = tramosSnap.map((t, idx) => {
+      const orden = num(t.orden) ?? idx + 1;
+      const o = (str(t.origen) ?? '').toUpperCase();
+      const d = (str(t.destino) ?? '').toUpperCase();
+      const esc = escalaDeTramo(orden, o, d);
+      // Día del tramo: plan de la escala → fecha de pared del PDF → el día
+      // del tramo anterior (intermedios del mismo día) → día del vuelo.
+      const fecha =
+        diaSeguro(esc?.fecha_salida_plan) ??
+        diaSeguro(esc?.pdf_fecha) ??
+        ultimaFecha ??
+        fechaVuelo;
+      ultimaFecha = fecha;
+      const tiempoHr = round4(num(t.tiempo_hr) ?? 0);
+      // Tarifa por tramo solo si el snapshot algún día la trae (multi-avión
+      // en el precio sigue pendiente): hoy es la ÚNICA del vuelo.
+      const tarifaTramo = num(t.tarifa_usd_hr) ?? tarifaHora;
+      const totalSnap = num(t.total_usd) ?? num(t.costo_usd);
+      const total =
+        totalSnap != null
+          ? round2(totalSnap)
+          : tarifaTramo != null
+            ? round2(tiempoHr * tarifaTramo)
+            : 0;
+      const esFerry = t.es_ferry === true;
+      const origenNombre = nombreDeIata(o);
+      const destinoNombre = nombreDeIata(d);
+      return {
+        orden: idx + 1,
+        ruta: `${origenNombre}-${destinoNombre}`,
+        origen_iata: o,
+        destino_iata: d,
+        origen_nombre: origenNombre,
+        destino_nombre: destinoNombre,
+        fecha,
+        millas: num(t.millas),
+        tiempo_hr: tiempoHr,
+        tiempo_hhmm: horasAHhmm(tiempoHr),
+        tarifa_hora_usd: tarifaTramo,
+        total_usd: total,
+        pax: esFerry ? 0 : num(t.pasajeros),
+        es_ferry: esFerry,
+        pernocta: t.requiere_pernocta === true,
+        pernocta_usd: num(t.pernocta_usd) ?? 0,
+        tuas_usd: num(t.tuas_usd) ?? 0,
+        consolidado: false,
+      };
+    });
+    puntosRuta = puntosRutaVisible(
+      tramosCot.map((t) => ({
+        origen_iata: t.origen_iata,
+        destino_iata: t.destino_iata,
+      })),
+    );
+  } else {
+    // RESPALDO: snapshot anterior al desglose por tramo o cotización sin
+    // snapshot (motor viejo). UNA fila consolidada con los totales que el
+    // snapshot/vuelo YA traen — jamás se re-deriva el motor por tramo.
+    const vivas = escalasOrdenadas.filter(
+      (e) => e.cancelada_at == null && e.solo_operativa !== true,
+    );
+    puntosRuta =
+      vivas.length > 0
+        ? puntosRutaVisible(vivas)
+        : ([str(q.origen_iata), str(q.destino_iata)].filter(
+            Boolean,
+          ) as string[]);
+    if (
+      vivas.length === 0 &&
+      (rutaSnap?.es_redondo_auto === true || q.es_redondo_auto === true) &&
+      puntosRuta.length === 2
+    ) {
+      puntosRuta = [...puntosRuta, puntosRuta[0]];
+    }
+    const tiempoHr =
+      vueloHr != null
+        ? round4(vueloHr + (calzosHr ?? 0))
+        : round4(tiempoCobrable ?? 0);
+    const millasOneWay = num(q.millas_nauticas_one_way);
+    const millas =
+      num(rutaSnap?.millas_nauticas_totales) ??
+      (millasOneWay != null
+        ? round2(millasOneWay * (q.es_redondo_auto === true ? 2 : 1))
+        : null);
+    // Con snapshot (tiempos reales) el total se arma como en la tabla; sin
+    // snapshot no hay tiempos por tramo: el servicio aéreo del vuelo tal cual.
+    const total = snap
+      ? tarifaHora != null
+        ? round2(tiempoHr * tarifaHora)
+        : 0
+      : montoTiempoVuelo;
+    const o = puntosRuta[0] ?? '';
+    const d = puntosRuta[puntosRuta.length - 1] ?? '';
+    const nombres = puntosRuta.map((p) => nombreDeIata(p));
+    tramosCot =
+      puntosRuta.length > 0
+        ? [
+            {
+              orden: 1,
+              ruta: nombres.join('-'),
+              origen_iata: o,
+              destino_iata: d,
+              origen_nombre: nombres[0] ?? o,
+              destino_nombre: nombres[nombres.length - 1] ?? d,
+              fecha:
+                diaSeguro(vivas[0]?.fecha_salida_plan) ??
+                diaSeguro(vivas[0]?.pdf_fecha) ??
+                fechaVuelo,
+              millas,
+              tiempo_hr: tiempoHr,
+              tiempo_hhmm: horasAHhmm(tiempoHr),
+              tarifa_hora_usd: tarifaHora,
+              total_usd: total,
+              pax: num(q.pasajeros),
+              es_ferry: false,
+              pernocta: false,
+              pernocta_usd: 0,
+              tuas_usd: 0,
+              consolidado: true,
+            },
+          ]
+        : [];
+  }
+  const tramosTiempoTotal = round4(
+    tramosCot.reduce((acc, t) => acc + t.tiempo_hr, 0),
+  );
+  const tramosTotal = round2(
+    tramosCot.reduce((acc, t) => acc + t.total_usd, 0),
+  );
+  // Ajuste = servicio aéreo canónico − Σ tramos. Se EXPONE con su motivo,
+  // nunca se reparte entre tramos ni se toca el desglose.
+  const tramosAjuste = round2(montoTiempoVuelo - tramosTotal);
+  let tramosAjusteMotivo: string | null = null;
+  if (Math.abs(tramosAjuste) >= 0.005) {
+    const partes: string[] = [];
+    if (cobrableOverride && tiempoCobrable != null) {
+      partes.push(`Horas pactadas ${horasTexto(tiempoCobrable)} h`);
+    } else {
+      if (sobrevueloHr != null && sobrevueloHr > 0) {
+        partes.push(`Sobrevuelo ${horasTexto(sobrevueloHr)} h`);
+      }
+      if (horaMinima) partes.push('Hora mínima 1.0 h');
+    }
+    tramosAjusteMotivo =
+      partes.length > 0
+        ? partes.join(' · ')
+        : tarifaHora == null
+          ? 'Tarifa no disponible'
+          : 'Redondeo';
+  }
+  const ruta = puntosRuta.length > 0 ? puntosRuta.join(' → ') : null;
+
+  // ---- Totales, IVA, pago al vendedor ----
   const totalUsd = round2(
     num(q.monto_total_usd) ?? num(totales?.total_usd) ?? 0,
   );
   const ivaUsd = round2(num(ivaSnap?.monto_usd) ?? num(q.iva_usd) ?? 0);
   const ivaPctRaw = num(ivaSnap?.porcentaje) ?? num(q.iva_pct) ?? 0;
   const ivaPct = ivaPctRaw <= 1 ? round2(ivaPctRaw * 100) : round2(ivaPctRaw);
+  // particionIngresoVuelo SOLO para el pago al vendedor (fuente única
+  // pagoVendedorUsd); la partición completa no viaja en este documento.
   const particion = particionIngresoVuelo(q);
   // CANCELADO / partición inconsistente: sin provisión al vendedor (misma
   // regla que findById, el reporte por vuelo y Otros movimientos).
@@ -636,29 +700,6 @@ export function armarCotizacionInternaPayload(
   const comisionVendedor = particion.comision_vendedor_usd;
   const pagoVendedorOut =
     pagoVendedor > 0 ? pagoVendedor : comisionVendedor > 0 ? 0 : null;
-
-  // ---- Participación multi-avión (fuente única) ----
-  let participacionAviones: ReporteVueloParticipacionPayload[] = [];
-  if (!esExterno) {
-    const escalasPart: EscalaParticipacionInput[] = escalasOrdenadas;
-    const p = participacionPorAeronave(
-      { aeronave_id: aeronaveId, calculo_snapshot: q.calculo_snapshot },
-      escalasPart,
-    );
-    if (p.multi_avion && particion.total_usd > 0) {
-      const partes = repartirUsd(particion.avion_usd, p);
-      const ids = [...p.factores.keys()].sort((a, b) =>
-        a === p.principal ? -1 : b === p.principal ? 1 : 0,
-      );
-      participacionAviones = ids.map((id) => ({
-        aeronave_id: id,
-        matricula: aeronavePorId.get(id)?.matricula ?? '?',
-        factor: p.factores.get(id) ?? 0,
-        tramos: p.tramos_por_avion.get(id) ?? 0,
-        venta_usd: partes.get(id) ?? 0,
-      }));
-    }
-  }
 
   // ---- Cobros ----
   const cobrosOrdenados = [...cobros].sort((a, b) => {
@@ -721,112 +762,7 @@ export function armarCotizacionInternaPayload(
     esInterno,
   });
 
-  // ---- Gastos (USD directo; MXN ÷ tc_gasto; respaldo TC del vuelo; si no, sin TC) ----
-  const porCategoria = new Map<string, { total: number; n: number }>();
-  let gastosSinTcCount = 0;
-  let gastosSinTcMxn = 0;
-  let hayGastos = false;
-  for (const g of gastos) {
-    const cat = str(g.categoria) ?? 'OTRO';
-    if (CATEGORIAS_FUERA.has(cat)) continue;
-    hayGastos = true;
-    const monto = num(g.monto) ?? 0;
-    let usd: number | null;
-    if (g.moneda === 'USD') usd = monto;
-    else {
-      const tc = num(g.tc_gasto);
-      const tcOk =
-        tc != null && tc > 0
-          ? tc
-          : tcVuelo != null && tcVuelo > 0
-            ? tcVuelo
-            : null;
-      usd = tcOk ? monto / tcOk : null;
-    }
-    if (usd == null) {
-      gastosSinTcCount += 1;
-      gastosSinTcMxn += monto;
-      continue;
-    }
-    const acc = porCategoria.get(cat) ?? { total: 0, n: 0 };
-    acc.total += usd;
-    acc.n += 1;
-    porCategoria.set(cat, acc);
-  }
-  const gastosPorCategoria: CotizacionInternaGastoCategoriaPdf[] = [
-    ...porCategoria.entries(),
-  ]
-    .map(([categoria, v]) => ({
-      categoria,
-      etiqueta: etiquetaCategoriaGasto(categoria),
-      total_usd: round2(v.total),
-      n: v.n,
-    }))
-    .sort((a, b) => b.total_usd - a.total_usd);
-  const costoExterno = esExterno ? num(q.costo_externo_usd) : null;
-  const gastosSuma = gastosPorCategoria.reduce(
-    (acc, g) => acc + g.total_usd,
-    0,
-  );
-  const gastosTotal =
-    hayGastos || (costoExterno != null && costoExterno > 0)
-      ? round2(gastosSuma + (costoExterno ?? 0))
-      : null;
-  const utilidadBase: 'cobrado' | 'total' =
-    totalCobrado > 0 ? 'cobrado' : 'total';
-  const utilidadBruta =
-    gastosTotal != null
-      ? round2(
-          (utilidadBase === 'cobrado' ? totalCobrado : totalUsd) - gastosTotal,
-        )
-      : null;
-
-  // ---- Facturación ----
-  const facturasOut: CotizacionInternaFacturaPdf[] = facturas.map((f) => ({
-    serie: str(f.serie),
-    folio: f.folio == null ? null : String(f.folio),
-    uuid_fiscal: str(f.uuid_fiscal),
-    estado: str(f.estado),
-    total: num(f.total),
-    moneda: str(f.moneda),
-    fecha_timbrado: str(f.fecha_timbrado),
-    facturado_a_nombre: str(f.facturado_a_nombre),
-    cancelada: f.cancelada_at != null,
-  }));
-  const vigentes = facturasOut.filter((f) => !f.cancelada);
-  const cfdi =
-    vigentes[vigentes.length - 1] ??
-    facturasOut[facturasOut.length - 1] ??
-    null;
-  const cfdiFolio = cfdi
-    ? [cfdi.serie, cfdi.folio].filter(Boolean).join('-') || cfdi.uuid_fiscal
-    : null;
-  const cfdiEstatus = cfdi
-    ? cfdi.cancelada
-      ? 'CANCELADA'
-      : (cfdi.estado ?? 'TIMBRADA')
-    : q.facturado === true
-      ? 'Facturado (bandera del vuelo, sin CFDI ligado)'
-      : null;
-
   // ---- Cabecera ----
-  const operativaRaw = obj(q.aeronave_operativa);
-  const operativaId = str(operativaRaw?.id) ?? aeronaveId;
-  const fichaOperativa: FichaAvionInterna | null = esExterno
-    ? null
-    : operativaRaw
-      ? {
-          matricula: str(operativaRaw.matricula),
-          modelo: str(operativaRaw.modelo),
-        }
-      : operativaId
-        ? (aeronavePorId.get(operativaId) ?? null)
-        : null;
-  const operativaDifiere =
-    fichaOperativa != null &&
-    (cotizadaId == null || operativaId == null
-      ? fichaOperativa.matricula !== fichaCotizada?.matricula
-      : cotizadaId !== operativaId);
   const grupo = rel(q.grupo);
   const metaGrupo = obj(meta?.grupo);
   const combinado = rel(q.combinado);
@@ -843,6 +779,9 @@ export function armarCotizacionInternaPayload(
     razon_social: str(cliente?.razon_social_default),
     cliente_rfc: str(cliente?.rfc),
     es_broker: cliente?.es_broker === true,
+    fecha_vuelo: fechaVuelo,
+    fecha_vuelo_fin:
+      fechaFin != null && fechaFin !== fechaVuelo ? fechaFin : null,
     fecha: str(q.fecha_solicitud) ?? str(q.created_at),
     fecha_confirmacion: str(q.fecha_confirmacion),
     tarifa_tipo: tarifaTipo,
@@ -865,7 +804,6 @@ export function armarCotizacionInternaPayload(
     cotizado_por: nombreDe(creadoPorId),
     aeronave_cotizada_modelo: fichaCotizada?.modelo ?? null,
     aeronave_cotizada_matricula: fichaCotizada?.matricula ?? null,
-    aeronave_operativa: operativaDifiere ? fichaTexto(fichaOperativa) : null,
     avion_externo: esExterno
       ? fichaTexto({
           modelo: str(q.avion_externo_modelo),
@@ -878,8 +816,6 @@ export function armarCotizacionInternaPayload(
     apoyos: apoyosNivelVuelo(apoyos)
       .map((id) => nombreDe(id))
       .filter((x): x is string => !!x),
-    fecha_traslado_inicial: str(q.fecha_vuelo),
-    fecha_traslado_final: str(q.fecha_traslado_final) ?? str(q.fecha_fin),
     pasajeros: num(q.pasajeros) ?? 0,
     ruta,
     itinerario_operativo: q.itinerario_operativo === true,
@@ -893,19 +829,22 @@ export function armarCotizacionInternaPayload(
     grupo_total_aviones: num(metaGrupo?.total_aviones),
     combinado_con_folio: folioTexto(combinado?.folio),
 
-    tramos,
+    tramos_cotizados: tramosCot,
+    tramos_tiempo_total_hr: tramosTiempoTotal,
+    tramos_tiempo_total_hhmm: horasAHhmm(tramosTiempoTotal),
+    tramos_total_usd: tramosTotal,
+    tramos_ajuste_usd: tramosAjuste,
+    tramos_ajuste_motivo: tramosAjusteMotivo,
     horas_cotizadas_hr: horasCotizadas,
     vuelo_hr: vueloHr,
     calzos_hr: calzosHr,
     sobrevuelo_hr: sobrevueloHr,
-    horas_voladas_hr: horasVoladas,
-    delta_horas_hr: deltaHoras,
     tiempo_cobrable_hr: tiempoCobrable,
-    hora_minima_aplicada: tiempos?.minimo_hora_aplicado === true,
-    cobrable_override: tiempos?.cobrable_proviene_de_override === true,
+    hora_minima_aplicada: horaMinima,
+    cobrable_override: cobrableOverride,
 
     lineas,
-    tuas_exentos: tuasExentos,
+    tuas_cobradas: tuasCobradas,
     subtotal_vuelo_usd: round2(
       num(totales?.subtotal_vuelo_usd) ?? num(q.subtotal_vuelo_usd) ?? 0,
     ),
@@ -927,8 +866,6 @@ export function armarCotizacionInternaPayload(
     iva_comision_vendedor_usd:
       pagoVendedor > 0 ? ivaComisionVendedorUsd(particion) : 0,
     pago_vendedor_usd: pagoVendedorOut,
-    neto_vuelatour_usd:
-      pagoVendedor > 0 ? round2(particion.total_usd - pagoVendedor) : null,
     ajuste_final_usd: round2(
       num(totales?.ajuste_final_usd) ?? num(q.ajuste_final_usd) ?? 0,
     ),
@@ -946,15 +883,6 @@ export function armarCotizacionInternaPayload(
     mxn_nativos: num(totales?.mxn_nativos),
     version_motor: str(meta?.version_motor),
     calculado_at: str(meta?.calculado_at),
-    venta_avion_usd: particion.total_usd > 0 ? particion.avion_usd : null,
-    otros_ingresos_vuelatour_usd:
-      particion.total_usd > 0 ? particion.vuelatour_usd : null,
-    iva_avion_usd: particion.total_usd > 0 ? particion.iva_avion_usd : null,
-    iva_vuelatour_usd:
-      particion.total_usd > 0 ? particion.iva_vuelatour_usd : null,
-    particion_fuente: particion.fuente,
-    particion_inconsistente: particion.inconsistente,
-    participacion_aviones: participacionAviones,
 
     cobros: cobrosOut,
     total_cobrado_usd: totalCobrado,
@@ -969,20 +897,8 @@ export function armarCotizacionInternaPayload(
     semaforo_cobro_key: semaforo.key,
     semaforo_cobro_label: semaforo.label,
 
-    gastos_por_categoria: gastosPorCategoria,
-    gastos_total_usd: gastosTotal,
-    gastos_sin_tc_count: gastosSinTcCount,
-    gastos_sin_tc_mxn: round2(gastosSinTcMxn),
-    costo_externo_usd: costoExterno,
-    utilidad_bruta_usd: utilidadBruta,
-    utilidad_base: utilidadBase,
-
     notas_cliente: str(q.notas),
     notas_internas: str(q.notas_internas),
-    facturado: q.facturado === true,
-    facturas: facturasOut,
-    cfdi_estatus: cfdiEstatus,
-    cfdi_folio: cfdiFolio,
 
     generado: ahora.toISOString(),
     generado_cancun: fechaHoraCancun(ahora),

@@ -191,7 +191,7 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'PDF «Cotización interna» (USO INTERNO, una hoja, sin fotos): desglose canónico completo con comisión del vendedor, horas cotizadas vs tacómetros por tramo, cobros con comisión bancaria/neto/conciliación, gastos por categoría y CFDI. Jamás se manda al cliente. Sin SOCIO ni PILOTO.',
+      'PDF «Cotización interna» v2 (USO INTERNO, una hoja, sin fotos): SOLO lo de la cotización — fecha del vuelo, tabla de tramos (ruta con ciudad · fecha · millas · tiempo con calzos · costo/hr · total), desglose canónico con comisión del vendedor, TUAS cobradas, cobros con comisión bancaria/neto/conciliación y notas internas. Sin operación (tacos), partición, gastos ni CFDI: eso vive en el reporte del vuelo. Jamás se manda al cliente. Sin SOCIO ni PILOTO.',
   })
   async pdfInterno(
     @Param('id', ParseUUIDPipe) id: string,
