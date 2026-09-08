@@ -10,11 +10,13 @@ import {
   IsEnum,
   IsIn,
   IsInt,
+  IsISO8601,
   IsNumber,
   IsObject,
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -308,6 +310,20 @@ export class CreateGastoDto {
   @IsOptional()
   @IsBoolean()
   permitir_fecha_antigua?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Momento REAL de captura (7-sep-2026), ISO 8601 CON zona horaria ' +
+      '(ej. 2026-09-05T14:32:00-05:00 o ...Z). La app lo manda al guardar ' +
+      'aunque esté sin señal (el outbox lo sube después: created_at = ' +
+      'llegada al servidor). Omitido = ahora (panel, cargas masivas). Se ' +
+      'rechaza con 400 si viene sin zona, en el futuro (> 10 min) o antes ' +
+      'de 2020. Solo auditoría: no toca dinero ni ventanas de edición; en ' +
+      'PATCH se ignora (se fija una sola vez al crear).',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  capturado_en?: string;
 }
 
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {
@@ -582,15 +598,32 @@ export class ListGastosQuery {
       'Fecha de CAPTURA >= (YYYY-MM-DD, día Cancún): lo que se subió desde esa fecha aunque el ticket traiga otra.',
   })
   @IsOptional()
-  @IsDateString()
+  // Solo día puro: el servicio concatena `T00:00:00-05:00` (corte Cancún);
+  // un ISO con hora armaría un timestamp inválido y PostgREST respondería
+  // con un error opaco en vez de un 400 legible.
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'capturado_desde debe ser un día YYYY-MM-DD',
+  })
   capturado_desde?: string;
 
   @ApiPropertyOptional({
     description: 'Fecha de CAPTURA <= (YYYY-MM-DD, día Cancún)',
   })
   @IsOptional()
-  @IsDateString()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'capturado_hasta debe ser un día YYYY-MM-DD',
+  })
   capturado_hasta?: string;
+
+  @ApiPropertyOptional({
+    enum: ['fecha', 'captura'],
+    default: 'fecha',
+    description:
+      'Orden del listado: fecha = fecha del consumo (fecha_gasto desc, luego llegada al servidor); captura = momento real de captura (capturado_en desc). El Excel respeta el mismo orden.',
+  })
+  @IsOptional()
+  @IsIn(['fecha', 'captura'])
+  orden?: 'fecha' | 'captura';
 
   @ApiPropertyOptional({
     description: 'Solo gastos sin avión asignado (bandeja de pendientes).',

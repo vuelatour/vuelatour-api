@@ -1,4 +1,9 @@
-import { diaCancun, hoyCancun, restarMeses } from './fecha-cancun.util';
+import {
+  diaCancun,
+  fechaHoraCancun,
+  hoyCancun,
+  restarMeses,
+} from './fecha-cancun.util';
 
 describe('restarMeses', () => {
   it('resta meses calendario a una fecha de pared', () => {
@@ -46,5 +51,33 @@ describe('diaCancun', () => {
 
   it('fecha inválida → error legible', () => {
     expect(() => diaCancun('no-es-fecha')).toThrow(/Fecha inválida/);
+  });
+});
+
+describe('fechaHoraCancun', () => {
+  it('instante UTC → "YYYY-MM-DD HH:mm" en hora Cancún (UTC−5)', () => {
+    expect(fechaHoraCancun('2026-09-05T19:32:00.000Z')).toBe(
+      '2026-09-05 14:32',
+    );
+    // Cruce de día: 03:15 UTC del 6 es 22:15 del 5 en Cancún.
+    expect(fechaHoraCancun('2026-09-06T03:15:00Z')).toBe('2026-09-05 22:15');
+    // Medianoche Cancún nunca sale como "24:00".
+    expect(fechaHoraCancun('2026-09-06T05:00:00Z')).toBe('2026-09-06 00:00');
+  });
+
+  it('acepta offset explícito y Date', () => {
+    expect(fechaHoraCancun('2026-09-05T14:32:00-05:00')).toBe(
+      '2026-09-05 14:32',
+    );
+    expect(fechaHoraCancun(new Date('2026-09-05T19:32:00Z'))).toBe(
+      '2026-09-05 14:32',
+    );
+  });
+
+  it('nulo o inválido → cadena vacía (el Excel no se cae por una fila rara)', () => {
+    expect(fechaHoraCancun(null)).toBe('');
+    expect(fechaHoraCancun(undefined)).toBe('');
+    expect(fechaHoraCancun('')).toBe('');
+    expect(fechaHoraCancun('no-es-fecha')).toBe('');
   });
 });

@@ -13,7 +13,15 @@ import {
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
-import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import {
+  diaCancun,
+  fechaHoraCancun,
+  hoyCancun,
+} from '../../common/fecha-cancun.util';
+import {
+  capturadoAhora,
+  resolverCapturadoEn,
+} from '../../common/capturado-en.util';
 import {
   graciaSaneada,
   limiteCapturaMin,
@@ -51,7 +59,7 @@ import type {
 } from './dto/expenses.dto';
 
 const COLS =
-  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, created_at, updated_at';
+  'id, vuelo_id, aeronave_id, escala_id, usuario_captura_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, proveedor_id, medio_pago, tarjeta_terminacion, litros, tipo_combustible, lugar, fecha_hora_carga, estatus_comprobante, estatus_facturacion, foto_url, valor_ia_extraido, conciliado, duplicado_sospechado, folio_ticket, origen, factura_recibida_id, notas, requiere_visto_bueno, visto_bueno_por, visto_bueno_at, verificado_por, verificado_at, compra_id, compra_rol, capturado_en, created_at, updated_at';
 
 /**
  * Prefijo del aviso ⚠ "avión del gasto ≠ avión del tramo" que se anexa a
@@ -151,6 +159,9 @@ export class ExpensesService {
       { label: 'Facturación' },
       { label: 'Moneda' },
       { label: 'Monto', tipo: 'money' },
+      // Momento REAL de captura (7-sep-2026), hora Cancún — aparte de la
+      // fecha del consumo. Texto ya formateado: pyservices no formatea fechas.
+      { label: 'Capturado' },
     ];
     const filas = data.map((g) => {
       const x = g;
@@ -174,6 +185,9 @@ export class ExpensesService {
         FACT_LABEL[fact] ?? fact,
         (x.moneda as string) ?? '',
         Number(x.monto),
+        fechaHoraCancun(
+          (x.capturado_en as string | null) ?? (x.created_at as string),
+        ),
       ];
     });
     // Resumen del periodo por categoría (y moneda: un total MXN+USD mezclado
@@ -220,7 +234,8 @@ export class ExpensesService {
         : '';
     return this.pyservices.generateTablaXlsx({
       titulo: 'Gastos por avión / categoría',
-      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}${rango}`,
+      // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
+      subtitulo: `Generado ${this.cancunDate(new Date().toISOString())}${rango}`,
       resumen_titulo: 'Total del periodo por categoría',
       resumen,
       columnas,
@@ -231,10 +246,18 @@ export class ExpensesService {
   async list(filters: ListGastosQuery) {
     let q = this.supabase.service
       .from('gasto')
-      .select(LIST_COLS, { count: 'exact' })
-      .order('fecha_gasto', { ascending: false })
-      .order('created_at', { ascending: false })
-      .range(filters.offset, filters.offset + filters.limit - 1);
+      .select(LIST_COLS, { count: 'exact' });
+    // orden=captura (7-sep): "lo último que capturaron" sin importar la fecha
+    // del ticket. Default: fecha del consumo y, dentro del día, llegada.
+    q =
+      filters.orden === 'captura'
+        ? q
+            .order('capturado_en', { ascending: false, nullsFirst: false })
+            .order('created_at', { ascending: false })
+        : q
+            .order('fecha_gasto', { ascending: false })
+            .order('created_at', { ascending: false });
+    q = q.range(filters.offset, filters.offset + filters.limit - 1);
 
     if (filters.vuelo_id) q = q.eq('vuelo_id', filters.vuelo_id);
     if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
@@ -253,12 +276,14 @@ export class ExpensesService {
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
-    // Fecha de CAPTURA (28-ago): "lo que subieron esta semana" aunque el
+    // Fecha de CAPTURA (28-ago): "lo que capturaron esta semana" aunque el
     // ticket traiga otra fecha — así el panel muestra lo mismo que la app.
+    // Desde el 7-sep sobre `capturado_en` (momento REAL de captura, que en
+    // capturas sin señal es anterior a `created_at`); cortes en día Cancún.
     if (filters.capturado_desde)
-      q = q.gte('created_at', `${filters.capturado_desde}T00:00:00-05:00`);
+      q = q.gte('capturado_en', `${filters.capturado_desde}T00:00:00-05:00`);
     if (filters.capturado_hasta)
-      q = q.lte('created_at', `${filters.capturado_hasta}T23:59:59-05:00`);
+      q = q.lte('capturado_en', `${filters.capturado_hasta}T23:59:59-05:00`);
     // Pendiente = sin avión asignado (la bandeja debe quedar siempre vacía).
     // FIJO e INDIRECTO se excluyen: por diseño no llevan avión/vuelo — no son
     // "pendientes de resolver" (mismo criterio que el pre-cierre).
@@ -854,6 +879,8 @@ export class ExpensesService {
           estatus_comprobante: 'SIN_COMPROBANTE',
           notas:
             item.notas ?? `Cuota de aterrizaje ${esc.destino_iata as string}`,
+          // Gasto fabricado por oficina: capturado = ahora (sin DEFAULT en BD).
+          capturado_en: capturadoAhora(),
           created_by: userId,
           updated_by: userId,
         })
@@ -1030,6 +1057,10 @@ export class ExpensesService {
       rol,
       dto.permitir_fecha_antigua === true,
     );
+    // Momento REAL de captura (7-sep): lo manda la app al guardar (aunque
+    // esté sin señal); panel/masivo/backfill lo dejan = ahora. Se valida
+    // ANTES de cualquier consulta (400 claro con el valor a la vista).
+    const capturadoEn = resolverCapturadoEn(dto.capturado_en);
     // Regla SEMANAL de captura (1-sep): solo roles de CAMPO — la oficina
     // (vuelos pasados, cargas masivas, cargas históricas) queda exenta, y un
     // permiso temporal `gastos_sin_limite_hasta` vigente también exime.
@@ -1306,6 +1337,8 @@ export class ExpensesService {
       // Idempotencia (29-ago): un reintento con la misma llave colisiona en
       // uq_gasto_client_request y devuelve la fila EXISTENTE (abajo).
       client_request_id: dto.client_request_id ?? null,
+      // Auditoría (7-sep): cuándo se capturó de verdad; created_at = llegada.
+      capturado_en: capturadoEn,
       notas,
       created_by: userId,
       updated_by: userId,
@@ -2566,6 +2599,9 @@ export class ExpensesService {
     // La llave de idempotencia se fija SOLO al crear: reescribirla en un
     // PATCH podría colisionar con otra captura o robarle su llave.
     delete cols.client_request_id;
+    // El momento de captura también se fija UNA sola vez (7-sep): un PATCH
+    // (edición, reintento del outbox) jamás lo reescribe.
+    delete cols.capturado_en;
     // Acoplamiento medio↔tarjeta (3-sep): el CHECK gasto_check exige
     // terminación null salvo TARJETA_CORP. Cambiar a otro medio LIMPIA la
     // tarjeta (antes: 500 y oficina no podía corregir un medio mal

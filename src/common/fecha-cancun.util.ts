@@ -44,3 +44,32 @@ export function restarMeses(dia: string, meses: number): string {
   if (Number.isNaN(d.getTime())) throw new Error(`Fecha inválida: ${dia}`);
   return d.toISOString().slice(0, 10);
 }
+
+const FORMATO_FECHA_HORA_CANCUN = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Cancun',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hour12: false,
+});
+
+/**
+ * Fecha y hora "YYYY-MM-DD HH:mm" de un instante en hora Cancún (para
+ * celdas de texto en Excel y textos de auditoría). Cadena vacía si el valor
+ * viene nulo o no es un instante válido — nunca lanza (un reporte no se cae
+ * por una fila rara).
+ */
+export function fechaHoraCancun(iso: string | Date | null | undefined): string {
+  if (iso == null || iso === '') return '';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p: Record<string, string> = {};
+  for (const parte of FORMATO_FECHA_HORA_CANCUN.formatToParts(d)) {
+    p[parte.type] = parte.value;
+  }
+  // Intl puede devolver "24" para medianoche según el motor: normalizar.
+  const hora = p.hour === '24' ? '00' : p.hour;
+  return `${p.year}-${p.month}-${p.day} ${hora}:${p.minute}`;
+}

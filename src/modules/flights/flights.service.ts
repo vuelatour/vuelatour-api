@@ -4812,7 +4812,7 @@ export class FlightsService {
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(
-        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, usuario_captura_id, usuario:usuario_captura_id(nombre)',
+        'id, categoria, monto, moneda, medio_pago, fecha_gasto, notas, created_at, capturado_en, origen, usuario_captura_id, usuario:usuario_captura_id(nombre)',
       )
       .eq('vuelo_id', vueloId)
       .order('created_at', { ascending: false });
@@ -4835,6 +4835,13 @@ export class FlightsService {
         capturado_por_id: (g.usuario_captura_id as string | null) ?? null,
         capturado_at: g.created_at as string,
         created_at: g.created_at as string,
+        // Aditivo (7-sep-2026): momento REAL de captura (la app lo manda al
+        // guardar aunque esté sin señal) y origen (PILOTO/OFICINA/SISTEMA…).
+        // `capturado_at` sigue = created_at: es lo que gatea la ventana de
+        // edición y no cambia.
+        capturado_en: ((g.capturado_en as string | null) ??
+          g.created_at) as string,
+        origen: (g.origen as string | null) ?? null,
       };
     });
   }

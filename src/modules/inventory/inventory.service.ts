@@ -28,6 +28,7 @@ import {
 } from './dto/inventory.dto';
 import { normalizarCodigo } from './inventario-codigo.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
+import { capturadoAhora } from '../../common/capturado-en.util';
 // FIFO, venta/ganancia y agregados del cardex: fuente única (con spec).
 import {
   agregadosDeItem,
@@ -1864,6 +1865,8 @@ export class InventoryService {
         notas:
           `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'})` +
           (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
+        // Gasto fabricado por el sistema: capturado = ahora (7-sep).
+        capturado_en: capturadoAhora(),
         created_by: userId,
         updated_by: userId,
       })
@@ -1959,6 +1962,8 @@ export class InventoryService {
       notas:
         `Salida de bodega (toda la flota, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'} $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
+      // Gasto fabricado por el sistema: capturado = ahora (7-sep).
+      capturado_en: capturadoAhora(),
       created_by: userId,
       updated_by: userId,
     }));

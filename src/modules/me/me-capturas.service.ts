@@ -30,6 +30,13 @@ export interface CapturaItem {
   id: string;
   /** ISO: cuándo quedó el registro en el servidor. */
   fecha: string;
+  /**
+   * ISO (solo gastos/combustible, 7-sep-2026): momento REAL de captura —
+   * la app lo manda al guardar aunque esté sin señal; `fecha` es cuando el
+   * outbox lo subió. La app pinta "Capturado el … · subió el …" (una sola
+   * hora si coinciden ±1 min).
+   */
+  capturado_en?: string | null;
   /** Fecha del TICKET (YYYY-MM-DD, solo gastos): la app avisa si el año no cuadra. */
   fecha_gasto?: string | null;
   /** Fecha del COBRO (YYYY-MM-DD, solo cobros). */
@@ -124,7 +131,7 @@ export class MeCapturasService {
     let gastosQ = this.supabase.service
       .from('gasto')
       .select(
-        'id, vuelo_id, categoria, monto, moneda, medio_pago, litros, lugar, notas, duplicado_sospechado, created_at, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
+        'id, vuelo_id, categoria, monto, moneda, medio_pago, litros, lugar, notas, duplicado_sospechado, created_at, capturado_en, fecha_gasto, compra_id, compra_rol, proveedor:proveedor!proveedor_id(nombre), compra:compra!compra_id(id, folio)',
       )
       .eq('usuario_captura_id', userId);
     if (desdeIso) gastosQ = gastosQ.gte('created_at', desdeIso);
@@ -313,6 +320,8 @@ export class MeCapturasService {
       tipo: esCombustible ? 'COMBUSTIBLE' : 'GASTO',
       id: g.id as string,
       fecha: g.created_at as string,
+      capturado_en: ((g.capturado_en as string | null) ??
+        g.created_at) as string,
       // Fecha del TICKET (28-ago): la app la muestra junto a la de captura
       // y avisa cuando el año no cuadra (la IA leyó 2025 en una visita 2026).
       fecha_gasto: (g.fecha_gasto as string | null) ?? null,
