@@ -15,11 +15,15 @@ import type { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import type { MapaSvgDto, MapaSvgEscalaDto } from './dto/mapa-svg.dto';
 import type { PreviewQuoteDto } from './dto/preview-quote.dto';
 import {
   QuotesPdfService,
+  armarMapaPuntos,
   escalasVisiblesPdf,
+  iatasDeTramos,
   type CotizacionPdfPayload,
+  type MapaPuntoPdf,
 } from './quotes-pdf.service';
 import type { QuotesService } from './quotes.service';
 
@@ -790,5 +794,190 @@ describe('QuotesPdfService — armarPayloadPdf / render / vista previa', () => {
       'tok',
     );
     expect(JSON.parse(init.body as string)).toEqual(PAYLOAD_148);
+  });
+});
+
+/**
+ * mapa_puntos — FUENTE ÚNICA del mapa (8-sep-2026, form-as-document): el
+ * PDF, la vista previa y `POST /quotes/mapa-svg` (la hoja del panel) pasan
+ * por `armarMapaPuntos` + `coordenadasPorIata`. Para los mismos tramos el
+ * endpoint devuelve EXACTAMENTE el array que viaja en el payload del PDF.
+ */
+describe('mapa_puntos — armarMapaPuntos / mapaPuntosDeEscalas / mapaSvg / hojaCss', () => {
+  const coords: Map<string, { lat: number; lon: number }> = new Map([
+    ['CUN', { lat: 21.04, lon: -86.87 }],
+    ['HOL', { lat: 20.63, lon: -87.1 }],
+    ['CZM', { lat: 20.52, lon: -86.93 }],
+  ]);
+
+  /** Filas del borrador tal como las mandaría el panel (TODAS, con su ojito). */
+  const filasPanel148 = (): MapaSvgEscalaDto[] => [
+    { origen_iata: 'CUN', destino_iata: 'HOL' },
+    { origen_iata: 'HOL', destino_iata: 'CZM', pdf_oculto: true },
+    { origen_iata: 'CZM', destino_iata: 'CUN', es_ferry: false },
+  ];
+
+  it('iatasDeTramos: distintos, sin vacíos, en orden de aparición', () => {
+    expect(
+      iatasDeTramos([
+        { origen_iata: 'CUN', destino_iata: 'HOL' },
+        { origen_iata: 'HOL', destino_iata: '' },
+        { origen_iata: 'CZM', destino_iata: 'CUN' },
+      ]),
+    ).toEqual(['CUN', 'HOL', 'CZM']);
+    expect(iatasDeTramos([])).toEqual([]);
+  });
+
+  it('armarMapaPuntos (puro): un punto por tramo con AMBAS coordenadas; orden del tramo o posición; ferry solo con true explícito', () => {
+    const puntos = armarMapaPuntos(
+      [
+        { orden: 1, origen_iata: 'CUN', destino_iata: 'HOL' },
+        // Sin coordenadas de un extremo: se omite, jamás inventa posición.
+        { orden: 2, origen_iata: 'HOL', destino_iata: 'XXX' },
+        // Sin orden → posición 1..N; minúsculas se resuelven pero viajan tal cual.
+        { origen_iata: 'czm', destino_iata: 'CUN', es_ferry: true },
+        { orden: 4, origen_iata: 'CZM', destino_iata: 'HOL', es_ferry: 'si' },
+      ],
+      coords,
+    );
+    expect(puntos).toEqual([
+      {
+        orden: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'HOL',
+        o_lat: 21.04,
+        o_lon: -86.87,
+        d_lat: 20.63,
+        d_lon: -87.1,
+        es_ferry: false,
+      },
+      {
+        orden: 3,
+        origen_iata: 'czm',
+        destino_iata: 'CUN',
+        o_lat: 20.52,
+        o_lon: -86.93,
+        d_lat: 21.04,
+        d_lon: -86.87,
+        es_ferry: true,
+      },
+      {
+        orden: 4,
+        origen_iata: 'CZM',
+        destino_iata: 'HOL',
+        o_lat: 20.52,
+        o_lon: -86.93,
+        d_lat: 20.63,
+        d_lon: -87.1,
+        es_ferry: false,
+      },
+    ]);
+    expect(armarMapaPuntos([], coords)).toEqual([]);
+  });
+
+  it('PARIDAD: mapaPuntosDeEscalas (tramos sueltos con ojito) == mapa_puntos del payload del PDF (#148, tramo 2 oculto)', async () => {
+    const callsPdf: string[] = [];
+    const delPdf = (
+      await pdfService(callsPdf).armarPayloadPdf(quote148(), {
+        conFotos: false,
+      })
+    ).mapa_puntos;
+    expect(delPdf).toEqual(PAYLOAD_148.mapa_puntos);
+
+    // (a) El panel manda TODAS sus filas con el ojito: el oculto sale y los
+    // visibles se renumeran 1..N — misma regla que escalasVisiblesPdf.
+    const callsA: string[] = [];
+    const conOjito =
+      await pdfService(callsA).mapaPuntosDeEscalas(filasPanel148());
+    expect(conOjito).toEqual(delPdf);
+    expect(callsA).toEqual(['aeropuerto']);
+
+    // (b) El panel manda SOLO los visibles: mismo resultado.
+    const soloVisibles = await pdfService([]).mapaPuntosDeEscalas(
+      filasPanel148().filter((f) => f.pdf_oculto !== true),
+    );
+    expect(soloVisibles).toEqual(delPdf);
+
+    // (c) Y coincide con armar a mano desde los visibles renumerados del PDF.
+    const visibles = escalasVisiblesPdf(quote148()).escalas;
+    expect(armarMapaPuntos(visibles, coords)).toEqual(delPdf);
+  });
+
+  it('sin coordenadas en el catálogo el tramo se omite en AMBOS caminos (PDF y endpoint) por igual', async () => {
+    const config = {
+      get: (k: string) => (k === 'PYSERVICES_BASE_URL' ? 'http://py/' : 'tok'),
+    } as unknown as ConfigService<EnvVars, true>;
+    const tablas = tablas148();
+    // HOL sin lat/long y CZM ausente del catálogo.
+    tablas.aeropuerto = {
+      lista: [
+        { iata: 'CUN', latitud: 21.04, longitud: -86.87 },
+        { iata: 'HOL', latitud: null, longitud: -87.1 },
+      ],
+    } as unknown as typeof tablas.aeropuerto;
+    const svc = new QuotesPdfService(
+      config,
+      supabasePdfMock(tablas, []),
+      {} as QuotesService,
+      {} as PyservicesService,
+    );
+    const delPdf = (await svc.armarPayloadPdf(quote148(), { conFotos: false }))
+      .mapa_puntos;
+    expect(delPdf).toEqual([]);
+    await expect(svc.mapaPuntosDeEscalas(filasPanel148())).resolves.toEqual(
+      delPdf,
+    );
+  });
+
+  it('mapaSvg(dto): con puntos → pyservices.generateCotizacionMapaSvg(mapa_puntos) y devuelve el svg tal cual', async () => {
+    const generateCotizacionMapaSvg = jest
+      .fn()
+      .mockResolvedValue('<svg viewBox="0 0 1 1"/>');
+    const svc = pdfService([], { pyservices: { generateCotizacionMapaSvg } });
+    const dto: MapaSvgDto = { escalas: filasPanel148() };
+    await expect(svc.mapaSvg(dto)).resolves.toBe('<svg viewBox="0 0 1 1"/>');
+    expect(generateCotizacionMapaSvg).toHaveBeenCalledTimes(1);
+    expect(generateCotizacionMapaSvg).toHaveBeenCalledWith(
+      PAYLOAD_148.mapa_puntos,
+    );
+  });
+
+  it('mapaSvg(dto): sin tramos (o sin coordenadas) → null SIN llamar a pyservices; sin tramos tampoco consulta el catálogo', async () => {
+    const generateCotizacionMapaSvg = jest.fn();
+    const calls: string[] = [];
+    const svc = pdfService(calls, {
+      pyservices: { generateCotizacionMapaSvg },
+    });
+    await expect(svc.mapaSvg({ escalas: [] })).resolves.toBeNull();
+    expect(calls).toEqual([]);
+    // Todos ocultos = sin visibles: tampoco hay mapa.
+    await expect(
+      svc.mapaSvg({
+        escalas: [
+          { origen_iata: 'CUN', destino_iata: 'HOL', pdf_oculto: true },
+        ],
+      }),
+    ).resolves.toBeNull();
+    // Con tramos pero ningún IATA del catálogo → consulta y null.
+    await expect(
+      svc.mapaSvg({ escalas: [{ origen_iata: 'XXX', destino_iata: 'YYY' }] }),
+    ).resolves.toBeNull();
+    expect(generateCotizacionMapaSvg).not.toHaveBeenCalled();
+  });
+
+  it('hojaCss() delega en pyservices.getCotizacionHojaCss (mismo texto que el <style> del PDF), sin caché en el API', async () => {
+    const getCotizacionHojaCss = jest
+      .fn()
+      .mockResolvedValueOnce('.cot-hoja{a:1}')
+      .mockResolvedValueOnce('.cot-hoja{a:2}');
+    const svc = pdfService([], { pyservices: { getCotizacionHojaCss } });
+    await expect(svc.hojaCss()).resolves.toBe('.cot-hoja{a:1}');
+    await expect(svc.hojaCss()).resolves.toBe('.cot-hoja{a:2}');
+    expect(getCotizacionHojaCss).toHaveBeenCalledTimes(2);
+  });
+
+  it('el tipo MapaPuntoPdf es el elemento exacto de mapa_puntos del payload', () => {
+    const p: MapaPuntoPdf[] = PAYLOAD_148.mapa_puntos;
+    expect(p.length).toBe(2);
   });
 });

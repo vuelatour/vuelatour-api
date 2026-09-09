@@ -20,6 +20,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
 import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
+import { MapaSvgDto } from './dto/mapa-svg.dto';
 import {
   PdfPresentacionVueloDto,
   PdfVisibilidadDto,
@@ -67,6 +68,42 @@ export class QuotesController {
       'Cache-Control': 'no-store',
     });
     res.send(html);
+  }
+
+  // Rutas LITERALES del segmento (hoja.css, mapa-svg) ANTES de ':id'.
+  @Get('hoja.css')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'CSS de la HOJA de cotización para el editor form-as-document (8-sep-2026): proxy de pyservices GET /reportes/cotizacion/hoja.css — Arimo incrustada + cuerpo de la hoja, EXACTAMENTE el mismo texto que llevan el <style> del PDF y de la vista previa; todo selector cuelga de .cot-hoja. Sin geometría de pantalla (esa la pone el panel). text/css; Cache-Control: public, max-age=3600. Mismos roles que /calculate.',
+  })
+  async hojaCss(@Res() res: Response) {
+    const css = await this.quotesPdf.hojaCss();
+    res.set({
+      'Content-Type': 'text/css; charset=utf-8',
+      'Cache-Control': 'public, max-age=3600',
+    });
+    res.send(css);
+  }
+
+  @Post('mapa-svg')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Mapa del itinerario como <svg> suelto para la hoja del panel (8-sep-2026): {escalas:[{origen_iata, destino_iata, es_ferry?, pdf_oculto?}]} EN ORDEN → mapa_puntos con el MISMO armador y coordenadas del PDF (ocultos fuera, visibles renumerados 1..N) → pyservices POST /reportes/cotizacion/mapa-svg. 200 image/svg+xml (el panel lo inyecta inline en <div class="mapa">, nunca como <img>); 204 sin cuerpo cuando ningún tramo tiene coordenadas (la hoja no lleva mapa). Cache-Control: no-store. Nunca persiste. Mismos roles que /calculate.',
+  })
+  async mapaSvg(@Body() dto: MapaSvgDto, @Res() res: Response) {
+    const svg = await this.quotesPdf.mapaSvg(dto);
+    if (svg == null) {
+      res.status(HttpStatus.NO_CONTENT).end();
+      return;
+    }
+    res.set({
+      'Content-Type': 'image/svg+xml; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.send(svg);
   }
 
   @Get()

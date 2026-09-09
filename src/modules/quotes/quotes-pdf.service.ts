@@ -4,11 +4,15 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { PyservicesService } from '../pyservices/pyservices.service';
+import {
+  PyservicesService,
+  type MapaPuntoPdfPayload,
+} from '../pyservices/pyservices.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
+import type { MapaSvgDto, MapaSvgEscalaDto } from './dto/mapa-svg.dto';
 import type { PreviewQuoteDto } from './dto/preview-quote.dto';
 import { QuotesService } from './quotes.service';
 
@@ -16,6 +20,70 @@ function num(v: unknown): number | null {
   if (v == null) return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
+}
+
+/** Elemento de `mapa_puntos` (nombres exactos de `MapaPuntoPdf` en pyservices). */
+export type MapaPuntoPdf = MapaPuntoPdfPayload;
+
+/**
+ * Lo MÍNIMO de un tramo para el mapa: los visibles del PDF ya renumerados
+ * (`escalasVisiblesPdf`) o los tramos sueltos del borrador del panel.
+ */
+export interface TramoMapa {
+  orden?: unknown;
+  origen_iata?: unknown;
+  destino_iata?: unknown;
+  es_ferry?: unknown;
+}
+
+/** Coordenadas del catálogo por IATA en MAYÚSCULAS. */
+export type CoordPorIata = Map<string, { lat: number; lon: number }>;
+
+/** IATA distintos de los tramos, tal cual vienen (sin vacíos), en orden de aparición. */
+export function iatasDeTramos(escalas: TramoMapa[]): string[] {
+  return [
+    ...new Set(
+      escalas.flatMap((e) => [
+        (e.origen_iata as string) ?? '',
+        (e.destino_iata as string) ?? '',
+      ]),
+    ),
+  ].filter(Boolean);
+}
+
+/**
+ * ÚNICO armador de `mapa_puntos` (PDF, vista previa y `POST /quotes/mapa-svg`
+ * de la hoja del panel, 8-sep-2026): un punto por tramo con coordenadas de
+ * AMBOS extremos (sin lat/long en el catálogo el tramo se omite del mapa,
+ * jamás inventa una posición); `orden` = el del tramo (ya renumerado 1..N)
+ * o la posición 1..N; `es_ferry` solo con `true` explícito. Puro: las
+ * coordenadas las trae `QuotesPdfService.coordenadasPorIata`.
+ */
+export function armarMapaPuntos(
+  escalas: TramoMapa[],
+  coordPorIata: CoordPorIata,
+): MapaPuntoPdf[] {
+  return escalas
+    .map((e, i) => {
+      const o = coordPorIata.get(
+        ((e.origen_iata as string) ?? '').toUpperCase(),
+      );
+      const d = coordPorIata.get(
+        ((e.destino_iata as string) ?? '').toUpperCase(),
+      );
+      if (!o || !d) return null;
+      return {
+        orden: num(e.orden) ?? i + 1,
+        origen_iata: (e.origen_iata as string) ?? '',
+        destino_iata: (e.destino_iata as string) ?? '',
+        o_lat: o.lat,
+        o_lon: o.lon,
+        d_lat: d.lat,
+        d_lon: d.lon,
+        es_ferry: e.es_ferry === true,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x !== null);
 }
 
 /**
@@ -294,6 +362,71 @@ export class QuotesPdfService {
   }
 
   /**
+   * `GET /v1/quotes/hoja.css` (form-as-document, 8-sep-2026): el CSS de la
+   * hoja tal cual lo sirve pyservices — el MISMO texto que llevan el PDF y
+   * la vista previa. Sin caché en el API: la ventana de desfase tras un
+   * deploy de pyservices es SOLO la del `Cache-Control` del navegador (1 h).
+   */
+  async hojaCss(): Promise<string> {
+    return this.pyservices.getCotizacionHojaCss();
+  }
+
+  /**
+   * `POST /v1/quotes/mapa-svg`: el `<svg>` del mapa para la hoja del panel
+   * a partir de los tramos SUELTOS del borrador. `null` = sin tramo con
+   * coordenadas (204: la hoja no lleva mapa) y pyservices ni se llama.
+   */
+  async mapaSvg(dto: MapaSvgDto): Promise<string | null> {
+    const puntos = await this.mapaPuntosDeEscalas(dto.escalas);
+    if (puntos.length === 0) return null;
+    return this.pyservices.generateCotizacionMapaSvg(puntos);
+  }
+
+  /**
+   * `mapa_puntos` de tramos SUELTOS con el MISMO armador y las MISMAS
+   * coordenadas del PDF: los ocultos (`pdf_oculto`) se filtran y los
+   * visibles se renumeran 1..N ANTES de armar (la misma regla de
+   * `escalasVisiblesPdf`), así que para los mismos tramos el resultado es
+   * idéntico al `mapa_puntos` del payload del PDF.
+   */
+  async mapaPuntosDeEscalas(
+    escalas: MapaSvgEscalaDto[],
+  ): Promise<MapaPuntoPdf[]> {
+    const visibles: TramoMapa[] = escalas
+      .filter((e) => e.pdf_oculto !== true)
+      .map((e, i) => ({
+        orden: i + 1,
+        origen_iata: e.origen_iata,
+        destino_iata: e.destino_iata,
+        es_ferry: e.es_ferry === true,
+      }));
+    return armarMapaPuntos(visibles, await this.coordenadasPorIata(visibles));
+  }
+
+  /**
+   * Coordenadas del catálogo `aeropuerto` para los IATA de los tramos
+   * (clave en MAYÚSCULAS; sin latitud/longitud el aeropuerto se omite). Sin
+   * IATA no consulta nada.
+   */
+  async coordenadasPorIata(escalas: TramoMapa[]): Promise<CoordPorIata> {
+    const iatas = iatasDeTramos(escalas);
+    const coordPorIata: CoordPorIata = new Map();
+    if (iatas.length === 0) return coordPorIata;
+    const { data: aps } = await this.supabase.service
+      .from('aeropuerto')
+      .select('iata, latitud, longitud')
+      .in('iata', iatas);
+    for (const a of aps ?? []) {
+      const lat = num(a.latitud);
+      const lon = num(a.longitud);
+      if (lat != null && lon != null) {
+        coordPorIata.set((a.iata as string).toUpperCase(), { lat, lon });
+      }
+    }
+    return coordPorIata;
+  }
+
+  /**
    * Payload de `/reportes/cotizacion` (y de la vista previa) a partir de un
    * quote-like. Consultas: `cliente` (nombre), `aeronave` (matrícula y ficha
    * hoja 2), `aeronave_imagen` + descarga (solo `conFotos`), `aeropuerto`
@@ -425,50 +558,12 @@ export class QuotesPdfService {
           .reduce((acc, d) => acc + (num(d.monto_usd) ?? 0), 0)
       : 0;
 
-    // Coordenadas de los aeropuertos del itinerario para el MAPA del PDF.
-    const iatas = [
-      ...new Set(
-        escalas.flatMap((e) => [
-          (e.origen_iata as string) ?? '',
-          (e.destino_iata as string) ?? '',
-        ]),
-      ),
-    ].filter(Boolean);
-    const coordPorIata = new Map<string, { lat: number; lon: number }>();
-    if (iatas.length > 0) {
-      const { data: aps } = await this.supabase.service
-        .from('aeropuerto')
-        .select('iata, latitud, longitud')
-        .in('iata', iatas);
-      for (const a of aps ?? []) {
-        const lat = num(a.latitud);
-        const lon = num(a.longitud);
-        if (lat != null && lon != null) {
-          coordPorIata.set((a.iata as string).toUpperCase(), { lat, lon });
-        }
-      }
-    }
-    const mapaPuntos = escalas
-      .map((e, i) => {
-        const o = coordPorIata.get(
-          ((e.origen_iata as string) ?? '').toUpperCase(),
-        );
-        const d = coordPorIata.get(
-          ((e.destino_iata as string) ?? '').toUpperCase(),
-        );
-        if (!o || !d) return null;
-        return {
-          orden: num(e.orden) ?? i + 1,
-          origen_iata: (e.origen_iata as string) ?? '',
-          destino_iata: (e.destino_iata as string) ?? '',
-          o_lat: o.lat,
-          o_lon: o.lon,
-          d_lat: d.lat,
-          d_lon: d.lon,
-          es_ferry: e.es_ferry === true,
-        };
-      })
-      .filter((x): x is NonNullable<typeof x> => x !== null);
+    // MAPA del PDF: mismo armador que `POST /quotes/mapa-svg` (la hoja del
+    // panel) sobre los visibles ya renumerados — fuente única.
+    const mapaPuntos = armarMapaPuntos(
+      escalas,
+      await this.coordenadasPorIata(escalas),
+    );
 
     // MODELO COTIZADO (feedback del cliente 4-sep): el PDF muestra el TIPO
     // de avión que se cotizó (snapshot), NUNCA la matrícula — a veces se

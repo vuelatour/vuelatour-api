@@ -1436,6 +1436,23 @@ export interface FacturaRecibidaParsed {
 }
 
 /**
+ * Tramo con coordenadas para el mapa de ruta de la cotización — nombres
+ * exactos de `MapaPuntoPdf` (pyservices app/schemas/reportes.py). Es el
+ * elemento de `CotizacionPdfRequest.mapa_puntos` y el body de
+ * `POST /reportes/cotizacion/mapa-svg` (`{ mapa_puntos }`).
+ */
+export interface MapaPuntoPdfPayload {
+  orden: number;
+  origen_iata: string;
+  destino_iata: string;
+  o_lat: number;
+  o_lon: number;
+  d_lat: number;
+  d_lon: number;
+  es_ferry: boolean;
+}
+
+/**
  * Cliente HTTP del microservicio Python (vuelatour-pyservices).
  * Autentica con el header X-Internal-Token contra INTERNAL_SHARED_TOKEN
  * (misma configuración que el resto de clientes a pyservices).
@@ -1513,6 +1530,40 @@ export class PyservicesService {
       30_000,
     );
     return buf.toString('utf8');
+  }
+
+  /**
+   * CSS de la HOJA de cotización para el panel (form-as-document,
+   * 8-sep-2026): `GET /reportes/cotizacion/hoja.css` = `_estilos_hoja()`
+   * (Arimo incrustada + cuerpo de la hoja), EXACTAMENTE el mismo texto que
+   * llevan el `<style>` del PDF y de la vista previa; todo selector cuelga de
+   * `.cot-hoja`. Estático por deploy de pyservices: el API lo reexpone con
+   * `Cache-Control: public, max-age=3600`.
+   */
+  async getCotizacionHojaCss(): Promise<string> {
+    const buf = await this.getForBuffer(
+      '/reportes/cotizacion/hoja.css',
+      15_000,
+    );
+    return buf.toString('utf8');
+  }
+
+  /**
+   * Mapa del itinerario como `<svg>` suelto (`POST /reportes/cotizacion/
+   * mapa-svg`): el MISMO `_mapa_svg` del PDF sobre los MISMOS `mapa_puntos`
+   * de `CotizacionPdfRequest`; el panel lo inyecta inline en su
+   * `<div class="mapa">`. `null` cuando pyservices responde 204 (sin
+   * puntos con coordenadas: la hoja no lleva mapa).
+   */
+  async generateCotizacionMapaSvg(
+    mapaPuntos: MapaPuntoPdfPayload[],
+  ): Promise<string | null> {
+    const buf = await this.postForBuffer(
+      '/reportes/cotizacion/mapa-svg',
+      { mapa_puntos: mapaPuntos },
+      15_000,
+    );
+    return buf.length === 0 ? null : buf.toString('utf8');
   }
 
   /** Libro «Dinero» del periodo (réplica del control manual del equipo). */
@@ -1675,6 +1726,27 @@ export class PyservicesService {
     body: unknown,
     timeoutMs = 60_000,
   ): Promise<Buffer> {
+    return this.fetchBuffer(path, { method: 'POST', body }, timeoutMs);
+  }
+
+  /** GET que devuelve el cuerpo crudo (CSS/texto estático). Timeout default 60s. */
+  private async getForBuffer(
+    path: string,
+    timeoutMs = 60_000,
+  ): Promise<Buffer> {
+    return this.fetchBuffer(path, { method: 'GET' }, timeoutMs);
+  }
+
+  /**
+   * Request con timeout que devuelve el cuerpo crudo. Misma autenticación y
+   * misma traducción de fallos que `postForJson` (502 con detalle; 503 sin
+   * configuración). Un 204 llega como Buffer vacío (el llamador decide).
+   */
+  private async fetchBuffer(
+    path: string,
+    req: { method: 'GET' | 'POST'; body?: unknown },
+    timeoutMs: number,
+  ): Promise<Buffer> {
     const baseUrl = this.config
       .get('PYSERVICES_BASE_URL', { infer: true })
       .replace(/\/+$/, '');
@@ -1689,12 +1761,14 @@ export class PyservicesService {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${baseUrl}${path}`, {
-        method: 'POST',
+        method: req.method,
         headers: {
-          'Content-Type': 'application/json',
+          ...(req.method === 'POST'
+            ? { 'Content-Type': 'application/json' }
+            : {}),
           'X-Internal-Token': token,
         },
-        body: JSON.stringify(body),
+        ...(req.method === 'POST' ? { body: JSON.stringify(req.body) } : {}),
         signal: controller.signal,
       }).catch((e: unknown) => {
         if (controller.signal.aborted) {
