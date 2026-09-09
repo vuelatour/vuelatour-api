@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
+  Allow,
   ArrayMaxSize,
   ArrayMinSize,
   ArrayNotEmpty,
@@ -704,9 +705,80 @@ export class ReservaEscalaDto {
 }
 
 export class CreateReservaDto {
-  @ApiProperty()
+  @ApiPropertyOptional({
+    description:
+      'Cliente existente. Requerido si no viene `cliente_nombre`; si vienen ambos GANA cliente_id.',
+  })
+  // Requerido sin `cliente_nombre`; si VIENE (aunque haya nombre) debe ser
+  // uuid: un id mal formado no debe llegar al service (22P02 → 500).
+  @ValidateIf(
+    (o: CreateReservaDto) => !o.cliente_nombre || o.cliente_id != null,
+  )
   @IsUUID()
-  cliente_id!: string;
+  cliente_id?: string;
+
+  @ApiPropertyOptional({
+    minLength: 2,
+    maxLength: 200,
+    description:
+      'Cliente NUEVO por nombre (app sin internet, 9-sep-2026): se busca entre TODOS los clientes ' +
+      'por nombre normalizado (sin acentos/mayúsculas/espacios dobles); activo → se reutiliza, ' +
+      'inactivo → se reactiva, ninguno → se crea justo antes del vuelo (respuesta `cliente_creado`).',
+  })
+  @IsOptional()
+  @IsString()
+  @Length(2, 200)
+  cliente_nombre?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de idempotencia (uuid) por captura (outbox de la app / doble clic): repetirla devuelve ' +
+      'la reserva YA creada (200, idempotente:true) sin volver a avisar al piloto; un vuelo huérfano ' +
+      '(sin tramos) se REPARA con esta misma llave.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Tripulación de APOYO de todo el vuelo (mismas reglas que assign: activos, sin repetir, ' +
+      'distintos del piloto/copiloto). Se aplica en la misma operación (antes: 2.º POST /assign).',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  apoyo_ids?: string[];
+
+  @ApiPropertyOptional({
+    description:
+      'Momento REAL de captura en la app (ISO con zona). Solo auditoría: NUNCA provoca 400 — ' +
+      'un valor raro deja constancia en notas_internas y el alta sigue.',
+  })
+  // Sin validadores a propósito: `@Allow()` solo lo deja pasar la whitelist
+  // (un tipo raro o un texto largo tampoco deben rechazar: el sello
+  // tolerante lo convierte a texto y lo recorta).
+  @Allow()
+  capturado_en?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Outbox de la app: con esta bandera, un posible duplicado (mismo cliente, mismo día Cancún y ' +
+      'mismo avión o misma ruta del tramo 1) rebota 409 POSIBLE_DUPLICADO en vez de solo avisar.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  rechazar_posible_duplicado?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Decisión explícita del usuario: agendar aunque parezca duplicado (anula rechazar_posible_duplicado).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_posible_duplicado?: boolean;
 
   @ApiPropertyOptional({
     description: 'Requerido si no se envía escalas_operacion',

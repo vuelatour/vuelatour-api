@@ -73,3 +73,38 @@ export function fechaHoraCancun(iso: string | Date | null | undefined): string {
   const hora = p.hour === '24' ? '00' : p.hour;
   return `${p.year}-${p.month}-${p.day} ${hora}:${p.minute}`;
 }
+
+const FORMATO_CORTO_CANCUN = new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Cancun',
+  weekday: 'short',
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/**
+ * "lun 14 sep" o, con `hora`, "lun 14 sep 09:00" en hora Cancún (textos de
+ * avisos y títulos de la app, 9-sep-2026). Se arma por partes: el formato
+ * es-MX de Intl mete "14 de sep," y puntos según el motor. Cadena vacía si
+ * el valor no es un instante válido — nunca lanza.
+ */
+export function fechaCortaCancun(
+  iso: string | Date | null | undefined,
+  opts: { hora?: boolean } = {},
+): string {
+  if (iso == null || iso === '') return '';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p: Record<string, string> = {};
+  for (const parte of FORMATO_CORTO_CANCUN.formatToParts(d)) {
+    p[parte.type] = parte.value;
+  }
+  const limpiar = (v: string | undefined) => (v ?? '').replace(/[.,]/g, '');
+  const dia =
+    `${limpiar(p.weekday)} ${limpiar(p.day)} ${limpiar(p.month)}`.trim();
+  if (!opts.hora) return dia;
+  const hora = p.hour === '24' ? '00' : p.hour;
+  return `${dia} ${hora}:${p.minute}`;
+}

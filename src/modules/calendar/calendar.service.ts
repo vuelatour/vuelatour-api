@@ -8,6 +8,11 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { nombresUnicos, textosDeJson } from '../../common/busqueda-vuelo.util';
+import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
+import {
+  clientRequestIdDescanso,
+  clientRequestIdEvento,
+} from '../../common/columna-opcional.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import { PushService } from '../realtime/push.service';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -22,7 +27,7 @@ import {
   avisoEventoBase,
   cambiosRelevantes,
   cuerpoEvento,
-  EVENTO_FLOTA_COLS,
+  eventoFlotaCols,
   horaCancun,
   mapEventoRow,
   rangoMisEventos,
@@ -68,6 +73,24 @@ export class CalendarService {
     private readonly push: PushService,
   ) {}
 
+  // ===== Columna opcional `client_request_id` (migración 20260909000003) =====
+  // Mientras la migración no esté aplicada en prod, los selects la omiten
+  // (la respuesta sigue trayendo `client_request_id: null`) y las altas no
+  // son idempotentes. Se activa sola en ≤ 10 min tras aplicarla.
+
+  private conClientRequestEvento(): Promise<boolean> {
+    return clientRequestIdEvento(this.supabase.service).disponible();
+  }
+
+  private conClientRequestDescanso(): Promise<boolean> {
+    return clientRequestIdDescanso(this.supabase.service).disponible();
+  }
+
+  /** Columnas + embeds de `evento_flota` según exista ya la llave. */
+  private async eventoCols(): Promise<string> {
+    return eventoFlotaCols(await this.conClientRequestEvento());
+  }
+
   async listEvents(q: CalendarRangeQuery) {
     const now = new Date();
     const from = q.from ?? now;
@@ -89,7 +112,7 @@ export class CalendarService {
         // grupo_* (4-sep-2026, aditivo): banda "G-12 · 3/7" del calendario.
         // pasajeros_nombres/notas/notas_internas/motivo_cancelacion, razón social
         // y modelo (5-sep-2026, aditivo): buscador del calendario de la app.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -197,6 +220,7 @@ export class CalendarService {
         folio: number;
         fecha_vuelo: string | null;
         fecha_traslado_final: string | null;
+        client_request_id?: string | null;
         tipo: string | null;
         estado: string;
         es_externo: boolean;
@@ -416,6 +440,9 @@ export class CalendarService {
           grupo_total: v.grupo_id
             ? (totalPorGrupo.get(v.grupo_id) ?? null)
             : null,
+          // Alta sin internet (9-sep-2026, aditivo): la app deduplica su
+          // pendiente local contra el real por esta llave.
+          client_request_id: v.client_request_id ?? null,
           fecha_vuelo: params.fecha,
           hora,
           tramo: params.tramo,
@@ -518,25 +545,42 @@ export class CalendarService {
     const DESCANSO_COLOR = '#14B8A6';
     const fromDay = from.toISOString().slice(0, 10);
     const toDay = to.toISOString().slice(0, 10);
+    interface DescansoRow {
+      id: string;
+      piloto_id: string;
+      fecha_inicio: string;
+      fecha_fin: string;
+      motivo: string | null;
+      client_request_id?: string | null;
+      piloto?: { nombre?: string | null } | { nombre?: string | null }[] | null;
+    }
+    // `client_request_id` solo si la columna ya existe (migración pendiente).
+    const descansoCols = [
+      'id, piloto_id, fecha_inicio, fecha_fin, motivo',
+      (await this.conClientRequestDescanso()) ? 'client_request_id' : null,
+      'piloto:usuario!piloto_id(nombre)',
+    ]
+      .filter((s): s is string => s !== null)
+      .join(', ');
     let dq = this.supabase.service
       .from('piloto_descanso')
-      .select(
-        'id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)',
-      )
+      .select(descansoCols)
       .lte('fecha_inicio', toDay)
       .gte('fecha_fin', fromDay);
     if (q.piloto_id) dq = dq.eq('piloto_id', q.piloto_id);
-    const { data: descansos } = q.solo_externos ? { data: [] } : await dq;
-    for (const d of descansos ?? []) {
+    // Como siempre: un error aquí no tumba el calendario (sin descansos).
+    const { data: descansosRaw } = q.solo_externos ? { data: [] } : await dq;
+    const descansos = (descansosRaw ?? []) as unknown as DescansoRow[];
+    for (const d of descansos) {
       const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
-      const nombre = (piloto as { nombre?: string } | null)?.nombre ?? 'Piloto';
-      const ini = new Date(`${d.fecha_inicio as string}T12:00:00Z`);
-      const fin = new Date(`${d.fecha_fin as string}T12:00:00Z`);
+      const nombre = piloto?.nombre ?? 'Piloto';
+      const ini = new Date(`${d.fecha_inicio}T12:00:00Z`);
+      const fin = new Date(`${d.fecha_fin}T12:00:00Z`);
       for (let t = ini.getTime(); t <= fin.getTime(); t += 86_400_000) {
         const day = new Date(t).toISOString().slice(0, 10);
         if (day < fromDay || day > toDay) continue;
         events.push({
-          id: `descanso:${d.id as string}:${day}`,
+          id: `descanso:${d.id}:${day}`,
           tipo_evento: 'descanso',
           descanso_id: d.id,
           vuelo_id: null,
@@ -547,10 +591,12 @@ export class CalendarService {
           estado: 'DESCANSO',
           estado_permiso: null,
           es_externo: false,
-          title: `Descansa · ${nombre}${d.motivo ? ` (${d.motivo as string})` : ''}`,
+          title: `Descansa · ${nombre}${d.motivo ? ` (${d.motivo})` : ''}`,
           color: DESCANSO_COLOR,
           piloto_id: d.piloto_id,
           piloto_nombre: nombre,
+          // null mientras la columna no exista (misma forma de respuesta).
+          client_request_id: d.client_request_id ?? null,
         });
       }
     }
@@ -561,7 +607,7 @@ export class CalendarService {
     const EVENTO_COLOR = '#0EA5E9';
     let eq = this.supabase.service
       .from('evento_flota')
-      .select(EVENTO_FLOTA_COLS)
+      .select(await this.eventoCols())
       .lte('fecha', to.toISOString())
       .or(`fecha_fin.is.null,fecha_fin.gte.${from.toISOString()}`)
       .gte('fecha', new Date(from.getTime() - 40 * 86_400_000).toISOString());
@@ -621,6 +667,7 @@ export class CalendarService {
           aeronave_matricula: matricula,
           piloto_id: ev.responsable_id,
           piloto_nombre: ev.responsable_nombre,
+          client_request_id: ev.client_request_id,
           // null = sin responsable; 0 = el responsable NO tiene la app
           // registrada (la oficina debe avisarle por otro medio).
           responsable_push_dispositivos: ev.responsable_id
@@ -720,11 +767,11 @@ export class CalendarService {
   private async cargarEvento(id: string): Promise<EventoInterno | null> {
     const { data, error } = await this.supabase.service
       .from('evento_flota')
-      .select(EVENTO_FLOTA_COLS)
+      .select(await this.eventoCols())
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return data ? mapEventoRow(data) : null;
+    return data ? mapEventoRow(data as unknown as EventoFlotaRow) : null;
   }
 
   /**
@@ -803,13 +850,44 @@ export class CalendarService {
 
   private static readonly REFERENCIA_ROTA = '23503';
 
-  /** Alta de un evento NO-vuelo (oficina o app). */
+  /** Evento ya creado con esa llave de idempotencia (o null). */
+  private async eventoPorClientRequest(
+    key: string,
+  ): Promise<EventoInterno | null> {
+    const { data, error } = await this.supabase.service
+      .from('evento_flota')
+      .select(await this.eventoCols())
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ? mapEventoRow(data as unknown as EventoFlotaRow) : null;
+  }
+
+  /**
+   * Alta de un evento NO-vuelo (oficina o app). IDEMPOTENTE por
+   * `client_request_id` (9-sep-2026): la misma llave devuelve el evento YA
+   * creado `{ ...evento, aviso: null, idempotente: true }` sin volver a
+   * avisar al responsable ni re-espejar en Google. `capturado_en` (solo
+   * auditoría) se anexa a `notas` con el sello tolerante: nunca rechaza.
+   */
   async createEvento(dto: CreateEventoFlotaDto, userId: string) {
+    // La llave solo cuenta si la columna ya existe (migración 20260909000003
+    // pendiente de aplicar): sin columna, alta normal SIN idempotencia (ni
+    // pre-check, ni columna en el insert, ni rama 23505).
+    const key =
+      dto.client_request_id && (await this.conClientRequestEvento())
+        ? dto.client_request_id
+        : null;
+    if (key) {
+      const ya = await this.eventoPorClientRequest(key);
+      if (ya) return this.eventoIdempotente(ya);
+    }
     if (dto.fecha_fin && dto.fecha_fin < dto.fecha) {
       throw new BadRequestException(
         'La fecha fin no puede ser anterior al inicio.',
       );
     }
+    const notas = anexarSello(dto.notas, selloCapturaApp(dto.capturado_en));
     const { data, error } = await this.supabase.service
       .from('evento_flota')
       .insert({
@@ -818,13 +896,24 @@ export class CalendarService {
         fecha_fin: dto.fecha_fin?.toISOString() ?? null,
         aeronave_id: dto.aeronave_id ?? null,
         responsable_id: dto.responsable_id ?? null,
-        notas: dto.notas?.trim() || null,
+        notas,
+        // Llave SOLO cuando viaja (panel: insert idéntico al de siempre).
+        ...(key ? { client_request_id: key } : {}),
         created_by: userId,
         updated_by: userId,
       })
-      .select(EVENTO_FLOTA_COLS)
+      .select(await this.eventoCols())
       .maybeSingle();
     if (error) {
+      // Carrera con la misma llave (dos flushes): devolver el primero.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes('uq_evento_flota_client_request')
+      ) {
+        const ya = await this.eventoPorClientRequest(key);
+        if (ya) return this.eventoIdempotente(ya);
+      }
       if (error.code === CalendarService.REFERENCIA_ROTA)
         throw new BadRequestException(
           `Referencia no encontrada: ${error.message}`,
@@ -832,7 +921,7 @@ export class CalendarService {
       throw new Error(error.message);
     }
     if (!data) throw new Error('No se pudo crear el evento');
-    const ev = mapEventoRow(data);
+    const ev = mapEventoRow(data as unknown as EventoFlotaRow);
     // Se ESPERA el aviso: la respuesta le dice a la oficina si llegó.
     const aviso = await this.avisarResponsable(ev, userId, 'evento_asignado');
     this.espejoGoogle(ev);
@@ -840,6 +929,17 @@ export class CalendarService {
       ...aEventoMe(ev),
       responsable_nombre: ev.responsable_nombre,
       aviso,
+      idempotente: false as const,
+    };
+  }
+
+  /** Replay del alta: misma proyección, sin aviso ni espejo (200). */
+  private eventoIdempotente(ev: EventoInterno) {
+    return {
+      ...aEventoMe(ev),
+      responsable_nombre: ev.responsable_nombre,
+      aviso: null as AvisoEvento | null,
+      idempotente: true as const,
     };
   }
 
@@ -893,7 +993,7 @@ export class CalendarService {
       .from('evento_flota')
       .update(patch)
       .eq('id', id)
-      .select(EVENTO_FLOTA_COLS)
+      .select(await this.eventoCols())
       .maybeSingle();
     if (error) {
       if (error.code === CalendarService.REFERENCIA_ROTA)
@@ -903,7 +1003,7 @@ export class CalendarService {
       throw new Error(error.message);
     }
     if (!data) throw new NotFoundException(`Evento ${id} not found`);
-    const next = mapEventoRow(data);
+    const next = mapEventoRow(data as unknown as EventoFlotaRow);
 
     let aviso: AvisoEvento | null = null;
     if (prev.responsable_id !== next.responsable_id) {
@@ -1005,7 +1105,7 @@ export class CalendarService {
     const desdeIso = new Date(desdeTs).toISOString();
     let q = this.supabase.service
       .from('evento_flota')
-      .select(EVENTO_FLOTA_COLS)
+      .select(await this.eventoCols())
       .eq('responsable_id', usuarioId)
       .lte('fecha', hastaTs)
       .or(

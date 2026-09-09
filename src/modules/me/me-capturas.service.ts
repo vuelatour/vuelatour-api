@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { diaCancun } from '../../common/fecha-cancun.util';
+import { diaCancun, fechaCortaCancun } from '../../common/fecha-cancun.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import type { CapturasQuery } from './dto/capturas.dto';
@@ -21,7 +21,10 @@ export type TipoCaptura =
   | 'COMBUSTIBLE'
   | 'COBRO'
   | 'TACO'
-  | 'MANTENIMIENTO';
+  | 'MANTENIMIENTO'
+  /** Vuelo (reserva) creado por el usuario — alta sin internet, 9-sep-2026.
+   *  En minúsculas por contrato del diseño offline v2 (la app lo distingue así). */
+  | 'vuelo';
 
 export type EstadoCaptura = 'OK' | 'EN_REVISION' | 'POSIBLE_DUPLICADO';
 
@@ -165,10 +168,21 @@ export class MeCapturasService {
       .eq('created_by', userId);
     if (desdeIso) mantQ = mantQ.gte('created_at', desdeIso);
 
+    // 5.ª fuente (9-sep-2026): vuelos creados por el usuario (oficina desde
+    // la app, con o sin internet). Select propio: `created_by` no viaja en
+    // VUELO_COLS. Para PILOTO sale vacío por construcción (no crea vuelos).
+    let vuelosQ = this.supabase.service
+      .from('vuelo')
+      .select(
+        'id, folio, estado, fecha_vuelo, origen_iata, destino_iata, created_at, notas_internas, client_request_id, aeronave:aeronave_id(matricula), piloto:piloto_id(nombre), cliente:cliente_id(nombre)',
+      )
+      .eq('created_by', userId);
+    if (desdeIso) vuelosQ = vuelosQ.gte('created_at', desdeIso);
+
     // Traer `tope` (offset + limit) por fuente basta: el top-N del merge
     // nunca necesita más filas de una sola fuente. Los gastos se ordenan por
     // fecha del TICKET (así se agrupa la lista, 29-ago) y luego por captura.
-    const [gastos, cobros, tacos, mants] = await Promise.all([
+    const [gastos, cobros, tacos, mants, vuelos] = await Promise.all([
       gastosQ
         .order('fecha_gasto', { ascending: false, nullsFirst: false })
         .order('created_at', { ascending: false })
@@ -179,19 +193,26 @@ export class MeCapturasService {
         .limit(tope),
       tacosQ.order('updated_at', { ascending: false }).limit(tope),
       mantQ.order('created_at', { ascending: false }).limit(tope),
+      vuelosQ.order('created_at', { ascending: false }).limit(tope),
     ]);
-    for (const r of [gastos, cobros, tacos, mants]) {
+    for (const r of [gastos, cobros, tacos, mants, vuelos]) {
       if (r.error) throw new Error(r.error.message);
     }
     const gastoRows = (gastos.data ?? []) as Row[];
     const cobroRows = (cobros.data ?? []) as Row[];
     const tacoRows = (tacos.data ?? []) as Row[];
     const mantRows = (mants.data ?? []) as Row[];
+    const vueloRows = (vuelos.data ?? []) as Row[];
 
     // ===== Lookups batch de folio y ruta (cero N+1) =====
     const vueloIds = [
       ...new Set(
-        [...gastoRows, ...cobroRows, ...tacoRows]
+        [
+          ...gastoRows,
+          ...cobroRows,
+          ...tacoRows,
+          ...vueloRows.map((v) => ({ vuelo_id: v.id })),
+        ]
           .map((r) => r.vuelo_id as string | null)
           .filter((id): id is string => Boolean(id)),
       ),
@@ -204,6 +225,7 @@ export class MeCapturasService {
       ...cobroRows.map((c) => this.itemCobro(c, folios, rutas)),
       ...tacoRows.map((e) => this.itemTaco(e, folios)),
       ...mantRows.map((m) => this.itemMantenimiento(m)),
+      ...vueloRows.map((v) => this.itemVuelo(v, rutas)),
     ];
 
     // Día de agrupación (Cancún): ticket → cobro → captura. Las fechas de
@@ -399,6 +421,54 @@ export class MeCapturasService {
           'En revisión de oficina')
         : null,
       estado: enRevision ? 'EN_REVISION' : 'OK',
+    };
+  }
+
+  /**
+   * Vuelo creado por el usuario: «Vuelo #123 · lun 14 sep 09:00 · CUN → HOL ·
+   * XA-VGV · Juan». `detalle` trae la línea "[Capturado en la app el …]" de
+   * notas_internas cuando existe (alta sin internet); solo informativo.
+   */
+  private itemVuelo(v: Row, rutas: Map<string, string>): CapturaItem {
+    const id = v.id as string;
+    const fechaVuelo = (v.fecha_vuelo as string | null) ?? null;
+    // "lun 14 sep 09:00" (Cancún), fuente única fechaCortaCancun.
+    const cuando = fechaCortaCancun(fechaVuelo, { hora: true }) || null;
+    const ruta =
+      rutas.get(id) ??
+      [v.origen_iata as string | null, v.destino_iata as string | null]
+        .filter(Boolean)
+        .join(' → ');
+    const matricula = flatten(v.aeronave)?.matricula as string | undefined;
+    const piloto = flatten(v.piloto)?.nombre as string | undefined;
+    const cliente = flatten(v.cliente)?.nombre as string | undefined;
+    const titulo = [
+      `Vuelo #${v.folio != null ? Number(v.folio) : '?'}`,
+      cuando,
+      ruta || null,
+      matricula ?? null,
+      piloto ?? null,
+    ]
+      .filter((p): p is string => !!p)
+      .join(' · ');
+    const selloApp = (v.notas_internas as string | null)
+      ?.split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.startsWith('[Capturado en la app'));
+    return {
+      tipo: 'vuelo',
+      id,
+      fecha: v.created_at as string,
+      vuelo_id: id,
+      vuelo_folio: v.folio != null ? Number(v.folio) : null,
+      ruta: ruta || null,
+      titulo,
+      detalle: detalleDe(
+        cliente ? `Cliente ${cliente}` : null,
+        typeof v.estado === 'string' ? v.estado : null,
+        selloApp ?? null,
+      ),
+      estado: 'OK',
     };
   }
 

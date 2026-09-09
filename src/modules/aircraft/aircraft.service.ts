@@ -704,9 +704,36 @@ export class AircraftService {
   private async aptitudBulk(
     ids: string[],
     maxTaco: Map<string, number>,
-  ): Promise<Map<string, { apto: boolean; razones: string[] }>> {
-    const out = new Map<string, { apto: boolean; razones: string[] }>();
-    for (const id of ids) out.set(id, { apto: true, razones: [] });
+  ): Promise<
+    Map<
+      string,
+      {
+        apto: boolean;
+        razones: string[];
+        /** Discrepancias ALTA sin resolver (conteo, mismo criterio que
+         *  validateAssignTargets). */
+        squawks_alta: number;
+        /** Algún mantenimiento EN_TALLER. */
+        en_taller: boolean;
+      }
+    >
+  > {
+    const out = new Map<
+      string,
+      {
+        apto: boolean;
+        razones: string[];
+        squawks_alta: number;
+        en_taller: boolean;
+      }
+    >();
+    for (const id of ids)
+      out.set(id, {
+        apto: true,
+        razones: [],
+        squawks_alta: 0,
+        en_taller: false,
+      });
     if (ids.length === 0) return out;
 
     const hoy = this.hoyCancun();
@@ -767,6 +794,7 @@ export class AircraftService {
     }
     for (const t of tallerRes.data ?? []) {
       const s = out.get(t.aeronave_id as string);
+      if (s) s.en_taller = true;
       // Una sola razón de taller aunque haya varios servicios abiertos.
       if (s && !s.razones.includes('Servicio en taller')) {
         marca(t.aeronave_id as string, 'Servicio en taller');
@@ -790,6 +818,8 @@ export class AircraftService {
       }
     }
     for (const s of squawksRes.data ?? []) {
+      const st = out.get(s.aeronave_id as string);
+      if (st) st.squawks_alta += 1;
       marca(
         s.aeronave_id as string,
         `Discrepancia ALTA sin resolver: ${((s.descripcion as string | null) ?? '').slice(0, 60)}`,
@@ -888,6 +918,13 @@ export class AircraftService {
         const apt = aptitud.get(a.id as string);
         a.apto = apt?.apto ?? true;
         a.no_apto_razones = apt?.razones ?? [];
+        // Alta de vuelo sin internet (9-sep-2026, aditivo): la app confirma
+        // el squawk ALTA EN CAPTURA y bloquea el avión en taller con su
+        // copia local del catálogo. Mismo criterio que validateAssignTargets
+        // (discrepancia severidad ALTA con estado ≠ RESUELTA; mantenimiento
+        // EN_TALLER). Antes el taller solo viajaba como razón de texto.
+        a.squawks_alta_abiertos = apt?.squawks_alta ?? 0;
+        a.en_taller = apt?.en_taller ?? false;
       }
     }
 

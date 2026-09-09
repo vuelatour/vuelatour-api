@@ -73,3 +73,76 @@ export function resolverCapturadoEn(
 export function capturadoAhora(ahora: Date = new Date()): string {
   return ahora.toISOString();
 }
+
+// ===== Sello TOLERANTE para reserva/evento (diseño offline v2, 9-sep-2026) =====
+//
+// A diferencia de `resolverCapturadoEn` (gastos: 400 ante un valor raro), el
+// alta de un VUELO/EVENTO desde el outbox de la app NUNCA se rechaza por
+// `capturado_en`: es solo auditoría y un 400 mataría para siempre la captura
+// (la app volvería a sellar con el mismo reloj en cada reintento). Aquí el
+// valor raro se deja constancia y se sigue.
+
+const FMT_SELLO_CANCUN = new Intl.DateTimeFormat('es-MX', {
+  timeZone: 'America/Cancun',
+  day: 'numeric',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/** "14 sep 09:00" en hora Cancún (día · mes corto · HH:mm). */
+export function fechaSelloCancun(d: Date): string {
+  const p: Record<string, string> = {};
+  for (const parte of FMT_SELLO_CANCUN.formatToParts(d)) {
+    p[parte.type] = parte.value;
+  }
+  const hora = p.hour === '24' ? '00' : p.hour;
+  // "sep." (con punto, según motor) → "sep".
+  const mes = (p.month ?? '').replace(/\.$/, '');
+  return `${p.day} ${mes} ${hora}:${p.minute}`;
+}
+
+/** Diferencia mínima para que valga la pena dejar el sello (ruido si no). */
+export const SELLO_CAPTURA_MIN_MS = 2 * 60_000;
+
+/**
+ * Línea de bitácora para `notas_internas` (reserva) / `notas` (evento):
+ * - ausente / vacío → null (nada que anotar);
+ * - válido (ISO con zona, no futuro > 10 min, ≥ 2020) y `ahora − valor >
+ *   2 min` → `[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]`;
+ *   si la diferencia es menor → null (alta en línea normal: sin ruido);
+ * - inválido (sin zona, futuro, año absurdo, basura) →
+ *   `[Capturado en la app (hora del teléfono no confiable: <valor>) · recibido el …]`.
+ * Nunca lanza. Hora Cancún en ambos lados.
+ */
+export function selloCapturaApp(
+  capturadoEn: string | null | undefined,
+  ahora: Date = new Date(),
+): string | null {
+  if (capturadoEn == null) return null;
+  const texto = String(capturadoEn).trim();
+  if (texto === '') return null;
+  const recibido = fechaSelloCancun(ahora);
+  let ms = Number.NaN;
+  if (ISO_CON_ZONA.test(texto)) ms = Date.parse(texto);
+  const valido =
+    Number.isFinite(ms) &&
+    ms <= ahora.getTime() + CAPTURADO_EN_FUTURO_MAX_MS &&
+    ms >= CAPTURADO_EN_MIN_MS;
+  if (!valido) {
+    return `[Capturado en la app (hora del teléfono no confiable: ${texto.slice(0, 60)}) · recibido el ${recibido}]`;
+  }
+  if (ahora.getTime() - ms <= SELLO_CAPTURA_MIN_MS) return null;
+  return `[Capturado en la app el ${fechaSelloCancun(new Date(ms))} · recibido el ${recibido}]`;
+}
+
+/** Anexa el sello (si hay) al final de unas notas existentes. */
+export function anexarSello(
+  notas: string | null | undefined,
+  sello: string | null,
+): string | null {
+  const base = (notas ?? '').trim();
+  if (!sello) return base || null;
+  return base ? `${base}\n${sello}` : sello;
+}

@@ -5,8 +5,20 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
+import {
+  buscarClientePorNombre,
+  nombreClienteParaCrear,
+  type ClienteNombreRow,
+} from '../../common/nombre-cliente.util';
+import {
+  buscarPosiblesDuplicados,
+  textoPosibleDuplicado,
+  type ResumenDuplicado,
+} from '../../common/posible-duplicado.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   apoyosDeVuelo,
@@ -48,6 +60,7 @@ import type {
   CreateExternalFlightDto,
   CreateReservaDto,
   ListFlightsQuery,
+  ReservaEscalaDto,
   UpdateFlightDto,
 } from './dto/flights.dto';
 import type {
@@ -127,7 +140,7 @@ import {
 } from '../../common/busqueda-vuelo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, client_request_id, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
 
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
@@ -136,6 +149,45 @@ const VUELO_COLS =
  * re-exporta por compatibilidad).
  */
 export type { ParticipacionAvionItem };
+
+/**
+ * Detalle de entrega del aviso de asignación a un tripulante (9-sep-2026,
+ * alta sin internet): `notificado=false` o `push_dispositivos=0` ⇒ la
+ * oficina le confirma por otro medio (la app lo dice en la respuesta).
+ */
+export interface AvisoTripulante {
+  usuario_id: string;
+  nombre: string | null;
+  notificado: boolean;
+  push_dispositivos: number;
+}
+
+/**
+ * Respuesta de POST /flights/reserva (contrato para panel y app, 9-sep-2026):
+ * la fila del vuelo (VUELO_COLS) + lo que la app necesita para cerrar su
+ * pendiente local sin adivinar.
+ */
+export type RespuestaReserva = Record<string, unknown> & {
+  escalas: Record<string, unknown>[];
+  apoyos: string[];
+  cliente_id: string | null;
+  cliente_creado: boolean;
+  avisos: string[];
+  aviso_piloto: AvisoTripulante | null;
+  aviso_copiloto: AvisoTripulante | null;
+  idempotente: boolean;
+  apoyos_aplicados: boolean;
+  reparado: boolean;
+};
+
+/** Códigos de Postgres que NO se arreglan reintentando (→ 400 legible). */
+const ERRORES_BD_DETERMINISTAS: Record<string, string> = {
+  '23514': 'La captura no cumple una regla de la base de datos',
+  '23502': 'Falta un dato obligatorio',
+  '22P02': 'Un valor tiene un formato inválido',
+};
+/** Huérfano más joven que esto: otro flush lo está terminando (503). */
+const HUERFANO_MIN_EDAD_MS = 5 * 60_000;
 
 // NOTA: aeronave_id/piloto_id/estado_permiso del tramo orden=1 (ida) se mantienen
 // como ESPEJO de vuelo.aeronave_id/piloto_id/estado_permiso (sincronizado por la app,
@@ -1287,12 +1339,19 @@ export class FlightsService {
     }
   }
 
-  /** Envía aviso de asignación al piloto (best-effort), con info de pernocta. */
+  /**
+   * Envía aviso de asignación al piloto (best-effort), con info de pernocta.
+   * Devuelve el DETALLE de entrega (9-sep-2026): `createReserva` lo expone
+   * como `aviso_piloto`/`aviso_copiloto` para que la app diga "se avisó a
+   * Juan" o "Juan no tiene la app con avisos: confírmale por WhatsApp". Los
+   * demás callers lo ignoran (`void`). Piloto externo ⇒ sin envío y
+   * `push_dispositivos: 0` (se coordina por WhatsApp, doc 3.7).
+   */
   private async notifyPilotAssigned(
     pilotoId: string,
     vuelo: Record<string, unknown>,
     rol: 'piloto' | 'copiloto' = 'piloto',
-  ): Promise<void> {
+  ): Promise<AvisoTripulante> {
     const [{ data: piloto }, pernoctas, ruta, grupo] = await Promise.all([
       this.supabase.service
         .from('usuario')
@@ -1304,18 +1363,26 @@ export class FlightsService {
       // Contexto de GRUPO (4-sep-2026): "Grupo G-12 · avión 3 de 7 · 44 pax".
       contextoGrupoDeVuelo(this.supabase.service, vuelo),
     ]);
+    const nombre =
+      (piloto as { nombre?: string | null } | null)?.nombre ?? null;
     // Piloto externo (doc 3.7): sin acceso al sistema — ni push ni email; la
     // coordinación con él es por WhatsApp fuera del sistema.
     if ((piloto as { es_piloto_externo?: boolean } | null)?.es_piloto_externo) {
-      return;
+      return {
+        usuario_id: pilotoId,
+        nombre,
+        notificado: false,
+        push_dispositivos: 0,
+      };
     }
     const pernoctaTxt =
       pernoctas.length > 0
         ? ` · 🌙 Pernocta en ${pernoctas.join(', ')}`
         : ' · Sin pernocta';
     const grupoTxt = grupo ? ` · ${grupo.texto}` : '';
-    // Socket + push al piloto (independiente del email).
-    void this.notifications.notifyUser(pilotoId, {
+    // Socket + push al piloto (independiente del email). Best-effort: nunca
+    // lanza; devuelve si quedó la fila y cuántos dispositivos tenía.
+    const entrega = await this.notifications.notifyUserDetallado(pilotoId, {
       tipo: 'vuelo_asignado',
       titulo:
         rol === 'copiloto'
@@ -1331,13 +1398,19 @@ export class FlightsService {
       },
       link: `/flights/${vuelo.id as string}`,
     });
+    const aviso: AvisoTripulante = {
+      usuario_id: pilotoId,
+      nombre,
+      notificado: entrega.notificado,
+      push_dispositivos: entrega.push_dispositivos,
+    };
 
     // El correo de asignación es del piloto TITULAR (plantilla "tu vuelo"):
     // al copiloto le basta el push — evita que reciba un correo como si
     // fuera el responsable del vuelo (auditoría 21-ago-2026).
-    if (rol === 'copiloto') return;
+    if (rol === 'copiloto') return aviso;
     const email = (piloto as { email: string | null } | null)?.email;
-    if (!email) return;
+    if (!email) return aviso;
     void this.email.sendPilotAssignment({
       to: email,
       pilotoNombre: (piloto as { nombre: string }).nombre ?? 'Piloto',
@@ -1351,6 +1424,7 @@ export class FlightsService {
       fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
       pernoctas,
     });
+    return aviso;
   }
 
   // ============ Vuelos ============
@@ -3379,6 +3453,28 @@ export class FlightsService {
    * exitoso (`notificarSquawkAceptado`).
    */
   /**
+   * Discrepancias de severidad ALTA sin resolver de un avión (criterio
+   * ÚNICO del candado de asignación; `aptitudBulk` de aircraft lo replica
+   * en lote para el listado). Best-effort: un error de lectura cuenta como
+   * "sin squawks" — igual que antes de extraer el helper.
+   */
+  private async squawksAltaAbiertos(
+    aeronaveId: string,
+  ): Promise<{ id: string; descripcion: string }[]> {
+    const { data } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .select('id, descripcion')
+      .eq('aeronave_id', aeronaveId)
+      .neq('estado', 'RESUELTA')
+      .eq('severidad', 'ALTA')
+      .limit(10);
+    return (data ?? []).map((s) => ({
+      id: s.id as string,
+      descripcion: String(s.descripcion),
+    }));
+  }
+
+  /**
    * Público desde el 4-sep-2026: el armador de la cotización de GRUPO
    * (GroupsService) valida taller/squawk/documentos de cada avión y piloto
    * ANTES de crear los N hijos con exactamente esta regla.
@@ -3405,9 +3501,23 @@ export class FlightsService {
       targets.aeronaveId &&
       (await this.aircraftEnTaller(targets.aeronaveId))
     ) {
-      throw new ConflictException(
-        'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
-      );
+      // 409 ESTRUCTURADO (9-sep-2026): la app sin internet lo clasifica por
+      // `error` (decisión "cambiar avión"); el `message` es el MISMO texto
+      // de siempre para el panel.
+      const { data: av } = await this.supabase.service
+        .from('aeronave')
+        .select('matricula')
+        .eq('id', targets.aeronaveId)
+        .maybeSingle();
+      throw new ConflictException({
+        message:
+          'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
+        error: 'AERONAVE_EN_TALLER',
+        details: {
+          aeronave_id: targets.aeronaveId,
+          matricula: (av?.matricula as string | null) ?? null,
+        },
+      });
     }
     // Un squawk de severidad ALTA sin resolver = avión no apto (doc 4.3).
     // BAJA/MEDIA no bloquean. CAMBIO CONSCIENTE 2-sep-2026: ya no bloquea a
@@ -3416,18 +3526,8 @@ export class FlightsService {
     // la asignación procede A SABIENDAS y el caller avisa al mecánico.
     let squawksAceptados: { id: string; descripcion: string }[] = [];
     if (targets.aeronaveId) {
-      const { data: squawks } = await this.supabase.service
-        .from('aeronave_discrepancia')
-        .select('id, descripcion')
-        .eq('aeronave_id', targets.aeronaveId)
-        .neq('estado', 'RESUELTA')
-        .eq('severidad', 'ALTA')
-        .limit(10);
-      if (squawks && squawks.length > 0) {
-        const lista = squawks.map((s) => ({
-          id: s.id as string,
-          descripcion: String(s.descripcion),
-        }));
+      const lista = await this.squawksAltaAbiertos(targets.aeronaveId);
+      if (lista.length > 0) {
         if (opts?.aceptarDiscrepanciaAlta !== true) {
           throw new ConflictException({
             message: `No se puede asignar: discrepancia de severidad ALTA sin resolver (${lista
@@ -4523,11 +4623,43 @@ export class FlightsService {
    * Precios en 0 — se cotiza después con "revisar" desde el detalle. Crea sus
    * tramos (ida + regreso si hay fecha final) para que la asignación por tramo
    * y el calendario por tramo funcionen desde el día uno.
+   *
+   * UNA operación IDEMPOTENTE (diseño offline v2, 9-sep-2026): la app sin
+   * internet la encola con `client_request_id` y puede reintentarla N veces
+   * (timeout tras commit, doble flush). Orden estricto — TODO lo que puede
+   * rechazar va ANTES del insert (un 400 después del insert dejaría un vuelo
+   * con la llave que el reintento devolvería "creado" sin lo que faltó):
+   *  1. pre-check por llave → rama idempotente;
+   *  2. validaciones (avión/piloto/taller/squawk, copiloto, apoyos, IATAs);
+   *  3. resolución del cliente (por id o por NOMBRE, sin crear todavía);
+   *  4. detector de posible duplicado (409 solo con la bandera);
+   *  5. sello de captura tolerante;
+   *  6. (crear cliente) + insert del vuelo; 7. tramos; 8. push con detalle
+   *     de entrega (INMEDIATO tras los tramos: la rama idempotente nunca
+   *     re-avisa), apoyos, permisos, avisos; 9. respuesta.
    */
-  async createReserva(dto: CreateReservaDto, userId: string) {
-    // El vuelo aún no existe al validar: con `aceptar_discrepancia_alta` se
-    // valida aquí, se crea, y el aviso al mecánico sale al final con el
-    // vuelo ya insertado.
+  async createReserva(
+    dto: CreateReservaDto,
+    userId: string,
+  ): Promise<RespuestaReserva> {
+    const key = dto.client_request_id ?? null;
+    // 1. Pre-check por llave: el reintento NUNCA vuelve a validar ni a crear.
+    if (key) {
+      const yaId = await this.vueloIdPorClientRequest(key);
+      if (yaId) return this.reservaIdempotente(yaId, dto, userId);
+    }
+
+    // 2. Validaciones. HECHO DURO (CHECK de `vuelo`: es_externo=false ⇒
+    // aeronave_id not null): una reserva propia SIEMPRE lleva avión; se
+    // rechaza aquí con texto claro en vez de dejar que el 23514 del insert lo
+    // diga en lenguaje de base de datos. El vuelo aún no existe: con
+    // `aceptar_discrepancia_alta` se valida aquí, se crea, y el aviso al
+    // mecánico sale al final con el vuelo ya insertado.
+    if (!dto.aeronave_id) {
+      throw new BadRequestException(
+        'Elige la aeronave: una reserva propia siempre lleva avión.',
+      );
+    }
     let squawksAceptados: { id: string; descripcion: string }[] = [];
     if (dto.aeronave_id || dto.piloto_id) {
       squawksAceptados = await this.validateAssignTargets(
@@ -4548,6 +4680,466 @@ export class FlightsService {
       }
       await this.validateAssignTargets({ pilotoId: dto.copiloto_id });
     }
+    // Apoyos en la MISMA operación (antes: 2.º POST /assign que se perdía
+    // sin señal). Mismas reglas que assign: sin repetir, activos, ≠ piloto/
+    // copiloto.
+    const apoyoIds = dto.apoyo_ids ? [...new Set(dto.apoyo_ids)] : [];
+    if (apoyoIds.length > 0) {
+      await this.assertApoyosAsignables(apoyoIds, {
+        piloto: dto.piloto_id ?? null,
+        copiloto: dto.copiloto_id ?? null,
+      });
+    }
+    const plan = this.itinerarioDeReserva(dto);
+
+    // 3. Cliente: por id (debe existir) o por NOMBRE (se busca entre TODOS;
+    // si no existe se crea DESPUÉS del detector, justo antes del vuelo).
+    const cliente = await this.resolverClienteReserva(dto);
+
+    // 4. Detector de posible duplicado (mismo cliente, mismo día Cancún y
+    // mismo avión o misma ruta del tramo 1). Solo bloquea con la bandera.
+    const avisos: string[] = [];
+    let duplicados: ResumenDuplicado[] = [];
+    if (cliente.id) {
+      duplicados = await buscarPosiblesDuplicados(this.supabase.service, {
+        clienteId: cliente.id,
+        fechaVuelo: dto.fecha_vuelo,
+        fechaFin: plan.fechaFinReserva,
+        nueva: {
+          aeronave_id: dto.aeronave_id ?? null,
+          origen_iata: plan.tramo1.origen,
+          destino_iata: plan.tramo1.destino,
+          cliente_es_interno: cliente.es_interno,
+          cliente_es_broker: cliente.es_broker,
+        },
+      });
+      if (
+        duplicados.length > 0 &&
+        dto.rechazar_posible_duplicado === true &&
+        dto.aceptar_posible_duplicado !== true
+      ) {
+        throw new ConflictException({
+          message: `Este cliente ya tiene un vuelo ese día: ${duplicados
+            .map((d) =>
+              textoPosibleDuplicado(d).replace(/^Posible duplicado: /, ''),
+            )
+            .join(' | ')}. Confirma si es otro vuelo o descarta este.`,
+          error: 'POSIBLE_DUPLICADO',
+          details: { vuelos: duplicados },
+        });
+      }
+    }
+    avisos.push(...duplicados.map(textoPosibleDuplicado));
+
+    // 5. Sello de captura (tolerante: jamás rechaza; va DENTRO del insert).
+    const notasInternas = anexarSello(
+      dto.notas_internas,
+      selloCapturaApp(dto.capturado_en),
+    );
+
+    // 6. Cliente nuevo/reactivado justo antes del vuelo (tras el detector:
+    // un 409 no deja clientes creados) e insert del vuelo.
+    let clienteId = cliente.id;
+    let clienteCreado = false;
+    if (!clienteId) {
+      clienteId = await this.crearClientePorNombre(
+        cliente.nombreCrear!,
+        userId,
+      );
+      clienteCreado = true;
+      avisos.push(
+        `Cliente nuevo “${cliente.nombreCrear!}”: completa RFC/broker en el panel`,
+      );
+    } else if (cliente.reactivar) {
+      await this.reactivarCliente(clienteId, userId);
+      avisos.push(
+        `El cliente “${cliente.nombre ?? ''}” estaba inactivo y se reactivó`,
+      );
+    }
+    const payload = {
+      cliente_id: clienteId,
+      aeronave_id: dto.aeronave_id ?? null,
+      piloto_id: dto.piloto_id ?? null,
+      copiloto_id: dto.copiloto_id ?? null,
+      es_externo: false,
+      tipo: 'MULTIESCALA',
+      estado: 'RESERVA',
+      cotizacion_version: 1,
+      origen_iata: plan.origen,
+      destino_iata: plan.destino,
+      es_redondo_auto: false,
+      num_aterrizajes: dto.fecha_traslado_final ? 2 : 1,
+      pasajeros: plan.pasajeros,
+      pasajeros_nombres: dto.pasajeros_nombres ?? [],
+      pase_abordar: false,
+      tiempo_cobrable_hr: 0,
+      tarifa_tipo: 'PUBLICO',
+      tarifa_hora_usd: 0,
+      subtotal_vuelo_usd: 0,
+      tuas_usd: 0,
+      iva_pct: 0,
+      iva_usd: 0,
+      monto_total_usd: 0,
+      cotizacion_abierta: dto.cotizacion_abierta ?? false,
+      itinerario_operativo: plan.itinerario.length > 0,
+      fecha_vuelo: dto.fecha_vuelo.toISOString(),
+      fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
+      notas: dto.notas,
+      notas_internas: notasInternas,
+      // Llave de idempotencia SOLO cuando viaja (panel/APK vieja: insert
+      // idéntico al de siempre).
+      ...(key ? { client_request_id: key } : {}),
+      created_by: userId,
+      updated_by: userId,
+    };
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .insert(payload)
+      .select(VUELO_COLS)
+      .maybeSingle();
+    if (error) {
+      // Carrera con la misma llave (dos flushes a la vez): el índice único
+      // rechazó la segunda — rama idempotente sobre la primera.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes('uq_vuelo_client_request')
+      ) {
+        const yaId = await this.vueloIdPorClientRequest(key);
+        if (yaId) return this.reservaIdempotente(yaId, dto, userId);
+      }
+      this.lanzarErrorBdReserva(error, 'la reserva');
+    }
+
+    // 7. Tramos: con itinerario de operación se crean TODOS los tramos reales
+    // (los ferry como solo_operativa: el piloto los ve y captura tacómetro,
+    // pero no se cotizan ni se muestran al cliente). Sin itinerario, el
+    // comportamiento clásico: ida (+ regreso invertido si hay fecha).
+    const vueloId = data!.id as string;
+    const legs = this.legsDeReserva({
+      vueloId,
+      plan,
+      dto,
+      aeronaveId: dto.aeronave_id ?? null,
+      pilotoId: dto.piloto_id ?? null,
+      userId,
+    });
+    const { error: legsErr } = await this.supabase.service
+      .from('escala')
+      .insert(legs);
+    if (legsErr) {
+      // COMPENSACIÓN (29-ago): una reserva sin tramos no aparece en la
+      // asignación por tramo ni en el calendario por tramo — "parecía
+      // guardada y no estaba". Se borra el vuelo y se lanza claro. Si la
+      // compensación falla, el huérfano queda y el reintento con la misma
+      // llave lo REPARA (rama idempotente), jamás lo borra.
+      await this.compensarVueloSinEscalas(vueloId, 'reserva');
+      if (ERRORES_BD_DETERMINISTAS[legsErr.code]) {
+        throw new BadRequestException(
+          `No se pudieron crear los tramos de la reserva (${ERRORES_BD_DETERMINISTAS[legsErr.code]}: ${legsErr.message}). Corrige la captura y vuelve a guardarla.`,
+        );
+      }
+      throw new Error(
+        `No se pudieron crear los tramos de la reserva y el alta se descartó completa (nada quedó a medias): ${legsErr.message}. Intenta guardarla de nuevo.`,
+      );
+    }
+    // 8. Push al piloto y al copiloto con DETALLE de entrega (la app dice "se
+    // avisó a Juan" o "confírmale por WhatsApp"). Va INMEDIATAMENTE después
+    // de los tramos: si algo posterior (apoyos) fallara con 500, el vuelo ya
+    // existe con su llave y el reintento entra por la rama idempotente, que
+    // por diseño NUNCA re-avisa — el piloto se quedaría sin enterarse.
+    const [avisoPiloto, avisoCopiloto] = await Promise.all([
+      dto.piloto_id
+        ? this.avisoTripulanteSeguro(dto.piloto_id, data!, 'piloto')
+        : Promise.resolve(null),
+      dto.copiloto_id
+        ? this.avisoTripulanteSeguro(dto.copiloto_id, data!, 'copiloto')
+        : Promise.resolve(null),
+    ]);
+    // Apoyos: mismo camino que assign (reemplazarApoyos termina en
+    // syncApoyoEspejo) + aviso solo a las altas. Un fallo aquí es 500
+    // (transitorio): el reintento con la misma llave los aplica sobre
+    // `vuelo_apoyo` vacío (`apoyos_aplicados`).
+    const apoyosAltas =
+      apoyoIds.length > 0
+        ? await this.aplicarApoyosReserva(vueloId, apoyoIds, userId)
+        : [];
+    for (const uid of apoyosAltas) void this.notifyApoyoAssigned(uid, data!);
+
+    // Permiso de pista: se deriva de los aeropuertos de la ruta (best-effort
+    // dentro del helper). Antes solo se hacía al CREAR una cotización, así
+    // que las reservas —el flujo con el que hoy nacen casi todos los
+    // vuelos— nunca avisaban del permiso.
+    await this.airports.refreshPermisosDeVuelo(vueloId);
+    // Reserva aceptada CON squawk ALTA abierto: avisar al mecánico con el
+    // vuelo ya insertado (dedupe diario dentro del helper).
+    if (dto.aeronave_id && squawksAceptados.length > 0) {
+      this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
+    }
+    // AVISOS (4-sep-2026, nunca candado): doble reserva del avión en la
+    // ventana de la reserva (fecha de salida → regreso / último tramo) y
+    // capacidad de los tramos recién creados.
+    if (dto.aeronave_id) {
+      avisos.push(
+        ...(await this.avisosOperacionAvion({
+          vueloId,
+          aeronaveId: dto.aeronave_id,
+          fechaVuelo: dto.fecha_vuelo,
+          fechaFin: plan.fechaFinReserva,
+          paxDefault: plan.pasajeros,
+        })),
+      );
+    }
+    void this.calendar.syncFlight(vueloId);
+
+    // 9. Respuesta (201; el controller baja a 200 solo si `idempotente`).
+    return {
+      ...data!,
+      escalas: await this.escalasDeRespuesta(vueloId),
+      apoyos: apoyoIds,
+      cliente_id: clienteId,
+      cliente_creado: clienteCreado,
+      avisos,
+      aviso_piloto: avisoPiloto,
+      aviso_copiloto: avisoCopiloto,
+      idempotente: false as const,
+      apoyos_aplicados: apoyoIds.length > 0,
+      reparado: false as const,
+    };
+  }
+
+  /**
+   * Rama IDEMPOTENTE de `createReserva` (pre-check por llave o 23505): el
+   * vuelo con esa `client_request_id` YA existe. NUNCA vuelve a validar,
+   * crear ni avisar al piloto; NUNCA borra.
+   *  - Con tramos → 200 con el existente (`escalas`, `apoyos`,
+   *    `idempotente:true`). Si el request trae `apoyo_ids` y `vuelo_apoyo`
+   *    del vuelo está VACÍO se aplican (`apoyos_aplicados:true`).
+   *  - Sin tramos (huérfano: la compensación de un alta anterior falló):
+   *    RESERVA + 0 cobro/gasto/factura + más de 5 min de edad → se REPARA
+   *    insertando los tramos del DTO sobre el MISMO id/folio (+ apoyos,
+   *    permisos, push al piloto — el huérfano nunca avisó), `reparado:true`;
+   *    más joven de 5 min → 503 RESERVA_EN_PROCESO (otro flush lo está
+   *    terminando; el outbox reintenta sin quemar); con dinero ligado o en
+   *    otro estado → 200 con el existente y aviso para revisarlo.
+   */
+  private async reservaIdempotente(
+    vueloId: string,
+    dto: CreateReservaDto,
+    userId: string,
+  ): Promise<RespuestaReserva> {
+    const sb = this.supabase.service;
+    const [vueloRes, escalasRes, cobrosRes, gastosRes, facturasRes] =
+      await Promise.all([
+        sb.from('vuelo').select(VUELO_COLS).eq('id', vueloId).maybeSingle(),
+        sb
+          .from('escala')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', vueloId),
+        sb
+          .from('cobro_vuelo')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', vueloId),
+        sb
+          .from('gasto')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', vueloId),
+        sb
+          .from('factura')
+          .select('id', { count: 'exact', head: true })
+          .eq('vuelo_id', vueloId),
+      ]);
+    for (const r of [vueloRes, escalasRes, cobrosRes, gastosRes, facturasRes]) {
+      if (r.error) throw new Error(r.error.message);
+    }
+    const vuelo = vueloRes.data as Record<string, unknown> | null;
+    if (!vuelo) {
+      // Desapareció entre el pre-check y aquí (compensación de otro flush):
+      // transitorio — el siguiente intento no encontrará la llave y creará.
+      throw new ServiceUnavailableException({
+        message:
+          'La reserva se está terminando de guardar; se reintenta en unos minutos.',
+        error: 'RESERVA_EN_PROCESO',
+        details: { vuelo_id: vueloId },
+      });
+    }
+    const nTramos = escalasRes.count ?? 0;
+    const conDinero =
+      (cobrosRes.count ?? 0) +
+        (gastosRes.count ?? 0) +
+        (facturasRes.count ?? 0) >
+      0;
+    const apoyoIds = dto.apoyo_ids ? [...new Set(dto.apoyo_ids)] : [];
+    const filasApoyo = await apoyosDeVuelo(sb, vueloId);
+    const aeronaveId = (vuelo.aeronave_id as string | null) ?? null;
+    const base = {
+      cliente_id: (vuelo.cliente_id as string | null) ?? null,
+      cliente_creado: false as const,
+      aviso_piloto: null as AvisoTripulante | null,
+      aviso_copiloto: null as AvisoTripulante | null,
+      idempotente: true as const,
+    };
+
+    if (nTramos > 0) {
+      let apoyosAplicados = false;
+      let apoyos = apoyosNivelVuelo(filasApoyo);
+      if (apoyoIds.length > 0 && filasApoyo.length === 0) {
+        const altas = await this.aplicarApoyosReserva(
+          vueloId,
+          apoyoIds,
+          userId,
+        );
+        for (const uid of altas) void this.notifyApoyoAssigned(uid, vuelo);
+        apoyosAplicados = true;
+        apoyos = apoyoIds;
+      }
+      const avisos = aeronaveId
+        ? await this.avisosOperacionAvion({
+            vueloId,
+            aeronaveId,
+            fechaVuelo: vuelo.fecha_vuelo as string | null,
+            fechaFin: (vuelo.fecha_fin as string | null) ?? null,
+            paxDefault: (vuelo.pasajeros as number | null) ?? null,
+          })
+        : [];
+      return {
+        ...vuelo,
+        ...base,
+        escalas: await this.escalasDeRespuesta(vueloId),
+        apoyos,
+        avisos,
+        apoyos_aplicados: apoyosAplicados,
+        reparado: false as const,
+      };
+    }
+
+    // ---- Huérfano (0 filas de escala) ----
+    if (conDinero || vuelo.estado !== 'RESERVA') {
+      this.logger.warn(
+        `Reserva ${vueloId} (folio #${String(vuelo.folio)}) sin tramos con dinero ligado o estado ${String(vuelo.estado)}: se devuelve tal cual.`,
+      );
+      return {
+        ...vuelo,
+        ...base,
+        escalas: [],
+        apoyos: apoyosNivelVuelo(filasApoyo),
+        avisos: ['Vuelo sin tramos: revisar en el panel'],
+        apoyos_aplicados: false,
+        reparado: false as const,
+      };
+    }
+    const edadMs = Date.now() - new Date(vuelo.created_at as string).getTime();
+    if (!(edadMs > HUERFANO_MIN_EDAD_MS)) {
+      throw new ServiceUnavailableException({
+        message:
+          'La reserva se está terminando de guardar; se reintenta en unos minutos.',
+        error: 'RESERVA_EN_PROCESO',
+        details: { vuelo_id: vueloId, folio: vuelo.folio ?? null },
+      });
+    }
+
+    // REPARAR: tramos del DTO sobre el MISMO vuelo (mismo folio). Jamás delete.
+    const plan = this.itinerarioDeReserva(dto);
+    const legs = this.legsDeReserva({
+      vueloId,
+      plan,
+      dto,
+      aeronaveId,
+      pilotoId: (vuelo.piloto_id as string | null) ?? null,
+      userId,
+    });
+    const { error: legsErr } = await sb.from('escala').insert(legs);
+    if (legsErr) {
+      if (ERRORES_BD_DETERMINISTAS[legsErr.code]) {
+        throw new BadRequestException(
+          `No se pudieron crear los tramos de la reserva #${String(vuelo.folio)} (${ERRORES_BD_DETERMINISTAS[legsErr.code]}: ${legsErr.message}). Corrige la captura y vuelve a guardarla.`,
+        );
+      }
+      throw new Error(
+        `No se pudieron reparar los tramos de la reserva #${String(vuelo.folio)}: ${legsErr.message}. Se reintentará.`,
+      );
+    }
+    this.logger.warn(
+      `Reserva ${vueloId} (folio #${String(vuelo.folio)}) estaba sin tramos: reparada con ${legs.length} tramo(s) por reintento idempotente.`,
+    );
+    let apoyosAplicados = false;
+    let apoyos = apoyosNivelVuelo(filasApoyo);
+    let apoyosAltas: string[] = [];
+    if (apoyoIds.length > 0 && filasApoyo.length === 0) {
+      apoyosAltas = await this.aplicarApoyosReserva(vueloId, apoyoIds, userId);
+      apoyosAplicados = true;
+      apoyos = apoyoIds;
+    }
+    await this.airports.refreshPermisosDeVuelo(vueloId);
+    const pilotoId = (vuelo.piloto_id as string | null) ?? null;
+    const copilotoId = (vuelo.copiloto_id as string | null) ?? null;
+    const [avisoPiloto, avisoCopiloto] = await Promise.all([
+      pilotoId
+        ? this.avisoTripulanteSeguro(pilotoId, vuelo, 'piloto')
+        : Promise.resolve(null),
+      copilotoId
+        ? this.avisoTripulanteSeguro(copilotoId, vuelo, 'copiloto')
+        : Promise.resolve(null),
+    ]);
+    for (const uid of apoyosAltas) void this.notifyApoyoAssigned(uid, vuelo);
+    // Reserva aceptada CON squawk ALTA (invariante 9): el alta original nunca
+    // llegó a avisar al mecánico (ese aviso sale después de los tramos). Sin
+    // re-validar taller/squawk: solo se leen las discrepancias abiertas hoy.
+    if (dto.aceptar_discrepancia_alta === true && aeronaveId) {
+      this.notificarSquawkAceptado(
+        vuelo,
+        aeronaveId,
+        await this.squawksAltaAbiertos(aeronaveId),
+      );
+    }
+    const avisos = aeronaveId
+      ? await this.avisosOperacionAvion({
+          vueloId,
+          aeronaveId,
+          fechaVuelo: vuelo.fecha_vuelo as string | null,
+          fechaFin: plan.fechaFinReserva,
+          paxDefault: plan.pasajeros,
+        })
+      : [];
+    void this.calendar.syncFlight(vueloId);
+    return {
+      ...vuelo,
+      ...base,
+      escalas: await this.escalasDeRespuesta(vueloId),
+      apoyos,
+      avisos,
+      aviso_piloto: avisoPiloto,
+      aviso_copiloto: avisoCopiloto,
+      apoyos_aplicados: apoyosAplicados,
+      reparado: true as const,
+    };
+  }
+
+  /** Vuelo ya creado con esa llave de idempotencia (o null). */
+  private async vueloIdPorClientRequest(key: string): Promise<string | null> {
+    const { data, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id')
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data?.id as string | undefined) ?? null;
+  }
+
+  /**
+   * Itinerario y extremos de una reserva a partir del DTO (fuente única para
+   * el alta y la reparación del huérfano). Valida origen ≠ destino por tramo.
+   */
+  private itinerarioDeReserva(dto: CreateReservaDto): {
+    itinerario: Array<
+      ReservaEscalaDto & { origen_iata: string; destino_iata: string }
+    >;
+    origen: string;
+    destino: string;
+    pasajeros: number;
+    fechaFinReserva: Date | null;
+    tramo1: { origen: string; destino: string };
+  } {
     // Creación rápida con itinerario de OPERACIÓN: la ruta real del avión
     // (puede salir de otra base, con ferries). Mientras no exista cotización,
     // el vuelo muestra los extremos de la operación; la ruta comercial
@@ -4568,7 +5160,11 @@ export class FlightsService {
         );
       }
     }
-
+    if (itinerario.length === 0 && (!dto.origen_iata || !dto.destino_iata)) {
+      throw new BadRequestException(
+        'Indica origen y destino o el itinerario de operación.',
+      );
+    }
     // Ruta comercial derivada (convención del cliente): la cotización SIEMPRE
     // abre y cierra en Cancún aunque la operación salga de otra base. El
     // destino comercial es el último destino de los tramos con pasajeros
@@ -4584,159 +5180,6 @@ export class FlightsService {
       .filter((e) => !e.es_ferry)
       .reduce((max, e) => Math.max(max, e.pasajeros ?? 0), 0);
     const pasajeros = dto.pasajeros ?? (paxItinerario > 0 ? paxItinerario : 1);
-    const payload = {
-      cliente_id: dto.cliente_id,
-      aeronave_id: dto.aeronave_id ?? null,
-      piloto_id: dto.piloto_id ?? null,
-      copiloto_id: dto.copiloto_id ?? null,
-      es_externo: false,
-      tipo: 'MULTIESCALA',
-      estado: 'RESERVA',
-      cotizacion_version: 1,
-      origen_iata: origen,
-      destino_iata: destino,
-      es_redondo_auto: false,
-      num_aterrizajes: dto.fecha_traslado_final ? 2 : 1,
-      pasajeros,
-      pasajeros_nombres: dto.pasajeros_nombres ?? [],
-      pase_abordar: false,
-      tiempo_cobrable_hr: 0,
-      tarifa_tipo: 'PUBLICO',
-      tarifa_hora_usd: 0,
-      subtotal_vuelo_usd: 0,
-      tuas_usd: 0,
-      iva_pct: 0,
-      iva_usd: 0,
-      monto_total_usd: 0,
-      cotizacion_abierta: dto.cotizacion_abierta ?? false,
-      itinerario_operativo: itinerario.length > 0,
-      fecha_vuelo: dto.fecha_vuelo.toISOString(),
-      fecha_traslado_final: dto.fecha_traslado_final?.toISOString(),
-      notas: dto.notas,
-      notas_internas: dto.notas_internas,
-      created_by: userId,
-      updated_by: userId,
-    };
-    const { data, error } = await this.supabase.service
-      .from('vuelo')
-      .insert(payload)
-      .select(VUELO_COLS)
-      .maybeSingle();
-    if (error) {
-      if (error.code === '23503')
-        throw new BadRequestException(
-          `Referenced entity not found: ${error.message}`,
-        );
-      throw new Error(error.message);
-    }
-
-    // Tramos: con itinerario de operación se crean TODOS los tramos reales
-    // (los ferry como solo_operativa: el piloto los ve y captura tacómetro,
-    // pero no se cotizan ni se muestran al cliente). Sin itinerario, el
-    // comportamiento clásico: ida (+ regreso invertido si hay fecha).
-    const vueloId = data!.id as string;
-    // Pernocta SOLO manual (27-ago, regla del cliente): la derivación
-    // automática por salto de fecha marcaba pernoctas que nadie pidió.
-    const fechaEfectiva = (i: number): Date | null =>
-      itinerario[i]?.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null);
-    const legs = itinerario.length
-      ? itinerario.map((e, i) => {
-          return {
-            vuelo_id: vueloId,
-            orden: i + 1,
-            origen_iata: e.origen_iata,
-            destino_iata: e.destino_iata,
-            aeronave_id: dto.aeronave_id ?? null,
-            piloto_id: dto.piloto_id ?? null,
-            pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
-            pasajeros_nombres: e.es_ferry ? [] : (e.pasajeros_nombres ?? []),
-            es_ferry: e.es_ferry ?? false,
-            es_sobrevuelo: e.es_sobrevuelo ?? false,
-            solo_operativa: e.es_ferry ?? false,
-            // Pernocta: SOLO la captura manual (27-ago).
-            requiere_pernocta: e.requiere_pernocta ?? false,
-            tipo_parada: e.tipo_parada ?? 'NORMAL',
-            servicio_notas: e.servicio_notas ?? null,
-            notas: e.notas ?? null,
-            fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
-            created_by: userId,
-            updated_by: userId,
-          };
-        })
-      : [
-          {
-            vuelo_id: vueloId,
-            orden: 1,
-            origen_iata: origen,
-            destino_iata: destino,
-            aeronave_id: dto.aeronave_id ?? null,
-            piloto_id: dto.piloto_id ?? null,
-            pasajeros: pasajeros as number | null,
-            pasajeros_nombres: [] as string[],
-            es_ferry: false,
-            solo_operativa: false,
-            requiere_pernocta: false,
-            notas: null as string | null,
-            fecha_salida_plan: dto.fecha_vuelo.toISOString() as
-              | string
-              | undefined,
-            created_by: userId,
-            updated_by: userId,
-          },
-          ...(dto.fecha_traslado_final
-            ? [
-                {
-                  vuelo_id: vueloId,
-                  orden: 2,
-                  origen_iata: destino,
-                  destino_iata: origen,
-                  aeronave_id: dto.aeronave_id ?? null,
-                  piloto_id: dto.piloto_id ?? null,
-                  pasajeros: pasajeros as number | null,
-                  pasajeros_nombres: [] as string[],
-                  es_ferry: false,
-                  solo_operativa: false,
-                  requiere_pernocta: false,
-                  notas: null as string | null,
-                  fecha_salida_plan: dto.fecha_traslado_final.toISOString() as
-                    | string
-                    | undefined,
-                  created_by: userId,
-                  updated_by: userId,
-                },
-              ]
-            : []),
-        ];
-    const { error: legsErr } = await this.supabase.service
-      .from('escala')
-      .insert(legs);
-    if (legsErr) {
-      // COMPENSACIÓN (29-ago): una reserva sin tramos no aparece en la
-      // asignación por tramo ni en el calendario por tramo — "parecía
-      // guardada y no estaba". Se borra el vuelo y se lanza claro.
-      await this.compensarVueloSinEscalas(vueloId, 'reserva');
-      throw new Error(
-        `No se pudieron crear los tramos de la reserva y el alta se descartó completa (nada quedó a medias): ${legsErr.message}. Intenta guardarla de nuevo.`,
-      );
-    }
-
-    // Permiso de pista: se deriva de los aeropuertos de la ruta. Antes solo
-    // se hacía al CREAR una cotización, así que las reservas —el flujo con el
-    // que hoy nacen casi todos los vuelos— nunca avisaban del permiso.
-    await this.airports.refreshPermisosDeVuelo(vueloId);
-
-    if (dto.piloto_id) void this.notifyPilotAssigned(dto.piloto_id, data!);
-    // El copiloto también recibe su aviso (ve todo el vuelo en su app).
-    if (dto.copiloto_id)
-      void this.notifyPilotAssigned(dto.copiloto_id, data!, 'copiloto');
-    // Reserva aceptada CON squawk ALTA abierto: avisar al mecánico con el
-    // vuelo ya insertado (dedupe diario dentro del helper).
-    if (dto.aeronave_id && squawksAceptados.length > 0) {
-      this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
-    }
-    // AVISOS (4-sep-2026, nunca candado): doble reserva del avión en la
-    // ventana de la reserva (fecha de salida → regreso / último tramo) y
-    // capacidad de los tramos recién creados.
     const finCandidatos = [
       dto.fecha_traslado_final,
       ...itinerario.map((e) => e.hora_salida),
@@ -4744,17 +5187,250 @@ export class FlightsService {
     const fechaFinReserva = finCandidatos.length
       ? new Date(Math.max(...finCandidatos.map((d) => d.getTime())))
       : null;
-    const avisos = dto.aeronave_id
-      ? await this.avisosOperacionAvion({
-          vueloId,
-          aeronaveId: dto.aeronave_id,
-          fechaVuelo: dto.fecha_vuelo,
-          fechaFin: fechaFinReserva,
-          paxDefault: pasajeros,
-        })
-      : [];
-    void this.calendar.syncFlight(vueloId);
-    return { ...data!, avisos };
+    const tramo1 = itinerario[0]
+      ? {
+          origen: itinerario[0].origen_iata,
+          destino: itinerario[0].destino_iata,
+        }
+      : { origen, destino };
+    return { itinerario, origen, destino, pasajeros, fechaFinReserva, tramo1 };
+  }
+
+  /** Filas de `escala` de una reserva (alta y reparación del huérfano). */
+  private legsDeReserva(p: {
+    vueloId: string;
+    plan: ReturnType<FlightsService['itinerarioDeReserva']>;
+    dto: CreateReservaDto;
+    aeronaveId: string | null;
+    pilotoId: string | null;
+    userId: string;
+  }): Record<string, unknown>[] {
+    const { vueloId, plan, dto, aeronaveId, pilotoId, userId } = p;
+    // Pernocta SOLO manual (27-ago, regla del cliente): la derivación
+    // automática por salto de fecha marcaba pernoctas que nadie pidió.
+    const fechaEfectiva = (i: number): Date | null =>
+      plan.itinerario[i]?.hora_salida ?? (i === 0 ? dto.fecha_vuelo : null);
+    if (plan.itinerario.length > 0) {
+      return plan.itinerario.map((e, i) => ({
+        vuelo_id: vueloId,
+        orden: i + 1,
+        origen_iata: e.origen_iata,
+        destino_iata: e.destino_iata,
+        aeronave_id: aeronaveId,
+        piloto_id: pilotoId,
+        pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? null),
+        pasajeros_nombres: e.es_ferry ? [] : (e.pasajeros_nombres ?? []),
+        es_ferry: e.es_ferry ?? false,
+        es_sobrevuelo: e.es_sobrevuelo ?? false,
+        solo_operativa: e.es_ferry ?? false,
+        // Pernocta: SOLO la captura manual (27-ago).
+        requiere_pernocta: e.requiere_pernocta ?? false,
+        tipo_parada: e.tipo_parada ?? 'NORMAL',
+        servicio_notas: e.servicio_notas ?? null,
+        notas: e.notas ?? null,
+        fecha_salida_plan: fechaEfectiva(i)?.toISOString(),
+        created_by: userId,
+        updated_by: userId,
+      }));
+    }
+    const tramo = (
+      orden: number,
+      origen: string,
+      destino: string,
+      fecha: Date,
+    ): Record<string, unknown> => ({
+      vuelo_id: vueloId,
+      orden,
+      origen_iata: origen,
+      destino_iata: destino,
+      aeronave_id: aeronaveId,
+      piloto_id: pilotoId,
+      pasajeros: plan.pasajeros,
+      pasajeros_nombres: [] as string[],
+      es_ferry: false,
+      solo_operativa: false,
+      requiere_pernocta: false,
+      notas: null,
+      fecha_salida_plan: fecha.toISOString(),
+      created_by: userId,
+      updated_by: userId,
+    });
+    return [
+      tramo(1, plan.origen, plan.destino, dto.fecha_vuelo),
+      ...(dto.fecha_traslado_final
+        ? [tramo(2, plan.destino, plan.origen, dto.fecha_traslado_final)]
+        : []),
+    ];
+  }
+
+  /**
+   * Cliente de la reserva: por id (400 si no existe) o por NOMBRE (búsqueda
+   * normalizada entre TODOS los clientes, activos e inactivos). NO crea:
+   * devuelve `nombreCrear` para crearlo después del detector.
+   */
+  private async resolverClienteReserva(dto: CreateReservaDto): Promise<{
+    id: string | null;
+    nombre: string | null;
+    nombreCrear: string | null;
+    reactivar: boolean;
+    es_interno: boolean;
+    es_broker: boolean;
+  }> {
+    const sb = this.supabase.service;
+    const COLS = 'id, nombre, activo, es_interno, es_broker';
+    if (dto.cliente_id) {
+      const { data, error } = await sb
+        .from('cliente')
+        .select(COLS)
+        .eq('id', dto.cliente_id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data) {
+        throw new BadRequestException(
+          `El cliente ${dto.cliente_id} no existe: elígelo de nuevo o captúralo por nombre.`,
+        );
+      }
+      return {
+        id: data.id as string,
+        nombre: (data.nombre as string | null) ?? null,
+        nombreCrear: null,
+        reactivar: false,
+        es_interno: data.es_interno === true,
+        es_broker: data.es_broker === true,
+      };
+    }
+    const nombre = dto.cliente_nombre
+      ? nombreClienteParaCrear(dto.cliente_nombre)
+      : '';
+    if (nombre.length < 2) {
+      throw new BadRequestException('Indica el cliente (id o nombre).');
+    }
+    // Todos los clientes (paginado: PostgREST corta a 1000 filas).
+    type Fila = ClienteNombreRow & { es_interno: boolean; es_broker: boolean };
+    const todos: Fila[] = [];
+    const PAGINA = 1000;
+    for (let desde = 0; ; desde += PAGINA) {
+      const { data, error } = await sb
+        .from('cliente')
+        .select(COLS)
+        .order('created_at', { ascending: true })
+        .range(desde, desde + PAGINA - 1);
+      if (error) throw new Error(error.message);
+      const filas = (data ?? []) as unknown as Fila[];
+      todos.push(...filas);
+      if (filas.length < PAGINA) break;
+    }
+    const igual = buscarClientePorNombre(todos, nombre);
+    if (igual) {
+      return {
+        id: igual.id,
+        nombre: igual.nombre,
+        nombreCrear: null,
+        reactivar: igual.activo !== true,
+        es_interno: igual.es_interno === true,
+        es_broker: igual.es_broker === true,
+      };
+    }
+    return {
+      id: null,
+      nombre: null,
+      nombreCrear: nombre,
+      reactivar: false,
+      es_interno: false,
+      es_broker: false,
+    };
+  }
+
+  /** Alta mínima de cliente por nombre (tarifa pública, sin RFC: el panel
+   *  completa; carrera residual entre dos teléfonos con el mismo nombre
+   *  nuevo = 2 clientes, documentado). */
+  private async crearClientePorNombre(
+    nombre: string,
+    userId: string,
+  ): Promise<string> {
+    const { data, error } = await this.supabase.service
+      .from('cliente')
+      .insert({ nombre, created_by: userId, updated_by: userId })
+      .select('id')
+      .maybeSingle();
+    if (error) throw new Error(`No se pudo crear el cliente: ${error.message}`);
+    if (!data?.id) throw new Error('No se pudo crear el cliente.');
+    return data.id as string;
+  }
+
+  private async reactivarCliente(id: string, userId: string): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('cliente')
+      .update({ activo: true, updated_by: userId })
+      .eq('id', id);
+    if (error)
+      throw new Error(`No se pudo reactivar el cliente: ${error.message}`);
+  }
+
+  /** Apoyos de nivel vuelo: mismo camino que assign (reemplazarApoyos ya
+   *  termina en syncApoyoEspejo). Devuelve solo las ALTAS (a quién avisar). */
+  private async aplicarApoyosReserva(
+    vueloId: string,
+    apoyoIds: string[],
+    userId: string,
+  ): Promise<string[]> {
+    const r = await reemplazarApoyos(this.supabase.service, {
+      vueloId,
+      escalaId: null,
+      usuarioIds: apoyoIds,
+      createdBy: userId,
+    });
+    return r.altas;
+  }
+
+  /** Push a un tripulante con detalle; un fallo jamás tumba el alta. */
+  private async avisoTripulanteSeguro(
+    usuarioId: string,
+    vuelo: Record<string, unknown>,
+    rol: 'piloto' | 'copiloto',
+  ): Promise<AvisoTripulante | null> {
+    try {
+      return await this.notifyPilotAssigned(usuarioId, vuelo, rol);
+    } catch (err) {
+      this.logger.warn(
+        `Aviso al ${rol} ${usuarioId} del vuelo ${String(vuelo.id)} falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /** Escalas para la respuesta del alta; un fallo de lectura no la tumba. */
+  private async escalasDeRespuesta(
+    vueloId: string,
+  ): Promise<Record<string, unknown>[]> {
+    try {
+      return await this.listEscalas(vueloId);
+    } catch (err) {
+      this.logger.warn(
+        `listEscalas(${vueloId}) tras el alta falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [];
+    }
+  }
+
+  /** Error del insert del vuelo: 23503/23514/23502/22P02 → 400 legible (no
+   *  se arreglan reintentando); lo demás → 500 (transitorio). */
+  private lanzarErrorBdReserva(
+    error: { code?: string; message: string },
+    que: string,
+  ): never {
+    if (error.code === '23503') {
+      throw new BadRequestException(
+        `Referenced entity not found: ${error.message}`,
+      );
+    }
+    const texto = error.code ? ERRORES_BD_DETERMINISTAS[error.code] : undefined;
+    if (texto) {
+      throw new BadRequestException(
+        `No se pudo guardar ${que} (${texto}: ${error.message}). Corrige la captura y vuelve a intentar.`,
+      );
+    }
+    throw new Error(error.message);
   }
 
   /**

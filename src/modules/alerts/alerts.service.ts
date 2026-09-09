@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { saldoCaja } from '../../common/caja-chica-saldo.util';
+import { clientRequestIdEvento } from '../../common/columna-opcional.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   diagnosticoGrupo,
@@ -29,7 +30,7 @@ import {
   claveVispera,
   cuerpoEvento,
   diaSiguienteCancun,
-  EVENTO_FLOTA_COLS,
+  eventoFlotaCols,
   horaCancun,
   mapEventoRow,
   rangoDiaCancun,
@@ -312,7 +313,12 @@ export class AlertsService {
   ): Promise<EventoInterno[]> {
     const { data, error } = await this.supabase.service
       .from('evento_flota')
-      .select(EVENTO_FLOTA_COLS)
+      // Columna opcional hasta aplicar la migración 20260909000003.
+      .select(
+        eventoFlotaCols(
+          await clientRequestIdEvento(this.supabase.service).disponible(),
+        ),
+      )
       .not('responsable_id', 'is', null)
       .gte('fecha', desde)
       .lte('fecha', hasta)

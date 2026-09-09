@@ -25,6 +25,9 @@ export interface EventoMe {
   creado_por_nombre: string | null;
   created_at: string;
   updated_at: string;
+  /** Llave de idempotencia de la captura (app sin internet, 9-sep-2026);
+   *  null en eventos del panel. La app deduplica "pendiente vs real" con ella. */
+  client_request_id: string | null;
 }
 
 /** EventoMe + lo que el servicio necesita internamente (no viaja a la app). */
@@ -34,7 +37,7 @@ export interface EventoInterno extends EventoMe {
   created_by: string | null;
 }
 
-/** Fila cruda de `evento_flota` con sus embeds (select EVENTO_FLOTA_COLS). */
+/** Fila cruda de `evento_flota` con sus embeds (select `eventoFlotaCols`). */
 export interface EventoFlotaRow {
   id: string;
   titulo: string;
@@ -47,6 +50,7 @@ export interface EventoFlotaRow {
   updated_at: string;
   created_by?: string | null;
   google_calendar_id?: string | null;
+  client_request_id?: string | null;
   aeronave?:
     | { matricula?: string | null; color_calendario?: string | null }
     | Array<{ matricula?: string | null; color_calendario?: string | null }>
@@ -61,9 +65,21 @@ export interface EventoFlotaRow {
     | null;
 }
 
-/** Columnas + embeds únicos para leer eventos (calendario, /me, alertas). */
-export const EVENTO_FLOTA_COLS =
-  'id, titulo, fecha, fecha_fin, aeronave_id, responsable_id, notas, created_at, updated_at, created_by, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre), creador:usuario!created_by(nombre)';
+/**
+ * Columnas + embeds únicos para leer eventos (calendario, /me, alertas).
+ * `conClientRequest=false` omite `client_request_id` mientras la migración
+ * 20260909000003 no esté aplicada (ver `columna-opcional.util`); el lector
+ * sigue devolviendo la llave como `null` (`mapEventoRow`).
+ */
+export function eventoFlotaCols(conClientRequest: boolean): string {
+  return [
+    'id, titulo, fecha, fecha_fin, aeronave_id, responsable_id, notas, created_at, updated_at, created_by, google_calendar_id',
+    conClientRequest ? 'client_request_id' : null,
+    'aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre), creador:usuario!created_by(nombre)',
+  ]
+    .filter((s): s is string => s !== null)
+    .join(', ');
+}
 
 function unwrap<T>(v: T | T[] | null | undefined): T | null {
   if (v == null) return null;
@@ -87,6 +103,7 @@ export function mapEventoRow(row: EventoFlotaRow): EventoInterno {
     creado_por_nombre: creador?.nombre ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    client_request_id: row.client_request_id ?? null,
     responsable_nombre: resp?.nombre ?? null,
     google_calendar_id: row.google_calendar_id ?? null,
     created_by: row.created_by ?? null,
@@ -108,6 +125,7 @@ export function aEventoMe(ev: EventoInterno): EventoMe {
     creado_por_nombre: ev.creado_por_nombre,
     created_at: ev.created_at,
     updated_at: ev.updated_at,
+    client_request_id: ev.client_request_id ?? null,
   };
 }
 

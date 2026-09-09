@@ -237,6 +237,55 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       (omitidos = conservar la escala viva) y `PATCH :id/pdf-visibilidad`
       (+ la ruta por escala) mueve notas/toggles del PDF SIN versión,
       snapshot ni avisos: presentación pura.
+    - **Alta sin internet desde la app (9-sep-2026, diseño offline v2)**:
+      `POST /flights/reserva`, `POST /pilots/:id/descansos` y
+      `POST /calendar/eventos` son IDEMPOTENTES por `client_request_id`
+      (índices únicos parciales `uq_vuelo_client_request`,
+      `uq_piloto_descanso_client_request`, `uq_evento_flota_client_request`;
+      la columna solo entra al insert cuando la llave viaja). En
+      `createReserva` TODO lo que puede rechazar va ANTES del insert
+      (avión obligatorio = 400 claro, el CHECK de `vuelo` lo exige; taller =
+      409 estructurado `AERONAVE_EN_TALLER` con el mismo `message`; squawk,
+      copiloto, `assertApoyosAsignables`, IATAs, cliente por nombre SIN
+      crear todavía, detector de duplicado, sello). Tras los tramos el push
+      al piloto/copiloto sale INMEDIATAMENTE (antes de apoyos y permisos):
+      un 500 posterior reintenta por la rama idempotente, que no re-avisa,
+      y el piloto ya se enteró. La rama
+      idempotente (pre-check por llave o 23505) NUNCA re-valida, re-crea ni
+      re-notifica al piloto/copiloto/responsable (200, `idempotente:true`);
+      solo aplica `apoyo_ids` si `vuelo_apoyo` está vacío
+      (`apoyos_aplicados`). Un vuelo HUÉRFANO (RESERVA, 0 filas de escala,
+      0 cobro/gasto/factura, > 5 min) se REPARA sobre el mismo id/folio
+      (`reparado:true`, ahí sí avisa porque nunca avisó); más joven → 503
+      `RESERVA_EN_PROCESO`; con dinero → 200 con aviso. JAMÁS delete
+      (`compensarVueloSinEscalas` solo corre en el alta fresca). Errores
+      deterministas de BD (23514/23502/22P02/23503) → 400 legible; el resto
+      500 (transitorio para el outbox). `capturado_en` de reserva/evento
+      NUNCA rechaza (`selloCapturaApp`, tolerante, va a
+      `notas_internas`/`notas`; el descanso lo ignora) — `resolverCapturadoEn`
+      de gastos sigue siendo estricto. El detector de posible duplicado
+      (`posible-duplicado.util`: mismo cliente, solape del día Cancún con
+      `[fecha_vuelo, fecha_fin]`, y misma aeronave O misma ruta del tramo 1;
+      excluye `es_interno`, `es_broker` y `grupo_id`) solo bloquea (409
+      `POSIBLE_DUPLICADO` + `details.vuelos[]`) con
+      `rechazar_posible_duplicado` y sin `aceptar_posible_duplicado`; si no,
+      texto en `avisos[]`. `cliente_nombre` busca entre TODOS los clientes
+      por nombre normalizado (`nombre-cliente.util`), reactiva al inactivo y
+      crea justo antes del insert (`cliente_creado`). `aviso_piloto`/
+      `aviso_copiloto` traen `notificado` y `push_dispositivos`
+      (`notifyUserDetallado`): 0 ⇒ la oficina confirma por WhatsApp.
+      `client_request_id` viaja en `VUELO_COLS`, `GET /calendar` (vuelo,
+      descanso, evento), `/me/descansos` y `/me/eventos` para que la app
+      deduplique su pendiente local. En `piloto_descanso`/`evento_flota` la
+      columna es OPCIONAL hasta aplicar la migración `20260909000003`
+      (`columna-opcional.util`: sonda 1 vez, 42703 ⇒ se omite del select y
+      del insert, respuesta con `client_request_id: null`, altas sin
+      idempotencia; re-sondea cada ≤10 min y se activa sola sin reiniciar;
+      `vuelo.client_request_id` ya existe en prod y no pasa por el gate).
+      `GET /aircraft` expone
+      `squawks_alta_abiertos` y `en_taller`; `GET /me/capturas` incluye los
+      vuelos creados por el usuario (`tipo: 'vuelo'`). Verificar el deploy
+      con `GET /v1/version` (package.json `version`), nunca con un 401.
 
 ## Convenciones NestJS
 

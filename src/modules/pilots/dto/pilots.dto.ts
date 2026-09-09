@@ -10,6 +10,7 @@ const boolQuery = ({ value }: { value: unknown }): boolean | undefined =>
       ? false
       : undefined;
 import {
+  Allow,
   IsBoolean,
   IsEmail,
   IsEnum,
@@ -74,6 +75,26 @@ export class CreateDescansoDto {
   @IsString()
   @MaxLength(200)
   motivo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de idempotencia (uuid) por captura (outbox de la app, 9-sep-2026): repetirla devuelve ' +
+      'el descanso YA creado (200, idempotente:true) sin volver a avisar al piloto.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Momento real de captura en la app (ISO con zona). Se acepta y se ignora: el descanso no tiene ' +
+      'campo de notas donde sellarlo; NUNCA provoca 400.',
+  })
+  // Sin validadores a propósito: `@Allow()` solo lo deja pasar la whitelist
+  // (un tipo raro o un texto largo tampoco deben rechazar: el sello
+  // tolerante lo convierte a texto y lo recorta).
+  @Allow()
+  capturado_en?: string;
 }
 
 export class ListDescansosQuery {

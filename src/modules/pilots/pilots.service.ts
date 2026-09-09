@@ -6,6 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { clientRequestIdDescanso } from '../../common/columna-opcional.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { CalendarService } from '../calendar/calendar.service';
@@ -652,12 +653,36 @@ export class PilotsService {
 
   // ===== Descansos (se pintan en el calendario y avisan al asignar) =====
 
+  /**
+   * `client_request_id` es columna OPCIONAL hasta aplicar la migración
+   * 20260909000003 (ver `columna-opcional.util`): sin columna se omite del
+   * select y la respuesta la trae como `null` (misma forma). Se activa sola
+   * en ≤ 10 min tras aplicarla, sin reiniciar.
+   */
+  private conClientRequestDescanso(): Promise<boolean> {
+    return clientRequestIdDescanso(this.supabase.service).disponible();
+  }
+
   async listDescansos(q: ListDescansosQuery) {
+    interface DescansoListRow {
+      id: string;
+      piloto_id: string;
+      fecha_inicio: string;
+      fecha_fin: string;
+      motivo: string | null;
+      client_request_id?: string | null;
+      piloto?: { nombre?: string | null } | { nombre?: string | null }[] | null;
+    }
+    const cols = [
+      'id, piloto_id, fecha_inicio, fecha_fin, motivo',
+      (await this.conClientRequestDescanso()) ? 'client_request_id' : null,
+      'piloto:usuario!piloto_id(nombre)',
+    ]
+      .filter((s): s is string => s !== null)
+      .join(', ');
     let query = this.supabase.service
       .from('piloto_descanso')
-      .select(
-        'id, piloto_id, fecha_inicio, fecha_fin, motivo, piloto:usuario!piloto_id(nombre)',
-      )
+      .select(cols)
       .order('fecha_inicio', { ascending: true });
     if (q.piloto_id) query = query.eq('piloto_id', q.piloto_id);
     // Solapamiento con el rango pedido: inicio <= hasta y fin >= desde.
@@ -665,20 +690,56 @@ export class PilotsService {
     if (q.desde) query = query.gte('fecha_fin', q.desde);
     const { data, error } = await query;
     if (error) throw new Error(error.message);
-    return (data ?? []).map((d) => {
+    return ((data ?? []) as unknown as DescansoListRow[]).map((d) => {
       const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
       return {
         ...d,
-        piloto_nombre: (piloto as { nombre?: string } | null)?.nombre ?? null,
+        // Siempre presente en la respuesta; null mientras no exista la columna.
+        client_request_id: d.client_request_id ?? null,
+        piloto_nombre: piloto?.nombre ?? null,
       };
     });
   }
 
+  private static readonly DESCANSO_COLS =
+    'id, piloto_id, fecha_inicio, fecha_fin, motivo';
+
+  /** Descanso ya creado con esa llave de idempotencia (o null). */
+  private async descansoPorClientRequest(
+    key: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('piloto_descanso')
+      .select(PilotsService.DESCANSO_COLS)
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data ?? null;
+  }
+
+  /**
+   * IDEMPOTENTE por `client_request_id` (9-sep-2026, app sin internet): la
+   * misma llave devuelve la MISMA proyección `{id, piloto_id, fecha_inicio,
+   * fecha_fin, motivo, idempotente: true}` sin re-avisar al piloto ni
+   * re-espejar en Google. `capturado_en` se acepta y se ignora (el descanso
+   * no tiene notas donde sellarlo); nunca rechaza.
+   */
   async createDescanso(
     pilotoId: string,
     dto: CreateDescansoDto,
     userId: string,
   ) {
+    // La llave solo cuenta si la columna ya existe (migración 20260909000003
+    // pendiente de aplicar): sin columna, alta normal SIN idempotencia (ni
+    // pre-check, ni columna en el insert, ni rama 23505).
+    const key =
+      dto.client_request_id && (await this.conClientRequestDescanso())
+        ? dto.client_request_id
+        : null;
+    if (key) {
+      const ya = await this.descansoPorClientRequest(key);
+      if (ya) return { ...ya, idempotente: true as const };
+    }
     const inicio = dto.fecha_inicio.slice(0, 10);
     const fin = dto.fecha_fin.slice(0, 10);
     if (fin < inicio) {
@@ -693,12 +754,23 @@ export class PilotsService {
         fecha_inicio: inicio,
         fecha_fin: fin,
         motivo: dto.motivo ?? null,
+        // Llave SOLO cuando viaja (panel: insert idéntico al de siempre).
+        ...(key ? { client_request_id: key } : {}),
         created_by: userId,
         updated_by: userId,
       })
-      .select('id, piloto_id, fecha_inicio, fecha_fin, motivo')
+      .select(PilotsService.DESCANSO_COLS)
       .maybeSingle();
     if (error) {
+      // Carrera con la misma llave (dos flushes): devolver el primero.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes('uq_piloto_descanso_client_request')
+      ) {
+        const ya = await this.descansoPorClientRequest(key);
+        if (ya) return { ...ya, idempotente: true as const };
+      }
       if (error.code === '23503')
         throw new NotFoundException('Piloto no encontrado');
       throw new Error(error.message);
@@ -739,7 +811,7 @@ export class PilotsService {
       }
     })();
 
-    return data!;
+    return { ...data!, idempotente: false as const };
   }
 
   async deleteDescanso(id: string) {

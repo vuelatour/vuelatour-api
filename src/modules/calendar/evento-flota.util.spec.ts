@@ -7,6 +7,7 @@ import {
   cuerpoEvento,
   diaSiguienteCancun,
   enVentanaRecordatorio90,
+  eventoFlotaCols,
   fechaHoraCancunCorta,
   horaCancun,
   isoAlMinuto,
@@ -93,6 +94,41 @@ describe('avisoEventoBase', () => {
   });
 });
 
+describe('eventoFlotaCols', () => {
+  it('con la columna: incluye client_request_id entre columnas y embeds', () => {
+    const cols = eventoFlotaCols(true);
+    expect(cols).toContain(
+      ', google_calendar_id, client_request_id, aeronave:',
+    );
+    expect(cols.startsWith('id, titulo, fecha, fecha_fin')).toBe(true);
+    expect(cols).toContain('creador:usuario!created_by(nombre)');
+  });
+
+  it('sin la columna (migración pendiente): la omite sin dejar comas dobles', () => {
+    const cols = eventoFlotaCols(false);
+    expect(cols).not.toContain('client_request_id');
+    expect(cols).toContain(', google_calendar_id, aeronave:');
+    expect(cols).not.toMatch(/,\s*,/);
+    expect(cols).toBe(eventoFlotaCols(true).replace('client_request_id, ', ''));
+  });
+
+  it('mapEventoRow sin la columna → client_request_id null (misma forma)', () => {
+    const ev = mapEventoRow({
+      id: 'e1',
+      titulo: 'Lavado',
+      fecha: '2026-09-03T14:45:00Z',
+      fecha_fin: null,
+      aeronave_id: null,
+      responsable_id: null,
+      notas: null,
+      created_at: '2026-09-01T00:00:00Z',
+      updated_at: '2026-09-01T00:00:00Z',
+    });
+    expect(ev.client_request_id).toBeNull();
+    expect(aEventoMe(ev).client_request_id).toBeNull();
+  });
+});
+
 describe('mapEventoRow / aEventoMe', () => {
   it('desenvuelve embeds (objeto o arreglo) y proyecta el shape público', () => {
     const interno = mapEventoRow({
@@ -122,6 +158,7 @@ describe('mapEventoRow / aEventoMe', () => {
         'aeronave_color',
         'aeronave_id',
         'aeronave_matricula',
+        'client_request_id',
         'creado_por_nombre',
         'created_at',
         'fecha',

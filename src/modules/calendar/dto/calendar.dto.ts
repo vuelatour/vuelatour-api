@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  Allow,
   IsBoolean,
   IsDate,
   IsOptional,
@@ -99,6 +100,26 @@ export class CreateEventoFlotaDto {
   @IsString()
   @MaxLength(500)
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de idempotencia (uuid) por captura (outbox de la app, 9-sep-2026): repetirla devuelve ' +
+      'el evento YA creado (200, idempotente:true, aviso:null) sin volver a avisar al responsable.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Momento real de captura en la app (ISO con zona). Solo auditoría: se anexa a `notas` como ' +
+      '"[Capturado en la app el … · recibido el …]"; NUNCA provoca 400.',
+  })
+  // Sin validadores a propósito: `@Allow()` solo lo deja pasar la whitelist
+  // (un tipo raro o un texto largo tampoco deben rechazar: el sello
+  // tolerante lo convierte a texto y lo recorta).
+  @Allow()
+  capturado_en?: string;
 }
 
 /**

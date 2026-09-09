@@ -3,6 +3,7 @@ import {
   fechaHoraCancun,
   hoyCancun,
   restarMeses,
+  fechaCortaCancun,
 } from './fecha-cancun.util';
 
 describe('restarMeses', () => {
@@ -79,5 +80,20 @@ describe('fechaHoraCancun', () => {
     expect(fechaHoraCancun(undefined)).toBe('');
     expect(fechaHoraCancun('')).toBe('');
     expect(fechaHoraCancun('no-es-fecha')).toBe('');
+  });
+});
+
+describe('fechaCortaCancun', () => {
+  it('"lun 14 sep" y "lun 14 sep 09:00" en hora Cancún, sin "de" ni puntos', () => {
+    // 14:00Z = 09:00 Cancún del lunes 14-sep-2026.
+    expect(fechaCortaCancun('2026-09-14T14:00:00Z')).toBe('lun 14 sep');
+    expect(fechaCortaCancun('2026-09-14T14:00:00Z', { hora: true })).toBe(
+      'lun 14 sep 09:00',
+    );
+  });
+
+  it('valor nulo o inválido → cadena vacía (nunca lanza)', () => {
+    expect(fechaCortaCancun(null)).toBe('');
+    expect(fechaCortaCancun('ayer', { hora: true })).toBe('');
   });
 });

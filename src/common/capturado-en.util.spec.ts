@@ -1,8 +1,10 @@
 import { BadRequestException } from '@nestjs/common';
 import {
   CAPTURADO_EN_FUTURO_MAX_MS,
+  anexarSello,
   capturadoAhora,
   resolverCapturadoEn,
+  selloCapturaApp,
 } from './capturado-en.util';
 
 /**
@@ -82,5 +84,61 @@ describe('capturadoAhora', () => {
   it('sello ISO del instante dado', () => {
     const t = new Date('2026-09-07T12:00:00Z');
     expect(capturadoAhora(t)).toBe('2026-09-07T12:00:00.000Z');
+  });
+});
+
+/**
+ * Sello TOLERANTE de reserva/evento (alta sin internet, 9-sep-2026): nunca
+ * lanza; el valor raro se anota como "no confiable" y el alta sigue.
+ */
+describe('selloCapturaApp', () => {
+  // 11:32 Cancún del 14-sep-2026.
+  const AHORA = new Date('2026-09-14T16:32:00Z');
+
+  it('ausente / vacío → null (nada que anotar)', () => {
+    expect(selloCapturaApp(undefined, AHORA)).toBeNull();
+    expect(selloCapturaApp(null, AHORA)).toBeNull();
+    expect(selloCapturaApp('   ', AHORA)).toBeNull();
+  });
+
+  it('válido y más de 2 min antes → "[Capturado en la app el … · recibido el …]" en hora Cancún', () => {
+    expect(selloCapturaApp('2026-09-14T09:00:00-05:00', AHORA)).toBe(
+      '[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]',
+    );
+    // Instante en Z: 14:00Z = 09:00 Cancún.
+    expect(selloCapturaApp('2026-09-14T14:00:00Z', AHORA)).toBe(
+      '[Capturado en la app el 14 sep 09:00 · recibido el 14 sep 11:32]',
+    );
+  });
+
+  it('válido pero reciente (≤ 2 min): alta en línea normal → null', () => {
+    expect(selloCapturaApp('2026-09-14T16:31:00Z', AHORA)).toBeNull();
+    expect(selloCapturaApp(AHORA.toISOString(), AHORA)).toBeNull();
+  });
+
+  it('futuro (> 10 min): reloj del teléfono no confiable, NO rechaza', () => {
+    expect(selloCapturaApp('2026-09-14T17:00:00Z', AHORA)).toBe(
+      '[Capturado en la app (hora del teléfono no confiable: 2026-09-14T17:00:00Z) · recibido el 14 sep 11:32]',
+    );
+  });
+
+  it('inválido (sin zona, basura, antes de 2020): no confiable, NO rechaza', () => {
+    expect(selloCapturaApp('2026-09-14T09:00:00', AHORA)).toMatch(
+      /^\[Capturado en la app \(hora del teléfono no confiable: 2026-09-14T09:00:00\) · recibido el 14 sep 11:32\]$/,
+    );
+    expect(selloCapturaApp('ayer', AHORA)).toMatch(/no confiable: ayer\)/);
+    expect(selloCapturaApp('2001-01-01T00:00:00Z', AHORA)).toMatch(
+      /no confiable/,
+    );
+    expect(() => selloCapturaApp('x'.repeat(500), AHORA)).not.toThrow();
+  });
+});
+
+describe('anexarSello', () => {
+  it('anexa en una línea nueva; sin sello devuelve las notas (o null)', () => {
+    expect(anexarSello('Notas', '[sello]')).toBe('Notas\n[sello]');
+    expect(anexarSello(undefined, '[sello]')).toBe('[sello]');
+    expect(anexarSello('Notas', null)).toBe('Notas');
+    expect(anexarSello('', null)).toBeNull();
   });
 });
