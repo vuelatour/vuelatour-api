@@ -638,6 +638,11 @@ export class QuotesService {
       .filter((e) => !e.aplica_iva)
       .reduce((acc, e) => acc + e.monto_usd, 0);
 
+    // IVA por método: solo los métodos BANCARIOS facturables lo llevan por
+    // default. BILLPOCKET/PAYWISE (terminal/pasarela sin factura), EFECTIVO,
+    // DOLARES y OTRO → 0 % (el override de IVA es la válvula). PAYWISE
+    // (9-sep-2026) sigue a BillPocket a propósito; su comisión NO se
+    // sintetiza como extra al cliente: es comisión bancaria del COBRO.
     const ivaAplicaPorMetodo =
       dto.metodo_pago === MetodoPago.TRANSFERENCIA ||
       dto.metodo_pago === MetodoPago.HSBC_LINK ||

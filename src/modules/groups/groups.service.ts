@@ -3280,6 +3280,21 @@ export class GroupsService {
     };
   }
 
+  /**
+   * PAYWISE (9-sep-2026): sin comisión capturada, el sobre provisiona el %
+   * configurado (misma regla que `createCobro`, fuente única en
+   * FlightsService.comisionDefaultPorMetodo). Muta el DTO antes de partir.
+   */
+  private async aplicarComisionDefault(dto: CreateCobroGrupoDto) {
+    if (!(Number(dto.monto) > 0)) return;
+    const pct = await this.flights.comisionDefaultPorMetodo(
+      dto.metodo_cobro,
+      dto.comision_banco_pct,
+      dto.comision_banco_monto,
+    );
+    if (pct != null) dto.comision_banco_pct = pct;
+  }
+
   /** POST /v1/grupos/:id/cobros/previsualizar (sin escribir). */
   async previsualizarCobro(grupoId: string, dto: CreateCobroGrupoDto) {
     const cab = await this.cargarCabecera(grupoId);
@@ -3288,6 +3303,7 @@ export class GroupsService {
         'El grupo está cancelado: los cargos por cancelación se registran en cada vuelo.',
       );
     }
+    await this.aplicarComisionDefault(dto);
     const prep = await this.prepararSobre(cab, dto);
     const p = prep.particion;
     return {
@@ -3516,6 +3532,7 @@ export class GroupsService {
         };
       }
     }
+    await this.aplicarComisionDefault(dto);
     const prep = await this.prepararSobre(cab, dto);
     const p = prep.particion;
     // Ventana anti-duplicado de 90 s a nivel SOBRE (doble clic sin llave).

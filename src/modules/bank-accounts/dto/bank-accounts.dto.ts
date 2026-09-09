@@ -23,6 +23,16 @@ export enum RazonSocialEmisora {
   OTRA = 'OTRA',
 }
 
+/**
+ * Tipo de cuenta (9-sep-2026): BANCO = estado de cuenta clásico; PASARELA =
+ * Paywise (cada abono trae bruto/comisión/neto y liquida con días de
+ * retraso — el auto-cruce usa ±5 días y coteja bruto/neto/referencia).
+ */
+export enum TipoCuentaBancaria {
+  BANCO = 'BANCO',
+  PASARELA = 'PASARELA',
+}
+
 export class ListBankAccountsQuery {
   @ApiPropertyOptional()
   @IsOptional()
@@ -91,6 +101,16 @@ export class CreateBankAccountDto {
   @ApiProperty({ enum: RazonSocialEmisora })
   @IsEnum(RazonSocialEmisora)
   razon_social!: RazonSocialEmisora;
+
+  @ApiPropertyOptional({
+    enum: TipoCuentaBancaria,
+    default: TipoCuentaBancaria.BANCO,
+    description:
+      'BANCO (default) o PASARELA (Paywise: abonos con bruto/comisión/neto).',
+  })
+  @IsOptional()
+  @IsEnum(TipoCuentaBancaria)
+  tipo?: TipoCuentaBancaria;
 
   @ApiPropertyOptional()
   @IsOptional()

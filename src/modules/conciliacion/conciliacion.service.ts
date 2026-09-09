@@ -13,6 +13,7 @@ import { PyservicesService } from '../pyservices/pyservices.service';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
 import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
 import {
   fetchRepartos,
@@ -25,28 +26,48 @@ import {
   type MovimientoLiga,
 } from '../../common/cobro-conciliado.util';
 import {
+  etiquetaMetodoCobro,
+  METODOS_COBRO_ABONO_AUTO,
+  METODOS_COBRO_ABONO_MANUAL,
+  METODOS_COBRO_PASARELA,
+} from '../../common/metodo-cobro.util';
+import {
   ConciliacionParseDto,
   ImportarMovimientosDto,
   ListConciliacionQuery,
+  PaywiseAuditoriaQuery,
   TipoMovimientoBancario,
   type ReporteConciliacionEstado,
 } from './dto/conciliacion.dto';
+import {
+  cruzarPaywise,
+  PAYWISE_VENTANA_DIAS,
+  type CobroPaywise,
+  type CrucePaywise,
+  type MovimientoPaywise,
+  type ResultadoCrucePaywise,
+} from './paywise-cruce.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
+// monto_bruto / comision_monto (9-sep-2026): solo los abonos de una cuenta
+// PASARELA (Paywise) los traen; `monto` sigue siendo lo DEPOSITADO (neto).
 const MOV_COLS =
-  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, origen, notas, created_at';
+  'id, cuenta_bancaria_id, fecha, tipo, monto, monto_bruto, comision_monto, descripcion, referencia, conciliado, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, origen, notas, created_at';
 const MATCH_DAYS = 3;
 /**
  * Métodos de cobro que llegan al banco como ABONO y se cruzan SOLOS
  * (auto-match): misma lista para cobro_vuelo y para los sobres de grupo.
+ * Fuente única `common/metodo-cobro.util` (+ PAYWISE desde 9-sep-2026).
  */
-const METODOS_ABONO_AUTO = ['TRANSFERENCIA', 'HSBC_LINK', 'CHEQUE'];
+const METODOS_ABONO_AUTO = [...METODOS_COBRO_ABONO_AUTO];
 /**
  * Candidatos MANUALES: + BILLPOCKET (el depósito de la terminal también
  * aparece en el estado de cuenta; el panel ya lo ofrecía a mano).
  */
-const METODOS_ABONO_MANUAL = [...METODOS_ABONO_AUTO, 'BILLPOCKET'];
+const METODOS_ABONO_MANUAL = [...METODOS_COBRO_ABONO_MANUAL];
+/** Tipo de cuenta_bancaria cuyos abonos traen bruto/comisión (Paywise). */
+const TIPO_CUENTA_PASARELA = 'PASARELA';
 /** Ventana default (±días) de candidatos manuales: la misma que usaba el panel. */
 const CANDIDATOS_DIAS_DEFAULT = 60;
 const CANDIDATOS_MAX = 60;
@@ -148,13 +169,20 @@ export interface ParsedStatement {
     monto: number;
     tipo: 'CARGO' | 'ABONO';
     referencia: string | null;
+    /** Paywise (aditivo): bruto/comisión/estatus por movimiento. */
+    monto_bruto?: number | null;
+    comision?: number | null;
+    estatus?: string | null;
   }>;
   total: number;
+  /** csv | excel | pdf | paywise */
   formato: string;
   notas: string;
   modelo: string | null;
   /** Consumo de tokens (solo PDF; CSV/Excel no usan IA). */
   uso_ia?: UsoIaPayload | null;
+  /** Encabezados del archivo (tabular): para el mapeo manual del panel. */
+  columnas?: string[];
 }
 
 export interface SugerenciaConciliacion {
@@ -217,6 +245,8 @@ export class ConciliacionService {
         body: JSON.stringify({
           filename: dto.filename,
           file_base64: dto.file_base64,
+          // Mapeo manual de columnas Paywise (respaldo del panel).
+          mapeo: dto.mapeo ?? null,
         }),
         signal: controller.signal,
       });
@@ -351,6 +381,10 @@ export class ConciliacionService {
         monto: m.monto,
         descripcion: m.descripcion ?? null,
         referencia: m.referencia ?? null,
+        // Pasarela (Paywise): bruto y comisión del movimiento; null en bancos.
+        monto_bruto: m.monto_bruto != null ? r2(Number(m.monto_bruto)) : null,
+        comision_monto:
+          m.comision_monto != null ? r2(Number(m.comision_monto)) : null,
         origen: 'IMPORTADO',
         created_by: userId,
         updated_by: userId,
@@ -435,7 +469,9 @@ export class ConciliacionService {
     const { data: inserted, error } = await this.supabase.service
       .from('movimiento_bancario')
       .insert(rows)
-      .select('id, fecha, monto, tipo');
+      .select(
+        'id, fecha, monto, tipo, monto_bruto, comision_monto, referencia, descripcion',
+      );
     if (error) {
       if (error.code === '23503')
         throw new BadRequestException('Cuenta bancaria no encontrada.');
@@ -443,8 +479,11 @@ export class ConciliacionService {
     }
 
     // La moneda de la cuenta define contra qué se cruza: un cargo de 3,000 en
-    // la cuenta USD jamás debe conciliar un gasto de $3,000 MXN.
-    const monedaCuenta = await this.monedaCuenta(dto.cuenta_bancaria_id);
+    // la cuenta USD jamás debe conciliar un gasto de $3,000 MXN. El TIPO
+    // decide el cruce de abonos: PASARELA (Paywise) coteja bruto/neto/
+    // referencia a ±5 días; BANCO, neto/bruto a ±3.
+    const cuentaInfo = await this.infoCuenta(dto.cuenta_bancaria_id);
+    const monedaCuenta = cuentaInfo.moneda;
 
     // Auto-conciliación: la parte lenta (una consulta por movimiento). El
     // progreso avanza de 35 a 95, reportado por lotes para no duplicar el
@@ -457,13 +496,29 @@ export class ConciliacionService {
       const matched =
         m.tipo === TipoMovimientoBancario.CARGO
           ? await this.autoMatch(m.id, m.monto, m.fecha, monedaCuenta, userId)
-          : await this.autoMatchAbono(
-              m.id,
-              m.monto,
-              m.fecha,
-              monedaCuenta,
-              userId,
-            );
+          : cuentaInfo.tipo === TIPO_CUENTA_PASARELA
+            ? await this.autoMatchAbonoPasarela(
+                {
+                  id: m.id as string,
+                  fecha: m.fecha as string,
+                  monto: Number(m.monto),
+                  monto_bruto:
+                    m.monto_bruto == null ? null : Number(m.monto_bruto),
+                  comision_monto:
+                    m.comision_monto == null ? null : Number(m.comision_monto),
+                  referencia: (m.referencia as string | null) ?? null,
+                  descripcion: (m.descripcion as string | null) ?? null,
+                  moneda: monedaCuenta,
+                },
+                userId,
+              )
+            : await this.autoMatchAbono(
+                m.id,
+                m.monto,
+                m.fecha,
+                monedaCuenta,
+                userId,
+              );
       if (matched) conciliadosAuto += 1;
       if (i % pasoLote === 0 || i === lista.length - 1) {
         await onProgress(
@@ -563,12 +618,22 @@ export class ConciliacionService {
   }
 
   private async monedaCuenta(cuentaId: string): Promise<string | null> {
+    return (await this.infoCuenta(cuentaId)).moneda;
+  }
+
+  /** Moneda y tipo (BANCO | PASARELA) de la cuenta; null si no existe. */
+  private async infoCuenta(
+    cuentaId: string,
+  ): Promise<{ moneda: string | null; tipo: string | null }> {
     const { data } = await this.supabase.service
       .from('cuenta_bancaria')
-      .select('moneda')
+      .select('moneda, tipo')
       .eq('id', cuentaId)
       .maybeSingle();
-    return (data?.moneda as string | null) ?? null;
+    return {
+      moneda: (data?.moneda as string | null) ?? null,
+      tipo: (data?.tipo as string | null) ?? null,
+    };
   }
 
   /** Si hay exactamente un gasto candidato (mismo monto+moneda, fecha ±N días, medio bancario, sin conciliar), lo vincula. */
@@ -1142,6 +1207,684 @@ export class ConciliacionService {
     };
   }
 
+  // =====================================================================
+  // PAYWISE (9-sep-2026): universo de cobros por método, cruce y auditoría
+  // =====================================================================
+
+  /**
+   * Cobros del sistema (cobro_vuelo positivos que NO son parte de sobre +
+   * sobres cobro_grupo) con método en `metodos` y fecha_cobro en [lo, hi]
+   * (ISO con offset Cancún), normalizados a la forma pura del cruce.
+   */
+  private async cargarCobrosPorMetodo(
+    metodos: readonly string[],
+    lo: string,
+    hi: string,
+    moneda?: string | null,
+  ): Promise<CobroPaywise[]> {
+    let qc = this.supabase.service
+      .from('cobro_vuelo')
+      .select(
+        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+      )
+      .gt('monto', 0)
+      .is('cobro_grupo_id', null)
+      .in('metodo_cobro', [...metodos])
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(2000);
+    let qs = this.supabase.service
+      .from('cobro_grupo')
+      .select(
+        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, cliente:cliente_id(nombre))',
+      )
+      .gt('monto', 0)
+      .in('metodo_cobro', [...metodos])
+      .gte('fecha_cobro', lo)
+      .lte('fecha_cobro', hi)
+      .order('fecha_cobro', { ascending: true })
+      .limit(500);
+    if (moneda) {
+      qc = qc.eq('moneda', moneda);
+      qs = qs.eq('moneda', moneda);
+    }
+    const [cobrosRes, sobresRes] = await Promise.all([qc, qs]);
+    if (cobrosRes.error) throw new Error(cobrosRes.error.message);
+    if (sobresRes.error) throw new Error(sobresRes.error.message);
+    const out: CobroPaywise[] = [];
+    for (const c of (cobrosRes.data ?? []) as Array<Record<string, unknown>>) {
+      const vuelo = unwrapOne(
+        c.vuelo as {
+          folio?: unknown;
+          cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+        } | null,
+      );
+      const cliente = unwrapOne(vuelo?.cliente);
+      out.push({
+        tipo: 'COBRO_VUELO',
+        id: c.id as string,
+        fecha_cobro: c.fecha_cobro as string,
+        monto: r2(Number(c.monto) || 0),
+        moneda: (c.moneda as string) ?? 'USD',
+        metodo_cobro: (c.metodo_cobro as string | null) ?? null,
+        comision_banco_monto:
+          Number(c.comision_banco_monto) > 0
+            ? r2(Number(c.comision_banco_monto))
+            : null,
+        referencia: (c.referencia as string | null) ?? null,
+        vuelo_id: c.vuelo_id as string,
+        folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+        grupo_id: null,
+        grupo_folio: null,
+        cliente: typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+      });
+    }
+    for (const s of (sobresRes.data ?? []) as Array<Record<string, unknown>>) {
+      const grupo = unwrapOne(
+        s.grupo as {
+          folio?: unknown;
+          cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+        } | null,
+      );
+      const cliente = unwrapOne(grupo?.cliente);
+      out.push({
+        tipo: 'SOBRE_GRUPO',
+        id: s.id as string,
+        fecha_cobro: s.fecha_cobro as string,
+        monto: r2(Number(s.monto) || 0),
+        moneda: (s.moneda as string) ?? 'USD',
+        metodo_cobro: (s.metodo_cobro as string | null) ?? null,
+        comision_banco_monto:
+          Number(s.comision_banco_monto) > 0
+            ? r2(Number(s.comision_banco_monto))
+            : null,
+        referencia: (s.referencia as string | null) ?? null,
+        vuelo_id: null,
+        folio: null,
+        grupo_id: s.grupo_id as string,
+        grupo_folio: grupo?.folio == null ? null : Number(grupo.folio),
+        cliente: typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Ligas banco↔cobro de estos cobros/sobres (fuente única MOV_LIGA_COLS):
+   * mapa cobro (`${tipo}:${id}`) → id del movimiento que lo concilia.
+   */
+  private async ligasDeCobros(
+    cobros: ReadonlyArray<CobroPaywise>,
+  ): Promise<Map<string, string>> {
+    const filtro = filtroLigaCobros(
+      cobros.filter((c) => c.tipo === 'COBRO_VUELO').map((c) => c.id),
+      cobros.filter((c) => c.tipo === 'SOBRE_GRUPO').map((c) => c.id),
+    );
+    const out = new Map<string, string>();
+    if (!filtro) return out;
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(MOV_LIGA_COLS)
+      .or(filtro);
+    if (error) throw new Error(error.message);
+    for (const m of (data ?? []) as MovimientoLiga[]) {
+      if (typeof m.cobro_id === 'string')
+        out.set(`COBRO_VUELO:${m.cobro_id}`, m.id as string);
+      if (typeof m.cobro_grupo_id === 'string')
+        out.set(`SOBRE_GRUPO:${m.cobro_grupo_id}`, m.id as string);
+    }
+    return out;
+  }
+
+  /**
+   * Auto-cruce de UN abono de una cuenta PASARELA (Paywise) recién
+   * importado: cobros PAYWISE libres a ±5 días de la MISMA moneda, cotejo
+   * NETO → BRUTO (fuente única cruzarPaywise). Liga solo si cuadra el
+   * dinero; misma referencia con montos distintos NO se liga sola.
+   */
+  private async autoMatchAbonoPasarela(
+    mov: MovimientoPaywise,
+    userId: string,
+  ): Promise<boolean> {
+    const { lo, hi } = this.ventanaAbono(mov.fecha, PAYWISE_VENTANA_DIAS);
+    const cobros = await this.cargarCobrosPorMetodo(
+      METODOS_COBRO_PASARELA,
+      lo,
+      hi,
+      mov.moneda,
+    );
+    const ligas = await this.ligasDeCobros(cobros);
+    const libres = cobros.filter((c) => !ligas.has(`${c.tipo}:${c.id}`));
+    const r = cruzarPaywise([mov], libres, { dias: PAYWISE_VENTANA_DIAS });
+    const cruce = r.coinciden[0];
+    if (!cruce) return false;
+    await this.aplicarCrucePaywise(cruce, userId);
+    return true;
+  }
+
+  /**
+   * Aplica un cruce: escribe en el cobro de vuelo la comisión REAL del
+   * archivo (si difiere — mismo espíritu que `tc_gasto` al ligar gastos;
+   * ANTES de ligar, porque un cobro conciliado ya no se toca) y liga el
+   * movimiento (`linkCobro`, con sus candados). Un SOBRE no se reescribe
+   * (su comisión se parte entre los hijos): solo se liga y se reporta.
+   */
+  private async aplicarCrucePaywise(
+    cruce: CrucePaywise,
+    userId: string,
+  ): Promise<void> {
+    const { cobro, movimiento } = cruce;
+    if (
+      cobro.tipo === 'COBRO_VUELO' &&
+      cruce.comision_paywise != null &&
+      cruce.dif_comision != null &&
+      Math.abs(cruce.dif_comision) > 0.01 &&
+      cruce.comision_paywise >= 0 &&
+      cruce.comision_paywise < cobro.monto
+    ) {
+      const comision = cruce.comision_paywise;
+      const { error } = await this.supabase.service
+        .from('cobro_vuelo')
+        .update({
+          comision_banco_monto: comision > 0 ? r2(comision) : null,
+          comision_banco_pct:
+            comision > 0
+              ? Math.round((comision / cobro.monto) * 100 * 10000) / 10000
+              : null,
+          updated_by: userId,
+        })
+        .eq('id', cobro.id);
+      if (error) throw new Error(error.message);
+      this.logger.log(
+        `Paywise: comisión real ${comision} escrita en cobro ${cobro.id} (antes ${cruce.comision_sistema}).`,
+      );
+    }
+    await this.linkCobro(
+      movimiento.id,
+      cobro.tipo === 'COBRO_VUELO'
+        ? { cobro_id: cobro.id }
+        : { cobro_grupo_id: cobro.id },
+      userId,
+    );
+  }
+
+  /** Cuentas PASARELA (o la indicada, validando que lo sea). */
+  private async cuentasPasarela(cuentaId?: string) {
+    let q = this.supabase.service
+      .from('cuenta_bancaria')
+      .select('id, alias, banco, moneda, tipo');
+    q = cuentaId ? q.eq('id', cuentaId) : q.eq('tipo', TIPO_CUENTA_PASARELA);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const cuentas = (data ?? []) as Array<{
+      id: string;
+      alias: string;
+      banco: string;
+      moneda: string;
+      tipo: string;
+    }>;
+    if (cuentaId && cuentas.length === 0)
+      throw new NotFoundException(`Cuenta ${cuentaId} not found`);
+    if (cuentaId && cuentas[0].tipo !== TIPO_CUENTA_PASARELA) {
+      throw new BadRequestException(
+        `La cuenta «${cuentas[0].alias}» no es de tipo PASARELA (Paywise).`,
+      );
+    }
+    if (cuentas.length === 0) {
+      throw new BadRequestException(
+        'No hay ninguna cuenta de tipo PASARELA (Paywise): dala de alta en Cuentas bancarias con tipo PASARELA e importa ahí el estado de cuenta de Paywise.',
+      );
+    }
+    return cuentas;
+  }
+
+  /** Suma días a un YYYY-MM-DD (UTC, sin hora). */
+  private sumarDias(fecha: string, dias: number): string {
+    const d = new Date(`${fecha}T00:00:00Z`);
+    d.setUTCDate(d.getUTCDate() + dias);
+    return d.toISOString().slice(0, 10);
+  }
+
+  /**
+   * Universo de la auditoría: ABONOS de las cuentas PASARELA en el periodo
+   * + cobros PAYWISE del sistema en [desde − días, hasta + días] (cortes
+   * Cancún). Los cobros ligados a un movimiento FUERA del universo se
+   * excluyen (ya conciliaron en otro periodo) y se cuentan aparte.
+   */
+  private async universoPaywise(q: PaywiseAuditoriaQuery) {
+    const cuentas = await this.cuentasPasarela(q.cuenta_bancaria_id);
+    const monedaPorCuenta = new Map(cuentas.map((c) => [c.id, c.moneda]));
+    const { data: movsRaw, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(MOV_COLS)
+      .in(
+        'cuenta_bancaria_id',
+        cuentas.map((c) => c.id),
+      )
+      .eq('tipo', TipoMovimientoBancario.ABONO)
+      .gte('fecha', q.desde)
+      .lte('fecha', q.hasta)
+      .order('fecha', { ascending: true })
+      .order('created_at', { ascending: true })
+      .limit(5000);
+    if (error) throw new Error(error.message);
+    const movimientos: MovimientoPaywise[] = (
+      (movsRaw ?? []) as Array<Record<string, unknown>>
+    ).map((m) => ({
+      id: m.id as string,
+      fecha: m.fecha as string,
+      monto: r2(Number(m.monto) || 0),
+      monto_bruto: m.monto_bruto == null ? null : r2(Number(m.monto_bruto)),
+      comision_monto:
+        m.comision_monto == null ? null : r2(Number(m.comision_monto)),
+      referencia: (m.referencia as string | null) ?? null,
+      descripcion: (m.descripcion as string | null) ?? null,
+      moneda: monedaPorCuenta.get(m.cuenta_bancaria_id as string) ?? null,
+      cobro_id: (m.cobro_id as string | null) ?? null,
+      cobro_grupo_id: (m.cobro_grupo_id as string | null) ?? null,
+    }));
+    const lo = `${this.sumarDias(q.desde, -q.dias)}T00:00:00-05:00`;
+    const hi = `${this.sumarDias(q.hasta, q.dias)}T23:59:59-05:00`;
+    const todos = await this.cargarCobrosPorMetodo(
+      METODOS_COBRO_PASARELA,
+      lo,
+      hi,
+    );
+    const ligas = await this.ligasDeCobros(todos);
+    const movIds = new Set(movimientos.map((m) => m.id));
+    let cobrosConciliadosFuera = 0;
+    const cobros = todos.filter((c) => {
+      const movId = ligas.get(`${c.tipo}:${c.id}`);
+      if (movId && !movIds.has(movId)) {
+        cobrosConciliadosFuera += 1;
+        return false;
+      }
+      return true;
+    });
+    return { cuentas, movimientos, cobros, cobrosConciliadosFuera };
+  }
+
+  private armarSalidaAuditoria(
+    q: PaywiseAuditoriaQuery,
+    cuentas: Array<{ id: string; alias: string; moneda: string }>,
+    movimientos: MovimientoPaywise[],
+    cobros: CobroPaywise[],
+    cobrosConciliadosFuera: number,
+    r: ResultadoCrucePaywise,
+    extra: { conciliados_ahora?: number; errores?: unknown[] } = {},
+  ) {
+    const ya = r.coinciden.filter((c) => c.criterio === 'YA_CONCILIADO');
+    const suma = (xs: number[]) => r2(xs.reduce((a, b) => a + b, 0));
+    return {
+      periodo: { desde: q.desde, hasta: q.hasta },
+      dias: q.dias,
+      cuentas: cuentas.map((c) => ({
+        id: c.id,
+        alias: c.alias,
+        moneda: c.moneda,
+      })),
+      resumen: {
+        movimientos_paywise: movimientos.length,
+        cobros_sistema: cobros.length,
+        coinciden: r.coinciden.length,
+        ya_conciliados: ya.length,
+        conciliables: r.coinciden.length - ya.length,
+        comision_distinta: r.comision_distinta.length,
+        referencia_monto_distinto: r.referencia_monto_distinto.length,
+        solo_paywise: r.solo_paywise.length,
+        solo_sistema: r.solo_sistema.length,
+        ambiguos: r.ambiguos.length,
+        movimientos_conciliados_fuera: r.ya_conciliados_fuera,
+        cobros_conciliados_fuera: cobrosConciliadosFuera,
+        // Dinero (moneda nativa de la pasarela: MXN).
+        neto_paywise: suma(movimientos.map((m) => m.monto)),
+        neto_solo_paywise: suma(r.solo_paywise.map((m) => m.monto)),
+        bruto_solo_sistema: suma(r.solo_sistema.map((c) => c.monto)),
+        dif_comision_total: suma(
+          r.comision_distinta.map((c) => c.dif_comision ?? 0),
+        ),
+        conciliados_ahora: extra.conciliados_ahora ?? 0,
+        errores: (extra.errores ?? []).length,
+      },
+      coinciden: r.coinciden,
+      comision_distinta: r.comision_distinta,
+      referencia_monto_distinto: r.referencia_monto_distinto,
+      solo_paywise: r.solo_paywise,
+      solo_sistema: r.solo_sistema,
+      ambiguos: r.ambiguos,
+      errores: extra.errores ?? [],
+    };
+  }
+
+  /**
+   * GET /conciliacion/paywise/auditoria — SOLO LECTURA. Cruza los abonos
+   * importados de Paywise contra los cobros PAYWISE (fecha ±días, NETO →
+   * BRUTO → referencia) y devuelve: coinciden (con diferencia de comisión),
+   * en Paywise sin cobro, cobros sin Paywise, referencia con monto distinto
+   * y ambiguos.
+   */
+  async auditoriaPaywise(q: PaywiseAuditoriaQuery) {
+    if (q.desde > q.hasta)
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    const u = await this.universoPaywise(q);
+    const r = cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias });
+    return this.armarSalidaAuditoria(
+      q,
+      u.cuentas,
+      u.movimientos,
+      u.cobros,
+      u.cobrosConciliadosFuera,
+      r,
+    );
+  }
+
+  /**
+   * POST /conciliacion/paywise/auditoria/conciliar — liga automáticamente
+   * los cruces que CUADRAN (NETO/BRUTO), escribiendo la comisión real en los
+   * cobros de vuelo, y devuelve la auditoría recalculada. Cada liga es
+   * independiente: un fallo (carrera, cobro ya ligado) se reporta en
+   * `errores` sin tumbar el resto.
+   */
+  async conciliarPaywise(q: PaywiseAuditoriaQuery, userId: string) {
+    if (q.desde > q.hasta)
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    const u = await this.universoPaywise(q);
+    const r = cruzarPaywise(u.movimientos, u.cobros, { dias: q.dias });
+    let conciliados = 0;
+    const errores: Array<{
+      movimiento_id: string;
+      cobro_id: string;
+      tipo: string;
+      error: string;
+    }> = [];
+    for (const cruce of r.coinciden) {
+      if (cruce.criterio === 'YA_CONCILIADO') continue;
+      try {
+        await this.aplicarCrucePaywise(cruce, userId);
+        conciliados += 1;
+      } catch (err) {
+        errores.push({
+          movimiento_id: cruce.movimiento.id,
+          cobro_id: cruce.cobro.id,
+          tipo: cruce.cobro.tipo,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    const u2 = await this.universoPaywise(q);
+    const r2x = cruzarPaywise(u2.movimientos, u2.cobros, { dias: q.dias });
+    return this.armarSalidaAuditoria(
+      q,
+      u2.cuentas,
+      u2.movimientos,
+      u2.cobros,
+      u2.cobrosConciliadosFuera,
+      r2x,
+      { conciliados_ahora: conciliados, errores },
+    );
+  }
+
+  /**
+   * GET /conciliacion/paywise/auditoria.xlsx — 3 hojas: «Cotejo» (todo lo
+   * cruzado con bruto/comisión/neto sistema vs Paywise y la diferencia en
+   * naranja), «Paywise sin cobro» y «Cobros sin Paywise».
+   */
+  async auditoriaPaywiseXlsx(
+    q: PaywiseAuditoriaQuery,
+  ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    const a = await this.auditoriaPaywise(q);
+    const quien = (c: CobroPaywise) =>
+      c.tipo === 'SOBRE_GRUPO'
+        ? `Grupo G-${c.grupo_folio ?? '?'}`
+        : `Vuelo #${c.folio ?? '?'}`;
+    const criterioLabel: Record<string, string> = {
+      YA_CONCILIADO: 'Ya conciliado',
+      NETO: 'Neto exacto',
+      BRUTO: 'Bruto exacto',
+      REFERENCIA: 'Referencia (monto distinto)',
+    };
+    // Cotejo: coinciden + referencia con monto distinto + ambiguos.
+    const cotejoFilas: (string | number | null)[][] = [];
+    const cotejoResaltes: { fila: number; col: number }[] = [];
+    const filaCruce = (c: CrucePaywise, estatus: string) => {
+      const i = cotejoFilas.length;
+      cotejoFilas.push([
+        c.movimiento.fecha,
+        c.movimiento.referencia ?? '',
+        quien(c.cobro),
+        c.cobro.cliente ?? '',
+        diaCancun(c.cobro.fecha_cobro),
+        c.cobro.monto,
+        c.movimiento.monto_bruto ?? null,
+        c.comision_sistema,
+        c.comision_paywise,
+        c.neto_sistema,
+        c.movimiento.monto,
+        c.dif_comision,
+        criterioLabel[c.criterio] ?? c.criterio,
+        estatus,
+      ]);
+      if (c.comision_distinta) {
+        cotejoResaltes.push({ fila: i, col: 11 });
+        cotejoResaltes.push({ fila: i, col: 8 });
+      }
+      if (c.criterio === 'REFERENCIA') {
+        cotejoResaltes.push({ fila: i, col: 10 });
+        cotejoResaltes.push({ fila: i, col: 13 });
+      }
+    };
+    for (const c of a.coinciden) {
+      filaCruce(
+        c,
+        c.criterio === 'YA_CONCILIADO'
+          ? c.comision_distinta
+            ? 'Conciliado · comisión distinta'
+            : 'Conciliado'
+          : c.comision_distinta
+            ? 'Cuadra · comisión distinta'
+            : 'Cuadra',
+      );
+    }
+    for (const c of a.referencia_monto_distinto) {
+      filaCruce(c, 'REVISAR: misma referencia, monto distinto');
+    }
+    for (const amb of a.ambiguos) {
+      const i = cotejoFilas.length;
+      cotejoFilas.push([
+        amb.movimiento.fecha,
+        amb.movimiento.referencia ?? '',
+        amb.candidatos.map(quien).join(' / '),
+        '',
+        '',
+        null,
+        amb.movimiento.monto_bruto ?? null,
+        null,
+        amb.movimiento.comision_monto ?? null,
+        null,
+        amb.movimiento.monto,
+        null,
+        criterioLabel[amb.criterio] ?? amb.criterio,
+        `AMBIGUO: ${amb.candidatos.length} cobros iguales — concilia a mano`,
+      ]);
+      cotejoResaltes.push({ fila: i, col: 13 });
+    }
+    const money = (label: string) => ({ label, tipo: 'money' as const });
+    const texto = (label: string) => ({ label, tipo: 'texto' as const });
+    const moneda = a.cuentas[0]?.moneda ?? 'MXN';
+    const sinCobroFilas = a.solo_paywise.map((m) => [
+      m.fecha,
+      m.referencia ?? '',
+      m.descripcion ?? '',
+      m.monto_bruto ?? null,
+      m.comision_monto ?? null,
+      m.monto,
+    ]);
+    const sinPaywiseFilas = a.solo_sistema.map((c) => [
+      diaCancun(c.fecha_cobro),
+      quien(c),
+      c.cliente ?? '',
+      c.referencia ?? '',
+      c.monto,
+      c.comision_banco_monto ?? 0,
+      r2(c.monto - (c.comision_banco_monto ?? 0)),
+      c.moneda,
+    ]);
+    const s = a.resumen;
+    const buffer = await this.pyservices.generateTablaXlsx({
+      titulo: 'Auditoría Paywise',
+      subtitulo: `${q.desde} a ${q.hasta}`,
+      columnas: [texto('Resumen')],
+      filas: [],
+      hojas: [
+        {
+          titulo: 'Cotejo',
+          subtitulo: `${s.movimientos_paywise} abonos Paywise · ${s.cobros_sistema} cobros Paywise en el sistema · ${s.coinciden} coinciden (${s.ya_conciliados} ya conciliados) · ${s.comision_distinta} con comisión distinta · ${s.referencia_monto_distinto} referencia/monto · ${s.ambiguos} ambiguos · ±${q.dias} días · ${q.desde} a ${q.hasta}`,
+          columnas: [
+            texto('Fecha Paywise'),
+            texto('Referencia'),
+            texto('Vuelo / Grupo'),
+            texto('Cliente'),
+            texto('Fecha cobro'),
+            money(`Bruto sistema (${moneda})`),
+            money('Bruto Paywise'),
+            money('Comisión sistema'),
+            money('Comisión Paywise'),
+            money('Neto sistema'),
+            money('Neto Paywise (abono)'),
+            money('Dif. comisión'),
+            texto('Criterio'),
+            texto('Estatus'),
+          ],
+          filas: cotejoFilas,
+          resaltes: cotejoResaltes,
+          totales: [
+            'Totales',
+            null,
+            null,
+            null,
+            null,
+            r2(a.coinciden.reduce((x, c) => x + c.cobro.monto, 0)),
+            r2(
+              a.coinciden.reduce(
+                (x, c) => x + (c.movimiento.monto_bruto ?? 0),
+                0,
+              ),
+            ),
+            r2(a.coinciden.reduce((x, c) => x + c.comision_sistema, 0)),
+            r2(a.coinciden.reduce((x, c) => x + (c.comision_paywise ?? 0), 0)),
+            r2(a.coinciden.reduce((x, c) => x + c.neto_sistema, 0)),
+            r2(a.coinciden.reduce((x, c) => x + c.movimiento.monto, 0)),
+            s.dif_comision_total,
+            null,
+            null,
+          ],
+        },
+        {
+          titulo: 'Paywise sin cobro',
+          subtitulo: `${s.solo_paywise} abonos de Paywise sin cobro registrado en el sistema (neto ${s.neto_solo_paywise} ${moneda}) · ${q.desde} a ${q.hasta}`,
+          columnas: [
+            texto('Fecha'),
+            texto('Referencia'),
+            texto('Descripción'),
+            money('Bruto'),
+            money('Comisión'),
+            money(`Neto (${moneda})`),
+          ],
+          filas: sinCobroFilas,
+          resaltes: sinCobroFilas.map((_, i) => ({ fila: i, col: 5 })),
+          totales: [
+            'Totales',
+            null,
+            null,
+            r2(a.solo_paywise.reduce((x, m) => x + (m.monto_bruto ?? 0), 0)),
+            r2(a.solo_paywise.reduce((x, m) => x + (m.comision_monto ?? 0), 0)),
+            s.neto_solo_paywise,
+          ],
+        },
+        {
+          titulo: 'Cobros sin Paywise',
+          subtitulo: `${s.solo_sistema} cobros con método Paywise sin abono en el estado de cuenta (bruto ${s.bruto_solo_sistema}) · cobros de ${this.sumarDias(q.desde, -q.dias)} a ${this.sumarDias(q.hasta, q.dias)}`,
+          columnas: [
+            texto('Fecha cobro'),
+            texto('Vuelo / Grupo'),
+            texto('Cliente'),
+            texto('Referencia'),
+            money('Bruto'),
+            money('Comisión registrada'),
+            money('Neto esperado'),
+            texto('Moneda'),
+          ],
+          filas: sinPaywiseFilas,
+          resaltes: sinPaywiseFilas.map((_, i) => ({ fila: i, col: 4 })),
+          totales: [
+            'Totales',
+            null,
+            null,
+            null,
+            s.bruto_solo_sistema,
+            r2(
+              a.solo_sistema.reduce(
+                (x, c) => x + (c.comision_banco_monto ?? 0),
+                0,
+              ),
+            ),
+            r2(
+              a.solo_sistema.reduce(
+                (x, c) => x + c.monto - (c.comision_banco_monto ?? 0),
+                0,
+              ),
+            ),
+            null,
+          ],
+        },
+      ],
+    });
+    return { buffer, etiqueta: 'paywise' };
+  }
+
+  /**
+   * GET /conciliacion/cobros-sin-banco — el espejo de `gastosSinBanco` para
+   * los COBROS (9-sep-2026): cobros de vuelo (no partes de sobre) y sobres
+   * con método bancario (transferencia / HSBC link / cheque / Paywise) sin
+   * liga con ningún abono importado. Lo usa el pre-cierre como aviso.
+   * Default: últimos 90 días por fecha_cobro (cortes Cancún).
+   */
+  async cobrosSinBanco(desde?: string, hasta?: string) {
+    // Defaults en día CANCÚN (no UTC): a las 20:00 de Cancún el UTC ya es
+    // mañana y el corte se corría un día.
+    const d = desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    const h = hasta ?? hoyCancun();
+    if (d > h)
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    const cobros = await this.cargarCobrosPorMetodo(
+      METODOS_COBRO_ABONO_AUTO,
+      `${d}T00:00:00-05:00`,
+      `${h}T23:59:59-05:00`,
+    );
+    const ligas = await this.ligasDeCobros(cobros);
+    const libres = cobros.filter((c) => !ligas.has(`${c.tipo}:${c.id}`));
+    const porMoneda = new Map<string, number>();
+    const data = libres.map((c) => {
+      porMoneda.set(c.moneda, (porMoneda.get(c.moneda) ?? 0) + c.monto);
+      return {
+        ...c,
+        metodo_label: etiquetaMetodoCobro(c.metodo_cobro),
+        neto: r2(c.monto - (c.comision_banco_monto ?? 0)),
+      };
+    });
+    return {
+      data,
+      total: data.length,
+      desde: d,
+      hasta: h,
+      por_moneda: [...porMoneda.entries()].map(([moneda, monto]) => ({
+        moneda,
+        monto: r2(monto),
+      })),
+    };
+  }
+
   /** Catálogo de clasificaciones "sin vuelo" (activas, orden alfabético). */
   async listClasificaciones() {
     const { data, error } = await this.supabase.service
@@ -1501,7 +2244,7 @@ export class ConciliacionService {
       }
       const sobre = m.cobro_grupo as SobreConciliacion | null;
       if (sobre) {
-        return `Cobro grupo G-${sobre.grupo_folio ?? '?'} · ${sobre.metodo}`;
+        return `Cobro grupo G-${sobre.grupo_folio ?? '?'} · ${etiquetaMetodoCobro(sobre.metodo)}`;
       }
       const cobro = unwrapOne(
         m.cobro as {
@@ -1514,7 +2257,7 @@ export class ConciliacionService {
         return [
           'Cobro',
           folio != null ? `vuelo #${folio}` : null,
-          cobro.metodo_cobro ?? null,
+          cobro.metodo_cobro ? etiquetaMetodoCobro(cobro.metodo_cobro) : null,
         ]
           .filter(Boolean)
           .join(' · ');

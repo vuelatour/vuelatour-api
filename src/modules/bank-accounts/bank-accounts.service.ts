@@ -11,7 +11,7 @@ import type {
 } from './dto/bank-accounts.dto';
 
 const COLS =
-  'id, alias, banco, numero_cuenta, clabe, moneda, razon_social, notas, activa, created_at, updated_at';
+  'id, alias, banco, numero_cuenta, clabe, moneda, razon_social, tipo, notas, activa, created_at, updated_at';
 
 @Injectable()
 export class BankAccountsService {

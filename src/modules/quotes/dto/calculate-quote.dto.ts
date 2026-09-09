@@ -43,6 +43,17 @@ export enum MetodoPago {
    * pre-cobro; timbra con FormaPago SAT 99 (Por definir).
    */
   OTRO = 'OTRO',
+  /**
+   * PAYWISE (9-sep-2026): link/pasarela de cobro. Lo registra la OFICINA
+   * (fuera de la whitelist del piloto). IVA como BillPocket: pasarela/
+   * terminal SIN factura por default → 0 % (el override de IVA es la
+   * válvula); factura pre-cobro como BillPocket (FormaPago SAT 04). La
+   * comisión de la pasarela (≈8.857 %, `paywise_comision_pct`) NO se
+   * traslada al cliente como línea: es comisión BANCARIA del cobro (bruto
+   * en `monto`, neto por diferencia) y la concilia el estado de cuenta de
+   * Paywise (`GET /conciliacion/paywise/auditoria`).
+   */
+  PAYWISE = 'PAYWISE',
 }
 
 export enum TipoVuelo {

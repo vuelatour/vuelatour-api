@@ -107,6 +107,25 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    contable de inventario), `EFECTIVO` (caja chica) y `PERSONAL_*`
    (reintegros) nunca se cruzan con el banco. ABONOS se cruzan con
    `cobro_vuelo` vía `movimiento_bancario.cobro_id`.
+   **PAYWISE como MÉTODO DE COBRO (9-sep-2026)**: fuente única de
+   etiquetas/conjuntos `src/common/metodo-cobro.util.ts`
+   (`METODOS_COBRO_ABONO_AUTO` = TRANSFERENCIA, HSBC_LINK, CHEQUE, PAYWISE;
+   `+BILLPOCKET` manual). IVA como BillPocket (0 % por default), FormaPago
+   SAT 04, facturable pre-cobro, FUERA de la whitelist del piloto. Comisión
+   BANCARIA del cobro (bruto en `monto`, neto por diferencia): sin comisión
+   capturada, `createCobro`/sobre provisionan `paywise_comision_pct`
+   (config, 8.857) — un 0 explícito = sin comisión. `cuenta_bancaria.tipo`
+   = BANCO | PASARELA; los abonos de PASARELA traen
+   `movimiento_bancario.monto_bruto/comision_monto` (`monto` = NETO) y se
+   cruzan con `cruzarPaywise` (`conciliacion/paywise-cruce.util.ts`, puro:
+   ±5 días, NETO exacto → BRUTO exacto → REFERENCIA; referencia con monto
+   distinto NUNCA se liga sola; empate = ambiguo). Al ligar un cobro de
+   vuelo se escribe la comisión REAL del archivo (antes de `linkCobro`);
+   los sobres no se reescriben. Auditoría: `GET /conciliacion/paywise/
+   auditoria` (lectura), `POST …/auditoria/conciliar` (liga lo que cuadra),
+   `GET …/auditoria.xlsx` (3 hojas). `GET /conciliacion/cobros-sin-banco`
+   = espejo de gastos-sin-banco; el pre-cierre lo expone como aviso
+   `cobros_bancarios_sin_conciliar` (no bloquea).
 
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
    `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se

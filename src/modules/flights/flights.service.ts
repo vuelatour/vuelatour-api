@@ -33,7 +33,9 @@ import {
 } from '../realtime/notifications.service';
 import {
   CONFIG_CAPTURA_TACO_FOTO_IA,
+  CONFIG_PAYWISE_COMISION_PCT,
   ConfiguracionService,
+  PAYWISE_COMISION_PCT_DEFAULT,
 } from '../configuracion/configuracion.service';
 import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
@@ -8986,6 +8988,27 @@ export class FlightsService {
     });
   }
 
+  /**
+   * % de comisión bancaria por DEFAULT según el método (solo cuando el DTO
+   * no trae ni % ni monto): PAYWISE → `paywise_comision_pct` de
+   * configuración (≈8.857 %). Resto de métodos → null (sin default). La
+   * comparte el sobre de grupo (`GroupsService`).
+   */
+  async comisionDefaultPorMetodo(
+    metodo: string,
+    pct?: number | null,
+    monto?: number | null,
+  ): Promise<number | null> {
+    if (metodo !== 'PAYWISE') return null;
+    if (pct !== undefined && pct !== null) return null;
+    if (monto !== undefined && monto !== null) return null;
+    const valor = await this.configuracion.numero(
+      CONFIG_PAYWISE_COMISION_PCT,
+      PAYWISE_COMISION_PCT_DEFAULT,
+    );
+    return valor > 0 && valor < 100 ? valor : null;
+  }
+
   async createCobro(
     vueloId: string,
     dto: CreateCobroDto,
@@ -9055,9 +9078,18 @@ export class FlightsService {
     // Comisión por MONTO directo (el estado de cuenta trae pesos, no %):
     // manda sobre el %, y el % se deriva solo como referencia del reporte.
     // Regla ÚNICA (comision-bancaria.util): la comparte el sobre de grupo.
+    // PAYWISE (9-sep-2026): si la oficina no captura comisión, se provisiona
+    // el % configurado (≈8.857 %) para que el neto esperado cuadre con el
+    // depósito de la pasarela; el estado de cuenta de Paywise la sustituye
+    // por la REAL al conciliar. Un 0 explícito significa "sin comisión".
+    const comisionPctDefault = await this.comisionDefaultPorMetodo(
+      dto.metodo_cobro,
+      dto.comision_banco_pct,
+      dto.comision_banco_monto,
+    );
     const comision = resolverComisionBancaria(
       dto.monto,
-      dto.comision_banco_pct,
+      comisionPctDefault ?? dto.comision_banco_pct,
       dto.comision_banco_monto,
     );
     const comisionPct = comision.pct;

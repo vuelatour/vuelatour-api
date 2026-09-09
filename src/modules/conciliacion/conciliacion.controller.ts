@@ -19,12 +19,14 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CandidatosCobroQuery,
   ClasificarMovimientoDto,
+  CobrosSinBancoQuery,
   ConciliacionParseDto,
   CrearClasificacionDto,
   ImportarMovimientosDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
   ListConciliacionQuery,
+  PaywiseAuditoriaQuery,
   ReporteConciliacionQuery,
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
@@ -101,6 +103,55 @@ export class ConciliacionController {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="conciliacion-${etiqueta}${sufijoEstado}-${q.desde}-a-${q.hasta}.xlsx"`,
     });
+  }
+
+  // ---- PAYWISE (9-sep-2026): rutas literales ANTES de movimientos/:id ----
+
+  @Get('paywise/auditoria')
+  @ApiOperation({
+    summary:
+      'Auditoría Paywise (solo lectura): cruza los ABONOS importados de las cuentas PASARELA en el periodo contra los cobros con método PAYWISE (fecha ±días, NETO exacto → BRUTO exacto → referencia). Devuelve coinciden (con diferencia de comisión), en Paywise sin cobro, cobros sin Paywise, referencia con monto distinto y ambiguos.',
+  })
+  paywiseAuditoria(@Query() q: PaywiseAuditoriaQuery) {
+    return this.conciliacion.auditoriaPaywise(q);
+  }
+
+  @Post('paywise/auditoria/conciliar')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Concilia automáticamente los cruces que CUADRAN (neto/bruto exacto): escribe la comisión real de Paywise en el cobro de vuelo y liga el abono (linkCobro). Devuelve la auditoría recalculada + conciliados_ahora y errores por liga.',
+  })
+  paywiseConciliar(
+    @Query() q: PaywiseAuditoriaQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.conciliarPaywise(q, c.userId);
+  }
+
+  @Get('paywise/auditoria.xlsx')
+  @ApiOperation({
+    summary:
+      'Auditoría Paywise en Excel: 3 hojas — Cotejo (bruto/comisión/neto sistema vs Paywise, diferencias en naranja), Paywise sin cobro y Cobros sin Paywise.',
+  })
+  async paywiseAuditoriaXlsx(
+    @Query() q: PaywiseAuditoriaQuery,
+  ): Promise<StreamableFile> {
+    const { buffer, etiqueta } =
+      await this.conciliacion.auditoriaPaywiseXlsx(q);
+    return new StreamableFile(buffer, {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      disposition: `attachment; filename="auditoria-${etiqueta}-${q.desde}-a-${q.hasta}.xlsx"`,
+    });
+  }
+
+  @Get('cobros-sin-banco')
+  @ApiOperation({
+    summary:
+      'Cobros BANCARIOS (transferencia / HSBC link / cheque / Paywise; cobros de vuelo y sobres de grupo) sin liga con ningún abono importado. Espejo de gastos-sin-banco. Default: últimos 90 días por fecha_cobro.',
+  })
+  cobrosSinBanco(@Query() q: CobrosSinBancoQuery) {
+    return this.conciliacion.cobrosSinBanco(q.desde, q.hasta);
   }
 
   @Get('clasificaciones')

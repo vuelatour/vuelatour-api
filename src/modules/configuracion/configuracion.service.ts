@@ -17,6 +17,15 @@ export const CONFIG_CAPTURA_TACO_FOTO_IA = 'captura_taco_foto_ia';
  * semana pasada (1 = hasta el lunes). Default 1 en los consumidores.
  */
 export const CONFIG_DIAS_GRACIA_GASTOS_SEMANA = 'dias_gracia_gastos_semana';
+/**
+ * Comisión (%) que Paywise retiene por cobro (9-sep-2026, ≈ 8.857 %). Se
+ * provisiona por default en `createCobro`/sobre de grupo cuando el método
+ * es PAYWISE y no viene comisión capturada; el estado de cuenta de Paywise
+ * la sustituye por la REAL al conciliar. Default en los consumidores:
+ * `PAYWISE_COMISION_PCT_DEFAULT`.
+ */
+export const CONFIG_PAYWISE_COMISION_PCT = 'paywise_comision_pct';
+export const PAYWISE_COMISION_PCT_DEFAULT = 8.857;
 
 /** Fila cacheada de una bandera: estado on/off + valor numérico opcional. */
 type ConfigRow = { activa: boolean; valor_numerico: number | null };

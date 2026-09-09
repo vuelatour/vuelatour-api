@@ -50,6 +50,8 @@ const METODOS_FACTURABLES = new Set([
   'HSBC_LINK',
   'BILLPOCKET',
   'CHEQUE',
+  // PAYWISE (9-sep-2026): link/pasarela, mismo trato que BillPocket.
+  'PAYWISE',
 ]);
 
 /** RFC genérico SAT para residentes en el extranjero. */
@@ -119,6 +121,7 @@ const FORMA_PAGO_SAT: Record<string, string> = {
   TRANSFERENCIA: '03',
   HSBC_LINK: '03', // el link HSBC liquida vía transferencia/SPEI
   BILLPOCKET: '04', // terminal = tarjeta de crédito
+  PAYWISE: '04', // link/pasarela: el cliente paga con tarjeta
   OTRO: '99', // método manual: "Por definir" — el operador corrige al timbrar
 };
 
@@ -429,7 +432,8 @@ export class InvoicesService {
       // FACTURABLE: hay clientes que piden la factura ANTES de pagar
       // (transferencia/link/terminal/cheque) — pedido de Itzy, 14 jul 2026.
       .or(
-        'cobrado.eq.true,and(metodo_cobro.in.(TRANSFERENCIA,HSBC_LINK,BILLPOCKET,CHEQUE),estado.in.(CONFIRMADO,EN_VUELO,COMPLETADO))',
+        // Mismo conjunto que METODOS_FACTURABLES (literal PostgREST).
+        'cobrado.eq.true,and(metodo_cobro.in.(TRANSFERENCIA,HSBC_LINK,BILLPOCKET,CHEQUE,PAYWISE),estado.in.(CONFIRMADO,EN_VUELO,COMPLETADO))',
       )
       .order('fecha_vuelo', { ascending: false, nullsFirst: false })
       .range(f.offset, f.offset + f.limit - 1);

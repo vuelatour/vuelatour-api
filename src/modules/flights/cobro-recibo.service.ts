@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { METODO_COBRO_LABELS } from '../../common/metodo-cobro.util';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import {
   PyservicesService,
@@ -19,16 +20,11 @@ import { COBRO_COLS } from './flights.service';
  */
 const TOLERANCIA_COBRO_USD = 1;
 
-/** Etiquetas legibles de método de cobro (mismo mapa que el panel admin). */
-const METODO_LABELS: Record<string, string> = {
-  TRANSFERENCIA: 'Transferencia',
-  HSBC_LINK: 'HSBC link',
-  CHEQUE: 'Cheque',
-  BILLPOCKET: 'BillPocket',
-  EFECTIVO: 'Efectivo',
-  DOLARES: 'Dólares',
-  OTRO: 'Otro',
-};
+/**
+ * Etiquetas legibles de método de cobro: fuente única
+ * `common/metodo-cobro.util` (mismo mapa que el PDF interno y el panel).
+ */
+const METODO_LABELS = METODO_COBRO_LABELS;
 
 /**
  * Recibo de pago (PDF NO fiscal) de UN cobro: comprobante amable para el

@@ -24,6 +24,60 @@ export enum TipoMovimientoBancario {
   ABONO = 'ABONO',
 }
 
+/**
+ * Mapeo MANUAL de columnas del estado de cuenta de Paywise (9-sep-2026):
+ * respaldo cuando pyservices no reconoce los encabezados. Cada valor es el
+ * NOMBRE de la columna tal como viene en el archivo (la respuesta de parse
+ * devuelve `columnas` para elegirlas). Con mapeo, el archivo se lee como
+ * formato `paywise` (abono NETO con bruto y comisión).
+ */
+export class MapeoColumnasPaywiseDto {
+  @ApiProperty({ description: 'Columna de fecha (fecha de operación/pago).' })
+  @IsString()
+  @MaxLength(120)
+  fecha!: string;
+
+  @ApiPropertyOptional({ description: 'Columna del monto BRUTO cobrado.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  bruto?: string;
+
+  @ApiPropertyOptional({ description: 'Columna de la comisión retenida.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  comision?: string;
+
+  @ApiPropertyOptional({ description: 'Columna del NETO depositado.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  neto?: string;
+
+  @ApiPropertyOptional({
+    description: 'Columna de referencia / ID de operación / autorización.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  referencia?: string;
+
+  @ApiPropertyOptional({ description: 'Columna de descripción/concepto.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  descripcion?: string;
+
+  @ApiPropertyOptional({
+    description: 'Columna de estatus (aprobado/rechazado…).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  estatus?: string;
+}
+
 export class ConciliacionParseDto {
   @ApiProperty({
     description: 'Nombre del archivo (define el parser por extensión)',
@@ -34,6 +88,16 @@ export class ConciliacionParseDto {
   @ApiProperty({ description: 'Contenido del estado de cuenta en base64' })
   @IsString()
   file_base64!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Mapeo manual de columnas (Paywise). Solo cuando la detección por encabezados no reconoce el archivo (formato genérico): fuerza el parser Paywise con estas columnas.',
+    type: MapeoColumnasPaywiseDto,
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => MapeoColumnasPaywiseDto)
+  mapeo?: MapeoColumnasPaywiseDto;
 }
 
 export class MovimientoImportDto {
@@ -61,6 +125,26 @@ export class MovimientoImportDto {
   @IsString()
   @MaxLength(120)
   referencia?: string;
+
+  // ADITIVO (Paywise, 9-sep-2026): solo los abonos de una PASARELA los
+  // traen. `monto` sigue siendo lo DEPOSITADO (neto).
+  @ApiPropertyOptional({
+    description: 'Bruto que pagó el cliente (pasarela). monto = neto.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  monto_bruto?: number;
+
+  @ApiPropertyOptional({
+    description: 'Comisión retenida por la pasarela en este movimiento.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  comision_monto?: number;
 }
 
 export class ImportarMovimientosDto {
@@ -213,9 +297,60 @@ export class ReporteConciliacionQuery {
   estado: ReporteConciliacionEstado = 'todos';
 }
 
+/**
+ * Auditoría Paywise (9-sep-2026): cruza los abonos importados de la(s)
+ * cuenta(s) PASARELA contra los cobros con método PAYWISE del sistema.
+ */
+export class PaywiseAuditoriaQuery {
+  @ApiProperty({
+    description: 'Inicio del periodo (YYYY-MM-DD) de los ABONOS de Paywise',
+  })
+  @IsISO8601()
+  desde!: string;
+
+  @ApiProperty({ description: 'Fin del periodo (YYYY-MM-DD)' })
+  @IsISO8601()
+  hasta!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Cuenta PASARELA concreta. Omitida = todas las cuentas de tipo PASARELA.',
+  })
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({
+    default: 5,
+    description:
+      'Ventana ±días entre el abono y el cobro (liquidación diferida). 0..30.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(30)
+  dias: number = 5;
+}
+
+/** Cobros bancarios (transferencia/link/cheque/Paywise) sin liga con el banco. */
+export class CobrosSinBancoQuery {
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD (default: hace 90 días)' })
+  @IsOptional()
+  @IsISO8601()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD' })
+  @IsOptional()
+  @IsISO8601()
+  hasta?: string;
+}
+
 /** Alta de clasificación "sin vuelo" (o recuperación de la existente). */
 export class CrearClasificacionDto {
-  @ApiProperty({ description: 'Nombre de la clasificación (p. ej. "Comisión del banco")' })
+  @ApiProperty({
+    description: 'Nombre de la clasificación (p. ej. "Comisión del banco")',
+  })
   @IsString()
   @MaxLength(80)
   nombre!: string;
@@ -224,7 +359,8 @@ export class CrearClasificacionDto {
 /** Concilia por clasificación (sin gasto/cobro). null = quitarla. */
 export class ClasificarMovimientoDto {
   @ApiPropertyOptional({
-    description: 'Clasificación a asignar. null para quitarla (vuelve a Pendiente).',
+    description:
+      'Clasificación a asignar. null para quitarla (vuelve a Pendiente).',
     nullable: true,
   })
   @IsOptional()

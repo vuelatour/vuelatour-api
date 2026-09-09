@@ -126,6 +126,24 @@ export interface TablaXlsxPayload {
    * SIN conciliar del reporte de conciliación. Omitirlo = render de siempre.
    */
   resaltes?: { fila: number; col: number; color?: string }[];
+  /**
+   * ADITIVO (9-sep-2026): varias HOJAS en el mismo libro (auditoría Paywise:
+   * Cotejo / Paywise sin cobro / Cobros sin Paywise). Cada hoja trae su
+   * propio título (nombre de la pestaña), columnas, filas, totales y
+   * resaltes. Con `hojas`, los campos de nivel raíz solo nombran el libro.
+   */
+  hojas?: TablaHojaPayload[];
+}
+
+export interface TablaHojaPayload {
+  titulo: string;
+  subtitulo?: string;
+  columnas: TablaColumnaPayload[];
+  filas: (string | number | null)[][];
+  totales?: (string | number | null)[];
+  resumen_titulo?: string;
+  resumen?: (string | number | null)[][];
+  resaltes?: { fila: number; col: number; color?: string }[];
 }
 
 export interface ReporteVueloLineaPayload {

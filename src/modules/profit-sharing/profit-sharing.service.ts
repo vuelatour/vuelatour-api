@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import {
@@ -6,6 +6,7 @@ import {
   TipoCambioService,
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
+import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
@@ -251,7 +252,10 @@ export class ProfitSharingService {
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
     private readonly tipoCambio: TipoCambioService,
+    private readonly conciliacion: ConciliacionService,
   ) {}
+
+  private readonly logger = new Logger(ProfitSharingService.name);
 
   /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
   private async buildRepartoPayload(q: ProfitSharingQuery) {
@@ -2356,6 +2360,23 @@ export class ProfitSharingService {
       return delRecibo != null && delRecibo !== g.aeronave_id;
     });
     const movs = (movRes.data ?? []) as Array<Record<string, unknown>>;
+    // El espejo de `bancariosSinConciliar` para los COBROS (9-sep-2026):
+    // transferencia / HSBC link / cheque / Paywise sin liga con ningún abono
+    // importado — misma lectura que GET /conciliacion/cobros-sin-banco.
+    // Best-effort: un fallo aquí no tumba el pre-cierre (se avisa en 0).
+    let cobrosSinBanco: Awaited<
+      ReturnType<ConciliacionService['cobrosSinBanco']>
+    > | null = null;
+    try {
+      cobrosSinBanco = await this.conciliacion.cobrosSinBanco(q.desde, q.hasta);
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: cobros sin banco no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const cobrosPaywiseSinBanco = (cobrosSinBanco?.data ?? []).filter(
+      (c) => c.metodo_cobro === 'PAYWISE',
+    );
 
     const items = [
       {
@@ -2479,6 +2500,25 @@ export class ProfitSharingService {
         detalle:
           'Tarjeta corporativa, transferencia o PayWise sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
         count: bancariosSinConciliar.length,
+      },
+      {
+        clave: 'cobros_bancarios_sin_conciliar',
+        titulo: 'Cobros bancarios sin conciliar al corte',
+        detalle:
+          'Transferencia, HSBC link, cheque o Paywise sin cruzar con ningún abono importado: importa el estado de cuenta (o el de Paywise → Auditoría Paywise) y concilia. Un cobro que nunca llegó al banco es dinero que se cree cobrado.',
+        count: cobrosSinBanco?.total ?? 0,
+        cobros: (cobrosSinBanco?.data ?? []).map((c) => ({
+          tipo: c.tipo,
+          id: c.id,
+          folio: c.folio ?? null,
+          grupo_folio: c.grupo_folio ?? null,
+          fecha_cobro: c.fecha_cobro,
+          monto: c.monto,
+          moneda: c.moneda,
+          metodo_cobro: c.metodo_cobro ?? null,
+        })),
+        por_moneda: cobrosSinBanco?.por_moneda ?? [],
+        paywise: cobrosPaywiseSinBanco.length,
       },
       {
         clave: 'pistas_sin_gasto',

@@ -39,6 +39,7 @@
  */
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { diaCancun, fechaHoraCancun } from '../../common/fecha-cancun.util';
+import { METODO_COBRO_LABELS } from '../../common/metodo-cobro.util';
 import {
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
@@ -150,17 +151,8 @@ const ESTADO_LABEL: Record<string, string> = {
   CANCELADO: 'Cancelado',
 };
 
-/** Mismo mapa que el recibo de cobro y el panel admin (+ PAYWISE, 2-sep). */
-const METODO_LABEL: Record<string, string> = {
-  TRANSFERENCIA: 'Transferencia',
-  HSBC_LINK: 'HSBC link',
-  CHEQUE: 'Cheque',
-  BILLPOCKET: 'BillPocket',
-  EFECTIVO: 'Efectivo',
-  DOLARES: 'Dólares',
-  OTRO: 'Otro',
-  PAYWISE: 'Paywise',
-};
+/** Mismo mapa que el recibo de cobro y el panel admin (fuente única). */
+const METODO_LABEL = METODO_COBRO_LABELS;
 
 const TARIFA_LABEL: Record<string, string> = {
   PUBLICO: 'Público',
