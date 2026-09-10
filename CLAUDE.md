@@ -303,6 +303,25 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `notificado:false`/`push_dispositivos:0` (WhatsApp). Sin piloto:
       `aviso_piloto:null` y sin push. El replay idempotente NUNCA re-crea
       pilotos ni clientes.
+      **Baja desde la app (10-sep-2026)**: `DELETE /flights/:id` acepta body
+      OPCIONAL `DeleteFlightDto {motivo 5-500, client_request_id}` (el panel
+      sigue sin body → `vuelo_eliminado.motivo` = 'eliminado desde panel';
+      con motivo = 'eliminado desde la app: <motivo>'; con llave y sin
+      motivo útil = 'eliminado desde la app' — la etiqueta forense NUNCA
+      dice "panel" si vino de la app; la llave va SOLO al `snapshot.app`)
+      y responde `{deleted, id, folio}`. Rechazos ESTRUCTURADOS con el
+      `message` de siempre: 404 `VUELO_NO_EXISTE` (`vueloNoExiste()` es la
+      ÚNICA forma de lanzar "Vuelo <id> not found" en flights.service —
+      findById/purge/reassign/relacionConVuelo/resumen/plan de vuelo; la
+      app lo toma como éxito idempotente), 409 `VUELO_COBRADO_O_FACTURADO`
+      y 409 `VUELO_CON_ACTIVIDAD` + `details {cobros, gastos, tacos}`.
+      `flights.controller.baja.spec.ts` prueba la cadena HTTP real
+      (Express 5 sin body ⇒ `req.body` undefined ⇒ DTO vacío; campo extra
+      ⇒ 400; `code`/`details` a través del filtro): no quitar el
+      `transform:true` del ValidationPipe sin correrlo.
+      `POST :id/cancel`: 409 `VUELO_YA_CANCELADO` (idempotente para la app)
+      y `VUELO_COMPLETADO` (fallo visible). Ningún consumidor decide por
+      `message`: siempre por `code`.
 
 ## Convenciones NestJS
 

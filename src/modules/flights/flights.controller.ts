@@ -47,6 +47,7 @@ import {
   CreateExternalFlightDto,
   CubrirExternoDto,
   CreateReservaDto,
+  DeleteFlightDto,
   ReassignAircraftDto,
   ListFlightsQuery,
   SetFlightPlanDto,
@@ -415,13 +416,21 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Elimina un vuelo SIN actividad (solicitud fantasma). Si tiene cobros/gastos/tacómetros, se rechaza: cancélalo.',
+      'Elimina un vuelo SIN actividad (solicitud fantasma). Body opcional { motivo, client_request_id } (app). ' +
+      '404 VUELO_NO_EXISTE si ya no existe (idempotente para la app); 409 VUELO_COBRADO_O_FACTURADO / ' +
+      'VUELO_CON_ACTIVIDAD (details {cobros, gastos, tacos}): cancélalo en lugar de borrarlo.',
   })
   remove(
     @Param('id', ParseUUIDPipe) id: string,
     @CurrentUser() c: AuthenticatedUser,
+    // El panel manda DELETE sin body: el ValidationPipe lo devuelve tal cual
+    // (undefined o {}), por eso se lee con `?.`.
+    @Body() dto?: DeleteFlightDto,
   ) {
-    return this.flights.deleteFlight(id, c.userId);
+    return this.flights.deleteFlight(id, c.userId, {
+      motivo: dto?.motivo,
+      clientRequestId: dto?.client_request_id,
+    });
   }
 
   @Delete(':id/purge')
@@ -458,7 +467,8 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Cancela un vuelo (-> CANCELADO) con motivo auditable. Solo ADMIN/COORDINADOR.',
+      'Cancela un vuelo (-> CANCELADO) con motivo auditable. Solo ADMIN/COORDINADOR. ' +
+      '409 estructurados: VUELO_YA_CANCELADO (idempotente para la app) y VUELO_COMPLETADO.',
   })
   async cancel(
     @Param('id', ParseUUIDPipe) id: string,

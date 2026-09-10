@@ -334,6 +334,19 @@ const METODOS_COBRO_PILOTO = new Set([
   'HSBC_LINK',
 ]);
 
+/**
+ * 404 ESTRUCTURADO de vuelo inexistente (10-sep-2026): `code`
+ * VUELO_NO_EXISTE con el `message` de siempre. La app sin internet lo trata
+ * como éxito idempotente al borrar/cancelar (ya no hay nada sobre qué actuar).
+ */
+function vueloNoExiste(id: string): NotFoundException {
+  return new NotFoundException({
+    message: `Vuelo ${id} not found`,
+    error: 'VUELO_NO_EXISTE',
+    details: { vuelo_id: id },
+  });
+}
+
 @Injectable()
 export class FlightsService {
   constructor(
@@ -608,15 +621,31 @@ export class FlightsService {
    * SIEMPRE deja fila en `vuelo_eliminado` (auditoría 29-ago: 8 folios
    * desaparecieron sin bitácora y nadie podía saber que fue un borrado).
    */
+  /**
+   * `opts` (10-sep-2026, baja desde la app sin internet): `motivo` viaja a
+   * `vuelo_eliminado.motivo` como 'eliminado desde la app: <motivo>' (sin él
+   * se conserva 'eliminado desde panel'); `clientRequestId` es SOLO
+   * trazabilidad (snapshot forense). Rechazos ESTRUCTURADOS (mismo `message`
+   * de siempre): 404 VUELO_NO_EXISTE (findById), 409
+   * VUELO_COBRADO_O_FACTURADO y 409 VUELO_CON_ACTIVIDAD con
+   * `details {cobros, gastos, tacos}`.
+   */
   async deleteFlight(
     id: string,
     userId: string | null = null,
-  ): Promise<{ deleted: true; id: string }> {
+    opts: { motivo?: string | null; clientRequestId?: string | null } = {},
+  ): Promise<{ deleted: true; id: string; folio: number | null }> {
     const vuelo = await this.findById(id);
     if (vuelo.cobrado || vuelo.facturado) {
-      throw new ConflictException(
-        'El vuelo ya fue cobrado/facturado; cancélalo en lugar de borrarlo.',
-      );
+      throw new ConflictException({
+        message:
+          'El vuelo ya fue cobrado/facturado; cancélalo en lugar de borrarlo.',
+        error: 'VUELO_COBRADO_O_FACTURADO',
+        details: {
+          cobrado: vuelo.cobrado === true,
+          facturado: vuelo.facturado === true,
+        },
+      });
     }
     const sb = this.supabase.service;
     const [{ count: cobros }, { count: gastos }, { count: tacos }] =
@@ -636,9 +665,16 @@ export class FlightsService {
           .not('taco_salida', 'is', null),
       ]);
     if ((cobros ?? 0) > 0 || (gastos ?? 0) > 0 || (tacos ?? 0) > 0) {
-      throw new ConflictException(
-        'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
-      );
+      throw new ConflictException({
+        message:
+          'El vuelo tiene actividad registrada (cobros, gastos o tacómetros); cancélalo en lugar de borrarlo para no perder el rastro.',
+        error: 'VUELO_CON_ACTIVIDAD',
+        details: {
+          cobros: cobros ?? 0,
+          gastos: gastos ?? 0,
+          tacos: tacos ?? 0,
+        },
+      });
     }
     // Aviso a la tripulación ANTES de borrar (21-ago): después ya no hay a
     // quién consultar. Se resuelve la lista ahora y se manda al final.
@@ -652,11 +688,21 @@ export class FlightsService {
       sb.from('vuelo').select('*').eq('id', id).maybeSingle(),
       sb.from('escala').select('*').eq('vuelo_id', id).order('orden'),
     ]);
+    const motivoApp = opts.motivo?.trim();
     const bitacoraId = await this.escribirBitacoraVueloEliminado(
       (vueloRaw as Record<string, unknown> | null) ?? vuelo,
       (escalasRaw ?? []) as Array<Record<string, unknown>>,
-      'eliminado desde panel',
+      // Sin motivo útil PERO con llave del outbox = vino de la app: la
+      // bitácora no debe decir "panel" (etiqueta forense veraz).
+      motivoApp
+        ? `eliminado desde la app: ${motivoApp}`
+        : opts.clientRequestId
+          ? 'eliminado desde la app'
+          : 'eliminado desde panel',
       userId,
+      opts.clientRequestId
+        ? { client_request_id: opts.clientRequestId }
+        : undefined,
     );
     // Quita eventos de Google antes de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
@@ -679,7 +725,7 @@ export class FlightsService {
       });
     }
     if (ctxGrupo) void this.avisarBajaHijoDeGrupo(vuelo, 'eliminado', ctxGrupo);
-    return { deleted: true, id };
+    return { deleted: true, id, folio: (vuelo.folio as number | null) ?? null };
   }
 
   /**
@@ -711,6 +757,8 @@ export class FlightsService {
     escalas: Array<Record<string, unknown>>,
     motivo: string,
     userId: string | null,
+    /** Trazabilidad de la app (client_request_id del outbox): va al snapshot. */
+    traza?: { client_request_id: string },
   ): Promise<string | null> {
     const sb = this.supabase.service;
     // Nombres para la bitácora (best-effort).
@@ -744,7 +792,7 @@ export class FlightsService {
         estado: vuelo.estado,
         tramos: escalas.length,
         motivo: motivo.trim(),
-        snapshot: { vuelo, escalas },
+        snapshot: { vuelo, escalas, ...(traza ? { app: traza } : {}) },
         eliminado_por: userId,
       })
       .select('id')
@@ -768,7 +816,7 @@ export class FlightsService {
       .eq('id', id)
       .maybeSingle();
     if (vErr) throw new Error(vErr.message);
-    if (!vuelo) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (!vuelo) throw vueloNoExiste(id);
     if (vuelo.estado !== 'CANCELADO') {
       throw new ConflictException(
         'Solo un vuelo CANCELADO se puede eliminar definitivamente. Cancélalo primero (o usa el borrado normal si es un borrador sin actividad).',
@@ -937,7 +985,7 @@ export class FlightsService {
       .eq('id', id)
       .maybeSingle();
     if (e0) throw new Error(e0.message);
-    if (!original) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (!original) throw vueloNoExiste(id);
     if (original.estado === 'CANCELADO' || original.estado === 'COMPLETADO') {
       throw new ConflictException(
         `No se puede reasignar un vuelo ${original.estado as string}.`,
@@ -1748,7 +1796,10 @@ export class FlightsService {
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    // 404 ESTRUCTURADO (10-sep-2026): la app sin internet clasifica por
+    // `code` (VUELO_NO_EXISTE ⇒ borrar/cancelar ya no tiene sobre qué actuar
+    // = éxito idempotente). El `message` es el de siempre.
+    if (!data) throw vueloNoExiste(id);
     return this.redactVueloForRol(data, current);
   }
 
@@ -1788,7 +1839,7 @@ export class FlightsService {
     userId: string,
   ): Promise<MiTripulacion> {
     const carga = await cargarTripulacion(this.supabase.service, vueloId);
-    if (!carga) throw new NotFoundException(`Vuelo ${vueloId} not found`);
+    if (!carga) throw vueloNoExiste(vueloId);
     return miTripulacion(userId, carga.vuelo, carga.escalas, carga.apoyos);
   }
 
@@ -1965,7 +2016,7 @@ export class FlightsService {
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (!data) throw vueloNoExiste(id);
 
     const v = data as unknown as {
       id: string;
@@ -2660,7 +2711,7 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (!data) throw vueloNoExiste(id);
     // Misma redacción por rol que el resto de caminos que devuelven el vuelo:
     // el piloto adjunta el plan y no debe recibir el costo del operador.
     return this.redactVueloForRol(data, actor);
@@ -2680,7 +2731,7 @@ export class FlightsService {
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Vuelo ${id} not found`);
+    if (!data) throw vueloNoExiste(id);
     const raw = ((data.foto_plan_vuelo_url as string | null) ?? '').trim();
     if (!raw) return { url: null };
     let path = raw;
@@ -4197,10 +4248,18 @@ export class FlightsService {
     opts: { silenciarAvisoGrupo?: boolean } = {},
   ) {
     const current = await this.findById(id);
+    // 409 ESTRUCTURADOS (10-sep-2026, app sin internet): YA_CANCELADO se
+    // trata como éxito idempotente; COMPLETADO es fallo visible. El `message`
+    // es el mismo texto de siempre (el panel lo muestra tal cual).
     if (current.estado === 'CANCELADO' || current.estado === 'COMPLETADO') {
-      throw new ConflictException(
-        `No se puede cancelar un vuelo en estado ${current.estado}`,
-      );
+      throw new ConflictException({
+        message: `No se puede cancelar un vuelo en estado ${current.estado as string}`,
+        error:
+          current.estado === 'CANCELADO'
+            ? 'VUELO_YA_CANCELADO'
+            : 'VUELO_COMPLETADO',
+        details: { estado: current.estado, folio: current.folio ?? null },
+      });
     }
     // Vuelo COMBINADO (28-ago): cancelarlo deja al otro colgando (su ferry
     // sigue cancelado y el avión que iba a cubrirlo ya no va). La liga se

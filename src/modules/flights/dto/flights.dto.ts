@@ -256,9 +256,41 @@ export class PurgeFlightDto {
   motivo!: string;
 }
 
+/**
+ * Body OPCIONAL de DELETE /flights/:id (10-sep-2026, baja desde la app sin
+ * internet). El panel sigue llamando sin body (→ 'eliminado desde panel');
+ * la app manda el motivo que queda en `vuelo_eliminado.motivo` como
+ * 'eliminado desde la app: <motivo>'.
+ */
+export class DeleteFlightDto {
+  @ApiPropertyOptional({
+    description:
+      'Motivo del borrado (5-500). Opcional: sin él la bitácora dice ' +
+      '"eliminado desde panel"; con él "eliminado desde la app: <motivo>".',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(5)
+  @MaxLength(500)
+  motivo?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de la captura en el outbox de la app (uuid). SOLO trazabilidad ' +
+      '(queda en el snapshot forense); el borrado ya es idempotente por sí ' +
+      'mismo: un vuelo que ya no existe responde 404 VUELO_NO_EXISTE.',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
+}
+
 export class CancelFlightDto {
   @ApiProperty({
-    description: 'Motivo de la cancelación. Queda auditado en notas_internas.',
+    description:
+      'Motivo de la cancelación. Queda auditado en notas_internas. ' +
+      '409 estructurados: VUELO_YA_CANCELADO (idempotente para la app) y ' +
+      'VUELO_COMPLETADO (no se puede cancelar).',
   })
   @IsString()
   @MinLength(3)
