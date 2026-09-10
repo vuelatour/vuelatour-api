@@ -286,6 +286,23 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `squawks_alta_abiertos` y `en_taller`; `GET /me/capturas` incluye los
       vuelos creados por el usuario (`tipo: 'vuelo'`). Verificar el deploy
       con `GET /v1/version` (package.json `version`), nunca con un 401.
+      **Externo y piloto externo desde la reserva (9-sep-2026)**:
+      `es_externo:true` exige `operador_externo` y PROHÍBE `aeronave_id`
+      (400 en DTO y service); el vuelo nace RESERVA con `aeronave_id null`,
+      tramos sin avión, `avion_externo_*` y el costo por
+      `resolverCostoExterno` (MXN sin `costo_externo_tc` = 400 ANTES del
+      insert); se SALTAN «Elige la aeronave», taller/squawk y
+      `avisosOperacionAvion`, y el detector compara SOLO la ruta del tramo 1.
+      `piloto_externo_nombre` (solo sin `piloto_id`) busca entre los pilotos
+      externos por nombre normalizado (`nombre-cliente.util`), reactiva al
+      inactivo y crea por `PilotsService.createExterno` justo antes del
+      insert (409 de `createExterno` ⇒ relectura por nombre normalizado y, si
+      no, por su MISMO candado — `es_piloto_externo` con cualquier rol, ilike
+      exacto —: nunca un 409 sin salida); respuesta `piloto_id` +
+      `piloto_externo_creado`; `aviso_piloto` del externo sale
+      `notificado:false`/`push_dispositivos:0` (WhatsApp). Sin piloto:
+      `aviso_piloto:null` y sin push. El replay idempotente NUNCA re-crea
+      pilotos ni clientes.
 
 ## Convenciones NestJS
 

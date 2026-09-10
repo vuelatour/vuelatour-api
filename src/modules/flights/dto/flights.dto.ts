@@ -21,8 +21,10 @@ import {
   MaxLength,
   Min,
   MinLength,
+  ValidateBy,
   ValidateIf,
   ValidateNested,
+  type ValidationArguments,
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
 import { MetodoPago } from '../../quotes/dto/calculate-quote.dto';
@@ -704,6 +706,24 @@ export class ReservaEscalaDto {
   notas?: string;
 }
 
+/**
+ * `es_externo:true` con `aeronave_id` → 400 claro desde el DTO (el CHECK de
+ * `vuelo` los excluye: externo ⇒ operador_externo; propio ⇒ aeronave_id).
+ */
+function SinAeronaveSiExterno(): PropertyDecorator {
+  return ValidateBy({
+    name: 'sinAeronaveSiExterno',
+    validator: {
+      validate: (value: unknown, args?: ValidationArguments) =>
+        value !== true ||
+        (args?.object as { aeronave_id?: unknown } | undefined)?.aeronave_id ==
+          null,
+      defaultMessage: () =>
+        'Un vuelo externo no lleva aeronave propia: quita aeronave_id o es_externo.',
+    },
+  });
+}
+
 export class CreateReservaDto {
   @ApiPropertyOptional({
     description:
@@ -827,15 +847,118 @@ export class CreateReservaDto {
   @Min(1)
   pasajeros?: number;
 
-  @ApiPropertyOptional({ description: 'Aeronave tentativa' })
+  @ApiPropertyOptional({
+    description:
+      'Aeronave tentativa. OBLIGATORIA en una reserva propia (400 claro sin ella); PROHIBIDA con es_externo.',
+  })
   @IsOptional()
   @IsUUID()
   aeronave_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Vuelo cubierto por un operador EXTERNO (app sin internet, 9-sep-2026): exige operador_externo y ' +
+      'prohíbe aeronave_id. Nace como RESERVA con aeronave_id null (tramos sin avión) y se salta ' +
+      'taller/squawk/doble reserva/capacidad; el detector de duplicado compara solo la ruta del tramo 1.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  @SinAeronaveSiExterno()
+  es_externo?: boolean;
+
+  @ApiPropertyOptional({
+    minLength: 2,
+    maxLength: 100,
+    description: 'Operador externo (ej. XA-TIB). OBLIGATORIO con es_externo.',
+  })
+  @ValidateIf(
+    (o: CreateReservaDto) =>
+      o.es_externo === true || o.operador_externo != null,
+  )
+  @IsString()
+  @Length(2, 100)
+  operador_externo?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 20,
+    description:
+      'Matrícula del avión externo (solo con es_externo; vuelo.avion_externo_matricula).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  externo_matricula?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 60,
+    description:
+      'Modelo del avión externo (solo con es_externo; vuelo.avion_externo_modelo).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(60)
+  externo_modelo?: string;
+
+  @ApiPropertyOptional({
+    minimum: 0,
+    description:
+      'Lo que cobra el operador externo, en SU moneda (solo con es_externo). 0/omitido = aún sin pactar. ' +
+      'El server DERIVA costo_externo_usd (fuente única resolverCostoExterno).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  costo_externo_monto?: number;
+
+  @ApiPropertyOptional({
+    enum: ['USD', 'MXN'],
+    description:
+      'Moneda del costo del externo (default USD). MXN exige costo_externo_tc (sin TC, 400 ANTES del insert).',
+  })
+  @IsOptional()
+  @IsIn(['USD', 'MXN'])
+  costo_externo_moneda?: 'USD' | 'MXN';
+
+  @ApiPropertyOptional({
+    description:
+      'TC MXN por USD para convertir un costo en MXN (banda 15–25). Solo se usa con costo_externo_moneda=MXN.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0.01)
+  @Max(100)
+  costo_externo_tc?: number;
 
   @ApiPropertyOptional({ description: 'Piloto tentativo' })
   @IsOptional()
   @IsUUID()
   piloto_id?: string;
+
+  @ApiPropertyOptional({
+    minLength: 2,
+    maxLength: 100,
+    description:
+      'Piloto EXTERNO por NOMBRE (app sin internet, 9-sep-2026). Solo aplica sin piloto_id (si vienen ambos ' +
+      'gana piloto_id). Se busca entre los pilotos externos por nombre normalizado (sin acentos/mayúsculas/' +
+      'espacios dobles): activo → se reutiliza, inactivo → se reactiva, ninguno → se crea justo antes del ' +
+      'vuelo por el mismo camino que POST /pilots/externo (respuesta `piloto_externo_creado`).',
+  })
+  @ValidateIf((o: CreateReservaDto) => !o.piloto_id)
+  @IsOptional()
+  @IsString()
+  @Length(2, 100)
+  piloto_externo_nombre?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 20,
+    description: 'WhatsApp del piloto externo (solo se usa al CREARLO).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  piloto_externo_telefono?: string;
 
   @ApiPropertyOptional({
     description: 'Copiloto (2do piloto). Ve todo el vuelo igual que el piloto.',

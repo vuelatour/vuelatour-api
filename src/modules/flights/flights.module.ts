@@ -4,6 +4,7 @@ import { CalendarModule } from '../calendar/calendar.module';
 import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { ExpirationsModule } from '../expirations/expirations.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { PilotsModule } from '../pilots/pilots.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { VisionModule } from '../vision/vision.module';
@@ -19,6 +20,9 @@ import { FlightsService } from './flights.service';
     ConfiguracionModule,
     ExpirationsModule,
     NotificationsModule,
+    // Piloto externo por nombre desde la reserva (9-sep-2026): sin ciclo,
+    // PilotsModule no importa flights.
+    PilotsModule,
     PyservicesModule,
     RealtimeModule,
     VisionModule,

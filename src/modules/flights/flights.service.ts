@@ -51,6 +51,7 @@ import {
 } from '../configuracion/configuracion.service';
 import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
+import { PilotsService } from '../pilots/pilots.service';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -172,6 +173,10 @@ export type RespuestaReserva = Record<string, unknown> & {
   apoyos: string[];
   cliente_id: string | null;
   cliente_creado: boolean;
+  /** Piloto EFECTIVO (por id o piloto externo resuelto/creado por nombre). */
+  piloto_id: string | null;
+  /** true solo cuando `piloto_externo_nombre` creó un usuario nuevo. */
+  piloto_externo_creado: boolean;
   avisos: string[];
   aviso_piloto: AvisoTripulante | null;
   aviso_copiloto: AvisoTripulante | null;
@@ -340,6 +345,9 @@ export class FlightsService {
     private readonly expirations: ExpirationsService,
     private readonly airports: AirportsService,
     private readonly configuracion: ConfiguracionService,
+    // Alta del piloto EXTERNO por nombre desde la reserva (9-sep-2026): mismo
+    // camino que POST /pilots/externo. PilotsModule no depende de flights.
+    private readonly pilots: PilotsService,
   ) {}
 
   private readonly logger = new Logger(FlightsService.name);
@@ -4619,7 +4627,9 @@ export class FlightsService {
 
   /**
    * Reserva tentativa: aparta el espacio en el calendario SIN cotización
-   * (vuelo propio; el cliente aún no confirma o faltan costos para cotizar).
+   * (vuelo propio o, desde el 9-sep-2026, cubierto por un operador EXTERNO
+   * con `es_externo`; el cliente aún no confirma o faltan costos para
+   * cotizar).
    * Precios en 0 — se cotiza después con "revisar" desde el detalle. Crea sus
    * tramos (ida + regreso si hay fecha final) para que la asignación por tramo
    * y el calendario por tramo funcionen desde el día uno.
@@ -4630,11 +4640,15 @@ export class FlightsService {
    * rechazar va ANTES del insert (un 400 después del insert dejaría un vuelo
    * con la llave que el reintento devolvería "creado" sin lo que faltó):
    *  1. pre-check por llave → rama idempotente;
-   *  2. validaciones (avión/piloto/taller/squawk, copiloto, apoyos, IATAs);
+   *  2. validaciones (propio: avión obligatorio + taller/squawk; externo:
+   *     operador obligatorio, SIN avión, costo con moneda; piloto por id o
+   *     por NOMBRE de piloto externo sin crear todavía; copiloto, apoyos,
+   *     IATAs);
    *  3. resolución del cliente (por id o por NOMBRE, sin crear todavía);
    *  4. detector de posible duplicado (409 solo con la bandera);
    *  5. sello de captura tolerante;
-   *  6. (crear cliente) + insert del vuelo; 7. tramos; 8. push con detalle
+   *  6. (crear cliente / piloto externo) + insert del vuelo; 7. tramos;
+   *     8. push con detalle
    *     de entrega (INMEDIATO tras los tramos: la rama idempotente nunca
    *     re-avisa), apoyos, permisos, avisos; 9. respuesta.
    */
@@ -4650,30 +4664,63 @@ export class FlightsService {
     }
 
     // 2. Validaciones. HECHO DURO (CHECK de `vuelo`: es_externo=false ⇒
-    // aeronave_id not null): una reserva propia SIEMPRE lleva avión; se
-    // rechaza aquí con texto claro en vez de dejar que el 23514 del insert lo
-    // diga en lenguaje de base de datos. El vuelo aún no existe: con
-    // `aceptar_discrepancia_alta` se valida aquí, se crea, y el aviso al
-    // mecánico sale al final con el vuelo ya insertado.
-    if (!dto.aeronave_id) {
+    // aeronave_id not null; es_externo=true ⇒ operador_externo not null):
+    // una reserva propia SIEMPRE lleva avión y una EXTERNA nunca (9-sep-2026:
+    // la app sin internet también agenda vuelos cubiertos por un operador
+    // externo). Se rechaza aquí con texto claro en vez de dejar que el 23514
+    // del insert lo diga en lenguaje de base de datos. El vuelo aún no
+    // existe: con `aceptar_discrepancia_alta` se valida aquí, se crea, y el
+    // aviso al mecánico sale al final con el vuelo ya insertado.
+    const esExterno = dto.es_externo === true;
+    const operadorExterno = (dto.operador_externo ?? '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (esExterno) {
+      if (dto.aeronave_id) {
+        throw new BadRequestException(
+          'Un vuelo externo no lleva aeronave propia: quita aeronave_id o es_externo.',
+        );
+      }
+      if (operadorExterno.length < 2) {
+        throw new BadRequestException(
+          'Indica el operador externo que cubre el vuelo.',
+        );
+      }
+    } else if (!dto.aeronave_id) {
       throw new BadRequestException(
         'Elige la aeronave: una reserva propia siempre lleva avión.',
       );
     }
+    // Avión EFECTIVO: null en el externo (los tramos nacen sin aeronave y se
+    // saltan taller/squawk, doble reserva y capacidad: son del avión propio).
+    const aeronaveId = esExterno ? null : (dto.aeronave_id ?? null);
+    // Costo del operador externo CON MONEDA (fuente única): MXN sin TC o TC
+    // fuera de banda → 400 AQUÍ (determinista), nunca después del insert.
+    const costoExterno = esExterno
+      ? resolverCostoExterno({
+          monto: dto.costo_externo_monto,
+          moneda: dto.costo_externo_moneda,
+          tc: dto.costo_externo_tc,
+        })
+      : null;
+    // Piloto: por id o por NOMBRE de piloto externo (se busca entre TODOS los
+    // externos, activos e inactivos; NO se crea todavía). Si vienen ambos
+    // gana piloto_id. Desde aquí `pilotoId` es el piloto efectivo: null si
+    // la reserva va sin piloto o si el externo se creará justo antes del
+    // insert (un piloto recién creado no tiene nada que validar).
+    const pilotoExt = await this.resolverPilotoExternoReserva(dto);
+    let pilotoId: string | null = dto.piloto_id ?? pilotoExt.id;
     let squawksAceptados: { id: string; descripcion: string }[] = [];
-    if (dto.aeronave_id || dto.piloto_id) {
+    if (aeronaveId || pilotoId) {
       squawksAceptados = await this.validateAssignTargets(
-        {
-          aeronaveId: dto.aeronave_id,
-          pilotoId: dto.piloto_id,
-        },
+        { aeronaveId, pilotoId },
         { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
       );
     }
     // Copiloto (2 pilotos volando): debe ser un piloto válido y distinto del
     // titular. Se valida aparte para dar un mensaje claro.
     if (dto.copiloto_id) {
-      if (dto.copiloto_id === dto.piloto_id) {
+      if (dto.copiloto_id === pilotoId) {
         throw new BadRequestException(
           'El copiloto debe ser distinto del piloto.',
         );
@@ -4686,7 +4733,7 @@ export class FlightsService {
     const apoyoIds = dto.apoyo_ids ? [...new Set(dto.apoyo_ids)] : [];
     if (apoyoIds.length > 0) {
       await this.assertApoyosAsignables(apoyoIds, {
-        piloto: dto.piloto_id ?? null,
+        piloto: pilotoId,
         copiloto: dto.copiloto_id ?? null,
       });
     }
@@ -4706,7 +4753,8 @@ export class FlightsService {
         fechaVuelo: dto.fecha_vuelo,
         fechaFin: plan.fechaFinReserva,
         nueva: {
-          aeronave_id: dto.aeronave_id ?? null,
+          // Externo ⇒ null: el detector compara SOLO la ruta del tramo 1.
+          aeronave_id: aeronaveId,
           origen_iata: plan.tramo1.origen,
           destino_iata: plan.tramo1.destino,
           cliente_es_interno: cliente.es_interno,
@@ -4756,12 +4804,46 @@ export class FlightsService {
         `El cliente “${cliente.nombre ?? ''}” estaba inactivo y se reactivó`,
       );
     }
+    // Piloto EXTERNO nuevo/reactivado, también justo antes del vuelo (mismo
+    // camino que POST /pilots/externo). Un fallo aquí no deja vuelo a medias
+    // y el reintento con la misma llave lo REUTILIZA por nombre (no duplica).
+    let pilotoExternoCreado = false;
+    if (pilotoExt.nombreCrear) {
+      pilotoId = await this.crearPilotoExternoReserva(
+        pilotoExt.nombreCrear,
+        dto.piloto_externo_telefono,
+        userId,
+      );
+      pilotoExternoCreado = true;
+      avisos.push(
+        `Piloto externo nuevo “${pilotoExt.nombreCrear}”: completa teléfono/honorarios en el panel`,
+      );
+    } else if (pilotoExt.reactivar && pilotoExt.id) {
+      await this.reactivarPilotoExterno(pilotoExt.id, userId);
+      avisos.push(
+        `El piloto externo “${pilotoExt.nombre ?? ''}” estaba inactivo y se reactivó`,
+      );
+    }
     const payload = {
       cliente_id: clienteId,
-      aeronave_id: dto.aeronave_id ?? null,
-      piloto_id: dto.piloto_id ?? null,
+      aeronave_id: aeronaveId,
+      piloto_id: pilotoId,
       copiloto_id: dto.copiloto_id ?? null,
-      es_externo: false,
+      es_externo: esExterno,
+      // Vuelo EXTERNO: operador + ficha del avión ajeno + costo con moneda
+      // (las 4 columnas del costo JUNTAS, nunca a medias). En el propio el
+      // insert sigue siendo el de siempre (sin estas claves).
+      ...(esExterno && costoExterno
+        ? {
+            operador_externo: operadorExterno,
+            avion_externo_modelo: dto.externo_modelo?.trim() || null,
+            avion_externo_matricula: dto.externo_matricula?.trim() || null,
+            costo_externo_usd: costoExterno.usd,
+            costo_externo_monto: costoExterno.monto,
+            costo_externo_moneda: costoExterno.moneda,
+            costo_externo_tc: costoExterno.tc,
+          }
+        : {}),
       tipo: 'MULTIESCALA',
       estado: 'RESERVA',
       cotizacion_version: 1,
@@ -4820,8 +4902,8 @@ export class FlightsService {
       vueloId,
       plan,
       dto,
-      aeronaveId: dto.aeronave_id ?? null,
-      pilotoId: dto.piloto_id ?? null,
+      aeronaveId,
+      pilotoId,
       userId,
     });
     const { error: legsErr } = await this.supabase.service
@@ -4848,9 +4930,11 @@ export class FlightsService {
     // de los tramos: si algo posterior (apoyos) fallara con 500, el vuelo ya
     // existe con su llave y el reintento entra por la rama idempotente, que
     // por diseño NUNCA re-avisa — el piloto se quedaría sin enterarse.
+    // Piloto externo (sin app): `notificado:false` y 0 dispositivos — la
+    // oficina le confirma por WhatsApp. Sin piloto: null (reserva tentativa).
     const [avisoPiloto, avisoCopiloto] = await Promise.all([
-      dto.piloto_id
-        ? this.avisoTripulanteSeguro(dto.piloto_id, data!, 'piloto')
+      pilotoId
+        ? this.avisoTripulanteSeguro(pilotoId, data!, 'piloto')
         : Promise.resolve(null),
       dto.copiloto_id
         ? this.avisoTripulanteSeguro(dto.copiloto_id, data!, 'copiloto')
@@ -4873,17 +4957,18 @@ export class FlightsService {
     await this.airports.refreshPermisosDeVuelo(vueloId);
     // Reserva aceptada CON squawk ALTA abierto: avisar al mecánico con el
     // vuelo ya insertado (dedupe diario dentro del helper).
-    if (dto.aeronave_id && squawksAceptados.length > 0) {
-      this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
+    if (aeronaveId && squawksAceptados.length > 0) {
+      this.notificarSquawkAceptado(data!, aeronaveId, squawksAceptados);
     }
     // AVISOS (4-sep-2026, nunca candado): doble reserva del avión en la
     // ventana de la reserva (fecha de salida → regreso / último tramo) y
-    // capacidad de los tramos recién creados.
-    if (dto.aeronave_id) {
+    // capacidad de los tramos recién creados. Nunca en el externo (sin avión
+    // propio no hay doble reserva ni capacidad que vigilar).
+    if (aeronaveId) {
       avisos.push(
         ...(await this.avisosOperacionAvion({
           vueloId,
-          aeronaveId: dto.aeronave_id,
+          aeronaveId,
           fechaVuelo: dto.fecha_vuelo,
           fechaFin: plan.fechaFinReserva,
           paxDefault: plan.pasajeros,
@@ -4899,6 +4984,8 @@ export class FlightsService {
       apoyos: apoyoIds,
       cliente_id: clienteId,
       cliente_creado: clienteCreado,
+      piloto_id: pilotoId,
+      piloto_externo_creado: pilotoExternoCreado,
       avisos,
       aviso_piloto: avisoPiloto,
       aviso_copiloto: avisoCopiloto,
@@ -4975,6 +5062,9 @@ export class FlightsService {
     const base = {
       cliente_id: (vuelo.cliente_id as string | null) ?? null,
       cliente_creado: false as const,
+      // El replay NUNCA re-crea clientes ni pilotos externos.
+      piloto_id: (vuelo.piloto_id as string | null) ?? null,
+      piloto_externo_creado: false as const,
       aviso_piloto: null as AvisoTripulante | null,
       aviso_copiloto: null as AvisoTripulante | null,
       idempotente: true as const,
@@ -5365,6 +5455,139 @@ export class FlightsService {
       .eq('id', id);
     if (error)
       throw new Error(`No se pudo reactivar el cliente: ${error.message}`);
+  }
+
+  /**
+   * Piloto EXTERNO por NOMBRE (alta sin internet, 9-sep-2026). Solo aplica
+   * sin `piloto_id` (si vienen ambos gana el id). Misma regla de nombre que
+   * el cliente (`nombre-cliente.util`: trim, espacios, sin acentos,
+   * minúsculas) contra TODOS los pilotos externos (rol PILOTO +
+   * es_piloto_externo, activos e inactivos). NO crea: devuelve `nombreCrear`
+   * para crearlo después del detector, justo antes del vuelo.
+   */
+  private async resolverPilotoExternoReserva(dto: CreateReservaDto): Promise<{
+    id: string | null;
+    nombre: string | null;
+    nombreCrear: string | null;
+    reactivar: boolean;
+  }> {
+    const nada = {
+      id: null,
+      nombre: null,
+      nombreCrear: null,
+      reactivar: false,
+    };
+    if (dto.piloto_id || !dto.piloto_externo_nombre) return nada;
+    const nombre = nombreClienteParaCrear(dto.piloto_externo_nombre);
+    if (nombre.length < 2) {
+      throw new BadRequestException(
+        'Indica el nombre del piloto externo (mínimo 2 caracteres).',
+      );
+    }
+    const igual = await this.buscarPilotoExternoPorNombre(nombre);
+    if (igual) {
+      return {
+        id: igual.id,
+        nombre: igual.nombre,
+        nombreCrear: null,
+        reactivar: !igual.activo,
+      };
+    }
+    return { ...nada, nombreCrear: nombre };
+  }
+
+  /** Piloto externo cuyo nombre normalizado coincide (prefiere el ACTIVO;
+   *  si solo hay inactivo lo devuelve para reactivarlo). */
+  private async buscarPilotoExternoPorNombre(
+    nombre: string,
+  ): Promise<ClienteNombreRow | null> {
+    const todos: ClienteNombreRow[] = [];
+    const PAGINA = 1000;
+    for (let desde = 0; ; desde += PAGINA) {
+      const { data, error } = await this.supabase.service
+        .from('usuario')
+        .select('id, nombre, estado')
+        .eq('rol', 'PILOTO')
+        .eq('es_piloto_externo', true)
+        .order('created_at', { ascending: true })
+        .range(desde, desde + PAGINA - 1);
+      if (error) throw new Error(error.message);
+      const filas = data ?? [];
+      todos.push(
+        ...filas.map((u) => ({
+          id: u.id as string,
+          nombre: (u.nombre as string | null) ?? '',
+          activo: u.estado === 'ACTIVO',
+        })),
+      );
+      if (filas.length < PAGINA) break;
+    }
+    return buscarClientePorNombre(todos, nombre);
+  }
+
+  /**
+   * Alta del piloto externo por el MISMO camino que POST /pilots/externo
+   * (rol PILOTO, es_piloto_externo, sin cuenta de auth, created_by). Carrera
+   * entre dos flushes con el mismo nombre nuevo: el 409 de `createExterno`
+   * se resuelve releyendo por nombre y reutilizando al que ganó.
+   */
+  private async crearPilotoExternoReserva(
+    nombre: string,
+    telefono: string | undefined,
+    userId: string,
+  ): Promise<string> {
+    try {
+      const creado = await this.pilots.createExterno(
+        { nombre, telefono: telefono?.trim() || undefined },
+        userId,
+      );
+      return (creado as { id: string }).id;
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        // 1) Mismo criterio del alta (nombre normalizado, prefiere ACTIVO).
+        const otro = await this.buscarPilotoExternoPorNombre(nombre);
+        if (otro) return otro.id;
+        // 2) El candado de createExterno es MÁS ANCHO que esa búsqueda
+        //    (es_piloto_externo con CUALQUIER rol — POST/PATCH /users lo
+        //    permiten —, ilike exacto con comodines %/_): si él dice "ya
+        //    existe", ese es el piloto. Sin esto la reserva rebotaría 409
+        //    sin salida para la oficina (el outbox lo trata como definitivo).
+        const segunCandado = await this.pilotoExternoSegunCandado(nombre);
+        if (segunCandado) return segunCandado;
+      }
+      throw err;
+    }
+  }
+
+  /** Relectura con el MISMO candado de `PilotsService.createExterno`
+   *  (es_piloto_externo, no INACTIVO, ilike exacto). Solo tras su 409. */
+  private async pilotoExternoSegunCandado(
+    nombre: string,
+  ): Promise<string | null> {
+    const { data, error } = await this.supabase.service
+      .from('usuario')
+      .select('id')
+      .eq('es_piloto_externo', true)
+      .neq('estado', 'INACTIVO')
+      .ilike('nombre', nombre)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data?.id as string | undefined) ?? null;
+  }
+
+  private async reactivarPilotoExterno(
+    id: string,
+    userId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('usuario')
+      .update({ estado: 'ACTIVO', updated_by: userId })
+      .eq('id', id);
+    if (error)
+      throw new Error(
+        `No se pudo reactivar al piloto externo: ${error.message}`,
+      );
   }
 
   /** Apoyos de nivel vuelo: mismo camino que assign (reemplazarApoyos ya

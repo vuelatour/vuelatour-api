@@ -192,7 +192,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Reserva tentativa: aparta el espacio en el calendario SIN cotización (vuelo propio). Se cotiza después desde el detalle. ' +
+      'Reserva tentativa: aparta el espacio en el calendario SIN cotización (vuelo propio, o cubierto por un operador externo con es_externo: sin avión propio). Se cotiza después desde el detalle. ' +
+      'piloto_externo_nombre (sin piloto_id) reutiliza/reactiva/crea al piloto externo por nombre (respuesta piloto_id + piloto_externo_creado). ' +
       'IDEMPOTENTE por client_request_id (9-sep-2026): la misma llave devuelve la reserva ya creada (200, idempotente:true) o la repara si quedó sin tramos; ' +
       '409 estructurados: SQUAWK_ALTA_SIN_RESOLVER, AERONAVE_EN_TALLER, POSIBLE_DUPLICADO; 503 RESERVA_EN_PROCESO (transitorio).',
   })

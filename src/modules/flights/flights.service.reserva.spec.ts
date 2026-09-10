@@ -12,6 +12,9 @@ jest.mock('../notifications/email.service', () => ({
   EmailService: class {},
 }));
 jest.mock('../vision/vision.service', () => ({ VisionService: class {} }));
+// PilotsService arrastra calendar.service/users.service (push, firebase):
+// aquí solo se necesita `createExterno` simulado.
+jest.mock('../pilots/pilots.service', () => ({ PilotsService: class {} }));
 
 import {
   BadRequestException,
@@ -28,6 +31,7 @@ import type { ExpirationsService } from '../expirations/expirations.service';
 import type { AirportsService } from '../airports/airports.service';
 import type { VisionService } from '../vision/vision.service';
 import type { ConfiguracionService } from '../configuracion/configuracion.service';
+import type { PilotsService } from '../pilots/pilots.service';
 
 /**
  * `createReserva` como UNA operación idempotente (alta sin internet,
@@ -60,6 +64,7 @@ const METODOS = [
   'order',
   'range',
   'limit',
+  'ilike',
   'insert',
   'update',
   'delete',
@@ -113,6 +118,8 @@ const APOYO = 'aaaaaaaa-0000-4000-8000-00000000000c';
 const CLIENTE = 'aaaaaaaa-0000-4000-8000-00000000000d';
 const CLIENTE_NUEVO = 'aaaaaaaa-0000-4000-8000-00000000000e';
 const USER = 'aaaaaaaa-0000-4000-8000-00000000000f';
+const PILOTO_EXT = 'aaaaaaaa-0000-4000-8000-0000000000e1';
+const PILOTO_EXT_NUEVO = 'aaaaaaaa-0000-4000-8000-0000000000e2';
 
 function vueloRow(extra: Row = {}): Row {
   return {
@@ -159,6 +166,19 @@ interface Mundo {
   apoyosError?: boolean;
   /** Discrepancias ALTA abiertas del avión. */
   squawksAlta?: Row[];
+  /** Pilotos externos (rol PILOTO + es_piloto_externo) que devuelve la
+   *  búsqueda por nombre: filas {id, nombre, estado}. */
+  pilotosExternos?: Row[];
+  /** Ficha de usuario por id (notifyPilotAssigned lee es_piloto_externo). */
+  usuarioPorId?: Record<string, Row>;
+  /** Externos que la búsqueda por nombre NO ve (es_piloto_externo con otro
+   *  rol): solo los devuelve la relectura por el candado de createExterno
+   *  (ilike). */
+  pilotosExternosOtroRol?: Row[];
+  /** createExterno rebota 409: true = carrera (el ganador aparece en la
+   *  búsqueda por nombre); 'otro_rol' = el que ya existe solo lo ve el
+   *  candado ilike; 'sin_ganador' = nadie reutilizable (409 se propaga). */
+  createExternoConflicto?: boolean | 'otro_rol' | 'sin_ganador';
 }
 
 function armar(m: Mundo) {
@@ -209,17 +229,33 @@ function armar(m: Mundo) {
           : { data: { matricula: 'XA-VGV' } };
       case 'aeronave_discrepancia':
         return { data: m.squawksAlta ?? [] };
-      case 'usuario':
+      case 'usuario': {
+        if (tiene(ops, 'ilike')) {
+          // Candado de createExterno: ilike exacto (case-insensitive).
+          const patron = (
+            (ops.find((o) => o.m === 'ilike')?.args[1] as string | undefined) ??
+            ''
+          ).toLowerCase();
+          const fila = (m.pilotosExternosOtroRol ?? []).find(
+            (u) => String(u.nombre).toLowerCase() === patron,
+          );
+          return { data: fila ?? null };
+        }
+        if (eqDe(ops, 'es_piloto_externo') === true)
+          return { data: m.pilotosExternos ?? [] };
+        if (upd) return {};
         if (tiene(ops, 'in')) return { data: [] };
+        const id = eqDe(ops, 'id') as string;
         return {
-          data: {
-            id: eqDe(ops, 'id'),
+          data: m.usuarioPorId?.[id] ?? {
+            id,
             estado: 'ACTIVO',
             nombre: 'Juan',
             email: null,
             es_piloto_externo: false,
           },
         };
+      }
       case 'cliente':
         if (ins) return { data: { id: CLIENTE_NUEVO } };
         if (upd) return {};
@@ -255,6 +291,39 @@ function armar(m: Mundo) {
   const email = {
     sendPilotAssignment: jest.fn().mockResolvedValue(undefined),
   } as unknown as EmailService;
+  // Alta del piloto externo (mismo camino que POST /pilots/externo). Deja
+  // huella en `llamadas` para auditar el ORDEN respecto al insert del vuelo.
+  const createExterno = jest.fn(
+    (
+      d: { nombre: string; telefono?: string },
+      createdBy: string,
+    ): Promise<Row> => {
+      llamadas.push({
+        tabla: '__createExterno',
+        ops: [{ m: 'createdBy', args: [createdBy] }],
+      });
+      if (m.createExternoConflicto) {
+        const ganador = { id: PILOTO_EXT, nombre: d.nombre, estado: 'ACTIVO' };
+        if (m.createExternoConflicto === true) {
+          (m.pilotosExternos ??= []).push(ganador);
+        } else if (m.createExternoConflicto === 'otro_rol') {
+          (m.pilotosExternosOtroRol ??= []).push(ganador);
+        }
+        return Promise.reject(
+          new ConflictException(
+            `Ya existe un piloto externo llamado "${d.nombre}".`,
+          ),
+        );
+      }
+      return Promise.resolve({
+        id: PILOTO_EXT_NUEVO,
+        nombre: d.nombre,
+        telefono: d.telefono ?? '',
+        es_piloto_externo: true,
+      });
+    },
+  );
+  const pilots = { createExterno } as unknown as PilotsService;
   const service = new FlightsService(
     supabase,
     calendar,
@@ -264,6 +333,7 @@ function armar(m: Mundo) {
     expirations,
     airports,
     {} as ConfiguracionService,
+    pilots,
   );
   const notifyPilotAssigned = jest.spyOn(
     service as unknown as { notifyPilotAssigned: () => Promise<unknown> },
@@ -277,6 +347,7 @@ function armar(m: Mundo) {
     notifications,
     refreshPermisos,
     notifyPilotAssigned,
+    createExterno,
   };
 }
 
@@ -839,5 +910,453 @@ describe('createReserva — alta fresca', () => {
     expect(r.id).toBe(V1);
     expect(r.idempotente).toBe(true);
     expect(base.notifyPilotAssigned).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Vuelo cubierto por operador EXTERNO y piloto externo por NOMBRE desde la
+ * reserva (app sin internet, 9-sep-2026). Contrato: externo ⇒ es_externo,
+ * operador, aeronave null, sin candados de avión; el piloto externo se
+ * reutiliza por nombre normalizado, se reactiva o se crea justo antes del
+ * insert; sin piloto no hay push. El replay idempotente no re-crea nada.
+ */
+describe('createReserva — vuelo externo (es_externo)', () => {
+  const dtoExterno = (extra: Partial<CreateReservaDto> = {}) =>
+    dtoBase({
+      aeronave_id: undefined,
+      es_externo: true,
+      operador_externo: '  XA-TIB   Charter ',
+      externo_matricula: 'XA-REG',
+      externo_modelo: 'Hawker 400',
+      costo_externo_monto: 1500,
+      costo_externo_moneda: 'USD',
+      ...extra,
+    });
+
+  it('inserta es_externo:true, operador, aeronave_id null y tramos sin avión; NO valida el avión ni avisa doble reserva/capacidad', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({
+        aeronave_id: null,
+        es_externo: true,
+        operador_externo: 'XA-TIB Charter',
+      }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      escalas: escalasVivas(),
+      // Taller y squawk ALTA presentes: en el externo NO deben consultarse.
+      enTaller: true,
+      squawksAlta: [{ id: 'sq-1', descripcion: 'Fuga de aceite' }],
+    });
+    const validar = jest.spyOn(w.service, 'validateAssignTargets');
+    const avisosAvion = jest.spyOn(
+      w.service as unknown as { avisosOperacionAvion: () => Promise<string[]> },
+      'avisosOperacionAvion',
+    );
+    const r = await w.service.createReserva(dtoExterno(), USER);
+    expect(r.idempotente).toBe(false);
+    expect(r.piloto_id).toBe(PILOTO);
+    expect(r.piloto_externo_creado).toBe(false);
+    const payload = w.inserts.vuelo?.[0] as Row;
+    expect(payload).toMatchObject({
+      es_externo: true,
+      operador_externo: 'XA-TIB Charter',
+      aeronave_id: null,
+      piloto_id: PILOTO,
+      estado: 'RESERVA',
+      avion_externo_matricula: 'XA-REG',
+      avion_externo_modelo: 'Hawker 400',
+      costo_externo_monto: 1500,
+      costo_externo_moneda: 'USD',
+      costo_externo_usd: 1500,
+      costo_externo_tc: null,
+    });
+    const legs = w.inserts.escala?.[0] as Row[];
+    expect(legs).toHaveLength(2);
+    expect(legs.every((l) => l.aeronave_id === null)).toBe(true);
+    // Solo el piloto pasa por validateAssignTargets (aeronaveId null).
+    expect(validar).toHaveBeenCalledTimes(1);
+    expect(validar.mock.calls[0][0]).toEqual({
+      aeronaveId: null,
+      pilotoId: PILOTO,
+    });
+    expect(avisosAvion).not.toHaveBeenCalled();
+    expect(w.llamadas.some((l) => l.tabla === 'mantenimiento')).toBe(false);
+    expect(w.llamadas.some((l) => l.tabla === 'aeronave_discrepancia')).toBe(
+      false,
+    );
+    expect(r.avisos).toEqual([]);
+  });
+
+  it('propio SIN aeronave sigue rebotando «Elige la aeronave»; externo CON aeronave_id → 400 y externo SIN operador → 400, todo antes del insert', async () => {
+    const w = armar({
+      porLlave: null,
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+    });
+    await expect(
+      w.service.createReserva(dtoBase({ aeronave_id: undefined }), USER),
+    ).rejects.toThrow(/Elige la aeronave/);
+    await expect(
+      w.service.createReserva(dtoExterno({ aeronave_id: AVION }), USER),
+    ).rejects.toThrow(/no lleva aeronave propia/);
+    await expect(
+      w.service.createReserva(dtoExterno({ operador_externo: ' ' }), USER),
+    ).rejects.toThrow(/operador externo/);
+    expect(w.inserts.vuelo).toBeUndefined();
+    expect(w.inserts.cliente).toBeUndefined();
+  });
+
+  it('costo del externo en MXN sin TC → 400 ANTES del insert; con TC deriva costo_externo_usd (4 columnas juntas)', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ aeronave_id: null, es_externo: true }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+    });
+    await expect(
+      w.service.createReserva(
+        dtoExterno({ costo_externo_monto: 30000, costo_externo_moneda: 'MXN' }),
+        USER,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(w.inserts.vuelo).toBeUndefined();
+    await w.service.createReserva(
+      dtoExterno({
+        costo_externo_monto: 30000,
+        costo_externo_moneda: 'MXN',
+        costo_externo_tc: 20,
+      }),
+      USER,
+    );
+    expect(w.inserts.vuelo?.[0]).toMatchObject({
+      costo_externo_monto: 30000,
+      costo_externo_moneda: 'MXN',
+      costo_externo_tc: 20,
+      costo_externo_usd: 1500,
+    });
+  });
+
+  it('detector de duplicado con aeronave null compara SOLO la ruta del tramo 1', async () => {
+    // Otro vuelo del cliente ese día con OTRA ruta: no es duplicado.
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ aeronave_id: null, es_externo: true }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      duplicados: [
+        vueloRow({
+          id: 'v-otro',
+          folio: 117,
+          origen_iata: 'CUN',
+          destino_iata: 'MID',
+          escalas: [],
+        }),
+      ],
+    });
+    const r = await w.service.createReserva(
+      dtoExterno({ rechazar_posible_duplicado: true }),
+      USER,
+    );
+    expect(r.idempotente).toBe(false);
+    expect(r.avisos).toEqual([]);
+    // Misma ruta CUN → HOL: sí es posible duplicado (409 con la bandera).
+    const w2 = armar({
+      porLlave: null,
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      duplicados: [vueloRow({ id: 'v-otro', folio: 117, escalas: [] })],
+    });
+    let err: unknown;
+    try {
+      await w2.service.createReserva(
+        dtoExterno({ rechazar_posible_duplicado: true }),
+        USER,
+      );
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(ConflictException);
+    expect(
+      (err as ConflictException).getResponse() as Record<string, unknown>,
+    ).toMatchObject({ error: 'POSIBLE_DUPLICADO' });
+    expect(w2.inserts.vuelo).toBeUndefined();
+  });
+});
+
+describe('createReserva — piloto externo por nombre', () => {
+  const fichaExterno = (id: string, nombre: string): Row => ({
+    id,
+    nombre,
+    email: null,
+    estado: 'ACTIVO',
+    es_piloto_externo: true,
+  });
+
+  it('piloto externo NUEVO: createExterno UNA vez (tras el detector, antes del vuelo), piloto_id asignado en vuelo y tramos, aviso, y aviso_piloto sin push (WhatsApp)', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT_NUEVO }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      escalas: escalasVivas(),
+      pilotosExternos: [
+        { id: 'px-otro', nombre: 'Pedro Externo', estado: 'ACTIVO' },
+      ],
+      usuarioPorId: {
+        [PILOTO_EXT_NUEVO]: fichaExterno(PILOTO_EXT_NUEVO, 'Juan Pérez'),
+      },
+    });
+    const r = await w.service.createReserva(
+      dtoBase({
+        piloto_id: undefined,
+        piloto_externo_nombre: '  Juan   Pérez ',
+        piloto_externo_telefono: ' 9981234567 ',
+      }),
+      USER,
+    );
+    expect(w.createExterno).toHaveBeenCalledTimes(1);
+    expect(w.createExterno.mock.calls[0][0]).toEqual({
+      nombre: 'Juan Pérez',
+      telefono: '9981234567',
+    });
+    expect(w.createExterno.mock.calls[0][1]).toBe(USER);
+    expect(r.piloto_id).toBe(PILOTO_EXT_NUEVO);
+    expect(r.piloto_externo_creado).toBe(true);
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBe(PILOTO_EXT_NUEVO);
+    const legs = w.inserts.escala?.[0] as Row[];
+    expect(legs.every((l) => l.piloto_id === PILOTO_EXT_NUEVO)).toBe(true);
+    expect(r.avisos).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(
+          /^Piloto externo nuevo “Juan Pérez”: completa teléfono\/honorarios/,
+        ),
+      ]),
+    );
+    // Externo: sin app ⇒ notificado:false y 0 dispositivos, sin push.
+    expect(r.aviso_piloto).toEqual({
+      usuario_id: PILOTO_EXT_NUEVO,
+      nombre: 'Juan Pérez',
+      notificado: false,
+      push_dispositivos: 0,
+    });
+    expect(
+      (w.notifications.notifyUserDetallado as jest.Mock).mock.calls,
+    ).toHaveLength(0);
+    // ORDEN: detector (select vuelo por cliente) → createExterno → insert.
+    const idx = (pred: (l: { tabla: string; ops: Op[] }) => boolean) =>
+      w.llamadas.findIndex(pred);
+    const iDetector = idx(
+      (l) => l.tabla === 'vuelo' && eqDe(l.ops, 'cliente_id') !== undefined,
+    );
+    const iCrear = idx((l) => l.tabla === '__createExterno');
+    const iInsert = idx((l) => l.tabla === 'vuelo' && tiene(l.ops, 'insert'));
+    expect(iDetector).toBeGreaterThanOrEqual(0);
+    expect(iDetector).toBeLessThan(iCrear);
+    expect(iCrear).toBeLessThan(iInsert);
+  });
+
+  it('piloto externo EXISTENTE por nombre normalizado (acentos/mayúsculas/espacios) → se reutiliza sin crear', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [
+        { id: 'px-otro', nombre: 'Juana Pérez', estado: 'ACTIVO' },
+        { id: PILOTO_EXT, nombre: 'Juan Pérez', estado: 'ACTIVO' },
+      ],
+      usuarioPorId: { [PILOTO_EXT]: fichaExterno(PILOTO_EXT, 'Juan Pérez') },
+    });
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_id: undefined, piloto_externo_nombre: 'JUAN  PEREZ' }),
+      USER,
+    );
+    expect(w.createExterno).not.toHaveBeenCalled();
+    expect(r.piloto_id).toBe(PILOTO_EXT);
+    expect(r.piloto_externo_creado).toBe(false);
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBe(PILOTO_EXT);
+    expect(w.updates.usuario).toBeUndefined();
+    expect(r.aviso_piloto).toMatchObject({
+      usuario_id: PILOTO_EXT,
+      notificado: false,
+      push_dispositivos: 0,
+    });
+  });
+
+  it('piloto externo INACTIVO con ese nombre → se reactiva (update usuario ACTIVO) y se reutiliza, con aviso', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [
+        { id: PILOTO_EXT, nombre: 'Juan Pérez', estado: 'INACTIVO' },
+      ],
+      usuarioPorId: { [PILOTO_EXT]: fichaExterno(PILOTO_EXT, 'Juan Pérez') },
+    });
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_id: undefined, piloto_externo_nombre: 'juan perez' }),
+      USER,
+    );
+    expect(w.createExterno).not.toHaveBeenCalled();
+    expect(r.piloto_id).toBe(PILOTO_EXT);
+    expect(r.piloto_externo_creado).toBe(false);
+    expect(w.updates.usuario?.[0]).toMatchObject({
+      estado: 'ACTIVO',
+      updated_by: USER,
+    });
+    expect(r.avisos).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('“Juan Pérez” estaba inactivo y se reactivó'),
+      ]),
+    );
+    // La reactivación va DESPUÉS del detector y ANTES del insert del vuelo.
+    const iUpd = w.llamadas.findIndex(
+      (l) => l.tabla === 'usuario' && tiene(l.ops, 'update'),
+    );
+    const iIns = w.llamadas.findIndex(
+      (l) => l.tabla === 'vuelo' && tiene(l.ops, 'insert'),
+    );
+    expect(iUpd).toBeGreaterThanOrEqual(0);
+    expect(iUpd).toBeLessThan(iIns);
+  });
+
+  it('con piloto_id Y piloto_externo_nombre gana piloto_id: ni busca externos ni crea', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow(),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [
+        { id: PILOTO_EXT, nombre: 'Otro Nombre', estado: 'ACTIVO' },
+      ],
+    });
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_externo_nombre: 'Otro Nombre' }),
+      USER,
+    );
+    expect(r.piloto_id).toBe(PILOTO);
+    expect(r.piloto_externo_creado).toBe(false);
+    expect(w.createExterno).not.toHaveBeenCalled();
+    expect(
+      w.llamadas.some(
+        (l) =>
+          l.tabla === 'usuario' && eqDe(l.ops, 'es_piloto_externo') === true,
+      ),
+    ).toBe(false);
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBe(PILOTO);
+  });
+
+  it('SIN piloto (ni id ni nombre): reserva tentativa con piloto_id null, aviso_piloto null y sin push', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: null }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+    });
+    const validar = jest.spyOn(w.service, 'validateAssignTargets');
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_id: undefined }),
+      USER,
+    );
+    expect(r.piloto_id).toBeNull();
+    expect(r.piloto_externo_creado).toBe(false);
+    expect(r.aviso_piloto).toBeNull();
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBeNull();
+    expect(w.notifyPilotAssigned).not.toHaveBeenCalled();
+    expect(
+      (w.notifications.notifyUserDetallado as jest.Mock).mock.calls,
+    ).toHaveLength(0);
+    expect(w.createExterno).not.toHaveBeenCalled();
+    // El avión sí se valida (taller/squawk); el piloto no existe.
+    expect(validar.mock.calls[0][0]).toEqual({
+      aeronaveId: AVION,
+      pilotoId: null,
+    });
+  });
+
+  it('un 409 de createExterno (carrera con otro flush) se resuelve releyendo por nombre: se reutiliza al que ganó', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [],
+      usuarioPorId: { [PILOTO_EXT]: fichaExterno(PILOTO_EXT, 'Juan Pérez') },
+      createExternoConflicto: true,
+    });
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_id: undefined, piloto_externo_nombre: 'Juan Pérez' }),
+      USER,
+    );
+    expect(w.createExterno).toHaveBeenCalledTimes(1);
+    expect(r.piloto_id).toBe(PILOTO_EXT);
+    expect(r.piloto_externo_creado).toBe(true);
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBe(PILOTO_EXT);
+  });
+
+  it('409 de createExterno por un externo que la búsqueda por nombre NO ve (rol distinto de PILOTO) → se reutiliza por el MISMO candado de createExterno (ilike), nunca un 409 sin salida', async () => {
+    const w = armar({
+      porLlave: null,
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT }),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [],
+      usuarioPorId: { [PILOTO_EXT]: fichaExterno(PILOTO_EXT, 'Juan Pérez') },
+      createExternoConflicto: 'otro_rol',
+    });
+    const r = await w.service.createReserva(
+      dtoBase({ piloto_id: undefined, piloto_externo_nombre: 'Juan Pérez' }),
+      USER,
+    );
+    expect(w.createExterno).toHaveBeenCalledTimes(1);
+    expect(r.piloto_id).toBe(PILOTO_EXT);
+    expect((w.inserts.vuelo?.[0] as Row).piloto_id).toBe(PILOTO_EXT);
+    // Primero la relectura normalizada (vacía) y luego la del candado.
+    const iNorm = w.llamadas.findIndex(
+      (l) => l.tabla === 'usuario' && eqDe(l.ops, 'rol') === 'PILOTO',
+    );
+    const iCandado = w.llamadas.findIndex(
+      (l) => l.tabla === 'usuario' && tiene(l.ops, 'ilike'),
+    );
+    expect(iCandado).toBeGreaterThan(iNorm);
+  });
+
+  it('409 de createExterno sin nadie reutilizable → se propaga el 409 y NO se inserta el vuelo (nada a medias)', async () => {
+    const w = armar({
+      porLlave: null,
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
+      pilotosExternos: [],
+      createExternoConflicto: 'sin_ganador',
+    });
+    await expect(
+      w.service.createReserva(
+        dtoBase({ piloto_id: undefined, piloto_externo_nombre: 'Juan Pérez' }),
+        USER,
+      ),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(w.inserts.vuelo).toBeUndefined();
+    expect(w.inserts.escala).toBeUndefined();
+  });
+
+  it('replay idempotente con piloto_externo_nombre: NO vuelve a crear ni a buscar pilotos ni clientes', async () => {
+    const w = armar({
+      porLlave: { id: V1 },
+      vuelo: vueloRow({ piloto_id: PILOTO_EXT }),
+      nEscalas: 2,
+      escalas: escalasVivas(),
+    });
+    const r = await w.service.createReserva(
+      dtoBase({
+        piloto_id: undefined,
+        piloto_externo_nombre: 'Juan Pérez',
+        cliente_id: undefined,
+        cliente_nombre: 'Cliente Nuevo',
+      }),
+      USER,
+    );
+    expect(r.idempotente).toBe(true);
+    expect(r.piloto_id).toBe(PILOTO_EXT);
+    expect(r.piloto_externo_creado).toBe(false);
+    expect(r.cliente_creado).toBe(false);
+    expect(w.createExterno).not.toHaveBeenCalled();
+    expect(w.inserts.cliente).toBeUndefined();
+    expect(w.inserts.vuelo).toBeUndefined();
+    expect(
+      w.llamadas.some(
+        (l) =>
+          l.tabla === 'usuario' && eqDe(l.ops, 'es_piloto_externo') === true,
+      ),
+    ).toBe(false);
+    expect(w.notifyPilotAssigned).not.toHaveBeenCalled();
   });
 });
