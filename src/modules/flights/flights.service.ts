@@ -81,6 +81,14 @@ import type {
 } from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
+import { columnaOpcional } from '../../common/columna-opcional.util';
+import { clientRequestIdEnUso } from '../../common/client-request-id.util';
+import {
+  aplicarCas,
+  assertVersion,
+  conflictoVersion,
+  instanteDe,
+} from '../../common/version-cas.util';
 import {
   filtroLigaCobros,
   movimientoDeCobro,
@@ -347,6 +355,34 @@ function vueloNoExiste(id: string): NotFoundException {
   });
 }
 
+/**
+ * 404 ESTRUCTURADO de tramo inexistente (10-sep-2026, Ola B): mismo
+ * `message` de siempre + code `ESCALA_NO_EXISTE` para que la app decida sin
+ * regex (un tramo que ya no existe = nada sobre qué actuar).
+ */
+function escalaNoExiste(id: string): NotFoundException {
+  return new NotFoundException({
+    message: `Escala ${id} not found`,
+    error: 'ESCALA_NO_EXISTE',
+    details: { escala_id: id },
+  });
+}
+
+/** Migración que crea `escala.client_request_id` (idempotencia de tramos). */
+const MIGRACION_CLIENT_REQUEST_ALTAS = '20260910000002';
+
+/** Filas máximas por lectura de apoyo de los deltas (max-rows de PostgREST). */
+const DELTA_MAX_FILAS = 1000;
+/**
+ * Tope de ids que caben en el `or=(…,id.in.(…))` de PostgREST sin reventar
+ * la URL (~37 bytes por uuid). Por encima, `GET /flights?updated_since`
+ * responde la lista COMPLETA (repetir vuelos es inocuo; omitirlos no).
+ */
+const DELTA_MAX_IDS_TRAMO = 150;
+
+/** Redondeo a centavos para los `details` de dinero. */
+const r2 = (n: number): number => Math.round(n * 100) / 100;
+
 @Injectable()
 export class FlightsService {
   constructor(
@@ -364,6 +400,211 @@ export class FlightsService {
   ) {}
 
   private readonly logger = new Logger(FlightsService.name);
+
+  // ===== Ola B (10-sep-2026): idempotencia de tramos, CAS y deltas =====
+
+  /**
+   * ¿Existe ya `escala.client_request_id`? (migración
+   * `20260910000002_client_request_id_altas`, puede estar pendiente).
+   * Sonda memorizada por `ColumnaOpcional`: sin columna, la llave se ignora
+   * (alta normal sin pre-check, sin columna en el insert, sin rama 23505).
+   */
+  private conClientRequestEscala(): Promise<boolean> {
+    return columnaOpcional(this.supabase.service, 'escala', 'client_request_id', {
+      mensajeAusente: `Columna escala.client_request_id no existe todavía: tramos sin idempotencia hasta aplicar la migración ${MIGRACION_CLIENT_REQUEST_ALTAS}`,
+    }).disponible();
+  }
+
+  /** Llave de idempotencia EFECTIVA del tramo (null si no viaja o no hay columna). */
+  private async llaveTramo(
+    clientRequestId: string | null | undefined,
+  ): Promise<string | null> {
+    return clientRequestId && (await this.conClientRequestEscala())
+      ? clientRequestId
+      : null;
+  }
+
+  /**
+   * Tramo YA creado con esa llave EN ESE VUELO (replay del outbox). La llave
+   * es única global (índice parcial), pero se acota al vuelo para nunca
+   * devolver un tramo ajeno si un cliente reutilizara la llave.
+   */
+  private async escalaPorClientRequest(
+    vueloId: string,
+    key: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(ESCALA_COLS)
+      .eq('vuelo_id', vueloId)
+      .eq('client_request_id', key)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as Record<string, unknown> | null) ?? null;
+  }
+
+  /**
+   * Cobro YA registrado con esa llave EN ESE VUELO (replay del outbox), o
+   * null. Acotado al vuelo: una llave reutilizada en otro vuelo nunca
+   * devuelve un cobro ajeno (el insert choca en 23505 → 409, jamás 500).
+   */
+  private async cobroPorClientRequest(
+    vueloId: string,
+    key: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select(COBRO_COLS)
+      .eq('client_request_id', key)
+      .eq('vuelo_id', vueloId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as Record<string, unknown> | null) ?? null;
+  }
+
+  /**
+   * El UPDATE con CAS devolvió 0 filas: releer el VUELO y responder 409
+   * `CONFLICTO_VERSION` con la fila viva (o 404 si ya no existe).
+   */
+  private async conflictoDeVuelo(id: string, enviado: string): Promise<never> {
+    const actual = await this.findById(id);
+    throw conflictoVersion({ entidad: 'vuelo', actual, enviado });
+  }
+
+  /** Igual que `conflictoDeVuelo` para un TRAMO (columnas públicas ESCALA_COLS). */
+  private async conflictoDeTramo(
+    legId: string,
+    enviado: string,
+  ): Promise<never> {
+    const { data, error } = await this.supabase.service
+      .from('escala')
+      .select(ESCALA_COLS)
+      .eq('id', legId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw escalaNoExiste(legId);
+    throw conflictoVersion({
+      entidad: 'tramo',
+      actual: data as Record<string, unknown>,
+      enviado,
+    });
+  }
+
+  /**
+   * DELTAS (B5): qué cambió desde `updated_since`. Un tramo modificado
+   * (taco, permiso, reagenda) también cuenta como cambio del vuelo — el
+   * `updated_at` de `vuelo` no se mueve solo por eso. `eliminados` sale de la
+   * bitácora forense `vuelo_eliminado` (índice idx_vuelo_eliminado_eliminado_at).
+   * `>=` (no `>`) a propósito: repetir un id es inocuo, omitirlo no.
+   */
+  private async deltaDesde(updatedSince: string): Promise<{
+    since: string;
+    vuelosConTramoCambiado: string[];
+    /**
+     * true = demasiados tramos tocados para filtrar por `id.in.(…)` (la
+     * URL de PostgREST reventaría, o la lectura se truncó en max-rows): el
+     * caller NO filtra y responde la lista completa — repetir vuelos es
+     * inocuo, omitirlos no.
+     */
+    desbordado: boolean;
+    eliminados: string[];
+  }> {
+    const t = instanteDe(updatedSince);
+    if (t == null) {
+      throw new BadRequestException(
+        'updated_since debe ser una fecha ISO válida.',
+      );
+    }
+    // Forma canónica (Z, milisegundos): viaja dentro de un `or=(...)`.
+    const since = new Date(t).toISOString();
+    const [tramos, borrados] = await Promise.all([
+      this.supabase.service
+        .from('escala')
+        .select('vuelo_id')
+        .gte('updated_at', since)
+        .limit(DELTA_MAX_FILAS),
+      this.supabase.service
+        .from('vuelo_eliminado')
+        .select('vuelo_id')
+        .gte('eliminado_at', since)
+        .limit(DELTA_MAX_FILAS),
+    ]);
+    if (tramos.error) throw new Error(tramos.error.message);
+    if (borrados.error) throw new Error(borrados.error.message);
+    const unicos = (filas: { vuelo_id?: unknown }[] | null) => [
+      ...new Set(
+        (filas ?? [])
+          .map((f) => f.vuelo_id)
+          .filter((v): v is string => typeof v === 'string' && v.length > 0),
+      ),
+    ];
+    const vuelosConTramoCambiado = unicos(tramos.data);
+    const desbordado =
+      (tramos.data ?? []).length >= DELTA_MAX_FILAS ||
+      vuelosConTramoCambiado.length > DELTA_MAX_IDS_TRAMO;
+    return {
+      since,
+      vuelosConTramoCambiado,
+      desbordado,
+      eliminados: unicos(borrados.data),
+    };
+  }
+
+  /**
+   * CANDADO DE SALDO (B3, 10-sep-2026): SOLO para capturas de la app (el
+   * DTO trae `client_request_id`; el panel puede sobrecobrar a propósito con
+   * aviso). Usa la FUENTE ÚNICA `cobrosEnUsd` (invariante 2) sobre los cobros
+   * ya registrados + el equivalente USD del nuevo; si rebasa el precio del
+   * vuelo por más de la TOLERANCIA → 409 `COBRO_EXCEDE_SALDO`. Tolerancia =
+   * max(1 USD, 5 % del precio): un cobro MXN de campo convertido con el TC
+   * del vuelo (o con un TC tecleado distinto) puede quedar unos pesos arriba
+   * sin ser un doble cobro; el candado busca la captura DUPLICADA (el mismo
+   * cobro dos veces), no centavos de redondeo. Exentos: vuelos sin precio
+   * (internos / $0). Un cobro MXN que no convierte (sin TC) no se puede
+   * comparar y pasa (queda expuesto en `sin_tc_*` como siempre).
+   */
+  private async assertCobroNoExcedeSaldo(
+    vueloId: string,
+    vuelo: { monto_total_usd?: unknown; tc_usd_mxn?: unknown },
+    dto: CreateCobroDto,
+    tcCobro: number | undefined,
+  ): Promise<void> {
+    const total = Number(vuelo.monto_total_usd) || 0;
+    if (total <= 0) return;
+    const monto = Number(dto.monto);
+    const montoUsd =
+      dto.moneda === 'USD'
+        ? monto
+        : tcCobro != null && tcCobro > 0
+          ? monto / tcCobro
+          : null;
+    if (montoUsd == null || !Number.isFinite(montoUsd)) return;
+    const { data: previos, error } = await this.supabase.service
+      .from('cobro_vuelo')
+      .select(COBRO_COLS)
+      .eq('vuelo_id', vueloId);
+    if (error) throw new Error(error.message);
+    const conv = cobrosEnUsd(
+      (previos ?? []) as CobroLike[],
+      Number(vuelo.tc_usd_mxn) || null,
+    );
+    // Tolerancia: 1 USD o 5 % del precio, lo que sea mayor (redondeos de TC
+    // de un cobro en pesos capturado en campo no son un doble cobro).
+    const tolerancia = Math.max(1, total * 0.05);
+    if (conv.total_usd + montoUsd > total + tolerancia) {
+      const saldo = r2(total - conv.total_usd);
+      throw new ConflictException({
+        message: `Este cobro rebasa lo que falta por cobrar del vuelo (saldo USD ${saldo.toLocaleString('en-US')}; el cobro equivale a USD ${r2(montoUsd).toLocaleString('en-US')}). Se conserva lo ya registrado; revisa los cobros del vuelo.`,
+        error: 'COBRO_EXCEDE_SALDO',
+        details: {
+          saldo_usd: saldo,
+          cobrado_usd: conv.total_usd,
+          monto_usd: r2(montoUsd),
+          monto_total_usd: r2(total),
+        },
+      });
+    }
+  }
 
   /**
    * Destinos del itinerario donde el piloto pernocta (tramos con
@@ -1543,6 +1784,31 @@ export class FlightsService {
       q = q.eq('es_externo', filters.es_externo);
     // Hijos de una cotización de GRUPO (4-sep-2026).
     if (filters.grupo_id) q = q.eq('grupo_id', filters.grupo_id);
+    // DELTAS (10-sep-2026, B5): solo lo modificado desde `updated_since`
+    // (vuelo o alguno de sus tramos) + `eliminados` en la respuesta. Sin el
+    // parámetro, respuesta de siempre. Varios `.or()` se combinan con AND en
+    // PostgREST (el filtro del piloto sigue aplicando).
+    const delta = filters.updated_since
+      ? await this.deltaDesde(filters.updated_since)
+      : null;
+    if (delta) {
+      if (delta.desbordado) {
+        // Demasiados tramos tocados para el `id.in.(…)`: la lista COMPLETA
+        // (paginada como siempre) es un superconjunto válido del delta.
+        this.logger.warn(
+          `GET /flights?updated_since=${delta.since}: ${delta.vuelosConTramoCambiado.length} vuelos con tramo tocado (tope ${DELTA_MAX_IDS_TRAMO}); se responde la lista completa sin filtro de delta para no omitir ninguno.`,
+        );
+      } else {
+        q = delta.vuelosConTramoCambiado.length
+          ? q.or(
+              `updated_at.gte.${delta.since},id.in.(${delta.vuelosConTramoCambiado.join(',')})`,
+            )
+          : q.gte('updated_at', delta.since);
+      }
+    }
+    const extrasDelta = delta
+      ? { updated_since: delta.since, eliminados: delta.eliminados }
+      : {};
     // Filtro de estado de COBRO (petición del cliente, jul 2026). PARCIAL y
     // SIN_COBROS necesitan saber qué vuelos tienen cobros: una consulta de
     // ids (la tabla de cobros es chica) antes de paginar.
@@ -1571,6 +1837,7 @@ export class FlightsService {
                 count: 0,
                 limit: filters.limit,
                 offset: filters.offset,
+                ...extrasDelta,
               };
             q = q.in('id', ids);
           } else {
@@ -1731,6 +1998,7 @@ export class FlightsService {
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
+      ...extrasDelta,
     };
   }
 
@@ -2483,8 +2751,14 @@ export class FlightsService {
   }
 
   async update(id: string, dto: UpdateFlightDto, updatedBy: string) {
-    if (Object.keys(dto).length === 0) return this.findById(id);
+    // `if_updated_at` (B1) es control de versión, NO una columna: se separa
+    // antes de armar el patch y de las decisiones "¿qué campos vienen?".
+    const { if_updated_at: ifUpdatedAt, ...campos } = dto;
+    if (Object.keys(campos).length === 0) return this.findById(id);
     const current = await this.findById(id);
+    // Pre-check contra la fila leída: un cliente con versión vieja recibe
+    // CONFLICTO_VERSION (con la fila viva) antes que cualquier otro rechazo.
+    assertVersion({ entidad: 'vuelo', enviado: ifUpdatedAt, actual: current });
     // El método de cobro pactado SOLO se edita aquí en vuelos externos sin
     // desglose canónico (los externos viejos nacían sin método y por eso no
     // salían en Facturas). En vuelos cotizados se cambia REVISANDO la
@@ -2508,7 +2782,9 @@ export class FlightsService {
     }
     // COMPLETADO sigue editable ÚNICAMENTE para poner el método de cobro (la
     // bandeja de Facturas incluye vuelos completados por cobrar).
-    const soloMetodoCobro = Object.keys(dto).every((k) => k === 'metodo_cobro');
+    const soloMetodoCobro = Object.keys(campos).every(
+      (k) => k === 'metodo_cobro',
+    );
     if (
       current.estado === 'CANCELADO' ||
       (current.estado === 'COMPLETADO' && !soloMetodoCobro)
@@ -2530,15 +2806,19 @@ export class FlightsService {
       await this.validateAssignTargets({ pilotoId: dto.piloto_id });
     }
 
-    const patch: Record<string, unknown> = { ...dto, updated_by: updatedBy };
+    const patch: Record<string, unknown> = { ...campos, updated_by: updatedBy };
     if (dto.fecha_vuelo) patch.fecha_vuelo = dto.fecha_vuelo.toISOString();
     if (dto.fecha_traslado_final) {
       patch.fecha_traslado_final = dto.fecha_traslado_final.toISOString();
     }
-    const { data, error } = await this.supabase.service
-      .from('vuelo')
-      .update(patch)
-      .eq('id', id)
+    // CAS (B1): con `if_updated_at` el UPDATE solo aplica si `updated_at`
+    // sigue siendo el que leyó el cliente (ventana ±1 ms); 0 filas = alguien
+    // lo cambió entre la lectura y el write → relectura + 409. Este es el
+    // PRIMER write del flujo: si rebota, nada más se tocó.
+    const { data, error } = await aplicarCas(
+      this.supabase.service.from('vuelo').update(patch).eq('id', id),
+      ifUpdatedAt,
+    )
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) {
@@ -2547,6 +2827,10 @@ export class FlightsService {
           `Referenced entity not found: ${error.message}`,
         );
       throw new Error(error.message);
+    }
+    if (!data) {
+      if (ifUpdatedAt) await this.conflictoDeVuelo(id, ifUpdatedAt);
+      throw vueloNoExiste(id);
     }
     // Espejo: al cambiar la fecha general (traslado inicial) desde "Editar",
     // el tramo 1 la refleja — es la salida real del itinerario (feedback de
@@ -2658,7 +2942,8 @@ export class FlightsService {
       .select(VUELO_COLS)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Flight ${id} not found`);
+    // 404 ESTRUCTURADO (B4): la app clasifica por code, no por texto.
+    if (!data) throw vueloNoExiste(id);
     // El botón a NIVEL VUELO habla de todo el vuelo: propaga a TODOS los
     // tramos vivos que requieren permiso (estado ≠ no_aplica), no solo a la
     // ida. Espejar solo orden=1 dejaba el regreso pendiente (misma pista) y
@@ -2950,6 +3235,15 @@ export class FlightsService {
 
   async assign(id: string, dto: AssignFlightDto, updatedBy: string) {
     const current = await this.findById(id);
+    // Control de versión (B1): flujo MULTI-PASO (apoyos → vuelo → tramos) —
+    // se valida UNA vez contra el updated_at del VUELO antes del primer
+    // write y no se vuelve a validar por tramo. Versión vieja → 409
+    // CONFLICTO_VERSION con la fila viva, antes que cualquier otro rechazo.
+    assertVersion({
+      entidad: 'vuelo',
+      enviado: dto.if_updated_at,
+      actual: current,
+    });
     // Operación independiente de lo administrativo: se asigna avión/piloto en
     // cualquier estado operable (incluida la RESERVA sin cotizar).
     if (current.estado === 'COMPLETADO' || current.estado === 'CANCELADO') {
@@ -3812,12 +4106,30 @@ export class FlightsService {
     const { data: escala, error: escErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, aeronave_id, piloto_id, copiloto_id, cancelada_at',
+        'id, vuelo_id, orden, aeronave_id, piloto_id, copiloto_id, cancelada_at, updated_at',
       )
       .eq('id', legId)
       .maybeSingle();
     if (escErr) throw new Error(escErr.message);
-    if (!escala) throw new NotFoundException(`Escala ${legId} not found`);
+    if (!escala) throw escalaNoExiste(legId);
+    // Control de versión (B1): multi-paso (apoyos del tramo → tramo → espejo
+    // al vuelo) — una sola validación contra el updated_at del TRAMO antes
+    // del primer write; en conflicto se responde con la fila pública completa.
+    if (dto.if_updated_at) {
+      const vivo = (escala as { updated_at?: unknown }).updated_at;
+      try {
+        assertVersion({
+          entidad: 'tramo',
+          enviado: dto.if_updated_at,
+          actual: { updated_at: vivo },
+        });
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          await this.conflictoDeTramo(legId, dto.if_updated_at);
+        }
+        throw err;
+      }
+    }
     if (escala.cancelada_at) {
       throw new ConflictException(
         'Este tramo está cancelado: restáuralo antes de asignar avión/piloto.',
@@ -4132,9 +4444,17 @@ export class FlightsService {
     // asignación y tacómetro se mantienen.
     const iniciables = ['RESERVA', 'SOLICITUD', 'COTIZADO', 'CONFIRMADO'];
     if (!iniciables.includes(current.estado as string)) {
-      throw new ConflictException(
-        `No se puede iniciar un vuelo en estado ${current.estado}.`,
-      );
+      // 409 ESTRUCTURADOS (B4, 10-sep-2026) con el `message` de siempre:
+      // VUELO_YA_INICIADO = idempotente para la app (ya está EN_VUELO);
+      // VUELO_NO_INICIABLE (COMPLETADO/CANCELADO) = fallo visible.
+      throw new ConflictException({
+        message: `No se puede iniciar un vuelo en estado ${current.estado as string}.`,
+        error:
+          current.estado === 'EN_VUELO'
+            ? 'VUELO_YA_INICIADO'
+            : 'VUELO_NO_INICIABLE',
+        details: { estado: current.estado, folio: current.folio },
+      });
     }
     if (!current.es_externo) {
       if (!current.aeronave_id) {
@@ -5940,10 +6260,19 @@ export class FlightsService {
 
   async listEscalas(vueloId: string) {
     const vuelo = await this.findById(vueloId);
+    // `client_request_id` del tramo (B2, aditivo) SOLO cuando la columna ya
+    // existe: la app deduplica su pendiente local contra el snapshot. Se
+    // castea a la literal de ESCALA_COLS para que el parser tipado de
+    // supabase-js conserve el tipo de fila (la columna extra vive en runtime).
+    const colsEscala = (
+      (await this.conClientRequestEscala())
+        ? `${ESCALA_COLS}, client_request_id`
+        : ESCALA_COLS
+    ) as typeof ESCALA_COLS;
     const [{ data, error }, apoyosRows] = await Promise.all([
       this.supabase.service
         .from('escala')
-        .select(ESCALA_COLS)
+        .select(colsEscala)
         .eq('vuelo_id', vueloId)
         .order('orden', { ascending: true }),
       // Tripulación por tramo (29-ago): apoyos del vuelo y de cada tramo.
@@ -5956,7 +6285,13 @@ export class FlightsService {
       }),
     ]);
     if (error) throw new Error(error.message);
-    const filas = data ?? [];
+    const filas = (data ?? []).map((e) => ({
+      ...e,
+      // null mientras la columna no exista (contrato estable para la app).
+      client_request_id:
+        ((e as unknown as { client_request_id?: string | null })
+          .client_request_id as string | null | undefined) ?? null,
+    }));
 
     // Nombres de quien capturó / corrigió cada lectura: el detalle del vuelo
     // muestra la MISMA procedencia que el tablero de tacómetros en vivo (la
@@ -6007,6 +6342,13 @@ export class FlightsService {
   }
 
   async createEscala(vueloId: string, dto: CreateEscalaDto, userId: string) {
+    // IDEMPOTENCIA (B2, 10-sep-2026): la rama de replay va ANTES de toda
+    // validación y NUNCA re-valida, re-inserta ni re-avisa a la tripulación.
+    const key = await this.llaveTramo(dto.client_request_id);
+    if (key) {
+      const ya = await this.escalaPorClientRequest(vueloId, key);
+      if (ya) return { ...ya, idempotente: true as const };
+    }
     const vuelo = await this.findById(vueloId);
     await this.assertTramoAgregable(vuelo, dto.motivo);
     const { data, error } = await this.supabase.service
@@ -6014,6 +6356,8 @@ export class FlightsService {
       .insert({
         vuelo_id: vueloId,
         orden: dto.orden,
+        // Llave SOLO cuando viaja y la columna existe (panel: insert idéntico).
+        ...(key ? { client_request_id: key } : {}),
         origen_iata: dto.origen_iata.toUpperCase(),
         destino_iata: dto.destino_iata.toUpperCase(),
         hora_salida: dto.hora_salida?.toISOString(),
@@ -6048,6 +6392,16 @@ export class FlightsService {
       .select(ESCALA_COLS)
       .maybeSingle();
     if (error) {
+      // Carrera con la misma llave (dos flushes): devolver el primero.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes('uq_escala_client_request')
+      ) {
+        const ya = await this.escalaPorClientRequest(vueloId, key);
+        if (ya) return { ...ya, idempotente: true as const };
+        throw clientRequestIdEnUso('tramo', key);
+      }
       if (error.code === '23505')
         throw new ConflictException(
           `Ya existe una escala con orden ${dto.orden}`,
@@ -6068,7 +6422,7 @@ export class FlightsService {
     // de reabrir para que el evento pinte el estado fresco.
     void this.calendar.syncFlight(vueloId);
     void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
-    return data!;
+    return { ...data!, idempotente: false as const };
   }
 
   /**
@@ -6194,6 +6548,13 @@ export class FlightsService {
     userId: string,
     current?: AuthenticatedUser,
   ) {
+    // IDEMPOTENCIA (B2): replay ANTES de validar; devuelve el tramo YA
+    // creado con su `orden` calculado, sin re-insertar ni re-avisar.
+    const key = await this.llaveTramo(dto.client_request_id);
+    if (key) {
+      const ya = await this.escalaPorClientRequest(vueloId, key);
+      if (ya) return { ...ya, idempotente: true as const };
+    }
     const vuelo = await this.findById(vueloId);
     await this.assertTramoAgregable(vuelo, dto.motivo, current);
     const { data: existentes } = await this.supabase.service
@@ -6224,13 +6585,26 @@ export class FlightsService {
         servicio_notas: dto.servicio_notas ?? null,
         fecha_salida_plan: dto.fecha_salida_plan?.toISOString() ?? null,
         notas: dto.notas ?? null,
+        // Llave SOLO cuando viaja y la columna existe (panel: insert idéntico).
+        ...(key ? { client_request_id: key } : {}),
         created_by: userId,
         updated_by: userId,
       })
       .select(ESCALA_COLS)
       .maybeSingle();
-    if (error)
+    if (error) {
+      // Carrera con la misma llave (dos flushes): devolver el primero.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes('uq_escala_client_request')
+      ) {
+        const ya = await this.escalaPorClientRequest(vueloId, key);
+        if (ya) return { ...ya, idempotente: true as const };
+        throw clientRequestIdEnUso('tramo', key);
+      }
       throw new Error(`Failed to insert operational leg: ${error.message}`);
+    }
     // Un ferry/parada técnica también puede tocar una pista con permiso.
     await this.airports.refreshPermisosDeVuelo(vueloId);
     await this.reabrirTrasTramoNuevo(
@@ -6241,7 +6615,7 @@ export class FlightsService {
     );
     void this.calendar.syncFlight(vueloId);
     void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
-    return data!;
+    return { ...data!, idempotente: false as const };
   }
 
   /** Tramo agregado a un vuelo (21-ago): la tripulación se entera. */
@@ -6261,13 +6635,21 @@ export class FlightsService {
   }
 
   async updateEscala(escalaId: string, dto: UpdateEscalaDto, userId: string) {
-    if (Object.keys(dto).length === 0) {
+    // `if_updated_at` (B1) y el `client_request_id` heredado del DTO de alta
+    // no son campos del tramo: se apartan de "¿qué campos vienen?".
+    const {
+      if_updated_at: ifUpdatedAt,
+      client_request_id: _llaveIgnorada,
+      ...campos
+    } = dto;
+    void _llaveIgnorada;
+    if (Object.keys(campos).length === 0) {
       const { data } = await this.supabase.service
         .from('escala')
         .select(ESCALA_COLS)
         .eq('id', escalaId)
         .maybeSingle();
-      if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+      if (!data) throw escalaNoExiste(escalaId);
       return data;
     }
     // Fila PREVIA (26-ago): el panel y la app en edición mandan TODO
@@ -6276,12 +6658,30 @@ export class FlightsService {
     const { data: prev, error: prevErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, vuelo:vuelo_id(estado)',
+        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, updated_at, vuelo:vuelo_id(estado)',
       )
       .eq('id', escalaId)
       .maybeSingle();
     if (prevErr) throw new Error(prevErr.message);
-    if (!prev) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (!prev) throw escalaNoExiste(escalaId);
+    // Pre-check de versión (B1) contra la fila leída (en conflicto se
+    // responde con la fila pública completa); el CAS del UPDATE cubre la
+    // carrera entre esta lectura y el write.
+    if (ifUpdatedAt) {
+      const vivo = (prev as { updated_at?: unknown }).updated_at;
+      try {
+        assertVersion({
+          entidad: 'tramo',
+          enviado: ifUpdatedAt,
+          actual: { updated_at: vivo },
+        });
+      } catch (err) {
+        if (err instanceof ConflictException) {
+          await this.conflictoDeTramo(escalaId, ifUpdatedAt);
+        }
+        throw err;
+      }
+    }
     const estadoVuelo =
       ((prev as { vuelo?: { estado?: string } }).vuelo?.estado as string) ??
       null;
@@ -6337,10 +6737,12 @@ export class FlightsService {
       if (dto.pasajeros_nombres === undefined) patch.pasajeros_nombres = [];
     }
 
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .update(patch)
-      .eq('id', escalaId)
+    // CAS (B1): PRIMER write del flujo; con `if_updated_at` solo aplica si el
+    // tramo sigue en la versión leída (±1 ms). 0 filas → relectura + 409.
+    const { data, error } = await aplicarCas(
+      this.supabase.service.from('escala').update(patch).eq('id', escalaId),
+      ifUpdatedAt,
+    )
       .select(ESCALA_COLS)
       .maybeSingle();
     if (error) {
@@ -6348,7 +6750,10 @@ export class FlightsService {
         throw new ConflictException('orden ya existe en este vuelo');
       throw new Error(error.message);
     }
-    if (!data) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (!data) {
+      if (ifUpdatedAt) await this.conflictoDeTramo(escalaId, ifUpdatedAt);
+      throw escalaNoExiste(escalaId);
+    }
     // Cambió la ruta del tramo: puede entrar (o salir) una pista con permiso.
     const rutaCambia =
       (dto.origen_iata !== undefined &&
@@ -9447,9 +9852,16 @@ export class FlightsService {
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
-    if (!row) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (!row) throw escalaNoExiste(escalaId);
+    // 409 ESTRUCTURADOS (B4, 10-sep-2026) con los `message` de siempre: la
+    // app decide por `code` (ya cancelado = idempotente; con taco / único =
+    // fallo visible que empuja a "cancelar el vuelo" o "editar tramo").
     if (row.cancelada_at) {
-      throw new ConflictException('Este tramo ya está cancelado.');
+      throw new ConflictException({
+        message: 'Este tramo ya está cancelado.',
+        error: 'ESCALA_YA_CANCELADA',
+        details: { escala_id: escalaId, cancelada_at: row.cancelada_at },
+      });
     }
     // Evidencia de que el tramo VOLÓ = su LLEGADA real (≠ DEDUCIDO) o
     // cualquier FOTO propia. La SALIDA nunca cuenta como evidencia, de ningún
@@ -9460,9 +9872,17 @@ export class FlightsService {
     const llegadaReal =
       row.taco_llegada !== null && row.taco_llegada_origen !== 'DEDUCIDO';
     if (llegadaReal || row.foto_taco_salida_url || row.foto_taco_llegada_url) {
-      throw new ConflictException(
-        'El tramo tiene llegada o fotos reales de tacómetro: sí voló. Corrige la ruta con "Editar tramo" o cancela el vuelo completo.',
-      );
+      throw new ConflictException({
+        message:
+          'El tramo tiene llegada o fotos reales de tacómetro: sí voló. Corrige la ruta con "Editar tramo" o cancela el vuelo completo.',
+        error: 'ESCALA_CON_TACO',
+        details: {
+          escala_id: escalaId,
+          taco_llegada: row.taco_llegada,
+          foto_taco_salida: !!row.foto_taco_salida_url,
+          foto_taco_llegada: !!row.foto_taco_llegada_url,
+        },
+      });
     }
     // Nunca dejar el vuelo sin tramos activos: para eso está cancelar el vuelo.
     const { count: activos, error: cntErr } = await this.supabase.service
@@ -9473,9 +9893,12 @@ export class FlightsService {
       .neq('id', escalaId);
     if (cntErr) throw new Error(cntErr.message);
     if ((activos ?? 0) === 0) {
-      throw new ConflictException(
-        'Es el único tramo activo del vuelo: cancela el vuelo completo, no el tramo.',
-      );
+      throw new ConflictException({
+        message:
+          'Es el único tramo activo del vuelo: cancela el vuelo completo, no el tramo.',
+        error: 'ESCALA_UNICA',
+        details: { escala_id: escalaId, vuelo_id: row.vuelo_id },
+      });
     }
 
     const { data, error } = await this.supabase.service
@@ -9790,11 +10213,19 @@ export class FlightsService {
       .eq('id', escalaId)
       .maybeSingle();
     if (readErr) throw new Error(readErr.message);
-    if (!row) throw new NotFoundException(`Escala ${escalaId} not found`);
+    if (!row) throw escalaNoExiste(escalaId);
     if (row.taco_salida !== null || row.taco_llegada !== null) {
-      throw new ConflictException(
-        'No se puede borrar una escala con tacómetro capturado (auditoría)',
-      );
+      // 409 ESTRUCTURADO (B4): mismo `message`; la app decide por `code`.
+      throw new ConflictException({
+        message:
+          'No se puede borrar una escala con tacómetro capturado (auditoría)',
+        error: 'ESCALA_CON_TACO',
+        details: {
+          escala_id: escalaId,
+          taco_salida: row.taco_salida,
+          taco_llegada: row.taco_llegada,
+        },
+      });
     }
     const { error } = await this.supabase.service
       .from('escala')
@@ -9975,6 +10406,24 @@ export class FlightsService {
     sobre?: CobroParteDeSobreOpts,
   ) {
     const vuelo = await this.findById(vueloId);
+    // REPLAY del outbox (10-sep-2026 · B3): la rama idempotente va ANTES de
+    // todo candado (rol, método, voucher, saldo) — el cobro YA está
+    // registrado y un rechazo aquí dejaría al piloto con un «fallido» falso
+    // (p. ej. el vuelo se canceló o cambió de método después de cobrar).
+    // Acotado al vuelo: una llave de otro vuelo nunca devuelve un cobro
+    // ajeno (choca en 23505 → 409 abajo). Sin candado de saldo ni aviso.
+    if (dto.client_request_id && !sobre) {
+      const ya = await this.cobroPorClientRequest(
+        vueloId,
+        dto.client_request_id,
+      );
+      if (ya) {
+        this.logger.log(
+          `Cobro idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el cobro existente ${ya.id as string} (sin duplicar).`,
+        );
+        return { ...ya, idempotente: true as const };
+      }
+    }
     // REGLA (cliente, 28-ago-2026): un vuelo CANCELADO puede tener cobros
     // reales — cargo por cancelación o anticipo retenido que NO se reembolsa.
     // La oficina (ADMIN/COORDINADOR/FACTURACION) SÍ los registra aquí y ese
@@ -10057,6 +10506,14 @@ export class FlightsService {
         'La comisión del banco no puede ser mayor o igual al monto del cobro.',
       );
     }
+    // CAPTURAS DE LA APP (llave de idempotencia, 10-sep-2026 · B3): candado
+    // de SOBRE-COBRO con la fuente única cobrosEnUsd → 409 COBRO_EXCEDE_SALDO
+    // (el panel, sin llave, puede sobrecobrar a propósito con aviso). El
+    // replay ya salió arriba (antes de los candados). Las partes de un sobre
+    // de grupo no pasan aquí.
+    if (dto.client_request_id && !sobre) {
+      await this.assertCobroNoExcedeSaldo(vueloId, vuelo, dto, tcCobro);
+    }
     // CANDADO DE VENTANA (29-ago, mientras vivan APKs sin llave de
     // idempotencia): un cobro IDÉNTICO (vuelo + monto + moneda + método) del
     // que ya existe uno creado hace < 90 s es casi seguro el reintento del
@@ -10129,17 +10586,19 @@ export class FlightsService {
         dto.client_request_id &&
         error.message.includes('uq_cobro_vuelo_client_request')
       ) {
-        const { data: existente, error: exErr } = await this.supabase.service
-          .from('cobro_vuelo')
-          .select(COBRO_COLS)
-          .eq('client_request_id', dto.client_request_id)
-          .maybeSingle();
-        if (!exErr && existente) {
+        const existente = await this.cobroPorClientRequest(
+          vueloId,
+          dto.client_request_id,
+        );
+        if (existente) {
           this.logger.log(
             `Cobro idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el cobro existente ${existente.id as string} (sin duplicar).`,
           );
-          return existente;
+          return { ...existente, idempotente: true as const };
         }
+        // La llave pertenece a un cobro de OTRO vuelo: ni la fila ajena ni
+        // un 500 (el outbox lo reintentaría para siempre).
+        throw clientRequestIdEnUso('cobro', dto.client_request_id);
       }
       throw new Error(error.message);
     }

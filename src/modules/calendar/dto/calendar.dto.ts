@@ -4,6 +4,7 @@ import {
   Allow,
   IsBoolean,
   IsDate,
+  IsISO8601,
   IsOptional,
   IsString,
   IsUUID,
@@ -62,6 +63,15 @@ export class CalendarRangeQuery {
   @Transform(boolQuery)
   @IsBoolean()
   incluir_mantenimientos?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Deltas al reconectar (10-sep-2026): solo entradas cuyo `updated_at` (vuelo o alguno de sus tramos, descanso, evento, mantenimiento) sea ≥ este instante ISO, más `eliminados` = ids de vuelos borrados desde entonces (vuelo_eliminado). Sin el parámetro, respuesta de siempre.',
+  })
+  @IsOptional()
+  @Type(() => Date)
+  @IsDate()
+  updated_since?: Date;
 }
 
 /**
@@ -128,7 +138,17 @@ export class CreateEventoFlotaDto {
  * responsable avisa al nuevo y al anterior; cambios de fecha/avión/título/
  * notas avisan 'evento_actualizado' al responsable vigente.
  */
-export class UpdateEventoFlotaDto extends PartialType(CreateEventoFlotaDto) {}
+export class UpdateEventoFlotaDto extends PartialType(CreateEventoFlotaDto) {
+  @ApiPropertyOptional({
+    description:
+      'Control de versión (doc 6.1, gana el servidor + aviso): `updated_at` del evento tal como lo leyó el cliente (ISO). ' +
+      'Si alguien lo modificó después, el PATCH no aplica y responde 409 CONFLICTO_VERSION con `details.actual`. ' +
+      'Omitido = comportamiento de siempre. Mientras `evento_flota` no tenga trigger de updated_at (migración 20260910000001) se ignora.',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  if_updated_at?: string;
+}
 
 /** Rango de GET /v1/me/eventos: días YYYY-MM-DD Cancún (default hoy-7 → hoy+90). */
 export class MisEventosQuery {

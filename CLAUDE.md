@@ -323,6 +323,112 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       y `VUELO_COMPLETADO` (fallo visible). Ningún consumidor decide por
       `message`: siempre por `code`.
 
+13. **Ediciones sin internet: control de versión, idempotencia de altas y
+    deltas (10-sep-2026, Lote 2 · Ola B; doc funcional 6.1 «conflicto ⇒
+    gana el servidor y se avisa»).** Todo es OPCIONAL y retrocompatible:
+    sin los campos nuevos, cada ruta se comporta como siempre (panel y APK
+    vieja intactos).
+    - **`if_updated_at` → 409 `CONFLICTO_VERSION`** (helper único
+      `src/common/version-cas.util.ts`: `assertVersion`, `aplicarCas`,
+      `conflictoVersion`). Lo aceptan `PATCH /flights/:id`, `POST
+      /flights/:id/assign`, `PATCH /flights/legs/:legId` y `POST
+      /flights/:id/legs/:legId/assign` (los demás módulos adoptan el MISMO
+      helper). Semántica: el cliente manda el `updated_at` que leyó; se
+      compara COMO INSTANTES con tolerancia de 1 ms (Postgres guarda
+      microsegundos; el cliente reserializa a ms) y el UPDATE de un solo
+      paso lleva CAS en BD (ventana `updated_at ∈ [t−1 ms, t+1 ms]`, mismo
+      patrón que `complete()`); 0 filas ⇒ relectura y 409 estructurado
+      `{ message: 'Alguien modificó este <vuelo|tramo|…> después de tu
+      captura; se conserva la versión del servidor.', error:
+      'CONFLICTO_VERSION', details: { actual: <fila pública>,
+      updated_at_enviado, updated_at_actual } }`. Los flujos MULTI-PASO
+      (`assign`, `assignEscala`) validan UNA vez contra la fila leída antes
+      del primer write y no re-validan por paso. `if_updated_at` NUNCA
+      entra al patch (se destructura antes) ni cuenta como "campo
+      enviado". Una tabla sin `updated_at` (trigger pendiente) ⇒
+      `assertVersion` devuelve `'omitido'` = comportamiento actual.
+    - **Altas idempotentes de tramos** (`POST :id/legs`, `POST
+      :id/operational-legs`) por `client_request_id` (índice único parcial
+      `uq_escala_client_request`, migración `20260910000002`, columna
+      OPCIONAL vía `ColumnaOpcional` hasta aplicarla: sin columna la llave
+      se ignora y el insert es idéntico al de siempre). La rama idempotente
+      (pre-check por llave acotado al vuelo, o 23505) va ANTES de toda
+      validación y NUNCA re-valida, re-inserta, reabre ni re-notifica
+      (`notificarTramoNuevo`); responde la fila YA creada con `idempotente:
+      true` (en el operativo, con su `orden` calculado); llave reutilizada
+      en OTRO vuelo ⇒ 409 `CLIENT_REQUEST_ID_EN_USO` (jamás 500; helper
+      único `src/common/client-request-id.util.ts`). REGLA de toda alta
+      idempotente: la relectura del replay (pre-check y 23505) se ACOTA al
+      padre de la ruta (vuelo del tramo/cobro, avión del squawk, producto
+      del movimiento) — jamás se devuelve una fila ajena. El snapshot
+      expone `escala.client_request_id` (null sin columna).
+    - **Cobros de la app**: `createCobro` con `client_request_id` (y sin
+      sobre) hace pre-check por llave ANTES de todo candado (rol, método,
+      voucher, saldo — el cobro ya existe: un 409 tardío sería un «fallido»
+      falso en la app), acotado al vuelo (replay ⇒ el cobro existente,
+      `idempotente: true`, sin candados ni aviso; 23505 con llave de OTRO
+      vuelo ⇒ 409 `CLIENT_REQUEST_ID_EN_USO`) y luego el candado de
+      SOBRE-COBRO con la fuente única `cobrosEnUsd`: `cobrado + monto_usd >
+      monto_total_usd + max(1 USD, 5 %)` ⇒ 409 `COBRO_EXCEDE_SALDO` + `details {
+      saldo_usd, cobrado_usd, monto_usd, monto_total_usd }`. Exentos: vuelos
+      sin precio (internos/$0) y cobros MXN que no convierten. SIN llave
+      (panel) no hay candado: la oficina puede sobrecobrar a propósito.
+    - **Codes en bajas/transiciones** (message intacto): `deleteEscala` 409
+      `ESCALA_CON_TACO`; `cancelEscala` 409 `ESCALA_YA_CANCELADA`
+      (idempotente) / `ESCALA_CON_TACO` / `ESCALA_UNICA`; `start()` 409
+      `VUELO_YA_INICIADO` (idempotente) / `VUELO_NO_INICIABLE`; 404
+      `ESCALA_NO_EXISTE` (`escalaNoExiste()`) y `VUELO_NO_EXISTE` también
+      en `updatePermiso`.
+    - **Deltas**: `GET /flights?updated_since=ISO` devuelve solo los vuelos
+      con `updated_at >= since` O con algún tramo con `escala.updated_at >=
+      since` (un taco/permiso/reagenda no mueve el `updated_at` del vuelo)
+      y añade `updated_since` (forma canónica) + `eliminados: [vuelo_id]`
+      desde `vuelo_eliminado.eliminado_at >= since` (índice
+      `idx_vuelo_eliminado_eliminado_at`). `>=` a propósito: repetir es
+      inocuo, omitir no. TOPE: si más de 150 vuelos tienen tramo tocado (o
+      la lectura de tramos se trunca en max-rows = 1000) el `id.in.(…)`
+      reventaría la URL de PostgREST: se responde la lista COMPLETA sin
+      filtro de delta (superconjunto válido) con `updated_since` +
+      `eliminados` y un warn. Sin el parámetro, respuesta idéntica a la
+      actual.
+      `GET /calendar?updated_since` sigue el mismo contrato (módulo
+      calendar): filtra vuelos (vuelo o tramo), descansos, eventos y
+      mantenimientos por su `updated_at` y añade `updated_since` +
+      `eliminados`.
+    - **Gastos, eventos, mantenimiento y squawks (misma ola)**:
+      `if_updated_at` con `aplicarCas` en `PATCH /expenses/:id` (entidad
+      «gasto»), `PATCH /calendar/eventos/:id` («evento»), `PATCH
+      engineering/maintenance/:mid` («mantenimiento») y `PATCH
+      /aircraft/squawks/:id` («reporte»). `gasto`, `aeronave_discrepancia`
+      e `inventario_movimiento` ya tenían `tg_set_updated_at`;
+      `mantenimiento`, `piloto_descanso` y `evento_flota` lo reciben en la
+      migración `20260910000001` junto con la función sonda
+      `updated_at_trigger_activo(p_tabla)`: mientras no exista
+      (`src/common/updated-at-trigger.util.ts`, rpc 1 vez, warn 1 vez,
+      re-sondea ≤ 10 min) el CAS de evento/mantenimiento se SALTA
+      (comportamiento de hoy). `MANT_COLS`/`EventoMe`/squawks exponen
+      `updated_at`; el patch de mantenimiento y evento lo sella a mano.
+      Altas idempotentes por `client_request_id` (columna OPCIONAL vía
+      `columnaOpcional`, migración `20260910000002`): `POST
+      /aircraft/:id/squawks` (`uq_discrepancia_client_request`) y `POST
+      /inventory/items/:id/movimientos` (`uq_inv_movimiento_client_request`;
+      el replay devuelve el movimiento, su `gasto_generado` BODEGA ya
+      ligado por `inventario_movimiento_id` y el stock actual, SIN volver
+      a mover stock ni dinero; el pre-check va ANTES de toda validación
+      porque el stock ya bajó con el primer intento). Ventana semanal
+      JUSTA de gastos (B3): `UpdateGastoDto.capturado_en` y `DELETE
+      /expenses/:id?capturado_en=` son el sello de la CORRECCIÓN/BAJA
+      (`ventana-correccion.util`: `resolverCapturadoEn` estricto, acotado a
+      ahora); `assertOwnEnVentana` evalúa la semana contra ese día Cancún y
+      la línea «[Corrección|Baja capturada en la app el … · recibida el …]»
+      va a `notas` (el trigger `tg_gasto_bitacora` la registra); la
+      columna `capturado_en` y `client_request_id` del gasto NUNCA se
+      reescriben en el PATCH. Codes (message intacto): `GASTO_AJENO`
+      (403), `GASTO_CONCILIADO`, `GASTO_EN_REPOSICION`,
+      `GASTO_FUERA_DE_VENTANA` (403) en `assertOwnEnVentana`;
+      `GASTO_CONCILIADO`, `GASTO_DE_COMPRA` (+`details.compra_id/folio`),
+      `GASTO_REPARTIDO` en `remove`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

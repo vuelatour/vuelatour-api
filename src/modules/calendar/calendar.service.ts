@@ -14,6 +14,8 @@ import {
   clientRequestIdEvento,
 } from '../../common/columna-opcional.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import { triggerUpdatedAt } from '../../common/updated-at-trigger.util';
+import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import { PushService } from '../realtime/push.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from './calendar-sync.service';
@@ -91,6 +93,15 @@ export class CalendarService {
     return eventoFlotaCols(await this.conClientRequestEvento());
   }
 
+  // ===== Trigger de updated_at (migración 20260910000001) =====
+  // `evento_flota` no tenía tg_set_updated_at: mientras no exista, el CAS de
+  // `if_updated_at` se SALTA (comportamiento de hoy, warn una vez) — el
+  // service sigue sellando updated_at a mano, así que el valor que viaja en
+  // EventoMe/GET /calendar sí se mueve con cada edición del API.
+  private conTriggerEvento(): Promise<boolean> {
+    return triggerUpdatedAt(this.supabase.service, 'evento_flota').disponible();
+  }
+
   async listEvents(q: CalendarRangeQuery) {
     const now = new Date();
     const from = q.from ?? now;
@@ -104,6 +115,23 @@ export class CalendarService {
         59,
         59,
       );
+    // Deltas al reconectar (10-sep-2026, B5): con `updated_since` solo salen
+    // las entradas tocadas desde ese instante (vuelo o alguno de sus tramos,
+    // descanso, evento, mantenimiento) + `eliminados` (vuelo_eliminado).
+    // Sin el parámetro, respuesta idéntica a la de siempre.
+    const sinceMs =
+      q.updated_since instanceof Date && !Number.isNaN(q.updated_since.getTime())
+        ? q.updated_since.getTime()
+        : null;
+    const tocadoDesde = (...isos: Array<string | null | undefined>): boolean => {
+      if (sinceMs == null) return true;
+      for (const iso of isos) {
+        if (!iso) continue;
+        const t = Date.parse(iso);
+        if (Number.isFinite(t) && t >= sinceMs) return true;
+      }
+      return false;
+    };
 
     let query = this.supabase.service
       .from('vuelo')
@@ -112,7 +140,8 @@ export class CalendarService {
         // grupo_* (4-sep-2026, aditivo): banda "G-12 · 3/7" del calendario.
         // pasajeros_nombres/notas/notas_internas/motivo_cancelacion, razón social
         // y modelo (5-sep-2026, aditivo): buscador del calendario de la app.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        // updated_at del vuelo y de cada tramo (10-sep-2026): filtro de deltas.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, updated_at, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, updated_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -173,8 +202,23 @@ export class CalendarService {
     }
     if (q.solo_externos) query = query.eq('es_externo', true);
 
-    const { data, error } = await query;
+    const { data: dataCruda, error } = await query;
     if (error) throw new Error(error.message);
+    // Delta: un vuelo cuenta como "tocado" si cambió él o cualquiera de sus
+    // tramos (asignar por tramo solo mueve escala.updated_at).
+    const data =
+      sinceMs == null
+        ? dataCruda
+        : (dataCruda ?? []).filter((r) => {
+            const v = r as {
+              updated_at?: string | null;
+              escalas?: Array<{ updated_at?: string | null }> | null;
+            };
+            return tocadoDesde(
+              v.updated_at,
+              ...(v.escalas ?? []).map((e) => e.updated_at),
+            );
+          });
 
     // Grupo (4-sep-2026): aviones VIVOS por grupo presente en el rango, en
     // UNA consulta — el evento pinta "avión k de N" (cancelados no cuentan).
@@ -552,11 +596,12 @@ export class CalendarService {
       fecha_fin: string;
       motivo: string | null;
       client_request_id?: string | null;
+      updated_at?: string | null;
       piloto?: { nombre?: string | null } | { nombre?: string | null }[] | null;
     }
     // `client_request_id` solo si la columna ya existe (migración pendiente).
     const descansoCols = [
-      'id, piloto_id, fecha_inicio, fecha_fin, motivo',
+      'id, piloto_id, fecha_inicio, fecha_fin, motivo, updated_at',
       (await this.conClientRequestDescanso()) ? 'client_request_id' : null,
       'piloto:usuario!piloto_id(nombre)',
     ]
@@ -570,7 +615,9 @@ export class CalendarService {
     if (q.piloto_id) dq = dq.eq('piloto_id', q.piloto_id);
     // Como siempre: un error aquí no tumba el calendario (sin descansos).
     const { data: descansosRaw } = q.solo_externos ? { data: [] } : await dq;
-    const descansos = (descansosRaw ?? []) as unknown as DescansoRow[];
+    const descansos = (
+      (descansosRaw ?? []) as unknown as DescansoRow[]
+    ).filter((d) => tocadoDesde(d.updated_at));
     for (const d of descansos) {
       const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
       const nombre = piloto?.nombre ?? 'Piloto';
@@ -621,9 +668,9 @@ export class CalendarService {
       ? { data: [], error: null }
       : await eq;
     if (evErr) throw new Error(evErr.message);
-    const eventosMap = (
-      (eventosFlota ?? []) as unknown as EventoFlotaRow[]
-    ).map(mapEventoRow);
+    const eventosMap = ((eventosFlota ?? []) as unknown as EventoFlotaRow[])
+      .map(mapEventoRow)
+      .filter((ev) => tocadoDesde(ev.updated_at));
     // Entregabilidad del aviso (3-sep): la oficina ve si el responsable tiene
     // la app registrada — UNA consulta agrupada, no N+1.
     const conteoPush = await this.push.contarDispositivosPorUsuario(
@@ -685,7 +732,7 @@ export class CalendarService {
       let mq = this.supabase.service
         .from('mantenimiento')
         .select(
-          'id, descripcion, estado, fecha_programada, horas_programadas, etapa_intervalo_hr, aeronave_id, aeronave:aeronave_id(matricula, color_calendario)',
+          'id, descripcion, estado, fecha_programada, horas_programadas, etapa_intervalo_hr, aeronave_id, updated_at, aeronave:aeronave_id(matricula, color_calendario)',
         )
         .neq('estado', 'COMPLETADO')
         .not('fecha_programada', 'is', null)
@@ -701,12 +748,15 @@ export class CalendarService {
         estado: string | null;
         fecha_programada: string;
         aeronave_id: string | null;
+        updated_at?: string | null;
         aeronave:
           | { matricula?: string | null }
           | Array<{ matricula?: string | null }>
           | null;
       }
-      for (const m of (mants ?? []) as unknown as MantRow[]) {
+      for (const m of ((mants ?? []) as unknown as MantRow[]).filter((m) =>
+        tocadoDesde(m.updated_at),
+      )) {
         const aero = Array.isArray(m.aeronave)
           ? (m.aeronave[0] ?? null)
           : m.aeronave;
@@ -744,11 +794,38 @@ export class CalendarService {
       ),
     );
 
+    if (sinceMs == null) {
+      return {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        count: events.length,
+        events,
+      };
+    }
+    // Vuelos borrados desde `since` (otro usuario los eliminó): la app los
+    // retira de su copia. Un error aquí SÍ tumba la respuesta: un delta que
+    // calla los borrados deja vuelos fantasma en el teléfono; la app cae a
+    // la recarga completa.
+    const updatedSince = new Date(sinceMs).toISOString();
+    const { data: borrados, error: bErr } = await this.supabase.service
+      .from('vuelo_eliminado')
+      .select('vuelo_id')
+      .gte('eliminado_at', updatedSince);
+    if (bErr) throw new Error(bErr.message);
+    const eliminados = [
+      ...new Set(
+        (borrados ?? [])
+          .map((b) => (b as { vuelo_id?: string | null }).vuelo_id)
+          .filter((x): x is string => !!x),
+      ),
+    ];
     return {
       from: from.toISOString(),
       to: to.toISOString(),
       count: events.length,
       events,
+      updated_since: updatedSince,
+      eliminados,
     };
   }
 
@@ -955,6 +1032,12 @@ export class CalendarService {
   async updateEvento(id: string, dto: UpdateEventoFlotaDto, userId: string) {
     const prev = await this.cargarEvento(id);
     if (!prev) throw new NotFoundException(`Evento ${id} not found`);
+    // Control de versión (10-sep-2026, B1): solo cuenta si la tabla ya mueve
+    // updated_at por trigger; si no, comportamiento de hoy (último gana).
+    const ifUpdatedAt =
+      dto.if_updated_at && (await this.conTriggerEvento())
+        ? dto.if_updated_at
+        : null;
 
     const fecha = dto.fecha instanceof Date ? dto.fecha : new Date(prev.fecha);
     if (Number.isNaN(fecha.getTime())) {
@@ -989,10 +1072,10 @@ export class CalendarService {
       patch.responsable_id = dto.responsable_id ?? null;
     if (dto.notas !== undefined) patch.notas = dto.notas?.trim() || null;
 
-    const { data, error } = await this.supabase.service
-      .from('evento_flota')
-      .update(patch)
-      .eq('id', id)
+    const { data, error } = await aplicarCas(
+      this.supabase.service.from('evento_flota').update(patch).eq('id', id),
+      ifUpdatedAt,
+    )
       .select(await this.eventoCols())
       .maybeSingle();
     if (error) {
@@ -1002,7 +1085,18 @@ export class CalendarService {
         );
       throw new Error(error.message);
     }
-    if (!data) throw new NotFoundException(`Evento ${id} not found`);
+    if (!data) {
+      if (!ifUpdatedAt) throw new NotFoundException(`Evento ${id} not found`);
+      // 0 filas con CAS: alguien lo movió después de la lectura del cliente
+      // (o lo borró). Gana el servidor: se devuelve la versión viva.
+      const vivo = await this.cargarEvento(id);
+      if (!vivo) throw new NotFoundException(`Evento ${id} not found`);
+      throw conflictoVersion({
+        entidad: 'evento',
+        actual: aEventoMe(vivo) as unknown as Record<string, unknown>,
+        enviado: ifUpdatedAt,
+      });
+    }
     const next = mapEventoRow(data as unknown as EventoFlotaRow);
 
     let aviso: AvisoEvento | null = null;

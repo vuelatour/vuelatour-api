@@ -11,6 +11,9 @@ import {
   horasVivasComponente,
   tiempoPlaneador,
 } from '../../common/horas-componente.util';
+import { columnaOpcional } from '../../common/columna-opcional.util';
+import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
+import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 import {
   construirTiras,
   resolverTirasSolicitadas,
@@ -46,6 +49,9 @@ const SEGURO_COLS =
 
 const DISCREPANCIA_COLS =
   'id, aeronave_id, vuelo_id, descripcion, severidad, estado, reportado_por, fecha_reporte, resolucion, fecha_resolucion, resuelto_por, notas, created_at, updated_at';
+
+/** Índice único parcial de `aeronave_discrepancia.client_request_id`. */
+const UQ_DISCREPANCIA_CLIENT_REQUEST = 'uq_discrepancia_client_request';
 
 const IMAGEN_COLS =
   'id, aeronave_id, storage_path, url, alt_text, orden, es_principal, etiqueta, size_bytes, content_type, created_at, updated_at';
@@ -1796,22 +1802,82 @@ export class AircraftService {
 
   // ============ Discrepancias (squawks) ============
 
+  // Columna OPCIONAL `client_request_id` (migración 20260910000002): mientras
+  // no exista, los selects la omiten (la respuesta trae null) y el alta no es
+  // idempotente — comportamiento de hoy. Se activa sola en ≤ 10 min.
+  private conClientRequestDiscrepancia(): Promise<boolean> {
+    return columnaOpcional(
+      this.supabase.service,
+      'aeronave_discrepancia',
+      'client_request_id',
+      {
+        mensajeAusente:
+          'Columna aeronave_discrepancia.client_request_id no existe todavía: squawks sin idempotencia hasta aplicar la migración 20260910000002',
+      },
+    ).disponible();
+  }
+
+  private async discrepanciaCols(): Promise<string> {
+    return (await this.conClientRequestDiscrepancia())
+      ? `${DISCREPANCIA_COLS}, client_request_id`
+      : DISCREPANCIA_COLS;
+  }
+
+  /**
+   * Squawk ya creado con esa llave de idempotencia EN ESE AVIÓN (o null).
+   * Acotado al avión: una llave reutilizada en otro avión nunca devuelve un
+   * reporte ajeno (el insert choca en 23505 → 409 CLIENT_REQUEST_ID_EN_USO).
+   */
+  private async discrepanciaPorClientRequest(
+    aeronaveId: string,
+    key: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('aeronave_discrepancia')
+      .select(await this.discrepanciaCols())
+      .eq('client_request_id', key)
+      .eq('aeronave_id', aeronaveId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as Record<string, unknown> | null) ?? null;
+  }
+
   async listDiscrepancias(aeronaveId: string) {
     await this.findById(aeronaveId);
     const { data, error } = await this.supabase.service
       .from('aeronave_discrepancia')
-      .select(DISCREPANCIA_COLS)
+      .select(await this.discrepanciaCols())
       .eq('aeronave_id', aeronaveId)
       .order('fecha_reporte', { ascending: false });
     if (error) throw new Error(error.message);
-    return data ?? [];
+    return ((data ?? []) as unknown as Array<Record<string, unknown>>).map(
+      (d) => ({
+        ...d,
+        client_request_id: (d.client_request_id as string | null) ?? null,
+      }),
+    );
   }
 
+  /**
+   * Alta de un squawk. IDEMPOTENTE por `client_request_id` (10-sep-2026,
+   * B2): la misma llave devuelve el reporte YA creado (200,
+   * `idempotente:true`) sin re-validar ni re-insertar (pre-check por llave o
+   * 23505 sobre uq_discrepancia_client_request). No avisa a nadie en ningún
+   * camino (los avisos de squawk viven en la asignación de vuelos).
+   */
   async createDiscrepancia(
     aeronaveId: string,
     dto: CreateDiscrepanciaDto,
     userId: string,
   ) {
+    const key =
+      dto.client_request_id && (await this.conClientRequestDiscrepancia())
+        ? dto.client_request_id
+        : null;
+    if (key) {
+      const ya = await this.discrepanciaPorClientRequest(aeronaveId, key);
+      if (ya) return this.discrepanciaIdempotente(ya, key);
+    }
     await this.findById(aeronaveId);
     const estado = dto.estado ?? 'ABIERTA';
     const { data, error } = await this.supabase.service
@@ -1831,20 +1897,55 @@ export class AircraftService {
             : null,
         resuelto_por: estado === 'RESUELTA' ? userId : null,
         notas: dto.notas ?? null,
+        // Llave SOLO cuando viaja y la columna existe (insert de siempre si no).
+        ...(key ? { client_request_id: key } : {}),
         created_by: userId,
         updated_by: userId,
       })
-      .select(DISCREPANCIA_COLS)
+      .select(await this.discrepanciaCols())
       .maybeSingle();
-    if (error) throw new Error(error.message);
-    return data;
+    if (error) {
+      // Carrera con la misma llave (dos flushes del outbox): el primero gana.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes(UQ_DISCREPANCIA_CLIENT_REQUEST)
+      ) {
+        const ya = await this.discrepanciaPorClientRequest(aeronaveId, key);
+        if (ya) return this.discrepanciaIdempotente(ya, key);
+        // La llave pertenece a un reporte de OTRO avión: ni la fila ajena
+        // ni un 500 (el outbox lo reintentaría para siempre).
+        throw clientRequestIdEnUso('reporte', key);
+      }
+      throw new Error(error.message);
+    }
+    return {
+      ...(data as unknown as Record<string, unknown>),
+      client_request_id: key,
+      idempotente: false as const,
+    };
   }
 
+  /** Replay del alta: misma fila, sin re-insertar ni avisar (200). */
+  private discrepanciaIdempotente(fila: Record<string, unknown>, key: string) {
+    this.logger.log(
+      `Squawk idempotente: reintento con client_request_id ${key} → se devuelve el existente ${String(fila.id)} (sin duplicar).`,
+    );
+    return { ...fila, client_request_id: key, idempotente: true as const };
+  }
+
+  /**
+   * Edición/resolución. `if_updated_at` (10-sep-2026, B1): CAS sobre
+   * updated_at (la tabla SÍ tiene trigger) → 409 CONFLICTO_VERSION con la
+   * fila viva si alguien lo modificó después de la lectura del cliente.
+   * `client_request_id` del DTO se IGNORA (se fija solo al crear).
+   */
   async updateDiscrepancia(
     id: string,
     dto: UpdateDiscrepanciaDto,
     userId: string,
   ) {
+    const ifUpdatedAt = dto.if_updated_at ?? null;
     const patch: Record<string, unknown> = { updated_by: userId };
     if (dto.descripcion !== undefined) patch.descripcion = dto.descripcion;
     if (dto.severidad !== undefined) patch.severidad = dto.severidad;
@@ -1865,14 +1966,33 @@ export class AircraftService {
     if (dto.fecha_resolucion !== undefined)
       patch.fecha_resolucion = dto.fecha_resolucion;
 
-    const { data, error } = await this.supabase.service
-      .from('aeronave_discrepancia')
-      .update(patch)
-      .eq('id', id)
-      .select(DISCREPANCIA_COLS)
+    const cols = await this.discrepanciaCols();
+    const { data, error } = await aplicarCas(
+      this.supabase.service
+        .from('aeronave_discrepancia')
+        .update(patch)
+        .eq('id', id),
+      ifUpdatedAt,
+    )
+      .select(cols)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Discrepancia ${id} not found`);
+    if (!data) {
+      if (!ifUpdatedAt)
+        throw new NotFoundException(`Discrepancia ${id} not found`);
+      const { data: vivo, error: vErr } = await this.supabase.service
+        .from('aeronave_discrepancia')
+        .select(cols)
+        .eq('id', id)
+        .maybeSingle();
+      if (vErr) throw new Error(vErr.message);
+      if (!vivo) throw new NotFoundException(`Discrepancia ${id} not found`);
+      throw conflictoVersion({
+        entidad: 'reporte',
+        actual: vivo as unknown as Record<string, unknown>,
+        enviado: ifUpdatedAt,
+      });
+    }
     return data;
   }
 

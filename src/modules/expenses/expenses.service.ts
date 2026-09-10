@@ -19,6 +19,7 @@ import {
   hoyCancun,
 } from '../../common/fecha-cancun.util';
 import {
+  anexarSello,
   capturadoAhora,
   resolverCapturadoEn,
 } from '../../common/capturado-en.util';
@@ -27,6 +28,12 @@ import {
   limiteCapturaMin,
   limiteEdicion,
 } from '../../common/semana-gastos.util';
+import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
+import {
+  diaReferenciaVentana,
+  lineaSelloCorreccion,
+  resolverSelloCorreccion,
+} from './ventana-correccion.util';
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
@@ -2156,18 +2163,35 @@ export class ExpensesService {
    * nueva → editable hasta SU lunes) — y solo si aún no está conciliado ni
    * entró ya a una REPOSICIÓN de su caja chica. Después, únicamente oficina.
    * Lanza si no cumple.
+   *
+   * `capturadoEn` (10-sep-2026, app sin internet): momento REAL en que el
+   * capturista hizo la corrección/baja (ISO con zona). Cuando viene y es ≤
+   * ahora, la semana se evalúa contra ESE día Cancún y no contra el de la
+   * llegada al servidor — una corrección del domingo subida el martes por
+   * el outbox sigue siendo válida. Los rechazos llevan `code` (la app decide
+   * sin regex): GASTO_AJENO (403), GASTO_CONCILIADO (409),
+   * GASTO_EN_REPOSICION (409), GASTO_FUERA_DE_VENTANA (403).
    */
-  async assertOwnEnVentana(id: string, userId: string): Promise<void> {
+  async assertOwnEnVentana(
+    id: string,
+    userId: string,
+    capturadoEn?: string,
+  ): Promise<void> {
+    // 400 si el sello viene mal ANTES de tocar nada (misma regla del alta).
+    const sello = resolverSelloCorreccion(capturadoEn);
     const gasto = await this.findById(id);
     if (gasto.usuario_captura_id !== userId) {
-      throw new ForbiddenException(
-        'Solo puedes corregir gastos capturados por ti.',
-      );
+      throw new ForbiddenException({
+        message: 'Solo puedes corregir gastos capturados por ti.',
+        error: 'GASTO_AJENO',
+      });
     }
     if (gasto.conciliado === true) {
-      throw new ConflictException(
-        'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
-      );
+      throw new ConflictException({
+        message:
+          'Este gasto ya está conciliado con el banco; pide el ajuste a oficina.',
+        error: 'GASTO_CONCILIADO',
+      });
     }
     // Permiso temporal sin límite (caso Luis, 1-sep): salta SOLO los candados
     // de TIEMPO que siguen (reposición de caja chica y semana de edición).
@@ -2184,26 +2208,32 @@ export class ExpensesService {
       );
       const diaGasto = String(gasto.fecha_gasto ?? '').slice(0, 10);
       if (ultima && diaGasto && diaGasto <= ultima) {
-        throw new ConflictException(
-          'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
-        );
+        throw new ConflictException({
+          message:
+            'Este gasto ya entró a una reposición de tu caja chica; pide el ajuste a oficina.',
+          error: 'GASTO_EN_REPOSICION',
+        });
       }
     }
     // Semana de edición: la semana (lunes→domingo, pared Cancún) es la de la
     // CAPTURA (created_at) + días de gracia. Cálculo en el helper puro
     // `semana-gastos.util` (patrón en-CA + T12:00:00Z, con spec propio).
+    // "Hoy" = el día del sello de la corrección si viene (≤ ahora), si no el
+    // día de llegada al servidor.
     const gracia = graciaSaneada(
       await this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
     );
     const capturado = diaCancun(gasto.created_at as string);
-    if (hoyCancun() > limiteEdicion(capturado, gracia)) {
-      throw new ForbiddenException(
-        gracia === 1
-          ? 'Los gastos solo se corrigen dentro de su semana (hasta el lunes siguiente). Pide el ajuste a oficina.'
-          : gracia === 0
-            ? 'Los gastos solo se corrigen dentro de su semana (lunes a domingo). Pide el ajuste a oficina.'
-            : `Los gastos solo se corrigen dentro de su semana (hasta ${gracia} días después del domingo). Pide el ajuste a oficina.`,
-      );
+    if (diaReferenciaVentana(sello) > limiteEdicion(capturado, gracia)) {
+      throw new ForbiddenException({
+        message:
+          gracia === 1
+            ? 'Los gastos solo se corrigen dentro de su semana (hasta el lunes siguiente). Pide el ajuste a oficina.'
+            : gracia === 0
+              ? 'Los gastos solo se corrigen dentro de su semana (lunes a domingo). Pide el ajuste a oficina.'
+              : `Los gastos solo se corrigen dentro de su semana (hasta ${gracia} días después del domingo). Pide el ajuste a oficina.`,
+        error: 'GASTO_FUERA_DE_VENTANA',
+      });
     }
   }
 
@@ -2297,6 +2327,14 @@ export class ExpensesService {
   }
 
   async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
+    // Control de versión (10-sep-2026, B1): `if_updated_at` NO es columna;
+    // se aplica como CAS en el UPDATE final (0 filas ⇒ 409 CONFLICTO_VERSION).
+    const ifUpdatedAt = dto.if_updated_at;
+    delete dto.if_updated_at;
+    // Sello de la CORRECCIÓN (B3): 400 si viene mal; la línea de bitácora
+    // solo cuando llegó tarde (> 2 min). La columna capturado_en NO se toca.
+    const selloCorreccion = resolverSelloCorreccion(dto.capturado_en);
+    const lineaSello = lineaSelloCorreccion('Corrección', selloCorreccion);
     if (dto.fecha_gasto !== undefined) {
       this.assertFechaRazonable(
         dto.fecha_gasto,
@@ -2308,7 +2346,11 @@ export class ExpensesService {
       // temporal `gastos_sin_limite_hasta` también).
       await this.assertCapturaEnSemana(dto.fecha_gasto, rol, userId);
     }
-    if (Object.keys(dto).length === 0) return this.findById(id);
+    // Sin campos de negocio (solo sellos/llaves) no hay nada que escribir.
+    const camposNegocio = Object.keys(dto).filter(
+      (k) => k !== 'capturado_en' && k !== 'client_request_id',
+    );
+    if (camposNegocio.length === 0 && !lineaSello) return this.findById(id);
     // Confirmación del panel (28-ago): sellar/retirar es acción EXPLÍCITA
     // del diálogo Verificar; si un rol de CAMPO vuelve a editar su gasto,
     // el sello se LIMPIA (la información cambió: oficina debe re-confirmar).
@@ -2336,6 +2378,8 @@ export class ExpensesService {
       dto.aeronave_id !== undefined ||
       dto.escala_id !== undefined ||
       dto.moneda !== undefined ||
+      // La línea de bitácora se anexa a las notas VIGENTES.
+      lineaSello !== null ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
       // el gasto o se sella (voucher IA → tarjeta del capturador).
       (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
@@ -2596,11 +2640,13 @@ export class ExpensesService {
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
     delete cols.permitir_fecha_antigua;
-    // La llave de idempotencia se fija SOLO al crear: reescribirla en un
-    // PATCH podría colisionar con otra captura o robarle su llave.
+    // La llave de idempotencia se fija SOLO al crear y se CONSERVA: un PATCH
+    // jamás la reescribe (colisionaría con otra captura o le robaría su
+    // llave) ni la borra; mandarla en el PATCH es inocuo (10-sep-2026).
     delete cols.client_request_id;
     // El momento de captura también se fija UNA sola vez (7-sep): un PATCH
-    // (edición, reintento del outbox) jamás lo reescribe.
+    // (edición, reintento del outbox) jamás lo reescribe. En el PATCH el
+    // valor es el sello de la CORRECCIÓN (ya consumido arriba).
     delete cols.capturado_en;
     // Acoplamiento medio↔tarjeta (3-sep): el CHECK gasto_check exige
     // terminación null salvo TARJETA_CORP. Cambiar a otro medio LIMPIA la
@@ -2658,10 +2704,28 @@ export class ExpensesService {
     if (dto.folio_ticket !== undefined) {
       cols.folio_ticket = dto.folio_ticket?.trim() || null;
     }
-    const { data, error } = await this.supabase.service
-      .from('gasto')
-      .update({ ...cols, ...sello, updated_by: userId })
-      .eq('id', id)
+    // Bitácora de la corrección tardía (B3): se anexa a las notas VIGENTES
+    // (las del PATCH, o las que ya tenía el gasto) y el trigger
+    // tg_gasto_bitacora la registra como diff de `notas`.
+    if (lineaSello) {
+      const notasBase =
+        cols.notas !== undefined
+          ? (cols.notas as string | null)
+          : dto.notas !== undefined
+            ? dto.notas
+            : (actual?.notas ?? null);
+      cols.notas = anexarSello(notasBase, lineaSello);
+    }
+    // CAS (B1): con `if_updated_at` el UPDATE solo aplica si updated_at sigue
+    // siendo el que leyó el cliente (ventana ±1 ms); 0 filas ⇒ releer y 409
+    // CONFLICTO_VERSION con la fila viva (gana el servidor).
+    const { data, error } = await aplicarCas(
+      this.supabase.service
+        .from('gasto')
+        .update({ ...cols, ...sello, updated_by: userId })
+        .eq('id', id),
+      ifUpdatedAt,
+    )
       .select(COLS)
       .maybeSingle();
     if (error) {
@@ -2678,19 +2742,43 @@ export class ExpensesService {
         );
       throw new Error(error.message);
     }
-    if (!data) throw new NotFoundException(`Gasto ${id} not found`);
+    if (!data) {
+      if (!ifUpdatedAt) throw new NotFoundException(`Gasto ${id} not found`);
+      // findById lanza 404 si ya no existe; si existe, la versión difiere.
+      const vivo = (await this.findById(id)) as Record<string, unknown>;
+      throw conflictoVersion({
+        entidad: 'gasto',
+        actual: vivo,
+        enviado: ifUpdatedAt,
+      });
+    }
     return data;
   }
 
-  async remove(id: string, userId: string, rol?: Rol) {
+  /**
+   * Baja de un gasto. Los 409 llevan `code` (10-sep-2026, B4) para que la
+   * app decida sin regex: GASTO_CONCILIADO, GASTO_DE_COMPRA, GASTO_REPARTIDO
+   * (el candado GASTO_EN_REPOSICION vive en `assertOwnEnVentana`, que el
+   * controller corre antes para los roles de campo). `capturadoEn` = sello
+   * de la baja encolada (B3): deja «baja capturada el … · recibida el …» en
+   * la bitácora del gasto antes de borrarlo.
+   */
+  async remove(id: string, userId: string, rol?: Rol, capturadoEn?: string) {
+    // 400 si el sello viene mal, antes de tocar nada.
+    const lineaSello = lineaSelloCorreccion(
+      'Baja',
+      resolverSelloCorreccion(capturadoEn),
+    );
     // Un gasto conciliado está amarrado a un movimiento bancario (FK con
     // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
     // nada y la conciliación se sobreestimaría en silencio.
     const gasto = await this.findById(id);
     if (gasto.conciliado === true) {
-      throw new ConflictException(
-        'Este gasto ya está conciliado con el banco; desconcíliaselo en Conciliación antes de eliminarlo.',
-      );
+      throw new ConflictException({
+        message:
+          'Este gasto ya está conciliado con el banco; desconcíliaselo en Conciliación antes de eliminarlo.',
+        error: 'GASTO_CONCILIADO',
+      });
     }
     // PAGO de una compra de refacciones (28-ago): la FK es `set null`, así
     // que borrarlo dejaría la compra sin ese pago EN SILENCIO (su costo
@@ -2704,9 +2792,11 @@ export class ExpensesService {
         .eq('id', compraId)
         .maybeSingle();
       const folio = (compra as { folio?: number } | null)?.folio;
-      throw new ConflictException(
-        `Este gasto es un pago de la compra #${folio ?? '?'} de refacciones; quítalo primero desde Compras.`,
-      );
+      throw new ConflictException({
+        message: `Este gasto es un pago de la compra #${folio ?? '?'} de refacciones; quítalo primero desde Compras.`,
+        error: 'GASTO_DE_COMPRA',
+        details: { compra_id: compraId, folio: folio ?? null },
+      });
     }
     // Gasto REPARTIDO entre aviones: el reparto es acto de oficina — el
     // piloto/mecánico no puede tirar la atribución de N aviones al borrar su
@@ -2717,16 +2807,26 @@ export class ExpensesService {
       filasReparto.length > 0 &&
       (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE)
     ) {
-      throw new ConflictException(
-        'La oficina ya repartió este gasto entre aviones: pídeles a ellos eliminarlo o corregirlo.',
-      );
+      throw new ConflictException({
+        message:
+          'La oficina ya repartió este gasto entre aviones: pídeles a ellos eliminarlo o corregirlo.',
+        error: 'GASTO_REPARTIDO',
+        details: { repartos: filasReparto.length },
+      });
     }
     // Atribución del borrado en la bitácora (1-sep): el trigger de BD toma
     // OLD.updated_by como actor del DELETE, así que se sella ANTES de borrar.
-    // Ese update tiene diff de negocio vacío → el trigger NO inserta fila.
+    // Sin sello de baja el diff de negocio es vacío → el trigger NO inserta
+    // fila; con baja tardía (B3) la línea va a `notas` y SÍ queda en la
+    // bitácora (UPDATE con la línea + DELETE con el snapshot).
     const { error: selloErr } = await this.supabase.service
       .from('gasto')
-      .update({ updated_by: userId })
+      .update({
+        updated_by: userId,
+        ...(lineaSello
+          ? { notas: anexarSello(gasto.notas as string | null, lineaSello) }
+          : {}),
+      })
       .eq('id', id);
     if (selloErr) throw new Error(selloErr.message);
     const { error } = await this.supabase.service

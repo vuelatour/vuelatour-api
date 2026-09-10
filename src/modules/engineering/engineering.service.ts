@@ -5,6 +5,8 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { triggerUpdatedAt } from '../../common/updated-at-trigger.util';
+import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import type {
   CreateMantenimientoDto,
   CreateVencimientoDto,
@@ -12,8 +14,9 @@ import type {
   UpdateMantenimientoDto,
 } from './dto/engineering.dto';
 
+// updated_at (10-sep-2026): versión para `if_updated_at` y deltas de la app.
 const MANT_COLS =
-  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, horas_programadas, costo_usd, proveedor, notas, etapa_intervalo_hr, tareas_realizadas, motor_id, helice_id, created_at';
+  'id, aeronave_id, estado, pais, tipo, descripcion, fecha_programada, fecha_realizada, horas_aeronave, horas_programadas, costo_usd, proveedor, notas, etapa_intervalo_hr, tareas_realizadas, motor_id, helice_id, created_at, updated_at';
 
 /** El campo legado `tipo` (NOT NULL) se mantiene en sync con el nuevo `estado`. */
 function tipoFromEstado(
@@ -195,8 +198,29 @@ export class EngineeringService {
     return data;
   }
 
-  /** Actualiza un servicio (incluye transicionar estado programado→en taller→completado). */
+  // ===== Trigger de updated_at (migración 20260910000001) =====
+  // `mantenimiento` solo traía `default now()`: mientras no exista el
+  // trigger, el CAS de `if_updated_at` se SALTA (comportamiento de hoy, warn
+  // una vez). El patch sella updated_at a mano de todas formas, así que la
+  // versión que lee la app ya se mueve con cada edición del API.
+  private conTriggerMantenimiento(): Promise<boolean> {
+    return triggerUpdatedAt(
+      this.supabase.service,
+      'mantenimiento',
+    ).disponible();
+  }
+
+  /**
+   * Actualiza un servicio (incluye transicionar estado programado→en
+   * taller→completado). `if_updated_at` (10-sep-2026, B1): CAS sobre
+   * updated_at → 409 CONFLICTO_VERSION con la fila viva si alguien lo
+   * modificó después de la lectura del cliente. Sin campos = solo lectura.
+   */
   async updateMantenimiento(id: string, dto: UpdateMantenimientoDto) {
+    const ifUpdatedAt =
+      dto.if_updated_at && (await this.conTriggerMantenimiento())
+        ? dto.if_updated_at
+        : null;
     const patch: Record<string, unknown> = {};
     if (dto.estado !== undefined) {
       patch.estado = dto.estado;
@@ -256,16 +280,40 @@ export class EngineeringService {
     }
 
     const query = this.supabase.service.from('mantenimiento');
-    const { data, error } =
-      Object.keys(patch).length === 0
-        ? await query.select(MANT_COLS).eq('id', id).maybeSingle()
-        : await query
-            .update(patch)
-            .eq('id', id)
-            .select(MANT_COLS)
-            .maybeSingle();
+    if (Object.keys(patch).length === 0) {
+      const { data, error } = await query
+        .select(MANT_COLS)
+        .eq('id', id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data) throw new NotFoundException(`Mantenimiento ${id} not found`);
+      return data;
+    }
+    // Sello manual: la tabla no tenía trigger (ver conTriggerMantenimiento).
+    patch.updated_at = new Date().toISOString();
+    const { data, error } = await aplicarCas(
+      query.update(patch).eq('id', id),
+      ifUpdatedAt,
+    )
+      .select(MANT_COLS)
+      .maybeSingle();
     if (error) throw new Error(error.message);
-    if (!data) throw new NotFoundException(`Mantenimiento ${id} not found`);
+    if (!data) {
+      if (!ifUpdatedAt)
+        throw new NotFoundException(`Mantenimiento ${id} not found`);
+      const { data: vivo, error: vErr } = await this.supabase.service
+        .from('mantenimiento')
+        .select(MANT_COLS)
+        .eq('id', id)
+        .maybeSingle();
+      if (vErr) throw new Error(vErr.message);
+      if (!vivo) throw new NotFoundException(`Mantenimiento ${id} not found`);
+      throw conflictoVersion({
+        entidad: 'mantenimiento',
+        actual: vivo,
+        enviado: ifUpdatedAt,
+      });
+    }
     return data;
   }
 

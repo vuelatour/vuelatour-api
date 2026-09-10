@@ -318,14 +318,26 @@ export class CreateGastoDto {
       'aunque esté sin señal (el outbox lo sube después: created_at = ' +
       'llegada al servidor). Omitido = ahora (panel, cargas masivas). Se ' +
       'rechaza con 400 si viene sin zona, en el futuro (> 10 min) o antes ' +
-      'de 2020. Solo auditoría: no toca dinero ni ventanas de edición; en ' +
-      'PATCH se ignora (se fija una sola vez al crear).',
+      'de 2020. Solo auditoría: no toca dinero ni ventanas de edición. En ' +
+      'PATCH la columna NO se reescribe (se fija una sola vez al crear): ahí ' +
+      'el valor es el sello de la CORRECCIÓN (ver UpdateGastoDto).',
   })
   @IsOptional()
   @IsISO8601({ strict: true })
   capturado_en?: string;
 }
 
+/**
+ * Edición de un gasto. Todo lo heredado es opcional. Dos campos cambian de
+ * significado respecto al alta (10-sep-2026, app sin internet):
+ *  - `capturado_en`: momento REAL en que el capturista hizo la CORRECCIÓN
+ *    (el outbox la sube después). La ventana semanal se evalúa contra ese
+ *    sello (si viene y es ≤ ahora), no contra la llegada al servidor, y la
+ *    bitácora del gasto conserva «corrección capturada el … · recibida el …».
+ *    La columna `capturado_en` del gasto NO se toca.
+ *  - `client_request_id`: la llave de la captura ORIGINAL se conserva
+ *    siempre (el PATCH ni la reescribe ni la borra); mandarla es inocuo.
+ */
 export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   @ApiPropertyOptional()
   @IsOptional()
@@ -338,6 +350,31 @@ export class UpdateGastoDto extends PartialType(CreateGastoDto) {
   @IsOptional()
   @IsBoolean()
   duplicado_sospechado?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      'Control de versión (doc 6.1, gana el servidor + aviso): `updated_at` ' +
+      'del gasto tal como lo leyó el cliente (ISO). Si alguien lo modificó ' +
+      'después, el PATCH no aplica y responde 409 CONFLICTO_VERSION con ' +
+      '`details.actual` (la fila vigente), `updated_at_enviado` y ' +
+      '`updated_at_actual`. Omitido = comportamiento de siempre (último gana).',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  if_updated_at?: string;
+}
+
+/** Query de DELETE /expenses/:id (10-sep-2026). */
+export class DeleteGastoQuery {
+  @ApiPropertyOptional({
+    description:
+      'Momento REAL en que el capturista pidió la baja (ISO con zona). Como ' +
+      'en el PATCH: la ventana semanal se evalúa contra este sello si viene ' +
+      'y es ≤ ahora; la bitácora conserva «baja capturada el … · recibida el …».',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  capturado_en?: string;
 }
 
 // ===== Gastos de pista (cuotas de aeródromo VIP SAESA) =====

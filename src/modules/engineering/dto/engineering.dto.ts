@@ -7,6 +7,7 @@ import {
   IsDateString,
   IsIn,
   IsInt,
+  IsISO8601,
   IsNumber,
   IsOptional,
   IsString,
@@ -263,6 +264,16 @@ export class UpdateMantenimientoDto {
   @ValidateIf((_, v) => v !== null)
   @IsUUID()
   helice_id?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Control de versión (doc 6.1, gana el servidor + aviso): `updated_at` del servicio tal como lo leyó el cliente (ISO). ' +
+      'Si alguien lo modificó después, el PATCH no aplica y responde 409 CONFLICTO_VERSION con `details.actual`. ' +
+      'Omitido = comportamiento de siempre. Mientras `mantenimiento` no tenga trigger de updated_at (migración 20260910000001) se ignora.',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  if_updated_at?: string;
 }
 
 export class CreateVencimientoDto {

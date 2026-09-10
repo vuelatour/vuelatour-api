@@ -513,6 +513,19 @@ export class CreateMovimientoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por ' +
+      'captura; outbox de la app, 10-sep-2026). Un reintento con la misma ' +
+      'llave devuelve el movimiento YA creado (200, idempotente:true, con su ' +
+      'gasto BODEGA ya generado) en vez de volver a mover stock y dinero. ' +
+      'Índice único uq_inv_movimiento_client_request; mientras la columna no ' +
+      'exista en BD se ignora (alta sin idempotencia).',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
 /**

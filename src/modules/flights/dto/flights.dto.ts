@@ -28,6 +28,7 @@ import {
 } from 'class-validator';
 import { EstadoVuelo } from '../../quotes/dto/list-quotes.query';
 import { MetodoPago } from '../../quotes/dto/calculate-quote.dto';
+import { IF_UPDATED_AT_DESC } from '../../../common/version-cas.util';
 
 export class TacoStatusDto {
   @ApiProperty({ type: [String], description: 'IDs de vuelo a evaluar' })
@@ -133,6 +134,17 @@ export class ListFlightsQuery {
   @IsDateString()
   hasta?: string;
 
+  @ApiPropertyOptional({
+    description:
+      'Bajar DELTAS (10-sep-2026, app sin internet): solo vuelos con ' +
+      'updated_at >= ISO (o con algún TRAMO modificado desde entonces) y, ' +
+      'además, `eliminados: [vuelo_id]` de vuelo_eliminado.eliminado_at >= ' +
+      'ISO. Sin el parámetro, respuesta de siempre (sin `eliminados`).',
+  })
+  @IsOptional()
+  @IsDateString()
+  updated_since?: string;
+
   // Tope 500: el selector de vuelos del app (oficina) trae un lote grande y
   // filtra localmente por folio/cliente/ruta/piloto. Los listados paginados
   // siguen usando límites chicos.
@@ -224,6 +236,11 @@ export class UpdateFlightDto {
   @IsOptional()
   @IsEnum(MetodoPago)
   metodo_cobro?: MetodoPago;
+
+  @ApiPropertyOptional({ description: IF_UPDATED_AT_DESC })
+  @IsOptional()
+  @IsDateString()
+  if_updated_at?: string;
 }
 
 export class UpdatePermisoDto {
@@ -390,6 +407,16 @@ export class AssignFlightDto {
   @IsOptional()
   @IsBoolean()
   aceptar_discrepancia_alta?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      IF_UPDATED_AT_DESC +
+      ' En assign se valida contra el updated_at del VUELO antes del primer ' +
+      'paso (apoyos, vuelo, tramos) y no se vuelve a validar por tramo.',
+  })
+  @IsOptional()
+  @IsDateString()
+  if_updated_at?: string;
 }
 
 /** Tramo de un vuelo EXTERNO multiescala (solo ruta; sin tacos ni pax por tramo). */

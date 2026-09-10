@@ -29,6 +29,8 @@ import {
 import { normalizarCodigo } from './inventario-codigo.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { capturadoAhora } from '../../common/capturado-en.util';
+import { columnaOpcional } from '../../common/columna-opcional.util';
+import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 // FIFO, venta/ganancia y agregados del cardex: fuente única (con spec).
 import {
   agregadosDeItem,
@@ -64,6 +66,9 @@ const MOV_JOINS =
 const FOTOS_BUCKET = 'inventario-fotos';
 const MOV_COLS =
   'id, item_id, tipo, cantidad, empaque_id, cantidad_empaques, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, aeronave_id, proveedor_id, fecha_movimiento, fecha_orden, fecha_cargo_banco, referencia, notas, registrado_por, created_at';
+
+/** Índice único parcial de `inventario_movimiento.client_request_id`. */
+const UQ_INV_MOVIMIENTO_CLIENT_REQUEST = 'uq_inv_movimiento_client_request';
 
 type EmpaqueRow = {
   id: string;
@@ -1473,11 +1478,120 @@ export class InventoryService {
     };
   }
 
+  // ===== Idempotencia del cardex (10-sep-2026, B2) =====
+  // Columna OPCIONAL `client_request_id` (migración 20260910000002): mientras
+  // no exista, no hay pre-check ni columna en el insert (alta de siempre, sin
+  // idempotencia). Se activa sola en ≤ 10 min tras aplicarla.
+  private conClientRequestMovimiento(): Promise<boolean> {
+    return columnaOpcional(
+      this.supabase.service,
+      'inventario_movimiento',
+      'client_request_id',
+      {
+        mensajeAusente:
+          'Columna inventario_movimiento.client_request_id no existe todavía: movimientos de cardex sin idempotencia hasta aplicar la migración 20260910000002',
+      },
+    ).disponible();
+  }
+
+  /**
+   * Movimiento ya creado con esa llave EN ESE PRODUCTO (o null). Acotado al
+   * ítem: una llave reutilizada en otro producto nunca devuelve un
+   * movimiento ajeno (el insert choca en 23505 → 409 CLIENT_REQUEST_ID_EN_USO).
+   */
+  private async movimientoPorClientRequest(
+    itemId: string,
+    key: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select(
+        `${MOV_COLS}, para_flota, client_request_id, empaque:inventario_item_empaque!empaque_id(nombre, factor)`,
+      )
+      .eq('client_request_id', key)
+      .eq('item_id', itemId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return (data as Record<string, unknown> | null) ?? null;
+  }
+
+  /**
+   * Replay del alta (reintento del outbox con la misma llave): la MISMA
+   * forma de respuesta que un alta fresca — movimiento + `gasto_generado`
+   * (el/los gastos BODEGA ya ligados por `gasto.inventario_movimiento_id`,
+   * invariante 8) + stock/valor actuales — sin volver a mover stock ni
+   * dinero, y sin re-validar (el stock ya bajó con el primer intento).
+   */
+  private async movimientoIdempotente(
+    fila: Record<string, unknown>,
+    key: string,
+  ) {
+    this.logger.log(
+      `Movimiento de cardex idempotente: reintento con client_request_id ${key} → se devuelve el existente ${String(fila.id)} (sin duplicar stock ni gasto).`,
+    );
+    const { data: gastos, error: gErr } = await this.supabase.service
+      .from('gasto')
+      .select('id, monto, moneda, categoria')
+      .eq('inventario_movimiento_id', fila.id as string)
+      .order('created_at', { ascending: true });
+    if (gErr) throw new Error(gErr.message);
+    const ligados = (gastos ?? []) as Array<Record<string, unknown>>;
+    let gastoGenerado: Record<string, unknown> | null = null;
+    if (fila.para_flota === true) {
+      if (ligados.length > 0) {
+        gastoGenerado = {
+          prorrateado: true,
+          aviones: ligados.length,
+          monto_total: round(
+            ligados.reduce((s, g) => s + Number(g.monto ?? 0), 0),
+            2,
+          ),
+          gastos: ligados.length,
+        };
+      }
+    } else {
+      gastoGenerado = ligados[0] ?? null;
+    }
+    const stats = this.statsFromLayers(
+      this.buildLayers(await this.movsForItem(fila.item_id as string)),
+    );
+    const empaqueRaw = fila.empaque;
+    const empaque = (
+      Array.isArray(empaqueRaw) ? (empaqueRaw[0] ?? null) : empaqueRaw
+    ) as { nombre?: string; factor?: number | string } | null;
+    const mov: Record<string, unknown> = { ...fila };
+    delete mov.empaque;
+    delete mov.para_flota;
+    return {
+      ...mov,
+      empaque: empaque
+        ? { nombre: empaque.nombre, factor: Number(empaque.factor) }
+        : null,
+      stock_resultante: stats.stock,
+      valor_usd: stats.valor_usd,
+      gasto_generado: gastoGenerado,
+      reversion_pendiente: null as ReversionPendiente | null,
+      client_request_id: key,
+      idempotente: true as const,
+    };
+  }
+
   async createMovimiento(
     itemId: string,
     dto: CreateMovimientoDto,
     userId: string,
   ) {
+    // Idempotencia (B2): pre-check por llave ANTES de cualquier validación —
+    // un replay no debe re-validar (el stock ya bajó con el primer intento)
+    // ni volver a generar el gasto BODEGA.
+    const key =
+      dto.client_request_id && (await this.conClientRequestMovimiento())
+        ? dto.client_request_id
+        : null;
+    if (key) {
+      const ya = await this.movimientoPorClientRequest(itemId, key);
+      if (ya) return this.movimientoIdempotente(ya, key);
+    }
     const item = (await this.findItem(itemId)) as {
       nombre: string;
       precio_venta?: number | string | null;
@@ -1636,10 +1750,25 @@ export class InventoryService {
         registrado_por: userId,
         created_by: userId,
         updated_by: userId,
+        // Llave SOLO cuando viaja y la columna existe (insert de siempre si no).
+        ...(key ? { client_request_id: key } : {}),
       })
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
+      // Carrera con la misma llave (dos flushes del outbox): el primero ya
+      // movió el stock y generó su gasto → se devuelve ese.
+      if (
+        error.code === '23505' &&
+        key &&
+        error.message.includes(UQ_INV_MOVIMIENTO_CLIENT_REQUEST)
+      ) {
+        const ya = await this.movimientoPorClientRequest(itemId, key);
+        if (ya) return this.movimientoIdempotente(ya, key);
+        // La llave pertenece a un movimiento de OTRO producto: ni la fila
+        // ajena ni un 500 (el outbox lo reintentaría para siempre).
+        throw clientRequestIdEnUso('movimiento', key);
+      }
       if (error.code === '23503')
         throw new BadRequestException(
           `Referencia no encontrada: ${error.message}`,
@@ -1700,6 +1829,10 @@ export class InventoryService {
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
       reversion_pendiente: reversionPendiente,
+      // Aditivo (10-sep-2026): la app deduplica su pendiente local con la
+      // llave; null cuando no viajó o la columna aún no existe.
+      client_request_id: key,
+      idempotente: false as const,
     };
   }
 

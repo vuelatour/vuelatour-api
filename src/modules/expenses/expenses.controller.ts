@@ -24,6 +24,7 @@ import {
   CategoriaGasto,
   CreateGastoDto,
   CreateTarifaAerodromoDto,
+  DeleteGastoQuery,
   GenerarPistasDto,
   ListGastosQuery,
   PhotoUrlsDto,
@@ -419,7 +420,8 @@ export class ExpensesController {
   )
   @ApiOperation({
     summary:
-      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana).',
+      'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana). ' +
+      'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA.',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -431,7 +433,7 @@ export class ExpensesController {
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      await this.expenses.assertOwnEnVentana(id, c.userId);
+      await this.expenses.assertOwnEnVentana(id, c.userId, dto.capturado_en);
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
       // Ni concilia ni desmarca duplicados (27-ago): un gasto "conciliado"
@@ -460,10 +462,12 @@ export class ExpensesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo dentro de su semana de captura (lunes→domingo + gracia).',
+      'Delete gasto. Oficina siempre; piloto/mecánico solo el suyo dentro de su semana de captura (lunes→domingo + gracia). ' +
+      'App sin internet (10-sep-2026): `?capturado_en=` = sello de la baja (la semana se evalúa contra él). 409 con code: GASTO_CONCILIADO, GASTO_DE_COMPRA, GASTO_REPARTIDO, GASTO_EN_REPOSICION; 2.ª llamada = 404 (éxito idempotente para la app).',
   })
   async remove(
     @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: DeleteGastoQuery,
     @CurrentUser() c: AuthenticatedUser,
   ) {
     if (
@@ -471,8 +475,8 @@ export class ExpensesController {
       c.rol === Rol.MECANICO ||
       c.rol === Rol.VISITANTE
     ) {
-      await this.expenses.assertOwnEnVentana(id, c.userId);
+      await this.expenses.assertOwnEnVentana(id, c.userId, q.capturado_en);
     }
-    return this.expenses.remove(id, c.userId, c.rol);
+    return this.expenses.remove(id, c.userId, c.rol, q.capturado_en);
   }
 }

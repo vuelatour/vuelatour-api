@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
 import {
   IsDateString,
   IsIn,
+  IsISO8601,
   IsOptional,
   IsString,
   IsUUID,
@@ -54,6 +55,33 @@ export class CreateDiscrepanciaDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Llave de IDEMPOTENCIA generada por el cliente (uuid v4, una por ' +
+      'captura; outbox de la app, 10-sep-2026). Un reintento con la misma ' +
+      'llave devuelve el reporte YA creado (200, idempotente:true) en vez de ' +
+      'duplicar el squawk. Índice único uq_discrepancia_client_request; ' +
+      'mientras la columna no exista en BD se ignora (alta sin idempotencia).',
+  })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
-export class UpdateDiscrepanciaDto extends PartialType(CreateDiscrepanciaDto) {}
+/**
+ * Edición/resolución de un squawk. Hereda `client_request_id` del alta pero
+ * el PATCH lo IGNORA (la llave se fija una sola vez al crear).
+ */
+export class UpdateDiscrepanciaDto extends PartialType(CreateDiscrepanciaDto) {
+  @ApiPropertyOptional({
+    description:
+      'Control de versión (doc 6.1, gana el servidor + aviso): `updated_at` ' +
+      'del reporte tal como lo leyó el cliente (ISO). Si alguien lo modificó ' +
+      'después, el PATCH no aplica y responde 409 CONFLICTO_VERSION con ' +
+      '`details.actual`. Omitido = comportamiento de siempre (último gana).',
+  })
+  @IsOptional()
+  @IsISO8601({ strict: true })
+  if_updated_at?: string;
+}

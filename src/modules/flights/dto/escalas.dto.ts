@@ -5,6 +5,7 @@ import {
   IsArray,
   IsBoolean,
   IsDate,
+  IsDateString,
   IsEnum,
   IsIn,
   IsInt,
@@ -19,6 +20,16 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { EstadoPermiso } from './flights.dto';
+import { IF_UPDATED_AT_DESC } from '../../../common/version-cas.util';
+
+/** Descripción compartida de la llave de idempotencia de tramos (B2). */
+const CLIENT_REQUEST_ID_TRAMO_DESC =
+  'Llave de IDEMPOTENCIA generada por la app por captura (uuid v4). Un ' +
+  'reintento (timeout tras commit, doble flush del outbox) con la misma ' +
+  'llave devuelve el tramo YA creado (200, `idempotente: true`, con su ' +
+  '`orden`) sin re-insertar ni volver a avisar a la tripulación. Índice ' +
+  'único parcial uq_escala_client_request (migración 20260910000002); ' +
+  'mientras no exista la columna la llave se ignora (alta normal).';
 
 export class CreateEscalaDto {
   @ApiProperty({ minimum: 1 })
@@ -119,9 +130,24 @@ export class CreateEscalaDto {
   @IsString()
   @MaxLength(300)
   motivo?: string;
+
+  @ApiPropertyOptional({ description: CLIENT_REQUEST_ID_TRAMO_DESC })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
-export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {}
+/**
+ * PATCH legs/:legId. Hereda los campos de alta como opcionales (el
+ * `client_request_id` heredado se ignora en la edición) y acepta el control
+ * de versión `if_updated_at` (B1).
+ */
+export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {
+  @ApiPropertyOptional({ description: IF_UPDATED_AT_DESC })
+  @IsOptional()
+  @IsDateString()
+  if_updated_at?: string;
+}
 
 /**
  * Tramo OPERATIVO interno (ferry, parada técnica, movimiento interno, pernocta
@@ -210,6 +236,11 @@ export class OperationalLegDto {
   @IsString()
   @MaxLength(300)
   motivo?: string;
+
+  @ApiPropertyOptional({ description: CLIENT_REQUEST_ID_TRAMO_DESC })
+  @IsOptional()
+  @IsUUID()
+  client_request_id?: string;
 }
 
 /** Asignación de aeronave/piloto a UN tramo (ida o regreso por separado). */
@@ -270,6 +301,15 @@ export class AssignEscalaDto {
   @IsOptional()
   @IsBoolean()
   aceptar_discrepancia_alta?: boolean;
+
+  @ApiPropertyOptional({
+    description:
+      IF_UPDATED_AT_DESC +
+      ' Se valida contra el updated_at del TRAMO antes del primer paso.',
+  })
+  @IsOptional()
+  @IsDateString()
+  if_updated_at?: string;
 }
 
 /**
