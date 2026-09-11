@@ -1,5 +1,6 @@
 import {
   avionesDeTramos,
+  avionesUtilizados,
   modeloCotizadoDe,
   modelosCotizados,
 } from './modelos-cotizados.util';
@@ -58,5 +59,43 @@ describe('modelosCotizados (modelo del avión cotizado, nunca matrícula)', () =
       'Piper Meridian',
     ]);
     expect(modelosCotizados({ aeronave_id: null }, [], modelos)).toEqual([]);
+  });
+});
+
+/**
+ * «Aeronave cotizada» vs «aeronave utilizada» (control interno, 11-sep-2026):
+ * el cliente ve el modelo COTIZADO; la oficina necesita además qué avión lo
+ * está volando de verdad.
+ */
+describe('avionesUtilizados (avión que vuela HOY el itinerario)', () => {
+  it('tramos vivos con herencia, en orden y sin repetir; ferry y solo-operativa CUENTAN', () => {
+    const v = { aeronave_id: 'anu' };
+    const escalas = [
+      { aeronave_id: null, cancelada_at: null },
+      { aeronave_id: 'meridian', cancelada_at: null, es_ferry: true },
+      { aeronave_id: 'anu', cancelada_at: null, solo_operativa: true },
+      { aeronave_id: 'seneca', cancelada_at: '2026-09-01T00:00:00Z' },
+    ];
+    expect(avionesUtilizados(v, escalas)).toEqual(['anu', 'meridian']);
+  });
+
+  it('sin tramos vivos: el avión del vuelo; sin avión ⇒ []', () => {
+    expect(avionesUtilizados({ aeronave_id: 'anu' }, [])).toEqual(['anu']);
+    expect(
+      avionesUtilizados({ aeronave_id: 'anu' }, [
+        { aeronave_id: 'anu', cancelada_at: '2026-09-01T00:00:00Z' },
+      ]),
+    ).toEqual(['anu']);
+    expect(avionesUtilizados({ aeronave_id: null }, [])).toEqual([]);
+  });
+
+  it('difiere del COTIZADO cuando la operación cambió de avión (caso #254)', () => {
+    const v = {
+      aeronave_id: 'anu',
+      calculo_snapshot: { aeronave: { id: 'seneca', modelo: 'Seneca V' } },
+    };
+    const escalas = [{ aeronave_id: null, cancelada_at: null }];
+    expect(modeloCotizadoDe(v)).toBe('Seneca V');
+    expect(avionesUtilizados(v, escalas)).toEqual(['anu']);
   });
 });

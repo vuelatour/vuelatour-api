@@ -13,12 +13,14 @@ import {
 } from '../pyservices/pyservices.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { COBRO_COLS } from './flights.service';
+import { TOLERANCIA_LIQUIDACION_USD } from './metodo-cobro-final.util';
 
 /**
- * Tolerancia de redondeo multi-moneda (misma regla que `refreshCobradoFlag`
- * y que el panel — caso #131): hasta 1 USD de saldo es redondeo, no deuda.
+ * Tolerancia de redondeo multi-moneda (fuente única
+ * `metodo-cobro-final.util`, misma regla que `refreshCobradoFlag` y que el
+ * panel — caso #131): hasta 1 USD de saldo es redondeo, no deuda.
  */
-const TOLERANCIA_COBRO_USD = 1;
+const TOLERANCIA_COBRO_USD = TOLERANCIA_LIQUIDACION_USD;
 
 /**
  * Etiquetas legibles de método de cobro: fuente única
@@ -405,6 +407,12 @@ export class CobroReciboService {
         etiqueta: Number(c.monto) < 0 ? 'Reembolso' : 'Abono',
       }));
 
+    // MÉTODO REAL del cobro (`cobro_vuelo.metodo_cobro`), NUNCA el previsto
+    // en la cotización (`vuelo.metodo_cobro`): el recibo dice con qué pagó
+    // el cliente ESTE abono — un vuelo cotizado por transferencia puede
+    // liquidarse en efectivo, y cada parcialidad puede venir por un medio
+    // distinto. `vuelo.metodo_cobro` solo guarda, informativamente, el
+    // método del cobro que liquidó (ver `sellarMetodoCobroFinal`).
     const metodoCrudo = (cobro.metodo_cobro as string | null) ?? '';
     const payload: ReciboPdfPayload = {
       folio_recibo: folioRecibo,

@@ -47,7 +47,13 @@ import {
 import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  CATEGORIAS_GASTO_SIN_AVION,
+  categoriaEsDeEmpresa,
+  categoriaExigeVuelo,
+  destinoCategoriaGasto,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import {
   acoplarTarjetaEnUpdate,
   cruzarMedioConIa,
@@ -292,26 +298,23 @@ export class ExpensesService {
     if (filters.capturado_hasta)
       q = q.lte('capturado_en', `${filters.capturado_hasta}T23:59:59-05:00`);
     // Pendiente = sin avión asignado (la bandeja debe quedar siempre vacía).
-    // FIJO e INDIRECTO se excluyen: por diseño no llevan avión/vuelo — no son
-    // "pendientes de resolver" (mismo criterio que el pre-cierre).
     if (filters.pendientes === true) {
-      // OTRO sin vuelo tampoco es pendiente (26-ago): sin reparto es gasto
-      // de la EMPRESA a propósito — se administra en la pantalla Otros
-      // gastos, no en esta bandeja.
-      // PERSONAL_DUENO tampoco (26-ago): jamás lleva avión/vuelo — dejarlo
-      // aquí sería un pendiente eterno (se administra en Gastos personales).
-      // NOMINA (29-ago): como INDIRECTO, sin avión por diseño — fuera de la
-      // bandeja. SERVICIOS NO se excluye: como REFACCION, sin avión SÍ es
-      // pendiente. Misma cadena literal en sugerirAsignaciones y en
-      // alerts.service (pre-cierre) o el conteo no cuadra.
+      // Quedan FUERA de la bandeja (mismo criterio que el pre-cierre y que
+      // alerts.service, o el conteo no cuadra — fuente única
+      // `CATEGORIAS_GASTO_SIN_AVION`):
+      //  - LAS DE EMPRESA (11-sep-2026: OTRO, NOMINA, GASOLINA, FIJO,
+      //    VISITA): gasto de VuelaTour, CON o SIN vuelo — se administran en
+      //    la pantalla Otros gastos. Antes la lista era literal y el `.or`
+      //    dejaba «OTRO CON vuelo» dentro: un pendiente de un dinero que ya
+      //    no es de ningún avión.
+      //  - INDIRECTO: por diseño no lleva avión.
+      //  - PERSONAL_DUENO (26-ago): jamás lleva avión/vuelo — sería un
+      //    pendiente eterno (se administra en Gastos personales).
+      //  - SERVICIOS NO se excluye: como REFACCION, sin avión SÍ es
+      //    pendiente.
       q = q
         .is('aeronave_id', null)
-        .not(
-          'categoria',
-          'in',
-          '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
-        )
-        .or('categoria.neq.OTRO,vuelo_id.not.is.null');
+        .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`);
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
 
@@ -578,14 +581,11 @@ export class ExpensesService {
         'id, fecha_gasto, monto, moneda, categoria, notas, captura:usuario!usuario_captura_id(nombre)',
       )
       .is('aeronave_id', null)
-      // Mismo universo que la bandeja: PERSONAL_DUENO jamás tendrá vuelo —
-      // sugerirle uno quemaría llamadas de IA en un imposible.
-      .not(
-        'categoria',
-        'in',
-        '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
-      )
-      .or('categoria.neq.OTRO,vuelo_id.not.is.null')
+      // Mismo universo que la bandeja (fuente única
+      // `CATEGORIAS_GASTO_SIN_AVION`): PERSONAL_DUENO jamás tendrá vuelo y
+      // las de EMPRESA ya no son de ningún avión — sugerirles uno quemaría
+      // llamadas de IA en un imposible.
+      .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`)
       .order('fecha_gasto', { ascending: false })
       .limit(15);
     if (error) throw new Error(error.message);
@@ -1054,6 +1054,38 @@ export class ExpensesService {
           'El visitante paga con su fondo (efectivo) o su tarjeta corporativa.',
         );
       }
+    }
+    // GASTO DE PILOTO **SIN VUELO** (11-sep-2026, pedido de la app): el
+    // piloto ya no está obligado a elegir vuelo — pero SOLO en las
+    // categorías que no son del vuelo (empresa/indirectos/refacción/
+    // servicios, y GAS desde el 11-sep-2026: el piloto carga combustible en
+    // BASE igual que el mecánico y la app ofrece "Sin vuelo"; ese GAS sigue
+    // exigiendo `aeronave_id` por su candado propio, más abajo).
+    // Las «directas del vuelo» + TUAS/PERMISO/
+    // PILOTO_EXTERNO sin vuelo caerían en la bandeja de pendientes o, peor,
+    // fuera del balance del avión: 400 ESTRUCTURADO `GASTO_REQUIERE_VUELO`
+    // (la app lo distingue por `code` y manda a elegir el vuelo). Regla en
+    // `categoriaExigeVuelo` (derivada del destino por default, fuente única).
+    // Un `escala_id` IMPLICA vuelo (se resuelve más abajo y se valida que
+    // pertenezcan al mismo), así que cuenta como "con vuelo". Va ANTES de
+    // tocar la BD: el rechazo es del formulario, no de los datos.
+    // La OFICINA y el MECÁNICO quedan fuera a propósito (la oficina carga
+    // gastos sueltos y los liga después; el mecánico carga GAS en base).
+    if (
+      rol === Rol.PILOTO &&
+      !dto.vuelo_id &&
+      !dto.escala_id &&
+      categoriaExigeVuelo(dto.categoria)
+    ) {
+      throw new BadRequestException({
+        message: `Esta categoría es del vuelo: elige el vuelo. «${etiquetaCategoriaGasto(dto.categoria)}» siempre se registra con el vuelo al que pertenece.`,
+        error: 'GASTO_REQUIERE_VUELO',
+        details: {
+          categoria: dto.categoria,
+          categoria_label: etiquetaCategoriaGasto(dto.categoria),
+          destino: destinoCategoriaGasto(dto.categoria),
+        },
+      });
     }
     // Fecha del ticket razonable en capturas de CAMPO (28-ago): la IA leyó
     // "26/08/2025" en un ticket de la visita de 2026 y el gasto quedó un año
@@ -2898,13 +2930,17 @@ export class ExpensesService {
       const monto = Number(g.monto ?? 0);
       const filas = (g.repartos as Array<{ monto: unknown }> | null) ?? [];
       const sumaReparto = filas.reduce((a, r) => a + Number(r.monto), 0);
-      // Asignado = reparto manual; sin reparto, un gasto con avión propio
-      // cuenta entero a ese avión (comportamiento clásico); sin nada =
-      // empresa completa.
+      // Asignado = reparto manual. SIN reparto: un gasto con avión propio
+      // cuenta entero a ese avión SOLO si su categoría es del avión
+      // (INDIRECTO); las de EMPRESA (OTRO, NOMINA, GASOLINA, FIJO, VISITA)
+      // son de VuelaTour aunque traigan aeronave sellada — regla del cliente
+      // 11-sep-2026, fuente única `categoriaEsDeEmpresa`, la MISMA del
+      // balance/reparto/Libro Dinero: este resumen decía "asignado a aviones"
+      // un dinero que ningún libro por avión carga ya. Sin nada = empresa.
       const asignado =
         filas.length > 0
           ? Math.min(sumaReparto, monto)
-          : g.aeronave_id
+          : g.aeronave_id && !categoriaEsDeEmpresa(g.categoria as string | null)
             ? monto
             : 0;
       acc.total += monto;

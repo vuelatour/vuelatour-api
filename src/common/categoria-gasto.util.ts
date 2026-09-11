@@ -74,6 +74,60 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   PERSONAL_DUENO: 'Gastos personales de los dueños (fuera de la empresa)',
 };
 
+/** Destino por default que marca a una categoría como gasto de la EMPRESA. */
+const DESTINO_EMPRESA = 'Otros gastos (Balance general VuelaTour)';
+
+/**
+ * CATEGORÍAS DE EMPRESA — «la categoría de empresa manda sobre el vuelo»
+ * (regla del cliente, 11-sep-2026). Su gasto es de VuelaTour, no del avión:
+ * va SIEMPRE a la hoja "otros gastos" del Balance general (eje `fecha_gasto`)
+ * AUNQUE traiga vuelo o aeronave sellados, y NO resta en la fila del vuelo,
+ * ni en las hojas del libro del avión, ni en su cascada de utilidad.
+ *
+ * Se DERIVA de `CATEGORIA_GASTO_DESTINO` (mismo patrón que
+ * `categoriaExigeVuelo`): una categoría nueva con ese destino entra sola y
+ * nadie tiene que acordarse de copiarla a una segunda lista — el spec
+ * congela la membresía exacta de hoy, así que un cambio de destino que mueva
+ * dinero falla en pruebas en vez de hacerlo en silencio.
+ *
+ * Fuera a propósito: `PERSONAL_DUENO` (dinero personal del dueño, fuera de
+ * la empresa), `GAS` (hoja "combustible" del avión) y todo lo indirecto del
+ * avión (INDIRECTO, SERVICIOS, REFACCION).
+ */
+export const CATEGORIAS_GASTO_EMPRESA: ReadonlySet<string> = new Set(
+  (Object.keys(CATEGORIA_GASTO_DESTINO) as CategoriaGasto[]).filter(
+    (c) => CATEGORIA_GASTO_DESTINO[c] === DESTINO_EMPRESA,
+  ),
+);
+
+/** ¿El gasto es de la EMPRESA aunque traiga vuelo/avión? (ver arriba). */
+export function categoriaEsDeEmpresa(cat: string | null | undefined): boolean {
+  return !!cat && CATEGORIAS_GASTO_EMPRESA.has(cat);
+}
+
+/**
+ * Categorías que NUNCA son "pendiente de asignarle avión" — FUENTE ÚNICA de
+ * la bandeja de pendientes (`expenses.list?pendientes=1`), de su sugerencia
+ * por IA (`sugerirAsignaciones`), de la alerta diaria `gastos_sin_avion` y
+ * del pre-cierre del reparto. Si las cuatro no usan la MISMA lista, los
+ * conteos no cuadran y la bandeja "que debe quedar vacía" nunca se vacía.
+ *
+ *  - Las de EMPRESA (11-sep-2026): son de VuelaTour CON o SIN vuelo — se
+ *    administran en la pantalla "Otros gastos". Antes la lista se escribía a
+ *    mano en cada lector y un `.or('categoria.neq.OTRO,vuelo_id.not.is.null')`
+ *    dejaba dentro al OTRO CON vuelo.
+ *  - `INDIRECTO`: captura general, sin avión por diseño (jul 2026).
+ *  - `PERSONAL_DUENO`: jamás lleva avión (dinero personal del dueño).
+ *
+ * `SERVICIOS` y `REFACCION` NO están: sin avión SÍ son pendientes reales.
+ * Se expone como arreglo de strings para armar el `not.in(...)` de PostgREST.
+ */
+export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
+  ...CATEGORIAS_GASTO_EMPRESA,
+  'INDIRECTO',
+  'PERSONAL_DUENO',
+];
+
 /**
  * Etiqueta humana de un código de categoría. Fallback para códigos que el
  * enum no conoce (datos viejos, valores libres de la IA): el código
@@ -114,4 +168,49 @@ export function descripcionCategoriasGasto(): string {
     'Categoría del gasto. Código → etiqueta (UI) → destino por default (la oficina puede reacomodarlo después):',
     ...lineas,
   ].join('\n');
+}
+
+/**
+ * Categorías que SIEMPRE pertenecen a un vuelo aunque su destino por default
+ * no diga "Gastos directos del vuelo": la TUA/el permiso se pagan POR un
+ * vuelo y el honorario del piloto externo es de la operación que voló. Se
+ * listan aparte porque su destino contable es otro (hoja de permisos /
+ * directo del vuelo).
+ *
+ * **GAS salió de esta lista el 11-sep-2026** (pedido del cliente): un PILOTO
+ * también carga combustible EN BASE sin vuelo (igual que el mecánico, que ya
+ * estaba fuera del candado), y la pantalla de combustible de la app ofrece
+ * "Sin vuelo". El combustible no se pierde sin vuelo: su eje es `fecha_gasto`
+ * y su hoja "combustible" del balance se arma por AVIÓN (`aeronave_id`), no
+ * por vuelo — el pre-cierre ya vigila el GAS sin avión (ese sí bloquea).
+ */
+const CATEGORIAS_GASTO_SIEMPRE_DE_VUELO: ReadonlySet<string> = new Set([
+  'TUAS',
+  'PERMISO',
+  'PILOTO_EXTERNO',
+]);
+
+/** Prefijo del destino que marca a una categoría como "del vuelo". */
+const DESTINO_DIRECTO_DE_VUELO = 'Gastos directos del vuelo';
+
+/**
+ * ¿Esta categoría EXIGE vuelo? (helper puro, 11-sep-2026 — pedido de la app:
+ * "quiero registrar un gasto sin vuelo").
+ *
+ * Regla: es del vuelo si su destino por default son los «Gastos directos del
+ * vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO, COMIDA, HOTEL, TAXI,
+ * PILOTO_EXTERNO) o si está en la lista de arriba (PERMISO). Las de
+ * EMPRESA/indirectos (INDIRECTO, SERVICIOS, NOMINA, GASOLINA, OTRO, VISITA,
+ * FIJO, PERSONAL_DUENO), REFACCION (va a inventario) y GAS (11-sep-2026: el
+ * piloto también carga combustible en base) se capturan sin vuelo.
+ *
+ * Se deriva de `CATEGORIA_GASTO_DESTINO` a propósito: una categoría nueva
+ * hereda la regla desde su destino, sin otra lista que mantener. Un código
+ * que el enum no conoce ⇒ false (no se inventan candados sobre datos viejos).
+ */
+export function categoriaExigeVuelo(cat: string | null | undefined): boolean {
+  if (!cat) return false;
+  if (CATEGORIAS_GASTO_SIEMPRE_DE_VUELO.has(cat)) return true;
+  const destino = destinoCategoriaGasto(cat);
+  return destino != null && destino.startsWith(DESTINO_DIRECTO_DE_VUELO);
 }

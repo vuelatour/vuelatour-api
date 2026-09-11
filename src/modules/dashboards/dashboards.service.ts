@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import {
   expandirConReparto,
   fetchRepartos,
@@ -360,6 +361,19 @@ export class DashboardsService {
         else if (g.id) padresSinTc.add(g.id);
         continue;
       }
+      // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL AVIÓN/VUELO (cliente,
+      // 11-sep-2026 — fuente única `categoriaEsDeEmpresa`, la MISMA del
+      // balance, del reparto a socios y del Libro Dinero): OTRO, NOMINA,
+      // GASOLINA, FIJO y VISITA son gasto de VuelaTour aunque traigan avión
+      // SELLADO, así que no entran a `gastos_usd`/`costo_hora_usd` de ningún
+      // avión — van al bloque de EMPRESA (el dinero no se pierde, cambia de
+      // renglón). Sin esto, el tablero pintaba un costo por hora que el
+      // balance del mismo avión ya no reconocía. Los PARCIALES de un reparto
+      // manual sí son del avión (el reparto gana).
+      if (!g.es_reparto_parcial && categoriaEsDeEmpresa(g.categoria)) {
+        gastoEmpresa += usd;
+        continue;
+      }
       if (!g.aeronave_id) {
         gastoSinAvion += usd;
         continue;
@@ -399,7 +413,9 @@ export class DashboardsService {
         gastos_totales_usd: round2(totalGasto + gastoSinAvion + gastoEmpresa),
         gastos_avion_usd: round2(totalGasto),
         gastos_sin_avion_usd: round2(gastoSinAvion),
-        // Remanentes de repartos manuales: gasto de la EMPRESA VuelaTour.
+        // Gasto de la EMPRESA VuelaTour: remanentes de repartos manuales +
+        // (11-sep-2026) TODA categoría de empresa sin reparto — OTRO,
+        // NOMINA, GASOLINA, FIJO, VISITA — aunque traiga avión sellado.
         gastos_empresa_usd: round2(gastoEmpresa),
         horas_voladas: round2(totalHoras),
         costo_hora_promedio_usd:

@@ -715,6 +715,18 @@ export interface BalanceAvionGastoFilaPayload {
    *  hojas de gastos (29-ago-2026). null = API sin el dato. */
   categoria?: string | null;
   detalle: string;
+  /**
+   * Columna **PAGO** de la hoja "combustible" del balance por avión
+   * (11-sep-2026): forma de pago del gasto ya en etiqueta amable es-MX
+   * ("Efectivo", "Transferencia", "Tarjeta corporativa ****1234" —
+   * `etiquetaMedioPago`, espejo de `MEDIO_PAGO_LABELS` del panel). El
+   * cliente concilia las cargas contra el estado de cuenta del banco.
+   * `null` = gasto sin medio capturado → celda VACÍA (nunca un default).
+   * El API la manda en TODAS las hojas ledger; el renderer la pinta hoy
+   * solo en "combustible". Opcional por skew de deploy (pyservices
+   * viejo/API nueva y viceversa).
+   */
+  pago?: string | null;
   /** null = moneda extranjera sin TC (no convertible; va a pendientes). */
   monto_mxn: number | null;
   moneda_original: string | null;
@@ -1330,6 +1342,16 @@ export interface CotizacionInternaPdfRequest {
   /** Avión COTIZADO (snapshot); sin snapshot cae al avión del vuelo. Matrícula SIEMPRE visible aquí. */
   aeronave_cotizada_modelo: string | null;
   aeronave_cotizada_matricula: string | null;
+  /**
+   * Avión UTILIZADO: el asignado HOY al vuelo/tramos (11-sep-2026, control
+   * interno). Se cotiza con un avión y a veces vuela otro — el PDF del
+   * CLIENTE sigue mostrando solo el modelo COTIZADO; el interno pinta los
+   * dos. null en externos (su ficha ajena va en `avion_externo`) y sin
+   * avión asignado. pyservices arma el texto «matrícula · modelo».
+   */
+  aeronave_utilizada: { matricula: string | null; modelo: string | null } | null;
+  /** ⚠ el avión cotizado y el utilizado NO son el mismo (comparado por id). */
+  aeronave_cotizada_vs_utilizada_difiere: boolean;
   /** Vuelo cubierto por externo: "Modelo · Matrícula" (+ operador). */
   avion_externo: string | null;
   operador_externo: string | null;

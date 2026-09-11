@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsArray,
+  IsBoolean,
   IsDate,
   IsIn,
   IsNumber,
@@ -42,6 +43,25 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   @IsOptional()
   @IsUUID()
   client_request_id?: string;
+
+  /**
+   * CAMBIO DE AVIÓN DESDE EL COTIZADOR (11-sep-2026, invariante 14 + 9): si
+   * la revisión cambia `aeronave_id`, el avión nuevo pasa por el MISMO
+   * pre-check de `assign` (taller y squawk ALTA). Con esta bandera la
+   * asignación procede A SABIENDAS y se avisa al mecánico, igual que en
+   * assign/reassign. No aplica cuando el cotizador no cambió de avión.
+   */
+  @ApiPropertyOptional({
+    description:
+      'Aceptar discrepancia(s) de severidad ALTA del avión NUEVO al cambiarlo ' +
+      'desde el cotizador: sin ella, el cambio rechaza con 409 ' +
+      'SQUAWK_ALTA_SIN_RESOLVER (details.discrepancias); al aceptar se avisa ' +
+      'al mecánico. El avión en TALLER bloquea siempre (409 ' +
+      'AERONAVE_EN_TALLER).',
+  })
+  @IsOptional()
+  @IsBoolean()
+  aceptar_discrepancia_alta?: boolean;
 
   @ApiPropertyOptional()
   @IsOptional()

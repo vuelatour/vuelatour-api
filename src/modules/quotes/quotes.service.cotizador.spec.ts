@@ -27,6 +27,7 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type { EmailService } from '../notifications/email.service';
 import type { NotificationsService } from '../realtime/notifications.service';
+import type { FlightsService } from '../flights/flights.service';
 
 /**
  * Rediseño del cotizador (8-sep-2026): vista previa sin persistir (limpia vs
@@ -147,6 +148,9 @@ function servicio(
     {} as CalendarSyncService,
     {} as EmailService,
     {} as NotificationsService,
+    // `flights` solo interviene en el CAMBIO de avión de revise (taller /
+    // squawk ALTA); aquí ninguna revisión cambia de aeronave.
+    {} as FlightsService,
   );
   return { svc, findById };
 }

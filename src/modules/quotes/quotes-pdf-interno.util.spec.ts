@@ -1393,3 +1393,83 @@ describe('armarCotizacionInternaPayload — grupo y combinado', () => {
     expect(p.combinado_con_folio).toBe('1040');
   });
 });
+
+/**
+ * «Aeronave cotizada» vs «aeronave utilizada» (11-sep-2026, control interno):
+ * el PDF del CLIENTE solo muestra el modelo COTIZADO; el interno pinta los
+ * dos, porque la cotización se pacta con un avión y la operación puede salir
+ * en otro (cambio de avión, rotación por tramo) y el dinero del balance
+ * cuelga del UTILIZADO.
+ */
+describe('armarCotizacionInternaPayload — aeronave cotizada vs utilizada', () => {
+  const C206 = 'aaaaaaaa-0000-0000-0000-00000000c206';
+
+  it('mismo avión cotizado y utilizado: se manda el objeto y NO se marca diferencia', () => {
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          aeronave_utilizada: {
+            id: SENECA,
+            matricula: 'N4142R',
+            modelo: 'Seneca V',
+          },
+        }),
+      }),
+    );
+    expect(p.aeronave_cotizada_modelo).toBe('Seneca V');
+    expect(p.aeronave_utilizada).toEqual({
+      matricula: 'N4142R',
+      modelo: 'Seneca V',
+    });
+    expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(false);
+  });
+
+  it('cotizado en Seneca y volando en Cessna 206: los dos datos por separado + ⚠ difiere', () => {
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          aeronave_utilizada: {
+            id: C206,
+            matricula: 'XB-ANU',
+            modelo: 'Cessna 206',
+          },
+        }),
+      }),
+    );
+    // El cliente ve SIEMPRE el modelo cotizado; la matrícula solo en interno.
+    expect(p.aeronave_cotizada_modelo).toBe('Seneca V');
+    expect(p.aeronave_cotizada_matricula).toBe('N4142R');
+    expect(p.aeronave_utilizada).toEqual({
+      matricula: 'XB-ANU',
+      modelo: 'Cessna 206',
+    });
+    expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(true);
+  });
+
+  it('API sin el campo nuevo (skew): cae a aeronave_operativa, sin inventar diferencia', () => {
+    const p = armarCotizacionInternaPayload(insumos());
+    expect(p.aeronave_utilizada).toEqual({
+      matricula: 'N4142R',
+      modelo: 'Seneca V',
+    });
+    expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(false);
+  });
+
+  it('externo: no hay avión propio utilizado (su ficha ajena va en avion_externo)', () => {
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          es_externo: true,
+          operador_externo: 'Aerolíneas del Sur',
+          avion_externo_modelo: 'Hawker 400',
+          avion_externo_matricula: 'XA-REG',
+          aeronave_operativa: null,
+          aeronave_utilizada: null,
+        }),
+      }),
+    );
+    expect(p.aeronave_utilizada).toBeNull();
+    expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(false);
+    expect(p.avion_externo).toBe('Hawker 400 · XA-REG');
+  });
+});

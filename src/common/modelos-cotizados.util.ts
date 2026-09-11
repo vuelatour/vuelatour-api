@@ -99,3 +99,31 @@ export function modelosCotizados(
   }
   return out;
 }
+
+/**
+ * AVIONES REALMENTE UTILIZADOS (control interno, 11-sep-2026) — el espejo
+ * operativo de `modelosCotizados`: qué avión vuela HOY el itinerario, sin
+ * importar con cuál se PACTÓ el precio. La cotización puede haberse hecho en
+ * un Seneca y la operación salir en un Cessna: el PDF del cliente sigue
+ * mostrando el MODELO cotizado y la oficina necesita ver los dos datos
+ * separados ("aeronave cotizada" vs "aeronave utilizada").
+ *
+ * Reglas: tramos VIVOS (no cancelados) en orden de tramo, con la herencia de
+ * todo el sistema (`escala.aeronave_id ?? vuelo.aeronave_id`); a diferencia
+ * de `avionesDeTramos` NO se filtran ferries ni tramos solo-operativos (un
+ * ferry también lo voló un avión). Sin tramos vivos, el avión del vuelo.
+ * Ids distintos, orden de aparición.
+ */
+export function avionesUtilizados(
+  v: VueloModelosInput,
+  escalas: EscalaModelosInput[] | null | undefined,
+): string[] {
+  const out: string[] = [];
+  for (const e of escalas ?? []) {
+    if (e.cancelada_at != null) continue;
+    const id = e.aeronave_id ?? v.aeronave_id ?? null;
+    if (id && !out.includes(id)) out.push(id);
+  }
+  if (out.length === 0 && v.aeronave_id) out.push(v.aeronave_id);
+  return out;
+}

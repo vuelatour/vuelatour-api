@@ -1,6 +1,10 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  CATEGORIAS_GASTO_EMPRESA,
+  categoriaEsDeEmpresa,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
@@ -106,6 +110,17 @@ function repartirHoras(
  * total completo junto a cobros repartidos. La hoja "otros ingresos" sale
  * UNA sola vez por vuelo. Los gastos no se reparten: van al avión del tramo
  * ligado (avionDelGasto).
+ *
+ * **LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026)**:
+ * OTRO, NOMINA, GASOLINA, FIJO y VISITA (fuente única
+ * `CATEGORIAS_GASTO_EMPRESA`) son gasto de VuelaTour aunque el gasto traiga
+ * vuelo o avión sellado: entran ENTEROS en la hoja "otros gastos" (con el
+ * folio como referencia en el concepto), NO se acreditan a ningún avión en
+ * la hoja utilidades y su parte TUA embebida NO sale además como egreso en
+ * "otros ingresos" (sería restar dos veces en el mismo libro). Única
+ * excepción: los PARCIALES de un reparto MANUAL, que sí van al avión de
+ * cada parte. Misma regla, mismo helper y mismos números que el Balance por
+ * avión y el reparto a socios — los tres libros del cierre cuadran.
  */
 @Injectable()
 export class DineroReportService {
@@ -174,7 +189,7 @@ export class DineroReportService {
       cobrosRes,
       gastosVuelo,
       facturasRes,
-      gastosSinVuelo,
+      gastosEmpresaYSueltos,
       gastosGasRes,
     ] = await Promise.all([
       sb
@@ -222,14 +237,24 @@ export class DineroReportService {
             .in('vuelo_id', vueloIds)
             .neq('estado', 'CANCELADA')
         : Promise.resolve({ data: [], error: null } as const),
-      // "Otros gastos" del mes: sin vuelo (pensión, cera, nómina, etc.).
+      // "Otros gastos" del mes: los sueltos SIN vuelo de siempre (pensión,
+      // cera, nómina, etc.) MÁS, desde el 11-sep-2026, todos los de
+      // CATEGORÍA DE EMPRESA aunque traigan vuelo — LA CATEGORÍA MANDA SOBRE
+      // EL VUELO (regla del cliente; fuente única `CATEGORIAS_GASTO_EMPRESA`,
+      // la MISMA que usan el Balance general y el reparto a socios). Antes
+      // un OTRO/NOMINA ligado a un vuelo no salía en NINGUNA hoja de este
+      // libro: el Balance ya lo cobraba a la empresa y el Libro Dinero lo
+      // perdía — los dos libros del cierre no cuadraban.
       // fecha_gasto es DATE: comparación de días, sin componente horaria.
+      // `vuelo:vuelo_id(folio)` es solo traza para el concepto de la fila.
       sb
         .from('gasto')
         .select(
-          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, proveedor:proveedor_id(nombre)',
+          'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, aeronave_id, vuelo_id, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)',
         )
-        .is('vuelo_id', null)
+        .or(
+          `vuelo_id.is.null,categoria.in.(${[...CATEGORIAS_GASTO_EMPRESA].join(',')})`,
+        )
         // PERSONAL_DUENO fuera: es gasto personal del dueño, no del mes de
         // la empresa (réplica del Excel del cliente).
         .neq('categoria', 'PERSONAL_DUENO')
@@ -256,7 +281,7 @@ export class DineroReportService {
       cobrosRes,
       gastosVuelo,
       facturasRes,
-      gastosSinVuelo,
+      gastosEmpresaYSueltos,
       gastosGasRes,
     ]) {
       if (r.error) throw new Error(r.error.message);
@@ -829,6 +854,12 @@ export class DineroReportService {
       let tuaSinTc = false;
       let fechaTua: string | null = null;
       for (const g of gastosV) {
+        // COROLARIO de "la categoría de EMPRESA manda" (11-sep-2026): un
+        // OTRO/NOMINA/GASOLINA/FIJO/VISITA con vuelo ya restó ENTERO en la
+        // hoja "otros gastos"; sacar además su parte TUA embebida como
+        // egreso aquí la contaría DOS VECES en el mismo libro. (TUAS no es
+        // categoría de empresa: su apareo cobrado↔pagado sigue igual.)
+        if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
         const monto = num(g.monto) ?? 0;
         const parte =
           g.categoria === 'TUAS'
@@ -952,7 +983,11 @@ export class DineroReportService {
       }
     }
 
-    // ===== Hoja 3: otros gastos del mes (sin vuelo), con acumulado =====
+    // ===== Hoja 3: otros gastos del mes, con acumulado =====
+    // Universo (11-sep-2026): los sueltos SIN vuelo de siempre + TODOS los
+    // de CATEGORÍA DE EMPRESA aunque traigan vuelo o avión sellado (la
+    // categoría manda sobre el vuelo — misma regla y misma fuente única que
+    // el Balance general y el reparto a socios).
     // Reparto MANUAL (gasto_reparto, 26-ago-2026): la FILA del libro y el
     // acumulado NO cambian (el pago es uno); solo la ATRIBUCIÓN por avión de
     // la hoja utilidades usa los parciales — el remanente queda en el
@@ -960,16 +995,16 @@ export class DineroReportService {
     // ningún avión. Misma regla que el reparto a socios y el balance.
     const repartosDinero = await fetchRepartos(
       sb,
-      ((gastosSinVuelo.data ?? []) as Array<Record<string, unknown>>).map(
-        (g) => g.id as string,
-      ),
+      (
+        (gastosEmpresaYSueltos.data ?? []) as Array<Record<string, unknown>>
+      ).map((g) => g.id as string),
     );
     const otrosGastos: DineroOtroGastoFilaPayload[] = [];
     let acumulado = 0;
     const indirectosPorAvion = new Map<string, number>();
     const otrosPorAvion = new Map<string, number>();
     const permisosPorAvion = new Map<string, number>();
-    for (const g of (gastosSinVuelo.data ?? []) as Array<
+    for (const g of (gastosEmpresaYSueltos.data ?? []) as Array<
       Record<string, unknown>
     >) {
       // GAS fuera de "otros gastos" (26-ago-2026): el combustible tiene su
@@ -987,10 +1022,22 @@ export class DineroReportService {
       const prov = unwrapOne(g.proveedor as { nombre?: string } | null)?.nombre;
       const nota = ((g.notas as string | null) ?? '').split('\n')[0].trim();
       const filasReparto = repartosDinero.get(g.id as string);
+      // Referencia del vuelo (11-sep-2026, espejo del Balance general): un
+      // gasto de EMPRESA ligado a un vuelo entra ENTERO en esta hoja; el
+      // folio queda como traza para que nadie crea que se perdió — el dinero
+      // NO es del vuelo ni de su avión.
+      const folioRef = unwrapOne(g.vuelo as { folio?: unknown } | null)?.folio;
+      const referenciaVuelo =
+        g.vuelo_id == null
+          ? null
+          : typeof folioRef === 'number' || typeof folioRef === 'string'
+            ? `vuelo #${folioRef}`
+            : 'vuelo sin folio';
       const concepto = [
         etiquetaCategoriaGasto(g.categoria as string | null),
         prov ?? null,
         nota || null,
+        referenciaVuelo,
         filasReparto
           ? `repartido entre ${filasReparto.length} avión(es)`
           : null,
@@ -1018,10 +1065,13 @@ export class DineroReportService {
       //    29-ago) — acredita a "gastos indirectos" — el cliente los busca
       //    por su categoría; el cuadre no cambia (utilidades resta AMBOS
       //    cortes), solo cambia de columna.
-      //  - aeronave_id DIRECTO sin vuelo (INDIRECTO, REFACCION, OTRO, FIJO,
+      //  - aeronave_id DIRECTO sin vuelo (INDIRECTO, REFACCION, SERVICIOS,
       //    OPERACIONES, …) → gastos indirectos: no se ligan a un vuelo pero
       //    sí al avión.
       //  - GAS (pestaña propia) y TUAS (regla 7) nunca se acreditan.
+      //  - CATEGORÍA DE EMPRESA sin reparto (11-sep-2026: OTRO, NOMINA,
+      //    GASOLINA, FIJO, VISITA) tampoco, ni con avión sellado ni con
+      //    vuelo: son de VuelaTour (ver la rama explícita abajo).
       // Con reparto manual los PARCIALES mandan (aeronave_id del gasto se
       // ignora — regla binaria); cada parcial convierte con la MISMA regla
       // del padre (moneda + tc_gasto): sin TC no se acredita (ya está en el
@@ -1043,6 +1093,13 @@ export class DineroReportService {
             g.moneda === 'MXN' ? r.monto : tcg != null ? r.monto * tcg : null;
           if (mxnParcial != null) acreditar(r.aeronave_id, mxnParcial, true);
         }
+      } else if (categoriaEsDeEmpresa(g.categoria as string | null)) {
+        // LA CATEGORÍA DE EMPRESA MANDA (11-sep-2026): OTRO/NOMINA/GASOLINA/
+        // FIJO/VISITA son de VuelaTour aunque traigan avión SELLADO o vuelo
+        // — no se acreditan a ningún avión en utilidades (antes un NOMINA
+        // sellado a una matrícula caía en sus "gastos indirectos" mientras
+        // el Balance por avión ya lo había sacado de ahí). Sin reparto
+        // manual, el gasto entero se queda en el acumulado de la empresa.
       } else {
         const aid = g.aeronave_id as string | null;
         if (aid && mxn != null) acreditar(aid, mxn, false);

@@ -179,6 +179,73 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     vez; `otros_gastos` sigue viajando aparte porque alimenta "repartidos
     a aviones" del Balance general VuelaTour). Restar `otros_usd` además de
     `gastos_indirectos_usd` cuenta doble.
+    **La categoría de EMPRESA manda sobre el vuelo (cliente, 11-sep-2026).
+    APLICA A TODOS LOS LIBROS** — balance por avión, reparto a socios, Libro
+    Dinero, pre-cierre, reporte por vuelo, tablero y ficha del avión: un
+    gasto de `CATEGORIAS_GASTO_EMPRESA` NO es costo de ningún avión ni de
+    ningún vuelo aunque traiga `vuelo_id`/`aeronave_id` sellados; la ÚNICA
+    excepción son las PARTES de un reparto manual (`gasto_reparto`), que sí
+    van al avión de cada parte. Concretamente:
+    `CAT_EMPRESA` = {OTRO, NOMINA, GASOLINA, FIJO, VISITA} va SIEMPRE a la
+    hoja "otros gastos" del Balance general VuelaTour
+    (`gastosEmpresaYSueltos`, eje `fecha_gasto`) AUNQUE el gasto traiga
+    vuelo o aeronave sellados — el vuelo queda solo como referencia en el
+    detalle ("· vuelo #123"). Esas categorías **no restan** en la fila del
+    vuelo (la columna OTROS quedó en SOLO FBO; antes OTRO con vuelo caía
+    ahí — regla del 27-jul), ni en "Gastos Indirectos"/"otros gastos" del
+    libro del avión, ni en la cascada de `utilidad_despues_usd`.
+    En el **reparto a socios** (`profit-sharing.service`) 'OTRO' SALIÓ del
+    set `DIRECTO` y toda categoría de empresa sin reparto cae en `EXCLUIDO`
+    (repartida a mano va al grupo INDIRECTO = "otros gastos" del avión, y un
+    FIJO repartido al grupo FIJO); el TUA EMBEBIDO solo se descuenta de lo
+    que SÍ resta (grupo ≠ EXCLUIDO). El **pool de FIJO se sigue
+    prorrateando entre la flota activa** (doc 4.8): ese prorrateo no nace
+    del vuelo/avión sellado, así que la regla no lo toca.
+    En el **Libro Dinero** (`dinero-report.service`) la hoja "otros gastos"
+    dejó de ser «solo los gastos SIN vuelo»: lee `vuelo_id is null` **OR**
+    categoría de empresa (un `.or` en UNA consulta, sin duplicar filas),
+    cita el folio en el concepto, NO acredita a ningún avión en la hoja
+    utilidades sin reparto manual, y su TUA embebido YA NO sale además como
+    egreso "tuas pagadas" en "otros ingresos" (restaría dos veces en el
+    mismo libro). En el **reporte por vuelo** se listan con la nota "gasto
+    de VuelaTour — no resta al vuelo" y quedan fuera del remanente; en
+    `dashboards.gastos` van a `gastos_empresa_usd` (fuera de
+    `gastos_usd`/`costo_hora_usd` por avión); en `aircraft.metrics` fuera de
+    `finanzas`; en `groups.gastosPorHijo` fuera del gasto del hijo.
+    **Quién NO pide avión** (bandeja de pendientes, `sugerirAsignaciones`,
+    alerta `gastos_sin_avion` y pre-cierre): fuente única
+    `CATEGORIAS_GASTO_SIN_AVION` = empresa + INDIRECTO + PERSONAL_DUENO —
+    sin `vuelo_id` en la condición. Antes cada lector traía la lista a mano
+    con un `.or('categoria.neq.OTRO,vuelo_id.not.is.null')` que dejaba
+    DENTRO al «OTRO CON vuelo»: pendiente eterno de un dinero que ya no es
+    de ningún avión.
+    **Hoja "pendientes de captura" — horas voladas vs cobradas
+    (11-sep-2026)**: cobrar HORAS CERRADAS es normal (se cobran 4.0 y se
+    vuelan 4.3), así que el viejo pendiente «recotizar con las horas reales»
+    (umbral 0.01 hr) salía en casi todos los vuelos y tapaba lo que sí hay
+    que atender. Ahora es una NOTA informativa y solo con diferencia >
+    `UMBRAL_HORAS_INFORMATIVO` (0.5 h): «Vuelo #247 (…): voló 2.60 hr y se
+    cobraron 2.00 (diferencia 0.60 hr) — solo informativo». Nadie tiene que
+    recotizar.
+    Sobreviven intactas: `PERSONAL_DUENO` fuera del dinero de la empresa,
+    `GAS` en la hoja "combustible" del avión, y el REPARTO MANUAL que
+    sigue GANANDO (parciales a las hojas de sus aviones + remanente a la
+    empresa — por eso la consulta de parciales ya no exige `vuelo_id null`
+    en esas categorías). La lista es `CATEGORIAS_GASTO_EMPRESA`
+    (`categoria-gasto.util.ts`), **derivada** del destino "Otros gastos
+    (Balance general VuelaTour)": una categoría nueva con ese destino entra
+    sola y el spec congela la membresía de hoy (cambiar un destino mueve
+    dinero ⇒ falla en pruebas, no en el cierre). Su corolario: un gasto de
+    empresa entra UNA vez — "Otros movimientos" del general SALTA estas
+    categorías al calcular el TUA pagado (si no, la parte TUA embebida de un
+    OTRO/FIJO con vuelo restaría en la hoja "otros gastos" Y como egreso de
+    esa pestaña). La lectura de `gastosEmpresaYSueltos` va PAGINADA
+    (PostgREST corta en 1000 sin avisar). **Columna PAGO** (misma fecha): cada fila de
+    hoja ledger viaja con la forma de pago legible
+    (`src/common/medio-pago.util.ts#etiquetaMedioPago`, espejo de
+    `MEDIO_PAGO_LABELS` del panel; `TARJETA_CORP` añade " ****1234"; sin
+    medio capturado → null = celda vacía) para conciliar el combustible
+    contra el estado de cuenta del banco.
 
 11. **Cotización de GRUPO (4-sep-2026, `src/modules/groups/`)** — varios
     aviones para un mismo cliente y UN total. La cabecera `vuelo_grupo` NO
@@ -429,6 +496,107 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `GASTO_CONCILIADO`, `GASTO_DE_COMPRA` (+`details.compra_id/folio`),
       `GASTO_REPARTIDO` en `remove`.
 
+14. **Avión de la cotización: COTIZADO vs UTILIZADO, y el cambio de avión SÍ
+    se persiste (11-sep-2026, bug cotización #254).**
+    - Fuente única `resolverAeronaveDeRevision`
+      (`quotes/aeronave-revision.util.ts`), compartida por `revise()`,
+      `quickAdjust()` y el quote-like de `preview-html` (si divergen, la hoja
+      muestra un avión y se guarda otro): si el cotizador CAMBIÓ el avión
+      (`dto.aeronave_id` ≠ `vuelo.aeronave_id`) el cambio es DELIBERADO y
+      manda — se escribe `vuelo.aeronave_id` y los tramos VIVOS lo siguen con
+      el **blanket SELECTIVO** de siempre (solo herencia `null` o el avión
+      VIEJO; una rotación deliberada a un tercer avión se respeta). Si NO lo
+      cambió, manda el OPERATIVO del primer tramo ACTIVO (caso #80: cotizado
+      en XA-VGV, volado en N990GG). `quickAdjust` —que re-envía a propósito
+      el avión del SNAPSHOT para no mover el precio— y `reviseParaGrupo`
+      —el armado del grupo re-envía el avión del hijo como referencia de
+      tarifa y el cambio operativo lo hace `flights.assign`, que sí valida
+      taller/squawk y avisa— pasan `conservarAvionOperativo: true` y JAMÁS
+      reasignan. Sin esa guarda en el grupo, un hijo COMPLETADO (cuyo
+      `assign` se salta a propósito) se movía de avión al recotizar y
+      arrastraba sus tramos CON TACOS: horas de motor, gastos y balance de
+      dos aviones cambiaban en silencio (invariante 1). Antes el tramo 1
+      mandaba siempre: el snapshot y el historial guardaban el avión nuevo,
+      `vuelo.aeronave_id` se quedaba con el viejo, el formulario reabría con
+      el viejo y cada versión repetía el mismo diff «Avión X→Y» mientras la
+      hoja seguía diciendo el avión original.
+    - **Dos datos SEPARADOS para control interno**: `aeronave_cotizada`
+      (ficha del avión del SNAPSHOT vigente — el MODELO es lo único que ve el
+      cliente, vía `modelos-cotizados.util`) y `aeronave_utilizada`
+      (matrícula + modelo del avión asignado HOY al vuelo/tramos, con
+      `aeronaves_utilizadas` para multi-avión; helper puro
+      `avionesUtilizados`: tramos vivos con herencia, ferry y solo-operativa
+      INCLUIDOS). Viajan en `quotes.findById` (detalle/quote-like) y en
+      `flights.snapshot`; el PDF INTERNO los pinta juntos
+      (`aeronave_cotizada_modelo`/`_matricula`, `aeronave_utilizada`
+      {matricula, modelo} y `aeronave_cotizada_vs_utilizada_difiere`). El PDF
+      del CLIENTE sigue mostrando SOLO el modelo cotizado. Externos: null (su
+      ficha ajena vive en `avion_externo_*`).
+    - **CAMBIAR DE AVIÓN AL REVISAR ES UNA ASIGNACIÓN (11-sep-2026).** Con
+      `cambio_deliberado`, ANTES de escribir nada `revise` pasa por el MISMO
+      `FlightsService.validateAssignTargets` de `assign` (QuotesService lo
+      inyecta; jamás una réplica local): taller ⇒ 409 `AERONAVE_EN_TALLER`;
+      squawk ALTA sin resolver ⇒ 409 `SQUAWK_ALTA_SIN_RESOLVER` +
+      `details.discrepancias`, y `aceptar_discrepancia_alta` en el
+      `ReviseQuoteDto` lo acepta y dispara `notificarSquawkAceptado`
+      (MECANICO + espejo, dedupe diario) tras el write exitoso. Sin esto el
+      cotizador era la puerta trasera del candado del panel (invariante 9).
+      El **blanket NO toca lo que YA VOLÓ** (invariante 1): el UPDATE lleva
+      `.is('taco_salida', null).is('taco_llegada', null)` y NO corre si el
+      vuelo está EN_VUELO/COMPLETADO (ahí el cambio operativo se hace por
+      `assign`/`reassign-aircraft`, que validan y avisan). El vuelo y el
+      snapshot SÍ conservan el avión nuevo y `revise` devuelve `avisos[]`
+      (aditivo, siempre presente) diciendo qué tramos no se movieron.
+      `quickAdjust` y `reviseParaGrupo` pasan `conservarAvionOperativo` ⇒
+      nunca hay cambio deliberado ⇒ ni pre-check ni blanket.
+
+15. **Método de cobro: PREVISTO (vuelo) vs REAL (cobro) — 11-sep-2026.**
+    `cobro_vuelo.metodo_cobro` es lo que REALMENTE se recibió y es la ÚNICA
+    fuente del **recibo de pago** (`cobro-recibo.service`), de la
+    conciliación y de cualquier lectura de "con qué pagó": JAMÁS se pinta
+    `vuelo.metodo_cobro` como método de un cobro (cada parcialidad puede
+    venir por un medio distinto). `vuelo.metodo_cobro` es lo PREVISTO al
+    cotizar y **NINGÚN cobro lo reescribe** (corrección de la revisión
+    adversaria del 11-sep, que revirtió el sellado al liquidar): esa columna
+    es un INSUMO DEL PRECIO — define el IVA del desglose canónico v1.3 y la
+    comisión BillPocket en `calculate()`, el cotizador del panel rehidrata su
+    selector desde ella y el candado de rol del piloto (invariante 9) la
+    valida. Sellarla con el método real movía el total de la SIGUIENTE
+    revisión por dos caminos vivos (una cotización CANCELADA —`revise` sí las
+    acepta— y un vuelo con todos sus cobros reembolsados, neto 0) y dejaba
+    mintiendo a la etiqueta «Previsto en la cotización» del panel.
+    «Cómo se cobró al final» se DERIVA (fuente única
+    `metodo-cobro-final.util`: `vueloLiquidado`, `metodoCobroQueLiquido`,
+    `metodoCobroFinal`) y viaja SOLO LECTURA en el snapshot del vuelo:
+    `metodo_cobro_final` (método del último abono POSITIVO cuando el cobrado
+    NETO por `cobrosEnUsd` ≥ total − 1 USD, misma tolerancia que
+    `refreshCobradoFlag`; un vuelo en $0 nunca liquida) y
+    `metodo_cobro_final_difiere` (true cuando no coincide con lo previsto).
+    Si el cliente pide PERSISTIRLO, es una columna NUEVA
+    (`vuelo.metodo_cobro_final` + migración), nunca la del previsto.
+
+16. **Gasto de PILOTO sin vuelo (11-sep-2026, pedido de la app).** Un PILOTO
+    puede capturar un gasto SIN `vuelo_id` solo si la categoría NO es del
+    vuelo. Regla única `categoriaExigeVuelo`
+    (`src/common/categoria-gasto.util.ts`, derivada del destino por default +
+    la lista corta TUAS/PERMISO/PILOTO_EXTERNO): exigen vuelo las que
+    dicen «Gastos directos del vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO,
+    COMIDA, HOTEL, TAXI, PILOTO_EXTERNO) más PERMISO; las de
+    empresa/indirectos/refacción/servicios (REFACCION, INDIRECTO, SERVICIOS,
+    NOMINA, GASOLINA, OTRO, VISITA, FIJO, PERSONAL_DUENO) van sin vuelo.
+    **GAS salió de la lista el 11-sep-2026** (decisión del cliente): un
+    piloto también carga combustible EN BASE, como el mecánico —que ya
+    estaba fuera del candado por rol—, y la pantalla de combustible de la
+    app ofrece "Sin vuelo"; ese GAS sigue exigiendo `aeronave_id` por su
+    candado propio (sin avión sería invisible para balance y reparto). La
+    app espeja esta lista. Sin
+    vuelo y con categoría del vuelo: **400 ESTRUCTURADO `GASTO_REQUIERE_VUELO`**
+    («Esta categoría es del vuelo: elige el vuelo…», `details` con categoría,
+    etiqueta y destino) ANTES de tocar la BD. `escala_id` cuenta como vuelo
+    (el tramo lo resuelve). OFICINA y MECÁNICO quedan FUERA del candado a
+    propósito (la oficina liga después; el mecánico carga GAS en base). Con
+    vuelo, las reglas de siempre no cambian.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -512,3 +680,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.
+- **Vigilar (11-sep-2026)**: `reviseParaGrupo` pasa por la MISMA regla de
+  avión que el cotizador (invariante 14) — hoy el grupo re-envía el avión ya
+  persistido del hijo, así que no reasigna nada; si algún día el armado del
+  grupo manda un avión distinto sin pasar por `reassignAircraft`, ese cambio
+  SÍ moverá el vuelo y sus tramos.

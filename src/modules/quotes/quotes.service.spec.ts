@@ -25,6 +25,7 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarSyncService } from '../calendar/calendar-sync.service';
 import type { EmailService } from '../notifications/email.service';
 import type { NotificationsService } from '../realtime/notifications.service';
+import type { FlightsService } from '../flights/flights.service';
 
 /**
  * Motor v1.3 con extras `cantidad × unitario` / `por_persona` / origen GRUPO
@@ -75,6 +76,9 @@ function servicio(): QuotesService {
     {} as CalendarSyncService,
     {} as EmailService,
     {} as NotificationsService,
+    // `flights` solo interviene en el CAMBIO de avión de revise (taller /
+    // squawk ALTA): este spec prueba el motor `calculate`, que no lo toca.
+    {} as FlightsService,
   );
 }
 

@@ -4,6 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
@@ -135,9 +136,12 @@ export class AircraftService {
         .select('monto, moneda, vuelo:vuelo_id!inner(aeronave_id, estado)')
         .eq('vuelo.aeronave_id', id)
         .neq('vuelo.estado', 'CANCELADO'),
+      // `categoria`: LA CATEGORÍA DE EMPRESA MANDA SOBRE EL AVIÓN
+      // (11-sep-2026) — se filtra abajo, en memoria, para no depender de un
+      // `not.in` de PostgREST que además descartaría una categoría nula.
       this.supabase.service
         .from('gasto')
-        .select('monto, moneda')
+        .select('monto, moneda, categoria')
         .eq('aeronave_id', id),
       // Squawk ALTA sin resolver = avión no apto — MISMO criterio que el
       // candado de asignación (flights.service.validateAssignTargets):
@@ -250,6 +254,13 @@ export class AircraftService {
       bump(c.moneda as string, 'ingresos', Number(c.monto));
     }
     for (const g of (gastosRes.data ?? []) as Array<Record<string, unknown>>) {
+      // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL AVIÓN (cliente, 11-sep-2026 —
+      // fuente única `categoriaEsDeEmpresa`, la MISMA del balance, el
+      // reparto a socios, el Libro Dinero y el tablero): OTRO, NOMINA,
+      // GASOLINA, FIJO y VISITA son gasto de VuelaTour aunque estén sellados
+      // a esta matrícula. Sin este filtro, la ficha del avión pintaba una
+      // utilidad que su propio balance ya no reconocía.
+      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
       bump(g.moneda as string, 'gastos', Number(g.monto));
     }
     const finanzas = [...byMoneda.entries()].map(([moneda, v]) => ({

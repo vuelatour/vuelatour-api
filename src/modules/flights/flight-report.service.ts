@@ -5,7 +5,10 @@ import {
   type ReporteVueloLineaPayload,
   type ReporteVueloPayload,
 } from '../pyservices/pyservices.service';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  categoriaEsDeEmpresa,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
@@ -358,6 +361,12 @@ export class FlightReportService {
           [
             proveedorNombre(g),
             (g.notas as string | null)?.replace(/\s*\n+\s*/g, ' · ') || null,
+            // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (11-sep-2026): se
+            // LISTA (el dinero nunca desaparece) pero no resta en la
+            // economía del vuelo — igual que en el balance y el Libro Dinero.
+            categoriaEsDeEmpresa(g.categoria as string | null)
+              ? 'gasto de VuelaTour — no resta al vuelo'
+              : null,
           ]
             .filter(Boolean)
             .join(' · ') || null,
@@ -435,6 +444,14 @@ export class FlightReportService {
     let gastosSinTcCount = 0;
     let gastosSinTcMxn = 0;
     for (const g of gastosRows) {
+      // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026 —
+      // fuente única `categoriaEsDeEmpresa`, la MISMA del Balance por avión,
+      // del reparto a socios y del Libro Dinero): OTRO, NOMINA, GASOLINA,
+      // FIJO y VISITA son gasto de VuelaTour aunque estén ligados al vuelo.
+      // Se listan arriba (con su nota) pero NO restan en el remanente del
+      // vuelo — si restaran aquí, este reporte contradiría la fila del mismo
+      // vuelo en el balance, que ya los manda a la hoja "otros gastos".
+      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
       const usd = gastoUsd(g);
       if (usd == null) {
         gastosSinTcCount += 1;
@@ -668,6 +685,10 @@ export class FlightReportService {
           : cancelado && particion.comision_vendedor_usd > 0
             ? Number(totalCobrado.toFixed(2))
             : null,
+      // Dato de la COTIZACIÓN (método previsto; desde el 11-sep-2026 también
+      // "cómo se cobró al final" cuando un cobro liquidó el vuelo). El
+      // método REAL de cada abono va en cada línea de `cobros`
+      // (`cobro_vuelo.metodo_cobro`) — jamás se pinta el del vuelo ahí.
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
       horas_cotizadas_hr: horasCotizadas,

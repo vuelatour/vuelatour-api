@@ -9,6 +9,7 @@ import {
   avionOcupadoEnFecha,
   avisoAvionOcupado,
 } from '../../common/avion-ocupado.util';
+import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   movimientoDeSobre,
@@ -1689,7 +1690,7 @@ export class GroupsService {
     if (ids.length === 0) return out;
     const { data } = await this.supabase.service
       .from('gasto')
-      .select('vuelo_id, monto, moneda, tc_gasto')
+      .select('vuelo_id, monto, moneda, tc_gasto, categoria')
       .in('vuelo_id', ids)
       .limit(5000);
     const tcVuelo = new Map<string, number | null>();
@@ -1697,6 +1698,13 @@ export class GroupsService {
       const vid = g.vuelo_id as string;
       const s = out.get(vid);
       if (!s) continue;
+      // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026 —
+      // fuente única `categoriaEsDeEmpresa`): OTRO, NOMINA, GASOLINA, FIJO y
+      // VISITA son gasto de VuelaTour aunque estén ligados a este hijo. Ni
+      // se cuentan ni se suman aquí: el reporte por vuelo y el balance ya
+      // los sacaron del vuelo, y dos cifras distintas del MISMO vuelo es
+      // exactamente lo que rompe el cierre.
+      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
       s.n += 1;
       const monto = num(g.monto);
       if (g.moneda === 'USD') {

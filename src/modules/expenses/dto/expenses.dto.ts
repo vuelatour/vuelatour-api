@@ -176,7 +176,18 @@ export class CreateGastoDto {
   @IsString()
   tarjeta_terminacion?: string;
 
-  @ApiPropertyOptional({ description: 'Vuelo asociado (opcional)' })
+  @ApiPropertyOptional({
+    description:
+      'Vuelo asociado (opcional). Desde el 11-sep-2026 el PILOTO puede ' +
+      'capturar SIN vuelo, pero SOLO en categorías que no son del vuelo ' +
+      '(empresa/indirectos/refacción/servicios y GAS): las «directas del ' +
+      'vuelo» y TUAS/PERMISO/PILOTO_EXTERNO responden 400 con code ' +
+      'GASTO_REQUIERE_VUELO (regla única: categoriaExigeVuelo, ' +
+      'src/common/categoria-gasto.util.ts). GAS salió del candado el ' +
+      '11-sep-2026 (el piloto carga combustible en base, como el mecánico), ' +
+      'pero sigue exigiendo `aeronave_id` si no viene vuelo. Mandar ' +
+      '`escala_id` cuenta como mandar el vuelo (el tramo lo resuelve).',
+  })
   @IsOptional()
   @IsUUID()
   vuelo_id?: string;

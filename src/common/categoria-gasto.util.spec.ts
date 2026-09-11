@@ -2,6 +2,10 @@ import { CategoriaGasto } from '../modules/expenses/dto/expenses.dto';
 import {
   CATEGORIA_GASTO_DESTINO,
   CATEGORIA_GASTO_LABEL,
+  CATEGORIAS_GASTO_EMPRESA,
+  CATEGORIAS_GASTO_SIN_AVION,
+  categoriaEsDeEmpresa,
+  categoriaExigeVuelo,
   descripcionCategoriasGasto,
   destinoCategoriaGasto,
   etiquetaCategoriaGasto,
@@ -134,5 +138,159 @@ describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', (
       );
     }
     expect(texto.split('\n')).toHaveLength(codigos.length + 1);
+  });
+});
+
+/**
+ * Gasto SIN vuelo (11-sep-2026): el piloto solo puede capturar sin vuelo las
+ * categorías que NO son del vuelo. La regla se deriva del destino por
+ * default + la lista corta (TUAS/PERMISO/PILOTO_EXTERNO).
+ */
+describe('categoriaExigeVuelo', () => {
+  const DEL_VUELO: CategoriaGasto[] = [
+    CategoriaGasto.ATERRIZAJE,
+    CategoriaGasto.OPERACIONES,
+    CategoriaGasto.TUAS,
+    CategoriaGasto.FBO,
+    CategoriaGasto.COMIDA,
+    CategoriaGasto.HOTEL,
+    CategoriaGasto.TAXI,
+    CategoriaGasto.PERMISO,
+    CategoriaGasto.PILOTO_EXTERNO,
+  ];
+  const SIN_VUELO: CategoriaGasto[] = [
+    // GAS (11-sep-2026): el piloto también carga combustible EN BASE, sin
+    // vuelo — la pantalla de combustible de la app ofrece "Sin vuelo".
+    CategoriaGasto.GAS,
+    CategoriaGasto.REFACCION,
+    CategoriaGasto.FIJO,
+    CategoriaGasto.INDIRECTO,
+    CategoriaGasto.VISITA,
+    CategoriaGasto.GASOLINA,
+    CategoriaGasto.NOMINA,
+    CategoriaGasto.SERVICIOS,
+    CategoriaGasto.PERSONAL_DUENO,
+    CategoriaGasto.OTRO,
+  ];
+
+  it('las categorías del VUELO lo exigen', () => {
+    for (const c of DEL_VUELO) expect(categoriaExigeVuelo(c)).toBe(true);
+  });
+
+  it('las de empresa/indirectos/refacción/servicios NO lo exigen', () => {
+    for (const c of SIN_VUELO) expect(categoriaExigeVuelo(c)).toBe(false);
+  });
+
+  it('la partición cubre TODO el enum (una categoría nueva no se queda sin decidir)', () => {
+    expect([...DEL_VUELO, ...SIN_VUELO].sort()).toEqual(
+      Object.values(CategoriaGasto).sort(),
+    );
+  });
+
+  it('todas las que dicen «Gastos directos del vuelo» quedan dentro de la regla', () => {
+    for (const c of Object.values(CategoriaGasto)) {
+      if (CATEGORIA_GASTO_DESTINO[c].startsWith('Gastos directos del vuelo')) {
+        expect(categoriaExigeVuelo(c)).toBe(true);
+      }
+    }
+  });
+
+  it('GAS NO exige vuelo (11-sep-2026): el piloto carga combustible en base', () => {
+    // Cambio del cliente: el mecánico ya estaba fuera del candado por rol y
+    // el piloto hacía lo mismo en tierra. El combustible sin vuelo no se
+    // pierde (su hoja del balance se arma por AVIÓN y eje fecha_gasto).
+    expect(categoriaExigeVuelo(CategoriaGasto.GAS)).toBe(false);
+  });
+
+  it('código desconocido / vacío ⇒ false (no se inventan candados)', () => {
+    expect(categoriaExigeVuelo('FOO_BAR')).toBe(false);
+    expect(categoriaExigeVuelo(null)).toBe(false);
+    expect(categoriaExigeVuelo(undefined)).toBe(false);
+    expect(categoriaExigeVuelo('')).toBe(false);
+  });
+});
+
+/**
+ * CATEGORÍAS DE EMPRESA («la categoría manda sobre el vuelo», 11-sep-2026):
+ * su gasto sale del avión y vive en la hoja "otros gastos" del Balance
+ * general. La membresía se DERIVA del destino, así que este spec la CONGELA:
+ * mover un destino mueve dinero del cierre y debe fallar aquí primero.
+ */
+describe('categoriaEsDeEmpresa (11-sep-2026)', () => {
+  it('la lista congelada es exactamente OTRO, NOMINA, GASOLINA, FIJO, VISITA', () => {
+    expect([...CATEGORIAS_GASTO_EMPRESA].sort()).toEqual([
+      'FIJO',
+      'GASOLINA',
+      'NOMINA',
+      'OTRO',
+      'VISITA',
+    ]);
+  });
+
+  it('fuera a propósito: PERSONAL_DUENO, GAS y todo lo del avión', () => {
+    for (const c of [
+      'PERSONAL_DUENO',
+      'GAS',
+      'INDIRECTO',
+      'SERVICIOS',
+      'REFACCION',
+      'PERMISO',
+      'TUAS',
+      'FBO',
+      'OPERACIONES',
+    ]) {
+      expect(categoriaEsDeEmpresa(c)).toBe(false);
+    }
+  });
+
+  it('coincide con el destino "Otros gastos (Balance general VuelaTour)"', () => {
+    for (const c of Object.values(CategoriaGasto)) {
+      expect(categoriaEsDeEmpresa(c)).toBe(
+        CATEGORIA_GASTO_DESTINO[c] ===
+          'Otros gastos (Balance general VuelaTour)',
+      );
+    }
+  });
+
+  it('código desconocido / vacío ⇒ false', () => {
+    expect(categoriaEsDeEmpresa('FOO_BAR')).toBe(false);
+    expect(categoriaEsDeEmpresa(null)).toBe(false);
+    expect(categoriaEsDeEmpresa(undefined)).toBe(false);
+    expect(categoriaEsDeEmpresa('')).toBe(false);
+  });
+});
+
+/**
+ * CATEGORÍAS QUE NUNCA PIDEN AVIÓN — fuente única de la bandeja de
+ * pendientes, su sugerencia por IA, la alerta diaria `gastos_sin_avion` y el
+ * pre-cierre del reparto. Antes cada lector escribía la lista a mano y todos
+ * llevaban un `.or('categoria.neq.OTRO,vuelo_id.not.is.null')` que dejaba
+ * DENTRO al «OTRO CON vuelo»: desde el 11-sep-2026 ese gasto ya no es de
+ * ningún avión, así que pedirle aeronave es un pendiente eterno.
+ */
+describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
+  it('es exactamente las de EMPRESA + INDIRECTO + PERSONAL_DUENO', () => {
+    expect([...CATEGORIAS_GASTO_SIN_AVION].sort()).toEqual([
+      'FIJO',
+      'GASOLINA',
+      'INDIRECTO',
+      'NOMINA',
+      'OTRO',
+      'PERSONAL_DUENO',
+      'VISITA',
+    ]);
+  });
+
+  it('un OTRO CON vuelo tampoco pide avión (la categoría manda)', () => {
+    // El filtro de los cuatro lectores es exactamente esta pertenencia: no
+    // mira `vuelo_id`, así que un OTRO ligado a un vuelo queda fuera de la
+    // bandeja igual que uno suelto.
+    expect(CATEGORIAS_GASTO_SIN_AVION).toContain('OTRO');
+  });
+
+  it('SERVICIOS, REFACCION y GAS SÍ son pendientes reales sin avión', () => {
+    for (const c of ['SERVICIOS', 'REFACCION', 'GAS', 'OPERACIONES']) {
+      expect(CATEGORIAS_GASTO_SIN_AVION).not.toContain(c);
+    }
   });
 });

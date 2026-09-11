@@ -8,7 +8,11 @@ import {
 } from '../tipo-cambio/tipo-cambio.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  CATEGORIAS_GASTO_SIN_AVION,
+  categoriaEsDeEmpresa,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   expandirConReparto,
@@ -49,7 +53,10 @@ const DIRECTO = new Set([
   // Honorario del piloto externo (freelance, doc 3.7): costo directo del
   // vuelo — fuera de este set el reparto lo ignoraría e inflaría la utilidad.
   'PILOTO_EXTERNO',
-  'OTRO',
+  // 'OTRO' YA NO está aquí (regla del cliente, 11-sep-2026 — LA CATEGORÍA DE
+  // EMPRESA MANDA SOBRE EL VUELO): un OTRO con vuelo es gasto de VuelaTour,
+  // no costo del avión. Ver `categoriaEsDeEmpresa` en el clasificador de
+  // `computeAvion`. Sus PARTES de reparto manual sí van al avión.
 ]);
 /** Talleres, aceites, refacciones, mecanicos. */
 // OJO: la CATEGORÍA de gasto 'INDIRECTO' (captura sin vuelo, jul 2026) NO
@@ -61,7 +68,17 @@ const DIRECTO = new Set([
 // SERVICIOS (29-ago) es espejo de REFACCION: gasto directo del avión.
 const INDIRECTO = new Set(['REFACCION', 'SERVICIOS']);
 const PERMISO = new Set(['PERMISO']);
-/** Sueldos, seguros: se prorratean entre aviones activos. */
+/**
+ * Sueldos, seguros: se prorratean entre aviones activos (doc 4.8).
+ *
+ * NO es una excepción a la regla de empresa del 11-sep-2026: el FIJO nunca
+ * se carga al avión DEL VUELO ni al avión sellado — sale del pool y se
+ * reparte entre TODA la flota activa (`otrosPorAvion`). Lo que la regla
+ * prohíbe es que el vuelo/avión de un gasto de empresa lo convierta en costo
+ * de ESE avión; el prorrateo de sueldos entre la flota es otra decisión
+ * (doc 4.8) y sigue viva. Un FIJO REPARTIDO a mano sí va a los aviones de
+ * sus parciales (el reparto manual gana) y sale del pool.
+ */
 const FIJO = 'FIJO';
 /**
  * TUA pagado (regla 7, 28-ago-2026): grupo EXCLUIDO del reparto — solo nota de
@@ -1116,31 +1133,42 @@ export class ProfitSharingService {
       // idéntico a antes). Un FIJO repartido va al grupo FIJO manual (suma
       // en otros_prorrateados junto al pool — mismo campo de la cascada).
       const esTuas = g.categoria === TUAS_CAT;
+      // LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026,
+      // MISMA regla del Balance por avión y del Libro Dinero — fuente única
+      // `categoriaEsDeEmpresa`): OTRO, NOMINA, GASOLINA, FIJO y VISITA son
+      // gasto de VuelaTour, NO costo del avión, aunque el gasto traiga vuelo
+      // o avión sellado. Antes 'OTRO' vivía en DIRECTO y un comisariato
+      // ligado al vuelo restaba a la utilidad del socio mientras el balance
+      // ya lo mandaba a la hoja "otros gastos" del general: los dos libros
+      // del cierre no cuadraban. ÚNICA excepción: las PARTES de un reparto
+      // manual (`gasto_reparto`), que sí son del avión de cada parte.
+      const empresaSinReparto =
+        categoriaEsDeEmpresa(g.categoria) && !g.es_reparto_parcial;
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
         esTuas
           ? 'EXCLUIDO'
-          : // GASOLINA repartida a mano cuenta como "otros gastos" del avión
-            // (mismo grupo que INDIRECTO repartido); sin reparto = EXCLUIDO.
-            // NOMINA (29-ago): mismo tratamiento que INDIRECTO.
-            g.es_reparto_parcial &&
-              (g.categoria === 'INDIRECTO' ||
-                g.categoria === 'NOMINA' ||
-                g.categoria === 'GASOLINA' ||
-                g.categoria === 'VISITA')
-            ? 'INDIRECTO'
-            : g.es_reparto_parcial && g.categoria === FIJO
-              ? 'FIJO'
-              : DIRECTO.has(g.categoria)
-                ? 'DIRECTO'
-                : INDIRECTO.has(g.categoria)
-                  ? 'INDIRECTO'
-                  : PERMISO.has(g.categoria)
-                    ? 'PERMISO'
-                    : // FIJO se prorratea aparte; otras categorias no
-                      // avion-especificas SIN reparto (p. ej. la categoría
-                      // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
-                      'EXCLUIDO';
+          : empresaSinReparto
+            ? 'EXCLUIDO'
+            : // Parciales del reparto MANUAL: cuentan como "otros gastos"
+              // del avión (grupo INDIRECTO) — INDIRECTO, NOMINA, GASOLINA,
+              // VISITA y OTRO repartidos. FIJO repartido va a su grupo.
+              g.es_reparto_parcial &&
+                (g.categoria === 'INDIRECTO' ||
+                  (categoriaEsDeEmpresa(g.categoria) && g.categoria !== FIJO))
+              ? 'INDIRECTO'
+              : g.es_reparto_parcial && g.categoria === FIJO
+                ? 'FIJO'
+                : DIRECTO.has(g.categoria)
+                  ? 'DIRECTO'
+                  : INDIRECTO.has(g.categoria)
+                    ? 'INDIRECTO'
+                    : PERMISO.has(g.categoria)
+                      ? 'PERMISO'
+                      : // FIJO se prorratea aparte; otras categorias no
+                        // avion-especificas SIN reparto (p. ej. la categoría
+                        // INDIRECTO) se EXCLUYEN — detalle solo transparencia.
+                        'EXCLUIDO';
       // Clave separada para parciales: el detalle muestra "OTRO (repartido)"
       // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
       const clave = esTuas
@@ -1162,7 +1190,12 @@ export class ProfitSharingService {
       // gasto), convertido con la MISMA regla/TC de siempre (tc_gasto ??
       // oficial del día del gasto). Sin TC el gasto entero sigue en sin_tc_*
       // (nada se convierte a medias).
-      const tuaEmbebido = tuaEmbebidoDeGasto(g);
+      // Solo se descuenta de lo que SÍ resta en el avión: un gasto EXCLUIDO
+      // (TUAS, categoría de EMPRESA con vuelo) no aporta costo, así que
+      // "quitarle" su TUA embebido sería una deducción fantasma en la fila
+      // informativa (y doble conteo contra la hoja "otros gastos", donde el
+      // gasto entra ENTERO).
+      const tuaEmbebido = grupo === 'EXCLUIDO' ? 0 : tuaEmbebidoDeGasto(g);
       const conv = this.toUsd(
         tuaEmbebido > 0
           ? { ...g, monto: round2(Number(g.monto) - tuaEmbebido) }
@@ -2191,24 +2224,22 @@ export class ProfitSharingService {
       this.supabase.service,
       gastos.map((g) => g.id as string),
     );
-    // FIJO e INDIRECTO no llevan avión por diseño: no bloquean el cierre.
-    // OTRO sin vuelo tampoco: sin reparto es gasto de la EMPRESA VuelaTour
-    // a propósito (regla 26-ago — se reparte en la pantalla Otros gastos).
+    // Categorías que NO necesitan avión (no bloquean ni ensucian el cierre)
+    // — FUENTE ÚNICA `CATEGORIAS_GASTO_SIN_AVION`, la MISMA de la bandeja de
+    // pendientes y de la alerta diaria (si divergen, el conteo no cuadra):
+    //  - LAS DE EMPRESA (11-sep-2026: OTRO, NOMINA, GASOLINA, FIJO, VISITA):
+    //    son gasto de VuelaTour, van a la hoja "otros gastos" del general
+    //    CON o SIN vuelo y con o sin avión — pedirles aeronave era pedir que
+    //    el dinero del avión mintiera. Antes solo se exentaba «OTRO SIN
+    //    vuelo» y un OTRO ligado a un vuelo gritaba "sin avión" aunque su
+    //    destino ya no fuera ningún avión.
+    //  - INDIRECTO: sin avión por diseño (captura general, jul 2026).
+    //  - PERSONAL_DUENO: jamás lleva avión (dinero personal del dueño).
+    // SERVICIOS NO se exenta: sin avión SÍ bloquea (como REFACCION).
     const sinAvion = gastos.filter(
       (g) =>
         g.aeronave_id == null &&
-        g.categoria !== 'FIJO' &&
-        g.categoria !== 'INDIRECTO' &&
-        // NOMINA (29-ago): como INDIRECTO, sin avión por diseño. SERVICIOS
-        // NO se exenta: sin avión SÍ bloquea (como REFACCION).
-        g.categoria !== 'NOMINA' &&
-        // PERSONAL_DUENO jamás lleva avión (gasto personal del dueño).
-        g.categoria !== 'PERSONAL_DUENO' &&
-        // GASOLINA (vehículos) tampoco: gasto de la empresa, se reparte a
-        // mano en Otros gastos si acaso. VISITA ídem (rol visitante).
-        g.categoria !== 'GASOLINA' &&
-        g.categoria !== 'VISITA' &&
-        !(g.categoria === 'OTRO' && g.vuelo_id == null) &&
+        !CATEGORIAS_GASTO_SIN_AVION.includes(g.categoria as string) &&
         !repartosPre.has(g.id as string),
     );
     // Reparto incoherente: Σ parciales > monto del gasto (p. ej. se editó el

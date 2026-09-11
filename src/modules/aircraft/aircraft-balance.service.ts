@@ -9,7 +9,11 @@ import {
   TipoCambioService,
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  CATEGORIAS_GASTO_EMPRESA,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
+import { etiquetaMedioPago } from '../../common/medio-pago.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
@@ -59,12 +63,49 @@ const VUELO_COLS =
 // "Otros movimientos" del Balance general).
 // Regla del cliente (27 jul 2026, ajustada el mismo día): cada gasto va a su
 // columna POR CATEGORÍA sin importar el medio de pago (un taxi en efectivo es
-// PILOTO). OTROS = solo FBO + categoría OTRO (comisariatos, varios); mover
-// algo más a OTROS es decisión manual (se recategoriza el gasto). REFACCION y
-// FIJO van a OPERACIONES. GAS conserva SIEMPRE su columna (litros/precio).
-// El medio EFECTIVO solo se señala como "(efectivo)" en la nota de la celda.
+// PILOTO). Mover algo más a OTROS es decisión manual (se recategoriza el
+// gasto). REFACCION va a OPERACIONES. GAS conserva SIEMPRE su columna
+// (litros/precio). El medio EFECTIVO solo se señala como "(efectivo)" en la
+// nota de la celda.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
-const CAT_OTROS = new Set(['FBO', 'OTRO']);
+// OTROS de la fila del vuelo = SOLO FBO desde el 11-sep-2026 (antes FBO +
+// OTRO): ver CAT_EMPRESA — la categoría OTRO ya no resta en el avión.
+const CAT_OTROS = new Set(['FBO']);
+/**
+ * LA CATEGORÍA MANDA SOBRE EL VUELO (regla del cliente, 11-sep-2026).
+ *
+ * Estas categorías son gasto de la EMPRESA VuelaTour, no del avión: van
+ * SIEMPRE a la hoja "otros gastos" del Balance general VuelaTour AUNQUE el
+ * gasto traiga vuelo o aeronave sellados (antes, un OTRO con vuelo caía en
+ * la columna OTROS de la fila del vuelo — regla del 27-jul — y un NOMINA
+ * sellado a un avión caía en sus "Gastos Indirectos"). El vuelo queda como
+ * REFERENCIA en el detalle ("· vuelo #123"), nunca como dinero del avión:
+ * NO restan en la fila del vuelo, ni en las hojas del libro, ni en la
+ * cascada de `utilidad_despues_usd`.
+ *
+ * Excepciones que NO cambian:
+ *  - `PERSONAL_DUENO` sigue FUERA del dinero de la empresa (ni aquí ni allá).
+ *  - `GAS` sigue en la hoja "combustible" del avión (eje fecha_gasto).
+ *  - El REPARTO MANUAL (`gasto_reparto`) sigue GANANDO: los parciales viven
+ *    en las hojas de sus aviones y solo el REMANENTE es de la empresa.
+ *
+ * FUENTE ÚNICA `CATEGORIAS_GASTO_EMPRESA` (categoria-gasto.util.ts): se
+ * DERIVA del destino "Otros gastos (Balance general VuelaTour)" de
+ * `CATEGORIA_GASTO_DESTINO` — una categoría nueva con ese destino entra sola
+ * (antes eran dos listas a mano y olvidar una movía dinero en silencio). Su
+ * spec congela la membresía de hoy: OTRO, NOMINA, GASOLINA, FIJO, VISITA.
+ */
+const CAT_EMPRESA = CATEGORIAS_GASTO_EMPRESA;
+/**
+ * Diferencia (en HORAS) a partir de la cual la hoja "pendientes de captura"
+ * ANOTA que se voló más de lo cobrado. Regla del cliente (11-sep-2026):
+ * cobrar horas CERRADAS es normal (se cobran 4.0 y se vuelan 4.3), así que
+ * media hora es el umbral de lo que vale la pena mirar — y el texto es una
+ * NOTA, no una tarea ("solo informativo"): nadie tiene que recotizar. Antes
+ * el umbral era 0.01 hr con el texto "recotizar con las horas reales" y el
+ * aviso salía en casi todos los vuelos, tapando los pendientes reales.
+ */
+const UMBRAL_HORAS_INFORMATIVO = 0.5;
 // Etiquetas humanas de categoría (nota de celda, pendientes, columna
 // CATEGORÍA de las hojas, concepto de Otros movimientos): fuente única
 // `etiquetaCategoriaGasto` (src/common/categoria-gasto.util.ts, 2-sep-2026).
@@ -174,6 +215,10 @@ interface GastoRow {
   /** Aeropuerto/lugar del gasto (IATA o texto libre): nota "Op CUN $x". */
   lugar?: string | null;
   medio_pago: string | null;
+  /** Últimos 4 dígitos de la tarjeta corporativa (solo con
+   *  `medio_pago = 'TARJETA_CORP'`, CHECK de BD): columna PAGO de la hoja
+   *  "combustible" — conciliación contra el estado de cuenta. */
+  tarjeta_terminacion?: string | null;
   proveedor: { nombre?: string } | { nombre?: string }[] | null;
   /** Lectura IA de la factura: conceptos para separar el TUA embebido. */
   valor_ia_extraido: {
@@ -181,6 +226,13 @@ interface GastoRow {
   } | null;
   /** Clon parcial del reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
+  /**
+   * Referencia que `buildHoja` AGREGA al detalle de la fila (11-sep-2026):
+   * un gasto de categoría de empresa con vuelo vive en la hoja "otros
+   * gastos" del general y ahí el vuelo se cita como "· vuelo #123" — el
+   * folio es traza, no dinero del avión. Solo presentación.
+   */
+  referencia_detalle?: string | null;
   /**
    * Solo en la consulta de COMBUSTIBLE del mes (fuente única `avionDelGasto`,
    * verificación 28-ago): avión crudo del tramo y del vuelo embebidos, para
@@ -339,6 +391,21 @@ function ivaPctDe(v: VueloRow): number {
  *  - Horas de vuelo DERIVADAS de tacómetros (taco_llegada − taco_salida).
  *  - null se propaga (celda vacía): un monto sin TC JAMÁS se suma crudo ni se
  *    vuelve 0 en silencio — se lista en la hoja "pendientes de captura".
+ *
+ * **LA CATEGORÍA DE EMPRESA MANDA SOBRE EL VUELO (cliente, 11-sep-2026).**
+ * `CAT_EMPRESA` = {OTRO, NOMINA, GASOLINA, FIJO, VISITA}: SIEMPRE a la hoja
+ * "otros gastos" del Balance general VuelaTour (`gastosEmpresaYSueltos`,
+ * eje `fecha_gasto`), aunque el gasto traiga vuelo o aeronave. NO restan en
+ * la fila del vuelo (OTROS de la fila quedó en solo FBO), ni en "Gastos
+ * Indirectos"/"otros gastos" del libro del avión, ni en la cascada de
+ * `utilidad_despues_usd`; el vuelo se cita como referencia ("· vuelo #123").
+ * Sobreviven intactas: `PERSONAL_DUENO` fuera del dinero de la empresa,
+ * `GAS` en la hoja "combustible", y el REPARTO MANUAL que sigue GANANDO
+ * (parciales a los aviones + remanente a la empresa).
+ *
+ * Columna **PAGO** (11-sep-2026): cada fila de hoja ledger viaja con la
+ * forma de pago (`etiquetaMedioPago`, espejo del panel) para conciliar las
+ * cargas de combustible contra el estado de cuenta del banco.
  */
 @Injectable()
 export class AircraftBalanceService {
@@ -1154,7 +1221,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -1166,7 +1233,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
             )
             .eq('aeronave_id', aircraftId)
             .is('vuelo_id', null)
@@ -1202,7 +1269,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre), escala:escala_id(aeronave_id), vuelo:vuelo_id(aeronave_id, es_externo)',
+              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre), escala:escala_id(aeronave_id), vuelo:vuelo_id(aeronave_id, es_externo)',
             )
             .eq('categoria', 'GAS')
             .gte('fecha_gasto', desde)
@@ -1212,7 +1279,7 @@ export class AircraftBalanceService {
           ? sb
               .from('gasto')
               .select(
-                'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+                'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
               )
               .in('vuelo_id', vueloIds)
               .is('aeronave_id', null)
@@ -1288,10 +1355,16 @@ export class AircraftBalanceService {
         ? await sb
             .from('gasto_reparto')
             .select(
-              'aeronave_id, monto, gasto:gasto_id!inner(id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre))',
+              'aeronave_id, monto, gasto:gasto_id!inner(id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, valor_ia_extraido, proveedor:proveedor_id(nombre))',
             )
             .eq('aeronave_id', aircraftId)
-            .is('gasto.vuelo_id', null)
+            // Sin filtro `gasto.vuelo_id is null` desde el 11-sep-2026: un
+            // gasto de categoría de EMPRESA con vuelo ya NO vive en la fila
+            // del vuelo, así que su parcial repartido a este avión debe
+            // llegar aquí o el dinero restaría CERO veces. El filtro local
+            // de abajo cuida lo demás (un INDIRECTO con vuelo ya vive en la
+            // hoja "Gastos Indirectos" por `gastosVueloDelAvion`: contarlo
+            // aquí también sería doble).
             .gte('gasto.fecha_gasto', desde)
             .lte('gasto.fecha_gasto', hasta)
         : vacio;
@@ -1306,30 +1379,41 @@ export class AircraftBalanceService {
     );
     const parcialesAvion: GastoRow[] = (
       (repartosHaciaAvionRes.data ?? []) as Array<Record<string, unknown>>
-    ).map((r) => {
-      const padre = (Array.isArray(r.gasto)
-        ? r.gasto[0]
-        : r.gasto) as unknown as GastoRow;
-      const nota = (padre.notas ?? '').split('\n')[0].trim();
-      return {
-        ...padre,
-        aeronave_id: aircraftId,
-        monto: Number(r.monto),
-        notas: [
-          nota || null,
-          `reparto manual: $${Number(r.monto).toLocaleString('es-MX', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })} de $${Number(padre.monto).toLocaleString('es-MX', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-          })} ${padre.moneda ?? 'MXN'}`,
-        ]
-          .filter(Boolean)
-          .join(' · '),
-        es_reparto_parcial: true,
-      };
-    });
+    )
+      .filter((r) => {
+        const padre = (Array.isArray(r.gasto)
+          ? r.gasto[0]
+          : r.gasto) as unknown as GastoRow | undefined;
+        if (!padre) return false;
+        // Gasto SIN vuelo: el caso de siempre. CON vuelo: solo las
+        // categorías de EMPRESA (11-sep-2026) — las demás ya restan en la
+        // fila del vuelo o en las hojas por `gastosVueloDelAvion`.
+        return padre.vuelo_id == null || CAT_EMPRESA.has(padre.categoria);
+      })
+      .map((r) => {
+        const padre = (Array.isArray(r.gasto)
+          ? r.gasto[0]
+          : r.gasto) as unknown as GastoRow;
+        const nota = (padre.notas ?? '').split('\n')[0].trim();
+        return {
+          ...padre,
+          aeronave_id: aircraftId,
+          monto: Number(r.monto),
+          notas: [
+            nota || null,
+            `reparto manual: $${Number(r.monto).toLocaleString('es-MX', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })} de $${Number(padre.monto).toLocaleString('es-MX', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            })} ${padre.moneda ?? 'MXN'}`,
+          ]
+            .filter(Boolean)
+            .join(' · '),
+          es_reparto_parcial: true,
+        };
+      });
     const gastosAvion: GastoRow[] = [
       ...gastosAvionCrudos.filter((g) => !g.id || !repartidosIds.has(g.id)),
       ...parcialesAvion,
@@ -1994,6 +2078,14 @@ export class AircraftBalanceService {
           g.categoria === 'GAS'
         )
           continue;
+        // LA CATEGORÍA MANDA (regla del cliente, 11-sep-2026): OTRO, NOMINA,
+        // GASOLINA, FIJO y VISITA son gasto de la EMPRESA aunque el gasto
+        // traiga vuelo — no restan en NINGUNA columna de la fila ni en la
+        // cascada del avión. Su lugar es la hoja "otros gastos" del Balance
+        // general VuelaTour (`gastosEmpresaYSueltos`), donde el vuelo queda
+        // como referencia ("· vuelo #123"). Antes la categoría OTRO con
+        // vuelo caía en la columna OTROS (regla del 27-jul).
+        if (CAT_EMPRESA.has(g.categoria)) continue;
         if (g.categoria === 'TUAS') {
           // REGLA DEL CLIENTE (28-ago-2026, sustituye a la del 26-ago): el
           // TUA pagado es SOLO NOTA en la celda de OPERACIÓN — no suma en OP
@@ -2044,9 +2136,11 @@ export class AircraftBalanceService {
         // operación, el FBO se separa a la columna OTROS (SÍ es costo — ej.
         // factura $154.14 = Op $67.14 + FBO $87.00) y el TUA no suma a ningún
         // costo (traslado al pasajero); la nota lleva las partes POR SEPARADO.
-        // Exclusión ÚNICA: CATS_SIN_TUA_EMBEBIDO (la misma que usa
-        // tuaEmbebidoDeGasto en "Otros movimientos" del general — el TUA
-        // pagado de un vuelo debe ser el MISMO número en ambas hojas).
+        // Exclusiones: CATS_SIN_TUA_EMBEBIDO + las categorías de EMPRESA
+        // (11-sep-2026), que ni siquiera llegan aquí (el loop las saltó
+        // arriba) y que "Otros movimientos" del general también salta — el
+        // TUA pagado de un vuelo debe ser el MISMO número en ambas hojas y
+        // un OTRO/FIJO con vuelo viaja ENTERO a la hoja "otros gastos".
         const separarPartes = (): {
           opParte: number;
           tuaParte: number;
@@ -2174,7 +2268,12 @@ export class AircraftBalanceService {
         // TAMBIÉN como gasto, el costo se resta DOS veces y el sistema no
         // puede distinguirlo solo — se grita con la evidencia que hay.
         const gastosColumna = vGastos.filter(
-          (g) => !['TUAS', 'GAS', 'PERMISO', 'INDIRECTO'].includes(g.categoria),
+          (g) =>
+            !['TUAS', 'GAS', 'PERMISO', 'INDIRECTO'].includes(g.categoria) &&
+            // 11-sep-2026: las categorías de EMPRESA tampoco restan en las
+            // columnas (viven en el general) — no pueden ser el "mismo pago"
+            // duplicado que este aviso busca.
+            !CAT_EMPRESA.has(g.categoria),
         );
         const gastosColumnaMxn = gastosColumna.reduce(
           (acc, g) => acc + (gastoMxn(g) ?? 0),
@@ -2587,6 +2686,10 @@ export class AircraftBalanceService {
       // fecha_gasto) lo ponen en OTRO mes — los libros del cierre divergen.
       const fechasFuera = vGastos.filter(
         (g) =>
+          // Categorías de EMPRESA (11-sep-2026): su eje YA es fecha_gasto (la
+          // hoja "otros gastos" del general), igual que el reparto y el Libro
+          // Dinero — no hay divergencia que gritar.
+          !CAT_EMPRESA.has(g.categoria) &&
           g.fecha_gasto != null &&
           (g.fecha_gasto < desde || g.fecha_gasto > hasta),
       );
@@ -2604,18 +2707,23 @@ export class AircraftBalanceService {
           `${etiqueta}: ${cobroSinTc} cobro(s) en USD sin TC (ni TC del vuelo) — parcialidad vacía en MXN`,
         );
       }
-      // Regla del cliente: NUNCA se cobran menos horas de las voladas. Si el
-      // tacómetro registró más de lo cotizado, hay que recotizar el vuelo
-      // (revisar cotización con las horas reales). Solo aplica con cotización
-      // (D>0; sin cotización ya sale su propio pendiente) y con cliente NO
-      // interno (interno no cobra: recotizar no cambiaría un peso).
+      // Horas voladas > horas cobradas: NOTA INFORMATIVA (regla del cliente,
+      // 11-sep-2026). Antes era un pendiente que exigía "recotizar con las
+      // horas reales" en cuanto la diferencia pasaba de 0.01 hr; el cliente
+      // aclaró que cobrar HORAS CERRADAS es lo normal (se cobran 4.0 y se
+      // vuelan 4.3), así que el aviso gritaba en casi todos los vuelos y
+      // tapaba los pendientes que sí hay que atender. Ahora solo se anota
+      // cuando la diferencia pasa de MEDIA HORA (`UMBRAL_HORAS_INFORMATIVO`)
+      // y el texto dice explícitamente que es informativo: nadie tiene que
+      // recotizar. Solo aplica con cotización (D>0; sin cotización ya sale su
+      // propio pendiente) y con cliente NO interno (interno no cobra).
       // Horas de TODO el viaje (todas las matrículas) contra las horas
       // cobradas COMPLETAS del vuelo (horasCobrablesVuelo, sin el factor
       // multi-avión — D es solo la parte de este avión): en vuelos
-      // multi-avión comparar solo los tramos de este avión dejaba ciego el
-      // candado de recotizar (ida 1.4 + regreso 1.5 = 2.9 hr > 2.4 cobradas
-      // y nadie avisaba). Solo en la fila del avión que reporta. Tramos
-      // activos (vEscalas): un tramo cancelado no voló.
+      // multi-avión comparar solo los tramos de este avión dejaba ciega la
+      // nota (ida 1.4 + regreso 1.5 = 2.9 hr > 2.4 cobradas y nadie lo
+      // anotaba). Solo en la fila del avión que reporta. Tramos activos
+      // (vEscalas): un tramo cancelado no voló.
       let horasViaje: number | null = null;
       for (const e of vEscalas) {
         const s = num(e.taco_salida);
@@ -2628,14 +2736,14 @@ export class AircraftBalanceService {
       if (
         horasCobrablesVuelo > 0 &&
         horasViaje != null &&
-        horasViaje - horasCobrablesVuelo > 0.01 &&
+        horasViaje - horasCobrablesVuelo > UMBRAL_HORAS_INFORMATIVO &&
         !esClienteInterno &&
         reporta
       ) {
         pendientes.push(
-          `${etiqueta}: voló ${horasViaje.toFixed(2)} hr (todas las matrículas) y solo se cobraron ${horasCobrablesVuelo.toFixed(
+          `${etiqueta}: voló ${horasViaje.toFixed(2)} hr y se cobraron ${horasCobrablesVuelo.toFixed(
             2,
-          )} — recotizar con las horas reales (lo cobrado no puede ser menor a lo volado)`,
+          )} (diferencia ${(horasViaje - horasCobrablesVuelo).toFixed(2)} hr) — solo informativo`,
         );
       }
       // (Regla B, 28-ago tarde: la fila COMPARTIDA ya lleva su parte de la
@@ -2957,6 +3065,12 @@ export class AircraftBalanceService {
       ...gastosAvion.filter(
         (g) =>
           !HOJAS_APARTE.has(g.categoria) &&
+          // LA CATEGORÍA MANDA (11-sep-2026): un OTRO/NOMINA/GASOLINA/FIJO/
+          // VISITA sellado a ESTE avión es gasto de la EMPRESA — sale de
+          // "Gastos Indirectos" y vive en la hoja "otros gastos" del
+          // general. El REPARTO MANUAL sigue ganando: sus clones parciales
+          // (`es_reparto_parcial`) SÍ se quedan en el avión que los recibe.
+          (g.es_reparto_parcial === true || !CAT_EMPRESA.has(g.categoria)) &&
           (g.es_reparto_parcial !== true ||
             PARCIAL_A_INDIRECTOS.has(g.categoria)),
       ),
@@ -3509,16 +3623,28 @@ export class AircraftBalanceService {
   }
 
   /**
-   * Gastos de EMPRESA del periodo (29-ago-2026) — FUENTE ÚNICA para la
-   * hoja "otros gastos" del general (antes "gastos VuelaTour",
-   * 1-sep-2026) Y las filas sueltas de "Otros
-   * movimientos" (una sola lectura; el dinero aparece UNA vez): gastos sin
-   * vuelo NI avión (PERSONAL_DUENO fuera — dinero personal del dueño; GAS
-   * fuera — fila propia "gas sin avión" en Otros movimientos).
+   * Gastos de EMPRESA del periodo (29-ago-2026; regla ampliada el
+   * 11-sep-2026) — FUENTE ÚNICA para la hoja "otros gastos" del general
+   * (antes "gastos VuelaTour", 1-sep-2026) Y las filas sueltas de "Otros
+   * movimientos" (una sola lectura; el dinero aparece UNA vez).
+   *
+   * Dos universos que se UNEN sin duplicar (dedupe por id):
+   *  1. **Por CATEGORÍA (11-sep-2026, LA CATEGORÍA MANDA)**: todo gasto de
+   *     `CAT_EMPRESA` (OTRO, NOMINA, GASOLINA, FIJO, VISITA) del periodo,
+   *     CON o SIN vuelo, CON o SIN avión sellado. Es gasto de VuelaTour:
+   *     ya no resta en la fila del vuelo ni en las hojas del avión. El
+   *     vuelo queda como REFERENCIA en el detalle ("· vuelo #123").
+   *  2. **Sueltos de siempre**: gastos sin vuelo NI avión de cualquier otra
+   *     categoría (PERSONAL_DUENO fuera — dinero personal del dueño; GAS
+   *     fuera — fila propia "gas sin avión" en Otros movimientos).
+   *
+   * Eje del periodo: `fecha_gasto` (el mismo del reparto, el Libro Dinero y
+   * la conciliación), NO la fecha del vuelo.
+   *
    *  - `empresa`: los que nadie reparte (≠ TUAS) + el REMANENTE de un
    *    reparto manual parcial (los parciales viven en las hojas de sus
-   *    aviones; Σ < monto ⇒ el resto es de la empresa) → hoja "gastos
-   *    VuelaTour": egresos de VuelaTour, FUERA de toda cascada por avión.
+   *    aviones; Σ < monto ⇒ el resto es de la empresa) → hoja "otros
+   *    gastos": egresos de VuelaTour, FUERA de toda cascada por avión.
    *  - `tuasSueltos`: TUAS sin vuelo sin avión sin reparto — regla 7
    *    (28-ago): no restan en ninguna hoja; su único lugar sigue siendo la
    *    fila suelta "tuas sin vuelo" de "Otros movimientos".
@@ -3528,20 +3654,74 @@ export class AircraftBalanceService {
     hasta: string,
   ): Promise<{ empresa: GastoRow[]; tuasSueltos: GastoRow[] }> {
     const sb = this.supabase.service;
-    const { data, error } = await sb
-      .from('gasto')
-      .select(
-        'id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, lugar, proveedor:proveedor_id(nombre)',
-      )
-      .is('vuelo_id', null)
-      .is('aeronave_id', null)
-      .neq('categoria', 'PERSONAL_DUENO')
-      .neq('categoria', 'GAS')
-      .gte('fecha_gasto', desde)
-      .lte('fecha_gasto', hasta)
-      .order('fecha_gasto', { ascending: true });
-    if (error) throw new Error(error.message);
-    const sueltos = (data ?? []) as Array<Record<string, unknown>>;
+    // `vuelo:vuelo_id(folio)` = solo traza para el detalle; `medio_pago` +
+    // `tarjeta_terminacion` alimentan la columna PAGO de la hoja.
+    const COLS =
+      'id, vuelo_id, aeronave_id, categoria, monto, moneda, tc_gasto, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, proveedor:proveedor_id(nombre), vuelo:vuelo_id(folio)';
+    // PostgREST corta en `max-rows` (1000 en Supabase) SIN avisar: un
+    // periodo largo dejaría gastos fuera de la hoja y el dinero
+    // DESAPARECERÍA en silencio (lo contrario de la regla del libro). Las dos
+    // lecturas van paginadas (mismo patrón que el catálogo de clientes).
+    const PAGINA = 1000;
+    const leerPaginado = async (
+      pagina: (
+        rangoDesde: number,
+        rangoHasta: number,
+      ) => PromiseLike<{
+        data: unknown[] | null;
+        error: { message: string } | null;
+      }>,
+    ): Promise<Array<Record<string, unknown>>> => {
+      const todo: Array<Record<string, unknown>> = [];
+      for (let i = 0; ; i += PAGINA) {
+        const { data, error } = await pagina(i, i + PAGINA - 1);
+        if (error) throw new Error(error.message);
+        const filas = (data ?? []) as Array<Record<string, unknown>>;
+        todo.push(...filas);
+        if (filas.length < PAGINA) break;
+      }
+      return todo;
+    };
+    const [porCategoria, sueltosCrudos] = await Promise.all([
+      // (1) LA CATEGORÍA MANDA: con vuelo, con avión o sin nada.
+      leerPaginado((a, b) =>
+        sb
+          .from('gasto')
+          .select(COLS)
+          .in('categoria', [...CAT_EMPRESA])
+          .gte('fecha_gasto', desde)
+          .lte('fecha_gasto', hasta)
+          .order('fecha_gasto', { ascending: true })
+          .order('id', { ascending: true })
+          .range(a, b),
+      ),
+      // (2) Sueltos de siempre (TUAS incluidos: se separan abajo).
+      leerPaginado((a, b) =>
+        sb
+          .from('gasto')
+          .select(COLS)
+          .is('vuelo_id', null)
+          .is('aeronave_id', null)
+          .neq('categoria', 'PERSONAL_DUENO')
+          .neq('categoria', 'GAS')
+          .gte('fecha_gasto', desde)
+          .lte('fecha_gasto', hasta)
+          .order('fecha_gasto', { ascending: true })
+          .order('id', { ascending: true })
+          .range(a, b),
+      ),
+    ]);
+    // Un gasto de empresa SIN vuelo ni avión sale en las DOS consultas: el
+    // dinero entra UNA sola vez (dedupe por id; sin id, defensa por índice).
+    const porId = new Map<string, Record<string, unknown>>();
+    let sinId = 0;
+    for (const g of [...porCategoria, ...sueltosCrudos]) {
+      const id = typeof g.id === 'string' ? g.id : `sin-id-${sinId++}`;
+      if (!porId.has(id)) porId.set(id, g);
+    }
+    const sueltos = [...porId.values()].sort((a, b) =>
+      String(a.fecha_gasto ?? '').localeCompare(String(b.fecha_gasto ?? '')),
+    );
     const empresa: GastoRow[] = [];
     const tuasSueltos: GastoRow[] = [];
     if (sueltos.length === 0) return { empresa, tuasSueltos };
@@ -3556,8 +3736,21 @@ export class AircraftBalanceService {
         minimumFractionDigits: 2,
         maximumFractionDigits: 2,
       });
+    // Referencia del vuelo en el detalle (11-sep-2026): traza para que nadie
+    // crea que el gasto se perdió — el dinero NO es del vuelo ni del avión.
+    const referenciaVuelo = (g: Record<string, unknown>): string | null => {
+      if (g.vuelo_id == null) return null;
+      const v = embebido<{ folio?: unknown }>(
+        g.vuelo as { folio?: unknown } | { folio?: unknown }[] | null,
+      );
+      const folio = v?.folio;
+      return typeof folio === 'number' || typeof folio === 'string'
+        ? `vuelo #${folio}`
+        : 'vuelo sin folio';
+    };
     for (const g of sueltos) {
-      const fila = g as unknown as GastoRow;
+      const fila = { ...(g as unknown as GastoRow) };
+      fila.referencia_detalle = referenciaVuelo(g);
       const partes = repartos.get(g.id as string) ?? [];
       if (partes.length === 0) {
         // TUAS sin vuelo (regla 7): no restan en ninguna hoja — fila
@@ -4035,6 +4228,14 @@ export class AircraftBalanceService {
       let tuaSinTc = false;
       let fechaTua: string | null = null;
       for (const g of gastosV) {
+        // LA CATEGORÍA DE EMPRESA MANDA (11-sep-2026): un OTRO/FIJO con
+        // vuelo ya viaja ENTERO a la hoja "otros gastos" del general
+        // (`gastosEmpresaYSueltos`) — los ledger nunca separan el TUA
+        // embebido. Separarlo AQUÍ como egreso lo restaría DOS veces en el
+        // mismo libro y rompería la identidad "el TUA pagado de un vuelo es
+        // el MISMO número en ambas hojas" (la fila de la maestra ya salta
+        // estas categorías antes de llegar a `separarPartes`).
+        if (CAT_EMPRESA.has((g.categoria as string | null) ?? '')) continue;
         const monto = num(g.monto) ?? 0;
         const parte =
           g.categoria === 'TUAS'
@@ -4540,9 +4741,15 @@ export class AircraftBalanceService {
         const proveedor = Array.isArray(g.proveedor)
           ? g.proveedor[0]?.nombre
           : g.proveedor?.nombre;
-        const detalle =
+        const detalle = [
           g.notas?.trim() ||
-          [g.categoria, proveedor].filter(Boolean).join(' · ');
+            [g.categoria, proveedor].filter(Boolean).join(' · '),
+          // Referencia al vuelo de un gasto de EMPRESA (11-sep-2026): traza,
+          // no dinero del avión (la pone `gastosEmpresaYSueltos`).
+          g.referencia_detalle?.trim() || null,
+        ]
+          .filter(Boolean)
+          .join(' · ');
         let mxn: number | null;
         if (g.moneda === 'MXN') {
           mxn = round2(monto);
@@ -4574,6 +4781,13 @@ export class AircraftBalanceService {
           // la categoría cruda).
           categoria: etiquetaCategoriaGasto(g.categoria) || null,
           detalle,
+          // Columna PAGO (11-sep-2026): con qué se pagó, con la terminación
+          // de la tarjeta corporativa — el cliente concilia la hoja
+          // "combustible" contra el estado de cuenta del banco. Fuente única
+          // `etiquetaMedioPago` (espejo del panel); sin medio capturado va
+          // null (celda VACÍA, jamás un default falso). Viaja en TODAS las
+          // hojas ledger; hoy pyservices solo la pinta en "combustible".
+          pago: etiquetaMedioPago(g.medio_pago, g.tarjeta_terminacion),
           monto_mxn: mxn,
           moneda_original: g.moneda !== 'MXN' ? (g.moneda ?? null) : null,
           monto_original: g.moneda !== 'MXN' ? round2(monto) : null,

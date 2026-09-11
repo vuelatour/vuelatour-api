@@ -108,6 +108,15 @@ import {
   particionIngresoVuelo,
   type VueloIngresoInput,
 } from '../../common/ingreso-vuelo.util';
+import { avionesUtilizados } from '../../common/modelos-cotizados.util';
+import {
+  metodoCobroFinal,
+  metodoCobroQueLiquido,
+} from './metodo-cobro-final.util';
+// Ficha mínima de avión (cotizado vs utilizado): MISMO contrato que el
+// detalle de la cotización. `import type` = se borra al compilar (sin ciclo
+// flights ↔ quotes en runtime).
+import type { FichaAvionMin } from '../quotes/quotes.service';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   avisosCapacidad,
@@ -2536,6 +2545,16 @@ export class FlightsService {
     const grupoTotalAviones = grupoId
       ? await totalAvionesDeGrupo(this.supabase.service, grupoId)
       : null;
+    // Método con el que se TERMINÓ de pagar (derivado; el previsto sigue
+    // siendo `vuelo.metodo_cobro`). `monto_total_usd` vive en snapRow.
+    const metodoFinal = this.metodoCobroFinalDe(
+      {
+        metodo_cobro: (vuelo as { metodo_cobro?: unknown }).metodo_cobro,
+        monto_total_usd: snapRow?.monto_total_usd,
+      },
+      cobros as Array<Record<string, unknown>>,
+      conv.total_usd,
+    );
     // Participación por avión (regla B 28-ago): con tramos en aviones
     // distintos, la venta del avión se reparte entre ellos; aquí solo se
     // EXPONE (app/panel lo etiquetan). Se pasan TODAS las escalas — la
@@ -2545,6 +2564,13 @@ export class FlightsService {
         ...((snapRow ?? {}) as VueloIngresoInput),
         aeronave_id: aeronaveId,
         calculo_snapshot: snapRow?.calculo_snapshot,
+        // es_externo vive en VUELO_COLS (findById), no en la lectura del
+        // snapshot: sin él, un vuelo cubierto por externo expondría un
+        // "avión utilizado" que no es suyo.
+        es_externo:
+          ((vuelo as { es_externo?: boolean | null }).es_externo as
+            | boolean
+            | null) ?? null,
       },
       escalas,
     );
@@ -2571,6 +2597,13 @@ export class FlightsService {
       total_cobrado: Math.round(conv.total_usd * 100) / 100,
       cobros_sin_tc_count: conv.sin_tc_count,
       cobros_sin_tc_mxn: conv.sin_tc_mxn,
+      // «CÓMO SE COBRÓ AL FINAL» (11-sep-2026): DERIVADO de los cobros, nunca
+      // persistido en `vuelo.metodo_cobro` (esa columna es el PREVISTO y un
+      // insumo del precio: ver `metodoCobroFinalDe`). null mientras el vuelo
+      // no esté liquidado; `..._difiere` avisa cuando no coincide con lo
+      // pactado para que el panel lo pueda resaltar.
+      metodo_cobro_final: metodoFinal.metodo,
+      metodo_cobro_final_difiere: metodoFinal.difiere,
     };
   }
 
@@ -2589,11 +2622,15 @@ export class FlightsService {
     vuelo: {
       aeronave_id?: string | null;
       calculo_snapshot?: unknown;
+      es_externo?: boolean | null;
     } & VueloIngresoInput,
     escalas: EscalaParticipacionInput[],
   ): Promise<{
     participacion_aviones: ParticipacionAvionItem[];
     participacion_fuente: FuenteParticipacion;
+    aeronave_cotizada: FichaAvionMin | null;
+    aeronave_utilizada: FichaAvionMin | null;
+    aeronaves_utilizadas: FichaAvionMin[];
   }> {
     const p = participacionPorAeronave(
       {
@@ -2603,17 +2640,49 @@ export class FlightsService {
       escalas,
     );
     const particion = particionIngresoVuelo(vuelo);
-    const ids = [...p.factores.keys()];
+    // COTIZADA vs UTILIZADA (11-sep-2026, control interno): el avión con el
+    // que se PACTÓ el precio (snapshot) puede no ser el que vuela hoy. Se
+    // exponen SEPARADOS — el PDF del cliente sigue mostrando solo el modelo
+    // cotizado (`modelos-cotizados.util`).
+    const snapAeronave = (
+      vuelo.calculo_snapshot as {
+        aeronave?: { id?: unknown; matricula?: unknown; modelo?: unknown };
+      } | null
+    )?.aeronave;
+    const cotizadaId =
+      typeof snapAeronave?.id === 'string' ? snapAeronave.id : null;
+    const utilizadosIds = avionesUtilizados(
+      { aeronave_id: vuelo.aeronave_id ?? null },
+      escalas,
+    );
+    const ids = [
+      ...new Set(
+        [...p.factores.keys(), cotizadaId, ...utilizadosIds].filter(
+          (x): x is string => !!x,
+        ),
+      ),
+    ];
     const matriculaPorId = new Map<string, string>();
+    const modeloPorId = new Map<string, string | null>();
     if (ids.length > 0) {
       const { data } = await this.supabase.service
         .from('aeronave')
-        .select('id, matricula')
+        .select('id, matricula, modelo')
         .in('id', ids);
-      for (const a of data ?? []) {
+      for (const a of (data ?? []) as Array<Record<string, unknown>>) {
         matriculaPorId.set(a.id as string, a.matricula as string);
+        modeloPorId.set(a.id as string, (a.modelo as string | null) ?? null);
       }
     }
+    const ficha = (id: string | null): FichaAvionMin | null =>
+      id && matriculaPorId.has(id)
+        ? {
+            id,
+            matricula: matriculaPorId.get(id) ?? null,
+            modelo: modeloPorId.get(id) ?? null,
+          }
+        : null;
+    const esExterno = vuelo.es_externo === true;
     return {
       // Mapper único (fuente única): principal primero, venta del avión
       // repartida al centavo, horas siempre null.
@@ -2623,6 +2692,32 @@ export class FlightsService {
         matriculaPorId,
       ),
       participacion_fuente: p.fuente,
+      // Sin ficha en catálogo (avión dado de baja) el snapshot sigue
+      // diciendo con qué modelo se cotizó.
+      aeronave_cotizada:
+        ficha(cotizadaId) ??
+        (cotizadaId
+          ? {
+              id: cotizadaId,
+              matricula:
+                typeof snapAeronave?.matricula === 'string'
+                  ? snapAeronave.matricula
+                  : null,
+              modelo:
+                typeof snapAeronave?.modelo === 'string'
+                  ? snapAeronave.modelo
+                  : null,
+            }
+          : null),
+      aeronave_utilizada: esExterno
+        ? null
+        : (ficha(vuelo.aeronave_id ?? null) ??
+          ficha(utilizadosIds[0] ?? null)),
+      aeronaves_utilizadas: esExterno
+        ? []
+        : utilizadosIds
+            .map((id) => ficha(id))
+            .filter((f): f is FichaAvionMin => f != null),
     };
   }
 
@@ -10615,6 +10710,17 @@ export class FlightsService {
       );
     }
 
+    // «CÓMO SE COBRÓ AL FINAL» (11-sep-2026): NO se escribe nada en el
+    // vuelo. `vuelo.metodo_cobro` es el PREVISTO de la cotización y además
+    // un INSUMO DEL PRECIO (el cotizador rehidrata su selector de ahí y
+    // `calculate()` deriva el IVA por default y la comisión BillPocket):
+    // sellarlo con el método real movía el total de la siguiente revisión
+    // (alcanzable en una cotización CANCELADA —revise sí las acepta— y en un
+    // vuelo con todos sus cobros reembolsados), endurecía el candado del
+    // PILOTO (invariante 9) y dejaba mintiendo la etiqueta «Previsto en la
+    // cotización» del panel. El dato que pidió el cliente se DERIVA de los
+    // cobros y viaja en `snapshot.metodo_cobro_final` (solo lectura).
+
     const payload = {
       tipo: 'cobro_registrado',
       titulo: 'Cobro registrado',
@@ -10772,6 +10878,41 @@ export class FlightsService {
     };
     if (!sobre?.silenciarPush) this.notificarCobroRegistrado(payload, userId);
     return cobro!;
+  }
+
+  /**
+   * MÉTODO DE COBRO: PREVISTO (vuelo) vs REAL (cobro) — 11-sep-2026, fuente
+   * única `metodo-cobro-final.util`.
+   *
+   * `cobro_vuelo.metodo_cobro` es lo que REALMENTE se recibió y la ÚNICA
+   * fuente del recibo y de la conciliación. `vuelo.metodo_cobro` es lo
+   * PREVISTO al cotizar y NO se toca nunca aquí: además de definir el IVA
+   * del desglose canónico v1.3 y el candado de rol del piloto, es el valor
+   * con el que el cotizador rehidrata su selector, así que sobrescribirlo
+   * movería el precio de la siguiente revisión.
+   *
+   * «Cómo se cobró al final» se DERIVA para el panel/app: método del último
+   * abono positivo cuando el cobrado NETO (`cobrosEnUsd`) deja el vuelo
+   * liquidado, más la bandera de si DIFIERE del previsto. Solo lectura.
+   */
+  private metodoCobroFinalDe(
+    vuelo: Record<string, unknown>,
+    cobros: Array<Record<string, unknown>>,
+    cobradoUsd: number,
+  ): { metodo: string | null; difiere: boolean } {
+    const montoTotalUsd = Number(vuelo.monto_total_usd) || 0;
+    const metodo = metodoCobroQueLiquido(cobros, cobradoUsd, montoTotalUsd);
+    return {
+      metodo,
+      difiere:
+        metodo != null &&
+        metodoCobroFinal({
+          metodoDelCobro: metodo,
+          metodoVigente: vuelo.metodo_cobro as string | null,
+          cobradoUsd,
+          montoTotalUsd,
+        }) != null,
+    };
   }
 
   /**

@@ -24,10 +24,13 @@ import {
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   avionesDeTramos,
+  avionesUtilizados,
   modeloCotizadoDe,
   modelosCotizados,
 } from '../../common/modelos-cotizados.util';
+import { resolverAeronaveDeRevision } from './aeronave-revision.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
+import { FlightsService } from '../flights/flights.service';
 import { EmailService } from '../notifications/email.service';
 import { NotificationsService } from '../realtime/notifications.service';
 import { tripulacionDeVuelo } from '../../common/tripulacion.util';
@@ -262,6 +265,15 @@ export class QuotesService {
     private readonly calendar: CalendarSyncService,
     private readonly email: EmailService,
     private readonly notifications: NotificationsService,
+    /**
+     * CAMBIO DE AVIÓN desde el cotizador (11-sep-2026, invariante 14 + 9):
+     * `validateAssignTargets` (taller / squawk ALTA) y
+     * `notificarSquawkAceptado` — el MISMO pre-check y el MISMO aviso que
+     * `assign`, jamás una réplica local. (Sin ciclo de módulos:
+     * `QuotesModule` ya importa `FlightsModule` para el PDF interno y
+     * `flights.service` solo trae de aquí un `import type`.)
+     */
+    private readonly flights: FlightsService,
   ) {}
 
   /**
@@ -1596,12 +1608,19 @@ export class QuotesService {
     const vivas = (
       Array.isArray(current?.escalas) ? current.escalas : []
     ) as Array<Record<string, unknown>>;
-    // Avión que quedaría en vuelo.aeronave_id: como revise(), el OPERATIVO
-    // del primer tramo activo manda sobre la referencia del cotizador.
+    // Avión que quedaría en vuelo.aeronave_id: MISMA fuente única que
+    // revise() (`resolverAeronaveDeRevision`) — un cambio deliberado de
+    // avión en el cotizador manda; si no lo hubo, manda el OPERATIVO del
+    // primer tramo activo. Si esto divergiera de revise(), la hoja mostraría
+    // un avión y se guardaría otro.
     const primerActivo = vivas.find((e) => e.cancelada_at == null);
     const aeronaveOperativa = current
-      ? ((primerActivo?.aeronave_id as string | null | undefined) ??
-        dto.aeronave_id)
+      ? (resolverAeronaveDeRevision({
+          aeronaveDto: dto.aeronave_id,
+          aeronaveVuelo: (current.aeronave_id as string | null) ?? null,
+          aeronavePrimerTramoActivo:
+            (primerActivo?.aeronave_id as string | null | undefined) ?? null,
+        }).aeronave_id ?? dto.aeronave_id)
       : dto.aeronave_id;
     const fechaInicio =
       dto.fecha_traslado_inicial?.toISOString() ??
@@ -2027,12 +2046,20 @@ export class QuotesService {
    *   manda REEMPLAZAN a los persistidos (sin él, se ANCLAN: ver
    *   `anclarExtrasDeGrupo`).
    * - `grupo`: re-sella `meta.grupo` (posición/pax/total actualizados).
+   * - `conservarAvionOperativo`: la revisión NO nace del cotizador
+   *   (`quickAdjust` re-envía el avión del SNAPSHOT para no mover el precio)
+   *   → el avión del vuelo/tramos NO se reasigna nunca. Ver
+   *   `resolverAeronaveDeRevision`.
    */
   async revise(
     vueloId: string,
     dto: ReviseQuoteDto,
     userId: string,
-    opts: { desdeGrupo?: boolean; grupo?: GrupoHijoOpts } = {},
+    opts: {
+      desdeGrupo?: boolean;
+      grupo?: GrupoHijoOpts;
+      conservarAvionOperativo?: boolean;
+    } = {},
   ) {
     const current = await this.findById(vueloId);
     // IDEMPOTENCIA (8-sep-2026): la misma llave ya creó una versión → se
@@ -2138,24 +2165,69 @@ export class QuotesService {
       breakdown.meta.grupo = resto;
     }
 
-    // El avión del cotizador es la REFERENCIA de tarifa. Si la operación ya
-    // asignó un avión al tramo 1 (asignación por tramo), revisar el precio NO
-    // lo pisa: vuelo.aeronave_id espeja la ida y la tabla de vuelos refleja
-    // lo OPERACIONAL (caso vuelo #80: cotizado en XA-VGV, volado en N990GG —
-    // registrar el cobro lo regresaba al avión de la cotización).
-    // Primer tramo ACTIVO (vuelos combinados, 28-ago): con la ida ferry
-    // cancelada, leer el orden=1 a secas rebotaba el avión del vuelo al del
-    // tramo cancelado al revisar el precio.
-    const { data: ida } = await this.supabase.service
+    // AVIÓN DEL VUELO AL REVISAR (fuente única `resolverAeronaveDeRevision`,
+    // 11-sep-2026 — bug cotización #254): si el operador CAMBIÓ el avión en
+    // el cotizador, ese cambio manda y se persiste (antes se lo tragaba el
+    // avión del tramo 1 y cada versión repetía el mismo diff mientras la
+    // hoja seguía diciendo el avión original). Si NO lo cambió, manda el
+    // OPERATIVO del primer tramo ACTIVO — caso #80 (cotizado en XA-VGV,
+    // volado en N990GG: registrar el cobro, que pasa por quickAdjust, lo
+    // regresaba al avión de la cotización) — y el ajuste rápido lo fuerza
+    // con `conservarAvionOperativo`. Primer tramo ACTIVO (vuelos
+    // combinados, 28-ago): con la ida ferry cancelada, leer el orden=1 a
+    // secas rebotaba el avión del vuelo al del tramo cancelado.
+    // Se leen TODOS los tramos vivos (no solo el primero): el primero decide
+    // el avión operativo y la lista completa decide a cuáles puede llegar el
+    // blanket — un tramo con TACÓMETRO capturado ya voló y no se mueve de
+    // avión desde una cotización (invariante 1: sus horas de motor, gastos y
+    // balance cuelgan de esa matrícula).
+    const { data: tramosVivos } = await this.supabase.service
       .from('escala')
-      .select('aeronave_id')
+      .select('id, orden, aeronave_id, taco_salida, taco_llegada')
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null)
-      .order('orden', { ascending: true })
-      .limit(1)
-      .maybeSingle();
-    const aeronaveOperativa =
-      (ida?.aeronave_id as string | null) ?? dto.aeronave_id;
+      .order('orden', { ascending: true });
+    const vivos = (tramosVivos ?? []) as Array<{
+      id?: string;
+      orden?: number | null;
+      aeronave_id?: string | null;
+      taco_salida?: unknown;
+      taco_llegada?: unknown;
+    }>;
+    const ida = vivos[0] ?? null;
+    const avionRevision = resolverAeronaveDeRevision({
+      aeronaveDto: dto.aeronave_id,
+      aeronaveVuelo: current.aeronave_id as string | null,
+      aeronavePrimerTramoActivo: (ida?.aeronave_id as string | null) ?? null,
+      conservarOperativo: opts.conservarAvionOperativo === true,
+    });
+    const aeronaveOperativa = avionRevision.aeronave_id ?? dto.aeronave_id;
+    // CAMBIO DELIBERADO DE AVIÓN = asignación (invariante 14 + 9): el avión
+    // NUEVO pasa por el MISMO pre-check de `assign` ANTES de escribir nada —
+    // taller bloquea siempre (409 AERONAVE_EN_TALLER) y un squawk ALTA sin
+    // resolver rebota 409 estructurado SQUAWK_ALTA_SIN_RESOLVER salvo que el
+    // DTO traiga `aceptar_discrepancia_alta` (entonces se avisa al mecánico
+    // tras el write, igual que assign/reassign/reserva). Sin esto, el
+    // cotizador era una puerta trasera para meter un avión en taller o con
+    // discrepancia ALTA a un vuelo, saltándose el candado del panel.
+    // `conservarAvionOperativo` (quickAdjust / grupo) nunca reasigna, así que
+    // nunca llega aquí.
+    const cambiaAvion =
+      !current.es_externo &&
+      avionRevision.cambio_deliberado &&
+      !!avionRevision.aeronave_id;
+    const squawksAceptados = cambiaAvion
+      ? await this.flights.validateAssignTargets(
+          { aeronaveId: avionRevision.aeronave_id },
+          { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta === true },
+        )
+      : [];
+    /**
+     * Avisos NO bloqueantes de la revisión (aditivo, siempre presente): hoy
+     * solo los tramos que el cambio de avión NO pudo mover porque ya
+     * volaron. El panel los pinta; nada de esto tumba la revisión.
+     */
+    const avisos: string[] = [];
     // CAPACIDAD (4-sep-2026): vuelo PROPIO — pax por tramo ≤ asientos del
     // avión que lo vuela (avión del tramo persistido con herencia del
     // OPERATIVO que quedará en vuelo.aeronave_id). 409 CAPACIDAD_EXCEDIDA
@@ -2275,6 +2347,16 @@ export class QuotesService {
         'La cotización cambió mientras editabas (otra revisión o facturación). Recarga e intenta de nuevo.',
       );
     }
+    // Squawk ALTA aceptado a sabiendas: se avisa al MECÁNICO (espejo
+    // ADMIN/COORDINADOR, dedupe diario) DESPUÉS del write exitoso — el
+    // MISMO helper de assign/reassign/reserva, no una réplica.
+    if (squawksAceptados.length > 0 && avionRevision.aeronave_id) {
+      this.flights.notificarSquawkAceptado(
+        updated,
+        avionRevision.aeronave_id,
+        squawksAceptados,
+      );
+    }
     const pernoctasAntes = await this.pernoctaDestinos(vueloId);
     try {
       await this.replaceEscalas(
@@ -2292,6 +2374,70 @@ export class QuotesService {
             null,
         },
       );
+      // CAMBIO DE AVIÓN DESDE EL COTIZADOR (11-sep-2026): el vuelo ya quedó
+      // con el avión nuevo; sus tramos VIVOS lo siguen con el blanket
+      // SELECTIVO de siempre (mismo patrón que assign y combinarVuelos):
+      // solo se pisan los heredados (aeronave_id null) o los del avión
+      // VIEJO — una rotación deliberada a un tercer avión se respeta. Sin
+      // esto, la cotización diría un avión y los tacos/gastos/balance del
+      // tramo seguirían colgados del anterior.
+      //
+      // DOS FRENOS (11-sep-2026, invariante 1): el blanket NO toca un tramo
+      // con TACÓMETRO capturado (`taco_salida`/`taco_llegada` no nulos) ni
+      // corre cuando el vuelo ya está EN_VUELO o COMPLETADO. Ahí el avión ya
+      // voló: mover esos tramos cambiaría en silencio horas de motor, gastos
+      // y balance de DOS aviones. El cambio operativo de un vuelo volado se
+      // hace por `assign`/`reassign-aircraft` (que valida y avisa); la
+      // revisión conserva el avión nuevo en el vuelo y en el snapshot y lo
+      // ANOTA en `avisos[]` para que nadie crea que los tramos se movieron.
+      if (cambiaAvion) {
+        const nuevo = avionRevision.aeronave_id!;
+        const viejo = avionRevision.aeronave_anterior;
+        const conTaco = (e: {
+          taco_salida?: unknown;
+          taco_llegada?: unknown;
+        }) => e.taco_salida != null || e.taco_llegada != null;
+        // Tramos que el blanket SELECTIVO habría movido (herencia o avión
+        // viejo) — de ahí salen los que se quedan y el texto del aviso.
+        const alcanzables = vivos.filter(
+          (e) =>
+            (e.aeronave_id ?? null) === null ||
+            (viejo != null && e.aeronave_id === viejo),
+        );
+        const volados = alcanzables.filter(conTaco);
+        const vueloYaVolo =
+          current.estado === 'EN_VUELO' || current.estado === 'COMPLETADO';
+        if (vueloYaVolo) {
+          if (alcanzables.length > 0) {
+            avisos.push(
+              `El vuelo está ${current.estado === 'EN_VUELO' ? 'EN VUELO' : 'COMPLETADO'}: la cotización quedó con el avión nuevo, pero sus ${alcanzables.length} tramo(s) NO se movieron de aeronave (sus tacómetros, gastos y horas de motor siguen en el avión con el que se voló). Si el cambio es operativo, hazlo desde el vuelo con "Cambiar aeronave".`,
+            );
+          }
+        } else {
+          if (volados.length > 0) {
+            avisos.push(
+              `${volados.length} tramo(s) con tacómetro capturado NO se movieron de aeronave (tramo${volados.length > 1 ? 's' : ''} ${volados
+                .map((e) => `#${e.orden ?? '?'}`)
+                .join(
+                  ', ',
+                )}): ya volaron y sus horas de motor, gastos y balance cuelgan de esa matrícula. El resto del itinerario sí quedó en el avión nuevo.`,
+            );
+          }
+          let q = this.supabase.service
+            .from('escala')
+            .update({ aeronave_id: nuevo, updated_by: userId })
+            .eq('vuelo_id', vueloId)
+            .is('cancelada_at', null)
+            // Tramo VOLADO = intocable desde la cotización (invariante 1).
+            .is('taco_salida', null)
+            .is('taco_llegada', null);
+          q = viejo
+            ? q.or(`aeronave_id.is.null,aeronave_id.eq.${viejo}`)
+            : q.is('aeronave_id', null);
+          const { error: blanketErr } = await q;
+          if (blanketErr) throw new Error(blanketErr.message);
+        }
+      }
     } catch (err) {
       // NUNCA warn-only (auditoría 29-ago): el usuario debe saber qué quedó
       // aplicado — los MONTOS ya se escribieron (versión nueva), los TRAMOS
@@ -2407,7 +2553,7 @@ export class QuotesService {
     // flujo actual de cancelados se conserva tal cual.
     void this.calendar.syncFlight(vueloId);
     const escalas = await this.findEscalas(vueloId);
-    return { ...updated, escalas };
+    return { ...updated, escalas, avisos };
   }
 
   /**
@@ -2517,7 +2663,8 @@ export class QuotesService {
       // sobre el operativo — la velocidad de crucero y el prefijo de
       // matrícula (TUAS) del avión asignado por operación cambiarían las
       // horas/el precio en silencio. La asignación OPERATIVA no se toca:
-      // revise() la protege con el espejo del tramo 1 (caso #80).
+      // este camino NO es el cotizador, así que revise() recibe
+      // `conservarAvionOperativo` y jamás reasigna el vuelo (caso #80).
       aeronave_id: (snapshot?.aeronave?.id ?? current.aeronave_id) as string,
       tipo: TipoVuelo.MULTIESCALA,
       // Tramos tal como están persistidos. Si cambia el pax global, los tramos
@@ -2641,7 +2788,10 @@ export class QuotesService {
     // `void this.calendar.syncFlight(vueloId)` tras aplicar la revisión (sin
     // early-returns antes), así que un cambio de pasajeros —que sale en el
     // summary del evento— queda sincronizado sin un segundo disparo aquí.
-    return this.revise(vueloId, reviseDto, userId);
+    return this.revise(vueloId, reviseDto, userId, {
+      // El ajuste rápido NUNCA cambia de avión (re-envía el del snapshot).
+      conservarAvionOperativo: true,
+    });
   }
 
   /**
@@ -2999,6 +3149,15 @@ export class QuotesService {
    * Revisa un HIJO desde el grupo: la lista de extras enviada REEMPLAZA a
    * las líneas origen='GRUPO' persistidas (`desdeGrupo`) y `meta.grupo` se
    * re-sella. Mismos candados que `revise()` (cobrado/facturado/ventana).
+   *
+   * NUNCA reasigna el avión (`conservarAvionOperativo`, 11-sep-2026): el
+   * armado del grupo re-envía el avión del hijo como REFERENCIA de tarifa y
+   * el cambio operativo lo hace `flights.assign` (validaciones de taller/
+   * squawk, avisos a la tripulación, blanket a tramos). Sin esta guarda, un
+   * hijo cuyo `assign` se SALTA a propósito —`groups.revise` no asigna a los
+   * COMPLETADO— se movía igual de avión aquí, arrastrando sus tramos con
+   * tacos (y con ellos las horas de motor, los gastos y el balance de dos
+   * aviones) sin que nadie lo validara ni lo avisara.
    */
   async reviseParaGrupo(
     vueloId: string,
@@ -3006,7 +3165,11 @@ export class QuotesService {
     userId: string,
     grupo: GrupoHijoOpts,
   ) {
-    return this.revise(vueloId, dto, userId, { desdeGrupo: true, grupo });
+    return this.revise(vueloId, dto, userId, {
+      desdeGrupo: true,
+      grupo,
+      conservarAvionOperativo: true,
+    });
   }
 
   /**
@@ -3278,6 +3441,10 @@ export class QuotesService {
     participacion_fuente: FuenteParticipacion;
     aeronave_cotizada: FichaAvionMin | null;
     aeronave_operativa: FichaAvionMin | null;
+    /** Avión que vuela HOY el itinerario (matrícula + modelo). */
+    aeronave_utilizada: FichaAvionMin | null;
+    /** Todos los aviones de los tramos vivos (multi-avión), en orden. */
+    aeronaves_utilizadas: FichaAvionMin[];
     modelos_cotizados: string[];
   }> {
     const p = participacionPorAeronave(
@@ -3299,11 +3466,19 @@ export class QuotesService {
     )?.aeronave;
     const cotizadaId =
       typeof snapAeronave?.id === 'string' ? snapAeronave.id : null;
+    // Aviones UTILIZADOS (11-sep-2026): los de los tramos VIVOS con herencia
+    // — ferries y tramos solo-operativos incluidos (también los voló un
+    // avión). Es el espejo operativo del "cotizado" y va en la misma
+    // consulta de fichas.
+    const utilizadosIds = avionesUtilizados(vuelo, escalas);
     const ids = [
       ...new Set(
-        [...p.factores.keys(), vuelo.aeronave_id ?? null, cotizadaId].filter(
-          (x): x is string => !!x,
-        ),
+        [
+          ...p.factores.keys(),
+          vuelo.aeronave_id ?? null,
+          cotizadaId,
+          ...utilizadosIds,
+        ].filter((x): x is string => !!x),
       ),
     ];
     const matriculaPorId = new Map<string, string>();
@@ -3353,6 +3528,19 @@ export class QuotesService {
       aeronave_operativa: vuelo.es_externo
         ? null
         : ficha(vuelo.aeronave_id ?? null),
+      // CONTROL INTERNO (11-sep-2026): "aeronave cotizada" (modelo del
+      // snapshot vigente, lo único que ve el cliente) vs "aeronave
+      // utilizada" (matrícula + modelo del avión asignado HOY al vuelo/
+      // tramos). Un vuelo cubierto por EXTERNO no tiene avión propio: null
+      // (su ficha ajena vive en `avion_externo_*`).
+      aeronave_utilizada: vuelo.es_externo
+        ? null
+        : (ficha(vuelo.aeronave_id ?? null) ?? ficha(utilizadosIds[0] ?? null)),
+      aeronaves_utilizadas: vuelo.es_externo
+        ? []
+        : utilizadosIds
+            .map((id) => ficha(id))
+            .filter((f): f is FichaAvionMin => f != null),
       modelos_cotizados: modelosCotizados(vuelo, escalas, modeloPorId),
     };
   }

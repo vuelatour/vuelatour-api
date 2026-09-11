@@ -312,10 +312,15 @@ export function armarCotizacionInternaPayload(
     horasCotizadas = tiempoCobrable;
   }
 
-  // ---- Avión cotizado (snapshot); sin snapshot cae al avión del vuelo ----
+  // ---- Avión COTIZADO (snapshot) vs UTILIZADO (el que vuela hoy) ----
+  // Control interno (11-sep-2026): el PDF del CLIENTE solo muestra el modelo
+  // cotizado; aquí se imprimen los dos por separado — la cotización se pactó
+  // con un avión y la operación puede salir en otro (cambio de avión,
+  // rotación por tramo), y el dinero del balance cuelga del UTILIZADO.
   const cotizada = obj(q.aeronave_cotizada);
   const snapAeronave = obj(snap?.aeronave);
   const operativaRaw = obj(q.aeronave_operativa);
+  const utilizadaRaw = obj(q.aeronave_utilizada) ?? operativaRaw;
   const fichaCotizada = cotizada
     ? { matricula: str(cotizada.matricula), modelo: str(cotizada.modelo) }
     : snapAeronave
@@ -796,6 +801,23 @@ export function armarCotizacionInternaPayload(
     cotizado_por: nombreDe(creadoPorId),
     aeronave_cotizada_modelo: fichaCotizada?.modelo ?? null,
     aeronave_cotizada_matricula: fichaCotizada?.matricula ?? null,
+    // Avión UTILIZADO: matrícula + modelo del que vuela HOY. Objeto (no
+    // texto) porque pyservices arma la línea; null en externos y cuando no
+    // hay avión (la segunda línea simplemente no se pinta).
+    aeronave_utilizada:
+      esExterno || !utilizadaRaw
+        ? null
+        : {
+            matricula: str(utilizadaRaw.matricula),
+            modelo: str(utilizadaRaw.modelo),
+          },
+    // ⚠ para la oficina: se cotizó con un avión y vuela otro. Se compara por
+    // ID (dos aviones pueden compartir modelo); sin alguno de los dos, false.
+    aeronave_cotizada_vs_utilizada_difiere:
+      !esExterno &&
+      str(cotizada?.id) != null &&
+      str(utilizadaRaw?.id) != null &&
+      str(cotizada?.id) !== str(utilizadaRaw?.id),
     avion_externo: esExterno
       ? fichaTexto({
           modelo: str(q.avion_externo_modelo),

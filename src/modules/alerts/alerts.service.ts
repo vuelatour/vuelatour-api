@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { saldoCaja } from '../../common/caja-chica-saldo.util';
+import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
@@ -1394,19 +1395,14 @@ export class AlertsService {
       .from('gasto')
       .select('id, monto, moneda')
       .is('aeronave_id', null)
-      // MISMO criterio que la bandeja de pendientes de expenses.service (o
-      // el conteo no cuadra): FIJO e INDIRECTO no llevan avión por diseño,
-      // y OTRO sin vuelo tampoco es pendiente (26-ago: sin reparto es gasto
-      // de la EMPRESA — se administra en Otros gastos).
-      // (y PERSONAL_DUENO: gasto personal del dueño, jamás lleva avión).
-      // NOMINA (29-ago) como INDIRECTO; SERVICIOS NO se excluye (sin avión
-      // sí es pendiente, como REFACCION).
-      .not(
-        'categoria',
-        'in',
-        '(FIJO,INDIRECTO,NOMINA,PERSONAL_DUENO,GASOLINA,VISITA)',
-      )
-      .or('categoria.neq.OTRO,vuelo_id.not.is.null');
+      // MISMO criterio que el pre-cierre y la bandeja de pendientes de
+      // expenses.service (o el conteo no cuadra): fuente única
+      // `CATEGORIAS_GASTO_SIN_AVION` (empresa + INDIRECTO + PERSONAL_DUENO).
+      // Antes la lista se escribía a mano aquí y el
+      // `.or('categoria.neq.OTRO,vuelo_id.not.is.null')` dejaba pasar un
+      // OTRO CON vuelo: gritaba "asígnale avión" a un dinero que desde el
+      // 11-sep-2026 ya no es de ningún avión.
+      .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`);
     if (error) throw new Error(error.message);
     // Los repartidos manualmente (gasto_reparto) ya están asignados.
     const repartosAl = await fetchRepartos(
