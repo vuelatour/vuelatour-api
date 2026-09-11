@@ -164,6 +164,10 @@ export class ExpensesService {
     const columnas: TablaColumnaPayload[] = [
       { label: 'Fecha' },
       { label: 'Categoría' },
+      // Concepto (pedido de oficina 11-sep-2026): la primera línea de las
+      // notas del gasto (lo que capturó el piloto / la IA), o el lugar si no
+      // hay notas — sin esto el Excel no decía QUÉ se compró.
+      { label: 'Concepto' },
       { label: 'Avión' },
       { label: 'Proveedor' },
       { label: 'Capturó' },
@@ -184,9 +188,12 @@ export class ExpensesService {
       const medio = (x.medio_pago as string) ?? '';
       const comp = (x.estatus_comprobante as string) ?? '';
       const fact = (x.estatus_facturacion as string) ?? '';
+      const notas = ((x.notas as string | null) ?? '').split('\n')[0].trim();
+      const lugar = ((x.lugar as string | null) ?? '').trim();
       return [
         (x.fecha_gasto as string) ?? '',
         etiquetaCategoriaGasto(x.categoria as string | null),
+        notas || lugar,
         // Gasto repartido entre aviones: no está "pendiente" de nada.
         Array.isArray(x.repartos) && x.repartos.length > 0
           ? `Repartido (${x.repartos.length})`
