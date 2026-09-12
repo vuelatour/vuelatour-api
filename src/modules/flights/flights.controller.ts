@@ -138,7 +138,8 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Combina este vuelo con un anfitrión (estrategia de pernocta): cancela ambos ferries, reasigna avión/piloto y liga los vuelos. Los precios no cambian.',
+      'Combina este vuelo con un anfitrión (estrategia de pernocta): cancela ambos ferries, reasigna avión/piloto y liga los vuelos. Los precios no cambian. ' +
+      'Respuesta {vuelo, anfitrion, avisos[]}: avisos trae el texto ámbar si el avión del anfitrión está EN TALLER (nunca rechaza, 11-sep-2026) más capacidad/doble reserva.',
   })
   combinar(
     @Param('id', ParseUUIDPipe) id: string,
@@ -166,7 +167,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Regresa un vuelo cubierto por externo a vuelo propio: limpia operador/costo del apoyo; queda listo para asignar avión y piloto.',
+      'Regresa un vuelo cubierto por externo a vuelo propio: limpia operador/costo del apoyo; queda listo para asignar avión y piloto. ' +
+      'Respuesta + avisos[]: aviso ámbar si el avión propio elegido está EN TALLER (informativo, nunca bloquea).',
   })
   revertirExterno(
     @Param('id', ParseUUIDPipe) id: string,
@@ -196,7 +198,8 @@ export class FlightsController {
       'Reserva tentativa: aparta el espacio en el calendario SIN cotización (vuelo propio, o cubierto por un operador externo con es_externo: sin avión propio). Se cotiza después desde el detalle. ' +
       'piloto_externo_nombre (sin piloto_id) reutiliza/reactiva/crea al piloto externo por nombre (respuesta piloto_id + piloto_externo_creado). ' +
       'IDEMPOTENTE por client_request_id (9-sep-2026): la misma llave devuelve la reserva ya creada (200, idempotente:true) o la repara si quedó sin tramos; ' +
-      '409 estructurados: SQUAWK_ALTA_SIN_RESOLVER, AERONAVE_EN_TALLER, POSIBLE_DUPLICADO; 503 RESERVA_EN_PROCESO (transitorio).',
+      '409 estructurados: SQUAWK_ALTA_SIN_RESOLVER, POSIBLE_DUPLICADO; 503 RESERVA_EN_PROCESO (transitorio). ' +
+      'El avión EN TALLER ya NO rechaza (11-sep-2026): la reserva se guarda y el texto ámbar viaja en avisos[].',
   })
   async createReserva(
     @Body() dto: CreateReservaDto,
@@ -344,7 +347,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Assign aircraft / pilot / copiloto / apoyos (apoyo_ids 0..N, reemplaza la lista de nivel vuelo; apoyo_id legado = [apoyo_id]) / fecha to a flight (COTIZADO or CONFIRMADO)',
+      'Assign aircraft / pilot / copiloto / apoyos (apoyo_ids 0..N, reemplaza la lista de nivel vuelo; apoyo_id legado = [apoyo_id]) / fecha to a flight (COTIZADO or CONFIRMADO). ' +
+      'Respuesta + avisos[] (siempre presente): avión EN TALLER (aviso ámbar desde el 11-sep-2026, ya NO es 409), capacidad por tramo y doble reserva.',
   })
   assign(
     @Param('id', ParseUUIDPipe) id: string,
@@ -452,7 +456,8 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Cambio de aeronave de último minuto: clona el vuelo a la nueva matrícula (cobros se mueven) y el original queda CANCELADO con sus gastos.',
+      'Cambio de aeronave de último minuto: clona el vuelo a la nueva matrícula (cobros se mueven) y el original queda CANCELADO con sus gastos. ' +
+      'Respuesta = el clon + avisos[]: aviso ámbar si la aeronave nueva está EN TALLER (no rechaza).',
   })
   reassignAircraft(
     @Param('id', ParseUUIDPipe) id: string,
@@ -525,7 +530,8 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Asigna aeronave/piloto/copiloto (null = hereda del vuelo)/apoyos del tramo (apoyo_ids reemplaza SOLO los de ese tramo) a UN tramo (ida o regreso por separado). El tramo de ida (orden=1) espeja avión/piloto/fecha en el vuelo.',
+      'Asigna aeronave/piloto/copiloto (null = hereda del vuelo)/apoyos del tramo (apoyo_ids reemplaza SOLO los de ese tramo) a UN tramo (ida o regreso por separado). El tramo de ida (orden=1) espeja avión/piloto/fecha en el vuelo. ' +
+      'Respuesta + avisos[]: avión EN TALLER (ámbar, nunca 409), capacidad del tramo y doble reserva.',
   })
   assignLeg(
     @Param('legId', ParseUUIDPipe) legId: string,

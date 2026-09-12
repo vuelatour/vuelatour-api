@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
+import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import {
   buscarClientePorNombre,
   nombreClienteParaCrear,
@@ -1254,10 +1255,11 @@ export class FlightsService {
         'Selecciona una aeronave distinta a la actual.',
       );
     }
-    const squawksAceptados = await this.validateAssignTargets(
-      { aeronaveId: dto.aeronave_id },
-      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
-    );
+    const { squawksAceptados, avisos: avisosTaller } =
+      await this.validateAssignTargets(
+        { aeronaveId: dto.aeronave_id },
+        { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+      );
     // Vuelo COMBINADO: cambiar de avión rompe la premisa de la combinación
     // (el avión que pernocta ya no es el que vuela) — la liga se rompe en
     // ambos ANTES de clonar y el clon nace sin ella.
@@ -1501,7 +1503,9 @@ export class FlightsService {
     this.notificarSquawkAceptado(clonRow, dto.aeronave_id, squawksAceptados, {
       folioOriginalCancelado: (original as { folio: number }).folio,
     });
-    return clon!;
+    // `avisos` ADITIVO (11-sep-2026): el clon sale con el aviso ámbar si la
+    // aeronave nueva está en taller — la reasignación NUNCA se rechaza por eso.
+    return { ...clon!, avisos: avisosTaller };
   }
 
   /**
@@ -3140,7 +3144,8 @@ export class FlightsService {
 
   /**
    * True si la aeronave tiene un servicio de mantenimiento en curso (EN_TALLER).
-   * Se usa para impedir asignarla a vuelos (Doc 4.3: "no en mantenimiento").
+   * INFORMATIVO desde el 11-sep-2026: ya NO impide asignarla (ver
+   * `avisoTallerDe`); lo usan el semáforo del avión y el aviso ámbar.
    */
   async aircraftEnTaller(aeronaveId: string): Promise<boolean> {
     const { data, error } = await this.supabase.service
@@ -3152,6 +3157,55 @@ export class FlightsService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     return !!data;
+  }
+
+  /**
+   * TALLER = AVISO, NUNCA CANDADO (cliente, 11-sep-2026): FUENTE ÚNICA del
+   * aviso para TODO camino que elige avión (assign, assign por tramo,
+   * reserva, reassign-aircraft, combinar, cotización create/revise y el
+   * grupo). Devuelve `[]` (sin avión, o el avión no está en taller) o un
+   * único texto `avisoAeronaveEnTaller(matrícula)` para anexar a `avisos[]`
+   * de la respuesta. Jamás lanza por taller: antes era un 409
+   * `AERONAVE_EN_TALLER` que obligaba a cotizar con otro avión aunque el
+   * vuelo fuera dentro de dos meses.
+   *
+   * Best-effort COMPLETO (nunca lanza): un aviso es presentación, así que ni
+   * la lectura de `mantenimiento` ni la de la matrícula pueden tumbar la
+   * operación. Si falla la primera, se devuelve `[]` (sin aviso) en vez de
+   * romper — coherente con «el taller no debe limitarte»: un error de lectura
+   * jamás debe convertirse en un candado. Si falla la segunda, el aviso sale
+   * igual con «El avión». Esto IMPORTA en los caminos donde el aviso se
+   * calcula DESPUÉS del write (`quotes.create`, `revertirExterno`): un 500
+   * ahí dejaría el dato guardado y al operador creyendo que no se guardó.
+   */
+  async avisoTallerDe(aeronaveId?: string | null): Promise<string[]> {
+    if (!aeronaveId) return [];
+    try {
+      if (!(await this.aircraftEnTaller(aeronaveId))) return [];
+    } catch (err) {
+      this.logger.warn(
+        `avisoTallerDe ${aeronaveId}: no se pudo leer mantenimiento (se sigue sin aviso): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+      return [];
+    }
+    let matricula: string | null = null;
+    try {
+      const { data: av } = await this.supabase.service
+        .from('aeronave')
+        .select('matricula')
+        .eq('id', aeronaveId)
+        .maybeSingle();
+      matricula = (av?.matricula as string | null) ?? null;
+    } catch (err) {
+      this.logger.warn(
+        `avisoTallerDe ${aeronaveId}: no se pudo leer la matrícula: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    return [avisoAeronaveEnTaller(matricula)];
   }
 
   /**
@@ -3355,14 +3409,16 @@ export class FlightsService {
       dto.piloto_id !== null &&
       dto.piloto_id !== '';
 
-    // Doc 4.3: no se asigna avión/piloto con documento crítico vencido ni avión en taller.
-    const squawksAceptados = await this.validateAssignTargets(
-      {
-        aeronaveId: dto.aeronave_id,
-        pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
-      },
-      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
-    );
+    // Doc 4.3: squawk ALTA exige confirmación; documento crítico vencido y
+    // avión EN TALLER solo avisan (`avisosTaller` → `avisos[]`, 11-sep-2026).
+    const { squawksAceptados, avisos: avisosTaller } =
+      await this.validateAssignTargets(
+        {
+          aeronaveId: dto.aeronave_id,
+          pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+        },
+        { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+      );
 
     // Copiloto (segundo piloto del viaje): valida que exista y no choque con el
     // piloto principal. null = quitarlo.
@@ -3684,22 +3740,26 @@ export class FlightsService {
     if (dto.aeronave_id && squawksAceptados.length > 0) {
       this.notificarSquawkAceptado(data!, dto.aeronave_id, squawksAceptados);
     }
-    // AVISOS (4-sep-2026, nunca candado): capacidad de asientos por tramo y
-    // doble reserva del avión. En un hijo de GRUPO, cambiar el avión sin
-    // recotizar deja el precio desactualizado (bandera en el snapshot).
+    // AVISOS (4-sep-2026, nunca candado): TALLER (11-sep-2026), capacidad de
+    // asientos por tramo y doble reserva del avión. En un hijo de GRUPO,
+    // cambiar el avión sin recotizar deja el precio desactualizado (bandera
+    // en el snapshot).
     const avisos = dto.aeronave_id
-      ? await this.avisosOperacionAvion({
-          vueloId: id,
-          aeronaveId: dto.aeronave_id,
-          fechaVuelo:
-            dto.fecha_vuelo ?? (current.fecha_vuelo as string | null) ?? null,
-          // El RETURNING ya trae la fecha_fin recalculada por el trigger.
-          fechaFin:
-            (data as { fecha_fin?: string | null }).fecha_fin ??
-            (current.fecha_fin as string | null) ??
-            null,
-          paxDefault: Number(current.pasajeros) || null,
-        })
+      ? [
+          ...avisosTaller,
+          ...(await this.avisosOperacionAvion({
+            vueloId: id,
+            aeronaveId: dto.aeronave_id,
+            fechaVuelo:
+              dto.fecha_vuelo ?? (current.fecha_vuelo as string | null) ?? null,
+            // El RETURNING ya trae la fecha_fin recalculada por el trigger.
+            fechaFin:
+              (data as { fecha_fin?: string | null }).fecha_fin ??
+              (current.fecha_fin as string | null) ??
+              null,
+            paxDefault: Number(current.pasajeros) || null,
+          })),
+        ]
       : [];
     if (avionCambio) await this.marcarPrecioDesactualizadoGrupo(id);
     return { ...data!, avisos };
@@ -3890,15 +3950,23 @@ export class FlightsService {
   }
 
   /**
-   * Valida que un avión/piloto pueda asignarse (doc 4.3): sin documento crítico
-   * vencido y sin la aeronave en taller. Reutilizable por vuelo y por tramo.
+   * Valida que un avión/piloto pueda asignarse (doc 4.3). Reutilizable por
+   * vuelo y por tramo.
+   *
+   * TALLER (regla del cliente 11-sep-2026): YA NO BLOQUEA. Antes lanzaba 409
+   * `AERONAVE_EN_TALLER`; hoy devuelve el texto único de
+   * `avisoAeronaveEnTaller` en `avisos` y el caller lo anexa a los `avisos[]`
+   * de su respuesta (ámbar en panel y app). Ningún camino del API rechaza
+   * por taller.
    *
    * Squawk ALTA (regla 2-sep-2026, "avisar sin bloquear"): sin
    * `aceptarDiscrepanciaAlta` el 409 sale ESTRUCTURADO (code
    * `SQUAWK_ALTA_SIN_RESOLVER` + `details.discrepancias`) para que el panel
-   * ofrezca el confirm; con la bandera NO lanza y DEVUELVE la lista de
-   * squawks aceptados — el caller DEBE avisar al mecánico tras el write
-   * exitoso (`notificarSquawkAceptado`).
+   * ofrezca el confirm; con la bandera NO lanza y DEVUELVE la lista en
+   * `squawksAceptados` — el caller DEBE avisar al mecánico tras el write
+   * exitoso (`notificarSquawkAceptado`). ESTE candado NO cambió.
+   *
+   * Documentos críticos vencidos: solo avisan a oficina (política ago-2026).
    */
   /**
    * Discrepancias de severidad ALTA sin resolver de un avión (criterio
@@ -3924,8 +3992,13 @@ export class FlightsService {
 
   /**
    * Público desde el 4-sep-2026: el armador de la cotización de GRUPO
-   * (GroupsService) valida taller/squawk/documentos de cada avión y piloto
-   * ANTES de crear los N hijos con exactamente esta regla.
+   * (GroupsService) valida squawk/documentos de cada avión y piloto ANTES de
+   * crear los N hijos con exactamente esta regla.
+   *
+   * Devuelve SIEMPRE `{ squawksAceptados, avisos }` (11-sep-2026): los
+   * `avisos` son informativos (hoy, el taller) y el caller los suma a los
+   * `avisos[]` de su respuesta; un caller que solo valida piloto puede
+   * ignorar el resultado.
    */
   async validateAssignTargets(
     targets: {
@@ -3933,40 +4006,25 @@ export class FlightsService {
       pilotoId?: string | null;
     },
     opts?: { aceptarDiscrepanciaAlta?: boolean },
-  ): Promise<{ id: string; descripcion: string }[]> {
+  ): Promise<{
+    squawksAceptados: { id: string; descripcion: string }[];
+    avisos: string[];
+  }> {
     const objetivos: { aeronaveId?: string; pilotoId?: string } = {};
     if (targets.aeronaveId) objetivos.aeronaveId = targets.aeronaveId;
     if (targets.pilotoId) objetivos.pilotoId = targets.pilotoId;
     // Documentos críticos vencidos: POLÍTICA (ago 2026) — ya NO bloquean (la
     // autoridad a veces autoriza vuelos limitados). Se resuelve al FINAL, tras
-    // taller y squawk, para no avisar "se asignó" cuando esos SÍ rechazan.
+    // el squawk, para no avisar "se asignó" cuando ese SÍ rechaza.
     const bloqueos =
       objetivos.aeronaveId || objetivos.pilotoId
         ? await this.expirations.findBlockingExpirations(objetivos)
         : [];
 
-    if (
-      targets.aeronaveId &&
-      (await this.aircraftEnTaller(targets.aeronaveId))
-    ) {
-      // 409 ESTRUCTURADO (9-sep-2026): la app sin internet lo clasifica por
-      // `error` (decisión "cambiar avión"); el `message` es el MISMO texto
-      // de siempre para el panel.
-      const { data: av } = await this.supabase.service
-        .from('aeronave')
-        .select('matricula')
-        .eq('id', targets.aeronaveId)
-        .maybeSingle();
-      throw new ConflictException({
-        message:
-          'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
-        error: 'AERONAVE_EN_TALLER',
-        details: {
-          aeronave_id: targets.aeronaveId,
-          matricula: (av?.matricula as string | null) ?? null,
-        },
-      });
-    }
+    // TALLER: aviso, jamás candado (cliente, 11-sep-2026). Se calcula ANTES
+    // del squawk (una sola lectura) y viaja en `avisos`; si el squawk ALTA
+    // rechaza, el aviso se descarta con el resto de la respuesta.
+    const avisos = await this.avisoTallerDe(targets.aeronaveId);
     // Un squawk de severidad ALTA sin resolver = avión no apto (doc 4.3).
     // BAJA/MEDIA no bloquean. CAMBIO CONSCIENTE 2-sep-2026: ya no bloquea a
     // secas — sin confirmación se rechaza con 409 estructurado (el panel
@@ -3994,7 +4052,7 @@ export class FlightsService {
       }
     }
 
-    // Ya pasó taller y squawk: la asignación PROCEDE. Solo aquí se avisa a
+    // Ya pasó el squawk: la asignación PROCEDE. Solo aquí se avisa a
     // administración (dedupe diario por documento) para no perder de vista el
     // crítico vencido — el semáforo del avión ya lo pinta NO APTO.
     if (bloqueos.length > 0) {
@@ -4043,7 +4101,7 @@ export class FlightsService {
         }
       })();
     }
-    return squawksAceptados;
+    return { squawksAceptados, avisos };
   }
 
   /**
@@ -4247,13 +4305,14 @@ export class FlightsService {
       dto.piloto_id !== null &&
       dto.piloto_id !== '';
 
-    const squawksAceptados = await this.validateAssignTargets(
-      {
-        aeronaveId: dto.aeronave_id,
-        pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
-      },
-      { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
-    );
+    const { squawksAceptados, avisos: avisosTaller } =
+      await this.validateAssignTargets(
+        {
+          aeronaveId: dto.aeronave_id,
+          pilotoId: asignandoPiloto ? dto.piloto_id : undefined,
+        },
+        { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
+      );
 
     // Tripulación POR TRAMO (29-ago-2026). Copiloto: `copiloto_id` con valor
     // = copiloto propio del tramo (rotación); null = vuelve a heredar el del
@@ -4444,18 +4503,22 @@ export class FlightsService {
     if (dto.aeronave_id && squawksAceptados.length > 0) {
       this.notificarSquawkAceptado(vuelo, dto.aeronave_id, squawksAceptados);
     }
-    // AVISOS (4-sep-2026, nunca candado): capacidad del TRAMO y doble
-    // reserva del avión en la ventana del vuelo; hijo de GRUPO → bandera
-    // precio_desactualizado si el avión efectivo ya no es el cotizado.
+    // AVISOS (4-sep-2026, nunca candado): TALLER (11-sep-2026), capacidad del
+    // TRAMO y doble reserva del avión en la ventana del vuelo; hijo de GRUPO
+    // → bandera precio_desactualizado si el avión efectivo ya no es el
+    // cotizado.
     const avisos = dto.aeronave_id
-      ? await this.avisosOperacionAvion({
-          vueloId: escala.vuelo_id as string,
-          aeronaveId: dto.aeronave_id,
-          fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
-          fechaFin: (vuelo.fecha_fin as string | null) ?? null,
-          paxDefault: Number(vuelo.pasajeros) || null,
-          soloEscalaId: legId,
-        })
+      ? [
+          ...avisosTaller,
+          ...(await this.avisosOperacionAvion({
+            vueloId: escala.vuelo_id as string,
+            aeronaveId: dto.aeronave_id,
+            fechaVuelo: (vuelo.fecha_vuelo as string | null) ?? null,
+            fechaFin: (vuelo.fecha_fin as string | null) ?? null,
+            paxDefault: Number(vuelo.pasajeros) || null,
+            soloEscalaId: legId,
+          })),
+        ]
       : [];
     if (dto.aeronave_id && dto.aeronave_id !== escala.aeronave_id) {
       await this.marcarPrecioDesactualizadoGrupo(escala.vuelo_id as string);
@@ -4952,7 +5015,11 @@ export class FlightsService {
       await this.airports.refreshPermisosDeVuelo(id);
     }
     void this.calendar.syncFlight(id);
-    return data!;
+    // `avisos` ADITIVO (11-sep-2026): este camino nunca pasó por
+    // `validateAssignTargets` (hueco conocido del invariante 9) y el taller
+    // tampoco lo bloquea — pero el avión propio elegido SÍ puede estar en
+    // mantenimiento y la oficina tiene que enterarse (ámbar, no candado).
+    return { ...data!, avisos: await this.avisoTallerDe(aeronaveId) };
   }
 
   async createExternal(dto: CreateExternalFlightDto, userId: string) {
@@ -5185,11 +5252,16 @@ export class FlightsService {
     const pilotoExt = await this.resolverPilotoExternoReserva(dto);
     let pilotoId: string | null = dto.piloto_id ?? pilotoExt.id;
     let squawksAceptados: { id: string; descripcion: string }[] = [];
+    // Taller = aviso (11-sep-2026): se guarda aquí y se suma a `avisos[]` de
+    // la respuesta; ya NO existe el 409 AERONAVE_EN_TALLER de la reserva.
+    let avisosTaller: string[] = [];
     if (aeronaveId || pilotoId) {
-      squawksAceptados = await this.validateAssignTargets(
+      const v = await this.validateAssignTargets(
         { aeronaveId, pilotoId },
         { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta },
       );
+      squawksAceptados = v.squawksAceptados;
+      avisosTaller = v.avisos;
     }
     // Copiloto (2 pilotos volando): debe ser un piloto válido y distinto del
     // titular. Se valida aparte para dar un mensaje claro.
@@ -5219,7 +5291,9 @@ export class FlightsService {
 
     // 4. Detector de posible duplicado (mismo cliente, mismo día Cancún y
     // mismo avión o misma ruta del tramo 1). Solo bloquea con la bandera.
-    const avisos: string[] = [];
+    // El aviso de TALLER abre la lista: es lo primero que la oficina debe
+    // leer si eligió un avión en mantenimiento (nunca rechaza el alta).
+    const avisos: string[] = [...avisosTaller];
     let duplicados: ResumenDuplicado[] = [];
     if (cliente.id) {
       duplicados = await buscarPosiblesDuplicados(this.supabase.service, {
@@ -5557,14 +5631,21 @@ export class FlightsService {
         apoyosAplicados = true;
         apoyos = apoyoIds;
       }
+      // TALLER (11-sep-2026): el replay TAMBIÉN avisa. Es el caso donde más
+      // importa — la respuesta original se perdió (outbox de la app, timeout)
+      // y esta es la ÚNICA que verá la oficina: sin esto, un vuelo guardado
+      // con un avión en mantenimiento nunca mostraría la advertencia.
       const avisos = aeronaveId
-        ? await this.avisosOperacionAvion({
-            vueloId,
-            aeronaveId,
-            fechaVuelo: vuelo.fecha_vuelo as string | null,
-            fechaFin: (vuelo.fecha_fin as string | null) ?? null,
-            paxDefault: (vuelo.pasajeros as number | null) ?? null,
-          })
+        ? [
+            ...(await this.avisoTallerDe(aeronaveId)),
+            ...(await this.avisosOperacionAvion({
+              vueloId,
+              aeronaveId,
+              fechaVuelo: vuelo.fecha_vuelo as string | null,
+              fechaFin: (vuelo.fecha_fin as string | null) ?? null,
+              paxDefault: (vuelo.pasajeros as number | null) ?? null,
+            })),
+          ]
         : [];
       return {
         ...vuelo,
@@ -5656,14 +5737,18 @@ export class FlightsService {
         await this.squawksAltaAbiertos(aeronaveId),
       );
     }
+    // Mismo criterio que el replay de arriba: el aviso de TALLER abre la lista.
     const avisos = aeronaveId
-      ? await this.avisosOperacionAvion({
-          vueloId,
-          aeronaveId,
-          fechaVuelo: vuelo.fecha_vuelo as string | null,
-          fechaFin: plan.fechaFinReserva,
-          paxDefault: plan.pasajeros,
-        })
+      ? [
+          ...(await this.avisoTallerDe(aeronaveId)),
+          ...(await this.avisosOperacionAvion({
+            vueloId,
+            aeronaveId,
+            fechaVuelo: vuelo.fecha_vuelo as string | null,
+            fechaFin: plan.fechaFinReserva,
+            paxDefault: plan.pasajeros,
+          })),
+        ]
       : [];
     void this.calendar.syncFlight(vueloId);
     return {
@@ -9659,13 +9744,14 @@ export class FlightsService {
       .maybeSingle();
     const matricula = (avionRow?.matricula as string) ?? 'el avión';
 
-    // 0) Asignabilidad ANTES de mutar (taller/squawk ALTA rechazan): si
-    //    assign() fuera a tronar, debe tronar AHORA — no con los ferries ya
-    //    cancelados y el estado a medias (no hay transacción). El flag de
+    // 0) Asignabilidad ANTES de mutar (el squawk ALTA sin aceptar rechaza):
+    //    si assign() fuera a tronar, debe tronar AHORA — no con los ferries
+    //    ya cancelados y el estado a medias (no hay transacción). El flag de
     //    aceptación viaja AQUÍ y al assign interno de abajo: si solo se
     //    pasara a uno, el flujo aceptado reventaría a medias con los
-    //    ferries ya cancelados.
-    await this.validateAssignTargets(
+    //    ferries ya cancelados. El TALLER ya no rechaza (11-sep-2026): su
+    //    aviso viaja en `avisos[]` de la respuesta.
+    const { avisos: avisosTaller } = await this.validateAssignTargets(
       {
         aeronaveId: avionId,
         ...(dto.aplicar_piloto !== false && pilotoId ? { pilotoId } : {}),
@@ -9692,7 +9778,7 @@ export class FlightsService {
     // 2) Reasignar el vuelo cubierto al avión (y piloto) del anfitrión —
     //    assign() valida documentos/squawks, avisa a la tripulación y (con
     //    el flag) al mecánico si hay squawk ALTA aceptado.
-    await this.assign(
+    const asignado = await this.assign(
       cubiertoId,
       {
         aeronave_id: avionId,
@@ -9800,9 +9886,20 @@ export class FlightsService {
 
     void this.calendar.syncFlight(cubiertoId);
     void this.calendar.syncFlight(dto.vuelo_anfitrion_id);
+    // `avisos` ADITIVO (11-sep-2026): el del TALLER (el avión del anfitrión
+    // está en mantenimiento — se combinó de todas formas) y los que ya
+    // devolvía el assign interno (capacidad / doble reserva del cubierto),
+    // sin repetir el mismo texto dos veces.
+    const avisos = [
+      ...new Set([
+        ...avisosTaller,
+        ...(((asignado as { avisos?: string[] }).avisos ?? []) as string[]),
+      ]),
+    ];
     return {
       vuelo: await this.findById(cubiertoId),
       anfitrion: await this.findById(dto.vuelo_anfitrion_id),
+      avisos,
     };
   }
 

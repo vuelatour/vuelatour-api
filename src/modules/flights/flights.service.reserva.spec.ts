@@ -22,6 +22,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { FlightsService } from './flights.service';
+import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import type { CreateReservaDto } from './dto/flights.dto';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { CalendarSyncService } from '../calendar/calendar-sync.service';
@@ -410,6 +411,22 @@ describe('createReserva — rama idempotente (misma client_request_id)', () => {
     expect(w.inserts.cliente).toBeUndefined();
   });
 
+  it('replay CON tramos y avión en taller: el aviso ámbar viaja IGUAL (la 1.ª respuesta se perdió y ésta es la única que verá la oficina)', async () => {
+    const w = armar({
+      porLlave: { id: V1, estado: 'RESERVA' },
+      vuelo: vueloRow(),
+      nEscalas: 2,
+      escalas: escalasVivas(),
+      enTaller: true,
+    });
+    const r = await w.service.createReserva(dtoBase(), USER);
+    expect(r.idempotente).toBe(true);
+    expect(r.avisos[0]).toBe(avisoAeronaveEnTaller('XA-VGV'));
+    // Sigue siendo un replay: no re-crea nada ni re-avisa al piloto.
+    expect(w.inserts.vuelo).toBeUndefined();
+    expect(w.notifyPilotAssigned).not.toHaveBeenCalled();
+  });
+
   it('con tramos y apoyo_ids: aplica los apoyos SOLO si vuelo_apoyo está vacío (apoyos_aplicados:true), sin re-notificar al piloto', async () => {
     const w = armar({
       porLlave: { id: V1 },
@@ -776,22 +793,19 @@ describe('createReserva — alta fresca', () => {
     expect(w.inserts.vuelo).toHaveLength(1);
   });
 
-  it('avión en taller → 409 ESTRUCTURADO AERONAVE_EN_TALLER con el message de siempre, antes de tocar nada', async () => {
-    const w = armar({ porLlave: null, enTaller: true });
-    let err: unknown;
-    try {
-      await w.service.createReserva(dtoBase(), USER);
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(ConflictException);
-    expect((err as ConflictException).getResponse()).toEqual({
-      message:
-        'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
-      error: 'AERONAVE_EN_TALLER',
-      details: { aeronave_id: AVION, matricula: 'XA-VGV' },
+  it('avión en taller: la reserva SÍ se guarda y el aviso ámbar viaja en avisos[] (cliente 11-sep-2026: taller avisa, nunca bloquea)', async () => {
+    const w = armar({
+      porLlave: null,
+      enTaller: true,
+      vuelo: vueloRow(),
+      cliente: { id: CLIENTE, nombre: 'Juan', activo: true },
     });
-    expect(w.inserts.vuelo).toBeUndefined();
+    const r = await w.service.createReserva(dtoBase(), USER);
+    expect(r.idempotente).toBe(false);
+    // El vuelo se insertó: ya no hay 409 AERONAVE_EN_TALLER en ningún camino.
+    expect(w.inserts.vuelo).toHaveLength(1);
+    expect(r.avisos[0]).toBe(avisoAeronaveEnTaller('XA-VGV'));
+    expect(r.avisos[0]).not.toMatch(/no se puede/i);
   });
 
   it('capturado_en válido y viejo se sella en notas_internas; uno inválido NUNCA rechaza', async () => {

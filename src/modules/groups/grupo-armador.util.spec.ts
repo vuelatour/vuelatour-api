@@ -8,6 +8,7 @@ import {
   normalizarExtrasGrupo,
   normalizarTuasLineas,
   proponerFlota,
+  proponerFlotaConTaller,
   repartirAjuste,
   repartirExacto,
   tramosDeHijo,
@@ -129,6 +130,44 @@ describe('proponerFlota (greedy por asientos)', () => {
     expect(p.asientos_total).toBe(39);
     expect(sum(p.aviones.map((a) => a.pax))).toBe(39);
     expect(p.faltan).toBe(5);
+  });
+});
+
+describe('proponerFlotaConTaller (taller avisa, nunca bloquea — 11-sep-2026)', () => {
+  const enTaller = (...ids: string[]) => new Set(ids);
+
+  it('PREFIERE los aviones sanos: si alcanzan, el avión en taller ni aparece', () => {
+    // 30 pax caben en la flota sana sin el Kodiak (el más grande).
+    const r = proponerFlotaConTaller(flota, 30, enTaller('kodiak'));
+    expect(r.uso_aviones_en_taller).toBe(false);
+    expect(r.aviones.some((a) => a.aeronave_id === 'kodiak')).toBe(false);
+    expect(sum(r.aviones.map((a) => a.pax))).toBe(30);
+  });
+
+  it('si los sanos NO alcanzan, incluye los de taller SOLO para los pax que sobran', () => {
+    // Sin el Kodiak quedan 30 asientos sanos; 39 pax ⇒ 9 al avión en taller.
+    const r = proponerFlotaConTaller(flota, 39, enTaller('kodiak'));
+    expect(r.uso_aviones_en_taller).toBe(true);
+    const kodiak = r.aviones.find((a) => a.aeronave_id === 'kodiak');
+    expect(kodiak).toEqual({ aeronave_id: 'kodiak', pax: 9, rotaciones: 1 });
+    // El sano sigue mandando: el Kodiak entra AL FINAL, no al frente.
+    expect(r.aviones[r.aviones.length - 1].aeronave_id).toBe('kodiak');
+    expect(sum(r.aviones.map((a) => a.pax))).toBe(39);
+  });
+
+  it('toda la flota en taller: propone igual (con la bandera) en vez de dejar el grupo sin flota', () => {
+    const ids = flota.filter((f) => f.activa).map((f) => f.id);
+    const r = proponerFlotaConTaller(flota, 10, enTaller(...ids));
+    expect(r.uso_aviones_en_taller).toBe(true);
+    expect(sum(r.aviones.map((a) => a.pax))).toBe(10);
+  });
+
+  it('el avión INACTIVO sigue fuera aunque no esté en taller (esa regla no cambió)', () => {
+    const ids = flota.filter((f) => f.activa).map((f) => f.id);
+    const r = proponerFlotaConTaller(flota, 44, enTaller(...ids));
+    expect(r.aviones.some((a) => a.aeronave_id === 'inactivo')).toBe(false);
+    // 44 > 39 asientos: los 5 que faltan no se inventan.
+    expect(sum(r.aviones.map((a) => a.pax))).toBe(39);
   });
 });
 

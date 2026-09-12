@@ -47,17 +47,19 @@ export class ReviseQuoteDto extends CalculateQuoteDto {
   /**
    * CAMBIO DE AVIÓN DESDE EL COTIZADOR (11-sep-2026, invariante 14 + 9): si
    * la revisión cambia `aeronave_id`, el avión nuevo pasa por el MISMO
-   * pre-check de `assign` (taller y squawk ALTA). Con esta bandera la
-   * asignación procede A SABIENDAS y se avisa al mecánico, igual que en
+   * pre-check de `assign` (squawk ALTA). Con esta bandera la asignación
+   * procede A SABIENDAS y se avisa al mecánico, igual que en
    * assign/reassign. No aplica cuando el cotizador no cambió de avión.
+   * El TALLER ya no bloquea: solo agrega su aviso a `avisos[]`.
    */
   @ApiPropertyOptional({
     description:
       'Aceptar discrepancia(s) de severidad ALTA del avión NUEVO al cambiarlo ' +
       'desde el cotizador: sin ella, el cambio rechaza con 409 ' +
       'SQUAWK_ALTA_SIN_RESOLVER (details.discrepancias); al aceptar se avisa ' +
-      'al mecánico. El avión en TALLER bloquea siempre (409 ' +
-      'AERONAVE_EN_TALLER).',
+      'al mecánico. Un avión EN TALLER ya NO bloquea (11-sep-2026: las ' +
+      'cotizaciones son a futuro): se guarda y la respuesta trae el aviso en ' +
+      'avisos[] para pintarlo en ámbar.',
   })
   @IsOptional()
   @IsBoolean()

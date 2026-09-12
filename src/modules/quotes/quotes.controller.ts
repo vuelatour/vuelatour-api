@@ -119,7 +119,8 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Persist a quote (creates vuelo in estado=COTIZADO con cotizacion v1). ADMIN o COORDINADOR. 201; con client_request_id repetido devuelve la cotización ya creada (200, sin duplicar).',
+      'Persist a quote (creates vuelo in estado=COTIZADO con cotizacion v1). ADMIN o COORDINADOR. 201; con client_request_id repetido devuelve la cotización ya creada (200, sin duplicar). ' +
+      'Respuesta + avisos[] (aditivo, siempre presente): hoy solo el aviso ámbar de avión EN TALLER — se puede cotizar un avión en mantenimiento (las cotizaciones son a futuro), nunca rechaza.',
   })
   async create(
     @Body() dto: CreateQuoteDto,
@@ -166,7 +167,8 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO); 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión.',
+      'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO); 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión. ' +
+      'Cambiar de avión mantiene el pre-check del squawk ALTA (409 SQUAWK_ALTA_SIN_RESOLVER + aceptar_discrepancia_alta); el TALLER ya NO bloquea (11-sep-2026): su aviso ámbar viaja en avisos[] junto a los tramos que ya volaron.',
   })
   async revise(
     @Param('id', ParseUUIDPipe) id: string,
@@ -186,7 +188,7 @@ export class QuotesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Ajuste rápido desde el detalle: extras y/o pasajeros (recalcula TUAs) sin rearmar el cotizador. Versiona como una revisión.',
+      'Ajuste rápido desde el detalle: extras y/o pasajeros (recalcula TUAs) sin rearmar el cotizador. Versiona como una revisión (misma respuesta, avisos[] incluido). Nunca cambia de avión: re-envía el del snapshot, así que no genera aviso de taller.',
   })
   quickAdjust(
     @Param('id', ParseUUIDPipe) id: string,

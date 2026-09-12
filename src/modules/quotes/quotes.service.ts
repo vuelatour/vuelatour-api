@@ -267,11 +267,13 @@ export class QuotesService {
     private readonly notifications: NotificationsService,
     /**
      * CAMBIO DE AVIÓN desde el cotizador (11-sep-2026, invariante 14 + 9):
-     * `validateAssignTargets` (taller / squawk ALTA) y
-     * `notificarSquawkAceptado` — el MISMO pre-check y el MISMO aviso que
-     * `assign`, jamás una réplica local. (Sin ciclo de módulos:
-     * `QuotesModule` ya importa `FlightsModule` para el PDF interno y
-     * `flights.service` solo trae de aquí un `import type`.)
+     * `validateAssignTargets` (squawk ALTA) y `notificarSquawkAceptado` — el
+     * MISMO pre-check y el MISMO aviso que `assign`, jamás una réplica local.
+     * Además `avisoTallerDe` (fuente única del aviso ámbar de taller, que
+     * desde el 11-sep-2026 ya no bloquea) para los `avisos[]` de
+     * create/revise. (Sin ciclo de módulos: `QuotesModule` ya importa
+     * `FlightsModule` para el PDF interno y `flights.service` solo trae de
+     * aquí un `import type`.)
      */
     private readonly flights: FlightsService,
   ) {}
@@ -1833,7 +1835,13 @@ export class QuotesService {
         this.logger.log(
           `Cotización idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el vuelo ${yaId} (sin duplicar).`,
         );
-        return { ...(await this.findById(yaId)), idempotente: true as const };
+        // `avisos` siempre presente (aditivo): el reintento no re-valida
+        // nada, así que sale vacío — el aviso ya viajó en la 1.ª respuesta.
+        return {
+          ...(await this.findById(yaId)),
+          avisos: [] as string[],
+          idempotente: true as const,
+        };
       }
     }
     const breakdown = await this.calculate(dto);
@@ -1950,6 +1958,7 @@ export class QuotesService {
         if (yaId) {
           return {
             ...(await this.findById(yaId)),
+            avisos: [] as string[],
             idempotente: true as const,
           };
         }
@@ -2037,7 +2046,17 @@ export class QuotesService {
 
     void this.calendar.syncFlight(vuelo!.id);
     const escalas = await this.findEscalas(vuelo!.id);
-    return { ...vuelo!, escalas };
+    // AVISOS de la cotización nueva (aditivo, siempre presente, 11-sep-2026):
+    // hoy solo el TALLER. Se calcula al final y NUNCA rechaza — «al cotizar
+    // debe poder elegirse un avión aunque esté en taller (son cotizaciones a
+    // futuro)». Se usa `avisoTallerDe` (solo lee mantenimiento), no
+    // `validateAssignTargets`: crear una cotización nunca fue una asignación
+    // y no debe heredar el candado del squawk ALTA. El externo no avisa: su
+    // avión es solo referencia de tarifa.
+    const avisos = dto.es_externo
+      ? []
+      : await this.flights.avisoTallerDe(dto.aeronave_id);
+    return { ...vuelo!, escalas, avisos };
   }
 
   /**
@@ -2077,7 +2096,12 @@ export class QuotesService {
         this.logger.log(
           `Revisión idempotente: reintento con client_request_id ${dto.client_request_id} → cotización ${vueloId} v${ya.version} ya aplicada (sin crear otra versión).`,
         );
-        return { ...current, idempotente: true as const };
+        // `avisos` siempre presente (aditivo): el replay no re-valida nada.
+        return {
+          ...current,
+          avisos: [] as string[],
+          idempotente: true as const,
+        };
       }
     }
     // CANCELADO sí se revisa (decisión del equipo, 1-sep-2026): el vuelo no
@@ -2204,30 +2228,36 @@ export class QuotesService {
     const aeronaveOperativa = avionRevision.aeronave_id ?? dto.aeronave_id;
     // CAMBIO DELIBERADO DE AVIÓN = asignación (invariante 14 + 9): el avión
     // NUEVO pasa por el MISMO pre-check de `assign` ANTES de escribir nada —
-    // taller bloquea siempre (409 AERONAVE_EN_TALLER) y un squawk ALTA sin
-    // resolver rebota 409 estructurado SQUAWK_ALTA_SIN_RESOLVER salvo que el
-    // DTO traiga `aceptar_discrepancia_alta` (entonces se avisa al mecánico
-    // tras el write, igual que assign/reassign/reserva). Sin esto, el
-    // cotizador era una puerta trasera para meter un avión en taller o con
-    // discrepancia ALTA a un vuelo, saltándose el candado del panel.
+    // un squawk ALTA sin resolver rebota 409 estructurado
+    // SQUAWK_ALTA_SIN_RESOLVER salvo que el DTO traiga
+    // `aceptar_discrepancia_alta` (entonces se avisa al mecánico tras el
+    // write, igual que assign/reassign/reserva). Sin esto, el cotizador era
+    // una puerta trasera para meter un avión con discrepancia ALTA a un
+    // vuelo, saltándose el candado del panel.
+    // TALLER (cliente, 11-sep-2026): ya NO bloquea — «son cotizaciones a
+    // futuro»; el avión en mantenimiento se cotiza y el aviso ámbar viaja en
+    // `avisos[]` de la respuesta.
     // `conservarAvionOperativo` (quickAdjust / grupo) nunca reasigna, así que
-    // nunca llega aquí.
+    // nunca llega aquí (y por eso un quickAdjust jamás trae aviso de taller:
+    // re-envía el avión del snapshot, no elige uno nuevo).
     const cambiaAvion =
       !current.es_externo &&
       avionRevision.cambio_deliberado &&
       !!avionRevision.aeronave_id;
-    const squawksAceptados = cambiaAvion
+    const preAsignacion = cambiaAvion
       ? await this.flights.validateAssignTargets(
           { aeronaveId: avionRevision.aeronave_id },
           { aceptarDiscrepanciaAlta: dto.aceptar_discrepancia_alta === true },
         )
-      : [];
+      : { squawksAceptados: [], avisos: [] };
+    const squawksAceptados = preAsignacion.squawksAceptados;
     /**
-     * Avisos NO bloqueantes de la revisión (aditivo, siempre presente): hoy
-     * solo los tramos que el cambio de avión NO pudo mover porque ya
-     * volaron. El panel los pinta; nada de esto tumba la revisión.
+     * Avisos NO bloqueantes de la revisión (aditivo, siempre presente): el
+     * avión NUEVO en taller (11-sep-2026, ámbar — se guarda de todas formas)
+     * y los tramos que el cambio de avión NO pudo mover porque ya volaron.
+     * El panel los pinta; nada de esto tumba la revisión.
      */
-    const avisos: string[] = [];
+    const avisos: string[] = [...preAsignacion.avisos];
     // CAPACIDAD (4-sep-2026): vuelo PROPIO — pax por tramo ≤ asientos del
     // avión que lo vuela (avión del tramo persistido con herencia del
     // OPERATIVO que quedará en vuelo.aeronave_id). 409 CAPACIDAD_EXCEDIDA
@@ -2339,6 +2369,7 @@ export class QuotesService {
         if (ya && ya.vuelo_id === vueloId) {
           return {
             ...(await this.findById(vueloId)),
+            avisos: [] as string[],
             idempotente: true as const,
           };
         }

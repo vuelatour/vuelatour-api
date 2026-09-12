@@ -13,6 +13,7 @@ jest.mock('../notifications/email.service', () => ({
 
 import { ConflictException } from '@nestjs/common';
 import { QuotesService } from './quotes.service';
+import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { MetodoPago, TipoTarifa, TipoVuelo } from './dto/calculate-quote.dto';
 import type { ReviseQuoteDto } from './dto/revise-quote.dto';
 import type { AircraftService } from '../aircraft/aircraft.service';
@@ -100,7 +101,7 @@ interface Mundo {
   tramosExtra?: Row[];
   /** Discrepancias ALTA abiertas del avión NUEVO (pre-check de assign). */
   squawks?: { id: string; descripcion: string }[];
-  /** El avión NUEVO está en taller (bloquea siempre). */
+  /** El avión NUEVO está en taller (desde el 11-sep-2026 solo AVISA). */
   taller?: boolean;
 }
 
@@ -214,25 +215,16 @@ function armar(m: Mundo = {}) {
     refreshPermisosDeVuelo: jest.fn().mockResolvedValue(undefined),
   } as unknown as AirportsService;
   // FUENTE ÚNICA del pre-check de asignación: `revise` DELEGA en
-  // FlightsService (taller / squawk ALTA), jamás replica la regla. El doble
-  // simula solo lo que el contrato promete: taller lanza siempre; squawk
-  // ALTA lanza salvo `aceptarDiscrepanciaAlta`, y entonces DEVUELVE la lista
-  // para que el caller avise al mecánico.
+  // FlightsService (squawk ALTA + aviso de taller), jamás replica la regla.
+  // El doble simula solo lo que el contrato promete (11-sep-2026): el TALLER
+  // YA NO LANZA — devuelve su texto en `avisos`; el squawk ALTA lanza salvo
+  // `aceptarDiscrepanciaAlta`, y entonces DEVUELVE la lista en
+  // `squawksAceptados` para que el caller avise al mecánico.
   const validateAssignTargets = jest.fn(
     (
       _targets: { aeronaveId?: string | null },
       opts?: { aceptarDiscrepanciaAlta?: boolean },
     ) => {
-      if (m.taller) {
-        return Promise.reject(
-          new ConflictException({
-            message:
-              'No se puede asignar: la aeronave está en taller (mantenimiento en curso).',
-            error: 'AERONAVE_EN_TALLER',
-            details: { aeronave_id: _targets.aeronaveId, matricula: 'XB-ANU' },
-          }),
-        );
-      }
       const lista = m.squawks ?? [];
       if (lista.length > 0 && opts?.aceptarDiscrepanciaAlta !== true) {
         return Promise.reject(
@@ -243,13 +235,20 @@ function armar(m: Mundo = {}) {
           }),
         );
       }
-      return Promise.resolve(lista);
+      return Promise.resolve({
+        squawksAceptados: lista,
+        avisos: m.taller ? [avisoAeronaveEnTaller('XB-ANU')] : [],
+      });
     },
   );
   const notificarSquawkAceptado = jest.fn();
+  const avisoTallerDe = jest.fn(() =>
+    Promise.resolve(m.taller ? [avisoAeronaveEnTaller('XB-ANU')] : []),
+  );
   const flights = {
     validateAssignTargets,
     notificarSquawkAceptado,
+    avisoTallerDe,
   } as unknown as FlightsService;
   const service = new QuotesService(
     aircraft,
@@ -388,9 +387,10 @@ describe('QuotesService.revise — cambio de aeronave desde el cotizador (#254)'
 /**
  * CANDADOS DEL CAMBIO DE AVIÓN (11-sep-2026, invariante 14 + 9). Cambiar el
  * avión desde el cotizador ES una asignación: pasa por el MISMO pre-check de
- * `assign` (taller / squawk ALTA) ANTES de escribir, y el blanket a tramos
- * respeta lo que YA VOLÓ (invariante 1: los tacos, las horas de motor, los
- * gastos y el balance cuelgan de la matrícula con la que se voló).
+ * `assign` (squawk ALTA) ANTES de escribir, y el blanket a tramos respeta lo
+ * que YA VOLÓ (invariante 1: los tacos, las horas de motor, los gastos y el
+ * balance cuelgan de la matrícula con la que se voló). El TALLER dejó de ser
+ * candado el mismo día: solo agrega su aviso a `avisos[]`.
  */
 describe('QuotesService.revise — candados al cambiar de avión (taller / squawk)', () => {
   it('valida el avión NUEVO con el pre-check de assign (fuente única) antes de escribir', async () => {
@@ -402,14 +402,15 @@ describe('QuotesService.revise — candados al cambiar de avión (taller / squaw
     );
   });
 
-  it('avión NUEVO en taller → 409 AERONAVE_EN_TALLER y NADA se escribe', async () => {
+  it('avión NUEVO en taller: el cambio SE GUARDA y el aviso ámbar sale en avisos[] (cliente 11-sep-2026)', async () => {
     const w = armar({ taller: true });
-    await expect(w.service.revise(V1, dto(C206), USER)).rejects.toMatchObject({
-      response: { error: 'AERONAVE_EN_TALLER' },
-    });
-    expect(w.patchVuelo()).toBeNull();
-    expect(w.blanketEscala()).toBeNull();
-    expect(w.inserts).toHaveLength(0);
+    const res = (await w.service.revise(V1, dto(C206), USER)) as {
+      avisos: string[];
+    };
+    // Se escribió: ya no hay 409 AERONAVE_EN_TALLER en el cotizador.
+    expect(w.patchVuelo()!.aeronave_id).toBe(C206);
+    expect(res.avisos).toContain(avisoAeronaveEnTaller('XB-ANU'));
+    expect(res.avisos.join(' ')).not.toMatch(/no se puede/i);
   });
 
   it('squawk ALTA sin resolver → 409 estructurado con details, sin escribir', async () => {
@@ -446,7 +447,7 @@ describe('QuotesService.revise — candados al cambiar de avión (taller / squaw
     );
   });
 
-  it('una revisión que NO cambia de avión no pide pre-check (ni taller ni squawk)', async () => {
+  it('una revisión que NO cambia de avión no pide pre-check (ni aviso de taller ni squawk)', async () => {
     const w = armar();
     await w.service.revise(V1, dto(SENECA), USER);
     expect(w.validateAssignTargets).not.toHaveBeenCalled();

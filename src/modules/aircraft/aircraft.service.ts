@@ -936,10 +936,12 @@ export class AircraftService {
         a.apto = apt?.apto ?? true;
         a.no_apto_razones = apt?.razones ?? [];
         // Alta de vuelo sin internet (9-sep-2026, aditivo): la app confirma
-        // el squawk ALTA EN CAPTURA y bloquea el avión en taller con su
-        // copia local del catálogo. Mismo criterio que validateAssignTargets
-        // (discrepancia severidad ALTA con estado ≠ RESUELTA; mantenimiento
-        // EN_TALLER). Antes el taller solo viajaba como razón de texto.
+        // el squawk ALTA EN CAPTURA con su copia local del catálogo. Mismo
+        // criterio que validateAssignTargets (discrepancia severidad ALTA con
+        // estado ≠ RESUELTA; mantenimiento EN_TALLER). `en_taller` es
+        // INFORMATIVO desde el 11-sep-2026: MARCA ámbar del selector en panel
+        // y app — jamás deshabilita ni bloquea el guardado (ver
+        // `src/common/aviso-taller.util.ts`).
         a.squawks_alta_abiertos = apt?.squawks_alta ?? 0;
         a.en_taller = apt?.en_taller ?? false;
       }

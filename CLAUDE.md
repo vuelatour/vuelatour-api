@@ -151,8 +151,32 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    ADMIN/COORDINADOR, tipo `alerta_sistema`, dedupe directo
    `squawk_alta_aceptado:<vuelo>:<avión>:<díaCancún>` en `alerta_emitida`,
    marca DESPUÉS de entregar) y sella la bitácora en `notas_internas`.
-   Taller sigue bloqueando sin excepción; `revertirExterno` sigue SIN pasar
-   por este candado (hueco conocido, pendiente de decisión).
+   **TALLER YA NO BLOQUEA (cliente, 11-sep-2026)**: «al cotizar debe poder
+   elegirse un avión aunque esté en taller (son cotizaciones a futuro) […]
+   la advertencia está bien pero con eso es suficiente, no debe limitarte;
+   lo mismo para el vuelo». NINGÚN camino del API responde ya 409
+   `AERONAVE_EN_TALLER` — ni assign, assign por tramo, reserva,
+   reassign-aircraft, combinar, revertir-externo, ni quotes
+   create/revise/quickAdjust, ni el grupo. En su lugar viaja un AVISO
+   informativo en `avisos: string[]` (campo ADITIVO, siempre presente aunque
+   vaya vacío; en el grupo, dentro de los `avisos` DE ESE AVIÓN como el
+   squawk aceptado) con el texto ÚNICO de
+   `src/common/aviso-taller.util.ts#avisoAeronaveEnTaller(matricula)`: panel
+   y app lo pintan en ÁMBAR (ni modal, ni confirm, ni rojo) y el selector
+   sigue MARCANDO «En taller» (`GET /aircraft.en_taller`) sin deshabilitar.
+   Fuente única del lado servidor: `FlightsService.avisoTallerDe` — lo usa
+   `validateAssignTargets`, que devuelve `{ squawksAceptados, avisos }`, y
+   todo caller suma esos `avisos` a los de su respuesta. `avisoTallerDe`
+   NUNCA lanza (best-effort completo): si falla la lectura de
+   `mantenimiento` devuelve `[]` y sigue — un aviso es presentación y en
+   `quotes.create` / `revertirExterno` se calcula DESPUÉS del write, donde
+   un 500 dejaría el dato guardado y al operador creyendo que no. El REPLAY
+   idempotente de la reserva también trae el aviso: cuando la primera
+   respuesta se perdió (outbox de la app), esa es la única que verá la
+   oficina. El squawk ALTA y
+   los documentos críticos vencidos NO cambiaron. `revertirExterno` sigue
+   SIN pasar por el candado del squawk (hueco conocido, pendiente de
+   decisión) aunque ya devuelve el aviso de taller.
 
 10. **Partición del ingreso y participación por avión — fuentes únicas.**
     `particionIngresoVuelo` (`src/common/ingreso-vuelo.util.ts`): venta del
@@ -263,9 +287,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     con `desdeGrupo` conserva los extras propios del hijo
     (`mezclarExtrasDesdeGrupo`). 409 estructurados: CAPACIDAD_EXCEDIDA
     (también en quotes.create/revise de vuelos propios), PAX_NO_CUADRAN,
-    PILOTO_DUPLICADO, AERONAVE_EN_TALLER, HIJOS_CONGELADOS
+    PILOTO_DUPLICADO, HIJOS_CONGELADOS
     (+`solo_editables`), REVISION_A_MEDIAS (`details.creados` con vuelo_id:
-    el reintento NO recrea). Nada del grupo es transaccional salvo la
+    el reintento NO recrea). El avión EN TALLER ya NO rebota 409
+    (11-sep-2026): avisa en los `avisos` de ese avión, y la PROPUESTA
+    automática de flota (`proponerFlotaConTaller`) prefiere los aviones fuera
+    de taller y solo incluye los que están en mantenimiento cuando los sanos
+    no alcanzan asientos (para los pax sobrantes, con su aviso). Nada del grupo es transaccional salvo la
     compensación total de `create`. `precio_desactualizado` en
     `calculo_snapshot.meta.grupo` cuando el avión efectivo ≠ cotizado;
     alerta diaria `grupo_desincronizado`.
@@ -311,10 +339,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `uq_piloto_descanso_client_request`, `uq_evento_flota_client_request`;
       la columna solo entra al insert cuando la llave viaja). En
       `createReserva` TODO lo que puede rechazar va ANTES del insert
-      (avión obligatorio = 400 claro, el CHECK de `vuelo` lo exige; taller =
-      409 estructurado `AERONAVE_EN_TALLER` con el mismo `message`; squawk,
+      (avión obligatorio = 400 claro, el CHECK de `vuelo` lo exige; squawk,
       copiloto, `assertApoyosAsignables`, IATAs, cliente por nombre SIN
-      crear todavía, detector de duplicado, sello). Tras los tramos el push
+      crear todavía, detector de duplicado, sello). El TALLER dejó de
+      rechazar el 11-sep-2026 (ver invariante 9): la reserva se guarda y su
+      aviso abre `avisos[]`. Tras los tramos el push
       al piloto/copiloto sale INMEDIATAMENTE (antes de apoyos y permisos):
       un 500 posterior reintenta por la rama idempotente, que no re-avisa,
       y el piloto ya se enteró. La rama
@@ -511,7 +540,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       el avión del SNAPSHOT para no mover el precio— y `reviseParaGrupo`
       —el armado del grupo re-envía el avión del hijo como referencia de
       tarifa y el cambio operativo lo hace `flights.assign`, que sí valida
-      taller/squawk y avisa— pasan `conservarAvionOperativo: true` y JAMÁS
+      el squawk y avisa (taller incluido, ya solo como aviso)— pasan
+      `conservarAvionOperativo: true` y JAMÁS
       reasignan. Sin esa guarda en el grupo, un hijo COMPLETADO (cuyo
       `assign` se salta a propósito) se movía de avión al recotizar y
       arrastraba sus tramos CON TACOS: horas de motor, gastos y balance de
@@ -535,7 +565,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     - **CAMBIAR DE AVIÓN AL REVISAR ES UNA ASIGNACIÓN (11-sep-2026).** Con
       `cambio_deliberado`, ANTES de escribir nada `revise` pasa por el MISMO
       `FlightsService.validateAssignTargets` de `assign` (QuotesService lo
-      inyecta; jamás una réplica local): taller ⇒ 409 `AERONAVE_EN_TALLER`;
+      inyecta; jamás una réplica local): el taller SOLO AVISA desde el
+      11-sep-2026 (texto único en `avisos[]`, ver invariante 9);
       squawk ALTA sin resolver ⇒ 409 `SQUAWK_ALTA_SIN_RESOLVER` +
       `details.discrepancias`, y `aceptar_discrepancia_alta` en el
       `ReviseQuoteDto` lo acepta y dispara `notificarSquawkAceptado`
@@ -546,9 +577,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       vuelo está EN_VUELO/COMPLETADO (ahí el cambio operativo se hace por
       `assign`/`reassign-aircraft`, que validan y avisan). El vuelo y el
       snapshot SÍ conservan el avión nuevo y `revise` devuelve `avisos[]`
-      (aditivo, siempre presente) diciendo qué tramos no se movieron.
-      `quickAdjust` y `reviseParaGrupo` pasan `conservarAvionOperativo` ⇒
-      nunca hay cambio deliberado ⇒ ni pre-check ni blanket.
+      (aditivo, siempre presente) con el aviso de TALLER del avión nuevo y
+      qué tramos no se movieron. `quotes.create` también devuelve `avisos[]`
+      (solo taller; usa `avisoTallerDe`, NO el candado del squawk: crear una
+      cotización nunca fue una asignación). `quickAdjust` y `reviseParaGrupo`
+      pasan `conservarAvionOperativo` ⇒ nunca hay cambio deliberado ⇒ ni
+      pre-check, ni blanket, ni aviso de taller.
 
 15. **Método de cobro: PREVISTO (vuelo) vs REAL (cobro) — 11-sep-2026.**
     `cobro_vuelo.metodo_cobro` es lo que REALMENTE se recibió y es la ÚNICA

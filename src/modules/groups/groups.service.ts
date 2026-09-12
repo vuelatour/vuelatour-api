@@ -16,6 +16,7 @@ import {
   MOV_LIGA_COLS,
   type MovimientoLiga,
 } from '../../common/cobro-conciliado.util';
+import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { diaCancun } from '../../common/fecha-cancun.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { resolverComisionBancaria } from '../flights/comision-bancaria.util';
@@ -56,7 +57,7 @@ import {
   materializarExtras,
   normalizarExtrasGrupo,
   normalizarTuasLineas,
-  proponerFlota,
+  proponerFlotaConTaller,
   repartirAjuste,
   round2,
   tramosDeHijo,
@@ -861,10 +862,20 @@ export class GroupsService {
       const { enTaller } = await this.estadoAviones(
         flotaCompleta.map((f) => f.id),
       );
-      const disponibles = flotaCompleta.filter(
-        (f) => f.activa && !enTaller.has(f.id),
+      // PROPUESTA AUTOMÁTICA con taller-que-avisa (11-sep-2026): PREFIERE
+      // los aviones fuera de taller (greedy de siempre sobre ellos) y solo
+      // si NO alcanzan los asientos completa con los que están en taller —
+      // para los pasajeros que quedaron fuera, nunca en lugar de un avión
+      // sano. Cada avión en taller llega con su aviso ámbar por avión (más
+      // abajo) y el grupo lleva además una nota. Antes se excluían siempre y
+      // un grupo grande se quedaba "sin flota" con la mitad de la flota en
+      // servicio programado.
+      const propuesta = proponerFlotaConTaller(
+        flotaCompleta,
+        pasajerosTotal,
+        enTaller,
       );
-      const propuesta = proponerFlota(disponibles, pasajerosTotal);
+      const usoAvionesEnTaller = propuesta.uso_aviones_en_taller;
       aviones = propuesta.aviones.map((p, i) => ({
         key: `nuevo-${i + 1}`,
         posicion: i + 1,
@@ -877,13 +888,18 @@ export class GroupsService {
         fecha_salida_plan: null,
         aceptar_discrepancia_alta: false,
       }));
-      fichas = new Map(disponibles.map((f) => [f.id, f]));
+      fichas = new Map(flotaCompleta.map((f) => [f.id, f]));
       if (aviones.length === 0) {
         throw new ConflictException({
           message:
-            'No hay aviones activos disponibles (fuera de taller) con asientos para armar el grupo.',
+            'No hay aviones activos con asientos capturados para armar el grupo.',
           error: 'SIN_FLOTA',
         });
+      }
+      if (usoAvionesEnTaller) {
+        avisosGrupo.push(
+          'Los aviones fuera de taller no alcanzaban para todo el grupo: la propuesta incluye aviones en mantenimiento (marcados abajo). Confirma con el mecánico o cambia el reparto.',
+        );
       }
     }
     for (const a of aviones) {
@@ -1048,7 +1064,7 @@ export class GroupsService {
       );
     }
 
-    // ---- Aviones: taller (bloquea), squawk ALTA, doble reserva ----
+    // ---- Aviones: taller (AVISA), squawk ALTA (bloquea), doble reserva ----
     const aRevisar = aviones.filter((a) => !opts.avionSinCambio?.has(a.key));
     const { enTaller, squawks } = await this.estadoAviones([
       ...new Set(aRevisar.map((a) => a.aeronave_id)),
@@ -1056,16 +1072,13 @@ export class GroupsService {
     for (const a of aRevisar) {
       const f = fichas.get(a.aeronave_id)!;
       const av = avisosPorAvion.get(a.key)!;
+      // TALLER = aviso, nunca candado (cliente, 11-sep-2026): antes esto era
+      // un 409 AERONAVE_EN_TALLER que tumbaba el grupo entero por un avión
+      // en mantenimiento, aunque el viaje fuera dentro de dos meses. Ahora
+      // viaja en los `avisos` DE ESE AVIÓN — igual que el squawk aceptado —
+      // con el texto único del API.
       if (enTaller.has(a.aeronave_id)) {
-        throw new ConflictException({
-          message: `Avión ${a.posicion} (${f.matricula}) está en taller (mantenimiento en curso): no se puede vender en el grupo.`,
-          error: 'AERONAVE_EN_TALLER',
-          details: {
-            aeronave_id: f.id,
-            matricula: f.matricula,
-            posicion: a.posicion,
-          },
-        });
+        av.avisos.push(avisoAeronaveEnTaller(f.matricula));
       }
       const sq = squawks.get(a.aeronave_id) ?? [];
       if (sq.length > 0) {
@@ -1369,23 +1382,27 @@ export class GroupsService {
 
   /**
    * Pre-check de asignación por avión con la MISMA regla que
-   * flights.assign (taller bloquea, squawk ALTA exige aceptar, documentos
-   * vencidos avisan a oficina). Devuelve los squawks aceptados por clave
-   * para avisar al mecánico DESPUÉS de crear.
+   * flights.assign (squawk ALTA exige aceptar; taller y documentos vencidos
+   * solo avisan). Devuelve los squawks aceptados por clave para avisar al
+   * mecánico DESPUÉS de crear.
    */
   private async prevalidarAsignaciones(
     aviones: AvionCtx[],
   ): Promise<Map<string, { id: string; descripcion: string }[]>> {
     const out = new Map<string, { id: string; descripcion: string }[]>();
     for (const a of aviones) {
-      const sq = await this.flights.validateAssignTargets(
+      // Solo interesan los squawks aceptados: el aviso de TALLER que también
+      // devuelve `validateAssignTargets` ya lo puso `prepararArmado` en los
+      // `avisos` DEL AVIÓN (misma lectura, un solo lugar) — sumarlo aquí lo
+      // duplicaría en la respuesta del grupo.
+      const { squawksAceptados } = await this.flights.validateAssignTargets(
         { aeronaveId: a.aeronave_id, pilotoId: a.piloto_id },
         { aceptarDiscrepanciaAlta: a.aceptar_discrepancia_alta },
       );
       if (a.copiloto_id) {
         await this.flights.validateAssignTargets({ pilotoId: a.copiloto_id });
       }
-      out.set(a.key, sq);
+      out.set(a.key, squawksAceptados);
     }
     return out;
   }
@@ -2786,11 +2803,14 @@ export class GroupsService {
           aceptar_discrepancia_alta: dto.aceptar_discrepancia_alta,
         },
         userId,
-      )) as { id: string; folio: number };
+      )) as { id: string; folio: number; avisos?: string[] };
       vivoId = clon.id;
       avisos.push(
         `El vuelo #${hijo.folio} quedó cancelado; el avión ${hijo.grupo_posicion ?? ''} ahora es el #${clon.folio}.`,
       );
+      // Avisos del cambio de avión (taller ámbar incluido, 11-sep-2026): el
+      // grupo los reexpone tal cual — antes se perdían en el clon.
+      avisos.push(...(clon.avisos ?? []));
       // Las partes de sobre viajan al clon (UPDATE de vuelo_id): el dinero
       // sigue en el avión vivo; solo si el precio cambia conviene re-partir.
       const partesSobre = await this.contarPartesDeSobre(clon.id);

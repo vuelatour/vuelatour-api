@@ -204,6 +204,37 @@ export function proponerFlota(
   return { aviones, asientos_total: asientosTotal, faltan: restantes };
 }
 
+/**
+ * Propuesta automática con TALLER-QUE-AVISA (cliente, 11-sep-2026): PREFIERE
+ * los aviones fuera de taller —el greedy de siempre sobre ellos— y solo si
+ * NO alcanzan los asientos completa con los que están en mantenimiento, y
+ * únicamente para los pasajeros que quedaron fuera (nunca EN LUGAR de un
+ * avión sano). Cada avión en taller llega con su aviso ámbar por avión y el
+ * grupo lleva además una nota; nada de esto bloquea.
+ *
+ * Antes los aviones en taller se excluían siempre y un grupo grande se
+ * quedaba «sin flota» con media flota en servicio programado.
+ */
+export function proponerFlotaConTaller(
+  fichas: FichaAvionArmador[],
+  pasajerosTotal: number,
+  enTaller: ReadonlySet<string>,
+): { aviones: AvionPropuesto[]; uso_aviones_en_taller: boolean } {
+  const sanos = fichas.filter((f) => !enTaller.has(f.id));
+  const base = proponerFlota(sanos, pasajerosTotal);
+  const aviones = [...base.aviones];
+  let usoEnTaller = false;
+  if (base.faltan > 0) {
+    const enMantenimiento = fichas.filter((f) => enTaller.has(f.id));
+    const extra = proponerFlota(enMantenimiento, base.faltan);
+    if (extra.aviones.length > 0) {
+      aviones.push(...extra.aviones);
+      usoEnTaller = true;
+    }
+  }
+  return { aviones, uso_aviones_en_taller: usoEnTaller };
+}
+
 // ===== Tramos por hijo (rotaciones) =====
 
 function tramoBase(
