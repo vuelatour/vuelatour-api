@@ -5,16 +5,25 @@
  * la matrícula, porque a veces se cotiza en un avión y la ruta operativa va
  * en otro. Con tramos en aviones distintos se listan los modelos distintos.
  *
+ * LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN (cliente, 12-sep-2026,
+ * cotización #298): «se cotiza con un avión y se vuela con otro por distintos
+ * motivos, pero la cotización no debe verse afectada por cambios en el vuelo
+ * operativo». Por eso la hoja/PDF del cliente muestran SOLO el modelo del
+ * SNAPSHOT vigente. La rama vieja «≥ 2 aviones en los tramos ⇒ sus modelos»
+ * colaba un dato OPERATIVO en la cotización: reasignar un tramo cambiaba el
+ * avión impreso en la hoja sin que nadie tocara la cotización. Ahora esa
+ * rama es solo RESPALDO cuando NO hay snapshot (reserva sin cotizar).
+ *
  * Reglas (presentación pura; no toca precio ni asignación):
  * - Vuelo cubierto por EXTERNO: solo `avion_externo_modelo` (el avión del
  *   snapshot es la REFERENCIA de tarifa y el cliente no debe verla).
- * - Tramos VIVOS y COMERCIALES (no cancelados, no `solo_operativa`, no
- *   ferry — mismo criterio que la participación por avión) con avión
- *   resuelto CON HERENCIA (`escala.aeronave_id ?? vuelo.aeronave_id`). Si
- *   participan ≥ 2 aviones distintos → sus modelos en orden de tramo, sin
- *   repetir (modelos iguales se colapsan).
- * - Un solo avión (o sin tramos): el modelo del SNAPSHOT (avión con el que
- *   se PACTÓ el precio); sin snapshot, el del avión del vuelo.
+ * - Con SNAPSHOT: su modelo y nada más (el avión con el que se PACTÓ el
+ *   precio), sin importar en qué avión(es) se esté volando hoy.
+ * - RESPALDO sin snapshot: los tramos VIVOS y COMERCIALES (no cancelados, no
+ *   `solo_operativa`, no ferry — mismo criterio que la participación por
+ *   avión) con avión resuelto CON HERENCIA (`escala.aeronave_id ??
+ *   vuelo.aeronave_id`), sus modelos en orden de tramo y sin repetir; sin
+ *   tramos, el modelo del avión del vuelo.
  */
 
 export interface VueloModelosInput {
@@ -47,7 +56,12 @@ export function modeloCotizadoDe(v: VueloModelosInput): string | null {
   return limpio(snap?.aeronave?.modelo);
 }
 
-/** Ids de aviones distintos de los tramos vendidos, en orden de tramo. */
+/**
+ * Ids de aviones distintos de los tramos vendidos, en orden de tramo. Es un
+ * dato OPERATIVO: desde el 12-sep-2026 solo alimenta el RESPALDO de
+ * `modelosCotizados` (vuelo sin snapshot), nunca la hoja de una cotización
+ * ya calculada.
+ */
 export function avionesDeTramos(
   v: VueloModelosInput,
   escalas: EscalaModelosInput[] | null | undefined,
@@ -66,8 +80,9 @@ export function avionesDeTramos(
 }
 
 /**
- * Modelos distintos a mostrar al cliente (ver cabecera). `modeloPorId`
- * resuelve el modelo de cada avión de los tramos; un id sin modelo se omite.
+ * Modelo(s) a mostrar al cliente (ver cabecera): el del SNAPSHOT vigente. Con
+ * snapshot, `modeloPorId` ni se consulta; solo alimenta el RESPALDO de un
+ * vuelo SIN snapshot (un id sin modelo se omite).
  */
 export function modelosCotizados(
   v: VueloModelosInput,
@@ -78,7 +93,6 @@ export function modelosCotizados(
     const m = limpio(v.avion_externo_modelo);
     return m ? [m] : [];
   }
-  const ids = avionesDeTramos(v, escalas);
   const out: string[] = [];
   const vistos = new Set<string>();
   const agregar = (m: string | null) => {
@@ -88,14 +102,18 @@ export function modelosCotizados(
     vistos.add(k);
     out.push(m);
   };
-  if (ids.length >= 2) {
-    for (const id of ids) agregar(limpio(modeloPorId.get(id)));
-    if (out.length > 0) return out;
+  // El COTIZADO manda y CIERRA: un cambio de avión en la operación no toca
+  // lo que el cliente ve en su cotización (12-sep-2026).
+  const cotizado = modeloCotizadoDe(v);
+  if (cotizado) {
+    agregar(cotizado);
+    return out;
   }
-  agregar(modeloCotizadoDe(v));
-  if (out.length === 0) {
-    const unico = ids[0] ?? v.aeronave_id ?? null;
-    if (unico) agregar(limpio(modeloPorId.get(unico)));
+  // RESPALDO (sin snapshot: reserva sin cotizar todavía).
+  const ids = avionesDeTramos(v, escalas);
+  for (const id of ids) agregar(limpio(modeloPorId.get(id)));
+  if (out.length === 0 && v.aeronave_id) {
+    agregar(limpio(modeloPorId.get(v.aeronave_id)));
   }
   return out;
 }

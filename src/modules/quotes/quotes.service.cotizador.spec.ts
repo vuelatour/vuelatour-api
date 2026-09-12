@@ -379,6 +379,45 @@ describe('quoteLikeParaPreview — vista previa sin persistir', () => {
     expect(escalas[0].id).toBe('e1');
     expect(escrituras(log)).toEqual([]);
   });
+
+  it('#298 la cotización es independiente de la operación: el vuelo ya opera OTRO avión y el quote-like NO lo reasigna al cotizado', async () => {
+    // Cliente 12-sep-2026: «se cotiza con un avión y se vuela con otro […] la
+    // cotización no debe verse afectada por cambios en el vuelo operativo».
+    // El cotizador rehidrata el COTIZADO (snapshot = Kodiak) y la vista
+    // previa debe predecir lo mismo que revise(): el vuelo conserva el avión
+    // OPERATIVO y la HOJA imprime el modelo del snapshot.
+    const OPERATIVO = 'aaaaaaaa-0000-0000-0000-0000000000n9';
+    const log: Op[] = [];
+    const { svc } = servicio(
+      {
+        vuelo: () => ({ data: filaVuelo({ aeronave_id: OPERATIVO }) }),
+        escala: () => ({
+          data: [
+            escalaViva(1, { aeronave_id: OPERATIVO }),
+            escalaViva(2, { aeronave_id: OPERATIVO }),
+          ],
+        }),
+        aeronave: () => ({
+          data: [
+            { id: KODIAK, matricula: 'N621TX', modelo: 'Kodiak 100' },
+            { id: OPERATIVO, matricula: 'N990GG', modelo: 'Piper Seneca V' },
+          ],
+        }),
+        cliente: () => ({ data: { es_interno: false, tarifas: [] } }),
+      },
+      log,
+    );
+    const q = await svc.quoteLikeParaPreview({
+      ...dtoBase(),
+      quote_id: 'v1',
+      sucio: true,
+    });
+    // Guardar esta versión NO movería el vuelo al avión cotizado.
+    expect(q.aeronave_id).toBe(OPERATIVO);
+    // …y la hoja del cliente sigue mostrando el modelo COTIZADO.
+    expect(q.modelos_cotizados).toEqual(['Kodiak 100']);
+    expect(escrituras(log)).toEqual([]);
+  });
 });
 
 describe('client_request_id — idempotencia de create/revise', () => {

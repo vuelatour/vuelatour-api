@@ -980,4 +980,102 @@ describe('mapa_puntos — armarMapaPuntos / mapaPuntosDeEscalas / mapaSvg / hoja
     const p: MapaPuntoPdf[] = PAYLOAD_148.mapa_puntos;
     expect(p.length).toBe(2);
   });
+
+  // ===================================================================
+  // LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN (#298, 12-sep-2026):
+  // la ficha del avión del PDF del CLIENTE (matrícula, fotos, modelo,
+  // asientos, velocidad, motores, características) sale del avión
+  // COTIZADO —el del snapshot vigente—, NUNCA de `vuelo.aeronave_id`.
+  // ===================================================================
+  describe('#298 — la ficha del avión del PDF es la del COTIZADO', () => {
+    /** Mock que ANOTA `tabla.columna=valor` de cada .eq() para poder afirmar
+     *  con QUÉ avión se consultaron la ficha y la galería. */
+    function mockEspia(filtros: string[]): SupabaseService {
+      const tablas = tablas148() as Record<
+        string,
+        { single?: Row | null; lista?: Row[] }
+      >;
+      const from = (tabla: string) => {
+        const t = tablas[tabla] ?? {};
+        const b: Record<string, unknown> = {};
+        const chain = () => b;
+        for (const m of ['select', 'in', 'is', 'order', 'limit']) {
+          b[m] = jest.fn(chain);
+        }
+        b.eq = jest.fn((col: string, val: unknown) => {
+          filtros.push(`${tabla}.${col}=${String(val)}`);
+          return b;
+        });
+        b.maybeSingle = jest.fn(() =>
+          Promise.resolve({ data: t.single ?? null, error: null }),
+        );
+        b.then = (res: (v: unknown) => unknown, rej: (e: unknown) => unknown) =>
+          Promise.resolve({ data: t.lista ?? [], error: null }).then(res, rej);
+        return b;
+      };
+      return { service: { from } } as unknown as SupabaseService;
+    }
+
+    function svcEspia(filtros: string[]) {
+      const config = {
+        get: (k: string) => (k === 'PYSERVICES_BASE_URL' ? 'http://py/' : 'tok'),
+      } as unknown as ConfigService<EnvVars, true>;
+      return new QuotesPdfService(
+        config,
+        mockEspia(filtros),
+        {} as QuotesService,
+        {} as PyservicesService,
+      );
+    }
+
+    const OPERATIVO = 'bbbbbbbb-0000-0000-0000-00000000000b';
+
+    it('vuelo reasignado (snapshot Cessna 205, opera N990GG): ficha y galería se piden del COTIZADO', async () => {
+      const filtros: string[] = [];
+      const quote = { ...quote148(), aeronave_id: OPERATIVO };
+      const payload = await svcEspia(filtros).armarPayloadPdf(quote, {
+        conFotos: true,
+      });
+      // La ficha y las fotos se consultaron con el avión del SNAPSHOT.
+      expect(filtros).toContain(`aeronave.id=${KODIAK_ID}`);
+      expect(filtros).toContain(`aeronave_imagen.aeronave_id=${KODIAK_ID}`);
+      // …y NUNCA con el operativo (era el bug: fotos del avión que vuela).
+      expect(filtros.join('|')).not.toContain(OPERATIVO);
+      // El payload sigue siendo el de la cotización #148 (nada cambia por
+      // reasignar el vuelo): mismo modelo, matrícula y fotos.
+      expect(payload.avion_modelo).toBe('Piper Seneca V');
+      expect(payload.matricula).toBe('N621TX');
+      expect(payload.modelos_cotizados).toEqual(['Piper Seneca V']);
+    });
+
+    it('sin snapshot (reserva sin cotizar) el respaldo sigue siendo vuelo.aeronave_id', async () => {
+      const filtros: string[] = [];
+      const quote = {
+        ...quote148(),
+        aeronave_id: OPERATIVO,
+        calculo_snapshot: null,
+      };
+      await svcEspia(filtros).armarPayloadPdf(quote, { conFotos: false });
+      expect(filtros).toContain(`aeronave.id=${OPERATIVO}`);
+    });
+
+    it('EXTERNO: no se consulta ninguna ficha (la referencia de tarifa del snapshot JAMÁS se enseña)', async () => {
+      const filtros: string[] = [];
+      const quote = {
+        ...quote148(),
+        es_externo: true,
+        aeronave_id: null,
+        avion_externo_modelo: 'Hawker 400 A',
+        avion_externo_matricula: 'XA-REG',
+      };
+      const payload = await svcEspia(filtros).armarPayloadPdf(quote, {
+        conFotos: true,
+      });
+      expect(filtros.join('|')).not.toContain('aeronave.id');
+      expect(filtros.join('|')).not.toContain('aeronave_imagen');
+      expect(payload.matricula).toBeNull();
+      expect(payload.avion_modelo).toBeNull();
+      expect(payload.avion_externo).toBe('Hawker 400 A · XA-REG');
+    });
+  });
 });

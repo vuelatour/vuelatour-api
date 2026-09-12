@@ -42,8 +42,10 @@ type Op = { m: string; args: unknown[] };
 
 const SENECA = 'aaaaaaaa-0000-4000-8000-0000000seneca';
 const C206 = 'aaaaaaaa-0000-4000-8000-00000000c206';
+const N990 = 'aaaaaaaa-0000-4000-8000-00000000n990';
 const V1 = 'vvvvvvvv-0000-4000-8000-000000000254';
 const USER = 'uuuuuuuu-0000-4000-8000-00000000000f';
+const PILOTO = 'pppppppp-0000-4000-8000-00000000000p';
 
 const FICHAS: Record<string, Row> = {
   [SENECA]: {
@@ -65,6 +67,17 @@ const FICHAS: Record<string, Row> = {
     velocidad_crucero_kts: 140,
     tarifa_hora_pub_usd: 800,
     tarifa_hora_broker_usd: 700,
+  },
+  // Avión OPERATIVO del caso #298 (se cotizó en otro y se vuela en este).
+  [N990]: {
+    id: N990,
+    activa: true,
+    matricula: 'N990GG',
+    modelo: 'PIPER SENECA V',
+    pais_registro: 'US',
+    velocidad_crucero_kts: 170,
+    tarifa_hora_pub_usd: 1400,
+    tarifa_hora_broker_usd: 1300,
   },
 };
 
@@ -250,6 +263,7 @@ function armar(m: Mundo = {}) {
     notificarSquawkAceptado,
     avisoTallerDe,
   } as unknown as FlightsService;
+  const notifyUser = jest.fn().mockResolvedValue(true);
   const service = new QuotesService(
     aircraft,
     airports,
@@ -258,7 +272,7 @@ function armar(m: Mundo = {}) {
     { syncFlight: jest.fn() } as unknown as CalendarSyncService,
     {} as EmailService,
     {
-      notifyUser: jest.fn().mockResolvedValue(true),
+      notifyUser,
       notifyRole: jest.fn().mockResolvedValue(true),
     } as unknown as NotificationsService,
     flights,
@@ -277,6 +291,7 @@ function armar(m: Mundo = {}) {
     blanketEscala,
     validateAssignTargets,
     notificarSquawkAceptado,
+    notifyUser,
   };
 }
 
@@ -392,6 +407,93 @@ describe('QuotesService.revise — cambio de aeronave desde el cotizador (#254)'
  * balance cuelgan de la matrícula con la que se voló). El TALLER dejó de ser
  * candado el mismo día: solo agrega su aviso a `avisos[]`.
  */
+/**
+ * LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN (cliente, 12-sep-2026,
+ * cotización #298): «al realizar un ajuste en el vuelo operativo (cambio de
+ * avión) terminó afectando a la cotización; esto no debe ser así: se cotiza
+ * con un avión y se vuela con otro por distintos motivos, pero la cotización
+ * no debe verse afectada por cambios en el vuelo operativo».
+ *
+ * Caso de punta a punta: snapshot = Cessna (COTIZADO), el vuelo se reasignó a
+ * N990GG (OPERATIVO) y el panel guarda una versión SIN tocar el selector (el
+ * cotizador rehidrata el COTIZADO) ⇒ el precio se calcula con el Cessna, el
+ * vuelo sigue en el N990GG, el snapshot conserva el Cessna y NADIE recibe un
+ * aviso de cambio de avión.
+ */
+describe('QuotesService.revise — la cotización es independiente de la operación (#298)', () => {
+  const mundo298 = () =>
+    armar({
+      vuelo: vueloRow({
+        // Se cotizó en el Cessna (snapshot) y hoy opera el N990GG.
+        aeronave_id: N990,
+        piloto_id: PILOTO,
+        calculo_snapshot: {
+          aeronave: { id: C206, matricula: 'XB-ANU', modelo: 'Cessna 206' },
+        },
+      }),
+      aeronaveTramo1: N990,
+    });
+
+  it('guardar una versión con el avión COTIZADO no reasigna el vuelo ni sus tramos', async () => {
+    const w = mundo298();
+    await w.service.revise(V1, dto(C206), USER);
+    const patch = w.patchVuelo()!;
+    // El vuelo conserva el avión OPERATIVO…
+    expect(patch.aeronave_id).toBe(N990);
+    // …y ningún tramo se mueve de aeronave.
+    expect(w.blanketEscala()).toBeNull();
+  });
+
+  it('el PRECIO y el snapshot se calculan con el avión COTIZADO (no con el operativo)', async () => {
+    const w = mundo298();
+    await w.service.revise(V1, dto(C206), USER);
+    const patch = w.patchVuelo()!;
+    const snap = patch.calculo_snapshot as {
+      aeronave: { id: string; modelo: string };
+      tarifa: { usd_por_hora: number };
+    };
+    expect(snap.aeronave.id).toBe(C206);
+    expect(snap.aeronave.modelo).toBe('Cessna 206');
+    // Tarifa del COTIZADO (800), jamás la del operativo (1400).
+    expect(snap.tarifa.usd_por_hora).toBe(800);
+  });
+
+  it('no es una asignación: ni pre-check de squawk/taller ni aviso de cambio de avión a la tripulación', async () => {
+    const w = mundo298();
+    await w.service.revise(V1, dto(C206), USER);
+    expect(w.validateAssignTargets).not.toHaveBeenCalled();
+    expect(w.notificarSquawkAceptado).not.toHaveBeenCalled();
+    const titulos = (w.notifyUser.mock.calls as unknown[][]).map(
+      (c) => (c[1] as { titulo?: string } | undefined)?.titulo ?? '',
+    );
+    expect(titulos.join(' | ')).not.toMatch(/cambio de avión/i);
+  });
+
+  it('el historial registra la versión con el avión COTIZADO (lo pactado con el cliente)', async () => {
+    const w = mundo298();
+    await w.service.revise(V1, dto(C206), USER);
+    const version = w.inserts.find(
+      (i) => i.tabla === 'cotizacion_version_history',
+    )!;
+    expect(version.fila.aeronave_id).toBe(C206);
+  });
+
+  it('elegir un TERCER avión en el cotizador SÍ es deliberado (contrato del 11-sep intacto)', async () => {
+    const w = mundo298();
+    await w.service.revise(V1, dto(SENECA), USER);
+    expect(w.patchVuelo()!.aeronave_id).toBe(SENECA);
+    expect(w.validateAssignTargets).toHaveBeenCalledWith(
+      { aeronaveId: SENECA },
+      { aceptarDiscrepanciaAlta: false },
+    );
+    // El blanket parte del OPERATIVO anterior (N990GG), no del cotizado.
+    expect(w.blanketEscala()!.ops).toContainEqual({
+      m: 'or',
+      args: [`aeronave_id.is.null,aeronave_id.eq.${N990}`],
+    });
+  });
+});
+
 describe('QuotesService.revise — candados al cambiar de avión (taller / squawk)', () => {
   it('valida el avión NUEVO con el pre-check de assign (fuente única) antes de escribir', async () => {
     const w = armar();

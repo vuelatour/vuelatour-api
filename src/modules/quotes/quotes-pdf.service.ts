@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
+import { idAeronaveCotizada } from './aeronave-revision.util';
 import type { MapaSvgDto, MapaSvgEscalaDto } from './dto/mapa-svg.dto';
 import type { PreviewQuoteDto } from './dto/preview-quote.dto';
 import { QuotesService } from './quotes.service';
@@ -459,7 +460,27 @@ export class QuotesPdfService {
     // Ficha comercial (26-ago v2): la hoja del avión lleva modelo, tarjeta
     // "De un vistazo" y características — todo de la fila de aeronave.
     let avion: Record<string, unknown> | null = null;
-    if (quote.aeronave_id) {
+    // AVIÓN DE LA FICHA = EL COTIZADO (R3, 12-sep-2026, cotización #298): la
+    // hoja "La aeronave" (fotos, modelo, asientos, velocidad, motores,
+    // características) y la sublínea de matrícula son parte del documento
+    // que ve el CLIENTE, así que salen del SNAPSHOT vigente — con el que se
+    // pactó el precio— y NUNCA de `vuelo.aeronave_id`. Antes se leía el
+    // operativo: reasignar el vuelo (caso #298: cotizado Cessna 205, volado
+    // en N990GG · Seneca V) dejaba la línea "Aeronave cotizada: Cessna 205"
+    // correcta pero imprimía las FOTOS y la ficha del Seneca — un dato
+    // operativo colándose a la cotización, justo lo que el cliente pidió
+    // separar. Respaldo `aeronave_id` solo cuando no hay snapshot (reserva
+    // sin cotizar todavía).
+    // EXTERNO: sigue SIN ficha (su avión ajeno se pinta con
+    // `avion_externo_*`). El snapshot de un externo guarda la referencia de
+    // TARIFA —un avión PROPIO— y enseñarla sería peor que el bug: el cliente
+    // vería las fotos de un avión que no va a volar.
+    const aeronaveFichaId =
+      quote.es_externo === true
+        ? null
+        : (idAeronaveCotizada(quote.calculo_snapshot) ??
+          ((quote.aeronave_id as string | null) ?? null));
+    if (aeronaveFichaId) {
       // La ficha del avión SÍ hace falta aun sin fotos (vista previa de la
       // hoja 1): `matricula` alimenta la sublínea VGV; la galería solo con
       // `conFotos` (una consulta y dos descargas menos por tecleo).
@@ -469,13 +490,13 @@ export class QuotesPdfService {
           .select(
             'matricula, modelo, velocidad_crucero_kts, asientos, num_motores, motor_hp, caracteristicas',
           )
-          .eq('id', quote.aeronave_id as string)
+          .eq('id', aeronaveFichaId)
           .maybeSingle(),
         conFotos
           ? this.supabase.service
               .from('aeronave_imagen')
               .select('url, etiqueta, content_type')
-              .eq('aeronave_id', quote.aeronave_id as string)
+              .eq('aeronave_id', aeronaveFichaId)
               .in('etiqueta', ['EXTERIOR', 'INTERIOR'])
           : Promise.resolve({
               data: null as Array<Record<string, unknown>> | null,
@@ -567,10 +588,12 @@ export class QuotesPdfService {
 
     // MODELO COTIZADO (feedback del cliente 4-sep): el PDF muestra el TIPO
     // de avión que se cotizó (snapshot), NUNCA la matrícula — a veces se
-    // cotiza en un avión y la ruta operativa va en otro. Con tramos en
-    // aviones distintos, los modelos distintos. `modelos_cotizados` ya viene
-    // resuelto por findById (fuente única modelos-cotizados.util); fallback
-    // al snapshot si el render se llama con una fila cruda.
+    // cotiza en un avión y la ruta operativa va en otro. Desde el
+    // 12-sep-2026 es SOLO el del snapshot vigente: la cotización es
+    // independiente de la operación, así que reasignar el vuelo (o un tramo)
+    // NO cambia el avión impreso en la hoja del cliente. `modelos_cotizados`
+    // ya viene resuelto por findById (fuente única modelos-cotizados.util);
+    // fallback al snapshot si el render se llama con una fila cruda.
     const aeronaveCotizadaModelo = modeloCotizadoDe({
       es_externo: quote.es_externo === true,
       avion_externo_modelo:

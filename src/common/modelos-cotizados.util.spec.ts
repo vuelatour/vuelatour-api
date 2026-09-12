@@ -25,7 +25,11 @@ describe('modelosCotizados (modelo del avión cotizado, nunca matrícula)', () =
     expect(modelosCotizados(v, escalas, modelos)).toEqual(['Seneca V']);
   });
 
-  it('tramos en aviones distintos ⇒ modelos distintos en orden de tramo, sin repetir', () => {
+  it('#298: con tramos en aviones distintos el cliente SIGUE viendo solo el modelo COTIZADO', () => {
+    // Regla 12-sep-2026: la cotización es independiente de la operación —
+    // reasignar tramos a otros aviones no cambia la hoja del cliente. Antes
+    // esta misma entrada imprimía ['Kodiak 100', 'Piper Meridian'] (dato
+    // OPERATIVO colándose a la cotización).
     const v = { aeronave_id: 'anu', calculo_snapshot: snap };
     const escalas = [
       { aeronave_id: null, cancelada_at: null },
@@ -34,11 +38,34 @@ describe('modelosCotizados (modelo del avión cotizado, nunca matrícula)', () =
       { aeronave_id: 'seneca', cancelada_at: '2026-09-01T00:00:00Z' },
       { aeronave_id: 'seneca', cancelada_at: null, es_ferry: true },
     ];
+    // El dato operativo sigue disponible (control interno), pero no se pinta.
     expect(avionesDeTramos(v, escalas)).toEqual(['anu', 'meridian', 'anu2']);
+    expect(modelosCotizados(v, escalas, modelos)).toEqual(['Seneca V']);
+  });
+
+  it('#298: el vuelo entero reasignado a otro avión no mueve el modelo cotizado', () => {
+    const v = { aeronave_id: 'meridian', calculo_snapshot: snap };
+    const escalas = [{ aeronave_id: 'meridian', cancelada_at: null }];
+    expect(modelosCotizados(v, escalas, modelos)).toEqual(['Seneca V']);
+  });
+
+  it('RESPALDO sin snapshot: los modelos de los tramos (y con uno solo, ese)', () => {
+    const v = { aeronave_id: 'anu', calculo_snapshot: null };
+    const escalas = [
+      { aeronave_id: null, cancelada_at: null },
+      { aeronave_id: 'meridian', cancelada_at: null },
+    ];
     expect(modelosCotizados(v, escalas, modelos)).toEqual([
       'Kodiak 100',
       'Piper Meridian',
     ]);
+    expect(
+      modelosCotizados(
+        { aeronave_id: 'anu', calculo_snapshot: null },
+        [],
+        modelos,
+      ),
+    ).toEqual(['Kodiak 100']);
   });
 
   it('externo: solo el modelo del avión ajeno (la referencia del snapshot no se muestra)', () => {

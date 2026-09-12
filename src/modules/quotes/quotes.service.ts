@@ -28,7 +28,10 @@ import {
   modeloCotizadoDe,
   modelosCotizados,
 } from '../../common/modelos-cotizados.util';
-import { resolverAeronaveDeRevision } from './aeronave-revision.util';
+import {
+  idAeronaveCotizada,
+  resolverAeronaveDeRevision,
+} from './aeronave-revision.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { FlightsService } from '../flights/flights.service';
 import { EmailService } from '../notifications/email.service';
@@ -1612,14 +1615,17 @@ export class QuotesService {
     ) as Array<Record<string, unknown>>;
     // Avión que quedaría en vuelo.aeronave_id: MISMA fuente única que
     // revise() (`resolverAeronaveDeRevision`) — un cambio deliberado de
-    // avión en el cotizador manda; si no lo hubo, manda el OPERATIVO del
-    // primer tramo activo. Si esto divergiera de revise(), la hoja mostraría
-    // un avión y se guardaría otro.
+    // avión en el cotizador (DTO ≠ COTIZADO del snapshot vigente) manda; si
+    // no lo hubo, se conserva el OPERATIVO (tramo vivo / vuelo) aunque el DTO
+    // traiga el cotizado: LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN
+    // (12-sep-2026). Si esto divergiera de revise(), la hoja mostraría un
+    // avión y se guardaría otro.
     const primerActivo = vivas.find((e) => e.cancelada_at == null);
     const aeronaveOperativa = current
       ? (resolverAeronaveDeRevision({
           aeronaveDto: dto.aeronave_id,
           aeronaveVuelo: (current.aeronave_id as string | null) ?? null,
+          aeronaveCotizada: idAeronaveCotizada(current.calculo_snapshot),
           aeronavePrimerTramoActivo:
             (primerActivo?.aeronave_id as string | null | undefined) ?? null,
         }).aeronave_id ?? dto.aeronave_id)
@@ -1774,21 +1780,36 @@ export class QuotesService {
       notas: dto.notas ?? current?.notas ?? null,
       escalas,
     };
-    // Modelos cotizados (fuente única modelos-cotizados.util): con tramos en
-    // aviones distintos hace falta el modelo de cada uno (una consulta);
-    // con un solo avión basta el modelo del snapshot.
-    const idsAviones = avionesDeTramos(fila, escalas);
+    // Modelos cotizados (fuente única modelos-cotizados.util): el modelo del
+    // SNAPSHOT recién calculado y NADA MÁS — la cotización es independiente
+    // de la operación (12-sep-2026), así que los aviones de los tramos ya no
+    // entran en la hoja. La consulta de modelos solo hace falta en el
+    // RESPALDO (fila sin snapshot: no debería pasar aquí, el motor siempre
+    // deja uno).
     const modeloPorId = new Map<string, string | null>();
-    if (idsAviones.length >= 2) {
-      const { data } = await this.supabase.service
-        .from('aeronave')
-        .select('id, modelo')
-        .in('id', idsAviones);
-      for (const a of data ?? []) {
-        modeloPorId.set(a.id as string, (a.modelo as string | null) ?? null);
+    if (!esExterno && !modeloCotizadoDe(fila)) {
+      const idsAviones = avionesDeTramos(fila, escalas);
+      if (idsAviones.length > 0) {
+        const { data } = await this.supabase.service
+          .from('aeronave')
+          .select('id, modelo')
+          .in('id', idsAviones);
+        for (const a of data ?? []) {
+          modeloPorId.set(a.id as string, (a.modelo as string | null) ?? null);
+        }
       }
     }
     fila.modelos_cotizados = modelosCotizados(fila, escalas, modeloPorId);
+    // Fichas COTIZADA/UTILIZADA: las calcula `findById` sobre lo PERSISTIDO y
+    // el spread de `current` las arrastraría VIEJAS junto a un snapshot
+    // recién calculado (el operador cambió de avión y la ficha seguiría
+    // diciendo el anterior). Aquí no hay a quién consultarlas, así que se
+    // quitan: quien lee el quote-like (payload del PDF/vista previa) resuelve
+    // el avión COTIZADO desde `calculo_snapshot`, que SÍ está fresco.
+    delete fila.aeronave_cotizada;
+    delete fila.aeronave_utilizada;
+    delete fila.aeronaves_utilizadas;
+    delete fila.aeronave_operativa;
     return fila;
   }
 
@@ -2200,6 +2221,18 @@ export class QuotesService {
     // con `conservarAvionOperativo`. Primer tramo ACTIVO (vuelos
     // combinados, 28-ago): con la ida ferry cancelada, leer el orden=1 a
     // secas rebotaba el avión del vuelo al del tramo cancelado.
+    // LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN (cliente 12-sep-2026,
+    // cotización #298): «se cotiza con un avión y se vuela con otro […] la
+    // cotización no debe verse afectada por cambios en el vuelo operativo».
+    // El "cambió el avión" se mide contra el COTIZADO
+    // (`calculo_snapshot.aeronave.id`, lo que el cotizador rehidrata), NO
+    // contra el operativo: con el vuelo ya reasignado a otro avión, guardar
+    // una versión sin tocar el selector traía el avión COTIZADO en el DTO y
+    // eso se leía como cambio deliberado ⇒ reasignaba el vuelo de vuelta al
+    // avión de la cotización (regresión del caso #80). Ahora ese caso NO es
+    // cambio deliberado: el PRECIO se calcula con el avión del DTO (el
+    // cotizado, vía `calculate`) y `vuelo.aeronave_id` conserva el
+    // OPERATIVO.
     // Se leen TODOS los tramos vivos (no solo el primero): el primero decide
     // el avión operativo y la lista completa decide a cuáles puede llegar el
     // blanket — un tramo con TACÓMETRO capturado ya voló y no se mueve de
@@ -2222,6 +2255,7 @@ export class QuotesService {
     const avionRevision = resolverAeronaveDeRevision({
       aeronaveDto: dto.aeronave_id,
       aeronaveVuelo: current.aeronave_id as string | null,
+      aeronaveCotizada: idAeronaveCotizada(current.calculo_snapshot),
       aeronavePrimerTramoActivo: (ida?.aeronave_id as string | null) ?? null,
       conservarOperativo: opts.conservarAvionOperativo === true,
     });
@@ -3196,6 +3230,17 @@ export class QuotesService {
     userId: string,
     grupo: GrupoHijoOpts,
   ) {
+    // OJO (12-sep-2026): el armado del grupo re-envía como referencia de
+    // tarifa el avión OPERATIVO del hijo (`groups.avionCtxDeHijo`:
+    // `h.aeronave_id ?? snapshot.aeronave.id`), NO el cotizado. Es
+    // DELIBERADO y no colisiona con «la cotización es independiente de la
+    // operación»: en el grupo la flota se elige en el wizard y el cambio
+    // operativo lo hace `flights.assign` (que valida squawk y avisa), con
+    // `meta.grupo.precio_desactualizado` marcando cuando el avión efectivo ≠
+    // el cotizado. `conservarAvionOperativo` garantiza que NADA de esto
+    // reasigne el vuelo ni sus tramos desde aquí (hijo COMPLETADO con tacos,
+    // invariante 1). Si algún día el precio del hijo debe seguir al avión
+    // COTIZADO, el cambio va en `avionCtxDeHijo`, no aquí.
     return this.revise(vueloId, dto, userId, {
       desdeGrupo: true,
       grupo,
@@ -3572,6 +3617,10 @@ export class QuotesService {
         : utilizadosIds
             .map((id) => ficha(id))
             .filter((f): f is FichaAvionMin => f != null),
+      // Lo ÚNICO que ve el cliente en la hoja/PDF: el modelo del SNAPSHOT
+      // vigente. Desde el 12-sep-2026 los aviones de los tramos ya no se
+      // cuelan aquí (la cotización es independiente de la operación); para
+      // control interno están `aeronave_cotizada` vs `aeronave_utilizada`.
       modelos_cotizados: modelosCotizados(vuelo, escalas, modeloPorId),
     };
   }

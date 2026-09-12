@@ -525,23 +525,60 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `GASTO_CONCILIADO`, `GASTO_DE_COMPRA` (+`details.compra_id/folio`),
       `GASTO_REPARTIDO` en `remove`.
 
-14. **Avión de la cotización: COTIZADO vs UTILIZADO, y el cambio de avión SÍ
-    se persiste (11-sep-2026, bug cotización #254).**
+14. **Avión de la cotización: COTIZADO vs UTILIZADO — LA COTIZACIÓN ES
+    INDEPENDIENTE DE LA OPERACIÓN (cliente, 12-sep-2026, cotización #298) y
+    el cambio DELIBERADO de avión sí se persiste (11-sep-2026, #254).**
+    - **REGLA RECTORA (cliente, 12-sep-2026)**: «al realizar un ajuste en el
+      vuelo operativo (cambio de avión) terminó afectando a la cotización;
+      esto no debe ser así: **se cotiza con un avión y se vuela con otro por
+      distintos motivos, pero la cotización no debe verse afectada por
+      cambios en el vuelo operativo**». Dos datos, dos fuentes: el avión
+      **COTIZADO** = `calculo_snapshot.aeronave` del snapshot VIGENTE
+      (expuesto como `aeronave_cotizada {id, matricula, modelo}` en
+      `GET /quotes/:id` y en el snapshot del vuelo; el id lo lee la fuente
+      única `idAeronaveCotizada`); el **OPERATIVO** = `vuelo.aeronave_id` /
+      los tramos. (R1) el cotizador del panel rehidrata su selector desde el
+      COTIZADO (`aeronave_cotizada?.id ?? calculo_snapshot?.aeronave?.id ??
+      aeronave_id`), nunca desde el operativo — también en externos (ahí el
+      snapshot es la referencia de TARIFA). (R2) ver el punto siguiente.
+      (R3) `modelos_cotizados`/hoja/PDF del cliente: SOLO el modelo del
+      snapshot vigente (externo: el modelo ajeno) **y también su FICHA** —
+      `armarPayloadPdf` consulta `aeronave`/`aeronave_imagen` con el avión
+      COTIZADO (`idAeronaveCotizada(calculo_snapshot)`, respaldo
+      `vuelo.aeronave_id` solo sin snapshot; externo = sin ficha, su
+      referencia de tarifa JAMÁS se enseña). Antes leía el operativo: la línea
+      «Aeronave cotizada» salía bien pero las FOTOS, asientos, velocidad,
+      motores, características y la matrícula del PDF eran los del avión que
+      vuela hoy. (R4) la card «Operación» y
+      el PDF INTERNO siguen mostrando cotizada vs utilizada. (R5) los textos
+      del panel explican la separación (el diálogo de «tiene tripulación
+      asignada» y la nota tenue «Opera en …»); el selector JAMÁS se mueve
+      solo.
     - Fuente única `resolverAeronaveDeRevision`
       (`quotes/aeronave-revision.util.ts`), compartida por `revise()`,
       `quickAdjust()` y el quote-like de `preview-html` (si divergen, la hoja
-      muestra un avión y se guarda otro): si el cotizador CAMBIÓ el avión
-      (`dto.aeronave_id` ≠ `vuelo.aeronave_id`) el cambio es DELIBERADO y
-      manda — se escribe `vuelo.aeronave_id` y los tramos VIVOS lo siguen con
-      el **blanket SELECTIVO** de siempre (solo herencia `null` o el avión
-      VIEJO; una rotación deliberada a un tercer avión se respeta). Si NO lo
-      cambió, manda el OPERATIVO del primer tramo ACTIVO (caso #80: cotizado
-      en XA-VGV, volado en N990GG). `quickAdjust` —que re-envía a propósito
-      el avión del SNAPSHOT para no mover el precio— y `reviseParaGrupo`
-      —el armado del grupo re-envía el avión del hijo como referencia de
-      tarifa y el cambio operativo lo hace `flights.assign`, que sí valida
-      el squawk y avisa (taller incluido, ya solo como aviso)— pasan
-      `conservarAvionOperativo: true` y JAMÁS
+      muestra un avión y se guarda otro). **(R2, 12-sep-2026)** el «cambió el
+      avión» se mide contra el **COTIZADO**, no contra el operativo:
+      `cambio_deliberado = dto != null && dto !== (aeronaveCotizada ??
+      aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
+      vuelo no es asignación nueva — sin ella un panel viejo rebotaría 409 por
+      un squawk del avión que ya vuela). Con cambio DELIBERADO manda el DTO:
+      se escribe `vuelo.aeronave_id` y los tramos VIVOS lo siguen con el
+      **blanket SELECTIVO** de siempre (solo herencia `null` o el avión
+      VIEJO —el OPERATIVO anterior—; una rotación deliberada a un tercer avión
+      se respeta). SIN cambio deliberado el vuelo conserva el OPERATIVO
+      (`tramo ?? vuelo ?? dto`) y el PRECIO se calcula con el avión del DTO
+      (= el cotizado): ese es el caso #298 (snapshot Cessna 205, vuelo en
+      N990GG, el panel guarda sin tocar el selector ⇒ precio con el Cessna,
+      `vuelo.aeronave_id` sigue en N990GG, snapshot con el Cessna y NINGÚN
+      aviso de cambio de avión). Antes esa misma revisión se leía como cambio
+      deliberado y REASIGNABA el vuelo al avión de la cotización (regresión
+      del caso #80: cotizado en XA-VGV, volado en N990GG).
+      `quickAdjust` —que re-envía a propósito el avión del SNAPSHOT para no
+      mover el precio— y `reviseParaGrupo` —el armado del grupo re-envía el
+      avión del hijo como referencia de tarifa y el cambio operativo lo hace
+      `flights.assign`, que sí valida el squawk y avisa (taller incluido, ya
+      solo como aviso)— pasan `conservarAvionOperativo: true` y JAMÁS
       reasignan. Sin esa guarda en el grupo, un hijo COMPLETADO (cuyo
       `assign` se salta a propósito) se movía de avión al recotizar y
       arrastraba sus tramos CON TACOS: horas de motor, gastos y balance de
@@ -550,6 +587,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `vuelo.aeronave_id` se quedaba con el viejo, el formulario reabría con
       el viejo y cada versión repetía el mismo diff «Avión X→Y» mientras la
       hoja seguía diciendo el avión original.
+    - **(R3) El cliente solo ve el modelo COTIZADO**: `modelosCotizados`
+      (`common/modelos-cotizados.util.ts`) devuelve el modelo del SNAPSHOT y
+      CIERRA. La rama vieja «≥ 2 aviones en los tramos ⇒ sus modelos» quedó
+      como **RESPALDO solo cuando NO hay snapshot** (reserva sin cotizar):
+      colaba un dato OPERATIVO en la cotización (reasignar un tramo cambiaba
+      el avión impreso en la hoja sin que nadie tocara la cotización).
+      `avionesDeTramos` sigue existiendo, pero ya solo alimenta ese respaldo.
     - **Dos datos SEPARADOS para control interno**: `aeronave_cotizada`
       (ficha del avión del SNAPSHOT vigente — el MODELO es lo único que ve el
       cliente, vía `modelos-cotizados.util`) y `aeronave_utilizada`
@@ -714,8 +758,14 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.
-- **Vigilar (11-sep-2026)**: `reviseParaGrupo` pasa por la MISMA regla de
-  avión que el cotizador (invariante 14) — hoy el grupo re-envía el avión ya
-  persistido del hijo, así que no reasigna nada; si algún día el armado del
-  grupo manda un avión distinto sin pasar por `reassignAircraft`, ese cambio
-  SÍ moverá el vuelo y sus tramos.
+- **Vigilar (11-sep-2026, revisado el 12-sep)**: `reviseParaGrupo` pasa por
+  la MISMA regla de avión que el cotizador (invariante 14) pero SIEMPRE con
+  `conservarAvionOperativo: true`, así que no reasigna nada. El armado del
+  grupo re-envía como referencia de tarifa el avión **OPERATIVO** del hijo
+  (`groups.avionCtxDeHijo`: `h.aeronave_id ?? snapshot.aeronave.id`), NO el
+  cotizado: es deliberado (en el grupo la flota se elige en el wizard, el
+  cambio operativo lo hace `flights.assign` y `meta.grupo
+  .precio_desactualizado` marca cuando el avión efectivo ≠ el cotizado). Si
+  el cliente pide que el precio del hijo siga al avión COTIZADO (R1 del
+  12-sep aplicada al grupo), el cambio va en `avionCtxDeHijo`, no en
+  `reviseParaGrupo`.
