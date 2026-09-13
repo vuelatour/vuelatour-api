@@ -19,6 +19,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CalendarRangeQuery,
   CreateEventoFlotaDto,
+  ResyncCalendarDto,
   UpdateEventoFlotaDto,
 } from './dto/calendar.dto';
 import { CalendarService } from './calendar.service';
@@ -78,14 +79,26 @@ export class CalendarController {
     return this.calendar.removeEvento(id);
   }
 
+  // Ruta LITERAL antes de cualquier ':id' del mismo segmento (convención del
+  // repo) — hoy no hay ninguna, pero el orden se conserva.
+  @Get('sync-estado')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Estado de la sincronización a Google Calendar (C5, 12-sep-2026): {enabled, calendar_id, ultimo_reconcile_at, ultimo_resync_at, ultimo_resumen, nota}. `enabled:false` = faltan las variables en Railway (GOOGLE_CALENDAR_SYNC_ENABLED / GOOGLE_CALENDAR_ID / GOOGLE_SERVICE_ACCOUNT_JSON). Los últimos = en memoria del proceso: null si aún no ha corrido desde el último deploy.',
+  })
+  syncEstado() {
+    return this.sync.estadoSync();
+  }
+
   @Post('resync')
   @Roles(Rol.ADMIN)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Re-sincroniza a Google Calendar los vuelos redondos (crea el tramo de regreso).',
+      'Backfill COMPLETO a Google Calendar (12-sep-2026): vuelos no cancelados con fecha, descansos de piloto, eventos NO-vuelo y mantenimientos con fecha de la ventana [hoy−30d, hoy+365d] (body opcional `desde`/`hasta` ISO). Secuencial y best-effort: devuelve conteos por tipo {enabled, calendar_id, vuelos, descansos, eventos, mantenimientos, errores, desde, hasta, nota} y nunca lanza por un evento que falle. Los eventos capturados A MANO en Google no se tocan ni se deduplican.',
   })
-  resync() {
-    return this.sync.resyncRedondos();
+  resync(@Body() dto?: ResyncCalendarDto) {
+    return this.sync.resyncTodo(dto);
   }
 }

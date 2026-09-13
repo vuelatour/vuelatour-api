@@ -714,6 +714,89 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   [fecha, coalesce(fecha_fin, fecha)] en cortes Cancún). Cambiar de
   responsable avisa al nuevo (`evento_asignado`) y al anterior
   (`evento_cancelado`); única exclusión de auto-aviso: actor = responsable.
+- **Espejo a GOOGLE CALENDAR (sistema → Google, UNIDIRECCIONAL; pedido del
+  cliente del 12-sep-2026)** — `calendar/calendar-sync.service.ts` sube al
+  calendario **PRIMARIO de `aerochartercancunflightplanner@gmail.com`** (NO
+  `info@vuelatour.com`, dato viejo ya corregido en `.env.example`/`env.schema`;
+  la service account `vuelatour-calendar-sync@vuelatour.iam.gserviceaccount.com`
+  es OWNER y el calendario está en `America/Cancun`) TODO lo que muestra el
+  calendario del sistema: vuelos (un evento de 2 h por tramo), descansos de
+  piloto, eventos NO-vuelo de la flota y —desde el 12-sep-2026—
+  **mantenimientos**. Se prende con las 3 variables de Railway
+  (`GOOGLE_CALENDAR_SYNC_ENABLED`, `GOOGLE_CALENDAR_ID`,
+  `GOOGLE_SERVICE_ACCOUNT_JSON`); sin ellas queda inactiva y
+  `GET /v1/calendar/sync-estado` responde `enabled:false`.
+  - **Best-effort SIEMPRE**: todo hook es `void` (nunca `await` bloqueante) y
+    ningún fallo de Google llega al cliente. `syncFlight`/`syncMantenimiento`
+    se tragan sus errores y devuelven `boolean` SOLO para los conteos.
+    `EngineeringService.espejoGoogle` añade `.catch` porque una promesa
+    rechazada tumbaría el proceso (unhandled rejection en Node).
+  - **MANTENIMIENTOS**: evento de DÍA COMPLETO en `fecha_programada` (DATE =
+    día Cancún), título `🔧 Servicio · <matrícula> · <descripción>`
+    (`🔧 En taller · …` si `EN_TALLER`), colorId 5 (ámbar) / 11 (rojo Tomate),
+    `extendedProperties.private.vuelatour_mantenimiento_id`, id en
+    `mantenimiento.google_calendar_id`. **COMPLETADO o sin fecha ⇒ el evento se
+    BORRA** (el calendario del sistema tampoco los pinta). TODO camino de
+    escritura de `mantenimiento` llama al espejo: `createMantenimiento` (y su
+    replay idempotente — es un upsert, no una notificación), `updateMantenimiento`
+    y el servicio auto-programado de `alerts` (nace sin fecha ⇒ no agenda).
+    Si algún día aparece una BAJA de `mantenimiento`, debe llamar a
+    `removeMantenimientoEvent(google_calendar_id)`.
+  - **Título de vuelos**: la oficina identifica el vuelo por el PILOTO, así que
+    el summary lleva su nombre corto — `T1 · N4142R · CUN-PTU · Luis · 3 pax`
+    (`nombreCortoPiloto`: primer nombre, `sin piloto`, `externo`); ferry
+    `T2 Ferry · …`; `⚠ permiso pendiente` como siempre.
+  - **Color**: `colorIdGoogleDe` (`calendar/google-evento.util.ts`, PURO) mapea
+    `aeronave.color_calendario` al colorId más cercano de la paleta oficial de
+    Google (11 colores, distancia redmean). Precedencia: permiso pendiente (6)
+    > externo (4) > color del avión > `DEFAULT_COLOR_ID` (9).
+    **El color en Google NO es un dato confiable, el TÍTULO sí**: Google solo
+    da 11 colores y 5 ya tienen significado (4 externo, 5 mantenimiento
+    PROGRAMADO, 6 permiso pendiente, 7 evento de flota, 11 EN_TALLER), así que
+    8 aviones no pueden tener un color propio. Con los hex de hoy: N4142R
+    (#F97316) cae en **6 = el mismo ámbar del permiso pendiente** (para ese
+    avión el color ya no distingue la alerta; el `⚠ permiso pendiente` del
+    título sí), N990GG y XA-VGV comparten Pavo real, y N58BT y XB-ANU comparten
+    Banana con el mantenimiento programado. Re-pintar los `color_calendario`
+    NO lo resuelve del todo (no hay 8 ids libres); es decisión del cliente.
+  - `extendedProperties.private.vuelatour_*` se ESCRIBE pero todavía no se
+    LEE: el único anclaje de idempotencia real es el id guardado en la fila
+    (`vuelo`/`escala`/`piloto_descanso`/`evento_flota`/`mantenimiento`
+    `.google_calendar_id`). Si ese id se pierde (restauración de respaldo,
+    limpieza manual), el siguiente resync CREA un evento nuevo y el anterior
+    queda huérfano; un `events.list` por `privateExtendedProperty` sería el
+    camino para deduplicar, y hoy no existe (ver pendientes).
+  - **Backfill**: `POST /v1/calendar/resync` (ADMIN) sincroniza los 4 tipos en
+    `[hoy−30d, hoy+365d]` (body opcional `desde`/`hasta` ISO), SECUENCIAL, y
+    devuelve `{enabled, calendar_id, vuelos, descansos, eventos,
+    mantenimientos, errores, desde, hasta, nota}`; nunca lanza por un evento
+    que falle (lo cuenta en `errores`). Comparte el núcleo
+    `sincronizarVentana` con el cron `reconcileVentana` (05:15 UTC, ventana
+    `[hoy−7d, hoy+60d]`): una sola implementación o el calendario queda
+    distinto según quién corrió último.
+  - **Idempotencia (regla dura, 12-sep-2026)**: con un `google_calendar_id`
+    guardado, un evento SOLO se re-crea si Google dice que ya no existe
+    (**404/410**, `eventoAusenteEnGoogle`). Ante cualquier otro fallo (403 de
+    cuota, 429, 5xx, red) el error se PROPAGA y se cuenta: re-crear ahí
+    duplicaba el evento en el calendario de la oficina y dejaba huérfano al
+    anterior (el id nuevo pisaba al viejo y el viejo ya nunca se actualizaba
+    ni se borraba). Simétrico al borrar: `deleteEvent` devuelve boolean y el
+    id guardado **solo se limpia si el evento quedó fuera de Google** — si no,
+    se conserva y el siguiente hook/reconcile reintenta. Un evento vivo en
+    Google sin id en la BD es un FANTASMA que ya nadie puede borrar. Dentro de
+    un itinerario, un TRAMO que falla no cancela los demás (`syncLegs` aísla
+    cada tramo) y el vuelo devuelve `false` para que el resumen lo cuente.
+  - **Los eventos que la oficina capturó A MANO en Google NO se tocan** (ni se
+    borran ni se deduplican; decisión del cliente pendiente): el resync lo dice
+    en su campo `nota`. Los vuelos CANCELADOS sí se BORRAN de Google (aunque el
+    calendario del sistema los conserve en rojo) y por eso el barrido de la
+    ventana **NO filtra por estado**: los cancelados entran para que
+    `syncFlight` limpie su evento (no se cuentan en `vuelos`, que es lo
+    publicado). Nada bidireccional (Google → sistema) todavía.
+  - `desde`/`hasta` del resync se NORMALIZAN (`instanteValido`): `@IsISO8601()`
+    deja pasar cadenas que `new Date` no entiende (`2026-W01-1`, coma decimal)
+    y con ellas la ruta respondía **500**; hoy es un 400 en es-MX, y la coma
+    tampoco puede partir el filtro `.or()` de PostgREST.
 - Espejo vuelo↔tramo 1: `aeronave_id/piloto_id/fecha` del vuelo se reflejan en
   la escala orden=1 (`mirrorVueloToIdaEscala`) y viceversa. Reagendar
   `fecha_vuelo` con el mismo piloto → push al piloto (doc 4.3). Cambiar la
@@ -755,6 +838,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   principal (una tarifa/velocidad; TUAS por su matrícula) — tarifa por
   tramo sigue pendiente. El REPARTO del ingreso entre aviones YA está
   decidido (28-ago-2026): ver invariante 10.
+- **Google Calendar (12-sep-2026)**: qué hacer con los ~305 eventos que la
+  oficina capturó A MANO en `aerochartercancunflightplanner@gmail.com`
+  (borrarlos, dejarlos conviviendo o deduplicar contra los del sistema) lo
+  decide el CLIENTE: hoy no se tocan. Colores duplicados en Google cuando dos
+  aviones tienen hex parecidos (ver el bullet del espejo).
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.

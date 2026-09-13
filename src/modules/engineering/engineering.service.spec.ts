@@ -1,6 +1,13 @@
+// El cliente de Google (googleapis) fuera del spec: el espejo a Calendar se
+// verifica con un doble, JAMÁS llamando a Google.
+jest.mock('../calendar/calendar-sync.service', () => ({
+  CalendarSyncService: class {},
+}));
+
 import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { EngineeringService } from './engineering.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import type { CalendarSyncService } from '../calendar/calendar-sync.service';
 
 /**
  * Lote 2 Ola B (10-sep-2026) · B1 en mantenimiento: `if_updated_at` → CAS
@@ -22,7 +29,15 @@ function armar(resultados: Resultado[]) {
         llamadas.push({ tabla, metodo, args });
         return q;
       };
-    for (const m of ['select', 'eq', 'gte', 'lte', 'update', 'order']) {
+    for (const m of [
+      'select',
+      'eq',
+      'gte',
+      'lte',
+      'update',
+      'insert',
+      'order',
+    ]) {
       q[m] = registra(m);
     }
     q.maybeSingle = () => {
@@ -34,7 +49,16 @@ function armar(resultados: Resultado[]) {
   };
   const rpc = jest.fn();
   const supabase = { service: { from, rpc } } as unknown as SupabaseService;
-  return { service: new EngineeringService(supabase), llamadas, rpc };
+  const syncMantenimiento = jest.fn().mockResolvedValue(true);
+  const calendarSync = {
+    syncMantenimiento,
+  } as unknown as CalendarSyncService;
+  return {
+    service: new EngineeringService(supabase, calendarSync),
+    llamadas,
+    rpc,
+    syncMantenimiento,
+  };
 }
 
 const de = (llamadas: Llamada[], metodo: string) =>
@@ -152,5 +176,54 @@ describe('EngineeringService.updateMantenimiento — B1 if_updated_at', () => {
     });
     expect(res).toEqual(MANT);
     expect(de(llamadas, 'update')).toHaveLength(0);
+  });
+});
+
+/**
+ * C1 del pedido del 12-sep-2026: TODO camino de escritura de `mantenimiento`
+ * espeja el servicio en el Google Calendar de la oficina — best-effort
+ * (`void`, nunca await bloqueante) y sin errores hacia el cliente.
+ */
+describe('EngineeringService — hooks de Google Calendar en mantenimiento (C1)', () => {
+  it('createMantenimiento dispara el espejo con el id creado', async () => {
+    const { service, syncMantenimiento } = armar([
+      { data: { ...MANT, id: 'm-9' }, error: null },
+    ]);
+    await service.createMantenimiento(
+      'a-1',
+      { estado: 'PROGRAMADO', descripcion: 'Servicio de 100 h' },
+      'u-1',
+    );
+    expect(syncMantenimiento).toHaveBeenCalledWith('m-9');
+  });
+
+  it('updateMantenimiento (cambio de fecha/estado/descripción) dispara el espejo', async () => {
+    const { service, syncMantenimiento, rpc } = armar([
+      { data: MANT, error: null },
+    ]);
+    rpc.mockResolvedValue({ data: true, error: null });
+    await service.updateMantenimiento('m-1', {
+      fecha_programada: '2026-09-22',
+    });
+    expect(syncMantenimiento).toHaveBeenCalledWith('m-1');
+  });
+
+  it('un fallo del espejo NUNCA llega al cliente (best-effort)', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    const { service, syncMantenimiento } = armar([{ data: MANT, error: null }]);
+    syncMantenimiento.mockRejectedValue(new Error('Google caído'));
+    await expect(
+      service.updateMantenimiento('m-1', { notas: 'x' }),
+    ).resolves.toMatchObject({ id: 'm-1' });
+    await Promise.resolve();
+    warn.mockRestore();
+  });
+
+  it('PATCH sin campos (solo lectura) NO toca Google', async () => {
+    const { service, syncMantenimiento } = armar([{ data: MANT, error: null }]);
+    await service.updateMantenimiento('m-1', {});
+    expect(syncMantenimiento).not.toHaveBeenCalled();
   });
 });

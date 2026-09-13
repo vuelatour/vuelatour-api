@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { triggerUpdatedAt } from '../../common/updated-at-trigger.util';
 import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import type {
@@ -32,7 +33,30 @@ const VENC_COLS =
 export class EngineeringService {
   private readonly logger = new Logger(EngineeringService.name);
 
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    // Espejo a Google Calendar (12-sep-2026): SIEMPRE best-effort (`void`,
+    // nunca await bloqueante) — un problema con Google jamás debe romperle la
+    // captura al mecánico ni a la oficina.
+    private readonly calendarSync: CalendarSyncService,
+  ) {}
+
+  /**
+   * Espejo del mantenimiento en el Google Calendar de la oficina (C1,
+   * 12-sep-2026). BEST-EFFORT total: no se espera (`void`), no puede fallarle
+   * al mecánico ni a la oficina y el `.catch` existe para que una promesa
+   * rechazada NUNCA tumbe el proceso (Node cae con unhandled rejection).
+   * `syncMantenimiento` ya se traga sus propios errores; esto es la red.
+   */
+  private espejoGoogle(mantenimientoId: string): void {
+    void this.calendarSync.syncMantenimiento(mantenimientoId).catch((err) => {
+      this.logger.warn(
+        `No se pudo espejar el mantenimiento ${mantenimientoId} a Google Calendar: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
 
   // ===== Mantenimientos =====
 
@@ -190,11 +214,18 @@ export class EngineeringService {
           this.logger.log(
             `Mantenimiento idempotente: reintento con client_request_id ${dto.client_request_id} → se devuelve el existente ${existente.id as string} (sin duplicar).`,
           );
+          // El replay NO re-crea ni re-notifica, pero SÍ re-intenta el espejo
+          // de Google: es un upsert idempotente (reusa google_calendar_id) y
+          // repara el caso "la primera respuesta se perdió y su sync también".
+          this.espejoGoogle(existente.id as string);
           return existente;
         }
       }
       throw new Error(error.message);
     }
+    // Espejo en el Google Calendar de la oficina (C1): con fecha crea el
+    // evento de día completo; sin fecha no agenda nada.
+    if (data?.id) this.espejoGoogle(data.id as string);
     return data;
   }
 
@@ -314,6 +345,9 @@ export class EngineeringService {
         enviado: ifUpdatedAt,
       });
     }
+    // Espejo en Google (C1): cambio de fecha/estado/descripción re-escribe el
+    // evento; COMPLETADO o sin fecha lo BORRA. Best-effort.
+    this.espejoGoogle(id);
     return data;
   }
 

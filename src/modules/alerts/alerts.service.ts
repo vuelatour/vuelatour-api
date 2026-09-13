@@ -17,6 +17,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
+import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { EmailService } from '../notifications/email.service';
 import {
   NotificationsService,
@@ -71,6 +72,7 @@ export class AlertsService {
     private readonly notifications: NotificationsService,
     private readonly email: EmailService,
     private readonly expirations: ExpirationsService,
+    private readonly calendarSync: CalendarSyncService,
   ) {}
 
   // ===== Cron =====
@@ -1211,6 +1213,14 @@ export class AlertsService {
             );
           } else {
             mantenimientoId = creado.id as string;
+            // Espejo a Google Calendar (C1, 12-sep-2026): este mantenimiento
+            // nace SIN fecha, así que hoy no agenda nada — el hook está por
+            // contrato (todo camino de escritura de `mantenimiento` lo llama)
+            // y para que el día que el cron nazca con fecha, el calendario de
+            // la oficina lo tenga sin tocar nada más. Best-effort.
+            void this.calendarSync
+              .syncMantenimiento(mantenimientoId)
+              .catch(() => undefined);
           }
         }
         const tareasTxt =

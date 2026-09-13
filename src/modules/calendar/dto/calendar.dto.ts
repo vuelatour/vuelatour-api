@@ -75,6 +75,29 @@ export class CalendarRangeQuery {
 }
 
 /**
+ * Ventana del backfill a Google Calendar (C2, 12-sep-2026). Ambos campos son
+ * OPCIONALES: sin ellos la ventana es [hoy−30d, hoy+365d]. Body opcional —
+ * `POST /v1/calendar/resync` sin cuerpo sigue funcionando igual.
+ */
+export class ResyncCalendarDto {
+  @ApiPropertyOptional({
+    description: 'Desde (ISO). Default: hoy − 30 días.',
+    example: '2026-08-01T00:00:00-05:00',
+  })
+  @IsOptional()
+  @IsISO8601()
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Hasta (ISO). Default: hoy + 365 días.',
+    example: '2027-09-12T23:59:59-05:00',
+  })
+  @IsOptional()
+  @IsISO8601()
+  hasta?: string;
+}
+
+/**
  * Evento NO-vuelo del calendario (21-ago-2026): lavado de avión, trámites,
  * visitas — se agenda desde la app/panel y sale en GET /v1/calendar.
  */

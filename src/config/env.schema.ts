@@ -40,11 +40,12 @@ export const envSchema = z.object({
         .filter(Boolean),
     ),
 
-  // ===== Google Calendar (app -> Calendar sync) =====
+  // ===== Google Calendar (sistema -> Calendar, unidireccional) =====
   // Full service-account JSON as a single-line string. Leave empty to disable sync.
   GOOGLE_SERVICE_ACCOUNT_JSON: z.string().default(''),
-  // Target calendar id (the shared "aerochartercancunflightplanner" calendar,
-  // e.g. an email like info@vuelatour.com or a *@group.calendar.google.com id).
+  // Calendario destino: el PRIMARIO de la cuenta de la oficina
+  // aerochartercancunflightplanner@gmail.com (o un id
+  // *@group.calendar.google.com). NO es info@vuelatour.com (dato viejo).
   GOOGLE_CALENDAR_ID: z.string().default(''),
   GOOGLE_CALENDAR_SYNC_ENABLED: z
     .string()
