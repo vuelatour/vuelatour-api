@@ -354,6 +354,10 @@ const VUELO_MULTIESCALA = {
   tipo: 'MULTIESCALA',
   notas: null,
   estado_permiso: null,
+  // Asignación a nivel VUELO (el tramo la hereda): sin ellos el vuelo sería
+  // "sin asignar" y el color del sistema pasaría a morado.
+  aeronave_id: 'a-1',
+  piloto_id: 'p-1',
   google_calendar_id: null,
   google_calendar_regreso_id: null,
   aeronave: { matricula: 'N4142R', color_calendario: '#10B981' },
@@ -395,7 +399,7 @@ const VUELO_MULTIESCALA = {
   ],
 };
 
-describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color por avión (C4)', () => {
+describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES DEL SISTEMA (12-sep-2026)', () => {
   it('un evento por tramo: «T1 · N4142R · CUN-PTU · Luis · 3 pax» y el ferry con su prefijo', async () => {
     const { service } = armar({
       vuelo: [{ data: VUELO_MULTIESCALA, error: null }],
@@ -411,14 +415,16 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
     expect(cuerpos[1].summary).toBe(
       'T2 Ferry · N4142R · PTU-CUN · Luis · 0 pax ⚠ permiso pendiente',
     );
-    // El permiso pendiente sigue DOMINANDO el color (Mandarina/6).
-    expect(cuerpos[1].colorId).toBe('6');
+    // El permiso pendiente sigue DOMINANDO el color, pero ahora es el ÁMBAR
+    // DEL SISTEMA (#F59E0B) traducido → Banana (5), no el 6 inventado antes.
+    expect(cuerpos[1].colorId).toBe('5');
   });
 
-  it('sin piloto asignado: «sin piloto» en el título y color del avión', async () => {
+  it('sin piloto asignado: «sin piloto» en el título y el MORADO "sin asignar" del sistema', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       piloto: null,
+      piloto_id: null,
       escalas: [
         { ...VUELO_MULTIESCALA.escalas[0], piloto: null, piloto_id: null },
       ],
@@ -431,7 +437,47 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
     expect(requestBody.summary).toBe(
       'T1 · N4142R · CUN-PTU · sin piloto · 3 pax',
     );
-    expect(requestBody.colorId).toBe('2');
+    // El calendario del sistema lo pinta morado (#8B5CF6 "⚠ falta asignar"):
+    // en Google es Lavanda (1). Antes ganaba el color del avión y la oficina
+    // no veía el pendiente por color.
+    expect(requestBody.colorId).toBe('1');
+  });
+
+  it('tramo SIN asignación propia: HEREDA avión/piloto del vuelo (no es "sin asignar")', async () => {
+    // Regla del repo: `escala.aeronave_id ?? vuelo.aeronave_id` (igual que el
+    // calendario del sistema). Sin la herencia, este tramo saldría morado
+    // "falta asignar" (Lavanda 1) con el piloto puesto en el título.
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          aeronave_id: null,
+          piloto_id: null,
+          aeronave: null,
+          piloto: null,
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('T1 · N4142R · CUN-PTU · Luis · 3 pax');
+    expect(requestBody.colorId).toBe('2'); // color del avión del VUELO
+  });
+
+  it('RESERVA (tentativo): el gris del sistema (#64748B) → Grafito (8)', async () => {
+    const vuelo = { ...VUELO_MULTIESCALA, estado: 'RESERVA' };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    // Tentativo va ANTES del permiso pendiente y del color del avión: los dos
+    // tramos salen grises aunque el 2.º tenga permiso pendiente.
+    expect(insertado(0).requestBody.colorId).toBe('8');
+    expect(insertado(1).requestBody.colorId).toBe('8');
   });
 
   it('externo: «externo» como piloto, operador como avión y su color Flamenco', async () => {
@@ -455,6 +501,7 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
     expect(requestBody.summary).toBe(
       'T1 · Jet Amigo · CUN-PTU · externo · 3 pax',
     );
+    // Rosa pálido del sistema (#F0DCDB) → Flamenco (4).
     expect(requestBody.colorId).toBe('4');
   });
 
@@ -465,6 +512,8 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
       escalas: [],
       aeronave: { matricula: 'N990GG', color_calendario: '#3B82F6' },
       piloto: { nombre: 'Itzi Pérez' },
+      aeronave_id: 'a-2',
+      piloto_id: 'p-2',
     };
     const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
 
@@ -475,7 +524,7 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
     expect(requestBody.colorId).toBe('7'); // azul del sistema → Pavo real
   });
 
-  it('avión sin color_calendario: cae al DEFAULT (Arándano/9)', async () => {
+  it('avión sin color_calendario: el gris "sin avión" del sistema (#9CA3AF) → Lavanda (1)', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       tipo: 'SENCILLO',
@@ -487,7 +536,9 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    expect(requestBody.colorId).toBe('9');
+    // COLISIÓN CONOCIDA: el gris "sin avión" y el morado "sin asignar" caen
+    // los dos en Lavanda (1). El TÍTULO los distingue (⚠ / «sin piloto»).
+    expect(requestBody.colorId).toBe('1');
   });
 
   it('CANCELADO: el evento se BORRA de Google (C6)', async () => {
@@ -512,6 +563,156 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y color p
       calendarId: CALENDARIO,
       eventId: 'ev-1',
     });
+  });
+
+  // El cancelado NO vive en Google (aunque el sistema lo conserve en rojo):
+  // eso valía para el vuelo entero y para cada TRAMO del itinerario, pero el
+  // evento a nivel VUELO de la ida se seguía publicando.
+  it('itinerario con TODOS los tramos cancelados: no queda nada publicado', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      google_calendar_id: 'ev-vuelo',
+      escalas: VUELO_MULTIESCALA.escalas.map((e) => ({
+        ...e,
+        cancelada_at: '2026-09-19T10:00:00.000Z',
+        google_calendar_id: `ev-t${e.orden}`,
+      })),
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(eventosGoogle.insert).not.toHaveBeenCalled();
+    expect(eventosGoogle.update).not.toHaveBeenCalled();
+    const borrados = eventosGoogle.delete.mock.calls.map(
+      (_c, i) => argsDe(eventosGoogle.delete, i).eventId,
+    );
+    expect(borrados).toEqual(
+      expect.arrayContaining(['ev-t1', 'ev-t2', 'ev-vuelo']),
+    );
+  });
+
+  it('REDONDO con la IDA cancelada: se borra la ida y solo se publica el regreso', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      tipo: 'REDONDO',
+      fecha_traslado_final: '2026-09-21T18:00:00.000Z',
+      google_calendar_id: 'ev-ida',
+      google_calendar_regreso_id: null,
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          cancelada_at: '2026-09-19T10:00:00.000Z',
+          google_calendar_id: null,
+        },
+        {
+          ...VUELO_MULTIESCALA.escalas[1],
+          es_ferry: false,
+          pasajeros: 3,
+          estado_permiso: null,
+          fecha_salida_plan: null,
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(eventosGoogle.delete).toHaveBeenCalledWith({
+      calendarId: CALENDARIO,
+      eventId: 'ev-ida',
+    });
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+    expect(insertado().requestBody.summary).toBe(
+      '↩ Regreso · N4142R · PTU-CUN · Luis · 3 pax',
+    );
+    // Color del sistema para el tramo que SÍ vuela (avión #10B981 → Salvia).
+    expect(insertado().requestBody.colorId).toBe('2');
+  });
+});
+
+// ===== COLORES DEL SISTEMA EN DESCANSOS Y EVENTOS DE FLOTA (12-sep-2026) =====
+
+describe('CalendarSyncService — descansos y eventos de flota con el color del sistema', () => {
+  it('el descanso lleva colorId: turquesa del sistema (#14B8A6) → Salvia (2)', async () => {
+    const { service } = armar({});
+
+    await service.upsertDescansoEvent({
+      piloto_nombre: 'Luis',
+      fecha_inicio: '2026-09-01',
+      fecha_fin: '2026-09-03',
+    });
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('😴 Descansa · Luis');
+    // Antes iba SIN color y Google lo pintaba del default del calendario.
+    expect(requestBody.colorId).toBe('2');
+  });
+
+  it('evento de flota CON avión: el color del avión (N4142R #F97316 → Mandarina 6)', async () => {
+    const { service } = armar({});
+
+    await service.upsertEventoFlotaEvent({
+      id: 'ef-1',
+      titulo: 'Lavado',
+      fecha: '2026-09-05T15:00:00.000Z',
+      fecha_fin: null,
+      aeronave_matricula: 'N4142R',
+      aeronave_color: '#F97316',
+    });
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('📌 Lavado · N4142R');
+    // El calendario del sistema pinta estos eventos con el color del avión:
+    // Google ignoraba el avión y los pintaba TODOS de azul.
+    expect(requestBody.colorId).toBe('6');
+  });
+
+  it('evento de flota SIN avión: el azul cielo propio (#0EA5E9) → Pavo real (7)', async () => {
+    const { service } = armar({});
+
+    await service.upsertEventoFlotaEvent({
+      id: 'ef-2',
+      titulo: 'Visita SAESA',
+      fecha: '2026-09-05T15:00:00.000Z',
+      fecha_fin: null,
+    });
+
+    expect(insertado().requestBody.colorId).toBe('7');
+  });
+
+  it('el barrido pide `color_calendario` del avión del evento (si no, el color se perdía)', async () => {
+    const { service, llamadas } = armar({
+      vuelo: [{ data: [], error: null }],
+      piloto_descanso: [{ data: [], error: null }],
+      evento_flota: [
+        {
+          data: [
+            {
+              id: 'ef-1',
+              titulo: 'Lavado',
+              fecha: '2026-09-05T15:00:00.000Z',
+              fecha_fin: null,
+              notas: null,
+              google_calendar_id: 'ev-e',
+              aeronave: { matricula: 'XB-PEV', color_calendario: '#10B981' },
+              responsable: null,
+            },
+          ],
+          error: null,
+        },
+      ],
+      mantenimiento: [{ data: [], error: null }],
+    });
+
+    await service.resyncTodo();
+
+    const select = de(llamadas, 'evento_flota', 'select')[0].args[0] as string;
+    expect(select).toContain(
+      'aeronave:aeronave_id(matricula, color_calendario)',
+    );
+    // Esmeralda del avión (#10B981) → Salvia (2), no el azul de "evento".
+    expect(actualizado().requestBody.colorId).toBe('2');
   });
 });
 
@@ -910,7 +1111,7 @@ describe('arranque tolerante de la credencial (incidente Railway 12-sep-2026)', 
       {},
       {
         GOOGLE_SERVICE_ACCOUNT_JSON:
-          '"{\"client_email\":\"sa@vuelatour.iam.gserviceaccount.com\",\"private_key\":\"k\"}"',
+          '"{"client_email":"sa@vuelatour.iam.gserviceaccount.com","private_key":"k"}"',
       },
     );
     const estado = service.estadoSync();

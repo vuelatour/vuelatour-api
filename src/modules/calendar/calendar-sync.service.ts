@@ -11,28 +11,22 @@ import { JWT } from 'google-auth-library';
 import type { EnvVars } from '../../config/env.schema';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
-  colorIdGoogleDe,
+  colorIdGoogleDescanso,
+  colorIdGoogleDeVuelo,
+  colorIdGoogleEvento,
+  colorIdGoogleMantenimiento,
   eventoAusenteEnGoogle,
   nombreCortoPiloto,
   parsearServiceAccountJson,
 } from './google-evento.util';
 
-const EXTERNAL_COLOR_ID = '4'; // Flamingo (pinkish) — externos
-const DEFAULT_COLOR_ID = '9'; // Blueberry — vuelos propios sin color de avión
-const PERMISO_PENDIENTE_COLOR_ID = '6'; // Tangerine — permiso de pista pendiente
-// Eventos no-vuelo de la flota: Peacock, el color de Google más cercano al
-// azul cielo #0EA5E9 que usa el calendario interno para estos eventos.
-const EVENTO_FLOTA_COLOR_ID = '7';
-// MANTENIMIENTOS (12-sep-2026): mismos colores que el calendario del sistema
-// (ámbar #F59E0B PROGRAMADO / rojo #EF4444 EN_TALLER) traducidos a la paleta
-// de Google. El rojo se FIJA en Tomate (11) a propósito: `colorIdGoogleDe`
-// acercaría #EF4444 a Mandarina (6), que es el ámbar del permiso pendiente y
-// el naranja de un avión — el taller debe leerse como ROJO y no confundirse.
-const MANT_PROGRAMADO_COLOR_ID = '5'; // Banana ≈ ámbar del sistema
-const MANT_TALLER_COLOR_ID = '11'; // Tomate = el rojo de Google
+// NINGÚN colorId suelto vive acá (12-sep-2026): todo color sale de la paleta
+// del sistema (`colores-calendario.util`) traducida al más cercano de Google
+// por `google-evento.util`. Si el cliente cambia un color, se cambia allá y el
+// panel, la app y Google se mueven JUNTOS.
 
 const VUELO_SELECT =
-  'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, google_calendar_id, google_calendar_regreso_id, ' +
+  'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), ' +
   'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))';
 
@@ -70,6 +64,9 @@ interface VueloRow {
   tipo: string | null;
   notas: string | null;
   estado_permiso: string | null;
+  /** Asignación a NIVEL VUELO: el tramo la hereda si no tiene propia. */
+  aeronave_id: string | null;
+  piloto_id: string | null;
   google_calendar_id: string | null;
   google_calendar_regreso_id: string | null;
   aeronave: AeronaveRef | AeronaveRef[] | null;
@@ -95,7 +92,10 @@ interface VueloRow {
 
 interface AeronaveRef {
   matricula: string;
-  /** Hex del calendario interno; se traduce con `colorIdGoogleDe`. */
+  /**
+   * Hex del calendario interno (`colores-calendario.util`); el colorId de
+   * Google sale de `colorIdGoogleDeVuelo`/`colorIdGoogleEvento`.
+   */
   color_calendario?: string | null;
 }
 
@@ -276,13 +276,31 @@ export class CalendarSyncService implements OnModuleInit {
       // Without a date there is nothing meaningful to place on a calendar.
       if (!vuelo.fecha_vuelo) return ok;
 
-      // IDA (en fecha_vuelo).
-      const idaId = await this.upsertRaw(
-        this.buildEvent(vuelo, 'ida'),
-        vuelo.google_calendar_id,
-        'ida',
+      // La IDA (tramo orden 1) CANCELADA no se agenda: MISMO criterio que el
+      // regreso y que los tramos del itinerario — un cancelado no vive en
+      // Google, aunque el calendario del sistema lo conserve en rojo. Cubre
+      // dos casos que antes publicaban un evento a nivel VUELO como si fuera
+      // a volar (con el color del avión, no el rojo del sistema): la ida
+      // cancelada de un REDONDO y el itinerario con TODOS sus tramos
+      // cancelados (ahí `activas` queda vacío y la rama de tramos no corre).
+      const idaCancelada = escalas.some(
+        (e) => e.orden === 1 && e.cancelada_at != null,
       );
-      await this.saveEventId(vueloId, 'google_calendar_id', idaId);
+      if (idaCancelada) {
+        if (vuelo.google_calendar_id) {
+          if (await this.deleteEvent(vuelo.google_calendar_id))
+            await this.saveEventId(vueloId, 'google_calendar_id', null);
+          else ok = false;
+        }
+      } else {
+        // IDA (en fecha_vuelo).
+        const idaId = await this.upsertRaw(
+          this.buildEvent(vuelo, 'ida'),
+          vuelo.google_calendar_id,
+          'ida',
+        );
+        await this.saveEventId(vueloId, 'google_calendar_id', idaId);
+      }
 
       // REGRESO de redondo (en fecha_traslado_final): segundo evento. Si el
       // tramo de regreso (orden 2) está cancelado, su evento sobra.
@@ -515,7 +533,7 @@ export class CalendarSyncService implements OnModuleInit {
       const { data: eventos, error: eErr } = await this.supabase.service
         .from('evento_flota')
         .select(
-          'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula), responsable:usuario!responsable_id(nombre)',
+          'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
         )
         .lte('fecha', hastaIso)
         .or(
@@ -534,7 +552,7 @@ export class CalendarSyncService implements OnModuleInit {
         fecha_fin: string | null;
         notas: string | null;
         google_calendar_id: string | null;
-        aeronave: { matricula: string } | { matricula: string }[] | null;
+        aeronave: AeronaveRef | AeronaveRef[] | null;
         responsable: { nombre: string } | { nombre: string }[] | null;
       }>) {
         const eventId = await this.upsertEventoFlotaEvent({
@@ -543,6 +561,7 @@ export class CalendarSyncService implements OnModuleInit {
           fecha: ev.fecha,
           fecha_fin: ev.fecha_fin,
           aeronave_matricula: unwrap(ev.aeronave)?.matricula ?? null,
+          aeronave_color: unwrap(ev.aeronave)?.color_calendario ?? null,
           responsable_nombre: unwrap(ev.responsable)?.nombre ?? null,
           notas: ev.notas,
           google_calendar_id: ev.google_calendar_id,
@@ -708,6 +727,9 @@ export class CalendarSyncService implements OnModuleInit {
     const event = {
       summary: `😴 Descansa · ${d.piloto_nombre}`,
       description: d.motivo ?? undefined,
+      // El turquesa del sistema traducido (12-sep-2026): antes el descanso
+      // salía SIN color y Google lo pintaba del default del calendario.
+      colorId: colorIdGoogleDescanso(),
       start: { date: d.fecha_inicio },
       end: { date: fin.toISOString().slice(0, 10) },
       transparency: 'transparent',
@@ -747,6 +769,8 @@ export class CalendarSyncService implements OnModuleInit {
     fecha: string; // ISO timestamptz (inicio)
     fecha_fin?: string | null; // ISO timestamptz (fin INCLUSIVO); null = un día
     aeronave_matricula?: string | null;
+    /** `aeronave.color_calendario` del avión del evento (si tiene). */
+    aeronave_color?: string | null;
     responsable_nombre?: string | null;
     notas?: string | null;
     google_calendar_id?: string | null;
@@ -774,7 +798,9 @@ export class CalendarSyncService implements OnModuleInit {
         ]
           .filter(Boolean)
           .join('\n'),
-        colorId: EVENTO_FLOTA_COLOR_ID,
+        // Con avión, el COLOR DEL AVIÓN (igual que el calendario del
+        // sistema); sin avión, el azul cielo propio de los eventos.
+        colorId: colorIdGoogleEvento(ev.aeronave_color),
         start: { date: iniDia },
         end: { date: fin.toISOString().slice(0, 10) },
         transparency: 'transparent',
@@ -911,7 +937,7 @@ export class CalendarSyncService implements OnModuleInit {
       ]
         .filter((l) => l != null)
         .join('\n'),
-      colorId: enTaller ? MANT_TALLER_COLOR_ID : MANT_PROGRAMADO_COLOR_ID,
+      colorId: colorIdGoogleMantenimiento(enTaller),
       start: { date: dia },
       end: { date: fin.toISOString().slice(0, 10) },
       transparency: 'transparent',
@@ -1083,14 +1109,17 @@ export class CalendarSyncService implements OnModuleInit {
       `VuelaTour · vuelo ${v.id}`,
     ].filter(Boolean);
 
-    // Permiso pendiente domina el color (alerta) hasta que se emita; después
-    // manda el COLOR DEL AVIÓN del sistema traducido a la paleta de Google
-    // (C4, 12-sep-2026) y el externo conserva el suyo.
-    const colorId = permisoPendiente
-      ? PERMISO_PENDIENTE_COLOR_ID
-      : v.es_externo
-        ? EXTERNAL_COLOR_ID
-        : (colorIdGoogleDe(aeronave?.color_calendario) ?? DEFAULT_COLOR_ID);
+    // MISMO color que el calendario del sistema, traducido al más cercano de
+    // Google (12-sep-2026): tentativo > sin asignar > permiso pendiente >
+    // externo > color del avión. La precedencia no se repite aquí.
+    const colorId = colorIdGoogleDeVuelo({
+      estado: v.estado,
+      esExterno: v.es_externo,
+      aeronaveId: escala?.aeronave_id ?? v.aeronave_id,
+      pilotoId: escala?.piloto_id ?? v.piloto_id,
+      permisoPendiente,
+      colorAvion: aeronave?.color_calendario,
+    });
 
     return {
       summary,
@@ -1147,13 +1176,16 @@ export class CalendarSyncService implements OnModuleInit {
       `VuelaTour · vuelo ${v.id}`,
     ].filter(Boolean);
 
-    // Mismo criterio que `buildEvent`: permiso pendiente > externo > color del
-    // avión del tramo (C4) > default.
-    const colorId = permisoPendiente
-      ? PERMISO_PENDIENTE_COLOR_ID
-      : v.es_externo
-        ? EXTERNAL_COLOR_ID
-        : (colorIdGoogleDe(aeronave?.color_calendario) ?? DEFAULT_COLOR_ID);
+    // Mismo criterio que `buildEvent`: el color del SISTEMA para este tramo
+    // (con la asignación del tramo y su herencia del vuelo) → Google.
+    const colorId = colorIdGoogleDeVuelo({
+      estado: v.estado,
+      esExterno: v.es_externo,
+      aeronaveId: e.aeronave_id ?? v.aeronave_id,
+      pilotoId: e.piloto_id ?? v.piloto_id,
+      permisoPendiente,
+      colorAvion: aeronave?.color_calendario,
+    });
 
     return {
       summary,

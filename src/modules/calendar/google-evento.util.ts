@@ -7,6 +7,16 @@
  * criterio de color o de nombre corto.
  */
 
+import {
+  DESCANSO_COLOR,
+  EVENTO_COLOR,
+  SIN_AVION_COLOR,
+  colorEventoFlotaSistema,
+  colorMantenimientoSistema,
+  colorVueloSistema,
+  type ParamsColorVuelo,
+} from './colores-calendario.util';
+
 /**
  * Paleta OFICIAL de colores de EVENTO de Google Calendar (`colors.event` de
  * la API v3). Son los ÚNICOS 11 valores que Google acepta en
@@ -78,14 +88,16 @@ function distancia(
  * espeje los colores por avión del calendario interno.
  *
  * Devuelve `null` cuando no hay color o no es un hex válido: el llamador cae
- * a su color por default (`DEFAULT_COLOR_ID`) — nunca se inventa un color.
+ * al gris "sin avión" del sistema — nunca se inventa un color.
  *
  * LIMITACIÓN CONOCIDA (documentada, no es un bug): Google solo tiene 11
- * colores de evento, así que dos aviones con hex parecidos pueden caer en el
- * MISMO colorId (hoy: XA-VGV cian y N990GG azul → Pavo real; N58BT lima y
- * XB-ANU amarillo → Banana). Si el cliente quiere colores únicos en Google,
- * se separan los `color_calendario` del sistema; aquí no se reparten colores
- * "libres" porque eso dejaría de ser puro (dependería de la flota completa).
+ * colores de evento, así que dos cosas del sistema con hex parecidos caen en
+ * el MISMO colorId (hoy: XA-VGV cian, N990GG azul y el evento de flota →
+ * Pavo real; N58BT lima, XB-ANU amarillo, el permiso pendiente y el
+ * mantenimiento PROGRAMADO → Banana). La tabla completa de colisiones está
+ * congelada en `google-evento.util.spec.ts`. Si el cliente quiere colores
+ * únicos, se separan los `color_calendario` del sistema; aquí no se reparten
+ * colores "libres" porque eso dejaría de ser puro (dependería de la flota).
  */
 export function colorIdGoogleDe(
   hexColor: string | null | undefined,
@@ -107,6 +119,73 @@ export function colorIdGoogleDe(
     }
   }
   return mejorId;
+}
+
+/**
+ * ESPEJO DE COLOR (pedido del cliente, 12-sep-2026): «los mismos colores que
+ * usamos para cada cosa». Google solo acepta 11 colores de evento, así que
+ * «el mismo color» = el colorId MÁS CERCANO al hex que el calendario del
+ * sistema usa para esa cosa, con LA MISMA PRECEDENCIA
+ * (`colores-calendario.util`). Ninguna de estas funciones inventa un color
+ * propio: todas salen de un hex del sistema.
+ *
+ * Fallback cuando el hex del sistema no se puede leer (un
+ * `color_calendario` con basura en la BD): el gris "sin avión" del sistema,
+ * nunca un color con significado.
+ */
+const COLOR_ID_SIN_AVION: string = colorIdGoogleDe(SIN_AVION_COLOR) ?? '1';
+
+/**
+ * colorId de Google de UN evento de vuelo (vuelo completo o tramo): el hex que
+ * el sistema pintaría, traducido. Mismos parámetros que `colorVueloSistema`
+ * — el cancelado no llega aquí (en Google su evento se BORRA).
+ *
+ * Con los hex de hoy: tentativo → 8 Grafito, sin asignar → 1 Lavanda,
+ * permiso pendiente → 5 Banana, externo → 4 Flamenco, sin avión → 1 Lavanda.
+ */
+export function colorIdGoogleDeVuelo(p: ParamsColorVuelo): string {
+  return colorIdGoogleDe(colorVueloSistema(p)) ?? COLOR_ID_SIN_AVION;
+}
+
+/** colorId del DESCANSO de piloto: #14B8A6 (turquesa) → 2 Salvia. */
+export function colorIdGoogleDescanso(): string {
+  return colorIdGoogleDe(DESCANSO_COLOR) ?? COLOR_ID_SIN_AVION;
+}
+
+/**
+ * colorId de un evento NO-vuelo de la flota: con avión, el COLOR DEL AVIÓN
+ * (igual que el calendario del sistema, que antes Google ignoraba); sin
+ * avión, el azul cielo propio #0EA5E9 → 7 Pavo real.
+ */
+export function colorIdGoogleEvento(colorAvion?: string | null): string {
+  return (
+    colorIdGoogleDe(colorEventoFlotaSistema(colorAvion)) ??
+    colorIdGoogleDe(EVENTO_COLOR) ??
+    COLOR_ID_SIN_AVION
+  );
+}
+
+/**
+ * Tomate: el rojo REAL de Google. Ver el cálculo en
+ * `colorIdGoogleMantenimiento` (el nearest de #EF4444 sería Mandarina).
+ */
+const COLOR_ID_TALLER_FIJO = '11';
+
+/**
+ * colorId de un mantenimiento: PROGRAMADO = ámbar del sistema (#F59E0B) →
+ * 5 Banana.
+ *
+ * EN_TALLER se FIJA en 11 Tomate a propósito: el rojo del sistema (#EF4444)
+ * por distancia redmean cae en 6 Mandarina (d=3,714) antes que en 4 Flamenco
+ * (17,375) y que en 11 Tomate (30,217) — Mandarina es el naranja de N4142R y
+ * el taller debe leerse como ROJO. Es la ÚNICA excepción al "más cercano",
+ * y es visible: `MANTENIMIENTO_TALLER_COLOR` sigue siendo el hex del sistema.
+ */
+export function colorIdGoogleMantenimiento(enTaller: boolean): string {
+  if (enTaller) return COLOR_ID_TALLER_FIJO;
+  return (
+    colorIdGoogleDe(colorMantenimientoSistema(false)) ?? COLOR_ID_SIN_AVION
+  );
 }
 
 /**

@@ -25,6 +25,13 @@ import type {
   UpdateEventoFlotaDto,
 } from './dto/calendar.dto';
 import {
+  DESCANSO_COLOR,
+  colorEventoFlotaSistema,
+  colorMantenimientoSistema,
+  colorVueloSistema,
+  vueloSinAsignar,
+} from './colores-calendario.util';
+import {
   aEventoMe,
   avisoEventoBase,
   cambiosRelevantes,
@@ -47,18 +54,6 @@ export interface AvisoEvento extends EntregaNotificacion {
   responsable_id: string;
   nombre: string | null;
 }
-
-// Paleta del equipo (21-ago-2026): externos en rosa pálido #F0DCDB.
-const EXTERNAL_COLOR = '#F0DCDB';
-// Color de alerta para vuelos con permiso de pista pendiente. Configurable.
-const PERMISO_PENDIENTE_COLOR = '#F59E0B';
-// Vuelo propio confirmado pero todavía SIN avión asignado (acción pendiente).
-const SIN_ASIGNAR_COLOR = '#8B5CF6';
-// Reserva tentativa: espacio apartado sin cotización ("espérame y te confirmo").
-const TENTATIVO_COLOR = '#64748B';
-// Vuelo CANCELADO: se queda en el calendario como historial de operaciones
-// (pedido del cliente, ago 2026) — en rojo y con la etiqueta CANCELADO.
-const CANCELADO_COLOR = '#EF4444';
 
 function unwrap<T>(value: T | T[] | null | undefined): T | null {
   if (value == null) return null;
@@ -120,10 +115,13 @@ export class CalendarService {
     // descanso, evento, mantenimiento) + `eliminados` (vuelo_eliminado).
     // Sin el parámetro, respuesta idéntica a la de siempre.
     const sinceMs =
-      q.updated_since instanceof Date && !Number.isNaN(q.updated_since.getTime())
+      q.updated_since instanceof Date &&
+      !Number.isNaN(q.updated_since.getTime())
         ? q.updated_since.getTime()
         : null;
-    const tocadoDesde = (...isos: Array<string | null | undefined>): boolean => {
+    const tocadoDesde = (
+      ...isos: Array<string | null | undefined>
+    ): boolean => {
       if (sinceMs == null) return true;
       for (const iso of isos) {
         if (!iso) continue;
@@ -420,26 +418,32 @@ export class CalendarService {
         // ambos se quedan como historial en rojo y sin edición rápida.
         const esCancelado =
           v.estado === 'CANCELADO' || escala?.cancelada_at != null;
-        // Un cancelado ya no acarrea pendientes: sin ⚠ de permiso/asignación.
+        // Un cancelado ya no acarrea el ⚠ del PERMISO (no hay nada que
+        // gestionar). El ⚠ «sin asignar» sí puede seguir saliendo en un TRAMO
+        // cancelado de un vuelo CONFIRMADO que nunca tuvo avión/piloto: es el
+        // comportamiento histórico y `sin_asignar` viaja igual en la respuesta
+        // (no se toca aquí para no mover lo que el panel y la app ya leen).
         const permisoPendiente = !esCancelado && estadoPermiso === 'pendiente';
-        const sinAsignar =
-          v.estado === 'CONFIRMADO' &&
-          !v.es_externo &&
-          (!aeronaveId || !pilotoId);
+        const sinAsignar = vueloSinAsignar({
+          estado: v.estado,
+          esExterno: v.es_externo,
+          aeronaveId,
+          pilotoId,
+        });
+        // Etiqueta "Tentativo ·" del título (el color lo decide la util).
         const esTentativo = v.estado === 'RESERVA';
-        // El cancelado domina el color (historial); luego el tentativo (es un
-        // espacio apartado, no un vuelo firme).
-        const color = esCancelado
-          ? CANCELADO_COLOR
-          : esTentativo
-            ? TENTATIVO_COLOR
-            : sinAsignar
-              ? SIN_ASIGNAR_COLOR
-              : permisoPendiente
-                ? PERMISO_PENDIENTE_COLOR
-                : v.es_externo
-                  ? EXTERNAL_COLOR
-                  : (aeronave?.color_calendario ?? '#9CA3AF');
+        // Precedencia ÚNICA del color (colores-calendario.util): cancelado >
+        // tentativo > sin asignar > permiso pendiente > externo > avión. La
+        // misma que traduce el espejo a Google.
+        const color = colorVueloSistema({
+          estado: v.estado,
+          cancelado: esCancelado,
+          esExterno: v.es_externo,
+          aeronaveId,
+          pilotoId,
+          permisoPendiente,
+          colorAvion: aeronave?.color_calendario,
+        });
         const hora = horaOf(params.fecha);
         return {
           id: `${v.id}${params.idSuffix}`,
@@ -586,7 +590,6 @@ export class CalendarService {
 
     // Descansos de pilotos en el rango: un evento por día de descanso, para
     // que se pinten en el calendario junto a los vuelos (pedido del cliente).
-    const DESCANSO_COLOR = '#14B8A6';
     const fromDay = from.toISOString().slice(0, 10);
     const toDay = to.toISOString().slice(0, 10);
     interface DescansoRow {
@@ -615,9 +618,9 @@ export class CalendarService {
     if (q.piloto_id) dq = dq.eq('piloto_id', q.piloto_id);
     // Como siempre: un error aquí no tumba el calendario (sin descansos).
     const { data: descansosRaw } = q.solo_externos ? { data: [] } : await dq;
-    const descansos = (
-      (descansosRaw ?? []) as unknown as DescansoRow[]
-    ).filter((d) => tocadoDesde(d.updated_at));
+    const descansos = ((descansosRaw ?? []) as unknown as DescansoRow[]).filter(
+      (d) => tocadoDesde(d.updated_at),
+    );
     for (const d of descansos) {
       const piloto = Array.isArray(d.piloto) ? d.piloto[0] : d.piloto;
       const nombre = piloto?.nombre ?? 'Piloto';
@@ -651,7 +654,6 @@ export class CalendarService {
     // a vuelos y descansos. Con avión toman su color de calendario; sin
     // avión, azul cielo propio (leyenda "Evento"). Multi-día = un evento por
     // día, igual que los descansos.
-    const EVENTO_COLOR = '#0EA5E9';
     let eq = this.supabase.service
       .from('evento_flota')
       .select(await this.eventoCols())
@@ -680,7 +682,7 @@ export class CalendarService {
     );
     for (const ev of eventosMap) {
       const matricula = ev.aeronave_matricula;
-      const color = ev.aeronave_color ?? EVENTO_COLOR;
+      const color = colorEventoFlotaSistema(ev.aeronave_color);
       const iniDia = diaCancun(ev.fecha);
       const finDia = ev.fecha_fin ? diaCancun(ev.fecha_fin) : iniDia;
       const hora = horaCancun(ev.fecha);
@@ -779,7 +781,7 @@ export class CalendarService {
           cancelado: false,
           sin_asignar: false,
           title: `Servicio · ${matricula ?? 'avión'} · ${desc}`,
-          color: enTaller ? '#EF4444' : '#F59E0B',
+          color: colorMantenimientoSistema(enTaller),
           aeronave_id: m.aeronave_id ?? null,
           aeronave_matricula: matricula,
           piloto_id: null,
@@ -918,6 +920,9 @@ export class CalendarService {
         fecha: ev.fecha,
         fecha_fin: ev.fecha_fin,
         aeronave_matricula: ev.aeronave_matricula,
+        // El color del avión viaja a Google igual que al calendario interno
+        // (12-sep-2026): antes Google pintaba TODO evento de flota de azul.
+        aeronave_color: ev.aeronave_color,
         responsable_nombre: ev.responsable_nombre,
         notas: ev.notas,
         google_calendar_id: ev.google_calendar_id,

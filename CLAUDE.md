@@ -746,19 +746,49 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     el summary lleva su nombre corto — `T1 · N4142R · CUN-PTU · Luis · 3 pax`
     (`nombreCortoPiloto`: primer nombre, `sin piloto`, `externo`); ferry
     `T2 Ferry · …`; `⚠ permiso pendiente` como siempre.
-  - **Color**: `colorIdGoogleDe` (`calendar/google-evento.util.ts`, PURO) mapea
-    `aeronave.color_calendario` al colorId más cercano de la paleta oficial de
-    Google (11 colores, distancia redmean). Precedencia: permiso pendiente (6)
-    > externo (4) > color del avión > `DEFAULT_COLOR_ID` (9).
-    **El color en Google NO es un dato confiable, el TÍTULO sí**: Google solo
-    da 11 colores y 5 ya tienen significado (4 externo, 5 mantenimiento
-    PROGRAMADO, 6 permiso pendiente, 7 evento de flota, 11 EN_TALLER), así que
-    8 aviones no pueden tener un color propio. Con los hex de hoy: N4142R
-    (#F97316) cae en **6 = el mismo ámbar del permiso pendiente** (para ese
-    avión el color ya no distingue la alerta; el `⚠ permiso pendiente` del
-    título sí), N990GG y XA-VGV comparten Pavo real, y N58BT y XB-ANU comparten
-    Banana con el mantenimiento programado. Re-pintar los `color_calendario`
-    NO lo resuelve del todo (no hay 8 ids libres); es decisión del cliente.
+  - **Color (pedido del cliente, 12-sep-2026: «los mismos colores»)**: los
+    colores de Google son LOS DEL SISTEMA traducidos al más cercano de los 11
+    que Google acepta. **Fuente única de los hex**:
+    `calendar/colores-calendario.util.ts` (`colorVueloSistema` = la ÚNICA
+    implementación de la precedencia **cancelado > tentativo > sin asignar >
+    permiso pendiente > externo > color del avión > sin avión #9CA3AF**, más
+    `DESCANSO_COLOR`, `EVENTO_COLOR` y los del mantenimiento).
+    `calendar.service` la usa para `GET /calendar` y `google-evento.util` la
+    traduce con `colorIdGoogleDe` (distancia redmean, PURO):
+    `colorIdGoogleDeVuelo` (mismos parámetros que `colorVueloSistema`),
+    `colorIdGoogleDescanso`, `colorIdGoogleEvento(colorAvion)` y
+    `colorIdGoogleMantenimiento(enTaller)`. `calendar-sync` ya NO tiene
+    constantes de colorId propias (se fueron `EXTERNAL_COLOR_ID`,
+    `DEFAULT_COLOR_ID` 9, `PERMISO_PENDIENTE_COLOR_ID` 6…): si el cliente
+    cambia un color, se cambia en la util y panel + app + Google se mueven
+    JUNTOS. El descanso YA lleva color (antes salía sin `colorId`) y el evento
+    de flota usa el color del AVIÓN (antes Google los pintaba todos de azul:
+    por eso `color_calendario` viaja en el select de `aeronave` del barrido y
+    en el hook `espejoGoogle`).
+    Del lado del SISTEMA los mismos hex, la precedencia y `sin_asignar` están
+    congelados en `calendar.service.spec.ts` («colores y precedencia del
+    sistema») y en `colores-calendario.util.spec.ts`: mover un color del
+    sistema rompe las tres pruebas a propósito.
+    Tabla viva (congelada en `google-evento.util.spec.ts`): tentativo #64748B →
+    **8** Grafito · sin asignar #8B5CF6 → **1** Lavanda · permiso pendiente
+    #F59E0B → **5** Banana · externo #F0DCDB → **4** Flamenco · sin avión
+    #9CA3AF → **1** Lavanda · descanso #14B8A6 → **2** Salvia · evento sin
+    avión #0EA5E9 → **7** Pavo real · mant. PROGRAMADO #F59E0B → **5** Banana ·
+    mant. EN_TALLER #EF4444 → **11** Tomate (ÚNICA excepción al "más cercano":
+    por redmean caería en 6 Mandarina, d≈3 714 vs 30 217, y el taller debe
+    leerse ROJO) · N4142R #F97316 → 6 · N58BT #84CC16 → 5 · N621TX #EC4899 → 4
+    · N990GG #3B82F6 → 7 · XA-VGV #06B6D4 → 7 · XB-ANU #EAB308 → 5 · XB-IJP
+    #6366F1 → 1 · XB-PEV #10B981 → 2. El vuelo CANCELADO (#EF4444) no llega a
+    Google (su evento se BORRA).
+    **Colisiones conocidas** (11 colores para 18 cosas; libres hoy: 3 Uva,
+    9 Arándano, 10 Albahaca): **1** = sin asignar + sin avión + XB-IJP; **2** =
+    descanso + XB-PEV; **4** = externo + N621TX; **5** = permiso pendiente +
+    mantenimiento PROGRAMADO + N58BT + XB-ANU; **6** = N4142R (+ el rojo del
+    cancelado, que no viaja); **7** = evento de flota sin avión + N990GG +
+    XA-VGV. **El color en Google NO es un dato confiable, el TÍTULO sí**
+    (`⚠ permiso pendiente`, `sin piloto`, `🔧`, `😴`, `📌`). Re-pintar los
+    `color_calendario` NO lo resuelve (no hay 8 ids libres); es decisión del
+    cliente.
   - `extendedProperties.private.vuelatour_*` se ESCRIBE pero todavía no se
     LEE: el único anclaje de idempotencia real es el id guardado en la fila
     (`vuelo`/`escala`/`piloto_descanso`/`evento_flota`/`mantenimiento`
@@ -792,7 +822,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     calendario del sistema los conserve en rojo) y por eso el barrido de la
     ventana **NO filtra por estado**: los cancelados entran para que
     `syncFlight` limpie su evento (no se cuentan en `vuelos`, que es lo
-    publicado). Nada bidireccional (Google → sistema) todavía.
+    publicado). Lo mismo vale para un TRAMO cancelado: se borra su evento y no
+    se re-crea — incluida la IDA del modelo vuelo (revisión 12-sep-2026: la
+    ida cancelada de un REDONDO, y el itinerario con TODOS sus tramos
+    cancelados —ahí `activas` queda vacío y la rama por tramos no corre—,
+    seguían publicando un evento a nivel vuelo con el color del avión mientras
+    el calendario del sistema los pintaba en rojo). Nada bidireccional
+    (Google → sistema) todavía.
   - `desde`/`hasta` del resync se NORMALIZAN (`instanteValido`): `@IsISO8601()`
     deja pasar cadenas que `new Date` no entiende (`2026-W01-1`, coma decimal)
     y con ellas la ruta respondía **500**; hoy es un 400 en es-MX, y la coma
@@ -841,8 +877,13 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - **Google Calendar (12-sep-2026)**: qué hacer con los ~305 eventos que la
   oficina capturó A MANO en `aerochartercancunflightplanner@gmail.com`
   (borrarlos, dejarlos conviviendo o deduplicar contra los del sistema) lo
-  decide el CLIENTE: hoy no se tocan. Colores duplicados en Google cuando dos
-  aviones tienen hex parecidos (ver el bullet del espejo).
+  decide el CLIENTE: hoy no se tocan. Colores COMPARTIDOS en Google (solo hay
+  11): sin asignar y el gris sin avión caen los dos en Lavanda, el permiso
+  pendiente comparte Banana con el mantenimiento PROGRAMADO y con N58BT/XB-ANU,
+  el descanso comparte Salvia con XB-PEV, el externo Flamenco con N621TX, y el
+  evento de flota Pavo real con N990GG/XA-VGV — re-pintar los
+  `color_calendario` no alcanza para 8 aviones + 6 significados; lo decide el
+  CLIENTE (ver el bullet del espejo).
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.
