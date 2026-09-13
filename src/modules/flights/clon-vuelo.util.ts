@@ -16,6 +16,14 @@ export const CAMPOS_NO_CLONABLES: readonly string[] = [
   'created_at',
   'updated_at',
   'google_calendar_id',
+  // El evento de REGRESO también es del original (revisión adversaria
+  // 12-sep-2026): sin esta línea el clon nacía apuntando al MISMO evento de
+  // Google que el vuelo original, los dos espejos escribían sobre él y el
+  // `removeFlight` del original (cancelado) lo BORRABA — el clon quedaba con
+  // un id muerto y su regreso desaparecía del calendario de la oficina hasta
+  // el siguiente sync (que lo re-crea por el 404). Ninguna columna
+  // `google_calendar_*` tiene UNIQUE, así que la BD no lo impedía.
+  'google_calendar_regreso_id',
   'foto_plan_vuelo_url',
   // La liga de combinación no viaja al clon (el original la rompe antes de
   // clonar; el spread de `original` se lee ANTES de romperla).

@@ -3700,7 +3700,7 @@ export class QuotesService {
     const { data: existing, error: exErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, orden, taco_salida, taco_llegada, fecha_salida_plan, piloto_id, cancelada_at, origen_iata, destino_iata',
+        'id, orden, taco_salida, taco_llegada, fecha_salida_plan, piloto_id, cancelada_at, origen_iata, destino_iata, google_calendar_id',
       )
       .eq('vuelo_id', vueloId)
       .eq('solo_operativa', false);
@@ -3837,6 +3837,15 @@ export class QuotesService {
         );
         continue;
       }
+      // El evento de Google del tramo se borra ANTES de perder su id
+      // (revisión adversaria 12-sep-2026): re-cotizar con menos tramos era el
+      // huérfano MÁS FRECUENTE de la operación normal — la fila desaparecía y
+      // su evento se quedaba vivo en el calendario de la oficina sin nada que
+      // lo apuntara (el barrido solo mira filas VIVAS y nunca lo borraba).
+      // Con la cola activa el trigger del DELETE lo reintenta si esto falla.
+      await this.calendar.removeEscalaEvent(
+        s.google_calendar_id as string | null,
+      );
       const { error } = await this.supabase.service
         .from('escala')
         .delete()

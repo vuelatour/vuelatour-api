@@ -1,14 +1,18 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { calendar_v3, google } from 'googleapis';
 import { JWT } from 'google-auth-library';
 import type { EnvVars } from '../../config/env.schema';
+import { Rol } from '../../common/types/auth.types';
+import { NotificationsService } from '../realtime/notifications.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
   colorIdGoogleDescanso,
@@ -19,6 +23,62 @@ import {
   nombreCortoPiloto,
   parsearServiceAccountJson,
 } from './google-evento.util';
+import {
+  ANCLA_DESCANSO,
+  ANCLA_EVENTO,
+  ANCLA_MANTENIMIENTO,
+  ANCLA_VUELO,
+  clasificarEventoSistema,
+  decidirHuerfano,
+  esRecienCreado,
+  esUuidCalendar,
+  HUERFANOS_BORRADO_TOPE,
+  HUERFANOS_PAGINA_MAX,
+  HUERFANOS_PAGINAS_TOPE,
+  lotesDe,
+  type EventoSistemaGoogle,
+  type TipoAnclaCalendar,
+} from './calendar-huerfanos.util';
+import {
+  CANDADO_BARRIDO,
+  CANDADO_BARRIDO_TTL_SEG,
+  CANDADO_DRENADO,
+  CANDADO_DRENADO_TTL_SEG,
+  CLAVE_ESTADO_SYNC,
+  CLAVE_ESTADO_WORKER,
+  EstadoCalendarBd,
+  parseEstadoSync,
+  parseEstadoWorker,
+  type ResultadoCandado,
+} from './calendar-sync-estado.util';
+import {
+  COLA_ALERTA_CLAVE,
+  COLA_DEBOUNCE_MS,
+  COLA_PAUSA_CUOTA_MS,
+  COLA_TOMADO_VENCE_MS,
+  COLA_TOMA_MAX,
+  ColaSondaCalendar,
+  colaAtorada,
+  esLimiteGoogle,
+  sanitizarError,
+  siguienteIntentoMs,
+  TABLA_CALENDAR_SYNC_COLA,
+  textoAvisoCola,
+  type EstadoColaCalendar,
+  type ItemCola,
+} from './calendar-sync-cola.util';
+
+/**
+ * Cómo se pide un espejo (12-sep-2026, cola automática):
+ * - sin opciones = viene de un HOOK de negocio. Con la cola activa el trigger
+ *   YA encoló el cambio, así que el hook solo pide «drenar pronto» y NO habla
+ *   con Google (una sola ruta de escritura, cero doble escritura);
+ * - `{ directo: true }` = lo pide el WORKER de la cola o el barrido
+ *   (`sincronizarVentana`, red de seguridad): escribe a Google ahora mismo.
+ */
+export interface OpcionesEspejo {
+  directo?: boolean;
+}
 
 // NINGÚN colorId suelto vive acá (12-sep-2026): todo color sale de la paleta
 // del sistema (`colores-calendario.util`) traducida al más cercano de Google
@@ -114,6 +174,32 @@ interface MantenimientoRow {
   aeronave: AeronaveRef | AeronaveRef[] | null;
 }
 
+/** Mensaje ÚNICO del 409 de `POST /resync` cuando ya hay un barrido corriendo. */
+const MSG_BARRIDO_EN_CURSO =
+  'Ya hay una sincronización con Google Calendar en curso (el respaldo nocturno u otro resync). Espera a que termine e inténtalo de nuevo.';
+
+/**
+ * Google contestó cuota/429 a media pasada del barrido: se ABANDONA la pasada
+ * (revisión adversaria 12-sep-2026). Seguir sería dispararle miles de llamadas
+ * condenadas a fallar al mismo calendario que acaba de decir «basta» —
+ * castigando la cuota del día y, peor, dejando el PASO INVERSO trabajando con
+ * una vista incompleta de Google. La red de seguridad vuelve a correr esa
+ * noche; la cola (cuando está activa) sigue reintentando con su backoff.
+ */
+class PausaCuotaBarrido extends Error {
+  constructor(public readonly etapa: string) {
+    super(`Google Calendar pausado por cuota durante ${etapa}`);
+    this.name = 'PausaCuotaBarrido';
+  }
+}
+
+/**
+ * Filas por página en las lecturas del barrido. Es el `max-rows` de PostgREST
+ * en Supabase: una respuesta con exactamente este tamaño puede estar TRUNCADA,
+ * así que se pide la siguiente página (ver `leerPaginado`).
+ */
+const PAGINA_BD = 1000;
+
 /** Conteos de una pasada de sincronización (resync o reconciliación). */
 export interface ResumenSyncCalendar {
   vuelos: number;
@@ -122,6 +208,13 @@ export interface ResumenSyncCalendar {
   mantenimientos: number;
   /** Fallos OBSERVABLES (consulta o evento): nunca lanzan, solo se cuentan. */
   errores: number;
+  /**
+   * Eventos de Google BORRADOS por el paso inverso (D12): nacieron en
+   * VuelaTour (llevan `extendedProperties.private.vuelatour_*`) y su fila ya
+   * no existe, o la fila apunta a otro evento (duplicado fantasma). Solo el
+   * reconcile nocturno hace ese paso: en `POST /resync` siempre es 0.
+   */
+  huerfanos_borrados: number;
 }
 
 /** Respuesta de `POST /v1/calendar/resync` (backfill completo, C2). */
@@ -158,6 +251,23 @@ export interface EstadoSyncCalendar {
 }
 
 /**
+ * `GET /v1/calendar/sync-estado` con el estado de la COLA (D5, 12-sep-2026).
+ * Campos ADITIVOS: un panel viejo ignora `cola`/`automatica` y sigue
+ * pintando el chip de siempre.
+ */
+export interface EstadoSyncCalendarCompleto extends EstadoSyncCalendar {
+  /**
+   * `true` = el espejo es AUTOMÁTICO de punta a punta (sync prendida + cola
+   * con triggers): ningún cambio depende de que un hook alcance a Google.
+   * `false` con `enabled:true` y `cola:null` = falta aplicar la migración
+   * `20260912000002` (el espejo sigue siendo best-effort, como antes).
+   */
+  automatica: boolean;
+  /** null = la cola no está disponible (migración pendiente). */
+  cola: EstadoColaCalendar | null;
+}
+
+/**
  * One-way sync: VuelaTour flights -> Google Calendar.
  *
  * Best-effort by design: every public method swallows its own errors and logs
@@ -172,17 +282,217 @@ export class CalendarSyncService implements OnModuleInit {
   private enabled = false;
   /** Diagnóstico de arranque (ver `EstadoSyncCalendar.motivo`). */
   private motivoInactivo: string | null = null;
-  // Estado VISIBLE de la sync (C5, 12-sep-2026): en MEMORIA del proceso a
-  // propósito — es diagnóstico para el panel ("¿corrió?"), no un dato de
-  // negocio; un redeploy lo reinicia en null y no pasa nada.
+  // Estado VISIBLE de la sync (C5, 12-sep-2026). Es diagnóstico para el panel
+  // ("¿corrió?"), no un dato de negocio — pero desde D12 SÍ se persiste en
+  // `calendar_sync_estado`: un redeploy lo dejaba en null y el panel decía
+  // "nunca corrió" aunque el reconcile hubiera corrido de madrugada.
+  // Desde el 12-sep-2026 (D12) estos tres ADEMÁS se PERSISTEN en
+  // `calendar_sync_estado` y se rehidratan al arrancar: un redeploy de Railway
+  // ya no hace que el panel diga «nunca corrió». La memoria es la CACHÉ.
   private ultimoReconcileAt: string | null = null;
   private ultimoResyncAt: string | null = null;
   private ultimoResumen: EstadoSyncCalendar['ultimo_resumen'] = null;
 
+  // ===== COLA AUTOMÁTICA (12-sep-2026) =====
+  /** Sonda de la migración `20260912000002` (lazy: Supabase aún no está). */
+  private colaSonda: ColaSondaCalendar | null = null;
+  /** Single-flight del worker: dos pasadas a la vez duplicarían trabajo. */
+  private drenando = false;
+  /** Debounce de «drenar pronto» tras un hook. */
+  private drenarProntoTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Google contestó cuota/429: no drenar hasta este instante (ms). */
+  private pausadaHastaMs = 0;
+  private ultimoDrenadoAt: string | null = null;
+  /** Último error de Google observado (sin secretos), para `ultimo_error`. */
+  private ultimoDetalleError: string | null = null;
+  /** Para loguear UNA vez que la cola volvió a cero. */
+  private colaTeniaPendientes = false;
+  /**
+   * El BARRIDO (`sincronizarVentana`: reconcile nocturno y `POST /resync`)
+   * está publicando. El worker NO drena mientras eso pase.
+   *
+   * Por qué (revisión adversaria 12-sep-2026): los dos escriben los MISMOS
+   * eventos y los dos escriben DIRECTO a Google. Si coinciden en un vuelo que
+   * todavía NO tiene `google_calendar_id`, los dos leen la fila con el id en
+   * null y los dos hacen `events.insert`: Google se queda con un evento
+   * DUPLICADO y el id perdedor no se guarda en ninguna fila ⇒ un FANTASMA que
+   * ya nadie puede actualizar ni borrar (el barrido solo mira filas vivas).
+   * Un `patch` simultáneo sería inocuo; un `insert` simultáneo, no.
+   */
+  private barriendo = false;
+  /**
+   * CLAIM SÍNCRONO del barrido dentro de ESTE proceso (revisión adversaria
+   * 12-sep-2026). `barriendo` excluye al WORKER, pero no excluía a otro
+   * BARRIDO: dos `POST /resync` a la vez —o un resync encima del reconcile
+   * nocturno— publicaban los dos DIRECTO a Google y, en un vuelo todavía sin
+   * `google_calendar_id`, los dos hacían `events.insert` ⇒ evento DUPLICADO
+   * cuyo id no vive en ninguna fila (el fantasma que el candado de BD evita
+   * entre réplicas). El candado no cubría este caso HOY: sin la migración
+   * aplicada responde `sin_candado` y los dos seguían. Se toma y se suelta
+   * SIN `await` en medio, que es lo que lo hace hermético en Node.
+   */
+  private barridoEnCurso = false;
+
+  // ===== ESTADO PERSISTIDO + CANDADO EN BD (D12, 12-sep-2026) =====
+  /** Sonda de la parte nueva de la migración (lazy, como la de la cola). */
+  private estadoSonda: EstadoCalendarBd | null = null;
+  /** El estado guardado ya se releyó (una vez por proceso). */
+  private hidratado = false;
+  private hidratacionEnCurso: Promise<void> | null = null;
+
   constructor(
     private readonly config: ConfigService<EnvVars, true>,
     private readonly supabase: SupabaseService,
+    /**
+     * Aviso a ADMIN cuando la cola se atora (D4). OPCIONAL a propósito: la
+     * sync nunca depende de él (y los specs construyen el servicio sin él).
+     */
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
+
+  /** Sonda de la cola (perezosa: en el constructor Supabase aún no existe). */
+  private cola(): ColaSondaCalendar {
+    if (!this.colaSonda) {
+      this.colaSonda = new ColaSondaCalendar(this.supabase.service);
+    }
+    return this.colaSonda;
+  }
+
+  /**
+   * Estado persistido + candado (perezoso, igual que la sonda de la cola: en
+   * el constructor Supabase todavía no existe).
+   */
+  private estadoBd(): EstadoCalendarBd {
+    if (!this.estadoSonda) {
+      this.estadoSonda = new EstadoCalendarBd(this.supabase.service);
+    }
+    return this.estadoSonda;
+  }
+
+  /**
+   * Relee de la BD los «últimos» que el panel muestra (D12). Se llama al
+   * primer `GET /calendar/sync-estado` y a la primera pasada del worker de
+   * cada proceso: así un redeploy de Railway NO borra la evidencia de que el
+   * reconcile corrió, y una pausa por cuota de Google sobrevive al reinicio
+   * (si no, el proceso nuevo volvería a golpear a Google de inmediato).
+   *
+   * NUNCA pisa un valor más fresco de esta instancia: solo rellena lo que
+   * está en `null` (si el reconcile ya corrió acá, manda lo de acá). Sin la
+   * migración aplicada no consulta nada y todo queda como hoy.
+   */
+  private async hidratarEstado(): Promise<void> {
+    if (this.hidratado) return;
+    if (!this.hidratacionEnCurso) {
+      this.hidratacionEnCurso = this.hidratarAhora().finally(() => {
+        this.hidratacionEnCurso = null;
+      });
+    }
+    return this.hidratacionEnCurso;
+  }
+
+  private async hidratarAhora(): Promise<void> {
+    try {
+      const bd = this.estadoBd();
+      if (!(await bd.disponible())) return;
+      const leidoSync = await bd.leer(CLAVE_ESTADO_SYNC);
+      const leidoWorker = await bd.leer(CLAVE_ESTADO_WORKER);
+      const sync = parseEstadoSync(leidoSync.valor);
+      const worker = parseEstadoWorker(leidoWorker.valor);
+      this.ultimoReconcileAt ??= sync.ultimo_reconcile_at;
+      this.ultimoResyncAt ??= sync.ultimo_resync_at;
+      this.ultimoResumen ??= sync.ultimo_resumen;
+      this.ultimoDrenadoAt ??= worker.ultimo_drenado_at;
+      if (this.pausadaHastaMs === 0 && worker.pausada_hasta) {
+        const t = Date.parse(worker.pausada_hasta);
+        if (Number.isFinite(t) && t > Date.now()) this.pausadaHastaMs = t;
+      }
+      // Solo se considera hidratado cuando la BD RESPONDIÓ las dos filas: si la
+      // migración aún no está —o hubo un error de lectura— se vuelve a
+      // intentar (la sonda limita el costo a 1 sondeo cada 10 min). Antes
+      // bastaba con que la sonda dijera «sí» y un blip de red al arrancar
+      // dejaba el panel en «nunca corrió» hasta la madrugada siguiente.
+      if (leidoSync.ok && leidoWorker.ok) this.hidratado = true;
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo releer el estado de la sincronización a Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** Persiste los «últimos» del barrido (best-effort, nunca lanza). */
+  private async guardarEstadoSync(): Promise<void> {
+    await this.estadoBd().guardar(CLAVE_ESTADO_SYNC, {
+      ultimo_reconcile_at: this.ultimoReconcileAt,
+      ultimo_resync_at: this.ultimoResyncAt,
+      ultimo_resumen: this.ultimoResumen,
+    });
+  }
+
+  /**
+   * Persiste los «últimos» del worker. Solo cuando hubo trabajo o pausa: la
+   * cola se drena cada 20 s y escribir una fila en cada pasada vacía sería
+   * ruido puro en la BD.
+   */
+  private async guardarEstadoWorker(): Promise<void> {
+    await this.estadoBd().guardar(CLAVE_ESTADO_WORKER, {
+      ultimo_drenado_at: this.ultimoDrenadoAt,
+      pausada_hasta:
+        this.pausadaHastaMs > Date.now()
+          ? new Date(this.pausadaHastaMs).toISOString()
+          : null,
+    });
+  }
+
+  /**
+   * ¿Hay que ENCOLAR en vez de escribir directo? `true` solo cuando la sync
+   * está prendida, la cola está operativa y quien llama es un HOOK (no el
+   * worker ni el barrido). Nunca lanza: ante la duda, `false` = el
+   * comportamiento de siempre (escribir directo).
+   */
+  private async delegarEnCola(opts?: OpcionesEspejo): Promise<boolean> {
+    if (opts?.directo) return false;
+    if (!this.enabled || !this.calendar) return false;
+    try {
+      return await this.cola().activa();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * «Drenar pronto»: el trigger ya encoló el cambio y el hook solo pide que el
+   * worker corra YA (debounce de 2 s para que un guardado con 5 pasos drene
+   * una sola vez). Nunca bloquea al llamador ni deja el proceso vivo.
+   */
+  private drenarPronto(): void {
+    if (this.drenarProntoTimer) return;
+    const t = setTimeout(() => {
+      this.drenarProntoTimer = null;
+      void this.drenarCola();
+    }, COLA_DEBOUNCE_MS);
+    if (typeof (t as { unref?: () => void }).unref === 'function') {
+      (t as { unref: () => void }).unref();
+    }
+    this.drenarProntoTimer = t;
+  }
+
+  /**
+   * Espera a que termine el drenado que estuviera en curso (máx. ~15 s). Se
+   * llama con `barriendo` YA en true, así que ningún drenado nuevo arranca: lo
+   * único que puede haber es una pasada a medias de hasta 50 items. Si se
+   * agota la espera se sigue igual (el barrido nocturno no puede quedarse
+   * colgado): el riesgo vuelve a ser el de antes de este lote, no peor.
+   */
+  private async esperarDrenado(): Promise<void> {
+    for (let i = 0; i < 60 && this.drenando; i++) {
+      await new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, 250);
+        if (typeof (t as { unref?: () => void }).unref === 'function') {
+          (t as { unref: () => void }).unref();
+        }
+      });
+    }
+  }
 
   onModuleInit() {
     this.enabled = this.config.get('GOOGLE_CALENDAR_SYNC_ENABLED', {
@@ -241,7 +551,21 @@ export class CalendarSyncService implements OnModuleInit {
    * reconciliación: los errores se tragan y loguean aquí como siempre y los
    * ~30 hooks `void this.calendar.syncFlight(...)` lo ignoran sin cambios.
    */
-  async syncFlight(vueloId: string): Promise<boolean> {
+  async syncFlight(vueloId: string, opts?: OpcionesEspejo): Promise<boolean> {
+    if (!this.enabled || !this.calendar) return true;
+    // MODO AUTOMÁTICO: el trigger de la BD ya encoló este vuelo antes de que
+    // el hook llegara hasta acá (venga del panel, de la app online, de su
+    // outbox al reconectar o de un cron). El worker es el ÚNICO que habla con
+    // Google: una sola ruta, con reintentos y sin doble escritura.
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return true;
+    }
+    return this.syncFlightAhora(vueloId);
+  }
+
+  /** Escritura DIRECTA a Google de un vuelo (worker de la cola y barrido). */
+  private async syncFlightAhora(vueloId: string): Promise<boolean> {
     if (!this.enabled || !this.calendar) return true;
     try {
       const vuelo = await this.loadVuelo(vueloId);
@@ -299,7 +623,16 @@ export class CalendarSyncService implements OnModuleInit {
           vuelo.google_calendar_id,
           'ida',
         );
-        await this.saveEventId(vueloId, 'google_calendar_id', idaId);
+        // SOLO si el id CAMBIÓ (revisión adversaria 12-sep-2026, mismo
+        // criterio que los tramos / mantenimiento / evento de flota). Antes se
+        // escribía en CADA sincronización con el MISMO valor: un UPDATE sin
+        // cambio de negocio que `tg_set_updated_at` sellaba igual ⇒ deltas
+        // falsos en `?updated_since` y 409 CONFLICTO_VERSION espurios contra
+        // el `if_updated_at` de la app offline (invariante 13) cada vez que el
+        // worker tocaba el vuelo. Y es una escritura menos por pasada.
+        if (idaId !== vuelo.google_calendar_id) {
+          await this.saveEventId(vueloId, 'google_calendar_id', idaId);
+        }
       }
 
       // REGRESO de redondo (en fecha_traslado_final): segundo evento. Si el
@@ -317,7 +650,10 @@ export class CalendarSyncService implements OnModuleInit {
           vuelo.google_calendar_regreso_id,
           'regreso',
         );
-        await this.saveEventId(vueloId, 'google_calendar_regreso_id', regId);
+        // Igual que la ida: solo si el id cambió (ver el comentario de arriba).
+        if (regId !== vuelo.google_calendar_regreso_id) {
+          await this.saveEventId(vueloId, 'google_calendar_regreso_id', regId);
+        }
       } else if (vuelo.google_calendar_regreso_id) {
         // Dejó de ser redondo (o se quitó el regreso): borra el evento de regreso.
         if (await this.deleteEvent(vuelo.google_calendar_regreso_id))
@@ -326,6 +662,7 @@ export class CalendarSyncService implements OnModuleInit {
       }
       return ok;
     } catch (err) {
+      this.notarFalloGoogle(err, `vuelo ${vueloId}`);
       this.logger.error(
         `syncFlight(${vueloId}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -336,8 +673,10 @@ export class CalendarSyncService implements OnModuleInit {
   /**
    * Estado VISIBLE de la sincronización (C5, 12-sep-2026) para el panel: si
    * está prendida, a qué calendario apunta y cuándo corrió por última vez el
-   * cron o el backfill. Todo en MEMORIA del proceso (null si aún no corre en
-   * esta instancia): es diagnóstico, no un dato de negocio.
+   * cron o el backfill. Lee la CACHÉ en memoria; quien la rellena es
+   * `hidratarEstado` (desde `calendar_sync_estado`) o la pasada que acabó de
+   * correr. Sin la migración `20260912000002` vuelve a ser solo memoria
+   * (null tras cada redeploy), como antes de D12.
    */
   estadoSync(): EstadoSyncCalendar {
     return {
@@ -350,6 +689,79 @@ export class CalendarSyncService implements OnModuleInit {
       motivo:
         this.enabled && this.calendar != null ? null : this.motivoInactivo,
     };
+  }
+
+  /**
+   * `GET /v1/calendar/sync-estado` completo (D5): el estado de siempre + la
+   * COLA. `automatica: true` = ningún cambio depende de que un hook alcance a
+   * Google. `cola: null` con `enabled: true` = falta aplicar la migración
+   * `20260912000002` (el panel lo pinta en ÁMBAR: «activo · sin cola»).
+   */
+  async estadoSyncCompleto(): Promise<EstadoSyncCalendarCompleto> {
+    // D12: los «últimos» viven en la BD desde el 12-sep-2026, así que un
+    // redeploy ya no los borra. La memoria es la caché; esta es la relectura.
+    await this.hidratarEstado();
+    const base = this.estadoSync();
+    let activa = false;
+    try {
+      activa = await this.cola().activa();
+    } catch {
+      activa = false;
+    }
+    const cola = activa ? await this.leerEstadoCola() : null;
+    // `automatica` es el flag AUTORITATIVO (sync prendida + cola con
+    // triggers). `cola` puede venir null también si los conteos no se
+    // pudieron leer en ese instante: el panel decide «sin cola (migración
+    // pendiente)» por `automatica === false`, no por `cola === null`.
+    return { ...base, automatica: base.enabled && activa, cola };
+  }
+
+  /** Conteos de la cola para el chip del panel. Nunca lanza. */
+  private async leerEstadoCola(): Promise<EstadoColaCalendar | null> {
+    try {
+      const sb = this.supabase.service;
+      const { count: pendientes, error: e1 } = await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('id', { count: 'exact', head: true });
+      if (e1) throw new Error(e1.message);
+      const { count: conError, error: e2 } = await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('id', { count: 'exact', head: true })
+        .gt('intentos', 0);
+      if (e2) throw new Error(e2.message);
+      // El más viejo manda: es el que dice «desde cuándo» en el aviso.
+      const { data: viejo, error: e3 } = (await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('creado_at, ultimo_error, intentos')
+        .order('creado_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()) as {
+        data: {
+          creado_at: string;
+          ultimo_error: string | null;
+          intentos: number;
+        } | null;
+        error: { message: string } | null;
+      };
+      if (e3) throw new Error(e3.message);
+      return {
+        activa: true,
+        pendientes: pendientes ?? 0,
+        con_error: conError ?? 0,
+        mas_antiguo_at: viejo?.creado_at ?? null,
+        ultimo_error: viejo?.ultimo_error ?? this.ultimoDetalleError,
+        ultimo_drenado_at: this.ultimoDrenadoAt,
+        pausada_hasta:
+          this.pausadaHastaMs > Date.now()
+            ? new Date(this.pausadaHastaMs).toISOString()
+            : null,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer el estado de la cola de Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**
@@ -398,39 +810,525 @@ export class CalendarSyncService implements OnModuleInit {
         eventos: 0,
         mantenimientos: 0,
         errores: 0,
+        huerfanos_borrados: 0,
         desde,
         hasta,
         nota: NOTA_MANUALES,
       };
     }
-    const resumen = await this.sincronizarVentana(desdeIso, hastaIso, 'resync');
-    return {
-      enabled: true,
-      calendar_id: this.calendarId,
-      ...resumen,
-      desde,
-      hasta,
-      nota: NOTA_MANUALES,
-    };
+    // CANDADO (D12): el barrido escribe DIRECTO a Google. Si el reconcile
+    // nocturno (o el resync de otro admin, o de otra réplica) ya está
+    // publicando, dos `events.insert` del mismo evento dejarían un duplicado
+    // fantasma. Se prefiere un 409 claro a un calendario sucio.
+    // Exclusión DENTRO del proceso (síncrona, sin await en medio): vale aunque
+    // la migración del candado no esté aplicada, que es el estado de hoy.
+    if (this.barridoEnCurso) throw new ConflictException(MSG_BARRIDO_EN_CURSO);
+    this.barridoEnCurso = true;
+    let candado: ResultadoCandado = 'sin_candado';
+    try {
+      candado = await this.estadoBd().tomarCandado(
+        CANDADO_BARRIDO,
+        CANDADO_BARRIDO_TTL_SEG,
+      );
+      if (candado === 'ocupado') {
+        throw new ConflictException(MSG_BARRIDO_EN_CURSO);
+      }
+      const resumen = await this.sincronizarVentana(
+        desdeIso,
+        hastaIso,
+        'resync',
+      );
+      return {
+        enabled: true,
+        calendar_id: this.calendarId,
+        ...resumen,
+        desde,
+        hasta,
+        nota: NOTA_MANUALES,
+      };
+    } finally {
+      if (candado === 'concedido')
+        await this.estadoBd().soltarCandado(CANDADO_BARRIDO);
+      this.barridoEnCurso = false;
+    }
   }
 
   /**
-   * Reconciliación nocturna (05:15 UTC ≈ 00:15 Cancún) de la VENTANA
-   * operativa [hoy−7d, hoy+60d] contra Google: recoge mutaciones que no pasan
-   * por un hook directo (p. ej. `refreshPermisosDeVuelo` cambia
-   * `estado_permiso` sin re-sync) y repara eventos borrados a mano en
-   * Calendar. Reusa la idempotencia de syncFlight/upsertRaw y va SECUENCIAL a
-   * propósito para no saturar la API. Best-effort: nunca lanza.
+   * RED DE SEGURIDAD nocturna (05:15 UTC ≈ 00:15 Cancún). Dos pasadas sobre la
+   * MISMA ventana **[hoy−30d, hoy+365d]** (la del resync desde D12,
+   * 12-sep-2026: antes era [hoy−7d, hoy+60d] y un vuelo agendado para el año
+   * que viene podía quedar mal DÍAS sin que nadie lo notara):
+   *
+   * 1. **DIRECTA** (`sincronizarVentana`): republica a Google todo lo que el
+   *    calendario del sistema muestra en la ventana. Recoge mutaciones que no
+   *    pasan por un hook (p. ej. `refreshPermisosDeVuelo` mueve
+   *    `estado_permiso` sin re-sync) y repara lo que alguien borró a mano en
+   *    Calendar. Reusa la idempotencia de `syncFlight`/`upsertRaw`.
+   * 2. **INVERSA** (`limpiarHuerfanos`, D12): lista en Google los eventos de
+   *    la ventana y BORRA los que nacieron en VuelaTour
+   *    (`extendedProperties.private.vuelatour_*`) y ya no tienen fila que los
+   *    apunte — o cuya fila apunta a OTRO evento (duplicado fantasma). Sin
+   *    esto el reconcile solo mira FILAS VIVAS y un evento huérfano se queda
+   *    para siempre en el calendario de la oficina. Los eventos capturados A
+   *    MANO (sin ancla `vuelatour_*`) NO se tocan JAMÁS.
+   *
+   * Va SECUENCIAL a propósito para no saturar la API de Google y es
+   * best-effort: nunca lanza. Sigue escribiendo DIRECTO (`{ directo: true }`),
+   * sin pasar por la cola: la cola es el remedio normal, esto es la red.
+   *
+   * CANDADO (D12): antes de correr toma `calendar_sync_lock(912001)` en la BD.
+   * Railway corre **1 réplica hoy**, así que es preventivo: con 2 réplicas,
+   * dos reconciles simultáneos podrían insertar el MISMO evento dos veces. Sin
+   * la migración aplicada el candado no existe y se corre igual, como hoy.
    */
   @Cron('15 5 * * *', { name: 'calendar-reconcile-ventana' })
   async reconcileVentana(): Promise<void> {
     if (!this.enabled || !this.calendar) return;
     const ahora = Date.now();
-    await this.sincronizarVentana(
-      new Date(ahora - 7 * 86_400_000).toISOString(),
-      new Date(ahora + 60 * 86_400_000).toISOString(),
-      'reconcile',
-    );
+    // Un `POST /resync` (o el reconcile de ayer que no terminó) ya está
+    // publicando en ESTE proceso: dos barridos a la vez pueden duplicar un
+    // evento. La bandera es síncrona, así que vale sin la migración aplicada.
+    if (this.barridoEnCurso) {
+      this.logger.log(
+        'reconcile de Google Calendar omitido: ya hay un barrido en curso en este proceso (resync manual).',
+      );
+      return;
+    }
+    this.barridoEnCurso = true;
+    let candado: ResultadoCandado = 'sin_candado';
+    try {
+      candado = await this.estadoBd().tomarCandado(
+        CANDADO_BARRIDO,
+        CANDADO_BARRIDO_TTL_SEG,
+      );
+      if (candado === 'ocupado') {
+        this.logger.log(
+          'reconcile de Google Calendar omitido: otra réplica del API lo está haciendo (candado en BD).',
+        );
+        return;
+      }
+      await this.sincronizarVentana(
+        new Date(ahora - 30 * 86_400_000).toISOString(),
+        new Date(ahora + 365 * 86_400_000).toISOString(),
+        'reconcile',
+        { pasoInverso: true },
+      );
+    } finally {
+      if (candado === 'concedido')
+        await this.estadoBd().soltarCandado(CANDADO_BARRIDO);
+      this.barridoEnCurso = false;
+    }
+  }
+
+  // ===== WORKER DE LA COLA (D2, 12-sep-2026) =====
+
+  /**
+   * DRENADO AUTOMÁTICO de `calendar_sync_cola` cada 20 s: el único camino que
+   * habla con Google en modo automático. Tolerante de punta a punta:
+   *
+   * - sin migración aplicada (`calendar_sync_cola_activa()` en false) NO hace
+   *   nada y los hooks siguen escribiendo directo, como hasta hoy;
+   * - con la sync APAGADA no drena NI quema intentos: la cola espera (prender
+   *   las 3 variables de Railway sube todo lo acumulado);
+   * - single-flight: dos pasadas nunca corren a la vez;
+   * - toma hasta 50 items listos, los reclama con `tomado_at` y los procesa
+   *   SECUENCIAL (no saturar la API de Google);
+   * - éxito ⇒ el item se BORRA; fallo ⇒ `intentos+1`, backoff
+   *   `min(30 s · 2^intentos, 1 h)` y `ultimo_error` sin secretos: un cambio
+   *   NUNCA se pierde, se reintenta para siempre;
+   * - 403 de cuota / 429 ⇒ PAUSA el drenado 5 min sin quemar intentos de los
+   *   demás (seguir sería regalarle errores a Google) — y la pausa se PERSISTE
+   *   (D12), así que un redeploy en medio no la cancela;
+   * - CANDADO en BD (`calendar_sync_lock(912002)`, D12): con más de una réplica
+   *   solo una drena por vez. Railway corre 1 réplica hoy; sin la migración
+   *   aplicada el candado no existe y todo sigue como antes.
+   */
+  @Cron('*/20 * * * * *', { name: 'calendar-sync-cola' })
+  async drenarCola(): Promise<void> {
+    if (this.drenando) return;
+    // El barrido (reconcile/resync) ya está publicando DIRECTO a Google: dos
+    // escritores del mismo evento pueden duplicarlo (ver `barriendo`). La cola
+    // no se pierde nada: los items siguen ahí y se drenan al terminar.
+    if (this.barriendo) return;
+    // Sync apagada: la cola ESPERA (no se drena ni se castiga a nadie).
+    if (!this.enabled || !this.calendar) return;
+    // El candado se toma ANTES del primer `await` (la sonda): si no, dos
+    // pasadas del cron pasarían juntas por la sonda y duplicarían trabajo.
+    this.drenando = true;
+    let candado: ResultadoCandado = 'sin_candado';
+    try {
+      let activa = false;
+      try {
+        activa = await this.cola().activa();
+      } catch {
+        activa = false;
+      }
+      if (!activa) return;
+      // Estado guardado (D12): tras un redeploy, recupera `ultimo_drenado_at`
+      // y —lo importante— una PAUSA POR CUOTA vigente; si no, el proceso nuevo
+      // volvería a golpear a Google de inmediato y a quemar la cuota.
+      await this.hidratarEstado();
+      if (this.pausadaHastaMs > Date.now()) return;
+      // CANDADO en BD (D12): con 2 réplicas, dos workers drenando a la vez
+      // duplican trabajo contra Google (el `tomado_at` protege item por item,
+      // pero no evita la doble pasada). Railway corre 1 réplica hoy; sin la
+      // migración aplicada esto responde `sin_candado` y se drena igual.
+      candado = await this.estadoBd().tomarCandado(
+        CANDADO_DRENADO,
+        CANDADO_DRENADO_TTL_SEG,
+      );
+      if (candado === 'ocupado') return;
+
+      const items = await this.tomarItems();
+      this.ultimoDrenadoAt = new Date().toISOString();
+
+      const sinProcesar: number[] = [];
+      let hechos = 0;
+      let fallidos = 0;
+      for (const item of items) {
+        if (this.pausadaHastaMs > Date.now()) {
+          // Pausa por cuota: el resto conserva su turno INTACTO.
+          sinProcesar.push(item.id);
+          continue;
+        }
+        const pausaAntes = this.pausadaHastaMs;
+        this.ultimoDetalleError = null;
+        let ok = false;
+        try {
+          ok = await this.procesarItem(item);
+        } catch (err) {
+          this.notarFalloGoogle(err, this.etiquetaItem(item));
+          ok = false;
+        }
+        if (ok) {
+          hechos++;
+          await this.borrarItem(item);
+          continue;
+        }
+        if (this.pausadaHastaMs > pausaAntes) {
+          // El fallo FUE la cuota: no se le cobra el intento a este item.
+          sinProcesar.push(item.id);
+          continue;
+        }
+        fallidos++;
+        await this.reprogramarItem(item);
+      }
+      if (sinProcesar.length > 0) await this.liberarItems(sinProcesar);
+      if (items.length > 0) {
+        this.logger.log(
+          `cola Google Calendar: ${hechos} sincronizados, ${fallidos} con error, ${sinProcesar.length} en espera por pausa.`,
+        );
+      }
+      // Solo cuando hubo trabajo o pausa: el worker corre cada 20 s y escribir
+      // una fila en cada pasada vacía sería ruido puro en la BD.
+      if (items.length > 0 || this.pausadaHastaMs > Date.now()) {
+        await this.guardarEstadoWorker();
+      }
+      // SIEMPRE (aunque no hubiera items listos): un item atorado en backoff
+      // de 1 h no aparece en `tomarItems` y su alerta no puede esperar esa
+      // hora. Cuesta una consulta de conteo por pasada.
+      await this.vigilarCola();
+    } catch (err) {
+      this.logger.error(
+        `drenarCola falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      if (candado === 'concedido')
+        await this.estadoBd().soltarCandado(CANDADO_DRENADO);
+      this.drenando = false;
+    }
+  }
+
+  /** Etiqueta legible de un item (logs y `ultimo_error`). */
+  private etiquetaItem(item: ItemCola): string {
+    return item.entidad === 'borrar_evento'
+      ? `borrar evento ${item.google_event_id ?? '?'}`
+      : `${item.entidad} ${item.entidad_id ?? '?'}`;
+  }
+
+  /**
+   * Toma hasta 50 items LISTOS y los RECLAMA (`tomado_at` = sello propio).
+   * El reclamo es la llave de concurrencia: el borrado y el reprograma exigen
+   * ese mismo sello, así que si un trigger re-encoló la fila mientras el
+   * worker la procesaba (un cambio nuevo), el item NO se borra y se vuelve a
+   * procesar — un cambio jamás se pierde por una carrera.
+   */
+  private async tomarItems(): Promise<ItemCola[]> {
+    const ahora = Date.now();
+    const nowIso = new Date(ahora).toISOString();
+    const vencidoIso = new Date(ahora - COLA_TOMADO_VENCE_MS).toISOString();
+    const libre = `tomado_at.is.null,tomado_at.lt.${vencidoIso}`;
+    const COLS =
+      'id, entidad, entidad_id, google_event_id, intentos, creado_at, tomado_at';
+
+    const { data: listos, error } = (await this.supabase.service
+      .from(TABLA_CALENDAR_SYNC_COLA)
+      .select('id')
+      .lte('siguiente_intento_at', nowIso)
+      .or(libre)
+      .order('siguiente_intento_at', { ascending: true })
+      .order('id', { ascending: true })
+      .limit(COLA_TOMA_MAX)) as {
+      data: { id: number }[] | null;
+      error: { message: string } | null;
+    };
+    if (error) throw new Error(error.message);
+    const ids = (listos ?? []).map((r) => r.id);
+    if (ids.length === 0) return [];
+
+    // El sello del reclamo se genera acá (no `now()` de Postgres) para poder
+    // compararlo exacto al borrar/reprogramar.
+    const sello = new Date().toISOString();
+    const { data: tomados, error: errTomar } = (await this.supabase.service
+      .from(TABLA_CALENDAR_SYNC_COLA)
+      .update({ tomado_at: sello })
+      .in('id', ids)
+      .or(libre)
+      .select(COLS)) as {
+      data: ItemCola[] | null;
+      error: { message: string } | null;
+    };
+    if (errTomar) throw new Error(errTomar.message);
+    return (tomados ?? []).map((t) => ({ ...t, tomado_at: sello }));
+  }
+
+  /**
+   * Ejecuta UN item. `true` = quedó hecho (o ya no había nada que hacer: la
+   * fila se borró) ⇒ el item se elimina de la cola.
+   */
+  private async procesarItem(item: ItemCola): Promise<boolean> {
+    switch (item.entidad) {
+      case 'vuelo':
+        return item.entidad_id
+          ? await this.syncFlightAhora(item.entidad_id)
+          : true;
+      case 'descanso':
+        return item.entidad_id
+          ? await this.syncDescanso(item.entidad_id, { directo: true })
+          : true;
+      case 'evento':
+        return item.entidad_id
+          ? await this.syncEvento(item.entidad_id, { directo: true })
+          : true;
+      case 'mantenimiento':
+        return item.entidad_id
+          ? await this.syncMantenimientoAhora(item.entidad_id)
+          : true;
+      case 'borrar_evento':
+        // `deleteEvent` ya devuelve true con 404/410 (el objetivo —que el
+        // evento no exista— se cumple igual).
+        return item.google_event_id
+          ? await this.deleteEvent(item.google_event_id)
+          : true;
+      default:
+        // Entidad desconocida (API viejo contra una cola nueva): no se puede
+        // procesar, pero tampoco se borra a ciegas.
+        this.logger.warn(
+          `cola Google Calendar: entidad desconocida «${String(item.entidad)}» (item ${item.id})`,
+        );
+        return false;
+    }
+  }
+
+  /** Item resuelto: sale de la cola (solo si nadie lo re-encoló en medio). */
+  private async borrarItem(item: ItemCola): Promise<void> {
+    const { error } = await this.supabase.service
+      .from(TABLA_CALENDAR_SYNC_COLA)
+      .delete()
+      .eq('id', item.id)
+      .eq('tomado_at', item.tomado_at);
+    if (error) {
+      this.logger.warn(
+        `No se pudo cerrar el item ${item.id} de la cola: ${error.message}`,
+      );
+    }
+  }
+
+  /** Item fallido: backoff exponencial + rastro del error (sin secretos). */
+  private async reprogramarItem(item: ItemCola): Promise<void> {
+    const intentos = (item.intentos ?? 0) + 1;
+    const cuando = new Date(Date.now() + siguienteIntentoMs(intentos));
+    const { error } = await this.supabase.service
+      .from(TABLA_CALENDAR_SYNC_COLA)
+      .update({
+        intentos,
+        siguiente_intento_at: cuando.toISOString(),
+        ultimo_error: this.ultimoDetalleError ?? 'no se pudo sincronizar',
+        tomado_at: null,
+      })
+      .eq('id', item.id)
+      .eq('tomado_at', item.tomado_at);
+    if (error) {
+      this.logger.warn(
+        `No se pudo reprogramar el item ${item.id} de la cola: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Devuelve items reclamados SIN castigo (pausa por cuota): se les mueve el
+   * turno al final de la pausa para no repetir el 403 en 20 s.
+   */
+  private async liberarItems(ids: number[]): Promise<void> {
+    const cuando = new Date(
+      Math.max(this.pausadaHastaMs, Date.now()),
+    ).toISOString();
+    const { error } = await this.supabase.service
+      .from(TABLA_CALENDAR_SYNC_COLA)
+      .update({ tomado_at: null, siguiente_intento_at: cuando })
+      .in('id', ids);
+    if (error) {
+      this.logger.warn(
+        `No se pudieron liberar items de la cola: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * Registra un fallo de Google: guarda el texto (sin secretos) para
+   * `ultimo_error` y, si Google está rechazando por CUOTA (403) o exceso de
+   * peticiones (429), PAUSA el drenado 5 min — insistir solo quemaría el
+   * turno de todos los demás cambios.
+   */
+  private notarFalloGoogle(err: unknown, contexto: string): void {
+    const detalle = err instanceof Error ? err.message : String(err);
+    this.ultimoDetalleError = sanitizarError(`${contexto}: ${detalle}`);
+    if (esLimiteGoogle(err)) {
+      this.pausadaHastaMs = Date.now() + COLA_PAUSA_CUOTA_MS;
+      this.logger.warn(
+        `Google Calendar respondió cuota/límite (${contexto}): el drenado se pausa 5 min y ningún cambio pierde su turno.`,
+      );
+    }
+  }
+
+  /**
+   * AVISO A ADMIN (D4) cuando la cola se atora: algún item con ≥ 12 intentos
+   * (≈ 1 h de backoff) o el más viejo esperando > 30 min. UNA VEZ AL DÍA
+   * (dedupe en `alerta_emitida`, mismo patrón que las demás alertas) y con
+   * texto claro: qué pasa, desde cuándo y con qué error.
+   */
+  private async vigilarCola(): Promise<void> {
+    try {
+      const sb = this.supabase.service;
+      const { count, error } = await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('id', { count: 'exact', head: true });
+      if (error) throw new Error(error.message);
+      const pendientes = count ?? 0;
+      if (pendientes === 0) {
+        if (this.colaTeniaPendientes) {
+          this.colaTeniaPendientes = false;
+          this.logger.log(
+            'Cola de Google Calendar en cero: el calendario quedó al día.',
+          );
+        }
+        return;
+      }
+      this.colaTeniaPendientes = true;
+
+      const { data: viejo } = (await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('creado_at, ultimo_error')
+        .order('creado_at', { ascending: true })
+        .limit(1)
+        .maybeSingle()) as {
+        data: { creado_at: string; ultimo_error: string | null } | null;
+      };
+      const { data: peor } = (await sb
+        .from(TABLA_CALENDAR_SYNC_COLA)
+        .select('intentos')
+        .order('intentos', { ascending: false })
+        .limit(1)
+        .maybeSingle()) as { data: { intentos: number } | null };
+
+      const estado = {
+        pendientes,
+        mas_antiguo_at: viejo?.creado_at ?? null,
+        max_intentos: peor?.intentos ?? 0,
+      };
+      if (!colaAtorada(estado, Date.now())) return;
+
+      const dia = this.diaCancun(new Date().toISOString());
+      if (!(await this.marcarAvisoDelDia(`calendar_sync_cola:${dia}`))) return;
+
+      const cuerpo = textoAvisoCola({
+        pendientes,
+        mas_antiguo_at: estado.mas_antiguo_at,
+        ultimo_error: viejo?.ultimo_error ?? this.ultimoDetalleError,
+      });
+      this.logger.error(`ALERTA · ${cuerpo}`);
+      await this.notifications?.notifyRole(Rol.ADMIN, {
+        tipo: 'alerta_sistema',
+        titulo: 'Google Calendar sin sincronizar',
+        cuerpo,
+        data: { pendientes, mas_antiguo_at: estado.mas_antiguo_at },
+      });
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo evaluar el aviso de la cola: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /** Dedupe del aviso en `alerta_emitida` (23505 = ya se avisó hoy). */
+  private async marcarAvisoDelDia(dedupeKey: string): Promise<boolean> {
+    const { error } = await this.supabase.service
+      .from('alerta_emitida')
+      .insert({ dedupe_key: dedupeKey, clave: COLA_ALERTA_CLAVE });
+    if (error) {
+      if (error.code === '23505') return false;
+      this.logger.warn(
+        `No se pudo marcar el aviso de la cola: ${error.message}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Corta el barrido si Google acaba de responder cuota/429 (revisión
+   * adversaria 12-sep-2026). El worker de la cola ya respetaba
+   * `pausadaHastaMs`; el barrido no lo miraba, así que una pasada de ~395 días
+   * seguía disparando miles de llamadas condenadas a fallar (y con la vista de
+   * Google incompleta el paso inverso NO debe decidir borrados).
+   */
+  private abortarSiCuota(etapa: string, r: ResumenSyncCalendar): void {
+    if (this.pausadaHastaMs <= Date.now()) return;
+    r.errores++;
+    throw new PausaCuotaBarrido(etapa);
+  }
+
+  /**
+   * LECTURA PAGINADA de PostgREST (revisión adversaria 12-sep-2026).
+   *
+   * Supabase corta toda respuesta en `max-rows` (1000) **sin avisar**: no hay
+   * error, solo faltan filas. Con la ventana de D12 (~395 días) el barrido
+   * pasó a leer miles de vuelos y de descansos, así que una lectura sin
+   * paginar dejaba SILENCIOSAMENTE de publicar todo lo que cayera después de
+   * la fila 1000 — exactamente el «falla y nadie se entera» que la red de
+   * seguridad existe para evitar. Mismo patrón que `aircraft-balance` y
+   * `flights.service`: `order` estable + `range`, hasta que una página venga
+   * incompleta.
+   *
+   * Un error a media paginación devuelve lo leído hasta ahí MÁS el error: el
+   * caller lo cuenta y sigue con lo que tiene (igual que antes de este lote,
+   * cuando una consulta con error se procesaba como lista vacía).
+   */
+  private async leerPaginado<T>(
+    consulta: (
+      desde: number,
+      hasta: number,
+    ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+  ): Promise<{ filas: T[]; error: string | null }> {
+    const filas: T[] = [];
+    for (let desde = 0; ; desde += PAGINA_BD) {
+      const { data, error } = await consulta(desde, desde + PAGINA_BD - 1);
+      if (error) return { filas, error: error.message };
+      const pagina = data ?? [];
+      filas.push(...pagina);
+      if (pagina.length < PAGINA_BD) break;
+    }
+    return { filas, error: null };
   }
 
   /**
@@ -446,6 +1344,7 @@ export class CalendarSyncService implements OnModuleInit {
     desdeIso: string,
     hastaIso: string,
     origen: 'resync' | 'reconcile',
+    opts?: { pasoInverso?: boolean },
   ): Promise<ResumenSyncCalendar> {
     const desdeDia = this.diaCancun(desdeIso);
     const hastaDia = this.diaCancun(hastaIso);
@@ -455,8 +1354,17 @@ export class CalendarSyncService implements OnModuleInit {
       eventos: 0,
       mantenimientos: 0,
       errores: 0,
+      huerfanos_borrados: 0,
     };
+    // EXCLUSIÓN MUTUA con el worker de la cola (revisión adversaria
+    // 12-sep-2026): el barrido escribe DIRECTO y el worker también. Si los dos
+    // tocan un vuelo SIN `google_calendar_id` a la vez, los dos hacen
+    // `events.insert` y queda un evento DUPLICADO cuyo id no vive en ninguna
+    // fila (fantasma imborrable). Con `barriendo` en true no arranca ningún
+    // drenado nuevo; solo hay que dejar terminar el que estuviera en curso.
+    this.barriendo = true;
     try {
+      await this.esperarDrenado();
       // 1) Vuelos cuyo rango [fecha_vuelo, coalesce(fecha_fin, fecha_vuelo)]
       //    SOLAPA la ventana (viajes multi-día incluidos). SIN filtro de
       //    estado (12-sep-2026): los CANCELADOS también entran para que
@@ -464,52 +1372,67 @@ export class CalendarSyncService implements OnModuleInit {
       //    cuando se canceló, su evento seguía vivo en el calendario de la
       //    oficina y nadie lo volvía a mirar. No se cuentan en `vuelos`
       //    (ahí solo va lo PUBLICADO); un borrado que falla sí cuenta error.
-      const { data: vuelos, error: vErr } = await this.supabase.service
-        .from('vuelo')
-        .select('id, estado')
-        .not('fecha_vuelo', 'is', null)
-        .lte('fecha_vuelo', hastaIso)
-        .or(
-          `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha_vuelo.gte.${desdeIso})`,
-        );
+      const { filas: vuelos, error: vErr } = await this.leerPaginado<{
+        id: string;
+        estado?: string;
+      }>((d, h) =>
+        this.supabase.service
+          .from('vuelo')
+          .select('id, estado')
+          .not('fecha_vuelo', 'is', null)
+          .lte('fecha_vuelo', hastaIso)
+          .or(
+            `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha_vuelo.gte.${desdeIso})`,
+          )
+          .order('id', { ascending: true })
+          .range(d, h),
+      );
       if (vErr) {
         r.errores++;
-        this.logger.warn(`${origen}: vuelos no consultados (${vErr.message})`);
+        this.logger.warn(`${origen}: vuelos no consultados (${vErr})`);
       }
-      for (const v of (vuelos ?? []) as { id: string; estado?: string }[]) {
-        if (!(await this.syncFlight(v.id))) r.errores++;
+      for (const v of vuelos) {
+        this.abortarSiCuota('vuelos', r);
+        if (!(await this.syncFlight(v.id, { directo: true }))) r.errores++;
         else if (v.estado !== 'CANCELADO') r.vuelos++;
       }
 
       // 2) Descansos de piloto que tocan la ventana (columnas DATE en Cancún).
-      const { data: descansos, error: dErr } = await this.supabase.service
-        .from('piloto_descanso')
-        .select(
-          'id, fecha_inicio, fecha_fin, motivo, google_calendar_id, piloto:usuario!piloto_id(nombre)',
-        )
-        .lte('fecha_inicio', hastaDia)
-        .gte('fecha_fin', desdeDia);
-      if (dErr) {
-        r.errores++;
-        this.logger.warn(
-          `${origen}: descansos no consultados (${dErr.message})`,
-        );
-      }
-      for (const d of (descansos ?? []) as unknown as Array<{
+      const { filas: descansos, error: dErr } = await this.leerPaginado<{
         id: string;
         fecha_inicio: string;
         fecha_fin: string;
         motivo: string | null;
         google_calendar_id: string | null;
         piloto: { nombre: string } | { nombre: string }[] | null;
-      }>) {
-        const eventId = await this.upsertDescansoEvent({
-          piloto_nombre: unwrap(d.piloto)?.nombre ?? 'Piloto',
-          fecha_inicio: d.fecha_inicio,
-          fecha_fin: d.fecha_fin,
-          motivo: d.motivo,
-          google_calendar_id: d.google_calendar_id,
-        });
+      }>((desde, hasta) =>
+        this.supabase.service
+          .from('piloto_descanso')
+          .select(
+            'id, fecha_inicio, fecha_fin, motivo, google_calendar_id, piloto:usuario!piloto_id(nombre)',
+          )
+          .lte('fecha_inicio', hastaDia)
+          .gte('fecha_fin', desdeDia)
+          .order('id', { ascending: true })
+          .range(desde, hasta),
+      );
+      if (dErr) {
+        r.errores++;
+        this.logger.warn(`${origen}: descansos no consultados (${dErr})`);
+      }
+      for (const d of descansos) {
+        this.abortarSiCuota('descansos', r);
+        const eventId = await this.upsertDescansoEvent(
+          {
+            id: d.id,
+            piloto_nombre: unwrap(d.piloto)?.nombre ?? 'Piloto',
+            fecha_inicio: d.fecha_inicio,
+            fecha_fin: d.fecha_fin,
+            motivo: d.motivo,
+            google_calendar_id: d.google_calendar_id,
+          },
+          { directo: true },
+        );
         // Evento recreado (lo borraron del lado de Calendar): persistir el id
         // nuevo o cada noche nacería otro duplicado.
         if (eventId && eventId !== d.google_calendar_id) {
@@ -530,22 +1453,7 @@ export class CalendarSyncService implements OnModuleInit {
       }
 
       // 3) Eventos NO-vuelo de la flota en la ventana.
-      const { data: eventos, error: eErr } = await this.supabase.service
-        .from('evento_flota')
-        .select(
-          'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
-        )
-        .lte('fecha', hastaIso)
-        .or(
-          `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha.gte.${desdeIso})`,
-        );
-      if (eErr) {
-        r.errores++;
-        this.logger.warn(
-          `${origen}: eventos de flota no consultados (${eErr.message})`,
-        );
-      }
-      for (const ev of (eventos ?? []) as unknown as Array<{
+      type EventoFlotaBarrido = {
         id: string;
         titulo: string | null;
         fecha: string;
@@ -554,18 +1462,43 @@ export class CalendarSyncService implements OnModuleInit {
         google_calendar_id: string | null;
         aeronave: AeronaveRef | AeronaveRef[] | null;
         responsable: { nombre: string } | { nombre: string }[] | null;
-      }>) {
-        const eventId = await this.upsertEventoFlotaEvent({
-          id: ev.id,
-          titulo: ev.titulo ?? 'Evento',
-          fecha: ev.fecha,
-          fecha_fin: ev.fecha_fin,
-          aeronave_matricula: unwrap(ev.aeronave)?.matricula ?? null,
-          aeronave_color: unwrap(ev.aeronave)?.color_calendario ?? null,
-          responsable_nombre: unwrap(ev.responsable)?.nombre ?? null,
-          notas: ev.notas,
-          google_calendar_id: ev.google_calendar_id,
-        });
+      };
+      const { filas: eventos, error: eErr } =
+        await this.leerPaginado<EventoFlotaBarrido>((desde, hasta) =>
+          this.supabase.service
+            .from('evento_flota')
+            .select(
+              'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
+            )
+            .lte('fecha', hastaIso)
+            .or(
+              `fecha_fin.gte.${desdeIso},and(fecha_fin.is.null,fecha.gte.${desdeIso})`,
+            )
+            .order('id', { ascending: true })
+            .range(desde, hasta),
+        );
+      if (eErr) {
+        r.errores++;
+        this.logger.warn(
+          `${origen}: eventos de flota no consultados (${eErr})`,
+        );
+      }
+      for (const ev of eventos) {
+        this.abortarSiCuota('eventos de flota', r);
+        const eventId = await this.upsertEventoFlotaEvent(
+          {
+            id: ev.id,
+            titulo: ev.titulo ?? 'Evento',
+            fecha: ev.fecha,
+            fecha_fin: ev.fecha_fin,
+            aeronave_matricula: unwrap(ev.aeronave)?.matricula ?? null,
+            aeronave_color: unwrap(ev.aeronave)?.color_calendario ?? null,
+            responsable_nombre: unwrap(ev.responsable)?.nombre ?? null,
+            notas: ev.notas,
+            google_calendar_id: ev.google_calendar_id,
+          },
+          { directo: true },
+        );
         if (eventId) r.eventos++;
         else r.errores++;
       }
@@ -573,37 +1506,362 @@ export class CalendarSyncService implements OnModuleInit {
       // 4) MANTENIMIENTOS con fecha en la ventana (12-sep-2026). Sin filtro de
       //    estado a propósito: `syncMantenimiento` BORRA el evento de lo que
       //    ya se completó (el calendario del sistema tampoco lo pinta).
-      const { data: mants, error: mErr } = await this.supabase.service
-        .from('mantenimiento')
-        .select('id')
-        .not('fecha_programada', 'is', null)
-        .gte('fecha_programada', desdeDia)
-        .lte('fecha_programada', hastaDia);
+      const { filas: mants, error: mErr } = await this.leerPaginado<{
+        id: string;
+      }>((desde, hasta) =>
+        this.supabase.service
+          .from('mantenimiento')
+          .select('id')
+          .not('fecha_programada', 'is', null)
+          .gte('fecha_programada', desdeDia)
+          .lte('fecha_programada', hastaDia)
+          .order('id', { ascending: true })
+          .range(desde, hasta),
+      );
       if (mErr) {
         r.errores++;
-        this.logger.warn(
-          `${origen}: mantenimientos no consultados (${mErr.message})`,
-        );
+        this.logger.warn(`${origen}: mantenimientos no consultados (${mErr})`);
       }
-      for (const m of (mants ?? []) as { id: string }[]) {
-        if (await this.syncMantenimiento(m.id)) r.mantenimientos++;
+      for (const m of mants) {
+        this.abortarSiCuota('mantenimientos', r);
+        if (await this.syncMantenimiento(m.id, { directo: true }))
+          r.mantenimientos++;
         else r.errores++;
       }
 
+      // 5) PASO INVERSO (D12): Google → BD. Corre DESPUÉS de publicar (los
+      //    pasos 1-4 ya crearon y persistieron los ids de las filas vivas, así
+      //    que lo que quede sin fila es huérfano de verdad) y con `barriendo`
+      //    todavía en true (el worker no puede insertar en medio).
+      if (opts?.pasoInverso) {
+        const inverso = await this.limpiarHuerfanos(desdeIso, hastaIso);
+        r.huerfanos_borrados = inverso.borrados;
+        r.errores += inverso.errores;
+      }
+
       this.logger.log(
-        `${origen} [${desdeDia} → ${hastaDia}]: ${r.vuelos} vuelos, ${r.descansos} descansos, ${r.eventos} eventos, ${r.mantenimientos} mantenimientos, ${r.errores} con error.`,
+        `${origen} [${desdeDia} → ${hastaDia}]: ${r.vuelos} vuelos, ${r.descansos} descansos, ${r.eventos} eventos, ${r.mantenimientos} mantenimientos, ${r.huerfanos_borrados} huérfanos borrados, ${r.errores} con error.`,
       );
     } catch (err) {
-      r.errores++;
-      this.logger.error(
-        `${origen} falló: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      if (err instanceof PausaCuotaBarrido) {
+        // El error ya se contó en `abortarSiCuota`: acá solo se deja constancia
+        // de que la pasada quedó a medias A PROPÓSITO.
+        this.logger.error(
+          `ALERTA · ${origen} ABANDONADO en ${err.etapa}: Google Calendar respondió cuota/límite. Lo que faltó se publica en la próxima pasada (y la cola sigue reintentando). El paso inverso NO corrió: con una vista incompleta de Google no se borra nada.`,
+        );
+      } else {
+        r.errores++;
+        this.logger.error(
+          `${origen} falló: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    } finally {
+      // SIEMPRE se libera: si el barrido reventara con `barriendo` en true, la
+      // cola no volvería a drenar nunca y el modo automático quedaría muerto.
+      this.barriendo = false;
     }
     const at = new Date().toISOString();
     this.ultimoResumen = { ...r, origen, desde: desdeDia, hasta: hastaDia, at };
     if (origen === 'resync') this.ultimoResyncAt = at;
     else this.ultimoReconcileAt = at;
+    // PERSISTIDO (D12): sin esto, un redeploy de Railway dejaba `sync-estado`
+    // en null y el panel decía «nunca corrió» aunque hubiera corrido de
+    // madrugada. La memoria (arriba) sigue siendo la caché de lectura; una
+    // hidratación posterior solo rellena lo que siga en null, así que jamás
+    // pisa el resumen de esta pasada.
+    await this.guardarEstadoSync();
     return r;
+  }
+
+  // ===== PASO INVERSO: GOOGLE → BD (D12, 12-sep-2026) =====
+
+  /**
+   * Borra de Google los eventos que NACIERON en VuelaTour y ya no tienen fila
+   * viva que los apunte. Es la mitad que faltaba de la red de seguridad: el
+   * barrido directo solo mira FILAS VIVAS, así que un evento huérfano (Google
+   * caído al cancelar, un `insert` duplicado por una carrera, un DELETE por
+   * SQL de antes de los triggers) se quedaba PARA SIEMPRE en el calendario de
+   * la oficina.
+   *
+   * CÓMO SE RECONOCE LO NUESTRO: por `extendedProperties.private.vuelatour_*`
+   * (`vuelatour_vuelo_id`, `vuelatour_descanso_id`, `vuelatour_evento_id`,
+   * `vuelatour_mantenimiento_id`). **Un evento SIN ninguna de esas anclas NO
+   * se toca jamás**: es de la oficina (pedido del cliente C7).
+   *
+   * POR QUÉ UN SOLO LISTADO DE LA VENTANA Y NO CUATRO CON
+   * `privateExtendedProperty` (desviación deliberada del plan D12): ese
+   * parámetro de la API de Google exige `propertyName=value` — un valor
+   * CONCRETO. No existe forma de pedir «los eventos que TENGAN la propiedad
+   * `vuelatour_vuelo_id`, con cualquier valor»: `vuelatour_vuelo_id=*` se toma
+   * literal y no empata con nada, así que el paso inverso no borraría NUNCA
+   * nada (una red de seguridad falsa, peor que ninguna). Y los valores
+   * concretos que sí conocemos son los de las filas VIVAS, justo los que NO
+   * hay que borrar. Por eso se lista la ventana una vez (`timeMin`/`timeMax`,
+   * `singleEvents: true`, `showDeleted: false`, paginado con `pageToken`) y se
+   * clasifica del lado del API: una sola consulta paginada en vez de cuatro, y
+   * `fields` recorta la respuesta a id + summary + created +
+   * extendedProperties.
+   *
+   * VOLUMEN: lecturas de BD por LOTES (`in (...)` de ≤ `LOTE_IDS_BD` = 150
+   * ids), nunca N+1 — 1 consulta por cada 150 entidades (2 en el caso del
+   * vuelo: la fila y sus tramos, y la de tramos PAGINADA porque es la única
+   * que devuelve varias filas por entidad).
+   *
+   * ANTE LA DUDA NO SE BORRA: si una consulta a la BD falla, o el id del ancla
+   * no es un UUID, ese evento se CONSERVA y se cuenta un error. Y hay un tope
+   * de `HUERFANOS_BORRADO_TOPE` borrados por pasada: si una noche quisiera
+   * borrar más que eso, la premisa está mal (no el calendario) — se para y se
+   * avisa en el log.
+   */
+  private async limpiarHuerfanos(
+    desdeIso: string,
+    hastaIso: string,
+  ): Promise<{ borrados: number; errores: number }> {
+    const res = { borrados: 0, errores: 0 };
+    if (!this.calendar) return res;
+
+    // 1) LISTAR la ventana en Google (paginado).
+    const nuestros: EventoSistemaGoogle[] = [];
+    let manuales = 0;
+    let pageToken: string | undefined;
+    let paginas = 0;
+    try {
+      do {
+        const { data } = await this.calendar.events.list({
+          calendarId: this.calendarId,
+          timeMin: desdeIso,
+          timeMax: hastaIso,
+          singleEvents: true,
+          showDeleted: false,
+          maxResults: HUERFANOS_PAGINA_MAX,
+          pageToken,
+          // `created` (revisión adversaria 12-sep-2026): un evento recién
+          // nacido puede ser legítimo con el id todavía sin guardar en su
+          // fila — ver `esRecienCreado`.
+          fields: 'nextPageToken,items(id,summary,created,extendedProperties)',
+        });
+        for (const ev of data?.items ?? []) {
+          const nuestro = clasificarEventoSistema(ev);
+          if (nuestro) nuestros.push(nuestro);
+          else manuales++;
+        }
+        pageToken = data?.nextPageToken ?? undefined;
+        paginas++;
+      } while (pageToken && paginas < HUERFANOS_PAGINAS_TOPE);
+      if (pageToken) {
+        res.errores++;
+        this.logger.warn(
+          `paso inverso: la ventana tiene más de ${HUERFANOS_PAGINAS_TOPE * HUERFANOS_PAGINA_MAX} eventos; se revisó solo lo leído.`,
+        );
+      }
+    } catch (err) {
+      // Sin el listado no hay nada que decidir: se cuenta el error y NO se
+      // borra nada (el reconcile de mañana lo reintenta).
+      res.errores++;
+      this.notarFalloGoogle(err, 'listar eventos de Google (paso inverso)');
+      this.logger.error(
+        `paso inverso: no se pudo listar el calendario: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return res;
+    }
+
+    if (nuestros.length === 0) {
+      this.logger.log(
+        `paso inverso: ${manuales} eventos de la oficina (intactos), ninguno del sistema en la ventana.`,
+      );
+      return res;
+    }
+
+    // 2) VERIFICAR contra la BD, por tipo y por lotes.
+    const porTipo = new Map<TipoAnclaCalendar, Set<string>>();
+    for (const ev of nuestros) {
+      const ya = porTipo.get(ev.tipo);
+      if (ya) ya.add(ev.entidadId);
+      else porTipo.set(ev.tipo, new Set([ev.entidadId]));
+    }
+    const mapas = new Map<
+      TipoAnclaCalendar,
+      { verificados: Set<string>; vivos: Map<string, Set<string>> }
+    >();
+    for (const [tipo, ids] of porTipo) {
+      const v = await this.verificarVivos(tipo, [...ids]);
+      res.errores += v.errores;
+      mapas.set(tipo, { verificados: v.verificados, vivos: v.vivos });
+    }
+
+    // 3) BORRAR lo huérfano (y solo eso).
+    let noVerificables = 0;
+    let recientes = 0;
+    let tope = false;
+    const ahoraMs = Date.now();
+    for (const ev of nuestros) {
+      const m = mapas.get(ev.tipo);
+      const decision = m
+        ? decidirHuerfano(ev, m.verificados, m.vivos)
+        : 'no_verificable';
+      if (decision === 'conservar') continue;
+      if (decision === 'no_verificable') {
+        noVerificables++;
+        continue;
+      }
+      // RECIÉN CREADO (revisión adversaria 12-sep-2026): sin la cola activa
+      // los hooks escriben DIRECTO a Google en cualquier momento, también
+      // durante la media hora que dura el reconcile, y guardan el
+      // `google_calendar_id` un instante DESPUÉS del `insert`. Si el paso
+      // inverso lo listó en ese hueco, la fila apunta a null y lo tomaría por
+      // duplicado fantasma: sería BORRAR UN EVENTO VIVO. Un huérfano de verdad
+      // nunca es nuevo; esperar a la noche siguiente no cuesta nada.
+      if (esRecienCreado(ev.creadoMs, ahoraMs)) {
+        recientes++;
+        continue;
+      }
+      if (res.borrados >= HUERFANOS_BORRADO_TOPE) {
+        tope = true;
+        break;
+      }
+      // Google acaba de decir cuota/429: los demás borrados van a fallar
+      // igual y el reconcile de mañana los vuelve a ver.
+      if (this.pausadaHastaMs > ahoraMs) {
+        res.errores++;
+        this.logger.warn(
+          'paso inverso: Google respondió cuota/límite; el resto de los huérfanos se revisa en la próxima pasada.',
+        );
+        break;
+      }
+      if (await this.deleteEvent(ev.eventId)) {
+        res.borrados++;
+        this.logger.log(
+          `paso inverso: borrado ${ev.tipo} ${ev.entidadId} («${ev.summary ?? ''}») — ${
+            decision === 'borrar_duplicado'
+              ? 'duplicado: la fila apunta a otro evento'
+              : 'la fila ya no existe'
+          }.`,
+        );
+      } else {
+        res.errores++;
+      }
+    }
+    if (tope) {
+      res.errores++;
+      this.logger.error(
+        `ALERTA · paso inverso: se alcanzó el tope de ${HUERFANOS_BORRADO_TOPE} eventos borrados en una pasada y se detuvo. Revisar a mano antes de la próxima noche.`,
+      );
+    }
+    this.logger.log(
+      `paso inverso [${this.diaCancun(desdeIso)} → ${this.diaCancun(hastaIso)}]: ${nuestros.length} eventos del sistema, ${res.borrados} huérfanos borrados, ${noVerificables} sin verificar (intactos), ${recientes} recién creados (intactos), ${manuales} de la oficina (intactos).`,
+    );
+    return res;
+  }
+
+  /**
+   * Qué eventos de Google apunta HOY la BD para estas entidades. Devuelve:
+   * - `verificados`: ids cuya consulta SÍ respondió (lo que no está acá no se
+   *   borra: no saber ≠ no existir);
+   * - `vivos`: id de entidad → ids de evento que sus filas apuntan (en el
+   *   vuelo: ida + regreso + el de CADA tramo);
+   * - `errores`: lotes que no se pudieron leer.
+   */
+  private async verificarVivos(
+    tipo: TipoAnclaCalendar,
+    ids: string[],
+  ): Promise<{
+    verificados: Set<string>;
+    vivos: Map<string, Set<string>>;
+    errores: number;
+  }> {
+    const verificados = new Set<string>();
+    const vivos = new Map<string, Set<string>>();
+    let errores = 0;
+    // Un ancla que no es UUID no se puede consultar (y `in (...)` con basura
+    // reventaría el lote entero): queda fuera y `decidirHuerfano` la marca
+    // «no verificable» ⇒ el evento se conserva.
+    const utiles = ids.filter((id) => esUuidCalendar(id));
+    const TABLA: Record<Exclude<TipoAnclaCalendar, 'vuelo'>, string> = {
+      descanso: 'piloto_descanso',
+      evento: 'evento_flota',
+      mantenimiento: 'mantenimiento',
+    };
+    for (const lote of lotesDe(utiles)) {
+      try {
+        if (tipo === 'vuelo') {
+          const { data, error } = (await this.supabase.service
+            .from('vuelo')
+            .select('id, google_calendar_id, google_calendar_regreso_id')
+            .in('id', lote)) as {
+            data: Array<{
+              id: string;
+              google_calendar_id: string | null;
+              google_calendar_regreso_id: string | null;
+            }> | null;
+            error: { message: string } | null;
+          };
+          if (error) throw new Error(error.message);
+          for (const v of data ?? []) {
+            const set = new Set<string>();
+            if (v.google_calendar_id) set.add(v.google_calendar_id);
+            if (v.google_calendar_regreso_id)
+              set.add(v.google_calendar_regreso_id);
+            vivos.set(v.id, set);
+          }
+          // Los eventos POR TRAMO llevan el ancla del VUELO: sus ids viven en
+          // `escala.google_calendar_id` y son igual de legítimos.
+          //
+          // PAGINADO (revisión adversaria 12-sep-2026): esta es la única
+          // lectura del paso inverso que puede devolver MÁS de una fila por
+          // entidad (un lote de vuelos × sus tramos). PostgREST corta en
+          // `max-rows` = 1000 SIN avisar, y una fila que falta acá no es un
+          // hueco inocente: el evento de ese tramo dejaría de estar en
+          // `vivos` y se borraría como «duplicado fantasma» — BORRAR UN
+          // EVENTO VIVO, justo lo que este paso no puede hacer nunca.
+          const legs = await this.leerPaginado<{
+            vuelo_id: string;
+            google_calendar_id: string | null;
+          }>((desde, hasta) =>
+            this.supabase.service
+              .from('escala')
+              .select('vuelo_id, google_calendar_id')
+              .in('vuelo_id', lote)
+              .not('google_calendar_id', 'is', null)
+              .order('id', { ascending: true })
+              .range(desde, hasta),
+          );
+          if (legs.error) throw new Error(legs.error);
+          for (const l of legs.filas) {
+            if (!l.google_calendar_id) continue;
+            const set = vivos.get(l.vuelo_id);
+            // Sin fila de vuelo no hay a quién sumarle el tramo (no debería
+            // pasar: `escala.vuelo_id` es FK con CASCADE).
+            if (set) set.add(l.google_calendar_id);
+          }
+        } else {
+          const tabla = TABLA[tipo];
+          const { data, error } = (await this.supabase.service
+            .from(tabla)
+            .select('id, google_calendar_id')
+            .in('id', lote)) as {
+            data: Array<{
+              id: string;
+              google_calendar_id: string | null;
+            }> | null;
+            error: { message: string } | null;
+          };
+          if (error) throw new Error(error.message);
+          for (const f of data ?? []) {
+            vivos.set(
+              f.id,
+              new Set(f.google_calendar_id ? [f.google_calendar_id] : []),
+            );
+          }
+        }
+        for (const id of lote) verificados.add(id);
+      } catch (err) {
+        errores++;
+        this.logger.warn(
+          `paso inverso: no se pudo verificar un lote de ${tipo} (${err instanceof Error ? err.message : String(err)}): esos eventos NO se tocan.`,
+        );
+      }
+    }
+    return { verificados, vivos, errores };
   }
 
   /**
@@ -651,6 +1909,7 @@ export class CalendarSyncService implements OnModuleInit {
             await this.saveLegEventId(e.id, eventId);
         } catch (err) {
           ok = false;
+          this.notarFalloGoogle(err, `tramo ${e.orden} del vuelo ${vuelo.id}`);
           this.logger.error(
             `Tramo ${e.orden} del vuelo ${vuelo.id} no se sincronizó: ${
               err instanceof Error ? err.message : String(err)
@@ -713,13 +1972,31 @@ export class CalendarSyncService implements OnModuleInit {
    * Evento de día completo en el calendario compartido para un descanso de
    * piloto. Devuelve el eventId (para guardarlo en piloto_descanso). Best-effort.
    */
-  async upsertDescansoEvent(d: {
-    piloto_nombre: string;
-    fecha_inicio: string; // YYYY-MM-DD
-    fecha_fin: string; // YYYY-MM-DD (inclusivo)
-    motivo?: string | null;
-    google_calendar_id?: string | null;
-  }): Promise<string | null> {
+  async upsertDescansoEvent(
+    d: {
+      /**
+       * `piloto_descanso.id`. Sin él el evento sale SIN el ancla
+       * `vuelatour_descanso_id` y el paso inverso no puede reconocerlo como
+       * nuestro (lo trataría como un evento manual de la oficina y lo dejaría
+       * vivo para siempre). Opcional solo por compatibilidad: TODO llamador
+       * nuevo lo manda.
+       */
+      id?: string | null;
+      piloto_nombre: string;
+      fecha_inicio: string; // YYYY-MM-DD
+      fecha_fin: string; // YYYY-MM-DD (inclusivo)
+      motivo?: string | null;
+      google_calendar_id?: string | null;
+    },
+    opts?: OpcionesEspejo,
+  ): Promise<string | null> {
+    // Modo automático: el trigger de `piloto_descanso` ya encoló el descanso;
+    // el hook solo pide drenar. Se devuelve el id ACTUAL (ningún llamador
+    // escribe null encima, y así no se pierde el que ya estaba guardado).
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return d.google_calendar_id ?? null;
+    }
     if (!this.calendar) return d.google_calendar_id ?? null;
     // Google usa fin EXCLUSIVO en eventos de día completo: fin + 1 día.
     const fin = new Date(`${d.fecha_fin}T12:00:00Z`);
@@ -733,6 +2010,12 @@ export class CalendarSyncService implements OnModuleInit {
       start: { date: d.fecha_inicio },
       end: { date: fin.toISOString().slice(0, 10) },
       transparency: 'transparent',
+      // Ancla de idempotencia (12-sep-2026, D12): antes el descanso era el
+      // ÚNICO evento nuestro sin ancla, así que el paso inverso no podía
+      // distinguir uno huérfano de un evento manual de la oficina.
+      ...(d.id
+        ? { extendedProperties: { private: { [ANCLA_DESCANSO]: d.id } } }
+        : {}),
     };
     try {
       return await this.upsertRaw(
@@ -744,6 +2027,7 @@ export class CalendarSyncService implements OnModuleInit {
       // `null` = FALLÓ (12-sep-2026): antes devolvía el id guardado y el
       // barrido lo contaba como éxito. Ningún llamador escribe null encima
       // (pilots.service y el barrido solo persisten con id truthy).
+      this.notarFalloGoogle(err, 'descanso');
       this.logger.warn(
         `No se pudo sincronizar el descanso a Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -751,8 +2035,152 @@ export class CalendarSyncService implements OnModuleInit {
     }
   }
 
+  /**
+   * Espejo de UN descanso POR ID (worker de la cola, D2): carga la fila, la
+   * sube y persiste el id si Google devolvió otro. Una fila borrada ⇒ `true`
+   * (no hay nada que hacer; su evento lo mata el item `borrar_evento` que el
+   * trigger encoló con el id de OLD).
+   */
+  async syncDescanso(
+    descansoId: string,
+    opts?: OpcionesEspejo,
+  ): Promise<boolean> {
+    if (!this.enabled || !this.calendar) return true;
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return true;
+    }
+    try {
+      const { data, error } = (await this.supabase.service
+        .from('piloto_descanso')
+        .select(
+          'id, fecha_inicio, fecha_fin, motivo, google_calendar_id, piloto:usuario!piloto_id(nombre)',
+        )
+        .eq('id', descansoId)
+        .maybeSingle()) as {
+        data: {
+          id: string;
+          fecha_inicio: string;
+          fecha_fin: string;
+          motivo: string | null;
+          google_calendar_id: string | null;
+          piloto: { nombre: string } | { nombre: string }[] | null;
+        } | null;
+        error: { message: string } | null;
+      };
+      if (error) throw new Error(error.message);
+      if (!data) return true;
+
+      const eventId = await this.upsertDescansoEvent(
+        {
+          id: data.id,
+          piloto_nombre: unwrap(data.piloto)?.nombre ?? 'Piloto',
+          fecha_inicio: data.fecha_inicio,
+          fecha_fin: data.fecha_fin,
+          motivo: data.motivo,
+          google_calendar_id: data.google_calendar_id,
+        },
+        { directo: true },
+      );
+      if (!eventId) return false;
+      if (eventId !== data.google_calendar_id) {
+        const { error: errId } = await this.supabase.service
+          .from('piloto_descanso')
+          .update({ google_calendar_id: eventId })
+          .eq('id', data.id);
+        if (errId) throw new Error(errId.message);
+      }
+      return true;
+    } catch (err) {
+      this.notarFalloGoogle(err, `descanso ${descansoId}`);
+      this.logger.error(
+        `syncDescanso(${descansoId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Espejo de UN evento de flota POR ID (worker de la cola, D2). Fila
+   * borrada ⇒ `true` (su evento lo mata el item `borrar_evento`).
+   */
+  async syncEvento(eventoId: string, opts?: OpcionesEspejo): Promise<boolean> {
+    if (!this.enabled || !this.calendar) return true;
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return true;
+    }
+    try {
+      const { data, error } = (await this.supabase.service
+        .from('evento_flota')
+        .select(
+          'id, titulo, fecha, fecha_fin, notas, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario), responsable:usuario!responsable_id(nombre)',
+        )
+        .eq('id', eventoId)
+        .maybeSingle()) as {
+        data: {
+          id: string;
+          titulo: string | null;
+          fecha: string;
+          fecha_fin: string | null;
+          notas: string | null;
+          google_calendar_id: string | null;
+          aeronave: AeronaveRef | AeronaveRef[] | null;
+          responsable: { nombre: string } | { nombre: string }[] | null;
+        } | null;
+        error: { message: string } | null;
+      };
+      if (error) throw new Error(error.message);
+      if (!data) return true;
+
+      // `upsertEventoFlotaEvent` persiste el id por su cuenta (contrato de la
+      // migración 20260829: esa columna solo la escribe calendar-sync).
+      const eventId = await this.upsertEventoFlotaEvent(
+        {
+          id: data.id,
+          titulo: data.titulo ?? 'Evento',
+          fecha: data.fecha,
+          fecha_fin: data.fecha_fin,
+          aeronave_matricula: unwrap(data.aeronave)?.matricula ?? null,
+          aeronave_color: unwrap(data.aeronave)?.color_calendario ?? null,
+          responsable_nombre: unwrap(data.responsable)?.nombre ?? null,
+          notas: data.notas,
+          google_calendar_id: data.google_calendar_id,
+        },
+        { directo: true },
+      );
+      return eventId != null;
+    } catch (err) {
+      this.notarFalloGoogle(err, `evento ${eventoId}`);
+      this.logger.error(
+        `syncEvento(${eventoId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
   /** Borra el evento de un descanso del calendario compartido. Best-effort. */
   async removeDescansoEvent(eventId: string | null | undefined): Promise<void> {
+    if (eventId) await this.deleteEvent(eventId);
+  }
+
+  /**
+   * Borra el evento de Google de UN TRAMO que está por desaparecer de la BD
+   * (revisión adversaria 12-sep-2026, huérfanos §4 de la auditoría).
+   *
+   * Se llama ANTES del `.delete()` de la escala: después, `syncFlight` ya no
+   * ve ese tramo ni su `google_calendar_id` y el evento se queda VIVO en el
+   * calendario de la oficina sin fila que lo apunte — un fantasma que nadie
+   * puede borrar. Lo usan `flights.deleteEscala` y
+   * `quotes.replaceEscalas` (tramos sobrantes al re-cotizar, el huérfano más
+   * frecuente en operación normal).
+   *
+   * Con la COLA activa esto es un cinturón: el trigger del DELETE encola
+   * `borrar_evento` con el id de OLD y el worker lo reintenta si aquí falla.
+   * Sin cola es la ÚNICA limpieza posible, y por eso no espera a la
+   * migración. Best-effort: nunca lanza.
+   */
+  async removeEscalaEvent(eventId: string | null | undefined): Promise<void> {
     if (eventId) await this.deleteEvent(eventId);
   }
 
@@ -763,19 +2191,27 @@ export class CalendarSyncService implements OnModuleInit {
    * `evento_flota.google_calendar_id` (contrato de la migración 20260829:
    * esa columna solo la escribe calendar-sync). Best-effort.
    */
-  async upsertEventoFlotaEvent(ev: {
-    id: string;
-    titulo: string;
-    fecha: string; // ISO timestamptz (inicio)
-    fecha_fin?: string | null; // ISO timestamptz (fin INCLUSIVO); null = un día
-    aeronave_matricula?: string | null;
-    /** `aeronave.color_calendario` del avión del evento (si tiene). */
-    aeronave_color?: string | null;
-    responsable_nombre?: string | null;
-    notas?: string | null;
-    google_calendar_id?: string | null;
-  }): Promise<string | null> {
+  async upsertEventoFlotaEvent(
+    ev: {
+      id: string;
+      titulo: string;
+      fecha: string; // ISO timestamptz (inicio)
+      fecha_fin?: string | null; // ISO timestamptz (fin INCLUSIVO); null = un día
+      aeronave_matricula?: string | null;
+      /** `aeronave.color_calendario` del avión del evento (si tiene). */
+      aeronave_color?: string | null;
+      responsable_nombre?: string | null;
+      notas?: string | null;
+      google_calendar_id?: string | null;
+    },
+    opts?: OpcionesEspejo,
+  ): Promise<string | null> {
     if (!this.enabled || !this.calendar) return ev.google_calendar_id ?? null;
+    // Modo automático: el trigger de `evento_flota` ya encoló el evento.
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return ev.google_calendar_id ?? null;
+    }
     try {
       // Día operativo en Cancún (mismo criterio que el calendario interno).
       const iniDia = this.diaCancun(ev.fecha);
@@ -805,7 +2241,7 @@ export class CalendarSyncService implements OnModuleInit {
         end: { date: fin.toISOString().slice(0, 10) },
         transparency: 'transparent',
         // Ancla de idempotencia — reconoce nuestros propios eventos.
-        extendedProperties: { private: { vuelatour_evento_id: ev.id } },
+        extendedProperties: { private: { [ANCLA_EVENTO]: ev.id } },
       };
       const eventId = await this.upsertRaw(
         event,
@@ -819,6 +2255,7 @@ export class CalendarSyncService implements OnModuleInit {
     } catch (err) {
       // `null` = FALLÓ (mismo criterio que el descanso): el barrido lo cuenta
       // en `errores` y el id guardado se conserva (aquí no se escribe).
+      this.notarFalloGoogle(err, `evento de flota ${ev.id}`);
       this.logger.warn(
         `No se pudo sincronizar el evento de flota ${ev.id} a Google Calendar: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -851,7 +2288,23 @@ export class CalendarSyncService implements OnModuleInit {
    * hooks `void this.calendarSync.syncMantenimiento(id)` lo ignoran y jamás
    * ven un error (best-effort, nunca bloquea al mecánico ni a la oficina).
    */
-  async syncMantenimiento(mantenimientoId: string): Promise<boolean> {
+  async syncMantenimiento(
+    mantenimientoId: string,
+    opts?: OpcionesEspejo,
+  ): Promise<boolean> {
+    if (!this.enabled || !this.calendar) return true;
+    // Modo automático: el trigger de `mantenimiento` ya encoló el cambio.
+    if (await this.delegarEnCola(opts)) {
+      this.drenarPronto();
+      return true;
+    }
+    return this.syncMantenimientoAhora(mantenimientoId);
+  }
+
+  /** Escritura DIRECTA a Google de un mantenimiento (worker y barrido). */
+  private async syncMantenimientoAhora(
+    mantenimientoId: string,
+  ): Promise<boolean> {
     if (!this.enabled || !this.calendar) return true;
     try {
       const { data, error } = await this.supabase.service
@@ -888,6 +2341,7 @@ export class CalendarSyncService implements OnModuleInit {
       }
       return true;
     } catch (err) {
+      this.notarFalloGoogle(err, `mantenimiento ${mantenimientoId}`);
       this.logger.error(
         `syncMantenimiento(${mantenimientoId}) failed: ${
           err instanceof Error ? err.message : String(err)
@@ -942,7 +2396,7 @@ export class CalendarSyncService implements OnModuleInit {
       end: { date: fin.toISOString().slice(0, 10) },
       transparency: 'transparent',
       // Ancla de idempotencia — reconoce nuestros propios eventos.
-      extendedProperties: { private: { vuelatour_mantenimiento_id: m.id } },
+      extendedProperties: { private: { [ANCLA_MANTENIMIENTO]: m.id } },
     };
   }
 
@@ -982,6 +2436,7 @@ export class CalendarSyncService implements OnModuleInit {
     } catch (err) {
       // Ya no existía: el objetivo (que no esté) se cumple igual.
       if (eventoAusenteEnGoogle(err)) return true;
+      this.notarFalloGoogle(err, `borrar evento ${eventId}`);
       this.logger.warn(
         `Delete failed for event ${eventId}: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -1037,6 +2492,7 @@ export class CalendarSyncService implements OnModuleInit {
       }
     } catch (err) {
       ok = false;
+      this.notarFalloGoogle(err, `borrar eventos del vuelo ${vueloId}`);
       this.logger.error(
         `removeFlight(${vueloId}) failed: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -1129,7 +2585,7 @@ export class CalendarSyncService implements OnModuleInit {
       end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
       // Idempotency anchor — lets us recognize our own events.
       extendedProperties: {
-        private: { vuelatour_vuelo_id: v.id, vuelatour_tramo: tramo },
+        private: { [ANCLA_VUELO]: v.id, vuelatour_tramo: tramo },
       },
     };
   }
@@ -1195,7 +2651,7 @@ export class CalendarSyncService implements OnModuleInit {
       end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
       extendedProperties: {
         private: {
-          vuelatour_vuelo_id: v.id,
+          [ANCLA_VUELO]: v.id,
           vuelatour_tramo: `leg-${e.orden}`,
         },
       },

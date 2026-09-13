@@ -315,8 +315,17 @@ export class AirportsService {
    * - Los tramos CANCELADOS no cuentan (no se van a volar).
    * - Best-effort: si algo falla, se registra y NO se rompe la operación —
    *   el aviso es importante, pero no puede impedir guardar un vuelo.
+   *
+   * Devuelve `true` si ESCRIBIÓ algo (revisión adversaria 12-sep-2026): el
+   * `estado_permiso` cambia el TÍTULO («⚠ permiso pendiente») y el COLOR
+   * (ámbar) del evento de Google, así que quien lo llame FUERA de un camino
+   * que ya espeja —el cron diario de `alerts` y `POST /alerts/run`, que barren
+   * hasta +90 días— tiene que disparar el espejo. Era el hueco H1 de la
+   * auditoría: escrituras diarias a las 08:00 Cancún que la reconciliación de
+   * las 00:15 no alcanzaba (y ni siquiera cubría, por ventana).
    */
-  async refreshPermisosDeVuelo(vueloId: string): Promise<void> {
+  async refreshPermisosDeVuelo(vueloId: string): Promise<boolean> {
+    let escribio = false;
     try {
       const [vueloRes, escalasRes] = await Promise.all([
         this.supabase.service
@@ -334,7 +343,7 @@ export class AirportsService {
         destino_iata: string | null;
         estado_permiso: string | null;
       } | null;
-      if (!vuelo) return;
+      if (!vuelo) return false;
       const escalas = (escalasRes.data ?? []) as Array<{
         id: string;
         origen_iata: string;
@@ -368,10 +377,11 @@ export class AirportsService {
         );
         estadosTramos.push(nuevo);
         if (nuevo !== (e.estado_permiso ?? 'no_aplica')) {
-          await this.supabase.service
+          const { error } = await this.supabase.service
             .from('escala')
             .update({ estado_permiso: nuevo })
             .eq('id', e.id);
+          if (!error) escribio = true;
         }
       }
 
@@ -388,10 +398,11 @@ export class AirportsService {
             vuelo.estado_permiso,
           );
       if (vueloNuevo !== (vuelo.estado_permiso ?? 'no_aplica')) {
-        await this.supabase.service
+        const { error } = await this.supabase.service
           .from('vuelo')
           .update({ estado_permiso: vueloNuevo })
           .eq('id', vueloId);
+        if (!error) escribio = true;
       }
     } catch (err) {
       this.logger.warn(
@@ -400,6 +411,7 @@ export class AirportsService {
         }`,
       );
     }
+    return escribio;
   }
 
   /**

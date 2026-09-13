@@ -356,6 +356,24 @@ describe('parsearServiceAccountJson (variable pegada con tolerancia)', () => {
     );
   });
 
+  it('el motivo del JSON roto NO hace eco del valor (la llave privada va ahí)', () => {
+    // V8 cita un trozo de la entrada («Unexpected token 'x', "x{\"priv"… is
+    // not valid JSON») y ese mensaje viaja en `motivo` de
+    // GET /v1/calendar/sync-estado y en el chip del panel.
+    let msg = '';
+    try {
+      parsearServiceAccountJson(
+        'x{"private_key":"-----BEGIN PRIVATE KEY-----"}',
+      );
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toMatch(/no es un JSON válido/);
+    expect(msg).not.toContain('private_key');
+    expect(msg).not.toContain('BEGIN PRIVATE KEY');
+    expect(msg).toContain('«…»');
+  });
+
   it('rechaza sin secretos: JSON roto y JSON sin llaves', () => {
     expect(() => parsearServiceAccountJson('"{"type":"x"')).toThrow(
       /no es un JSON válido/,

@@ -9,6 +9,11 @@ jest.mock('google-auth-library', () => ({
     constructor(public readonly opts: unknown) {}
   },
 }));
+// `notifications` (aviso a ADMIN de la cola) arrastra el gateway y `jose`
+// (ESM puro que jest no transforma): mismo patrón que expenses.service.spec.
+jest.mock('../realtime/notifications.service', () => ({
+  NotificationsService: class {},
+}));
 
 import { Logger } from '@nestjs/common';
 import { CalendarSyncService } from './calendar-sync.service';
@@ -86,6 +91,8 @@ function armarSupabase(tablas: Record<string, Resultado[]>) {
       'lte',
       'order',
       'limit',
+      // El barrido lee PAGINADO (max-rows 1000 de PostgREST).
+      'range',
       'insert',
       'update',
       'delete',
@@ -783,6 +790,9 @@ describe('CalendarSyncService.resyncTodo (C2) y estadoSync (C5)', () => {
       eventos: 1,
       mantenimientos: 3,
       errores: 0,
+      // D12: el paso inverso (borrar huérfanos) es SOLO del reconcile
+      // nocturno; en el backfill manual siempre es 0.
+      huerfanos_borrados: 0,
       desde: '2026-08-01',
       hasta: '2027-09-12',
     });
@@ -917,7 +927,8 @@ describe('CalendarSyncService.reconcileVentana', () => {
 
     await service.reconcileVentana();
 
-    expect(syncMant).toHaveBeenCalledWith('m-1');
+    // El barrido escribe DIRECTO a Google (red de seguridad): no encola.
+    expect(syncMant).toHaveBeenCalledWith('m-1', { directo: true });
     expect(de(llamadas, 'mantenimiento', 'select')).toHaveLength(1);
     const estado = service.estadoSync();
     expect(estado.ultimo_reconcile_at).not.toBeNull();
@@ -1084,7 +1095,9 @@ describe('CalendarSyncService.resyncTodo — cancelados y parámetros', () => {
 
     // El cancelado SÍ pasa por syncFlight (que hace removeFlight): si no, un
     // borrado que falló cuando Google estaba caído se quedaba de fantasma.
-    expect(syncFlight).toHaveBeenCalledWith('v-cancelado');
+    expect(syncFlight).toHaveBeenCalledWith('v-cancelado', {
+      directo: true,
+    });
     // La consulta ya NO excluye los cancelados.
     expect(
       de(llamadas, 'vuelo', 'neq').filter((l) => l.args[0] === 'estado'),

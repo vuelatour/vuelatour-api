@@ -17,6 +17,7 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     combinado_con_id: 'v-otro',
     pago_anticipado_req: false,
     google_calendar_id: 'gcal',
+    google_calendar_regreso_id: 'gcal-regreso',
     foto_plan_vuelo_url: 'x.pdf',
     created_at: '2026-09-01T00:00:00Z',
     updated_at: '2026-09-02T00:00:00Z',
@@ -54,6 +55,17 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     for (const k of ['grupo_id', 'grupo_posicion', 'grupo_pax']) {
       expect(CAMPOS_NO_CLONABLES).not.toContain(k);
     }
+  });
+
+  it('NO clona NINGÚN id de evento de Google (ida y regreso): el clon no puede compartir el evento del original', () => {
+    const c = payloadClonVuelo(original, {
+      aeronaveId: 'av-nueva',
+      userId: 'u-1',
+      matricula: 'N4142R',
+    });
+    expect(c).not.toHaveProperty('google_calendar_id');
+    expect(c).not.toHaveProperty('google_calendar_regreso_id');
+    expect(CAMPOS_NO_CLONABLES).toContain('google_calendar_regreso_id');
   });
 
   it('no clona la llave de idempotencia del alta (uq_vuelo_client_request reventaría el INSERT)', () => {

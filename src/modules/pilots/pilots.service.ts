@@ -795,6 +795,10 @@ export class PilotsService {
           .eq('id', pilotoId)
           .maybeSingle();
         const eventId = await this.calendarSync.upsertDescansoEvent({
+          // El id viaja para que el evento lleve el ancla
+          // `vuelatour_descanso_id` (D12): sin ella, el paso inverso del
+          // reconcile no puede reconocerlo como nuestro.
+          id: data!.id as string,
           piloto_nombre: (piloto?.nombre as string | undefined) ?? 'Piloto',
           fecha_inicio: inicio,
           fecha_fin: fin,

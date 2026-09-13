@@ -6838,7 +6838,10 @@ export class FlightsService {
     const { data: prev, error: prevErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, updated_at, vuelo:vuelo_id(estado)',
+        // `pasajeros`/`es_ferry` viajan para poder comparar lo que Google
+        // PINTA del tramo (hueco H3): sin ellos no se sabe si el evento
+        // cambió y el espejo se saltaba.
+        'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, pasajeros, es_ferry, updated_at, vuelo:vuelo_id(estado)',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -6934,6 +6937,20 @@ export class FlightsService {
       if (ifUpdatedAt) await this.conflictoDeTramo(escalaId, ifUpdatedAt);
       throw escalaNoExiste(escalaId);
     }
+    // CAMPOS QUE GOOGLE PINTA del tramo (hueco H3, revisión adversaria
+    // 12-sep-2026): `buildLegEvent` arma el título «T{orden} [Ferry ·]
+    // matrícula · ORI-DES · piloto · {pax} pax», así que `orden`, `pasajeros`
+    // y `es_ferry` SALEN en el evento — y el espejo solo se disparaba al
+    // cambiar la RUTA o la FECHA. Este PATCH es el que usa el editor único de
+    // la app (que manda TODO el DTO explícito, también desde su outbox al
+    // reconectar): editar los pasajeros de un tramo dejaba el evento de
+    // Google mintiendo hasta la reconciliación de la madrugada.
+    const pintadoCambia =
+      (dto.orden !== undefined && Number(dto.orden) !== Number(prev.orden)) ||
+      (dto.pasajeros !== undefined &&
+        Number(data.pasajeros ?? 0) !== Number(prev.pasajeros ?? 0)) ||
+      (dto.es_ferry !== undefined &&
+        Boolean(data.es_ferry) !== Boolean(prev.es_ferry));
     // Cambió la ruta del tramo: puede entrar (o salir) una pista con permiso.
     const rutaCambia =
       (dto.origen_iata !== undefined &&
@@ -6955,6 +6972,10 @@ export class FlightsService {
       } catch {
         /* best-effort */
       }
+      void this.calendar.syncFlight(data.vuelo_id as string);
+    } else if (pintadoCambia) {
+      // Sin cambio de ruta pero con un campo pintado distinto: el evento se
+      // actualiza igual (la ruta ya lo hizo arriba; no se espeja dos veces).
       void this.calendar.syncFlight(data.vuelo_id as string);
     }
     // Espejo inverso: la salida plan del TRAMO 1 es la fecha del vuelo. Pasa
@@ -10400,7 +10421,7 @@ export class FlightsService {
     const { data: row, error: readErr } = await this.supabase.service
       .from('escala')
       .select(
-        'id, vuelo_id, piloto_id, origen_iata, destino_iata, taco_salida, taco_llegada',
+        'id, vuelo_id, piloto_id, origen_iata, destino_iata, taco_salida, taco_llegada, google_calendar_id',
       )
       .eq('id', escalaId)
       .maybeSingle();
@@ -10419,6 +10440,14 @@ export class FlightsService {
         },
       });
     }
+    // El evento de Google del TRAMO se borra ANTES de perder su id (revisión
+    // adversaria 12-sep-2026): una vez borrada la fila, `syncFlight` ya no ve
+    // ese tramo ni su `google_calendar_id` y el evento se quedaba VIVO en el
+    // calendario de la oficina sin nadie que lo apuntara. Con la cola activa
+    // el trigger del DELETE lo reintenta; sin cola esta es la única limpieza.
+    await this.calendar.removeEscalaEvent(
+      row.google_calendar_id as string | null,
+    );
     const { error } = await this.supabase.service
       .from('escala')
       .delete()
@@ -10427,7 +10456,10 @@ export class FlightsService {
     // Auditoría 26-ago: borrar un tramo era MUDO — ni la tripulación ni el
     // piloto del tramo se enteraban, el calendario quedaba obsoleto y las
     // alertas de permiso no se re-derivaban. Mismo epílogo que cancelEscala.
-    void this.calendar.syncFlight(row.vuelo_id as string);
+    // ORDEN (12-sep-2026): PRIMERO se re-deriva el permiso y DESPUÉS se
+    // espeja. Al revés, el cambio de `estado_permiso` que provoca el borrado
+    // (⚠ en el título y el ámbar del evento) no llegaba a Google hasta la
+    // reconciliación de la madrugada.
     try {
       await this.airports.refreshPermisosDeVuelo(row.vuelo_id as string);
     } catch (err) {
@@ -10435,6 +10467,7 @@ export class FlightsService {
         `refreshPermisosDeVuelo tras deleteEscala falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    void this.calendar.syncFlight(row.vuelo_id as string);
     void this.notifyTramoCancelado(row, 'oficina lo quitó del itinerario', {
       titulo: 'Tramo eliminado',
       accion: 'se eliminó',

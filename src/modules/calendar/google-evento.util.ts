@@ -247,6 +247,26 @@ export interface CredencialesServiceAccount {
 }
 
 /**
+ * Motivo de un `JSON.parse` fallido SIN eco del valor (revisión adversaria
+ * 12-sep-2026). V8 cita un trozo de la ENTRADA en algunos mensajes
+ * (`Unexpected token 'x', "x{\"priva"... is not valid JSON`) y esa entrada es
+ * el JSON de la service account —con su llave PRIVADA—. Este mensaje termina
+ * en `motivoInactivo` y viaja en `GET /v1/calendar/sync-estado`, que leen
+ * ADMIN/COORDINADOR/ANALISTA/FACTURACION/SOCIO y que el panel pinta VERBATIM
+ * en su chip. Se conserva la POSICIÓN del error (es lo útil para arreglarlo y
+ * no es secreta) y se borra cualquier fragmento entrecomillado.
+ */
+function motivoJsonSinValor(err: unknown): string {
+  const bruto = err instanceof Error ? err.message : String(err);
+  return bruto
+    .replace(/"(?:[^"\\]|\\.)*"/g, '«…»')
+    .replace(/'(?:[^'\\]|\\.)*'/g, '«…»')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 160);
+}
+
+/**
  * Lee `GOOGLE_SERVICE_ACCOUNT_JSON` con tolerancia a cómo suele quedar pegada
  * en un panel de variables (incidente Railway 12-sep-2026: el valor quedó
  * entre comillas dobles y `JSON.parse` falló con «Unexpected non-whitespace
@@ -281,7 +301,7 @@ export function parsearServiceAccountJson(
     obj = JSON.parse(texto);
   } catch (err) {
     throw new Error(
-      `GOOGLE_SERVICE_ACCOUNT_JSON no es un JSON válido (${err instanceof Error ? err.message : String(err)}). Debe ser el contenido del archivo de la service account en UNA línea, sin comillas alrededor.`,
+      `GOOGLE_SERVICE_ACCOUNT_JSON no es un JSON válido (${motivoJsonSinValor(err)}). Debe ser el contenido del archivo de la service account en UNA línea, sin comillas alrededor.`,
     );
   }
   const o = (obj ?? {}) as Record<string, unknown>;

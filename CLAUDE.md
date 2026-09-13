@@ -725,12 +725,245 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   **mantenimientos**. Se prende con las 3 variables de Railway
   (`GOOGLE_CALENDAR_SYNC_ENABLED`, `GOOGLE_CALENDAR_ID`,
   `GOOGLE_SERVICE_ACCOUNT_JSON`); sin ellas queda inactiva y
-  `GET /v1/calendar/sync-estado` responde `enabled:false`.
+  `GET /v1/calendar/sync-estado` responde `enabled:false`. Desde el
+  12-sep-2026 el espejo es **AUTOMÁTICO por cola en BD** (ver el bullet
+  «AUTOMÁTICA POR COLA»): ya no depende de que un hook alcance a Google.
+  - **HUECOS H1–H5 CERRADOS TAMBIÉN EN CÓDIGO** (revisión adversaria
+    12-sep-2026): con la cola activa los triggers ya los cubren, pero estos
+    arreglos valen **aunque la migración no esté aplicada** y bajan la latencia
+    cuando sí lo está:
+    - `clon-vuelo.util.ts` excluye `google_calendar_regreso_id` de
+      `CAMPOS_NO_CLONABLES`: el clon de `reassignAircraft` nacía apuntando al
+      MISMO evento de regreso que el original, los dos espejos lo escribían y
+      el `removeFlight` del original (cancelado) lo BORRABA.
+    - `flights.deleteEscala` y `quotes.replaceEscalas` borran el evento del
+      tramo (`calendarSync.removeEscalaEvent`) **ANTES** del `.delete()`:
+      después ya no hay `google_calendar_id` que leer y el evento se quedaba
+      vivo sin fila que lo apuntara. `replaceEscalas` (re-cotizar con menos
+      tramos) era el huérfano más frecuente de la operación normal.
+    - `deleteEscala` corre `refreshPermisosDeVuelo` **ANTES** de `syncFlight`
+      (al revés, el `⚠ permiso pendiente` del título no llegaba a Google).
+    - `airports.refreshPermisosDeVuelo` devuelve **`boolean`** («escribí algo»)
+      y `alerts.refrescarPermisosProximos` espeja solo cuando escribió (H1:
+      `estado_permiso` hasta +90 d, escrito a las 08:00 Cancún, 16 h después
+      del reconcile y fuera de su ventana). `alerts.sincronizarEspejoIda`
+      espeja tras mover `vuelo.aeronave_id` (H2: matrícula y color del evento).
+    - `flights.updateEscala` espeja cuando cambia CUALQUIER campo pintado
+      (H3: `orden`, `pasajeros`, `es_ferry` salen en el título del tramo), no
+      solo la ruta o la fecha — es el `PATCH /flights/legs/:id` del editor
+      único de la app, que manda el DTO completo también desde su outbox.
+      Reenviar los MISMOS valores NO espeja (el DTO completo no es un cambio).
+    - Sigue ABIERTO sin la cola (solo los triggers lo cubren): el **fan-out
+      H4** de `aeronave.matricula`/`color_calendario`, `usuario.nombre` y
+      `cliente.nombre` (una fila ⇒ N eventos) y H6 (`groups.confirm`).
   - **Best-effort SIEMPRE**: todo hook es `void` (nunca `await` bloqueante) y
     ningún fallo de Google llega al cliente. `syncFlight`/`syncMantenimiento`
     se tragan sus errores y devuelven `boolean` SOLO para los conteos.
     `EngineeringService.espejoGoogle` añade `.catch` porque una promesa
     rechazada tumbaría el proceso (unhandled rejection en Node).
+  - **AUTOMÁTICA POR COLA — «que NUNCA falle» (pedido del cliente,
+    12-sep-2026)**: la fuente de verdad de que un cambio llegue a Google es
+    la **cola persistente `calendar_sync_cola`** (migración
+    `20260912000002_calendar_sync_cola.sql`), alimentada por **TRIGGERS** en
+    `vuelo`, `escala`, `piloto_descanso`, `evento_flota`, `mantenimiento` +
+    fan-out de `aeronave (matricula, color_calendario)`, `usuario (nombre)` y
+    `cliente (nombre)`. Un trigger no se puede olvidar: encola venga el
+    cambio del panel, de la app ONLINE, de su **outbox al reconectar** (entra
+    por los mismos endpoints), de un cron del API o de un UPDATE a mano en la
+    BD — y en `DELETE` captura los ids de Google de **OLD** (`borrar_evento`),
+    que es la única forma de matar un evento huérfano (cubre
+    `replaceEscalas`, `deleteEscala`, los `ON DELETE CASCADE` y los borrados
+    por SQL).
+    - **El worker es el ÚNICO que habla con Google** cuando la cola está
+      activa: `@Cron('*/20 * * * * *')` `drenarCola` (single-flight) toma
+      hasta 50 items listos, los RECLAMA con `tomado_at` (sello propio) y los
+      procesa SECUENCIAL: `vuelo → syncFlight`, `descanso → syncDescanso`,
+      `evento → syncEvento`, `mantenimiento → syncMantenimiento`,
+      `borrar_evento → deleteEvent`. Fila inexistente ⇒ **hecho** (el item se
+      borra). Éxito ⇒ `delete` del item exigiendo el MISMO `tomado_at` (si un
+      trigger lo re-encoló mientras se procesaba, el borrado no aplica y el
+      cambio nuevo se vuelve a procesar: **nada se pierde por una carrera**).
+      Fallo ⇒ `intentos+1`, `siguiente_intento_at = now() + min(30 s ·
+      2^intentos, 1 h)` y `ultimo_error` (pasado por `sanitizarError`: sin
+      `key=`, sin llaves PEM). **Un 403 de cuota / 429 PAUSA el drenado
+      completo 5 min** (en memoria) sin quemar intentos de los demás.
+    - **Los ~30 hooks NO se tocaron uno por uno**: con la cola activa,
+      `syncFlight` / `syncMantenimiento` / `upsertDescansoEvent` /
+      `upsertEventoFlotaEvent` solo hacen «**drenar pronto**» (debounce 2 s,
+      single-flight) y devuelven el id que ya estaba — el trigger encoló el
+      cambio antes de que el hook corriera. `{ directo: true }`
+      (`OpcionesEspejo`) = lo pide el WORKER o el barrido: escribe a Google
+      ahora. Sin cola activa, TODO se comporta como antes (hooks directos).
+      `removeFlight` sigue directo a propósito (corre ANTES de borrar las
+      filas); si falla, el trigger del DELETE encola `borrar_evento` con los
+      ids de OLD y el worker lo reintenta.
+    - **TOLERANTE A LA MIGRACIÓN NO APLICADA** (invariante 12/13,
+      `calendar-sync-cola.util.ts#ColaSondaCalendar`): sonda
+      `calendar_sync_cola_activa()` 1 vez, `true` memorizado, `false`/error
+      re-sondeado cada ≤ 10 min. **Aplicar la migración ENCIENDE el modo
+      automático sin redeploy**; el deploy del API y la migración van en
+      cualquier orden. Ante cualquier duda la sonda dice `false` = el
+      comportamiento de hoy (asumir una cola que no existe dejaría los
+      cambios sin subir).
+    - **La sync APAGADA no drena ni quema intentos**: la cola espera (prender
+      las 3 variables sube todo lo acumulado). El único crecimiento posible
+      es 1 fila por entidad (índices únicos parciales `(entidad, entidad_id)`
+      y `(google_event_id) where entidad='borrar_evento'`: una ráfaga de 20
+      ediciones del mismo vuelo se COLAPSA en un item).
+    - **ANTI-LOOP (crítico)**: el trigger ignora los UPDATE cuyo único cambio
+      son `google_calendar_id` / `google_calendar_regreso_id` / `updated_at`
+      (compara `to_jsonb(OLD)` vs `to_jsonb(NEW)` con esas llaves fuera), y en
+      `vuelo`/`escala` el trigger es `AFTER UPDATE OF <columnas que Google
+      pinta>` — una captura de tacómetro no encola nada. Sin esto, el
+      write-back del id se re-encolaría para siempre.
+    - **EL ID DE GOOGLE YA NO MUEVE `updated_at`**: la misma migración
+      redefine `public.tg_set_updated_at()` para conservar el sello cuando lo
+      único que cambió son los ids de Google. Antes cada `saveEventId` movía
+      `updated_at` sin cambio de negocio ⇒ deltas falsos en
+      `?updated_since` y **409 `CONFLICTO_VERSION` espurios** contra el
+      `if_updated_at` de la app offline (invariante 13). Los `save*EventId`
+      mandan SOLO la columna del id, **y solo cuando el id CAMBIÓ** (revisión
+      adversaria 12-sep-2026: los de ida/regreso lo escribían en CADA
+      sincronización con el mismo valor, un UPDATE sin cambio de negocio que
+      movía el sello y una escritura de más por pasada): no agregar más campos
+      a esos updates ni quitar la guarda `id !== id guardado`. La excepción exige **DOS** condiciones
+      (revisión adversaria 12-sep-2026) y no una: que **cambie de verdad** un
+      `google_calendar_id`/`google_calendar_regreso_id` **y** que el resto de
+      la fila sea idéntico. Esa función la comparten **37 triggers en 23
+      tablas** (gasto, cobro_vuelo, inventario_movimiento, aeronave…): sin la
+      primera condición, un UPDATE que no cambia NADA dejaría de sellar
+      `updated_at` en TODAS ellas — un cambio de semántica que nadie pidió. En
+      las tablas sin columnas `google_calendar_*` la excepción NUNCA aplica y
+      el comportamiento es byte a byte el de hoy.
+    - **EL BARRIDO Y EL WORKER NO ESCRIBEN A LA VEZ** (revisión adversaria
+      12-sep-2026): los dos escriben DIRECTO a Google, así que si coincidieran
+      en un vuelo SIN `google_calendar_id` los dos harían `events.insert` y
+      Google se quedaría con un evento DUPLICADO cuyo id no vive en ninguna
+      fila (fantasma imborrable: el barrido solo mira filas vivas).
+      `sincronizarVentana` toma la bandera `barriendo` —en `finally`, o la cola
+      no volvería a drenar nunca—, espera a que termine el drenado en curso
+      (máx. ~15 s) y el worker se abstiene mientras dure. **Entre RÉPLICAS
+      lo resuelve el candado en BD (D12, ver el bullet «RED DE SEGURIDAD»)**:
+      el barrido toma `calendar_sync_lock(912001)` y el worker
+      `calendar_sync_lock(912002)`. Railway corre **1 réplica hoy**. Riesgo
+      residual con 2+ réplicas: son claves DISTINTAS, así que el barrido de
+      una réplica y el worker de OTRA todavía podrían insertar el mismo evento
+      (la exclusión barrido↔worker sigue siendo la bandera de memoria, que es
+      intra-proceso). Se eligieron dos claves para que un barrido muerto —TTL
+      de 2 h— no congele el drenado; si algún día se escala a 2 réplicas, la
+      decisión a revisar es usar UNA sola clave para los dos.
+    - **AVISO a ADMIN** (`alerta_sistema`, dedupe `calendar_sync_cola:<día
+      Cancún>` en `alerta_emitida`, UNA vez al día): item con ≥ 12 intentos
+      (≈ 1 h de backoff) o el más viejo esperando > 30 min → «La
+      sincronización con Google Calendar lleva N cambios sin poder subir
+      desde las HH:MM; último error: …». Cuando la cola vuelve a cero, log.
+    - `GET /v1/calendar/sync-estado` añade (ADITIVO) `automatica: boolean` —
+      flag AUTORITATIVO: `enabled && cola activa` — y `cola: {activa,
+      pendientes, con_error, mas_antiguo_at, ultimo_error, ultimo_drenado_at,
+      pausada_hasta} | null`. `POST /resync` sigue siendo el backfill manual
+      (solo para el arranque) y el reconcile nocturno sigue siendo la RED DE
+      SEGURIDAD que escribe directo (no encola). Los «últimos» ya NO viven
+      solo en memoria: se persisten (D12, bullet siguiente).
+  - **RED DE SEGURIDAD «que nunca falle» (D12, 12-sep-2026)** — el reconcile
+    nocturno (`@Cron('15 5 * * *')`, 00:15 Cancún) dejó de ser un simple
+    re-publicador:
+    - **VENTANA `[hoy−30d, hoy+365d]`** (la misma del resync; antes
+      `[−7d, +60d]`): un vuelo agendado para dentro de tres meses podía quedar
+      mal DÍAS y nadie lo veía. Son ~395 días SECUENCIALES: la pasada puede
+      tardar media hora larga (de ahí el TTL de 2 h del candado).
+      **Las 4 lecturas del barrido van PAGINADAS** (`leerPaginado`, `order('id')`
+      + `range` de 1000 en 1000; revisión adversaria 12-sep-2026): con la
+      ventana vieja de 67 días nunca se pasaba de 1000 filas, con 395 días sí —
+      y PostgREST corta en `max-rows` **sin error y sin avisar**, así que todo
+      lo que cayera después de la fila 1000 dejaba de publicarse mientras el
+      resumen decía «0 errores». Toda lectura nueva del barrido va paginada.
+    - **CUOTA A MEDIA PASADA**: si Google responde 403/429, el barrido
+      **ABANDONA** la pasada (`abortarSiCuota`, `PausaCuotaBarrido`) y NO corre
+      el paso inverso. Antes solo el worker miraba `pausadaHastaMs` y el
+      barrido seguía disparando miles de llamadas condenadas al mismo
+      calendario que acababa de decir «basta» — y, peor, el paso inverso habría
+      decidido borrados con una foto INCOMPLETA de Google. Lo que faltó se
+      publica en la pasada siguiente (y la cola sigue con su backoff).
+    - **PASO INVERSO Google → BD** (`limpiarHuerfanos`, corre DESPUÉS de
+      publicar y con la bandera `barriendo` puesta): lista la ventana en Google
+      (`timeMin`/`timeMax`, `singleEvents:true`, `showDeleted:false`,
+      `pageToken`, `fields` recortado, tope de 40 páginas) y BORRA los eventos
+      que llevan ancla `vuelatour_*` y (a) ya no tienen fila —vuelo/escala por
+      `vuelo_id`, descanso, evento, mantenimiento— o (b) su fila apunta a OTRO
+      id (**duplicado fantasma**). Reglas SAGRADAS: un evento **sin ancla NO
+      se toca JAMÁS** (es de la oficina, C7); si no se pudo verificar (consulta
+      con error, ancla que no es UUID) **no se borra**; tope de 500 borrados
+      por pasada (más que eso es un error de premisa, se para y se avisa en el
+      log). Lecturas de BD por LOTES (`in (...)` de **≤ 150 ids** —`LOTE_IDS_BD`,
+      el mismo tope que `DELTA_MAX_IDS_TRAMO`: con 200 uuids la URL de PostgREST
+      revienta (414) y el lote entero quedaba «no verificable»—: 1 consulta por
+      tipo, 2 para el vuelo —fila + tramos—), nunca N+1. La de TRAMOS va
+      **PAGINADA**: es la única que devuelve varias filas por entidad y una fila
+      perdida en `max-rows` habría borrado el evento de ese tramo como
+      «duplicado fantasma» — BORRAR UN EVENTO VIVO. Los ids permitidos de
+      un vuelo son ida + regreso + **el de cada tramo**. Se cuenta en
+      `ultimo_resumen.huerfanos_borrados`.
+      **REGLA 6 — un evento RECIÉN CREADO no se borra** (`esRecienCreado`,
+      `created` de Google, margen 15 min; revisión adversaria 12-sep-2026): sin
+      la cola activa los ~30 hooks escriben DIRECTO a Google a cualquier hora
+      (también durante la media hora del reconcile) y guardan el
+      `google_calendar_id` un instante DESPUÉS del `insert`; listado en ese
+      hueco, la fila apunta a `null` y el evento —vivo y legítimo— se leía como
+      duplicado fantasma. Un huérfano de verdad nunca es nuevo.
+      **POR QUÉ UN SOLO LISTADO Y NO 4 CON `privateExtendedProperty`**
+      (desviación deliberada del plan): ese parámetro de Google exige
+      `propertyName=value` con un valor CONCRETO — no existe «que TENGA la
+      propiedad»; `vuelatour_vuelo_id=*` se toma literal y no empata con nada,
+      así que el paso inverso no borraría NUNCA nada (red de seguridad falsa).
+      Y los valores que conocemos son los de las filas VIVAS, justo los que NO
+      hay que borrar.
+    - **ESTADO PERSISTIDO** (`calendar_sync_estado`, clave → jsonb, misma
+      migración): fila `sync` = `{ultimo_reconcile_at, ultimo_resync_at,
+      ultimo_resumen}` y fila `worker` = `{ultimo_drenado_at, pausada_hasta}`.
+      Antes vivían SOLO en memoria y un redeploy de Railway dejaba
+      `sync-estado` en «nunca corrió» aunque el reconcile hubiera corrido de
+      madrugada; la pausa por cuota también se perdía y el proceso nuevo volvía
+      a golpear a Google. La memoria sigue siendo la CACHÉ: `hidratarEstado`
+      relee al arrancar (primer `sync-estado` / primera pasada del worker) y
+      **solo rellena lo que está en `null`** (lo de esta instancia manda). El
+      worker solo escribe cuando hubo items o pausa (si no, sería una fila cada
+      20 s). No se usó `configuracion_sistema`: es `clave/activa/descripcion`,
+      sin columna de valor JSON. `leer` devuelve `{ok, valor}` y la hidratación
+      **solo se da por hecha cuando la BD respondió las dos filas**: con un
+      `ok:false` se reintenta, si no un blip de red al arrancar dejaba el panel
+      en «nunca corrió» hasta la madrugada siguiente.
+    - **CANDADO EN BD** (`calendar_sync_lock(p_clave, p_ttl_seg)` /
+      `calendar_sync_unlock`, tabla `calendar_sync_candado`): 912001 = barrido
+      (reconcile y `POST /resync`, TTL 2 h), 912002 = drenado (TTL 5 min).
+      **NO es `pg_try_advisory_lock` de sesión a propósito**: el API habla por
+      PostgREST/pooler y no controla la conexión, así que el unlock podría caer
+      en otra y el candado se quedaría tomado PARA SIEMPRE — la red de
+      seguridad nocturna muerta en silencio, justo lo contrario de lo pedido.
+      Es un **arrendamiento con vencimiento** (fila + TTL, se cura solo si el
+      proceso muere) más `pg_try_advisory_xact_lock` como serializador
+      instantáneo (ese sí se libera al terminar la función). `ocupado` ⇒ el
+      cron se SALTA la pasada y `POST /resync` responde **409** («ya hay una
+      sincronización en curso»); `sin_candado` (migración pendiente o BD que no
+      contesta) ⇒ **se corre igual, como hoy**: nunca se cancela la red de
+      seguridad por no poder tomar un candado. Las dos llamadas viajan con
+      **`p_dueno`** (`api:<pid>:<base36>`): en `calendar_sync_candado` se ve QUÉ
+      proceso tiene tomado el barrido (lo primero que se pregunta cuando el
+      resync responde 409) y el `unlock` va ACOTADO a ese dueño, así que una
+      réplica atrasada no borra el arrendamiento que otra acaba de tomar cuando
+      el TTL venció.
+    - **DOS BARRIDOS TAMPOCO** (`barridoEnCurso`, revisión adversaria
+      12-sep-2026): `barriendo` excluía al worker, pero no a otro BARRIDO. Dos
+      `POST /resync` a la vez —o un resync encima del reconcile nocturno—
+      publicaban los dos DIRECTO a Google y en un vuelo sin
+      `google_calendar_id` los dos hacían `events.insert` ⇒ duplicado fantasma.
+      El candado de BD **no cubría esto hoy** (sin la migración responde
+      `sin_candado` y los dos seguían), así que la exclusión es una bandera de
+      memoria que se toma y se suelta SIN `await` en medio: el 2.º resync
+      responde **409** y el reconcile se salta con un log.
+    - **TOLERANTE** como todo lo demás (`calendar-sync-estado.util.ts#
+      EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
+      memorizado, `false`/error re-sondeado cada ≤ 10 min. Sin la migración no
+      se consulta ninguna tabla nueva y el comportamiento es el de siempre.
   - **MANTENIMIENTOS**: evento de DÍA COMPLETO en `fecha_programada` (DATE =
     día Cancún), título `🔧 Servicio · <matrícula> · <descripción>`
     (`🔧 En taller · …` si `EN_TALLER`), colorId 5 (ámbar) / 11 (rojo Tomate),
@@ -789,21 +1022,39 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     (`⚠ permiso pendiente`, `sin piloto`, `🔧`, `😴`, `📌`). Re-pintar los
     `color_calendario` NO lo resuelve (no hay 8 ids libres); es decisión del
     cliente.
-  - `extendedProperties.private.vuelatour_*` se ESCRIBE pero todavía no se
-    LEE: el único anclaje de idempotencia real es el id guardado en la fila
+  - **El `motivo` de `sync-estado` no hace eco de la credencial** (revisión
+    adversaria 12-sep-2026): `parsearServiceAccountJson` pasa el mensaje de
+    `JSON.parse` por `motivoJsonSinValor`, que borra cualquier fragmento
+    entrecomillado y conserva solo la POSICIÓN del error. V8 cita un trozo de
+    la ENTRADA (`Unexpected token 'x', "x{\"priva"… is not valid JSON`) y esa
+    entrada es el JSON de la service account —con su llave PRIVADA—; ese
+    mensaje viaja en `motivo` a ADMIN/COORDINADOR/ANALISTA/FACTURACION/SOCIO y
+    el panel lo pinta VERBATIM en su chip.
+  - `extendedProperties.private.vuelatour_*` ya SE LEE (D12, 12-sep-2026):
+    es lo que distingue «nuestro» de «manual de la oficina» en el PASO INVERSO
+    del reconcile (bullet siguiente). Fuente única de los nombres:
+    `calendar-huerfanos.util.ts` (`ANCLA_VUELO`, `ANCLA_DESCANSO`,
+    `ANCLA_EVENTO`, `ANCLA_MANTENIMIENTO`) — los `build*Event` las usan por
+    constante, no por literal. El **descanso** empezó a llevar
+    `vuelatour_descanso_id` ese día (era el ÚNICO evento nuestro sin ancla):
+    `upsertDescansoEvent` recibe `id` y TODO llamador se lo manda
+    (`pilots.createDescanso`, `syncDescanso`, el barrido). El anclaje de
+    IDEMPOTENCIA sigue siendo el id guardado en la fila
     (`vuelo`/`escala`/`piloto_descanso`/`evento_flota`/`mantenimiento`
-    `.google_calendar_id`). Si ese id se pierde (restauración de respaldo,
-    limpieza manual), el siguiente resync CREA un evento nuevo y el anterior
-    queda huérfano; un `events.list` por `privateExtendedProperty` sería el
-    camino para deduplicar, y hoy no existe (ver pendientes).
+    `.google_calendar_id`): si ese id se pierde, el siguiente barrido CREA un
+    evento nuevo… y ahora el paso inverso BORRA el viejo la misma noche.
   - **Backfill**: `POST /v1/calendar/resync` (ADMIN) sincroniza los 4 tipos en
     `[hoy−30d, hoy+365d]` (body opcional `desde`/`hasta` ISO), SECUENCIAL, y
     devuelve `{enabled, calendar_id, vuelos, descansos, eventos,
-    mantenimientos, errores, desde, hasta, nota}`; nunca lanza por un evento
-    que falle (lo cuenta en `errores`). Comparte el núcleo
-    `sincronizarVentana` con el cron `reconcileVentana` (05:15 UTC, ventana
-    `[hoy−7d, hoy+60d]`): una sola implementación o el calendario queda
-    distinto según quién corrió último.
+    mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
+    lanza por un evento que falle (lo cuenta en `errores`). `huerfanos_borrados`
+    ahí es SIEMPRE 0 (el paso inverso es solo del cron) y desde el 12-sep-2026
+    puede responder **409** si ya hay un barrido en curso (la bandera
+    `barridoEnCurso` de este proceso —vale sin la migración— o el candado de BD
+    de otra réplica; mensaje único `MSG_BARRIDO_EN_CURSO`). Comparte
+    el núcleo `sincronizarVentana` con el cron `reconcileVentana` (05:15 UTC),
+    que desde D12 usa la **MISMA ventana** `[hoy−30d, hoy+365d]`: una sola
+    implementación o el calendario queda distinto según quién corrió último.
   - **Idempotencia (regla dura, 12-sep-2026)**: con un `google_calendar_id`
     guardado, un evento SOLO se re-crea si Google dice que ya no existe
     (**404/410**, `eventoAusenteEnGoogle`). Ante cualquier otro fallo (403 de
@@ -859,6 +1110,22 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (12-sep-2026)**:
+  `20260912000002_calendar_sync_cola.sql` quedó escrita **sin aplicar** porque
+  el MCP de Supabase estaba caído. Trae TRES cosas (se amplió el mismo archivo
+  el 12-sep porque nunca se aplicó): la **cola automática** + el
+  `tg_set_updated_at` que ya no se mueve por el id de Google (§1-6), el
+  **estado persistido** `calendar_sync_estado` (§7) y el **candado
+  multi-réplica** `calendar_sync_candado` + `calendar_sync_lock`/`unlock`
+  (§8; el `unlock` es `(int, text)` —acotado al dueño— y la migración dropea
+  antes la firma vieja de 1 argumento por si alguien corrió una copia a mano),
+  con DOS sondas independientes (`calendar_sync_cola_activa()` y
+  `calendar_sync_estado_activa()`). El API ya está desplegable así: mientras la
+  migración no exista, el espejo se comporta EXACTAMENTE como antes (hooks
+  best-effort, «últimos» solo en memoria, exclusión solo por banderas) y las
+  sondas lo encienden solo en ≤ 10 min al aplicarla (sin redeploy). Tras
+  aplicarla: `get_advisors`, verificar `GET /v1/calendar/sync-estado` →
+  `automatica: true` y que `ultimo_reconcile_at` sobreviva un redeploy.
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el
@@ -874,6 +1141,29 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   principal (una tarifa/velocidad; TUAS por su matrícula) — tarifa por
   tramo sigue pendiente. El REPARTO del ingreso entre aviones YA está
   decidido (28-ago-2026): ver invariante 10.
+- **Google Calendar · huecos residuales de la red de seguridad (D12,
+  12-sep-2026)**: (a) los eventos de DESCANSO creados ANTES de este lote no
+  llevan `vuelatour_descanso_id`, así que si quedó alguno huérfano el paso
+  inverso NO lo puede distinguir de un evento manual y lo deja vivo (se borra
+  a mano; los nuevos ya nacen con ancla y el barrido re-ancla los de las filas
+  vivas de la ventana); (b) un evento huérfano cuya fecha cayó FUERA de
+  `[hoy−30d, hoy+365d]` no se lista y sobrevive; (c) con 2+ réplicas el barrido
+  de una y el worker de otra usan claves de candado distintas (ver el bullet
+  del espejo); (d) el paso inverso lista la ventana completa en vez de 4
+  consultas por `privateExtendedProperty` porque Google no permite buscar «la
+  propiedad existe» — si algún día se agrega un marcador de valor FIJO a todos
+  los eventos, se podría acotar (solo serviría para los eventos nacidos después
+  de ese cambio); (e) **el calendario NO se puede compartir entre entornos**: si
+  otro API (staging, o una copia local con las mismas 3 variables) apuntara al
+  MISMO `GOOGLE_CALENDAR_ID` con OTRA base, el paso inverso de cada uno vería
+  los eventos del otro con ancla `vuelatour_*` y sin fila propia, y los
+  BORRARÍA. Antes de D12 no pasaba nada (nadie borraba); ahora es regla de
+  operación: un calendario por base; (f) un evento del sistema DUPLICADO a mano
+  desde la UI de Google (que copia las `extendedProperties`) se borra como
+  duplicado fantasma — deseable para deduplicar, pero indistinguible de una
+  copia hecha a propósito por la oficina; (g) un evento con ancla creado en los
+  últimos 15 min no se evalúa (regla 6): su limpieza espera a la noche
+  siguiente.
 - **Google Calendar (12-sep-2026)**: qué hacer con los ~305 eventos que la
   oficina capturó A MANO en `aerochartercancunflightplanner@gmail.com`
   (borrarlos, dejarlos conviviendo o deduplicar contra los del sistema) lo

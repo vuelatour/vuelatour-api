@@ -85,10 +85,10 @@ export class CalendarController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO)
   @ApiOperation({
     summary:
-      'Estado de la sincronización a Google Calendar (C5, 12-sep-2026): {enabled, calendar_id, ultimo_reconcile_at, ultimo_resync_at, ultimo_resumen, nota}. `enabled:false` = faltan las variables en Railway (GOOGLE_CALENDAR_SYNC_ENABLED / GOOGLE_CALENDAR_ID / GOOGLE_SERVICE_ACCOUNT_JSON). Los últimos = en memoria del proceso: null si aún no ha corrido desde el último deploy.',
+      'Estado de la sincronización a Google Calendar (C5, 12-sep-2026): {enabled, calendar_id, ultimo_reconcile_at, ultimo_resync_at, ultimo_resumen, nota, motivo, automatica, cola}. `enabled:false` = faltan las variables en Railway (GOOGLE_CALENDAR_SYNC_ENABLED / GOOGLE_CALENDAR_ID / GOOGLE_SERVICE_ACCOUNT_JSON). `automatica:true` = el espejo es AUTOMÁTICO (cola persistente con triggers + worker cada 20 s): ningún cambio depende de que un hook alcance a Google. `cola` = {activa, pendientes, con_error, mas_antiguo_at, ultimo_error, ultimo_drenado_at, pausada_hasta} o null si la migración 20260912000002 no está aplicada. Los «últimos» (incluido `ultimo_resumen.huerfanos_borrados` del paso inverso del reconcile) se PERSISTEN en `calendar_sync_estado` desde el 12-sep-2026 (D12): sobreviven a un redeploy. Solo son null si nunca ha corrido o si esa migración no está aplicada.',
   })
   syncEstado() {
-    return this.sync.estadoSync();
+    return this.sync.estadoSyncCompleto();
   }
 
   @Post('resync')
@@ -96,7 +96,7 @@ export class CalendarController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Backfill COMPLETO a Google Calendar (12-sep-2026): vuelos no cancelados con fecha, descansos de piloto, eventos NO-vuelo y mantenimientos con fecha de la ventana [hoy−30d, hoy+365d] (body opcional `desde`/`hasta` ISO). Secuencial y best-effort: devuelve conteos por tipo {enabled, calendar_id, vuelos, descansos, eventos, mantenimientos, errores, desde, hasta, nota} y nunca lanza por un evento que falle. Los eventos capturados A MANO en Google no se tocan ni se deduplican.',
+      'Backfill COMPLETO a Google Calendar (12-sep-2026): vuelos no cancelados con fecha, descansos de piloto, eventos NO-vuelo y mantenimientos con fecha de la ventana [hoy−30d, hoy+365d] (body opcional `desde`/`hasta` ISO). Secuencial y best-effort: devuelve conteos por tipo {enabled, calendar_id, vuelos, descansos, eventos, mantenimientos, errores, huerfanos_borrados, desde, hasta, nota} y nunca lanza por un evento que falle. `huerfanos_borrados` siempre es 0 acá: el paso inverso (borrar eventos del sistema sin fila) lo hace SOLO el reconcile nocturno. Los eventos capturados A MANO en Google no se tocan ni se deduplican. 409 si ya hay una sincronización en curso (el respaldo nocturno u otra réplica).',
   })
   resync(@Body() dto?: ResyncCalendarDto) {
     return this.sync.resyncTodo(dto);

@@ -518,7 +518,19 @@ export class AlertsService {
       .limit(500);
     if (error) throw new Error(error.message);
     for (const v of data ?? []) {
-      await this.airports.refreshPermisosDeVuelo(v.id as string);
+      // ESPEJO A GOOGLE (hueco H1, revisión adversaria 12-sep-2026): este
+      // barrido escribe `estado_permiso` de vuelos y tramos hasta +90 días y
+      // NO tenía hook. `estado_permiso` cambia el título («⚠ permiso
+      // pendiente») y el color (ámbar) del evento, así que el calendario de la
+      // oficina quedaba mintiendo: el cron corre a las 08:00 Cancún, ~16 h
+      // DESPUÉS de la reconciliación de las 00:15, y a +90 d ni la ventana del
+      // reconcile lo alcanzaba. Solo cuando REALMENTE escribió algo (el
+      // método devuelve si tocó la BD) para no pedir 500 syncs por nada.
+      // Con la cola activa el trigger ya encoló el cambio y esto solo adelanta
+      // el drenado; sin cola es el único camino a Google.
+      if (await this.airports.refreshPermisosDeVuelo(v.id as string)) {
+        void this.calendarSync.syncFlight(v.id as string);
+      }
     }
   }
 
@@ -739,6 +751,12 @@ export class AlertsService {
       this.logger.warn(
         `Espejo ida: vuelo #${v.folio} re-sincronizado al avión del tramo 1.`,
       );
+      // ESPEJO A GOOGLE (hueco H2, revisión adversaria 12-sep-2026): mover
+      // `vuelo.aeronave_id` cambia la MATRÍCULA del título y el COLOR del
+      // evento, y este barrido no tenía hook (corre en el cron de las 08:00
+      // Cancún y en POST /alerts/run). Con la cola activa el trigger ya lo
+      // encoló y esto solo adelanta el drenado.
+      void this.calendarSync.syncFlight(e.vuelo_id as string);
     }
   }
 
