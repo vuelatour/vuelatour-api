@@ -33,6 +33,13 @@ import {
   repartirUsd,
   type ParticipacionAeronave,
 } from '../../common/participacion-aeronave.util';
+import { cuentaComoSinFacturar } from '../../common/facturacion-gasto.util';
+import {
+  detalleTacosEnRevision,
+  pilotosDeTacosEnRevision,
+  resumenTacosEnRevision,
+  type EscalaEnRevisionRow,
+} from './tacos-revision.util';
 
 /** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
 const DIRECTO = new Set([
@@ -1642,9 +1649,14 @@ export class ProfitSharingService {
         .lte('fecha', q.hasta),
       // Tacómetros en revisión (amarillos) de vuelos del periodo. Tramos
       // cancelados fuera (no volaron: nada que revisar/capturar).
+      // 14-sep-2026 (pedido del cliente «¿podría indicar cuáles son?»): se
+      // traen ruta, orden, motivo y piloto del tramo (con el del vuelo de
+      // respaldo) para listar QUÉ tramos son, no solo cuántos.
       sb
         .from('escala')
-        .select('id, vuelo:vuelo_id!inner(folio, fecha_vuelo, estado)')
+        .select(
+          'id, vuelo_id, orden, origen_iata, destino_iata, fecha_salida_plan, revision_motivo, piloto_id, vuelo:vuelo_id!inner(id, folio, fecha_vuelo, estado, piloto_id)',
+        )
         .eq('revision_requerida', true)
         .is('cancelada_at', null)
         .neq('vuelo.estado', 'CANCELADO')
@@ -2340,13 +2352,11 @@ export class ProfitSharingService {
     // BODEGA se excluye: es cargo contable del puente de inventario y su
     // factura vive en la ENTRADA del cardex — jamás tendrá factura propia
     // (dejarlo contaría ruido eterno en el pre-cierre).
-    const sinFacturar = gastos.filter(
-      // PERSONAL_DUENO: la factura a la empresa no aplica (gasto del dueño).
-      (g) =>
-        g.estatus_facturacion !== 'FACTURADA' &&
-        g.medio_pago !== 'BODEGA' &&
-        g.categoria !== 'PERSONAL_DUENO',
-    );
+    // PERSONAL_DUENO: la factura a la empresa no aplica (gasto del dueño).
+    // NO_FACTURABLE (14-sep-2026): la oficina ya dijo que ese gasto no lleva
+    // factura — contarlo sería ruido eterno en el checklist.
+    // Fuente única de la regla: `cuentaComoSinFacturar`.
+    const sinFacturar = gastos.filter((g) => cuentaComoSinFacturar(g));
     // Posibles duplicados con el flag aún encendido: cada uno resta DOBLE al
     // reparto hasta que alguien lo resuelva (borrar el repetido o marcar
     // "No es duplicado" en Gastos → pestaña Duplicados).
@@ -2409,6 +2419,15 @@ export class ProfitSharingService {
       (c) => c.metodo_cobro === 'PAYWISE',
     );
 
+    // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
+    // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
+    // alguno no resuelve, sale null (jamás un nombre inventado).
+    const tacosRows = (revRes.data ?? []) as EscalaEnRevisionRow[];
+    const tacos = resumenTacosEnRevision(
+      tacosRows,
+      await this.fetchNombres(pilotosDeTacosEnRevision(tacosRows)),
+    );
+
     const items = [
       {
         clave: 'vuelos_sin_completar',
@@ -2421,8 +2440,11 @@ export class ProfitSharingService {
       {
         clave: 'tacos_en_revision',
         titulo: 'Tacómetros en revisión (amarillos)',
-        detalle: 'Confírmalos o ajústalos en Tacómetros en vivo.',
-        count: (revRes.data ?? []).length,
+        detalle: detalleTacosEnRevision(tacosRows.length, tacos.vuelos.length),
+        // count = TRAMOS amarillos (no vuelos), como siempre.
+        count: tacosRows.length,
+        vuelos: tacos.vuelos,
+        tramos: tacos.tramos,
       },
       {
         clave: 'fechas_tramos_incoherentes',
@@ -2631,7 +2653,8 @@ export class ProfitSharingService {
         clave: 'gastos_sin_comprobante',
         titulo: 'Gastos sin facturar (pendientes o solicitados)',
         detalle:
-          'Sin factura en mano — márcalos con el semáforo en Gastos. El ' +
+          'Sin factura en mano — márcalos con el semáforo en Gastos (los ' +
+          'marcados "No requiere factura" ya NO cuentan aquí). El ' +
           'seguimiento arrancó en ago 2026: lo anterior nace "Pendiente".',
         count: sinFacturar.length,
       },

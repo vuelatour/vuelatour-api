@@ -154,6 +154,11 @@ end $function$;
 comment on function public.tg_mov_bancario_gasto_suma() is
   'Regla 1 gasto ↔ N cargos (14-sep-2026): misma moneda y suma <= monto + 1.00; moneda distinta = 1 a 1. Espejo del util puro conciliacion-parcial.util.ts. Lanza 23514 con prefijo GASTO_YA_CUBIERTO (el API lo traduce a 409 GASTO_YA_CUBIERTO).';
 
+-- Interna: nadie la invoca por PostgREST (solo el trigger). Sin este revoke el
+-- advisor de Supabase (0028/0029) la marca como SECURITY DEFINER ejecutable
+-- por anon/authenticated. (Aplicado en prod como follow-up el 14-sep-2026.)
+revoke execute on function public.tg_mov_bancario_gasto_suma() from public, anon, authenticated;
+
 drop trigger if exists trg_mov_bancario_gasto_suma on public.movimiento_bancario;
 create trigger trg_mov_bancario_gasto_suma
   before insert or update of gasto_id, monto, cuenta_bancaria_id

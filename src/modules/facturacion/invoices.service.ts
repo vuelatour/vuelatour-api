@@ -341,9 +341,14 @@ export class InvoicesService {
 
   /**
    * Amarra una factura recibida a VARIOS gastos (una factura de VIP SAESA
-   * ampara varios aterrizajes/servicios). Reemplaza el amarre anterior:
-   * los gastos fuera de la lista se desamarra, los de la lista quedan con
-   * estatus_comprobante = FACTURA. Lista vacía = desamarrar todo.
+   * ampara varios aterrizajes/servicios). Reemplaza el amarre anterior: los
+   * gastos fuera de la lista se desamarran y los de la lista quedan
+   * `estatus_facturacion = FACTURADA` (lo pone el trigger
+   * `gasto_sync_facturacion`, incluso desde NO_FACTURABLE: si hay factura,
+   * está facturado). `estatus_comprobante` NO se toca — es el registro de
+   * qué papel entregó quien capturó, y desde el 14-sep-2026 solo se lee como
+   * «con / sin comprobante» (`src/common/comprobante.util.ts`). Lista vacía =
+   * desamarrar todo.
    */
   async amarrarGastos(recibidaId: string, gastoIds: string[], userId: string) {
     const { data: recibida, error: rErr } = await this.supabase.service

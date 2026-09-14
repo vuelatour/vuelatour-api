@@ -742,6 +742,60 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     pinta liga (antes el tipo lo declaraba `string`, el título mentía y el
     enlace iba a `/admin/flights/null`).
 
+18. **Comprobante (2 opciones) y semáforo de facturación (4 estados) —
+    14-sep-2026, pedidos del cliente.** Son DOS preguntas distintas y jamás
+    se mezclan: `estatus_comprobante` = «¿trajo papel?»,
+    `estatus_facturacion` = «¿ya se facturó?».
+    - **Comprobante, SIN migración**: el enum de BD sigue con tres valores y
+      NADIE reescribe filas. Regla de lectura única
+      `src/common/comprobante.util.ts`: `hayComprobante(e) = e !==
+      'SIN_COMPROBANTE'` y `etiquetaComprobante` devuelve SOLO «Con
+      comprobante» / «Sin comprobante» (la palabra «Factura» salió de los
+      textos: se confundía con el semáforo vecino). `FACTURA` es el valor
+      que se GUARDA para «con comprobante» (es el que ya manda la app al
+      adjuntar foto) y **`VALE` es LEGADO**: se lee igual, no se reescribe
+      solo (el panel conserva el VALE de un gasto viejo si el guardado no
+      toca el campo). Nada de negocio compara contra `'FACTURA'` a mano.
+    - **Facturación**: `PENDIENTE` 🔴 · `SOLICITADA` 🟡 · `FACTURADA` 🟢 ·
+      **`NO_FACTURABLE` ⚪ «No requiere factura»** (migración
+      `20260914000002`: el CHECK se busca por su DEFINICIÓN en
+      `pg_constraint`, el nombre no se adivina). Fuente única
+      `src/common/facturacion-gasto.util.ts`: el filtro `NO_FACTURADA` es
+      `in (PENDIENTE, SOLICITADA)` — **ya no `!= FACTURADA`**, o los
+      `NO_FACTURABLE` caían en la bandeja de "falta por facturar" y no
+      cuadraban con el checklist — y `cuentaComoSinFacturar` (pre-cierre)
+      excluye FACTURADA, NO_FACTURABLE, `medio_pago = BODEGA` y
+      `categoria = PERSONAL_DUENO`. El reporte de EFECTIVOS del Excel tiene
+      TRES cubos (facturado / POR FACTURAR / no facturable): meter el ⚪ en
+      cualquiera de los otros dos sería una cifra falsa. El trigger
+      `gasto_sync_facturacion` marca FACTURADA también desde NO_FACTURABLE
+      al AMARRAR una factura recibida (hay factura ⇒ está facturado); el
+      desamarre sigue regresando a PENDIENTE solo desde FACTURADA.
+    - **TOLERANCIA a la migración no aplicada**: un INSERT/UPDATE con
+      `NO_FACTURABLE` contra una base sin `20260914000002` revienta el CHECK
+      viejo (23514). `mensajeNoFacturableSinMigracion` lo convierte en **400
+      legible** («Esta opción necesita la migración 20260914000002;
+      mientras, usa Pendiente»), nunca 409 genérico ni 500 (un 500 dispara
+      el reintento del outbox de la app).
+
+19. **Pre-cierre «Tacómetros en revisión»: QUÉ tramos son (14-sep-2026).**
+    El item `tacos_en_revision` es ADITIVO — `clave`, `titulo` y `count`
+    (= TRAMOS amarillos, no vuelos) no cambian — y ahora trae `vuelos`
+    (chips deduplicados `{id, folio, estado, fecha_vuelo}`, el shape que el
+    renderer del panel ya pinta con liga a `/admin/flights/<id>`) y `tramos`
+    (`{vuelo_id, folio, orden, origen_iata, destino_iata, fecha_salida_plan,
+    motivo, piloto_nombre}`), más un `detalle` que dice cuántos tramos en
+    cuántos vuelos. Helpers PUROS en
+    `src/modules/profit-sharing/tacos-revision.util.ts`: `motivo` es la
+    primera línea ACCIONABLE de `revision_motivo` (`soloPendientes` deja
+    fuera el bloque `Registro: …`, que es procedencia, no alerta) y el
+    piloto es el del TRAMO con herencia del vuelo, resuelto a nombre con
+    `fetchNombres` en UNA consulta (lo que no resuelva sale `null`, jamás un
+    nombre inventado). `tramos` va TOPADO a `MAX_TRAMOS_EN_REVISION = 200`
+    mientras que `count` es siempre el total real: quien pinte «y N más…»
+    cuenta contra `count`, nunca contra `tramos.length`. «Resolver» sigue
+    llevando a `/admin/taco-live`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

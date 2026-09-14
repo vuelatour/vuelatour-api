@@ -62,6 +62,13 @@ import {
   mensajeCheckGasto,
   terminacionPrevia,
 } from './medio-tarjeta.util';
+import { etiquetaComprobante } from '../../common/comprobante.util';
+import {
+  etiquetaFacturacion,
+  esNoFacturable,
+  filtroFacturacion,
+  mensajeNoFacturableSinMigracion,
+} from '../../common/facturacion-gasto.util';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import type {
   CreateGastoDto,
@@ -162,16 +169,6 @@ export class ExpensesService {
     // Medio de pago: fuente única `etiquetaMedioPago` (medio-tarjeta.util).
     // Comprobante = qué entregó el piloto (documento físico); Facturación =
     // seguimiento de oficina (¿ya tenemos factura?). Son cosas distintas.
-    const COMP_LABEL: Record<string, string> = {
-      FACTURA: 'Factura',
-      VALE: 'Vale',
-      SIN_COMPROBANTE: 'Sin comprobante',
-    };
-    const FACT_LABEL: Record<string, string> = {
-      PENDIENTE: 'Pendiente',
-      SOLICITADA: 'Solicitada',
-      FACTURADA: 'Facturada',
-    };
     const columnas: TablaColumnaPayload[] = [
       { label: 'Fecha' },
       { label: 'Categoría' },
@@ -212,8 +209,11 @@ export class ExpensesService {
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
         etiquetaMedioPago(medio),
-        COMP_LABEL[comp] ?? comp,
-        FACT_LABEL[fact] ?? fact,
+        // Dos opciones (14-sep-2026): «Con comprobante» / «Sin
+        // comprobante» — la palabra «Factura» salió de esta columna para
+        // que no se confunda con el semáforo de facturación de al lado.
+        etiquetaComprobante(comp),
+        etiquetaFacturacion(fact),
         (x.moneda as string) ?? '',
         Number(x.monto),
         fechaHoraCancun(
@@ -249,10 +249,16 @@ export class ExpensesService {
         (x.captura as { nombre?: string } | null)?.nombre ?? 'Sin capturador';
       // Fuente: estatus_facturacion (seguimiento de oficina). El comprobante
       // NO sirve aquí: la app marca FACTURA con cualquier foto.
+      // TRES cubos desde el 14-sep-2026: lo que la oficina marcó «No
+      // requiere factura» no es facturado NI está por facturar — meterlo en
+      // cualquiera de los otros dos sería una cifra falsa.
+      const estatusFact = (x.estatus_facturacion as string) ?? '';
       const facturado =
-        (x.estatus_facturacion as string) === 'FACTURADA'
+        estatusFact === 'FACTURADA'
           ? 'facturado'
-          : 'POR FACTURAR';
+          : esNoFacturable(estatusFact)
+            ? 'no facturable'
+            : 'POR FACTURAR';
       const clave = `Efectivo ${facturado} · ${nombre} (${(x.moneda as string) ?? '?'})`;
       porPersona.set(clave, (porPersona.get(clave) ?? 0) + monto);
     }
@@ -299,11 +305,15 @@ export class ExpensesService {
     if (filters.estatus_comprobante)
       q = q.eq('estatus_comprobante', filters.estatus_comprobante);
     // NO_FACTURADA = pendiente o solicitada (para "todo lo que falta por
-    // facturar" en un solo filtro; lo usa el link del pre-cierre).
-    if (filters.estatus_facturacion === 'NO_FACTURADA')
-      q = q.neq('estatus_facturacion', 'FACTURADA');
-    else if (filters.estatus_facturacion)
-      q = q.eq('estatus_facturacion', filters.estatus_facturacion);
+    // facturar" en un solo filtro; lo usa el link del pre-cierre). Desde el
+    // 14-sep-2026 es un `in` explícito y NO `!= FACTURADA`: con el `neq`,
+    // los NO_FACTURABLE caían en la bandeja de "falta por facturar" y el
+    // conteo del pre-cierre dejaba de cuadrar con la lista.
+    const filtroFact = filtroFacturacion(filters.estatus_facturacion);
+    if (filtroFact?.op === 'in')
+      q = q.in('estatus_facturacion', [...filtroFact.valores]);
+    else if (filtroFact?.op === 'eq')
+      q = q.eq('estatus_facturacion', filtroFact.valor);
     if (filters.medio_pago) q = q.eq('medio_pago', filters.medio_pago);
     if (filters.desde) q = q.gte('fecha_gasto', filters.desde);
     if (filters.hasta) q = q.lte('fecha_gasto', filters.hasta);
@@ -1483,6 +1493,13 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
+      // NO_FACTURABLE contra una base SIN la migración 20260914000002: el
+      // CHECK viejo lo rechaza. 400 que dice qué hacer, no un 409 genérico.
+      const sinMigracion = mensajeNoFacturableSinMigracion(
+        error,
+        dto.estatus_facturacion,
+      );
+      if (sinMigracion) throw new BadRequestException(sinMigracion);
       // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500
       // (un 500 dispara el reintento del outbox de la app y se repetiría).
       if (error.code === '23514')
@@ -2925,6 +2942,12 @@ export class ExpensesService {
         throw new BadRequestException(
           `Referenced entity not found: ${error.message}`,
         );
+      // NO_FACTURABLE sin la migración 20260914000002 (ver create): 400.
+      const sinMigracion = mensajeNoFacturableSinMigracion(
+        error,
+        dto.estatus_facturacion,
+      );
+      if (sinMigracion) throw new BadRequestException(sinMigracion);
       // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500.
       if (error.code === '23514')
         throw new ConflictException(mensajeCheckGasto(error));

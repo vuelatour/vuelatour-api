@@ -93,9 +93,26 @@ export enum TipoCombustible {
   AVGAS = 'AVGAS',
 }
 
+/**
+ * Comprobante que entregó quien capturó — DOS opciones de cara al usuario
+ * (pedido del cliente, 14-sep-2026), tres valores en BD para no migrar:
+ *
+ *  - `FACTURA`         = **con comprobante** (ticket, voucher o factura). Es
+ *    el valor que GUARDAN el panel y la app cuando hay foto.
+ *  - `VALE`            = con comprobante, valor **LEGADO** (cargas masivas
+ *    con comprobante TICKET, capturas viejas). Se lee igual que FACTURA y
+ *    NO se reescribe solo.
+ *  - `SIN_COMPROBANTE` = sin comprobante (default de la columna).
+ *
+ * Regla de lectura única: `src/common/comprobante.util.ts`. Este campo NO
+ * dice si ya se facturó — eso es `estatus_facturacion`.
+ */
 export enum EstatusComprobante {
+  /** Con comprobante (ticket, voucher o factura) — valor que se guarda. */
   FACTURA = 'FACTURA',
+  /** LEGADO: también significa "con comprobante"; no se escribe nuevo. */
   VALE = 'VALE',
+  /** Sin comprobante. */
   SIN_COMPROBANTE = 'SIN_COMPROBANTE',
 }
 
@@ -103,11 +120,16 @@ export enum EstatusComprobante {
  * Seguimiento de facturación de OFICINA — independiente del comprobante que
  * entregó el piloto (la app marca FACTURA con cualquier foto, aunque sea un
  * ticket, así que ese campo NO dice si ya se facturó).
+ *
+ * `NO_FACTURABLE` (14-sep-2026) = «No requiere factura»: ni facturado ni
+ * por facturar. Necesita la migración `20260914000002` (CHECK de BD); sin
+ * ella el API responde 400 explicándolo, nunca 500.
  */
 export enum EstatusFacturacion {
   PENDIENTE = 'PENDIENTE',
   SOLICITADA = 'SOLICITADA',
   FACTURADA = 'FACTURADA',
+  NO_FACTURABLE = 'NO_FACTURABLE',
 }
 
 export class CreateGastoDto {
@@ -212,12 +234,20 @@ export class CreateGastoDto {
   @IsUUID()
   proveedor_id?: string;
 
-  @ApiPropertyOptional({ enum: EstatusComprobante })
+  @ApiPropertyOptional({
+    enum: EstatusComprobante,
+    description:
+      'Comprobante entregado, DOS opciones de cara al usuario: FACTURA = con comprobante (ticket, voucher o factura; es el valor que se guarda) · VALE = con comprobante, LEGADO (se lee, no se escribe nuevo) · SIN_COMPROBANTE = sin comprobante. NO dice si ya se facturó: eso es estatus_facturacion.',
+  })
   @IsOptional()
   @IsEnum(EstatusComprobante)
   estatus_comprobante?: EstatusComprobante;
 
-  @ApiPropertyOptional({ enum: EstatusFacturacion })
+  @ApiPropertyOptional({
+    enum: EstatusFacturacion,
+    description:
+      'Semáforo de facturación de oficina: PENDIENTE · SOLICITADA · FACTURADA · NO_FACTURABLE (no requiere factura; necesita la migración 20260914000002).',
+  })
   @IsOptional()
   @IsEnum(EstatusFacturacion)
   estatus_facturacion?: EstatusFacturacion;
@@ -689,14 +719,18 @@ export class ListGastosQuery {
   @IsBoolean()
   duplicados?: boolean;
 
-  @ApiPropertyOptional({ enum: EstatusComprobante })
+  @ApiPropertyOptional({
+    enum: EstatusComprobante,
+    description:
+      'FACTURA y VALE son ambos "con comprobante" (VALE = legado); SIN_COMPROBANTE = sin comprobante.',
+  })
   @IsOptional()
   @IsEnum(EstatusComprobante)
   estatus_comprobante?: EstatusComprobante;
 
   @ApiPropertyOptional({
     description:
-      'PENDIENTE | SOLICITADA | FACTURADA | NO_FACTURADA (= pendiente o solicitada)',
+      'PENDIENTE | SOLICITADA | FACTURADA | NO_FACTURABLE (no requiere factura) | NO_FACTURADA (meta-valor = pendiente o solicitada; NO incluye NO_FACTURABLE)',
   })
   @IsOptional()
   @IsIn([...Object.values(EstatusFacturacion), 'NO_FACTURADA'])
