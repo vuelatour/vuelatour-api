@@ -54,7 +54,8 @@ export class ExpensesController {
 
   @Get()
   @ApiOperation({
-    summary: 'List gastos (with filters). Pilotos see only own captures.',
+    summary:
+      'List gastos (with filters). Pilotos see only own captures. Los gastos de medio BANCARIO traen los aditivos monto_vinculado / faltante / parcial (pagos parciales, 14-sep-2026).',
   })
   async list(
     @Query() q: ListGastosQuery,

@@ -13,6 +13,7 @@ import {
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
 import {
   diaCancun,
   fechaHoraCancun,
@@ -100,6 +101,16 @@ function quitarAvisoAvionTramo(
 // de refacciones de la que este gasto es un PAGO (28-ago): el equipo la ve
 // como "un solo gasto"; se liga/desliga SOLO desde /v1/compras.
 const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))`;
+
+/**
+ * Medios de pago que cruzan con el banco (espejo de `MEDIOS_BANCARIOS` de
+ * conciliación): los únicos cuyos gastos pueden traer cargos ligados.
+ */
+const MEDIOS_PAGO_BANCARIOS: string[] = [
+  'TARJETA_CORP',
+  'TRANSFERENCIA',
+  'PAYWISE',
+];
 
 /** Ventana en días para considerar dos gastos como posible duplicado.
  *  Ampliada de 3→7 (con proveedor) y 1→3 (sin proveedor) en ago 2026: el
@@ -329,12 +340,64 @@ export class ExpensesService {
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as Array<Record<string, unknown>>;
     await this.anexarPagosDeCompra(rows);
+    await this.anexarConciliacionParcial(rows);
     return {
       data: rows,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /**
+   * `monto_vinculado` / `faltante` / `parcial` (aditivos, 14-sep-2026): con
+   * pagos parciales un gasto bancario puede tener cargos ligados sin estar
+   * `conciliado` — el selector «Vincular gasto» del panel necesita ver
+   * «faltan $X de $Y» para elegir bien. Solo se consultan los gastos de
+   * medio BANCARIO (los únicos que cruzan con el banco): una consulta `in`
+   * por lotes, y si falla no rompe el listado (el dato es presentación).
+   */
+  private async anexarConciliacionParcial(
+    rows: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const ids = [
+      ...new Set(
+        rows
+          .filter((r) => MEDIOS_PAGO_BANCARIOS.includes(r.medio_pago as string))
+          .map((r) => r.id as string)
+          .filter(Boolean),
+      ),
+    ];
+    if (ids.length === 0) return;
+    const suma = new Map<string, number>();
+    try {
+      const CHUNK = 200;
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const { data, error } = await this.supabase.service
+          .from('movimiento_bancario')
+          .select('gasto_id, monto')
+          .in('gasto_id', ids.slice(i, i + CHUNK));
+        if (error) throw new Error(error.message);
+        for (const m of data ?? []) {
+          const gid = m.gasto_id as string | null;
+          if (!gid) continue;
+          const v = (suma.get(gid) ?? 0) + (Math.abs(Number(m.monto)) || 0);
+          suma.set(gid, Math.round(v * 100) / 100);
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer lo conciliado por gasto: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    for (const r of rows) {
+      if (!MEDIOS_PAGO_BANCARIOS.includes(r.medio_pago as string)) continue;
+      const ligado = suma.get(r.id as string) ?? 0;
+      r.monto_vinculado = ligado;
+      r.faltante = faltanteDe(Number(r.monto), ligado);
+      r.parcial = ligado > 0 && r.conciliado !== true;
+    }
   }
 
   /**
@@ -2194,6 +2257,70 @@ export class ExpensesService {
   }
 
   /**
+   * Cargos del banco ligados a un gasto (14-sep-2026, pagos parciales: un
+   * gasto puede tener VARIOS `movimiento_bancario`). Mientras exista aunque
+   * sea UNO, el monto/moneda/medio del gasto y su baja quedan bajo candado:
+   * cambiarlos descuadraría una conciliación ya hecha (y la baja dejaría el
+   * movimiento "conciliado" apuntando a nada, FK `set null`).
+   * Un fallo de lectura LANZA (fail-closed): nunca se abre el candado por un
+   * error de BD.
+   */
+  /**
+   * ¿El PATCH toca de verdad el dinero que cruzó con el banco
+   * (`monto` / `moneda` / `medio_pago`)? Reenviar el MISMO valor no es
+   * tocarlo: el diálogo del panel manda esos tres campos siempre, y sin
+   * esta comparación un gasto con cargos ligados no se podría ni
+   * reclasificar ni ligar a un vuelo (lo que la regla del 14-sep-2026
+   * deja explícitamente libre).
+   * Sin la fila vigente a la mano se responde `true` (fail-closed: mejor
+   * pedir desvincular de más que descuadrar una conciliación).
+   */
+  private cambiaDineroDelGasto(
+    dto: UpdateGastoDto,
+    actual: {
+      monto?: unknown;
+      moneda?: string;
+      medio_pago?: string | null;
+    } | null,
+  ): boolean {
+    const tocaDinero =
+      dto.monto !== undefined ||
+      dto.moneda !== undefined ||
+      dto.medio_pago !== undefined;
+    if (!tocaDinero) return false;
+    if (!actual) return true;
+    const centavos = (v: unknown): number | null => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.round(n * 100) : null;
+    };
+    if (dto.monto !== undefined) {
+      const nuevo = centavos(dto.monto);
+      const viejo = centavos(actual.monto);
+      if (nuevo === null || viejo === null || nuevo !== viejo) return true;
+    }
+    if (dto.moneda !== undefined && dto.moneda !== actual.moneda) return true;
+    if (dto.medio_pago !== undefined && dto.medio_pago !== actual.medio_pago)
+      return true;
+    return false;
+  }
+
+  private async cargosBancariosDe(gastoId: string): Promise<number> {
+    const { count, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id', { count: 'exact', head: true })
+      .eq('gasto_id', gastoId);
+    if (error) throw new Error(error.message);
+    return count ?? 0;
+  }
+
+  /** Texto único del candado: «Este gasto tiene N cargos del banco ligados…». */
+  private mensajeCargosLigados(n: number, accion: string): string {
+    return n === 1
+      ? `Este gasto tiene 1 cargo del banco ligado; desvincúlalo en Conciliación antes de ${accion}.`
+      : `Este gasto tiene ${n} cargos del banco ligados; desvincúlalos en Conciliación antes de ${accion}.`;
+  }
+
+  /**
    * Regla SEMANAL (audio del equipo, 1-sep-2026 — sustituye la ventana de N
    * días): el CAPTURISTA (piloto/mecánico/visitante) corrige o borra su gasto
    * mientras hoy ≤ domingo de la semana de CAPTURA (lunes→domingo, pared
@@ -2417,6 +2544,9 @@ export class ExpensesService {
       dto.aeronave_id !== undefined ||
       dto.escala_id !== undefined ||
       dto.moneda !== undefined ||
+      // Candado de conciliación (14-sep-2026): se compara el valor NUEVO
+      // contra el VIGENTE — reenviar el mismo medio no es tocarlo.
+      dto.medio_pago !== undefined ||
       // La línea de bitácora se anexa a las notas VIGENTES.
       lineaSello !== null ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
@@ -2431,6 +2561,7 @@ export class ExpensesService {
           aeronave_id?: string | null;
           escala_id?: string | null;
           moneda?: string;
+          medio_pago?: string | null;
           notas?: string | null;
           tarjeta_terminacion?: string | null;
           usuario_captura_id?: string | null;
@@ -2489,6 +2620,28 @@ export class ExpensesService {
         escalaAutoLimpiada = true;
       } else if (!vueloEf) {
         dto.vuelo_id = tramoRef.vuelo_id;
+      }
+    }
+    // CONCILIADO CON EL BANCO (14-sep-2026): con pagos parciales el gasto
+    // puede tener VARIOS cargos ligados sin estar `conciliado`. Tocar
+    // monto/moneda/medio con cargos vivos descuadraría la conciliación (la
+    // suma dejaría de cuadrar con el ticket): se exige desvincular primero.
+    // Los demás campos (notas, vuelo, categoría, foto…) siguen editables.
+    //
+    // SOLO CUANDO EL VALOR CAMBIA DE VERDAD (revisión 14-sep-2026): el
+    // diálogo «Verificar» del panel manda SIEMPRE monto/moneda/medio (son
+    // campos del formulario, se toquen o no). Con la comparación por
+    // `!== undefined` a secas, corregir la CATEGORÍA, ligar el VUELO o
+    // anotar una nota de un gasto con cargos ligados rebotaba 409 — justo
+    // lo que la regla promete que sigue libre.
+    if (this.cambiaDineroDelGasto(dto, actual)) {
+      const cargos = await this.cargosBancariosDe(id);
+      if (cargos > 0) {
+        throw new ConflictException({
+          message: this.mensajeCargosLigados(cargos, 'corregirlo'),
+          error: 'GASTO_CONCILIADO',
+          details: { movimientos_ligados: cargos },
+        });
       }
     }
     // Gasto con REPARTO MANUAL (gasto_reparto): mutar monto/categoría/vuelo/
@@ -2812,6 +2965,17 @@ export class ExpensesService {
     // set null): borrarlo dejaría el movimiento "conciliado" apuntando a
     // nada y la conciliación se sobreestimaría en silencio.
     const gasto = await this.findById(id);
+    // Pagos PARCIALES (14-sep-2026): el candado mira los CARGOS ligados, no
+    // solo la bandera — un gasto con un pago parcial no está `conciliado`
+    // pero ya tiene banco detrás.
+    const cargosLigados = await this.cargosBancariosDe(id);
+    if (cargosLigados > 0) {
+      throw new ConflictException({
+        message: this.mensajeCargosLigados(cargosLigados, 'eliminarlo'),
+        error: 'GASTO_CONCILIADO',
+        details: { movimientos_ligados: cargosLigados },
+      });
+    }
     if (gasto.conciliado === true) {
       throw new ConflictException({
         message:

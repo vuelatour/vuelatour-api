@@ -220,7 +220,7 @@ export class ConciliacionController {
   @Get('gastos-sin-banco')
   @ApiOperation({
     summary:
-      'Gastos BANCARIOS (tarjeta/transferencia) que NO aparecen en ningún estado de cuenta: sin conciliar tras los cruces. Default: últimos 90 días.',
+      'Gastos BANCARIOS (tarjeta/transferencia/PayWise) que NO aparecen en ningún estado de cuenta: sin conciliar tras los cruces. Incluye los de pago PARCIAL (aditivos monto_vinculado, faltante, parcial). Default: últimos 90 días.',
   })
   gastosSinBanco(
     @Query('desde') desde?: string,
@@ -239,7 +239,10 @@ export class ConciliacionController {
   }
 
   @Patch('movimientos/:id')
-  @ApiOperation({ summary: 'Vincula o desvincula un movimiento con un gasto' })
+  @ApiOperation({
+    summary:
+      'Vincula o desvincula un movimiento con un gasto. PAGOS PARCIALES (14-sep-2026): un gasto admite VARIOS cargos de su MISMA moneda mientras la suma no rebase su monto (+1.00 de tolerancia); moneda distinta (gasto USD ↔ cuenta MXN) sigue siendo 1 ↔ 1. `gasto.conciliado` se recalcula con la suma: parcial ⇒ sigue en gastos-sin-banco. Respuesta ADITIVA: gasto_conciliado, monto_vinculado, faltante (null al desvincular). Si no cabe: 409 GASTO_YA_CUBIERTO con details {motivo, monto_gasto, suma_ligada, faltante, movimientos[]}.',
+  })
   link(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: LinkMovimientoDto,

@@ -47,6 +47,15 @@ import {
   type MovimientoPaywise,
   type ResultadoCrucePaywise,
 } from './paywise-cruce.util';
+import {
+  cubreGasto,
+  faltanteDe,
+  montoBonito,
+  mensajeGastoYaCubierto,
+  mensajeMonedaDistinta,
+  puedeLigar,
+  type MotivoNoLigar,
+} from './conciliacion-parcial.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -138,6 +147,19 @@ export interface LigaCobroInput {
   cobro_grupo_id?: string | null;
 }
 
+/**
+ * Cargo del banco ligado a un gasto (pagos parciales, 14-sep-2026):
+ * `monto` en POSITIVO (|monto| del movimiento) y `moneda` = la de su
+ * cuenta bancaria — con ella se decide si suma contra el gasto o si es el
+ * caso cruzado USD↔MXN (1 ↔ 1).
+ */
+export interface CargoDeGasto {
+  id: string;
+  fecha: string | null;
+  monto: number;
+  moneda: string | null;
+}
+
 function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
   return Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 }
@@ -199,6 +221,9 @@ export interface SugerenciaConciliacion {
     fecha: string | null;
     monto: number;
     proveedor: string | null;
+    /** Aditivos (14-sep-2026, pagos parciales): lo ya cruzado y lo que falta. */
+    monto_vinculado?: number;
+    faltante?: number;
   }>;
 }
 
@@ -665,8 +690,7 @@ export class ConciliacionService {
     const { data, error } = await q;
     if (error) return false;
     if (data && data.length === 1) {
-      await this.link(movId, data[0].id, userId);
-      return true;
+      return this.ligarAuto(movId, data[0].id as string, userId);
     }
     if ((data ?? []).length > 1) return false;
 
@@ -692,11 +716,35 @@ export class ConciliacionService {
         return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX;
       });
       if (plausibles.length === 1) {
-        await this.link(movId, plausibles[0].id as string, userId);
-        return true;
+        return this.ligarAuto(movId, plausibles[0].id as string, userId);
       }
     }
     return false;
+  }
+
+  /**
+   * Liga del auto-match: un 409 (gasto ya cubierto por otros cargos, carrera
+   * con otra liga) NO puede tumbar la importación completa — se deja el
+   * movimiento pendiente para que la oficina lo cruce a mano. Solo los
+   * errores de verdad (BD caída) siguen subiendo.
+   */
+  private async ligarAuto(
+    movId: string,
+    gastoId: string,
+    userId: string,
+  ): Promise<boolean> {
+    try {
+      await this.link(movId, gastoId, userId);
+      return true;
+    } catch (err) {
+      if (err instanceof ConflictException) {
+        this.logger.warn(
+          `auto-match: el gasto ${gastoId} no admite el cargo ${movId} (${err.message}); queda pendiente.`,
+        );
+        return false;
+      }
+      throw err;
+    }
   }
 
   /** Ventana [fecha − días, fecha + días] en UTC (fecha = DATE del banco). */
@@ -2003,6 +2051,36 @@ export class ConciliacionService {
    * gasto no coincide, o el cargo nunca llegó al banco. Default: últimos
    * 90 días por fecha_gasto (DATE, sin componente horaria).
    */
+  /**
+   * Suma de |monto| de los cargos del banco ligados a cada gasto (pagos
+   * parciales, 14-sep-2026). Devuelve solo los gastos CON algún cargo; los
+   * demás valen 0. Se consulta por lotes (`in`) para no disparar una
+   * consulta por fila.
+   */
+  private async sumasLigadasDe(
+    gastoIds: string[],
+  ): Promise<Map<string, number>> {
+    const out = new Map<string, number>();
+    const ids = [...new Set(gastoIds.filter(Boolean))];
+    const CHUNK = 200;
+    for (let i = 0; i < ids.length; i += CHUNK) {
+      const { data, error } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select('gasto_id, monto')
+        .in('gasto_id', ids.slice(i, i + CHUNK));
+      if (error) throw new Error(error.message);
+      for (const m of data ?? []) {
+        const gid = m.gasto_id as string | null;
+        if (!gid) continue;
+        out.set(
+          gid,
+          r2((out.get(gid) ?? 0) + (Math.abs(Number(m.monto)) || 0)),
+        );
+      }
+    }
+    return out;
+  }
+
   async gastosSinBanco(desde?: string, hasta?: string) {
     const d =
       desde ??
@@ -2022,12 +2100,22 @@ export class ConciliacionService {
     const { data, count, error } = await q;
     if (error) throw new Error(error.message);
     const rows = (data ?? []) as Array<Record<string, unknown>>;
+    // Pagos PARCIALES (14-sep-2026): un gasto sigue aquí mientras la suma de
+    // sus cargos no lo cubra — con lo ya vinculado y lo que falta, para que
+    // la oficina no lo lea como "sin nada del banco".
+    const vinculado = await this.sumasLigadasDe(
+      rows.map((g) => g.id as string),
+    );
     // Totales por moneda NATIVA (jamás convertir aquí: es un listado de
     // faltantes, no un balance).
     const porMoneda = new Map<string, number>();
     for (const g of rows) {
       const mon = (g.moneda as string) ?? 'MXN';
       porMoneda.set(mon, (porMoneda.get(mon) ?? 0) + Number(g.monto));
+      const suma = vinculado.get(g.id as string) ?? 0;
+      g.monto_vinculado = suma;
+      g.faltante = faltanteDe(Number(g.monto), suma);
+      g.parcial = suma > 0;
     }
     return {
       data: rows,
@@ -2363,7 +2451,7 @@ export class ConciliacionService {
     const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
       Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 
-    const [repartos, mapas] = await Promise.all([
+    const [repartos, mapas, vinculado] = await Promise.all([
       fetchRepartos(
         this.supabase.service,
         rows.map((g) => g.id as string),
@@ -2373,6 +2461,8 @@ export class ConciliacionService {
           .map((g) => g.escala_id as string | null)
           .filter((id): id is string => !!id),
       ),
+      // Pagos PARCIALES (14-sep-2026): cuánto del gasto ya cruzó con el banco.
+      this.sumasLigadasDe(rows.map((g) => g.id as string)),
     ]);
 
     // Totales por moneda NATIVA (jamás convertir aquí: es un listado de
@@ -2410,6 +2500,12 @@ export class ConciliacionService {
         ),
         monto,
         mon,
+        // «Parcial»: el gasto ya trae cargos del banco pero no lo cubren.
+        (() => {
+          const ligado = vinculado.get(g.id as string) ?? 0;
+          if (!(ligado > 0)) return '';
+          return `parcial · faltan ${montoBonito(faltanteDe(monto, ligado))} de ${montoBonito(monto)}`;
+        })(),
       ];
     });
 
@@ -2426,6 +2522,8 @@ export class ConciliacionService {
         { label: 'Matrícula', tipo: 'texto' },
         { label: 'Monto', tipo: 'money' },
         { label: 'Moneda', tipo: 'texto' },
+        // Aditiva y AL FINAL: el resalte naranja apunta a la col 7 (Monto).
+        { label: 'Parcial', tipo: 'texto' },
       ],
       filas,
       // Nada de esta pestaña está conciliado: TODOS los montos en naranja
@@ -2536,7 +2634,186 @@ export class ConciliacionService {
     };
   }
 
-  /** Vincula (o desvincula si gastoId es null) un movimiento con un gasto. */
+  /**
+   * Cargos del banco YA ligados a un gasto, con la MONEDA de su cuenta
+   * (14-sep-2026: un gasto admite N cargos de su misma moneda). `excepto`
+   * saca de la lista al movimiento que se está ligando/desligando.
+   */
+  private async cargosDeGasto(
+    gastoId: string,
+    excepto?: string | null,
+  ): Promise<CargoDeGasto[]> {
+    let q = this.supabase.service
+      .from('movimiento_bancario')
+      .select(
+        'id, fecha, monto, cuenta_bancaria_id, cuenta:cuenta_bancaria(moneda)',
+      )
+      .eq('gasto_id', gastoId)
+      .order('fecha', { ascending: true });
+    if (excepto) q = q.neq('id', excepto);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    return (data ?? []).map((m) => ({
+      id: m.id as string,
+      fecha: (m.fecha as string | null) ?? null,
+      monto: Math.abs(Number(m.monto)) || 0,
+      moneda:
+        unwrapOne(
+          m.cuenta as { moneda?: string } | { moneda?: string }[] | null,
+        )?.moneda ?? null,
+    }));
+  }
+
+  /**
+   * Estado de conciliación de un gasto a partir de SUS cargos ligados:
+   * cuánto suma, cuánto falta y si está CUBIERTO (= `gasto.conciliado`,
+   * fuente única `cubreGasto`). Un cargo de OTRA moneda (gasto USD contra
+   * cuenta MXN) es 1 ↔ 1 y se da por cubierto: de él se deriva el `tc_gasto`
+   * (invariante 7) y su monto no es comparable con el del gasto.
+   */
+  private estadoConciliacion(
+    gasto: { monto: unknown; moneda?: string | null },
+    cargos: CargoDeGasto[],
+  ): {
+    suma: number;
+    faltante: number;
+    cubierto: boolean;
+    cruzado: boolean;
+  } {
+    const monto = Math.abs(Number(gasto.monto)) || 0;
+    const moneda = (gasto.moneda as string | null) ?? null;
+    const cruzados = cargos.filter(
+      (c) => c.moneda != null && moneda != null && c.moneda !== moneda,
+    );
+    if (cruzados.length > 0) {
+      return { suma: monto, faltante: 0, cubierto: true, cruzado: true };
+    }
+    const suma = r2(cargos.reduce((acc, c) => acc + c.monto, 0));
+    return {
+      suma,
+      faltante: faltanteDe(monto, suma),
+      cubierto: cargos.length > 0 && cubreGasto(monto, suma),
+      cruzado: false,
+    };
+  }
+
+  /**
+   * 409 explicado (GASTO_YA_CUBIERTO) con los cargos que ya lo cubren.
+   * `montoNuevo` = el cargo que se intentó ligar: sin cargos previos (el
+   * PRIMER cargo ya rebasa el ticket) el texto tiene que hablar de ÉL, no
+   * decir «ya está cubierto: $0.00 de $277.79».
+   */
+  private conflictoGastoCubierto(
+    gasto: { monto: unknown; moneda?: string | null },
+    cargos: CargoDeGasto[],
+    motivo: MotivoNoLigar,
+    monedaCuenta?: string | null,
+    montoNuevo?: number,
+  ): ConflictException {
+    const montoGasto = Math.abs(Number(gasto.monto)) || 0;
+    const sumaLigada = r2(cargos.reduce((acc, c) => acc + c.monto, 0));
+    return new ConflictException({
+      message:
+        motivo === 'MONEDA_DISTINTA'
+          ? mensajeMonedaDistinta({
+              monedaGasto: (gasto.moneda as string | null) ?? null,
+              monedaCuenta: monedaCuenta ?? cargos[0]?.moneda ?? null,
+              cargos,
+            })
+          : mensajeGastoYaCubierto({
+              montoGasto,
+              sumaLigada,
+              cargos,
+              montoNuevo,
+            }),
+      error: 'GASTO_YA_CUBIERTO',
+      details: {
+        motivo,
+        monto_gasto: r2(montoGasto),
+        // Moneda del GASTO (aditivo): el panel imprime el sufijo USD en los
+        // textos del 409 sin adivinarla.
+        moneda: (gasto.moneda as string | null) ?? null,
+        suma_ligada: sumaLigada,
+        faltante: faltanteDe(montoGasto, sumaLigada),
+        monto_nuevo: montoNuevo != null ? r2(Math.abs(montoNuevo)) : null,
+        movimientos: cargos.map((c) => ({
+          id: c.id,
+          fecha: c.fecha,
+          monto: c.monto,
+        })),
+      },
+    });
+  }
+
+  /**
+   * Recalcula `gasto.conciliado` desde SUS cargos ligados (fuente única
+   * `cubreGasto`): cubierto ⇒ true, parcial o sin cargos ⇒ false. Se llama
+   * SIEMPRE después de mover una liga (al ligar y al desligar): antes se
+   * ponía `false` a ciegas y un gasto pagado en dos cargos se "des-conciliaba"
+   * al soltar uno solo de ellos.
+   *
+   * `montoDesligado` (monto del cargo que se acaba de soltar) limpia el
+   * `tc_gasto` DERIVADO de ese cargo cuando ya no queda ninguno;
+   * `tcDerivado` lo escribe al ligar una compra USD contra un cargo MXN.
+   * Un fallo aquí LANZA (fail-loud): un gasto con la bandera equivocada
+   * desaparece de la bandeja o se vuelve a cruzar con otro cargo.
+   */
+  private async recalcularGasto(
+    gastoId: string,
+    userId: string,
+    opts: { tcDerivado?: number | null; montoDesligado?: number } = {},
+  ): Promise<{ suma: number; faltante: number; cubierto: boolean }> {
+    const { data: gasto, error } = await this.supabase.service
+      .from('gasto')
+      .select('id, monto, moneda, tc_gasto, conciliado')
+      .eq('id', gastoId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!gasto) return { suma: 0, faltante: 0, cubierto: false };
+    const cargos = await this.cargosDeGasto(gastoId);
+    const est = this.estadoConciliacion(gasto, cargos);
+    const limpiarTc =
+      opts.montoDesligado != null &&
+      cargos.length === 0 &&
+      gasto.moneda === 'USD' &&
+      gasto.tc_gasto != null &&
+      Number(gasto.monto) > 0 &&
+      Math.abs(
+        Number(gasto.tc_gasto) - opts.montoDesligado / Number(gasto.monto),
+      ) < 0.001;
+    const patch: Record<string, unknown> = {
+      conciliado: est.cubierto,
+      updated_by: userId,
+    };
+    if (limpiarTc) patch.tc_gasto = null;
+    if (opts.tcDerivado != null) patch.tc_gasto = opts.tcDerivado;
+    const { error: upErr } = await this.supabase.service
+      .from('gasto')
+      .update(patch)
+      .eq('id', gastoId);
+    if (upErr) {
+      throw new Error(
+        `El movimiento quedó guardado pero no se pudo recalcular la conciliación del gasto: ${upErr.message}`,
+      );
+    }
+    return { suma: est.suma, faltante: est.faltante, cubierto: est.cubierto };
+  }
+
+  /**
+   * Vincula (o desvincula si gastoId es null) un movimiento con un gasto.
+   *
+   * PAGOS PARCIALES (14-sep-2026, caso real: UNA factura de ASUR cobrada en
+   * DOS cargos de tarjeta). Un gasto admite VARIOS cargos siempre que:
+   *  - todos sean de la MISMA moneda que el gasto (si el cargo es de otra
+   *    moneda sigue siendo 1 ↔ 1: de ese cargo sale el `tc_gasto`), y
+   *  - la suma de |monto| no rebase `gasto.monto + TOLERANCIA_CONCILIACION`
+   *    (si de verdad son dos pagos de la misma factura, el gasto debe valer
+   *    la suma de los dos ⇒ 409 `GASTO_YA_CUBIERTO` explicado).
+   * `gasto.conciliado` se recalcula SIEMPRE con la suma (`cubreGasto`): un
+   * pago parcial deja el gasto en la bandeja con `monto_vinculado`/`faltante`.
+   * Campos ADITIVOS de la respuesta: `gasto_conciliado`, `monto_vinculado`,
+   * `faltante` (null al desvincular).
+   */
   async link(movId: string, gastoId: string | null, userId: string) {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
@@ -2549,9 +2826,6 @@ export class ConciliacionService {
     const prevGasto = (mov as { gasto_id: string | null }).gasto_id;
     const movMonto = Math.abs(Number((mov as { monto: unknown }).monto)) || 0;
 
-    // Un gasto ya conciliado NO puede cuadrar una segunda línea del banco
-    // (doble conciliación). El auto-match ya lo respeta; el vínculo manual
-    // también debe hacerlo.
     type GastoLink = {
       id: string;
       conciliado: boolean;
@@ -2560,7 +2834,8 @@ export class ConciliacionService {
       tc_gasto: number | null;
     };
     let gastoVinculado: GastoLink | null = null;
-    if (gastoId && gastoId !== prevGasto) {
+    let cuentaMoneda: string | null = null;
+    if (gastoId) {
       const { data: gasto, error: gastoErr } = await this.supabase.service
         .from('gasto')
         .select('id, conciliado, moneda, monto, tc_gasto')
@@ -2568,42 +2843,49 @@ export class ConciliacionService {
         .maybeSingle();
       if (gastoErr) throw new Error(gastoErr.message);
       if (!gasto) throw new BadRequestException('Gasto no encontrado.');
-      if (gasto.conciliado === true) {
-        throw new ConflictException(
-          'Ese gasto ya está conciliado con otro movimiento bancario.',
-        );
-      }
       gastoVinculado = gasto;
-    }
-
-    if (prevGasto && prevGasto !== gastoId) {
-      // Libera el gasto previamente vinculado. Si falla, se aborta: dejarlo
-      // conciliado=true sin movimiento lo sacaría de la conciliación en
-      // silencio (regla del repo: nada de fallos silenciosos en dinero).
-      // Si su tc_gasto fue DERIVADO de este cargo (gasto USD con TC ≈ cargo
-      // MXN ÷ monto), también se limpia: era información de este vínculo.
-      const { data: prev } = await this.supabase.service
-        .from('gasto')
-        .select('moneda, monto, tc_gasto')
-        .eq('id', prevGasto)
-        .maybeSingle();
-      const limpiarTc =
-        prev?.moneda === 'USD' &&
-        prev.tc_gasto != null &&
-        Number(prev.monto) > 0 &&
-        Math.abs(Number(prev.tc_gasto) - movMonto / Number(prev.monto)) < 0.001;
-      const { error: liberaErr } = await this.supabase.service
-        .from('gasto')
-        .update({
-          conciliado: false,
-          ...(limpiarTc ? { tc_gasto: null } : {}),
-          updated_by: userId,
-        })
-        .eq('id', prevGasto);
-      if (liberaErr) {
-        throw new Error(
-          `No se pudo liberar el gasto previamente conciliado: ${liberaErr.message}`,
+      cuentaMoneda = await this.monedaCuenta(
+        (mov as { cuenta_bancaria_id: string }).cuenta_bancaria_id,
+      );
+      // Solo al ENTRAR una liga nueva: re-ligar el mismo gasto es idempotente.
+      if (gastoId !== prevGasto) {
+        const monedaGasto = gastoVinculado.moneda ?? null;
+        const otros = await this.cargosDeGasto(gastoId, movId);
+        const cruzados = otros.filter(
+          (c) =>
+            c.moneda != null && monedaGasto != null && c.moneda !== monedaGasto,
         );
+        // Ya conciliado contra otra moneda (1 ↔ 1): ningún cargo más.
+        if (cruzados.length > 0) {
+          throw this.conflictoGastoCubierto(
+            gastoVinculado,
+            otros,
+            'MONEDA_DISTINTA',
+            cruzados[0].moneda,
+            movMonto,
+          );
+        }
+        const mismaMoneda =
+          cuentaMoneda == null ||
+          monedaGasto == null ||
+          cuentaMoneda === monedaGasto;
+        const sumaLigada = r2(otros.reduce((acc, c) => acc + c.monto, 0));
+        const veredicto = puedeLigar({
+          montoGasto: Number(gastoVinculado.monto),
+          sumaLigada,
+          montoNuevo: movMonto,
+          mismaMoneda,
+          yaHayLigados: otros.length > 0,
+        });
+        if (!veredicto.ok) {
+          throw this.conflictoGastoCubierto(
+            gastoVinculado,
+            otros,
+            veredicto.motivo ?? 'GASTO_YA_CUBIERTO',
+            cuentaMoneda,
+            movMonto,
+          );
+        }
       }
     }
 
@@ -2621,17 +2903,51 @@ export class ConciliacionService {
       .select(MOV_COLS)
       .maybeSingle();
     if (error) {
-      // Índice único uq_mov_bancario_gasto: dos vínculos simultáneos al mismo
-      // gasto pasan el check previo (TOCTOU) pero solo uno gana en la BD.
-      if (error.code === '23505' || error.message?.includes('23505'))
+      const msg = error.message ?? '';
+      // Trigger tg_mov_bancario_gasto_suma (migración 20260914000001): cierra
+      // el TOCTOU que antes cerraba el índice único uq_mov_bancario_gasto —
+      // dos ligas simultáneas al mismo gasto pasan el check previo, pero en
+      // la BD solo cabe la que no rebasa el monto.
+      if (
+        (error.code === '23514' || msg.includes('23514')) &&
+        msg.includes('GASTO_YA_CUBIERTO')
+      ) {
+        const gasto = gastoVinculado ?? { monto: 0, moneda: null };
+        const cargos = gastoId
+          ? await this.cargosDeGasto(gastoId, movId).catch(
+              () => [] as CargoDeGasto[],
+            )
+          : [];
+        throw this.conflictoGastoCubierto(
+          gasto,
+          cargos,
+          msg.includes('MONEDA') ? 'MONEDA_DISTINTA' : 'GASTO_YA_CUBIERTO',
+          cuentaMoneda,
+          movMonto,
+        );
+      }
+      // Índice único uq_mov_bancario_gasto (mientras la migración
+      // 20260914000001 no esté aplicada): el gasto sigue siendo 1 ↔ 1.
+      if (error.code === '23505' || msg.includes('23505'))
         throw new ConflictException(
           'Ese gasto ya está vinculado a otro movimiento bancario.',
         );
       if (error.code === '23503')
         throw new BadRequestException('Gasto no encontrado.');
-      throw new Error(error.message);
+      throw new Error(msg);
     }
 
+    // El gasto ANTERIOR se recalcula con los cargos que le QUEDAN (puede
+    // seguir cubierto por otro pago del mismo ticket): ya no se pone
+    // conciliado=false a ciegas.
+    if (prevGasto && prevGasto !== gastoId) {
+      await this.recalcularGasto(prevGasto, userId, {
+        montoDesligado: movMonto,
+      });
+    }
+
+    let estado: { suma: number; faltante: number; cubierto: boolean } | null =
+      null;
     if (gastoId) {
       // Compra en DÓLARES conciliada contra un cargo en PESOS: el estado de
       // cuenta REVELA el tipo de cambio real del banco (cargo MXN ÷ gasto
@@ -2644,9 +2960,6 @@ export class ConciliacionService {
         Number(gastoVinculado.monto) > 0 &&
         movMonto > 0
       ) {
-        const cuentaMoneda = await this.monedaCuenta(
-          (mov as { cuenta_bancaria_id: string }).cuenta_bancaria_id,
-        );
         const tc = movMonto / Number(gastoVinculado.monto);
         if (
           cuentaMoneda === 'MXN' &&
@@ -2656,23 +2969,16 @@ export class ConciliacionService {
           tcDerivado = Math.round(tc * 10000) / 10000;
         }
       }
-      // Si falla, se avisa: un gasto que sigue conciliado=false puede volver a
-      // matchearse con OTRO cargo (doble conciliación silenciosa).
-      const { error: marcaErr } = await this.supabase.service
-        .from('gasto')
-        .update({
-          conciliado: true,
-          ...(tcDerivado != null ? { tc_gasto: tcDerivado } : {}),
-          updated_by: userId,
-        })
-        .eq('id', gastoId);
-      if (marcaErr) {
-        throw new Error(
-          `El movimiento quedó vinculado pero no se pudo marcar el gasto como conciliado: ${marcaErr.message}`,
-        );
-      }
+      estado = await this.recalcularGasto(gastoId, userId, { tcDerivado });
     }
-    return data!;
+    // Aditivos (14-sep-2026): el panel decide el toast «Gasto cubierto» vs
+    // «Pago parcial: faltan $X» con la respuesta, sin recalcular nada.
+    return {
+      ...data!,
+      gasto_conciliado: estado ? estado.cubierto : null,
+      monto_vinculado: estado ? estado.suma : null,
+      faltante: estado ? estado.faltante : null,
+    };
   }
 
   /**
@@ -2834,8 +3140,38 @@ export class ConciliacionService {
       moneda?: string | null;
       proveedor: { nombre: string } | { nombre: string }[] | null;
     };
+
+    // PAGOS PARCIALES (14-sep-2026): una factura pagada en dos cargos tiene
+    // `monto` MAYOR que este cargo — no cae en la banda de monto. Se buscan
+    // aparte los gastos más caros de la ventana y se comparan contra su
+    // FALTANTE (monto − lo ya vinculado), que es lo que este cargo cubriría.
+    let masCaros: GastoRow[] = [];
+    if (montoHi > 0) {
+      let qParcial = this.supabase.service
+        .from('gasto')
+        .select(
+          'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
+        )
+        .eq('conciliado', false)
+        .in('medio_pago', MEDIOS_BANCARIOS)
+        .gte('fecha_gasto', iso(lo))
+        .lte('fecha_gasto', iso(hi))
+        .gt('monto', montoHi)
+        .limit(40);
+      if (moneda) qParcial = qParcial.eq('moneda', moneda);
+      const { data: caros, error: carosErr } = await qParcial;
+      if (!carosErr) masCaros = caros ?? [];
+    }
+
+    const propiosRaw = (data ?? []) as GastoRow[];
+    const vinculado = await this.sumasLigadasDe([
+      ...propiosRaw.map((g) => g.id),
+      ...masCaros.map((g) => g.id),
+    ]);
+
     const aCandidato = (g: GastoRow, tcImplicito: number | null) => {
       const prov = Array.isArray(g.proveedor) ? g.proveedor[0] : g.proveedor;
+      const ligado = vinculado.get(g.id) ?? 0;
       return {
         id: g.id,
         fecha: g.fecha_gasto,
@@ -2843,16 +3179,26 @@ export class ConciliacionService {
         moneda: g.moneda ?? undefined,
         tc_implicito: tcImplicito,
         proveedor: prov?.nombre ?? null,
+        // Aditivos (14-sep-2026): con pagos parciales el candidato se juzga
+        // por lo que FALTA, no por su monto total.
+        monto_vinculado: ligado,
+        faltante: faltanteDe(Number(g.monto), ligado),
       };
     };
-    const propios = ((data ?? []) as GastoRow[]).map((g) =>
-      aCandidato(g, null),
-    );
+    const propios = propiosRaw.map((g) => aCandidato(g, null));
+    const parciales = masCaros
+      .filter((g) => {
+        const ligado = vinculado.get(g.id) ?? 0;
+        if (!(ligado > 0)) return false;
+        const falta = faltanteDe(Number(g.monto), ligado);
+        return falta >= montoLo && falta <= montoHi;
+      })
+      .map((g) => aCandidato(g, null));
 
     // Cuenta en PESOS: una compra EN DÓLARES cuyo cargo llegó en MXN no cae
     // en la banda del monto — se ofrece aparte si su TC implícito (cargo ÷
     // gasto USD) es plausible, con el TC visible para que el operador decida.
-    if (moneda !== 'MXN' || !(monto > 0)) return propios;
+    if (moneda !== 'MXN' || !(monto > 0)) return [...propios, ...parciales];
     const { data: usd, error: usdErr } = await this.supabase.service
       .from('gasto')
       .select(
@@ -2864,7 +3210,7 @@ export class ConciliacionService {
       .gte('fecha_gasto', iso(lo))
       .lte('fecha_gasto', iso(hi))
       .limit(15);
-    if (usdErr) return propios;
+    if (usdErr) return [...propios, ...parciales];
     const cruzados = ((usd ?? []) as GastoRow[])
       .map((g) => {
         const m = Number(g.monto);
@@ -2874,6 +3220,6 @@ export class ConciliacionService {
           : null;
       })
       .filter((c): c is NonNullable<typeof c> => c !== null);
-    return [...propios, ...cruzados];
+    return [...propios, ...parciales, ...cruzados];
   }
 }

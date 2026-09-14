@@ -126,6 +126,46 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    `GET …/auditoria.xlsx` (3 hojas). `GET /conciliacion/cobros-sin-banco`
    = espejo de gastos-sin-banco; el pre-cierre lo expone como aviso
    `cobros_bancarios_sin_conciliar` (no bloquea).
+   **PAGOS PARCIALES — 1 gasto ↔ N movimientos (14-sep-2026, caso real: UNA
+   factura de ASUR cobrada en DOS cargos, operación y FBO por separado)**:
+   un gasto admite VARIOS `movimiento_bancario` ligados SOLO si todos son de
+   la MISMA moneda que el gasto (`cuenta_bancaria.moneda = gasto.moneda`) y
+   la suma de |monto| no rebasa `gasto.monto + 1.00` (TOLERANCIA). Un gasto
+   conciliado contra OTRA moneda (USD ↔ cuenta MXN, de donde se deriva su
+   `tc_gasto`) sigue siendo **1 ↔ 1**. Fuente única de la regla:
+   `src/modules/conciliacion/conciliacion-parcial.util.ts` (`faltanteDe`,
+   `cubreGasto`, `puedeLigar`, puras) + su ESPEJO en BD, el trigger
+   `tg_mov_bancario_gasto_suma` (migración `20260914000001`, `for update`
+   sobre el gasto: cierra el TOCTOU que cerraba el índice único
+   `uq_mov_bancario_gasto`, hoy retirado) que lanza 23514 con prefijo
+   `GASTO_YA_CUBIERTO` y el service traduce a 409 `GASTO_YA_CUBIERTO`
+   (`details {motivo, monto_gasto, suma_ligada, faltante, movimientos[]}`).
+   **`gasto.conciliado` = CUBIERTO**, no "tiene liga": parcial ⇒ `false` y el
+   gasto SIGUE en `gastos-sin-banco` y en el reporte, con los aditivos
+   `monto_vinculado` / `faltante` / `parcial` (columna «Parcial» en el xlsx).
+   `link` recalcula `conciliado` desde la suma SIEMPRE — al ligar y al
+   desligar (desvincular uno de dos NO desconcilia a ciegas: el otro sigue
+   contando). `autoMatch` NO cambió (monto exacto, `conciliado=false`) pero
+   un 409 suyo ya no tumba la importación: deja el movimiento pendiente.
+   `sugerir`/`candidatosCercanos` ofrecen los gastos con pago parcial
+   comparando contra el **faltante**. CANDADO espejo en `expenses`: un gasto
+   con CUALQUIER cargo ligado (aunque parcial) no se edita en
+   `monto`/`moneda`/`medio_pago` ni se borra (409 `GASTO_CONCILIADO` +
+   `details.movimientos_ligados`); notas, vuelo y categoría siguen libres.
+   El candado compara el valor NUEVO contra el VIGENTE
+   (`cambiaDineroDelGasto`), NO «¿viene el campo?»: el diálogo «Verificar»
+   del panel manda SIEMPRE monto/moneda/medio (son campos del formulario) y
+   con la comparación por `!== undefined` a secas reclasificar o ligar el
+   vuelo de un gasto con cargos rebotaba 409 — justo lo que la regla deja
+   libre. Sin la fila vigente a la mano se responde «sí cambia»
+   (fail-closed).
+   **La regla también rechaza el PRIMER cargo** cuando él solo rebasa el
+   ticket (cargo de $1,850 contra un gasto de $277.79: paga varias facturas
+   o el gasto está mal capturado) — comportamiento NUEVO (antes se podía
+   ligar cualquier movimiento a cualquier gasto) con su propio texto
+   («Ese cargo ($1,850.00) es MAYOR que el gasto…»); decir «ya está
+   cubierto: $0.00 de $277.79» no significaba nada. `details` del 409 lleva
+   además `moneda` y `monto_nuevo` (aditivos).
 
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
    `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se
@@ -674,6 +714,33 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     (el tramo lo resuelve). OFICINA y MECÁNICO quedan FUERA del candado a
     propósito (la oficina liga después; el mecánico carga GAS en base). Con
     vuelo, las reglas de siempre no cambian.
+
+17. **Historial de gastos: la bitácora de un gasto MOVIDO vive bajo el vuelo
+    DESTINO (14-sep-2026, caso real #260 → #268).** `tg_gasto_bitacora`
+    escribe la fila UPDATE con `coalesce(new.vuelo_id, old.vuelo_id)`, así
+    que el vuelo de ORIGEN se quedaba con una captura MUDA («Gasto
+    capturado» sin descripción ni acción, porque el gasto ya no vivía ahí) y
+    el destino no decía de dónde venía. `FlightsService.gastosHistorial`
+    ahora suma a la bitácora del vuelo las filas UPDATE cuyo
+    `diff->'vuelo_id'->>'antes'` es ESTE vuelo (índice de expresión
+    `idx_gasto_bitacora_movido_desde`, migración `20260914000001`; NO parcial
+    a propósito: con `where diff ? 'vuelo_id'` el planeador no puede usarlo),
+    deduplica por `gasto_bitacora.id` (un UPDATE que DESLIGA el vuelo cae en
+    las dos consultas) y expone el campo ADITIVO
+    `movimiento: { tipo: 'salio' | 'llego', vuelo_id, folio } | null` —
+    `accion` (INSERT/UPDATE/DELETE) NO cambia. `descripcion_gasto` se
+    resuelve también para gastos que ya no viven en el vuelo (consulta por
+    los ids faltantes; si se borró, el snapshot del DELETE como siempre) y
+    los folios salen de UNA consulta `in`. Las dos lecturas extra son
+    best-effort: si fallan, el historial sale como siempre (warn en el log),
+    nunca 500.
+    **`movimiento.vuelo_id` PUEDE SER null** y no es un caso raro: `llego`
+    con null = al gasto se le ASIGNÓ este vuelo estando suelto (lo más común
+    de todos: la oficina liga un gasto de la bandeja) y `salio` con null =
+    se le QUITÓ el vuelo. Sin contraparte NO hay «otro vuelo»: el panel dice
+    «Gasto asignado a este vuelo» / «Gasto desligado de este vuelo» y no
+    pinta liga (antes el tipo lo declaraba `string`, el título mentía y el
+    enlace iba a `/admin/flights/null`).
 
 ## Convenciones NestJS
 

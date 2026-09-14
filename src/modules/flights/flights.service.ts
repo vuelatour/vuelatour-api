@@ -420,9 +420,14 @@ export class FlightsService {
    * (alta normal sin pre-check, sin columna en el insert, sin rama 23505).
    */
   private conClientRequestEscala(): Promise<boolean> {
-    return columnaOpcional(this.supabase.service, 'escala', 'client_request_id', {
-      mensajeAusente: `Columna escala.client_request_id no existe todavía: tramos sin idempotencia hasta aplicar la migración ${MIGRACION_CLIENT_REQUEST_ALTAS}`,
-    }).disponible();
+    return columnaOpcional(
+      this.supabase.service,
+      'escala',
+      'client_request_id',
+      {
+        mensajeAusente: `Columna escala.client_request_id no existe todavía: tramos sin idempotencia hasta aplicar la migración ${MIGRACION_CLIENT_REQUEST_ALTAS}`,
+      },
+    ).disponible();
   }
 
   /** Llave de idempotencia EFECTIVA del tramo (null si no viaja o no hay columna). */
@@ -450,7 +455,7 @@ export class FlightsService {
       .eq('client_request_id', key)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as Record<string, unknown> | null) ?? null;
+    return data ?? null;
   }
 
   /**
@@ -469,7 +474,7 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as Record<string, unknown> | null) ?? null;
+    return data ?? null;
   }
 
   /**
@@ -495,7 +500,7 @@ export class FlightsService {
     if (!data) throw escalaNoExiste(legId);
     throw conflictoVersion({
       entidad: 'tramo',
-      actual: data as Record<string, unknown>,
+      actual: data,
       enviado,
     });
   }
@@ -594,10 +599,7 @@ export class FlightsService {
       .select(COBRO_COLS)
       .eq('vuelo_id', vueloId);
     if (error) throw new Error(error.message);
-    const conv = cobrosEnUsd(
-      (previos ?? []) as CobroLike[],
-      Number(vuelo.tc_usd_mxn) || null,
-    );
+    const conv = cobrosEnUsd(previos ?? [], Number(vuelo.tc_usd_mxn) || null);
     // Tolerancia: 1 USD o 5 % del precio, lo que sea mayor (redondeos de TC
     // de un cobro en pesos capturado en campo no son un doble cobro).
     const tolerancia = Math.max(1, total * 0.05);
@@ -2556,7 +2558,7 @@ export class FlightsService {
         metodo_cobro: (vuelo as { metodo_cobro?: unknown }).metodo_cobro,
         monto_total_usd: snapRow?.monto_total_usd,
       },
-      cobros as Array<Record<string, unknown>>,
+      cobros,
       conv.total_usd,
     );
     // Participación por avión (regla B 28-ago): con tramos en aviones
@@ -2572,9 +2574,7 @@ export class FlightsService {
         // snapshot: sin él, un vuelo cubierto por externo expondría un
         // "avión utilizado" que no es suyo.
         es_externo:
-          ((vuelo as { es_externo?: boolean | null }).es_externo as
-            | boolean
-            | null) ?? null,
+          (vuelo as { es_externo?: boolean | null }).es_externo ?? null,
       },
       escalas,
     );
@@ -2715,8 +2715,7 @@ export class FlightsService {
           : null),
       aeronave_utilizada: esExterno
         ? null
-        : (ficha(vuelo.aeronave_id ?? null) ??
-          ficha(utilizadosIds[0] ?? null)),
+        : (ficha(vuelo.aeronave_id ?? null) ?? ficha(utilizadosIds[0] ?? null)),
       aeronaves_utilizadas: esExterno
         ? []
         : utilizadosIds
@@ -2945,7 +2944,7 @@ export class FlightsService {
     }
     void this.calendar.syncFlight(id);
     if (asignandoPiloto && dto.piloto_id !== current.piloto_id) {
-      void this.notifyPilotAssigned(dto.piloto_id!, data!);
+      void this.notifyPilotAssigned(dto.piloto_id!, data);
     }
     // Piloto REEMPLAZADO o quitado: el anterior también se entera (21-ago).
     if (
@@ -2955,7 +2954,7 @@ export class FlightsService {
     ) {
       this.notificarQuitado(
         current.piloto_id as string,
-        data!,
+        data,
         'piloto',
         `${current.origen_iata as string} → ${current.destino_iata as string}`,
       );
@@ -2992,7 +2991,7 @@ export class FlightsService {
         );
       }
       void this.notificarTripulacion(
-        data!,
+        data,
         {
           titulo: `Vuelo #${current.folio as number} reagendado`,
           cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ${partes.join(' y ')} (hora Cancún).`,
@@ -3015,7 +3014,7 @@ export class FlightsService {
       void this.notifications.notifyRole(Rol.ADMIN, payload, updatedBy);
       void this.notifications.notifyRole(Rol.COORDINADOR, payload, updatedBy);
     }
-    return data!;
+    return data;
   }
 
   /**
@@ -6313,29 +6312,79 @@ export class FlightsService {
    * capturado ANTES del trigger no tiene fila INSERT: se sintetiza una con
    * los datos del propio gasto (o de su snapshot de DELETE) marcada
    * `sintetizado: true`, para que todo historial arranque en la captura.
+   *
+   * GASTOS MOVIDOS ENTRE VUELOS (14-sep-2026, caso real vuelo #260): el
+   * trigger escribe el UPDATE bajo `coalesce(new.vuelo_id, old.vuelo_id)` —
+   * o sea, bajo el vuelo DESTINO —, así que el vuelo de ORIGEN se quedaba
+   * con una captura MUDA («Gasto capturado» sin descripción ni acción) y el
+   * destino no decía de dónde vino. Ahora:
+   *  - se leen TAMBIÉN las filas UPDATE cuyo `diff->vuelo_id->>antes` es
+   *    ESTE vuelo (movimientos hacia OTRO vuelo; índice
+   *    `idx_gasto_bitacora_movido_desde`, migración 20260914000001);
+   *  - cada evento que cambió `vuelo_id` sale con el campo ADITIVO
+   *    `movimiento: { tipo: 'salio' | 'llego', vuelo_id, folio }` (`salio`
+   *    en el origen con el folio del destino, `llego` en el destino con el
+   *    folio del origen; `vuelo_id: null` = se le quitó/puso el vuelo sin
+   *    contraparte). `accion` NO cambia (INSERT/UPDATE/DELETE);
+   *  - `descripcion_gasto` se resuelve también para gastos que YA NO viven
+   *    en este vuelo (una consulta por los ids faltantes).
+   * La lectura extra es best-effort: si el filtro JSON falla, el historial
+   * sale como siempre (sin los movimientos) en vez de romperse.
    */
   async gastosHistorial(vueloId: string) {
-    const [bitRes, gastosRes] = await Promise.all([
-      this.supabase.service
-        .from('gasto_bitacora')
-        .select('gasto_id, accion, actor_id, diff, snapshot, created_at')
-        .eq('vuelo_id', vueloId)
-        .order('created_at', { ascending: true }),
-      this.supabase.service
-        .from('gasto')
-        .select('id, categoria, monto, moneda, created_by, created_at')
-        .eq('vuelo_id', vueloId),
-    ]);
-    if (bitRes.error) throw new Error(bitRes.error.message);
-    if (gastosRes.error) throw new Error(gastosRes.error.message);
-    const bitacora = (bitRes.data ?? []) as Array<{
+    type FilaBitacora = {
+      id: string;
       gasto_id: string;
       accion: 'INSERT' | 'UPDATE' | 'DELETE';
       actor_id: string | null;
       diff: Record<string, unknown> | null;
       snapshot: Record<string, unknown> | null;
       created_at: string;
-    }>;
+    };
+    const COLS_BITACORA =
+      'id, gasto_id, accion, actor_id, diff, snapshot, created_at';
+    const [bitRes, gastosRes, movidosRes] = await Promise.all([
+      this.supabase.service
+        .from('gasto_bitacora')
+        .select(COLS_BITACORA)
+        .eq('vuelo_id', vueloId)
+        .order('created_at', { ascending: true }),
+      this.supabase.service
+        .from('gasto')
+        .select('id, categoria, monto, moneda, created_by, created_at')
+        .eq('vuelo_id', vueloId),
+      // Gastos que SALIERON de este vuelo: su fila UPDATE quedó bajo el
+      // vuelo nuevo. Filtro por JSON (`diff->'vuelo_id'->>'antes'`).
+      this.supabase.service
+        .from('gasto_bitacora')
+        .select(COLS_BITACORA)
+        .eq('accion', 'UPDATE')
+        .eq('diff->vuelo_id->>antes', vueloId)
+        .order('created_at', { ascending: true })
+        .then(
+          (r) => r,
+          (err: unknown) => ({ data: null, error: err as { message: string } }),
+        ),
+    ]);
+    if (bitRes.error) throw new Error(bitRes.error.message);
+    if (gastosRes.error) throw new Error(gastosRes.error.message);
+    const propias = (bitRes.data ?? []) as FilaBitacora[];
+    let movidas: FilaBitacora[] = [];
+    if (movidosRes.error) {
+      // Nunca tumba el historial: se pierde el «salió al vuelo #N», no la
+      // pantalla (p.ej. índice/filtro JSON no disponible).
+      this.logger.warn(
+        `gastosHistorial(${vueloId}): no se pudieron leer los gastos movidos a otro vuelo: ${movidosRes.error.message}`,
+      );
+    } else {
+      const propiasIds = new Set(propias.map((b) => b.id));
+      // Un UPDATE que DESLIGA el vuelo (despues = null) cae en las dos
+      // consultas: se deduplica por id.
+      movidas = ((movidosRes.data ?? []) as FilaBitacora[]).filter(
+        (b) => !propiasIds.has(b.id),
+      );
+    }
+    const bitacora = [...propias, ...movidas];
     const vivos = (gastosRes.data ?? []) as Array<{
       id: string;
       categoria: string;
@@ -6344,6 +6393,23 @@ export class FlightsService {
       created_by: string | null;
       created_at: string;
     }>;
+
+    // ¿Este UPDATE movió el gasto de vuelo? Devuelve la contraparte (el otro
+    // vuelo) y de qué lado quedó ESTE vuelo.
+    const movimientoDe = (
+      diff: Record<string, unknown> | null,
+    ): { tipo: 'salio' | 'llego'; vuelo_id: string | null } | null => {
+      const campo = (diff ?? {})['vuelo_id'] as
+        | { antes?: unknown; despues?: unknown }
+        | undefined;
+      if (!campo || typeof campo !== 'object') return null;
+      const antes = typeof campo.antes === 'string' ? campo.antes : null;
+      const despues = typeof campo.despues === 'string' ? campo.despues : null;
+      if (antes === despues) return null;
+      if (despues === vueloId) return { tipo: 'llego', vuelo_id: antes };
+      if (antes === vueloId) return { tipo: 'salio', vuelo_id: despues };
+      return null;
+    };
 
     // Descripción legible por gasto: el estado ACTUAL si vive; si ya se
     // borró, el snapshot de la bitácora (el DELETE lo guarda completo).
@@ -6377,14 +6443,19 @@ export class FlightsService {
       created_at: string;
       diff: Record<string, unknown>;
       sintetizado?: true;
+      movimiento?: { tipo: 'salio' | 'llego'; vuelo_id: string | null };
     };
-    const eventos: Evento[] = bitacora.map((b) => ({
-      gasto_id: b.gasto_id,
-      accion: b.accion,
-      actor_id: b.actor_id ?? null,
-      created_at: b.created_at,
-      diff: b.diff ?? {},
-    }));
+    const eventos: Evento[] = bitacora.map((b) => {
+      const mov = b.accion === 'UPDATE' ? movimientoDe(b.diff) : null;
+      return {
+        gasto_id: b.gasto_id,
+        accion: b.accion,
+        actor_id: b.actor_id ?? null,
+        created_at: b.created_at,
+        diff: b.diff ?? {},
+        ...(mov ? { movimiento: mov } : {}),
+      };
+    });
 
     // INSERT sintetizado para el histórico pre-trigger: gastos vivos sin fila
     // INSERT y gastos borrados cuyo snapshot conserva captura y capturista.
@@ -6419,6 +6490,55 @@ export class FlightsService {
       a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0,
     );
 
+    // Descripción de los gastos que YA NO viven en este vuelo (se movieron):
+    // una sola consulta por los ids que quedaron sin etiqueta.
+    const faltantes = [
+      ...new Set(
+        eventos
+          .map((e) => e.gasto_id)
+          .filter((id) => !descripcion.get(id) && !!id),
+      ),
+    ];
+    if (faltantes.length > 0) {
+      const { data: otros, error: otrosErr } = await this.supabase.service
+        .from('gasto')
+        .select('id, categoria, monto, moneda')
+        .in('id', faltantes);
+      if (otrosErr) {
+        this.logger.warn(
+          `gastosHistorial(${vueloId}): descripciones de gastos movidos no disponibles: ${otrosErr.message}`,
+        );
+      }
+      for (const g of otros ?? []) {
+        const d = etiqueta(g.categoria, g.monto, g.moneda);
+        if (d) descripcion.set(g.id as string, d);
+      }
+    }
+
+    // Folios de los vuelos contraparte (origen/destino): UNA consulta `in`.
+    const vuelosMov = [
+      ...new Set(
+        eventos
+          .map((e) => e.movimiento?.vuelo_id)
+          .filter((id): id is string => typeof id === 'string' && !!id),
+      ),
+    ];
+    const folios = new Map<string, number | null>();
+    if (vuelosMov.length > 0) {
+      const { data: vuelosRef, error: vuelosErr } = await this.supabase.service
+        .from('vuelo')
+        .select('id, folio')
+        .in('id', vuelosMov);
+      if (vuelosErr) {
+        this.logger.warn(
+          `gastosHistorial(${vueloId}): folios de vuelos contraparte no disponibles: ${vuelosErr.message}`,
+        );
+      }
+      for (const v of vuelosRef ?? []) {
+        folios.set(v.id as string, (v.folio as number | null) ?? null);
+      }
+    }
+
     const info = await this.usuariosInfo(
       eventos
         .map((e) => e.actor_id)
@@ -6433,6 +6553,17 @@ export class FlightsService {
       ...(e.sintetizado ? { sintetizado: true as const } : {}),
       diff: e.diff,
       descripcion_gasto: descripcion.get(e.gasto_id) ?? null,
+      // ADITIVO (14-sep-2026): null salvo que el UPDATE haya movido el gasto
+      // de vuelo. `folio` es el del vuelo contraparte (null si ya no existe).
+      movimiento: e.movimiento
+        ? {
+            tipo: e.movimiento.tipo,
+            vuelo_id: e.movimiento.vuelo_id,
+            folio: e.movimiento.vuelo_id
+              ? (folios.get(e.movimiento.vuelo_id) ?? null)
+              : null,
+          }
+        : null,
     }));
   }
 
@@ -6469,8 +6600,8 @@ export class FlightsService {
       ...e,
       // null mientras la columna no exista (contrato estable para la app).
       client_request_id:
-        ((e as unknown as { client_request_id?: string | null })
-          .client_request_id as string | null | undefined) ?? null,
+        (e as unknown as { client_request_id?: string | null })
+          .client_request_id ?? null,
     }));
 
     // Nombres de quien capturó / corrigió cada lectura: el detalle del vuelo
@@ -9914,7 +10045,7 @@ export class FlightsService {
     const avisos = [
       ...new Set([
         ...avisosTaller,
-        ...(((asignado as { avisos?: string[] }).avisos ?? []) as string[]),
+        ...((asignado as { avisos?: string[] }).avisos ?? []),
       ]),
     ];
     return {
