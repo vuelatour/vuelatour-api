@@ -32,10 +32,12 @@ import {
   METODOS_COBRO_PASARELA,
 } from '../../common/metodo-cobro.util';
 import {
+  AutoMatchDto,
   ConciliacionParseDto,
   ImportarMovimientosDto,
   ListConciliacionQuery,
   PaywiseAuditoriaQuery,
+  SugerirLoteDto,
   TipoMovimientoBancario,
   type ReporteConciliacionEstado,
 } from './dto/conciliacion.dto';
@@ -56,6 +58,23 @@ import {
   puedeLigar,
   type MotivoNoLigar,
 } from './conciliacion-parcial.util';
+import {
+  CLASIFICACION_TRASPASO,
+  conteoVacio,
+  elegirCandidato,
+  elegirMovimiento,
+  emparejarDuplicados,
+  montoCasa,
+  patronTraspaso,
+  primeraLinea,
+  sumarResultado,
+  terminacionDeMovimiento,
+  TOLERANCIA_CENTAVOS,
+  ventanaDias,
+  type CriterioCruce,
+  type GastoCandidatoCruce,
+  type ResultadoCruce,
+} from './auto-cruce.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -64,6 +83,12 @@ import {
 const MOV_COLS =
   'id, cuenta_bancaria_id, fecha, tipo, monto, monto_bruto, comision_monto, descripcion, referencia, conciliado, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, origen, notas, created_at';
 const MATCH_DAYS = 3;
+/**
+ * Columnas del gasto que necesita el auto-cruce (fuente única: el desempate
+ * por tarjeta/descripción y el camino inverso leen EXACTAMENTE lo mismo).
+ */
+const GASTO_CRUCE_COLS =
+  'id, monto, moneda, fecha_gasto, medio_pago, tarjeta_terminacion, lugar, notas, categoria, vuelo_id, proveedor:proveedor!proveedor_id(nombre)';
 /**
  * Métodos de cobro que llegan al banco como ABONO y se cruzan SOLOS
  * (auto-match): misma lista para cobro_vuelo y para los sobres de grupo.
@@ -212,6 +237,26 @@ export interface SugerenciaConciliacion {
   gasto_id_sugerido: string | null;
   confianza: number;
   razon: string;
+  /**
+   * ADITIVOS 15-sep-2026. `evidencias` = los hechos que la IA dice haber
+   * usado («terminación 0577 == tarjeta del gasto», «monto exacto»): sin
+   * evidencias la propuesta se lee con pinzas. `alternativas` = 2.ª y 3.ª
+   * opción para el panel. `terminacion_detectada` la calcula el API (no la
+   * IA) a partir de la referencia del banco.
+   */
+  evidencias?: string[];
+  alternativas?: Array<{
+    gasto_id: string;
+    confianza: number;
+    razon: string;
+  }>;
+  terminacion_detectada?: string | null;
+  /**
+   * Por qué NINGÚN candidato encaja (solo cuando `gasto_id_sugerido` es
+   * null). Lo redacta pyservices y el panel lo pinta tal cual: sin él, «no
+   * hay propuesta» no dice nada al operador.
+   */
+  motivo_sin_match?: string | null;
   /** Gastos candidatos considerados (para que el front muestre opciones). */
   candidatos: Array<{
     /** USD = compra en dólares cuyo cargo llegó en pesos (TC implícito). */
@@ -224,11 +269,58 @@ export interface SugerenciaConciliacion {
     /** Aditivos (14-sep-2026, pagos parciales): lo ya cruzado y lo que falta. */
     monto_vinculado?: number;
     faltante?: number;
+    /** Aditivos (15-sep-2026): contexto para desempatar (IA y panel). */
+    medio_pago?: string | null;
+    tarjeta_terminacion?: string | null;
+    categoria?: string | null;
+    lugar?: string | null;
+    /** Primera línea de `gasto.notas` (la que describe el gasto). */
+    nota?: string | null;
+    matricula?: string | null;
+    vuelo_folio?: number | null;
+    capturado_por?: string | null;
   }>;
 }
 
+/**
+ * Resultado del auto-cruce de UN movimiento (import y re-cruce hablan el
+ * mismo idioma). `motivo` es el texto que el panel muestra para explicar
+ * POR QUÉ un movimiento sigue pendiente — la pregunta literal del cliente.
+ */
+export interface ResultadoMovimiento {
+  movimiento_id: string;
+  resultado: ResultadoCruce;
+  criterio: CriterioCruce | null;
+  motivo: string | null;
+  candidatos_n: number;
+  gasto_id?: string | null;
+  cobro_id?: string | null;
+  cobro_grupo_id?: string | null;
+}
+
+/** Contexto compartido del auto-cruce (se carga UNA vez por corrida). */
+interface CruceCtx {
+  /** Terminaciones de `tarjeta_corporativa` activas (desempate por tarjeta). */
+  terminaciones: string[];
+  /** Id de la clasificación «Traspaso entre cuentas» (perezoso). */
+  clasificacionTraspaso?: string | null;
+}
+
+/** Tope de filas del detalle que devuelve el re-cruce (respuesta acotada). */
+const DETALLE_MAX = 300;
+
+/** Tope de movimientos por corrida del re-cruce (evita respuestas eternas). */
+const RECRUCE_MAX = 2000;
+
 /** Banda de tolerancia de monto (±5%) para juntar gastos candidatos. */
 const MATCH_MONTO_PCT = 0.05;
+
+/**
+ * Tope de gastos que lee el cálculo del «por qué sigue pendiente» de la
+ * lista. Si la ventana trae MÁS que esto, la foto está incompleta y NO se
+ * anota ningún motivo (un «sin candidato» falso sería peor que no decir nada).
+ */
+const MOTIVO_GASTOS_MAX = 4000;
 
 @Injectable()
 export class ConciliacionService {
@@ -346,12 +438,31 @@ export class ConciliacionService {
     dto: ImportarMovimientosDto,
     userId: string,
   ): Promise<void> {
-    const setJob = async (patch: Record<string, unknown>) => {
+    const setJob = async (
+      patch: Record<string, unknown>,
+      // Columnas del desglose (migración 20260916000001). Mientras no esté
+      // aplicada se reintenta SIN ellas: el job nunca se queda sin cerrar
+      // por una columna que todavía no existe.
+      extras: Record<string, unknown> = {},
+    ) => {
+      const base = { ...patch, updated_at: new Date().toISOString() };
       const { error } = await this.supabase.service
         .from('conciliacion_import_job')
-        .update({ ...patch, updated_at: new Date().toISOString() })
+        .update({ ...base, ...extras })
         .eq('id', jobId);
-      if (error) this.logger.warn(`import job ${jobId}: ${error.message}`);
+      if (!error) return;
+      if (Object.keys(extras).length > 0) {
+        this.logger.warn(
+          `import job ${jobId}: sin columnas de desglose (${error.message}); se guarda el resumen básico.`,
+        );
+        const { error: err2 } = await this.supabase.service
+          .from('conciliacion_import_job')
+          .update(base)
+          .eq('id', jobId);
+        if (err2) this.logger.warn(`import job ${jobId}: ${err2.message}`);
+        return;
+      }
+      this.logger.warn(`import job ${jobId}: ${error.message}`);
     };
     try {
       const res = await this.ejecutarImport(
@@ -359,14 +470,29 @@ export class ConciliacionService {
         userId,
         async (progreso, paso) => setJob({ progreso, paso }),
       );
-      await setJob({
-        estado: 'LISTO',
-        progreso: 100,
-        paso: 'Terminado',
-        importados: res.importados,
-        conciliados_auto: res.conciliados_auto,
-        duplicados_omitidos: res.duplicados_omitidos,
-      });
+      await setJob(
+        {
+          estado: 'LISTO',
+          progreso: 100,
+          paso: 'Terminado',
+          importados: res.importados,
+          conciliados_auto: res.conciliados_auto,
+          duplicados_omitidos: res.duplicados_omitidos,
+        },
+        {
+          errores: res.errores,
+          resultados: {
+            conciliados: res.conciliados,
+            traspasos: res.traspasos,
+            ambiguos: res.ambiguos,
+            sin_candidato: res.sin_candidato,
+            rechazados: res.rechazados,
+            errores: res.errores,
+            por_criterio: res.por_criterio,
+          },
+          errores_detalle: res.detalle.slice(0, 100),
+        },
+      );
     } catch (err) {
       // El job jamás queda colgado en PROCESANDO: el error se muestra tal
       // cual en el panel para corregir (cuenta equivocada, archivo, etc.).
@@ -378,18 +504,38 @@ export class ConciliacionService {
     }
   }
 
-  /** Estado de un job de importación (polling del panel). */
+  /**
+   * Estado de un job de importación (polling del panel). Expone el desglose
+   * por resultado (`resultados`, `errores`, `errores_detalle`) cuando la
+   * migración 20260916000001 está aplicada; si no, el mismo shape de antes.
+   */
   async importStatus(jobId: string) {
-    const { data, error } = await this.supabase.service
-      .from('conciliacion_import_job')
-      .select(
-        'id, estado, progreso, paso, total_movimientos, importados, conciliados_auto, duplicados_omitidos, error, created_at',
-      )
-      .eq('id', jobId)
-      .maybeSingle();
+    const BASE =
+      'id, estado, progreso, paso, total_movimientos, importados, conciliados_auto, duplicados_omitidos, error, created_at';
+    const leer = async (cols: string) =>
+      this.supabase.service
+        .from('conciliacion_import_job')
+        .select(cols)
+        .eq('id', jobId)
+        .maybeSingle();
+    let { data, error } = await leer(
+      `${BASE}, errores, errores_detalle, resultados`,
+    );
+    if (error) {
+      ({ data, error } = await leer(BASE));
+    }
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Job ${jobId} not found`);
-    return data;
+    // El desglose se guarda ANIDADO en `resultados` (una sola columna jsonb)
+    // pero el panel —y cualquier consumidor— lo lee PLANO, igual que en la
+    // respuesta de `importar`. Se devuelven las dos formas: sin esto, el
+    // resumen del job salía en ceros aunque el cruce hubiera funcionado.
+    const fila = data as unknown as Record<string, unknown>;
+    const r = fila.resultados;
+    if (r && typeof r === 'object' && !Array.isArray(r)) {
+      return { ...fila, ...(r as Record<string, unknown>) };
+    }
+    return fila;
   }
 
   private async ejecutarImport(
@@ -430,40 +576,19 @@ export class ConciliacionService {
     const fechas = base.map((r) => r.fecha).sort();
     const { data: previos, error: prevErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('fecha, tipo, monto, descripcion')
+      .select('fecha, tipo, monto, descripcion, referencia')
       .eq('cuenta_bancaria_id', dto.cuenta_bancaria_id)
       .gte('fecha', fechas[0])
-      .lte('fecha', fechas[fechas.length - 1]);
+      .lte('fecha', fechas[fechas.length - 1])
+      // SIN limit explícito PostgREST corta en el «Max rows» del proyecto
+      // (1000) y el multiconjunto salía incompleto ⇒ duplicados en silencio.
+      .limit(20000);
     if (prevErr) throw new Error(prevErr.message);
-    const clave = (m: {
-      fecha?: string | null;
-      tipo?: string | null;
-      monto: number | string;
-      descripcion?: string | null;
-    }) =>
-      [
-        m.fecha,
-        m.tipo,
-        Number(m.monto).toFixed(2),
-        (m.descripcion ?? '').trim().toLowerCase().replace(/\s+/g, ' '),
-      ].join('|');
-    const existentes = new Map<string, number>();
-    for (const p of previos ?? []) {
-      const k = clave(p);
-      existentes.set(k, (existentes.get(k) ?? 0) + 1);
-    }
-    const nuevos: typeof base = [];
-    let duplicadosOmitidos = 0;
-    for (const r of base) {
-      const k = clave(r);
-      const disponibles = existentes.get(k) ?? 0;
-      if (disponibles > 0) {
-        existentes.set(k, disponibles - 1);
-        duplicadosOmitidos += 1;
-      } else {
-        nuevos.push(r);
-      }
-    }
+    // Fuente única del candado: `emparejarDuplicados` (auto-cruce.util). La
+    // REFERENCIA manda cuando existe de los dos lados (re-subir el MISMO PDF
+    // con la descripción redactada distinta por la IA ya no duplica).
+    const { aInsertar: nuevos, duplicados: duplicadosOmitidos } =
+      emparejarDuplicados(base, previos ?? []);
 
     await onProgress(18, 'Archivando el estado de cuenta…');
     // El archivo original se archiva DESPUÉS de validar y ANTES de insertar:
@@ -483,6 +608,14 @@ export class ConciliacionService {
         importados: 0,
         conciliados_auto: 0,
         duplicados_omitidos: duplicadosOmitidos,
+        conciliados: 0,
+        traspasos: 0,
+        ambiguos: 0,
+        sin_candidato: 0,
+        rechazados: 0,
+        errores: 0,
+        por_criterio: {} as Record<string, number>,
+        detalle: [] as ResultadoMovimiento[],
       };
     }
     const rows = nuevos.map((r) => ({
@@ -513,38 +646,53 @@ export class ConciliacionService {
     // Auto-conciliación: la parte lenta (una consulta por movimiento). El
     // progreso avanza de 35 a 95, reportado por lotes para no duplicar el
     // costo con updates del job en cada vuelta.
-    let conciliadosAuto = 0;
+    //
+    // RESILIENCIA (15-sep-2026): NINGÚN movimiento puede tumbar la
+    // importación. El 15-sep el trigger `tg_mov_bancario_gasto_suma` lanzaba
+    // «operator does not exist: public.moneda = text» en cada liga y el job
+    // 4f9545e3 murió al 37 % con 101 movimientos YA insertados y 0
+    // conciliados. Ahora cada movimiento va en su propio try/catch: el fallo
+    // se cuenta con su motivo y el job termina LISTO diciendo cuántos.
+    const ctx = await this.cargarCtxCruce();
+    const conteo = conteoVacio();
+    const detalle: ResultadoMovimiento[] = [];
+    const porCriterio: Record<string, number> = {};
     const lista = inserted ?? [];
+    if (lista.length !== rows.length) {
+      // PostgREST puede devolver menos filas de las insertadas (max-rows): los
+      // que no vuelven quedan SIN cruzar. Se dice en el log y «Cruzar
+      // pendientes» los recupera — nunca se da por cruzado lo que no se miró.
+      this.logger.warn(
+        `Importación: se insertaron ${rows.length} movimientos y la BD devolvió ${lista.length}; los ${rows.length - lista.length} restantes quedan pendientes hasta correr auto-match.`,
+      );
+    }
     const pasoLote = Math.max(1, Math.ceil(lista.length / 25));
     for (let i = 0; i < lista.length; i++) {
       const m = lista[i];
-      const matched =
-        m.tipo === TipoMovimientoBancario.CARGO
-          ? await this.autoMatch(m.id, m.monto, m.fecha, monedaCuenta, userId)
-          : cuentaInfo.tipo === TIPO_CUENTA_PASARELA
-            ? await this.autoMatchAbonoPasarela(
-                {
-                  id: m.id as string,
-                  fecha: m.fecha as string,
-                  monto: Number(m.monto),
-                  monto_bruto:
-                    m.monto_bruto == null ? null : Number(m.monto_bruto),
-                  comision_monto:
-                    m.comision_monto == null ? null : Number(m.comision_monto),
-                  referencia: (m.referencia as string | null) ?? null,
-                  descripcion: (m.descripcion as string | null) ?? null,
-                  moneda: monedaCuenta,
-                },
-                userId,
-              )
-            : await this.autoMatchAbono(
-                m.id,
-                m.monto,
-                m.fecha,
-                monedaCuenta,
-                userId,
-              );
-      if (matched) conciliadosAuto += 1;
+      const r = await this.cruzarMovimiento(
+        {
+          id: m.id as string,
+          cuenta_bancaria_id: dto.cuenta_bancaria_id,
+          fecha: m.fecha as string,
+          tipo: m.tipo as string,
+          monto: Number(m.monto),
+          monto_bruto: m.monto_bruto == null ? null : Number(m.monto_bruto),
+          comision_monto:
+            m.comision_monto == null ? null : Number(m.comision_monto),
+          descripcion: (m.descripcion as string | null) ?? null,
+          referencia: (m.referencia as string | null) ?? null,
+          notas: null,
+        },
+        { moneda: monedaCuenta, tipo: cuentaInfo.tipo },
+        ctx,
+        userId,
+      );
+      sumarResultado(conteo, r.resultado);
+      if (r.criterio)
+        porCriterio[r.criterio] = (porCriterio[r.criterio] ?? 0) + 1;
+      if (r.resultado !== 'CONCILIADO' && detalle.length < DETALLE_MAX) {
+        detalle.push(r);
+      }
       if (i % pasoLote === 0 || i === lista.length - 1) {
         await onProgress(
           35 + Math.round(((i + 1) / lista.length) * 60),
@@ -552,6 +700,7 @@ export class ConciliacionService {
         );
       }
     }
+    const conciliadosAuto = conteo.conciliados + conteo.traspasos;
 
     if (estadoCuentaId) {
       await this.supabase.service
@@ -564,6 +713,15 @@ export class ConciliacionService {
       importados: rows.length,
       conciliados_auto: conciliadosAuto,
       duplicados_omitidos: duplicadosOmitidos,
+      // ADITIVOS (15-sep-2026): el operador ve POR QUÉ quedó lo que quedó.
+      conciliados: conteo.conciliados,
+      traspasos: conteo.traspasos,
+      ambiguos: conteo.ambiguos,
+      sin_candidato: conteo.sin_candidato,
+      rechazados: conteo.rechazados,
+      errores: conteo.errores,
+      por_criterio: porCriterio,
+      detalle,
     };
   }
 
@@ -646,118 +804,758 @@ export class ConciliacionService {
     return (await this.infoCuenta(cuentaId)).moneda;
   }
 
-  /** Moneda y tipo (BANCO | PASARELA) de la cuenta; null si no existe. */
+  /**
+   * Moneda y tipo (BANCO | PASARELA) de la cuenta; null si no existe o si la
+   * consulta falló. `cuenta_bancaria.moneda` es NOT NULL, así que un null
+   * aquí SIEMPRE es un problema de lectura: se registra, y el auto-cruce lo
+   * trata como ERROR (nunca cruza de oídas — sin moneda no se puede
+   * garantizar que el gasto sea de la misma divisa).
+   */
   private async infoCuenta(
     cuentaId: string,
   ): Promise<{ moneda: string | null; tipo: string | null }> {
-    const { data } = await this.supabase.service
+    const { data, error } = await this.supabase.service
       .from('cuenta_bancaria')
       .select('moneda, tipo')
       .eq('id', cuentaId)
       .maybeSingle();
+    if (error || !data) {
+      this.logger.warn(
+        `No se pudo leer la cuenta ${cuentaId}: ${error?.message ?? 'no existe'}.`,
+      );
+    }
     return {
       moneda: (data?.moneda as string | null) ?? null,
       tipo: (data?.tipo as string | null) ?? null,
     };
   }
 
-  /** Si hay exactamente un gasto candidato (mismo monto+moneda, fecha ±N días, medio bancario, sin conciliar), lo vincula. */
-  private async autoMatch(
-    movId: string,
-    monto: number,
-    fecha: string,
+  /**
+   * AUTO-CRUCE de un CARGO contra los gastos bancarios sin conciliar.
+   *
+   * Orden de desempate (fuente única `auto-cruce.util`, pura y probada):
+   *  1. monto ±1 centavo + ventana ±MATCH_DAYS + moneda de la cuenta;
+   *  2. si hay ≥2 candidatos, la TERMINACIÓN de tarjeta del movimiento
+   *     (últimos 4 dígitos de `referencia`, validados contra
+   *     `tarjeta_corporativa`) contra `gasto.tarjeta_terminacion`;
+   *  3. si siguen ≥2, la DESCRIPCIÓN del banco contra `lugar` / primera
+   *     línea de `notas` / proveedor del gasto (sinónimos del giro);
+   *  4. si nada desempata ⇒ AMBIGUO (pendiente, JAMÁS se liga a la brava);
+   *  5. sin candidato por monto: se prueba contra el FALTANTE de un gasto
+   *     mayor con pagos parciales y, en cuenta MXN, la compra en USD por TC
+   *     implícito.
+   */
+  private async autoMatchCargo(
+    mov: {
+      id: string;
+      monto: number;
+      fecha: string;
+      descripcion: string | null;
+      referencia: string | null;
+    },
     moneda: string | null,
     userId: string,
-  ): Promise<boolean> {
-    const base = new Date(`${fecha}T00:00:00Z`);
-    const lo = new Date(base);
-    lo.setUTCDate(lo.getUTCDate() - MATCH_DAYS);
-    const hi = new Date(base);
-    hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
-    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    ctx: CruceCtx,
+  ): Promise<ResultadoMovimiento> {
+    const { desde, hasta } = ventanaDias(mov.fecha, MATCH_DAYS);
+    const monto = Math.abs(Number(mov.monto)) || 0;
+    const base = {
+      movimiento_id: mov.id,
+      resultado: 'SIN_CANDIDATO' as ResultadoCruce,
+      criterio: null as CriterioCruce | null,
+      motivo: null as string | null,
+      candidatos_n: 0,
+    };
 
-    let q = this.supabase.service
-      .from('gasto')
-      .select('id')
-      .eq('monto', monto)
-      .eq('conciliado', false)
-      // Solo medios que tocan el banco (excluye EFECTIVO, BODEGA, PERSONAL_*).
-      .in('medio_pago', MEDIOS_BANCARIOS)
-      .gte('fecha_gasto', iso(lo))
-      .lte('fecha_gasto', iso(hi))
-      .limit(2);
-    if (moneda) q = q.eq('moneda', moneda);
-    const { data, error } = await q;
-    if (error) return false;
-    if (data && data.length === 1) {
-      return this.ligarAuto(movId, data[0].id as string, userId);
+    // CANDADO DE MONEDA (invariante: jamás se cruzan divisas distintas sin
+    // la regla del TC). `cuenta_bancaria.moneda` es NOT NULL: si aquí llega
+    // null es que la cuenta no se pudo leer, y sin moneda la consulta de
+    // candidatos NO filtraría divisa — un gasto de 125.82 USD cuadraría con
+    // un cargo de 125.82 MXN. Se prefiere dejarlo pendiente.
+    if (!moneda) {
+      return {
+        ...base,
+        resultado: 'ERROR',
+        motivo:
+          'No se pudo leer la moneda de la cuenta bancaria: el cruce no se intenta para no mezclar divisas.',
+      };
     }
-    if ((data ?? []).length > 1) return false;
 
-    // Sin candidato en la moneda de la cuenta. Cuenta MXN: puede ser una
-    // compra EN DÓLARES cuyo cargo llegó en pesos (Aircraft Spruce). Se
-    // acepta SOLO si hay exactamente un gasto USD sin conciliar cuyo TC
-    // implícito (cargo ÷ monto) es plausible — el vínculo guarda ese TC.
-    if (moneda === 'MXN' && monto > 0) {
-      const { data: usd, error: usdErr } = await this.supabase.service
-        .from('gasto')
-        .select('id, monto')
-        .eq('moneda', 'USD')
-        .eq('conciliado', false)
-        .in('medio_pago', MEDIOS_BANCARIOS)
-        .gte('fecha_gasto', iso(lo))
-        .lte('fecha_gasto', iso(hi))
-        .limit(25);
-      if (usdErr) return false;
-      const plausibles = (usd ?? []).filter((g) => {
-        const m = Number((g as { monto: unknown }).monto);
-        if (!(m > 0)) return false;
-        const tc = monto / m;
-        return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX;
+    // 1) Candidatos por monto (banda de centavos: la terminal redondea).
+    const { data, error } = await this.gastosCandidatos({
+      moneda,
+      desde,
+      hasta,
+      montoMin: monto - TOLERANCIA_CENTAVOS,
+      montoMax: monto + TOLERANCIA_CENTAVOS,
+      limite: 25,
+    });
+    if (error) {
+      return {
+        ...base,
+        resultado: 'ERROR',
+        motivo: `No se pudieron leer los gastos candidatos: ${error.message}`,
+      };
+    }
+    const candidatos = (data ?? []).map((g) => this.aCandidatoCruce(g));
+    if (candidatos.length > 0) {
+      const eleccion = elegirCandidato(mov, candidatos, ctx.terminaciones);
+      if (eleccion.gasto_id) {
+        return this.ligarCargo(mov.id, eleccion.gasto_id, userId, {
+          ...base,
+          criterio: eleccion.criterio,
+          candidatos_n: eleccion.candidatos_n,
+        });
+      }
+      return {
+        ...base,
+        resultado: 'AMBIGUO',
+        candidatos_n: eleccion.candidatos_n,
+        motivo: eleccion.detalle,
+      };
+    }
+
+    // 2) PAGO PARCIAL: el cargo puede cubrir lo que FALTA de un gasto mayor
+    //    (una factura de ASUR pagada en dos cargos). Misma regla que
+    //    `candidatosCercanos`, ahora también en automático.
+    const parcial = await this.candidatoPorFaltante(
+      monto,
+      moneda,
+      desde,
+      hasta,
+    );
+    if (parcial.length > 0) {
+      const eleccion = elegirCandidato(mov, parcial, ctx.terminaciones, {
+        criterioBase: 'FALTANTE',
       });
+      if (eleccion.gasto_id) {
+        return this.ligarCargo(mov.id, eleccion.gasto_id, userId, {
+          ...base,
+          criterio: eleccion.criterio,
+          candidatos_n: eleccion.candidatos_n,
+        });
+      }
+      return {
+        ...base,
+        resultado: 'AMBIGUO',
+        candidatos_n: eleccion.candidatos_n,
+        motivo: eleccion.detalle,
+      };
+    }
+
+    // 3) Cuenta MXN: compra EN DÓLARES cuyo cargo llegó en pesos (Aircraft
+    //    Spruce). Solo con TC implícito plausible y candidato único.
+    if (moneda === 'MXN' && monto > 0) {
+      const { data: usd, error: usdErr } = await this.gastosCandidatos({
+        moneda: 'USD',
+        desde,
+        hasta,
+        limite: 25,
+      });
+      if (usdErr) {
+        return {
+          ...base,
+          resultado: 'ERROR',
+          motivo: `No se pudieron leer los gastos en USD: ${usdErr.message}`,
+        };
+      }
+      const plausibles = (usd ?? [])
+        .filter((g) => {
+          const m = Number((g as { monto: unknown }).monto);
+          if (!(m > 0)) return false;
+          const tc = monto / m;
+          return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX;
+        })
+        .map((g) => this.aCandidatoCruce(g));
+      // OJO (revisión 15-sep-2026): aquí el monto NO cuadra — la banda de TC
+      // (15-25) acepta cualquier gasto USD dentro de un ±25 % del cargo. Por
+      // eso este camino liga SOLO con candidato ÚNICO: desempatar por
+      // descripción o por tarjeta entre montos que no coinciden sería ligar
+      // «por parecerse», justo lo que el auto-cruce tiene prohibido.
       if (plausibles.length === 1) {
-        return this.ligarAuto(movId, plausibles[0].id as string, userId);
+        return this.ligarCargo(mov.id, plausibles[0].id, userId, {
+          ...base,
+          criterio: 'TC_IMPLICITO',
+          candidatos_n: 1,
+        });
+      }
+      if (plausibles.length > 1) {
+        return {
+          ...base,
+          resultado: 'AMBIGUO',
+          candidatos_n: plausibles.length,
+          motivo: `${plausibles.length} gastos en USD podrían corresponder a este cargo en pesos (tipo de cambio entre ${TC_IMPLICITO_MIN} y ${TC_IMPLICITO_MAX}): vincúlalo a mano.`,
+        };
       }
     }
-    return false;
+    return {
+      ...base,
+      motivo: `Ningún gasto bancario sin conciliar de ${montoBonito(monto)} ${moneda ?? ''} entre ${desde} y ${hasta}.`,
+    };
   }
 
   /**
-   * Liga del auto-match: un 409 (gasto ya cubierto por otros cargos, carrera
-   * con otra liga) NO puede tumbar la importación completa — se deja el
-   * movimiento pendiente para que la oficina lo cruce a mano. Solo los
-   * errores de verdad (BD caída) siguen subiendo.
+   * Gastos SIN conciliar, de medio bancario, en la ventana y (si se indica)
+   * en esa moneda, con todo lo que el desempate necesita. Fuente única del
+   * select para que el auto-cruce y el camino inverso no diverjan.
+   */
+  private async gastosCandidatos(opts: {
+    moneda: string | null;
+    desde: string;
+    hasta: string;
+    /** Banda [min, max] de monto (centavos). */
+    montoMin?: number;
+    montoMax?: number;
+    /** Solo gastos MAYORES que esto (camino de pago parcial). */
+    mayorQue?: number;
+    limite: number;
+  }): Promise<{
+    data: Array<Record<string, unknown>> | null;
+    error: { message: string } | null;
+  }> {
+    let q = this.supabase.service
+      .from('gasto')
+      .select(GASTO_CRUCE_COLS)
+      .eq('conciliado', false)
+      .in('medio_pago', MEDIOS_BANCARIOS)
+      .gte('fecha_gasto', opts.desde)
+      .lte('fecha_gasto', opts.hasta);
+    if (opts.moneda) q = q.eq('moneda', opts.moneda);
+    if (opts.montoMin != null) q = q.gte('monto', opts.montoMin);
+    if (opts.montoMax != null) q = q.lte('monto', opts.montoMax);
+    if (opts.mayorQue != null) q = q.gt('monto', opts.mayorQue);
+    const { data, error } = await q.limit(opts.limite);
+    return {
+      data: (data ?? null) as Array<Record<string, unknown>> | null,
+      error: error ? { message: error.message } : null,
+    };
+  }
+
+  /** Fila cruda de `gasto` → candidato del auto-cruce (util puro). */
+  private aCandidatoCruce(g: Record<string, unknown>): GastoCandidatoCruce {
+    const prov = unwrapOne(
+      g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
+    );
+    return {
+      id: g.id as string,
+      monto: Number(g.monto) || 0,
+      tarjeta_terminacion: (g.tarjeta_terminacion as string | null) ?? null,
+      lugar: (g.lugar as string | null) ?? null,
+      notas: (g.notas as string | null) ?? null,
+      proveedor: typeof prov?.nombre === 'string' ? prov.nombre : null,
+    };
+  }
+
+  /**
+   * Gastos MAYORES que el cargo cuyo FALTANTE (monto − lo ya ligado) cuadra
+   * con él: el segundo pago de una factura partida en dos cargos.
+   */
+  private async candidatoPorFaltante(
+    monto: number,
+    moneda: string | null,
+    desde: string,
+    hasta: string,
+  ): Promise<GastoCandidatoCruce[]> {
+    if (!(monto > 0)) return [];
+    const { data, error } = await this.gastosCandidatos({
+      moneda,
+      desde,
+      hasta,
+      mayorQue: monto + TOLERANCIA_CENTAVOS,
+      limite: 40,
+    });
+    if (error || !data || data.length === 0) return [];
+    const ligado = await this.sumasLigadasDe(data.map((g) => g.id as string));
+    return data
+      .filter((g) => {
+        const suma = ligado.get(g.id as string) ?? 0;
+        if (!(suma > 0)) return false;
+        return montoCasa(faltanteDe(Number(g.monto), suma), monto);
+      })
+      .map((g) => this.aCandidatoCruce(g));
+  }
+
+  /** Aplica la liga del auto-cruce y traduce el desenlace a ResultadoMovimiento. */
+  private async ligarCargo(
+    movId: string,
+    gastoId: string,
+    userId: string,
+    base: Omit<ResultadoMovimiento, 'resultado' | 'motivo'> & {
+      motivo?: string | null;
+    },
+  ): Promise<ResultadoMovimiento> {
+    const liga = await this.ligarAuto(movId, gastoId, userId);
+    if (liga.ok) {
+      return {
+        ...base,
+        resultado: 'CONCILIADO',
+        gasto_id: gastoId,
+        motivo: null,
+      };
+    }
+    return {
+      ...base,
+      resultado: liga.rechazado ? 'RECHAZADO' : 'ERROR',
+      criterio: null,
+      motivo: liga.motivo,
+    };
+  }
+
+  /**
+   * Liga del auto-match. NADA que salga de aquí puede tumbar la importación
+   * (15-sep-2026): un 409 (gasto ya cubierto, carrera con otra liga) deja el
+   * movimiento pendiente, y CUALQUIER otro error (el 23514 del trigger, un
+   * 5xx de PostgREST, una desconexión) se registra y se sigue con el
+   * siguiente movimiento. Antes solo se atrapaba ConflictException y un
+   * error del trigger mataba el job entero con todo a medias.
    */
   private async ligarAuto(
     movId: string,
     gastoId: string,
     userId: string,
-  ): Promise<boolean> {
+  ): Promise<{ ok: boolean; rechazado: boolean; motivo: string | null }> {
     try {
       await this.link(movId, gastoId, userId);
-      return true;
+      return { ok: true, rechazado: false, motivo: null };
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
       if (err instanceof ConflictException) {
         this.logger.warn(
-          `auto-match: el gasto ${gastoId} no admite el cargo ${movId} (${err.message}); queda pendiente.`,
+          `auto-match: el gasto ${gastoId} no admite el cargo ${movId} (${msg}); queda pendiente.`,
         );
-        return false;
+        return {
+          ok: false,
+          rechazado: true,
+          motivo: `El gasto candidato no admite este cargo (${msg}).`,
+        };
       }
-      throw err;
+      this.logger.error(
+        `auto-match: fallo al ligar el cargo ${movId} con el gasto ${gastoId}: ${msg}`,
+      );
+      return { ok: false, rechazado: false, motivo: msg };
     }
   }
 
-  /** Ventana [fecha − días, fecha + días] en UTC (fecha = DATE del banco). */
+  /**
+   * Gemelo de `ligarAuto` para los ABONOS: `linkCobro` puede lanzar 409
+   * (el cobro ya lo tomó otro movimiento) o cualquier error de BD, y ni uno
+   * ni otro pueden tumbar la importación.
+   */
+  private async ligarCobroAuto(
+    movId: string,
+    liga: LigaCobroInput,
+    userId: string,
+  ): Promise<{ ok: boolean; rechazado: boolean; motivo: string | null }> {
+    try {
+      await this.linkCobro(movId, liga, userId);
+      return { ok: true, rechazado: false, motivo: null };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof ConflictException) {
+        this.logger.warn(`auto-match abono ${movId}: ${msg}; queda pendiente.`);
+        return {
+          ok: false,
+          rechazado: true,
+          motivo: `El cobro candidato ya no admite este abono (${msg}).`,
+        };
+      }
+      this.logger.error(`auto-match abono ${movId}: ${msg}`);
+      return { ok: false, rechazado: false, motivo: msg };
+    }
+  }
+
+  // =====================================================================
+  // RE-CRUCE (15-sep-2026): el auto-cruce ya no vive SOLO dentro del import
+  // =====================================================================
+
+  /** Contexto del auto-cruce: se carga UNA vez por corrida, no por fila. */
+  private async cargarCtxCruce(): Promise<CruceCtx> {
+    const { data, error } = await this.supabase.service
+      .from('tarjeta_corporativa')
+      .select('terminacion, activa')
+      .limit(200);
+    if (error) {
+      // Sin catálogo no hay desempate por tarjeta, pero el cruce sigue.
+      this.logger.warn(`No se pudo leer tarjeta_corporativa: ${error.message}`);
+      return { terminaciones: [] };
+    }
+    return {
+      terminaciones: (data ?? [])
+        .map((t) => (t as { terminacion: unknown }).terminacion)
+        .filter((t): t is string => typeof t === 'string'),
+    };
+  }
+
+  /**
+   * Id de la clasificación «Traspaso entre cuentas» (se crea la primera vez
+   * que hace falta; `crearClasificacion` ya es idempotente por nombre).
+   */
+  private async idClasificacionTraspaso(
+    ctx: CruceCtx,
+    userId: string,
+  ): Promise<string | null> {
+    if (ctx.clasificacionTraspaso !== undefined)
+      return ctx.clasificacionTraspaso;
+    try {
+      const clasif = await this.crearClasificacion(
+        CLASIFICACION_TRASPASO,
+        userId,
+      );
+      ctx.clasificacionTraspaso = (clasif as { id: string }).id;
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo preparar la clasificación «${CLASIFICACION_TRASPASO}»: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      ctx.clasificacionTraspaso = null;
+    }
+    return ctx.clasificacionTraspaso;
+  }
+
+  /**
+   * TRASPASOS INTERNOS (regla por descripción): «SEL TRASPASO ENTRE
+   * CUENTAS» y compañía no tienen gasto ni cobro detrás — el dinero solo
+   * cambió de cuenta. Sin esta regla quedaban pendientes para siempre e
+   * inflaban el «faltan N por conciliar» del cierre. Se clasifican con la
+   * clasificación canónica y una nota que dice de dónde salió.
+   */
+  private async aplicarTraspaso(
+    mov: { id: string; descripcion: string | null; notas?: string | null },
+    ctx: CruceCtx,
+    userId: string,
+  ): Promise<ResultadoMovimiento | null> {
+    const patron = patronTraspaso(mov.descripcion);
+    if (!patron) return null;
+    const clasifId = await this.idClasificacionTraspaso(ctx, userId);
+    if (!clasifId) return null;
+    const nota = `Regla: ${patron}`;
+    await this.clasificarMovimiento(
+      mov.id,
+      clasifId,
+      // Nunca se pisa lo que escribió la oficina.
+      mov.notas ? undefined : nota,
+      userId,
+    );
+    return {
+      movimiento_id: mov.id,
+      resultado: 'TRASPASO',
+      criterio: 'REGLA',
+      motivo: `Traspaso entre cuentas (regla «${patron}»).`,
+      candidatos_n: 0,
+    };
+  }
+
+  /**
+   * Cruza UN movimiento pendiente (regla de traspaso → gasto si es CARGO →
+   * cobro si es ABONO). Nunca lanza: el fallo se devuelve como resultado
+   * ERROR con su motivo para que el job lo cuente y siga.
+   */
+  private async cruzarMovimiento(
+    mov: {
+      id: string;
+      cuenta_bancaria_id: string;
+      fecha: string;
+      tipo: string;
+      monto: number;
+      monto_bruto?: number | null;
+      comision_monto?: number | null;
+      descripcion: string | null;
+      referencia: string | null;
+      notas?: string | null;
+    },
+    cuenta: { moneda: string | null; tipo: string | null },
+    ctx: CruceCtx,
+    userId: string,
+  ): Promise<ResultadoMovimiento> {
+    try {
+      const traspaso = await this.aplicarTraspaso(mov, ctx, userId);
+      if (traspaso) return traspaso;
+      // Sin la moneda de la cuenta ninguna consulta de candidatos filtra
+      // divisa: un cobro/gasto de 125.82 USD cuadraría con 125.82 MXN. La
+      // columna es NOT NULL, así que esto solo pasa si la cuenta no se pudo
+      // leer — se cuenta como ERROR y el movimiento queda pendiente.
+      if (!cuenta.moneda) {
+        return {
+          movimiento_id: mov.id,
+          resultado: 'ERROR',
+          criterio: null,
+          motivo:
+            'No se pudo leer la moneda de la cuenta bancaria: el cruce no se intenta para no mezclar divisas.',
+          candidatos_n: 0,
+        };
+      }
+      if (mov.tipo === (TipoMovimientoBancario.CARGO as string)) {
+        return await this.autoMatchCargo(
+          {
+            id: mov.id,
+            monto: mov.monto,
+            fecha: mov.fecha,
+            descripcion: mov.descripcion,
+            referencia: mov.referencia,
+          },
+          cuenta.moneda,
+          userId,
+          ctx,
+        );
+      }
+      if (cuenta.tipo === TIPO_CUENTA_PASARELA) {
+        return await this.autoMatchAbonoPasarela(
+          {
+            id: mov.id,
+            fecha: mov.fecha,
+            monto: Number(mov.monto),
+            monto_bruto: mov.monto_bruto ?? null,
+            comision_monto: mov.comision_monto ?? null,
+            referencia: mov.referencia,
+            descripcion: mov.descripcion,
+            moneda: cuenta.moneda,
+          },
+          userId,
+        );
+      }
+      return await this.autoMatchAbono(
+        mov.id,
+        mov.monto,
+        mov.fecha,
+        cuenta.moneda,
+        userId,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`auto-cruce del movimiento ${mov.id}: ${msg}`);
+      return {
+        movimiento_id: mov.id,
+        resultado: 'ERROR',
+        criterio: null,
+        motivo: msg,
+        candidatos_n: 0,
+      };
+    }
+  }
+
+  /**
+   * RE-CRUCE de los movimientos PENDIENTES de una ventana (15-sep-2026).
+   *
+   * Hasta hoy el auto-cruce corría SOLO dentro del bucle de importación: si
+   * fallaba (el 15-sep, el trigger con el ENUM de moneda) los movimientos ya
+   * insertados se quedaban pendientes PARA SIEMPRE — re-importar respondía
+   * «101 duplicados» y no reintentaba el cruce de nadie. Este método vuelve
+   * a correr EXACTAMENTE la misma lógica (reglas + cargos + abonos) sobre lo
+   * que sigue sin conciliar, y cuenta por qué quedó cada uno.
+   */
+  async autoMatchPendientes(dto: AutoMatchDto, userId: string) {
+    // Re-cruce DIRIGIDO: con ids explícitos la ventana de fechas no aplica
+    // (el operador señaló exactamente qué filas reintentar).
+    const ids = dto.movimiento_ids?.length ? dto.movimiento_ids : null;
+    const hasta = dto.hasta ?? hoyCancun();
+    const desde =
+      dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    if (!ids && desde > hasta) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const limite = Math.min(dto.limite ?? 500, RECRUCE_MAX);
+
+    let q = this.supabase.service
+      .from('movimiento_bancario')
+      .select(
+        'id, cuenta_bancaria_id, fecha, tipo, monto, monto_bruto, comision_monto, descripcion, referencia, notas',
+      )
+      .eq('conciliado', false)
+      .order('fecha', { ascending: true })
+      .limit(limite);
+    if (ids) q = q.in('id', ids);
+    else q = q.gte('fecha', desde).lte('fecha', hasta);
+    if (dto.cuenta_bancaria_id)
+      q = q.eq('cuenta_bancaria_id', dto.cuenta_bancaria_id);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    const movs = (data ?? []) as Array<Record<string, unknown>>;
+
+    const ctx = await this.cargarCtxCruce();
+    const cuentas = new Map<
+      string,
+      { moneda: string | null; tipo: string | null }
+    >();
+    const conteo = conteoVacio();
+    const porCriterio: Record<string, number> = {};
+    const detalle: ResultadoMovimiento[] = [];
+
+    for (const m of movs) {
+      const cuentaId = m.cuenta_bancaria_id as string;
+      if (!cuentas.has(cuentaId)) {
+        cuentas.set(cuentaId, await this.infoCuenta(cuentaId));
+      }
+      const r = await this.cruzarMovimiento(
+        {
+          id: m.id as string,
+          cuenta_bancaria_id: cuentaId,
+          fecha: m.fecha as string,
+          tipo: m.tipo as string,
+          monto: Number(m.monto),
+          monto_bruto: m.monto_bruto == null ? null : Number(m.monto_bruto),
+          comision_monto:
+            m.comision_monto == null ? null : Number(m.comision_monto),
+          descripcion: (m.descripcion as string | null) ?? null,
+          referencia: (m.referencia as string | null) ?? null,
+          notas: (m.notas as string | null) ?? null,
+        },
+        cuentas.get(cuentaId)!,
+        ctx,
+        userId,
+      );
+      sumarResultado(conteo, r.resultado);
+      if (r.criterio)
+        porCriterio[r.criterio] = (porCriterio[r.criterio] ?? 0) + 1;
+      if (detalle.length < DETALLE_MAX) detalle.push(r);
+    }
+
+    return {
+      revisados: movs.length,
+      conciliados: conteo.conciliados,
+      traspasos: conteo.traspasos,
+      ambiguos: conteo.ambiguos,
+      sin_candidato: conteo.sin_candidato,
+      rechazados: conteo.rechazados,
+      errores: conteo.errores,
+      por_criterio: porCriterio,
+      desde,
+      hasta,
+      cuenta_bancaria_id: dto.cuenta_bancaria_id ?? null,
+      limite,
+      truncado: movs.length >= limite,
+      detalle_truncado: movs.length > detalle.length,
+      detalle,
+    };
+  }
+
+  /**
+   * CAMINO INVERSO (15-sep-2026): un gasto capturado DESPUÉS de importar el
+   * estado de cuenta jamás se cruzaba solo — el auto-cruce solo corría al
+   * importar y el operador tenía que acordarse de volver a la pestaña.
+   *
+   * Se llama best-effort desde `expenses.service` al crear/editar un gasto
+   * bancario: NUNCA lanza (un fallo aquí no puede tumbar el alta del gasto)
+   * y liga solo si hay UN cargo pendiente inequívoco (misma disciplina que
+   * el auto-cruce: tarjeta y descripción desempatan, el empate no liga).
+   */
+  async intentarCruzarGasto(
+    gastoId: string,
+    userId: string,
+  ): Promise<{
+    ligado: boolean;
+    movimiento_id: string | null;
+    motivo: string;
+  }> {
+    const nada = (motivo: string) => ({
+      ligado: false,
+      movimiento_id: null,
+      motivo,
+    });
+    try {
+      const { data: gasto, error } = await this.supabase.service
+        .from('gasto')
+        .select(`${GASTO_CRUCE_COLS}, conciliado`)
+        .eq('id', gastoId)
+        .maybeSingle();
+      if (error) return nada(error.message);
+      if (!gasto) return nada('El gasto ya no existe.');
+      const g = gasto as unknown as Record<string, unknown>;
+      if (g.conciliado === true) return nada('El gasto ya está conciliado.');
+      const medio = (g.medio_pago as string | null) ?? '';
+      if (!MEDIOS_BANCARIOS.includes(medio)) {
+        return nada(`El medio ${medio || '(vacío)'} no toca el banco.`);
+      }
+      const fecha = (g.fecha_gasto as string | null) ?? null;
+      const monto = Math.abs(Number(g.monto)) || 0;
+      const moneda = (g.moneda as string | null) ?? null;
+      if (!fecha || !(monto > 0)) return nada('Gasto sin fecha o sin monto.');
+      // `gasto.moneda` es NOT NULL: sin ella no se puede garantizar que el
+      // cargo sea de la misma divisa (el filtro de cuentas quedaría abierto).
+      if (!moneda) return nada('El gasto no tiene moneda: no se cruza solo.');
+
+      // Pagos parciales: lo que este gasto todavía espera del banco.
+      const ligado = (await this.sumasLigadasDe([gastoId])).get(gastoId) ?? 0;
+      const objetivo = ligado > 0 ? faltanteDe(monto, ligado) : monto;
+      if (!(objetivo > 0)) return nada('El gasto ya está cubierto.');
+
+      // Cuentas de la MISMA moneda del gasto (un cargo de otra moneda es el
+      // caso cruzado USD↔MXN: 1 ↔ 1, se deja al operador).
+      const { data: cuentas, error: ctaErr } = await this.supabase.service
+        .from('cuenta_bancaria')
+        .select('id, moneda')
+        .limit(100);
+      if (ctaErr) return nada(ctaErr.message);
+      const ids = (cuentas ?? [])
+        .filter((c) => (c as { moneda: string }).moneda === moneda)
+        .map((c) => (c as { id: string }).id);
+      if (ids.length === 0) return nada('No hay cuentas de esa moneda.');
+
+      const { desde, hasta } = ventanaDias(fecha, MATCH_DAYS);
+      const { data: movs, error: movErr } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select('id, monto, descripcion, referencia')
+        .eq('conciliado', false)
+        .eq('tipo', TipoMovimientoBancario.CARGO)
+        .in('cuenta_bancaria_id', ids)
+        .gte('fecha', desde)
+        .lte('fecha', hasta)
+        .gte('monto', objetivo - TOLERANCIA_CENTAVOS)
+        .lte('monto', objetivo + TOLERANCIA_CENTAVOS)
+        .limit(15);
+      if (movErr) return nada(movErr.message);
+      const candidatos = (movs ?? []).map((m) => ({
+        id: (m as { id: string }).id,
+        monto: Number((m as { monto: unknown }).monto) || 0,
+        descripcion: (m as { descripcion?: string | null }).descripcion ?? null,
+        referencia: (m as { referencia?: string | null }).referencia ?? null,
+      }));
+      if (candidatos.length === 0) {
+        return nada('Ningún cargo pendiente del banco cuadra con el gasto.');
+      }
+      const ctx = await this.cargarCtxCruce();
+      const eleccion = elegirMovimiento(
+        this.aCandidatoCruce(g),
+        candidatos,
+        ctx.terminaciones,
+      );
+      if (!eleccion.movimiento_id) {
+        return nada(
+          `${candidatos.length} cargos del banco cuadran con el gasto: vincúlalo a mano.`,
+        );
+      }
+      const liga = await this.ligarAuto(
+        eleccion.movimiento_id,
+        gastoId,
+        userId,
+      );
+      if (!liga.ok) return nada(liga.motivo ?? 'No se pudo ligar.');
+      this.logger.log(
+        `auto-cruce inverso: el gasto ${gastoId} se ligó con el cargo ${eleccion.movimiento_id} (${eleccion.criterio}).`,
+      );
+      return {
+        ligado: true,
+        movimiento_id: eleccion.movimiento_id,
+        motivo: `Ligado por ${eleccion.criterio}.`,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`auto-cruce inverso del gasto ${gastoId}: ${msg}`);
+      return nada(msg);
+    }
+  }
+
+  /**
+   * Ventana [fecha − días, fecha + días] en hora CANCÚN (invariante 4). La
+   * `fecha` del banco es un DATE y `cobro_vuelo.fecha_cobro` es timestamptz:
+   * con cortes en UTC la ventana real iba de las 19:00 Cancún del día
+   * −(N+1) a las 18:59 del día +N y un cobro capturado a las 20:00 del
+   * último día quedaba fuera. Mismos cortes que `cobrosSinBanco`.
+   */
   private ventanaAbono(
     fecha: string,
     dias: number,
   ): { lo: string; hi: string } {
-    const base = new Date(`${fecha}T00:00:00Z`);
-    const lo = new Date(base);
-    lo.setUTCDate(lo.getUTCDate() - dias);
-    const hi = new Date(base);
-    hi.setUTCDate(hi.getUTCDate() + dias);
-    return { lo: lo.toISOString(), hi: hi.toISOString() };
+    const { desde, hasta } = ventanaDias(fecha, dias);
+    return { lo: `${desde}T00:00:00-05:00`, hi: `${hasta}T23:59:59-05:00` };
   }
 
   /**
@@ -779,8 +1577,15 @@ export class ConciliacionService {
     fecha: string,
     moneda: string | null,
     userId: string,
-  ): Promise<boolean> {
+  ): Promise<ResultadoMovimiento> {
     const { lo, hi } = this.ventanaAbono(fecha, MATCH_DAYS);
+    const base = {
+      movimiento_id: movId,
+      resultado: 'SIN_CANDIDATO' as ResultadoCruce,
+      criterio: null as CriterioCruce | null,
+      motivo: null as string | null,
+      candidatos_n: 0,
+    };
 
     // El banco deposita monto − comisión bancaria: el abono real es el NETO.
     // Se matchea por bruto (cobros sin comisión) O por neto (con comisión) —
@@ -814,7 +1619,13 @@ export class ConciliacionService {
       qs = qs.eq('moneda', moneda);
     }
     const [cobrosRes, sobresRes] = await Promise.all([q, qs]);
-    if (cobrosRes.error || sobresRes.error) return false;
+    if (cobrosRes.error || sobresRes.error) {
+      return {
+        ...base,
+        resultado: 'ERROR',
+        motivo: `No se pudieron leer los cobros candidatos: ${cobrosRes.error?.message ?? sobresRes.error?.message ?? ''}`,
+      };
+    }
 
     const matchea = (c: { monto: unknown; comision_banco_monto: unknown }) => {
       const bruto = Number(c.monto);
@@ -829,7 +1640,12 @@ export class ConciliacionService {
     const sobreIds = ((sobresRes.data ?? []) as Cand[])
       .filter(matchea)
       .map((c) => c.id);
-    if (cobroIds.length === 0 && sobreIds.length === 0) return false;
+    if (cobroIds.length === 0 && sobreIds.length === 0) {
+      return {
+        ...base,
+        motivo: `Ningún cobro bancario de ${montoBonito(monto)} ${moneda ?? ''} entre ${lo.slice(0, 10)} y ${hi.slice(0, 10)}.`,
+      };
+    }
 
     // Descarta cobros/sobres ya enlazados a otro movimiento; exige candidato
     // único ENTRE AMBOS universos.
@@ -849,16 +1665,43 @@ export class ConciliacionService {
     }
     const libresCobro = cobroIds.filter((id) => !ocupadosCobro.has(id));
     const libresSobre = sobreIds.filter((id) => !ocupadosSobre.has(id));
-    if (libresCobro.length + libresSobre.length !== 1) return false;
+    const n = libresCobro.length + libresSobre.length;
+    if (n === 0) {
+      return {
+        ...base,
+        motivo: `Ningún cobro bancario libre de ${montoBonito(monto)} ${moneda ?? ''} entre ${lo.slice(0, 10)} y ${hi.slice(0, 10)}.`,
+      };
+    }
+    if (n > 1) {
+      return {
+        ...base,
+        resultado: 'AMBIGUO',
+        candidatos_n: n,
+        motivo: `${n} cobros/sobres cuadran con este abono: vincúlalo a mano.`,
+      };
+    }
 
-    await this.linkCobro(
-      movId,
+    const liga: LigaCobroInput =
       libresCobro.length === 1
         ? { cobro_id: libresCobro[0] }
-        : { cobro_grupo_id: libresSobre[0] },
-      userId,
-    );
-    return true;
+        : { cobro_grupo_id: libresSobre[0] };
+    const r = await this.ligarCobroAuto(movId, liga, userId);
+    if (r.ok) {
+      return {
+        ...base,
+        resultado: 'CONCILIADO',
+        criterio: 'MONTO_EXACTO',
+        candidatos_n: 1,
+        cobro_id: liga.cobro_id ?? null,
+        cobro_grupo_id: liga.cobro_grupo_id ?? null,
+      };
+    }
+    return {
+      ...base,
+      resultado: r.rechazado ? 'RECHAZADO' : 'ERROR',
+      candidatos_n: 1,
+      motivo: r.motivo,
+    };
   }
 
   /**
@@ -1394,7 +2237,14 @@ export class ConciliacionService {
   private async autoMatchAbonoPasarela(
     mov: MovimientoPaywise,
     userId: string,
-  ): Promise<boolean> {
+  ): Promise<ResultadoMovimiento> {
+    const base = {
+      movimiento_id: mov.id,
+      resultado: 'SIN_CANDIDATO' as ResultadoCruce,
+      criterio: null as CriterioCruce | null,
+      motivo: null as string | null,
+      candidatos_n: 0,
+    };
     const { lo, hi } = this.ventanaAbono(mov.fecha, PAYWISE_VENTANA_DIAS);
     const cobros = await this.cargarCobrosPorMetodo(
       METODOS_COBRO_PASARELA,
@@ -1406,9 +2256,41 @@ export class ConciliacionService {
     const libres = cobros.filter((c) => !ligas.has(`${c.tipo}:${c.id}`));
     const r = cruzarPaywise([mov], libres, { dias: PAYWISE_VENTANA_DIAS });
     const cruce = r.coinciden[0];
-    if (!cruce) return false;
-    await this.aplicarCrucePaywise(cruce, userId);
-    return true;
+    if (!cruce) {
+      const ambiguos = r.ambiguos?.length ?? 0;
+      return {
+        ...base,
+        resultado: ambiguos > 0 ? 'AMBIGUO' : 'SIN_CANDIDATO',
+        candidatos_n: ambiguos,
+        motivo:
+          ambiguos > 0
+            ? `${ambiguos} cobros Paywise cuadran con este depósito: revísalo en la auditoría Paywise.`
+            : 'Ningún cobro Paywise libre cuadra con este depósito (neto/bruto/referencia).',
+      };
+    }
+    // La comisión REAL del archivo se escribe ANTES de ligar; un fallo aquí
+    // tampoco puede tumbar la importación (se cuenta y se sigue).
+    try {
+      await this.aplicarCrucePaywise(cruce, userId);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`auto-match Paywise ${mov.id}: ${msg}`);
+      return {
+        ...base,
+        resultado: err instanceof ConflictException ? 'RECHAZADO' : 'ERROR',
+        candidatos_n: 1,
+        motivo: msg,
+      };
+    }
+    return {
+      ...base,
+      resultado: 'CONCILIADO',
+      criterio: 'MONTO_EXACTO',
+      candidatos_n: 1,
+      cobro_id: cruce.cobro.tipo === 'COBRO_VUELO' ? cruce.cobro.id : null,
+      cobro_grupo_id:
+        cruce.cobro.tipo === 'SOBRE_GRUPO' ? cruce.cobro.id : null,
+    };
   }
 
   /**
@@ -2082,9 +2964,10 @@ export class ConciliacionService {
   }
 
   async gastosSinBanco(desde?: string, hasta?: string) {
-    const d =
-      desde ??
-      new Date(Date.now() - 90 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    // Default en día CANCÚN (no UTC), igual que `cobrosSinBanco`: a las
+    // 20:00 de Cancún el UTC ya es mañana y el corte se corría un día
+    // (invariante 4).
+    const d = desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
     let q = this.supabase.service
       .from('gasto')
       .select(
@@ -2625,13 +3508,128 @@ export class ConciliacionService {
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
+    const filas = await this.normalizarSobresEnMovs(data ?? []);
+    await this.anotarMotivoPendiente(filas);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
-      data: await this.normalizarSobresEnMovs(data ?? []),
+      data: filas,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
     };
+  }
+
+  /**
+   * POR QUÉ sigue pendiente cada CARGO de la página (15-sep-2026). Es la
+   * pregunta literal del cliente («salen como pendiente»): el badge ámbar a
+   * secas no dice nada y obligaba a abrir uno por uno.
+   *
+   * Campos ADITIVOS `motivo_pendiente` ∈ {SIN_CANDIDATOS, AMBIGUO,
+   * SE_PUEDE_CRUZAR} y `candidatos_n`, calculados con las MISMAS reglas del
+   * auto-cruce (`elegirCandidato`) en DOS consultas en lote para toda la
+   * página — nunca una por fila.
+   *
+   * HONESTIDAD ANTES QUE COBERTURA: si algo falla o la consulta de gastos se
+   * trunca, NO se anota nada (la UI vuelve al badge «Pendiente» de siempre).
+   * Un «Sin candidato» falso sería peor que no decir nada. Los ABONOS no se
+   * anotan: su universo son cobros y sobres, y ahí no hay consulta en lote.
+   */
+  private async anotarMotivoPendiente(
+    filas: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const pendientes = filas.filter(
+      (m) =>
+        m.conciliado === false &&
+        m.tipo === (TipoMovimientoBancario.CARGO as string) &&
+        typeof m.fecha === 'string',
+    );
+    if (pendientes.length === 0) return;
+    try {
+      const cuentaIds = [
+        ...new Set(
+          pendientes
+            .map((m) => m.cuenta_bancaria_id)
+            .filter((id): id is string => typeof id === 'string'),
+        ),
+      ];
+      const { data: cuentas } = await this.supabase.service
+        .from('cuenta_bancaria')
+        .select('id, moneda')
+        .in('id', cuentaIds);
+      const monedaDe = new Map<string, string>();
+      for (const c of (cuentas ?? []) as Array<{
+        id: string;
+        moneda: string;
+      }>) {
+        monedaDe.set(c.id, c.moneda);
+      }
+
+      const fechas = pendientes.map((m) => m.fecha as string).sort();
+      const desde = ventanaDias(fechas[0], MATCH_DAYS).desde;
+      const hasta = ventanaDias(fechas[fechas.length - 1], MATCH_DAYS).hasta;
+      const { data: gastos, error } = await this.gastosCandidatos({
+        moneda: null, // la moneda se filtra por cuenta, fila por fila
+        desde,
+        hasta,
+        limite: MOTIVO_GASTOS_MAX,
+      });
+      // Truncado = foto incompleta: mejor no decir nada que decir «sin
+      // candidato» de un gasto que sí existe.
+      if (error || !gastos || gastos.length >= MOTIVO_GASTOS_MAX) return;
+
+      // Índice por monto (centavos) para no comparar N×M.
+      const porMonto = new Map<string, Array<Record<string, unknown>>>();
+      for (const g of gastos) {
+        const k = (Number(g.monto) || 0).toFixed(2);
+        const lista = porMonto.get(k) ?? [];
+        lista.push(g);
+        porMonto.set(k, lista);
+      }
+      const ctx = await this.cargarCtxCruce();
+
+      for (const m of pendientes) {
+        const moneda = monedaDe.get(m.cuenta_bancaria_id as string) ?? null;
+        if (!moneda) continue;
+        const fecha = m.fecha as string;
+        const { desde: lo, hasta: hi } = ventanaDias(fecha, MATCH_DAYS);
+        const monto = Math.abs(Number(m.monto)) || 0;
+        const claves = new Set([
+          monto.toFixed(2),
+          (monto - TOLERANCIA_CENTAVOS).toFixed(2),
+          (monto + TOLERANCIA_CENTAVOS).toFixed(2),
+        ]);
+        const candidatos: GastoCandidatoCruce[] = [];
+        for (const k of claves) {
+          for (const g of porMonto.get(k) ?? []) {
+            const f = g.fecha_gasto as string | null;
+            if (!f || f < lo || f > hi) continue;
+            if ((g.moneda as string | null) !== moneda) continue;
+            if (!montoCasa(monto, Number(g.monto))) continue;
+            if (candidatos.some((c) => c.id === (g.id as string))) continue;
+            candidatos.push(this.aCandidatoCruce(g));
+          }
+        }
+        const eleccion = elegirCandidato(
+          {
+            monto,
+            descripcion: (m.descripcion as string | null) ?? null,
+            referencia: (m.referencia as string | null) ?? null,
+          },
+          candidatos,
+          ctx.terminaciones,
+        );
+        m.candidatos_n = eleccion.candidatos_n;
+        m.motivo_pendiente = eleccion.gasto_id
+          ? // Cuadra y nadie lo ligó: el auto-cruce no ha corrido sobre él
+            // (importación vieja o fallida). «Cruzar pendientes» lo resuelve.
+            'SE_PUEDE_CRUZAR'
+          : (eleccion.motivo ?? 'SIN_CANDIDATOS');
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo calcular el motivo de los pendientes: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -2982,9 +3980,18 @@ export class ConciliacionService {
   }
 
   /**
-   * Sugiere (vía Claude en pyservices) el gasto más probable para un movimiento
-   * bancario sin conciliar y ambiguo. Junta gastos candidatos cercanos (±3 días
-   * y ±5% de monto, sin conciliar) y deja que la IA proponga el match con razón.
+   * Sugiere (vía Claude en pyservices) el gasto más probable para un
+   * movimiento bancario sin conciliar y ambiguo.
+   *
+   * CONTEXTO RICO (15-sep-2026): antes al modelo solo le llegaban
+   * {fecha, monto, descripcion} del movimiento y {id, fecha, monto,
+   * proveedor} de cada candidato — estaba CIEGO justo a lo que desempata:
+   * la referencia (donde va la terminación de la tarjeta), la moneda de la
+   * cuenta, el lugar / la primera línea de las notas del gasto, su tarjeta,
+   * su categoría, su matrícula y su faltante. Ahora viaja todo eso y la
+   * respuesta admite `evidencias` y `alternativas`.
+   *
+   * La IA PROPONE y NUNCA liga: esto es solo-lectura.
    * Best-effort: si pyservices no está configurado o falla, devuelve
    * disponible=false con los candidatos para que el operador elija a mano.
    */
@@ -2994,28 +4001,61 @@ export class ConciliacionService {
   ): Promise<SugerenciaConciliacion> {
     const { data: mov, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select('id, fecha, monto, descripcion, conciliado, cuenta_bancaria_id')
+      .select(
+        'id, fecha, monto, tipo, descripcion, referencia, conciliado, cuenta_bancaria_id, cuenta:cuenta_bancaria(alias, banco, moneda)',
+      )
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
     if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
 
-    const m = mov;
+    const m = mov as Record<string, unknown>;
     if (m.conciliado) {
       throw new BadRequestException('El movimiento ya está conciliado.');
     }
+    return this.sugerirDeMovimiento(m, userId);
+  }
 
-    const moneda = await this.monedaCuenta(m.cuenta_bancaria_id);
-    const candidatos = await this.candidatosCercanos(m.monto, m.fecha, moneda);
+  /**
+   * Núcleo de la sugerencia (lo comparten `sugerir` y `sugerir-lote`): arma
+   * el contexto, llama a pyservices y filtra la respuesta contra los
+   * candidatos REALES (la IA jamás puede inventar un id).
+   */
+  private async sugerirDeMovimiento(
+    m: Record<string, unknown>,
+    userId?: string,
+  ): Promise<SugerenciaConciliacion> {
+    const movId = m.id as string;
+    const cuenta = unwrapOne(
+      m.cuenta as { alias?: unknown; banco?: unknown; moneda?: unknown } | null,
+    );
+    const moneda = (cuenta?.moneda as string | null) ?? null;
+    const candidatos = await this.candidatosCercanos(
+      Number(m.monto),
+      m.fecha as string,
+      moneda,
+    );
+    const ctx = await this.cargarCtxCruce();
+    const terminacion = terminacionDeMovimiento(
+      (m.referencia as string | null) ?? null,
+      (m.descripcion as string | null) ?? null,
+      ctx.terminaciones,
+    );
+    const vacia = (razon: string, disponible = true) => ({
+      disponible,
+      gasto_id_sugerido: null,
+      confianza: 0,
+      razon,
+      evidencias: [] as string[],
+      alternativas: [] as SugerenciaConciliacion['alternativas'],
+      terminacion_detectada: terminacion,
+      motivo_sin_match: razon,
+      candidatos,
+    });
     if (candidatos.length === 0) {
-      return {
-        disponible: true,
-        gasto_id_sugerido: null,
-        confianza: 0,
-        razon:
-          'No hay gastos candidatos cercanos (±3 días y ±5% de monto) sin conciliar.',
-        candidatos,
-      };
+      return vacia(
+        'No hay gastos candidatos cercanos (±3 días y ±5% de monto) sin conciliar.',
+      );
     }
 
     const baseUrl = this.config
@@ -3023,13 +4063,10 @@ export class ConciliacionService {
       .replace(/\/+$/, '');
     const token = this.config.get('INTERNAL_SHARED_TOKEN', { infer: true });
     if (!baseUrl || !token) {
-      return {
-        disponible: false,
-        gasto_id_sugerido: null,
-        confianza: 0,
-        razon: 'Asistente de conciliación no configurado (pyservices).',
-        candidatos,
-      };
+      return vacia(
+        'Asistente de conciliación no configurado (pyservices).',
+        false,
+      );
     }
 
     const controller = new AbortController();
@@ -3044,8 +4081,16 @@ export class ConciliacionService {
         body: JSON.stringify({
           movimiento: {
             fecha: m.fecha,
-            monto: m.monto,
-            descripcion: m.descripcion,
+            monto: Number(m.monto),
+            descripcion: (m.descripcion as string | null) ?? null,
+            referencia: (m.referencia as string | null) ?? null,
+            tipo: (m.tipo as string | null) ?? null,
+            cuenta_alias:
+              (cuenta?.alias as string | null) ??
+              (cuenta?.banco as string | null) ??
+              null,
+            cuenta_moneda: moneda,
+            terminacion_tarjeta_detectada: terminacion,
           },
           candidatos,
         }),
@@ -3055,48 +4100,185 @@ export class ConciliacionService {
         this.logger.warn(
           `pyservices /conciliacion/sugerir respondió ${res.status}`,
         );
-        return {
-          disponible: false,
-          gasto_id_sugerido: null,
-          confianza: 0,
-          razon: `pyservices respondió ${res.status}.`,
-          candidatos,
-        };
+        return vacia(`pyservices respondió ${res.status}.`, false);
       }
       const data = (await res.json()) as {
         gasto_id_sugerido: string | null;
         confianza: number;
         razon: string;
+        evidencias?: unknown;
+        alternativas?: unknown;
+        motivo_sin_match?: unknown;
         uso_ia?: UsoIaPayload | null;
       };
       this.iaUso.registrar('CONCILIACION_SUGERIR', data.uso_ia, {
         usuarioId: userId ?? null,
         contexto: { movimiento_id: movId },
       });
-      // Solo aceptamos un id que esté realmente entre los candidatos.
-      const sugerido = candidatos.some((c) => c.id === data.gasto_id_sugerido)
-        ? data.gasto_id_sugerido
+      // Solo aceptamos ids que estén realmente entre los candidatos.
+      const validos = new Set(candidatos.map((c) => c.id));
+      const sugerido = validos.has(data.gasto_id_sugerido as string)
+        ? (data.gasto_id_sugerido as string)
         : null;
+      const evidencias = Array.isArray(data.evidencias)
+        ? data.evidencias
+            .filter((e): e is string => typeof e === 'string')
+            .slice(0, 8)
+        : [];
+      const alternativas = Array.isArray(data.alternativas)
+        ? data.alternativas
+            .map((a) => a as Record<string, unknown>)
+            .filter(
+              (a) =>
+                typeof a?.gasto_id === 'string' &&
+                validos.has(a.gasto_id) &&
+                a.gasto_id !== sugerido,
+            )
+            .map((a) => ({
+              gasto_id: a.gasto_id as string,
+              confianza: Number(a.confianza) || 0,
+              razon: typeof a.razon === 'string' ? a.razon : '',
+            }))
+            .slice(0, 5)
+        : [];
       return {
         disponible: true,
         gasto_id_sugerido: sugerido,
         confianza: sugerido ? data.confianza : 0,
         razon: data.razon ?? '',
+        evidencias,
+        alternativas,
+        terminacion_detectada: terminacion,
+        motivo_sin_match: sugerido
+          ? null
+          : typeof data.motivo_sin_match === 'string'
+            ? data.motivo_sin_match.slice(0, 300)
+            : null,
         candidatos,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.logger.warn(`sugerir conciliación falló: ${msg}`);
-      return {
-        disponible: false,
-        gasto_id_sugerido: null,
-        confianza: 0,
-        razon: `No se pudo contactar al asistente de conciliación: ${msg}`,
-        candidatos,
-      };
+      return vacia(
+        `No se pudo contactar al asistente de conciliación: ${msg}`,
+        false,
+      );
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * Sugerencias EN LOTE para los pendientes de una ventana (15-sep-2026).
+   * Corre la MISMA sugerencia individual sobre los movimientos que todavía
+   * tienen candidatos y devuelve PROPUESTAS: no liga nada — el operador las
+   * confirma en el panel. Cada llamada consume créditos de IA, por eso el
+   * tope es bajo y explícito.
+   */
+  async sugerirLote(dto: SugerirLoteDto, userId: string) {
+    const hasta = dto.hasta ?? hoyCancun();
+    const desde =
+      dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    if (desde > hasta) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const limite = Math.min(dto.limite ?? 15, 40);
+    let q = this.supabase.service
+      .from('movimiento_bancario')
+      .select(
+        'id, fecha, monto, tipo, descripcion, referencia, conciliado, cuenta_bancaria_id, cuenta:cuenta_bancaria(alias, banco, moneda)',
+      )
+      .eq('conciliado', false)
+      .eq('tipo', TipoMovimientoBancario.CARGO)
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
+      .order('fecha', { ascending: true })
+      .limit(limite);
+    if (dto.cuenta_bancaria_id)
+      q = q.eq('cuenta_bancaria_id', dto.cuenta_bancaria_id);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+
+    const propuestas: Array<{
+      movimiento_id: string;
+      fecha: string;
+      monto: number;
+      descripcion: string | null;
+      referencia: string | null;
+      gasto_id_sugerido: string | null;
+      confianza: number;
+      razon: string;
+      evidencias: string[];
+      alternativas: SugerenciaConciliacion['alternativas'];
+      motivo_sin_match: string | null;
+      /** Ficha del gasto propuesto (null si la IA no propuso ninguno). */
+      gasto: SugerenciaConciliacion['candidatos'][number] | null;
+      candidatos: SugerenciaConciliacion['candidatos'];
+      candidatos_n: number;
+    }> = [];
+    let errores = 0;
+    let sinCandidatos = 0;
+    // ¿El asistente contestó ALGUNA vez? Si pyservices no está configurado o
+    // no responde, todas vuelven `disponible:false` y decir «la IA no
+    // encontró propuestas» sería mentir: nunca se le preguntó.
+    let consultados = 0;
+    let disponibles = 0;
+    let notaNoDisponible: string | null = null;
+    for (const m of (data ?? []) as Array<Record<string, unknown>>) {
+      try {
+        const s = await this.sugerirDeMovimiento(m, userId);
+        if (s.candidatos.length === 0) {
+          sinCandidatos += 1;
+          continue;
+        }
+        consultados += 1;
+        if (s.disponible) disponibles += 1;
+        else notaNoDisponible ??= s.razon || null;
+        propuestas.push({
+          movimiento_id: m.id as string,
+          fecha: m.fecha as string,
+          monto: Number(m.monto),
+          descripcion: (m.descripcion as string | null) ?? null,
+          referencia: (m.referencia as string | null) ?? null,
+          gasto_id_sugerido: s.gasto_id_sugerido,
+          confianza: s.confianza,
+          razon: s.razon,
+          evidencias: s.evidencias ?? [],
+          alternativas: s.alternativas ?? [],
+          motivo_sin_match: s.motivo_sin_match ?? null,
+          // Ficha del gasto propuesto y lista de candidatos: sin ellas el
+          // panel solo podría pintar un uuid y el operador no tendría con
+          // qué confirmar (la IA propone, la persona decide).
+          gasto: s.candidatos.find((c) => c.id === s.gasto_id_sugerido) ?? null,
+          candidatos: s.candidatos,
+          candidatos_n: s.candidatos.length,
+        });
+      } catch (err) {
+        errores += 1;
+        this.logger.warn(
+          `sugerir-lote: movimiento ${m.id as string}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const conPropuesta = propuestas.filter((p) => p.gasto_id_sugerido).length;
+    return {
+      revisados: (data ?? []).length,
+      con_propuesta: conPropuesta,
+      sin_candidatos: sinCandidatos,
+      // Alias del contrato del panel (mismo dato, su nombre): cuántos
+      // pendientes se quedaron sin una propuesta que confirmar.
+      sin_propuesta: (data ?? []).length - conPropuesta,
+      errores,
+      desde,
+      hasta,
+      limite,
+      // `false` SOLO si se preguntó y NADIE contestó: el panel lo dice tal
+      // cual («el asistente no está configurado») en vez de «no encontró
+      // nada».
+      disponible: consultados === 0 ? true : disponibles > 0,
+      nota: consultados > 0 && disponibles === 0 ? notaNoDisponible : null,
+      propuestas,
+    };
   }
 
   /** Gastos sin conciliar dentro de ±MATCH_DAYS días y ±MATCH_MONTO_PCT de monto. */
@@ -3105,90 +4287,99 @@ export class ConciliacionService {
     fecha: string,
     moneda: string | null,
   ): Promise<SugerenciaConciliacion['candidatos']> {
-    const base = new Date(`${fecha}T00:00:00Z`);
-    const lo = new Date(base);
-    lo.setUTCDate(lo.getUTCDate() - MATCH_DAYS);
-    const hi = new Date(base);
-    hi.setUTCDate(hi.getUTCDate() + MATCH_DAYS);
-    const iso = (d: Date) => d.toISOString().slice(0, 10);
+    const { desde: lo, hasta: hi } = ventanaDias(fecha, MATCH_DAYS);
 
     const delta = Math.abs(monto) * MATCH_MONTO_PCT;
     const montoLo = monto - delta;
     const montoHi = monto + delta;
 
-    let query = this.supabase.service
-      .from('gasto')
-      .select(
-        'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
-      )
-      .eq('conciliado', false)
-      // Solo medios que tocan el banco (misma regla que autoMatch).
-      .in('medio_pago', MEDIOS_BANCARIOS)
-      .gte('fecha_gasto', iso(lo))
-      .lte('fecha_gasto', iso(hi))
-      .gte('monto', montoLo)
-      .lte('monto', montoHi)
-      .limit(15);
-    if (moneda) query = query.eq('moneda', moneda);
-    const { data, error } = await query;
-    if (error) throw new Error(error.message);
-
-    type GastoRow = {
-      id: string;
-      fecha_gasto: string | null;
-      monto: number;
-      moneda?: string | null;
-      proveedor: { nombre: string } | { nombre: string }[] | null;
+    const traer = async (opts: {
+      moneda: string | null;
+      montoMin?: number;
+      montoMax?: number;
+      mayorQue?: number;
+      limite: number;
+      /** Un fallo aquí no debe tumbar la sugerencia completa. */
+      tolerante?: boolean;
+    }) => {
+      const { data, error } = await this.gastosCandidatosRicos({
+        desde: lo,
+        hasta: hi,
+        ...opts,
+      });
+      if (error) {
+        if (opts.tolerante) return [];
+        throw new Error(error.message);
+      }
+      return data ?? [];
     };
+
+    const propiosRaw = await traer({
+      moneda,
+      montoMin: montoLo,
+      montoMax: montoHi,
+      limite: 15,
+    });
 
     // PAGOS PARCIALES (14-sep-2026): una factura pagada en dos cargos tiene
     // `monto` MAYOR que este cargo — no cae en la banda de monto. Se buscan
     // aparte los gastos más caros de la ventana y se comparan contra su
     // FALTANTE (monto − lo ya vinculado), que es lo que este cargo cubriría.
-    let masCaros: GastoRow[] = [];
+    let masCaros: Array<Record<string, unknown>> = [];
     if (montoHi > 0) {
-      let qParcial = this.supabase.service
-        .from('gasto')
-        .select(
-          'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
-        )
-        .eq('conciliado', false)
-        .in('medio_pago', MEDIOS_BANCARIOS)
-        .gte('fecha_gasto', iso(lo))
-        .lte('fecha_gasto', iso(hi))
-        .gt('monto', montoHi)
-        .limit(40);
-      if (moneda) qParcial = qParcial.eq('moneda', moneda);
-      const { data: caros, error: carosErr } = await qParcial;
-      if (!carosErr) masCaros = caros ?? [];
+      masCaros = await traer({
+        moneda,
+        mayorQue: montoHi,
+        limite: 40,
+        tolerante: true,
+      });
     }
 
-    const propiosRaw = (data ?? []) as GastoRow[];
     const vinculado = await this.sumasLigadasDe([
-      ...propiosRaw.map((g) => g.id),
-      ...masCaros.map((g) => g.id),
+      ...propiosRaw.map((g) => g.id as string),
+      ...masCaros.map((g) => g.id as string),
     ]);
 
-    const aCandidato = (g: GastoRow, tcImplicito: number | null) => {
-      const prov = Array.isArray(g.proveedor) ? g.proveedor[0] : g.proveedor;
-      const ligado = vinculado.get(g.id) ?? 0;
+    const aCandidato = (
+      g: Record<string, unknown>,
+      tcImplicito: number | null,
+    ) => {
+      const prov = unwrapOne(
+        g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
+      );
+      const vuelo = unwrapOne(g.vuelo as { folio?: unknown } | null);
+      const avion = unwrapOne(g.aeronave as { matricula?: unknown } | null);
+      const captura = unwrapOne(g.captura as { nombre?: unknown } | null);
+      const ligado = vinculado.get(g.id as string) ?? 0;
       return {
-        id: g.id,
-        fecha: g.fecha_gasto,
+        id: g.id as string,
+        fecha: (g.fecha_gasto as string | null) ?? null,
         monto: Number(g.monto),
-        moneda: g.moneda ?? undefined,
+        moneda: (g.moneda as string | null) ?? undefined,
         tc_implicito: tcImplicito,
-        proveedor: prov?.nombre ?? null,
+        proveedor: typeof prov?.nombre === 'string' ? prov.nombre : null,
         // Aditivos (14-sep-2026): con pagos parciales el candidato se juzga
         // por lo que FALTA, no por su monto total.
         monto_vinculado: ligado,
         faltante: faltanteDe(Number(g.monto), ligado),
+        // Aditivos (15-sep-2026): el contexto que la IA no tenía y que el
+        // panel también pinta en el selector de «Vincular gasto».
+        medio_pago: (g.medio_pago as string | null) ?? null,
+        tarjeta_terminacion: (g.tarjeta_terminacion as string | null) ?? null,
+        categoria: (g.categoria as string | null) ?? null,
+        lugar: (g.lugar as string | null) ?? null,
+        nota: primeraLinea(g.notas as string | null) || null,
+        matricula:
+          typeof avion?.matricula === 'string' ? avion.matricula : null,
+        vuelo_folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+        capturado_por:
+          typeof captura?.nombre === 'string' ? captura.nombre : null,
       };
     };
     const propios = propiosRaw.map((g) => aCandidato(g, null));
     const parciales = masCaros
       .filter((g) => {
-        const ligado = vinculado.get(g.id) ?? 0;
+        const ligado = vinculado.get(g.id as string) ?? 0;
         if (!(ligado > 0)) return false;
         const falta = faltanteDe(Number(g.monto), ligado);
         return falta >= montoLo && falta <= montoHi;
@@ -3199,19 +4390,8 @@ export class ConciliacionService {
     // en la banda del monto — se ofrece aparte si su TC implícito (cargo ÷
     // gasto USD) es plausible, con el TC visible para que el operador decida.
     if (moneda !== 'MXN' || !(monto > 0)) return [...propios, ...parciales];
-    const { data: usd, error: usdErr } = await this.supabase.service
-      .from('gasto')
-      .select(
-        'id, fecha_gasto, monto, moneda, proveedor:proveedor!proveedor_id(nombre)',
-      )
-      .eq('moneda', 'USD')
-      .eq('conciliado', false)
-      .in('medio_pago', MEDIOS_BANCARIOS)
-      .gte('fecha_gasto', iso(lo))
-      .lte('fecha_gasto', iso(hi))
-      .limit(15);
-    if (usdErr) return [...propios, ...parciales];
-    const cruzados = ((usd ?? []) as GastoRow[])
+    const usd = await traer({ moneda: 'USD', limite: 15, tolerante: true });
+    const cruzados = usd
       .map((g) => {
         const m = Number(g.monto);
         const tc = m > 0 ? monto / m : 0;
@@ -3221,5 +4401,42 @@ export class ConciliacionService {
       })
       .filter((c): c is NonNullable<typeof c> => c !== null);
     return [...propios, ...parciales, ...cruzados];
+  }
+
+  /**
+   * Candidatos con TODO el contexto que se le manda a la IA y al panel
+   * (matrícula, vuelo, captura). Mismo universo que `gastosCandidatos`: solo
+   * cambia el select.
+   */
+  private async gastosCandidatosRicos(opts: {
+    moneda: string | null;
+    desde: string;
+    hasta: string;
+    montoMin?: number;
+    montoMax?: number;
+    mayorQue?: number;
+    limite: number;
+  }): Promise<{
+    data: Array<Record<string, unknown>> | null;
+    error: { message: string } | null;
+  }> {
+    let q = this.supabase.service
+      .from('gasto')
+      .select(
+        `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio), captura:usuario!usuario_captura_id(nombre)`,
+      )
+      .eq('conciliado', false)
+      .in('medio_pago', MEDIOS_BANCARIOS)
+      .gte('fecha_gasto', opts.desde)
+      .lte('fecha_gasto', opts.hasta);
+    if (opts.moneda) q = q.eq('moneda', opts.moneda);
+    if (opts.montoMin != null) q = q.gte('monto', opts.montoMin);
+    if (opts.montoMax != null) q = q.lte('monto', opts.montoMax);
+    if (opts.mayorQue != null) q = q.gt('monto', opts.mayorQue);
+    const { data, error } = await q.limit(opts.limite);
+    return {
+      data: (data ?? null) as Array<Record<string, unknown>> | null,
+      error: error ? { message: error.message } : null,
+    };
   }
 }

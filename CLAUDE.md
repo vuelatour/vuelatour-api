@@ -167,6 +167,96 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    cubierto: $0.00 de $277.79» no significaba nada. `details` del 409 lleva
    además `moneda` y `monto_nuevo` (aditivos).
 
+   **AUTO-CRUCE RESILIENTE, RE-CRUCE Y DESEMPATES (15-sep-2026, incidente
+   del estado de cuenta que «no conciliaba nada»)**. Fuente única de la
+   decisión: `src/modules/conciliacion/auto-cruce.util.ts` (PURO, con
+   specs). Reglas:
+   - **Ningún movimiento tumba el job.** Cada movimiento del bucle de
+     importación va en su propio try/catch (`cruzarMovimiento`), `ligarAuto`
+     y `ligarCobroAuto` atrapan CUALQUIER error (antes solo
+     `ConflictException`) y el job termina **LISTO** con el desglose
+     `{conciliados, traspasos, ambiguos, sin_candidato, rechazados,
+     errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
+     PRIMERA liga mató el job al 37 % con 101 movimientos ya insertados.
+   - **`POST /v1/conciliacion/auto-match`** (ADMIN+FACTURACION, body opcional
+     `{cuenta_bancaria_id?, desde?, hasta?, limite?}`, default últimos 90
+     días en hora Cancún y 500 movimientos) vuelve a correr EXACTAMENTE el
+     mismo cruce sobre lo que sigue `conciliado=false`. Sin él, lo que quedó
+     pendiente por un fallo se quedaba pendiente **para siempre**
+     (re-importar responde «N duplicados» y no reintenta el cruce de nadie).
+   - **El auto-cruce solo liga lo INEQUÍVOCO.** Orden: monto ±0.01 y ventana
+     ±`MATCH_DAYS` → si hay ≥2 candidatos, **terminación de tarjeta**
+     (últimos 4 dígitos de `referencia` SOLO si la referencia tiene ≥8
+     dígitos y esos 4 son una terminación real de
+     `tarjeta_corporativa`: la referencia de 6 dígitos '174465' no inventa
+     tarjeta) → **descripción** del banco contra `lugar` / primera línea de
+     `notas` / proveedor (sinónimos del giro + **veto por ciudad**; exige ≥2
+     tokens comunes y margen sobre el segundo) → si nada desempata,
+     **AMBIGUO** y se queda pendiente con su motivo. Después del monto se
+     prueba el **FALTANTE** de un gasto con pagos parciales y, en cuenta MXN,
+     la compra USD por TC implícito (15-25).
+   - **Camino inverso**: `intentarCruzarGasto` (best-effort, nunca lanza) se
+     dispara con `void` desde `expenses.service` al CREAR un gasto bancario y
+     al editar `monto`/`moneda`/`fecha_gasto`/`medio_pago`. Un gasto
+     capturado DESPUÉS de importar el estado de cuenta ya no necesita que
+     alguien se acuerde de volver a la pestaña.
+   - **Traspasos internos**: `patronTraspaso` («SEL TRASPASO ENTRE CUENTAS»…)
+     los clasifica solos con la clasificación canónica «Traspaso entre
+     cuentas» (se crea si no existe) y nota `Regla: <patrón>`; nunca pisa
+     notas escritas por la oficina. Eran pendientes eternos que inflaban el
+     «faltan N por conciliar».
+   - **Dedupe por REFERENCIA** (`emparejarDuplicados`): la referencia manda
+     cuando existe de los dos lados (re-subir el MISMO PDF con la descripción
+     redactada distinta por la IA ya no duplica) y dos cargos idénticos con
+     referencias DISTINTAS son dos movimientos reales. Sin referencia, la
+     descripción como siempre. La consulta de previos lleva `.limit(20000)`
+     (sin límite PostgREST cortaba en 1000 y duplicaba en silencio).
+   - **`ventanaAbono` en hora Cancún** (`-05:00`), como `cobrosSinBanco`:
+     invariante 4. Antes un cobro de las 20:00 del último día caía fuera.
+   - **La IA propone, jamás liga**: `POST /conciliacion/movimientos/:id/
+     sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
+     de la cuenta, terminación detectada; por candidato: medio, tarjeta,
+     categoría, lugar, primera línea de notas, matrícula, folio de vuelo,
+     capturista, `monto_vinculado`/`faltante`/`tc_implicito`) y acepta
+     `evidencias[]` y `alternativas[]`; todo id se valida contra los
+     candidatos reales. `POST /conciliacion/sugerir-lote` (ADMIN) hace lo
+     mismo para los cargos pendientes de una ventana (tope 40, default 15) y
+     devuelve PROPUESTAS — el humano confirma.
+   - **REVISIÓN ADVERSARIA (15-sep-2026), candados que faltaban**:
+     - **TC implícito USD↔MXN: solo con candidato ÚNICO.** Ahí el monto NO
+       cuadra (la banda 15-25 acepta cualquier gasto USD dentro de un ±25 %
+       del cargo), así que desempatar por tarjeta o por descripción sería
+       ligar «por parecerse» — con ≥2 plausibles queda **AMBIGUO**. El
+       comentario del código ya lo decía; el código no lo hacía.
+     - **Sin moneda de la cuenta NO se cruza nada.** `cuenta_bancaria.moneda`
+       es NOT NULL: un null solo puede venir de una lectura fallida, y sin
+       moneda la consulta de candidatos no filtra divisa (un gasto de 125.82
+       USD cuadraría con un cargo de 125.82 MXN). `cruzarMovimiento` y
+       `autoMatchCargo` devuelven ERROR con su motivo y el movimiento queda
+       pendiente.
+     - **`list()` dice POR QUÉ sigue pendiente cada CARGO** (`motivo_pendiente`
+       ∈ SIN_CANDIDATOS | AMBIGUO | **SE_PUEDE_CRUZAR** + `candidatos_n`,
+       ADITIVOS): DOS consultas en lote para toda la página —jamás una por
+       fila— con las MISMAS reglas (`elegirCandidato`). Si la lectura falla o
+       se trunca (`MOTIVO_GASTOS_MAX`), **no se anota nada**: un «sin
+       candidato» falso es peor que el badge mudo. Los ABONOS no se anotan
+       (su universo son cobros/sobres y ahí no hay consulta en lote).
+     - `AutoMatchDto.movimiento_ids[]` (≤ 500): re-cruce DIRIGIDO que manda
+       sobre `desde`/`hasta` — el panel ya lo mandaba y el API lo rebotaba con
+       400 (`forbidNonWhitelisted`).
+     - `importar-status` devuelve el desglose **PLANO además de anidado**
+       (`resultados`): el panel lo lee plano y el resumen del job salía en
+       ceros.
+     - `sugerir-lote` viaja con `gasto` (ficha del propuesto), `candidatos[]`,
+       `motivo_sin_match`, `sin_propuesta` y `disponible`/`nota` — `false`
+       SOLO si se preguntó y nadie contestó (con pyservices sin configurar el
+       panel decía «la IA no encontró propuestas», que es mentira).
+   - Migración `20260916000001_conciliacion_job_resultados.sql` (aditiva,
+     **pendiente de aplicar**): `conciliacion_import_job.errores`,
+     `errores_detalle`, `resultados`, `tipo`. Mientras no exista, el job se
+     cierra igual (el API reintenta el UPDATE sin esas columnas) y el
+     desglose viaja en la respuesta de `POST /conciliacion/importar`.
+
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
    `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se
    compraron en pesos — moneda operativa del cliente —, si no USD;
@@ -1247,6 +1337,20 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   sondas lo encienden solo en ≤ 10 min al aplicarla (sin redeploy). Tras
   aplicarla: `get_advisors`, verificar `GET /v1/calendar/sync-estado` →
   `automatica: true` y que `ultimo_reconcile_at` sobreviva un redeploy.
+- **`moneda` es un ENUM (`public.moneda`)** en `gasto`, `cuenta_bancaria` y
+  `cobro_vuelo`: en plpgsql se compara **SIEMPRE `::text`**, nunca contra una
+  variable `text` a secas. El 15-sep-2026 `tg_mov_bancario_gasto_suma`
+  (migración `20260914000001`) comparaba `c.moneda = v_moneda_gasto` y cada
+  liga cargo↔gasto reventaba con «operator does not exist: public.moneda =
+  text»: la importación del estado de cuenta se cayó al 37 % y el vínculo
+  manual del panel también. Hotfix: `20260915000001_fix_trigger_moneda_enum`.
+- **Toda migración con TRIGGER se prueba en seco con un UPDATE/INSERT REAL
+  dentro de `begin … rollback`**, no solo con `select`s: el bug anterior era
+  invisible para cualquier consulta de lectura.
+- **PENDIENTE DE APLICAR (16-sep-2026)**:
+  `20260916000001_conciliacion_job_resultados.sql` (aditiva, sin triggers):
+  columnas de desglose del auto-cruce en `conciliacion_import_job`. El API
+  0.0.13 funciona con o sin ella.
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

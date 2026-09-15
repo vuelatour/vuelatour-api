@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
+  ArrayMaxSize,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -372,4 +373,92 @@ export class ClasificarMovimientoDto {
   @IsString()
   @MaxLength(500)
   notas?: string;
+}
+
+/**
+ * RE-CRUCE de pendientes (15-sep-2026): vuelve a correr el auto-cruce sobre
+ * los movimientos que siguen sin conciliar. Todo opcional: sin filtros son
+ * los últimos 90 días de TODAS las cuentas.
+ */
+export class AutoMatchDto {
+  @ApiPropertyOptional({
+    description: 'Cuenta bancaria a re-cruzar. Omitida = todas.',
+  })
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({
+    description: 'Inicio (YYYY-MM-DD). Default: hace 90 días (hora Cancún).',
+  })
+  @IsOptional()
+  @IsISO8601()
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fin (YYYY-MM-DD). Default: hoy (hora Cancún).',
+  })
+  @IsOptional()
+  @IsISO8601()
+  hasta?: string;
+
+  @ApiPropertyOptional({
+    default: 500,
+    description: 'Tope de movimientos a revisar en esta corrida (1..2000).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(2000)
+  limite?: number;
+
+  /**
+   * Re-cruce DIRIGIDO (el panel lo manda cuando el operador quiere reintentar
+   * solo unas filas). Manda sobre `desde`/`hasta`: se revisan exactamente
+   * estos movimientos (los que sigan `conciliado = false`).
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Solo estos movimientos (ignora desde/hasta). Máximo 500 ids.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(500)
+  @IsUUID(undefined, { each: true })
+  movimiento_ids?: string[];
+}
+
+/**
+ * Sugerencias de IA EN LOTE para los pendientes de una ventana. La IA
+ * PROPONE y nunca liga: la respuesta son propuestas para que el operador
+ * confirme en el panel.
+ */
+export class SugerirLoteDto {
+  @ApiPropertyOptional({ description: 'Cuenta bancaria. Omitida = todas.' })
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({ description: 'Inicio (YYYY-MM-DD).' })
+  @IsOptional()
+  @IsISO8601()
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Fin (YYYY-MM-DD).' })
+  @IsOptional()
+  @IsISO8601()
+  hasta?: string;
+
+  @ApiPropertyOptional({
+    default: 15,
+    description:
+      'Tope de movimientos a consultar con IA en esta corrida (1..40). Cada uno consume créditos.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(40)
+  limite?: number;
 }

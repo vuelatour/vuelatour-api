@@ -2,9 +2,12 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
+  forwardRef,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CajaChicaService } from '../caja-chica/caja-chica.service';
@@ -14,6 +17,7 @@ import {
 } from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
+import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import {
   diaCancun,
   fechaHoraCancun,
@@ -160,7 +164,40 @@ export class ExpensesService {
     private readonly configuracion: ConfiguracionService,
     private readonly cajaChica: CajaChicaService,
     private readonly iaUso: IaUsoService,
+    // Auto-cruce con el banco al capturar/editar un gasto bancario
+    // (15-sep-2026). @Optional + forwardRef: es un efecto SECUNDARIO
+    // best-effort — si el módulo no está disponible (specs, arranque
+    // parcial), el alta del gasto no se entera siquiera.
+    @Optional()
+    @Inject(forwardRef(() => ConciliacionService))
+    private readonly conciliacion?: ConciliacionService,
   ) {}
+
+  /**
+   * AUTO-CRUCE con el banco, best-effort (15-sep-2026). Un gasto capturado
+   * DESPUÉS de importar el estado de cuenta jamás se cruzaba solo: el
+   * auto-cruce vivía únicamente dentro del bucle de importación y el
+   * operador tenía que acordarse de volver a Conciliación y vincular a
+   * mano. Se dispara con `void` (nunca bloquea ni falla el alta/edición) y
+   * solo liga si hay UN cargo pendiente inequívoco.
+   */
+  private cruzarConBancoBestEffort(
+    gasto: Record<string, unknown> | null | undefined,
+    userId: string,
+  ): void {
+    const id = gasto?.id as string | undefined;
+    if (!id || !this.conciliacion) return;
+    if (gasto?.conciliado === true) return;
+    const medio = (gasto?.medio_pago as string | null) ?? '';
+    if (!MEDIOS_PAGO_BANCARIOS.includes(medio)) return;
+    void this.conciliacion
+      .intentarCruzarGasto(id, userId)
+      .catch((err) =>
+        this.logger.warn(
+          `Auto-cruce con el banco del gasto ${id} falló: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+  }
 
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
   async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
@@ -1560,6 +1597,10 @@ export class ExpensesService {
         ),
       );
     }
+
+    // AUTO-CRUCE con el banco (15-sep-2026): si el estado de cuenta ya se
+    // importó, este gasto se concilia solo en cuanto se captura.
+    this.cruzarConBancoBestEffort(data, userId);
 
     // Aviso a admin: el piloto subió un gasto desde campo.
     if (opts?.notificar !== false) {
@@ -2966,6 +3007,17 @@ export class ExpensesService {
         actual: vivo,
         enviado: ifUpdatedAt,
       });
+    }
+    // AUTO-CRUCE con el banco: solo cuando cambió algo que decide el cruce
+    // (monto, moneda, fecha o medio). Editar notas o el vuelo no dispara
+    // nada. Best-effort: jamás afecta la respuesta del PATCH.
+    if (
+      dto.monto !== undefined ||
+      dto.moneda !== undefined ||
+      dto.fecha_gasto !== undefined ||
+      dto.medio_pago !== undefined
+    ) {
+      this.cruzarConBancoBestEffort(data, userId);
     }
     return data;
   }

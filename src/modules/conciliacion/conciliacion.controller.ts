@@ -17,6 +17,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  AutoMatchDto,
   CandidatosCobroQuery,
   ClasificarMovimientoDto,
   CobrosSinBancoQuery,
@@ -28,6 +29,7 @@ import {
   ListConciliacionQuery,
   PaywiseAuditoriaQuery,
   ReporteConciliacionQuery,
+  SugerirLoteDto,
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
 
@@ -80,6 +82,32 @@ export class ConciliacionController {
   })
   importarStatus(@Param('id', ParseUUIDPipe) id: string) {
     return this.conciliacion.importStatus(id);
+  }
+
+  // ---- RE-CRUCE e IA en lote (15-sep-2026): rutas LITERALES arriba ----
+
+  @Post('auto-match')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Vuelve a correr el AUTO-CRUCE sobre los movimientos PENDIENTES de la ventana (cargos y abonos): reglas de traspaso, gasto por monto ±1 centavo con desempate por terminación de tarjeta y por descripción, faltante de pagos parciales, TC implícito USD↔MXN y cobros/sobres para los abonos. Nunca liga lo ambiguo. Body opcional {cuenta_bancaria_id?, desde?, hasta?, limite?} (default: últimos 90 días, hora Cancún, 500 movimientos). Devuelve {revisados, conciliados, traspasos, ambiguos, sin_candidato, rechazados, errores, por_criterio, detalle[]}.',
+  })
+  autoMatch(@Body() dto: AutoMatchDto, @CurrentUser() c: AuthenticatedUser) {
+    return this.conciliacion.autoMatchPendientes(dto ?? {}, c.userId);
+  }
+
+  @Post('sugerir-lote')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Sugerencias de IA EN LOTE para los CARGOS pendientes de la ventana (ADMIN). La IA PROPONE y jamás liga: devuelve propuestas {movimiento_id, gasto_id_sugerido, confianza, razon, evidencias[], alternativas[]} para confirmar en el panel. Cada movimiento consume créditos: tope 40 (default 15).',
+  })
+  sugerirLote(
+    @Body() dto: SugerirLoteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.sugerirLote(dto ?? {}, c.userId);
   }
 
   @Get('reporte.xlsx')
@@ -288,7 +316,7 @@ export class ConciliacionController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Sugiere por IA el gasto más probable para un movimiento sin conciliar y ambiguo (ADMIN). Best-effort: disponible=false si la IA no está disponible.',
+      'Sugiere por IA el gasto más probable para un movimiento sin conciliar y ambiguo (ADMIN). Contexto rico (referencia, moneda de la cuenta, terminación de tarjeta detectada; por candidato: lugar, primera línea de notas, categoría, tarjeta, matrícula, vuelo y faltante). Respuesta ADITIVA: evidencias[], alternativas[], terminacion_detectada. Best-effort: disponible=false si la IA no está disponible. NUNCA liga.',
   })
   sugerir(
     @Param('id', ParseUUIDPipe) id: string,
