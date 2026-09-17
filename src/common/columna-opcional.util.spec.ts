@@ -60,6 +60,32 @@ describe('esColumnaInexistente', () => {
     );
     expect(esColumnaInexistente(null)).toBe(false);
   });
+
+  /**
+   * MENSAJE REAL de PostgREST cuando la columna que falta viaja en el CUERPO
+   * de un insert/update (lo rechaza su schema cache, sin llegar a Postgres).
+   * No contiene «does not exist»: con la regla vieja, el alta de usuarios
+   * respondía 500 mientras `20260917000001` no estuviera aplicada.
+   */
+  it("PGRST204 real: «Could not find the 'apodo' column … in the schema cache»", () => {
+    const real = {
+      code: 'PGRST204',
+      message:
+        "Could not find the 'apodo' column of 'usuario' in the schema cache",
+    };
+    expect(esColumnaInexistente(real)).toBe(true);
+    // Y también sin el code (por si alguna versión lo cambia).
+    expect(esColumnaInexistente({ code: null, message: real.message })).toBe(
+      true,
+    );
+    // Un «no encontré la FUNCIÓN» NO es una columna ausente.
+    expect(
+      esColumnaInexistente({
+        code: 'PGRST202',
+        message: 'Could not find the function public.foo in the schema cache',
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('ColumnaOpcional', () => {

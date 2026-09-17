@@ -5,10 +5,15 @@ import {
   colorIdGoogleDeVuelo,
   colorIdGoogleEvento,
   colorIdGoogleMantenimiento,
+  descripcionEventoVuelo,
   estadoHttpGoogle,
   eventoAusenteEnGoogle,
+  horaCortaCancun,
   nombreCortoPiloto,
   parsearServiceAccountJson,
+  rutaMinusculas,
+  tituloEventoVuelo,
+  ventanaEventoVuelo,
 } from './google-evento.util';
 import {
   CANCELADO_COLOR,
@@ -29,8 +34,14 @@ import {
  *    (`colores-calendario.util`: semánticos y `aeronave.color_calendario`) al
  *    colorId de Google más cercano, para que el calendario de la oficina
  *    espeje «los mismos colores que usamos para cada cosa»;
- *  - `nombreCortoPiloto` pone el primer nombre del piloto en el título.
+ *  - `nombreCortoPiloto` pone el nombre corto del piloto en el título.
  * Ambos PUROS: ninguna llamada a Google ni a la BD.
+ *
+ * Desde el 15-sep-2026 viven aquí también los helpers del FORMATO DE LA
+ * OFICINA —`rutaMinusculas`, `horaCortaCancun`, `tituloEventoVuelo`,
+ * `descripcionEventoVuelo`, `ventanaEventoVuelo`—: el vuelo entero es UNA
+ * SOLA FILA («Saab N621TX cun-pce-ctm-pce-cun 6:50») porque el Google
+ * Calendar lo lee UNA persona, Luis el mecánico.
  */
 describe('colorIdGoogleDe', () => {
   it('la paleta son los 11 colores oficiales de evento de Google', () => {
@@ -276,6 +287,368 @@ describe('nombreCortoPiloto', () => {
   it('vuelo externo: "externo" aunque haya nombre capturado', () => {
     expect(nombreCortoPiloto('Quien Sea', true)).toBe('externo');
     expect(nombreCortoPiloto(null, true)).toBe('externo');
+  });
+
+  /**
+   * APODO (`usuario.apodo`, 17-sep-2026): el primer nombre NO es como la
+   * oficina conoce al piloto, y el calendario lo lee el mecánico. Casos
+   * REALES del cliente.
+   */
+  it('el apodo GANA sobre el primer nombre (casos reales de la oficina)', () => {
+    expect(nombreCortoPiloto('Alexander E. Saab', false, 'Saab')).toBe('Saab');
+    expect(nombreCortoPiloto('Abraham Zamora', false, 'Zamora')).toBe('Zamora');
+    expect(nombreCortoPiloto('Pablo Canales', false, 'Pab')).toBe('Pab');
+  });
+
+  it('apodo vacío / en blanco / ausente: cae al primer nombre', () => {
+    expect(nombreCortoPiloto('Luis Alberto Ramírez', false, null)).toBe('Luis');
+    expect(nombreCortoPiloto('Luis Alberto Ramírez', false, '')).toBe('Luis');
+    expect(nombreCortoPiloto('Luis Alberto Ramírez', false, '   ')).toBe(
+      'Luis',
+    );
+    expect(nombreCortoPiloto(null, false, '  ')).toBe('sin piloto');
+  });
+
+  it('externo manda sobre el apodo (la tripulación no es nuestra)', () => {
+    expect(nombreCortoPiloto('Quien Sea', true, 'Saab')).toBe('externo');
+  });
+});
+
+/**
+ * FORMATO DE LA OFICINA — pedido del cliente del 15-sep-2026: «que no se
+ * divida en tramos, mejor que esté todo en UNA SOLA FILA» y «le quitamos lo
+ * de T1 y la cantidad de pasajeros, para nada más dejar piloto, avión, ruta
+ * y hora».
+ *
+ * Los títulos de abajo son MUESTRAS REALES de los eventos que la oficina
+ * capturaba a mano en el calendario de
+ * `aerochartercancunflightplanner@gmail.com` (15-sep-2026). Si esta tabla se
+ * rompe, el mecánico deja de reconocer su calendario.
+ */
+describe('formato de la oficina: rutaMinusculas / horaCortaCancun / tituloEventoVuelo', () => {
+  it('rutaMinusculas: origen del primero + destino de cada tramo, en minúsculas', () => {
+    expect(
+      rutaMinusculas([
+        { origen: 'CUN', destino: 'MID' },
+        { origen: 'MID', destino: 'CUN' },
+      ]),
+    ).toBe('cun-mid-cun');
+    expect(
+      rutaMinusculas([
+        { origen: 'CUN', destino: 'PCE' },
+        { origen: 'PCE', destino: 'CTM' },
+        { origen: 'CTM', destino: 'PCE' },
+        { origen: 'PCE', destino: 'CUN' },
+      ]),
+    ).toBe('cun-pce-ctm-pce-cun');
+    // Un solo tramo (vuelo sencillo sin escalas capturadas).
+    expect(rutaMinusculas([{ origen: 'ILS', destino: 'CZM' }])).toBe('ils-czm');
+  });
+
+  it('rutaMinusculas: un tramo que NO empieza donde terminó el anterior escribe su origen', () => {
+    // Traslado no capturado: la ruta lo dice en vez de mentir por callar.
+    expect(
+      rutaMinusculas([
+        { origen: 'CUN', destino: 'MID' },
+        { origen: 'CZM', destino: 'CUN' },
+      ]),
+    ).toBe('cun-mid-czm-cun');
+  });
+
+  it('rutaMinusculas: códigos vacíos o nulos se omiten; sin tramos, cadena vacía', () => {
+    expect(rutaMinusculas([])).toBe('');
+    expect(rutaMinusculas([{ origen: null, destino: '  ' }])).toBe('');
+    expect(rutaMinusculas([{ origen: 'CUN', destino: null }])).toBe('cun');
+  });
+
+  it('horaCortaCancun: hora de PARED en Cancún (UTC−5), sin cero a la izquierda', () => {
+    expect(horaCortaCancun('2026-09-15T11:50:00.000Z')).toBe('6:50');
+    expect(horaCortaCancun('2026-09-15T12:00:00.000Z')).toBe('7:00');
+    expect(horaCortaCancun('2026-09-15T15:00:00.000Z')).toBe('10:00');
+    expect(horaCortaCancun('2026-09-15T21:00:00.000Z')).toBe('16:00');
+    // Medianoche Cancún (05:00Z): "0:00", nunca "24:00".
+    expect(horaCortaCancun('2026-09-15T05:00:00.000Z')).toBe('0:00');
+    // Cancún NO tiene horario de verano: en junio sigue siendo UTC−5.
+    expect(horaCortaCancun('2026-06-15T15:00:00.000Z')).toBe('10:00');
+  });
+
+  it('horaCortaCancun: nulo o basura devuelve cadena vacía (nunca lanza)', () => {
+    expect(horaCortaCancun(null)).toBe('');
+    expect(horaCortaCancun(undefined)).toBe('');
+    expect(horaCortaCancun('')).toBe('');
+    expect(horaCortaCancun('no es una fecha')).toBe('');
+  });
+
+  it('TÍTULOS REALES de la oficina (15-sep-2026): congelados', () => {
+    const titulo = (
+      piloto: string,
+      avion: string,
+      tramos: Array<{ origen: string; destino: string }>,
+      salidaIso: string,
+    ) =>
+      tituloEventoVuelo({
+        pilotoCorto: piloto,
+        aeronave: avion,
+        ruta: rutaMinusculas(tramos),
+        hora: horaCortaCancun(salidaIso),
+      });
+
+    expect(
+      titulo(
+        'Saab',
+        'N621TX',
+        [
+          { origen: 'CUN', destino: 'PCE' },
+          { origen: 'PCE', destino: 'CTM' },
+          { origen: 'CTM', destino: 'PCE' },
+          { origen: 'PCE', destino: 'CUN' },
+        ],
+        '2026-09-15T11:50:00.000Z',
+      ),
+    ).toBe('Saab N621TX cun-pce-ctm-pce-cun 6:50');
+
+    expect(
+      titulo(
+        'Luis',
+        'XB-PEV',
+        [
+          { origen: 'CUN', destino: 'CTM' },
+          { origen: 'CTM', destino: 'CUN' },
+        ],
+        '2026-09-15T12:00:00.000Z',
+      ),
+    ).toBe('Luis XB-PEV cun-ctm-cun 7:00');
+
+    expect(
+      titulo(
+        'Zamora',
+        'XA-VGV',
+        [
+          { origen: 'CET', destino: 'CZM' },
+          { origen: 'CZM', destino: 'CET' },
+        ],
+        '2026-09-15T21:00:00.000Z',
+      ),
+    ).toBe('Zamora XA-VGV cet-czm-cet 16:00');
+
+    expect(
+      titulo(
+        'Saab',
+        'XB-PEV',
+        [
+          { origen: 'CUN', destino: 'MID' },
+          { origen: 'MID', destino: 'CUN' },
+        ],
+        '2026-09-15T15:00:00.000Z',
+      ),
+    ).toBe('Saab XB-PEV cun-mid-cun 10:00');
+
+    expect(
+      titulo(
+        'Pab',
+        'N4142R',
+        [
+          { origen: 'ILS', destino: 'CZM' },
+          { origen: 'CZM', destino: 'CUN' },
+        ],
+        '2026-09-15T16:00:00.000Z',
+      ),
+    ).toBe('Pab N4142R ils-czm-cun 11:00');
+  });
+
+  it('el título NUNCA lleva T1, pax ni el ⚠ del permiso (el color y la descripción lo dicen)', () => {
+    const t = tituloEventoVuelo({
+      pilotoCorto: 'Luis',
+      aeronave: 'N4142R',
+      ruta: 'cun-mid-cun',
+      hora: '10:00',
+    });
+    expect(t).toBe('Luis N4142R cun-mid-cun 10:00');
+    expect(t).not.toMatch(/T1|pax|⚠|·/);
+  });
+
+  it('partes vacías se omiten (nunca dobles espacios)', () => {
+    expect(
+      tituloEventoVuelo({
+        pilotoCorto: 'sin piloto',
+        aeronave: 'sin avión',
+        ruta: '',
+        hora: '',
+      }),
+    ).toBe('sin piloto sin avión');
+  });
+});
+
+describe('descripcionEventoVuelo', () => {
+  const BASE = {
+    id: 'v-1',
+    folio: 247,
+    estado: 'CONFIRMADO',
+    cliente: 'ACME',
+    pasajeros: 2,
+    esExterno: false,
+    matricula: 'N4142R',
+    pilotoNombre: 'Alexander E. Saab',
+    montoUsd: '4200',
+    notas: null as string | null,
+    tramos: [
+      {
+        orden: 1,
+        origen: 'CUN',
+        destino: 'MID',
+        salida: '2026-09-15T15:00:00.000Z',
+        pasajeros: 2,
+      },
+      {
+        orden: 2,
+        origen: 'MID',
+        destino: 'CUN',
+        salida: '2026-09-15T23:00:00.000Z',
+        ferry: true,
+      },
+    ],
+  };
+
+  it('formato de la oficina: una línea por tramo, con el ancla al final', () => {
+    expect(descripcionEventoVuelo(BASE).split('\n')).toEqual([
+      'Folio: #247',
+      'Estado: CONFIRMADO',
+      'Cliente: ACME',
+      'Pasajeros: 2',
+      'Aeronave: N4142R',
+      'Piloto: Alexander E. Saab',
+      'T1 cun-mid 10:00 · 2 pax',
+      'T2 mid-cun 18:00 · ferry',
+      'Monto: $4200 USD',
+      '',
+      'VuelaTour · vuelo v-1',
+    ]);
+  });
+
+  it('permiso pendiente y notas SÍ salen (el título ya no los lleva)', () => {
+    const lineas = descripcionEventoVuelo({
+      ...BASE,
+      permisoPendiente: true,
+      notas: 'avisar al FBO',
+    }).split('\n');
+    expect(lineas).toContain('Permiso de pista: PENDIENTE');
+    expect(lineas).toContain('Notas: avisar al FBO');
+    // El pendiente va ANTES de los tramos (se lee primero).
+    expect(lineas.indexOf('Permiso de pista: PENDIENTE')).toBeLessThan(
+      lineas.indexOf('T1 cun-mid 10:00 · 2 pax'),
+    );
+  });
+
+  it('externo: operador en vez de matrícula y «(externo)» de piloto', () => {
+    const lineas = descripcionEventoVuelo({
+      ...BASE,
+      esExterno: true,
+      operadorExterno: 'Jet Amigo',
+    }).split('\n');
+    expect(lineas).toContain('Operador externo: Jet Amigo');
+    expect(lineas).toContain('Piloto: (externo)');
+    expect(lineas.join('\n')).not.toContain('Aeronave:');
+  });
+
+  it('tramo SIN hora: la línea sale igual, solo sin hora', () => {
+    const lineas = descripcionEventoVuelo({
+      ...BASE,
+      tramos: [{ orden: 1, origen: 'CUN', destino: 'MID', salida: null }],
+    }).split('\n');
+    // Sin `pasajeros` propios cae a los del vuelo.
+    expect(lineas).toContain('T1 cun-mid · 2 pax');
+  });
+
+  /**
+   * MULTI-AVIÓN / ROTACIÓN DE PILOTO: el título lleva UN avión y UN piloto
+   * (los del primer tramo activo). Quien difiera se dice en su línea, que es
+   * lo que el formato viejo daba con un evento por tramo. Solo aparece cuando
+   * difiere: la línea normal no cambia (ver la prueba del formato).
+   */
+  it('tramo con avión o piloto DISTINTOS: se anexan a su línea', () => {
+    const lineas = descripcionEventoVuelo({
+      ...BASE,
+      tramos: [
+        BASE.tramos[0],
+        {
+          orden: 2,
+          origen: 'MID',
+          destino: 'CUN',
+          salida: '2026-09-15T23:00:00.000Z',
+          pasajeros: 2,
+          aeronave: 'N990GG',
+          piloto: 'Zamora',
+        },
+      ],
+    }).split('\n');
+    expect(lineas).toContain('T1 cun-mid 10:00 · 2 pax');
+    expect(lineas).toContain('T2 mid-cun 18:00 · 2 pax · N990GG · Zamora');
+  });
+
+  it('sin cliente / sin piloto / sin monto: guiones y omisiones, nunca "undefined"', () => {
+    const texto = descripcionEventoVuelo({
+      ...BASE,
+      cliente: null,
+      pilotoNombre: null,
+      matricula: null,
+      montoUsd: null,
+    });
+    expect(texto).toContain('Cliente: —');
+    expect(texto).toContain('Aeronave: —');
+    expect(texto).toContain('Piloto: sin asignar');
+    expect(texto).not.toContain('Monto');
+    expect(texto).not.toContain('undefined');
+  });
+});
+
+/**
+ * VENTANA de la fila única: un redondo debe ser UNA barra de la mañana a la
+ * tarde y un viaje con pernocta debe abarcar sus días — no dos bloques
+ * sueltos de 2 h como en el formato viejo.
+ */
+describe('ventanaEventoVuelo', () => {
+  const T = (iso: string) => new Date(iso).toISOString();
+
+  it('del primer despegue al último instante conocido + 1 h', () => {
+    const v = ventanaEventoVuelo('2026-09-15T15:00:00.000Z', [
+      '2026-09-15T18:00:00.000Z',
+      '2026-09-15T23:00:00.000Z',
+    ]);
+    expect(v?.inicio.toISOString()).toBe(T('2026-09-15T15:00:00.000Z'));
+    expect(v?.fin.toISOString()).toBe(T('2026-09-16T00:00:00.000Z'));
+  });
+
+  it('viaje multi-día (pernocta): la fila abarca los días', () => {
+    const v = ventanaEventoVuelo('2026-09-15T15:00:00.000Z', [
+      '2026-09-18T20:00:00.000Z',
+    ]);
+    expect(v?.fin.toISOString()).toBe(T('2026-09-18T21:00:00.000Z'));
+  });
+
+  it('sin más instantes conocidos: 1 h mínima', () => {
+    const v = ventanaEventoVuelo('2026-09-15T15:00:00.000Z', [null, undefined]);
+    expect(v?.fin.toISOString()).toBe(T('2026-09-15T16:00:00.000Z'));
+  });
+
+  it('instantes ANTERIORES al inicio o con basura se ignoran', () => {
+    const v = ventanaEventoVuelo('2026-09-15T15:00:00.000Z', [
+      '2026-09-14T10:00:00.000Z',
+      'no es una fecha',
+    ]);
+    expect(v?.fin.toISOString()).toBe(T('2026-09-15T16:00:00.000Z'));
+  });
+
+  it('un fin absurdo (año mal capturado) NO pinta una barra de meses', () => {
+    const v = ventanaEventoVuelo('2026-09-15T15:00:00.000Z', [
+      '2027-09-15T15:00:00.000Z',
+    ]);
+    expect(v?.fin.toISOString()).toBe(T('2026-09-15T16:00:00.000Z'));
+  });
+
+  it('sin inicio válido no hay fila', () => {
+    expect(ventanaEventoVuelo(null)).toBeNull();
+    expect(ventanaEventoVuelo('')).toBeNull();
+    expect(ventanaEventoVuelo('no es una fecha')).toBeNull();
   });
 });
 

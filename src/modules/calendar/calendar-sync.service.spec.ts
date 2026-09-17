@@ -55,7 +55,10 @@ const argsDe = (fn: jest.Mock, i: number): LlamadaGoogle => {
 const insertado = (i = 0): LlamadaGoogle => argsDe(eventosGoogle.insert, i);
 const actualizado = (i = 0): LlamadaGoogle => argsDe(eventosGoogle.update, i);
 
-type Resultado = { data: unknown; error: null | { message: string } };
+type Resultado = {
+  data: unknown;
+  error: null | { code?: string; message: string };
+};
 type Llamada = { tabla: string; metodo: string; args: unknown[] };
 
 /**
@@ -406,25 +409,84 @@ const VUELO_MULTIESCALA = {
   ],
 };
 
-describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES DEL SISTEMA (12-sep-2026)', () => {
-  it('un evento por tramo: «T1 · N4142R · CUN-PTU · Luis · 3 pax» y el ferry con su prefijo', async () => {
+/**
+ * UNA SOLA FILA POR VUELO (pedido del cliente, 15-sep-2026). El Google
+ * Calendar lo lee UNA persona —Luis, el mecánico— y el espejo lo partía en un
+ * evento por tramo. Ahora el vuelo entero es UN evento con el formato que la
+ * oficina capturaba a mano: `{piloto} {AVIÓN} {ruta} {hora}`.
+ *
+ * Los tramos NO desaparecen: viven en la DESCRIPCIÓN («T1 cun-ptu 9:00 · 3
+ * pax»), que es donde el mecánico los busca cuando los necesita.
+ */
+describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-2026)', () => {
+  it('itinerario completo en una fila: «Luis N4142R cun-ptu-cun 9:00», sin T1 ni pax en el título', async () => {
     const { service } = armar({
       vuelo: [{ data: VUELO_MULTIESCALA, error: null }],
     });
 
     await expect(service.syncFlight('v-1')).resolves.toBe(true);
 
-    expect(eventosGoogle.insert).toHaveBeenCalledTimes(2);
-    const cuerpos = [insertado(0).requestBody, insertado(1).requestBody];
-    expect(cuerpos[0].summary).toBe('T1 · N4142R · CUN-PTU · Luis · 3 pax');
-    // El color del avión del sistema (#10B981) → Salvia (2).
-    expect(cuerpos[0].colorId).toBe('2');
-    expect(cuerpos[1].summary).toBe(
-      'T2 Ferry · N4142R · PTU-CUN · Luis · 0 pax ⚠ permiso pendiente',
+    // UN evento, no dos.
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('Luis N4142R cun-ptu-cun 9:00');
+    // El color del avión del sistema (#10B981) → Salvia (2). El color sale
+    // del PRIMER tramo activo, que no tiene permiso pendiente.
+    expect(requestBody.colorId).toBe('2');
+    // La fila abarca del primer despegue (14:00Z = 9:00 Cancún) a la última
+    // salida conocida + 1 h (20:00Z = 15:00 Cancún → 21:00Z).
+    expect(requestBody.start).toEqual({
+      dateTime: '2026-09-20T14:00:00.000Z',
+      timeZone: 'America/Cancun',
+    });
+    expect(requestBody.end).toEqual({
+      dateTime: '2026-09-20T21:00:00.000Z',
+      timeZone: 'America/Cancun',
+    });
+    // Ancla ÚNICA: `vuelatour_tramo: 'vuelo'` (ya no 'ida'/'regreso'/'leg-N').
+    expect(requestBody.extendedProperties).toEqual({
+      private: { vuelatour_vuelo_id: 'v-1', vuelatour_tramo: 'vuelo' },
+    });
+    // La descripción conserva TODO lo que el título dejó de decir.
+    expect(String(requestBody.description).split('\n')).toEqual([
+      'Folio: #247',
+      'Estado: CONFIRMADO',
+      'Cliente: ACME',
+      'Pasajeros: 3',
+      'Aeronave: N4142R',
+      'Piloto: Luis Alberto Ramírez',
+      // El permiso pendiente del tramo 2 SÍ se dice (el color solo mira el
+      // primer tramo: el texto es el dato confiable).
+      'Permiso de pista: PENDIENTE',
+      'T1 cun-ptu 9:00 · 3 pax',
+      'T2 ptu-cun 15:00 · ferry',
+      'Monto: $4200 USD',
+      '',
+      'VuelaTour · vuelo v-1',
+    ]);
+  });
+
+  it('APODO de la oficina: gana sobre el primer nombre («Saab», no «Alexander»)', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      piloto: { nombre: 'Alexander E. Saab', apodo: 'Saab' },
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          piloto: { nombre: 'Alexander E. Saab', apodo: 'Saab' },
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('Saab N4142R cun-ptu 9:00');
+    // El nombre COMPLETO sigue en la descripción (el apodo es del título).
+    expect(String(requestBody.description)).toContain(
+      'Piloto: Alexander E. Saab',
     );
-    // El permiso pendiente sigue DOMINANDO el color, pero ahora es el ÁMBAR
-    // DEL SISTEMA (#F59E0B) traducido → Banana (5), no el 6 inventado antes.
-    expect(cuerpos[1].colorId).toBe('5');
   });
 
   it('sin piloto asignado: «sin piloto» en el título y el MORADO "sin asignar" del sistema', async () => {
@@ -441,18 +503,15 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    expect(requestBody.summary).toBe(
-      'T1 · N4142R · CUN-PTU · sin piloto · 3 pax',
-    );
+    expect(requestBody.summary).toBe('sin piloto N4142R cun-ptu 9:00');
     // El calendario del sistema lo pinta morado (#8B5CF6 "⚠ falta asignar"):
-    // en Google es Lavanda (1). Antes ganaba el color del avión y la oficina
-    // no veía el pendiente por color.
+    // en Google es Lavanda (1).
     expect(requestBody.colorId).toBe('1');
   });
 
   it('tramo SIN asignación propia: HEREDA avión/piloto del vuelo (no es "sin asignar")', async () => {
     // Regla del repo: `escala.aeronave_id ?? vuelo.aeronave_id` (igual que el
-    // calendario del sistema). Sin la herencia, este tramo saldría morado
+    // calendario del sistema). Sin la herencia, esta fila saldría morada
     // "falta asignar" (Lavanda 1) con el piloto puesto en el título.
     const vuelo = {
       ...VUELO_MULTIESCALA,
@@ -471,7 +530,7 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    expect(requestBody.summary).toBe('T1 · N4142R · CUN-PTU · Luis · 3 pax');
+    expect(requestBody.summary).toBe('Luis N4142R cun-ptu 9:00');
     expect(requestBody.colorId).toBe('2'); // color del avión del VUELO
   });
 
@@ -481,10 +540,9 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
 
     await service.syncFlight('v-1');
 
-    // Tentativo va ANTES del permiso pendiente y del color del avión: los dos
-    // tramos salen grises aunque el 2.º tenga permiso pendiente.
-    expect(insertado(0).requestBody.colorId).toBe('8');
-    expect(insertado(1).requestBody.colorId).toBe('8');
+    // Tentativo va ANTES del permiso pendiente y del color del avión.
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+    expect(insertado().requestBody.colorId).toBe('8');
   });
 
   it('externo: «externo» como piloto, operador como avión y su color Flamenco', async () => {
@@ -505,14 +563,108 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    expect(requestBody.summary).toBe(
-      'T1 · Jet Amigo · CUN-PTU · externo · 3 pax',
-    );
+    expect(requestBody.summary).toBe('externo Jet Amigo cun-ptu 9:00');
     // Rosa pálido del sistema (#F0DCDB) → Flamenco (4).
     expect(requestBody.colorId).toBe('4');
+    expect(String(requestBody.description)).toContain(
+      'Operador externo: Jet Amigo',
+    );
   });
 
-  it('vuelo legacy ida/regreso (sin escalas): título con piloto y color del avión del vuelo', async () => {
+  /**
+   * La casilla del título es el AVIÓN. `operador_externo` a veces trae el
+   * nombre de la persona («Carlos Muciño», caso real del vuelo #290) y el
+   * mecánico necesita la MATRÍCULA ajena que la oficina capturó a mano.
+   */
+  it('externo CON matrícula ajena capturada: el título la usa (no el nombre del operador)', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      es_externo: true,
+      operador_externo: 'Carlos Muciño',
+      avion_externo_matricula: 'XB-ORN',
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          aeronave: null,
+          aeronave_id: null,
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('externo XB-ORN cun-ptu 9:00');
+    // La descripción conserva a QUIÉN se le contrató.
+    expect(String(requestBody.description)).toContain(
+      'Operador externo: Carlos Muciño',
+    );
+  });
+
+  /**
+   * MULTI-AVIÓN (invariante 10): el título solo puede decir un avión. El que
+   * difiera se dice en la línea de SU tramo — el formato viejo lo daba con un
+   * evento por tramo y sin esto el mecánico creería que todo lo vuela el
+   * primero. Lo mismo con una rotación de piloto (caso #129).
+   */
+  it('multi-avión y rotación de piloto: la línea del tramo dice el avión y el piloto distintos', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      escalas: [
+        VUELO_MULTIESCALA.escalas[0],
+        {
+          ...VUELO_MULTIESCALA.escalas[1],
+          es_ferry: false,
+          pasajeros: 2,
+          estado_permiso: null,
+          aeronave_id: 'a-9',
+          piloto_id: 'p-9',
+          aeronave: { matricula: 'N990GG', color_calendario: '#3B82F6' },
+          piloto: { nombre: 'Abraham Zamora', apodo: 'Zamora' },
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    // El título sigue siendo el del PRIMER tramo activo (una sola fila).
+    expect(requestBody.summary).toBe('Luis N4142R cun-ptu-cun 9:00');
+    const lineas = String(requestBody.description).split('\n');
+    // El tramo 1 va como siempre (no repite lo del encabezado)…
+    expect(lineas).toContain('T1 cun-ptu 9:00 · 3 pax');
+    // …y el 2 dice su avión y su piloto.
+    expect(lineas).toContain('T2 ptu-cun 15:00 · 2 pax · N990GG · Zamora');
+  });
+
+  /**
+   * PostgREST puede devolver `[]` (no `null`) en un embed a-uno vacío. Con el
+   * `??` sobre el crudo, ese `[]` ganaba y el vuelo salía «sin avión / sin
+   * piloto» aunque el tramo HEREDE la asignación del vuelo.
+   */
+  it('embed vacío del tramo (`[]`): hereda avión y piloto del vuelo, no «sin avión»', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          aeronave_id: null,
+          piloto_id: null,
+          aeronave: [],
+          piloto: [],
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(insertado().requestBody.summary).toBe('Luis N4142R cun-ptu 9:00');
+  });
+
+  it('vuelo SENCILLO sin escalas: la ruta sale del vuelo (cun-ptu)', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       tipo: 'SENCILLO',
@@ -527,8 +679,33 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    expect(requestBody.summary).toBe('N990GG · CUN-PTU · Itzi · 3 pax');
+    expect(requestBody.summary).toBe('Itzi N990GG cun-ptu 9:00');
     expect(requestBody.colorId).toBe('7'); // azul del sistema → Pavo real
+    expect(String(requestBody.description).split('\n')).toContain(
+      'T1 cun-ptu 9:00 · 3 pax',
+    );
+  });
+
+  it('REDONDO sin escalas: la ruta va y VUELVE (cun-ptu-cun) en una sola fila', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      tipo: 'REDONDO',
+      escalas: [],
+      fecha_traslado_final: '2026-09-21T23:00:00.000Z',
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('Luis N4142R cun-ptu-cun 9:00');
+    // La fila abarca los DOS días (pernocta), no dos bloques sueltos de 2 h.
+    expect(requestBody.start?.dateTime).toBe('2026-09-20T14:00:00.000Z');
+    expect(requestBody.end?.dateTime).toBe('2026-09-22T00:00:00.000Z');
+    expect(String(requestBody.description).split('\n')).toContain(
+      'T2 ptu-cun 18:00 · 3 pax',
+    );
   });
 
   it('avión sin color_calendario: el gris "sin avión" del sistema (#9CA3AF) → Lavanda (1)', async () => {
@@ -544,7 +721,7 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
 
     const { requestBody } = insertado();
     // COLISIÓN CONOCIDA: el gris "sin avión" y el morado "sin asignar" caen
-    // los dos en Lavanda (1). El TÍTULO los distingue (⚠ / «sin piloto»).
+    // los dos en Lavanda (1). El TÍTULO los distingue («sin piloto»).
     expect(requestBody.colorId).toBe('1');
   });
 
@@ -572,9 +749,7 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     });
   });
 
-  // El cancelado NO vive en Google (aunque el sistema lo conserve en rojo):
-  // eso valía para el vuelo entero y para cada TRAMO del itinerario, pero el
-  // evento a nivel VUELO de la ida se seguía publicando.
+  // El cancelado NO vive en Google (aunque el sistema lo conserve en rojo).
   it('itinerario con TODOS los tramos cancelados: no queda nada publicado', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
@@ -599,12 +774,58 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
     );
   });
 
-  it('REDONDO con la IDA cancelada: se borra la ida y solo se publica el regreso', async () => {
+  /**
+   * Un tramo cancelado NO viaja a Google: ni en la ruta del título ni en la
+   * descripción. Si el tramo que sigue no empieza donde terminó el anterior
+   * (justo lo que deja una cancelación intermedia), su origen SÍ se escribe:
+   * la ruta nunca miente por callar.
+   */
+  it('tramo INTERMEDIO cancelado: la ruta lo omite y la descripción tampoco lo lista', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      escalas: [
+        VUELO_MULTIESCALA.escalas[0],
+        {
+          ...VUELO_MULTIESCALA.escalas[1],
+          id: 'e-2b',
+          origen_iata: 'PTU',
+          destino_iata: 'CZM',
+          es_ferry: false,
+          pasajeros: 3,
+          estado_permiso: null,
+          cancelada_at: '2026-09-19T10:00:00.000Z',
+        },
+        {
+          ...VUELO_MULTIESCALA.escalas[1],
+          id: 'e-3',
+          orden: 3,
+          origen_iata: 'CZM',
+          destino_iata: 'CUN',
+          fecha_salida_plan: '2026-09-20T22:00:00.000Z',
+          es_ferry: false,
+          pasajeros: 3,
+          estado_permiso: null,
+        },
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.summary).toBe('Luis N4142R cun-ptu-czm-cun 9:00');
+    const lineas = String(requestBody.description).split('\n');
+    expect(lineas).toContain('T1 cun-ptu 9:00 · 3 pax');
+    expect(lineas).toContain('T3 czm-cun 17:00 · 3 pax');
+    expect(lineas.join('\n')).not.toContain('ptu-czm');
+  });
+
+  it('REDONDO con la IDA cancelada: la fila única queda con el tramo que SÍ vuela', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       tipo: 'REDONDO',
       fecha_traslado_final: '2026-09-21T18:00:00.000Z',
-      google_calendar_id: 'ev-ida',
+      google_calendar_id: 'ev-vuelo',
       google_calendar_regreso_id: null,
       escalas: [
         {
@@ -625,16 +846,79 @@ describe('CalendarSyncService.syncFlight — piloto en el título (C3) y COLORES
 
     await service.syncFlight('v-1');
 
-    expect(eventosGoogle.delete).toHaveBeenCalledWith({
-      calendarId: CALENDARIO,
-      eventId: 'ev-ida',
-    });
-    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
-    expect(insertado().requestBody.summary).toBe(
-      '↩ Regreso · N4142R · PTU-CUN · Luis · 3 pax',
-    );
+    // Se REUSA la fila del vuelo (no se borra y se vuelve a crear).
+    expect(eventosGoogle.insert).not.toHaveBeenCalled();
+    expect(actualizado().eventId).toBe('ev-vuelo');
+    // Solo el tramo vivo: ruta ptu-cun con la fecha de traslado final.
+    expect(actualizado().requestBody.summary).toBe('Luis N4142R ptu-cun 13:00');
     // Color del sistema para el tramo que SÍ vuela (avión #10B981 → Salvia).
-    expect(insertado().requestBody.colorId).toBe('2');
+    expect(actualizado().requestBody.colorId).toBe('2');
+  });
+
+  /**
+   * `usuario.apodo` lo crea la migración `20260917000001`. Entre el deploy
+   * del API y la migración, PostgREST responde 42703 y SIN este degradado se
+   * caería TODA la sincronización del calendario (no solo el apodo).
+   */
+  it('pide usuario.apodo y, si la migración no está aplicada (42703), reintenta SIN ella', async () => {
+    const { service, llamadas } = armar({
+      vuelo: [
+        {
+          data: null,
+          error: {
+            code: '42703',
+            message: 'column usuario.apodo does not exist',
+          },
+        },
+        { data: VUELO_MULTIESCALA, error: null },
+      ],
+    });
+
+    await expect(service.syncFlight('v-1')).resolves.toBe(true);
+
+    const selects = de(llamadas, 'vuelo', 'select').map((l) =>
+      String(l.args[0]),
+    );
+    expect(selects[0]).toContain('apodo');
+    expect(selects[1]).not.toContain('apodo');
+    // El vuelo SÍ queda publicado, con el primer nombre del piloto.
+    expect(insertado().requestBody.summary).toBe(
+      'Luis N4142R cun-ptu-cun 9:00',
+    );
+  });
+
+  it('LEGADO: borra el evento de regreso y los de tramo ANTES de publicar la fila única', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      google_calendar_id: 'ev-vuelo',
+      google_calendar_regreso_id: 'ev-regreso',
+      escalas: VUELO_MULTIESCALA.escalas.map((e) => ({
+        ...e,
+        google_calendar_id: `ev-t${e.orden}`,
+      })),
+    };
+    const { service, llamadas } = armar({
+      vuelo: [{ data: vuelo, error: null }],
+    });
+
+    await expect(service.syncFlight('v-1')).resolves.toBe(true);
+
+    // Los tres eventos del formato viejo se van de Google…
+    const borrados = eventosGoogle.delete.mock.calls.map(
+      (_c, i) => argsDe(eventosGoogle.delete, i).eventId,
+    );
+    expect(borrados.sort()).toEqual(['ev-regreso', 'ev-t1', 'ev-t2']);
+    // …y sus columnas quedan en null (si no, el paso inverso los conservaría).
+    expect(de(llamadas, 'vuelo', 'update')[0].args[0]).toEqual({
+      google_calendar_regreso_id: null,
+    });
+    expect(de(llamadas, 'escala', 'update').map((l) => l.args[0])).toEqual([
+      { google_calendar_id: null },
+      { google_calendar_id: null },
+    ]);
+    // La fila única REUSA el id del vuelo: un update, ningún insert.
+    expect(eventosGoogle.insert).not.toHaveBeenCalled();
+    expect(actualizado().eventId).toBe('ev-vuelo');
   });
 });
 
@@ -1032,10 +1316,11 @@ describe('CalendarSyncService — idempotencia ante fallos de Google', () => {
     });
   });
 
-  it('un tramo que falla NO cancela los siguientes (se publica el resto del itinerario)', async () => {
-    // El tramo 1 ya tenía evento y su update falla con 403 de cuota; el 2 es
-    // nuevo y DEBE publicarse igual.
-    eventosGoogle.update.mockRejectedValue(gaxios(403, 'Rate Limit Exceeded'));
+  it('el borrado de un evento LEGADO falla: se conserva su id, la fila única se publica igual y el resultado es false', async () => {
+    // 500 de Google al borrar el evento viejo del tramo 1. Limpiar la columna
+    // ahí dejaría ese evento vivo en el calendario del mecánico SIN fila que
+    // lo apunte: un fantasma imborrable.
+    eventosGoogle.delete.mockRejectedValue(gaxios(500, 'Backend Error'));
     const conIda = {
       ...VUELO_MULTIESCALA,
       escalas: [
@@ -1043,13 +1328,19 @@ describe('CalendarSyncService — idempotencia ante fallos de Google', () => {
         VUELO_MULTIESCALA.escalas[1],
       ],
     };
-    const { service } = armar({ vuelo: [{ data: conIda, error: null }] });
+    const { service, llamadas } = armar({
+      vuelo: [{ data: conIda, error: null }],
+    });
 
     await expect(service.syncFlight('v-1')).resolves.toBe(false);
 
-    // El tramo 2 sí se creó; el 1 NO se duplicó.
+    // El id NO se limpia (la próxima pasada lo reintenta)…
+    expect(de(llamadas, 'escala', 'update')).toHaveLength(0);
+    // …y el vuelo SÍ queda publicado en su fila única.
     expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
-    expect(insertado().requestBody.summary).toContain('T2 Ferry');
+    expect(insertado().requestBody.summary).toBe(
+      'Luis N4142R cun-ptu-cun 9:00',
+    );
   });
 
   it('dos corridas seguidas sobre el mismo mantenimiento: un solo evento (update, nunca insert)', async () => {

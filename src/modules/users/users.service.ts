@@ -1,4 +1,11 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { EmailService } from '../notifications/email.service';
 import { PushService } from '../realtime/push.service';
@@ -7,8 +14,18 @@ import type { ListUsuariosQuery } from './dto/list-usuarios.query';
 import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
 import type { UpdateSelfDto } from './dto/update-self.dto';
 
-const COLUMNS =
+const COLUMNS_BASE =
   'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
+
+/**
+ * `apodo` (migración `20260917000001`): nombre corto de la oficina para el
+ * TÍTULO del evento de Google Calendar del vuelo («Saab N621TX cun-mid-cun
+ * 10:00»). Aditivo: quien no lo lea no se entera.
+ */
+const COLUMNS = `${COLUMNS_BASE}, apodo`;
+
+/** Migración que crea `usuario.apodo`. */
+const MIGRACION_APODO = '20260917000001';
 
 export interface UsuarioRow {
   id: string;
@@ -24,45 +41,98 @@ export interface UsuarioRow {
   es_piloto_externo: boolean;
   telefono: string | null;
   avatar_url: string | null;
+  /**
+   * Nombre corto de la oficina («Saab», «Zamora», «Pab») para el título del
+   * evento de Google Calendar. `undefined` mientras la migración
+   * `20260917000001` no esté aplicada (la columna no viaja en el select).
+   */
+  apodo?: string | null;
   created_at: string;
   updated_at: string;
 }
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
+  /**
+   * `usuario.apodo` existe. Arranca en `true` y solo se apaga si Postgres
+   * responde 42703 (migración `20260917000001` sin aplicar): así el API se
+   * puede desplegar ANTES de la migración sin tumbar el alta, la edición ni
+   * el listado de usuarios. No se vuelve a prender hasta el siguiente
+   * arranque (aplicar la migración pide un resync del calendario de todas
+   * formas, porque el formato del título cambia).
+   */
+  private apodoDisponible = true;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly email: EmailService,
     private readonly push: PushService,
   ) {}
 
+  /** Columnas a pedir: con `apodo` mientras la migración esté aplicada. */
+  private columnas(): string {
+    return this.apodoDisponible ? COLUMNS : COLUMNS_BASE;
+  }
+
+  /**
+   * Apaga el soporte de `apodo` si el error es «la columna no existe», y
+   * dice si hay que reintentar SIN ella. Cualquier otro error se propaga tal
+   * cual (nunca se oculta un problema real).
+   */
+  private degradarApodo(
+    error: { code?: string | null; message?: string | null } | null,
+  ): boolean {
+    if (!this.apodoDisponible || !esColumnaInexistente(error)) return false;
+    this.apodoDisponible = false;
+    this.logger.warn(
+      `Columna usuario.apodo no existe todavía (migración ${MIGRACION_APODO} pendiente): el nombre corto del calendario no se guarda ni se devuelve hasta aplicarla.`,
+    );
+    return true;
+  }
+
+  /** Quita `apodo` de un payload cuando la columna todavía no existe. */
+  private sinApodo<T extends Record<string, unknown>>(payload: T): T {
+    if (this.apodoDisponible || !('apodo' in payload)) return payload;
+    const resto = { ...payload };
+    delete resto.apodo;
+    return resto;
+  }
+
   async list(filters: ListUsuariosQuery) {
-    let query = this.supabase.service
-      .from('usuario')
-      .select(COLUMNS, { count: 'exact' })
-      .order('created_at', { ascending: false })
-      .range(filters.offset, filters.offset + filters.limit - 1);
+    const consultar = (columnas: string) => {
+      let query = this.supabase.service
+        .from('usuario')
+        .select(columnas, { count: 'exact' })
+        .order('created_at', { ascending: false })
+        .range(filters.offset, filters.offset + filters.limit - 1);
 
-    if (filters.rol === 'PILOTO') {
-      // "Pilotos" = quien VUELA: rol PILOTO o doble rol (ADMIN/SOCIO que
-      // también vuela). Así los selectores de asignación los incluyen sin
-      // cambiar a los consumidores.
-      query = query.or('rol.eq.PILOTO,es_piloto.eq.true');
-    } else if (filters.rol) {
-      query = query.eq('rol', filters.rol);
-    }
-    if (filters.estado) query = query.eq('estado', filters.estado);
-    if (filters.q) {
-      const term = `%${filters.q}%`;
-      query = query.or(`nombre.ilike.${term},email.ilike.${term}`);
-    }
+      if (filters.rol === 'PILOTO') {
+        // "Pilotos" = quien VUELA: rol PILOTO o doble rol (ADMIN/SOCIO que
+        // también vuela). Así los selectores de asignación los incluyen sin
+        // cambiar a los consumidores.
+        query = query.or('rol.eq.PILOTO,es_piloto.eq.true');
+      } else if (filters.rol) {
+        query = query.eq('rol', filters.rol);
+      }
+      if (filters.estado) query = query.eq('estado', filters.estado);
+      if (filters.q) {
+        const term = `%${filters.q}%`;
+        query = query.or(`nombre.ilike.${term},email.ilike.${term}`);
+      }
+      return query;
+    };
 
-    const { data, error, count } = await query;
+    let { data, error, count } = await consultar(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error, count } = await consultar(this.columnas()));
+    }
     if (error) throw new Error(`Failed to list usuarios: ${error.message}`);
 
     // push_dispositivos (3-sep-2026): la oficina ve quién NO tiene la app
     // registrada (badge "Sin app") — una consulta agrupada, best-effort.
-    const filas = (data ?? []) as UsuarioRow[];
+    const filas = (data ?? []) as unknown as UsuarioRow[];
     let conteo = new Map<string, number>();
     try {
       conteo = await this.push.contarDispositivosPorUsuario(
@@ -84,27 +154,37 @@ export class UsersService {
   }
 
   async findById(id: string): Promise<UsuarioRow> {
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .select(COLUMNS)
-      .eq('id', id)
-      .maybeSingle();
+    const consultar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .select(columnas)
+        .eq('id', id)
+        .maybeSingle();
 
+    let { data, error } = await consultar(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await consultar(this.columnas()));
+    }
     if (error) throw new Error(`Failed to load usuario: ${error.message}`);
     if (!data) throw new NotFoundException(`Usuario ${id} not found`);
-    return data as UsuarioRow;
+    return data as unknown as UsuarioRow;
   }
 
   async findByAuthId(authId: string): Promise<UsuarioRow> {
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .select(COLUMNS)
-      .eq('supabase_auth_id', authId)
-      .maybeSingle();
+    const consultar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .select(columnas)
+        .eq('supabase_auth_id', authId)
+        .maybeSingle();
 
+    let { data, error } = await consultar(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await consultar(this.columnas()));
+    }
     if (error) throw new Error(`Failed to load usuario: ${error.message}`);
     if (!data) throw new NotFoundException('Usuario not provisioned');
-    return data as UsuarioRow;
+    return data as unknown as UsuarioRow;
   }
 
   /**
@@ -146,15 +226,23 @@ export class UsersService {
       es_piloto_externo: dto.es_piloto_externo ?? false,
       telefono: dto.telefono ?? '',
       avatar_url: '',
+      // Nombre corto del calendario: vacío = se usa el primer nombre.
+      apodo: dto.apodo?.trim() || null,
       created_by: createdBy,
       updated_by: createdBy,
     };
 
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .insert(payload)
-      .select(COLUMNS)
-      .maybeSingle();
+    const insertar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .insert(this.sinApodo(payload))
+        .select(columnas)
+        .maybeSingle();
+
+    let { data, error } = await insertar(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await insertar(this.columnas()));
+    }
 
     if (error) {
       if (error.code === '23505') {
@@ -162,7 +250,7 @@ export class UsersService {
       }
       throw new Error(`Failed to create usuario: ${error.message}`);
     }
-    const usuario = data as UsuarioRow;
+    const usuario = data as unknown as UsuarioRow;
     // Aviso de invitación por correo (best-effort, no bloquea la creación).
     // Va ANTES del vínculo de tarjeta: si aquel truena, el invitado igual
     // recibe su correo (verificación 26-ago — el reintento daría 409).
@@ -333,16 +421,26 @@ export class UsersService {
         extra.tarjeta_terminacion = '';
       }
     }
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .update({ ...patch, ...extra, updated_by: updatedBy })
-      .eq('id', id)
-      .select(COLUMNS)
-      .maybeSingle();
+    // Nombre corto del calendario: "" (el form vacío) = quitar el apodo.
+    if (patch.apodo !== undefined) {
+      extra.apodo = patch.apodo?.trim() ? patch.apodo.trim() : null;
+    }
+    const escribir = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .update(this.sinApodo({ ...patch, ...extra, updated_by: updatedBy }))
+        .eq('id', id)
+        .select(columnas)
+        .maybeSingle();
+
+    let { data, error } = await escribir(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await escribir(this.columnas()));
+    }
 
     if (error) throw new Error(`Failed to update usuario: ${error.message}`);
     if (!data) throw new NotFoundException(`Usuario ${id} not found`);
-    return data as UsuarioRow;
+    return data as unknown as UsuarioRow;
   }
 
   async updateSelf(
@@ -353,16 +451,22 @@ export class UsersService {
     if (Object.keys(patch).length === 0) {
       return this.findByAuthId(authId);
     }
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .update({ ...patch, updated_by: updatedBy })
-      .eq('supabase_auth_id', authId)
-      .select(COLUMNS)
-      .maybeSingle();
+    const escribir = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .update({ ...patch, updated_by: updatedBy })
+        .eq('supabase_auth_id', authId)
+        .select(columnas)
+        .maybeSingle();
+
+    let { data, error } = await escribir(this.columnas());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await escribir(this.columnas()));
+    }
 
     if (error) throw new Error(`Failed to update self: ${error.message}`);
     if (!data) throw new NotFoundException('Usuario not provisioned');
-    return data as UsuarioRow;
+    return data as unknown as UsuarioRow;
   }
 
   async softDelete(id: string, updatedBy: string): Promise<UsuarioRow> {

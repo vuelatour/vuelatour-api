@@ -34,14 +34,36 @@ export interface ErrorColumnaLike {
   message?: string | null;
 }
 
-/** ¿El error de PostgREST/Postgres es «la columna no existe»? */
+/**
+ * ¿El error de PostgREST/Postgres es «la columna no existe»?
+ *
+ * DOS formas, según por dónde entre la columna (revisión adversaria
+ * 17-sep-2026):
+ * - **En un SELECT** la consulta llega a Postgres y vuelve `42703`
+ *   («column usuario.apodo does not exist»).
+ * - **En el CUERPO de un insert/update** PostgREST ni siquiera consulta:
+ *   rechaza contra su SCHEMA CACHE con `PGRST204` y el mensaje REAL de las
+ *   versiones que corre Supabase hoy es «Could not find the 'apodo' column
+ *   of 'usuario' in the schema cache» — que NO dice «does not exist». Sin
+ *   este caso, el alta de usuarios respondía 500 mientras la migración
+ *   `20260917000001` no estuviera aplicada, justo lo que la tolerancia
+ *   existe para evitar (el payload de `create` SIEMPRE lleva `apodo`).
+ *   `PGRST204` está documentado como «columna no encontrada», así que el
+ *   código basta; el texto se acepta además por si cambia el code.
+ */
 export function esColumnaInexistente(
   err: ErrorColumnaLike | null | undefined,
 ): boolean {
   if (!err) return false;
-  if (err.code === '42703') return true;
+  if (err.code === '42703' || err.code === 'PGRST204') return true;
   const msg = (err.message ?? '').toLowerCase();
-  return msg.includes('column') && msg.includes('does not exist');
+  if (msg.includes('column') && msg.includes('does not exist')) return true;
+  // «Could not find the 'x' column of 'y' in the schema cache» (PostgREST 11+).
+  return (
+    msg.includes('could not find') &&
+    msg.includes('column') &&
+    msg.includes('schema cache')
+  );
 }
 
 export interface ColumnaOpcionalOpciones {

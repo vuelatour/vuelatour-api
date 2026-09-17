@@ -30,8 +30,9 @@ import type { PilotsService } from '../pilots/pilots.service';
  * del 12-sep-2026, corregidos en la revisión adversaria del mismo día.
  *
  * H3 `updateEscala`: el espejo solo se disparaba al cambiar la RUTA o la
- * FECHA, pero `buildLegEvent` pinta también `orden`, `pasajeros` y `es_ferry`
- * («T2 Ferry · N4142R · CUN-PTU · Luis · 3 pax»). Es el PATCH que usa el
+ * FECHA, pero el evento del vuelo pinta también `orden`, `pasajeros` y
+ * `es_ferry` en su desglose por tramo («T2 ptu-cun 20:00 · ferry», formato de
+ * UNA SOLA FILA del 15-sep-2026). Es el PATCH que usa el
  * editor único de la app (manda TODO el DTO explícito, también desde su
  * outbox al reconectar), así que editar los pasajeros dejaba el evento de
  * Google mintiendo hasta la reconciliación de la madrugada.

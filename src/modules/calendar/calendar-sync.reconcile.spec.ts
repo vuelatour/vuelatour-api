@@ -464,9 +464,9 @@ describe('CalendarSyncService — paso inverso (huérfanos y duplicados)', () =>
   });
 
   const PAGINA_1 = [
-    evGoogle('ev-vivo', { [ANCLA_VUELO]: V1 }, 'T1 · N4142R · CUN-PTU'),
-    evGoogle('ev-tramo', { [ANCLA_VUELO]: V1 }, 'T2 · N4142R · PTU-CUN'),
-    evGoogle('ev-dup', { [ANCLA_VUELO]: V1 }, 'T1 · N4142R · CUN-PTU (dup)'),
+    evGoogle('ev-vivo', { [ANCLA_VUELO]: V1 }, 'Luis N4142R cun-ptu-cun 9:00'),
+    evGoogle('ev-tramo', { [ANCLA_VUELO]: V1 }, 'Luis N4142R ptu-cun 15:00'),
+    evGoogle('ev-dup', { [ANCLA_VUELO]: V1 }, 'Luis N4142R cun-ptu-cun (dup)'),
     evGoogle('ev-huerfano', { [ANCLA_VUELO]: V_BORRADO }, 'vuelo borrado'),
     evGoogle('ev-manual', undefined, 'Junta con el contador'),
     evGoogle('ev-descanso', { [ANCLA_DESCANSO]: D1 }, '😴 Descansa · Luis'),
@@ -519,6 +519,53 @@ describe('CalendarSyncService — paso inverso (huérfanos y duplicados)', () =>
     const estado = await service.estadoSyncCompleto();
     expect(estado.ultimo_resumen?.huerfanos_borrados).toBe(4);
     expect(estado.ultimo_resumen?.errores).toBe(0);
+  });
+
+  /**
+   * FORMATO VIEJO (antes del 15-sep-2026): un evento por TRAMO
+   * (`vuelatour_tramo: 'leg-N'`) y el de REGRESO ('regreso'). Tras el resync
+   * al formato de UNA SOLA FILA, `escala.google_calendar_id` y
+   * `vuelo.google_calendar_regreso_id` quedan en null, así que esos eventos
+   * ya no los apunta ninguna fila: son huérfanos y este paso los barre. El
+   * evento de la oficina sigue intocable.
+   */
+  it('los eventos del FORMATO VIEJO (leg-N / regreso) se barren como huérfanos', async () => {
+    eventosGoogle.list.mockReset();
+    eventosGoogle.list.mockResolvedValueOnce({
+      data: {
+        items: [
+          evGoogle(
+            'ev-vivo',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'vuelo' },
+            'Luis N4142R cun-ptu-cun 9:00',
+          ),
+          evGoogle(
+            'ev-legado-regreso',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'regreso' },
+            '↩ Regreso · N4142R · PTU-CUN · Luis · 3 pax',
+          ),
+          evGoogle(
+            'ev-legado-t1',
+            { [ANCLA_VUELO]: V1, vuelatour_tramo: 'leg-1' },
+            'T1 · N4142R · CUN-PTU · Luis · 3 pax',
+          ),
+          evGoogle('ev-manual', undefined, 'Junta con el contador'),
+        ],
+      },
+    });
+    const { service } = armar(
+      rutasVerificacion({
+        // Ya sincronizado al formato nuevo: la escala perdió su id.
+        escala: () => ({ data: [], error: null }),
+      }),
+    );
+
+    await service.reconcileVentana();
+
+    const borrados = idsBorrados();
+    expect(borrados.sort()).toEqual(['ev-legado-regreso', 'ev-legado-t1']);
+    expect(borrados).not.toContain('ev-vivo');
+    expect(borrados).not.toContain('ev-manual');
   });
 
   it('lee la BD por LOTES (una consulta por tipo), nunca un id a la vez', async () => {

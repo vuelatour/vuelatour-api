@@ -931,14 +931,93 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   `info@vuelatour.com`, dato viejo ya corregido en `.env.example`/`env.schema`;
   la service account `vuelatour-calendar-sync@vuelatour.iam.gserviceaccount.com`
   es OWNER y el calendario está en `America/Cancun`) TODO lo que muestra el
-  calendario del sistema: vuelos (un evento de 2 h por tramo), descansos de
-  piloto, eventos NO-vuelo de la flota y —desde el 12-sep-2026—
-  **mantenimientos**. Se prende con las 3 variables de Railway
+  calendario del sistema: vuelos (**UNA SOLA FILA por vuelo** desde el
+  15-sep-2026), descansos de piloto, eventos NO-vuelo de la flota y —desde el
+  12-sep-2026— **mantenimientos**. Se prende con las 3 variables de Railway
   (`GOOGLE_CALENDAR_SYNC_ENABLED`, `GOOGLE_CALENDAR_ID`,
   `GOOGLE_SERVICE_ACCOUNT_JSON`); sin ellas queda inactiva y
   `GET /v1/calendar/sync-estado` responde `enabled:false`. Desde el
   12-sep-2026 el espejo es **AUTOMÁTICO por cola en BD** (ver el bullet
   «AUTOMÁTICA POR COLA»): ya no depende de que un hook alcance a Google.
+  - **UNA SOLA FILA POR VUELO — FORMATO DE LA OFICINA (pedido del cliente,
+    15-sep-2026)**: el Google Calendar lo sigue usando UNA persona —**Luis, el
+    mecánico**; los demás viven en la app—, así que el evento vuelve a verse
+    como los que la oficina capturaba a mano. Un solo evento por vuelo para
+    TODOS los tipos (SENCILLO/REDONDO/MULTIESCALA, propios y externos),
+    guardado en `vuelo.google_calendar_id`.
+    - **Título** `{piloto} {AVIÓN} {ruta} {hora}` — `Saab N621TX
+      cun-pce-ctm-pce-cun 6:50`. SIN `T1`, SIN pasajeros, SIN `⚠ permiso
+      pendiente` (el color lo dice y la descripción lo conserva). Piloto =
+      `usuario.apodo` si existe, si no su PRIMER nombre; externo ⇒ `externo`;
+      sin asignar ⇒ `sin piloto`. AVIÓN = la matrícula del primer tramo activo
+      (con herencia del vuelo); en un vuelo EXTERNO, `avion_externo_matricula`
+      y, si no la capturaron, `operador_externo` (revisión 17-sep-2026: ese
+      campo a veces trae el nombre de la persona —«Carlos Muciño»— y la
+      casilla es del AVIÓN; en la mayoría de los externos de hoy el operador
+      ES la matrícula: «XA-TYV»). Ruta = IATA en MINÚSCULAS de los tramos
+      ACTIVOS (origen del 1.º + destino de cada uno); sin escalas sale del
+      vuelo (`REDONDO` ⇒ `cun-mid-cun`). Hora = salida del primer tramo activo
+      en hora Cancún `H:MM` sin cero a la izquierda.
+    - **Ventana**: `start` = salida del primer tramo activo
+      (`fecha_salida_plan ?? fecha_vuelo`); `end` = el instante conocido MÁS
+      TARDÍO (salidas de los tramos + `fecha_traslado_final`) **+ 1 h**, nunca
+      menos de `start + 1 h` y nunca más de 30 días (una fecha con el año mal
+      capturado pintaría una barra de meses). `escala` **no tiene**
+      `fecha_llegada_plan`. Así un redondo es UNA fila 10:00–19:00 y un viaje
+      con pernocta abarca sus días.
+    - **Descripción**: `Folio / Estado / Cliente / Pasajeros / Aeronave |
+      Operador externo / Piloto (nombre completo) / Permiso de pista:
+      PENDIENTE` + **una línea por tramo** (`T1 cun-mid 10:00 · 2 pax`, `T2
+      mid-cun 18:00 · ferry`) + `Monto`, `Notas` y el ancla legible
+      `VuelaTour · vuelo <id>`. La línea del tramo AÑADE su matrícula y su
+      piloto corto SOLO cuando difieren del encabezado (`T2 ptu-cun 15:00 ·
+      2 pax · N990GG · Zamora`): el título solo puede decir UN avión y UN
+      piloto, y en un vuelo MULTI-AVIÓN (invariante 10) o con rotación de
+      piloto (caso #129) el formato viejo sí lo decía —un evento por tramo—.
+      El permiso en la descripción sale si
+      **CUALQUIER** tramo activo está pendiente; el **color** sigue mirando
+      solo el PRIMER tramo activo (criterio de siempre) — puede haber fila de
+      color normal con «PENDIENTE» en el texto: el texto manda.
+    - `extendedProperties.private` = `vuelatour_vuelo_id` +
+      **`vuelatour_tramo: 'vuelo'`** (valor único).
+    - **LEGADO**: `vuelo.google_calendar_regreso_id` y
+      `escala.google_calendar_id` ya NO se publican. Cada `syncFlightAhora`
+      los borra de Google y los pone en `null` **ANTES** del upsert (un
+      borrado que falla CONSERVA el id y devuelve `false`). Los eventos viejos
+      que queden en Google (`vuelatour_tramo` = `ida` / `regreso` / `leg-N`)
+      los barre el **paso inverso** como «duplicado: la fila apunta a otro
+      evento» en cuanto su columna queda en null — por eso `verificarVivos`
+      SIGUE leyendo esas dos columnas (mientras el borrado falle, el evento
+      debe conservarse).
+    - **El cambio de formato se aplica con un RESYNC**: `reconcileVentana` y
+      `resyncTodo` pasan por `sincronizarVentana → syncFlight(directo)` →
+      `syncFlightAhora`, sin atajos, así que reescriben todos los vuelos de la
+      ventana. Orden de despliegue: migración `20260917000001` → API →
+      `POST /v1/calendar/resync` (y el reconcile nocturno hace el paso
+      inverso que limpia los eventos viejos).
+    - Helpers **PUROS** en `calendar/google-evento.util.ts`
+      (`tituloEventoVuelo`, `rutaMinusculas`, `horaCortaCancun`,
+      `descripcionEventoVuelo`, `ventanaEventoVuelo`, `nombreCortoPiloto`),
+      con los títulos REALES de la oficina congelados en su spec.
+  - **`usuario.apodo` (migración `20260917000001`, PENDIENTE de aplicar)**: nombre corto con el que
+    la oficina conoce al piloto («Saab» = Alexander E. Saab, «Zamora» =
+    Abraham Zamora, «Pab» = Pablo Canales) — el primer nombre NO es como lo
+    conocen. Texto libre ≤ 20 caracteres (validado en el DTO), `null` = usa el
+    primer nombre. Viaja en `COLUMNS` de `users.service` y en `VUELO_SELECT`
+    del espejo. El **fan-out** `trg_usuario_calendar_fanout` escucha ahora
+    `update of nombre, apodo` (misma migración), así que cambiar el apodo
+    re-encola los vuelos del piloto. **Tanto `users.service` como
+    `calendar-sync.service` TOLERAN que la migración no esté aplicada**: se
+    degradan UNA vez (avisan en el log) y siguen sin la columna, en
+    vez de tumbar el alta de usuarios o el espejo entero. **Son DOS errores
+    distintos y los dos cuentan** (revisión adversaria 17-sep-2026,
+    `esColumnaInexistente`): en un SELECT Postgres responde `42703`, pero
+    cuando la columna va en el CUERPO de un insert/update PostgREST ni
+    consulta —la rechaza contra su schema cache con `PGRST204` y el mensaje
+    «Could not find the 'apodo' column of 'usuario' in the schema cache», que
+    NO dice «does not exist»—. Con solo 42703, el alta de usuarios respondía
+    500 durante toda la ventana entre el deploy y la migración (el payload de
+    `create` SIEMPRE lleva `apodo`).
   - **HUECOS H1–H5 CERRADOS TAMBIÉN EN CÓDIGO** (revisión adversaria
     12-sep-2026): con la cola activa los triggers ya los cubren, pero estos
     arreglos valen **aunque la migración no esté aplicada** y bajan la latencia
@@ -953,15 +1032,16 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       vivo sin fila que lo apuntara. `replaceEscalas` (re-cotizar con menos
       tramos) era el huérfano más frecuente de la operación normal.
     - `deleteEscala` corre `refreshPermisosDeVuelo` **ANTES** de `syncFlight`
-      (al revés, el `⚠ permiso pendiente` del título no llegaba a Google).
+      (al revés, el permiso no llegaba a Google — entonces en el título con
+      `⚠`, hoy en la línea `Permiso de pista: PENDIENTE` y en el color).
     - `airports.refreshPermisosDeVuelo` devuelve **`boolean`** («escribí algo»)
       y `alerts.refrescarPermisosProximos` espeja solo cuando escribió (H1:
       `estado_permiso` hasta +90 d, escrito a las 08:00 Cancún, 16 h después
       del reconcile y fuera de su ventana). `alerts.sincronizarEspejoIda`
       espeja tras mover `vuelo.aeronave_id` (H2: matrícula y color del evento).
     - `flights.updateEscala` espeja cuando cambia CUALQUIER campo pintado
-      (H3: `orden`, `pasajeros`, `es_ferry` salen en el título del tramo), no
-      solo la ruta o la fecha — es el `PATCH /flights/legs/:id` del editor
+      (H3: `orden`, `pasajeros`, `es_ferry` salen en la línea del tramo de la
+      descripción), no solo la ruta o la fecha — es el `PATCH /flights/legs/:id` del editor
       único de la app, que manda el DTO completo también desde su outbox.
       Reenviar los MISMOS valores NO espeja (el DTO completo no es un cambio).
     - Sigue ABIERTO sin la cola (solo los triggers lo cubren): el **fan-out
@@ -977,8 +1057,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     la **cola persistente `calendar_sync_cola`** (migración
     `20260912000002_calendar_sync_cola.sql`), alimentada por **TRIGGERS** en
     `vuelo`, `escala`, `piloto_descanso`, `evento_flota`, `mantenimiento` +
-    fan-out de `aeronave (matricula, color_calendario)`, `usuario (nombre)` y
-    `cliente (nombre)`. Un trigger no se puede olvidar: encola venga el
+    fan-out de `aeronave (matricula, color_calendario)`, `usuario (nombre,
+    apodo)` y `cliente (nombre)`. Un trigger no se puede olvidar: encola venga el
     cambio del panel, de la app ONLINE, de su **outbox al reconectar** (entra
     por los mismos endpoints), de un cron del API o de un UPDATE a mano en la
     BD — y en `DELETE` captura los ids de Google de **OLD** (`borrar_evento`),
@@ -1187,9 +1267,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     Si algún día aparece una BAJA de `mantenimiento`, debe llamar a
     `removeMantenimientoEvent(google_calendar_id)`.
   - **Título de vuelos**: la oficina identifica el vuelo por el PILOTO, así que
-    el summary lleva su nombre corto — `T1 · N4142R · CUN-PTU · Luis · 3 pax`
-    (`nombreCortoPiloto`: primer nombre, `sin piloto`, `externo`); ferry
-    `T2 Ferry · …`; `⚠ permiso pendiente` como siempre.
+    el summary empieza por su nombre corto (`nombreCortoPiloto`: apodo, si no
+    el primer nombre; `sin piloto`; `externo`). El FORMATO vigente es el de
+    UNA SOLA FILA del 15-sep-2026 —`{piloto} {AVIÓN} {ruta} {hora}`— descrito
+    arriba; el viejo `T1 · N4142R · CUN-PTU · Luis · 3 pax` (un evento por
+    tramo, `T2 Ferry · …`, `⚠ permiso pendiente`) YA NO EXISTE: el ferry y el
+    permiso viven en la descripción y el color.
   - **Color (pedido del cliente, 12-sep-2026: «los mismos colores»)**: los
     colores de Google son LOS DEL SISTEMA traducidos al más cercano de los 11
     que Google acepta. **Fuente única de los hex**:
@@ -1229,8 +1312,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     descanso + XB-PEV; **4** = externo + N621TX; **5** = permiso pendiente +
     mantenimiento PROGRAMADO + N58BT + XB-ANU; **6** = N4142R (+ el rojo del
     cancelado, que no viaja); **7** = evento de flota sin avión + N990GG +
-    XA-VGV. **El color en Google NO es un dato confiable, el TÍTULO sí**
-    (`⚠ permiso pendiente`, `sin piloto`, `🔧`, `😴`, `📌`). Re-pintar los
+    XA-VGV. **El color en Google NO es un dato confiable, el TEXTO sí** — el
+    título (`sin piloto`, `externo`, `🔧`, `😴`, `📌`) y, en el vuelo, la
+    línea `Permiso de pista: PENDIENTE` de la descripción. Re-pintar los
     `color_calendario` NO lo resuelve (no hay 8 ids libres); es decisión del
     cliente.
   - **El `motivo` de `sync-estado` no hace eco de la credencial** (revisión
@@ -1275,9 +1359,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     ni se borraba). Simétrico al borrar: `deleteEvent` devuelve boolean y el
     id guardado **solo se limpia si el evento quedó fuera de Google** — si no,
     se conserva y el siguiente hook/reconcile reintenta. Un evento vivo en
-    Google sin id en la BD es un FANTASMA que ya nadie puede borrar. Dentro de
-    un itinerario, un TRAMO que falla no cancela los demás (`syncLegs` aísla
-    cada tramo) y el vuelo devuelve `false` para que el resumen lo cuente.
+    Google sin id en la BD es un FANTASMA que ya nadie puede borrar. Desde el
+    15-sep-2026 el vuelo es UN solo evento (`syncLegs` ya no existe): lo que
+    puede fallar aparte es el borrado de un id LEGADO —`limpiarEventosLegado`
+    conserva el id, publica igual la fila única y devuelve `false` para que el
+    resumen lo cuente.
   - **Los eventos que la oficina capturó A MANO en Google NO se tocan** (ni se
     borran ni se deduplican; decisión del cliente pendiente): el resync lo dice
     en su campo `nota`. Los vuelos CANCELADOS sí se BORRAN de Google (aunque el
@@ -1321,9 +1407,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (12-sep-2026)**:
-  `20260912000002_calendar_sync_cola.sql` quedó escrita **sin aplicar** porque
-  el MCP de Supabase estaba caído. Trae TRES cosas (se amplió el mismo archivo
+- **APLICADA (verificada en prod el 17-sep-2026 vía MCP: `calendar_sync_cola`,
+  `calendar_sync_estado`, `calendar_sync_candado`, `calendar_sync_lock(int,
+  int, text)` y `trg_*_calendar_sync` existen)** —
+  `20260912000002_calendar_sync_cola.sql`. Estuvo días marcada aquí como
+  pendiente porque el MCP se cayó el 12-sep; el modo AUTOMÁTICO está activo.
+  Trae TRES cosas (se amplió el mismo archivo
   el 12-sep porque nunca se aplicó): la **cola automática** + el
   `tg_set_updated_at` que ya no se mueve por el id de Google (§1-6), el
   **estado persistido** `calendar_sync_estado` (§7) y el **candado
@@ -1334,9 +1423,14 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   `calendar_sync_estado_activa()`). El API ya está desplegable así: mientras la
   migración no exista, el espejo se comporta EXACTAMENTE como antes (hooks
   best-effort, «últimos» solo en memoria, exclusión solo por banderas) y las
-  sondas lo encienden solo en ≤ 10 min al aplicarla (sin redeploy). Tras
-  aplicarla: `get_advisors`, verificar `GET /v1/calendar/sync-estado` →
+  sondas lo encienden solo en ≤ 10 min al aplicarla (sin redeploy). Ya
+  aplicada, la comprobación viva es `GET /v1/calendar/sync-estado` →
   `automatica: true` y que `ultimo_reconcile_at` sobreviva un redeploy.
+  **Consecuencia que NO hay que olvidar**: con la cola activa los hooks del
+  API ya NO escriben directo a Google — si una columna que el evento PINTA no
+  está en la lista `after update of …` de `trg_vuelo_calendar_sync` /
+  `trg_escala_calendar_sync`, editarla no encola nada y el calendario se
+  queda viejo hasta el reconcile nocturno.
 - **`moneda` es un ENUM (`public.moneda`)** en `gasto`, `cuenta_bancaria` y
   `cobro_vuelo`: en plpgsql se compara **SIEMPRE `::text`**, nunca contra una
   variable `text` a secas. El 15-sep-2026 `tg_mov_bancario_gasto_suma`
@@ -1347,10 +1441,23 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - **Toda migración con TRIGGER se prueba en seco con un UPDATE/INSERT REAL
   dentro de `begin … rollback`**, no solo con `select`s: el bug anterior era
   invisible para cualquier consulta de lectura.
-- **PENDIENTE DE APLICAR (16-sep-2026)**:
-  `20260916000001_conciliacion_job_resultados.sql` (aditiva, sin triggers):
-  columnas de desglose del auto-cruce en `conciliacion_import_job`. El API
-  0.0.13 funciona con o sin ella.
+- **APLICADA** (verificada en prod el 17-sep-2026: las 4 columnas existen):
+  `20260916000001_conciliacion_job_resultados.sql` (aditiva, sin triggers),
+  desglose del auto-cruce en `conciliacion_import_job`. El API funciona con o
+  sin ella.
+- **PENDIENTE DE APLICAR (17-sep-2026) — REQUIERE DRY-RUN**:
+  `20260917000001_usuario_apodo.sql`. Aditiva en datos
+  (`usuario.apodo text`), pero toca **DOS triggers** y por eso va en seco
+  primero (`begin … update usuario set apodo = … ; update vuelo set
+  operador_externo = … ; rollback`): (1) `trg_usuario_calendar_fanout` pasa a
+  `after update of nombre, apodo` (y su función mira las dos columnas) para
+  que cambiar el apodo re-encole los vuelos del piloto; (2)
+  `trg_vuelo_calendar_sync` suma `avion_externo_matricula` a sus columnas
+  (hoy es la casilla «avión» del título de un vuelo externo). Los dos bloques
+  se saltan solos si `calendar_sync_cola` no existe. El API 0.0.14 corre CON
+  o SIN la migración: ante `42703` (select) o `PGRST204` (cuerpo del
+  insert/update) se degrada una vez, avisa en el log y sigue con el PRIMER
+  nombre del piloto. Orden: migración → API → `POST /v1/calendar/resync`.
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

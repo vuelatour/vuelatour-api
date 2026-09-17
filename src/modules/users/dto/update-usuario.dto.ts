@@ -63,4 +63,14 @@ export class UpdateUsuarioDto {
   @IsOptional()
   @IsString()
   avatar_url?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 20,
+    description:
+      'Nombre corto con el que la oficina lo conoce («Saab», «Zamora», «Pab»). Es el que sale en el TÍTULO del evento de Google Calendar del vuelo; vacío = se usa el primer nombre.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(20)
+  apodo?: string | null;
 }

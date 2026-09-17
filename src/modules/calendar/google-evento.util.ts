@@ -191,20 +191,256 @@ export function colorIdGoogleMantenimiento(enTaller: boolean): string {
 /**
  * Nombre CORTO del piloto para el título del evento: la oficina identifica
  * el vuelo por el piloto (pedido del cliente, 12-sep-2026), y en el título
- * de Google solo cabe el primer nombre.
+ * de Google solo cabe una palabra.
  *
  * - vuelo externo ⇒ `'externo'` (la tripulación es del operador, no nuestra);
- * - sin piloto asignado ⇒ `'sin piloto'` (acción pendiente, visible);
- * - con piloto ⇒ su PRIMER nombre tal cual está capturado (acentos incluidos).
+ * - con `apodo` (`usuario.apodo`, 17-sep-2026) ⇒ el apodo, que GANA sobre el
+ *   nombre: la oficina le dice «Saab» a «Alexander E. Saab», «Zamora» a
+ *   «Abraham Zamora» y «Pab» a «Pablo Canales» — el PRIMER NOMBRE no es como
+ *   lo conocen, y el calendario lo lee el mecánico, no el sistema;
+ * - sin apodo ⇒ su PRIMER nombre tal cual está capturado (acentos incluidos);
+ * - sin piloto asignado ⇒ `'sin piloto'` (acción pendiente, visible).
  */
 export function nombreCortoPiloto(
   nombre: string | null | undefined,
   esExterno = false,
+  apodo?: string | null,
 ): string {
   if (esExterno) return 'externo';
+  const corto = (apodo ?? '').trim().replace(/\s+/g, ' ');
+  if (corto.length > 0) return corto;
   const limpio = (nombre ?? '').trim().replace(/\s+/g, ' ');
   if (limpio.length === 0) return 'sin piloto';
   return limpio.split(' ')[0];
+}
+
+/* ===================================================================== *
+ * FORMATO DE LA OFICINA (pedido del cliente, 15-sep-2026)
+ *
+ * El Google Calendar lo sigue usando UNA sola persona: Luis, el mecánico
+ * (los demás viven en la app). Pedido literal: «que no se divida en tramos,
+ * mejor que esté todo en UNA SOLA FILA» y «le quitamos lo de T1 y la
+ * cantidad de pasajeros, para nada más dejar piloto, avión, ruta y hora».
+ *
+ * Es EXACTAMENTE el formato que la oficina capturaba a mano antes de que
+ * existiera el espejo — muestra real del 15-sep-2026:
+ *   `Saab N621TX cun-pce-ctm-pce-cun 6:50`
+ *   `Luis XB-PEV cun-ctm-cun 7:00`
+ *   `Zamora XA-VGV cet-czm-cet 16:00`
+ * Estos helpers son PUROS a propósito: el título que ve el mecánico se
+ * congela en `google-evento.util.spec.ts` con esas muestras.
+ * ===================================================================== */
+
+/**
+ * RUTA de la fila: los códigos IATA en MINÚSCULAS de los tramos ACTIVOS, en
+ * orden — origen del primero y destino de cada uno (`cun-mid-cun`).
+ *
+ * - Códigos repetidos consecutivos se colapsan (el destino de un tramo es el
+ *   origen del siguiente: no se escribe dos veces).
+ * - Si un tramo NO empieza donde terminó el anterior (dato roto o traslado
+ *   no capturado), su origen SÍ se escribe: la ruta nunca miente por callar.
+ * - Un código vacío se omite; sin tramos útiles devuelve `''`.
+ */
+export function rutaMinusculas(
+  tramos: ReadonlyArray<{
+    origen?: string | null;
+    destino?: string | null;
+  }>,
+): string {
+  const codigos: string[] = [];
+  const agregar = (crudo: string | null | undefined): void => {
+    const c = (crudo ?? '').trim().toLowerCase();
+    if (c === '') return;
+    if (codigos[codigos.length - 1] === c) return;
+    codigos.push(c);
+  };
+  for (const t of tramos ?? []) {
+    agregar(t?.origen);
+    agregar(t?.destino);
+  }
+  return codigos.join('-');
+}
+
+const FORMATO_HORA_CANCUN = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Cancun',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+
+/**
+ * Hora de PARED en Cancún (UTC−5) como la escribe la oficina: `H:MM` SIN
+ * cero a la izquierda (`6:50`, `7:00`, `10:00`, `16:00`).
+ *
+ * Cadena vacía si el valor viene nulo o no es un instante válido — nunca
+ * lanza: un evento del calendario no se cae por una fecha rara (sale sin
+ * hora y el resto del título se lee igual).
+ */
+export function horaCortaCancun(iso: string | Date | null | undefined): string {
+  if (iso == null || iso === '') return '';
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  const p: Record<string, string> = {};
+  for (const parte of FORMATO_HORA_CANCUN.formatToParts(d)) {
+    p[parte.type] = parte.value;
+  }
+  // Intl puede devolver "24" para medianoche según el motor: normalizar.
+  const hora = p.hour === '24' ? 0 : Number(p.hour);
+  if (!Number.isFinite(hora) || p.minute == null) return '';
+  return `${hora}:${p.minute}`;
+}
+
+/**
+ * TÍTULO de la fila única del vuelo: `{piloto} {AVIÓN} {ruta} {hora}`
+ * (`Saab N621TX cun-pce-ctm-pce-cun 6:50`).
+ *
+ * SIN `T1`, SIN pasajeros y SIN `⚠ permiso pendiente` (15-sep-2026): el
+ * color del evento ya dice el pendiente y la descripción lo conserva con
+ * todas sus letras. Las partes vacías se omiten (nunca dobles espacios).
+ */
+export function tituloEventoVuelo(p: {
+  pilotoCorto: string;
+  aeronave: string;
+  ruta: string;
+  hora: string;
+}): string {
+  return [p.pilotoCorto, p.aeronave, p.ruta, p.hora]
+    .map((x) => (x ?? '').trim())
+    .filter((x) => x !== '')
+    .join(' ');
+}
+
+/** Un tramo ACTIVO tal como lo lee la descripción del evento único. */
+export interface TramoEventoVuelo {
+  orden: number;
+  origen?: string | null;
+  destino?: string | null;
+  /** Instante de salida (ISO) o null si el tramo todavía no tiene hora. */
+  salida?: string | null;
+  ferry?: boolean;
+  /** Pasajeros YA resueltos por el llamador (ferry ⇒ irrelevante). */
+  pasajeros?: number | null;
+  /**
+   * Matrícula del tramo SOLO cuando difiere de la del encabezado (vuelo
+   * MULTI-AVIÓN, invariante 10). El título trae un solo avión —el del primer
+   * tramo activo—, así que sin esto el mecánico no sabría qué avión vuela
+   * cada tramo: información que el formato viejo sí daba (un evento por
+   * tramo con su matrícula). Vacío/null ⇒ la línea sale igual que siempre.
+   */
+  aeronave?: string | null;
+  /**
+   * Nombre CORTO del piloto del tramo, SOLO cuando difiere del encabezado
+   * (rotación de piloto a media jornada, caso #129). Mismo criterio.
+   */
+  piloto?: string | null;
+}
+
+/** Todo lo que la descripción del evento único necesita del vuelo. */
+export interface DatosEventoVuelo {
+  id: string;
+  folio: number | string;
+  estado: string;
+  cliente?: string | null;
+  pasajeros: number;
+  esExterno: boolean;
+  operadorExterno?: string | null;
+  matricula?: string | null;
+  pilotoNombre?: string | null;
+  permisoPendiente?: boolean;
+  montoUsd?: number | string | null;
+  notas?: string | null;
+  tramos: readonly TramoEventoVuelo[];
+}
+
+/**
+ * DESCRIPCIÓN del evento único, con el desglose por tramo que el título ya
+ * no lleva (formato de la oficina: una línea por tramo, como los
+ * `cun-ctm | paxs | ctm-cun (15:00)` que escribían a mano).
+ *
+ * La última línea es el ANCLA legible `VuelaTour · vuelo <id>`: el ancla de
+ * verdad vive en `extendedProperties.private`, pero esta se ve desde la app
+ * de Google y ayuda a la oficina a saber que el evento es del sistema.
+ */
+export function descripcionEventoVuelo(v: DatosEventoVuelo): string {
+  const lineas: Array<string | null> = [
+    `Folio: #${v.folio}`,
+    `Estado: ${v.estado}`,
+    `Cliente: ${v.cliente ?? '—'}`,
+    `Pasajeros: ${v.pasajeros}`,
+    v.esExterno
+      ? `Operador externo: ${v.operadorExterno ?? '—'}`
+      : `Aeronave: ${v.matricula ?? '—'}`,
+    `Piloto: ${v.esExterno ? '(externo)' : (v.pilotoNombre ?? 'sin asignar')}`,
+    v.permisoPendiente ? 'Permiso de pista: PENDIENTE' : null,
+    ...v.tramos.map((t) => {
+      const ruta = rutaMinusculas([t]);
+      const hora = horaCortaCancun(t.salida);
+      const detalle = t.ferry ? 'ferry' : `${t.pasajeros ?? v.pasajeros} pax`;
+      // Avión y piloto del tramo SOLO si difieren del encabezado: en el 99 %
+      // de los vuelos no aparecen (línea idéntica a la de siempre) y en un
+      // multi-avión o una rotación dicen lo que el título ya no puede decir.
+      const extras = [t.aeronave, t.piloto]
+        .map((x) => (x ?? '').trim())
+        .filter((x) => x !== '');
+      return [
+        `T${t.orden} ${[ruta, hora].filter((x) => x !== '').join(' ')} · ${detalle}`,
+        ...extras,
+      ].join(' · ');
+    }),
+    v.montoUsd == null || v.montoUsd === ''
+      ? null
+      : `Monto: $${Number(v.montoUsd)} USD`,
+    v.notas ? `Notas: ${v.notas}` : null,
+    '',
+    `VuelaTour · vuelo ${v.id}`,
+  ];
+  return lineas.filter((l) => l != null).join('\n');
+}
+
+/** Duración MÍNIMA del evento único: 1 h (un vuelo nunca es un punto). */
+export const EVENTO_VUELO_MIN_MS = 60 * 60 * 1000;
+
+/** Colchón que se le suma al último instante conocido del vuelo. */
+export const EVENTO_VUELO_COLCHON_MS = 60 * 60 * 1000;
+
+/**
+ * Tope de duración del evento único. Una `fecha_traslado_final` capturada con
+ * el año equivocado (pasa) pintaría en el calendario del mecánico una barra
+ * de meses encima de TODO lo demás. Un viaje real con pernoctas no pasa de
+ * unos días; 30 es holgado y visible.
+ */
+export const EVENTO_VUELO_TOPE_DIAS = 30;
+
+/**
+ * VENTANA del evento único (UNA SOLA FILA, 15-sep-2026): empieza en la salida
+ * del primer tramo activo y termina en el instante conocido MÁS TARDÍO del
+ * vuelo + 1 h, nunca menos de 1 h. Así un redondo es una fila 10:00–19:00 y
+ * un viaje con pernocta abarca sus días, en vez de dos bloques sueltos de 2 h.
+ *
+ * `null` si el inicio no es un instante válido (no hay dónde poner la fila).
+ * Instantes ANTERIORES al inicio o más allá del tope se ignoran (dato roto).
+ */
+export function ventanaEventoVuelo(
+  inicioIso: string | Date | null | undefined,
+  finesPosibles: ReadonlyArray<string | Date | null | undefined> = [],
+): { inicio: Date; fin: Date } | null {
+  if (inicioIso == null || inicioIso === '') return null;
+  const inicio = inicioIso instanceof Date ? inicioIso : new Date(inicioIso);
+  if (Number.isNaN(inicio.getTime())) return null;
+  const tope = inicio.getTime() + EVENTO_VUELO_TOPE_DIAS * 24 * 60 * 60 * 1000;
+  let ultimo = inicio.getTime();
+  for (const candidato of finesPosibles) {
+    if (candidato == null || candidato === '') continue;
+    const d = candidato instanceof Date ? candidato : new Date(candidato);
+    const ms = d.getTime();
+    if (Number.isNaN(ms) || ms <= ultimo || ms > tope) continue;
+    ultimo = ms;
+  }
+  const fin = Math.max(
+    ultimo + EVENTO_VUELO_COLCHON_MS,
+    inicio.getTime() + EVENTO_VUELO_MIN_MS,
+  );
+  return { inicio, fin: new Date(fin) };
 }
 
 /**

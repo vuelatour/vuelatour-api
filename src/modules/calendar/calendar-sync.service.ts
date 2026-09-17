@@ -14,14 +14,21 @@ import type { EnvVars } from '../../config/env.schema';
 import { Rol } from '../../common/types/auth.types';
 import { NotificationsService } from '../realtime/notifications.service';
 import { SupabaseService } from '../supabase/supabase.service';
+import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import {
   colorIdGoogleDescanso,
   colorIdGoogleDeVuelo,
   colorIdGoogleEvento,
   colorIdGoogleMantenimiento,
+  descripcionEventoVuelo,
   eventoAusenteEnGoogle,
+  horaCortaCancun,
   nombreCortoPiloto,
   parsearServiceAccountJson,
+  rutaMinusculas,
+  tituloEventoVuelo,
+  ventanaEventoVuelo,
+  type TramoEventoVuelo,
 } from './google-evento.util';
 import {
   ANCLA_DESCANSO,
@@ -85,10 +92,27 @@ export interface OpcionesEspejo {
 // por `google-evento.util`. Si el cliente cambia un color, se cambia allá y el
 // panel, la app y Google se mueven JUNTOS.
 
-const VUELO_SELECT =
-  'id, folio, estado, es_externo, operador_externo, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
-  'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre), cliente:cliente_id(nombre), ' +
-  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre))';
+const VUELO_SELECT_BASE =
+  'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
+  'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@), cliente:cliente_id(nombre), ' +
+  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
+
+/**
+ * Con `usuario.apodo` (migración `20260917000001`): el TÍTULO de la fila del
+ * mecánico usa el apodo de la oficina («Saab», «Zamora», «Pab») antes que el
+ * primer nombre.
+ */
+const VUELO_SELECT = VUELO_SELECT_BASE.replace(/@APODO@/g, ', apodo');
+
+/**
+ * El MISMO select SIN `apodo`, para el hueco entre desplegar el API y aplicar
+ * la migración: PostgREST responde 42703 y CUALQUIER sincronización del
+ * calendario moriría. Ver `loadVuelo` (se degrada una sola vez y avisa).
+ */
+const VUELO_SELECT_SIN_APODO = VUELO_SELECT_BASE.replace(/@APODO@/g, '');
+
+/** Migración que crea `usuario.apodo` (nombre corto del piloto, 17-sep-2026). */
+const MIGRACION_APODO = '20260917000001';
 
 const MANT_SELECT =
   'id, estado, descripcion, fecha_programada, horas_programadas, etapa_intervalo_hr, google_calendar_id, aeronave:aeronave_id(matricula, color_calendario)';
@@ -115,6 +139,15 @@ interface VueloRow {
   estado: string;
   es_externo: boolean;
   operador_externo: string | null;
+  /**
+   * Matrícula del avión AJENO capturada a mano (`avion_externo_manual`). Es
+   * lo que va en la casilla «avión» del título cuando el vuelo es externo:
+   * `operador_externo` a veces trae el nombre de la persona («Carlos
+   * Muciño») y el mecánico necesita la MATRÍCULA. Cuando no hay, se cae al
+   * operador (que en la mayoría de los vuelos externos de hoy ES la
+   * matrícula: «XA-TYV»).
+   */
+  avion_externo_matricula: string | null;
   origen_iata: string;
   destino_iata: string;
   pasajeros: number;
@@ -130,7 +163,7 @@ interface VueloRow {
   google_calendar_id: string | null;
   google_calendar_regreso_id: string | null;
   aeronave: AeronaveRef | AeronaveRef[] | null;
-  piloto: { nombre: string } | { nombre: string }[] | null;
+  piloto: PilotoRef | PilotoRef[] | null;
   cliente: { nombre: string } | { nombre: string }[] | null;
   escalas: Array<{
     id: string;
@@ -146,8 +179,19 @@ interface VueloRow {
     estado_permiso: string | null;
     cancelada_at: string | null;
     aeronave: AeronaveRef | AeronaveRef[] | null;
-    piloto: { nombre: string } | { nombre: string }[] | null;
+    piloto: PilotoRef | PilotoRef[] | null;
   }> | null;
+}
+
+/**
+ * Piloto tal como lo lee el título del evento. `apodo` es OPCIONAL en el tipo
+ * a propósito: mientras la migración `20260917000001` no esté aplicada el
+ * select lo omite y la fila llega sin la propiedad.
+ */
+interface PilotoRef {
+  nombre: string;
+  /** Nombre corto de la oficina («Saab», «Zamora», «Pab»). */
+  apodo?: string | null;
 }
 
 interface AeronaveRef {
@@ -339,6 +383,15 @@ export class CalendarSyncService implements OnModuleInit {
   /** El estado guardado ya se releyó (una vez por proceso). */
   private hidratado = false;
   private hidratacionEnCurso: Promise<void> | null = null;
+
+  /**
+   * `usuario.apodo` (migración `20260917000001`) existe. Arranca en `true` y
+   * solo se apaga si Postgres responde 42703 — así el API se puede desplegar
+   * ANTES de aplicar la migración sin tumbar el espejo del calendario. No se
+   * vuelve a prender hasta el siguiente arranque: aplicar la migración pide
+   * un resync de todas formas (el formato del título cambia).
+   */
+  private apodoDisponible = true;
 
   constructor(
     private readonly config: ConfigService<EnvVars, true>,
@@ -564,7 +617,21 @@ export class CalendarSyncService implements OnModuleInit {
     return this.syncFlightAhora(vueloId);
   }
 
-  /** Escritura DIRECTA a Google de un vuelo (worker de la cola y barrido). */
+  /**
+   * Escritura DIRECTA a Google de un vuelo (worker de la cola y barrido).
+   *
+   * UNA SOLA FILA POR VUELO (pedido del cliente, 15-sep-2026). El calendario
+   * de Google lo sigue leyendo UNA persona —Luis, el mecánico— y el espejo lo
+   * partía en un evento por tramo (`T1 · … · 2 pax`, `↩ Regreso · …`), que no
+   * se parece a lo que la oficina capturaba a mano. Ahora el vuelo entero es
+   * UN evento (`vuelo.google_calendar_id`), para TODOS los tipos
+   * (SENCILLO/REDONDO/MULTIESCALA, propios y externos):
+   * `Saab N621TX cun-pce-ctm-pce-cun 6:50`.
+   *
+   * `vuelo.google_calendar_regreso_id` y `escala.google_calendar_id` quedan
+   * en LEGADO: cada pasada los borra de Google y los pone en null ANTES del
+   * upsert, para que el mecánico nunca vea dos filas del mismo vuelo.
+   */
   private async syncFlightAhora(vueloId: string): Promise<boolean> {
     if (!this.enabled || !this.calendar) return true;
     try {
@@ -578,87 +645,49 @@ export class CalendarSyncService implements OnModuleInit {
       // Un borrado que falló deja el id guardado: se reintenta y se cuenta.
       let ok = true;
 
-      // Itinerario personalizado (MULTIESCALA con escalas): un evento por tramo,
-      // guardado en escala.google_calendar_id. El 1er tramo hereda fecha_vuelo y
-      // el último fecha_traslado_final si no tienen fecha propia.
+      // LEGADO fuera ANTES de publicar (espejo exacto de lo que hacía
+      // `syncLegs` con los ids a nivel vuelo): un borrado fallido CONSERVA el
+      // id —para reintentarlo— y baja el resultado a false.
+      if (!(await this.limpiarEventosLegado(vuelo))) ok = false;
+
       const escalas = [...(vuelo.escalas ?? [])].sort(
         (a, b) => a.orden - b.orden,
       );
-      // Un tramo CANCELADO no se agenda: su evento se elimina y no se re-crea.
-      for (const c of escalas) {
-        if (c.cancelada_at != null && c.google_calendar_id) {
-          if (await this.deleteEvent(c.google_calendar_id))
-            await this.saveLegEventId(c.id, null);
-          else ok = false;
-        }
-      }
+      // Un tramo CANCELADO no viaja a Google: ni en la ruta del título ni en
+      // la descripción (el calendario del sistema sí lo conserva en rojo).
       const activas = escalas.filter((e) => e.cancelada_at == null);
-      if (vuelo.tipo === 'MULTIESCALA' && activas.length > 0) {
-        return (await this.syncLegs(vuelo, activas)) && ok;
-      }
+      // Itinerario con TODOS sus tramos cancelados (o la ida cancelada de un
+      // redondo sin más tramos vivos): el vuelo NO vive en Google.
+      const todoCancelado = escalas.length > 0 && activas.length === 0;
 
-      // Without a date there is nothing meaningful to place on a calendar.
-      if (!vuelo.fecha_vuelo) return ok;
+      const evento = todoCancelado
+        ? null
+        : this.buildEventoVuelo(vuelo, escalas, activas);
 
-      // La IDA (tramo orden 1) CANCELADA no se agenda: MISMO criterio que el
-      // regreso y que los tramos del itinerario — un cancelado no vive en
-      // Google, aunque el calendario del sistema lo conserve en rojo. Cubre
-      // dos casos que antes publicaban un evento a nivel VUELO como si fuera
-      // a volar (con el color del avión, no el rojo del sistema): la ida
-      // cancelada de un REDONDO y el itinerario con TODOS sus tramos
-      // cancelados (ahí `activas` queda vacío y la rama de tramos no corre).
-      const idaCancelada = escalas.some(
-        (e) => e.orden === 1 && e.cancelada_at != null,
-      );
-      if (idaCancelada) {
+      if (!evento) {
+        // Sin fecha no hay dónde ponerlo (y si ya había fila, sobra).
         if (vuelo.google_calendar_id) {
           if (await this.deleteEvent(vuelo.google_calendar_id))
             await this.saveEventId(vueloId, 'google_calendar_id', null);
           else ok = false;
         }
-      } else {
-        // IDA (en fecha_vuelo).
-        const idaId = await this.upsertRaw(
-          this.buildEvent(vuelo, 'ida'),
-          vuelo.google_calendar_id,
-          'ida',
-        );
-        // SOLO si el id CAMBIÓ (revisión adversaria 12-sep-2026, mismo
-        // criterio que los tramos / mantenimiento / evento de flota). Antes se
-        // escribía en CADA sincronización con el MISMO valor: un UPDATE sin
-        // cambio de negocio que `tg_set_updated_at` sellaba igual ⇒ deltas
-        // falsos en `?updated_since` y 409 CONFLICTO_VERSION espurios contra
-        // el `if_updated_at` de la app offline (invariante 13) cada vez que el
-        // worker tocaba el vuelo. Y es una escritura menos por pasada.
-        if (idaId !== vuelo.google_calendar_id) {
-          await this.saveEventId(vueloId, 'google_calendar_id', idaId);
-        }
+        return ok;
       }
 
-      // REGRESO de redondo (en fecha_traslado_final): segundo evento. Si el
-      // tramo de regreso (orden 2) está cancelado, su evento sobra.
-      const regresoCancelado = escalas.some(
-        (e) => e.orden === 2 && e.cancelada_at != null,
+      const eventId = await this.upsertRaw(
+        evento,
+        vuelo.google_calendar_id,
+        'vuelo',
       );
-      const esRedondo =
-        vuelo.tipo === 'REDONDO' &&
-        !!vuelo.fecha_traslado_final &&
-        !regresoCancelado;
-      if (esRedondo) {
-        const regId = await this.upsertRaw(
-          this.buildEvent(vuelo, 'regreso'),
-          vuelo.google_calendar_regreso_id,
-          'regreso',
-        );
-        // Igual que la ida: solo si el id cambió (ver el comentario de arriba).
-        if (regId !== vuelo.google_calendar_regreso_id) {
-          await this.saveEventId(vueloId, 'google_calendar_regreso_id', regId);
-        }
-      } else if (vuelo.google_calendar_regreso_id) {
-        // Dejó de ser redondo (o se quitó el regreso): borra el evento de regreso.
-        if (await this.deleteEvent(vuelo.google_calendar_regreso_id))
-          await this.saveEventId(vueloId, 'google_calendar_regreso_id', null);
-        else ok = false;
+      // SOLO si el id CAMBIÓ (revisión adversaria 12-sep-2026, mismo
+      // criterio que el mantenimiento / evento de flota). Antes se escribía
+      // en CADA sincronización con el MISMO valor: un UPDATE sin cambio de
+      // negocio que `tg_set_updated_at` sellaba igual ⇒ deltas falsos en
+      // `?updated_since` y 409 CONFLICTO_VERSION espurios contra el
+      // `if_updated_at` de la app offline (invariante 13) cada vez que el
+      // worker tocaba el vuelo. Y es una escritura menos por pasada.
+      if (eventId !== vuelo.google_calendar_id) {
+        await this.saveEventId(vueloId, 'google_calendar_id', eventId);
       }
       return ok;
     } catch (err) {
@@ -1757,9 +1786,16 @@ export class CalendarSyncService implements OnModuleInit {
    * Qué eventos de Google apunta HOY la BD para estas entidades. Devuelve:
    * - `verificados`: ids cuya consulta SÍ respondió (lo que no está acá no se
    *   borra: no saber ≠ no existir);
-   * - `vivos`: id de entidad → ids de evento que sus filas apuntan (en el
-   *   vuelo: ida + regreso + el de CADA tramo);
+   * - `vivos`: id de entidad → ids de evento que sus filas apuntan;
    * - `errores`: lotes que no se pudieron leer.
+   *
+   * EL VUELO SIGUE LEYENDO LAS COLUMNAS LEGADO (`google_calendar_regreso_id`
+   * y `escala.google_calendar_id`) aunque desde el 15-sep-2026 solo publique
+   * UNA fila: mientras un borrado legado falle, su id se conserva y ese
+   * evento debe CONSERVARSE (lo reintenta `limpiarEventosLegado`). En cuanto
+   * la columna queda en null, el evento viejo (`vuelatour_tramo` = 'ida' /
+   * 'regreso' / 'leg-N') ya no está en `vivos` y este paso lo borra como
+   * duplicado fantasma — que es justo lo que hay que hacer con él.
    */
   private async verificarVivos(
     tipo: TipoAnclaCalendar,
@@ -1865,63 +1901,32 @@ export class CalendarSyncService implements OnModuleInit {
   }
 
   /**
-   * Sincroniza un itinerario por tramos: un evento de Google por escala con
-   * fecha. Limpia los eventos legacy a nivel de vuelo (ida/regreso) para no
-   * duplicar el primer tramo. Devuelve `false` si algún borrado falló (el id
-   * se conserva para reintentar).
+   * Borra de Google los eventos LEGADO de este vuelo —el de REGRESO
+   * (`vuelo.google_calendar_regreso_id`) y el de cada TRAMO
+   * (`escala.google_calendar_id`)— y limpia sus columnas. Desde el
+   * 15-sep-2026 el vuelo entero es UNA SOLA FILA: estos ids solo pueden venir
+   * de una sincronización anterior, y dejarlos vivos le pondría al mecánico
+   * dos (o cinco) filas del mismo vuelo.
+   *
+   * Un borrado que FALLA conserva su id —la próxima pasada lo reintenta— y
+   * devuelve `false`; nunca se limpia una columna cuyo evento sigue en
+   * Google (sería un fantasma imborrable). La fila en memoria se actualiza
+   * para que el resto de la pasada vea el estado real.
    */
-  private async syncLegs(
-    vuelo: VueloRow,
-    escalas: EscalaRow[],
-  ): Promise<boolean> {
+  private async limpiarEventosLegado(vuelo: VueloRow): Promise<boolean> {
     let ok = true;
-    // Limpia eventos legacy del modelo ida/regreso si existieran.
-    if (vuelo.google_calendar_id) {
-      if (await this.deleteEvent(vuelo.google_calendar_id))
-        await this.saveEventId(vuelo.id, 'google_calendar_id', null);
-      else ok = false;
-    }
     if (vuelo.google_calendar_regreso_id) {
-      if (await this.deleteEvent(vuelo.google_calendar_regreso_id))
+      if (await this.deleteEvent(vuelo.google_calendar_regreso_id)) {
         await this.saveEventId(vuelo.id, 'google_calendar_regreso_id', null);
-      else ok = false;
+        vuelo.google_calendar_regreso_id = null;
+      } else ok = false;
     }
-
-    for (let i = 0; i < escalas.length; i++) {
-      const e = escalas[i];
-      const fecha =
-        e.fecha_salida_plan ??
-        (i === 0
-          ? vuelo.fecha_vuelo
-          : i === escalas.length - 1
-            ? vuelo.fecha_traslado_final
-            : null);
-      if (fecha) {
-        // Un tramo que falla NO cancela los siguientes (Google puede fallar en
-        // el 3.º de 5): se cuenta y el resto del itinerario sí se publica.
-        try {
-          const eventId = await this.upsertRaw(
-            this.buildLegEvent(vuelo, e, fecha),
-            e.google_calendar_id,
-            `tramo ${e.orden}`,
-          );
-          if (eventId !== e.google_calendar_id)
-            await this.saveLegEventId(e.id, eventId);
-        } catch (err) {
-          ok = false;
-          this.notarFalloGoogle(err, `tramo ${e.orden} del vuelo ${vuelo.id}`);
-          this.logger.error(
-            `Tramo ${e.orden} del vuelo ${vuelo.id} no se sincronizó: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      } else if (e.google_calendar_id) {
-        // El tramo perdió su fecha: quita su evento.
-        if (await this.deleteEvent(e.google_calendar_id))
-          await this.saveLegEventId(e.id, null);
-        else ok = false;
-      }
+    for (const e of vuelo.escalas ?? []) {
+      if (!e.google_calendar_id) continue;
+      if (await this.deleteEvent(e.google_calendar_id)) {
+        await this.saveLegEventId(e.id, null);
+        e.google_calendar_id = null;
+      } else ok = false;
     }
     return ok;
   }
@@ -2500,70 +2505,206 @@ export class CalendarSyncService implements OnModuleInit {
     return ok;
   }
 
+  /**
+   * Lee el vuelo con todo lo que pinta su fila de Google.
+   *
+   * TOLERA que la migración `20260917000001` (`usuario.apodo`) no esté
+   * aplicada: PostgREST responde 42703 y, sin este degradado, TODA la
+   * sincronización del calendario moriría entre el deploy del API y la
+   * migración. Se degrada UNA vez (avisa una vez) y sigue con el primer
+   * nombre del piloto hasta el siguiente reinicio.
+   */
   private async loadVuelo(vueloId: string): Promise<VueloRow | null> {
-    const { data, error } = await this.supabase.service
-      .from('vuelo')
-      .select(VUELO_SELECT)
-      .eq('id', vueloId)
-      .maybeSingle();
+    const leer = async (
+      select: string,
+    ): Promise<{
+      data: unknown;
+      error: { code?: string | null; message: string } | null;
+    }> => {
+      const res = await this.supabase.service
+        .from('vuelo')
+        .select(select)
+        .eq('id', vueloId)
+        .maybeSingle();
+      return { data: res.data as unknown, error: res.error ?? null };
+    };
+
+    let { data, error } = await leer(
+      this.apodoDisponible ? VUELO_SELECT : VUELO_SELECT_SIN_APODO,
+    );
+    if (error && this.apodoDisponible && esColumnaInexistente(error)) {
+      this.apodoDisponible = false;
+      this.logger.warn(
+        `Columna usuario.apodo no existe todavía (migración ${MIGRACION_APODO} pendiente): el título de Google Calendar usa el PRIMER NOMBRE del piloto hasta aplicarla.`,
+      );
+      ({ data, error } = await leer(VUELO_SELECT_SIN_APODO));
+    }
     if (error) throw new Error(error.message);
-    return (data as unknown as VueloRow) ?? null;
+    return (data as VueloRow | null) ?? null;
   }
 
-  private buildEvent(
+  /**
+   * EL evento del vuelo: UNA SOLA FILA con `{piloto} {AVIÓN} {ruta} {hora}`
+   * (pedido del cliente, 15-sep-2026 — formato de los eventos que la oficina
+   * capturaba a mano). `null` = no hay dónde ponerlo (sin fecha de salida).
+   *
+   * @param escalas TODOS los tramos (cancelados incluidos), ordenados por
+   *   `orden`: son los que definen quién es el PRIMERO y el ÚLTIMO del
+   *   itinerario para heredar `fecha_vuelo` / `fecha_traslado_final`.
+   * @param activas los NO cancelados, en el mismo orden.
+   */
+  private buildEventoVuelo(
     v: VueloRow,
-    tramo: 'ida' | 'regreso',
-  ): calendar_v3.Schema$Event {
-    const esRegreso = tramo === 'regreso';
-    // Asignación POR TRAMO: ida = escala orden 1, regreso = escala orden 2. Si el
-    // tramo aún no tiene escala (vuelo viejo/externo), cae a la asignación del vuelo.
-    const escala = (v.escalas ?? []).find(
-      (e) => e.orden === (esRegreso ? 2 : 1),
-    );
-    const aeronave = unwrap(escala?.aeronave ?? v.aeronave);
-    const piloto = unwrap(escala?.piloto ?? v.piloto);
+    escalas: EscalaRow[],
+    activas: EscalaRow[],
+  ): calendar_v3.Schema$Event | null {
+    // TRAMOS de la fila. Sin escalas capturadas (vuelo viejo, externo o
+    // recién creado) se arma el itinerario mínimo desde el vuelo: la ida y,
+    // si es REDONDO, el regreso — así la ruta sale `cun-mid-cun` como la
+    // escribía la oficina, no `cun-mid`.
+    // Herencia de siempre para el tramo sin fecha propia: el PRIMERO del
+    // itinerario toma `fecha_vuelo` y el ÚLTIMO `fecha_traslado_final`. Se
+    // mide contra TODOS los tramos, no contra los activos: si se canceló la
+    // ida de un redondo, el regreso sigue siendo el ÚLTIMO y hereda la fecha
+    // de traslado final — no la de salida del vuelo, que ya no vuela nadie.
+    const ordenPrimero = escalas[0]?.orden;
+    const ordenUltimo = escalas[escalas.length - 1]?.orden;
+    const tramos: TramoEventoVuelo[] =
+      activas.length > 0
+        ? activas.map((e) => ({
+            orden: e.orden,
+            origen: e.origen_iata,
+            destino: e.destino_iata,
+            salida:
+              e.fecha_salida_plan ??
+              (e.orden === ordenPrimero
+                ? v.fecha_vuelo
+                : e.orden === ordenUltimo
+                  ? v.fecha_traslado_final
+                  : null),
+            ferry: e.es_ferry,
+            pasajeros: e.es_ferry ? 0 : (e.pasajeros ?? v.pasajeros),
+          }))
+        : [
+            {
+              orden: 1,
+              origen: v.origen_iata,
+              destino: v.destino_iata,
+              salida: v.fecha_vuelo,
+              ferry: false,
+              pasajeros: v.pasajeros,
+            },
+            ...(v.tipo === 'REDONDO'
+              ? [
+                  {
+                    orden: 2,
+                    origen: v.destino_iata,
+                    destino: v.origen_iata,
+                    salida: v.fecha_traslado_final,
+                    ferry: false,
+                    pasajeros: v.pasajeros,
+                  },
+                ]
+              : []),
+          ];
+
+    // La fila EMPIEZA en la salida del primer tramo activo y TERMINA en el
+    // instante conocido más tardío del vuelo + 1 h (nunca menos de 1 h): un
+    // redondo es una fila 10:00–19:00 y un viaje con pernocta abarca sus
+    // días. `escala` no tiene `fecha_llegada_plan` (verificado 17-sep-2026):
+    // la llegada real todavía no se planea, solo se captura con los tacos.
+    const inicio = tramos[0]?.salida ?? v.fecha_vuelo;
+    const ventana = ventanaEventoVuelo(inicio, [
+      ...tramos.map((t) => t.salida),
+      v.fecha_traslado_final,
+    ]);
+    if (!ventana) return null;
+
+    // ASIGNACIÓN del PRIMER tramo activo (con su herencia del vuelo), igual
+    // que antes: es la que manda en el color de la fila.
+    //
+    // `unwrap` POR SEPARADO (revisión adversaria 17-sep-2026): con
+    // `unwrap(primero?.aeronave ?? v.aeronave)` un embed vacío del tramo
+    // (`[]` en vez de `null`, que PostgREST devuelve según la versión) gana
+    // el `??` y el vuelo se publicaba como «sin avión»/«sin piloto» aunque
+    // el tramo HEREDE la asignación del vuelo.
+    const primero = activas[0] ?? null;
+    const aeronave = unwrap(primero?.aeronave) ?? unwrap(v.aeronave);
+    const piloto = unwrap(primero?.piloto) ?? unwrap(v.piloto);
     const cliente = unwrap(v.cliente);
 
+    // EXTERNO: la casilla «avión» del título lleva la MATRÍCULA ajena cuando
+    // la oficina la capturó; si no, el operador (que en la mayoría de los
+    // vuelos externos de hoy ES la matrícula: «XA-TYV»). El nombre de una
+    // persona en la casilla del avión no le sirve al mecánico.
     const aeronaveStr = v.es_externo
-      ? (v.operador_externo ?? 'Externo')
+      ? v.avion_externo_matricula?.trim() ||
+        v.operador_externo?.trim() ||
+        'Externo'
       : (aeronave?.matricula ?? 'sin avión');
 
-    const permisoPendiente = escala
-      ? escala.estado_permiso === 'pendiente'
+    // MULTI-AVIÓN y ROTACIÓN DE PILOTO: el título solo puede decir UN avión y
+    // UN piloto (los del primer tramo activo). Lo que difiera se dice en la
+    // línea de su tramo, que es donde el formato viejo lo tenía (un evento
+    // por tramo con su matrícula). Sin esto, un vuelo con tramos en dos
+    // aviones se leía como si todo lo volara el primero.
+    if (activas.length > 0 && !v.es_externo) {
+      activas.forEach((e, i) => {
+        const avTramo = unwrap(e.aeronave) ?? unwrap(v.aeronave);
+        const pilTramo = unwrap(e.piloto) ?? unwrap(v.piloto);
+        if (avTramo?.matricula && avTramo.matricula !== aeronave?.matricula) {
+          tramos[i].aeronave = avTramo.matricula;
+        }
+        if (pilTramo?.nombre && pilTramo.nombre !== piloto?.nombre) {
+          tramos[i].piloto = nombreCortoPiloto(
+            pilTramo.nombre,
+            false,
+            pilTramo.apodo,
+          );
+        }
+      });
+    }
+
+    // COLOR: criterio de siempre, con los datos del primer tramo activo.
+    const permisoPendientePrimero = primero
+      ? primero.estado_permiso === 'pendiente'
       : v.estado_permiso === 'pendiente';
-    // En el regreso se invierte la ruta y se usa la fecha de traslado final.
-    const origen = esRegreso ? v.destino_iata : v.origen_iata;
-    const destino = esRegreso ? v.origen_iata : v.destino_iata;
-    const prefijo = esRegreso ? '↩ Regreso · ' : '';
+    // DESCRIPCIÓN: basta con que CUALQUIER tramo activo tenga el permiso
+    // pendiente — ahora que el vuelo es una sola fila, callar el pendiente de
+    // un tramo intermedio sería esconderlo. (El color sigue el del primero:
+    // puede haber fila de color normal con «Permiso de pista: PENDIENTE» en
+    // la descripción; el texto manda, el color solo ayuda.)
+    const permisoPendiente =
+      activas.length > 0
+        ? activas.some((e) => e.estado_permiso === 'pendiente')
+        : v.estado_permiso === 'pendiente';
 
-    // C3 (12-sep-2026): la oficina identifica el vuelo por el PILOTO, así que
-    // su nombre corto va en el TÍTULO del evento, no solo en la descripción.
-    const pilotoCorto = nombreCortoPiloto(piloto?.nombre, v.es_externo);
-    const summary = `${prefijo}${aeronaveStr} · ${origen}-${destino} · ${pilotoCorto} · ${v.pasajeros} pax${permisoPendiente ? ' ⚠ permiso pendiente' : ''}`;
+    const summary = tituloEventoVuelo({
+      pilotoCorto: nombreCortoPiloto(
+        piloto?.nombre,
+        v.es_externo,
+        piloto?.apodo,
+      ),
+      aeronave: aeronaveStr,
+      ruta: rutaMinusculas(tramos),
+      hora: horaCortaCancun(ventana.inicio),
+    });
 
-    const start = new Date(
-      esRegreso ? v.fecha_traslado_final! : v.fecha_vuelo!,
-    );
-    // Bloque de 2 h por tramo (la ida ya no abarca hasta el regreso).
-    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
-
-    const descriptionLines = [
-      `Folio: #${v.folio}`,
-      `Tramo: ${esRegreso ? 'Regreso' : 'Ida'}`,
-      `Estado: ${v.estado}`,
-      permisoPendiente ? 'Permiso de pista: PENDIENTE' : null,
-      `Cliente: ${cliente?.nombre ?? '—'}`,
-      `Ruta: ${origen} → ${destino}`,
-      `Pasajeros: ${v.pasajeros}`,
-      v.es_externo
-        ? `Operador externo: ${v.operador_externo ?? '—'}`
-        : `Aeronave: ${aeronave?.matricula ?? '—'}`,
-      `Piloto: ${v.es_externo ? '(externo)' : (piloto?.nombre ?? 'sin asignar')}`,
-      `Monto: $${Number(v.monto_total_usd)} USD`,
-      v.notas ? `Notas: ${v.notas}` : null,
-      '',
-      `VuelaTour · vuelo ${v.id}`,
-    ].filter(Boolean);
+    const description = descripcionEventoVuelo({
+      id: v.id,
+      folio: v.folio,
+      estado: v.estado,
+      cliente: cliente?.nombre ?? null,
+      pasajeros: v.pasajeros,
+      esExterno: v.es_externo,
+      operadorExterno: v.operador_externo,
+      matricula: aeronave?.matricula ?? null,
+      pilotoNombre: piloto?.nombre ?? null,
+      permisoPendiente,
+      montoUsd: v.monto_total_usd,
+      notas: v.notas,
+      tramos,
+    });
 
     // MISMO color que el calendario del sistema, traducido al más cercano de
     // Google (12-sep-2026): tentativo > sin asignar > permiso pendiente >
@@ -2571,89 +2712,30 @@ export class CalendarSyncService implements OnModuleInit {
     const colorId = colorIdGoogleDeVuelo({
       estado: v.estado,
       esExterno: v.es_externo,
-      aeronaveId: escala?.aeronave_id ?? v.aeronave_id,
-      pilotoId: escala?.piloto_id ?? v.piloto_id,
-      permisoPendiente,
+      aeronaveId: primero?.aeronave_id ?? v.aeronave_id,
+      pilotoId: primero?.piloto_id ?? v.piloto_id,
+      permisoPendiente: permisoPendientePrimero,
       colorAvion: aeronave?.color_calendario,
     });
 
     return {
       summary,
-      description: descriptionLines.join('\n'),
+      description,
       colorId,
-      start: { dateTime: start.toISOString(), timeZone: 'America/Cancun' },
-      end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
-      // Idempotency anchor — lets us recognize our own events.
-      extendedProperties: {
-        private: { [ANCLA_VUELO]: v.id, vuelatour_tramo: tramo },
+      start: {
+        dateTime: ventana.inicio.toISOString(),
+        timeZone: 'America/Cancun',
       },
-    };
-  }
-
-  /** Evento de Google para UN tramo de un itinerario personalizado. */
-  private buildLegEvent(
-    v: VueloRow,
-    e: EscalaRow,
-    fechaIso: string,
-  ): calendar_v3.Schema$Event {
-    const aeronave = unwrap(e.aeronave ?? v.aeronave);
-    const piloto = unwrap(e.piloto ?? v.piloto);
-    const cliente = unwrap(v.cliente);
-
-    const aeronaveStr = v.es_externo
-      ? (v.operador_externo ?? 'Externo')
-      : (aeronave?.matricula ?? 'sin avión');
-    const permisoPendiente = e.estado_permiso === 'pendiente';
-    const pax = e.es_ferry ? 0 : (e.pasajeros ?? v.pasajeros);
-    const prefijo = e.es_ferry ? `T${e.orden} Ferry · ` : `T${e.orden} · `;
-
-    // C3: nombre corto del piloto DEL TRAMO en el título
-    // («T1 · N4142R · CUN-PTU · Luis · 3 pax»).
-    const pilotoCorto = nombreCortoPiloto(piloto?.nombre, v.es_externo);
-    const summary = `${prefijo}${aeronaveStr} · ${e.origen_iata}-${e.destino_iata} · ${pilotoCorto} · ${pax} pax${permisoPendiente ? ' ⚠ permiso pendiente' : ''}`;
-
-    const start = new Date(fechaIso);
-    const end = new Date(start.getTime() + 2 * 60 * 60 * 1000);
-
-    const descriptionLines = [
-      `Folio: #${v.folio}`,
-      `Tramo: ${e.orden} de ${(v.escalas ?? []).length}${e.es_ferry ? ' (ferry, vacío)' : ''}`,
-      `Estado: ${v.estado}`,
-      permisoPendiente ? 'Permiso de pista: PENDIENTE' : null,
-      `Cliente: ${cliente?.nombre ?? '—'}`,
-      `Ruta: ${e.origen_iata} → ${e.destino_iata}`,
-      `Pasajeros: ${pax}`,
-      v.es_externo
-        ? `Operador externo: ${v.operador_externo ?? '—'}`
-        : `Aeronave: ${aeronave?.matricula ?? '—'}`,
-      `Piloto: ${v.es_externo ? '(externo)' : (piloto?.nombre ?? 'sin asignar')}`,
-      v.notas ? `Notas: ${v.notas}` : null,
-      '',
-      `VuelaTour · vuelo ${v.id}`,
-    ].filter(Boolean);
-
-    // Mismo criterio que `buildEvent`: el color del SISTEMA para este tramo
-    // (con la asignación del tramo y su herencia del vuelo) → Google.
-    const colorId = colorIdGoogleDeVuelo({
-      estado: v.estado,
-      esExterno: v.es_externo,
-      aeronaveId: e.aeronave_id ?? v.aeronave_id,
-      pilotoId: e.piloto_id ?? v.piloto_id,
-      permisoPendiente,
-      colorAvion: aeronave?.color_calendario,
-    });
-
-    return {
-      summary,
-      description: descriptionLines.join('\n'),
-      colorId,
-      start: { dateTime: start.toISOString(), timeZone: 'America/Cancun' },
-      end: { dateTime: end.toISOString(), timeZone: 'America/Cancun' },
+      end: {
+        dateTime: ventana.fin.toISOString(),
+        timeZone: 'America/Cancun',
+      },
+      // Ancla de idempotencia — así reconocemos nuestros propios eventos.
+      // `vuelatour_tramo: 'vuelo'` es el valor ÚNICO desde el 15-sep-2026;
+      // 'ida' / 'regreso' / 'leg-N' son del formato viejo y el paso inverso
+      // los borra en cuanto dejan de estar guardados en alguna columna.
       extendedProperties: {
-        private: {
-          [ANCLA_VUELO]: v.id,
-          vuelatour_tramo: `leg-${e.orden}`,
-        },
+        private: { [ANCLA_VUELO]: v.id, vuelatour_tramo: 'vuelo' },
       },
     };
   }

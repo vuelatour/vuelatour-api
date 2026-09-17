@@ -7069,13 +7069,14 @@ export class FlightsService {
       throw escalaNoExiste(escalaId);
     }
     // CAMPOS QUE GOOGLE PINTA del tramo (hueco H3, revisión adversaria
-    // 12-sep-2026): `buildLegEvent` arma el título «T{orden} [Ferry ·]
-    // matrícula · ORI-DES · piloto · {pax} pax», así que `orden`, `pasajeros`
-    // y `es_ferry` SALEN en el evento — y el espejo solo se disparaba al
-    // cambiar la RUTA o la FECHA. Este PATCH es el que usa el editor único de
-    // la app (que manda TODO el DTO explícito, también desde su outbox al
-    // reconectar): editar los pasajeros de un tramo dejaba el evento de
-    // Google mintiendo hasta la reconciliación de la madrugada.
+    // 12-sep-2026; actualizado el 15-sep-2026 al formato de UNA SOLA FILA):
+    // la descripción del evento del vuelo lleva una línea por tramo
+    // («T{orden} cun-mid 10:00 · 2 pax» / «· ferry»), así que `orden`,
+    // `pasajeros` y `es_ferry` SALEN en el evento — y el espejo solo se
+    // disparaba al cambiar la RUTA o la FECHA. Este PATCH es el que usa el
+    // editor único de la app (que manda TODO el DTO explícito, también desde
+    // su outbox al reconectar): editar los pasajeros de un tramo dejaba el
+    // evento de Google mintiendo hasta la reconciliación de la madrugada.
     const pintadoCambia =
       (dto.orden !== undefined && Number(dto.orden) !== Number(prev.orden)) ||
       (dto.pasajeros !== undefined &&
