@@ -345,6 +345,17 @@ describe('formato de la oficina: rutaMinusculas / horaCortaCancun / tituloEvento
     expect(rutaMinusculas([{ origen: 'ILS', destino: 'CZM' }])).toBe('ils-czm');
   });
 
+  it('rutaMinusculas: un tramo LOCAL (origen = destino) se escribe «mid-mid», nunca «mid»', () => {
+    // Formato de la oficina para pruebas/servicios: «msss-msss Vuelo de prueba».
+    expect(rutaMinusculas([{ origen: 'MID', destino: 'MID' }])).toBe('mid-mid');
+    expect(
+      rutaMinusculas([
+        { origen: 'CUN', destino: 'CUN' },
+        { origen: 'CUN', destino: 'MID' },
+      ]),
+    ).toBe('cun-cun-mid');
+  });
+
   it('rutaMinusculas: un tramo que NO empieza donde terminó el anterior escribe su origen', () => {
     // Traslado no capturado: la ruta lo dice en vez de mentir por callar.
     expect(

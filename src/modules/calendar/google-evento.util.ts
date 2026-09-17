@@ -248,15 +248,19 @@ export function rutaMinusculas(
   }>,
 ): string {
   const codigos: string[] = [];
-  const agregar = (crudo: string | null | undefined): void => {
-    const c = (crudo ?? '').trim().toLowerCase();
-    if (c === '') return;
-    if (codigos[codigos.length - 1] === c) return;
-    codigos.push(c);
-  };
+  const limpio = (crudo: string | null | undefined): string =>
+    (crudo ?? '').trim().toLowerCase();
   for (const t of tramos ?? []) {
-    agregar(t?.origen);
-    agregar(t?.destino);
+    const origen = limpio(t?.origen);
+    const destino = limpio(t?.destino);
+    // Solo se COLAPSA la unión entre tramos (el origen repite el destino
+    // anterior: cun-mid + mid-cun ⇒ cun-mid-cun). Dentro de un tramo NO:
+    // un vuelo local o de prueba (mid → mid) se escribe «mid-mid», como lo
+    // anotaba la oficina («msss-msss Vuelo de prueba»), nunca «mid».
+    if (origen !== '' && codigos[codigos.length - 1] !== origen) {
+      codigos.push(origen);
+    }
+    if (destino !== '') codigos.push(destino);
   }
   return codigos.join('-');
 }
