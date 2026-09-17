@@ -11,6 +11,7 @@ import {
 } from '../../common/avion-ocupado.util';
 import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { normalizarTc } from '../../common/tc.util';
 import {
   movimientoDeSobre,
   MOV_LIGA_COLS,
@@ -1153,7 +1154,10 @@ export class GroupsService {
       tarifa_tipo: dto.tarifa_tipo,
       metodo_pago: dto.metodo_pago,
       metodo_pago_detalle: dto.metodo_pago_detalle,
-      tc_usd_mxn: dto.tc_usd_mxn,
+      // TC normalizado a 6 decimales UNA sola vez (fuente única tc.util): el
+      // mismo número viaja al motor de cada hijo, a la cabecera del grupo y
+      // al sobre de cobro — lo que se guarda es lo que compuso los pesos.
+      tc_usd_mxn: normalizarTc(dto.tc_usd_mxn) ?? undefined,
       pase_abordar: dto.pase_abordar === true,
       extras,
       ajuste_grupo_usd: round2(Number(dto.ajuste_grupo_usd) || 0),
@@ -2066,8 +2070,9 @@ export class GroupsService {
         'TRANSFERENCIA') as MetodoPago,
       metodo_pago_detalle: detalle,
       tc_usd_mxn:
-        dto?.tc_usd_mxn ??
-        (cab.tc_usd_mxn == null ? undefined : Number(cab.tc_usd_mxn)),
+        normalizarTc(dto?.tc_usd_mxn) ??
+        normalizarTc(cab.tc_usd_mxn) ??
+        undefined,
       pase_abordar: dto?.pase_abordar ?? cab.pase_abordar,
       extras_grupo: (dto?.extras_grupo ??
         normalizarExtrasGrupo(

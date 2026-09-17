@@ -6,6 +6,7 @@ import {
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { round6, totalMxnDeVuelo } from '../../common/tc.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
@@ -516,10 +517,14 @@ export class DineroReportService {
       // extras y la columna salía inflada respecto a la tarifa.
       const ivaHr =
         ivaUsd != null && horas != null && horas > 0 ? ivaUsd / horas : null;
-      // Total del CLIENTE en MXN: misma conversión de siempre (persistido
-      // por composición; si no, total × TC).
+      // Total del CLIENTE en MXN: FUENTE ÚNICA `totalMxnDeVuelo` (17-sep-2026)
+      // — se LEE `monto_total_mxn` (el número exacto que el cliente vio, con
+      // los renglones nativos en pesos incluidos) y solo sin él se cae a
+      // usd × TC. Recalcularlo aquí era lo que hacía que el Libro Dinero
+      // dijera 99,999.81 donde la cotización decía 100,000.00.
       const totalMxnCalc =
-        totalMxn ?? (totalUsd != null && tc != null ? totalUsd * tc : null);
+        totalMxnDeVuelo(v) ??
+        (totalUsd != null && tc != null ? totalUsd * tc : null);
       // Venta del avión en MXN con el MISMO TC. Sin parte VuelaTour el avión
       // ES el total del cliente (idéntico a antes, al centavo). Cancelado: lo
       // retenido × TC (sin TC no se inventa).
@@ -649,7 +654,9 @@ export class DineroReportService {
           // Venta del AVIÓN (regla 6); el total del cliente va aparte.
           total_cobrado_usd: r2(parteDe(ventaUsd, fa.aid)),
           iva_total_usd: r2(parteDe(ivaUsd, fa.aid)),
-          tc_venta: tc != null ? Math.round(tc * 10000) / 10000 : null,
+          // TC con la precisión canónica (6 decimales): la columna del libro
+          // dice el MISMO número que la hoja de la cotización.
+          tc_venta: tc != null ? round6(tc) : null,
           total_cobrado_mxn: r2(ventaMxnParte),
           iva_total_mxn: r2(ivaMxnParte),
           total_siva_mxn: r2(
@@ -1224,8 +1231,7 @@ export class DineroReportService {
         comisionProvisionadaMxn,
       ),
       utilidades_otros_gastos_mxn: r2(acumulado),
-      utilidades_tc:
-        nTc > 0 ? Math.round((sumaTc / nTc) * 10000) / 10000 : null,
+      utilidades_tc: nTc > 0 ? round6(sumaTc / nTc) : null,
       utilidades_aviones: utilidadesAviones,
     };
   }

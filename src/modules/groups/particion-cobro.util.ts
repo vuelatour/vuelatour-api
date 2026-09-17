@@ -30,6 +30,7 @@
  */
 
 import { diaCancun } from '../../common/fecha-cancun.util';
+import { normalizarTc } from '../../common/tc.util';
 import {
   repartirExacto,
   round2,
@@ -157,6 +158,8 @@ function fmt(n: number): string {
   });
 }
 
+/** Redondeo del PESO/factor de una parte (fracción 0–1), NO de un tipo de
+ *  cambio: el TC vive en `tc.util` (`normalizarTc`). */
 function round6(n: number): number {
   return Math.round((n + Number.EPSILON) * 1_000_000) / 1_000_000;
 }
@@ -172,7 +175,10 @@ export function particionCobroGrupo(
     );
   }
   const moneda: MonedaCobroGrupo = input.moneda === 'MXN' ? 'MXN' : 'USD';
-  const tc = Number(input.tc) > 0 ? Number(input.tc) : null;
+  // TC del sobre a 6 decimales (fuente única tc.util): el mismo número que
+  // heredan las partes en `cobro_vuelo.tc_usd_mxn` y con el que la BD lo
+  // guarda — sin esto, el sobre partía con un TC y la BD archivaba otro.
+  const tc = normalizarTc(input.tc);
   if (moneda === 'MXN' && !tc) {
     throw new ParticionCobroError(
       'SIN_TC',

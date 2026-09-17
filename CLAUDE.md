@@ -886,6 +886,42 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     cuenta contra `count`, nunca contra `tramos.length`. «Resolver» sigue
     llevando a `/admin/taco-live`.
 
+20. **TIPO DE CAMBIO = 6 DECIMALES, y el total en pesos se LEE (17-sep-2026,
+    caso del vuelo #314).** Fuente única `src/common/tc.util.ts`
+    (`TC_DECIMALES = 6`, `round6`, `normalizarTc`, `totalMxnDeVuelo`).
+    - **Precisión**: `vuelo.tc_usd_mxn`, `cobro_vuelo.tc_usd_mxn`,
+      `cobro_grupo.tc_usd_mxn`, `vuelo_grupo.tc_usd_mxn`,
+      `cotizacion_version_history.tc_usd_mxn` y `gasto.tc_gasto` son
+      `numeric(12,6)` (migración `20260917000002_tc_seis_decimales.sql`, con
+      backfill del TC de los vuelos cuyo total ya no cuadraba).
+      `tipo_cambio_oficial.tc`, `compra.tc_usd_mxn` e
+      `inventario_movimiento.tc_usd_mxn` se quedan en 4 a propósito
+      (referencia y compras, no el precio que el cliente vio).
+    - **Todo escritor de un TC pasa por `normalizarTc`** — motor
+      (`quotes.service`: `tcQuote` y `camposDesdeBreakdown` usan la MISMA
+      llamada, así lo que se guarda es exactamente lo que compuso los pesos),
+      grupos (`ArmadoCtx.tc_usd_mxn`, sobre de cobro vía
+      `particionCobroGrupo`), cobros/reembolsos/PATCH de cobro, cubrir con
+      externo, alta de externo, gastos (alta y PATCH), importador de
+      combustibles y el `tc_gasto` DERIVADO de la conciliación
+      (`round6`, ya no `Math.round(x*10000)/10000`). Los DTOs NO rechazan
+      decimales de más: se normalizan.
+    - **El costo del operador EXTERNO en pesos** (`resolverCostoExterno`)
+      convierte con ese MISMO TC normalizado: `costo_externo_tc` y el
+      `costo_externo_usd` derivado tienen que reproducirse con el TC que
+      quedó en `vuelo.tc_usd_mxn` (cotizar, revisar, cubrir con externo y
+      alta de externo pasan los cuatro por `normalizarTc`).
+    - **El total en pesos de un vuelo se LEE de `monto_total_mxn`, JAMÁS se
+      recalcula** (`totalMxnDeVuelo`): ese número lo compuso el motor
+      incluyendo los renglones NATIVOS en MXN (TUAS/extras pagados en pesos),
+      que nunca pasaron por el TC — `usd × tc` los ignora y desvía el total.
+      Ya lo usan el Libro Dinero (`dinero-report`), el balance por avión
+      (total del cliente; las PARTICIONES por avión sí siguen con `× tc`), el
+      reporte por vuelo, el CFDI (`invoices.service`) y los PDF de cotización.
+    - **Síntoma que esto cierra**: la hoja imprimía «Total MXN (T.C. 16.9916)
+      $100,000.00» y «Registrar cobro» decía «Total ≈ MXN $99,999.81», porque
+      el operador tecleó 16.991632 y la BD guardaba 16.9916.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

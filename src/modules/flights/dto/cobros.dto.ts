@@ -33,7 +33,9 @@ export class CreateCobroDto {
   metodo_cobro!: MetodoPago;
 
   @ApiPropertyOptional({
-    description: 'TC al momento del cobro (si moneda=USD y se factura en MXN)',
+    description:
+      'TC al momento del cobro (si moneda=USD y se factura en MXN).' +
+      'Se guarda con 6 decimales (17-sep-2026): manda los que necesites — el API normaliza y persiste EXACTAMENTE el que usó para componer los pesos; no se rechazan decimales de más.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -151,7 +153,8 @@ export class CreateReembolsoDto {
 
   @ApiPropertyOptional({
     description:
-      'TC del reembolso (MXN). Si falta, se usa el TC de la cotización del vuelo.',
+      'TC del reembolso (MXN). Si falta, se usa el TC de la cotización del vuelo.' +
+      'Se guarda con 6 decimales (17-sep-2026): manda los que necesites — el API normaliza y persiste EXACTAMENTE el que usó para componer los pesos; no se rechazan decimales de más.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -221,7 +224,10 @@ export class UpdateCobroDto {
   @IsEnum(MetodoPago)
   metodo_cobro?: MetodoPago;
 
-  @ApiPropertyOptional()
+  @ApiPropertyOptional({
+    description:
+      'Tipo de cambio MXN por USD. Se guarda con 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el que usó para convertir; no se rechazan decimales de más.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

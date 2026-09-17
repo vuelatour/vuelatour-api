@@ -15,6 +15,7 @@ import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
+import { round6 } from '../../common/tc.util';
 import {
   fetchRepartos,
   type GastoRepartoFila,
@@ -3964,7 +3965,10 @@ export class ConciliacionService {
           tc >= TC_IMPLICITO_MIN &&
           tc <= TC_IMPLICITO_MAX
         ) {
-          tcDerivado = Math.round(tc * 10000) / 10000;
+          // 6 decimales (17-sep-2026, fuente única tc.util): con 4, un gasto
+          // de 722.90 USD × 17.2244 ya no reproducía los 12,451.49 MXN que
+          // el banco cobró — el TC derivado tiene que cerrar al centavo.
+          tcDerivado = round6(tc);
         }
       }
       estado = await this.recalcularGasto(gastoId, userId, { tcDerivado });
@@ -4396,7 +4400,7 @@ export class ConciliacionService {
         const m = Number(g.monto);
         const tc = m > 0 ? monto / m : 0;
         return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX
-          ? aCandidato(g, Math.round(tc * 10000) / 10000)
+          ? aCandidato(g, round6(tc))
           : null;
       })
       .filter((c): c is NonNullable<typeof c> => c !== null);

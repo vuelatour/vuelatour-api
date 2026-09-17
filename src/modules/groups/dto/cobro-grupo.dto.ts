@@ -64,7 +64,7 @@ export class CreateCobroGrupoDto {
 
   @ApiPropertyOptional({
     description:
-      'TC del pago. Con MXN es necesario (si falta se usa el TC del grupo); el mismo TC viaja al sobre y a las N partes.',
+      'TC del pago. Con MXN es necesario (si falta se usa el TC del grupo); el mismo TC viaja al sobre y a las N partes. 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el TC que usó para convertir.',
   })
   @IsOptional()
   @Type(() => Number)

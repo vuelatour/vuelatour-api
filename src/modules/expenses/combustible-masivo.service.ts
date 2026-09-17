@@ -4,6 +4,7 @@ import { PyservicesService } from '../pyservices/pyservices.service';
 import type { FilaCombustibleCruda } from '../pyservices/pyservices.service';
 import { ExpensesService } from './expenses.service';
 import { Rol } from '../../common/types/auth.types';
+import { round6 } from '../../common/tc.util';
 import {
   CategoriaGasto,
   EstatusComprobante,
@@ -372,7 +373,9 @@ export class CombustibleMasivoService {
       const tc = Number(f.tipo_cambio);
       if (!Number.isFinite(tc) || tc <= 0)
         errores.push('El tipo de cambio debe ser mayor a 0.');
-      else datos.tc_gasto = Math.round(tc * 10000) / 10000;
+      // TC del gasto a 6 decimales (fuente única tc.util): la columna los
+      // guarda desde el 17-sep-2026 y el balance convierte con el mismo número.
+      else datos.tc_gasto = round6(tc);
     }
     if (datos.moneda === Moneda.MXN && datos.tc_gasto == null) {
       advertencias.push(

@@ -173,11 +173,13 @@ export class CreateGastoDto {
 
   @ApiPropertyOptional({
     description:
-      'Tipo de cambio MXN/USD si el gasto es en moneda distinta a USD',
+      'Tipo de cambio MXN/USD si el gasto es en moneda distinta a USD. Se ' +
+      'guarda con 6 decimales (17-sep-2026): manda los que necesites, el API ' +
+      'normaliza — no se rechazan decimales de más.',
   })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 4 })
+  @IsNumber({ maxDecimalPlaces: 6 })
   @Min(0)
   tc_gasto?: number;
 

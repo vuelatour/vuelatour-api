@@ -15,6 +15,7 @@ import {
 } from '../../common/categoria-gasto.util';
 import { etiquetaMedioPago } from '../../common/medio-pago.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
   desgloseGastoPartes,
@@ -1894,18 +1895,31 @@ export class AircraftBalanceService {
       // avión que reporta (venta 100 % + VuelaTour).
       const totalCotizacionVueloUsd =
         totalSistemaUsd != null ? round2(totalSistemaUsd) : null;
+      // Total del CLIENTE en pesos por la FUENTE ÚNICA (17-sep-2026): el
+      // `monto_total_mxn` que compuso el motor (incluye los renglones
+      // nativos en MXN) y, solo si el vuelo no lo tiene, el respaldo
+      // histórico total × K. Recalcularlo siempre era lo que separaba este
+      // libro de la cotización que vio el cliente.
       const totalCotizacionVueloMxn =
-        totalCotizacionVueloUsd != null && K != null
-          ? round2(totalCotizacionVueloUsd * K)
-          : null;
+        totalCotizacionVueloUsd == null
+          ? null
+          : (totalMxnDeVuelo(v) ??
+            (K != null ? round2(totalCotizacionVueloUsd * K) : null));
       const totalCotizacionUsd =
         multiAvion && !cancelado && p != null
           ? round2((I ?? 0) + (otrosIngresosUsd ?? 0))
           : totalCotizacionVueloUsd;
+      // Multi-avión: la PARTICIÓN de esta fila sí se convierte con K (es una
+      // porción, no el total del cliente). Cuando la fila ES el vuelo entero,
+      // hereda el total exacto de arriba para no volver a inventar centavos.
       const totalCotizacionMxn =
-        totalCotizacionUsd != null && K != null
-          ? round2(totalCotizacionUsd * K)
-          : null;
+        totalCotizacionUsd == null
+          ? null
+          : totalCotizacionUsd === totalCotizacionVueloUsd
+            ? totalCotizacionVueloMxn
+            : K != null
+              ? round2(totalCotizacionUsd * K)
+              : null;
       // CANCELADO: 100 % del avión (sin partición).
       const ventaFactor = p != null ? (cancelado ? 1 : p.factor_avion) : null;
 

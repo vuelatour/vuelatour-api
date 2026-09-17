@@ -641,7 +641,8 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
-      'Tipo de cambio MXN por USD con el que entrará el pago (BillPocket/transferencia pueden cobrarse en pesos). Persiste tc_usd_mxn y monto_total_mxn; los cobros MXN sin TC lo usan de respaldo.',
+      'Tipo de cambio MXN por USD con el que entrará el pago (BillPocket/transferencia pueden cobrarse en pesos). Persiste tc_usd_mxn y monto_total_mxn; los cobros MXN sin TC lo usan de respaldo.' +
+      'Se guarda con 6 decimales (17-sep-2026): manda los que necesites — el API normaliza y persiste EXACTAMENTE el que usó para componer los pesos; no se rechazan decimales de más.',
   })
   @IsOptional()
   @Type(() => Number)

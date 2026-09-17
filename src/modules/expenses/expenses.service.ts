@@ -52,6 +52,7 @@ import {
 import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
+import { normalizarTc } from '../../common/tc.util';
 import {
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
@@ -1470,7 +1471,10 @@ export class ExpensesService {
       monto: dto.monto,
       propina: dto.propina ?? 0,
       moneda: dto.moneda,
-      tc_gasto: dto.tc_gasto,
+      // TC del gasto a 6 decimales (fuente única tc.util, 17-sep-2026): lo
+      // que se guarda es lo que convierte. 0/negativo ⇒ null (el CHECK de la
+      // BD ya solo admite null o > 0).
+      tc_gasto: normalizarTc(dto.tc_gasto),
       fecha_gasto: dto.fecha_gasto,
       medio_pago: dto.medio_pago,
       tarjeta_terminacion: tarjetaTerminacion,
@@ -2887,6 +2891,10 @@ export class ExpensesService {
 
     // Campos del DTO que NO son columna de gasto: reventarían el UPDATE.
     const cols: Record<string, unknown> = { ...dto };
+    // Mismo TC de 6 decimales que en el alta (tc.util): corregir el tipo de
+    // cambio por PATCH no puede dejar un número distinto al que convierte.
+    if (cols.tc_gasto !== undefined)
+      cols.tc_gasto = normalizarTc(cols.tc_gasto);
     delete cols.capturar_como_piloto;
     delete cols.leer_con_ia;
     delete cols.permitir_fecha_antigua;

@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
+import { normalizarTc, totalMxnDeVuelo } from '../../common/tc.util';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import {
@@ -699,9 +700,18 @@ export class InvoicesService {
 
     // Importes en MXN. NOTA: mapeo simplificado (un concepto, IVA 16%); validar
     // contra FEL pruebas antes de producción.
+    // FUENTE ÚNICA del total en pesos (17-sep-2026): `monto_total_mxn` tal
+    // como lo compuso el motor; solo sin él, usd × TC. El CFDI tiene que
+    // decir los MISMOS pesos que la cotización que firmó el cliente.
+    // (Un `monto_total_mxn` persistido en 0 sigue cayendo al respaldo, como
+    // antes: el `||` conserva la semántica histórica.)
     let totalMxn =
-      Number(vuelo.monto_total_mxn) ||
-      Number(vuelo.monto_total_usd) * (Number(vuelo.tc_usd_mxn) || 0);
+      totalMxnDeVuelo(vuelo) ||
+      Math.round(
+        Number(vuelo.monto_total_usd) *
+          (normalizarTc(vuelo.tc_usd_mxn) ?? 0) *
+          100,
+      ) / 100;
     let tcPactado: EmisionPreparada['tcPactado'];
     if (
       (!totalMxn || totalMxn <= 0) &&
@@ -713,10 +723,12 @@ export class InvoicesService {
       // (invariante #2) lo usa de respaldo y reparto/reportes ven el mismo MXN
       // que el CFDI, sin crear un cálculo paralelo. Aquí solo se CALCULA:
       // emitir() escribe tcPactado en el vuelo (el preview no toca la BD).
+      // El TC pactado se PERSISTE con la precisión canónica (6 decimales):
+      // el mismo número compone los pesos del CFDI y respalda cobrosEnUsd.
+      const tcPactadoNorm = normalizarTc(input.tc_usd_mxn)!;
       totalMxn =
-        Math.round(Number(vuelo.monto_total_usd) * input.tc_usd_mxn * 100) /
-        100;
-      tcPactado = { tc_usd_mxn: input.tc_usd_mxn, monto_total_mxn: totalMxn };
+        Math.round(Number(vuelo.monto_total_usd) * tcPactadoNorm * 100) / 100;
+      tcPactado = { tc_usd_mxn: tcPactadoNorm, monto_total_mxn: totalMxn };
     }
     if (!totalMxn || totalMxn <= 0) {
       throw new BadRequestException(

@@ -79,11 +79,15 @@ export class FilaCombustibleDto {
   @IsEnum(Moneda)
   moneda!: Moneda;
 
-  @ApiPropertyOptional({ description: 'TC MXN/USD del día (DOF) si se conoce' })
+  @ApiPropertyOptional({
+    description:
+      'TC MXN/USD del día (DOF) si se conoce. 6 decimales (17-sep-2026): el ' +
+      'API normaliza, no rechaza decimales de más.',
+  })
   @IsOptional()
   @Type(() => Number)
-  @IsNumber({ maxDecimalPlaces: 4 })
-  @Min(0.0001)
+  @IsNumber({ maxDecimalPlaces: 6 })
+  @Min(0.000001)
   tc_gasto?: number;
 
   @ApiPropertyOptional({ enum: TipoCombustible })

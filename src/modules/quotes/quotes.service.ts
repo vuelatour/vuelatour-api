@@ -44,6 +44,7 @@ import {
 } from '../../common/grupo-contexto.util';
 import { Rol } from '../../common/types/auth.types';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { normalizarTc } from '../../common/tc.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   conflictoCapacidad,
@@ -435,7 +436,13 @@ export class QuotesService {
 
     // TC de la cotización: necesario para convertir líneas nativas en MXN
     // (TUAS/extras que se pagan en pesos aunque el vuelo se cotice en USD).
-    const tcQuote = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
+    // TC NORMALIZADO A 6 DECIMALES (17-sep-2026, fuente única tc.util):
+    // el mismo número que se persiste en `vuelo.tc_usd_mxn`, así el total
+    // en pesos que se compone abajo es EXACTAMENTE el que cualquier lector
+    // puede reproducir. Antes la columna era numeric(10,4) y la BD recortaba
+    // el TC a espaldas del motor (caso #314: 16.991632 → 16.9916 ⇒ el
+    // diálogo de cobro mostraba $99,999.81 donde la hoja decía $100,000.00).
+    const tcQuote = normalizarTc(dto.tc_usd_mxn);
     // Línea de TUA capturada por aeropuerto (monto unitario + moneda): manda
     // sobre el catálogo y sobre el override global para ESE aeropuerto —
     // pass-through exacto de lo que el aeropuerto nos cobró.
@@ -1258,7 +1265,9 @@ export class QuotesService {
       monto_total_usd: breakdown.totales.total_usd,
       // TC declarado al cotizar (el pago puede entrar en pesos): habilita el
       // total MXN y sirve de respaldo para convertir cobros MXN sin TC.
-      tc_usd_mxn: dto.tc_usd_mxn ?? null,
+      // NORMALIZADO con la MISMA función que usó el motor para componer
+      // `monto_total_mxn`: lo que se guarda es exactamente lo que se usó.
+      tc_usd_mxn: normalizarTc(dto.tc_usd_mxn),
       monto_total_mxn: breakdown.totales.total_mxn ?? null,
       viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
       extras_total_usd: breakdown.totales.extras_total_usd,
@@ -1895,11 +1904,15 @@ export class QuotesService {
     // Costo del operador externo CON MONEDA (29-ago): lo capturado es
     // {monto, moneda}; costo_externo_usd se DERIVA aquí (fuente única
     // resolverCostoExterno) con el TC de la cotización como respaldo del MXN.
+    // El TC de respaldo va NORMALIZADO (tc.util, 17-sep-2026): es el MISMO
+    // número que se persiste en `vuelo.tc_usd_mxn`, así `costo_externo_tc` y
+    // el `costo_externo_usd` derivado no quedan colgados de un TC crudo que
+    // el vuelo nunca guardó.
     const costoExterno = dto.es_externo
       ? resolverCostoExterno({
           monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
           moneda: dto.costo_externo_moneda,
-          tcVuelo: dto.tc_usd_mxn,
+          tcVuelo: normalizarTc(dto.tc_usd_mxn),
         })
       : { monto: null, moneda: null, tc: null, usd: null };
 
@@ -2336,15 +2349,15 @@ export class QuotesService {
               // Costo del externo CON MONEDA (29-ago): costo_externo_usd es
               // DERIVADO (fuente única resolverCostoExterno) y las 4
               // columnas viajan JUNTAS. null/0 = limpiar (las 4). TC de
-              // respaldo del MXN: el de esta revisión o el ya persistido.
+              // respaldo del MXN: el de esta revisión o el ya persistido,
+              // NORMALIZADO a 6 decimales (tc.util) para que sea el mismo
+              // número que queda en `vuelo.tc_usd_mxn`.
               const c = resolverCostoExterno({
                 monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
                 moneda: dto.costo_externo_moneda,
                 tcVuelo:
-                  dto.tc_usd_mxn ??
-                  (Number(current.tc_usd_mxn) > 0
-                    ? Number(current.tc_usd_mxn)
-                    : null),
+                  normalizarTc(dto.tc_usd_mxn) ??
+                  normalizarTc(current.tc_usd_mxn),
               });
               return {
                 costo_externo_usd: c.usd,
@@ -2778,8 +2791,7 @@ export class QuotesService {
       // ni la comisión del vendedor: passthrough CONGELADO de modo + tarifa +
       // monto efectivo persistidos (el ajuste rápido no cambia tramos, así
       // que las horas — y una comisión POR_HORA — quedan idénticas).
-      tc_usd_mxn:
-        Number(current.tc_usd_mxn) > 0 ? Number(current.tc_usd_mxn) : undefined,
+      tc_usd_mxn: normalizarTc(current.tc_usd_mxn) ?? undefined,
       comision_billpocket_pct:
         metaSnapshot?.comision_billpocket_pct ?? undefined,
       comision_vendedor_usd:
@@ -3937,7 +3949,8 @@ export class QuotesService {
         iva_pct: breakdown.iva.porcentaje,
         iva_usd: breakdown.iva.monto_usd,
         monto_total_usd: breakdown.totales.total_usd,
-        tc_usd_mxn: dto.tc_usd_mxn ?? null,
+        // Mismo TC de 6 decimales que la fila viva (tc.util::normalizarTc).
+        tc_usd_mxn: normalizarTc(dto.tc_usd_mxn),
         monto_total_mxn: breakdown.totales.total_mxn ?? null,
         viaticos_pernocta_usd: breakdown.totales.viaticos_pernocta_usd,
         extras_total_usd: breakdown.totales.extras_total_usd,

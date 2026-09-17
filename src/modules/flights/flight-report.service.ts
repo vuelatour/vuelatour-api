@@ -11,6 +11,7 @@ import {
 } from '../../common/categoria-gasto.util';
 import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   pagoVendedorUsd,
   particionIngresoVuelo,
@@ -660,7 +661,10 @@ export class FlightReportService {
         particion.total_usd > 0 ? particion.vuelatour_usd : null,
       // Regla B: reparto de la venta del avión entre aviones (solo multi).
       participacion_aviones: participacionAviones,
-      total_mxn: v.monto_total_mxn == null ? null : n(v.monto_total_mxn),
+      // Total en pesos por la FUENTE ÚNICA (17-sep-2026): se LEE el
+      // `monto_total_mxn` compuesto por el motor; un vuelo sin él (externos
+      // viejos) cae a usd × TC de 6 decimales en vez de quedar en blanco.
+      total_mxn: totalMxnDeVuelo(v),
       tc_usd_mxn: v.tc_usd_mxn == null ? null : n(v.tc_usd_mxn),
       // Comisión del vendedor: se muestra DESPUÉS del total (regla jul 2026:
       // el total del cliente YA la incluye — se le suma al precio). Regla A

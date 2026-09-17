@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { normalizarTc } from '../../common/tc.util';
 import { METODO_COBRO_LABELS } from '../../common/metodo-cobro.util';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import {
@@ -220,9 +221,9 @@ export class CobroReciboService {
     let tcUsado: number | null = null;
     let equivalenteUsd: number | null = null;
     if (sobre.moneda === 'MXN') {
-      const propio = Number(sobre.tc_usd_mxn);
-      const delGrupo = Number(cab.tc_usd_mxn);
-      tcUsado = propio > 0 ? propio : delGrupo > 0 ? delGrupo : null;
+      // TC a 6 decimales (fuente única tc.util): el recibo imprime el MISMO
+      // número con el que se convirtió — no una versión recortada.
+      tcUsado = normalizarTc(sobre.tc_usd_mxn) ?? normalizarTc(cab.tc_usd_mxn);
       if (tcUsado) equivalenteUsd = Number((monto / tcUsado).toFixed(2));
     }
 
@@ -382,9 +383,7 @@ export class CobroReciboService {
     let tcUsado: number | null = null;
     let equivalenteUsd: number | null = null;
     if (cobro.moneda === 'MXN') {
-      const propio = Number(cobro.tc_usd_mxn);
-      const delVuelo = Number(v.tc_usd_mxn);
-      tcUsado = propio > 0 ? propio : delVuelo > 0 ? delVuelo : null;
+      tcUsado = normalizarTc(cobro.tc_usd_mxn) ?? normalizarTc(v.tc_usd_mxn);
       if (tcUsado) equivalenteUsd = Number((monto / tcUsado).toFixed(2));
     }
 

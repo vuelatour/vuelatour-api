@@ -227,7 +227,7 @@ export class ArmarGrupoDto {
 
   @ApiPropertyOptional({
     description:
-      'TC MXN por USD del grupo (total MXN y respaldo de cobros MXN).',
+      'TC MXN por USD del grupo (total MXN y respaldo de cobros MXN). 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el TC que usó para convertir.',
   })
   @IsOptional()
   @Type(() => Number)

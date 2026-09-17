@@ -82,6 +82,7 @@ import type {
 } from './dto/cobros.dto';
 import { AirportsService } from '../airports/airports.service';
 import { cobrosEnUsd, type CobroLike } from '../../common/cobros-usd.util';
+import { normalizarTc } from '../../common/tc.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 import {
@@ -159,7 +160,7 @@ import {
 } from '../../common/busqueda-vuelo.util';
 
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, client_request_id, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
+  'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, monto_total_mxn, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, client_request_id, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
 
 /**
  * Elemento de `participacion_aviones` (campo ADITIVO del snapshot del vuelo
@@ -4832,7 +4833,7 @@ export class FlightsService {
       );
     }
     // TC pactado: sin él, un vuelo en USD no se puede facturar (CFDI en MXN).
-    const tc = Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null;
+    const tc = normalizarTc(dto.tc_usd_mxn);
     // Costo del externo CON MONEDA (29-ago): costo_externo_usd queda DERIVADO
     // (fuente única resolverCostoExterno; los lectores no cambian). TC del
     // MXN: el del diálogo, o el ya persistido en el vuelo de respaldo.
@@ -5041,11 +5042,13 @@ export class FlightsService {
         ? legs[legs.length - 1].destino_iata
         : dto.destino_iata.toUpperCase();
     // Costo del externo CON MONEDA (29-ago): usd DERIVADO (fuente única);
-    // el TC pactado del alta respalda un costo en MXN.
+    // el TC pactado del alta respalda un costo en MXN — NORMALIZADO a 6
+    // decimales (tc.util, 17-sep-2026) para que sea el MISMO número que se
+    // persiste abajo en `tc_usd_mxn` y compone `monto_total_mxn`.
     const costoExterno = resolverCostoExterno({
       monto: dto.costo_externo_monto ?? dto.costo_externo_usd,
       moneda: dto.costo_externo_moneda,
-      tcVuelo: dto.tc_usd_mxn,
+      tcVuelo: normalizarTc(dto.tc_usd_mxn),
     });
     const payload = {
       cliente_id: dto.cliente_id,
@@ -5078,11 +5081,15 @@ export class FlightsService {
       metodo_cobro: dto.metodo_cobro ?? 'TRANSFERENCIA',
       // TC pactado (opcional): sin MXN el CFDI no se puede emitir; también se
       // puede capturar después, al emitir la factura.
-      tc_usd_mxn: Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null,
-      monto_total_mxn:
-        Number(dto.tc_usd_mxn) > 0
-          ? Math.round(dto.monto_total_usd * Number(dto.tc_usd_mxn) * 100) / 100
-          : null,
+      tc_usd_mxn: normalizarTc(dto.tc_usd_mxn),
+      monto_total_mxn: (() => {
+        // Mismo TC de 6 decimales que se persiste: el total en pesos que se
+        // guarda aquí es el que los lectores leerán (totalMxnDeVuelo).
+        const tcAlta = normalizarTc(dto.tc_usd_mxn);
+        return tcAlta == null
+          ? null
+          : Math.round(dto.monto_total_usd * tcAlta * 100) / 100;
+      })(),
       fecha_vuelo: dto.fecha_vuelo?.toISOString(),
       fecha_confirmacion: new Date().toISOString(),
       notas: dto.notas,
@@ -10831,10 +10838,13 @@ export class FlightsService {
     // Un cobro MXN sin TC "desaparecía" de todos los balances. Si el capturista
     // no lo da, se toma el TC de la cotización para que el dinero siempre
     // convierta a USD (fuente canónica cobrosEnUsd).
+    // TC NORMALIZADO a 6 decimales (17-sep-2026, fuente única tc.util): lo que
+    // se guarda es lo que convierte — con 4 decimales, 100,000 MXN del vuelo
+    // #314 volvían 5,885.26 USD y dejaban un centavo de deuda fantasma.
     const tcCobro =
-      dto.tc_usd_mxn ??
-      (dto.moneda === 'MXN' && Number(vuelo.tc_usd_mxn) > 0
-        ? Number(vuelo.tc_usd_mxn)
+      normalizarTc(dto.tc_usd_mxn) ??
+      (dto.moneda === 'MXN'
+        ? (normalizarTc(vuelo.tc_usd_mxn) ?? undefined)
         : undefined);
     // Comisión bancaria: el banco deposita monto − comisión; sin registrarla,
     // el reporte no cuadraba con el estado de cuenta. `monto` sigue siendo el
@@ -11027,10 +11037,8 @@ export class FlightsService {
     // caería a sin_tc_* en NEGATIVO (ruido para el supervisor).
     const esMxn = (dto.moneda as string) === 'MXN';
     const tcReembolso =
-      dto.tc_usd_mxn ??
-      (esMxn && Number(vuelo.tc_usd_mxn) > 0
-        ? Number(vuelo.tc_usd_mxn)
-        : undefined);
+      normalizarTc(dto.tc_usd_mxn) ??
+      (esMxn ? (normalizarTc(vuelo.tc_usd_mxn) ?? undefined) : undefined);
     if (esMxn && !tcReembolso) {
       throw new BadRequestException(
         'Un reembolso en pesos necesita tipo de cambio: captura tc_usd_mxn (este vuelo no tiene TC de cotización de respaldo).',
@@ -11300,7 +11308,8 @@ export class FlightsService {
     if (dto.monto !== undefined) patch.monto = dto.monto;
     if (dto.moneda !== undefined) patch.moneda = dto.moneda;
     if (dto.metodo_cobro !== undefined) patch.metodo_cobro = dto.metodo_cobro;
-    if (dto.tc_usd_mxn !== undefined) patch.tc_usd_mxn = dto.tc_usd_mxn;
+    if (dto.tc_usd_mxn !== undefined)
+      patch.tc_usd_mxn = normalizarTc(dto.tc_usd_mxn);
     if (dto.referencia !== undefined) patch.referencia = dto.referencia;
     // `null` pasa IsOptional y salta el @ValidateIf: `.trim()` directo
     // tronaba. Vacío/null = quitar la cuenta.

@@ -85,7 +85,11 @@ export class ReviseGrupoDto {
   @MaxLength(80)
   metodo_pago_detalle?: string;
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'TC MXN por USD del grupo. 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el TC que usó para convertir.',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()

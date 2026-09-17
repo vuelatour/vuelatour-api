@@ -481,7 +481,7 @@ export class CubrirExternoDto {
   @ApiPropertyOptional({
     description:
       'TC MXN por USD pactado. Sin él, un vuelo cotizado en USD no se puede ' +
-      'facturar (el CFDI se emite en MXN).',
+      'facturar (el CFDI se emite en MXN). 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el TC que usó para convertir.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -626,7 +626,7 @@ export class CreateExternalFlightDto {
   @ApiPropertyOptional({
     description:
       'TC MXN por USD pactado. Sin él, el vuelo (cotizado en USD) no se ' +
-      'puede facturar hasta capturar el TC al emitir.',
+      'puede facturar hasta capturar el TC al emitir. 6 decimales (17-sep-2026): el API normaliza y persiste EXACTAMENTE el TC que usó para convertir.',
   })
   @IsOptional()
   @Type(() => Number)
