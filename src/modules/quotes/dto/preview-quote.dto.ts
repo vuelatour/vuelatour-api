@@ -4,6 +4,7 @@ import {
   IsArray,
   IsBoolean,
   IsDate,
+  IsIn,
   IsInt,
   IsISO8601,
   IsOptional,
@@ -17,6 +18,10 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { CalculateQuoteDto } from './calculate-quote.dto';
+import {
+  TRAMOS_BASE_ACEPTADOS,
+  type TramosBase,
+} from '../tramos-cotizados.util';
 
 /**
  * Presentación PDF de UN tramo del borrador, cruzada por `orden` (1..N de
@@ -134,6 +139,24 @@ export class PreviewQuoteDto extends CalculateQuoteDto {
   @ValidateNested({ each: true })
   @Type(() => EscalaPdfPreviewDto)
   escalas_pdf?: EscalaPdfPreviewDto[];
+
+  /**
+   * MISMA semántica que en `ReviseQuoteDto` (22-sep-2026, caso #326): la
+   * vista previa debe predecir lo que `revise()` guardaría, así que el ancla
+   * de tramos del panel viejo también aplica aquí. Con el campo presente
+   * (panel nuevo) se confía en el DTO y la hoja muestra exactamente lo que
+   * el operador tiene en el formulario.
+   */
+  @ApiPropertyOptional({
+    enum: TRAMOS_BASE_ACEPTADOS,
+    description:
+      'De dónde salieron los tramos del DTO (ver /quotes/:id/revise). ' +
+      'Ausente = el API ancla a lo cotizado los tramos que son eco de la ' +
+      'escala viva, igual que al guardar.',
+  })
+  @IsOptional()
+  @IsIn(TRAMOS_BASE_ACEPTADOS)
+  tramos_base?: TramosBase | 'EDITADO';
 
   @ApiPropertyOptional({
     description:

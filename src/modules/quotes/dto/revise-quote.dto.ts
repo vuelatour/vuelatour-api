@@ -15,8 +15,42 @@ import {
   ValidateIf,
 } from 'class-validator';
 import { CalculateQuoteDto } from './calculate-quote.dto';
+import {
+  TRAMOS_BASE_ACEPTADOS,
+  type TramosBase,
+} from '../tramos-cotizados.util';
 
 export class ReviseQuoteDto extends CalculateQuoteDto {
+  /**
+   * DE DÓNDE SALIERON LOS TRAMOS DEL DTO (22-sep-2026, caso #326 — campo
+   * ADITIVO y opcional: un panel viejo lo omite y todo sigue funcionando).
+   *
+   * - `COTIZADO` (lo que manda el panel nuevo al reabrir): los tramos se
+   *   hidrataron del `calculo_snapshot`, así que lo que DIFIERA del snapshot
+   *   es una edición deliberada de la oficina y sí se escribe en la escala
+   *   viva; lo que coincida se OMITE del UPDATE y la operación conserva lo
+   *   que capturó el piloto. `EDITADO` es alias de `COTIZADO`.
+   * - `OPERACION`: la oficina pulsó «Actualizar la cotización con la
+   *   operación» — el DTO trae los tramos VIVOS a propósito y se escriben
+   *   completos (acto deliberado, con su versión y su motivo).
+   * - AUSENTE (panel viejo / pestaña abierta): el API ANCLA a lo cotizado los
+   *   tramos cuyo pax/ferry/pernocta son un ECO de la escala viva, y lo dice
+   *   en `avisos[]`. Mismo espíritu que los anclajes de tarifa y horas.
+   */
+  @ApiPropertyOptional({
+    enum: TRAMOS_BASE_ACEPTADOS,
+    description:
+      'De dónde salieron los tramos del DTO. COTIZADO (default del panel ' +
+      'nuevo) = del calculo_snapshot: lo que difiera del snapshot es una ' +
+      'edición deliberada de la oficina. OPERACION = la oficina pulsó ' +
+      '«Actualizar la cotización con la operación». AUSENTE (panel viejo) = ' +
+      'el API ancla los tramos a lo cotizado cuando lo entrante es un eco de ' +
+      'la escala viva.',
+  })
+  @IsOptional()
+  @IsIn(TRAMOS_BASE_ACEPTADOS)
+  tramos_base?: TramosBase | 'EDITADO';
+
   // Tope 1000 (8-sep-2026, D1 del rediseño): el panel arma el motivo como
   // resumen automático del diff + chip humano + texto libre; 500 se quedaba
   // corto. Columna `text`, sin migración.

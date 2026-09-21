@@ -100,6 +100,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 6. **Cotización vs operación**: si `vuelo.itinerario_operativo = true`,
    `quotes.replaceEscalas` hace early-return (la cotización JAMÁS pisa las
    escalas del piloto). `replaceEscalas` es UPSERT: no destruye tacos.
+   **Desde el 22-sep-2026 tampoco pisa pax/ferry/pernocta/notas del piloto en
+   el modo NORMAL** (las omite del UPDATE cuando la oficina no las cambió
+   respecto a lo cotizado) y el precio se calcula con los tramos del
+   `calculo_snapshot`, no con la escala viva: ver invariante 24.
 
 7. **Conciliación**: auto-match solo `medio_pago IN (TARJETA_CORP,
    TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
@@ -1220,6 +1224,101 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       exactas al centésimo ⇒ no pueden ser un `round4` truncado ⇒ el único
       factor que pudo perderse es la tarifa. `tarifa.util.spec.ts` congela
       los 12 casos reales.
+
+24. **TRAMOS de la cotización: LA COTIZACIÓN ES INDEPENDIENTE DE LA OPERACIÓN
+    (22-sep-2026, cotización #326).** Extiende al ITINERARIO la regla rectora
+    del cliente del 12-sep (invariante 14, que ya la aplicaba al AVIÓN): «la
+    cotización no debe verse afectada por cambios en el vuelo operativo».
+    Fuente única `src/modules/quotes/tramos-cotizados.util.ts` (PURO, con
+    spec).
+    - **Síntoma (palabras del cliente)**: «antes de poner el tipo de cambio
+      esta en 3596 y despues de ponerlo, se cambia en automatico no se por
+      que». La #326 se cotizó `T1 CUN→PTU FERRY` + `T2 PTU→CUN 2 pax` ⇒ TUAS
+      $0 ⇒ **$3,596.00**; el PILOTO editó los DOS tramos desde la app (4 pax,
+      sin ferry — cambio OPERATIVO legítimo) y reabrir + teclear el T.C.
+      repreciaba con la operación (TUA CUN $25 × 4 + IVA) ⇒ **$3,712.00**.
+      9 de las 64 cotizaciones con `itinerario_operativo = false` divergían
+      así, y **8 versiones ya guardadas** se llevaron el pax del piloto al
+      precio con un motivo que solo decía «[TC —→16.97] Corrección».
+    - **QUÉ PRECIA vs QUÉ ES DE LA OPERACIÓN.** Precian y salen del
+      COTIZADO (`calculo_snapshot`): origen, destino, millas, `pasajeros`,
+      `es_ferry`, pernocta, `tipo_parada`. Viven en la operación y salen de
+      la escala VIVA del MISMO `orden` (solo si conserva la ruta cotizada):
+      `fecha_salida_plan`, `pdf_oculto`, `pdf_fecha`, notas del tramo y el
+      manifiesto capturado por el piloto.
+    - **LA RUTA PRECIA *Y* ES DE LA OPERACIÓN — los dos datos conviven**
+      (revisión adversaria 22-sep-2026, casos REALES #322 `CET→PTU` y #297
+      `PPS→CZM`, los dos con TACÓMETRO capturado, y #320 `CZM→CET` con
+      pernocta). `origen_iata`/`destino_iata` se editan desde el vuelo
+      (`PATCH /flights/legs/:legId`, `UpdateEscalaDto extends
+      PartialType(CreateEscalaDto)`), así que son operación tanto como el
+      pax. Mientras el formulario mandaba la ruta VIVA, escribirla era un
+      no-op; **hidratado del snapshot, guardar un ajuste de T.C.
+      reescribiría el aeropuerto de salida de un tramo QUE YA VOLÓ**
+      (bitácora, evento de Google, permisos de pista y manifiesto). Por eso
+      «deliberado» se mide contra lo COTIZADO, **nunca contra la escala
+      viva**: si el DTO trae la MISMA ruta que el snapshot, la oficina no la
+      tocó ⇒ `replaceEscalas` omite `origen_iata`, `destino_iata`,
+      `millas_nauticas`, `es_sobrevuelo` y la `fecha_salida_plan` heredada
+      del vuelo, conserva también pax/ferry/pernocta de ese tramo y manda
+      `avisoRutaDeLaOperacion` en ámbar. La oficina que SÍ edita la ruta en
+      el cotizador la escribe como siempre (tramo redefinido), y
+      «Actualizar la cotización con la operación» (`tramos_base:
+      'OPERACION'`) adopta la del vuelo. Mismo freno que el blanket de
+      avión, que tampoco toca lo que ya voló (invariante 1).
+    - **Cascada de «qué se cotizó»** (`tramosCotizados`):
+      `calculo_snapshot.ruta.escalas` → `calculo_snapshot.tramos` → `null`.
+      Las 227 filas de prod traen las dos; `null` = cotización sin snapshot
+      (reserva que se cotiza por primera vez) y ahí manda la operación, como
+      siempre.
+    - **La ESCRITURA no pisa lo del piloto** — la otra mitad, y NO es
+      opcional: `replaceEscalas` recibe los tramos cotizados ANTES de la
+      revisión y **OMITE del UPDATE** (`columnasQueConservaLaOperacion`) las
+      columnas cuyo valor entrante es IDÉNTICO al cotizado, con el tramo ya
+      existente y su ruta intacta. Mismo patrón que `pdf_oculto`/`pdf_fecha`
+      y `es_sobrevuelo`. Se ESCRIBE cuando el tramo es NUEVO, su ruta CAMBIÓ,
+      el valor DIFIERE del cotizado (edición deliberada de la oficina),
+      `tramos_base = 'OPERACION'`, el escritor es el GRUPO (`desdeGrupo`
+      manda su plantilla) o no hay snapshot (`create`). Sin esto, hidratar
+      del snapshot habría BORRADO los 4 pax del piloto al primer «Guardar».
+      `pernocta_costo_usd` viaja pegado a `requiere_pernocta`;
+      `pasajeros_nombres` se decide APARTE (el manifiesto sí se edita desde
+      el cotizador).
+    - **Campo ADITIVO `tramos_base`** (`ReviseQuoteDto`, `PreviewQuoteDto`;
+      `'COTIZADO' | 'OPERACION'`, `'EDITADO'` = alias de COTIZADO). **Deploy
+      API antes que panel** (`forbidNonWhitelisted` ⇒ 400 si el campo llega
+      a un API viejo). **NO se agrega a `CalculateQuoteDto`**: `/calculate`
+      no persiste nada.
+    - **ANCLA para un panel VIEJO** (sin `tramos_base`): `anclarTramoAlCotizado`
+      —dentro de `anclarRevisionAlPersistido`, junto a los ecos de tarifa y
+      horas— devuelve el tramo a lo cotizado cuando pax/ferry/pernocta son un
+      ECO de la escala VIVA (misma ruta y mismas millas, valor igual al vivo
+      y distinto al cotizado). Una edición REAL (un valor que no coincide con
+      la operación) jamás se ancla. **Nunca silencioso**: el ancla se declara
+      en `avisos[]`. No aplica con `desdeGrupo`, con `tramos_base` presente,
+      con `itinerario_operativo = true` ni sin snapshot.
+    - **`quickAdjust` precia SIEMPRE con lo COTIZADO** (antes solo en modo
+      operativo, caso #141): registrar un cobro o tocar un extra ya no
+      arrastra el pax del piloto al precio, y manda `tramos_base:'COTIZADO'`
+      a su `revise` interno. Respaldo a las escalas vivas solo sin snapshot.
+    - **Un tramo CANCELADO por la operación ya no revive a ciegas**: con la
+      ruta intacta, `replaceEscalas` omite `cancelada_at/_motivo/_por` y
+      manda un aviso ámbar en vez del push «tramos restaurados». Un tramo
+      SOBRANTE con tacómetro sigue conservándose y ahora además AVISA.
+    - **Capacidad**: el 409 `CAPACIDAD_EXCEDIDA` sigue mirando lo COTIZADO
+      (es el precio) y el pax de la OPERACIÓN pasa a `avisos[]` ámbar
+      (`avisosCapacidadOperacion`, best-effort) — «taller = aviso, no
+      candado» (11-sep): una cotización no queda imposible de guardar por un
+      dato operativo (caso #319: 5 y 6 pax capturados por el piloto).
+    - **`vuelo.pasajeros` pasa a ser el pax PACTADO** (`representativePax`
+      deriva del breakdown, que ya es el cotizado). El pax real por tramo se
+      sigue leyendo de la escala viva (bitácora, manifiestos, permisos).
+    - **Lo que NO cambia**: `create` escribe todo; el early-return por
+      `itinerario_operativo`; `escalasVisiblesPdf` (ya leía el snapshot y
+      solo toma ojito/fecha de la escala viva); `PATCH pdf-visibilidad`; la
+      app del piloto, la bitácora, los manifiestos y los reportes
+      operativos, que siguen leyendo la escala VIVA. **Sin migración**: todo
+      se resuelve con `calculo_snapshot` y con omitir columnas en un UPDATE.
 
 ## Convenciones NestJS
 

@@ -32,6 +32,21 @@ import {
   idAeronaveCotizada,
   resolverAeronaveDeRevision,
 } from './aeronave-revision.util';
+import {
+  anclarTramoAlCotizado,
+  avisoAnclaDeTramos,
+  avisoRutaDeLaOperacion,
+  avisoTramoCancelado,
+  avisoTramoConTacoConservado,
+  columnasQueConservaLaOperacion,
+  mismaRuta,
+  normalizarTramosBase,
+  rutaTxt,
+  tramosCotizados,
+  tramosCotizadosPorOrden,
+  type TramoCotizado,
+  type TramosBase,
+} from './tramos-cotizados.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { FlightsService } from '../flights/flights.service';
 import { EmailService } from '../notifications/email.service';
@@ -59,6 +74,7 @@ import {
 } from '../../common/tarifa.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
+  avisosCapacidad,
   conflictoCapacidad,
   excesoDeCapacidad,
   type EscalaCapacidadInput,
@@ -1210,6 +1226,58 @@ export class QuotesService {
     if (conflicto) throw new ConflictException(conflicto);
   }
 
+  /**
+   * CAPACIDAD DE LA OPERACIÓN — AVISO, no candado (22-sep-2026, caso #319).
+   *
+   * Desde que la cotización se precia con los tramos COTIZADOS, el pax que
+   * el piloto capturó ya no pasa por `assertCapacidadAeronave` (que valida el
+   * PRECIO). Este helper lo mira aparte sobre las escalas VIVAS comerciales y
+   * solo devuelve texto ámbar: coherente con «taller = aviso, no candado»
+   * (11-sep-2026) — una cotización no debe quedar imposible de guardar por un
+   * dato operativo, pero 6 pasajeros en un avión de 5 asientos no puede pasar
+   * callado. Best-effort: si la lectura falla, devuelve [] (un aviso es
+   * presentación y jamás tumba una revisión ya validada).
+   */
+  private async avisosCapacidadOperacion(
+    current: { escalas?: unknown },
+    aeronaveVueloId: string | null,
+    paxDefault: number,
+  ): Promise<string[]> {
+    try {
+      const vivas = (
+        Array.isArray(current.escalas) ? current.escalas : []
+      ) as Array<Record<string, unknown>>;
+      const escalas: EscalaCapacidadInput[] = vivas
+        .filter((e) => e.solo_operativa !== true && e.cancelada_at == null)
+        .map((e) => ({
+          orden: Number(e.orden) || 0,
+          origen_iata: (e.origen_iata as string | null) ?? null,
+          destino_iata: (e.destino_iata as string | null) ?? null,
+          aeronave_id: (e.aeronave_id as string | null) ?? null,
+          pasajeros: e.pasajeros == null ? null : Number(e.pasajeros),
+          es_ferry: e.es_ferry === true,
+        }));
+      const ids = new Set<string>();
+      for (const e of escalas) {
+        const a = e.aeronave_id ?? aeronaveVueloId;
+        if (a) ids.add(a);
+      }
+      if (ids.size === 0) return [];
+      const fichas = await this.fichaAsientos([...ids]);
+      return avisosCapacidad(
+        excesoDeCapacidad(escalas, fichas, {
+          aeronaveVueloId,
+          paxDefault,
+        }),
+      ).map(
+        (t) =>
+          `${t} Es el pax de la OPERACIÓN (el precio conserva el cotizado): revísalo en el vuelo.`,
+      );
+    } catch {
+      return [];
+    }
+  }
+
   /** Tramos a validar al CREAR: los cotizados y, si vienen, los operativos. */
   private escalasParaCapacidad(
     breakdown: Awaited<ReturnType<QuotesService['calculate']>>,
@@ -1343,12 +1411,15 @@ export class QuotesService {
    * ANCLAJES de una revisión a lo PERSISTIDO (extraído de revise(), 8-sep;
    * lo reutiliza la vista previa "sucia" de una cotización guardada para
    * que la hoja muestre lo que revise() guardaría). Muta el DTO.
+   *
+   * Devuelve los AVISOS ámbar que el anclaje generó (hoy solo el de tramos):
+   * un anclaje que mueve el total jamás es silencioso.
    */
   private anclarRevisionAlPersistido(
-    dto: CalculateQuoteDto,
+    dto: CalculateQuoteDto & { tramos_base?: TramosBase | 'EDITADO' },
     current: Record<string, unknown>,
     opts: { desdeGrupo?: boolean },
-  ): void {
+  ): string[] {
     // La tarifa preferencial se resuelve SIEMPRE con el cliente real del
     // vuelo (no se confía en el que mande el front al revisar).
     dto.cliente_id = (current.cliente_id as string | null) ?? undefined;
@@ -1473,6 +1544,60 @@ export class QuotesService {
         dto.tarifa_hora_override_usd = persistida;
       }
     }
+    return this.anclarTramosAlCotizado(dto, current, opts);
+  }
+
+  /**
+   * TRAMOS: la cotización es independiente de la operación (22-sep-2026,
+   * caso #326 — invariante 24). Ancla los tramos entrantes a lo COTIZADO
+   * cuando son un ECO de la escala VIVA. Muta `dto.escalas` y devuelve el
+   * aviso ámbar (o [] si no ancló nada).
+   *
+   * NO aplica cuando:
+   * - `opts.desdeGrupo`: el grupo manda su PLANTILLA a propósito (es el
+   *   escritor de la ruta de sus hijos).
+   * - `dto.tramos_base` viaja (panel nuevo): ahí el panel ya hidrató del
+   *   snapshot y declara si lo que manda es lo cotizado o la operación.
+   * - `itinerario_operativo = true`: la ruta comercial y la del piloto son
+   *   dos cosas distintas por diseño (`replaceEscalas` hace early-return) y
+   *   el panel ya rehidrata del snapshot en ese modo.
+   * - No hay snapshot con tramos (reserva que se cotiza por primera vez): no
+   *   hay nada pactado todavía.
+   */
+  private anclarTramosAlCotizado(
+    dto: CalculateQuoteDto & { tramos_base?: TramosBase | 'EDITADO' },
+    current: Record<string, unknown>,
+    opts: { desdeGrupo?: boolean },
+  ): string[] {
+    if (opts.desdeGrupo) return [];
+    if (normalizarTramosBase(dto.tramos_base) != null) return [];
+    if (current.itinerario_operativo === true) return [];
+    const legs = dto.escalas;
+    if (!Array.isArray(legs) || legs.length === 0) return [];
+    const cotizados = tramosCotizadosPorOrden(current.calculo_snapshot);
+    if (cotizados.size === 0) return [];
+    const vivaPorOrden = new Map<number, Record<string, unknown>>();
+    for (const e of (Array.isArray(current.escalas)
+      ? current.escalas
+      : []) as Array<Record<string, unknown>>) {
+      if (e.solo_operativa === true) continue;
+      const o = Number(e.orden);
+      if (Number.isFinite(o) && !vivaPorOrden.has(o)) vivaPorOrden.set(o, e);
+    }
+    const anclados: Array<{ orden: number; campos: string[] }> = [];
+    dto.escalas = legs.map((l, i) => {
+      const orden = i + 1;
+      const r = anclarTramoAlCotizado(
+        l,
+        cotizados.get(orden),
+        vivaPorOrden.get(orden),
+        { paxGlobal: dto.pasajeros },
+      );
+      if (r.anclado.length > 0) anclados.push({ orden, campos: r.anclado });
+      return r.leg;
+    });
+    const aviso = avisoAnclaDeTramos(anclados);
+    return aviso ? [aviso] : [];
   }
 
   /**
@@ -1770,7 +1895,16 @@ export class QuotesService {
       (current?.fecha_traslado_final as string | null | undefined) ??
       null;
 
-    // ---- Escalas en memoria (mismo resultado que dejaría replaceEscalas) ----
+    // ---- Escalas en memoria (lo que dejaría replaceEscalas, para el PDF) ----
+    // OJO (22-sep-2026, invariante 24): desde que `replaceEscalas` OMITE del
+    // UPDATE lo que la operación cambió (pax, ferry, pernocta, notas y —si la
+    // oficina no la tocó— la RUTA), estas filas ya NO son byte a byte lo que
+    // quedará en `escala`: aquí se pinta lo COTIZADO. Es a propósito y no
+    // afecta al papel — `escalasVisiblesPdf` arma el itinerario del snapshot y
+    // de la escala viva solo toma `pdf_oculto`, `pdf_fecha` y la fecha de
+    // salida—, pero un consumidor NUEVO que lea `pasajeros`/`origen_iata` de
+    // aquí creyendo que es la operación se equivocaría: esos dos datos viven
+    // separados desde el caso #326.
     const legs = breakdown.ruta.escalas ?? [];
     const pdfPorOrden = new Map(
       (dto.escalas_pdf ?? []).map((e) => [e.orden, e] as const),
@@ -2324,7 +2458,13 @@ export class QuotesService {
 
     // Anclajes a lo persistido (cliente, comisión, es_externo, extras de
     // GRUPO, pactado): fuente única compartida con la vista previa.
-    this.anclarRevisionAlPersistido(dto, current, opts);
+    const avisosAncla = this.anclarRevisionAlPersistido(dto, current, opts);
+    // TRAMOS COTIZADOS del snapshot VIGENTE (22-sep-2026, caso #326): se leen
+    // ANTES de recalcular (el UPDATE de abajo reemplaza `calculo_snapshot`) y
+    // son la referencia de "qué se cotizó antes" con la que `replaceEscalas`
+    // decide qué columnas NO pisar de la escala viva.
+    const tramosBase = normalizarTramosBase(dto.tramos_base);
+    const cotizadosPrevios = tramosCotizadosPorOrden(current.calculo_snapshot);
     const breakdown = await this.calculate(dto);
     const reprPax = this.representativePax(breakdown, dto.pasajeros);
     const newVersion = current.cotizacion_version + 1;
@@ -2426,7 +2566,7 @@ export class QuotesService {
      * y los tramos que el cambio de avión NO pudo mover porque ya volaron.
      * El panel los pinta; nada de esto tumba la revisión.
      */
-    const avisos: string[] = [...preAsignacion.avisos];
+    const avisos: string[] = [...preAsignacion.avisos, ...avisosAncla];
     // CAPACIDAD (4-sep-2026): vuelo PROPIO — pax por tramo ≤ asientos del
     // avión que lo vuela (avión del tramo persistido con herencia del
     // OPERATIVO que quedará en vuelo.aeronave_id). 409 CAPACIDAD_EXCEDIDA
@@ -2436,6 +2576,18 @@ export class QuotesService {
         this.escalasParaCapacidadRevise(breakdown, current),
         aeronaveOperativa,
         reprPax,
+      );
+      // …y el pax que lleva HOY la OPERACIÓN (que desde el 22-sep-2026 ya no
+      // entra al precio) se revisa aparte y solo AVISA — «taller = aviso, no
+      // candado» (11-sep-2026): una cotización no puede quedar imposible de
+      // guardar por un dato operativo, pero que 6 personas suban a un avión
+      // de 5 asientos no puede pasar callado (caso #319).
+      avisos.push(
+        ...(await this.avisosCapacidadOperacion(
+          current,
+          aeronaveOperativa,
+          reprPax,
+        )),
       );
     }
 
@@ -2559,20 +2711,32 @@ export class QuotesService {
     }
     const pernoctasAntes = await this.pernoctaDestinos(vueloId);
     try {
-      await this.replaceEscalas(
-        vueloId,
-        breakdown.ruta.escalas ?? null,
-        userId,
-        {
-          inicio:
-            dto.fecha_vuelo?.toISOString() ??
-            (current.fecha_vuelo as string | null) ??
-            null,
-          fin:
-            dto.fecha_traslado_final?.toISOString() ??
-            (current.fecha_traslado_final as string | null) ??
-            null,
-        },
+      // `cotizados` = qué se cotizó ANTES (snapshot vigente): con eso el
+      // UPSERT omite las columnas que la oficina NO cambió y la escala viva
+      // conserva lo que capturó el piloto (caso #326). `confiarEnDto` = la
+      // oficina adoptó la operación a propósito, o el escritor es el GRUPO
+      // (manda su plantilla: ahí la ruta de los hijos la define él).
+      avisos.push(
+        ...(await this.replaceEscalas(
+          vueloId,
+          breakdown.ruta.escalas ?? null,
+          userId,
+          {
+            inicio:
+              dto.fecha_vuelo?.toISOString() ??
+              (current.fecha_vuelo as string | null) ??
+              null,
+            fin:
+              dto.fecha_traslado_final?.toISOString() ??
+              (current.fecha_traslado_final as string | null) ??
+              null,
+          },
+          {
+            cotizados: cotizadosPrevios.size > 0 ? cotizadosPrevios : null,
+            confiarEnDto:
+              tramosBase === 'OPERACION' || opts.desdeGrupo === true,
+          },
+        )),
       );
       // CAMBIO DE AVIÓN DESDE EL COTIZADOR (11-sep-2026): el vuelo ya quedó
       // con el avión nuevo; sus tramos VIVOS lo siguen con el blanket
@@ -2801,26 +2965,33 @@ export class QuotesService {
         'El vuelo no tiene aeronave asignada; usa "Revisar" para cotizar completo.',
       );
     }
-    // TRAMOS PARA PRECIAR: normalmente los del vuelo (== los cotizados). Con
-    // itinerario OPERATIVO las escalas son la RUTA DEL PILOTO (otra base y
-    // usualmente SIN millas): re-preciar con ellas colapsaba el tiempo al
-    // mínimo de 1 hr (caso #141, 18-ago-2026: 2.9065 hr → 1 hr y el total
-    // cayó de $6,300 a $3,249). La ruta COMERCIAL congelada vive en
-    // snapshot.ruta.escalas — con itinerario operativo se precia con ELLA;
-    // replaceEscalas hace early-return en ese modo, así que los tramos del
+    // TRAMOS PARA PRECIAR: SIEMPRE los COTIZADOS (22-sep-2026, caso #326).
+    //
+    // Antes solo el modo OPERATIVO se preciaba con el snapshot (caso #141,
+    // 18-ago-2026: la ruta del piloto, sin millas, colapsaba el tiempo al
+    // mínimo de 1 hr y el total caía de $6,300 a $3,249). En el modo normal
+    // se leían las escalas VIVAS, y un cambio del piloto (pax, ferry) movía
+    // el precio de un ajuste rápido de extras sin que nadie lo pidiera — el
+    // mismo bug de la #326 por la otra puerta. La ruta COMERCIAL congelada
+    // vive en el snapshot y es la única fuente de "con qué se pactó".
+    // Respaldo a las escalas vivas SOLO sin snapshot (cotización legada):
+    // ahí no hay nada cotizado que leer. Con `itinerario_operativo` da igual
+    // por partida doble: `replaceEscalas` hace early-return y los tramos del
     // piloto no se tocan.
-    const esOperativo =
-      (current as { itinerario_operativo?: boolean }).itinerario_operativo ===
-      true;
-    const rutaCotizada = (
-      snapshot as {
-        ruta?: { escalas?: Array<Record<string, unknown>> };
-      } | null
-    )?.ruta?.escalas;
-    const escalas: Array<Record<string, unknown>> =
-      esOperativo && (rutaCotizada?.length ?? 0) > 0
-        ? rutaCotizada!
-        : (current.escalas ?? []);
+    const cotizados = tramosCotizados(snapshot);
+    const escalas: Array<Record<string, unknown>> = (cotizados ??
+      current.escalas ??
+      []) as unknown as Array<Record<string, unknown>>;
+    // Lo que NO precia y vive en la operación (ojito del PDF, hora de salida
+    // planeada) se toma de la escala VIVA del MISMO orden mientras conserve
+    // la ruta cotizada: el ajuste rápido no gestiona esos campos y no debe
+    // normalizarlos (bug 28-ago: destapaba tramos ocultos del PDF).
+    const vivasPorOrden = new Map<number, Record<string, unknown>>();
+    for (const e of (current.escalas ?? []) as Array<Record<string, unknown>>) {
+      if (e.solo_operativa === true) continue;
+      const o = Number(e.orden);
+      if (Number.isFinite(o) && !vivasPorOrden.has(o)) vivasPorOrden.set(o, e);
+    }
     if (escalas.length === 0) {
       throw new BadRequestException(
         'La cotización no tiene tramos registrados; usa "Revisar".',
@@ -2868,40 +3039,52 @@ export class QuotesService {
       // `conservarAvionOperativo` y jamás reasigna el vuelo (caso #80).
       aeronave_id: (snapshot?.aeronave?.id ?? current.aeronave_id) as string,
       tipo: TipoVuelo.MULTIESCALA,
-      // Tramos tal como están persistidos. Si cambia el pax global, los tramos
-      // que usaban el global anterior lo heredan (los personalizados se quedan).
-      escalas: escalas.map((e) => ({
-        origen_iata: e.origen_iata as string,
-        destino_iata: e.destino_iata as string,
-        millas_nauticas: Number(e.millas_nauticas) || 0,
-        pasajeros:
-          e.es_ferry === true
-            ? 0
-            : dto.pasajeros !== undefined && Number(e.pasajeros) === oldPax
-              ? undefined
-              : ((e.pasajeros as number | null) ?? undefined),
-        // Preserva el manifiesto por tramo en el ajuste rápido.
-        pasajeros_nombres:
-          e.es_ferry === true
-            ? []
-            : ((e.pasajeros_nombres as string[] | null) ?? undefined),
-        es_ferry: e.es_ferry === true,
-        requiere_pernocta: e.requiere_pernocta === true,
-        pernocta_costo_usd:
-          e.pernocta_costo_usd != null
-            ? Number(e.pernocta_costo_usd)
+      // Tramos COTIZADOS tal cual. Si cambia el pax global, los tramos que
+      // usaban el global anterior lo heredan (los personalizados se quedan).
+      escalas: escalas.map((e, i) => {
+        // Presentación y hora planeada: de la escala VIVA del mismo orden
+        // mientras conserve la ruta cotizada (no precian y son de operación).
+        const viva = vivasPorOrden.get(i + 1);
+        const conViva = viva != null && mismaRuta(viva, e);
+        const pdfOculto = conViva ? viva.pdf_oculto : e.pdf_oculto;
+        const fechaPlan = conViva ? viva.fecha_salida_plan : null;
+        return {
+          origen_iata: e.origen_iata as string,
+          destino_iata: e.destino_iata as string,
+          millas_nauticas: Number(e.millas_nauticas) || 0,
+          pasajeros:
+            e.es_ferry === true
+              ? 0
+              : dto.pasajeros !== undefined && Number(e.pasajeros) === oldPax
+                ? undefined
+                : ((e.pasajeros as number | null) ?? undefined),
+          // Preserva el manifiesto por tramo en el ajuste rápido.
+          pasajeros_nombres:
+            e.es_ferry === true
+              ? []
+              : ((e.pasajeros_nombres as string[] | null) ?? undefined),
+          es_ferry: e.es_ferry === true,
+          requiere_pernocta: e.requiere_pernocta === true,
+          pernocta_costo_usd:
+            e.pernocta_costo_usd != null
+              ? Number(e.pernocta_costo_usd)
+              : undefined,
+          tipo_parada: (e.tipo_parada as 'NORMAL' | 'SERVICIO') ?? 'NORMAL',
+          servicio_notas: (e.servicio_notas as string | null) ?? undefined,
+          notas: (e.notas as string | null) ?? undefined,
+          // Preservar lo que el ajuste rápido NO gestiona: sin esto el UPDATE
+          // de replaceEscalas lo normalizaba a false y destapaba tramos
+          // ocultos del PDF (bug 28-ago).
+          pdf_oculto: pdfOculto === true,
+          fecha_salida_plan: fechaPlan
+            ? new Date(fechaPlan as string)
             : undefined,
-        tipo_parada: (e.tipo_parada as 'NORMAL' | 'SERVICIO') ?? 'NORMAL',
-        servicio_notas: (e.servicio_notas as string | null) ?? undefined,
-        notas: (e.notas as string | null) ?? undefined,
-        // Preservar lo que el ajuste rápido NO gestiona: sin esto el UPDATE
-        // de replaceEscalas lo normalizaba a false y destapaba tramos
-        // ocultos del PDF (bug 28-ago).
-        pdf_oculto: e.pdf_oculto === true,
-        fecha_salida_plan: e.fecha_salida_plan
-          ? new Date(e.fecha_salida_plan as string)
-          : undefined,
-      })),
+        };
+      }),
+      // El ajuste rápido reenvía LO COTIZADO: `replaceEscalas` compara contra
+      // el snapshot y omite del UPDATE lo que no cambió, así que lo que el
+      // piloto capturó (pax, ferry, notas del tramo) se queda intacto.
+      tramos_base: 'COTIZADO' as const,
       tipo_tarifa: current.tarifa_tipo as TipoTarifa,
       pasajeros: newPax,
       pase_abordar: current.pase_abordar === true,
@@ -3812,12 +3995,39 @@ export class QuotesService {
     }
   }
 
+  /**
+   * UPSERT por `orden` de los tramos COMERCIALES de la cotización.
+   *
+   * LA COTIZACIÓN NO PISA LO QUE CAPTURÓ EL PILOTO (22-sep-2026, caso #326 —
+   * invariante 24): con `opts.cotizados` (los tramos del snapshot VIGENTE,
+   * que `revise` pasa siempre), las columnas que la OPERACIÓN también puede
+   * tocar (`pasajeros`, `pasajeros_nombres`, `es_ferry`, pernocta, notas,
+   * tipo de parada) se OMITEN del UPDATE cuando lo entrante es IDÉNTICO a lo
+   * cotizado antes y el tramo conserva su ruta: si la oficina no lo cambió,
+   * la escala viva se queda como está. Mismo patrón que `pdf_oculto`/
+   * `pdf_fecha` (solo se escriben cuando viajan) y `es_sobrevuelo` (solo en
+   * tramo nuevo o con ruta cambiada).
+   *
+   * Se ESCRIBE todo cuando: el tramo es NUEVO (INSERT), su ruta CAMBIÓ, el
+   * valor entrante DIFIERE del cotizado (edición deliberada de la oficina),
+   * `opts.confiarEnDto` (la oficina pulsó «Actualizar la cotización con la
+   * operación», o el escritor es el GRUPO con su plantilla) o no hay
+   * snapshot con tramos (`create`: no hay operación previa que respetar).
+   *
+   * Devuelve los AVISOS ámbar que la escritura dejó pendientes (tramo que
+   * sigue CANCELADO en la operación, tramo con tacómetro que ya no está en
+   * la cotización). Campo aditivo de `revise.avisos[]`: nada de esto bloquea.
+   */
   private async replaceEscalas(
     vueloId: string,
     escalas: ResolvedLeg[] | null,
     userId: string,
     fechas?: { inicio?: string | null; fin?: string | null },
-  ): Promise<void> {
+    opts: {
+      cotizados?: Map<number, TramoCotizado> | null;
+      confiarEnDto?: boolean;
+    } = {},
+  ): Promise<string[]> {
     // Vuelo con itinerario OPERATIVO capturado (Nueva cotización · paso 1):
     // TODAS sus escalas son la ruta real del piloto; la ruta comercial de la
     // cotización solo sirve para el precio y NO gestiona escalas. OJO: si la
@@ -3833,7 +4043,9 @@ export class QuotesService {
       throw new Error(
         `Failed to read itinerario_operativo: ${flagErr.message}`,
       );
-    if (vueloFlag?.itinerario_operativo === true) return;
+    if (vueloFlag?.itinerario_operativo === true) return [];
+    /** Avisos ámbar de la escritura (no bloquean; viajan en revise.avisos). */
+    const avisos: string[] = [];
     // Vuelo CANCELADO (decisión 1-sep-2026): la revisión de una cancelada es
     // financiera/documental — los tramos NO reviven (conservan su
     // cancelada_at/motivo/por: evidencias por tramo y vuelos combinados con
@@ -3931,8 +4143,65 @@ export class QuotesService {
         String(actual.destino_iata ?? '').toUpperCase() !== destinoUp;
       if (rutaCambio) planFields.es_sobrevuelo = origenUp === destinoUp;
       if (actual) {
-        // No pisar con null una fecha ya planeada/asignada al tramo.
-        if (fechaPlan != null || actual.fecha_salida_plan == null) {
+        // LA COTIZACIÓN NO PISA LA OPERACIÓN (22-sep-2026, caso #326): el
+        // tramo ya existía, la cotización no lo editó deliberadamente ⇒ lo
+        // que el piloto capturó se queda. Sin `opts.cotizados` (create,
+        // cotización sin snapshot) el comportamiento es el de siempre: se
+        // escribe todo.
+        //
+        // «Deliberado» se mide contra lo COTIZADO, no contra la escala VIVA
+        // (misma regla que el AVIÓN, invariante 14 R2): con el formulario
+        // hidratado del snapshot, lo que llega IGUAL a lo cotizado es
+        // "nadie tocó esto", venga como venga la operación.
+        const cotizado = opts.cotizados?.get(orden) ?? null;
+        const oficinaCambioRuta =
+          !!cotizado &&
+          !mismaRuta(cotizado, {
+            origen_iata: origenUp,
+            destino_iata: destinoUp,
+          });
+        const conservaOperacion =
+          !!cotizado && !oficinaCambioRuta && opts.confiarEnDto !== true;
+        // La RUTA también es de la operación (revisión adversaria
+        // 22-sep-2026, casos REALES #322 CET→PTU y #297 PPS→CZM, los dos con
+        // TACÓMETRO capturado, y #320 CZM→CET con pernocta): el piloto y la
+        // oficina la editan por `PATCH /flights/legs/:legId`, y hasta hoy el
+        // formulario mandaba la ruta VIVA, así que guardar era un no-op. Con
+        // el formulario hidratado del snapshot, guardar un cambio de T.C.
+        // reescribiría `origen_iata` de un tramo QUE YA VOLÓ — falsificando
+        // bitácora, calendario y permisos. Si la oficina no movió la ruta en
+        // la cotización, el vuelo conserva la suya (y sus millas, que le
+        // pertenecen) y se AVISA. Mismo freno que el blanket de avión, que
+        // tampoco toca lo que ya voló (invariante 1).
+        const operacionMovioRuta = conservaOperacion && rutaCambio;
+        if (conservaOperacion) {
+          for (const col of columnasQueConservaLaOperacion(e, cotizado)) {
+            delete planFields[col];
+          }
+        }
+        if (operacionMovioRuta) {
+          delete planFields.origen_iata;
+          delete planFields.destino_iata;
+          delete planFields.millas_nauticas;
+          delete planFields.es_sobrevuelo;
+          avisos.push(
+            avisoRutaDeLaOperacion(
+              orden,
+              rutaTxt(e),
+              `${String(actual.origen_iata ?? '?').toUpperCase()} → ${String(actual.destino_iata ?? '?').toUpperCase()}`,
+              tieneTaco(actual),
+            ),
+          );
+        }
+        // No pisar con null una fecha ya planeada/asignada al tramo. Y si la
+        // ruta es de la OPERACIÓN (arriba), tampoco pisarla con la fecha del
+        // VUELO: `fechaPlan` de los tramos extremos cae a `fechas.inicio/fin`
+        // cuando el DTO no trae la suya, y esa hora pertenece a un tramo que
+        // ya no es el que vuela. Una fecha EXPLÍCITA de la oficina sí manda.
+        if (
+          (fechaPlan != null || actual.fecha_salida_plan == null) &&
+          !(operacionMovioRuta && e.fecha_salida_plan == null)
+        ) {
           planFields.fecha_salida_plan = fechaPlan;
         }
         // Re-cotizar redefine la ruta: si el tramo estaba CANCELADO
@@ -3941,15 +4210,23 @@ export class QuotesService {
         // sería contradictorio. EXCEPCIÓN (1-sep-2026): con el VUELO
         // CANCELADO nada revive — se omiten las columnas y el UPDATE
         // conserva la cancelación del tramo tal cual.
+        // EXCEPCIÓN 2 (22-sep-2026): tampoco revive un tramo que la
+        // OPERACIÓN canceló mientras la cotización sigue diciendo lo mismo
+        // de siempre — un ajuste de T.C. no resucita el ferry que
+        // `combinarVuelos` canceló. Se avisa en ámbar y la oficina decide.
         if (!vueloCancelado) {
-          if (actual.cancelada_at != null) {
-            cambios.revividos.push(
-              `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
-            );
+          if (conservaOperacion && actual.cancelada_at != null) {
+            avisos.push(avisoTramoCancelado(orden, rutaTxt(e)));
+          } else {
+            if (actual.cancelada_at != null) {
+              cambios.revividos.push(
+                `${e.origen_iata.toUpperCase()} → ${e.destino_iata.toUpperCase()}`,
+              );
+            }
+            planFields.cancelada_at = null;
+            planFields.cancelada_motivo = null;
+            planFields.cancelada_por = null;
           }
-          planFields.cancelada_at = null;
-          planFields.cancelada_motivo = null;
-          planFields.cancelada_por = null;
         }
         const { error } = await this.supabase.service
           .from('escala')
@@ -3982,6 +4259,9 @@ export class QuotesService {
         this.logger.warn(
           `Vuelo ${vueloId}: escala orden ${s.orden} tiene tacómetro capturado; se conserva aunque el plan cotizado ya no la incluye.`,
         );
+        // El operador también debe enterarse (antes era solo un log): un
+        // tramo que ya voló y que la cotización no cobra es dinero perdido.
+        avisos.push(avisoTramoConTacoConservado(Number(s.orden), rutaTxt(s)));
         continue;
       }
       // El evento de Google del tramo se borra ANTES de perder su id
@@ -4049,6 +4329,7 @@ export class QuotesService {
         );
       }
     }
+    return avisos;
   }
 
   private async appendVersionHistory(
