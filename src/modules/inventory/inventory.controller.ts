@@ -20,6 +20,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateInventarioItemDto,
   CreateMovimientoDto,
+  EliminarMovimientoDto,
   EmpaqueInputDto,
   ImportarInventarioDto,
   ListInventarioQuery,
@@ -297,6 +298,48 @@ export class InventoryController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.inventory.createMovimiento(id, dto, c.userId);
+  }
+
+  // ===== Baja de un movimiento de cardex (21-sep-2026) =====
+  // Literales ANTES de las rutas con ':movId' a secas (convención del repo).
+
+  @Get('items/:id/movimientos-eliminados')
+  @Roles(...OFICINA)
+  @ApiOperation({
+    summary:
+      'Historial de movimientos de cardex ELIMINADOS del ítem: qué se borró, QUIÉN, CUÁNDO y con qué MOTIVO (desc). [] si la migración 20260921000001 aún no está aplicada.',
+  })
+  listMovimientosEliminados(@Param('id', ParseUUIDPipe) id: string) {
+    return this.inventory.listMovimientosEliminados(id);
+  }
+
+  @Get('items/:id/movimientos/:movId/eliminacion')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'VISTA PREVIA de la baja (solo lee): qué se eliminaría, cómo queda la existencia y qué gastos de bodega se van con el movimiento — o por qué NO se puede (code: MOVIMIENTO_DE_COMPRA, TIPO_NO_SOPORTADO, GASTO_BLOQUEADO, STOCK_NEGATIVO, CAMBIA_COSTO_FIFO) y qué eliminar primero.',
+  })
+  previewEliminacionMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('movId', ParseUUIDPipe) movId: string,
+  ) {
+    return this.inventory.previewEliminacionMovimiento(id, movId);
+  }
+
+  @Delete('items/:id/movimientos/:movId')
+  @Roles(Rol.ADMIN)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Elimina un movimiento de cardex con JUSTIFICACIÓN (motivo 10-500) — SOLO ADMIN. Borra también los gastos REFACCION/BODEGA que generó, en UNA transacción, y deja bitácora (quién, cuándo, motivo, snapshots). 409 con code estable si algún candado aplica; 503 si falta la migración 20260921000001.',
+  })
+  eliminarMovimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('movId', ParseUUIDPipe) movId: string,
+    @Body() dto: EliminarMovimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.eliminarMovimiento(id, movId, dto.motivo, c.userId);
   }
 
   @Patch('items/:id/movimientos/:movId')

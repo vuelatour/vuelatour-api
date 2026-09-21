@@ -266,6 +266,56 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    No duplicar ese costo en otro lado. Caso aceites 28-ago-2026: una entrada
    en pesos capturada como USD multiplicó ×17 el costo del avión.
 
+   **BAJA de un movimiento de cardex (21-sep-2026, pedido del cliente: «que
+   al momento de eliminarlos pida justificacion y sepamos quien lo hizo»).**
+   El cardex dejó de ser append-only, pero SOLO por esta puerta:
+   - `DELETE /v1/inventory/items/:id/movimientos/:movId` es **SOLO ADMIN** y
+     exige `motivo` (10-500, trim). El texto va a
+     `inventario_movimiento_eliminado` (tabla nueva, migración
+     `20260921000001`): fila COMPLETA del movimiento, filas completas de los
+     gastos que se fueron con él, motivo, quién y cuándo. Sin FK a propósito
+     (patrón `vuelo_eliminado` / `gasto_bitacora`).
+   - El borrado lo hace **la función de BD** `inventario_eliminar_movimiento`
+     (auditoría + gastos BODEGA + movimiento en UNA transacción). El API
+     **jamás** borra por pasos sueltos: sin la función responde **503
+     `MIGRACION_PENDIENTE`**. Un movimiento sin su gasto —o al revés— infla o
+     desinfla el costo del avión en silencio.
+   - Candados con `code` estable (409): `MOVIMIENTO_DE_COMPRA` (se corrige
+     desde Compras), `GASTO_BLOQUEADO` (gasto conciliado, con cargo bancario
+     ligado, facturado, **con `compra_id`, con una `factura_recibida` que lo
+     apunte** —esas tres FK son `on delete set null`: borrar el gasto las
+     dejaría apuntando a nada EN SILENCIO— o que ya no es REFACCION/BODEGA),
+     `TIPO_NO_SOPORTADO` (DEVOLUCION/AJUSTE: se corrigen con un movimiento
+     contrario) y los dos NUMÉRICOS de
+     `src/modules/inventory/eliminar-movimiento.util.ts#evaluarEliminacion`
+     (helper PURO con spec sobre el caso real del 29-ago):
+     `STOCK_NEGATIVO` y `CAMBIA_COSTO_FIFO`. **Solo se elimina si en NINGÚN
+     punto de la cronología la existencia queda negativa Y el costo FIFO de
+     TODAS las demás salidas queda idéntico (tolerancia 0.005)** — el costo
+     de una salida ya viajó al gasto de un avión y no se mueve nunca. El
+     mensaje dice SIEMPRE qué eliminar primero (se borra de lo más nuevo a
+     lo más viejo).
+     **El costo se compara EN LAS DOS MONEDAS** (revisión adversaria
+     21-sep-2026): `walkCardex` expone `costoUsdFifo` (ADITIVO) además de
+     `costoMxnFifo`, y `evaluarEliminacion` exige que las dos queden iguales.
+     Motivo: para una capa comprada en USD SIN TC —**66 de los 75
+     movimientos de producción**, la carga VTF-INV-001 completada con el
+     PATCH de costo— el costo en pesos NO es expresable y sale `null`; solo
+     con los pesos, «null vs null» se leía como «no cambió» y la baja pasaba
+     aunque el costo real de la salida saltara de $46.06 a $9,541.25 USD.
+     Por lo mismo el mensaje cita la moneda que SÍ se puede leer (pesos si
+     los hay, si no USD): jamás «$0.00 MXN» sobre capas sin TC.
+     La vista previa repite EXACTAMENTE los candados de dinero de la función
+     de BD: si divergen, el diálogo diría «se puede» y el DELETE contestaría
+     409.
+   - `GET …/movimientos/:movId/eliminacion` (ADMIN) es la vista previa (solo
+     lee, funciona aunque falte la migración) y
+     `GET …/items/:id/movimientos-eliminados` (OFICINA) el historial (`[]`
+     si falta la migración).
+   - `createMovimiento` responde **409 `MOVIMIENTO_ELIMINADO`** si llega un
+     `client_request_id` que está en la bitácora: el reintento del outbox de
+     la app no resucita lo que la oficina eliminó con justificación.
+
 9. **Candados de rol**: el PILOTO solo registra cobros con método ∈
    {EFECTIVO, DOLARES, BILLPOCKET, HSBC_LINK} (se valida el del vuelo Y el del
    DTO); piloto/mecánico solo editan/borran SU gasto y SOLO el mismo día
@@ -1590,6 +1640,21 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   o SIN la migración: ante `42703` (select) o `PGRST204` (cuerpo del
   insert/update) se degrada una vez, avisa en el log y sigue con el PRIMER
   nombre del piloto. Orden: migración → API → `POST /v1/calendar/resync`.
+- **PENDIENTE DE APLICAR (21-sep-2026) — REQUIERE DRY-RUN**:
+  `20260921000001_inventario_movimiento_eliminado.sql` (baja de movimientos
+  de cardex con justificación). Aditiva en datos —tabla nueva
+  `inventario_movimiento_eliminado` + función
+  `inventario_eliminar_movimiento(uuid, uuid, text, uuid)`— pero la función
+  **BORRA filas y dispara `trg_gasto_bitacora`**, así que va en seco primero:
+  el guion completo (savepoints por candado + camino feliz + conteos
+  antes/después + la fila de auditoría, todo dentro de `begin … rollback`)
+  está en la CABECERA del archivo. `tipo` es ENUM
+  (`tipo_movimiento_inventario`) y `categoria`/`medio_pago`/`moneda` del
+  gasto también: **todo se compara `::text`**. El API 0.0.18 corre CON o SIN
+  la migración: la vista previa y el historial funcionan igual (el historial
+  devuelve `[]`) y la baja responde **503 `MIGRACION_PENDIENTE`** hasta que
+  la función exista — nunca un borrado a medias. Tras aplicar: `get_advisors`
+  (la tabla queda con RLS y sin políticas, solo service key).
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

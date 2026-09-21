@@ -4,7 +4,7 @@ import {
   OmitType,
   PartialType,
 } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
@@ -22,6 +22,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateIf,
   ValidateNested,
 } from 'class-validator';
@@ -572,6 +573,30 @@ export class UpdateMovimientoCostoDto {
   @IsNumber()
   @IsPositive()
   tc_usd_mxn?: number;
+}
+
+/**
+ * Baja de un movimiento de cardex (21-sep-2026, pedido del cliente): el
+ * MOTIVO es obligatorio —«que al momento de eliminarlos pida justificacion y
+ * sepamos quien lo hizo»— y viaja tal cual a
+ * `inventario_movimiento_eliminado.motivo` (la BD repite el mínimo de 10
+ * caracteres en un CHECK: ningún camino lo esquiva).
+ */
+export class EliminarMovimientoDto {
+  @ApiProperty({
+    description:
+      'Por qué se elimina (10-500 caracteres, sin espacios de sobra). Queda en la bitácora con quién y cuándo.',
+    minLength: 10,
+    maxLength: 500,
+  })
+  // El trim va ANTES de validar: 12 espacios no son una justificación.
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MinLength(10)
+  @MaxLength(500)
+  motivo!: string;
 }
 
 export class ListMovimientosQuery {

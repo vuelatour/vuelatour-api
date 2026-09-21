@@ -4,8 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { NotificationsService } from '../realtime/notifications.service';
+import { Rol } from '../../common/types/auth.types';
 import {
   PyservicesService,
   type BalanceHojaInventarioPayload,
@@ -27,6 +31,21 @@ import {
   UpdateMovimientoCostoDto,
 } from './dto/inventory.dto';
 import { normalizarCodigo } from './inventario-codigo.util';
+// Baja de un movimiento de cardex (21-sep-2026): simulación pura del FIFO
+// sin el movimiento + códigos estables del 409 (con spec).
+import {
+  cantidadTxt,
+  codigoDeErrorEliminacion,
+  esTablaInexistente,
+  evaluarEliminacion,
+  mensajeDeErrorEliminacion,
+  montoTxt,
+  MIGRACION_MOVIMIENTO_ELIMINADO,
+  type CodigoBloqueoEliminacion,
+  type EvaluacionEliminacion,
+  type MovEliminable,
+} from './eliminar-movimiento.util';
+import { esFuncionInexistente } from '../../common/updated-at-trigger.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { capturadoAhora } from '../../common/capturado-en.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
@@ -41,6 +60,7 @@ import {
   EPS,
   filtroPeriodo,
   resumenDiarioDe,
+  nombreDeJoin,
   round,
   sortChrono,
   statsFromLayers,
@@ -70,6 +90,33 @@ const MOV_COLS =
 /** Índice único parcial de `inventario_movimiento.client_request_id`. */
 const UQ_INV_MOVIMIENTO_CLIENT_REQUEST = 'uq_inv_movimiento_client_request';
 
+/** Bitácora forense de bajas de cardex (migración 20260921000001). */
+const TABLA_MOVIMIENTO_ELIMINADO = 'inventario_movimiento_eliminado';
+/** Borrado ATÓMICO (auditoría + gastos + movimiento) de la misma migración. */
+const RPC_ELIMINAR_MOVIMIENTO = 'inventario_eliminar_movimiento';
+
+/**
+ * Texto de un valor `unknown` que viene de PostgREST (columna de texto o
+ * ENUM). Nunca `[object Object]`: lo que no sea escalar cae al default.
+ */
+function textoDe(v: unknown, porDefecto = ''): string {
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return porDefecto;
+}
+
+/** Gasto BODEGA ligado a un movimiento, con su veredicto para la baja. */
+export interface GastoLigado {
+  id: string;
+  monto: number;
+  moneda: string;
+  aeronave_matricula: string | null;
+  fecha_gasto: string | null;
+  /** true = este gasto NO se puede borrar (dinero ya cerrado). */
+  bloqueado: boolean;
+  motivo_bloqueo: string | null;
+}
+
 type EmpaqueRow = {
   id: string;
   item_id: string;
@@ -96,6 +143,12 @@ export class InventoryService {
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
+    /**
+     * Aviso a ADMIN cuando alguien elimina un movimiento de cardex
+     * (21-sep-2026). OPCIONAL a propósito: la baja NUNCA depende de él (y
+     * los specs construyen el servicio sin él).
+     */
+    @Optional() private readonly notifications?: NotificationsService,
   ) {}
 
   private readonly logger = new Logger(InventoryService.name);
@@ -1512,7 +1565,7 @@ export class InventoryService {
       .eq('item_id', itemId)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    return (data as Record<string, unknown> | null) ?? null;
+    return data ?? null;
   }
 
   /**
@@ -1591,6 +1644,17 @@ export class InventoryService {
     if (key) {
       const ya = await this.movimientoPorClientRequest(itemId, key);
       if (ya) return this.movimientoIdempotente(ya, key);
+      // La oficina ELIMINÓ ese movimiento (21-sep-2026): un reintento del
+      // outbox no lo resucita. 409 con `code` estable para que la app
+      // descarte el pendiente en vez de reintentar para siempre.
+      const eliminado = await this.eliminadoPorClientRequest(key);
+      if (eliminado) {
+        throw new ConflictException({
+          message: `La oficina eliminó este movimiento${eliminado.eliminado_por_nombre ? ` (${eliminado.eliminado_por_nombre})` : ''}: «${eliminado.motivo}». Si hace falta, captúralo de nuevo desde cero.`,
+          error: 'MOVIMIENTO_ELIMINADO',
+          details: { client_request_id: key, motivo: eliminado.motivo },
+        });
+      }
     }
     const item = (await this.findItem(itemId)) as {
       nombre: string;
@@ -1962,6 +2026,476 @@ export class InventoryService {
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       valor_mxn: stats.valor_mxn,
+    };
+  }
+
+  // ===== Baja de un movimiento de cardex (21-sep-2026) =====
+  //
+  // Pedido del cliente: «podemos agregar una opcion para eliminar algunos
+  // movimientos, pero que al momento de eliminarlos pida justificacion y
+  // sepamos quien lo hizo» (captura del cardex del aceite 15W-50 con tres
+  // movimientos capturados por error el 29-ago).
+  //
+  // El cardex era APPEND-ONLY porque el stock y los costos NO se guardan: se
+  // derivan de él cada vez. Por eso la baja tiene TRES capas:
+  //   1. `evaluarEliminacion` (helper puro, con specs): simula el FIFO sin el
+  //      movimiento y bloquea si la existencia quedaría negativa o si el
+  //      costo FIFO de CUALQUIER otra salida cambiaría.
+  //   2. Este servicio: candados de DINERO (compra ligada, gasto conciliado /
+  //      facturado / con cargo bancario) y 409 con `code` estable.
+  //   3. La función de BD `inventario_eliminar_movimiento` (migración
+  //      20260921000001): auditoría + gastos + movimiento en UNA transacción.
+  //      Sin ella la baja responde 503 — nunca un borrado a medias por pasos
+  //      sueltos desde aquí.
+
+  /** Movimiento del ítem con sus joins, o 404. */
+  private async movimientoDeItem(
+    itemId: string,
+    movId: string,
+  ): Promise<Record<string, unknown>> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_movimiento')
+      .select(`${MOV_COLS}, para_flota, ${MOV_JOINS}`)
+      .eq('id', movId)
+      .eq('item_id', itemId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException(
+        `Movimiento ${movId} no encontrado en este ítem`,
+      );
+    }
+    return data;
+  }
+
+  /** Cardex COMPLETO del ítem en la forma que pide `evaluarEliminacion`. */
+  private async movsEliminablesDeItem(
+    itemId: string,
+  ): Promise<MovEliminable[]> {
+    const movs = await this.movsCardexCompleto(itemId);
+    return movs.map((m) => ({
+      ...m,
+      id: String(m.id),
+      aeronave_matricula: nombreDeJoin(m.aeronave, 'matricula'),
+      para_flota: m.para_flota ?? false,
+    }));
+  }
+
+  /** Compra de la que nace el movimiento (null = captura manual). */
+  private async compraDeMovimiento(
+    movId: string,
+  ): Promise<{ folio: number | null } | null> {
+    const { data, error } = await this.supabase.service
+      .from('compra_linea')
+      .select('id, compra:compra!compra_id(folio)')
+      .eq('inventario_movimiento_id', movId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const raw = (data as Record<string, unknown>).compra;
+    const compra = (Array.isArray(raw) ? (raw[0] ?? null) : raw) as {
+      folio?: number;
+    } | null;
+    return { folio: compra?.folio ?? null };
+  }
+
+  /**
+   * Gastos ligados al movimiento con su veredicto: `bloqueado` = borrarlo
+   * tocaría dinero ya cerrado (conciliado con el banco, con cargo bancario
+   * ligado —conciliación PARCIAL, 14-sep—, facturado) o el gasto ya no es de
+   * bodega (alguien lo cambió en Gastos y la FK `set null` lo dejaría
+   * huérfano en silencio).
+   */
+  private async gastosDeMovimiento(movId: string): Promise<GastoLigado[]> {
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(
+        'id, monto, moneda, categoria, medio_pago, conciliado, factura_recibida_id, estatus_facturacion, fecha_gasto, aeronave_id, compra_id, aeronave:aeronave!aeronave_id(matricula)',
+      )
+      .eq('inventario_movimiento_id', movId)
+      .order('created_at', { ascending: true });
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as Array<Record<string, unknown>>;
+    if (filas.length === 0) return [];
+
+    // Cargos bancarios y facturas recibidas ligados. Los DOS son FK con
+    // `on delete set null`: borrar el gasto no avisa, solo deja el renglón
+    // del banco / la factura apuntando a nada. Un gasto con pago PARCIAL no
+    // está `conciliado` pero ya tiene banco detrás, y una factura puede
+    // apuntar al gasto SIN que `gasto.factura_recibida_id` esté puesto (el
+    // amarre no es simétrico — pendiente conocido del repo). Estos MISMOS
+    // candados los repite la función de BD: si aquí faltaran, la vista previa
+    // diría «se puede» y el DELETE contestaría 409.
+    const ids = filas.map((g) => String(g.id));
+    const [cargosRes, facturasRes] = await Promise.all([
+      this.supabase.service
+        .from('movimiento_bancario')
+        .select('gasto_id')
+        .in('gasto_id', ids),
+      this.supabase.service
+        .from('factura_recibida')
+        .select('gasto_id')
+        .in('gasto_id', ids),
+    ]);
+    if (cargosRes.error) throw new Error(cargosRes.error.message);
+    if (facturasRes.error) throw new Error(facturasRes.error.message);
+    const idsDeGasto = (rows: unknown) =>
+      new Set(
+        ((rows ?? []) as Array<{ gasto_id: string | null }>)
+          .map((c) => c.gasto_id)
+          .filter((id): id is string => !!id),
+      );
+    const conCargo = idsDeGasto(cargosRes.data);
+    const conFactura = idsDeGasto(facturasRes.data);
+
+    return filas.map((g) => {
+      const id = textoDe(g.id);
+      const esDeBodega =
+        textoDe(g.categoria) === 'REFACCION' &&
+        textoDe(g.medio_pago) === 'BODEGA';
+      const conciliado = g.conciliado === true || conCargo.has(id);
+      const facturado =
+        g.factura_recibida_id != null ||
+        conFactura.has(id) ||
+        textoDe(g.estatus_facturacion) === 'FACTURADA';
+      const motivo = conciliado
+        ? 'Ya está conciliado con el banco: desconcílialo en Conciliación antes de eliminar el movimiento.'
+        : facturado
+          ? 'Ya tiene factura recibida: desligar la factura en Gastos antes de eliminar el movimiento.'
+          : g.compra_id != null
+            ? 'Es el pago de una compra: corrígelo desde Compras antes de eliminar el movimiento.'
+            : !esDeBodega
+              ? 'Este gasto ya no es una REFACCION de bodega (lo cambiaron en Gastos): revísalo ahí antes de eliminar el movimiento.'
+              : null;
+      return {
+        id,
+        monto: round(Number(g.monto ?? 0), 2),
+        moneda: textoDe(g.moneda, 'MXN'),
+        aeronave_matricula: nombreDeJoin(g.aeronave, 'matricula'),
+        fecha_gasto: (g.fecha_gasto as string | null) ?? null,
+        bloqueado: motivo != null,
+        motivo_bloqueo: motivo,
+      };
+    });
+  }
+
+  /**
+   * Orden de los candados (el primero que aplique manda): COMPRA (estructural)
+   * → TIPO (devolución/ajuste no se borran) → DINERO (gasto cerrado) →
+   * CARDEX (stock negativo / costo FIFO movido). El mensaje SIEMPRE dice qué
+   * hacer para desbloquearlo.
+   */
+  private resolverBloqueoEliminacion(
+    cardex: EvaluacionEliminacion,
+    compra: { folio: number | null } | null,
+    gastos: GastoLigado[],
+    tipo: string,
+  ): { codigo: CodigoBloqueoEliminacion | null; mensaje: string } {
+    if (compra) {
+      return {
+        codigo: 'MOVIMIENTO_DE_COMPRA',
+        mensaje: `Esta ${tipo} nace de la compra #${compra.folio ?? '?'}: quítala o corrígela desde Compras (ahí se prorratean envío e impuestos).`,
+      };
+    }
+    if (cardex.codigo_bloqueo === 'TIPO_NO_SOPORTADO') {
+      return { codigo: 'TIPO_NO_SOPORTADO', mensaje: cardex.detalle };
+    }
+    const bloqueado = gastos.find((g) => g.bloqueado);
+    if (bloqueado) {
+      return {
+        codigo: 'GASTO_BLOQUEADO',
+        mensaje:
+          `El gasto de ${montoTxt(bloqueado.monto)} ${bloqueado.moneda}${bloqueado.aeronave_matricula ? ` de ${bloqueado.aeronave_matricula}` : ''} que generó este movimiento no se puede eliminar. ${bloqueado.motivo_bloqueo ?? ''}`.trim(),
+      };
+    }
+    return { codigo: cardex.codigo_bloqueo, mensaje: cardex.detalle };
+  }
+
+  /**
+   * VISTA PREVIA de la baja (ADMIN): qué se va a eliminar, cómo queda la
+   * existencia y qué gastos se van con el movimiento — o por qué NO se puede
+   * y qué hay que hacer primero. Solo LEE: no cambia nada, y funciona aunque
+   * la migración 20260921000001 todavía no esté aplicada (el 503 es de la
+   * baja, no de la vista previa).
+   */
+  async previewEliminacionMovimiento(itemId: string, movId: string) {
+    const mov = await this.movimientoDeItem(itemId, movId);
+    const [compra, gastos, movs] = await Promise.all([
+      this.compraDeMovimiento(movId),
+      this.gastosDeMovimiento(movId),
+      this.movsEliminablesDeItem(itemId),
+    ]);
+    // Carrera (alguien lo borró entre las dos lecturas): 404, no un 500.
+    let cardex: EvaluacionEliminacion;
+    try {
+      cardex = evaluarEliminacion(movs, movId);
+    } catch {
+      throw new NotFoundException(
+        `Movimiento ${movId} no encontrado en este ítem`,
+      );
+    }
+    const tipo = String(mov.tipo);
+    const { codigo, mensaje } = this.resolverBloqueoEliminacion(
+      cardex,
+      compra,
+      gastos,
+      tipo,
+    );
+    return {
+      permitido: codigo == null,
+      codigo_bloqueo: codigo,
+      mensaje,
+      stock_antes: cardex.stock_antes,
+      stock_despues: cardex.stock_despues,
+      movimiento: {
+        tipo,
+        cantidad: round(Number(mov.cantidad), 2),
+        fecha: mov.fecha_movimiento as string,
+        // 'FLOTA' = salida prorrateada entre todos los aviones activos.
+        aeronave:
+          mov.para_flota === true
+            ? 'FLOTA'
+            : nombreDeJoin(mov.aeronave, 'matricula'),
+      },
+      gastos,
+      de_compra: compra,
+    };
+  }
+
+  /**
+   * BAJA de un movimiento de cardex (SOLO ADMIN, con motivo ≥ 10 caracteres).
+   * Re-evalúa TODOS los candados (la vista previa pudo quedar vieja) y delega
+   * el borrado a la función de BD, que es atómica: auditoría + gastos
+   * BODEGA + movimiento, o nada.
+   */
+  async eliminarMovimiento(
+    itemId: string,
+    movId: string,
+    motivo: string,
+    userId: string,
+  ) {
+    const item = (await this.findItem(itemId)) as { nombre: string }; // 404
+    const previa = await this.previewEliminacionMovimiento(itemId, movId);
+    if (!previa.permitido) {
+      throw new ConflictException({
+        message: previa.mensaje,
+        error: previa.codigo_bloqueo,
+        details: {
+          movimiento_id: movId,
+          stock_antes: previa.stock_antes,
+          stock_despues: previa.stock_despues,
+          gastos: previa.gastos.length,
+        },
+      });
+    }
+
+    const { data, error } = (await this.supabase.service.rpc(
+      RPC_ELIMINAR_MOVIMIENTO,
+      {
+        p_movimiento: movId,
+        p_item: itemId,
+        p_motivo: motivo,
+        p_usuario: userId,
+      },
+    )) as {
+      data: unknown;
+      error: { code?: string; message: string; hint?: string | null } | null;
+    };
+    if (error) {
+      // La migración no está aplicada: 503 CLARO. Jamás un borrado por pasos
+      // sueltos desde el API (movimiento sin gasto = costo del avión inflado).
+      if (esFuncionInexistente(error)) {
+        this.logger.error(
+          `Baja de movimiento de cardex no disponible: falta aplicar la migración ${MIGRACION_MOVIMIENTO_ELIMINADO} (${error.message}). No se eliminó nada.`,
+        );
+        throw new ServiceUnavailableException({
+          message: `La baja de movimientos de cardex todavía no está disponible en la base: falta aplicar la migración ${MIGRACION_MOVIMIENTO_ELIMINADO}. No se eliminó nada.`,
+          error: 'MIGRACION_PENDIENTE',
+          details: { migracion: MIGRACION_MOVIMIENTO_ELIMINADO },
+        });
+      }
+      // El código viaja DOS veces desde la función: en el `hint` y como
+      // prefijo del mensaje. Se lee primero el hint (dato estructurado) y el
+      // mensaje queda de respaldo: si alguien reescribe el texto en es-MX, el
+      // `code` del 409 no se convierte en un 500 silencioso.
+      const codigo =
+        codigoDeErrorEliminacion(error.hint) ??
+        codigoDeErrorEliminacion(error.message);
+      const mensaje = mensajeDeErrorEliminacion(error.message);
+      if (
+        codigo === 'MOVIMIENTO_NO_EXISTE' ||
+        codigo === 'MOVIMIENTO_DE_OTRO_ITEM'
+      ) {
+        throw new NotFoundException({ message: mensaje, error: codigo });
+      }
+      if (codigo === 'MOTIVO_REQUERIDO' || codigo === 'USUARIO_REQUERIDO') {
+        throw new BadRequestException({ message: mensaje, error: codigo });
+      }
+      if (codigo) {
+        throw new ConflictException({
+          message: mensaje,
+          error: codigo,
+          details: { movimiento_id: movId },
+        });
+      }
+      throw new Error(error.message);
+    }
+
+    const resultado = (data ?? {}) as {
+      auditoria_id?: string;
+      gastos_eliminados?: number;
+    };
+    const stats = this.statsFromLayers(
+      this.buildLayers(await this.movsForItem(itemId)),
+    );
+    this.logger.warn(
+      `Movimiento de cardex ${movId} (${previa.movimiento.tipo} ${previa.movimiento.cantidad} · ${item.nombre}) ELIMINADO por ${userId}: «${motivo}». ${resultado.gastos_eliminados ?? 0} gasto(s) de bodega borrados; existencia ${previa.stock_antes} → ${stats.stock}. Auditoría ${resultado.auditoria_id ?? '?'}.`,
+    );
+    void this.avisarMovimientoEliminado(
+      itemId,
+      item.nombre,
+      previa,
+      motivo,
+      userId,
+      resultado.gastos_eliminados ?? 0,
+    );
+
+    return {
+      ok: true as const,
+      auditoria_id: resultado.auditoria_id ?? null,
+      gastos_eliminados: resultado.gastos_eliminados ?? 0,
+      stock_resultante: stats.stock,
+      valor_usd: stats.valor_usd,
+      valor_mxn: stats.valor_mxn,
+    };
+  }
+
+  /**
+   * Aviso in-app a la oficina (ADMIN) — best-effort, NUNCA rompe la baja:
+   * quien elimina ya lo sabe (queda excluido), los demás se enteran con el
+   * motivo. Sin NotificationsService (specs) no hace nada.
+   */
+  private async avisarMovimientoEliminado(
+    itemId: string,
+    itemNombre: string,
+    previa: {
+      movimiento: { tipo: string; cantidad: number; aeronave: string | null };
+      stock_antes: number;
+    },
+    motivo: string,
+    userId: string,
+    gastosEliminados: number,
+  ): Promise<void> {
+    try {
+      const destino = previa.movimiento.aeronave
+        ? ` (${previa.movimiento.aeronave})`
+        : '';
+      await this.notifications?.notifyRole(
+        Rol.ADMIN,
+        {
+          tipo: 'alerta_sistema',
+          titulo: 'Movimiento de inventario eliminado',
+          cuerpo: `${previa.movimiento.tipo} de ${cantidadTxt(previa.movimiento.cantidad)} × ${itemNombre}${destino}${gastosEliminados > 0 ? ` y ${gastosEliminados} gasto(s) de bodega` : ''}. Motivo: ${motivo}`,
+          data: {
+            item_id: itemId,
+            item_nombre: itemNombre,
+            motivo,
+            gastos_eliminados: gastosEliminados,
+          },
+          link: `/admin/inventory/${itemId}`,
+        },
+        userId,
+      );
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo avisar la baja del movimiento de cardex: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  }
+
+  /**
+   * Historial de bajas del ítem (OFICINA): qué se eliminó, QUIÉN y POR QUÉ.
+   * Con la migración sin aplicar devuelve `[]` y avisa en el log: la sección
+   * del panel se ve vacía, no rota.
+   */
+  async listMovimientosEliminados(itemId: string) {
+    await this.findItem(itemId); // 404 si el ítem no existe
+    const { data, error } = await this.supabase.service
+      .from(TABLA_MOVIMIENTO_ELIMINADO)
+      .select(
+        'id, movimiento_id, tipo, cantidad, fecha_movimiento, aeronave_matricula, motivo, eliminado_por, eliminado_por_nombre, eliminado_at, gastos_snapshot',
+      )
+      .eq('item_id', itemId)
+      .order('eliminado_at', { ascending: false });
+    if (error) {
+      if (esTablaInexistente(error)) {
+        this.logger.warn(
+          `Historial de movimientos eliminados no disponible: falta aplicar la migración ${MIGRACION_MOVIMIENTO_ELIMINADO} (${error.message}).`,
+        );
+        return [];
+      }
+      throw new Error(error.message);
+    }
+    return ((data ?? []) as Array<Record<string, unknown>>).map((fila) => {
+      const gastos = Array.isArray(fila.gastos_snapshot)
+        ? (fila.gastos_snapshot as Array<Record<string, unknown>>)
+        : [];
+      // Todos los gastos de UN movimiento comparten moneda (montoGastoDeSalida
+      // resuelve una sola para la salida): sumarlos no mezcla monedas.
+      const moneda =
+        gastos.length > 0 ? textoDe(gastos[0].moneda, 'MXN') : null;
+      return {
+        id: textoDe(fila.id),
+        movimiento_id: textoDe(fila.movimiento_id),
+        tipo: textoDe(fila.tipo),
+        cantidad: round(Number(fila.cantidad), 2),
+        fecha_movimiento: fila.fecha_movimiento as string,
+        aeronave_matricula: (fila.aeronave_matricula as string | null) ?? null,
+        motivo: textoDe(fila.motivo),
+        eliminado_por: (fila.eliminado_por as string | null) ?? null,
+        eliminado_por_nombre:
+          (fila.eliminado_por_nombre as string | null) ?? null,
+        eliminado_at: fila.eliminado_at as string,
+        gastos_eliminados: gastos.length,
+        monto_gastos:
+          gastos.length > 0
+            ? round(
+                gastos.reduce((s, g) => s + Number(g.monto ?? 0), 0),
+                2,
+              )
+            : null,
+        moneda_gastos: moneda,
+      };
+    });
+  }
+
+  /**
+   * ¿Esta llave del outbox pertenece a un movimiento que la oficina YA
+   * eliminó? (21-sep-2026). Sin esto, el reintento de la app volvería a crear
+   * el movimiento que alguien borró con justificación — y el stock quedaría
+   * mal otra vez. Con la migración sin aplicar devuelve null (comportamiento
+   * de siempre).
+   */
+  private async eliminadoPorClientRequest(
+    key: string,
+  ): Promise<{ motivo: string; eliminado_por_nombre: string | null } | null> {
+    const { data, error } = await this.supabase.service
+      .from(TABLA_MOVIMIENTO_ELIMINADO)
+      .select('motivo, eliminado_por_nombre, eliminado_at')
+      .eq('client_request_id', key)
+      .order('eliminado_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      if (esTablaInexistente(error)) return null;
+      throw new Error(error.message);
+    }
+    if (!data) return null;
+    const fila = data as Record<string, unknown>;
+    return {
+      motivo: textoDe(fila.motivo),
+      eliminado_por_nombre:
+        (fila.eliminado_por_nombre as string | null) ?? null,
     };
   }
 

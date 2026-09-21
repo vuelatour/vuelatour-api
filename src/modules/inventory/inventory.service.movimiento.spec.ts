@@ -1,6 +1,11 @@
 jest.mock('../pyservices/pyservices.service', () => ({
   PyservicesService: class {},
 }));
+// notifications (aviso de baja de cardex, 21-sep) arrastra el gateway y
+// `jose` (ESM), que jest no parsea.
+jest.mock('../realtime/notifications.service', () => ({
+  NotificationsService: class {},
+}));
 
 import { ConflictException, Logger } from '@nestjs/common';
 import { InventoryService } from './inventory.service';

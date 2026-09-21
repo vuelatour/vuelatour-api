@@ -1,3 +1,10 @@
+// inventario-masivo.service importa InventoryService, que desde el 21-sep
+// depende de notifications (aviso de baja de cardex): eso arrastra el
+// gateway y `jose` (ESM), que jest no parsea.
+jest.mock('../realtime/notifications.service', () => ({
+  NotificationsService: class {},
+}));
+
 import { BadRequestException } from '@nestjs/common';
 import { InventarioMasivoService } from './inventario-masivo.service';
 import type { InventoryService } from './inventory.service';

@@ -256,6 +256,15 @@ export type PasoCardex = {
   /** SALIDA: costo FIFO en PESOS de las capas consumidas; null si no es
    *  salida o si alguna capa consumida no está en pesos reales (sinTc). */
   costoMxnFifo: number | null;
+  /**
+   * SALIDA: costo FIFO en USD (la moneda CANÓNICA interna del cardex) de las
+   * capas consumidas; null si no es salida. A diferencia de `costoMxnFifo`,
+   * SIEMPRE trae número en una salida — también cuando las capas son USD sin
+   * TC. Sin él, dos costos distintos (una capa de $46 y una de $9,541, ambas
+   * USD sin TC) se ven IGUALES desde los pesos, porque los dos salen `null`;
+   * eso dejaba pasar bajas de cardex que sí movían el costo (21-sep-2026).
+   */
+  costoUsdFifo: number | null;
   /** Un monto ≠ 0 de este paso está en USD SIN tipo de cambio (la capa
    *  propia en ENTRADA/DEVOLUCION/AJUSTE; alguna consumida en SALIDA): no hay
    *  cómo expresarlo en pesos. Se EXPONE, jamás se suma el USD como MXN. */
@@ -279,11 +288,13 @@ export function walkCardex(movs: MovForFifo[]): Map<string, PasoCardex> {
     if (m.tipo === SALIDA) {
       let need = cant;
       let mxn = 0;
+      let usd = 0;
       let sinTc = false;
       while (need > EPS && layers.length > 0) {
         const layer = layers[0];
         const take = Math.min(need, layer.qty);
         mxn += take * layer.costMxn;
+        usd += take * layer.cost;
         // Una capa USD sin TC con monto ≠ 0 contaminaría la suma en pesos.
         if (!layer.pesosExactos && Math.abs(take * layer.costMxn) > EPS) {
           sinTc = true;
@@ -297,6 +308,7 @@ export function walkCardex(movs: MovForFifo[]): Map<string, PasoCardex> {
         out.set(m.id, {
           stockDespues: stock,
           costoMxnFifo: sinTc ? null : round(mxn, 2),
+          costoUsdFifo: round(usd, 2),
           sinTc,
         });
     } else {
@@ -313,6 +325,7 @@ export function walkCardex(movs: MovForFifo[]): Map<string, PasoCardex> {
         out.set(m.id, {
           stockDespues: stock,
           costoMxnFifo: null,
+          costoUsdFifo: null,
           sinTc: !pesosExactos && Math.abs(mxn) > EPS,
         });
     }

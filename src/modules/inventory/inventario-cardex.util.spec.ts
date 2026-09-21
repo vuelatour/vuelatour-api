@@ -255,37 +255,46 @@ describe('FIFO: sortChrono / walkCardex / statsFromLayers', () => {
     expect(walk.get('e1')).toEqual({
       stockDespues: 10,
       costoMxnFifo: null,
+      costoUsdFifo: null,
       sinTc: false,
     });
     expect(walk.get('e2')).toEqual({
       stockDespues: 15,
       costoMxnFifo: null,
+      costoUsdFifo: null,
       sinTc: false,
     });
     expect(walk.get('s1')).toEqual({
       stockDespues: 7,
       costoMxnFifo: 800,
+      // El MISMO costo en la moneda canónica: 8 × 5.5 USD.
+      costoUsdFifo: 44,
       sinTc: false,
     });
     // Cruza dos capas: 2 × 100 (resto de e1) + 2 × 108 (e2).
     expect(walk.get('s2')).toEqual({
       stockDespues: 3,
       costoMxnFifo: 416,
+      // 2 × 5.5 (resto de e1) + 2 × 6 (e2) USD.
+      costoUsdFifo: 23,
       sinTc: false,
     });
     expect(walk.get('d1')).toEqual({
       stockDespues: 4,
       costoMxnFifo: null,
+      costoUsdFifo: null,
       sinTc: false,
     });
     expect(walk.get('s3')).toEqual({
       stockDespues: 2,
       costoMxnFifo: 216,
+      costoUsdFifo: 12,
       sinTc: false,
     });
     expect(walk.get('e3')).toEqual({
       stockDespues: 5,
       costoMxnFifo: null,
+      costoUsdFifo: null,
       sinTc: false,
     });
   });
@@ -385,6 +394,9 @@ describe('agregadosDeItem (mismo número que la hoja Inventario del balance)', (
     expect(walk.get('su')).toEqual({
       stockDespues: 1,
       costoMxnFifo: null,
+      // Sin TC no hay pesos, pero el costo en USD SÍ existe y es el que
+      // delata un cambio de capas: 2 × 5.5 (e1) + 1 × 50 (u1).
+      costoUsdFifo: 61,
       sinTc: true,
     });
     const b = bloquesCardexDe('Aceite', CON_USD);
