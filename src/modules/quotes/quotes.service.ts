@@ -45,6 +45,12 @@ import {
 import { Rol } from '../../common/types/auth.types';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { normalizarTc } from '../../common/tc.util';
+import {
+  esEcoDeHorasPactadas,
+  horasPactadasPersistidas,
+  normalizarHoras,
+  round8,
+} from '../../common/horas.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   conflictoCapacidad,
@@ -372,7 +378,12 @@ export class QuotesService {
     const calzosHr = route.num_aterrizajes * CALZOS_HR_POR_ATERRIZAJE;
     // SOBREVUELO (ej. sobrevolar la isla 0.5 hr): tiempo extra cobrable que
     // se suma ANTES del mínimo de 1 hr.
-    const sobrevueloHr = Math.max(0, Number(dto.sobrevuelo_hr) || 0);
+    // NORMALIZADO A 8 DECIMALES (22-sep-2026, horas.util): el sobrevuelo se
+    // REHIDRATA desde el snapshot (panel y quickAdjust) y entra en la suma
+    // que produce el subtotal — si se guardara con menos decimales de los que
+    // se usaron para multiplicar, reabrir y guardar movería el total (el bug
+    // del pactado de #322, por la otra puerta).
+    const sobrevueloHr = round8(Math.max(0, Number(dto.sobrevuelo_hr) || 0));
     // CLIENTE INTERNO (jul 2026) + tarifa preferencial: UNA sola lectura.
     // Interno = pseudo-cliente de operación PROPIA ("Vuelos de
     // reposicionamiento", "Demostracion", "Servicio"): su cotización puede ir
@@ -395,12 +406,22 @@ export class QuotesService {
     // COBRABLE pactado (26-ago, corrige al 25-ago): vuelo y calzos quedan
     // calculados e intocables — lo que la oficina decide a mano es la SUMA
     // final: aceptar la regla (mínimo 1 hr) o pactar otro total de horas.
-    const cobrableOverride =
-      dto.tiempo_cobrable_override_hr != null &&
-      Number(dto.tiempo_cobrable_override_hr) > 0
-        ? Number(dto.tiempo_cobrable_override_hr)
-        : null;
-    const cobrableRegla = esInterno ? tiempoRealHr : Math.max(1, tiempoRealHr);
+    //
+    // PRECISIÓN ÚNICA DE LAS HORAS (22-sep-2026, caso #322 — invariante 22):
+    // las horas cobrables se NORMALIZAN A 8 DECIMALES **antes** de
+    // multiplicar, tanto el pactado a mano como el de la regla, y ese mismo
+    // número es el que se persiste (`tiempos.cobrable_hr`,
+    // `vuelo.tiempo_cobrable_hr` numeric(14,8)). Antes el motor multiplicaba
+    // con la precisión completa (2.333333333 × 600 = 1,400.00) y guardaba
+    // `round4` (2.3333): al reabrir, el panel rehidrataba ESE número y el
+    // total caía a 1,399.98 sin que nadie tocara nada.
+    const cobrableOverride = normalizarHoras(dto.tiempo_cobrable_override_hr);
+    // `round8` (no `normalizarHoras`): la regla puede ser legítimamente 0
+    // (cliente INTERNO sin hora mínima) y ahí 0 significa "sin cobro", no
+    // "sin dato".
+    const cobrableRegla = round8(
+      esInterno ? tiempoRealHr : Math.max(1, tiempoRealHr),
+    );
     const tiempoCobrableHr = cobrableOverride ?? cobrableRegla;
     const minimoHoraAplicado =
       !esInterno && cobrableOverride == null && tiempoRealHr < 1;
@@ -938,8 +959,13 @@ export class QuotesService {
         cobrable_hr_regla: round4(cobrableRegla),
         cobrable_proviene_de_override: cobrableOverride != null,
         calzos_hr: round4(calzosHr),
-        sobrevuelo_hr: round4(sobrevueloHr),
-        cobrable_hr: round4(tiempoCobrableHr),
+        // 8 decimales (ver `cobrableOverride` arriba): el sobrevuelo se
+        // rehidrata y el cobrable ES el factor del subtotal — se guarda
+        // EXACTAMENTE el número con el que se multiplicó, jamás una copia
+        // redondeada. `vuelo_hr`, `calzos_hr` y `cobrable_hr_regla` siguen en
+        // round4: son informativos, nadie los rehidrata como dinero.
+        sobrevuelo_hr: sobrevueloHr,
+        cobrable_hr: tiempoCobrableHr,
         // Vuelo corto: se facturó la hora completa (cobrable_hr = 1.0 aunque
         // el tiempo real vuelo+calzos fuera menor).
         minimo_hora_aplicado: minimoHoraAplicado,
@@ -1351,6 +1377,40 @@ export class QuotesService {
       )?.meta?.total_pactado_usd,
     );
     if (!(pactadoVigente > 0)) dto.total_pactado_usd = undefined;
+    // HORAS PACTADAS: el ECO TRUNCADO se ancla a lo persistido (22-sep-2026,
+    // caso #322 — invariante 22). Un cliente que leyó las horas guardadas con
+    // la precisión vieja (panel anterior a este cambio, borrador en caché,
+    // integración externa) las devuelve con 4 decimales; recalcular con esa
+    // copia baja el subtotal ($1,400.00 → $1,399.98) sin que nadie haya
+    // tocado nada. Solo se ancla cuando la diferencia es menor a media unidad
+    // del 4.º decimal Y el entrante trae MENOS decimales (`horas.util`): una
+    // edición real del pactado —más precisión o un valor distinto— se
+    // respeta siempre. Sin pactado vigente no aplica: ahí manda la regla.
+    const tiemposPersistidos = (
+      current.calculo_snapshot as {
+        tiempos?: {
+          cobrable_hr?: unknown;
+          cobrable_proviene_de_override?: unknown;
+        };
+      } | null
+    )?.tiempos;
+    if (
+      tiemposPersistidos?.cobrable_proviene_de_override === true &&
+      dto.tiempo_cobrable_override_hr != null
+    ) {
+      const persistido = horasPactadasPersistidas(
+        tiemposPersistidos.cobrable_hr,
+        current.tiempo_cobrable_hr,
+      );
+      const entrante = normalizarHoras(dto.tiempo_cobrable_override_hr);
+      if (
+        persistido != null &&
+        entrante != null &&
+        esEcoDeHorasPactadas(entrante, persistido)
+      ) {
+        dto.tiempo_cobrable_override_hr = persistido;
+      }
+    }
   }
 
   /**
@@ -2818,11 +2878,16 @@ export class QuotesService {
           ? Number(snapshot?.tiempos?.sobrevuelo_hr)
           : undefined,
       // El COBRABLE pactado también se conserva (si no, el ajuste rápido
-      // re-aplicaría la regla y movería las horas pactadas en silencio).
+      // re-aplicaría la regla y movería las horas pactadas en silencio). Con
+      // los 8 decimales COMPLETOS (22-sep-2026): `horasPactadasPersistidas`
+      // toma el más preciso entre el snapshot y la columna, así un ajuste de
+      // extras jamás recalcula el subtotal con unas horas truncadas.
       tiempo_cobrable_override_hr:
-        snapshot?.tiempos?.cobrable_proviene_de_override === true &&
-        Number(snapshot?.tiempos?.cobrable_hr) > 0
-          ? Number(snapshot?.tiempos?.cobrable_hr)
+        snapshot?.tiempos?.cobrable_proviene_de_override === true
+          ? (horasPactadasPersistidas(
+              snapshot?.tiempos?.cobrable_hr,
+              current.tiempo_cobrable_hr,
+            ) ?? undefined)
           : undefined,
       tuas_override_usd_pax:
         snapshot?.tuas?.usd_pax_default != null

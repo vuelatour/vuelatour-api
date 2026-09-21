@@ -12,6 +12,7 @@ import {
 import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { normalizarTc } from '../../common/tc.util';
+import { horasPactadasPersistidas } from '../../common/horas.util';
 import {
   movimientoDeSobre,
   MOV_LIGA_COLS,
@@ -2039,9 +2040,17 @@ export class GroupsService {
         snap.tarifa?.proviene_de_override === true
           ? snap.tarifa.usd_por_hora
           : undefined,
+      // HORAS PACTADAS COMPLETAS (22-sep-2026, invariante 22): el más preciso
+      // entre el snapshot y la columna del hijo. Re-materializar el grupo
+      // recalcula el precio de cada hijo con ESTAS horas — con una copia
+      // truncada a 4 decimales, tocar cualquier cosa del grupo movía el
+      // subtotal de los hijos pactados a mano (mismo defecto que #322).
       tiempo_cobrable_override_hr:
         snap.tiempos?.cobrable_proviene_de_override === true
-          ? snap.tiempos.cobrable_hr
+          ? (horasPactadasPersistidas(
+              snap.tiempos.cobrable_hr,
+              h.tiempo_cobrable_hr,
+            ) ?? undefined)
           : undefined,
       fecha_salida_plan: h.fecha_vuelo ? new Date(h.fecha_vuelo) : null,
       aceptar_discrepancia_alta: false,

@@ -736,6 +736,54 @@ describe('QuotesPdfService — armarPayloadPdf / render / vista previa', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
+  // INVARIANTE 22 (22-sep-2026, #322): el PDF del CLIENTE imprime
+  // «Servicio aéreo ({tiempo_cobrable_hr:g} h × …)» y el panel espeja ese
+  // `:g` con `numeroG` LEYENDO EL SNAPSHOT. Si el payload tomara la columna
+  // —`numeric(10,4)` hasta aplicar `20260922000001`, y truncada para siempre
+  // en los vuelos guardados entre el deploy del API y la migración—, la hoja
+  // de pantalla diría «2.33333 h» y el PDF real «2.3333 h» para la MISMA
+  // cotización. Se leen las horas con las que se multiplicó.
+  it('horas del recibo: manda el SNAPSHOT (8 decimales) sobre la columna truncada', async () => {
+    const quote = quote148();
+    const payload = await pdfService([]).armarPayloadPdf(
+      {
+        ...quote,
+        // Lo que guardó el motor nuevo (jsonb, sin precisión) …
+        calculo_snapshot: {
+          ...(quote.calculo_snapshot as Record<string, unknown>),
+          tiempos: { cobrable_hr: 2.33333333 },
+        },
+        // … y lo que la columna vieja alcanzó a conservar.
+        tiempo_cobrable_hr: 2.3333,
+      },
+      { conFotos: false },
+    );
+    expect(payload.tiempo_cobrable_hr).toBe(2.33333333);
+  });
+
+  it('horas del recibo: sin snapshot de tiempos se conserva la columna (cotización legada)', async () => {
+    const payload = await pdfService([]).armarPayloadPdf(quote148(), {
+      conFotos: false,
+    });
+    expect(payload.tiempo_cobrable_hr).toBe(2.4);
+  });
+
+  it('horas del recibo: cliente interno en 0 no se pierde (la línea ni se imprime)', async () => {
+    const quote = quote148();
+    const payload = await pdfService([]).armarPayloadPdf(
+      {
+        ...quote,
+        calculo_snapshot: {
+          ...(quote.calculo_snapshot as Record<string, unknown>),
+          tiempos: { cobrable_hr: 0 },
+        },
+        tiempo_cobrable_hr: 0,
+      },
+      { conFotos: false },
+    );
+    expect(payload.tiempo_cobrable_hr).toBe(0);
+  });
+
   it('iva_pct como fracción (0.16) se normaliza a 16', async () => {
     const payload = await pdfService([]).armarPayloadPdf(
       { ...quote148(), iva_pct: 0.16 },
@@ -1018,7 +1066,8 @@ describe('mapa_puntos — armarMapaPuntos / mapaPuntosDeEscalas / mapaSvg / hoja
 
     function svcEspia(filtros: string[]) {
       const config = {
-        get: (k: string) => (k === 'PYSERVICES_BASE_URL' ? 'http://py/' : 'tok'),
+        get: (k: string) =>
+          k === 'PYSERVICES_BASE_URL' ? 'http://py/' : 'tok',
       } as unknown as ConfigService<EnvVars, true>;
       return new QuotesPdfService(
         config,

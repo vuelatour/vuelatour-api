@@ -148,7 +148,8 @@ export class AvionGrupoDto {
   tarifa_hora_override_usd?: number;
 
   @ApiPropertyOptional({
-    description: 'Horas cobrables pactadas para este avión.',
+    description:
+      'Horas cobrables pactadas para este avión. Se guardan con 8 decimales (22-sep-2026): 2:20 = 2.33333333 hr, y el API persiste exactamente el número con el que multiplicó la tarifa.',
   })
   @IsOptional()
   @Type(() => Number)

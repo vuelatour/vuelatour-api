@@ -12,6 +12,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
+import { horasPactadasPersistidas } from '../../common/horas.util';
 import { idAeronaveCotizada } from './aeronave-revision.util';
 import type { MapaSvgDto, MapaSvgEscalaDto } from './dto/mapa-svg.dto';
 import type { PreviewQuoteDto } from './dto/preview-quote.dto';
@@ -479,7 +480,8 @@ export class QuotesPdfService {
       quote.es_externo === true
         ? null
         : (idAeronaveCotizada(quote.calculo_snapshot) ??
-          ((quote.aeronave_id as string | null) ?? null));
+          (quote.aeronave_id as string | null) ??
+          null);
     if (aeronaveFichaId) {
       // La ficha del avión SÍ hace falta aun sin fotos (vista previa de la
       // hoja 1): `matricula` alimenta la sublínea VGV; la galería solo con
@@ -650,7 +652,22 @@ export class QuotesPdfService {
         // vieja lo ignora); sin fecha en ningún tramo no hay columna.
         fecha: (e.pdf_fecha as string | null | undefined) ?? null,
       })),
-      tiempo_cobrable_hr: num(quote.tiempo_cobrable_hr),
+      // HORAS DEL RECIBO (22-sep-2026, invariante 22): las MISMAS con las que
+      // el motor multiplicó la tarifa — el snapshot manda sobre la columna,
+      // que hasta la migración `20260922000001` sigue siendo `numeric(10,4)`
+      // y recorta a 2.3333. pyservices imprime «Servicio aéreo ({:g} h × …)»
+      // y el panel espeja ese `:g` con `numeroG` desde el SNAPSHOT: leyendo
+      // la columna, la hoja de pantalla decía «2.33333 h» y el PDF real
+      // «2.3333 h» para la misma cotización. Mismo criterio que el PDF
+      // INTERNO (`quotes-pdf-interno.util`, que ya prefería el snapshot) y
+      // que `quickAdjust`. Respaldo a la columna cuando no hay snapshot
+      // (cotización legada) o cuando el cobrable es 0 (cliente interno: la
+      // línea de horas ni se imprime).
+      tiempo_cobrable_hr:
+        horasPactadasPersistidas(
+          (snap?.tiempos as Record<string, unknown> | undefined)?.cobrable_hr,
+          quote.tiempo_cobrable_hr,
+        ) ?? num(quote.tiempo_cobrable_hr),
       tarifa_hora_usd: num(quote.tarifa_hora_usd),
       // Presentación configurable por cotización (27-ago).
       mostrar_tarifa_hora: quote.pdf_mostrar_tarifa === true,

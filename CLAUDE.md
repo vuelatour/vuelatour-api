@@ -1066,6 +1066,74 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `null` = no se pudo leer ⇒ el panel NO afirma nada (se comporta como
       hoy); sin fila en `alerta_config`, `safe()` salta la regla ⇒ apagada.
 
+22. **LO QUE SE PERSISTE ES LO QUE SE USÓ PARA MULTIPLICAR — horas pactadas
+    con 8 decimales (22-sep-2026, cotizaciones #322 y #302).** Fuente única
+    `src/common/horas.util.ts` (`HORAS_DECIMALES = 8`, `round8`,
+    `normalizarHoras`, `esEcoDeHorasPactadas`, `horasPactadasPersistidas`).
+    Hermano del invariante 20: mismo defecto, el otro factor del producto.
+    - **Síntoma**: la MISMA cotización (XB-PEV, CUN→PTU→CUN, $600/hr,
+      «Cobrable pactado» 2.333333333 = 2 h 20 min) daba $1,400.00 / $1,624.00
+      recién capturada y $1,399.98 / $1,623.98 al reabrirla y guardarla.
+      «no me lo redondea en la primer captura de la cotización 322».
+    - **Causa**: el motor multiplicaba con la precisión COMPLETA pero
+      persistía `round4` (snapshot) sobre `numeric(10,4)`; el panel REHIDRATA
+      el pactado desde el snapshot ⇒ 2.3333 × 600 = 1,399.98, y guardar
+      dejaba el descuadre persistido (#322 v1 1,400.00 → v2 1,399.98 con las
+      MISMAS horas).
+    - **Precisión**: `vuelo.tiempo_cobrable_hr` y
+      `cotizacion_version_history.tiempo_cobrable_hr` son `numeric(14,8)`
+      (migración `20260922000001_horas_pactadas_ocho_decimales.sql`, con
+      backfill de los 12 vuelos cuyas horas ya no reproducían su subtotal:
+      `h8 = round(subtotal ÷ tarifa, 8)` solo si la diferencia es
+      truncamiento puro (≤ 0.00005 hr) **y** reproduce el subtotal al
+      centavo; corrige la columna Y el snapshot). El backfill NO corrige
+      dinero ya persistido: #322 se re-guarda desde el panel.
+    - **El motor normaliza ANTES de multiplicar**: `cobrableOverride` pasa por
+      `normalizarHoras` y la regla por `round8` (0 legítimo del cliente
+      interno), y el snapshot guarda ESE número —`tiempos.cobrable_hr` y
+      `tiempos.sobrevuelo_hr` ya no son `round4`—. `vuelo_hr`, `calzos_hr` y
+      `cobrable_hr_regla` siguen en `round4`: son informativos y nadie los
+      rehidrata como dinero. El sobrevuelo SÍ se rehidrata (panel y
+      `quickAdjust`) y entra en la suma, por eso va con los 8.
+    - **Rehidratar = leer el más preciso**: `horasPactadasPersistidas`
+      (snapshot vs columna) en `quickAdjust` y en los hijos de un GRUPO
+      (`avionCtxDeHijo`), y `anclarRevisionAlPersistido` ancla el **eco
+      truncado**: un cliente que devuelve las horas con 4 decimales
+      (panel viejo, borrador en caché) no baja el subtotal — solo se ancla si
+      la diferencia es < media unidad del 4.º decimal Y el entrante trae
+      MENOS decimales; una edición real del pactado se respeta (2.3333 →
+      2.3334 sobre 2.33333333 está FUERA de la tolerancia). **Punto ciego
+      asumido** (revisión adversaria 22-sep): un eco y un REDONDEO
+      DELIBERADO a 4 decimales son el mismo número — teclear «3.297» sobre
+      3.2969697 persistido (#309) se ancla y esa edición de 5 centavos se
+      descarta sin avisar. Se prefiere así: reabrir y guardar no mueve un
+      total. Para permitirlo haría falta un campo ADITIVO del DTO, jamás
+      bajar la tolerancia.
+    - **Por qué 8**: 2.33333333 × 9,750 = $22,750.00 exacto, donde 2.3333
+      daba $22,749.68 (32 centavos perdidos en un solo vuelo).
+    - **Los lectores que PINTAN horas ya formatean** y se dejaron como están:
+      el desglose canónico sigue imprimiendo `round4` («2.3333 hr»), el PDF
+      interno `_horas` (`:.2f`), el balance `round2`, el panel `fmtDecimal`.
+      El PDF del CLIENTE usa `:g` en pyservices (6 cifras significativas): con
+      el pactado completo la línea pasa a decir «Servicio aéreo (2.33333 h ×
+      $600.00/hr)» — el importe es el correcto y el texto sigue espejando al
+      panel, pero si el cliente prefiere «2.33 h» se cambia en pyservices.
+    - **Las horas del PDF del CLIENTE salen del SNAPSHOT, no de la columna**
+      (revisión adversaria 22-sep): `quotes-pdf.service.armarPayloadPdf` usa
+      `horasPactadasPersistidas(snapshot.tiempos.cobrable_hr,
+      quote.tiempo_cobrable_hr)`. Leyendo la columna —`numeric(10,4)` hasta
+      aplicar la migración, y truncada PARA SIEMPRE en lo que se guarde entre
+      el deploy y la migración— la hoja WYSIWYG del panel decía «2.33333 h»
+      (espeja el snapshot con `numeroG`) y el PDF real «2.3333 h» para la
+      MISMA cotización. El PDF INTERNO ya prefería el snapshot; ahora los dos
+      leen lo mismo. Respaldo a la columna sin snapshot (cotización legada) y
+      en cliente interno (cobrable 0: la línea ni se imprime).
+    - **El REPORTE POR VUELO redondea a 4 al salir** (`flight-report.service`):
+      `reporte_vuelo_xlsx.py` escribe esa celda SIN formato de número y
+      mostraría «2.33333333» en Excel. Ese reporte nunca multiplica las horas
+      (el dinero viaja calculado), así que ahí son presentación. El factor
+      exacto vive en la columna y en el snapshot.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -1655,6 +1723,26 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   devuelve `[]`) y la baja responde **503 `MIGRACION_PENDIENTE`** hasta que
   la función exista — nunca un borrado a medias. Tras aplicar: `get_advisors`
   (la tabla queda con RLS y sin políticas, solo service key).
+- **PENDIENTE DE APLICAR (22-sep-2026) — REQUIERE DRY-RUN**:
+  `20260922000001_horas_pactadas_ocho_decimales.sql` (invariante 22:
+  `tiempo_cobrable_hr` a `numeric(14,8)` en `vuelo` y
+  `cotizacion_version_history` + backfill de 12 vuelos). NO crea triggers,
+  pero ESCRIBE en `vuelo`, así que el guion en seco va en la CABECERA del
+  archivo: conteos antes/después (84 pactados · 12 descuadrados, verificados
+  en prod el 22-sep), la lista esperada («SE CORRIGE» en los 12) y un UPDATE
+  REAL de una fila con su rollback que devuelve `columna_admite_8`,
+  `snapshot_coincide` y `updated_at_intacto` — las tres en `t`. **El `ALTER`
+  va DENTRO de ese `begin`** (corrección de la revisión adversaria 22-sep):
+  sin él la columna sigue en `numeric(10,4)`, el UPDATE de prueba se guarda
+  como 2.3333 y el ensayo "demuestra" lo contrario de lo que se quiere
+  probar. El backfill apaga `trg_vuelo_set_updated_at`
+  (el CAS de las ediciones offline lo lee) y no encola nada a Google Calendar
+  (`trg_vuelo_calendar_sync` no vigila esta columna ni el snapshot). El API
+  0.0.19 corre CON o SIN la migración: sin ella el motor ya multiplica y
+  snapshotea con 8 decimales (el snapshot es `jsonb`, no tiene precisión) y
+  solo la COLUMNA sigue recortando a 4 — `horasPactadasPersistidas` lee el más
+  preciso de los dos, así que el total tampoco se mueve. Tras aplicar:
+  `get_advisors` y re-guardar #322 desde el panel.
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

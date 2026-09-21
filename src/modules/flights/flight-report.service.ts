@@ -644,8 +644,17 @@ export class FlightReportService {
       pasajeros_nombres: nombresATexto(v.pasajeros_nombres),
       tarifa_tipo: (v.tarifa_tipo as string) ?? null,
       tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
+      // PRESENTACIÓN, no factor (22-sep-2026, invariante 22): desde que las
+      // horas pactadas se persisten con 8 decimales, la celda «HORAS» del
+      // Excel (`reporte_vuelo_xlsx`, que la escribe SIN formato de número)
+      // mostraría «2.33333333». Este reporte nunca multiplica estas horas
+      // —el dinero viaja ya calculado— así que se redondea a los 4 decimales
+      // de siempre. El factor exacto vive en `vuelo.tiempo_cobrable_hr` y en
+      // el snapshot.
       tiempo_cobrable_hr:
-        v.tiempo_cobrable_hr == null ? null : n(v.tiempo_cobrable_hr),
+        v.tiempo_cobrable_hr == null
+          ? null
+          : Math.round(n(v.tiempo_cobrable_hr) * 10000) / 10000,
       subtotal_usd: n(v.subtotal_vuelo_usd),
       tuas_usd: n(v.tuas_usd),
       tuas_detalle: tuasDetalle,
@@ -695,7 +704,14 @@ export class FlightReportService {
       // (`cobro_vuelo.metodo_cobro`) — jamás se pinta el del vuelo ahí.
       metodo_cobro: (v.metodo_cobro as string) ?? null,
       tramos,
-      horas_cotizadas_hr: horasCotizadas,
+      // A 4 decimales SOLO al salir (22-sep-2026, invariante 22): esta celda
+      // del Excel tampoco lleva formato de número y mostraría «2.33333333».
+      // `horasCotizadas` se conserva ENTERA arriba, que es la que divide en
+      // `gananciaXHrUsd` — aquí solo se pinta.
+      horas_cotizadas_hr:
+        horasCotizadas == null
+          ? null
+          : Math.round(horasCotizadas * 10000) / 10000,
       horas_voladas_hr: horasVoladas,
       horas_delta_hr:
         horasCotizadas != null && horasVoladas != null

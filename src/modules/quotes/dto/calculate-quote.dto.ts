@@ -674,7 +674,8 @@ export class CalculateQuoteDto {
 
   @ApiPropertyOptional({
     description:
-      'COBRABLE pactado a mano (hr): sustituye la SUMA final (vuelo + calzos + sobrevuelo y el mínimo de 1 hr). Vuelo y calzos siguen calculados e intocables; esto decide el total de horas que se cobran.',
+      'COBRABLE pactado a mano (hr): sustituye la SUMA final (vuelo + calzos + sobrevuelo y el mínimo de 1 hr). Vuelo y calzos siguen calculados e intocables; esto decide el total de horas que se cobran. ' +
+      'Se guarda con 8 decimales (22-sep-2026): manda los que necesites —2:20 son 2.33333333 hr— y el API normaliza y persiste EXACTAMENTE el número con el que multiplicó la tarifa; no se rechazan decimales de más.',
   })
   @IsOptional()
   @Type(() => Number)
