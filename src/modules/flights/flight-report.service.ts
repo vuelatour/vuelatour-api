@@ -643,6 +643,14 @@ export class FlightReportService {
       pasajeros: n(v.pasajeros),
       pasajeros_nombres: nombresATexto(v.pasajeros_nombres),
       tarifa_tipo: (v.tarifa_tipo as string) ?? null,
+      // TARIFA: viaja COMPLETA (6 decimales desde el 22-sep-2026, invariante
+      // 23) y NO se redondea a la salida, al revés que las horas de abajo.
+      // Verificado en `reporte_vuelo_xlsx.py`: esta celda pasa por
+      // `money_cell`, que le pone el formato `"$"#,##0.00` — Excel muestra
+      // $989.58 aunque el valor sea 989.583333 — y el PDF la imprime con
+      // `_money`. La celda de HORAS, en cambio, se escribe SIN formato: por
+      // eso aquella sí se recorta. Este reporte nunca multiplica la tarifa
+      // para componer dinero (todos los montos viajan ya calculados).
       tarifa_hora_usd: v.tarifa_hora_usd == null ? null : n(v.tarifa_hora_usd),
       // PRESENTACIÓN, no factor (22-sep-2026, invariante 22): desde que las
       // horas pactadas se persisten con 8 decimales, la celda «HORAS» del

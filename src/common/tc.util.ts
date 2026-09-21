@@ -35,17 +35,18 @@
  *    total TAL CUAL y no pasan por el TC.
  */
 
+import { redondearA } from './redondeo.util';
+
 /** Decimales canónicos de un tipo de cambio en este sistema. */
 export const TC_DECIMALES = 6;
 
-const FACTOR_TC = 10 ** TC_DECIMALES;
-
-/** Redondeo a 6 decimales (la precisión con la que la BD guarda un TC). */
+/**
+ * Redondeo a 6 decimales (la precisión con la que la BD guarda un TC).
+ * La mecánica vive en `redondeo.util` (compartida con `horas.util` y
+ * `tarifa.util`); el resultado es byte a byte el de siempre.
+ */
 export function round6(n: number): number {
-  if (!Number.isFinite(n)) return NaN;
-  const abs = Math.abs(n);
-  const r = Math.round((abs + Number.EPSILON) * FACTOR_TC) / FACTOR_TC;
-  return n < 0 ? -r : r;
+  return redondearA(n, TC_DECIMALES);
 }
 
 /** Redondeo a centavos (interno: la moneda siempre cierra en 2 decimales). */

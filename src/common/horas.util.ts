@@ -29,10 +29,10 @@
  * mientras que con 2.3333 daba $22,749.68 (32 centavos de menos).
  */
 
+import { decimalesSignificativos, redondearA } from './redondeo.util';
+
 /** Decimales canónicos de unas horas pactadas en este sistema. */
 export const HORAS_DECIMALES = 8;
-
-const FACTOR_HORAS = 10 ** HORAS_DECIMALES;
 
 /**
  * Media unidad del 4.º decimal: el error MÁXIMO que puede introducir un
@@ -43,12 +43,13 @@ const FACTOR_HORAS = 10 ** HORAS_DECIMALES;
  */
 export const HORAS_TOLERANCIA_ECO = 0.00005;
 
-/** Redondeo a 8 decimales (la precisión con la que la BD guarda las horas). */
+/**
+ * Redondeo a 8 decimales (la precisión con la que la BD guarda las horas).
+ * La mecánica vive en `redondeo.util` (compartida con `tc.util` y
+ * `tarifa.util`); el resultado es byte a byte el de siempre.
+ */
 export function round8(n: number): number {
-  if (!Number.isFinite(n)) return NaN;
-  const abs = Math.abs(n);
-  const r = Math.round((abs + Number.EPSILON) * FACTOR_HORAS) / FACTOR_HORAS;
-  return n < 0 ? -r : r;
+  return redondearA(n, HORAS_DECIMALES);
 }
 
 /**
@@ -69,11 +70,7 @@ export function normalizarHoras(v: unknown): number | null {
 
 /** Decimales SIGNIFICATIVOS de unas horas ya normalizadas (0…8). */
 function decimalesDe(v: number): number {
-  for (let d = 0; d < HORAS_DECIMALES; d++) {
-    const f = 10 ** d;
-    if (Math.round(v * f) / f === v) return d;
-  }
-  return HORAS_DECIMALES;
+  return decimalesSignificativos(v, HORAS_DECIMALES);
 }
 
 /**

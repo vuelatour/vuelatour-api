@@ -13,6 +13,7 @@ import type { EnvVars } from '../../config/env.schema';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
 import { modeloCotizadoDe } from '../../common/modelos-cotizados.util';
 import { horasPactadasPersistidas } from '../../common/horas.util';
+import { tarifaPersistida } from '../../common/tarifa.util';
 import { idAeronaveCotizada } from './aeronave-revision.util';
 import type { MapaSvgDto, MapaSvgEscalaDto } from './dto/mapa-svg.dto';
 import type { PreviewQuoteDto } from './dto/preview-quote.dto';
@@ -668,7 +669,18 @@ export class QuotesPdfService {
           (snap?.tiempos as Record<string, unknown> | undefined)?.cobrable_hr,
           quote.tiempo_cobrable_hr,
         ) ?? num(quote.tiempo_cobrable_hr),
-      tarifa_hora_usd: num(quote.tarifa_hora_usd),
+      // TARIFA DEL RECIBO (22-sep-2026, invariante 23): la MISMA con la que el
+      // motor multiplicó — el snapshot manda sobre la columna, que hasta la
+      // migración `20260922000002` sigue en `numeric(10,2)` y recorta
+      // 989.583333 a 989.58. pyservices la imprime con `_money` (2 decimales),
+      // así que la HOJA no cambia ni un carácter: lo que cambia es que el
+      // número que viaja es el persistido de verdad, igual que las horas de
+      // arriba. Respaldo a la columna sin snapshot (cotización legada).
+      tarifa_hora_usd:
+        tarifaPersistida(
+          (snap?.tarifa as Record<string, unknown> | undefined)?.usd_por_hora,
+          quote.tarifa_hora_usd,
+        ) ?? num(quote.tarifa_hora_usd),
       // Presentación configurable por cotización (27-ago).
       mostrar_tarifa_hora: quote.pdf_mostrar_tarifa === true,
       mostrar_itinerario: quote.pdf_mostrar_itinerario !== false,

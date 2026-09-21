@@ -1134,6 +1134,93 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       (el dinero viaja calculado), así que ahí son presentación. El factor
       exacto vive en la columna y en el snapshot.
 
+23. **TARIFA POR HORA CON 6 DECIMALES — el TERCER factor (22-sep-2026,
+    cotización #105).** Fuente única `src/common/tarifa.util.ts`
+    (`TARIFA_DECIMALES = 6`, `round6`, `normalizarTarifa`, `esEcoDeTarifa`,
+    `tarifaPersistida`). Cierra la familia de los invariantes 20 (T.C.) y 22
+    (horas): **los tres factores del precio se persisten EXACTAMENTE como se
+    multiplicaron**. La mecánica del redondeo es una sola
+    (`src/common/redondeo.util.ts`: `redondearA`,
+    `decimalesSignificativos`) y `tc.util`/`horas.util` delegan en ella sin
+    cambiar un solo export.
+    - **Síntoma**: la oficina cerró el SERVICIO AÉREO de #105 (2.4 hr) en
+      **$2,375.00 exactos** tecleando la tarifa personalizada **989.583333**
+      (= 2,375 ÷ 2.4). Reabrir la cotización y guardarla sin tocar nada lo
+      bajaba a **$2,374.99**. **Al verificarlo**: #105 lleva un descuento de
+      $200.00 y $0 de IVA, así que su `monto_total_usd` es **$2,175.00** —
+      el par correcto es 2,375.00 (subtotal) / 2,175.00 (total), y con la
+      tarifa truncada era 2,374.99 / 2,174.99. Sus 2.4 hr salen de la REGLA
+      (2.1 + 0.3 de calzos, sin `cobrable_proviene_de_override`) y son
+      exactas: por eso la guarda del backfill lo acepta.
+    - **Causa**: el motor multiplicaba con la precisión COMPLETA del DTO
+      (`tarifa_hora_override_usd`) pero persistía `round2` —
+      `calculo_snapshot.tarifa.usd_por_hora` y `vuelo.tarifa_hora_usd`
+      `numeric(10,2)` ⇒ 989.58—, y el panel / `quickAdjust` / los hijos de
+      grupo REHIDRATAN la tarifa desde ahí: 2.4 × 989.58 = 2,374.99.
+    - **Precisión**: `vuelo.tarifa_hora_usd` y
+      `cotizacion_version_history.tarifa_hora_usd` son `numeric(14,6)`
+      (migración `20260922000002_tarifa_hora_seis_decimales.sql`). Los
+      **CATÁLOGOS se quedan en 2 decimales a propósito**
+      (`aeronave.tarifa_hora_pub_usd`, `aeronave.tarifa_hora_broker_usd`,
+      `tarifa_cliente_aeronave.tarifa_hora_usd`): son precios de lista. Su
+      corolario, del que depende el anclaje: **la ÚNICA tarifa que puede
+      traer más de 2 decimales es la personalizada de una cotización**.
+    - **El motor normaliza ANTES de multiplicar**: la tarifa efectiva
+      —override manual, preferencial del cliente o catálogo— pasa por
+      `round6` y ESE número se persiste y se snapshotea. `round6` y no
+      `normalizarTarifa` porque la tarifa 0 del cliente INTERNO es legítima
+      («no se cobra», no «sin dato») y tiene que seguir llegando intacta al
+      candado de «aeronave sin tarifa configurada».
+    - **Rehidratar = leer la más precisa**: `tarifaPersistida` (snapshot vs
+      columna) en `quickAdjust`, en los hijos de un GRUPO
+      (`groups.avionCtxDeHijo`), en el PDF del cliente
+      (`quotes-pdf.service`) y en el PDF interno (`quotes-pdf-interno.util`).
+      Mientras la migración no esté aplicada, el snapshot (jsonb) ya lleva
+      los 6 decimales y la columna no: por eso el total **no se mueve ni
+      antes ni después de aplicarla**.
+    - **`anclarRevisionAlPersistido` ancla el ECO TRUNCADO** (revise,
+      quickAdjust y la vista previa pasan por ahí): un cliente que devuelve
+      989.58 sobre 989.583333 persistido no baja el subtotal. La banda es
+      **medio centavo por hora** (`TARIFA_TOLERANCIA_ECO = 0.005`, media
+      unidad de la precisión vieja) **y** el entrante debe traer MENOS
+      decimales. Una edición real —990, 989.59, o añadir precisión— se
+      respeta siempre. **SIN gate por `proviene_de_override`**: esa bandera
+      solo dice «el panel mandó una tarifa» y viaja en `true` hasta con
+      tarifas redondas (#26, $555.00); el gate real es que lo persistido
+      tenga MÁS decimales, cosa que una tarifa de catálogo nunca puede tener.
+      **Punto ciego asumido**, el mismo de las horas: un eco y un redondeo
+      DELIBERADO a 2 decimales son el mismo número.
+    - **La COMISIÓN del vendedor POR_HORA NO tiene este defecto** (verificado
+      en prod: 6 vuelos con `comision_vendedor_modo = 'POR_HORA'`, 0
+      descuadrados): el motor redondea `comision_vendedor_tarifa_hr` a 2
+      decimales **antes** de multiplicar, así que lo que persiste es lo que
+      multiplicó. `quotes.service.tarifa.spec.ts` congela ese orden — si
+      alguien lo invierte, reaparece el bug de #105 en la comisión.
+    - **El COSTO DEL OPERADOR EXTERNO no es esta tarifa**
+      (`resolverCostoExterno`: `costo_externo_monto/moneda/tc`); en un vuelo
+      externo la tarifa del snapshot es solo la REFERENCIA con la que se
+      cotiza al cliente y pasa por la misma regla.
+    - **Los lectores que PINTAN la tarifa siguen en 2 decimales** y se
+      dejaron como están: el desglose imprime «$989.58/hr», y pyservices usa
+      `_money` en el PDF del cliente, el interno, el del grupo y el reporte
+      por vuelo. **El reporte por vuelo NO recorta la tarifa a la salida**
+      (al revés que las horas): verificado en `reporte_vuelo_xlsx.py`, esa
+      celda pasa por `money_cell` (formato `"$"#,##0.00`) mientras que la de
+      HORAS se escribe sin formato. En el balance por avión y el Libro Dinero
+      la tarifa ya salía por `r2()`.
+    - **El backfill distingue «tarifa truncada» de «horas truncadas»** y esa
+      guarda es la parte delicada: de los 12 vuelos que hoy descuadran
+      `round(horas × tarifa, 2) <> subtotal`, **once son horas de la REGLA
+      truncadas a 4 decimales** (tarifas redondas: 650, 575, 900, 555, 600,
+      1600, 670, 850, 700, 1650, 950 — su dinero es correcto y el motor
+      re-deriva las horas al guardar) y **solo #105 es tarifa truncada**. El
+      falso positivo a vigilar es **#26** (3.4273 hr @ $555.00): también
+      «cuadraría» con una tarifa inventada de 554.996645 dentro de la
+      tolerancia. Lo que los separa es `round(horas, 2) = horas` — horas
+      exactas al centésimo ⇒ no pueden ser un `round4` truncado ⇒ el único
+      factor que pudo perderse es la tarifa. `tarifa.util.spec.ts` congela
+      los 12 casos reales.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -1723,8 +1810,17 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   devuelve `[]`) y la baja responde **503 `MIGRACION_PENDIENTE`** hasta que
   la función exista — nunca un borrado a medias. Tras aplicar: `get_advisors`
   (la tabla queda con RLS y sin políticas, solo service key).
-- **PENDIENTE DE APLICAR (22-sep-2026) — REQUIERE DRY-RUN**:
-  `20260922000001_horas_pactadas_ocho_decimales.sql` (invariante 22:
+- **APLICADA (verificada en prod el 22-sep-2026 vía MCP)**:
+  `20260922000001_horas_pactadas_ocho_decimales.sql`. `tiempo_cobrable_hr` es
+  `numeric(14,8)` en `vuelo` y en `cotizacion_version_history`, y el backfill
+  corrió con el resultado EXACTO que predecía su cabecera: los 12 vuelos
+  corregidos (columna y snapshot juntos — #188 y #222 en 1.15384615, #302 y
+  #254/#255/#301 en 2.33333333, #309 en 3.29696970, #313 en 3.20949231…) y
+  **#322 intacto en 2.3333** (su subtotal ya estaba dañado y el WHERE no lo
+  selecciona). Pendiente de negocio, no de BD: **re-guardar #322 desde el
+  panel** para que el motor lo devuelva a $1,400.00 / $1,624.00. La
+  descripción de abajo se conserva como registro de lo que hizo.
+- (histórico) `20260922000001_horas_pactadas_ocho_decimales.sql` (invariante 22:
   `tiempo_cobrable_hr` a `numeric(14,8)` en `vuelo` y
   `cotizacion_version_history` + backfill de 12 vuelos). NO crea triggers,
   pero ESCRIBE en `vuelo`, así que el guion en seco va en la CABECERA del
@@ -1743,6 +1839,35 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   solo la COLUMNA sigue recortando a 4 — `horasPactadasPersistidas` lee el más
   preciso de los dos, así que el total tampoco se mueve. Tras aplicar:
   `get_advisors` y re-guardar #322 desde el panel.
+- **PENDIENTE DE APLICAR (22-sep-2026) — REQUIERE DRY-RUN**:
+  `20260922000002_tarifa_hora_seis_decimales.sql` (invariante 23:
+  `tarifa_hora_usd` a `numeric(14,6)` en `vuelo` y
+  `cotizacion_version_history` + backfill de **1 vuelo**, #105). NO crea
+  triggers ni toca los catálogos de tarifa, pero ESCRIBE en `vuelo`, así que
+  el guion en seco va en la CABECERA del archivo: conteos antes/después (223
+  con tarifa · 12 descuadrados, verificados en prod el 22-sep), el veredicto
+  esperado de los 12 (1 «SE CORRIGE» + 11 «HORAS DE LA REGLA») y un ensayo
+  que corre **el CUERPO REAL de la migración** —las secciones 1) y 2) tal
+  cual, `do $$` incluido— dentro de `begin … rollback` con foto de TODA la
+  tabla antes y después: `filas_cambiadas` = 1 más `columna_admite_6`,
+  `snapshot_coincide`, `reproduce_subtotal`, `dinero_intacto` y
+  `updated_at_intacto`, las cinco en `t`, y la lista nominal de los 12
+  (solo #105 se mueve). Se corre el bloque REAL y no un UPDATE a mano
+  (corrección de la revisión adversaria 22-sep): el backfill es `plpgsql` y
+  un error de tipo dentro de un `do $$` es INVISIBLE para cualquier `select`
+  —la forma exacta del incidente del ENUM `moneda` del 15-sep—, así que un
+  ensayo que reescribe una fila a mano prueba la COLUMNA, no el BACKFILL.
+  **Los `ALTER` van DENTRO de ese `begin`** (sin ellos la columna sigue en
+  `numeric(10,2)`, el UPDATE de prueba se guardaría otra vez como 989.58 y
+  el ensayo demostraría lo contrario de lo que se quiere probar). El backfill apaga
+  `trg_vuelo_set_updated_at` (lo lee el CAS de las ediciones offline) y no
+  encola nada a Google Calendar (`trg_vuelo_calendar_sync` no vigila esta
+  columna ni el snapshot); `cotizacion_version_history` no tiene triggers y
+  sus filas NO se reescriben (son el acta de cada día). El API 0.0.20 corre
+  CON o SIN la migración: sin ella el motor ya multiplica y snapshotea con 6
+  decimales (el snapshot es `jsonb`, no tiene precisión) y solo la COLUMNA
+  sigue recortando a 2 — `tarifaPersistida` lee la más precisa de las dos,
+  así que el total tampoco se mueve. Tras aplicar: `get_advisors`.
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

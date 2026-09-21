@@ -13,6 +13,7 @@ import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { normalizarTc } from '../../common/tc.util';
 import { horasPactadasPersistidas } from '../../common/horas.util';
+import { tarifaPersistida } from '../../common/tarifa.util';
 import {
   movimientoDeSobre,
   MOV_LIGA_COLS,
@@ -2036,9 +2037,16 @@ export class GroupsService {
       rotaciones: this.rotacionesDe(h, plantillaLen) === 2 ? 2 : 1,
       piloto_id: h.piloto_id,
       copiloto_id: h.copiloto_id,
+      // TARIFA COMPLETA (22-sep-2026, invariante 23): la más precisa entre el
+      // snapshot y la columna del hijo (que sigue en `numeric(10,2)` hasta
+      // aplicar la migración `20260922000002`). Re-materializar el grupo
+      // recalcula el precio de cada hijo con ESTA tarifa — con una copia
+      // truncada a centavos, tocar cualquier cosa del grupo movía el subtotal
+      // de los hijos con tarifa personalizada (mismo defecto que #105).
       tarifa_hora_override_usd:
         snap.tarifa?.proviene_de_override === true
-          ? snap.tarifa.usd_por_hora
+          ? (tarifaPersistida(snap.tarifa.usd_por_hora, h.tarifa_hora_usd) ??
+            undefined)
           : undefined,
       // HORAS PACTADAS COMPLETAS (22-sep-2026, invariante 22): el más preciso
       // entre el snapshot y la columna del hijo. Re-materializar el grupo

@@ -51,6 +51,12 @@ import {
   normalizarHoras,
   round8,
 } from '../../common/horas.util';
+import {
+  esEcoDeTarifa,
+  normalizarTarifa,
+  round6 as round6Tarifa,
+  tarifaPersistida,
+} from '../../common/tarifa.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import {
   conflictoCapacidad,
@@ -430,18 +436,32 @@ export class QuotesService {
     // cliente para ESTA aeronave > tarifa default del avión (público/broker).
     // Cliente INTERNO: default 0 sin exigir tarifa (el override sigue
     // permitiendo cobrar una operación interna excepcional).
+    //
+    // PRECISIÓN ÚNICA DE LA TARIFA (22-sep-2026, caso #105 — invariante 23):
+    // la tarifa efectiva se NORMALIZA A 6 DECIMALES **antes** de multiplicar,
+    // venga del override manual, de la preferencial del cliente o del
+    // catálogo del avión, y ESE mismo número es el que se persiste
+    // (`tarifa.usd_por_hora`, `vuelo.tarifa_hora_usd` numeric(14,6)). Antes el
+    // motor multiplicaba con la precisión completa que tecleó la oficina
+    // (2.4 × 989.583333 = 2,375.00) y guardaba `round2` (989.58): al reabrir,
+    // el panel rehidrataba ESA tarifa y el total caía a 2,374.99 sin que
+    // nadie tocara nada. `round6` (no `normalizarTarifa`): la tarifa puede ser
+    // legítimamente 0 (cliente INTERNO) y ahí 0 significa "no se cobra", no
+    // "sin dato"; el `!tarifaHora` de abajo sigue atrapando el NaN de un
+    // catálogo vacío exactamente igual que antes.
     const tarifaPreferencial =
       dto.tarifa_hora_override_usd == null
         ? ctxCliente.tarifaPreferencial
         : null;
-    const tarifaHora =
+    const tarifaHora = round6Tarifa(
       dto.tarifa_hora_override_usd ??
-      tarifaPreferencial ??
-      (esInterno
-        ? 0
-        : dto.tipo_tarifa === TipoTarifa.PUBLICO
-          ? Number(aeronave.tarifa_hora_pub_usd)
-          : Number(aeronave.tarifa_hora_broker_usd));
+        tarifaPreferencial ??
+        (esInterno
+          ? 0
+          : dto.tipo_tarifa === TipoTarifa.PUBLICO
+            ? Number(aeronave.tarifa_hora_pub_usd)
+            : Number(aeronave.tarifa_hora_broker_usd)),
+    );
     if (!esInterno && (!tarifaHora || tarifaHora <= 0)) {
       throw new BadRequestException(
         `Aeronave ${aeronave.matricula} no tiene tarifa ${dto.tipo_tarifa} configurada y no se proveyó tarifa_hora_override_usd`,
@@ -819,6 +839,10 @@ export class QuotesService {
     }> = [
       {
         clave: 'TIEMPO_VUELO',
+        // PRESENTACIÓN (invariantes 22 y 23): las horas se imprimen con 4
+        // decimales y la tarifa con 2 aunque se hayan multiplicado con 8 y 6.
+        // El monto de la línea es el subtotal PERSISTIDO, no el producto de
+        // los dos números impresos.
         concepto: `Tiempo de vuelo · ${round4(tiempoCobrableHr)} hr × $${round2(tarifaHora)}/hr${
           minimoHoraAplicado ? ' (mínimo 1 hr)' : ''
         }`,
@@ -972,7 +996,13 @@ export class QuotesService {
       },
       tarifa: {
         tipo: dto.tipo_tarifa,
-        usd_por_hora: round2(tarifaHora),
+        // 6 decimales (ver `tarifaHora` arriba, invariante 23): la tarifa ES
+        // el otro factor del subtotal y se REHIDRATA (panel, quickAdjust,
+        // hijos de grupo) — se guarda EXACTAMENTE el número con el que se
+        // multiplicó, jamás una copia redondeada a centavos. Los TEXTOS del
+        // desglose y los PDF la siguen imprimiendo a 2 decimales
+        // («$989.58/hr»): eso es presentación.
+        usd_por_hora: tarifaHora,
         // != null (no !== undefined): mismo gate que la cadena de tarifa, para
         // que un null explícito no marque override y preferencial a la vez.
         proviene_de_override: dto.tarifa_hora_override_usd != null,
@@ -1409,6 +1439,38 @@ export class QuotesService {
         esEcoDeHorasPactadas(entrante, persistido)
       ) {
         dto.tiempo_cobrable_override_hr = persistido;
+      }
+    }
+    // TARIFA PERSONALIZADA: el ECO TRUNCADO se ancla a lo persistido
+    // (22-sep-2026, caso #105 — invariante 23). Hermano exacto del bloque de
+    // arriba, por el OTRO factor del subtotal: un cliente que leyó la tarifa
+    // guardada con la precisión vieja (panel anterior a este cambio, o la
+    // columna `numeric(10,2)` mientras la migración `20260922000002` no esté
+    // aplicada) la devuelve con 2 decimales, y recalcular con esa copia baja
+    // el subtotal ($2,375.00 → $2,374.99) sin que nadie haya tocado nada.
+    //
+    // SIN gate por `proviene_de_override`: esa bandera solo dice «el panel
+    // mandó una tarifa», y viaja en `true` hasta en cotizaciones con tarifa
+    // redonda (#26, $555.00) — no distingue nada. El gate real lo pone
+    // `esEcoDeTarifa`: solo se ancla si lo persistido tiene MÁS decimales que
+    // lo entrante, y las tarifas de CATÁLOGO (avión y preferencial del
+    // cliente) son `numeric(_,2)`, así que nunca pueden serlo.
+    if (dto.tarifa_hora_override_usd != null) {
+      const persistida = tarifaPersistida(
+        (
+          current.calculo_snapshot as {
+            tarifa?: { usd_por_hora?: unknown };
+          } | null
+        )?.tarifa?.usd_por_hora,
+        current.tarifa_hora_usd,
+      );
+      const entrante = normalizarTarifa(dto.tarifa_hora_override_usd);
+      if (
+        persistida != null &&
+        entrante != null &&
+        esEcoDeTarifa(entrante, persistida)
+      ) {
+        dto.tarifa_hora_override_usd = persistida;
       }
     }
   }
@@ -2714,6 +2776,7 @@ export class QuotesService {
         cobrable_hr?: number | null;
         cobrable_proviene_de_override?: boolean | null;
       };
+      tarifa?: { usd_por_hora?: number | null };
       tuas?: { usd_pax_default?: number | null };
       aeronave?: { id?: string | null };
     } | null;
@@ -2894,10 +2957,17 @@ export class QuotesService {
           ? Number(snapshot.tuas.usd_pax_default)
           : undefined,
       // Se conserva la economía pactada: misma tarifa/hora y mismo % de IVA.
+      // La tarifa, con los 6 decimales COMPLETOS (22-sep-2026, invariante 23):
+      // `tarifaPersistida` toma la más precisa entre el snapshot y la columna
+      // —que sigue en `numeric(10,2)` hasta aplicar la migración
+      // `20260922000002`—, así registrar un cobro o tocar un extra jamás
+      // recalcula el subtotal con una tarifa truncada (caso #105: 2.4 hr ×
+      // 989.58 = $2,374.99 contra los $2,375.00 persistidos).
       tarifa_hora_override_usd:
-        Number(current.tarifa_hora_usd) > 0
-          ? Number(current.tarifa_hora_usd)
-          : undefined,
+        tarifaPersistida(
+          snapshot?.tarifa?.usd_por_hora,
+          current.tarifa_hora_usd,
+        ) ?? undefined,
       iva_pct_override: Number(current.iva_pct),
       extras: dto.extras ?? (current.extras as never[]) ?? [],
       // Con redondeo automático, el ajuste base es SOLO el descuento (el

@@ -46,6 +46,7 @@ import {
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
 import { puntosRutaVisible } from '../../common/ruta-visible.util';
+import { tarifaPersistida } from '../../common/tarifa.util';
 import { estadoCobroSemaforo } from '../../common/semaforo-cobro.util';
 import {
   apoyosNivelVuelo,
@@ -293,7 +294,18 @@ export function armarCotizacionInternaPayload(
   // ---- Horas (snapshot.tiempos) ----
   const tiempoCobrable =
     num(tiempos?.cobrable_hr) ?? num(q.tiempo_cobrable_hr) ?? null;
-  const tarifaHora = num(tarifa?.usd_por_hora) ?? num(q.tarifa_hora_usd);
+  // TARIFA (22-sep-2026, invariante 23): la MÁS PRECISA entre el snapshot —que
+  // lleva los 6 decimales con los que el motor multiplicó— y la columna, que
+  // sigue en `numeric(10,2)` hasta aplicar la migración `20260922000002`. Se
+  // IMPRIME con `_money` (2 decimales) en pyservices, así que la hoja no
+  // cambia; lo que cambia es el `total_usd` por tramo de la tabla de abajo
+  // (`round2(tiempo_hr × tarifa)`), que ahora se acerca al servicio aéreo
+  // canónico en vez de alejarse — y su diferencia sigue viajando explícita en
+  // `tramos_ajuste_usd`, nunca escondida.
+  const tarifaHora =
+    tarifaPersistida(tarifa?.usd_por_hora, q.tarifa_hora_usd) ??
+    num(tarifa?.usd_por_hora) ??
+    num(q.tarifa_hora_usd);
   const vueloHr = num(tiempos?.vuelo_hr);
   const calzosHr = num(tiempos?.calzos_hr);
   const sobrevueloHr = num(tiempos?.sobrevuelo_hr);
