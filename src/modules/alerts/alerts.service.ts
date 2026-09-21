@@ -4,6 +4,11 @@ import { CATEGORIAS_GASTO_SIN_AVION } from '../../common/categoria-gasto.util';
 import { clientRequestIdEvento } from '../../common/columna-opcional.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
+  MANT_HITO_COLS,
+  NOTA_SERVICIO_AUTOMATICO,
+  hitoYaTieneOrden,
+} from '../../common/servicio-hito.util';
+import {
   diagnosticoGrupo,
   normalizarExtrasGrupo,
   type HijoDiagnostico,
@@ -50,6 +55,22 @@ export interface AlertConfig {
   roles: string[];
   dias_anticipacion: number[];
   horas_anticipacion: number | null;
+}
+
+/** Avión tal como lo mira el programa de servicio por horas. */
+interface AvionServicio {
+  id: string;
+  matricula: string;
+  servicio_intervalos: number[] | null;
+  servicio_horas_base: number | string | null;
+  activa?: boolean | null;
+}
+
+/** Etapa del programa cíclico (intervalo + nombre + tareas). */
+interface EtapaServicio {
+  intervalo_hr: number;
+  nombre: string | null;
+  tareas: string[];
 }
 
 function unwrap<T>(v: T | T[] | null | undefined): T | null {
@@ -377,6 +398,40 @@ export class AlertsService {
       await this.runDailyInner();
     } finally {
       this.barridoEnCurso = false;
+    }
+  }
+
+  /** Candado del barrido de servicio (una corrida a la vez): el de 10 min
+   *  puede tardar más que su periodo si la flota crece. */
+  private servicioHorasEnCurso = false;
+
+  /**
+   * RED DE SEGURIDAD del programa de servicio (20-sep-2026, caso XA-VGV).
+   *
+   * Antes el programa se revisaba UNA vez al día (08:00 Cancún) y entre que
+   * el avión cruzaba el umbral de 10 h y la orden aparecía podían pasar 24 h
+   * — con varios vuelos al día eso se come casi todo el margen. El 19-sep el
+   * cron corrió a las 08:00 con 2,238.8 h (faltaban 11.2), la oficina capturó
+   * los tacos del vuelo #295 a las 08:40 (2,240.2 ⇒ faltan 9.8) y a las 08:49
+   * Porfirio vio la leyenda SIN orden.
+   *
+   * El camino rápido es el HOOK de captura de tacómetro
+   * (`revisarServicioDeAvion`, desde `flights.service`); esto es la malla que
+   * recoge lo que ese hook no cubre (reasignar un tramo a otro avión, una
+   * escritura por un camino nuevo, un hook que falló). MISMO cuerpo, mismos
+   * candados: nunca duplica.
+   */
+  @Cron('*/10 * * * *', { timeZone: 'America/Cancun' })
+  async runServicioHoras(): Promise<void> {
+    // El barrido diario ya incluye esta regla: correr las dos a la vez sería
+    // pelear por el mismo insert (lo evita igual el candado por avión, pero
+    // mejor no gastar las consultas).
+    if (this.barridoEnCurso || this.servicioHorasEnCurso) return;
+    this.servicioHorasEnCurso = true;
+    try {
+      await this.safe('servicio_horas', (c) => this.checkServicioPorHoras(c));
+    } finally {
+      this.servicioHorasEnCurso = false;
     }
   }
 
@@ -766,30 +821,20 @@ export class AlertsService {
    * vivas NUNCA acumulan (el snapshot cae a la base capturada, casi siempre 0
    * — caso reportado 4 ago 2026: toda la flota en ceros). Se ancla al hobbs
    * ACTUAL: la base capturada se respeta y desde hoy acumula lo que vuele.
+   *
+   * El Hobbs sale de la FUENTE ÚNICA `hobbsDeAvion` → `currentHobbs`
+   * (revisión adversaria 20-sep-2026). Antes esta regla armaba el máximo con
+   * un `select … from escala` de TODA la flota SIN paginar —el mismo tope de
+   * 1000 de PostgREST que se corrigió en el programa de servicio— y aquí el
+   * número no solo se muestra: se ESCRIBE en `aeronave_horas_ref`, que es el
+   * ancla de las horas vivas (invariante 1). Un ancla demasiado baja infla
+   * las horas del componente para siempre. Además, con cero componentes por
+   * anclar (lo normal) ya no se lee ninguna escala.
    */
   private async anclarRefsComponentes(): Promise<void> {
-    // Hobbs por avión con herencia del vuelo (tramos sin avión propio).
-    const { data: escalas, error: escErr } = await this.supabase.service
-      .from('escala')
-      .select(
-        'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
-      )
-      .neq('vuelo.estado', 'CANCELADO');
-    if (escErr) throw new Error(escErr.message);
-    const hobbsPorAvion = new Map<string, number>();
-    for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
-      const id =
-        (e.aeronave_id as string | null) ??
-        (unwrap(e.vuelo as { aeronave_id?: string | null } | null)
-          ?.aeronave_id as string | null);
-      if (!id) continue;
-      for (const v of [e.taco_salida, e.taco_llegada]) {
-        if (v == null) continue;
-        const num = Number(v);
-        if (Number.isFinite(num))
-          hobbsPorAvion.set(id, Math.max(hobbsPorAvion.get(id) ?? 0, num));
-      }
-    }
+    // Memo por corrida: cada `currentHobbs` cuesta dos consultas paginadas y
+    // un avión suele traer motor(es) + hélice(s) sin anclar a la vez.
+    const hobbsCache = new Map<string, number>();
     for (const tabla of ['motor', 'helice'] as const) {
       const { data: comps, error } = await this.supabase.service
         .from(tabla)
@@ -798,7 +843,10 @@ export class AlertsService {
         .not('aeronave_id', 'is', null);
       if (error) throw new Error(error.message);
       for (const c of comps ?? []) {
-        const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
+        const hobbs = await this.hobbsDeAvion(
+          c.aeronave_id as string,
+          hobbsCache,
+        );
         const { error: upErr } = await this.supabase.service
           .from(tabla)
           .update({ aeronave_horas_ref: hobbs })
@@ -1103,9 +1151,243 @@ export class AlertsService {
    * el próximo servicio del programa cíclico o para agotar el TBO de un
    * motor/hélice (re-alerta a lo sumo una vez al mes por objetivo).
    */
+  /**
+   * Candado EN MEMORIA por AVIÓN del programa de servicio. El hook de captura
+   * de tacómetro y los crones (08:00 y cada 10 min) pueden coincidir en el
+   * mismo avión: sin esto, dos «no existe» simultáneos = dos órdenes para el
+   * mismo hito. Railway corre UNA réplica, así que el mutex en memoria basta
+   * (mismo razonamiento que `barridoEnCurso`).
+   */
+  private readonly servicioEnCursoPorAvion = new Set<string>();
+
+  /**
+   * Aviones a los que les llegó OTRA escritura de tacómetro MIENTRAS su
+   * revisión ya estaba corriendo (revisión adversaria 20-sep-2026).
+   *
+   * Sin esto, esa segunda lectura se descartaba en silencio: la corrida en
+   * curso pudo leer el Hobbs ANTES de que la escritura nueva se guardara, así
+   * que la que cruzaba el umbral no la veía NADIE y la orden se quedaba
+   * esperando al cron de 10 min. No es teórico: es EXACTAMENTE la forma del
+   * caso XA-VGV (la oficina capturó los tres tramos del vuelo #295 entre las
+   * 08:40 y las 08:42) y el outbox de la app sube sus capturas en ráfaga.
+   */
+  private readonly servicioPendientePorAvion = new Set<string>();
+
+  /** Tope de re-pasadas por llamada: con una ráfaga larga el cron de 10 min
+   *  es la red, no hace falta perseguir cada lectura en el mismo tick. */
+  private static readonly MAX_PASADAS_SERVICIO = 3;
+
+  /**
+   * REVISIÓN INMEDIATA del programa de servicio de UN avión (20-sep-2026).
+   *
+   * La llama `flights.service` después de CADA escritura de tacómetro que
+   * puede subir el Hobbs (captura del piloto, confirmación/ajuste de oficina,
+   * restaurar un tramo). Así la orden queda creada EN EL MOMENTO en que el
+   * avión entra a las 10 h del hito, no a las 08:00 del día siguiente.
+   *
+   * Es EXACTAMENTE el mismo cuerpo que corre el barrido de flota (mismo
+   * dedupe por existencia, mismo texto de notas, mismo dispatch con dedupe
+   * mensual, mismo espejo a Google): nunca puede crear una orden que el
+   * barrido no habría creado, ni duplicar la que ya existe.
+   *
+   * BEST-EFFORT ABSOLUTO: NUNCA lanza. Es un efecto secundario de guardar un
+   * tacómetro — si falla, la lectura del piloto ya quedó guardada y el cron
+   * de 10 min lo recoge.
+   */
+  async revisarServicioDeAvion(aeronaveId: string): Promise<void> {
+    try {
+      if (!aeronaveId) return;
+      // El barrido ya va a mirar toda la flota en esta misma corrida: dejarlo
+      // trabajar (y si este avión se le escapó, el cron de 10 min lo agarra).
+      if (this.barridoEnCurso) return;
+      if (this.servicioEnCursoPorAvion.has(aeronaveId)) {
+        // NO se tira la lectura: la corrida en curso pudo leer el Hobbs ANTES
+        // de esta escritura. Se anota y la corrida en curso la recoge al
+        // terminar (ver `servicioPendientePorAvion`).
+        this.servicioPendientePorAvion.add(aeronaveId);
+        return;
+      }
+      let pasadas = 0;
+      do {
+        // Nuestra pasada va a leer el Hobbs VIGENTE: lo anotado hasta aquí
+        // queda cubierto por ella.
+        this.servicioPendientePorAvion.delete(aeronaveId);
+        await this.revisarServicioDeAvionUnaVez(aeronaveId);
+        pasadas += 1;
+      } while (
+        this.servicioPendientePorAvion.has(aeronaveId) &&
+        pasadas < AlertsService.MAX_PASADAS_SERVICIO
+      );
+    } catch (err) {
+      this.logger.warn(
+        `revisarServicioDeAvion(${aeronaveId}) falló: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  /** UNA pasada del programa de servicio de un avión (la comparte el bucle
+   *  anti-carrera de `revisarServicioDeAvion`). */
+  private async revisarServicioDeAvionUnaVez(
+    aeronaveId: string,
+  ): Promise<void> {
+    const config = await this.getConfig('servicio_horas');
+    if (!config || !config.activa) return;
+    const { data: avion, error } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula, activa, servicio_intervalos, servicio_horas_base')
+      .eq('id', aeronaveId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    // Avión dado de baja: fuera del programa, igual que en el barrido
+    // (`.eq('activa', true)`).
+    if (!avion || avion.activa === false) return;
+    const etapas = await this.aircraft.etapasDeServicio(aeronaveId);
+    await this.revisarProgramaDeServicio(
+      config,
+      avion,
+      etapas,
+      dateOnly(new Date()).slice(0, 7),
+      config.horas_anticipacion ?? 10,
+      new Map(),
+    );
+  }
+
+  /**
+   * Hobbs (horas actuales) de un avión con la FUENTE ÚNICA del panel:
+   * `AircraftService.currentHobbs` — el MISMO número que la tarjeta «Horas
+   * actuales (Hobbs)» y que alimenta «faltan N h».
+   *
+   * Antes esta regla armaba el Hobbs con un `select … from escala` de toda la
+   * flota SIN paginar: PostgREST corta en 1000 filas EN SILENCIO y, pasado
+   * ese tope, el máximo podía salir viejo y el servicio no dispararse nunca
+   * (misma familia que el anti-cap-1000 de `aircraft.aptitudBulk`).
+   * `currentHobbs` va paginado, respeta la herencia del avión del vuelo
+   * cuando el tramo no trae `aeronave_id` y deja fuera vuelos y tramos
+   * cancelados.
+   */
+  private async hobbsDeAvion(
+    aeronaveId: string,
+    cache: Map<string, number>,
+  ): Promise<number> {
+    const memo = cache.get(aeronaveId);
+    if (memo != null) return memo;
+    const hobbs = await this.aircraft.currentHobbs(aeronaveId);
+    cache.set(aeronaveId, hobbs);
+    return hobbs;
+  }
+
+  /**
+   * CUERPO ÚNICO del programa de servicio por horas de UN avión: lo comparten
+   * el barrido de flota (crones de 08:00 y de 10 min) y el hook de captura de
+   * tacómetro. Deja creada la orden PROGRAMADA sin fecha y avisa.
+   *
+   * El sistema DEJA CREADO el mantenimiento (PROGRAMADO, sin fecha): el
+   * mecánico solo confirma cuándo entra al taller (app/panel) y con fecha
+   * aparece en el calendario y en los recordatorios por fecha. Idempotente
+   * por EXISTENCIA (no por `alerta_emitida`) con el criterio canónico de
+   * `servicio-hito.util` — el MISMO que decide `proximo_servicio.orden` en la
+   * ficha del avión.
+   */
+  private async revisarProgramaDeServicio(
+    config: AlertConfig,
+    avion: AvionServicio,
+    etapas: EtapaServicio[],
+    mes: string,
+    umbralHoras: number,
+    hobbsCache: Map<string, number>,
+  ): Promise<void> {
+    const aeronaveId = avion.id;
+    // Otro camino (cron o hook) ya está revisando este avión: su insert es el
+    // mismo que haría este. Duplicar sería el único error imperdonable aquí.
+    if (this.servicioEnCursoPorAvion.has(aeronaveId)) return;
+    this.servicioEnCursoPorAvion.add(aeronaveId);
+    try {
+      const hobbs = await this.hobbsDeAvion(aeronaveId, hobbsCache);
+      if (hobbs <= 0) return;
+      const prox = this.aircraft.proximoServicioDetallado(
+        avion.servicio_intervalos ?? [],
+        Number(avion.servicio_horas_base ?? 0),
+        hobbs,
+        etapas,
+      );
+      if (!prox || prox.faltan > umbralHoras) return;
+
+      const { data: mantsHito, error: mhErr } = await this.supabase.service
+        .from('mantenimiento')
+        .select(MANT_HITO_COLS)
+        .eq('aeronave_id', aeronaveId);
+      if (mhErr) throw new Error(mhErr.message);
+      const yaExiste = hitoYaTieneOrden(mantsHito ?? [], prox);
+
+      let mantenimientoId: string | null = null;
+      if (!yaExiste) {
+        const nombreServicio = prox.nombre ?? `Servicio de ${prox.intervalo} h`;
+        const { data: creado, error: crErr } = await this.supabase.service
+          .from('mantenimiento')
+          .insert({
+            aeronave_id: aeronaveId,
+            estado: 'PROGRAMADO',
+            tipo: 'PROGRAMADO',
+            descripcion: nombreServicio,
+            horas_programadas: prox.a_las,
+            etapa_intervalo_hr: prox.intervalo,
+            notas: `${NOTA_SERVICIO_AUTOMATICO} por el programa de servicio: faltan ${prox.faltan} h para el hito de ${prox.a_las} h (tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`,
+          })
+          .select('id')
+          .single();
+        if (crErr) {
+          // No tirar el barrido de toda la flota por un insert: la alerta
+          // sale igual y el siguiente run reintenta la creación.
+          this.logger.warn(
+            `No se pudo crear el mantenimiento automático de ${avion.matricula}: ${crErr.message}`,
+          );
+        } else {
+          mantenimientoId = creado.id as string;
+          // Espejo a Google Calendar (C1, 12-sep-2026): este mantenimiento
+          // nace SIN fecha, así que hoy no agenda nada — el hook está por
+          // contrato (todo camino de escritura de `mantenimiento` lo llama)
+          // y para que el día que el cron nazca con fecha, el calendario de
+          // la oficina lo tenga sin tocar nada más. Best-effort.
+          void this.calendarSync
+            .syncMantenimiento(mantenimientoId)
+            .catch(() => undefined);
+        }
+      }
+      const tareasTxt =
+        prox.tareas.length > 0
+          ? ` Incluye: ${prox.tareas.slice(0, 4).join(', ')}${
+              prox.tareas.length > 4 ? '…' : ''
+            }.`
+          : '';
+      await this.dispatch(
+        config,
+        `servicio:${aeronaveId}:${prox.a_las}:${mes}`,
+        {
+          tipo: 'mantenimiento_programado',
+          titulo: `Servicio por horas cerca: ${avion.matricula}`,
+          cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
+          data: {
+            aeronave_id: aeronaveId,
+            a_las: prox.a_las,
+            ...(mantenimientoId ? { mantenimiento_id: mantenimientoId } : {}),
+          },
+          link: `/admin/aircraft/${aeronaveId}`,
+        },
+      );
+    } finally {
+      this.servicioEnCursoPorAvion.delete(aeronaveId);
+    }
+  }
+
   private async checkServicioPorHoras(config: AlertConfig): Promise<void> {
     const umbralHoras = config.horas_anticipacion ?? 10;
     const mes = dateOnly(new Date()).slice(0, 7);
+    // Memo del Hobbs por avión DE ESTA CORRIDA (el cálculo va paginado y
+    // cuesta dos consultas por avión): la usan el programa de servicio y el
+    // TBO de componentes.
+    const hobbsPorAvion = new Map<string, number>();
 
     const { data: aviones, error } = await this.supabase.service
       .from('aeronave')
@@ -1113,38 +1395,12 @@ export class AlertsService {
       .eq('activa', true);
     if (error) throw new Error(error.message);
 
-    // Hobbs por avión (máximo tacómetro de vuelos no cancelados) en una consulta.
-    const { data: escalas } = await this.supabase.service
-      .from('escala')
-      .select(
-        'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
-      )
-      .neq('vuelo.estado', 'CANCELADO');
-    const hobbsPorAvion = new Map<string, number>();
-    for (const e of (escalas ?? []) as Array<Record<string, unknown>>) {
-      // Tramo sin avión propio (asignación por tramo): hereda el del vuelo.
-      const id =
-        (e.aeronave_id as string | null) ??
-        (unwrap(e.vuelo as { aeronave_id?: string | null } | null)
-          ?.aeronave_id as string | null);
-      if (!id) continue;
-      for (const v of [e.taco_salida, e.taco_llegada]) {
-        if (v == null) continue;
-        const num = Number(v);
-        if (Number.isFinite(num))
-          hobbsPorAvion.set(id, Math.max(hobbsPorAvion.get(id) ?? 0, num));
-      }
-    }
-
     // Tareas de cada etapa (una consulta para toda la flota): el aviso dice
     // QUÉ incluye el servicio, no solo el número.
     const { data: etapasRows } = await this.supabase.service
       .from('aeronave_servicio_etapa')
       .select('aeronave_id, intervalo_hr, nombre, tareas');
-    const etapasPorAvion = new Map<
-      string,
-      Array<{ intervalo_hr: number; nombre: string | null; tareas: string[] }>
-    >();
+    const etapasPorAvion = new Map<string, EtapaServicio[]>();
     for (const e of (etapasRows ?? []) as Array<Record<string, unknown>>) {
       const lista = etapasPorAvion.get(e.aeronave_id as string) ?? [];
       lista.push({
@@ -1156,111 +1412,21 @@ export class AlertsService {
     }
 
     for (const a of aviones ?? []) {
-      const hobbs = hobbsPorAvion.get(a.id as string) ?? 0;
-      if (hobbs <= 0) continue;
-      const prox = this.aircraft.proximoServicioDetallado(
-        (a.servicio_intervalos as number[] | null) ?? [],
-        Number(a.servicio_horas_base ?? 0),
-        hobbs,
-        etapasPorAvion.get(a.id as string) ?? [],
-      );
-      if (prox && prox.faltan <= umbralHoras) {
-        // El sistema DEJA CREADO el mantenimiento (PROGRAMADO, sin fecha):
-        // el mecánico solo confirma cuándo entra al taller (app/panel) y con
-        // fecha aparece en el calendario y en los recordatorios por fecha.
-        // Idempotente por EXISTENCIA (no por alerta_emitida): mismo avión +
-        // mismo hito (horas_programadas) en cualquier estado — un COMPLETADO
-        // del hito también cuenta (el avión aún no rebasa el hito y el
-        // próximo cálculo sigue apuntando ahí); una entrada MANUAL abierta de
-        // la misma etapa sin horas también (no duplicar la del mecánico).
-        const { data: mantsHito, error: mhErr } = await this.supabase.service
-          .from('mantenimiento')
-          .select(
-            'id, estado, horas_programadas, etapa_intervalo_hr, fecha_realizada, horas_aeronave',
-          )
-          .eq('aeronave_id', a.id as string);
-        if (mhErr) throw new Error(mhErr.message);
-        const cerca = (v: unknown, obj: number) => {
-          const n = v == null ? null : Number(v);
-          return n != null && Number.isFinite(n) && Math.abs(n - obj) < 0.05;
-        };
-        const yaExiste = (mantsHito ?? []).some((m) => {
-          if (cerca(m.horas_programadas, prox.a_las)) return true;
-          if (m.estado === 'COMPLETADO' || m.fecha_realizada != null) {
-            // Servicio de la MISMA etapa ya HECHO dentro del ciclo actual
-            // (entró a horas ∈ (hito − intervalo, hito]): el hito está
-            // cubierto aunque el hobbs no lo rebase todavía — no re-crear
-            // lo que el mecánico acaba de terminar (verificación 26-ago).
-            const ha =
-              m.horas_aeronave == null ? null : Number(m.horas_aeronave);
-            return (
-              cerca(m.etapa_intervalo_hr, prox.intervalo) &&
-              ha != null &&
-              Number.isFinite(ha) &&
-              ha > prox.a_las - prox.intervalo &&
-              ha <= prox.a_las + 0.05
-            );
-          }
-          return (
-            m.horas_programadas == null &&
-            cerca(m.etapa_intervalo_hr, prox.intervalo)
-          );
-        });
-        let mantenimientoId: string | null = null;
-        if (!yaExiste) {
-          const nombreServicio =
-            prox.nombre ?? `Servicio de ${prox.intervalo} h`;
-          const { data: creado, error: crErr } = await this.supabase.service
-            .from('mantenimiento')
-            .insert({
-              aeronave_id: a.id,
-              estado: 'PROGRAMADO',
-              tipo: 'PROGRAMADO',
-              descripcion: nombreServicio,
-              horas_programadas: prox.a_las,
-              etapa_intervalo_hr: prox.intervalo,
-              notas: `Creado automáticamente por el programa de servicio: faltan ${prox.faltan} h para el hito de ${prox.a_las} h (tacómetro ${hobbs}). Confirma la fecha de entrada al taller.`,
-            })
-            .select('id')
-            .single();
-          if (crErr) {
-            // No tirar el barrido de toda la flota por un insert: la alerta
-            // sale igual y el siguiente run reintenta la creación.
-            this.logger.warn(
-              `No se pudo crear el mantenimiento automático de ${a.matricula as string}: ${crErr.message}`,
-            );
-          } else {
-            mantenimientoId = creado.id as string;
-            // Espejo a Google Calendar (C1, 12-sep-2026): este mantenimiento
-            // nace SIN fecha, así que hoy no agenda nada — el hook está por
-            // contrato (todo camino de escritura de `mantenimiento` lo llama)
-            // y para que el día que el cron nazca con fecha, el calendario de
-            // la oficina lo tenga sin tocar nada más. Best-effort.
-            void this.calendarSync
-              .syncMantenimiento(mantenimientoId)
-              .catch(() => undefined);
-          }
-        }
-        const tareasTxt =
-          prox.tareas.length > 0
-            ? ` Incluye: ${prox.tareas.slice(0, 4).join(', ')}${
-                prox.tareas.length > 4 ? '…' : ''
-              }.`
-            : '';
-        await this.dispatch(
+      // Un avión no tumba a los demás: la orden del siguiente sí se crea.
+      try {
+        await this.revisarProgramaDeServicio(
           config,
-          `servicio:${a.id as string}:${prox.a_las}:${mes}`,
-          {
-            tipo: 'mantenimiento_programado',
-            titulo: `Servicio por horas cerca: ${a.matricula as string}`,
-            cuerpo: `Faltan ${prox.faltan} hrs para el servicio de ${prox.intervalo} hrs (a las ${prox.a_las}). Tacómetro actual: ${hobbs}.${tareasTxt} El mantenimiento ya quedó PROGRAMADO: confirma la fecha de entrada al taller.`,
-            data: {
-              aeronave_id: a.id,
-              a_las: prox.a_las,
-              ...(mantenimientoId ? { mantenimiento_id: mantenimientoId } : {}),
-            },
-            link: `/admin/aircraft/${a.id as string}`,
-          },
+          a,
+          etapasPorAvion.get(a.id as string) ?? [],
+          mes,
+          umbralHoras,
+          hobbsPorAvion,
+        );
+      } catch (err) {
+        this.logger.warn(
+          `Programa de servicio de ${(a.matricula as string) ?? (a.id as string)} falló: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
         );
       }
     }
@@ -1293,7 +1459,10 @@ export class AlertsService {
 
         const tbo = Number(c.tbo_horas ?? 0);
         if (tbo > 0) {
-          const hobbs = hobbsPorAvion.get(c.aeronave_id as string) ?? 0;
+          const hobbs = await this.hobbsDeAvion(
+            c.aeronave_id as string,
+            hobbsPorAvion,
+          );
           const estado = this.aircraft.componenteEstado(c, hobbs, true);
           const restantes = estado.tbo_restante ?? tbo;
           const umbralTbo = Math.max(umbralHoras, 25);

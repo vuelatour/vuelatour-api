@@ -1,5 +1,6 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { AirportsModule } from '../airports/airports.module';
+import { AlertsModule } from '../alerts/alerts.module';
 import { CalendarModule } from '../calendar/calendar.module';
 import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { ExpirationsModule } from '../expirations/expirations.module';
@@ -16,6 +17,10 @@ import { FlightsService } from './flights.service';
 @Module({
   imports: [
     AirportsModule,
+    // Programa de servicio por horas al capturar un tacómetro (20-sep-2026).
+    // forwardRef por higiene: AlertsModule no importa FlightsModule hoy, pero
+    // la dependencia es un efecto secundario y no debe amarrar el arranque.
+    forwardRef(() => AlertsModule),
     CalendarModule,
     ConfiguracionModule,
     ExpirationsModule,

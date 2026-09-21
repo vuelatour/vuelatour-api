@@ -13,6 +13,11 @@ import {
   tiempoPlaneador,
 } from '../../common/horas-componente.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
+import {
+  MANT_HITO_COLS,
+  ordenAbiertaDelHito,
+  type MantenimientoHitoRow,
+} from '../../common/servicio-hito.util';
 import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
 import {
@@ -91,7 +96,7 @@ export class AircraftService {
       motorsRes,
       helicesMetRes,
       segurosMetRes,
-      tallerRes,
+      mantsRes,
       blocking,
       escalas,
       cobrosRes,
@@ -117,12 +122,16 @@ export class AircraftService {
         .from('aeronave_seguro')
         .select('vigente_hasta')
         .eq('aeronave_id', id),
+      // Mantenimientos del avión: de aquí salen DOS cosas que antes se leían
+      // por separado — el semáforo "en taller" y la ORDEN que cubre el
+      // próximo hito de servicio (`proximo_servicio.orden`, 20-sep-2026).
+      // Una sola lectura con las columnas del criterio canónico
+      // (`servicio-hito.util`): el dedupe del check y esta tarjeta tienen que
+      // decidir con EXACTAMENTE los mismos datos.
       this.supabase.service
         .from('mantenimiento')
-        .select('id')
-        .eq('aeronave_id', id)
-        .eq('estado', 'EN_TALLER')
-        .limit(1),
+        .select(MANT_HITO_COLS)
+        .eq('aeronave_id', id),
       this.expirations.findBlockingExpirations({ aeronaveId: id }),
       // Asignación por tramo (misma regla que horasVoladas/currentHobbs):
       // filtrar solo por vuelo.aeronave_id atribuía horas de tramos volados
@@ -162,13 +171,15 @@ export class AircraftService {
     if (motorsRes.error) throw new Error(motorsRes.error.message);
     if (helicesMetRes.error) throw new Error(helicesMetRes.error.message);
     if (segurosMetRes.error) throw new Error(segurosMetRes.error.message);
-    if (tallerRes.error) throw new Error(tallerRes.error.message);
+    if (mantsRes.error) throw new Error(mantsRes.error.message);
     if (cobrosRes.error) throw new Error(cobrosRes.error.message);
     if (gastosRes.error) throw new Error(gastosRes.error.message);
     if (squawksRes.error) throw new Error(squawksRes.error.message);
     if (enVueloRes.error) throw new Error(enVueloRes.error.message);
 
-    const enTaller = (tallerRes.data ?? []).length > 0;
+    const mantenimientos = (mantsRes.data ??
+      []) as unknown as MantenimientoHitoRow[];
+    const enTaller = mantenimientos.some((m) => m.estado === 'EN_TALLER');
 
     // Utilización: suma de horas (taco_llegada - taco_salida) y # de vuelos.
     let horasTotal = 0;
@@ -289,7 +300,10 @@ export class AircraftService {
       Number,
     );
     const baseServicio = Number(aeronave.servicio_horas_base ?? 0);
-    const etapasServicio = await this.etapasDeServicio(id);
+    const [etapasServicio, avisoAutomatico] = await Promise.all([
+      this.etapasDeServicio(id),
+      this.avisoAutomaticoServicio(),
+    ]);
     const prox = this.proximoServicioDetallado(
       intervalos,
       baseServicio,
@@ -318,6 +332,17 @@ export class AircraftService {
             horas_objetivo: prox.a_las,
             faltan_hr: prox.faltan,
             tareas: prox.tareas,
+            // ADITIVO (20-sep-2026, pedido de Porfirio): la tarjeta decía
+            // "faltan 9.8 h" y nada más, y parecía que el aviso era solo
+            // ENUNCIATIVO. Con `orden` el panel puede decir si la orden ya
+            // existe y en qué va ("falta confirmar fecha" / "en taller").
+            // MISMO criterio que el dedupe del programa automático
+            // (`servicio-hito.util`): null = el hito todavía no tiene orden.
+            orden: ordenAbiertaDelHito(mantenimientos, prox),
+            // ADITIVO: ¿el programa automático está encendido y con qué
+            // margen? Sin esto el panel prometía «se genera sola» aunque la
+            // regla estuviera apagada, y daba por hecho un umbral de 10 h.
+            aviso_automatico: avisoAutomatico,
           }
         : null,
       // Distingue "sin programa capturado" de "sin datos": sin esto el KPI
@@ -456,10 +481,14 @@ export class AircraftService {
       Number,
     );
     const base = Number(aeronave.servicio_horas_base ?? 0);
-    const etapas = await this.etapasDeServicio(id);
+    const [etapas, avisoAutomatico] = await Promise.all([
+      this.etapasDeServicio(id),
+      this.avisoAutomaticoServicio(),
+    ]);
 
-    // Motores y hélices con horas de vida vivas + estatus de overhaul (TBO).
-    const [motoresRes, helicesRes] = await Promise.all([
+    // Motores y hélices con horas de vida vivas + estatus de overhaul (TBO),
+    // y las órdenes de mantenimiento (para `proximo_servicio.orden`).
+    const [motoresRes, helicesRes, mantsRes] = await Promise.all([
       this.supabase.service
         .from('motor')
         .select(
@@ -474,6 +503,10 @@ export class AircraftService {
         )
         .eq('aeronave_id', id)
         .order('posicion'),
+      this.supabase.service
+        .from('mantenimiento')
+        .select(MANT_HITO_COLS)
+        .eq('aeronave_id', id),
     ]);
     const componentes = [
       ...(motoresRes.data ?? []).map((m) => ({
@@ -497,6 +530,13 @@ export class AircraftService {
       })),
     ];
 
+    const proxHistorial = this.proximoServicioDetallado(
+      intervalos,
+      base,
+      horasActuales,
+      etapas,
+    );
+
     return {
       horas_actuales: Number(horasActuales.toFixed(1)),
       // Tiempo TOTAL del planeador (base capturada + delta del taco); con
@@ -510,12 +550,16 @@ export class AircraftService {
       servicio_intervalos: intervalos,
       servicio_horas_base: base,
       servicio_etapas: etapas,
-      proximo_servicio: this.proximoServicioDetallado(
-        intervalos,
-        base,
-        horasActuales,
-        etapas,
-      ),
+      // `orden` ADITIVO (20-sep-2026): misma regla y mismo helper que la
+      // tarjeta del KPI — el hito no puede "tener orden" en una vista y no
+      // tenerla en la otra.
+      proximo_servicio: proxHistorial
+        ? {
+            ...proxHistorial,
+            orden: ordenAbiertaDelHito(mantsRes.data ?? [], proxHistorial),
+            aviso_automatico: avisoAutomatico,
+          }
+        : null,
       componentes,
       historial: items,
     };
@@ -564,6 +608,43 @@ export class AircraftService {
       intervalo,
       faltan: r1(aLas - horas),
     };
+  }
+
+  /**
+   * ¿El programa AUTOMÁTICO de servicio está encendido y con qué margen?
+   * (`alerta_config.servicio_horas` — revisión adversaria 20-sep-2026).
+   *
+   * Viaja en `proximo_servicio.aviso_automatico` para que la tarjeta del
+   * panel no prometa lo que no va a pasar: con la regla APAGADA nadie crea la
+   * orden (ni el hook del tacómetro, ni el cron de 10 min, ni el diario), y
+   * decir «se genera sola en unos minutos» sería repetir la queja de Porfirio
+   * («entonces es enunciativa»). El margen también sale de aquí: el panel lo
+   * tenía en una constante de 10 h y bajarlo en Configuración lo dejaba
+   * mintiendo.
+   *
+   * `null` = NO se pudo leer: el panel no afirma nada (se comporta como hoy).
+   * Sin fila en `alerta_config`, `safe()` salta la regla ⇒ apagada.
+   */
+  private async avisoAutomaticoServicio(): Promise<{
+    activo: boolean;
+    umbral_hr: number;
+  } | null> {
+    try {
+      const { data, error } = await this.supabase.service
+        .from('alerta_config')
+        .select('activa, horas_anticipacion')
+        .eq('clave', 'servicio_horas')
+        .maybeSingle();
+      if (error) return null;
+      if (!data) return { activo: false, umbral_hr: 10 };
+      const umbral = Number(data.horas_anticipacion ?? 10);
+      return {
+        activo: data.activa === true,
+        umbral_hr: Number.isFinite(umbral) && umbral > 0 ? umbral : 10,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /** Etapas del programa de servicio (intervalo + nombre + tareas). */

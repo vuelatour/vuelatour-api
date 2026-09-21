@@ -2,10 +2,13 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
+  forwardRef,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
@@ -53,6 +56,7 @@ import {
 import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { PilotsService } from '../pilots/pilots.service';
+import { AlertsService } from '../alerts/alerts.service';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -408,7 +412,65 @@ export class FlightsService {
     // Alta del piloto EXTERNO por nombre desde la reserva (9-sep-2026): mismo
     // camino que POST /pilots/externo. PilotsModule no depende de flights.
     private readonly pilots: PilotsService,
+    // Programa de servicio por horas EN EL MOMENTO (20-sep-2026, caso
+    // XA-VGV): cada escritura de tacómetro que puede subir el Hobbs avisa a
+    // `alerts` para que la orden se cree al cruzar el umbral y no 24 h
+    // después. @Optional + forwardRef como en `expenses.service` con
+    // ConciliacionService: es un efecto SECUNDARIO best-effort — sin el
+    // módulo (specs, arranque parcial) la captura del taco ni se entera.
+    // Hoy NO hay ciclo (AlertsModule no importa FlightsModule), el forwardRef
+    // es higiene para que esta dependencia no amarre el orden de arranque.
+    @Optional()
+    @Inject(forwardRef(() => AlertsService))
+    private readonly alerts?: AlertsService,
   ) {}
+
+  /**
+   * CHOKEPOINT del programa de servicio por horas (20-sep-2026).
+   *
+   * Toda escritura de tacómetro que pueda SUBIR el Hobbs del avión pasa por
+   * aquí: `captureTaco` (piloto, oficina y outbox de la app), `confirmTaco`
+   * (confirmación/ajuste de oficina) y `restoreEscala` (un tramo cancelado
+   * vuelve con sus lecturas). Con eso la orden de servicio nace en el mismo
+   * minuto en que el avión entra a las 10 h del hito.
+   *
+   * NO pasan por aquí, a propósito:
+   *  - `fillTacoGaps` / la propagación llegada→salida y la salida del tramo 1:
+   *    solo COPIAN lecturas que ya existen, así que el máximo del avión no
+   *    cambia.
+   *  - `clearTaco` y las correcciones a la BAJA: bajan, nunca suben.
+   *  - Mover un tramo YA VOLADO a otro avión (`assignEscala`,
+   *    `reassignAircraft`, `combinarVuelos`): no es una escritura de
+   *    tacómetro. Eso —y cualquier camino nuevo que se nos escape— lo recoge
+   *    la red de seguridad: `AlertsService.runServicioHoras`, cada 10 min.
+   *
+   * Best-effort total: no espera (el piloto no paga la latencia), nunca
+   * lanza, y `revisarServicioDeAvion` ya trae sus propios candados
+   * anti-duplicado por avión.
+   */
+  private avisarProgramaDeServicio(
+    aeronaveEscala: string | null | undefined,
+    vueloId: string,
+  ): void {
+    if (!this.alerts) return;
+    void (async () => {
+      try {
+        // Avión del tramo CON HERENCIA (regla de tacos): un tramo sin avión
+        // propio es del avión del vuelo. Comparar el id crudo apagaría el
+        // aviso en silencio.
+        const avion =
+          aeronaveEscala ?? (await this.aeronaveDelVuelo(vueloId));
+        if (!avion) return;
+        await this.alerts!.revisarServicioDeAvion(avion);
+      } catch (err) {
+        this.logger.warn(
+          `Aviso al programa de servicio falló (vuelo ${vueloId}): ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    })();
+  }
 
   private readonly logger = new Logger(FlightsService.name);
 
@@ -7592,6 +7654,15 @@ export class FlightsService {
         }`,
       );
     }
+    // Programa de servicio EN EL MOMENTO (20-sep-2026): esta lectura pudo
+    // meter al avión en las últimas 10 h antes del hito — la orden se crea
+    // ya, no en el barrido de mañana a las 08:00.
+    if (dto.taco_salida !== undefined || dto.taco_llegada !== undefined) {
+      this.avisarProgramaDeServicio(
+        current.aeronave_id as string | null,
+        current.vuelo_id as string,
+      );
+    }
     return finalRow;
   }
 
@@ -8174,6 +8245,13 @@ export class FlightsService {
         // best-effort: la notificación nunca bloquea la confirmación
       }
     })();
+    // Oficina ajustó/confirmó una lectura: mismo hook que en captureTaco.
+    if (dto.taco_salida !== undefined || dto.taco_llegada !== undefined) {
+      this.avisarProgramaDeServicio(
+        current.aeronave_id as string | null,
+        current.vuelo_id as string,
+      );
+    }
     return data;
   }
 
@@ -10553,6 +10631,12 @@ export class FlightsService {
     } catch {
       /* best-effort */
     }
+    // El tramo restaurado puede traer sus tacos completos (se canceló DESPUÉS
+    // de volar): esas lecturas vuelven a contar para el Hobbs del avión.
+    this.avisarProgramaDeServicio(
+      (data?.aeronave_id as string | null) ?? null,
+      row.vuelo_id as string,
+    );
     return data!;
   }
 

@@ -922,6 +922,100 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       $100,000.00» y «Registrar cobro» decía «Total ≈ MXN $99,999.81», porque
       el operador tecleó 16.991632 y la BD guardaba 16.9916.
 
+21. **PROGRAMA DE SERVICIO POR HORAS: la orden se crea AL CRUZAR EL UMBRAL,
+    no al día siguiente (20-sep-2026, caso XA-VGV).** Porfirio: «no se
+    generó, mejor dicho solo marca una leyenda. entonces es enunciativa y
+    posterior la agrego». La generación automática SÍ funcionaba; el defecto
+    era la LATENCIA: `checkServicioPorHoras` solo corría en `runDaily`
+    (08:00 Cancún). El 19-sep a las 08:00 faltaban 11.2 h; a las 08:40-08:42
+    la oficina capturó los tacos del vuelo #295 (2,238.8 → 2,240.2), la
+    tarjeta —que calcula EN VIVO— dijo «faltan 9.8 h» y a las 08:49 no había
+    orden. Con varios vuelos al día, 24 h de latencia se comen el margen de
+    10 h entero.
+    - **Cuerpo ÚNICO por avión**: `AlertsService.revisarProgramaDeServicio`.
+      Lo comparten el barrido de flota y el hook — mismo dedupe, mismo texto
+      de `notas`, mismo `dispatch` (dedupe mensual
+      `servicio:<avión>:<hito>:<mes>`) y mismo espejo a Google. Cualquier
+      cambio va AHÍ: dos cuerpos = dos órdenes o ninguna.
+    - **Tres disparadores, un solo insert posible**: (a) `runDaily` 08:00;
+      (b) `runServicioHoras` cada 10 min (`@Cron('*/10 * * * *')`, RED DE
+      SEGURIDAD: corre solo `safe('servicio_horas', …)` y se salta si hay
+      barrido en curso); (c) `AlertsService.revisarServicioDeAvion(id)`,
+      PÚBLICO y best-effort (NUNCA lanza), que llama `flights.service` tras
+      cada escritura de tacómetro. Candados: `barridoEnCurso` (global, ya
+      existía) + `servicioEnCursoPorAvion` (Set EN MEMORIA por avión,
+      check-and-add síncrono al entrar al cuerpo). Railway = 1 réplica, así
+      que el mutex en memoria basta.
+    - **UNA CAPTURA NUNCA SE DESCARTA** (revisión adversaria 20-sep-2026):
+      cuando el hook encuentra el avión con su revisión EN VUELO, ya no
+      devuelve en silencio — anota el avión en `servicioPendientePorAvion` y
+      la corrida en curso vuelve a mirarlo al terminar (bucle acotado a
+      `MAX_PASADAS_SERVICIO = 3`). Sin eso la corrida en curso pudo leer el
+      Hobbs ANTES de esa escritura y la lectura que cruzaba el umbral no la
+      veía NADIE: la orden se quedaba esperando al cron de 10 min. Es la forma
+      EXACTA del caso XA-VGV (tres tramos capturados entre 08:40 y 08:42) y la
+      del outbox de la app, que sube sus capturas en ráfaga. El spec
+      «la lectura que cruza el umbral NO se pierde» lo reproduce con una
+      puerta sobre la lectura de escalas y falla sin el bucle.
+    - **Chokepoint del hook**: `FlightsService.avisarProgramaDeServicio`
+      (privado, fire-and-forget, resuelve el avión del tramo CON HERENCIA
+      `escala.aeronave_id ?? vuelo.aeronave_id`). Lo llaman las TRES
+      escrituras que pueden SUBIR el Hobbs: `captureTaco` (piloto, oficina y
+      outbox de la app), `confirmTaco` (ajuste de oficina) y `restoreEscala`
+      (un tramo cancelado vuelve con sus lecturas). NO lo llaman, a
+      propósito: `fillTacoGaps` y la propagación llegada→salida (solo COPIAN
+      lecturas existentes: el máximo no cambia), `clearTaco` y las
+      correcciones a la baja (bajan), y mover un tramo ya volado a otro avión
+      (`assignEscala`/`reassignAircraft`/`combinarVuelos`: no es escritura de
+      taco) — eso y cualquier camino nuevo lo recoge el cron de 10 min.
+      `flights.service.servicio-horas.spec.ts` congela que esos tres métodos
+      sigan llamando al hook.
+    - **DI**: `FlightsModule` importa `forwardRef(() => AlertsModule)` y
+      `FlightsService` inyecta `@Optional() @Inject(forwardRef(() =>
+      AlertsService))` (mismo patrón que `expenses`↔`conciliacion`). Sin el
+      módulo (specs, arranque parcial) la captura del taco ni se entera.
+    - **El Hobbs del check = el Hobbs de la tarjeta**: `hobbsDeAvion` usa
+      `AircraftService.currentHobbs` (memoizado por corrida). Antes el check
+      armaba el Hobbs con un `select … from escala` de TODA la flota SIN
+      paginar: PostgREST corta en 1000 filas en silencio y, pasado ese tope,
+      el máximo podía salir viejo y el servicio no dispararse NUNCA (misma
+      familia que el anti-cap-1000 de `aptitudBulk`). `currentHobbs` va
+      paginado (`fetchTodas`), hereda el avión del vuelo y deja fuera vuelos
+      y tramos cancelados. **`anclarRefsComponentes` usa la MISMA fuente**
+      (revisión adversaria 20-sep-2026): armaba su máximo con OTRO `select …
+      from escala` de toda la flota sin paginar, y ahí el número no se
+      muestra — se ESCRIBE en `aeronave_horas_ref`, el ancla de las horas
+      vivas (invariante 1), y un ancla baja infla las horas del componente
+      para siempre. De paso, sin componentes por anclar (lo normal) ya no lee
+      ninguna escala. NINGUNA regla de `alerts` calcula el Hobbs por su
+      cuenta.
+    - **Fuente única del dedupe**: `src/common/servicio-hito.util.ts` (PURO,
+      con specs). `mantenimientoCubreHito` = mismo hito por
+      `horas_programadas` ±0.05 en CUALQUIER estado, **o** servicio de la
+      misma etapa ya COMPLETADO dentro del ciclo (`horas_aeronave ∈ (hito −
+      intervalo, hito + 0.05]`), **o** entrada MANUAL abierta de la misma
+      etapa sin horas. `NOTA_SERVICIO_AUTOMATICO` ('Creado automáticamente')
+      lo ESCRIBE el insert y lo LEE `orden.automatica`: una sola constante.
+    - **`proximo_servicio.orden` (ADITIVO)** en `aircraft.metrics` Y en
+      `aircraft.tacometroHistorial`: `{id, estado: PROGRAMADO|EN_TALLER,
+      fecha_programada: string|null, automatica: boolean} | null` = la orden
+      ABIERTA que cubre el hito, con el MISMO helper
+      (`ordenAbiertaDelHito`). `null` = el hito aún no tiene orden viva (una
+      COMPLETADA cubre el dedupe pero NO es orden pendiente). El panel ya no
+      pinta solo «faltan N h». Los dos sitios leen `mantenimiento` con
+      `MANT_HITO_COLS`; en `metrics` esa MISMA lectura es la que decide
+      `airworthiness.en_taller` (antes era una consulta aparte).
+    - **`proximo_servicio.aviso_automatico` (ADITIVO, revisión adversaria
+      20-sep-2026)**: `{activo: boolean, umbral_hr: number} | null`, leído de
+      `alerta_config.servicio_horas` (`AircraftService.avisoAutomaticoServicio`,
+      best-effort). El panel PROMETE «la orden se genera sola en unos
+      minutos», y esa promesa solo vale si la regla está ENCENDIDA y si el
+      margen es el mismo de los dos lados; el panel lo tenía en una constante
+      de 10 h. Con `activo:false` la tarjeta dice la verdad («La orden NO se
+      crea sola · hay que capturarla») en vez de repetir la queja de Porfirio.
+      `null` = no se pudo leer ⇒ el panel NO afirma nada (se comporta como
+      hoy); sin fila en `alerta_config`, `safe()` salta la regla ⇒ apagada.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -930,7 +1024,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Crones: aviso de tacos vencidos (push al piloto, sin escrituras)
   `*/10 * * * *`; resumen nocturno de tacos `45 4 * * *` UTC (23:45 Cancún);
   vuelos zombi `55 4 * * *`; alertas diarias `0 8 * * *` con
-  `timeZone: America/Cancun`; recordatorios de eventos NO-vuelo
+  `timeZone: America/Cancun`; programa de servicio por horas
+  `*/10 * * * *` Cancún (`runServicioHoras`, red de seguridad del hook de
+  tacómetro — invariante 21); recordatorios de eventos NO-vuelo
   (`recordatorio_evento` al responsable): 90 min antes cada minuto
   (`runEventoRecordatorios`, dedupe `evento_90m:<evento>:<fecha al minuto>`
   — reagendar vuelve a avisar) y víspera `0 18 * * *` Cancún
