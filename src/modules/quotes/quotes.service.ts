@@ -47,6 +47,10 @@ import {
   type TramoCotizado,
   type TramosBase,
 } from './tramos-cotizados.util';
+// FUENTE ÚNICA del costo por tramo (22-sep-2026): la comparte el PDF interno
+// (`quotes-pdf-interno.util`). El panel NUNCA recalcula `tiempo × tarifa`,
+// `tramos_ajuste_usd` ni el motivo del ajuste.
+import { costearTramos } from './tramos-costeados.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { FlightsService } from '../flights/flights.service';
 import { EmailService } from '../notifications/email.service';
@@ -59,6 +63,7 @@ import {
 } from '../../common/grupo-contexto.util';
 import { Rol } from '../../common/types/auth.types';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
 import { normalizarTc } from '../../common/tc.util';
 import {
   esEcoDeHorasPactadas,
@@ -269,6 +274,19 @@ const PERNOCTA_COSTO_DEFAULT_USD = 150;
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, millas_nauticas_one_way, es_redondo_auto, num_aterrizajes, pasajeros, pasajeros_nombres, pase_abordar, tiempo_cobrable_hr, tarifa_tipo, tarifa_hora_usd, subtotal_vuelo_usd, tuas_usd, iva_pct, iva_usd, monto_total_usd, viaticos_pernocta_usd, extras_total_usd, ajuste_final_usd, comision_vendedor_usd, comision_vendedor_nombre, comision_vendedor_modo, comision_vendedor_tarifa_hr, tc_usd_mxn, monto_total_mxn, metodo_cobro, metodo_cobro_detalle, pago_anticipado_req, cotizacion_abierta, pdf_mostrar_tarifa, pdf_mostrar_itinerario, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), extras, estado_permiso, fecha_solicitud, fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, fecha_cancelacion, motivo_cancelacion, google_calendar_id, facturado, cobrado, notas, notas_internas, calculo_snapshot, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
+
+/**
+ * Columnas del DETALLE de una cotización = `VUELO_COLS` + lo que solo el
+ * detalle necesita. `created_by` NO entra a `VUELO_COLS` a propósito: esa
+ * constante la comparten `list()`, `findById` y tres selects más, y ampliarla
+ * cambiaría la forma de la fila para todos (y para los specs que la
+ * congelan). El embed `usuario!created_by(nombre)` resuelve el nombre de quien
+ * cotizó en la MISMA consulta: `cotizado_por` no cuesta un round-trip extra.
+ * `as const` a propósito: sin él el literal se degrada a `string` y
+ * supabase-js pierde el tipo de TODA la fila.
+ */
+const VUELO_COLS_DETALLE =
+  `${VUELO_COLS}, created_by, creador:usuario!created_by(nombre)` as const;
 
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
@@ -971,6 +989,56 @@ export class QuotesService {
           total_mxn_nativo: tuasMxnNativo,
         };
 
+    // ---- TRAMOS COSTEADOS (22-sep-2026, TODO ADITIVO) ----
+    // La hoja INTERNA del panel replica la tabla del Excel de la oficina
+    // (`RUTA · FECHA · MILLAS · TIEMPO · COSTO/HR · TOTAL POR TRAMO`) y la
+    // pinta MIENTRAS se teclea. El importe por tramo NO se calcula en el
+    // panel: sale del MISMO helper puro que imprime el PDF interno
+    // (`tramos-costeados.util`), o habría dos fuentes del mismo número y la
+    // pantalla podría decir una cifra y el PDF otra del mismo vuelo.
+    // `tiempo_hr` YA incluye el calzo de 0.15 h del tramo.
+    const tramosBase = route.escalas
+      ? route.escalas.map((leg, i) => ({
+          orden: i + 1,
+          origen: leg.origen_iata,
+          destino: leg.destino_iata,
+          millas: round2(leg.millas_nauticas),
+          pasajeros: leg.pasajeros,
+          es_ferry: leg.es_ferry,
+          tiempo_hr:
+            velocidadKts > 0
+              ? round4(
+                  leg.millas_nauticas / velocidadKts + CALZOS_HR_POR_ATERRIZAJE,
+                )
+              : 0,
+          tuas_usd: round2(tramosTuas[i] ?? 0),
+          requiere_pernocta: leg.requiere_pernocta,
+          pernocta_usd: round2(leg.pernocta_costo_usd),
+          tipo_parada: leg.tipo_parada,
+          servicio_notas: leg.servicio_notas,
+          // Puede ser NULL ("no viajó en el DTO"): el snapshot NO lo fuerza
+          // a false — el PDF de todos modos prioriza la escala VIVA
+          // (escalasVisiblesPdf) y null ahí cae al snapshot sin ocultar.
+          pdf_oculto: leg.pdf_oculto,
+        }))
+      : null;
+    // El ajuste `servicio aéreo canónico − Σ tramos` viaja EXPLÍCITO con su
+    // motivo (horas pactadas / sobrevuelo / hora mínima / redondeo): jamás se
+    // reparte entre tramos ni se toca el desglose canónico (invariante 3).
+    const tramosCosteados = tramosBase
+      ? costearTramos({
+          tramos: tramosBase,
+          tarifaHora,
+          servicioAereoUsd: subtotalR,
+          horas: {
+            tiempo_cobrable_hr: tiempoCobrableHr,
+            sobrevuelo_hr: sobrevueloHr,
+            hora_minima_aplicada: minimoHoraAplicado,
+            cobrable_override: cobrableOverride != null,
+          },
+        })
+      : null;
+
     return {
       // Siempre el avión del catálogo (en externos, la REFERENCIA de tarifa;
       // la ficha del avión AJENO vive en vuelo.avion_externo_*).
@@ -1027,30 +1095,19 @@ export class QuotesService {
       },
       tuas: tuasBlock,
       // Desglose por tramo (null en single-leg/REDONDO simple).
-      tramos: route.escalas
-        ? route.escalas.map((leg, i) => ({
-            orden: i + 1,
-            origen: leg.origen_iata,
-            destino: leg.destino_iata,
-            millas: round2(leg.millas_nauticas),
-            pasajeros: leg.pasajeros,
-            es_ferry: leg.es_ferry,
-            tiempo_hr:
-              velocidadKts > 0
-                ? round4(
-                    leg.millas_nauticas / velocidadKts +
-                      CALZOS_HR_POR_ATERRIZAJE,
-                  )
-                : 0,
-            tuas_usd: round2(tramosTuas[i] ?? 0),
-            requiere_pernocta: leg.requiere_pernocta,
-            pernocta_usd: round2(leg.pernocta_costo_usd),
-            tipo_parada: leg.tipo_parada,
-            servicio_notas: leg.servicio_notas,
-            // Puede ser NULL ("no viajó en el DTO"): el snapshot NO lo fuerza
-            // a false — el PDF de todos modos prioriza la escala VIVA
-            // (escalasVisiblesPdf) y null ahí cae al snapshot sin ocultar.
-            pdf_oculto: leg.pdf_oculto,
+      // ADITIVOS desde el 22-sep-2026 — `tarifa_usd_hr`, `tiempo_hhmm` y
+      // `total_usd` por tramo: la columna «TOTAL POR TRAMO» del Excel de la
+      // oficina, calculada por `tramos-costeados.util` (la MISMA que imprime
+      // el PDF interno). Se PERSISTEN en `calculo_snapshot` a propósito: así
+      // la hoja interna de una cotización guardada LEE el importe con el que
+      // se cotizó en vez de re-multiplicar (y el PDF interno, que ya prefería
+      // `tramos[].total_usd` cuando existe, imprime exactamente eso).
+      tramos: tramosBase
+        ? tramosBase.map((t, i) => ({
+            ...t,
+            tarifa_usd_hr: tramosCosteados?.tramos[i]?.tarifa_hora_usd ?? null,
+            tiempo_hhmm: tramosCosteados?.tramos[i]?.tiempo_hhmm ?? null,
+            total_usd: tramosCosteados?.tramos[i]?.total_usd ?? null,
           }))
         : null,
       iva: {
@@ -1160,6 +1217,20 @@ export class QuotesService {
               )
             : null,
       },
+      // ---- PIE de la tabla de tramos (ADITIVO, al FINAL a propósito) ----
+      // Van después de `meta` para que el `calculo_snapshot` persistido sea
+      // el de siempre + estas 5 llaves, en ese orden: el snapshot viejo es
+      // un PREFIJO exacto del nuevo (invariante 3 — ni el desglose ni los
+      // totales se mueven un byte).
+      // `null` cuando NO hay tabla por tramo (ruta de un solo tramo legada):
+      // un 0 ahí convertiría TODO el servicio aéreo en un "ajuste" que no
+      // existe.
+      tramos_total_usd: tramosCosteados?.tramos_total_usd ?? null,
+      tramos_tiempo_total_hr: tramosCosteados?.tramos_tiempo_total_hr ?? null,
+      tramos_tiempo_total_hhmm:
+        tramosCosteados?.tramos_tiempo_total_hhmm ?? null,
+      tramos_ajuste_usd: tramosCosteados?.tramos_ajuste_usd ?? null,
+      tramos_ajuste_motivo: tramosCosteados?.tramos_ajuste_motivo ?? null,
     };
   }
 
@@ -1765,7 +1836,7 @@ export class QuotesService {
   async findById(id: string) {
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select(VUELO_COLS)
+      .select(VUELO_COLS_DETALLE)
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -1800,7 +1871,19 @@ export class QuotesService {
     // distintos, la venta del avión se reparte entre ellos. Se pasan TODAS
     // las escalas (la fuente única excluye las canceladas).
     const participacion = await this.participacionAvionesDe(data, escalas);
-    return { ...data, escalas, particion_ingreso, ...participacion };
+    // QUIÉN COTIZÓ (ADITIVO, 22-sep-2026, hoja interna del panel): nombre de
+    // `vuelo.created_by`. Nunca un uuid ni un nombre inventado — usuario
+    // borrado, nombre vacío o relación sin resolver ⇒ null (misma regla que
+    // `registrado_por_nombre` de los cobros). La relación cruda `creador` no
+    // sale en la respuesta: el contrato es el nombre.
+    const { creador, ...fila } = data;
+    return {
+      ...fila,
+      cotizado_por: nombreDeRelacionUsuario(creador),
+      escalas,
+      particion_ingreso,
+      ...participacion,
+    };
   }
 
   async findVersions(vueloId: string) {

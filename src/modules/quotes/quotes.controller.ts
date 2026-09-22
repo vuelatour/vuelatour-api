@@ -32,6 +32,25 @@ import { QuotesService } from './quotes.service';
 import { QuotesPdfService } from './quotes-pdf.service';
 import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 
+/**
+ * Roles que pueden ver la COTIZACIÓN INTERNA (22-sep-2026). Sin SOCIO ni
+ * PILOTO: el dato interno (costo por tramo, comisión del vendedor, cobros con
+ * su neto, notas internas) no se le enseña a quien no puede imprimirlo.
+ *
+ * Es UNA constante a propósito: la comparten `POST :id/pdf-interno` (el PDF) y
+ * `GET :id/interno` (el mismo payload en JSON para la pantalla). Si algún día
+ * se le abre la puerta a un rol más, se abre en los DOS a la vez — con dos
+ * listas escritas a mano, la pantalla y el PDF podrían divergir y alguien
+ * vería en el panel lo que el PDF le niega. `quotes.controller.spec` congela
+ * que las dos rutas sigan apuntando a esta misma lista.
+ */
+export const ROLES_PDF_INTERNO = [
+  Rol.ADMIN,
+  Rol.COORDINADOR,
+  Rol.FACTURACION,
+  Rol.ANALISTA,
+] as const;
+
 @ApiTags('Quotes')
 @ApiBearerAuth()
 @Controller({ path: 'quotes', version: '1' })
@@ -152,6 +171,19 @@ export class QuotesController {
   })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
     return this.quotes.findById(id);
+  }
+
+  @Get(':id/interno')
+  @Roles(...ROLES_PDF_INTERNO)
+  @ApiOperation({
+    summary:
+      'HOJA INTERNA de la cotización en JSON (22-sep-2026): EXACTAMENTE el mismo payload que arma el PDF «Cotización interna» (POST :id/pdf-interno) pero SIN generar PDF, para que la pantalla del cotizador pinte lo mismo que se imprime. Incluye tramos costeados (total por tramo + ajuste con su motivo), desglose canónico enriquecido, TUAS cobradas, comisión y pago al vendedor, cobros con comisión bancaria/neto/conciliación, notas internas y cotizado_por. MISMOS roles que el PDF interno: sin SOCIO ni PILOTO (el dato interno no se le muestra a quien no puede imprimirlo). Solo lectura: no persiste nada.',
+  })
+  interno(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.quotesPdfInterno.payload(id, c);
   }
 
   @Get(':id/versions')
@@ -276,7 +308,7 @@ export class QuotesController {
   }
 
   @Post(':id/pdf-interno')
-  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
+  @Roles(...ROLES_PDF_INTERNO)
   @ApiOperation({
     summary:
       'PDF «Cotización interna» v2 (USO INTERNO, una hoja, sin fotos): SOLO lo de la cotización — fecha del vuelo, tabla de tramos (ruta con ciudad · fecha · millas · tiempo con calzos · costo/hr · total), desglose canónico con comisión del vendedor, TUAS cobradas, cobros con comisión bancaria/neto/conciliación y notas internas. Sin operación (tacos), partición, gastos ni CFDI: eso vive en el reporte del vuelo. Jamás se manda al cliente. Sin SOCIO ni PILOTO.',

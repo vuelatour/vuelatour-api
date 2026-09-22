@@ -59,6 +59,20 @@ import type {
   CotizacionInternaTramoCotizadoPdf,
   CotizacionInternaTuaCobradaPdf,
 } from '../pyservices/pyservices.service';
+// FUENTE ÚNICA del costo por tramo (22-sep-2026): la comparte
+// `POST /quotes/calculate`, para que la pantalla interna del panel pinte
+// EXACTAMENTE los importes que imprime este PDF (riesgo 10 del diseño:
+// dos fuentes del mismo número).
+import {
+  consolidarTramosCosteados,
+  costearTramos,
+  costoDeTramo,
+  horasAHhmm,
+  type ConsolidadoTramosCosteados,
+  type HorasDelAjuste,
+} from './tramos-costeados.util';
+
+export { horasAHhmm };
 
 // ===== Insumos (lo que carga el servicio) =====
 
@@ -224,17 +238,6 @@ function fichaTexto(f: {
 }): string | null {
   const t = [str(f.modelo), str(f.matricula)].filter(Boolean).join(' · ');
   return t || null;
-}
-
-/** Horas decimales → "hh:mm" (1.3 → "01:18", 0.4 → "00:24"); nunca negativo. */
-export function horasAHhmm(h: number): string {
-  const m = Math.max(0, Math.round(h * 60));
-  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
-}
-
-/** Horas para texto: hasta 2 decimales sin ceros de relleno ("0.5", "2", "1.25"). */
-function horasTexto(h: number): string {
-  return String(Number(h.toFixed(2)));
 }
 
 /**
@@ -536,58 +539,43 @@ export function armarCotizacionInternaPayload(
         (str(e.origen_iata) ?? '').toUpperCase() === o &&
         (str(e.destino_iata) ?? '').toUpperCase() === d,
     );
+  // Horas que EXPLICAN el ajuste `servicio aéreo − Σ tramos` (no lo calculan).
+  const horasDelAjuste: HorasDelAjuste = {
+    tiempo_cobrable_hr: tiempoCobrable,
+    sobrevuelo_hr: sobrevueloHr,
+    hora_minima_aplicada: horaMinima,
+    cobrable_override: cobrableOverride,
+  };
   let tramosCot: CotizacionInternaTramoCotizadoPdf[];
   let puntosRuta: string[];
+  let pieTramos: ConsolidadoTramosCosteados;
   if (tramosSnap.length > 0) {
-    let ultimaFecha: string | null = null;
-    tramosCot = tramosSnap.map((t, idx) => {
-      const orden = num(t.orden) ?? idx + 1;
-      const o = (str(t.origen) ?? '').toUpperCase();
-      const d = (str(t.destino) ?? '').toUpperCase();
-      const esc = escalaDeTramo(orden, o, d);
-      // Día del tramo: plan de la escala → fecha de pared del PDF → el día
-      // del tramo anterior (intermedios del mismo día) → día del vuelo.
-      const fecha =
-        diaSeguro(esc?.fecha_salida_plan) ??
-        diaSeguro(esc?.pdf_fecha) ??
-        ultimaFecha ??
-        fechaVuelo;
-      ultimaFecha = fecha;
-      const tiempoHr = round4(num(t.tiempo_hr) ?? 0);
-      // Tarifa por tramo solo si el snapshot algún día la trae (multi-avión
-      // en el precio sigue pendiente): hoy es la ÚNICA del vuelo.
-      const tarifaTramo = num(t.tarifa_usd_hr) ?? tarifaHora;
-      const totalSnap = num(t.total_usd) ?? num(t.costo_usd);
-      const total =
-        totalSnap != null
-          ? round2(totalSnap)
-          : tarifaTramo != null
-            ? round2(tiempoHr * tarifaTramo)
-            : 0;
-      const esFerry = t.es_ferry === true;
-      const origenNombre = nombreDeIata(o);
-      const destinoNombre = nombreDeIata(d);
-      return {
-        orden: idx + 1,
-        ruta: `${origenNombre}-${destinoNombre}`,
-        origen_iata: o,
-        destino_iata: d,
-        origen_nombre: origenNombre,
-        destino_nombre: destinoNombre,
-        fecha,
-        millas: num(t.millas),
-        tiempo_hr: tiempoHr,
-        tiempo_hhmm: horasAHhmm(tiempoHr),
-        tarifa_hora_usd: tarifaTramo,
-        total_usd: total,
-        pax: esFerry ? 0 : num(t.pasajeros),
-        es_ferry: esFerry,
-        pernocta: t.requiere_pernocta === true,
-        pernocta_usd: num(t.pernocta_usd) ?? 0,
-        tuas_usd: num(t.tuas_usd) ?? 0,
-        consolidado: false,
-      };
+    // COSTEO: fuente única `tramos-costeados.util` (la misma que alimenta el
+    // `breakdown` de /quotes/calculate). Aquí solo se INYECTA la
+    // presentación que necesita BD/catálogos: el día de pared del tramo y el
+    // nombre corto de la ciudad.
+    const costeados = costearTramos({
+      tramos: tramosSnap,
+      tarifaHora,
+      servicioAereoUsd: montoTiempoVuelo,
+      horas: horasDelAjuste,
+      fechaVuelo,
+      // Día del tramo: plan de la escala → fecha de pared del PDF (el helper
+      // completa la cascada con el día del tramo anterior y el del vuelo).
+      fechaBaseDeTramo: (orden, o, d) => {
+        const esc = escalaDeTramo(orden, o, d);
+        return diaSeguro(esc?.fecha_salida_plan) ?? diaSeguro(esc?.pdf_fecha);
+      },
+      nombreDeIata,
     });
+    tramosCot = costeados.tramos;
+    pieTramos = {
+      tramos_tiempo_total_hr: costeados.tramos_tiempo_total_hr,
+      tramos_tiempo_total_hhmm: costeados.tramos_tiempo_total_hhmm,
+      tramos_total_usd: costeados.tramos_total_usd,
+      tramos_ajuste_usd: costeados.tramos_ajuste_usd,
+      tramos_ajuste_motivo: costeados.tramos_ajuste_motivo,
+    };
     puntosRuta = puntosRutaVisible(
       tramosCot.map((t) => ({
         origen_iata: t.origen_iata,
@@ -626,11 +614,10 @@ export function armarCotizacionInternaPayload(
         : null);
     // Con snapshot (tiempos reales) el total se arma como en la tabla; sin
     // snapshot no hay tiempos por tramo: el servicio aéreo del vuelo tal cual.
+    // Mismo `costoDeTramo` de la tabla (fuente única).
     const total = snap
-      ? tarifaHora != null
-        ? round2(tiempoHr * tarifaHora)
-        : 0
-      : montoTiempoVuelo;
+      ? costoDeTramo(tiempoHr, tarifaHora)
+      : costoDeTramo(tiempoHr, tarifaHora, montoTiempoVuelo);
     const o = puntosRuta[0] ?? '';
     const d = puntosRuta[puntosRuta.length - 1] ?? '';
     const nombres = puntosRuta.map((p) => nombreDeIata(p));
@@ -662,33 +649,14 @@ export function armarCotizacionInternaPayload(
             },
           ]
         : [];
-  }
-  const tramosTiempoTotal = round4(
-    tramosCot.reduce((acc, t) => acc + t.tiempo_hr, 0),
-  );
-  const tramosTotal = round2(
-    tramosCot.reduce((acc, t) => acc + t.total_usd, 0),
-  );
-  // Ajuste = servicio aéreo canónico − Σ tramos. Se EXPONE con su motivo,
-  // nunca se reparte entre tramos ni se toca el desglose.
-  const tramosAjuste = round2(montoTiempoVuelo - tramosTotal);
-  let tramosAjusteMotivo: string | null = null;
-  if (Math.abs(tramosAjuste) >= 0.005) {
-    const partes: string[] = [];
-    if (cobrableOverride && tiempoCobrable != null) {
-      partes.push(`Horas pactadas ${horasTexto(tiempoCobrable)} h`);
-    } else {
-      if (sobrevueloHr != null && sobrevueloHr > 0) {
-        partes.push(`Sobrevuelo ${horasTexto(sobrevueloHr)} h`);
-      }
-      if (horaMinima) partes.push('Hora mínima 1.0 h');
-    }
-    tramosAjusteMotivo =
-      partes.length > 0
-        ? partes.join(' · ')
-        : tarifaHora == null
-          ? 'Tarifa no disponible'
-          : 'Redondeo';
+    // El pie (Σ tiempo, Σ importe, ajuste con su motivo) sale del MISMO
+    // helper que la tabla por tramo: una sola aritmética para las dos ramas.
+    pieTramos = consolidarTramosCosteados(
+      tramosCot,
+      montoTiempoVuelo,
+      tarifaHora,
+      horasDelAjuste,
+    );
   }
   const ruta = puntosRuta.length > 0 ? puntosRuta.join(' → ') : null;
 
@@ -856,11 +824,11 @@ export function armarCotizacionInternaPayload(
     combinado_con_folio: folioTexto(combinado?.folio),
 
     tramos_cotizados: tramosCot,
-    tramos_tiempo_total_hr: tramosTiempoTotal,
-    tramos_tiempo_total_hhmm: horasAHhmm(tramosTiempoTotal),
-    tramos_total_usd: tramosTotal,
-    tramos_ajuste_usd: tramosAjuste,
-    tramos_ajuste_motivo: tramosAjusteMotivo,
+    tramos_tiempo_total_hr: pieTramos.tramos_tiempo_total_hr,
+    tramos_tiempo_total_hhmm: pieTramos.tramos_tiempo_total_hhmm,
+    tramos_total_usd: pieTramos.tramos_total_usd,
+    tramos_ajuste_usd: pieTramos.tramos_ajuste_usd,
+    tramos_ajuste_motivo: pieTramos.tramos_ajuste_motivo,
     horas_cotizadas_hr: horasCotizadas,
     vuelo_hr: vueloHr,
     calzos_hr: calzosHr,

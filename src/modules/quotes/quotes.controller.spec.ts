@@ -8,7 +8,10 @@ jest.mock('./quotes-pdf-interno.service', () => ({
 }));
 
 import type { Response } from 'express';
-import { QuotesController } from './quotes.controller';
+import { QuotesController, ROLES_PDF_INTERNO } from './quotes.controller';
+import { ROLES_KEY } from '../../common/decorators/roles.decorator';
+import { Rol } from '../../common/types/auth.types';
+import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type { QuotesPdfService } from './quotes-pdf.service';
 import type { QuotesPdfInternoService } from './quotes-pdf-interno.service';
 import type { QuotesService } from './quotes.service';
@@ -50,11 +53,14 @@ function resMock(): ResMock {
   return res;
 }
 
-function controller(pdf: Partial<QuotesPdfService>) {
+function controller(
+  pdf: Partial<QuotesPdfService>,
+  interno: Partial<QuotesPdfInternoService> = {},
+) {
   return new QuotesController(
     {} as QuotesService,
     pdf as QuotesPdfService,
-    {} as QuotesPdfInternoService,
+    interno as QuotesPdfInternoService,
   );
 }
 
@@ -95,5 +101,52 @@ describe('QuotesController — hoja.css / mapa-svg', () => {
     expect(vacio.ended).toBe(true);
     expect(vacio.send).not.toHaveBeenCalled();
     expect(vacio.headers).toEqual({});
+  });
+});
+
+/**
+ * HOJA INTERNA EN JSON (22-sep-2026): la pantalla del cotizador pasa a
+ * parecerse al PDF interno, así que necesita EXACTAMENTE su payload sin
+ * generar un PDF. Dos cosas se congelan: que sea el MISMO `payload()` del PDF
+ * (no una réplica) y que lleve el MISMO gate de rol — sin SOCIO.
+ */
+describe('QuotesController — GET :id/interno', () => {
+  const ID = 'vvvvvvvv-0000-4000-8000-000000000329';
+  const USUARIO = { userId: 'u-1', nombre: 'Itzi' } as AuthenticatedUser;
+
+  it('devuelve el payload del PDF interno tal cual, SIN renderizar PDF', async () => {
+    const payload = jest.fn().mockResolvedValue({ folio: '329' });
+    const render = jest.fn();
+    const r = await controller({}, { payload, render }).interno(ID, USUARIO);
+    expect(payload).toHaveBeenCalledWith(ID, USUARIO);
+    expect(render).not.toHaveBeenCalled();
+    expect(r).toEqual({ folio: '329' });
+  });
+
+  it('mismos roles que POST :id/pdf-interno: ADMIN/COORDINADOR/FACTURACION/ANALISTA, sin SOCIO ni PILOTO', () => {
+    const esperados = [
+      Rol.ADMIN,
+      Rol.COORDINADOR,
+      Rol.FACTURACION,
+      Rol.ANALISTA,
+    ];
+    const roles = (m: string): Rol[] =>
+      Reflect.getMetadata(
+        ROLES_KEY,
+        (QuotesController.prototype as unknown as Record<string, object>)[m],
+      ) as Rol[];
+    expect(roles('interno')).toEqual(esperados);
+    // El PDF es la referencia: si alguien le abre la puerta a SOCIO, tiene
+    // que ser en los dos a la vez y a propósito.
+    expect(roles('interno')).toEqual(roles('pdfInterno'));
+    expect(roles('interno')).not.toContain(Rol.SOCIO);
+    expect(roles('interno')).not.toContain(Rol.PILOTO);
+    // Y las dos salen de la MISMA constante exportada (`ROLES_PDF_INTERNO`,
+    // la que cita el invariante 12): con dos listas escritas a mano, abrir un
+    // rol en una y olvidar la otra deja la pantalla enseñando lo que el PDF
+    // niega. Si esto falla, alguien volvió a escribir los roles a mano.
+    expect([...ROLES_PDF_INTERNO]).toEqual(esperados);
+    expect(roles('interno')).toEqual([...ROLES_PDF_INTERNO]);
+    expect(roles('pdfInterno')).toEqual([...ROLES_PDF_INTERNO]);
   });
 });

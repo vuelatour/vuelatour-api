@@ -23,6 +23,58 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 3. **Desglose canónico del cotizador v1.3**: cada componente se redondea antes
    de sumar y `subtotal + tuas + pernocta + extras + ajuste + iva == total`
    exacto. No tocar ese orden de redondeo.
+   - **TRAMOS COSTEADOS: fuente única `quotes/tramos-costeados.util.ts` (PURO,
+     con spec) — el panel NO calcula (22-sep-2026).** La pantalla de la
+     cotización pasa a verse como la hoja INTERNA, con la tabla del Excel de
+     la oficina (`RUTA · FECHA · DISTANCIA MILLAS · TIEMPO VUELO · COSTO POR
+HORA VUELO · TOTAL POR TRAMO`) y la pinta mientras se teclea. Ese
+     `total_usd` por tramo **no existe en el dinero persistido**: el snapshot
+     guardaba `tiempo_hr` pero no su importe, y el único que lo calculaba era
+     el armador del PDF interno (`round2(tiempo_hr × tarifa)`, inline). Ahora
+     el costeo vive en el helper y lo comparten `quotes-pdf-interno.util` y
+     `QuotesService.calculate` — si el panel replicara `round2(tiempo_hr ×
+tarifa)`, `tramos_ajuste_usd` o el MOTIVO del ajuste, habría dos fuentes
+     del mismo número y pantalla y PDF podrían decir cifras distintas del
+     MISMO vuelo. Reglas: el ÚNICO número nuevo es `total_usd` (y ni eso si el
+     snapshot ya lo trae: entonces se LEE); `tiempo_hr` ya incluye el calzo;
+     la diferencia contra la línea canónica TIEMPO_VUELO viaja EXPLÍCITA como
+     `tramos_ajuste_usd` + `tramos_ajuste_motivo` («Horas pactadas 1.75 h» ·
+     «Sobrevuelo 0.5 h» · «Hora mínima 1.0 h» · «Redondeo»), **jamás repartida
+     entre tramos ni escondida**, de modo que `Σ tramos + ajuste == servicio
+aéreo`. El `breakdown` de `POST /v1/quotes/calculate` los expone como
+     campos **ADITIVOS**: `tramos[i].total_usd`, `tramos[i].tarifa_usd_hr`,
+     `tramos[i].tiempo_hhmm` y, en la raíz y DESPUÉS de `meta`,
+     `tramos_total_usd`, `tramos_tiempo_total_hr`, `tramos_tiempo_total_hhmm`,
+     `tramos_ajuste_usd`, `tramos_ajuste_motivo` (los 5 en `null` cuando no
+     hay tabla por tramo — un 0 ahí convertiría todo el servicio aéreo en un
+     "ajuste" inexistente). Ese `null` es una **guarda defensiva, no un estado
+     que se vea hoy**: `resolveRoute` o entrega tramos (itinerario explícito o
+     plantilla MULTIESCALA del catálogo) o **rebota 400** —los caminos legados
+     "ad-hoc" y "redondo automático ×2" se retiraron—, y en prod las 231
+     cotizaciones con snapshot traen `tramos` como arreglo y **ninguna** en
+     null. El spec prueba las dos mitades (que esos caminos rebotan y que el
+     mapeo es `?? null`, nunca `?? 0`). Van al final para que el `calculo_snapshot` viejo
+     sea un PREFIJO exacto del nuevo: **`lineas`, `totales`, el orden y los
+     redondeos no se mueven un byte** (`quotes.service.tramos-costeados.spec`
+     congela el breakdown viejo como subconjunto del nuevo). **Se PERSISTEN a
+     propósito** (`calculo_snapshot = breakdown`): así la hoja interna de una
+     cotización guardada LEE el importe con el que se cotizó en vez de
+     re-multiplicar, y el PDF interno —que ya prefería `tramos[].total_usd`
+     cuando existe— imprime exactamente eso. La paridad con lo que hoy imprime
+     el PDF se congela en `tramos-costeados.util.spec.ts` con payloads REALES
+     de prod (#329 con horas pactadas y ajuste de $165.00, #311 que cuadra
+     exacto, #294 de 8 tramos). **Paridad verificada contra el binario
+     ANTERIOR al refactor** (revisión adversaria 22-sep-2026): se corrió el
+     armador del PDF interno viejo y el nuevo sobre las **294** cotizaciones
+     de prod con sus escalas, cobros, clientes y catálogo de aeropuertos
+     reales y el payload salió **idéntico byte a byte en las 294** — 231 con
+     tabla por tramo y 63 con la fila consolidada de respaldo, incluidos los
+     84 de "Horas pactadas", 31 de "Hora mínima", 4 de "Sobrevuelo", 20 de
+     "Redondeo" y 157 con ajuste 0. Y la pantalla no puede decir otra cosa que
+     el PDF: recalculando el pie con el helper sobre los 231 snapshots
+     guardados, los 5 campos y el importe de CADA tramo coinciden con lo que
+     imprime el PDF, y `Σ tramos + ajuste == línea TIEMPO_VUELO` se cumple en
+     los 231.
 
 4. **Cortes de periodo SIEMPRE en hora Cancún**: filtros sobre columnas
    timestamptz usan `${fecha}T00:00:00-05:00` / `${fecha}T23:59:59-05:00`.
@@ -106,7 +158,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    `calculo_snapshot`, no con la escala viva: ver invariante 24.
 
 7. **Conciliación**: auto-match solo `medio_pago IN (TARJETA_CORP,
-   TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
+TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
    el 2-sep-2026; caja chica sigue mirando SOLO EFECTIVO). `BODEGA` (cargo
    contable de inventario), `EFECTIVO` (caja chica) y `PERSONAL_*`
    (reintegros) nunca se cruzan con el banco. ABONOS se cruzan con
@@ -126,7 +178,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    distinto NUNCA se liga sola; empate = ambiguo). Al ligar un cobro de
    vuelo se escribe la comisión REAL del archivo (antes de `linkCobro`);
    los sobres no se reescriben. Auditoría: `GET /conciliacion/paywise/
-   auditoria` (lectura), `POST …/auditoria/conciliar` (liga lo que cuadra),
+auditoria` (lectura), `POST …/auditoria/conciliar` (liga lo que cuadra),
    `GET …/auditoria.xlsx` (3 hojas). `GET /conciliacion/cobros-sin-banco`
    = espejo de gastos-sin-banco; el pre-cierre lo expone como aviso
    `cobros_bancarios_sin_conciliar` (no bloquea).
@@ -180,7 +232,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
      y `ligarCobroAuto` atrapan CUALQUIER error (antes solo
      `ConflictException`) y el job termina **LISTO** con el desglose
      `{conciliados, traspasos, ambiguos, sin_candidato, rechazados,
-     errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
+errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      PRIMERA liga mató el job al 37 % con 101 movimientos ya insertados.
    - **`POST /v1/conciliacion/auto-match`** (ADMIN+FACTURACION, body opcional
      `{cuenta_bancaria_id?, desde?, hasta?, limite?}`, default últimos 90
@@ -218,7 +270,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    - **`ventanaAbono` en hora Cancún** (`-05:00`), como `cobrosSinBanco`:
      invariante 4. Antes un cobro de las 20:00 del último día caía fuera.
    - **La IA propone, jamás liga**: `POST /conciliacion/movimientos/:id/
-     sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
+sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      de la cuenta, terminación detectada; por candidato: medio, tarjeta,
      categoría, lugar, primera línea de notas, matrícula, folio de vuelo,
      capturista, `monto_vinculado`/`faltante`/`tc_implicito`) y acepta
@@ -372,8 +424,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
      Por lo mismo el mensaje cita la moneda que SÍ se puede leer (pesos si
      los hay, si no USD): jamás «$0.00 MXN» sobre capas sin TC.
      La vista previa repite EXACTAMENTE los candados de dinero de la función
-     de BD: si divergen, el diálogo diría «se puede» y el DELETE contestaría
-     409.
+     de BD: si divergen, el diálogo diría «se puede» y el DELETE contestaría 409.
    - `GET …/movimientos/:movId/eliminacion` (ADMIN) es la vista previa (solo
      lee, funciona aunque falte la migración) y
      `GET …/items/:id/movimientos-eliminados` (OFICINA) el historial (`[]`
@@ -513,7 +564,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     (PostgREST corta en 1000 sin avisar). **Columna PAGO** (misma fecha): cada fila de
     hoja ledger viaja con la forma de pago legible
     (`src/common/medio-pago.util.ts#etiquetaMedioPago`, espejo de
-    `MEDIO_PAGO_LABELS` del panel; `TARJETA_CORP` añade " ****1234"; sin
+    `MEDIO_PAGO_LABELS` del panel; `TARJETA_CORP` añade " \*\*\*\*1234"; sin
     medio capturado → null = celda vacía) para conciliar el combustible
     contra el estado de cuenta del banco.
 
@@ -578,6 +629,37 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       (omitidos = conservar la escala viva) y `PATCH :id/pdf-visibilidad`
       (+ la ruta por escala) mueve notas/toggles del PDF SIN versión,
       snapshot ni avisos: presentación pura.
+    - **LA PANTALLA SE PARECE A LA HOJA INTERNA (22-sep-2026, pedido del
+      cliente: «que no se vea como el PDF de la cotización que se entrega al
+      cliente, más bien que se parezca a la cotización INTERNA»)**. Dos
+      endpoints de SOLO LECTURA, los dos ADITIVOS:
+      - `GET /v1/quotes/:id/interno` devuelve EXACTAMENTE el payload que arma
+        `QuotesPdfInternoService.payload()` para el PDF interno, sin generar
+        PDF: la pantalla pinta lo que se imprime, no una réplica. Roles
+        `ROLES_PDF_INTERNO` = ADMIN/COORDINADOR/FACTURACION/ANALISTA, **sin
+        SOCIO** — el MISMO criterio que `POST :id/pdf-interno`. Es una
+        **constante exportada de verdad** (`quotes.controller.ts`, corrección
+        de la revisión adversaria 22-sep-2026: el invariante la citaba pero en
+        el código había DOS listas escritas a mano, y abrir un rol en una y
+        olvidar la otra deja la pantalla enseñando lo que el PDF niega); los
+        dos `@Roles` la esparcen y `quotes.controller.spec` congela que las
+        dos rutas sigan apuntando a ella. Ojo: `POST /quotes/calculate` sí
+        admite a SOCIO, así que la pantalla interna NO puede colgar solo de
+        él.
+      - `GET /v1/quotes/:id` añade `cotizado_por` (nombre de
+        `vuelo.created_by`). `created_by` NO entra a `VUELO_COLS` —esa
+        constante la comparten `list()`, `findById` y tres selects más—: el
+        detalle usa `VUELO_COLS_DETALLE` = `VUELO_COLS` + `created_by` +
+        el embed `creador:usuario!created_by(nombre)`, resuelto en la MISMA
+        consulta (cero round-trips extra). El `as const` del template NO es
+        cosmético: sin él supabase-js pierde el tipo de TODA la fila. Nunca un
+        uuid ni un nombre inventado: usuario borrado, nombre en blanco o
+        relación sin resolver ⇒ `null` (`nombreDeRelacionUsuario`, en la
+        fuente única `registrado-por.util`), y la relación cruda `creador` no
+        sale en la respuesta.
+      - La tabla de tramos de esa pantalla se alimenta de los campos
+        ADITIVOS del `breakdown` (invariante 3): el panel NO calcula el total
+        por tramo ni el ajuste.
     - **Alta sin internet desde la app (9-sep-2026, diseño offline v2)**:
       `POST /flights/reserva`, `POST /pilots/:id/descansos` y
       `POST /calendar/eventos` son IDEMPOTENTES por `client_request_id`
@@ -673,31 +755,31 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     - **`if_updated_at` → 409 `CONFLICTO_VERSION`** (helper único
       `src/common/version-cas.util.ts`: `assertVersion`, `aplicarCas`,
       `conflictoVersion`). Lo aceptan `PATCH /flights/:id`, `POST
-      /flights/:id/assign`, `PATCH /flights/legs/:legId` y `POST
-      /flights/:id/legs/:legId/assign` (los demás módulos adoptan el MISMO
+/flights/:id/assign`, `PATCH /flights/legs/:legId` y `POST
+/flights/:id/legs/:legId/assign` (los demás módulos adoptan el MISMO
       helper). Semántica: el cliente manda el `updated_at` que leyó; se
       compara COMO INSTANTES con tolerancia de 1 ms (Postgres guarda
       microsegundos; el cliente reserializa a ms) y el UPDATE de un solo
       paso lleva CAS en BD (ventana `updated_at ∈ [t−1 ms, t+1 ms]`, mismo
       patrón que `complete()`); 0 filas ⇒ relectura y 409 estructurado
       `{ message: 'Alguien modificó este <vuelo|tramo|…> después de tu
-      captura; se conserva la versión del servidor.', error:
-      'CONFLICTO_VERSION', details: { actual: <fila pública>,
-      updated_at_enviado, updated_at_actual } }`. Los flujos MULTI-PASO
+captura; se conserva la versión del servidor.', error:
+'CONFLICTO_VERSION', details: { actual: <fila pública>,
+updated_at_enviado, updated_at_actual } }`. Los flujos MULTI-PASO
       (`assign`, `assignEscala`) validan UNA vez contra la fila leída antes
       del primer write y no re-validan por paso. `if_updated_at` NUNCA
       entra al patch (se destructura antes) ni cuenta como "campo
       enviado". Una tabla sin `updated_at` (trigger pendiente) ⇒
       `assertVersion` devuelve `'omitido'` = comportamiento actual.
     - **Altas idempotentes de tramos** (`POST :id/legs`, `POST
-      :id/operational-legs`) por `client_request_id` (índice único parcial
+:id/operational-legs`) por `client_request_id` (índice único parcial
       `uq_escala_client_request`, migración `20260910000002`, columna
       OPCIONAL vía `ColumnaOpcional` hasta aplicarla: sin columna la llave
       se ignora y el insert es idéntico al de siempre). La rama idempotente
       (pre-check por llave acotado al vuelo, o 23505) va ANTES de toda
       validación y NUNCA re-valida, re-inserta, reabre ni re-notifica
       (`notificarTramoNuevo`); responde la fila YA creada con `idempotente:
-      true` (en el operativo, con su `orden` calculado); llave reutilizada
+true` (en el operativo, con su `orden` calculado); llave reutilizada
       en OTRO vuelo ⇒ 409 `CLIENT_REQUEST_ID_EN_USO` (jamás 500; helper
       único `src/common/client-request-id.util.ts`). REGLA de toda alta
       idempotente: la relectura del replay (pre-check y 23505) se ACOTA al
@@ -711,8 +793,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `idempotente: true`, sin candados ni aviso; 23505 con llave de OTRO
       vuelo ⇒ 409 `CLIENT_REQUEST_ID_EN_USO`) y luego el candado de
       SOBRE-COBRO con la fuente única `cobrosEnUsd`: `cobrado + monto_usd >
-      monto_total_usd + max(1 USD, 5 %)` ⇒ 409 `COBRO_EXCEDE_SALDO` + `details {
-      saldo_usd, cobrado_usd, monto_usd, monto_total_usd }`. Exentos: vuelos
+monto_total_usd + max(1 USD, 5 %)` ⇒ 409 `COBRO_EXCEDE_SALDO` + `details {
+saldo_usd, cobrado_usd, monto_usd, monto_total_usd }`. Exentos: vuelos
       sin precio (internos/$0) y cobros MXN que no convierten. SIN llave
       (panel) no hay candado: la oficina puede sobrecobrar a propósito.
     - **Codes en bajas/transiciones** (message intacto): `deleteEscala` 409
@@ -723,7 +805,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       en `updatePermiso`.
     - **Deltas**: `GET /flights?updated_since=ISO` devuelve solo los vuelos
       con `updated_at >= since` O con algún tramo con `escala.updated_at >=
-      since` (un taco/permiso/reagenda no mueve el `updated_at` del vuelo)
+since` (un taco/permiso/reagenda no mueve el `updated_at` del vuelo)
       y añade `updated_since` (forma canónica) + `eliminados: [vuelo_id]`
       desde `vuelo_eliminado.eliminado_at >= since` (índice
       `idx_vuelo_eliminado_eliminado_at`). `>=` a propósito: repetir es
@@ -740,8 +822,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     - **Gastos, eventos, mantenimiento y squawks (misma ola)**:
       `if_updated_at` con `aplicarCas` en `PATCH /expenses/:id` (entidad
       «gasto»), `PATCH /calendar/eventos/:id` («evento»), `PATCH
-      engineering/maintenance/:mid` («mantenimiento») y `PATCH
-      /aircraft/squawks/:id` («reporte»). `gasto`, `aeronave_discrepancia`
+engineering/maintenance/:mid` («mantenimiento») y `PATCH
+/aircraft/squawks/:id` («reporte»). `gasto`, `aeronave_discrepancia`
       e `inventario_movimiento` ya tenían `tg_set_updated_at`;
       `mantenimiento`, `piloto_descanso` y `evento_flota` lo reciben en la
       migración `20260910000001` junto con la función sonda
@@ -752,14 +834,14 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `updated_at`; el patch de mantenimiento y evento lo sella a mano.
       Altas idempotentes por `client_request_id` (columna OPCIONAL vía
       `columnaOpcional`, migración `20260910000002`): `POST
-      /aircraft/:id/squawks` (`uq_discrepancia_client_request`) y `POST
-      /inventory/items/:id/movimientos` (`uq_inv_movimiento_client_request`;
+/aircraft/:id/squawks` (`uq_discrepancia_client_request`) y `POST
+/inventory/items/:id/movimientos` (`uq_inv_movimiento_client_request`;
       el replay devuelve el movimiento, su `gasto_generado` BODEGA ya
       ligado por `inventario_movimiento_id` y el stock actual, SIN volver
       a mover stock ni dinero; el pre-check va ANTES de toda validación
       porque el stock ya bajó con el primer intento). Ventana semanal
       JUSTA de gastos (B3): `UpdateGastoDto.capturado_en` y `DELETE
-      /expenses/:id?capturado_en=` son el sello de la CORRECCIÓN/BAJA
+/expenses/:id?capturado_en=` son el sello de la CORRECCIÓN/BAJA
       (`ventana-correccion.util`: `resolverCapturadoEn` estricto, acotado a
       ahora); `assertOwnEnVentana` evalúa la semana contra ese día Cancún y
       la línea «[Corrección|Baja capturada en la app el … · recibida el …]»
@@ -785,7 +867,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       única `idAeronaveCotizada`); el **OPERATIVO** = `vuelo.aeronave_id` /
       los tramos. (R1) el cotizador del panel rehidrata su selector desde el
       COTIZADO (`aeronave_cotizada?.id ?? calculo_snapshot?.aeronave?.id ??
-      aeronave_id`), nunca desde el operativo — también en externos (ahí el
+aeronave_id`), nunca desde el operativo — también en externos (ahí el
       snapshot es la referencia de TARIFA). (R2) ver el punto siguiente.
       (R3) `modelos_cotizados`/hoja/PDF del cliente: SOLO el modelo del
       snapshot vigente (externo: el modelo ajeno) **y también su FICHA** —
@@ -806,7 +888,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       muestra un avión y se guarda otro). **(R2, 12-sep-2026)** el «cambió el
       avión» se mide contra el **COTIZADO**, no contra el operativo:
       `cambio_deliberado = dto != null && dto !== (aeronaveCotizada ??
-      aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
+aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
       vuelo no es asignación nueva — sin ella un panel viejo rebotaría 409 por
       un squawk del avión que ya vuela). Con cambio DELIBERADO manda el DTO:
       se escribe `vuelo.aeronave_id` y los tramos VIVOS lo siguen con el
@@ -955,7 +1037,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     - **Comprobante, SIN migración**: el enum de BD sigue con tres valores y
       NADIE reescribe filas. Regla de lectura única
       `src/common/comprobante.util.ts`: `hayComprobante(e) = e !==
-      'SIN_COMPROBANTE'` y `etiquetaComprobante` devuelve SOLO «Con
+'SIN_COMPROBANTE'` y `etiquetaComprobante` devuelve SOLO «Con
       comprobante» / «Sin comprobante» (la palabra «Factura» salió de los
       textos: se confundía con el semáforo vecino). `FACTURA` es el valor
       que se GUARDA para «con comprobante» (es el que ya manda la app al
@@ -990,7 +1072,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     (chips deduplicados `{id, folio, estado, fecha_vuelo}`, el shape que el
     renderer del panel ya pinta con liga a `/admin/flights/<id>`) y `tramos`
     (`{vuelo_id, folio, orden, origen_iata, destino_iata, fecha_salida_plan,
-    motivo, piloto_nombre}`), más un `detalle` que dice cuántos tramos en
+motivo, piloto_nombre}`), más un `detalle` que dice cuántos tramos en
     cuántos vuelos. Helpers PUROS en
     `src/modules/profit-sharing/tacos-revision.util.ts`: `motivo` es la
     primera línea ACCIONABLE de `revision_motivo` (`soloPendientes` deja
@@ -1088,7 +1170,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       sigan llamando al hook.
     - **DI**: `FlightsModule` importa `forwardRef(() => AlertsModule)` y
       `FlightsService` inyecta `@Optional() @Inject(forwardRef(() =>
-      AlertsService))` (mismo patrón que `expenses`↔`conciliacion`). Sin el
+AlertsService))` (mismo patrón que `expenses`↔`conciliacion`). Sin el
       módulo (specs, arranque parcial) la captura del taco ni se entera.
     - **El Hobbs del check = el Hobbs de la tarjeta**: `hobbsDeAvion` usa
       `AircraftService.currentHobbs` (memoizado por corrida). Antes el check
@@ -1099,7 +1181,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       paginado (`fetchTodas`), hereda el avión del vuelo y deja fuera vuelos
       y tramos cancelados. **`anclarRefsComponentes` usa la MISMA fuente**
       (revisión adversaria 20-sep-2026): armaba su máximo con OTRO `select …
-      from escala` de toda la flota sin paginar, y ahí el número no se
+from escala` de toda la flota sin paginar, y ahí el número no se
       muestra — se ESCRIBE en `aeronave_horas_ref`, el ancla de las horas
       vivas (invariante 1), y un ancla baja infla las horas del componente
       para siempre. De paso, sin componentes por anclar (lo normal) ya no lee
@@ -1109,12 +1191,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       con specs). `mantenimientoCubreHito` = mismo hito por
       `horas_programadas` ±0.05 en CUALQUIER estado, **o** servicio de la
       misma etapa ya COMPLETADO dentro del ciclo (`horas_aeronave ∈ (hito −
-      intervalo, hito + 0.05]`), **o** entrada MANUAL abierta de la misma
+intervalo, hito + 0.05]`), **o** entrada MANUAL abierta de la misma
       etapa sin horas. `NOTA_SERVICIO_AUTOMATICO` ('Creado automáticamente')
       lo ESCRIBE el insert y lo LEE `orden.automatica`: una sola constante.
     - **`proximo_servicio.orden` (ADITIVO)** en `aircraft.metrics` Y en
       `aircraft.tacometroHistorial`: `{id, estado: PROGRAMADO|EN_TALLER,
-      fecha_programada: string|null, automatica: boolean} | null` = la orden
+fecha_programada: string|null, automatica: boolean} | null` = la orden
       ABIERTA que cubre el hito, con el MISMO helper
       (`ordenAbiertaDelHito`). `null` = el hito aún no tiene orden viva (una
       COMPLETADA cubre el dedupe pero NO es orden pendiente). El panel ya no
@@ -1217,7 +1299,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     - **Las horas del PDF del CLIENTE salen del SNAPSHOT, no de la columna**
       (revisión adversaria 22-sep): `quotes-pdf.service.armarPayloadPdf` usa
       `horasPactadasPersistidas(snapshot.tiempos.cobrable_hr,
-      quote.tiempo_cobrable_hr)`. Leyendo la columna —`numeric(10,4)` hasta
+quote.tiempo_cobrable_hr)`. Leyendo la columna —`numeric(10,4)` hasta
       aplicar la migración, y truncada PARA SIEMPRE en lo que se guarde entre
       el deploy y la migración— la hoja WYSIWYG del panel decía «2.33333 h»
       (espeja el snapshot con `numeroG`) y el PDF real «2.3333 h» para la
@@ -1302,8 +1384,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       por vuelo. **El reporte por vuelo NO recorta la tarifa a la salida**
       (al revés que las horas): verificado en `reporte_vuelo_xlsx.py`, esa
       celda pasa por `money_cell` (formato `"$"#,##0.00`) mientras que la de
-      HORAS se escribe sin formato. En el balance por avión y el Libro Dinero
-      la tarifa ya salía por `r2()`.
+HORAS se escribe sin formato. En el balance por avión y el Libro Dinero
+la tarifa ya salía por `r2()`.
     - **El backfill distingue «tarifa truncada» de «horas truncadas»** y esa
       guarda es la parte delicada: de los 12 vuelos que hoy descuadran
       `round(horas × tarifa, 2) <> subtotal`, **once son horas de la REGLA
@@ -1338,12 +1420,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       la escala VIVA del MISMO `orden` (solo si conserva la ruta cotizada):
       `fecha_salida_plan`, `pdf_oculto`, `pdf_fecha`, notas del tramo y el
       manifiesto capturado por el piloto.
-    - **LA RUTA PRECIA *Y* ES DE LA OPERACIÓN — los dos datos conviven**
+    - **LA RUTA PRECIA _Y_ ES DE LA OPERACIÓN — los dos datos conviven**
       (revisión adversaria 22-sep-2026, casos REALES #322 `CET→PTU` y #297
       `PPS→CZM`, los dos con TACÓMETRO capturado, y #320 `CZM→CET` con
       pernocta). `origen_iata`/`destino_iata` se editan desde el vuelo
       (`PATCH /flights/legs/:legId`, `UpdateEscalaDto extends
-      PartialType(CreateEscalaDto)`), así que son operación tanto como el
+PartialType(CreateEscalaDto)`), así que son operación tanto como el
       pax. Mientras el formulario mandaba la ruta VIVA, escribirla era un
       no-op; **hidratado del snapshot, guardar un ajuste de T.C.
       reescribiría el aeropuerto de salida de un tramo QUE YA VOLÓ**
@@ -1356,7 +1438,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `avisoRutaDeLaOperacion` en ámbar. La oficina que SÍ edita la ruta en
       el cotizador la escribe como siempre (tramo redefinido), y
       «Actualizar la cotización con la operación» (`tramos_base:
-      'OPERACION'`) adopta la del vuelo. Mismo freno que el blanket de
+'OPERACION'`) adopta la del vuelo. Mismo freno que el blanket de
       avión, que tampoco toca lo que ya voló (invariante 1).
     - **Cascada de «qué se cotizó»** (`tramosCotizados`):
       `calculo_snapshot.ruta.escalas` → `calculo_snapshot.tramos` → `null`.
@@ -1434,9 +1516,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 - Notificaciones: `notifications.notifyUser/notifyRole`; dedupe de alertas vía
   `alerta_emitida` (`markIfNew`). Los tipos que la app Flutter sabe pintar:
   `vuelo_asignado, taco_capturado, cobro_registrado, gasto_registrado,
-  permiso_emitido, mantenimiento_programado, recordatorio_taco,
-  alerta_sistema, evento_asignado, evento_actualizado, evento_cancelado,
-  recordatorio_evento`. Links `/flights/<id>` redirigen al vuelo en la app;
+permiso_emitido, mantenimiento_programado, recordatorio_taco,
+alerta_sistema, evento_asignado, evento_actualizado, evento_cancelado,
+recordatorio_evento`. Links `/flights/<id>` redirigen al vuelo en la app;
   `/me/eventos?dia=YYYY-MM-DD` abre Mis vuelos en ese día.
   `notifyUserDetallado` devuelve además `push_dispositivos`/`plataformas`
   (fila persistida ≠ push entregado: sin dispositivo no llega nada y
@@ -1474,8 +1556,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     TODOS los tipos (SENCILLO/REDONDO/MULTIESCALA, propios y externos),
     guardado en `vuelo.google_calendar_id`.
     - **Título** `{piloto} {AVIÓN} {ruta} {hora}` — `Saab N621TX
-      cun-pce-ctm-pce-cun 6:50`. SIN `T1`, SIN pasajeros, SIN `⚠ permiso
-      pendiente` (el color lo dice y la descripción lo conserva). Piloto =
+cun-pce-ctm-pce-cun 6:50`. SIN `T1`, SIN pasajeros, SIN `⚠ permiso
+pendiente` (el color lo dice y la descripción lo conserva). Piloto =
       `usuario.apodo` si existe, si no su PRIMER nombre; externo ⇒ `externo`;
       sin asignar ⇒ `sin piloto`. AVIÓN = la matrícula del primer tramo activo
       (con herencia del vuelo); en un vuelo EXTERNO, `avion_externo_matricula`
@@ -1494,12 +1576,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       `fecha_llegada_plan`. Así un redondo es UNA fila 10:00–19:00 y un viaje
       con pernocta abarca sus días.
     - **Descripción**: `Folio / Estado / Cliente / Pasajeros / Aeronave |
-      Operador externo / Piloto (nombre completo) / Permiso de pista:
-      PENDIENTE` + **una línea por tramo** (`T1 cun-mid 10:00 · 2 pax`, `T2
-      mid-cun 18:00 · ferry`) + `Monto`, `Notas` y el ancla legible
+Operador externo / Piloto (nombre completo) / Permiso de pista:
+PENDIENTE` + **una línea por tramo** (`T1 cun-mid 10:00 · 2 pax`, `T2
+mid-cun 18:00 · ferry`) + `Monto`, `Notas` y el ancla legible
       `VuelaTour · vuelo <id>`. La línea del tramo AÑADE su matrícula y su
       piloto corto SOLO cuando difieren del encabezado (`T2 ptu-cun 15:00 ·
-      2 pax · N990GG · Zamora`): el título solo puede decir UN avión y UN
+2 pax · N990GG · Zamora`): el título solo puede decir UN avión y UN
       piloto, y en un vuelo MULTI-AVIÓN (invariante 10) o con rotación de
       piloto (caso #129) el formato viejo sí lo decía —un evento por tramo—.
       El permiso en la descripción sale si
@@ -1586,7 +1668,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     `20260912000002_calendar_sync_cola.sql`), alimentada por **TRIGGERS** en
     `vuelo`, `escala`, `piloto_descanso`, `evento_flota`, `mantenimiento` +
     fan-out de `aeronave (matricula, color_calendario)`, `usuario (nombre,
-    apodo)` y `cliente (nombre)`. Un trigger no se puede olvidar: encola venga el
+apodo)` y `cliente (nombre)`. Un trigger no se puede olvidar: encola venga el
     cambio del panel, de la app ONLINE, de su **outbox al reconectar** (entra
     por los mismos endpoints), de un cron del API o de un UPDATE a mano en la
     BD — y en `DELETE` captura los ids de Google de **OLD** (`borrar_evento`),
@@ -1603,7 +1685,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       trigger lo re-encoló mientras se procesaba, el borrado no aplica y el
       cambio nuevo se vuelve a procesar: **nada se pierde por una carrera**).
       Fallo ⇒ `intentos+1`, `siguiente_intento_at = now() + min(30 s ·
-      2^intentos, 1 h)` y `ultimo_error` (pasado por `sanitizarError`: sin
+2^intentos, 1 h)` y `ultimo_error` (pasado por `sanitizarError`: sin
       `key=`, sin llaves PEM). **Un 403 de cuota / 429 PAUSA el drenado
       completo 5 min** (en memoria) sin quemar intentos de los demás.
     - **Los ~30 hooks NO se tocaron uno por uno**: con la cola activa,
@@ -1633,7 +1715,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       son `google_calendar_id` / `google_calendar_regreso_id` / `updated_at`
       (compara `to_jsonb(OLD)` vs `to_jsonb(NEW)` con esas llaves fuera), y en
       `vuelo`/`escala` el trigger es `AFTER UPDATE OF <columnas que Google
-      pinta>` — una captura de tacómetro no encola nada. Sin esto, el
+pinta>` — una captura de tacómetro no encola nada. Sin esto, el
       write-back del id se re-encolaría para siempre.
     - **EL ID DE GOOGLE YA NO MUEVE `updated_at`**: la misma migración
       redefine `public.tg_set_updated_at()` para conservar el sello cuando lo
@@ -1649,10 +1731,10 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       (revisión adversaria 12-sep-2026) y no una: que **cambie de verdad** un
       `google_calendar_id`/`google_calendar_regreso_id` **y** que el resto de
       la fila sea idéntico. Esa función la comparten **37 triggers en 23
-      tablas** (gasto, cobro_vuelo, inventario_movimiento, aeronave…): sin la
+      tablas** (gasto, cobro*vuelo, inventario_movimiento, aeronave…): sin la
       primera condición, un UPDATE que no cambia NADA dejaría de sellar
       `updated_at` en TODAS ellas — un cambio de semántica que nadie pidió. En
-      las tablas sin columnas `google_calendar_*` la excepción NUNCA aplica y
+      las tablas sin columnas `google_calendar*\*` la excepción NUNCA aplica y
       el comportamiento es byte a byte el de hoy.
     - **EL BARRIDO Y EL WORKER NO ESCRIBEN A LA VEZ** (revisión adversaria
       12-sep-2026): los dos escriben DIRECTO a Google, así que si coincidieran
@@ -1672,14 +1754,14 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       de 2 h— no congele el drenado; si algún día se escala a 2 réplicas, la
       decisión a revisar es usar UNA sola clave para los dos.
     - **AVISO a ADMIN** (`alerta_sistema`, dedupe `calendar_sync_cola:<día
-      Cancún>` en `alerta_emitida`, UNA vez al día): item con ≥ 12 intentos
+Cancún>` en `alerta_emitida`, UNA vez al día): item con ≥ 12 intentos
       (≈ 1 h de backoff) o el más viejo esperando > 30 min → «La
       sincronización con Google Calendar lleva N cambios sin poder subir
       desde las HH:MM; último error: …». Cuando la cola vuelve a cero, log.
     - `GET /v1/calendar/sync-estado` añade (ADITIVO) `automatica: boolean` —
       flag AUTORITATIVO: `enabled && cola activa` — y `cola: {activa,
-      pendientes, con_error, mas_antiguo_at, ultimo_error, ultimo_drenado_at,
-      pausada_hasta} | null`. `POST /resync` sigue siendo el backfill manual
+pendientes, con_error, mas_antiguo_at, ultimo_error, ultimo_drenado_at,
+pausada_hasta} | null`. `POST /resync` sigue siendo el backfill manual
       (solo para el arranque) y el reconcile nocturno sigue siendo la RED DE
       SEGURIDAD que escribe directo (no encola). Los «últimos» ya NO viven
       solo en memoria: se persisten (D12, bullet siguiente).
@@ -1691,11 +1773,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       mal DÍAS y nadie lo veía. Son ~395 días SECUENCIALES: la pasada puede
       tardar media hora larga (de ahí el TTL de 2 h del candado).
       **Las 4 lecturas del barrido van PAGINADAS** (`leerPaginado`, `order('id')`
-      + `range` de 1000 en 1000; revisión adversaria 12-sep-2026): con la
-      ventana vieja de 67 días nunca se pasaba de 1000 filas, con 395 días sí —
-      y PostgREST corta en `max-rows` **sin error y sin avisar**, así que todo
-      lo que cayera después de la fila 1000 dejaba de publicarse mientras el
-      resumen decía «0 errores». Toda lectura nueva del barrido va paginada.
+      - `range` de 1000 en 1000; revisión adversaria 12-sep-2026): con la
+        ventana vieja de 67 días nunca se pasaba de 1000 filas, con 395 días sí —
+        y PostgREST corta en `max-rows` **sin error y sin avisar**, así que todo
+        lo que cayera después de la fila 1000 dejaba de publicarse mientras el
+        resumen decía «0 errores». Toda lectura nueva del barrido va paginada.
     - **CUOTA A MEDIA PASADA**: si Google responde 403/429, el barrido
       **ABANDONA** la pasada (`abortarSiCuota`, `PausaCuotaBarrido`) y NO corre
       el paso inverso. Antes solo el worker miraba `pausadaHastaMs` y el
@@ -1738,7 +1820,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       hay que borrar.
     - **ESTADO PERSISTIDO** (`calendar_sync_estado`, clave → jsonb, misma
       migración): fila `sync` = `{ultimo_reconcile_at, ultimo_resync_at,
-      ultimo_resumen}` y fila `worker` = `{ultimo_drenado_at, pausada_hasta}`.
+ultimo_resumen}` y fila `worker` = `{ultimo_drenado_at, pausada_hasta}`.
       Antes vivían SOLO en memoria y un redeploy de Railway dejaba
       `sync-estado` en «nunca corrió» aunque el reconcile hubiera corrido de
       madrugada; la pausa por cuota también se perdía y el proceso nuevo volvía
@@ -1780,7 +1862,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       memoria que se toma y se suelta SIN `await` en medio: el 2.º resync
       responde **409** y el reconcile se salta con un log.
     - **TOLERANTE** como todo lo demás (`calendar-sync-estado.util.ts#
-      EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
+EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
       memorizado, `false`/error re-sondeado cada ≤ 10 min. Sin la migración no
       se consulta ninguna tabla nueva y el comportamiento es el de siempre.
   - **MANTENIMIENTOS**: evento de DÍA COMPLETO en `fecha_programada` (DATE =
@@ -1867,7 +1949,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       (la tabla hex → colorId). Mover un color rompe las tres.
     - **DESPLIEGUE**: tras el deploy hay que **RE-PINTAR Google** — los eventos
       ya publicados conservan su colorId viejo hasta que se reescriben. `POST
-      /v1/calendar/resync` (ADMIN, ventana `[hoy−30d, hoy+365d]`) los reescribe
+/v1/calendar/resync` (ADMIN, ventana `[hoy−30d, hoy+365d]`) los reescribe
       todos; si no, el reconcile nocturno (00:15 Cancún) lo hace esa misma
       noche. La cola NO se entera sola: el color cambió en el código, no en una
       fila. Foto de prod del 22-sep-2026 para verificar el resync (ventana
@@ -1912,7 +1994,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   - **Backfill**: `POST /v1/calendar/resync` (ADMIN) sincroniza los 4 tipos en
     `[hoy−30d, hoy+365d]` (body opcional `desde`/`hasta` ISO), SECUENCIAL, y
     devuelve `{enabled, calendar_id, vuelos, descansos, eventos,
-    mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
+mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
     lanza por un evento que falle (lo cuenta en `errores`). `huerfanos_borrados`
     ahí es SIEMPRE 0 (el paso inverso es solo del cron) y desde el 12-sep-2026
     puede responder **409** si ya hay un barrido en curso (la bandera
@@ -1991,7 +2073,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
     movimientos: cero latencia extra.
   - **Nunca un nombre inventado ni un uuid**: usuario borrado, `nombre`
     vacío, id que no resuelve o **lectura fallida** ⇒ `null`.
-    `fetchNombresUsuarios` **no lanza nunca** (error de PostgREST *y*
+    `fetchNombresUsuarios` **no lanza nunca** (error de PostgREST _y_
     rechazo del cliente): va dentro de un `Promise.all` que arma el dinero de
     la card, y un nombre no puede tumbar el snapshot de un vuelo.
   - `GET /v1/quotes/:id` NO devuelve cobros (solo los cuenta en el 409
@@ -2010,7 +2092,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   usa service key).
 - **APLICADA (verificada en prod el 17-sep-2026 vía MCP: `calendar_sync_cola`,
   `calendar_sync_estado`, `calendar_sync_candado`, `calendar_sync_lock(int,
-  int, text)` y `trg_*_calendar_sync` existen)** —
+int, text)` y `trg_*_calendar_sync` existen)** —
   `20260912000002_calendar_sync_cola.sql`. Estuvo días marcada aquí como
   pendiente porque el MCP se cayó el 12-sep; el modo AUTOMÁTICO está activo.
   Trae TRES cosas (se amplió el mismo archivo
@@ -2051,7 +2133,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   conserva como registro de lo que hizo. Aditiva en datos
   (`usuario.apodo text`), pero toca **DOS triggers** y por eso va en seco
   primero (`begin … update usuario set apodo = … ; update vuelo set
-  operador_externo = … ; rollback`): (1) `trg_usuario_calendar_fanout` pasa a
+operador_externo = … ; rollback`): (1) `trg_usuario_calendar_fanout` pasa a
   `after update of nombre, apodo` (y su función mira las dos columnas) para
   que cambiar el apodo re-encole los vuelos del piloto; (2)
   `trg_vuelo_calendar_sync` suma `avion_externo_matricula` a sus columnas
@@ -2138,7 +2220,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   así que el total tampoco se mueve. Tras aplicar: `get_advisors`.
 - **APLICADA (22-sep-2026 vía MCP, tras correr el dry-run de la cabecera en
   prod: `DRYRUN_OK · movimientos 81 → 82, gastos 800 → 807, suma 21.25 USD ·
-  todo se revierte`; después del apply: 10 CHECK —los 8 de siempre + los 2
+todo se revierte`; después del apply: 10 CHECK —los 8 de siempre + los 2
   nuevos—, `uq_gasto_inventario_movimiento` fuera,
   `idx_gasto_inventario_movimiento` puesto, 81 movimientos y 800 gastos
   intactos, `get_advisors` sin hallazgos nuevos)** —
@@ -2153,9 +2235,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   `20260914000002`; de los 9 CHECK de la tabla coincide EXACTAMENTE 1, los de
   cantidad/costos/moneda/TC/venta se quedan— por DOS con nombre:
   `inventario_movimiento_salida_destino_chk` (`tipo <> 'SALIDA' or
-  aeronave_id is not null or para_flota`) y
+aeronave_id is not null or para_flota`) y
   `inventario_movimiento_para_flota_chk` (`not para_flota or (tipo =
-  'SALIDA' and aeronave_id is null)`).
+'SALIDA' and aeronave_id is null)`).
   (B) Cambia el índice ÚNICO `uq_gasto_inventario_movimiento`
   (`20260703000001`) por uno NORMAL con el mismo predicado parcial
   (`idx_gasto_inventario_movimiento`): la salida de flota crea N gastos con
@@ -2172,7 +2254,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   porque el camino que desbloquea ESCRIBE dinero: el guion de la CABECERA
   corre dentro de `begin … rollback` **con los `ALTER` DENTRO** (fuera de
   ellos probaría el CHECK viejo y demostraría lo contrario) y es CONCLUYENTE
-  — (1) INSERT REAL de la salida de flota que DEBE reventar con 23514 *antes*
+  — (1) INSERT REAL de la salida de flota que DEBE reventar con 23514 _antes_
   del ALTER (el bug del cliente, reproducido), (2) el cuerpo real de la
   migración parte 1 + aserción de que quedaron los dos checks Y de que no se
   llevó ningún otro, (3) tres negativos (SALIDA sin destino, SALIDA con avión
@@ -2188,12 +2270,12 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   cualquier `select`, forma exacta del incidente del ENUM `moneda` del
   15-sep—, con aserciones de +1 movimiento, +N gastos, Σ = total AL CENTAVO
   y una fila de bitácora por gasto, y (8) cierre con `raise exception
-  'DRYRUN_OK …'` que revierte + los conteos de control tras el `rollback`
+'DRYRUN_OK …'` que revierte + los conteos de control tras el `rollback`
   (81 movimientos · 799 gastos · 481 bitácora · 0 con `para_flota` · 9
   CHECK · índice único aún presente, verificados en prod el 22-sep).
   **El guion ya se corrió en prod** (22-sep, como una sola sentencia
   autoabortada, equivalente al `begin … rollback`): `ok1 · ok2(10) · ok3a ·
-  ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
+ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   `primero=36.42 base=36.43 suma=255.00`, `movs 81→82`, `gastos 799→806`,
   `bitacora 481→488`, y los conteos post-rollback idénticos a los de antes.
   `tipo` es ENUM (`tipo_movimiento_inventario`): en el CHECK y en
@@ -2266,7 +2348,7 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   (`groups.avionCtxDeHijo`: `h.aeronave_id ?? snapshot.aeronave.id`), NO el
   cotizado: es deliberado (en el grupo la flota se elige en el wizard, el
   cambio operativo lo hace `flights.assign` y `meta.grupo
-  .precio_desactualizado` marca cuando el avión efectivo ≠ el cotizado). Si
+.precio_desactualizado` marca cuando el avión efectivo ≠ el cotizado). Si
   el cliente pide que el precio del hijo siga al avión COTIZADO (R1 del
   12-sep aplicada al grupo), el cambio va en `avionCtxDeHijo`, no en
   `reviseParaGrupo`.

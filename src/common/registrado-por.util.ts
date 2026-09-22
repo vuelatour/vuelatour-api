@@ -42,7 +42,9 @@ export interface ConRegistradoPor {
 }
 
 /** El mismo objeto + el campo aditivo ya resuelto. */
-export type ConNombreRegistrado<T> = T & { registrado_por_nombre: string | null };
+export type ConNombreRegistrado<T> = T & {
+  registrado_por_nombre: string | null;
+};
 
 function idStr(v: unknown): string | null {
   return typeof v === 'string' && v.length > 0 ? v : null;
@@ -53,6 +55,23 @@ function nombreStr(v: unknown): string | null {
   if (typeof v !== 'string') return null;
   const limpio = v.trim().replace(/\s+/g, ' ');
   return limpio.length > 0 ? limpio : null;
+}
+
+/**
+ * Nombre presentable de una relación embebida `usuario(nombre)` de PostgREST
+ * (objeto, arreglo de un elemento, `null` o ausente). PURA: no consulta nada.
+ *
+ * Misma regla 2 de arriba — relación sin resolver, usuario borrado o `nombre`
+ * en blanco ⇒ `null`, JAMÁS un uuid ni un texto inventado. La usa
+ * `quotes.findById` para `cotizado_por` (la relación viaja en la MISMA
+ * consulta de la fila, así que no hay nada que leer en lote).
+ */
+export function nombreDeRelacionUsuario(relacion: unknown): string | null {
+  const fila: unknown = Array.isArray(relacion)
+    ? (relacion as unknown[])[0]
+    : relacion;
+  if (!fila || typeof fila !== 'object') return null;
+  return nombreStr((fila as { nombre?: unknown }).nombre);
 }
 
 /** Ids DISTINTOS de `registrado_por` presentes en la lista (sin nulls). */
