@@ -269,6 +269,35 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    de la devolución (peso contra peso; TC solo si la moneda difiere).
    No duplicar ese costo en otro lado. Caso aceites 28-ago-2026: una entrada
    en pesos capturada como USD multiplicó ×17 el costo del avión.
+
+   **JAMÁS UN USD SUMADO COMO MXN EN EL VALORIZADO (22-sep-2026).** Fuente
+   única `inventario-cardex.util.ts#statsFromLayers`: `valor_mxn` suma SOLO
+   las capas con pesos REALES (compra en MXN, o USD con TC — `pesosExactos`),
+   la parte comprada en dólares SIN tipo de cambio va en `valor_usd_sin_tc`
+   (en DÓLARES) y `pesos_exactos` dice si `valor_mxn` ya es todo el
+   valorizado (criterio de `costoSinTc`: un costo de $0 vale 0 en cualquier
+   moneda y NO cuenta como «sin TC»). Los dos campos no se suman entre sí
+   NUNCA. `valor_usd` (el USD interno del reparto, TODAS las capas) no
+   cambió. En la **hoja «inventario» del Balance general**
+   (`resumenTiendita` → `BalanceHojaInventarioPayload`) cada fila lleva
+   `valor_costo_mxn` (pesos reales; 0 es 0, no «se desconoce»),
+   `valor_costo_usd` (dólares sin TC; null si 0) y `sin_tc`, con totales
+   `total_valor_mxn` / `total_valor_usd` separados y `filas_sin_tc` para la
+   nota al pie; el Excel los pinta en DOS columnas (pyservices). Todo eso es
+   ADITIVO en los dos sentidos: un pyservices viejo ignora los campos y
+   pinta la hoja de siempre, y un pyservices nuevo con un API viejo también.
+   Reporte del cliente: la hoja decía «Aceite 15w 50 · 30 · $3,300.00 MXN»
+   cuando la única entrada era 30 × 110 **USD** sin TC; en producción 67 de
+   las 68 ENTRADAs (66 productos, carga VTF-INV-001 del 29-ago) son USD sin
+   TC, o sea casi toda la columna y su total. Espejo del mismo criterio:
+   `agregadosDeItem` ya excluía compras/vendido/utilidad sin TC
+   (`con_movimientos_sin_tc` — mira TODO el cardex, incluidas capas ya
+   consumidas: NO es lo mismo que `sin_tc`, que mira las capas vivas), el
+   Excel «Inventario valorizado» tiene su columna «Valor USD (sin T.C.)» y
+   `listItems` su `valor_total_usd_sin_tc`. Lo único que sigue mezclando es
+   `costo_fifo_mxn_actual` (costo unitario de la capa más vieja, no una
+   suma): se lee con `pesos_exactos` al lado.
+
    **SALIDA «para todas las matrículas» (`para_flota`) ⇒ `aeronave_id` NULL**
    y el cargo se prorratea entre los aviones ACTIVOS (un gasto por avión,
    Σ EXACTA al centavo con el residuo en el primero). **La liga

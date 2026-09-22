@@ -323,7 +323,11 @@ describe('eliminarMovimiento', () => {
       gastos_eliminados: 1,
       stock_resultante: 30,
       valor_usd: 2841.3,
+      // La entrada de este cardex se capturó en PESOS (1,658.33 con TC
+      // 17.51): el valorizado es peso real y nada queda en dólares sin TC.
       valor_mxn: 49749.9,
+      valor_usd_sin_tc: 0,
+      pesos_exactos: true,
     });
     // NADA de borrados por pasos sueltos desde el API.
     expect(llamadas.filter((l) => l.metodo === 'delete')).toEqual([]);

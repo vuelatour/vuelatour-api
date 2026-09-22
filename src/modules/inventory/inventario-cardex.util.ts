@@ -232,21 +232,59 @@ export function buildLayers(movs: MovForFifo[]): FifoLayer[] {
   return layers;
 }
 
+/**
+ * Existencia y VALORIZADO de las capas vivas.
+ *
+ * MONEDAS (22-sep-2026, invariante 8 — «jamás un USD sumado como MXN»):
+ * `valor_mxn` suma SOLO las capas con pesos REALES (compra en MXN, o USD con
+ * TC) y `valor_usd_sin_tc` las que se compraron en dólares SIN tipo de
+ * cambio, en su moneda. Antes `valor_mxn` sumaba las dos y el resultado se
+ * rotulaba «MXN»: 67 de las 68 ENTRADAS de producción son USD sin TC (la
+ * carga VTF-INV-001 del 29-ago), así que la columna «VALOR A COSTO MXN» del
+ * balance —y su total— eran dólares disfrazados de pesos (reporte del
+ * cliente: «Aceite 15W-50, 30 piezas, $3,300.00 MXN» cuando eran 3,300 USD).
+ * Un ítem MIXTO reparte su valor entre los dos campos; ninguno de los dos se
+ * suma con el otro NUNCA.
+ *
+ * `pesos_exactos` = ninguna capa viva es USD sin TC (mismo criterio de
+ * `costoSinTc`/`walkCardex`: un costo de $0 vale 0 en cualquier moneda y no
+ * cuenta como «sin TC»), o sea: `valor_mxn` ya es TODO el valorizado.
+ *
+ * `valor_usd` NO cambió: es el USD interno del reparto sobre TODAS las capas
+ * (≠ `valor_usd_sin_tc`, que es solo la parte no expresable en pesos).
+ */
 export function statsFromLayers(layers: FifoLayer[]): {
   stock: number;
   valor_usd: number;
   costo_fifo_actual: number;
   valor_mxn: number;
+  /** Σ qty × costo USD de las capas vivas SIN pesos reales (0 = ninguna). */
+  valor_usd_sin_tc: number;
+  /** Ninguna capa viva es USD sin TC ⇒ `valor_mxn` es el valorizado COMPLETO. */
+  pesos_exactos: boolean;
   costo_fifo_mxn_actual: number;
 } {
   const stock = layers.reduce((s, l) => s + l.qty, 0);
   const valor_usd = layers.reduce((s, l) => s + l.qty * l.cost, 0);
-  const valor_mxn = layers.reduce((s, l) => s + l.qty * l.costMxn, 0);
+  const valor_mxn = layers.reduce(
+    (s, l) => (l.pesosExactos ? s + l.qty * l.costMxn : s),
+    0,
+  );
+  // En una capa sin pesos exactos `cost` y `costMxn` son EL MISMO número
+  // (costoUnitarioMxnDe copia el USD); se usa `cost`, que es el canónico.
+  const valor_usd_sin_tc = layers.reduce(
+    (s, l) => (l.pesosExactos ? s : s + l.qty * l.cost),
+    0,
+  );
   return {
     stock: round(stock),
     valor_usd: round(valor_usd, 2),
     costo_fifo_actual: round(layers[0]?.cost ?? 0, 2),
     valor_mxn: round(valor_mxn, 2),
+    valor_usd_sin_tc: round(valor_usd_sin_tc, 2),
+    pesos_exactos: !layers.some(
+      (l) => !l.pesosExactos && Math.abs(l.qty * l.costMxn) > EPS,
+    ),
     costo_fifo_mxn_actual: round(layers[0]?.costMxn ?? 0, 2),
   };
 }
@@ -378,8 +416,10 @@ export interface AgregadosItem {
   con_entradas_sin_costo: boolean;
   /** Algún movimiento del cardex COMPLETO no se puede expresar en pesos
    *  (USD sin tipo de cambio): compras, ventas y utilidad afectadas van
-   *  null/excluidas en vez de sumar USD como MXN; el valorizado MXN de esa
-   *  capa (statsFromLayers) sigue siendo el número USD — avisar. */
+   *  null/excluidas en vez de sumar USD como MXN. El VALORIZADO de las capas
+   *  vivas se reparte aparte (`statsFromLayers.valor_usd_sin_tc`): esta
+   *  bandera mira TODO el cardex (incluidas capas ya consumidas), así que un
+   *  ítem puede traerla en true con el valorizado 100 % en pesos. */
   con_movimientos_sin_tc: boolean;
 }
 

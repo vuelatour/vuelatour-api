@@ -180,13 +180,18 @@ export class InventoryService {
 
   /** Inventario valorizado en Excel (respeta los filtros del listado). */
   async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
-    const { data, valor_total_mxn } = await this.listItems({
-      ...filters,
-      limit: 2000,
-      offset: 0,
-    });
+    const { data, valor_total_mxn, valor_total_usd_sin_tc } =
+      await this.listItems({
+        ...filters,
+        limit: 2000,
+        offset: 0,
+      });
     // El cliente maneja el inventario en PESOS: el Excel valoriza en MXN (el
-    // USD interno solo alimenta el reparto, no este reporte de bodega).
+    // USD interno solo alimenta el reparto, no este reporte de bodega). Lo
+    // comprado en dólares SIN TC no tiene monto en pesos: va en su propia
+    // columna, con su propio total (22-sep-2026, invariante 8) — antes se
+    // sumaba en "Valor (MXN)" y el total de la bodega eran dólares rotulados
+    // como pesos.
     const columnas: TablaColumnaPayload[] = [
       { label: 'Ítem' },
       { label: 'Código' },
@@ -198,9 +203,11 @@ export class InventoryService {
       { label: 'Mínimo', tipo: 'numero' },
       { label: 'Costo FIFO (MXN)', tipo: 'money' },
       { label: 'Valor (MXN)', tipo: 'money' },
+      { label: 'Valor USD (sin T.C.)', tipo: 'money' },
     ];
     const filas = data.map((it) => {
       const x = it as Record<string, unknown>;
+      const usdSinTc = Number(x.valor_usd_sin_tc ?? 0);
       return [
         (x.nombre as string) ?? '',
         (x.codigo as string) ?? '',
@@ -212,6 +219,7 @@ export class InventoryService {
         (x.stock_minimo as number) ?? null,
         x.costo_fifo_mxn_actual as number,
         x.valor_mxn as number,
+        usdSinTc !== 0 ? usdSinTc : null,
       ];
     });
     const totales = [
@@ -225,6 +233,7 @@ export class InventoryService {
       null,
       null,
       valor_total_mxn,
+      valor_total_usd_sin_tc !== 0 ? valor_total_usd_sin_tc : null,
     ];
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
@@ -386,6 +395,17 @@ export class InventoryService {
    * (string YYYY-MM-DD, mismo eje que listMovimientos). Solo ítems con
    * actividad en el periodo O con stock/valor vivo; los eliminados con
    * movimiento del periodo SÍ cuentan (su dinero ya viajó).
+   *
+   * MONEDAS (22-sep-2026, invariante 8 — «jamás un USD sumado como MXN»):
+   * `valor_costo_mxn` trae SOLO pesos reales y `valor_costo_usd` (+ `sin_tc`)
+   * la parte comprada en dólares SIN tipo de cambio, que el Excel pinta en su
+   * propia columna con su propio total (`total_valor_usd`) y una nota al pie
+   * cuando `filas_sin_tc > 0`. Hasta hoy la columna sumaba las dos monedas y
+   * las rotulaba «MXN»: 67 de las 68 ENTRADAs de producción son USD sin TC
+   * (carga VTF-INV-001 del 29-ago), así que casi TODO el total de esa hoja
+   * eran dólares disfrazados de pesos. Decisión del cliente: verlos en
+   * dólares, aparte, en vez de sumarlos como pesos. Los dos campos nuevos son
+   * ADITIVOS: un pyservices viejo los ignora y pinta la hoja de siempre.
    */
   async resumenTiendita(
     desde: string,
@@ -443,7 +463,15 @@ export class InventoryService {
     for (const [itemId, movs] of porItem) {
       const stats = statsFromLayers(buildLayers(movs));
       const actividadPeriodo = movs.some(enPeriodo);
-      if (!actividadPeriodo && stats.stock <= 0 && stats.valor_mxn === 0) {
+      // `valor_usd_sin_tc` entra a la condición: desde que `valor_mxn` deja
+      // fuera las capas USD sin TC, un ítem valorizado SOLO en dólares daría
+      // `valor_mxn === 0` y desaparecería de la hoja en silencio.
+      if (
+        !actividadPeriodo &&
+        stats.stock <= 0 &&
+        stats.valor_mxn === 0 &&
+        stats.valor_usd_sin_tc === 0
+      ) {
         continue;
       }
       // Agregación única (agregadosDeItem): compras = solo ENTRADA;
@@ -456,13 +484,22 @@ export class InventoryService {
           : info.nombre
         : 'Ítem eliminado';
       // Movimientos USD sin TC: compras/utilidad afectadas van null (jamás
-      // USD sumado como MXN). La hoja no tiene columna de aviso: queda en el
-      // log y el panel lo marca en ámbar (con_movimientos_sin_tc).
+      // USD sumado como MXN). Eso NO tiene columna en la hoja: queda en el
+      // log y el panel lo marca en ámbar (con_movimientos_sin_tc). El
+      // VALORIZADO sí la tiene desde hoy (`valor_costo_usd`), y es una
+      // pregunta distinta: mira las capas VIVAS, no todo el cardex — un ítem
+      // cuyas capas en dólares ya se consumieron va `sin_tc: false` con su
+      // valor 100 % en pesos, y aun así se registra en el log.
       if (a.con_movimientos_sin_tc) sinTc.push(nombre);
       filas.push({
         nombre,
         existencia: stats.stock,
         valor_costo_mxn: stats.valor_mxn,
+        // 0 ⇒ null: celda vacía en el Excel, no un "$0.00 USD" que se lea
+        // como «esto no vale nada en dólares».
+        valor_costo_usd:
+          stats.valor_usd_sin_tc !== 0 ? stats.valor_usd_sin_tc : null,
+        sin_tc: !stats.pesos_exactos,
         compradas_cant: a.compradas_cant,
         compradas_costo_mxn: a.compradas_costo_mxn,
         salidas_cant: a.salidas_cant,
@@ -484,6 +521,12 @@ export class InventoryService {
         filas.reduce((s, f) => s + (f.valor_costo_mxn ?? 0), 0),
         2,
       ),
+      // Total APARTE, en su moneda: nunca se suma con el de pesos.
+      total_valor_usd: round(
+        filas.reduce((s, f) => s + (f.valor_costo_usd ?? 0), 0),
+        2,
+      ),
+      filas_sin_tc: filas.filter((f) => f.sin_tc).length,
       total_compras_mxn: round(
         filas.reduce((s, f) => s + (f.compradas_costo_mxn ?? 0), 0),
         2,
@@ -662,6 +705,12 @@ export class InventoryService {
         data.reduce((s, d) => s + d.valor_mxn, 0),
         2,
       ),
+      // ADITIVO (22-sep-2026): lo comprado en dólares SIN TC, en DÓLARES y
+      // aparte — `valor_total_mxn` ya no lo incluye (invariante 8).
+      valor_total_usd_sin_tc: round(
+        data.reduce((s, d) => s + d.valor_usd_sin_tc, 0),
+        2,
+      ),
       ventas_total_mxn: round(
         data.reduce((s, d) => s + (d.ventas_mxn ?? 0), 0),
         2,
@@ -838,6 +887,12 @@ export class InventoryService {
         ...totales,
         existencia_actual: stats.stock,
         valor_costo_mxn: stats.valor_mxn,
+        // ADITIVOS (22-sep-2026): la parte del valorizado que está en dólares
+        // SIN TC ya no entra a `valor_costo_mxn` (invariante 8); viaja aparte
+        // para que el panel la pinte en su moneda en vez de un $0 mudo.
+        valor_costo_usd:
+          stats.valor_usd_sin_tc !== 0 ? stats.valor_usd_sin_tc : null,
+        valor_sin_tc: !stats.pesos_exactos,
       },
     };
   }
@@ -2082,6 +2137,11 @@ export class InventoryService {
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       valor_mxn: stats.valor_mxn,
+      // ADITIVOS (22-sep-2026): `valor_mxn` ya solo trae pesos reales, así
+      // que la parte en dólares sin TC viaja aparte — si no, corregir el
+      // costo de una entrada USD sin TC dejaría el eco en $0.00 "MXN".
+      valor_usd_sin_tc: stats.valor_usd_sin_tc,
+      pesos_exactos: stats.pesos_exactos,
     };
   }
 
@@ -2423,6 +2483,10 @@ export class InventoryService {
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       valor_mxn: stats.valor_mxn,
+      // ADITIVOS (22-sep-2026): el valorizado que queda, separado por moneda
+      // (`valor_mxn` = pesos reales; el resto, en dólares sin TC).
+      valor_usd_sin_tc: stats.valor_usd_sin_tc,
+      pesos_exactos: stats.pesos_exactos,
     };
   }
 

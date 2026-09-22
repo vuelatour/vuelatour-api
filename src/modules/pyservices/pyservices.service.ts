@@ -831,7 +831,26 @@ export interface BalanceInventarioItemFilaPayload {
   /** Nombre del ítem (+ ' · nº de parte' cuando lo tiene). */
   nombre: string;
   existencia: number | null;
+  /**
+   * Valor a costo de la existencia en PESOS REALES (compras en MXN, o en USD
+   * con TC). Ya NO incluye las capas compradas en dólares SIN tipo de cambio
+   * —esas van en `valor_costo_usd`—: sumarlas aquí rotulaba dólares como
+   * pesos (invariante 8, 22-sep-2026). 0 = la existencia no vale nada en
+   * pesos, no «se desconoce».
+   */
   valor_costo_mxn: number | null;
+  /**
+   * ADITIVO (22-sep-2026): valor a costo de las capas compradas en USD SIN
+   * tipo de cambio, EN DÓLARES. `null` = no hay (o vale 0). Jamás se suma
+   * con `valor_costo_mxn`: son dos monedas y el Excel las pinta en columnas
+   * distintas, con su propio total.
+   */
+  valor_costo_usd: number | null;
+  /**
+   * ADITIVO: el valor de este producto tiene una parte en dólares sin TC
+   * (`valor_costo_usd`) que NO entra al total en pesos.
+   */
+  sin_tc: boolean;
   /** Cantidad y costo de las ENTRADAs del periodo (compras reales; una
    *  DEVOLUCION/AJUSTE suma stock pero no es compra). */
   compradas_cant: number | null;
@@ -850,7 +869,12 @@ export interface BalanceInventarioItemFilaPayload {
 export interface BalanceHojaInventarioPayload {
   filas: BalanceInventarioItemFilaPayload[];
   total_piezas: number | null;
+  /** Σ `valor_costo_mxn` — SOLO pesos reales (ver la fila). */
   total_valor_mxn: number | null;
+  /** ADITIVO: Σ `valor_costo_usd` (dólares sin TC), su propio total. */
+  total_valor_usd: number;
+  /** ADITIVO: cuántas filas traen `sin_tc` (la nota al pie de la hoja). */
+  filas_sin_tc: number;
   total_compras_mxn: number | null;
   total_vendido_mxn: number | null;
   total_utilidad_mxn: number | null;

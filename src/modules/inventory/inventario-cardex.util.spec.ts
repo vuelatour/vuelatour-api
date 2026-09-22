@@ -305,6 +305,98 @@ describe('FIFO: sortChrono / walkCardex / statsFromLayers', () => {
     expect(stats.stock).toBe(5);
     expect(stats.valor_mxn).toBe(208);
     expect(stats.costo_fifo_mxn_actual).toBe(108);
+    // Todo el cardex está en pesos reales: nada que reportar en dólares.
+    expect(stats.valor_usd_sin_tc).toBe(0);
+    expect(stats.pesos_exactos).toBe(true);
+  });
+
+  /**
+   * MONEDAS del VALORIZADO (22-sep-2026, invariante 8). Caso REAL del
+   * cliente: la hoja de inventario del balance decía «Aceite 15w 50 · 30 ·
+   * $3,300.00 MXN» cuando la única entrada era 30 × 110 USD SIN tipo de
+   * cambio — la columna sumaba dólares y los rotulaba pesos.
+   */
+  describe('statsFromLayers: USD sin TC jamás se suma como MXN', () => {
+    const entrada = (
+      id: string,
+      cantidad: number,
+      costo: number,
+      moneda: 'MXN' | 'USD',
+      tc: number | null = null,
+    ): MovCardex => ({
+      id,
+      tipo: 'ENTRADA',
+      cantidad,
+      costo_unitario_usd: costo,
+      moneda,
+      costo_unitario_mxn: moneda === 'MXN' ? costo : null,
+      tc_usd_mxn: tc,
+      fecha_movimiento: '2026-08-29',
+      created_at: `2026-08-29T15:00:0${id.slice(-1)}Z`,
+    });
+
+    it('caso real (30 × 110 USD sin TC): el valor sale en DÓLARES, no en pesos', () => {
+      const stats = statsFromLayers(
+        buildLayers([entrada('u1', 30, 110, 'USD')]),
+      );
+      expect(stats.stock).toBe(30);
+      expect(stats.valor_mxn).toBe(0);
+      expect(stats.valor_usd_sin_tc).toBe(3300);
+      expect(stats.pesos_exactos).toBe(false);
+      // El USD interno del reparto NO cambia (mismas 30 × 110).
+      expect(stats.valor_usd).toBe(3300);
+    });
+
+    it('ítem MIXTO: cada moneda en su campo, sin mezclarse jamás', () => {
+      const stats = statsFromLayers(
+        buildLayers([
+          entrada('m1', 10, 200, 'MXN'), // $2,000 MXN reales
+          entrada('u2', 5, 40, 'USD'), // 200 USD sin TC
+          entrada('t3', 2, 6, 'USD', 18), // 2 × 108 = $216 MXN reales
+        ]),
+      );
+      expect(stats.stock).toBe(17);
+      expect(stats.valor_mxn).toBe(2216);
+      expect(stats.valor_usd_sin_tc).toBe(200);
+      expect(stats.pesos_exactos).toBe(false);
+    });
+
+    it('una ENTRADA a $0 sin TC no ensucia la bandera ($0 vale 0 en cualquier moneda)', () => {
+      const stats = statsFromLayers(
+        buildLayers([
+          entrada('m4', 4, 50, 'MXN'),
+          entrada('z5', 3, 0, 'USD'), // carga masiva sin costo
+        ]),
+      );
+      expect(stats.valor_mxn).toBe(200);
+      expect(stats.valor_usd_sin_tc).toBe(0);
+      expect(stats.pesos_exactos).toBe(true);
+    });
+
+    it('la capa en dólares consumida por el FIFO deja de pesar en el valorizado', () => {
+      const salida: MovCardex = {
+        id: 's9',
+        tipo: 'SALIDA',
+        cantidad: 30,
+        costo_unitario_usd: 110,
+        moneda: 'USD',
+        costo_unitario_mxn: null,
+        tc_usd_mxn: null,
+        fecha_movimiento: '2026-09-01',
+        created_at: '2026-09-01T15:00:00Z',
+      };
+      const stats = statsFromLayers(
+        buildLayers([
+          entrada('u1', 30, 110, 'USD'),
+          salida,
+          entrada('m2', 2, 150, 'MXN'),
+        ]),
+      );
+      expect(stats.stock).toBe(2);
+      expect(stats.valor_mxn).toBe(300);
+      expect(stats.valor_usd_sin_tc).toBe(0);
+      expect(stats.pesos_exactos).toBe(true);
+    });
   });
 });
 
