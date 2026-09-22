@@ -269,6 +269,39 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    de la devolución (peso contra peso; TC solo si la moneda difiere).
    No duplicar ese costo en otro lado. Caso aceites 28-ago-2026: una entrada
    en pesos capturada como USD multiplicó ×17 el costo del avión.
+   **SALIDA «para todas las matrículas» (`para_flota`) ⇒ `aeronave_id` NULL**
+   y el cargo se prorratea entre los aviones ACTIVOS (un gasto por avión,
+   Σ EXACTA al centavo con el residuo en el primero). **La liga
+   `gasto.inventario_movimiento_id` es 1→N desde el 22-sep-2026**: el índice
+   ÚNICO `uq_gasto_inventario_movimiento` (`20260703000001`, cuando el puente
+   era 1 salida → 1 gasto) pasa a ser normal en `20260922000003` — era el
+   SEGUNDO candado del bug y, sin él, relajar el CHECK solo cambiaba el 23514
+   por un **23505** («duplicate key … uq_gasto_inventario_movimiento») en el
+   segundo renglón del lote, con compensación (el movimiento se borra) y otro
+   toast rojo. Verificado en prod el 22-sep con un INSERT REAL revertido. Que
+   una salida no genere su gasto dos veces lo garantiza el API (UNA llamada
+   por alta) + la idempotencia por `client_request_id`, no el índice. Mientras
+   la migración no esté aplicada, ese 23505 también responde **503
+   `MIGRACION_PENDIENTE`** (nunca el 500 traducido «Ya existe un registro con
+   esos mismos datos», que manda a buscar un duplicado inexistente) y el
+   movimiento se revierte: no queda NADA escrito. El CHECK de la tabla
+   lo permite **desde `20260922000003`**: el original sin nombre de
+   `20260515000004` («toda SALIDA lleva avión») nunca se relajó al agregar la
+   columna el 13-jul-2026, así que CADA salida de flota moría con 23514 →
+   500 → el toast genérico «Alguno de los valores capturados no es válido»
+   (reporte del cliente, 22-sep-2026: «solo pasa cuando se intenta repartir
+   en todas las matrículas»; en prod: 0 filas con `para_flota = true`). Hoy
+   son DOS checks con nombre, espejo EXACTO de las dos validaciones del
+   service: `inventario_movimiento_salida_destino_chk` (SALIDA con avión **o**
+   con flota) y `inventario_movimiento_para_flota_chk` (`para_flota` solo en
+   SALIDA y SIN avión). Mientras la migración no esté aplicada, el API 0.0.22
+   responde **503 `MIGRACION_PENDIENTE`** a esa captura (con la instrucción
+   de capturar por avión) y **400 `MOVIMIENTO_INVALIDO`** + `details.constraint`
+   a cualquier otro 23514 del insert: nunca un 500 (un 500 dispara el
+   reintento del outbox de la app). Un 23514 que cite UNO DE LOS DOS CHECKS
+   NUEVOS es 400 aunque sea salida de flota: si ese check existe, la
+   migración YA está aplicada y lo que falla es el dato — un 503 mandaría a
+   aplicar algo que ya está.
 
    **BAJA de un movimiento de cardex (21-sep-2026, pedido del cliente: «que
    al momento de eliminarlos pida justificacion y sepamos quien lo hizo»).**
@@ -1881,8 +1914,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   `20260916000001_conciliacion_job_resultados.sql` (aditiva, sin triggers),
   desglose del auto-cruce en `conciliacion_import_job`. El API funciona con o
   sin ella.
-- **PENDIENTE DE APLICAR (17-sep-2026) — REQUIERE DRY-RUN**:
-  `20260917000001_usuario_apodo.sql`. Aditiva en datos
+- **APLICADA (verificada en prod el 22-sep-2026 vía MCP: `usuario.apodo`
+  existe)** — `20260917000001_usuario_apodo.sql`. La descripción de abajo se
+  conserva como registro de lo que hizo. Aditiva en datos
   (`usuario.apodo text`), pero toca **DOS triggers** y por eso va en seco
   primero (`begin … update usuario set apodo = … ; update vuelo set
   operador_externo = … ; rollback`): (1) `trg_usuario_calendar_fanout` pasa a
@@ -1894,9 +1928,11 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   o SIN la migración: ante `42703` (select) o `PGRST204` (cuerpo del
   insert/update) se degrada una vez, avisa en el log y sigue con el PRIMER
   nombre del piloto. Orden: migración → API → `POST /v1/calendar/resync`.
-- **PENDIENTE DE APLICAR (21-sep-2026) — REQUIERE DRY-RUN**:
-  `20260921000001_inventario_movimiento_eliminado.sql` (baja de movimientos
-  de cardex con justificación). Aditiva en datos —tabla nueva
+- **APLICADA (21-sep-2026, verificada en prod el 22-sep vía MCP: existen la
+  tabla y la función; primer uso real el 21-sep: baja de la ENTRADA de prueba
+  «Aceite 15w 50»)** — `20260921000001_inventario_movimiento_eliminado.sql`
+  (baja de movimientos de cardex con justificación). La descripción de abajo
+  se conserva como registro de lo que hizo. Aditiva en datos —tabla nueva
   `inventario_movimiento_eliminado` + función
   `inventario_eliminar_movimiento(uuid, uuid, text, uuid)`— pero la función
   **BORRA filas y dispara `trg_gasto_bitacora`**, así que va en seco primero:
@@ -1938,8 +1974,9 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   solo la COLUMNA sigue recortando a 4 — `horasPactadasPersistidas` lee el más
   preciso de los dos, así que el total tampoco se mueve. Tras aplicar:
   `get_advisors` y re-guardar #322 desde el panel.
-- **PENDIENTE DE APLICAR (22-sep-2026) — REQUIERE DRY-RUN**:
-  `20260922000002_tarifa_hora_seis_decimales.sql` (invariante 23:
+- **APLICADA (22-sep-2026, verificada en prod vía MCP: `tarifa_hora_usd` es
+  `numeric(14,6)`)** — `20260922000002_tarifa_hora_seis_decimales.sql`. La
+  descripción de abajo se conserva como registro de lo que hizo. (Invariante 23:
   `tarifa_hora_usd` a `numeric(14,6)` en `vuelo` y
   `cotizacion_version_history` + backfill de **1 vuelo**, #105). NO crea
   triggers ni toca los catálogos de tarifa, pero ESCRIBE en `vuelo`, así que
@@ -1967,6 +2004,79 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   decimales (el snapshot es `jsonb`, no tiene precisión) y solo la COLUMNA
   sigue recortando a 2 — `tarifaPersistida` lee la más precisa de las dos,
   así que el total tampoco se mueve. Tras aplicar: `get_advisors`.
+- **APLICADA (22-sep-2026 vía MCP, tras correr el dry-run de la cabecera en
+  prod: `DRYRUN_OK · movimientos 81 → 82, gastos 800 → 807, suma 21.25 USD ·
+  todo se revierte`; después del apply: 10 CHECK —los 8 de siempre + los 2
+  nuevos—, `uq_gasto_inventario_movimiento` fuera,
+  `idx_gasto_inventario_movimiento` puesto, 81 movimientos y 800 gastos
+  intactos, `get_advisors` sin hallazgos nuevos)** —
+  `20260922000003_inventario_salida_flota_sin_avion.sql` (invariante 8: la
+  SALIDA «para todas las matrículas» deja de exigir avión **y la liga
+  gasto→movimiento deja de ser única**). **SON DOS CANDADOS Y HAY QUE QUITAR
+  LOS DOS** (revisión adversaria 22-sep-2026, con INSERT REAL revertido en
+  prod): quitar solo el primero cambia el 23514 por un 23505.
+  (A) Cambia UN CHECK sin nombre —el de `20260515000004`, que Postgres
+  bautizó `inventario_movimiento_check` y que se busca por su **DEFINICIÓN**
+  en `pg_constraint` (`aeronave_id IS NOT NULL`), patrón de
+  `20260914000002`; de los 9 CHECK de la tabla coincide EXACTAMENTE 1, los de
+  cantidad/costos/moneda/TC/venta se quedan— por DOS con nombre:
+  `inventario_movimiento_salida_destino_chk` (`tipo <> 'SALIDA' or
+  aeronave_id is not null or para_flota`) y
+  `inventario_movimiento_para_flota_chk` (`not para_flota or (tipo =
+  'SALIDA' and aeronave_id is null)`).
+  (B) Cambia el índice ÚNICO `uq_gasto_inventario_movimiento`
+  (`20260703000001`) por uno NORMAL con el mismo predicado parcial
+  (`idx_gasto_inventario_movimiento`): la salida de flota crea N gastos con
+  el MISMO `inventario_movimiento_id` y el segundo renglón del lote moría con
+  «duplicate key value violates unique constraint
+  "uq_gasto_inventario_movimiento"». El índice se conserva (no se borra a
+  secas) porque TODAS las lecturas de la liga van por esa columna
+  (`gastoIdPorMovimiento`, `gastosDeMovimiento`, el replay idempotente,
+  `llenarCostoVentaRefacciones`, `inventario_eliminar_movimiento`).
+  **Sin triggers nuevos y sin backfill**: las 81 filas de hoy ya cumplen las
+  dos condiciones (toda SALIDA tiene avión, 0 con `para_flota`) y no hay
+  movimiento con más de un gasto ligado, así que los `add constraint` validan
+  y el índice nuevo se construye sin conflicto. Aun así va en seco primero,
+  porque el camino que desbloquea ESCRIBE dinero: el guion de la CABECERA
+  corre dentro de `begin … rollback` **con los `ALTER` DENTRO** (fuera de
+  ellos probaría el CHECK viejo y demostraría lo contrario) y es CONCLUYENTE
+  — (1) INSERT REAL de la salida de flota que DEBE reventar con 23514 *antes*
+  del ALTER (el bug del cliente, reproducido), (2) el cuerpo real de la
+  migración parte 1 + aserción de que quedaron los dos checks Y de que no se
+  llevó ningún otro, (3) tres negativos (SALIDA sin destino, SALIDA con avión
+  Y flota, ENTRADA con `para_flota`), (4) INSERT REAL de la salida, que ya
+  entra, (5) los 7 gastos que DEBEN reventar con 23505 mientras el índice
+  único siga puesto (el segundo candado, invisible para cualquier `select`),
+  (6) el cuerpo real parte 2 (swap del índice), (7) los 7 gastos
+  prorrateados **tal como los arma `crearGastosDeSalidaFlota`** (origen
+  SISTEMA, REFACCION, BODEGA, SIN_COMPROBANTE, `capturado_en`,
+  `inventario_movimiento_id`, montos 1/7 con el residuo en el primero) para
+  que disparen TODOS los triggers de `gasto` —bitácora, personal_dueno,
+  sync_facturacion, updated_at: un error de trigger es INVISIBLE para
+  cualquier `select`, forma exacta del incidente del ENUM `moneda` del
+  15-sep—, con aserciones de +1 movimiento, +N gastos, Σ = total AL CENTAVO
+  y una fila de bitácora por gasto, y (8) cierre con `raise exception
+  'DRYRUN_OK …'` que revierte + los conteos de control tras el `rollback`
+  (81 movimientos · 799 gastos · 481 bitácora · 0 con `para_flota` · 9
+  CHECK · índice único aún presente, verificados en prod el 22-sep).
+  **El guion ya se corrió en prod** (22-sep, como una sola sentencia
+  autoabortada, equivalente al `begin … rollback`): `ok1 · ok2(10) · ok3a ·
+  ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
+  `primero=36.42 base=36.43 suma=255.00`, `movs 81→82`, `gastos 799→806`,
+  `bitacora 481→488`, y los conteos post-rollback idénticos a los de antes.
+  `tipo` es ENUM (`tipo_movimiento_inventario`): en el CHECK y en
+  los INSERT del guion el literal es SQL (se resuelve solo, como el CHECK
+  original); en plpgsql sería `::text`. El API 0.0.22 corre CON o SIN la
+  migración: sin ella la salida de flota responde **503
+  `MIGRACION_PENDIENTE`** («captura la salida por avión») en vez del 500
+  genérico de antes —tanto por el 23514 del movimiento como por el 23505 de
+  los gastos, y en ese caso el movimiento se revierte: no queda nada
+  escrito—, y cualquier otro 23514 del insert es un **400
+  `MOVIMIENTO_INVALIDO`** con el nombre del constraint en `details`. Tras
+  aplicar: `get_advisors` y repetir la captura del cliente desde el panel
+  (SALIDA de 12 con «Para todas las matrículas» ⇒ 200 + 7 gastos
+  REFACCION/BODEGA que suman el total al centavo: 36.42 + 6 × 36.43 =
+  255.00 USD).
 - Push a `main` = deploy automático en Railway. El usuario autorizó push
   directo de este repo sin preguntar.
 - Build/typecheck requiere `NODE_OPTIONS=--max-old-space-size=4096` (el

@@ -90,6 +90,31 @@ const MOV_COLS =
 /** Índice único parcial de `inventario_movimiento.client_request_id`. */
 const UQ_INV_MOVIMIENTO_CLIENT_REQUEST = 'uq_inv_movimiento_client_request';
 
+/**
+ * Migración que permite la SALIDA «para todas las matrículas» sin avión
+ * (relaja el CHECK sin nombre de `20260515000004`). Mientras no esté
+ * aplicada, esa captura rebota 23514 y el API responde 503
+ * MIGRACION_PENDIENTE en vez del 500 genérico de antes.
+ */
+export const MIGRACION_SALIDA_FLOTA = '20260922000003';
+
+/**
+ * Los DOS checks CON NOMBRE que trae esa migración. Si un 23514 los cita, la
+ * migración ya está aplicada: el rechazo es del DATO (400), no de la base.
+ */
+const CHECKS_SALIDA_FLOTA = [
+  'inventario_movimiento_salida_destino_chk',
+  'inventario_movimiento_para_flota_chk',
+];
+
+/**
+ * Índice ÚNICO legado de `gasto.inventario_movimiento_id` (`20260703000001`,
+ * cuando una salida generaba UN solo gasto). La misma migración
+ * `20260922000003` lo cambia por uno normal: la salida de flota crea N gastos
+ * ligados al MISMO movimiento y el segundo renglón del lote choca con 23505.
+ */
+const UQ_GASTO_INVENTARIO_MOVIMIENTO = 'uq_gasto_inventario_movimiento';
+
 /** Bitácora forense de bajas de cardex (migración 20260921000001). */
 const TABLA_MOVIMIENTO_ELIMINADO = 'inventario_movimiento_eliminado';
 /** Borrado ATÓMICO (auditoría + gastos + movimiento) de la misma migración. */
@@ -1775,6 +1800,12 @@ export class InventoryService {
       tc = costo.tc;
     }
 
+    // Salida "para todas las matrículas": lo que REALMENTE se va a insertar
+    // (la bandera solo aplica a SALIDA). Se resuelve aquí porque el manejo
+    // del 23514 de abajo depende de ella.
+    const salidaDeFlota =
+      dto.tipo === TipoMovimientoInventario.SALIDA && dto.para_flota === true;
+
     const { data, error } = await this.supabase.service
       .from('inventario_movimiento')
       .insert({
@@ -1793,9 +1824,7 @@ export class InventoryService {
         // aquí (montoGastoDeSalida); null = la salida se cargó a costo FIFO.
         venta_unitaria: ventaUnitaria,
         venta_moneda: ventaUnitaria != null ? ventaMoneda : null,
-        para_flota:
-          dto.tipo === TipoMovimientoInventario.SALIDA &&
-          dto.para_flota === true,
+        para_flota: salidaDeFlota,
         aeronave_id: dto.aeronave_id ?? null,
         proveedor_id: dto.proveedor_id ?? null,
         // Día Cancún explícito: el default current_date de la BD es UTC y de
@@ -1837,6 +1866,36 @@ export class InventoryService {
         throw new BadRequestException(
           `Referencia no encontrada: ${error.message}`,
         );
+      // CHECK de la tabla (23514). Hasta el 22-sep-2026 esto era un 500 que
+      // el filtro traducía al genérico «Alguno de los valores capturados no
+      // es válido…»: el operador no tenía forma de saber QUÉ pasaba.
+      if (error.code === '23514') {
+        const constraint = nombreDeConstraint(error.message);
+        // La salida "para todas las matrículas" va sin avión y el CHECK
+        // original (`20260515000004`) exige avión en TODA salida: mientras
+        // no se aplique `20260922000003` no hay nada que corregir en la
+        // captura — es la BASE la que falta. 503 (no 400): no es culpa del
+        // dato y el outbox de la app puede reintentarlo más tarde.
+        // Si quien rechazó es uno de los checks que TRAE esa migración, la
+        // migración SÍ está aplicada y el problema es el dato: 400, nunca un
+        // 503 que mande a aplicar algo que ya existe.
+        if (salidaDeFlota && !CHECKS_SALIDA_FLOTA.includes(constraint ?? '')) {
+          this.logger.error(
+            `Salida de bodega para toda la flota rechazada por la base: falta aplicar la migración ${MIGRACION_SALIDA_FLOTA} (${error.message}). No se escribió nada.`,
+          );
+          throw new ServiceUnavailableException({
+            message: `La salida para toda la flota todavía no está disponible en la base: falta aplicar la migración ${MIGRACION_SALIDA_FLOTA}. Mientras tanto, captura la salida por avión (una por matrícula). No se guardó nada.`,
+            error: 'MIGRACION_PENDIENTE',
+            details: { migracion: MIGRACION_SALIDA_FLOTA, constraint },
+          });
+        }
+        throw new BadRequestException({
+          message:
+            'Alguno de los valores del movimiento no cumple una regla de la base (por ejemplo cantidad o costo en cero, o una salida sin destino). Revisa los campos e intenta de nuevo.',
+          error: 'MOVIMIENTO_INVALIDO',
+          details: { constraint, tecnico: error.message },
+        });
+      }
       throw new Error(error.message);
     }
 
@@ -1849,10 +1908,7 @@ export class InventoryService {
     // viaja como `reversion_pendiente` para que el dinero no se pierda en
     // silencio (la UI puede ignorarlo; el warn en el log se conserva).
     let reversionPendiente: ReversionPendiente | null = null;
-    if (
-      dto.tipo === TipoMovimientoInventario.SALIDA &&
-      dto.para_flota === true
-    ) {
+    if (salidaDeFlota) {
       gastoGenerado = await this.crearGastosDeSalidaFlota(
         data as Record<string, unknown>,
         item.nombre,
@@ -2644,6 +2700,33 @@ export class InventoryService {
       // el stock no baja sin su cargo. Insert en lote = o entran todos los
       // gastos o ninguno; se revierte el movimiento y se lanza claro.
       await this.revertirMovimientoSinGasto(mov.id as string, 'SALIDA flota');
+      // SEGUNDO CANDADO de la misma migración (22-sep-2026): la liga
+      // gasto→movimiento nació ÚNICA (`uq_gasto_inventario_movimiento`,
+      // `20260703000001`, cuando el puente era 1 salida → 1 gasto). Los N
+      // gastos de la flota comparten `inventario_movimiento_id`, así que el
+      // segundo renglón del lote choca con 23505 si `20260922000003` no
+      // relajó el índice. Es EXACTAMENTE el mismo diagnóstico que el 23514
+      // del movimiento —falta la migración, el dato está bien— y merece el
+      // mismo 503: un 500 traducido decía «Ya existe un registro con esos
+      // mismos datos; revisa si está duplicado», que manda al operador a
+      // buscar un duplicado que no existe.
+      if (
+        error.code === '23505' &&
+        error.message.includes(UQ_GASTO_INVENTARIO_MOVIMIENTO)
+      ) {
+        this.logger.error(
+          `Gastos prorrateados de la salida de flota rechazados por la base: falta aplicar la migración ${MIGRACION_SALIDA_FLOTA} (${error.message}). La salida se revirtió: no quedó nada escrito.`,
+        );
+        throw new ServiceUnavailableException({
+          message: `La salida para toda la flota todavía no está disponible en la base: falta aplicar la migración ${MIGRACION_SALIDA_FLOTA} (el cargo se reparte en un gasto por avión y la base todavía admite uno solo). Mientras tanto, captura la salida por avión (una por matrícula). No se guardó nada.`,
+          error: 'MIGRACION_PENDIENTE',
+          details: {
+            migracion: MIGRACION_SALIDA_FLOTA,
+            constraint: UQ_GASTO_INVENTARIO_MOVIMIENTO,
+            aviones: n,
+          },
+        });
+      }
       throw new Error(
         `La salida de bodega (flota) se revirtió: no se pudieron crear los gastos prorrateados (${error.message}). Intenta la salida de nuevo.`,
       );
@@ -2863,6 +2946,17 @@ function pathsDeFotos(raw: unknown): string[] {
  * (en MXN cuando todas las capas consumidas se compraron en pesos, si no
  * USD; `tc_gasto` = TC ponderado de las capas).
  */
+/**
+ * Nombre del CHECK que rechazó un INSERT/UPDATE (23514). Postgres lo manda
+ * entrecomillado dentro del mensaje: «… violates check constraint
+ * "inventario_movimiento_check"». Sirve para que el 400 diga CUÁL regla se
+ * rompió (`details.constraint`) en vez del genérico de siempre; `null`
+ * cuando el mensaje no trae nombre (nunca se inventa uno).
+ */
+function nombreDeConstraint(mensaje: string): string | null {
+  return /check constraint "([^"]+)"/i.exec(mensaje ?? '')?.[1] ?? null;
+}
+
 function montoGastoDeSalida(mov: Record<string, unknown>): {
   monto: number;
   moneda: 'MXN' | 'USD';

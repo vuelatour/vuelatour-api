@@ -1,0 +1,518 @@
+-- 22-sep-2026 · LA SALIDA DE BODEGA «PARA TODAS LAS MATRÍCULAS» NO LLEVA
+-- AVIÓN Y GENERA **N** GASTOS (uno por avión), NO UNO.
+--
+-- Reporte del cliente (captura del panel, /admin/inventory · «Aceite
+-- multigrado semisintético 15W-50»): Tipo = Salida, 12 piezas, precio de
+-- venta 21.25 USD, casilla «Para todas las matrículas» MARCADA, fecha
+-- 01/09/2026, notas «Se lleva a Luisillo para los aviones» ⇒ toast rojo
+-- «Alguno de los valores capturados no es válido para este registro; revisa
+-- los campos e intenta de nuevo.» Sus palabras: «solo pasa cuando se intenta
+-- repartir en todas las matrículas».
+--
+-- SON **DOS** CANDADOS, NO UNO (los dos verificados contra prod
+-- `bjesduasnzbzywofukbf` el 22-sep-2026 con un INSERT REAL que se revirtió):
+--
+--   (A) CHECK de `inventario_movimiento` — el que revienta HOY.
+--       `20260515000004_inventario.sql` creó la tabla con un CHECK **SIN
+--       NOMBRE** —`check (tipo <> 'SALIDA' or aeronave_id is not null)`, que
+--       Postgres bautizó `inventario_movimiento_check`— y
+--       `20260713000003_inventario_movimiento_para_flota.sql` agregó la
+--       columna `para_flota` SIN relajarlo. `createMovimiento` inserta la
+--       salida de flota con `aeronave_id: null` + `para_flota: true` ⇒
+--       **23514** ⇒ 500 ⇒ `traducirErrorTecnico`
+--       (`src/common/filters/all-exceptions.filter.ts`) ⇒ el texto EXACTO de
+--       la captura. Medido en prod:
+--         «new row for relation "inventario_movimiento" violates check
+--          constraint "inventario_movimiento_check"».
+--
+--   (B) ÍNDICE ÚNICO `uq_gasto_inventario_movimiento` — el que reventaría
+--       DESPUÉS, y que por sí solo dejaría el bug sin arreglar.
+--       `20260703000001_gasto_desde_bodega.sql` creó
+--       `create unique index uq_gasto_inventario_movimiento on public.gasto
+--        (inventario_movimiento_id) where inventario_movimiento_id is not
+--        null` cuando el puente era 1 salida → 1 gasto. La salida de flota
+--       crea **N gastos ligados al MISMO movimiento**
+--       (`crearGastosDeSalidaFlota`), así que el segundo renglón del lote
+--       choca contra ese índice. Medido en prod, ya con el CHECK (A)
+--       relajado en la misma transacción de ensayo:
+--         «duplicate key value violates unique constraint
+--          "uq_gasto_inventario_movimiento"».
+--       Y ese 23505 NO es inocuo: `crearGastosDeSalidaFlota` compensa
+--       (borra el movimiento recién creado) y lanza, así que el operador
+--       vería otro toast rojo —«Ya existe un registro con esos mismos
+--       datos»— después de haber «arreglado» la base. Arreglar solo (A) es
+--       cambiar un error por otro.
+--
+-- Como lo que revienta hoy es el INSERT del MOVIMIENTO, no quedó nada
+-- escrito: en prod hay **0** filas con `para_flota = true` y **0** gastos de
+-- «toda la flota». La funcionalidad NUNCA funcionó desde que se agregó la
+-- columna (13-jul-2026). La oficina acabó cargando esa salida de 12 piezas a
+-- UN solo avión (XA-VGV) — eso NO se toca aquí.
+--
+-- QUÉ HACE ESTA MIGRACIÓN (aditiva, sin triggers nuevos, sin backfill, sin
+-- tocar una sola fila):
+--   1. Cambia el CHECK sin nombre por DOS con nombre, espejo EXACTO de las
+--      dos validaciones que el API ya hace en `createMovimiento`
+--      (invariante 8):
+--        · `inventario_movimiento_salida_destino_chk` — una SALIDA lleva
+--          avión **o** va a toda la flota (nunca al aire).
+--        · `inventario_movimiento_para_flota_chk` — `para_flota` solo existe
+--          en SALIDA y SIN avión (nunca las dos cosas a la vez).
+--   2. Cambia el índice ÚNICO de `gasto.inventario_movimiento_id` por uno
+--      NORMAL (mismo predicado parcial): la liga dejó de ser 1→1 y pasó a
+--      ser 1→N el día que nació `para_flota`. El índice se conserva (no se
+--      borra a secas) porque TODAS las lecturas de la liga son por esa
+--      columna: `gastoIdPorMovimiento`, `gastosDeMovimiento`, el replay
+--      idempotente, `llenarCostoVentaRefacciones` y la función de BD
+--      `inventario_eliminar_movimiento`.
+--
+-- ¿QUÉ PROTEGÍA EL ÚNICO Y QUIÉN LO PROTEGE AHORA? Que una MISMA salida no
+-- generara su gasto dos veces. Hoy eso lo garantiza el API, no el índice:
+-- `gasto.inventario_movimiento_id` lo escriben EXCLUSIVAMENTE
+-- `crearGastoDeSalida` y `crearGastosDeSalidaFlota`, cada una UNA vez por
+-- alta, y el reintento del outbox ni siquiera llega ahí (el pre-check por
+-- `client_request_id` devuelve el movimiento existente con sus gastos ya
+-- ligados, sin volver a insertar — `uq_inv_movimiento_client_request`).
+-- Las 81 filas de hoy cumplen las condiciones nuevas (toda SALIDA tiene
+-- avión, 0 con `para_flota`) y hay 0 movimientos con más de un gasto ligado,
+-- así que los `add constraint` validan y el índice nuevo se construye sin
+-- conflicto.
+--
+-- El nombre del CHECK viejo NO se adivina (es autogenerado y podría diferir
+-- entre entornos), así que se busca por su **DEFINICIÓN** en `pg_constraint`
+-- — mismo patrón que `20260914000002_estatus_facturacion_no_facturable.sql`.
+-- El barrido es QUIRÚRGICO: solo toca los CHECK cuya definición menciona
+-- `aeronave_id IS NOT NULL`. Verificado en prod: de los 9 CHECK de la tabla
+-- coincide EXACTAMENTE 1 (`inventario_movimiento_check`); los de cantidad,
+-- costos, moneda, TC, venta y empaques no lo mencionan y se quedan.
+--
+-- ATENCIÓN · ENUMs: `inventario_movimiento.tipo` es ENUM
+-- (`public.tipo_movimiento_inventario`) y `gasto.categoria`/`moneda`/
+-- `medio_pago`/`estatus_comprobante` también. En un CHECK o un INSERT
+-- **SQL** el literal `'SALIDA'` se resuelve solo contra el enum (así estaba
+-- el CHECK original); en **plpgsql** se compara SIEMPRE `::text` — regla del
+-- repo tras el incidente del 15-sep-2026 («operator does not exist:
+-- public.moneda = text» tiró la conciliación entera y era invisible para
+-- cualquier `select`).
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN OBLIGATORIO ANTES DE APLICAR (escrituras REALES, begin … rollback).
+--
+-- Un `select` no prueba NADA aquí: lo que hay que demostrar es (a) que hoy
+-- el movimiento revienta, (b) que con el CHECK relajado los 7 gastos
+-- REVIENTAN IGUAL por el índice único —el candado (B), que ningún select
+-- enseña—, (c) que con las dos cosas arregladas la salida entra, los 7
+-- gastos disparan TODOS los triggers de `gasto` (bitácora, personal_dueno,
+-- sync_facturacion, updated_at) y suman el total AL CENTAVO, y (d) que lo
+-- que no debe entrar sigue sin entrar.
+-- Los OCHO pasos son ASERCIONES: cada uno imprime «ok N/8» o REVIENTA la
+-- transacción con «DRY-RUN FALLÓ». Nada que verificar a ojo.
+--
+-- **LOS `ALTER` VAN DENTRO DEL `begin`** (pasos 2 y 6). Fuera de él, el paso
+-- 1 probaría el CHECK viejo y los pasos 3-7 también: el ensayo demostraría
+-- lo contrario de lo que se quiere probar.
+--
+-- CÓMO CORRERLO: en UNA sola sesión con control de transacción propio (psql
+-- o el editor SQL de Supabase). NO sirve una herramienta que envuelva cada
+-- sentencia en su propia transacción ni una conexión solo-lectura: el
+-- `rollback` final es lo que hace seguro el ensayo.
+--
+--   begin;
+--     -- 0) CONTEXTO: un ADMIN real, el ítem del reporte y la flota activa.
+--     create temporary table dry (k text primary key, v uuid) on commit drop;
+--     create temporary table dry_n (k text primary key, v bigint) on commit drop;
+--     insert into dry values
+--       ('usuario', (select id from public.usuario
+--                     where rol::text = 'ADMIN' and estado::text = 'ACTIVO'
+--                     order by created_at limit 1)),
+--       ('item',    'd99df930-16e2-499a-877a-37e9518c1041'::uuid),
+--       ('avion',   (select id from public.aeronave
+--                     where activa = true order by matricula limit 1));
+--     insert into dry_n
+--       select 'movs',   count(*) from public.inventario_movimiento
+--       union all select 'gastos',  count(*) from public.gasto
+--       union all select 'bitacora', count(*) from public.gasto_bitacora
+--       union all select 'aviones', count(*) from public.aeronave where activa = true;
+--     do $dry$
+--     declare v_aviones bigint := (select v from dry_n where k = 'aviones');
+--     begin
+--       if (select v from dry where k = 'usuario') is null then
+--         raise exception 'DRY-RUN SIN CONTEXTO: no hay ADMIN activo'
+--           using errcode = 'assert_failure';
+--       end if;
+--       if not exists (select 1 from public.inventario_item
+--                       where id = (select v from dry where k = 'item')) then
+--         raise exception 'DRY-RUN SIN CONTEXTO: el ítem del reporte no existe'
+--           using errcode = 'assert_failure';
+--       end if;
+--       if v_aviones < 2 then
+--         raise exception 'DRY-RUN SIN CONTEXTO: % aviones activos (se esperaban 7)', v_aviones
+--           using errcode = 'assert_failure';
+--       end if;
+--       raise notice 'ok 0/8 · contexto: % aviones activos', v_aviones;   -- 7
+--     end $dry$;
+--
+--     -- 1) CANDADO (A), HOY: la salida de flota DEBE reventar con 23514.
+--     --    Esto es el bug del cliente, reproducido con un INSERT REAL.
+--     savepoint s1;
+--     do $dry$
+--     begin
+--       insert into public.inventario_movimiento (
+--         item_id, tipo, cantidad, costo_unitario_usd, moneda,
+--         aeronave_id, para_flota, fecha_movimiento, referencia, notas,
+--         registrado_por, created_by, updated_by)
+--       values (
+--         (select v from dry where k = 'item'), 'SALIDA', 1, 21.25, 'USD',
+--         null, true, current_date, 'dry-run', 'DRY-RUN 22-sep (se revierte)',
+--         (select v from dry where k = 'usuario'),
+--         (select v from dry where k = 'usuario'),
+--         (select v from dry where k = 'usuario'));
+--       raise exception 'DRY-RUN FALLÓ: la salida de flota entró ANTES del ALTER (¿el CHECK viejo ya no está?)'
+--         using errcode = 'assert_failure';
+--     exception when check_violation then
+--       raise notice 'ok 1/8 · el CHECK viejo la rechaza (este es el bug): %', sqlerrm;
+--     end $dry$;
+--     rollback to savepoint s1;
+--
+--     -- 2) CUERPO REAL DE LA MIGRACIÓN · parte 1 (sección 1 y 2, tal cual).
+--     do $mig$
+--     declare c record;
+--     begin
+--       for c in
+--         select con.conname
+--           from pg_constraint con
+--          where con.conrelid = 'public.inventario_movimiento'::regclass
+--            and con.contype = 'c'
+--            and con.conname not in ('inventario_movimiento_salida_destino_chk',
+--                                    'inventario_movimiento_para_flota_chk')
+--            and pg_get_constraintdef(con.oid) ilike '%aeronave_id IS NOT NULL%'
+--       loop
+--         raise notice 'drop check % de public.inventario_movimiento', c.conname;
+--         execute format('alter table public.inventario_movimiento drop constraint %I', c.conname);
+--       end loop;
+--     end $mig$;
+--     alter table public.inventario_movimiento
+--       drop constraint if exists inventario_movimiento_salida_destino_chk;
+--     alter table public.inventario_movimiento
+--       add constraint inventario_movimiento_salida_destino_chk
+--       check (tipo <> 'SALIDA' or aeronave_id is not null or para_flota);
+--     alter table public.inventario_movimiento
+--       drop constraint if exists inventario_movimiento_para_flota_chk;
+--     alter table public.inventario_movimiento
+--       add constraint inventario_movimiento_para_flota_chk
+--       check (not para_flota or (tipo = 'SALIDA' and aeronave_id is null));
+--     -- Si algún `add constraint` no valida las 81 filas de hoy, revienta
+--     -- aquí. Y los DEMÁS checks (cantidad, costos, moneda, TC, venta) siguen
+--     -- en su sitio: el barrido solo se lleva los que hablan de aeronave_id.
+--     do $dry$
+--     declare v_checks int;
+--     begin
+--       if (select count(*) from pg_constraint
+--            where conrelid = 'public.inventario_movimiento'::regclass
+--              and contype = 'c'
+--              and conname in ('inventario_movimiento_salida_destino_chk',
+--                              'inventario_movimiento_para_flota_chk')) <> 2 then
+--         raise exception 'DRY-RUN FALLÓ: no quedaron los DOS checks con nombre'
+--           using errcode = 'assert_failure';
+--       end if;
+--       select count(*) into v_checks from pg_constraint
+--        where conrelid = 'public.inventario_movimiento'::regclass
+--          and contype = 'c';
+--       if v_checks < 10 then      -- 8 que se quedan + los 2 nuevos
+--         raise exception 'DRY-RUN FALLÓ: el barrido se llevó checks de más (quedaron %)', v_checks
+--           using errcode = 'assert_failure';
+--       end if;
+--       raise notice 'ok 2/8 · CHECK viejo fuera, los dos nuevos puestos, % checks en total', v_checks;
+--     end $dry$;
+--
+--     -- 3) NEGATIVOS (ya con los checks nuevos): lo que no debe entrar.
+--     savepoint s3;
+--     do $dry$
+--     declare
+--       v_item uuid := (select v from dry where k = 'item');
+--       v_usr  uuid := (select v from dry where k = 'usuario');
+--       v_av   uuid := (select v from dry where k = 'avion');
+--     begin
+--       -- (a) SALIDA sin avión y sin flota.
+--       begin
+--         insert into public.inventario_movimiento (
+--           item_id, tipo, cantidad, costo_unitario_usd, moneda,
+--           aeronave_id, para_flota, registrado_por)
+--         values (v_item, 'SALIDA', 1, 21.25, 'USD', null, false, v_usr);
+--         raise exception 'DRY-RUN FALLÓ: entró una SALIDA sin avión y sin flota'
+--           using errcode = 'assert_failure';
+--       exception when check_violation then
+--         raise notice 'ok 3a/8 · SALIDA sin destino rechazada: %', sqlerrm;
+--       end;
+--       -- (b) SALIDA con avión Y flota a la vez.
+--       begin
+--         insert into public.inventario_movimiento (
+--           item_id, tipo, cantidad, costo_unitario_usd, moneda,
+--           aeronave_id, para_flota, registrado_por)
+--         values (v_item, 'SALIDA', 1, 21.25, 'USD', v_av, true, v_usr);
+--         raise exception 'DRY-RUN FALLÓ: entró una SALIDA con avión Y flota'
+--           using errcode = 'assert_failure';
+--       exception when check_violation then
+--         raise notice 'ok 3b/8 · SALIDA con avión Y flota rechazada: %', sqlerrm;
+--       end;
+--       -- (c) ENTRADA marcada para flota.
+--       begin
+--         insert into public.inventario_movimiento (
+--           item_id, tipo, cantidad, costo_unitario_usd, moneda,
+--           aeronave_id, para_flota, registrado_por)
+--         values (v_item, 'ENTRADA', 1, 21.25, 'USD', null, true, v_usr);
+--         raise exception 'DRY-RUN FALLÓ: entró una ENTRADA con para_flota'
+--           using errcode = 'assert_failure';
+--       exception when check_violation then
+--         raise notice 'ok 3c/8 · ENTRADA con para_flota rechazada: %', sqlerrm;
+--       end;
+--     end $dry$;
+--     rollback to savepoint s3;
+--
+--     -- 4) Ya con el CHECK relajado, la SALIDA de flota ENTRA (INSERT REAL).
+--     do $dry$
+--     declare
+--       v_usr uuid := (select v from dry where k = 'usuario');
+--       v_mov uuid;
+--     begin
+--       insert into public.inventario_movimiento (
+--         item_id, tipo, cantidad, costo_unitario_usd, moneda,
+--         aeronave_id, para_flota, fecha_movimiento, referencia, notas,
+--         registrado_por, created_by, updated_by)
+--       values (
+--         (select v from dry where k = 'item'), 'SALIDA', 1, 21.25, 'USD',
+--         null, true, current_date, 'dry-run', 'DRY-RUN 22-sep (se revierte)',
+--         v_usr, v_usr, v_usr)
+--       returning id into v_mov;
+--       insert into dry values ('mov', v_mov);
+--       raise notice 'ok 4/8 · la salida de flota YA ENTRA: %', v_mov;
+--     end $dry$;
+--
+--     -- 5) CANDADO (B): con el índice ÚNICO todavía puesto, los N gastos
+--     --    prorrateados REVIENTAN con 23505. Este es el paso que demuestra
+--     --    que arreglar solo el CHECK no arregla nada. Se salta solo si el
+--     --    índice ya no está (migración re-aplicada: el ensayo no debe
+--     --    fallar por eso).
+--     savepoint s5;
+--     do $dry$
+--     declare
+--       v_usr uuid := (select v from dry where k = 'usuario');
+--       v_mov uuid := (select v from dry where k = 'mov');
+--     begin
+--       if not exists (select 1 from pg_class
+--                       where relname = 'uq_gasto_inventario_movimiento'
+--                         and relkind = 'i') then
+--         raise notice 'ok 5/8 · (saltado) el índice único ya no existe';
+--         return;
+--       end if;
+--       begin
+--         insert into public.gasto (
+--           usuario_captura_id, origen, categoria, monto, moneda, fecha_gasto,
+--           medio_pago, estatus_comprobante, aeronave_id,
+--           inventario_movimiento_id, notas, capturado_en, created_by, updated_by)
+--         select v_usr, 'SISTEMA', 'REFACCION', 3.04, 'USD', current_date,
+--                'BODEGA', 'SIN_COMPROBANTE', a.id, v_mov,
+--                'DRY-RUN 22-sep (se revierte)', now(), v_usr, v_usr
+--           from public.aeronave a where a.activa = true;
+--         raise exception 'DRY-RUN FALLÓ: los N gastos entraron con el índice ÚNICO puesto (?)'
+--           using errcode = 'assert_failure';
+--       exception when unique_violation then
+--         raise notice 'ok 5/8 · el índice único los rechaza (segundo candado): %', sqlerrm;
+--       end;
+--     end $dry$;
+--     rollback to savepoint s5;
+--
+--     -- 6) CUERPO REAL DE LA MIGRACIÓN · parte 2 (sección 3, tal cual).
+--     drop index if exists public.uq_gasto_inventario_movimiento;
+--     create index if not exists idx_gasto_inventario_movimiento
+--       on public.gasto (inventario_movimiento_id)
+--       where inventario_movimiento_id is not null;
+--     do $dry$
+--     begin
+--       if exists (select 1 from pg_class
+--                   where relname = 'uq_gasto_inventario_movimiento') then
+--         raise exception 'DRY-RUN FALLÓ: el índice único sigue ahí'
+--           using errcode = 'assert_failure';
+--       end if;
+--       if not exists (select 1 from pg_class
+--                       where relname = 'idx_gasto_inventario_movimiento') then
+--         raise exception 'DRY-RUN FALLÓ: no quedó índice para la liga (las lecturas por movimiento harían seq scan)'
+--           using errcode = 'assert_failure';
+--       end if;
+--       raise notice 'ok 6/8 · índice único fuera, índice normal puesto';
+--     end $dry$;
+--
+--     -- 7) CAMINO FELIZ COMPLETO (escrituras REALES): los N gastos se crean
+--     --    TAL COMO los arma `crearGastosDeSalidaFlota` (origen SISTEMA,
+--     --    REFACCION, BODEGA, SIN_COMPROBANTE, `inventario_movimiento_id`,
+--     --    montos 1/N con el residuo en el PRIMERO por matrícula). Disparan
+--     --    trg_gasto_bitacora, trg_gasto_personal_dueno_valida,
+--     --    trg_gasto_sync_facturacion y trg_gasto_set_updated_at: un error de
+--     --    trigger es INVISIBLE para cualquier select (caso 15-sep-2026).
+--     do $dry$
+--     declare
+--       v_usr  uuid := (select v from dry where k = 'usuario');
+--       v_mov  uuid := (select v from dry where k = 'mov');
+--       v_n    int  := (select v from dry_n where k = 'aviones');
+--       v_monto numeric(12,2) := 21.25;   -- 1 × 21.25 (montoGastoDeSalida)
+--       v_base numeric(12,2);
+--       v_primero numeric(12,2);
+--       v_movs_despues bigint;   v_gastos_despues bigint;  v_bit_despues bigint;
+--       v_suma numeric(12,2);    v_min numeric(12,2);
+--     begin
+--       v_base    := round(v_monto / v_n, 2);
+--       v_primero := round(v_monto - v_base * (v_n - 1), 2);
+--
+--       insert into public.gasto (
+--         usuario_captura_id, origen, categoria, monto, moneda, tc_gasto,
+--         fecha_gasto, medio_pago, estatus_comprobante, aeronave_id,
+--         proveedor_id, inventario_movimiento_id, notas, capturado_en,
+--         created_by, updated_by)
+--       select v_usr, 'SISTEMA', 'REFACCION',
+--              case when a.i = 1 then v_primero else v_base end,
+--              'USD', null, current_date, 'BODEGA', 'SIN_COMPROBANTE',
+--              a.id, null, v_mov,
+--              'Salida de bodega (toda la flota, 1/' || v_n ||
+--              ' del precio de venta): 1 × Aceite 15W-50 · DRY-RUN',
+--              now(), v_usr, v_usr
+--         from (select id, row_number() over (order by matricula) as i
+--                 from public.aeronave where activa = true) a;
+--
+--       select count(*) into v_movs_despues   from public.inventario_movimiento;
+--       select count(*) into v_gastos_despues from public.gasto;
+--       select count(*) into v_bit_despues    from public.gasto_bitacora;
+--       select coalesce(sum(monto), 0), coalesce(min(monto), 0)
+--         into v_suma, v_min
+--         from public.gasto where inventario_movimiento_id = v_mov;
+--
+--       if v_movs_despues <> (select v from dry_n where k = 'movs') + 1 then
+--         raise exception 'DRY-RUN FALLÓ: movimientos % → % (se esperaba +1)',
+--           (select v from dry_n where k = 'movs'), v_movs_despues
+--           using errcode = 'assert_failure';
+--       end if;
+--       if v_gastos_despues <> (select v from dry_n where k = 'gastos') + v_n then
+--         raise exception 'DRY-RUN FALLÓ: gastos % → % (se esperaban +%)',
+--           (select v from dry_n where k = 'gastos'), v_gastos_despues, v_n
+--           using errcode = 'assert_failure';
+--       end if;
+--       -- FIABILIDAD NUMÉRICA: la suma de los N gastos == el total, al centavo.
+--       if v_suma <> v_monto then
+--         raise exception 'DRY-RUN FALLÓ: los % gastos suman % y el total es %',
+--           v_n, v_suma, v_monto using errcode = 'assert_failure';
+--       end if;
+--       if v_min <= 0 then
+--         raise exception 'DRY-RUN FALLÓ: un gasto quedó en % (el CHECK monto > 0)', v_min
+--           using errcode = 'assert_failure';
+--       end if;
+--       -- Los TRIGGERS corrieron: una fila de bitácora por gasto.
+--       if v_bit_despues <> (select v from dry_n where k = 'bitacora') + v_n then
+--         raise exception 'DRY-RUN FALLÓ: gasto_bitacora % → % (se esperaban +%)',
+--           (select v from dry_n where k = 'bitacora'), v_bit_despues, v_n
+--           using errcode = 'assert_failure';
+--       end if;
+--       raise notice 'ok 7/8 · % gastos prorrateados (% + % × %) = % USD, con su bitácora',
+--         v_n, v_primero, v_n - 1, v_base, v_suma;
+--
+--       -- 8) Y SE REVIERTE TODO (la excepción aborta la transacción a propósito).
+--       raise exception 'DRYRUN_OK · movimientos % → %, gastos % → %, suma % USD · todo se revierte',
+--         (select v from dry_n where k = 'movs'), v_movs_despues,
+--         (select v from dry_n where k = 'gastos'), v_gastos_despues, v_suma
+--         using errcode = 'assert_failure';
+--     end $dry$;
+--   rollback;
+--
+--   -- Y COMPROBAR que el rollback dejó todo EXACTAMENTE como estaba
+--   -- (valores verificados en prod el 22-sep-2026):
+--   select count(*) as movs from public.inventario_movimiento;              -- 81
+--   select count(*) as movs_flota from public.inventario_movimiento
+--    where para_flota = true;                                               -- 0
+--   select count(*) as gastos from public.gasto;                            -- 799
+--   select count(*) as bitacora from public.gasto_bitacora;                 -- 481
+--   select count(*) as checks from pg_constraint
+--    where conrelid = 'public.inventario_movimiento'::regclass
+--      and contype = 'c';                                                   -- 9 (aún)
+--   select count(*) as uq from pg_indexes
+--    where tablename = 'gasto'
+--      and indexname = 'uq_gasto_inventario_movimiento';                    -- 1 (aún)
+--
+-- Tras aplicar: `get_advisors` (no hay tabla nueva ni RLS que tocar, pero es
+-- la regla del repo tras cualquier DDL) y, desde el panel, repetir la
+-- captura del cliente: SALIDA de 12 con «Para todas las matrículas» ⇒ 200 y
+-- 7 gastos REFACCION/BODEGA que suman el total al centavo
+-- (36.42 + 6 × 36.43 = 255.00 USD).
+-- ---------------------------------------------------------------------------
+
+-- ===========================================================================
+-- 1) Fuera el CHECK viejo. El nombre NO se adivina (lo puso Postgres al
+--    crear la tabla: `inventario_movimiento_check`): se busca por su
+--    DEFINICIÓN entre los CHECK de public.inventario_movimiento.
+--    Los dos checks nuevos quedan EXCLUIDOS del barrido por nombre, así que
+--    re-aplicar esta migración es un no-op.
+-- ===========================================================================
+do $$
+declare
+  c record;
+begin
+  for c in
+    select con.conname
+      from pg_constraint con
+     where con.conrelid = 'public.inventario_movimiento'::regclass
+       and con.contype = 'c'
+       and con.conname not in ('inventario_movimiento_salida_destino_chk',
+                               'inventario_movimiento_para_flota_chk')
+       and pg_get_constraintdef(con.oid) ilike '%aeronave_id IS NOT NULL%'
+  loop
+    raise notice 'drop check % de public.inventario_movimiento', c.conname;
+    execute format('alter table public.inventario_movimiento drop constraint %I', c.conname);
+  end loop;
+end $$;
+
+-- ===========================================================================
+-- 2) Los DOS checks nuevos, ya con nombre estable. Espejo EXACTO de las dos
+--    validaciones de `InventoryService.createMovimiento`:
+--      · «La salida debe registrar el avión (aeronave_id) o marcarse para
+--         toda la flota (para_flota).»
+--      · «Una salida para toda la flota no lleva avión específico.»
+--    (`tipo` es ENUM: en SQL el literal se resuelve solo, como en el CHECK
+--     original; en plpgsql se compararía `::text`.)
+-- ===========================================================================
+alter table public.inventario_movimiento
+  drop constraint if exists inventario_movimiento_salida_destino_chk;
+alter table public.inventario_movimiento
+  add constraint inventario_movimiento_salida_destino_chk
+  check (tipo <> 'SALIDA' or aeronave_id is not null or para_flota);
+
+alter table public.inventario_movimiento
+  drop constraint if exists inventario_movimiento_para_flota_chk;
+alter table public.inventario_movimiento
+  add constraint inventario_movimiento_para_flota_chk
+  check (not para_flota or (tipo = 'SALIDA' and aeronave_id is null));
+
+-- ===========================================================================
+-- 3) La liga gasto ↔ movimiento deja de ser 1→1: una salida de flota genera
+--    UN gasto POR AVIÓN, todos con el mismo `inventario_movimiento_id`. El
+--    índice ÚNICO de `20260703000001` (cuando el puente era 1→1) rechazaba
+--    el segundo renglón del lote con 23505 — el SEGUNDO candado del bug.
+--    Se cambia por uno NORMAL con el mismo predicado parcial: la columna se
+--    sigue leyendo en `gastoIdPorMovimiento`, `gastosDeMovimiento`, el
+--    replay idempotente, `llenarCostoVentaRefacciones` y la función de BD
+--    `inventario_eliminar_movimiento`, y esas lecturas no deben degradarse.
+--    Que una salida no genere su gasto dos veces lo garantiza el API (una
+--    sola llamada por alta) + la idempotencia por `client_request_id`.
+-- ===========================================================================
+drop index if exists public.uq_gasto_inventario_movimiento;
+create index if not exists idx_gasto_inventario_movimiento
+  on public.gasto (inventario_movimiento_id)
+  where inventario_movimiento_id is not null;
+
+-- ===========================================================================
+-- 4) La documentación de las columnas deja de mentir.
+-- ===========================================================================
+comment on column public.inventario_movimiento.aeronave_id is
+  'SALIDA: avión al que se carga la pieza. Obligatorio SALVO cuando para_flota = true (salida repartida entre la flota activa: un gasto REFACCION/BODEGA por avión, ligados por inventario_movimiento_id). Los dos casos son excluyentes (inventario_movimiento_salida_destino_chk / inventario_movimiento_para_flota_chk, 22-sep-2026).';
+
+comment on column public.inventario_movimiento.para_flota is
+  'SALIDA repartida entre toda la flota activa (sin aeronave_id): el gasto se prorratea por avión. Desde el 22-sep-2026 el CHECK de la tabla lo permite (antes toda SALIDA exigía avión y la captura del panel moría con 23514) y la liga gasto→movimiento dejó de ser única (antes el lote de N gastos moría con 23505).';
+
+comment on column public.gasto.inventario_movimiento_id is
+  'Movimiento de bodega (SALIDA) que originó este gasto automático de refacción. Liga 1→N desde el 22-sep-2026: una salida «para todas las matrículas» genera un gasto por avión activo, todos con este mismo id (Σ de sus montos == el total de la salida, al centavo).';
