@@ -1869,6 +1869,36 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
   tacos; piloto/copiloto del vuelo o de un tramo sí). Lectores nuevos de
   "quién va" usan `tripulacionDeVuelo`/`cargarTripulacion`, jamás
   `apoyo_id` a mano.
+- **`registrado_por_nombre` — quién registró el cobro (22-sep-2026, pedido
+  del cliente: «ver ahí en la lista de cobros de un vuelo quién registró el
+  cobro»)**. Fuente única `src/common/registrado-por.util.ts`
+  (`idsRegistradoPor`, `fetchNombresUsuarios`, `conNombreRegistrado`,
+  `adjuntarNombreRegistrado`). Campo **ADITIVO** que resuelve el uuid
+  `cobro_vuelo.registrado_por` / `cobro_grupo.registrado_por` a
+  `usuario.nombre`. Reglas:
+  - **JAMÁS un embed dentro de `COBRO_COLS`**: esa fila es el `CobroLike` de
+    `cobrosEnUsd` (invariante 2), del recibo PDF y del CFDI — un embed le
+    cambia la forma a los tres. El nombre se pega DESPUÉS, en el armador.
+  - **EN LOTE, una consulta por respuesta** (ids DISTINTOS, `in (...)`), nunca
+    una por cobro. Se aplica en los DOS chokepoints de lectura:
+    `FlightsService.adjuntarSobres` (cubre `listCobros` ⇒ snapshot del vuelo,
+    `GET /flights/:id/payments`, la card de cobros del cotizador —que lee ese
+    mismo snapshot— y el PDF interno) y `GroupsService.armarSobreSalida`
+    (`sobresDeGrupo`/`sobrePorId` ⇒ `GET /grupos/:id` y `/grupos/:id/cobros`).
+    En `adjuntarSobres` viaja en el MISMO `Promise.all` que sobres y
+    movimientos: cero latencia extra.
+  - **Nunca un nombre inventado ni un uuid**: usuario borrado, `nombre`
+    vacío, id que no resuelve o **lectura fallida** ⇒ `null`.
+    `fetchNombresUsuarios` **no lanza nunca** (error de PostgREST *y*
+    rechazo del cliente): va dentro de un `Promise.all` que arma el dinero de
+    la card, y un nombre no puede tumbar el snapshot de un vuelo.
+  - `GET /v1/quotes/:id` NO devuelve cobros (solo los cuenta en el 409
+    `COTIZACION_COBRADA`): no hay nada que enriquecer ahí.
+  - Las respuestas de ESCRITURA (`POST /flights/:id/cobros`, `.../reembolso`,
+    `PATCH /flights/cobros/:id`) devuelven la fila cruda, **sin** el campo: el
+    panel hace `router.refresh()` y relee la lista. Si algún día la app lo
+    necesita optimista, se resuelve UNA vez y se pasa a las partes — nunca
+    una consulta por parte de sobre.
 
 ## Migraciones y despliegue
 

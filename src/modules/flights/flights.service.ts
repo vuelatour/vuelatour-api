@@ -104,6 +104,11 @@ import {
   type MovimientoLiga,
 } from '../../common/cobro-conciliado.util';
 import {
+  conNombreRegistrado,
+  fetchNombresUsuarios,
+  idsRegistradoPor,
+} from '../../common/registrado-por.util';
+import {
   participacionAvionesItems,
   participacionPorAeronave,
   type EscalaParticipacionInput,
@@ -338,12 +343,18 @@ export interface CobroGrupoResumen {
  * - `conciliado` / `movimiento_bancario_id`: fuente única
  *   `cobro-conciliado.util` (liga directa `cobro_id` o, si es parte de un
  *   sobre, la liga del sobre `cobro_grupo_id`). Es el badge del detalle.
+ * - `registrado_por_nombre` (22-sep-2026): QUIÉN capturó el cobro, resuelto
+ *   EN LOTE desde `registrado_por` por `registrado-por.util`. `null` =
+ *   usuario borrado, sin nombre o no se pudo leer — jamás un uuid ni un
+ *   nombre inventado. NO entra a `COBRO_COLS` (un embed cambiaría la forma
+ *   de la fila para `cobrosEnUsd`, el recibo PDF y el CFDI).
  */
 export interface CobroConSobre extends CobroLike {
   [k: string]: unknown;
   cobro_grupo: CobroGrupoResumen | null;
   conciliado: boolean;
   movimiento_bancario_id: string | null;
+  registrado_por_nombre: string | null;
 }
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
@@ -10717,6 +10728,12 @@ export class FlightsService {
    * moneda}` (null en cobros normales) para que panel/app pinten "parte de
    * G-12 · $2,060.16 de $10,800.76" y oculten Editar/Eliminar. No cambia
    * ningún número: cobrosEnUsd ignora el campo.
+   *
+   * QUIÉN REGISTRÓ (22-sep-2026): también resuelve `registrado_por` a
+   * `registrado_por_nombre` en UNA consulta para toda la lista (fuente única
+   * `registrado-por.util`). Este método es el CHOKEPOINT de los cobros de un
+   * vuelo: por aquí pasan `listCobros` (card del detalle), la card de cobros
+   * del cotizador (lee el mismo snapshot) y el PDF interno.
    */
   private async adjuntarSobres(
     cobros: Array<Record<string, unknown>>,
@@ -10736,7 +10753,7 @@ export class FlightsService {
     // normales por `cobro_id`, las partes de sobre por el `cobro_grupo_id`
     // de su sobre — una sola consulta con ambas columnas.
     const filtro = filtroLigaCobros(cobroIds, ids);
-    const [sobresRes, movsRes] = await Promise.all([
+    const [sobresRes, movsRes, nombres] = await Promise.all([
       ids.length > 0
         ? this.supabase.service
             .from('cobro_grupo')
@@ -10751,6 +10768,8 @@ export class FlightsService {
             .select(MOV_LIGA_COLS)
             .or(filtro)
         : Promise.resolve({ data: [], error: null }),
+      // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
+      fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
     ]);
     if (sobresRes.error) throw new Error(sobresRes.error.message);
     if (movsRes.error) throw new Error(movsRes.error.message);
@@ -10767,7 +10786,7 @@ export class FlightsService {
         moneda: (s.moneda as string) ?? 'USD',
       });
     }
-    return cobros.map((c) => {
+    return conNombreRegistrado(cobros, nombres).map((c) => {
       const mov = movimientoDeCobro(
         { id: c.id as string, cobro_grupo_id: c.cobro_grupo_id },
         movs,

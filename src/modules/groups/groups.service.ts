@@ -19,6 +19,10 @@ import {
   MOV_LIGA_COLS,
   type MovimientoLiga,
 } from '../../common/cobro-conciliado.util';
+import {
+  fetchNombresUsuarios,
+  idsRegistradoPor,
+} from '../../common/registrado-por.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { diaCancun } from '../../common/fecha-cancun.util';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
@@ -264,6 +268,13 @@ export interface SobreSalida {
   fecha_cobro: string;
   modo_particion: string;
   registrado_por: string | null;
+  /**
+   * QUIÉN registró el sobre, resuelto EN LOTE desde `registrado_por`
+   * (22-sep-2026, fuente única `registrado-por.util`). Campo ADITIVO: `null`
+   * = usuario borrado, sin nombre o no se pudo leer — jamás un uuid. El
+   * panel lo pinta con el MISMO helper que los cobros por vuelo.
+   */
+  registrado_por_nombre: string | null;
   notas: string | null;
   client_request_id: string | null;
   created_at: string;
@@ -3059,6 +3070,8 @@ export class GroupsService {
     hijosPorId: Map<string, HijoRow>,
     fichas: Map<string, FichaRow>,
     movs: ReadonlyArray<MovimientoLiga>,
+    /** usuario_id → nombre, resuelto EN LOTE por el llamador (22-sep-2026). */
+    nombres: ReadonlyMap<string, string> = new Map(),
   ): SobreSalida {
     const monto = round2(num(sobre.monto));
     const propias: ParteSobreSalida[] = partes
@@ -3115,6 +3128,9 @@ export class GroupsService {
       fecha_cobro: sobre.fecha_cobro,
       modo_particion: sobre.modo_particion,
       registrado_por: sobre.registrado_por,
+      registrado_por_nombre: sobre.registrado_por
+        ? (nombres.get(sobre.registrado_por) ?? null)
+        : null,
       notas: sobre.notas,
       client_request_id: sobre.client_request_id,
       created_at: sobre.created_at,
@@ -3139,23 +3155,26 @@ export class GroupsService {
     const sobres = await this.cargarSobresDeGrupo(grupoId);
     if (sobres.length === 0) return [];
     const ids = sobres.map((s) => s.id);
-    const [partes, movs] = await Promise.all([
+    const [partes, movs, nombres] = await Promise.all([
       this.cargarPartes(ids),
       this.movimientosDeSobres(ids),
+      // Quién registró cada sobre: UNA consulta para todos (cero N+1).
+      fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(sobres)),
     ]);
     const hijosPorId = new Map(hijos.map((h) => [h.id, h]));
     return sobres.map((s) =>
-      this.armarSobreSalida(s, partes, hijosPorId, fichas, movs),
+      this.armarSobreSalida(s, partes, hijosPorId, fichas, movs, nombres),
     );
   }
 
   private async sobrePorId(sobreId: string): Promise<SobreSalida> {
     const sobre = await this.cargarSobre(sobreId);
     const hijos = await this.cargarHijos(sobre.grupo_id);
-    const [fichas, partes, movs] = await Promise.all([
+    const [fichas, partes, movs, nombres] = await Promise.all([
       this.cargarFichas(hijos.map((h) => h.aeronave_id ?? '').filter(Boolean)),
       this.cargarPartes([sobreId]),
       this.movimientosDeSobres([sobreId]),
+      fetchNombresUsuarios(this.supabase.service, idsRegistradoPor([sobre])),
     ]);
     return this.armarSobreSalida(
       sobre,
@@ -3163,6 +3182,7 @@ export class GroupsService {
       new Map(hijos.map((h) => [h.id, h])),
       fichas,
       movs,
+      nombres,
     );
   }
 
