@@ -1102,6 +1102,36 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
       crea sola · hay que capturarla») en vez de repetir la queja de Porfirio.
       `null` = no se pudo leer ⇒ el panel NO afirma nada (se comporta como
       hoy); sin fila en `alerta_config`, `safe()` salta la regla ⇒ apagada.
+    - **`servicio` en `GET /v1/aircraft` (ADITIVO, 22-sep-2026 — el pizarrón
+      «Tacómetros» de la oficina)**: `{ultimo, siguiente, aviso_automatico}`
+      por fila del LISTADO (`null` sin programa; `GET /aircraft/:id` y
+      `metrics` NO cambian). Se arma en `AircraftService.list()` con el
+      helper PURO `src/modules/aircraft/servicio-flota.util.ts`
+      (`ultimoServicioDe` + `armarServicioFila`), que **no calcula nada**:
+      el hito entra INYECTADO desde `proximoServicioDetallado` y la orden
+      desde `ordenAbiertaDelHito` — las mismas fuentes que la ficha del
+      avión, para que lista y ficha no puedan decir números distintos.
+      `ultimo` = mantenimiento COMPLETADO **del avión** (fuera `motor_id` /
+      `helice_id`: el overhaul es del componente) con `horas_aeronave` más
+      alta; sin ninguno cae a `servicio_horas_base` con `origen:'BASE'`.
+      `faltan_hr` viaja SIN recortar (un negativo es «vencido», no 0). **El
+      listado NUNCA llama a `metrics` ni a `etapasDeServicio(id)` por avión**:
+      UNA lectura de `aeronave_servicio_etapa`, UNA de `mantenimiento`
+      (`MANT_SERVICIO_COLS`, ambas con `fetchTodas`) y UNA de
+      `alerta_config` para toda la página — `aircraft.service.servicio-flota.spec.ts`
+      cuenta las consultas y truena si aparece un N+1.
+      **El Hobbs del listado es el MISMO universo que el de la ficha**
+      (revisión adversaria 22-sep-2026): la lectura de `escala` que arma
+      `ultimo_taco` lleva `.is('cancelada_at', null)` y
+      `.neq('vuelo.estado','CANCELADO')` con `vuelo:vuelo_id!inner` — las
+      mismas tres condiciones de `escalasDelAvion`/`currentHobbs`. Sin ellas
+      un vuelo CANCELADO con tacos capturados (los hay en prod: el folio 180
+      conserva 2212.6 / 2213) subía el máximo SOLO en la lista, y ese número
+      no es decorativo: decide el hito, `faltan_hr`, la orden y el TBO del
+      semáforo (`aptitudBulk` lo recibe) — lista y ficha dirían números
+      distintos del mismo avión. El `!inner` es obligatorio: sin él PostgREST
+      no filtra la fila padre por una columna del embebido y el `.neq` queda
+      de adorno.
 
 22. **LO QUE SE PERSISTE ES LO QUE SE USÓ PARA MULTIPLICAR — horas pactadas
     con 8 decimales (22-sep-2026, cotizaciones #322 y #302).** Fuente única

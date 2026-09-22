@@ -25,6 +25,11 @@ import {
   resolverTirasSolicitadas,
   type FilaBaseBitacora,
 } from './bitacora-tiras.util';
+import {
+  agruparPorAeronave,
+  armarServicioFila,
+  type MantenimientoServicioRow,
+} from './servicio-flota.util';
 import type { ListAeronavesQuery } from './dto/list-aeronaves.query';
 import type { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import type { UpdateAeronaveDto } from './dto/update-aeronave.dto';
@@ -49,6 +54,15 @@ const AERONAVE_COLS =
   'id, matricula, modelo, pais_registro, num_motores, velocidad_crucero_kts, asientos, motor_hp, caracteristicas, tarifa_hora_pub_usd, tarifa_hora_broker_usd, reserva_overhaul_hr_usd, permiso_afac_usd_hr, color_calendario, ubicacion_base, activa, notas, servicio_intervalos, servicio_horas_base, planeador_horas_base, planeador_taco_ref, created_at, updated_at';
 
 const ETAPA_COLS = 'id, intervalo_hr, nombre, tareas';
+
+/**
+ * Columnas de `mantenimiento` que necesita el bloque `servicio` del listado:
+ * las del dedupe del hito (`MANT_HITO_COLS`, para la orden abierta) más las
+ * del ÚLTIMO servicio — `descripcion` cuando la fila no trae etapa, y
+ * `motor_id`/`helice_id` para dejar FUERA los overhauls de componente (ese
+ * taller es del motor, no de la célula).
+ */
+const MANT_SERVICIO_COLS = `${MANT_HITO_COLS}, aeronave_id, descripcion, motor_id, helice_id`;
 
 const SEGURO_COLS =
   'id, aeronave_id, aseguradora, num_poliza, cobertura, suma_asegurada_usd, prima_usd, vigente_desde, vigente_hasta, archivo_url, notas, created_at, updated_at';
@@ -982,6 +996,18 @@ export class AircraftService {
       // lecturas), en UNA consulta para todo el listado. Regla de asignación
       // por tramo: la escala pertenece al avión de escala.aeronave_id, o al
       // del vuelo cuando no tiene asignación propia.
+      //
+      // MISMO UNIVERSO QUE `escalasDelAvion`/`currentHobbs` (revisión
+      // adversaria 22-sep-2026): tramos CANCELADOS y vuelos CANCELADOS
+      // FUERA. El detalle (`metrics.horas_actuales`, `proximo_servicio`) los
+      // excluye desde siempre y este listado no, así que un vuelo cancelado
+      // con tacos capturados —los hay en prod: el folio 180 conserva 2212.6 /
+      // 2213— podía dejar a la lista con un Hobbs MAYOR que el de la ficha, y
+      // desde el 22-sep ese número también decide el `servicio` (hito,
+      // `faltan_hr`, orden) y el TBO del semáforo (`aptitudBulk`): lista y
+      // ficha dirían números distintos del MISMO avión. El `!inner` no es
+      // cosmético: sin él PostgREST no filtra la fila padre por
+      // `vuelo.estado`.
       const ids = new Set(rows.map((a) => a.id as string));
       // Paginado: sin .range() PostgREST trunca a 1000 filas y el max se
       // calcularía sobre un subconjunto arbitrario, en silencio.
@@ -989,9 +1015,11 @@ export class AircraftService {
         this.supabase.service
           .from('escala')
           .select(
-            'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id(aeronave_id)',
+            'aeronave_id, taco_salida, taco_llegada, vuelo:vuelo_id!inner(aeronave_id, estado)',
           )
           .or('taco_salida.not.is.null,taco_llegada.not.is.null')
+          .is('cancelada_at', null)
+          .neq('vuelo.estado', 'CANCELADO')
           .order('id', { ascending: true })
           .range(from, to),
       );
@@ -1009,10 +1037,65 @@ export class AircraftService {
         }
       }
       // Semáforo APTO/NO APTO en lote (petición del cliente: verlo en la
-      // lista, no solo en el detalle).
-      const aptitud = await this.aptitudBulk([...ids], maxTaco);
+      // lista, no solo en el detalle) + el bloque `servicio` del pizarrón
+      // (22-sep-2026), TODO EN LOTE: UNA lectura de etapas y UNA de
+      // mantenimientos para la página completa, y el margen del programa
+      // automático UNA vez. Nada de `etapasDeServicio(id)` por avión: el
+      // listado NUNCA hace por fila lo que la ficha hace por avión.
+      const listaIds = [...ids];
+      const [aptitud, etapasRows, mantRows, avisoAutomatico] =
+        await Promise.all([
+          this.aptitudBulk(listaIds, maxTaco),
+          // Paginadas: hoy son 22 etapas y 17 órdenes en toda la flota, pero
+          // el tope silencioso de 1000 de PostgREST se cruza sin avisar y
+          // dejaría aviones sin programa (o sin su último servicio) sin que
+          // nadie lo note — misma familia que el anti-cap-1000 del taco.
+          this.fetchTodas((from, to) =>
+            this.supabase.service
+              .from('aeronave_servicio_etapa')
+              .select(`${ETAPA_COLS}, aeronave_id`)
+              .in('aeronave_id', listaIds)
+              .order('id', { ascending: true })
+              .range(from, to),
+          ),
+          this.fetchTodas((from, to) =>
+            this.supabase.service
+              .from('mantenimiento')
+              .select(MANT_SERVICIO_COLS)
+              .in('aeronave_id', listaIds)
+              .order('id', { ascending: true })
+              .range(from, to),
+          ),
+          this.avisoAutomaticoServicio(),
+        ]);
+      const etapasPorAvion = agruparPorAeronave(
+        etapasRows.map((e) => ({
+          aeronave_id: e.aeronave_id as string | null,
+          intervalo_hr: Number(e.intervalo_hr),
+          nombre: (e.nombre as string | null) ?? null,
+          tareas: (e.tareas as string[] | null) ?? [],
+        })),
+      );
+      const mantPorAvion = agruparPorAeronave(
+        mantRows as unknown as MantenimientoServicioRow[],
+      );
       for (const a of rows) {
         a.ultimo_taco = maxTaco.get(a.id as string) ?? null;
+        // ADITIVO (22-sep-2026): las cuatro columnas del pizarrón de la
+        // oficina — último servicio, siguiente, restante y tipo. Los números
+        // NO se calculan aquí: el hito sale de `proximoServicioDetallado`
+        // (la misma fuente que la ficha del avión) y la orden de
+        // `ordenAbiertaDelHito`. `null` = el avión no tiene programa.
+        a.servicio = armarServicioFila({
+          intervalos: a.servicio_intervalos,
+          base: a.servicio_horas_base,
+          ultimoTaco: maxTaco.get(a.id as string) ?? null,
+          etapas: etapasPorAvion.get(a.id as string) ?? [],
+          mantenimientos: mantPorAvion.get(a.id as string) ?? [],
+          avisoAutomatico,
+          proximo: (intervalos, base, horas, etapas) =>
+            this.proximoServicioDetallado(intervalos, base, horas, etapas),
+        });
         const apt = aptitud.get(a.id as string);
         a.apto = apt?.apto ?? true;
         a.no_apto_razones = apt?.razones ?? [];
