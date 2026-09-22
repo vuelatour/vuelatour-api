@@ -8,9 +8,7 @@
  */
 
 import {
-  DESCANSO_COLOR,
-  EVENTO_COLOR,
-  SIN_AVION_COLOR,
+  SEMAFORO,
   colorEventoFlotaSistema,
   colorMantenimientoSistema,
   colorVueloSistema,
@@ -83,21 +81,17 @@ function distancia(
 }
 
 /**
- * Mapea un color del sistema (`aeronave.color_calendario`, hex #RRGGBB) al
- * `colorId` de Google MÁS CERCANO, para que el Google Calendar de la oficina
- * espeje los colores por avión del calendario interno.
+ * Mapea un hex del sistema al `colorId` de Google MÁS CERCANO (distancia
+ * redmean), para que el Google Calendar de la oficina espeje el semáforo del
+ * calendario interno.
  *
  * Devuelve `null` cuando no hay color o no es un hex válido: el llamador cae
- * al gris "sin avión" del sistema — nunca se inventa un color.
+ * al gris del tentativo — nunca se inventa un color.
  *
- * LIMITACIÓN CONOCIDA (documentada, no es un bug): Google solo tiene 11
- * colores de evento, así que dos cosas del sistema con hex parecidos caen en
- * el MISMO colorId (hoy: XA-VGV cian, N990GG azul y el evento de flota →
- * Pavo real; N58BT lima, XB-ANU amarillo, el permiso pendiente y el
- * mantenimiento PROGRAMADO → Banana). La tabla completa de colisiones está
- * congelada en `google-evento.util.spec.ts`. Si el cliente quiere colores
- * únicos, se separan los `color_calendario` del sistema; aquí no se reparten
- * colores "libres" porque eso dejaría de ser puro (dependería de la flota).
+ * Desde el 22-sep-2026 los únicos hex que llegan aquí son los CINCO del
+ * semáforo (`SEMAFORO`) y caen en cinco colorId DISTINTOS, así que ya NO hay
+ * colisiones: antes 18 cosas (6 significados + 8 colores de avión + 4 tipos)
+ * se repartían los 11 colores de Google y el color no era un dato confiable.
  */
 export function colorIdGoogleDe(
   hexColor: string | null | undefined,
@@ -122,70 +116,88 @@ export function colorIdGoogleDe(
 }
 
 /**
- * ESPEJO DE COLOR (pedido del cliente, 12-sep-2026): «los mismos colores que
- * usamos para cada cosa». Google solo acepta 11 colores de evento, así que
- * «el mismo color» = el colorId MÁS CERCANO al hex que el calendario del
- * sistema usa para esa cosa, con LA MISMA PRECEDENCIA
- * (`colores-calendario.util`). Ninguna de estas funciones inventa un color
- * propio: todas salen de un hex del sistema.
+ * ESPEJO DEL SEMÁFORO (pedido del cliente, 12-sep-2026 «los mismos colores»,
+ * reducido a 5 el 22-sep-2026 «que en los calendarios no se vean tantos
+ * colores»). Cada uno de los CINCO hex del semáforo se traduce a un colorId
+ * DISTINTO de Google. Ninguna de estas funciones inventa un color propio:
+ * todas salen de un hex de `colores-calendario.util`.
  *
- * Fallback cuando el hex del sistema no se puede leer (un
- * `color_calendario` con basura en la BD): el gris "sin avión" del sistema,
- * nunca un color con significado.
+ *   gris #64748B     → 8  Grafito     (tentativo)
+ *   verde #22C55E    → 2  Salvia      (confirmado)
+ *   amarillo #F59E0B → 5  Banana      (permiso o asunto pendiente · mantenimiento)
+ *   rojo #EF4444     → 11 Tomate      (cancelado — hoy NO viaja: se BORRA)
+ *   azul #3B82F6     → 7  Pavo real   (descanso)
+ *
+ * Fallback cuando el hex no se puede leer: el gris del tentativo, nunca un
+ * color con significado fuerte.
  */
-const COLOR_ID_SIN_AVION: string = colorIdGoogleDe(SIN_AVION_COLOR) ?? '1';
+const COLOR_ID_RESPALDO: string = colorIdGoogleDe(SEMAFORO.TENTATIVO) ?? '8';
+
+/**
+ * EXCEPCIONES al "más cercano". Hoy solo una: el ROJO.
+ *
+ * El rojo del sistema (#EF4444) por distancia redmean cae en 6 Mandarina
+ * (d≈3 714) antes que en 4 Flamenco (≈17 375) y que en 11 Tomate (≈30 217),
+ * y Mandarina es un NARANJA: «cancelado» tiene que leerse ROJO. Google llama
+ * Tomate (11) a su rojo de verdad.
+ *
+ * En la práctica este mapeo no viaja: el único rojo del semáforo es el
+ * CANCELADO y su evento se BORRA de Google. Se deja fijo para que la tabla de
+ * los 5 sea completa y para que cualquier rojo futuro (p. ej. un evento de
+ * flota cancelado) salga rojo sin que nadie tenga que acordarse.
+ */
+const COLOR_ID_FIJO: Readonly<Record<string, string>> = {
+  [SEMAFORO.CANCELADO]: '11',
+};
+
+/**
+ * Hex del semáforo → colorId de Google. Es el ÚNICO punto por el que pasan
+ * los colores que se suben: primero las excepciones fijas, luego el más
+ * cercano por redmean, y de último el respaldo.
+ */
+export function colorIdGoogleSemaforo(hex: string | null | undefined): string {
+  if (hex != null && COLOR_ID_FIJO[hex] != null) return COLOR_ID_FIJO[hex];
+  return colorIdGoogleDe(hex) ?? COLOR_ID_RESPALDO;
+}
 
 /**
  * colorId de Google de UN evento de vuelo (vuelo completo o tramo): el hex que
  * el sistema pintaría, traducido. Mismos parámetros que `colorVueloSistema`
  * — el cancelado no llega aquí (en Google su evento se BORRA).
  *
- * Con los hex de hoy: tentativo → 8 Grafito, sin asignar → 1 Lavanda,
- * permiso pendiente → 5 Banana, externo → 4 Flamenco, sin avión → 1 Lavanda.
+ * Con el semáforo de hoy: tentativo → 8 Grafito, pendiente → 5 Banana,
+ * confirmado → 2 Salvia. El avión ya no interviene (`colorAvion` se ignora).
  */
 export function colorIdGoogleDeVuelo(p: ParamsColorVuelo): string {
-  return colorIdGoogleDe(colorVueloSistema(p)) ?? COLOR_ID_SIN_AVION;
+  return colorIdGoogleSemaforo(colorVueloSistema(p));
 }
 
-/** colorId del DESCANSO de piloto: #14B8A6 (turquesa) → 2 Salvia. */
+/** colorId del DESCANSO de piloto: azul #3B82F6 → 7 Pavo real. */
 export function colorIdGoogleDescanso(): string {
-  return colorIdGoogleDe(DESCANSO_COLOR) ?? COLOR_ID_SIN_AVION;
+  return colorIdGoogleSemaforo(SEMAFORO.DESCANSO);
 }
 
 /**
- * colorId de un evento NO-vuelo de la flota: con avión, el COLOR DEL AVIÓN
- * (igual que el calendario del sistema, que antes Google ignoraba); sin
- * avión, el azul cielo propio #0EA5E9 → 7 Pavo real.
+ * colorId de un evento NO-vuelo de la flota: VERDE (2 Salvia) — es una cita
+ * agendada. El color del AVIÓN ya no interviene (el parámetro se conserva
+ * para no romper llamadores y se ignora, igual que en
+ * `colorEventoFlotaSistema`).
  */
 export function colorIdGoogleEvento(colorAvion?: string | null): string {
-  return (
-    colorIdGoogleDe(colorEventoFlotaSistema(colorAvion)) ??
-    colorIdGoogleDe(EVENTO_COLOR) ??
-    COLOR_ID_SIN_AVION
-  );
+  return colorIdGoogleSemaforo(colorEventoFlotaSistema(colorAvion));
 }
 
 /**
- * Tomate: el rojo REAL de Google. Ver el cálculo en
- * `colorIdGoogleMantenimiento` (el nearest de #EF4444 sería Mandarina).
- */
-const COLOR_ID_TALLER_FIJO = '11';
-
-/**
- * colorId de un mantenimiento: PROGRAMADO = ámbar del sistema (#F59E0B) →
- * 5 Banana.
+ * colorId de un mantenimiento: AMARILLO (5 Banana) siempre, PROGRAMADO y
+ * EN_TALLER por igual.
  *
- * EN_TALLER se FIJA en 11 Tomate a propósito: el rojo del sistema (#EF4444)
- * por distancia redmean cae en 6 Mandarina (d=3,714) antes que en 4 Flamenco
- * (17,375) y que en 11 Tomate (30,217) — Mandarina es el naranja de N4142R y
- * el taller debe leerse como ROJO. Es la ÚNICA excepción al "más cercano",
- * y es visible: `MANTENIMIENTO_TALLER_COLOR` sigue siendo el hex del sistema.
+ * Ya NO hay excepción «EN_TALLER = 11 Tomate» (12-sep → 22-sep-2026): en el
+ * semáforo nuevo el rojo significa CANCELADO y un avión en taller es un
+ * asunto PENDIENTE. Lo que distingue al taller es el título («🔧 En taller ·
+ * …»), no el color.
  */
-export function colorIdGoogleMantenimiento(enTaller: boolean): string {
-  if (enTaller) return COLOR_ID_TALLER_FIJO;
-  return (
-    colorIdGoogleDe(colorMantenimientoSistema(false)) ?? COLOR_ID_SIN_AVION
-  );
+export function colorIdGoogleMantenimiento(enTaller?: boolean): string {
+  return colorIdGoogleSemaforo(colorMantenimientoSistema(enTaller));
 }
 
 /**

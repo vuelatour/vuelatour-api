@@ -29,6 +29,7 @@ import {
   colorEventoFlotaSistema,
   colorMantenimientoSistema,
   colorVueloSistema,
+  esEstadoTentativo,
   vueloSinAsignar,
 } from './colores-calendario.util';
 import {
@@ -431,10 +432,14 @@ export class CalendarService {
           pilotoId,
         });
         // Etiqueta "Tentativo ·" del título (el color lo decide la util).
-        const esTentativo = v.estado === 'RESERVA';
-        // Precedencia ÚNICA del color (colores-calendario.util): cancelado >
-        // tentativo > sin asignar > permiso pendiente > externo > avión. La
-        // misma que traduce el espejo a Google.
+        // Desde el 22-sep-2026 son TODOS los estados anteriores a CONFIRMADO
+        // (RESERVA, SOLICITUD, COTIZADO), no solo la RESERVA: el gris del
+        // semáforo y la etiqueta tienen que decir lo mismo.
+        const esTentativo = esEstadoTentativo(v.estado);
+        // Precedencia ÚNICA del semáforo (colores-calendario.util):
+        // cancelado > tentativo > pendiente > confirmado. La misma que
+        // traduce el espejo a Google. El color del AVIÓN ya no entra al
+        // calendario (quedó solo para los Excel del balance).
         const color = colorVueloSistema({
           estado: v.estado,
           cancelado: esCancelado,
@@ -442,7 +447,6 @@ export class CalendarService {
           aeronaveId,
           pilotoId,
           permisoPendiente,
-          colorAvion: aeronave?.color_calendario,
         });
         const hora = horaOf(params.fecha);
         return {
@@ -457,6 +461,12 @@ export class CalendarService {
           estado_permiso: estadoPermiso,
           es_externo: v.es_externo,
           sin_asignar: sinAsignar,
+          // ADITIVO (22-sep-2026): la misma bandera que decide el gris del
+          // semáforo y el prefijo «Tentativo · » del título. El panel y la
+          // app ya no pueden deducirla del color (gris es gris para RESERVA,
+          // SOLICITUD y COTIZADO) y derivarla de `estado` en cada cliente
+          // sería un cuarto lugar donde vive la misma lista.
+          tentativo: esTentativo,
           color,
           cliente_id: v.cliente_id,
           cliente_nombre: cliente?.nombre ?? null,
@@ -651,9 +661,10 @@ export class CalendarService {
       }
     }
     // Eventos NO-vuelo (21-ago-2026: lavado, trámites, visitas): salen junto
-    // a vuelos y descansos. Con avión toman su color de calendario; sin
-    // avión, azul cielo propio (leyenda "Evento"). Multi-día = un evento por
-    // día, igual que los descansos.
+    // a vuelos y descansos. Desde el 22-sep-2026 van en VERDE (cita en
+    // firme): el color del avión salió de los calendarios y lo que los
+    // distingue es el título «Evento · …». Multi-día = un evento por día,
+    // igual que los descansos.
     let eq = this.supabase.service
       .from('evento_flota')
       .select(await this.eventoCols())
@@ -682,7 +693,7 @@ export class CalendarService {
     );
     for (const ev of eventosMap) {
       const matricula = ev.aeronave_matricula;
-      const color = colorEventoFlotaSistema(ev.aeronave_color);
+      const color = colorEventoFlotaSistema();
       const iniDia = diaCancun(ev.fecha);
       const finDia = ev.fecha_fin ? diaCancun(ev.fecha_fin) : iniDia;
       const hora = horaCancun(ev.fecha);
@@ -726,7 +737,9 @@ export class CalendarService {
       }
     }
 
-    // MANTENIMIENTOS con fecha (26-ago): PROGRAMADO ámbar / EN_TALLER rojo,
+    // MANTENIMIENTOS con fecha (26-ago): AMARILLOS —PROGRAMADO y EN_TALLER
+    // por igual desde el 22-sep-2026: un servicio es un «asunto pendiente»
+    // hasta que se completa, y el rojo del semáforo significa CANCELADO—,
     // un pin en su fecha_programada (DATE → mediodía UTC = día Cancún, mismo
     // truco de descansos/eventos). OPT-IN vía incluir_mantenimientos: el APK
     // viejo no conoce el tipo y no debe recibirlo. Vista de piloto no aplica.
@@ -781,7 +794,7 @@ export class CalendarService {
           cancelado: false,
           sin_asignar: false,
           title: `Servicio · ${matricula ?? 'avión'} · ${desc}`,
-          color: colorMantenimientoSistema(enTaller),
+          color: colorMantenimientoSistema(),
           aeronave_id: m.aeronave_id ?? null,
           aeronave_matricula: matricula,
           piloto_id: null,

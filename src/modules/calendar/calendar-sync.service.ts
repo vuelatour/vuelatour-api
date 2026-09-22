@@ -87,10 +87,12 @@ export interface OpcionesEspejo {
   directo?: boolean;
 }
 
-// NINGÚN colorId suelto vive acá (12-sep-2026): todo color sale de la paleta
-// del sistema (`colores-calendario.util`) traducida al más cercano de Google
-// por `google-evento.util`. Si el cliente cambia un color, se cambia allá y el
-// panel, la app y Google se mueven JUNTOS.
+// NINGÚN colorId suelto vive acá (12-sep-2026): todo color sale del SEMÁFORO
+// del sistema (`colores-calendario.util`) traducido al colorId de Google por
+// `google-evento.util`. Si el cliente cambia un color, se cambia allá y el
+// panel, la app y Google se mueven JUNTOS. Desde el 22-sep-2026 son 5 colores
+// (tentativo/confirmado/pendiente/cancelado/descanso) y el color del AVIÓN ya
+// no entra a ningún calendario: quedó solo para los Excel del balance.
 
 const VUELO_SELECT_BASE =
   'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
@@ -197,8 +199,10 @@ interface PilotoRef {
 interface AeronaveRef {
   matricula: string;
   /**
-   * Hex del calendario interno (`colores-calendario.util`); el colorId de
-   * Google sale de `colorIdGoogleDeVuelo`/`colorIdGoogleEvento`.
+   * @deprecated 22-sep-2026: `aeronave.color_calendario` YA NO pinta ningún
+   * calendario (quedó solo para los Excel del balance). Se sigue leyendo
+   * porque el select lo trae, pero ningún color sale de aquí: el semáforo lo
+   * decide `colorVueloSistema` por ESTADO.
    */
   color_calendario?: string | null;
 }
@@ -2009,8 +2013,8 @@ export class CalendarSyncService implements OnModuleInit {
     const event = {
       summary: `😴 Descansa · ${d.piloto_nombre}`,
       description: d.motivo ?? undefined,
-      // El turquesa del sistema traducido (12-sep-2026): antes el descanso
-      // salía SIN color y Google lo pintaba del default del calendario.
+      // AZUL del semáforo (22-sep-2026; antes turquesa). El descanso es el
+      // único azul del calendario.
       colorId: colorIdGoogleDescanso(),
       start: { date: d.fecha_inicio },
       end: { date: fin.toISOString().slice(0, 10) },
@@ -2203,7 +2207,11 @@ export class CalendarSyncService implements OnModuleInit {
       fecha: string; // ISO timestamptz (inicio)
       fecha_fin?: string | null; // ISO timestamptz (fin INCLUSIVO); null = un día
       aeronave_matricula?: string | null;
-      /** `aeronave.color_calendario` del avión del evento (si tiene). */
+      /**
+       * @deprecated 22-sep-2026: el evento de flota va SIEMPRE en verde (cita
+       * en firme). El campo se conserva por compatibilidad con los
+       * llamadores; el color ya no depende de él.
+       */
       aeronave_color?: string | null;
       responsable_nombre?: string | null;
       notas?: string | null;
@@ -2239,9 +2247,9 @@ export class CalendarSyncService implements OnModuleInit {
         ]
           .filter(Boolean)
           .join('\n'),
-        // Con avión, el COLOR DEL AVIÓN (igual que el calendario del
-        // sistema); sin avión, el azul cielo propio de los eventos.
-        colorId: colorIdGoogleEvento(ev.aeronave_color),
+        // VERDE del semáforo (22-sep-2026): una cita agendada está en
+        // firme. Lo que la distingue de un vuelo es el 📌 y el título.
+        colorId: colorIdGoogleEvento(),
         start: { date: iniDia },
         end: { date: fin.toISOString().slice(0, 10) },
         transparency: 'transparent',
@@ -2396,7 +2404,10 @@ export class CalendarSyncService implements OnModuleInit {
       ]
         .filter((l) => l != null)
         .join('\n'),
-      colorId: colorIdGoogleMantenimiento(enTaller),
+      // AMARILLO siempre (22-sep-2026): PROGRAMADO y EN_TALLER son un asunto
+      // PENDIENTE. El taller se lee en el título («🔧 En taller · …»), no en
+      // el color — el rojo del semáforo significa CANCELADO.
+      colorId: colorIdGoogleMantenimiento(),
       start: { date: dia },
       end: { date: fin.toISOString().slice(0, 10) },
       transparency: 'transparent',
@@ -2706,16 +2717,16 @@ export class CalendarSyncService implements OnModuleInit {
       tramos,
     });
 
-    // MISMO color que el calendario del sistema, traducido al más cercano de
-    // Google (12-sep-2026): tentativo > sin asignar > permiso pendiente >
-    // externo > color del avión. La precedencia no se repite aquí.
+    // MISMO color que el calendario del sistema, traducido al colorId de
+    // Google (12-sep-2026, semáforo de 5 desde el 22-sep-2026): cancelado >
+    // tentativo > pendiente > confirmado. La precedencia no se repite aquí y
+    // el color del AVIÓN ya no interviene.
     const colorId = colorIdGoogleDeVuelo({
       estado: v.estado,
       esExterno: v.es_externo,
       aeronaveId: primero?.aeronave_id ?? v.aeronave_id,
       pilotoId: primero?.piloto_id ?? v.piloto_id,
       permisoPendiente: permisoPendientePrimero,
-      colorAvion: aeronave?.color_calendario,
     });
 
     return {

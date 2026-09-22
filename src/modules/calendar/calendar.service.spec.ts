@@ -467,14 +467,18 @@ describe('CalendarService.listEvents — B5 updated_since', () => {
 });
 
 /**
- * COLORES DEL CALENDARIO DEL SISTEMA (12-sep-2026, guardia del refactor a
- * `colores-calendario.util`). El espejo a Google TRADUCE estos hex al colorId
- * más cercano, así que el contrato del cliente («los mismos colores») se apoya
- * en que ESTA respuesta no cambie: aquí se congelan los hex, la precedencia y
- * `sin_asignar` tal como los devuelve `GET /calendar` — antes ninguna prueba
- * miraba el color y el refactor iba a ciegas.
+ * SEMÁFORO DEL CALENDARIO (22-sep-2026; antes «colores y precedencia del
+ * sistema», 12-sep-2026). El cliente pidió «que en los calendarios no se vean
+ * tantos colores»: quedan CINCO (gris tentativo, verde confirmado, amarillo
+ * pendiente, rojo cancelado, azul descanso) y `aeronave.color_calendario` sale
+ * de TODOS los calendarios para quedarse solo en los Excel del balance.
+ *
+ * El espejo a Google traduce estos hex a 5 colorId distintos, así que el
+ * contrato del cliente se apoya en que ESTA respuesta no cambie: aquí se
+ * congelan los hex, la precedencia, `sin_asignar` y `tentativo` tal como los
+ * devuelve `GET /calendar`.
  */
-describe('CalendarService.listEvents — colores y precedencia del sistema', () => {
+describe('CalendarService.listEvents — semáforo de 5 colores (22-sep-2026)', () => {
   type Fila = Record<string, unknown>;
   const rango: CalendarRangeQuery = {
     from: new Date('2026-09-14T00:00:00Z'),
@@ -543,24 +547,29 @@ describe('CalendarService.listEvents — colores y precedencia del sistema', () 
   });
 
   const VUELOS: Fila[] = [
-    // Asignado y sin pendientes: manda el color del AVIÓN.
+    // Asignado y sin pendientes: VERDE (el color del avión ya no interviene).
     vuelo('v-avion'),
-    // Asignado pero el avión no tiene color configurado: gris de respaldo.
+    // El avión no tiene color configurado: da igual, el semáforo no lo mira.
     vuelo('v-sin-color', {
       aeronave: { matricula: 'XB-PEV', color_calendario: null },
     }),
-    // CONFIRMADO sin piloto: morado "falta asignar", que GANA al ámbar del
-    // permiso pendiente y al color del avión (precedencia, no solo el hex).
+    // CONFIRMADO sin piloto: AMARILLO "falta asignar" (antes morado propio).
     vuelo('v-sin-piloto', {
       piloto_id: null,
       piloto: null,
       estado_permiso: 'pendiente',
     }),
-    // Permiso de pista pendiente: ámbar (gana al avión, pierde con sin asignar).
+    // Permiso de pista pendiente: amarillo, el MISMO que "falta asignar".
     vuelo('v-permiso', { estado_permiso: 'pendiente' }),
     // RESERVA: tentativo gris, ANTES que el permiso pendiente.
     vuelo('v-reserva', { estado: 'RESERVA', estado_permiso: 'pendiente' }),
-    // Externo: rosa pálido (no exige avión ni piloto).
+    // SOLICITUD y COTIZADO también son tentativos (22-sep-2026): el gris ya
+    // no es solo de la RESERVA, es de TODO estado anterior a CONFIRMADO.
+    vuelo('v-solicitud', { estado: 'SOLICITUD' }),
+    vuelo('v-cotizado', { estado: 'COTIZADO' }),
+    // EN_VUELO / COMPLETADO: en firme, verde como el CONFIRMADO.
+    vuelo('v-en-vuelo', { estado: 'EN_VUELO' }),
+    // Externo: ya no tiene color propio (era rosa pálido); manda su estado.
     vuelo('v-externo', {
       es_externo: true,
       operador_externo: 'Jet Amigo',
@@ -636,29 +645,48 @@ describe('CalendarService.listEvents — colores y precedencia del sistema', () 
     ],
   });
 
-  it('congela el hex de cada cosa y la PRECEDENCIA del color de un vuelo', async () => {
+  it('congela los CINCO hex y la PRECEDENCIA del color de un vuelo', async () => {
     const { service } = armar(tablas());
     const res = await service.listEvents(rango);
     const color = new Map(
       res.events.map((e) => [String(e.id), String(e.color)]),
     );
     expect(Object.fromEntries(color)).toEqual({
-      // Vuelos, en orden de precedencia.
-      'v-avion': '#10B981',
-      'v-sin-color': '#9CA3AF',
-      'v-sin-piloto': '#8B5CF6',
+      // Vuelos, en orden de precedencia: cancelado > tentativo > pendiente >
+      // confirmado. NINGÚN hex de `aeronave.color_calendario` aparece aquí.
+      'v-avion': '#22C55E',
+      'v-sin-color': '#22C55E',
+      'v-sin-piloto': '#F59E0B',
       'v-permiso': '#F59E0B',
       'v-reserva': '#64748B',
-      'v-externo': '#F0DCDB',
+      'v-solicitud': '#64748B',
+      'v-cotizado': '#64748B',
+      'v-en-vuelo': '#22C55E',
+      'v-externo': '#22C55E',
       'v-cancelado': '#EF4444',
       'v-tramo-cancelado': '#EF4444',
-      // Descanso, eventos NO-vuelo y mantenimientos.
-      'descanso:d-1:2026-09-17': '#14B8A6',
-      'evento:ev-sin-avion:2026-09-16': '#0EA5E9',
-      'evento:ev-con-avion:2026-09-16': '#F97316',
+      // Descanso (azul), eventos NO-vuelo (verde: cita en firme, con avión o
+      // sin él) y mantenimientos (amarillo, PROGRAMADO y EN_TALLER por igual).
+      'descanso:d-1:2026-09-17': '#3B82F6',
+      'evento:ev-sin-avion:2026-09-16': '#22C55E',
+      'evento:ev-con-avion:2026-09-16': '#22C55E',
       'mant:m-prog': '#F59E0B',
-      'mant:m-taller': '#EF4444',
+      'mant:m-taller': '#F59E0B',
     });
+  });
+
+  it('el color del AVIÓN no aparece en NINGÚN evento (quedó solo para los Excel)', async () => {
+    const { service } = armar(tablas());
+    const res = await service.listEvents(rango);
+    const hexDeAviones = ['#10B981', '#F97316'];
+    const pintados = res.events.map((e) => String(e.color));
+    for (const hex of hexDeAviones) expect(pintados).not.toContain(hex);
+    // `aeronave_color` puede seguir viajando (aditivo) — lo que no puede es
+    // pintarse: el evento con avión sale VERDE aunque traiga su color.
+    const conAvion = res.events.find(
+      (e) => String(e.id) === 'evento:ev-con-avion:2026-09-16',
+    ) as Record<string, unknown>;
+    expect(conAvion.color).toBe('#22C55E');
   });
 
   it('`sin_asignar` y las marcas del título no cambiaron con el refactor', async () => {
@@ -676,6 +704,14 @@ describe('CalendarService.listEvents — colores y precedencia del sistema', () 
     expect(ev('v-externo').sin_asignar).toBe(false);
     expect(ev('v-reserva').sin_asignar).toBe(false);
     expect(String(ev('v-reserva').title)).toContain('Tentativo · ');
+    // `tentativo` (ADITIVO 22-sep-2026) viaja junto a `sin_asignar` y cubre
+    // los TRES estados previos a CONFIRMADO, igual que el gris y el título.
+    expect(ev('v-reserva').tentativo).toBe(true);
+    expect(ev('v-solicitud').tentativo).toBe(true);
+    expect(String(ev('v-solicitud').title)).toContain('Tentativo · ');
+    expect(ev('v-cotizado').tentativo).toBe(true);
+    expect(ev('v-avion').tentativo).toBe(false);
+    expect(ev('v-en-vuelo').tentativo).toBe(false);
     // Cancelado: bandera `cancelado`, etiqueta en el título y sin ⚠ de permiso.
     expect(ev('v-cancelado').cancelado).toBe(true);
     expect(String(ev('v-cancelado').title)).toContain('CANCELADO · ');

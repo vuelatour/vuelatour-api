@@ -829,7 +829,7 @@ describe('CalendarSyncService.syncDescanso / syncEvento', () => {
     expect(eventosGoogle.insert).not.toHaveBeenCalled();
   });
 
-  it('syncEvento publica el evento de flota con el color del avión', async () => {
+  it('syncEvento publica el evento de flota en VERDE (el avión ya no da color)', async () => {
     const { service } = armar(
       {
         evento_flota: (q) =>
@@ -863,7 +863,8 @@ describe('CalendarSyncService.syncDescanso / syncEvento', () => {
       [{ requestBody: { summary: string; colorId: string } }]
     >;
     expect(llamadas[0][0].requestBody.summary).toBe('📌 Lavado · N4142R · Ana');
-    expect(llamadas[0][0].requestBody.colorId).toBe('6');
+    // 22-sep-2026: verde del semáforo → Salvia (2), no el Mandarina del avión.
+    expect(llamadas[0][0].requestBody.colorId).toBe('2');
   });
 
   it('un evento borrado = HECHO', async () => {

@@ -175,7 +175,7 @@ describe('CalendarSyncService.syncMantenimiento (C1)', () => {
     expect(requestBody.summary).toBe(
       '🔧 Servicio · N4142R · Servicio de 100 h',
     );
-    expect(requestBody.colorId).toBe('5'); // Banana = ámbar del sistema
+    expect(requestBody.colorId).toBe('5'); // Banana = amarillo del semáforo
     // Día completo en el DÍA CANCÚN de fecha_programada; fin EXCLUSIVO.
     expect(requestBody.start).toEqual({ date: '2026-09-20' });
     expect(requestBody.end).toEqual({ date: '2026-09-21' });
@@ -196,7 +196,7 @@ describe('CalendarSyncService.syncMantenimiento (C1)', () => {
     });
   });
 
-  it('EN_TALLER: título "En taller", rojo Tomate y UPDATE del evento ya creado (sin re-persistir el id)', async () => {
+  it('EN_TALLER: título "En taller", AMARILLO (ya no Tomate) y UPDATE del evento ya creado (sin re-persistir el id)', async () => {
     const { service, llamadas } = armar({
       mantenimiento: [
         {
@@ -218,7 +218,10 @@ describe('CalendarSyncService.syncMantenimiento (C1)', () => {
     expect(requestBody.summary).toBe(
       '🔧 En taller · N4142R · Servicio de 100 h',
     );
-    expect(requestBody.colorId).toBe('11'); // Tomate = el rojo de Google
+    // 22-sep-2026: el taller dejó de ser rojo. En el semáforo nuevo el rojo
+    // significa CANCELADO y un avión en taller es un asunto PENDIENTE; lo que
+    // lo distingue es el título, no el color.
+    expect(requestBody.colorId).toBe('5'); // Banana = amarillo del semáforo
     expect(de(llamadas, 'mantenimiento', 'update')).toHaveLength(0);
   });
 
@@ -430,8 +433,9 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('Luis N4142R cun-ptu-cun 9:00');
-    // El color del avión del sistema (#10B981) → Salvia (2). El color sale
-    // del PRIMER tramo activo, que no tiene permiso pendiente.
+    // VERDE del semáforo (#22C55E) → Salvia (2): CONFIRMADO, con avión y
+    // piloto, y el PRIMER tramo activo sin permiso pendiente. El color del
+    // avión (#10B981) ya no interviene.
     expect(requestBody.colorId).toBe('2');
     // La fila abarca del primer despegue (14:00Z = 9:00 Cancún) a la última
     // salida conocida + 1 h (20:00Z = 15:00 Cancún → 21:00Z).
@@ -489,7 +493,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     );
   });
 
-  it('sin piloto asignado: «sin piloto» en el título y el MORADO "sin asignar" del sistema', async () => {
+  it('sin piloto asignado: «sin piloto» en el título y el AMARILLO de «asunto pendiente»', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       piloto: null,
@@ -504,15 +508,15 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('sin piloto N4142R cun-ptu 9:00');
-    // El calendario del sistema lo pinta morado (#8B5CF6 "⚠ falta asignar"):
-    // en Google es Lavanda (1).
-    expect(requestBody.colorId).toBe('1');
+    // 22-sep-2026: «falta asignar» dejó de tener morado propio y entró al
+    // AMARILLO del semáforo (#F59E0B) → Banana (5), junto con el permiso.
+    expect(requestBody.colorId).toBe('5');
   });
 
   it('tramo SIN asignación propia: HEREDA avión/piloto del vuelo (no es "sin asignar")', async () => {
     // Regla del repo: `escala.aeronave_id ?? vuelo.aeronave_id` (igual que el
-    // calendario del sistema). Sin la herencia, esta fila saldría morada
-    // "falta asignar" (Lavanda 1) con el piloto puesto en el título.
+    // calendario del sistema). Sin la herencia, esta fila saldría AMARILLA
+    // "falta asignar" (Banana 5) con el piloto puesto en el título.
     const vuelo = {
       ...VUELO_MULTIESCALA,
       escalas: [
@@ -531,21 +535,25 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('Luis N4142R cun-ptu 9:00');
-    expect(requestBody.colorId).toBe('2'); // color del avión del VUELO
+    expect(requestBody.colorId).toBe('2'); // verde: está en firme y asignado
   });
 
-  it('RESERVA (tentativo): el gris del sistema (#64748B) → Grafito (8)', async () => {
-    const vuelo = { ...VUELO_MULTIESCALA, estado: 'RESERVA' };
-    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+  it.each(['RESERVA', 'SOLICITUD', 'COTIZADO'])(
+    '%s (tentativo): el gris del semáforo (#64748B) → Grafito (8)',
+    async (estado) => {
+      const vuelo = { ...VUELO_MULTIESCALA, estado };
+      const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
 
-    await service.syncFlight('v-1');
+      await service.syncFlight('v-1');
 
-    // Tentativo va ANTES del permiso pendiente y del color del avión.
-    expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
-    expect(insertado().requestBody.colorId).toBe('8');
-  });
+      // Tentativo va ANTES de los pendientes. Desde el 22-sep-2026 son TODOS
+      // los estados anteriores a CONFIRMADO, no solo la RESERVA.
+      expect(eventosGoogle.insert).toHaveBeenCalledTimes(1);
+      expect(insertado().requestBody.colorId).toBe('8');
+    },
+  );
 
-  it('externo: «externo» como piloto, operador como avión y su color Flamenco', async () => {
+  it('externo: «externo» como piloto, operador como avión y el color de su ESTADO', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       es_externo: true,
@@ -564,8 +572,9 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('externo Jet Amigo cun-ptu 9:00');
-    // Rosa pálido del sistema (#F0DCDB) → Flamenco (4).
-    expect(requestBody.colorId).toBe('4');
+    // 22-sep-2026: el externo ya no tiene color propio (era rosa pálido). Se
+    // pinta por su estado: CONFIRMADO ⇒ verde → Salvia (2).
+    expect(requestBody.colorId).toBe('2');
     expect(String(requestBody.description)).toContain(
       'Operador externo: Jet Amigo',
     );
@@ -680,7 +689,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('Itzi N990GG cun-ptu 9:00');
-    expect(requestBody.colorId).toBe('7'); // azul del sistema → Pavo real
+    expect(requestBody.colorId).toBe('2'); // verde del semáforo → Salvia
     expect(String(requestBody.description).split('\n')).toContain(
       'T1 cun-ptu 9:00 · 3 pax',
     );
@@ -708,7 +717,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     );
   });
 
-  it('avión sin color_calendario: el gris "sin avión" del sistema (#9CA3AF) → Lavanda (1)', async () => {
+  it('avión SIN color_calendario: da igual, el semáforo no lo mira (verde → Salvia 2)', async () => {
     const vuelo = {
       ...VUELO_MULTIESCALA,
       tipo: 'SENCILLO',
@@ -720,9 +729,10 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     await service.syncFlight('v-1');
 
     const { requestBody } = insertado();
-    // COLISIÓN CONOCIDA: el gris "sin avión" y el morado "sin asignar" caen
-    // los dos en Lavanda (1). El TÍTULO los distingue («sin piloto»).
-    expect(requestBody.colorId).toBe('1');
+    // Antes el avión sin color caía en un gris propio (#9CA3AF → Lavanda 1).
+    // Desde el 22-sep-2026 `aeronave.color_calendario` no entra a ningún
+    // calendario: quedó SOLO para los Excel del balance.
+    expect(requestBody.colorId).toBe('2');
   });
 
   it('CANCELADO: el evento se BORRA de Google (C6)', async () => {
@@ -851,7 +861,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     expect(actualizado().eventId).toBe('ev-vuelo');
     // Solo el tramo vivo: ruta ptu-cun con la fecha de traslado final.
     expect(actualizado().requestBody.summary).toBe('Luis N4142R ptu-cun 13:00');
-    // Color del sistema para el tramo que SÍ vuela (avión #10B981 → Salvia).
+    // Color del semáforo para el tramo que SÍ vuela: CONFIRMADO ⇒ verde (2).
     expect(actualizado().requestBody.colorId).toBe('2');
   });
 
@@ -925,7 +935,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 // ===== COLORES DEL SISTEMA EN DESCANSOS Y EVENTOS DE FLOTA (12-sep-2026) =====
 
 describe('CalendarSyncService — descansos y eventos de flota con el color del sistema', () => {
-  it('el descanso lleva colorId: turquesa del sistema (#14B8A6) → Salvia (2)', async () => {
+  it('el descanso lleva colorId: AZUL del semáforo (#3B82F6) → Pavo real (7)', async () => {
     const { service } = armar({});
 
     await service.upsertDescansoEvent({
@@ -936,11 +946,12 @@ describe('CalendarSyncService — descansos y eventos de flota con el color del 
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('😴 Descansa · Luis');
-    // Antes iba SIN color y Google lo pintaba del default del calendario.
-    expect(requestBody.colorId).toBe('2');
+    // Antes iba SIN color (Google lo pintaba del default) y del 12 al 22-sep
+    // fue turquesa; hoy es el AZUL del semáforo, su único azul.
+    expect(requestBody.colorId).toBe('7');
   });
 
-  it('evento de flota CON avión: el color del avión (N4142R #F97316 → Mandarina 6)', async () => {
+  it('evento de flota CON avión: VERDE igual (el color del avión ya no manda)', async () => {
     const { service } = armar({});
 
     await service.upsertEventoFlotaEvent({
@@ -954,12 +965,12 @@ describe('CalendarSyncService — descansos y eventos de flota con el color del 
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('📌 Lavado · N4142R');
-    // El calendario del sistema pinta estos eventos con el color del avión:
-    // Google ignoraba el avión y los pintaba TODOS de azul.
-    expect(requestBody.colorId).toBe('6');
+    // Del 12 al 22-sep estos eventos tomaban el color del AVIÓN (Mandarina
+    // para N4142R). Hoy son una cita EN FIRME: verde → Salvia (2).
+    expect(requestBody.colorId).toBe('2');
   });
 
-  it('evento de flota SIN avión: el azul cielo propio (#0EA5E9) → Pavo real (7)', async () => {
+  it('evento de flota SIN avión: el MISMO verde (2), sin azul cielo propio', async () => {
     const { service } = armar({});
 
     await service.upsertEventoFlotaEvent({
@@ -969,10 +980,10 @@ describe('CalendarSyncService — descansos y eventos de flota con el color del 
       fecha_fin: null,
     });
 
-    expect(insertado().requestBody.colorId).toBe('7');
+    expect(insertado().requestBody.colorId).toBe('2');
   });
 
-  it('el barrido pide `color_calendario` del avión del evento (si no, el color se perdía)', async () => {
+  it('el barrido publica el evento en VERDE aunque el avión traiga color_calendario', async () => {
     const { service, llamadas } = armar({
       vuelo: [{ data: [], error: null }],
       piloto_descanso: [{ data: [], error: null }],
@@ -999,11 +1010,12 @@ describe('CalendarSyncService — descansos y eventos de flota con el color del 
     await service.resyncTodo();
 
     const select = de(llamadas, 'evento_flota', 'select')[0].args[0] as string;
+    // El select sigue trayendo el color (dato informativo del evento), pero
+    // NINGÚN color del calendario sale de ahí desde el 22-sep-2026.
     expect(select).toContain(
       'aeronave:aeronave_id(matricula, color_calendario)',
     );
-    // Esmeralda del avión (#10B981) → Salvia (2), no el azul de "evento".
-    expect(actualizado().requestBody.colorId).toBe('2');
+    expect(actualizado().requestBody.colorId).toBe('2'); // verde, no #10B981
   });
 });
 

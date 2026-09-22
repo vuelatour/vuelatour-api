@@ -5,6 +5,7 @@ import {
   colorIdGoogleDeVuelo,
   colorIdGoogleEvento,
   colorIdGoogleMantenimiento,
+  colorIdGoogleSemaforo,
   descripcionEventoVuelo,
   estadoHttpGoogle,
   eventoAusenteEnGoogle,
@@ -15,25 +16,14 @@ import {
   tituloEventoVuelo,
   ventanaEventoVuelo,
 } from './google-evento.util';
-import {
-  CANCELADO_COLOR,
-  DESCANSO_COLOR,
-  EVENTO_COLOR,
-  EXTERNO_COLOR,
-  MANTENIMIENTO_PROGRAMADO_COLOR,
-  MANTENIMIENTO_TALLER_COLOR,
-  PERMISO_PENDIENTE_COLOR,
-  SIN_ASIGNAR_COLOR,
-  SIN_AVION_COLOR,
-  TENTATIVO_COLOR,
-} from './colores-calendario.util';
+import { SEMAFORO } from './colores-calendario.util';
 
 /**
- * C4/C3 del pedido del 12-sep-2026 (sync sistema → Google Calendar):
- *  - `colorIdGoogleDe` traduce CUALQUIER hex del sistema
- *    (`colores-calendario.util`: semánticos y `aeronave.color_calendario`) al
- *    colorId de Google más cercano, para que el calendario de la oficina
- *    espeje «los mismos colores que usamos para cada cosa»;
+ * C4/C3 del pedido del 12-sep-2026 (sync sistema → Google Calendar),
+ * ACTUALIZADO el 22-sep-2026 al SEMÁFORO DE 5 COLORES:
+ *  - `colorIdGoogleDe` traduce un hex del sistema al colorId de Google más
+ *    cercano (redmean) y `colorIdGoogleSemaforo` le antepone las excepciones
+ *    fijas, para que el calendario de la oficina espeje el mismo semáforo;
  *  - `nombreCortoPiloto` pone el nombre corto del piloto en el título.
  * Ambos PUROS: ninguna llamada a Google ni a la BD.
  *
@@ -81,18 +71,6 @@ describe('colorIdGoogleDe', () => {
     }
   });
 
-  it('congela el mapeo de la FLOTA REAL (cambiarlo cambia el color que ve la oficina)', () => {
-    // Colores vivos en `aeronave.color_calendario` (prod, 12-sep-2026).
-    expect(colorIdGoogleDe('#F97316')).toBe('6'); // N4142R naranja → Mandarina
-    expect(colorIdGoogleDe('#84CC16')).toBe('5'); // N58BT lima → Banana
-    expect(colorIdGoogleDe('#EC4899')).toBe('4'); // N621TX rosa → Flamenco
-    expect(colorIdGoogleDe('#3B82F6')).toBe('7'); // N990GG azul → Pavo real
-    expect(colorIdGoogleDe('#06B6D4')).toBe('7'); // XA-VGV cian → Pavo real
-    expect(colorIdGoogleDe('#EAB308')).toBe('5'); // XB-ANU amarillo → Banana
-    expect(colorIdGoogleDe('#6366F1')).toBe('1'); // XB-IJP índigo → Lavanda
-    expect(colorIdGoogleDe('#10B981')).toBe('2'); // XB-PEV esmeralda → Salvia
-  });
-
   it('acepta el atajo de 3 dígitos', () => {
     expect(colorIdGoogleDe('#f00')).toBe('11'); // rojo puro → Tomate
   });
@@ -109,60 +87,79 @@ describe('colorIdGoogleDe', () => {
 });
 
 /**
- * TABLA CONGELADA «cosa del sistema → hex → colorId de Google» (pedido del
- * cliente del 12-sep-2026: «los mismos colores que usamos para cada cosa»).
+ * TABLA CONGELADA «color del semáforo → hex → colorId de Google»
+ * (22-sep-2026). Reemplaza a la tabla de 18 filas del 12-sep-2026, donde 6
+ * significados y 8 colores de avión se repartían los 11 colores de Google con
+ * SEIS colisiones y el color no era un dato confiable.
  *
- * Los hex salen de `colores-calendario.util` (fuente única del calendario del
- * sistema), así que si alguien cambia un color allá, ESTA tabla se rompe y hay
- * que decidir a conciencia qué ve la oficina en Google. Google solo tiene 11
- * colores de evento: varias cosas del sistema CAEN EN EL MISMO colorId y eso
- * está documentado abajo — el color en Google es una ayuda, el TÍTULO es el
- * dato confiable.
+ * Ahora son CINCO hex → CINCO colorId DISTINTOS. Los hex salen de
+ * `colores-calendario.util` (fuente única), así que si alguien cambia un color
+ * allá, ESTA tabla se rompe y hay que decidir a conciencia qué ve la oficina.
  */
-describe('espejo de colores del sistema → Google (tabla congelada)', () => {
-  /** [cosa del sistema, hex del sistema, colorId, nombre del color]. */
+describe('espejo del semáforo → Google (tabla congelada)', () => {
+  /** [cosa del sistema, hex del semáforo, colorId, nombre del color]. */
   const TABLA: ReadonlyArray<readonly [string, string, string, string]> = [
-    // --- vuelos, en orden de PRECEDENCIA ---
-    // El cancelado NO viaja a Google (su evento se BORRA); se congela igual
-    // para que la tabla cubra toda la paleta del sistema.
-    ['vuelo cancelado (no viaja a Google)', CANCELADO_COLOR, '6', 'Mandarina'],
-    ['vuelo tentativo (RESERVA)', TENTATIVO_COLOR, '8', 'Grafito'],
+    ['tentativo (antes de CONFIRMADO)', SEMAFORO.TENTATIVO, '8', 'Grafito'],
     [
-      'vuelo sin asignar (falta avión o piloto)',
-      SIN_ASIGNAR_COLOR,
-      '1',
-      'Lavanda',
+      'confirmado (vuelo y evento de flota)',
+      SEMAFORO.CONFIRMADO,
+      '2',
+      'Salvia',
     ],
-    ['permiso de pista pendiente', PERMISO_PENDIENTE_COLOR, '5', 'Banana'],
-    ['vuelo externo', EXTERNO_COLOR, '4', 'Flamenco'],
-    ['vuelo propio sin color de avión', SIN_AVION_COLOR, '1', 'Lavanda'],
-    // --- otros eventos ---
-    ['descanso de piloto', DESCANSO_COLOR, '2', 'Salvia'],
-    ['evento de flota sin avión', EVENTO_COLOR, '7', 'Pavo real'],
-    ['mantenimiento PROGRAMADO', MANTENIMIENTO_PROGRAMADO_COLOR, '5', 'Banana'],
-    // --- la FLOTA REAL (aeronave.color_calendario en prod, 12-sep-2026) ---
-    ['N4142R (naranja)', '#F97316', '6', 'Mandarina'],
-    ['N58BT (lima)', '#84CC16', '5', 'Banana'],
-    ['N621TX (rosa)', '#EC4899', '4', 'Flamenco'],
-    ['N990GG (azul)', '#3B82F6', '7', 'Pavo real'],
-    ['XA-VGV (cian)', '#06B6D4', '7', 'Pavo real'],
-    ['XB-ANU (amarillo)', '#EAB308', '5', 'Banana'],
-    ['XB-IJP (índigo)', '#6366F1', '1', 'Lavanda'],
-    ['XB-PEV (esmeralda)', '#10B981', '2', 'Salvia'],
+    [
+      'permiso o asunto pendiente (y mantenimiento)',
+      SEMAFORO.PENDIENTE,
+      '5',
+      'Banana',
+    ],
+    // El cancelado NO viaja a Google (su evento se BORRA); se congela igual
+    // para que la tabla cubra el semáforo completo.
+    ['cancelado (no viaja a Google)', SEMAFORO.CANCELADO, '11', 'Tomate'],
+    ['descanso de piloto', SEMAFORO.DESCANSO, '7', 'Pavo real'],
   ];
 
   it.each(TABLA)('%s (%s) → colorId %s (%s)', (_cosa, hex, id, nombre) => {
-    expect(colorIdGoogleDe(hex)).toBe(id);
+    expect(colorIdGoogleSemaforo(hex)).toBe(id);
     expect(COLORES_EVENTO_GOOGLE.find((c) => c.id === id)?.nombre).toBe(nombre);
   });
 
-  it('EN_TALLER es la ÚNICA excepción al "más cercano": Tomate FIJO (11)', () => {
-    // El rojo del sistema (#EF4444) por redmean cae en Mandarina (6, d≈3 714)
-    // antes que en Flamenco (4, ≈17 375) y que en Tomate (11, ≈30 217), y
-    // Mandarina es el naranja de N4142R: el taller debe leerse ROJO.
-    expect(colorIdGoogleDe(MANTENIMIENTO_TALLER_COLOR)).toBe('6');
-    expect(colorIdGoogleMantenimiento(true)).toBe('11');
-    expect(colorIdGoogleMantenimiento(false)).toBe('5');
+  it('los cinco colorId son DISTINTOS: ya no hay colisiones', () => {
+    const ids = TABLA.map(([, , id]) => id);
+    expect(new Set(ids).size).toBe(5);
+    // Libres para significados futuros: Lavanda (1), Uva (3), Flamenco (4),
+    // Mandarina (6), Arándano (9) y Albahaca (10).
+    const usados = new Set(ids);
+    expect(
+      COLORES_EVENTO_GOOGLE.filter((c) => !usados.has(c.id)).map((c) => c.id),
+    ).toEqual(['1', '3', '4', '6', '9', '10']);
+  });
+
+  /**
+   * El verde del semáforo (#22C55E) cae en Salvia por REDMEAN (d≈3 589);
+   * Albahaca —el otro verde de Google— queda a ≈22 269 y es un verde muy
+   * oscuro. Se respeta la regla de siempre («el más cercano») porque el
+   * confirmado es la mayoría de los eventos del calendario.
+   */
+  it('el VERDE sale del "más cercano", no de una excepción', () => {
+    expect(colorIdGoogleDe(SEMAFORO.CONFIRMADO)).toBe('2');
+  });
+
+  /**
+   * El ROJO es la ÚNICA excepción al "más cercano" que queda. La del taller
+   * (EN_TALLER → 11 Tomate) se RETIRÓ el 22-sep-2026: el mantenimiento pasó a
+   * amarillo porque el rojo significa CANCELADO.
+   */
+  it('el ROJO es la única excepción fija: Tomate (11), no Mandarina', () => {
+    // Por redmean, #EF4444 cae en Mandarina (6, d≈3 714) antes que en
+    // Flamenco (4, ≈17 375) y que en Tomate (11, ≈30 217) — y Mandarina es un
+    // NARANJA: «cancelado» tiene que leerse rojo.
+    expect(colorIdGoogleDe(SEMAFORO.CANCELADO)).toBe('6');
+    expect(colorIdGoogleSemaforo(SEMAFORO.CANCELADO)).toBe('11');
+  });
+
+  it('un hex ilegible cae al gris del tentativo, nunca a un color con significado', () => {
+    expect(colorIdGoogleSemaforo(null)).toBe('8');
+    expect(colorIdGoogleSemaforo('azul cielo')).toBe('8');
   });
 
   it('las funciones semánticas devuelven lo que dice la tabla', () => {
@@ -173,101 +170,56 @@ describe('espejo de colores del sistema → Google (tabla congelada)', () => {
         aeronaveId: 'a',
         pilotoId: 'p',
       }),
-    ).toBe('8'); // tentativo gana incluso asignado y con permiso pendiente
+    ).toBe('8'); // tentativo gana incluso asignado
     expect(
       colorIdGoogleDeVuelo({
-        estado: 'RESERVA',
+        estado: 'COTIZADO',
         permisoPendiente: true,
-        colorAvion: '#10B981',
       }),
-    ).toBe('8');
+    ).toBe('8'); // …y con permiso pendiente
     expect(colorIdGoogleDeVuelo({ estado: 'CONFIRMADO', pilotoId: 'p' })).toBe(
-      '1',
-    ); // sin avión asignado
+      '5',
+    ); // sin avión asignado = asunto pendiente
     expect(
       colorIdGoogleDeVuelo({ estado: 'CONFIRMADO', aeronaveId: 'a' }),
-    ).toBe('1'); // sin piloto asignado
+    ).toBe('5'); // sin piloto asignado
     expect(
       colorIdGoogleDeVuelo({
         estado: 'CONFIRMADO',
         aeronaveId: 'a',
         pilotoId: 'p',
         permisoPendiente: true,
-        colorAvion: '#10B981',
       }),
-    ).toBe('5'); // permiso pendiente > color del avión
+    ).toBe('5'); // permiso de pista pendiente
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'CONFIRMADO',
+        aeronaveId: 'a',
+        pilotoId: 'p',
+      }),
+    ).toBe('2'); // en firme
     expect(
       colorIdGoogleDeVuelo({ estado: 'CONFIRMADO', esExterno: true }),
-    ).toBe('4'); // externo: no exige asignación
-    expect(
-      colorIdGoogleDeVuelo({
-        estado: 'CONFIRMADO',
-        aeronaveId: 'a',
-        pilotoId: 'p',
-        colorAvion: '#F97316',
-      }),
-    ).toBe('6'); // color del avión
-    expect(
-      colorIdGoogleDeVuelo({
-        estado: 'CONFIRMADO',
-        aeronaveId: 'a',
-        pilotoId: 'p',
-        colorAvion: null,
-      }),
-    ).toBe('1'); // sin color de avión
-    // Un `color_calendario` con basura NO deja el evento sin color: cae al
-    // gris "sin avión" del sistema.
-    expect(
-      colorIdGoogleDeVuelo({
-        estado: 'CONFIRMADO',
-        aeronaveId: 'a',
-        pilotoId: 'p',
-        colorAvion: 'azul cielo',
-      }),
-    ).toBe('1');
-    // Descanso y eventos de flota.
-    expect(colorIdGoogleDescanso()).toBe('2');
-    expect(colorIdGoogleEvento(null)).toBe('7');
-    expect(colorIdGoogleEvento('#F97316')).toBe('6');
-    expect(colorIdGoogleEvento('no es un hex')).toBe('7');
-  });
-
-  it('COLISIONES conocidas: qué cosas comparten colorId en Google (y qué ids quedan libres)', () => {
-    const porId = new Map<string, string[]>();
-    for (const [cosa, , id] of TABLA) {
-      porId.set(id, [...(porId.get(id) ?? []), cosa]);
+    ).toBe('2'); // el externo ya no tiene color propio
+    // El color del AVIÓN no mueve nada (quedó solo para los Excel).
+    for (const colorAvion of ['#F97316', '#10B981', null, 'azul cielo']) {
+      expect(
+        colorIdGoogleDeVuelo({
+          estado: 'CONFIRMADO',
+          aeronaveId: 'a',
+          pilotoId: 'p',
+          colorAvion,
+        }),
+      ).toBe('2');
     }
-    // EN_TALLER va aparte (Tomate fijo, sin colisión).
-    porId.set('11', ['mantenimiento EN_TALLER']);
-
-    // Congelado a propósito: 11 colores para 18 cosas ⇒ hay empates. Si el
-    // cliente quiere distinguirlos, se re-pintan los `color_calendario` del
-    // sistema (y no alcanzan para los 8 aviones + 6 significados).
-    expect(Object.fromEntries([...porId].sort())).toEqual({
-      '1': [
-        'vuelo sin asignar (falta avión o piloto)',
-        'vuelo propio sin color de avión',
-        'XB-IJP (índigo)',
-      ],
-      '11': ['mantenimiento EN_TALLER'],
-      '2': ['descanso de piloto', 'XB-PEV (esmeralda)'],
-      '4': ['vuelo externo', 'N621TX (rosa)'],
-      '5': [
-        'permiso de pista pendiente',
-        'mantenimiento PROGRAMADO',
-        'N58BT (lima)',
-        'XB-ANU (amarillo)',
-      ],
-      '6': ['vuelo cancelado (no viaja a Google)', 'N4142R (naranja)'],
-      '7': ['evento de flota sin avión', 'N990GG (azul)', 'XA-VGV (cian)'],
-      '8': ['vuelo tentativo (RESERVA)'],
-    });
-    // Ids que NADIE usa hoy (quedan para futuros significados): Uva (3),
-    // Arándano (9) —era el viejo default de la sync— y Albahaca (10).
-    const usados = new Set(porId.keys());
-    expect(
-      COLORES_EVENTO_GOOGLE.filter((c) => !usados.has(c.id)).map((c) => c.id),
-    ).toEqual(['3', '9', '10']);
+    // Descanso, eventos de flota y mantenimientos.
+    expect(colorIdGoogleDescanso()).toBe('7');
+    expect(colorIdGoogleEvento()).toBe('2');
+    expect(colorIdGoogleEvento('#F97316')).toBe('2');
+    expect(colorIdGoogleEvento('no es un hex')).toBe('2');
+    expect(colorIdGoogleMantenimiento()).toBe('5');
+    expect(colorIdGoogleMantenimiento(false)).toBe('5');
+    expect(colorIdGoogleMantenimiento(true)).toBe('5');
   });
 });
 

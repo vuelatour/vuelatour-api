@@ -128,7 +128,8 @@ export class CreateAeronaveDto {
   permiso_afac_usd_hr?: number;
 
   @ApiPropertyOptional({
-    description: 'Color hex para UI (#XXXXXX)',
+    description:
+      'Color del avión en los REPORTES DE EXCEL (balance individual y general), hex #RRGGBB. Desde el 22-sep-2026 NO pinta ningún calendario: el panel, la app y Google usan el semáforo de 5 colores de `calendar/colores-calendario.util`. La columna conserva su nombre histórico (`color_calendario`) para no migrar la BD.',
     example: '#3B82F6',
   })
   @IsOptional()
