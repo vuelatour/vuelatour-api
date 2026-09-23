@@ -2179,8 +2179,10 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (escrita el 22-sep-2026, con DRY-RUN de 7 pasos en
-  la cabecera)** — `20260923000001_vuelo_factura_cliente.sql`: factura del
+- **APLICADA (23-sep-2026 vía MCP, tras correr el dry-run de 7 pasos de la
+  cabecera en prod: `DRYRUN_OK · cola 0, vuelos 294, recibidas 0`; después
+  columnas, CHECK, índice y `pdf_url` verificados, backfill 0 filas,
+  `get_advisors` sin hallazgos nuevos)** — `20260923000001_vuelo_factura_cliente.sql`: factura del
   SERVICIO por vuelo (`vuelo.factura_estatus` con CHECK de tres valores +
   `factura_archivo_path/_nombre/_subida_at/_subida_por`), backfill
   `FACTURADO` donde `facturado = true` (**0 filas en prod**: hay 294 vuelos,
