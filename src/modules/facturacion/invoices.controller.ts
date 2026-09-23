@@ -20,6 +20,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CancelarFacturaDto,
   AmarrarGastosDto,
+  CrearRecibidaDeGastoDto,
   CrearRecibidaDto,
   EmitirFacturaDto,
   FacturaFileUrlsDto,
@@ -161,6 +162,31 @@ export class InvoicesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.invoices.crearRecibida(dto.xml_b64, c.userId);
+  }
+
+  // Ruta literal ANTES de `recibidas/:id` (convención del repo).
+  @Post('recibidas/de-gasto')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      '«Subir la factura de ESTE gasto» desde la fila de Gastos: registra la factura recibida (XML y/o PDF) y la amarra al gasto en UNA llamada. El amarre es ADITIVO (no desamarra los demás gastos de la misma factura) y un UUID ya registrado se reutiliza (ya_existia: true). El gasto queda FACTURADA por el trigger de la BD.',
+  })
+  crearRecibidaDeGasto(
+    @Body() dto: CrearRecibidaDeGastoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.invoices.crearRecibidaDeGasto(dto, c.userId);
+  }
+
+  @Get('recibidas/:id')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Una factura recibida con sus gastos amarrados («Ver factura» desde la fila del gasto).',
+  })
+  recibidaPorId(@Param('id', ParseUUIDPipe) id: string) {
+    return this.invoices.recibidaPorId(id);
   }
 
   @Patch('recibidas/:id')

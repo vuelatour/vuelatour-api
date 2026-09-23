@@ -44,6 +44,22 @@ export class AllExceptionsFilter implements ExceptionFilter {
         details = r.details;
       }
       code = code.toUpperCase().replace(/\s+/g, '_');
+    } else if (exception instanceof Error && esErrorDeSubida(exception)) {
+      // Subida de archivos (multer): el archivo que se pasa del tope o que
+      // viene en otro campo NO es un error del servidor — es algo que quien
+      // sube puede corregir. Sin este caso, subir una factura de 12 MB
+      // respondía un 500 con «Ocurrió un error inesperado».
+      const err = exception as Error & { code?: string; field?: string };
+      code = err.code ?? 'UPLOAD_ERROR';
+      status =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? HttpStatus.PAYLOAD_TOO_LARGE
+          : HttpStatus.BAD_REQUEST;
+      message =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? 'El archivo supera el tamaño máximo permitido. Súbelo más ligero.'
+          : `No se pudo leer el archivo enviado${err.field ? ` (campo «${err.field}»)` : ''}.`;
+      details = { tecnico: exception.message };
     } else if (exception instanceof Error) {
       // Los errores no controlados (Postgres/red) NUNCA llegan crudos al
       // usuario: se traducen a un mensaje accionable y lo técnico va a
@@ -69,6 +85,14 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     res.status(status).json(body);
   }
+}
+
+/**
+ * ¿Es un error de multer (subida multipart)? Se reconoce por el nombre de la
+ * clase para no depender de `@types/multer` (el repo no lo instala).
+ */
+function esErrorDeSubida(err: Error): boolean {
+  return err.name === 'MulterError';
 }
 
 /**

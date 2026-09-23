@@ -57,6 +57,12 @@ import { VisionService } from '../vision/vision.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { PilotsService } from '../pilots/pilots.service';
 import { AlertsService } from '../alerts/alerts.service';
+import { FacturaClienteService } from './factura-cliente.service';
+import {
+  bloqueFacturaCliente,
+  type BloqueFacturaCliente,
+  type VueloFacturaRow,
+} from './factura-cliente.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -434,7 +440,28 @@ export class FlightsService {
     @Optional()
     @Inject(forwardRef(() => AlertsService))
     private readonly alerts?: AlertsService,
+    // Factura del SERVICIO por vuelo (22-sep-2026): el bloque ADITIVO
+    // `factura_cliente` del snapshot y del listado. @Optional porque los
+    // specs construyen el servicio con argumentos posicionales; sin él se
+    // deriva del `facturado` que ya viene en VUELO_COLS (exactamente lo que
+    // el panel pinta hoy), nunca se pierde el dato.
+    @Optional()
+    private readonly facturaCliente?: FacturaClienteService,
   ) {}
+
+  /**
+   * Bloque `factura_cliente` de un vuelo ya leído. Sin el servicio inyectado
+   * (specs) o sin la migración `20260923000001`, se deriva de
+   * `vuelo.facturado` — la misma respuesta que daba el API antes.
+   */
+  private bloqueFacturaClienteDe(
+    vuelo: Record<string, unknown>,
+  ): Promise<BloqueFacturaCliente> {
+    const fila = vuelo as VueloFacturaRow;
+    if (!this.facturaCliente)
+      return Promise.resolve(bloqueFacturaCliente(fila));
+    return this.facturaCliente.bloqueDeVuelo(vuelo.id as string, fila);
+  }
 
   /**
    * CHOKEPOINT del programa de servicio por horas (20-sep-2026).
@@ -469,8 +496,7 @@ export class FlightsService {
         // Avión del tramo CON HERENCIA (regla de tacos): un tramo sin avión
         // propio es del avión del vuelo. Comparar el id crudo apagaría el
         // aviso en silencio.
-        const avion =
-          aeronaveEscala ?? (await this.aeronaveDelVuelo(vueloId));
+        const avion = aeronaveEscala ?? (await this.aeronaveDelVuelo(vueloId));
         if (!avion) return;
         await this.alerts!.revisarServicioDeAvion(avion);
       } catch (err) {
@@ -2048,6 +2074,19 @@ export class FlightsService {
       for (const id of r.copiloto_ids) idsUsuarios.add(id);
     }
     const info: InfoUsuarios = await this.usuariosInfo([...idsUsuarios]);
+    // Factura del SERVICIO por vuelo (22-sep-2026, ADITIVO): en LOTE (una
+    // consulta por página, más la de nombres), nunca N+1. Sin el servicio o
+    // sin la migración se deriva del `facturado` que ya trae cada fila.
+    const facturaPorVuelo = this.facturaCliente
+      ? await this.facturaCliente.bloquesDeVuelos(
+          rows as Array<{ id?: unknown } & VueloFacturaRow>,
+        )
+      : new Map(
+          rows.map((r) => [
+            (r as Record<string, unknown>).id as string,
+            bloqueFacturaCliente(r as VueloFacturaRow),
+          ]),
+        );
     const rowsConRuta = rows.map((r) => {
       const row = r as Record<string, unknown>;
       const vid = row.id as string;
@@ -2073,6 +2112,9 @@ export class FlightsService {
           }),
           pasajeros_nombres_tramos: resumen?.pasajeros_nombres_tramos ?? [],
           notas_tramos: resumen?.notas_tramos ?? [],
+          factura_cliente:
+            facturaPorVuelo.get(vid) ??
+            bloqueFacturaCliente(row as VueloFacturaRow),
           ruta_iatas:
             resumen?.ruta_iatas ??
             [row.origen_iata as string, row.destino_iata as string].filter(
@@ -2544,6 +2586,7 @@ export class FlightsService {
       snapRow,
       apoyosRows,
       clienteResumen,
+      facturaClienteBloque,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -2577,6 +2620,10 @@ export class FlightsService {
       // Cliente con razón social (5-sep-2026, buscador de la app): findById
       // no embebe cliente (VUELO_COLS se usa en escrituras), se lee aparte.
       this.clienteResumen(clienteId),
+      // Factura del SERVICIO (22-sep-2026, ADITIVO): estatus manual +
+      // archivo. Las columnas no van en VUELO_COLS (se usa en escrituras y
+      // la migración puede no estar aplicada todavía), se leen aparte.
+      this.bloqueFacturaClienteDe(vuelo as Record<string, unknown>),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -2682,6 +2729,9 @@ export class FlightsService {
       // pactado para que el panel lo pueda resaltar.
       metodo_cobro_final: metodoFinal.metodo,
       metodo_cobro_final_difiere: metodoFinal.difiere,
+      // FACTURA DEL SERVICIO (22-sep-2026, ADITIVO): { estatus, archivo }.
+      // `facturado` y la tabla `factura` (CFDI del PAC) no cambian.
+      factura_cliente: facturaClienteBloque,
     };
   }
 

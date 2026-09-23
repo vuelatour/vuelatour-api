@@ -13,14 +13,29 @@
  * de cuenta de Paywise por NETO (bruto − comisión) / BRUTO / referencia.
  */
 
+/**
+ * ETIQUETAS es-MX. FUENTE ÚNICA: el panel (`lib/admin/metodos-pago.ts`) y la
+ * app copian ESTA tabla, y es la que imprimen el recibo de pago y el PDF
+ * interno de la cotización.
+ *
+ * 22-sep-2026 (palabras del cliente: «en vuelos, apartado COBRO, colocar las
+ * opciones link de pago, transferencia, efectivo»): los dos métodos que la
+ * oficina llama «link de pago» lo dicen con esas palabras y entre paréntesis
+ * quién cobra. Los VALORES del enum (`metodo_cobro` de la BD) NO cambian —
+ * cambiarlos rompería cobros históricos, conciliación y whitelist del piloto.
+ */
 export const METODO_COBRO_LABELS: Record<string, string> = {
+  HSBC_LINK: 'Link de pago (HSBC)',
+  PAYWISE: 'Link de pago (Paywise)',
   TRANSFERENCIA: 'Transferencia',
-  HSBC_LINK: 'HSBC link',
+  EFECTIVO: 'Efectivo',
   CHEQUE: 'Cheque',
   BILLPOCKET: 'BillPocket',
-  PAYWISE: 'Paywise',
-  EFECTIVO: 'Efectivo',
-  DOLARES: 'Dólares',
+  // «Dólares DIRECTO» = efectivo en dólares en mano, para que no se confunda
+  // con una transferencia a la cuenta en dólares. Es la etiqueta que el panel
+  // ya pintaba; el API decía «Dólares» y el recibo impreso no coincidía con
+  // la pantalla (revisión adversaria 22-sep-2026).
+  DOLARES: 'Dólares directo',
   OTRO: 'Otro',
 };
 

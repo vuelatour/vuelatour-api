@@ -98,7 +98,7 @@ export class CreatePropellerDto {
 
   @ApiPropertyOptional({
     description:
-      'TURM en marco del COMPONENTE (como la bitácora física): horas de vida de la hélice en su último overhaul. TSO = horas de vida − TURM. Viaja con la hélice al trasladarla.',
+      'T.U.R.M. de la bitácora: horas del componente DESDE su último overhaul (TSO) al día de la foto. Se guarda tal cual en tso_base y viaja con la hélice al trasladarla; el TSO vivo = tso_base + horas voladas desde el ancla. null/vacío = sin overhaul registrado. No puede superar las horas totales (400).',
   })
   @IsOptional()
   @Type(() => Number)

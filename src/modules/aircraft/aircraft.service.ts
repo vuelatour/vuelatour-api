@@ -1601,11 +1601,20 @@ export class AircraftService {
    * Horas de vida vivas de un componente (motor/hélice) y horas restantes a su
    * overhaul (TBO). Si no hay referencia/TBO, devuelve los valores que se puedan.
    *
-   * TURM = lectura del TACÓMETRO DEL AVIÓN en la última reparación mayor (así
-   * lo captura el mecánico: N990GG turm=4290.5 con taco 5543.9 → 1253.4 hrs
-   * desde overhaul). Restarlo de las horas de vida del motor —otra escala—
-   * daba 0 o negativos en toda la flota. Sin TURM capturado, el respaldo son
-   * las horas de vida (hélices, o motor recién anclado).
+   * TURM (columna LEGADA `turm`) = lectura del TACÓMETRO DEL AVIÓN en la
+   * última reparación mayor (así lo captura el mecánico: N990GG turm=4290.5
+   * con taco 5543.9 → 1253.4 hrs desde overhaul). Restarlo de las horas de
+   * vida del motor —otra escala— daba 0 o negativos en toda la flota. Sin
+   * TURM capturado, el respaldo son las horas de vida (hélices, o motor
+   * recién anclado).
+   *
+   * `turm_componente` de la RESPUESTA = **T.U.R.M. de la bitácora física =
+   * Tiempo desde la Última Reparación Mayor = TSO vivo** (22-sep-2026).
+   * Antes devolvía «las horas de vida que tenía el componente EN su
+   * overhaul» (horas_actuales − TSO), que es el número contrario al que
+   * pinta la bitácora y al que teclea la oficina en el panel. Se conserva el
+   * campo (forma de la respuesta sin cambios) y es idéntico a
+   * `horas_desde_overhaul` cuando hubo overhaul; `null` = sin overhaul.
    *
    * Público a propósito: la alerta de TBO (alerts.service) usa ESTE cálculo —
    * no duplicar la aritmética.
@@ -1641,11 +1650,12 @@ export class AircraftService {
         : turm > 0
           ? Math.max(0, hobbs - turm)
           : horasActuales;
-    // TURM en marco del componente (como la bitácora física AFAC): horas de
-    // vida del componente en su último overhaul. Null = sin overhaul.
+    // T.U.R.M. como lo imprime la bitácora física (y como lo captura la
+    // oficina): TIEMPO desde la última reparación mayor = TSO vivo.
+    // Null = sin overhaul registrado.
     const tuvoOverhaul = tsoBase != null || turm > 0;
     const turmComponente = tuvoOverhaul
-      ? Number(Math.max(0, horasActuales - desdeOverhaul).toFixed(1))
+      ? Number(desdeOverhaul.toFixed(1))
       : null;
     const tboRestante =
       tbo > 0 ? Number((tbo - desdeOverhaul).toFixed(1)) : null;

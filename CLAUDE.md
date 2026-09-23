@@ -12,6 +12,38 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
    un vuelo (el viejo `advanceComponentHours` contaba doble y los ajustes de
    taco post-COMPLETADO no se reflejaban). Al escribir `horas_totales` desde
    `engines.service`, SIEMPRE re-anclar `aeronave_horas_ref` al hobbs actual.
+   - **T.U.R.M. = TSO, COMO EN LA BITÁCORA (22-sep-2026): antes el
+     formulario lo leía al revés.** T.U.R.M. = *Tiempo desde la Última
+     Reparación Mayor* = horas voladas DESDE el overhaul. El API lo leía
+     como «horas del componente EN su último overhaul» y guardaba
+     `tso_base = horas_totales − turm_componente`; la oficina capturó la
+     hélice del XB-ANU con T.T. 2708 y T.U.R.M. 364 (TBO 2000) y quedó
+     `tso_base = 2344`: la ficha pintaba «TSO 2,344.00 · Restantes −344.00 ·
+     Vida usada 100 %» y el avión salía con «TBO agotado» en el semáforo de
+     aptitud. Hoy el T.U.R.M. que se teclea es **el TSO de HOY** y se guarda
+     en el marco del ANCLA: `tso_base = turm_componente − max(0, hobbs −
+     aeronave_horas_ref)` (fuente única `common/turm-componente.util.ts`,
+     con spec de los casos reales), en `create` y en `update` de
+     `engines.service` y `propellers.service`; `null` = sin overhaul
+     (`tso_base = null`) y **T.U.R.M. > horas de vida VIVAS es un 400**,
+     porque nadie vuela más desde la reparación que en toda la vida del
+     componente. **La resta del delta NO es opcional** (revisión adversaria
+     22-sep-2026): `tso_base` está anclado y el TSO que la ficha pinta —y
+     que el panel PRELLENA en el formulario— es el VIVO (`tso_base +
+     delta`). En el XB-ANU el delta es 0 y no se nota, pero las dos hélices
+     del **N4142R** están ancladas en 4448.9 con el taco en 5546.9 (delta
+     **1,098 h**): guardar el T.U.R.M. tal cual habría inflado su TSO en
+     esas horas —teclear 2,400 y que la ficha responda 3,498—, que es el
+     mismo desconcierto del reporte, al revés. `tso_base` NEGATIVO es
+     legítimo (overhaul reciente sobre un ancla vieja): el cálculo vivo lo
+     compensa y recorta a 0, como ya documentaba el código anterior. Al
+     re-anclar (cambio real de `horas_totales`) el delta vuelve a 0 y el
+     T.U.R.M. entra tal cual. `componenteEstado`
+     devuelve `turm_componente` = **TSO vivo** (idéntico a
+     `horas_desde_overhaul`; antes devolvía su complemento). La columna
+     LEGADA `turm` (taco del avión en el overhaul) no cambió. **Los datos
+     ya guardados NO se migran**: la fila del XB-ANU la corrige el usuario
+     desde el panel tras el deploy.
 
 2. **`cobrosEnUsd` (`src/common/cobros-usd.util.ts`) es LA única fuente de
    "cuánto se cobró en USD".** La usan: `refreshCobradoFlag`, el reporte por
@@ -166,7 +198,20 @@ TRANSFERENCIA, PAYWISE)` + moneda de la cuenta (PAYWISE es bancario desde
    **PAYWISE como MÉTODO DE COBRO (9-sep-2026)**: fuente única de
    etiquetas/conjuntos `src/common/metodo-cobro.util.ts`
    (`METODOS_COBRO_ABONO_AUTO` = TRANSFERENCIA, HSBC_LINK, CHEQUE, PAYWISE;
-   `+BILLPOCKET` manual). IVA como BillPocket (0 % por default), FormaPago
+   `+BILLPOCKET` manual).
+   **ETIQUETAS (22-sep-2026, palabras del cliente: «en vuelos, apartado
+   COBRO, colocar las opciones link de pago, transferencia, efectivo»)**:
+   `HSBC_LINK` = «Link de pago (HSBC)» y `PAYWISE` = «Link de pago
+   (Paywise)» (antes «HSBC link» / «Paywise») y `DOLARES` = «Dólares
+   directo» (así lo pinta el panel desde siempre; con «Dólares» a secas el
+   recibo impreso no coincidía con la pantalla — revisión adversaria del
+   22-sep); TRANSFERENCIA, EFECTIVO, CHEQUE, BILLPOCKET y OTRO no cambian.
+   **Los VALORES del enum
+   NO se tocan** (romperían cobros históricos, conciliación y la whitelist
+   del piloto). La tabla vive en `METODO_COBRO_LABELS` con spec
+   (`metodo-cobro.util.spec.ts`) y la COPIAN el panel
+   (`lib/admin/metodos-pago.ts`) y la app; la imprimen el recibo de pago
+   (`cobro-recibo.service`) y el PDF interno de la cotización. IVA como BillPocket (0 % por default), FormaPago
    SAT 04, facturable pre-cobro, FUERA de la whitelist del piloto. Comisión
    BANCARIA del cobro (bruto en `monto`, neto por diferencia): sin comisión
    capturada, `createCobro`/sobre provisionan `paywise_comision_pct`
@@ -1494,6 +1539,50 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       operativos, que siguen leyendo la escala VIVA. **Sin migración**: todo
       se resuelve con `calculo_snapshot` y con omitir columnas en un UPDATE.
 
+25. **FACTURA DEL SERVICIO POR VUELO: seguimiento ADMINISTRATIVO, no el CFDI
+    (22-sep-2026, pedido del cliente).** «Por cada vuelo las opciones para
+    identificar vuelos facturado, sin factura, factura elaborada y enviada, y
+    que pueda yo también subir la factura del servicio a un lado». Son DOS
+    cosas distintas y jamás se mezclan (mismo espíritu que el invariante 18):
+    - `vuelo.facturado` (boolean) + tabla `factura` = **CFDI del PAC**. Es el
+      candado de emisión (`invoices.service.emitir` lo pone con
+      compare-and-set; la cancelación ante el SAT lo libera). **No cambian.**
+    - `vuelo.factura_estatus` = **seguimiento MANUAL** de la oficina:
+      `SIN_FACTURA` · `ELABORADA_ENVIADA` · `FACTURADO` (varchar + CHECK, NO
+      un enum: en plpgsql se compara con texto sin `::text` y sin repetir el
+      incidente del 15-sep). Migración `20260923000001`.
+    - **Fuente única `src/modules/flights/factura-cliente.util.ts`** (PURA,
+      con spec; el panel copia la tabla). Derivación MONÓTONA —y por eso
+      segura con panel/BD viejos—: CFDI timbrado MANDA (`facturado = true`
+      ⇒ FACTURADO aunque la columna no exista); si no, vale la columna; sin
+      columna, `SIN_FACTURA`. **Cancelar el CFDI NO baja el estatus solo**:
+      la factura se elaboró y se envió — que la oficina lo decida a mano.
+    - **Bloque ADITIVO `factura_cliente: { estatus, archivo }`** en
+      `GET /flights/:id/snapshot` y en cada fila de `GET /flights` (en LOTE:
+      una consulta por página más la de nombres, nunca N+1). El archivo
+      (PDF/XML, ≤ 10 MB) vive en el bucket PRIVADO `facturas` bajo
+      `vuelos/<vuelo_id>/<uuid>.<ext>`; se guarda el PATH y el API firma
+      10 min al VER (`GET :id/factura-cliente/archivo-url`) — nunca una URL
+      persistida. Al reemplazar: primero sube el nuevo, luego guarda el path
+      y AL FINAL borra el viejo (ningún fallo deja al vuelo apuntando a un
+      archivo que no existe); si el UPDATE falla, el archivo huérfano se
+      retira.
+    - **Candado**: con `facturado = true`, `PATCH :id/factura-cliente` a algo
+      distinto de FACTURADO responde 409 `VUELO_CON_CFDI`.
+    - **Sin la migración aplicada**: leer responde lo de hoy; escribir
+      responde 409 `FACTURA_CLIENTE_NO_DISPONIBLE` con la migración que falta
+      (nunca 500 ni un guardado que se pierde en silencio).
+    - **La factura del GASTO es otra cosa** (buzón de proveedores):
+      `POST /v1/invoices/recibidas/de-gasto` crea la factura recibida
+      (XML y/o PDF) y la amarra al gasto en UNA llamada. Tres reglas suyas:
+      el amarre es **ADITIVO** (solo ese gasto — `amarrarGastos` REEMPLAZA la
+      lista y desde la fila desamarraría en silencio los demás gastos de una
+      factura de VIP SAESA), el **XML es opcional** (solo PDF ⇒
+      `uuid_fiscal` null, que la columna única admite repetido en nulos) y un
+      **UUID ya registrado se reutiliza** (`ya_existia: true`) en vez del 409
+      sin salida. Quien marca el gasto FACTURADA sigue siendo el trigger
+      `gasto_sync_facturacion`; `estatus_comprobante` no se toca.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -2090,6 +2179,24 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (escrita el 22-sep-2026, con DRY-RUN de 7 pasos en
+  la cabecera)** — `20260923000001_vuelo_factura_cliente.sql`: factura del
+  SERVICIO por vuelo (`vuelo.factura_estatus` con CHECK de tres valores +
+  `factura_archivo_path/_nombre/_subida_at/_subida_por`), backfill
+  `FACTURADO` donde `facturado = true` (**0 filas en prod**: hay 294 vuelos,
+  ninguno timbrado) e índice parcial; y `factura_recibida.pdf_url` para el
+  PDF de la factura del gasto. **Aditiva, sin triggers nuevos.** El API ya
+  está desplegable así: mientras no exista, LEER sigue respondiendo lo de
+  hoy (`factura_cliente` derivado de `vuelo.facturado` — fuente única
+  `flights/factura-cliente.util.ts`) y ESCRIBIR responde 409
+  `FACTURA_CLIENTE_NO_DISPONIBLE` / `PDF_FACTURA_NO_DISPONIBLE` con la
+  migración que falta; las sondas (`columnaOpcional`) lo encienden solo en
+  ≤ 10 min al aplicarla, sin redeploy. El DRY-RUN prueba con UPDATEs REALES
+  que el CHECK acepta los tres estados, que `updated_at` se mueve y —clave—
+  que cambiar el estatus **NO encola nada en `calendar_sync_cola`**
+  (`factura_estatus` no está en la lista `after update of …` de
+  `trg_vuelo_calendar_sync`: si algún día se agrega, cada cambio
+  administrativo reescribiría el evento de Google del vuelo).
 - **APLICADA (verificada en prod el 17-sep-2026 vía MCP: `calendar_sync_cola`,
   `calendar_sync_estado`, `calendar_sync_candado`, `calendar_sync_lock(int,
 int, text)` y `trg_*_calendar_sync` existen)** —

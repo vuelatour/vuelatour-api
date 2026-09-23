@@ -4,9 +4,12 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
+import { columnaOpcional } from '../../common/columna-opcional.util';
+import { FacturaClienteService } from '../flights/factura-cliente.service';
 import { normalizarTc, totalMxnDeVuelo } from '../../common/tc.util';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
@@ -144,6 +147,18 @@ const FACTURA_COLS =
 const RECIBIDA_COLS =
   'id, uuid_fiscal, emisor_rfc, emisor_nombre, receptor_rfc, receptor_nombre, tipo_comprobante, subtotal, total, moneda, fecha_emision, conceptos_resumen, xml_url, estado, gasto_id, aeronave_id, categoria_sugerida, notas, created_at, updated_at';
 
+/**
+ * `factura_recibida.pdf_url` la crea la migración `20260923000001`. Mientras
+ * no esté aplicada, los selects la OMITEN (el API sigue funcionando igual
+ * que hoy) y subir un PDF responde un 409 que dice qué falta — nunca se
+ * guarda a medias ni se pierde el papel en silencio.
+ */
+const MIGRACION_PDF_RECIBIDA = '20260923000001';
+
+/** El embed de gastos amarrados, igual en todas las respuestas de recibidas. */
+const RECIBIDA_EMBED_GASTOS =
+  'gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)';
+
 @Injectable()
 export class InvoicesService {
   private readonly logger = new Logger(InvoicesService.name);
@@ -153,6 +168,12 @@ export class InvoicesService {
     private readonly fel: FacturacionClient,
     private readonly pyservices: PyservicesService,
     private readonly profitSharing: ProfitSharingService,
+    // Factura del SERVICIO por vuelo (22-sep-2026): timbrar un CFDI deja el
+    // seguimiento administrativo en FACTURADO por la MISMA fuente que usa el
+    // panel. @Optional: es un efecto secundario best-effort — la emisión
+    // nunca se cae por él (y los specs no lo inyectan).
+    @Optional()
+    private readonly facturaCliente?: FacturaClienteService,
   ) {}
 
   /** Diagnóstico de conexión con el PAC (no consume timbres ni toca BD). */
@@ -220,6 +241,27 @@ export class InvoicesService {
 
   // ============ Facturas recibidas (buzón de CFDI de proveedores) ============
 
+  /** ¿Existe ya `factura_recibida.pdf_url`? (sondeo memorizado ≤ 10 min) */
+  private conPdfRecibida(): Promise<boolean> {
+    return columnaOpcional(
+      this.supabase.service,
+      'factura_recibida',
+      'pdf_url',
+      {
+        mensajeAusente:
+          `Columna factura_recibida.pdf_url no existe todavía: las facturas ` +
+          `recibidas van sin PDF hasta aplicar la migración ${MIGRACION_PDF_RECIBIDA}`,
+      },
+    ).disponible();
+  }
+
+  /** Columnas de `factura_recibida` según lo que exista en la BD. */
+  private async colsRecibida(): Promise<string> {
+    return (await this.conPdfRecibida())
+      ? `${RECIBIDA_COLS}, pdf_url`
+      : RECIBIDA_COLS;
+  }
+
   /** Sube un XML recibido: lo parsea, lo guarda en Storage e inserta la fila. */
   async crearRecibida(xmlB64: string, userId: string) {
     const p = await this.pyservices.parseFacturaRecibida(xmlB64);
@@ -254,7 +296,7 @@ export class InvoicesService {
         created_by: userId,
         updated_by: userId,
       })
-      .select(RECIBIDA_COLS)
+      .select(await this.colsRecibida())
       .maybeSingle();
     if (error) {
       if (error.code === '23505') {
@@ -273,7 +315,7 @@ export class InvoicesService {
     let q = this.supabase.service
       .from('factura_recibida')
       .select(
-        `${RECIBIDA_COLS}, gasto:gasto_id(id, categoria, monto, moneda), aeronave:aeronave_id(matricula), gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)`,
+        `${await this.colsRecibida()}, gasto:gasto_id(id, categoria, monto, moneda), aeronave:aeronave_id(matricula), ${RECIBIDA_EMBED_GASTOS}`,
         { count: 'exact' },
       )
       .order('created_at', { ascending: false })
@@ -304,7 +346,7 @@ export class InvoicesService {
       .from('factura_recibida')
       .update(patch)
       .eq('id', id)
-      .select(RECIBIDA_COLS)
+      .select(await this.colsRecibida())
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
@@ -397,12 +439,239 @@ export class InvoicesService {
         updated_by: userId,
       })
       .eq('id', recibidaId)
-      .select(
-        `${RECIBIDA_COLS}, gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)`,
-      )
+      .select(`${await this.colsRecibida()}, ${RECIBIDA_EMBED_GASTOS}`)
       .maybeSingle();
     if (error) throw new Error(error.message);
     return data!;
+  }
+
+  /**
+   * «SUBIR LA FACTURA DE **ESTE** GASTO» (22-sep-2026, palabras del cliente:
+   * «en los registros de gastos, además de la opción facturada (a un lado)
+   * agregar la opción para subir la factura correspondiente de dicho
+   * gasto»).
+   *
+   * Antes hacían falta DOS llamadas (`POST recibidas` con el XML y luego
+   * `amarrar-gastos`) y el PDF no tenía dónde guardarse. Aquí se registra la
+   * factura Y se amarra el gasto en una sola operación, con tres diferencias
+   * deliberadas respecto de `amarrarGastos`:
+   *
+   *  1. **El amarre es ADITIVO**: solo toca ESTE gasto. `amarrarGastos`
+   *     REEMPLAZA la lista completa — usarlo desde la fila de un gasto
+   *     desamarraría en silencio los demás gastos que ampara la misma
+   *     factura (el caso VIP SAESA: una factura, varios aterrizajes).
+   *  2. **El XML es OPCIONAL**: hay proveedores que solo mandan el PDF. Esa
+   *     factura entra con `uuid_fiscal` null (la columna es única pero
+   *     admite varios nulos) y sirve igual para marcar el gasto FACTURADA.
+   *  3. **Un UUID ya registrado NO es un error**: es la MISMA factura
+   *     amparando otro gasto. Se reutiliza la fila existente y se responde
+   *     `ya_existia: true` (antes: 409 y callejón sin salida).
+   *
+   * Quien marca el gasto como FACTURADA sigue siendo el trigger de la BD
+   * `gasto_sync_facturacion` al recibir el amarre; `estatus_comprobante` no
+   * se toca (es el registro de qué papel entregó quien capturó).
+   */
+  async crearRecibidaDeGasto(
+    dto: {
+      gasto_id: string;
+      xml_b64?: string;
+      pdf_b64?: string;
+      pdf_nombre?: string;
+    },
+    userId: string,
+  ) {
+    const xmlB64 = (dto.xml_b64 ?? '').trim();
+    const pdfB64 = (dto.pdf_b64 ?? '').trim();
+    if (!xmlB64 && !pdfB64) {
+      throw new BadRequestException(
+        'Sube al menos un archivo: el XML del CFDI o el PDF de la factura.',
+      );
+    }
+    const conPdf = await this.conPdfRecibida();
+    if (pdfB64 && !conPdf) {
+      throw new ConflictException({
+        message:
+          'Guardar el PDF de la factura todavía no está habilitado en la ' +
+          'base de datos (falta aplicar la migración). Sube el XML por ' +
+          'ahora, o vuelve a intentarlo en unos minutos.',
+        error: 'PDF_FACTURA_NO_DISPONIBLE',
+        details: { migracion: MIGRACION_PDF_RECIBIDA },
+      });
+    }
+
+    const { data: gasto, error: gErr } = await this.supabase.service
+      .from('gasto')
+      .select('id, factura_recibida_id')
+      .eq('id', dto.gasto_id)
+      .maybeSingle();
+    if (gErr) throw new Error(gErr.message);
+    if (!gasto) {
+      throw new NotFoundException(`Gasto ${dto.gasto_id} not found`);
+    }
+
+    // Con XML: se parsea ANTES de subir nada (si el CFDI no es legible, no
+    // queda basura en el bucket).
+    const p = xmlB64
+      ? await this.pyservices.parseFacturaRecibida(xmlB64)
+      : null;
+
+    // ¿Esa factura ya estaba en el buzón? Entonces solo se le suma el gasto.
+    if (p?.uuid_fiscal) {
+      const { data: previa, error: pErr } = await this.supabase.service
+        .from('factura_recibida')
+        .select('id')
+        .eq('uuid_fiscal', p.uuid_fiscal)
+        .maybeSingle();
+      if (pErr) throw new Error(pErr.message);
+      if (previa) {
+        const id = previa.id as string;
+        await this.amarrarGastoAdicional(id, dto.gasto_id, userId);
+        return {
+          ...(await this.recibidaPorId(id)),
+          ya_existia: true,
+        };
+      }
+    }
+
+    // Base del nombre en Storage: el UUID fiscal (identifica al CFDI) o uno
+    // propio para las facturas que llegan solo en PDF.
+    const base = (p?.uuid_fiscal ?? randomUUID()).replace(/[^a-zA-Z0-9-]/g, '');
+    const subidos: string[] = [];
+    let xmlPath: string | null = null;
+    let pdfPath: string | null = null;
+    // Una vez insertada la fila, los archivos son SUYOS: un fallo posterior
+    // (amarre, relectura) ya no puede borrarlos o la factura quedaría
+    // apuntando a papeles que no existen.
+    let filaCreada = false;
+    try {
+      if (xmlB64) {
+        xmlPath = `recibidas/${base}.xml`;
+        const { error } = await this.supabase.service.storage
+          .from('facturas')
+          .upload(xmlPath, Buffer.from(xmlB64, 'base64'), {
+            contentType: 'application/xml',
+            upsert: true,
+          });
+        if (error)
+          throw new Error(`No se pudo guardar el XML: ${error.message}`);
+        subidos.push(xmlPath);
+      }
+      if (pdfB64) {
+        pdfPath = `recibidas/${base}.pdf`;
+        const { error } = await this.supabase.service.storage
+          .from('facturas')
+          .upload(pdfPath, Buffer.from(pdfB64, 'base64'), {
+            contentType: 'application/pdf',
+            upsert: true,
+          });
+        if (error)
+          throw new Error(`No se pudo guardar el PDF: ${error.message}`);
+        subidos.push(pdfPath);
+      }
+
+      const notas = !p
+        ? `Factura en PDF (sin XML)${dto.pdf_nombre ? `: ${dto.pdf_nombre}` : ''}`
+        : null;
+      const { data, error } = await this.supabase.service
+        .from('factura_recibida')
+        .insert({
+          uuid_fiscal: p?.uuid_fiscal ?? null,
+          emisor_rfc: p?.emisor_rfc ?? null,
+          emisor_nombre: p?.emisor_nombre ?? null,
+          receptor_rfc: p?.receptor_rfc ?? null,
+          receptor_nombre: p?.receptor_nombre ?? null,
+          tipo_comprobante: p?.tipo_comprobante ?? null,
+          subtotal: p?.subtotal ?? null,
+          total: p?.total ?? null,
+          moneda: p?.moneda ?? null,
+          fecha_emision: p?.fecha_emision ?? null,
+          conceptos_resumen: p?.conceptos_resumen ?? null,
+          xml_url: xmlPath,
+          ...(conPdf ? { pdf_url: pdfPath } : {}),
+          // Nace amarrada: llegó desde la fila de un gasto concreto.
+          estado: 'CLASIFICADA',
+          gasto_id: dto.gasto_id,
+          notas,
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select('id')
+        .maybeSingle();
+      if (error) {
+        if (error.code === '23505') {
+          throw new ConflictException('Esa factura (UUID) ya está registrada.');
+        }
+        throw new Error(error.message);
+      }
+      const id = (data as { id: string }).id;
+      filaCreada = true;
+      await this.amarrarGastoAdicional(id, dto.gasto_id, userId);
+      return { ...(await this.recibidaPorId(id)), ya_existia: false };
+    } catch (e) {
+      // Nada a medias: si la fila NO entró, los archivos no se quedan. Si sí
+      // entró, se conservan (la factura ya vive en el buzón y el amarre se
+      // puede rehacer desde el panel).
+      if (!filaCreada && subidos.length > 0) {
+        const { error } = await this.supabase.service.storage
+          .from('facturas')
+          .remove(subidos);
+        if (error) {
+          this.logger.warn(
+            `Factura del gasto ${dto.gasto_id} falló y no se pudieron borrar ${subidos.join(', ')}: ${error.message}`,
+          );
+        }
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Amarra UN gasto a una factura recibida SIN tocar los demás gastos que ya
+   * ampara (a diferencia de `amarrarGastos`, que reemplaza la lista). El
+   * trigger `gasto_sync_facturacion` lo deja en FACTURADA.
+   */
+  private async amarrarGastoAdicional(
+    recibidaId: string,
+    gastoId: string,
+    userId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.service
+      .from('gasto')
+      .update({ factura_recibida_id: recibidaId, updated_by: userId })
+      .eq('id', gastoId);
+    if (error) throw new Error(error.message);
+    // `gasto_id` es el espejo legado 1:1: solo se llena si estaba vacío para
+    // no borrar a cuál se amarró primero.
+    const { data: fila, error: rErr } = await this.supabase.service
+      .from('factura_recibida')
+      .select('gasto_id, estado')
+      .eq('id', recibidaId)
+      .maybeSingle();
+    if (rErr) throw new Error(rErr.message);
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (!fila?.gasto_id) patch.gasto_id = gastoId;
+    if (fila?.estado !== 'CLASIFICADA') patch.estado = 'CLASIFICADA';
+    const { error: uErr } = await this.supabase.service
+      .from('factura_recibida')
+      .update(patch)
+      .eq('id', recibidaId);
+    if (uErr) throw new Error(uErr.message);
+  }
+
+  /** Una factura recibida con sus gastos amarrados (respuesta canónica). */
+  async recibidaPorId(id: string) {
+    // string plano: el parser TIPADO de supabase-js no digiere el template
+    // con columnas condicionales (truena en compilación, no en runtime) —
+    // mismo caso que el embed opcional de `flights.list`.
+    const cols: string = `${await this.colsRecibida()}, ${RECIBIDA_EMBED_GASTOS}`;
+    const { data, error } = await this.supabase.service
+      .from('factura_recibida')
+      .select(cols)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
+    return data as unknown as Record<string, unknown>;
   }
 
   async deleteRecibida(id: string) {
@@ -979,6 +1248,13 @@ export class InvoicesService {
       .select(FACTURA_COLS)
       .maybeSingle();
     if (fErr) throw new Error(fErr.message);
+
+    // El seguimiento administrativo sigue al CFDI (22-sep-2026): timbrado ⇒
+    // «Facturado». Best-effort: el timbre ya se consumió y `facturado = true`
+    // (que es lo que manda en la derivación) ya quedó escrito.
+    // Al CANCELAR el CFDI el estatus NO baja solo: la factura se elaboró y se
+    // envió — que la oficina decida a mano si vuelve a «sin factura».
+    await this.facturaCliente?.marcarFacturadoPorCfdi(vuelo.id, userId);
 
     return factura;
   }

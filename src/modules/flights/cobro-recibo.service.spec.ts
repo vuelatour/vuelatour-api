@@ -172,7 +172,9 @@ describe('CobroReciboService — método REAL del cobro', () => {
     });
     await service.pdf(COBRO_ID);
     const p = leerPayload();
-    expect(p.metodo).toBe('HSBC link');
+    // Etiqueta de la fuente única (22-sep-2026: «HSBC link» → «Link de pago
+    // (HSBC)», palabras del cliente).
+    expect(p.metodo).toBe('Link de pago (HSBC)');
     // El dinero sigue saliendo de la fuente única (cobrosEnUsd): 600 + 400.
     expect(p.cobrado_a_la_fecha_usd).toBe(1000);
     expect(p.saldo_pendiente_usd).toBe(0);

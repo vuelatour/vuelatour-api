@@ -10,6 +10,7 @@ import { PyservicesModule } from '../pyservices/pyservices.module';
 import { RealtimeModule } from '../realtime/realtime.module';
 import { VisionModule } from '../vision/vision.module';
 import { CobroReciboService } from './cobro-recibo.service';
+import { FacturaClienteService } from './factura-cliente.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
@@ -33,8 +34,15 @@ import { FlightsService } from './flights.service';
     VisionModule,
   ],
   controllers: [FlightsController],
-  providers: [FlightsService, FlightReportService, CobroReciboService],
+  providers: [
+    FlightsService,
+    FlightReportService,
+    CobroReciboService,
+    FacturaClienteService,
+  ],
   // CobroReciboService: GroupsModule lo usa para el recibo del SOBRE de grupo.
-  exports: [FlightsService, CobroReciboService],
+  // FacturaClienteService: FacturacionModule lo usa para marcar FACTURADO el
+  // vuelo al timbrar su CFDI (22-sep-2026).
+  exports: [FlightsService, CobroReciboService, FacturaClienteService],
 })
 export class FlightsModule {}

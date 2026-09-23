@@ -108,7 +108,7 @@ export class CreateEngineDto {
 
   @ApiPropertyOptional({
     description:
-      'TURM en marco del COMPONENTE (como la bitácora física): horas de vida del motor en su último overhaul. TSO = horas de vida − TURM. Viaja con el motor al trasladarlo.',
+      'T.U.R.M. de la bitácora: horas del componente DESDE su último overhaul (TSO) al día de la foto. Se guarda tal cual en tso_base y viaja con el motor al trasladarlo; el TSO vivo = tso_base + horas voladas desde el ancla. null/vacío = sin overhaul registrado. No puede superar las horas totales (400).',
   })
   @IsOptional()
   @Type(() => Number)

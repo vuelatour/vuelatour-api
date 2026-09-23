@@ -7,6 +7,9 @@ jest.mock('./flight-report.service', () => ({
   FlightReportService: class {},
 }));
 jest.mock('./cobro-recibo.service', () => ({ CobroReciboService: class {} }));
+jest.mock('./factura-cliente.service', () => ({
+  FacturaClienteService: class {},
+}));
 
 import {
   ConflictException,
@@ -20,6 +23,7 @@ import type { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { AllExceptionsFilter } from '../../common/filters/all-exceptions.filter';
 import { CobroReciboService } from './cobro-recibo.service';
+import { FacturaClienteService } from './factura-cliente.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
@@ -49,6 +53,7 @@ describe('FlightsController — DELETE :id y POST :id/cancel por HTTP', () => {
         { provide: FlightsService, useValue: { deleteFlight, cancel } },
         { provide: FlightReportService, useValue: {} },
         { provide: CobroReciboService, useValue: {} },
+        { provide: FacturaClienteService, useValue: {} },
       ],
     }).compile();
     app = moduleRef.createNestApplication();

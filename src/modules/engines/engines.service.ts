@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
+import { resolverTsoBase } from '../../common/turm-componente.util';
 import type {
   CreateEngineDto,
   ListEnginesQuery,
@@ -126,12 +127,19 @@ export class EnginesService {
     // del motor acumulan con lo que vuele el avión.
     const { turm_componente, ...rest } = dto;
     const ref = await this.aircraft.currentHobbs(dto.aeronave_id);
-    // TURM en marco del componente (como la bitácora AFAC: horas del MOTOR en
-    // su último overhaul) → tso_base = horas base − turm_componente.
-    const tsoBase =
-      turm_componente != null
-        ? Number((Number(dto.horas_totales ?? 0) - turm_componente).toFixed(1))
-        : null;
+    // T.U.R.M. = TIEMPO desde la Última Reparación Mayor = TSO (22-sep-2026,
+    // fuente única `turm-componente.util`). Antes se restaba —se leía como
+    // «horas del motor EN su último overhaul»— y la captura de la oficina
+    // entraba invertida (caso hélice XB-ANU: 2708 − 364 = 2344 > TBO).
+    // Delta 0: el alta ANCLA en el Hobbs de hoy (`ref`), así que el T.U.R.M.
+    // capturado ya está en el marco del ancla.
+    const resuelto = resolverTsoBase(
+      dto.horas_totales,
+      turm_componente ?? null,
+      0,
+    );
+    if (!resuelto.ok) throw new BadRequestException(resuelto.mensaje);
+    const tsoBase = resuelto.tso_base;
     const { data, error } = await this.supabase.service
       .from('motor')
       .insert({
@@ -181,6 +189,22 @@ export class EnginesService {
       dto.horas_totales !== undefined || turm_componente !== undefined;
     const motor = necesitaActual ? await this.findById(id) : null;
     let baseHoras = motor ? Number(motor.horas_totales) : null;
+    // Horas voladas desde el ancla vigente. Si esta misma escritura re-ancla
+    // (cambio real de horas_totales) vuelve a 0 más abajo: el T.U.R.M. que
+    // teclea la oficina es el de HOY y `tso_base` vive en el marco del ancla.
+    let deltaVivo = 0;
+    if (turm_componente !== undefined && motor) {
+      const refActual =
+        motor.aeronave_horas_ref != null
+          ? Number(motor.aeronave_horas_ref)
+          : null;
+      if (refActual != null && motor.aeronave_id) {
+        const hobbsActual = await this.aircraft.currentHobbs(
+          motor.aeronave_id as string,
+        );
+        deltaVivo = Math.max(0, hobbsActual - refActual);
+      }
+    }
     let ajuste: {
       hobbs: number;
       anterior: number;
@@ -196,6 +220,9 @@ export class EnginesService {
         const estadoPrevio = this.aircraft.componenteEstado(motor, hobbs, true);
         patch.aeronave_horas_ref = hobbs;
         baseHoras = Number(dto.horas_totales);
+        // Se re-ancla en el Hobbs de hoy: el marco del ancla pasa a ser el
+        // de la captura y el T.U.R.M. entra tal cual.
+        deltaVivo = 0;
         // La corrección de TSN no toca el TSO: se preserva el TSO vivo en el
         // nuevo ancla (salvo que también venga turm_componente, abajo).
         if (turm_componente === undefined) {
@@ -214,10 +241,16 @@ export class EnginesService {
       }
     }
     if (turm_componente !== undefined && baseHoras != null) {
-      // tso_base en el ancla = horas base − TURM del componente (puede ser
-      // negativo si el overhaul quedó "adelante" de la base; el cálculo vivo
-      // lo compensa con el delta del taco y el API recorta a 0 al mostrar).
-      patch.tso_base = Number((baseHoras - turm_componente).toFixed(1));
+      // tso_base en el ancla = el T.U.R.M. de la bitácora (horas voladas
+      // DESDE el overhaul, HOY) menos lo volado desde `aeronave_horas_ref`.
+      // El TSO vivo lo reconstruye `componenteEstado` sumando ese delta.
+      const resuelto = resolverTsoBase(
+        baseHoras,
+        turm_componente ?? null,
+        deltaVivo,
+      );
+      if (!resuelto.ok) throw new BadRequestException(resuelto.mensaje);
+      patch.tso_base = resuelto.tso_base;
     }
     const { data, error } = await this.supabase.service
       .from('motor')

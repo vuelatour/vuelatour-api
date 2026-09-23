@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -13,9 +14,17 @@ import {
   Query,
   Res,
   StreamableFile,
+  UploadedFile,
+  UseInterceptors,
   ForbiddenException,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
@@ -59,7 +68,18 @@ import {
   PurgeFlightDto,
   RevertirExternoDto,
 } from './dto/flights.dto';
+import {
+  SetFacturaClienteEstatusDto,
+  SubirFacturaClienteDto,
+} from './dto/factura-cliente.dto';
+import {
+  LIMITE_ARCHIVO_FACTURA_BYTES,
+  MENSAJE_SIN_ARCHIVO,
+  archivoDeLaPeticion,
+  type ArchivoMultipart,
+} from './factura-cliente.util';
 import { CobroReciboService } from './cobro-recibo.service';
+import { FacturaClienteService } from './factura-cliente.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
 
@@ -71,6 +91,7 @@ export class FlightsController {
     private readonly flights: FlightsService,
     private readonly report: FlightReportService,
     private readonly recibo: CobroReciboService,
+    private readonly facturaCliente: FacturaClienteService,
   ) {}
 
   // ============ Vuelos ============
@@ -713,6 +734,76 @@ export class FlightsController {
   @ApiOperation({ summary: 'Delete leg (only if no tacómetro captured)' })
   deleteLeg(@Param('legId', ParseUUIDPipe) legId: string) {
     return this.flights.deleteEscala(legId);
+  }
+
+  // ============ Factura del SERVICIO (por vuelo) ============
+  //
+  // 22-sep-2026, palabras del cliente: «quisiera agregar por cada vuelo las
+  // opciones para identificar vuelos facturado, sin factura, factura
+  // elaborada y enviada, y que pueda yo también subir la factura del
+  // servicio a un lado». Es SEGUIMIENTO ADMINISTRATIVO: `vuelo.facturado` y
+  // la tabla `factura` siguen siendo del CFDI del PAC y no se tocan aquí.
+
+  @Patch(':id/factura-cliente')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Estatus MANUAL de la factura del servicio: SIN_FACTURA | ELABORADA_ENVIADA | FACTURADO. Con CFDI timbrado no puede bajar de FACTURADO (409 VUELO_CON_CFDI). Devuelve el bloque factura_cliente.',
+  })
+  setFacturaClienteEstatus(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SetFacturaClienteEstatusDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.facturaCliente.setEstatus(id, dto.estatus, c.userId);
+  }
+
+  @Post(':id/factura-cliente/archivo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: LIMITE_ARCHIVO_FACTURA_BYTES },
+    }),
+  )
+  @ApiConsumes('multipart/form-data', 'application/json')
+  @ApiOperation({
+    summary:
+      'Sube (o reemplaza) el archivo de la factura del servicio: PDF o XML, ≤ 10 MB. multipart/form-data con el campo `file`, o JSON { file_base64, filename, content_type }. Devuelve el bloque factura_cliente.',
+  })
+  subirFacturaCliente(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFile() file: ArchivoMultipart | undefined,
+    @Body() dto: SubirFacturaClienteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    const archivo = archivoDeLaPeticion(file, dto);
+    if (!archivo) throw new BadRequestException(MENSAJE_SIN_ARCHIVO);
+    return this.facturaCliente.subirArchivo(id, archivo, c.userId);
+  }
+
+  @Delete(':id/factura-cliente/archivo')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Quita el archivo de la factura del servicio (borra el objeto del bucket privado). El estatus NO se toca. La confirmación la pide la UI.',
+  })
+  quitarFacturaCliente(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.facturaCliente.quitarArchivo(id, c.userId);
+  }
+
+  @Get(':id/factura-cliente/archivo-url')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'URL firmada (10 min) del archivo de la factura del servicio. 404 si el vuelo no tiene archivo.',
+  })
+  facturaClienteUrl(@Param('id', ParseUUIDPipe) id: string) {
+    return this.facturaCliente.archivoUrl(id);
   }
 
   // ============ Cobros ============

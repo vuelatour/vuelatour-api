@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import { AircraftService } from '../aircraft/aircraft.service';
+import { resolverTsoBase } from '../../common/turm-componente.util';
 import type {
   CreatePropellerDto,
   ListPropellersQuery,
@@ -115,12 +116,19 @@ export class PropellersService {
   async create(dto: CreatePropellerDto, createdBy: string) {
     const { turm_componente, ...rest } = dto;
     const ref = await this.aircraft.currentHobbs(dto.aeronave_id);
-    // TURM en marco del componente (horas de la HÉLICE en su último
-    // overhaul) → tso_base = horas base − turm_componente.
-    const tsoBase =
-      turm_componente != null
-        ? Number((Number(dto.horas_totales ?? 0) - turm_componente).toFixed(1))
-        : null;
+    // T.U.R.M. = TIEMPO desde la Última Reparación Mayor = TSO (22-sep-2026,
+    // fuente única `turm-componente.util`). El bug que reportó la oficina
+    // nació justo aquí: con la resta, la hélice del XB-ANU (T.T. 2708,
+    // T.U.R.M. 364, TBO 2000) quedó en tso_base 2344 y «restantes −344».
+    // Delta 0: el alta ANCLA en el Hobbs de hoy (`ref`), así que el T.U.R.M.
+    // capturado ya está en el marco del ancla.
+    const resuelto = resolverTsoBase(
+      dto.horas_totales,
+      turm_componente ?? null,
+      0,
+    );
+    if (!resuelto.ok) throw new BadRequestException(resuelto.mensaje);
+    const tsoBase = resuelto.tso_base;
     const { data, error } = await this.supabase.service
       .from('helice')
       .insert({
@@ -177,6 +185,22 @@ export class PropellersService {
       dto.horas_totales !== undefined || turm_componente !== undefined;
     const helice = necesitaActual ? await this.findById(id) : null;
     let baseHoras = helice ? Number(helice.horas_totales) : null;
+    // Horas voladas desde el ancla vigente. Si esta misma escritura re-ancla
+    // (cambio real de horas_totales) vuelve a 0 más abajo: el T.U.R.M. que
+    // teclea la oficina es el de HOY y `tso_base` vive en el marco del ancla.
+    let deltaVivo = 0;
+    if (turm_componente !== undefined && helice) {
+      const refActual =
+        helice.aeronave_horas_ref != null
+          ? Number(helice.aeronave_horas_ref)
+          : null;
+      if (refActual != null && helice.aeronave_id) {
+        const hobbsActual = await this.aircraft.currentHobbs(
+          helice.aeronave_id as string,
+        );
+        deltaVivo = Math.max(0, hobbsActual - refActual);
+      }
+    }
     let ajuste: {
       hobbs: number;
       anterior: number;
@@ -196,6 +220,9 @@ export class PropellersService {
         );
         patch.aeronave_horas_ref = hobbs;
         baseHoras = Number(dto.horas_totales);
+        // Se re-ancla en el Hobbs de hoy: el marco del ancla pasa a ser el
+        // de la captura y el T.U.R.M. entra tal cual.
+        deltaVivo = 0;
         if (turm_componente === undefined) {
           patch.tso_base =
             estadoPrevio.turm_componente != null
@@ -212,7 +239,15 @@ export class PropellersService {
       }
     }
     if (turm_componente !== undefined && baseHoras != null) {
-      patch.tso_base = Number((baseHoras - turm_componente).toFixed(1));
+      // tso_base = T.U.R.M. de la bitácora (horas DESDE el overhaul, HOY)
+      // llevado al marco del ancla: menos lo volado desde `aeronave_horas_ref`.
+      const resuelto = resolverTsoBase(
+        baseHoras,
+        turm_componente ?? null,
+        deltaVivo,
+      );
+      if (!resuelto.ok) throw new BadRequestException(resuelto.mensaje);
+      patch.tso_base = resuelto.tso_base;
     }
     const { data, error } = await this.supabase.service
       .from('helice')

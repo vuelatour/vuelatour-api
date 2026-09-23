@@ -88,7 +88,9 @@ export class EmitirFacturaDto {
 
   // Receptor alterno opcional (caso 9.7 "SE FACTURÓ A"). Si se envía facturado_a_rfc,
   // el CFDI se emite a este receptor en lugar del cliente del vuelo.
-  @ApiPropertyOptional({ description: 'RFC del receptor "SE FACTURÓ A" (12-13).' })
+  @ApiPropertyOptional({
+    description: 'RFC del receptor "SE FACTURÓ A" (12-13).',
+  })
   @IsOptional()
   // CFDI 4.0 exige el RFC en MAYÚSCULAS: normalizar aquí evita que un alterno
   // tecleado en minúsculas rebote en el PAC.
@@ -98,19 +100,25 @@ export class EmitirFacturaDto {
   @Matches(/^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/, { message: 'RFC inválido.' })
   facturado_a_rfc?: string;
 
-  @ApiPropertyOptional({ description: 'Razón social / nombre del receptor "SE FACTURÓ A".' })
+  @ApiPropertyOptional({
+    description: 'Razón social / nombre del receptor "SE FACTURÓ A".',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(200)
   facturado_a_nombre?: string;
 
-  @ApiPropertyOptional({ description: 'Régimen fiscal SAT del receptor "SE FACTURÓ A".' })
+  @ApiPropertyOptional({
+    description: 'Régimen fiscal SAT del receptor "SE FACTURÓ A".',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(5)
   facturado_a_regimen?: string;
 
-  @ApiPropertyOptional({ description: 'CP (DomicilioFiscalReceptor) del receptor "SE FACTURÓ A".' })
+  @ApiPropertyOptional({
+    description: 'CP (DomicilioFiscalReceptor) del receptor "SE FACTURÓ A".',
+  })
   @IsOptional()
   @Matches(/^\d{5}$/, { message: 'CP de 5 dígitos.' })
   facturado_a_cp?: string;
@@ -130,7 +138,8 @@ export class EmitirFacturaDto {
   publico_en_general?: boolean;
 
   @ApiPropertyOptional({
-    description: 'c_Periodicidad para público en general: 01 diario, 02 semanal, 03 quincenal, 04 mensual (default).',
+    description:
+      'c_Periodicidad para público en general: 01 diario, 02 semanal, 03 quincenal, 04 mensual (default).',
     enum: ['01', '02', '03', '04'],
   })
   @IsOptional()
@@ -160,7 +169,8 @@ export class CancelarFacturaDto {
   motivo!: string;
 
   @ApiPropertyOptional({
-    description: 'UUID de la factura que sustituye (obligatorio cuando motivo=01).',
+    description:
+      'UUID de la factura que sustituye (obligatorio cuando motivo=01).',
   })
   @IsOptional()
   @IsString()
@@ -169,24 +179,33 @@ export class CancelarFacturaDto {
 }
 
 export class NotaCreditoDto {
-  @ApiProperty({ description: 'Factura original (TIMBRADA) a la que se relaciona la nota.' })
+  @ApiProperty({
+    description: 'Factura original (TIMBRADA) a la que se relaciona la nota.',
+  })
   @IsUUID()
   factura_id!: string;
 
-  @ApiPropertyOptional({ description: 'Tipo de relación SAT (default 01).', default: '01' })
+  @ApiPropertyOptional({
+    description: 'Tipo de relación SAT (default 01).',
+    default: '01',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(2)
   tipo_relacion?: string;
 
-  @ApiPropertyOptional({ description: 'Monto a acreditar (default: total de la factura original).' })
+  @ApiPropertyOptional({
+    description: 'Monto a acreditar (default: total de la factura original).',
+  })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @IsPositive()
   monto?: number;
 
-  @ApiPropertyOptional({ description: 'Descripción del concepto de la nota de crédito.' })
+  @ApiPropertyOptional({
+    description: 'Descripción del concepto de la nota de crédito.',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(1000)
@@ -206,6 +225,42 @@ export class CrearRecibidaDto {
   @ApiProperty({ description: 'XML del CFDI recibido en base64' })
   @IsString()
   xml_b64!: string;
+}
+
+/**
+ * «Subir la factura de ESTE gasto» desde la fila de Gastos (22-sep-2026,
+ * palabras del cliente). Crea la factura recibida Y la amarra al gasto en
+ * UNA llamada: antes eran dos (`POST recibidas` + `amarrar-gastos`) y no
+ * había dónde guardar el PDF.
+ */
+export class CrearRecibidaDeGastoDto {
+  @ApiProperty({ description: 'Gasto al que pertenece la factura.' })
+  @IsUUID()
+  gasto_id!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'XML del CFDI en base64. Recomendado (trae UUID, emisor y total). Puede omitirse si solo hay PDF.',
+  })
+  @IsOptional()
+  @IsString()
+  xml_b64?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'PDF de la factura en base64 (opcional si viene el XML; obligatorio si no).',
+  })
+  @IsOptional()
+  @IsString()
+  pdf_b64?: string;
+
+  @ApiPropertyOptional({
+    description: 'Nombre original del PDF (solo para la bitácora/notas).',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  pdf_nombre?: string;
 }
 
 export class ListRecibidasQuery {

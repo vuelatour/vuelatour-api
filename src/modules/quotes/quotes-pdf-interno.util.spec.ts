@@ -1235,7 +1235,9 @@ describe('armarCotizacionInternaPayload — cobros', () => {
     expect(c).toMatchObject({
       fecha: '2026-09-03T18:30:00.000Z',
       metodo: 'PAYWISE',
-      metodo_label: 'Paywise',
+      // Etiqueta de la fuente única (22-sep-2026: «Paywise» → «Link de pago
+      // (Paywise)», palabras del cliente).
+      metodo_label: 'Link de pago (Paywise)',
       monto: 36540,
       moneda: 'MXN',
       tc: 14.79,
