@@ -30,6 +30,7 @@ import {
   colorMantenimientoSistema,
   colorVueloSistema,
   esEstadoTentativo,
+  vueloPagado,
   vueloSinAsignar,
 } from './colores-calendario.util';
 import {
@@ -140,7 +141,9 @@ export class CalendarService {
         // pasajeros_nombres/notas/notas_internas/motivo_cancelacion, razón social
         // y modelo (5-sep-2026, aditivo): buscador del calendario de la app.
         // updated_at del vuelo y de cada tramo (10-sep-2026): filtro de deltas.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, updated_at, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, updated_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        // cobrado (24-sep-2026, semáforo de 6): el AZUL «Pagado» sale de la
+        // bandera del vuelo — misma consulta, sin N+1.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, cobrado, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, updated_at, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, updated_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -275,6 +278,8 @@ export class CalendarService {
         notas_internas: string | null;
         motivo_cancelacion: string | null;
         monto_total_usd: string;
+        /** Cobrado completo (`refreshCobradoFlag`): pinta el AZUL «Pagado». */
+        cobrado?: boolean | null;
         aeronave_id: string | null;
         piloto_id: string | null;
         copiloto_id: string | null;
@@ -436,18 +441,26 @@ export class CalendarService {
         // (RESERVA, SOLICITUD, COTIZADO), no solo la RESERVA: el gris del
         // semáforo y la etiqueta tienen que decir lo mismo.
         const esTentativo = esEstadoTentativo(v.estado);
-        // Precedencia ÚNICA del semáforo (colores-calendario.util):
-        // cancelado > tentativo > pendiente > confirmado. La misma que
-        // traduce el espejo a Google. El color del AVIÓN ya no entra al
-        // calendario (quedó solo para los Excel del balance).
-        const color = colorVueloSistema({
+        // Precedencia ÚNICA del semáforo (colores-calendario.util, 24-sep-2026):
+        // cancelado > tentativo > pendiente > PAGADO > confirmado. La misma
+        // que traduce el espejo a Google. El color del AVIÓN ya no entra al
+        // calendario (quedó solo para los Excel del balance). `cobrado` es
+        // del VUELO: todos sus tramos lo comparten.
+        const paramsColor = {
           estado: v.estado,
           cancelado: esCancelado,
           esExterno: v.es_externo,
           aeronaveId,
           pilotoId,
           permisoPendiente,
-        });
+          cobrado: v.cobrado === true,
+          montoTotalUsd: v.monto_total_usd,
+        };
+        const color = colorVueloSistema(paramsColor);
+        // «Cobrado completo» como DATO (igual que `sin_asignar`): puede ser
+        // true aunque el color que gane sea otro (pagado con permiso
+        // pendiente ⇒ amarillo; RESERVA pagada ⇒ gris; cancelado ⇒ rojo).
+        const pagado = vueloPagado(paramsColor);
         const hora = horaOf(params.fecha);
         return {
           id: `${v.id}${params.idSuffix}`,
@@ -467,6 +480,12 @@ export class CalendarService {
           // SOLICITUD y COTIZADO) y derivarla de `estado` en cada cliente
           // sería un cuarto lugar donde vive la misma lista.
           tentativo: esTentativo,
+          // ADITIVO (24-sep-2026): el vuelo está COBRADO COMPLETO
+          // (`vuelo.cobrado`, con total > 0). Es la bandera del AZUL
+          // «Pagado»; el `color` de abajo ya trae resuelta la precedencia, así
+          // que el panel y la app NO recalculan nada con ella (sirve para la
+          // etiqueta o el buscador).
+          pagado,
           color,
           cliente_id: v.cliente_id,
           cliente_nombre: cliente?.nombre ?? null,

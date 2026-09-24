@@ -88,8 +88,9 @@ function distancia(
  * Devuelve `null` cuando no hay color o no es un hex válido: el llamador cae
  * al gris del tentativo — nunca se inventa un color.
  *
- * Desde el 22-sep-2026 los únicos hex que llegan aquí son los CINCO del
- * semáforo (`SEMAFORO`) y caen en cinco colorId DISTINTOS, así que ya NO hay
+ * Desde el 22-sep-2026 los únicos hex que llegan aquí son los del semáforo
+ * (`SEMAFORO`: SEIS desde el 24-sep-2026) y, con las excepciones fijas de
+ * `colorIdGoogleSemaforo`, caen en colorId DISTINTOS, así que ya NO hay
  * colisiones: antes 18 cosas (6 significados + 8 colores de avión + 4 tipos)
  * se repartían los 11 colores de Google y el color no era un dato confiable.
  */
@@ -118,15 +119,20 @@ export function colorIdGoogleDe(
 /**
  * ESPEJO DEL SEMÁFORO (pedido del cliente, 12-sep-2026 «los mismos colores»,
  * reducido a 5 el 22-sep-2026 «que en los calendarios no se vean tantos
- * colores»). Cada uno de los CINCO hex del semáforo se traduce a un colorId
- * DISTINTO de Google. Ninguna de estas funciones inventa un color propio:
- * todas salen de un hex de `colores-calendario.util`.
+ * colores», 6 desde el 24-sep-2026 con el PAGADO y el descanso MORADO). Cada
+ * uno de los SEIS hex del semáforo se traduce a un colorId DISTINTO de
+ * Google. Ninguna de estas funciones inventa un color propio: todas salen de
+ * un hex de `colores-calendario.util`.
  *
  *   gris #64748B     → 8  Grafito     (tentativo)
- *   verde #22C55E    → 2  Salvia      (confirmado)
- *   amarillo #F59E0B → 5  Banana      (permiso o asunto pendiente · mantenimiento)
- *   rojo #EF4444     → 11 Tomate      (cancelado — hoy NO viaja: se BORRA)
- *   azul #3B82F6     → 7  Pavo real   (descanso)
+ *   amarillo #F59E0B → 5  Banana      (pendiente · permiso, sin asignar, mantenimiento)
+ *   verde #22C55E    → 2  Salvia      (confirmado · evento de flota)
+ *   azul #3B82F6     → 7  Pavo real   (PAGADO: cobrado completo)
+ *   rojo #EF4444     → 11 Tomate      (cancelado — hoy NO viaja: se BORRA) · FIJO
+ *   morado #8B5CF6   → 3  Uva         (descanso 💤) · FIJO
+ *
+ * Libres para significados futuros: 1 Lavanda, 4 Flamenco, 6 Mandarina,
+ * 9 Arándano y 10 Albahaca.
  *
  * Fallback cuando el hex no se puede leer: el gris del tentativo, nunca un
  * color con significado fuerte.
@@ -134,20 +140,29 @@ export function colorIdGoogleDe(
 const COLOR_ID_RESPALDO: string = colorIdGoogleDe(SEMAFORO.TENTATIVO) ?? '8';
 
 /**
- * EXCEPCIONES al "más cercano". Hoy solo una: el ROJO.
+ * EXCEPCIONES al "más cercano". Son DOS, y las dos por la MISMA razón: el
+ * color de Google más cercano por redmean se LEE como otro significado.
  *
- * El rojo del sistema (#EF4444) por distancia redmean cae en 6 Mandarina
- * (d≈3 714) antes que en 4 Flamenco (≈17 375) y que en 11 Tomate (≈30 217),
- * y Mandarina es un NARANJA: «cancelado» tiene que leerse ROJO. Google llama
- * Tomate (11) a su rojo de verdad.
+ * 1) ROJO (cancelado). El rojo del sistema (#EF4444) por distancia redmean cae
+ *    en 6 Mandarina (d≈3 714) antes que en 4 Flamenco (≈17 375) y que en 11
+ *    Tomate (≈30 217), y Mandarina es un NARANJA: «cancelado» tiene que leerse
+ *    ROJO. Google llama Tomate (11) a su rojo de verdad. En la práctica este
+ *    mapeo no viaja: el único rojo del semáforo es el CANCELADO y su evento se
+ *    BORRA de Google. Se deja fijo para que la tabla sea completa y para que
+ *    cualquier rojo futuro (p. ej. un evento de flota cancelado) salga rojo sin
+ *    que nadie tenga que acordarse.
  *
- * En la práctica este mapeo no viaja: el único rojo del semáforo es el
- * CANCELADO y su evento se BORRA de Google. Se deja fijo para que la tabla de
- * los 5 sea completa y para que cualquier rojo futuro (p. ej. un evento de
- * flota cancelado) salga rojo sin que nadie tenga que acordarse.
+ * 2) MORADO (descanso, 24-sep-2026). El morado del sistema (#8B5CF6) por
+ *    redmean cae en 1 Lavanda (d≈12 469) antes que en 9 Arándano (≈25 306) y
+ *    que en 3 Uva (≈26 702). Lavanda es un azul-lila pálido que, en el
+ *    calendario del mecánico, junto al 7 Pavo real del PAGADO se lee «otro
+ *    azul»; y Arándano es un índigo, tampoco morado. «Descanso» tiene que
+ *    leerse MORADO: Uva (3) es el único morado de verdad de Google. Este SÍ
+ *    viaja: cada descanso de piloto es un evento.
  */
 const COLOR_ID_FIJO: Readonly<Record<string, string>> = {
   [SEMAFORO.CANCELADO]: '11',
+  [SEMAFORO.DESCANSO]: '3',
 };
 
 /**
@@ -166,13 +181,18 @@ export function colorIdGoogleSemaforo(hex: string | null | undefined): string {
  * — el cancelado no llega aquí (en Google su evento se BORRA).
  *
  * Con el semáforo de hoy: tentativo → 8 Grafito, pendiente → 5 Banana,
- * confirmado → 2 Salvia. El avión ya no interviene (`colorAvion` se ignora).
+ * PAGADO → 7 Pavo real (24-sep-2026: `cobrado` del vuelo) y confirmado → 2
+ * Salvia. El avión ya no interviene (`colorAvion` se ignora).
  */
 export function colorIdGoogleDeVuelo(p: ParamsColorVuelo): string {
   return colorIdGoogleSemaforo(colorVueloSistema(p));
 }
 
-/** colorId del DESCANSO de piloto: azul #3B82F6 → 7 Pavo real. */
+/**
+ * colorId del DESCANSO de piloto: MORADO #8B5CF6 → 3 Uva (fijo, ver
+ * `COLOR_ID_FIJO`). Hasta el 24-sep-2026 era el azul #3B82F6 → 7 Pavo real,
+ * que hoy es del PAGADO.
+ */
 export function colorIdGoogleDescanso(): string {
   return colorIdGoogleSemaforo(SEMAFORO.DESCANSO);
 }

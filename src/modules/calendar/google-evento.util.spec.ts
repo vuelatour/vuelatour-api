@@ -20,7 +20,8 @@ import { SEMAFORO } from './colores-calendario.util';
 
 /**
  * C4/C3 del pedido del 12-sep-2026 (sync sistema → Google Calendar),
- * ACTUALIZADO el 22-sep-2026 al SEMÁFORO DE 5 COLORES:
+ * ACTUALIZADO el 22-sep-2026 al SEMÁFORO DE 5 COLORES y el 24-sep-2026 al de
+ * 6 (PAGADO azul, descanso MORADO):
  *  - `colorIdGoogleDe` traduce un hex del sistema al colorId de Google más
  *    cercano (redmean) y `colorIdGoogleSemaforo` le antepone las excepciones
  *    fijas, para que el calendario de la oficina espeje el mismo semáforo;
@@ -88,11 +89,12 @@ describe('colorIdGoogleDe', () => {
 
 /**
  * TABLA CONGELADA «color del semáforo → hex → colorId de Google»
- * (22-sep-2026). Reemplaza a la tabla de 18 filas del 12-sep-2026, donde 6
- * significados y 8 colores de avión se repartían los 11 colores de Google con
- * SEIS colisiones y el color no era un dato confiable.
+ * (22-sep-2026, 6 colores desde el 24-sep-2026). Reemplaza a la tabla de 18
+ * filas del 12-sep-2026, donde 6 significados y 8 colores de avión se
+ * repartían los 11 colores de Google con SEIS colisiones y el color no era un
+ * dato confiable.
  *
- * Ahora son CINCO hex → CINCO colorId DISTINTOS. Los hex salen de
+ * Ahora son SEIS hex → SEIS colorId DISTINTOS. Los hex salen de
  * `colores-calendario.util` (fuente única), así que si alguien cambia un color
  * allá, ESTA tabla se rompe y hay que decidir a conciencia qué ve la oficina.
  */
@@ -101,21 +103,22 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
   const TABLA: ReadonlyArray<readonly [string, string, string, string]> = [
     ['tentativo (antes de CONFIRMADO)', SEMAFORO.TENTATIVO, '8', 'Grafito'],
     [
+      'pendiente: permiso, sin asignar y mantenimiento',
+      SEMAFORO.PENDIENTE,
+      '5',
+      'Banana',
+    ],
+    [
       'confirmado (vuelo y evento de flota)',
       SEMAFORO.CONFIRMADO,
       '2',
       'Salvia',
     ],
-    [
-      'permiso o asunto pendiente (y mantenimiento)',
-      SEMAFORO.PENDIENTE,
-      '5',
-      'Banana',
-    ],
+    ['PAGADO: vuelo cobrado completo', SEMAFORO.PAGADO, '7', 'Pavo real'],
     // El cancelado NO viaja a Google (su evento se BORRA); se congela igual
     // para que la tabla cubra el semáforo completo.
     ['cancelado (no viaja a Google)', SEMAFORO.CANCELADO, '11', 'Tomate'],
-    ['descanso de piloto', SEMAFORO.DESCANSO, '7', 'Pavo real'],
+    ['descanso de piloto (MORADO)', SEMAFORO.DESCANSO, '3', 'Uva'],
   ];
 
   it.each(TABLA)('%s (%s) → colorId %s (%s)', (_cosa, hex, id, nombre) => {
@@ -123,15 +126,44 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
     expect(COLORES_EVENTO_GOOGLE.find((c) => c.id === id)?.nombre).toBe(nombre);
   });
 
-  it('los cinco colorId son DISTINTOS: ya no hay colisiones', () => {
+  it('la tabla cubre el semáforo COMPLETO (ningún color queda sin colorId)', () => {
+    expect(new Set(TABLA.map(([, hex]) => hex))).toEqual(
+      new Set(Object.values(SEMAFORO)),
+    );
+  });
+
+  it('los seis colorId son DISTINTOS: ya no hay colisiones', () => {
     const ids = TABLA.map(([, , id]) => id);
-    expect(new Set(ids).size).toBe(5);
-    // Libres para significados futuros: Lavanda (1), Uva (3), Flamenco (4),
+    expect(new Set(ids).size).toBe(6);
+    // Libres para significados futuros: Lavanda (1), Flamenco (4),
     // Mandarina (6), Arándano (9) y Albahaca (10).
     const usados = new Set(ids);
     expect(
       COLORES_EVENTO_GOOGLE.filter((c) => !usados.has(c.id)).map((c) => c.id),
-    ).toEqual(['1', '3', '4', '6', '9', '10']);
+    ).toEqual(['1', '4', '6', '9', '10']);
+  });
+
+  /**
+   * El azul del PAGADO (#3B82F6) cae en Pavo real por REDMEAN (d≈9 983),
+   * antes que Lavanda (≈13 993) y Arándano (≈21 292): sin excepción. Es el
+   * MISMO colorId que el descanso tuvo del 22 al 24-sep: un evento de
+   * descanso publicado antes del resync todavía puede verse azul.
+   */
+  it('el AZUL del pagado sale del "más cercano": Pavo real (7)', () => {
+    expect(colorIdGoogleDe(SEMAFORO.PAGADO)).toBe('7');
+    expect(colorIdGoogleSemaforo(SEMAFORO.PAGADO)).toBe('7');
+  });
+
+  /**
+   * El MORADO del descanso es la SEGUNDA excepción fija. Por redmean #8B5CF6
+   * cae en Lavanda (1, d≈12 469) antes que en Arándano (9, ≈25 306) y en Uva
+   * (3, ≈26 702); Lavanda es un azul-lila pálido que junto al Pavo real del
+   * PAGADO se lee «otro azul» en el calendario del mecánico.
+   */
+  it('el MORADO del descanso es fijo: Uva (3), no Lavanda', () => {
+    expect(colorIdGoogleDe(SEMAFORO.DESCANSO)).toBe('1');
+    expect(colorIdGoogleSemaforo(SEMAFORO.DESCANSO)).toBe('3');
+    expect(colorIdGoogleDescanso()).toBe('3');
   });
 
   /**
@@ -145,11 +177,12 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
   });
 
   /**
-   * El ROJO es la ÚNICA excepción al "más cercano" que queda. La del taller
-   * (EN_TALLER → 11 Tomate) se RETIRÓ el 22-sep-2026: el mantenimiento pasó a
-   * amarillo porque el rojo significa CANCELADO.
+   * El ROJO es una de las DOS excepciones al "más cercano" (la otra es el
+   * morado del descanso). La del taller (EN_TALLER → 11 Tomate) se RETIRÓ el
+   * 22-sep-2026: el mantenimiento pasó a amarillo porque el rojo significa
+   * CANCELADO.
    */
-  it('el ROJO es la única excepción fija: Tomate (11), no Mandarina', () => {
+  it('el ROJO es excepción fija: Tomate (11), no Mandarina', () => {
     // Por redmean, #EF4444 cae en Mandarina (6, d≈3 714) antes que en
     // Flamenco (4, ≈17 375) y que en Tomate (11, ≈30 217) — y Mandarina es un
     // NARANJA: «cancelado» tiene que leerse rojo.
@@ -198,6 +231,41 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
         pilotoId: 'p',
       }),
     ).toBe('2'); // en firme
+    // PAGADO (24-sep-2026): cobrado completo ⇒ azul → Pavo real (7)…
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'COMPLETADO',
+        aeronaveId: 'a',
+        pilotoId: 'p',
+        cobrado: true,
+        montoTotalUsd: '4200.00',
+      }),
+    ).toBe('7');
+    // …pero el pendiente operativo NO se esconde detrás del dinero…
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'CONFIRMADO',
+        aeronaveId: 'a',
+        pilotoId: 'p',
+        permisoPendiente: true,
+        cobrado: true,
+        montoTotalUsd: 4200,
+      }),
+    ).toBe('5');
+    // …una RESERVA pagada sigue gris…
+    expect(colorIdGoogleDeVuelo({ estado: 'RESERVA', cobrado: true })).toBe(
+      '8',
+    );
+    // …y un vuelo en $0 nunca es azul.
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'CONFIRMADO',
+        aeronaveId: 'a',
+        pilotoId: 'p',
+        cobrado: true,
+        montoTotalUsd: 0,
+      }),
+    ).toBe('2');
     expect(
       colorIdGoogleDeVuelo({ estado: 'CONFIRMADO', esExterno: true }),
     ).toBe('2'); // el externo ya no tiene color propio
@@ -212,8 +280,8 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
         }),
       ).toBe('2');
     }
-    // Descanso, eventos de flota y mantenimientos.
-    expect(colorIdGoogleDescanso()).toBe('7');
+    // Descanso (MORADO → Uva), eventos de flota y mantenimientos.
+    expect(colorIdGoogleDescanso()).toBe('3');
     expect(colorIdGoogleEvento()).toBe('2');
     expect(colorIdGoogleEvento('#F97316')).toBe('2');
     expect(colorIdGoogleEvento('no es un hex')).toBe('2');

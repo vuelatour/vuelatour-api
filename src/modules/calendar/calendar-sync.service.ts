@@ -90,12 +90,19 @@ export interface OpcionesEspejo {
 // NINGÚN colorId suelto vive acá (12-sep-2026): todo color sale del SEMÁFORO
 // del sistema (`colores-calendario.util`) traducido al colorId de Google por
 // `google-evento.util`. Si el cliente cambia un color, se cambia allá y el
-// panel, la app y Google se mueven JUNTOS. Desde el 22-sep-2026 son 5 colores
-// (tentativo/confirmado/pendiente/cancelado/descanso) y el color del AVIÓN ya
-// no entra a ningún calendario: quedó solo para los Excel del balance.
+// panel, la app y Google se mueven JUNTOS. Desde el 22-sep-2026 el color del
+// AVIÓN ya no entra a ningún calendario (quedó solo para los Excel del
+// balance) y desde el 24-sep-2026 son 6 colores: tentativo, pendiente,
+// confirmado, PAGADO (azul, `vuelo.cobrado`), cancelado y descanso (morado).
+//
+// `cobrado` viaja en el select del espejo porque decide el AZUL «Pagado».
+// La migración `20260924000002_calendar_sync_cobrado.sql` lo suma a la lista
+// `after update of …` de `trg_vuelo_calendar_sync`: sin ella, registrar el
+// cobro que liquida el vuelo NO re-encolaba el evento y Google se quedaba en
+// verde hasta el reconcile nocturno.
 
 const VUELO_SELECT_BASE =
-  'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
+  'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, cobrado, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@), cliente:cliente_id(nombre), ' +
   'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
 
@@ -154,6 +161,11 @@ interface VueloRow {
   destino_iata: string;
   pasajeros: number;
   monto_total_usd: string | number;
+  /**
+   * Cobrado COMPLETO (`refreshCobradoFlag`, 24-sep-2026): decide el AZUL
+   * «Pagado» (7 Pavo real). Opcional en el tipo por robustez: ausente = no.
+   */
+  cobrado?: boolean | null;
   fecha_vuelo: string | null;
   fecha_traslado_final: string | null;
   tipo: string | null;
@@ -2013,8 +2025,8 @@ export class CalendarSyncService implements OnModuleInit {
     const event = {
       summary: `😴 Descansa · ${d.piloto_nombre}`,
       description: d.motivo ?? undefined,
-      // AZUL del semáforo (22-sep-2026; antes turquesa). El descanso es el
-      // único azul del calendario.
+      // MORADO del semáforo (24-sep-2026 → 3 Uva; del 22 al 24-sep fue azul y
+      // antes turquesa). El azul ahora es del PAGADO.
       colorId: colorIdGoogleDescanso(),
       start: { date: d.fecha_inicio },
       end: { date: fin.toISOString().slice(0, 10) },
@@ -2718,15 +2730,18 @@ export class CalendarSyncService implements OnModuleInit {
     });
 
     // MISMO color que el calendario del sistema, traducido al colorId de
-    // Google (12-sep-2026, semáforo de 5 desde el 22-sep-2026): cancelado >
-    // tentativo > pendiente > confirmado. La precedencia no se repite aquí y
-    // el color del AVIÓN ya no interviene.
+    // Google (12-sep-2026; semáforo de 6 desde el 24-sep-2026): cancelado >
+    // tentativo > pendiente > PAGADO > confirmado. La precedencia no se
+    // repite aquí y el color del AVIÓN ya no interviene. `cobrado` +
+    // `montoTotalUsd` son los MISMOS que lee `GET /v1/calendar`.
     const colorId = colorIdGoogleDeVuelo({
       estado: v.estado,
       esExterno: v.es_externo,
       aeronaveId: primero?.aeronave_id ?? v.aeronave_id,
       pilotoId: primero?.piloto_id ?? v.piloto_id,
       permisoPendiente: permisoPendientePrimero,
+      cobrado: v.cobrado === true,
+      montoTotalUsd: v.monto_total_usd,
     });
 
     return {

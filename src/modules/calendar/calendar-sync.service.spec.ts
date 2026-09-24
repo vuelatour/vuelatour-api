@@ -538,6 +538,59 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     expect(requestBody.colorId).toBe('2'); // verde: está en firme y asignado
   });
 
+  /**
+   * PAGADO (24-sep-2026): el vuelo COBRADO COMPLETO (`vuelo.cobrado`) se
+   * publica AZUL → Pavo real (7), sin que nadie haga nada. `cobrado` viaja en
+   * el MISMO select del espejo (`loadVuelo`), así que el worker, el hook y el
+   * barrido lo pintan igual.
+   */
+  it('cobrado completo y en firme: AZUL del pagado (#3B82F6) → Pavo real (7)', async () => {
+    const vuelo = { ...VUELO_MULTIESCALA, estado: 'COMPLETADO', cobrado: true };
+    const { service, llamadas } = armar({
+      vuelo: [{ data: vuelo, error: null }],
+    });
+
+    await service.syncFlight('v-1');
+
+    expect(insertado().requestBody.colorId).toBe('7');
+    // El select del espejo pide `cobrado` (sin él, Google nunca sería azul).
+    const select = String(de(llamadas, 'vuelo', 'select')[0].args[0]);
+    expect(select).toMatch(/monto_total_usd, cobrado,/);
+  });
+
+  it('pagado con el permiso del PRIMER tramo pendiente: AMARILLO (el pendiente no se esconde)', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      cobrado: true,
+      escalas: [
+        { ...VUELO_MULTIESCALA.escalas[0], estado_permiso: 'pendiente' },
+        VUELO_MULTIESCALA.escalas[1],
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(insertado().requestBody.colorId).toBe('5');
+  });
+
+  it.each([
+    ['RESERVA pagada ⇒ gris (8)', { estado: 'RESERVA', cobrado: true }, '8'],
+    [
+      '$0 con cobrado=true ⇒ verde (2), nunca azul',
+      { cobrado: true, monto_total_usd: '0' },
+      '2',
+    ],
+    ['sin cobrar ⇒ verde (2)', { cobrado: false }, '2'],
+  ])('%s', async (_nombre, cambios, colorId) => {
+    const vuelo = { ...VUELO_MULTIESCALA, ...cambios };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    expect(insertado().requestBody.colorId).toBe(colorId);
+  });
+
   it.each(['RESERVA', 'SOLICITUD', 'COTIZADO'])(
     '%s (tentativo): el gris del semáforo (#64748B) → Grafito (8)',
     async (estado) => {
@@ -935,7 +988,7 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
 // ===== COLORES DEL SISTEMA EN DESCANSOS Y EVENTOS DE FLOTA (12-sep-2026) =====
 
 describe('CalendarSyncService — descansos y eventos de flota con el color del sistema', () => {
-  it('el descanso lleva colorId: AZUL del semáforo (#3B82F6) → Pavo real (7)', async () => {
+  it('el descanso lleva colorId: MORADO del semáforo (#8B5CF6) → Uva (3)', async () => {
     const { service } = armar({});
 
     await service.upsertDescansoEvent({
@@ -946,9 +999,10 @@ describe('CalendarSyncService — descansos y eventos de flota con el color del 
 
     const { requestBody } = insertado();
     expect(requestBody.summary).toBe('😴 Descansa · Luis');
-    // Antes iba SIN color (Google lo pintaba del default) y del 12 al 22-sep
-    // fue turquesa; hoy es el AZUL del semáforo, su único azul.
-    expect(requestBody.colorId).toBe('7');
+    // Antes iba SIN color (Google lo pintaba del default), del 12 al 22-sep
+    // fue turquesa y del 22 al 24-sep azul (7). Hoy es MORADO → Uva (3): el
+    // azul es del PAGADO y Lavanda (el más cercano) se leería azul.
+    expect(requestBody.colorId).toBe('3');
   });
 
   it('evento de flota CON avión: VERDE igual (el color del avión ya no manda)', async () => {
