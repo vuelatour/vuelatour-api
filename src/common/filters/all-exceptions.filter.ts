@@ -44,20 +44,45 @@ export class AllExceptionsFilter implements ExceptionFilter {
         details = r.details;
       }
       code = code.toUpperCase().replace(/\s+/g, '_');
+      // Subida multipart (24-sep-2026): `FileInterceptor` de Nest CONVIERTE
+      // el MulterError en HttpException ANTES de llegar aquí (el caso de
+      // abajo nunca lo veía) y el operador recibía «File too large» en
+      // inglés. Se traduce con el peso aproximado del Content-Length.
+      const subida = traducirErrorDeSubidaNest(
+        status,
+        message,
+        req.headers?.['content-length'],
+      );
+      if (subida) {
+        code = subida.code;
+        message = subida.message;
+        details = { tecnico: subida.tecnico };
+      }
     } else if (exception instanceof Error && esErrorDeSubida(exception)) {
-      // Subida de archivos (multer): el archivo que se pasa del tope o que
-      // viene en otro campo NO es un error del servidor — es algo que quien
-      // sube puede corregir. Sin este caso, subir una factura de 12 MB
-      // respondía un 500 con «Ocurrió un error inesperado».
+      // Subida de archivos (multer CRUDO — p. ej. un multer montado a mano;
+      // el de `FileInterceptor` llega ya como HttpException, ver arriba): el
+      // archivo que se pasa del tope o que viene en otro campo NO es un
+      // error del servidor — es algo que quien sube puede corregir.
       const err = exception as Error & { code?: string; field?: string };
-      code = err.code ?? 'UPLOAD_ERROR';
+      code =
+        err.code === 'LIMIT_FILE_SIZE'
+          ? 'ARCHIVO_MUY_GRANDE'
+          : (err.code ?? 'UPLOAD_ERROR');
       status =
         err.code === 'LIMIT_FILE_SIZE'
           ? HttpStatus.PAYLOAD_TOO_LARGE
           : HttpStatus.BAD_REQUEST;
+      // Multer corta la subida al pasar el tope y NO sabe cuánto pesaba el
+      // archivo; el Content-Length de la petición (archivo + unos cientos de
+      // bytes del multipart) da el peso APROXIMADO para que el mensaje diga
+      // algo accionable (24-sep-2026: «supera el máximo» sin cifra no le
+      // decía al operador cuánto había que aligerar).
+      const mb = megasAproxDe(req.headers?.['content-length']);
       message =
         err.code === 'LIMIT_FILE_SIZE'
-          ? 'El archivo supera el tamaño máximo permitido. Súbelo más ligero.'
+          ? mb != null
+            ? `El archivo pesa aprox. ${mb} MB y supera el tamaño máximo permitido. Súbelo más ligero.`
+            : 'El archivo supera el tamaño máximo permitido. Súbelo más ligero.'
           : `No se pudo leer el archivo enviado${err.field ? ` (campo «${err.field}»)` : ''}.`;
       details = { tecnico: exception.message };
     } else if (exception instanceof Error) {
@@ -93,6 +118,67 @@ export class AllExceptionsFilter implements ExceptionFilter {
  */
 function esErrorDeSubida(err: Error): boolean {
   return err.name === 'MulterError';
+}
+
+/**
+ * Errores de subida que `@nestjs/platform-express` ya convirtió a
+ * HttpException (`multer.utils#transformException`): los reconoce por su
+ * texto en inglés y devuelve el mensaje es-MX accionable. `null` = no es un
+ * error de subida (se responde tal cual).
+ */
+export function traducirErrorDeSubidaNest(
+  status: number,
+  message: unknown,
+  contentLength: string | string[] | undefined,
+): { code: string; message: string; tecnico: string } | null {
+  if (typeof message !== 'string') return null;
+  if (status === 413 && message === 'File too large') {
+    const mb = megasAproxDe(contentLength);
+    return {
+      code: 'ARCHIVO_MUY_GRANDE',
+      message:
+        mb != null
+          ? `El archivo pesa aprox. ${mb} MB y supera el tamaño máximo permitido. Súbelo más ligero.`
+          : 'El archivo supera el tamaño máximo permitido. Súbelo más ligero.',
+      tecnico: message,
+    };
+  }
+  if (status !== 400) return null;
+  const inesperado = /^Unexpected field(?: - (.+))?$/.exec(message);
+  if (inesperado) {
+    return {
+      code: 'CAMPO_ARCHIVO_INVALIDO',
+      message: `El archivo tiene que ir en el campo «file» del formulario${
+        inesperado[1] ? ` (llegó en «${inesperado[1]}»)` : ''
+      }.`,
+      tecnico: message,
+    };
+  }
+  const ilegibles = [
+    'Multipart:',
+    'Too many parts',
+    'Too many files',
+    'Too many fields',
+    'Field name too long',
+    'Field value too long',
+    'Field name missing',
+  ];
+  if (ilegibles.some((p) => message.startsWith(p))) {
+    return {
+      code: 'SUBIDA_ILEGIBLE',
+      message:
+        'No se pudo leer el archivo enviado (la subida llegó incompleta o mal formada). Intenta de nuevo.',
+      tecnico: message,
+    };
+  }
+  return null;
+}
+
+/** MB con un decimal a partir de un Content-Length (o null si no sirve). */
+function megasAproxDe(v: string | string[] | undefined): string | null {
+  const n = Number(Array.isArray(v) ? v[0] : v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return (n / 1024 / 1024).toFixed(1);
 }
 
 /**

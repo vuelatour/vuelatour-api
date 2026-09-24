@@ -343,3 +343,50 @@ describe('Libro Dinero — la categoría de EMPRESA manda sobre el vuelo (11-sep
     expect(tua?.egreso_mxn).toBe(600);
   });
 });
+
+/**
+ * FOLIO de la factura en el Libro Dinero (24-sep-2026). Palabras del
+ * cliente: «subí la factura de un vuelo … al descargar el reporte en Excel sí
+ * aparece la columna de factura (del vuelo) pero no aparece el folio». La
+ * columna salía SOLO de la tabla `factura` (CFDI del PAC, 0 filas en prod).
+ */
+describe('Libro Dinero — columna «FACTURA VUELATOUR» (24-sep-2026)', () => {
+  function conFactura(vuelo: Fila, facturas: Fila[] = []) {
+    const t = tablas([]);
+    t.vuelo = [{ ...t.vuelo[0], ...vuelo }];
+    t.factura = facturas;
+    const service = new DineroReportService(fakeSupabase(t), {} as never);
+    return (service as unknown as Privado).buildPayload(DESDE, HASTA);
+  }
+
+  it('el folio de la factura subida/capturada sale en la hoja 1', async () => {
+    const p = await conFactura({
+      facturado: false,
+      factura_estatus: 'FACTURADO',
+      factura_folio: 'A-1234',
+    });
+    expect(p.vuelos[0].factura_vuelatour).toBe('A-1234');
+  });
+
+  it('marcado «Facturado» SIN folio (caso #297) ⇒ la etiqueta del estatus, no una celda vacía', async () => {
+    const p = await conFactura({
+      facturado: false,
+      factura_estatus: 'FACTURADO',
+      factura_folio: null,
+    });
+    expect(p.vuelos[0].factura_vuelatour).toBe('Facturado');
+  });
+
+  it('un CFDI timbrado vivo sigue mandando sobre el folio manual', async () => {
+    const p = await conFactura(
+      { facturado: true, factura_estatus: 'FACTURADO', factura_folio: 'A-1' },
+      [{ vuelo_id: V1, serie: 'VT', folio: '77', estado: 'TIMBRADA' }],
+    );
+    expect(p.vuelos[0].factura_vuelatour).toBe('VT-77');
+  });
+
+  it('sin factura de ningún tipo ⇒ vacío (como antes)', async () => {
+    const p = await conFactura({ facturado: false });
+    expect(p.vuelos[0].factura_vuelatour).toBeNull();
+  });
+});

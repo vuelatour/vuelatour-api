@@ -73,7 +73,7 @@ import {
   SubirFacturaClienteDto,
 } from './dto/factura-cliente.dto';
 import {
-  LIMITE_ARCHIVO_FACTURA_BYTES,
+  LIMITE_MULTER_FACTURA_BYTES,
   MENSAJE_SIN_ARCHIVO,
   archivoDeLaPeticion,
   type ArchivoMultipart,
@@ -748,28 +748,38 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @ApiOperation({
     summary:
-      'Estatus MANUAL de la factura del servicio: SIN_FACTURA | ELABORADA_ENVIADA | FACTURADO. Con CFDI timbrado no puede bajar de FACTURADO (409 VUELO_CON_CFDI). Devuelve el bloque factura_cliente.',
+      'Estatus MANUAL de la factura del servicio (SIN_FACTURA | ELABORADA_ENVIADA | FACTURADO) y/o su FOLIO ({ folio }: captura o corrección sin archivo; null/"" lo borra). Al menos uno de los dos (400). Con CFDI timbrado el estatus no puede bajar de FACTURADO (409 VUELO_CON_CFDI); folio sin la migración 20260924000001 ⇒ 409 FACTURA_FOLIO_NO_DISPONIBLE. Devuelve el bloque factura_cliente.',
   })
   setFacturaClienteEstatus(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: SetFacturaClienteEstatusDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.facturaCliente.setEstatus(id, dto.estatus, c.userId);
+    return this.facturaCliente.actualizar(
+      id,
+      {
+        ...(dto.estatus !== undefined ? { estatus: dto.estatus } : {}),
+        ...(dto.folio !== undefined ? { folio: dto.folio } : {}),
+      },
+      c.userId,
+    );
   }
 
   @Post(':id/factura-cliente/archivo')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
   @HttpCode(HttpStatus.OK)
   @UseInterceptors(
+    // Tope de multer con 1 MB de margen sobre los 10 MB de negocio: así la
+    // validación del servicio alcanza a decir cuánto pesa el archivo (413
+    // ARCHIVO_MUY_GRANDE «El archivo pesa 10.4 MB y el máximo son 10 MB»).
     FileInterceptor('file', {
-      limits: { fileSize: LIMITE_ARCHIVO_FACTURA_BYTES },
+      limits: { fileSize: LIMITE_MULTER_FACTURA_BYTES },
     }),
   )
   @ApiConsumes('multipart/form-data', 'application/json')
   @ApiOperation({
     summary:
-      'Sube (o reemplaza) el archivo de la factura del servicio: PDF o XML, ≤ 10 MB. multipart/form-data con el campo `file`, o JSON { file_base64, filename, content_type }. Devuelve el bloque factura_cliente.',
+      'Sube (o reemplaza) el archivo de la factura del servicio: PDF o XML, ≤ 10 MB (413 ARCHIVO_MUY_GRANDE con el peso). multipart/form-data con el campo `file` (+ campo de texto opcional `folio`), o JSON { file_base64, filename, content_type, folio? }. Si es el XML del CFDI saca SERIE-FOLIO y el UUID; el folio tecleado gana. Devuelve el bloque factura_cliente (con `folio` y `uuid`).',
   })
   subirFacturaCliente(
     @Param('id', ParseUUIDPipe) id: string,
@@ -779,7 +789,9 @@ export class FlightsController {
   ) {
     const archivo = archivoDeLaPeticion(file, dto);
     if (!archivo) throw new BadRequestException(MENSAJE_SIN_ARCHIVO);
-    return this.facturaCliente.subirArchivo(id, archivo, c.userId);
+    return this.facturaCliente.subirArchivo(id, archivo, c.userId, {
+      folio: dto.folio ?? null,
+    });
   }
 
   @Delete(':id/factura-cliente/archivo')

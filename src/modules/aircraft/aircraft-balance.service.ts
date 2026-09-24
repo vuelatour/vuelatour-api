@@ -51,6 +51,7 @@ import {
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
@@ -4005,13 +4006,10 @@ export class AircraftBalanceService {
             .in('vuelo_id', vueloIds)
             .order('fecha_cobro', { ascending: true })
         : Promise.resolve(vacio),
-      vueloIds.length
-        ? sb
-            .from('factura')
-            .select('vuelo_id, serie, folio, estado')
-            .in('vuelo_id', vueloIds)
-            .neq('estado', 'CANCELADA')
-        : Promise.resolve(vacio),
+      // FACTURA del vuelo (24-sep-2026): fuente única compartida con el
+      // Libro Dinero — CFDI vivo → folio de la factura del servicio →
+      // estatus manual. En lote.
+      etiquetasFacturaDeVuelos(sb, vueloIds),
       // (29-ago: los gastos de EMPRESA sin vuelo ni avión ya vienen leídos
       // en `empresaYSueltos` — lectura compartida con la hoja "otros
       // gastos" del general.)
@@ -4048,7 +4046,6 @@ export class AircraftBalanceService {
       avionesRes,
       gastosRes,
       cobrosRes,
-      facturasRes,
       gasRes,
       tuasSinVueloRes,
     ]) {
@@ -4082,15 +4079,8 @@ export class AircraftBalanceService {
         c,
       );
     }
-    const facturaPorVuelo = new Map<string, string>();
-    for (const f of (facturasRes.data ?? []) as Array<
-      Record<string, unknown>
-    >) {
-      const vid = f.vuelo_id as string;
-      if (!vid || facturaPorVuelo.has(vid)) continue;
-      const etiqueta = [f.serie, f.folio].filter(Boolean).join('-');
-      if (etiqueta) facturaPorVuelo.set(vid, etiqueta);
-    }
+    // Etiqueta de la factura por vuelo: `etiquetasFacturaDeVuelos` (arriba).
+    const facturaPorVuelo = facturasRes;
 
     // TC de VENTA por vuelo: la MISMA cadena que la hoja maestra (K =
     // tc_usd_mxn capturado ?? TC oficial de referencia (open.er-api / BCE)

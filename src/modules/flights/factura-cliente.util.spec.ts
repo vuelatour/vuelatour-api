@@ -86,7 +86,12 @@ describe('bloqueFacturaCliente (lo que viaja en snapshot y listado)', () => {
         facturado: false,
         factura_estatus: 'SIN_FACTURA',
       }),
-    ).toEqual({ estatus: 'SIN_FACTURA', archivo: null });
+    ).toEqual({
+      estatus: 'SIN_FACTURA',
+      archivo: null,
+      folio: null,
+      uuid: null,
+    });
   });
 
   it('con archivo: path, nombre, cuándo y quién', () => {
@@ -110,6 +115,8 @@ describe('bloqueFacturaCliente (lo que viaja en snapshot y listado)', () => {
         subida_at: '2026-09-22T18:00:00.000Z',
         subida_por_nombre: 'Itzy',
       },
+      folio: null,
+      uuid: null,
     });
   });
 

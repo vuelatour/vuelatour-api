@@ -4,15 +4,19 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  PayloadTooLargeException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import {
+  LIMITE_ARCHIVO_FACTURA_BYTES,
   MENSAJE_VUELO_CON_CFDI,
   bloqueFacturaCliente,
   bloqueaBajarEstatus,
   contentTypeArchivoFactura,
+  extraerDatosCfdi,
+  normalizarFolioFactura,
   pathArchivoFactura,
   validarArchivoFactura,
   type ArchivoEntrante,
@@ -30,11 +34,32 @@ export const SEGUNDOS_URL_FIRMADA = 600;
 /** Migración que crea las columnas de la factura del servicio. */
 export const MIGRACION_FACTURA_CLIENTE = '20260923000001';
 
+/** Migración del FOLIO de la factura del servicio (24-sep-2026). */
+export const MIGRACION_FACTURA_FOLIO = '20260924000001';
+
 const COLS_FACTURA =
   'id, facturado, factura_estatus, factura_archivo_path, factura_archivo_nombre, factura_archivo_subida_at, factura_archivo_subida_por';
 
+/** Columnas de `20260924000001` (se agregan SOLO si la sonda las ve). */
+const COLS_FOLIO = 'factura_folio, factura_uuid';
+
 /** Lo mínimo que se lee cuando la migración todavía no está aplicada. */
 const COLS_LEGADO = 'id, facturado';
+
+/** Qué migraciones de la factura del servicio están aplicadas. */
+interface ColumnasFactura {
+  /** `20260923000001`: estatus + archivo. */
+  estatus: boolean;
+  /** `20260924000001`: folio + UUID (solo cuenta si `estatus` también). */
+  folio: boolean;
+}
+
+/** Cambio del `PATCH :id/factura-cliente` (al menos uno de los dos). */
+export interface CambioFacturaCliente {
+  estatus?: EstatusFacturaCliente;
+  /** `undefined` = no se toca; `null`/"" = se borra. */
+  folio?: string | null;
+}
 
 /**
  * FACTURA DEL SERVICIO POR VUELO (22-sep-2026): estatus manual de tres
@@ -61,6 +86,45 @@ export class FacturaClienteService {
     }).disponible();
   }
 
+  /**
+   * Las DOS sondas: estatus/archivo (`20260923000001`) y folio/UUID
+   * (`20260924000001`). El folio solo cuenta si la primera también está:
+   * sin estatus no hay bloque que extender.
+   */
+  private async columnas(): Promise<ColumnasFactura> {
+    const estatus = await this.columnasListas();
+    if (!estatus) return { estatus: false, folio: false };
+    const folio = await columnaOpcional(
+      this.supabase.service,
+      'vuelo',
+      'factura_folio',
+      {
+        mensajeAusente:
+          `Columnas vuelo.factura_folio/factura_uuid no existen todavía: el ` +
+          `folio de la factura del servicio no se guarda hasta aplicar la ` +
+          `migración ${MIGRACION_FACTURA_FOLIO}`,
+      },
+    ).disponible();
+    return { estatus, folio };
+  }
+
+  private colsFactura(c: ColumnasFactura): string {
+    return c.folio ? `${COLS_FACTURA}, ${COLS_FOLIO}` : COLS_FACTURA;
+  }
+
+  /** 409 del folio: el archivo y el estatus siguen funcionando como hoy. */
+  private folioNoDisponible(): ConflictException {
+    return new ConflictException({
+      message:
+        'El folio de la factura todavía no se puede guardar (falta aplicar ' +
+        'una actualización de la base de datos). Sube el archivo o cambia el ' +
+        'estatus sin folio, o vuelve a intentarlo en unos minutos; si sigue ' +
+        'igual, avisa a soporte.',
+      error: 'FACTURA_FOLIO_NO_DISPONIBLE',
+      details: { migracion: MIGRACION_FACTURA_FOLIO },
+    });
+  }
+
   private noDisponible(): ConflictException {
     return new ConflictException({
       message:
@@ -75,11 +139,15 @@ export class FacturaClienteService {
   /** Fila del vuelo con las columnas de factura (o solo las legadas). */
   private async filaVuelo(
     vueloId: string,
-    conColumnas: boolean,
+    conColumnas: boolean | ColumnasFactura,
   ): Promise<VueloFacturaRow & { id: string }> {
+    const c: ColumnasFactura =
+      typeof conColumnas === 'boolean'
+        ? { estatus: conColumnas, folio: false }
+        : conColumnas;
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select(conColumnas ? COLS_FACTURA : COLS_LEGADO)
+      .select(c.estatus ? this.colsFactura(c) : COLS_LEGADO)
       .eq('id', vueloId)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -118,13 +186,13 @@ export class FacturaClienteService {
     vueloId: string,
     filaConocida?: VueloFacturaRow | null,
   ): Promise<BloqueFacturaCliente> {
-    const conColumnas = await this.columnasListas();
-    if (!conColumnas) {
+    const cols = await this.columnas();
+    if (!cols.estatus) {
       return bloqueFacturaCliente(
         filaConocida ?? (await this.filaVuelo(vueloId, false)),
       );
     }
-    const fila = await this.filaVuelo(vueloId, true);
+    const fila = await this.filaVuelo(vueloId, cols);
     const autorId = (fila.factura_archivo_subida_por as string | null) ?? null;
     const nombres = autorId
       ? await this.nombresUsuarios([autorId])
@@ -148,7 +216,8 @@ export class FacturaClienteService {
       .map((f) => f.id)
       .filter((x): x is string => typeof x === 'string');
     if (ids.length === 0) return out;
-    if (!(await this.columnasListas())) {
+    const cols = await this.columnas();
+    if (!cols.estatus) {
       for (const f of filasBase) {
         if (typeof f.id === 'string') out.set(f.id, bloqueFacturaCliente(f));
       }
@@ -156,7 +225,7 @@ export class FacturaClienteService {
     }
     const { data, error } = await this.supabase.service
       .from('vuelo')
-      .select(COLS_FACTURA)
+      .select(this.colsFactura(cols))
       .in('id', ids);
     if (error) {
       // Degradación explícita: el listado no se cae por el bloque nuevo.
@@ -194,23 +263,52 @@ export class FacturaClienteService {
   }
 
   /** Cambia el estatus MANUAL. Con CFDI timbrado no puede bajar (409). */
-  async setEstatus(
+  setEstatus(
     vueloId: string,
     estatus: EstatusFacturaCliente,
     userId: string,
   ): Promise<BloqueFacturaCliente> {
-    if (!(await this.columnasListas())) throw this.noDisponible();
-    const fila = await this.filaVuelo(vueloId, true);
-    if (bloqueaBajarEstatus(fila, estatus)) {
+    return this.actualizar(vueloId, { estatus }, userId);
+  }
+
+  /**
+   * `PATCH :id/factura-cliente` (24-sep-2026): estatus y/o FOLIO en UNA
+   * escritura. El folio se captura o se corrige sin subir archivo — también
+   * en los vuelos que ya se marcaron «Facturado» sin papel. Candados:
+   *  - sin la migración `20260923000001`: 409 FACTURA_CLIENTE_NO_DISPONIBLE;
+   *  - con folio pero sin `20260924000001`: 409 FACTURA_FOLIO_NO_DISPONIBLE
+   *    ANTES de escribir nada (ni el estatus: nada a medias);
+   *  - CFDI timbrado: el estatus no baja de FACTURADO (409 VUELO_CON_CFDI).
+   */
+  async actualizar(
+    vueloId: string,
+    cambio: CambioFacturaCliente,
+    userId: string,
+  ): Promise<BloqueFacturaCliente> {
+    const tocaEstatus = cambio.estatus !== undefined;
+    const tocaFolio = cambio.folio !== undefined;
+    if (!tocaEstatus && !tocaFolio) {
+      throw new BadRequestException(
+        'Manda el estatus o el folio de la factura (o los dos).',
+      );
+    }
+    const cols = await this.columnas();
+    if (!cols.estatus) throw this.noDisponible();
+    if (tocaFolio && !cols.folio) throw this.folioNoDisponible();
+    const fila = await this.filaVuelo(vueloId, cols);
+    if (tocaEstatus && bloqueaBajarEstatus(fila, cambio.estatus!)) {
       throw new ConflictException({
         message: MENSAJE_VUELO_CON_CFDI,
         error: 'VUELO_CON_CFDI',
         details: { vuelo_id: vueloId, estatus_actual: 'FACTURADO' },
       });
     }
+    const patch: Record<string, unknown> = { updated_by: userId };
+    if (tocaEstatus) patch.factura_estatus = cambio.estatus;
+    if (tocaFolio) patch.factura_folio = normalizarFolioFactura(cambio.folio);
     const { error } = await this.supabase.service
       .from('vuelo')
-      .update({ factura_estatus: estatus, updated_by: userId })
+      .update(patch)
       .eq('id', vueloId);
     if (error) throw new Error(error.message);
     return this.bloqueDeVuelo(vueloId);
@@ -226,15 +324,38 @@ export class FacturaClienteService {
     vueloId: string,
     archivo: ArchivoEntrante,
     userId: string,
+    opts: { folio?: string | null } = {},
   ): Promise<BloqueFacturaCliente> {
-    if (!(await this.columnasListas())) throw this.noDisponible();
-    const fila = await this.filaVuelo(vueloId, true);
+    const cols = await this.columnas();
+    if (!cols.estatus) throw this.noDisponible();
     const v = validarArchivoFactura({
       nombre: archivo.nombre,
       mime: archivo.mime,
       bytes: archivo.buffer.length,
     });
-    if (!v.ok) throw new BadRequestException(v.mensaje);
+    if (!v.ok) {
+      const cuerpo = { message: v.mensaje, error: v.codigo };
+      if (v.codigo === 'ARCHIVO_MUY_GRANDE') {
+        throw new PayloadTooLargeException({
+          ...cuerpo,
+          details: {
+            bytes: archivo.buffer.length,
+            limite_bytes: LIMITE_ARCHIVO_FACTURA_BYTES,
+          },
+        });
+      }
+      throw new BadRequestException(cuerpo);
+    }
+    // FOLIO (24-sep-2026): el TECLEADO gana; si no, el del XML del CFDI
+    // (`SERIE-FOLIO` + UUID). Tecleado sin la migración del folio ⇒ 409
+    // ANTES de subir nada (jamás un folio que se pierde en silencio); el
+    // extraído sin la migración simplemente no se guarda (sigue en el XML).
+    const folioTecleado = normalizarFolioFactura(opts.folio);
+    if (folioTecleado && !cols.folio) throw this.folioNoDisponible();
+    const cfdi =
+      v.extension === 'xml' ? extraerDatosCfdi(archivo.buffer) : null;
+    const folioFinal = folioTecleado ?? cfdi?.etiqueta ?? null;
+    const fila = await this.filaVuelo(vueloId, cols);
 
     const path = pathArchivoFactura(vueloId, randomUUID(), v.extension);
     const { error: upErr } = await this.supabase.service.storage
@@ -247,15 +368,23 @@ export class FacturaClienteService {
       throw new Error(`No se pudo guardar la factura: ${upErr.message}`);
     }
 
+    const patch: Record<string, unknown> = {
+      factura_archivo_path: path,
+      factura_archivo_nombre: v.nombre,
+      factura_archivo_subida_at: new Date().toISOString(),
+      factura_archivo_subida_por: userId,
+      updated_by: userId,
+    };
+    if (cols.folio) {
+      // Sin folio nuevo (PDF sin teclear) se CONSERVA el que ya tenía: un
+      // reemplazo del papel no borra un dato que alguien capturó. El UUID
+      // solo cambia cuando llega un XML (es del CFDI, no del PDF).
+      if (folioFinal) patch.factura_folio = folioFinal;
+      if (v.extension === 'xml') patch.factura_uuid = cfdi?.uuid ?? null;
+    }
     const { error } = await this.supabase.service
       .from('vuelo')
-      .update({
-        factura_archivo_path: path,
-        factura_archivo_nombre: v.nombre,
-        factura_archivo_subida_at: new Date().toISOString(),
-        factura_archivo_subida_por: userId,
-        updated_by: userId,
-      })
+      .update(patch)
       .eq('id', vueloId);
     if (error) {
       // El archivo quedó huérfano: se retira para no dejar basura privada.

@@ -23,6 +23,7 @@ import {
   repartirUsd,
   type ParticipacionAeronave,
 } from '../../common/participacion-aeronave.util';
+import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 import {
   PyservicesService,
   type DineroCombustibleFilaPayload,
@@ -231,13 +232,10 @@ export class DineroReportService {
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve({ data: [], error: null } as const),
-      vueloIds.length
-        ? sb
-            .from('factura')
-            .select('vuelo_id, serie, folio, estado')
-            .in('vuelo_id', vueloIds)
-            .neq('estado', 'CANCELADA')
-        : Promise.resolve({ data: [], error: null } as const),
+      // FACTURA del vuelo (24-sep-2026): fuente única compartida con el
+      // Balance — CFDI vivo → folio de la factura del servicio → estatus
+      // manual («Facturado» / «Factura elaborada y enviada»). En lote.
+      etiquetasFacturaDeVuelos(sb, vueloIds),
       // "Otros gastos" del mes: los sueltos SIN vuelo de siempre (pensión,
       // cera, nómina, etc.) MÁS, desde el 11-sep-2026, todos los de
       // CATEGORÍA DE EMPRESA aunque traigan vuelo — LA CATEGORÍA MANDA SOBRE
@@ -281,7 +279,6 @@ export class DineroReportService {
       escalasRes,
       cobrosRes,
       gastosVuelo,
-      facturasRes,
       gastosEmpresaYSueltos,
       gastosGasRes,
     ]) {
@@ -364,15 +361,8 @@ export class DineroReportService {
         g,
       );
     }
-    const facturaPorVuelo = new Map<string, string>();
-    for (const f of (facturasRes.data ?? []) as Array<
-      Record<string, unknown>
-    >) {
-      const vid = f.vuelo_id as string;
-      if (!vid || facturaPorVuelo.has(vid)) continue;
-      const etiqueta = [f.serie, f.folio].filter(Boolean).join('-');
-      if (etiqueta) facturaPorVuelo.set(vid, etiqueta);
-    }
+    // Etiqueta de la factura por vuelo: `etiquetasFacturaDeVuelos` (arriba).
+    const facturaPorVuelo = facturasRes;
     // Cancelados sin cobros ni gastos: fuera (ver arriba). Un cancelado con
     // dinero se queda y su fila se arma con reglas propias (abajo).
     const vuelos = vuelosPeriodo.filter(

@@ -208,3 +208,115 @@ export function lecturaFondo(p: LecturaFondoInput): {
     disponible: p.asignado > 0 ? round2(p.asignado - p.gastadoTotal) : p.saldo,
   };
 }
+
+// ================= Tramo de una REPOSICIÓN (24-sep-2026) =================
+//
+// Pedido del cliente: «en el apartado de caja chica, quiero ver si se puede
+// al momento de reembolsar la caja de cada uno, me puede arrojar un Excel
+// descargable con la información de lo que estoy reembolsando».
+//
+// Lo que una reposición REPONE = las entradas del libro entre la reposición
+// ANTERIOR (exclusiva) y ésta (exclusiva), en el MISMO orden del historial
+// (`historialConSaldo` → `compararEntradasCaja`: un gasto fechado el mismo
+// día que la reposición va ANTES y entra en ella — la misma regla del
+// candado `GASTO_EN_REPOSICION`). Los saldos NO se recalculan: se leen de
+// las cifras que el historial ya trae por fila. Aquí solo se RE-SUMAN las
+// filas que se listan (columna del Excel), nunca un saldo paralelo.
+
+export interface EntradaTramoLike extends EntradaHistorialCaja {
+  id: string;
+  tipo: string;
+}
+
+export interface TramoReposicion<T extends EntradaTramoLike> {
+  /** La reposición (null = lo PENDIENTE hoy, antes de registrarla). */
+  reposicion: EntradaConSaldo<T> | null;
+  /** Reposición anterior (null = es la primera del fondo). */
+  anterior: EntradaConSaldo<T> | null;
+  /** Entradas del periodo (gastos + otros movimientos), orden del libro. */
+  entradas: EntradaConSaldo<T>[];
+  /** Solo los gastos en efectivo del periodo. */
+  gastos: EntradaConSaldo<T>[];
+  /** Reintegros / ajustes (movimientos de caja que NO son reposición). */
+  otros: EntradaConSaldo<T>[];
+  /** Σ de los gastos del periodo (POSITIVO). */
+  total_gastos: number;
+  /** Σ con signo de los otros movimientos (reintegro −, ajuste ±). */
+  total_otros: number;
+  /** Saldo del libro al abrir el periodo (tras la reposición anterior). */
+  saldo_inicio: number;
+  /** Por reponer al abrir el periodo. */
+  por_reponer_inicio: number;
+  /** Saldo del libro justo ANTES de la reposición (o HOY si es pendiente). */
+  saldo_antes: number;
+  /** Por reponer justo ANTES de la reposición (o HOY si es pendiente). */
+  por_reponer_antes: number;
+  /** Saldo tras la reposición (null en pendiente). */
+  saldo_despues: number | null;
+  /** Por reponer tras la reposición (null en pendiente). */
+  por_reponer_despues: number | null;
+  /** Monto de la reposición (null en pendiente). */
+  monto_repuesto: number | null;
+  /**
+   * Repuesto − por reponer antes: > 0 se repuso DE MÁS; < 0 quedó
+   * PENDIENTE; 0 cuadra. null en pendiente.
+   */
+  diferencia: number | null;
+  /** Fechas (YYYY-MM-DD) del primer y último GASTO del periodo. */
+  periodo_desde: string | null;
+  periodo_hasta: string | null;
+}
+
+/**
+ * Tramo que cubre una reposición — o, con `reposicionId = null`, lo que
+ * está PENDIENTE hoy (desde la última reposición hasta el final del libro:
+ * lo que se va a reponer). `historial` es la salida de `historialConSaldo`
+ * (ASC). `null` si el id no es una REPOSICIÓN del libro.
+ */
+export function tramoDeReposicion<T extends EntradaTramoLike>(
+  historial: EntradaConSaldo<T>[],
+  reposicionId: string | null,
+): TramoReposicion<T> | null {
+  const esReposicion = (e: EntradaConSaldo<T>) =>
+    e.origen === 'caja' && e.tipo === TIPO_REPOSICION;
+  let idx = historial.length;
+  if (reposicionId !== null) {
+    idx = historial.findIndex((e) => esReposicion(e) && e.id === reposicionId);
+    if (idx < 0) return null;
+  }
+  let previo = -1;
+  for (let i = idx - 1; i >= 0; i--) {
+    if (esReposicion(historial[i])) {
+      previo = i;
+      break;
+    }
+  }
+  const entradas = historial.slice(previo + 1, idx);
+  const gastos = entradas.filter((e) => e.origen === 'gasto');
+  const otros = entradas.filter((e) => e.origen === 'caja');
+  const anterior = previo >= 0 ? historial[previo] : null;
+  const ultimaAntes = idx > 0 ? historial[idx - 1] : null;
+  const reposicion = reposicionId !== null ? historial[idx] : null;
+  const porReponerAntes = ultimaAntes?.por_reponer ?? 0;
+  const montoRepuesto = reposicion ? round2(reposicion.monto) : null;
+  return {
+    reposicion,
+    anterior,
+    entradas,
+    gastos,
+    otros,
+    total_gastos: round2(gastos.reduce((s, e) => s - e.monto, 0)),
+    total_otros: round2(otros.reduce((s, e) => s + e.monto, 0)),
+    saldo_inicio: anterior?.saldo ?? 0,
+    por_reponer_inicio: anterior?.por_reponer ?? 0,
+    saldo_antes: ultimaAntes?.saldo ?? 0,
+    por_reponer_antes: porReponerAntes,
+    saldo_despues: reposicion ? reposicion.saldo : null,
+    por_reponer_despues: reposicion ? reposicion.por_reponer : null,
+    monto_repuesto: montoRepuesto,
+    diferencia:
+      montoRepuesto !== null ? round2(montoRepuesto - porReponerAntes) : null,
+    periodo_desde: gastos[0]?.fecha ?? null,
+    periodo_hasta: gastos[gastos.length - 1]?.fecha ?? null,
+  };
+}

@@ -131,3 +131,60 @@ describe('PyservicesService — hoja de cotización (hoja.css / mapa-svg)', () =
     expect(JSON.parse(init.body as string)).toEqual({ folio: '1' });
   });
 });
+
+describe('PyservicesService — Excel de la reposición de caja chica (24-sep-2026)', () => {
+  let fetchSpy: jest.SpyInstance;
+  afterEach(() => fetchSpy?.mockRestore());
+
+  const payload = {
+    titulo: 'Reposición de caja chica · Itzi',
+    subtitulo: 'Reposición del 21/09/2026',
+    hoja: 'Reposición 21-09-2026',
+    encabezado_titulo: 'Datos de la reposición',
+    encabezado: [{ etiqueta: 'Responsable', valor: 'Itzi' }],
+    filas: [],
+    n_gastos: 0,
+    total_gastos: 0,
+    total_otros: null,
+    totales_titulo: 'Totales de la reposición',
+    totales: [],
+    avisos: [],
+    sin_filas: 'Sin gastos.',
+  };
+
+  it('POST /reportes/caja-chica-reposicion.xlsx con el token y devuelve el binario', async () => {
+    fetchSpy = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(respuesta(200, 'PK-xlsx') as unknown as Response);
+    const buf = await svc().generateCajaChicaReposicionXlsx(payload);
+    expect(buf?.toString()).toBe('PK-xlsx');
+    const [url, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://py/reportes/caja-chica-reposicion.xlsx');
+    expect((init.headers as Record<string, string>)['X-Internal-Token']).toBe(
+      'tok',
+    );
+    expect(JSON.parse(init.body as string)).toMatchObject({
+      titulo: 'Reposición de caja chica · Itzi',
+    });
+  });
+
+  it('404 (pyservices sin el endpoint todavía) ⇒ null para caer al export genérico', async () => {
+    fetchSpy = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(
+        respuesta(404, '{"detail":"Not Found"}') as unknown as Response,
+      );
+    await expect(
+      svc().generateCajaChicaReposicionXlsx(payload),
+    ).resolves.toBeNull();
+  });
+
+  it('cualquier OTRO fallo se lanza (nunca se esconde un 500 real tras el respaldo)', async () => {
+    fetchSpy = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue(respuesta(500, 'boom') as unknown as Response);
+    await expect(
+      svc().generateCajaChicaReposicionXlsx(payload),
+    ).rejects.toBeInstanceOf(BadGatewayException);
+  });
+});

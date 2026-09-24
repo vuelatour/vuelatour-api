@@ -135,6 +135,54 @@ export interface TablaXlsxPayload {
   hojas?: TablaHojaPayload[];
 }
 
+/**
+ * Excel de la REPOSICIÓN de caja chica (24-sep-2026):
+ * `POST /reportes/caja-chica-reposicion.xlsx` (pyservices
+ * `CajaChicaReposicionRequest`). Todo llega calculado — pyservices solo pinta.
+ */
+export interface CajaChicaDatoPayload {
+  etiqueta: string;
+  /** number = monto ("$"#,##0.00); string = texto tal cual. */
+  valor: number | string | null;
+  nota?: string | null;
+  destacado?: boolean;
+}
+
+export interface CajaChicaFilaPayload {
+  /** Fecha de pared YYYY-MM-DD (en Excel: fecha real dd/mm/aaaa). */
+  fecha: string;
+  tipo: string;
+  categoria: string;
+  descripcion: string;
+  vuelo: string;
+  matricula: string;
+  gasto: number | null;
+  otro: number | null;
+  comprobante: string;
+  facturacion: string;
+  capturo: string;
+  capturado: string;
+  saldo: number;
+  por_reponer: number;
+  resaltar: boolean;
+}
+
+export interface CajaChicaReposicionPayload {
+  titulo: string;
+  subtitulo: string;
+  hoja: string;
+  encabezado_titulo: string;
+  encabezado: CajaChicaDatoPayload[];
+  filas: CajaChicaFilaPayload[];
+  n_gastos: number;
+  total_gastos: number;
+  total_otros: number | null;
+  totales_titulo: string;
+  totales: CajaChicaDatoPayload[];
+  avisos: string[];
+  sin_filas: string;
+}
+
 export interface TablaHojaPayload {
   titulo: string;
   subtitulo?: string;
@@ -1539,6 +1587,31 @@ export class PyservicesService {
   /** Export genérico de cualquier tabla a Excel. */
   async generateTablaXlsx(payload: TablaXlsxPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/tabla-xlsx', payload);
+  }
+
+  /**
+   * Excel de una REPOSICIÓN de caja chica (24-sep-2026). `null` = este
+   * pyservices todavía no tiene el endpoint (404: deploy desfasado) — quien
+   * llama cae al export genérico `generateTablaXlsx`, así el orden de deploy
+   * API/pyservices no importa. Cualquier otro fallo se lanza tal cual.
+   */
+  async generateCajaChicaReposicionXlsx(
+    payload: CajaChicaReposicionPayload,
+  ): Promise<Buffer | null> {
+    try {
+      return await this.postForBuffer(
+        '/reportes/caja-chica-reposicion.xlsx',
+        payload,
+      );
+    } catch (e) {
+      if (
+        e instanceof BadGatewayException &&
+        /pyservices respondio 404\b/.test(e.message)
+      ) {
+        return null;
+      }
+      throw e;
+    }
   }
 
   /** Ensambla archivos (base64) en un .zip. */

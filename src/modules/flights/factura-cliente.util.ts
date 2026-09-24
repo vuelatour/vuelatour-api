@@ -43,6 +43,22 @@ export const ETIQUETAS_FACTURA_CLIENTE: Record<EstatusFacturaCliente, string> =
 /** Tope del archivo de la factura del servicio: 10 MB. */
 export const LIMITE_ARCHIVO_FACTURA_BYTES = 10 * 1024 * 1024;
 
+/**
+ * Tope de MULTER para la ruta de subida (24-sep-2026): 1 MB por ENCIMA del
+ * de negocio. Con el tope exacto, multer cortaba la petición antes de que
+ * `validarArchivoFactura` pudiera decir cuánto pesaba el archivo; con el
+ * margen, un PDF de 10.4 MB llega a la validación y el 413 dice «El archivo
+ * pesa 10.4 MB y el máximo son 10 MB». Arriba de 11 MB responde multer (413
+ * con el peso APROXIMADO que da el Content-Length — `all-exceptions.filter`).
+ */
+export const LIMITE_MULTER_FACTURA_BYTES =
+  LIMITE_ARCHIVO_FACTURA_BYTES + 1024 * 1024;
+
+/** «El archivo pesa 12.3 MB y el máximo son 10 MB.» (fuente única). */
+export function mensajeArchivoMuyGrande(bytes: number): string {
+  return `El archivo pesa ${(bytes / 1024 / 1024).toFixed(1)} MB y el máximo son 10 MB.`;
+}
+
 /** Extensiones aceptadas: el CFDI (XML) y el papel que se enseña (PDF). */
 export const EXTENSIONES_ARCHIVO_FACTURA = ['pdf', 'xml'] as const;
 export type ExtensionArchivoFactura =
@@ -58,6 +74,14 @@ export interface ArchivoFacturaCliente {
 export interface BloqueFacturaCliente {
   estatus: EstatusFacturaCliente;
   archivo: ArchivoFacturaCliente | null;
+  /**
+   * FOLIO de la factura del servicio (24-sep-2026, ADITIVO): el que tecleó
+   * la oficina o el que se sacó del XML del CFDI (`SERIE-FOLIO`). `null` =
+   * nadie lo ha capturado (o la migración `20260924000001` no está aplicada).
+   */
+  folio: string | null;
+  /** UUID fiscal (folio fiscal del SAT) si se subió el XML timbrado. */
+  uuid: string | null;
 }
 
 /** Fila de `vuelo` (o el trozo que se haya leído) para derivar el estatus. */
@@ -68,6 +92,9 @@ export interface VueloFacturaRow {
   factura_archivo_nombre?: unknown;
   factura_archivo_subida_at?: unknown;
   factura_archivo_subida_por?: unknown;
+  /** Migración `20260924000001` (24-sep-2026). */
+  factura_folio?: unknown;
+  factura_uuid?: unknown;
 }
 
 export function esEstatusFacturaCliente(
@@ -123,7 +150,192 @@ export function bloqueFacturaCliente(
           subida_por_nombre: subidaPorNombre ?? null,
         }
       : null,
+    folio: normalizarFolioFactura(vuelo?.factura_folio),
+    uuid: normalizarUuidFiscal(vuelo?.factura_uuid),
   };
+}
+
+// ===================== FOLIO de la factura (24-sep-2026) =====================
+//
+// Palabras del cliente: «subí la factura de un vuelo, peroooo al momento de
+// descargar el reporte en Excel sí aparece la columna de factura (del vuelo)
+// pero no aparece el folio de la factura que subí en el registro». La columna
+// «FACTURA VUELATOUR» del Libro Dinero y «factura vuelatour» del balance solo
+// leían la tabla `factura` (CFDI timbrado por el PAC: 0 filas en prod) — la
+// factura que la oficina sube a mano no guardaba folio en ningún lado.
+
+/** Tope del folio tecleado (y del extraído del XML). */
+export const LIMITE_FOLIO_FACTURA = 40;
+
+/**
+ * Folio saneado: sin espacios de sobra ni caracteres de control, ≤ 40.
+ * `null` = vacío o no es texto (así se BORRA el folio desde el PATCH).
+ * NO cambia mayúsculas: el folio se guarda como lo escribió quien factura.
+ */
+export function normalizarFolioFactura(x: unknown): string | null {
+  if (typeof x !== 'string' && typeof x !== 'number') return null;
+  const limpio = String(x)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!limpio) return null;
+  return limpio.slice(0, LIMITE_FOLIO_FACTURA).trim();
+}
+
+const RE_UUID_FISCAL =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** UUID fiscal en MAYÚSCULAS (como lo imprime el SAT) o `null`. */
+export function normalizarUuidFiscal(x: unknown): string | null {
+  if (typeof x !== 'string') return null;
+  const u = x.trim();
+  return RE_UUID_FISCAL.test(u) ? u.toUpperCase() : null;
+}
+
+/**
+ * Etiqueta `SERIE-FOLIO` — la MISMA regla que el Excel ya usaba para el CFDI
+ * del PAC (`[serie, folio].filter(Boolean).join('-')`). `null` si no hay
+ * ninguno de los dos.
+ */
+export function etiquetaSerieFolio(
+  serie: unknown,
+  folio: unknown,
+): string | null {
+  const partes = [serie, folio]
+    .map((p) =>
+      typeof p === 'string' || typeof p === 'number' ? String(p).trim() : '',
+    )
+    .filter(Boolean);
+  return partes.length > 0 ? partes.join('-') : null;
+}
+
+export interface DatosCfdi {
+  serie: string | null;
+  folio: string | null;
+  /** Lo que se guarda como folio: `SERIE-FOLIO`, o solo el Folio. */
+  etiqueta: string | null;
+  uuid: string | null;
+}
+
+/** Decodifica las entidades XML de un valor de atributo. */
+function decodificarEntidadesXml(v: string): string {
+  return v.replace(
+    /&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi,
+    (m, ent: string) => {
+      const e = ent.toLowerCase();
+      if (e === 'amp') return '&';
+      if (e === 'lt') return '<';
+      if (e === 'gt') return '>';
+      if (e === 'quot') return '"';
+      if (e === 'apos') return "'";
+      const code = e.startsWith('#x')
+        ? parseInt(e.slice(2), 16)
+        : parseInt(e.slice(1), 10);
+      return Number.isFinite(code) && code > 0 ? String.fromCodePoint(code) : m;
+    },
+  );
+}
+
+/** Atributos de la PRIMERA etiqueta de apertura `<prefijo:Nombre …>`. */
+function atributosDeNodo(
+  xml: string,
+  nombre: string,
+): Map<string, string> | null {
+  const re = new RegExp(`<(?:[A-Za-z_][\\w.-]*:)?${nombre}\\b([^>]*)>`);
+  const m = re.exec(xml);
+  if (!m) return null;
+  const attrs = new Map<string, string>();
+  const reAttr = /([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+  let a: RegExpExecArray | null;
+  while ((a = reAttr.exec(m[1])) !== null) {
+    attrs.set(a[1], decodificarEntidadesXml(a[2] ?? a[3] ?? ''));
+  }
+  return attrs;
+}
+
+/** Texto de un XML en bytes: UTF-8 (con o sin BOM) o UTF-16 con BOM. */
+export function textoDeXml(buffer: Buffer): string {
+  if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) {
+    return buffer.subarray(2).toString('utf16le');
+  }
+  if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) {
+    const le = Buffer.from(buffer.subarray(2));
+    le.swap16();
+    return le.toString('utf16le');
+  }
+  const t = buffer.toString('utf8');
+  return t.charCodeAt(0) === 0xfeff ? t.slice(1) : t;
+}
+
+/**
+ * Serie, Folio y UUID de un CFDI (3.3 / 4.0; tolera el 3.2 con atributos en
+ * minúscula). Parser TOLERANTE a propósito (regex sobre la etiqueta de
+ * apertura, sin dependencias): un XML raro o que no es CFDI devuelve `null`
+ * y la subida sigue — el folio es una ayuda, nunca un requisito.
+ *
+ *  - `cfdi:Comprobante` → `Serie` + `Folio` ⇒ etiqueta `SERIE-FOLIO` (o solo
+ *    el Folio). Sin Folio no hay etiqueta: la Serie sola no identifica nada.
+ *    Si `SERIE-FOLIO` pasa de 40 caracteres queda solo el Folio (el SAT lo
+ *    limita a 40).
+ *  - `tfd:TimbreFiscalDigital` → `UUID` (el folio fiscal), en mayúsculas.
+ */
+export function extraerDatosCfdi(xml: string | Buffer): DatosCfdi | null {
+  const texto = typeof xml === 'string' ? xml : textoDeXml(xml);
+  const comp = atributosDeNodo(texto, 'Comprobante');
+  if (!comp) return null;
+  const leer = (k: string) =>
+    normalizarFolioFactura(comp.get(k) ?? comp.get(k.toLowerCase()));
+  const serie = leer('Serie');
+  const folio = leer('Folio');
+  const tfd = atributosDeNodo(texto, 'TimbreFiscalDigital');
+  const uuid = normalizarUuidFiscal(tfd?.get('UUID') ?? tfd?.get('uuid'));
+  let etiqueta: string | null = null;
+  if (folio) {
+    const completa = etiquetaSerieFolio(serie, folio);
+    etiqueta =
+      completa && completa.length <= LIMITE_FOLIO_FACTURA ? completa : folio;
+  }
+  return { serie, folio, etiqueta, uuid };
+}
+
+/**
+ * Lo que dice la columna «FACTURA VUELATOUR» del Libro Dinero y «factura
+ * vuelatour» del balance — FUENTE ÚNICA (24-sep-2026). Cascada:
+ *  1. CFDI timbrado VIVO por el sistema (`serie-folio` de la tabla `factura`,
+ *     no cancelado) — manda, es el documento fiscal;
+ *  2. el folio de la factura del servicio (`vuelo.factura_folio`: tecleado
+ *     por la oficina o sacado del XML que subió);
+ *  3. sin folio pero con seguimiento (`factura_estatus` ≠ SIN_FACTURA): la
+ *     etiqueta del estatus («Facturado» / «Factura elaborada y enviada») —
+ *     el Excel ya no dice «nada» de un vuelo que la oficina marcó facturado;
+ *  4. vacío (`null`).
+ */
+export function etiquetaFacturaVuelo(p: {
+  cfdi?: string | null;
+  vuelo?: VueloFacturaRow | null;
+}): string | null {
+  const cfdi = typeof p.cfdi === 'string' ? p.cfdi.trim() : '';
+  if (cfdi) return cfdi;
+  const folio = normalizarFolioFactura(p.vuelo?.factura_folio);
+  if (folio) return folio;
+  const estatus = estatusFacturaCliente(p.vuelo);
+  return estatus === 'SIN_FACTURA' ? null : ETIQUETAS_FACTURA_CLIENTE[estatus];
+}
+
+/**
+ * Etiqueta del CFDI VIVO de un vuelo entre sus filas de `factura`: la
+ * primera NO cancelada con serie/folio (misma regla que el Excel usaba).
+ */
+export function etiquetaCfdiVivo(
+  facturas: Array<{ serie?: unknown; folio?: unknown; estado?: unknown }>,
+): string | null {
+  for (const f of facturas) {
+    if (f.estado === 'CANCELADA') continue;
+    const e = etiquetaSerieFolio(f.serie, f.folio);
+    if (e) return e;
+  }
+  return null;
 }
 
 /**
@@ -143,9 +355,21 @@ export const MENSAJE_VUELO_CON_CFDI =
   '«sin factura» ni a «elaborada y enviada». Cancela el CFDI ante el SAT ' +
   'si la factura no procede.';
 
+/**
+ * Motivo de rechazo del archivo (24-sep-2026, ADITIVO): el servicio responde
+ * **413** para `ARCHIVO_MUY_GRANDE` (lo que HTTP dice que es) y 400 para el
+ * resto, con este código en `error` para que el panel no tenga que adivinar
+ * por el texto.
+ */
+export type CodigoArchivoInvalido =
+  | 'ARCHIVO_SIN_NOMBRE'
+  | 'ARCHIVO_VACIO'
+  | 'ARCHIVO_MUY_GRANDE'
+  | 'ARCHIVO_TIPO_INVALIDO';
+
 export type ValidacionArchivo =
   | { ok: true; extension: ExtensionArchivoFactura; nombre: string }
-  | { ok: false; mensaje: string };
+  | { ok: false; mensaje: string; codigo: CodigoArchivoInvalido };
 
 /** Nombre "de archivo" sano: sin rutas, sin caracteres raros, ≤ 120 chars. */
 export function nombreArchivoSeguro(nombre: string): string {
@@ -165,15 +389,24 @@ export function validarArchivoFactura(a: {
 }): ValidacionArchivo {
   const nombre = nombreArchivoSeguro((a.nombre ?? '').trim());
   if (!nombre) {
-    return { ok: false, mensaje: 'El archivo viene sin nombre.' };
+    return {
+      ok: false,
+      mensaje: 'El archivo viene sin nombre.',
+      codigo: 'ARCHIVO_SIN_NOMBRE',
+    };
   }
   if (a.bytes <= 0) {
-    return { ok: false, mensaje: 'El archivo llegó vacío.' };
+    return {
+      ok: false,
+      mensaje: 'El archivo llegó vacío.',
+      codigo: 'ARCHIVO_VACIO',
+    };
   }
   if (a.bytes > LIMITE_ARCHIVO_FACTURA_BYTES) {
     return {
       ok: false,
-      mensaje: `El archivo pesa ${(a.bytes / 1024 / 1024).toFixed(1)} MB y el máximo son 10 MB.`,
+      mensaje: mensajeArchivoMuyGrande(a.bytes),
+      codigo: 'ARCHIVO_MUY_GRANDE',
     };
   }
   const ext = (nombre.split('.').at(-1) ?? '').toLowerCase();
@@ -194,6 +427,7 @@ export function validarArchivoFactura(a: {
       ok: false,
       mensaje:
         'La factura se sube en PDF o en XML (el CFDI). Ese archivo no es ninguno de los dos.',
+      codigo: 'ARCHIVO_TIPO_INVALIDO',
     };
   }
   return { ok: true, extension, nombre };

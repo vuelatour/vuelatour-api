@@ -3,20 +3,32 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 import {
   CONCEPTO_CAJA,
   TIPO_GASTO_CAJA,
+  TIPO_REPOSICION,
   efectoMovimientoCaja,
   historialConSaldo,
   lecturaFondo,
   porReponerCaja,
   round2,
   saldoCaja,
+  tramoDeReposicion,
   type EntradaConSaldo,
   type EntradaHistorialCaja,
+  type TramoReposicion,
 } from '../../common/caja-chica-saldo.util';
+import {
+  armarExcelCaja,
+  tablaXlsxDeCaja,
+  type ExtraGastoXlsx,
+  type ModoExcelCaja,
+} from './caja-chica-reposicion-xlsx';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { hoyCancun, restarMeses } from '../../common/fecha-cancun.util';
 import {
@@ -70,6 +82,17 @@ type EntradaLibro = EntradaHistorialCaja & {
   autorizado_por_nombre: string | null;
 };
 
+/**
+ * Columnas de PRESENTACIÓN de los gastos del Excel de reposición (consulta
+ * aparte por id: el libro —montos, orden y saldo— sigue saliendo SOLO de
+ * `cargarLibro`, y el detalle/app no cargan embeds que no usan).
+ */
+const GASTO_XLSX_COLS =
+  'id, estatus_comprobante, estatus_facturacion, capturado_en, created_at, aeronave:aeronave!aeronave_id(matricula), creador:usuario!created_by(nombre)';
+
+/** Ids por consulta `.in(...)` (la URL de PostgREST no crece sin tope). */
+const LOTE_IDS = 200;
+
 /** PostgREST devuelve el embed como objeto o arreglo según la relación. */
 function unwrapEmbed<T>(v: unknown): T | null {
   const x: unknown = Array.isArray(v) ? (v as unknown[])[0] : v;
@@ -88,7 +111,12 @@ function nombreEmbed(v: unknown): string | null {
  */
 @Injectable()
 export class CajaChicaService {
-  constructor(private readonly supabase: SupabaseService) {}
+  constructor(
+    private readonly supabase: SupabaseService,
+    // Excel de la reposición (24-sep-2026). @Optional: los specs construyen
+    // el servicio con un solo argumento posicional.
+    @Optional() private readonly pyservices?: PyservicesService,
+  ) {}
 
   /**
    * Última REPOSICIÓN del fondo (fecha y monto) — null si nunca ha habido.
@@ -1145,5 +1173,136 @@ export class CajaChicaService {
         autorizado_por_nombre: e.autorizado_por_nombre,
       })),
     };
+  }
+
+  // ===== Excel de la REPOSICIÓN (24-sep-2026) =====
+
+  /**
+   * `GET /v1/caja-chica/movimientos/:id/reposicion.xlsx`: lo que ESA
+   * reposición repuso — los gastos (y reintegros/ajustes) del libro entre la
+   * reposición anterior y ésta, en el orden del historial y con el saldo que
+   * el historial ya trae por fila. 404 si el movimiento no existe; 409
+   * `MOVIMIENTO_NO_ES_REPOSICION` si es un reintegro/ajuste.
+   */
+  async reposicionXlsx(
+    movimientoId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const { data: mov, error } = await this.supabase.service
+      .from('caja_chica_movimiento')
+      .select('id, fondo_id, tipo')
+      .eq('id', movimientoId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!mov) {
+      throw new NotFoundException('Ese movimiento de caja chica ya no existe.');
+    }
+    const tipo = (mov as { tipo: string }).tipo;
+    if (tipo !== TIPO_REPOSICION) {
+      throw new ConflictException({
+        message: `Solo las reposiciones tienen Excel de lo repuesto; este movimiento es «${CONCEPTO_CAJA[tipo] ?? tipo}».`,
+        error: 'MOVIMIENTO_NO_ES_REPOSICION',
+        details: { movimiento_id: movimientoId, tipo },
+      });
+    }
+    const fondo = (await this.findFondo(
+      (mov as { fondo_id: string }).fondo_id,
+    )) as FondoRow;
+    const { historial } = await this.cargarLibro(fondo);
+    const tramo = tramoDeReposicion(historial, movimientoId);
+    if (!tramo) {
+      // Imposible con un libro íntegro (la reposición es del mismo fondo):
+      // si pasa, mejor un error claro que un Excel con otro periodo.
+      throw new ConflictException({
+        message:
+          'No se encontró la reposición dentro del libro del fondo; recarga e intenta de nuevo.',
+        error: 'REPOSICION_FUERA_DEL_LIBRO',
+        details: { movimiento_id: movimientoId },
+      });
+    }
+    return this.excelDeTramo('reposicion', fondo, tramo);
+  }
+
+  /**
+   * `GET /v1/caja-chica/fondos/:id/por-reponer.xlsx`: el MISMO formato para
+   * lo PENDIENTE hoy (desde la última reposición hasta el final del libro)
+   * — para descargarlo ANTES de registrar la reposición.
+   */
+  async porReponerXlsx(
+    fondoId: string,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    const fondo = (await this.findFondo(fondoId)) as FondoRow;
+    const { historial } = await this.cargarLibro(fondo);
+    const tramo = tramoDeReposicion(historial, null)!;
+    return this.excelDeTramo('pendiente', fondo, tramo);
+  }
+
+  private async excelDeTramo(
+    modo: ModoExcelCaja,
+    fondo: FondoRow,
+    tramo: TramoReposicion<EntradaLibro>,
+  ): Promise<{ buffer: Buffer; filename: string }> {
+    if (!this.pyservices) {
+      throw new ServiceUnavailableException(
+        'El generador de Excel no está disponible en este momento.',
+      );
+    }
+    const origenId = (fondo as { fondo_origen_id?: string | null })
+      .fondo_origen_id;
+    const [extras, madre] = await Promise.all([
+      this.extrasDeGastos(tramo.gastos.map((g) => g.id)),
+      origenId ? this.nombreDeFondo(origenId) : Promise.resolve(null),
+    ]);
+    const monto = Number(fondo.monto_fondo ?? 0);
+    const { payload, filename } = armarExcelCaja({
+      modo,
+      fondo: {
+        responsable: nombreEmbed(fondo.usuario) ?? 'Sin nombre',
+        moneda: fondo.moneda,
+        es_acumulada: fondo.es_acumulada === true,
+        monto_fondo: Number.isFinite(monto) && monto > 0 ? monto : null,
+        caja_madre: madre,
+      },
+      tramo,
+      extras,
+      hoy: hoyCancun(),
+      ahora: new Date(),
+    });
+    // Hoja dedicada de pyservices; si ese pyservices todavía no tiene el
+    // endpoint (deploy desfasado ⇒ null), el MISMO contenido en el export
+    // genérico ya desplegado. Nunca un 502 por el orden de los deploys.
+    const buffer =
+      (await this.pyservices.generateCajaChicaReposicionXlsx(payload)) ??
+      (await this.pyservices.generateTablaXlsx(tablaXlsxDeCaja(payload)));
+    return { buffer, filename };
+  }
+
+  /** Comprobante, facturación, matrícula y quién/cuándo capturó, por id. */
+  private async extrasDeGastos(
+    ids: string[],
+  ): Promise<Map<string, ExtraGastoXlsx>> {
+    const out = new Map<string, ExtraGastoXlsx>();
+    const unicos = [...new Set(ids)];
+    for (let i = 0; i < unicos.length; i += LOTE_IDS) {
+      const { data, error } = await this.supabase.service
+        .from('gasto')
+        .select(GASTO_XLSX_COLS)
+        .in('id', unicos.slice(i, i + LOTE_IDS));
+      // Un Excel a medias sería peor que un error: el reporte es la prueba
+      // de lo que se repuso.
+      if (error) throw new Error(error.message);
+      for (const g of (data ?? []) as Array<Record<string, unknown>>) {
+        const aeronave = unwrapEmbed<{ matricula?: unknown }>(g.aeronave);
+        out.set(g.id as string, {
+          estatus_comprobante: (g.estatus_comprobante as string | null) ?? null,
+          estatus_facturacion: (g.estatus_facturacion as string | null) ?? null,
+          matricula:
+            typeof aeronave?.matricula === 'string' ? aeronave.matricula : null,
+          capturo: nombreEmbed(g.creador),
+          capturado_en: (g.capturado_en as string | null) ?? null,
+          created_at: (g.created_at as string | null) ?? null,
+        });
+      }
+    }
+    return out;
   }
 }

@@ -10,6 +10,7 @@ import {
   Patch,
   Post,
   Query,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -24,9 +25,13 @@ import {
   UpdateFondoDto,
 } from './dto/caja-chica.dto';
 import { CajaChicaService } from './caja-chica.service';
+import { dispositionXlsx } from './caja-chica-reposicion-xlsx';
 
 const LECTURA = [Rol.ADMIN, Rol.FACTURACION, Rol.SOCIO, Rol.COORDINADOR];
 const GESTION = [Rol.ADMIN, Rol.FACTURACION];
+
+const XLSX_MIME =
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 @ApiTags('Caja chica')
 @ApiBearerAuth()
@@ -72,6 +77,24 @@ export class CajaChicaController {
     return this.caja.getFondoDetail(id);
   }
 
+  // Excel de lo PENDIENTE por reponer HOY (24-sep-2026): el mismo formato
+  // que el de una reposición registrada, para descargarlo ANTES de reponer.
+  @Get('fondos/:id/por-reponer.xlsx')
+  @Roles(...GESTION)
+  @ApiOperation({
+    summary:
+      'Excel de lo PENDIENTE por reponer hoy (gastos del libro desde la última reposición, en el orden del historial, con saldo por fila). Mismo formato que movimientos/:id/reposicion.xlsx.',
+  })
+  async porReponerXlsx(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.caja.porReponerXlsx(id);
+    return new StreamableFile(buffer, {
+      type: XLSX_MIME,
+      disposition: dispositionXlsx(filename),
+    });
+  }
+
   @Patch('fondos/:id')
   @Roles(...GESTION)
   @ApiOperation({ summary: 'Update fund (activo / moneda / notas)' })
@@ -92,6 +115,25 @@ export class CajaChicaController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.caja.createMovimiento(id, dto, c.userId);
+  }
+
+  // Excel de lo que repuso UNA reposición (24-sep-2026, pedido del
+  // cliente: «al momento de reembolsar la caja de cada uno … un Excel
+  // descargable con la información de lo que estoy reembolsando»).
+  @Get('movimientos/:id/reposicion.xlsx')
+  @Roles(...GESTION)
+  @ApiOperation({
+    summary:
+      'Excel de lo que repuso una REPOSICIÓN: encabezado (responsable, caja, moneda, fondo, fecha, monto, autorizó, registró, notas, periodo) + gastos del libro entre la reposición anterior y ésta con totales y saldo antes/después. 409 MOVIMIENTO_NO_ES_REPOSICION si el movimiento es reintegro/ajuste.',
+  })
+  async reposicionXlsx(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<StreamableFile> {
+    const { buffer, filename } = await this.caja.reposicionXlsx(id);
+    return new StreamableFile(buffer, {
+      type: XLSX_MIME,
+      disposition: dispositionXlsx(filename),
+    });
   }
 
   @Patch('movimientos/:id')

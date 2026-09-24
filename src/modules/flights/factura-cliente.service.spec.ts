@@ -1,4 +1,8 @@
-import { BadRequestException, ConflictException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  PayloadTooLargeException,
+} from '@nestjs/common';
 import { FacturaClienteService } from './factura-cliente.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 
@@ -37,6 +41,8 @@ const METODOS = [
 interface Mundo {
   /** Columnas de la migración presentes (false = 42703 en el sondeo). */
   columnas?: boolean;
+  /** Columnas del FOLIO (`20260924000001`); false = 42703 en su sondeo. */
+  columnasFolio?: boolean;
   /** Fila del vuelo. */
   vuelo?: Record<string, unknown> | null;
   /** Nombre del usuario que subió el archivo. */
@@ -53,6 +59,7 @@ function armar(m: Mundo = {}) {
   const subidas: Array<{ path: string; bytes: number; tipo?: string }> = [];
   const borrados: string[][] = [];
   const firmados: Array<{ path: string; segundos: number }> = [];
+  const selects: string[] = [];
 
   const service = {
     from(tabla: string) {
@@ -69,6 +76,18 @@ function armar(m: Mundo = {}) {
               },
             };
           }
+          if (
+            m.columnasFolio === false &&
+            columnasPedidas.includes('factura_folio')
+          ) {
+            return {
+              data: null,
+              error: {
+                code: '42703',
+                message: 'column vuelo.factura_folio does not exist',
+              },
+            };
+          }
           return { data: m.vuelo === undefined ? { id: VUELO } : m.vuelo };
         }
         if (tabla === 'usuario') return { data: m.usuario ? [m.usuario] : [] };
@@ -78,6 +97,7 @@ function armar(m: Mundo = {}) {
         q[met] = (...args: unknown[]) => {
           if (met === 'select') {
             columnasPedidas = typeof args[0] === 'string' ? args[0] : '';
+            if (tabla === 'vuelo') selects.push(columnasPedidas);
           }
           if (met === 'update') {
             updates.push(args[0] as Record<string, unknown>);
@@ -144,7 +164,7 @@ function armar(m: Mundo = {}) {
   const svc = new FacturaClienteService({
     service,
   } as unknown as SupabaseService);
-  return { svc, updates, subidas, borrados, firmados };
+  return { svc, updates, subidas, borrados, firmados, selects };
 }
 
 const pdf = (bytes = 100) => ({
@@ -162,6 +182,8 @@ describe('FacturaClienteService · migración PENDIENTE', () => {
     await expect(svc.bloqueDeVuelo(VUELO)).resolves.toEqual({
       estatus: 'FACTURADO',
       archivo: null,
+      folio: null,
+      uuid: null,
     });
   });
 
@@ -355,8 +377,18 @@ describe('FacturaClienteService · lote del listado', () => {
       { id: 'v1', facturado: true },
       { id: 'v2', facturado: false },
     ]);
-    expect(mapa.get('v1')).toEqual({ estatus: 'FACTURADO', archivo: null });
-    expect(mapa.get('v2')).toEqual({ estatus: 'SIN_FACTURA', archivo: null });
+    expect(mapa.get('v1')).toEqual({
+      estatus: 'FACTURADO',
+      archivo: null,
+      folio: null,
+      uuid: null,
+    });
+    expect(mapa.get('v2')).toEqual({
+      estatus: 'SIN_FACTURA',
+      archivo: null,
+      folio: null,
+      uuid: null,
+    });
   });
 });
 
@@ -386,5 +418,203 @@ describe('FacturaClienteService · CFDI timbrado', () => {
       svc.marcarFacturadoPorCfdi(VUELO, USER),
     ).resolves.toBeUndefined();
     expect(updates).toHaveLength(0);
+  });
+});
+
+// ===================== FOLIO (24-sep-2026) =====================
+
+const xmlCfdi = (serie: string, folio: string, uuid: string) => ({
+  buffer: Buffer.from(
+    `\uFEFF<?xml version="1.0" encoding="utf-8"?><cfdi:Comprobante Version="4.0" ` +
+      `NoCertificado="0001" Serie="${serie}" Folio="${folio}" Total="1">` +
+      `<cfdi:Complemento><tfd:TimbreFiscalDigital Version="1.1" UUID="${uuid}"/>` +
+      `</cfdi:Complemento></cfdi:Comprobante>`,
+    'utf8',
+  ),
+  nombre: 'FECMID-90255.xml',
+  // Los navegadores mandan el XML como octet-stream más veces de las que se cree.
+  mime: 'application/octet-stream',
+});
+const UUID_CFDI = 'DF1BFB5F-4D88-4F51-AC50-A7B72299128E';
+
+describe('FacturaClienteService · folio en el PATCH', () => {
+  it('captura el folio SIN archivo (caso #297: FACTURADO sin papel)', async () => {
+    const { svc, updates } = armar({
+      vuelo: { id: VUELO, facturado: false, factura_estatus: 'FACTURADO' },
+    });
+    await svc.actualizar(VUELO, { folio: '  A-1234 ' }, USER);
+    expect(updates[0]).toEqual({ factura_folio: 'A-1234', updated_by: USER });
+  });
+
+  it('estatus + folio en UNA escritura', async () => {
+    const { svc, updates } = armar({
+      vuelo: { id: VUELO, facturado: false, factura_estatus: 'SIN_FACTURA' },
+    });
+    await svc.actualizar(
+      VUELO,
+      { estatus: 'ELABORADA_ENVIADA', folio: 'B-7' },
+      USER,
+    );
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      factura_estatus: 'ELABORADA_ENVIADA',
+      factura_folio: 'B-7',
+    });
+  });
+
+  it('folio "" o null lo BORRA', async () => {
+    const { svc, updates } = armar({
+      vuelo: { id: VUELO, factura_folio: 'A-1' },
+    });
+    await svc.actualizar(VUELO, { folio: '' }, USER);
+    await svc.actualizar(VUELO, { folio: null }, USER);
+    expect(updates.map((u) => u.factura_folio)).toEqual([null, null]);
+  });
+
+  it('sin estatus ni folio ⇒ 400 y nada se escribe', async () => {
+    const { svc, updates } = armar({ vuelo: { id: VUELO } });
+    await expect(svc.actualizar(VUELO, {}, USER)).rejects.toThrow(
+      BadRequestException,
+    );
+    expect(updates).toHaveLength(0);
+  });
+
+  it('folio SIN la migración 20260924000001 ⇒ 409 explicado y NADA se escribe (ni el estatus)', async () => {
+    const { svc, updates } = armar({
+      columnasFolio: false,
+      vuelo: { id: VUELO, facturado: false, factura_estatus: 'SIN_FACTURA' },
+    });
+    await expect(
+      svc.actualizar(VUELO, { estatus: 'FACTURADO', folio: 'A-1' }, USER),
+    ).rejects.toMatchObject({
+      response: {
+        error: 'FACTURA_FOLIO_NO_DISPONIBLE',
+        details: { migracion: '20260924000001' },
+      },
+    });
+    expect(updates).toHaveLength(0);
+  });
+
+  it('sin la migración del folio, el ESTATUS solo sigue funcionando como hoy', async () => {
+    const { svc, updates, selects } = armar({
+      columnasFolio: false,
+      vuelo: { id: VUELO, facturado: false, factura_estatus: 'SIN_FACTURA' },
+    });
+    const bloque = await svc.setEstatus(VUELO, 'FACTURADO', USER);
+    expect(updates[0]).toEqual({
+      factura_estatus: 'FACTURADO',
+      updated_by: USER,
+    });
+    expect(bloque.folio).toBeNull();
+    // Nunca se pide la columna que no existe fuera de la sonda.
+    expect(
+      selects.filter(
+        (x) => x.includes('factura_folio') && x !== 'factura_folio',
+      ),
+    ).toEqual([]);
+  });
+
+  it('el bloque devuelto trae el folio guardado', async () => {
+    const { svc } = armar({
+      vuelo: {
+        id: VUELO,
+        factura_estatus: 'FACTURADO',
+        factura_folio: 'A-1234',
+        factura_uuid: null,
+      },
+    });
+    await expect(svc.bloqueDeVuelo(VUELO)).resolves.toMatchObject({
+      estatus: 'FACTURADO',
+      folio: 'A-1234',
+      uuid: null,
+    });
+  });
+});
+
+describe('FacturaClienteService · folio al subir el archivo', () => {
+  it('XML del CFDI: saca SERIE-FOLIO y el UUID solos', async () => {
+    const { svc, updates, subidas } = armar({
+      vuelo: { id: VUELO, facturado: false },
+    });
+    await svc.subirArchivo(
+      VUELO,
+      xmlCfdi('FECMID', '90255', UUID_CFDI.toLowerCase()),
+      USER,
+    );
+    expect(subidas[0].tipo).toBe('application/xml');
+    expect(updates[0]).toMatchObject({
+      factura_folio: 'FECMID-90255',
+      factura_uuid: UUID_CFDI,
+    });
+  });
+
+  it('el folio TECLEADO gana sobre el del XML', async () => {
+    const { svc, updates } = armar({ vuelo: { id: VUELO } });
+    await svc.subirArchivo(VUELO, xmlCfdi('FECMID', '90255', UUID_CFDI), USER, {
+      folio: 'VT-77',
+    });
+    expect(updates[0]).toMatchObject({
+      factura_folio: 'VT-77',
+      factura_uuid: UUID_CFDI,
+    });
+  });
+
+  it('PDF con folio tecleado: lo guarda', async () => {
+    const { svc, updates } = armar({ vuelo: { id: VUELO } });
+    await svc.subirArchivo(VUELO, pdf(), USER, { folio: 'A-1' });
+    expect(updates[0]).toMatchObject({ factura_folio: 'A-1' });
+    expect(updates[0]).not.toHaveProperty('factura_uuid');
+  });
+
+  it('PDF SIN folio: CONSERVA el folio que ya tenía (reemplazar el papel no borra el dato)', async () => {
+    const { svc, updates } = armar({
+      vuelo: { id: VUELO, factura_folio: 'A-1', factura_uuid: UUID_CFDI },
+    });
+    await svc.subirArchivo(VUELO, pdf(), USER);
+    expect(updates[0]).not.toHaveProperty('factura_folio');
+    expect(updates[0]).not.toHaveProperty('factura_uuid');
+  });
+
+  it('folio tecleado SIN la migración del folio ⇒ 409 y NADA sube', async () => {
+    const { svc, updates, subidas } = armar({
+      columnasFolio: false,
+      vuelo: { id: VUELO },
+    });
+    await expect(
+      svc.subirArchivo(VUELO, pdf(), USER, { folio: 'A-1' }),
+    ).rejects.toMatchObject({
+      response: { error: 'FACTURA_FOLIO_NO_DISPONIBLE' },
+    });
+    expect(subidas).toHaveLength(0);
+    expect(updates).toHaveLength(0);
+  });
+
+  it('XML SIN la migración del folio: el archivo se sube como hoy y el folio no se escribe', async () => {
+    const { svc, updates, subidas } = armar({
+      columnasFolio: false,
+      vuelo: { id: VUELO },
+    });
+    await svc.subirArchivo(VUELO, xmlCfdi('A', '1', UUID_CFDI), USER);
+    expect(subidas).toHaveLength(1);
+    expect(updates[0]).not.toHaveProperty('factura_folio');
+    expect(updates[0]).not.toHaveProperty('factura_uuid');
+    expect(updates[0]).toHaveProperty('factura_archivo_path');
+  });
+
+  it('más de 10 MB ⇒ 413 ARCHIVO_MUY_GRANDE con el peso, y NADA sube', async () => {
+    const { svc, subidas } = armar({ vuelo: { id: VUELO } });
+    const bytes = Math.round(10.4 * 1024 * 1024);
+    const err = await svc
+      .subirArchivo(VUELO, pdf(bytes), USER)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PayloadTooLargeException);
+    expect(err).toMatchObject({
+      response: {
+        error: 'ARCHIVO_MUY_GRANDE',
+        message: 'El archivo pesa 10.4 MB y el máximo son 10 MB.',
+        details: { bytes, limite_bytes: 10 * 1024 * 1024 },
+      },
+    });
+    expect(subidas).toHaveLength(0);
   });
 });

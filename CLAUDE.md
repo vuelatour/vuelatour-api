@@ -992,14 +992,21 @@ aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
       El **blanket NO toca lo que YA VOLÓ** (invariante 1): el UPDATE lleva
       `.is('taco_salida', null).is('taco_llegada', null)` y NO corre si el
       vuelo está EN_VUELO/COMPLETADO (ahí el cambio operativo se hace por
-      `assign`/`reassign-aircraft`, que validan y avisan). El vuelo y el
-      snapshot SÍ conservan el avión nuevo y `revise` devuelve `avisos[]`
-      (aditivo, siempre presente) con el aviso de TALLER del avión nuevo y
-      qué tramos no se movieron. `quotes.create` también devuelve `avisos[]`
+      `assign`/`reassign-aircraft`, que validan y avisan). Con el vuelo SIN
+      volar, el vuelo y el snapshot conservan el avión nuevo y `revise`
+      devuelve `avisos[]` (aditivo, siempre presente) con el aviso de TALLER
+      del avión nuevo. `quotes.create` también devuelve `avisos[]`
       (solo taller; usa `avisoTallerDe`, NO el candado del squawk: crear una
       cotización nunca fue una asignación). `quickAdjust` y `reviseParaGrupo`
       pasan `conservarAvionOperativo` ⇒ nunca hay cambio deliberado ⇒ ni
       pre-check, ni blanket, ni aviso de taller.
+    - **VUELO QUE YA VOLÓ = CAMBIO DE AVIÓN SOLO COMERCIAL (24-sep-2026, cotización #338).** Fuente única `estadoVueloVolado(estado, tramos)` (`quotes/aeronave-revision.util.ts`): `ya_volo` = EN_VUELO, COMPLETADO o algún tramo VIVO con `taco_salida`/`taco_llegada` (un 0 cuenta; un tramo cancelado no); `termino` = COMPLETADO o el ÚLTIMO tramo vivo (por `orden`) con taco. Con `ya_volo`, `resolverAeronaveDeRevision({ yaVolo })` NUNCA marca cambio deliberado: precio y snapshot con el avión del DTO («se cobra como Cessna»), `vuelo.aeronave_id` = el del PRIMER TRAMO VIVO (respaldo la cabecera, JAMÁS el del DTO; una cabecera desalineada se re-alinea sin push), ningún tramo se toca, sin pre-check de squawk/taller ni push de «cambio de avión», y `cambio_solo_comercial` agrega a `avisos[]` el texto único `avisoAvionSoloComercial` («El vuelo ya voló en N4142R: el cambio de avión solo cambia con qué se cobra (Cessna 206); la operación no se modifica.»). `quoteLikeParaPreview` usa la MISMA regla. EN_VUELO a medio camino (tramo 1 volado, regreso pendiente) también es SOLO COMERCIAL: el cambio operativo se hace con `assign`/`reassign-aircraft`. Antes: #338 (cotizado y volado en N4142R, 2 tramos con tacos, COMPLETADO, `itinerario_operativo` true) se recotizó «se cobra como cessna, pidieron cessna» y la revisión lo leyó como asignación ⇒ cabecera XA-VGV con los tramos en N4142R (lista, app y «aeronave utilizada» decían XA-VGV) y piloto+copiloto recibieron «Ahora vuela en XA-VGV» y «el REGRESO ahora sale 24/09/26, 10:00» de un vuelo ya aterrizado. `quickAdjust` y `reviseParaGrupo` (`conservarAvionOperativo`) no cambian: nunca reasignan ni dicen «solo comercial».
+      - **Fechas del VUELO** (`resolverFechasDeRevision`): `fecha_vuelo`/`fecha_traslado_final` NO son solo de la cotización. `fecha_vuelo` ancla el mes del dinero y el calendario; las dos alimentan `fecha_fin` (trigger GREATEST), la cola de Google Calendar, el día del regreso del balance por avión y, vía `replaceEscalas`, la `fecha_salida_plan` de los tramos extremos (y `flights.update` no edita un COMPLETADO). La salida no se escribe con `ya_volo` y el regreso no con `termino`. Un viaje de varios días EN_VUELO sí reagenda —y avisa— su regreso pendiente. Si el DTO traía otra fecha, `avisos[]` lo dice (`avisoFechaConservada`) y a `replaceEscalas` baja la fecha persistida. Con `reviseParaGrupo` sobre un hijo volado la fecha del grupo tampoco se escribe (groups no propaga el aviso).
+      - **Fecha de un TRAMO que ya voló** (revisión adversaria 24-sep-2026, `tramoConservaFechaPlan`): un tramo con taco y con `fecha_salida_plan` la conserva aunque el cotizador traiga una EXPLÍCITA en `escalas[i].fecha_salida_plan` (vuelos con `itinerario_operativo = false`). Si difiere, `avisos[]` trae `avisoFechaTramoVoladoConservada` («El tramo 2 (PTU → CUN) ya voló: su fecha de salida no se cambia desde la cotización (movería el calendario); se conserva la del vuelo: …»). La vista previa hace lo mismo. Un tramo volado SIN fecha (legado) se completa como siempre.
+      - **Avisos a tripulación de `revise`**: reagenda solo de lo que SÍ se escribió (`salida_cambio`/`regreso_cambio`); «cambio de avión» nunca con `ya_volo`; pernocta y el aviso de itinerario de `replaceEscalas` (`silenciarTripulacion`) nunca con `termino` ni en CANCELADO.
+      - **`aeronave_utilizada`** (`quotes.findById`, `flights.snapshot` y, a través del quote-like, el PDF interno) = ficha del PRIMER TRAMO VIVO con herencia (`avionesUtilizados(...)[0]`), respaldo la cabecera — nunca la cabecera a secas. Campo ADITIVO `aeronave_cotizada_vs_utilizada_difiere` (por ID; externo o sin alguno ⇒ false).
+      - **Red de seguridad**: `alerts.sincronizarEspejoIda` (cron 08:00 Cancún) re-alinea cada día cabecera ← primer tramo vivo, sin push. Ningún camino de escritura de `vuelo.aeronave_id` corre en COMPLETADO (`assign`, `assignEscala`, `reassignAircraft` y externo lo bloquean; `combinarVuelos` solo acepta vuelos sin volar). OJO: el blanket de `assign` en EN_VUELO todavía mueve tramos con taco (pendiente de decisión, invariante 1).
+      - Specs: `aeronave-revision.util.spec.ts`, `quotes.service.aeronave.spec.ts`, `quotes.service.caso338.spec.ts` (DATOS REALES de prod: precio exacto de la v2 $1,440.00 · IVA $286.40 · $2,076.40, cero notificaciones, control CONFIRMADO que sí reasigna y avisa, EN_VUELO a medio camino, grupo, vista previa y fecha por tramo), `flights.service.aeronave-utilizada.spec.ts` y el caso #338 de `quotes-pdf-interno.util.spec.ts`.
 
 15. **Método de cobro: PREVISTO (vuelo) vs REAL (cobro) — 11-sep-2026.**
     `cobro_vuelo.metodo_cobro` es lo que REALMENTE se recibió y es la ÚNICA
@@ -1582,6 +1589,105 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       **UUID ya registrado se reutiliza** (`ya_existia: true`) en vez del 409
       sin salida. Quien marca el gasto FACTURADA sigue siendo el trigger
       `gasto_sync_facturacion`; `estatus_comprobante` no se toca.
+    - **FOLIO de la factura del servicio (24-sep-2026, API 0.0.29,
+      migración `20260924000001` APLICADA el 24-sep-2026).** «Al descargar el
+      reporte en Excel sí aparece la columna de factura pero no el folio de
+      la factura que subí»: la columna solo leía la tabla `factura` (CFDI
+      del PAC, **0 filas en prod**) y la factura subida no guardaba folio.
+      Hoy `vuelo.factura_folio` (1–40, sin espacios en los extremos; vacío
+      = NULL) y `vuelo.factura_uuid` (UUID fiscal en MAYÚSCULAS). El bloque
+      `factura_cliente` gana `folio` y `uuid` (aditivos). `POST
+      …/archivo` acepta el campo de texto `folio` (en multipart es un campo
+      más del formulario; **el DTO lo declara**, o `forbidNonWhitelisted`
+      tumbaría la subida) y, si el archivo es el XML del CFDI, saca
+      `SERIE-FOLIO` (o solo el Folio) y el UUID con un parser TOLERANTE sin
+      dependencias (`extraerDatosCfdi`: BOM, UTF-16, CFDI 3.2 en minúscula,
+      entidades); el folio TECLEADO gana. Un PDF sin folio **conserva** el
+      folio que ya había; el UUID solo cambia con un XML nuevo. `PATCH
+      …/factura-cliente` acepta `{ estatus?, folio? }` (al menos uno; `folio:
+      null|""` lo borra) — captura sin archivo, también para los vuelos ya
+      marcados «Facturado» (caso #297). Sin la migración: leer da `folio:
+      null`, subir sin folio funciona igual, y MANDAR un folio responde 409
+      `FACTURA_FOLIO_NO_DISPONIBLE` **antes** de escribir o subir nada.
+    - **La columna «FACTURA VUELATOUR» de los Excel tiene FUENTE ÚNICA**:
+      `flights/factura-cliente-etiquetas.ts#etiquetasFacturaDeVuelos` (en
+      lote, 2 consultas por cada 200 vuelos, tolerante a las dos
+      migraciones) sobre la cascada PURA `etiquetaFacturaVuelo`: CFDI vivo
+      (`serie-folio` no cancelado) → `vuelo.factura_folio` → etiqueta del
+      estatus («Facturado» / «Factura elaborada y enviada») → vacío. La usan
+      el Libro Dinero (hoja 1 y «otros ingresos») y «otros movimientos» del
+      Balance. **Nadie vuelve a armar su propio `facturaPorVuelo`** con la
+      tabla `factura` a secas.
+    - **Diagnóstico de la subida (24-sep-2026)**: en prod el #297 quedó
+      FACTURADO (Mary Cruz, 23-sep 14:38 Cancún) SIN archivo y
+      `facturas/vuelos/` está VACÍO. **Los logs de Supabase (edge_logs +
+      storage_logs) prueban que la subida SÍ funcionó**: 14:28:29 Cancún
+      `POST storage facturas/vuelos/dc204a2f…/33c47a79….pdf` 200 (PDF de
+      51,220 bytes) + `PATCH vuelo`; «Ver» a las 14:32 y 14:37; **14:37:46
+      `quitarArchivo` (`PATCH vuelo` + `DELETE storage` del mismo objeto,
+      `ObjectRemoved:Delete`)**; 14:38 dos cambios de estatus. No se perdió
+      al subir: se QUITÓ a mano, y como `quitarArchivo` borra el objeto del
+      bucket, no hay cómo recuperarlo. Del lado API se reprodujo además el
+      flujo real (multipart `file` + `folio`, PDF de 2.5 MB) por toda la
+      cadena y pasa; lo que SÍ estaba mal: `FileInterceptor`
+      de Nest convierte el MulterError en HttpException ANTES del filtro y
+      el operador recibía **«File too large» / «Unexpected field» en
+      inglés** (la rama MulterError del filtro era código muerto). Hoy
+      `all-exceptions.filter#traducirErrorDeSubidaNest` responde 413
+      `ARCHIVO_MUY_GRANDE` «El archivo pesa aprox. X MB…» (Content-Length),
+      400 `CAMPO_ARCHIVO_INVALIDO` y 400 `SUBIDA_ILEGIBLE`; multer corta en
+      `LIMITE_MULTER_FACTURA_BYTES` (10 MB + 1 MB de margen) para que el
+      servicio diga el peso EXACTO (413 `ARCHIVO_MUY_GRANDE`, `details:
+      { bytes, limite_bytes }`). OJO panel: en Vercel el cuerpo de una
+      server action o route handler tiene tope DURO de **4.5 MB**
+      (`FUNCTION_PAYLOAD_TOO_LARGE`), por debajo de los 10 MB del contrato
+      — por eso el panel sube DIRECTO al API desde el navegador (no fue la
+      causa del #297, era un PDF de 50 KB).
+
+26. **CAJA CHICA: el saldo tiene FUENTE ÚNICA y el Excel de la reposición
+    la LEE (24-sep-2026, API 0.0.29).** Todo saldo, «por reponer» y saldo
+    corrido sale de `common/caja-chica-saldo.util.ts` (`saldoCaja`,
+    `porReponerCaja`, `historialConSaldo`). El libro de un fondo lo arma
+    SOLO `CajaChicaService.cargarLibro` (movimientos + gastos `EFECTIVO`
+    del dueño en la moneda del fondo).
+    - **Qué repone una reposición** = `tramoDeReposicion(historial, id)`:
+      las entradas del libro entre la reposición ANTERIOR (exclusiva) y
+      ésta, en el orden de `compararEntradasCaja` (un gasto fechado el día
+      de la reposición entra en ella aunque se capture después — la misma
+      regla del candado `GASTO_EN_REPOSICION`). Saldo/por reponer antes y
+      después se LEEN de las filas del historial; `diferencia = repuesto −
+      por reponer antes` (> 0 de más, < 0 quedó pendiente). Con `id = null`
+      es lo PENDIENTE hoy. Spec con libro sintético:
+      `common/caja-chica-tramo.util.spec.ts`.
+    - `GET /v1/caja-chica/movimientos/:id/reposicion.xlsx` (GESTION; 404 si
+      no existe; 409 `MOVIMIENTO_NO_ES_REPOSICION` si es reintegro/ajuste) y
+      `GET /v1/caja-chica/fondos/:id/por-reponer.xlsx` (mismo formato, lo
+      pendiente hoy). Payload PURO en `caja-chica/caja-chica-reposicion-xlsx.ts`
+      → pyservices `POST /reportes/caja-chica-reposicion.xlsx` (hoja propia:
+      el export genérico ancla el ancho de la columna A al encabezado de la
+      tabla y cortaba «Por reponer antes de esta reposición» a 12
+      caracteres). Si ese pyservices todavía no tiene el endpoint (404 ⇒
+      `generateCajaChicaReposicionXlsx` devuelve null) se cae SOLO al export
+      genérico `/pdf/tabla-xlsx` con el mismo contenido (`tablaXlsxDeCaja`):
+      el orden de deploy no importa. Contenido: encabezado (responsable,
+      caja, moneda, fondo, caja madre, fecha, monto, autorizó, registró,
+      notas, periodo, reposición anterior) + tabla en el orden del libro con
+      saldo y por reponer POR FILA del historial + fila TOTAL + totales (Σ,
+      reintegros/ajustes, por reponer antes, repuesto, diferencia, saldo
+      antes/después; con reposición anterior, además **«Saldo del libro al
+      abrir el periodo» y «Por reponer que venía de antes»** = fila de la
+      reposición anterior — sin ellas el Excel no cuadraba a la vista: Mary
+      «Σ pendientes $2,738.99» vs «POR REPONER HOY $29,812.92», Alexander
+      «Σ $3,658» vs repuesto $3,656 «cuadra»; el cuadre exacto es por saldo:
+      abrir − Σ gastos + reintegros/ajustes = saldo antes); los gastos capturados DESPUÉS de registrar la
+      reposición van resaltados en naranja con un aviso. Las columnas se
+      copian a mano entre `COLUMNAS_EXCEL_CAJA` y `caja_chica_xlsx.COLUMNAS`
+      (paridad manual). Los
+      datos de presentación (comprobante, facturación, matrícula, quién
+      capturó) se leen APARTE por id — `cargarLibro` no carga embeds que el
+      detalle y la app no usan. Nombre: «Reposicion caja <responsable>
+      <YYYY-MM-DD>.xlsx» / «Por reponer caja <responsable> <hoy>.xlsx»
+      (ASCII + `filename*`).
 
 ## Convenciones NestJS
 
@@ -1973,92 +2079,120 @@ EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
     arriba; el viejo `T1 · N4142R · CUN-PTU · Luis · 3 pax` (un evento por
     tramo, `T2 Ferry · …`, `⚠ permiso pendiente`) YA NO EXISTE: el ferry y el
     permiso viven en la descripción y el color.
-  - **SEMÁFORO DE 5 COLORES (pedido del cliente, 22-sep-2026; sustituye a la
-    paleta de 10 del 12-sep)**: «para que en los calendarios no se vean tantos
-    colores, es mejor que únicamente tenga estos colores del semáforo, pero los
-    colores que tiene cada avión configurados los seguiremos respetando
-    principalmente en los reportes del balance individual y general en los
-    excel que se generan, y es que en realidad los colores son para el reporte
-    de excel nada más». Aplica a las TRES superficies (panel, app y Google).
-    - **Los cinco, y nada más** (`SEMAFORO` en
-      `calendar/colores-calendario.util.ts`, fuente única): gris `#64748B`
-      **Tentativo** · verde `#22C55E` **Confirmado** · amarillo `#F59E0B`
-      **Permiso o asunto pendiente** · rojo `#EF4444` **Cancelado** · azul
-      `#3B82F6` **Descanso 💤**. `LEYENDA_SEMAFORO` y `NOTA_COLOR_AVION`
-      exportan el texto EXACTO de la leyenda (5 renglones en ese orden + la
-      nota «El color de cada avión ya no se usa en el calendario: se conserva
-      para los reportes de Excel (balance individual y general)»); panel y app
-      los copian, no los reinventan.
-    - **`aeronave.color_calendario` YA NO PINTA NINGÚN CALENDARIO.** La columna
-      sigue viva, se sigue editando en la ficha del avión (con la etiqueta
-      «Color en los reportes de Excel») y su ÚNICO consumidor son los Excel de
-      pyservices (`balance_avion_xlsx.py`, balance general). `colorAvion` sigue
-      en `ParamsColorVuelo` para no romper llamadores, pero se IGNORA
-      (`@deprecated`), y el spec lo prueba con hex de la flota real.
-    - **Precedencia ÚNICA** (`colorVueloSistema`, vuelo o tramo, propio o
-      EXTERNO —el externo ya no tiene color propio—): **cancelado (rojo) >
-      tentativo (gris) > pendiente (amarillo) > confirmado (verde)**. Tentativo
-      = TODO estado anterior a CONFIRMADO (`ESTADOS_TENTATIVOS` = RESERVA,
-      SOLICITUD, COTIZADO), no solo la RESERVA. Pendiente = `vueloPendiente` =
-      permiso de pista PENDIENTE **o** `vueloSinAsignar` (falta avión o
-      piloto); cualquier bandera nueva de «pendiente» se suma AHÍ, no en el
-      color. Verde es el DEFAULT (por descarte, para que un estado nuevo del
-      enum nunca se quede sin color). `vueloSinAsignar` NO cambió de semántica
-      y `sin_asignar` sigue viajando en `GET /v1/calendar`, junto con el
-      ADITIVO `tentativo` (la app ya no puede deducirlo del color: gris es gris
-      para los tres estados).
+  - **SEMÁFORO DE 6 COLORES (pedidos del cliente del 22-sep-2026 y del
+    24-sep-2026; sustituye a la paleta de 10 del 12-sep y a la de 5 del
+    22-sep)**. 22-sep: «para que en los calendarios no se vean tantos colores
+    […] los colores que tiene cada avión configurados los seguiremos
+    respetando principalmente en los reportes del balance individual y
+    general en los excel […] en realidad los colores son para el reporte de
+    excel nada más». 24-sep: «Ale quiere cambiar el color del descanso y
+    agregar el de cobrado (este me imagino se cambiaría en automático cuando
+    ya esté cobrado)». Aplica a las TRES superficies (panel, app y Google).
+    - **Los seis, y nada más** (`SEMAFORO` en
+      `calendar/colores-calendario.util.ts`, fuente única), en el ORDEN de la
+      lista del cliente: gris `#64748B` **Tentativo** · amarillo `#F59E0B`
+      **Pendiente (permiso)** · verde `#22C55E` **Confirmado** · azul
+      `#3B82F6` **Pagado** · rojo `#EF4444` **Cancelado** · morado `#8B5CF6`
+      **Descanso 💤**. **El azul CAMBIÓ DE DUEÑO el 24-sep-2026**: era del
+      descanso y hoy es del PAGADO. Cualquier texto que diga «azul =
+      descanso» está viejo. `LEYENDA_SEMAFORO` (6 renglones
+      `{color, etiqueta, ayuda?}`), `AYUDA_PENDIENTE` (tooltip de «Pendiente
+      (permiso)»: «Permiso de pista pendiente. También se pinta así el vuelo
+      confirmado que todavía no tiene avión o piloto asignado.») y
+      `NOTA_COLOR_AVION` exportan el texto EXACTO. El panel
+      (`lib/admin/calendario-semaforo.ts`) y la app
+      (`core/theme/semaforo_calendario.dart`) los COPIAN byte por byte
+      (verificado el 24-sep, emoji incluido) y los dos arrancan su tooltip
+      con `AYUDA_PENDIENTE`.
+    - **`aeronave.color_calendario` YA NO PINTA NINGÚN CALENDARIO.** La
+      columna sigue viva y se sigue editando en la ficha del avión (etiqueta
+      «Color en los reportes de Excel»). Su ÚNICO consumidor son los Excel
+      de pyservices (`balance_avion_xlsx.py`, balance general).
+      `colorAvion` sigue en `ParamsColorVuelo` para no romper llamadores,
+      pero se IGNORA (`@deprecated`).
+    - **Precedencia ÚNICA** (`colorVueloSistema`; vuelo o tramo, propio o
+      EXTERNO; el externo no tiene color propio): **cancelado (rojo) >
+      tentativo (gris) > pendiente (amarillo) > PAGADO (azul) > confirmado
+      (verde)**. Tentativo = `ESTADOS_TENTATIVOS` (RESERVA, SOLICITUD,
+      COTIZADO). Pendiente = `vueloPendiente` = permiso PENDIENTE **o**
+      `vueloSinAsignar` (confirmado propio sin avión o piloto); cualquier
+      bandera nueva de «pendiente» se suma AHÍ. Pagado = `vueloPagado`. El
+      verde es el DEFAULT por descarte. Consecuencias: un pagado con permiso
+      pendiente o sin asignar se ve AMARILLO (el pendiente operativo no se
+      esconde detrás del dinero); una RESERVA o COTIZADO pagada se ve GRIS;
+      un cancelado con anticipo retenido se ve ROJO.
+    - **PAGADO = `vuelo.cobrado`** (fuente única: la mantienen
+      `FlightsService.refreshCobradoFlag` y su gemelo
+      `quotes.refreshCobradoTrasRecotizar` con `cobrosEnUsd`:
+      `monto_total > 0 && cobrado ≥ total − 1`). `vueloPagado` NO
+      recalcula: exige `cobrado === true` y, si llega `montoTotalUsd`, que
+      el total sea > 0. Es un cinturón para que un vuelo en $0 o de cliente
+      interno NUNCA salga azul; en prod, el 24-sep ninguno de los 185
+      cobrados tenía total ≤ 0. Es dato del VUELO: todos sus tramos lo
+      comparten. Nadie lo marca a mano: se pinta al registrar el cobro que
+      liquida el vuelo y regresa a verde al borrar o reembolsar, porque
+      create, update, delete, reembolso y grupo pasan todos por
+      `refreshCobradoFlag`. `GET /v1/calendar` lee `cobrado` en la MISMA
+      consulta de vuelos (sin N+1) y manda el ADITIVO `pagado: boolean` en
+      cada evento de VUELO. Es el DATO, como `sin_asignar`/`tentativo`:
+      puede ser true aunque gane otro color, y ningún cliente decide un
+      color con él.
     - **Mantenimiento = AMARILLO siempre** (`colorMantenimientoSistema`),
-      PROGRAMADO y EN_TALLER por igual: un servicio es un asunto pendiente
-      hasta que se completa, y el rojo ya significa CANCELADO. El taller se lee
-      en el título (`🔧 En taller · …`). **Evento NO-vuelo = VERDE**
-      (`colorEventoFlotaSistema`, ignora el avión): es una cita en firme y lo
-      distingue el 📌. `evento_flota` no tiene estado CANCELADO (se borra); si
-      algún día lo tuviera, ahí se decide su rojo.
-    - **Google**: `google-evento.util` traduce con `colorIdGoogleDe`
-      (redmean, PURO) y `colorIdGoogleSemaforo` (excepciones fijas primero).
-      Tabla viva, congelada en `google-evento.util.spec.ts` — **cinco hex,
-      cinco colorId DISTINTOS, cero colisiones** (antes 18 cosas se repartían
-      los 11 colores y el color no era un dato confiable): gris #64748B →
-      **8** Grafito · verde #22C55E → **2** Salvia · amarillo #F59E0B → **5**
-      Banana · rojo #EF4444 → **11** Tomate · azul #3B82F6 → **7** Pavo real.
-      Libres: 1 Lavanda, 3 Uva, 4 Flamenco, 6 Mandarina, 9 Arándano, 10
-      Albahaca. El ROJO es la ÚNICA excepción al «más cercano» (por redmean
-      caería en 6 Mandarina, d≈3 714 vs 30 217, y «cancelado» debe leerse
-      rojo) y **hoy no viaja**: el evento de un cancelado se BORRA. Se dejó
-      fijo para que cualquier rojo futuro salga rojo. El VERDE sale del más
-      cercano, sin excepción: Albahaca queda a ≈22 269 y es un verde muy
-      oscuro para el color mayoritario del calendario. La excepción «EN_TALLER
-      = 11 Tomate» se RETIRÓ. `calendar-sync` sigue sin constantes de colorId
-      propias: si el cliente cambia un color, se cambia en la util y panel +
-      app + Google se mueven JUNTOS.
-    - **Congelado en tres specs a propósito**: `colores-calendario.util.spec.ts`
-      (los 5 hex, la leyenda, la precedencia, `colorAvion` ignorado),
-      `calendar.service.spec.ts` («semáforo de 5 colores», los hex de
-      `GET /calendar` + `sin_asignar`/`tentativo`) y `google-evento.util.spec.ts`
-      (la tabla hex → colorId). Mover un color rompe las tres.
-    - **DESPLIEGUE**: tras el deploy hay que **RE-PINTAR Google** — los eventos
-      ya publicados conservan su colorId viejo hasta que se reescriben. `POST
-/v1/calendar/resync` (ADMIN, ventana `[hoy−30d, hoy+365d]`) los reescribe
-      todos; si no, el reconcile nocturno (00:15 Cancún) lo hace esa misma
-      noche. La cola NO se entera sola: el color cambió en el código, no en una
-      fila. Foto de prod del 22-sep-2026 para verificar el resync (ventana
-      `[−30d, +365d]`): **111 vuelos vivos → 8 grises (5 COTIZADO + 3 RESERVA),
-      13 amarillos, 90 verdes**, más 13 cancelados (rojos en el sistema, sin
-      evento en Google), 14 descansos azules, 2 eventos de flota verdes y 2
-      mantenimientos con fecha que **no pintan nada** (los dos COMPLETADO y
-      sin `google_calendar_id`: el barrido y la cola los procesan como
-      «borrar», que es un no-op — corrección de la revisión adversaria
-      22-sep-2026, antes esta nota decía «0 mantenimientos con fecha» y quien
-      contara filas en la BD creería que faltó algo). Total del re-pintado:
-      **142 items** (124 vuelos —111 vivos + 13 cancelados—, 14 descansos,
-      2 eventos, 2 mantenimientos). Los 5 COTIZADO son el cambio más visible:
-      antes salían con el color de su avión y ahora son GRISES.
+      PROGRAMADO y EN_TALLER por igual; el taller se lee en el título
+      («🔧 En taller · …»). **Evento NO-vuelo = VERDE**
+      (`colorEventoFlotaSistema`): es una cita en firme y lo distingue el
+      📌.
+    - **Google, 6 colorId DISTINTOS** (`colorIdGoogleDe` redmean PURO y
+      `colorIdGoogleSemaforo`, que aplica primero las excepciones fijas de
+      `COLOR_ID_FIJO`): gris #64748B → **8** Grafito · amarillo #F59E0B →
+      **5** Banana · verde #22C55E → **2** Salvia · azul #3B82F6 (pagado) →
+      **7** Pavo real (redmean d≈9 983) · rojo #EF4444 → **11** Tomate
+      (FIJO: redmean daría 6 Mandarina, un naranja; hoy no viaja porque el
+      evento de un cancelado se BORRA) · morado #8B5CF6 (descanso) → **3**
+      Uva (FIJO: redmean daría 1 Lavanda, d≈12 469, un azul lila que junto
+      al 7 del pagado se lee «otro azul»; Uva es el único morado de verdad
+      de Google). Libres: 1 Lavanda, 4 Flamenco, 6 Mandarina, 9 Arándano y
+      10 Albahaca. El mantenimiento va en 5 y el evento de flota en 2.
+      `calendar-sync` no tiene colorId propios: si el cliente cambia un
+      color, se cambia en la util y panel, app y Google se mueven JUNTOS.
+    - **TRIGGER: toda columna que decida el título, la descripción o el
+      COLOR del evento va en `after update of …` de
+      `trg_vuelo_calendar_sync`.** `cobrado` entró con
+      `20260924000002_calendar_sync_cobrado.sql` (lista de `20260917000001`
+      + `cobrado`, verificada contra prod con `pg_get_triggerdef`). Sin
+      ella, liquidar un vuelo solo escribe `cobrado` + `updated_by`, no se
+      encola nada y Google se queda verde hasta el reconcile de las 00:15.
+      `calendar_sync_encolar()` no cambió: compara `to_jsonb(OLD/NEW)`.
+    - **Congelado en specs**: `colores-calendario.util.spec.ts` (6 hex,
+      leyenda, `AYUDA_PENDIENTE`, tabla de precedencia con pagado,
+      `vueloPagado`, `colorAvion` ignorado), `calendar.service.spec.ts`
+      («semáforo de 6 colores» + `pagado` + `cobrado` en el select),
+      `google-evento.util.spec.ts` (tabla de 6 colorId) y
+      `calendar-sync.service.spec.ts` (7 para el pagado, 3 para el descanso,
+      `cobrado` en `VUELO_SELECT`). Además, el panel
+      (`calendario-semaforo.test.ts`, `leyenda-semaforo.test.tsx`,
+      `sin-hex-sueltos.test.ts`) y la app (`semaforo_calendario_test.dart`)
+      guardan una COPIA de la paleta, la leyenda y `AYUDA_PENDIENTE`: si
+      cambias uno de los tres repos, cámbialos juntos.
+    - **DESPLIEGUE (24-sep-2026)**: API y migración (entre ellos el orden da
+      igual), después panel, después APK 1.1.3+72; luego
+      `POST /v1/calendar/resync` (ADMIN, ventana `[hoy−30d, hoy+365d]`) para
+      RE-PINTAR lo ya publicado, o esperar al reconcile de las 00:15. La
+      cola no se entera sola de un color que cambió en el código. Fotos de
+      prod del 24-sep:
+      - Google, por vuelo: 122 vuelos; **68 pasan de 2 a 7**, 24 siguen en
+        verde, 16 amarillos, 6 grises y 8 cancelados sin evento. **13
+        descansos pasan de 7 a 3**.
+      - Sistema (`listEvents` real), por evento: 130 eventos de 121 vuelos =
+        69 azules, 24 verdes, 18 amarillos, 10 grises y 9 rojos; 19 días de
+        descanso en morado.
+      Mientras no corra el resync, en Google un descanso viejo y un vuelo
+      recién liquidado comparten el 7.
     - **Residuo conocido (sin migración, a propósito)**: el fan-out
       `trg_aeronave_calendar_fanout` sigue escuchando
-      `aeronave (matricula, color_calendario)`, así que cambiar el color de un
-      avión re-encola sus vuelos y republica eventos IDÉNTICOS. Es ruido
-      inofensivo (el evento no cambia) y quitar `color_calendario` de esa lista
-      es una migración de un renglón que no urge.
+      `aeronave (matricula, color_calendario)`, así que cambiar el color de
+      un avión re-encola sus vuelos y republica eventos IDÉNTICOS. Es ruido
+      inofensivo.
   - **El `motivo` de `sync-estado` no hace eco de la credencial** (revisión
     adversaria 12-sep-2026): `parsearServiceAccountJson` pasa el mensaje de
     `JSON.parse` por `motivoJsonSinValor`, que borra cualquier fragmento
@@ -2179,6 +2313,24 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **APLICADA (24-sep-2026 vía MCP, tras el dry-run A/B/C en prod: `okA` y
+  `DRYRUN_OK · C1 trigger con cobrado · C2 lista intacta · C3 cobrado encola ·
+  C4 notas_internas no encola · C5 sin cambio no encola`; después, re-pintado
+  de Google: 124 vuelos + 13 descansos + 2 eventos + 2 mantenimientos, cola
+  drenada sin errores)** — `20260924000002_calendar_sync_cobrado.sql`
+  (semáforo de 6): recrea `trg_vuelo_calendar_sync` con la lista de
+  `20260917000001` + `cobrado`, para que el cobro que liquida el vuelo
+  re-pinte su evento de Google en azul. No crea tablas ni escribe filas.
+- **APLICADA (24-sep-2026 vía MCP, tras el dry-run de 6 pasos en prod:
+  `DRYRUN_OK · cola 0, vuelos 301, con estatus 1`)** — `20260924000001_vuelo_factura_folio.sql`: FOLIO y UUID
+  fiscal de la factura del servicio (`vuelo.factura_folio` text 1–40 con
+  CHECK sin espacios en los extremos, `vuelo.factura_uuid` text con CHECK
+  de formato en mayúsculas). **Aditiva, sin triggers, sin backfill.**
+  Correr ANTES el dry-run de 6 pasos de su cabecera (UPDATEs reales en
+  `begin … rollback`; comprueba CHECKs, `updated_at` y que NO encola nada
+  en `calendar_sync_cola`) y después `get_advisors`. El API 0.0.29 ya es
+  desplegable sin ella (sonda `columnaOpcional` de `vuelo.factura_folio`:
+  se enciende sola en ≤ 10 min al aplicarla).
 - **APLICADA (23-sep-2026 vía MCP, tras correr el dry-run de 7 pasos de la
   cabecera en prod: `DRYRUN_OK · cola 0, vuelos 294, recibidas 0`; después
   columnas, CHECK, índice y `pdf_url` verificados, backfill 0 filas,
@@ -2441,12 +2593,11 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
 - **Google Calendar (12-sep-2026)**: qué hacer con los ~305 eventos que la
   oficina capturó A MANO en `aerochartercancunflightplanner@gmail.com`
   (borrarlos, dejarlos conviviendo o deduplicar contra los del sistema) lo
-  decide el CLIENTE: hoy no se tocan. **Las colisiones de color en Google se
-  CERRARON el 22-sep-2026** con el semáforo de 5 (5 hex → 5 colorId distintos,
-  ver el bullet del espejo): ya no hay que decidir cómo repartir 11 colores
-  entre 18 cosas. Lo que queda pendiente de ESE cambio es operativo: correr
-  `POST /v1/calendar/resync` tras el deploy para re-pintar lo ya publicado
-  (o esperar al reconcile de las 00:15).
+  decide el CLIENTE: hoy no se tocan. **Las colisiones de color en Google
+  están CERRADAS**: semáforo de 5 el 22-sep-2026 y de 6 el 24-sep-2026 (6
+  hex → 6 colorId distintos, ver el bullet del espejo). Lo pendiente es
+  operativo: después de cada cambio de color, correr
+  `POST /v1/calendar/resync` (o esperar al reconcile de las 00:15).
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.
