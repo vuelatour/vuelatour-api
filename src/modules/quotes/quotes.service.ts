@@ -4,7 +4,9 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
+import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
@@ -108,7 +110,13 @@ import {
   TipoVuelo,
 } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
-import { EstadoVuelo, ListQuotesQuery } from './dto/list-quotes.query';
+import {
+  EstadoVuelo,
+  ListQuotesQuery,
+  VecinosQuotesQuery,
+  type QuoteVecino,
+  type QuoteVecinosRespuesta,
+} from './dto/list-quotes.query';
 import {
   PdfPresentacionVueloDto,
   PdfVisibilidadDto,
@@ -295,6 +303,63 @@ const VUELO_COLS =
 const VUELO_COLS_DETALLE =
   `${VUELO_COLS}, created_by, creador:usuario!created_by(nombre)` as const;
 
+/**
+ * Columnas de una cotización VECINA (flechas del detalle, 24-sep-2026): lo
+ * justo para el texto «#341 · 27 sep · Maqar» — nada de `VUELO_COLS`.
+ */
+// Tipada como `string`: la fila se mapea a mano (`vecinoDeFila`), así que no
+// hace falta que supabase-js infiera su tipo desde el literal.
+const COLS_VECINO: string =
+  'id, folio, fecha_vuelo, estado, cliente:cliente_id(nombre)';
+
+/**
+ * Builder de PostgREST (o cualquier consulta encadenable) al que se le
+ * aplican los filtros de la lista. Mismo patrón estructural que
+ * `BuilderCas` (`common/version-cas.util.ts`).
+ */
+interface BuilderFiltrosLista<T> {
+  eq(columna: string, valor: string | boolean): T;
+  or(filtros: string): T;
+}
+
+/** Fila de `COLS_VECINO` → `QuoteVecino` (el embed puede llegar objeto o arreglo). */
+function vecinoDeFila(fila: Record<string, unknown>): QuoteVecino {
+  const rel = fila.cliente as
+    | { nombre?: unknown }
+    | Array<{ nombre?: unknown }>
+    | null
+    | undefined;
+  const cliente = Array.isArray(rel) ? rel[0] : rel;
+  const nombre =
+    typeof cliente?.nombre === 'string' && cliente.nombre.trim()
+      ? cliente.nombre.trim()
+      : null;
+  return {
+    id: fila.id as string,
+    folio: Number(fila.folio),
+    fecha_vuelo: fila.fecha_vuelo as string,
+    estado: fila.estado as EstadoVuelo,
+    cliente_nombre: nombre,
+  };
+}
+
+/**
+ * Primera fila de una consulta de vecinos (`limit(1)`) → `QuoteVecino` o
+ * null. Un error de PostgREST sube (el panel degrada la navegación con aviso;
+ * jamás se pinta «no hay vecino» cuando la lectura falló).
+ */
+async function primerVecino(
+  consulta: PromiseLike<{
+    data: unknown;
+    error: { message: string } | null;
+  }>,
+): Promise<QuoteVecino | null> {
+  const { data, error } = await consulta;
+  if (error) throw new Error(error.message);
+  const fila = Array.isArray(data) ? (data[0] as unknown) : null;
+  return fila ? vecinoDeFila(fila as Record<string, unknown>) : null;
+}
+
 function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
@@ -333,6 +398,13 @@ export class QuotesService {
      * aquí un `import type`.)
      */
     private readonly flights: FlightsService,
+    /**
+     * «Por facturar» en la lista de cotizaciones (24-sep-2026, ADITIVO):
+     * `factura_servicio_resumen` por fila, en lote (1–2 consultas por
+     * página). @Optional: los specs construyen el servicio sin él.
+     */
+    @Optional()
+    private readonly facturaSolicitud?: FacturaSolicitudService,
   ) {}
 
   /**
@@ -1743,73 +1815,213 @@ export class QuotesService {
     });
   }
 
-  async list(filters: ListQuotesQuery) {
-    let q = this.supabase.service
-      .from('vuelo')
-      .select(VUELO_COLS, { count: 'exact' })
-      .order('fecha_solicitud', { ascending: false })
-      .range(filters.offset, filters.offset + filters.limit - 1);
-
-    if (filters.cliente_id) q = q.eq('cliente_id', filters.cliente_id);
-    if (filters.aeronave_id) q = q.eq('aeronave_id', filters.aeronave_id);
-    if (filters.estado) q = q.eq('estado', filters.estado);
-    if (typeof filters.es_externo === 'boolean')
-      q = q.eq('es_externo', filters.es_externo);
-    // Hijos de una cotización de GRUPO (4-sep-2026).
-    if (filters.grupo_id) q = q.eq('grupo_id', filters.grupo_id);
-    if (filters.q) {
-      // En PostgREST `.or()` las comas separan condiciones y los paréntesis
-      // cierran el grupo: interpolarlos crudos rompe el parser (500) o inyecta
-      // filtros. Se sustituyen por `_` (comodín de UN carácter en ilike), que
-      // conserva el match ("Cancún, MX" sigue encontrando "Cancún, MX").
-      const raw = filters.q.trim().replace(/[,()]/g, '_');
-      const term = `%${raw.toUpperCase()}%`;
-      const conds = [`origen_iata.ilike.${term}`, `destino_iata.ilike.${term}`];
-      // Folio exacto si es numérico.
-      if (/^\d+$/.test(raw)) conds.push(`folio.eq.${raw}`);
-      // Por nombre de cliente ("¿cuánto le cobré a Punta Pájaros?").
-      const { data: clientes } = await this.supabase.service
-        .from('cliente')
-        .select('id')
-        .ilike('nombre', `%${raw}%`)
-        .limit(50);
-      if (clientes && clientes.length > 0) {
-        conds.push(
-          `cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`,
-        );
-      }
-      // Por ciudad/nombre de aeropuerto ("Miami" → MIA/OPF/…): resuelve IATAs.
-      const { data: aeropuertos } = await this.supabase.service
-        .from('aeropuerto')
-        .select('iata')
-        .or(`ciudad.ilike.%${raw}%,nombre.ilike.%${raw}%`)
-        .limit(20);
-      for (const a of aeropuertos ?? []) {
-        const iata = (a.iata as string)?.toUpperCase();
-        if (iata) {
-          conds.push(`origen_iata.eq.${iata}`, `destino_iata.eq.${iata}`);
-        }
-      }
-      q = q.or(conds.join(','));
+  /**
+   * Condición `.or(...)` de la BÚSQUEDA `q` de la lista de cotizaciones, ya
+   * resuelta: folio exacto, IATA de origen/destino, nombre de cliente y
+   * ciudad/nombre de aeropuerto. `null` = sin búsqueda.
+   *
+   * Es ASÍNCRONA (lee `cliente` y `aeropuerto`) y por eso va APARTE de
+   * `aplicarFiltrosLista` (24-sep-2026, flechas entre cotizaciones): `vecinos`
+   * arma CUATRO consultas con los mismos filtros y resolver `q` en cada una
+   * costaría 8 lecturas extra por flecha. Se resuelve UNA vez y la cadena se
+   * aplica a las que haga falta. `list` y `vecinos` comparten ESTA función:
+   * las flechas recorren exactamente lo que la lista enseña.
+   */
+  private async condicionesBusqueda(q?: string): Promise<string | null> {
+    if (!q) return null;
+    // En PostgREST `.or()` las comas separan condiciones y los paréntesis
+    // cierran el grupo: interpolarlos crudos rompe el parser (500) o inyecta
+    // filtros. Se sustituyen por `_` (comodín de UN carácter en ilike), que
+    // conserva el match ("Cancún, MX" sigue encontrando "Cancún, MX").
+    const raw = q.trim().replace(/[,()]/g, '_');
+    const term = `%${raw.toUpperCase()}%`;
+    const conds = [`origen_iata.ilike.${term}`, `destino_iata.ilike.${term}`];
+    // Folio exacto si es numérico.
+    if (/^\d+$/.test(raw)) conds.push(`folio.eq.${raw}`);
+    // Por nombre de cliente ("¿cuánto le cobré a Punta Pájaros?").
+    const { data: clientes } = await this.supabase.service
+      .from('cliente')
+      .select('id')
+      .ilike('nombre', `%${raw}%`)
+      .limit(50);
+    if (clientes && clientes.length > 0) {
+      conds.push(
+        `cliente_id.in.(${clientes.map((c) => c.id as string).join(',')})`,
+      );
     }
+    // Por ciudad/nombre de aeropuerto ("Miami" → MIA/OPF/…): resuelve IATAs.
+    const { data: aeropuertos } = await this.supabase.service
+      .from('aeropuerto')
+      .select('iata')
+      .or(`ciudad.ilike.%${raw}%,nombre.ilike.%${raw}%`)
+      .limit(20);
+    for (const a of aeropuertos ?? []) {
+      const iata = (a.iata as string)?.toUpperCase();
+      if (iata) {
+        conds.push(`origen_iata.eq.${iata}`, `destino_iata.eq.${iata}`);
+      }
+    }
+    return conds.join(',');
+  }
+
+  /**
+   * Filtros de la LISTA de cotizaciones sobre cualquier consulta de `vuelo`
+   * (SÍNCRONA: la búsqueda `q` llega ya resuelta por `condicionesBusqueda`).
+   * Fuente ÚNICA para `list` y `vecinos` — si divergen, la flecha brincaría a
+   * una cotización que la lista de donde vino no enseña.
+   */
+  private aplicarFiltrosLista<T extends BuilderFiltrosLista<T>>(
+    qb: T,
+    filtros: VecinosQuotesQuery,
+    condQ: string | null,
+  ): T {
+    let q = qb;
+    if (filtros.cliente_id) q = q.eq('cliente_id', filtros.cliente_id);
+    if (filtros.aeronave_id) q = q.eq('aeronave_id', filtros.aeronave_id);
+    if (filtros.estado) q = q.eq('estado', filtros.estado);
+    if (typeof filtros.es_externo === 'boolean')
+      q = q.eq('es_externo', filtros.es_externo);
+    // Hijos de una cotización de GRUPO (4-sep-2026).
+    if (filtros.grupo_id) q = q.eq('grupo_id', filtros.grupo_id);
+    if (condQ) q = q.or(condQ);
+    return q;
+  }
+
+  async list(filters: ListQuotesQuery) {
+    const condQ = await this.condicionesBusqueda(filters.q);
+    const q = this.aplicarFiltrosLista(
+      this.supabase.service
+        .from('vuelo')
+        .select(VUELO_COLS, { count: 'exact' })
+        .order('fecha_solicitud', { ascending: false })
+        .range(filters.offset, filters.offset + filters.limit - 1),
+      filters,
+      condQ,
+    );
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);
     // Ruta COMPLETA (origen → escalas → destino) por cotización para el listado.
     const rows = (data ?? []) as Array<Record<string, unknown>>;
-    const rutas = await this.rutasIatasPorVuelo(
-      rows.map((r) => r.id as string),
-    );
+    const ids = rows.map((r) => r.id as string);
+    const [rutas, resumenFactura] = await Promise.all([
+      this.rutasIatasPorVuelo(ids),
+      // «Por facturar» (24-sep-2026): null sin la migración 20260924000003.
+      this.facturaSolicitud
+        ? this.facturaSolicitud.resumenesDeVuelos(ids)
+        : Promise.resolve(null),
+    ]);
     const dataConRuta = rows.map((r) => ({
       ...r,
       ruta_iatas:
         rutas.get(r.id as string) ??
         [r.origen_iata as string, r.destino_iata as string].filter(Boolean),
+      ...(this.facturaSolicitud
+        ? {
+            factura_servicio_resumen:
+              resumenFactura?.get(r.id as string) ?? null,
+          }
+        : {}),
     }));
     return {
       data: dataConRuta,
       count: count ?? 0,
       limit: filters.limit,
       offset: filters.offset,
+    };
+  }
+
+  /**
+   * FLECHAS «‹ Anterior» / «Siguiente ›» del detalle de una cotización
+   * (24-sep-2026, pedido de Itzi: «ya le piqué al vuelo del 20 de septiembre
+   * … si hay una flechita arriba me brinca el siguiente vuelito, ya sea de ese
+   * mismo día o hasta el siguiente día»).
+   *
+   * Orden CRONOLÓGICO por `fecha_vuelo` con empate por `folio` (único): el
+   * «siguiente» es el vuelo que sigue en el tiempo —mismo día más tarde o días
+   * después—. Recorre EXACTAMENTE lo que la lista enseña con esos filtros
+   * (`aplicarFiltrosLista` + `condicionesBusqueda`, mismas fuentes que
+   * `list`; sin filtrado por fila, igual que la lista) y la búsqueda `q` se
+   * resuelve UNA vez.
+   *
+   * Barato a propósito: una lectura del ancla + CUATRO consultas en paralelo
+   * con `limit(1)` sobre `idx_vuelo_fecha_vuelo` —jamás se carga la lista
+   * entera—. Se parten en «mismo instante» y «antes/después» para no combinar
+   * dos `.or()` de PostgREST (el de la búsqueda y el del empate):
+   * siguiente = mismo instante con folio mayor ?? primer instante posterior;
+   * anterior  = mismo instante con folio menor ?? último instante anterior.
+   *
+   * - El ANCLA es la cotización actual AUNQUE ya no cumpla el filtro (se abrió
+   *   desde «Cotizado» y se confirmó): se navega desde su fecha/folio, sin
+   *   error.
+   * - Sin `fecha_vuelo` no hay orden cronológico: `sin_fecha: true` y ninguna
+   *   consulta más. Una cotización sin fecha tampoco es vecina de nadie
+   *   (`eq/gt/lt` sobre null no empatan).
+   * - Las CANCELADAS entran, como en la lista (salvo que `estado` diga otra
+   *   cosa).
+   * - 404 como `findById` si el vuelo no existe.
+   */
+  async vecinos(
+    id: string,
+    filtros: VecinosQuotesQuery,
+  ): Promise<QuoteVecinosRespuesta> {
+    const { data: actual, error } = await this.supabase.service
+      .from('vuelo')
+      .select('id, folio, fecha_vuelo')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!actual) throw new NotFoundException(`Vuelo ${id} not found`);
+    const fecha = (actual.fecha_vuelo as string | null) ?? null;
+    if (!fecha) return { anterior: null, siguiente: null, sin_fecha: true };
+    const folio =
+      actual.folio == null || Number.isNaN(Number(actual.folio))
+        ? null
+        : Number(actual.folio);
+
+    const condQ = await this.condicionesBusqueda(filtros.q);
+    // `limit(1)` va en la BASE (antes de los filtros) y no al final: en ese
+    // orden el genérico de `aplicarFiltrosLista` no revienta el chequeo de
+    // tipos de supabase-js (TS2589). Cada llamada arma un builder NUEVO.
+    const base = () =>
+      this.aplicarFiltrosLista(
+        this.supabase.service.from('vuelo').select(COLS_VECINO).limit(1),
+        filtros,
+        condQ,
+      );
+    const [sigMismo, sigDespues, antMismo, antAntes] = await Promise.all([
+      folio == null
+        ? null
+        : primerVecino(
+            base()
+              .eq('fecha_vuelo', fecha)
+              .gt('folio', folio)
+              .order('folio', { ascending: true }),
+          ),
+      primerVecino(
+        base()
+          .gt('fecha_vuelo', fecha)
+          .order('fecha_vuelo', { ascending: true })
+          .order('folio', { ascending: true }),
+      ),
+      folio == null
+        ? null
+        : primerVecino(
+            base()
+              .eq('fecha_vuelo', fecha)
+              .lt('folio', folio)
+              .order('folio', { ascending: false }),
+          ),
+      primerVecino(
+        base()
+          .lt('fecha_vuelo', fecha)
+          .order('fecha_vuelo', { ascending: false })
+          .order('folio', { ascending: false }),
+      ),
+    ]);
+    return {
+      anterior: antMismo ?? antAntes,
+      siguiente: sigMismo ?? sigDespues,
+      sin_fecha: false,
     };
   }
 

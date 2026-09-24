@@ -7,6 +7,7 @@ import {
   Param,
   Patch,
   Post,
+  Put,
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -17,6 +18,7 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   IaSaldoDto,
   IaUsoQuery,
+  ResponsablesFacturacionDto,
   UpdateConfiguracionDto,
 } from './dto/configuracion.dto';
 import { ConfiguracionService } from './configuracion.service';
@@ -62,6 +64,34 @@ export class ConfiguracionController {
       dto.saldo_usd,
       dto.notas ?? null,
       c.userId,
+    );
+  }
+
+  // Responsables de facturación (24-sep-2026): quién recibe el aviso
+  // «Factura pedida». Literales ANTES de ':clave'.
+  @Get('responsables-facturacion')
+  @Roles(Rol.ADMIN, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Responsables de facturación: ids guardados, su resolución, candidatos de oficina, a quién le llegaría HOY el aviso «Factura pedida» y de dónde sale (CONFIG | ROL_FACTURACION | ADMINS). 503 FACTURAS_EMITIDAS_NO_DISPONIBLE sin la migración 20260924000003.',
+  })
+  responsablesFacturacion() {
+    return this.config.responsablesFacturacion();
+  }
+
+  @Put('responsables-facturacion')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Guarda los responsables de facturación ({ usuario_ids }). Solo usuarios ACTIVOS de oficina (400 USUARIOS_INVALIDOS con los ids que no lo son). [] = por rol (FACTURACION → ADMIN).',
+  })
+  setResponsablesFacturacion(
+    @Body() dto: ResponsablesFacturacionDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.config.setResponsablesFacturacion(
+      dto.usuario_ids,
+      current.userId,
     );
   }
 

@@ -1,6 +1,9 @@
 import type { ArgumentsHost } from '@nestjs/common';
 import { ConflictException, NotFoundException } from '@nestjs/common';
-import { AllExceptionsFilter } from './all-exceptions.filter';
+import {
+  AllExceptionsFilter,
+  traducirErrorDeSubidaNest,
+} from './all-exceptions.filter';
 
 /**
  * Contrato del cuerpo de error que consumen el panel y la app: `code` sale
@@ -64,5 +67,23 @@ describe('AllExceptionsFilter — code/details de excepciones estructuradas', ()
     expect(correr(new NotFoundException('x')).body.code).toBe('NOT_FOUND');
     expect(correr(new ConflictException('y')).body.code).toBe('CONFLICT');
     expect(correr(new ConflictException('y')).body.message).toBe('y');
+  });
+});
+
+describe('traducirErrorDeSubidaNest — campos «pdf»/«xml» del registro de facturas', () => {
+  it('dos archivos en «pdf» ⇒ 400 CAMPO_ARCHIVO_INVALIDO que NO manda al campo «file»', () => {
+    const r = traducirErrorDeSubidaNest(
+      400,
+      'Unexpected field - pdf',
+      undefined,
+    );
+    expect(r?.code).toBe('CAMPO_ARCHIVO_INVALIDO');
+    expect(r?.message).toContain('«pdf»');
+    expect(r?.message).not.toContain('«file»');
+    // El resto de las rutas conserva su texto de siempre.
+    expect(
+      traducirErrorDeSubidaNest(400, 'Unexpected field - archivo', undefined)
+        ?.message,
+    ).toContain('«file»');
   });
 });

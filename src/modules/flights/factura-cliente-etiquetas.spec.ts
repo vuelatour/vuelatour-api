@@ -20,6 +20,14 @@ interface Mundo {
   folio?: boolean;
   /** error de lectura de la tabla `factura`. */
   errorFactura?: string;
+  /**
+   * true = migración 20260924000003 aplicada (registro de facturas
+   * emitidas). Default: NO aplicada (42703 al sondear
+   * `vuelo.factura_solicitada_at`) — el Excel sale como antes.
+   */
+  emitida?: boolean;
+  /** Filas del puente con su factura embebida (solo con `emitida`). */
+  factura_emitida_vuelo?: Fila[];
 }
 
 function fake(m: Mundo) {
@@ -49,7 +57,8 @@ function fake(m: Mundo) {
       const faltante =
         tabla === 'vuelo' &&
         ((m.estatus === false && select.includes('factura_estatus')) ||
-          (m.folio === false && select.includes('factura_folio')));
+          (m.folio === false && select.includes('factura_folio')) ||
+          (m.emitida !== true && select.includes('factura_solicitada_at')));
       if (faltante) {
         return Promise.resolve({
           data: null,
@@ -61,6 +70,10 @@ function fake(m: Mundo) {
           data: null,
           error: { message: m.errorFactura },
         }).then(res);
+      }
+      // El puente trae la factura EMBEBIDA: se devuelve la fila tal cual.
+      if (tabla === 'factura_emitida_vuelo') {
+        return Promise.resolve({ data: filas, error: null }).then(res);
       }
       // Proyección REAL de columnas: una columna no pedida no llega (así se
       // prueba que sin la migración el folio no se «cuela» en la etiqueta).
@@ -162,6 +175,71 @@ describe('etiquetasFacturaDeVuelos', () => {
     expect(Object.fromEntries(m)).toEqual({ [V1]: 'VT-501' });
     const lectura = consultas.find((c) => c.tabla === 'vuelo' && c.ids)!;
     expect(lectura.select).toBe('id, facturado');
+  });
+
+  describe('con el registro de facturas EMITIDAS (migración 20260924000003)', () => {
+    const fe = (
+      vuelo_id: string,
+      serie: string | null,
+      folio: string,
+      folio_num: number | null,
+      estatus = 'VIGENTE',
+      deleted_at: string | null = null,
+    ): Fila => ({
+      vuelo_id,
+      factura: { serie, folio, folio_num, estatus, deleted_at },
+    });
+
+    it('cascada: CFDI vivo → EMITIDAS vigentes («A-123, A-130») → folio legado → estatus', async () => {
+      const { sb } = fake({
+        ...mundo,
+        emitida: true,
+        factura_emitida_vuelo: [
+          // V1 tiene CFDI vivo: manda sobre la emitida.
+          fe(V1, 'A', '99', 99),
+          // V2: dos vigentes (desordenadas) + una cancelada + una borrada
+          // ⇒ solo las vigentes, por número, y ganan al folio legado.
+          fe(V2, 'A', '130', 130),
+          fe(V2, 'A', '123', 123),
+          fe(V2, 'A', '120', 120, 'CANCELADA'),
+          fe(V2, 'A', '121', 121, 'VIGENTE', '2026-09-24T10:00:00Z'),
+          // V3: solo cancelada ⇒ cae al estatus manual.
+          fe(V3, 'B', '7', 7, 'CANCELADA'),
+          // V4: sin serie.
+          fe(V4, null, '555', 555),
+        ],
+      });
+      const m = await etiquetasFacturaDeVuelos(sb, [V1, V2, V3, V4]);
+      expect(Object.fromEntries(m)).toEqual({
+        [V1]: 'VT-501',
+        [V2]: 'A-123, A-130',
+        [V3]: 'Facturado',
+        [V4]: '555',
+      });
+    });
+
+    it('el puente se lee EN LOTE (una consulta por cada 200 vuelos)', async () => {
+      const ids = Array.from({ length: 250 }, (_, i) => `v-${i}`);
+      const { sb, consultas } = fake({
+        factura: [],
+        vuelo: [],
+        emitida: true,
+        factura_emitida_vuelo: [],
+      });
+      await etiquetasFacturaDeVuelos(sb, ids);
+      const lotes = consultas.filter(
+        (c) => c.tabla === 'factura_emitida_vuelo' && c.ids,
+      );
+      expect(lotes.map((c) => c.ids!.length)).toEqual([200, 50]);
+    });
+
+    it('sin la migración NO consulta el puente (Excel idéntico a hoy)', async () => {
+      const { sb, consultas } = fake({ ...mundo, emitida: false });
+      await etiquetasFacturaDeVuelos(sb, [V1, V2]);
+      expect(consultas.some((c) => c.tabla === 'factura_emitida_vuelo')).toBe(
+        false,
+      );
+    });
   });
 
   it('sin vuelos no consulta nada', async () => {

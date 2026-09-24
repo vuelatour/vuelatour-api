@@ -11,6 +11,7 @@ import { RealtimeModule } from '../realtime/realtime.module';
 import { VisionModule } from '../vision/vision.module';
 import { CobroReciboService } from './cobro-recibo.service';
 import { FacturaClienteService } from './factura-cliente.service';
+import { FacturaSolicitudService } from './factura-solicitud.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
@@ -39,10 +40,18 @@ import { FlightsService } from './flights.service';
     FlightReportService,
     CobroReciboService,
     FacturaClienteService,
+    FacturaSolicitudService,
   ],
   // CobroReciboService: GroupsModule lo usa para el recibo del SOBRE de grupo.
   // FacturaClienteService: FacturacionModule lo usa para marcar FACTURADO el
   // vuelo al timbrar su CFDI (22-sep-2026).
-  exports: [FlightsService, CobroReciboService, FacturaClienteService],
+  // FacturaSolicitudService (24-sep-2026): «Necesito factura» + bloques
+  // `factura_servicio`; lo usan QuotesService (lista) y FacturasEmitidasModule.
+  exports: [
+    FlightsService,
+    CobroReciboService,
+    FacturaClienteService,
+    FacturaSolicitudService,
+  ],
 })
 export class FlightsModule {}

@@ -299,24 +299,236 @@ export function extraerDatosCfdi(xml: string | Buffer): DatosCfdi | null {
   return { serie, folio, etiqueta, uuid };
 }
 
+// ============ CFDI COMPLETO (registro de facturas emitidas, 24-sep-2026) ============
+//
+// «Facturas emitidas» (pedido de Ale): Mari suelta el XML (y/o el PDF) y el
+// formulario se llena solo. `extraerDatosCfdi` (arriba) se queda INTACTO —
+// lo usa la subida legada por vuelo—; esto AGREGA lo que el registro
+// necesita: tipo, fecha, emisor, receptor, totales, moneda y método.
+
+/**
+ * ¿El XML declara DOCTYPE o ENTITY? Se RECHAZA antes de leer (422
+ * `XML_NO_PERMITIDO`). La lectura de aquí es por regex y no expande nada,
+ * pero es la misma defensa que pyservices (XXE / «billion laughs»): un CFDI
+ * legítimo del SAT nunca trae DOCTYPE. Solo se miran los primeros 4096
+ * caracteres (el prólogo).
+ */
+export function xmlDeclaraDoctype(buf: Buffer | string): boolean {
+  const texto = typeof buf === 'string' ? buf : textoDeXml(buf);
+  return /<!\s*(DOCTYPE|ENTITY)/i.test(texto.slice(0, 4096));
+}
+
+export interface CfdiCompleto extends DatosCfdi {
+  /** Comprobante@TipoDeComprobante ('I', 'E', 'P', 'T', 'N'; el 3.2 «ingreso» ⇒ 'I'). */
+  tipo_comprobante: string | null;
+  /** Comprobante@Fecha → 'YYYY-MM-DD' (fecha de pared, sin conversión TZ). */
+  fecha_emision: string | null;
+  emisor_rfc: string | null;
+  emisor_nombre: string | null;
+  receptor_rfc: string | null;
+  receptor_nombre: string | null;
+  subtotal: number | null;
+  total: number | null;
+  /** @TotalImpuestosTrasladados del nodo Impuestos que LO TRAE (el del comprobante). */
+  iva: number | null;
+  /** @Moneda tal cual. */
+  moneda_raw: string | null;
+  /** 'MXN' | 'USD' | null (MXN/XXX ⇒ 'MXN'; otra ⇒ null). */
+  moneda: 'MXN' | 'USD' | null;
+  metodo_pago: 'PUE' | 'PPD' | null;
+  /** 2 dígitos del catálogo del SAT o null. */
+  forma_pago: string | null;
+}
+
+/** Atributo sin importar mayúsculas (el 3.2 usa `subTotal`, `rfc`, `fecha`…). */
+function leerAtributo(
+  attrs: Map<string, string> | null,
+  nombre: string,
+): string | null {
+  if (!attrs) return null;
+  const directo = attrs.get(nombre);
+  if (directo != null) return directo.trim() || null;
+  const buscado = nombre.toLowerCase();
+  for (const [k, v] of attrs) {
+    // Sin prefijo de namespace (p. ej. `xsi:…` no cuenta).
+    if (!k.includes(':') && k.toLowerCase() === buscado) {
+      return v.trim() || null;
+    }
+  }
+  return null;
+}
+
+function numeroCfdi(v: string | null): number | null {
+  if (v == null) return null;
+  const n = Number(v.replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** RFC en mayúsculas sin espacios ni guiones (o null). */
+export function normalizarRfc(v: unknown): string | null {
+  if (typeof v !== 'string') return null;
+  const r = v.toUpperCase().replace(/[\s-]+/g, '');
+  return r || null;
+}
+
+/** 'MXN' | 'USD' | null — XXX (sin moneda, CFDI de pago) y «MN» se leen como MXN. */
+export function monedaCfdi(v: string | null | undefined): 'MXN' | 'USD' | null {
+  const m = (v ?? '').trim().toUpperCase();
+  if (m === 'MXN' || m === 'XXX' || m === 'MN') return 'MXN';
+  if (m === 'USD') return 'USD';
+  return null;
+}
+
+function tipoComprobanteCfdi(v: string | null): string | null {
+  if (!v) return null;
+  const t = v.trim();
+  const palabras: Record<string, string> = {
+    ingreso: 'I',
+    egreso: 'E',
+    traslado: 'T',
+    pago: 'P',
+    nomina: 'N',
+    nómina: 'N',
+  };
+  return palabras[t.toLowerCase()] ?? t.toUpperCase();
+}
+
+/**
+ * CFDI completo (3.3 / 4.0; tolera el 3.2 con atributos en minúscula, BOM,
+ * UTF-16 y entidades — mismo parser tolerante que `extraerDatosCfdi`).
+ * `null` = no es un CFDI legible (no hay `Comprobante`).
+ */
+export function extraerCfdiCompleto(xml: string | Buffer): CfdiCompleto | null {
+  const texto = typeof xml === 'string' ? xml : textoDeXml(xml);
+  const base = extraerDatosCfdi(texto);
+  if (!base) return null;
+  const comp = atributosDeNodo(texto, 'Comprobante');
+  const emisor = atributosDeNodo(texto, 'Emisor');
+  const receptor = atributosDeNodo(texto, 'Receptor');
+
+  // IVA: el nodo `Impuestos` que TRAE TotalImpuestosTrasladados es el del
+  // comprobante; los `Impuestos` de cada concepto no lo tienen.
+  let iva: number | null = null;
+  const reImp = /<(?:[A-Za-z_][\w.-]*:)?Impuestos\b([^>]*)>/g;
+  let mImp: RegExpExecArray | null;
+  while ((mImp = reImp.exec(texto)) !== null) {
+    const attrs = new Map<string, string>();
+    const reAttr = /([A-Za-z_][\w:.-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+    let a: RegExpExecArray | null;
+    while ((a = reAttr.exec(mImp[1])) !== null) {
+      attrs.set(a[1], decodificarEntidadesXml(a[2] ?? a[3] ?? ''));
+    }
+    const t = numeroCfdi(leerAtributo(attrs, 'TotalImpuestosTrasladados'));
+    if (t != null) {
+      iva = t;
+      break;
+    }
+  }
+
+  const fechaRaw = leerAtributo(comp, 'Fecha');
+  const fecha =
+    fechaRaw && /^\d{4}-\d{2}-\d{2}/.test(fechaRaw)
+      ? fechaRaw.slice(0, 10)
+      : null;
+  const monedaRaw = leerAtributo(comp, 'Moneda');
+  const metodo = (leerAtributo(comp, 'MetodoPago') ?? '').toUpperCase();
+  const forma = leerAtributo(comp, 'FormaPago');
+  const nombre = (v: string | null) =>
+    v ? v.replace(/\s+/g, ' ').trim().slice(0, 300) || null : null;
+  return {
+    ...base,
+    tipo_comprobante: tipoComprobanteCfdi(
+      leerAtributo(comp, 'TipoDeComprobante'),
+    ),
+    fecha_emision: fecha,
+    emisor_rfc: normalizarRfc(leerAtributo(emisor, 'Rfc')),
+    emisor_nombre: nombre(leerAtributo(emisor, 'Nombre')),
+    receptor_rfc: normalizarRfc(leerAtributo(receptor, 'Rfc')),
+    receptor_nombre: nombre(leerAtributo(receptor, 'Nombre')),
+    subtotal: numeroCfdi(leerAtributo(comp, 'SubTotal')),
+    total: numeroCfdi(leerAtributo(comp, 'Total')),
+    iva,
+    moneda_raw: monedaRaw,
+    moneda: monedaCfdi(monedaRaw),
+    metodo_pago: metodo === 'PUE' || metodo === 'PPD' ? metodo : null,
+    forma_pago: forma && /^\d{2}$/.test(forma) ? forma : null,
+  };
+}
+
+/** Fila de `factura_emitida` (vía el puente) que alimenta la cascada del Excel. */
+export interface FacturaEmitidaEtiquetaRow {
+  serie?: unknown;
+  folio?: unknown;
+  folio_num?: unknown;
+  estatus?: unknown;
+  deleted_at?: unknown;
+}
+
+/**
+ * Etiquetas de las facturas EMITIDAS a mano VIGENTES (no borradas) de un
+ * vuelo, ordenadas por serie → número → folio y unidas con ", "
+ * («A-123, A-130»). `null` si no hay ninguna. PURA (la cascada del Excel).
+ */
+export function etiquetaEmitidasVigentes(
+  filas: ReadonlyArray<FacturaEmitidaEtiquetaRow>,
+): string | null {
+  const vivas = filas.filter(
+    (f) =>
+      f.estatus === 'VIGENTE' && (f.deleted_at == null || f.deleted_at === ''),
+  );
+  if (vivas.length === 0) return null;
+  const txt = (v: unknown) =>
+    typeof v === 'string' || typeof v === 'number' ? String(v).trim() : '';
+  const num = (v: unknown): number | null => {
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  };
+  const ordenadas = [...vivas].sort((a, b) => {
+    const sa = txt(a.serie).toUpperCase();
+    const sb = txt(b.serie).toUpperCase();
+    if (sa !== sb) return sa < sb ? -1 : 1;
+    const na = num(a.folio_num);
+    const nb = num(b.folio_num);
+    if (na !== nb) {
+      if (na == null) return 1;
+      if (nb == null) return -1;
+      return na - nb;
+    }
+    const fa = txt(a.folio).toUpperCase();
+    const fb = txt(b.folio).toUpperCase();
+    return fa < fb ? -1 : fa > fb ? 1 : 0;
+  });
+  const etiquetas = ordenadas
+    .map((f) => etiquetaSerieFolio(f.serie, f.folio))
+    .filter((e): e is string => !!e);
+  return etiquetas.length > 0 ? [...new Set(etiquetas)].join(', ') : null;
+}
+
 /**
  * Lo que dice la columna «FACTURA VUELATOUR» del Libro Dinero y «factura
  * vuelatour» del balance — FUENTE ÚNICA (24-sep-2026). Cascada:
  *  1. CFDI timbrado VIVO por el sistema (`serie-folio` de la tabla `factura`,
  *     no cancelado) — manda, es el documento fiscal;
- *  2. el folio de la factura del servicio (`vuelo.factura_folio`: tecleado
- *     por la oficina o sacado del XML que subió);
- *  3. sin folio pero con seguimiento (`factura_estatus` ≠ SIN_FACTURA): la
+ *  2. las facturas EMITIDAS a mano VIGENTES del registro (`factura_emitida`
+ *     vía el puente, «A-123, A-130»; `etiquetaEmitidasVigentes`) — parámetro
+ *     OPCIONAL `emitidas` (24-sep-2026, migración 20260924000003);
+ *  3. el folio de la factura del servicio (`vuelo.factura_folio`: tecleado
+ *     por la oficina o sacado del XML que subió — LEGADO);
+ *  4. sin folio pero con seguimiento (`factura_estatus` ≠ SIN_FACTURA): la
  *     etiqueta del estatus («Facturado» / «Factura elaborada y enviada») —
  *     el Excel ya no dice «nada» de un vuelo que la oficina marcó facturado;
- *  4. vacío (`null`).
+ *  5. vacío (`null`).
  */
 export function etiquetaFacturaVuelo(p: {
   cfdi?: string | null;
+  emitidas?: string | null;
   vuelo?: VueloFacturaRow | null;
 }): string | null {
   const cfdi = typeof p.cfdi === 'string' ? p.cfdi.trim() : '';
   if (cfdi) return cfdi;
+  const emitidas = typeof p.emitidas === 'string' ? p.emitidas.trim() : '';
+  if (emitidas) return emitidas;
   const folio = normalizarFolioFactura(p.vuelo?.factura_folio);
   if (folio) return folio;
   const estatus = estatusFacturaCliente(p.vuelo);

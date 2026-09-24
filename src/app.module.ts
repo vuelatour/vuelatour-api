@@ -48,6 +48,7 @@ import { ExpirationsModule } from './modules/expirations/expirations.module';
 import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.module';
 import { DashboardsModule } from './modules/dashboards/dashboards.module';
 import { GroupsModule } from './modules/groups/groups.module';
+import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emitidas.module';
 
 @Module({
   imports: [
@@ -125,6 +126,8 @@ import { GroupsModule } from './modules/groups/groups.module';
     MultasModule,
     TipoCambioModule,
     GroupsModule,
+    // Registro de facturas emitidas a mano + «Por facturar» (24-sep-2026).
+    FacturasEmitidasModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

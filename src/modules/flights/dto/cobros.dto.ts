@@ -288,3 +288,10 @@ export class UpdateCobroDto {
   @IsString()
   notas?: string;
 }
+
+/**
+ * `POST /v1/flights/cobros/:cobroId/comprobante` (24-sep-2026): multipart
+ * con SOLO el archivo `file`. Sin campos de texto (cualquiera ⇒ 400 por
+ * `forbidNonWhitelisted`).
+ */
+export class SinCamposComprobanteDto {}

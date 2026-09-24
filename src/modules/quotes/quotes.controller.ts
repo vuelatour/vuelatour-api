@@ -19,7 +19,11 @@ import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { CalculateQuoteDto } from './dto/calculate-quote.dto';
 import { CreateQuoteDto } from './dto/create-quote.dto';
-import { CancelQuoteDto, ListQuotesQuery } from './dto/list-quotes.query';
+import {
+  CancelQuoteDto,
+  ListQuotesQuery,
+  VecinosQuotesQuery,
+} from './dto/list-quotes.query';
 import { MapaSvgDto } from './dto/mapa-svg.dto';
 import {
   PdfPresentacionVueloDto,
@@ -161,6 +165,20 @@ export class QuotesController {
   })
   rutasSugeridas(@Query('cliente_id', ParseUUIDPipe) clienteId: string) {
     return this.quotes.rutasSugeridas(clienteId);
+  }
+
+  // Sub-ruta de ':id' declarada ANTES de ':id' (convención del repo).
+  @Get(':id/vecinos')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
+  @ApiOperation({
+    summary:
+      'Flechas «‹ Anterior» / «Siguiente ›» del detalle (24-sep-2026): la cotización anterior y la siguiente en orden CRONOLÓGICO de vuelo (fecha_vuelo, empate por folio), con los MISMOS filtros de GET /quotes (cliente_id, aeronave_id, estado, es_externo, grupo_id, q) y los mismos roles. {anterior, siguiente: {id, folio, fecha_vuelo, estado, cliente_nombre} | null, sin_fecha}. La cotización actual es el ancla aunque ya no cumpla el filtro; sin fecha de vuelo ⇒ sin_fecha:true y ambos null. 404 si no existe. Solo lectura; 5 consultas indexadas, nunca la lista entera.',
+  })
+  vecinos(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: VecinosQuotesQuery,
+  ) {
+    return this.quotes.vecinos(id, q);
   }
 
   @Get(':id')

@@ -7,10 +7,12 @@ import {
   Logger,
   NotFoundException,
   Optional,
+  PayloadTooLargeException,
   ServiceUnavailableException,
   forwardRef,
 } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { randomUUID } from 'node:crypto';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import {
@@ -60,9 +62,19 @@ import { AlertsService } from '../alerts/alerts.service';
 import { FacturaClienteService } from './factura-cliente.service';
 import {
   bloqueFacturaCliente,
+  etiquetaSerieFolio,
   type BloqueFacturaCliente,
   type VueloFacturaRow,
 } from './factura-cliente.util';
+import { FacturaSolicitudService } from './factura-solicitud.service';
+import { facturaEmitidaDisponible } from '../../common/factura-emitida-disponible.util';
+import {
+  BUCKET_COBRO_VOUCHERS,
+  LIMITE_COMPROBANTE_BYTES,
+  pathComprobanteCobro,
+  validarComprobanteCobro,
+} from './comprobante-cobro.util';
+import type { ArchivoEntrante } from './factura-cliente.util';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
@@ -415,6 +427,21 @@ const DELTA_MAX_IDS_TRAMO = 150;
 /** Redondeo a centavos para los `details` de dinero. */
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 
+/**
+ * Liga del puente `factura_emitida_vuelo` a una factura emitida CANCELADA o
+ * borrada (24-sep-2026): se quita justo antes de borrar el vuelo (el FK es
+ * RESTRICT) y queda en la bitácora forense; si el borrado falla, se repone.
+ */
+interface FacturaDesligada {
+  factura_id: string;
+  vuelo_id: string;
+  created_at: string | null;
+  created_by: string | null;
+  etiqueta: string;
+  estatus: string;
+  borrada: boolean;
+}
+
 @Injectable()
 export class FlightsService {
   constructor(
@@ -447,7 +474,22 @@ export class FlightsService {
     // el panel pinta hoy), nunca se pierde el dato.
     @Optional()
     private readonly facturaCliente?: FacturaClienteService,
+    // «Necesito factura» + registro de facturas emitidas (24-sep-2026): los
+    // bloques ADITIVOS `factura_servicio` (snapshot) y
+    // `factura_servicio_resumen` (lista). @Optional por la misma razón que
+    // `facturaCliente`: sin él (specs) se responde `null` — «sin datos».
+    @Optional()
+    private readonly facturaSolicitud?: FacturaSolicitudService,
   ) {}
+
+  /** Roles de campo que NO reciben los bloques de factura del servicio. */
+  private static esRolDeCampo(current?: AuthenticatedUser): boolean {
+    return (
+      current?.rol === Rol.PILOTO ||
+      current?.rol === Rol.MECANICO ||
+      current?.rol === Rol.VISITANTE
+    );
+  }
 
   /**
    * Bloque `factura_cliente` de un vuelo ya leído. Sin el servicio inyectado
@@ -1029,6 +1071,12 @@ export class FlightsService {
         },
       });
     }
+    // Facturas EMITIDAS ligadas (24-sep-2026): con una VIGENTE ⇒ 409; las
+    // canceladas/borradas se desligan (y quedan en la bitácora).
+    const desligadas = await this.ligasFacturaEmitidaParaBorrar(
+      id,
+      (vuelo.folio as number | null) ?? null,
+    );
     // Aviso a la tripulación ANTES de borrar (21-ago): después ya no hay a
     // quién consultar. Se resuelve la lista ahora y se manda al final.
     const tripulacion = await this.tripulacionDeVuelo(id, vuelo);
@@ -1053,10 +1101,22 @@ export class FlightsService {
           ? 'eliminado desde la app'
           : 'eliminado desde panel',
       userId,
-      opts.clientRequestId
-        ? { client_request_id: opts.clientRequestId }
+      opts.clientRequestId || desligadas.length > 0
+        ? {
+            ...(opts.clientRequestId
+              ? { client_request_id: opts.clientRequestId }
+              : {}),
+            ...(desligadas.length > 0
+              ? { facturas_emitidas_desligadas: desligadas }
+              : {}),
+          }
         : undefined,
     );
+    // Ligas a facturas emitidas CANCELADAS/borradas: se quitan ANTES de
+    // cualquier paso destructivo. Si fallara DESPUÉS de borrar los tramos,
+    // el vuelo quedaría vivo sin tramos y con la bitácora diciendo
+    // «eliminado» — así, un fallo aquí revierte la bitácora y no toca nada.
+    await this.quitarLigasOrevertirBitacora(id, desligadas, bitacoraId);
     // Quita eventos de Google antes de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
     await sb.from('cotizacion_version_history').delete().eq('vuelo_id', id);
@@ -1067,6 +1127,7 @@ export class FlightsService {
       if (bitacoraId) {
         await sb.from('vuelo_eliminado').delete().eq('id', bitacoraId);
       }
+      await this.reponerLigasDesligadas(desligadas);
       throw new Error(error.message);
     }
     for (const uid of tripulacion) {
@@ -1105,13 +1166,145 @@ export class FlightsService {
    * SIN bitácora NO hay borrado. Devuelve el id para revertirla si el
    * DELETE del vuelo falla después.
    */
+  /**
+   * CANDADO de borrado por FACTURAS EMITIDAS (24-sep-2026). Con una factura
+   * VIGENTE (no borrada) ligada ⇒ 409 `VUELO_CON_FACTURA_EMITIDA` (se cancela
+   * o se desliga en el registro antes de borrar el vuelo). Devuelve las ligas
+   * de facturas CANCELADAS o borradas (van a la bitácora y se quitan justo
+   * antes del DELETE: el FK del puente es RESTRICT). Sin la migración
+   * 20260924000003 ⇒ [] (no hay puente).
+   */
+  private async ligasFacturaEmitidaParaBorrar(
+    vueloId: string,
+    folio: number | null,
+  ): Promise<FacturaDesligada[]> {
+    const sb = this.supabase.service;
+    if (!(await facturaEmitidaDisponible(sb))) return [];
+    const { data, error } = await sb
+      .from('factura_emitida_vuelo')
+      .select(
+        'factura_id, vuelo_id, created_at, created_by, factura:factura_id(serie, folio, estatus, deleted_at)',
+      )
+      .eq('vuelo_id', vueloId);
+    if (error) throw new Error(error.message);
+    const ligas: FacturaDesligada[] = [];
+    const vigentes: string[] = [];
+    for (const l of (data ?? []) as Array<Record<string, unknown>>) {
+      const rel = l.factura as
+        | Record<string, unknown>
+        | Array<Record<string, unknown>>
+        | null;
+      const f = Array.isArray(rel) ? rel[0] : rel;
+      const etiqueta =
+        etiquetaSerieFolio(f?.serie, f?.folio) ??
+        (typeof f?.folio === 'string' ? f.folio : '?');
+      const borrada = f?.deleted_at != null;
+      const estatus = typeof f?.estatus === 'string' ? f.estatus : '';
+      if (!borrada && estatus === 'VIGENTE') {
+        vigentes.push(etiqueta);
+        continue;
+      }
+      ligas.push({
+        factura_id: l.factura_id as string,
+        vuelo_id: l.vuelo_id as string,
+        created_at: (l.created_at as string | null) ?? null,
+        created_by: (l.created_by as string | null) ?? null,
+        etiqueta,
+        estatus,
+        borrada,
+      });
+    }
+    if (vigentes.length > 0) {
+      const lista =
+        vigentes.length === 1
+          ? `la factura ${vigentes[0]} registrada`
+          : `las facturas ${vigentes.slice(0, -1).join(', ')} y ${vigentes[vigentes.length - 1]} registradas`;
+      throw new ConflictException({
+        message: `El vuelo #${folio ?? '?'} tiene ${lista}. Cancélala o desliga el vuelo en Facturas emitidas antes de borrarlo.`,
+        error: 'VUELO_CON_FACTURA_EMITIDA',
+        details: { facturas: vigentes },
+      });
+    }
+    return ligas;
+  }
+
+  /** Quita del puente SOLO las ligas desligables (justo antes del DELETE). */
+  private async quitarLigasDesligables(
+    vueloId: string,
+    ligas: FacturaDesligada[],
+  ): Promise<void> {
+    if (ligas.length === 0) return;
+    const { error } = await this.supabase.service
+      .from('factura_emitida_vuelo')
+      .delete()
+      .eq('vuelo_id', vueloId)
+      .in(
+        'factura_id',
+        ligas.map((l) => l.factura_id),
+      );
+    if (error) throw new Error(error.message);
+  }
+
+  /**
+   * Quita las ligas desligables ANTES de los pasos destructivos del borrado.
+   * Si no se puede, revierte la bitácora forense recién escrita y lanza: el
+   * vuelo queda EXACTAMENTE como estaba (sin esto, un fallo aquí dejaba el
+   * vuelo vivo, sin tramos y «eliminado» en la bitácora).
+   */
+  private async quitarLigasOrevertirBitacora(
+    vueloId: string,
+    ligas: FacturaDesligada[],
+    bitacoraId: string | null,
+  ): Promise<void> {
+    try {
+      await this.quitarLigasDesligables(vueloId, ligas);
+    } catch (err) {
+      if (bitacoraId) {
+        await this.supabase.service
+          .from('vuelo_eliminado')
+          .delete()
+          .eq('id', bitacoraId);
+      }
+      throw err;
+    }
+  }
+
+  /** El DELETE del vuelo falló: se reponen las ligas (best-effort). */
+  private async reponerLigasDesligadas(
+    ligas: FacturaDesligada[],
+  ): Promise<void> {
+    if (ligas.length === 0) return;
+    const { error } = await this.supabase.service
+      .from('factura_emitida_vuelo')
+      .insert(
+        ligas.map((l) => ({
+          factura_id: l.factura_id,
+          vuelo_id: l.vuelo_id,
+          ...(l.created_at ? { created_at: l.created_at } : {}),
+          created_by: l.created_by,
+        })),
+      );
+    if (error) {
+      this.logger.error(
+        `No se pudieron reponer ${ligas.length} liga(s) de facturas emitidas del vuelo ${ligas[0].vuelo_id} tras un borrado fallido: ${error.message}. Están en la bitácora: ${ligas.map((l) => l.etiqueta).join(', ')}`,
+      );
+    }
+  }
+
   private async escribirBitacoraVueloEliminado(
     vuelo: Record<string, unknown>,
     escalas: Array<Record<string, unknown>>,
     motivo: string,
     userId: string | null,
-    /** Trazabilidad de la app (client_request_id del outbox): va al snapshot. */
-    traza?: { client_request_id: string },
+    /**
+     * Trazabilidad (va al snapshot): `client_request_id` del outbox de la app
+     * y, ADITIVO (24-sep-2026), las ligas a facturas emitidas CANCELADAS o
+     * borradas que se quitan del puente antes de borrar el vuelo.
+     */
+    traza?: {
+      client_request_id?: string;
+      facturas_emitidas_desligadas?: FacturaDesligada[];
+    },
   ): Promise<string | null> {
     const sb = this.supabase.service;
     // Nombres para la bitácora (best-effort).
@@ -1145,7 +1338,24 @@ export class FlightsService {
         estado: vuelo.estado,
         tramos: escalas.length,
         motivo: motivo.trim(),
-        snapshot: { vuelo, escalas, ...(traza ? { app: traza } : {}) },
+        snapshot: {
+          vuelo,
+          escalas,
+          ...(traza?.client_request_id
+            ? { app: { client_request_id: traza.client_request_id } }
+            : {}),
+          ...(traza?.facturas_emitidas_desligadas?.length
+            ? {
+                facturas_emitidas_desligadas:
+                  traza.facturas_emitidas_desligadas.map((f) => ({
+                    factura_id: f.factura_id,
+                    etiqueta: f.etiqueta,
+                    estatus: f.estatus,
+                    borrada: f.borrada,
+                  })),
+              }
+            : {}),
+        },
         eliminado_por: userId,
       })
       .select('id')
@@ -1237,18 +1447,29 @@ export class FlightsService {
     const pv = planPath(vuelo.foto_plan_vuelo_url);
     if (pv) planPaths.push(pv);
 
+    // Facturas EMITIDAS ligadas (24-sep-2026): con una VIGENTE ⇒ 409 (antes
+    // de la bitácora); las canceladas/borradas se desligan y quedan en ella.
+    const desligadas = await this.ligasFacturaEmitidaParaBorrar(id, folio);
+
     // Bitácora forense ANTES de borrar (si el delete falla, se revierte).
     const bitacoraId = await this.escribirBitacoraVueloEliminado(
       vuelo as Record<string, unknown>,
       escalas,
       motivo,
       userId,
+      desligadas.length > 0
+        ? { facturas_emitidas_desligadas: desligadas }
+        : undefined,
     );
     // Hijo de GRUPO (4-sep): contexto resuelto ANTES de borrar la fila.
     const ctxGrupo = await contextoGrupoDeVuelo(
       sb,
       vuelo as Record<string, unknown>,
     );
+    // Ligas a facturas emitidas CANCELADAS/borradas: fuera ANTES de cualquier
+    // paso destructivo (si fallara después de borrar los tramos, el vuelo
+    // quedaría vivo sin tramos y con la bitácora diciendo «eliminado»).
+    await this.quitarLigasOrevertirBitacora(id, desligadas, bitacoraId);
 
     // Eventos de Google Calendar ANTES de perder los IDs.
     await this.calendar.removeFlight(id).catch(() => undefined);
@@ -1266,6 +1487,7 @@ export class FlightsService {
       if (bitacoraId) {
         await sb.from('vuelo_eliminado').delete().eq('id', bitacoraId);
       }
+      await this.reponerLigasDesligadas(desligadas);
       if (error.code === '23503') {
         throw new ConflictException(
           'La base bloqueó el borrado: el vuelo tiene cobros o factura ligados (capturados mientras confirmabas).',
@@ -1555,6 +1777,25 @@ export class FlightsService {
       .from('cobro_vuelo')
       .update(patchCobrosAlClon(clonId))
       .eq('vuelo_id', id);
+    // 4a) Facturas EMITIDAS ligadas (24-sep-2026) → al clon, como los cobros:
+    //     la factura es del servicio que SÍ sale. Si falla, la factura queda
+    //     en el original CANCELADO y el registro la marca con la alerta
+    //     VUELO_CANCELADO (no pasa en silencio). La SOLICITUD viaja sola en
+    //     el spread del clon (el original sale de «Por facturar» por
+    //     derivación y el clon entra si aún no tiene factura, sin re-avisar).
+    try {
+      if (await facturaEmitidaDisponible(sb)) {
+        const { error: ligErr } = await sb
+          .from('factura_emitida_vuelo')
+          .update({ vuelo_id: clonId })
+          .eq('vuelo_id', id);
+        if (ligErr) throw new Error(ligErr.message);
+      }
+    } catch (err) {
+      this.logger.error(
+        `reassignAircraft ${id}: no se pudieron mover las facturas emitidas al clon ${clonId}: ${err instanceof Error ? err.message : String(err)}. Quedan en el vuelo cancelado (alerta VUELO_CANCELADO en el registro).`,
+      );
+    }
     // 4b) Hijo de GRUPO (4-sep-2026): si el original era el avión ANCLA del
     //     grupo (residuos de centavos / extras ANCLA), el ancla pasa al clon
     //     — un ancla CANCELADA dejaría al grupo sin dónde caer los residuos.
@@ -2077,16 +2318,28 @@ export class FlightsService {
     // Factura del SERVICIO por vuelo (22-sep-2026, ADITIVO): en LOTE (una
     // consulta por página, más la de nombres), nunca N+1. Sin el servicio o
     // sin la migración se deriva del `facturado` que ya trae cada fila.
-    const facturaPorVuelo = this.facturaCliente
-      ? await this.facturaCliente.bloquesDeVuelos(
-          rows as Array<{ id?: unknown } & VueloFacturaRow>,
-        )
-      : new Map(
-          rows.map((r) => [
-            (r as Record<string, unknown>).id as string,
-            bloqueFacturaCliente(r as VueloFacturaRow),
-          ]),
-        );
+    // «Por facturar» (24-sep-2026, ADITIVO): resumen de la solicitud y de las
+    // facturas emitidas VIGENTES por fila, en LOTE (2 consultas por cada 200
+    // vuelos). Se omite para roles de campo; `null` sin la migración.
+    const conResumenFactura =
+      !!this.facturaSolicitud && !FlightsService.esRolDeCampo(current);
+    const [facturaPorVuelo, resumenFacturaServicio] = await Promise.all([
+      this.facturaCliente
+        ? this.facturaCliente.bloquesDeVuelos(
+            rows as Array<{ id?: unknown } & VueloFacturaRow>,
+          )
+        : Promise.resolve(
+            new Map(
+              rows.map((r) => [
+                (r as Record<string, unknown>).id as string,
+                bloqueFacturaCliente(r as VueloFacturaRow),
+              ]),
+            ),
+          ),
+      conResumenFactura
+        ? this.facturaSolicitud.resumenesDeVuelos(idsVuelos)
+        : Promise.resolve(null),
+    ]);
     const rowsConRuta = rows.map((r) => {
       const row = r as Record<string, unknown>;
       const vid = row.id as string;
@@ -2115,6 +2368,12 @@ export class FlightsService {
           factura_cliente:
             facturaPorVuelo.get(vid) ??
             bloqueFacturaCliente(row as VueloFacturaRow),
+          ...(conResumenFactura
+            ? {
+                factura_servicio_resumen:
+                  resumenFacturaServicio?.get(vid) ?? null,
+              }
+            : {}),
           ruta_iatas:
             resumen?.ruta_iatas ??
             [row.origen_iata as string, row.destino_iata as string].filter(
@@ -2587,6 +2846,7 @@ export class FlightsService {
       apoyosRows,
       clienteResumen,
       facturaClienteBloque,
+      facturaServicioBloque,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -2624,6 +2884,12 @@ export class FlightsService {
       // archivo. Las columnas no van en VUELO_COLS (se usa en escrituras y
       // la migración puede no estar aplicada todavía), se leen aparte.
       this.bloqueFacturaClienteDe(vuelo as Record<string, unknown>),
+      // «Necesito factura» + facturas emitidas ligadas (24-sep-2026,
+      // ADITIVO). null sin la migración 20260924000003 (el panel oculta la
+      // burbuja); los roles de campo ni lo piden (se omite la llave abajo).
+      FlightsService.esRolDeCampo(current) || !this.facturaSolicitud
+        ? Promise.resolve(null)
+        : this.facturaSolicitud.bloqueDeVuelo(id),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -2732,6 +2998,12 @@ export class FlightsService {
       // FACTURA DEL SERVICIO (22-sep-2026, ADITIVO): { estatus, archivo }.
       // `facturado` y la tabla `factura` (CFDI del PAC) no cambian.
       factura_cliente: facturaClienteBloque,
+      // SOLICITUD + FACTURAS EMITIDAS (24-sep-2026, ADITIVO): solicitud,
+      // «por facturar» derivado y facturas VIGENTES ligadas. La llave se
+      // OMITE para PILOTO/MECANICO/VISITANTE.
+      ...(FlightsService.esRolDeCampo(current)
+        ? {}
+        : { factura_servicio: facturaServicioBloque }),
     };
   }
 
@@ -9802,33 +10074,41 @@ export class FlightsService {
     const out: Record<string, { total_cobrado: number; sin_tc_count: number }> =
       {};
     if (ids.length === 0) return out;
-    const [cobrosRes, vuelosRes] = await Promise.all([
-      this.supabase.service
-        .from('cobro_vuelo')
-        .select('vuelo_id, monto, moneda, tc_usd_mxn')
-        .in('vuelo_id', ids)
-        // Anti-cap de PostgREST (1000 filas): 200 vuelos con muchos abonos
-        // truncarían el total EN SILENCIO y pintarían "parcial" un pagado.
-        .limit(10000),
-      this.supabase.service
-        .from('vuelo')
-        .select('id, tc_usd_mxn')
-        .in('id', ids),
-    ]);
-    if (cobrosRes.error) throw new Error(cobrosRes.error.message);
-    if (vuelosRes.error) throw new Error(vuelosRes.error.message);
     const tcPorVuelo = new Map<string, number | null>();
-    for (const v of vuelosRes.data ?? []) {
-      tcPorVuelo.set(v.id as string, Number(v.tc_usd_mxn) || null);
-    }
     const grupos = new Map<
       string,
       { monto: unknown; moneda: unknown; tc_usd_mxn: unknown }[]
     >();
-    for (const c of cobrosRes.data ?? []) {
-      const list = grupos.get(c.vuelo_id as string) ?? [];
-      list.push(c);
-      grupos.set(c.vuelo_id as string, list);
+    // LOTES de 200 ids (24-sep-2026): el registro de facturas emitidas pide
+    // el semáforo de páginas que pueden traer > 200 vuelos y la URL de
+    // PostgREST revienta con un `in.(…)` sin tope. Para ≤ 200 ids es la
+    // MISMA consulta de siempre.
+    const LOTE = 200;
+    for (let i = 0; i < ids.length; i += LOTE) {
+      const lote = ids.slice(i, i + LOTE);
+      const [cobrosRes, vuelosRes] = await Promise.all([
+        this.supabase.service
+          .from('cobro_vuelo')
+          .select('vuelo_id, monto, moneda, tc_usd_mxn')
+          .in('vuelo_id', lote)
+          // Anti-cap de PostgREST (1000 filas): 200 vuelos con muchos abonos
+          // truncarían el total EN SILENCIO y pintarían "parcial" un pagado.
+          .limit(10000),
+        this.supabase.service
+          .from('vuelo')
+          .select('id, tc_usd_mxn')
+          .in('id', lote),
+      ]);
+      if (cobrosRes.error) throw new Error(cobrosRes.error.message);
+      if (vuelosRes.error) throw new Error(vuelosRes.error.message);
+      for (const v of vuelosRes.data ?? []) {
+        tcPorVuelo.set(v.id as string, Number(v.tc_usd_mxn) || null);
+      }
+      for (const c of cobrosRes.data ?? []) {
+        const list = grupos.get(c.vuelo_id as string) ?? [];
+        list.push(c);
+        grupos.set(c.vuelo_id as string, list);
+      }
     }
     for (const id of ids) {
       const conv = cobrosEnUsd(
@@ -9884,6 +10164,138 @@ export class FlightsService {
       if (it.signedUrl && it.path) map[it.path] = it.signedUrl;
     }
     return map;
+  }
+
+  /**
+   * COMPROBANTE DEL COBRO (24-sep-2026, pedido de Itzi): adjunta o reemplaza
+   * el comprobante de un cobro YA registrado. Es EVIDENCIA, no dinero:
+   *  - NO se bloquea por conciliación, por el candado de «cotización con
+   *    cobros», por vuelo CANCELADO ni por ser REEMBOLSO;
+   *  - NO toca monto/moneda/TC ni llama `refreshCobradoFlag`;
+   *  - el archivo ANTERIOR NO se borra del bucket (reemplazar nunca destruye
+   *    evidencia de dinero; misma regla que las facturas emitidas);
+   *  - CAS sobre `foto_voucher_url`: si alguien más lo cambió entre la
+   *    lectura y la escritura ⇒ 409 COMPROBANTE_CAMBIO y se retira lo NUEVO.
+   * Parte de un SOBRE de grupo ⇒ 409 COBRO_DE_GRUPO (el grupo tampoco sube
+   * vouchers hoy: pendiente documentado).
+   */
+  async adjuntarComprobanteCobro(
+    cobroId: string,
+    archivo: ArchivoEntrante,
+    userId: string,
+  ): Promise<{
+    id: string;
+    foto_voucher_url: string;
+    url: string;
+    tipo: 'imagen' | 'pdf';
+  }> {
+    const v = validarComprobanteCobro({
+      nombre: archivo.nombre,
+      mime: archivo.mime,
+      bytes: archivo.buffer.length,
+    });
+    if (!v.ok) {
+      const cuerpo = { message: v.mensaje, error: v.codigo };
+      if (v.codigo === 'ARCHIVO_MUY_GRANDE') {
+        throw new PayloadTooLargeException({
+          ...cuerpo,
+          details: {
+            bytes: archivo.buffer.length,
+            limite_bytes: LIMITE_COMPROBANTE_BYTES,
+          },
+        });
+      }
+      throw new BadRequestException(cuerpo);
+    }
+    const sb = this.supabase.service;
+    const { data: cobro, error: cErr } = await sb
+      .from('cobro_vuelo')
+      .select('id, vuelo_id, foto_voucher_url, cobro_grupo_id')
+      .eq('id', cobroId)
+      .maybeSingle();
+    if (cErr) throw new Error(cErr.message);
+    if (!cobro) {
+      throw new NotFoundException({
+        message: 'Ese cobro no existe (¿se eliminó?). Recarga la página.',
+        error: 'COBRO_NO_EXISTE',
+        details: { cobro_id: cobroId },
+      });
+    }
+    const grupoCobroId = (cobro.cobro_grupo_id as string | null) ?? null;
+    if (grupoCobroId) {
+      const { data: sobre } = await sb
+        .from('cobro_grupo')
+        .select('grupo_id')
+        .eq('id', grupoCobroId)
+        .maybeSingle();
+      throw new ConflictException({
+        message:
+          'Este cobro es parte de un sobre de grupo: por ahora su comprobante no se adjunta por vuelo.',
+        error: 'COBRO_DE_GRUPO',
+        details: {
+          grupo_id: (sobre?.grupo_id as string | undefined) ?? null,
+          cobro_grupo_id: grupoCobroId,
+        },
+      });
+    }
+    const anterior = (cobro.foto_voucher_url as string | null) ?? null;
+    const path = pathComprobanteCobro(
+      cobro.vuelo_id as string,
+      cobroId,
+      randomUUID(),
+      v.extension,
+    );
+    const { error: upErr } = await sb.storage
+      .from(BUCKET_COBRO_VOUCHERS)
+      .upload(path, archivo.buffer, {
+        contentType: v.contentType,
+        upsert: false,
+      });
+    if (upErr) {
+      throw new Error(`No se pudo guardar el comprobante: ${upErr.message}`);
+    }
+    const retirarNuevo = async () => {
+      const { error } = await sb.storage
+        .from(BUCKET_COBRO_VOUCHERS)
+        .remove([path]);
+      if (error) {
+        this.logger.warn(
+          `Comprobante huérfano ${path} (no se pudo retirar): ${error.message}`,
+        );
+      }
+    };
+    let upd = sb
+      .from('cobro_vuelo')
+      .update({ foto_voucher_url: path, updated_by: userId })
+      .eq('id', cobroId);
+    upd = anterior
+      ? upd.eq('foto_voucher_url', anterior)
+      : upd.is('foto_voucher_url', null);
+    const { data: filas, error: updErr } = await upd.select('id');
+    if (updErr) {
+      await retirarNuevo();
+      throw new Error(updErr.message);
+    }
+    if (!filas || filas.length === 0) {
+      await retirarNuevo();
+      throw new ConflictException({
+        message: 'Alguien más cambió el comprobante; recarga.',
+        error: 'COMPROBANTE_CAMBIO',
+        details: { cobro_id: cobroId },
+      });
+    }
+    this.logger.log(
+      `Comprobante del cobro ${cobroId} (vuelo ${cobro.vuelo_id as string}) por ${userId}: ${anterior ?? '(sin comprobante)'} → ${path}${anterior ? ' — el anterior se CONSERVA en el bucket' : ''}`,
+    );
+    const { data: firmada } = await sb.storage
+      .from(BUCKET_COBRO_VOUCHERS)
+      .createSignedUrl(path, 600);
+    return {
+      id: cobroId,
+      foto_voucher_url: path,
+      url: firmada?.signedUrl ?? '',
+      tipo: v.tipo,
+    };
   }
 
   /**

@@ -1,4 +1,4 @@
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiPropertyOptional, OmitType } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
@@ -71,6 +71,38 @@ export class ListQuotesQuery {
   @IsInt()
   @Min(0)
   offset: number = 0;
+}
+
+/**
+ * Filtros de las FLECHAS «‹ Anterior» / «Siguiente ›» del detalle de una
+ * cotización (24-sep-2026, pedido de Itzi: «estando adentro de la cotización
+ * me pueda brincar a la siguiente»). Son EXACTAMENTE los de la lista
+ * (`GET /quotes`) sin paginar: las flechas recorren lo mismo que el operador
+ * veía en la lista de donde vino. `limit`/`offset` no existen aquí (con
+ * `forbidNonWhitelisted` mandarlos es 400).
+ */
+export class VecinosQuotesQuery extends OmitType(ListQuotesQuery, [
+  'limit',
+  'offset',
+] as const) {}
+
+/** Una cotización vecina (la anterior o la siguiente en el tiempo). */
+export interface QuoteVecino {
+  id: string;
+  folio: number;
+  /** timestamptz del vuelo (nunca null: sin fecha no hay vecino). */
+  fecha_vuelo: string;
+  estado: EstadoVuelo;
+  /** Nombre del cliente; null si no se resolvió (nunca se inventa). */
+  cliente_nombre: string | null;
+}
+
+/** Respuesta de `GET /v1/quotes/:id/vecinos`. */
+export interface QuoteVecinosRespuesta {
+  anterior: QuoteVecino | null;
+  siguiente: QuoteVecino | null;
+  /** La cotización actual no tiene fecha de vuelo: no hay orden cronológico. */
+  sin_fecha: boolean;
 }
 
 export class CancelQuoteDto {

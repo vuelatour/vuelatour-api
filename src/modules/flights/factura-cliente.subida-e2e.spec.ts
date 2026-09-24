@@ -15,6 +15,10 @@ jest.mock('./flight-report.service', () => ({
   FlightReportService: class {},
 }));
 jest.mock('./cobro-recibo.service', () => ({ CobroReciboService: class {} }));
+// «Necesito factura» (24-sep-2026): arrastra notifications/jose.
+jest.mock('./factura-solicitud.service', () => ({
+  FacturaSolicitudService: class {},
+}));
 
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';

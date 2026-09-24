@@ -1689,6 +1689,123 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       <YYYY-MM-DD>.xlsx» / «Por reponer caja <responsable> <hoy>.xlsx»
       (ASCII + `filename*`).
 
+27. **FACTURAS EMITIDAS (registro manual), «NECESITO FACTURA» y COMPROBANTE
+    DEL COBRO (24-sep-2026, API 0.0.32, migración `20260924000003` APLICADA
+    el 24-sep-2026 tras DRYRUN_OK).** Pedidos de Ale («las facturas que hace Mari manualmente
+    … por orden del número … que no haya duplicadas») y de Itzi («algo que
+    marque como necesito factura y a Mari le salga una alertita»; «adjuntar
+    el comprobante del cobro»). Contrato de diseño v2 compartido con panel
+    y pyservices (tipos JSON en `facturas-emitidas.types.ts`, idénticos a
+    `vuelatour-next/src/types/facturas-emitidas.ts`). Tres cosas, ninguna
+    toca dinero:
+    - **Registro `factura_emitida` + puente `factura_emitida_vuelo` (N:M)**
+      — NO es la facturación automática del PAC (`factura`,
+      `/admin/facturas`, intacta). Módulo `modules/facturas-emitidas/`
+      (`v1/facturas-emitidas`, `@Roles(ADMIN, FACTURACION)` de CLASE; ver el
+      PDF también COORDINADOR). Lógica PURA en `facturas-emitidas.util.ts`
+      (con spec): número único = **emisora + serie + folio** (hay DOS razones
+      sociales con numeración propia; emisora NULL = comodín al buscar
+      duplicados); duplicado = `claveCompacta` («A»+«00123» = «A-123» sin
+      serie = «a 123») + `mismaEmisora`; `buscarYaRegistrada` es LA regla del
+      409 (`FACTURA_DUPLICADA`/`UUID_DUPLICADO` con la existente) y del banner
+      «ya registrada» de `leer-archivo` — nunca discrepan. Orden por número
+      (`serieEfectiva` → `folio_num` → folio), huecos por (emisora, serie)
+      contando canceladas y aritméticos (un folio con un dígito de más no
+      enumera millones), alertas `DUPLICADO_VUELO` (≥ 2 vigentes y al menos
+      una NO `es_parcial`), `SIN_PDF`, `SIN_VUELO`, `VUELO_CANCELADO`.
+      **Los archivos NUNCA se borran del bucket** (el #297 perdió su PDF con
+      un «Quitar»): quitar/reemplazar solo desreferencia y deja la entrada en
+      `archivos_historial`; el ÚNICO `storage.remove` es lo recién subido de
+      una operación que FALLÓ. Cancelar ≠ eliminar (soft delete con motivo;
+      TODO lector filtra `deleted_at is null`). Ligar una VIGENTE sube
+      `vuelo.factura_estatus` SIN_FACTURA ⇒ FACTURADO con CAS (nunca baja;
+      no es columna del trigger de Google). El PDF lo lee pyservices
+      (`/facturacion/leer-pdf-emitida`, sin IA; si falla ⇒ aviso
+      `PDF_NO_LEIDO`, nunca 500); el XML el parser TS
+      (`extraerCfdiCompleto`, DOCTYPE ⇒ 422). La columna «FACTURA VUELATOUR»
+      de los Excel suma el paso «emitidas VIGENTES» a su cascada única
+      (`etiquetaFacturaVuelo`): CFDI PAC → «A-123, A-130» → folio legado →
+      estatus. Las rutas viejas `flights/:id/factura-cliente/*` siguen vivas
+      (compatibilidad); el panel ya no sube por ahí.
+    - **Solicitud en `vuelo`** (`factura_solicitada_at/_por`,
+      `factura_solicitud_nota`, `factura_paga_contra_factura`): `POST|DELETE
+      v1/flights/:id/solicitud-factura` (`FacturaSolicitudService`,
+      idempotente; `todo_el_grupo` = UNA notificación). **«Por facturar» es
+      DERIVADO, nunca se guarda** (`factura-solicitud.util#esPorFacturar`):
+      solicitada AND no CANCELADO AND `facturado` (PAC) ≠ true AND 0 emitidas
+      VIGENTES ligadas. Aviso `factura_solicitada` a
+      `ConfiguracionService.destinatariosFacturacion` (config
+      `responsables_facturacion` en `valor_json` → rol FACTURACION → ADMIN;
+      el nivel se elige ANTES de excluir a quien pide) y `factura_emitida` a
+      quien pidió (avisos directos, sin fila en `alerta_config`; la app
+      Flutter no conoce esos tipos: ícono genérico y el tap abre el vuelo
+      por `data.vuelo_id` — verificado sin tocar la app). Bloques ADITIVOS `factura_servicio` (snapshot) y
+      `factura_servicio_resumen` (listas de vuelos y cotizaciones; se OMITEN
+      para PILOTO/MECANICO/VISITANTE). La clave de config se EXCLUYE de
+      `GET /v1/config` y `PATCH /config/:clave` la rechaza (400).
+    - **Comprobante del cobro**: `POST v1/flights/cobros/:cobroId/comprobante`
+      (foto o PDF ≤ 10 MB, bucket `cobro-vouchers`, `oficina/<vuelo>/<cobro>/`)
+      — evidencia, no dinero: no se bloquea por conciliación ni por el candado
+      de cotización, no llama `refreshCobradoFlag`, CAS sobre
+      `foto_voucher_url` (409 `COMPROBANTE_CAMBIO`) y el archivo ANTERIOR se
+      conserva. Parte de sobre de grupo ⇒ 409 `COBRO_DE_GRUPO` (pendiente:
+      el grupo tampoco sube vouchers).
+    - **Candados**: borrar/purgar un vuelo con factura emitida VIGENTE ⇒ 409
+      `VUELO_CON_FACTURA_EMITIDA`; las ligas de canceladas/borradas van a la
+      bitácora forense, se quitan justo antes del DELETE y se REPONEN si
+      falla. `reassignAircraft` mueve las ligas al clon (si falla, el
+      registro marca `VUELO_CANCELADO`). **Toda consulta `.in(...)` del
+      bloque va en lotes de ≤ 200 ids** (incluido `cobroStatus`, que ahora
+      parte solo). Dinero en textos: `common/dinero-texto.util` (nunca 1
+      decimal; `semaforo-cobro.util` usa la misma regla).
+    - **Sin la migración** (sonda única `common/factura-emitida-disponible.util`,
+      re-sondeo ≤ 10 min): rutas nuevas y responsables ⇒ 503
+      `FACTURAS_EMITIDAS_NO_DISPONIBLE`; snapshot/listas ⇒ `null`; Excel,
+      etiquetas y vuelos idénticos a hoy. El comprobante NO depende de ella.
+
+28. **FLECHAS ENTRE COTIZACIONES — `GET /v1/quotes/:id/vecinos` (24-sep-2026,
+    API 0.0.32, sin migración).** Pedido de Itzi: «ya le piqué al vuelo del
+    20 de septiembre … si hay una flechita arriba me brinca el siguiente
+    vuelito, ya sea de ese mismo día o hasta el siguiente día». Solo lectura.
+    - **Orden CRONOLÓGICO por `fecha_vuelo`, empate por `folio`** (único):
+      «siguiente» = el vuelo que sigue en el tiempo (mismo día más tarde o
+      días después), NO el folio siguiente. Respuesta `{anterior, siguiente:
+      {id, folio, fecha_vuelo, estado, cliente_nombre} | null, sin_fecha}`.
+    - **MISMOS filtros y roles que `GET /quotes`** (`VecinosQuotesQuery =
+      OmitType(ListQuotesQuery, ['limit','offset'])`; ADMIN, COORDINADOR,
+      FACTURACION, ANALISTA, SOCIO; sin filtrado por fila). Fuente ÚNICA para
+      las dos rutas: `condicionesBusqueda(q)` (async: resuelve UNA vez las
+      búsquedas de cliente y aeropuerto y devuelve la cadena del `.or`) +
+      `aplicarFiltrosLista(qb, filtros, condQ)` (síncrona). Si divergen, la
+      flecha brinca a una cotización que la lista no enseña. `list` no cambió
+      de comportamiento (el spec compara el `.or` de las dos).
+    - **Barato**: ancla (`id, folio, fecha_vuelo`) + CUATRO consultas en
+      paralelo con `limit(1)` sobre `idx_vuelo_fecha_vuelo` (mismo instante con
+      folio mayor/menor · primer instante posterior · último anterior), así no
+      se combinan dos `.or()` de PostgREST. Jamás se carga la lista.
+    - El ANCLA es la cotización actual aunque ya no cumpla el filtro; sin
+      `fecha_vuelo` ⇒ `sin_fecha: true` y ninguna consulta más; una sin fecha
+      nunca es vecina; las CANCELADAS entran como en la lista; 404 como
+      `findById`; un error de PostgREST SUBE (el panel degrada con aviso, nunca
+      pinta «no hay siguiente» por una lectura fallida).
+    - Detalle de tipos: el `limit(1)` va en la BASE, antes de los filtros —
+      en el otro orden el genérico de `aplicarFiltrosLista` revienta el
+      chequeo de tipos de supabase-js (TS2589)— y `primerVecino` resuelve cada
+      consulta a `QuoteVecino | null` fuera del `Promise.all`.
+    - Specs: `quotes.service.vecinos.spec.ts` (BD en memoria que INTERPRETA
+      `eq/gt/lt/ilike/in/or/order/limit`: mismo día más tarde, día siguiente,
+      empate, extremos, recorrido completo ida y vuelta, filtros, `q` resuelta
+      una vez, ancla fuera del filtro, sin fecha, 404, error que sube, y la
+      paridad del `.or` con `list`) y `quotes.controller.vecinos.spec.ts`
+      (HTTP real con `RolesGuard`: ruta antes de `:id`, roles = los de la
+      lista, `limit` ⇒ 400).
+    - **Hueco conocido, AJENO a esto**: con `enableImplicitConversion` el
+      `@ToBooleanQuery()` recibe el valor YA convertido (`'false'` ⇒ `true`),
+      así que `?es_externo=false` filtra como `true` — en la lista y en las
+      flechas por igual (el panel no manda ese filtro). Afecta también a
+      `conciliado`, `pendientes`, `duplicados`, `activo` y `forzar` de otros
+      DTOs; no se tocó aquí.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -2313,6 +2430,24 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **APLICADA (24-sep-2026, API 0.0.32; dry-run DRYRUN_OK con escrituras reales, `get_advisors` solo el INFO de RLS sin policies, `responsables_facturacion` = [Mary Cruz])** —
+  `20260924000003_factura_emitida.sql` (invariante 27): tablas
+  `factura_emitida` + `factura_emitida_vuelo` (RLS sin policies, patrón del
+  repo), 4 columnas de SOLICITUD en `vuelo` (con CHECKs; **fuera** de la
+  lista de `trg_vuelo_calendar_sync`: pedir factura NO reescribe Google),
+  `configuracion_sistema.valor_json` + fila `responsables_facturacion`
+  sembrada con Mary Cruz. Aditiva, sin funciones ni triggers nuevos (solo el
+  `tg_set_updated_at` de la tabla nueva). **Antes de aplicar**: correr el
+  DRY-RUN de su cabecera (UNA sentencia `do $dry$ … $dry$` con el cuerpo
+  pegado en B; INSERT/UPDATE REALES —incluido el UPDATE de `vuelo` con las
+  columnas nuevas y la verificación de que NO encola en
+  `calendar_sync_cola`— que termina en `raise exception 'DRYRUN_OK …'`, así
+  que todo se revierte). Cualquier `DRYRUN_FALLA` ⇒ NO aplicar. Después:
+  `get_advisors`, `select clave, valor_json from configuracion_sistema where
+  clave = 'responsables_facturacion'` (uuid de Mary Cruz) y sondear
+  `GET /v1/facturas-emitidas/por-facturar/conteo` (200, no 503; la sonda
+  re-sondea en ≤ 10 min o reiniciar el API). El API 0.0.32 es desplegable
+  ANTES de aplicarla (503 claro en lo nuevo, todo lo demás igual).
 - **APLICADA (24-sep-2026 vía MCP, tras el dry-run A/B/C en prod: `okA` y
   `DRYRUN_OK · C1 trigger con cobrado · C2 lista intacta · C3 cobrado encola ·
   C4 notas_internas no encola · C5 sin cambio no encola`; después, re-pintado

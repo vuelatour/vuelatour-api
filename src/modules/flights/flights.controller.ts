@@ -7,6 +7,7 @@ import {
   Header,
   HttpCode,
   HttpStatus,
+  Optional,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -80,6 +81,10 @@ import {
 } from './factura-cliente.util';
 import { CobroReciboService } from './cobro-recibo.service';
 import { FacturaClienteService } from './factura-cliente.service';
+import { FacturaSolicitudService } from './factura-solicitud.service';
+import { SolicitarFacturaDto } from './dto/solicitud-factura.dto';
+import { SinCamposComprobanteDto } from './dto/cobros.dto';
+import { errorFacturasNoDisponibles } from '../../common/factura-emitida-disponible.util';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
 
@@ -92,7 +97,16 @@ export class FlightsController {
     private readonly report: FlightReportService,
     private readonly recibo: CobroReciboService,
     private readonly facturaCliente: FacturaClienteService,
+    // «Necesito factura» (24-sep-2026). @Optional: los specs HTTP que ya
+    // existen montan el controlador sin él; en la app siempre está.
+    @Optional()
+    private readonly facturaSolicitud?: FacturaSolicitudService,
   ) {}
+
+  private solicitudService(): FacturaSolicitudService {
+    if (!this.facturaSolicitud) throw errorFacturasNoDisponibles();
+    return this.facturaSolicitud;
+  }
 
   // ============ Vuelos ============
 
@@ -818,6 +832,48 @@ export class FlightsController {
     return this.facturaCliente.archivoUrl(id);
   }
 
+  // ============ «Necesito factura» (solicitud, 24-sep-2026) ============
+  //
+  // Pedido de Itzi: «que haya algo que yo marque así como de necesito
+  // factura … y a Mari le salga una alertita». «Por facturar» es DERIVADO
+  // (flights/factura-solicitud.util.ts#esPorFacturar); el registro de la
+  // factura vive en /v1/facturas-emitidas.
+
+  @Post(':id/solicitud-factura')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Pide factura del vuelo (idempotente): la primera vez registra quién/cuándo y AVISA a facturación (`factura_solicitada`); después solo actualiza nota/paga_contra_factura que vengan. `todo_el_grupo` aplica a los hijos NO cancelados del grupo con UNA notificación. 409 VUELO_CANCELADO; 503 FACTURAS_EMITIDAS_NO_DISPONIBLE. { factura_servicio, nueva, vuelos, notificados }.',
+  })
+  solicitarFactura(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: SolicitarFacturaDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.solicitudService().solicitar(id, dto, {
+      userId: c.userId,
+      nombre: c.nombre,
+    });
+  }
+
+  @Delete(':id/solicitud-factura')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Retira la solicitud de factura de ESTE vuelo (idempotente; la UI confirma). { factura_servicio }.',
+  })
+  retirarSolicitudFactura(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.solicitudService().retirar(id, {
+      userId: c.userId,
+      nombre: c.nombre,
+    });
+  }
+
   // ============ Cobros ============
 
   @Get(':id/payments')
@@ -895,6 +951,44 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.deleteCobro(cobroId, c.userId);
+  }
+
+  @Post('cobros/:cobroId/comprobante')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @HttpCode(HttpStatus.OK)
+  @UseInterceptors(
+    FileInterceptor('file', {
+      limits: { fileSize: LIMITE_MULTER_FACTURA_BYTES },
+    }),
+  )
+  @ApiConsumes('multipart/form-data')
+  @ApiOperation({
+    summary:
+      'Adjunta (o reemplaza) el COMPROBANTE de un cobro YA registrado: foto (JPG, PNG, WEBP, HEIC) o PDF, ≤ 10 MB, campo `file`. NO toca dinero ni se bloquea por conciliación, candado de cotización ni vuelo cancelado; el archivo anterior se CONSERVA en el bucket. 409 COBRO_DE_GRUPO (parte de sobre) / COMPROBANTE_CAMBIO (CAS). { id, foto_voucher_url, url (600 s), tipo }.',
+  })
+  adjuntarComprobanteCobro(
+    @Param('cobroId', ParseUUIDPipe) cobroId: string,
+    @UploadedFile() file: ArchivoMultipart | undefined,
+    @Body() _dto: SinCamposComprobanteDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    void _dto;
+    if (!file?.buffer || file.buffer.length === 0) {
+      throw new BadRequestException({
+        message:
+          'No llegó ningún archivo: manda la foto o el PDF del comprobante en el campo «file».',
+        error: 'SIN_ARCHIVO',
+      });
+    }
+    return this.flights.adjuntarComprobanteCobro(
+      cobroId,
+      {
+        buffer: file.buffer,
+        nombre: file.originalname ?? null,
+        mime: file.mimetype ?? null,
+      },
+      c.userId,
+    );
   }
 
   @Get('cobros/:cobroId/recibo.pdf')

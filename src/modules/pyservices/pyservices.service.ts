@@ -1548,6 +1548,32 @@ export interface FacturaRecibidaParsed {
 }
 
 /**
+ * Respuesta de `POST /facturacion/leer-pdf-emitida` (pyservices
+ * `LeerPdfEmitidaResponse`, 24-sep-2026). Todo opcional: cada PAC arma su
+ * PDF distinto y el extractor es tolerante; `texto_extraido: false` = PDF
+ * escaneado/cifrado/ilegible.
+ */
+export interface LeerPdfEmitidaResult {
+  serie: string | null;
+  folio: string | null;
+  uuid: string | null;
+  fecha_emision: string | null;
+  emisor_rfc: string | null;
+  emisor_nombre: string | null;
+  receptor_rfc: string | null;
+  receptor_nombre: string | null;
+  subtotal: number | null;
+  iva: number | null;
+  total: number | null;
+  moneda: string | null;
+  metodo_pago: string | null;
+  forma_pago: string | null;
+  texto_extraido: boolean;
+  paginas: number;
+  avisos: string[];
+}
+
+/**
  * Tramo con coordenadas para el mapa de ruta de la cotización — nombres
  * exactos de `MapaPuntoPdf` (pyservices app/schemas/reportes.py). Es el
  * elemento de `CotizacionPdfRequest.mapa_puntos` y el body de
@@ -1784,6 +1810,21 @@ export class PyservicesService {
       {
         xml_b64: xmlB64,
       },
+    );
+  }
+
+  /**
+   * Lee una factura EMITIDA en PDF (24-sep-2026, registro de facturas
+   * emitidas): pypdf + regex en pyservices, determinista y SIN IA. Timeout
+   * 30 s (pyservices corta pypdf a los 20 s). Quien llama lo envuelve en
+   * try/catch ⇒ aviso `PDF_NO_LEIDO` (nunca 500): un pyservices viejo (404),
+   * caído o lento solo deja los campos vacíos para capturar a mano.
+   */
+  async leerPdfEmitida(pdfB64: string): Promise<LeerPdfEmitidaResult> {
+    return this.postForJson<LeerPdfEmitidaResult>(
+      '/facturacion/leer-pdf-emitida',
+      { pdf_b64: pdfB64 },
+      30_000,
     );
   }
 

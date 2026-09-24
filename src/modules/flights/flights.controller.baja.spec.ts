@@ -7,6 +7,10 @@ jest.mock('./flight-report.service', () => ({
   FlightReportService: class {},
 }));
 jest.mock('./cobro-recibo.service', () => ({ CobroReciboService: class {} }));
+// «Necesito factura» (24-sep-2026): arrastra notifications/jose.
+jest.mock('./factura-solicitud.service', () => ({
+  FacturaSolicitudService: class {},
+}));
 jest.mock('./factura-cliente.service', () => ({
   FacturaClienteService: class {},
 }));

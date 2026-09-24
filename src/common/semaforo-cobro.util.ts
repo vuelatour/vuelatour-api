@@ -16,6 +16,8 @@
  * `cobrado` = bandera del vuelo. Aquí no se suma dinero.
  */
 
+import { fmtNumeroDinero } from './dinero-texto.util';
+
 export const TOLERANCIA_COBRO_USD = 1;
 
 export type EstadoCobroKey = 'COBRADO' | 'PARCIAL' | 'SIN_COBROS' | 'NO_APLICA';
@@ -43,8 +45,13 @@ export function pendienteCobro(totalUsd: number, cobradoUsd: number): number {
   return p > TOLERANCIA_COBRO_USD ? p : 0;
 }
 
+/**
+ * Dinero de los títulos (24-sep-2026): misma regla que el panel y que
+ * `dinero-texto.util` — nunca 1 decimal («Cobrado $8,050.40 de $8,050.40»,
+ * antes «$8,050.4»). Entero sin decimales, con centavos exactamente 2.
+ */
 function fmt(n: number): string {
-  return n.toLocaleString('en-US');
+  return fmtNumeroDinero(n);
 }
 
 export function estadoCobroSemaforo(v: {

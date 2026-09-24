@@ -103,6 +103,21 @@ describe('estadoCobroSemaforo (espejo server-side del panel)', () => {
     ).toMatchObject({ key: 'NO_APLICA', label: '—' });
   });
 
+  it('dinero del título: nunca 1 decimal (paridad con el panel, 24-sep-2026)', () => {
+    const r = estadoCobroSemaforo({
+      montoTotalUsd: 8050.4,
+      cobrado: false,
+      totalCobradoUsd: 4025.2,
+    });
+    expect(r.title).toContain('Cobrado $4,025.20 de $8,050.40 USD');
+    const sin = estadoCobroSemaforo({
+      montoTotalUsd: 1200.5,
+      cobrado: false,
+      totalCobradoUsd: 0,
+    });
+    expect(sin.title).toContain('Total $1,200.50 USD sin ningún cobro');
+  });
+
   it('sin lote de cobros (null) degrada a "Por cobrar"', () => {
     expect(
       estadoCobroSemaforo({

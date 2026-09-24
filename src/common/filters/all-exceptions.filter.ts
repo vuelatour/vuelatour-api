@@ -145,6 +145,17 @@ export function traducirErrorDeSubidaNest(
   }
   if (status !== 400) return null;
   const inesperado = /^Unexpected field(?: - (.+))?$/.exec(message);
+  // Registro de facturas emitidas (24-sep-2026): sus campos SÍ son «pdf» y
+  // «xml» (uno de cada uno). Multer da el mismo «Unexpected field - pdf»
+  // cuando llegan DOS archivos en ese campo; decirle al operador que lo
+  // mande en «file» lo mandaba al lugar equivocado.
+  if (inesperado && (inesperado[1] === 'pdf' || inesperado[1] === 'xml')) {
+    return {
+      code: 'CAMPO_ARCHIVO_INVALIDO',
+      message: `Solo se acepta UN archivo en «${inesperado[1]}» (un PDF y, si quieres, un XML por factura).`,
+      tecnico: message,
+    };
+  }
   if (inesperado) {
     return {
       code: 'CAMPO_ARCHIVO_INVALIDO',

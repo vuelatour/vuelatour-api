@@ -1,9 +1,12 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
+  IsArray,
   IsBoolean,
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   Min,
@@ -56,4 +59,21 @@ export class IaSaldoDto {
   @IsString()
   @MaxLength(500)
   notas?: string;
+}
+
+/**
+ * `PUT /v1/config/responsables-facturacion` (24-sep-2026): quién recibe el
+ * aviso «Factura pedida». `[]` = default por rol (FACTURACION → ADMIN).
+ * `@IsUUID('all')`: no se asume la versión del uuid de `usuario`.
+ */
+export class ResponsablesFacturacionDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Usuarios de oficina ACTIVOS (ADMIN/COORDINADOR/FACTURACION) que reciben el aviso. Máximo 20. Vacío = por rol.',
+  })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  usuario_ids!: string[];
 }
