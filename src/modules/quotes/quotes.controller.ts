@@ -200,7 +200,8 @@ export class QuotesController {
   @ApiOperation({
     summary:
       'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO); 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión. ' +
-      'Cambiar de avión mantiene el pre-check del squawk ALTA (409 SQUAWK_ALTA_SIN_RESOLVER + aceptar_discrepancia_alta); el TALLER ya NO bloquea (11-sep-2026): su aviso ámbar viaja en avisos[] junto a los tramos que ya volaron.',
+      'Cambiar de avión mantiene el pre-check del squawk ALTA (409 SQUAWK_ALTA_SIN_RESOLVER + aceptar_discrepancia_alta); el TALLER ya NO bloquea (11-sep-2026): su aviso ámbar viaja en avisos[]. ' +
+      'Vuelo que YA VOLÓ (EN_VUELO, COMPLETADO o algún tramo con tacómetro; 24-sep-2026, #338): un avión distinto es SOLO COMERCIAL (precio y snapshot con él; vuelo.aeronave_id y tramos intactos, sin pre-check ni push a la tripulación) y las fechas del vuelo no se reescriben — ambos se explican en avisos[].',
   })
   async revise(
     @Param('id', ParseUUIDPipe) id: string,

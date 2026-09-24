@@ -29,8 +29,15 @@ import {
   modelosCotizados,
 } from '../../common/modelos-cotizados.util';
 import {
+  avisoAvionSoloComercial,
+  avisoFechaConservada,
+  avisoFechaTramoVoladoConservada,
+  estadoVueloVolado,
+  fechaCambia,
   idAeronaveCotizada,
   resolverAeronaveDeRevision,
+  resolverFechasDeRevision,
+  tramoConservaFechaPlan,
 } from './aeronave-revision.util';
 import {
   anclarTramoAlCotizado,
@@ -1960,21 +1967,38 @@ export class QuotesService {
     // (12-sep-2026). Si esto divergiera de revise(), la hoja mostraría un
     // avión y se guardaría otro.
     const primerActivo = vivas.find((e) => e.cancelada_at == null);
-    const aeronaveOperativa = current
-      ? (resolverAeronaveDeRevision({
+    // «¿Ya voló?» con la MISMA fuente única que revise() (#338): el avión
+    // del DTO de un vuelo volado es solo comercial y sus fechas no se mueven.
+    const volado = estadoVueloVolado(current?.estado, vivas);
+    const avionPreview = current
+      ? resolverAeronaveDeRevision({
           aeronaveDto: dto.aeronave_id,
           aeronaveVuelo: (current.aeronave_id as string | null) ?? null,
           aeronaveCotizada: idAeronaveCotizada(current.calculo_snapshot),
           aeronavePrimerTramoActivo:
             (primerActivo?.aeronave_id as string | null | undefined) ?? null,
-        }).aeronave_id ?? dto.aeronave_id)
+          yaVolo: volado.ya_volo,
+        }).aeronave_id
+      : null;
+    const aeronaveOperativa = current
+      ? (avionPreview ??
+        (volado.ya_volo
+          ? ((current.aeronave_id as string | null) ?? null)
+          : dto.aeronave_id))
       : dto.aeronave_id;
+    const fechasPreview = resolverFechasDeRevision({
+      salidaDto: dto.fecha_traslado_inicial,
+      regresoDto: dto.fecha_traslado_final,
+      salidaActual: current?.fecha_vuelo,
+      regresoActual: current?.fecha_traslado_final,
+      volado,
+    });
     const fechaInicio =
-      dto.fecha_traslado_inicial?.toISOString() ??
+      fechasPreview.salida?.toISOString() ??
       (current?.fecha_vuelo as string | null | undefined) ??
       null;
     const fechaFin =
-      dto.fecha_traslado_final?.toISOString() ??
+      fechasPreview.regreso?.toISOString() ??
       (current?.fecha_traslado_final as string | null | undefined) ??
       null;
 
@@ -2052,11 +2076,14 @@ export class QuotesService {
           tipo_parada: e.tipo_parada,
           servicio_notas: e.servicio_notas,
           notas: e.notas,
-          // No pisar con null una fecha ya planeada (regla de replaceEscalas).
+          // No pisar con null una fecha ya planeada (regla de replaceEscalas),
+          // ni la de un tramo que YA VOLÓ (`tramoConservaFechaPlan`, #338).
           fecha_salida_plan:
-            fechaPlan ??
-            (viva?.fecha_salida_plan as string | null | undefined) ??
-            null,
+            viva && tramoConservaFechaPlan(viva)
+              ? (viva.fecha_salida_plan as string)
+              : (fechaPlan ??
+                (viva?.fecha_salida_plan as string | null | undefined) ??
+                null),
           taco_salida: viva?.taco_salida ?? null,
           taco_llegada: viva?.taco_llegada ?? null,
           hora_salida: viva?.hora_salida ?? null,
@@ -2157,6 +2184,7 @@ export class QuotesService {
     delete fila.aeronave_cotizada;
     delete fila.aeronave_utilizada;
     delete fila.aeronaves_utilizadas;
+    delete fila.aeronave_cotizada_vs_utilizada_difiere;
     delete fila.aeronave_operativa;
     return fila;
   }
@@ -2610,14 +2638,38 @@ export class QuotesService {
       taco_llegada?: unknown;
     }>;
     const ida = vivos[0] ?? null;
+    // ¿YA VOLÓ? (24-sep-2026, cotización #338 — fuente única
+    // `estadoVueloVolado`): EN_VUELO/COMPLETADO o algún tramo vivo con
+    // tacómetro. Con el vuelo volado un avión distinto en el cotizador es
+    // SOLO COMERCIAL (precio + snapshot), la operación no se mueve, las
+    // fechas del vuelo no se reescriben y la tripulación no recibe avisos de
+    // reagenda/avión de un vuelo que ya aterrizó.
+    const volado = estadoVueloVolado(current.estado, vivos);
     const avionRevision = resolverAeronaveDeRevision({
       aeronaveDto: dto.aeronave_id,
       aeronaveVuelo: current.aeronave_id as string | null,
       aeronaveCotizada: idAeronaveCotizada(current.calculo_snapshot),
       aeronavePrimerTramoActivo: (ida?.aeronave_id as string | null) ?? null,
       conservarOperativo: opts.conservarAvionOperativo === true,
+      yaVolo: volado.ya_volo,
     });
-    const aeronaveOperativa = avionRevision.aeronave_id ?? dto.aeronave_id;
+    // Respaldo al avión del DTO SOLO si el vuelo no ha volado: a un vuelo
+    // volado jamás se le asigna el avión con el que ahora se cobra.
+    const aeronaveOperativa =
+      avionRevision.aeronave_id ??
+      (volado.ya_volo
+        ? ((current.aeronave_id as string | null) ?? null)
+        : dto.aeronave_id);
+    // FECHAS DEL VUELO (fuente única `resolverFechasDeRevision`): con el
+    // vuelo volado no se reescriben (mueven calendario/Google, `fecha_fin`,
+    // el mes del dinero y la fecha planeada de los tramos extremos).
+    const fechasRev = resolverFechasDeRevision({
+      salidaDto: dto.fecha_vuelo,
+      regresoDto: dto.fecha_traslado_final,
+      salidaActual: current.fecha_vuelo,
+      regresoActual: current.fecha_traslado_final,
+      volado,
+    });
     // CAMBIO DELIBERADO DE AVIÓN = asignación (invariante 14 + 9): el avión
     // NUEVO pasa por el MISMO pre-check de `assign` ANTES de escribir nada —
     // un squawk ALTA sin resolver rebota 409 estructurado
@@ -2645,11 +2697,46 @@ export class QuotesService {
     const squawksAceptados = preAsignacion.squawksAceptados;
     /**
      * Avisos NO bloqueantes de la revisión (aditivo, siempre presente): el
-     * avión NUEVO en taller (11-sep-2026, ámbar — se guarda de todas formas)
-     * y los tramos que el cambio de avión NO pudo mover porque ya volaron.
+     * avión NUEVO en taller (11-sep-2026, ámbar — se guarda de todas formas),
+     * el cambio de avión SOLO COMERCIAL de un vuelo que ya voló y las fechas
+     * del vuelo que se conservaron por lo mismo (24-sep-2026, #338).
      * El panel los pinta; nada de esto tumba la revisión.
      */
     const avisos: string[] = [...preAsignacion.avisos, ...avisosAncla];
+    // Avión SOLO COMERCIAL (vuelo volado, #338): la oficina ve con qué avión
+    // voló y con cuál se cobra ahora — nadie debe creer que la operación
+    // cambió. Aviones con los que voló = tramos vivos con herencia del
+    // OPERATIVO que se conserva (misma regla que `aeronave_utilizada`).
+    if (avionRevision.cambio_solo_comercial && !current.es_externo) {
+      const idsVolo = avionesUtilizados(
+        { aeronave_id: aeronaveOperativa ?? null },
+        vivos,
+      );
+      const matriculaPorId = new Map<string, string>();
+      if (idsVolo.length > 0) {
+        const { data: fichasVolo } = await this.supabase.service
+          .from('aeronave')
+          .select('id, matricula')
+          .in('id', idsVolo);
+        for (const a of (fichasVolo ?? []) as Array<Record<string, unknown>>) {
+          matriculaPorId.set(a.id as string, a.matricula as string);
+        }
+      }
+      avisos.push(
+        avisoAvionSoloComercial(
+          idsVolo.map((id) => matriculaPorId.get(id) ?? '').filter((m) => !!m),
+          (breakdown.aeronave?.modelo as string | null | undefined) ?? null,
+        ),
+      );
+    }
+    if (fechasRev.salida_conservada) {
+      avisos.push(avisoFechaConservada('salida', current.fecha_vuelo));
+    }
+    if (fechasRev.regreso_conservada) {
+      avisos.push(
+        avisoFechaConservada('regreso', current.fecha_traslado_final),
+      );
+    }
     // CAPACIDAD (4-sep-2026): vuelo PROPIO — pax por tramo ≤ asientos del
     // avión que lo vuela (avión del tramo persistido con herencia del
     // OPERATIVO que quedará en vuelo.aeronave_id). 409 CAPACIDAD_EXCEDIDA
@@ -2727,11 +2814,13 @@ export class QuotesService {
         // Ruta, montos, comisión, método y snapshot: mapeo ÚNICO
         // fila←breakdown (compartido con create() y la vista previa).
         ...this.camposDesdeBreakdown(dto, breakdown, reprPax),
-        ...(dto.fecha_vuelo !== undefined
-          ? { fecha_vuelo: dto.fecha_vuelo.toISOString() }
+        // Fechas del vuelo: solo las que `resolverFechasDeRevision` deja
+        // escribir (con el vuelo volado se conservan las persistidas).
+        ...(fechasRev.salida !== undefined
+          ? { fecha_vuelo: fechasRev.salida.toISOString() }
           : {}),
-        ...(dto.fecha_traslado_final !== undefined
-          ? { fecha_traslado_final: dto.fecha_traslado_final.toISOString() }
+        ...(fechasRev.regreso !== undefined
+          ? { fecha_traslado_final: fechasRev.regreso.toISOString() }
           : {}),
         ...(dto.pasajeros_nombres !== undefined
           ? { pasajeros_nombres: dto.pasajeros_nombres }
@@ -2805,12 +2894,15 @@ export class QuotesService {
           breakdown.ruta.escalas ?? null,
           userId,
           {
+            // Las MISMAS fechas que quedan en el vuelo (con el vuelo volado,
+            // las persistidas): la fecha planeada de los tramos extremos cae
+            // a estas cuando el tramo no trae la suya.
             inicio:
-              dto.fecha_vuelo?.toISOString() ??
+              fechasRev.salida?.toISOString() ??
               (current.fecha_vuelo as string | null) ??
               null,
             fin:
-              dto.fecha_traslado_final?.toISOString() ??
+              fechasRev.regreso?.toISOString() ??
               (current.fecha_traslado_final as string | null) ??
               null,
           },
@@ -2818,6 +2910,9 @@ export class QuotesService {
             cotizados: cotizadosPrevios.size > 0 ? cotizadosPrevios : null,
             confiarEnDto:
               tramosBase === 'OPERACION' || opts.desdeGrupo === true,
+            // Viaje TERMINADO: el aviso «cambió el itinerario» no sale (la
+            // tripulación no recibe pushes de un vuelo que ya aterrizó).
+            silenciarTripulacion: volado.termino,
           },
         )),
       );
@@ -2829,61 +2924,32 @@ export class QuotesService {
       // esto, la cotización diría un avión y los tacos/gastos/balance del
       // tramo seguirían colgados del anterior.
       //
-      // DOS FRENOS (11-sep-2026, invariante 1): el blanket NO toca un tramo
-      // con TACÓMETRO capturado (`taco_salida`/`taco_llegada` no nulos) ni
-      // corre cuando el vuelo ya está EN_VUELO o COMPLETADO. Ahí el avión ya
-      // voló: mover esos tramos cambiaría en silencio horas de motor, gastos
-      // y balance de DOS aviones. El cambio operativo de un vuelo volado se
-      // hace por `assign`/`reassign-aircraft` (que valida y avisa); la
-      // revisión conserva el avión nuevo en el vuelo y en el snapshot y lo
-      // ANOTA en `avisos[]` para que nadie crea que los tramos se movieron.
+      // FRENOS (invariante 1): el blanket NO corre si el vuelo YA VOLÓ
+      // —EN_VUELO, COMPLETADO o algún tramo vivo con tacómetro—: desde el
+      // 24-sep-2026 (#338) ahí el avión del cotizador es SOLO COMERCIAL y
+      // `resolverAeronaveDeRevision` nunca marca cambio deliberado (antes el
+      // vuelo SÍ se quedaba con el avión nuevo mientras sus tramos volados
+      // seguían en el viejo: cabecera y tramos en dos aviones). El cambio
+      // operativo de un vuelo en curso se hace por `assign`/
+      // `reassign-aircraft` (que validan y avisan). Aun así el UPDATE
+      // excluye en BD los tramos con TACÓMETRO: un taco capturado entre la
+      // lectura y esta escritura (carrera) tampoco se mueve de avión.
       if (cambiaAvion) {
         const nuevo = avionRevision.aeronave_id!;
         const viejo = avionRevision.aeronave_anterior;
-        const conTaco = (e: {
-          taco_salida?: unknown;
-          taco_llegada?: unknown;
-        }) => e.taco_salida != null || e.taco_llegada != null;
-        // Tramos que el blanket SELECTIVO habría movido (herencia o avión
-        // viejo) — de ahí salen los que se quedan y el texto del aviso.
-        const alcanzables = vivos.filter(
-          (e) =>
-            (e.aeronave_id ?? null) === null ||
-            (viejo != null && e.aeronave_id === viejo),
-        );
-        const volados = alcanzables.filter(conTaco);
-        const vueloYaVolo =
-          current.estado === 'EN_VUELO' || current.estado === 'COMPLETADO';
-        if (vueloYaVolo) {
-          if (alcanzables.length > 0) {
-            avisos.push(
-              `El vuelo está ${current.estado === 'EN_VUELO' ? 'EN VUELO' : 'COMPLETADO'}: la cotización quedó con el avión nuevo, pero sus ${alcanzables.length} tramo(s) NO se movieron de aeronave (sus tacómetros, gastos y horas de motor siguen en el avión con el que se voló). Si el cambio es operativo, hazlo desde el vuelo con "Cambiar aeronave".`,
-            );
-          }
-        } else {
-          if (volados.length > 0) {
-            avisos.push(
-              `${volados.length} tramo(s) con tacómetro capturado NO se movieron de aeronave (tramo${volados.length > 1 ? 's' : ''} ${volados
-                .map((e) => `#${e.orden ?? '?'}`)
-                .join(
-                  ', ',
-                )}): ya volaron y sus horas de motor, gastos y balance cuelgan de esa matrícula. El resto del itinerario sí quedó en el avión nuevo.`,
-            );
-          }
-          let q = this.supabase.service
-            .from('escala')
-            .update({ aeronave_id: nuevo, updated_by: userId })
-            .eq('vuelo_id', vueloId)
-            .is('cancelada_at', null)
-            // Tramo VOLADO = intocable desde la cotización (invariante 1).
-            .is('taco_salida', null)
-            .is('taco_llegada', null);
-          q = viejo
-            ? q.or(`aeronave_id.is.null,aeronave_id.eq.${viejo}`)
-            : q.is('aeronave_id', null);
-          const { error: blanketErr } = await q;
-          if (blanketErr) throw new Error(blanketErr.message);
-        }
+        let q = this.supabase.service
+          .from('escala')
+          .update({ aeronave_id: nuevo, updated_by: userId })
+          .eq('vuelo_id', vueloId)
+          .is('cancelada_at', null)
+          // Tramo VOLADO = intocable desde la cotización (invariante 1).
+          .is('taco_salida', null)
+          .is('taco_llegada', null);
+        q = viejo
+          ? q.or(`aeronave_id.is.null,aeronave_id.eq.${viejo}`)
+          : q.is('aeronave_id', null);
+        const { error: blanketErr } = await q;
+        if (blanketErr) throw new Error(blanketErr.message);
       }
     } catch (err) {
       // NUNCA warn-only (auditoría 29-ago): el usuario debe saber qué quedó
@@ -2904,7 +2970,11 @@ export class QuotesService {
     const pernoctasDespues = await this.pernoctaDestinos(vueloId);
     // Avisos a tripulación SOLO con el vuelo vivo (1-sep-2026): en un
     // CANCELADO nadie debe recibir pernoctas/reagendas de un vuelo que no va.
-    if (!esCancelado) {
+    // Ni de un viaje que YA TERMINÓ (24-sep-2026, #338): el piloto recibió
+    // «el REGRESO ahora sale…» y «Ahora vuela en XA-VGV» de un vuelo que ya
+    // había aterrizado. Fuente única de «ya voló» = `estadoVueloVolado`.
+    const avisarTripulacion = !esCancelado && !volado.termino;
+    if (avisarTripulacion) {
       void this.notifyPernoctaCambiada(
         updated,
         pernoctasAntes,
@@ -2913,31 +2983,24 @@ export class QuotesService {
     }
     // Reagenda desde el cotizador (21-ago; ampliada 26-ago): fecha de salida
     // Y del REGRESO avisan a la tripulación (doc 4.3), comparando por
-    // INSTANTE (el string crudo de PostgREST nunca era igual).
+    // INSTANTE (`fechaCambia`). Solo las fechas que la revisión SÍ escribió
+    // (`resolverFechasDeRevision`): con el vuelo volado la salida no se
+    // mueve, y un viaje de varios días a medio camino (EN_VUELO) solo puede
+    // reagendar —y avisar— su REGRESO, que todavía no vuela.
     const fechaTxt = (d: Date) =>
       d.toLocaleString('es-MX', {
         dateStyle: 'short',
         timeStyle: 'short',
         timeZone: 'America/Cancun',
       });
-    const cambia = (nueva: Date | undefined, actual: unknown): boolean => {
-      if (nueva === undefined) return false;
-      if (!actual) return true;
-      const t = new Date(actual as string).getTime();
-      return Number.isNaN(t) || nueva.getTime() !== t;
-    };
-    const salidaCambio = cambia(dto.fecha_vuelo, current.fecha_vuelo);
-    const regresoCambio = cambia(
-      dto.fecha_traslado_final,
-      current.fecha_traslado_final,
-    );
+    const salidaCambio = fechasRev.salida_cambio;
+    const regresoCambio = fechasRev.regreso_cambio;
     if (!esCancelado && (salidaCambio || regresoCambio)) {
       const partes: string[] = [];
-      if (salidaCambio) partes.push(`ahora sale ${fechaTxt(dto.fecha_vuelo!)}`);
+      if (salidaCambio)
+        partes.push(`ahora sale ${fechaTxt(fechasRev.salida!)}`);
       if (regresoCambio)
-        partes.push(
-          `el REGRESO ahora sale ${fechaTxt(dto.fecha_traslado_final!)}`,
-        );
+        partes.push(`el REGRESO ahora sale ${fechaTxt(fechasRev.regreso!)}`);
       void this.notificarTripulacion(updated, {
         titulo: `Vuelo #${current.folio as number} reagendado`,
         cuerpo: `${updated.origen_iata as string} → ${updated.destino_iata as string} ${partes.join(' y ')} (hora Cancún).`,
@@ -2945,9 +3008,13 @@ export class QuotesService {
     }
     // Cambio de AVIÓN al revisar (26-ago, paridad con assign): la referencia
     // operativa del cotizador puede pisar vuelo.aeronave_id sin que nadie
-    // se enterara. En CANCELADO no se avisa (1-sep-2026).
+    // se enterara. En CANCELADO no se avisa (1-sep-2026). Con el vuelo YA
+    // VOLADO tampoco (24-sep-2026, #338): ahí el cambio de avión es solo
+    // comercial y, si la cabecera se movió, fue para volver a espejar el
+    // tramo con el que SÍ voló (reparación, no reasignación).
     if (
       !esCancelado &&
+      !volado.ya_volo &&
       !current.es_externo &&
       updated.aeronave_id &&
       updated.aeronave_id !== current.aeronave_id
@@ -3934,6 +4001,8 @@ export class QuotesService {
     aeronave_utilizada: FichaAvionMin | null;
     /** Todos los aviones de los tramos vivos (multi-avión), en orden. */
     aeronaves_utilizadas: FichaAvionMin[];
+    /** Cotizado ≠ utilizado, comparado por ID (aditivo, 24-sep-2026). */
+    aeronave_cotizada_vs_utilizada_difiere: boolean;
     modelos_cotizados: string[];
   }> {
     const p = participacionPorAeronave(
@@ -3991,6 +4060,14 @@ export class QuotesService {
           }
         : null;
     const cotizada = ficha(cotizadaId);
+    // AVIÓN UTILIZADO = el del PRIMER TRAMO VIVO con herencia
+    // (`avionesUtilizados`), respaldo la cabecera — NO la cabecera a secas
+    // (24-sep-2026, cotización #338): con la cabecera en XA-VGV y los dos
+    // tramos volados (tacos) en N4142R, «utilizada» decía XA-VGV. El avión
+    // que VOLÓ es el de los tramos: de ahí cuelgan tacos, horas y gastos.
+    const utilizada = vuelo.es_externo
+      ? null
+      : (ficha(utilizadosIds[0] ?? null) ?? ficha(vuelo.aeronave_id ?? null));
     return {
       // Mapper único (fuente única): principal primero, venta del avión
       // repartida al centavo, horas siempre null.
@@ -4022,14 +4099,19 @@ export class QuotesService {
       // utilizada" (matrícula + modelo del avión asignado HOY al vuelo/
       // tramos). Un vuelo cubierto por EXTERNO no tiene avión propio: null
       // (su ficha ajena vive en `avion_externo_*`).
-      aeronave_utilizada: vuelo.es_externo
-        ? null
-        : (ficha(vuelo.aeronave_id ?? null) ?? ficha(utilizadosIds[0] ?? null)),
+      aeronave_utilizada: utilizada,
       aeronaves_utilizadas: vuelo.es_externo
         ? []
         : utilizadosIds
             .map((id) => ficha(id))
             .filter((f): f is FichaAvionMin => f != null),
+      // Por ID (dos aviones pueden compartir modelo); externo o sin alguno
+      // de los dos ⇒ false. Misma regla que el PDF interno.
+      aeronave_cotizada_vs_utilizada_difiere:
+        !vuelo.es_externo &&
+        cotizadaId != null &&
+        utilizada != null &&
+        utilizada.id !== cotizadaId,
       // Lo ÚNICO que ve el cliente en la hoja/PDF: el modelo del SNAPSHOT
       // vigente. Desde el 12-sep-2026 los aviones de los tramos ya no se
       // cuelan aquí (la cotización es independiente de la operación); para
@@ -4109,6 +4191,12 @@ export class QuotesService {
     opts: {
       cotizados?: Map<number, TramoCotizado> | null;
       confiarEnDto?: boolean;
+      /**
+       * true = el viaje YA TERMINÓ (`estadoVueloVolado(...).termino`, lo
+       * pasa `revise`): el aviso «cambió el itinerario» no se manda
+       * (24-sep-2026, #338 — nadie recibe pushes de un vuelo que aterrizó).
+       */
+      silenciarTripulacion?: boolean;
     } = {},
   ): Promise<string[]> {
     // Vuelo con itinerario OPERATIVO capturado (Nueva cotización · paso 1):
@@ -4280,8 +4368,25 @@ export class QuotesService {
         // ruta es de la OPERACIÓN (arriba), tampoco pisarla con la fecha del
         // VUELO: `fechaPlan` de los tramos extremos cae a `fechas.inicio/fin`
         // cuando el DTO no trae la suya, y esa hora pertenece a un tramo que
-        // ya no es el que vuela. Una fecha EXPLÍCITA de la oficina sí manda.
-        if (
+        // ya no es el que vuela. Una fecha EXPLÍCITA de la oficina sí manda…
+        // SALVO en un tramo que YA VOLÓ (24-sep-2026, #338,
+        // `tramoConservaFechaPlan`): su fecha es historia operativa
+        // (Google, calendario, día del tramo en la app) y se conserva; si la
+        // oficina tecleó otra, se avisa (queda solo en el snapshot).
+        if (tramoConservaFechaPlan(actual)) {
+          if (
+            e.fecha_salida_plan != null &&
+            fechaCambia(new Date(e.fecha_salida_plan), actual.fecha_salida_plan)
+          ) {
+            avisos.push(
+              avisoFechaTramoVoladoConservada(
+                orden,
+                rutaTxt(e),
+                actual.fecha_salida_plan,
+              ),
+            );
+          }
+        } else if (
           (fechaPlan != null || actual.fecha_salida_plan == null) &&
           !(operacionMovioRuta && e.fecha_salida_plan == null)
         ) {
@@ -4375,6 +4480,7 @@ export class QuotesService {
     // tripulación no debe recibir pushes de un vuelo que no va.
     if (
       !vueloCancelado &&
+      opts.silenciarTripulacion !== true &&
       (cambios.revividos.length ||
         cambios.agregados.length ||
         cambios.eliminados.length)

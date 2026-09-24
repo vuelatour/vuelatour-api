@@ -418,6 +418,73 @@ describe('quoteLikeParaPreview — vista previa sin persistir', () => {
     expect(q.modelos_cotizados).toEqual(['Kodiak 100']);
     expect(escrituras(log)).toEqual([]);
   });
+
+  it('#338 vuelo YA VOLADO: la vista previa predice lo mismo que revise() — el avión nuevo es solo comercial y las fechas del vuelo no se mueven', async () => {
+    // Cotizado y volado en OPERATIVO (tramos con tacos, COMPLETADO); el
+    // operador elige el Kodiak «para cobrar como Kodiak» y teclea otro
+    // regreso. La hoja precia con el Kodiak, pero el vuelo no cambia.
+    const OPERATIVO = 'aaaaaaaa-0000-0000-0000-00000000n414';
+    const SALIDA = '2026-09-24T13:30:00.000Z';
+    const log: Op[] = [];
+    const { svc } = servicio(
+      {
+        vuelo: () => ({
+          data: filaVuelo({
+            estado: 'COMPLETADO',
+            aeronave_id: OPERATIVO,
+            fecha_vuelo: SALIDA,
+            calculo_snapshot: {
+              ...(filaVuelo().calculo_snapshot as Row),
+              aeronave: {
+                id: OPERATIVO,
+                matricula: 'N4142R',
+                modelo: 'PIPER SENECA V',
+              },
+            },
+          }),
+        }),
+        escala: () => ({
+          data: [
+            escalaViva(1, {
+              aeronave_id: OPERATIVO,
+              taco_salida: 4460.5,
+              taco_llegada: 4461.7,
+            }),
+            escalaViva(2, {
+              aeronave_id: OPERATIVO,
+              taco_salida: 4461.7,
+              taco_llegada: 4462.9,
+            }),
+          ],
+        }),
+        aeronave: () => ({
+          data: [
+            { id: KODIAK, matricula: 'N621TX', modelo: 'Kodiak 100' },
+            { id: OPERATIVO, matricula: 'N4142R', modelo: 'PIPER SENECA V' },
+          ],
+        }),
+        cliente: () => ({ data: { es_interno: false, tarifas: [] } }),
+      },
+      log,
+    );
+    const q = await svc.quoteLikeParaPreview({
+      ...dtoBase(),
+      quote_id: 'v1',
+      sucio: true,
+      fecha_traslado_inicial: new Date('2026-09-25T13:30:00.000Z'),
+      fecha_traslado_final: new Date('2026-09-24T15:00:00.000Z'),
+    });
+    // El precio/hoja con el avión elegido…
+    expect(
+      (q.calculo_snapshot as { aeronave: { id: string } }).aeronave.id,
+    ).toBe(KODIAK);
+    expect(q.modelos_cotizados).toEqual(['Kodiak 100']);
+    // …pero el vuelo conserva el avión con el que VOLÓ y sus fechas.
+    expect(q.aeronave_id).toBe(OPERATIVO);
+    expect(q.fecha_vuelo).toBe(SALIDA);
+    expect(q.fecha_traslado_final).toBeNull();
+    expect(escrituras(log)).toEqual([]);
+  });
 });
 
 describe('client_request_id — idempotencia de create/revise', () => {

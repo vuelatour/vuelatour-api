@@ -110,6 +110,8 @@ interface Mundo {
   vuelo?: Row;
   /** Avión explícito del tramo 1 vivo (null = hereda el del vuelo). */
   aeronaveTramo1?: string | null;
+  /** Columnas extra del tramo 1 (ruta, tacos, avión…); ganan sobre las de arriba. */
+  tramo1?: Row;
   /** Tramos VIVOS extra (el 1 siempre existe); se usan para los tacos. */
   tramosExtra?: Row[];
   /** Discrepancias ALTA abiertas del avión NUEVO (pre-check de assign). */
@@ -147,6 +149,7 @@ function armar(m: Mundo = {}) {
   const escalas: Row[] = [
     escalaRow({
       aeronave_id: m.aeronaveTramo1 === undefined ? SENECA : m.aeronaveTramo1,
+      ...(m.tramo1 ?? {}),
     }),
     ...(m.tramosExtra ?? []),
   ];
@@ -557,7 +560,52 @@ describe('QuotesService.revise — candados al cambiar de avión (taller / squaw
 });
 
 describe('QuotesService.revise — el blanket respeta lo que YA VOLÓ', () => {
-  it('el blanket excluye en BD los tramos con tacómetro y los anota en avisos[]', async () => {
+  it('el blanket excluye en BD los tramos con tacómetro (carrera: taco capturado entre la lectura y el UPDATE)', async () => {
+    // Sin tacos al LEER (cambio deliberado permitido): el filtro del UPDATE
+    // es la red de seguridad si el piloto captura en medio.
+    const w = armar({
+      tramosExtra: [
+        escalaRow({
+          id: 'e-2',
+          orden: 2,
+          origen_iata: 'HOL',
+          destino_iata: 'CUN',
+          aeronave_id: null,
+        }),
+      ],
+    });
+    await w.service.revise(
+      V1,
+      {
+        ...dto(C206),
+        escalas: [
+          { origen_iata: 'CUN', destino_iata: 'HOL', millas_nauticas: 80 },
+          { origen_iata: 'HOL', destino_iata: 'CUN', millas_nauticas: 80 },
+        ],
+      },
+      USER,
+    );
+    const blanket = w.blanketEscala()!;
+    expect(blanket.ops).toContainEqual({
+      m: 'is',
+      args: ['taco_salida', null],
+    });
+    expect(blanket.ops).toContainEqual({
+      m: 'is',
+      args: ['taco_llegada', null],
+    });
+  });
+
+  it('sin tramos volados no hay aviso (el itinerario entero siguió al avión nuevo)', async () => {
+    const w = armar();
+    const res = (await w.service.revise(V1, dto(C206), USER)) as {
+      avisos: string[];
+    };
+    expect(res.avisos).toEqual([]);
+    expect(w.blanketEscala()).not.toBeNull();
+  });
+
+  it('un tramo con tacómetro = el vuelo YA VOLÓ: el cambio es solo comercial (ni cabecera ni tramos se mueven)', async () => {
     const w = armar({
       tramosExtra: [
         escalaRow({
@@ -571,40 +619,26 @@ describe('QuotesService.revise — el blanket respeta lo que YA VOLÓ', () => {
     const res = (await w.service.revise(V1, dto(C206), USER)) as {
       avisos: string[];
     };
-    const blanket = w.blanketEscala()!;
-    // La exclusión viaja en el UPDATE: un tramo volado no se mueve ni por
-    // una carrera con otra escritura.
-    expect(blanket.ops).toContainEqual({
-      m: 'is',
-      args: ['taco_salida', null],
-    });
-    expect(blanket.ops).toContainEqual({
-      m: 'is',
-      args: ['taco_llegada', null],
-    });
-    expect(res.avisos.join(' ')).toMatch(/tacómetro capturado NO se movieron/);
-    expect(res.avisos.join(' ')).toContain('#2');
+    expect(w.patchVuelo()!.aeronave_id).toBe(SENECA);
+    expect(w.blanketEscala()).toBeNull();
+    expect(w.validateAssignTargets).not.toHaveBeenCalled();
+    expect(res.avisos).toContain(
+      'El vuelo ya voló en XA-VGV: el cambio de avión solo cambia con qué se cobra (Cessna 206); la operación no se modifica.',
+    );
   });
 
-  it('sin tramos volados no hay aviso (el itinerario entero siguió al avión nuevo)', async () => {
-    const w = armar();
-    const res = (await w.service.revise(V1, dto(C206), USER)) as {
-      avisos: string[];
-    };
-    expect(res.avisos).toEqual([]);
-    expect(w.blanketEscala()).not.toBeNull();
-  });
-
-  it('vuelo COMPLETADO: se guarda el avión nuevo pero NINGÚN tramo se mueve (avisado)', async () => {
+  it('vuelo COMPLETADO: el avión nuevo queda SOLO en el snapshot; el vuelo conserva el suyo', async () => {
     const w = armar({ vuelo: vueloRow({ estado: 'COMPLETADO' }) });
     const res = (await w.service.revise(V1, dto(C206), USER)) as {
       avisos: string[];
     };
-    // El vuelo y el snapshot sí conservan el cambio (contrato de #254).
-    expect(w.patchVuelo()!.aeronave_id).toBe(C206);
+    const patch = w.patchVuelo()!;
+    expect(patch.aeronave_id).toBe(SENECA);
+    expect(
+      (patch.calculo_snapshot as { aeronave: { id: string } }).aeronave.id,
+    ).toBe(C206);
     expect(w.blanketEscala()).toBeNull();
-    expect(res.avisos.join(' ')).toMatch(/COMPLETADO/);
-    expect(res.avisos.join(' ')).toMatch(/NO se movieron de aeronave/);
+    expect(res.avisos.join(' ')).toMatch(/solo cambia con qué se cobra/);
   });
 
   it('vuelo EN_VUELO: mismo freno (el cambio operativo se hace con "Cambiar aeronave")', async () => {
@@ -612,9 +646,224 @@ describe('QuotesService.revise — el blanket respeta lo que YA VOLÓ', () => {
     const res = (await w.service.revise(V1, dto(C206), USER)) as {
       avisos: string[];
     };
-    expect(w.patchVuelo()!.aeronave_id).toBe(C206);
+    expect(w.patchVuelo()!.aeronave_id).toBe(SENECA);
     expect(w.blanketEscala()).toBeNull();
-    expect(res.avisos.join(' ')).toMatch(/EN VUELO/);
+    expect(res.avisos.join(' ')).toMatch(/ya voló en XA-VGV/);
+  });
+});
+
+/**
+ * COTIZACIÓN #338 (24-sep-2026, cliente Mike Nelson, CUN→PTU→CUN) DE PUNTA A
+ * PUNTA: cotizada y volada en el Seneca N4142R (tramo 1 ferry CUN–PTU tacos
+ * 4460.5→4461.7, tramo 2 PTU–CUN 4461.7→4462.9, COMPLETADO). Ya aterrizada,
+ * la oficina guardó la v2 «se cobra como Cessna, pidieron Cessna» con el
+ * Cessna 206 XA-VGV y el regreso —→ 10:00. Antes: cabecera XA-VGV con los
+ * tramos en N4142R y dos push a la tripulación («cambio de avión · Ahora
+ * vuela en XA-VGV» y «el REGRESO ahora sale 24/09/26, 10:00»).
+ */
+describe('QuotesService.revise — vuelo YA VOLADO, cotización #338', () => {
+  const N4142R = 'aaaaaaaa-0000-4000-8000-0000000n4142';
+  const XAVGV = 'aaaaaaaa-0000-4000-8000-000000000vgv';
+  const COPILOTO = 'pppppppp-0000-4000-8000-00000000000c';
+  const REGRESO_DTO = new Date('2026-09-24T15:00:00.000Z');
+  beforeAll(() => {
+    FICHAS[N4142R] = {
+      id: N4142R,
+      activa: true,
+      matricula: 'N4142R',
+      modelo: 'PIPER SENECA V',
+      pais_registro: 'US',
+      velocidad_crucero_kts: 170,
+      tarifa_hora_pub_usd: 1000,
+      tarifa_hora_broker_usd: 900,
+    };
+    FICHAS[XAVGV] = {
+      id: XAVGV,
+      activa: true,
+      matricula: 'XA-VGV',
+      modelo: 'Cessna 206',
+      pais_registro: 'MX',
+      velocidad_crucero_kts: 120,
+      tarifa_hora_pub_usd: 600,
+      tarifa_hora_broker_usd: 600,
+    };
+  });
+
+  /** `cabecera` = vuelo.aeronave_id (N4142R antes del bug; XA-VGV después). */
+  const mundo338 = (
+    opts: { cabecera?: string; estado?: string; tacos?: boolean } = {},
+  ) => {
+    const tacos = opts.tacos !== false;
+    return armar({
+      vuelo: vueloRow({
+        folio: 338,
+        estado: opts.estado ?? 'COMPLETADO',
+        aeronave_id: opts.cabecera ?? N4142R,
+        piloto_id: PILOTO,
+        copiloto_id: COPILOTO,
+        fecha_traslado_final: null,
+        calculo_snapshot: {
+          aeronave: {
+            id: N4142R,
+            matricula: 'N4142R',
+            modelo: 'PIPER SENECA V',
+          },
+        },
+      }),
+      tramo1: {
+        destino_iata: 'PTU',
+        aeronave_id: N4142R,
+        es_ferry: true,
+        pasajeros: 0,
+        taco_salida: tacos ? 4460.5 : null,
+        taco_llegada: tacos ? 4461.7 : null,
+      },
+      tramosExtra: [
+        escalaRow({
+          id: 'e-2',
+          orden: 2,
+          origen_iata: 'PTU',
+          destino_iata: 'CUN',
+          aeronave_id: N4142R,
+          taco_salida: tacos ? 4461.7 : null,
+          taco_llegada: tacos ? 4462.9 : null,
+        }),
+      ],
+    });
+  };
+  const dto338 = (): ReviseQuoteDto => ({
+    ...dto(XAVGV),
+    escalas: [
+      { origen_iata: 'CUN', destino_iata: 'PTU', millas_nauticas: 60 },
+      { origen_iata: 'PTU', destino_iata: 'CUN', millas_nauticas: 60 },
+    ],
+    fecha_traslado_final: REGRESO_DTO,
+    motivo: 'Corrección',
+  });
+  /** Los avisos a tripulación son `void` (best-effort): se drenan. */
+  const drenar = async () => {
+    for (let i = 0; i < 15; i++) await new Promise((r) => setImmediate(r));
+  };
+  const titulos = (w: ReturnType<typeof armar>) =>
+    (w.notifyUser.mock.calls as unknown[][]).map(
+      (c) => (c[1] as { titulo?: string } | undefined)?.titulo ?? '',
+    );
+
+  it('el vuelo SIGUE en N4142R (cabecera) y ningún tramo se mueve', async () => {
+    const w = mundo338();
+    await w.service.revise(V1, dto338(), USER);
+    expect(w.patchVuelo()!.aeronave_id).toBe(N4142R);
+    expect(w.blanketEscala()).toBeNull();
+  });
+
+  it('el PRECIO y el snapshot sí quedan con el Cessna 206 (se cobra como Cessna)', async () => {
+    const w = mundo338();
+    await w.service.revise(V1, dto338(), USER);
+    const snap = w.patchVuelo()!.calculo_snapshot as {
+      aeronave: { id: string; modelo: string };
+      tarifa: { usd_por_hora: number };
+    };
+    expect(snap.aeronave).toMatchObject({ id: XAVGV, modelo: 'Cessna 206' });
+    expect(snap.tarifa.usd_por_hora).toBe(600);
+    const version = w.inserts.find(
+      (i) => i.tabla === 'cotizacion_version_history',
+    )!;
+    expect(version.fila.aeronave_id).toBe(XAVGV);
+  });
+
+  it('no es una asignación: ni pre-check de squawk/taller ni aviso al mecánico', async () => {
+    const w = mundo338();
+    await w.service.revise(V1, dto338(), USER);
+    expect(w.validateAssignTargets).not.toHaveBeenCalled();
+    expect(w.notificarSquawkAceptado).not.toHaveBeenCalled();
+  });
+
+  it('la tripulación NO recibe «cambio de avión» ni «el REGRESO ahora sale…» (ya aterrizó)', async () => {
+    const w = mundo338();
+    await w.service.revise(V1, dto338(), USER);
+    await drenar();
+    expect(w.notifyUser).not.toHaveBeenCalled();
+  });
+
+  it('las fechas del vuelo NO se reescriben (calendario/Google/fecha_fin/mes del dinero) y se avisa', async () => {
+    const w = mundo338();
+    const res = (await w.service.revise(V1, dto338(), USER)) as {
+      avisos: string[];
+    };
+    const patch = w.patchVuelo()!;
+    expect('fecha_traslado_final' in patch).toBe(false);
+    expect('fecha_vuelo' in patch).toBe(false);
+    expect(res.avisos).toContain(
+      'El viaje ya terminó: la fecha de regreso no se cambia desde la cotización (movería el calendario); el vuelo se queda sin fecha de regreso.',
+    );
+  });
+
+  it('avisos[] explica con qué voló y con qué se cobra', async () => {
+    const w = mundo338();
+    const res = (await w.service.revise(V1, dto338(), USER)) as {
+      avisos: string[];
+    };
+    expect(res.avisos).toContain(
+      'El vuelo ya voló en N4142R: el cambio de avión solo cambia con qué se cobra (Cessna 206); la operación no se modifica.',
+    );
+  });
+
+  it('estado ya dañado (cabecera XA-VGV, tramos N4142R): guardar REPARA la cabecera al avión que voló, sin push de «cambio de avión»', async () => {
+    const w = mundo338({ cabecera: XAVGV });
+    await w.service.revise(V1, dto338(), USER);
+    await drenar();
+    expect(w.patchVuelo()!.aeronave_id).toBe(N4142R);
+    expect(w.blanketEscala()).toBeNull();
+    expect(titulos(w).join(' | ')).not.toMatch(/cambio de avión/i);
+  });
+
+  it('control: el MISMO cambio en un vuelo que NO ha volado sí reasigna y avisa (contrato del 11-sep)', async () => {
+    const w = mundo338({ estado: 'CONFIRMADO', tacos: false });
+    await w.service.revise(V1, dto338(), USER);
+    await drenar();
+    expect(w.patchVuelo()!.aeronave_id).toBe(XAVGV);
+    expect(w.patchVuelo()!.fecha_traslado_final).toBe(
+      REGRESO_DTO.toISOString(),
+    );
+    expect(w.validateAssignTargets).toHaveBeenCalled();
+    const t = titulos(w).join(' | ');
+    expect(t).toMatch(/cambio de avión/i);
+    expect(t).toMatch(/reagendado/i);
+  });
+
+  it('GET /quotes/:id: «aeronave utilizada» sale de los TRAMOS (N4142R), no de la cabecera (XA-VGV)', async () => {
+    const w = mundo338({ cabecera: XAVGV });
+    // Snapshot de la v2: cotizado Cessna 206 · XA-VGV.
+    const q = (await w.service.findById(V1)) as Record<string, unknown>;
+    expect(q.aeronave_utilizada).toMatchObject({
+      id: N4142R,
+      matricula: 'N4142R',
+      modelo: 'PIPER SENECA V',
+    });
+  });
+
+  it('cotizado ≠ utilizado se compara por ID', async () => {
+    const w = armar({
+      vuelo: vueloRow({
+        estado: 'COMPLETADO',
+        aeronave_id: XAVGV,
+        calculo_snapshot: {
+          aeronave: { id: XAVGV, matricula: 'XA-VGV', modelo: 'Cessna 206' },
+        },
+      }),
+      tramo1: { aeronave_id: N4142R, taco_salida: 1, taco_llegada: 2 },
+    });
+    const q = (await w.service.findById(V1)) as Record<string, unknown>;
+    expect(q.aeronave_cotizada).toMatchObject({ id: XAVGV });
+    expect(q.aeronave_utilizada).toMatchObject({ id: N4142R });
+    expect(q.aeronave_cotizada_vs_utilizada_difiere).toBe(true);
+  });
+
+  it('mismo avión cotizado y utilizado ⇒ no difiere', async () => {
+    const w = armar();
+    const q = (await w.service.findById(V1)) as Record<string, unknown>;
+    expect(q.aeronave_utilizada).toMatchObject({ id: SENECA });
+    expect(q.aeronave_cotizada_vs_utilizada_difiere).toBe(false);
   });
 });
 

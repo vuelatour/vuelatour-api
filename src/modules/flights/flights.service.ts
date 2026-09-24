@@ -2759,6 +2759,8 @@ export class FlightsService {
     aeronave_cotizada: FichaAvionMin | null;
     aeronave_utilizada: FichaAvionMin | null;
     aeronaves_utilizadas: FichaAvionMin[];
+    /** Cotizado ≠ utilizado, comparado por ID (aditivo, 24-sep-2026). */
+    aeronave_cotizada_vs_utilizada_difiere: boolean;
   }> {
     const p = participacionPorAeronave(
       {
@@ -2811,6 +2813,13 @@ export class FlightsService {
           }
         : null;
     const esExterno = vuelo.es_externo === true;
+    // UTILIZADA = avión del PRIMER TRAMO VIVO con herencia, respaldo la
+    // cabecera — no la cabecera a secas (24-sep-2026, cotización #338:
+    // cabecera XA-VGV, tramos volados en N4142R ⇒ «utilizada» XA-VGV).
+    // Espejo del helper homónimo de quotes.service.
+    const utilizada = esExterno
+      ? null
+      : (ficha(utilizadosIds[0] ?? null) ?? ficha(vuelo.aeronave_id ?? null));
     return {
       // Mapper único (fuente única): principal primero, venta del avión
       // repartida al centavo, horas siempre null.
@@ -2837,14 +2846,19 @@ export class FlightsService {
                   : null,
             }
           : null),
-      aeronave_utilizada: esExterno
-        ? null
-        : (ficha(vuelo.aeronave_id ?? null) ?? ficha(utilizadosIds[0] ?? null)),
+      aeronave_utilizada: utilizada,
       aeronaves_utilizadas: esExterno
         ? []
         : utilizadosIds
             .map((id) => ficha(id))
             .filter((f): f is FichaAvionMin => f != null),
+      // Por ID (dos aviones pueden compartir modelo); externo o sin alguno
+      // de los dos ⇒ false.
+      aeronave_cotizada_vs_utilizada_difiere:
+        !esExterno &&
+        cotizadaId != null &&
+        utilizada != null &&
+        utilizada.id !== cotizadaId,
     };
   }
 

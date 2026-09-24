@@ -1448,6 +1448,40 @@ describe('armarCotizacionInternaPayload — aeronave cotizada vs utilizada', () 
     expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(true);
   });
 
+  it('#338 (24-sep-2026): cabecera en el Cessna, tramos volados en N4142R ⇒ el PDF imprime el avión de los TRAMOS (aeronave_utilizada), no la cabecera', () => {
+    const XAVGV = 'aaaaaaaa-0000-0000-0000-000000000vgv';
+    const p = armarCotizacionInternaPayload(
+      insumos({
+        quote: quote({
+          // Snapshot v2: se cobra como Cessna 206.
+          aeronave_cotizada: {
+            id: XAVGV,
+            matricula: 'XA-VGV',
+            modelo: 'Cessna 206',
+          },
+          // Cabecera dañada por la revisión (antes de la corrección).
+          aeronave_operativa: {
+            id: XAVGV,
+            matricula: 'XA-VGV',
+            modelo: 'Cessna 206',
+          },
+          // Lo que el API resuelve de los tramos vivos (con herencia).
+          aeronave_utilizada: {
+            id: SENECA,
+            matricula: 'N4142R',
+            modelo: 'Seneca V',
+          },
+        }),
+      }),
+    );
+    expect(p.aeronave_cotizada_modelo).toBe('Cessna 206');
+    expect(p.aeronave_utilizada).toEqual({
+      matricula: 'N4142R',
+      modelo: 'Seneca V',
+    });
+    expect(p.aeronave_cotizada_vs_utilizada_difiere).toBe(true);
+  });
+
   it('API sin el campo nuevo (skew): cae a aeronave_operativa, sin inventar diferencia', () => {
     const p = armarCotizacionInternaPayload(insumos());
     expect(p.aeronave_utilizada).toEqual({
