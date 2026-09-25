@@ -2730,8 +2730,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `GET /v1/inventory/ubicaciones` (200; la sonda re-sondea en ≤ 10 min o
   reiniciar el API). El API 0.0.35 es desplegable ANTES (503 claro en lo
   nuevo; todo lo demás como 0.0.34) y el 0.0.34 convive con ella.
-- **PENDIENTE DE APLICAR (25-sep-2026, DESPUÉS de `20260925000001` y del API
-  0.0.35; migración de DATOS)** — `20260925000002_repreciar_salidas_tienda.sql`:
+- **APLICADA (25-sep-2026, con el API 0.0.35 ya en prod; migración de DATOS; DRYRUN_OK C0–C7; resultado: 10 salidas y 10 gastos, N4142R 1,477.27 · XA-VGV 1,199.41 · total 2,676.68 USD, utilidad 535.35; bitácora +10 actor Sistema)** — `20260925000002_repreciar_salidas_tienda.sql`:
   re-precia las 10 SALIDAS del 01-sep a costo FIFO + 25 % (`venta_unitaria`
   y el gasto BODEGA de cada una: N4142R 1,181.81 → 1,477.27, XA-VGV 959.52 →
   1,199.41 USD; total +535.35). Función en `pg_temp` con la tabla de casos
