@@ -68,6 +68,7 @@ import {
   costearTramos,
   costoDeTramo,
   horasAHhmm,
+  repartirHorasDecimales,
   type ConsolidadoTramosCosteados,
   type HorasDelAjuste,
 } from './tramos-costeados.util';
@@ -572,6 +573,7 @@ export function armarCotizacionInternaPayload(
     pieTramos = {
       tramos_tiempo_total_hr: costeados.tramos_tiempo_total_hr,
       tramos_tiempo_total_hhmm: costeados.tramos_tiempo_total_hhmm,
+      tramos_tiempo_total_horas: costeados.tramos_tiempo_total_horas,
       tramos_total_usd: costeados.tramos_total_usd,
       tramos_ajuste_usd: costeados.tramos_ajuste_usd,
       tramos_ajuste_motivo: costeados.tramos_ajuste_motivo,
@@ -638,6 +640,9 @@ export function armarCotizacionInternaPayload(
               millas,
               tiempo_hr: tiempoHr,
               tiempo_hhmm: horasAHhmm(tiempoHr),
+              // Una sola fila: su celda ES el total (mismo helper que la
+              // tabla por tramo, 2 decimales fijos).
+              tiempo_horas: repartirHorasDecimales([tiempoHr]).tramos[0],
               tarifa_hora_usd: tarifaHora,
               total_usd: total,
               pax: num(q.pasajeros),
@@ -826,6 +831,7 @@ export function armarCotizacionInternaPayload(
     tramos_cotizados: tramosCot,
     tramos_tiempo_total_hr: pieTramos.tramos_tiempo_total_hr,
     tramos_tiempo_total_hhmm: pieTramos.tramos_tiempo_total_hhmm,
+    tramos_tiempo_total_horas: pieTramos.tramos_tiempo_total_horas,
     tramos_total_usd: pieTramos.tramos_total_usd,
     tramos_ajuste_usd: pieTramos.tramos_ajuste_usd,
     tramos_ajuste_motivo: pieTramos.tramos_ajuste_motivo,

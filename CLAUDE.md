@@ -107,6 +107,39 @@ aéreo`. El `breakdown` de `POST /v1/quotes/calculate` los expone como
      guardados, los 5 campos y el importe de CADA tramo coinciden con lo que
      imprime el PDF, y `Σ tramos + ajuste == línea TIEMPO_VUELO` se cumple en
      los 231.
+   - **TIEMPO VUELO (HRS) en horas DECIMALES (24-sep-2026, API 0.0.33, solo
+     presentación).** Pedido del cliente con la captura de una CUN→PTU→CUN:
+     «la parte de tiempo de vuelo, lo podemos manejar solo en decimales por
+     favor? … se nos hacen raros los tiempos» — cada tramo valía 1.19166… h
+     (125 nm / 120 kt + 0.15) ⇒ «01:12», el total 2.38333 h ⇒ «02:23», y
+     01:12 + 01:12 ≠ 02:23. Fuente única en el MISMO util:
+     `horasADecimal` (2 decimales FIJOS, medio hacia arriba en aritmética
+     ENTERA de micro-horas: 1.005 → «1.01», `toFixed` daría «1.00») y
+     `repartirHorasDecimales(tiempos)` → `{tramos, total}`: total =
+     `horasADecimal(Σ tiempo_hr)` y cada tramo por **RESIDUO MAYOR** (piso +
+     las centésimas que faltan a los residuos más grandes, empate por orden),
+     así **Σ tramos mostrados == total mostrado** y cada tramo queda a ≤ 0.01
+     de su propio redondeo; un tramo sin `tiempo_hr` en el snapshot va
+     `null` («—») y no suma. Campos ADITIVOS nuevos, por los MISMOS caminos
+     que `tiempo_hhmm`: `tramos[i].tiempo_horas` (string | null, al FINAL
+     del tramo, después de `total_usd`) y `tramos_tiempo_total_horas` (al
+     FINAL del breakdown, después de `tramos_ajuste_motivo`: el breakdown del
+     22-sep sigue siendo PREFIJO exacto) en `/quotes/calculate` (y por tanto
+     en el `calculo_snapshot`), en `TramoCosteado` / `consolidarTramosCosteados`
+     y en el payload del PDF interno (incluida la fila consolidada de
+     respaldo). Se reparte sobre TODAS las filas de la tabla (las ocultas del
+     PDF del cliente también: el documento interno las imprime todas).
+     `tiempo_hhmm` / `tramos_tiempo_total_hhmm` se CONSERVAN por
+     compatibilidad pero ya nadie los pinta. Espejos: el panel
+     (`lib/admin/quote-sheet-interna.ts#repartirHorasDecimales`, para
+     snapshots guardados antes del 0.0.33) y pyservices
+     (`_repartir_horas_decimales`, para un payload viejo), con la MISMA tabla
+     de casos (`CASOS_HORAS_DECIMALES`) en los tres repos. Specs:
+     `tramos-costeados.util.spec.ts` (casos + 2,000 tablas al azar + la
+     captura con su dinero intacto: $889.01 × 2 + $12.38 = $1,790.40),
+     `quotes.service.tramos-costeados.spec.ts` (llaves al final y el motor
+     real con 125 nm a 120 kt) y `quotes-pdf-interno.util.spec.ts` (3 × 0.4167
+     ⇒ «0.42», «0.42», «0.41» = «1.25»).
 
 4. **Cortes de periodo SIEMPRE en hora Cancún**: filtros sobre columnas
    timestamptz usan `${fecha}T00:00:00-05:00` / `${fecha}T23:59:59-05:00`.

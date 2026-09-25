@@ -588,6 +588,7 @@ describe('armarCotizacionInternaPayload — tramos cotizados (tabla de administr
       millas: 60,
       tiempo_hr: 0.4,
       tiempo_hhmm: '00:24',
+      tiempo_horas: '0.40',
       tarifa_hora_usd: 1000,
       total_usd: 400,
       pax: 4,
@@ -597,6 +598,7 @@ describe('armarCotizacionInternaPayload — tramos cotizados (tabla de administr
       tuas_usd: 0,
       consolidado: false,
     });
+    expect(p.tramos_tiempo_total_horas).toBe('1.60');
     expect(p.tramos_cotizados.map((t) => t.ruta)).toEqual([
       'Cancun-Cozumel',
       'Cozumel-Cancun',
@@ -799,6 +801,16 @@ describe('armarCotizacionInternaPayload — tramos cotizados (tabla de administr
     expect(p.tramos_ajuste_motivo).toBe('Redondeo');
     expect(p.tramos_tiempo_total_hr).toBe(1.2501);
     expect(p.tramos_tiempo_total_hhmm).toBe('01:15');
+    // TIEMPO VUELO (HRS), API 0.0.33 — el caso de RESIDUO MAYOR con datos de
+    // la tabla: redondeados cada uno por su lado serían 0.42 × 3 = 1.26 y el
+    // total dice 1.25. Las dos centésimas que faltan sobre el piso (0.41 × 3
+    // = 1.23) van a los dos primeros tramos (empate ⇒ orden).
+    expect(p.tramos_cotizados.map((t) => t.tiempo_horas)).toEqual([
+      '0.42',
+      '0.42',
+      '0.41',
+    ]);
+    expect(p.tramos_tiempo_total_horas).toBe('1.25');
   });
 
   it('cliente interno (tarifa $0): tabla en $0, sin ajuste ni motivo', () => {
@@ -952,10 +964,13 @@ describe('armarCotizacionInternaPayload — tramos cotizados (tabla de administr
       millas: 240,
       tiempo_hr: 1.6, // vuelo 1.0 + calzos 0.6
       tiempo_hhmm: '01:36',
+      tiempo_horas: '1.60',
       tarifa_hora_usd: 1000,
       total_usd: 1600,
       pax: 4,
     });
+    // Fila consolidada: su celda ES el total (mismo helper, mismo texto).
+    expect(viejoSnap.tramos_tiempo_total_horas).toBe('1.60');
     expect(viejoSnap.tramos_total_usd).toBe(1600);
     expect(viejoSnap.tramos_ajuste_usd).toBe(0);
     expect(viejoSnap.ruta).toBe('CUN → CZM → CUN → CZM → CUN');

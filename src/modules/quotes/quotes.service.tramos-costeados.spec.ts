@@ -88,6 +88,15 @@ const LLAVES_PIE_NUEVAS = [
 ];
 const LLAVES_TRAMO_NUEVAS = ['tarifa_usd_hr', 'tiempo_hhmm', 'total_usd'];
 
+/**
+ * API 0.0.33 (24-sep-2026): la columna «TIEMPO VUELO (HRS)» en horas
+ * decimales. También ADITIVAS y también al FINAL (la del pie, después de las
+ * 5 de arriba; la del tramo, después de `total_usd`), así el breakdown del
+ * 22-sep sigue siendo un PREFIJO exacto del de hoy.
+ */
+const LLAVES_PIE_HORAS = ['tramos_tiempo_total_horas'];
+const LLAVES_TRAMO_HORAS = ['tiempo_horas'];
+
 function servicio(): QuotesService {
   const aircraft = {
     findById: jest.fn().mockResolvedValue({
@@ -175,6 +184,13 @@ describe('QuotesService.calculate — tramos costeados (campos ADITIVOS)', () =>
     expect(b.tramos_total_usd).toBe(2722.5);
     expect(b.tramos_tiempo_total_hr).toBe(1.65);
     expect(b.tramos_tiempo_total_hhmm).toBe('01:39');
+    // TIEMPO VUELO (HRS) — lo que pinta la hoja interna desde el 0.0.33.
+    expect(b.tramos!.map((t) => t.tiempo_horas)).toEqual([
+      '0.33',
+      '0.57',
+      '0.75',
+    ]);
+    expect(b.tramos_tiempo_total_horas).toBe('1.65');
     // Sin pactar horas la tabla cuadra con el servicio aéreo: ajuste 0.
     expect(b.tramos_ajuste_usd).toBe(0);
     expect(b.tramos_ajuste_motivo).toBeNull();
@@ -237,11 +253,66 @@ describe('QuotesService.calculate — tramos costeados (campos ADITIVOS)', () =>
     expect(b.tramos_tiempo_total_hhmm).toBe(helper.tramos_tiempo_total_hhmm);
     expect(b.tramos_ajuste_usd).toBe(helper.tramos_ajuste_usd);
     expect(b.tramos_ajuste_motivo).toBe(helper.tramos_ajuste_motivo);
+    expect(b.tramos!.map((t) => t.tiempo_horas)).toEqual(
+      helper.tramos.map((t) => t.tiempo_horas),
+    );
+    expect(b.tramos_tiempo_total_horas).toBe(helper.tramos_tiempo_total_horas);
   });
 
-  it('los 5 campos del pie EXISTEN SIEMPRE como llave (el panel no distingue «no vino» de «no aplica»)', async () => {
+  it('la captura del cliente (125 nm a 120 kt ⇒ 1.19166… h por tramo): «1.19» + «1.19» = «2.38», nunca «01:12» + «01:12» ≠ «02:23»', async () => {
+    const svc = new QuotesService(
+      {
+        findById: jest.fn().mockResolvedValue({
+          id: AVION,
+          activa: true,
+          matricula: 'XB-PEV',
+          modelo: 'Cessna 206',
+          pais_registro: 'MX',
+          velocidad_crucero_kts: 120,
+          tarifa_hora_pub_usd: 746,
+          tarifa_hora_broker_usd: 746,
+        }),
+      } as unknown as AircraftService,
+      {
+        computeTuasUsdPax: jest
+          .fn()
+          .mockResolvedValue({ aplica: false, usd_pax: 0, razon: 'exenta' }),
+      } as unknown as AirportsService,
+      {} as RoutesService,
+      {
+        service: {
+          from: () => {
+            throw new Error('calculate() no debe tocar la BD en este spec');
+          },
+        },
+      } as unknown as SupabaseService,
+      {} as CalendarSyncService,
+      {} as EmailService,
+      {} as NotificationsService,
+      {} as FlightsService,
+    );
+    const b = await svc.calculate({
+      ...dto({ tiempo_cobrable_override_hr: 2.4 }),
+      escalas: [
+        { origen_iata: 'CUN', destino_iata: 'PTU', millas_nauticas: 125 },
+        { origen_iata: 'PTU', destino_iata: 'CUN', millas_nauticas: 125 },
+      ],
+    });
+    expect(b.tramos!.map((t) => t.tiempo_hr)).toEqual([1.1917, 1.1917]);
+    expect(b.tramos!.map((t) => t.tiempo_horas)).toEqual(['1.19', '1.19']);
+    expect(b.tramos_tiempo_total_horas).toBe('2.38');
+    // El dinero de la captura, intacto: $889.01 × 2 = $1,778.02 + $12.38 del
+    // ajuste = $1,790.40 de servicio aéreo (2.4 h × $746).
+    expect(b.tramos!.map((t) => t.total_usd)).toEqual([889.01, 889.01]);
+    expect(b.tramos_total_usd).toBe(1778.02);
+    expect(b.tramos_ajuste_usd).toBe(12.38);
+    expect(b.tramos_ajuste_motivo).toBe('Horas pactadas 2.4 h');
+    expect(b.totales.subtotal_vuelo_usd).toBe(1790.4);
+  });
+
+  it('los campos del pie EXISTEN SIEMPRE como llave (el panel no distingue «no vino» de «no aplica»)', async () => {
     const b = await servicio().calculate(dto());
-    for (const k of LLAVES_PIE_NUEVAS) {
+    for (const k of [...LLAVES_PIE_NUEVAS, ...LLAVES_PIE_HORAS]) {
       expect(Object.prototype.hasOwnProperty.call(b, k)).toBe(true);
       expect((b as unknown as Record<string, unknown>)[k]).not.toBeUndefined();
     }
@@ -290,23 +361,29 @@ describe('QuotesService.calculate — tramos costeados (campos ADITIVOS)', () =>
       tramos_tiempo_total_hhmm: sinTabla?.tramos_tiempo_total_hhmm ?? null,
       tramos_ajuste_usd: sinTabla?.tramos_ajuste_usd ?? null,
       tramos_ajuste_motivo: sinTabla?.tramos_ajuste_motivo ?? null,
+      tramos_tiempo_total_horas: sinTabla?.tramos_tiempo_total_horas ?? null,
     };
-    expect(Object.keys(pie)).toEqual(LLAVES_PIE_NUEVAS);
-    expect(Object.values(pie)).toEqual([null, null, null, null, null]);
+    expect(Object.keys(pie)).toEqual([
+      ...LLAVES_PIE_NUEVAS,
+      ...LLAVES_PIE_HORAS,
+    ]);
+    expect(Object.values(pie)).toEqual([null, null, null, null, null, null]);
   });
 });
 
 describe('QuotesService.calculate — el desglose canónico v1.3 NO cambia (invariante 3)', () => {
-  it('las llaves del breakdown VIEJO siguen todas ahí y solo se AÑADEN las 5 del pie', async () => {
+  it('las llaves del breakdown VIEJO siguen todas ahí y solo se AÑADEN las del pie (y la de horas del 0.0.33, al final)', async () => {
     const b = await servicio().calculate(dto());
     expect(Object.keys(b)).toEqual([
       ...LLAVES_BREAKDOWN_VIEJAS,
       ...LLAVES_PIE_NUEVAS,
+      ...LLAVES_PIE_HORAS,
     ]);
     for (const t of b.tramos!) {
       expect(Object.keys(t)).toEqual([
         ...LLAVES_TRAMO_VIEJAS,
         ...LLAVES_TRAMO_NUEVAS,
+        ...LLAVES_TRAMO_HORAS,
       ]);
     }
   });

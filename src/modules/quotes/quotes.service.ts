@@ -1181,12 +1181,17 @@ export class QuotesService {
       // la hoja interna de una cotización guardada LEE el importe con el que
       // se cotizó en vez de re-multiplicar (y el PDF interno, que ya prefería
       // `tramos[].total_usd` cuando existe, imprime exactamente eso).
+      // `tiempo_horas` (ADITIVO, API 0.0.33, al FINAL del tramo): lo que
+      // pinta la columna «TIEMPO VUELO (HRS)» — 2 decimales fijos con la
+      // suma cuadrada de `repartirHorasDecimales`. `tiempo_hhmm` se conserva
+      // por compatibilidad pero ya no se pinta.
       tramos: tramosBase
         ? tramosBase.map((t, i) => ({
             ...t,
             tarifa_usd_hr: tramosCosteados?.tramos[i]?.tarifa_hora_usd ?? null,
             tiempo_hhmm: tramosCosteados?.tramos[i]?.tiempo_hhmm ?? null,
             total_usd: tramosCosteados?.tramos[i]?.total_usd ?? null,
+            tiempo_horas: tramosCosteados?.tramos[i]?.tiempo_horas ?? null,
           }))
         : null,
       iva: {
@@ -1310,6 +1315,10 @@ export class QuotesService {
         tramosCosteados?.tramos_tiempo_total_hhmm ?? null,
       tramos_ajuste_usd: tramosCosteados?.tramos_ajuste_usd ?? null,
       tramos_ajuste_motivo: tramosCosteados?.tramos_ajuste_motivo ?? null,
+      // ADITIVO del API 0.0.33, al FINAL por la misma regla del prefijo: la
+      // fila TOTAL de «TIEMPO VUELO (HRS)» (= Σ `tramos[i].tiempo_horas`).
+      tramos_tiempo_total_horas:
+        tramosCosteados?.tramos_tiempo_total_horas ?? null,
     };
   }
 

@@ -2,9 +2,11 @@ import {
   consolidarTramosCosteados,
   costearTramos,
   costoDeTramo,
+  horasADecimal,
   horasAHhmm,
   horasTexto,
   motivoAjusteTramos,
+  repartirHorasDecimales,
   type HorasDelAjuste,
 } from './tramos-costeados.util';
 import {
@@ -125,6 +127,7 @@ describe('tramos-costeados.util — aritmética del tramo', () => {
       tramos_total_usd: 2722.5,
       tramos_ajuste_usd: 165,
       tramos_ajuste_motivo: 'Horas pactadas 1.75 h',
+      tramos_tiempo_total_horas: '1.65',
     });
     expect(pie.tramos_total_usd + pie.tramos_ajuste_usd).toBe(2887.5);
   });
@@ -191,6 +194,217 @@ describe('tramos-costeados.util — aritmética del tramo', () => {
     expect(r.tramos_total_usd).toBe(0);
     expect(r.tramos_ajuste_usd).toBe(1000);
     expect(r.tramos_ajuste_motivo).toBe('Redondeo');
+  });
+});
+
+// ===== TIEMPO VUELO (HRS): horas decimales con SUMA CUADRADA (24-sep-2026) =====
+
+/**
+ * Casos de la columna TIEMPO VUELO (HRS). Esta MISMA tabla vive copiada en
+ * el panel (`vuelatour-next/src/lib/admin/__tests__/quote-sheet-interna.test.ts`,
+ * `CASOS_HORAS_DECIMALES`) para su espejo `repartirHorasDecimales`, y en
+ * pyservices (`tests/test_cotizacion_interna_pdf.py`) para su respaldo: si
+ * cambia una regla aquí, cambia en los tres.
+ */
+const CASOS_HORAS_DECIMALES: ReadonlyArray<{
+  caso: string;
+  tiempos: (number | null | undefined)[];
+  tramos: (string | null)[];
+  total: string;
+}> = [
+  {
+    // La captura del cliente: 125 nm / 120 kt + 0.15 = 1.19166… h por tramo.
+    // En hh:mm era «01:12» + «01:12» ≠ «02:23».
+    caso: 'CUN–PTU–CUN de la captura: 1.19166… × 2',
+    tiempos: [1.1916666667, 1.1916666667],
+    tramos: ['1.19', '1.19'],
+    total: '2.38',
+  },
+  {
+    caso: 'el mismo caso ya en round4 (como lo guarda el snapshot)',
+    tiempos: [1.1917, 1.1917],
+    tramos: ['1.19', '1.19'],
+    total: '2.38',
+  },
+  {
+    // Redondeados cada uno por su lado: 0.34 × 3 = 1.02 ≠ 1.01.
+    caso: 'residuo mayor hacia ARRIBA: tres tramos de 0.335',
+    tiempos: [0.335, 0.335, 0.335],
+    tramos: ['0.34', '0.34', '0.33'],
+    total: '1.01',
+  },
+  {
+    // Redondeados cada uno por su lado: 0.33 × 3 = 0.99 ≠ 1.00. La centésima
+    // que falta va al residuo MÁS GRANDE (0.3349), no al primer tramo.
+    caso: 'residuo mayor hacia ABAJO: gana el residuo más grande, no el orden',
+    tiempos: [0.333, 0.3349, 0.3349],
+    tramos: ['0.33', '0.34', '0.33'],
+    total: '1.00',
+  },
+  {
+    caso: 'empate de residuos: decide el ORDEN del tramo (determinista)',
+    tiempos: [0.005, 0.005],
+    tramos: ['0.01', '0.00'],
+    total: '0.01',
+  },
+  {
+    caso: 'un solo tramo: su celda ES el total',
+    tiempos: [1.1916666667],
+    tramos: ['1.19'],
+    total: '1.19',
+  },
+  {
+    caso: 'dos decimales FIJOS: 1.2 → «1.20», 1 → «1.00»',
+    tiempos: [1.2, 1],
+    tramos: ['1.20', '1.00'],
+    total: '2.20',
+  },
+  {
+    // #294 (8 tramos): 1.6433/1.2567 ya suman exacto 7.20.
+    caso: 'ocho tramos que ya cuadran (#294)',
+    tiempos: [1.6433, 0.35, 1.2567, 0.35, 1.6433, 0.35, 1.2567, 0.35],
+    tramos: ['1.64', '0.35', '1.26', '0.35', '1.64', '0.35', '1.26', '0.35'],
+    total: '7.20',
+  },
+  {
+    caso: 'tramo SIN tiempo: «—» y no suma (igual que hoy, que cuenta 0)',
+    tiempos: [1.1917, null, 0.5],
+    tramos: ['1.19', null, '0.50'],
+    total: '1.69',
+  },
+  {
+    caso: 'ningún tramo con tiempo',
+    tiempos: [null, undefined],
+    tramos: [null, null],
+    total: '0.00',
+  },
+  { caso: 'sin tramos', tiempos: [], tramos: [], total: '0.00' },
+  {
+    caso: 'nunca negativo (un tiempo negativo es un dato roto)',
+    tiempos: [-3, 0.5],
+    tramos: ['0.00', '0.50'],
+    total: '0.50',
+  },
+];
+
+/** Generador pseudoaleatorio DETERMINISTA (la prueba nunca parpadea). */
+function lcg(semilla: number): () => number {
+  let s = semilla >>> 0;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 2 ** 32;
+  };
+}
+
+describe('tramos-costeados.util — TIEMPO VUELO (HRS) en horas decimales', () => {
+  it('horasADecimal: 2 decimales FIJOS, medio hacia arriba en aritmética entera', () => {
+    expect(horasADecimal(1.1916666667)).toBe('1.19');
+    expect(horasADecimal(2.3833333333)).toBe('2.38');
+    expect(horasADecimal(1.2)).toBe('1.20');
+    expect(horasADecimal(1)).toBe('1.00');
+    expect(horasADecimal(10.5)).toBe('10.50');
+    expect(horasADecimal(0)).toBe('0.00');
+    // Donde `toFixed(2)` falla por el binario del flotante.
+    expect((1.005).toFixed(2)).toBe('1.00');
+    expect(horasADecimal(1.005)).toBe('1.01');
+    expect(horasADecimal(2.675)).toBe('2.68');
+    expect(horasADecimal(-3)).toBe('0.00');
+  });
+
+  it.each(CASOS_HORAS_DECIMALES)(
+    'repartirHorasDecimales · $caso',
+    ({ tiempos, tramos, total }) => {
+      const r = repartirHorasDecimales(tiempos);
+      expect(r).toEqual({ tramos, total });
+      // La suma de lo que se VE es el total que se VE.
+      const suma = r.tramos.reduce(
+        (acc, t) => acc + (t == null ? 0 : Math.round(Number(t) * 100)),
+        0,
+      );
+      expect(suma).toBe(Math.round(Number(r.total) * 100));
+    },
+  );
+
+  it('SUMA CUADRADA en 2,000 tablas al azar: Σ tramos = total y cada tramo a ≤ 0.01 de su propio redondeo', () => {
+    const azar = lcg(20260924);
+    for (let caso = 0; caso < 2000; caso++) {
+      const n = 1 + Math.floor(azar() * 9);
+      // Tiempos como los del snapshot: round4 entre 0.15 y ~4 h.
+      const tiempos = Array.from(
+        { length: n },
+        () => Math.round((0.15 + azar() * 4) * 10000) / 10000,
+      );
+      const r = repartirHorasDecimales(tiempos);
+      const cent = r.tramos.map((t) => Math.round(Number(t) * 100));
+      expect(cent.reduce((a, b) => a + b, 0)).toBe(
+        Math.round(Number(r.total) * 100),
+      );
+      expect(r.total).toBe(horasADecimal(tiempos.reduce((a, b) => a + b, 0)));
+      tiempos.forEach((h, i) => {
+        const propio = Math.round(Number(horasADecimal(h)) * 100);
+        expect(Math.abs(cent[i] - propio)).toBeLessThanOrEqual(1);
+        // Piso o techo de su propio valor, nunca otra cosa.
+        expect(cent[i]).toBeGreaterThanOrEqual(Math.floor(h * 100 + 1e-9));
+        expect(cent[i]).toBeLessThanOrEqual(Math.ceil(h * 100 - 1e-9));
+      });
+    }
+  });
+
+  it('costearTramos: la captura del cliente (CUN–PTU–CUN a $746/hr, horas pactadas 2.4) — tramos «1.19» + «1.19» = «2.38» y el dinero idéntico', () => {
+    const r = costearTramos({
+      tramos: [
+        {
+          orden: 1,
+          origen: 'CUN',
+          destino: 'PTU',
+          millas: 125,
+          tiempo_hr: 1.1917,
+        },
+        {
+          orden: 2,
+          origen: 'PTU',
+          destino: 'CUN',
+          millas: 125,
+          tiempo_hr: 1.1917,
+        },
+      ],
+      tarifaHora: 746,
+      servicioAereoUsd: 1790.4,
+      horas: {
+        tiempo_cobrable_hr: 2.4,
+        sobrevuelo_hr: 0,
+        hora_minima_aplicada: false,
+        cobrable_override: true,
+      },
+    });
+    expect(r.tramos.map((t) => t.tiempo_horas)).toEqual(['1.19', '1.19']);
+    expect(r.tramos_tiempo_total_horas).toBe('2.38');
+    // Lo LEGADO sigue viajando igual (compatibilidad), y era lo que no cuadraba.
+    expect(r.tramos.map((t) => t.tiempo_hhmm)).toEqual(['01:12', '01:12']);
+    expect(r.tramos_tiempo_total_hhmm).toBe('02:23');
+    // El dinero NO se mueve: es solo presentación.
+    expect(r.tramos.map((t) => t.tiempo_hr)).toEqual([1.1917, 1.1917]);
+    expect(r.tramos.map((t) => t.total_usd)).toEqual([889.01, 889.01]);
+    expect(r.tramos_total_usd).toBe(1778.02);
+    expect(r.tramos_ajuste_usd).toBe(12.38);
+    expect(r.tramos_ajuste_motivo).toBe('Horas pactadas 2.4 h');
+  });
+
+  it('costearTramos: un tramo SIN tiempo en el snapshot pinta «—» (null) y el total suma los demás', () => {
+    const r = costearTramos({
+      tramos: [
+        { orden: 1, origen: 'CUN', destino: 'HOL', tiempo_hr: 0.5 },
+        { orden: 2, origen: 'HOL', destino: 'CUN' },
+        { orden: 3, origen: 'CUN', destino: 'CZM', tiempo_hr: 0.335 },
+      ],
+      tarifaHora: 1000,
+      servicioAereoUsd: 835,
+      horas: HORAS_NEUTRAS,
+    });
+    expect(r.tramos.map((t) => t.tiempo_horas)).toEqual(['0.50', null, '0.34']);
+    // Como hoy: el tiempo numérico del tramo faltante vale 0.
+    expect(r.tramos[1].tiempo_hr).toBe(0);
+    expect(r.tramos_tiempo_total_horas).toBe('0.84');
   });
 });
 
@@ -494,6 +708,7 @@ describe('PARIDAD del costeo por tramo con el PDF interno (payloads REALES de pr
       millas: 27,
       tiempo_hr: 0.33,
       tiempo_hhmm: '00:20',
+      tiempo_horas: '0.33',
       tarifa_hora_usd: 1650,
       total_usd: 544.5,
       pax: 0,
@@ -537,6 +752,13 @@ describe('PARIDAD del costeo por tramo con el PDF interno (payloads REALES de pr
     ]);
     expect(p.tramos_tiempo_total_hr).toBe(1.65);
     expect(p.tramos_tiempo_total_hhmm).toBe('01:39');
+    // TIEMPO VUELO (HRS), API 0.0.33: 0.33 + 0.57 + 0.75 = 1.65.
+    expect(p.tramos_cotizados.map((t) => t.tiempo_horas)).toEqual([
+      '0.33',
+      '0.57',
+      '0.75',
+    ]);
+    expect(p.tramos_tiempo_total_horas).toBe('1.65');
     expect(p.tramos_total_usd).toBe(2722.5);
     expect(p.tramos_ajuste_usd).toBe(165);
     expect(p.tramos_ajuste_motivo).toBe('Horas pactadas 1.75 h');
@@ -553,6 +775,11 @@ describe('PARIDAD del costeo por tramo con el PDF interno (payloads REALES de pr
     ]);
     expect(p.tramos_tiempo_total_hr).toBe(1);
     expect(p.tramos_tiempo_total_hhmm).toBe('01:00');
+    expect(p.tramos_cotizados.map((t) => t.tiempo_horas)).toEqual([
+      '0.50',
+      '0.50',
+    ]);
+    expect(p.tramos_tiempo_total_horas).toBe('1.00');
     expect(p.tramos_total_usd).toBe(750);
     expect(p.tramos_ajuste_usd).toBe(0);
     expect(p.tramos_ajuste_motivo).toBeNull();
@@ -609,6 +836,19 @@ describe('PARIDAD del costeo por tramo con el PDF interno (payloads REALES de pr
     ]);
     expect(p.tramos_tiempo_total_hr).toBe(7.2);
     expect(p.tramos_tiempo_total_hhmm).toBe('07:12');
+    // Los 8 tramos (ferries ocultos incluidos: el documento INTERNO los
+    // imprime todos) suman exacto el total.
+    expect(p.tramos_cotizados.map((t) => t.tiempo_horas)).toEqual([
+      '1.64',
+      '0.35',
+      '1.26',
+      '0.35',
+      '1.64',
+      '0.35',
+      '1.26',
+      '0.35',
+    ]);
+    expect(p.tramos_tiempo_total_horas).toBe('7.20');
     expect(p.tramos_total_usd).toBe(7200);
     expect(p.tramos_ajuste_usd).toBe(0);
     expect(p.tramos_ajuste_motivo).toBeNull();

@@ -20,6 +20,9 @@
  *    tramo — y ni siquiera eso si el snapshot ya trae `total_usd`/`costo_usd`
  *    (entonces se LEE tal cual).
  *  - `tiempo_hr` YA incluye el calzo de 0.15 h del tramo: se usa como viene.
+ *  - La columna TIEMPO se PINTA en horas decimales (`tiempo_horas`,
+ *    `tramos_tiempo_total_horas`, API 0.0.33) con la suma cuadrada de
+ *    `repartirHorasDecimales`: es texto de presentación, no multiplica nada.
  *  - La diferencia contra la línea canónica TIEMPO_VUELO del desglose NO se
  *    esconde ni se reparte entre tramos: viaja explícita como
  *    `tramos_ajuste_usd` con su motivo (horas pactadas / sobrevuelo / hora
@@ -37,10 +40,123 @@
  * escala) entra INYECTADA por el llamador.
  */
 
-/** Horas decimales → "hh:mm" (1.3 → "01:18", 0.4 → "00:24"); nunca negativo. */
+/**
+ * Horas decimales → "hh:mm" (1.3 → "01:18", 0.4 → "00:24"); nunca negativo.
+ *
+ * LEGADO desde el 24-sep-2026 (API 0.0.33): `tiempo_hhmm` y
+ * `tramos_tiempo_total_hhmm` se siguen mandando por compatibilidad, pero la
+ * hoja interna y el PDF interno ya pintan `tiempo_horas` /
+ * `tramos_tiempo_total_horas` (ver `repartirHorasDecimales`).
+ */
 export function horasAHhmm(h: number): string {
   const m = Math.max(0, Math.round(h * 60));
   return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+}
+
+// ===== TIEMPO DE VUELO EN HORAS DECIMALES (24-sep-2026, API 0.0.33) =====
+//
+// Pedido del cliente con la captura de la hoja interna de una CUN→PTU→CUN:
+// «la parte de tiempo de vuelo, lo podemos manejar solo en decimales por
+// favor? Porque parece ser que el sistema tiene un poco de problema al momento
+// de convertirlo y luego como que se nos hacen raros los tiempos». Cada tramo
+// valía 1.19166… h (125 nm / 120 kt + 0.15 de calzo) = 71.5 min ⇒ «01:12»; el
+// total 2.38333 h = 143 min ⇒ «02:23»; y 01:12 + 01:12 ≠ 02:23. La columna
+// TIEMPO VUELO pasa a horas decimales con 2 decimales FIJOS («1.19», «2.38»,
+// «1.20») y, además, los tramos que se ven SIEMPRE suman el total que se ve.
+//
+// Es SOLO presentación: `tiempo_hr` (4 dec.) sigue siendo el número con el
+// que se multiplica y ningún importe cambia.
+
+/** Unidades enteras por hora con las que se redondea (micro-horas). */
+const MICRO_POR_HORA = 1_000_000;
+/** Micro-horas por centésima de hora. */
+const MICRO_POR_CENTESIMA = MICRO_POR_HORA / 100;
+
+/** Horas → micro-horas enteras (nunca negativo; sin flotantes al redondear). */
+function microHoras(h: number): number {
+  return Math.max(0, Math.round(h * MICRO_POR_HORA));
+}
+
+/** Centésimas de hora → «1.19» (2 decimales FIJOS). */
+function centesimasATexto(c: number): string {
+  return `${Math.floor(c / 100)}.${String(c % 100).padStart(2, '0')}`;
+}
+
+/**
+ * Horas decimales → texto con 2 decimales FIJOS, redondeo MEDIO HACIA ARRIBA
+ * en aritmética ENTERA (1.19166 → «1.19», 1.2 → «1.20», 1.005 → «1.01», que
+ * con `toFixed` daría «1.00» por el binario del flotante). Nunca negativo.
+ */
+export function horasADecimal(h: number): string {
+  return centesimasATexto(
+    Math.floor((microHoras(h) + MICRO_POR_CENTESIMA / 2) / MICRO_POR_CENTESIMA),
+  );
+}
+
+/** Columna TIEMPO de la tabla ya en texto decimal, cuadrada. */
+export interface HorasDecimalesCuadradas {
+  /** Una celda por tramo, en el MISMO orden; `null` = el tramo no trae tiempo («—»). */
+  tramos: (string | null)[];
+  /** `horasADecimal(Σ tiempos)`: la fila TOTAL. */
+  total: string;
+}
+
+/**
+ * La columna TIEMPO de la tabla de tramos en horas decimales (2 decimales
+ * fijos) con la SUMA CUADRADA: los tramos mostrados suman EXACTAMENTE el
+ * total mostrado.
+ *
+ *  - Total mostrado = `horasADecimal(Σ tiempos)` (Σ exacto, redondeado UNA vez).
+ *  - Cada tramo se redondea con el método del RESIDUO MAYOR (largest
+ *    remainder): todos bajan a su centésima de piso y las centésimas que
+ *    faltan para llegar al total se reparten, de una en una, a los tramos con
+ *    el residuo más grande — empates por ORDEN del tramo (determinista). Cada
+ *    tramo queda en su piso o en su techo, así que difiere de su propio
+ *    redondeo en ≤ 0.01.
+ *  - Un tiempo `null`/no finito es un tramo SIN tiempo: su celda es `null`
+ *    («—») y no aporta a la suma (igual que hoy, donde cuenta como 0).
+ *
+ * Ej.: 1.19166 + 1.19166 ⇒ «1.19» + «1.19» = «2.38» (antes «01:12» + «01:12»
+ * ≠ «02:23»); tres tramos de 0.335 ⇒ total «1.01» y tramos «0.34», «0.34»,
+ * «0.33» (redondeados cada uno por su lado sumarían 1.02).
+ *
+ * FUENTE ÚNICA: la usan `costearTramos` / `consolidarTramosCosteados` (el
+ * breakdown de `/quotes/calculate` y el PDF interno). El panel tiene un
+ * ESPEJO EXACTO (`lib/admin/quote-sheet-interna.ts`) SOLO para snapshots
+ * anteriores al 0.0.33, con test de paridad de los mismos casos; pyservices,
+ * un respaldo igual para un payload sin estos campos.
+ */
+export function repartirHorasDecimales(
+  tiempos: readonly (number | null | undefined)[],
+): HorasDecimalesCuadradas {
+  const micros = tiempos.map((h) =>
+    h == null || !Number.isFinite(h) ? null : microHoras(h),
+  );
+  const suma = micros.reduce<number>((acc, m) => acc + (m ?? 0), 0);
+  const totalCentesimas = Math.floor(
+    (suma + MICRO_POR_CENTESIMA / 2) / MICRO_POR_CENTESIMA,
+  );
+  const pisos = micros.map((m) =>
+    m == null ? null : Math.floor(m / MICRO_POR_CENTESIMA),
+  );
+  let faltan =
+    totalCentesimas - pisos.reduce<number>((acc, p) => acc + (p ?? 0), 0);
+  // Residuo de mayor a menor; empate ⇒ el tramo de menor ORDEN primero. Con
+  // residuo 0 un tramo nunca sube: `faltan` ≤ nº de residuos positivos.
+  const candidatos = micros
+    .map((m, i) => ({ i, residuo: m == null ? -1 : m % MICRO_POR_CENTESIMA }))
+    .filter((c) => c.residuo > 0)
+    .sort((a, b) => b.residuo - a.residuo || a.i - b.i);
+  const centesimas = [...pisos];
+  for (const c of candidatos) {
+    if (faltan <= 0) break;
+    centesimas[c.i] = (centesimas[c.i] ?? 0) + 1;
+    faltan -= 1;
+  }
+  return {
+    tramos: centesimas.map((c) => (c == null ? null : centesimasATexto(c))),
+    total: centesimasATexto(totalCentesimas),
+  };
 }
 
 /** Horas para texto: hasta 2 decimales sin ceros de relleno ("0.5", "2", "1.25"). */
@@ -104,7 +220,15 @@ export interface TramoCosteado {
   millas: number | null;
   /** Horas del tramo CON calzos (4 dec.). */
   tiempo_hr: number;
+  /** LEGADO (compatibilidad): «01:12». Ya no se pinta desde el API 0.0.33. */
   tiempo_hhmm: string;
+  /**
+   * Lo que PINTA la columna TIEMPO VUELO (HRS) desde el 0.0.33: «1.19», 2
+   * decimales fijos y repartido con `repartirHorasDecimales` para que Σ
+   * tramos mostrados == `tramos_tiempo_total_horas`. `null` = el snapshot no
+   * trae tiempo para este tramo (la celda dice «—»).
+   */
+  tiempo_horas: string | null;
   /** Tarifa USD/hr aplicada: la del tramo si el snapshot la trae, si no la del vuelo. */
   tarifa_hora_usd: number | null;
   /** `snapshot.total_usd` si existe; si no `round2(tiempo_hr × tarifa)`. */
@@ -142,7 +266,10 @@ export interface FilaConsolidable {
 export interface ConsolidadoTramosCosteados {
   /** Σ `tiempo_hr` (4 dec.). */
   tramos_tiempo_total_hr: number;
+  /** LEGADO (compatibilidad): «02:23». Ya no se pinta desde el API 0.0.33. */
   tramos_tiempo_total_hhmm: string;
+  /** Fila TOTAL de la columna TIEMPO VUELO (HRS): «2.38» (= Σ `tiempo_horas`). */
+  tramos_tiempo_total_horas: string;
   /** Σ `total_usd` (fila TOTAL de la tabla). */
   tramos_total_usd: number;
   /** Línea TIEMPO_VUELO canónica − Σ tramos (0 si cuadra). */
@@ -237,6 +364,11 @@ export function consolidarTramosCosteados(
     tramos_total_usd: total,
     tramos_ajuste_usd: ajuste,
     tramos_ajuste_motivo: motivoAjusteTramos(ajuste, horas, tarifaHora),
+    // El MISMO total que reparte `costearTramos` entre las filas (un tramo
+    // sin tiempo llega aquí con 0 y no aporta, igual que un `null` allá).
+    tramos_tiempo_total_horas: repartirHorasDecimales(
+      filas.map((t) => t.tiempo_hr),
+    ).total,
   };
 }
 
@@ -261,6 +393,15 @@ export function costearTramos(
     (t): t is TramoSnapshotLike => !!t && typeof t === 'object',
   );
   let ultimaFecha: string | null = null;
+  // Columna TIEMPO VUELO (HRS): se reparte sobre TODAS las filas de la tabla
+  // a la vez (residuo mayor), así Σ `tiempo_horas` == el total del pie. Un
+  // tramo sin `tiempo_hr` en el snapshot va `null` («—»).
+  const horasDecimales = repartirHorasDecimales(
+    crudos.map((t) => {
+      const h = num(t.tiempo_hr);
+      return h == null ? null : round4(h);
+    }),
+  );
   const tramos: TramoCosteado[] = crudos.map((t, idx) => {
     const orden = num(t.orden) ?? idx + 1;
     const o = (str(t.origen) ?? '').toUpperCase();
@@ -289,6 +430,7 @@ export function costearTramos(
       millas: num(t.millas),
       tiempo_hr: tiempoHr,
       tiempo_hhmm: horasAHhmm(tiempoHr),
+      tiempo_horas: horasDecimales.tramos[idx] ?? null,
       tarifa_hora_usd: tarifaTramo,
       total_usd: costoDeTramo(tiempoHr, tarifaTramo, totalSnap),
       pax: esFerry ? 0 : num(t.pasajeros),

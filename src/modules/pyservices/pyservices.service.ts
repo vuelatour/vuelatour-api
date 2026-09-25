@@ -1285,8 +1285,15 @@ export interface CotizacionInternaTramoCotizadoPdf {
   millas: number | null;
   /** Horas cobrables del tramo CON calzos (decimal, 4 dec.). */
   tiempo_hr: number;
-  /** Mismo tiempo como "hh:mm" (1.3 → "01:18"). */
+  /** LEGADO (compatibilidad): mismo tiempo como "hh:mm" (1.3 → "01:18"). Ya no se pinta desde el API 0.0.33. */
   tiempo_hhmm: string;
+  /**
+   * Lo que PINTA la columna «TIEMPO VUELO (HRS)» (API 0.0.33): horas
+   * decimales con 2 decimales fijos («1.19»), repartidas por residuo mayor
+   * para que Σ tramos == `tramos_tiempo_total_horas`
+   * (`repartirHorasDecimales`). `null` = el tramo no trae tiempo («—»).
+   */
+  tiempo_horas: string | null;
   /** Tarifa USD/hr aplicada al tramo: la del snapshot por tramo si algún día viaja, si no la ÚNICA del vuelo (`snapshot.tarifa.usd_por_hora`). */
   tarifa_hora_usd: number | null;
   /** Costo del tramo: `snapshot.tramos[].total_usd` si existe; si no `round2(tiempo_hr × tarifa)` (único cálculo nuevo, en el API). */
@@ -1446,9 +1453,11 @@ export interface CotizacionInternaPdfRequest {
 
   // ---- (2) Tramos cotizados y horas ----
   tramos_cotizados: CotizacionInternaTramoCotizadoPdf[];
-  /** Σ `tiempo_hr` de la tabla (4 dec.) y su "hh:mm". */
+  /** Σ `tiempo_hr` de la tabla (4 dec.) y su "hh:mm" (LEGADO, ya no se pinta). */
   tramos_tiempo_total_hr: number;
   tramos_tiempo_total_hhmm: string;
+  /** Fila TOTAL de «TIEMPO VUELO (HRS)» (API 0.0.33): «2.38» = Σ `tiempo_horas`. */
+  tramos_tiempo_total_horas: string;
   /** Σ `total_usd` de la tabla (fila TOTAL). */
   tramos_total_usd: number;
   /** Línea TIEMPO_VUELO canónica − Σ tramos (0 si cuadra). Σ tramos + ajuste == servicio aéreo del desglose. */
