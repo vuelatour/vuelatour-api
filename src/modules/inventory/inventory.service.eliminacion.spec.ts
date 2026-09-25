@@ -222,6 +222,46 @@ describe('previewEliminacionMovimiento', () => {
     ]);
     expect(r.de_compra).toBeNull();
     expect(r.mensaje).toContain('Se puede eliminar');
+    // API 0.0.36: sin candado de costo; el precio vigente no cambia al
+    // quitar una salida y la lista de salidas afectadas viaja vacía.
+    expect(r.mensaje).toContain('Ninguna salida cambia de costo');
+    expect(r).toMatchObject({
+      salidas_afectadas: [],
+      cambia_precio_vigente: false,
+      precio_vigente_antes: {
+        movimiento_id: 'E1',
+        unitario: 1658.33,
+        moneda: 'MXN',
+      },
+      regla_costo: 'ULTIMO_PRECIO',
+    });
+  });
+
+  it('una COMPRA más reciente que la salida SÍ se puede quitar (antes CAMBIA_COSTO_FIFO) y la vista previa dice que cambia el precio vigente', async () => {
+    const E2: Fila = {
+      ...E1,
+      id: 'E2',
+      cantidad: 10,
+      costo_unitario_usd: 110,
+      moneda: 'USD',
+      costo_unitario_mxn: null,
+      tc_usd_mxn: 17.0115,
+      fecha_movimiento: '2026-08-29',
+      created_at: '2026-08-29T17:36:43Z',
+    };
+    const { service } = armar({
+      cardex: [[E1, S1, E2]],
+      movimiento: E2,
+      gastos: [],
+    });
+    const r = await service.previewEliminacionMovimiento('it-1', 'E2');
+    expect(r.permitido).toBe(true);
+    expect(r.codigo_bloqueo).toBeNull();
+    expect(r.cambia_precio_vigente).toBe(true);
+    expect(r.precio_vigente_despues).toMatchObject({ movimiento_id: 'E1' });
+    expect(r.mensaje).toContain(
+      'El último precio de compra pasa de $110.00 USD (29 ago 2026) a $1,658.33 MXN (13 jul 2026)',
+    );
   });
 
   it('gasto CONCILIADO: bloquea con GASTO_BLOQUEADO y dice qué hacer', async () => {
@@ -328,6 +368,18 @@ describe('eliminarMovimiento', () => {
       valor_mxn: 49749.9,
       valor_usd_sin_tc: 0,
       pesos_exactos: true,
+      // ADITIVOS (0.0.36): el último precio de compra que queda.
+      costo_vigente: {
+        movimiento_id: 'E1',
+        fecha: '2026-07-13',
+        moneda: 'MXN',
+        unitario: 1658.33,
+        unitario_usd: 94.71,
+        unitario_mxn: 1658.33,
+        tc_compra: 17.51,
+      },
+      costo_vigente_mxn: 1658.33,
+      regla_costo: 'ULTIMO_PRECIO',
     });
     // NADA de borrados por pasos sueltos desde el API.
     expect(llamadas.filter((l) => l.metodo === 'delete')).toEqual([]);

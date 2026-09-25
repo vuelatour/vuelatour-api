@@ -90,7 +90,7 @@ export class CreateInventoryMovementDto {
 
   @ApiPropertyOptional({
     description:
-      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION si la captura es USD. En SALIDA lo calcula el API por FIFO.',
+      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION si la captura es USD. En SALIDA lo toma el API: último precio de compra vigente el día de la salida.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -118,7 +118,8 @@ export class CreateInventoryMovementDto {
   costo_unitario_mxn?: number;
 
   @ApiPropertyOptional({
-    description: 'Tipo de cambio de la compra (MXN por USD). Requerido en capturas MXN.',
+    description:
+      'Tipo de cambio de la compra (MXN por USD). Requerido en capturas MXN.',
   })
   @IsOptional()
   @Type(() => Number)

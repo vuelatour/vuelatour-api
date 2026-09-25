@@ -17,8 +17,13 @@ import {
  * 15W-50», cardex de producción): el 29-ago se capturaron por error una
  * SALIDA de 10 a XA-VGV, una ENTRADA de 1 a $350 MXN y una SALIDA de 1 a
  * XA-VGV, encima de una ENTRADA de 120 a $0 del mismo día. Lo que se prueba
- * aquí es EXACTAMENTE qué orden de borrado se permite y cuál no, para que el
- * costo FIFO que ya viajó a los gastos de los aviones no se mueva jamás.
+ * aquí es EXACTAMENTE qué orden de borrado se permite y cuál no.
+ *
+ * Desde el API 0.0.36 (regla del ÚLTIMO PRECIO DE COMPRA, 25-sep-2026) el
+ * costo de cada salida está GUARDADO en su fila y ninguna baja lo mueve: el
+ * único candado numérico es la EXISTENCIA (`STOCK_NEGATIVO`). Lo que sí se
+ * informa es si cambia el PRECIO VIGENTE (`cambia_precio_vigente`), con el
+ * que se valúa la existencia y se cobra la siguiente salida.
  */
 
 type Entrada = Partial<MovEliminable> & {
@@ -149,20 +154,22 @@ describe('evaluarEliminacion · caso real del 29-ago (aceite 15W-50)', () => {
     expect(r.detalle).toContain('SALIDA de 1 del 29 ago 2026 a XA-VGV');
   });
 
-  it('la SALIDA de 24 NO se puede: movería el costo FIFO de las salidas del 29-ago (de $0 a $1,658.33)', () => {
-    const r = evaluarEliminacion(CARDEX, 'S3');
-    expect(r.permitido).toBe(false);
-    expect(r.codigo_bloqueo).toBe('CAMBIA_COSTO_FIFO');
-    expect(r.salidas_afectadas.map((s) => s.id)).toEqual(['S4', 'S5']);
-    expect(r.salidas_afectadas[0]).toMatchObject({
-      id: 'S4',
-      fecha: '2026-08-29',
-      costo_antes: 0,
-      costo_despues: 1658.33,
-      costo_antes_usd: 0,
-      costo_despues_usd: 94.71,
+  it('la SALIDA de 24 YA SE PUEDE eliminar (antes CAMBIA_COSTO_FIFO): cada salida conserva el costo de su fila', () => {
+    const r = evaluarEliminacion(CARDEX, 'S3', '2026-09-25');
+    expect(r.permitido).toBe(true);
+    expect(r.codigo_bloqueo).toBeNull();
+    expect(r.salidas_afectadas).toEqual([]);
+    expect(r.stock_despues).toBe(134);
+    // El precio vigente (E3, $350 MXN) no cambia al quitar una salida.
+    expect(r.cambia_precio_vigente).toBe(false);
+    expect(r.precio_vigente_antes).toMatchObject({
+      movimiento_id: 'E3',
+      unitario: 350,
+      moneda: 'MXN',
     });
-    expect(r.detalle).toContain('ya se cargó al avión');
+    expect(r.detalle).toBe(
+      'Se puede eliminar la SALIDA de 24 del 6 ago 2026 a N990GG: la existencia pasa de 110 a 134. Ninguna salida cambia de costo: cada una guarda el costo con que se cobró.',
+    );
   });
 
   it('la ENTRADA original de 30 NO se puede: la primera salida quedaría en negativo', () => {
@@ -211,28 +218,28 @@ describe('evaluarEliminacion · capas con costo DISTINTO', () => {
     aeronave_matricula: 'XA-VGV',
   });
 
-  it('la capa VIEJA (ya consumida) se bloquea: la salida pasaría de $500 a $1,000', () => {
-    const r = evaluarEliminacion([A, B, S], 'A');
-    expect(r.codigo_bloqueo).toBe('CAMBIA_COSTO_FIFO');
-    expect(r.salidas_afectadas).toEqual([
-      {
-        id: 'S',
-        fecha: '2026-09-03',
-        costo_antes: 500,
-        costo_despues: 1000,
-        costo_antes_usd: 25,
-        costo_despues_usd: 50,
-      },
-    ]);
-    expect(r.detalle).toContain('$500.00 MXN');
-    expect(r.detalle).toContain('$1,000.00 MXN');
+  it('la compra VIEJA se permite (antes CAMBIA_COSTO_FIFO): la salida guarda su costo y el precio vigente sigue siendo el de B', () => {
+    const r = evaluarEliminacion([A, B, S], 'A', '2026-09-25');
+    expect(r.permitido).toBe(true);
+    expect(r.salidas_afectadas).toEqual([]);
+    expect(r.cambia_precio_vigente).toBe(false);
+    expect(r.detalle).not.toContain('se cobraron con el precio');
   });
 
-  it('la capa NUEVA (intacta) se permite: ninguna salida cambia de costo', () => {
-    const r = evaluarEliminacion([A, B, S], 'B');
+  it('la compra NUEVA se permite y AVISA: el último precio regresa al de A y la salida que usó el de B conserva su cargo', () => {
+    const r = evaluarEliminacion([A, B, S], 'B', '2026-09-25');
     expect(r.permitido).toBe(true);
     expect(r.stock_antes).toBe(5);
     expect(r.stock_despues).toBe(0);
+    expect(r.cambia_precio_vigente).toBe(true);
+    expect(r.precio_vigente_antes?.movimiento_id).toBe('B');
+    expect(r.precio_vigente_despues?.movimiento_id).toBe('A');
+    expect(r.detalle).toContain(
+      '1 salida(s) se cobraron con el precio de esta compra y conservan su cargo.',
+    );
+    expect(r.detalle).toContain(
+      'El último precio de compra pasa de $200.00 MXN (2 sep 2026) a $100.00 MXN (1 sep 2026): con él se valúa la existencia y se cobra la siguiente salida.',
+    );
   });
 
   it('la SALIDA se permite aunque haya capas distintas: no hay nadie después', () => {
@@ -282,23 +289,17 @@ describe('evaluarEliminacion · capas USD SIN tipo de cambio (forma de prod)', (
     ...usd(46.06),
   });
 
-  it('borrar la capa YA CONSUMIDA se bloquea aunque el costo en pesos sea null en los dos lados', () => {
-    const r = evaluarEliminacion([BARATA, CARA, SAL], 'BARATA');
-    expect(r.permitido).toBe(false);
-    expect(r.codigo_bloqueo).toBe('CAMBIA_COSTO_FIFO');
-    expect(r.salidas_afectadas).toEqual([
-      {
-        id: 'SAL',
-        fecha: '2026-09-02',
-        costo_antes: null,
-        costo_despues: null,
-        costo_antes_usd: 46.06,
-        costo_despues_usd: 9541.25,
-      },
-    ]);
-    // El mensaje NO puede decir «$0.00 MXN» ni «null»: dice el número real.
-    expect(r.detalle).toContain('$46.06 USD');
-    expect(r.detalle).toContain('$9,541.25 USD');
+  it('borrar la compra barata ya NO mueve el costo de la salida (está en su fila): se permite', () => {
+    const r = evaluarEliminacion([BARATA, CARA, SAL], 'BARATA', '2026-09-25');
+    expect(r.permitido).toBe(true);
+    expect(r.codigo_bloqueo).toBeNull();
+    expect(r.salidas_afectadas).toEqual([]);
+    // El precio vigente era y sigue siendo la compra cara (la más reciente).
+    expect(r.cambia_precio_vigente).toBe(false);
+    expect(r.precio_vigente_antes).toMatchObject({
+      unitario: 9541.25,
+      moneda: 'USD',
+    });
   });
 
   it('la capa INTACTA sigue siendo eliminable (el candado no se volvió paranoico)', () => {
@@ -312,6 +313,67 @@ describe('evaluarEliminacion · capas USD SIN tipo de cambio (forma de prod)', (
     // Sin costo no hay costo que mover: el candado no debe inventar bloqueos.
     expect(evaluarEliminacion(CARDEX, 'S4').permitido).toBe(true);
     expect(evaluarEliminacion(CARDEX, 'S5').permitido).toBe(true);
+  });
+});
+
+describe('evaluarEliminacion · el ejemplo del cliente (último precio)', () => {
+  const E1 = m({
+    id: 'E1',
+    tipo: 'ENTRADA',
+    cantidad: 10,
+    fecha_movimiento: '2026-08-10',
+    created_at: '2026-08-10T15:00:00Z',
+    moneda: 'USD',
+    costo_unitario_usd: 21,
+    tc_usd_mxn: 17,
+  });
+  const S1 = m({
+    id: 'S1',
+    tipo: 'SALIDA',
+    cantidad: 5,
+    fecha_movimiento: '2026-08-15',
+    created_at: '2026-08-15T15:00:00Z',
+    moneda: 'USD',
+    costo_unitario_usd: 21,
+    tc_usd_mxn: 17.1,
+    venta_unitaria: 26.25,
+    venta_moneda: 'USD',
+    aeronave_matricula: 'XA-VGV',
+  });
+  const E2 = m({
+    id: 'E2',
+    tipo: 'ENTRADA',
+    cantidad: 5,
+    fecha_movimiento: '2026-09-05',
+    created_at: '2026-09-05T15:00:00Z',
+    moneda: 'USD',
+    costo_unitario_usd: 30,
+    tc_usd_mxn: 17.2,
+  });
+
+  it('quitar la compra de 30 regresa el precio vigente a 21 (lo dice antes de borrar)', () => {
+    const r = evaluarEliminacion([E1, S1, E2], 'E2', '2026-09-25');
+    expect(r.permitido).toBe(true);
+    expect(r.stock_despues).toBe(5);
+    expect(r.cambia_precio_vigente).toBe(true);
+    expect(r.detalle).toContain(
+      'El último precio de compra pasa de $30.00 USD (5 sep 2026) a $21.00 USD (10 ago 2026): con él se valúa la existencia y se cobra la siguiente salida.',
+    );
+  });
+
+  it('con una fecha de corte ANTERIOR a la compra de 30, esa compra no es el precio vigente', () => {
+    const r = evaluarEliminacion([E1, S1, E2], 'E2', '2026-09-01');
+    expect(r.cambia_precio_vigente).toBe(false);
+    expect(r.precio_vigente_antes?.movimiento_id).toBe('E1');
+  });
+
+  it('quitar la única compra con costo deja el producto sin precio (valor $0)', () => {
+    const r = evaluarEliminacion([E1], 'E1', '2026-09-25');
+    expect(r.permitido).toBe(true);
+    expect(r.precio_vigente_despues).toBeNull();
+    expect(r.detalle).toContain(
+      'El producto se queda sin ninguna compra con costo',
+    );
   });
 });
 

@@ -1,54 +1,65 @@
 /**
- * ¿SE PUEDE ELIMINAR ESTE MOVIMIENTO DE CARDEX? — cálculo PURO (21-sep-2026).
+ * ¿SE PUEDE ELIMINAR ESTE MOVIMIENTO DE CARDEX? — cálculo PURO (21-sep-2026;
+ * regla de costo del 25-sep-2026, API 0.0.36).
  *
  * Pedido del cliente: «podemos agregar una opcion para eliminar algunos
  * movimientos, pero que al momento de eliminarlos pida justificacion y
  * sepamos quien lo hizo». El motivo y el autor los guarda la BD
  * (`inventario_movimiento_eliminado`, migración 20260921000001); aquí vive
- * el candado NUMÉRICO, que es el delicado: el stock y los costos FIFO NO se
- * guardan en ninguna columna — se derivan del cardex completo cada vez
- * (`inventario-cardex.util.ts`). Borrar un movimiento reescribe la historia
- * de TODO lo que vino después.
+ * el candado NUMÉRICO. La existencia NO se guarda en ninguna columna — se
+ * deriva del cardex completo cada vez (`inventario-cardex.util.ts`).
  *
- * Regla (fiabilidad numérica es sagrada): se permite eliminar SOLO si
+ * Regla (fiabilidad numérica es sagrada): se permite eliminar SOLO si en
+ * NINGÚN punto de la cronología la existencia queda negativa.
  *
- *   1. en NINGÚN punto de la cronología la existencia queda negativa, y
- *   2. el costo FIFO recalculado de TODAS las demás salidas queda IGUAL
- *      (tolerancia de medio centavo) — EN LAS DOS MONEDAS: pesos (lo que el
- *      cliente lee) y USD (la canónica del cardex). Con capas USD sin TC el
- *      costo en pesos de toda salida es `null`, así que compararlo solo en
- *      pesos daba «no cambió» aunque el costo pasara de $46 a $9,541 USD —
- *      la forma de 66 de los 75 movimientos de producción.
- *
- * Así, una ENTRADA que el FIFO ya consumió, o una SALIDA intermedia que
- * desplazaría las capas de las salidas posteriores, se BLOQUEA con un
- * mensaje que dice exactamente qué hay que eliminar primero — en vez de
- * mover en silencio el costo que ya viajó a los gastos de un avión.
+ * El candado del COSTO (`CAMBIA_COSTO_FIFO`) YA NO se emite desde el API
+ * 0.0.36: el costo de una salida es el que se GUARDÓ en su fila al
+ * registrarla (último precio de compra vigente ese día) y ninguna baja lo
+ * mueve — cada salida conserva el costo con que se cobró. El código se
+ * conserva en `CODIGOS_BLOQUEO_ELIMINACION` porque un API previo aún podría
+ * mandarlo. Lo que SÍ puede cambiar al quitar una ENTRADA es el PRECIO
+ * VIGENTE (con el que se valúa la existencia y se cobra la siguiente
+ * salida): la evaluación lo informa (`cambia_precio_vigente`) para que el
+ * diálogo de confirmación lo diga antes de borrar.
  *
  * DEVOLUCION y AJUSTE quedan FUERA en esta versión (`TIPO_NO_SOPORTADO`):
  * son correcciones de inventario, y la corrección de una corrección se hace
  * con un movimiento contrario, no borrando el rastro.
  *
- * Sin `this`, sin BD, sin `new Date()`: `fecha_movimiento` ya es día Cancún.
- * La simulación reusa `sortChrono`/`walkCardex` (fuente única del FIFO): NO
- * hay un segundo motor de costos aquí.
+ * Sin `this`, sin BD, sin `new Date()`: `fecha_movimiento` ya es día Cancún
+ * y «hoy» llega como argumento.
  */
 import { TipoMovimientoInventario } from './dto/inventory.dto';
 import {
+  costoVigenteEn,
   EPS,
+  fechaCardexEsMx,
+  montoTxt,
+  precioTxt,
   round,
+  salidasQueDependenDe,
   sortChrono,
-  walkCardex,
-  type MovForFifo,
+  type CostoVigente,
+  type MovCardex,
 } from './inventario-cardex.util';
+
+// Fuente única de los textos (viven en el util del cardex desde el 0.0.36);
+// se re-exportan para no romper a quien los importaba de aquí.
+export { fechaCardexEsMx, montoTxt };
 
 const SALIDA = TipoMovimientoInventario.SALIDA as string;
 const ENTRADA = TipoMovimientoInventario.ENTRADA as string;
 
-/** Medio centavo: dos costos FIFO que difieren menos son EL MISMO costo. */
+/**
+ * Medio centavo (se conserva exportada por compatibilidad: desde el 0.0.36
+ * ya no hay costo que comparar — cada salida guarda el suyo).
+ */
 export const TOLERANCIA_COSTO_FIFO = 0.005;
 
-/** Por qué NO se puede eliminar (lo que calcula este helper). */
+/**
+ * Por qué NO se puede eliminar (lo que calcula este helper). `CAMBIA_COSTO_FIFO`
+ * ya no lo emite el API 0.0.36; se conserva en el tipo por compatibilidad.
+ */
 export type CodigoBloqueoCardex =
   | 'STOCK_NEGATIVO'
   | 'CAMBIA_COSTO_FIFO'
@@ -56,9 +67,11 @@ export type CodigoBloqueoCardex =
 
 /**
  * Códigos ESTABLES del 409 (`code` del cuerpo de error): el panel y la app
- * deciden por ellos, nunca por el texto. Los tres de cardex los calcula
- * `evaluarEliminacion`; los otros dos miran el DINERO (compra ligada, gasto
- * conciliado/facturado) y los verifica también la función de BD.
+ * deciden por ellos, nunca por el texto. Los de cardex los calcula
+ * `evaluarEliminacion` (`CAMBIA_COSTO_FIFO` ya no se emite desde el API
+ * 0.0.36; se conserva porque un API previo aún podría mandarlo); los otros
+ * dos miran el DINERO (compra ligada, gasto conciliado/facturado) y los
+ * verifica también la función de BD.
  */
 export const CODIGOS_BLOQUEO_ELIMINACION = [
   'MOVIMIENTO_DE_COMPRA',
@@ -112,21 +125,26 @@ export function mensajeDeErrorEliminacion(mensaje?: string | null): string {
 }
 
 /**
- * Movimiento del cardex con lo mínimo para simular el FIFO sin él. La
- * matrícula es OPCIONAL: sin ella los mensajes dicen «sin avión», los
- * NÚMEROS no cambian.
+ * Movimiento del cardex con lo mínimo para simular la baja. La matrícula es
+ * OPCIONAL: sin ella los mensajes dicen «sin avión», los NÚMEROS no cambian.
+ * Los campos de venta (`MovCardex`) solo sirven para saber qué salidas se
+ * cobraron con el precio de una ENTRADA.
  */
-export type MovEliminable = MovForFifo & {
+export type MovEliminable = MovCardex & {
   id: string;
   aeronave_matricula?: string | null;
   para_flota?: boolean | null;
 };
 
-/** Salida cuyo costo FIFO cambiaría al quitar el movimiento. */
+/**
+ * Salida cuyo costo cambiaría al quitar el movimiento. Desde el API 0.0.36
+ * `salidas_afectadas` viaja SIEMPRE vacía (el costo de cada salida es el de
+ * su fila); el tipo se conserva por compatibilidad.
+ */
 export interface SalidaAfectada {
   id: string;
   fecha: string;
-  /** Costo FIFO en MXN hoy; null = capas USD sin TC (no expresable en pesos). */
+  /** Costo en MXN (compat ≤ 0.0.35); null = no expresable en pesos. */
   costo_antes: number | null;
   costo_despues: number | null;
   /**
@@ -147,7 +165,13 @@ export interface EvaluacionEliminacion {
   stock_antes: number;
   /** Existencia si se elimina. */
   stock_despues: number;
+  /** SIEMPRE [] desde el API 0.0.36 (compat). */
   salidas_afectadas: SalidaAfectada[];
+  /** ADITIVOS (0.0.36): último precio de compra hoy, con y sin el movimiento. */
+  precio_vigente_antes: CostoVigente | null;
+  precio_vigente_despues: CostoVigente | null;
+  /** Quitar el movimiento cambia el precio con el que se valúa y se cobra. */
+  cambia_precio_vigente: boolean;
 }
 
 /** Migración que crea la bitácora y la función de borrado atómico. */
@@ -177,44 +201,10 @@ export function esTablaInexistente(
 
 // ===== Texto (es-MX) =====
 
-const MESES = [
-  'ene',
-  'feb',
-  'mar',
-  'abr',
-  'may',
-  'jun',
-  'jul',
-  'ago',
-  'sep',
-  'oct',
-  'nov',
-  'dic',
-];
-
-/**
- * 'YYYY-MM-DD' → '29 ago 2026'. Corta el string (jamás `new Date`: eso
- * restaría un día en Cancún). Un formato inesperado vuelve tal cual.
- */
-export function fechaCardexEsMx(fecha: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fecha ?? '');
-  if (!m) return fecha ?? '';
-  const mes = MESES[Number(m[2]) - 1] ?? m[2];
-  return `${Number(m[3])} ${mes} ${m[1]}`;
-}
-
 /** 10 → «10»; 2.5 → «2.5»; 2.375 → «2.38» (sin ceros de relleno). */
 export function cantidadTxt(n: number | string): string {
   const v = round(Number(n), 2);
   return String(v);
-}
-
-/** 6633.32 → «$6,633.32». Determinista (sin `toLocaleString`, que depende del ICU). */
-export function montoTxt(n: number): string {
-  const s = Math.abs(n).toFixed(2);
-  const [ent, dec] = s.split('.');
-  const miles = ent.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-  return `${n < 0 ? '−' : ''}$${miles}.${dec}`;
 }
 
 /** «la SALIDA de 10 del 29 ago 2026 a XA-VGV» (fuente única de los mensajes). */
@@ -249,26 +239,21 @@ function recorrerStock(movs: MovEliminable[]): Array<{
   });
 }
 
-/** Dos costos FIFO son el mismo (null = no expresable en esa moneda, en ambos). */
-function mismoCosto(a: number | null, b: number | null): boolean {
-  if (a == null || b == null) return a == null && b == null;
-  return Math.abs(a - b) <= TOLERANCIA_COSTO_FIFO;
+/** «$30.00 USD (5 sep 2026)» — el precio de una compra con su fecha. */
+function precioConFecha(c: CostoVigente): string {
+  return `${precioTxt(c.unitario, c.moneda)} (${fechaCardexEsMx(c.fecha)})`;
 }
 
-/**
- * El costo en la moneda en la que SE PUEDE leer: pesos si las capas lo
- * permiten, si no USD (66 de los 75 movimientos de producción son capas USD
- * sin TC: ahí «$0.00 MXN» sería mentira y `null` no dice nada).
- */
-function costoTxt(mxn: number | null, usd: number | null): string {
-  if (mxn != null) return `${montoTxt(mxn)} MXN`;
-  if (usd != null) return `${montoTxt(usd)} USD`;
-  return 'un costo que no se puede expresar';
+/** Dos costos vigentes son el MISMO precio (misma compra o mismo número y moneda). */
+function mismoPrecio(a: CostoVigente | null, b: CostoVigente | null): boolean {
+  if (a == null || b == null) return a == null && b == null;
+  return a.moneda === b.moneda && Math.abs(a.unitario - b.unitario) <= EPS;
 }
 
 /**
  * ¿Se puede eliminar `movId` del cardex de `movs` (TODOS los movimientos del
- * producto, en cualquier orden)?
+ * producto, en cualquier orden)? `hoy` (día Cancún, YYYY-MM-DD) es el corte
+ * del precio vigente; sin él, el último de todos.
  *
  * Lanza si el movimiento no está en la lista: el caller lo lee de la BD
  * antes (404), así que llegar aquí sin él es un error de programación.
@@ -276,6 +261,7 @@ function costoTxt(mxn: number | null, usd: number | null): string {
 export function evaluarEliminacion(
   movs: MovEliminable[],
   movId: string,
+  hoy = '9999-12-31',
 ): EvaluacionEliminacion {
   const orden = sortChrono(movs);
   const objetivo = orden.find((m) => m.id === movId);
@@ -293,10 +279,17 @@ export function evaluarEliminacion(
   const stockDespues = pasosDespues.length
     ? pasosDespues[pasosDespues.length - 1].stock
     : 0;
+  const precioAntes = costoVigenteEn(orden, { fecha: hoy });
+  const precioDespues = costoVigenteEn(restantes, { fecha: hoy });
+  const cambiaPrecio = !mismoPrecio(precioAntes, precioDespues);
 
   const base = {
     stock_antes: stockAntes,
     stock_despues: stockDespues,
+    salidas_afectadas: [] as SalidaAfectada[],
+    precio_vigente_antes: precioAntes,
+    precio_vigente_despues: precioDespues,
+    cambia_precio_vigente: cambiaPrecio,
   };
 
   // (1) Tipos soportados: ENTRADA y SALIDA. Una DEVOLUCION/AJUSTE es en sí
@@ -307,7 +300,6 @@ export function evaluarEliminacion(
       permitido: false,
       codigo_bloqueo: 'TIPO_NO_SOPORTADO',
       detalle: `Un movimiento de tipo ${objetivo.tipo} no se elimina: corrige con un movimiento contrario (una ${objetivo.tipo === 'DEVOLUCION' ? 'SALIDA' : 'ENTRADA/SALIDA'} que lo compense), así el cardex conserva el rastro completo.`,
-      salidas_afectadas: [],
     };
   }
 
@@ -320,57 +312,33 @@ export function evaluarEliminacion(
       permitido: false,
       codigo_bloqueo: 'STOCK_NEGATIVO',
       detalle: `Sin ${describirMovimiento(objetivo)} la existencia quedaría en ${cantidadTxt(negativo.stock)} al llegar ${describirMovimiento(negativo.mov)}: elimina primero ${describirMovimiento(negativo.mov)} (y su gasto) y vuelve a intentarlo.`,
-      salidas_afectadas: [],
     };
   }
 
-  // (3) Ninguna otra SALIDA puede cambiar de costo FIFO: ese costo ya viajó
-  // al gasto del avión (invariante 8) y moverlo aquí descuadraría el mes.
-  // Se comparan las DOS monedas: en pesos (lo que el cliente lee) Y en USD
-  // (la canónica del cardex). Con capas USD sin TC la versión en pesos de
-  // CUALQUIER salida es `null`, así que mirar solo los pesos daba «no
-  // cambió» para dos costos tan distintos como $46 y $9,541 USD.
-  const antes = walkCardex(orden);
-  const despues = walkCardex(restantes);
-  const afectadas: SalidaAfectada[] = [];
-  for (const m of restantes) {
-    if (m.tipo !== SALIDA) continue;
-    const pa = antes.get(m.id);
-    const pd = despues.get(m.id);
-    const a = pa?.costoMxnFifo ?? null;
-    const d = pd?.costoMxnFifo ?? null;
-    const aUsd = pa?.costoUsdFifo ?? null;
-    const dUsd = pd?.costoUsdFifo ?? null;
-    if (!mismoCosto(a, d) || !mismoCosto(aUsd, dUsd)) {
-      afectadas.push({
-        id: m.id,
-        fecha: m.fecha_movimiento,
-        costo_antes: a,
-        costo_despues: d,
-        costo_antes_usd: aUsd,
-        costo_despues_usd: dUsd,
-      });
+  // (3) Ya no hay candado de COSTO: cada salida conserva el costo con que se
+  // cobró (guardado en su fila). Se informa lo que SÍ cambia.
+  const partes = [
+    `Se puede eliminar ${describirMovimiento(objetivo)}: la existencia pasa de ${cantidadTxt(stockAntes)} a ${cantidadTxt(stockDespues)}. Ninguna salida cambia de costo: cada una guarda el costo con que se cobró.`,
+  ];
+  if (objetivo.tipo === ENTRADA) {
+    const deps = salidasQueDependenDe(orden, movId);
+    if (deps.length > 0) {
+      partes.push(
+        `${deps.length} salida(s) se cobraron con el precio de esta compra y conservan su cargo.`,
+      );
     }
   }
-  if (afectadas.length > 0) {
-    const primera = restantes.find((m) => m.id === afectadas[0].id)!;
-    const detalleUna = `${describirMovimiento(primera)} pasaría de ${costoTxt(afectadas[0].costo_antes, afectadas[0].costo_antes_usd)} a ${costoTxt(afectadas[0].costo_despues, afectadas[0].costo_despues_usd)}`;
-    const otras =
-      afectadas.length > 1 ? ` (y ${afectadas.length - 1} salida(s) más)` : '';
-    return {
-      ...base,
-      permitido: false,
-      codigo_bloqueo: 'CAMBIA_COSTO_FIFO',
-      detalle: `No se puede eliminar: ${detalleUna}${otras}, y ese costo ya se cargó al avión. Elimina primero esa(s) salida(s) —de la más reciente a la más vieja— y luego este movimiento.`,
-      salidas_afectadas: afectadas,
-    };
+  if (cambiaPrecio) {
+    partes.push(
+      precioDespues
+        ? `El último precio de compra pasa de ${precioAntes ? precioConFecha(precioAntes) : 'ninguno'} a ${precioConFecha(precioDespues)}: con él se valúa la existencia y se cobra la siguiente salida.`
+        : `El producto se queda sin ninguna compra con costo (antes ${precioAntes ? precioConFecha(precioAntes) : 'ninguno'}): la existencia se valúa en $0 y la siguiente salida saldría sin cargo.`,
+    );
   }
-
   return {
     ...base,
     permitido: true,
     codigo_bloqueo: null,
-    detalle: `Se puede eliminar ${describirMovimiento(objetivo)}: la existencia pasa de ${cantidadTxt(stockAntes)} a ${cantidadTxt(stockDespues)} y ninguna otra salida cambia de costo.`,
-    salidas_afectadas: [],
+    detalle: partes.join(' '),
   };
 }

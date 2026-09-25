@@ -6,8 +6,9 @@ import { ExpirationsModule } from '../expirations/expirations.module';
 import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
 // Hoja "inventario" del Balance general (tiendita, 30-ago): el resumen por
-// ítem lo calcula InventoryService (FIFO fuente única). Sin ciclo:
-// InventoryModule solo importa PyservicesModule.
+// ítem lo calcula InventoryService (fuente única del cardex). Sin ciclo:
+// InventoryModule no importa AircraftModule (sus imports: Pyservices,
+// Realtime, Configuracion y TipoCambio).
 import { InventoryModule } from '../inventory/inventory.module';
 
 @Module({

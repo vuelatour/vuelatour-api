@@ -39,8 +39,9 @@ export const CONFIG_PAYWISE_COMISION_PCT = 'paywise_comision_pct';
 export const PAYWISE_COMISION_PCT_DEFAULT = 8.857;
 /**
  * MARGEN DE LA TIENDA VuelaTour (25-sep-2026, migración 20260925000001): %
- * que se suma al costo FIFO cuando una SALIDA de bodega a un avión no trae
- * precio de venta (25 = el avión paga costo + 25 %; esa diferencia es la
+ * que se suma al ÚLTIMO PRECIO DE COMPRA (desde el API 0.0.36; antes el
+ * costo FIFO) cuando una SALIDA de bodega a un avión no trae precio de venta
+ * (25 = el avión paga ese precio + 25 %; esa diferencia es la
  * utilidad de VuelaTour). 0 = las salidas sin precio van a costo. Rango
  * 0–100 (el PATCH lo valida). Aplica a las salidas NUEVAS. Un solo número:
  * el default vive en `inventario-cardex.util.ts#MARGEN_VENTA_PCT_DEFAULT`.

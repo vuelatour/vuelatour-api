@@ -789,11 +789,19 @@ export interface BalanceAvionGastoFilaPayload {
    */
   matricula?: string | null;
   /** Movimiento de cardex ligado (solo hoja "refacciones", 29-ago): el
-   *  GENERAL lo usa para el costo FIFO; pyservices lo ignora. */
+   *  GENERAL lo usa para el costo de la salida; pyservices lo ignora. */
   inventario_movimiento_id?: string | null;
-  /** Solo hoja "refacciones" del GENERAL (29-ago): costo FIFO de la salida
-   *  y VENTA al avión (= monto del gasto). pyservices pinta GANANCIA =
-   *  venta − costo (0 mientras la salida se cargue a costo). */
+  /**
+   * INTERNO (solo hoja "refacciones", 25-sep-2026, API 0.0.36): `tc_gasto`
+   * del gasto de ESTA fila, adjuntado por índice junto a
+   * `inventario_movimiento_id`. El GENERAL convierte el costo de la salida
+   * con el MISMO T.C. con que la fila convirtió la venta (este, o el
+   * promedio del libro). pyservices lo ignora (`extra="ignore"`).
+   */
+  tc_gasto?: number | null;
+  /** Solo hoja "refacciones" del GENERAL (29-ago): costo de la salida (el
+   *  guardado en su fila: último precio de compra) y VENTA al avión (= monto
+   *  del gasto). pyservices pinta GANANCIA = venta − costo. */
   costo_mxn?: number | null;
   venta_mxn?: number | null;
 }
@@ -872,7 +880,8 @@ export interface BalanceGeneralResumenFilaPayload {
 /**
  * Fila del bloque POR ÍTEM de la hoja "inventario" del Balance GENERAL
  * (tiendita, 30-ago-2026). EXISTENCIA y VALOR A COSTO son A HOY (todo el
- * cardex FIFO), no una foto al corte del periodo; el resto es del periodo.
+ * cardex; desde el API 0.0.36 existencia × último precio de compra al T.C.
+ * oficial de hoy), no una foto al corte del periodo; el resto es del periodo.
  * null = celda vacía (sin actividad de ese tipo), nunca un 0 falso.
  */
 export interface BalanceInventarioItemFilaPayload {
@@ -906,7 +915,7 @@ export interface BalanceInventarioItemFilaPayload {
   salidas_cant: number | null;
   /** Σ venta de las salidas CON precio (lo cargado a los aviones). */
   vendido_mxn: number | null;
-  /** vendido − costo FIFO consumido por esas salidas. */
+  /** vendido − costo de esas salidas (en pesos, T.C. del día de la venta). */
   utilidad_mxn: number | null;
   /**
    * ADITIVO (25-sep-2026, tienda VuelaTour): Σ venta en DÓLARES de las
@@ -920,6 +929,12 @@ export interface BalanceInventarioItemFilaPayload {
   ventas_sin_utilidad: number;
   /** Matrículas a las que se aplicó en el periodo (únicas, ' + '). */
   matriculas: string | null;
+  /**
+   * ADITIVOS (0.0.36): el USD ORIGINAL de las ventas USD-sobre-USD que YA
+   * cuentan en pesos (dato secundario; pyservices no los pinta).
+   */
+  vendido_usd_original?: number | null;
+  utilidad_usd_original?: number | null;
 }
 
 /** Hoja "inventario" del Balance GENERAL (tiendita): bloque por ítem +
@@ -944,8 +959,19 @@ export interface BalanceHojaInventarioPayload {
   total_utilidad_usd: number | null;
   /** ADITIVO: filas con `ventas_sin_utilidad > 0` (nota roja bajo la tabla). */
   filas_utilidad_incompleta: number;
-  /** ADITIVO: margen vigente de la tienda (% sobre el costo FIFO) para la nota. */
+  /** ADITIVO: margen vigente de la tienda (% sobre el último precio de compra) para la nota. */
   margen_venta_pct: number | null;
+  /**
+   * ADITIVOS (0.0.36): T.C. oficial de HOY con que se valúa la existencia
+   * (null = sin dato) y la regla de costo ('ULTIMO_PRECIO'; ausente = API
+   * previo, FIFO). pyservices cambia sus notas con ellos.
+   */
+  tc_hoy?: {
+    tc: number;
+    fecha_dato: string | null;
+    fuente: string | null;
+  } | null;
+  regla_costo?: string | null;
 }
 
 /**
@@ -973,7 +999,7 @@ export interface BalanceGeneralPayload {
   gastos_empresa?: BalanceAvionHojaGastosPayload;
   /**
    * Hoja "inventario" (tiendita, 30-ago-2026): resumen POR ÍTEM del periodo
-   * (InventoryService.resumenTiendita — mismo FIFO del cardex, cero cálculo
+   * (InventoryService.resumenTiendita — misma fuente del cardex, cero cálculo
    * paralelo). Sustituye a la hoja "refacciones" SOLO en el render del
    * general (su detalle de salidas pasa a ser el bloque 2 de esta hoja); el
    * libro INDIVIDUAL conserva la suya. Opcional por skew: un py viejo lo
@@ -1448,7 +1474,10 @@ export interface CotizacionInternaPdfRequest {
    * dos. null en externos (su ficha ajena va en `avion_externo`) y sin
    * avión asignado. pyservices arma el texto «matrícula · modelo».
    */
-  aeronave_utilizada: { matricula: string | null; modelo: string | null } | null;
+  aeronave_utilizada: {
+    matricula: string | null;
+    modelo: string | null;
+  } | null;
   /** ⚠ el avión cotizado y el utilizado NO son el mismo (comparado por id). */
   aeronave_cotizada_vs_utilizada_difiere: boolean;
   /** Vuelo cubierto por externo: "Modelo · Matrícula" (+ operador). */
@@ -2032,12 +2061,12 @@ export interface CardexLibroSalidaPayload {
   fecha: string;
   cantidad: number;
   descripcion: string;
-  /** Precio al que se vendió (o el costo FIFO si la salida fue "a costo"). */
+  /** Precio al que se vendió (o el costo si la salida fue "a costo"). */
   venta_unitaria: number | null;
   venta_total: number | null;
   /** Stock corriente DESPUÉS de la salida. */
   remanente: number;
-  /** Venta total MXN − costo FIFO MXN de las capas consumidas. */
+  /** Venta total MXN − costo MXN de la salida (último precio de compra). */
   ganancia: number | null;
   /** Matrícula del avión, 'FLOTA' en salidas para toda la flota. */
   vendido_a: string;
@@ -2052,6 +2081,11 @@ export interface CardexLibroPayload {
   generado?: string | null;
   /** Moneda de TODOS los montos del libro (hoy siempre 'MXN'). */
   moneda: string;
+  /**
+   * ADITIVO (0.0.36): nota del subtítulo — de qué T.C. salen los pesos y
+   * cuál es el costo. pyservices viejo la ignora.
+   */
+  nota?: string | null;
   entradas: CardexLibroEntradaPayload[];
   salidas: CardexLibroSalidaPayload[];
   total_compra: number;

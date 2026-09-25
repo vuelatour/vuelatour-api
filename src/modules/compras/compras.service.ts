@@ -995,7 +995,21 @@ export class ComprasService {
         const final = l.costo_unitario_final;
         if (l.inventario_movimiento_id && l.movimiento) {
           // Recosteo de la ENTRADA existente (update directo: no hay
-          // "editar movimiento" en InventoryService).
+          // "editar movimiento" en InventoryService). Las SALIDAS ya
+          // registradas conservan su costo (está guardado en su fila, regla
+          // de costo del 25-sep-2026); cambia el valorizado y las siguientes.
+          // T.C. en USD (API 0.0.36): el de la compra; si no trae, el que YA
+          // tiene la entrada; si tampoco, el oficial del día de la compra
+          // (misma fuente que las cotizaciones). Antes se escribía `tc` a
+          // secas y el recosteo de una compra sin T.C. BORRABA el de la
+          // entrada.
+          const tcUsd =
+            compra.moneda === 'MXN'
+              ? tc
+              : (tc ??
+                tcDe(l.movimiento.tc_usd_mxn) ??
+                (await this.inventory.tcOficialDe(fecha))?.tc ??
+                null);
           const patch =
             compra.moneda === 'MXN'
               ? {
@@ -1009,7 +1023,7 @@ export class ComprasService {
                   moneda: 'USD',
                   costo_unitario_usd: final,
                   costo_unitario_mxn: null,
-                  tc_usd_mxn: tc,
+                  tc_usd_mxn: tcUsd,
                   updated_by: userId,
                 };
           const { error } = await svc
@@ -1046,8 +1060,8 @@ export class ComprasService {
               : {
                   costo_unitario_usd: final,
                   // ENTRADA en USD con TC conocido: createMovimiento lo
-                  // conserva para que el cardex exprese la capa en pesos
-                  // reales (costoUnitarioMxnDe usa usd × tc).
+                  // conserva; sin él, createMovimiento le pone el T.C.
+                  // oficial del día de la compra (API 0.0.36).
                   ...(tc ? { tc_usd_mxn: tc } : {}),
                 }),
             proveedor_id: compra.proveedor_id ?? undefined,

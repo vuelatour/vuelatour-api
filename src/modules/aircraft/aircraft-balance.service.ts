@@ -55,6 +55,12 @@ import {
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 import { InventoryService } from '../inventory/inventory.service';
+// Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
+// puro, con spec; el costo sale del util del inventario (fuente única).
+import {
+  adjuntarLigasRefacciones,
+  costoMxnDeFilaRefaccion,
+} from './refacciones-costo.util';
 import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
@@ -464,7 +470,7 @@ export class AircraftBalanceService {
    * cada avión; 1-sep-2026: antes "otros gastos" — los
    * renombres son SOLO del renderer del general, los campos del payload
    * no cambian), inventario (tiendita, 30-ago: resumen por ítem del
-   * periodo + detalle de salidas con costo FIFO vs venta al avión;
+   * periodo + detalle de salidas con su costo vs venta al avión;
    * sustituye a la antigua hoja refacciones del general), balance
    * (bloques por avión) y pendientes. Desde el 29-ago el RENDERER del
    * general ya no pinta las hojas combustible / Gastos Indirectos /
@@ -634,11 +640,11 @@ export class AircraftBalanceService {
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
     registrar(await this.buildPayload(null, d, h, memoTc), null, false);
     // Hoja "refacciones" del GENERAL (29-ago): cada fila se completa con el
-    // costo FIFO del movimiento de cardex ligado y la venta al avión (el
-    // libro individual pinta la hoja sin esas columnas).
+    // costo de la salida de cardex ligada (el guardado en su fila) y la venta
+    // al avión (el libro individual pinta la hoja sin esas columnas).
     await this.llenarCostoVentaRefacciones(libros);
     // Hoja "inventario" del GENERAL (tiendita, 30-ago): resumen POR ÍTEM del
-    // periodo (FIFO fuente única de InventoryService). En el render del
+    // periodo (fuente única de InventoryService). En el render del
     // general SUSTITUYE a la hoja "refacciones" (cuyo detalle de salidas pasa
     // a ser su bloque 2); `consolidado.refacciones` se sigue mandando: lo usa
     // ese bloque 2, la cascada de "balance" y el libro individual.
@@ -770,7 +776,7 @@ export class AircraftBalanceService {
       totales: totalesFlota,
       gastos_indirectos: hojaFlota((p) => p.gastos_indirectos),
       // Hoja "refacciones" (29-ago): salidas de inventario de toda la flota,
-      // con costo FIFO vs venta al avión por fila (llenarCostoVentaRefacciones).
+      // con su costo vs venta al avión por fila (llenarCostoVentaRefacciones).
       refacciones: hojaFlota(
         (p) =>
           p.refacciones ?? { filas: [], total_mxn: 0, usd: 0, usd_hr: null },
@@ -3149,9 +3155,11 @@ export class AircraftBalanceService {
       'Gastos Indirectos',
       pendientes,
     );
-    // Hoja "refacciones": mismo ledger + el id del movimiento de cardex por
-    // fila (mismo orden estable por fecha que buildHoja — patrón de los
-    // litros de combustible): el GENERAL lo usa para el costo FIFO.
+    // Hoja "refacciones": mismo ledger + el id del movimiento de cardex y
+    // el `tc_gasto` de SU gasto por fila (mismo orden estable por fecha que
+    // buildHoja — patrón de los litros de combustible): el GENERAL convierte
+    // el costo de la salida con el MISMO T.C. con que la fila convirtió la
+    // venta (25-sep-2026).
     const hojaRefaccionesBase = this.buildHoja(
       filasRefacciones,
       tcPromedio,
@@ -3159,16 +3167,12 @@ export class AircraftBalanceService {
       'refacciones',
       pendientes,
     );
-    const refaccionesOrdenadas = [...filasRefacciones].sort((a, b) =>
-      (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? ''),
-    );
     const hojaRefacciones = {
       ...hojaRefaccionesBase,
-      filas: hojaRefaccionesBase.filas.map((f, i) => ({
-        ...f,
-        inventario_movimiento_id:
-          refaccionesOrdenadas[i]?.inventario_movimiento_id ?? null,
-      })),
+      filas: adjuntarLigasRefacciones(
+        hojaRefaccionesBase.filas,
+        filasRefacciones,
+      ),
     };
     // Misma pestaña que `gastos_indirectos` en el individual (2-sep-2026);
     // la lista viaja aparte para "repartidos a aviones" del general.
@@ -3550,16 +3554,20 @@ export class AircraftBalanceService {
 
   /**
    * Hoja "refacciones" del GENERAL (29-ago): completa cada fila con el
-   * COSTO FIFO del movimiento de cardex ligado y la VENTA al avión (= el
-   * monto del gasto, ya en MXN en la fila); pyservices pinta GANANCIA =
-   * venta − costo (0 mientras la salida se cargue a costo — aún sin precio
-   * de venta). Solo el general las lleva; el libro individual pinta la
-   * hoja sin estas columnas. Conversión del costo con la MISMA cadena que
-   * la venta de la fila (moneda del movimiento; USD × tc del movimiento ??
-   * TC promedio del libro); sin ningún TC el costo queda VACÍO — jamás un
-   * número falso. Una salida para TODA LA FLOTA (para_flota) se prorrateó
-   * 1/N entre los aviones activos: su costo sigue la MISMA proporción del
-   * monto de cada gasto ligado (Σ partes == costo de la salida).
+   * COSTO de la salida de cardex ligada (el GUARDADO en su fila: último
+   * precio de compra — `costoDeSalida`, fuente única del inventario) y la
+   * VENTA al avión (= el monto del gasto, ya en MXN en la fila); pyservices
+   * pinta GANANCIA = venta − costo. Solo el general las lleva; el libro
+   * individual pinta la hoja sin estas columnas. Conversión del costo con el
+   * MISMO T.C. con que la fila convirtió la VENTA (25-sep-2026: el
+   * `tc_gasto` de SU gasto, adjuntado por índice, o el TC promedio del
+   * libro; antes el `tc_usd_mxn` del movimiento, que hoy da idéntico en las
+   * 13 salidas históricas y que la migración 20260925000003 cambiaría);
+   * sin ningún TC el costo queda VACÍO — jamás un número falso. Una salida
+   * para TODA LA FLOTA (para_flota) se prorrateó 1/N entre los aviones
+   * activos: su costo sigue la MISMA proporción del monto de cada gasto
+   * ligado (Σ partes == costo de la salida). Lógica pura en
+   * `refacciones-costo.util.ts` (con spec).
    */
   private async llenarCostoVentaRefacciones(
     libros: BalanceAvionPayload[],
@@ -3615,28 +3623,21 @@ export class AircraftBalanceService {
         // VENTA al avión = el monto del gasto (la fila ya lo trae en MXN).
         f.venta_mxn = f.monto_mxn;
         if (!mov || !movId) continue;
-        const cantidad = num(mov.cantidad) ?? 0;
-        const enMxn =
-          mov.moneda === 'MXN' && num(mov.costo_unitario_mxn) != null;
-        let costoTotalMxn: number | null;
-        if (enMxn) {
-          costoTotalMxn = round2(cantidad * (num(mov.costo_unitario_mxn) ?? 0));
-        } else {
-          const costoUsd = cantidad * (num(mov.costo_unitario_usd) ?? 0);
-          const tc = pos(mov.tc_usd_mxn) ?? p.tc_promedio;
-          costoTotalMxn = tc != null ? round2(costoUsd * tc) : null;
-        }
-        if (costoTotalMxn == null) continue; // sin TC: costo vacío
-        if (mov.para_flota === true) {
-          const total = sumaMontoPorMov.get(movId) ?? 0;
-          const nativo = f.monto_original ?? f.monto_mxn;
-          f.costo_mxn =
-            total > 0 && nativo != null
-              ? round2((costoTotalMxn * nativo) / total)
-              : null;
-        } else {
-          f.costo_mxn = costoTotalMxn;
-        }
+        const costo = costoMxnDeFilaRefaccion({
+          mov: {
+            cantidad: num(mov.cantidad) ?? 0,
+            moneda: typeof mov.moneda === 'string' ? mov.moneda : null,
+            costo_unitario_usd: num(mov.costo_unitario_usd) ?? 0,
+            costo_unitario_mxn: num(mov.costo_unitario_mxn),
+            tc_usd_mxn: num(mov.tc_usd_mxn),
+            para_flota: mov.para_flota,
+          },
+          fila: f,
+          tcPromedio: p.tc_promedio,
+          sumaMontoFlota: sumaMontoPorMov.get(movId) ?? 0,
+        });
+        if (costo === undefined) continue; // sin TC: costo vacío
+        f.costo_mxn = costo;
       }
     }
   }

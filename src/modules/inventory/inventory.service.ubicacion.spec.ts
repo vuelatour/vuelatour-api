@@ -284,7 +284,9 @@ const ITEMS = (): Fila[] => [
   },
 ];
 
-function armar(o: Opciones & { tablas?: Record<string, Fila[]> } = {}) {
+function armar(
+  o: Opciones & { tablas?: Record<string, Fila[]>; tcHoy?: number } = {},
+) {
   const sinCol = (rows: Fila[]) =>
     o.migracion === false
       ? rows.map((r) => {
@@ -309,11 +311,26 @@ function armar(o: Opciones & { tablas?: Record<string, Fila[]> } = {}) {
       return Promise.resolve(Buffer.from('xlsx'));
     },
   };
+  // T.C. oficial fijo (TipoCambioService falso) cuando el caso lo pide.
+  const tipoCambio =
+    o.tcHoy != null
+      ? {
+          oficialDetallePara: (fecha: string) =>
+            Promise.resolve({
+              tc: o.tcHoy,
+              fecha_dato: fecha,
+              fuente: 'OPEN_ER_API',
+            }),
+        }
+      : undefined;
   const svc = new InventoryService(
     {
       service: { from: (t: string) => fake.from(t) },
     } as unknown as SupabaseService,
     pyservices as never,
+    undefined,
+    undefined,
+    tipoCambio as never,
   );
   return { svc, fake, tablaXlsx };
 }
@@ -731,7 +748,7 @@ describe('Ubicaciones: lista y Excel', () => {
     });
   });
 
-  it('Excel: Ubicación con «(anterior)» y Utilidad MXN/USD en DOS columnas con totales separados', async () => {
+  it('Excel: Ubicación con «(anterior)», último precio de compra y, SIN T.C., lo de dólares en sus columnas aparte', async () => {
     const mov = (
       id: string,
       item_id: string,
@@ -797,28 +814,107 @@ describe('Ubicaciones: lista y Excel', () => {
       'Stock',
       'Unidad',
       'Mínimo',
-      'Costo FIFO (MXN)',
+      'Último precio de compra',
+      'Moneda',
       'Valor (MXN)',
-      'Valor USD (sin T.C.)',
+      'Vendido (MXN)',
       'Utilidad (MXN)',
-      'Utilidad (USD)',
+      'Valor USD (sin T.C.)',
+      'Utilidad (USD sin T.C.)',
     ]);
     const col = (l: string) => labels.indexOf(l);
     const fila = (nombre: string) => p.filas.find((f) => f[0] === nombre)!;
     expect(fila('Aceite 15W-50')[col('Ubicación')]).toBe(
       'Bodega Cancún (anterior)',
     );
-    expect(fila('Aceite 15W-50')[col('Utilidad (USD)')]).toBe(21.25);
+    expect(fila('Aceite 15W-50')[col('Último precio de compra')]).toBe(21.25);
+    expect(fila('Aceite 15W-50')[col('Moneda')]).toBe('USD');
+    // Sin T.C. de hoy: 6 × 21.25 = 127.50 USD aparte, $0 en pesos.
+    expect(fila('Aceite 15W-50')[col('Valor (MXN)')]).toBe(0);
+    expect(fila('Aceite 15W-50')[col('Valor USD (sin T.C.)')]).toBe(127.5);
+    expect(fila('Aceite 15W-50')[col('Utilidad (USD sin T.C.)')]).toBe(21.25);
     expect(fila('Aceite 15W-50')[col('Utilidad (MXN)')]).toBeNull();
     expect(fila('Balata 66-105')[col('Ubicación')]).toBe('Oficina nueva');
+    expect(fila('Balata 66-105')[col('Último precio de compra')]).toBe(100);
+    expect(fila('Balata 66-105')[col('Moneda')]).toBe('MXN');
+    expect(fila('Balata 66-105')[col('Valor (MXN)')]).toBe(800);
+    expect(fila('Balata 66-105')[col('Vendido (MXN)')]).toBe(250);
     expect(fila('Balata 66-105')[col('Utilidad (MXN)')]).toBe(50);
-    expect(fila('Balata 66-105')[col('Utilidad (USD)')]).toBeNull();
+    expect(fila('Balata 66-105')[col('Utilidad (USD sin T.C.)')]).toBeNull();
     expect(fila('Cubre pitot')[col('Utilidad (MXN)')]).toBeNull();
     // Totales: cada moneda en SU columna, jamás sumadas.
+    expect(p.totales[col('Valor (MXN)')]).toBe(800);
+    expect(p.totales[col('Vendido (MXN)')]).toBe(250);
     expect(p.totales[col('Utilidad (MXN)')]).toBe(50);
-    expect(p.totales[col('Utilidad (USD)')]).toBe(21.25);
+    expect(p.totales[col('Valor USD (sin T.C.)')]).toBe(127.5);
+    expect(p.totales[col('Utilidad (USD sin T.C.)')]).toBe(21.25);
+    expect(p.subtitulo).toContain(
+      'valorizado al último precio de compra (sin T.C. oficial de hoy',
+    );
     expect(p.subtitulo).toContain('utilidad: del 2026-09-01 al 2026-09-30');
     expect(p.subtitulo).toContain('margen vigente 25 %');
+    expect(p.subtitulo).not.toContain('FIFO');
+  });
+
+  it('Excel CON T.C. oficial: todo en pesos y SIN columnas en dólares', async () => {
+    const mov = (
+      id: string,
+      item_id: string,
+      tipo: string,
+      cantidad: number,
+      costo: number,
+      extra: Fila = {},
+    ): Fila => ({
+      id,
+      item_id,
+      tipo,
+      cantidad,
+      costo_unitario_usd: costo,
+      moneda: 'USD',
+      costo_unitario_mxn: null,
+      tc_usd_mxn: 17.0115,
+      venta_unitaria: null,
+      venta_moneda: null,
+      para_flota: false,
+      fecha_movimiento: '2026-09-01',
+      created_at: '2026-09-01T10:00:00Z',
+      ...extra,
+    });
+    const tablas = {
+      inventario_ubicacion: CATALOGO(),
+      inventario_item: ITEMS(),
+      inventario_item_empaque: [],
+      inventario_movimiento: [
+        mov('e1', 'i-aceite', 'ENTRADA', 10, 21.25),
+        mov('s1', 'i-aceite', 'SALIDA', 4, 21.25, {
+          venta_unitaria: 26.5625,
+          venta_moneda: 'USD',
+          tc_usd_mxn: 17.0077,
+          created_at: '2026-09-01T11:00:00Z',
+        }),
+      ],
+    };
+    const { svc, tablaXlsx } = armar({ tablas, tcHoy: 17.6729 });
+    await svc.itemsXlsx(q());
+    const p = tablaXlsx.payload as {
+      subtitulo: string;
+      columnas: Array<{ label: string }>;
+      filas: unknown[][];
+      totales: unknown[];
+    };
+    const labels = p.columnas.map((c) => c.label);
+    expect(labels).not.toContain('Valor USD (sin T.C.)');
+    expect(labels).not.toContain('Utilidad (USD sin T.C.)');
+    const col = (l: string) => labels.indexOf(l);
+    const aceite = p.filas.find((f) => f[0] === 'Aceite 15W-50')!;
+    // 6 × 21.25 = 127.50 USD × 17.6729 (hoy).
+    expect(aceite[col('Valor (MXN)')]).toBe(2253.29);
+    // Venta 106.25 USD y costo 85 USD, los dos al T.C. del día de la venta.
+    expect(aceite[col('Vendido (MXN)')]).toBe(1807.07);
+    expect(aceite[col('Utilidad (MXN)')]).toBe(361.42);
+    expect(p.subtitulo).toContain(
+      'valorizado al último precio de compra con el T.C. oficial de hoy 17.6729 (open.er-api,',
+    );
   });
 });
 
@@ -882,6 +978,21 @@ describe('Detalle del producto: utilidad por salida y ubicación', () => {
       ubicacion_legado: 'Bodega Cancún',
     });
     expect(r.margen_venta_pct).toBe(25);
+    expect(r.regla_costo).toBe('ULTIMO_PRECIO');
+    expect(r.tc_hoy).toBeNull();
+    // Último precio de compra y a cuánto sale la siguiente salida (+25 %).
+    expect(r.precio_vigente).toMatchObject({
+      movimiento_id: 'e1',
+      fecha: '2026-08-29',
+      moneda: 'USD',
+      unitario: 21.25,
+      unitario_mxn_hoy: null,
+      siguiente_salida: {
+        venta_unitaria: 26.5625,
+        moneda: 'USD',
+        origen: 'MARGEN',
+      },
+    });
     expect(r.ventas).toHaveLength(1);
     expect(r.ventas[0]).toMatchObject({
       movimiento_id: 's1',
@@ -912,15 +1023,102 @@ describe('Detalle del producto: utilidad por salida y ubicación', () => {
       costo_ventas_usd: 255,
       utilidad_usd: 63.75,
     });
+    // Sin T.C. en la salida (antes de la migración): nada en pesos, la
+    // utilidad en dólares como respaldo — y la banda la cuenta.
+    expect(r.dinero_generado).toEqual({
+      vendido_mxn: null,
+      costo_mxn: null,
+      utilidad_mxn: null,
+      vendido_usd_original: null,
+      utilidad_usd_original: null,
+      unidades_vendidas: 12,
+      cargado_a_costo_mxn: null,
+      unidades_a_costo: 0,
+      ventas_sin_utilidad: 0,
+      utilidad_usd_sin_tc: 63.75,
+    });
+    expect(r.totales.movimientos_sin_tc).toBe(2);
   });
 
-  it('GET items/:id: la SALIDA trae ganancia_usd junto a ganancia_mxn (ausente)', async () => {
+  it('GET items/:id/resumen CON T.C. (tras la migración): todo en pesos y «Dinero generado» listo para pintar', async () => {
+    const t = tablas();
+    const [entrada, salida] = t.inventario_movimiento as Fila[];
+    entrada.tc_usd_mxn = 17.0115;
+    salida.tc_usd_mxn = 17.0077;
+    const { svc } = armar({ tablas: t, tcHoy: 17.6729 });
+    const r = await svc.resumenItem('i-aceite');
+    expect(r.compras[0]).toMatchObject({
+      precio_unitario: 21.25,
+      moneda: 'USD',
+      tc_usd_mxn: 17.0115,
+      total: 2550,
+      total_mxn: 43379.33,
+      es_precio_vigente: true,
+      sin_tc: false,
+    });
+    expect(r.ventas[0]).toMatchObject({
+      precio_unitario: 26.5625,
+      moneda: 'USD',
+      tc_venta: 17.0077,
+      total_mxn: 5421.2,
+      costo_mxn: 4336.96,
+      ganancia_mxn: 1084.24,
+      ganancia_usd: null,
+      ganancia_usd_original: 63.75,
+      moneda_utilidad: 'MXN',
+    });
+    expect(r.dinero_generado).toEqual({
+      vendido_mxn: 5421.2,
+      costo_mxn: 4336.96,
+      utilidad_mxn: 1084.24,
+      vendido_usd_original: 318.75,
+      utilidad_usd_original: 63.75,
+      unidades_vendidas: 12,
+      cargado_a_costo_mxn: null,
+      unidades_a_costo: 0,
+      ventas_sin_utilidad: 0,
+      utilidad_usd_sin_tc: null,
+    });
+    expect(r.totales).toMatchObject({
+      existencia_actual: 108,
+      // 108 × 21.25 = 2,295 USD × 17.6729 (hoy).
+      valor_costo_mxn: 40559.31,
+      valor_costo_usd: null,
+      valor_sin_tc: false,
+      movimientos_sin_tc: 0,
+      con_movimientos_sin_tc: false,
+    });
+    expect(r.precio_vigente).toMatchObject({ unitario_mxn_hoy: 375.55 });
+    expect(r.tc_hoy).toMatchObject({ tc: 17.6729 });
+  });
+
+  it('GET items/:id: la SALIDA trae ganancia_usd (respaldo) y la ENTRADA cuántas salidas usaron su precio', async () => {
     const { svc } = armar({ tablas: tablas() });
     const d = await svc.getItemDetail('i-aceite');
     const s1 = (d.movimientos as Fila[]).find((m) => m.id === 's1')!;
     expect(s1.ganancia_usd).toBe(63.75);
     expect(s1).not.toHaveProperty('ganancia_mxn');
-    expect(d).toMatchObject({ ubicacion_legado: 'Bodega Cancún' });
+    expect(s1).toMatchObject({
+      tc_venta: null,
+      costo_total: 255,
+      costo_moneda: 'USD',
+      costo_total_mxn: null,
+      ganancia_usd_original: null,
+    });
+    const e1 = (d.movimientos as Fila[]).find((m) => m.id === 'e1')!;
+    expect(e1).toMatchObject({
+      fija_precio: true,
+      es_precio_vigente: true,
+      salidas_con_este_precio: 1,
+      salidas_sin_cargo: 0,
+    });
+    expect(d).toMatchObject({
+      ubicacion_legado: 'Bodega Cancún',
+      regla_costo: 'ULTIMO_PRECIO',
+      stock: 108,
+      valor_usd: 2295,
+      valor_usd_sin_tc: 2295,
+    });
   });
 });
 
@@ -983,5 +1181,59 @@ describe('Ubicaciones: SIN la migración 20260925000001 (API desplegado antes)',
     )!;
     expect(upd.payload).toMatchObject({ ubicacion: 'Estante 2' });
     expect(upd.payload).not.toHaveProperty('ubicacion_id');
+  });
+});
+
+describe('Cardex de inventario en Excel (movimientosXlsx) — invariante 8', () => {
+  it('«Costo unit. (MXN)» NUNCA pinta dólares: USD sin T.C. ⇒ celda vacía; con T.C. ⇒ pesos; MXN tal cual', async () => {
+    const { svc, tablaXlsx } = armar();
+    const base = {
+      tipo: 'ENTRADA',
+      cantidad: 1,
+      item: { nombre: 'Aceite 15W-50', numero_parte: null },
+      aeronave: null,
+      proveedor: null,
+      referencia: null,
+    };
+    jest.spyOn(svc, 'listMovimientos').mockResolvedValue({
+      data: [
+        {
+          ...base,
+          fecha_movimiento: '2026-08-29',
+          costo_unitario_usd: 21.25,
+          moneda: 'USD',
+          costo_unitario_mxn: null,
+          tc_usd_mxn: null,
+        },
+        {
+          ...base,
+          fecha_movimiento: '2026-08-29',
+          costo_unitario_usd: 21.25,
+          moneda: 'USD',
+          costo_unitario_mxn: null,
+          tc_usd_mxn: 17.0115,
+        },
+        {
+          ...base,
+          fecha_movimiento: '2026-07-13',
+          costo_unitario_usd: 94.71,
+          moneda: 'MXN',
+          costo_unitario_mxn: 1658.33,
+          tc_usd_mxn: 17.51,
+        },
+      ],
+    } as never);
+    await svc.movimientosXlsx({ limit: 100, offset: 0 });
+    const p = tablaXlsx.payload as {
+      columnas: Array<{ label: string }>;
+      filas: unknown[][];
+    };
+    const col = p.columnas.map((c) => c.label).indexOf('Costo unit. (MXN)');
+    const usdCol = p.columnas
+      .map((c) => c.label)
+      .indexOf('Costo unit. USD (interno)');
+    expect(p.filas.map((f) => f[col])).toEqual([null, 361.49, 1658.33]);
+    // El USD sin T.C. no se pierde: va en SU columna, rotulada en dólares.
+    expect(p.filas[0][usdCol]).toBe(21.25);
   });
 });

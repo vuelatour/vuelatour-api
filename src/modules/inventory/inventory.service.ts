@@ -50,7 +50,7 @@ import {
   ubicacionDuplicada,
 } from './inventario-ubicacion.util';
 import { normalizarCodigo } from './inventario-codigo.util';
-// Baja de un movimiento de cardex (21-sep-2026): simulación pura del FIFO
+// Baja de un movimiento de cardex (21-sep-2026): simulación pura de la existencia
 // sin el movimiento + códigos estables del 409 (con spec).
 import {
   cantidadTxt,
@@ -69,32 +69,49 @@ import { hoyCancun } from '../../common/fecha-cancun.util';
 import { capturadoAhora } from '../../common/capturado-en.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
-// FIFO, venta/ganancia y agregados del cardex: fuente única (con spec).
+// Costo vigente (último precio de compra), T.C. por movimiento, venta/utilidad
+// y agregados del cardex: fuente única (con spec).
 import {
   agregadosDeItem,
   bloquesCardexDe,
-  buildLayers,
   costoSinTc,
   costoUnitarioMxnDe,
+  costoVigenteEn,
   EPS,
+  etiquetaCargoDeSalida,
+  existenciaDe,
+  fijaPrecio,
   filtroPeriodo,
   margenVentaValido,
   montoGastoDeSalida,
+  precioTxt,
   precioVentaDeSalida,
+  REGLA_COSTO,
   resumenDiarioDe,
   nombreDeJoin,
   round,
+  salidasQueDependenDe,
   sortChrono,
-  statsFromLayers,
+  statsDe,
+  TEXTOS_INVENTARIO,
+  textoEntradaConSalidas,
+  textoSalidaAntesDeLaCompra,
   ventaDeSalida,
-  walkCardex,
   type AgregadosItem,
-  type FifoLayer,
+  type CostoVigente,
   type MovCardex,
   type MovCosto,
   type MovForFifo,
   type OrigenVenta,
+  type StatsInventario,
 } from './inventario-cardex.util';
+// T.C. oficial del día: la MISMA función que usa el cotizador (25-sep-2026).
+import {
+  fuenteTcLegible,
+  TipoCambioService,
+  type TipoCambioDetalle,
+} from '../tipo-cambio/tipo-cambio.service';
+import { redondearA } from '../../common/redondeo.util';
 
 export { MIGRACION_INVENTARIO_UBICACION };
 
@@ -225,12 +242,74 @@ export class InventoryService {
      * OPCIONAL: sin él (specs) o con la fila ausente el margen es 25 %.
      */
     @Optional() private readonly configuracion?: ConfiguracionService,
+    /**
+     * T.C. oficial del día (25-sep-2026, API 0.0.36): la MISMA fuente que las
+     * cotizaciones (`oficialDetallePara`). OPCIONAL: sin él (specs viejos)
+     * todo movimiento nuevo en dólares queda «sin T.C.» como en 0.0.35.
+     */
+    @Optional() private readonly tipoCambio?: TipoCambioService,
   ) {}
 
   private readonly logger = new Logger(InventoryService.name);
 
   /**
-   * Margen vigente de la tienda (% sobre el costo FIFO). Best-effort: una
+   * Memo del T.C. oficial POR FECHA (positivo y negativo, 10 min): la alta
+   * masiva, importar una compra con IA y recibir una compra llaman
+   * `createMovimiento` N veces con la misma fecha, y `oficialDetallePara`
+   * puede ir a la red (6 s de timeout) por cada fecha pasada sin fila. Se
+   * guarda la PROMESA para que dos llamadas simultáneas pidan una sola vez.
+   */
+  private readonly memoTc = new Map<
+    string,
+    { hasta: number; valor: Promise<TipoCambioDetalle | null> }
+  >();
+
+  /**
+   * T.C. oficial del día `fecha` (YYYY-MM-DD, día Cancún) con la MISMA
+   * función y la misma regla de respaldo que el cotizador
+   * (`TipoCambioService.oficialDetallePara`: tabla con ventana de 7 días →
+   * descarga del día / histórico BCE). Redondeado a 4 decimales (la
+   * precisión de `inventario_movimiento.tc_usd_mxn`: lo persistido es lo que
+   * se usó). NUNCA lanza: null = sin dato. Público: lo usa compras.service.
+   */
+  async tcOficialDe(fecha: string): Promise<TipoCambioDetalle | null> {
+    if (!this.tipoCambio || !fecha) return null;
+    const ahora = Date.now();
+    const memo = this.memoTc.get(fecha);
+    if (memo && memo.hasta > ahora) return memo.valor;
+    const tipoCambio = this.tipoCambio;
+    const valor = (async (): Promise<TipoCambioDetalle | null> => {
+      try {
+        const d = await tipoCambio.oficialDetallePara(fecha);
+        const tc = d ? redondearA(Number(d.tc), 4) : NaN;
+        return d && Number.isFinite(tc) && tc > 0 ? { ...d, tc } : null;
+      } catch (e) {
+        this.logger.warn(
+          `T.C. oficial ${fecha} no disponible: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return null;
+      }
+    })();
+    this.memoTc.set(fecha, { hasta: ahora + 10 * 60 * 1000, valor });
+    return valor;
+  }
+
+  /** T.C. oficial de HOY (Cancún) — el del valorizado. */
+  private tcHoy(): Promise<TipoCambioDetalle | null> {
+    return this.tcOficialDe(hoyCancun());
+  }
+
+  /** Existencia + valorizado de un cardex con el T.C. oficial de hoy. */
+  private async statsConTcHoy(
+    movs: MovForFifo[],
+    tcHoy?: TipoCambioDetalle | null,
+  ): Promise<StatsInventario> {
+    const tc = tcHoy === undefined ? await this.tcHoy() : tcHoy;
+    return statsDe(movs, { hoy: hoyCancun(), tcHoy: tc?.tc ?? null });
+  }
+
+  /**
+   * Margen vigente de la tienda (% sobre el último precio de compra). Best-effort: una
    * config caída o fuera de rango responde el default (25) — jamás tira una
    * salida de bodega.
    */
@@ -667,25 +746,29 @@ export class InventoryService {
    * Inventario valorizado en Excel (respeta los filtros del listado:
    * q/categoría/ubicación y desde/hasta para la utilidad).
    *
-   * 25-sep-2026: gana UBICACIÓN (catálogo; el texto legado sale
-   * «Bodega Cancún (anterior)») y UTILIDAD de la tienda en DOS columnas
-   * —pesos y dólares—, con sus totales cada una en su columna: jamás se suman
-   * entre sí (invariante 8).
+   * 25-sep-2026 (API 0.0.36): valorizado al ÚLTIMO PRECIO DE COMPRA con el
+   * T.C. oficial de hoy, y lo vendido / la utilidad en PESOS (cada venta al
+   * T.C. de su día). Las columnas en dólares («Valor USD (sin T.C.)»,
+   * «Utilidad (USD sin T.C.)») solo aparecen si algún producto trae ese dato
+   * (movimientos sin T.C.): cada moneda en su columna con su total, jamás
+   * sumadas (invariante 8).
    */
   async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
-    const { data, valor_total_mxn, valor_total_usd_sin_tc, margen_venta_pct } =
-      await this.listItems({
-        ...filters,
-        limit: 2000,
-        offset: 0,
-      });
+    const {
+      data,
+      valor_total_mxn,
+      valor_total_usd_sin_tc,
+      margen_venta_pct,
+      tc_hoy,
+    } = await this.listItems({
+      ...filters,
+      limit: 2000,
+      offset: 0,
+    });
     const conCatalogo = await this.ubicacionDisponible();
-    // El cliente maneja el inventario en PESOS: el Excel valoriza en MXN (el
-    // USD interno solo alimenta el reparto, no este reporte de bodega). Lo
-    // comprado en dólares SIN TC no tiene monto en pesos: va en su propia
-    // columna, con su propio total (22-sep-2026, invariante 8) — antes se
-    // sumaba en "Valor (MXN)" y el total de la bodega eran dólares rotulados
-    // como pesos.
+    const filasBase = data.map((it) => it as Record<string, unknown>);
+    const hayValorUsd = valor_total_usd_sin_tc !== 0;
+    const hayUtilidadUsd = filasBase.some((x) => x.utilidad_usd != null);
     const columnas: TablaColumnaPayload[] = [
       { label: 'Ítem' },
       { label: 'Código' },
@@ -695,23 +778,32 @@ export class InventoryService {
       { label: 'Stock', tipo: 'numero' },
       { label: 'Unidad' },
       { label: 'Mínimo', tipo: 'numero' },
-      { label: 'Costo FIFO (MXN)', tipo: 'money' },
+      { label: 'Último precio de compra', tipo: 'numero' },
+      { label: 'Moneda' },
       { label: 'Valor (MXN)', tipo: 'money' },
-      { label: 'Valor USD (sin T.C.)', tipo: 'money' },
+      { label: 'Vendido (MXN)', tipo: 'money' },
       { label: 'Utilidad (MXN)', tipo: 'money' },
-      { label: 'Utilidad (USD)', tipo: 'money' },
+      ...(hayValorUsd
+        ? [{ label: 'Valor USD (sin T.C.)', tipo: 'money' as const }]
+        : []),
+      ...(hayUtilidadUsd
+        ? [{ label: 'Utilidad (USD sin T.C.)', tipo: 'money' as const }]
+        : []),
     ];
-    // Totales de utilidad sobre TODO lo exportado, cada moneda en su columna
-    // (null = ningún producto trae utilidad en esa moneda: celda vacía).
+    // Totales sobre TODO lo exportado, cada moneda en su columna (null =
+    // ningún producto trae dato en esa columna: celda vacía).
+    let vendidoMxn: number | null = null;
     let utilidadMxn: number | null = null;
     let utilidadUsd: number | null = null;
-    const filas = data.map((it) => {
-      const x = it as Record<string, unknown>;
+    const filas = filasBase.map((x) => {
       const usdSinTc = Number(x.valor_usd_sin_tc ?? 0);
+      const vMxn = x.ventas_mxn != null ? Number(x.ventas_mxn) : null;
       const uMxn = x.utilidad_mxn != null ? Number(x.utilidad_mxn) : null;
       const uUsd = x.utilidad_usd != null ? Number(x.utilidad_usd) : null;
+      if (vMxn != null) vendidoMxn = round((vendidoMxn ?? 0) + vMxn, 2);
       if (uMxn != null) utilidadMxn = round((utilidadMxn ?? 0) + uMxn, 2);
       if (uUsd != null) utilidadUsd = round((utilidadUsd ?? 0) + uUsd, 2);
+      const vig = x.costo_vigente as CostoVigente | null | undefined;
       return [
         (x.nombre as string) ?? '',
         (x.codigo as string) ?? '',
@@ -721,11 +813,13 @@ export class InventoryService {
         x.stock as number,
         (x.unidad as string) ?? '',
         (x.stock_minimo as number) ?? null,
-        x.costo_fifo_mxn_actual as number,
+        vig ? round(vig.unitario, 4) : null,
+        vig ? vig.moneda : '',
         x.valor_mxn as number,
-        usdSinTc !== 0 ? usdSinTc : null,
+        vMxn,
         uMxn,
-        uUsd,
+        ...(hayValorUsd ? [usdSinTc !== 0 ? usdSinTc : null] : []),
+        ...(hayUtilidadUsd ? [uUsd] : []),
       ];
     });
     const totales = [
@@ -738,10 +832,12 @@ export class InventoryService {
       null,
       null,
       null,
+      null,
       valor_total_mxn,
-      valor_total_usd_sin_tc !== 0 ? valor_total_usd_sin_tc : null,
+      vendidoMxn,
       utilidadMxn,
-      utilidadUsd,
+      ...(hayValorUsd ? [valor_total_usd_sin_tc] : []),
+      ...(hayUtilidadUsd ? [utilidadUsd] : []),
     ];
     const periodo =
       filters.desde && filters.hasta
@@ -751,9 +847,12 @@ export class InventoryService {
           : filters.hasta
             ? `hasta el ${filters.hasta}`
             : 'todo el historial';
+    const valorizado = tc_hoy
+      ? `valorizado al último precio de compra con el T.C. oficial de hoy ${tc_hoy.tc.toFixed(4)} (${fuenteTcLegible(tc_hoy.fuente)}, ${fechaGuion(tc_hoy.fecha_dato)})`
+      : 'valorizado al último precio de compra (sin T.C. oficial de hoy: lo comprado en dólares va aparte)';
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
-      subtitulo: `Generado ${hoyCancun()} · utilidad: ${periodo} · margen vigente ${margen_venta_pct} %`,
+      subtitulo: `Generado ${hoyCancun()} · ${valorizado} · utilidad: ${periodo} · margen vigente ${margen_venta_pct} %`,
       columnas,
       filas,
       totales,
@@ -768,7 +867,8 @@ export class InventoryService {
       offset: 0,
     });
     // El cliente maneja bodega en PESOS: el costo visible va en MXN con el
-    // MISMO criterio de las capas FIFO (costoUnitarioMxnDe); el USD interno
+    // criterio único costoUnitarioMxnDe (en una SALIDA la columna «TC» es el
+    // T.C. oficial del día de la VENTA desde el API 0.0.36); el USD interno
     // (el que alimenta el reparto) se exporta etiquetado para que nadie lo
     // lea como pesos (caso aceites 28-ago-2026: una columna "Costo unit." sin
     // moneda mostraba 94.71 donde el cliente esperaba ~1,658 MXN).
@@ -804,7 +904,11 @@ export class InventoryService {
         item?.nombre ?? '',
         item?.numero_parte ?? '',
         Number(x.cantidad),
-        costo.costo_unitario_usd != null
+        // USD sin T.C.: costoUnitarioMxnDe devuelve el número en DÓLARES
+        // (pesosExactos=false) — pintarlo en la columna «(MXN)» sería un USD
+        // disfrazado de pesos (invariante 8; revisión adversaria 25-sep-2026).
+        // Celda vacía: el USD interno va en su propia columna.
+        costo.costo_unitario_usd != null && !costoSinTc(costo)
           ? round(costoUnitarioMxnDe(costo).mxn, 2)
           : null,
         costo.moneda === 'MXN' ? 'MXN' : 'USD',
@@ -819,7 +923,8 @@ export class InventoryService {
     });
     return this.pyservices.generateTablaXlsx({
       titulo: 'Cardex de inventario',
-      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      // Día Cancún (el ISO de UTC fechaba «mañana» de las 19:00 a las 23:59).
+      subtitulo: `Generado ${hoyCancun()}`,
       columnas,
       filas,
     });
@@ -828,12 +933,12 @@ export class InventoryService {
   /**
    * Cardex de UN ítem en formato LIBRO (réplica del cuaderno del cliente):
    * bloque ENTRADAS | bloque SALIDAS lado a lado, con stock corriente,
-   * venta, remanente y ganancia FIFO por salida. Los bloques son los MISMOS
-   * que consume el detalle del producto en el panel (bloquesCardexDe —
-   * fuente única; pyservices SOLO renderiza). Montos en PESOS con el
-   * criterio único costoUnitarioMxnDe; salida SIN precio de venta = el avión
-   * pagó el costo FIFO, así que el libro la registra "vendida al costo"
-   * (ganancia 0).
+   * venta, remanente y ganancia por salida. Los bloques son los MISMOS que
+   * consume la ficha del producto en el panel (bloquesCardexDe — fuente
+   * única; pyservices SOLO renderiza). Montos en PESOS: compras al T.C.
+   * oficial de su día, ventas al del día de la venta; salida SIN precio de
+   * venta = el avión pagó el costo (último precio de compra), así que el
+   * libro la registra "vendida al costo" (ganancia 0).
    */
   async cardexLibroXlsx(
     itemId: string,
@@ -844,7 +949,12 @@ export class InventoryService {
       unidad?: string | null;
     };
     const movs = await this.movsCardexCompleto(itemId);
-    const { compras, ventas, totales } = bloquesCardexDe(item.nombre, movs);
+    const { compras, ventas, totales } = bloquesCardexDe(
+      item.nombre,
+      movs,
+      undefined,
+      { hoy: hoyCancun() },
+    );
     const entradas: CardexLibroEntradaPayload[] = compras.map((c) => ({
       fecha: c.fecha,
       cantidad: c.cantidad,
@@ -871,13 +981,16 @@ export class InventoryService {
       unidad: item.unidad ?? null,
       generado: hoyCancun(),
       moneda: 'MXN',
+      // ADITIVO (0.0.36): de qué T.C. salen los pesos (pyservices la pinta
+      // en el subtítulo; uno viejo la ignora).
+      nota: TEXTOS_INVENTARIO.notaLibro,
       entradas,
       salidas,
       // Total de COMPRA = solo las ENTRADAS (una devolución o un ajuste
       // regresan valor al stock, pero no son una compra). Total de VENTA =
       // toda la columna del libro: lo vendido con precio + lo que salió a
-      // costo FIFO. Ganancia = la de las salidas con precio (las salidas a
-      // costo aportan 0).
+      // costo. Ganancia = la de las salidas con precio (las salidas a costo
+      // aportan 0).
       total_compra: totales.compras_mxn ?? 0,
       total_venta: round(
         (totales.ventas_mxn ?? 0) + (totales.ventas_a_costo_mxn ?? 0),
@@ -898,15 +1011,16 @@ export class InventoryService {
   /**
    * Resumen "tiendita" para la hoja `inventario` del BALANCE GENERAL
    * (30-ago-2026): una fila POR ÍTEM con su existencia ACTUAL y valor a
-   * costo (stock FIFO A HOY — todo el cardex, no una foto al corte), lo
-   * COMPRADO en el periodo (solo ENTRADAs: una DEVOLUCION/AJUSTE regresa
-   * stock pero no es compra — mismo criterio que el total de compra del
-   * cardex libro), las salidas del periodo, lo VENDIDO a los aviones
-   * (Σ venta de las salidas CON precio — criterio único ventaYGananciaDe),
-   * la utilidad (vendido − costo FIFO consumido) y las matrículas a las que
-   * se aplicó. FUENTES ÚNICAS: buildLayers/statsFromLayers para stock y
-   * valorizado, walkCardex + costoUnitarioMxnDe para los pesos — cero FIFO
-   * paralelo. La consulta trae el historial COMPLETO (el FIFO lo necesita);
+   * costo (existencia × último precio de compra al T.C. oficial de HOY —
+   * todo el cardex, no una foto al corte), lo COMPRADO en el periodo (solo
+   * ENTRADAs: una DEVOLUCION/AJUSTE regresa stock pero no es compra — mismo
+   * criterio que el total de compra del cardex libro), las salidas del
+   * periodo, lo VENDIDO a los aviones (Σ venta de las salidas CON precio al
+   * T.C. del día de la venta — criterio único ventaDeSalida), la utilidad
+   * (vendido − costo de esas salidas) y las matrículas a las que se aplicó.
+   * FUENTES ÚNICAS: statsDe para stock y valorizado, agregadosDeItem para
+   * compras/ventas/utilidad — cero cálculo paralelo. La consulta trae el
+   * historial COMPLETO (existencia y precio vigente lo necesitan);
    * el corte desde/hasta se aplica EN MEMORIA sobre fecha_movimiento
    * (string YYYY-MM-DD, mismo eje que listMovimientos). Solo ítems con
    * actividad en el periodo O con stock/valor vivo; los eliminados con
@@ -922,14 +1036,18 @@ export class InventoryService {
    * eran dólares disfrazados de pesos. Decisión del cliente: verlos en
    * dólares, aparte, en vez de sumarlos como pesos. Los dos campos nuevos son
    * ADITIVOS: un pyservices viejo los ignora y pinta la hoja de siempre.
+   * Desde el API 0.0.36 (T.C. oficial en cada movimiento) las columnas en
+   * dólares quedan vacías y pyservices las apaga solas; `tc_hoy` y
+   * `regla_costo` viajan en la raíz para la nota del valor.
    */
   async resumenTiendita(
     desde: string,
     hasta: string,
   ): Promise<BalanceHojaInventarioPayload> {
-    const [porItem, margen] = await Promise.all([
+    const [porItem, margen, tcHoy] = await Promise.all([
       this.agregadosPorItem(desde, hasta),
       this.margenVentaPct(),
+      this.tcHoy(),
     ]);
     const ids = porItem.map((p) => p.item_id);
     const nombrePorItem = new Map<
@@ -959,7 +1077,10 @@ export class InventoryService {
     const filas: BalanceInventarioItemFilaPayload[] = [];
     const sinTc: string[] = [];
     for (const { item_id: itemId, movs, agregados: a } of porItem) {
-      const stats = statsFromLayers(buildLayers(movs));
+      const stats = statsDe(movs, {
+        hoy: hoyCancun(),
+        tcHoy: tcHoy?.tc ?? null,
+      });
       const actividadPeriodo = movs.some(enPeriodo);
       // `valor_usd_sin_tc` entra a la condición: desde que `valor_mxn` deja
       // fuera las capas USD sin TC, un ítem valorizado SOLO en dólares daría
@@ -1003,10 +1124,15 @@ export class InventoryService {
         salidas_cant: a.salidas_cant,
         vendido_mxn: a.ventas_mxn,
         utilidad_mxn: a.utilidad_mxn,
-        // ADITIVOS (25-sep-2026, tienda): la utilidad en DÓLARES, aparte.
+        // ADITIVOS (25-sep-2026, tienda): la utilidad en DÓLARES, aparte
+        // (solo el RESPALDO de filas sin T.C. desde el API 0.0.36).
         vendido_usd: a.ventas_usd,
         utilidad_usd: a.utilidad_usd,
         ventas_sin_utilidad: a.ventas_sin_utilidad,
+        // ADITIVOS (0.0.36): el USD original de las ventas USD-sobre-USD que
+        // YA cuentan en pesos (pyservices no los pinta).
+        vendido_usd_original: a.ventas_usd_original,
+        utilidad_usd_original: a.utilidad_usd_original,
         matriculas: a.matriculas.length > 0 ? a.matriculas.join(' + ') : null,
       });
     }
@@ -1057,6 +1183,9 @@ export class InventoryService {
       filas_utilidad_incompleta: filas.filter((f) => f.ventas_sin_utilidad > 0)
         .length,
       margen_venta_pct: margen,
+      // ADITIVOS (0.0.36): T.C. del valorizado y la regla de costo.
+      tc_hoy: tcHoy,
+      regla_costo: REGLA_COSTO,
     };
   }
 
@@ -1069,7 +1198,7 @@ export class InventoryService {
    * `para_flota` NO está en la lista base de columnas de movimiento:
    * seleccionarlo explícito (como el cardex libro) o el "FLOTA" de las
    * salidas prorrateadas se perdería en silencio. Lectura paginada hasta
-   * cubrir el count: el FIFO necesita TODO el cardex.
+   * cubrir el count: existencia y precio vigente necesitan TODO el cardex.
    */
   private async agregadosPorItem(
     desde?: string | null,
@@ -1104,10 +1233,13 @@ export class InventoryService {
 
   /**
    * UTILIDAD DE LA TIENDA VuelaTour (25-sep-2026, `GET tienda/resumen`): lo
-   * que se cobró a los aviones menos el costo FIFO de lo que salió, en el
-   * periodo (sin fechas = todo el historial). Pesos y dólares van SEPARADOS
-   * (null = no hubo nada en esa moneda; 0 es 0). Fuente única:
-   * `agregadosPorItem` → `agregadosDeItem` → `ventaDeSalida`.
+   * que se cobró a los aviones menos el costo de lo que salió (último precio
+   * de compra), en el periodo (sin fechas = todo el historial), en PESOS al
+   * T.C. del día de cada venta. Los dólares van SEPARADOS: `utilidad_usd` es
+   * el respaldo de filas sin T.C.; `utilidad_usd_original` el USD de las
+   * ventas USD-sobre-USD que ya cuentan en pesos (dato secundario, jamás
+   * sumado). Fuente única: `agregadosPorItem` → `agregadosDeItem` →
+   * `ventaDeSalida`.
    */
   async tiendaResumen(q: { desde?: string; hasta?: string } = {}) {
     if (q.desde && q.hasta && q.desde > q.hasta) {
@@ -1154,81 +1286,24 @@ export class InventoryService {
       con_entradas_sin_costo: conVentas.some(
         (p) => p.agregados.con_entradas_sin_costo,
       ),
+      // ADITIVOS (0.0.36).
+      ventas_usd_original: suma((a) => a.ventas_usd_original),
+      costo_ventas_usd_original: suma((a) => a.costo_ventas_usd_original),
+      utilidad_usd_original: suma((a) => a.utilidad_usd_original),
+      regla_costo: REGLA_COSTO,
     };
   }
 
-  // ===== Cálculo FIFO =====
-  // El FIFO vive en inventario-cardex.util.ts (fuente única, puro y con
-  // spec); estos delegados conservan las firmas privadas que usa el resto
-  // del servicio.
-
-  /** Orden cronológico estable: fecha_movimiento y, a igualdad, created_at. */
-  private sortChrono<T extends MovForFifo>(movs: T[]): T[] {
-    return sortChrono(movs);
-  }
-
-  /** Capas FIFO restantes tras procesar los movimientos en orden. */
-  private buildLayers(movs: MovForFifo[]): FifoLayer[] {
-    return buildLayers(movs);
-  }
-
-  private statsFromLayers(layers: FifoLayer[]) {
-    return statsFromLayers(layers);
-  }
+  // ===== Cardex =====
+  // Existencia, costo vigente y agregados viven en inventario-cardex.util.ts
+  // (fuente única, puro y con spec).
 
   /**
-   * Consume `qty` de las capas FIFO. Devuelve el costo total en USD (interno)
-   * y en MXN (`mxn` = null si alguna capa consumida no tiene pesos reales);
-   * `todoMxn` = todas las capas consumidas se COMPRARON en pesos — el gasto
-   * de bodega sale entonces en MXN, la moneda operativa del cliente. Lanza
-   * si no alcanza.
-   */
-  private consumeFifo(
-    layers: FifoLayer[],
-    qty: number,
-  ): { usd: number; mxn: number | null; todoMxn: boolean } {
-    const disponible = layers.reduce((s, l) => s + l.qty, 0);
-    if (disponible + EPS < qty) {
-      // Sin nada en existencia el mensaje debe DECIR qué hacer: el stock se
-      // deriva del cardex, así que un ítem recién dado de alta arranca en 0
-      // aunque la pieza ya esté físicamente en la bodega (caso 6 ago 2026).
-      throw new BadRequestException(
-        disponible <= EPS
-          ? 'Este ítem no tiene existencia registrada: captura primero una ENTRADA con la cantidad y su costo (aunque la pieza ya esté en bodega). El stock sale del cardex, no del alta del ítem.'
-          : `Stock insuficiente: disponible ${round(disponible)}, salida solicitada ${qty}.`,
-      );
-    }
-    let need = qty;
-    let usd = 0;
-    let mxn = 0;
-    let pesosExactos = true;
-    let todoMxn = true;
-    for (const layer of layers) {
-      if (need <= EPS) break;
-      const take = Math.min(need, layer.qty);
-      usd += take * layer.cost;
-      mxn += take * layer.costMxn;
-      if (!layer.pesosExactos) pesosExactos = false;
-      if (!layer.enMxn) todoMxn = false;
-      need -= take;
-    }
-    return {
-      usd,
-      mxn: pesosExactos ? mxn : null,
-      todoMxn: todoMxn && pesosExactos,
-    };
-  }
-
-  /** Stock corriente y costo FIFO MXN por movimiento (inventario-cardex.util). */
-  private walkCardex(movs: MovForFifo[]) {
-    return walkCardex(movs);
-  }
-
-  /**
-   * Cardex mínimo del ítem para el FIFO de una SALIDA/corrección de costo.
-   * Paginado hasta cubrir `count` (mismo anti-cap que movsCardexCompleto): con
-   * el tope de 1000 filas de PostgREST una salida nueva consumiría capas de
-   * un cardex incompleto y el costo al avión saldría falso en silencio.
+   * Cardex mínimo del ítem para la existencia y el costo vigente de una
+   * SALIDA nueva. Paginado hasta cubrir `count` (mismo anti-cap que
+   * movsCardexCompleto): con el tope de 1000 filas de PostgREST una salida
+   * nueva leería un cardex incompleto y el costo al avión saldría falso en
+   * silencio.
    */
   private async movsForItem(itemId: string): Promise<MovForFifo[]> {
     return this.todasLasFilas<MovForFifo>((desde, hasta) =>
@@ -1282,26 +1357,29 @@ export class InventoryService {
       Record<string, unknown> & { id: string; stock_minimo: number | null }
     >;
 
-    // Stock + valorizado + ganancia por ítem (un solo barrido del cardex de
-    // los ítems listados). El FIFO corre SIEMPRE sobre todo el cardex;
-    // desde/hasta solo acotan qué compras/ventas SUMAN (sin query =
-    // acumulado histórico).
+    // Stock + valorizado + utilidad por ítem (un solo barrido del cardex de
+    // los ítems listados). Existencia y precio vigente miran SIEMPRE todo el
+    // cardex; desde/hasta solo acotan qué compras/ventas SUMAN (sin query =
+    // acumulado histórico). Valorizado = existencia × último precio de
+    // compra al T.C. oficial de HOY (uno por petición).
     const ids = rows.map((r) => r.id);
-    const [movsByItem, empaquesByItem, margen] = await Promise.all([
+    const [movsByItem, empaquesByItem, margen, tcHoy] = await Promise.all([
       this.movsByItems(ids),
       this.empaquesByItems(ids),
       this.margenVentaPct(),
+      this.tcHoy(),
     ]);
     const enPeriodo = filtroPeriodo(filters.desde, filters.hasta);
+    const hoy = hoyCancun();
     let data = rows.map((r) => {
       const it = this.conUbicacion(r, conCatalogo);
       const movs = movsByItem.get(it.id) ?? [];
-      const stats = statsFromLayers(buildLayers(movs));
+      const stats = statsDe(movs, { hoy, tcHoy: tcHoy?.tc ?? null });
       // UTILIDAD del producto (tienda, 25-sep-2026): la MISMA agregación que
       // la hoja "inventario" del Balance general (agregadosDeItem) — lo que
-      // se cobró a los aviones − costo FIFO de esas salidas; en PESOS y en
-      // DÓLARES por separado (una salida cuenta en una sola moneda); null =
-      // nunca vendió en esa moneda.
+      // se cobró a los aviones − el costo de esas salidas, en PESOS al T.C.
+      // del día de cada venta (los dólares: solo el respaldo sin T.C. y el
+      // USD original como dato secundario); null = nunca vendió.
       const a = agregadosDeItem(movs, enPeriodo);
       return {
         ...it,
@@ -1322,6 +1400,13 @@ export class InventoryService {
         ventas_sin_utilidad: a.ventas_sin_utilidad,
         con_entradas_sin_costo: a.con_entradas_sin_costo,
         con_movimientos_sin_tc: a.con_movimientos_sin_tc,
+        // ADITIVOS (0.0.36).
+        ventas_usd_original: a.ventas_usd_original,
+        costo_ventas_usd_original: a.costo_ventas_usd_original,
+        utilidad_usd_original: a.utilidad_usd_original,
+        ventas_a_costo_mxn: a.ventas_a_costo_mxn,
+        salidas_a_costo_cant: a.salidas_a_costo_cant,
+        movimientos_sin_tc: a.movimientos_sin_tc,
       };
     });
 
@@ -1366,12 +1451,25 @@ export class InventoryService {
         2,
       ),
       margen_venta_pct: margen,
+      // ADITIVOS (0.0.36): T.C. del valorizado, el USD original de las
+      // ventas USD-sobre-USD (dato secundario, jamás sumado a los pesos) y la
+      // regla de costo.
+      tc_hoy: tcHoy,
+      utilidad_total_usd_original: round(
+        data.reduce((s, d) => s + (d.utilidad_usd_original ?? 0), 0),
+        2,
+      ),
+      ventas_total_usd_original: round(
+        data.reduce((s, d) => s + (d.ventas_usd_original ?? 0), 0),
+        2,
+      ),
+      regla_costo: REGLA_COSTO,
     };
   }
 
   /**
    * Cardex de VARIOS ítems en una sola lectura (paginada hasta cubrir el
-   * count: el FIFO necesita el historial completo). Trae venta y para_flota
+   * count: existencia y precio vigente necesitan el historial completo). Trae venta y para_flota
    * para poder agregar ganancia por ítem (agregadosDeItem).
    */
   private async movsByItems(
@@ -1416,7 +1514,10 @@ export class InventoryService {
     );
   }
 
-  /** Detalle del ítem con empaques, cardex completo y stats FIFO. */
+  /**
+   * Detalle del ítem con empaques, cardex completo y stats (existencia y
+   * valorizado al último precio de compra con el T.C. oficial de hoy).
+   */
   async getItemDetail(id: string) {
     const item = await this.findItemConEmpaques(id);
     // para_flota NO está en MOV_COLS: explícito, o el cardex del detalle no
@@ -1435,45 +1536,66 @@ export class InventoryService {
         .range(desde, hasta),
     );
 
-    const stats = statsFromLayers(buildLayers(movs));
+    const stats = await this.statsConTcHoy(movs);
+    const vigenteId = stats.costo_vigente?.movimiento_id ?? null;
     // Por movimiento, ADITIVO: `costo_unitario_mxn_efectivo` (costo unitario
-    // en PESOS con el criterio único costoUnitarioMxnDe — el panel lo pinta
-    // tal cual y ya no convierte monedas por su cuenta; null si la captura
-    // fue USD sin TC: el panel entonces enseña el USD, jamás un "MXN" falso)
-    // y, en las SALIDAs con venta, `ganancia_mxn` (venta total MXN − costo
-    // FIFO MXN de las capas consumidas). El resto de la fila viaja intacto.
-    const walk = walkCardex(movs);
+    // en PESOS con el criterio único costoUnitarioMxnDe — null si la captura
+    // fue USD sin TC: el panel entonces enseña el USD, jamás un "MXN" falso).
+    // ENTRADA: si fija precio, si ES el precio vigente y cuántas salidas se
+    // cobraron con él (el aviso ANTES de «Editar costo»). SALIDA: su costo
+    // (el de la fila), venta y utilidad en pesos al T.C. del día de la venta
+    // (ventaDeSalida). El resto de la fila viaja intacto.
     const salida = TipoMovimientoInventario.SALIDA as string;
+    const entrada = TipoMovimientoInventario.ENTRADA as string;
     const movimientos = movs.map((x) => {
       const costo_unitario_mxn_efectivo =
         x.costo_unitario_usd != null && !costoSinTc(x)
           ? round(costoUnitarioMxnDe(x).mxn, 2)
           : null;
+      if (x.tipo === entrada) {
+        const deps = salidasQueDependenDe(movs, x.id);
+        return {
+          ...x,
+          costo_unitario_mxn_efectivo,
+          fija_precio: fijaPrecio(x),
+          es_precio_vigente: vigenteId != null && x.id === vigenteId,
+          salidas_con_este_precio: deps.length,
+          salidas_sin_cargo: deps.filter((d) => d.sin_cargo).length,
+        };
+      }
       if (x.tipo !== salida) return { ...x, costo_unitario_mxn_efectivo };
-      // Utilidad de la salida en UNA moneda (ventaDeSalida): `ganancia_mxn`
-      // como siempre y, ADITIVO (25-sep-2026), `ganancia_usd` cuando la
-      // venta y el costo están en dólares sin T.C.
-      const { gananciaMxn, gananciaUsd } = ventaDeSalida(x, walk.get(x.id));
+      const v = ventaDeSalida(x);
       return {
         ...x,
         costo_unitario_mxn_efectivo,
-        ...(gananciaMxn != null ? { ganancia_mxn: gananciaMxn } : {}),
-        ...(gananciaUsd != null ? { ganancia_usd: gananciaUsd } : {}),
+        tc_venta: v.tcVenta,
+        costo_total: v.costo.total,
+        costo_moneda: v.costo.moneda,
+        costo_total_mxn: v.costo.total_mxn,
+        venta_total_mxn: v.ventaTotalMxn,
+        ...(v.gananciaMxn != null ? { ganancia_mxn: v.gananciaMxn } : {}),
+        // Respaldo sin T.C. (compat 0.0.35): utilidad en dólares.
+        ...(v.gananciaUsd != null ? { ganancia_usd: v.gananciaUsd } : {}),
+        ganancia_usd_original: v.gananciaUsdOriginal,
       };
     });
-    return { ...item, ...stats, movimientos };
+    return { ...item, ...stats, regla_costo: REGLA_COSTO, movimientos };
   }
 
   /**
-   * Resumen del PRODUCTO para el detalle del panel (pedido del cliente
-   * 4-sep-2026, réplica de su Excel): bloques COMPRAS | VENTAS
-   * (bloquesCardexDe — los MISMOS del cardex formato libro en Excel),
-   * RESUMEN por día (resumenDiarioDe: existencia al cierre del día y
-   * utilidad del día) y totales (agregadosDeItem — el mismo número que el
-   * listado y que la hoja "inventario" del Balance general). Todo en PESOS.
-   * `desde`/`hasta` (YYYY-MM-DD, día Cancún) acotan qué filas se listan y
-   * qué suma; el FIFO corre SIEMPRE sobre todo el cardex. Ligas a la compra
-   * (compra_linea) y al gasto del avión (gasto.inventario_movimiento_id;
+   * FICHA DEL PRODUCTO (pedido del cliente 4-sep-2026, réplica de su Excel;
+   * simplificada el 25-sep-2026: «Solo necesitamos el apartado de Compras |
+   * Ventas | Resumen de ventas»): bloques COMPRAS | VENTAS (bloquesCardexDe
+   * — los MISMOS del cardex formato libro en Excel), RESUMEN por día
+   * (resumenDiarioDe), totales (agregadosDeItem — el mismo número que el
+   * listado y que la hoja "inventario" del Balance general), el precio
+   * vigente (último precio de compra y a cuánto se cobra la siguiente
+   * salida) y `dinero_generado` (lo vendido y la utilidad del producto, que
+   * el panel pinta TAL CUAL — no suma nada). Todo en PESOS: compras al T.C.
+   * oficial de su día, ventas al del día de la venta. `desde`/`hasta`
+   * (YYYY-MM-DD, día Cancún) acotan qué filas se listan y qué suma;
+   * existencia y precio vigente miran SIEMPRE todo el cardex. Ligas a la
+   * compra (compra_linea) y al gasto del avión (gasto.inventario_movimiento_id;
    * null cuando la salida prorrateó a la flota y nacieron N gastos).
    */
   async resumenItem(
@@ -1493,18 +1615,21 @@ export class InventoryService {
       ubicacion_nombre?: string | null;
       ubicacion_legado?: string | null;
     };
-    const [movs, margen] = await Promise.all([
+    const [movs, margen, tcHoy] = await Promise.all([
       this.movsCardexCompleto(itemId),
       this.margenVentaPct(),
+      this.tcHoy(),
     ]);
+    const hoy = hoyCancun();
     const enPeriodo = filtroPeriodo(q.desde, q.hasta);
     const { compras, ventas, totales } = bloquesCardexDe(
       item.nombre,
       movs,
       enPeriodo,
+      { hoy },
     );
     const resumen_diario = resumenDiarioDe(movs, enPeriodo);
-    const stats = statsFromLayers(buildLayers(movs));
+    const stats = statsDe(movs, { hoy, tcHoy: tcHoy?.tc ?? null });
     const idsDe = (rows: Array<{ movimiento_id: string | null }>) =>
       rows
         .map((r) => r.movimiento_id)
@@ -1513,6 +1638,19 @@ export class InventoryService {
       this.compraIdPorMovimiento(idsDe(compras)),
       this.gastoIdPorMovimiento(idsDe(ventas)),
     ]);
+    // Precio vigente y a cuánto se cobraría la siguiente salida SIN precio
+    // capturado (la MISMA precedencia de createMovimiento: precio del
+    // producto → último precio + margen → a costo).
+    const vig = stats.costo_vigente;
+    const siguiente = vig
+      ? precioVentaDeSalida({
+          itemPrecio: item.precio_venta ?? null,
+          itemMoneda: item.precio_venta_moneda ?? null,
+          costoUnitario: vig.unitario,
+          monedaSalida: vig.moneda,
+          margenPct: margen,
+        })
+      : null;
     return {
       item: {
         id: item.id,
@@ -1534,13 +1672,29 @@ export class InventoryService {
             }
           : {}),
       },
-      // Margen vigente de la tienda (textos del detalle).
+      // ADITIVO (0.0.36): el panel quita la palabra «FIFO» con ella.
+      regla_costo: REGLA_COSTO,
+      // Margen vigente de la tienda (textos de la ficha).
       margen_venta_pct: margen,
       moneda: 'MXN' as const,
       periodo:
         q.desde || q.hasta
           ? { desde: q.desde ?? null, hasta: q.hasta ?? null }
           : null,
+      // ADITIVO (0.0.36): T.C. oficial de hoy (el del valorizado); null = sin dato.
+      tc_hoy: tcHoy,
+      // ADITIVO (0.0.36): último precio de compra (null = ninguna compra con costo).
+      precio_vigente: vig
+        ? {
+            ...vig,
+            unitario_mxn_hoy: stats.costo_vigente_mxn,
+            siguiente_salida: {
+              venta_unitaria: siguiente?.ventaUnitaria ?? null,
+              moneda: siguiente?.ventaMoneda ?? null,
+              origen: siguiente?.origen ?? 'A_COSTO',
+            },
+          }
+        : null,
       compras: compras.map((c) => ({
         ...c,
         compra_id: c.movimiento_id
@@ -1558,12 +1712,27 @@ export class InventoryService {
         ...totales,
         existencia_actual: stats.stock,
         valor_costo_mxn: stats.valor_mxn,
-        // ADITIVOS (22-sep-2026): la parte del valorizado que está en dólares
-        // SIN TC ya no entra a `valor_costo_mxn` (invariante 8); viaja aparte
-        // para que el panel la pinte en su moneda en vez de un $0 mudo.
+        // La parte del valorizado que está en dólares SIN TC (solo si no hay
+        // T.C. oficial de hoy) no entra a `valor_costo_mxn` (invariante 8);
+        // viaja aparte para que el panel la pinte en su moneda.
         valor_costo_usd:
           stats.valor_usd_sin_tc !== 0 ? stats.valor_usd_sin_tc : null,
         valor_sin_tc: !stats.pesos_exactos,
+      },
+      // ADITIVO (0.0.36): «Dinero generado por este producto» — lo arma el
+      // API desde agregadosDeItem (el panel NO suma). Pesos al T.C. del día
+      // de cada venta; el USD original, dato secundario.
+      dinero_generado: {
+        vendido_mxn: totales.ventas_mxn,
+        costo_mxn: totales.costo_ventas_mxn,
+        utilidad_mxn: totales.utilidad_mxn,
+        vendido_usd_original: totales.ventas_usd_original,
+        utilidad_usd_original: totales.utilidad_usd_original,
+        unidades_vendidas: totales.unidades_vendidas ?? 0,
+        cargado_a_costo_mxn: totales.ventas_a_costo_mxn,
+        unidades_a_costo: totales.salidas_a_costo_cant ?? 0,
+        ventas_sin_utilidad: totales.ventas_sin_utilidad,
+        utilidad_usd_sin_tc: totales.utilidad_usd,
       },
     };
   }
@@ -1623,9 +1792,9 @@ export class InventoryService {
 
   /**
    * Cardex COMPLETO de un ítem con joins y `para_flota` (lo que necesitan
-   * los bloques y el Excel formato libro). Pagina hasta cubrir `count`: el
-   * FIFO necesita TODO el historial y una respuesta cortada por el tope de
-   * PostgREST daría stock y costos falsos en silencio.
+   * los bloques y el Excel formato libro). Pagina hasta cubrir `count`:
+   * existencia y precio vigente necesitan TODO el historial y una respuesta
+   * cortada por el tope de PostgREST daría stock y costos falsos en silencio.
    */
   private async movsCardexCompleto(itemId: string): Promise<MovCardex[]> {
     return this.todasLasFilas<MovCardex>((desde, hasta) =>
@@ -2264,34 +2433,50 @@ export class InventoryService {
   // ===== Movimientos (cardex) =====
 
   /**
-   * Resuelve el costo de un movimiento que APILA capa (ENTRADA / DEVOLUCION /
-   * AJUSTE) según la moneda de captura. FUENTE ÚNICA: la usan
-   * createMovimiento y updateCostoEntrada — no duplicar el criterio.
-   * MXN exige costo_unitario_mxn + tc_usd_mxn (> 0) y deriva el USD interno;
-   * USD exige costo_unitario_usd, costoMxn queda null (la captura fue en
-   * dólares) y el TC se conserva si viene, para expresar la capa en pesos
-   * reales (costoUnitarioMxnDe = usd × tc).
+   * Resuelve el costo de un movimiento que SUMA existencia (ENTRADA /
+   * DEVOLUCION / AJUSTE) según la moneda de captura, con su T.C. FUENTE
+   * ÚNICA: la usan createMovimiento y updateCostoEntrada — no duplicar el
+   * criterio.
+   *
+   * T.C. (25-sep-2026, API 0.0.36 — «que sea los mismos que usan en las
+   * cotizaciones»): el capturado (> 0) gana; si no viene, en USD se conserva
+   * el de la fila (`tcFila`, solo al corregir un costo) y si tampoco, el
+   * T.C. OFICIAL del día del movimiento (`tcOficialDe(fecha)`, la función del
+   * cotizador); en MXN el oficial de su fecha, y sin ninguno ⇒ 400. Todo T.C.
+   * que se escribe pasa por redondearA(tc, 4) (la precisión de la columna):
+   * lo persistido es lo que se usó para derivar el USD interno.
    */
-  private resolverCostoEntrada(dto: {
-    moneda?: 'MXN' | 'USD';
-    costo_unitario_usd?: number;
-    costo_unitario_mxn?: number;
-    tc_usd_mxn?: number;
-  }): {
+  private async resolverCostoEntrada(
+    dto: {
+      moneda?: 'MXN' | 'USD';
+      costo_unitario_usd?: number;
+      costo_unitario_mxn?: number;
+      tc_usd_mxn?: number;
+    },
+    fecha: string,
+    tcFila: number | null = null,
+  ): Promise<{
     costoUnitario: number;
     moneda: 'MXN' | 'USD';
     costoMxn: number | null;
     tc: number | null;
-  } {
+  }> {
     const moneda: 'MXN' | 'USD' = dto.moneda ?? 'USD';
+    const tcCapturado =
+      Number(dto.tc_usd_mxn) > 0 ? redondearA(Number(dto.tc_usd_mxn), 4) : null;
     if (moneda === 'MXN') {
-      if (dto.costo_unitario_mxn == null || !(Number(dto.tc_usd_mxn) > 0)) {
+      if (dto.costo_unitario_mxn == null) {
         throw new BadRequestException(
-          'Captura en MXN: se requieren costo_unitario_mxn y tc_usd_mxn (tipo de cambio de la compra).',
+          'Captura en MXN: se requiere costo_unitario_mxn (el tipo de cambio es opcional: vacío = T.C. oficial del día de la compra).',
+        );
+      }
+      const tc = tcCapturado ?? (await this.tcOficialDe(fecha))?.tc ?? null;
+      if (tc == null) {
+        throw new BadRequestException(
+          'Captura en MXN: se requieren costo_unitario_mxn y tc_usd_mxn (tipo de cambio de la compra). No hay T.C. oficial para esa fecha: captúralo a mano.',
         );
       }
       const costoMxn = dto.costo_unitario_mxn;
-      const tc = Number(dto.tc_usd_mxn);
       return { costoUnitario: round(costoMxn / tc, 4), moneda, costoMxn, tc };
     }
     if (dto.costo_unitario_usd == null) {
@@ -2299,11 +2484,14 @@ export class InventoryService {
         'costo_unitario_usd es requerido para ENTRADA, DEVOLUCION y AJUSTE.',
       );
     }
+    const deFila = tcFila != null && tcFila > 0 ? redondearA(tcFila, 4) : null;
+    const tc =
+      tcCapturado ?? deFila ?? (await this.tcOficialDe(fecha))?.tc ?? null;
     return {
       costoUnitario: dto.costo_unitario_usd,
       moneda,
       costoMxn: null,
-      tc: Number(dto.tc_usd_mxn) > 0 ? Number(dto.tc_usd_mxn) : null,
+      tc,
     };
   }
 
@@ -2381,9 +2569,10 @@ export class InventoryService {
     } else {
       gastoGenerado = ligados[0] ?? null;
     }
-    const stats = this.statsFromLayers(
-      this.buildLayers(await this.movsForItem(fila.item_id as string)),
-    );
+    const stats = statsDe(await this.movsForItem(fila.item_id as string), {
+      hoy: hoyCancun(),
+      tcHoy: null,
+    });
     const empaqueRaw = fila.empaque;
     const empaque = (
       Array.isArray(empaqueRaw) ? (empaqueRaw[0] ?? null) : empaqueRaw
@@ -2403,6 +2592,15 @@ export class InventoryService {
       // El replay NO recalcula nada (el precio ya viajó al gasto).
       venta_origen: null as OrigenVenta | null,
       margen_pct: null as number | null,
+      costo_vigente: null as CostoVigente | null,
+      tc_venta:
+        fila.tipo === (TipoMovimientoInventario.SALIDA as string) &&
+        Number(fila.tc_usd_mxn) > 0
+          ? Number(fila.tc_usd_mxn)
+          : null,
+      aviso: null as string | null,
+      aviso_mensaje: null as string | null,
+      regla_costo: REGLA_COSTO,
       client_request_id: key,
       idempotente: true as const,
     };
@@ -2442,8 +2640,8 @@ export class InventoryService {
     }; // 404 si no existe
 
     // Captura POR EMPAQUE (caja): la cantidad del cardex SIEMPRE va en
-    // UNIDADES = cantidad_empaques × factor (fuente única del FIFO y del
-    // gasto de bodega, que no cambian); el empaque y el nº de cajas se
+    // UNIDADES = cantidad_empaques × factor (fuente única de la existencia y
+    // del gasto de bodega, que no cambian); el empaque y el nº de cajas se
     // guardan solo como trazabilidad.
     let empaque: { id: string; nombre: string; factor: number } | null = null;
     let cantidad: number;
@@ -2493,24 +2691,31 @@ export class InventoryService {
     // DTO normalizado (cantidad resuelta) para el resto del flujo.
     const d: CreateMovimientoDto = { ...dto, cantidad };
 
+    // Día Cancún del movimiento (el insert conserva lo que mandó el
+    // cliente; para el costo vigente y el T.C. basta el día).
+    const fechaDia = String(dto.fecha_movimiento ?? hoyCancun()).slice(0, 10);
     let costoUnitario: number;
     // Captura en PESOS (default operativo del cliente) o en USD (compras tipo
-    // Aircraft Spruce). La moneda CANÓNICA interna sigue siendo USD: FIFO,
-    // valorizado y el gasto de bodega que entra al reparto no cambian.
+    // Aircraft Spruce). La moneda CANÓNICA interna sigue siendo USD
+    // (`costo_unitario_usd`, el del reparto); los pesos de una captura MXN
+    // son nativos.
     let moneda: 'MXN' | 'USD' = dto.moneda ?? 'USD';
     let costoMxn: number | null = null;
     let tc: number | null = null;
     // VENTA (decisión del cliente 29-ago-2026): en SALIDA el avión paga el
-    // PRECIO DE VENTA (el capturado en la salida, o el del ítem como default);
-    // el costo FIFO queda para el inventario (capas/valorizado intactos). Un 0
-    // explícito en venta_unitaria = "esta salida va a costo FIFO".
+    // PRECIO DE VENTA (el capturado en la salida, o el del ítem como default).
+    // Un 0 explícito en venta_unitaria = "esta salida va a costo".
     // TIENDA VuelaTour (decisión del cliente 25-sep-2026): SIN precio, el
-    // avión paga costo FIFO + margen de la tienda (`inventario_margen_venta_pct`,
-    // 25 %), en la MISMA moneda del costo — fuente única precioVentaDeSalida.
+    // avión paga el ÚLTIMO PRECIO DE COMPRA + margen de la tienda
+    // (`inventario_margen_venta_pct`, 25 %), en la MISMA moneda de esa compra
+    // — fuente única precioVentaDeSalida.
     let ventaUnitaria: number | null = null;
     let ventaMoneda: 'MXN' | 'USD' | null = null;
     let ventaOrigen: OrigenVenta | null = null;
     let margenAplicado: number | null = null;
+    // ADITIVOS de la respuesta (0.0.36).
+    let costoVigente: CostoVigente | null = null;
+    let aviso: string | null = null;
 
     if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       if (!dto.aeronave_id && dto.para_flota !== true) {
@@ -2523,32 +2728,61 @@ export class InventoryService {
           'Una salida para toda la flota no lleva avión específico.',
         );
       }
-      const layers = this.buildLayers(await this.movsForItem(itemId));
-      const consumo = this.consumeFifo(layers, cantidad);
-      costoUnitario = round(consumo.usd / cantidad, 4);
-      // El costo FIFO interno sigue en USD, pero si las capas consumidas se
-      // compraron en PESOS la salida se expresa en MXN (moneda 'MXN' +
-      // costo_unitario_mxn + TC ponderado) para que el cardex y el gasto de
-      // bodega digan lo que realmente se pagó. Caso aceites 28-ago-2026: una
-      // entrada en pesos capturada como USD multiplicó ×17 el costo del avión.
-      if (consumo.mxn != null) {
-        costoMxn = round(consumo.mxn / cantidad, 4);
-        tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
+      const movsItem = await this.movsForItem(itemId);
+      // Existencia: todo el cardex (textos de siempre). El stock sale del
+      // cardex, no del alta del ítem (caso 6 ago 2026).
+      const disponible = existenciaDe(movsItem);
+      if (disponible + EPS < cantidad) {
+        throw new BadRequestException(
+          disponible <= EPS
+            ? 'Este ítem no tiene existencia registrada: captura primero una ENTRADA con la cantidad y su costo (aunque la pieza ya esté en bodega). El stock sale del cardex, no del alta del ítem.'
+            : `Stock insuficiente: disponible ${round(disponible)}, salida solicitada ${cantidad}.`,
+        );
       }
-      moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
+      // COSTO = ÚLTIMO PRECIO DE COMPRA vigente el día de la salida (25-sep-
+      // 2026). Se GUARDA en la fila: nada posterior lo mueve (D1-bis).
+      costoVigente = costoVigenteEn(movsItem, { fecha: fechaDia });
+      if (!costoVigente) {
+        // Hay compras con costo, pero todas con fecha POSTERIOR a la salida:
+        // cobrarla a $0 en silencio sería un error de captura (400 claro).
+        const primera = sortChrono(movsItem.filter(fijaPrecio))[0];
+        if (primera) {
+          throw new BadRequestException({
+            message: textoSalidaAntesDeLaCompra(
+              fechaDia,
+              primera.fecha_movimiento,
+            ),
+            error: 'SALIDA_ANTES_DE_LA_COMPRA',
+            details: {
+              fecha_salida: fechaDia,
+              fecha_primera_compra: primera.fecha_movimiento,
+            },
+          });
+        }
+        // Solo entradas a $0 (carga sin costo): a costo $0, sin gasto, como
+        // siempre — y se AVISA.
+        aviso = 'SIN_COSTO_VIGENTE';
+      }
+      costoUnitario = costoVigente?.unitario_usd ?? 0;
+      moneda = costoVigente?.moneda ?? 'USD';
+      costoMxn =
+        costoVigente?.moneda === 'MXN' ? costoVigente.unitario_mxn : null;
+      // T.C. del DÍA DE LA VENTA (el mismo de las cotizaciones): convierte
+      // venta Y costo de esta salida y es el `tc_gasto` del cargo al avión.
+      // Se SELLA al escribir; null si no hay dato (queda «sin T.C.»).
+      tc = (await this.tcOficialDe(fechaDia))?.tc ?? null;
       // Precio de venta efectivo (fuente única precioVentaDeSalida): el del
       // DTO (> 0) gana; sin campo en el DTO se hereda el del ítem; sin
-      // ninguno, costo FIFO + margen de la tienda en la moneda del costo. La
-      // moneda del DTO acompaña a SU precio; la del ítem al suyo (jamás cruzar
-      // precio de una fuente con moneda de otra).
+      // ninguno, último precio + margen de la tienda en la moneda de la
+      // compra. La moneda del DTO acompaña a SU precio; la del ítem al suyo
+      // (jamás cruzar precio de una fuente con moneda de otra).
       const margen = await this.margenVentaPct();
       const precio = precioVentaDeSalida({
         dtoVenta: dto.venta_unitaria ?? null,
         dtoMoneda: dto.venta_moneda ?? null,
         itemPrecio: item.precio_venta ?? null,
         itemMoneda: item.precio_venta_moneda ?? null,
-        costoUnitario:
-          moneda === 'MXN' && costoMxn != null ? costoMxn : costoUnitario,
+        costoUnitario: costoVigente?.unitario ?? 0,
         monedaSalida: moneda,
         margenPct: margen,
       });
@@ -2557,7 +2791,7 @@ export class InventoryService {
       ventaOrigen = precio.origen;
       margenAplicado = precio.origen === 'MARGEN' ? margen : null;
     } else {
-      const costo = this.resolverCostoEntrada(dto);
+      const costo = await this.resolverCostoEntrada(dto, fechaDia);
       costoUnitario = costo.costoUnitario;
       moneda = costo.moneda;
       costoMxn = costo.costoMxn;
@@ -2585,7 +2819,7 @@ export class InventoryService {
         costo_unitario_mxn: costoMxn,
         tc_usd_mxn: tc,
         // Venta al avión (solo SALIDA con precio): el gasto BODEGA sale de
-        // aquí (montoGastoDeSalida); null = la salida se cargó a costo FIFO.
+        // aquí (montoGastoDeSalida); null = la salida se cargó a costo.
         venta_unitaria: ventaUnitaria,
         venta_moneda: ventaUnitaria != null ? ventaMoneda : null,
         para_flota: salidaDeFlota,
@@ -2664,8 +2898,9 @@ export class InventoryService {
     }
 
     // Puente inventario → gastos (diseño 5.6): "el cargo al avión ocurre al
-    // sacar la pieza de bodega". La SALIDA genera el gasto REFACCION con el
-    // costo FIFO para que llegue al reporte mensual del avión y al reparto.
+    // sacar la pieza de bodega". La SALIDA genera el gasto REFACCION con su
+    // precio (o su costo) para que llegue al reporte mensual del avión y al
+    // reparto.
     // La DEVOLUCION con avión revierte ese cargo.
     let gastoGenerado: Record<string, unknown> | null = null;
     // Resto de una DEVOLUCION que no se pudo revertir (null = todo revertido):
@@ -2673,13 +2908,7 @@ export class InventoryService {
     // silencio (la UI puede ignorarlo; el warn en el log se conserva).
     let reversionPendiente: ReversionPendiente | null = null;
     // Cómo se cobró la salida (notas del gasto): precio, costo + margen o costo.
-    const etiquetaCargo =
-      ventaOrigen === 'MARGEN'
-        ? `costo FIFO + ${margenAplicado} %`
-        : ventaOrigen === 'PRECIO_CAPTURADO' ||
-            ventaOrigen === 'PRECIO_PRODUCTO'
-          ? 'precio de venta'
-          : 'costo FIFO';
+    const etiquetaCargo = etiquetaCargoDeSalida(ventaOrigen, margenAplicado);
     if (salidaDeFlota) {
       gastoGenerado = await this.crearGastosDeSalidaFlota(
         data as Record<string, unknown>,
@@ -2701,19 +2930,23 @@ export class InventoryService {
       dto.aeronave_id
     ) {
       // Usar el costo USD ya resuelto arriba: en captura MXN el dto no trae
-      // costo_unitario_usd y la reversión quedaría en 0 en silencio.
+      // costo_unitario_usd y la reversión quedaría en 0 en silencio. El T.C.
+      // de respaldo es el RESUELTO (capturado u oficial), no el del DTO.
       reversionPendiente = await this.revertirGastoPorDevolucion(
         itemId,
         d,
         costoUnitario,
         item.nombre,
         userId,
+        tc,
       );
     }
 
-    const stats = this.statsFromLayers(
-      this.buildLayers(await this.movsForItem(itemId)),
-    );
+    // Solo existencia y USD interno: no hace falta el T.C. de hoy.
+    const stats = statsDe(await this.movsForItem(itemId), {
+      hoy: hoyCancun(),
+      tcHoy: null,
+    });
     return {
       ...data,
       empaque: empaque
@@ -2727,6 +2960,23 @@ export class InventoryService {
       // (null fuera de SALIDA) y el margen aplicado (solo MARGEN).
       venta_origen: ventaOrigen,
       margen_pct: margenAplicado,
+      // ADITIVOS (0.0.36): el último precio de compra con que se costeó la
+      // SALIDA (null fuera de SALIDA), el T.C. del día de la venta sellado en
+      // la fila y el aviso de una salida sin ninguna compra con costo.
+      costo_vigente: costoVigente,
+      tc_venta: dto.tipo === TipoMovimientoInventario.SALIDA ? tc : null,
+      aviso,
+      // Con precio (capturado o del producto) el avión SÍ pagó: el texto
+      // «sin cargo al avión» sería falso — se dice que la venta entera
+      // cuenta como utilidad.
+      aviso_mensaje:
+        aviso === 'SIN_COSTO_VIGENTE'
+          ? ventaOrigen === 'PRECIO_CAPTURADO' ||
+            ventaOrigen === 'PRECIO_PRODUCTO'
+            ? TEXTOS_INVENTARIO.sinCostoVigenteConVenta
+            : TEXTOS_INVENTARIO.sinCostoVigente
+          : null,
+      regla_costo: REGLA_COSTO,
       // Aditivo (10-sep-2026): la app deduplica su pendiente local con la
       // llave; null cuando no viajó o la columna aún no existe.
       client_request_id: key,
@@ -2738,9 +2988,20 @@ export class InventoryService {
    * Corrige el COSTO de una ENTRADA de cardex (caso carga masiva
    * [CARGA-INV-AGO29]: 63 entradas a $0 que el cliente completa con el
    * precio real). SOLO costo/moneda/TC — cantidad, fecha y tipo jamás.
-   * Candados: la entrada que nace de una COMPRA se corrige desde la compra
-   * (ahí se prorratean envío/impuestos), y una capa ya consumida por el FIFO
-   * no se toca (su costo ya viajó a los gastos del avión).
+   *
+   * Regla de costo del 25-sep-2026 (API 0.0.36): el costo de cada SALIDA
+   * está GUARDADO en su fila, así que corregir el precio de una compra solo
+   * cambia el VALORIZADO y el precio de las SIGUIENTES salidas — ninguna
+   * salida ya cobrada se mueve. Candados:
+   *  - la entrada que nace de una COMPRA se corrige desde la compra (ahí se
+   *    prorratean envío/impuestos);
+   *  - RECONOCIMIENTO (D7): si alguna salida ya usó (o habría usado) este
+   *    precio — `salidasQueDependenDe` —, sin `confirmar_salidas: true`
+   *    responde 409 ENTRADA_CON_SALIDAS con la lista y NO escribe nada.
+   *    Ningún cliente (panel viejo, script) cambia el precio de una compra
+   *    usada sin ver qué salidas conservan su cargo — y cuáles salieron SIN
+   *    cargo ($0), que completar el costo NO cobra. Re-costear una salida mal
+   *    cobrada = eliminarla (baja con motivo) y volver a capturarla.
    */
   async updateCostoEntrada(
     itemId: string,
@@ -2763,9 +3024,7 @@ export class InventoryService {
     }
     const actual = mov as Record<string, unknown>;
     if (actual.tipo !== (TipoMovimientoInventario.ENTRADA as string)) {
-      throw new BadRequestException(
-        'Solo se corrige el costo de una ENTRADA: el de las salidas lo calcula el FIFO, y devoluciones/ajustes se corrigen con un movimiento nuevo.',
-      );
+      throw new BadRequestException(TEXTOS_INVENTARIO.soloEntrada);
     }
 
     // (ii) Candado de COMPRA: su costo lo calcula compras.service (factura +
@@ -2786,38 +3045,32 @@ export class InventoryService {
       );
     }
 
-    // (iii) Candado FIFO: si las salidas ya consumieron unidades de ESTA capa,
-    // su costo ya viajó a los gastos de avión y cambiarlo aquí descuadraría.
-    // E_prev = capas apiladas ANTES de esta entrada (ENTRADA + DEVOLUCION +
-    // AJUSTE — omitir devoluciones/ajustes daría falsos "ya consumidos");
-    // S_total = todas las SALIDAS (el FIFO consume de la capa más vieja, así
-    // que una salida posterior también puede haber llegado a esta capa).
-    const movs = this.sortChrono(await this.movsForItem(itemId));
-    const idx = movs.findIndex((m) => m.id === movId);
-    if (idx < 0) {
+    // (iii) Candado de RECONOCIMIENTO: las salidas que se cobraron con este
+    // precio CONSERVAN su costo (está en su fila); el operador lo confirma.
+    const movs = await this.movsCardexCompleto(itemId);
+    if (!movs.some((m) => m.id === movId)) {
       throw new NotFoundException(
         `Movimiento ${movId} no encontrado en el cardex del ítem`,
       );
     }
-    const salida = TipoMovimientoInventario.SALIDA as string;
-    const entradasPrevias = movs
-      .slice(0, idx)
-      .filter((m) => m.tipo !== salida)
-      .reduce((s, m) => s + Number(m.cantidad), 0);
-    const salidasTotales = movs
-      .filter((m) => m.tipo === salida)
-      .reduce((s, m) => s + Number(m.cantidad), 0);
-    if (salidasTotales > entradasPrevias + EPS) {
-      const consumidas = round(
-        Math.min(Number(actual.cantidad), salidasTotales - entradasPrevias),
-      );
-      throw new ConflictException(
-        `No se puede corregir: ${consumidas} de las ${round(Number(actual.cantidad))} unidades de esta entrada ya salieron de bodega y su costo FIFO ya viajó a los gastos del avión. Ajusta con una DEVOLUCION/AJUSTE o corrige el gasto directamente.`,
-      );
+    const deps = salidasQueDependenDe(movs, movId);
+    if (deps.length > 0 && dto.confirmar_salidas !== true) {
+      const sinCargo = deps.filter((d) => d.sin_cargo).length;
+      throw new ConflictException({
+        message: textoEntradaConSalidas(deps.length, sinCargo),
+        error: 'ENTRADA_CON_SALIDAS',
+        details: { salidas: deps },
+      });
     }
 
-    // (iv) Costo nuevo con el MISMO criterio de createMovimiento.
-    const costo = this.resolverCostoEntrada(dto);
+    // (iv) Costo nuevo con el MISMO criterio de createMovimiento. USD sin
+    // T.C. en el DTO conserva el de la fila (o el oficial de su fecha).
+    const tcFila = Number(actual.tc_usd_mxn);
+    const costo = await this.resolverCostoEntrada(
+      dto,
+      textoDe(actual.fecha_movimiento, hoyCancun()).slice(0, 10),
+      Number.isFinite(tcFila) && tcFila > 0 ? tcFila : null,
+    );
 
     // (v) Bitácora en las notas: el costo anterior no se pierde en silencio.
     const enMxnAntes =
@@ -2828,7 +3081,9 @@ export class InventoryService {
       ),
       4,
     );
-    const notaCorreccion = `Costo corregido ${hoyCancun()}: antes $${montoAntes} ${enMxnAntes ? 'MXN' : 'USD'}`;
+    // precioTxt: 2 a 4 decimales y siempre con moneda («$21.50 USD», nunca
+    // «$21.5 USD»).
+    const notaCorreccion = `Costo corregido ${hoyCancun()}: antes ${precioTxt(montoAntes, enMxnAntes ? 'MXN' : 'USD')}`;
     const notas = textoNoVacio(actual.notas)
       ? `${actual.notas} · ${notaCorreccion}`
       : notaCorreccion;
@@ -2851,20 +3106,24 @@ export class InventoryService {
       .maybeSingle();
     if (eUpd) throw new Error(eUpd.message);
 
-    // (vi) Stats recalculadas (mismo patrón que createMovimiento).
-    const stats = this.statsFromLayers(
-      this.buildLayers(await this.movsForItem(itemId)),
-    );
+    // (vi) Stats recalculadas: valorizado al último precio con el T.C. de hoy.
+    const stats = await this.statsConTcHoy(await this.movsForItem(itemId));
     return {
       ...(updated as Record<string, unknown>),
       stock_resultante: stats.stock,
       valor_usd: stats.valor_usd,
       valor_mxn: stats.valor_mxn,
-      // ADITIVOS (22-sep-2026): `valor_mxn` ya solo trae pesos reales, así
-      // que la parte en dólares sin TC viaja aparte — si no, corregir el
-      // costo de una entrada USD sin TC dejaría el eco en $0.00 "MXN".
+      // ADITIVOS (22-sep-2026): `valor_mxn` solo trae pesos reales; la parte
+      // en dólares sin TC viaja aparte.
       valor_usd_sin_tc: stats.valor_usd_sin_tc,
       pesos_exactos: stats.pesos_exactos,
+      // ADITIVOS (0.0.36): las salidas que CONSERVAN su costo, el precio
+      // vigente que queda y el T.C. del valorizado.
+      salidas_conservan_costo: deps,
+      costo_vigente: stats.costo_vigente,
+      costo_vigente_mxn: stats.costo_vigente_mxn,
+      tc_hoy: stats.tc_hoy,
+      regla_costo: REGLA_COSTO,
     };
   }
 
@@ -2875,11 +3134,13 @@ export class InventoryService {
   // sepamos quien lo hizo» (captura del cardex del aceite 15W-50 con tres
   // movimientos capturados por error el 29-ago).
   //
-  // El cardex era APPEND-ONLY porque el stock y los costos NO se guardan: se
-  // derivan de él cada vez. Por eso la baja tiene TRES capas:
-  //   1. `evaluarEliminacion` (helper puro, con specs): simula el FIFO sin el
-  //      movimiento y bloquea si la existencia quedaría negativa o si el
-  //      costo FIFO de CUALQUIER otra salida cambiaría.
+  // El cardex era APPEND-ONLY porque la existencia NO se guarda: se deriva
+  // de él cada vez. Por eso la baja tiene TRES capas:
+  //   1. `evaluarEliminacion` (helper puro, con specs): simula la existencia
+  //      sin el movimiento y bloquea si quedaría negativa. Desde el API
+  //      0.0.36 el costo de cada salida está GUARDADO en su fila (último
+  //      precio de compra), así que ya no hay candado de costo: se informa
+  //      si cambia el PRECIO VIGENTE (valorizado y siguiente salida).
   //   2. Este servicio: candados de DINERO (compra ligada, gasto conciliado /
   //      facturado / con cargo bancario) y 409 con `code` estable.
   //   3. La función de BD `inventario_eliminar_movimiento` (migración
@@ -3021,8 +3282,8 @@ export class InventoryService {
   /**
    * Orden de los candados (el primero que aplique manda): COMPRA (estructural)
    * → TIPO (devolución/ajuste no se borran) → DINERO (gasto cerrado) →
-   * CARDEX (stock negativo / costo FIFO movido). El mensaje SIEMPRE dice qué
-   * hacer para desbloquearlo.
+   * CARDEX (stock negativo). El mensaje SIEMPRE dice qué hacer para
+   * desbloquearlo.
    */
   private resolverBloqueoEliminacion(
     cardex: EvaluacionEliminacion,
@@ -3067,7 +3328,7 @@ export class InventoryService {
     // Carrera (alguien lo borró entre las dos lecturas): 404, no un 500.
     let cardex: EvaluacionEliminacion;
     try {
-      cardex = evaluarEliminacion(movs, movId);
+      cardex = evaluarEliminacion(movs, movId, hoyCancun());
     } catch {
       throw new NotFoundException(
         `Movimiento ${movId} no encontrado en este ítem`,
@@ -3098,6 +3359,14 @@ export class InventoryService {
       },
       gastos,
       de_compra: compra,
+      // ADITIVOS (0.0.36): el último precio de compra hoy, con y sin el
+      // movimiento (el diálogo lo dice en su propio renglón), y la lista de
+      // salidas afectadas, SIEMPRE vacía (cada salida guarda su costo).
+      precio_vigente_antes: cardex.precio_vigente_antes,
+      precio_vigente_despues: cardex.precio_vigente_despues,
+      cambia_precio_vigente: cardex.cambia_precio_vigente,
+      salidas_afectadas: cardex.salidas_afectadas,
+      regla_costo: REGLA_COSTO,
     };
   }
 
@@ -3184,9 +3453,7 @@ export class InventoryService {
       auditoria_id?: string;
       gastos_eliminados?: number;
     };
-    const stats = this.statsFromLayers(
-      this.buildLayers(await this.movsForItem(itemId)),
-    );
+    const stats = await this.statsConTcHoy(await this.movsForItem(itemId));
     this.logger.warn(
       `Movimiento de cardex ${movId} (${previa.movimiento.tipo} ${previa.movimiento.cantidad} · ${item.nombre}) ELIMINADO por ${userId}: «${motivo}». ${resultado.gastos_eliminados ?? 0} gasto(s) de bodega borrados; existencia ${previa.stock_antes} → ${stats.stock}. Auditoría ${resultado.auditoria_id ?? '?'}.`,
     );
@@ -3210,6 +3477,10 @@ export class InventoryService {
       // (`valor_mxn` = pesos reales; el resto, en dólares sin TC).
       valor_usd_sin_tc: stats.valor_usd_sin_tc,
       pesos_exactos: stats.pesos_exactos,
+      // ADITIVOS (0.0.36): el último precio de compra que queda.
+      costo_vigente: stats.costo_vigente,
+      costo_vigente_mxn: stats.costo_vigente_mxn,
+      regla_costo: REGLA_COSTO,
     };
   }
 
@@ -3346,21 +3617,20 @@ export class InventoryService {
    * Crea el gasto REFACCION del avión a partir de una SALIDA de bodega.
    * medio_pago 'BODEGA': el dinero salió del banco al COMPRAR la pieza, no al
    * consumirla, así que este cargo no debe cruzarse con la conciliación
-   * bancaria. Si el costo FIFO es 0 (capas capturadas sin costo) no hay nada
-   * que cargar y solo se registra en el cardex.
+   * bancaria. Si el monto es 0 (salida a costo de una compra sin costo) no
+   * hay nada que cargar y solo se registra en el cardex.
    */
   private async crearGastoDeSalida(
     mov: Record<string, unknown>,
     itemNombre: string,
     userId: string,
     presentacion: string | null = null,
-    /** Cómo se cobró (25-sep-2026): «precio de venta» | «costo FIFO + 25 %» | «costo FIFO». */
+    /** Cómo se cobró: «precio de venta» | «último precio + 25 %» | «a costo». */
     etiquetaCargo?: string,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
-    const etiqueta =
-      etiquetaCargo ?? (esVenta ? 'precio de venta' : 'costo FIFO');
+    const etiqueta = etiquetaCargo ?? (esVenta ? 'precio de venta' : 'a costo');
 
     const { data, error } = await this.supabase.service
       .from('gasto')
@@ -3426,7 +3696,7 @@ export class InventoryService {
 
   /**
    * SALIDA "para todas las matrículas" (aceites/consumibles de flota): el
-   * cargo total (PRECIO DE VENTA si la salida lo lleva; si no, costo FIFO —
+   * cargo total (PRECIO DE VENTA si la salida lo lleva; si no, su costo —
    * misma fuente única montoGastoDeSalida) se PRORRATEA en partes iguales
    * entre los aviones ACTIVOS — un gasto REFACCION medio BODEGA por avión,
    * todos ligados al mismo movimiento. Los centavos de diferencia se ajustan
@@ -3437,13 +3707,12 @@ export class InventoryService {
     itemNombre: string,
     userId: string,
     presentacion: string | null = null,
-    /** Cómo se cobró (25-sep-2026): «precio de venta» | «costo FIFO + 25 %» | «costo FIFO». */
+    /** Cómo se cobró: «precio de venta» | «último precio + 25 %» | «a costo». */
     etiquetaCargo?: string,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
-    const etiqueta =
-      etiquetaCargo ?? (esVenta ? 'precio de venta' : 'costo FIFO');
+    const etiqueta = etiquetaCargo ?? (esVenta ? 'precio de venta' : 'a costo');
 
     const { data: aviones, error: avErr } = await this.supabase.service
       .from('aeronave')
@@ -3544,8 +3813,8 @@ export class InventoryService {
    * El monto por revertir se lleva en la MONEDA NATIVA de la devolución (MXN
    * si se capturó en pesos; si no, USD) y cada gasto se convierte SOLO cuando
    * su moneda difiere: con el tc_gasto de ESE gasto o, si no lo trae (gasto
-   * de bodega USD histórico), con el TC tecleado en la devolución
-   * (`tc_usd_mxn`, obligatorio en captura MXN). Peso contra peso, dólar
+   * de bodega USD histórico), con el TC RESUELTO de la devolución (el
+   * capturado o el oficial de su día — `tcDevolucion`). Peso contra peso, dólar
    * contra dólar: antes todo se pasaba a USD con el TC de la devolución y se
    * comparaba contra el tc_gasto del gasto — dos TC distintos dejaban
    * centavos (o pesos) sin cuadrar. Sin NINGÚN TC el gasto se salta y se
@@ -3557,7 +3826,7 @@ export class InventoryService {
    * dinero jamás desaparece en silencio (además del warn en el log).
    *
    * VENTA (29-ago-2026): la reversión casa contra `gasto.monto` — LO QUE
-   * REALMENTE SE CARGÓ al avión, sea precio de venta o costo FIFO — así que
+   * REALMENTE SE CARGÓ al avión, sea precio de venta o costo — así que
    * los gastos a precio de venta se revierten igual (se borran/reducen hasta
    * cubrir el monto devuelto); no hay que distinguirlos aquí.
    */
@@ -3567,6 +3836,8 @@ export class InventoryService {
     costoUnitarioUsd: number,
     itemNombre: string,
     userId: string,
+    /** T.C. resuelto de la devolución (capturado u oficial); null = sin T.C. */
+    tcDevolucion: number | null = null,
   ): Promise<ReversionPendiente | null> {
     const devEnMxn = dto.moneda === 'MXN' && dto.costo_unitario_mxn != null;
     const monedaDev: 'MXN' | 'USD' = devEnMxn ? 'MXN' : 'USD';
@@ -3576,8 +3847,9 @@ export class InventoryService {
       2,
     );
     if (porRevertir <= 0) return null;
-    // TC de respaldo para gastos en OTRA moneda sin tc_gasto propio.
-    const tcDev = Number(dto.tc_usd_mxn);
+    // TC de respaldo para gastos en OTRA moneda sin tc_gasto propio: el
+    // RESUELTO (capturado u oficial), no solo el que tecleó el operador.
+    const tcDev = Number(tcDevolucion ?? dto.tc_usd_mxn);
     let sinTc = 0;
     try {
       // Gastos automáticos de este ítem+avión (via la liga al cardex).
@@ -3687,6 +3959,27 @@ export class InventoryService {
       offset: filters.offset,
     };
   }
+}
+
+/** '2026-09-25' → '25-sep-2026' (subtítulos de Excel; corta el string, jamás `new Date`). */
+function fechaGuion(fecha: string | null | undefined): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(fecha ?? '');
+  if (!m) return fecha ?? '';
+  const meses = [
+    'ene',
+    'feb',
+    'mar',
+    'abr',
+    'may',
+    'jun',
+    'jul',
+    'ago',
+    'sep',
+    'oct',
+    'nov',
+    'dic',
+  ];
+  return `${m[3]}-${meses[Number(m[2]) - 1] ?? m[2]}-${m[1]}`;
 }
 
 /** true si es un string con algo más que espacios (null/undefined/'' → false). */

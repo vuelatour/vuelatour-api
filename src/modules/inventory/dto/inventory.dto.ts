@@ -84,7 +84,7 @@ export class ListInventarioQuery {
 
   @ApiPropertyOptional({
     description:
-      'Acota las VENTAS/ganancia por ítem desde esta fecha (YYYY-MM-DD, día Cancún). El stock/FIFO siempre es de todo el cardex. Sin desde/hasta = acumulado histórico.',
+      'Acota las VENTAS/ganancia por ítem desde esta fecha (YYYY-MM-DD, día Cancún). El stock y el último precio de compra siempre son de todo el cardex. Sin desde/hasta = acumulado histórico.',
   })
   @IsOptional()
   @Matches(FECHA_DIA_CANCUN, { message: 'desde debe ser YYYY-MM-DD' })
@@ -239,7 +239,7 @@ export class MoverUbicacionDto {
 export class ResumenItemQuery {
   @ApiPropertyOptional({
     description:
-      'Desde (YYYY-MM-DD, día Cancún): acota las filas y lo que suma; el FIFO corre sobre todo el cardex.',
+      'Desde (YYYY-MM-DD, día Cancún): acota las filas y lo que suma; existencia y último precio de compra miran todo el cardex.',
   })
   @IsOptional()
   @Matches(FECHA_DIA_CANCUN, { message: 'desde debe ser YYYY-MM-DD' })
@@ -448,7 +448,7 @@ export class CreateInventarioItemDto {
 
   @ApiPropertyOptional({
     description:
-      'Precio de VENTA unitario al avión (decisión del cliente 29-ago-2026): la SALIDA carga este precio como gasto BODEGA; el costo FIFO queda para el inventario. Sin precio (o 0) la salida se carga a costo FIFO + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). null = quitar el precio. Viaja JUNTO con precio_venta_moneda.',
+      'Precio de VENTA unitario al avión (decisión del cliente 29-ago-2026): la SALIDA carga este precio como gasto BODEGA; el costo (último precio de compra) queda para el inventario. Sin precio (o 0) la salida se carga al último precio de compra + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). null = quitar el precio. Viaja JUNTO con precio_venta_moneda.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -551,7 +551,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION/AJUSTE si la captura es USD. En SALIDA se ignora: se calcula por FIFO.',
+      'Costo unitario en USD. Requerido en ENTRADA/DEVOLUCION/AJUSTE si la captura es USD. En SALIDA se ignora: el API toma el último precio de compra vigente el día de la salida.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -562,7 +562,7 @@ export class CreateMovimientoDto {
   @ApiPropertyOptional({
     enum: ['MXN', 'USD'],
     description:
-      'Moneda de la CAPTURA (default USD por compatibilidad; panel/app mandan MXN por default). La contabilidad interna (FIFO/valorizado/gasto bodega) sigue en USD.',
+      'Moneda de la CAPTURA (default USD por compatibilidad; panel/app mandan MXN por default). El USD interno (costo_unitario_usd) sigue siendo el canónico del reparto; los pesos de una captura MXN son nativos.',
   })
   @IsOptional()
   @IsIn(['MXN', 'USD'])
@@ -580,7 +580,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'Tipo de cambio de la compra (MXN por USD). Requerido en capturas MXN; en capturas USD es opcional y se conserva para expresar la capa en pesos reales.',
+      'Tipo de cambio de la compra (MXN por USD). OPCIONAL (25-sep-2026): vacío = T.C. oficial del día del movimiento (el mismo de las cotizaciones). En SALIDA se ignora: el API sella el T.C. oficial del día de la venta.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -590,7 +590,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'SALIDA: precio de VENTA unitario que paga el avión. > 0 = ese precio (en venta_moneda). Ausente = el precio_venta del ítem; ausente y sin precio en el ítem = costo FIFO + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). 0 explícito = a costo (sin utilidad). En otros tipos se ignora.',
+      'SALIDA: precio de VENTA unitario que paga el avión. > 0 = ese precio (en venta_moneda). Ausente = el precio_venta del ítem; ausente y sin precio en el ítem = último precio de compra + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). 0 explícito = a costo (sin utilidad). En otros tipos se ignora.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -617,7 +617,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'SALIDA para TODAS las matrículas (aceites/consumibles de flota): el cargo (precio de venta, o costo FIFO + margen de la tienda) se prorratea en partes iguales entre los aviones activos, un gasto por avión (residuo en el primero). Excluye aeronave_id.',
+      'SALIDA para TODAS las matrículas (aceites/consumibles de flota): el cargo (precio de venta, o último precio de compra + margen de la tienda) se prorratea en partes iguales entre los aviones activos, un gasto por avión (residuo en el primero). Excluye aeronave_id.',
   })
   @IsOptional()
   @IsBoolean()
@@ -676,8 +676,9 @@ export class CreateMovimientoDto {
 /**
  * Corrección del COSTO de una ENTRADA de cardex (caso carga masiva
  * [CARGA-INV-AGO29]: entradas a $0 que el cliente completa con el precio
- * real). SOLO viaja costo/moneda/TC — cantidad, fecha y tipo JAMÁS se
- * editan (romperían el FIFO); mandar otro campo = 400 (forbidNonWhitelisted).
+ * real). SOLO viaja costo/moneda/TC (+ `confirmar_salidas`) — cantidad,
+ * fecha y tipo JAMÁS se editan (moverían la existencia y el precio vigente
+ * de todo lo posterior); mandar otro campo = 400 (forbidNonWhitelisted).
  * La moneda es OBLIGATORIA para que el operador diga en qué capturó (caso
  * aceites 28-ago-2026: pesos capturados como USD multiplicaron ×17 el costo).
  */
@@ -685,7 +686,7 @@ export class UpdateMovimientoCostoDto {
   @ApiProperty({
     enum: ['MXN', 'USD'],
     description:
-      'Moneda de la captura del costo. MXN exige costo_unitario_mxn + tc_usd_mxn; USD exige costo_unitario_usd.',
+      'Moneda de la captura del costo. MXN exige costo_unitario_mxn (T.C. opcional: vacío = oficial del día de la compra); USD exige costo_unitario_usd.',
   })
   @IsIn(['MXN', 'USD'])
   moneda!: 'MXN' | 'USD';
@@ -710,13 +711,21 @@ export class UpdateMovimientoCostoDto {
 
   @ApiPropertyOptional({
     description:
-      'Tipo de cambio de la compra (MXN por USD). Requerido si moneda=MXN; opcional en USD (expresa la capa en pesos reales).',
+      'Tipo de cambio de la compra (MXN por USD). OPCIONAL (25-sep-2026): en MXN vacío = T.C. oficial del día de la compra (sin él ⇒ 400); en USD vacío = el que ya tiene la fila, o el oficial de su fecha.',
   })
   @IsOptional()
   @Type(() => Number)
   @IsNumber()
   @IsPositive()
   tc_usd_mxn?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Reconocimiento (25-sep-2026, API 0.0.36): si alguna SALIDA ya se cobró con el precio de esta compra, el API responde 409 ENTRADA_CON_SALIDAS con la lista (`details.salidas`) y no guarda nada hasta recibir `confirmar_salidas: true`. Esas salidas CONSERVAN su costo; el precio nuevo aplica a la existencia y a las siguientes salidas.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  confirmar_salidas?: boolean;
 }
 
 /**

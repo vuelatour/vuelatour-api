@@ -41,6 +41,12 @@ function armar(
   configuracion?: {
     numero: (clave: string, porDefecto: number) => Promise<number>;
   },
+  /** TipoCambioService falso (T.C. oficial por fecha); sin él ⇒ «sin T.C.». */
+  tipoCambio?: {
+    oficialDetallePara: (
+      fecha: string,
+    ) => Promise<{ tc: number; fecha_dato: string; fuente: string } | null>;
+  },
 ) {
   const llamadas: Llamada[] = [];
   const cursor: Record<string, number> = {};
@@ -130,9 +136,22 @@ function armar(
       {} as never,
       undefined,
       configuracion as never,
+      tipoCambio as never,
     ),
     llamadas,
   };
+}
+
+/** T.C. oficial por fecha (el de las cotizaciones); fecha sin dato ⇒ null. */
+function tcPorFecha(tabla: Record<string, number>) {
+  const oficialDetallePara = jest.fn((fecha: string) =>
+    Promise.resolve(
+      tabla[fecha] != null
+        ? { tc: tabla[fecha], fecha_dato: fecha, fuente: 'OPEN_ER_API' }
+        : null,
+    ),
+  );
+  return { oficialDetallePara };
 }
 
 const de = (llamadas: Llamada[], tabla: string, metodo: string) =>
@@ -874,9 +893,10 @@ describe('InventoryService.createMovimiento — salida de flota: los N gastos', 
 
 /**
  * 25-sep-2026 · TIENDA VuelaTour: toda SALIDA a un avión SIN precio se cobra
- * a costo FIFO + margen (`inventario_margen_venta_pct`, 25 %), en la moneda
- * del costo. El precio capturado (> 0) y el del producto siguen ganando; el 0
- * explícito sigue siendo «a costo».
+ * al ÚLTIMO PRECIO DE COMPRA + margen (`inventario_margen_venta_pct`, 25 %;
+ * antes del API 0.0.36, costo FIFO), en la moneda de esa compra. El precio
+ * capturado (> 0) y el del producto siguen ganando; el 0 explícito sigue
+ * siendo «a costo».
  */
 describe('InventoryService.createMovimiento — margen de la tienda', () => {
   let warn: jest.SpyInstance;
@@ -954,7 +974,7 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
   const insertDe = (llamadas: Llamada[], tabla: string) =>
     de(llamadas, tabla, 'insert')[0].args[0] as Record<string, unknown>;
 
-  it('sin precio ⇒ costo FIFO + 25 % en la moneda del costo (USD sin TC): 12 × 26.5625 = 318.75 USD', async () => {
+  it('sin precio ⇒ último precio + 25 % en la moneda de la compra (USD, sin TipoCambioService): 12 × 26.5625 = 318.75 USD', async () => {
     const { service, llamadas } = salida(CARDEX_USD);
     const res = await service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
     expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
@@ -973,8 +993,16 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
       moneda: 'USD',
       tc_gasto: null,
     });
-    expect(String(gasto.notas)).toContain('(costo FIFO + 25 %)');
-    expect(res).toMatchObject({ venta_origen: 'MARGEN', margen_pct: 25 });
+    expect(String(gasto.notas)).toContain('(último precio + 25 %)');
+    expect(String(gasto.notas)).not.toContain('FIFO');
+    expect(res).toMatchObject({
+      venta_origen: 'MARGEN',
+      margen_pct: 25,
+      tc_venta: null,
+      aviso: null,
+      regla_costo: 'ULTIMO_PRECIO',
+      costo_vigente: { movimiento_id: 'e-usd', unitario: 21.25, moneda: 'USD' },
+    });
   });
 
   it('config AUSENTE (fila sin sembrar) ⇒ 25 % por default', async () => {
@@ -1015,7 +1043,7 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
     });
     const gasto = insertDe(llamadas, 'gasto');
     expect(gasto).toMatchObject({ monto: 255, moneda: 'USD' });
-    expect(String(gasto.notas)).toContain('(costo FIFO)');
+    expect(String(gasto.notas)).toContain('(a costo)');
     expect(res).toMatchObject({ venta_origen: 'A_COSTO', margen_pct: null });
   });
 
@@ -1071,7 +1099,7 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
     expect(res).toMatchObject({ venta_origen: 'PRECIO_CAPTURADO' });
   });
 
-  it('capas compradas en PESOS ⇒ el margen va en PESOS: 4 × 2,072.9125 = 8,291.65 MXN', async () => {
+  it('compra vigente en PESOS ⇒ el margen va en PESOS: 4 × 2,072.9125 = 8,291.65 MXN (tc_gasto null sin T.C. oficial)', async () => {
     const { service, llamadas } = salida(CARDEX_MXN);
     const res = await service.createMovimiento(
       'i-1',
@@ -1087,8 +1115,9 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
     expect(insertDe(llamadas, 'gasto')).toMatchObject({
       monto: 8291.65,
       moneda: 'MXN',
-      // TC ponderado de las capas (1,658.33 / 94.71), regla de siempre.
-      tc_gasto: 17.5096,
+      // API 0.0.36: el T.C. del gasto es el oficial del día de la VENTA (sin
+      // TipoCambioService, ninguno); ya no el ponderado de las capas.
+      tc_gasto: null,
     });
     expect(res).toMatchObject({ venta_origen: 'MARGEN', margen_pct: 25 });
   });
@@ -1120,7 +1149,7 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
     expect(Math.round(montos.reduce((s, m) => s + m, 0) * 100) / 100).toBe(
       318.75,
     );
-    expect(String(filas[0].notas)).toContain('costo FIFO + 25 %');
+    expect(String(filas[0].notas)).toContain('último precio + 25 %');
     expect(res).toMatchObject({
       venta_origen: 'MARGEN',
       margen_pct: 25,
@@ -1144,5 +1173,572 @@ describe('InventoryService.createMovimiento — margen de la tienda', () => {
       'u-ofi',
     );
     expect(res).toMatchObject({ venta_origen: null, margen_pct: null });
+  });
+});
+
+/**
+ * 25-sep-2026 · API 0.0.36 — ÚLTIMO PRECIO DE COMPRA + T.C. OFICIAL DEL DÍA
+ * al ESCRIBIR. Pedido del cliente: «que los precios se ajusten en automático
+ * al último registrado» y «En el tipo de cambio, que sea los mismos que usan
+ * en las cotizaciones (Tipo de cambio del día de la venta)».
+ */
+describe('InventoryService.createMovimiento — último precio y T.C. oficial', () => {
+  let warn: jest.SpyInstance;
+  let log: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  const fila = (
+    id: string,
+    tipo: 'ENTRADA' | 'SALIDA',
+    cantidad: number,
+    costo: number,
+    fecha: string,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    id,
+    tipo,
+    cantidad,
+    costo_unitario_usd: costo,
+    moneda: 'USD',
+    costo_unitario_mxn: null,
+    tc_usd_mxn: 17,
+    fecha_movimiento: fecha,
+    created_at: `${fecha}T15:00:00+00:00`,
+    ...extra,
+  });
+  /** El ejemplo del cliente: 10 @ 21 USD, salen 5, entran 5 @ 30 USD. */
+  const EJEMPLO = {
+    data: [
+      fila('e1', 'ENTRADA', 10, 21, '2026-08-10'),
+      fila('s1', 'SALIDA', 5, 21, '2026-08-15'),
+      fila('e2', 'ENTRADA', 5, 30, '2026-09-05'),
+    ],
+    error: null,
+    count: 3,
+  };
+  const TC = tcPorFecha({
+    '2026-09-01': 17.0077,
+    '2026-09-25': 17.6729,
+    '2026-08-29': 17.0115,
+  });
+  const insertDe = (llamadas: Llamada[], tabla: string) =>
+    de(llamadas, tabla, 'insert')[0]?.args[0] as Record<string, unknown>;
+
+  it('SALIDA con dos precios distintos cobra el ÚLTIMO (FIFO habría cobrado 21): 1 × 37.50 USD, T.C. del día de la venta', async () => {
+    const tc = tcPorFecha({ '2026-09-25': 17.6729 });
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [EJEMPLO, { data: ECO, error: null }, EJEMPLO],
+        gasto: [{ data: ECO, error: null }],
+      },
+      true,
+      undefined,
+      tc,
+    );
+    const res = await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.SALIDA,
+        cantidad: 1,
+        aeronave_id: 'a-xavgv',
+        fecha_movimiento: '2026-09-25',
+      },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      costo_unitario_usd: 30,
+      moneda: 'USD',
+      costo_unitario_mxn: null,
+      tc_usd_mxn: 17.6729,
+      venta_unitaria: 37.5,
+      venta_moneda: 'USD',
+    });
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({
+      monto: 37.5,
+      moneda: 'USD',
+      tc_gasto: 17.6729,
+    });
+    expect(res).toMatchObject({
+      costo_vigente: { movimiento_id: 'e2', unitario: 30 },
+      tc_venta: 17.6729,
+      venta_origen: 'MARGEN',
+    });
+    expect(tc.oficialDetallePara).toHaveBeenCalledWith('2026-09-25');
+  });
+
+  it('SALIDA con fecha ATRASADA ⇒ el costo vigente Y el T.C. de ESA fecha', async () => {
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [EJEMPLO, { data: ECO, error: null }, EJEMPLO],
+        gasto: [{ data: ECO, error: null }],
+      },
+      true,
+      undefined,
+      TC,
+    );
+    await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.SALIDA,
+        cantidad: 1,
+        aeronave_id: 'a-xavgv',
+        fecha_movimiento: '2026-09-01',
+      },
+      'u-ofi',
+    );
+    // El 01-sep el último precio era el de agosto (21) y el T.C. el del 01-sep.
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      costo_unitario_usd: 21,
+      tc_usd_mxn: 17.0077,
+      venta_unitaria: 26.25,
+    });
+  });
+
+  it('SALIDA anterior a TODA compra con costo ⇒ 400 SALIDA_ANTES_DE_LA_COMPRA y NADA escrito', async () => {
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [EJEMPLO],
+      },
+      true,
+      undefined,
+      TC,
+    );
+    const err = await service
+      .createMovimiento(
+        'i-1',
+        {
+          tipo: TipoMovimientoInventario.SALIDA,
+          cantidad: 1,
+          aeronave_id: 'a-xavgv',
+          fecha_movimiento: '2026-08-01',
+        },
+        'u-ofi',
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as BadRequestException).getResponse()).toMatchObject({
+      error: 'SALIDA_ANTES_DE_LA_COMPRA',
+      message:
+        'La salida es del 1 ago 2026 y la primera compra con costo de este producto es del 10 ago 2026: corrige la fecha de la salida o captura antes la compra.',
+    });
+    expect(de(llamadas, 'inventario_movimiento', 'insert')).toHaveLength(0);
+    expect(de(llamadas, 'gasto', 'insert')).toHaveLength(0);
+  });
+
+  it('sin ninguna compra con costo (solo entradas a $0) ⇒ a costo $0, sin gasto, con aviso SIN_COSTO_VIGENTE', async () => {
+    const soloCero = {
+      data: [fila('e0', 'ENTRADA', 3, 0, '2026-08-29', { tc_usd_mxn: null })],
+      error: null,
+      count: 1,
+    };
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [soloCero, { data: ECO, error: null }, soloCero],
+      },
+      true,
+      undefined,
+      TC,
+    );
+    const res = await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.SALIDA,
+        cantidad: 1,
+        aeronave_id: 'a-xavgv',
+        fecha_movimiento: '2026-09-01',
+      },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      costo_unitario_usd: 0,
+      venta_unitaria: null,
+    });
+    expect(de(llamadas, 'gasto', 'insert')).toHaveLength(0);
+    expect(res).toMatchObject({
+      aviso: 'SIN_COSTO_VIGENTE',
+      costo_vigente: null,
+      gasto_generado: null,
+    });
+    const msg = String((res as { aviso_mensaje: string }).aviso_mensaje);
+    expect(msg).toContain('no tiene ninguna compra con costo');
+    expect(msg).toContain('sin cargo al avión');
+    // El costo queda congelado en la fila: completar la compra NO la cobra
+    // (revisión adversaria 25-sep-2026).
+    expect(msg).toContain('esta se queda sin cargo');
+  });
+
+  it('sin compra con costo pero CON precio capturado ⇒ sí hay cargo al avión y el aviso NO dice «sin cargo»', async () => {
+    const soloCero = {
+      data: [fila('e0', 'ENTRADA', 3, 0, '2026-08-29', { tc_usd_mxn: null })],
+      error: null,
+      count: 1,
+    };
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [soloCero, { data: ECO, error: null }, soloCero],
+        gasto: [{ data: ECO, error: null }],
+      },
+      true,
+      undefined,
+      TC,
+    );
+    const res = await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.SALIDA,
+        cantidad: 1,
+        aeronave_id: 'a-xavgv',
+        fecha_movimiento: '2026-09-01',
+        venta_unitaria: 50,
+        venta_moneda: 'USD',
+      },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      costo_unitario_usd: 0,
+      venta_unitaria: 50,
+      venta_moneda: 'USD',
+    });
+    expect(de(llamadas, 'gasto', 'insert')).toHaveLength(1);
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({
+      monto: 50,
+      moneda: 'USD',
+      tc_gasto: 17.0077,
+    });
+    expect(res).toMatchObject({
+      aviso: 'SIN_COSTO_VIGENTE',
+      venta_origen: 'PRECIO_CAPTURADO',
+    });
+    const msg = String((res as { aviso_mensaje: string }).aviso_mensaje);
+    expect(msg).toContain('no tiene ninguna compra con costo');
+    expect(msg).toContain('se le cobró su precio de venta');
+    expect(msg).not.toContain('sin cargo al avión');
+  });
+
+  it('ENTRADA en USD sin T.C. ⇒ el oficial de SU fecha; con T.C. capturado ⇒ ese (4 decimales)', async () => {
+    const correr = async (dto: Record<string, unknown>) => {
+      const { service, llamadas } = armar(
+        {
+          inventario_item: [{ data: ITEM, error: null }],
+          inventario_movimiento: [{ data: ECO, error: null }, EJEMPLO],
+        },
+        true,
+        undefined,
+        TC,
+      );
+      await service.createMovimiento(
+        'i-1',
+        {
+          tipo: TipoMovimientoInventario.ENTRADA,
+          cantidad: 5,
+          moneda: 'USD',
+          costo_unitario_usd: 21.25,
+          fecha_movimiento: '2026-08-29',
+          ...dto,
+        },
+        'u-ofi',
+      );
+      return insertDe(llamadas, 'inventario_movimiento');
+    };
+    expect(await correr({})).toMatchObject({ tc_usd_mxn: 17.0115 });
+    expect(await correr({ tc_usd_mxn: 17.123456 })).toMatchObject({
+      tc_usd_mxn: 17.1235,
+    });
+  });
+
+  it('ENTRADA en PESOS sin T.C. ⇒ el oficial del día de la compra; sin oficial ⇒ 400 y nada escrito', async () => {
+    const { service, llamadas } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [{ data: ECO, error: null }, EJEMPLO],
+      },
+      true,
+      undefined,
+      TC,
+    );
+    await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.ENTRADA,
+        cantidad: 2,
+        moneda: 'MXN',
+        costo_unitario_mxn: 350,
+        fecha_movimiento: '2026-09-01',
+      },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      moneda: 'MXN',
+      costo_unitario_mxn: 350,
+      tc_usd_mxn: 17.0077,
+      costo_unitario_usd: 20.5789, // round4(350 / 17.0077)
+    });
+
+    const sinDato = armar(
+      { inventario_item: [{ data: ITEM, error: null }] },
+      true,
+      undefined,
+      TC,
+    );
+    await expect(
+      sinDato.service.createMovimiento(
+        'i-1',
+        {
+          tipo: TipoMovimientoInventario.ENTRADA,
+          cantidad: 2,
+          moneda: 'MXN',
+          costo_unitario_mxn: 350,
+          fecha_movimiento: '2025-01-01',
+        },
+        'u-ofi',
+      ),
+    ).rejects.toThrow(/No hay T\.C\. oficial para esa fecha/);
+    expect(
+      de(sinDato.llamadas, 'inventario_movimiento', 'insert'),
+    ).toHaveLength(0);
+  });
+
+  it('SIN TipoCambioService (clientes/specs viejos): todo igual, T.C. en null', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [{ data: ECO, error: null }, EJEMPLO],
+    });
+    await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.ENTRADA,
+        cantidad: 5,
+        moneda: 'USD',
+        costo_unitario_usd: 21.25,
+      },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      tc_usd_mxn: null,
+    });
+  });
+
+  it('el T.C. oficial se pide UNA vez por fecha (memo): alta masiva / recepción de compras', async () => {
+    const tc = tcPorFecha({ '2026-08-29': 17.0115 });
+    const { service } = armar(
+      {
+        inventario_item: [{ data: ITEM, error: null }],
+        inventario_movimiento: [{ data: ECO, error: null }, EJEMPLO],
+      },
+      true,
+      undefined,
+      tc,
+    );
+    for (let i = 0; i < 3; i++) {
+      await service.createMovimiento(
+        'i-1',
+        {
+          tipo: TipoMovimientoInventario.ENTRADA,
+          cantidad: 1,
+          moneda: 'USD',
+          costo_unitario_usd: 10,
+          fecha_movimiento: '2026-08-29',
+        },
+        'u-ofi',
+      );
+    }
+    expect(tc.oficialDetallePara).toHaveBeenCalledTimes(1);
+    expect(await service.tcOficialDe('2026-08-29')).toMatchObject({
+      tc: 17.0115,
+    });
+  });
+});
+
+/**
+ * «Editar costo» de una ENTRADA con la regla del último precio (D1-bis / D7):
+ * ya no hay candado de «capa consumida»; las salidas que se cobraron con el
+ * precio CONSERVAN su costo y el API exige reconocerlo (`confirmar_salidas`).
+ */
+describe('InventoryService.updateCostoEntrada — último precio y reconocimiento', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
+
+  const ENTRADA = {
+    id: 'e1',
+    item_id: 'i-1',
+    tipo: 'ENTRADA',
+    cantidad: 10,
+    costo_unitario_usd: 21.25,
+    moneda: 'USD',
+    costo_unitario_mxn: null,
+    tc_usd_mxn: 17.0115,
+    venta_unitaria: null,
+    venta_moneda: null,
+    fecha_movimiento: '2026-08-29',
+    created_at: '2026-08-29T17:36:43+00:00',
+    notas: null,
+  };
+  const SALIDA = {
+    ...ENTRADA,
+    id: 's1',
+    tipo: 'SALIDA',
+    cantidad: 4,
+    tc_usd_mxn: 17.0077,
+    venta_unitaria: 26.5625,
+    venta_moneda: 'USD',
+    fecha_movimiento: '2026-09-01',
+    created_at: '2026-09-22T14:13:06+00:00',
+    aeronave: { matricula: 'XA-VGV' },
+  };
+  const conSalida = { data: [ENTRADA, SALIDA], error: null, count: 2 };
+  const sinSalida = { data: [ENTRADA], error: null, count: 1 };
+  const DTO = { moneda: 'USD' as const, costo_unitario_usd: 23 };
+
+  const correr = (
+    cardex: Resultado,
+    tc = tcPorFecha({ '2026-08-29': 17.0115 }),
+  ) =>
+    armar(
+      {
+        inventario_movimiento: [
+          { data: ENTRADA, error: null }, // el movimiento
+          cardex, // cardex completo (dependientes)
+          { data: { ...ENTRADA, costo_unitario_usd: 23 }, error: null }, // update
+          cardex, // stats
+        ],
+        compra_linea: [{ data: null, error: null }],
+      },
+      true,
+      undefined,
+      tc,
+    );
+
+  it('CON salidas que usaron el precio y sin confirmar ⇒ 409 ENTRADA_CON_SALIDAS con la lista, y la fila NO cambia', async () => {
+    const { service, llamadas } = correr(conSalida);
+    const err = await service
+      .updateCostoEntrada('i-1', 'e1', DTO, 'u-ofi')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConflictException);
+    expect((err as ConflictException).getResponse()).toMatchObject({
+      error: 'ENTRADA_CON_SALIDAS',
+      message:
+        'Este precio ya se usó en 1 salida(s) (conservan su costo; 0 sin cargo). Confirma para guardar el precio nuevo: aplica a la existencia y a las siguientes salidas.',
+      details: {
+        salidas: [
+          {
+            id: 's1',
+            fecha: '2026-09-01',
+            cantidad: 4,
+            costo_unitario: 21.25,
+            moneda: 'USD',
+            sin_cargo: false,
+            vendido_a: 'XA-VGV',
+          },
+        ],
+      },
+    });
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
+  });
+
+  it('con confirmar_salidas: true ⇒ se guarda (ya no hay 409 de «capa consumida») y responde qué salidas conservan su costo', async () => {
+    const { service, llamadas } = correr(conSalida);
+    const res = await service.updateCostoEntrada(
+      'i-1',
+      'e1',
+      { ...DTO, confirmar_salidas: true },
+      'u-ofi',
+    );
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(1);
+    expect(
+      de(llamadas, 'inventario_movimiento', 'update')[0].args[0],
+    ).toMatchObject({
+      costo_unitario_usd: 23,
+      moneda: 'USD',
+      // USD sin T.C. en el DTO: conserva el de la fila.
+      tc_usd_mxn: 17.0115,
+    });
+    // Bitácora en notas con el dinero bien escrito (2–4 decimales + moneda).
+    const notas = String(
+      (
+        de(llamadas, 'inventario_movimiento', 'update')[0].args[0] as {
+          notas: string;
+        }
+      ).notas,
+    );
+    expect(notas).toMatch(
+      /^Costo corregido \d{4}-\d{2}-\d{2}: antes \$21\.25 USD$/,
+    );
+    expect(res).toMatchObject({
+      salidas_conservan_costo: [expect.objectContaining({ id: 's1' })],
+      regla_costo: 'ULTIMO_PRECIO',
+    });
+  });
+
+  it('la bitácora del costo anterior nunca escribe dinero con 1 decimal («$21.50 USD», no «$21.5 USD»)', async () => {
+    const e = { ...ENTRADA, costo_unitario_usd: 21.5 };
+    const cardex = { data: [e], error: null, count: 1 };
+    const { service, llamadas } = armar(
+      {
+        inventario_movimiento: [
+          { data: e, error: null },
+          cardex,
+          { data: { ...e, costo_unitario_usd: 23 }, error: null },
+          cardex,
+        ],
+        compra_linea: [{ data: null, error: null }],
+      },
+      true,
+      undefined,
+      tcPorFecha({ '2026-08-29': 17.0115 }),
+    );
+    await service.updateCostoEntrada('i-1', 'e1', DTO, 'u-ofi');
+    const upd = de(llamadas, 'inventario_movimiento', 'update')[0].args[0] as {
+      notas: string;
+    };
+    expect(upd.notas).toMatch(/: antes \$21\.50 USD$/);
+  });
+
+  it('sin salidas dependientes ⇒ 200 sin necesidad del flag', async () => {
+    const { service, llamadas } = correr(sinSalida);
+    const res = await service.updateCostoEntrada('i-1', 'e1', DTO, 'u-ofi');
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(1);
+    expect(res).toMatchObject({ salidas_conservan_costo: [] });
+  });
+
+  it('una SALIDA no se corrige aquí: 400 con el texto nuevo (sin «FIFO»)', async () => {
+    const { service } = armar({
+      inventario_movimiento: [{ data: SALIDA, error: null }],
+    });
+    const err = await service
+      .updateCostoEntrada('i-1', 's1', DTO, 'u-ofi')
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BadRequestException);
+    expect((err as Error).message).toBe(
+      'Solo se corrige el costo de una ENTRADA: el de una salida es el que se cobró al avión, y las devoluciones/ajustes se corrigen con un movimiento nuevo.',
+    );
+    expect((err as Error).message).not.toContain('FIFO');
+  });
+
+  it('el candado de COMPRA sigue intacto', async () => {
+    const { service, llamadas } = armar({
+      inventario_movimiento: [{ data: ENTRADA, error: null }],
+      compra_linea: [
+        { data: { id: 'l-1', compra: { folio: 3 } }, error: null },
+      ],
+    });
+    await expect(
+      service.updateCostoEntrada('i-1', 'e1', DTO, 'u-ofi'),
+    ).rejects.toThrow(/nace de la compra #3/);
+    expect(de(llamadas, 'inventario_movimiento', 'update')).toHaveLength(0);
   });
 });

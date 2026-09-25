@@ -25,6 +25,11 @@ import type { SupabaseService } from '../supabase/supabase.service';
  * parte en dólares viaja en `valor_costo_usd`/`sin_tc`, que los totales
  * cuadran con la Σ de las filas moneda por moneda y que ninguna fila se
  * pierde por quedarse sin valor en pesos.
+ *
+ * Desde el API 0.0.36 (25-sep-2026) el VALOR A COSTO es existencia × ÚLTIMO
+ * PRECIO DE COMPRA al T.C. oficial de HOY: con T.C. de hoy todo va en pesos;
+ * sin él (servicio sin TipoCambioService, o sin dato), lo que se compró al
+ * último en dólares va aparte, en dólares — jamás sumado como pesos.
  */
 
 type Fila = Record<string, unknown>;
@@ -74,7 +79,13 @@ const CARDEX: Fila[] = [
   mov('c1', 'it-c', 'ENTRADA', 4, 50, 'MXN'),
 ];
 
-function armar(cardex: Fila[] = CARDEX, items: Fila[] = ITEMS) {
+/** TipoCambioService falso: T.C. oficial fijo para cualquier fecha. */
+const tcFijo = (tc: number) => ({
+  oficialDetallePara: (fecha: string) =>
+    Promise.resolve({ tc, fecha_dato: fecha, fuente: 'OPEN_ER_API' }),
+});
+
+function armar(cardex: Fila[] = CARDEX, items: Fila[] = ITEMS, tcHoy?: number) {
   const from = (tabla: string) => {
     const q: Record<string, unknown> = {};
     const cadena: string[] = [];
@@ -101,7 +112,13 @@ function armar(cardex: Fila[] = CARDEX, items: Fila[] = ITEMS) {
     return q;
   };
   const supabase = { service: { from } } as unknown as SupabaseService;
-  return new InventoryService(supabase, {} as never);
+  return new InventoryService(
+    supabase,
+    {} as never,
+    undefined,
+    undefined,
+    tcHoy != null ? (tcFijo(tcHoy) as never) : undefined,
+  );
 }
 
 describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos', () => {
@@ -117,11 +134,13 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       sin_tc: true,
     });
 
-    // (b) MIXTO: 10 × $200 MXN reales + 5 × 40 USD sin TC, separados.
+    // (b) MIXTO: 10 × $200 MXN + 5 × 40 USD sin TC. Último precio = la
+    // compra en dólares (mismo instante: desempate por id) ⇒ las 15 piezas
+    // valen 40 USD, y sin T.C. de hoy van en DÓLARES (15 × 40 = 600).
     expect(porNombre.get('Bujia · REM40E')).toMatchObject({
       existencia: 15,
-      valor_costo_mxn: 2000,
-      valor_costo_usd: 200,
+      valor_costo_mxn: 0,
+      valor_costo_usd: 600,
       sin_tc: true,
     });
 
@@ -134,9 +153,11 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
     });
 
     expect(r.total_piezas).toBe(49);
-    expect(r.total_valor_mxn).toBe(2200); // 0 + 2,000 + 200 — SOLO pesos
-    expect(r.total_valor_usd).toBe(3500); // 3,300 + 200 — SOLO dólares
+    expect(r.total_valor_mxn).toBe(200); // 0 + 0 + 200 — SOLO pesos
+    expect(r.total_valor_usd).toBe(3900); // 3,300 + 600 — SOLO dólares
     expect(r.filas_sin_tc).toBe(2);
+    expect(r.regla_costo).toBe('ULTIMO_PRECIO');
+    expect(r.tc_hoy).toBeNull();
     // Σ de las filas, moneda por moneda (jamás una suma de las dos).
     expect(r.total_valor_mxn).toBe(
       r.filas.reduce((s, f) => s + (f.valor_costo_mxn ?? 0), 0),
@@ -160,7 +181,29 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       sin_tc: true,
       compradas_cant: null, // la compra quedó fuera del periodo
     });
-    expect(r.total_valor_usd).toBe(3500);
+    expect(r.total_valor_usd).toBe(3900);
+  });
+
+  it('CON el T.C. oficial de hoy (17.6729) todo el valorizado va en pesos; nada en dólares', async () => {
+    const r = await armar(CARDEX, ITEMS, 17.6729).resumenTiendita(
+      '2026-08-01',
+      '2026-08-31',
+    );
+    const porNombre = new Map(r.filas.map((f) => [f.nombre, f]));
+    expect(porNombre.get('Aceite 15w 50')).toMatchObject({
+      valor_costo_mxn: 58320.57, // round2(3,300 × 17.6729)
+      valor_costo_usd: null,
+      sin_tc: false,
+    });
+    expect(porNombre.get('Bujia · REM40E')).toMatchObject({
+      valor_costo_mxn: 10603.74, // round2(600 × 17.6729)
+      valor_costo_usd: null,
+      sin_tc: false,
+    });
+    expect(r.total_valor_mxn).toBe(69124.31);
+    expect(r.total_valor_usd).toBe(0);
+    expect(r.filas_sin_tc).toBe(0);
+    expect(r.tc_hoy).toMatchObject({ tc: 17.6729, fuente: 'OPEN_ER_API' });
   });
 
   it('el aviso en el log se conserva (la hoja no tiene columna para las compras sin TC)', async () => {
@@ -179,23 +222,27 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
     }
   });
 
-  it('sin capas en dólares, la hoja sale EXACTAMENTE como antes (0 y 0 filas marcadas)', async () => {
+  it('sin nada en dólares sin T.C., la hoja no marca ninguna fila (0 y 0)', async () => {
     const soloPesos = [
       mov('c1', 'it-c', 'ENTRADA', 4, 50, 'MXN'),
-      // USD CON tipo de cambio: es un peso real (2 × 6 × 18 = $216).
+      // Último precio: 6 USD (T.C. 18 de SU compra); el valorizado usa el de
+      // HOY (18.5): 6 piezas × 6 USD = 36 USD × 18.5 = $666.
       mov('c2', 'it-c', 'ENTRADA', 2, 6, 'USD', 18),
     ];
-    const r = await armar(soloPesos, [ITEMS[2]]).resumenTiendita(
+    const r = await armar(soloPesos, [ITEMS[2]], 18.5).resumenTiendita(
       '2026-08-01',
       '2026-08-31',
     );
     expect(r.filas).toHaveLength(1);
     expect(r.filas[0]).toMatchObject({
-      valor_costo_mxn: 416,
+      valor_costo_mxn: 666,
       valor_costo_usd: null,
       sin_tc: false,
+      // Compras del periodo en pesos, cada una al T.C. de SU día:
+      // 4 × 50 + round2(12 × 18) = 200 + 216.
+      compradas_costo_mxn: 416,
     });
-    expect(r.total_valor_mxn).toBe(416);
+    expect(r.total_valor_mxn).toBe(666);
     expect(r.total_valor_usd).toBe(0);
     expect(r.filas_sin_tc).toBe(0);
     // Tienda (25-sep-2026): sin ventas en dólares, nada en las columnas USD.
@@ -304,6 +351,13 @@ describe('resumenTiendita: utilidad USD en su columna (tienda, 25-sep-2026)', ()
       productos_con_ventas: 2,
       ventas_sin_utilidad: 1,
       con_entradas_sin_costo: false,
+      // ADITIVOS (0.0.36): sin T.C. en las salidas del aceite, su utilidad
+      // es el RESPALDO en dólares (utilidad_usd); el USD «original» solo
+      // existe para ventas que ya cuentan en pesos.
+      ventas_usd_original: null,
+      costo_ventas_usd_original: null,
+      utilidad_usd_original: null,
+      regla_costo: 'ULTIMO_PRECIO',
     });
     // Periodo sin salidas: null en cada moneda (no un 0 falso).
     const agosto = await svc.tiendaResumen({
@@ -322,6 +376,24 @@ describe('resumenTiendita: utilidad USD en su columna (tienda, 25-sep-2026)', ()
     await expect(
       svc.tiendaResumen({ desde: '2026-09-30', hasta: '2026-09-01' }),
     ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('con T.C. en las salidas (tras la migración): la utilidad del aceite cuenta en PESOS y el USD queda como original', async () => {
+    const conTc = TIENDA.map((f) =>
+      f.item_id === 'it-a'
+        ? { ...f, tc_usd_mxn: f.tipo === 'SALIDA' ? 17.0077 : 17.0115 }
+        : f,
+    );
+    const r = await armar(conTc).tiendaResumen();
+    // 12 + 24 salidas: venta round2(318.75×17.0077)+round2(637.5×17.0077)
+    // = 5,421.20 + 10,842.41; costo 4,336.96 + 8,673.93 ⇒ 3,252.72 (+400 de la bujía).
+    expect(r).toMatchObject({
+      utilidad_mxn: 3652.72,
+      utilidad_usd: null,
+      utilidad_usd_original: 191.25,
+      ventas_usd_original: 956.25,
+      ventas_usd: null,
+    });
   });
 
   it('el margen del resumen sale de la configuración', async () => {

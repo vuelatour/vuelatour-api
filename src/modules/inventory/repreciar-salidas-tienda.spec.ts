@@ -7,7 +7,6 @@ import {
   round,
   ventaDeSalida,
   ventaUnitariaConMargen,
-  walkCardex,
   type MovCardex,
 } from './inventario-cardex.util';
 
@@ -411,15 +410,15 @@ describe('re-precio 25-sep-2026: SQL ⇄ regla del API', () => {
     },
   );
 
-  it('con el cardex REAL de prod, la utilidad por salida es la de la tabla, en USD', () => {
+  it('con el cardex REAL de prod (SIN T.C., antes de 20260925000003), la utilidad por salida es la de la tabla, en USD (respaldo)', () => {
     const cardex = cardexRepreciado();
     const casos = new Map(CASOS.map((c) => [c.movId, c]));
     let vistos = 0;
     for (const movs of Object.values(cardex)) {
-      const walk = walkCardex(movs);
       for (const m of movs) {
         if (m.tipo !== 'SALIDA' || !m.id) continue;
-        const v = ventaDeSalida(m, walk.get(m.id));
+        // API 0.0.36: el costo es el GUARDADO en la fila (sin recorrer capas).
+        const v = ventaDeSalida(m);
         const caso = casos.get(m.id);
         if (caso) {
           vistos += 1;
@@ -447,6 +446,32 @@ describe('re-precio 25-sep-2026: SQL ⇄ regla del API', () => {
       }
     }
     expect(vistos).toBe(10);
+  });
+
+  it('DESPUÉS de la migración de T.C. (17.0077): la MISMA utilidad cuenta en pesos y el USD queda como dato original', () => {
+    const conTc = (movs: MovCardex[]) =>
+      movs.map((m) =>
+        m.moneda === 'USD' && m.fecha_movimiento === '2026-09-01'
+          ? { ...m, tc_usd_mxn: 17.0077 }
+          : m.moneda === 'USD' && m.fecha_movimiento === '2026-08-29'
+            ? { ...m, tc_usd_mxn: 17.0115 }
+            : m,
+      );
+    let mxn = 0;
+    let usdOriginal = 0;
+    for (const movs of Object.values(cardexRepreciado())) {
+      for (const m of conTc(movs)) {
+        if (m.tipo !== 'SALIDA' || !m.id || !UTILIDAD_USD[m.id]) continue;
+        const v = ventaDeSalida(m);
+        expect(v.monedaUtilidad).toBe('MXN');
+        expect(v.gananciaUsd).toBeNull();
+        expect(v.gananciaUsdOriginal).toBe(UTILIDAD_USD[m.id]);
+        mxn = round(mxn + (v.gananciaMxn as number), 2);
+        usdOriginal = round(usdOriginal + (v.gananciaUsdOriginal as number), 2);
+      }
+    }
+    expect(mxn).toBe(9105.07);
+    expect(usdOriginal).toBe(535.35);
   });
 
   it('HOY (venta = costo) la utilidad de las 10 es 0 USD — por eso se re-precian', () => {

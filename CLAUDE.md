@@ -392,23 +392,27 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      desglose viaja en la respuesta de `POST /conciliacion/importar`.
 
 8. **Inventario→gastos**: una SALIDA de cardex genera gasto `REFACCION` medio
-   `BODEGA` (costo FIFO; en **MXN** cuando TODAS las capas consumidas se
-   compraron en pesos — moneda operativa del cliente —, si no USD;
-   `tc_gasto` = TC ponderado de las capas) ligado por
-   `inventario_movimiento_id`; la devolución lo revierte en la moneda nativa
-   de la devolución (peso contra peso; TC solo si la moneda difiere).
+   `BODEGA` (precio de venta o, sin él, el **ÚLTIMO PRECIO DE COMPRA**
+   vigente el día de la salida + margen de la tienda — desde el API 0.0.36;
+   en **MXN** cuando esa compra fue en pesos — moneda operativa del cliente
+   —, si no USD; `tc_gasto` = T.C. OFICIAL del día de la venta, el mismo de
+   las cotizaciones. Hasta el 0.0.35 era el costo FIFO con el TC ponderado
+   de las capas: ver «ÚLTIMO PRECIO DE COMPRA + T.C. DEL DÍA» abajo) ligado
+   por `inventario_movimiento_id`; la devolución lo revierte en la moneda
+   nativa de la devolución (peso contra peso; TC solo si la moneda difiere).
    No duplicar ese costo en otro lado. Caso aceites 28-ago-2026: una entrada
    en pesos capturada como USD multiplicó ×17 el costo del avión.
 
    **JAMÁS UN USD SUMADO COMO MXN EN EL VALORIZADO (22-sep-2026).** Fuente
-   única `inventario-cardex.util.ts#statsFromLayers`: `valor_mxn` suma SOLO
-   las capas con pesos REALES (compra en MXN, o USD con TC — `pesosExactos`),
-   la parte comprada en dólares SIN tipo de cambio va en `valor_usd_sin_tc`
-   (en DÓLARES) y `pesos_exactos` dice si `valor_mxn` ya es todo el
-   valorizado (criterio de `costoSinTc`: un costo de $0 vale 0 en cualquier
-   moneda y NO cuenta como «sin TC»). Los dos campos no se suman entre sí
-   NUNCA. `valor_usd` (el USD interno del reparto, TODAS las capas) no
-   cambió. En la **hoja «inventario» del Balance general**
+   única `inventario-cardex.util.ts#statsDe` (desde el API 0.0.36; antes
+   `statsFromLayers`, que se ELIMINÓ con el FIFO): `valor_mxn` = existencia
+   × último precio de compra en pesos REALES (compra en MXN, o USD al T.C.
+   oficial de HOY); si el último precio es USD y no hay T.C. de hoy, el
+   valor va en `valor_usd_sin_tc` (en DÓLARES) y `pesos_exactos` = false.
+   Los dos campos no se suman entre sí NUNCA (criterio de `costoSinTc`: un
+   costo de $0 vale 0 en cualquier moneda y NO cuenta como «sin TC»).
+   `valor_usd` = existencia × `costo_unitario_usd` del último precio (USD
+   interno). En la **hoja «inventario» del Balance general**
    (`resumenTiendita` → `BalanceHojaInventarioPayload`) cada fila lleva
    `valor_costo_mxn` (pesos reales; 0 es 0, no «se desconoce»),
    `valor_costo_usd` (dólares sin TC; null si 0) y `sin_tc`, con totales
@@ -424,9 +428,10 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
    (`con_movimientos_sin_tc` — mira TODO el cardex, incluidas capas ya
    consumidas: NO es lo mismo que `sin_tc`, que mira las capas vivas), el
    Excel «Inventario valorizado» tiene su columna «Valor USD (sin T.C.)» y
-   `listItems` su `valor_total_usd_sin_tc`. Lo único que sigue mezclando es
-   `costo_fifo_mxn_actual` (costo unitario de la capa más vieja, no una
-   suma): se lee con `pesos_exactos` al lado.
+   `listItems` su `valor_total_usd_sin_tc`. `costo_fifo_mxn_actual` y
+   `costo_fifo_actual` quedan DEPRECADOS (compat, nadie los pinta):
+   `costo_fifo_mxn_actual = costo_vigente_mxn ?? 0` — jamás el USD en un
+   campo «mxn» (antes caía al USD sin TC).
 
    **SALIDA «para todas las matrículas» (`para_flota`) ⇒ `aeronave_id` NULL**
    y el cargo se prorratea entre los aviones ACTIVOS (un gasto por avión,
@@ -482,25 +487,24 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      apunte** —esas tres FK son `on delete set null`: borrar el gasto las
      dejaría apuntando a nada EN SILENCIO— o que ya no es REFACCION/BODEGA),
      `TIPO_NO_SOPORTADO` (DEVOLUCION/AJUSTE: se corrigen con un movimiento
-     contrario) y los dos NUMÉRICOS de
+     contrario) y el NUMÉRICO de
      `src/modules/inventory/eliminar-movimiento.util.ts#evaluarEliminacion`
      (helper PURO con spec sobre el caso real del 29-ago):
-     `STOCK_NEGATIVO` y `CAMBIA_COSTO_FIFO`. **Solo se elimina si en NINGÚN
-     punto de la cronología la existencia queda negativa Y el costo FIFO de
-     TODAS las demás salidas queda idéntico (tolerancia 0.005)** — el costo
-     de una salida ya viajó al gasto de un avión y no se mueve nunca. El
-     mensaje dice SIEMPRE qué eliminar primero (se borra de lo más nuevo a
-     lo más viejo).
-     **El costo se compara EN LAS DOS MONEDAS** (revisión adversaria
-     21-sep-2026): `walkCardex` expone `costoUsdFifo` (ADITIVO) además de
-     `costoMxnFifo`, y `evaluarEliminacion` exige que las dos queden iguales.
-     Motivo: para una capa comprada en USD SIN TC —**66 de los 75
-     movimientos de producción**, la carga VTF-INV-001 completada con el
-     PATCH de costo— el costo en pesos NO es expresable y sale `null`; solo
-     con los pesos, «null vs null» se leía como «no cambió» y la baja pasaba
-     aunque el costo real de la salida saltara de $46.06 a $9,541.25 USD.
-     Por lo mismo el mensaje cita la moneda que SÍ se puede leer (pesos si
-     los hay, si no USD): jamás «$0.00 MXN» sobre capas sin TC.
+     `STOCK_NEGATIVO`. **Solo se elimina si en NINGÚN punto de la
+     cronología la existencia queda negativa.** El mensaje dice SIEMPRE qué
+     eliminar primero (se borra de lo más nuevo a lo más viejo).
+     **`CAMBIA_COSTO_FIFO` ya NO se emite desde el API 0.0.36**: el costo de
+     cada salida está GUARDADO en su fila (último precio de compra vigente
+     el día de la salida) y ninguna baja lo mueve. El código se conserva en
+     `CODIGOS_BLOQUEO_ELIMINACION` (un API previo aún podría mandarlo) y
+     `salidas_afectadas` viaja siempre `[]`. La vista previa gana
+     `precio_vigente_antes/despues` + `cambia_precio_vigente` y el `detalle`
+     lo dice («El último precio de compra pasa de $30.00 USD (5 sep 2026) a
+     $21.00 USD (10 ago 2026)…») y cuántas salidas se cobraron con el
+     precio de esa compra (conservan su cargo). Historia (≤ 0.0.35): el
+     candado comparaba el costo FIFO de las demás salidas EN LAS DOS
+     MONEDAS porque 66 de 75 movimientos eran USD sin TC y «null vs null» se
+     leía como «no cambió».
      La vista previa repite EXACTAMENTE los candados de dinero de la función
      de BD: si divergen, el diálogo diría «se puede» y el DELETE contestaría 409.
    - `GET …/movimientos/:movId/eliminacion` (ADMIN) es la vista previa (solo
@@ -515,25 +519,25 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
    cliente: «de los productos que compramos, el precio que le ponemos en el
    costo se le saca el 25 % el cual va a ser nuestra utilidad por producto
    vendido o cargado a un avión»).** Decisión tomada: **margen SOBRE EL COSTO
-   FIFO, configurable** (`configuracion_sistema.inventario_margen_venta_pct`,
+   (desde el API 0.0.36, el ÚLTIMO PRECIO DE COMPRA; en 0.0.35, el costo
+   FIFO), configurable** (`configuracion_sistema.inventario_margen_venta_pct`,
    25 por default, `PATCH /v1/config/inventario_margen_venta_pct` 0–100 o
    **400 `VALOR_FUERA_DE_RANGO`**). Toda SALIDA a un avión (también «para toda
    la flota», prorrateada con el residuo en el primero) **sin precio** se
-   cobra a `costo FIFO × (1 + margen)`, en la MISMA moneda del costo (MXN si
-   todas las capas consumidas son pesos; si no USD). Precedencia intacta:
-   precio capturado > 0 → `precio_venta` del ítem → costo + margen → a costo;
-   **el 0 explícito sigue siendo «a costo»** (sin utilidad). Utilidad =
-   venta − costo FIFO.
+   cobra a `último precio × (1 + margen)`, en la MISMA moneda de esa compra.
+   Precedencia intacta: precio capturado > 0 → `precio_venta` del ítem →
+   costo + margen → a costo; **el 0 explícito sigue siendo «a costo»** (sin
+   utilidad). Utilidad = venta − costo de la salida (el de su fila).
    - **Fuente ÚNICA** en `inventario-cardex.util.ts`: `margenVentaValido`
      (config rota ⇒ 25), `ventaUnitariaConMargen` (round 4),
      `precioVentaDeSalida` (la precedencia, con `origen` PRECIO_CAPTURADO |
      PRECIO_PRODUCTO | MARGEN | A_COSTO), **`montoGastoDeSalida` (se MOVIÓ
      aquí desde el pie de `inventory.service.ts`, mismo cuerpo)** y
-     **`ventaDeSalida`**: la utilidad de UNA salida en UNA sola moneda — pesos
-     si `ventaYGananciaDe` los puede expresar (criterio de siempre, ninguna
-     salida que ya daba utilidad en pesos cambia), si no **dólares** cuando la
-     venta es USD (venta USD − `costoUsdFifo`: dinero real de los dos lados,
-     sin T.C.); venta en PESOS sobre capas USD sin T.C. ⇒ `utilidadIncompleta`
+     **`ventaDeSalida(mov)`** (desde 0.0.36 recibe SOLO la fila: el costo es
+     el guardado): la utilidad de UNA salida — en PESOS con venta y costo al
+     T.C. del día de la venta (el de la fila); RESPALDO de filas sin T.C.
+     (legado): dólares cuando la venta es USD (venta USD − costo USD
+     interno); venta en PESOS sobre costo USD sin T.C. ⇒ `utilidadIncompleta`
      (se cuenta en `ventas_sin_utilidad` y se avisa, jamás se suma nada).
      `gananciaMxn` y `gananciaUsd` NUNCA los dos. `agregadosDeItem` /
      `resumenDiarioDe` / `bloquesCardexDe` la usan y ganan `ventas_cant`,
@@ -545,7 +549,8 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      `@Optional()` (4.º parámetro; sin él ⇒ 25). La respuesta gana
      `venta_origen` y `margen_pct` (solo MARGEN); el replay idempotente NO
      recalcula (`null`). Las notas del gasto dicen `(precio de venta)` |
-     `(costo FIFO + 25 %)` | `(costo FIFO)`. El panel VIEJO manda
+     `(último precio + 25 %)` | `(a costo)` (hasta 0.0.35: `(costo FIFO + 25
+     %)` | `(costo FIFO)`; fuente única `etiquetaCargoDeSalida`). El panel VIEJO manda
      `venta_unitaria: 0` con el precio vacío ⇒ esas salidas van a costo hasta
      desplegar el panel nuevo (que omite el campo); la app Flutter ya lo
      omite.
@@ -616,6 +621,110 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      0.0.34 (sin llaves nuevas; alta con «Bodega Cancún») y lo nuevo responde
      **503 `MIGRACION_PENDIENTE`**. La utilidad y el margen NO dependen de la
      migración.
+
+   **ÚLTIMO PRECIO DE COMPRA + T.C. OFICIAL DEL DÍA (25-sep-2026, API
+   0.0.36; pedido del cliente: «que los precios se ajusten en automático al
+   último registrado … el remanente que teníamos de agosto ahora igual su
+   costo de 30 DLS» y «En el tipo de cambio, que sea los mismos que usan en
+   las cotizaciones (Tipo de cambio del día de la venta)»).** El FIFO SE
+   ELIMINÓ de todo el inventario (`buildLayers`, `statsFromLayers`,
+   `consumeFifo`, `ventaYGananciaDe` ya no existen). Fuente única
+   `inventario-cardex.util.ts` (spec con el ejemplo del cliente y el cardex
+   REAL de prod en `cardex-prod-25sep.fixture-spec.ts`):
+   - **Costo vigente** (`costoVigenteEn`): el precio unitario, con su
+     moneda, de la ENTRADA con costo > 0 más reciente con
+     `fecha_movimiento ≤ corte` (orden `fecha, created_at, id`).
+     DEVOLUCION/AJUSTE y entradas a $0 NO lo cambian. Corte `{ fecha }` =
+     salida nueva / valorizado (hoy); corte `{ alRegistrar: S }` = lo que
+     vio el API al escribir S (`created_at < S.created_at`): una compra
+     recibida después con fecha atrasada no reescribe el pasado.
+   - **El costo de una SALIDA se CONGELA en su fila** (`costo_unitario_usd`,
+     `moneda`, `costo_unitario_mxn`) y TODO lector lo lee de ahí
+     (`costoDeSalida`); nada lo recalcula. Semántica de la fila de una
+     SALIDA en PESOS: `costo_unitario_mxn` = pesos de la compra vigente (lo
+     canónico), `costo_unitario_usd` = el USD interno de ESA compra (con el
+     T.C. de la compra) y `tc_usd_mxn` = T.C. oficial del día de la VENTA:
+     ya NO se cumple `usd × tc ≈ mxn` en esa fila — ningún lector deriva
+     pesos de `usd × tc` en una fila MXN. En una SALIDA, la columna «TC» del
+     Excel del cardex significa «T.C. del día de la venta».
+   - **Escritura** (`createMovimiento`): SALIDA = existencia de todo el
+     cardex (textos de siempre) + costo vigente de SU fecha + T.C. oficial
+     de SU fecha sellado en `tc_usd_mxn` (⇒ `tc_gasto` del cargo). Si hay
+     compras con costo pero todas son POSTERIORES a la fecha de la salida ⇒
+     **400 `SALIDA_ANTES_DE_LA_COMPRA`** (nada escrito; un $0 silencioso no).
+     Sin ninguna compra con costo ⇒ costo $0 + `aviso:
+     'SIN_COSTO_VIGENTE'`: sin precio va a costo $0 SIN gasto; con precio
+     (capturado o del producto) el avión SÍ paga ese precio y toda la venta
+     es utilidad — `aviso_mensaje` dice cuál de los dos (revisión adversaria
+     25-sep-2026: el texto único decía «sin cargo al avión» también cuando
+     sí hubo cargo) y que completar después el costo de la compra NO
+     re-cobra esa salida. ENTRADA/DEVOLUCION/AJUSTE: T.C. capturado > 0
+     gana; si no, el oficial de SU fecha (MXN sin ninguno ⇒ 400 «No hay T.C.
+     oficial para esa fecha»; en MXN el T.C. ya es OPCIONAL). Todo T.C.
+     escrito pasa por `redondearA(tc, 4)` (precisión de la columna).
+     Respuesta ADITIVA: `costo_vigente`, `tc_venta`, `aviso`,
+     `aviso_mensaje`, `regla_costo: 'ULTIMO_PRECIO'`.
+   - **T.C.** = `TipoCambioService.oficialDetallePara(fecha)` — la MISMA
+     función (y la misma ventana de 7 días / descarga) que el cotizador;
+     `InventoryModule` importa `TipoCambioModule` (sin ciclo) y el servicio
+     lo recibe `@Optional()` (5.º parámetro; sin él ⇒ «sin T.C.», como
+     0.0.35). `tcOficialDe` (público: lo usa `compras.service`) memoiza por
+     fecha 10 min, positivo y negativo, guardando la promesa. El T.C. se
+     SELLA al escribir (una captura antes de las 07:05 puede llevar el de
+     ayer si open.er-api no contesta; no se recalcula — igual que la
+     cotización).
+   - **Conversión a pesos** (`aMxn`/`aUsd`/`montosDeCompra`/`costoDeSalida`/
+     `ventaDeSalida`): siempre el TOTAL nativo redondeado × T.C.
+     (`round2(round2(cant × u) × tc)`, idéntico a `numeric` de Postgres en
+     los 77 movimientos de prod). Compras al T.C. de SU día; venta Y costo
+     de una salida al del día de la VENTA (utilidad MXN ≈ utilidad USD × T.C.
+     ±1 ¢); valorizado al T.C. oficial de HOY (se mueve cada día). El USD
+     ORIGINAL (`*_usd_original`) es dato secundario de una utilidad que YA
+     cuenta en pesos (solo venta y costo en dólares nativos); los campos
+     `ventas_usd`/`utilidad_usd` son SOLO el respaldo de filas sin T.C.
+   - **«Editar costo» de una ENTRADA** (`updateCostoEntrada`): se retiró el
+     candado «capa consumida»; corregir el precio cambia el valorizado y las
+     SIGUIENTES salidas, jamás las ya cobradas. Si alguna salida usó (o
+     habría usado) ese precio (`salidasQueDependenDe`, también las que
+     salieron a $0 SIN cargo) y el DTO no trae `confirmar_salidas: true` ⇒
+     **409 `ENTRADA_CON_SALIDAS`** con `details.salidas` y NADA escrito.
+     USD sin T.C. en el DTO conserva el de la fila (antes lo borraba).
+     Re-costear una salida mal cobrada = baja con motivo + recaptura.
+     `compras.service#recibirInterno` (recosteo) ya no borra el T.C. de la
+     entrada: `tc ?? tc de la fila ?? oficial del día de la compra`.
+   - **Lecturas** (todo ADITIVO + `regla_costo`): lista (`costo_vigente`,
+     `costo_vigente_mxn`, `tc_hoy` raíz, `*_usd_original`,
+     `ventas_a_costo_mxn`, `movimientos_sin_tc`), detalle (ENTRADA
+     `fija_precio`/`es_precio_vigente`/`salidas_con_este_precio`/
+     `salidas_sin_cargo`; SALIDA `tc_venta`/`costo_total`/`costo_moneda`/
+     `costo_total_mxn`/`venta_total_mxn`/`ganancia_usd_original`), la FICHA
+     `GET items/:id/resumen` (`precio_vigente` con `siguiente_salida`,
+     `tc_hoy`, `dinero_generado` — el panel lo pinta TAL CUAL, no suma),
+     tienda/resumen, Excel del inventario («Último precio de compra» +
+     «Moneda», «Vendido (MXN)»; las columnas USD solo si algún producto las
+     trae), cardex libro (`nota`) y hoja «inventario» del Balance general
+     (`tc_hoy`, `regla_costo`, `*_usd_original` por fila).
+   - **Balance GENERAL, hoja «refacciones»**
+     (`aircraft/refacciones-costo.util.ts`, con spec): el costo de cada
+     salida se convierte con el MISMO T.C. con que la fila convierte la
+     VENTA (`tc_gasto` de SU gasto, adjuntado por índice junto a
+     `inventario_movimiento_id`, o el promedio del libro) — ya no con el
+     `tc_usd_mxn` del movimiento. En las 13 salidas históricas da idéntico
+     y la migración de T.C. no mueve la ganancia de la hoja. Diferencia
+     VISIBLE aceptada: en septiembre la utilidad por ítem (bloque 1, T.C.
+     del día de la venta) y el detalle de salidas (bloque 2, T.C. del gasto
+     ⇒ promedio) difieren ≈ $60 MXN para las 10 salidas del 01-sep (sus
+     gastos siguen con `tc_gasto` null; alinearlos sería otra migración que
+     SÍ mueve la cascada — decisión de la oficina). `gasto.tc_gasto` de
+     gastos existentes NO se toca; los NUEVOS nacen con el T.C. oficial del
+     día de la salida.
+   - **Pendientes conocidos**: la DEVOLUCIÓN revierte con el costo capturado
+     en la devolución (el avión conserva el 25 % de lo devuelto); el
+     `precio_venta` fijo del producto sigue ganando al margen y no sigue al
+     último precio; un movimiento que se escribe sin T.C. porque no había
+     dato queda «sin T.C.» (no hay cron que lo complete); la función de BD
+     `inventario_eliminar_movimiento` conserva «FIFO» en su COMMENT
+     (cosmético, sería DDL).
 
 9. **Candados de rol**: el PILOTO solo registra cobros con método ∈
    {EFECTIVO, DOLARES, BILLPOCKET, HSBC_LINK} (se valida el del vuelo Y el del
@@ -2706,6 +2815,32 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE — aplicar DESPUÉS de desplegar el API 0.0.36 (migración de
+  DATOS, sin DDL)** — `20260925000003_inventario_tc_oficial_movimientos.sql`
+  (invariante 8, «ÚLTIMO PRECIO DE COMPRA + T.C. DEL DÍA»): pone el T.C.
+  oficial de su día (tabla `tipo_cambio_oficial`, ventana de 7 días del
+  cotizador) a los 77 movimientos USD sin T.C. REGISTRADOS antes del 23-sep
+  Cancún: 63 entradas del 29-ago a 17.0115; 4 entradas y 10 salidas del
+  01-sep a 17.0077 (compras $1,351,908.88 + $18,196.87 MXN; ventas
+  $45,524.17 / costo $36,419.10 / utilidad $9,105.07 MXN). NO toca `gasto`
+  (ni `monto` ni `tc_gasto`). Guarda POR FILA (3 grupos, T.C. de su día;
+  tolera un subconjunto ≤ 63/4/10; una fila ajena ⇒ `TC_ABORTADO` sin
+  escribir), idempotente (`TC_YA_APLICADO`), informa lo posterior al corte
+  sin tocarlo; sección 3 cambia la descripción de
+  `inventario_margen_venta_pct` («último precio de compra»). **Antes de
+  aplicar**: el DRY-RUN de su cabecera (sección 1 + `do $dry$`: DELETE de
+  T.C. para ejercer el aborto, INSERT real de un movimiento posterior, la
+  migración dos veces, huellas `to_jsonb` de `gasto` y del cardex, UPDATE
+  real de la sección 3) ⇒ `DRYRUN_OK`. Probado en PGlite con los 81
+  movimientos, las 40 filas de T.C. y la fila de configuración REALES de
+  prod: `DRYRUN_OK`, `TC_OK: 77`, segunda vez `TC_YA_APLICADO (77 de los
+  77)`, subconjunto ⇒ `TC_OK: 76`, fila ajena ⇒ `TC_ABORTADO` sin escribir.
+  **Nunca antes del API 0.0.36** (con el 0.0.35 las ventas quedarían a
+  17.0077 contra un costo FIFO a 17.0115). Tras aplicar:
+  `GET /v1/inventory/tienda/resumen` ⇒ `utilidad_mxn 9105.07`,
+  `utilidad_usd null`, `utilidad_usd_original 535.35`. El spec
+  `inventario-tc-oficial.spec.ts` ata sus literales y la tabla de las 10
+  salidas al util.
 - **APLICADA (25-sep-2026, API 0.0.35; DRYRUN_OK C1–C6 con escrituras reales; `get_advisors` solo el INFO de RLS sin policies; ningún ítem ligado todavía)** —
   `20260925000001_inventario_ubicacion_margen.sql` (invariante 8,
   «UBICACIONES» y «UTILIDAD DE LA TIENDA»): tabla `inventario_ubicacion` (RLS

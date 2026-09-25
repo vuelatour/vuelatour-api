@@ -106,7 +106,7 @@ export class InventoryController {
   @Roles(...OFICINA)
   @ApiOperation({
     summary:
-      'Utilidad de la tienda VuelaTour: lo cobrado a los aviones − costo FIFO de lo que salió, en PESOS y en DÓLARES por separado (null = nada en esa moneda). desde/hasta opcionales (YYYY-MM-DD, día Cancún); sin fechas = todo el historial. Incluye el margen vigente (inventario_margen_venta_pct).',
+      'Utilidad de la tienda VuelaTour: lo cobrado a los aviones − el costo de lo que salió (último precio de compra), en PESOS al T.C. oficial del día de cada venta (utilidad_mxn). utilidad_usd = respaldo de movimientos sin T.C.; utilidad_usd_original = el USD de las ventas USD-sobre-USD (dato secundario, jamás sumado). desde/hasta opcionales (YYYY-MM-DD, día Cancún); sin fechas = todo el historial. Incluye el margen vigente (inventario_margen_venta_pct) y regla_costo.',
   })
   tiendaResumen(@Query() q: TiendaResumenQuery) {
     return this.inventory.tiendaResumen(q);
@@ -253,7 +253,7 @@ export class InventoryController {
   @Roles(...OFICINA)
   @ApiOperation({
     summary:
-      'Cardex del ítem en formato LIBRO (Excel): bloque ENTRADAS | bloque SALIDAS con venta, remanente y ganancia FIFO por salida.',
+      'Cardex del ítem en formato LIBRO (Excel): bloque ENTRADAS | bloque SALIDAS con venta, remanente y ganancia por salida (costo = último precio de compra; pesos al T.C. oficial de cada día).',
   })
   async cardexLibro(
     @Param('id', ParseUUIDPipe) id: string,
@@ -271,7 +271,7 @@ export class InventoryController {
   @Roles(...OFICINA)
   @ApiOperation({
     summary:
-      'Resumen del producto: bloques COMPRAS | VENTAS (los mismos del cardex libro), RESUMEN por día (existencia al cierre + utilidad del día) y totales — mismo FIFO/ganancia que la hoja Inventario del Balance general. Montos en MXN. desde/hasta opcionales (YYYY-MM-DD, día Cancún).',
+      'Ficha del producto: bloques COMPRAS | VENTAS (los mismos del cardex libro), RESUMEN por día (existencia al cierre + utilidad del día), totales, precio_vigente (último precio de compra y a cuánto sale la siguiente salida) y dinero_generado (vendido y utilidad) — mismos números que la hoja Inventario del Balance general. Montos en MXN al T.C. oficial de cada día. desde/hasta opcionales (YYYY-MM-DD, día Cancún).',
   })
   resumenItem(
     @Param('id', ParseUUIDPipe) id: string,
@@ -282,7 +282,10 @@ export class InventoryController {
 
   @Get('items/:id')
   @Roles(...OFICINA)
-  @ApiOperation({ summary: 'Item detail with cardex + FIFO stats + empaques' })
+  @ApiOperation({
+    summary:
+      'Detalle del ítem con cardex, empaques y valorizado (último precio de compra al T.C. oficial de hoy)',
+  })
   getItem(@Param('id', ParseUUIDPipe) id: string) {
     return this.inventory.getItemDetail(id);
   }
@@ -360,7 +363,7 @@ export class InventoryController {
   @Roles(Rol.ADMIN, Rol.MECANICO)
   @ApiOperation({
     summary:
-      'Register a cardex movement. SALIDA computes FIFO cost and requires aeronave_id. Por empaque: empaque_id + cantidad_empaques (cantidad = empaques × factor, en unidades).',
+      'Registra un movimiento de cardex. SALIDA: costo = último precio de compra vigente el día de la salida (se guarda en la fila), T.C. oficial del día de la venta, requiere aeronave_id o para_flota; 400 SALIDA_ANTES_DE_LA_COMPRA si todas las compras con costo son posteriores. ENTRADA sin T.C. ⇒ T.C. oficial de su día. Por empaque: empaque_id + cantidad_empaques (cantidad = empaques × factor, en unidades).',
   })
   createMovimiento(
     @Param('id', ParseUUIDPipe) id: string,
@@ -387,7 +390,7 @@ export class InventoryController {
   @Roles(Rol.ADMIN)
   @ApiOperation({
     summary:
-      'VISTA PREVIA de la baja (solo lee): qué se eliminaría, cómo queda la existencia y qué gastos de bodega se van con el movimiento — o por qué NO se puede (code: MOVIMIENTO_DE_COMPRA, TIPO_NO_SOPORTADO, GASTO_BLOQUEADO, STOCK_NEGATIVO, CAMBIA_COSTO_FIFO) y qué eliminar primero.',
+      'VISTA PREVIA de la baja (solo lee): qué se eliminaría, cómo queda la existencia, si cambia el último precio de compra (cambia_precio_vigente) y qué gastos de bodega se van con el movimiento — o por qué NO se puede (code: MOVIMIENTO_DE_COMPRA, TIPO_NO_SOPORTADO, GASTO_BLOQUEADO, STOCK_NEGATIVO; CAMBIA_COSTO_FIFO ya no se emite desde el 0.0.36) y qué eliminar primero.',
   })
   previewEliminacionMovimiento(
     @Param('id', ParseUUIDPipe) id: string,
@@ -416,7 +419,7 @@ export class InventoryController {
   @Roles(Rol.ADMIN, Rol.MECANICO)
   @ApiOperation({
     summary:
-      'Corrige el COSTO de una ENTRADA (moneda/costo/TC; cantidad/fecha/tipo jamás). 409 si nace de una compra (se corrige desde la compra) o si el FIFO ya consumió unidades de esa capa.',
+      'Corrige el COSTO de una ENTRADA (moneda/costo/TC; cantidad/fecha/tipo jamás). 409 si nace de una compra (se corrige desde la compra). 409 ENTRADA_CON_SALIDAS (details.salidas) si alguna salida ya se cobró con este precio y no viene confirmar_salidas: true — esas salidas conservan su costo; el precio nuevo aplica a la existencia y a las siguientes salidas.',
   })
   updateCostoMovimiento(
     @Param('id', ParseUUIDPipe) id: string,
