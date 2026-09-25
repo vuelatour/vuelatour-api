@@ -12,6 +12,12 @@ import { TipoMovimientoInventario } from './dto/inventory.dto';
  * Ninguno de ellos recalcula nada: consumen lo que sale de aquí. Sin `this`,
  * sin BD, sin fechas del sistema — `fecha_movimiento` ya es día Cancún
  * (la escribe el API con hoyCancun()).
+ *
+ * TIENDA VUELATOUR (25-sep-2026): también viven aquí el PRECIO de una salida
+ * (`precioVentaDeSalida`: precio capturado → precio del producto → costo FIFO
+ * + margen de la tienda), el MONTO del gasto BODEGA (`montoGastoDeSalida`) y
+ * la UTILIDAD de una salida en UNA sola moneda (`ventaDeSalida`: pesos si se
+ * puede, si no dólares sobre costo en dólares; jamás las dos sumadas).
  */
 
 const SALIDA = TipoMovimientoInventario.SALIDA as string;
@@ -175,6 +181,159 @@ export function ventaYGananciaDe(
         : null,
     sinTc: costoSinTc,
   };
+}
+
+// ===== Tienda VuelaTour: margen, precio y cargo de la salida (25-sep-2026) =====
+//
+// Pedido del cliente (25-sep-2026): «de los productos que compramos, el precio
+// que le ponemos en el costo se le saca el 25 % el cual va a ser nuestra
+// utilidad por producto vendido o cargado a un avión». Decisión tomada: el
+// margen es SOBRE EL COSTO FIFO, configurable (`inventario_margen_venta_pct`,
+// 25 % por default), y aplica a TODA salida a un avión (también «para toda la
+// flota») que no traiga precio explícito. El precio capturado en la salida
+// (> 0) y el `precio_venta` del ítem siguen ganando, y el 0 explícito sigue
+// siendo «a costo». La utilidad de VuelaTour = venta − costo FIFO.
+
+/** Margen de la tienda por default (% sobre el costo FIFO) — decisión del cliente 25-sep-2026. */
+export const MARGEN_VENTA_PCT_DEFAULT = 25;
+
+/**
+ * Valor de la configuración → margen válido: número finito 0 ≤ x ≤ 100.
+ * Cualquier otra cosa (null, NaN, texto, negativo, > 100) ⇒ el default 25:
+ * una fila rota en la BD jamás deja al avión pagando un precio absurdo.
+ */
+export function margenVentaValido(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100) {
+    return MARGEN_VENTA_PCT_DEFAULT;
+  }
+  return v;
+}
+
+/**
+ * Precio unitario con margen: round(costoUnitario × (1 + pct/100), 4). Con
+ * costo ≤ 0 (entrada sin costo real) o margen ≤ 0 no hay venta: 0.
+ */
+export function ventaUnitariaConMargen(
+  costoUnitario: number,
+  margenPct: number,
+): number {
+  const costo = Number(costoUnitario);
+  const pct = Number(margenPct);
+  if (!(costo > 0) || !(pct > 0)) return 0;
+  return round(costo * (1 + pct / 100), 4);
+}
+
+/** De dónde salió el precio que paga el avión en una SALIDA. */
+export type OrigenVenta =
+  | 'PRECIO_CAPTURADO'
+  | 'PRECIO_PRODUCTO'
+  | 'MARGEN'
+  | 'A_COSTO';
+
+/**
+ * Precio que paga el avión por UNA unidad de la salida. Precedencia (la de
+ * siempre + el margen al final):
+ *  1. dtoVenta != null: > 0 ⇒ PRECIO_CAPTURADO (moneda: dtoMoneda, si no la
+ *     del ítem); == 0 ⇒ A_COSTO («0 explícito = a costo»).
+ *  2. itemPrecio > 0 ⇒ PRECIO_PRODUCTO (moneda del ítem).
+ *  3. margenPct > 0 y costoUnitario > 0 ⇒ MARGEN, en `monedaSalida` (la
+ *     MISMA moneda del costo FIFO de la salida: MXN si todas las capas
+ *     consumidas son pesos, si no USD — regla de createMovimiento).
+ *  4. si no ⇒ A_COSTO (sin venta).
+ * Jamás cruza el precio de una fuente con la moneda de otra.
+ */
+export function precioVentaDeSalida(p: {
+  dtoVenta?: number | null;
+  dtoMoneda?: 'MXN' | 'USD' | null;
+  itemPrecio?: number | string | null;
+  itemMoneda?: 'MXN' | 'USD' | null;
+  /** Costo unitario de la salida EN monedaSalida (MXN: round4(mxn/cant); USD: round4(usd/cant)). */
+  costoUnitario: number;
+  monedaSalida: 'MXN' | 'USD';
+  margenPct: number;
+}): {
+  ventaUnitaria: number | null;
+  ventaMoneda: 'MXN' | 'USD' | null;
+  origen: OrigenVenta;
+} {
+  const aCosto = {
+    ventaUnitaria: null,
+    ventaMoneda: null,
+    origen: 'A_COSTO' as const,
+  };
+  if (p.dtoVenta != null) {
+    const v = Number(p.dtoVenta);
+    if (!(v > 0)) return aCosto;
+    return {
+      ventaUnitaria: round(v, 4),
+      ventaMoneda: p.dtoMoneda ?? (p.itemMoneda === 'USD' ? 'USD' : 'MXN'),
+      origen: 'PRECIO_CAPTURADO',
+    };
+  }
+  const precioItem = p.itemPrecio != null ? Number(p.itemPrecio) : NaN;
+  if (precioItem > 0) {
+    return {
+      ventaUnitaria: round(precioItem, 4),
+      ventaMoneda: p.itemMoneda === 'USD' ? 'USD' : 'MXN',
+      origen: 'PRECIO_PRODUCTO',
+    };
+  }
+  const conMargen = ventaUnitariaConMargen(p.costoUnitario, p.margenPct);
+  if (conMargen > 0) {
+    return {
+      ventaUnitaria: conMargen,
+      ventaMoneda: p.monedaSalida,
+      origen: 'MARGEN',
+    };
+  }
+  return aCosto;
+}
+
+/**
+ * Monto/moneda del gasto de bodega que nace de una SALIDA — FUENTE ÚNICA del
+ * monto/moneda/TC del cargo al avión (salida individual Y prorrateo de flota;
+ * vivía al pie de `inventory.service.ts` hasta el 25-sep-2026 y se movió aquí
+ * para que `ventaDeSalida` y la migración de re-precio se atan al MISMO
+ * número con un spec).
+ *
+ * CARGO A PRECIO DE VENTA (decisión del cliente 29-ago-2026): si la salida
+ * lleva `venta_unitaria`, el avión paga venta_unitaria × cantidad en
+ * `venta_moneda` (el costo FIFO queda SOLO para el inventario: capas,
+ * valorizado y cardex no cambian). CRITERIO DE TC de la venta: `tc_gasto`
+ * lleva el TC ponderado FIFO de las capas consumidas (mov.tc_usd_mxn) como
+ * REFERENCIA — es el TC real de lo que costó la pieza y permite expresar el
+ * gasto en la otra moneda para el reparto/balance; si las capas no traían TC,
+ * queda null y los lectores aplican su respaldo de siempre (TC del día /
+ * `vuelo.tc_usd_mxn`). Sin venta, NADA cambia: costo FIFO exacto como hoy
+ * (en MXN cuando todas las capas consumidas se compraron en pesos, si no
+ * USD; `tc_gasto` = TC ponderado de las capas). Desde el 25-sep-2026 casi
+ * toda salida lleva venta (costo + margen de la tienda).
+ */
+export function montoGastoDeSalida(mov: Record<string, unknown>): {
+  monto: number;
+  moneda: 'MXN' | 'USD';
+  tcGasto: number | null;
+  /** true = el cargo salió del PRECIO DE VENTA (no del costo FIFO). */
+  esVenta: boolean;
+} {
+  const cant = Number(mov.cantidad);
+  const tc = Number(mov.tc_usd_mxn);
+  const tcGasto = Number.isFinite(tc) && tc > 0 ? tc : null;
+  const venta = mov.venta_unitaria != null ? Number(mov.venta_unitaria) : null;
+  if (venta != null && venta > 0) {
+    return {
+      monto: round(cant * venta, 2),
+      moneda: mov.venta_moneda === 'USD' ? 'USD' : 'MXN',
+      tcGasto,
+      esVenta: true,
+    };
+  }
+  const enMxn = mov.moneda === 'MXN' && mov.costo_unitario_mxn != null;
+  const monto = round(
+    cant * Number(enMxn ? mov.costo_unitario_mxn : mov.costo_unitario_usd),
+    2,
+  );
+  return { monto, moneda: enMxn ? 'MXN' : 'USD', tcGasto, esVenta: false };
 }
 
 /** Campo de un join embebido de supabase (objeto o arreglo), o null. */
@@ -371,6 +530,113 @@ export function walkCardex(movs: MovForFifo[]): Map<string, PasoCardex> {
   return out;
 }
 
+// ===== Utilidad de UNA salida, en UNA sola moneda (25-sep-2026) =====
+
+/**
+ * Venta y utilidad de UNA salida — la pieza con la que el listado, el
+ * detalle, el resumen de la tienda y la hoja «inventario» del Balance
+ * general suman la utilidad. Una salida cuenta en PESOS o en DÓLARES, NUNCA
+ * en las dos (`monedaUtilidad`).
+ */
+export interface VentaDeSalida {
+  /** Llevó precio (> 0): es venta de la tienda. false = a costo. */
+  conVenta: boolean;
+  ventaMoneda: 'MXN' | 'USD' | null;
+  /** Total cobrado al avión en su moneda = round2(cant × venta_unitaria) = monto del gasto BODEGA. */
+  ventaTotal: number | null;
+  // --- pesos (criterio de siempre: ventaYGananciaDe, SIN cambios) ---
+  ventaUnitMxn: number | null;
+  ventaTotalMxn: number | null;
+  gananciaMxn: number | null;
+  /** Costo FIFO en pesos de la salida cuando `gananciaMxn` existe. */
+  costoMxn: number | null;
+  // --- dólares ---
+  ventaTotalUsd: number | null;
+  /** Costo FIFO en USD de las capas consumidas (walkCardex.costoUsdFifo). */
+  costoUsd: number | null;
+  /** round2(ventaTotalUsd − costoUsd). */
+  gananciaUsd: number | null;
+  /** En qué moneda cuenta ESTA salida para la utilidad (nunca en las dos). */
+  monedaUtilidad: 'MXN' | 'USD' | null;
+  /** Salida CON venta cuya utilidad no se puede expresar (venta en pesos sobre costo en USD sin T.C.). */
+  utilidadIncompleta: boolean;
+  /** Igual que siempre (pesos): venta USD sin TC o capas USD sin TC. */
+  sinTc: boolean;
+}
+
+/**
+ * Utilidad de UNA salida. ADITIVA sobre `ventaYGananciaDe` — ninguna salida
+ * que hoy da utilidad en pesos cambia:
+ *  1. Si la utilidad se puede expresar en PESOS reales (criterio de siempre)
+ *     ⇒ cuenta en MXN.
+ *  2. Si no, y la venta es en USD y el costo FIFO en USD existe (siempre en
+ *     una salida: las capas en pesos ya viven en USD con el T.C. de SU
+ *     compra) ⇒ cuenta en USD: venta USD − costo USD, dinero real de las dos
+ *     partes, sin tipo de cambio de por medio. Es el caso de la carga
+ *     VTF-INV-001 (dólares sin T.C.), que hasta el 25-sep-2026 salía «—».
+ *  3. Si no ⇒ sin utilidad; con venta, `utilidadIncompleta` (venta en pesos
+ *     sobre capas en dólares sin T.C.: no hay cómo restarlas).
+ */
+export function ventaDeSalida(
+  mov: MovVenta,
+  paso: PasoCardex | undefined,
+): VentaDeSalida {
+  const costoMxnFifo = paso?.costoMxnFifo ?? null;
+  const base = ventaYGananciaDe(mov, costoMxnFifo, paso?.sinTc === true);
+  const cant = Number(mov.cantidad);
+  const unit = mov.venta_unitaria != null ? Number(mov.venta_unitaria) : null;
+  const conVenta = unit != null && unit > 0;
+  const ventaMoneda: 'MXN' | 'USD' | null = conVenta
+    ? mov.venta_moneda === 'USD'
+      ? 'USD'
+      : 'MXN'
+    : null;
+  // MISMO redondeo que montoGastoDeSalida: la venta ES el monto del gasto.
+  const ventaTotal = conVenta ? round(cant * unit, 2) : null;
+  const comun = {
+    conVenta,
+    ventaMoneda,
+    ventaTotal,
+    ventaUnitMxn: base.ventaUnitMxn,
+    ventaTotalMxn: base.ventaTotalMxn,
+    gananciaMxn: base.gananciaMxn,
+    sinTc: base.sinTc,
+  };
+  if (base.gananciaMxn != null) {
+    return {
+      ...comun,
+      costoMxn: costoMxnFifo,
+      ventaTotalUsd: null,
+      costoUsd: null,
+      gananciaUsd: null,
+      monedaUtilidad: 'MXN',
+      utilidadIncompleta: false,
+    };
+  }
+  const costoUsd = paso?.costoUsdFifo ?? null;
+  if (conVenta && ventaMoneda === 'USD' && costoUsd != null) {
+    const totalUsd = ventaTotal as number;
+    return {
+      ...comun,
+      costoMxn: null,
+      ventaTotalUsd: totalUsd,
+      costoUsd,
+      gananciaUsd: round(totalUsd - costoUsd, 2),
+      monedaUtilidad: 'USD',
+      utilidadIncompleta: false,
+    };
+  }
+  return {
+    ...comun,
+    costoMxn: null,
+    ventaTotalUsd: null,
+    costoUsd: null,
+    gananciaUsd: null,
+    monedaUtilidad: null,
+    utilidadIncompleta: conVenta,
+  };
+}
+
 // ===== Periodo =====
 
 /** Predicado de corte sobre `fecha_movimiento` (YYYY-MM-DD, día Cancún). */
@@ -408,6 +674,19 @@ export interface AgregadosItem {
   costo_ventas_mxn: number | null;
   /** ventas_mxn − costo_ventas_mxn. null = ninguna salida con precio. */
   utilidad_mxn: number | null;
+  /** Σ cantidad de las salidas CON venta del periodo (null = ninguna). */
+  ventas_cant: number | null;
+  /** Σ venta en DÓLARES de las salidas cuya utilidad cuenta en USD
+   *  (`ventaDeSalida.monedaUtilidad === 'USD'`). null = ninguna. Jamás se
+   *  suma con `ventas_mxn`. */
+  ventas_usd: number | null;
+  /** Σ costo FIFO en USD de esas mismas salidas. */
+  costo_ventas_usd: number | null;
+  /** ventas_usd − costo_ventas_usd (Σ de `gananciaUsd`). */
+  utilidad_usd: number | null;
+  /** Salidas CON venta cuya utilidad no se puede expresar en ninguna moneda
+   *  (venta en pesos sobre capas USD sin T.C.). 0 = ninguna. */
+  ventas_sin_utilidad: number;
   /** Matrículas (o 'FLOTA') a las que se aplicó en el periodo, únicas, en
    *  orden de aparición. */
   matriculas: string[];
@@ -443,6 +722,12 @@ export function agregadosDeItem(
   let vendido: number | null = null;
   let costoVentas: number | null = null;
   let utilidad: number | null = null;
+  // Tienda (25-sep-2026): unidades vendidas y la utilidad en DÓLARES, aparte.
+  let ventasCant: number | null = null;
+  let vendidoUsd: number | null = null;
+  let costoVentasUsd: number | null = null;
+  let utilidadUsd: number | null = null;
+  let ventasSinUtilidad = 0;
   let sinCosto = false;
   let sinTc = false;
   const matriculas = new Set<string>();
@@ -452,10 +737,7 @@ export function agregadosDeItem(
     }
     const paso = m.id ? walk.get(m.id) : undefined;
     const costoMxnFifo = paso?.costoMxnFifo ?? null;
-    const venta =
-      m.tipo === SALIDA
-        ? ventaYGananciaDe(m, costoMxnFifo, paso?.sinTc === true)
-        : null;
+    const venta = m.tipo === SALIDA ? ventaDeSalida(m, paso) : null;
     // Banderas sobre el cardex COMPLETO (como con_entradas_sin_costo).
     if (paso?.sinTc || venta?.sinTc) sinTc = true;
     if (!enPeriodo(m)) continue;
@@ -465,7 +747,10 @@ export function agregadosDeItem(
       salidasCant = round(salidasCant + cant);
       // Solo salidas CON venta suman a vendido/utilidad (una salida a costo
       // FIFO no es una venta de la tiendita).
-      if (venta.ventaTotalMxn != null) {
+      // Una venta que CUENTA en USD va SOLO a vendido_usd: con T.C. en el
+      // movimiento pero capas sin T.C. también traería ventaTotalMxn y se
+      // pintaba en las dos columnas (vendido MXN sin su costo ni su utilidad).
+      if (venta.ventaTotalMxn != null && venta.monedaUtilidad !== 'USD') {
         vendido = round((vendido ?? 0) + venta.ventaTotalMxn, 2);
         if (costoMxnFifo != null && !venta.sinTc) {
           costoVentas = round((costoVentas ?? 0) + costoMxnFifo, 2);
@@ -474,6 +759,18 @@ export function agregadosDeItem(
       if (venta.gananciaMxn != null) {
         utilidad = round((utilidad ?? 0) + venta.gananciaMxn, 2);
       }
+      if (venta.conVenta) ventasCant = round((ventasCant ?? 0) + cant);
+      // Utilidad en DÓLARES: solo las salidas que cuentan en USD (nunca las
+      // que ya contaron en pesos).
+      if (venta.monedaUtilidad === 'USD') {
+        vendidoUsd = round((vendidoUsd ?? 0) + (venta.ventaTotalUsd ?? 0), 2);
+        costoVentasUsd = round(
+          (costoVentasUsd ?? 0) + (venta.costoUsd ?? 0),
+          2,
+        );
+        utilidadUsd = round((utilidadUsd ?? 0) + (venta.gananciaUsd ?? 0), 2);
+      }
+      if (venta.utilidadIncompleta) ventasSinUtilidad += 1;
       matriculas.add(
         m.para_flota === true
           ? 'FLOTA'
@@ -499,6 +796,11 @@ export function agregadosDeItem(
     ventas_mxn: vendido,
     costo_ventas_mxn: costoVentas,
     utilidad_mxn: utilidad,
+    ventas_cant: ventasCant,
+    ventas_usd: vendidoUsd,
+    costo_ventas_usd: costoVentasUsd,
+    utilidad_usd: utilidadUsd,
+    ventas_sin_utilidad: ventasSinUtilidad,
     matriculas: [...matriculas],
     con_entradas_sin_costo: sinCosto,
     con_movimientos_sin_tc: sinTc,
@@ -521,6 +823,11 @@ export interface ResumenDia {
   costo_ventas_mxn: number | null;
   /** Σ ganancia de las salidas con precio del día (null = no hubo). */
   utilidad_mxn: number | null;
+  /** Σ venta en DÓLARES de las salidas del día cuya utilidad cuenta en USD
+   *  (null = ese día no hubo venta en USD). Jamás se suma con los pesos. */
+  ventas_usd: number | null;
+  costo_ventas_usd: number | null;
+  utilidad_usd: number | null;
   /** Algún movimiento del día está en USD sin TC (montos afectados en null). */
   sin_tc: boolean;
 }
@@ -555,6 +862,9 @@ export function resumenDiarioDe(
         ventas_mxn: null,
         costo_ventas_mxn: null,
         utilidad_mxn: null,
+        ventas_usd: null,
+        costo_ventas_usd: null,
+        utilidad_usd: null,
         sin_tc: false,
       };
       dias.push(dia);
@@ -565,9 +875,24 @@ export function resumenDiarioDe(
     if (m.tipo === SALIDA) {
       dia.salidas_cant = round(dia.salidas_cant + cant);
       const costoMxnFifo = paso?.costoMxnFifo ?? null;
-      const venta = ventaYGananciaDe(m, costoMxnFifo, paso?.sinTc === true);
+      const venta = ventaDeSalida(m, paso);
       if (venta.sinTc) dia.sin_tc = true;
-      if (venta.ventaTotalMxn != null) {
+      if (venta.monedaUtilidad === 'USD') {
+        dia.ventas_usd = round(
+          (dia.ventas_usd ?? 0) + (venta.ventaTotalUsd ?? 0),
+          2,
+        );
+        dia.costo_ventas_usd = round(
+          (dia.costo_ventas_usd ?? 0) + (venta.costoUsd ?? 0),
+          2,
+        );
+        dia.utilidad_usd = round(
+          (dia.utilidad_usd ?? 0) + (venta.gananciaUsd ?? 0),
+          2,
+        );
+      }
+      // Misma regla que agregadosDeItem: lo que cuenta en USD no va a pesos.
+      if (venta.ventaTotalMxn != null && venta.monedaUtilidad !== 'USD') {
         dia.ventas_mxn = round((dia.ventas_mxn ?? 0) + venta.ventaTotalMxn, 2);
         if (costoMxnFifo != null && !venta.sinTc) {
           dia.costo_ventas_mxn = round(
@@ -634,6 +959,17 @@ export interface BloqueVenta {
   /** Costo FIFO MXN de las capas consumidas (null si `sin_tc`). */
   costo_fifo_mxn: number | null;
   ganancia_mxn: number | null;
+  /** Total cobrado al avión EN `venta_moneda` (= monto del gasto BODEGA);
+   *  null en una salida a costo. */
+  venta_total: number | null;
+  /** Costo FIFO en USD de las capas consumidas (siempre en una salida). */
+  costo_fifo_usd: number | null;
+  /** Utilidad en dólares cuando la salida cuenta en USD (`moneda_utilidad`). */
+  ganancia_usd: number | null;
+  /** En qué moneda cuenta la utilidad de ESTA salida (null = sin utilidad). */
+  moneda_utilidad: 'MXN' | 'USD' | null;
+  /** Con venta pero sin utilidad expresable (pesos sobre dólares sin T.C.). */
+  utilidad_incompleta: boolean;
   /** Matrícula, 'FLOTA' (prorrateo a toda la flota) o '—'. */
   vendido_a: string;
   aeronave_id: string | null;
@@ -654,6 +990,11 @@ export interface TotalesBloques {
   ventas_a_costo_mxn: number | null;
   costo_ventas_mxn: number | null;
   utilidad_mxn: number | null;
+  /** Utilidad en DÓLARES (agregadosDeItem): aparte, jamás sumada a pesos. */
+  ventas_usd: number | null;
+  costo_ventas_usd: number | null;
+  utilidad_usd: number | null;
+  ventas_sin_utilidad: number;
   con_entradas_sin_costo: boolean;
   /** Algún movimiento del cardex está en USD sin TC (filas con `sin_tc`). */
   con_movimientos_sin_tc: boolean;
@@ -691,12 +1032,10 @@ export function bloquesCardexDe(
     const ref = referencia ? ` · ref ${referencia}` : '';
     if (m.tipo === SALIDA) {
       const costoMxnFifo = paso?.costoMxnFifo ?? null;
-      const venta = ventaYGananciaDe(m, costoMxnFifo, paso?.sinTc === true);
+      const venta = ventaDeSalida(m, paso);
       // A costo = la salida NO llevó precio (no "no se pudo expresar en
       // pesos": una venta USD sin TC sigue siendo una venta, con sin_tc).
-      const aCosto = !(
-        m.venta_unitaria != null && Number(m.venta_unitaria) > 0
-      );
+      const aCosto = !venta.conVenta;
       const unit =
         venta.ventaUnitMxn ??
         (aCosto && costoMxnFifo != null && cant > 0
@@ -722,6 +1061,11 @@ export function bloquesCardexDe(
         sin_tc: venta.sinTc,
         costo_fifo_mxn: costoMxnFifo,
         ganancia_mxn: ganancia,
+        venta_total: venta.ventaTotal,
+        costo_fifo_usd: paso?.costoUsdFifo ?? null,
+        ganancia_usd: venta.gananciaUsd,
+        moneda_utilidad: venta.monedaUtilidad,
+        utilidad_incompleta: venta.utilidadIncompleta,
         vendido_a: paraFlota ? 'FLOTA' : (matricula ?? '—'),
         aeronave_id: m.aeronave_id ?? null,
         para_flota: paraFlota,
@@ -789,6 +1133,10 @@ export function bloquesCardexDe(
       ventas_a_costo_mxn: ventasACosto,
       costo_ventas_mxn: a.costo_ventas_mxn,
       utilidad_mxn: a.utilidad_mxn,
+      ventas_usd: a.ventas_usd,
+      costo_ventas_usd: a.costo_ventas_usd,
+      utilidad_usd: a.utilidad_usd,
+      ventas_sin_utilidad: a.ventas_sin_utilidad,
       con_entradas_sin_costo: a.con_entradas_sin_costo,
       con_movimientos_sin_tc: a.con_movimientos_sin_tc,
     },

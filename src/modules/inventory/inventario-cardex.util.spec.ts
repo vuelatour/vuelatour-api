@@ -5,9 +5,15 @@ import {
   costoSinTc,
   costoUnitarioMxnDe,
   filtroPeriodo,
+  MARGEN_VENTA_PCT_DEFAULT,
+  margenVentaValido,
+  montoGastoDeSalida,
+  precioVentaDeSalida,
   resumenDiarioDe,
   sortChrono,
   statsFromLayers,
+  ventaDeSalida,
+  ventaUnitariaConMargen,
   ventaYGananciaDe,
   walkCardex,
   type MovCardex,
@@ -443,6 +449,12 @@ describe('agregadosDeItem (mismo número que la hoja Inventario del balance)', (
       ventas_mxn: null,
       costo_ventas_mxn: null,
       utilidad_mxn: null,
+      // Llaves de la tienda (25-sep-2026): null/0 sin actividad.
+      ventas_cant: null,
+      ventas_usd: null,
+      costo_ventas_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 0,
       matriculas: [],
       con_entradas_sin_costo: false,
       con_movimientos_sin_tc: false,
@@ -536,6 +548,9 @@ describe('resumenDiarioDe (bloque RESUMEN: existencia al cierre por día)', () =
       ventas_mxn: null,
       costo_ventas_mxn: null,
       utilidad_mxn: null,
+      ventas_usd: null,
+      costo_ventas_usd: null,
+      utilidad_usd: null,
       sin_tc: false,
     });
     // Dos salidas el mismo día: existencia al CIERRE (3), utilidad solo de la
@@ -548,6 +563,9 @@ describe('resumenDiarioDe (bloque RESUMEN: existencia al cierre por día)', () =
       ventas_mxn: 1200,
       costo_ventas_mxn: 800,
       utilidad_mxn: 400,
+      ventas_usd: null,
+      costo_ventas_usd: null,
+      utilidad_usd: null,
       sin_tc: false,
     });
     expect(dias[2]).toMatchObject({
@@ -702,6 +720,11 @@ describe('bloquesCardexDe (COMPRAS | VENTAS — lo mismo que el Excel formato li
       ventas_a_costo_mxn: 416,
       costo_ventas_mxn: 1016,
       utilidad_mxn: 544,
+      // Todo en pesos: nada en dólares (25-sep-2026).
+      ventas_usd: null,
+      costo_ventas_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 0,
       con_entradas_sin_costo: true,
       con_movimientos_sin_tc: false,
     });
@@ -755,5 +778,460 @@ describe('filtroPeriodo', () => {
     expect(f(m('2026-09-01'))).toBe(false);
     expect(filtroPeriodo('2026-08-15', null)(m('2026-12-31'))).toBe(true);
     expect(filtroPeriodo(null, '2026-08-15')(m('2026-08-16'))).toBe(false);
+  });
+});
+
+// =====================================================================
+// TIENDA VuelaTour (25-sep-2026): margen sobre el costo, precio de la
+// salida y utilidad en UNA sola moneda.
+// =====================================================================
+
+describe('margenVentaValido / ventaUnitariaConMargen', () => {
+  it('solo acepta un número finito de 0 a 100; lo demás ⇒ 25', () => {
+    expect(MARGEN_VENTA_PCT_DEFAULT).toBe(25);
+    expect(margenVentaValido(25)).toBe(25);
+    expect(margenVentaValido(12.5)).toBe(12.5);
+    expect(margenVentaValido(0)).toBe(0);
+    expect(margenVentaValido(100)).toBe(100);
+    for (const malo of [-1, 101, NaN, Infinity, '25', null, undefined, {}]) {
+      expect(margenVentaValido(malo)).toBe(25);
+    }
+  });
+
+  it('costo × (1 + pct/100) a 4 decimales; costo o margen ≤ 0 ⇒ 0 (sin venta)', () => {
+    expect(ventaUnitariaConMargen(21.25, 25)).toBe(26.5625);
+    expect(ventaUnitariaConMargen(46.06, 25)).toBe(57.575);
+    expect(ventaUnitariaConMargen(155.94, 25)).toBe(194.925);
+    expect(ventaUnitariaConMargen(1658.33, 25)).toBe(2072.9125);
+    expect(ventaUnitariaConMargen(100, 12.5)).toBe(112.5);
+    expect(ventaUnitariaConMargen(0, 25)).toBe(0);
+    expect(ventaUnitariaConMargen(-5, 25)).toBe(0);
+    expect(ventaUnitariaConMargen(21.25, 0)).toBe(0);
+  });
+});
+
+describe('precioVentaDeSalida — precedencia de siempre + el margen al final', () => {
+  const base = {
+    costoUnitario: 21.25,
+    monedaSalida: 'USD' as const,
+    margenPct: 25,
+  };
+  it.each([
+    [
+      'DTO > 0 gana, con SU moneda',
+      {
+        dtoVenta: 30,
+        dtoMoneda: 'MXN' as const,
+        itemPrecio: 99,
+        itemMoneda: 'USD' as const,
+      },
+      { ventaUnitaria: 30, ventaMoneda: 'MXN', origen: 'PRECIO_CAPTURADO' },
+    ],
+    [
+      'DTO > 0 sin moneda ⇒ la del ítem',
+      { dtoVenta: 30, itemMoneda: 'USD' as const },
+      { ventaUnitaria: 30, ventaMoneda: 'USD', origen: 'PRECIO_CAPTURADO' },
+    ],
+    [
+      'DTO > 0 sin moneda ni ítem ⇒ MXN',
+      { dtoVenta: 30.123456 },
+      {
+        ventaUnitaria: 30.1235,
+        ventaMoneda: 'MXN',
+        origen: 'PRECIO_CAPTURADO',
+      },
+    ],
+    [
+      'DTO 0 explícito ⇒ a costo (aunque el ítem tenga precio y haya margen)',
+      { dtoVenta: 0, itemPrecio: 99, itemMoneda: 'USD' as const },
+      { ventaUnitaria: null, ventaMoneda: null, origen: 'A_COSTO' },
+    ],
+    [
+      'sin DTO: el precio del ítem, con la moneda del ítem',
+      { itemPrecio: '45.5', itemMoneda: 'USD' as const },
+      { ventaUnitaria: 45.5, ventaMoneda: 'USD', origen: 'PRECIO_PRODUCTO' },
+    ],
+    [
+      'sin DTO ni precio: costo + 25 % en la moneda del costo (USD)',
+      {},
+      { ventaUnitaria: 26.5625, ventaMoneda: 'USD', origen: 'MARGEN' },
+    ],
+    [
+      'margen en PESOS cuando la salida es MXN (capas compradas en pesos)',
+      { costoUnitario: 1658.33, monedaSalida: 'MXN' as const },
+      { ventaUnitaria: 2072.9125, ventaMoneda: 'MXN', origen: 'MARGEN' },
+    ],
+    [
+      'margen 0 ⇒ a costo',
+      { margenPct: 0 },
+      { ventaUnitaria: null, ventaMoneda: null, origen: 'A_COSTO' },
+    ],
+    [
+      'costo 0 (entrada sin costo real) ⇒ a costo',
+      { costoUnitario: 0 },
+      { ventaUnitaria: null, ventaMoneda: null, origen: 'A_COSTO' },
+    ],
+    [
+      'precio del ítem 0 no es precio: cae al margen',
+      { itemPrecio: 0, itemMoneda: 'MXN' as const },
+      { ventaUnitaria: 26.5625, ventaMoneda: 'USD', origen: 'MARGEN' },
+    ],
+  ])('%s', (_t, p, esperado) => {
+    expect(precioVentaDeSalida({ ...base, ...p })).toEqual(esperado);
+  });
+});
+
+describe('ventaDeSalida — utilidad de UNA salida en UNA sola moneda', () => {
+  const ent = (
+    id: string,
+    cantidad: number,
+    costo: number,
+    moneda: 'MXN' | 'USD',
+    tc: number | null,
+    dia = '2026-09-01',
+  ): MovCardex => ({
+    id,
+    tipo: 'ENTRADA',
+    cantidad,
+    costo_unitario_usd: moneda === 'MXN' && tc ? costo / tc : costo,
+    moneda,
+    costo_unitario_mxn: moneda === 'MXN' ? costo : null,
+    tc_usd_mxn: tc,
+    fecha_movimiento: dia,
+    created_at: `${dia}T10:00:00Z`,
+  });
+  const sal = (
+    id: string,
+    cantidad: number,
+    venta: number | null,
+    ventaMoneda: 'MXN' | 'USD' | null,
+    tc: number | null = null,
+  ): MovCardex => ({
+    id,
+    tipo: 'SALIDA',
+    cantidad,
+    costo_unitario_usd: 0,
+    moneda: 'USD',
+    tc_usd_mxn: tc,
+    venta_unitaria: venta,
+    venta_moneda: ventaMoneda,
+    fecha_movimiento: '2026-09-02',
+    created_at: '2026-09-02T10:00:00Z',
+    aeronave: { matricula: 'XA-VGV' },
+  });
+  const de = (cardex: MovCardex[], id: string) => {
+    const mov = cardex.find((m) => m.id === id)!;
+    return { mov, v: ventaDeSalida(mov, walkCardex(cardex).get(id)) };
+  };
+
+  it('pesos exactos ⇒ cuenta en MXN (idéntico a ventaYGananciaDe)', () => {
+    const { v } = de(CARDEX, 's1');
+    expect(v).toMatchObject({
+      conVenta: true,
+      ventaMoneda: 'MXN',
+      ventaTotal: 1200,
+      ventaTotalMxn: 1200,
+      gananciaMxn: 400,
+      costoMxn: 800,
+      gananciaUsd: null,
+      monedaUtilidad: 'MXN',
+      utilidadIncompleta: false,
+      sinTc: false,
+    });
+  });
+
+  it('venta USD CON TC ⇒ sigue contando en MXN como siempre', () => {
+    const { v } = de(CARDEX, 's3');
+    expect(v).toMatchObject({
+      ventaMoneda: 'USD',
+      ventaTotal: 20,
+      ventaTotalMxn: 360,
+      gananciaMxn: 144,
+      gananciaUsd: null,
+      monedaUtilidad: 'MXN',
+    });
+  });
+
+  it('venta USD sobre capas USD SIN TC ⇒ cuenta en USD (antes «—»)', () => {
+    const cardex = [
+      ent('e', 5, 21.25, 'USD', null),
+      sal('s', 2, 26.5625, 'USD'),
+    ];
+    const { mov, v } = de(cardex, 's');
+    expect(v).toMatchObject({
+      conVenta: true,
+      ventaTotal: 53.13,
+      ventaTotalMxn: null,
+      gananciaMxn: null,
+      ventaTotalUsd: 53.13,
+      costoUsd: 42.5,
+      gananciaUsd: 10.63,
+      monedaUtilidad: 'USD',
+      utilidadIncompleta: false,
+      sinTc: true,
+    });
+    // La venta ES el monto del gasto BODEGA (misma regla de redondeo).
+    expect(v.ventaTotal).toBe(montoGastoDeSalida(mov).monto);
+  });
+
+  it('venta USD sobre capas MXN (con su TC) + USD sin TC ⇒ USD: la capa en pesos ya vive en USD con el TC de SU compra', () => {
+    const cardex = [
+      ent('e1', 2, 1658.33, 'MXN', 17.51, '2026-07-13'),
+      ent('e2', 3, 21.25, 'USD', null),
+      sal('s', 4, 100, 'USD'),
+    ];
+    const { v } = de(cardex, 's');
+    // costo USD = 2 × (1658.33/17.51) + 2 × 21.25 = 189.42 + 42.5 = 231.92
+    expect(v).toMatchObject({
+      ventaTotalUsd: 400,
+      costoUsd: 231.92,
+      gananciaUsd: 168.08,
+      gananciaMxn: null,
+      monedaUtilidad: 'USD',
+    });
+  });
+
+  it('venta en PESOS sobre capas USD sin TC ⇒ incompleta (no hay cómo restarlas)', () => {
+    const cardex = [ent('e', 5, 21.25, 'USD', null), sal('s', 1, 500, 'MXN')];
+    const { v } = de(cardex, 's');
+    expect(v).toMatchObject({
+      conVenta: true,
+      ventaMoneda: 'MXN',
+      gananciaMxn: null,
+      gananciaUsd: null,
+      monedaUtilidad: null,
+      utilidadIncompleta: true,
+    });
+  });
+
+  it('a costo ⇒ ni venta ni utilidad, y NO es «incompleta»', () => {
+    const cardex = [ent('e', 5, 21.25, 'USD', null), sal('s', 1, null, null)];
+    const { v } = de(cardex, 's');
+    expect(v).toMatchObject({
+      conVenta: false,
+      ventaMoneda: null,
+      ventaTotal: null,
+      gananciaMxn: null,
+      gananciaUsd: null,
+      monedaUtilidad: null,
+      utilidadIncompleta: false,
+    });
+  });
+
+  it('venta USD con T.C. en el movimiento sobre capas sin T.C. ⇒ vendido SOLO en USD (agregados y resumen diario)', () => {
+    const cardex = [
+      ent('e', 5, 21.25, 'USD', null),
+      sal('s', 3, 26.5625, 'USD', 18),
+    ];
+    const { v } = de(cardex, 's');
+    // La venta trae pesos por el T.C. del movimiento, pero su utilidad cuenta en USD.
+    expect(v.ventaTotalMxn).not.toBeNull();
+    expect(v.monedaUtilidad).toBe('USD');
+    const a = agregadosDeItem(cardex);
+    expect(a.ventas_mxn).toBeNull();
+    expect(a.utilidad_mxn).toBeNull();
+    expect(a.ventas_usd).toBe(v.ventaTotalUsd);
+    expect(a.utilidad_usd).toBe(v.gananciaUsd);
+    const dia = resumenDiarioDe(cardex).find((d) => d.salidas_cant > 0)!;
+    expect(dia.ventas_mxn ?? null).toBeNull();
+    expect(dia.ventas_usd).toBe(v.ventaTotalUsd);
+  });
+
+  it('NUNCA en las dos monedas, y la venta siempre = monto del gasto', () => {
+    const casos: Array<[MovCardex[], string]> = [
+      [CARDEX, 's1'],
+      [CARDEX, 's2'],
+      [CARDEX, 's3'],
+      [[ent('e', 5, 21.25, 'USD', null), sal('s', 2, 26.5625, 'USD')], 's'],
+      [[ent('e', 5, 21.25, 'USD', null), sal('s', 1, 500, 'MXN')], 's'],
+      [[ent('e', 5, 21.25, 'USD', 18), sal('s', 3, 26.5625, 'USD', 18)], 's'],
+      [[ent('e', 5, 300, 'MXN', 18), sal('s', 1, 375, 'MXN', 18)], 's'],
+    ];
+    for (const [cardex, id] of casos) {
+      const { mov, v } = de(cardex, id);
+      expect(v.gananciaMxn != null && v.gananciaUsd != null).toBe(false);
+      if (v.gananciaMxn != null) expect(v.monedaUtilidad).toBe('MXN');
+      if (v.gananciaUsd != null) expect(v.monedaUtilidad).toBe('USD');
+      const g = montoGastoDeSalida(mov);
+      if (g.esVenta) expect(v.ventaTotal).toBe(g.monto);
+      else expect(v.conVenta).toBe(false);
+    }
+  });
+});
+
+describe('montoGastoDeSalida (movida al util el 25-sep-2026, mismo cuerpo)', () => {
+  it('con venta: cantidad × venta en la moneda de la venta, TC ponderado de referencia', () => {
+    expect(
+      montoGastoDeSalida({
+        cantidad: 12,
+        venta_unitaria: 26.5625,
+        venta_moneda: 'USD',
+        moneda: 'USD',
+        costo_unitario_usd: 21.25,
+        tc_usd_mxn: null,
+      }),
+    ).toEqual({ monto: 318.75, moneda: 'USD', tcGasto: null, esVenta: true });
+  });
+  it('sin venta: costo FIFO en pesos cuando la salida es MXN', () => {
+    expect(
+      montoGastoDeSalida({
+        cantidad: 4,
+        venta_unitaria: null,
+        moneda: 'MXN',
+        costo_unitario_mxn: 1658.33,
+        costo_unitario_usd: 94.71,
+        tc_usd_mxn: 17.51,
+      }),
+    ).toEqual({
+      monto: 6633.32,
+      moneda: 'MXN',
+      tcGasto: 17.51,
+      esVenta: false,
+    });
+  });
+});
+
+describe('agregados / resumen por día / bloques con utilidad en DÓLARES', () => {
+  // Carga VTF-INV-001 (USD sin TC) + una salida a costo + una venta con
+  // margen + una venta en pesos sobre dólares (incompleta).
+  const USD: MovCardex[] = [
+    {
+      id: 'e',
+      tipo: 'ENTRADA',
+      cantidad: 10,
+      costo_unitario_usd: 21.25,
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      fecha_movimiento: '2026-08-29',
+      created_at: '2026-08-29T17:36:43Z',
+    },
+    {
+      id: 'sc',
+      tipo: 'SALIDA',
+      cantidad: 1,
+      costo_unitario_usd: 21.25,
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      venta_unitaria: null,
+      venta_moneda: null,
+      fecha_movimiento: '2026-08-30',
+      created_at: '2026-08-30T10:00:00Z',
+      aeronave: { matricula: 'N990GG' },
+    },
+    {
+      id: 'sv',
+      tipo: 'SALIDA',
+      cantidad: 4,
+      costo_unitario_usd: 21.25,
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      venta_unitaria: 26.5625,
+      venta_moneda: 'USD',
+      fecha_movimiento: '2026-09-01',
+      created_at: '2026-09-01T10:00:00Z',
+      aeronave: { matricula: 'XA-VGV' },
+    },
+    {
+      id: 'sm',
+      tipo: 'SALIDA',
+      cantidad: 1,
+      costo_unitario_usd: 21.25,
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      venta_unitaria: 500,
+      venta_moneda: 'MXN',
+      fecha_movimiento: '2026-09-01',
+      created_at: '2026-09-01T11:00:00Z',
+      aeronave: { matricula: 'N4142R' },
+    },
+  ];
+
+  it('agregadosDeItem: USD aparte de los pesos, unidades vendidas y las incompletas', () => {
+    const a = agregadosDeItem(USD);
+    expect(a).toMatchObject({
+      salidas_cant: 6,
+      ventas_cant: 5,
+      ventas_mxn: 500, // la venta en pesos sí se expresa…
+      costo_ventas_mxn: null, // …pero su costo no
+      utilidad_mxn: null,
+      ventas_usd: 106.25,
+      costo_ventas_usd: 85,
+      utilidad_usd: 21.25,
+      ventas_sin_utilidad: 1,
+      con_movimientos_sin_tc: true,
+    });
+    // Periodo de agosto: solo la salida a costo (sin ventas).
+    const ago = agregadosDeItem(USD, filtroPeriodo('2026-08-01', '2026-08-31'));
+    expect(ago).toMatchObject({
+      salidas_cant: 1,
+      ventas_cant: null,
+      ventas_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 0,
+    });
+  });
+
+  it('un cardex todo en pesos da EXACTAMENTE los números de siempre y nada en USD', () => {
+    const a = agregadosDeItem(CARDEX);
+    expect(a).toMatchObject({
+      ventas_mxn: 1560,
+      costo_ventas_mxn: 1016,
+      utilidad_mxn: 544,
+      ventas_cant: 10,
+      ventas_usd: null,
+      costo_ventas_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 0,
+    });
+  });
+
+  it('resumenDiarioDe: la utilidad USD del día, aparte', () => {
+    const dias = resumenDiarioDe(USD);
+    const sep = dias.find((d) => d.fecha === '2026-09-01')!;
+    expect(sep).toMatchObject({
+      salidas_cant: 5,
+      ventas_mxn: 500,
+      utilidad_mxn: null,
+      ventas_usd: 106.25,
+      costo_ventas_usd: 85,
+      utilidad_usd: 21.25,
+    });
+    const ago30 = dias.find((d) => d.fecha === '2026-08-30')!;
+    expect(ago30.utilidad_usd).toBeNull();
+  });
+
+  it('bloquesCardexDe: cada venta dice su total, costo USD, utilidad y moneda', () => {
+    const b = bloquesCardexDe('Aceite 15W-50', USD);
+    const porId = new Map(b.ventas.map((v) => [v.movimiento_id, v]));
+    expect(porId.get('sv')).toMatchObject({
+      a_costo: false,
+      venta_moneda: 'USD',
+      venta_total: 106.25,
+      costo_fifo_usd: 85,
+      ganancia_usd: 21.25,
+      ganancia_mxn: null,
+      moneda_utilidad: 'USD',
+      utilidad_incompleta: false,
+    });
+    expect(porId.get('sc')).toMatchObject({
+      a_costo: true,
+      venta_total: null,
+      costo_fifo_usd: 21.25,
+      ganancia_usd: null,
+      moneda_utilidad: null,
+      utilidad_incompleta: false,
+    });
+    expect(porId.get('sm')).toMatchObject({
+      venta_moneda: 'MXN',
+      venta_total: 500,
+      moneda_utilidad: null,
+      utilidad_incompleta: true,
+    });
+    expect(b.totales).toMatchObject({
+      ventas_usd: 106.25,
+      costo_ventas_usd: 85,
+      utilidad_usd: 21.25,
+      ventas_sin_utilidad: 1,
+    });
   });
 });

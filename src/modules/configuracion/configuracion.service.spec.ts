@@ -1,7 +1,9 @@
 import { HttpException } from '@nestjs/common';
 import {
+  CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
   CONFIG_RESPONSABLES_FACTURACION,
   ConfiguracionService,
+  INVENTARIO_MARGEN_VENTA_PCT_DEFAULT,
 } from './configuracion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 
@@ -216,5 +218,57 @@ describe('ConfiguracionService — responsables de facturación', () => {
     }
     const ok = await svc.setResponsablesFacturacion([MARY], ALE);
     expect(ok.fuente).toBe('CONFIG');
+  });
+});
+
+/**
+ * MARGEN DE LA TIENDA (25-sep-2026): `inventario_margen_venta_pct` va de 0 a
+ * 100 %. La BD solo exige ≥ 0; el tope lo pone el API con un 400 legible.
+ */
+describe('ConfiguracionService — margen de la tienda', () => {
+  it('la clave y su default (25) son los del inventario', () => {
+    expect(CONFIG_INVENTARIO_MARGEN_VENTA_PCT).toBe(
+      'inventario_margen_venta_pct',
+    );
+    expect(INVENTARIO_MARGEN_VENTA_PCT_DEFAULT).toBe(25);
+  });
+
+  it('101 ⇒ 400 VALOR_FUERA_DE_RANGO (y no escribe)', async () => {
+    const { svc, llamadas } = armar({});
+    try {
+      await svc.update(
+        CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
+        { valor_numerico: 101 },
+        MARY,
+      );
+      throw new Error('no lanzó');
+    } catch (e) {
+      expect(e).toBeInstanceOf(HttpException);
+      expect((e as HttpException).getStatus()).toBe(400);
+      expect((e as HttpException).getResponse()).toMatchObject({
+        error: 'VALOR_FUERA_DE_RANGO',
+        message: 'El margen de la tienda va de 0 a 100 %.',
+      });
+    }
+    expect(llamadas.some((l) => l.ops.some((o) => o.m === 'update'))).toBe(
+      false,
+    );
+  });
+
+  it('0, 25 y 100 pasan; otra clave numérica no tiene ese tope', async () => {
+    for (const v of [0, 25, 100]) {
+      const { svc, llamadas } = armar({});
+      await svc.update(
+        CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
+        { valor_numerico: v },
+        MARY,
+      );
+      const upd = llamadas.flatMap((l) => l.ops).find((o) => o.m === 'update');
+      expect((upd?.args[0] as Fila).valor_numerico).toBe(v);
+    }
+    const { svc } = armar({});
+    await expect(
+      svc.update('dias_gracia_gastos_semana', { valor_numerico: 150 }, MARY),
+    ).resolves.toBeDefined();
   });
 });

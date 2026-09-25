@@ -21,15 +21,34 @@ import {
 import {
   CreateInventarioItemDto,
   CreateMovimientoDto,
+  CreateUbicacionDto,
   EmpaqueInputDto,
   FotoInventarioDto,
   ListInventarioQuery,
   ListMovimientosQuery,
+  MoverUbicacionDto,
   TipoMovimientoInventario,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
   UpdateMovimientoCostoDto,
+  UpdateUbicacionDto,
 } from './dto/inventory.dto';
+import {
+  CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
+  ConfiguracionService,
+  INVENTARIO_MARGEN_VENTA_PCT_DEFAULT,
+} from '../configuracion/configuracion.service';
+// Catálogo de ubicaciones de bodega (25-sep-2026): helpers puros con spec.
+import {
+  camposUbicacionDeItem,
+  FILTRO_SIN_UBICACION,
+  limpiarNombreUbicacion,
+  MENSAJES_UBICACION,
+  MIGRACION_INVENTARIO_UBICACION,
+  resolverUbicacionDeTexto,
+  textoUbicacionExcel,
+  ubicacionDuplicada,
+} from './inventario-ubicacion.util';
 import { normalizarCodigo } from './inventario-codigo.util';
 // Baja de un movimiento de cardex (21-sep-2026): simulación pura del FIFO
 // sin el movimiento + códigos estables del 409 (con spec).
@@ -59,21 +78,48 @@ import {
   costoUnitarioMxnDe,
   EPS,
   filtroPeriodo,
+  margenVentaValido,
+  montoGastoDeSalida,
+  precioVentaDeSalida,
   resumenDiarioDe,
   nombreDeJoin,
   round,
   sortChrono,
   statsFromLayers,
-  ventaYGananciaDe,
+  ventaDeSalida,
   walkCardex,
+  type AgregadosItem,
   type FifoLayer,
   type MovCardex,
   type MovCosto,
   type MovForFifo,
+  type OrigenVenta,
 } from './inventario-cardex.util';
+
+export { MIGRACION_INVENTARIO_UBICACION };
 
 const ITEM_COLS =
   'id, nombre, marca, numero_parte, codigo, categoria, stock_minimo, ubicacion, unidad, precio_venta, precio_venta_moneda, descripcion, notas, foto_url, foto_storage_path, fotos_adicionales, activo, created_at, updated_at';
+
+/** Columnas del catálogo `inventario_ubicacion` (migración 20260925000001). */
+const UBICACION_COLS = 'id, nombre, orden, activo, created_at, updated_at';
+
+/** Default del texto de ubicación SIN la migración (comportamiento 0.0.34). */
+const UBICACION_LEGADO_DEFAULT = 'Bodega Cancún';
+
+/** Ubicación del catálogo tal como la devuelve el API (con sus productos activos). */
+export interface InventarioUbicacionRow {
+  id: string;
+  nombre: string;
+  orden: number;
+  activo: boolean;
+  productos: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Movimiento del cardex completo que lee la tienda / la hoja inventario. */
+type MovTiendita = MovCardex & { id: string; item_id: string };
 
 /** Empaques (cajas) del ítem: factor = unidades por empaque; codigo = barras de la caja. */
 const EMPAQUE_COLS =
@@ -174,18 +220,466 @@ export class InventoryService {
      * los specs construyen el servicio sin él).
      */
     @Optional() private readonly notifications?: NotificationsService,
+    /**
+     * Margen de la tienda (`inventario_margen_venta_pct`, 25-sep-2026).
+     * OPCIONAL: sin él (specs) o con la fila ausente el margen es 25 %.
+     */
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   private readonly logger = new Logger(InventoryService.name);
 
-  /** Inventario valorizado en Excel (respeta los filtros del listado). */
+  /**
+   * Margen vigente de la tienda (% sobre el costo FIFO). Best-effort: una
+   * config caída o fuera de rango responde el default (25) — jamás tira una
+   * salida de bodega.
+   */
+  private async margenVentaPct(): Promise<number> {
+    if (!this.configuracion) return INVENTARIO_MARGEN_VENTA_PCT_DEFAULT;
+    try {
+      return margenVentaValido(
+        await this.configuracion.numero(
+          CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
+          INVENTARIO_MARGEN_VENTA_PCT_DEFAULT,
+        ),
+      );
+    } catch {
+      return INVENTARIO_MARGEN_VENTA_PCT_DEFAULT;
+    }
+  }
+
+  // ===== Ubicaciones de bodega (catálogo, 25-sep-2026) =====
+  // Sonda ÚNICA (`inventario_item.ubicacion_id`, migración 20260925000001):
+  // mientras no exista, todo lo de ubicación se comporta como el API 0.0.34
+  // (respuestas sin las llaves nuevas, alta con «Bodega Cancún») y lo NUEVO
+  // (catálogo, mover, filtro, `ubicacion_id` en el DTO) responde 503
+  // MIGRACION_PENDIENTE. Se enciende sola en ≤ 10 min al aplicarla.
+
+  private ubicacionDisponible(): Promise<boolean> {
+    return columnaOpcional(
+      this.supabase.service,
+      'inventario_item',
+      'ubicacion_id',
+      {
+        mensajeAusente: `Columna inventario_item.ubicacion_id no existe todavía: ubicaciones de bodega (catálogo) apagadas hasta aplicar la migración ${MIGRACION_INVENTARIO_UBICACION}`,
+      },
+    ).disponible();
+  }
+
+  /** Columnas del ítem: `ubicacion_id` solo con la migración aplicada. */
+  private itemCols(conCatalogo: boolean): string {
+    return conCatalogo ? `${ITEM_COLS}, ubicacion_id` : ITEM_COLS;
+  }
+
+  private ubicacionesNoDisponibles(): ServiceUnavailableException {
+    return new ServiceUnavailableException({
+      message: MENSAJES_UBICACION.noDisponible,
+      error: 'MIGRACION_PENDIENTE',
+      details: { migracion: MIGRACION_INVENTARIO_UBICACION },
+    });
+  }
+
+  /** 503 claro si el catálogo todavía no existe en la base. */
+  private async exigirUbicaciones(): Promise<void> {
+    if (!(await this.ubicacionDisponible())) {
+      throw this.ubicacionesNoDisponibles();
+    }
+  }
+
+  /**
+   * Fila de ítem con las llaves de ubicación (`ubicacion_id`,
+   * `ubicacion_nombre`, `ubicacion_legado`; `ubicacion` = texto a mostrar).
+   * Sin la migración la fila viaja tal cual (contrato 0.0.34).
+   */
+  private conUbicacion<T extends Record<string, unknown>>(
+    row: T,
+    conCatalogo: boolean,
+  ): T {
+    if (!conCatalogo) return row;
+    return { ...row, ...camposUbicacionDeItem(row) };
+  }
+
+  /** Catálogo completo (activas e inactivas) por orden y nombre. */
+  private async catalogoUbicaciones(): Promise<
+    Array<Omit<InventarioUbicacionRow, 'productos'>>
+  > {
+    const { data, error } = await this.supabase.service
+      .from('inventario_ubicacion')
+      .select(UBICACION_COLS)
+      .order('orden', { ascending: true })
+      .order('nombre', { ascending: true });
+    if (error) throw new Error(error.message);
+    return ((data ?? []) as Array<Record<string, unknown>>).map((u) => ({
+      id: textoDe(u.id),
+      nombre: textoDe(u.nombre),
+      orden: Number(u.orden ?? 0),
+      activo: u.activo !== false,
+      created_at: textoDe(u.created_at),
+      updated_at: textoDe(u.updated_at),
+    }));
+  }
+
+  /** Productos ACTIVOS por ubicación (una lectura paginada, anti-cap). */
+  private async productosPorUbicacion(): Promise<Map<string, number>> {
+    const filas = await this.todasLasFilas<{
+      id: string;
+      ubicacion_id: string | null;
+    }>((a, b) =>
+      this.supabase.service
+        .from('inventario_item')
+        .select('id, ubicacion_id', { count: 'exact' })
+        .eq('activo', true)
+        .not('ubicacion_id', 'is', null)
+        .order('id', { ascending: true })
+        .range(a, b),
+    );
+    const map = new Map<string, number>();
+    for (const f of filas) {
+      if (f.ubicacion_id) {
+        map.set(f.ubicacion_id, (map.get(f.ubicacion_id) ?? 0) + 1);
+      }
+    }
+    return map;
+  }
+
+  /** GET ubicaciones: catálogo (por orden) con sus productos activos. */
+  async listUbicaciones(
+    incluirInactivas = false,
+  ): Promise<InventarioUbicacionRow[]> {
+    await this.exigirUbicaciones();
+    const [catalogo, productos] = await Promise.all([
+      this.catalogoUbicaciones(),
+      this.productosPorUbicacion(),
+    ]);
+    return catalogo
+      .filter((u) => incluirInactivas || u.activo)
+      .map((u) => ({ ...u, productos: productos.get(u.id) ?? 0 }));
+  }
+
+  /** POST ubicaciones: alta (orden default = al final). */
+  async createUbicacion(
+    dto: CreateUbicacionDto,
+    userId: string,
+  ): Promise<InventarioUbicacionRow> {
+    await this.exigirUbicaciones();
+    const nombre = limpiarNombreUbicacion(dto.nombre);
+    if (nombre.length < 2 || nombre.length > 50) {
+      throw new BadRequestException(
+        'El nombre de la ubicación va de 2 a 50 caracteres.',
+      );
+    }
+    const catalogo = await this.catalogoUbicaciones();
+    const dup = ubicacionDuplicada(nombre, catalogo);
+    if (dup) {
+      throw new ConflictException({
+        message: MENSAJES_UBICACION.duplicada(dup.nombre),
+        error: 'UBICACION_DUPLICADA',
+        details: { id: dup.id, nombre: dup.nombre },
+      });
+    }
+    const orden =
+      dto.orden ??
+      (catalogo.length > 0 ? Math.max(...catalogo.map((u) => u.orden)) + 1 : 1);
+    const { data, error } = await this.supabase.service
+      .from('inventario_ubicacion')
+      .insert({ nombre, orden, created_by: userId, updated_by: userId })
+      .select(UBICACION_COLS)
+      .maybeSingle();
+    if (error) throw this.errorDeUbicacion(error, nombre);
+    return {
+      ...(data as Omit<InventarioUbicacionRow, 'productos'>),
+      productos: 0,
+    };
+  }
+
+  /**
+   * PATCH ubicaciones/:id: renombrar (el trigger propaga el nombre al texto
+   * de sus productos), reordenar o (des)activar. Desactivar con productos
+   * activos ⇒ 409 UBICACION_EN_USO (y la BD lo repite con un trigger).
+   */
+  async updateUbicacion(
+    id: string,
+    dto: UpdateUbicacionDto,
+    userId: string,
+  ): Promise<InventarioUbicacionRow> {
+    await this.exigirUbicaciones();
+    const catalogo = await this.catalogoUbicaciones();
+    const actual = catalogo.find((u) => u.id === id);
+    if (!actual) {
+      throw new NotFoundException({
+        message: MENSAJES_UBICACION.noExiste,
+        error: 'UBICACION_NO_EXISTE',
+      });
+    }
+    const cambios: Record<string, unknown> = {};
+    if (dto.nombre !== undefined) {
+      const nombre = limpiarNombreUbicacion(dto.nombre);
+      if (nombre.length < 2 || nombre.length > 50) {
+        throw new BadRequestException(
+          'El nombre de la ubicación va de 2 a 50 caracteres.',
+        );
+      }
+      const dup = ubicacionDuplicada(nombre, catalogo, id);
+      if (dup) {
+        throw new ConflictException({
+          message: MENSAJES_UBICACION.duplicada(dup.nombre),
+          error: 'UBICACION_DUPLICADA',
+          details: { id: dup.id, nombre: dup.nombre },
+        });
+      }
+      cambios.nombre = nombre;
+    }
+    if (dto.orden !== undefined) cambios.orden = dto.orden;
+    if (dto.activo !== undefined) cambios.activo = dto.activo;
+    if (Object.keys(cambios).length === 0) {
+      throw new BadRequestException(
+        'Nada que actualizar: manda nombre, orden o activo.',
+      );
+    }
+    const productos = (await this.productosPorUbicacion()).get(id) ?? 0;
+    if (dto.activo === false && actual.activo && productos > 0) {
+      throw new ConflictException({
+        message: MENSAJES_UBICACION.enUso(actual.nombre, productos),
+        error: 'UBICACION_EN_USO',
+        details: { productos },
+      });
+    }
+    const { data, error } = await this.supabase.service
+      .from('inventario_ubicacion')
+      .update({ ...cambios, updated_by: userId })
+      .eq('id', id)
+      .select(UBICACION_COLS)
+      .maybeSingle();
+    if (error) {
+      throw this.errorDeUbicacion(
+        error,
+        (cambios.nombre as string | undefined) ?? actual.nombre,
+        productos,
+      );
+    }
+    if (!data) {
+      throw new NotFoundException({
+        message: MENSAJES_UBICACION.noExiste,
+        error: 'UBICACION_NO_EXISTE',
+      });
+    }
+    return {
+      ...(data as Omit<InventarioUbicacionRow, 'productos'>),
+      productos,
+    };
+  }
+
+  /**
+   * Error de la BD en el catálogo → HTTP legible: 23505 (nombre repetido sin
+   * distinguir mayúsculas) ⇒ 409 UBICACION_DUPLICADA; 23514 del trigger
+   * «UBICACION_EN_USO…» (carrera: alguien movió un producto ahí entre la
+   * lectura y el update) ⇒ 409 UBICACION_EN_USO — nunca un 500; otro 23514
+   * (CHECK de nombre/orden) ⇒ 400.
+   */
+  private errorDeUbicacion(
+    error: { code?: string; message: string },
+    nombre: string,
+    productos = 0,
+  ): Error {
+    if (error.code === '23505') {
+      return new ConflictException({
+        message: MENSAJES_UBICACION.duplicada(nombre),
+        error: 'UBICACION_DUPLICADA',
+      });
+    }
+    if (error.code === '23514') {
+      if (/UBICACION_EN_USO/.test(error.message ?? '')) {
+        const n = /tiene (\d+) producto/.exec(error.message ?? '')?.[1];
+        const enUso = n != null ? Number(n) : productos;
+        return new ConflictException({
+          message: MENSAJES_UBICACION.enUso(nombre, enUso),
+          error: 'UBICACION_EN_USO',
+          details: { productos: enUso },
+        });
+      }
+      return new BadRequestException({
+        message:
+          'El nombre de la ubicación va de 2 a 50 caracteres (sin espacios de sobra) y el orden no puede ser negativo.',
+        error: 'UBICACION_INVALIDA',
+        details: { tecnico: error.message },
+      });
+    }
+    return new Error(error.message);
+  }
+
+  /** Ubicación destino válida (existe y está activa, salvo `actualId`). */
+  private async ubicacionElegible(
+    id: string,
+    actualId?: string | null,
+  ): Promise<{ id: string; nombre: string }> {
+    const { data, error } = await this.supabase.service
+      .from('inventario_ubicacion')
+      .select('id, nombre, activo')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: MENSAJES_UBICACION.noExiste,
+        error: 'UBICACION_NO_EXISTE',
+      });
+    }
+    const fila = data as unknown as Record<string, unknown>;
+    const u = {
+      id: textoDe(fila.id),
+      nombre: textoDe(fila.nombre),
+      activo: fila.activo !== false,
+    };
+    if (!u.activo && u.id !== actualId) {
+      throw new BadRequestException({
+        message: MENSAJES_UBICACION.inactiva(u.nombre),
+        error: 'UBICACION_INACTIVA',
+        details: { id: u.id },
+      });
+    }
+    return { id: u.id, nombre: u.nombre };
+  }
+
+  /**
+   * POST items/mover-ubicacion: mueve varios productos a una ubicación en UNA
+   * sola escritura (el trigger escribe el texto espejo). Solo ítems ACTIVOS;
+   * los que ya estaban ahí cuentan en `sin_cambio`, y los ids que no existen
+   * o están dados de baja se reportan (no es error). No mueve stock ni dinero.
+   */
+  async moverUbicacion(dto: MoverUbicacionDto, userId: string) {
+    await this.exigirUbicaciones();
+    const ids = [...new Set(dto.item_ids)];
+    const destino = await this.ubicacionElegible(dto.ubicacion_id);
+    // `in (…)` en LOTES (revisión adversaria 25-sep-2026): el DTO admite 500
+    // ids y con ~200 uuids la URL de PostgREST revienta (414, ver
+    // `LOTE_IDS_BD` del espejo de Google). Mover es idempotente: si un lote
+    // falla, reintentar mueve el resto y lo ya movido cuenta en `sin_cambio`.
+    const filas: Array<{
+      id: string;
+      activo: boolean;
+      ubicacion_id: string | null;
+    }> = [];
+    for (const lote of lotesDeIds(ids)) {
+      const { data, error } = await this.supabase.service
+        .from('inventario_item')
+        .select('id, activo, ubicacion_id')
+        .in('id', lote);
+      if (error) throw new Error(error.message);
+      filas.push(...((data ?? []) as typeof filas));
+    }
+    const porId = new Map(filas.map((f) => [f.id, f]));
+    const noEncontrados: string[] = [];
+    const inactivos: string[] = [];
+    const porMover: string[] = [];
+    let sinCambio = 0;
+    for (const id of ids) {
+      const f = porId.get(id);
+      if (!f) noEncontrados.push(id);
+      else if (f.activo === false) inactivos.push(id);
+      else if (f.ubicacion_id === destino.id) sinCambio += 1;
+      else porMover.push(id);
+    }
+    let movidos = 0;
+    for (const lote of lotesDeIds(porMover)) {
+      const { data: upd, error: eUpd } = await this.supabase.service
+        .from('inventario_item')
+        .update({ ubicacion_id: destino.id, updated_by: userId })
+        .in('id', lote)
+        .eq('activo', true)
+        .select('id');
+      if (eUpd) throw new Error(eUpd.message);
+      movidos += (upd ?? []).length;
+    }
+    return {
+      movidos,
+      sin_cambio: sinCambio,
+      no_encontrados: noEncontrados,
+      inactivos,
+      ubicacion: destino,
+    };
+  }
+
+  /**
+   * Campos de ubicación de un ALTA. Sin la migración: el texto de siempre
+   * (default «Bodega Cancún»; `ubicacion_id` ⇒ 503). Con ella: `ubicacion_id`
+   * gana (existe y activa); si solo viaja texto se liga al catálogo cuando
+   * coincide y, si no, queda como legado; sin nada ⇒ sin ubicación (null).
+   */
+  private async ubicacionDeAlta(
+    dto: CreateInventarioItemDto,
+  ): Promise<Record<string, unknown>> {
+    const conCatalogo = await this.ubicacionDisponible();
+    if (!conCatalogo) {
+      if (dto.ubicacion_id != null) throw this.ubicacionesNoDisponibles();
+      return { ubicacion: dto.ubicacion ?? UBICACION_LEGADO_DEFAULT };
+    }
+    if (dto.ubicacion_id != null) {
+      const u = await this.ubicacionElegible(dto.ubicacion_id);
+      return { ubicacion_id: u.id, ubicacion: u.nombre };
+    }
+    if (textoNoVacio(dto.ubicacion)) {
+      const r = resolverUbicacionDeTexto(
+        dto.ubicacion,
+        await this.catalogoUbicaciones(),
+      );
+      return { ubicacion_id: r.ubicacion_id, ubicacion: r.ubicacion };
+    }
+    return {};
+  }
+
+  /**
+   * Campos de ubicación de una EDICIÓN (misma regla que el alta; la
+   * ubicación que el ítem YA tiene se acepta aunque esté desactivada).
+   * `ubicacion_id: null` ⇒ «Sin ubicación» (id y texto en null).
+   */
+  private async ubicacionDeEdicion(
+    id: string,
+    dto: UpdateInventarioItemDto,
+  ): Promise<Record<string, unknown>> {
+    if (dto.ubicacion_id === undefined && dto.ubicacion === undefined) {
+      return {};
+    }
+    const conCatalogo = await this.ubicacionDisponible();
+    if (dto.ubicacion_id !== undefined) {
+      if (!conCatalogo) throw this.ubicacionesNoDisponibles();
+      if (dto.ubicacion_id === null) {
+        return { ubicacion_id: null, ubicacion: null };
+      }
+      const actual = (await this.findItem(id)) as { ubicacion_id?: unknown };
+      const u = await this.ubicacionElegible(
+        dto.ubicacion_id,
+        typeof actual.ubicacion_id === 'string' ? actual.ubicacion_id : null,
+      );
+      return { ubicacion_id: u.id, ubicacion: u.nombre };
+    }
+    const texto = (dto.ubicacion ?? '').trim();
+    if (!conCatalogo) return { ubicacion: texto };
+    const actual = (await this.findItem(id)) as { ubicacion_id?: unknown };
+    const r = resolverUbicacionDeTexto(
+      texto,
+      await this.catalogoUbicaciones(),
+      typeof actual.ubicacion_id === 'string' ? actual.ubicacion_id : null,
+    );
+    return { ubicacion_id: r.ubicacion_id, ubicacion: r.ubicacion };
+  }
+
+  /**
+   * Inventario valorizado en Excel (respeta los filtros del listado:
+   * q/categoría/ubicación y desde/hasta para la utilidad).
+   *
+   * 25-sep-2026: gana UBICACIÓN (catálogo; el texto legado sale
+   * «Bodega Cancún (anterior)») y UTILIDAD de la tienda en DOS columnas
+   * —pesos y dólares—, con sus totales cada una en su columna: jamás se suman
+   * entre sí (invariante 8).
+   */
   async itemsXlsx(filters: ListInventarioQuery): Promise<Buffer> {
-    const { data, valor_total_mxn, valor_total_usd_sin_tc } =
+    const { data, valor_total_mxn, valor_total_usd_sin_tc, margen_venta_pct } =
       await this.listItems({
         ...filters,
         limit: 2000,
         offset: 0,
       });
+    const conCatalogo = await this.ubicacionDisponible();
     // El cliente maneja el inventario en PESOS: el Excel valoriza en MXN (el
     // USD interno solo alimenta el reparto, no este reporte de bodega). Lo
     // comprado en dólares SIN TC no tiene monto en pesos: va en su propia
@@ -204,22 +698,34 @@ export class InventoryService {
       { label: 'Costo FIFO (MXN)', tipo: 'money' },
       { label: 'Valor (MXN)', tipo: 'money' },
       { label: 'Valor USD (sin T.C.)', tipo: 'money' },
+      { label: 'Utilidad (MXN)', tipo: 'money' },
+      { label: 'Utilidad (USD)', tipo: 'money' },
     ];
+    // Totales de utilidad sobre TODO lo exportado, cada moneda en su columna
+    // (null = ningún producto trae utilidad en esa moneda: celda vacía).
+    let utilidadMxn: number | null = null;
+    let utilidadUsd: number | null = null;
     const filas = data.map((it) => {
       const x = it as Record<string, unknown>;
       const usdSinTc = Number(x.valor_usd_sin_tc ?? 0);
+      const uMxn = x.utilidad_mxn != null ? Number(x.utilidad_mxn) : null;
+      const uUsd = x.utilidad_usd != null ? Number(x.utilidad_usd) : null;
+      if (uMxn != null) utilidadMxn = round((utilidadMxn ?? 0) + uMxn, 2);
+      if (uUsd != null) utilidadUsd = round((utilidadUsd ?? 0) + uUsd, 2);
       return [
         (x.nombre as string) ?? '',
         (x.codigo as string) ?? '',
         (x.numero_parte as string) ?? '',
         (x.categoria as string) ?? '',
-        (x.ubicacion as string) ?? '',
+        textoUbicacionExcel(x, conCatalogo),
         x.stock as number,
         (x.unidad as string) ?? '',
         (x.stock_minimo as number) ?? null,
         x.costo_fifo_mxn_actual as number,
         x.valor_mxn as number,
         usdSinTc !== 0 ? usdSinTc : null,
+        uMxn,
+        uUsd,
       ];
     });
     const totales = [
@@ -234,10 +740,20 @@ export class InventoryService {
       null,
       valor_total_mxn,
       valor_total_usd_sin_tc !== 0 ? valor_total_usd_sin_tc : null,
+      utilidadMxn,
+      utilidadUsd,
     ];
+    const periodo =
+      filters.desde && filters.hasta
+        ? `del ${filters.desde} al ${filters.hasta}`
+        : filters.desde
+          ? `desde el ${filters.desde}`
+          : filters.hasta
+            ? `hasta el ${filters.hasta}`
+            : 'todo el historial';
     return this.pyservices.generateTablaXlsx({
       titulo: 'Inventario valorizado',
-      subtitulo: `Generado ${new Date().toISOString().slice(0, 10)}`,
+      subtitulo: `Generado ${hoyCancun()} · utilidad: ${periodo} · margen vigente ${margen_venta_pct} %`,
       columnas,
       filas,
       totales,
@@ -411,29 +927,11 @@ export class InventoryService {
     desde: string,
     hasta: string,
   ): Promise<BalanceHojaInventarioPayload> {
-    type MovTiendita = MovCardex & { id: string; item_id: string };
-    // para_flota NO está en la lista base de columnas de movimiento:
-    // seleccionarlo explícito (como el cardex libro) o el "FLOTA" de las
-    // salidas prorrateadas se perdería en silencio. Lectura paginada hasta
-    // cubrir el count: el FIFO necesita TODO el cardex.
-    const data = await this.todasLasFilas<MovTiendita>((a, b) =>
-      this.supabase.service
-        .from('inventario_movimiento')
-        .select(
-          'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, fecha_movimiento, created_at, para_flota, aeronave:aeronave!aeronave_id(matricula)',
-          { count: 'exact' },
-        )
-        .order('fecha_movimiento', { ascending: true })
-        .order('created_at', { ascending: true })
-        .order('id', { ascending: true })
-        .range(a, b),
-    );
-    const porItem = new Map<string, MovTiendita[]>();
-    for (const m of data) {
-      if (!porItem.has(m.item_id)) porItem.set(m.item_id, []);
-      porItem.get(m.item_id)!.push(m);
-    }
-    const ids = [...porItem.keys()];
+    const [porItem, margen] = await Promise.all([
+      this.agregadosPorItem(desde, hasta),
+      this.margenVentaPct(),
+    ]);
+    const ids = porItem.map((p) => p.item_id);
     const nombrePorItem = new Map<
       string,
       { nombre: string; numero_parte: string | null }
@@ -460,7 +958,7 @@ export class InventoryService {
     const enPeriodo = filtroPeriodo(desde, hasta);
     const filas: BalanceInventarioItemFilaPayload[] = [];
     const sinTc: string[] = [];
-    for (const [itemId, movs] of porItem) {
+    for (const { item_id: itemId, movs, agregados: a } of porItem) {
       const stats = statsFromLayers(buildLayers(movs));
       const actividadPeriodo = movs.some(enPeriodo);
       // `valor_usd_sin_tc` entra a la condición: desde que `valor_mxn` deja
@@ -474,9 +972,9 @@ export class InventoryService {
       ) {
         continue;
       }
-      // Agregación única (agregadosDeItem): compras = solo ENTRADA;
-      // vendido/utilidad = solo SALIDAs con precio; null sin actividad.
-      const a = agregadosDeItem(movs, enPeriodo);
+      // Agregación única (agregadosDeItem, ya calculada en agregadosPorItem):
+      // compras = solo ENTRADA; vendido/utilidad = solo SALIDAs con precio;
+      // null sin actividad.
       const info = nombrePorItem.get(itemId);
       const nombre = info
         ? info.numero_parte
@@ -505,6 +1003,10 @@ export class InventoryService {
         salidas_cant: a.salidas_cant,
         vendido_mxn: a.ventas_mxn,
         utilidad_mxn: a.utilidad_mxn,
+        // ADITIVOS (25-sep-2026, tienda): la utilidad en DÓLARES, aparte.
+        vendido_usd: a.ventas_usd,
+        utilidad_usd: a.utilidad_usd,
+        ventas_sin_utilidad: a.ventas_sin_utilidad,
         matriculas: a.matriculas.length > 0 ? a.matriculas.join(' + ') : null,
       });
     }
@@ -514,6 +1016,17 @@ export class InventoryService {
         `Hoja inventario ${desde}..${hasta}: ${sinTc.length} ítem(s) con movimientos USD sin TC (montos en pesos omitidos): ${sinTc.join(' | ')}`,
       );
     }
+    // Σ en DÓLARES de las filas (null si ninguna trae USD): su propia
+    // columna, jamás sumada con los pesos.
+    const sumaUsd = (
+      f: (x: BalanceInventarioItemFilaPayload) => number | null,
+    ): number | null =>
+      filas.some((x) => f(x) != null)
+        ? round(
+            filas.reduce((s, x) => s + (f(x) ?? 0), 0),
+            2,
+          )
+        : null;
     return {
       filas,
       total_piezas: round(filas.reduce((s, f) => s + (f.existencia ?? 0), 0)),
@@ -538,6 +1051,108 @@ export class InventoryService {
       total_utilidad_mxn: round(
         filas.reduce((s, f) => s + (f.utilidad_mxn ?? 0), 0),
         2,
+      ),
+      total_vendido_usd: sumaUsd((f) => f.vendido_usd),
+      total_utilidad_usd: sumaUsd((f) => f.utilidad_usd),
+      filas_utilidad_incompleta: filas.filter((f) => f.ventas_sin_utilidad > 0)
+        .length,
+      margen_venta_pct: margen,
+    };
+  }
+
+  /**
+   * Cardex COMPLETO de la bodega (todos los ítems, incluidos los dados de
+   * baja: su dinero ya viajó) agrupado por ítem, con la agregación única
+   * (`agregadosDeItem`) del periodo. Lo comparten la hoja «inventario» del
+   * Balance general (`resumenTiendita`) y el resumen de la tienda
+   * (`tiendaResumen`): el MISMO número en los dos lados.
+   * `para_flota` NO está en la lista base de columnas de movimiento:
+   * seleccionarlo explícito (como el cardex libro) o el "FLOTA" de las
+   * salidas prorrateadas se perdería en silencio. Lectura paginada hasta
+   * cubrir el count: el FIFO necesita TODO el cardex.
+   */
+  private async agregadosPorItem(
+    desde?: string | null,
+    hasta?: string | null,
+  ): Promise<
+    Array<{ item_id: string; movs: MovTiendita[]; agregados: AgregadosItem }>
+  > {
+    const data = await this.todasLasFilas<MovTiendita>((a, b) =>
+      this.supabase.service
+        .from('inventario_movimiento')
+        .select(
+          'id, item_id, tipo, cantidad, costo_unitario_usd, moneda, costo_unitario_mxn, tc_usd_mxn, venta_unitaria, venta_moneda, fecha_movimiento, created_at, para_flota, aeronave:aeronave!aeronave_id(matricula)',
+          { count: 'exact' },
+        )
+        .order('fecha_movimiento', { ascending: true })
+        .order('created_at', { ascending: true })
+        .order('id', { ascending: true })
+        .range(a, b),
+    );
+    const porItem = new Map<string, MovTiendita[]>();
+    for (const m of data) {
+      if (!porItem.has(m.item_id)) porItem.set(m.item_id, []);
+      porItem.get(m.item_id)!.push(m);
+    }
+    const enPeriodo = filtroPeriodo(desde, hasta);
+    return [...porItem].map(([item_id, movs]) => ({
+      item_id,
+      movs,
+      agregados: agregadosDeItem(movs, enPeriodo),
+    }));
+  }
+
+  /**
+   * UTILIDAD DE LA TIENDA VuelaTour (25-sep-2026, `GET tienda/resumen`): lo
+   * que se cobró a los aviones menos el costo FIFO de lo que salió, en el
+   * periodo (sin fechas = todo el historial). Pesos y dólares van SEPARADOS
+   * (null = no hubo nada en esa moneda; 0 es 0). Fuente única:
+   * `agregadosPorItem` → `agregadosDeItem` → `ventaDeSalida`.
+   */
+  async tiendaResumen(q: { desde?: string; hasta?: string } = {}) {
+    if (q.desde && q.hasta && q.desde > q.hasta) {
+      throw new BadRequestException(
+        'El periodo está al revés: «desde» es posterior a «hasta».',
+      );
+    }
+    const [porItem, margen] = await Promise.all([
+      this.agregadosPorItem(q.desde, q.hasta),
+      this.margenVentaPct(),
+    ]);
+    const suma = (
+      f: (a: AgregadosItem) => number | null,
+      decimales = 2,
+    ): number | null =>
+      porItem.some((p) => f(p.agregados) != null)
+        ? round(
+            porItem.reduce((s, p) => s + (f(p.agregados) ?? 0), 0),
+            decimales,
+          )
+        : null;
+    const conVentas = porItem.filter((p) => p.agregados.ventas_cant != null);
+    return {
+      periodo:
+        q.desde || q.hasta
+          ? { desde: q.desde ?? null, hasta: q.hasta ?? null }
+          : null,
+      margen_venta_pct: margen,
+      utilidad_mxn: suma((a) => a.utilidad_mxn),
+      utilidad_usd: suma((a) => a.utilidad_usd),
+      ventas_mxn: suma((a) => a.ventas_mxn),
+      ventas_usd: suma((a) => a.ventas_usd),
+      costo_ventas_mxn: suma((a) => a.costo_ventas_mxn),
+      costo_ventas_usd: suma((a) => a.costo_ventas_usd),
+      unidades_cargadas: suma((a) => a.salidas_cant, 3) ?? 0,
+      unidades_vendidas: suma((a) => a.ventas_cant, 3) ?? 0,
+      productos_con_ventas: conVentas.length,
+      ventas_sin_utilidad: porItem.reduce(
+        (s, p) => s + p.agregados.ventas_sin_utilidad,
+        0,
+      ),
+      // Solo importa donde hubo ventas: ahí la utilidad sale inflada por
+      // una capa a $0 (un producto sin ventas no afecta la cifra).
+      con_entradas_sin_costo: conVentas.some(
+        (p) => p.agregados.con_entradas_sin_costo,
       ),
     };
   }
@@ -634,15 +1249,27 @@ export class InventoryService {
   // ===== Ítems =====
 
   async listItems(filters: ListInventarioQuery) {
+    const conCatalogo = await this.ubicacionDisponible();
+    // El filtro por ubicación es del catálogo: sin la migración no hay nada
+    // por qué filtrar (503 claro, no una lista vacía que engañe).
+    if (filters.ubicacion && !conCatalogo) {
+      throw this.ubicacionesNoDisponibles();
+    }
     let q = this.supabase.service
       .from('inventario_item')
-      .select(ITEM_COLS, { count: 'exact' })
+      .select(this.itemCols(conCatalogo), { count: 'exact' })
       .order('nombre', { ascending: true })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
     if (typeof filters.activo === 'boolean') q = q.eq('activo', filters.activo);
     else q = q.eq('activo', true);
     if (filters.categoria) q = q.eq('categoria', filters.categoria);
+    if (filters.ubicacion) {
+      q =
+        filters.ubicacion.toLowerCase() === FILTRO_SIN_UBICACION
+          ? q.is('ubicacion_id', null)
+          : q.eq('ubicacion_id', filters.ubicacion);
+    }
     if (filters.q) {
       const term = `%${filters.q}%`;
       q = q.or(
@@ -651,28 +1278,30 @@ export class InventoryService {
     }
     const { data: items, error, count } = await q;
     if (error) throw new Error(error.message);
-    const rows = items ?? [];
+    const rows = (items ?? []) as unknown as Array<
+      Record<string, unknown> & { id: string; stock_minimo: number | null }
+    >;
 
     // Stock + valorizado + ganancia por ítem (un solo barrido del cardex de
     // los ítems listados). El FIFO corre SIEMPRE sobre todo el cardex;
     // desde/hasta solo acotan qué compras/ventas SUMAN (sin query =
     // acumulado histórico).
-    const ids = rows.map((r) => (r as { id: string }).id);
-    const [movsByItem, empaquesByItem] = await Promise.all([
+    const ids = rows.map((r) => r.id);
+    const [movsByItem, empaquesByItem, margen] = await Promise.all([
       this.movsByItems(ids),
       this.empaquesByItems(ids),
+      this.margenVentaPct(),
     ]);
     const enPeriodo = filtroPeriodo(filters.desde, filters.hasta);
     let data = rows.map((r) => {
-      const it = r as Record<string, unknown> & {
-        id: string;
-        stock_minimo: number | null;
-      };
+      const it = this.conUbicacion(r, conCatalogo);
       const movs = movsByItem.get(it.id) ?? [];
       const stats = statsFromLayers(buildLayers(movs));
-      // Ganancia / pérdida del producto: la MISMA agregación que la hoja
-      // "inventario" del Balance general (agregadosDeItem) — ventas con
-      // precio − costo FIFO de esas salidas; null = nunca vendió con precio.
+      // UTILIDAD del producto (tienda, 25-sep-2026): la MISMA agregación que
+      // la hoja "inventario" del Balance general (agregadosDeItem) — lo que
+      // se cobró a los aviones − costo FIFO de esas salidas; en PESOS y en
+      // DÓLARES por separado (una salida cuenta en una sola moneda); null =
+      // nunca vendió en esa moneda.
       const a = agregadosDeItem(movs, enPeriodo);
       return {
         ...it,
@@ -681,9 +1310,16 @@ export class InventoryService {
         bajo_stock:
           it.stock_minimo != null && stats.stock < Number(it.stock_minimo),
         salidas_cant: a.salidas_cant,
+        ventas_cant: a.ventas_cant,
         ventas_mxn: a.ventas_mxn,
         costo_ventas_mxn: a.costo_ventas_mxn,
+        // `ganancia_mxn` se conserva (compat) = `utilidad_mxn`.
         ganancia_mxn: a.utilidad_mxn,
+        utilidad_mxn: a.utilidad_mxn,
+        ventas_usd: a.ventas_usd,
+        costo_ventas_usd: a.costo_ventas_usd,
+        utilidad_usd: a.utilidad_usd,
+        ventas_sin_utilidad: a.ventas_sin_utilidad,
         con_entradas_sin_costo: a.con_entradas_sin_costo,
         con_movimientos_sin_tc: a.con_movimientos_sin_tc,
       };
@@ -719,6 +1355,17 @@ export class InventoryService {
         data.reduce((s, d) => s + (d.ganancia_mxn ?? 0), 0),
         2,
       ),
+      // ADITIVOS (25-sep-2026): utilidad de la tienda POR PÁGINA, una suma por
+      // moneda — jamás sumadas entre sí.
+      utilidad_total_mxn: round(
+        data.reduce((s, d) => s + (d.utilidad_mxn ?? 0), 0),
+        2,
+      ),
+      utilidad_total_usd: round(
+        data.reduce((s, d) => s + (d.utilidad_usd ?? 0), 0),
+        2,
+      ),
+      margen_venta_pct: margen,
     };
   }
 
@@ -754,15 +1401,19 @@ export class InventoryService {
     return map;
   }
 
-  async findItem(id: string) {
+  async findItem(id: string): Promise<Record<string, unknown>> {
+    const conCatalogo = await this.ubicacionDisponible();
     const { data, error } = await this.supabase.service
       .from('inventario_item')
-      .select(ITEM_COLS)
+      .select(this.itemCols(conCatalogo))
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Ítem ${id} not found`);
-    return data;
+    return this.conUbicacion(
+      data as unknown as Record<string, unknown>,
+      conCatalogo,
+    );
   }
 
   /** Detalle del ítem con empaques, cardex completo y stats FIFO. */
@@ -799,15 +1450,16 @@ export class InventoryService {
           ? round(costoUnitarioMxnDe(x).mxn, 2)
           : null;
       if (x.tipo !== salida) return { ...x, costo_unitario_mxn_efectivo };
-      const paso = walk.get(x.id);
-      const { gananciaMxn } = ventaYGananciaDe(
-        x,
-        paso?.costoMxnFifo ?? null,
-        paso?.sinTc === true,
-      );
-      return gananciaMxn != null
-        ? { ...x, costo_unitario_mxn_efectivo, ganancia_mxn: gananciaMxn }
-        : { ...x, costo_unitario_mxn_efectivo };
+      // Utilidad de la salida en UNA moneda (ventaDeSalida): `ganancia_mxn`
+      // como siempre y, ADITIVO (25-sep-2026), `ganancia_usd` cuando la
+      // venta y el costo están en dólares sin T.C.
+      const { gananciaMxn, gananciaUsd } = ventaDeSalida(x, walk.get(x.id));
+      return {
+        ...x,
+        costo_unitario_mxn_efectivo,
+        ...(gananciaMxn != null ? { ganancia_mxn: gananciaMxn } : {}),
+        ...(gananciaUsd != null ? { ganancia_usd: gananciaUsd } : {}),
+      };
     });
     return { ...item, ...stats, movimientos };
   }
@@ -836,8 +1488,15 @@ export class InventoryService {
       categoria?: string | null;
       precio_venta?: number | string | null;
       precio_venta_moneda?: 'MXN' | 'USD' | null;
+      ubicacion?: string | null;
+      ubicacion_id?: string | null;
+      ubicacion_nombre?: string | null;
+      ubicacion_legado?: string | null;
     };
-    const movs = await this.movsCardexCompleto(itemId);
+    const [movs, margen] = await Promise.all([
+      this.movsCardexCompleto(itemId),
+      this.margenVentaPct(),
+    ]);
     const enPeriodo = filtroPeriodo(q.desde, q.hasta);
     const { compras, ventas, totales } = bloquesCardexDe(
       item.nombre,
@@ -864,7 +1523,19 @@ export class InventoryService {
         precio_venta:
           item.precio_venta != null ? Number(item.precio_venta) : null,
         precio_venta_moneda: item.precio_venta_moneda ?? null,
+        // ADITIVOS (25-sep-2026): ubicación a mostrar y, con la migración
+        // del catálogo, sus llaves (findItem ya las trae resueltas).
+        ubicacion: item.ubicacion ?? null,
+        ...('ubicacion_id' in item
+          ? {
+              ubicacion_id: item.ubicacion_id ?? null,
+              ubicacion_nombre: item.ubicacion_nombre ?? null,
+              ubicacion_legado: item.ubicacion_legado ?? null,
+            }
+          : {}),
       },
+      // Margen vigente de la tienda (textos del detalle).
+      margen_venta_pct: margen,
       moneda: 'MXN' as const,
       periodo:
         q.desde || q.hasta
@@ -1051,6 +1722,11 @@ export class InventoryService {
         if (e.codigo) await this.assertCodigoLibre(e.codigo);
       }
     }
+    // Ubicación (25-sep-2026): catálogo (`ubicacion_id`) o texto legado; sin
+    // la migración, el texto de siempre con «Bodega Cancún» por default.
+    const ubicacion = await this.ubicacionDeAlta(dto);
+    const conCatalogo = await this.ubicacionDisponible();
+    const cols = this.itemCols(conCatalogo);
 
     const { data, error } = await this.supabase.service
       .from('inventario_item')
@@ -1061,7 +1737,7 @@ export class InventoryService {
         codigo,
         categoria: dto.categoria,
         stock_minimo: dto.stock_minimo ?? 0,
-        ubicacion: dto.ubicacion ?? 'Bodega Cancún',
+        ...ubicacion,
         unidad: dto.unidad || null,
         precio_venta: precioVenta.precio,
         precio_venta_moneda: precioVenta.moneda,
@@ -1073,10 +1749,13 @@ export class InventoryService {
         created_by: userId,
         updated_by: userId,
       })
-      .select(ITEM_COLS)
+      .select(cols)
       .maybeSingle();
     if (error) throw this.errorDeCodigo(error, codigo);
-    const item = data as Record<string, unknown> & { id: string };
+    const item = this.conUbicacion(
+      data as unknown as Record<string, unknown> & { id: string },
+      conCatalogo,
+    );
     if (empaques.length === 0) return { ...item, empaques: [] as EmpaqueRow[] };
 
     const { data: creados, error: eEmp } = await this.supabase.service
@@ -1118,12 +1797,21 @@ export class InventoryService {
       throw new BadRequestException('El nombre del ítem no puede ir vacío.');
     if (dto.categoria !== undefined && !textoNoVacio(dto.categoria))
       throw new BadRequestException('La categoría del ítem no puede ir vacía.');
-    if (dto.ubicacion !== undefined && !textoNoVacio(dto.ubicacion))
+    // Con `ubicacion_id` el texto se ignora (no se valida); sin él, un texto
+    // vacío sigue siendo 400 (clientes viejos ya lo omiten).
+    if (
+      dto.ubicacion_id === undefined &&
+      dto.ubicacion !== undefined &&
+      !textoNoVacio(dto.ubicacion)
+    )
       throw new BadRequestException('La ubicación no puede ir vacía.');
     const cambios: Record<string, unknown> = { ...dto, updated_by: userId };
     if (dto.nombre !== undefined) cambios.nombre = dto.nombre.trim();
     if (dto.categoria !== undefined) cambios.categoria = dto.categoria.trim();
-    if (dto.ubicacion !== undefined) cambios.ubicacion = dto.ubicacion.trim();
+    // Ubicación (25-sep-2026): catálogo o texto legado (ubicacionDeEdicion).
+    delete cambios.ubicacion;
+    delete cambios.ubicacion_id;
+    Object.assign(cambios, await this.ubicacionDeEdicion(id, dto));
     if (dto.codigo !== undefined) {
       const codigo = normalizarCodigo(dto.codigo);
       if (codigo) await this.assertCodigoLibre(codigo, { itemId: id });
@@ -1173,11 +1861,12 @@ export class InventoryService {
       porBorrar = previas.filter((p): p is string => !!p && !nuevas.has(p));
     }
 
+    const conCatalogo = await this.ubicacionDisponible();
     const { data, error } = await this.supabase.service
       .from('inventario_item')
       .update(cambios)
       .eq('id', id)
-      .select(ITEM_COLS)
+      .select(this.itemCols(conCatalogo))
       .maybeSingle();
     if (error) throw this.errorDeCodigo(error, cambios.codigo as string | null);
     if (!data) throw new NotFoundException(`Ítem ${id} not found`);
@@ -1188,7 +1877,10 @@ export class InventoryService {
         .catch(() => undefined);
     }
     return {
-      ...(data as Record<string, unknown>),
+      ...this.conUbicacion(
+        data as unknown as Record<string, unknown>,
+        conCatalogo,
+      ),
       empaques: await this.listEmpaques(id),
     };
   }
@@ -1242,7 +1934,7 @@ export class InventoryService {
   async findItemConEmpaques(id: string) {
     const item = await this.findItem(id);
     return {
-      ...(item as Record<string, unknown>),
+      ...item,
       empaques: await this.listEmpaques(id),
     };
   }
@@ -1546,6 +2238,7 @@ export class InventoryService {
         .eq('item_id', id);
       if (eEmp) throw new Error(eEmp.message);
     }
+    const conCatalogo = await this.ubicacionDisponible();
     const { data, error } = await this.supabase.service
       .from('inventario_item')
       .update({
@@ -1555,12 +2248,15 @@ export class InventoryService {
         updated_by: userId,
       })
       .eq('id', id)
-      .select(ITEM_COLS)
+      .select(this.itemCols(conCatalogo))
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Ítem ${id} not found`);
     return {
-      ...(data as Record<string, unknown>),
+      ...this.conUbicacion(
+        data as unknown as Record<string, unknown>,
+        conCatalogo,
+      ),
       empaques: await this.listEmpaques(id),
     };
   }
@@ -1704,6 +2400,9 @@ export class InventoryService {
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
       reversion_pendiente: null as ReversionPendiente | null,
+      // El replay NO recalcula nada (el precio ya viajó al gasto).
+      venta_origen: null as OrigenVenta | null,
+      margen_pct: null as number | null,
       client_request_id: key,
       idempotente: true as const,
     };
@@ -1803,11 +2502,15 @@ export class InventoryService {
     let tc: number | null = null;
     // VENTA (decisión del cliente 29-ago-2026): en SALIDA el avión paga el
     // PRECIO DE VENTA (el capturado en la salida, o el del ítem como default);
-    // el costo FIFO queda para el inventario (capas/valorizado intactos). Sin
-    // precio no cambia NADA: el gasto sale a costo FIFO como siempre. Un 0
+    // el costo FIFO queda para el inventario (capas/valorizado intactos). Un 0
     // explícito en venta_unitaria = "esta salida va a costo FIFO".
+    // TIENDA VuelaTour (decisión del cliente 25-sep-2026): SIN precio, el
+    // avión paga costo FIFO + margen de la tienda (`inventario_margen_venta_pct`,
+    // 25 %), en la MISMA moneda del costo — fuente única precioVentaDeSalida.
     let ventaUnitaria: number | null = null;
     let ventaMoneda: 'MXN' | 'USD' | null = null;
+    let ventaOrigen: OrigenVenta | null = null;
+    let margenAplicado: number | null = null;
 
     if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       if (!dto.aeronave_id && dto.para_flota !== true) {
@@ -1833,20 +2536,26 @@ export class InventoryService {
         tc = consumo.usd > 0 ? round(consumo.mxn / consumo.usd, 4) : null;
       }
       moneda = consumo.todoMxn && consumo.mxn != null ? 'MXN' : 'USD';
-      // Precio de venta efectivo: el del DTO (> 0) gana; sin campo en el DTO
-      // se hereda el del ítem. La moneda del DTO acompaña a SU precio; la del
-      // ítem al suyo (jamás cruzar precio de una fuente con moneda de otra).
-      if (dto.venta_unitaria != null) {
-        if (Number(dto.venta_unitaria) > 0) {
-          ventaUnitaria = round(Number(dto.venta_unitaria), 4);
-          ventaMoneda =
-            dto.venta_moneda ??
-            (item.precio_venta_moneda === 'USD' ? 'USD' : 'MXN');
-        }
-      } else if (Number(item.precio_venta) > 0) {
-        ventaUnitaria = round(Number(item.precio_venta), 4);
-        ventaMoneda = item.precio_venta_moneda === 'USD' ? 'USD' : 'MXN';
-      }
+      // Precio de venta efectivo (fuente única precioVentaDeSalida): el del
+      // DTO (> 0) gana; sin campo en el DTO se hereda el del ítem; sin
+      // ninguno, costo FIFO + margen de la tienda en la moneda del costo. La
+      // moneda del DTO acompaña a SU precio; la del ítem al suyo (jamás cruzar
+      // precio de una fuente con moneda de otra).
+      const margen = await this.margenVentaPct();
+      const precio = precioVentaDeSalida({
+        dtoVenta: dto.venta_unitaria ?? null,
+        dtoMoneda: dto.venta_moneda ?? null,
+        itemPrecio: item.precio_venta ?? null,
+        itemMoneda: item.precio_venta_moneda ?? null,
+        costoUnitario:
+          moneda === 'MXN' && costoMxn != null ? costoMxn : costoUnitario,
+        monedaSalida: moneda,
+        margenPct: margen,
+      });
+      ventaUnitaria = precio.ventaUnitaria;
+      ventaMoneda = precio.ventaMoneda;
+      ventaOrigen = precio.origen;
+      margenAplicado = precio.origen === 'MARGEN' ? margen : null;
     } else {
       const costo = this.resolverCostoEntrada(dto);
       costoUnitario = costo.costoUnitario;
@@ -1963,12 +2672,21 @@ export class InventoryService {
     // viaja como `reversion_pendiente` para que el dinero no se pierda en
     // silencio (la UI puede ignorarlo; el warn en el log se conserva).
     let reversionPendiente: ReversionPendiente | null = null;
+    // Cómo se cobró la salida (notas del gasto): precio, costo + margen o costo.
+    const etiquetaCargo =
+      ventaOrigen === 'MARGEN'
+        ? `costo FIFO + ${margenAplicado} %`
+        : ventaOrigen === 'PRECIO_CAPTURADO' ||
+            ventaOrigen === 'PRECIO_PRODUCTO'
+          ? 'precio de venta'
+          : 'costo FIFO';
     if (salidaDeFlota) {
       gastoGenerado = await this.crearGastosDeSalidaFlota(
         data as Record<string, unknown>,
         item.nombre,
         userId,
         presentacion,
+        etiquetaCargo,
       );
     } else if (dto.tipo === TipoMovimientoInventario.SALIDA) {
       gastoGenerado = await this.crearGastoDeSalida(
@@ -1976,6 +2694,7 @@ export class InventoryService {
         item.nombre,
         userId,
         presentacion,
+        etiquetaCargo,
       );
     } else if (
       dto.tipo === TipoMovimientoInventario.DEVOLUCION &&
@@ -2004,6 +2723,10 @@ export class InventoryService {
       valor_usd: stats.valor_usd,
       gasto_generado: gastoGenerado,
       reversion_pendiente: reversionPendiente,
+      // ADITIVOS (25-sep-2026): de dónde salió el precio que paga el avión
+      // (null fuera de SALIDA) y el margen aplicado (solo MARGEN).
+      venta_origen: ventaOrigen,
+      margen_pct: margenAplicado,
       // Aditivo (10-sep-2026): la app deduplica su pendiente local con la
       // llave; null cuando no viajó o la columna aún no existe.
       client_request_id: key,
@@ -2631,9 +3354,13 @@ export class InventoryService {
     itemNombre: string,
     userId: string,
     presentacion: string | null = null,
+    /** Cómo se cobró (25-sep-2026): «precio de venta» | «costo FIFO + 25 %» | «costo FIFO». */
+    etiquetaCargo?: string,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
+    const etiqueta =
+      etiquetaCargo ?? (esVenta ? 'precio de venta' : 'costo FIFO');
 
     const { data, error } = await this.supabase.service
       .from('gasto')
@@ -2650,7 +3377,7 @@ export class InventoryService {
         proveedor_id: mov.proveedor_id ?? null,
         inventario_movimiento_id: mov.id,
         notas:
-          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'})` +
+          `Salida de bodega: ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${etiqueta})` +
           (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
         // Gasto fabricado por el sistema: capturado = ahora (7-sep).
         capturado_en: capturadoAhora(),
@@ -2710,9 +3437,13 @@ export class InventoryService {
     itemNombre: string,
     userId: string,
     presentacion: string | null = null,
+    /** Cómo se cobró (25-sep-2026): «precio de venta» | «costo FIFO + 25 %» | «costo FIFO». */
+    etiquetaCargo?: string,
   ): Promise<Record<string, unknown> | null> {
     const { monto, moneda, tcGasto, esVenta } = montoGastoDeSalida(mov);
     if (monto <= 0) return null;
+    const etiqueta =
+      etiquetaCargo ?? (esVenta ? 'precio de venta' : 'costo FIFO');
 
     const { data: aviones, error: avErr } = await this.supabase.service
       .from('aeronave')
@@ -2747,7 +3478,7 @@ export class InventoryService {
       proveedor_id: mov.proveedor_id ?? null,
       inventario_movimiento_id: mov.id,
       notas:
-        `Salida de bodega (toda la flota, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${esVenta ? 'precio de venta' : 'costo FIFO'} $${monto.toFixed(2)} ${moneda})` +
+        `Salida de bodega (toda la flota, 1/${n} del ${esVenta ? 'precio de venta' : 'costo'}): ${Number(mov.cantidad)} × ${itemNombre}${presentacion ? ` (${presentacion})` : ''} (${etiqueta} $${monto.toFixed(2)} ${moneda})` +
         (mov.referencia ? ` · ref ${mov.referencia as string}` : ''),
       // Gasto fabricado por el sistema: capturado = ahora (7-sep).
       capturado_en: capturadoAhora(),
@@ -2995,22 +3726,6 @@ function pathsDeFotos(raw: unknown): string[] {
 }
 
 /**
- * Monto/moneda del gasto de bodega que nace de una SALIDA — FUENTE ÚNICA del
- * monto/moneda/TC del cargo al avión (salida individual Y prorrateo de flota).
- *
- * CARGO A PRECIO DE VENTA (decisión del cliente 29-ago-2026): si la salida
- * lleva `venta_unitaria`, el avión paga venta_unitaria × cantidad en
- * `venta_moneda` (el costo FIFO queda SOLO para el inventario: capas,
- * valorizado y cardex no cambian). CRITERIO DE TC de la venta: `tc_gasto`
- * lleva el TC ponderado FIFO de las capas consumidas (mov.tc_usd_mxn) como
- * REFERENCIA — es el TC real de lo que costó la pieza y permite expresar el
- * gasto en la otra moneda para el reparto/balance; si las capas no traían TC,
- * queda null y los lectores aplican su respaldo de siempre (TC del día /
- * `vuelo.tc_usd_mxn`). Sin venta, NADA cambia: costo FIFO exacto como hoy
- * (en MXN cuando todas las capas consumidas se compraron en pesos, si no
- * USD; `tc_gasto` = TC ponderado de las capas).
- */
-/**
  * Nombre del CHECK que rechazó un INSERT/UPDATE (23514). Postgres lo manda
  * entrecomillado dentro del mensaje: «… violates check constraint
  * "inventario_movimiento_check"». Sirve para que el 400 diga CUÁL regla se
@@ -3021,29 +3736,17 @@ function nombreDeConstraint(mensaje: string): string | null {
   return /check constraint "([^"]+)"/i.exec(mensaje ?? '')?.[1] ?? null;
 }
 
-function montoGastoDeSalida(mov: Record<string, unknown>): {
-  monto: number;
-  moneda: 'MXN' | 'USD';
-  tcGasto: number | null;
-  /** true = el cargo salió del PRECIO DE VENTA (no del costo FIFO). */
-  esVenta: boolean;
-} {
-  const cant = Number(mov.cantidad);
-  const tc = Number(mov.tc_usd_mxn);
-  const tcGasto = Number.isFinite(tc) && tc > 0 ? tc : null;
-  const venta = mov.venta_unitaria != null ? Number(mov.venta_unitaria) : null;
-  if (venta != null && venta > 0) {
-    return {
-      monto: round(cant * venta, 2),
-      moneda: mov.venta_moneda === 'USD' ? 'USD' : 'MXN',
-      tcGasto,
-      esVenta: true,
-    };
+/**
+ * Ids por consulta `in (…)` de PostgREST: con ~200 uuids la URL revienta
+ * (414). Mismo tope que `calendar-huerfanos.util#LOTE_IDS_BD`.
+ */
+export const LOTE_IDS_INVENTARIO = 150;
+
+/** Parte `ids` en lotes de ≤ LOTE_IDS_INVENTARIO (vacío ⇒ ningún lote). */
+function lotesDeIds(ids: readonly string[]): string[][] {
+  const out: string[][] = [];
+  for (let i = 0; i < ids.length; i += LOTE_IDS_INVENTARIO) {
+    out.push(ids.slice(i, i + LOTE_IDS_INVENTARIO));
   }
-  const enMxn = mov.moneda === 'MXN' && mov.costo_unitario_mxn != null;
-  const monto = round(
-    cant * Number(enMxn ? mov.costo_unitario_mxn : mov.costo_unitario_usd),
-    2,
-  );
-  return { monto, moneda: enMxn ? 'MXN' : 'USD', tcGasto, esVenta: false };
+  return out;
 }

@@ -32,7 +32,16 @@ type Resultado = {
 };
 type Llamada = { tabla: string; metodo: string; args: unknown[] };
 
-function armar(tablas: Record<string, Resultado[]>, columnaLlave = true) {
+/** Marca de resultado: el insert devuelve su propio payload (eco) + un id. */
+const ECO = '__ECO__';
+
+function armar(
+  tablas: Record<string, Resultado[]>,
+  columnaLlave = true,
+  configuracion?: {
+    numero: (clave: string, porDefecto: number) => Promise<number>;
+  },
+) {
   const llamadas: Llamada[] = [];
   const cursor: Record<string, number> = {};
   const siguiente = (tabla: string): Resultado => {
@@ -74,6 +83,14 @@ function armar(tablas: Record<string, Resultado[]>, columnaLlave = true) {
         cadena.length === 2 &&
         cadena.some((l) => l.metodo === 'limit') &&
         sel?.args[0] === 'client_request_id';
+      // Sonda de la migración de ubicaciones (25-sep-2026): presente.
+      if (
+        cadena.length === 2 &&
+        cadena.some((l) => l.metodo === 'limit') &&
+        sel?.args[0] === 'ubicacion_id'
+      ) {
+        return { data: [], error: null };
+      }
       if (esSonda) {
         return columnaLlave
           ? { data: [], error: null }
@@ -86,7 +103,18 @@ function armar(tablas: Record<string, Resultado[]>, columnaLlave = true) {
               },
             };
       }
-      return siguiente(tabla);
+      const r = siguiente(tabla);
+      if (r.data === ECO) {
+        const ins = cadena.find((l) => l.metodo === 'insert')?.args[0];
+        const base = Array.isArray(ins) ? ins : [ins];
+        const filas = base.map((f, i) => ({
+          id: `${tabla}-eco-${i + 1}`,
+          created_at: '2026-09-25T15:00:00+00:00',
+          ...(f as Record<string, unknown>),
+        }));
+        return { data: Array.isArray(ins) ? filas : filas[0], error: null };
+      }
+      return r;
     };
     q.maybeSingle = () => Promise.resolve(resolver());
     q.then = (
@@ -96,7 +124,15 @@ function armar(tablas: Record<string, Resultado[]>, columnaLlave = true) {
     return q;
   };
   const supabase = { service: { from } } as unknown as SupabaseService;
-  return { service: new InventoryService(supabase, {} as never), llamadas };
+  return {
+    service: new InventoryService(
+      supabase,
+      {} as never,
+      undefined,
+      configuracion as never,
+    ),
+    llamadas,
+  };
 }
 
 const de = (llamadas: Llamada[], tabla: string, metodo: string) =>
@@ -206,6 +242,9 @@ describe('InventoryService.createMovimiento — B2 idempotencia', () => {
         categoria: 'REFACCION',
       },
       reversion_pendiente: null,
+      // El replay NO recalcula precio ni margen (25-sep-2026).
+      venta_origen: null,
+      margen_pct: null,
       client_request_id: KEY,
       idempotente: true,
     });
@@ -830,5 +869,280 @@ describe('InventoryService.createMovimiento — salida de flota: los N gastos', 
       service.createMovimiento('i-1', DTO_FLOTA, 'u-ofi'),
     ).rejects.toThrow(/se revirtió/);
     expect(de(llamadas, 'inventario_movimiento', 'delete')).toHaveLength(1);
+  });
+});
+
+/**
+ * 25-sep-2026 · TIENDA VuelaTour: toda SALIDA a un avión SIN precio se cobra
+ * a costo FIFO + margen (`inventario_margen_venta_pct`, 25 %), en la moneda
+ * del costo. El precio capturado (> 0) y el del producto siguen ganando; el 0
+ * explícito sigue siendo «a costo».
+ */
+describe('InventoryService.createMovimiento — margen de la tienda', () => {
+  let warn: jest.SpyInstance;
+  let log: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+    log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    log.mockRestore();
+  });
+
+  /** Carga VTF-INV-001: 120 × 21.25 USD sin TC. */
+  const CARDEX_USD = {
+    data: [
+      {
+        id: 'e-usd',
+        tipo: 'ENTRADA',
+        cantidad: 120,
+        costo_unitario_usd: 21.25,
+        moneda: 'USD',
+        costo_unitario_mxn: null,
+        tc_usd_mxn: null,
+        fecha_movimiento: '2026-08-29',
+        created_at: '2026-08-29T17:36:43+00:00',
+      },
+    ],
+    error: null,
+    count: 1,
+  };
+  /** Una capa comprada en PESOS: 30 × $1,658.33 MXN a TC 17.51. */
+  const CARDEX_MXN = {
+    data: [
+      {
+        id: 'e-mxn',
+        tipo: 'ENTRADA',
+        cantidad: 30,
+        costo_unitario_usd: 94.71,
+        moneda: 'MXN',
+        costo_unitario_mxn: 1658.33,
+        tc_usd_mxn: 17.51,
+        fecha_movimiento: '2026-07-13',
+        created_at: '2026-07-13T15:37:31+00:00',
+      },
+    ],
+    error: null,
+    count: 1,
+  };
+  const SALIDA_12 = {
+    tipo: TipoMovimientoInventario.SALIDA,
+    cantidad: 12,
+    aeronave_id: 'a-xavgv',
+  };
+  const salida = (
+    cardex: Resultado,
+    item: Record<string, unknown> = ITEM,
+    configuracion?: {
+      numero: (clave: string, porDefecto: number) => Promise<number>;
+    },
+  ) =>
+    armar(
+      {
+        inventario_item: [{ data: item, error: null }],
+        inventario_movimiento: [
+          cardex, // FIFO de la salida
+          { data: ECO, error: null }, // insert (eco del payload)
+          cardex, // stock resultante
+        ],
+        gasto: [{ data: ECO, error: null }],
+      },
+      true,
+      configuracion,
+    );
+  const insertDe = (llamadas: Llamada[], tabla: string) =>
+    de(llamadas, tabla, 'insert')[0].args[0] as Record<string, unknown>;
+
+  it('sin precio ⇒ costo FIFO + 25 % en la moneda del costo (USD sin TC): 12 × 26.5625 = 318.75 USD', async () => {
+    const { service, llamadas } = salida(CARDEX_USD);
+    const res = await service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      tipo: 'SALIDA',
+      cantidad: 12,
+      costo_unitario_usd: 21.25,
+      moneda: 'USD',
+      venta_unitaria: 26.5625,
+      venta_moneda: 'USD',
+    });
+    const gasto = insertDe(llamadas, 'gasto');
+    expect(gasto).toMatchObject({
+      categoria: 'REFACCION',
+      medio_pago: 'BODEGA',
+      monto: 318.75,
+      moneda: 'USD',
+      tc_gasto: null,
+    });
+    expect(String(gasto.notas)).toContain('(costo FIFO + 25 %)');
+    expect(res).toMatchObject({ venta_origen: 'MARGEN', margen_pct: 25 });
+  });
+
+  it('config AUSENTE (fila sin sembrar) ⇒ 25 % por default', async () => {
+    const numero = jest.fn((_c: string, porDefecto: number) =>
+      Promise.resolve(porDefecto),
+    );
+    const { service, llamadas } = salida(CARDEX_USD, ITEM, { numero });
+    const res = await service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    expect(numero).toHaveBeenCalledWith('inventario_margen_venta_pct', 25);
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({ monto: 318.75 });
+    expect(res).toMatchObject({ venta_origen: 'MARGEN', margen_pct: 25 });
+  });
+
+  it('config 12.5 ⇒ ese margen; config fuera de rango ⇒ 25', async () => {
+    const r1 = salida(CARDEX_USD, ITEM, {
+      numero: () => Promise.resolve(12.5),
+    });
+    const a = await r1.service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    // 21.25 × 1.125 = 23.90625 → 23.9063 (4 dec) × 12 = 286.8756 → 286.88
+    expect(insertDe(r1.llamadas, 'inventario_movimiento')).toMatchObject({
+      venta_unitaria: 23.9063,
+    });
+    expect(insertDe(r1.llamadas, 'gasto')).toMatchObject({ monto: 286.88 });
+    expect(a).toMatchObject({ margen_pct: 12.5 });
+    const r2 = salida(CARDEX_USD, ITEM, { numero: () => Promise.resolve(400) });
+    await r2.service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    expect(insertDe(r2.llamadas, 'gasto')).toMatchObject({ monto: 318.75 });
+  });
+
+  it('config 0 ⇒ a costo (sin venta, sin utilidad)', async () => {
+    const { service, llamadas } = salida(CARDEX_USD, ITEM, {
+      numero: () => Promise.resolve(0),
+    });
+    const res = await service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      venta_unitaria: null,
+      venta_moneda: null,
+    });
+    const gasto = insertDe(llamadas, 'gasto');
+    expect(gasto).toMatchObject({ monto: 255, moneda: 'USD' });
+    expect(String(gasto.notas)).toContain('(costo FIFO)');
+    expect(res).toMatchObject({ venta_origen: 'A_COSTO', margen_pct: null });
+  });
+
+  it('DTO 0 explícito ⇒ a costo aunque haya margen', async () => {
+    const { service, llamadas } = salida(CARDEX_USD);
+    const res = await service.createMovimiento(
+      'i-1',
+      { ...SALIDA_12, venta_unitaria: 0 },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      venta_unitaria: null,
+    });
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({ monto: 255 });
+    expect(res).toMatchObject({ venta_origen: 'A_COSTO', margen_pct: null });
+  });
+
+  it('el precio del PRODUCTO gana al margen (con su moneda)', async () => {
+    const { service, llamadas } = salida(CARDEX_USD, {
+      ...ITEM,
+      precio_venta: 450,
+      precio_venta_moneda: 'MXN',
+    });
+    const res = await service.createMovimiento('i-1', SALIDA_12, 'u-ofi');
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      venta_unitaria: 450,
+      venta_moneda: 'MXN',
+    });
+    const gasto = insertDe(llamadas, 'gasto');
+    expect(gasto).toMatchObject({ monto: 5400, moneda: 'MXN' });
+    expect(String(gasto.notas)).toContain('(precio de venta)');
+    expect(res).toMatchObject({
+      venta_origen: 'PRECIO_PRODUCTO',
+      margen_pct: null,
+    });
+  });
+
+  it('el precio CAPTURADO gana a todo', async () => {
+    const { service, llamadas } = salida(CARDEX_USD, {
+      ...ITEM,
+      precio_venta: 450,
+      precio_venta_moneda: 'MXN',
+    });
+    const res = await service.createMovimiento(
+      'i-1',
+      { ...SALIDA_12, venta_unitaria: 30, venta_moneda: 'USD' },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({
+      monto: 360,
+      moneda: 'USD',
+    });
+    expect(res).toMatchObject({ venta_origen: 'PRECIO_CAPTURADO' });
+  });
+
+  it('capas compradas en PESOS ⇒ el margen va en PESOS: 4 × 2,072.9125 = 8,291.65 MXN', async () => {
+    const { service, llamadas } = salida(CARDEX_MXN);
+    const res = await service.createMovimiento(
+      'i-1',
+      { ...SALIDA_12, cantidad: 4 },
+      'u-ofi',
+    );
+    expect(insertDe(llamadas, 'inventario_movimiento')).toMatchObject({
+      moneda: 'MXN',
+      costo_unitario_mxn: 1658.33,
+      venta_unitaria: 2072.9125,
+      venta_moneda: 'MXN',
+    });
+    expect(insertDe(llamadas, 'gasto')).toMatchObject({
+      monto: 8291.65,
+      moneda: 'MXN',
+      // TC ponderado de las capas (1,658.33 / 94.71), regla de siempre.
+      tc_gasto: 17.5096,
+    });
+    expect(res).toMatchObject({ venta_origen: 'MARGEN', margen_pct: 25 });
+  });
+
+  it('para toda la flota ⇒ el TOTAL con margen se prorratea al centavo (residuo en el primero)', async () => {
+    const { service, llamadas } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [
+        CARDEX_USD,
+        { data: ECO, error: null },
+        CARDEX_USD,
+      ],
+      aeronave: [FLOTA_ACTIVA],
+      gasto: [{ data: ECO, error: null }],
+    });
+    const res = await service.createMovimiento(
+      'i-1',
+      { tipo: TipoMovimientoInventario.SALIDA, cantidad: 12, para_flota: true },
+      'u-ofi',
+    );
+    const filas = de(llamadas, 'gasto', 'insert')[0].args[0] as Array<
+      Record<string, unknown>
+    >;
+    expect(filas).toHaveLength(7);
+    const montos = filas.map((f) => Number(f.monto));
+    // 318.75 / 7 = 45.5357… → 45.54 × 6 = 273.24; primero = 318.75 − 273.24 = 45.51
+    expect(montos[0]).toBe(45.51);
+    expect(montos.slice(1)).toEqual([45.54, 45.54, 45.54, 45.54, 45.54, 45.54]);
+    expect(Math.round(montos.reduce((s, m) => s + m, 0) * 100) / 100).toBe(
+      318.75,
+    );
+    expect(String(filas[0].notas)).toContain('costo FIFO + 25 %');
+    expect(res).toMatchObject({
+      venta_origen: 'MARGEN',
+      margen_pct: 25,
+      gasto_generado: { prorrateado: true, aviones: 7, monto_total: 318.75 },
+    });
+  });
+
+  it('ENTRADA: sin venta_origen ni margen', async () => {
+    const { service } = armar({
+      inventario_item: [{ data: ITEM, error: null }],
+      inventario_movimiento: [{ data: ECO, error: null }, CARDEX_USD],
+    });
+    const res = await service.createMovimiento(
+      'i-1',
+      {
+        tipo: TipoMovimientoInventario.ENTRADA,
+        cantidad: 5,
+        moneda: 'USD',
+        costo_unitario_usd: 10,
+      },
+      'u-ofi',
+    );
+    expect(res).toMatchObject({ venta_origen: null, margen_pct: null });
   });
 });

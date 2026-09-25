@@ -511,6 +511,112 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      `client_request_id` que está en la bitácora: el reintento del outbox de
      la app no resucita lo que la oficina eliminó con justificación.
 
+   **UTILIDAD DE LA TIENDA VuelaTour (25-sep-2026, API 0.0.35; pedido del
+   cliente: «de los productos que compramos, el precio que le ponemos en el
+   costo se le saca el 25 % el cual va a ser nuestra utilidad por producto
+   vendido o cargado a un avión»).** Decisión tomada: **margen SOBRE EL COSTO
+   FIFO, configurable** (`configuracion_sistema.inventario_margen_venta_pct`,
+   25 por default, `PATCH /v1/config/inventario_margen_venta_pct` 0–100 o
+   **400 `VALOR_FUERA_DE_RANGO`**). Toda SALIDA a un avión (también «para toda
+   la flota», prorrateada con el residuo en el primero) **sin precio** se
+   cobra a `costo FIFO × (1 + margen)`, en la MISMA moneda del costo (MXN si
+   todas las capas consumidas son pesos; si no USD). Precedencia intacta:
+   precio capturado > 0 → `precio_venta` del ítem → costo + margen → a costo;
+   **el 0 explícito sigue siendo «a costo»** (sin utilidad). Utilidad =
+   venta − costo FIFO.
+   - **Fuente ÚNICA** en `inventario-cardex.util.ts`: `margenVentaValido`
+     (config rota ⇒ 25), `ventaUnitariaConMargen` (round 4),
+     `precioVentaDeSalida` (la precedencia, con `origen` PRECIO_CAPTURADO |
+     PRECIO_PRODUCTO | MARGEN | A_COSTO), **`montoGastoDeSalida` (se MOVIÓ
+     aquí desde el pie de `inventory.service.ts`, mismo cuerpo)** y
+     **`ventaDeSalida`**: la utilidad de UNA salida en UNA sola moneda — pesos
+     si `ventaYGananciaDe` los puede expresar (criterio de siempre, ninguna
+     salida que ya daba utilidad en pesos cambia), si no **dólares** cuando la
+     venta es USD (venta USD − `costoUsdFifo`: dinero real de los dos lados,
+     sin T.C.); venta en PESOS sobre capas USD sin T.C. ⇒ `utilidadIncompleta`
+     (se cuenta en `ventas_sin_utilidad` y se avisa, jamás se suma nada).
+     `gananciaMxn` y `gananciaUsd` NUNCA los dos. `agregadosDeItem` /
+     `resumenDiarioDe` / `bloquesCardexDe` la usan y ganan `ventas_cant`,
+     `ventas_usd`, `costo_ventas_usd`, `utilidad_usd`, `ventas_sin_utilidad`
+     (ADITIVOS; los valores MXN no cambian). Hasta hoy la columna del panel
+     decía «—» en TODO el inventario porque la carga VTF-INV-001 es USD sin
+     T.C.
+   - `createMovimiento`: `InventoryService` recibe `ConfiguracionService`
+     `@Optional()` (4.º parámetro; sin él ⇒ 25). La respuesta gana
+     `venta_origen` y `margen_pct` (solo MARGEN); el replay idempotente NO
+     recalcula (`null`). Las notas del gasto dicen `(precio de venta)` |
+     `(costo FIFO + 25 %)` | `(costo FIFO)`. El panel VIEJO manda
+     `venta_unitaria: 0` con el precio vacío ⇒ esas salidas van a costo hasta
+     desplegar el panel nuevo (que omite el campo); la app Flutter ya lo
+     omite.
+   - Lecturas: `GET items` por ítem `utilidad_mxn` (alias de `ganancia_mxn`,
+     que se conserva), `utilidad_usd`, `ventas_usd`, `costo_ventas_usd`,
+     `ventas_cant`, `ventas_sin_utilidad`; raíz `utilidad_total_mxn` /
+     `utilidad_total_usd` (dos sumas, por página) y `margen_venta_pct`.
+     `GET items/:id` ⇒ `ganancia_usd` en las SALIDAS. `GET items/:id/resumen`
+     ⇒ `ventas[]` con `venta_total`, `costo_fifo_usd`, `ganancia_usd`,
+     `moneda_utilidad`, `utilidad_incompleta`; `resumen_diario[]` y
+     `totales` con lo USD; raíz `margen_venta_pct`. **`GET tienda/resumen?
+     desde&hasta`** (OFICINA) = la utilidad de la tienda por moneda (null =
+     nada en esa moneda), unidades cargadas/vendidas, productos con ventas —
+     lo arma `agregadosPorItem` (el MISMO recorrido que `resumenTiendita`).
+     La hoja «inventario» del Balance general gana `vendido_usd` /
+     `utilidad_usd` / `ventas_sin_utilidad` por fila y `total_vendido_usd` /
+     `total_utilidad_usd` (null si ninguna fila) / `filas_utilidad_incompleta`
+     / `margen_venta_pct` (ADITIVO en los dos sentidos con pyservices). El
+     Excel `items/export` gana «Utilidad (MXN)» y «Utilidad (USD)», totales
+     cada uno en su columna.
+   - **Re-precio de las 10 salidas del 01-sep** (migración de DATOS
+     `20260925000002`, autorizada por la oficina): a costo + 25 % con la
+     regla del API (redondeo POR SALIDA ⇒ N4142R +295.46, XA-VGV +239.89,
+     total +535.35 USD — 1 ¢ por avión arriba del 25 % del subtotal que se
+     autorizó). `repreciar-salidas-tienda.spec.ts` LEE los casos del SQL y
+     los ata a `ventaUnitariaConMargen`/`montoGastoDeSalida`/`ventaDeSalida`
+     con el cardex REAL de prod. Las 3 salidas de jul/ago (antes de la
+     tienda) no se tocan.
+   - Fuera de alcance (anotado): la DEVOLUCIÓN revierte contra
+     `gasto.monto` con el COSTO de la devolución ⇒ con margen el avión
+     conserva el 25 % de lo devuelto (igual que con precio de venta desde el
+     29-ago; se corrige en Gastos). El bloque 2 de la hoja «inventario» y el
+     cardex formato libro siguen en pesos. La utilidad NO entra al Libro
+     Dinero ni al reparto como ingreso de VuelaTour (no se pidió).
+
+   **UBICACIONES DE BODEGA (25-sep-2026, migración `20260925000001`).**
+   Catálogo `inventario_ubicacion` (nombre único sin distinguir mayúsculas,
+   `orden`, `activo`; sembrado con «Oficina vieja», «Oficina nueva», «Locker
+   del aeropuerto», «Bodega del taller de Mérida», «Bodega del taller de
+   Cozumel») + `inventario_item.ubicacion_id` (FK `on delete restrict`). El
+   TEXTO `ubicacion` se CONSERVA: con id es el ESPEJO del nombre (trigger
+   `trg_inventario_item_ubicacion_espejo`, venga de donde venga el write;
+   renombrar la ubicación lo propaga), sin id es el texto LEGADO de antes
+   (69 «Bodega Cancún», 3 «Corner/Bodega Córner»), que **NO se mapea
+   adivinando**: el panel lo pinta «(anterior)» y la oficina lo mueve con
+   «Sin ubicación nueva» + «Mover a…». Helpers puros en
+   `inventory/inventario-ubicacion.util.ts` (con spec).
+   - Respuesta de un ítem (lista, detalle, código, POST/PATCH): `ubicacion`
+     (texto a mostrar — la app Flutter lo sigue leyendo) + `ubicacion_id`,
+     `ubicacion_nombre`, `ubicacion_legado`. Escritura: `ubicacion_id` gana
+     (existe ⇒ si no 404 `UBICACION_NO_EXISTE`; activa ⇒ si no 400
+     `UBICACION_INACTIVA`, salvo la que el ítem YA tiene); `ubicacion_id:
+     null` = «Sin ubicación» (id y texto null); **solo texto (clientes
+     viejos: app, alta masiva)** ⇒ se liga si coincide sin acentos ni
+     mayúsculas con una activa (o la actual), si no queda legado sin id. Alta
+     sin nada ⇒ sin ubicación (ya no «Bodega Cancún»; la alta masiva dejó de
+     rellenarla).
+   - Rutas: `GET ubicaciones?incluir_inactivas` (OFICINA, con `productos`
+     activos), `POST ubicaciones`, `PATCH ubicaciones/:id` (ADMIN/MECANICO;
+     409 `UBICACION_DUPLICADA`; desactivar con productos activos ⇒ 409
+     `UBICACION_EN_USO` —la BD lo repite con 23514 y el API lo traduce a 409,
+     nunca 500—; sin DELETE), `POST items/mover-ubicacion` (UN update; 200
+     `{movidos, sin_cambio, no_encontrados, inactivos, ubicacion}`) y el
+     filtro `GET items?ubicacion=<id>|sin`. El Excel pinta «Bodega Cancún
+     (anterior)».
+   - **Tolerancia**: sonda única `columnaOpcional(inventario_item.
+     ubicacion_id)`. Sin la migración todo lo de ubicación se comporta como
+     0.0.34 (sin llaves nuevas; alta con «Bodega Cancún») y lo nuevo responde
+     **503 `MIGRACION_PENDIENTE`**. La utilidad y el margen NO dependen de la
+     migración.
+
 9. **Candados de rol**: el PILOTO solo registra cobros con método ∈
    {EFECTIVO, DOLARES, BILLPOCKET, HSBC_LINK} (se valida el del vuelo Y el del
    DTO); piloto/mecánico solo editan/borran SU gasto y SOLO el mismo día
@@ -2600,6 +2706,49 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **APLICADA (25-sep-2026, API 0.0.35; DRYRUN_OK C1–C6 con escrituras reales; `get_advisors` solo el INFO de RLS sin policies; ningún ítem ligado todavía)** —
+  `20260925000001_inventario_ubicacion_margen.sql` (invariante 8,
+  «UBICACIONES» y «UTILIDAD DE LA TIENDA»): tabla `inventario_ubicacion` (RLS
+  sin policies) sembrada con las 5 del cliente, `inventario_item.ubicacion_id`
+  (FK restrict + índice parcial), `inventario_item.ubicacion` pierde NOT NULL
+  y su default (se conserva como legado, SIN backfill), 4 triggers nuevos
+  (`trg_inventario_ubicacion_set_updated_at`,
+  `trg_inventario_item_ubicacion_espejo`, `trg_inventario_ubicacion_candados`,
+  `trg_inventario_ubicacion_renombre`; funciones SECURITY INVOKER con
+  `search_path = ''`, sin `moneda`) y la fila
+  `configuracion_sistema.inventario_margen_venta_pct = 25`. **Antes de
+  aplicar**: el DRY-RUN de su cabecera (UNA sentencia `do $dry$ … $dry$` con
+  las secciones 1–6 pegadas en B; UPDATE/INSERT REALES de `inventario_item`
+  —espejo, legado, FK, alta del API 0.0.34 con texto— y del catálogo
+  —renombre que propaga, únicos, desactivar/borrar con productos— que termina
+  en `DRYRUN_OK`). OJO: borrar una ubicación con productos responde
+  **23001 `restrict_violation`** (FK `on delete restrict`), no 23503: el
+  dry-run acepta los dos. Probado en PGlite (Postgres 17) con un esquema
+  espejo: `DRYRUN_OK` y aplicación idempotente (dos veces ⇒ 5 filas). Tras
+  aplicar: `get_advisors` (esperado solo el INFO de RLS sin policies), 5
+  ubicaciones, 0 ítems con `ubicacion_id`, margen 25 y sondear
+  `GET /v1/inventory/ubicaciones` (200; la sonda re-sondea en ≤ 10 min o
+  reiniciar el API). El API 0.0.35 es desplegable ANTES (503 claro en lo
+  nuevo; todo lo demás como 0.0.34) y el 0.0.34 convive con ella.
+- **PENDIENTE DE APLICAR (25-sep-2026, DESPUÉS de `20260925000001` y del API
+  0.0.35; migración de DATOS)** — `20260925000002_repreciar_salidas_tienda.sql`:
+  re-precia las 10 SALIDAS del 01-sep a costo FIFO + 25 % (`venta_unitaria`
+  y el gasto BODEGA de cada una: N4142R 1,181.81 → 1,477.27, XA-VGV 959.52 →
+  1,199.41 USD; total +535.35). Función en `pg_temp` con la tabla de casos
+  (la lee el spec jest), GUARDAS por id exacto (venta = costo, monto viejo,
+  mismo avión, sin conciliar / cargo bancario / factura / FACTURADA /
+  compra / reparto / ingreso ligados, un solo gasto por salida) ⇒
+  `REPRECIO_ABORTADO` sin escribir nada si alguna cambió; idempotente
+  (`REPRECIO_YA_APLICADO`). **Antes de aplicar**: el DRY-RUN de su cabecera
+  en UNA llamada de `execute_sql` (sección 1 tal cual —SIN la 2— + el `do
+  $dry$`): C0 un gasto conciliado aborta sin escribir, C1/C2 10/10 e
+  idempotente, C3 importes al centavo, C4 por avión, C5 jul/ago intactas,
+  C6 bitácora +10 (`actor_id` null ⇒ «Sistema»), C7 conteos ⇒ `DRYRUN_OK`.
+  Probado en PGlite con los 13 movimientos/gastos reales y los 4 triggers
+  reales de `gasto`. **Confirmar con la oficina la diferencia de 1 ¢ por
+  avión** (+295.46/+239.89 vs +295.45/+239.88 autorizados). Efecto: el
+  Balance de SEPTIEMBRE de N4142R y XA-VGV. Tras aplicar:
+  `GET /v1/inventory/tienda/resumen` ⇒ `utilidad_usd: 535.35`.
 - **APLICADA (24-sep-2026, API 0.0.34; DRYRUN_OK C1–C10 con escrituras reales; `get_advisors`: INFO de RLS sin policies + WARN de RPC de los 2 triggers SECURITY DEFINER, cerrado con `revoke execute` —sección 8, probado como service_role—)** —
   `20260924000004_ingresos.sql` (invariante 29): tablas `ingreso` e
   `ingreso_bitacora` (RLS sin policies, patrón del repo), columnas

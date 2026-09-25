@@ -15,6 +15,7 @@ import {
   type UsuarioAviso,
 } from '../flights/factura-solicitud.util';
 import type { ResponsablesFacturacion } from '../facturas-emitidas/facturas-emitidas.types';
+import { MARGEN_VENTA_PCT_DEFAULT } from '../inventory/inventario-cardex.util';
 
 const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
 
@@ -36,6 +37,31 @@ export const CONFIG_DIAS_GRACIA_GASTOS_SEMANA = 'dias_gracia_gastos_semana';
  */
 export const CONFIG_PAYWISE_COMISION_PCT = 'paywise_comision_pct';
 export const PAYWISE_COMISION_PCT_DEFAULT = 8.857;
+/**
+ * MARGEN DE LA TIENDA VuelaTour (25-sep-2026, migración 20260925000001): %
+ * que se suma al costo FIFO cuando una SALIDA de bodega a un avión no trae
+ * precio de venta (25 = el avión paga costo + 25 %; esa diferencia es la
+ * utilidad de VuelaTour). 0 = las salidas sin precio van a costo. Rango
+ * 0–100 (el PATCH lo valida). Aplica a las salidas NUEVAS. Un solo número:
+ * el default vive en `inventario-cardex.util.ts#MARGEN_VENTA_PCT_DEFAULT`.
+ */
+export const CONFIG_INVENTARIO_MARGEN_VENTA_PCT = 'inventario_margen_venta_pct';
+export const INVENTARIO_MARGEN_VENTA_PCT_DEFAULT = MARGEN_VENTA_PCT_DEFAULT;
+
+/**
+ * Rango permitido por clave numérica (PATCH `valor_numerico`). Fuera de él
+ * ⇒ 400 VALOR_FUERA_DE_RANGO. La BD solo exige ≥ 0.
+ */
+const RANGOS_NUMERICOS: Record<
+  string,
+  { min: number; max: number; mensaje: string }
+> = {
+  [CONFIG_INVENTARIO_MARGEN_VENTA_PCT]: {
+    min: 0,
+    max: 100,
+    mensaje: 'El margen de la tienda va de 0 a 100 %.',
+  },
+};
 /**
  * RESPONSABLES DE FACTURACIÓN (24-sep-2026, migración 20260924000003): lista
  * de usuarios de oficina (`valor_json`, arreglo de uuids) que reciben el
@@ -144,8 +170,18 @@ export class ConfiguracionService {
     }
     const patch: Record<string, unknown> = {};
     if (dto.activa !== undefined) patch.activa = dto.activa;
-    if (dto.valor_numerico !== undefined)
+    if (dto.valor_numerico !== undefined) {
+      const rango = RANGOS_NUMERICOS[clave];
+      const v = Number(dto.valor_numerico);
+      if (rango && (!Number.isFinite(v) || v < rango.min || v > rango.max)) {
+        throw new BadRequestException({
+          message: rango.mensaje,
+          error: 'VALOR_FUERA_DE_RANGO',
+          details: { clave, min: rango.min, max: rango.max },
+        });
+      }
       patch.valor_numerico = dto.valor_numerico;
+    }
     if (Object.keys(patch).length === 0) {
       throw new BadRequestException(
         'Nada que actualizar: manda activa y/o valor_numerico.',

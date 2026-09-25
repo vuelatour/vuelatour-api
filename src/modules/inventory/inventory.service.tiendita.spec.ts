@@ -198,5 +198,141 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
     expect(r.total_valor_mxn).toBe(416);
     expect(r.total_valor_usd).toBe(0);
     expect(r.filas_sin_tc).toBe(0);
+    // Tienda (25-sep-2026): sin ventas en dólares, nada en las columnas USD.
+    expect(r.filas[0]).toMatchObject({
+      vendido_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 0,
+    });
+    expect(r.total_vendido_usd).toBeNull();
+    expect(r.total_utilidad_usd).toBeNull();
+    expect(r.filas_utilidad_incompleta).toBe(0);
+    expect(r.margen_venta_pct).toBe(25);
+  });
+});
+
+/**
+ * 25-sep-2026 · UTILIDAD DE LA TIENDA en la hoja «inventario» y en
+ * `GET tienda/resumen`: la venta en dólares sobre costo en dólares (sin T.C.)
+ * tiene utilidad en USD —antes «—»—, en SU columna; la venta en pesos sobre
+ * dólares sin T.C. no se puede calcular (se cuenta y se avisa); los pesos
+ * quedan EXACTAMENTE como antes. Jamás se suman las dos monedas.
+ */
+const TIENDA: Fila[] = [
+  // Aceite: 120 × 21.25 USD sin TC (carga VTF-INV-001).
+  mov('a1', 'it-a', 'ENTRADA', 120, 21.25, 'USD'),
+  // 12 a XA-VGV y 24 a N4142R a costo + 25 % (26.5625 USD).
+  mov('a2', 'it-a', 'SALIDA', 12, 21.25, 'USD', null, {
+    venta_unitaria: 26.5625,
+    venta_moneda: 'USD',
+    fecha_movimiento: '2026-09-01',
+    created_at: '2026-09-22T14:13:06Z',
+    aeronave: { matricula: 'XA-VGV' },
+  }),
+  mov('a3', 'it-a', 'SALIDA', 24, 21.25, 'USD', null, {
+    venta_unitaria: 26.5625,
+    venta_moneda: 'USD',
+    fecha_movimiento: '2026-09-01',
+    created_at: '2026-09-22T14:14:18Z',
+    aeronave: { matricula: 'N4142R' },
+  }),
+  // Bujía (mixta): en PESOS 10 × $200 + 5 × 40 USD sin TC; una venta en
+  // pesos que consume SOLO pesos (utilidad MXN) y otra en pesos que llega a
+  // las capas en dólares (incompleta).
+  mov('b1', 'it-b', 'ENTRADA', 10, 200, 'MXN', 18),
+  mov('b2', 'it-b', 'ENTRADA', 5, 40, 'USD'),
+  mov('b3', 'it-b', 'SALIDA', 8, 200, 'MXN', 18, {
+    venta_unitaria: 250,
+    venta_moneda: 'MXN',
+    fecha_movimiento: '2026-09-02',
+    created_at: '2026-09-02T10:00:00Z',
+    aeronave: { matricula: 'N990GG' },
+  }),
+  mov('b4', 'it-b', 'SALIDA', 4, 40, 'USD', null, {
+    venta_unitaria: 900,
+    venta_moneda: 'MXN',
+    fecha_movimiento: '2026-09-03',
+    created_at: '2026-09-03T10:00:00Z',
+    aeronave: { matricula: 'N990GG' },
+  }),
+];
+// En este mock la ENTRADA MXN lleva costo_unitario_usd = 200 (el helper
+// copia el costo): el FIFO en pesos usa costo_unitario_mxn = 200 igual.
+
+describe('resumenTiendita: utilidad USD en su columna (tienda, 25-sep-2026)', () => {
+  it('USD por fila y totales Σ USD aparte; los pesos como siempre; incompletas contadas', async () => {
+    const r = await armar(TIENDA).resumenTiendita('2026-09-01', '2026-09-30');
+    const porNombre = new Map(r.filas.map((f) => [f.nombre, f]));
+    expect(porNombre.get('Aceite 15w 50')).toMatchObject({
+      salidas_cant: 36,
+      vendido_mxn: null,
+      utilidad_mxn: null,
+      vendido_usd: 956.25,
+      utilidad_usd: 191.25,
+      ventas_sin_utilidad: 0,
+      matriculas: 'XA-VGV + N4142R',
+    });
+    expect(porNombre.get('Bujia · REM40E')).toMatchObject({
+      salidas_cant: 12,
+      vendido_mxn: 5600, // 8 × 250 + 4 × 900: la venta en pesos sí se expresa
+      utilidad_mxn: 400, // solo la que consumió pesos: 2,000 − 1,600
+      vendido_usd: null,
+      utilidad_usd: null,
+      ventas_sin_utilidad: 1,
+    });
+    expect(r.total_vendido_usd).toBe(956.25);
+    expect(r.total_utilidad_usd).toBe(191.25);
+    expect(r.total_utilidad_mxn).toBe(400);
+    expect(r.filas_utilidad_incompleta).toBe(1);
+    expect(r.margen_venta_pct).toBe(25);
+  });
+
+  it('tiendaResumen: utilidad de la tienda por moneda, unidades y productos con ventas', async () => {
+    const svc = armar(TIENDA);
+    const todo = await svc.tiendaResumen();
+    expect(todo).toEqual({
+      periodo: null,
+      margen_venta_pct: 25,
+      utilidad_mxn: 400,
+      utilidad_usd: 191.25,
+      ventas_mxn: 5600,
+      ventas_usd: 956.25,
+      costo_ventas_mxn: 1600,
+      costo_ventas_usd: 765,
+      unidades_cargadas: 48,
+      unidades_vendidas: 48,
+      productos_con_ventas: 2,
+      ventas_sin_utilidad: 1,
+      con_entradas_sin_costo: false,
+    });
+    // Periodo sin salidas: null en cada moneda (no un 0 falso).
+    const agosto = await svc.tiendaResumen({
+      desde: '2026-08-01',
+      hasta: '2026-08-31',
+    });
+    expect(agosto).toMatchObject({
+      periodo: { desde: '2026-08-01', hasta: '2026-08-31' },
+      utilidad_mxn: null,
+      utilidad_usd: null,
+      ventas_usd: null,
+      unidades_cargadas: 0,
+      unidades_vendidas: 0,
+      productos_con_ventas: 0,
+    });
+    await expect(
+      svc.tiendaResumen({ desde: '2026-09-30', hasta: '2026-09-01' }),
+    ).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('el margen del resumen sale de la configuración', async () => {
+    const supabaseSvc = armar(TIENDA);
+    // Mismo mock, con configuración que responde 12.5.
+    const conCfg = new InventoryService(
+      (supabaseSvc as unknown as { supabase: SupabaseService }).supabase,
+      {} as never,
+      undefined,
+      { numero: () => Promise.resolve(12.5) } as never,
+    );
+    expect((await conCfg.tiendaResumen()).margen_venta_pct).toBe(12.5);
   });
 });

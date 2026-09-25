@@ -23,7 +23,13 @@ export const UNIDADES_SUGERIDAS = [
   'metro',
 ];
 export const MONEDAS_INVENTARIO = ['MXN', 'USD'] as const;
-export const UBICACION_DEFAULT = 'Bodega Cancún';
+/**
+ * (25-sep-2026) Ya NO hay ubicación por default: la celda vacía = producto
+ * SIN ubicación (el catálogo `inventario_ubicacion` la asigna después con
+ * «Mover a…»). Un texto que coincide con el catálogo se liga en createItem;
+ * el que no, queda como texto «(anterior)». Sin la migración 20260925000001
+ * createItem sigue poniendo «Bodega Cancún» como siempre.
+ */
 
 export interface ItemExistenteRef {
   id: string;
@@ -54,7 +60,8 @@ export interface ItemACrear {
   categoria: string;
   unidad?: string;
   descripcion?: string;
-  ubicacion: string;
+  /** Texto de la celda (vacía ⇒ sin ubicación). */
+  ubicacion?: string;
   stock_minimo?: number;
   notas?: string;
 }
@@ -367,9 +374,9 @@ function validarFila(
   }
 
   const descripcion = texto(campo(m, 'descripcion')) ?? undefined;
-  const ubicacionCruda = texto(campo(m, 'ubicacion'));
-  const ubicacion = ubicacionCruda ?? UBICACION_DEFAULT;
-  if (ubicacion.length > 50) errores.push('La ubicación excede 50 caracteres.');
+  const ubicacion = texto(campo(m, 'ubicacion')) ?? undefined;
+  if (ubicacion && ubicacion.length > 50)
+    errores.push('La ubicación excede 50 caracteres.');
   const notas = texto(campo(m, 'notas')) ?? undefined;
 
   let stockMinimo: number | undefined;
@@ -510,7 +517,7 @@ function validarFila(
   const item: ItemACrear = {
     nombre,
     categoria,
-    ubicacion,
+    ...(ubicacion ? { ubicacion } : {}),
     ...(marca ? { marca } : {}),
     ...(numeroParte ? { numero_parte: numeroParte } : {}),
     ...(codigo ? { codigo } : {}),

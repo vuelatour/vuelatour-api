@@ -20,15 +20,20 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   CreateInventarioItemDto,
   CreateMovimientoDto,
+  CreateUbicacionDto,
   EliminarMovimientoDto,
   EmpaqueInputDto,
   ImportarInventarioDto,
   ListInventarioQuery,
   ListMovimientosQuery,
+  ListUbicacionesQuery,
+  MoverUbicacionDto,
   ResumenItemQuery,
+  TiendaResumenQuery,
   UpdateEmpaqueDto,
   UpdateInventarioItemDto,
   UpdateMovimientoCostoDto,
+  UpdateUbicacionDto,
 } from './dto/inventory.dto';
 import { ExtraerCompraDto, ImportarCompraDto } from './dto/compras.dto';
 import { InventoryService } from './inventory.service';
@@ -94,10 +99,75 @@ export class InventoryController {
     return this.inventory.buscarPorCodigo(codigo);
   }
 
+  // ===== Tienda VuelaTour y ubicaciones de bodega (25-sep-2026) =====
+  // Rutas literales (convención del repo: antes de cualquier ':id').
+
+  @Get('tienda/resumen')
+  @Roles(...OFICINA)
+  @ApiOperation({
+    summary:
+      'Utilidad de la tienda VuelaTour: lo cobrado a los aviones − costo FIFO de lo que salió, en PESOS y en DÓLARES por separado (null = nada en esa moneda). desde/hasta opcionales (YYYY-MM-DD, día Cancún); sin fechas = todo el historial. Incluye el margen vigente (inventario_margen_venta_pct).',
+  })
+  tiendaResumen(@Query() q: TiendaResumenQuery) {
+    return this.inventory.tiendaResumen(q);
+  }
+
+  @Get('ubicaciones')
+  @Roles(...OFICINA)
+  @ApiOperation({
+    summary:
+      'Catálogo de ubicaciones de bodega por orden, con sus productos ACTIVOS. incluir_inactivas=true trae también las desactivadas. 503 MIGRACION_PENDIENTE sin la migración 20260925000001.',
+  })
+  listUbicaciones(@Query() q: ListUbicacionesQuery) {
+    return this.inventory.listUbicaciones(q.incluir_inactivas === true);
+  }
+
+  @Post('ubicaciones')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Alta de una ubicación { nombre, orden? } (orden default = al final). 409 UBICACION_DUPLICADA (sin distinguir acentos ni mayúsculas).',
+  })
+  createUbicacion(
+    @Body() dto: CreateUbicacionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.createUbicacion(dto, c.userId);
+  }
+
+  @Patch('ubicaciones/:id')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Edita una ubicación { nombre?, orden?, activo? }: renombrar propaga el nombre a sus productos; desactivar con productos activos ⇒ 409 UBICACION_EN_USO. 404 UBICACION_NO_EXISTE · 409 UBICACION_DUPLICADA. Sin DELETE: se desactiva.',
+  })
+  updateUbicacion(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateUbicacionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.updateUbicacion(id, dto, c.userId);
+  }
+
+  @Post('items/mover-ubicacion')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Mueve varios productos a una ubicación { item_ids (1–500), ubicacion_id } en UNA escritura. 200 { movidos, sin_cambio, no_encontrados[], inactivos[], ubicacion }. No mueve stock ni dinero. 404 UBICACION_NO_EXISTE · 400 UBICACION_INACTIVA.',
+  })
+  moverUbicacion(
+    @Body() dto: MoverUbicacionDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.moverUbicacion(dto, c.userId);
+  }
+
   @Get('items')
   @Roles(...OFICINA)
   @ApiOperation({
-    summary: 'List inventory items with computed stock + valuation',
+    summary:
+      'List inventory items with computed stock + valuation. Por ítem: utilidad de la tienda en pesos (utilidad_mxn) y en dólares (utilidad_usd) por separado, y ubicación (texto a mostrar + ubicacion_id/_nombre/_legado con la migración 20260925000001). ?ubicacion=<id>|sin filtra.',
   })
   listItems(@Query() q: ListInventarioQuery) {
     return this.inventory.listItems(q);

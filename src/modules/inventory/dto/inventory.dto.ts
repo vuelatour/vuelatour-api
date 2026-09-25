@@ -7,6 +7,8 @@ import {
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
+  ArrayUnique,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -96,6 +98,16 @@ export class ListInventarioQuery {
   @Matches(FECHA_DIA_CANCUN, { message: 'hasta debe ser YYYY-MM-DD' })
   hasta?: string;
 
+  @ApiPropertyOptional({
+    description:
+      "Filtra por ubicación del catálogo (25-sep-2026): el id de una ubicación, o 'sin' = productos SIN ubicación nueva (ubicacion_id null: texto legado o vacía). 503 MIGRACION_PENDIENTE sin la migración 20260925000001.",
+  })
+  @IsOptional()
+  @Matches(/^(sin|[0-9a-f-]{36})$/i, {
+    message: "ubicacion debe ser el id de una ubicación o 'sin'",
+  })
+  ubicacion?: string;
+
   @ApiPropertyOptional({ default: 100 })
   @IsOptional()
   @Type(() => Number)
@@ -110,6 +122,117 @@ export class ListInventarioQuery {
   @IsInt()
   @Min(0)
   offset: number = 0;
+}
+
+/**
+ * GET tienda/resumen (25-sep-2026): utilidad de la tienda VuelaTour en un
+ * periodo opcional (YYYY-MM-DD, día Cancún, sobre fecha_movimiento). Sin
+ * fechas = todo el historial.
+ */
+export class TiendaResumenQuery {
+  @ApiPropertyOptional({ description: 'Desde (YYYY-MM-DD, día Cancún).' })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Hasta (YYYY-MM-DD, día Cancún).' })
+  @IsOptional()
+  @Matches(FECHA_DIA_CANCUN, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
+}
+
+/** GET ubicaciones — `incluir_inactivas=true` trae también las desactivadas. */
+export class ListUbicacionesQuery {
+  @ApiPropertyOptional({
+    default: false,
+    description: 'true = también las ubicaciones desactivadas.',
+  })
+  @IsOptional()
+  // NO `@Type(() => Boolean)` NI leer `value`: con enableImplicitConversion
+  // (main.ts) class-transformer ya convirtió 'false' (string) a
+  // Boolean('false') = true ANTES del @Transform, así que
+  // `?incluir_inactivas=false` traía las desactivadas (revisión adversaria
+  // 25-sep-2026). Se lee el valor CRUDO (`obj[key]`), patrón de
+  // `quotes/dto/preview-quote.dto.ts#sucio`.
+  @Transform(({ obj, key }: { obj: unknown; key: string }) => {
+    const raw = (obj as Record<string, unknown>)[key];
+    return raw === true || raw === 'true';
+  })
+  @IsBoolean()
+  incluir_inactivas?: boolean;
+}
+
+/** Alta de una ubicación del catálogo de bodega. */
+export class CreateUbicacionDto {
+  @ApiProperty({
+    minLength: 2,
+    maxLength: 50,
+    example: 'Bodega del taller de Mérida',
+  })
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : value,
+  )
+  @IsString({ message: 'Escribe el nombre de la ubicación.' })
+  @MinLength(2, { message: 'El nombre de la ubicación es muy corto.' })
+  @MaxLength(50, { message: 'El nombre de la ubicación excede 50 caracteres.' })
+  nombre!: string;
+
+  @ApiPropertyOptional({
+    description: 'Posición en las listas (0–999). Default: al final.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(999)
+  orden?: number;
+}
+
+/** Edición de una ubicación: renombrar (propaga a sus productos), reordenar o (des)activar. */
+export class UpdateUbicacionDto {
+  @ApiPropertyOptional({ minLength: 2, maxLength: 50 })
+  @SiViene()
+  @Transform(({ value }: { value: unknown }) =>
+    typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : value,
+  )
+  @IsString({ message: 'Escribe el nombre de la ubicación.' })
+  @MinLength(2, { message: 'El nombre de la ubicación es muy corto.' })
+  @MaxLength(50, { message: 'El nombre de la ubicación excede 50 caracteres.' })
+  nombre?: string;
+
+  @ApiPropertyOptional({ description: 'Posición en las listas (0–999).' })
+  @SiViene()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(999)
+  orden?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'false = desactivar (409 UBICACION_EN_USO si tiene productos activos).',
+  })
+  @SiViene()
+  @IsBoolean()
+  activo?: boolean;
+}
+
+/** POST items/mover-ubicacion — mover varios productos a una ubicación (una sola escritura). */
+export class MoverUbicacionDto {
+  @ApiProperty({
+    type: [String],
+    description: 'Productos a mover (1–500, sin repetir).',
+  })
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Elige al menos un producto.' })
+  @ArrayMaxSize(500)
+  @ArrayUnique()
+  @IsUUID('all', { each: true })
+  item_ids!: string[];
+
+  @ApiProperty({ description: 'Ubicación destino (activa).' })
+  @IsUUID('all')
+  ubicacion_id!: string;
 }
 
 /** GET items/:id/resumen — corte opcional (YYYY-MM-DD, día Cancún) sobre fecha_movimiento. */
@@ -272,11 +395,23 @@ export class CreateInventarioItemDto {
   @Min(0)
   stock_minimo?: number;
 
-  @ApiPropertyOptional({ default: 'Bodega Cancún', maxLength: 50 })
+  @ApiPropertyOptional({
+    maxLength: 50,
+    description:
+      'LEGADO (clientes viejos: app, alta masiva). Texto de la ubicación: si coincide (sin acentos ni mayúsculas) con una ubicación ACTIVA del catálogo se liga su id; si no, queda como texto «(anterior)» sin id. Con `ubicacion_id` se ignora. Sin la migración 20260925000001: texto libre, default «Bodega Cancún».',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(50)
   ubicacion?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Ubicación del catálogo (GET /inventory/ubicaciones). Gana sobre el texto `ubicacion`. Debe existir (404 UBICACION_NO_EXISTE) y estar activa (400 UBICACION_INACTIVA). 503 MIGRACION_PENDIENTE sin la migración 20260925000001.',
+  })
+  @IsOptional()
+  @IsUUID('all', { message: 'ubicacion_id debe ser el id de una ubicación.' })
+  ubicacion_id?: string | null;
 
   @ApiPropertyOptional({
     maxLength: 30,
@@ -313,7 +448,7 @@ export class CreateInventarioItemDto {
 
   @ApiPropertyOptional({
     description:
-      'Precio de VENTA unitario al avión (decisión del cliente 29-ago-2026): la SALIDA carga este precio como gasto BODEGA; el costo FIFO queda para el inventario. Sin precio (o 0) la salida se carga a costo FIFO como siempre. null = quitar el precio. Viaja JUNTO con precio_venta_moneda.',
+      'Precio de VENTA unitario al avión (decisión del cliente 29-ago-2026): la SALIDA carga este precio como gasto BODEGA; el costo FIFO queda para el inventario. Sin precio (o 0) la salida se carga a costo FIFO + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). null = quitar el precio. Viaja JUNTO con precio_venta_moneda.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -368,6 +503,15 @@ export class UpdateInventarioItemDto extends PartialType(
   @IsString({ message: 'La ubicación no puede ir vacía.' })
   @MaxLength(50)
   ubicacion?: string;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Ubicación del catálogo; null = «Sin ubicación» (id y texto a null). Gana sobre `ubicacion`. La que el ítem YA tiene se acepta aunque esté desactivada.',
+  })
+  @IsOptional()
+  @IsUUID('all', { message: 'ubicacion_id debe ser el id de una ubicación.' })
+  ubicacion_id?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()
@@ -446,7 +590,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'SALIDA: precio de VENTA unitario que paga el avión (default: el precio_venta del ítem). > 0 activa el cargo a precio de venta; 0 explícito o ausente sin precio en el ítem = cargo a costo FIFO (comportamiento de siempre). En otros tipos se ignora.',
+      'SALIDA: precio de VENTA unitario que paga el avión. > 0 = ese precio (en venta_moneda). Ausente = el precio_venta del ítem; ausente y sin precio en el ítem = costo FIFO + margen de la tienda (`inventario_margen_venta_pct`, 25 %; 25-sep-2026). 0 explícito = a costo (sin utilidad). En otros tipos se ignora.',
   })
   @IsOptional()
   @Type(() => Number)
@@ -473,7 +617,7 @@ export class CreateMovimientoDto {
 
   @ApiPropertyOptional({
     description:
-      'SALIDA para TODAS las matrículas (aceites/consumibles de flota): el costo FIFO se prorratea en partes iguales entre los aviones activos, un gasto por avión. Excluye aeronave_id.',
+      'SALIDA para TODAS las matrículas (aceites/consumibles de flota): el cargo (precio de venta, o costo FIFO + margen de la tienda) se prorratea en partes iguales entre los aviones activos, un gasto por avión (residuo en el primero). Excluye aeronave_id.',
   })
   @IsOptional()
   @IsBoolean()

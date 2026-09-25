@@ -110,6 +110,25 @@ describe('normalizarClave / claveItem', () => {
   });
 });
 
+describe('validarFilasInventario — ubicación (25-sep-2026)', () => {
+  it('el texto de la celda viaja tal cual (createItem lo liga al catálogo si coincide)', () => {
+    const [r] = validarFilasInventario(
+      [{ ...AEROSHELL, ubicacion: '  Bodega del taller de Merida ' }],
+      CATALOGO,
+    );
+    expect(r.estado).toBe('OK');
+    expect(r.crear.item.ubicacion).toBe('Bodega del taller de Merida');
+  });
+  it('más de 50 caracteres ⇒ ERROR', () => {
+    const [r] = validarFilasInventario(
+      [{ ...AEROSHELL, ubicacion: 'x'.repeat(51) }],
+      CATALOGO,
+    );
+    expect(r.estado).toBe('ERROR');
+    expect(r.mensajes).toContain('La ubicación excede 50 caracteres.');
+  });
+});
+
 describe('validarFilasInventario — fila completa', () => {
   const [r] = validarFilasInventario([AEROSHELL], CATALOGO);
 
@@ -117,7 +136,9 @@ describe('validarFilasInventario — fila completa', () => {
     expect(r.estado).toBe('OK');
     expect(r.crear.item.codigo).toBe('021400062153');
     expect(r.crear.item.marca).toBe('AeroShell');
-    expect(r.crear.item.ubicacion).toBe('Bodega Cancún');
+    // 25-sep-2026: ya no hay «Bodega Cancún» por default — la celda vacía es
+    // «sin ubicación» (el catálogo la asigna después con «Mover a…»).
+    expect(r.crear.item).not.toHaveProperty('ubicacion');
     expect(r.crear.item.stock_minimo).toBe(12);
     expect(r.crear.empaque).toEqual({
       nombre: 'Caja de 6',

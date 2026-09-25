@@ -908,6 +908,16 @@ export interface BalanceInventarioItemFilaPayload {
   vendido_mxn: number | null;
   /** vendido − costo FIFO consumido por esas salidas. */
   utilidad_mxn: number | null;
+  /**
+   * ADITIVO (25-sep-2026, tienda VuelaTour): Σ venta en DÓLARES de las
+   * salidas cuya utilidad cuenta en USD (venta USD sobre costo en dólares sin
+   * T.C.). null = ninguna. Jamás se suma con `vendido_mxn`.
+   */
+  vendido_usd: number | null;
+  /** ADITIVO: utilidad en DÓLARES de esas mismas salidas. */
+  utilidad_usd: number | null;
+  /** ADITIVO: salidas con venta cuya utilidad no se puede expresar (0 = ninguna). */
+  ventas_sin_utilidad: number;
   /** Matrículas a las que se aplicó en el periodo (únicas, ' + '). */
   matriculas: string | null;
 }
@@ -926,6 +936,16 @@ export interface BalanceHojaInventarioPayload {
   total_compras_mxn: number | null;
   total_vendido_mxn: number | null;
   total_utilidad_mxn: number | null;
+  /**
+   * ADITIVOS (25-sep-2026): totales en DÓLARES (Σ de las filas; null si
+   * ninguna fila trae USD) — su propia columna, jamás sumados con los pesos.
+   */
+  total_vendido_usd: number | null;
+  total_utilidad_usd: number | null;
+  /** ADITIVO: filas con `ventas_sin_utilidad > 0` (nota roja bajo la tabla). */
+  filas_utilidad_incompleta: number;
+  /** ADITIVO: margen vigente de la tienda (% sobre el costo FIFO) para la nota. */
+  margen_venta_pct: number | null;
 }
 
 /**
