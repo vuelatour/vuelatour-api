@@ -2815,8 +2815,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE — aplicar DESPUÉS de desplegar el API 0.0.36 (migración de
-  DATOS, sin DDL)** — `20260925000003_inventario_tc_oficial_movimientos.sql`
+- **APLICADA (25-sep-2026, con el API 0.0.36 ya en prod; migración de DATOS, sin DDL; DRYRUN_OK C0–C7; resultado TC_OK: 77 — 63 entradas 29-ago × 17.0115, 4 entradas + 10 salidas 01-sep × 17.0077; utilidad de las 10 salidas 9,105.07 MXN; 0 movimientos USD sin T.C.)** — `20260925000003_inventario_tc_oficial_movimientos.sql`
   (invariante 8, «ÚLTIMO PRECIO DE COMPRA + T.C. DEL DÍA»): pone el T.C.
   oficial de su día (tabla `tipo_cambio_oficial`, ventana de 7 días del
   cotizador) a los 77 movimientos USD sin T.C. REGISTRADOS antes del 23-sep
