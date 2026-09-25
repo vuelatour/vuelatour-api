@@ -124,6 +124,12 @@ function fakeSupabase(tablas: Record<string, Fila[]>): SupabaseService {
         filas = filas.slice(0, n);
         return q;
       },
+      // Paginación de PostgREST (inclusiva en los dos extremos): la usa el
+      // lector de ingresos sin vuelo (24-sep-2026).
+      range: (a: number, b: number) => {
+        filas = filas.slice(a, b + 1);
+        return q;
+      },
       maybeSingle: () =>
         Promise.resolve({ data: filas[0] ?? null, error: null }),
       then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>

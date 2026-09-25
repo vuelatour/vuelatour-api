@@ -102,3 +102,79 @@ export function filtroLigaCobros(
   if (sobres.length > 0) conds.push(`cobro_grupo_id.in.(${sobres.join(',')})`);
   return conds.length > 0 ? conds.join(',') : null;
 }
+
+// =====================================================================
+// ANTICIPOS (24-sep-2026, contrato de ingresos §7.4-bis) — SOLO ADITIVO.
+//
+// Un cobro de vuelo nacido de un ANTICIPO (`cobro_vuelo.ingreso_anticipo_id`)
+// NO tiene movimiento propio: el abono del banco se liga UNA vez al anticipo
+// (`movimiento_bancario.ingreso_id`). «Conciliado» de ese cobro = su anticipo
+// está conciliado. Todo lo de arriba (liga directa y sobre) no cambia:
+// `movimientoDeCobro` sigue viendo SOLO directo/sobre A PROPÓSITO — el
+// candado de PATCH/DELETE de cobros (`assertCobroSinConciliar`) lo usa, y
+// desaplicar un cobro de anticipo conciliado está permitido (el abono queda
+// ligado al anticipo, que conserva el dinero; ningún movimiento apunta al
+// cobro). Las columnas nuevas solo se piden con la sonda
+// `ingresosDisponibles` (sin migración no existen).
+// =====================================================================
+
+/** `MOV_LIGA_COLS` + `ingreso_id` (SOLO con la migración de ingresos). */
+export const MOV_LIGA_COLS_CON_INGRESO =
+  'id, cobro_id, cobro_grupo_id, ingreso_id';
+
+export interface CobroConciliableAnticipo extends CobroConciliable {
+  /** Anticipo del que salió el cobro (null/undefined en cobros normales). */
+  ingreso_anticipo_id?: unknown;
+}
+
+/** Por dónde concilia un cobro: liga directa, su sobre o su anticipo. */
+export type ViaConciliacion = 'DIRECTO' | 'SOBRE' | 'ANTICIPO';
+
+/** Id del anticipo del que salió este cobro (null si es un cobro normal). */
+export function anticipoDeCobro(
+  cobro: CobroConciliableAnticipo,
+): string | null {
+  return idStr(cobro.ingreso_anticipo_id);
+}
+
+/**
+ * Movimiento que concilia el cobro y POR QUÉ VÍA: directo/sobre
+ * (`movimientoDeCobro`, igual que hoy) o, si el cobro salió de un anticipo,
+ * el movimiento con `ingreso_id` = su anticipo. null = sin conciliar.
+ */
+export function conciliacionDeCobro<
+  M extends MovimientoLiga & { ingreso_id?: unknown },
+>(
+  cobro: CobroConciliableAnticipo,
+  movimientos: ReadonlyArray<M>,
+): { mov: M; via: ViaConciliacion } | null {
+  const mov = movimientoDeCobro(cobro, movimientos);
+  if (mov) {
+    return {
+      mov,
+      via: idStr(mov.cobro_id) === cobro.id ? 'DIRECTO' : 'SOBRE',
+    };
+  }
+  const anticipo = anticipoDeCobro(cobro);
+  if (!anticipo) return null;
+  const porAnticipo = movimientos.find((m) => idStr(m.ingreso_id) === anticipo);
+  return porAnticipo ? { mov: porAnticipo, via: 'ANTICIPO' } : null;
+}
+
+/**
+ * `filtroLigaCobros` + `ingreso_id.in.(…)` de los anticipos: UNA consulta
+ * trae las tres vías. null cuando no hay nada que buscar.
+ */
+export function filtroLigaCobrosConAnticipos(
+  cobroIds: ReadonlyArray<string>,
+  sobreIds: ReadonlyArray<string>,
+  anticipoIds: ReadonlyArray<string>,
+): string | null {
+  const conds: string[] = [];
+  const base = filtroLigaCobros(cobroIds, sobreIds);
+  if (base) conds.push(base);
+  const anticipos = [...new Set(anticipoIds.filter(Boolean))];
+  if (anticipos.length > 0)
+    conds.push(`ingreso_id.in.(${anticipos.join(',')})`);
+  return conds.length > 0 ? conds.join(',') : null;
+}

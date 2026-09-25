@@ -17,6 +17,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  AbonosPendientesQuery,
   AutoMatchDto,
   CandidatosCobroQuery,
   ClasificarMovimientoDto,
@@ -26,9 +27,11 @@ import {
   ImportarMovimientosDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
+  LinkMovimientoIngresoDto,
   ListConciliacionQuery,
   PaywiseAuditoriaQuery,
   ReporteConciliacionQuery,
+  SugerirAbonosDto,
   SugerirLoteDto,
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
@@ -182,6 +185,32 @@ export class ConciliacionController {
     return this.conciliacion.cobrosSinBanco(q.desde, q.hasta);
   }
 
+  // ---- CONCILIACIÓN DE INGRESOS (24-sep-2026): rutas LITERALES antes de
+  // movimientos/:id. Roles de la CLASE (ADMIN, FACTURACION). Sin la
+  // migración 20260924000004 ⇒ 503 INGRESOS_NO_DISPONIBLE. ----
+
+  @Get('abonos-pendientes')
+  @ApiOperation({
+    summary:
+      'Abonos del banco sin identificar (default: últimos 90 días, hora Cancún): patrón (traspaso/reverso), qué haría el auto-cruce (motivo_pendiente, candidatos_n), candidatos manuales con el monto exacto (exactos_manual), duplicado probable, cliente y categoría sugeridos. Si una lectura de candidatos falla o se trunca: motivos_calculados=false y los motivos van null.',
+  })
+  abonosPendientes(@Query() q: AbonosPendientesQuery) {
+    return this.conciliacion.abonosPendientes(q);
+  }
+
+  @Post('sugerir-abonos')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Sugerencias de IA para los ABONOS pendientes (la IA PROPONE y jamás liga): traspasos, reversos, duplicados y lo que el auto ya cruza salen por REGLA sin gastar créditos; el resto va en lotes de ≤ 10 abonos (≤ 3 llamadas en paralelo). Body {cuenta_bancaria_id?, desde?, hasta?, limite? (1..30, default 20), movimiento_ids? (≤ 30)}.',
+  })
+  sugerirAbonos(
+    @Body() dto: SugerirAbonosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.sugerirAbonos(dto ?? {}, c.userId);
+  }
+
   @Get('clasificaciones')
   @ApiOperation({
     summary:
@@ -297,6 +326,19 @@ export class ConciliacionController {
       },
       c.userId,
     );
+  }
+
+  @Patch('movimientos/:id/ingreso')
+  @ApiOperation({
+    summary:
+      'Vincula o desvincula (ingreso_id null) un ABONO con un INGRESO registrado (1 ↔ 1, excluyente con gasto/cobro/sobre/clasificación). 409 MOVIMIENTO_YA_LIGADO / INGRESO_YA_CONCILIADO / INGRESO_OTRA_CUENTA / INGRESO_MONEDA_DISTINTA / INGRESO_MONTO_DISTINTO (±1.00) / INGRESO_SIN_CUENTA / INGRESO_DADO_DE_BAJA; 400 SOLO_ABONOS. Respuesta: movimiento + ingreso.',
+  })
+  linkIngreso(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: LinkMovimientoIngresoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.linkIngreso(id, dto.ingreso_id ?? null, c.userId);
   }
 
   @Get('movimientos/:id/candidatos-cobro')

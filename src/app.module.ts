@@ -49,6 +49,7 @@ import { ProfitSharingModule } from './modules/profit-sharing/profit-sharing.mod
 import { DashboardsModule } from './modules/dashboards/dashboards.module';
 import { GroupsModule } from './modules/groups/groups.module';
 import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emitidas.module';
+import { IngresosModule } from './modules/ingresos/ingresos.module';
 
 @Module({
   imports: [
@@ -128,6 +129,8 @@ import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emi
     GroupsModule,
     // Registro de facturas emitidas a mano + «Por facturar» (24-sep-2026).
     FacturasEmitidasModule,
+    // Ingresos (otros ingresos, anticipos) y conciliación de ingresos (24-sep-2026).
+    IngresosModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },

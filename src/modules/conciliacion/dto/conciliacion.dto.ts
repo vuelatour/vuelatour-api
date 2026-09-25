@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   ArrayMaxSize,
+  Matches,
   IsArray,
   IsBoolean,
   IsEnum,
@@ -24,6 +25,9 @@ export enum TipoMovimientoBancario {
   CARGO = 'CARGO',
   ABONO = 'ABONO',
 }
+
+/** Día de pared YYYY-MM-DD (filtros sobre la columna DATE `fecha`). */
+const RE_DIA_CONCILIACION = /^\d{4}-\d{2}-\d{2}$/;
 
 /**
  * Mapeo MANUAL de columnas del estado de cuenta de Paywise (9-sep-2026):
@@ -189,6 +193,22 @@ export class ListConciliacionQuery {
   @ToBooleanQuery()
   @IsBoolean()
   conciliado?: boolean;
+
+  // ADITIVOS (24-sep-2026, conciliación de ingresos): tipo y ventana.
+  @ApiPropertyOptional({ enum: TipoMovimientoBancario })
+  @IsOptional()
+  @IsEnum(TipoMovimientoBancario)
+  tipo?: TipoMovimientoBancario;
+
+  @ApiPropertyOptional({ description: 'Desde (YYYY-MM-DD) sobre fecha' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'Hasta (YYYY-MM-DD) sobre fecha' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
 
   @ApiPropertyOptional({ default: 100 })
   @IsOptional()
@@ -427,6 +447,15 @@ export class AutoMatchDto {
   @ArrayMaxSize(500)
   @IsUUID(undefined, { each: true })
   movimiento_ids?: string[];
+
+  /** ADITIVO (24-sep-2026): solo CARGOS o solo ABONOS en esta corrida. */
+  @ApiPropertyOptional({
+    enum: TipoMovimientoBancario,
+    description: 'Solo CARGO o solo ABONO (omitido = los dos).',
+  })
+  @IsOptional()
+  @IsEnum(TipoMovimientoBancario)
+  tipo?: TipoMovimientoBancario;
 }
 
 /**
@@ -461,4 +490,87 @@ export class SugerirLoteDto {
   @Min(1)
   @Max(40)
   limite?: number;
+}
+
+// =====================================================================
+// CONCILIACIÓN DE INGRESOS (24-sep-2026) — rutas nuevas del controller.
+// Sin la migración 20260924000004 responden 503 INGRESOS_NO_DISPONIBLE.
+// =====================================================================
+
+/** `GET /v1/conciliacion/abonos-pendientes` (default: últimos 90 días). */
+export class AbonosPendientesQuery {
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD (default: hace 90 días)' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD (default: hoy Cancún)' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({ default: 300, minimum: 1, maximum: 500 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(500)
+  limite?: number;
+}
+
+/**
+ * `POST /v1/conciliacion/sugerir-abonos` — la IA PROPONE qué es cada abono
+ * pendiente (nunca liga). `movimiento_ids` manda sobre la ventana.
+ */
+export class SugerirAbonosDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD (default: hace 90 días)' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({ description: 'YYYY-MM-DD (default: hoy Cancún)' })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
+
+  @ApiPropertyOptional({
+    default: 20,
+    minimum: 1,
+    maximum: 30,
+    description: 'Abonos a revisar (cada 10 que vayan a la IA = 1 llamada).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(30)
+  limite?: number;
+
+  @ApiPropertyOptional({ type: [String], description: 'Máximo 30 ids.' })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(30)
+  @IsUUID(undefined, { each: true })
+  movimiento_ids?: string[];
+}
+
+/** `PATCH /v1/conciliacion/movimientos/:id/ingreso` (null = desvincular). */
+export class LinkMovimientoIngresoDto {
+  @ApiPropertyOptional({
+    description: 'Ingreso a vincular. null para desvincular.',
+    nullable: true,
+  })
+  @IsOptional()
+  @IsUUID()
+  ingreso_id?: string | null;
 }

@@ -25,6 +25,10 @@ import {
 } from '../../common/participacion-aeronave.util';
 import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 import {
+  filaLibroDeIngreso,
+  leerIngresosDeResultado,
+} from '../../common/ingreso-resultado.util';
+import {
   PyservicesService,
   type DineroCombustibleFilaPayload,
   type DineroOtroGastoFilaPayload,
@@ -193,6 +197,7 @@ export class DineroReportService {
       facturasRes,
       gastosEmpresaYSueltos,
       gastosGasRes,
+      ingresosResultado,
     ] = await Promise.all([
       sb
         .from('aeronave')
@@ -272,6 +277,11 @@ export class DineroReportService {
         .gte('fecha_gasto', desde)
         .lte('fecha_gasto', hasta)
         .order('fecha_gasto', { ascending: true }),
+      // INGRESOS SIN VUELO de RESULTADO (24-sep-2026, DF §10.2 «otros
+      // ingresos → ingresos no de vuelo»): fuente única compartida con el
+      // Balance general. Sin la migración 20260924000004 devuelve [] sin
+      // consultar nada — el libro sale byte-idéntico al de siempre.
+      leerIngresosDeResultado(sb, desde, hasta),
     ]);
     for (const r of [
       aeronavesRes,
@@ -980,6 +990,37 @@ export class DineroReportService {
       }
     }
 
+    // ===== Hoja «Otros ingresos», AL FINAL: los ingresos sin vuelo de
+    // RESULTADO registrados en Ingresos (ING-n; orden fecha, folio). Los
+    // anticipos y las aportaciones NO están aquí (no son resultado: el
+    // anticipo cuenta como cobro del vuelo al aplicarse). Su comisión
+    // bancaria es egreso de la fila y se RESTA en utilidades (mismo trato
+    // que la provisión del vendedor: no es gasto de ninguna otra hoja; sin
+    // restarla, utilidades y el TOTAL remanente del Balance general dirían
+    // números distintos). =====
+    let comisionIngresosMxn = 0;
+    for (const ing of ingresosResultado) {
+      const f = filaLibroDeIngreso(ing);
+      if (!f) continue;
+      otrosIngresos.push({
+        clave: f.clave,
+        fecha_vuelo: null,
+        concepto_egreso: f.concepto_egreso,
+        egreso_mxn: f.egreso_mxn,
+        fecha_egreso:
+          f.egreso_mxn != null || f.concepto_egreso ? f.fecha : null,
+        nota_egreso: null,
+        concepto_ingreso: f.concepto_ingreso,
+        ingreso_mxn: f.ingreso_mxn,
+        fecha_ingreso: f.fecha,
+        remanente_mxn: f.remanente_mxn,
+        factura: null,
+      });
+      if (f.ingreso_mxn != null && f.egreso_mxn != null) {
+        comisionIngresosMxn += f.egreso_mxn;
+      }
+    }
+
     // ===== Hoja 3: otros gastos del mes, con acumulado =====
     // Universo (11-sep-2026): los sueltos SIN vuelo de siempre + TODOS los
     // de CATEGORÍA DE EMPRESA aunque traigan vuelo o avión sellado (la
@@ -1188,7 +1229,7 @@ export class DineroReportService {
       0,
     );
     const otrosIngresosNetos = r2n(
-      totalOtrosIngresos - comisionProvisionadaMxn,
+      totalOtrosIngresos - comisionProvisionadaMxn - comisionIngresosMxn,
     );
 
     return {

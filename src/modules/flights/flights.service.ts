@@ -114,13 +114,19 @@ import {
   instanteDe,
 } from '../../common/version-cas.util';
 import {
+  conciliacionDeCobro,
   filtroLigaCobros,
   movimientoDeCobro,
   MOV_LIGA_COLS,
+  MOV_LIGA_COLS_CON_INGRESO,
   sobreDeCobro,
   type CobroConciliable,
   type MovimientoLiga,
+  type ViaConciliacion,
 } from '../../common/cobro-conciliado.util';
+import { ingresosDisponibles } from '../../common/ingreso-disponible.util';
+import { etiquetaIngreso } from '../../common/categoria-ingreso.util';
+import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import {
   conNombreRegistrado,
   fetchNombresUsuarios,
@@ -373,6 +379,26 @@ export interface CobroConSobre extends CobroLike {
   conciliado: boolean;
   movimiento_bancario_id: string | null;
   registrado_por_nombre: string | null;
+  /**
+   * ADITIVOS (24-sep-2026, ingresos) — SOLO con la migración
+   * 20260924000004 (sonda `ingresosDisponibles`); sin ella no viajan.
+   * `anticipo`: el cobro salió de un anticipo (Ingresos → Anticipos).
+   * `conciliado_via`: por dónde concilia (fuente única
+   * `conciliacionDeCobro`): un cobro de anticipo es `conciliado` cuando su
+   * ANTICIPO está ligado a su abono.
+   */
+  anticipo?: { ingreso_id: string; etiqueta: string } | null;
+  conciliado_via?: ViaConciliacion | null;
+}
+
+/**
+ * Opción INTERNA del alta de un cobro nacido de un ANTICIPO (24-sep-2026):
+ * solo `IngresosService` la usa, jamás llega de un DTO. El trigger
+ * `tg_cobro_vuelo_anticipo` garantiza en BD el saldo, la moneda y que la
+ * liga sea inmutable.
+ */
+export interface CobroDeAnticipoOpts {
+  ingreso_anticipo_id: string;
 }
 
 // Tarea 11: métodos con tarjeta que exigen foto de voucher.
@@ -11229,7 +11255,10 @@ export class FlightsService {
     // normales por `cobro_id`, las partes de sobre por el `cobro_grupo_id`
     // de su sobre — una sola consulta con ambas columnas.
     const filtro = filtroLigaCobros(cobroIds, ids);
-    const [sobresRes, movsRes, nombres] = await Promise.all([
+    // ANTICIPOS (24-sep-2026): solo con la migración de ingresos. Sin ella,
+    // consultas y payload IDÉNTICOS a los de siempre (ni una consulta más).
+    const conIngresos = await ingresosDisponibles(this.supabase.service);
+    const [sobresRes, movsRes, nombres, anticiposRes] = await Promise.all([
       ids.length > 0
         ? this.supabase.service
             .from('cobro_grupo')
@@ -11241,15 +11270,42 @@ export class FlightsService {
       filtro
         ? this.supabase.service
             .from('movimiento_bancario')
-            .select(MOV_LIGA_COLS)
+            .select(conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS)
             .or(filtro)
         : Promise.resolve({ data: [], error: null }),
       // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
       fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
+      conIngresos
+        ? this.anticiposDeCobros(cobroIds)
+        : Promise.resolve(new Map<string, string>()),
     ]);
     if (sobresRes.error) throw new Error(sobresRes.error.message);
     if (movsRes.error) throw new Error(movsRes.error.message);
-    const movs = (movsRes.data ?? []) as MovimientoLiga[];
+    const movs = [...((movsRes.data ?? []) as MovimientoLiga[])];
+    // Segunda ronda SOLO si hubo cobros de anticipo: el abono que concilia
+    // su anticipo y el folio (ING-n) para el chip del panel.
+    const anticipoIds = [...new Set(anticiposRes.values())];
+    const folioAnticipo = new Map<string, number>();
+    if (conIngresos && anticipoIds.length > 0) {
+      const [movsAnt, folios] = await Promise.all([
+        this.leerPorLotes<Record<string, unknown>>(anticipoIds, (lote) =>
+          this.supabase.service
+            .from('movimiento_bancario')
+            .select(MOV_LIGA_COLS_CON_INGRESO)
+            .in('ingreso_id', lote),
+        ),
+        this.leerPorLotes<Record<string, unknown>>(anticipoIds, (lote) =>
+          this.supabase.service
+            .from('ingreso')
+            .select('id, folio')
+            .in('id', lote),
+        ),
+      ]);
+      movs.push(...(movsAnt as MovimientoLiga[]));
+      for (const f of folios) {
+        folioAnticipo.set(f.id as string, Number(f.folio));
+      }
+    }
     const porId = new Map<string, CobroGrupoResumen>();
     for (const s of (sobresRes.data ?? []) as Array<Record<string, unknown>>) {
       const g = s.grupo as { folio?: unknown } | { folio?: unknown }[] | null;
@@ -11263,21 +11319,96 @@ export class FlightsService {
       });
     }
     return conNombreRegistrado(cobros, nombres).map((c) => {
-      const mov = movimientoDeCobro(
-        { id: c.id as string, cobro_grupo_id: c.cobro_grupo_id },
-        movs,
+      const cobroGrupo =
+        typeof c.cobro_grupo_id === 'string'
+          ? (porId.get(c.cobro_grupo_id) ?? null)
+          : null;
+      if (!conIngresos) {
+        const mov = movimientoDeCobro(
+          { id: c.id as string, cobro_grupo_id: c.cobro_grupo_id },
+          movs,
+        );
+        return {
+          ...c,
+          cobro_grupo: cobroGrupo,
+          conciliado: mov !== null,
+          movimiento_bancario_id:
+            mov && typeof mov.id === 'string' ? mov.id : null,
+        };
+      }
+      // Con ingresos: fuente única `conciliacionDeCobro` (directo, sobre o
+      // su anticipo). El candado de PATCH/DELETE sigue con
+      // `movimientoDeCobro` a propósito (desaplicar está permitido).
+      const anticipoId = anticiposRes.get(c.id as string) ?? null;
+      const conc = conciliacionDeCobro(
+        {
+          id: c.id as string,
+          cobro_grupo_id: c.cobro_grupo_id,
+          ingreso_anticipo_id: anticipoId,
+        },
+        movs as Array<MovimientoLiga & { ingreso_id?: unknown }>,
       );
       return {
         ...c,
-        cobro_grupo:
-          typeof c.cobro_grupo_id === 'string'
-            ? (porId.get(c.cobro_grupo_id) ?? null)
-            : null,
-        conciliado: mov !== null,
+        cobro_grupo: cobroGrupo,
+        conciliado: conc !== null,
         movimiento_bancario_id:
-          mov && typeof mov.id === 'string' ? mov.id : null,
+          conc && typeof conc.mov.id === 'string' ? conc.mov.id : null,
+        anticipo: anticipoId
+          ? {
+              ingreso_id: anticipoId,
+              etiqueta: etiquetaIngreso(folioAnticipo.get(anticipoId) ?? null),
+            }
+          : null,
+        conciliado_via: conc?.via ?? null,
       };
     });
+  }
+
+  /**
+   * `cobro_id → ingreso_anticipo_id` de los cobros que salieron de un
+   * anticipo (SOLO con la migración de ingresos). No toca `COBRO_COLS` —
+   * esa fila es el `CobroLike` de `cobrosEnUsd`, del recibo y del CFDI.
+   * Lotes de ≤ 200 ids (la URL de PostgREST revienta con más).
+   */
+  private async anticiposDeCobros(
+    cobroIds: string[],
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const filas = await this.leerPorLotes<Record<string, unknown>>(
+      cobroIds,
+      (lote) =>
+        // Los ids son los cobros de ESTA respuesta (≤ 200 por lote): se
+        // filtra en memoria el `ingreso_anticipo_id` no nulo.
+        this.supabase.service
+          .from('cobro_vuelo')
+          .select('id, ingreso_anticipo_id')
+          .in('id', lote),
+    );
+    for (const f of filas) {
+      if (typeof f.ingreso_anticipo_id === 'string') {
+        out.set(f.id as string, f.ingreso_anticipo_id);
+      }
+    }
+    return out;
+  }
+
+  /** Lecturas `in (…)` en lotes de ≤ 200 ids; un error se LANZA. */
+  private async leerPorLotes<T>(
+    ids: string[],
+    consulta: (lote: string[]) => PromiseLike<{
+      data: unknown[] | null;
+      error: { message: string } | null;
+    }>,
+  ): Promise<T[]> {
+    const unicos = [...new Set(ids.filter(Boolean))];
+    const out: T[] = [];
+    for (let i = 0; i < unicos.length; i += 200) {
+      const { data, error } = await consulta(unicos.slice(i, i + 200));
+      if (error) throw new Error(error.message);
+      out.push(...((data ?? []) as T[]));
+    }
+    return out;
   }
 
   /**
@@ -11347,6 +11478,9 @@ export class FlightsService {
     userId: string,
     rol?: Rol,
     sobre?: CobroParteDeSobreOpts,
+    // 6.º parámetro INTERNO (24-sep-2026, ingresos): el cobro nace de un
+    // ANTICIPO. Sin él el insert es byte-idéntico al de siempre.
+    anticipo?: CobroDeAnticipoOpts,
   ) {
     const vuelo = await this.findById(vueloId);
     // REPLAY del outbox (10-sep-2026 · B3): la rama idempotente va ANTES de
@@ -11520,6 +11654,12 @@ export class FlightsService {
         grupo_factor: sobre?.grupo_factor ?? null,
         created_by: userId,
         updated_by: userId,
+        // Cobro aplicado de un ANTICIPO (24-sep-2026): la columna SOLO entra
+        // cuando viaja (sin ella, el insert de siempre). El trigger
+        // `tg_cobro_vuelo_anticipo` vigila saldo, moneda y la liga inmutable.
+        ...(anticipo
+          ? { ingreso_anticipo_id: anticipo.ingreso_anticipo_id }
+          : {}),
       })
       .select(COBRO_COLS)
       .maybeSingle();
@@ -11849,15 +11989,67 @@ export class FlightsService {
     dto: UpdateCobroDto,
     userId: string,
   ): Promise<Record<string, unknown>> {
-    const { data: existing, error: findErr } = await this.supabase.service
+    // Con la migración de ingresos se lee también la liga al ANTICIPO y el
+    // dinero vigente (para comparar valor NUEVO contra VIGENTE).
+    const conIngresos = await ingresosDisponibles(this.supabase.service);
+    const colsExistente: string = conIngresos
+      ? 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, comision_banco_monto, ingreso_anticipo_id'
+      : 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id';
+    const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id')
+      .select(colsExistente)
       .eq('id', cobroId)
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
-    if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    if (!existenteRaw)
+      throw new NotFoundException(`Cobro ${cobroId} not found`);
+    const existing = existenteRaw as unknown as Record<string, unknown>;
     // Parte de un SOBRE de grupo: se corrige desde el grupo (409 COBRO_DE_GRUPO).
     await this.assertNoEsParteDeSobre(existing);
+    // Cobro que SALIÓ DE UN ANTICIPO (24-sep-2026): su dinero (monto, moneda,
+    // comisión y método) viene del anticipo — cambiarlo aquí descuadraría el
+    // saldo del anticipo. Se compara el valor NUEVO contra el VIGENTE (patrón
+    // `cambiaDineroDelGasto`: el panel manda el formulario completo). El T.C.
+    // SÍ se corrige (es la conversión del vuelo, no toca el saldo).
+    const anticipoId = conIngresos
+      ? ((existing as { ingreso_anticipo_id?: unknown }).ingreso_anticipo_id ??
+        null)
+      : null;
+    if (typeof anticipoId === 'string' && anticipoId) {
+      const ex = existing;
+      const num = (v: unknown) =>
+        Number(v) > 0 ? Math.round(Number(v) * 100) / 100 : 0;
+      const pct = (v: unknown) => (Number(v) > 0 ? Number(v) : 0);
+      const cambiaDinero =
+        (dto.monto !== undefined && num(dto.monto) !== num(ex.monto)) ||
+        (dto.moneda !== undefined &&
+          String(dto.moneda) !== String(ex.moneda)) ||
+        (dto.metodo_cobro !== undefined &&
+          String(dto.metodo_cobro) !== String(ex.metodo_cobro)) ||
+        (dto.comision_banco_monto !== undefined &&
+          num(dto.comision_banco_monto) !== num(ex.comision_banco_monto)) ||
+        (dto.comision_banco_pct !== undefined &&
+          // El % se guarda con 4 decimales: tolerancia de redondeo.
+          Math.abs(pct(dto.comision_banco_pct) - pct(ex.comision_banco_pct)) >
+            0.0001);
+      if (cambiaDinero) {
+        throw await this.conflictoCobroDeAnticipo(anticipoId);
+      }
+      // Mismo dinero reenviado (el panel manda el formulario COMPLETO): se
+      // CONGELA — sin esto, `monto` presente dispara abajo el recálculo de la
+      // comisión desde el % guardado con 4 decimales, que en montos grandes
+      // mueve un centavo y rompe Σ comisiones aplicadas == comisión del
+      // anticipo (revisión adversaria 24-sep-2026). T.C., referencia, fecha,
+      // cuenta destino y notas siguen su curso.
+      dto = {
+        ...dto,
+        monto: undefined,
+        moneda: undefined,
+        metodo_cobro: undefined,
+        comision_banco_pct: undefined,
+        comision_banco_monto: undefined,
+      };
+    }
 
     // Editar el DINERO de un cobro conciliado rompería el cuadre con el banco
     // (la conciliación cruza por monto/neto y moneda). Referencia, fecha o
@@ -11953,13 +12145,22 @@ export class FlightsService {
 
   /** Elimina un cobro capturado por error (oficina) y recalcula la bandera. */
   async deleteCobro(cobroId: string, userId: string): Promise<{ ok: true }> {
-    const { data: existing, error: findErr } = await this.supabase.service
+    // Con la migración de ingresos se lee la liga al ANTICIPO: desaplicar
+    // desde el vuelo está PERMITIDO (el monto regresa al saldo del
+    // anticipo) y deja la fila DESAPLICAR en la bitácora del anticipo.
+    const conIngresos = await ingresosDisponibles(this.supabase.service);
+    const colsExistente: string = conIngresos
+      ? 'id, vuelo_id, cobro_grupo_id, monto, moneda, ingreso_anticipo_id'
+      : 'id, vuelo_id, cobro_grupo_id';
+    const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, vuelo_id, cobro_grupo_id')
+      .select(colsExistente)
       .eq('id', cobroId)
       .maybeSingle();
     if (findErr) throw new Error(findErr.message);
-    if (!existing) throw new NotFoundException(`Cobro ${cobroId} not found`);
+    if (!existenteRaw)
+      throw new NotFoundException(`Cobro ${cobroId} not found`);
+    const existing = existenteRaw as unknown as Record<string, unknown>;
     // Parte de un SOBRE de grupo: se elimina desde el grupo (borra el sobre
     // completo o re-parte) — 409 COBRO_DE_GRUPO.
     await this.assertNoEsParteDeSobre(existing);
@@ -11983,6 +12184,87 @@ export class FlightsService {
         `deleteCobro ${cobroId}: el cobro quedó eliminado pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+    const anticipoId = (existing as { ingreso_anticipo_id?: unknown })
+      .ingreso_anticipo_id;
+    if (conIngresos && typeof anticipoId === 'string' && anticipoId) {
+      await this.bitacoraDesaplicar(anticipoId, existing, userId);
+    }
     return { ok: true };
+  }
+
+  /**
+   * Fila DESAPLICAR en la bitácora del anticipo (best-effort: el cobro YA
+   * se borró; una bitácora que falla no puede responder 5xx). Cubre las dos
+   * puertas: «Desaplicar» desde Ingresos y «Desaplicar/Eliminar» desde el
+   * vuelo — `IngresosService` NO escribe otra fila.
+   */
+  private async bitacoraDesaplicar(
+    anticipoId: string,
+    cobro: Record<string, unknown>,
+    userId: string,
+  ): Promise<void> {
+    try {
+      const { data: vuelo } = await this.supabase.service
+        .from('vuelo')
+        .select('folio')
+        .eq('id', cobro.vuelo_id as string)
+        .maybeSingle();
+      const folioRaw = (vuelo as { folio?: unknown } | null)?.folio;
+      const folio =
+        typeof folioRaw === 'number' || typeof folioRaw === 'string'
+          ? String(folioRaw)
+          : null;
+      const { error } = await this.supabase.service
+        .from('ingreso_bitacora')
+        .insert({
+          ingreso_id: anticipoId,
+          accion: 'DESAPLICAR',
+          actor_id: userId,
+          diff: {
+            cobro_id: cobro.id,
+            vuelo_id: cobro.vuelo_id,
+            monto: Number(cobro.monto),
+            moneda: cobro.moneda,
+          },
+          nota: `vuelo #${folio ?? '?'} · ${fmtDineroTexto(Number(cobro.monto) || 0, (cobro.moneda as string | null) ?? null)}`,
+        });
+      if (error) throw new Error(error.message);
+    } catch (err) {
+      this.logger.warn(
+        `deleteCobro: el cobro ${cobro.id as string} del anticipo ${anticipoId} se borró pero la bitácora DESAPLICAR falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * 409 `COBRO_DE_ANTICIPO` (24-sep-2026): el cobro salió de un anticipo;
+   * su dinero se corrige desaplicando y volviendo a aplicar. La etiqueta
+   * ING-n se lee best-effort (sin folio ⇒ «ING-?»).
+   */
+  async conflictoCobroDeAnticipo(
+    anticipoId: string,
+    contexto: 'EDITAR' | 'CONCILIAR' = 'EDITAR',
+  ): Promise<ConflictException> {
+    let folio: number | null = null;
+    try {
+      const { data } = await this.supabase.service
+        .from('ingreso')
+        .select('folio')
+        .eq('id', anticipoId)
+        .maybeSingle();
+      const f = (data as { folio?: unknown } | null)?.folio;
+      folio = f == null ? null : Number(f);
+    } catch {
+      folio = null;
+    }
+    const etiqueta = etiquetaIngreso(folio);
+    return new ConflictException({
+      message:
+        contexto === 'EDITAR'
+          ? `Este cobro salió del anticipo ${etiqueta}: para cambiar el monto, desaplícalo y vuelve a aplicarlo desde Ingresos → Anticipos.`
+          : `Este cobro salió del anticipo ${etiqueta}: concilia el abono contra el anticipo, en Ingresos → Por conciliar.`,
+      error: 'COBRO_DE_ANTICIPO',
+      details: { ingreso_id: anticipoId, etiqueta },
+    });
   }
 }

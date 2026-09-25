@@ -1839,6 +1839,143 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `conciliado`, `pendientes`, `duplicados`, `activo` y `forzar` de otros
       DTOs; no se tocó aquí.
 
+29. **INGRESOS Y ANTICIPOS + CONCILIACIÓN DE INGRESOS (24-sep-2026, API
+    0.0.34, migración `20260924000004` — APLICADA el 24-sep-2026 tras
+    DRYRUN_OK, más el revoke de RPC de sus triggers).** Pedido del cliente: «faltarían las categorías de "ingresos"
+    de igual manera de como están ya ahorita las de "gastos" … Otros
+    Ingresos, Anticipos y depósitos, Ingresos en cuentas de banco»; del
+    usuario: «conciliar como los gastos pero ahora los ingresos subiendo un
+    estado de cuenta y con IA marcar los que sí empatan con los cobros de
+    los vuelos». Contrato v2 compartido con panel y pyservices (tipos JSON
+    en `ingresos/ingresos.types.ts` = `vuelatour-next/src/types/ingresos.ts`).
+    - **Tabla `ingreso`** para TODO lo que NO es un cobro de vuelo
+      (`cobro_vuelo` NO se reutiliza). Categorías = texto + CHECK (sin el
+      incidente del ENUM), FUENTE ÚNICA `common/categoria-ingreso.util.ts`
+      (el panel la copia con los MISMOS nombres de export): OTRO_INGRESO,
+      INGRESO_BANCARIO, REEMBOLSO_DEVOLUCION y VENTA_ACTIVO **suman a
+      resultados** (derivado del destino «Otros ingresos (Balance general
+      VuelaTour y Libro Dinero)», membresía congelada en spec — a propósito
+      NO se dice «Otros ingresos VuelaTour», que es el bloque de TUAs/extras
+      del reparto); ANTICIPO_CLIENTE y APORTACION_PRESTAMO quedan **fuera**.
+      `monto` = BRUTO, neto = monto − `comision_monto`; `fecha` = DATE (día
+      Cancún); folio `ING-n`; soft delete (`deleted_at` + `motivo_baja`, TODO
+      lector filtra); archivos que NUNCA se borran del bucket privado
+      `ingresos` (`archivos_historial`); bitácora `ingreso_bitacora` por
+      trigger (+ APLICAR/DESAPLICAR/CONCILIAR/DESCONCILIAR best-effort).
+    - **Anti doble conteo** (un ingreso de resultado JAMÁS es el pago de un
+      vuelo): `vuelo_id` solo en REEMBOLSO_DEVOLUCION (CHECK
+      `ingreso_vuelo_chk` + 400 `VUELO_SOLO_EN_REEMBOLSO`); «registrar como
+      otro ingreso» un abono que cuadra (neto o bruto ±1.00, ±30 días) con un
+      cobro de vuelo LIBRE ⇒ 409 `ABONO_TIENE_COBRO_CANDIDATO` salvo
+      `aceptar_sin_cobro` (caso real #235: 19,380 = 20,400 − 1,020); línea del
+      banco repetida ⇒ 409 `ABONO_POSIBLE_DUPLICADO` salvo confirmación; y
+      `POST /ingresos/abonos/:movId/cobro-de-vuelo` («Es el pago de un
+      vuelo»: `createCobro` + `linkCobro`, con compensación que BORRA el
+      cobro si la liga falla; comisión 0 EXPLÍCITA si el abono no la trae,
+      o un PAYWISE provisionaría 8.857 %). USD de resultado exige TC (el
+      oficial de su fecha o 400 `TC_REQUERIDO`; CHECK
+      `ingreso_tc_resultado_chk`); toda regla del alta se re-valida sobre el
+      estado FUSIONADO en el PATCH.
+      **Revisión adversaria (24-sep-2026), tres candados más del mismo
+      dinero**: (1) `cobro-de-vuelo` rebota 409 `ABONO_TIENE_COBRO_CANDIDATO`
+      si ESE vuelo ya tiene un cobro LIBRE que cuadra con el abono (sin
+      ventana de fechas; `aceptar_sin_cobro` en el cuerpo lo confirma) —
+      crear otro contaba el mismo pago dos veces en `cobrosEnUsd` y
+      `COBRO_EXCEDE_SALDO` solo lo veía si el doble rebasaba el total;
+      (2) el AUTO-cruce (banco y pasarela, y por tanto
+      `intentarCruzarIngreso`) NO liga un abono a un INGRESO si un cobro o
+      sobre LIBRE (métodos manuales, ±30 días) cuadra exacto
+      (`cobrosExactosLibresDeAbono` ⇒ AMBIGUO; «Por conciliar» lo pinta
+      igual): el cruce de pasarela solo mira cobros PAYWISE y un «otro
+      ingreso» de 19,380 tecleado a mano se llevaba el abono de #235;
+      (3) `linkIngreso` escribe con CAS (`ingreso_id is null` al ligar, la
+      liga leída al desvincular): dos ligas simultáneas del mismo abono ya no
+      se pisan (el CHECK excluyente no lo impide: es la misma columna).
+    - **Anticipo aplicado = cobro NORMAL** por `FlightsService.createCobro`
+      (6.º parámetro INTERNO `{ingreso_anticipo_id}`; sin él el insert es
+      byte-idéntico) ⇒ cuenta en el vuelo por `cobrosEnUsd` (bandera
+      `cobrado`, semáforo, «Pagado», COTIZACION_COBRADA, reparto, libros)
+      exactamente como cualquier cobro; el anticipo NUNCA suma a resultados.
+      Trigger `tg_cobro_vuelo_anticipo` (`for update`, moneda `::text`):
+      Σ aplicado ≤ anticipo, misma moneda, solo positivos sin sobre y la liga
+      es **INMUTABLE** (soltarla devolvería saldo con el cobro vivo). Comisión
+      por aplicación = proporcional con el RESIDUO en la que agota
+      (`comisionDeAplicacion`, Σ == comisión del anticipo) y 0 EXPLÍCITO sin
+      comisión. Idempotencia PRIMERO en alta, alta desde abono y aplicación
+      (el reintento con saldo ya agotado responde 200 `idempotente`, sin 2.ª
+      bitácora). `updateCobro` rechaza cambiar monto/moneda/comisión/método
+      de un cobro de anticipo (409 `COBRO_DE_ANTICIPO`, comparando contra el
+      VIGENTE; T.C., referencia, fecha y notas sí) y, si el dinero reenviado
+      es el MISMO, lo CONGELA (no recalcula la comisión desde el % de 4
+      decimales: 98,765.43 con 8,747.21 volvía 8,747.26 y rompía Σ
+      comisiones == comisión del anticipo); `deleteCobro`
+      («desaplicar») sigue permitido aunque el anticipo esté conciliado — el
+      candado usa `movimientoDeCobro` A PROPÓSITO — y deja DESAPLICAR.
+    - **Conciliado de un cobro**: fuente única extendida
+      `cobro-conciliado.util#conciliacionDeCobro` (DIRECTO | SOBRE |
+      ANTICIPO; aditivo, lo de antes byte-idéntico). `adjuntarSobres` expone
+      `anticipo` y `conciliado_via` (solo con la migración). Un cobro de
+      anticipo NUNCA es candidato de un abono (auto-cruce, candidatos
+      manuales, IA, Paywise) y `linkCobro` lo rechaza (409
+      `COBRO_DE_ANTICIPO`): su dinero se concilia UNA vez, como anticipo.
+      **«Cobros sin banco» / pre-cierre**: el cobro de un anticipo sale
+      MIENTRAS su anticipo no esté ligado a su abono (marcado `anticipo`);
+      la regla de «sin conciliar» de Ingresos es EXACTAMENTE esa (métodos
+      `METODOS_COBRO_ABONO_AUTO`; BillPocket sin liga = «no se concilia uno a
+      uno»), con spec de paridad contra `cobrosSinBanco`.
+    - **Conciliación de ingresos**: `movimiento_bancario.ingreso_id` (1 ↔ 1,
+      solo ABONO conciliado, EXCLUYENTE con gasto/cobro/sobre/clasificación
+      por CHECK); `linkIngreso` (`PATCH conciliacion/movimientos/:id/ingreso`,
+      regla 6.3 con sus 409) y `link`/`linkCobro`/`clasificar` rechazan un
+      abono ligado a un ingreso (409 `MOVIMIENTO_YA_LIGADO`, `liga:
+      'INGRESO'`). Decisión ÚNICA del auto-cruce de abonos en
+      `conciliacion/abono-cruce.util.ts` (PURA): cobros, sobres e ingresos de
+      la MISMA cuenta en un universo, monto igual a centavos como siempre y,
+      con ≥ 2, el NOMBRE del ordenante SPEI desempata solo si deja UNO
+      (`empataNombre`); pasarela sin cobro Paywise prueba los ingresos de esa
+      cuenta. Camino inverso `intentarCruzarIngreso` (nunca lanza).
+      `GET conciliacion/abonos-pendientes` (patrón traspaso/reverso, motivo
+      del auto, `exactos_manual`, duplicado, cliente y categoría sugeridos;
+      lecturas en lote paginadas — si fallan o llegan al tope,
+      `motivos_calculados=false` y nada inventado) y `POST
+      conciliacion/sugerir-abonos` (IA: propone y JAMÁS liga; REGLA sin IA
+      para traspasos, reversos, duplicados y lo que el auto ya cruza; lotes
+      de ≤ 10 abonos, ≤ 3 llamadas EN PARALELO, 130 s; `ia_uso` categoría
+      `CONCILIACION_ABONOS_SUGERIR` también en el 502 truncado; ids
+      validados contra los candidatos del abono, dedupe entre abonos,
+      REGISTRAR_INGRESO con cobro exacto ⇒ LIGAR ≤ 0.7 o REVISAR;
+      `monto_exacto` lo calcula el API). Clasificación canónica «Reverso de
+      un cargo» (sembrada por la migración; se SUGIERE, nunca se aplica sola).
+    - **Libros**: fila ÚNICA `common/ingreso-resultado.util#filaLibroDeIngreso`
+      (TC PROPIO del ingreso, comisión como egreso, remanente = ingreso −
+      comisión; USD sin TC ⇒ null + nota). Libro Dinero: filas ING al FINAL
+      de «Otros ingresos» y su comisión se RESTA en
+      `utilidades_otros_ingresos_mxn` (sube exactamente Σ remanente). Balance
+      general: filas al final de las sueltas de «Otros movimientos». Reparto,
+      pre-cierre, balance por avión, dashboards y reporte por vuelo NO
+      cambian (decisión del cliente). **Sin ingresos, payload BYTE-IDÉNTICO**
+      (specs con golden capturado del código sin modificar).
+    - **Sonda ÚNICA** `common/ingreso-disponible.util` (columna
+      `movimiento_bancario.ingreso_id`, re-sondeo ≤ 10 min): TODO lo que
+      nombre `ingreso_id`, `ingreso_anticipo_id` o la tabla `ingreso` fuera
+      del módulo va detrás de ella; sin la migración, conciliación, cobros,
+      pre-cierre y reportes responden como hoy (spec «sin migración» que
+      falla ante cualquier consulta que nombre lo nuevo) y
+      `/v1/ingresos/*` + las rutas nuevas de conciliación ⇒ 503
+      `INGRESOS_NO_DISPONIBLE`.
+    - **Roles**: clase `ROLES_INGRESOS` = ADMIN, COORDINADOR, FACTURACION
+      (los de «Gastos»); DESAPLICAR y `cobro-de-vuelo` = `ROLES_CONCILIAR`
+      (ADMIN, FACTURACION) por `@Roles` de MÉTODO; alta CON
+      `movimiento_bancario_id` ⇒ 403 `CONCILIAR_SOLO_ADMIN_FACTURACION` a
+      COORDINADOR. Anti-cap: `in (…)` ≤ 200 ids y periodos paginados con
+      tope 5,000 (400 `PERIODO_MUY_GRANDE`). Ningún booleano en query.
+    - Specs: `categoria-ingreso.util`, `ingreso-disponible.util`,
+      `ingreso-resultado.util`, `cobro-conciliado.util` (aditivos),
+      `abono-cruce.util`, `ingresos.util`, `ingresos-xlsx`,
+      `ingresos.service`, `ingresos.controller` (HTTP real),
+      `conciliacion.service.ingresos`, `flights.service.anticipo`,
+      `dinero-report.service.ingresos` y `aircraft-balance.service.ingresos`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -2463,6 +2600,30 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **APLICADA (24-sep-2026, API 0.0.34; DRYRUN_OK C1–C10 con escrituras reales; `get_advisors`: INFO de RLS sin policies + WARN de RPC de los 2 triggers SECURITY DEFINER, cerrado con `revoke execute` —sección 8, probado como service_role—)** —
+  `20260924000004_ingresos.sql` (invariante 29): tablas `ingreso` e
+  `ingreso_bitacora` (RLS sin policies, patrón del repo), columnas
+  `cobro_vuelo.ingreso_anticipo_id` y `movimiento_bancario.ingreso_id`, 3
+  CHECK nuevos en tablas existentes (`cobro_vuelo_anticipo_chk`,
+  `movimiento_bancario_ingreso_abono_chk`,
+  `movimiento_bancario_ingreso_excluyente_chk` — validan sin backfill: en
+  prod ninguna de las 697 filas tiene más de una liga), TRES triggers nuevos
+  (`trg_ingreso_bitacora`, `trg_ingreso_candados`, **`trg_cobro_vuelo_anticipo`
+  sobre la tabla caliente `cobro_vuelo`**, con early return para los cobros
+  normales), bucket privado `ingresos` y la clasificación «Reverso de un
+  cargo». NO toca ningún trigger existente. **Antes de aplicar**: correr el
+  DRY-RUN de su cabecera (UNA sentencia `do $dry$ … $dry$` con el cuerpo
+  pegado en B; INSERT/UPDATE/DELETE REALES de `ingreso`, `cobro_vuelo` y
+  `movimiento_bancario` —incluida la comparación `::text` del trigger con un
+  cobro USD contra un anticipo MXN, la liga inmutable y el trigger de suma de
+  gastos de siempre (C9)— que termina en `raise exception 'DRYRUN_OK …'`).
+  Cualquier `DRYRUN_FALLA` u otro error ⇒ NO aplicar. Tras aplicar:
+  `get_advisors` (esperado solo el INFO de RLS sin policies), conteos
+  intactos (0 filas con `ingreso_id`/`ingreso_anticipo_id`) y sondear
+  `GET /v1/ingresos/resumen` (200, no 503; la sonda re-sondea en ≤ 10 min o
+  reiniciar el API). El API 0.0.34 es desplegable ANTES de aplicarla (503
+  claro en lo nuevo; todo lo demás byte-idéntico). Rollback: al pie del
+  archivo (pierde lo registrado).
 - **APLICADA (24-sep-2026, API 0.0.32; dry-run DRYRUN_OK con escrituras reales, `get_advisors` solo el INFO de RLS sin policies, `responsables_facturacion` = [Mary Cruz])** —
   `20260924000003_factura_emitida.sql` (invariante 27): tablas
   `factura_emitida` + `factura_emitida_vuelo` (RLS sin policies, patrón del
@@ -2766,6 +2927,33 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   hex → 6 colorId distintos, ver el bullet del espejo). Lo pendiente es
   operativo: después de cada cambio de color, correr
   `POST /v1/calendar/resync` (o esperar al reconcile de las 00:15).
+- **Ingresos (24-sep-2026, invariante 29) — decisiones del cliente
+  pendientes** (v1 hace lo indicado entre paréntesis): ingresos sin vuelo en
+  el reparto a socios (fuera); ingreso con avión (solo referencia); reembolso
+  de proveedor ligado a un gasto (ingreso de VuelaTour); venta de activos
+  (resultado; la salida de bodega aparte); efectivo recibido y caja chica
+  (no entra al fondo); devolución o retención de un anticipo sin vuelo
+  (reclasificar / aplicar a un cancelado); avisos de pre-cierre para
+  anticipos con saldo e ingresos sin conciliar (no se agregan); reversos
+  (solo se clasifica el abono); depósito BillPocket agrupado 1 ↔ N (no);
+  roles (COORDINADOR registra y aplica pero no concilia ni desaplica);
+  préstamos con saldo de deuda (no); **auto-cruce de la cuenta Paywise con
+  cobros por TRANSFERENCIA** (no: se ven como «1 con el monto exacto» y se
+  ligan a mano o con la IA — caso #235); CFDI de anticipo (fuera); vuelo en
+  un ingreso solo para reembolsos recibidos; líneas duplicadas del banco
+  (se avisan, no se borran).
+- **Hueco PREEXISTENTE (anotado el 24-sep-2026, no se tocó)**:
+  `ConciliacionService.cargarCobrosPorMetodo` pide `.limit(2000)` a
+  `cobro_vuelo` y PostgREST corta en 1000 sin avisar: con más de 1,000
+  cobros bancarios en la ventana, «cobros sin banco», la auditoría Paywise
+  y el pre-cierre verían una foto recortada (hoy hay 225 cobros en total).
+  Lo nuevo de ingresos ya pagina.
+- **Hueco PREEXISTENTE (anotado en la revisión adversaria del 24-sep-2026,
+  no se tocó para cobros normales)**: `FlightsService.updateCobro` recalcula
+  `comision_banco_monto` desde `comision_banco_pct` (4 decimales) siempre
+  que el PATCH trae `monto`, aunque sea el MISMO: en montos grandes mueve
+  centavos (98,765.43 con comisión 8,747.21 ⇒ 8,747.26). Para cobros de
+  ANTICIPO ya se congela; para los normales es decisión aparte.
 - Complementos de pago REP (A2), Calendar bidireccional (Fase C), clasificación
   IA de facturas recibidas, `factura_recibida.gasto_id` no actualiza
   `gasto.estatus_comprobante` al amarrar.

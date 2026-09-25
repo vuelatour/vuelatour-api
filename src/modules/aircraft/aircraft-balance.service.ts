@@ -4,6 +4,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  filaLibroDeIngreso,
+  leerIngresosDeResultado,
+} from '../../common/ingreso-resultado.util';
 import { AircraftService } from './aircraft.service';
 import {
   TipoCambioService,
@@ -4716,6 +4720,31 @@ export class AircraftBalanceService {
         concepto_egreso: `${av?.matricula ?? 'avión ¿?'} · ${
           base.concepto_egreso ?? 'tuas'
         }`,
+      });
+    }
+    // INGRESOS SIN VUELO de RESULTADO (24-sep-2026): intereses, reembolsos
+    // recibidos, ventas de activos… registrados en Ingresos (clave ING-n),
+    // con la MISMA fila que el Libro Dinero (fuente única
+    // `filaLibroDeIngreso`: TC propio, comisión como egreso). Anticipos y
+    // aportaciones NO aparecen (no son resultado). Ni la hoja maestra, ni la
+    // cascada por avión, ni el reparto cambian. Sin la migración
+    // 20260924000004 no se consulta nada: la pestaña sale idéntica.
+    for (const ing of await leerIngresosDeResultado(sb, desde, hasta)) {
+      const f = filaLibroDeIngreso(ing);
+      if (!f) continue;
+      sueltas.push({
+        clave: f.clave,
+        avion_color: f.aeronave_color,
+        fecha_vuelo: null,
+        concepto_egreso: f.concepto_egreso,
+        egreso_mxn: f.egreso_mxn,
+        fecha_egreso:
+          f.egreso_mxn != null || f.concepto_egreso ? f.fecha : null,
+        concepto_ingreso: f.concepto_ingreso,
+        ingreso_mxn: f.ingreso_mxn,
+        fecha_ingreso: f.fecha,
+        remanente_mxn: f.remanente_mxn,
+        factura: null,
       });
     }
 

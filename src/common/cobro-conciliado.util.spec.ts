@@ -1,5 +1,9 @@
 import {
+  anticipoDeCobro,
   cobroEstaConciliado,
+  conciliacionDeCobro,
+  filtroLigaCobrosConAnticipos,
+  MOV_LIGA_COLS_CON_INGRESO,
   esParteDeSobre,
   filtroLigaCobros,
   movimientoDeCobro,
@@ -84,5 +88,64 @@ describe('cobro-conciliado.util (fuente única de "conciliado")', () => {
       expect(filtroLigaCobros([], [])).toBeNull();
       expect(filtroLigaCobros([''], [])).toBeNull();
     });
+  });
+});
+
+// ===== ANTICIPOS (24-sep-2026, §7.4-bis): SOLO aditivo =====
+
+describe('cobro-conciliado.util — cobros de ANTICIPO', () => {
+  const MOVS_ING = [
+    { id: 'm1', cobro_id: 'c1', cobro_grupo_id: null, ingreso_id: null },
+    { id: 'm2', cobro_id: null, cobro_grupo_id: 's1', ingreso_id: null },
+    { id: 'm4', cobro_id: null, cobro_grupo_id: null, ingreso_id: 'ing-1' },
+  ];
+
+  it('columnas con ingreso_id (solo con la sonda)', () => {
+    expect(MOV_LIGA_COLS_CON_INGRESO).toBe(
+      'id, cobro_id, cobro_grupo_id, ingreso_id',
+    );
+  });
+
+  it('conciliacionDeCobro: DIRECTO, SOBRE y ANTICIPO', () => {
+    expect(conciliacionDeCobro({ id: 'c1' }, MOVS_ING)).toEqual({
+      mov: MOVS_ING[0],
+      via: 'DIRECTO',
+    });
+    expect(
+      conciliacionDeCobro({ id: 'c7', cobro_grupo_id: 's1' }, MOVS_ING),
+    ).toEqual({ mov: MOVS_ING[1], via: 'SOBRE' });
+    expect(
+      conciliacionDeCobro({ id: 'c9', ingreso_anticipo_id: 'ing-1' }, MOVS_ING),
+    ).toEqual({ mov: MOVS_ING[2], via: 'ANTICIPO' });
+  });
+
+  it('cobro de un anticipo SIN conciliar ⇒ null; cobro normal sin liga ⇒ null', () => {
+    expect(
+      conciliacionDeCobro({ id: 'c9', ingreso_anticipo_id: 'ing-2' }, MOVS_ING),
+    ).toBeNull();
+    expect(conciliacionDeCobro({ id: 'c9' }, MOVS_ING)).toBeNull();
+    expect(anticipoDeCobro({ id: 'x', ingreso_anticipo_id: '' })).toBeNull();
+    expect(anticipoDeCobro({ id: 'x', ingreso_anticipo_id: 'ing-1' })).toBe(
+      'ing-1',
+    );
+  });
+
+  it('un cobro de anticipo NO es «conciliado» para movimientoDeCobro (el candado de desaplicar no se dispara)', () => {
+    const cobro = { id: 'c9', ingreso_anticipo_id: 'ing-1' };
+    expect(movimientoDeCobro(cobro, MOVS_ING)).toBeNull();
+    expect(cobroEstaConciliado(cobro, MOVS_ING)).toBe(false);
+  });
+
+  it('filtroLigaCobrosConAnticipos agrega ingreso_id.in.(…) sin tocar lo de siempre', () => {
+    expect(filtroLigaCobrosConAnticipos(['a'], ['s'], [])).toBe(
+      filtroLigaCobros(['a'], ['s']),
+    );
+    expect(filtroLigaCobrosConAnticipos(['a'], [], ['i1', 'i1', ''])).toBe(
+      'cobro_id.in.(a),ingreso_id.in.(i1)',
+    );
+    expect(filtroLigaCobrosConAnticipos([], [], ['i1'])).toBe(
+      'ingreso_id.in.(i1)',
+    );
+    expect(filtroLigaCobrosConAnticipos([], [], [])).toBeNull();
   });
 });
