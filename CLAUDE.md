@@ -2196,8 +2196,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
 
 
 30. **EDITORES DE COTIZACIONES COBRADAS — el candado D3 se abre POR PERSONA
-    (26-sep-2026, API 0.0.37, migración `20260926000001` PENDIENTE de
-    aplicar).** Pedido de Alejandro y Pablo Canales por WhatsApp con las
+    (26-sep-2026, API 0.0.37, migración `20260926000001` APLICADA el 26-sep tras
+    DRYRUN_OK).** Pedido de Alejandro y Pablo Canales por WhatsApp con las
     capturas de #305 y #317 («Bloqueada · vuelo cobrado»): «un vuelo que se
     cobró en efectivo pero estaba cotizado como para transferencia, entonces
     tenía IVA: decía 754 dólares, pero entró el cobro en efectivo por 600
@@ -2929,7 +2929,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (26-sep-2026, API 0.0.37; migración de DATOS, sin
+- **APLICADA (26-sep-2026, DRYRUN_OK A–C6; editores = [Alejandro Canales, Pablo Canales]; API 0.0.37; migración de DATOS, sin
   DDL ni triggers)** — `20260926000001_editores_cotizacion_cobrada.sql`
   (invariante 30): siembra la fila `editores_cotizacion_cobrada` con
   Alejandro Canales y Pablo Canales **solo si los dos son oficina ACTIVA**
