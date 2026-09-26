@@ -1,5 +1,7 @@
 import {
   BadRequestException,
+  ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -72,9 +74,49 @@ const RANGOS_NUMERICOS: Record<
  * cada fila como switch) y se edita solo en su propia ruta.
  */
 export const CONFIG_RESPONSABLES_FACTURACION = 'responsables_facturacion';
+/**
+ * EDITORES DE COTIZACIONES COBRADAS (26-sep-2026, migración
+ * 20260926000001; pedido de Alejandro y Pablo Canales por WhatsApp con las
+ * cotizaciones #305 y #317: «necesito yo poder entrar a las cotizaciones que
+ * ya se pagaron y hacer las modificaciones… que se desbloquee para mí, no
+ * para todos»). Lista de usuarios (`valor_json`, arreglo de uuids) que SÍ
+ * pueden revisar una cotización con cobros registrados (el candado D3
+ * `COTIZACION_COBRADA` no les aplica; CFDI, mes cerrado, servicio y grupo sí).
+ * Es un permiso por PERSONA, no por rol: en la oficina todos son ADMIN
+ * (Alejandro Villalobos también, y NO lo tiene). Reglas de la lista: solo
+ * un usuario que YA está en ella puede cambiarla (403
+ * `SOLO_EDITORES_COTIZACION_COBRADA`), nunca queda vacía (400
+ * `LISTA_VACIA`) y solo admite usuarios ACTIVOS de oficina (400
+ * `USUARIOS_INVALIDOS`). Sin la fila (migración sin aplicar) la lista es
+ * vacía: nadie tiene el permiso y todo sigue como antes. Igual que
+ * `responsables_facturacion`: se EXCLUYE de `GET /v1/config` y `PATCH
+ * :clave` la rechaza; se edita en su propia ruta.
+ */
+export const CONFIG_EDITORES_COTIZACION_COBRADA = 'editores_cotizacion_cobrada';
+
+/**
+ * Claves de LISTA (`valor_json`): su `activa` no significa nada, así que no
+ * salen en el listado general de banderas (el panel pinta cada fila como
+ * switch) y `PATCH :clave` las rechaza. Cada una tiene su sección y su ruta.
+ */
+const CLAVES_LISTA: Record<string, string> = {
+  [CONFIG_RESPONSABLES_FACTURACION]:
+    'Esta configuración se edita en Responsables de facturación.',
+  [CONFIG_EDITORES_COTIZACION_COBRADA]:
+    'Esta configuración se edita en «Editan cotizaciones cobradas».',
+};
 
 /** Roles de oficina que pueden ser responsables de facturación. */
 const ROLES_OFICINA_FACTURACION = ['ADMIN', 'COORDINADOR', 'FACTURACION'];
+
+/**
+ * Roles que pueden revisar una cotización (`@Roles` de `POST
+ * /quotes/:id/revise` y `:id/ajuste`). El permiso de `/me`
+ * (`permisos.editar_cotizacion_cobrada`) exige estar en la lista Y tener uno
+ * de estos roles: un usuario de FACTURACION en la lista no podría revisar de
+ * todos modos, y el permiso no debe decir lo contrario.
+ */
+export const ROLES_REVISAN_COTIZACION = ['ADMIN', 'COORDINADOR'] as const;
 
 /** Fila cacheada de una bandera: estado on/off + valor numérico opcional. */
 type ConfigRow = { activa: boolean; valor_numerico: number | null };
@@ -86,6 +128,36 @@ interface UsuarioOficina {
   rol: string;
 }
 
+/** Persona con nombre (nunca un uuid como nombre: «Sin nombre»). */
+export interface UsuarioNombre {
+  id: string;
+  nombre: string;
+}
+
+/** `GET|PUT /v1/config/editores-cotizacion-cobrada`. */
+export interface EditoresCotizacionCobrada {
+  /** Ids guardados en la lista (orden guardado). */
+  usuario_ids: string[];
+  /** Los ids que resuelven a un usuario, con su nombre. */
+  usuarios: UsuarioNombre[];
+  /** ¿Quien consulta puede cambiar la lista? (= está en ella). */
+  puede_modificar: boolean;
+  /**
+   * ADITIVO: usuarios ACTIVOS de oficina que se pueden agregar (los mismos
+   * que acepta el PUT). El panel pinta un switch por candidato.
+   */
+  candidatos: Array<UsuarioNombre & { rol: string }>;
+}
+
+/** Permisos por PERSONA que viajan en `GET /v1/me` (`permisos`). */
+export interface PermisosUsuario {
+  /** Puede revisar una cotización con cobros registrados. */
+  editar_cotizacion_cobrada: boolean;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * Banderas globales de comportamiento del sistema (tabla
  * `configuracion_sistema`). Lecturas con caché corto: /me las consulta en
@@ -96,8 +168,8 @@ interface UsuarioOficina {
 export class ConfiguracionService {
   private readonly logger = new Logger(ConfiguracionService.name);
   private cache: { data: Map<string, ConfigRow>; at: number } | null = null;
-  /** Caché corto (60 s) de los ids de responsables (`valor_json`). */
-  private cacheResponsables: { ids: string[]; at: number } | null = null;
+  /** Caché corto (60 s) de las listas de ids (`valor_json`) por clave. */
+  private cacheListas = new Map<string, { ids: string[]; at: number }>();
   private static readonly TTL_MS = 60_000;
 
   constructor(private readonly supabase: SupabaseService) {}
@@ -106,9 +178,11 @@ export class ConfiguracionService {
     const { data, error } = await this.supabase.service
       .from('configuracion_sistema')
       .select(COLS)
-      // La lista de responsables se edita en su propia sección (su `activa`
-      // no significa nada y el panel pinta cada fila como switch).
+      // Las LISTAS (responsables de facturación, editores de cotizaciones
+      // cobradas) se editan en su propia sección: su `activa` no significa
+      // nada y el panel pinta cada fila como switch.
       .neq('clave', CONFIG_RESPONSABLES_FACTURACION)
+      .neq('clave', CONFIG_EDITORES_COTIZACION_COBRADA)
       .order('clave');
     if (error) throw new Error(error.message);
     return data ?? [];
@@ -162,9 +236,12 @@ export class ConfiguracionService {
   }
 
   async update(clave: string, dto: UpdateConfiguracionDto, userId: string) {
-    if (clave === CONFIG_RESPONSABLES_FACTURACION) {
+    const seccion = Object.prototype.hasOwnProperty.call(CLAVES_LISTA, clave)
+      ? CLAVES_LISTA[clave]
+      : null;
+    if (seccion) {
       throw new BadRequestException({
-        message: 'Esta configuración se edita en Responsables de facturación.',
+        message: seccion,
         error: 'CLAVE_NO_EDITABLE_AQUI',
         details: { clave },
       });
@@ -206,33 +283,48 @@ export class ConfiguracionService {
     return data;
   }
 
-  // ================= RESPONSABLES DE FACTURACIÓN (24-sep-2026) =================
+  // ======================= LISTAS DE USUARIOS (valor_json) =======================
 
-  /** Ids guardados en `valor_json` (lectura PROPIA: `cachedRow` no lee esa columna). */
-  private async leerIdsResponsables(usarCache: boolean): Promise<string[]> {
+  /** Solo uuids, sin repetidos (el orden guardado se conserva). */
+  private static idsValidos(raw: unknown): string[] {
+    // Un valor editado a mano en la BD («Mary», un número…) haría reventar
+    // el `in (…)` de la lectura de usuarios con un 500.
+    const esUuid = (x: unknown): x is string =>
+      typeof x === 'string' && UUID_RE.test(x);
+    return Array.isArray(raw) ? [...new Set(raw.filter(esUuid))] : [];
+  }
+
+  /**
+   * Ids guardados en `valor_json` de una clave de LISTA (lectura PROPIA:
+   * `cachedRow` no lee esa columna). Fila inexistente ⇒ `[]`. Lanza si la
+   * consulta falla: cada llamador decide si eso es best-effort o candado.
+   */
+  private async leerIdsLista(
+    clave: string,
+    usarCache: boolean,
+  ): Promise<string[]> {
     const now = Date.now();
-    if (
-      usarCache &&
-      this.cacheResponsables &&
-      now - this.cacheResponsables.at <= ConfiguracionService.TTL_MS
-    ) {
-      return this.cacheResponsables.ids;
+    const c = this.cacheListas.get(clave);
+    if (usarCache && c && now - c.at <= ConfiguracionService.TTL_MS) {
+      return c.ids;
     }
     const { data, error } = await this.supabase.service
       .from('configuracion_sistema')
       .select('clave, valor_json')
-      .eq('clave', CONFIG_RESPONSABLES_FACTURACION)
+      .eq('clave', clave)
       .maybeSingle();
     if (error) throw new Error(error.message);
-    const raw = (data as { valor_json?: unknown } | null)?.valor_json;
-    // Solo uuids: un valor editado a mano en la BD («Mary», un número…)
-    // haría reventar el `in (…)` de la lectura de usuarios con un 500.
-    const esUuid = (x: unknown): x is string =>
-      typeof x === 'string' &&
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(x);
-    const ids = Array.isArray(raw) ? [...new Set(raw.filter(esUuid))] : [];
-    this.cacheResponsables = { ids, at: now };
+    const ids = ConfiguracionService.idsValidos(
+      (data as { valor_json?: unknown } | null)?.valor_json,
+    );
+    this.cacheListas.set(clave, { ids, at: now });
     return ids;
+  }
+
+  // ================= RESPONSABLES DE FACTURACIÓN (24-sep-2026) =================
+
+  private leerIdsResponsables(usarCache: boolean): Promise<string[]> {
+    return this.leerIdsLista(CONFIG_RESPONSABLES_FACTURACION, usarCache);
   }
 
   /** Oficina ACTIVA (no piloto externo) de rol ADMIN/COORDINADOR/FACTURACION. */
@@ -393,7 +485,206 @@ export class ConfiguracionService {
       if (insErr) throw new Error(insErr.message);
     }
     // Se refleja de inmediato en este proceso.
-    this.cacheResponsables = null;
+    this.cacheListas.delete(CONFIG_RESPONSABLES_FACTURACION);
     return this.responsablesFacturacion();
+  }
+
+  // ============ EDITORES DE COTIZACIONES COBRADAS (26-sep-2026) ============
+
+  /**
+   * ¿Este usuario puede revisar una cotización con cobros registrados?
+   * Permiso por PERSONA (lista `editores_cotizacion_cobrada`). Falla
+   * CERRADO: si la lista no se puede leer, responde `false` (el candado
+   * `COTIZACION_COBRADA` sigue en pie) y deja un `warn`. `usarCache: false`
+   * en el candado de `revise` (una baja de la lista aplica al instante);
+   * `/me` usa el caché de 60 s.
+   */
+  async puedeEditarCotizacionCobrada(
+    userId: string | null | undefined,
+    opts: { usarCache?: boolean } = {},
+  ): Promise<boolean> {
+    if (!userId) return false;
+    try {
+      const ids = await this.leerIdsLista(
+        CONFIG_EDITORES_COTIZACION_COBRADA,
+        opts.usarCache ?? true,
+      );
+      return ids.includes(userId);
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo leer ${CONFIG_EDITORES_COTIZACION_COBRADA}: ${e instanceof Error ? e.message : String(e)}. Sin permiso especial (falla cerrado).`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Permisos por PERSONA de `/me` (ADITIVO). `editar_cotizacion_cobrada`
+   * exige estar en la lista Y un rol que pueda revisar cotizaciones
+   * (`ROLES_REVISAN_COTIZACION`). Best-effort: nunca tumba `/me`.
+   */
+  async permisosDe(
+    userId: string | null | undefined,
+    rol: string | null | undefined,
+  ): Promise<PermisosUsuario> {
+    const rolRevisa = (ROLES_REVISAN_COTIZACION as readonly string[]).includes(
+      rol ?? '',
+    );
+    return {
+      editar_cotizacion_cobrada:
+        rolRevisa && (await this.puedeEditarCotizacionCobrada(userId)),
+    };
+  }
+
+  /**
+   * Nombres de quienes PUEDEN editar una cotización cobrada, en el orden de
+   * la lista: solo usuarios ACTIVOS de oficina con un rol que revisa
+   * cotizaciones (`ROLES_REVISAN_COTIZACION`, el MISMO criterio de
+   * `permisosDe`/`/me`) — para el mensaje del 409 «Solo pueden editarla: …».
+   * Revisión adversaria 26-sep-2026: con toda la oficina (FACTURACION
+   * incluida) el 409 podía mandar a pedírselo a alguien de la lista que NO
+   * puede revisar cotizaciones (su `/me` dice `false`). Best-effort: `[]` si
+   * no se puede leer — el 409 cae a su mensaje de siempre.
+   */
+  async editoresCotizacionCobradaNombres(): Promise<UsuarioNombre[]> {
+    try {
+      const ids = await this.leerIdsLista(
+        CONFIG_EDITORES_COTIZACION_COBRADA,
+        true,
+      );
+      if (ids.length === 0) return [];
+      const revisa = ROLES_REVISAN_COTIZACION as readonly string[];
+      const porId = new Map(
+        (await this.usuariosOficina())
+          .filter((u) => revisa.includes(u.rol))
+          .map((u) => [u.id, u]),
+      );
+      return ids
+        .map((id) => porId.get(id))
+        .filter((u): u is UsuarioOficina => !!u)
+        .map((u) => ({ id: u.id, nombre: u.nombre }));
+    } catch (e) {
+      this.logger.warn(
+        `No se pudieron resolver los editores de cotizaciones cobradas: ${e instanceof Error ? e.message : String(e)}.`,
+      );
+      return [];
+    }
+  }
+
+  /** `GET /v1/config/editores-cotizacion-cobrada` (oficina). */
+  async editoresCotizacionCobrada(
+    userId: string,
+  ): Promise<EditoresCotizacionCobrada> {
+    const ids = await this.leerIdsLista(
+      CONFIG_EDITORES_COTIZACION_COBRADA,
+      false,
+    );
+    const [oficina, resueltos] = await Promise.all([
+      this.usuariosOficina(),
+      ids.length > 0
+        ? this.supabase.service
+            .from('usuario')
+            .select('id, nombre')
+            .in('id', ids)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (resueltos.error) throw new Error(resueltos.error.message);
+    const porId = new Map(
+      ((resueltos.data ?? []) as Array<Record<string, unknown>>).map((u) => [
+        u.id as string,
+        u,
+      ]),
+    );
+    return {
+      usuario_ids: ids,
+      usuarios: ids
+        .map((id) => porId.get(id))
+        .filter((u): u is Record<string, unknown> => !!u)
+        .map((u) => ({
+          id: u.id as string,
+          nombre: ((u.nombre as string | null) ?? '').trim() || 'Sin nombre',
+        })),
+      puede_modificar: ids.includes(userId),
+      candidatos: oficina.map((u) => ({
+        id: u.id,
+        nombre: u.nombre,
+        rol: u.rol,
+      })),
+    };
+  }
+
+  /**
+   * `PUT /v1/config/editores-cotizacion-cobrada` ({ usuario_ids }). En este
+   * orden: (1) solo un usuario que YA está en la lista puede cambiarla ⇒
+   * 403 `SOLO_EDITORES_COTIZACION_COBRADA` (sin la fila sembrada nadie
+   * puede: la siembra la migración 20260926000001); (2) nunca vacía ⇒ 400
+   * `LISTA_VACIA` (sin nadie en ella nadie podría volver a cambiarla);
+   * (3) solo usuarios ACTIVOS de oficina ⇒ 400 `USUARIOS_INVALIDOS` con los
+   * ids que no lo son. La escritura es CAS sobre `updated_at` (dos editores
+   * a la vez: el segundo recibe 409 `EDITORES_CAMBIARON` y recarga, en vez
+   * de pisar al primero con una lista que ya no vio).
+   */
+  async setEditoresCotizacionCobrada(
+    usuarioIds: string[],
+    userId: string,
+  ): Promise<EditoresCotizacionCobrada> {
+    const { data: fila, error: filaErr } = await this.supabase.service
+      .from('configuracion_sistema')
+      .select('clave, valor_json, updated_at')
+      .eq('clave', CONFIG_EDITORES_COTIZACION_COBRADA)
+      .maybeSingle();
+    if (filaErr) throw new Error(filaErr.message);
+    const actuales = ConfiguracionService.idsValidos(
+      (fila as { valor_json?: unknown } | null)?.valor_json,
+    );
+    if (!fila || !actuales.includes(userId)) {
+      const editores = await this.editoresCotizacionCobradaNombres();
+      throw new ForbiddenException({
+        message:
+          editores.length > 0
+            ? `Solo quien ya puede editar cotizaciones cobradas puede cambiar esta lista (${editores.map((u) => u.nombre).join(', ')}).`
+            : 'Solo quien ya puede editar cotizaciones cobradas puede cambiar esta lista.',
+        error: 'SOLO_EDITORES_COTIZACION_COBRADA',
+        details: { editores },
+      });
+    }
+    const ids = [...new Set(usuarioIds)];
+    if (ids.length === 0) {
+      throw new BadRequestException({
+        message:
+          'La lista no puede quedar vacía: al menos una persona debe poder editar cotizaciones cobradas (y cambiar esta lista).',
+        error: 'LISTA_VACIA',
+      });
+    }
+    const oficina = new Set((await this.usuariosOficina()).map((u) => u.id));
+    const invalidos = ids.filter((id) => !oficina.has(id));
+    if (invalidos.length > 0) {
+      throw new BadRequestException({
+        message:
+          'Solo se pueden elegir usuarios ACTIVOS de oficina (administración, coordinación o facturación).',
+        error: 'USUARIOS_INVALIDOS',
+        details: { ids: invalidos },
+      });
+    }
+    const { data, error } = await this.supabase.service
+      .from('configuracion_sistema')
+      .update({
+        valor_json: ids,
+        updated_at: new Date().toISOString(),
+        updated_by: userId,
+      })
+      .eq('clave', CONFIG_EDITORES_COTIZACION_COBRADA)
+      .eq('updated_at', (fila as { updated_at: string }).updated_at)
+      .select('clave');
+    if (error) throw new Error(error.message);
+    this.cacheListas.delete(CONFIG_EDITORES_COTIZACION_COBRADA);
+    if (!data || data.length === 0) {
+      throw new ConflictException({
+        message:
+          'Alguien más cambió la lista mientras la editabas. Recarga y vuelve a intentar.',
+        error: 'EDITORES_CAMBIARON',
+      });
+    }
+    return this.editoresCotizacionCobrada(userId);
   }
 }

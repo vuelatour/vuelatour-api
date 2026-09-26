@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { AircraftModule } from '../aircraft/aircraft.module';
 import { AirportsModule } from '../airports/airports.module';
 import { CalendarModule } from '../calendar/calendar.module';
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 import { FlightsModule } from '../flights/flights.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { PyservicesModule } from '../pyservices/pyservices.module';
@@ -18,6 +19,9 @@ import { QuotesPdfInternoService } from './quotes-pdf-interno.service';
     AirportsModule,
     RoutesModule,
     CalendarModule,
+    // Editores de cotizaciones cobradas (26-sep-2026): la lista
+    // `editores_cotizacion_cobrada` decide quién revisa con cobros.
+    ConfiguracionModule,
     NotificationsModule,
     RealtimeModule,
     // PDF «Cotización interna» (8-sep): cobros con sobre/conciliado desde

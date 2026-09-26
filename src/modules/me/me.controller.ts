@@ -61,17 +61,24 @@ export class MeController {
       diasGraciaSemana,
       sinLimiteHasta,
       pushDispositivos,
+      permisos,
     ] = await Promise.all([
       this.users.findByAuthId(current.authId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
       this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
       this.users.gastosSinLimiteHasta(current.userId),
       this.misDispositivos(current.userId),
+      this.configuracion.permisosDe(current.userId, current.rol),
     ]);
     return {
       ...usuario,
       // Top-level a propósito (3-sep-2026): `config` conserva su shape.
       push_dispositivos: pushDispositivos,
+      // Permisos por PERSONA (26-sep-2026, ADITIVO): hoy solo «editar una
+      // cotización con cobros» (lista `editores_cotizacion_cobrada`). El
+      // panel decide el candado del cotizador con esto; el API lo vuelve a
+      // validar en `revise`. Best-effort: si la lista no se lee, `false`.
+      permisos,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,
@@ -98,16 +105,20 @@ export class MeController {
       diasGraciaSemana,
       sinLimiteHasta,
       pushDispositivos,
+      permisos,
     ] = await Promise.all([
       this.users.updateSelf(current.authId, body, current.userId),
       this.configuracion.isActiva(CONFIG_CAPTURA_TACO_FOTO_IA),
       this.configuracion.numero(CONFIG_DIAS_GRACIA_GASTOS_SEMANA, 1),
       this.users.gastosSinLimiteHasta(current.userId),
       this.misDispositivos(current.userId),
+      this.configuracion.permisosDe(current.userId, current.rol),
     ]);
     return {
       ...usuario,
       push_dispositivos: pushDispositivos,
+      // MISMO shape que el GET (permisos por persona, 26-sep-2026).
+      permisos,
       config: {
         captura_taco_foto_ia: capturaTacoFotoIa,
         dias_gracia_gastos_semana: diasGraciaSemana,

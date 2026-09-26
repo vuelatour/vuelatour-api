@@ -48,7 +48,8 @@ del cierre mensual del cliente (fiabilidad = requisito #1 del proyecto).
 2. **`cobrosEnUsd` (`src/common/cobros-usd.util.ts`) es LA única fuente de
    "cuánto se cobró en USD".** La usan: `refreshCobradoFlag`, el reporte por
    vuelo, `profit-sharing.compute`, el pre-cierre y `quotes.revise` (réplica
-   local para evitar dependencia circular). Un cobro MXN sin TC toma
+   local para evitar dependencia circular; desde el 0.0.37 la misma lectura
+   alimenta el aviso de saldo/sobrecobro de la edición con cobros). Un cobro MXN sin TC toma
    `vuelo.tc_usd_mxn` de respaldo; si aún así no convierte, se EXPONE en
    `sin_tc_*` — jamás desaparece en silencio ni se suma crudo como USD.
 
@@ -917,7 +918,9 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
       `COTIZACION_COBRADA` cuando el NETO de `cobro_vuelo` por `cobrosEnUsd`
       ≠ 0 o hay MXN sin TC — en CUALQUIER estado salvo CANCELADO. Un cobro
       reembolsado completo (neto 0) sí deja revisar. La CFDI bloquea en
-      cualquier estado no cancelado.
+      cualquier estado no cancelado. **Excepción POR PERSONA desde el API
+      0.0.37 (26-sep-2026)**: los usuarios de la lista
+      `editores_cotizacion_cobrada` SÍ revisan con cobros — ver invariante 30.
     - D4/D5: `pdf_oculto`/`pdf_fecha` viajan por tramo en create/revise
       (omitidos = conservar la escala viva) y `PATCH :id/pdf-visibilidad`
       (+ la ruta por escala) mueve notas/toggles del PDF SIN versión,
@@ -2191,6 +2194,117 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `conciliacion.service.ingresos`, `flights.service.anticipo`,
       `dinero-report.service.ingresos` y `aircraft-balance.service.ingresos`.
 
+
+30. **EDITORES DE COTIZACIONES COBRADAS — el candado D3 se abre POR PERSONA
+    (26-sep-2026, API 0.0.37, migración `20260926000001` PENDIENTE de
+    aplicar).** Pedido de Alejandro y Pablo Canales por WhatsApp con las
+    capturas de #305 y #317 («Bloqueada · vuelo cobrado»): «un vuelo que se
+    cobró en efectivo pero estaba cotizado como para transferencia, entonces
+    tenía IVA: decía 754 dólares, pero entró el cobro en efectivo por 600
+    dólares. Quiero editar para quitarle el IVA … Yo necesito que eso se
+    desbloquee para mí, no para todos». En prod #305 = COMPLETADO, $754.00
+    con $104.00 de IVA, un cobro de $600 USD; #317 = $2,893.04 cobrados en
+    pesos a 17.5.
+    - **Lista, no rol**: `configuracion_sistema.editores_cotizacion_cobrada`
+      (`valor_json` = arreglo de uuids, MISMO patrón que
+      `responsables_facturacion`), sembrada con Alejandro Canales
+      (`c691cc8b-…`) y Pablo Canales (`e5aa04a8-…`). TODA la oficina es
+      ADMIN (Alejandro Villalobos también) y NO lo tiene: jamás derivar el
+      permiso del rol. Fuente única `ConfiguracionService`
+      (`CONFIG_EDITORES_COTIZACION_COBRADA`, `puedeEditarCotizacionCobrada`,
+      `permisosDe`, `editoresCotizacionCobradaNombres`); la lectura de
+      `valor_json` se generalizó en `leerIdsLista(clave)` (la comparten las
+      dos listas; caché de 60 s POR CLAVE). La clave se EXCLUYE de
+      `GET /v1/config` y `PATCH /config/:clave` la rechaza (400
+      `CLAVE_NO_EDITABLE_AQUI`), igual que la de responsables.
+    - **Candado** (`QuotesService.assertSinCobros`, ahora devuelve
+      `CobrosRetenidos | null`): solo si el D3 habría rebotado se consulta la
+      lista **SIN caché** (una baja aplica al instante) — sin cobros o con
+      neto 0 nadie la consulta. En la lista ⇒ pasa; si no ⇒ el 409 de
+      siempre, cuyo mensaje ahora NOMBRA a quién puede editarla («… no se
+      puede revisar. Solo pueden editarla: Alejandro Canales, Pablo Canales.
+      Pídeselo a ellos, o elimina o reembolsa …») y `details.editores`
+      (ADITIVO, `{id, nombre}[]`, solo oficina ACTIVA con rol que revisa
+      —`ROLES_REVISAN_COTIZACION`, el mismo criterio de `/me`—, orden de la
+      lista; revisión adversaria 26-sep-2026: el PUT acepta FACTURACION, pero
+      el 409 jamás manda a «pedírselo» a quien no puede revisar).
+      **Falla CERRADO**: lista ilegible o `ConfiguracionService` ausente
+      (@Optional, 10.º parámetro del constructor; los specs viejos no lo
+      pasan) ⇒ nadie tiene el permiso y el mensaje es byte-idéntico al de
+      antes. Aplica a `revise` y `quickAdjust` (que delega en él); **NO al
+      camino del GRUPO** (`reviseParaGrupo` ⇒ `permiteConPermiso: false`, sin
+      nombres: el grupo congela a sus hijos cobrados con `HIJOS_CONGELADOS`).
+      CFDI del PAC, mes cerrado y vuelo de servicio se evalúan ANTES y siguen
+      bloqueando al editor; las reglas de vuelo ya volado (invariante 14)
+      aplican igual.
+    - **Los COBROS no se tocan**: ni una escritura a `cobro_vuelo`. El ingreso
+      del vuelo sigue saliendo de `cobrosEnUsd`. Lo único que cambia es el
+      total de la cotización y, con él, el saldo.
+    - **Tras guardar**: `refreshCobradoTrasRecotizar` (gemelo de
+      `refreshCobradoFlag`) recalcula `cobrado` — quitar el IVA puede dejar
+      el vuelo LIQUIDADO (semáforo y «Pagado» azul en calendario/Google vía
+      el trigger con `cobrado`) y subir el total puede des-liquidarlo. Ahora
+      DEVUELVE lo que usó (`cobrado`, `cobrado_usd`, `sin_tc_*`) y la
+      respuesta de `revise` lleva la bandera RECIÉN calculada (antes
+      devolvía la leída antes del UPDATE). Si el UPDATE de la bandera falla
+      ya no se traga: viaja como aviso («La versión se guardó, pero el estado
+      «Pagado» … no se pudo actualizar»), sin 500 (un 500 invitaría a guardar
+      la versión dos veces). **Lo mismo si falla la RE-LECTURA de los cobros**
+      (revisión adversaria 26-sep-2026: todavía lanzaba ⇒ 500 con la versión
+      ya guardada): la bandera NO se toca, aviso «…no se pudieron leer los
+      cobros para recalcular el estado «Pagado»…» y el saldo del aviso sale
+      de la lectura del candado (antes de guardar).
+    - **Respuesta** (ADITIVA): `edicion_con_cobros: boolean` (siempre
+      presente en el camino normal; `true` solo cuando el permiso abrió el
+      candado; los replays idempotentes no lo traen) y en `avisos[]` el texto
+      único de `quotes/edicion-con-cobros.util.ts#avisoEdicionConCobros`:
+      «Se editó con cobros registrados: cobrado $600 USD, nuevo total $650
+      USD, saldo $50 USD. Los cobros no se modificaron.» — o «sobrecobro $Z
+      USD» cuando lo cobrado rebasa el total; cobros MXN sin T.C. se dicen
+      aparte, jamás desaparecen. Montos con `fmtDineroTexto` (nunca 1
+      decimal, siempre con moneda). Un avión de GRUPO con cobros del sobre
+      suma `AVISO_EDICION_CON_COBROS_GRUPO` (el sobre no se re-parte solo:
+      «Re-partir»). El cálculo del saldo es UNA resta a centavos
+      (`saldoTrasEdicion`) sobre la MISMA lectura que decidió la bandera, con
+      la MISMA tolerancia de redondeo de $1 USD en los dos sentidos
+      (`semaforo-cobro.util#pendienteCobro`, la de `refreshCobradoFlag` y del
+      diálogo «Guardar vN» del panel): una diferencia ≤ $1 es «saldo $0 USD
+      (diferencia de redondeo de $0.50 USD)», nunca «saldo $0.50» con el
+      vuelo en «Pagado» (revisión adversaria 26-sep-2026).
+    - **Historial**: el motivo de la versión lleva el prefijo
+      `PREFIJO_MOTIVO_CON_COBROS` = «[Con cobros · permiso especial] » (una
+      sola vez, `motivoConCobros`).
+    - **`GET /v1/me` y `PATCH /v1/me`** (mismo shape) agregan
+      `permisos: { editar_cotizacion_cobrada }` = en la lista **Y** rol en
+      `ROLES_REVISAN_COTIZACION` (ADMIN, COORDINADOR — los `@Roles` de
+      revise). Caché de 60 s, best-effort (`false` si falla; nunca tumba
+      /me). El panel decide su candado con esto; el API vuelve a validar.
+    - **`GET /v1/config/editores-cotizacion-cobrada`** (ADMIN, COORDINADOR,
+      FACTURACION) ⇒ `{ usuario_ids, usuarios: {id, nombre}[],
+      puede_modificar, candidatos }` (`candidatos` ADITIVO = oficina activa
+      que acepta el PUT). **`PUT` mismo path `{ usuario_ids }`**, en este
+      orden: quien no está YA en la lista ⇒ 403
+      `SOLO_EDITORES_COTIZACION_COBRADA` (sin la fila sembrada nadie puede);
+      `[]` ⇒ 400 `LISTA_VACIA` (el DTO NO lleva `@ArrayMinSize` para que
+      llegue el código); ids que no son oficina ACTIVA
+      (ADMIN/COORDINADOR/FACTURACION, no piloto externo) ⇒ 400
+      `USUARIOS_INVALIDOS` + `details.ids`. Escritura con CAS sobre
+      `updated_at` (dos editores a la vez ⇒ 409 `EDITORES_CAMBIARON`) e
+      invalidación del caché. Quitarse a sí mismo está permitido si queda
+      alguien.
+    - **Sin la migración**: lista vacía ⇒ todo como el 0.0.36 (409 para
+      todos sin nombres, `permisos.editar_cotizacion_cobrada: false`, PUT
+      403). Deploy en cualquier orden.
+    - Specs: `edicion-con-cobros.util.spec.ts` (textos y resta con los casos
+      #305/#317), `quotes.service.cobrada-permiso.spec.ts` (editor pasa con
+      cobros intactos, Villalobos 409 con nombres, CFDI/mes cerrado/grupo
+      siguen, falla cerrado, `cobrado` que se liquida y se des-liquida,
+      sobrecobro, MXN convertido y sin T.C., sobre de grupo, `quickAdjust`),
+      `configuracion.editores-cotizacion-cobrada.spec.ts` (exclusión,
+      PATCH, permiso por persona, /me por rol, GET, los 3 errores del PUT,
+      CAS y caché), `configuracion.controller.editores.spec.ts` (HTTP real:
+      ruta antes de `:clave`, roles, DTO) y `me.controller.permisos.spec.ts`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -2815,6 +2929,23 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (26-sep-2026, API 0.0.37; migración de DATOS, sin
+  DDL ni triggers)** — `20260926000001_editores_cotizacion_cobrada.sql`
+  (invariante 30): siembra la fila `editores_cotizacion_cobrada` con
+  Alejandro Canales y Pablo Canales **solo si los dos son oficina ACTIVA**
+  (si no, la sección 2 aborta con `EDITORES_ABORTADO`: una lista vacía no
+  la podría cambiar nadie); `on conflict do nothing` (re-aplicar no pisa la
+  lista editada desde Configuración). **Antes de aplicar**: el DRY-RUN de su
+  cabecera (UNA sentencia `do $dry$ … $dry$` con la sección 1 pegada en B,
+  C2, C3 y C6; INSERT/UPDATE/DELETE REALES —incluido el PUT con CAS y un
+  UPDATE real de `usuario` que deja a Pablo INACTIVO para ejercer la
+  guarda—) ⇒ `DRYRUN_OK`. Probado en PGlite con el esquema y las filas
+  reales de prod: `DRYRUN_OK`, idempotente, guarda ⇒ `EDITORES_ABORTADO`.
+  Tras aplicar: `select valor_json from configuracion_sistema where clave =
+  'editores_cotizacion_cobrada'` (los dos uuids) y `GET /v1/me` con la
+  sesión de Alejandro ⇒ `permisos.editar_cotizacion_cobrada: true` (caché
+  60 s). El API 0.0.37 es desplegable ANTES (sin la fila nadie tiene el
+  permiso: todo como el 0.0.36). Rollback: borrar la fila.
 - **APLICADA (25-sep-2026, con el API 0.0.36 ya en prod; migración de DATOS, sin DDL; DRYRUN_OK C0–C7; resultado TC_OK: 77 — 63 entradas 29-ago × 17.0115, 4 entradas + 10 salidas 01-sep × 17.0077; utilidad de las 10 salidas 9,105.07 MXN; 0 movimientos USD sin T.C.)** — `20260925000003_inventario_tc_oficial_movimientos.sql`
   (invariante 8, «ÚLTIMO PRECIO DE COMPRA + T.C. DEL DÍA»): pone el T.C.
   oficial de su día (tabla `tipo_cambio_oficial`, ventana de 7 días del

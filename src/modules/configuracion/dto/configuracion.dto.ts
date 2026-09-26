@@ -77,3 +77,21 @@ export class ResponsablesFacturacionDto {
   @IsUUID('all', { each: true })
   usuario_ids!: string[];
 }
+
+/**
+ * `PUT /v1/config/editores-cotizacion-cobrada` (26-sep-2026): quién puede
+ * revisar una cotización con cobros registrados. SIN `@ArrayMinSize`: la
+ * lista vacía la rechaza el service con el código `LISTA_VACIA` (el
+ * ValidationPipe solo daría un 400 genérico sin código).
+ */
+export class EditoresCotizacionCobradaDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Usuarios ACTIVOS de oficina (ADMIN/COORDINADOR/FACTURACION) que pueden editar cotizaciones con cobros. Máximo 20. Nunca vacía (400 LISTA_VACIA).',
+  })
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsUUID('all', { each: true })
+  usuario_ids!: string[];
+}

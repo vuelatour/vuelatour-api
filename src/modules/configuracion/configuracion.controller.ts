@@ -16,6 +16,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  EditoresCotizacionCobradaDto,
   IaSaldoDto,
   IaUsoQuery,
   ResponsablesFacturacionDto,
@@ -90,6 +91,35 @@ export class ConfiguracionController {
     @CurrentUser() current: AuthenticatedUser,
   ) {
     return this.config.setResponsablesFacturacion(
+      dto.usuario_ids,
+      current.userId,
+    );
+  }
+
+  // Editores de cotizaciones cobradas (26-sep-2026): permiso por PERSONA
+  // para revisar una cotización con cobros. Literales ANTES de ':clave'.
+  // El rol solo abre la puerta: el PUT exige además estar YA en la lista.
+  @Get('editores-cotizacion-cobrada')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Quién puede editar cotizaciones con cobros registrados: { usuario_ids, usuarios: {id, nombre}[], puede_modificar (quien consulta está en la lista), candidatos (ADITIVO: oficina activa que acepta el PUT) }. Sin la migración 20260926000001 la lista es vacía (nadie tiene el permiso).',
+  })
+  editoresCotizacionCobrada(@CurrentUser() current: AuthenticatedUser) {
+    return this.config.editoresCotizacionCobrada(current.userId);
+  }
+
+  @Put('editores-cotizacion-cobrada')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION)
+  @ApiOperation({
+    summary:
+      'Guarda quién puede editar cotizaciones cobradas ({ usuario_ids }). Solo un usuario que YA está en la lista (403 SOLO_EDITORES_COTIZACION_COBRADA); nunca vacía (400 LISTA_VACIA); solo usuarios ACTIVOS de oficina (400 USUARIOS_INVALIDOS con los ids). Dos cambios a la vez: 409 EDITORES_CAMBIARON al segundo. Responde lo mismo que el GET.',
+  })
+  setEditoresCotizacionCobrada(
+    @Body() dto: EditoresCotizacionCobradaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    return this.config.setEditoresCotizacionCobrada(
       dto.usuario_ids,
       current.userId,
     );

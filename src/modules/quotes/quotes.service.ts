@@ -72,6 +72,13 @@ import {
 } from '../../common/grupo-contexto.util';
 import { Rol } from '../../common/types/auth.types';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
+import {
+  AVISO_EDICION_CON_COBROS_GRUPO,
+  avisoEdicionConCobros,
+  motivoConCobros,
+  textoQuienPuedeEditar,
+} from './edicion-con-cobros.util';
 import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
 import { normalizarTc } from '../../common/tc.util';
 import {
@@ -269,6 +276,21 @@ export interface GrupoHijoOpts {
   total_aviones?: number | null;
 }
 
+/**
+ * Dinero RETENIDO de un vuelo que se revisa con el permiso especial
+ * `editores_cotizacion_cobrada` (26-sep-2026): lo devuelve
+ * `assertSinCobros` cuando el candado D3 habría rebotado y el usuario sí
+ * tiene el permiso. Los montos salen de `cobrosEnUsd` (fuente única).
+ */
+interface CobrosRetenidos {
+  cobros: number;
+  cobrado_usd: number;
+  sin_tc_count: number;
+  sin_tc_mxn: number;
+  /** Algún cobro es parte de un sobre de GRUPO (`cobro_grupo_id`). */
+  de_sobre_grupo: boolean;
+}
+
 const IVA_DEFAULT = 0.16;
 /** Salida del motor v1.3 (`calculate()`); ES el `calculo_snapshot`. */
 type Breakdown = Awaited<ReturnType<QuotesService['calculate']>>;
@@ -405,6 +427,15 @@ export class QuotesService {
      */
     @Optional()
     private readonly facturaSolicitud?: FacturaSolicitudService,
+    /**
+     * EDITORES DE COTIZACIONES COBRADAS (26-sep-2026): la lista
+     * `editores_cotizacion_cobrada` decide quién puede revisar una
+     * cotización con cobros (ver `assertSinCobros`). @Optional: los specs
+     * construyen el servicio sin él y entonces NADIE tiene el permiso
+     * (falla cerrado, el candado de siempre).
+     */
+    @Optional()
+    private readonly configuracion?: ConfiguracionService,
   ) {}
 
   /**
@@ -1772,17 +1803,31 @@ export class QuotesService {
    * (decisión 1-sep-2026): CANCELADO — ahí la venta ES lo cobrado y editar
    * el desglose es documental; la CFDI sí lo bloquea aparte. 409
    * ESTRUCTURADO `COTIZACION_COBRADA` (details: cobros, cobrado_usd,
-   * sin_tc_*, link a los cobros) para que el panel ofrezca el camino.
-   * Falla CERRADO: sin poder leer los cobros no se revisa.
+   * sin_tc_*, link a los cobros, `editores`) para que el panel ofrezca el
+   * camino. Falla CERRADO: sin poder leer los cobros no se revisa.
+   *
+   * PERMISO ESPECIAL POR PERSONA (26-sep-2026, API 0.0.37 — Alejandro y
+   * Pablo Canales, cotizaciones #305/#317): si `ctx.permiteConPermiso` y el
+   * usuario está en la lista `editores_cotizacion_cobrada` (leída SIN caché:
+   * una baja aplica al instante), el candado NO rebota y devuelve lo
+   * cobrado (`CobrosRetenidos`) para que `revise` marque la versión, avise
+   * del saldo/sobrecobro y responda `edicion_con_cobros: true`. Los demás
+   * candados (CFDI, mes cerrado, servicio, grupo) viven fuera de aquí y
+   * siguen iguales. `permiteConPermiso` es false en el camino del GRUPO
+   * (`reviseParaGrupo`): el grupo congela a sus hijos cobrados por su cuenta
+   * y el permiso no lo abre. Lista ilegible ⇒ sin permiso (falla cerrado).
+   * Quien NO tiene el permiso recibe el 409 de siempre, con los nombres de
+   * quién sí puede editarla. Devuelve `null` cuando no hay dinero retenido.
    */
   private async assertSinCobros(
     current: Record<string, unknown>,
-  ): Promise<void> {
-    if (current.estado === 'CANCELADO') return;
+    ctx: { userId?: string | null; permiteConPermiso?: boolean } = {},
+  ): Promise<CobrosRetenidos | null> {
+    if (current.estado === 'CANCELADO') return null;
     const vueloId = current.id as string;
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('id, monto, moneda, tc_usd_mxn')
+      .select('id, monto, moneda, tc_usd_mxn, cobro_grupo_id')
       .eq('vuelo_id', vueloId);
     if (error) {
       throw new Error(
@@ -1790,16 +1835,37 @@ export class QuotesService {
       );
     }
     const cobros = data ?? [];
-    if (cobros.length === 0) return;
+    if (cobros.length === 0) return null;
     const { total_usd, sin_tc_count, sin_tc_mxn } = cobrosEnUsd(
       cobros,
       current.tc_usd_mxn as number | null,
     );
     // Neto 0 (cobro reembolsado completo) y nada sin TC: no hay dinero
     // retenido → se puede revisar (regla de arriba).
-    if (total_usd === 0 && sin_tc_count === 0) return;
-    const folio = current.folio as number | null;
+    if (total_usd === 0 && sin_tc_count === 0) return null;
     const n = cobros.length;
+    const retenidos: CobrosRetenidos = {
+      cobros: n,
+      cobrado_usd: total_usd,
+      sin_tc_count,
+      sin_tc_mxn,
+      de_sobre_grupo: cobros.some(
+        (c) => (c as { cobro_grupo_id?: unknown }).cobro_grupo_id != null,
+      ),
+    };
+    if (
+      ctx.permiteConPermiso === true &&
+      this.configuracion &&
+      (await this.configuracion.puedeEditarCotizacionCobrada(ctx.userId, {
+        usarCache: false,
+      }))
+    ) {
+      this.logger.log(
+        `Cotización #${String(current.folio)} (${vueloId}): revisión CON COBROS por permiso especial de ${String(ctx.userId)} (${n} cobro(s), neto ${total_usd} USD).`,
+      );
+      return retenidos;
+    }
+    const folio = current.folio as number | null;
     const usdTxt = total_usd.toLocaleString('en-US', {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
@@ -1808,8 +1874,16 @@ export class QuotesService {
       sin_tc_count > 0
         ? ` y ${sin_tc_count} en MXN sin tipo de cambio ($${sin_tc_mxn.toLocaleString('en-US', { minimumFractionDigits: 2 })} MXN)`
         : '';
+    // Quién SÍ puede editarla (best-effort: sin nombres, el mensaje de
+    // siempre). En el camino del grupo no se nombra a nadie: ahí el permiso
+    // no abre nada.
+    const editores =
+      ctx.permiteConPermiso === true && this.configuracion
+        ? await this.configuracion.editoresCotizacionCobradaNombres()
+        : [];
+    const quien = textoQuienPuedeEditar(editores.map((u) => u.nombre));
     throw new ConflictException({
-      message: `La cotización${folio != null ? ` #${folio}` : ''} ya tiene ${n} cobro${n === 1 ? '' : 's'} registrado${n === 1 ? '' : 's'} (neto $${usdTxt} USD${sinTc}): mientras exista dinero cobrado no se puede revisar. Elimina o reembolsa el cobro en "Cobros del vuelo" y vuelve a intentar.`,
+      message: `La cotización${folio != null ? ` #${folio}` : ''} ya tiene ${n} cobro${n === 1 ? '' : 's'} registrado${n === 1 ? '' : 's'} (neto $${usdTxt} USD${sinTc}): mientras exista dinero cobrado no se puede revisar.${quien} ${quien ? 'Pídeselo a ellos, o elimina' : 'Elimina'} o reembolsa el cobro en "Cobros del vuelo" y vuelve a intentar.`,
       error: 'COTIZACION_COBRADA',
       details: {
         vuelo_id: vueloId,
@@ -1820,6 +1894,8 @@ export class QuotesService {
         sin_tc_count,
         sin_tc_mxn,
         link: `/admin/quotes/${vueloId}#cobros-vuelo`,
+        // ADITIVO (26-sep-2026): quién tiene el permiso especial.
+        editores,
       },
     });
   }
@@ -2786,7 +2862,15 @@ export class QuotesService {
         `La cotización #${current.folio as number} ya tiene CFDI emitida; cancela la factura antes de revisarla.`,
       );
     }
-    await this.assertSinCobros(current);
+    // PERMISO ESPECIAL (26-sep-2026): los usuarios de la lista
+    // `editores_cotizacion_cobrada` SÍ revisan con cobros (la CFDI, el mes
+    // cerrado y el servicio de arriba siguen bloqueando). No aplica al camino
+    // del GRUPO (`desdeGrupo`): el grupo congela a sus hijos cobrados.
+    // `conCobros` ≠ null ⇒ esta versión se guarda CON dinero retenido.
+    const conCobros = await this.assertSinCobros(current, {
+      userId,
+      permiteConPermiso: opts.desdeGrupo !== true,
+    });
 
     // Anclajes a lo persistido (cliente, comisión, es_externo, extras de
     // GRUPO, pactado): fuente única compartida con la vista previa.
@@ -3260,7 +3344,8 @@ export class QuotesService {
         newVersion,
         dto,
         breakdown,
-        dto.motivo,
+        // Con el permiso especial, el historial lo delata con su prefijo.
+        conCobros ? motivoConCobros(dto.motivo) : dto.motivo,
         userId,
         dto.client_request_id ?? null,
       );
@@ -3279,8 +3364,24 @@ export class QuotesService {
     // no se toca (1-sep-2026): ahí "cobrado = total cubierto" no significa
     // nada (la venta ES lo cobrado), el semáforo prioriza cancelado y
     // flipear la bandera solo mete ruido.
-    if (!esCancelado) {
-      await this.refreshCobradoTrasRecotizar(vueloId, updated, userId);
+    const cobro = esCancelado
+      ? null
+      : await this.refreshCobradoTrasRecotizar(vueloId, updated, userId);
+    if (cobro?.aviso_error) avisos.push(cobro.aviso_error);
+    // EDICIÓN CON COBROS (permiso especial, 26-sep-2026): los cobros no se
+    // tocaron; el saldo sale de la MISMA lectura con la que se recalculó la
+    // bandera `cobrado` (cobrosEnUsd con el TC ya guardado) contra el total
+    // NUEVO. Aviso ámbar con cobrado / nuevo total / saldo o sobrecobro.
+    if (conCobros) {
+      avisos.push(
+        avisoEdicionConCobros({
+          cobradoUsd: cobro?.cobrado_usd ?? conCobros.cobrado_usd,
+          totalUsd: Number(updated.monto_total_usd) || 0,
+          sinTcCount: cobro?.sin_tc_count ?? conCobros.sin_tc_count,
+          sinTcMxn: cobro?.sin_tc_mxn ?? conCobros.sin_tc_mxn,
+        }),
+      );
+      if (conCobros.de_sobre_grupo) avisos.push(AVISO_EDICION_CON_COBROS_GRUPO);
     }
     // Refleja fechas/tramos nuevos en el calendario (admin lee en vivo; esto
     // mueve también los eventos de Google si el vuelo ya estaba sincronizado).
@@ -3288,7 +3389,16 @@ export class QuotesService {
     // flujo actual de cancelados se conserva tal cual.
     void this.calendar.syncFlight(vueloId);
     const escalas = await this.findEscalas(vueloId);
-    return { ...updated, escalas, avisos };
+    return {
+      ...updated,
+      // La bandera recién recalculada (el UPDATE de arriba la leyó ANTES).
+      ...(cobro ? { cobrado: cobro.cobrado } : {}),
+      escalas,
+      avisos,
+      // ADITIVO (26-sep-2026): la versión se guardó con cobros registrados
+      // gracias al permiso especial `editores_cotizacion_cobrada`.
+      edicion_con_cobros: conCobros != null,
+    };
   }
 
   /**
@@ -4047,18 +4157,37 @@ export class QuotesService {
     vueloId: string,
     vuelo: Record<string, unknown>,
     userId: string,
-  ): Promise<void> {
+  ): Promise<{
+    cobrado: boolean;
+    /** `null` = los cobros no se pudieron leer (la bandera no se tocó). */
+    cobrado_usd: number | null;
+    sin_tc_count: number | null;
+    sin_tc_mxn: number | null;
+    /** Texto para `avisos[]` cuando la bandera no se pudo recalcular. */
+    aviso_error: string | null;
+  }> {
     const { data: cobros, error: cobrosErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select('monto, moneda, tc_usd_mxn')
       .eq('vuelo_id', vueloId);
     // Sin cobros leídos NO se toca la bandera: tratar el fallo como "0 cobros"
-    // apagaría `cobrado` de un vuelo ya pagado en silencio.
-    if (cobrosErr)
-      throw new Error(
-        `No se pudieron leer los cobros del vuelo para actualizar 'cobrado': ${cobrosErr.message}`,
+    // apagaría `cobrado` de un vuelo ya pagado en silencio. Tampoco se lanza
+    // (revisión adversaria 26-sep-2026, misma regla que el UPDATE de abajo):
+    // aquí la versión YA quedó guardada y un 500 invitaba a guardarla otra
+    // vez; el fallo viaja como aviso y la bandera conserva su valor.
+    if (cobrosErr) {
+      this.logger.error(
+        `refreshCobradoTrasRecotizar ${vueloId}: no se pudieron leer los cobros para actualizar 'cobrado': ${cobrosErr.message}`,
       );
-    const { total_usd } = cobrosEnUsd(
+      return {
+        cobrado: vuelo.cobrado === true,
+        cobrado_usd: null,
+        sin_tc_count: null,
+        sin_tc_mxn: null,
+        aviso_error: `La versión se guardó, pero no se pudieron leer los cobros para recalcular el estado «Pagado» del vuelo (${cobrosErr.message}). Edita o registra un cobro del vuelo para recalcularlo.`,
+      };
+    }
+    const { total_usd, sin_tc_count, sin_tc_mxn } = cobrosEnUsd(
       cobros ?? [],
       vuelo.tc_usd_mxn as number | null,
     );
@@ -4067,12 +4196,33 @@ export class QuotesService {
     // bloqueaba volver a revisar la cotización (revise rechaza cobrados).
     const montoTotal = Number(vuelo.monto_total_usd);
     const deberia = montoTotal > 0 && total_usd >= montoTotal - 1;
+    let avisoError: string | null = null;
     if (deberia !== vuelo.cobrado) {
-      await this.supabase.service
+      // El error ya NO se traga (26-sep-2026): con la edición con cobros la
+      // bandera SÍ cambia (quitar el IVA deja el vuelo liquidado) y un fallo
+      // silencioso dejaba el semáforo y el «Pagado» del calendario diciendo
+      // otra cosa que el saldo del aviso. No se lanza (la versión YA quedó
+      // guardada y un 500 invitaría a guardarla dos veces): viaja como aviso.
+      const { error: updErr } = await this.supabase.service
         .from('vuelo')
         .update({ cobrado: deberia, updated_by: userId })
         .eq('id', vueloId);
+      if (updErr) {
+        this.logger.error(
+          `refreshCobradoTrasRecotizar ${vueloId}: no se pudo actualizar la bandera cobrado: ${updErr.message}`,
+        );
+        avisoError = `La versión se guardó, pero el estado «Pagado» del vuelo no se pudo actualizar (${updErr.message}). Edita o registra un cobro del vuelo para recalcularlo.`;
+      }
     }
+    // Lo que se usó para decidir (el aviso de la edición con cobros lo
+    // reutiliza: una sola lectura, una sola fuente).
+    return {
+      cobrado: avisoError ? vuelo.cobrado === true : deberia,
+      cobrado_usd: total_usd,
+      sin_tc_count,
+      sin_tc_mxn,
+      aviso_error: avisoError,
+    };
   }
 
   private async pernoctaDestinos(vueloId: string): Promise<string[]> {

@@ -217,7 +217,8 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO); 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión. ' +
+      'Revise quote (creates new version, increments cotizacion_version). 409 estructurado COTIZACION_COBRADA si el vuelo tiene dinero cobrado (neto de cobro_vuelo por cobrosEnUsd ≠ 0 o MXN sin TC; cualquier estado salvo CANCELADO), con details.editores y el mensaje «Solo pueden editarla: …»; 409 si tiene CFDI, mes cerrado o vuelo de servicio. Con client_request_id repetido devuelve la cotización vigente (200) sin crear otra versión. ' +
+      'PERMISO ESPECIAL (26-sep-2026, API 0.0.37): los usuarios de la lista editores_cotizacion_cobrada (GET /v1/config/editores-cotizacion-cobrada; /me.permisos.editar_cotizacion_cobrada) SÍ revisan con cobros — los cobros no se tocan, la bandera cobrado se recalcula, la versión lleva el motivo «[Con cobros · permiso especial] …», avisos[] trae cobrado / nuevo total / saldo o sobrecobro y la respuesta edicion_con_cobros: true (ADITIVO; false en una revisión normal). CFDI, mes cerrado, servicio y el camino del grupo siguen bloqueando. ' +
       'Cambiar de avión mantiene el pre-check del squawk ALTA (409 SQUAWK_ALTA_SIN_RESOLVER + aceptar_discrepancia_alta); el TALLER ya NO bloquea (11-sep-2026): su aviso ámbar viaja en avisos[]. ' +
       'Vuelo que YA VOLÓ (EN_VUELO, COMPLETADO o algún tramo con tacómetro; 24-sep-2026, #338): un avión distinto es SOLO COMERCIAL (precio y snapshot con él; vuelo.aeronave_id y tramos intactos, sin pre-check ni push a la tripulación) y las fechas del vuelo no se reescriben — ambos se explican en avisos[].',
   })
@@ -239,7 +240,7 @@ export class QuotesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Ajuste rápido desde el detalle: extras y/o pasajeros (recalcula TUAs) sin rearmar el cotizador. Versiona como una revisión (misma respuesta, avisos[] incluido). Nunca cambia de avión: re-envía el del snapshot, así que no genera aviso de taller.',
+      'Ajuste rápido desde el detalle: extras y/o pasajeros (recalcula TUAs) sin rearmar el cotizador. Versiona como una revisión (misma respuesta, avisos[] y edicion_con_cobros incluidos; mismo candado COTIZACION_COBRADA y mismo permiso especial editores_cotizacion_cobrada). Nunca cambia de avión: re-envía el del snapshot, así que no genera aviso de taller.',
   })
   quickAdjust(
     @Param('id', ParseUUIDPipe) id: string,
