@@ -467,20 +467,21 @@ describe('CalendarService.listEvents — B5 updated_since', () => {
 });
 
 /**
- * SEMÁFORO DEL CALENDARIO (22-sep-2026, 6 colores desde el 24-sep-2026; antes
- * «colores y precedencia del sistema», 12-sep-2026). El cliente pidió «que en
- * los calendarios no se vean tantos colores» y el 24-sep «cambiar el color del
- * descanso y agregar el de cobrado»: gris tentativo, amarillo pendiente, verde
- * confirmado, AZUL pagado, rojo cancelado y MORADO descanso.
- * `aeronave.color_calendario` sigue fuera de TODOS los calendarios (solo los
- * Excel del balance).
+ * SEMÁFORO DEL CALENDARIO (22-sep-2026, 6 colores desde el 24-sep-2026 y 7
+ * desde el 28-sep-2026; antes «colores y precedencia del sistema»,
+ * 12-sep-2026). El cliente pidió «que en los calendarios no se vean tantos
+ * colores», el 24-sep «cambiar el color del descanso y agregar el de cobrado»
+ * y el 28-sep «los vuelos de Servicio, poner en color Café»: gris tentativo,
+ * amarillo pendiente, verde confirmado, AZUL pagado, rojo cancelado, MORADO
+ * descanso y CAFÉ servicio. `aeronave.color_calendario` sigue fuera de TODOS
+ * los calendarios (solo los Excel del balance).
  *
- * El espejo a Google traduce estos hex a 6 colorId distintos, así que el
+ * El espejo a Google traduce estos hex a 7 colorId distintos, así que el
  * contrato del cliente se apoya en que ESTA respuesta no cambie: aquí se
- * congelan los hex, la precedencia, `sin_asignar`, `tentativo` y `pagado`
- * tal como los devuelve `GET /calendar`.
+ * congelan los hex, la precedencia, `sin_asignar`, `tentativo`, `pagado` y
+ * `servicio` tal como los devuelve `GET /calendar`.
  */
-describe('CalendarService.listEvents — semáforo de 6 colores (24-sep-2026)', () => {
+describe('CalendarService.listEvents — semáforo de 7 colores (28-sep-2026)', () => {
   type Fila = Record<string, unknown>;
   const rango: CalendarRangeQuery = {
     from: new Date('2026-09-14T00:00:00Z'),
@@ -601,6 +602,43 @@ describe('CalendarService.listEvents — semáforo de 6 colores (24-sep-2026)', 
       cobrado: true,
       escalas: [escala({ id: 'e-pagado' })],
     }),
+    // SERVICIO (28-sep-2026): parada de servicio y cero pasajeros ⇒ CAFÉ.
+    vuelo('v-servicio', {
+      estado: 'COMPLETADO',
+      escalas: [
+        escala({ id: 'e-serv', tipo_parada: 'SERVICIO', pasajeros: 0 }),
+      ],
+    }),
+    // Servicio cobrado (fila vieja): café, nunca azul; `pagado` sigue siendo
+    // el dato.
+    vuelo('v-servicio-pagado', {
+      estado: 'COMPLETADO',
+      cobrado: true,
+      escalas: [
+        escala({ id: 'e-serv-pag', tipo_parada: 'SERVICIO', pasajeros: null }),
+      ],
+    }),
+    // Servicio con permiso pendiente y en RESERVA: café (no es del cliente).
+    vuelo('v-servicio-reserva', {
+      estado: 'RESERVA',
+      estado_permiso: 'pendiente',
+      escalas: [
+        escala({ id: 'e-serv-res', tipo_parada: 'SERVICIO', pasajeros: 0 }),
+      ],
+    }),
+    // Parada de servicio CON pasajeros: ya no es vuelo de servicio (verde).
+    vuelo('v-servicio-con-pax', {
+      escalas: [
+        escala({ id: 'e-serv-pax', tipo_parada: 'SERVICIO', pasajeros: 2 }),
+      ],
+    }),
+    // Servicio CANCELADO: el rojo del historial sigue dominando.
+    vuelo('v-servicio-cancelado', {
+      estado: 'CANCELADO',
+      escalas: [
+        escala({ id: 'e-serv-can', tipo_parada: 'SERVICIO', pasajeros: 0 }),
+      ],
+    }),
   ];
 
   const tablas = (): Record<string, Resultado[]> => ({
@@ -662,16 +700,16 @@ describe('CalendarService.listEvents — semáforo de 6 colores (24-sep-2026)', 
     ],
   });
 
-  it('congela los SEIS hex y la PRECEDENCIA del color de un vuelo', async () => {
+  it('congela los SIETE hex y la PRECEDENCIA del color de un vuelo', async () => {
     const { service } = armar(tablas());
     const res = await service.listEvents(rango);
     const color = new Map(
       res.events.map((e) => [String(e.id), String(e.color)]),
     );
     expect(Object.fromEntries(color)).toEqual({
-      // Vuelos, en orden de precedencia: cancelado > tentativo > pendiente >
-      // PAGADO > confirmado. NINGÚN hex de `aeronave.color_calendario`
-      // aparece aquí.
+      // Vuelos, en orden de precedencia: cancelado > SERVICIO > tentativo >
+      // pendiente > PAGADO > confirmado. NINGÚN hex de
+      // `aeronave.color_calendario` aparece aquí.
       'v-avion': '#22C55E',
       'v-sin-color': '#22C55E',
       'v-sin-piloto': '#F59E0B',
@@ -689,6 +727,11 @@ describe('CalendarService.listEvents — semáforo de 6 colores (24-sep-2026)', 
       'v-cancelado-pagado': '#EF4444',
       'v-cero-pagado': '#22C55E',
       'v-tramo-pagado': '#3B82F6',
+      'v-servicio': '#8B5E3C',
+      'v-servicio-pagado': '#8B5E3C',
+      'v-servicio-reserva': '#8B5E3C',
+      'v-servicio-con-pax': '#22C55E',
+      'v-servicio-cancelado': '#EF4444',
       // Descanso (MORADO desde el 24-sep-2026), eventos NO-vuelo (verde: cita
       // en firme, con avión o sin él) y mantenimientos (amarillo, PROGRAMADO y
       // EN_TALLER por igual).
@@ -771,5 +814,43 @@ describe('CalendarService.listEvents — semáforo de 6 colores (24-sep-2026)', 
     const selects = de(llamadas, 'vuelo', 'select');
     expect(selects).toHaveLength(1);
     expect(String(selects[0].args[0])).toMatch(/monto_total_usd, cobrado,/);
+  });
+
+  /**
+   * `servicio` (ADITIVO 28-sep-2026) es el DATO «vuelo de servicio» (regla
+   * ÚNICA `esVueloDeServicio`), igual que `pagado`: el `color` ya trae la
+   * precedencia resuelta y ningún cliente decide un color con él. Sale de
+   * los tramos (`tipo_parada` + `pasajeros`) en la MISMA consulta de vuelos.
+   */
+  it('`servicio` viaja en cada evento de vuelo y el select lee `tipo_parada` de los tramos (sin N+1)', async () => {
+    const { service, llamadas } = armar(tablas());
+    const res = await service.listEvents(rango);
+    const porId = new Map(res.events.map((e) => [String(e.id), e]));
+    const ev = (id: string) => porId.get(id) as Record<string, unknown>;
+
+    expect(ev('v-servicio').servicio).toBe(true);
+    expect(ev('v-servicio-reserva').servicio).toBe(true);
+    // Café aunque esté cobrado; el dato `pagado` no se esconde.
+    expect(ev('v-servicio-pagado').servicio).toBe(true);
+    expect(ev('v-servicio-pagado').pagado).toBe(true);
+    // Con pasajeros no es de servicio.
+    expect(ev('v-servicio-con-pax').servicio).toBe(false);
+    // Un vuelo CANCELADO con sus tramos vivos conserva el DATO, pero el rojo
+    // del historial gana el color.
+    expect(ev('v-servicio-cancelado').servicio).toBe(true);
+    expect(ev('v-servicio-cancelado').color).toBe('#EF4444');
+    // Vuelos normales: false (nunca undefined).
+    expect(ev('v-avion').servicio).toBe(false);
+    expect(ev('v-tramo-cancelado').servicio).toBe(false);
+    // Solo los eventos de VUELO llevan la bandera.
+    expect('servicio' in ev('descanso:d-1:2026-09-17')).toBe(false);
+    // El título no cambia: el café se explica en la leyenda.
+    expect(String(ev('v-servicio').title)).not.toContain('Servicio');
+
+    const selects = de(llamadas, 'vuelo', 'select');
+    expect(selects).toHaveLength(1);
+    expect(String(selects[0].args[0])).toMatch(
+      /escalas:escala\([^)]*\bpasajeros, tipo_parada,/,
+    );
   });
 });

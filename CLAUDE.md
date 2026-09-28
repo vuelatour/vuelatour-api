@@ -2926,7 +2926,7 @@ EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
     permiso viven en la descripción y el color.
   - **SEMÁFORO DE 6 COLORES (pedidos del cliente del 22-sep-2026 y del
     24-sep-2026; sustituye a la paleta de 10 del 12-sep y a la de 5 del
-    22-sep)**. 22-sep: «para que en los calendarios no se vean tantos colores
+    22-sep) — hoy son 7: ver «SÉPTIMO COLOR: SERVICIO CAFÉ» abajo**. 22-sep: «para que en los calendarios no se vean tantos colores
     […] los colores que tiene cada avión configurados los seguiremos
     respetando principalmente en los reportes del balance individual y
     general en los excel […] en realidad los colores son para el reporte de
@@ -3038,6 +3038,65 @@ EstadoCalendarBd`): sonda `calendar_sync_estado_activa()` 1 vez, `true`
       `aeronave (matricula, color_calendario)`, así que cambiar el color de
       un avión re-encola sus vuelos y republica eventos IDÉNTICOS. Es ruido
       inofensivo.
+  - **SÉPTIMO COLOR: SERVICIO CAFÉ (pedido del cliente del 28-sep-2026, API
+    0.0.40)**: «los vuelos de Servicio, poner en color Café en el calendario
+    web, app y google calendar». Todo lo de arriba sigue vigente; esto SUMA:
+    - `SEMAFORO.SERVICIO = '#8B5E3C'` (texto blanco, contraste ≈ 5.6:1),
+      alias `SERVICIO_COLOR`, tooltip `AYUDA_SERVICIO` («Vuelo sin pasajeros
+      con parada de servicio: no es del cliente y no se cotiza.») y un 7.º
+      renglón AL FINAL de `LEYENDA_SEMAFORO`: «Servicio (taller / parada
+      técnica)». Panel y app lo copian byte por byte (punto final
+      incluido).
+    - **REGLA ÚNICA `esVueloDeServicio`** (`common/vuelo-servicio.util.ts`,
+      espejo de `quote-revision.ts#esVueloDeServicio` del panel): tramos
+      ACTIVOS (sin `cancelada_at`), alguno con `tipo_parada = 'SERVICIO'` y
+      NINGUNO con pasajeros (> 0; null = 0 por tramo, a propósito). Antes
+      vivía copiada en `quotes.assertNoEsVueloDeServicio` y en la clave
+      `vtservicio` del Libro Dinero: hoy los dos la llaman, igual que
+      `GET /v1/calendar`, el espejo a Google y el listado de vuelos. Nadie
+      vuelve a escribir la regla a mano.
+    - **Precedencia ÚNICA NUEVA**: **cancelado (rojo) > SERVICIO (café) >
+      tentativo (gris) > pendiente (amarillo) > pagado (azul) > confirmado
+      (verde)**. `ParamsColorVuelo.servicio` es el RESULTADO de la regla (la
+      util de colores no la recalcula). Un vuelo de servicio nunca se ve
+      pagado, tentativo ni pendiente; cancelado sí es rojo.
+    - `GET /v1/calendar`: el select de vuelos lee `escalas.tipo_parada`
+      (misma consulta, sin N+1) y cada evento de VUELO trae el ADITIVO
+      `servicio: boolean` (DATO, como `pagado`: `pagado` NO se apaga en un
+      servicio cobrado; el color ya viene resuelto).
+    - `GET /flights` (listado): ADITIVO `servicio: boolean` por fila, de la
+      MISMA lectura de escalas de `resumenEscalasPorVuelo` (se le suman
+      `tipo_parada, pasajeros`; `ResumenEscalas.servicio`). Lo pinta el
+      calendario del piloto en la app (Mis vuelos), que arma su propio color.
+    - **Google: colorId FIJO 6 «Mandarina»** (`COLOR_ID_FIJO`, tercera
+      excepción). Google NO tiene café: por redmean `#8B5E3C` cae en 8
+      Grafito (d≈7 848), el gris del TENTATIVO; Mandarina (≈32 996) es el
+      tono cálido más cercano y NINGÚN otro estado lo usa. La descripción
+      del evento suma `LINEA_DESCRIPCION_SERVICIO` («Vuelo de SERVICIO
+      (taller / parada técnica, sin pasajeros)») después del estado. Libres
+      en Google: 1 Lavanda, 4 Flamenco, 9 Arándano y 10 Albahaca.
+    - **El MANTENIMIENTO sigue AMARILLO** (🔧 «Servicio · …» es una orden de
+      taller, no un vuelo): no confundir con el vuelo de servicio.
+    - **TRIGGER**: `trg_escala_calendar_sync` NO escuchaba `tipo_parada`
+      (sí `pasajeros`). Migración `20260928000003_calendar_sync_tipo_parada.sql`
+      (misma lista verificada contra prod + `tipo_parada`, dry-run con
+      UPDATEs REALES en el encabezado, ENUM comparado `::text`). Sin ella,
+      marcar un tramo como Servicio no re-encola el vuelo hasta el reconcile
+      de las 00:15.
+    - **DESPLIEGUE**: API + migración (orden indiferente) → panel → APK
+      1.1.3+75. Después RE-PINTAR SOLO los vuelos de servicio de la ventana
+      [hoy−30d, hoy+365d] encolándolos en `calendar_sync_cola` (el SQL exacto
+      está en el encabezado de la migración; 28-sep: #300, #306 y #350) o
+      esperar al reconcile de las 00:15.
+    - Congelado en: `vuelo-servicio.util.spec.ts`, `colores-calendario.util.spec.ts`
+      (7 hex, leyenda, tabla con servicio), `google-evento.util.spec.ts`
+      (7 colorId, Mandarina fija, renglón de descripción),
+      `calendar.service.spec.ts` («semáforo de 7» + `servicio` +
+      `tipo_parada` en el select), `calendar-sync.service.spec.ts` (6 para el
+      servicio) y `busqueda-vuelo.util.spec.ts` (`servicio` del listado). Panel
+      (`calendario-semaforo.test.ts`, `leyenda-semaforo.test.tsx`,
+      `sin-hex-sueltos.test.ts`) y app (`semaforo_calendario_test.dart`)
+      guardan su COPIA.
   - **El `motivo` de `sync-estado` no hace eco de la credencial** (revisión
     adversaria 12-sep-2026): `parsearServiceAccountJson` pasa el mensaje de
     `JSON.parse` por `motivoJsonSinValor`, que borra cualquier fragmento

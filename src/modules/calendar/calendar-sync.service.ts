@@ -15,6 +15,7 @@ import { Rol } from '../../common/types/auth.types';
 import { NotificationsService } from '../realtime/notifications.service';
 import { SupabaseService } from '../supabase/supabase.service';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
+import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import {
   colorIdGoogleDescanso,
   colorIdGoogleDeVuelo,
@@ -93,18 +94,25 @@ export interface OpcionesEspejo {
 // panel, la app y Google se mueven JUNTOS. Desde el 22-sep-2026 el color del
 // AVIÓN ya no entra a ningún calendario (quedó solo para los Excel del
 // balance) y desde el 24-sep-2026 son 6 colores: tentativo, pendiente,
-// confirmado, PAGADO (azul, `vuelo.cobrado`), cancelado y descanso (morado).
+// confirmado, PAGADO (azul, `vuelo.cobrado`), cancelado y descanso (morado);
+// 7 desde el 28-sep-2026 con el SERVICIO (café → 6 Mandarina).
 //
 // `cobrado` viaja en el select del espejo porque decide el AZUL «Pagado».
 // La migración `20260924000002_calendar_sync_cobrado.sql` lo suma a la lista
 // `after update of …` de `trg_vuelo_calendar_sync`: sin ella, registrar el
 // cobro que liquida el vuelo NO re-encolaba el evento y Google se quedaba en
 // verde hasta el reconcile nocturno.
+//
+// `escalas.tipo_parada` (28-sep-2026, semáforo de 7) decide el CAFÉ del vuelo
+// de SERVICIO (→ colorId 6 Mandarina) junto con `escalas.pasajeros`. La
+// migración `20260928000003_calendar_sync_tipo_parada.sql` suma `tipo_parada`
+// a `trg_escala_calendar_sync` (`pasajeros` ya estaba): sin ella, marcar un
+// tramo como Servicio no re-encola el vuelo.
 
 const VUELO_SELECT_BASE =
   'id, folio, estado, es_externo, operador_externo, avion_externo_matricula, origen_iata, destino_iata, pasajeros, monto_total_usd, cobrado, fecha_vuelo, fecha_traslado_final, tipo, notas, estado_permiso, aeronave_id, piloto_id, google_calendar_id, google_calendar_regreso_id, ' +
   'aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@), cliente:cliente_id(nombre), ' +
-  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
+  'escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, tipo_parada, google_calendar_id, aeronave_id, piloto_id, estado_permiso, cancelada_at, aeronave:aeronave_id(matricula, color_calendario), piloto:piloto_id(nombre@APODO@))';
 
 /**
  * Con `usuario.apodo` (migración `20260917000001`): el TÍTULO de la fila del
@@ -187,6 +195,11 @@ interface VueloRow {
     fecha_salida_plan: string | null;
     es_ferry: boolean;
     pasajeros: number | null;
+    /**
+     * `NORMAL` | `SERVICIO` (28-sep-2026): con `pasajeros` decide el CAFÉ del
+     * vuelo de SERVICIO (`esVueloDeServicio`). Opcional por robustez.
+     */
+    tipo_parada?: string | null;
     google_calendar_id: string | null;
     aeronave_id: string | null;
     piloto_id: string | null;
@@ -2702,6 +2715,11 @@ export class CalendarSyncService implements OnModuleInit {
         ? activas.some((e) => e.estado_permiso === 'pendiente')
         : v.estado_permiso === 'pendiente';
 
+    // Vuelo de SERVICIO (28-sep-2026): la MISMA regla que `GET /v1/calendar`
+    // (`common/vuelo-servicio.util`, descarta los tramos cancelados). Decide
+    // el color (café → 6 Mandarina) y un renglón de la descripción.
+    const servicio = esVueloDeServicio(escalas);
+
     const summary = tituloEventoVuelo({
       pilotoCorto: nombreCortoPiloto(
         piloto?.nombre,
@@ -2724,16 +2742,17 @@ export class CalendarSyncService implements OnModuleInit {
       matricula: aeronave?.matricula ?? null,
       pilotoNombre: piloto?.nombre ?? null,
       permisoPendiente,
+      servicio,
       montoUsd: v.monto_total_usd,
       notas: v.notas,
       tramos,
     });
 
     // MISMO color que el calendario del sistema, traducido al colorId de
-    // Google (12-sep-2026; semáforo de 6 desde el 24-sep-2026): cancelado >
-    // tentativo > pendiente > PAGADO > confirmado. La precedencia no se
-    // repite aquí y el color del AVIÓN ya no interviene. `cobrado` +
-    // `montoTotalUsd` son los MISMOS que lee `GET /v1/calendar`.
+    // Google (12-sep-2026; semáforo de 7 desde el 28-sep-2026): cancelado >
+    // SERVICIO > tentativo > pendiente > PAGADO > confirmado. La precedencia
+    // no se repite aquí y el color del AVIÓN ya no interviene. `cobrado`,
+    // `montoTotalUsd` y `servicio` son los MISMOS que lee `GET /v1/calendar`.
     const colorId = colorIdGoogleDeVuelo({
       estado: v.estado,
       esExterno: v.es_externo,
@@ -2742,6 +2761,7 @@ export class CalendarSyncService implements OnModuleInit {
       permisoPendiente: permisoPendientePrimero,
       cobrado: v.cobrado === true,
       montoTotalUsd: v.monto_total_usd,
+      servicio,
     });
 
     return {

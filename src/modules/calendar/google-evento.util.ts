@@ -89,7 +89,7 @@ function distancia(
  * al gris del tentativo — nunca se inventa un color.
  *
  * Desde el 22-sep-2026 los únicos hex que llegan aquí son los del semáforo
- * (`SEMAFORO`: SEIS desde el 24-sep-2026) y, con las excepciones fijas de
+ * (`SEMAFORO`: SIETE desde el 28-sep-2026) y, con las excepciones fijas de
  * `colorIdGoogleSemaforo`, caen en colorId DISTINTOS, así que ya NO hay
  * colisiones: antes 18 cosas (6 significados + 8 colores de avión + 4 tipos)
  * se repartían los 11 colores de Google y el color no era un dato confiable.
@@ -119,10 +119,11 @@ export function colorIdGoogleDe(
 /**
  * ESPEJO DEL SEMÁFORO (pedido del cliente, 12-sep-2026 «los mismos colores»,
  * reducido a 5 el 22-sep-2026 «que en los calendarios no se vean tantos
- * colores», 6 desde el 24-sep-2026 con el PAGADO y el descanso MORADO). Cada
- * uno de los SEIS hex del semáforo se traduce a un colorId DISTINTO de
- * Google. Ninguna de estas funciones inventa un color propio: todas salen de
- * un hex de `colores-calendario.util`.
+ * colores», 6 desde el 24-sep-2026 con el PAGADO y el descanso MORADO, 7 desde
+ * el 28-sep-2026 con el SERVICIO café). Cada uno de los SIETE hex del
+ * semáforo se traduce a un colorId DISTINTO de Google. Ninguna de estas
+ * funciones inventa un color propio: todas salen de un hex de
+ * `colores-calendario.util`.
  *
  *   gris #64748B     → 8  Grafito     (tentativo)
  *   amarillo #F59E0B → 5  Banana      (pendiente · permiso, sin asignar, mantenimiento)
@@ -130,9 +131,10 @@ export function colorIdGoogleDe(
  *   azul #3B82F6     → 7  Pavo real   (PAGADO: cobrado completo)
  *   rojo #EF4444     → 11 Tomate      (cancelado — hoy NO viaja: se BORRA) · FIJO
  *   morado #8B5CF6   → 3  Uva         (descanso 💤) · FIJO
+ *   café #8B5E3C     → 6  Mandarina   (vuelo de SERVICIO: taller / parada técnica) · FIJO
  *
- * Libres para significados futuros: 1 Lavanda, 4 Flamenco, 6 Mandarina,
- * 9 Arándano y 10 Albahaca.
+ * Libres para significados futuros: 1 Lavanda, 4 Flamenco, 9 Arándano y
+ * 10 Albahaca.
  *
  * Fallback cuando el hex no se puede leer: el gris del tentativo, nunca un
  * color con significado fuerte.
@@ -140,7 +142,7 @@ export function colorIdGoogleDe(
 const COLOR_ID_RESPALDO: string = colorIdGoogleDe(SEMAFORO.TENTATIVO) ?? '8';
 
 /**
- * EXCEPCIONES al "más cercano". Son DOS, y las dos por la MISMA razón: el
+ * EXCEPCIONES al "más cercano". Son TRES, y las tres por la MISMA razón: el
  * color de Google más cercano por redmean se LEE como otro significado.
  *
  * 1) ROJO (cancelado). El rojo del sistema (#EF4444) por distancia redmean cae
@@ -159,10 +161,21 @@ const COLOR_ID_RESPALDO: string = colorIdGoogleDe(SEMAFORO.TENTATIVO) ?? '8';
  *    azul»; y Arándano es un índigo, tampoco morado. «Descanso» tiene que
  *    leerse MORADO: Uva (3) es el único morado de verdad de Google. Este SÍ
  *    viaja: cada descanso de piloto es un evento.
+ *
+ * 3) CAFÉ (vuelo de SERVICIO, 28-sep-2026). Google NO tiene café entre sus 11
+ *    colores de evento. Por redmean #8B5E3C cae en 8 Grafito (d≈7 848), que
+ *    es el gris del TENTATIVO: un vuelo al taller se leería «reserva sin
+ *    confirmar». El siguiente es 6 Mandarina (≈32 996, un naranja terroso),
+ *    empatado casi con 4 Flamenco (≈33 013, un rosa salmón). Se fija
+ *    **Mandarina**: es el tono cálido más cercano al café y NINGÚN otro
+ *    estado lo usa (el rojo del cancelado va FIJO en 11, justo para no caer
+ *    en Mandarina). Luis, el mecánico, lee además «Vuelo de SERVICIO …» en
+ *    la descripción del evento, que es el dato confiable.
  */
 const COLOR_ID_FIJO: Readonly<Record<string, string>> = {
   [SEMAFORO.CANCELADO]: '11',
   [SEMAFORO.DESCANSO]: '3',
+  [SEMAFORO.SERVICIO]: '6',
 };
 
 /**
@@ -180,9 +193,10 @@ export function colorIdGoogleSemaforo(hex: string | null | undefined): string {
  * el sistema pintaría, traducido. Mismos parámetros que `colorVueloSistema`
  * — el cancelado no llega aquí (en Google su evento se BORRA).
  *
- * Con el semáforo de hoy: tentativo → 8 Grafito, pendiente → 5 Banana,
- * PAGADO → 7 Pavo real (24-sep-2026: `cobrado` del vuelo) y confirmado → 2
- * Salvia. El avión ya no interviene (`colorAvion` se ignora).
+ * Con el semáforo de hoy: SERVICIO → 6 Mandarina (28-sep-2026, fijo: Google
+ * no tiene café), tentativo → 8 Grafito, pendiente → 5 Banana, PAGADO → 7
+ * Pavo real (24-sep-2026: `cobrado` del vuelo) y confirmado → 2 Salvia. El
+ * avión ya no interviene (`colorAvion` se ignora).
  */
 export function colorIdGoogleDeVuelo(p: ParamsColorVuelo): string {
   return colorIdGoogleSemaforo(colorVueloSistema(p));
@@ -383,10 +397,20 @@ export interface DatosEventoVuelo {
   matricula?: string | null;
   pilotoNombre?: string | null;
   permisoPendiente?: boolean;
+  /**
+   * Vuelo de SERVICIO (28-sep-2026, `esVueloDeServicio`): la descripción lo
+   * dice con todas sus letras porque en Google el café no existe y el
+   * evento sale Mandarina (ver `COLOR_ID_FIJO`).
+   */
+  servicio?: boolean;
   montoUsd?: number | string | null;
   notas?: string | null;
   tramos: readonly TramoEventoVuelo[];
 }
+
+/** Renglón de la descripción de un vuelo de SERVICIO (28-sep-2026). */
+export const LINEA_DESCRIPCION_SERVICIO =
+  'Vuelo de SERVICIO (taller / parada técnica, sin pasajeros)';
 
 /**
  * DESCRIPCIÓN del evento único, con el desglose por tramo que el título ya
@@ -401,6 +425,7 @@ export function descripcionEventoVuelo(v: DatosEventoVuelo): string {
   const lineas: Array<string | null> = [
     `Folio: #${v.folio}`,
     `Estado: ${v.estado}`,
+    v.servicio ? LINEA_DESCRIPCION_SERVICIO : null,
     `Cliente: ${v.cliente ?? '—'}`,
     `Pasajeros: ${v.pasajeros}`,
     v.esExterno

@@ -8,6 +8,7 @@ import {
   colorIdGoogleSemaforo,
   descripcionEventoVuelo,
   estadoHttpGoogle,
+  LINEA_DESCRIPCION_SERVICIO,
   eventoAusenteEnGoogle,
   horaCortaCancun,
   nombreCortoPiloto,
@@ -20,8 +21,8 @@ import { SEMAFORO } from './colores-calendario.util';
 
 /**
  * C4/C3 del pedido del 12-sep-2026 (sync sistema → Google Calendar),
- * ACTUALIZADO el 22-sep-2026 al SEMÁFORO DE 5 COLORES y el 24-sep-2026 al de
- * 6 (PAGADO azul, descanso MORADO):
+ * ACTUALIZADO el 22-sep-2026 al SEMÁFORO DE 5 COLORES, el 24-sep-2026 al de
+ * 6 (PAGADO azul, descanso MORADO) y el 28-sep-2026 al de 7 (SERVICIO café):
  *  - `colorIdGoogleDe` traduce un hex del sistema al colorId de Google más
  *    cercano (redmean) y `colorIdGoogleSemaforo` le antepone las excepciones
  *    fijas, para que el calendario de la oficina espeje el mismo semáforo;
@@ -89,12 +90,12 @@ describe('colorIdGoogleDe', () => {
 
 /**
  * TABLA CONGELADA «color del semáforo → hex → colorId de Google»
- * (22-sep-2026, 6 colores desde el 24-sep-2026). Reemplaza a la tabla de 18
- * filas del 12-sep-2026, donde 6 significados y 8 colores de avión se
- * repartían los 11 colores de Google con SEIS colisiones y el color no era un
- * dato confiable.
+ * (22-sep-2026, 6 colores desde el 24-sep-2026, 7 desde el 28-sep-2026).
+ * Reemplaza a la tabla de 18 filas del 12-sep-2026, donde 6 significados y 8
+ * colores de avión se repartían los 11 colores de Google con SEIS colisiones
+ * y el color no era un dato confiable.
  *
- * Ahora son SEIS hex → SEIS colorId DISTINTOS. Los hex salen de
+ * Ahora son SIETE hex → SIETE colorId DISTINTOS. Los hex salen de
  * `colores-calendario.util` (fuente única), así que si alguien cambia un color
  * allá, ESTA tabla se rompe y hay que decidir a conciencia qué ve la oficina.
  */
@@ -119,6 +120,13 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
     // para que la tabla cubra el semáforo completo.
     ['cancelado (no viaja a Google)', SEMAFORO.CANCELADO, '11', 'Tomate'],
     ['descanso de piloto (MORADO)', SEMAFORO.DESCANSO, '3', 'Uva'],
+    // Google no tiene café: Mandarina, FIJO (ver la prueba del CAFÉ abajo).
+    [
+      'vuelo de SERVICIO (CAFÉ: taller / parada técnica)',
+      SEMAFORO.SERVICIO,
+      '6',
+      'Mandarina',
+    ],
   ];
 
   it.each(TABLA)('%s (%s) → colorId %s (%s)', (_cosa, hex, id, nombre) => {
@@ -132,15 +140,31 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
     );
   });
 
-  it('los seis colorId son DISTINTOS: ya no hay colisiones', () => {
+  it('los siete colorId son DISTINTOS: ya no hay colisiones', () => {
     const ids = TABLA.map(([, , id]) => id);
-    expect(new Set(ids).size).toBe(6);
+    expect(new Set(ids).size).toBe(7);
     // Libres para significados futuros: Lavanda (1), Flamenco (4),
-    // Mandarina (6), Arándano (9) y Albahaca (10).
+    // Arándano (9) y Albahaca (10). Mandarina (6) es del SERVICIO desde el
+    // 28-sep-2026.
     const usados = new Set(ids);
     expect(
       COLORES_EVENTO_GOOGLE.filter((c) => !usados.has(c.id)).map((c) => c.id),
-    ).toEqual(['1', '4', '6', '9', '10']);
+    ).toEqual(['1', '4', '9', '10']);
+  });
+
+  /**
+   * El CAFÉ del SERVICIO (28-sep-2026) es la TERCERA excepción fija. Google
+   * no tiene café; por redmean #8B5E3C cae en Grafito (8, d≈7 848), que es el
+   * gris del TENTATIVO — un vuelo al taller se leería «reserva sin
+   * confirmar». Mandarina (6, ≈32 996) es el tono cálido más cercano y nadie
+   * más lo usa.
+   */
+  it('el CAFÉ del servicio es fijo: Mandarina (6), no Grafito', () => {
+    expect(colorIdGoogleDe(SEMAFORO.SERVICIO)).toBe('8');
+    expect(colorIdGoogleSemaforo(SEMAFORO.SERVICIO)).toBe('6');
+    expect(colorIdGoogleSemaforo(SEMAFORO.SERVICIO)).not.toBe(
+      colorIdGoogleSemaforo(SEMAFORO.TENTATIVO),
+    );
   });
 
   /**
@@ -280,6 +304,31 @@ describe('espejo del semáforo → Google (tabla congelada)', () => {
         }),
       ).toBe('2');
     }
+    // SERVICIO (28-sep-2026): café → Mandarina (6), después del cancelado y
+    // antes de todo lo demás (pagado, pendiente, tentativo).
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'COMPLETADO',
+        aeronaveId: 'a',
+        pilotoId: 'p',
+        servicio: true,
+        cobrado: true,
+        montoTotalUsd: 900,
+      }),
+    ).toBe('6');
+    expect(
+      colorIdGoogleDeVuelo({
+        estado: 'CONFIRMADO',
+        servicio: true,
+        permisoPendiente: true,
+      }),
+    ).toBe('6');
+    expect(colorIdGoogleDeVuelo({ estado: 'RESERVA', servicio: true })).toBe(
+      '6',
+    );
+    expect(colorIdGoogleDeVuelo({ estado: 'CANCELADO', servicio: true })).toBe(
+      '11',
+    );
     // Descanso (MORADO → Uva), eventos de flota y mantenimientos.
     expect(colorIdGoogleDescanso()).toBe('3');
     expect(colorIdGoogleEvento()).toBe('2');
@@ -568,6 +617,27 @@ describe('descripcionEventoVuelo', () => {
     expect(lineas.indexOf('Permiso de pista: PENDIENTE')).toBeLessThan(
       lineas.indexOf('T1 cun-mid 10:00 · 2 pax'),
     );
+  });
+
+  /**
+   * SERVICIO (28-sep-2026): en Google el café sale Mandarina, así que la
+   * descripción lo dice con todas sus letras, justo después del estado. Sin
+   * la bandera, la descripción es la de siempre (ver la prueba del formato).
+   */
+  it('vuelo de SERVICIO: un renglón que lo dice, después del estado', () => {
+    const lineas = descripcionEventoVuelo({
+      ...BASE,
+      servicio: true,
+    }).split('\n');
+    expect(LINEA_DESCRIPCION_SERVICIO).toBe(
+      'Vuelo de SERVICIO (taller / parada técnica, sin pasajeros)',
+    );
+    expect(lineas.indexOf(LINEA_DESCRIPCION_SERVICIO)).toBe(
+      lineas.indexOf('Estado: CONFIRMADO') + 1,
+    );
+    expect(
+      descripcionEventoVuelo({ ...BASE, servicio: false }).split('\n'),
+    ).not.toContain(LINEA_DESCRIPCION_SERVICIO);
   });
 
   it('externo: operador en vez de matrícula y «(externo)» de piloto', () => {

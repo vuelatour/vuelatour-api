@@ -1,5 +1,6 @@
 import {
   AYUDA_PENDIENTE,
+  AYUDA_SERVICIO,
   CANCELADO_COLOR,
   CONFIRMADO_COLOR,
   DESCANSO_COLOR,
@@ -10,6 +11,7 @@ import {
   PAGADO_COLOR,
   PENDIENTE_COLOR,
   SEMAFORO,
+  SERVICIO_COLOR,
   TENTATIVO_COLOR,
   colorEventoFlotaSistema,
   colorMantenimientoSistema,
@@ -22,16 +24,18 @@ import {
 } from './colores-calendario.util';
 
 /**
- * SEMÁFORO DE 6 COLORES (24-sep-2026; de 5 desde el 22-sep-2026, que a su vez
- * sustituyó a la paleta de 10 hex del 12-sep-2026). El cliente pidió «que en
- * los calendarios no se vean tantos colores», que `aeronave.color_calendario`
- * quede SOLO para los Excel del balance y —el 24-sep— «cambiar el color del
- * descanso y agregar el de cobrado». Estos hex son los que pintan el panel,
- * la app y —traducidos— el Google Calendar de la oficina: cambiar uno cambia
- * las tres superficies, así que quedan congelados aquí.
+ * SEMÁFORO DE 7 COLORES (28-sep-2026; 6 desde el 24-sep-2026 y 5 desde el
+ * 22-sep-2026, que a su vez sustituyó a la paleta de 10 hex del 12-sep-2026).
+ * El cliente pidió «que en los calendarios no se vean tantos colores», que
+ * `aeronave.color_calendario` quede SOLO para los Excel del balance, —el
+ * 24-sep— «cambiar el color del descanso y agregar el de cobrado» y —el
+ * 28-sep— «los vuelos de Servicio, poner en color Café». Estos hex son los
+ * que pintan el panel, la app y —traducidos— el Google Calendar de la
+ * oficina: cambiar uno cambia las tres superficies, así que quedan congelados
+ * aquí.
  */
 describe('semáforo del calendario', () => {
-  it('son EXACTAMENTE seis colores y estos hex', () => {
+  it('son EXACTAMENTE siete colores y estos hex', () => {
     expect(SEMAFORO).toEqual({
       TENTATIVO: '#64748B',
       PENDIENTE: '#F59E0B',
@@ -39,6 +43,7 @@ describe('semáforo del calendario', () => {
       PAGADO: '#3B82F6',
       CANCELADO: '#EF4444',
       DESCANSO: '#8B5CF6',
+      SERVICIO: '#8B5E3C',
     });
     // Los alias con nombre son los MISMOS valores (nadie define un hex propio).
     expect({
@@ -48,6 +53,7 @@ describe('semáforo del calendario', () => {
       PAGADO_COLOR,
       CANCELADO_COLOR,
       DESCANSO_COLOR,
+      SERVICIO_COLOR,
     }).toEqual({
       TENTATIVO_COLOR: SEMAFORO.TENTATIVO,
       CONFIRMADO_COLOR: SEMAFORO.CONFIRMADO,
@@ -55,9 +61,20 @@ describe('semáforo del calendario', () => {
       PAGADO_COLOR: SEMAFORO.PAGADO,
       CANCELADO_COLOR: SEMAFORO.CANCELADO,
       DESCANSO_COLOR: SEMAFORO.DESCANSO,
+      SERVICIO_COLOR: SEMAFORO.SERVICIO,
     });
     // Ningún color se repite: el semáforo tiene que poder leerse.
-    expect(new Set(Object.values(SEMAFORO)).size).toBe(6);
+    expect(new Set(Object.values(SEMAFORO)).size).toBe(7);
+  });
+
+  /**
+   * El CAFÉ (28-sep-2026) es del vuelo de SERVICIO y de nadie más. Ojo: el
+   * morado del descanso (#8B5CF6) y el café (#8B5E3C) comparten el «8B» del
+   * rojo; son colores distintos.
+   */
+  it('el café #8B5E3C es del vuelo de SERVICIO', () => {
+    expect(SEMAFORO.SERVICIO).toBe('#8B5E3C');
+    expect(SERVICIO_COLOR).not.toBe(DESCANSO_COLOR);
   });
 
   /**
@@ -73,7 +90,7 @@ describe('semáforo del calendario', () => {
   it('la LEYENDA va en el ORDEN del cliente y con sus textos (panel y app la copian)', () => {
     // Lista literal del cliente (24-sep-2026): «Tentativo - Gris · Pendiente
     // (permiso) - Amarillo · Confirmado - Verde · Pagado - Azul · Cancelado -
-    // Rojo · Descanso - Morado».
+    // Rojo · Descanso - Morado»; y al final, el café del 28-sep-2026.
     expect(LEYENDA_SEMAFORO).toEqual([
       { color: '#64748B', etiqueta: 'Tentativo' },
       {
@@ -86,6 +103,12 @@ describe('semáforo del calendario', () => {
       { color: '#3B82F6', etiqueta: 'Pagado' },
       { color: '#EF4444', etiqueta: 'Cancelado' },
       { color: '#8B5CF6', etiqueta: 'Descanso 💤' },
+      {
+        color: '#8B5E3C',
+        etiqueta: 'Servicio (taller / parada técnica)',
+        ayuda:
+          'Vuelo sin pasajeros con parada de servicio: no es del cliente y no se cotiza.',
+      },
     ]);
     // Un renglón por color del semáforo: ni falta ni sobra ninguno.
     expect(new Set(LEYENDA_SEMAFORO.map((r) => r.color))).toEqual(
@@ -94,6 +117,10 @@ describe('semáforo del calendario', () => {
     // El tooltip del amarillo avisa lo que la etiqueta no dice.
     expect(AYUDA_PENDIENTE).toContain('avión o piloto');
     expect(LEYENDA_SEMAFORO[1].ayuda).toBe(AYUDA_PENDIENTE);
+    // El tooltip del café dice QUÉ vuelo es de servicio (la etiqueta sola se
+    // confundiría con el mantenimiento, que sigue amarillo).
+    expect(LEYENDA_SEMAFORO[6].ayuda).toBe(AYUDA_SERVICIO);
+    expect(AYUDA_SERVICIO).toContain('sin pasajeros');
     expect(NOTA_COLOR_AVION).toBe(
       'El color de cada avión ya no se usa en el calendario: se conserva para los reportes de Excel (balance individual y general).',
     );
@@ -172,8 +199,9 @@ describe('vueloSinAsignar / vueloPendiente', () => {
 
 describe('colorVueloSistema (precedencia única del semáforo)', () => {
   /**
-   * La precedencia COMPLETA de un vuelo o tramo (24-sep-2026), congelada en
-   * una tabla: cancelado > tentativo > pendiente > PAGADO > confirmado.
+   * La precedencia COMPLETA de un vuelo o tramo (28-sep-2026), congelada en
+   * una tabla: cancelado > SERVICIO > tentativo > pendiente > PAGADO >
+   * confirmado.
    */
   it('precedencia completa con el PAGADO', () => {
     const firme = {
@@ -249,10 +277,65 @@ describe('colorVueloSistema (precedencia única del semáforo)', () => {
         },
         '#3B82F6',
       ],
+      // SERVICIO (28-sep-2026): café, después del cancelado y ANTES de todo
+      // lo demás. Un vuelo de servicio nunca es «pagado» ni «tentativo».
+      ['servicio COMPLETADO ⇒ café', { ...firme, servicio: true }, '#8B5E3C'],
+      [
+        'servicio pagado ⇒ café (nunca azul)',
+        { ...firme, servicio: true, cobrado: true },
+        '#8B5E3C',
+      ],
+      [
+        'servicio con permiso pendiente ⇒ café',
+        {
+          ...firme,
+          estado: 'CONFIRMADO',
+          servicio: true,
+          permisoPendiente: true,
+        },
+        '#8B5E3C',
+      ],
+      [
+        'servicio sin piloto ⇒ café',
+        { ...firme, estado: 'CONFIRMADO', servicio: true, pilotoId: null },
+        '#8B5E3C',
+      ],
+      [
+        'servicio RESERVA ⇒ café (no es un espacio del cliente)',
+        { ...firme, estado: 'RESERVA', servicio: true },
+        '#8B5E3C',
+      ],
+      [
+        'servicio CANCELADO ⇒ rojo (el cancelado sigue dominando)',
+        { ...firme, estado: 'CANCELADO', servicio: true },
+        '#EF4444',
+      ],
+      [
+        'tramo cancelado de un vuelo de servicio ⇒ rojo',
+        { ...firme, servicio: true, cancelado: true },
+        '#EF4444',
+      ],
+      [
+        'servicio=false ⇒ la precedencia de siempre (verde)',
+        { ...firme, servicio: false },
+        '#22C55E',
+      ],
+      [
+        'servicio=null ⇒ la precedencia de siempre (azul si pagado)',
+        { ...firme, servicio: null, cobrado: true },
+        '#3B82F6',
+      ],
     ];
     for (const [nombre, params, hex] of casos) {
       expect([nombre, colorVueloSistema(params)]).toEqual([nombre, hex]);
     }
+  });
+
+  it('`vueloPagado` sigue siendo el DATO aunque el vuelo sea de servicio', () => {
+    // El café gana el COLOR; el dato «cobrado completo» no se toca.
+    expect(
+      vueloPagado({ servicio: true, cobrado: true, montoTotalUsd: 100 }),
+    ).toBe(true);
   });
 
   const base = {

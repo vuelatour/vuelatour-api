@@ -19,6 +19,7 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { round6, totalMxnDeVuelo } from '../../common/tc.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
+import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import {
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
@@ -397,14 +398,12 @@ export class DineroReportService {
 
     // CLAVE del libro: "vt" + primer nombre del cliente en minúsculas
     // (vtchacon, vtmagaña). Vuelo de SERVICIO (tramo de taller sin pax) →
-    // "vtservicio", como en el libro manual.
+    // "vtservicio", como en el libro manual. La regla es la ÚNICA de
+    // `common/vuelo-servicio.util` (la misma del candado de cotización y del
+    // CAFÉ del calendario); `escalasPorVuelo` ya trae solo tramos activos.
     const claveDe = (v: Record<string, unknown>): string => {
       const escalas = escalasPorVuelo.get(v.id as string) ?? [];
-      const esServicio =
-        escalas.length > 0 &&
-        escalas.some((e) => e.tipo_parada === 'SERVICIO') &&
-        escalas.every((e) => !(Number(e.pasajeros) > 0));
-      if (esServicio) return 'vtservicio';
+      if (esVueloDeServicio(escalas)) return 'vtservicio';
       const nombre = clientes.get(v.cliente_id as string) ?? '';
       const primera = nombre.trim().split(/\s+/)[0] ?? '';
       const limpia = primera.toLowerCase().replace(/[^a-záéíóúüñ0-9]/gi, '');

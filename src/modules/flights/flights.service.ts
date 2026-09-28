@@ -2408,6 +2408,10 @@ export class FlightsService {
             [row.origen_iata as string, row.destino_iata as string].filter(
               Boolean,
             ),
+          // ADITIVO (28-sep-2026): vuelo de SERVICIO (regla ÚNICA
+          // `esVueloDeServicio`). La app pinta con él el CAFÉ del calendario
+          // del piloto (Mis vuelos), el mismo que `GET /v1/calendar`.
+          servicio: resumen?.servicio ?? false,
         },
         current,
       );
@@ -2440,7 +2444,9 @@ export class FlightsService {
     const { data } = await this.supabase.service
       .from('escala')
       .select(
-        'vuelo_id, orden, origen_iata, destino_iata, piloto_id, copiloto_id, pasajeros_nombres, notas, cancelada_at',
+        // tipo_parada/pasajeros (28-sep-2026): bandera `servicio` del listado
+        // (CAFÉ del calendario del piloto en la app, `esVueloDeServicio`).
+        'vuelo_id, orden, origen_iata, destino_iata, piloto_id, copiloto_id, pasajeros_nombres, notas, cancelada_at, tipo_parada, pasajeros',
       )
       .in('vuelo_id', vueloIds)
       .order('orden', { ascending: true });

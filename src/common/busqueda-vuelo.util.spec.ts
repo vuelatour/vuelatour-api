@@ -99,6 +99,7 @@ describe('resumirEscalasPorVuelo', () => {
       notas_tramos: ['Regreso con equipaje extra'],
       piloto_ids: [PIL_B],
       copiloto_ids: [COP_C],
+      servicio: false,
     });
     expect(r.get(V2)).toEqual({
       ruta_iatas: ['CUN', 'MID'],
@@ -106,7 +107,68 @@ describe('resumirEscalasPorVuelo', () => {
       notas_tramos: [],
       piloto_ids: [],
       copiloto_ids: [],
+      servicio: false,
     });
+  });
+
+  /**
+   * `servicio` (28-sep-2026): el CAFÉ del calendario del piloto en la app.
+   * Regla ÚNICA `esVueloDeServicio`: tramos activos, alguno con parada
+   * SERVICIO y ninguno con pasajeros (null = 0); los cancelados no cuentan.
+   */
+  it('servicio: parada de SERVICIO y cero pax en los tramos activos', () => {
+    const r = resumirEscalasPorVuelo([
+      // V1: taller de ida (sin pax) + regreso en ferry ⇒ servicio.
+      {
+        vuelo_id: V1,
+        orden: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'MID',
+        tipo_parada: 'SERVICIO',
+        pasajeros: 0,
+      },
+      {
+        vuelo_id: V1,
+        orden: 2,
+        origen_iata: 'MID',
+        destino_iata: 'CUN',
+        tipo_parada: 'NORMAL',
+        pasajeros: null,
+      },
+      // V2: la parada de servicio lleva pasajeros ⇒ es del cliente.
+      {
+        vuelo_id: V2,
+        orden: 1,
+        origen_iata: 'CUN',
+        destino_iata: 'MID',
+        tipo_parada: 'SERVICIO',
+        pasajeros: 2,
+      },
+    ]);
+    expect(r.get(V1)?.servicio).toBe(true);
+    expect(r.get(V2)?.servicio).toBe(false);
+    // La parada de servicio en un tramo CANCELADO no cuenta.
+    expect(
+      resumirEscalasPorVuelo([
+        {
+          vuelo_id: V1,
+          orden: 1,
+          origen_iata: 'CUN',
+          destino_iata: 'MID',
+          tipo_parada: 'SERVICIO',
+          pasajeros: 0,
+          cancelada_at: '2026-09-01T00:00:00Z',
+        },
+        {
+          vuelo_id: V1,
+          orden: 2,
+          origen_iata: 'MID',
+          destino_iata: 'CUN',
+          tipo_parada: 'NORMAL',
+          pasajeros: 0,
+        },
+      ]).get(V1)?.servicio,
+    ).toBe(false);
   });
 
   it('sin escalas → mapa vacío; filas sin vuelo_id se ignoran', () => {

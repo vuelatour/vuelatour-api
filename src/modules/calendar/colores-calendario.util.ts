@@ -1,6 +1,6 @@
 /**
- * SEMÁFORO DEL CALENDARIO — PALETA ÚNICA DE 6 COLORES (24-sep-2026; era de 5
- * desde el 22-sep-2026).
+ * SEMÁFORO DEL CALENDARIO — PALETA ÚNICA DE 7 COLORES (28-sep-2026; 6 desde el
+ * 24-sep-2026 y 5 desde el 22-sep-2026).
  *
  * Pedido literal del cliente (22-sep-2026): «queremos hacer un cambio en el
  * semáforo del calendario, tanto en este calendario del sistema web y la app
@@ -21,6 +21,17 @@
  *   Rojo     — Cancelado
  *   Morado   — Descanso 💤     (antes azul)
  *
+ * Ajuste del 28-sep-2026: «los vuelos de Servicio, poner en color Café en el
+ * calendario web, app y google calendar». Séptimo color:
+ *
+ *   Café     — Servicio (taller / parada técnica)   (NUEVO)
+ *
+ * «Servicio» = vuelo SIN pasajeros con alguna parada de SERVICIO (taller o
+ * parada técnica): no es del cliente y no se cotiza. La regla NO vive aquí: es
+ * `esVueloDeServicio` de `common/vuelo-servicio.util` (la misma del candado de
+ * cotización y de la clave `vtservicio` del Libro Dinero); el llamador pasa el
+ * resultado en `ParamsColorVuelo.servicio`.
+ *
  * «Pagado» = el vuelo quedó COBRADO COMPLETO: `vuelo.cobrado`, la bandera que
  * mantiene `FlightsService.refreshCobradoFlag` con `cobrosEnUsd`
  * (`monto_total > 0 && cobrado ≥ total − 1`). Nadie lo marca a mano: se pinta
@@ -36,8 +47,9 @@
  * - Desaparecieron el morado «sin asignar», el rosa del externo, el gris «sin
  *   avión», el turquesa del descanso y el azul cielo del evento: cada uno cayó
  *   en el cubo del semáforo que le toca (ver `colorVueloSistema`).
- * - `google-evento.util` traduce ESTOS 6 hex a 6 colorId DISTINTOS de Google
- *   (antes 18 cosas se repartían 11 colores y había 6 colisiones).
+ * - `google-evento.util` traduce ESTOS 7 hex a 7 colorId DISTINTOS de Google
+ *   (antes 18 cosas se repartían 11 colores y había 6 colisiones). Google no
+ *   tiene café: el SERVICIO va FIJO en 6 Mandarina (ver `COLOR_ID_FIJO`).
  * - El azul #3B82F6 CAMBIÓ DE DUEÑO el 24-sep-2026: era del descanso y ahora
  *   es del PAGADO. Cualquier lector que todavía diga «azul = descanso» está
  *   mal: el descanso es MORADO #8B5CF6.
@@ -48,7 +60,7 @@
  */
 
 /**
- * Los SEIS colores del semáforo. Es la fuente única: panel y app espejan
+ * Los SIETE colores del semáforo. Es la fuente única: panel y app espejan
  * estos hex EXACTOS en su leyenda (no los recalculan ni los aproximan).
  */
 export const SEMAFORO = {
@@ -70,6 +82,12 @@ export const SEMAFORO = {
   CANCELADO: '#EF4444',
   /** Morado — descanso de piloto 💤 (24-sep-2026; antes azul). */
   DESCANSO: '#8B5CF6',
+  /**
+   * Café — vuelo de SERVICIO (28-sep-2026): sin pasajeros y con alguna
+   * parada de servicio (taller / parada técnica). No es del cliente y no se
+   * cotiza. Lleva texto BLANCO (contraste ≈ 5.6:1).
+   */
+  SERVICIO: '#8B5E3C',
 } as const;
 
 // Alias con los nombres que ya usaban los lectores del módulo. Se conservan
@@ -93,6 +111,8 @@ export const PAGADO_COLOR: string = SEMAFORO.PAGADO;
 export const CANCELADO_COLOR: string = SEMAFORO.CANCELADO;
 /** Morado del descanso de piloto (un evento por día de descanso). */
 export const DESCANSO_COLOR: string = SEMAFORO.DESCANSO;
+/** Café del vuelo de SERVICIO (taller / parada técnica, 28-sep-2026). */
+export const SERVICIO_COLOR: string = SEMAFORO.SERVICIO;
 
 /**
  * Tooltip del renglón «Pendiente (permiso)» (misma redacción en panel y app).
@@ -103,15 +123,26 @@ export const AYUDA_PENDIENTE =
   'Permiso de pista pendiente. También se pinta así el vuelo confirmado que todavía no tiene avión o piloto asignado.';
 
 /**
- * LEYENDA CANÓNICA: los 6 renglones, en el ORDEN EXACTO de la lista del
- * cliente (24-sep-2026) y con estos textos. Panel y app la copian tal cual
- * (el panel en `lib/admin/calendario-semaforo.ts`, la app en
+ * Tooltip del renglón «Servicio (taller / parada técnica)» (28-sep-2026;
+ * misma redacción en panel y app). Dice QUÉ vuelo se pinta de café: la
+ * etiqueta sola se confundiría con el mantenimiento del avión, que sigue
+ * AMARILLO («🔧 Servicio · …» es una orden de taller, no un vuelo).
+ */
+export const AYUDA_SERVICIO =
+  'Vuelo sin pasajeros con parada de servicio: no es del cliente y no se cotiza.';
+
+/**
+ * LEYENDA CANÓNICA: los 7 renglones —los 6 en el ORDEN EXACTO de la lista del
+ * cliente (24-sep-2026) y, al final, el SERVICIO del 28-sep-2026— con estos
+ * textos. Panel y app la copian tal cual (el panel en
+ * `lib/admin/calendario-semaforo.ts`, la app en
  * `core/theme/semaforo_calendario.dart`). Vive aquí para que el texto y el
  * hex no puedan separarse.
  *
- * `ayuda` es el tooltip / `title` del renglón: hoy solo lo lleva «Pendiente
+ * `ayuda` es el tooltip / `title` del renglón: lo llevan «Pendiente
  * (permiso)», porque el amarillo también cubre al vuelo CONFIRMADO al que le
- * falta avión o piloto, y la etiqueta del cliente solo dice «permiso».
+ * falta avión o piloto, y la etiqueta del cliente solo dice «permiso»; y
+ * «Servicio (taller / parada técnica)», que dice qué vuelo es de servicio.
  */
 export const LEYENDA_SEMAFORO: ReadonlyArray<{
   readonly color: string;
@@ -128,6 +159,11 @@ export const LEYENDA_SEMAFORO: ReadonlyArray<{
   { color: SEMAFORO.PAGADO, etiqueta: 'Pagado' },
   { color: SEMAFORO.CANCELADO, etiqueta: 'Cancelado' },
   { color: SEMAFORO.DESCANSO, etiqueta: 'Descanso 💤' },
+  {
+    color: SEMAFORO.SERVICIO,
+    etiqueta: 'Servicio (taller / parada técnica)',
+    ayuda: AYUDA_SERVICIO,
+  },
 ] as const;
 
 /** Nota al pie de la leyenda (misma redacción en panel y app). */
@@ -193,6 +229,13 @@ export interface ParamsColorVuelo {
    */
   montoTotalUsd?: number | string | null;
   /**
+   * Vuelo de SERVICIO (28-sep-2026): el RESULTADO de `esVueloDeServicio`
+   * (`common/vuelo-servicio.util`) sobre los tramos del vuelo. Aquí NO se
+   * recalcula (fuente única). Es a nivel VUELO: todos sus tramos lo
+   * comparten. Ausente = no es de servicio.
+   */
+  servicio?: boolean | null;
+  /**
    * @deprecated Desde el 22-sep-2026 el color del avión NO entra a ningún
    * calendario: `aeronave.color_calendario` quedó SOLO para los reportes de
    * Excel. El campo se conserva para no romper llamadores, pero se IGNORA.
@@ -230,8 +273,8 @@ export function vueloPendiente(p: ParamsColorVuelo): boolean {
  * cliente interno NUNCA es pagado: no hay nada que cobrar).
  *
  * Solo dice «está cobrado completo»; si el azul GANA o no lo decide la
- * precedencia de `colorVueloSistema` (un cancelado, un tentativo o un
- * pendiente se ven con SU color aunque estén pagados).
+ * precedencia de `colorVueloSistema` (un cancelado, un servicio, un
+ * tentativo o un pendiente se ven con SU color aunque estén pagados).
  */
 export function vueloPagado(p: ParamsColorVuelo): boolean {
   if (p.cobrado !== true) return false;
@@ -243,10 +286,16 @@ export function vueloPagado(p: ParamsColorVuelo): boolean {
 /**
  * Color del semáforo para UN evento de vuelo (vuelo completo o tramo, propio o
  * EXTERNO — el externo ya no tiene color propio: se pinta por su estado como
- * cualquier otro). Precedencia ÚNICA, de arriba hacia abajo (24-sep-2026):
+ * cualquier otro). Precedencia ÚNICA, de arriba hacia abajo (28-sep-2026):
  *
- *   cancelado (rojo) > tentativo (gris) > pendiente (amarillo)
- *     > PAGADO (azul) > confirmado (verde)
+ *   cancelado (rojo) > SERVICIO (café) > tentativo (gris)
+ *     > pendiente (amarillo) > PAGADO (azul) > confirmado (verde)
+ *
+ * El SERVICIO va justo después del cancelado (28-sep-2026): un vuelo de
+ * taller o parada técnica no es del cliente, así que ni su estado comercial
+ * (tentativo), ni sus pendientes, ni el dinero cambian lo que es — un vuelo
+ * de servicio NUNCA se ve «pagado». Pero si se CANCELA, es historial en
+ * rojo como cualquier otro.
  *
  * El cancelado domina (es historial) y el tentativo va antes que los
  * pendientes porque un espacio apartado no es un vuelo firme: sus pendientes
@@ -259,6 +308,7 @@ export function vueloPagado(p: ParamsColorVuelo): boolean {
 export function colorVueloSistema(p: ParamsColorVuelo): string {
   const cancelado = p.cancelado ?? p.estado === 'CANCELADO';
   if (cancelado) return SEMAFORO.CANCELADO;
+  if (p.servicio === true) return SEMAFORO.SERVICIO;
   if (esEstadoTentativo(p.estado)) return SEMAFORO.TENTATIVO;
   if (vueloPendiente(p)) return SEMAFORO.PENDIENTE;
   if (vueloPagado(p)) return SEMAFORO.PAGADO;

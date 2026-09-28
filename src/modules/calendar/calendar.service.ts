@@ -14,6 +14,7 @@ import {
   clientRequestIdEvento,
 } from '../../common/columna-opcional.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
+import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import { triggerUpdatedAt } from '../../common/updated-at-trigger.util';
 import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import { PushService } from '../realtime/push.service';
@@ -143,7 +144,10 @@ export class CalendarService {
         // updated_at del vuelo y de cada tramo (10-sep-2026): filtro de deltas.
         // cobrado (24-sep-2026, semáforo de 6): el AZUL «Pagado» sale de la
         // bandera del vuelo — misma consulta, sin N+1.
-        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, cobrado, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, updated_at, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, updated_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
+        // escalas.tipo_parada (28-sep-2026, semáforo de 7): el CAFÉ del vuelo
+        // de SERVICIO sale de los tramos (`esVueloDeServicio`) — misma
+        // consulta, sin N+1.
+        'id, folio, fecha_vuelo, fecha_traslado_final, fecha_fin, tipo, estado, es_externo, origen_iata, destino_iata, pasajeros, pasajeros_nombres, notas, notas_internas, motivo_cancelacion, monto_total_usd, cobrado, aeronave_id, piloto_id, copiloto_id, cliente_id, operador_externo, estado_permiso, google_calendar_id, client_request_id, grupo_id, grupo_posicion, grupo_pax, updated_at, grupo:vuelo_grupo!grupo_id(folio), aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre), cliente:cliente_id(nombre, razon_social_default), apoyos:vuelo_apoyo(escala_id, usuario_id, usuario:usuario_id(nombre)), escalas:escala(id, orden, origen_iata, destino_iata, fecha_salida_plan, es_ferry, pasajeros, tipo_parada, pasajeros_nombres, notas, aeronave_id, piloto_id, copiloto_id, estado_permiso, cancelada_at, updated_at, aeronave:aeronave_id(matricula, color_calendario, modelo), piloto:piloto_id(nombre), copiloto:copiloto_id(nombre))',
       )
       // Solapamiento de [fecha_vuelo, fecha_fin] con el rango pedido.
       // fecha_fin (trigger BD) ya es max(fecha_salida_plan) del itinerario:
@@ -322,6 +326,8 @@ export class CalendarService {
           fecha_salida_plan: string | null;
           es_ferry: boolean;
           pasajeros: number | null;
+          /** `NORMAL` | `SERVICIO` (enum `public.tipo_parada`). */
+          tipo_parada?: string | null;
           aeronave_id: string | null;
           piloto_id: string | null;
           copiloto_id: string | null;
@@ -349,6 +355,11 @@ export class CalendarService {
       const escalaPorOrden = new Map(
         (v.escalas ?? []).map((e) => [e.orden, e]),
       );
+      // Vuelo de SERVICIO (28-sep-2026, CAFÉ del semáforo): regla ÚNICA de
+      // `common/vuelo-servicio.util` sobre TODOS los tramos del vuelo (la
+      // util descarta los cancelados). Es dato del VUELO: todos sus eventos
+      // lo comparten.
+      const esServicio = esVueloDeServicio(v.escalas);
 
       // Construye un evento usando la asignación del TRAMO (escala), con respaldo
       // en la asignación a nivel de vuelo cuando el tramo no exista todavía.
@@ -441,11 +452,11 @@ export class CalendarService {
         // (RESERVA, SOLICITUD, COTIZADO), no solo la RESERVA: el gris del
         // semáforo y la etiqueta tienen que decir lo mismo.
         const esTentativo = esEstadoTentativo(v.estado);
-        // Precedencia ÚNICA del semáforo (colores-calendario.util, 24-sep-2026):
-        // cancelado > tentativo > pendiente > PAGADO > confirmado. La misma
-        // que traduce el espejo a Google. El color del AVIÓN ya no entra al
-        // calendario (quedó solo para los Excel del balance). `cobrado` es
-        // del VUELO: todos sus tramos lo comparten.
+        // Precedencia ÚNICA del semáforo (colores-calendario.util, 28-sep-2026):
+        // cancelado > SERVICIO > tentativo > pendiente > PAGADO > confirmado.
+        // La misma que traduce el espejo a Google. El color del AVIÓN ya no
+        // entra al calendario (quedó solo para los Excel del balance).
+        // `cobrado` y `servicio` son del VUELO: todos sus tramos los comparten.
         const paramsColor = {
           estado: v.estado,
           cancelado: esCancelado,
@@ -455,6 +466,7 @@ export class CalendarService {
           permisoPendiente,
           cobrado: v.cobrado === true,
           montoTotalUsd: v.monto_total_usd,
+          servicio: esServicio,
         };
         const color = colorVueloSistema(paramsColor);
         // «Cobrado completo» como DATO (igual que `sin_asignar`): puede ser
@@ -486,6 +498,11 @@ export class CalendarService {
           // que el panel y la app NO recalculan nada con ella (sirve para la
           // etiqueta o el buscador).
           pagado,
+          // ADITIVO (28-sep-2026): vuelo de SERVICIO (sin pasajeros, con
+          // parada de taller / técnica; `esVueloDeServicio`). Es la razón del
+          // CAFÉ; como `pagado`, el `color` ya trae resuelta la precedencia y
+          // ningún cliente decide un color con esta bandera.
+          servicio: esServicio,
           color,
           cliente_id: v.cliente_id,
           cliente_nombre: cliente?.nombre ?? null,

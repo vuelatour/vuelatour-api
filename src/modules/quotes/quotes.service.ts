@@ -94,6 +94,7 @@ import {
   tarifaPersistida,
 } from '../../common/tarifa.util';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
+import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import {
   avisosCapacidad,
   conflictoCapacidad,
@@ -4305,10 +4306,13 @@ export class QuotesService {
 
   /**
    * Vuelo de SERVICIO = itinerario con al menos un tramo de parada SERVICIO y
-   * CERO pasajeros en TODOS los tramos activos (taller/mantenimiento). El pax
-   * se evalúa por tramo con null=0 a propósito: vuelo.pasajeros tiene piso
-   * artificial de 1 en las reservas y el fallback "null hereda el global" es
-   * una convención de TUAS, no evidencia de que viajen personas.
+   * CERO pasajeros en TODOS los tramos activos (taller/mantenimiento). La
+   * regla vive en `common/vuelo-servicio.util` (fuente ÚNICA desde el
+   * 28-sep-2026: la comparten este candado, el Libro Dinero y el CAFÉ del
+   * semáforo del calendario). El pax se evalúa por tramo con null=0 a
+   * propósito: vuelo.pasajeros tiene piso artificial de 1 en las reservas y
+   * el fallback "null hereda el global" es una convención de TUAS, no
+   * evidencia de que viajen personas.
    */
   private async assertNoEsVueloDeServicio(vueloId: string): Promise<void> {
     const { data, error } = await this.supabase.service
@@ -4317,11 +4321,7 @@ export class QuotesService {
       .eq('vuelo_id', vueloId)
       .is('cancelada_at', null);
     if (error) throw new Error(error.message);
-    const escalas = data ?? [];
-    if (escalas.length === 0) return;
-    const tieneServicio = escalas.some((e) => e.tipo_parada === 'SERVICIO');
-    const sinPasajeros = escalas.every((e) => !(Number(e.pasajeros) > 0));
-    if (tieneServicio && sinPasajeros) {
+    if (esVueloDeServicio(data)) {
       throw new ConflictException(
         'Vuelo de servicio (taller/parada técnica sin pasajeros): no se cotiza ni se asigna a una cotización. Si sí es un viaje del cliente, quita la marca de Servicio o captura los pasajeros del tramo.',
       );

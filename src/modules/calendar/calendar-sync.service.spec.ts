@@ -591,6 +591,60 @@ describe('CalendarSyncService.syncFlight — UNA SOLA FILA por vuelo (15-sep-202
     expect(insertado().requestBody.colorId).toBe(colorId);
   });
 
+  /**
+   * SERVICIO (28-sep-2026): tramos con parada de SERVICIO y cero pasajeros ⇒
+   * CAFÉ del semáforo → 6 Mandarina (fijo: Google no tiene café), aunque el
+   * vuelo esté cobrado. La regla es la ÚNICA de `common/vuelo-servicio.util`
+   * y `tipo_parada` viaja en el MISMO select del espejo.
+   */
+  it('vuelo de SERVICIO: CAFÉ (#8B5E3C) → Mandarina (6) y un renglón en la descripción', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      estado: 'COMPLETADO',
+      cobrado: true,
+      escalas: [
+        {
+          ...VUELO_MULTIESCALA.escalas[0],
+          tipo_parada: 'SERVICIO',
+          pasajeros: 0,
+        },
+        { ...VUELO_MULTIESCALA.escalas[1], tipo_parada: 'NORMAL' },
+      ],
+    };
+    const { service, llamadas } = armar({
+      vuelo: [{ data: vuelo, error: null }],
+    });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.colorId).toBe('6');
+    expect(String(requestBody.description).split('\n')).toContain(
+      'Vuelo de SERVICIO (taller / parada técnica, sin pasajeros)',
+    );
+    // El select del espejo pide `tipo_parada` de los tramos (sin él, Google
+    // nunca sería café).
+    const select = String(de(llamadas, 'vuelo', 'select')[0].args[0]);
+    expect(select).toMatch(/escalas:escala\([^)]*\bpasajeros, tipo_parada,/);
+  });
+
+  it('parada de SERVICIO pero CON pasajeros: no es de servicio (color de siempre)', async () => {
+    const vuelo = {
+      ...VUELO_MULTIESCALA,
+      escalas: [
+        { ...VUELO_MULTIESCALA.escalas[0], tipo_parada: 'SERVICIO' },
+        VUELO_MULTIESCALA.escalas[1],
+      ],
+    };
+    const { service } = armar({ vuelo: [{ data: vuelo, error: null }] });
+
+    await service.syncFlight('v-1');
+
+    const { requestBody } = insertado();
+    expect(requestBody.colorId).toBe('2');
+    expect(String(requestBody.description)).not.toContain('Vuelo de SERVICIO');
+  });
+
   it.each(['RESERVA', 'SOLICITUD', 'COTIZADO'])(
     '%s (tentativo): el gris del semáforo (#64748B) → Grafito (8)',
     async (estado) => {

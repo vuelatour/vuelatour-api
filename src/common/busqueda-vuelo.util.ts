@@ -1,4 +1,5 @@
 import type { VueloApoyoRow } from './tripulacion.util';
+import { esVueloDeServicio } from './vuelo-servicio.util';
 
 /**
  * Campos ADITIVOS de búsqueda para las listas de vuelos de la app
@@ -25,6 +26,12 @@ import type { VueloApoyoRow } from './tripulacion.util';
  *  · `apoyos_tramo`            — [{ id, nombre, rol, escala_id }] (las filas de
  *                                `vuelo_apoyo` con escala_id); `apoyos` (nivel
  *                                vuelo, contrato 29-ago) no cambia.
+ *  · `servicio`                — (28-sep-2026) vuelo de SERVICIO según la regla
+ *                                ÚNICA `esVueloDeServicio` (tramos activos,
+ *                                parada SERVICIO, cero pax): el CAFÉ del
+ *                                calendario del piloto en la app. Misma lectura
+ *                                de escalas (se le suman `tipo_parada` y
+ *                                `pasajeros`), sin consultas nuevas.
  */
 
 export interface EscalaResumenRow {
@@ -39,6 +46,10 @@ export interface EscalaResumenRow {
   pasajeros_nombres?: unknown;
   notas?: string | null;
   cancelada_at?: string | null;
+  /** `NORMAL` | `SERVICIO` (28-sep-2026: bandera `servicio` del resumen). */
+  tipo_parada?: string | null;
+  /** Pasajeros del TRAMO (null = 0 para la regla de servicio). */
+  pasajeros?: number | null;
 }
 
 export interface ResumenEscalas {
@@ -49,6 +60,12 @@ export interface ResumenEscalas {
   piloto_ids: string[];
   /** Ids EXPLÍCITOS (sin herencia) de copiloto de los tramos, sin repetir. */
   copiloto_ids: string[];
+  /**
+   * Vuelo de SERVICIO (28-sep-2026): regla ÚNICA `esVueloDeServicio`
+   * (`common/vuelo-servicio.util`). Pinta el CAFÉ del calendario del piloto
+   * en la app (Mis vuelos), igual que `GET /v1/calendar`.
+   */
+  servicio: boolean;
 }
 
 export interface ApoyoItem {
@@ -153,6 +170,7 @@ export function resumirEscalasPorVuelo(
       notas_tramos: notas,
       piloto_ids: pilotoIds,
       copiloto_ids: copilotoIds,
+      servicio: esVueloDeServicio(ordenadas),
     });
   }
   return out;
