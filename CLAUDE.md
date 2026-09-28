@@ -2361,7 +2361,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ruta antes de `:clave`, roles, DTO) y `me.controller.permisos.spec.ts`.
 
 31. **COMISIÓN DEL VENDEDOR COMO GASTO (28-sep-2026, API 0.0.39, migraciones
-    `20260928000001` y `20260928000002` PENDIENTES).** Pedido del cliente con
+    `20260928000001` y `20260928000002` APLICADAS el 28-sep tras DRYRUN_OK).** Pedido del cliente con
     las capturas de «otros movimientos» y «otros gastos» del balance general:
     «¿cómo registro un gasto para que aparezca en la hoja de otros
     movimientos? Como pagarle una comisión a Saab. Veo que está prellenada con
@@ -3158,8 +3158,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE (28-sep-2026, API 0.0.39 — DEPENDENCIA DURA: 000001 va ANTES
-  del push del API)** — `20260928000001_categoria_comision_vendedor.sql`
+- **APLICADA (28-sep-2026, DRYRUN_OK A–C; enum 19 → 20 con COMISION_VENDEDOR al final; aplicada ANTES del push del API 0.0.39)** — `20260928000001_categoria_comision_vendedor.sql`
   (invariante 31): `alter type public.categoria_gasto add value if not exists
   'COMISION_VENDEDOR'`, SOLA en su archivo (un valor nuevo de enum no se
   puede USAR en la transacción que lo crea). **Antes de aplicar**: el
@@ -3171,7 +3170,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   t.typname='categoria_gasto' and e.enumlabel='COMISION_VENDEDOR'` ⇒ 1 fila
   (sin ella el 0.0.39 da 500 en la bandeja de pendientes, la alerta
   `gastos_sin_avion` y el alta de gastos).
-- **PENDIENTE (28-sep-2026, después de 000001)** —
+- **APLICADA (28-sep-2026, DRYRUN_OK A–C7 con escrituras reales; `pg_get_constraintdef` verificado; advisors sin hallazgos nuevos)** —
   `20260928000002_gasto_comision_vendedor_exige_vuelo.sql` (invariante 31):
   CHECK `gasto_comision_vendedor_exige_vuelo` (`categoria::text <>
   'COMISION_VENDEDOR' or vuelo_id is not null`) + COMMENT. **Antes de
