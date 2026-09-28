@@ -70,6 +70,9 @@ const CATEGORIAS_NO_LIGABLES = [
   // ver con el costo de bodega de una refacción.
   'NOMINA',
   'SERVICIOS',
+  // COMISION_VENDEDOR (28-sep-2026): el pago al vendedor no es costo de una
+  // refacción.
+  'COMISION_VENDEDOR',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 

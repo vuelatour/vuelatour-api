@@ -3,8 +3,18 @@ import { SupabaseService } from '../supabase/supabase.service';
 import {
   CATEGORIAS_GASTO_EMPRESA,
   categoriaEsDeEmpresa,
+  categoriaFueraDelAvion,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
+import {
+  NOTA_PAGO_VENDEDOR_REAL,
+  NOTA_PAGO_VENDEDOR_SIN_LINEA,
+  NOTA_PROVISION_PAGO_VENDEDOR,
+  conceptoPagoVendedorReal,
+  motivoSinLineaComision,
+  pagosVendedorDeVuelo,
+  type GastoPagoVendedorRow,
+} from '../../common/pago-vendedor.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { round6, totalMxnDeVuelo } from '../../common/tc.util';
 import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
@@ -102,8 +112,11 @@ function repartirHoras(
  * paga al vendedor. La hoja 1 (venta del avión) no la cobra ni la descuenta
  * (ninguna columna "comisión" de esa hoja se llena con ella); la hoja
  * "otros ingresos" la lista como ingreso (comisión + su IVA) apareada con su
- * pago como egreso PROVISIONADO a la fecha del vuelo (hoy no existe categoría
- * de gasto para ese pago).
+ * pago como egreso: el GASTO REAL (categoría «Comisión del vendedor» ligada al
+ * vuelo, desde el 28-sep-2026 — invariante 31, fuente única
+ * `pago-vendedor.util.ts`, la MISMA del Balance general) o, mientras no se
+ * capture, una PROVISIÓN por el mismo monto a la fecha del vuelo. Por vuelo
+ * se resta la provisión (sin gasto) **o** lo pagado (con gasto), jamás ambos.
  *
  * MULTI-AVIÓN (Regla B, 28-ago-2026): un vuelo cuyos tramos volaron aviones
  * distintos emite en la hoja 1 UNA FILA POR AVIÓN, coherente por sí sola:
@@ -419,8 +432,14 @@ export class DineroReportService {
     let sumaTc = 0;
     let nTc = 0;
     // Σ egresos PROVISIONADOS del pago al vendedor (hoja "otros ingresos"):
-    // se descuenta de otros ingresos en la hoja utilidades.
+    // se descuenta de otros ingresos en la hoja utilidades. Solo vuelos SIN
+    // gasto real (invariante 31).
     let comisionProvisionadaMxn = 0;
+    // Σ pagado DE VERDAD al vendedor (gastos COMISION_VENDEDOR, apareados o
+    // de solo-egreso): también se descuenta de otros ingresos. Por vuelo se
+    // resta la provisión O lo pagado, nunca ambos.
+    let comisionPagadaMxn = 0;
+    let hayPagoVendedorReal = false;
     for (const v of vuelos) {
       const vid = v.id as string;
       // REGLA B (28-ago-2026): participación de cada avión en la venta del
@@ -841,6 +860,35 @@ export class DineroReportService {
         }
       }
       const gastosV = gastosPorVuelo.get(v.id as string) ?? [];
+      // Regla ÚNICA de conversión a MXN de lo PAGADO en este vuelo (TUA
+      // pagado y pago al vendedor): MXN directo; USD × tc_gasto o, sin él,
+      // el TC de venta; sin NINGÚN TC ⇒ null (no se suma en falso).
+      const pagadoAMxn = (
+        monto: number,
+        g: Record<string, unknown>,
+      ): number | null => {
+        const tcg = pos(g.tc_gasto) ?? tc;
+        return g.moneda === 'MXN' ? monto : tcg != null ? monto * tcg : null;
+      };
+      // PAGO REAL AL VENDEDOR (invariante 31): gastos COMISION_VENDEDOR del
+      // vuelo con la MISMA regla que su TUA pagado. Con n = 0 la provisión
+      // sale como siempre.
+      const pagosVend = pagosVendedorDeVuelo(
+        gastosV as unknown as GastoPagoVendedorRow[],
+        (g) =>
+          pagadoAMxn(
+            num(g.monto) ?? 0,
+            g as unknown as Record<string, unknown>,
+          ),
+      );
+      if (pagosVend.n > 0) hayPagoVendedorReal = true;
+      const lineasComisionMxn = lineasMxn.filter(esComision);
+      const lineaComisionMxn =
+        lineasComisionMxn.length > 0 &&
+        lineasComisionMxn.every((l) => l.ingreso_mxn != null)
+          ? r2n(lineasComisionMxn.reduce((a, l) => a + (l.ingreso_mxn ?? 0), 0))
+          : null;
+      let egresoPagoVendedorAsignado = false;
       // TUA PAGADO del vuelo (categoría TUAS entera + parte TUA EMBEBIDA en
       // facturas de aeródromo leídas por IA — caso ASUR "aterrizaje,
       // pernocta, TUA y plataforma"), calculado UNA vez por vuelo, a MXN con
@@ -879,9 +927,7 @@ export class DineroReportService {
                 valor_ia_extraido: g.valor_ia_extraido,
               });
         if (parte <= 0) continue;
-        const tcg = pos(g.tc_gasto) ?? tc;
-        const parteMxn =
-          g.moneda === 'MXN' ? parte : tcg != null ? parte * tcg : null;
+        const parteMxn = pagadoAMxn(parte, g);
         if (parteMxn == null) {
           // USD sin ningún TC: rastro en el concepto, jamás sumado en falso.
           tuaSinTc = true;
@@ -927,21 +973,37 @@ export class DineroReportService {
           fechaEgreso = fechaTua;
           egresoTuasAsignado = true;
         }
-        // Comisión cobrada ↔ pago al vendedor (Regla A): PROVISIÓN por el
-        // ingreso FINAL de la línea (= pagoVendedorUsd × TC, con el residuo
-        // si cayó aquí) a la fecha del vuelo — el par cierra en 0. No existe
-        // categoría de gasto para ese pago (CategoriaGasto), así que no hay
-        // gasto real con qué aparear; cuando exista, aparear el real como
-        // se hace con TUAS y dejar la provisión solo si falta. Se acumula
-        // para descontarla de "otros ingresos" en utilidades (no es gasto de
-        // ninguna otra hoja).
+        // Comisión cobrada ↔ pago al vendedor (Regla A; invariante 31 desde
+        // el 28-sep-2026). Lo que aquí sale como egreso se descuenta de
+        // "otros ingresos" en utilidades (no es gasto de ninguna otra hoja:
+        // la categoría COMISION_VENDEDOR NO entra a "otros gastos").
         if (esComision(linea)) {
-          egresoMxn = ingresoMxn;
-          conceptoEgreso = `pago ${linea.concepto} · provisión`;
-          fechaEgreso = (v.fecha_vuelo as string) ?? null;
-          notaEgreso =
-            'PROVISIÓN: pago al vendedor por el mismo monto de la comisión cobrada (comisión + IVA = pagoVendedorUsd; neto de VuelaTour = precio base). No hay gasto capturado para este pago — hoy no existe categoría de gasto de comisión de venta. En la hoja utilidades ya está descontado de "otros ingresos".';
-          if (egresoMxn != null) comisionProvisionadaMxn += egresoMxn;
+          if (pagosVend.n === 0) {
+            // Sin gasto real ⇒ PROVISIÓN por el ingreso FINAL de la línea
+            // (= pagoVendedorUsd × TC, con el residuo si cayó aquí) a la
+            // fecha del vuelo — el par cierra en 0.
+            egresoMxn = ingresoMxn;
+            conceptoEgreso = `pago ${linea.concepto} · provisión`;
+            fechaEgreso = (v.fecha_vuelo as string) ?? null;
+            notaEgreso = NOTA_PROVISION_PAGO_VENDEDOR;
+            if (egresoMxn != null) comisionProvisionadaMxn += egresoMxn;
+          } else if (!egresoPagoVendedorAsignado) {
+            // GASTO REAL: Σ de los gastos COMISION_VENDEDOR del vuelo
+            // REEMPLAZA la provisión entera (no queda «provisión del
+            // faltante»: la diferencia se VE como «faltan/excede»), en la
+            // PRIMERA línea de comisión. Remanente: fórmula de siempre.
+            egresoMxn =
+              pagosVend.pagadoMxn != null ? r2(pagosVend.pagadoMxn) : null;
+            conceptoEgreso = conceptoPagoVendedorReal({
+              etiquetaComision,
+              pagos: pagosVend,
+              lineaMxn: lineaComisionMxn,
+            });
+            fechaEgreso = pagosVend.fecha;
+            notaEgreso = NOTA_PAGO_VENDEDOR_REAL;
+            comisionPagadaMxn += egresoMxn ?? 0;
+            egresoPagoVendedorAsignado = true;
+          }
         }
         otrosIngresos.push({
           clave: claveDe(v),
@@ -987,6 +1049,41 @@ export class DineroReportService {
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
         });
+      }
+
+      // PAGO REAL al vendedor SIN línea de comisión que lo aparee (vuelo sin
+      // comisión cotizada, CANCELADO o partición inconsistente): fila de
+      // SOLO-egreso con el motivo de `motivoSinLineaComision` (MISMA regla y
+      // mismo concepto que el Balance general). A diferencia del TUA sin
+      // línea, SÍ se descuenta de "otros ingresos" en utilidades: es dinero
+      // de VuelaTour que no está en ninguna otra hoja.
+      if (pagosVend.n > 0 && !egresoPagoVendedorAsignado) {
+        const motivo = motivoSinLineaComision({
+          cancelado: esCancelado,
+          inconsistente: p.inconsistente,
+          comisionVendedorUsd: p.comision_vendedor_usd,
+        });
+        const egreso =
+          pagosVend.pagadoMxn != null ? r2(pagosVend.pagadoMxn) : null;
+        otrosIngresos.push({
+          clave: claveDe(v),
+          fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          concepto_egreso: conceptoPagoVendedorReal({
+            etiquetaComision,
+            pagos: pagosVend,
+            lineaMxn: null,
+            sinLinea: motivo,
+          }),
+          egreso_mxn: egreso,
+          fecha_egreso: pagosVend.fecha,
+          nota_egreso: NOTA_PAGO_VENDEDOR_SIN_LINEA,
+          concepto_ingreso: null,
+          ingreso_mxn: null,
+          fecha_ingreso: null,
+          remanente_mxn: egreso != null ? r2(-egreso) : null,
+          factura: facturaPorVuelo.get(v.id as string) ?? null,
+        });
+        comisionPagadaMxn += egreso ?? 0;
       }
     }
 
@@ -1131,8 +1228,10 @@ export class DineroReportService {
             g.moneda === 'MXN' ? r.monto : tcg != null ? r.monto * tcg : null;
           if (mxnParcial != null) acreditar(r.aeronave_id, mxnParcial, true);
         }
-      } else if (categoriaEsDeEmpresa(g.categoria as string | null)) {
-        // LA CATEGORÍA DE EMPRESA MANDA (11-sep-2026): OTRO/NOMINA/GASOLINA/
+      } else if (categoriaFueraDelAvion(g.categoria as string | null)) {
+        // COMISION_VENDEDOR (28-sep-2026) tampoco se acredita a un avión
+        // (defensa: siempre trae vuelo y no es de empresa, así que no llega
+        // a esta lectura). LA CATEGORÍA DE EMPRESA MANDA (11-sep-2026): OTRO/NOMINA/GASOLINA/
         // FIJO/VISITA son de VuelaTour aunque traigan avión SELLADO o vuelo
         // — no se acreditan a ningún avión en utilidades (antes un NOMINA
         // sellado a una matrícula caía en sus "gastos indirectos" mientras
@@ -1220,16 +1319,23 @@ export class DineroReportService {
     }
     // Solo INGRESOS (las filas de solo-egreso — TUA pagado sin línea TUAS —
     // llevan ingreso null y no entran): es lo que resta/suma en utilidades.
-    // NETO de la provisión del pago al vendedor: ese egreso no es gasto de
-    // ninguna otra hoja (no existe categoría de gasto de comisión de venta),
-    // así que sin descontarlo aquí la utilidad contaría la comisión cobrada
-    // como ingreso puro cuando VuelaTour se la paga al vendedor.
+    // NETO del pago al vendedor (invariante 31): la PROVISIÓN de los vuelos
+    // sin gasto real y lo PAGADO de verdad (gastos COMISION_VENDEDOR,
+    // apareados o de solo-egreso). Ninguno de los dos es gasto de otra hoja
+    // (la categoría no entra a "otros gastos"), así que sin descontarlos aquí
+    // la utilidad contaría la comisión cobrada como ingreso puro cuando
+    // VuelaTour se la paga al vendedor. Por vuelo se resta uno u otro, nunca
+    // ambos: exacto ⇒ utilidad igual que con la provisión; parcial ⇒ +el
+    // faltante; excedido ⇒ −el excedente.
     const totalOtrosIngresos = otrosIngresos.reduce(
       (s, f) => s + (f.ingreso_mxn ?? 0),
       0,
     );
     const otrosIngresosNetos = r2n(
-      totalOtrosIngresos - comisionProvisionadaMxn - comisionIngresosMxn,
+      totalOtrosIngresos -
+        comisionProvisionadaMxn -
+        comisionPagadaMxn -
+        comisionIngresosMxn,
     );
 
     return {
@@ -1256,11 +1362,20 @@ export class DineroReportService {
       // las cargas sin avión — el dinero no se esconde mientras se asignan).
       utilidades_combustible_mxn: r2(combustibleAcum),
       utilidades_otros_ingresos_mxn: otrosIngresosNetos,
-      // Provisión del pago al vendedor ya descontada arriba (informativo;
-      // pyservices la ignora mientras su schema no la declare).
+      // Provisión del pago al vendedor ya descontada arriba (informativo):
+      // SOLO las provisiones VIVAS (vuelos sin gasto real).
       utilidades_comision_vendedor_provisionada_mxn: r2n(
         comisionProvisionadaMxn,
       ),
+      // Pagado DE VERDAD al vendedor (invariante 31), también descontado
+      // arriba. Clave NUEVA que viaja SOLO si algún vuelo tuvo gasto real:
+      // sin pagos reales el payload es byte-idéntico y pyservices no cambia
+      // sus leyendas.
+      ...(hayPagoVendedorReal
+        ? {
+            utilidades_comision_vendedor_pagada_mxn: r2n(comisionPagadaMxn),
+          }
+        : {}),
       utilidades_otros_gastos_mxn: r2(acumulado),
       utilidades_tc: nTc > 0 ? round6(sumaTc / nTc) : null,
       utilidades_aviones: utilidadesAviones,

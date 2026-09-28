@@ -400,14 +400,22 @@ export interface DineroXlsxPayload {
   /** "Gasto de combustible" del mes: resta en la hoja utilidades. */
   utilidades_combustible_mxn?: number | null;
   /**
-   * Otros ingresos del mes NETOS de la provisión del pago al vendedor
-   * (Σ ingreso_mxn de la hoja "otros ingresos" − Σ egresos provisionados
-   * de comisión): ese egreso no es gasto de ninguna otra hoja, así que si
-   * no se descuenta aquí la utilidad lo cuenta como ingreso puro.
+   * Otros ingresos del mes NETOS del pago al vendedor (Σ ingreso_mxn de la
+   * hoja "otros ingresos" − Σ provisiones de comisión − Σ pagado de verdad
+   * con gastos COMISION_VENDEDOR − comisiones de ingresos): esos egresos no
+   * son gasto de ninguna otra hoja, así que si no se descuentan aquí la
+   * utilidad los cuenta como ingreso puro.
    */
   utilidades_otros_ingresos_mxn?: number | null;
-  /** Provisión del pago al vendedor ya descontada arriba (informativo). */
+  /** Provisión VIVA del pago al vendedor (vuelos sin gasto real) ya descontada arriba (informativo). */
   utilidades_comision_vendedor_provisionada_mxn?: number | null;
+  /**
+   * ADITIVO (28-sep-2026, invariante 31): pagado DE VERDAD al vendedor
+   * (gastos `COMISION_VENDEDOR`) ya descontado arriba. Viaja SOLO si algún
+   * vuelo del periodo tuvo gasto real: pyservices cambia sus leyendas solo
+   * con él (sin él, Excel byte-idéntico).
+   */
+  utilidades_comision_vendedor_pagada_mxn?: number | null;
   utilidades_otros_gastos_mxn?: number | null;
   utilidades_tc?: number | null;
   utilidades_aviones?: DineroUtilidadAvionPayload[];
@@ -1043,6 +1051,13 @@ export interface BalanceHojaOtrosMovimientosPayload {
   filas: BalanceOtroMovimientoFilaPayload[];
   /** Movimientos SIN avión y SIN vuelo (gastos de empresa hoy invisibles). */
   filas_sueltas: BalanceOtroMovimientoFilaPayload[];
+  /**
+   * ADITIVA (28-sep-2026, invariante 31): `true` SOLO si algún vuelo del
+   * periodo tiene gasto real `COMISION_VENDEDOR` (el pago al vendedor ya
+   * reemplaza a la provisión). Sin pagos reales la clave NO viaja ⇒ payload
+   * byte-idéntico; pyservices cambia sus leyendas solo con ella.
+   */
+  hay_pago_vendedor_real?: true;
 }
 
 export interface BalanceAvionPayload {

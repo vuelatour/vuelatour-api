@@ -312,7 +312,9 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     await this.flights.assertAccess(id, c);
-    return this.flights.gastosResumen(id);
+    // El rol decide si ve el pago al vendedor (COMISION_VENDEDOR): la
+    // tripulación no (invariante 31).
+    return this.flights.gastosResumen(id, c.rol);
   }
 
   @Get(':id/gastos-historial')

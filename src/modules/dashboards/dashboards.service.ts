@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
+import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import {
   expandirConReparto,
   fetchRepartos,
@@ -369,8 +369,10 @@ export class DashboardsService {
       // avión — van al bloque de EMPRESA (el dinero no se pierde, cambia de
       // renglón). Sin esto, el tablero pintaba un costo por hora que el
       // balance del mismo avión ya no reconocía. Los PARCIALES de un reparto
-      // manual sí son del avión (el reparto gana).
-      if (!g.es_reparto_parcial && categoriaEsDeEmpresa(g.categoria)) {
+      // manual sí son del avión (el reparto gana). COMISION_VENDEDOR
+      // (28-sep-2026, invariante 31): el pago al vendedor es dinero de
+      // VuelaTour ⇒ también al bloque de EMPRESA (`categoriaFueraDelAvion`).
+      if (!g.es_reparto_parcial && categoriaFueraDelAvion(g.categoria)) {
         gastoEmpresa += usd;
         continue;
       }

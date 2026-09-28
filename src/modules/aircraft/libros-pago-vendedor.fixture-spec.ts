@@ -1,32 +1,33 @@
-// Dependencia de inyección que arrastra el cliente HTTP: fuera del spec.
-jest.mock('../pyservices/pyservices.service', () => ({
-  PyservicesService: class {},
-}));
-
-import { DineroReportService } from './dinero-report.service';
-import type { SupabaseService } from '../supabase/supabase.service';
-import type { DineroXlsxPayload } from '../pyservices/pyservices.service';
+import type {
+  BalanceHojaOtrosMovimientosPayload,
+  DineroXlsxPayload,
+} from '../pyservices/pyservices.service';
 
 /**
- * LIBRO DINERO + INGRESOS SIN VUELO (24-sep-2026, contrato de ingresos §7.6
- * y §12.9).
+ * MUNDO DE LOS LIBROS para los specs de la COMISIÓN DEL VENDEDOR como gasto
+ * (28-sep-2026, invariante 31): `aircraft-balance.service.pago-vendedor.spec`
+ * y `dinero-report.service.pago-vendedor.spec`.
  *
- * 1. Sin ingresos el payload es BYTE-IDÉNTICO al de antes del cambio: el
- *    GOLDEN de abajo se capturó con el código SIN modificar sobre este mismo
- *    mundo (y sin la migración ni siquiera se consulta la tabla).
- * 2. Con ingresos: SOLO las filas de RESULTADO (ING-n) se agregan AL FINAL
- *    de «Otros ingresos» y `utilidades_otros_ingresos_mxn` sube EXACTAMENTE
- *    Σ remanente de esas filas (ingreso − su comisión bancaria). Anticipos y
- *    aportaciones no aparecen.
+ * El mundo y los dos GOLDEN son COPIA LITERAL de los specs de ingresos
+ * (24-sep-2026) — vuelo #501, K 20, comisión 80 USD sin IVA ⇒ línea de
+ * 1,600.00 MXN, TUAS pagadas 1,500, comisión bancaria 350 — para probar que
+ * SIN gastos `COMISION_VENDEDOR` los dos libros salen BYTE-IDÉNTICOS
+ * (el golden del Libro Dinero ya trae la nota NUEVA de la provisión: es la
+ * única cadena que cambia sin gastos nuevos). Los specs de ingresos NO se
+ * tocan; este archivo solo se lee desde los specs nuevos.
+ *
+ * `*-spec.ts` (sin punto) ⇒ fuera del build (tsconfig.build excluye
+ * `**\/*spec.ts`) y fuera de jest (no es `.spec.ts`).
  */
-// ===== Mundo compartido de los libros (se pega TAL CUAL en los dos specs) =====
-type Fila = Record<string, unknown>;
 
-const AV = 'av-1';
-const V1 = 'v-1';
-const DESDE = '2026-09-01';
-const HASTA = '2026-09-30';
-const DIA = '2026-09-10';
+// ===== Mundo compartido de los libros (COPIA TAL CUAL del de `aircraft-balance.service.ingresos.spec.ts` / `dinero-report.service.ingresos.spec.ts`) =====
+export type Fila = Record<string, unknown>;
+
+export const AV = 'av-1';
+export const V1 = 'v-1';
+export const DESDE = '2026-09-01';
+export const HASTA = '2026-09-30';
+export const DIA = '2026-09-10';
 
 function valorEn(f: Fila, col: string): unknown {
   return col.split('.').reduce<unknown>((acc, k) => {
@@ -74,7 +75,7 @@ function partirOr(cond: string): string[] {
  * `movimiento_bancario.ingreso_id` NO existe (42703 en la sonda) y la tabla
  * `ingreso` tampoco. `tablasLeidas` registra qué tablas se consultaron.
  */
-function fakeSupabase(
+export function fakeSupabase(
   tablas: Record<string, Fila[]>,
   opts: { sinMigracion?: boolean } = {},
 ) {
@@ -164,7 +165,7 @@ function fakeSupabase(
   return { supabase: { service: { from } }, tablasLeidas };
 }
 
-const gastoBase = {
+export const gastoBase = {
   aeronave_id: null,
   vuelo_id: null,
   escala_id: null,
@@ -189,7 +190,7 @@ const gastoBase = {
  * empresa y sueltos. Suficiente para recorrer las ramas de «Otros ingresos»
  * del Libro Dinero y de «Otros movimientos» del Balance general.
  */
-function mundoLibros(ingresos: Fila[] = []): Record<string, Fila[]> {
+export function mundoLibros(ingresos: Fila[] = []): Record<string, Fila[]> {
   const vuelo: Fila = {
     id: V1,
     folio: 501,
@@ -325,7 +326,7 @@ function mundoLibros(ingresos: Fila[] = []): Record<string, Fila[]> {
 }
 
 /** Los cuatro ingresos del contrato §12.9 (2 de resultado + 2 fuera). */
-const INGRESOS_LIBROS: Fila[] = [
+export const INGRESOS_LIBROS: Fila[] = [
   {
     id: 'i-1',
     folio: 12,
@@ -393,8 +394,62 @@ const INGRESOS_LIBROS: Fila[] = [
 ];
 // ===== fin del mundo compartido =====
 
-/** Payload del Libro Dinero ANTES del cambio (código sin modificar). */
-const GOLDEN_DINERO = {
+/** «Otros movimientos» del Balance general SIN gastos de comisión (código 0.0.38). */
+export const GOLDEN_OM = {
+  filas: [
+    {
+      clave: 'vtleticia501',
+      avion_color: '#3B82F6',
+      estado: 'COMPLETADO',
+      fecha_vuelo: '2026-09-10',
+      factura: null,
+      concepto_ingreso:
+        'comisión vendedor + TUAs con IVA · 2 conceptos (ver nota)',
+      ingreso_mxn: 4600,
+      fecha_ingreso: '2026-09-10',
+      nota_ingreso:
+        'comisión vendedor (Vendedor Uno) = $1,600.00\ntuas/extras/pernocta cobrados + iva (sin desglose canónico: estimado con columnas) = $3,000.00',
+      concepto_egreso:
+        'pago comisión vendedor + TUAs + comisión bancaria · 3 conceptos (ver nota)',
+      egreso_mxn: 3450,
+      fecha_egreso: '2026-09-10',
+      nota_egreso:
+        'pago comisión vendedor (Vendedor Uno) · PROVISIÓN (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado) = $1,600.00\ntuas pagadas = $1,500.00\ncomisión bancaria = $350.00',
+      remanente_mxn: 1150,
+    },
+  ],
+  filas_sueltas: [
+    {
+      clave: 'tuas sin vuelo',
+      avion_color: null,
+      fecha_vuelo: null,
+      concepto_egreso: 'TUAS',
+      egreso_mxn: 80,
+      fecha_egreso: '2026-09-10',
+      concepto_ingreso: null,
+      ingreso_mxn: null,
+      fecha_ingreso: null,
+      remanente_mxn: -80,
+      factura: null,
+    },
+    {
+      clave: 'gas sin avión',
+      avion_color: null,
+      fecha_vuelo: null,
+      concepto_egreso: 'Gasavión / Turbosina',
+      egreso_mxn: 250,
+      fecha_egreso: '2026-09-10',
+      concepto_ingreso: null,
+      ingreso_mxn: null,
+      fecha_ingreso: null,
+      remanente_mxn: -250,
+      factura: null,
+    },
+  ],
+} as unknown as BalanceHojaOtrosMovimientosPayload;
+
+/** Libro Dinero SIN gastos de comisión (0.0.38 + la nota NUEVA de la provisión). */
+export const GOLDEN_DINERO = {
   periodo_desde: '2026-09-01',
   periodo_hasta: '2026-09-30',
   generado: 'FIJO',
@@ -539,106 +594,78 @@ const GOLDEN_DINERO = {
   ],
 } as unknown as DineroXlsxPayload;
 
-type Privado = {
-  buildPayload: (desde: string, hasta: string) => Promise<DineroXlsxPayload>;
-};
+// ===== Constructores para los casos de la comisión del vendedor =====
 
-async function libroDinero(
-  ingresos: Fila[] = [],
-  opts: { sinMigracion?: boolean } = {},
-) {
-  const f = fakeSupabase(mundoLibros(ingresos), opts);
-  const service = new DineroReportService(
-    f.supabase as unknown as SupabaseService,
-    {} as never,
-  );
-  const p = await (service as unknown as Privado).buildPayload(DESDE, HASTA);
-  return { p: { ...p, generado: 'FIJO' }, tablas: f.tablasLeidas };
+/** Gasto `COMISION_VENDEDOR` ligado al vuelo #501 (con avión sellado). */
+export function gastoComision(
+  id: string,
+  monto: number,
+  extra: Fila = {},
+): Fila {
+  return {
+    ...gastoBase,
+    id,
+    vuelo_id: V1,
+    aeronave_id: AV,
+    vuelo: { folio: 501, aeronave_id: AV },
+    categoria: 'COMISION_VENDEDOR',
+    monto,
+    ...extra,
+  };
 }
 
-describe('Libro Dinero — ingresos sin vuelo (24-sep-2026)', () => {
-  it('SIN la migración: payload byte-idéntico al de hoy y ni una consulta a `ingreso`', async () => {
-    const { p, tablas } = await libroDinero([], { sinMigracion: true });
-    expect(JSON.stringify(p)).toBe(JSON.stringify(GOLDEN_DINERO));
-    expect(tablas).not.toContain('ingreso');
-  });
+/** Segundo vuelo del periodo (sin TUAS/extras/comisión), folio 502. */
+export const V2 = 'v-2';
+export function vuelo2(extra: Fila = {}): Fila {
+  return {
+    id: V2,
+    folio: 502,
+    cliente_id: 'cli-1',
+    aeronave_id: AV,
+    estado: 'COMPLETADO',
+    tipo: 'CHARTER',
+    es_externo: false,
+    operador_externo: null,
+    costo_externo_usd: null,
+    fecha_vuelo: '2026-09-20T15:00:00+00:00',
+    fecha_solicitud: null,
+    fecha_traslado_final: null,
+    origen_iata: 'CUN',
+    destino_iata: 'CZM',
+    tiempo_cobrable_hr: 1,
+    tarifa_hora_usd: 1000,
+    iva_pct: 0,
+    iva_usd: 0,
+    subtotal_vuelo_usd: 1000,
+    ajuste_final_usd: 0,
+    tuas_usd: 0,
+    extras_total_usd: 0,
+    viaticos_pernocta_usd: 0,
+    comision_vendedor_usd: 0,
+    comision_vendedor_nombre: null,
+    monto_total_usd: 1000,
+    monto_total_mxn: 18000,
+    tc_usd_mxn: 18,
+    cobrado: false,
+    calculo_snapshot: null,
+    cliente: { nombre: 'Leticia León Alvarado' },
+    ...extra,
+  };
+}
 
-  it('CON la migración y SIN ingresos: payload byte-idéntico al de hoy', async () => {
-    const { p } = await libroDinero([]);
-    expect(JSON.stringify(p)).toBe(JSON.stringify(GOLDEN_DINERO));
-  });
-
-  it('dados de baja o fuera del periodo: no cambian nada', async () => {
-    const { p } = await libroDinero([
-      { ...INGRESOS_LIBROS[0], deleted_at: '2026-09-16T10:00:00Z' },
-      { ...INGRESOS_LIBROS[1], fecha: '2026-10-01' },
-    ]);
-    expect(JSON.stringify(p)).toBe(JSON.stringify(GOLDEN_DINERO));
-  });
-
-  it('OTRO MXN (comisión $50) + USD con TC + ANTICIPO + APORTACIÓN ⇒ solo 2 filas nuevas AL FINAL', async () => {
-    const { p } = await libroDinero(INGRESOS_LIBROS);
-    const n = GOLDEN_DINERO.otros_ingresos.length;
-    expect(p.otros_ingresos).toHaveLength(n + 2);
-    // Lo de antes, intacto y en el mismo orden.
-    expect(p.otros_ingresos.slice(0, n)).toEqual(GOLDEN_DINERO.otros_ingresos);
-    expect(p.otros_ingresos.slice(n)).toEqual([
-      {
-        clave: 'ING-12',
-        fecha_vuelo: null,
-        concepto_egreso: 'comisión bancaria',
-        egreso_mxn: 50,
-        fecha_egreso: '2026-09-15',
-        nota_egreso: null,
-        concepto_ingreso:
-          'Otros ingresos · Renta de hangar a tercero · Aeroclub Cancún',
-        ingreso_mxn: 5000,
-        fecha_ingreso: '2026-09-15',
-        remanente_mxn: 4950,
-        factura: null,
-      },
-      {
-        clave: 'ING-13',
-        fecha_vuelo: null,
-        concepto_egreso: null,
-        egreso_mxn: null,
-        fecha_egreso: null,
-        nota_egreso: null,
-        concepto_ingreso: 'Ingresos en cuentas de banco · Intereses cuenta USD',
-        ingreso_mxn: 1850,
-        fecha_ingreso: '2026-09-20',
-        remanente_mxn: 1850,
-        factura: null,
-      },
-    ]);
-    // Utilidades sube EXACTAMENTE Σ remanente (5000 − 50 + 1850).
-    expect(p.utilidades_otros_ingresos_mxn).toBe(
-      Math.round(
-        ((GOLDEN_DINERO.utilidades_otros_ingresos_mxn ?? 0) + 4950 + 1850) *
-          100,
-      ) / 100,
-    );
-    // Nada más cambia (ni vuelos, ni otros gastos, ni combustible, ni la
-    // provisión del vendedor).
-    const sinIngresos = {
-      ...p,
-      otros_ingresos: p.otros_ingresos.slice(0, n),
-      utilidades_otros_ingresos_mxn:
-        GOLDEN_DINERO.utilidades_otros_ingresos_mxn,
-    };
-    expect(JSON.stringify(sinIngresos)).toBe(JSON.stringify(GOLDEN_DINERO));
-  });
-
-  it('USD SIN TC (defensa: el CHECK lo impide): fila con la nota, sin sumar', async () => {
-    const { p } = await libroDinero([
-      { ...INGRESOS_LIBROS[1], tc_usd_mxn: null },
-    ]);
-    const n = GOLDEN_DINERO.otros_ingresos.length;
-    const fila = p.otros_ingresos[n];
-    expect(fila.ingreso_mxn).toBeNull();
-    expect(fila.concepto_ingreso).toMatch(/USD sin TC — no suma/);
-    expect(p.utilidades_otros_ingresos_mxn).toBe(
-      GOLDEN_DINERO.utilidades_otros_ingresos_mxn,
-    );
-  });
-});
+/**
+ * El mundo de siempre + gastos extra (+ vuelo #502 opcional y overrides del
+ * vuelo #501). Nunca muta el mundo base.
+ */
+export function mundoCon(
+  opts: { gastos?: Fila[]; v1?: Fila; v2?: Fila | null } = {},
+): Record<string, Fila[]> {
+  const m = mundoLibros();
+  const vuelos = m.vuelo.map((v) => ({ ...v, ...(opts.v1 ?? {}) }));
+  if (opts.v2) vuelos.push(opts.v2);
+  return {
+    ...m,
+    vuelo: vuelos,
+    gasto: [...m.gasto, ...(opts.gastos ?? [])],
+  };
+}

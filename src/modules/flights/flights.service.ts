@@ -75,7 +75,10 @@ import {
   validarComprobanteCobro,
 } from './comprobante-cobro.util';
 import type { ArchivoEntrante } from './factura-cliente.util';
-import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
+import {
+  categoriaEsPagoVendedor,
+  etiquetaCategoriaGasto,
+} from '../../common/categoria-gasto.util';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import type {
@@ -6708,8 +6711,15 @@ export class FlightsService {
    * (piloto/copiloto/apoyo) en la app: con dos o tres personas capturando en
    * el mismo vuelo, ver lo que ya subió cada quien evita duplicados. Lista
    * ligera y sin datos sensibles (sin desgloses fiscales).
+   *
+   * PAGO AL VENDEDOR (28-sep-2026, invariante 31): con `rol` PILOTO o
+   * MECANICO se OMITEN los gastos `COMISION_VENDEDOR` — lo que se le paga al
+   * vendedor no es de la tripulación (esta lista existe para no duplicar
+   * capturas de campo). La oficina los sigue viendo. El filtro va en JS
+   * sobre el resultado, NUNCA con `.neq/.not/.in` de PostgREST: un literal
+   * que el enum de la BD no conoce revienta la LECTURA (22P02).
    */
-  async gastosResumen(vueloId: string) {
+  async gastosResumen(vueloId: string, rol?: Rol) {
     const { data, error } = await this.supabase.service
       .from('gasto')
       .select(
@@ -6718,7 +6728,13 @@ export class FlightsService {
       .eq('vuelo_id', vueloId)
       .order('created_at', { ascending: false });
     if (error) throw new Error(error.message);
-    return (data ?? []).map((g) => {
+    const ocultarPagoVendedor = rol === Rol.PILOTO || rol === Rol.MECANICO;
+    const filas = ocultarPagoVendedor
+      ? (data ?? []).filter(
+          (g) => !categoriaEsPagoVendedor(g.categoria as string | null),
+        )
+      : (data ?? []);
+    return filas.map((g) => {
       const usuario = Array.isArray(g.usuario) ? g.usuario[0] : g.usuario;
       return {
         id: g.id as string,

@@ -57,8 +57,10 @@ import {
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
   categoriaExigeVuelo,
+  categoriaExigeVueloSiempre,
   destinoCategoriaGasto,
   etiquetaCategoriaGasto,
+  mensajeCategoriaSinMigracion,
 } from '../../common/categoria-gasto.util';
 import {
   acoplarTarjetaEnUpdate,
@@ -1195,15 +1197,19 @@ export class ExpensesService {
       !dto.escala_id &&
       categoriaExigeVuelo(dto.categoria)
     ) {
-      throw new BadRequestException({
-        message: `Esta categoría es del vuelo: elige el vuelo. «${etiquetaCategoriaGasto(dto.categoria)}» siempre se registra con el vuelo al que pertenece.`,
-        error: 'GASTO_REQUIERE_VUELO',
-        details: {
-          categoria: dto.categoria,
-          categoria_label: etiquetaCategoriaGasto(dto.categoria),
-          destino: destinoCategoriaGasto(dto.categoria),
-        },
-      });
+      throw this.errorGastoRequiereVuelo(dto.categoria);
+    }
+    // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31): vuelo obligatorio
+    // para TODOS los roles — la oficina incluida, que es quien la captura.
+    // Sin vuelo no tiene con qué aparearse en «otros movimientos» y quedaría
+    // fuera de todo libro. Mismo 400 que el del piloto, ANTES de tocar la BD
+    // (el CHECK `gasto_comision_vendedor_exige_vuelo` es solo el respaldo).
+    if (
+      !dto.vuelo_id &&
+      !dto.escala_id &&
+      categoriaExigeVueloSiempre(dto.categoria)
+    ) {
+      throw this.errorGastoRequiereVuelo(dto.categoria);
     }
     // Fecha del ticket razonable en capturas de CAMPO (28-ago): la IA leyó
     // "26/08/2025" en un ticket de la visita de 2026 y el gasto quedó un año
@@ -1541,6 +1547,7 @@ export class ExpensesService {
         dto.estatus_facturacion,
       );
       if (sinMigracion) throw new BadRequestException(sinMigracion);
+      this.lanzarErrorComisionVendedor(error, dto.categoria);
       // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500
       // (un 500 dispara el reintento del outbox de la app y se repetiría).
       if (error.code === '23514')
@@ -2375,6 +2382,48 @@ export class ExpensesService {
     return count ?? 0;
   }
 
+  /**
+   * 400 ESTRUCTURADO `GASTO_REQUIERE_VUELO` (mismo `message`/`details` para el
+   * candado del PILOTO —categorías del vuelo— y el de TODOS los roles
+   * —COMISION_VENDEDOR, invariante 31—). La app lo distingue por `error`.
+   */
+  private errorGastoRequiereVuelo(
+    categoria: string | null | undefined,
+  ): BadRequestException {
+    return new BadRequestException({
+      message: `Esta categoría es del vuelo: elige el vuelo. «${etiquetaCategoriaGasto(categoria)}» siempre se registra con el vuelo al que pertenece.`,
+      error: 'GASTO_REQUIERE_VUELO',
+      details: {
+        categoria,
+        categoria_label: etiquetaCategoriaGasto(categoria),
+        destino: destinoCategoriaGasto(categoria),
+      },
+    });
+  }
+
+  /**
+   * Errores de BD del insert/update ligados a la COMISIÓN DEL VENDEDOR
+   * (28-sep-2026): nunca 500 ni el 409 genérico del CHECK.
+   *  - 22P02 del enum sin la migración 20260928000001 ⇒ 400 legible
+   *    (cinturón: ver `mensajeCategoriaSinMigracion`).
+   *  - 23514 del CHECK `gasto_comision_vendedor_exige_vuelo` (respaldo de BD
+   *    de la regla del API; p. ej. una carrera que desligó el vuelo) ⇒ el
+   *    mismo 400 `GASTO_REQUIERE_VUELO` del formulario.
+   */
+  private lanzarErrorComisionVendedor(
+    error: { code?: string | null; message?: string | null },
+    categoria: string | null | undefined,
+  ): void {
+    const sinEnum = mensajeCategoriaSinMigracion(error, categoria);
+    if (sinEnum) throw new BadRequestException(sinEnum);
+    if (
+      error.code === '23514' &&
+      (error.message ?? '').includes('gasto_comision_vendedor_exige_vuelo')
+    ) {
+      throw this.errorGastoRequiereVuelo(categoria ?? 'COMISION_VENDEDOR');
+    }
+  }
+
   /** Texto único del candado: «Este gasto tiene N cargos del banco ligados…». */
   private mensajeCargosLigados(n: number, accion: string): string {
     return n === 1
@@ -2788,6 +2837,13 @@ export class ExpensesService {
           'Un gasto de visita no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
         );
       }
+      // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31): espejo del
+      // create() para TODOS los roles — desligar el vuelo de una comisión o
+      // reclasificar a comisión un gasto sin vuelo ⇒ el mismo 400. Moverla a
+      // OTRO vuelo sigue permitido.
+      if (categoriaExigeVueloSiempre(catEf) && !vueloEf && !escalaEf) {
+        throw this.errorGastoRequiereVuelo(catEf);
+      }
     }
     // El invariante propina <= monto también vive aquí (el create no basta:
     // un PATCH parcial de solo uno de los dos podría dejar ticket negativo).
@@ -2997,6 +3053,10 @@ export class ExpensesService {
         dto.estatus_facturacion,
       );
       if (sinMigracion) throw new BadRequestException(sinMigracion);
+      this.lanzarErrorComisionVendedor(
+        error,
+        dto.categoria ?? actual?.categoria,
+      );
       // CHECK de BD (medio↔tarjeta, propina, monto): 409 legible, nunca 500.
       if (error.code === '23514')
         throw new ConflictException(mensajeCheckGasto(error));

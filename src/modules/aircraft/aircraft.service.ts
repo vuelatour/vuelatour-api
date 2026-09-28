@@ -4,7 +4,7 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
-import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
+import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { ExpirationsService } from '../expirations/expirations.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
@@ -284,8 +284,10 @@ export class AircraftService {
       // reparto a socios, el Libro Dinero y el tablero): OTRO, NOMINA,
       // GASOLINA, FIJO y VISITA son gasto de VuelaTour aunque estén sellados
       // a esta matrícula. Sin este filtro, la ficha del avión pintaba una
-      // utilidad que su propio balance ya no reconocía.
-      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
+      // utilidad que su propio balance ya no reconocía. COMISION_VENDEDOR
+      // (28-sep-2026, invariante 31) tampoco: el pago al vendedor vive en
+      // «otros movimientos» del general (`categoriaFueraDelAvion`).
+      if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
       bump(g.moneda as string, 'gastos', Number(g.monto));
     }
     const finanzas = [...byMoneda.entries()].map(([moneda, v]) => ({

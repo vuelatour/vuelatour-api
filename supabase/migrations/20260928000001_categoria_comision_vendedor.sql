@@ -1,0 +1,102 @@
+-- 28-sep-2026 · CATEGORÍA DE GASTO «Comisión del vendedor» (COMISION_VENDEDOR)
+-- (API 0.0.39, invariante 31 del CLAUDE.md del API).
+--
+-- Pedido del cliente (con capturas de las hojas «otros movimientos» y «otros
+-- gastos» del balance general): «¿cómo registro un gasto para que aparezca en
+-- la hoja de otros movimientos? Como pagarle una comisión a Saab. Veo que
+-- está prellenada con la leyenda de que es PROVISIÓN sin un gasto real
+-- capturado, pero ¿cómo edito eso para poner el gasto real? Si lo agrego en
+-- Gastos como "Otros gastos VuelaTour" me lo manda a la hoja de Otros gastos
+-- como un gasto aparte del que ya está en otros movimientos: queda
+-- duplicado.»
+--
+-- QUÉ HACE: agrega el valor `COMISION_VENDEDOR` al enum
+-- `public.categoria_gasto` (queda el ÚLTIMO, 20 valores). Nada más: sin
+-- filas, sin triggers, sin CHECK (el CHECK va en 20260928000002).
+--
+-- REGLAS DE LA CATEGORÍA (las aplica el API 0.0.39):
+--   1. Exige vuelo para TODOS los roles (400 GASTO_REQUIERE_VUELO; respaldo
+--      de BD en 20260928000002). El avión se hereda del vuelo solo como
+--      referencia.
+--   2. NO es costo del avión en ningún libro (fila del vuelo, hojas del
+--      avión, reparto, ficha, tablero, grupo, reporte por vuelo).
+--   3. NO va a la hoja «otros gastos» (no es categoría de empresa).
+--   4. Vive en «otros movimientos» (Balance general) y «Otros ingresos»
+--      (Libro Dinero) apareada con la comisión cobrada: REEMPLAZA a la
+--      PROVISIÓN; la provisión solo queda en vuelos sin gasto real.
+--   5. Monto libre, varios por vuelo, proveedor opcional, cualquier moneda.
+--      No repartible (`tg_gasto_reparto_valida` sin cambio).
+--   6. La IA de tickets no la sugiere.
+--
+-- Sola en su archivo A PROPÓSITO (patrón 20260909000001 / 20260827000001):
+-- un valor nuevo de enum no puede USARSE en la misma transacción que lo crea;
+-- el CHECK y su dry-run con INSERT real van en 20260928000002.
+--
+-- DEPENDENCIA DURA DEL API 0.0.39 (crítica 28-sep-2026, verificado en prod):
+-- un literal de enum que NO existe revienta la CONSULTA, no solo la
+-- escritura (`… where categoria not in ('OTRO','COMISION_VENDEDOR')` ⇒
+-- 22P02). El API 0.0.39 arma `not.in(CATEGORIAS_GASTO_SIN_AVION)` (bandeja
+-- de pendientes, alerta `gastos_sin_avion`, pre-cierre) y `.eq('categoria',
+-- …)` antes del insert: contra una BD SIN este valor daría 500. ⇒ ESTA
+-- MIGRACIÓN VA ANTES DEL DEPLOY DEL API 0.0.39.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN 1 (ANTES de aplicar). UNA sola sentencia; el `raise exception`
+-- final revierte todo (PG ≥ 12 permite `ADD VALUE` dentro de una
+-- transacción; el valor no se USA, solo se lee `pg_enum`). Cualquier
+-- 'DRYRUN_FALLA …' = NO aplicar. Si la herramienta rechazara el ADD VALUE
+-- dentro del DO, repetirlo como `begin; alter type …; select …; rollback;`
+-- en una sola llamada.
+--
+-- do $dry$
+-- declare
+--   v_n int;
+--   v_ultimo text;
+-- begin
+--   -- A) CONTEXTO
+--   if exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+--               join pg_namespace n on n.oid = t.typnamespace
+--              where n.nspname = 'public' and t.typname = 'categoria_gasto'
+--                and e.enumlabel = 'COMISION_VENDEDOR') then
+--     raise exception 'DRYRUN_FALLA A: COMISION_VENDEDOR ya existe (¿migración aplicada?)';
+--   end if;
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid
+--     join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> 19 then
+--     raise exception 'DRYRUN_FALLA A: el enum tiene % valores (esperado 19)', v_n;
+--   end if;
+--   raise notice 'okA · 19 valores, sin COMISION_VENDEDOR';
+--
+--   -- B) CUERPO REAL (pegado TAL CUAL)
+--   alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR';
+--
+--   -- C) VERIFICACIÓN
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid
+--     join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> 20 then
+--     raise exception 'DRYRUN_FALLA C: % valores tras el ADD (esperado 20)', v_n;
+--   end if;
+--   select e.enumlabel into v_ultimo from pg_enum e join pg_type t on t.oid = e.enumtypid
+--     join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto'
+--    order by e.enumsortorder desc limit 1;
+--   if v_ultimo <> 'COMISION_VENDEDOR' then
+--     raise exception 'DRYRUN_FALLA C: el último valor es % (esperado COMISION_VENDEDOR)', v_ultimo;
+--   end if;
+--   -- re-ejecutar el cuerpo es no-op (IF NOT EXISTS)
+--   alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR';
+--   raise exception 'DRYRUN_OK 20260928000001 · A–C (20 valores, COMISION_VENDEDOR al final, idempotente)';
+-- end $dry$;
+--
+-- Tras el DRYRUN_OK:
+--   select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto';                      ⇒ 19 (nada quedó)
+-- Aplicar (MCP `apply_migration`) ⇒ volver a contar ⇒ 20 ⇒ `get_advisors`.
+-- Rollback: no se quita el valor del enum (inofensivo sin filas); para
+-- volver al API 0.0.38 ver la sección 9 del contrato / CLAUDE.md
+-- (prohibido con gastos COMISION_VENDEDOR ya capturados).
+-- ---------------------------------------------------------------------------
+
+alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR';

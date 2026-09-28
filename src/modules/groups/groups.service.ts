@@ -9,7 +9,7 @@ import {
   avionOcupadoEnFecha,
   avisoAvionOcupado,
 } from '../../common/avion-ocupado.util';
-import { categoriaEsDeEmpresa } from '../../common/categoria-gasto.util';
+import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { normalizarTc } from '../../common/tc.util';
 import { horasPactadasPersistidas } from '../../common/horas.util';
@@ -1737,8 +1737,9 @@ export class GroupsService {
       // VISITA son gasto de VuelaTour aunque estén ligados a este hijo. Ni
       // se cuentan ni se suman aquí: el reporte por vuelo y el balance ya
       // los sacaron del vuelo, y dos cifras distintas del MISMO vuelo es
-      // exactamente lo que rompe el cierre.
-      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
+      // exactamente lo que rompe el cierre. COMISION_VENDEDOR (28-sep-2026,
+      // invariante 31) tampoco es gasto del hijo (`categoriaFueraDelAvion`).
+      if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
       s.n += 1;
       const monto = num(g.monto);
       if (g.moneda === 'USD') {

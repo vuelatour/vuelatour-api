@@ -38,6 +38,9 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
   REFACCION: 'Refacción',
   PERMISO: 'Permiso',
   PILOTO_EXTERNO: 'Piloto externo (honorario)',
+  /** Pago al vendedor (28-sep-2026): se aparea con la comisión cobrada en
+   *  «otros movimientos» (invariante 31 del CLAUDE.md del API). */
+  COMISION_VENDEDOR: 'Comisión del vendedor',
   /** Legado, solo lectura (fuera de los selectores desde el 2-sep-2026). */
   FIJO: 'Gasto fijo',
   INDIRECTO: 'Gastos indirectos de avión',
@@ -61,6 +64,10 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   HOTEL: 'Gastos directos del vuelo (en el balance del avión)',
   TAXI: 'Gastos directos del vuelo (en el balance del avión)',
   PILOTO_EXTERNO: 'Gastos directos del vuelo (en el balance del avión)',
+  // NO empieza con «Gastos directos del vuelo» ni es el destino de EMPRESA:
+  // no es costo del avión ni va a «otros gastos» (invariante 31).
+  COMISION_VENDEDOR:
+    'Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
   REFACCION:
     'Inventario en el Balance general VuelaTour; al salir del inventario se vende al avión y cae en sus Gastos Indirectos',
   PERMISO: 'Hoja de permisos (en el balance del avión)',
@@ -126,7 +133,101 @@ export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
   ...CATEGORIAS_GASTO_EMPRESA,
   'INDIRECTO',
   'PERSONAL_DUENO',
+  // COMISION_VENDEDOR (28-sep-2026): pago al vendedor, no es costo de ningún
+  // avión — una comisión de un vuelo sin avión NO es «pendiente de avión».
+  // OJO (crítica 28-sep): este arreglo arma un `not.in(...)` de PostgREST y
+  // un literal que el enum de la BD no conoce revienta la LECTURA (22P02)
+  // ⇒ el API que lo trae exige la migración 20260928000001 ANTES del deploy.
+  'COMISION_VENDEDOR',
 ];
+
+/**
+ * COMISIÓN DEL VENDEDOR como gasto (pedido del cliente, 28-sep-2026: «¿cómo
+ * registro el pago de la comisión a Saab para que aparezca en otros
+ * movimientos? Si lo capturo como "Otros gastos VuelaTour" queda
+ * duplicado»). Invariante 31 del CLAUDE.md del API.
+ *
+ * El pago al vendedor es dinero de VuelaTour (la comisión cobrada es ingreso
+ * de VuelaTour, regla 28-ago-2026): NO es costo de ningún avión, NO va a la
+ * hoja «otros gastos», y en «otros movimientos» (Balance general) / «Otros
+ * ingresos» (Libro Dinero) se APAREA con la línea de comisión cobrada del
+ * vuelo y REEMPLAZA a la PROVISIÓN (`src/common/pago-vendedor.util.ts`).
+ */
+export const CATEGORIA_PAGO_VENDEDOR = 'COMISION_VENDEDOR';
+
+/** ¿Es el pago real al vendedor (categoría «Comisión del vendedor»)? */
+export function categoriaEsPagoVendedor(
+  cat: string | null | undefined,
+): boolean {
+  return cat === CATEGORIA_PAGO_VENDEDOR;
+}
+
+/**
+ * Vuelo obligatorio para TODOS los roles (la oficina incluida). A diferencia
+ * de `categoriaExigeVuelo` —que el API solo impone al PILOTO: la oficina
+ * carga gastos sueltos y los liga después—, una comisión sin vuelo no tiene
+ * con qué aparearse y quedaría fuera de todo libro. Respaldo en BD: CHECK
+ * `gasto_comision_vendedor_exige_vuelo` (20260928000002).
+ */
+export const CATEGORIAS_GASTO_VUELO_OBLIGATORIO: ReadonlySet<string> = new Set([
+  CATEGORIA_PAGO_VENDEDOR,
+]);
+
+/** ¿La categoría exige vuelo para CUALQUIER rol? (ver arriba). */
+export function categoriaExigeVueloSiempre(
+  cat: string | null | undefined,
+): boolean {
+  return !!cat && CATEGORIAS_GASTO_VUELO_OBLIGATORIO.has(cat);
+}
+
+/**
+ * NO son costo de ningún avión aunque traigan vuelo/avión sellados: las de
+ * EMPRESA (van a «otros gastos») ∪ {COMISION_VENDEDOR} (va a «otros
+ * movimientos»). Fuente única de los lectores cuyo propósito es «¿resta al
+ * avión / al vuelo?» (fila del vuelo del balance, ficha, tablero, grupo,
+ * reporte por vuelo, acreditación del Libro Dinero). Los lectores que arman
+ * la hoja «otros gastos» siguen usando `CATEGORIAS_GASTO_EMPRESA`: la
+ * comisión NO va ahí.
+ */
+export const CATEGORIAS_GASTO_FUERA_DEL_AVION: ReadonlySet<string> = new Set([
+  ...CATEGORIAS_GASTO_EMPRESA,
+  CATEGORIA_PAGO_VENDEDOR,
+]);
+
+/** ¿El gasto queda fuera del costo del avión/vuelo? (ver arriba). */
+export function categoriaFueraDelAvion(
+  cat: string | null | undefined,
+): boolean {
+  return !!cat && CATEGORIAS_GASTO_FUERA_DEL_AVION.has(cat);
+}
+
+/** Texto del 400 cuando la BD todavía no tiene el valor nuevo del enum. */
+export const MENSAJE_CATEGORIA_SIN_MIGRACION =
+  '«Comisión del vendedor» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
+
+/**
+ * 22P02 «invalid input value for enum categoria_gasto: "COMISION_VENDEDOR"»
+ * al ESCRIBIR ⇒ texto 400 (nunca 500: un 500 invita al outbox a reintentar).
+ *
+ * (Crítica 28-sep-2026) Es SOLO un cinturón del insert/update: NO hace que el
+ * API tolere una BD sin la migración — las LECTURAS con el literal nuevo
+ * (`not.in` de `CATEGORIAS_GASTO_SIN_AVION`, `.eq('categoria', …)` de los
+ * candados anti-duplicado que corren ANTES del insert) revientan con 22P02
+ * primero. La garantía real es el orden del despliegue (migración antes del
+ * API). Se exige que la categoría ENVIADA sea COMISION_VENDEDOR y que el
+ * mensaje hable del enum `categoria_gasto`.
+ */
+export function mensajeCategoriaSinMigracion(
+  error: { code?: string | null; message?: string | null },
+  categoriaEnviada: string | null | undefined,
+): string | null {
+  if (!categoriaEsPagoVendedor(categoriaEnviada)) return null;
+  if (error.code !== '22P02') return null;
+  const msg = error.message ?? '';
+  if (!/categoria_gasto/.test(msg)) return null;
+  if (!msg.includes(CATEGORIA_PAGO_VENDEDOR)) return null;
+  return MENSAJE_CATEGORIA_SIN_MIGRACION;
+}
 
 /**
  * Etiqueta humana de un código de categoría. Fallback para códigos que el
@@ -188,6 +289,9 @@ const CATEGORIAS_GASTO_SIEMPRE_DE_VUELO: ReadonlySet<string> = new Set([
   'TUAS',
   'PERMISO',
   'PILOTO_EXTERNO',
+  // COMISION_VENDEDOR (28-sep-2026): la comisión siempre es de un vuelo; su
+  // candado además aplica a TODOS los roles (`categoriaExigeVueloSiempre`).
+  'COMISION_VENDEDOR',
 ]);
 
 /** Prefijo del destino que marca a una categoría como "del vuelo". */
@@ -199,7 +303,9 @@ const DESTINO_DIRECTO_DE_VUELO = 'Gastos directos del vuelo';
  *
  * Regla: es del vuelo si su destino por default son los «Gastos directos del
  * vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO, COMIDA, HOTEL, TAXI,
- * PILOTO_EXTERNO) o si está en la lista de arriba (PERMISO). Las de
+ * PILOTO_EXTERNO) o si está en la lista de arriba (PERMISO y, desde el
+ * 28-sep-2026, COMISION_VENDEDOR — que además exige vuelo a TODOS los roles,
+ * ver `categoriaExigeVueloSiempre`). Las de
  * EMPRESA/indirectos (INDIRECTO, SERVICIOS, NOMINA, GASOLINA, OTRO, VISITA,
  * FIJO, PERSONAL_DUENO), REFACCION (va a inventario) y GAS (11-sep-2026: el
  * piloto también carga combustible en base) se capturan sin vuelo.

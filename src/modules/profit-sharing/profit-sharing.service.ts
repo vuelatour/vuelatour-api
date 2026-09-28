@@ -11,6 +11,7 @@ import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import {
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
+  categoriaEsPagoVendedor,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
@@ -93,6 +94,18 @@ const FIJO = 'FIJO';
  */
 const TUAS_CAT = 'TUAS';
 const TUAS_CLAVE_DETALLE = 'TUAS (egreso VuelaTour — Otros movimientos)';
+/**
+ * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): grupo
+ * EXCLUIDO del reparto — la comisión cobrada es ingreso de VuelaTour y su
+ * pago vive en «otros movimientos» del Balance general apareado con ella;
+ * jamás es costo del avión. Espejo EXACTO de `TUAS_CLAVE_DETALLE`: la clave
+ * EMPIEZA con el código para que `detalleGastos` derive la etiqueta
+ * «Comisión del vendedor (egreso VuelaTour — Otros movimientos)» por
+ * `categoria.startsWith(acc.categoria)` (con una clave en español el sufijo
+ * se perdía).
+ */
+export const PAGO_VENDEDOR_CLAVE_DETALLE =
+  'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)';
 /**
  * TUA EMBEBIDO en facturas de aeródromo/handling (leído por IA): esa parte se
  * descuenta del costo del avión con la FUENTE ÚNICA `tuaEmbebidoDeGasto`
@@ -1151,9 +1164,12 @@ export class ProfitSharingService {
       // manual (`gasto_reparto`), que sí son del avión de cada parte.
       const empresaSinReparto =
         categoriaEsDeEmpresa(g.categoria) && !g.es_reparto_parcial;
+      // Pago al vendedor (invariante 31): EXCLUIDO explícito (antes de la
+      // regla ya caía al default EXCLUIDO; la rama lo hace a propósito).
+      const esPagoVendedor = categoriaEsPagoVendedor(g.categoria);
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
-        esTuas
+        esTuas || esPagoVendedor
           ? 'EXCLUIDO'
           : empresaSinReparto
             ? 'EXCLUIDO'
@@ -1180,9 +1196,11 @@ export class ProfitSharingService {
       // y un FIJO/INDIRECTO repartido no colisiona con su versión cruda.
       const clave = esTuas
         ? TUAS_CLAVE_DETALLE
-        : g.es_reparto_parcial
-          ? `${g.categoria} (repartido)`
-          : g.categoria;
+        : esPagoVendedor
+          ? PAGO_VENDEDOR_CLAVE_DETALLE
+          : g.es_reparto_parcial
+            ? `${g.categoria} (repartido)`
+            : g.categoria;
       const acc = porCategoria.get(clave) ?? {
         grupo,
         categoria: g.categoria,

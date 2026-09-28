@@ -37,6 +37,21 @@ export enum CategoriaGasto {
   PERMISO = 'PERMISO',
   /** Honorario del piloto externo (freelance sin acceso; lo captura oficina). */
   PILOTO_EXTERNO = 'PILOTO_EXTERNO',
+  /** Pago al VENDEDOR de su comisión (28-sep-2026, pedido del cliente: «¿cómo
+   *  le pago la comisión a Saab sin que quede duplicada?»). Invariante 31 del
+   *  CLAUDE.md del API:
+   *  - Exige vuelo para TODOS los roles (400 `GASTO_REQUIERE_VUELO`; CHECK
+   *    `gasto_comision_vendedor_exige_vuelo` de respaldo); el avión se hereda
+   *    del vuelo solo como referencia.
+   *  - NO es costo del avión (fila del vuelo, libro del avión, reparto,
+   *    ficha, tablero, grupo, reporte por vuelo) y NO va a «otros gastos».
+   *  - Vive en «otros movimientos» (Balance general) y «Otros ingresos»
+   *    (Libro Dinero) apareado con la comisión cobrada: REEMPLAZA a la
+   *    PROVISIÓN (`pago-vendedor.util.ts`).
+   *  - Monto libre (parcial/exacto/mayor), varios por vuelo, proveedor
+   *    opcional, cualquier moneda. No repartible. La IA de tickets no la
+   *    sugiere. */
+  COMISION_VENDEDOR = 'COMISION_VENDEDOR',
   FIJO = 'FIJO',
   /** Gasto indirecto de la operación (SIN vuelo; avión opcional). Por ahora
    *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir

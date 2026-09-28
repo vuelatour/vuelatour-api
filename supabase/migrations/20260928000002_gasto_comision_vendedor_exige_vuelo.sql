@@ -1,0 +1,195 @@
+-- 28-sep-2026 · «Comisión del vendedor» SIEMPRE con vuelo — respaldo de BD
+-- (API 0.0.39, invariante 31 del CLAUDE.md del API).
+--
+-- QUÉ HACE: CHECK `gasto_comision_vendedor_exige_vuelo` en `public.gasto`:
+-- un gasto COMISION_VENDEDOR no puede quedar sin `vuelo_id`. El API responde
+-- 400 GASTO_REQUIERE_VUELO ANTES de llegar aquí (alta y edición, TODOS los
+-- roles) y traduce este 23514 al MISMO 400; el CHECK es el respaldo (carrera,
+-- un UPDATE a mano, un camino futuro que se olvide la regla). Sin backfill:
+-- hoy hay 0 filas COMISION_VENDEDOR (el valor nace en 20260928000001).
+--
+-- El CHECK compara `categoria::text` (regla del workspace: enums en `::text`;
+-- además así no depende de que el literal exista al validar).
+--
+-- ORDEN: DESPUÉS de 20260928000001 (su dry-run INSERTA el valor nuevo, que
+-- ya debe estar confirmado en otra transacción). El API 0.0.39 funciona con o
+-- sin este CHECK (el candado del API es el que decide).
+--
+-- FK Y BORRADOS: `gasto.vuelo_id` es `ON DELETE SET NULL`; con el CHECK, borrar
+-- un vuelo con una comisión rebotaría con 23514. Los caminos de borrado del
+-- API YA se niegan antes con gastos ligados (409 VUELO_CON_ACTIVIDAD / purga
+-- «gasto(s) ligados»), y las compensaciones de alta solo borran vuelos recién
+-- creados, sin gastos. `vuelo.grupo_id` es RESTRICT (sin cambio).
+--
+-- NO SE TOCAN los 2 gastos de PRUEBA del cliente en el vuelo #317 (OTRO,
+-- 250,000.00 y 870,000.00 MXN, «PRUEBA COMISION SAAB»): los borra la oficina.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN 2 (DESPUÉS de aplicar 20260928000001 y ANTES de aplicar esta).
+-- Escrituras REALES sobre `gasto`, `gasto_reparto` y `movimiento_bancario`
+-- que disparan TODOS sus triggers (bitácora, personal_dueno, sync_facturacion,
+-- updated_at, reparto_valida, mov_bancario_gasto_suma — un error de trigger
+-- es INVISIBLE para cualquier `select`: forma exacta del incidente del ENUM
+-- `moneda` del 15-sep). UNA sentencia; termina en `raise exception
+-- 'DRYRUN_OK …'` ⇒ Postgres revierte TODO aunque la herramienta haga
+-- autocommit. Cualquier 'DRYRUN_FALLA …' u otro error = NO aplicar.
+-- Columnas, enums (`medio_pago`, `rol_usuario`, `estado_usuario`), CHECKs de
+-- `gasto` (origen, monto, tarjeta) y de `movimiento_bancario`
+-- (`movimiento_bancario_check`: gasto_id ⇒ conciliado) y los textos de los
+-- triggers cotejados en prod con SELECT el 28-sep-2026 (382 cargos MXN
+-- libres; vuelo #317 existe con avión; 8 ADMIN activos).
+--
+-- do $dry$
+-- declare
+--   c_folio constant int := 317;
+--   v_vuelo uuid; v_avion uuid; v_usr uuid;
+--   v_g uuid; v_g2 uuid; v_mov uuid; v_mov_monto numeric;
+--   v_n int; v_msg text;
+-- begin
+--   -- A) CONTEXTO
+--   if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+--                   join pg_namespace n on n.oid = t.typnamespace
+--                  where n.nspname = 'public' and t.typname = 'categoria_gasto'
+--                    and e.enumlabel = 'COMISION_VENDEDOR') then
+--     raise exception 'DRYRUN_FALLA A: falta aplicar 20260928000001';
+--   end if;
+--   if exists (select 1 from pg_constraint where conname = 'gasto_comision_vendedor_exige_vuelo') then
+--     raise exception 'DRYRUN_FALLA A: el CHECK ya existe (¿migración aplicada?)';
+--   end if;
+--   if exists (select 1 from public.gasto where categoria::text = 'COMISION_VENDEDOR') then
+--     raise exception 'DRYRUN_FALLA A: ya hay gastos COMISION_VENDEDOR en prod';
+--   end if;
+--   select id, aeronave_id into v_vuelo, v_avion from public.vuelo where folio = c_folio;
+--   if v_vuelo is null then raise exception 'DRYRUN_FALLA A: no existe el vuelo #%', c_folio; end if;
+--   select id into v_usr from public.usuario
+--    where rol::text = 'ADMIN' and estado::text = 'ACTIVO' order by created_at limit 1;
+--   if v_usr is null then raise exception 'DRYRUN_FALLA A: sin ADMIN activo'; end if;
+--   raise notice 'okA · vuelo #% %, admin %', c_folio, v_vuelo, v_usr;
+--
+--   -- B) CUERPO REAL de la sección 1 (pegado TAL CUAL)
+--   alter table public.gasto drop constraint if exists gasto_comision_vendedor_exige_vuelo;
+--   alter table public.gasto add constraint gasto_comision_vendedor_exige_vuelo
+--     check (categoria::text <> 'COMISION_VENDEDOR' or vuelo_id is not null);
+--
+--   -- C1) INSERT REAL con vuelo (bitácora, personal_dueno, sync_facturacion, updated_at)
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto,
+--                             medio_pago, vuelo_id, aeronave_id, notas, origen, created_by, updated_by)
+--   values (v_usr, 'COMISION_VENDEDOR', 2030.00, 'MXN', date '2026-09-28',
+--           'TRANSFERENCIA', v_vuelo, v_avion, 'DRYRUN comisión vendedor', 'OFICINA', v_usr, v_usr)
+--   returning id into v_g;
+--   select count(*) into v_n from public.gasto_bitacora where gasto_id = v_g and accion = 'INSERT';
+--   if v_n <> 1 then raise exception 'DRYRUN_FALLA C1: bitácora INSERT = % (esperado 1)', v_n; end if;
+--   if (select estatus_facturacion from public.gasto where id = v_g) <> 'PENDIENTE' then
+--     raise exception 'DRYRUN_FALLA C1: estatus_facturacion inesperado';
+--   end if;
+--   raise notice 'okC1 · INSERT con vuelo';
+--
+--   -- C2) UPDATE REAL (monto + fecha) ⇒ bitácora UPDATE
+--   update public.gasto set monto = 1750.00, fecha_gasto = date '2026-09-29', updated_by = v_usr where id = v_g;
+--   select count(*) into v_n from public.gasto_bitacora where gasto_id = v_g and accion = 'UPDATE';
+--   if v_n <> 1 then raise exception 'DRYRUN_FALLA C2: bitácora UPDATE = % (esperado 1)', v_n; end if;
+--   raise notice 'okC2 · UPDATE';
+--
+--   -- C3) Quitarle el vuelo ⇒ 23514 del CHECK nuevo (y de NINGÚN otro)
+--   begin
+--     update public.gasto set vuelo_id = null, updated_by = v_usr where id = v_g;
+--     raise exception 'DRYRUN_FALLA C3: quedó una comisión SIN vuelo';
+--   exception when check_violation then
+--     get stacked diagnostics v_msg = constraint_name;
+--     if v_msg is distinct from 'gasto_comision_vendedor_exige_vuelo' then
+--       raise exception 'DRYRUN_FALLA C3: rebotó otro CHECK (%)', v_msg;
+--     end if;
+--   end;
+--   raise notice 'okC3 · sin vuelo rebota';
+--
+--   -- C4) INSERT sin vuelo ⇒ 23514; un OTRO sin vuelo sigue pasando
+--   begin
+--     insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto,
+--                               medio_pago, origen, created_by, updated_by)
+--     values (v_usr, 'COMISION_VENDEDOR', 100.00, 'MXN', date '2026-09-28',
+--             'TRANSFERENCIA', 'OFICINA', v_usr, v_usr);
+--     raise exception 'DRYRUN_FALLA C4: se insertó una comisión SIN vuelo';
+--   exception when check_violation then
+--     get stacked diagnostics v_msg = constraint_name;
+--     if v_msg is distinct from 'gasto_comision_vendedor_exige_vuelo' then
+--       raise exception 'DRYRUN_FALLA C4: rebotó otro CHECK (%)', v_msg;
+--     end if;
+--   end;
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto,
+--                             medio_pago, origen, notas, created_by, updated_by)
+--   values (v_usr, 'OTRO', 100.00, 'MXN', date '2026-09-28', 'TRANSFERENCIA', 'OFICINA',
+--           'DRYRUN otro sin vuelo', v_usr, v_usr)
+--   returning id into v_g2;
+--   raise notice 'okC4 · sin vuelo rebota; OTRO sin vuelo pasa';
+--
+--   -- C5) Reparto manual ⇒ lo rechaza tg_gasto_reparto_valida (ligado a vuelo)
+--   begin
+--     insert into public.gasto_reparto (gasto_id, aeronave_id, monto, created_by, updated_by)
+--     values (v_g, v_avion, 100.00, v_usr, v_usr);
+--     raise exception 'DRYRUN_FALLA C5: se repartió una comisión';
+--   exception when raise_exception then
+--     get stacked diagnostics v_msg = message_text;
+--     if v_msg not like 'gasto_reparto:%' then raise; end if;
+--   end;
+--   raise notice 'okC5 · no repartible';
+--
+--   -- C6) Conciliación: ligar y desligar un CARGO MXN libre (tg_mov_bancario_gasto_suma).
+--   --     OJO: movimiento_bancario_check exige conciliado = true cuando
+--   --     gasto_id no es null ⇒ se liga y se desliga junto con `conciliado`.
+--   select m.id, m.monto into v_mov, v_mov_monto
+--     from public.movimiento_bancario m
+--     join public.cuenta_bancaria c on c.id = m.cuenta_bancaria_id
+--    where m.gasto_id is null and m.cobro_id is null and m.cobro_grupo_id is null
+--      and m.ingreso_id is null and m.clasificacion_id is null and not m.conciliado
+--      and m.tipo::text = 'CARGO' and c.moneda::text = 'MXN'
+--    order by m.fecha desc limit 1;
+--   if v_mov is null then
+--     raise notice 'avisoC6 · sin cargo MXN libre: liga omitida';
+--   else
+--     -- C6a) liga exacta (Σ cargos = monto del gasto) ⇒ pasa
+--     update public.gasto set monto = v_mov_monto, updated_by = v_usr where id = v_g;
+--     update public.movimiento_bancario set gasto_id = v_g, conciliado = true where id = v_mov;
+--     update public.movimiento_bancario set gasto_id = null, conciliado = false where id = v_mov;
+--     -- C6b) cargo MAYOR que el gasto (el caso «una transferencia paga varias
+--     --      comisiones», riesgo R1) ⇒ GASTO_YA_CUBIERTO (23514) del trigger
+--     if v_mov_monto > 10 then
+--       update public.gasto set monto = v_mov_monto - 5, updated_by = v_usr where id = v_g;
+--       begin
+--         update public.movimiento_bancario set gasto_id = v_g, conciliado = true where id = v_mov;
+--         raise exception 'DRYRUN_FALLA C6b: un cargo mayor que la comisión se ligó';
+--       exception when check_violation then
+--         get stacked diagnostics v_msg = message_text;
+--         if v_msg not like 'GASTO_YA_CUBIERTO%' then raise; end if;
+--       end;
+--     end if;
+--     raise notice 'okC6 · cargo % ligado/desligado; cargo mayor rebota', v_mov;
+--   end if;
+--
+--   -- C7) DELETE REAL ⇒ bitácora DELETE
+--   delete from public.gasto where id in (v_g, v_g2);
+--   select count(*) into v_n from public.gasto_bitacora where gasto_id = v_g and accion = 'DELETE';
+--   if v_n <> 1 then raise exception 'DRYRUN_FALLA C7: bitácora DELETE = % (esperado 1)', v_n; end if;
+--
+--   raise exception 'DRYRUN_OK 20260928000002 · A–C7 (C6 con conciliado)';
+-- end $dry$;
+--
+-- Tras el DRYRUN_OK (nada quedó escrito):
+--   select count(*) from gasto where categoria::text = 'COMISION_VENDEDOR';          ⇒ 0
+--   select count(*) from pg_constraint
+--    where conname = 'gasto_comision_vendedor_exige_vuelo';                           ⇒ 0
+--   el cargo usado en C6 sigue con `gasto_id is null and not conciliado`;
+--   select count(*) from gasto where notas ilike '%PRUEBA COMISION SAAB%';            ⇒ 2
+--   (las 2 PRUEBAS de #317 intactas).
+-- Aplicar ⇒ `select pg_get_constraintdef(oid) from pg_constraint
+--   where conname = 'gasto_comision_vendedor_exige_vuelo'` ⇒ `get_advisors`.
+-- Rollback: `alter table public.gasto drop constraint gasto_comision_vendedor_exige_vuelo;`
+-- ---------------------------------------------------------------------------
+
+-- 1) CUERPO (idempotente)
+alter table public.gasto
+  drop constraint if exists gasto_comision_vendedor_exige_vuelo;
+alter table public.gasto
+  add constraint gasto_comision_vendedor_exige_vuelo
+  check (categoria::text <> 'COMISION_VENDEDOR' or vuelo_id is not null);
+comment on constraint gasto_comision_vendedor_exige_vuelo on public.gasto is
+  'Comisión del vendedor (28-sep-2026): el pago al vendedor siempre es de un vuelo — se aparea con la comisión cobrada en «otros movimientos» (Balance general) y «Otros ingresos» (Libro Dinero). El API responde 400 GASTO_REQUIERE_VUELO antes de llegar aquí; esto es el respaldo.';

@@ -208,3 +208,55 @@ describe('Reparto a socios — la categoría de EMPRESA manda sobre el vuelo (11
     expect(fila(r, 'TUA embebido (excluido)')).toMatchObject({ usd: 600 });
   });
 });
+
+/**
+ * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): jamás es
+ * costo del avión — grupo EXCLUIDO explícito, con una clave de detalle que
+ * EMPIEZA con el código (espejo de `TUAS (egreso VuelaTour — Otros
+ * movimientos)`) para que la etiqueta derivada conserve el sufijo.
+ */
+describe('Reparto a socios — la comisión del vendedor NO es costo del avión (28-sep-2026)', () => {
+  const op: Fila = {
+    ...gastoBase,
+    id: 'g-op',
+    categoria: 'OPERACIONES',
+    monto: 300,
+    vuelo_id: VUELO,
+  };
+  const comisionVendedor: Fila = {
+    ...gastoBase,
+    id: 'g-cv',
+    categoria: 'COMISION_VENDEDOR',
+    monto: 116,
+    vuelo_id: VUELO,
+  };
+
+  it('grupo EXCLUIDO con la clave «COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)» y su etiqueta', () => {
+    const r = computar([op, comisionVendedor]);
+    const f = r.detalle.gastos_por_categoria.find(
+      (x) =>
+        x.categoria ===
+        'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)',
+    ) as { grupo: string; usd: number; etiqueta?: string } | undefined;
+    expect(f).toMatchObject({ grupo: 'EXCLUIDO', usd: 116 });
+    expect(f!.etiqueta).toBe(
+      'Comisión del vendedor (egreso VuelaTour — Otros movimientos)',
+    );
+  });
+
+  it('la utilidad del avión es IDÉNTICA al caso sin el gasto (solo cambia la fila informativa del detalle)', () => {
+    const sin = computar([op]);
+    const con = computar([op, comisionVendedor]);
+    expect(con.gastos).toEqual(sin.gastos);
+    const sinFilaInformativa = {
+      ...con,
+      detalle: {
+        ...con.detalle,
+        gastos_por_categoria: con.detalle.gastos_por_categoria.filter(
+          (x) => !x.categoria.startsWith('COMISION_VENDEDOR'),
+        ),
+      },
+    };
+    expect(JSON.stringify(sinFilaInformativa)).toBe(JSON.stringify(sin));
+  });
+});

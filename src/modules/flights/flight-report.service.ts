@@ -7,8 +7,11 @@ import {
 } from '../pyservices/pyservices.service';
 import {
   categoriaEsDeEmpresa,
+  categoriaEsPagoVendedor,
+  categoriaFueraDelAvion,
   etiquetaCategoriaGasto,
 } from '../../common/categoria-gasto.util';
+import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { horasTacoDe, sumaHorasTaco } from '../../common/horas-taco.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
@@ -368,6 +371,13 @@ export class FlightReportService {
             categoriaEsDeEmpresa(g.categoria as string | null)
               ? 'gasto de VuelaTour — no resta al vuelo'
               : null,
+            // PAGO AL VENDEDOR (28-sep-2026, invariante 31): se lista, pero
+            // la ganancia de este reporte ya resta el pago COTIZADO una sola
+            // vez (`pagoVendedorUsd`) — restarlo también como gasto sería
+            // contarlo dos veces.
+            categoriaEsPagoVendedor(g.categoria as string | null)
+              ? 'pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)'
+              : null,
           ]
             .filter(Boolean)
             .join(' · ') || null,
@@ -452,7 +462,9 @@ export class FlightReportService {
       // Se listan arriba (con su nota) pero NO restan en el remanente del
       // vuelo — si restaran aquí, este reporte contradiría la fila del mismo
       // vuelo en el balance, que ya los manda a la hoja "otros gastos".
-      if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
+      // COMISION_VENDEDOR (28-sep-2026, invariante 31) tampoco resta aquí:
+      // la ganancia ya descuenta el pago al vendedor (el cotizado, abajo).
+      if (categoriaFueraDelAvion(g.categoria as string | null)) continue;
       const usd = gastoUsd(g);
       if (usd == null) {
         gastosSinTcCount += 1;
@@ -489,9 +501,16 @@ export class FlightReportService {
       // gasto del vuelo (p. ej. para conciliar la transferencia), este
       // reporte lo contaría dos veces. No hay categoría dedicada para
       // detectarlo, así que se AVISA cuando el externo trae gastos capturados.
-      if (gastos.length > 0) {
+      // El pago al vendedor (COMISION_VENDEDOR) no cuenta: no puede ser el
+      // pago al operador.
+      const gastosAviso = gastosRows.filter(
+        (g) =>
+          g.categoria !== 'GAS' &&
+          !categoriaEsPagoVendedor(g.categoria as string | null),
+      ).length;
+      if (gastosAviso > 0) {
         notasHoras.push(
-          `Vuelo externo con ${gastos.length} gasto(s) capturado(s) ADEMÁS del costo del operador: verifica que el pago al operador no esté también capturado como gasto (se contaría doble).`,
+          `Vuelo externo con ${gastosAviso} gasto(s) capturado(s) ADEMÁS del costo del operador: verifica que el pago al operador no esté también capturado como gasto (se contaría doble).`,
         );
       }
       gastos.push({
@@ -523,8 +542,10 @@ export class FlightReportService {
     // GANANCIA = remanente − PAGO AL VENDEDOR − comisiones bancarias;
     // GANANCIA X HR sobre horas COBRADAS (fallback voladas); % sobre venta
     // sin IVA. El pago al vendedor se resta UNA sola vez (aquí): el costo
-    // del vuelo (gastos + combustible) no lo contiene — no existe categoría
-    // de gasto de comisión de venta — y la venta es el total del cliente,
+    // del vuelo (gastos + combustible) no lo contiene — la categoría
+    // «Comisión del vendedor» (COMISION_VENDEDOR, 28-sep-2026) existe pero se
+    // EXCLUYE del costo arriba y solo sale como nota informativa; el que se
+    // resta es el COTIZADO — y la venta es el total del cliente,
     // que incluye la comisión (regla 23-jul). Pago = comisión + su IVA
     // cuando la cotización grava (`pagoVendedorUsd`, fuente única — misma
     // cifra que la provisión de Otros movimientos y del Libro Dinero).
@@ -599,6 +620,43 @@ export class FlightReportService {
     if (cancelado && particion.comision_vendedor_usd > 0) {
       notasHoras.push(
         'Vuelo CANCELADO: la comisión del vendedor no se provisiona ni se resta (el servicio no se prestó); el neto de VuelaTour es lo retenido.',
+      );
+    }
+    // PAGO REAL al vendedor (invariante 31): nota INFORMATIVA solo si hay
+    // gastos COMISION_VENDEDOR. Conversión PURA local con la MISMA regla de
+    // `gastoUsd` (USD directo; MXN ÷ tc_gasto > 0 o el T.C. del vuelo) — NO
+    // se llama a `gastoUsd`: incrementa `gastosTcVueloCount` y alteraría la
+    // nota de «gasto(s) en MXN sin T.C. propio», que habla de los gastos que
+    // SÍ restan.
+    const pagosRealesVendedor = gastosRows.filter((g) =>
+      categoriaEsPagoVendedor(g.categoria as string | null),
+    );
+    if (pagosRealesVendedor.length > 0) {
+      let pagadoUsd = 0;
+      let todosConvierten = true;
+      for (const g of pagosRealesVendedor) {
+        if (g.moneda === 'USD') {
+          pagadoUsd += n(g.monto);
+          continue;
+        }
+        const tcg =
+          g.tc_gasto != null && Number(g.tc_gasto) > 0
+            ? Number(g.tc_gasto)
+            : tcVuelo;
+        if (tcg == null) {
+          todosConvierten = false;
+          continue;
+        }
+        pagadoUsd += n(g.monto) / tcg;
+      }
+      const nPagos = pagosRealesVendedor.length;
+      const cuanto = todosConvierten
+        ? `: ${fmtDineroTexto(pagadoUsd, 'USD')} en ${nPagos} gasto(s)`
+        : ` en ${nPagos} gasto(s)`;
+      notasHoras.push(
+        cancelado
+          ? `Pago real al vendedor capturado${cuanto} (vuelo cancelado: este reporte no resta pago al vendedor).`
+          : `Pago real al vendedor capturado${cuanto} (la ganancia de este reporte resta el pago cotizado de ${fmtDineroTexto(pagoVendedor, 'USD')}).`,
       );
     }
     const gananciaFinalUsd =
