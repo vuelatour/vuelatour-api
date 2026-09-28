@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   StreamableFile,
 } from '@nestjs/common';
@@ -28,6 +29,7 @@ import {
   ListMovimientosQuery,
   ListUbicacionesQuery,
   MoverUbicacionDto,
+  OrdenUbicacionesDto,
   ResumenItemQuery,
   TiendaResumenQuery,
   UpdateEmpaqueDto,
@@ -135,11 +137,25 @@ export class InventoryController {
     return this.inventory.createUbicacion(dto, c.userId);
   }
 
+  // Literal ANTES de `ubicaciones/:id` (convención del repo).
+  @Put('ubicaciones/orden')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Reordena el catálogo en UNA llamada { ids }: todas las ubicaciones ACTIVAS en su nuevo orden (puede incluir inactivas; las que no vengan quedan al final). Se numeran 1..n y solo se escriben las que cambian. 200 = el catálogo completo (con inactivas). Falta una activa o viene un id que ya no existe ⇒ 409 UBICACIONES_CAMBIARON (details { faltan, desconocidos, repetidos }) sin escribir nada.',
+  })
+  reordenarUbicaciones(
+    @Body() dto: OrdenUbicacionesDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.inventory.reordenarUbicaciones(dto.ids, c.userId);
+  }
+
   @Patch('ubicaciones/:id')
   @Roles(Rol.ADMIN, Rol.MECANICO)
   @ApiOperation({
     summary:
-      'Edita una ubicación { nombre?, orden?, activo? }: renombrar propaga el nombre a sus productos; desactivar con productos activos ⇒ 409 UBICACION_EN_USO. 404 UBICACION_NO_EXISTE · 409 UBICACION_DUPLICADA. Sin DELETE: se desactiva.',
+      'Edita una ubicación { nombre?, orden?, activo? }: renombrar propaga el nombre a sus productos; desactivar con productos activos ⇒ 409 UBICACION_EN_USO. 404 UBICACION_NO_EXISTE · 409 UBICACION_DUPLICADA. Para borrarla: DELETE (solo sin productos).',
   })
   updateUbicacion(
     @Param('id', ParseUUIDPipe) id: string,
@@ -147,6 +163,16 @@ export class InventoryController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.inventory.updateUbicacion(id, dto, c.userId);
+  }
+
+  @Delete('ubicaciones/:id')
+  @Roles(Rol.ADMIN, Rol.MECANICO)
+  @ApiOperation({
+    summary:
+      'Elimina DE VERDAD una ubicación que ningún producto usa (ni activo ni dado de baja). 200 { deleted: true, id, nombre }. Con productos ⇒ 409 UBICACION_EN_USO (details { productos, productos_activos }; mensaje: muévelos con «Mover a…» o, si son dados de baja, desactívala). 404 UBICACION_NO_EXISTE.',
+  })
+  deleteUbicacion(@Param('id', ParseUUIDPipe) id: string) {
+    return this.inventory.deleteUbicacion(id);
   }
 
   @Post('items/mover-ubicacion')

@@ -45,6 +45,7 @@ import {
   limpiarNombreUbicacion,
   MENSAJES_UBICACION,
   MIGRACION_INVENTARIO_UBICACION,
+  planOrdenUbicaciones,
   resolverUbicacionDeTexto,
   textoUbicacionExcel,
   ubicacionDuplicada,
@@ -464,7 +465,7 @@ export class InventoryService {
       .insert({ nombre, orden, created_by: userId, updated_by: userId })
       .select(UBICACION_COLS)
       .maybeSingle();
-    if (error) throw this.errorDeUbicacion(error, nombre);
+    if (error) throw await this.errorDeUbicacion(error, nombre);
     return {
       ...(data as Omit<InventarioUbicacionRow, 'productos'>),
       productos: 0,
@@ -530,10 +531,11 @@ export class InventoryService {
       .select(UBICACION_COLS)
       .maybeSingle();
     if (error) {
-      throw this.errorDeUbicacion(
+      throw await this.errorDeUbicacion(
         error,
         (cambios.nombre as string | undefined) ?? actual.nombre,
         productos,
+        id,
       );
     }
     if (!data) {
@@ -549,21 +551,168 @@ export class InventoryService {
   }
 
   /**
+   * PUT ubicaciones/orden (28-sep-2026): reordena el catálogo en UNA llamada
+   * (antes el panel mandaba dos PATCH por flecha y, si el segundo fallaba,
+   * dos ubicaciones quedaban con el mismo `orden`). El plan es PURO
+   * (`planOrdenUbicaciones`): todas las ACTIVAS en el orden pedido, numeradas
+   * 1..n, las no mencionadas al final, y solo se escriben las filas que
+   * cambian. Lista vieja (falta una activa, sobra una borrada) ⇒ 409
+   * UBICACIONES_CAMBIARON sin escribir nada. Devuelve el catálogo completo
+   * (con inactivas y sus productos), lo que el panel vuelve a pintar.
+   */
+  async reordenarUbicaciones(
+    ids: string[],
+    userId: string,
+  ): Promise<InventarioUbicacionRow[]> {
+    await this.exigirUbicaciones();
+    const catalogo = await this.catalogoUbicaciones();
+    const plan = planOrdenUbicaciones(catalogo, ids);
+    if (!plan.ok) {
+      throw new ConflictException({
+        message: MENSAJES_UBICACION.ordenDesactualizado,
+        error: 'UBICACIONES_CAMBIARON',
+        details: {
+          faltan: plan.faltan,
+          desconocidos: plan.desconocidos,
+          repetidos: plan.repetidos,
+        },
+      });
+    }
+    // Una fila por cambio (el catálogo es de unas cuantas ubicaciones). Sin
+    // índice único sobre `orden`, así que no hay choque intermedio; si una
+    // escritura fallara a medias, reintentar con la misma lista termina el
+    // trabajo (el plan solo escribe lo que aún difiere).
+    for (const c of plan.cambios) {
+      const { error } = await this.supabase.service
+        .from('inventario_ubicacion')
+        .update({ orden: c.orden, updated_by: userId })
+        .eq('id', c.id);
+      if (error) {
+        const nombre = catalogo.find((u) => u.id === c.id)?.nombre ?? '';
+        throw await this.errorDeUbicacion(error, nombre, 0, c.id);
+      }
+    }
+    return this.listUbicaciones(true);
+  }
+
+  /**
+   * Cuántos productos usan una ubicación: TODOS (activos y dados de baja, lo
+   * que mira la FK `on delete restrict`) y cuántos de ellos están activos (los
+   * que «Mover a…» sí puede mover). Lectura paginada, anti-cap.
+   */
+  private async usoDeUbicacion(
+    id: string,
+  ): Promise<{ productos: number; productos_activos: number }> {
+    const filas = await this.todasLasFilas<{ id: string; activo: boolean }>(
+      (a, b) =>
+        this.supabase.service
+          .from('inventario_item')
+          .select('id, activo', { count: 'exact' })
+          .eq('ubicacion_id', id)
+          .order('id', { ascending: true })
+          .range(a, b),
+    );
+    return {
+      productos: filas.length,
+      productos_activos: filas.filter((f) => f.activo !== false).length,
+    };
+  }
+
+  /** 409 UBICACION_EN_USO del DELETE, con el conteo y la salida honesta. */
+  private ubicacionNoEliminable(
+    nombre: string,
+    uso: { productos: number; productos_activos: number },
+  ): ConflictException {
+    return new ConflictException({
+      message: MENSAJES_UBICACION.noEliminable(
+        nombre,
+        uso.productos,
+        uso.productos_activos,
+      ),
+      error: 'UBICACION_EN_USO',
+      details: {
+        productos: uso.productos,
+        productos_activos: uso.productos_activos,
+      },
+    });
+  }
+
+  /**
+   * DELETE ubicaciones/:id (28-sep-2026, pedido del cliente: «una forma
+   * rápida y ágil para poder editar, borrar o agregar opciones a este listado
+   * de lugares»). Borra DE VERDAD solo si NINGÚN producto la usa —activo o
+   * dado de baja—; si la usan ⇒ 409 UBICACION_EN_USO con `details {
+   * productos, productos_activos }` y un mensaje que dice qué hacer («Mover
+   * a…» o, si son dados de baja, desactivarla). La BD es el candado final: la
+   * FK `inventario_item.ubicacion_id … on delete restrict` responde 23001
+   * (o 23503) si alguien movió un producto ahí entre la lectura y el borrado,
+   * y eso también es 409, nunca 500. No hay triggers de DELETE en el
+   * catálogo: sin productos, borrar no toca ninguna otra fila.
+   */
+  async deleteUbicacion(
+    id: string,
+  ): Promise<{ deleted: true; id: string; nombre: string }> {
+    await this.exigirUbicaciones();
+    const catalogo = await this.catalogoUbicaciones();
+    const actual = catalogo.find((u) => u.id === id);
+    if (!actual) {
+      throw new NotFoundException({
+        message: MENSAJES_UBICACION.noExiste,
+        error: 'UBICACION_NO_EXISTE',
+      });
+    }
+    const uso = await this.usoDeUbicacion(id);
+    if (uso.productos > 0) throw this.ubicacionNoEliminable(actual.nombre, uso);
+    const { data, error } = await this.supabase.service
+      .from('inventario_ubicacion')
+      .delete()
+      .eq('id', id)
+      .select('id');
+    if (error) {
+      if (error.code === '23001' || error.code === '23503') {
+        const ahora = await this.usoDeUbicacion(id).catch(() => null);
+        throw this.ubicacionNoEliminable(actual.nombre, {
+          productos: Math.max(1, ahora?.productos ?? 1),
+          productos_activos: ahora?.productos_activos ?? 0,
+        });
+      }
+      throw new Error(error.message);
+    }
+    if (!data || (data as unknown[]).length === 0) {
+      // Otra persona la borró entre la lectura y el DELETE.
+      throw new NotFoundException({
+        message: MENSAJES_UBICACION.noExiste,
+        error: 'UBICACION_NO_EXISTE',
+      });
+    }
+    return { deleted: true, id, nombre: actual.nombre };
+  }
+
+  /**
    * Error de la BD en el catálogo → HTTP legible: 23505 (nombre repetido sin
-   * distinguir mayúsculas) ⇒ 409 UBICACION_DUPLICADA; 23514 del trigger
+   * distinguir mayúsculas: índice `uq_inventario_ubicacion_nombre` sobre
+   * `lower(nombre)`, carrera con otra alta) ⇒ 409 UBICACION_DUPLICADA con el
+   * nombre REAL de la que ya existe cuando se puede releer; 23514 del trigger
    * «UBICACION_EN_USO…» (carrera: alguien movió un producto ahí entre la
    * lectura y el update) ⇒ 409 UBICACION_EN_USO — nunca un 500; otro 23514
    * (CHECK de nombre/orden) ⇒ 400.
    */
-  private errorDeUbicacion(
+  private async errorDeUbicacion(
     error: { code?: string; message: string },
     nombre: string,
     productos = 0,
-  ): Error {
+    excluirId?: string,
+  ): Promise<Error> {
     if (error.code === '23505') {
+      const dup = ubicacionDuplicada(
+        nombre,
+        await this.catalogoUbicaciones().catch(() => []),
+        excluirId,
+      );
       return new ConflictException({
-        message: MENSAJES_UBICACION.duplicada(nombre),
+        message: MENSAJES_UBICACION.duplicada(dup?.nombre ?? nombre),
         error: 'UBICACION_DUPLICADA',
+        ...(dup ? { details: { id: dup.id, nombre: dup.nombre } } : {}),
       });
     }
     if (error.code === '23514') {

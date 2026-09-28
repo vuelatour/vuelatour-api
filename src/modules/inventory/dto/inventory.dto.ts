@@ -217,6 +217,28 @@ export class UpdateUbicacionDto {
   activo?: boolean;
 }
 
+/**
+ * PUT ubicaciones/orden (28-sep-2026) — reordenar el catálogo en UNA
+ * llamada: TODAS las ubicaciones ACTIVAS en su nuevo orden (puede incluir las
+ * inactivas donde el panel las pinta; las que no vengan quedan al final).
+ */
+export class OrdenUbicacionesDto {
+  @ApiProperty({
+    type: [String],
+    description:
+      'Ids de las ubicaciones en su nuevo orden: todas las ACTIVAS (y, si se quiere, también las inactivas). Falta una activa o viene un id que ya no existe ⇒ 409 UBICACIONES_CAMBIARON.',
+  })
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Manda al menos una ubicación.' })
+  @ArrayMaxSize(999)
+  @ArrayUnique({ message: 'Una ubicación viene repetida en el orden.' })
+  @IsUUID('all', {
+    each: true,
+    message: 'Cada id debe ser el de una ubicación.',
+  })
+  ids!: string[];
+}
+
 /** POST items/mover-ubicacion — mover varios productos a una ubicación (una sola escritura). */
 export class MoverUbicacionDto {
   @ApiProperty({

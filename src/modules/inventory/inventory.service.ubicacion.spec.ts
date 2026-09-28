@@ -40,6 +40,16 @@ interface Opciones {
   migracion?: boolean;
   /** Error forzado en el UPDATE de inventario_ubicacion (simula el trigger). */
   errorUpdateUbicacion?: Err;
+  /**
+   * INSERT de inventario_ubicacion en carrera con otra alta: el callback
+   * puede sembrar la fila «ganadora» y devuelve el error de la BD.
+   */
+  errorInsertUbicacion?: (tablas: Record<string, Fila[]>) => Err;
+  /**
+   * Justo ANTES del DELETE de inventario_ubicacion (carrera: otra persona
+   * mueve un producto ahí entre la lectura y el borrado).
+   */
+  antesDeBorrarUbicacion?: (tablas: Record<string, Fila[]>) => void;
 }
 
 class Fake {
@@ -70,7 +80,7 @@ class Fake {
 
   from(tabla: string) {
     const ops: Op[] = [];
-    let tipo: 'select' | 'insert' | 'update' = 'select';
+    let tipo: 'select' | 'insert' | 'update' | 'delete' = 'select';
     let payload: unknown = null;
     let conCount = false;
     const q: Record<string, unknown> = {};
@@ -78,6 +88,7 @@ class Fake {
       (m: string) =>
       (...a: unknown[]) => {
         ops.push({ m, a });
+        if (m === 'delete') tipo = 'delete';
         if (m === 'insert') {
           tipo = 'insert';
           payload = a[0];
@@ -140,7 +151,46 @@ class Fake {
           : { data: [], error: null };
       }
       const rows = (this.tablas[tabla] ??= []);
+      if (tipo === 'delete') {
+        if (tabla === 'inventario_ubicacion') {
+          this.o.antesDeBorrarUbicacion?.(this.tablas);
+        }
+        this.escrituras.push({ tabla, tipo, ops, payload: null });
+        const hits = filtra(rows);
+        // FK inventario_item.ubicacion_id … ON DELETE RESTRICT ⇒ 23001.
+        if (
+          tabla === 'inventario_ubicacion' &&
+          hits.some((u) =>
+            (this.tablas.inventario_item ?? []).some(
+              (i) => i.ubicacion_id === u.id,
+            ),
+          )
+        ) {
+          return {
+            data: null,
+            error: {
+              code: '23001',
+              message:
+                'update or delete on table "inventario_ubicacion" violates RESTRICT setting of foreign key constraint "inventario_item_ubicacion_id_fkey" on table "inventario_item"',
+            },
+          };
+        }
+        this.tablas[tabla] = rows.filter((r) => !hits.includes(r));
+        return {
+          data: ops.some((x) => x.m === 'select')
+            ? hits.map((r) => ({ ...r }))
+            : null,
+          error: null,
+        };
+      }
       if (tipo === 'insert') {
+        if (tabla === 'inventario_ubicacion' && this.o.errorInsertUbicacion) {
+          this.escrituras.push({ tabla, tipo, ops, payload });
+          return {
+            data: null,
+            error: this.o.errorInsertUbicacion(this.tablas),
+          };
+        }
         this.escrituras.push({ tabla, tipo, ops, payload });
         const nuevo: Fila = {
           id: `${tabla}-${++this.seq}`,
@@ -460,6 +510,197 @@ describe('Ubicaciones: catálogo', () => {
       error: 'UBICACION_EN_USO',
       details: { productos: 2 },
     });
+  });
+});
+
+describe('Ubicaciones: ELIMINAR, reordenar y nombre repetido (28-sep-2026, API 0.0.38)', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => {
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => warn.mockRestore());
+
+  const borrados = (fake: Fake) =>
+    fake.escrituras.filter(
+      (w) => w.tabla === 'inventario_ubicacion' && w.tipo === 'delete',
+    );
+
+  it('DELETE sin productos ⇒ se borra DE VERDAD (una escritura) y ya no sale en la lista', async () => {
+    const { svc, fake } = armar();
+    const r = await svc.deleteUbicacion('u-vieja');
+    expect(r).toEqual({
+      deleted: true,
+      id: 'u-vieja',
+      nombre: 'Oficina vieja',
+    });
+    expect(borrados(fake)).toHaveLength(1);
+    expect(
+      fake.tablas.inventario_ubicacion.some((u) => u.id === 'u-vieja'),
+    ).toBe(false);
+    const todas = await svc.listUbicaciones(true);
+    expect(todas.map((u) => u.id)).not.toContain('u-vieja');
+    // Ningún producto se tocó.
+    expect(
+      fake.escrituras.filter((w) => w.tabla === 'inventario_item'),
+    ).toHaveLength(0);
+  });
+
+  it('DELETE con un producto ACTIVO ⇒ 409 UBICACION_EN_USO con el conteo y «Mover a…»; nada se borra', async () => {
+    const { svc, fake } = armar();
+    const e = await error(svc.deleteUbicacion('u-nueva'));
+    expect(e).toBeInstanceOf(ConflictException);
+    expect((e as ConflictException).getResponse()).toEqual({
+      message:
+        '«Oficina nueva» tiene 1 producto: muévelo con «Mover a…» y vuelve a intentar.',
+      error: 'UBICACION_EN_USO',
+      details: { productos: 1, productos_activos: 1 },
+    });
+    expect(borrados(fake)).toHaveLength(0);
+  });
+
+  it('DELETE cuando solo la usan productos DADOS DE BAJA ⇒ 409 que manda a desactivarla (moverlos no se puede)', async () => {
+    const { svc, fake } = armar();
+    fake.tablas.inventario_item = fake.tablas.inventario_item.filter(
+      (i) => i.id !== 'i-hangar',
+    );
+    const e = await error(svc.deleteUbicacion('u-baja'));
+    const body = (e as ConflictException).getResponse() as {
+      message: string;
+      details: unknown;
+    };
+    expect(body.details).toEqual({ productos: 1, productos_activos: 0 });
+    expect(body.message).toBe(
+      '«Hangar 3» la usan 1 producto dado de baja (historial): no se puede eliminar; desactívala para que ya no se ofrezca.',
+    );
+    expect(borrados(fake)).toHaveLength(0);
+  });
+
+  it('DELETE: activos + dados de baja ⇒ cuenta TODOS (la FK no distingue)', async () => {
+    const { svc } = armar();
+    const e = await error(svc.deleteUbicacion('u-baja'));
+    expect((e as ConflictException).getResponse()).toMatchObject({
+      error: 'UBICACION_EN_USO',
+      details: { productos: 2, productos_activos: 1 },
+    });
+  });
+
+  it('DELETE: 404 UBICACION_NO_EXISTE si ya no existe', async () => {
+    const { svc } = armar();
+    const e = await error(svc.deleteUbicacion('u-nada'));
+    expect(e).toBeInstanceOf(NotFoundException);
+    expect((e as NotFoundException).getResponse()).toMatchObject({
+      error: 'UBICACION_NO_EXISTE',
+    });
+  });
+
+  it('DELETE en carrera: alguien movió un producto ahí ⇒ el 23001 de la FK es 409 UBICACION_EN_USO, nunca 500', async () => {
+    const { svc } = armar({
+      antesDeBorrarUbicacion: (t) => {
+        const aceite = t.inventario_item.find((i) => i.id === 'i-aceite');
+        if (aceite) aceite.ubicacion_id = 'u-vieja';
+      },
+    });
+    const e = await error(svc.deleteUbicacion('u-vieja'));
+    expect(e).toBeInstanceOf(ConflictException);
+    expect((e as ConflictException).getResponse()).toMatchObject({
+      error: 'UBICACION_EN_USO',
+      details: { productos: 1, productos_activos: 1 },
+    });
+  });
+
+  it('PUT orden: numera 1..n, la inactiva al final y SOLO escribe lo que cambia; devuelve el catálogo completo', async () => {
+    const { svc, fake } = armar();
+    const r = await svc.reordenarUbicaciones(
+      ['u-nueva', 'u-vieja', 'u-locker', 'u-mer', 'u-czm'],
+      'u-1',
+    );
+    expect(r.map((u) => u.nombre)).toEqual([
+      'Oficina nueva',
+      'Oficina vieja',
+      'Locker del aeropuerto',
+      'Bodega del taller de Mérida',
+      'Bodega del taller de Cozumel',
+      'Hangar 3',
+    ]);
+    expect(r.find((u) => u.id === 'u-nueva')).toMatchObject({
+      orden: 1,
+      productos: 1,
+    });
+    const updates = fake.escrituras.filter(
+      (w) => w.tabla === 'inventario_ubicacion' && w.tipo === 'update',
+    );
+    expect(updates.map((w) => w.payload)).toEqual([
+      { orden: 1, updated_by: 'u-1' },
+      { orden: 2, updated_by: 'u-1' },
+    ]);
+  });
+
+  it('PUT orden con la lista VIEJA (falta una activa o sobra una borrada) ⇒ 409 UBICACIONES_CAMBIARON sin escribir', async () => {
+    const { svc, fake } = armar();
+    const e = await error(
+      svc.reordenarUbicaciones(
+        ['u-nueva', 'u-vieja', 'u-locker', 'u-mer'],
+        'u',
+      ),
+    );
+    expect(e).toBeInstanceOf(ConflictException);
+    expect((e as ConflictException).getResponse()).toMatchObject({
+      error: 'UBICACIONES_CAMBIARON',
+      details: { faltan: ['u-czm'], desconocidos: [], repetidos: [] },
+    });
+    const e2 = await error(
+      svc.reordenarUbicaciones(
+        ['u-nueva', 'u-vieja', 'u-locker', 'u-mer', 'u-czm', 'u-borrada'],
+        'u',
+      ),
+    );
+    expect((e2 as ConflictException).getResponse()).toMatchObject({
+      details: { desconocidos: ['u-borrada'] },
+    });
+    expect(
+      fake.escrituras.filter((w) => w.tabla === 'inventario_ubicacion'),
+    ).toHaveLength(0);
+  });
+
+  it('POST en carrera con otra alta: el 23505 del índice único ⇒ 409 UBICACION_DUPLICADA con el nombre REAL de la que ganó', async () => {
+    const { svc } = armar({
+      errorInsertUbicacion: (t) => {
+        t.inventario_ubicacion.push({
+          id: 'u-tulum',
+          nombre: 'Bodega Tulum',
+          orden: 7,
+          activo: true,
+        });
+        return {
+          code: '23505',
+          message:
+            'duplicate key value violates unique constraint "uq_inventario_ubicacion_nombre"',
+        };
+      },
+    });
+    const e = await error(
+      svc.createUbicacion({ nombre: 'bodega tulum' }, 'u-1'),
+    );
+    expect(e).toBeInstanceOf(ConflictException);
+    expect((e as ConflictException).getResponse()).toEqual({
+      message: 'Ya existe la ubicación «Bodega Tulum».',
+      error: 'UBICACION_DUPLICADA',
+      details: { id: 'u-tulum', nombre: 'Bodega Tulum' },
+    });
+  });
+
+  it('sin la migración: eliminar y reordenar ⇒ 503 MIGRACION_PENDIENTE', async () => {
+    const { svc } = armar({ migracion: false });
+    for (const p of [
+      svc.deleteUbicacion('u-vieja'),
+      svc.reordenarUbicaciones(['u-vieja'], 'u'),
+    ]) {
+      const e = await error(p);
+      expect(e).toBeInstanceOf(ServiceUnavailableException);
+      expect((e as ServiceUnavailableException).getResponse()).toMatchObject({
+        error: 'MIGRACION_PENDIENTE',
+      });
+    }
   });
 });
 

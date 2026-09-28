@@ -1,11 +1,15 @@
 import {
   camposUbicacionDeItem,
   limpiarNombreUbicacion,
+  mensajeNoEliminable,
   normalizarNombreUbicacion,
+  planOrdenUbicaciones,
   resolverUbicacionDeTexto,
+  textoCantidadProductos,
   textoUbicacionExcel,
   ubicacionDuplicada,
   type UbicacionCatalogo,
+  type UbicacionOrdenable,
 } from './inventario-ubicacion.util';
 
 /** El catálogo sembrado por la migración 20260925000001 (+ una inactiva). */
@@ -132,5 +136,141 @@ describe('camposUbicacionDeItem / textoUbicacionExcel', () => {
     expect(textoUbicacionExcel({ ubicacion: 'Bodega Cancún' }, false)).toBe(
       'Bodega Cancún',
     );
+  });
+});
+
+describe('mensajeNoEliminable — DELETE ubicaciones/:id (28-sep-2026)', () => {
+  it('singular y plural de «producto»', () => {
+    expect(textoCantidadProductos(1)).toBe('1 producto');
+    expect(textoCantidadProductos(0)).toBe('0 productos');
+    expect(textoCantidadProductos(12)).toBe('12 productos');
+  });
+  it('solo activos ⇒ «muévelos con «Mover a…» y vuelve a intentar»', () => {
+    expect(mensajeNoEliminable('Oficina nueva', 1, 1)).toBe(
+      '«Oficina nueva» tiene 1 producto: muévelo con «Mover a…» y vuelve a intentar.',
+    );
+    expect(mensajeNoEliminable('Oficina vieja', 3, 3)).toBe(
+      '«Oficina vieja» tiene 3 productos: muévelos con «Mover a…» y vuelve a intentar.',
+    );
+  });
+  it('solo dados de baja ⇒ no se mandan a mover (el panel no los mueve): desactívala', () => {
+    expect(mensajeNoEliminable('Hangar 3', 2, 0)).toBe(
+      '«Hangar 3» la usan 2 productos dados de baja (historial): no se puede eliminar; desactívala para que ya no se ofrezca.',
+    );
+    expect(mensajeNoEliminable('Hangar 3', 1, 0)).toContain(
+      '1 producto dado de baja',
+    );
+  });
+  it('mezcla ⇒ dice las dos cosas (moverlos no bastará)', () => {
+    const m = mensajeNoEliminable('Locker del aeropuerto', 3, 2);
+    expect(m).toContain('tiene 2 productos: muévelos con «Mover a…»');
+    expect(m).toContain('1 producto dado de baja');
+    expect(m).toContain('desactívala');
+  });
+});
+
+describe('planOrdenUbicaciones — PUT ubicaciones/orden (28-sep-2026)', () => {
+  const CAT: UbicacionOrdenable[] = [
+    { id: 'u-vieja', orden: 1, activo: true },
+    { id: 'u-nueva', orden: 2, activo: true },
+    { id: 'u-locker', orden: 3, activo: true },
+    { id: 'u-baja', orden: 4, activo: false },
+    { id: 'u-mer', orden: 5, activo: true },
+  ];
+
+  it('activas en el orden pedido, la inactiva al final; SOLO se escriben las que cambian', () => {
+    const r = planOrdenUbicaciones(CAT, [
+      'u-nueva',
+      'u-vieja',
+      'u-locker',
+      'u-mer',
+    ]);
+    expect(r).toEqual({
+      ok: true,
+      secuencia: ['u-nueva', 'u-vieja', 'u-locker', 'u-mer', 'u-baja'],
+      cambios: [
+        { id: 'u-nueva', orden: 1 },
+        { id: 'u-vieja', orden: 2 },
+        { id: 'u-mer', orden: 4 },
+        { id: 'u-baja', orden: 5 },
+      ],
+    });
+  });
+
+  it('también acepta la lista COMPLETA con inactivas donde el panel las pinta', () => {
+    const r = planOrdenUbicaciones(CAT, [
+      'u-baja',
+      'u-vieja',
+      'u-nueva',
+      'u-locker',
+      'u-mer',
+    ]);
+    expect(r.ok && r.secuencia[0]).toBe('u-baja');
+  });
+
+  it('el mismo orden de hoy ⇒ cero escrituras', () => {
+    const r = planOrdenUbicaciones(
+      [
+        { id: 'a', orden: 1, activo: true },
+        { id: 'b', orden: 2, activo: true },
+      ],
+      ['a', 'b'],
+    );
+    expect(r).toEqual({ ok: true, secuencia: ['a', 'b'], cambios: [] });
+  });
+
+  it('órdenes repetidos o con huecos (datos viejos) se vuelven 1..n', () => {
+    const r = planOrdenUbicaciones(
+      [
+        { id: 'a', orden: 0, activo: true },
+        { id: 'b', orden: 0, activo: true },
+        { id: 'c', orden: 9, activo: true },
+      ],
+      ['a', 'b', 'c'],
+    );
+    expect(r.ok && r.cambios).toEqual([
+      { id: 'a', orden: 1 },
+      { id: 'b', orden: 2 },
+      { id: 'c', orden: 3 },
+    ]);
+  });
+
+  it('lista VIEJA: falta una activa, sobra una borrada o hay repetidos ⇒ se rechaza entera', () => {
+    expect(
+      planOrdenUbicaciones(CAT, ['u-nueva', 'u-vieja', 'u-locker']),
+    ).toEqual({
+      ok: false,
+      faltan: ['u-mer'],
+      desconocidos: [],
+      repetidos: [],
+    });
+    expect(
+      planOrdenUbicaciones(CAT, [
+        'u-vieja',
+        'u-nueva',
+        'u-locker',
+        'u-mer',
+        'u-borrada',
+      ]),
+    ).toEqual({
+      ok: false,
+      faltan: [],
+      desconocidos: ['u-borrada'],
+      repetidos: [],
+    });
+    expect(
+      planOrdenUbicaciones(CAT, [
+        'u-vieja',
+        'u-nueva',
+        'u-vieja',
+        'u-locker',
+        'u-mer',
+      ]),
+    ).toEqual({
+      ok: false,
+      faltan: [],
+      desconocidos: [],
+      repetidos: ['u-vieja'],
+    });
   });
 });

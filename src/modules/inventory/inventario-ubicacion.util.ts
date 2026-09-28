@@ -154,6 +154,115 @@ export function textoUbicacionExcel(
   return id ? texto : `${texto} ${SUFIJO_UBICACION_ANTERIOR}`;
 }
 
+/** «1 producto» / «3 productos». */
+export function textoCantidadProductos(n: number): string {
+  return `${n} ${n === 1 ? 'producto' : 'productos'}`;
+}
+
+/**
+ * Por qué NO se puede ELIMINAR una ubicación (28-sep-2026, `DELETE
+ * ubicaciones/:id`). `productos` = TODOS los ítems que la usan (activos y
+ * dados de baja: la FK `on delete restrict` no distingue); `activos` = los
+ * que «Mover a…» sí puede mover. Los dados de baja NO se mueven desde el
+ * panel (son historial), así que con alguno de ellos la salida honesta es
+ * DESACTIVARLA — decirle «muévelos y vuelve a intentar» sería mandarlo a un
+ * segundo 409.
+ */
+export function mensajeNoEliminable(
+  nombre: string,
+  productos: number,
+  activos: number,
+): string {
+  const deBaja = Math.max(0, productos - activos);
+  if (activos > 0 && deBaja === 0) {
+    const verbo = activos === 1 ? 'muévelo' : 'muévelos';
+    return `«${nombre}» tiene ${textoCantidadProductos(activos)}: ${verbo} con «Mover a…» y vuelve a intentar.`;
+  }
+  const historial = `${textoCantidadProductos(deBaja)} ${deBaja === 1 ? 'dado de baja' : 'dados de baja'}`;
+  if (activos > 0) {
+    const verbo = activos === 1 ? 'muévelo' : 'muévelos';
+    return `«${nombre}» tiene ${textoCantidadProductos(activos)}: ${verbo} con «Mover a…». Además la usan ${historial} (historial), así que no se podrá eliminar: desactívala para que ya no se ofrezca.`;
+  }
+  return `«${nombre}» la usan ${historial} (historial): no se puede eliminar; desactívala para que ya no se ofrezca.`;
+}
+
+/** Fila mínima del catálogo para reordenar. */
+export interface UbicacionOrdenable {
+  id: string;
+  orden: number;
+  activo: boolean;
+}
+
+/** Resultado de `planOrdenUbicaciones`. */
+export type PlanOrdenUbicaciones =
+  | {
+      ok: true;
+      /** Solo las filas cuyo `orden` cambia (1..n en la secuencia final). */
+      cambios: Array<{ id: string; orden: number }>;
+      /** Secuencia final completa (activas en el orden pedido + el resto). */
+      secuencia: string[];
+    }
+  | {
+      ok: false;
+      /** Activas que el cliente no mandó (alguien agregó/reactivó una). */
+      faltan: string[];
+      /** Ids que ya no existen (alguien borró una). */
+      desconocidos: string[];
+      /** Ids repetidos en la lista pedida. */
+      repetidos: string[];
+    };
+
+/**
+ * `PUT ubicaciones/orden { ids }` (28-sep-2026): el cliente manda TODAS las
+ * ACTIVAS en su nuevo orden (puede incluir también inactivas; las que no
+ * mande van al final en su orden de hoy). La secuencia final se numera
+ * 1..n y solo se escriben las filas cuyo `orden` cambia. Si falta una activa
+ * o sobra un id que ya no existe, la lista del panel está VIEJA (otra persona
+ * agregó, reactivó o borró una mientras se ordenaba): se rechaza entera
+ * — reordenar con una foto vieja dejaría la nueva en un lugar que nadie
+ * eligió.
+ */
+export function planOrdenUbicaciones(
+  catalogo: readonly UbicacionOrdenable[],
+  ids: readonly string[],
+): PlanOrdenUbicaciones {
+  const porId = new Map(catalogo.map((u) => [u.id, u]));
+  const vistos = new Set<string>();
+  const repetidos: string[] = [];
+  const desconocidos: string[] = [];
+  for (const id of ids) {
+    if (vistos.has(id)) {
+      if (!repetidos.includes(id)) repetidos.push(id);
+      continue;
+    }
+    vistos.add(id);
+    if (!porId.has(id)) desconocidos.push(id);
+  }
+  const actual = [...catalogo].sort(
+    (a, b) =>
+      (Number(a.orden) || 0) - (Number(b.orden) || 0) ||
+      (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+  );
+  const faltan = actual
+    .filter((u) => u.activo && !vistos.has(u.id))
+    .map((u) => u.id);
+  if (faltan.length > 0 || desconocidos.length > 0 || repetidos.length > 0) {
+    return { ok: false, faltan, desconocidos, repetidos };
+  }
+  const secuencia = [
+    ...ids,
+    ...actual.filter((u) => !vistos.has(u.id)).map((u) => u.id),
+  ];
+  const cambios: Array<{ id: string; orden: number }> = [];
+  secuencia.forEach((id, i) => {
+    const orden = i + 1;
+    if ((Number(porId.get(id)?.orden) || 0) !== orden) {
+      cambios.push({ id, orden });
+    }
+  });
+  return { ok: true, cambios, secuencia };
+}
+
 /** Mensajes es-MX de los errores del catálogo (una sola redacción). */
 export const MENSAJES_UBICACION = {
   noDisponible: `Las ubicaciones de bodega todavía no están disponibles: falta aplicar la migración ${MIGRACION_INVENTARIO_UBICACION}.`,
@@ -163,4 +272,7 @@ export const MENSAJES_UBICACION = {
   inactiva: (nombre: string) =>
     `La ubicación «${nombre}» está desactivada; actívala o elige otra.`,
   noExiste: 'La ubicación ya no existe.',
+  noEliminable: mensajeNoEliminable,
+  ordenDesactualizado:
+    'La lista de ubicaciones cambió mientras la ordenabas (alguien agregó, activó o eliminó una). Vuelve a abrirla e inténtalo de nuevo.',
 } as const;

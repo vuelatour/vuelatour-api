@@ -613,10 +613,59 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
      activos), `POST ubicaciones`, `PATCH ubicaciones/:id` (ADMIN/MECANICO;
      409 `UBICACION_DUPLICADA`; desactivar con productos activos ⇒ 409
      `UBICACION_EN_USO` —la BD lo repite con 23514 y el API lo traduce a 409,
-     nunca 500—; sin DELETE), `POST items/mover-ubicacion` (UN update; 200
-     `{movidos, sin_cambio, no_encontrados, inactivos, ubicacion}`) y el
+     nunca 500—), `PUT ubicaciones/orden` y `DELETE ubicaciones/:id` (desde
+     el 0.0.38, bullet siguiente), `POST items/mover-ubicacion` (UN update;
+     200 `{movidos, sin_cambio, no_encontrados, inactivos, ubicacion}`) y el
      filtro `GET items?ubicacion=<id>|sin`. El Excel pinta «Bodega Cancún
      (anterior)».
+   - **ELIMINAR Y REORDENAR (28-sep-2026, API 0.0.38, SIN migración; pedido
+     del cliente con la captura del selector del producto: «una forma rápida
+     y ágil para poder editar, borrar o agregar opciones a este listado de
+     lugares»).** Helpers PUROS en `inventario-ubicacion.util.ts` (spec).
+     - `DELETE ubicaciones/:id` (ADMIN/MECANICO) borra DE VERDAD solo si
+       NINGÚN producto la usa, **activo o dado de baja** (lo mismo que mira la
+       FK `on delete restrict`; conteo paginado `usoDeUbicacion`). Si la usan
+       ⇒ **409 `UBICACION_EN_USO`** con `details { productos,
+       productos_activos }` y `mensajeNoEliminable`: solo activos ⇒ «X» tiene
+       N productos: muévelos con «Mover a…» y vuelve a intentar»; solo dados
+       de baja ⇒ «…la usan N productos dados de baja (historial): no se puede
+       eliminar; desactívala…» (el panel NO mueve dados de baja: mandarlo a
+       «Mover a…» sería mandarlo a otro 409); mezcla ⇒ las dos cosas. La FK
+       es el candado final: el **23001** (o 23503) de una carrera —alguien
+       movió un producto ahí entre la lectura y el DELETE— también es 409
+       `UBICACION_EN_USO` (re-cuenta), nunca 500. 200 `{ deleted: true, id,
+       nombre }`; 404 `UBICACION_NO_EXISTE` (también si otra persona la borró
+       entre la lectura y el DELETE). Verificado en prod (28-sep, solo
+       SELECT): la ÚNICA FK hacia `inventario_ubicacion` es
+       `inventario_item_ubicacion_id_fkey` (`confdeltype = r`) y el catálogo
+       NO tiene triggers de DELETE ⇒ borrar una sin productos no toca ninguna
+       otra fila. El COMMENT de la tabla aún dice «Sin DELETE en el API»
+       (cosmético, sería DDL: no se tocó).
+     - `PUT ubicaciones/orden { ids }` (ADMIN/MECANICO; DTO
+       `OrdenUbicacionesDto`: 1–999 uuids sin repetir): TODAS las ACTIVAS en su
+       nuevo orden (puede incluir inactivas; las que no vengan van al final en
+       su orden de hoy). `planOrdenUbicaciones` numera 1..n y solo se escriben
+       las filas que cambian (sin índice único sobre `orden` ⇒ no hay choque
+       intermedio; reintentar la misma lista termina un trabajo a medias).
+       Lista VIEJA (falta una activa, sobra un id que ya no existe, repetido)
+       ⇒ **409 `UBICACIONES_CAMBIARON`** con `details { faltan, desconocidos,
+       repetidos }` SIN escribir. 200 = el catálogo completo
+       (`listUbicaciones(true)`). Declarada ANTES de `ubicaciones/:id`
+       (convención). Antes el panel mandaba dos PATCH por flecha.
+     - **Nombre repetido**: la pre-validación sin acentos ni mayúsculas ya
+       respondía 409 `UBICACION_DUPLICADA`; el **23505** del índice
+       `uq_inventario_ubicacion_nombre` (`lower(nombre)`, carrera con otra
+       alta o renombre) ahora relee el catálogo y responde el 409 con el
+       nombre REAL de la que ganó + `details { id, nombre }`
+       (`errorDeUbicacion` pasó a `async`).
+     - Sin la migración 20260925000001: las dos rutas ⇒ 503
+       `MIGRACION_PENDIENTE` (sonda de siempre).
+     - Specs: `inventario-ubicacion.util.spec.ts` (mensajes y plan de orden),
+       `inventory.service.ubicacion.spec.ts` (el PostgREST falso ganó DELETE
+       con la FK restrict: borra, 409 activos / dados de baja / mezcla, 404,
+       carrera 23001, orden 1..n con solo lo que cambia, lista vieja, carrera
+       23505, 503) e `inventory.controller.ubicaciones.spec.ts` (HTTP real:
+       rutas antes de `:id`, roles, DTO, `code` + `details` por el filtro).
    - **Tolerancia**: sonda única `columnaOpcional(inventario_item.
      ubicacion_id)`. Sin la migración todo lo de ubicación se comporta como
      0.0.34 (sin llaves nuevas; alta con «Bodega Cancún») y lo nuevo responde
