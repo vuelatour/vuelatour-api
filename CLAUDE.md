@@ -3411,7 +3411,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (29-sep-2026; probada en PGlite: DRYRUN_OK A–C6, idempotente, dry-run sobre base aplicada ⇒ `DRYRUN_FALLA A`)** — `20260929000002_vuelo_seguimiento.sql`
+- **APLICADA en prod el 29-sep-2026 (DRYRUN_OK A–C6 en prod; antes probada en PGlite, idempotente)** — `20260929000002_vuelo_seguimiento.sql`
   (invariante 32): tabla `vuelo_seguimiento` + índice parcial por vuelo
   (`deleted_at is null`) + RLS + `trg_vuelo_seguimiento_updated_at`. Sin
   funciones nuevas, sin `moneda`, sin backfill. **Antes de aplicar**: el
