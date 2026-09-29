@@ -233,6 +233,15 @@ describe('etiquetaCfdiVivo / etiquetaSerieFolio', () => {
     expect(etiquetaSerieFolio(null, '7')).toBe('7');
     expect(etiquetaSerieFolio('', '')).toBeNull();
   });
+
+  it('no repite la serie cuando el folio ya la trae (29-sep-2026: «A-A-0424»)', () => {
+    expect(etiquetaSerieFolio('A', 'A-0424')).toBe('A-0424');
+    expect(etiquetaSerieFolio('a', 'A-0424')).toBe('A-0424');
+    // Serie distinta al prefijo del folio: se conserva lo capturado.
+    expect(etiquetaSerieFolio('FA', 'A-0422')).toBe('FA-A-0422');
+    expect(etiquetaSerieFolio('A', '0397')).toBe('A-0397');
+    expect(etiquetaSerieFolio('A', 'AB-1')).toBe('A-AB-1');
+  });
 });
 
 describe('bloque y validación (aditivos del 24-sep)', () => {

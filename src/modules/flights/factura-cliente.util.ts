@@ -202,11 +202,14 @@ export function etiquetaSerieFolio(
   serie: unknown,
   folio: unknown,
 ): string | null {
-  const partes = [serie, folio]
-    .map((p) =>
-      typeof p === 'string' || typeof p === 'number' ? String(p).trim() : '',
-    )
-    .filter(Boolean);
+  const [s, f] = [serie, folio].map((p) =>
+    typeof p === 'string' || typeof p === 'number' ? String(p).trim() : '',
+  );
+  // La oficina captura el folio de una factura EMITIDA ya con su serie
+  // («A-0424» con serie «A»): repetirla daba «A-A-0424» en el Excel
+  // (29-sep-2026). Si el folio ya empieza con «SERIE-», no se antepone.
+  if (s && f && f.toUpperCase().startsWith(`${s.toUpperCase()}-`)) return f;
+  const partes = [s, f].filter(Boolean);
   return partes.length > 0 ? partes.join('-') : null;
 }
 
