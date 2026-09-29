@@ -861,9 +861,9 @@ export class ConciliacionService {
     // CANDADO DE RE-IMPORTACIÓN: el mismo estado de cuenta subido dos veces
     // duplicaría los movimientos e inflaría los pendientes para siempre (los
     // gastos ya conciliados no se vuelven a cruzar). Dedup MULTICONJUNTO por
-    // (fecha, tipo, monto, descripción) contra lo ya importado en la cuenta:
-    // dos cargos legítimos idénticos del mismo día solo se omiten si ya
-    // existen exactamente esas repeticiones en la base.
+    // (fecha, tipo, monto) + leyenda TOLERANTE contra lo ya importado en la
+    // cuenta: dos cargos legítimos idénticos del mismo día solo se omiten si
+    // ya existen exactamente esas repeticiones en la base.
     const fechas = base.map((r) => r.fecha).sort();
     const { data: previos, error: prevErr } = await this.supabase.service
       .from('movimiento_bancario')
@@ -876,8 +876,10 @@ export class ConciliacionService {
       .limit(20000);
     if (prevErr) throw new Error(prevErr.message);
     // Fuente única del candado: `emparejarDuplicados` (auto-cruce.util). La
-    // REFERENCIA manda cuando existe de los dos lados (re-subir el MISMO PDF
-    // con la descripción redactada distinta por la IA ya no duplica).
+    // referencia que la IA lee del PDF NO es estable entre lecturas (29-sep-
+    // 2026: el mismo cargo llegó con tres referencias distintas y se insertó
+    // tres veces), así que NUNCA veta un duplicado: manda la leyenda
+    // tolerante (truncado, redacción) y la referencia solo suma.
     const { aInsertar: nuevos, duplicados: duplicadosOmitidos } =
       emparejarDuplicados(base, previos ?? []);
 

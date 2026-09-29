@@ -575,59 +575,238 @@ export function refDedupe(ref: string | null | undefined): string | null {
   return n.length >= 4 ? n : null;
 }
 
-function descDedupe(d: string | null | undefined): string {
-  return (d ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+/**
+ * Largo mínimo de la leyenda CORTA para que un prefijo cuente como la misma
+ * línea truncada («REST HOTEL ZOMAY HOLBO» ⊂ «REST HOTEL ZOMAY HOLBOX»).
+ * Con 8, una marca sola («ASUR», «UBER», «OXXO») NUNCA es prefijo de nada:
+ * es una cadena con muchas sucursales y no identifica la línea; «OXXO
+ * CISNE» (10) ya trae la sucursal.
+ */
+export const DEDUPE_PREFIJO_MIN = 8;
+
+/** Caracteres iniciales que, compartidos, hacen la misma leyenda. */
+export const DEDUPE_INICIO_COMUN = 12;
+
+/**
+ * Leyenda del banco lista para el dedupe: sin acentos, MAYÚSCULAS, sin
+ * signos, espacios simples y sin prefijos de agregador/terminal
+ * («MERPAGO*UBER» y «UBER» son la misma línea; «SPEI ENVIADO BBVA…» y
+ * «SPEI ENVIADO BANORTE…» ya no comparten 12 caracteres por el prefijo).
+ */
+export function descDedupe(d: string | null | undefined): string {
+  return normalizarTextoBanco(d);
+}
+
+/** Números sueltos (≥ 3 dígitos) de la leyenda: folio, sucursal, operación. */
+function numerosDedupe(d: string | null | undefined): string[] {
+  return descDedupe(d)
+    .split(' ')
+    .filter((t) => /^\d{3,}$/.test(t));
+}
+
+/**
+ * ¿Las leyendas nombran cosas DISTINTAS aunque se parezcan? Dos plazas
+ * distintas («AEROPUERTO DE CANCUN» / «AEROPUERTO DE COZUMEL» comparten 12
+ * caracteres; «ASUR CANCUN» / «ASUR MERIDA» con la misma tarjeta) o dos
+ * números distintos («CARGO INDEBIDO 21 SEP 35554» / «… 35552»,
+ * «AUTOZONE 7226» / «… 7227»). Un número truncado («355» / «35554») NO
+ * cuenta como distinto, ni una leyenda que no nombra plaza ni número.
+ */
+export function leyendasNombranDistinto(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  const ca = ciudadesDe(expandirTokens(tokensTexto(a)));
+  const cb = ciudadesDe(expandirTokens(tokensTexto(b)));
+  if (ca.size > 0 && cb.size > 0 && ![...ca].some((c) => cb.has(c))) {
+    return true;
+  }
+  const na = numerosDedupe(a);
+  const nb = numerosDedupe(b);
+  if (na.length === 0 || nb.length === 0) return false;
+  return !na.some((x) => nb.some((y) => x.startsWith(y) || y.startsWith(x)));
+}
+
+/**
+ * ¿Qué tan parecidas son dos leyendas para el dedupe? `0` iguales
+ * (normalizadas), `1` una es prefijo de la otra (lado corto ≥
+ * `DEDUPE_PREFIJO_MIN`), `2` comparten los primeros `DEDUPE_INICIO_COMUN`
+ * caracteres (lado corto ≥ `DEDUPE_INICIO_COMUN`); `null` si no se parecen
+ * o nombran plazas/números distintos (`leyendasNombranDistinto`). Menor =
+ * señal más fuerte. Las dos vacías cuentan como iguales (comportamiento de
+ * siempre para líneas sin descripción).
+ */
+export function nivelDescripcionDedupe(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): 0 | 1 | 2 | null {
+  const x = descDedupe(a);
+  const y = descDedupe(b);
+  if (x === y) return 0;
+  const [corta, larga] = x.length <= y.length ? [x, y] : [y, x];
+  let nivel: 1 | 2 | null = null;
+  if (corta.length >= DEDUPE_PREFIJO_MIN && larga.startsWith(corta)) {
+    nivel = 1;
+  } else if (
+    corta.length >= DEDUPE_INICIO_COMUN &&
+    x.slice(0, DEDUPE_INICIO_COMUN) === y.slice(0, DEDUPE_INICIO_COMUN)
+  ) {
+    nivel = 2;
+  }
+  if (nivel === null || leyendasNombranDistinto(a, b)) return null;
+  return nivel;
+}
+
+/**
+ * ¿Dos leyendas son la MISMA línea del banco leída dos veces? Tolera el
+ * truncado y la redacción de la IA (`nivelDescripcionDedupe` ≠ null).
+ */
+export function mismaDescripcionDedupe(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  return nivelDescripcionDedupe(a, b) !== null;
+}
+
+/**
+ * ¿Las leyendas se CONTRADICEN? Nombran plazas o números distintos, o las
+ * dos traen texto y no comparten NINGÚN token con significado («UBER» vs
+ * «OXXO»). Es lo único que impide que una referencia igual empate: la
+ * referencia de Scotiabank leída por la IA suele ser el número de TARJETA
+ * («0025830577»), que se repite en todos los cargos de esa tarjeta, así
+ * que por sí sola no identifica la línea.
+ */
+export function descripcionesSeContradicen(
+  a: string | null | undefined,
+  b: string | null | undefined,
+): boolean {
+  if (mismaDescripcionDedupe(a, b)) return false;
+  if (leyendasNombranDistinto(a, b)) return true;
+  const ta = tokensTexto(a);
+  const tb = tokensTexto(b);
+  if (ta.length === 0 || tb.length === 0) return false;
+  return !ta.some((t) => tb.includes(t));
+}
+
+/** Nivel más débil de `nivelEmpateDedupe`. */
+const NIVEL_EMPATE_MAX = 4;
+
+/**
+ * Nivel del empate de una línea nueva con una fila previa del MISMO bucket
+ * (menor = más fuerte; `null` = no son la misma línea):
+ *  0. REFERENCIA igual **y** leyenda tolerante igual (re-subir el mismo PDF).
+ *  1. Leyenda normalizada IDÉNTICA.
+ *  2. Leyenda truncada (una es prefijo de la otra).
+ *  3. Leyenda con el mismo inicio (12 caracteres).
+ *  4. REFERENCIA igual con leyendas que NO se contradicen (la IA redactó
+ *     distinto la MISMA línea: «AEROPUERTO DE COZUMEL» / «Aeropuerto
+ *     Cozumel (TUA)»).
+ */
+function nivelEmpateDedupe(n: LineaDedupe, p: LineaDedupe): number | null {
+  const ref = refDedupe(n.referencia);
+  const mismaRef = ref !== null && ref === refDedupe(p.referencia);
+  const desc = nivelDescripcionDedupe(n.descripcion, p.descripcion);
+  if (desc !== null) return mismaRef ? 0 : desc + 1;
+  if (mismaRef && !descripcionesSeContradicen(n.descripcion, p.descripcion)) {
+    return NIVEL_EMPATE_MAX;
+  }
+  return null;
 }
 
 /**
  * Multiconjunto de duplicados contra lo YA importado en la cuenta.
  *
- * La REFERENCIA manda cuando existe de los dos lados (el mismo PDF re-subido
- * puede traer la descripción redactada distinta por la IA y seguía
- * insertándose otra vez); si a alguno le falta, se compara la descripción
- * como siempre. Dos cargos legítimos del mismo día y monto con referencias
- * DISTINTAS ya NO se confunden: son dos movimientos reales.
+ * INCIDENTE 29-sep-2026 («se me están duplicando los gastos»): la regla
+ * anterior decía «la REFERENCIA manda cuando existe de los dos lados» y
+ * dos cargos iguales con referencias distintas eran dos movimientos. Pero
+ * la referencia que la IA transcribe del PDF NO es estable entre lecturas:
+ * el MISMO cargo del 7-sep (AEROPUERTO DE COZUMEL $125.82) llegó como
+ * «0025830577» (8-sep, número de tarjeta), «00000000000000000001»
+ * (22-sep, consecutivo) y «00000000000000000001 AUT. 456529» (29-sep); cada
+ * re-importación lo volvió a insertar (5 filas para 2 cargos reales;
+ * septiembre de GASTOS GNRAL con ~2× filas).
+ *
+ * Regla, dentro del bucket (fecha|tipo|monto): cada línea nueva empata con
+ * las filas previas según `nivelEmpateDedupe` (referencia + leyenda,
+ * leyenda idéntica, truncada, mismo inicio, referencia sola). En los
+ * niveles de leyenda la referencia NO cuenta: nunca veta un duplicado. Y
+ * sola es la señal MÁS débil (va al final y exige leyendas compatibles): en
+ * prod «0025830585» es la TARJETA y se repite en cargos de comercios
+ * distintos, y los 7 abonos «CARGO INDEBIDO 21 SEP 355xx» del 23-sep traen
+ * la MISMA referencia «00000000001303268115».
+ *
+ * EMPAREJAMIENTO MÁXIMO por niveles (no «el primero que encuentre»): se
+ * abre un nivel a la vez y, con caminos de aumento, una línea ya emparejada
+ * puede ceder su fila previa y moverse a otra con la que también empata.
+ * Así el orden del archivo no decide: «ASA CANCUN I\CARR CANC» (que también
+ * empata por prefijo con «ASA CANCUN») ya no le roba la fila a
+ * «ASA CANCUN\CARR CANCUN» y deja una carga duplicada; y una pareja fuerte
+ * (prefijo) gana siempre a una floja (mismo inicio).
+ *
+ * MULTICONJUNTO: cada fila previa se usa UNA sola vez. Dos cargos
+ * legítimos iguales del mismo día siguen entrando si el archivo trae dos y
+ * la base uno; y las líneas del MISMO archivo nunca se deduplican entre sí.
  */
 export function emparejarDuplicados<T extends LineaDedupe>(
   nuevos: readonly T[],
   previos: readonly LineaDedupe[],
 ): { aInsertar: T[]; duplicados: number } {
+  // Solo interesan los buckets que trae el archivo.
   const buckets = new Map<
     string,
-    Array<{ ref: string | null; desc: string; usado: boolean }>
+    { nuevos: number[]; previos: LineaDedupe[] }
   >();
-  for (const p of previos) {
-    const k = claveBucket(p);
-    const lista = buckets.get(k) ?? [];
-    lista.push({
-      ref: refDedupe(p.referencia),
-      desc: descDedupe(p.descripcion),
-      usado: false,
+  nuevos.forEach((n, i) => {
+    const k = claveBucket(n);
+    const b = buckets.get(k) ?? { nuevos: [], previos: [] };
+    b.nuevos.push(i);
+    buckets.set(k, b);
+  });
+  for (const p of previos) buckets.get(claveBucket(p))?.previos.push(p);
+
+  const duplicado = new Array<boolean>(nuevos.length).fill(false);
+  for (const b of buckets.values()) {
+    if (b.previos.length === 0) continue;
+    // Filas previas con las que empata cada línea nueva, la más fuerte primero.
+    const aristas = b.nuevos.map((i) =>
+      b.previos
+        .map((p, k) => ({ k, nivel: nivelEmpateDedupe(nuevos[i], p) }))
+        .filter((a): a is { k: number; nivel: number } => a.nivel !== null)
+        .sort((x, y) => x.nivel - y.nivel || x.k - y.k),
+    );
+    const usadaPor = new Array<number>(b.previos.length).fill(-1);
+    const emparejada = new Array<boolean>(b.nuevos.length).fill(false);
+    // Camino de aumento (Kuhn): si la fila previa ya la usa otra línea, se
+    // intenta mover ESA línea a otra fila con la que empate (nivel ≤ tope).
+    const aumentar = (
+      u: number,
+      tope: number,
+      vistas: Set<number>,
+    ): boolean => {
+      for (const { k, nivel } of aristas[u]) {
+        if (nivel > tope) break;
+        if (vistas.has(k)) continue;
+        vistas.add(k);
+        if (usadaPor[k] === -1 || aumentar(usadaPor[k], tope, vistas)) {
+          usadaPor[k] = u;
+          return true;
+        }
+      }
+      return false;
+    };
+    for (let tope = 0; tope <= NIVEL_EMPATE_MAX; tope++) {
+      for (let u = 0; u < b.nuevos.length; u++) {
+        if (!emparejada[u] && aumentar(u, tope, new Set())) {
+          emparejada[u] = true;
+        }
+      }
+    }
+    b.nuevos.forEach((i, u) => {
+      duplicado[i] = emparejada[u];
     });
-    buckets.set(k, lista);
   }
-  const aInsertar: T[] = [];
-  let duplicados = 0;
-  for (const n of nuevos) {
-    const lista = buckets.get(claveBucket(n)) ?? [];
-    const ref = refDedupe(n.referencia);
-    const desc = descDedupe(n.descripcion);
-    let hit = ref
-      ? lista.find((p) => !p.usado && p.ref !== null && p.ref === ref)
-      : undefined;
-    if (!hit) {
-      hit = lista.find(
-        (p) => !p.usado && (p.ref === null || ref === null) && p.desc === desc,
-      );
-    }
-    if (hit) {
-      hit.usado = true;
-      duplicados += 1;
-    } else {
-      aInsertar.push(n);
-    }
-  }
-  return { aInsertar, duplicados };
+  const aInsertar = nuevos.filter((_, i) => !duplicado[i]);
+  return { aInsertar, duplicados: nuevos.length - aInsertar.length };
 }
 
 // =======================================================================

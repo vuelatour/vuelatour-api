@@ -340,12 +340,93 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      cuentas» (se crea si no existe) y nota `Regla: <patrón>`; nunca pisa
      notas escritas por la oficina. Eran pendientes eternos que inflaban el
      «faltan N por conciliar».
-   - **Dedupe por REFERENCIA** (`emparejarDuplicados`): la referencia manda
-     cuando existe de los dos lados (re-subir el MISMO PDF con la descripción
-     redactada distinta por la IA ya no duplica) y dos cargos idénticos con
-     referencias DISTINTAS son dos movimientos reales. Sin referencia, la
-     descripción como siempre. La consulta de previos lleva `.limit(20000)`
-     (sin límite PostgREST cortaba en 1000 y duplicaba en silencio).
+   - **Dedupe de re-importación: la REFERENCIA NUNCA veta un duplicado
+     (29-sep-2026, API 0.0.42; incidente «se me están duplicando los
+     gastos»).** Hasta el 0.0.41 «la referencia manda cuando existe de los dos
+     lados» y dos cargos iguales con referencias distintas eran dos
+     movimientos. Pero la referencia que la IA transcribe del PDF NO es
+     estable entre lecturas: el MISMO cargo del 7-sep (AEROPUERTO DE COZUMEL
+     $125.82) llegó como «0025830577» (8-sep, número de TARJETA, que se repite
+     en todos los cargos de esa tarjeta), «00000000000000000001» (22-sep,
+     consecutivo del archivo) y «00000000000000000001 AUT. 456529» (29-sep), y
+     la descripción variaba por truncado («ZOMAY HOLBOX» / «HOLBO», «ASA
+     CANCUN» / «ASA CANCUN\CARR CANCUN»). Cada re-subida insertó otra vez lo
+     que ya estaba: en prod GASTOS GNRAL tenía 396 filas de septiembre para
+     ~200 movimientos y COMBUSTIBLE 99 para 75. Fuente única
+     `emparejarDuplicados` (+ `descDedupe`, `nivelDescripcionDedupe`,
+     `mismaDescripcionDedupe`, `leyendasNombranDistinto`,
+     `descripcionesSeContradicen`, PURAS en `auto-cruce.util.ts`); la usa
+     SOLO `ejecutarImport` (camino de `importar` e `importarAsync`); el
+     re-cruce (`autoMatchPendientes`) no inserta ni deduplica.
+     - **Bucket** (fecha | tipo | monto a centavos) y, dentro, niveles de
+       empate de más a menos fuerte (`nivelEmpateDedupe`): (0) referencia
+       igual **y** leyenda tolerante igual; (1) leyenda normalizada IGUAL;
+       (2) leyenda TRUNCADA (prefijo); (3) mismo INICIO (12 caracteres);
+       (4) referencia igual con leyendas que NO se contradicen (la IA redactó
+       distinto: «AEROPUERTO DE COZUMEL» / «Aeropuerto Cozumel (TUA)»). En
+       (1)–(3) la referencia no cuenta. Sola es la señal MÁS débil: los 7
+       abonos «CARGO INDEBIDO 21 SEP 355xx» del 23-sep traen la MISMA
+       referencia.
+     - **EMPAREJAMIENTO MÁXIMO por niveles** (Kuhn, revisión adversaria
+       29-sep): se abre un nivel a la vez y una línea ya emparejada puede
+       ceder su fila previa y moverse a otra con la que también empata. Con
+       «el primero que encuentre», «ASA CANCUN I\CARR CANC» (empata por
+       prefijo con las DOS filas «ASA CANCUN» y «ASA CANCUN I») le robaba la fila a «ASA
+       CANCUN\CARR CANCUN» y la carga se insertaba otra vez; y un «mismo
+       inicio» le ganaba a un prefijo según el orden del archivo. Ahora el
+       conteo de duplicados = emparejamiento máximo, NO depende del orden
+       (en la revisión se cotejó contra fuerza bruta en 3,000 casos
+       aleatorios), y una pareja fuerte gana siempre a una floja.
+     - **Leyenda tolerante** (`mismaDescripcionDedupe`, normalizada con
+       `normalizarTextoBanco`: sin acentos, mayúsculas, signos, espacios
+       dobles ni prefijos de agregador): iguales, o una es PREFIJO de la otra
+       con el lado corto ≥ `DEDUPE_PREFIJO_MIN` (8), o comparten los primeros
+       `DEDUPE_INICIO_COMUN` (12) caracteres — SALVO que
+       `leyendasNombranDistinto`: plazas distintas («AEROPUERTO DE CANCUN» /
+       «AEROPUERTO DE COZUMEL» comparten 12 caracteres) o números sueltos
+       (≥ 3 dígitos) distintos («CARGO INDEBIDO 21 SEP 35554» / «35552»,
+       «AUTOZONE 7226» / «7227»); un número truncado («355» / «35554») no
+       cuenta. Umbral del prefijo = 8: una marca sola («ASUR», «UBER»,
+       «OXXO») nunca es prefijo de nada; «OXXO CISNE» (10) ya trae sucursal.
+       **Se contradicen** (`descripcionesSeContradicen`) cuando nombran
+       plazas/números distintos o las dos traen texto y no comparten NINGÚN
+       token con significado (UBER vs OXXO): así la tarjeta repetida no junta
+       comercios distintos (ni «ASUR CANCUN» con «ASUR MERIDA»).
+     - **MULTICONJUNTO intacto**: cada fila previa se usa UNA vez; dos cargos
+       legítimos iguales del mismo día entran si el archivo trae dos y la base
+       uno, y las líneas del MISMO archivo nunca se deduplican entre sí (los
+       dos DIDI de $101 del 8-sep, los 2 Cozumel reales). Por eso la
+       tolerancia es segura cuando las dos lecturas traen el día COMPLETO:
+       solo decide QUÉ línea es la repetida, nunca cuántas entran.
+       **Límite conocido (día partido)**: si un estado de cuenta empieza a
+       mitad de un día (en prod 83dda1f9 trae 14 de las 29 líneas del 7-sep)
+       y trae una línea REALMENTE nueva con el mismo monto que una fila previa
+       compatible que el archivo NO repite, se toma por duplicada. Con
+       referencias de IA inestables no hay forma de distinguirlas; el panel
+       muestra `duplicados_omitidos`.
+     - **Verificado contra prod (29-sep, solo lectura)**: re-jugando las 13
+       importaciones reales en orden, la regla nueva deja 713 de 927 filas
+       (GASTOS sep 396 → 207, COMBUSTIBLE sep 99 → 75, julio 190 → 189 por el
+       «OXXO Cisne» del 16-jul leído en las dos importaciones que lo
+       traslapan; agosto y Paywise intactos), ninguna de las 214 filas que
+       marca como duplicado está conciliada con gasto, cobro ni ingreso (9 lo
+       están por clasificación de traspaso) y no queda ningún par (fecha,
+       tipo, monto) entre importaciones distintas. Las filas YA duplicadas NO
+       las borra este cambio: solo evita las nuevas.
+     - Specs (`auto-cruce.util.spec.ts`) con las lecturas REALES: Cozumel 5
+       filas ⇒ 2, ZOMAY 3 ⇒ 1, traspaso 3 ⇒ 1, ASA CANCUN con « REF. … AUT. …»,
+       tarjeta repetida, UBER/OXXO, los 7 «CARGO INDEBIDO» y el 8.º real, DIDI
+       y la pareja exacta que gana a la tolerante; 8 de ellos FALLAN con la
+       regla del 0.0.41. Revisión adversaria: ASA CANCUN / ASA CANCUN I en
+       cualquier orden, prefijo gana a mismo inicio, plazas distintas (por 12
+       caracteres y por la misma tarjeta), números distintos, «ASUR» sola y
+       una fila previa usada una sola vez; 8 FALLAN con la primera versión
+       del 0.0.42.
+     - **Espejo SQL**: la limpieza `20260929000001_limpieza_duplicados_…`
+       agrupa con el MISMO predicado (`mismaDescripcionDedupe`); si cambia
+       aquí (p. ej. el veto de plazas/números), cambia allá.
+     La consulta de previos lleva `.limit(20000)` (sin límite PostgREST
+     cortaba en 1000 y duplicaba en silencio).
    - **`ventanaAbono` en hora Cancún** (`-05:00`), como `cobrosSinBanco`:
      invariante 4. Antes un cobro de las 20:00 del último día caía fuera.
    - **La IA propone, jamás liga**: `POST /conciliacion/movimientos/:id/
