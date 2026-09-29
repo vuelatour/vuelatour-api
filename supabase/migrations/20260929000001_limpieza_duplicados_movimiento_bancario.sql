@@ -1,3 +1,11 @@
+-- ✅ APLICADA EN PROD el 29-sep-2026 ~17:10 Cancún (tras API 0.0.42): dry-run
+-- DRYRUN_OK con huella 53cdb3161bfbae3e34332ac077c9f746; resultado LIMPIEZA_OK
+-- 213 filas en 154 clústeres (2 conciliadas por clasificación, 0 ligadas), 0
+-- gastos recalculados; 927 → 714 movimientos (GASTOS sep 396→207, COMBUSTIBLE
+-- sep 99→75, julio/agosto/Paywise intactos); respaldo en
+-- movimiento_bancario_eliminado_20260929. Las funciones se crearon en el esquema
+-- temporal limpieza_tmp (en vez de pg_temp, porque el MCP no conserva la sesión)
+-- y se borraron al terminar. Queda 1 clúster dudoso (OXXO $140 del 16-jul).
 -- 29-sep-2026 · LIMPIEZA de los movimientos bancarios DUPLICADOS por las
 -- re-importaciones de estados de cuenta. MIGRACIÓN DE DATOS.
 --
