@@ -87,6 +87,18 @@ import { SinCamposComprobanteDto } from './dto/cobros.dto';
 import { errorFacturasNoDisponibles } from '../../common/factura-emitida-disponible.util';
 import { FlightReportService } from './flight-report.service';
 import { FlightsService } from './flights.service';
+import {
+  ActualizarSeguimientoDto,
+  CrearSeguimientoDto,
+} from './dto/seguimiento.dto';
+import {
+  VueloSeguimientoService,
+  errorSeguimientoNoDisponible,
+} from './vuelo-seguimiento.service';
+import {
+  ROLES_SEGUIMIENTO_ESCRITURA,
+  ROLES_SEGUIMIENTO_LECTURA,
+} from './vuelo-seguimiento.util';
 
 @ApiTags('Flights')
 @ApiBearerAuth()
@@ -101,11 +113,20 @@ export class FlightsController {
     // existen montan el controlador sin él; en la app siempre está.
     @Optional()
     private readonly facturaSolicitud?: FacturaSolicitudService,
+    // Seguimiento de la cotización (29-sep-2026). @Optional por la misma
+    // razón: los specs HTTP existentes montan el controlador sin él.
+    @Optional()
+    private readonly seguimiento?: VueloSeguimientoService,
   ) {}
 
   private solicitudService(): FacturaSolicitudService {
     if (!this.facturaSolicitud) throw errorFacturasNoDisponibles();
     return this.facturaSolicitud;
+  }
+
+  private seguimientoService(): VueloSeguimientoService {
+    if (!this.seguimiento) throw errorSeguimientoNoDisponible();
+    return this.seguimiento;
   }
 
   // ============ Vuelos ============
@@ -325,6 +346,63 @@ export class FlightsController {
   })
   gastosHistorial(@Param('id', ParseUUIDPipe) id: string) {
     return this.flights.gastosHistorial(id);
+  }
+
+  // ============ Seguimiento de la cotización (29-sep-2026) ============
+  // Notas con estado PENDIENTE/RESUELTA para no olvidar ajustes que se deben
+  // cobrar o agregar a la cotización («los pax pidieron transporte…»).
+  // Reglas puras en vuelo-seguimiento.util.ts. Las rutas por NOTA van bajo el
+  // literal `seguimiento/` (como `legs/` y `cobros/`): no chocan con `:id`.
+
+  @Get(':id/seguimiento')
+  @Roles(...ROLES_SEGUIMIENTO_LECTURA)
+  @ApiOperation({
+    summary:
+      'Seguimiento de la cotización del vuelo: notas NO borradas, PENDIENTE primero y luego la más reciente. Cada nota: {id, texto, afecta_cotizacion, estado, created_at, creado_por:{id,nombre}, resuelta_at, resuelta_por:{id,nombre}|null, resolucion}. 404 si el vuelo no existe.',
+  })
+  listarSeguimiento(@Param('id', ParseUUIDPipe) id: string) {
+    return this.seguimientoService().listar(id);
+  }
+
+  @Post(':id/seguimiento')
+  @Roles(...ROLES_SEGUIMIENTO_ESCRITURA)
+  @ApiOperation({
+    summary:
+      'Agrega una nota de seguimiento (PENDIENTE) al vuelo: ajuste que se debe cobrar o agregar a la cotización. `afecta_cotizacion` default true (la vigilan el banner del cotizador y el pre-cierre).',
+  })
+  crearSeguimiento(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CrearSeguimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.seguimientoService().crear(id, dto, c.userId);
+  }
+
+  @Patch('seguimiento/:notaId')
+  @Roles(...ROLES_SEGUIMIENTO_ESCRITURA)
+  @ApiOperation({
+    summary:
+      'Edita una nota de seguimiento: estado (RESUELTA sella quién y cuándo; PENDIENTE = reabrir, limpia sello y resolución), resolución, texto o afecta_cotizacion. Pedir el estado que ya tiene responde la nota tal cual. 404 si no existe o está borrada.',
+  })
+  actualizarSeguimiento(
+    @Param('notaId', ParseUUIDPipe) notaId: string,
+    @Body() dto: ActualizarSeguimientoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.seguimientoService().actualizar(notaId, dto, c.userId);
+  }
+
+  @Delete('seguimiento/:notaId')
+  @Roles(...ROLES_SEGUIMIENTO_ESCRITURA)
+  @ApiOperation({
+    summary:
+      'Elimina (soft delete) una nota de seguimiento, aunque esté resuelta. El panel CONFIRMA antes (acción destructiva). 404 si no existe o ya se eliminó.',
+  })
+  eliminarSeguimiento(
+    @Param('notaId', ParseUUIDPipe) notaId: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.seguimientoService().eliminar(notaId, c.userId);
   }
 
   @Get(':id/quote-view')

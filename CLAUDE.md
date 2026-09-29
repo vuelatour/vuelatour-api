@@ -2615,6 +2615,119 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `dinero-report.service.ingresos.spec` solo cambió la `nota_egreso` de la
       provisión en el golden (la excepción sancionada).
 
+32. **SEGUIMIENTO DE LA COTIZACIÓN POR VUELO (29-sep-2026, API 0.0.43,
+    migración `20260929000002`)** — pedido del cliente con la captura del
+    vuelo #358: «un apartado para poner unas notas que se deben agregar a la
+    cotización. Ejemplo: Pablo ya terminó el vuelito de hoy y los pax
+    pidieron un transporte el cual no está incluido en la cotización pero se
+    necesita cobrar». NO es otra `notas`: `vuelo.notas` (cliente/operación),
+    `vuelo.notas_internas` y `escala.notas` (piloto) siguen igual y ninguno
+    tiene estado. Esto es una LISTA con SEGUIMIENTO.
+    - **Tabla `vuelo_seguimiento`**: `texto` (1–1000, recortado),
+      `afecta_cotizacion` (default true = «debe reflejarse en la
+      cotización»), `estado` PENDIENTE | RESUELTA (texto + CHECK, no enum),
+      `resuelta_at/_por`, `resolucion` (≤ 500), `created_*`, `updated_at`
+      (`tg_set_updated_at`), soft delete `deleted_at/_by` — **TODO lector
+      filtra `deleted_at is null`**. CHECK: RESUELTA ⇔ `resuelta_at`; una
+      PENDIENTE no arrastra `resuelta_por` ni `resolucion` (reabrir LIMPIA).
+      vuelo ON DELETE CASCADE. La nota **no toca la fila `vuelo`**: ni
+      `updated_at` (CAS de la app sin internet) ni la cola de Google.
+    - **Fuente única PURA** `flights/vuelo-seguimiento.util.ts` (con spec):
+      orden de la lista (PENDIENTE primero, luego `created_at` desc, empate
+      por id), `contarPendientes`, `detallePendientesCotizacion` (solo
+      PENDIENTE + afecta, máx 20), `aNota` (`creado_por` SIEMPRE objeto:
+      usuario borrado ⇒ `{id: null, nombre: null}`, jamás un uuid como
+      nombre; `resuelta_por` null mientras está pendiente),
+      `parcheSeguimiento` (sellos) y el aviso del pre-cierre. I/O en
+      `flights/vuelo-seguimiento.service.ts` (provider de FlightsModule,
+      exportado; NO inyecta FlightsService).
+    - **Rutas** (`@Roles` explícito en CADA una; constantes
+      `ROLES_SEGUIMIENTO_*` en el util): `GET /v1/flights/:id/seguimiento`
+      (ADMIN, COORDINADOR, FACTURACION, SOCIO, ANALISTA); `POST
+      /v1/flights/:id/seguimiento` `{texto, afecta_cotizacion?}` → 201 con
+      la nota; `PATCH /v1/flights/seguimiento/:notaId` `{estado?,
+      resolucion?, texto?, afecta_cotizacion?}`; `DELETE
+      /v1/flights/seguimiento/:notaId` → soft delete (se permite aunque esté
+      RESUELTA; el panel CONFIRMA). Escrituras: ADMIN, COORDINADOR,
+      FACTURACION. PILOTO/MECANICO/VISITANTE ⇒ 403. 404 estructurados:
+      `VUELO_NO_EXISTE` / `SEGUIMIENTO_NO_EXISTE` (nota borrada = no
+      existe). Las rutas por NOTA van bajo el literal `seguimiento/` (como
+      `legs/` y `cobros/`).
+    - **Sellos de PATCH**: RESUELTA desde PENDIENTE sella `resuelta_at =
+      ahora` y `resuelta_por = actor` (+ resolución opcional). Pedir el
+      estado que YA tiene (doble clic, dos personas) responde la nota TAL
+      CUAL, sin re-sellar ni escribir. En una resuelta se corrige la
+      resolución sin re-sellar. PENDIENTE (reabrir) limpia sello y
+      resolución. Resolución sobre una pendiente ⇒ 400
+      `SEGUIMIENTO_RESOLUCION_SIN_RESOLVER`; cuerpo vacío ⇒ 400
+      `SEGUIMIENTO_SIN_CAMBIOS`. `afecta_cotizacion` se valida sobre el
+      valor CRUDO del body (`enableImplicitConversion` convertiría el texto
+      'false' en `true`; patrón de `preview-quote.dto#sucio`). **En el PATCH
+      `null` NO es «omitido»** (revisión adversaria 29-sep-2026): `estado` y
+      `afecta_cotizacion` usan `@ValidateIf(v !== undefined)` en vez de
+      `@IsOptional` ⇒ `null` = 400; con `@IsOptional` un
+      `{afecta_cotizacion: null}` pasaba y el parche lo guardaba como
+      `false` (la nota dejaba de vigilarse en silencio). `parcheSeguimiento`
+      lo repite (400 `SEGUIMIENTO_AFECTA_INVALIDO` si no es booleano).
+      **CAS por `estado`** (misma revisión): el UPDATE exige el estado LEÍDO
+      (`.eq('estado', actual.estado)`); con 0 filas se relee (404 si la
+      borraron) y se recalcula UNA vez. Sin él, dos «Marcar resuelta» a la
+      vez re-sellaban y la segunda BORRABA la resolución de la primera, y
+      corregir la resolución de una nota recién reabierta por otra persona
+      reventaba el CHECK ⇒ 500 (hoy: la nota tal cual / 400
+      `SEGUIMIENTO_RESOLUCION_SIN_RESOLVER`). Dos fallos seguidos ⇒ 409
+      `SEGUIMIENTO_CAMBIO_CONCURRENTE`.
+    - **ADITIVOS**: `GET /v1/flights/:id` (detalle) y el snapshot llevan
+      `seguimiento_pendientes` (PENDIENTE vivas) y
+      `seguimiento_cotizacion_pendientes` (las que afectan la cotización)
+      SOLO para los roles que leen la lista (`rolVeSeguimiento`): para la
+      tripulación las llaves se OMITEN (ni se leen). `GET /v1/quotes/:id`
+      (ahora `QuotesService.detalle` = `findById` + bloque) lleva el mismo
+      par + `seguimiento_pendientes_detalle` `[{id, texto, created_at,
+      creado_por_nombre}]` para el banner ámbar NO ocultable del cotizador;
+      los caminos internos (revise/confirm/cancel/PDF) siguen con
+      `findById` a secas (el panel rehidrata con esta ruta tras guardar).
+    - **Degradación**: tabla ausente (42P01/PGRST205, migración sin aplicar)
+      ⇒ lista `[]`, contadores 0 (no existe ninguna nota), pre-cierre sin
+      vuelos y ESCRITURAS 503 `SEGUIMIENTO_NO_DISPONIBLE`. Cualquier OTRO
+      fallo de lectura en los bloques aditivos ⇒ contadores **`null`** (≠ 0:
+      jamás se afirma «no hay pendientes» sin haber leído) y detalle `[]`,
+      con `warn`; el detalle del vuelo y el cotizador NO se caen.
+    - **Pre-cierre** (`profit-sharing.preCierre`): item
+      `seguimiento_cotizacion_pendiente` («Vuelos con ajustes pendientes de
+      reflejar en la cotización»), **NO bloqueante** (fuera de
+      `bloqueantes`, sin `informativo`: hay algo que hacer). Vuelos cuya
+      `fecha_vuelo` cae en el periodo (cortes Cancún, invariante 4; TODOS
+      los estados — una nota pendiente de un cancelado también se cierra a
+      mano) con notas PENDIENTE + afecta + vivas. `count` = VUELOS, `notas`
+      = total, `vuelos[] {id, folio, estado, fecha_vuelo, notas}` por folio,
+      `detalle` «N vuelo(s) con ajustes pendientes de reflejar en la
+      cotización: #a, #b…» (15 folios y «y N más»). Lectura fallida ⇒ count
+      0 con `lectura_fallida: true` y un texto que lo dice. La lectura va
+      **PAGINADA** (`order('id')` + `range` de 1000, tope 20 páginas ⇒
+      lectura fallida): PostgREST corta en max-rows = 1000 sin avisar y el
+      `.limit(5000)` original no lo evitaba. Sin la tabla, PostgREST responde
+      **PGRST205 también con el embed `vuelo:vuelo_id!inner`** (verificado
+      contra prod el 29-sep, no PGRST200), así que `esTablaInexistente` la
+      reconoce.
+    - **Pendiente (fuera de alcance)**: que el PILOTO deje la nota desde la
+      app (Flutter); cotizaciones de GRUPO (el banner vive en la cotización
+      por vuelo/hijo).
+    - Specs: `vuelo-seguimiento.util.spec` (orden, contadores, banner máx
+      20, forma, sellos, textos del pre-cierre), `vuelo-seguimiento.service.spec`
+      (BD en memoria: sin borradas, defaults, 404/503, soft delete, null ≠
+      0, resolver la última pendiente vacía el banner),
+      `flights.controller.seguimiento.spec` (HTTP real: `@Roles` en cada
+      ruta, 403 por rol, 400 del DTO incluido 'false' en texto, PATCH/DELETE
+      por nota no caen en `:id`, 503 sin el service),
+      `flights.service.seguimiento.spec` (llaves en detalle y snapshot por
+      rol), `quotes.service.seguimiento.spec` y
+      `profit-sharing.service.seguimiento.spec` (filtros y cortes Cancún de
+      la consulta, no bloquea, tabla ausente, lectura fallida, 2,350 notas
+      en 3 páginas). Carreras del CAS en `vuelo-seguimiento.service.spec`
+      («carreras (CAS por estado)»: 2 de sus casos FALLAN sin el `.eq` del
+      estado) y `null` ⇒ 400 en `flights.controller.seguimiento.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -3298,6 +3411,25 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (29-sep-2026; probada en PGlite: DRYRUN_OK A–C6, idempotente, dry-run sobre base aplicada ⇒ `DRYRUN_FALLA A`)** — `20260929000002_vuelo_seguimiento.sql`
+  (invariante 32): tabla `vuelo_seguimiento` + índice parcial por vuelo
+  (`deleted_at is null`) + RLS + `trg_vuelo_seguimiento_updated_at`. Sin
+  funciones nuevas, sin `moneda`, sin backfill. **Antes de aplicar**: el
+  DRY-RUN de su cabecera (UNA sentencia `do $dry$`, la sección 1 pegada en
+  B): C1 estructura y FK `confdeltype = 'c'`; C2 INSERT REAL con defaults
+  PENDIENTE/true que **no mueve `vuelo.updated_at` ni encola Google**; C3
+  CHECKs/FK (texto vacío/en blanco/1001/null, estado inventado, RESUELTA
+  sin fecha, PENDIENTE con sello o resolución, resolución de 501,
+  `deleted_by` sin `deleted_at`, vuelo/usuario inexistentes); C4 UPDATE real
+  (updated_at, resolver, editar, reabrir); C5 las lecturas del API
+  (contadores sin borradas ni no-cotización); C6 cascada REAL borrando un
+  vuelo sin dinero ni ligas RESTRICT (en prod hay 66 candidatos; si otra
+  liga lo impide, se salta con aviso) ⇒ `DRYRUN_OK`; después
+  `to_regclass('public.vuelo_seguimiento')` ⇒ NULL ⇒ `apply_migration` ⇒
+  `get_advisors` (esperado el INFO de RLS sin policies y FK sin índice a
+  `usuario`, como las demás tablas). El API 0.0.43 es desplegable ANTES
+  (lista `[]`, contadores 0, escrituras 503 `SEGUIMIENTO_NO_DISPONIBLE`).
+  Rollback: `drop table public.vuelo_seguimiento;`.
 - **APLICADA (28-sep-2026, DRYRUN_OK A–C; enum 19 → 20 con COMISION_VENDEDOR al final; aplicada ANTES del push del API 0.0.39)** — `20260928000001_categoria_comision_vendedor.sql`
   (invariante 31): `alter type public.categoria_gasto add value if not exists
   'COMISION_VENDEDOR'`, SOLA en su archivo (un valor nuevo de enum no se

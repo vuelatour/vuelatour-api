@@ -117,6 +117,8 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
   const svc = {
     vecinos: jest.fn().mockResolvedValue(respuesta),
     findById: jest.fn().mockResolvedValue({ id: ID }),
+    // `GET /v1/quotes/:id` llama a `detalle` desde el 29-sep-2026.
+    detalle: jest.fn().mockResolvedValue({ id: ID }),
   };
   const http = (): Servidor => app.getHttpServer() as Servidor;
 
@@ -168,6 +170,7 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
     expect(r.status).toBe(200);
     expect(r.body).toEqual(respuesta);
     expect(svc.findById).not.toHaveBeenCalled();
+    expect(svc.detalle).not.toHaveBeenCalled();
     expect(svc.vecinos).toHaveBeenCalledWith(
       ID,
       expect.objectContaining({

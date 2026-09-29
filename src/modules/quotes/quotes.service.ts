@@ -7,6 +7,7 @@ import {
   Optional,
 } from '@nestjs/common';
 import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
+import { VueloSeguimientoService } from '../flights/vuelo-seguimiento.service';
 import { AircraftService } from '../aircraft/aircraft.service';
 import { AirportsService } from '../airports/airports.service';
 import { RoutesService } from '../routes/routes.service';
@@ -437,6 +438,13 @@ export class QuotesService {
      */
     @Optional()
     private readonly configuracion?: ConfiguracionService,
+    /**
+     * SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): bloque ADITIVO de
+     * `GET /v1/quotes/:id` (banner ámbar del cotizador). @Optional: los
+     * specs construyen el servicio sin él y la respuesta es la de siempre.
+     */
+    @Optional()
+    private readonly seguimiento?: VueloSeguimientoService,
   ) {}
 
   /**
@@ -2189,6 +2197,27 @@ export class QuotesService {
       particion_ingreso,
       ...participacion,
     };
+  }
+
+  /**
+   * `GET /v1/quotes/:id` (29-sep-2026): `findById` + el bloque ADITIVO del
+   * SEGUIMIENTO DE LA COTIZACIÓN — `seguimiento_pendientes`,
+   * `seguimiento_cotizacion_pendientes` y `seguimiento_pendientes_detalle`
+   * ([{id, texto, created_at, creado_por_nombre}], solo las PENDIENTE que
+   * afectan la cotización, máx 20) para el banner ámbar NO ocultable del
+   * cotizador. Solo ESTA ruta lo lleva: los caminos internos (revise,
+   * confirm, cancel, PDF…) siguen con `findById` sin la lectura extra; el
+   * panel rehidrata con esta ruta tras guardar (router.refresh). Tabla
+   * ausente ⇒ 0/[]; lectura fallida ⇒ contadores `null` y detalle `[]`.
+   */
+  async detalle(id: string) {
+    const [fila, seguimiento] = await Promise.all([
+      this.findById(id),
+      this.seguimiento
+        ? this.seguimiento.deCotizacion(id)
+        : Promise.resolve(null),
+    ]);
+    return seguimiento ? { ...fila, ...seguimiento } : fila;
   }
 
   async findVersions(vueloId: string) {

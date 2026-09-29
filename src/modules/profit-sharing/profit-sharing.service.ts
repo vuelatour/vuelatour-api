@@ -36,6 +36,14 @@ import {
 } from '../../common/participacion-aeronave.util';
 import { cuentaComoSinFacturar } from '../../common/facturacion-gasto.util';
 import {
+  CLAVE_PRECIERRE_SEGUIMIENTO,
+  SEGUIMIENTO_PRECIERRE_MAX_PAGINAS,
+  SEGUIMIENTO_PRECIERRE_PAGINA,
+  resumenPrecierreSeguimiento,
+  type SeguimientoPrecierreRow,
+} from '../flights/vuelo-seguimiento.util';
+import { esTablaInexistente } from '../inventory/eliminar-movimiento.util';
+import {
   detalleTacosEnRevision,
   pilotosDeTacosEnRevision,
   resumenTacosEnRevision,
@@ -2437,6 +2445,14 @@ export class ProfitSharingService {
       (c) => c.metodo_cobro === 'PAYWISE',
     );
 
+    // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): vuelos del periodo con
+    // ajustes PENDIENTES de reflejar en la cotización («los pax pidieron
+    // transporte…»). Aviso NO bloqueante; best-effort como cobros sin banco.
+    const seguimiento = await this.seguimientoCotizacionPendiente(
+      desdeTs,
+      hastaTs,
+    );
+
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
     // alguno no resuelve, sale null (jamás un nombre inventado).
@@ -2510,6 +2526,23 @@ export class ProfitSharingService {
           'Se volaron pero su cotización quedó en $0: cotízalos para poder cobrarlos — sin precio no aparecen en cobranza ni en el reparto.',
         count: vuelosSinPrecio.length,
         vuelos: vuelosSinPrecio,
+      },
+      {
+        clave: CLAVE_PRECIERRE_SEGUIMIENTO,
+        titulo: 'Vuelos con ajustes pendientes de reflejar en la cotización',
+        // «N vuelo(s) con ajustes pendientes de reflejar en la cotización:
+        // #a, #b…» (fuente única resumenPrecierreSeguimiento). NO bloquea:
+        // es un recordatorio de cobranza, el dinero ya capturado no cambia.
+        detalle: seguimiento
+          ? seguimiento.detalle
+          : 'No se pudo leer el seguimiento de la cotización: revisa las notas pendientes en el detalle de cada vuelo.',
+        count: seguimiento?.count ?? 0,
+        // count = VUELOS; notas = total de notas pendientes (un vuelo puede
+        // tener varias). `vuelos[].notas` va por vuelo.
+        notas: seguimiento?.notas ?? 0,
+        vuelos: seguimiento?.vuelos ?? [],
+        // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
+        lectura_fallida: seguimiento === null,
       },
       {
         clave: 'extras_sin_desglose',
@@ -2701,6 +2734,63 @@ export class ProfitSharingService {
       .every((i) => i.count === 0);
 
     return { periodo: { desde: q.desde, hasta: q.hasta }, listo, items };
+  }
+
+  /**
+   * Pre-cierre · SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): notas PENDIENTE
+   * con `afecta_cotizacion`, NO borradas, de vuelos cuya `fecha_vuelo` cae en
+   * el periodo (cortes Cancún, invariante 4; TODOS los estados: una nota
+   * pendiente en un vuelo cancelado también hay que cerrarla a mano).
+   * Tabla ausente (migración 20260929000002 sin aplicar) ⇒ resumen vacío;
+   * cualquier otro fallo ⇒ `null` + `warn` (no tumba el pre-cierre).
+   */
+  private async seguimientoCotizacionPendiente(
+    desdeTs: string,
+    hastaTs: string,
+  ): Promise<ReturnType<typeof resumenPrecierreSeguimiento> | null> {
+    try {
+      // PAGINADA (revisión adversaria 29-sep-2026): PostgREST corta en
+      // max-rows = 1000 SIN avisar y el `.limit(5000)` no lo evita; con más
+      // notas el aviso contaría menos vuelos de los que hay. Orden TOTAL por
+      // id para que las páginas no se traslapen; tope de páginas ⇒ lectura
+      // fallida (jamás un conteo recortado presentado como completo).
+      const filas: SeguimientoPrecierreRow[] = [];
+      for (let pagina = 0; ; pagina += 1) {
+        if (pagina >= SEGUIMIENTO_PRECIERRE_MAX_PAGINAS) {
+          throw new Error(
+            `más de ${SEGUIMIENTO_PRECIERRE_MAX_PAGINAS * SEGUIMIENTO_PRECIERRE_PAGINA} notas pendientes en el periodo`,
+          );
+        }
+        const desde = pagina * SEGUIMIENTO_PRECIERRE_PAGINA;
+        const { data, error } = await this.supabase.service
+          .from('vuelo_seguimiento')
+          .select(
+            'id, vuelo_id, vuelo:vuelo_id!inner(id, folio, estado, fecha_vuelo)',
+          )
+          .eq('estado', 'PENDIENTE')
+          .eq('afecta_cotizacion', true)
+          .is('deleted_at', null)
+          .gte('vuelo.fecha_vuelo', desdeTs)
+          .lte('vuelo.fecha_vuelo', hastaTs)
+          .order('id', { ascending: true })
+          .range(desde, desde + SEGUIMIENTO_PRECIERRE_PAGINA - 1);
+        if (error) {
+          if (esTablaInexistente(error)) {
+            return resumenPrecierreSeguimiento([]);
+          }
+          throw new Error(error.message);
+        }
+        const chunk = (data ?? []) as SeguimientoPrecierreRow[];
+        filas.push(...chunk);
+        if (chunk.length < SEGUIMIENTO_PRECIERRE_PAGINA) break;
+      }
+      return resumenPrecierreSeguimiento(filas);
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: seguimiento de la cotización no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   // ============ fetchers ============

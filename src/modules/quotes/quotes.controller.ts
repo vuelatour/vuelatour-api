@@ -185,10 +185,10 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary:
-      'Get vuelo/quote with current cotization snapshot. No accesible a pilotos.',
+      'Get vuelo/quote with current cotization snapshot. No accesible a pilotos. ADITIVO (29-sep-2026): seguimiento_pendientes, seguimiento_cotizacion_pendientes y seguimiento_pendientes_detalle (banner del cotizador).',
   })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
-    return this.quotes.findById(id);
+    return this.quotes.detalle(id);
   }
 
   @Get(':id/interno')

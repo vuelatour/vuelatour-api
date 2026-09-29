@@ -67,6 +67,11 @@ import {
   type VueloFacturaRow,
 } from './factura-cliente.util';
 import { FacturaSolicitudService } from './factura-solicitud.service';
+import {
+  VueloSeguimientoService,
+  type ContadoresSeguimientoONulos,
+} from './vuelo-seguimiento.service';
+import { rolVeSeguimiento } from './vuelo-seguimiento.util';
 import { facturaEmitidaDisponible } from '../../common/factura-emitida-disponible.util';
 import {
   BUCKET_COBRO_VOUCHERS,
@@ -509,7 +514,28 @@ export class FlightsService {
     // `facturaCliente`: sin él (specs) se responde `null` — «sin datos».
     @Optional()
     private readonly facturaSolicitud?: FacturaSolicitudService,
+    // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): contadores ADITIVOS
+    // `seguimiento_pendientes` / `seguimiento_cotizacion_pendientes` del
+    // detalle y del snapshot. @Optional como los de arriba: sin él (specs)
+    // las llaves se omiten.
+    @Optional()
+    private readonly seguimiento?: VueloSeguimientoService,
   ) {}
+
+  /**
+   * Contadores ADITIVOS del seguimiento de la cotización (29-sep-2026) para
+   * el detalle y el snapshot. Solo los roles que leen la lista
+   * (`rolVeSeguimiento`); la tripulación, el visitante y las llamadas sin
+   * usuario reciben `{}` (llaves omitidas). Tabla ausente ⇒ 0; lectura
+   * fallida ⇒ `null` (ver `VueloSeguimientoService.contadoresDeVuelo`).
+   */
+  private async seguimientoAditivo(
+    vueloId: string,
+    current?: AuthenticatedUser,
+  ): Promise<Partial<ContadoresSeguimientoONulos>> {
+    if (!this.seguimiento || !rolVeSeguimiento(current?.rol)) return {};
+    return this.seguimiento.contadoresDeVuelo(vueloId);
+  }
 
   /** Roles de campo que NO reciben los bloques de factura del servicio. */
   private static esRolDeCampo(current?: AuthenticatedUser): boolean {
@@ -2602,7 +2628,11 @@ export class FlightsService {
    */
   async detalle(id: string, current?: AuthenticatedUser) {
     const vuelo = await this.findById(id, current);
-    const filas = await apoyosDeVuelo(this.supabase.service, id);
+    const [filas, seguimiento] = await Promise.all([
+      apoyosDeVuelo(this.supabase.service, id),
+      // Seguimiento de la cotización (29-sep-2026, ADITIVO).
+      this.seguimientoAditivo(id, current),
+    ]);
     const apoyos = await this.apoyosInfoDeVuelo(id, filas);
     let mi_tripulacion: MiTripulacion | null = null;
     if (current) {
@@ -2617,7 +2647,7 @@ export class FlightsService {
         filas,
       );
     }
-    return { ...vuelo, apoyos, mi_tripulacion };
+    return { ...vuelo, apoyos, mi_tripulacion, ...seguimiento };
   }
 
   /**
@@ -2882,6 +2912,7 @@ export class FlightsService {
       clienteResumen,
       facturaClienteBloque,
       facturaServicioBloque,
+      seguimientoContadores,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -2925,6 +2956,9 @@ export class FlightsService {
       FlightsService.esRolDeCampo(current) || !this.facturaSolicitud
         ? Promise.resolve(null)
         : this.facturaSolicitud.bloqueDeVuelo(id),
+      // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026, ADITIVO): contadores de
+      // notas PENDIENTE; `{}` para la tripulación (llaves omitidas).
+      this.seguimientoAditivo(id, current),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -3039,6 +3073,10 @@ export class FlightsService {
       ...(FlightsService.esRolDeCampo(current)
         ? {}
         : { factura_servicio: facturaServicioBloque }),
+      // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026, ADITIVO):
+      // `seguimiento_pendientes` y `seguimiento_cotizacion_pendientes`
+      // (number; null = lectura fallida). Omitidas para la tripulación.
+      ...seguimientoContadores,
     };
   }
 
