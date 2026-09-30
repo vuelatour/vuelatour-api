@@ -2733,7 +2733,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       estado) y `null` ⇒ 400 en `flights.controller.seguimiento.spec`.
 
 33. **REVERSOS: CARGO DEVUELTO ↔ SU DEVOLUCIÓN (30-sep-2026, API 0.0.44,
-    migración `20260930000001` — PENDIENTE de aplicar; DRYRUN_OK en prod con
+    migración `20260930000001` — APLICADA en prod el 30-sep-2026 (DRYRUN_OK con el par real); DRYRUN_OK en prod con
     el par REAL).** Pregunta del cliente con la captura de Conciliación ·
     GASTOS GNRAL: «¿Cómo puedo conciliar los cargos reembolsados?». Caso
     real: el 21-sep 8 cargos «ASUR CANCUN» $825.13 (1 con su gasto, 7
