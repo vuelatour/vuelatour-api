@@ -574,3 +574,54 @@ export class LinkMovimientoIngresoDto {
   @IsUUID()
   ingreso_id?: string | null;
 }
+
+/**
+ * `POST /v1/conciliacion/movimientos/:id/reverso` (30-sep-2026): empareja un
+ * CARGO con el ABONO que lo devuelve. Contrato: `:id` = el abono y
+ * `cargo_id` = el cargo. Por robustez se acepta también desde el cargo
+ * (`:id` = cargo y `abono_id` = el abono): el servicio decide el rol de cada
+ * uno por su tipo.
+ */
+export class EmparejarReversoDto {
+  @ApiPropertyOptional({
+    description: 'El CARGO que devuelve el abono `:id`.',
+  })
+  @IsOptional()
+  @IsUUID()
+  cargo_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Alternativa desde el cargo: el ABONO que devuelve el cargo `:id`.',
+  })
+  @IsOptional()
+  @IsUUID()
+  abono_id?: string;
+}
+
+/**
+ * `POST /v1/conciliacion/reversos/auto` (30-sep-2026): empareja solas las
+ * devoluciones del banco con su cargo. Todo opcional: sin filtros son los
+ * abonos de los últimos 90 días (hora Cancún) de todas las cuentas.
+ */
+export class AutoReversosDto {
+  @ApiPropertyOptional({ description: 'Cuenta bancaria. Omitida = todas.' })
+  @IsOptional()
+  @IsUUID()
+  cuenta_bancaria_id?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Inicio (YYYY-MM-DD) de la fecha del ABONO. Default: hace 90 días (hora Cancún).',
+  })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'desde debe ser YYYY-MM-DD' })
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description: 'Fin (YYYY-MM-DD) de la fecha del ABONO. Default: hoy.',
+  })
+  @IsOptional()
+  @Matches(RE_DIA_CONCILIACION, { message: 'hasta debe ser YYYY-MM-DD' })
+  hasta?: string;
+}

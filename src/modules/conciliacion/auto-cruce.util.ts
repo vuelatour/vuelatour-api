@@ -383,7 +383,9 @@ export type CriterioCruce =
   | 'DESCRIPCION'
   | 'FALTANTE'
   | 'TC_IMPLICITO'
-  | 'REGLA';
+  | 'REGLA'
+  /** Cargo devuelto por el banco ↔ su abono de devolución (30-sep-2026). */
+  | 'REVERSO';
 
 /** Movimiento del banco visto por el auto-cruce (solo lo que decide). */
 export interface MovimientoCruce {
@@ -816,6 +818,12 @@ export function emparejarDuplicados<T extends LineaDedupe>(
 export type ResultadoCruce =
   | 'CONCILIADO'
   | 'TRASPASO'
+  /**
+   * El movimiento quedó conciliado como CARGO DEVUELTO o como su DEVOLUCIÓN
+   * (30-sep-2026, `reverso-cruce.util`). Se cuenta por MOVIMIENTO, como
+   * todos: un par emparejado dentro de la corrida suma 2.
+   */
+  | 'REVERSO'
   | 'AMBIGUO'
   | 'SIN_CANDIDATO'
   | 'RECHAZADO'
@@ -824,6 +832,8 @@ export type ResultadoCruce =
 export interface ConteoCruce {
   conciliados: number;
   traspasos: number;
+  /** ADITIVO (30-sep-2026): movimientos conciliados como reverso. */
+  reversos: number;
   ambiguos: number;
   sin_candidato: number;
   rechazados: number;
@@ -834,6 +844,7 @@ export function conteoVacio(): ConteoCruce {
   return {
     conciliados: 0,
     traspasos: 0,
+    reversos: 0,
     ambiguos: 0,
     sin_candidato: 0,
     rechazados: 0,
@@ -848,6 +859,9 @@ export function sumarResultado(c: ConteoCruce, r: ResultadoCruce): ConteoCruce {
       break;
     case 'TRASPASO':
       c.traspasos += 1;
+      break;
+    case 'REVERSO':
+      c.reversos += 1;
       break;
     case 'AMBIGUO':
       c.ambiguos += 1;

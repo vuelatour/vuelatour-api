@@ -39,6 +39,10 @@ import {
   ingresosDisponibles,
 } from '../../common/ingreso-disponible.util';
 import {
+  errorReversosNoDisponibles,
+  reversosDisponibles,
+} from '../../common/reverso-disponible.util';
+import {
   CATEGORIAS_INGRESO,
   categoriaSugeridaDeDescripcion,
   esAnticipo,
@@ -63,6 +67,7 @@ import type {
 import {
   AbonosPendientesQuery,
   AutoMatchDto,
+  AutoReversosDto,
   ConciliacionParseDto,
   ImportarMovimientosDto,
   ListConciliacionQuery,
@@ -117,6 +122,31 @@ import {
   type GastoCandidatoCruce,
   type ResultadoCruce,
 } from './auto-cruce.util';
+import {
+  abonosCandidatosDeCargo,
+  anteponerNotaReverso,
+  cargoLigadoConDinero,
+  cargosCandidatosDeAbono,
+  compararAntiguedad,
+  elegirCargoReverso,
+  emparejarReversos,
+  esDevolucionDeCargo,
+  etiquetaConciliadoReverso,
+  motivoParInvalido,
+  motivoTriggerReverso,
+  movimientoLibreParaReverso,
+  notaAbonoReverso,
+  notaCargoReverso,
+  pistaFechaDevolucion,
+  quitarNotaReverso,
+  REVERSO_VENTANA_DIAS,
+  sumarDiasFecha,
+  ventanaAbonoDeCargo,
+  ventanaCargoDeAbono,
+  type DecisionReverso,
+  type MovimientoParReverso,
+  type MovimientoReverso,
+} from './reverso-cruce.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -340,6 +370,12 @@ export interface ResultadoMovimiento {
   cobro_grupo_id?: string | null;
   /** ADITIVO (24-sep-2026): el abono se ligó a un INGRESO registrado. */
   ingreso_id?: string | null;
+  /**
+   * ADITIVO (30-sep-2026): resultado REVERSO. En el ABONO = el cargo que
+   * devuelve; en el CARGO = el abono que lo devolvió (`reverso_par_id`).
+   */
+  reverso_de_id?: string | null;
+  reverso_par_id?: string | null;
 }
 
 /**
@@ -435,6 +471,25 @@ interface CruceCtx {
   /** Id de la clasificación «Traspaso entre cuentas» (perezoso). */
   clasificacionTraspaso?: string | null;
 }
+
+/**
+ * Columnas de un movimiento para el emparejado cargo ↔ devolución
+ * (30-sep-2026). Solo se piden con la migración 20260930000001 aplicada
+ * (`reversosOn`); `ingreso_id` se agrega detrás de su propia sonda.
+ */
+const MOV_REVERSO_COLS =
+  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, notas, conciliado, gasto_id, cobro_id, cobro_grupo_id, clasificacion_id, reverso_de_id, created_at';
+
+/** Fila de `movimiento_bancario` leída con `MOV_REVERSO_COLS`. */
+export interface MovReversoRow extends MovimientoReverso, MovimientoParReverso {
+  tipo: string;
+  monto: number;
+  notas: string | null;
+  conciliado: boolean;
+}
+
+/** Tope de devoluciones/cargos que lee una corrida del emparejado. */
+const REVERSO_TOPE = 3000;
 
 /** Tope de filas del detalle que devuelve el re-cruce (respuesta acotada). */
 const DETALLE_MAX = 300;
@@ -775,6 +830,8 @@ export class ConciliacionService {
           resultados: {
             conciliados: res.conciliados,
             traspasos: res.traspasos,
+            reversos: res.reversos,
+            reversos_emparejados: res.reversos_emparejados,
             ambiguos: res.ambiguos,
             sin_candidato: res.sin_candidato,
             rechazados: res.rechazados,
@@ -903,6 +960,8 @@ export class ConciliacionService {
         duplicados_omitidos: duplicadosOmitidos,
         conciliados: 0,
         traspasos: 0,
+        reversos: 0,
+        reversos_emparejados: 0,
         ambiguos: 0,
         sin_candidato: 0,
         rechazados: 0,
@@ -947,9 +1006,7 @@ export class ConciliacionService {
     // conciliados. Ahora cada movimiento va en su propio try/catch: el fallo
     // se cuenta con su motivo y el job termina LISTO diciendo cuántos.
     const ctx = await this.cargarCtxCruce();
-    const conteo = conteoVacio();
-    const detalle: ResultadoMovimiento[] = [];
-    const porCriterio: Record<string, number> = {};
+    const resultados: ResultadoMovimiento[] = [];
     const lista = inserted ?? [];
     if (lista.length !== rows.length) {
       // PostgREST puede devolver menos filas de las insertadas (max-rows): los
@@ -980,12 +1037,7 @@ export class ConciliacionService {
         ctx,
         userId,
       );
-      sumarResultado(conteo, r.resultado);
-      if (r.criterio)
-        porCriterio[r.criterio] = (porCriterio[r.criterio] ?? 0) + 1;
-      if (r.resultado !== 'CONCILIADO' && detalle.length < DETALLE_MAX) {
-        detalle.push(r);
-      }
+      resultados.push(r);
       if (i % pasoLote === 0 || i === lista.length - 1) {
         await onProgress(
           35 + Math.round(((i + 1) / lista.length) * 60),
@@ -993,7 +1045,27 @@ export class ConciliacionService {
         );
       }
     }
-    const conciliadosAuto = conteo.conciliados + conteo.traspasos;
+    // REVERSOS (30-sep-2026): el mismo estado de cuenta suele traer el cargo
+    // y su devolución («CARGO INDEBIDO 21 SEP …»): se emparejan aquí mismo,
+    // DESPUÉS del cruce contra gastos/cobros (que tiene prioridad).
+    const reversosEmparejados = await this.aplicarReversosEnCorrida(
+      lista.map((m) => ({ id: m.id as string, tipo: m.tipo as string })),
+      resultados,
+      userId,
+    );
+    const conteo = conteoVacio();
+    const porCriterio: Record<string, number> = {};
+    const detalle: ResultadoMovimiento[] = [];
+    for (const r of resultados) {
+      sumarResultado(conteo, r.resultado);
+      if (r.criterio)
+        porCriterio[r.criterio] = (porCriterio[r.criterio] ?? 0) + 1;
+      if (r.resultado !== 'CONCILIADO' && detalle.length < DETALLE_MAX) {
+        detalle.push(r);
+      }
+    }
+    const conciliadosAuto =
+      conteo.conciliados + conteo.traspasos + conteo.reversos;
 
     if (estadoCuentaId) {
       await this.supabase.service
@@ -1009,6 +1081,9 @@ export class ConciliacionService {
       // ADITIVOS (15-sep-2026): el operador ve POR QUÉ quedó lo que quedó.
       conciliados: conteo.conciliados,
       traspasos: conteo.traspasos,
+      // ADITIVOS (30-sep-2026): movimientos conciliados como reverso y pares.
+      reversos: conteo.reversos,
+      reversos_emparejados: reversosEmparejados,
       ambiguos: conteo.ambiguos,
       sin_candidato: conteo.sin_candidato,
       rechazados: conteo.rechazados,
@@ -1606,6 +1681,23 @@ export class ConciliacionService {
           mov.cuenta_bancaria_id,
         );
       }
+      // DEVOLUCIÓN DEL BANCO (revisión adversaria 30-sep-2026): un abono
+      // con leyenda «CARGO INDEBIDO / DEVOLUCION / REV …» NO es el pago de un
+      // cliente: jamás se liga por monto a un cobro, sobre o ingreso (antes
+      // un cobro de $X ±días se quedaba con la devolución de un cargo de $X).
+      // Queda SIN_CANDIDATO aquí y el paso de reversos de la MISMA corrida
+      // (`aplicarReversosEnCorrida`) lo empareja con su cargo o dice por qué
+      // no. Solo con la migración de reversos: sin ella, como el 0.0.43.
+      if (esDevolucionDeCargo(mov.descripcion) && (await this.reversosOn())) {
+        return {
+          movimiento_id: mov.id,
+          resultado: 'SIN_CANDIDATO',
+          criterio: null,
+          motivo:
+            'Devolución de un cargo del banco: se empareja con su cargo, no con un cobro.',
+          candidatos_n: 0,
+        };
+      }
       return await this.autoMatchAbono(
         {
           id: mov.id,
@@ -1677,9 +1769,7 @@ export class ConciliacionService {
       string,
       { moneda: string | null; tipo: string | null }
     >();
-    const conteo = conteoVacio();
-    const porCriterio: Record<string, number> = {};
-    const detalle: ResultadoMovimiento[] = [];
+    const resultados: ResultadoMovimiento[] = [];
 
     for (const m of movs) {
       const cuentaId = m.cuenta_bancaria_id as string;
@@ -1704,16 +1794,35 @@ export class ConciliacionService {
         ctx,
         userId,
       );
+      resultados.push(r);
+    }
+
+    // REVERSOS (30-sep-2026): las devoluciones del banco que el cruce dejó
+    // pendientes se emparejan con su cargo (misma función que «Emparejar
+    // devoluciones»). Va DESPUÉS: gastos y cobros tienen prioridad.
+    const reversosEmparejados = await this.aplicarReversosEnCorrida(
+      movs.map((m) => ({ id: m.id as string, tipo: m.tipo as string })),
+      resultados,
+      userId,
+    );
+    const conteo = conteoVacio();
+    const porCriterio: Record<string, number> = {};
+    for (const r of resultados) {
       sumarResultado(conteo, r.resultado);
       if (r.criterio)
         porCriterio[r.criterio] = (porCriterio[r.criterio] ?? 0) + 1;
-      if (detalle.length < DETALLE_MAX) detalle.push(r);
     }
+    const detalle = resultados.slice(0, DETALLE_MAX);
 
     return {
       revisados: movs.length,
       conciliados: conteo.conciliados,
       traspasos: conteo.traspasos,
+      // ADITIVOS (30-sep-2026): movimientos conciliados como reverso
+      // (cargo devuelto + su devolución: un par suma 2) y PARES emparejados
+      // (un par cuyo cargo cae fuera de la ventana cuenta 1 en `reversos`).
+      reversos: conteo.reversos,
+      reversos_emparejados: reversosEmparejados,
       ambiguos: conteo.ambiguos,
       sin_candidato: conteo.sin_candidato,
       rechazados: conteo.rechazados,
@@ -2269,6 +2378,9 @@ export class ConciliacionService {
         'Indica un cobro de vuelo O un sobre de grupo, no los dos.',
       );
     }
+    // Emparejado como devolución de un cargo (30-sep-2026): 409 antes de
+    // tocar nada (el trigger también lo rechazaría, con peor mensaje).
+    await this.bloquearSiEnReverso(movId);
     const conIngresos = await this.ingresosOn();
     const colsMov: string = conIngresos
       ? 'id, gasto_id, ingreso_id'
@@ -3829,6 +3941,26 @@ export class ConciliacionService {
     notas: string | undefined,
     userId: string,
   ) {
+    // REVERSOS (30-sep-2026): un movimiento emparejado como cargo devuelto /
+    // devolución. «Quitar clasificación» (null) en CUALQUIERA de los dos
+    // deja AMBOS pendientes; cambiarle la clasificación rompería el par en
+    // silencio ⇒ 409 (se quita primero); la MISMA clasificación (editar
+    // notas) sí se permite.
+    const par = await this.parDeReverso(movId);
+    if (par) {
+      if (clasificacionId === null) {
+        const r = await this.desemparejarReverso(movId, userId);
+        const propio = par.rol === 'ABONO' ? r.abono : r.cargo;
+        return {
+          ...(propio ?? { id: movId }),
+          desemparejado_con: par.rol === 'ABONO' ? par.cargo_id : par.abono_id,
+        } as Record<string, unknown>;
+      }
+      const actual = await this.leerMovReverso(movId);
+      if (clasificacionId !== actual.clasificacion_id) {
+        throw this.conflictoEnReverso(par);
+      }
+    }
     const colsMov: string = (await this.ingresosOn())
       ? 'id, gasto_id, cobro_id, cobro_grupo_id, ingreso_id'
       : 'id, gasto_id, cobro_id, cobro_grupo_id';
@@ -3878,6 +4010,1044 @@ export class ConciliacionService {
       .maybeSingle();
     if (error) throw new Error(error.message);
     return data as unknown as Record<string, unknown>;
+  }
+
+  // =====================================================================
+  // REVERSOS (30-sep-2026): CARGO devuelto por el banco ↔ su DEVOLUCIÓN.
+  // Pregunta del cliente: «¿Cómo puedo conciliar los cargos reembolsados?».
+  // Decisión PURA en `reverso-cruce.util.ts`; candado de verdad en la BD
+  // (trigger `tg_mov_bancario_reverso`, migración 20260930000001). Todo lo
+  // que nombre `reverso_de_id` va detrás de `reversosOn()`.
+  // =====================================================================
+
+  /** ¿Está aplicada la migración 20260930000001? (sonda única). */
+  private reversosOn(): Promise<boolean> {
+    return reversosDisponibles(this.supabase.service);
+  }
+
+  /** 503 `REVERSOS_NO_DISPONIBLE` si falta la migración. */
+  private async assertReversos(): Promise<void> {
+    if (!(await this.reversosOn())) throw errorReversosNoDisponibles();
+  }
+
+  /** Columnas del par (+ `ingreso_id` detrás de su propia sonda). */
+  private async colsReverso(): Promise<string> {
+    return (await this.ingresosOn())
+      ? `${MOV_REVERSO_COLS}, ingreso_id`
+      : MOV_REVERSO_COLS;
+  }
+
+  /** Fila cruda ⇒ movimiento del par (tipos normalizados). */
+  private aMovReverso(f: Record<string, unknown>): MovReversoRow {
+    const s = (v: unknown): string | null =>
+      typeof v === 'string' && v ? v : null;
+    return {
+      id: f.id as string,
+      cuenta_bancaria_id: f.cuenta_bancaria_id as string,
+      fecha: (s(f.fecha) ?? '').slice(0, 10),
+      tipo: s(f.tipo) ?? '',
+      monto: Number(f.monto) || 0,
+      descripcion: s(f.descripcion),
+      referencia: s(f.referencia),
+      notas: s(f.notas),
+      conciliado: f.conciliado === true,
+      gasto_id: s(f.gasto_id),
+      cobro_id: s(f.cobro_id),
+      cobro_grupo_id: s(f.cobro_grupo_id),
+      ingreso_id: s(f.ingreso_id),
+      clasificacion_id: s(f.clasificacion_id),
+      reverso_de_id: s(f.reverso_de_id),
+      created_at: s(f.created_at),
+    };
+  }
+
+  /** Lee un movimiento para el par; 404 estructurado si ya no existe. */
+  private async leerMovReverso(id: string): Promise<MovReversoRow> {
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(await this.colsReverso())
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: 'Ese movimiento del banco ya no existe.',
+        error: 'MOVIMIENTO_NO_EXISTE',
+        details: { movimiento_id: id },
+      });
+    }
+    return this.aMovReverso(data as unknown as Record<string, unknown>);
+  }
+
+  /** El abono que YA devuelve este cargo (null si ninguno). */
+  private async abonoQueDevuelve(
+    cargoId: string,
+  ): Promise<MovReversoRow | null> {
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(await this.colsReverso())
+      .eq('reverso_de_id', cargoId)
+      .limit(1)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    return data
+      ? this.aMovReverso(data as unknown as Record<string, unknown>)
+      : null;
+  }
+
+  /**
+   * El par cargo ↔ devolución al que pertenece un movimiento, o null. Sin la
+   * migración responde null SIN consultar nada (la columna no existe).
+   */
+  private async parDeReverso(movId: string): Promise<{
+    abono_id: string;
+    cargo_id: string;
+    rol: 'ABONO' | 'CARGO';
+  } | null> {
+    if (!(await this.reversosOn())) return null;
+    const { data: propio, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id, reverso_de_id')
+      .eq('id', movId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const cargoId = (propio as { reverso_de_id?: unknown } | null)
+      ?.reverso_de_id;
+    if (typeof cargoId === 'string' && cargoId) {
+      return { abono_id: movId, cargo_id: cargoId, rol: 'ABONO' };
+    }
+    const { data: hijo, error: hijoErr } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id')
+      .eq('reverso_de_id', movId)
+      .limit(1)
+      .maybeSingle();
+    if (hijoErr) throw new Error(hijoErr.message);
+    const abonoId = (hijo as { id?: unknown } | null)?.id;
+    return typeof abonoId === 'string' && abonoId
+      ? { abono_id: abonoId, cargo_id: movId, rol: 'CARGO' }
+      : null;
+  }
+
+  /**
+   * 409 `MOVIMIENTO_EN_REVERSO`: un movimiento emparejado como cargo
+   * devuelto / devolución no se liga ni se desliga por los caminos de
+   * gasto/cobro/clasificación — se quita el emparejamiento primero (los dos
+   * vuelven a pendiente juntos).
+   */
+  private conflictoEnReverso(par: {
+    abono_id: string;
+    cargo_id: string;
+    rol: 'ABONO' | 'CARGO';
+  }): ConflictException {
+    return new ConflictException({
+      message:
+        par.rol === 'ABONO'
+          ? 'Este abono está conciliado como la devolución de un cargo: quita el emparejamiento («Quitar») antes de conciliarlo con otra cosa.'
+          : 'Este cargo está conciliado con su devolución del banco: quita el emparejamiento («Quitar») antes de conciliarlo con otra cosa.',
+      error: 'MOVIMIENTO_EN_REVERSO',
+      details: { abono_id: par.abono_id, cargo_id: par.cargo_id },
+    });
+  }
+
+  /** Pre-check de `link`/`linkCobro`: 409 si el movimiento está en un par. */
+  private async bloquearSiEnReverso(movId: string): Promise<void> {
+    const par = await this.parDeReverso(movId);
+    if (par) throw this.conflictoEnReverso(par);
+  }
+
+  /** 409 `REVERSO_INVALIDO` con el motivo legible. */
+  private reversoInvalido(
+    motivo: string,
+    details: Record<string, unknown> = {},
+  ): ConflictException {
+    return new ConflictException({
+      message: motivo,
+      error: 'REVERSO_INVALIDO',
+      details: { motivo, ...details },
+    });
+  }
+
+  /**
+   * Id de la clasificación canónica «Reverso de un cargo»: la busca por
+   * nombre (sin distinguir mayúsculas), la crea si falta y la REACTIVA si
+   * alguien la dio de baja — el par SIEMPRE la lleva.
+   */
+  async asegurarClasificacionReverso(userId: string): Promise<string> {
+    const clasif = (await this.crearClasificacion(
+      CLASIFICACION_REVERSO,
+      userId,
+    )) as { id: string; activo?: boolean | null };
+    if (clasif.activo === false) {
+      const { error } = await this.supabase.service
+        .from('conciliacion_clasificacion')
+        .update({ activo: true })
+        .eq('id', clasif.id);
+      if (error) throw new Error(error.message);
+    }
+    return clasif.id;
+  }
+
+  /**
+   * Movimientos PENDIENTES y LIBRES (sin gasto, cobro, sobre, ingreso,
+   * clasificación ni devolución) de un tipo, en las cuentas, montos y
+   * ventana dados. Paginado (PostgREST corta en 1000 sin avisar) con tope
+   * `REVERSO_TOPE`: `truncado` lo dice y el llamador decide.
+   * `conLigados` (solo CARGOS): también devuelve en `ligados` los cargos de
+   * esas cuentas/montos/ventana YA explicados con dinero (gasto, cobro,
+   * sobre, ingreso): nunca se emparejan, pero frenan al automático
+   * (`elegirCargoReverso`, revisión adversaria 30-sep-2026).
+   */
+  private async movimientosLibresParaReverso(opts: {
+    tipo: 'CARGO' | 'ABONO';
+    cuentas: ReadonlyArray<string>;
+    montos: ReadonlyArray<number>;
+    desde: string;
+    hasta: string;
+    conLigados?: boolean;
+  }): Promise<{
+    filas: MovReversoRow[];
+    ligados: MovReversoRow[];
+    truncado: boolean;
+  }> {
+    const cuentas = [...new Set(opts.cuentas.filter(Boolean))];
+    const montos = [
+      ...new Set(opts.montos.map((m) => r2(Math.abs(Number(m) || 0)))),
+    ].filter((m) => m > 0);
+    if (cuentas.length === 0 || montos.length === 0) {
+      return { filas: [], ligados: [], truncado: false };
+    }
+    const conLigados = opts.conLigados === true && opts.tipo === 'CARGO';
+    const cols = await this.colsReverso();
+    const { filas, truncado } = await this.leerPaginado((a, b) => {
+      let q = this.supabase.service
+        .from('movimiento_bancario')
+        .select(cols)
+        .eq('tipo', opts.tipo);
+      if (!conLigados) q = q.eq('conciliado', false);
+      q = q
+        .gte('fecha', opts.desde)
+        .lte('fecha', opts.hasta)
+        .in('monto', montos);
+      q =
+        cuentas.length === 1
+          ? q.eq('cuenta_bancaria_id', cuentas[0])
+          : q.in('cuenta_bancaria_id', cuentas);
+      return q
+        .order('fecha', { ascending: true })
+        .order('id', { ascending: true })
+        .range(a, b);
+    }, REVERSO_TOPE);
+    const todas = filas
+      .map((f) => this.aMovReverso(f))
+      .filter((m) => m.tipo === opts.tipo);
+    return {
+      filas: todas.filter((m) => movimientoLibreParaReverso(m)),
+      ligados: conLigados ? todas.filter((m) => cargoLigadoConDinero(m)) : [],
+      truncado,
+    };
+  }
+
+  /**
+   * Escribe el par como UNA transacción lógica: primero el ABONO (el
+   * trigger valida el cargo con `for update` y el índice único lo reserva:
+   * dos devoluciones no se llevan el mismo cargo), luego el CARGO. Si el
+   * segundo update falla, el abono se REGRESA a como estaba (compensación).
+   * Los dos llevan CAS: siguen pendientes y libres.
+   */
+  private async escribirParReverso(
+    abono: MovReversoRow,
+    cargo: MovReversoRow,
+    clasifId: string,
+    userId: string,
+  ): Promise<{ abono: MovReversoRow; cargo: MovReversoRow }> {
+    const sb = this.supabase.service;
+    const cols = await this.colsReverso();
+    const detalles = { abono_id: abono.id, cargo_id: cargo.id };
+    const patchAbono: Record<string, unknown> = {
+      reverso_de_id: cargo.id,
+      clasificacion_id: clasifId,
+      conciliado: true,
+      gasto_id: null,
+      cobro_id: null,
+      cobro_grupo_id: null,
+      notas: anteponerNotaReverso(abono.notas, notaAbonoReverso(cargo)),
+      updated_by: userId,
+    };
+    const conIngresos = await this.ingresosOn();
+    if (conIngresos) patchAbono.ingreso_id = null;
+    // CAS COMPLETO (revisión adversaria 30-sep-2026): el patch pone en null
+    // gasto/cobro/sobre/ingreso, así que el trigger ya no vería una liga
+    // que alguien escribiera entre la lectura y este update — se exige aquí
+    // que el abono SIGA libre; si no, 0 filas ⇒ 409 «cambió».
+    let qAbono = sb
+      .from('movimiento_bancario')
+      .update(patchAbono)
+      .eq('id', abono.id)
+      .eq('conciliado', false)
+      .is('reverso_de_id', null)
+      .is('gasto_id', null)
+      .is('cobro_id', null)
+      .is('cobro_grupo_id', null)
+      .is('clasificacion_id', null);
+    if (conIngresos) qAbono = qAbono.is('ingreso_id', null);
+    const { data: abonoUpd, error: abErr } = await qAbono
+      .select(cols)
+      .maybeSingle();
+    if (abErr) {
+      const motivo = motivoTriggerReverso(abErr);
+      if (motivo) throw this.reversoInvalido(motivo, detalles);
+      throw new Error(abErr.message);
+    }
+    if (!abonoUpd) {
+      throw this.reversoInvalido(
+        'El abono cambió mientras lo emparejabas (alguien más lo concilió): recarga la lista.',
+        detalles,
+      );
+    }
+    const { data: cargoUpd, error: cgErr } = await sb
+      .from('movimiento_bancario')
+      .update({
+        clasificacion_id: clasifId,
+        conciliado: true,
+        notas: anteponerNotaReverso(cargo.notas, notaCargoReverso(abono)),
+        updated_by: userId,
+      })
+      .eq('id', cargo.id)
+      .eq('conciliado', false)
+      .is('gasto_id', null)
+      .is('clasificacion_id', null)
+      .select(cols)
+      .maybeSingle();
+    if (cgErr || !cargoUpd) {
+      // COMPENSACIÓN: el abono vuelve a como estaba (pendiente y libre).
+      const { error: rbErr } = await sb
+        .from('movimiento_bancario')
+        .update({
+          reverso_de_id: null,
+          clasificacion_id: abono.clasificacion_id ?? null,
+          conciliado: abono.conciliado,
+          notas: abono.notas,
+          updated_by: userId,
+        })
+        .eq('id', abono.id)
+        .eq('reverso_de_id', cargo.id);
+      if (rbErr) {
+        this.logger.error(
+          `reverso: el cargo ${cargo.id} no se pudo conciliar y el abono ${abono.id} NO se pudo regresar a pendiente: ${rbErr.message}`,
+        );
+        throw new InternalServerErrorException({
+          message:
+            'El emparejado quedó a medias (el abono quedó conciliado y el cargo no): vuelve a intentarlo (se completa) o usa «Quitar» en el abono.',
+          error: 'REVERSO_A_MEDIAS',
+          details: detalles,
+        });
+      }
+      if (cgErr) {
+        const motivo = motivoTriggerReverso(cgErr);
+        if (motivo) throw this.reversoInvalido(motivo, detalles);
+        throw new Error(cgErr.message);
+      }
+      throw this.reversoInvalido(
+        'El cargo cambió mientras lo emparejabas (alguien más lo concilió): recarga la lista.',
+        detalles,
+      );
+    }
+    return {
+      abono: this.aMovReverso(abonoUpd as unknown as Record<string, unknown>),
+      cargo: this.aMovReverso(cargoUpd as unknown as Record<string, unknown>),
+    };
+  }
+
+  /**
+   * Escribe SOLO el lado CARGO de un par cuyo abono ya apunta a él (par a
+   * medias). CAS: el cargo sigue pendiente y libre; si no, 409.
+   */
+  private async completarCargoReverso(
+    abono: MovReversoRow,
+    cargo: MovReversoRow,
+    clasifId: string,
+    userId: string,
+  ): Promise<MovReversoRow> {
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .update({
+        clasificacion_id: clasifId,
+        conciliado: true,
+        notas: anteponerNotaReverso(cargo.notas, notaCargoReverso(abono)),
+        updated_by: userId,
+      })
+      .eq('id', cargo.id)
+      .eq('conciliado', false)
+      .is('gasto_id', null)
+      .is('clasificacion_id', null)
+      .select(await this.colsReverso())
+      .maybeSingle();
+    const detalles = { abono_id: abono.id, cargo_id: cargo.id };
+    if (error) {
+      const motivo = motivoTriggerReverso(error);
+      if (motivo) throw this.reversoInvalido(motivo, detalles);
+      throw new Error(error.message);
+    }
+    if (!data) {
+      throw this.reversoInvalido(
+        'El cargo cambió mientras lo emparejabas (alguien más lo concilió): recarga la lista.',
+        detalles,
+      );
+    }
+    return this.aMovReverso(data as unknown as Record<string, unknown>);
+  }
+
+  /** Respuesta del par: filas + los aditivos `reverso_de`/`revertido_por`. */
+  private respuestaPar(
+    abono: MovReversoRow,
+    cargo: MovReversoRow | null,
+  ): {
+    abono: MovReversoRow & {
+      reverso_de: {
+        id: string;
+        fecha: string;
+        descripcion: string | null;
+      } | null;
+    };
+    cargo:
+      | (MovReversoRow & {
+          revertido_por: {
+            id: string;
+            fecha: string;
+            descripcion: string | null;
+          } | null;
+        })
+      | null;
+  } {
+    const emparejado = !!cargo && abono.reverso_de_id === cargo.id;
+    return {
+      abono: {
+        ...abono,
+        reverso_de: emparejado
+          ? {
+              id: cargo.id,
+              fecha: cargo.fecha,
+              descripcion: cargo.descripcion ?? null,
+            }
+          : null,
+      },
+      cargo: cargo
+        ? {
+            ...cargo,
+            revertido_por: emparejado
+              ? {
+                  id: abono.id,
+                  fecha: abono.fecha,
+                  descripcion: abono.descripcion ?? null,
+                }
+              : null,
+          }
+        : null,
+    };
+  }
+
+  /**
+   * `GET movimientos/:id/reverso-candidatos` (30-sep-2026).
+   * - `:id` = ABONO pendiente ⇒ CARGOS pendientes y libres de la misma
+   *   cuenta y el mismo monto entre `fecha − 60 días` y `fecha`, del más
+   *   reciente al más antiguo.
+   * - `:id` = CARGO pendiente («Lo devolvió el banco») ⇒ ABONOS pendientes y
+   *   libres de la misma cuenta y monto entre `fecha` y `fecha + 60 días`,
+   *   los que traen leyenda de devolución primero.
+   * `sugerido` (a lo más UNO) = el que elegiría el emparejado automático.
+   */
+  async candidatosReverso(movId: string): Promise<
+    Array<{
+      id: string;
+      fecha: string;
+      descripcion: string | null;
+      referencia: string | null;
+      monto: number;
+      tipo: 'CARGO' | 'ABONO';
+      es_devolucion: boolean;
+      sugerido: boolean;
+    }>
+  > {
+    await this.assertReversos();
+    const mov = await this.leerMovReverso(movId);
+    if (!movimientoLibreParaReverso(mov)) {
+      throw new ConflictException({
+        message:
+          'Ese movimiento ya está conciliado: quítale la conciliación antes de emparejarlo.',
+        error: 'MOVIMIENTO_YA_LIGADO',
+        details: { movimiento_id: movId },
+      });
+    }
+    const esAbono = mov.tipo === 'ABONO';
+    const ventana = esAbono
+      ? ventanaCargoDeAbono(mov.fecha)
+      : ventanaAbonoDeCargo(mov.fecha);
+    const { filas, ligados, truncado } =
+      await this.movimientosLibresParaReverso({
+        tipo: esAbono ? 'CARGO' : 'ABONO',
+        cuentas: [mov.cuenta_bancaria_id],
+        montos: [mov.monto],
+        desde: ventana.desde,
+        hasta: ventana.hasta,
+        conLigados: esAbono,
+      });
+    if (truncado) {
+      this.logger.warn(
+        `reverso-candidatos ${movId}: la lectura llegó al tope (${REVERSO_TOPE}); la lista puede estar incompleta.`,
+      );
+    }
+    const ficha = (m: MovReversoRow) => ({
+      id: m.id,
+      fecha: m.fecha,
+      descripcion: m.descripcion ?? null,
+      referencia: m.referencia ?? null,
+      monto: r2(m.monto),
+    });
+    if (esAbono) {
+      const candidatos = cargosCandidatosDeAbono(mov, filas).sort(
+        (a, b) => -compararAntiguedad(a, b),
+      );
+      // `sugerido` = lo que haría el automático, con el MISMO freno de los
+      // cargos ya ligados a un gasto/cobro (nunca salen en la lista).
+      const decision = elegirCargoReverso(mov, candidatos, ligados);
+      return candidatos.map((c) => ({
+        ...ficha(c),
+        tipo: 'CARGO' as const,
+        es_devolucion: false,
+        sugerido: decision.cargo_id === c.id,
+      }));
+    }
+    const candidatos = abonosCandidatosDeCargo(mov, filas);
+    const devoluciones = candidatos.filter((a) =>
+      esDevolucionDeCargo(a.descripcion),
+    );
+    const sugerido =
+      devoluciones.find(
+        (a) => pistaFechaDevolucion(a.descripcion, a.fecha) === mov.fecha,
+      ) ??
+      (devoluciones.length === 1 &&
+      pistaFechaDevolucion(
+        devoluciones[0].descripcion,
+        devoluciones[0].fecha,
+      ) === null
+        ? devoluciones[0]
+        : null);
+    return candidatos.map((a) => ({
+      ...ficha(a),
+      tipo: 'ABONO' as const,
+      es_devolucion: esDevolucionDeCargo(a.descripcion),
+      sugerido: sugerido?.id === a.id,
+    }));
+  }
+
+  /**
+   * `POST movimientos/:id/reverso` (30-sep-2026): empareja un CARGO con el
+   * ABONO que lo devuelve. Contrato: `:id` = abono, `otroId` = cargo; se
+   * acepta también al revés (el rol sale del TIPO de cada uno). Los dos
+   * quedan conciliados con «Reverso de un cargo» y una nota que nombra al
+   * otro. Reintento del mismo par ⇒ 200 `idempotente`. 409
+   * `REVERSO_INVALIDO` (+ `details.motivo`) si no es un par válido; 404 si
+   * alguno no existe; 503 sin la migración.
+   */
+  async emparejarReverso(
+    movId: string,
+    otroId: string | null | undefined,
+    userId: string,
+  ) {
+    await this.assertReversos();
+    if (!otroId) {
+      throw new BadRequestException({
+        message: 'Indica el cargo (cargo_id) que devuelve este abono.',
+        error: 'REVERSO_SIN_PAR',
+      });
+    }
+    if (otroId === movId) {
+      throw this.reversoInvalido(
+        'Un movimiento no puede ser su propia devolución.',
+      );
+    }
+    const [a, b] = await Promise.all([
+      this.leerMovReverso(movId),
+      this.leerMovReverso(otroId),
+    ]);
+    if (a.tipo === b.tipo) {
+      throw this.reversoInvalido(
+        `Se empareja un CARGO con el ABONO que lo devuelve (los dos son ${a.tipo}).`,
+        { movimiento_id: movId, otro_id: otroId },
+      );
+    }
+    const abono = a.tipo === 'ABONO' ? a : b;
+    const cargo = a.tipo === 'ABONO' ? b : a;
+    if (abono.reverso_de_id === cargo.id) {
+      if (
+        !cargo.conciliado &&
+        !cargo.clasificacion_id &&
+        !cargo.gasto_id &&
+        !cargo.cobro_id &&
+        !cargo.cobro_grupo_id &&
+        !cargo.ingreso_id
+      ) {
+        // Par A MEDIAS (el cargo no se escribió y la compensación también
+        // falló, REVERSO_A_MEDIAS): el reintento lo COMPLETA en vez de
+        // responder «idempotente» con el cargo todavía pendiente.
+        const completo = await this.completarCargoReverso(
+          abono,
+          cargo,
+          await this.asegurarClasificacionReverso(userId),
+          userId,
+        );
+        return {
+          ...this.respuestaPar(abono, completo),
+          idempotente: false,
+        };
+      }
+      return { ...this.respuestaPar(abono, cargo), idempotente: true };
+    }
+    const devueltoPor = await this.abonoQueDevuelve(cargo.id);
+    const motivo = motivoParInvalido(abono, cargo, devueltoPor?.id ?? null);
+    if (motivo) {
+      throw this.reversoInvalido(motivo, {
+        abono_id: abono.id,
+        cargo_id: cargo.id,
+      });
+    }
+    const clasifId = await this.asegurarClasificacionReverso(userId);
+    const par = await this.escribirParReverso(abono, cargo, clasifId, userId);
+    return { ...this.respuestaPar(par.abono, par.cargo), idempotente: false };
+  }
+
+  /**
+   * `DELETE movimientos/:id/reverso` (30-sep-2026): `:id` = el abono O el
+   * cargo del par. Los DOS vuelven a PENDIENTE (sin liga, sin
+   * clasificación) y se quitan de sus notas los renglones que escribió el
+   * emparejado (lo de la oficina se queda). 404 `SIN_REVERSO` si el
+   * movimiento no está emparejado.
+   */
+  async desemparejarReverso(movId: string, userId: string) {
+    await this.assertReversos();
+    const mov = await this.leerMovReverso(movId);
+    let abono: MovReversoRow | null;
+    let cargo: MovReversoRow | null;
+    if (mov.reverso_de_id) {
+      abono = mov;
+      cargo = await this.leerMovReverso(mov.reverso_de_id).catch((e) => {
+        if (e instanceof NotFoundException) return null;
+        throw e;
+      });
+    } else {
+      abono = await this.abonoQueDevuelve(mov.id);
+      cargo = abono ? mov : null;
+    }
+    if (!abono || !abono.reverso_de_id) {
+      throw new NotFoundException({
+        message: 'Ese movimiento no está emparejado con ninguna devolución.',
+        error: 'SIN_REVERSO',
+        details: { movimiento_id: movId },
+      });
+    }
+    const sb = this.supabase.service;
+    const cols = await this.colsReverso();
+    const cargoIdPrevio = abono.reverso_de_id;
+    const { data: abonoUpd, error } = await sb
+      .from('movimiento_bancario')
+      .update({
+        reverso_de_id: null,
+        clasificacion_id: null,
+        conciliado: false,
+        notas: quitarNotaReverso(abono.notas),
+        updated_by: userId,
+      })
+      .eq('id', abono.id)
+      .eq('reverso_de_id', cargoIdPrevio)
+      .select(cols)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!abonoUpd) {
+      throw new ConflictException({
+        message:
+          'El emparejamiento cambió mientras lo quitabas: recarga la lista.',
+        error: 'REVERSO_CAMBIO',
+        details: { abono_id: abono.id, cargo_id: cargoIdPrevio },
+      });
+    }
+    let cargoUpd: Record<string, unknown> | null = null;
+    if (cargo) {
+      const { data, error: cgErr } = await sb
+        .from('movimiento_bancario')
+        .update({
+          clasificacion_id: null,
+          conciliado: false,
+          notas: quitarNotaReverso(cargo.notas),
+          updated_by: userId,
+        })
+        .eq('id', cargo.id)
+        .is('gasto_id', null)
+        .select(cols)
+        .maybeSingle();
+      if (cgErr) {
+        // COMPENSACIÓN: el abono vuelve a apuntar a su cargo.
+        const { error: rbErr } = await sb
+          .from('movimiento_bancario')
+          .update({
+            reverso_de_id: cargoIdPrevio,
+            clasificacion_id: abono.clasificacion_id,
+            conciliado: abono.conciliado,
+            notas: abono.notas,
+            updated_by: userId,
+          })
+          .eq('id', abono.id)
+          .is('reverso_de_id', null);
+        if (rbErr) {
+          this.logger.error(
+            `reverso: al quitar el par ${abono.id}/${cargoIdPrevio} el cargo falló y el abono no se pudo re-emparejar: ${rbErr.message}`,
+          );
+        }
+        throw new Error(cgErr.message);
+      }
+      if (!data) {
+        this.logger.warn(
+          `reverso: al quitar el par, el cargo ${cargo.id} ya no estaba libre (¿borrado o ligado?); el abono ${abono.id} quedó pendiente.`,
+        );
+      }
+      cargoUpd = (data as unknown as Record<string, unknown> | null) ?? null;
+    }
+    return {
+      abono: {
+        ...this.aMovReverso(abonoUpd as unknown as Record<string, unknown>),
+        reverso_de: null,
+      },
+      cargo: cargoUpd
+        ? { ...this.aMovReverso(cargoUpd), revertido_por: null }
+        : null,
+    };
+  }
+
+  /**
+   * EMPAREJADO AUTOMÁTICO de devoluciones — fuente única de «Emparejar
+   * devoluciones», del re-cruce («Cruzar pendientes») y de la importación.
+   * Recibe ids de ABONOS; se RELEEN y solo siguen los que están pendientes,
+   * libres y con leyenda de devolución. Lee los CARGOS pendientes y libres
+   * de sus cuentas y montos en la ventana, decide `emparejarReversos`
+   * (PURA) y escribe cada par con `escribirParReverso`; un par que falla se
+   * cuenta como ERROR y se sigue. JAMÁS toca un cargo ligado a un gasto.
+   */
+  private async emparejarDevoluciones(
+    abonoIds: ReadonlyArray<string>,
+    userId: string,
+  ): Promise<
+    Array<
+      DecisionReverso & {
+        abono?: MovReversoRow;
+        cargo?: MovReversoRow;
+      }
+    >
+  > {
+    const ids = [...new Set(abonoIds.filter(Boolean))];
+    if (ids.length === 0) return [];
+    const cols = await this.colsReverso();
+    const leidos = await this.leerPorLotes(ids, (lote) =>
+      this.supabase.service
+        .from('movimiento_bancario')
+        .select(cols)
+        .in('id', lote),
+    );
+    const abonos = leidos
+      .map((f) => this.aMovReverso(f))
+      .filter(
+        (m) =>
+          m.tipo === 'ABONO' &&
+          movimientoLibreParaReverso(m) &&
+          esDevolucionDeCargo(m.descripcion),
+      );
+    if (abonos.length === 0) return [];
+    const fechas = abonos.map((a) => a.fecha).sort();
+    const {
+      filas: cargos,
+      ligados,
+      truncado,
+    } = await this.movimientosLibresParaReverso({
+      tipo: 'CARGO',
+      cuentas: abonos.map((a) => a.cuenta_bancaria_id),
+      montos: abonos.map((a) => a.monto),
+      desde: sumarDiasFecha(fechas[0], -REVERSO_VENTANA_DIAS),
+      hasta: fechas[fechas.length - 1],
+      conLigados: true,
+    });
+    const porAbono = new Map(abonos.map((a) => [a.id, a]));
+    if (truncado) {
+      // Una foto recortada podría convertir un AMBIGUO en «único»: no se
+      // empareja nada con una lectura incompleta.
+      return abonos.map((a) => ({
+        abono_id: a.id,
+        cargo_id: null,
+        resultado: 'ERROR' as const,
+        motivo: `Hay más de ${REVERSO_TOPE} cargos pendientes en la ventana: acota el rango (cuenta o fechas) y vuelve a intentarlo.`,
+        pista_fecha: null,
+        candidatos_n: 0,
+        abono: a,
+      }));
+    }
+    const porCargo = new Map(cargos.map((c) => [c.id, c]));
+    const decisiones = emparejarReversos(abonos, cargos, ligados);
+    let clasifId: string | null = null;
+    const out: Array<
+      DecisionReverso & { abono?: MovReversoRow; cargo?: MovReversoRow }
+    > = [];
+    for (const d of decisiones) {
+      const abono = porAbono.get(d.abono_id)!;
+      const cargo = d.cargo_id ? porCargo.get(d.cargo_id) : undefined;
+      if (d.resultado !== 'EMPAREJADO' || !cargo) {
+        out.push({ ...d, abono });
+        continue;
+      }
+      try {
+        clasifId ??= await this.asegurarClasificacionReverso(userId);
+        const par = await this.escribirParReverso(
+          abono,
+          cargo,
+          clasifId,
+          userId,
+        );
+        out.push({ ...d, abono: par.abono, cargo: par.cargo });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `reverso automático ${abono.id} → ${cargo.id}: ${msg}`,
+        );
+        out.push({
+          ...d,
+          cargo_id: null,
+          resultado: 'ERROR',
+          motivo: msg,
+          abono,
+        });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * `POST reversos/auto` (30-sep-2026, botón «Emparejar devoluciones»):
+   * empareja SOLAS las devoluciones del banco (abonos pendientes con
+   * leyenda CARGO INDEBIDO / DEVOLUCION / REVERSO / CONTRACARGO / ABONO POR
+   * ACLARACION / RECLAMACION / «REV …») con su cargo. Default: abonos de
+   * los últimos 90 días (hora Cancún) de todas las cuentas.
+   */
+  async autoReversos(dto: AutoReversosDto, userId: string) {
+    await this.assertReversos();
+    const hasta = dto.hasta ?? hoyCancun();
+    const desde =
+      dto.desde ?? hoyCancun(new Date(Date.now() - 90 * 24 * 3600 * 1000));
+    if (desde > hasta) {
+      throw new BadRequestException('desde no puede ser posterior a hasta');
+    }
+    const { filas, truncado } = await this.leerPaginado((a, b) => {
+      let q = this.supabase.service
+        .from('movimiento_bancario')
+        .select('id, descripcion')
+        .eq('tipo', TipoMovimientoBancario.ABONO)
+        .eq('conciliado', false)
+        .gte('fecha', desde)
+        .lte('fecha', hasta);
+      if (dto.cuenta_bancaria_id)
+        q = q.eq('cuenta_bancaria_id', dto.cuenta_bancaria_id);
+      return q
+        .order('fecha', { ascending: true })
+        .order('id', { ascending: true })
+        .range(a, b);
+    }, REVERSO_TOPE);
+    if (truncado) {
+      throw new BadRequestException({
+        message: `Hay más de ${REVERSO_TOPE} abonos pendientes en el rango: acótalo (cuenta o fechas).`,
+        error: 'PERIODO_MUY_GRANDE',
+      });
+    }
+    const ids = filas
+      .filter((f) => esDevolucionDeCargo(f.descripcion as string | null))
+      .map((f) => f.id as string);
+    const decisiones = await this.emparejarDevoluciones(ids, userId);
+    const cuenta = (r: DecisionReverso['resultado']) =>
+      decisiones.filter((d) => d.resultado === r).length;
+    return {
+      revisados: decisiones.length,
+      emparejados: cuenta('EMPAREJADO'),
+      sin_candidato: cuenta('SIN_CANDIDATO'),
+      ambiguos: cuenta('AMBIGUO'),
+      errores: cuenta('ERROR'),
+      desde,
+      hasta,
+      cuenta_bancaria_id: dto.cuenta_bancaria_id ?? null,
+      detalle: decisiones.slice(0, DETALLE_MAX).map((d) => ({
+        abono_id: d.abono_id,
+        cargo_id: d.resultado === 'EMPAREJADO' ? d.cargo_id : null,
+        resultado: d.resultado,
+        motivo: d.motivo,
+        pista_fecha: d.pista_fecha,
+        candidatos_n: d.candidatos_n,
+        abono_fecha: d.abono?.fecha ?? null,
+        abono_descripcion: d.abono?.descripcion ?? null,
+        cargo_fecha:
+          d.resultado === 'EMPAREJADO' ? (d.cargo?.fecha ?? null) : null,
+        cargo_descripcion:
+          d.resultado === 'EMPAREJADO' ? (d.cargo?.descripcion ?? null) : null,
+      })),
+      detalle_truncado: decisiones.length > DETALLE_MAX,
+    };
+  }
+
+  /**
+   * Emparejado de devoluciones DENTRO de una corrida del auto-cruce
+   * (importación y «Cruzar pendientes»). Corre DESPUÉS del cruce contra
+   * gastos/cobros —esos tienen prioridad; el reverso solo toma lo que nadie
+   * explicó— y REEMPLAZA el resultado de los movimientos emparejados por
+   * `REVERSO` (criterio `REVERSO`). Para una devolución que no se pudo
+   * emparejar y que el cruce dejó SIN_CANDIDATO, el motivo pasa a ser el
+   * del reverso (dice por qué: sin cargo o ambiguo). Best-effort: un fallo
+   * aquí NUNCA tumba la corrida (se registra y se sigue con lo de antes).
+   * Devuelve cuántos PARES se emparejaron.
+   */
+  private async aplicarReversosEnCorrida(
+    movs: ReadonlyArray<{ id: string; tipo: string }>,
+    resultados: ResultadoMovimiento[],
+    userId: string,
+  ): Promise<number> {
+    try {
+      if (!(await this.reversosOn())) return 0;
+      const indice = new Map(resultados.map((r, i) => [r.movimiento_id, i]));
+      const yaConciliado = new Set<ResultadoCruce>(['CONCILIADO', 'TRASPASO']);
+      const abonoIds = movs
+        .filter((m) => {
+          if (m.tipo !== (TipoMovimientoBancario.ABONO as string)) return false;
+          const i = indice.get(m.id);
+          return i === undefined || !yaConciliado.has(resultados[i].resultado);
+        })
+        .map((m) => m.id);
+      if (abonoIds.length === 0) return 0;
+      const decisiones = await this.emparejarDevoluciones(abonoIds, userId);
+      let pares = 0;
+      for (const d of decisiones) {
+        const iA = indice.get(d.abono_id);
+        if (d.resultado === 'EMPAREJADO' && d.cargo_id && d.cargo) {
+          pares += 1;
+          const cargo = d.cargo;
+          const abono = d.abono;
+          if (iA !== undefined) {
+            resultados[iA] = {
+              movimiento_id: d.abono_id,
+              resultado: 'REVERSO',
+              criterio: 'REVERSO',
+              motivo: `${notaAbonoReverso(cargo)}.`,
+              candidatos_n: d.candidatos_n,
+              reverso_de_id: cargo.id,
+            };
+          }
+          const iC = indice.get(cargo.id);
+          if (iC !== undefined && abono) {
+            resultados[iC] = {
+              movimiento_id: cargo.id,
+              resultado: 'REVERSO',
+              criterio: 'REVERSO',
+              motivo: `${notaCargoReverso(abono)}.`,
+              candidatos_n: 0,
+              reverso_par_id: abono.id,
+            };
+          }
+          continue;
+        }
+        if (
+          iA !== undefined &&
+          (d.resultado === 'SIN_CANDIDATO' || d.resultado === 'AMBIGUO') &&
+          resultados[iA].resultado === 'SIN_CANDIDATO'
+        ) {
+          resultados[iA] = {
+            ...resultados[iA],
+            resultado: d.resultado,
+            criterio: null,
+            motivo: `Devolución de un cargo: ${d.motivo}`,
+            candidatos_n: d.candidatos_n,
+          };
+        }
+      }
+      return pares;
+    } catch (err) {
+      this.logger.error(
+        `emparejado de devoluciones en la corrida: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * ADITIVOS de la lista y el reporte (30-sep-2026): `reverso_de` en el
+   * ABONO (el cargo que devuelve) y `revertido_por` en el CARGO (su
+   * devolución), `{id, fecha, descripcion}` o null. DOS lecturas en lote
+   * por página (≤ 200 ids por consulta), nunca una por fila. Si fallan se
+   * quedan en null y el «Conciliado con» cae a la clasificación, que dice
+   * lo mismo sin la otra fecha.
+   */
+  private async anotarReversos(
+    filas: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    for (const f of filas) {
+      f.reverso_de = null;
+      f.revertido_por = null;
+    }
+    if (!(await this.reversosOn())) return;
+    const abonos = filas.filter(
+      (f) => typeof f.reverso_de_id === 'string' && f.reverso_de_id,
+    );
+    const cargos = filas.filter(
+      (f) =>
+        f.tipo === (TipoMovimientoBancario.CARGO as string) &&
+        f.conciliado === true &&
+        !!f.clasificacion_id,
+    );
+    if (abonos.length === 0 && cargos.length === 0) return;
+    const sb = this.supabase.service;
+    const ficha = (m: Record<string, unknown>) => ({
+      id: m.id as string,
+      fecha: (typeof m.fecha === 'string' ? m.fecha : '').slice(0, 10),
+      descripcion: (m.descripcion as string | null) ?? null,
+    });
+    try {
+      const [deCargos, deAbonos] = await Promise.all([
+        this.leerPorLotes(
+          abonos.map((f) => f.reverso_de_id as string),
+          (lote) =>
+            sb
+              .from('movimiento_bancario')
+              .select('id, fecha, descripcion')
+              .in('id', lote),
+        ),
+        this.leerPorLotes(
+          cargos.map((f) => f.id as string),
+          (lote) =>
+            sb
+              .from('movimiento_bancario')
+              .select('id, fecha, descripcion, reverso_de_id')
+              .in('reverso_de_id', lote),
+        ),
+      ]);
+      const cargoPorId = new Map(deCargos.map((c) => [c.id as string, c]));
+      const abonoPorCargo = new Map(
+        deAbonos
+          .filter((a) => typeof a.reverso_de_id === 'string')
+          .map((a) => [a.reverso_de_id as string, a]),
+      );
+      for (const f of abonos) {
+        const c = cargoPorId.get(f.reverso_de_id as string);
+        if (c) f.reverso_de = ficha(c);
+      }
+      for (const f of cargos) {
+        const a = abonoPorCargo.get(f.id as string);
+        if (a) f.revertido_por = ficha(a);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudieron anotar los reversos de la página: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -4070,12 +5240,16 @@ export class ConciliacionService {
     const embedIngresoReporte: string = (await this.ingresosOn())
       ? ', ingreso_id, ingreso:ingreso!ingreso_id(folio, categoria, descripcion)'
       : '';
+    // REVERSOS (30-sep-2026): «Conciliado con» nombra al otro del par.
+    const colReversoReporte: string = (await this.reversosOn())
+      ? ', reverso_de_id'
+      : '';
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
         // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
         // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
-        `${MOV_COLS}${embedIngresoReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
@@ -4095,6 +5269,8 @@ export class ConciliacionService {
     const movs = await this.normalizarSobresEnMovs(
       (data ?? []) as unknown as Array<Record<string, unknown>>,
     );
+    // Par cargo devuelto ↔ devolución (30-sep-2026): la otra fecha y leyenda.
+    await this.anotarReversos(movs);
 
     // Mapas para la matrícula: repartos manuales de los gastos ligados y
     // aeronave/escala (patrón del Libro Dinero; la herencia escala→vuelo la
@@ -4219,6 +5395,30 @@ export class ConciliacionService {
           .join(' · ');
       }
       const clasif = unwrapOne(m.clasificacion as { nombre?: string } | null);
+      // REVERSO (30-sep-2026): «Reverso de un cargo · devuelve el cargo del
+      // 21-09 · ASUR CANCUN» / «… · devuelto el 23-09 · CARGO INDEBIDO …».
+      const reversoDe = m.reverso_de as {
+        fecha: string;
+        descripcion: string | null;
+      } | null;
+      if (reversoDe) {
+        return etiquetaConciliadoReverso(
+          'ABONO',
+          reversoDe,
+          clasif?.nombre ?? CLASIFICACION_REVERSO,
+        );
+      }
+      const revertidoPor = m.revertido_por as {
+        fecha: string;
+        descripcion: string | null;
+      } | null;
+      if (revertidoPor) {
+        return etiquetaConciliadoReverso(
+          'CARGO',
+          revertidoPor,
+          clasif?.nombre ?? CLASIFICACION_REVERSO,
+        );
+      }
       if (clasif?.nombre) return `Clasificación: ${clasif.nombre}`;
       return '';
     };
@@ -4481,12 +5681,16 @@ export class ConciliacionService {
     const embedIngresoLista: string = (await this.ingresosOn())
       ? ', ingreso_id, ingreso:ingreso!ingreso_id(id, folio, categoria, monto, moneda, descripcion)'
       : '';
+    // REVERSOS (30-sep-2026): con la migración, la liga del abono a su cargo.
+    const colReverso: string = (await this.reversosOn())
+      ? ', reverso_de_id'
+      : '';
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
-        `${MOV_COLS}${embedIngresoLista}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoLista}${colReverso}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -4507,6 +5711,8 @@ export class ConciliacionService {
       (data ?? []) as unknown as Array<Record<string, unknown>>,
     );
     await this.anotarMotivoPendiente(filas);
+    // ADITIVOS (30-sep-2026): `reverso_de` (abono) / `revertido_por` (cargo).
+    await this.anotarReversos(filas);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
       data: filas,
@@ -4810,6 +6016,9 @@ export class ConciliacionService {
    * `faltante` (null al desvincular).
    */
   async link(movId: string, gastoId: string | null, userId: string) {
+    // Emparejado como cargo devuelto / devolución (30-sep-2026): ni se liga
+    // ni se desvincula por aquí — el camino es DELETE movimientos/:id/reverso.
+    await this.bloquearSiEnReverso(movId);
     const colsMov: string = (await this.ingresosOn())
       ? 'id, gasto_id, monto, cuenta_bancaria_id, ingreso_id'
       : 'id, gasto_id, monto, cuenta_bancaria_id';

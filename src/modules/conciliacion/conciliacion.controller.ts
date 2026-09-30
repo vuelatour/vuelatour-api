@@ -1,6 +1,8 @@
 import {
+  BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -19,11 +21,13 @@ import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
   AbonosPendientesQuery,
   AutoMatchDto,
+  AutoReversosDto,
   CandidatosCobroQuery,
   ClasificarMovimientoDto,
   CobrosSinBancoQuery,
   ConciliacionParseDto,
   CrearClasificacionDto,
+  EmparejarReversoDto,
   ImportarMovimientosDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
@@ -93,10 +97,27 @@ export class ConciliacionController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Vuelve a correr el AUTO-CRUCE sobre los movimientos PENDIENTES de la ventana (cargos y abonos): reglas de traspaso, gasto por monto ±1 centavo con desempate por terminación de tarjeta y por descripción, faltante de pagos parciales, TC implícito USD↔MXN y cobros/sobres para los abonos. Nunca liga lo ambiguo. Body opcional {cuenta_bancaria_id?, desde?, hasta?, limite?} (default: últimos 90 días, hora Cancún, 500 movimientos). Devuelve {revisados, conciliados, traspasos, ambiguos, sin_candidato, rechazados, errores, por_criterio, detalle[]}.',
+      'Vuelve a correr el AUTO-CRUCE sobre los movimientos PENDIENTES de la ventana (cargos y abonos): reglas de traspaso, gasto por monto ±1 centavo con desempate por terminación de tarjeta y por descripción, faltante de pagos parciales, TC implícito USD↔MXN y cobros/sobres para los abonos. Nunca liga lo ambiguo. Body opcional {cuenta_bancaria_id?, desde?, hasta?, limite?} (default: últimos 90 días, hora Cancún, 500 movimientos). Después (30-sep-2026) empareja las DEVOLUCIONES del banco con su cargo (criterio REVERSO, misma regla que reversos/auto). Devuelve {revisados, conciliados, traspasos, reversos, reversos_emparejados, ambiguos, sin_candidato, rechazados, errores, por_criterio, detalle[]}.',
   })
   autoMatch(@Body() dto: AutoMatchDto, @CurrentUser() c: AuthenticatedUser) {
     return this.conciliacion.autoMatchPendientes(dto ?? {}, c.userId);
+  }
+
+  // ---- REVERSOS (30-sep-2026): cargo devuelto por el banco ↔ su
+  // devolución. Roles de la CLASE (ADMIN, FACTURACION: quienes concilian).
+  // Sin la migración 20260930000001 ⇒ 503 REVERSOS_NO_DISPONIBLE. ----
+
+  @Post('reversos/auto')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'EMPAREJA SOLAS las devoluciones del banco con su cargo: abonos pendientes cuya leyenda dice CARGO INDEBIDO / DEVOLUCION / REVERSO / CONTRACARGO / ABONO POR ACLARACION / RECLAMACION («REV …» también) contra cargos PENDIENTES y libres (nunca uno ligado a un gasto) de la misma cuenta y el mismo monto en los 60 días previos. Si la leyenda trae la fecha del cargo («21 SEP») manda esa fecha; cargos idénticos del mismo día ⇒ el más antiguo; fechas distintas sin pista ⇒ ambiguo (queda pendiente). Body opcional {cuenta_bancaria_id?, desde?, hasta?} sobre la fecha del ABONO (default: últimos 90 días, hora Cancún). Devuelve {revisados, emparejados, sin_candidato, ambiguos, errores, detalle[{abono_id, cargo_id, resultado, motivo, …}]}.',
+  })
+  autoReversos(
+    @Body() dto: AutoReversosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.autoReversos(dto ?? {}, c.userId);
   }
 
   @Post('sugerir-lote')
@@ -339,6 +360,53 @@ export class ConciliacionController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.conciliacion.linkIngreso(id, dto.ingreso_id ?? null, c.userId);
+  }
+
+  @Get('movimientos/:id/reverso-candidatos')
+  @ApiOperation({
+    summary:
+      'Candidatos para emparejar un movimiento PENDIENTE como cargo devuelto ↔ devolución. `:id` ABONO ⇒ cargos pendientes y libres de la misma cuenta y monto de los 60 días previos (fecha desc). `:id` CARGO ⇒ abonos pendientes de la misma cuenta y monto de los 60 días siguientes (leyenda de devolución primero). Cada uno {id, fecha, descripcion, referencia, monto, tipo, es_devolucion, sugerido}; lista vacía = no hay. 409 MOVIMIENTO_YA_LIGADO si el movimiento ya está conciliado.',
+  })
+  reversoCandidatos(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.candidatosReverso(id);
+  }
+
+  @Post('movimientos/:id/reverso')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Empareja el ABONO `:id` con el CARGO `cargo_id` que devuelve (también acepta `:id` = cargo con `abono_id`). Los dos quedan CONCILIADOS con la clasificación «Reverso de un cargo» y una nota que nombra al otro («Devuelve el cargo del 21-09 · …» / «Devuelto el 23-09 · …»). Respuesta {abono, cargo, idempotente}. 409 REVERSO_INVALIDO (details.motivo) si no es un par válido: tipos, cuenta, monto, alguno ya conciliado o el cargo ya devuelto; 404 si alguno no existe.',
+  })
+  emparejarReverso(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: EmparejarReversoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    // Los dos a la vez es ambiguo: antes se usaba `cargo_id` en silencio.
+    if (dto.cargo_id && dto.abono_id) {
+      throw new BadRequestException({
+        message:
+          'Indica el cargo (cargo_id) O el abono (abono_id), no los dos.',
+        error: 'REVERSO_SIN_PAR',
+      });
+    }
+    return this.conciliacion.emparejarReverso(
+      id,
+      dto.cargo_id ?? dto.abono_id ?? null,
+      c.userId,
+    );
+  }
+
+  @Delete('movimientos/:id/reverso')
+  @ApiOperation({
+    summary:
+      'Quita el emparejamiento cargo devuelto ↔ devolución (`:id` = el abono O el cargo): los DOS vuelven a PENDIENTE (sin clasificación) y se quitan de sus notas los renglones del emparejado. 404 SIN_REVERSO si no está emparejado. Respuesta {abono, cargo}.',
+  })
+  desemparejarReverso(
+    @Param('id', ParseUUIDPipe) id: string,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.conciliacion.desemparejarReverso(id, c.userId);
   }
 
   @Get('movimientos/:id/candidatos-cobro')

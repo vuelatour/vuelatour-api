@@ -340,6 +340,10 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      cuentas» (se crea si no existe) y nota `Regla: <patrón>`; nunca pisa
      notas escritas por la oficina. Eran pendientes eternos que inflaban el
      «faltan N por conciliar».
+   - **Devoluciones de cargos** («CARGO INDEBIDO 21 SEP …», «DEVOLUCION»,
+     «REV …»; 30-sep-2026): el re-cruce y la importación, DESPUÉS del cruce
+     contra gastos/cobros, emparejan cada devolución con su cargo pendiente
+     (criterio `REVERSO`, `reversos`/`reversos_emparejados`): invariante 33.
    - **Dedupe de re-importación: la REFERENCIA NUNCA veta un duplicado
      (29-sep-2026, API 0.0.42; incidente «se me están duplicando los
      gastos»).** Hasta el 0.0.41 «la referencia manda cuando existe de los dos
@@ -2728,6 +2732,163 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       («carreras (CAS por estado)»: 2 de sus casos FALLAN sin el `.eq` del
       estado) y `null` ⇒ 400 en `flights.controller.seguimiento.spec`.
 
+33. **REVERSOS: CARGO DEVUELTO ↔ SU DEVOLUCIÓN (30-sep-2026, API 0.0.44,
+    migración `20260930000001` — PENDIENTE de aplicar; DRYRUN_OK en prod con
+    el par REAL).** Pregunta del cliente con la captura de Conciliación ·
+    GASTOS GNRAL: «¿Cómo puedo conciliar los cargos reembolsados?». Caso
+    real: el 21-sep 8 cargos «ASUR CANCUN» $825.13 (1 con su gasto, 7
+    «sin candidato») y el 23-sep 7 abonos «CARGO INDEBIDO 21 SEP 355xx» de
+    $825.13 (MISMA referencia en los 7). Un cargo devuelto y su devolución
+    **se anulan: no son gasto ni ingreso**; hasta hoy se clasificaban a mano
+    los 14.
+    - **Modelo**: `movimiento_bancario.reverso_de_id` va en el ABONO y
+      apunta al CARGO que devuelve (FK a sí misma `on delete set null`;
+      índice ÚNICO parcial `uq_mov_bancario_reverso_de`: un cargo se
+      devuelve UNA vez). Los DOS quedan `conciliado = true` con la
+      clasificación canónica «Reverso de un cargo»
+      (`asegurarClasificacionReverso`: búsqueda sin distinguir mayúsculas,
+      la crea si falta y la REACTIVA si está de baja) y una nota que nombra
+      al otro, ANTEPUESTA a lo que ya había: abono «Devuelve el cargo del
+      21-09 · ASUR CANCUN», cargo «Devuelto el 23-09 · CARGO INDEBIDO 21 SEP
+      35552». El abono pierde gasto/cobro/sobre/ingreso (null).
+    - **Candado de verdad en BD**: `tg_mov_bancario_reverso` (BEFORE INSERT
+      / UPDATE OF reverso_de_id, tipo, monto, cuenta_bancaria_id, gasto_id,
+      cobro_id, cobro_grupo_id, ingreso_id; INVOKER, `search_path ''`,
+      `tipo::text`). Lado ABONO: la fila es ABONO sin ligas; el destino es
+      CARGO de la MISMA cuenta, MISMO monto (±0.005), sin ligas, sin reverso
+      propio ni otra devolución (`for update` sobre el cargo: serializa dos
+      emparejados o un emparejado y una liga a gasto). Lado CARGO: un cargo
+      emparejado no cambia tipo/monto/cuenta ni se liga a
+      gasto/cobro/sobre/ingreso. Lanza 23514 `REVERSO_INVALIDO: <motivo>`;
+      el API lo traduce a 409 `REVERSO_INVALIDO` (`details.motivo`) con
+      `motivoTriggerReverso` (también el 23505 del índice único). Espejo
+      PURO para el 409 previo: `motivoParInvalido`.
+    - **Fuente única PURA** `conciliacion/reverso-cruce.util.ts` (con spec y
+      las leyendas REALES): `patronDevolucion`/`esDevolucionDeCargo` (CARGO
+      INDEBIDO | DEVOLUCION | REVERSO | CONTRACARGO | ABONO POR ACLARACION |
+      RECLAMACION como inicio de palabra, + el prefijo «REV …» de
+      `patronReverso`), `pistaFechaDevolucion` («21 SEP» ⇒ la última fecha
+      con ese día/mes no posterior al abono; día inexistente ⇒ null),
+      ventanas (cargo en [abono − 60 d, abono]; abono en [cargo, cargo +
+      60 d]), `elegirCargoReverso` y `emparejarReversos`, notas, etiqueta del
+      reporte y `movimientoLibreParaReverso`.
+    - **Regla del emparejado automático (solo lo INEQUÍVOCO)**: candidatos =
+      cargos PENDIENTES y LIBRES (sin gasto/cobro/sobre/ingreso/
+      clasificación/devolución — **jamás un cargo ligado a gasto**) de la
+      misma cuenta y monto en la ventana. Con fecha en la leyenda: los de
+      ESE día; si no hay, ±3 días; si tampoco, SIN_CANDIDATO (nunca otra
+      fecha «por si acaso»). Todos del mismo día ⇒ intercambiables: el más
+      antiguo (fecha, `created_at`, id). Fechas distintas sin pista ⇒
+      AMBIGUO (queda pendiente). En lote: primero las devoluciones con
+      fecha en la leyenda, luego las demás, y se repasa mientras alguna se
+      empareje (al consumirse un cargo, una AMBIGUA puede quedar con uno);
+      cada cargo se usa UNA vez. Caso real ⇒ 7 pares distintos del 21-sep.
+      **Freno de los cargos YA LIGADOS con dinero** (revisión adversaria
+      30-sep, `cargoLigadoConDinero`: gasto/cobro/sobre/ingreso; una
+      clasificación NO cuenta): nunca se emparejan, pero si el cargo que
+      nombra la leyenda está ligado ⇒ SIN_CANDIDATO (no se brinca a ±3
+      días); con ±3 días, un ligado MÁS CERCA de la fecha que el libre ⇒
+      AMBIGUO; sin pista, un ligado MÁS RECIENTE que el libre más reciente ⇒
+      AMBIGUO (el banco casi seguro devolvió ESE). Caso REAL: «REV.ASUR
+      MERIDA» del 07-08 ($110.82) con su cargo del 07-08 ligado a gasto y
+      dos «ASUR Merida» pendientes del 06-07 — sin el freno se emparejaba
+      con uno del 06-07, un mes antes. Un ligado del MISMO día que los
+      libres no frena (el 21-sep). El `sugerido` del diálogo usa el mismo
+      freno.
+    - **Rutas** (roles de la CLASE: ADMIN, FACTURACION — quienes concilian;
+      el contrato pedía también COORDINADOR, pero la página de Conciliación
+      y todo `conciliacion/*` son ADMIN+FACTURACION y el invariante 29 dice
+      «COORDINADOR no concilia»): `GET conciliacion/movimientos/:id/
+      reverso-candidatos` (`:id` ABONO ⇒ cargos, fecha desc; `:id` CARGO ⇒
+      abonos, devoluciones primero; cada uno `{id, fecha, descripcion,
+      referencia, monto, tipo, es_devolucion, sugerido}` con a lo más UN
+      `sugerido`; `[]` = no hay; 409 `MOVIMIENTO_YA_LIGADO` si ya está
+      conciliado); `POST conciliacion/movimientos/:id/reverso {cargo_id}`
+      (también `:id` = cargo con `{abono_id}`; el rol sale del TIPO; los
+      dos a la vez ⇒ 400 `REVERSO_SIN_PAR`) ⇒
+      `{abono, cargo, idempotente}` con los aditivos `reverso_de` /
+      `revertido_por`; reintento del mismo par ⇒ 200 `idempotente: true` sin
+      escribir (si el par quedó A MEDIAS —abono apuntando y cargo
+      pendiente— el reintento COMPLETA el cargo, `idempotente: false`); 404 `MOVIMIENTO_NO_EXISTE`; 400 `REVERSO_SIN_PAR`; `DELETE
+      conciliacion/movimientos/:id/reverso` (`:id` abono O cargo) ⇒ los DOS
+      pendientes (sin clasificación) y se quitan SOLO los renglones del
+      emparejado de sus notas (`quitarNotaReverso`); 404 `SIN_REVERSO`;
+      `POST conciliacion/reversos/auto {cuenta_bancaria_id?, desde?,
+      hasta?}` (fecha del ABONO, default 90 días Cancún, 400
+      `PERIODO_MUY_GRANDE` > 3,000 abonos) ⇒ `{revisados, emparejados,
+      sin_candidato, ambiguos, errores, desde, hasta, cuenta_bancaria_id,
+      detalle[{abono_id, cargo_id, resultado, motivo, pista_fecha,
+      candidatos_n, abono_fecha, abono_descripcion, cargo_fecha,
+      cargo_descripcion}], detalle_truncado}`.
+    - **Escritura = UNA transacción lógica** (`escribirParReverso`): primero
+      el ABONO con CAS COMPLETO (`conciliado = false`, `reverso_de_id`,
+      `gasto_id`, `cobro_id`, `cobro_grupo_id`, `clasificacion_id` e
+      `ingreso_id` en null — el patch los pone en null, así que sin el CAS
+      una liga escrita entre la lectura y el update se borraba en silencio
+      y el trigger no la veía; el trigger valida y el índice reserva el
+      cargo), luego el CARGO con CAS
+      (`conciliado = false`, sin gasto ni clasificación); si el segundo
+      falla, el abono se REGRESA a como estaba (si ni eso se puede ⇒ 500
+      `REVERSO_A_MEDIAS`: reintentar lo COMPLETA, o «Quitar»). Desemparejar: abono
+      con CAS por su `reverso_de_id` y compensación simétrica.
+    - **Integración con el cruce** (misma función `emparejarDevoluciones`):
+      «Cruzar pendientes» (`autoMatchPendientes`) y la IMPORTACIÓN corren el
+      emparejado DESPUÉS del cruce contra gastos/cobros/ingresos —esos
+      tienen prioridad: el reverso solo toma lo que nadie explicó— sobre los
+      abonos de la corrida que siguen pendientes (`aplicarReversosEnCorrida`,
+      best-effort: un fallo NUNCA tumba la corrida). Los movimientos
+      emparejados pasan a resultado/criterio `REVERSO` (`ResultadoCruce` y
+      `CriterioCruce` + `ConteoCruce.reversos`, por MOVIMIENTO: un par suma
+      2) y la respuesta suma los ADITIVOS `reversos` y `reversos_emparejados`
+      (PARES); en la importación `conciliados_auto` los incluye y el job los
+      guarda en `resultados`. Una devolución que el cruce dejó SIN_CANDIDATO
+      y el reverso no pudo emparejar lleva el motivo del reverso («Devolución
+      de un cargo: …»). Con la migración, un ABONO con leyenda de devolución
+      (fuera de las cuentas PASARELA) **NO se cruza contra cobros/sobres/
+      ingresos** en `cruzarMovimiento` (revisión adversaria 30-sep): no es
+      el pago de un cliente, y antes un cobro del mismo monto ±días se
+      quedaba con la devolución; queda SIN_CANDIDATO y el paso de reversos
+      lo empareja o dice por qué. Sin la migración, como el 0.0.43.
+    - **Candados en los demás caminos**: `link` (gasto, ligar Y desligar) y
+      `linkCobro` rebotan 409 `MOVIMIENTO_EN_REVERSO` (`details {abono_id,
+      cargo_id}`) sobre un movimiento emparejado; `clasificarMovimiento` con
+      `null` («Quitar clasificación») en CUALQUIERA de los dos DESEMPAREJA
+      AMBOS (respuesta = la fila + `desemparejado_con`), con OTRA
+      clasificación ⇒ 409 `MOVIMIENTO_EN_REVERSO` y con la MISMA solo edita
+      notas. `linkIngreso` y las rutas de Ingresos ya rechazaban un abono
+      clasificado/conciliado.
+    - **Lectores**: `GET conciliacion/movimientos` suma `reverso_de_id` y los
+      ADITIVOS `reverso_de` (abono) / `revertido_por` (cargo) `{id, fecha,
+      descripcion} | null` en TODAS las filas (dos lecturas en lote por
+      página, ≤ 200 ids; si fallan quedan null). El reporte Excel dice
+      «Conciliado con: Reverso de un cargo · devuelve el cargo del 21-09 ·
+      ASUR CANCUN» / «… · devuelto el 23-09 · CARGO INDEBIDO 21 SEP 35552»
+      (`etiquetaConciliadoReverso`). Ingresos → «Por conciliar», el resumen
+      de Ingresos y el aviso del pre-cierre leen `conciliado = false`: la
+      devolución emparejada ya no aparece ni cuenta como ingreso. Libro
+      Dinero, balance y reparto NO cambian (los movimientos bancarios no
+      entran al dinero).
+    - **Sonda ÚNICA** `common/reverso-disponible.util` (columna
+      `reverso_de_id`, re-sondeo ≤ 10 min): sin la migración las rutas
+      nuevas ⇒ 503 `REVERSOS_NO_DISPONIBLE` y NINGUNA otra consulta nombra
+      la columna (lista/reporte/re-cruce/importación/ligas como el 0.0.43;
+      `reverso_de`/`revertido_por` viajan null).
+    - **Lo que NO se tocó (pendiente)**: `analizarAbono` / `sugerir-abonos`
+      de Ingresos siguen marcando `patron: 'REVERSO'` SOLO con el prefijo
+      «REV …» y proponiendo `CLASIFICAR_REVERSO` (clasifica solo el abono):
+      lo natural ahora es ofrecer «Es la devolución de un cargo» ahí también
+      (panel).
+    - Specs: `reverso-cruce.util.spec` (leyendas, pista de fecha, ventanas,
+      ambiguo/idénticos/pista, lote REAL 7 ↔ 7 y determinista, espejo del
+      trigger, notas y etiquetas), `conciliacion.service.reverso.spec`
+      (emparejar en los dos sentidos, idempotente, 409/404/400, trigger ⇒
+      409, compensación, desemparejar, «Quitar clasificación», candados de
+      link/linkCobro/clasificar, candidatos, auto con el caso real, re-cruce
+      donde el GASTO se lleva su cargo y las 7 devoluciones los otros 7,
+      importación, lista, reporte, «Por conciliar», y sin migración: 503 y
+      solo la sonda nombra la columna), `conciliacion.controller.reverso.spec`
+      (HTTP real: rutas, DTO, roles, 503) y `reverso-disponible.util.spec`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -3411,6 +3572,30 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (DRY-RUN corrido en prod el 30-sep-2026: `DRYRUN_OK · par REAL`)** —
+  `20260930000001_movimiento_bancario_reverso.sql` (invariante 33):
+  columna `movimiento_bancario.reverso_de_id` (FK a sí misma `on delete set
+  null`) + índice ÚNICO parcial `uq_mov_bancario_reverso_de` + trigger
+  `trg_mov_bancario_reverso` (función INVOKER con `search_path ''`, `tipo`
+  comparado `::text`, `revoke execute` a public/anon/authenticated). Sin
+  backfill ni cambios a triggers existentes. **Antes de aplicar**: el
+  DRY-RUN de su cabecera (UNA sentencia `do $dry$`, la sección 1 pegada en
+  B) — A contexto con el par REAL de GASTOS GNRAL (abono «CARGO INDEBIDO» +
+  cargo pendiente de la misma cuenta y monto), C1 estructura (FK
+  `confdeltype = 'n'`, índice único parcial, trigger), C2 UPDATE REALES del
+  abono y del cargo como los escribe el API, C3 rechazos con
+  `REVERSO_INVALIDO` (doble devolución, CARGO como devolución, destino
+  ABONO, propia, otra cuenta, otro monto, cargo con gasto, cobro/monto/tipo/
+  gasto sobre el par —el gasto pasa ANTES por `tg_mov_bancario_gasto_suma`
+  sin rechazar—), C4 desemparejar deja los dos pendientes y el cargo acepta
+  otra devolución, C5 tolerancia ±0.005 y ON DELETE SET NULL, C6 «Por
+  conciliar» excluye la devolución ⇒ `DRYRUN_OK`; después la columna, la
+  función y el índice NO existen. Corrido el 30-sep: `DRYRUN_OK · par REAL
+  (abono 35d5c5eb…, cargo 2baee742…) · cobro libre t · gasto libre t ·
+  pendientes 271`, sin residuos. Tras aplicar: `get_advisors` y sondear
+  `GET /v1/conciliacion/movimientos/<abono>/reverso-candidatos` (200). El
+  API 0.0.44 es desplegable ANTES (503 `REVERSOS_NO_DISPONIBLE` en lo nuevo;
+  todo lo demás como el 0.0.43). Rollback al pie del archivo.
 - **APLICADA en prod el 29-sep-2026 (DRYRUN_OK A–C6 en prod; antes probada en PGlite, idempotente)** — `20260929000002_vuelo_seguimiento.sql`
   (invariante 32): tabla `vuelo_seguimiento` + índice parcial por vuelo
   (`deleted_at is null`) + RLS + `trg_vuelo_seguimiento_updated_at`. Sin
@@ -3887,7 +4072,8 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   (no entra al fondo); devolución o retención de un anticipo sin vuelo
   (reclasificar / aplicar a un cancelado); avisos de pre-cierre para
   anticipos con saldo e ingresos sin conciliar (no se agregan); reversos
-  (solo se clasifica el abono); depósito BillPocket agrupado 1 ↔ N (no);
+  (desde el 30-sep-2026 se EMPAREJA el abono con su cargo: invariante 33);
+  depósito BillPocket agrupado 1 ↔ N (no);
   roles (COORDINADOR registra y aplica pero no concilia ni desaplica);
   préstamos con saldo de deuda (no); **auto-cruce de la cuenta Paywise con
   cobros por TRANSFERENCIA** (no: se ven como «1 con el monto exacto» y se
