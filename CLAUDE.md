@@ -2006,9 +2006,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       migraciones) sobre la cascada PURA `etiquetaFacturaVuelo`: CFDI vivo
       (`serie-folio` no cancelado) → `vuelo.factura_folio` → etiqueta del
       estatus («Facturado» / «Factura elaborada y enviada») → vacío. La usan
-      el Libro Dinero (hoja 1 y «otros ingresos») y «otros movimientos» del
-      Balance. **Nadie vuelve a armar su propio `facturaPorVuelo`** con la
-      tabla `factura` a secas.
+      el Libro Dinero (hoja 1 y «otros ingresos»), «otros movimientos» del
+      Balance y, desde el 30-sep-2026 (API 0.0.45), la hoja PRINCIPAL del
+      balance por avión y del general (`factura_vuelatour` por fila,
+      invariante 34). **Nadie vuelve a armar su propio `facturaPorVuelo`**
+      con la tabla `factura` a secas.
     - **Diagnóstico de la subida (24-sep-2026)**: en prod el #297 quedó
       FACTURADO (Mary Cruz, 23-sep 14:38 Cancún) SIN archivo y
       `facturas/vuelos/` está VACÍO. **Los logs de Supabase (edge_logs +
@@ -2888,6 +2890,48 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       importación, lista, reporte, «Por conciliar», y sin migración: 503 y
       solo la sonda nombra la columna), `conciliacion.controller.reverso.spec`
       (HTTP real: rutas, DTO, roles, 503) y `reverso-disponible.util.spec`.
+
+34. **FACTURA VUELATOUR EN LA HOJA PRINCIPAL DEL BALANCE (30-sep-2026, API
+    0.0.45, sin migración).** Marie, para Ale, con la foto del Excel
+    «balance-XA-VGV-2026-09-01-2026-09-30» (bloque STATUS DE COBROS): «en
+    balance por avión el reporte de excel se ocupa que diga el num de
+    factura que nosotros emitimos del servicio, no aparece en la columna, y
+    si puede salir en el reporte general también». Hasta el 0.0.44 solo la
+    traían «otros movimientos» y el Libro Dinero.
+    - **Campo ADITIVO `factura_vuelatour: string | null`** al FINAL de cada
+      fila de `BalanceAvionPayload.vuelos` (después de `por_cobrar_usd`),
+      con la etiqueta de la FUENTE ÚNICA `etiquetasFacturaDeVuelos`
+      (invariante 25/27: CFDI vivo → emitidas VIGENTES «A-0424» → folio
+      tecleado → estatus → `null`). Es del VUELO: un multi-avión lleva la
+      MISMA etiqueta en la fila de cada libro, y un CANCELADO o una fila
+      «solo gastos de tramo cancelado» también la llevan. Ningún número del
+      payload cambia: con y sin facturas el libro es idéntico salvo esa
+      llave (spec). El consolidado del general la hereda por el spread de
+      las filas. pyservices la pinta al final de STATUS DE COBROS («FACTURA
+      VUELATOUR», sin sumar en TOTALES); uno viejo la ignora.
+    - **Memo POR VUELO** (`etiquetasFacturaMemo`, mismo patrón que
+      `memoTc`): `buildPayload` y `buildOtrosMovimientos` reciben
+      `memoFactura: Map<vuelo_id, Promise<string | null>>` (opcional, al
+      final; los specs viejos no lo pasan). Solo se consultan los vuelos que
+      el memo aún no tiene, en UN lote (la helper parte en bloques de 200):
+      en el general UNA lectura por libro con vuelos nuevos, un multi-avión
+      no se pide dos veces y «otros movimientos» solo pide los vuelos que
+      ningún libro cargó (en la práctica los que no tienen avión). En el
+      libro individual, una sola lectura. Nunca N+1.
+    - **Un fallo de lectura TUMBA el libro** («Balance XB-TST: fallo al leer
+      facturas: …», misma regla que cobros/gastos): jamás una columna vacía
+      que parezca «sin factura». La tolerancia a las migraciones de factura
+      sigue viviendo en la helper (`columnaOpcional`).
+    - Spec: `aircraft-balance.service.factura.spec.ts` (emitida vigente gana
+      al folio tecleado y una CANCELADA no cuenta, CFDI vivo, CFDI cancelado
+      ⇒ folio, cancelado rotulado, `null` sin facturas en individual y
+      general, payload idéntico salvo la llave, un lote por libro, fallo con
+      contexto, multi-avión en los dos libros y en el consolidado, libro
+      EXTERNOS y fila «solo gastos de tramo cancelado» con la etiqueta de su
+      vuelo —falla si alguna de las dos se deja en `null`—, cada vuelo
+      pedido UNA vez en todo el general —falla si «otros movimientos» no
+      comparte el memo—, y el memo unitario: faltantes, reutilización,
+      rechazo sin etiqueta inventada, cero consultas sin vuelos).
 
 ## Convenciones NestJS
 

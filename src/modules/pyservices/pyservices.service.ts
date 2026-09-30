@@ -720,6 +720,19 @@ export interface BalanceAvionVueloPayload {
    *  topa en 0. */
   por_cobrar_mxn: number;
   por_cobrar_usd: number | null;
+  /**
+   * Columna «FACTURA VUELATOUR» de la hoja PRINCIPAL (30-sep-2026, API
+   * 0.0.45, ADITIVO; pedido de Marie para Ale: «se ocupa que diga el num de
+   * factura que nosotros emitimos del servicio»). Folio de la factura del
+   * SERVICIO emitida al cliente, con la FUENTE ÚNICA
+   * `etiquetasFacturaDeVuelos` (CFDI timbrado vivo → facturas EMITIDAS
+   * vigentes «A-0424» → `vuelo.factura_folio` tecleado → etiqueta del
+   * estatus → `null`), la MISMA que «otros movimientos» y el Libro Dinero.
+   * Es del VUELO: todas sus filas llevan la misma etiqueta (multi-avión,
+   * CANCELADO y «solo gastos» incluidos). pyservices la pinta al final de
+   * STATUS DE COBROS, sin sumar en TOTALES; uno viejo la ignora.
+   */
+  factura_vuelatour: string | null;
 }
 
 export interface BalanceAvionTotalesPayload {

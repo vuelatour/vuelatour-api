@@ -561,6 +561,11 @@ export class AircraftBalanceService {
     // general. Cero cambio numérico. Guarda el DETALLE (tc + fuente + día
     // del dato) para que cada fila diga de dónde salió su K.
     const memoTc = new Map<string, Promise<TipoCambioDetalle | null>>();
+    // UN memo de la etiqueta «FACTURA VUELATOUR» por vuelo (30-sep-2026)
+    // para todos los libros y «Otros movimientos»: un vuelo multi-avión (una
+    // fila por libro) y la pestaña leen la MISMA promesa — cada vuelo se
+    // consulta una sola vez en todo el general, nunca N+1.
+    const memoFactura = new Map<string, Promise<string | null>>();
     // Vuelos DISTINTOS de la flota (verificación 28-ago): un vuelo
     // multi-avión es una fila en CADA libro (cada avión lo voló y lleva su
     // parte de la venta), así que Σ de la columna VUELOS del RESUMEN puede
@@ -647,7 +652,7 @@ export class AircraftBalanceService {
     };
     for (const a of aviones ?? []) {
       registrar(
-        await this.buildPayload(a.id as string, d, h, memoTc),
+        await this.buildPayload(a.id as string, d, h, memoTc, memoFactura),
         (a.color_calendario as string | null) ?? null,
         true,
       );
@@ -656,7 +661,11 @@ export class AircraftBalanceService {
     // avión de referencia, con el MISMO row-loop. Entra al consolidado
     // (maestra, cobranza, totales) y al RESUMEN como una fila más; no a los
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
-    registrar(await this.buildPayload(null, d, h, memoTc), null, false);
+    registrar(
+      await this.buildPayload(null, d, h, memoTc, memoFactura),
+      null,
+      false,
+    );
     // Hoja "refacciones" del GENERAL (29-ago): cada fila se completa con el
     // costo de la salida de cardex ligada (el guardado en su fila) y la venta
     // al avión (el libro individual pinta la hoja sin esas columnas).
@@ -846,6 +855,7 @@ export class AircraftBalanceService {
         h,
         memoTc,
         empresaYSueltos,
+        memoFactura,
       ),
       pendientes: [
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
@@ -1041,6 +1051,41 @@ export class AircraftBalanceService {
   }
 
   /**
+   * Etiqueta «FACTURA VUELATOUR» de cada vuelo (30-sep-2026) sobre la FUENTE
+   * ÚNICA `etiquetasFacturaDeVuelos`, con MEMO POR VUELO compartido entre
+   * los libros del general y la pestaña «Otros movimientos» (mismo patrón
+   * que `memoTc`): solo se consultan los vuelos que el memo aún no tiene, en
+   * UN lote (la helper parte en bloques de 200) — un vuelo multi-avión o ya
+   * leído por la hoja principal no se vuelve a pedir. Devuelve solo los
+   * vuelos CON etiqueta (mismo contrato que la helper). Un fallo de lectura
+   * rechaza TODAS las promesas del lote: quien espera recibe el error (nunca
+   * una etiqueta vacía inventada).
+   */
+  private async etiquetasFacturaMemo(
+    vueloIds: ReadonlyArray<string>,
+    memo: Map<string, Promise<string | null>>,
+  ): Promise<Map<string, string>> {
+    const ids = [...new Set(vueloIds.filter(Boolean))];
+    const faltan = ids.filter((id) => !memo.has(id));
+    if (faltan.length > 0) {
+      const lote = etiquetasFacturaDeVuelos(this.supabase.service, faltan);
+      for (const id of faltan) {
+        memo.set(
+          id,
+          lote.then((m) => m.get(id) ?? null),
+        );
+      }
+    }
+    const etiquetas = await Promise.all(ids.map((id) => memo.get(id)!));
+    const out = new Map<string, string>();
+    ids.forEach((id, i) => {
+      const etiqueta = etiquetas[i];
+      if (etiqueta) out.set(id, etiqueta);
+    });
+    return out;
+  }
+
+  /**
    * Libro de UN avión (`aircraftId`) o, con `aircraftId = null`, el libro
    * EXTERNOS (regla 28-ago tarde): los vuelos de operador ajeno SIN avión
    * de referencia (es_externo = true, aeronave_id null) con el MISMO
@@ -1060,6 +1105,10 @@ export class AircraftBalanceService {
     desde: string,
     hasta: string,
     memoTc: Map<string, Promise<TipoCambioDetalle | null>> = new Map(),
+    // Etiqueta «FACTURA VUELATOUR» por vuelo (30-sep-2026): memo compartido
+    // entre los libros del general y «otros movimientos» — un vuelo se
+    // consulta UNA vez (ver `etiquetasFacturaMemo`).
+    memoFactura: Map<string, Promise<string | null>> = new Map(),
   ): Promise<BalanceAvionPayload> {
     const sb = this.supabase.service;
     const modoExternos = aircraftId == null;
@@ -1222,6 +1271,7 @@ export class AircraftBalanceService {
       gastosAvionRes,
       gastosGasRes,
       sociosRes,
+      facturaPorVuelo,
     ] = await Promise.all([
       vueloIds.length
         ? sb
@@ -1324,6 +1374,20 @@ export class AircraftBalanceService {
             )
             .eq('aeronave_id', aircraftId)
         : Promise.resolve(vacio),
+      // Columna «FACTURA VUELATOUR» de la hoja principal (30-sep-2026):
+      // FUENTE ÚNICA `etiquetasFacturaDeVuelos` (CFDI vivo → facturas
+      // EMITIDAS vigentes → folio tecleado → estatus), en lote y con el memo
+      // del general. Un fallo de lectura tumba el libro como cualquier otro:
+      // jamás un Excel con la columna vacía en silencio.
+      this.etiquetasFacturaMemo(vueloIds, memoFactura).catch(
+        (e: unknown): never => {
+          throw new Error(
+            `Balance ${matricula}: fallo al leer facturas: ${
+              e instanceof Error ? e.message : String(e)
+            }`,
+          );
+        },
+      ),
     ]);
     // Un query fallido NO degrada a "sin datos": un balance sin cobros o sin
     // gastos de un mes real es una mentira numérica silenciosa.
@@ -2964,6 +3028,10 @@ export class AircraftBalanceService {
         cobrado_real_mxn: cobradoRealMxn,
         por_cobrar_mxn: porCobrarMxn,
         por_cobrar_usd: porCobrarUsd,
+        // FACTURA VUELATOUR (30-sep-2026, ADITIVO al final): es del VUELO —
+        // la misma etiqueta en todas sus filas (multi-avión, CANCELADO,
+        // «solo gastos»); pyservices la pinta al final de STATUS DE COBROS.
+        factura_vuelatour: facturaPorVuelo.get(v.id) ?? null,
       });
     }
 
@@ -4002,6 +4070,10 @@ export class AircraftBalanceService {
     // Subconjuntos de gastosEmpresaYSueltos (lectura compartida con la hoja
     // "otros gastos" del general): aquí solo se pintan los TUAS sueltos.
     empresaYSueltos: { empresa: GastoRow[]; tuasSueltos: GastoRow[] },
+    // Memo de etiquetas de factura que ya llenaron los libros del general
+    // (30-sep-2026): aquí solo se consultan los vuelos que ningún libro
+    // cargó — normalmente ninguno.
+    memoFactura: Map<string, Promise<string | null>> = new Map(),
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
@@ -4054,8 +4126,9 @@ export class AircraftBalanceService {
         : Promise.resolve(vacio),
       // FACTURA del vuelo (24-sep-2026): fuente única compartida con el
       // Libro Dinero — CFDI vivo → folio de la factura del servicio →
-      // estatus manual. En lote.
-      etiquetasFacturaDeVuelos(sb, vueloIds),
+      // estatus manual. En lote y, desde el 30-sep-2026, con el memo de los
+      // libros del general (la hoja principal ya la leyó: sin 2.ª consulta).
+      this.etiquetasFacturaMemo(vueloIds, memoFactura),
       // (29-ago: los gastos de EMPRESA sin vuelo ni avión ya vienen leídos
       // en `empresaYSueltos` — lectura compartida con la hoja "otros
       // gastos" del general.)

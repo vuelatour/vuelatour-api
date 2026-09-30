@@ -15,8 +15,11 @@ const LOTE_IDS = 200;
 /**
  * Etiqueta de la factura de cada vuelo para los EXCEL — FUENTE ÚNICA
  * (24-sep-2026). La usan la columna «FACTURA VUELATOUR» del Libro Dinero
- * (hoja 1 y «otros ingresos») y «factura vuelatour» de «otros movimientos»
- * del Balance. Antes cada servicio armaba su propio `facturaPorVuelo` SOLO
+ * (hoja 1 y «otros ingresos»), «factura vuelatour» de «otros movimientos»
+ * del Balance y, desde el 30-sep-2026, la hoja PRINCIPAL del balance por
+ * avión y del general (`factura_vuelatour` por fila; allí pasa por el memo
+ * por vuelo `AircraftBalanceService#etiquetasFacturaMemo`). Antes cada
+ * servicio armaba su propio `facturaPorVuelo` SOLO
  * con la tabla `factura` (CFDI timbrado por el PAC — 0 filas en prod) y la
  * factura que la oficina sube a mano no aparecía nunca.
  *
