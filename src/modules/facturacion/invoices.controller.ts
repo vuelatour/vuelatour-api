@@ -17,6 +17,7 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
+import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import {
   CancelarFacturaDto,
   AmarrarGastosDto,
@@ -137,10 +138,10 @@ export class InvoicesController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Firma URLs de XML/PDF de facturas (bucket privado) para descarga.',
+      'Firma URLs (8 h) de XML/PDF de facturas (bucket privado) para descarga: /admin/facturas las firma al renderizar.',
   })
   fileUrls(@Body() dto: FacturaFileUrlsDto) {
-    return this.invoices.signFacturaFiles(dto.paths);
+    return this.invoices.signFacturaFiles(dto.paths, SEGUNDOS_URL_MINIATURA);
   }
 
   // ============ Facturas recibidas (buzón) ============

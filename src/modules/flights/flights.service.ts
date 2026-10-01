@@ -15,6 +15,7 @@ import { Cron } from '@nestjs/schedule';
 import { randomUUID } from 'node:crypto';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
+import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import {
   buscarClientePorNombre,
   nombreClienteParaCrear,
@@ -3589,11 +3590,15 @@ export class FlightsService {
   }
 
   /**
-   * URL firmada (1 h) de la foto del plan de vuelo (bucket PRIVADO
+   * URL firmada de la foto del plan de vuelo (bucket PRIVADO
    * `planes-vuelo`). `foto_plan_vuelo_url` guarda el PATH dentro del bucket
    * (p. ej. `vuelo-<id>/plan-<ts>.jpg`); filas viejas guardaron la URL
    * pública completa (que da 400 al ser privado el bucket) — de esas se
    * extrae el path después de `/planes-vuelo/` sin migrar datos.
+   * Vigencia 8 h (`SEGUNDOS_URL_MINIATURA`, 1-oct-2026): el detalle del vuelo
+   * del panel la firma al RENDERIZAR y la deja como href de «Ver foto del
+   * plan de vuelo» en la misma página que las miniaturas de tacos y
+   * vouchers; con 1 h el enlace abría el JSON `InvalidJWT` de Supabase.
    */
   async flightPlanUrl(id: string): Promise<{ url: string | null }> {
     const { data, error } = await this.supabase.service
@@ -3619,7 +3624,7 @@ export class FlightsService {
     }
     const { data: signed, error: signErr } = await this.supabase.service.storage
       .from('planes-vuelo')
-      .createSignedUrl(path, 3600);
+      .createSignedUrl(path, SEGUNDOS_URL_MINIATURA);
     if (signErr || !signed?.signedUrl) {
       this.logger.warn(
         `flightPlanUrl: no se pudo firmar "${path}" del vuelo ${id}: ${signErr?.message ?? 'sin URL'}`,
@@ -9821,11 +9826,13 @@ export class FlightsService {
         if (e.taco_obs_updated_by) userIds.add(e.taco_obs_updated_by as string);
       }
     }
+    // 8 h (1-oct-2026): el tablero de taco-live se queda abierto en la
+    // oficina; con 1 h las fotos salían rotas al vencer la firma.
     const signed: Record<string, string> = {};
     if (paths.length) {
       const { data: urls } = await this.supabase.service.storage
         .from('taco-fotos')
-        .createSignedUrls(paths, 3600);
+        .createSignedUrls(paths, SEGUNDOS_URL_MINIATURA);
       for (const item of urls ?? []) {
         if (item.signedUrl && item.path) signed[item.path] = item.signedUrl;
       }
@@ -10009,11 +10016,13 @@ export class FlightsService {
       if (e.foto_taco_llegada_url)
         paths.push(e.foto_taco_llegada_url as string);
     }
+    // 8 h (1-oct-2026): miniaturas del detalle del vuelo (ver
+    // `common/url-firmada.util.ts`).
     const signed: Record<string, string> = {};
     if (paths.length > 0) {
       const { data } = await this.supabase.service.storage
         .from('taco-fotos')
-        .createSignedUrls(paths, 3600);
+        .createSignedUrls(paths, SEGUNDOS_URL_MINIATURA);
       for (const item of data ?? []) {
         if (item.signedUrl && item.path) signed[item.path] = item.signedUrl;
       }
@@ -10290,13 +10299,17 @@ export class FlightsService {
     return out;
   }
 
-  /** URLs firmadas (1 h) de vouchers de cobro (bucket privado cobro-vouchers). */
+  /**
+   * URLs firmadas (8 h desde el 1-oct-2026, `SEGUNDOS_URL_MINIATURA`) de
+   * vouchers de cobro (bucket privado cobro-vouchers): miniaturas del detalle
+   * del vuelo que se quedan en pantalla.
+   */
   async signCobroVouchers(paths: string[]): Promise<Record<string, string>> {
     const clean = [...new Set(paths.filter(Boolean))];
     if (clean.length === 0) return {};
     const { data } = await this.supabase.service.storage
       .from('cobro-vouchers')
-      .createSignedUrls(clean, 3600);
+      .createSignedUrls(clean, SEGUNDOS_URL_MINIATURA);
     const map: Record<string, string> = {};
     for (const it of data ?? []) {
       if (it.signedUrl && it.path) map[it.path] = it.signedUrl;

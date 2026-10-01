@@ -20,6 +20,7 @@ import {
 } from '../../common/servicio-hito.util';
 import { aplicarCas, conflictoVersion } from '../../common/version-cas.util';
 import { clientRequestIdEnUso } from '../../common/client-request-id.util';
+import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import {
   construirTiras,
   resolverTirasSolicitadas,
@@ -430,11 +431,13 @@ export class AircraftService {
       if (e.foto_taco_llegada_url)
         fotoPaths.push(e.foto_taco_llegada_url as string);
     }
+    // 8 h (1-oct-2026): la tarjeta de tacómetros del avión se queda abierta
+    // en la oficina; con 1 h las miniaturas salían rotas al vencer la firma.
     const firmadas: Record<string, string> = {};
     if (fotoPaths.length > 0) {
       const { data: signed } = await this.supabase.service.storage
         .from('taco-fotos')
-        .createSignedUrls(fotoPaths, 3600);
+        .createSignedUrls(fotoPaths, SEGUNDOS_URL_MINIATURA);
       for (const s of signed ?? []) {
         if (s.signedUrl && s.path) firmadas[s.path] = s.signedUrl;
       }

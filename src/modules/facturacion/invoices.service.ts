@@ -11,6 +11,7 @@ import { SupabaseService } from '../supabase/supabase.service';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { FacturaClienteService } from '../flights/factura-cliente.service';
 import { normalizarTc, totalMxnDeVuelo } from '../../common/tc.util';
+import { SEGUNDOS_URL_PUNTUAL } from '../../common/url-firmada.util';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { ProfitSharingService } from '../profit-sharing/profit-sharing.service';
 import {
@@ -800,13 +801,22 @@ export class InvoicesService {
     };
   }
 
-  /** URLs firmadas (1 h) del XML/PDF de las facturas (bucket privado). */
-  async signFacturaFiles(paths: string[]): Promise<Record<string, string>> {
+  /**
+   * URLs firmadas del XML/PDF de las facturas (bucket privado). Default 1 h
+   * (`SEGUNDOS_URL_PUNTUAL`: el buzón de recibidas firma al CLIC);
+   * `POST invoices/file-urls` pide 8 h (`SEGUNDOS_URL_MINIATURA`, 1-oct-2026)
+   * porque `/admin/facturas` firma al RENDERIZAR y deja los enlaces XML/PDF
+   * en pantalla — con 1 h abrían el JSON `InvalidJWT` de Supabase.
+   */
+  async signFacturaFiles(
+    paths: string[],
+    segundos: number = SEGUNDOS_URL_PUNTUAL,
+  ): Promise<Record<string, string>> {
     const clean = [...new Set(paths.filter(Boolean))];
     if (clean.length === 0) return {};
     const { data } = await this.supabase.service.storage
       .from('facturas')
-      .createSignedUrls(clean, 3600);
+      .createSignedUrls(clean, segundos);
     const map: Record<string, string> = {};
     for (const it of data ?? [])
       if (it.signedUrl && it.path) map[it.path] = it.signedUrl;

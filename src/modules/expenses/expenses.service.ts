@@ -16,6 +16,10 @@ import {
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import {
+  SEGUNDOS_URL_MINIATURA,
+  SEGUNDOS_URL_PUNTUAL,
+} from '../../common/url-firmada.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import {
@@ -761,13 +765,22 @@ export class ExpensesService {
     return { total_pendientes: pendientes.length, resultados };
   }
 
-  /** URLs firmadas (1 h) para fotos de recibos en el bucket privado gasto-fotos. */
-  async signPhotos(paths: string[]): Promise<Record<string, string>> {
+  /**
+   * URLs firmadas para fotos de recibos en el bucket privado gasto-fotos.
+   * Default 8 h (`SEGUNDOS_URL_MINIATURA`, 1-oct-2026): alimenta las
+   * miniaturas del panel, que la oficina deja abiertas toda la jornada — con
+   * 1 h la foto salía rota al vencer. Las lecturas de la IA piden
+   * `SEGUNDOS_URL_PUNTUAL` (1 h): la URL se le entrega a un tercero.
+   */
+  async signPhotos(
+    paths: string[],
+    segundos: number = SEGUNDOS_URL_MINIATURA,
+  ): Promise<Record<string, string>> {
     const clean = [...new Set(paths.filter(Boolean))];
     if (clean.length === 0) return {};
     const { data } = await this.supabase.service.storage
       .from('gasto-fotos')
-      .createSignedUrls(clean, 3600);
+      .createSignedUrls(clean, segundos);
     const map: Record<string, string> = {};
     for (const it of data ?? []) {
       if (it.signedUrl && it.path) map[it.path] = it.signedUrl;
@@ -1684,7 +1697,7 @@ export class ExpensesService {
         )
       : [];
     const paths = [path, ...fotosAdicionales];
-    const urls = await this.signPhotos(paths);
+    const urls = await this.signPhotos(paths, SEGUNDOS_URL_PUNTUAL);
     if (!urls[path]) {
       throw new BadRequestException('No se pudo firmar el comprobante');
     }
@@ -1754,7 +1767,7 @@ export class ExpensesService {
     fotoPath: string,
     userId: string,
   ): Promise<void> {
-    const urls = await this.signPhotos([fotoPath]);
+    const urls = await this.signPhotos([fotoPath], SEGUNDOS_URL_PUNTUAL);
     const imageUrl = urls[fotoPath];
     if (!imageUrl) return;
     const ai = await this.vision.readGastoTicket(

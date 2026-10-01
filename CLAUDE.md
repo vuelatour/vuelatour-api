@@ -3143,6 +3143,90 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       byte-idéntico. El concepto de «Otros movimientos» y del Libro Dinero
       viaja armado desde el API.
 
+37. **URLs FIRMADAS DE STORAGE: 8 h PARA MINIATURAS + RE-FIRMA ACOTADA
+    `POST /v1/storage/firmar` (1-oct-2026, API 0.0.48, sin migración).**
+    Reporte de la oficina con capturas de Gastos: «las fotos de las facturas
+    no están cargando» — la miniatura de «Comp.» salía como una rayita blanca
+    y el visor como una franja delgada. Los archivos estaban sanos: el panel
+    firma al RENDERIZAR (`POST /v1/expenses/photo-urls`, entonces 1 h) y la
+    pestaña se queda abierta toda la mañana; al vencer, Supabase responde
+    HTTP 400 JSON `InvalidJWT · "exp" claim timestamp check failed` y el
+    navegador pinta la imagen rota.
+    - **Vigencias, fuente única `common/url-firmada.util.ts`**:
+      `SEGUNDOS_URL_MINIATURA` = **8 h** para lo que alimenta miniaturas y
+      visores que se quedan en pantalla — `expenses.signPhotos` (default del
+      parámetro nuevo `segundos`; lo usan Gastos, gastos personales,
+      combustibles, detalle de vuelo, caja chica y compras de inventario),
+      `flights.tacoPhotos` (`GET flights/:id/taco-photos`), `flights.tacoLive`,
+      `aircraft` tacómetros del avión (`GET aircraft/:id/tacometros`),
+      `flights.signCobroVouchers` (`cobro-voucher-urls`) y
+      `flights.flightPlanUrl` (`GET flights/:id/plan-vuelo-url`: revisión
+      adversaria 1-oct-2026 — el detalle del vuelo lo firma al RENDERIZAR y
+      lo deja como href de «Ver foto del plan de vuelo» en la misma página
+      que las miniaturas; con 1 h el enlace abría el JSON `InvalidJWT`) y
+      `POST invoices/file-urls` (`/admin/facturas` firma los enlaces XML/PDF
+      del CFDI al renderizar; `signFacturaFiles(paths, segundos)` con
+      default 1 h, que sigue usando el buzón de recibidas al clic).
+      **Regla**: toda URL que el panel firma al renderizar y el operador
+      usa DESPUÉS (miniatura, visor o href) va con `SEGUNDOS_URL_MINIATURA`.
+      `SEGUNDOS_URL_PUNTUAL` = 1 h para lo que se usa en el acto: las dos
+      lecturas de IA de `expenses` (reanálisis y enriquecimiento offline)
+      piden 1 h EXPLÍCITO — la URL se le entrega a un tercero. **NO cambian**
+      (se piden al CLIC, no al renderizar): `signedTacoUrl` (IA del
+      tacómetro, 1 h), póliza/vencimientos, estado de cuenta de
+      conciliación, `invoices/recibidas/file-urls` (1 h) y las de 10 min de
+      facturas cliente/emitidas, ingresos y la respuesta de subir un
+      comprobante de cobro.
+    - **`POST /v1/storage/firmar` {bucket, paths[]} → {urls: {path: url},
+      expira_en_s}** (módulo `storage/`, helper PURO `storage-firma.util.ts`
+      con spec): el visor del panel (`ImagePreview`) pide aquí una URL NUEVA
+      del MISMO archivo cuando la miniatura falla o cuando abre el visor con
+      una URL de más de 50 min — sin recargar la página y **sin proxy de
+      Vercel** (Active CPU del plan Hobby): las imágenes siguen yendo directo
+      a Supabase. Firma con `SEGUNDOS_URL_MINIATURA`. Reglas, en este orden:
+      1. **Lista blanca** `BUCKETS_FIRMABLES` (gasto-fotos, taco-fotos,
+         cobro-vouchers, planes-vuelo, facturas, estados-cuenta,
+         documentos-flota, ingresos, inventario-fotos). Otro bucket ⇒ 400
+         `BUCKET_NO_PERMITIDO` aun para ADMIN: se firma con la service key y
+         `csd` guarda los certificados de sello del SAT. **Un bucket nuevo
+         NO entra solo**: agregarlo aquí es una decisión explícita.
+      2. **Roles POR BUCKET, default-deny** (`ROLES_POR_BUCKET`; revisión
+         adversaria 1-oct-2026): este endpoint **NUNCA firma a un rol más de
+         lo que ya le daban** el endpoint específico del bucket o la
+         política de lectura de Storage (verificada en prod: gasto-fotos,
+         taco-fotos, planes-vuelo y cobro-vouchers ⇒ `authenticated`;
+         inventario-fotos público; facturas, estados-cuenta, ingresos y
+         documentos-flota SIN política, solo service key). Con «oficina
+         firma todo» ANALISTA y SOCIO sacaban estados de cuenta, CFDI e
+         ingresos que sus endpoints les niegan. Matriz:
+         gasto-fotos y taco-fotos = oficina (ADMIN, COORDINADOR,
+         FACTURACION, SOCIO, ANALISTA) + PILOTO/MECANICO; planes-vuelo e
+         inventario-fotos = oficina (el PILOTO tiene el plan solo de SUS
+         vuelos por `assertAccess`, aquí no hay vuelo que verificar);
+         cobro-vouchers, facturas e ingresos = ADMIN, COORDINADOR,
+         FACTURACION (= `cobro-voucher-urls`, `archivo-url` de facturas,
+         `ROLES_INGRESOS`); documentos-flota = ADMIN, COORDINADOR (=
+         `expirations/:id/archivo` y la póliza); estados-cuenta = ADMIN,
+         FACTURACION (= conciliación). `@Roles` = la unión. Rol fuera ⇒ 403
+         `BUCKET_FUERA_DE_ROL` (el panel pinta su placeholder). VISITANTE ⇒
+         403 del RolesGuard. **Un bucket nuevo en la lista blanca exige su
+         fila en la matriz** (el tipo `Record<BucketFirmable, …>` no
+         compila sin ella) **copiada del `@Roles` de su endpoint**.
+      3. **Tope** `MAX_PATHS_FIRMA` = 100 (DTO `ArrayMaxSize` ⇒ 400; el
+         helper repite el tope con código `DEMASIADOS_PATHS`).
+      4. **Cada path** es la llave DENTRO del bucket tal como vive en la BD:
+         sin `/` inicial, sin segmentos `.`/`..`, sin `\`, sin caracteres de
+         control, ≤ 1024 y NUNCA una URL completa ⇒ 400 `PATH_INVALIDO`
+         (el panel deriva el path de una URL firmada con su propia util).
+      Vacíos y repetidos se limpian; `[]` ⇒ 200 sin tocar Storage. Un path
+      que no existe NO aparece en `urls` (el panel pinta su placeholder);
+      falla de Storage para el lote ⇒ 503 `FIRMA_NO_DISPONIBLE` (el panel
+      ofrece «Reintentar»). Specs: `storage-firma.util.spec.ts`,
+      `storage.controller.spec.ts` (HTTP con ValidationPipe, filtro y
+      RolesGuard reales; matriz por bucket) y `firmas-vigencia.spec.ts`
+      (8 h vs 1 h: photo-urls, vouchers, fotos de tacómetro del vuelo, plan
+      de vuelo y `invoices/file-urls` vs recibidas).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

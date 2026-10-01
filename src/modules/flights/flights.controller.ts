@@ -505,7 +505,7 @@ export class FlightsController {
   @Get(':id/plan-vuelo-url')
   @ApiOperation({
     summary:
-      'URL firmada (1 h) de la foto del plan de vuelo (bucket privado planes-vuelo). { url: null } si no hay foto.',
+      'URL firmada (8 h) de la foto del plan de vuelo (bucket privado planes-vuelo). { url: null } si no hay foto.',
   })
   async planVueloUrl(
     @Param('id', ParseUUIDPipe) id: string,

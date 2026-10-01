@@ -50,6 +50,7 @@ import { DashboardsModule } from './modules/dashboards/dashboards.module';
 import { GroupsModule } from './modules/groups/groups.module';
 import { FacturasEmitidasModule } from './modules/facturas-emitidas/facturas-emitidas.module';
 import { IngresosModule } from './modules/ingresos/ingresos.module';
+import { StorageModule } from './modules/storage/storage.module';
 
 @Module({
   imports: [
@@ -131,6 +132,8 @@ import { IngresosModule } from './modules/ingresos/ingresos.module';
     FacturasEmitidasModule,
     // Ingresos (otros ingresos, anticipos) y conciliación de ingresos (24-sep-2026).
     IngresosModule,
+    // Re-firma de miniaturas del panel cuando la URL venció (1-oct-2026).
+    StorageModule,
   ],
   providers: [
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
