@@ -24,6 +24,7 @@ import {
   type ParticipacionAeronave,
 } from '../../common/participacion-aeronave.util';
 import { ORIGEN_EXTRA_GRUPO } from '../quotes/extras-grupo.util';
+import { tramosCotizados } from '../quotes/tramos-cotizados.util';
 
 export type RepartoExtraGrupo = 'POR_PAX' | 'ANCLA' | 'PROPORCIONAL';
 
@@ -334,6 +335,37 @@ export function tramosDeHijo(
     ...regreso.map((t) => tramoBase(t, w2)),
   ];
   return { tramos, pax_por_rotacion: [w1, w2] };
+}
+
+/**
+ * ¿El hijo va en DOBLE rotación? La doble rotación produce `plantilla × 3`
+ * tramos (`tramosDeHijo`) y la vuelta se deduce de ese conteo. Se mide sobre
+ * lo COTIZADO (`calculo_snapshot`, cascada `tramosCotizados`), no sobre las
+ * escalas vivas (revisión adversaria 30-sep-2026, API 0.0.46): desde que
+ * `operational-legs` crea tramos del CLIENTE (comerciales) en la operación,
+ * contar las vivas cambiaba la rotación del hijo con un solo tramo agregado
+ * — re-materializar el grupo lo re-preciaba a UNA vuelta (y borraba los
+ * tramos cotizados de la segunda) o, con una plantilla de 1 tramo y dos
+ * agregados, pedía una doble rotación imposible (`tramosDeHijo` lanza).
+ * Sin snapshot con tramos (hijo legado) se cuentan, como antes, las escalas
+ * vivas comerciales no canceladas.
+ */
+export function rotacionesDeHijo(p: {
+  calculo_snapshot: unknown;
+  escalas?: ReadonlyArray<{
+    cancelada_at?: unknown;
+    solo_operativa?: boolean | null;
+  }> | null;
+  plantillaLen: number;
+}): 1 | 2 {
+  const cotizados = tramosCotizados(p.calculo_snapshot);
+  const n =
+    cotizados != null
+      ? cotizados.length
+      : (p.escalas ?? []).filter(
+          (e) => e.cancelada_at == null && e.solo_operativa !== true,
+        ).length;
+  return p.plantillaLen > 0 && n === p.plantillaLen * 3 ? 2 : 1;
 }
 
 // ===== Extras del grupo → hijos =====

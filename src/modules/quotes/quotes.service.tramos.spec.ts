@@ -301,7 +301,10 @@ function armar(m: Mundo = {}) {
     airports,
     {} as RoutesService,
     supabase,
-    { syncFlight: jest.fn() } as unknown as CalendarSyncService,
+    {
+      syncFlight: jest.fn(),
+      removeEscalaEvent: jest.fn().mockResolvedValue(true),
+    } as unknown as CalendarSyncService,
     {} as EmailService,
     {
       notifyUser: jest.fn().mockResolvedValue(true),
@@ -682,5 +685,153 @@ describe('caminos que NO cambian', () => {
     const esc1 = w.patchEscala(1)!;
     expect(esc1.pasajeros).toBe(4);
     expect(esc1.es_ferry).toBe(false);
+  });
+});
+
+/**
+ * TRAMO DEL CLIENTE AGREGADO DESDE LA OPERACIÓN (30-sep-2026, API 0.0.46,
+ * caso #364). Desde el 0.0.46 `POST /flights/:id/operational-legs` crea un
+ * tramo con pasajeros como COMERCIAL en el siguiente `orden` (aquí el 3:
+ * CUN→HOL con 4 pax, sin tacómetro). La cotización (snapshot de 2 tramos)
+ * debe: (a) NO borrarlo al guardar sin adoptarlo, (b) actualizarlo EN SU
+ * LUGAR al adoptar la operación —UPSERT por `orden`, sin duplicarlo—.
+ */
+describe('#364 — tramo del cliente que agregó la operación', () => {
+  const tramo3Vivo = escalaViva(3, {
+    origen_iata: 'CUN',
+    destino_iata: 'HOL',
+    pasajeros: 4,
+    notas: null,
+    fecha_salida_plan: null,
+    taco_salida: null,
+    taco_llegada: null,
+    google_calendar_id: 'g-e3',
+  });
+  const escalas364 = () => [escalaViva(1), escalaViva(2), tramo3Vivo];
+  const tramo3 = {
+    origen_iata: 'CUN',
+    destino_iata: 'HOL',
+    millas_nauticas: 25,
+    pasajeros: 4,
+    pasajeros_nombres: [],
+    es_ferry: false,
+  };
+  const borrados = (log: Op[]) =>
+    log.filter((o) => o.tabla === 'escala' && o.tipo === 'delete');
+  const insertados = (log: Op[]) =>
+    log.filter((o) => o.tabla === 'escala' && o.tipo === 'insert');
+
+  it('guardar SIN adoptar (un ajuste cualquiera): el tramo 3 NO se borra y la respuesta lo AVISA', async () => {
+    const w = armar({ escalas: escalas364() });
+    const r = await w.service.revise(
+      V326,
+      dtoRevision({ tramos_base: 'COTIZADO' }),
+      USER,
+    );
+    expect(borrados(w.log)).toHaveLength(0);
+    expect(w.patchEscala(3)).toBeNull();
+    const avisos = (r as { avisos: string[] }).avisos;
+    expect(
+      avisos.some(
+        (a) =>
+          a.includes('El tramo 3 CUN → HOL') &&
+          a.includes('lo agregó la operación'),
+      ),
+    ).toBe(true);
+    // El precio sigue siendo el PACTADO.
+    expect(w.patchVuelo()!.monto_total_usd).toBe(3596);
+  });
+
+  it('panel VIEJO (sin tramos_base): tampoco lo borra', async () => {
+    const w = armar({ escalas: escalas364() });
+    await w.service.revise(V326, dtoRevision(), USER);
+    expect(borrados(w.log)).toHaveLength(0);
+  });
+
+  it('ADOPTAR la operación (3 tramos): UPSERT por orden — actualiza el tramo 3 en su lugar, sin insertar otro', async () => {
+    const w = armar({ escalas: escalas364() });
+    await w.service.revise(
+      V326,
+      dtoRevision({
+        escalas: [...TRAMOS_OPERACION, tramo3],
+        pasajeros: 4,
+        tramos_base: 'OPERACION',
+        motivo: 'Actualizar la cotización con la operación',
+      }),
+      USER,
+    );
+    expect(insertados(w.log)).toHaveLength(0);
+    expect(borrados(w.log)).toHaveLength(0);
+    const esc3 = w.patchEscala(3)!;
+    expect(esc3).not.toBeNull();
+    expect(esc3.pasajeros).toBe(4);
+    // El snapshot nuevo ya trae los 3 tramos.
+    const snap = w.patchVuelo()!.calculo_snapshot as {
+      ruta: { escalas: unknown[] };
+    };
+    expect(snap.ruta.escalas).toHaveLength(3);
+  });
+
+  it('desde el GRUPO (re-materializar la plantilla): el tramo que la operación agregó a ESTE hijo NO se borra', async () => {
+    // Revisión adversaria 30-sep-2026: el grupo confía en su DTO para las
+    // columnas, pero su plantilla no conoce el tramo 3 — tratarla como «la
+    // lista completa» lo BORRABA (con evento de Google y push) cada vez que
+    // alguien editaba el grupo.
+    const w = armar({ escalas: escalas364() });
+    const r = await w.service.reviseParaGrupo(
+      V326,
+      dtoRevision({ escalas: TRAMOS_OPERACION, pasajeros: 4 }),
+      USER,
+      { id: 'g-1', folio: 9, posicion: 1, pax: 4, total_aviones: 2 },
+    );
+    expect(borrados(w.log)).toHaveLength(0);
+    expect(w.patchEscala(3)).toBeNull();
+    // La plantilla sí manda en los tramos que el grupo cotizó.
+    expect(w.patchEscala(1)!.pasajeros).toBe(4);
+    const avisos = (r as { avisos: string[] }).avisos;
+    expect(avisos.some((a) => a.includes('El tramo 3 CUN → HOL'))).toBe(true);
+  });
+
+  it('ADOPTAR la operación sigue mandando su lista: un sobrante no cotizado que la operación CANCELÓ se borra', async () => {
+    const w = armar({
+      escalas: [
+        escalaViva(1),
+        escalaViva(2),
+        { ...tramo3Vivo, cancelada_at: '2026-09-30T15:00:00Z' },
+      ],
+    });
+    await w.service.revise(
+      V326,
+      dtoRevision({
+        escalas: TRAMOS_OPERACION,
+        pasajeros: 4,
+        tramos_base: 'OPERACION',
+        motivo: 'Actualizar la cotización con la operación',
+      }),
+      USER,
+    );
+    const b = borrados(w.log);
+    expect(b).toHaveLength(1);
+    expect(b[0].filtros.some((f) => f[1] === 'id' && f[2] === 'e3')).toBe(true);
+  });
+
+  it('CONTROL: un tramo que SÍ estaba cotizado y la oficina quitó se sigue borrando (edición deliberada)', async () => {
+    const w = armar({
+      escalas: [
+        escalaViva(1),
+        escalaViva(2, { taco_salida: null, taco_llegada: null }),
+      ],
+    });
+    await w.service.revise(
+      V326,
+      dtoRevision({
+        escalas: [TRAMOS_COTIZADOS[0]],
+        tramos_base: 'COTIZADO',
+      }),
+      USER,
+    );
+    const b = borrados(w.log);
+    expect(b).toHaveLength(1);
+    expect(b[0].filtros.some((f) => f[1] === 'id' && f[2] === 'e2')).toBe(true);
   });
 });

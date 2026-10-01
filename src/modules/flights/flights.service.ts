@@ -179,6 +179,11 @@ import {
   type ContextoGrupo,
 } from '../../common/grupo-contexto.util';
 import { patchCobrosAlClon, payloadClonVuelo } from './clon-vuelo.util';
+import {
+  avisoDeTramoGuardado,
+  ESCALAS_PARA_UBICAR_COLS,
+  ubicarTramoAgregado,
+} from './tramo-agregado.util';
 import { resolverComisionBancaria } from './comision-bancaria.util';
 import { marcarPrecioDesactualizado } from './grupo-precio.util';
 import {
@@ -7345,15 +7350,19 @@ export class FlightsService {
     // exactamente UNA vez por alta, pase o no el vuelo por esta reapertura.
   }
 
-  // Los tramos operativos internos viven en un rango de orden propio (>=100)
-  // para no colisionar nunca con los comerciales (1..N) al re-cotizar.
-  private static readonly OPERATIVA_ORDEN_BASE = 100;
-
   /**
-   * Agrega un tramo OPERATIVO interno (ferry, parada técnica, movimiento
-   * interno, pernocta operativa): visible para piloto/calendario/tacómetro pero
-   * EXCLUIDO del precio y de la cotización del cliente. No recalcula la
-   * cotización. El orden se asigna en el rango operativo (>=100).
+   * Agrega un tramo a la RUTA REAL de un vuelo ya creado (app «Editar vuelo»
+   * y panel «Agregar tramo»). Desde el 30-sep-2026 (API 0.0.46, caso #364)
+   * NO todo lo que entra aquí es operativo: la regla vive en
+   * `tramo-agregado.util.ts` (fuente única, con spec) y es la del alta —
+   * FERRY (o parada de SERVICIO vacía) ⇒ operativo interno (`solo_operativa`,
+   * `orden ≥ 100`, no se cotiza ni se cobra); con pasajeros ⇒ tramo del
+   * CLIENTE (`orden` = siguiente < 100), que la cotización señala como
+   * «la operación difiere» y ofrece adoptar. Si un operativo ≥ 100 ya voló o
+   * va antes, el tramo queda operativo para no romper la cadena de tacómetros
+   * (horas sagradas) y la respuesta lo avisa. No recalcula la cotización.
+   *
+   * Respuesta: la escala + ADITIVOS `comercial` y `aviso` (string | null).
    */
   async createOperationalLeg(
     vueloId: string,
@@ -7366,46 +7375,68 @@ export class FlightsService {
     const key = await this.llaveTramo(dto.client_request_id);
     if (key) {
       const ya = await this.escalaPorClientRequest(vueloId, key);
-      if (ya) return { ...ya, idempotente: true as const };
+      if (ya)
+        return {
+          ...ya,
+          ...avisoDeTramoGuardado(ya),
+          idempotente: true as const,
+        };
     }
     const vuelo = await this.findById(vueloId);
     await this.assertTramoAgregable(vuelo, dto.motivo, current);
-    const { data: existentes } = await this.supabase.service
-      .from('escala')
-      .select('orden')
-      .eq('vuelo_id', vueloId);
-    const maxOrden = (existentes ?? []).reduce(
-      (m, e) => Math.max(m, Number(e.orden) || 0),
-      0,
-    );
-    const orden = Math.max(maxOrden + 1, FlightsService.OPERATIVA_ORDEN_BASE);
 
-    const { data, error } = await this.supabase.service
-      .from('escala')
-      .insert({
-        vuelo_id: vueloId,
-        orden,
-        solo_operativa: true,
-        origen_iata: dto.origen_iata.toUpperCase(),
-        destino_iata: dto.destino_iata.toUpperCase(),
-        pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
-        // Manifiesto por tramo (un ferry vuela vacío: sin nombres).
-        pasajeros_nombres: dto.es_ferry ? [] : (dto.pasajeros_nombres ?? []),
-        es_ferry: dto.es_ferry ?? false,
-        es_sobrevuelo: dto.es_sobrevuelo ?? false,
-        requiere_pernocta: dto.requiere_pernocta ?? false,
-        tipo_parada: dto.tipo_parada ?? 'NORMAL',
-        servicio_notas: dto.servicio_notas ?? null,
-        fecha_salida_plan: dto.fecha_salida_plan?.toISOString() ?? null,
-        notas: dto.notas ?? null,
-        // Llave SOLO cuando viaja y la columna existe (panel: insert idéntico).
-        ...(key ? { client_request_id: key } : {}),
-        created_by: userId,
-        updated_by: userId,
-      })
-      .select(ESCALA_COLS)
-      .maybeSingle();
-    if (error) {
+    // Dos altas simultáneas pueden calcular el MISMO `orden` (índice único
+    // escala_vuelo_id_orden_key): se relee y se recalcula — antes era un 500.
+    let data: Record<string, unknown> | null = null;
+    let ubicacion: ReturnType<typeof ubicarTramoAgregado> | null = null;
+    for (let intento = 1; intento <= 3 && !data; intento++) {
+      const { data: existentes, error: exErr } = await this.supabase.service
+        .from('escala')
+        .select(ESCALAS_PARA_UBICAR_COLS)
+        .eq('vuelo_id', vueloId);
+      if (exErr)
+        throw new Error(`Failed to read escalas del vuelo: ${exErr.message}`);
+      ubicacion = ubicarTramoAgregado(
+        {
+          es_ferry: dto.es_ferry,
+          tipo_parada: dto.tipo_parada,
+          pasajeros: dto.pasajeros,
+          fecha_salida_plan: dto.fecha_salida_plan,
+        },
+        existentes ?? [],
+      );
+      const res = await this.supabase.service
+        .from('escala')
+        .insert({
+          vuelo_id: vueloId,
+          orden: ubicacion.orden,
+          solo_operativa: !ubicacion.comercial,
+          origen_iata: dto.origen_iata.toUpperCase(),
+          destino_iata: dto.destino_iata.toUpperCase(),
+          pasajeros: dto.es_ferry ? 0 : (dto.pasajeros ?? null),
+          // Manifiesto por tramo (un ferry vuela vacío: sin nombres).
+          pasajeros_nombres: dto.es_ferry ? [] : (dto.pasajeros_nombres ?? []),
+          es_ferry: dto.es_ferry ?? false,
+          es_sobrevuelo: dto.es_sobrevuelo ?? false,
+          requiere_pernocta: dto.requiere_pernocta ?? false,
+          tipo_parada: dto.tipo_parada ?? 'NORMAL',
+          servicio_notas: dto.servicio_notas ?? null,
+          fecha_salida_plan: dto.fecha_salida_plan?.toISOString() ?? null,
+          notas: dto.notas ?? null,
+          // Llave SOLO cuando viaja y la columna existe (panel: insert idéntico).
+          ...(key ? { client_request_id: key } : {}),
+          created_by: userId,
+          updated_by: userId,
+        })
+        .select(ESCALA_COLS)
+        .maybeSingle();
+      const error = res.error;
+      if (!error) {
+        data = res.data;
+        if (!data)
+          throw new Error('Failed to insert operational leg: sin fila');
+        break;
+      }
       // Carrera con la misma llave (dos flushes): devolver el primero.
       if (
         error.code === '23505' &&
@@ -7413,22 +7444,43 @@ export class FlightsService {
         error.message.includes('uq_escala_client_request')
       ) {
         const ya = await this.escalaPorClientRequest(vueloId, key);
-        if (ya) return { ...ya, idempotente: true as const };
+        if (ya)
+          return {
+            ...ya,
+            ...avisoDeTramoGuardado(ya),
+            idempotente: true as const,
+          };
         throw clientRequestIdEnUso('tramo', key);
       }
+      // Carrera de `orden` con otra alta del mismo vuelo: recalcular.
+      if (
+        error.code === '23505' &&
+        error.message.includes('escala_vuelo_id_orden_key') &&
+        intento < 3
+      ) {
+        continue;
+      }
+      if (error.code === '23505' && error.message.includes('orden'))
+        throw new ConflictException(
+          'Otro tramo se agregó a este vuelo al mismo tiempo: vuelve a intentarlo.',
+        );
       throw new Error(`Failed to insert operational leg: ${error.message}`);
     }
+    if (!data || !ubicacion)
+      throw new ConflictException(
+        'Otro tramo se agregó a este vuelo al mismo tiempo: vuelve a intentarlo.',
+      );
     // Un ferry/parada técnica también puede tocar una pista con permiso.
     await this.airports.refreshPermisosDeVuelo(vueloId);
-    await this.reabrirTrasTramoNuevo(
-      vuelo,
-      data as Record<string, unknown>,
-      dto.motivo,
-      userId,
-    );
+    await this.reabrirTrasTramoNuevo(vuelo, data, dto.motivo, userId);
     void this.calendar.syncFlight(vueloId);
-    void this.notificarTramoNuevo(vueloId, data as Record<string, unknown>);
-    return { ...data!, idempotente: false as const };
+    void this.notificarTramoNuevo(vueloId, data);
+    return {
+      ...data,
+      comercial: ubicacion.comercial,
+      aviso: ubicacion.aviso,
+      idempotente: false as const,
+    };
   }
 
   /** Tramo agregado a un vuelo (21-ago): la tripulación se entera. */

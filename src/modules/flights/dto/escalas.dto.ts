@@ -150,9 +150,13 @@ export class UpdateEscalaDto extends PartialType(CreateEscalaDto) {
 }
 
 /**
- * Tramo OPERATIVO interno (ferry, parada técnica, movimiento interno, pernocta
- * operativa): forma parte de la ruta real pero NO se cotiza ni se cobra ni se
- * muestra al cliente. El orden lo asigna el servidor en el rango operativo.
+ * Tramo agregado a la ruta real de un vuelo ya creado
+ * (`POST /flights/:id/operational-legs`). Pese al nombre (histórico), desde el
+ * 30-sep-2026 (API 0.0.46, caso #364) solo es OPERATIVO interno —no se cotiza
+ * ni se cobra ni se muestra al cliente— si es FERRY o parada de SERVICIO sin
+ * pasajeros; con pasajeros es un tramo del CLIENTE (comercial). El `orden` lo
+ * asigna el servidor (`tramo-agregado.util.ts`): operativo ≥ 100, comercial
+ * el siguiente < 100.
  */
 export class OperationalLegDto {
   @ApiProperty()

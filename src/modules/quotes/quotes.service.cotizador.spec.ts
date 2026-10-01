@@ -380,6 +380,52 @@ describe('quoteLikeParaPreview — vista previa sin persistir', () => {
     expect(escrituras(log)).toEqual([]);
   });
 
+  it('#364 tramo del cliente que agregó la operación (orden 3, no cotizado): la vista previa lo CONSERVA como replaceEscalas; al adoptar la operación, la lista del DTO manda', async () => {
+    const tramo3 = escalaViva(3, {
+      origen_iata: 'CUN',
+      destino_iata: 'HOL',
+      pasajeros: 4,
+    });
+    const mundo = {
+      vuelo: () => ({ data: filaVuelo() }),
+      escala: () => ({ data: [escalaViva(1), escalaViva(2), tramo3] }),
+      aeronave: () => ({
+        data: [{ id: KODIAK, matricula: 'N621TX', modelo: 'Kodiak 100' }],
+      }),
+      cliente: () => ({ data: { es_interno: false, tarifas: [] } }),
+    };
+    const log: Op[] = [];
+    const { svc } = servicio(mundo, log);
+    const q = await svc.quoteLikeParaPreview({
+      ...dtoBase(),
+      quote_id: 'v1',
+      sucio: true,
+      tramos_base: 'COTIZADO',
+    });
+    expect((q.escalas as Row[]).map((e) => e.orden)).toEqual([1, 2, 3]);
+    expect((q.escalas as Row[])[2].id).toBe('e3');
+    expect(escrituras(log)).toEqual([]);
+
+    // Adoptar la operación: los 3 tramos llegan en el DTO y el 3 es el MISMO.
+    const { svc: svc2 } = servicio(mundo, []);
+    const q2 = await svc2.quoteLikeParaPreview({
+      ...dtoBase({
+        escalas: [
+          { origen_iata: 'CUN', destino_iata: 'CZA', millas_nauticas: 90 },
+          { origen_iata: 'CZA', destino_iata: 'CUN', millas_nauticas: 90 },
+          { origen_iata: 'CUN', destino_iata: 'HOL', millas_nauticas: 25 },
+        ],
+      }),
+      quote_id: 'v1',
+      sucio: true,
+      tramos_base: 'OPERACION',
+    });
+    const e2 = q2.escalas as Row[];
+    expect(e2.map((e) => e.orden)).toEqual([1, 2, 3]);
+    expect(e2[2].id).toBe('e3');
+    expect(e2[2].destino_iata).toBe('HOL');
+  });
+
   it('#298 la cotización es independiente de la operación: el vuelo ya opera OTRO avión y el quote-like NO lo reasigna al cotizado', async () => {
     // Cliente 12-sep-2026: «se cotiza con un avión y se vuela con otro […] la
     // cotización no debe verse afectada por cambios en el vuelo operativo».

@@ -1211,7 +1211,9 @@ updated_at_enviado, updated_at_actual } }`. Los flujos MULTI-PASO
       (pre-check por llave acotado al vuelo, o 23505) va ANTES de toda
       validación y NUNCA re-valida, re-inserta, reabre ni re-notifica
       (`notificarTramoNuevo`); responde la fila YA creada con `idempotente:
-true` (en el operativo, con su `orden` calculado); llave reutilizada
+true` (en `operational-legs`, con su `orden` calculado y, desde el
+      0.0.46, `comercial`/`aviso` derivados de la fila — invariante 35);
+      llave reutilizada
       en OTRO vuelo ⇒ 409 `CLIENT_REQUEST_ID_EN_USO` (jamás 500; helper
       único `src/common/client-request-id.util.ts`). REGLA de toda alta
       idempotente: la relectura del replay (pre-check y 23505) se ACOTA al
@@ -1922,6 +1924,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ruta intacta, `replaceEscalas` omite `cancelada_at/_motivo/_por` y
       manda un aviso ámbar en vez del push «tramos restaurados». Un tramo
       SOBRANTE con tacómetro sigue conservándose y ahora además AVISA.
+      Desde el 30-sep-2026 (0.0.46, invariante 35) tampoco se borra el
+      SOBRANTE que la OPERACIÓN agregó y nunca se cotizó
+      (`sobranteNoCotizadoSeConserva`: hay snapshot, el `orden` no estaba en
+      él y no es «adoptar la operación» — `adoptaOperacion`; el GRUPO sí lo
+      conserva): se conserva y AVISA (`avisoTramoNoCotizadoConservado`).
     - **Capacidad**: el 409 `CAPACIDAD_EXCEDIDA` sigue mirando lo COTIZADO
       (es el precio) y el pax de la OPERACIÓN pasa a `avisos[]` ámbar
       (`avisosCapacidadOperacion`, best-effort) — «taller = aviso, no
@@ -2932,6 +2939,128 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       pedido UNA vez en todo el general —falla si «otros movimientos» no
       comparte el memo—, y el memo unitario: faltantes, reutilización,
       rechazo sin etiqueta inventada, cero consultas sin vuelos).
+
+35. **TRAMO AGREGADO A UN VUELO YA CREADO: DEL CLIENTE U OPERATIVO
+    (30-sep-2026, API 0.0.46, sin migración; caso #364).** Pregunta del
+    cliente con capturas de la app: Itzi dio de alta el #364 con CUN→CET y
+    CET→PTU (ferry, 0 pax; comerciales, orden 1 y 2) y Pablo agregó desde
+    «Editar vuelo» PTU→CUN con 4 pasajeros; la app lo pintó «Interno (no
+    del cliente)» y en el detalle «tramo 100» (en la lista, 3): «¿Por qué
+    aparece ese aviso? ¿A qué se refiere?». Causa: `POST
+    /v1/flights/:id/operational-legs` (`createOperationalLeg`, el ÚNICO
+    camino de la app «Editar vuelo» → `tramo_operativo` y del panel
+    «Agregar tramo») insertaba SIEMPRE `solo_operativa: true` en
+    `orden = max(maxOrden+1, 100)`, aunque el tramo llevara pasajeros: el
+    tramo del cliente quedaba fuera de la cotización, del precio, del
+    reparto (`participacion-aeronave.util`) y de «adoptar operación».
+    - **Fuente única PURA** `flights/tramo-agregado.util.ts` (con spec).
+      `esTramoOperativo`: FERRY, o parada de SERVICIO **sin** pasajeros ⇒
+      operativo (`solo_operativa`, `orden ≥ OPERATIVA_ORDEN_BASE = 100`, como
+      siempre). Todo lo demás es del CLIENTE (comercial) — la MISMA regla del
+      alta (`legsDeReserva`: `solo_operativa = es_ferry`). **Desviación
+      consciente del contrato** («SERVICIO ⇒ operativo»): una parada de
+      SERVICIO CON pasajeros es del cliente — en prod #150 (CUN→CET, 5 pax,
+      «ajustar el magneto»), #84 y #57 son vuelos del cliente que dejan el
+      avión en el taller y están cotizados; marcarlos operativos repetiría
+      el bug del #364.
+    - **`orden` del tramo comercial** (`ubicarTramoAgregado`): el mayor
+      `orden < 100` de los tramos NO cancelados + 1, saltando los números
+      que ocupe un tramo cancelado (el índice ÚNICO
+      `escala_vuelo_id_orden_key` cubre TODAS las filas). Así cae en el rango
+      1..n que `quotes.replaceEscalas` maneja por UPSERT de `orden`: la
+      cotización muestra «hay un tramo 3 PTU → CUN que no se cotizó» (panel,
+      `divergenciasDeOperacion`) y «Actualizar la cotización con la
+      operación» lo ACTUALIZA en su lugar, sin duplicarlo. En el #364 queda
+      orden 3 = el número de la lista.
+    - **FRENO DE CRONOLOGÍA (horas sagradas, invariantes 1 y 5)**: la cadena
+      de tacómetros (`propagarLlegadaASalidaSiguiente`, `fillTacoGaps`,
+      rotaciones) camina por `orden` y un tramo nuevo se agrega AL FINAL de
+      la ruta. Si hay un tramo NO cancelado en `orden ≥ 100` que va ANTES
+      —ya voló o está volando (llegada, o salida que no es copia DEDUCIDA),
+      o su `fecha_salida_plan` es anterior a la del nuevo—, numerar el nuevo
+      por debajo de 100 lo pondría ANTES en la cadena: su salida se copiaría
+      de la llegada equivocada y las horas del ferry se contarían dos veces.
+      Ahí el tramo queda OPERATIVO (`orden ≥ 100`, cronología intacta) y la
+      respuesta lo dice con `AVISO_TRAMO_CLIENTE_OPERATIVO` («…quedó como
+      operativo y no entra a la cotización. Si hay que cobrarlo, agrégalo
+      como ajuste o extra…» — NO «como tramo»: un tramo nuevo en la
+      cotización lo INSERTARÍA otra vez en la operación). Sin fechas se
+      asume lo que la lista ya pinta: el operativo ≥ 100 (ferry de regreso)
+      va al final y el tramo del cliente antes. Caso típico del freno: vuelo
+      COMPLETADO cuyo ferry de regreso (100) ya voló y el cliente pide otro
+      tramo.
+    - **Respuesta ADITIVA**: la escala + `comercial: boolean` + `aviso:
+      string | null` (`AVISO_TRAMO_COMERCIAL` = «Este tramo es del cliente:
+      la cotización mostrará que la operación difiere y ofrecerá
+      adoptarlo.» cuando es comercial; null en un ferry/servicio vacío). El
+      replay idempotente (pre-check y carrera 23505 de la llave) los DERIVA
+      de la fila guardada (`avisoDeTramoGuardado`): devuelve lo que se creó.
+      Todo lo demás que reacciona a un tramo nuevo NO cambió
+      (`refreshPermisosDeVuelo`, `reabrirTrasTramoNuevo`, `syncFlight`,
+      `notificarTramoNuevo`, `fecha_fin` por trigger).
+    - **Carrera de `orden`** (dos altas a la vez calculan el mismo número):
+      el 23505 de `escala_vuelo_id_orden_key` relee y recalcula (3
+      intentos) y, si no cede, 409 «Otro tramo se agregó a este vuelo al
+      mismo tiempo: vuelve a intentarlo.» — antes era un 500 (y un 500
+      dispara el reintento del outbox). Si la lectura de las escalas falla,
+      se LANZA: jamás se adivina un `orden`.
+    - **La cotización no borra el tramo que agregó la operación**
+      (`tramos-cotizados.util#sobranteNoCotizadoSeConserva`, con spec):
+      hasta hoy un tramo comercial con `orden` > los tramos que llegan era
+      «sobrante» y, sin tacómetro, se BORRABA (con su evento de Google y un
+      push «tramos eliminados»). Con tramos comerciales nacidos en la
+      operación eso significaba: Pablo agrega PTU→CUN, la oficina guarda la
+      cotización por un T.C. (o `quickAdjust` registra un cobro) y el tramo
+      DESAPARECE del vuelo. Ahora `replaceEscalas` lo CONSERVA y avisa
+      (`avisoTramoNoCotizadoConservado`, solo si no está cancelado) cuando
+      hay snapshot con tramos, ese `orden` NO estaba cotizado y la lista no
+      es «adoptar la operación» (`replaceEscalas` opción `adoptaOperacion` =
+      `tramos_base 'OPERACION'`: esa sí manda la lista viva completa). El
+      GRUPO confía en su DTO para las columnas (`confiarEnDto`) pero NO
+      cuenta como adoptar (revisión adversaria 30-sep-2026): re-materializa
+      su PLANTILLA, que no conoce el tramo que la operación agregó a un hijo,
+      y antes lo BORRABA cada vez que alguien editaba el grupo. Un tramo que
+      SÍ estaba cotizado y la oficina quitó se sigue borrando (edición
+      deliberada). La vista previa (`quoteLikeParaPreview`) usa la MISMA
+      función.
+    - **Rotaciones del hijo de GRUPO sobre lo COTIZADO**
+      (`grupo-armador.util#rotacionesDeHijo`, con spec; revisión adversaria
+      30-sep-2026): la doble rotación se deducía contando las escalas VIVAS
+      comerciales (`plantilla × 3`). Con tramos del cliente nacidos en la
+      operación, un tramo agregado a un hijo de doble rotación lo volvía «una
+      vuelta» y re-materializar el grupo lo re-preciaba (y borraba los tramos
+      cotizados de la segunda vuelta); con plantilla de 1 tramo y dos
+      agregados pedía una doble rotación imposible (`tramosDeHijo` lanza).
+      Ahora se cuenta `tramosCotizados(calculo_snapshot)`; sin snapshot con
+      tramos (legado), las vivas como antes.
+    - **Datos legados NO se migran**: el #364 (escala orden 100,
+      `solo_operativa = true`, 4 pax, sin tacos) sigue como estaba —el API
+      no tiene un PATCH de `solo_operativa`—; la app (1.1.3+77) y el panel lo
+      marcan con el chip ámbar «Lleva pasajeros y no está cotizado: revisa
+      la cotización». Para arreglarlo: cancelar ese tramo y volver a
+      agregarlo desde «Editar vuelo» (nace comercial en el orden 3), o una
+      corrección de datos autorizada. Mismo caso, ya volados: #290 (CZM→CUN
+      3 pax) y #213 (MHL→CUN 1 pax), los dos COMPLETADOS.
+    - Specs: `tramo-agregado.util.spec.ts` (regla, SERVICIO con y sin pax,
+      orden con cancelados, freno por taco/salida real/fecha, DEDUCIDA no
+      frena, rango lleno, replay), `flights.service.ola-b.spec.ts` (#364 con
+      el DTO real de la app ⇒ orden 3 comercial + aviso, ferry ⇒ 100,
+      servicio, freno, replay y carrera de llave con `comercial`, carrera de
+      orden ⇒ reintento / 409, lectura fallida),
+      `quotes.service.tramos.spec.ts` (guardar SIN adoptar NO lo borra y
+      avisa; panel viejo tampoco; ADOPTAR = UPDATE del orden 3 sin INSERT ni
+      DELETE; control: un cotizado quitado sí se borra),
+      `quotes.service.cotizador.spec.ts` (la vista previa lo conserva),
+      `tramos-cotizados.util.spec.ts`, `quotes.service.tramos.spec.ts`
+      (re-materializar el GRUPO conserva el tramo agregado; adoptar borra un
+      sobrante no cotizado CANCELADO) y `grupo-armador.util.spec.ts`
+      (`rotacionesDeHijo`).
+    - **Riesgo residual conocido (previo, 0 casos en prod)**: «adoptar la
+      operación» re-numera por POSICIÓN (`orden = idx + 1`). Con un tramo
+      COMERCIAL cancelado en medio (p. ej. 1, 2 cancelado, 3 agregado), el
+      orden 2 cancelado REVIVE con la ruta del 3 y el 3 se borra; si el 3 ya
+      tenía tacómetro se conserva y queda DUPLICADO. En prod solo hay 4
+      escalas canceladas y todas son operativas.
 
 ## Convenciones NestJS
 

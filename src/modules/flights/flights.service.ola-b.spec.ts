@@ -29,6 +29,11 @@ import type { ListFlightsQuery } from './dto/flights.dto';
 import type { CreateCobroDto } from './dto/cobros.dto';
 import { Moneda } from '../bank-accounts/dto/bank-accounts.dto';
 import { MetodoPago } from '../quotes/dto/calculate-quote.dto';
+import {
+  AVISO_TRAMO_CLIENTE_OPERATIVO,
+  AVISO_TRAMO_COMERCIAL,
+  ESCALAS_PARA_UBICAR_COLS,
+} from './tramo-agregado.util';
 
 /**
  * Lote 2 · Ola B (10-sep-2026) — ediciones sin red con «gana el servidor +
@@ -203,6 +208,12 @@ interface Mundo {
   /** ¿Existe escala.client_request_id? (default true). */
   columnaLlave?: boolean;
   insertEscalaError?: { code: string; message: string };
+  /** Errores del insert de escala, uno por intento (null = el intento pasa). */
+  insertEscalaErrores?: ({ code: string; message: string } | null)[];
+  /** Escalas del vuelo para ubicar un tramo agregado (operational-legs). */
+  escalasVuelo?: Row[];
+  /** Error de la lectura de escalas para ubicar el tramo agregado. */
+  escalasVueloError?: { code?: string; message: string };
   /** Cobros ya registrados del vuelo. */
   cobros?: Row[];
   cobroPorLlave?: Row | null;
@@ -248,6 +259,10 @@ function armar(m: Mundo = {}) {
         }
         if (ins) {
           if (m.insertEscalaError) return { error: m.insertEscalaError };
+          if (m.insertEscalaErrores?.length) {
+            const err = m.insertEscalaErrores.shift();
+            if (err) return { error: err };
+          }
           return {
             data: { ...escalaRow(), id: 'e-new', ...(ins.args[0] as Row) },
           };
@@ -275,6 +290,15 @@ function armar(m: Mundo = {}) {
         }
         if (selectDe(ops) === 'orden')
           return { data: [{ orden: 1 }, { orden: 2 }] };
+        if (selectDe(ops) === ESCALAS_PARA_UBICAR_COLS) {
+          if (m.escalasVueloError) return { error: m.escalasVueloError };
+          return {
+            data: m.escalasVuelo ?? [
+              escalaRow({ orden: 1 }),
+              escalaRow({ id: 'e-2', orden: 2 }),
+            ],
+          };
+        }
         if (selectDe(ops) === 'id')
           return { data: lista ? [{ id: E1 }] : { id: E1 } };
         const fila = m.escala === undefined ? escalaRow() : m.escala;
@@ -707,22 +731,27 @@ describe('B2 · POST /flights/:id/operational-legs — idempotencia', () => {
         id: 'e-op',
         orden: 100,
         solo_operativa: true,
+        es_ferry: true,
       }),
     });
     const out = await w.service.createOperationalLeg(V1, dto, USER);
     expect(out.idempotente).toBe(true);
     expect((out as Row).orden).toBe(100);
+    expect((out as Row).comercial).toBe(false);
+    expect((out as Row).aviso).toBeNull();
     expect(w.inserts.escala).toBeUndefined();
     expect(w.avisoTramo).not.toHaveBeenCalled();
   });
 
-  it('alta fresca: orden en el rango operativo (100), insert con llave, avisa una vez', async () => {
+  it('alta fresca (ferry): orden en el rango operativo (100), insert con llave, avisa una vez', async () => {
     const w = armar();
     const out = await w.service.createOperationalLeg(V1, dto, USER);
     expect(out.idempotente).toBe(false);
     expect(w.inserts.escala[0].orden).toBe(100);
     expect(w.inserts.escala[0].solo_operativa).toBe(true);
     expect(w.inserts.escala[0].client_request_id).toBe(LLAVE);
+    expect((out as Row).comercial).toBe(false);
+    expect((out as Row).aviso).toBeNull();
     expect(w.avisoTramo).toHaveBeenCalledTimes(1);
   });
 
@@ -730,6 +759,210 @@ describe('B2 · POST /flights/:id/operational-legs — idempotencia', () => {
     const w = armar({ columnaLlave: false });
     await w.service.createOperationalLeg(V1, dto, USER);
     expect('client_request_id' in w.inserts.escala[0]).toBe(false);
+  });
+});
+
+describe('POST /flights/:id/operational-legs — ¿del cliente u operativo? (caso #364, API 0.0.46)', () => {
+  /** #364: CUN→CET y CET→PTU ferry, comerciales (orden 1 y 2). */
+  const vuelo364 = [
+    escalaRow({
+      orden: 1,
+      origen_iata: 'CUN',
+      destino_iata: 'CET',
+      es_ferry: true,
+    }),
+    escalaRow({
+      id: 'e-2',
+      orden: 2,
+      origen_iata: 'CET',
+      destino_iata: 'PTU',
+      es_ferry: true,
+    }),
+  ];
+  /** Lo que mandó la app de Pablo: PTU→CUN con 4 pasajeros, sin ferry. */
+  const ptuCun = {
+    origen_iata: 'ptu',
+    destino_iata: 'cun',
+    pasajeros: 4,
+    es_ferry: false,
+    client_request_id: LLAVE,
+  };
+
+  it('con pasajeros ⇒ COMERCIAL: solo_operativa=false, orden 3 (el de la lista), comercial + aviso', async () => {
+    const w = armar({ escalasVuelo: vuelo364 });
+    const out = await w.service.createOperationalLeg(V1, ptuCun, USER);
+    const ins = w.inserts.escala[0];
+    expect(ins.solo_operativa).toBe(false);
+    expect(ins.orden).toBe(3);
+    expect(ins.pasajeros).toBe(4);
+    expect(ins.origen_iata).toBe('PTU');
+    expect((out as Row).comercial).toBe(true);
+    expect((out as Row).aviso).toBe(AVISO_TRAMO_COMERCIAL);
+    expect(out.idempotente).toBe(false);
+    // Lo que reacciona a un tramo nuevo sigue igual.
+    expect(w.refreshPermisosDeVuelo).toHaveBeenCalledWith(V1);
+    expect(w.syncFlight).toHaveBeenCalledWith(V1);
+    expect(w.avisoTramo).toHaveBeenCalledTimes(1);
+    // La lectura para ubicar el tramo ve TODAS las escalas (canceladas incl.).
+    const lectura = w.llamadas.find(
+      (l) =>
+        l.tabla === 'escala' && selectDe(l.ops) === ESCALAS_PARA_UBICAR_COLS,
+    )!;
+    expect(eqDe(lectura.ops, 'vuelo_id')).toBe(V1);
+    expect(tiene(lectura.ops, 'is')).toBe(false);
+  });
+
+  it('ferry ⇒ OPERATIVO en el rango ≥ 100, sin aviso', async () => {
+    const w = armar({ escalasVuelo: vuelo364 });
+    const out = await w.service.createOperationalLeg(
+      V1,
+      { ...ptuCun, es_ferry: true },
+      USER,
+    );
+    expect(w.inserts.escala[0].solo_operativa).toBe(true);
+    expect(w.inserts.escala[0].orden).toBe(100);
+    expect(w.inserts.escala[0].pasajeros).toBe(0);
+    expect((out as Row).comercial).toBe(false);
+    expect((out as Row).aviso).toBeNull();
+  });
+
+  it('parada de SERVICIO sin pasajeros ⇒ OPERATIVO', async () => {
+    const w = armar({ escalasVuelo: vuelo364 });
+    await w.service.createOperationalLeg(
+      V1,
+      {
+        origen_iata: 'cun',
+        destino_iata: 'mid',
+        tipo_parada: 'SERVICIO',
+        servicio_notas: 'Llevar a taller',
+      },
+      USER,
+    );
+    expect(w.inserts.escala[0].solo_operativa).toBe(true);
+    expect(w.inserts.escala[0].orden).toBe(100);
+    expect(w.inserts.escala[0].tipo_parada).toBe('SERVICIO');
+  });
+
+  it('parada de SERVICIO CON pasajeros ⇒ del cliente (como #150: 5 pax y el avión se queda en taller)', async () => {
+    const w = armar({ escalasVuelo: vuelo364 });
+    await w.service.createOperationalLeg(
+      V1,
+      {
+        origen_iata: 'cun',
+        destino_iata: 'cet',
+        tipo_parada: 'SERVICIO',
+        pasajeros: 5,
+      },
+      USER,
+    );
+    expect(w.inserts.escala[0].solo_operativa).toBe(false);
+    expect(w.inserts.escala[0].orden).toBe(3);
+  });
+
+  it('un operativo ≥ 100 que YA VOLÓ va antes ⇒ el tramo queda operativo (cadena de tacos intacta) y lo avisa', async () => {
+    const w = armar({
+      escalasVuelo: [
+        escalaRow({ orden: 1, taco_salida: 999, taco_llegada: 1000 }),
+        escalaRow({
+          id: 'e-100',
+          orden: 100,
+          taco_salida: 1000,
+          taco_llegada: 1001,
+        }),
+      ],
+    });
+    const out = await w.service.createOperationalLeg(V1, ptuCun, USER);
+    expect(w.inserts.escala[0].solo_operativa).toBe(true);
+    expect(w.inserts.escala[0].orden).toBe(101);
+    expect((out as Row).comercial).toBe(false);
+    expect((out as Row).aviso).toBe(AVISO_TRAMO_CLIENTE_OPERATIVO);
+  });
+
+  it('replay idempotente de un tramo COMERCIAL: conserva lo creado (orden 3, comercial + aviso), sin insert ni aviso', async () => {
+    const w = armar({
+      escalasVuelo: vuelo364,
+      escalaPorLlave: escalaRow({
+        id: 'e-ptu',
+        orden: 3,
+        solo_operativa: false,
+        pasajeros: 4,
+      }),
+    });
+    const out = await w.service.createOperationalLeg(V1, ptuCun, USER);
+    expect(out.idempotente).toBe(true);
+    expect((out as Row).orden).toBe(3);
+    expect((out as Row).comercial).toBe(true);
+    expect((out as Row).aviso).toBe(AVISO_TRAMO_COMERCIAL);
+    expect(w.inserts.escala).toBeUndefined();
+    expect(w.avisoTramo).not.toHaveBeenCalled();
+    expect(w.refreshPermisosDeVuelo).not.toHaveBeenCalled();
+  });
+
+  it('carrera de llave (23505 uq_escala_client_request): devuelve el primero con comercial/aviso', async () => {
+    const w = armar({
+      escalasVuelo: vuelo364,
+      insertEscalaError: {
+        code: '23505',
+        message:
+          'duplicate key value violates unique constraint "uq_escala_client_request"',
+      },
+      escalaPorLlaveSecuencia: [
+        null,
+        escalaRow({ id: 'e-ptu', orden: 3, solo_operativa: false }),
+      ],
+    });
+    const out = await w.service.createOperationalLeg(V1, ptuCun, USER);
+    expect(out.idempotente).toBe(true);
+    expect((out as Row).comercial).toBe(true);
+    expect(w.avisoTramo).not.toHaveBeenCalled();
+  });
+
+  it('carrera de ORDEN con otra alta (23505 escala_vuelo_id_orden_key): relee, recalcula y entra al segundo intento', async () => {
+    const w = armar({
+      escalasVuelo: vuelo364,
+      insertEscalaErrores: [
+        {
+          code: '23505',
+          message:
+            'duplicate key value violates unique constraint "escala_vuelo_id_orden_key"',
+        },
+        null,
+      ],
+    });
+    const out = await w.service.createOperationalLeg(V1, ptuCun, USER);
+    expect(w.inserts.escala).toHaveLength(2);
+    expect(out.idempotente).toBe(false);
+    expect((out as Row).comercial).toBe(true);
+    const lecturas = w.llamadas.filter(
+      (l) =>
+        l.tabla === 'escala' && selectDe(l.ops) === ESCALAS_PARA_UBICAR_COLS,
+    );
+    expect(lecturas).toHaveLength(2);
+    expect(w.avisoTramo).toHaveBeenCalledTimes(1);
+  });
+
+  it('la carrera de ORDEN que no cede en 3 intentos ⇒ 409 legible, nunca 500', async () => {
+    const choque = {
+      code: '23505',
+      message:
+        'duplicate key value violates unique constraint "escala_vuelo_id_orden_key"',
+    };
+    const w = armar({
+      escalasVuelo: vuelo364,
+      insertEscalaErrores: [choque, choque, choque],
+    });
+    const r = await rebote(w.service.createOperationalLeg(V1, ptuCun, USER));
+    expect(r.status).toBe(409);
+    expect(r.message).toContain('vuelve a intentarlo');
+    expect(w.avisoTramo).not.toHaveBeenCalled();
+  });
+
+  it('si no se pueden leer las escalas del vuelo NO se adivina el orden', async () => {
+    const w = armar({ escalasVueloError: { message: 'timeout' } });
+    await expect(
+      w.service.createOperationalLeg(V1, ptuCun, USER),
+    ).rejects.toThrow('timeout');
+    expect(w.inserts.escala).toBeUndefined();
   });
 });
 

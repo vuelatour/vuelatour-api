@@ -3,10 +3,12 @@ import {
   avisoAnclaDeTramos,
   avisoTramoCancelado,
   avisoTramoConTacoConservado,
+  avisoTramoNoCotizadoConservado,
   columnasQueConservaLaOperacion,
   mismaRuta,
   normalizarTramosBase,
   rutaTxt,
+  sobranteNoCotizadoSeConserva,
   tramosCotizados,
   tramosCotizadosPorOrden,
   type TramoCotizado,
@@ -491,5 +493,37 @@ describe('textos de los avisos ámbar', () => {
     expect(avisoTramoConTacoConservado(3, 'PTU → CZM')).toContain(
       'tacómetro capturado',
     );
+  });
+});
+
+describe('sobranteNoCotizadoSeConserva — tramo del cliente agregado por la operación (#364, 0.0.46)', () => {
+  const cotizados = new Map<number, unknown>([
+    [1, {}],
+    [2, {}],
+  ]);
+
+  it('el orden 3 NUNCA se cotizó ⇒ se conserva', () => {
+    expect(sobranteNoCotizadoSeConserva(3, cotizados, false)).toBe(true);
+    expect(sobranteNoCotizadoSeConserva(3, cotizados, undefined)).toBe(true);
+  });
+
+  it('el orden SÍ estaba cotizado y ya no viene ⇒ edición deliberada: se borra como siempre', () => {
+    expect(sobranteNoCotizadoSeConserva(2, cotizados, false)).toBe(false);
+  });
+
+  it('adoptar la operación (la lista viva completa) manda: se borra', () => {
+    expect(sobranteNoCotizadoSeConserva(3, cotizados, true)).toBe(false);
+  });
+
+  it('sin snapshot (create, reserva sin cotizar) no hay nada pactado que respetar', () => {
+    expect(sobranteNoCotizadoSeConserva(3, null, false)).toBe(false);
+    expect(sobranteNoCotizadoSeConserva(3, new Map(), false)).toBe(false);
+  });
+
+  it('aviso con el número y la ruta, y el botón para adoptarlo', () => {
+    const txt = avisoTramoNoCotizadoConservado(3, 'PTU → CUN');
+    expect(txt).toContain('El tramo 3 PTU → CUN');
+    expect(txt).toContain('se CONSERVÓ');
+    expect(txt).toContain('Actualizar la cotización con la operación');
   });
 });

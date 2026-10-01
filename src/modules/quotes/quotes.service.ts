@@ -48,10 +48,12 @@ import {
   avisoRutaDeLaOperacion,
   avisoTramoCancelado,
   avisoTramoConTacoConservado,
+  avisoTramoNoCotizadoConservado,
   columnasQueConservaLaOperacion,
   mismaRuta,
   normalizarTramosBase,
   rutaTxt,
+  sobranteNoCotizadoSeConserva,
   tramosCotizados,
   tramosCotizadosPorOrden,
   type TramoCotizado,
@@ -2422,14 +2424,26 @@ export class QuotesService {
         };
       });
       // Lo que replaceEscalas NO toca y sigue vivo: tramos operativos del
-      // piloto y sobrantes con tacómetro capturado.
+      // piloto, sobrantes con tacómetro capturado y (0.0.46) los tramos del
+      // cliente que agregó la operación y nunca se cotizaron.
+      const cotizadosPrevios = tramosCotizadosPorOrden(
+        current?.calculo_snapshot,
+      );
+      const adoptaOperacion =
+        normalizarTramosBase(dto.tramos_base) === 'OPERACION';
       for (const e of vivas) {
         const o = Number(e.orden);
         if (e.solo_operativa === true) {
           escalas.push(e);
         } else if (
           o > legs.length &&
-          (e.taco_salida != null || e.taco_llegada != null)
+          (e.taco_salida != null ||
+            e.taco_llegada != null ||
+            sobranteNoCotizadoSeConserva(
+              o,
+              cotizadosPrevios.size > 0 ? cotizadosPrevios : null,
+              adoptaOperacion,
+            ))
         ) {
           escalas.push(e);
         }
@@ -3245,6 +3259,9 @@ export class QuotesService {
             cotizados: cotizadosPrevios.size > 0 ? cotizadosPrevios : null,
             confiarEnDto:
               tramosBase === 'OPERACION' || opts.desdeGrupo === true,
+            // Solo «adoptar la operación» borra un sobrante que nunca se
+            // cotizó; el GRUPO lo conserva (su plantilla no lo conoce).
+            adoptaOperacion: tramosBase === 'OPERACION',
             // Viaje TERMINADO: el aviso «cambió el itinerario» no sale (la
             // tripulación no recibe pushes de un vuelo que ya aterrizó).
             silenciarTripulacion: volado.termino,
@@ -4592,6 +4609,15 @@ export class QuotesService {
       cotizados?: Map<number, TramoCotizado> | null;
       confiarEnDto?: boolean;
       /**
+       * true = la lista que llega ES la operación viva adoptada a propósito
+       * («Actualizar la cotización con la operación», `tramos_base =
+       * 'OPERACION'`). Solo ella decide si un SOBRANTE que nunca se cotizó se
+       * borra (`sobranteNoCotizadoSeConserva`): el GRUPO también confía en su
+       * DTO (`confiarEnDto`) pero manda su PLANTILLA, que no conoce el tramo
+       * que la operación agregó a un hijo (revisión adversaria 30-sep-2026).
+       */
+      adoptaOperacion?: boolean;
+      /**
        * true = el viaje YA TERMINÓ (`estadoVueloVolado(...).termino`, lo
        * pasa `revise`): el aviso «cambió el itinerario» no se manda
        * (24-sep-2026, #338 — nadie recibe pushes de un vuelo que aterrizó).
@@ -4843,6 +4869,30 @@ export class QuotesService {
       (e) => (e.orden as number) > total,
     );
     for (const s of sobrantes) {
+      // Tramo del CLIENTE que agregó la OPERACIÓN y NUNCA se cotizó
+      // (30-sep-2026, API 0.0.46, caso #364): desde que `operational-legs`
+      // crea tramos comerciales, guardar la cotización SIN adoptarlo (un
+      // ajuste de T.C., un cobro vía quickAdjust) lo dejaba como «sobrante» y
+      // lo BORRABA de la operación con su evento de Google. La cotización no
+      // pisa la operación (invariante 24): si el snapshot vigente no tenía
+      // ese `orden`, la oficina no lo quitó — se conserva y se avisa. Solo
+      // con lo cotizado a la mano y sin `adoptaOperacion` (adoptar la
+      // operación manda la lista viva completa). El GRUPO SÍ lo conserva:
+      // su plantilla no conoce el tramo que la operación agregó a un hijo.
+      if (
+        sobranteNoCotizadoSeConserva(
+          Number(s.orden),
+          opts.cotizados,
+          opts.adoptaOperacion,
+        )
+      ) {
+        if (s.cancelada_at == null) {
+          avisos.push(
+            avisoTramoNoCotizadoConservado(Number(s.orden), rutaTxt(s)),
+          );
+        }
+        continue;
+      }
       if (tieneTaco(s)) {
         this.logger.warn(
           `Vuelo ${vueloId}: escala orden ${s.orden} tiene tacómetro capturado; se conserva aunque el plan cotizado ya no la incluye.`,

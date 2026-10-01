@@ -443,6 +443,46 @@ export function avisoTramoCancelado(orden: number, ruta: string): string {
   return `El tramo ${orden} ${ruta} está CANCELADO en la operación y la cotización lo sigue cobrando. Si ya no va, quítalo de la cotización; si sí va, reactívalo desde el vuelo.`;
 }
 
+/**
+ * ¿Un tramo COMERCIAL que sobra al guardar la cotización (su `orden` ya no
+ * está en la lista que llega) se CONSERVA porque la OPERACIÓN lo agregó y
+ * nunca se cotizó? (30-sep-2026, API 0.0.46, caso #364.) Sí cuando hay
+ * snapshot vigente con tramos (`cotizados`), la lista que llega NO es la
+ * operación viva adoptada a propósito (`adoptaOperacion`: «Actualizar la
+ * cotización con la operación», `tramos_base = 'OPERACION'`) y ese `orden`
+ * NO estaba cotizado: la oficina no lo quitó de la cotización, nunca estuvo
+ * ahí. Si estaba cotizado y ya no viene, es una edición deliberada y se
+ * borra como siempre (salvo con tacómetro). La usan `replaceEscalas` y su
+ * espejo en memoria de la vista previa.
+ *
+ * OJO: el GRUPO NO cuenta como «adoptar» (revisión adversaria 30-sep-2026)
+ * aunque `replaceEscalas` confíe en su DTO para las columnas: re-materializa
+ * su PLANTILLA, que no sabe nada del tramo que la operación le agregó a UN
+ * hijo — tratarlo como lista completa BORRABA ese tramo (con su evento de
+ * Google y un push «tramos eliminados») cada vez que alguien editaba el
+ * grupo, una acción destructiva sin confirmación.
+ */
+export function sobranteNoCotizadoSeConserva(
+  orden: number,
+  cotizados: ReadonlyMap<number, unknown> | null | undefined,
+  adoptaOperacion: boolean | undefined,
+): boolean {
+  if (adoptaOperacion === true) return false;
+  if (!cotizados || cotizados.size === 0) return false;
+  return !cotizados.has(orden);
+}
+
+/**
+ * Aviso: un tramo del cliente que agregó la operación no está en la
+ * cotización y NO se borró al guardar (`sobranteNoCotizadoSeConserva`).
+ */
+export function avisoTramoNoCotizadoConservado(
+  orden: number,
+  ruta: string,
+): string {
+  return `El tramo ${orden} ${ruta} lo agregó la operación y no está en la cotización: se CONSERVÓ en el vuelo. Si el cliente debe pagarlo, usa "Actualizar la cotización con la operación".`;
+}
+
 /** Aviso: sobra un tramo con tacómetro y NO se borró (invariante 1). */
 export function avisoTramoConTacoConservado(
   orden: number,

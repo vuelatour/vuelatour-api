@@ -11,6 +11,7 @@ import {
   proponerFlotaConTaller,
   repartirAjuste,
   repartirExacto,
+  rotacionesDeHijo,
   tramosDeHijo,
   type ExtraGrupoDef,
   type FichaAvionArmador,
@@ -227,6 +228,83 @@ describe('tramosDeHijo (rotaciones)', () => {
     expect(() => tramosDeHijo(plantilla, 4, 2, 5)).toThrow(
       /no necesita doble rotación/,
     );
+  });
+});
+
+describe('rotacionesDeHijo (se mide sobre lo COTIZADO — revisión 0.0.46)', () => {
+  /** Snapshot de un hijo con `n` tramos cotizados (`ruta.escalas`). */
+  const snap = (n: number) => ({
+    ruta: {
+      escalas: Array.from({ length: n }, (_, i) => ({
+        origen_iata: i % 2 === 0 ? 'CUN' : 'CZA',
+        destino_iata: i % 2 === 0 ? 'CZA' : 'CUN',
+        millas_nauticas: 90,
+        pasajeros: 5,
+      })),
+    },
+  });
+  const viva = (extra: Record<string, unknown> = {}) => ({
+    cancelada_at: null,
+    solo_operativa: false,
+    ...extra,
+  });
+
+  it('doble rotación cotizada (plantilla 2 ⇒ 6 tramos) sigue en 2 aunque la operación le agregue un tramo del cliente', () => {
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: snap(6),
+        escalas: Array.from({ length: 7 }, () => viva()),
+        plantillaLen: 2,
+      }),
+    ).toBe(2);
+  });
+
+  it('una vuelta cotizada (plantilla 1) con dos tramos agregados por la operación NO se vuelve «doble rotación» imposible', () => {
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: snap(1),
+        escalas: [viva(), viva(), viva()],
+        plantillaLen: 1,
+      }),
+    ).toBe(1);
+  });
+
+  it('sin snapshot con tramos (hijo legado): cuenta las escalas vivas comerciales no canceladas, como antes', () => {
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: null,
+        escalas: Array.from({ length: 6 }, () => viva()),
+        plantillaLen: 2,
+      }),
+    ).toBe(2);
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: {},
+        escalas: [
+          ...Array.from({ length: 6 }, () => viva()),
+          viva({ solo_operativa: true }),
+          viva({ cancelada_at: '2026-09-30T12:00:00Z' }),
+        ],
+        plantillaLen: 2,
+      }),
+    ).toBe(2);
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: null,
+        escalas: Array.from({ length: 2 }, () => viva()),
+        plantillaLen: 2,
+      }),
+    ).toBe(1);
+  });
+
+  it('plantilla vacía ⇒ 1', () => {
+    expect(
+      rotacionesDeHijo({
+        calculo_snapshot: snap(0),
+        escalas: [],
+        plantillaLen: 0,
+      }),
+    ).toBe(1);
   });
 });
 

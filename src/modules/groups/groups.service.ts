@@ -66,6 +66,7 @@ import {
   normalizarTuasLineas,
   proponerFlotaConTaller,
   repartirAjuste,
+  rotacionesDeHijo,
   round2,
   tramosDeHijo,
   type Consolidado,
@@ -1687,12 +1688,13 @@ export class GroupsService {
   // Detalle y lista
   // =====================================================================
 
+  /** Fuente única `rotacionesDeHijo`: se mide sobre lo COTIZADO (0.0.46). */
   private rotacionesDe(h: HijoRow, plantillaLen: number): number {
-    const comerciales = (h.escalas ?? []).filter(
-      (e) => e.cancelada_at == null && e.solo_operativa !== true,
-    ).length;
-    if (plantillaLen > 0 && comerciales === plantillaLen * 3) return 2;
-    return 1;
+    return rotacionesDeHijo({
+      calculo_snapshot: h.calculo_snapshot,
+      escalas: h.escalas,
+      plantillaLen,
+    });
   }
 
   private hijoCongelado(h: HijoRow): string | null {

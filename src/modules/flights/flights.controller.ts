@@ -628,7 +628,7 @@ export class FlightsController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.PILOTO)
   @ApiOperation({
     summary:
-      'Agrega un tramo OPERATIVO interno (ferry, parada técnica, pernocta operativa) a la ruta real. No se cotiza ni se cobra ni se muestra al cliente; no recalcula el precio.',
+      'Agrega un tramo a la ruta real de un vuelo ya creado. FERRY (o parada de SERVICIO sin pasajeros) ⇒ tramo OPERATIVO interno (solo_operativa, orden ≥ 100): no se cotiza ni se cobra ni se muestra al cliente. Con pasajeros ⇒ tramo del CLIENTE (orden siguiente < 100): la cotización lo señala como «la operación difiere» y ofrece adoptarlo (API 0.0.46). No recalcula el precio. Respuesta: la escala + `comercial` (boolean) y `aviso` (string | null).',
   })
   async createOperationalLeg(
     @Param('id', ParseUUIDPipe) id: string,
