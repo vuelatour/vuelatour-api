@@ -3062,6 +3062,87 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       tenía tacómetro se conserva y queda DUPLICADO. En prod solo hay 4
       escalas canceladas y todas son operativas.
 
+36. **EXTENSIÓN Y/O ANTELACIÓN DE HORARIO = TRASLADO AL CLIENTE, COMO EL TUA
+    (regla 7 ampliada; 1-oct-2026, API 0.0.47, sin migración).** Ale con la
+    captura del balance XA-VGV/N4142R, vuelo #192 (CUN-CTM-CUN): «en este
+    vuelo me se está poniendo la extensión de servicios como Operación y no
+    va en ese apartado». La cotización de #192 cobra el EXTRA «Extensión de
+    servicios» ($1,200 USD, ingreso de VuelaTour) y la factura del aeropuerto
+    (gasto 8ab208c4, OPERACIONES $4,549.06: «AE-Extension y/o antelacion de
+    horario» 3,921.60 + IVA 627.46) caía ENTERA en la columna OPERACIONES:
+    costo del avión que no es suyo.
+    - **Fuente única `common/desglose-gasto.util.ts`** (spec
+      `desglose-gasto.util.spec.ts` con los conceptos REALES de #192 y #190).
+      `esExtension` (regex: «extensión [y/o] [antelación] [de] horario |
+      servicio(s)», «antelación de horario», «AE-Extension»; una palabra
+      suelta «Extensión» NO basta — folio 11 de ASUR la trae y no se toca).
+      `desgloseGastoPartes` devuelve además `extension` (con su IVA, mismas
+      formas a/b y misma verificación de cuadre que el TUA): Operación =
+      total − TUA − FBO − extensión. Un renglón que es FBO o TUA NO es
+      extensión (gana el FBO / el TUA). SOLO con extensión, 1-5 ¢ «negativos»
+      de Operación (IVA por renglón) los absorbe la extensión; sin ella, la
+      regla de siempre (null). `desgloseGastoLineas` imprime «Extensión de
+      horario (IVA incluido) - $X MXN» (notas del gasto, sync IA y vista
+      previa del panel, que LEE `desglose_lineas` del API: no hay copia).
+    - **RESPALDO POR TEXTO** (`extensionPorNotas` / `partesDeGasto`): un
+      gasto SIN conceptos IA (null, `[]` o sin renglones válidos) de
+      categoría OPERACIONES/ATERRIZAJE (`CATS_EXTENSION_POR_NOTAS`) cuya
+      PRIMERA línea de notas cumple `esExtension` es extensión COMPLETA
+      (monto − propina). Es regla de TEXTO, no de factura: #314 0d2c6f0c
+      «extensión de servicio inspector Baraona $500 efectivo». Con conceptos
+      IA manda la factura: si no cuadra ⇒ `null` y NO hay respaldo.
+      CONSERVADOR (revisión del mismo día): una primera línea que NIEGA la
+      extensión («sin extensión de horario», «no hubo extensión…») o que la
+      MEZCLA con otro servicio del aeródromo (aterrizaje, plataforma,
+      embarque, pernocta, estacionamiento, combustible, TUA, FBO) NO es
+      extensión completa — sin factura no hay partes; se queda como siempre.
+      Abreviaturas («ext serv», «3 horas ext servicios») tampoco entran.
+    - **`trasladosEmbebidosDeGasto(g) → {tua, extension}`** generaliza a
+      `tuaEmbebidoDeGasto` (firma vieja intacta = `.tua`): solo gastos CON
+      vuelo, nunca parciales de reparto, `CATS_SIN_TUA_EMBEBIDO` ni
+      categorías de EMPRESA (cinturón: los lectores ya las saltaban — las
+      extensiones de Roman Zúñiga capturadas como OTRO siguen ENTERAS en
+      «otros gastos»). Topes: TUA ≤ monto, extensión ≤ monto − TUA.
+    - **Lectores** (todos por la fuente única, ninguno recalcula):
+      - Fila del vuelo del Balance (`separarPartes` → `partesDeGasto`): la
+        parte extensión NO suma a OPERACIONES ni a OTROS; va en la nota de
+        OPERACIONES «Extensión de horario (IVA incluido) $X**» (mismo pie **
+        del TUA). Campo ADITIVO `extension_pagada_mxn` al FINAL de la fila y
+        en `totales` (libro individual y consolidado), que **solo viaja con
+        valor ≠ 0**: sin extensiones el payload es byte-idéntico al 0.0.46.
+        Gasto USD con varias partes y Operación 0 (TUA + extensión): el
+        −1/−2 ¢ del redondeo proporcional lo absorbe la extensión (antes la
+        factura caía ENTERA a OPERACIONES y la extensión se contaba además
+        en «Otros movimientos»); sin extensión, la regla de siempre.
+      - «Otros movimientos» del general: egreso `CONCEPTO_EXTENSION_PAGADA`
+        = «extensión de horario pagada» (sufijos «(parcial: USD sin TC)» /
+        «(USD sin TC)» como las TUAS), apareado con la PRIMERA línea EXTRA
+        cuyo concepto cumple `esExtension` («Extensión de servicios») o, sin
+        ella, fila de SOLO-egreso (remanente −egreso). Fecha = la del gasto.
+        `colapsarFilasDeVuelo` lo tipifica «extensión de horario».
+      - Libro Dinero «otros ingresos»: la MISMA mecánica que el TUA
+        (apareado o solo-egreso «… (sin línea de extensión cobrada | vuelo
+        cancelado)»); se ANOTA, no se descuenta de utilidades (solo cuentan
+        los ingresos, igual que el TUA).
+      - Reparto a socios: se descuenta del costo igual que el TUA embebido
+        (solo de lo que SÍ resta: grupo ≠ EXCLUIDO) y sale en la fila
+        informativa «Extensión de horario (excluido)» SOLO cuando hubo.
+      - Las lecturas de `gasto` de «Otros movimientos», Libro Dinero y
+        reparto suman `notas` al select (el respaldo por texto las necesita).
+    - **Efecto en prod (SELECT del 1-oct-2026)**: #192 8ab208c4 $4,549.06,
+      #190 ccf37888 $4,549.04 (IA) **y b15080c3 $3,648.00** (OPERACIONES,
+      `conceptos: []`, «2 horas extension servicio PEV 25 agosto · Proveedor:
+      Roman Zuñiga» — entra por el respaldo de texto), #314 0d2c6f0c
+      $500.00. Ninguno tiene reparto. Sin cambio: 6e21976a (#192, OTRO,
+      «3 horas ext servicios ctm») y 5c88260d (folio 11, «Extensión» suelta
+      y factura que no cuadra).
+    - **pyservices** (contrato aditivo): con `extension_pagada_mxn` en
+      alguna fila o en `totales`, el pie ** dice que TUA y extensión de
+      horario son traslados al pasajero y el bloque de totales suma el
+      renglón «Extensión de horario pagada del periodo»; sin la llave,
+      byte-idéntico. El concepto de «Otros movimientos» y del Libro Dinero
+      viaja armado desde el API.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

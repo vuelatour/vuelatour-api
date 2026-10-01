@@ -396,3 +396,96 @@ describe('Libro Dinero — columna «FACTURA VUELATOUR» (24-sep-2026)', () => {
     expect(p.vuelos[0].factura_vuelatour).toBeNull();
   });
 });
+
+/**
+ * EXTENSIÓN DE HORARIO = TRASLADO AL CLIENTE (1-oct-2026, caso #192). Igual
+ * que el TUA embebido: egreso «extensión de horario pagada» en «otros
+ * ingresos», apareado con la línea EXTRA de extensión cobrada o como fila de
+ * SOLO-egreso; se ANOTA (las utilidades solo cuentan ingresos, como con el
+ * TUA). Misma fuente única que el Balance general.
+ */
+describe('Libro Dinero — extensión de horario pagada (1-oct-2026)', () => {
+  const gExt192: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-ext-192',
+    categoria: 'OPERACIONES',
+    monto: 4549.06,
+    fecha_gasto: '2026-09-06',
+    valor_ia_extraido: {
+      conceptos: [
+        { concepto: 'AE-Extension y/o antelacion de horario', monto: 3921.6 },
+        { concepto: 'IVA 16%', monto: 627.46 },
+      ],
+    },
+  };
+  const gExt314: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-ext-314',
+    categoria: 'OPERACIONES',
+    monto: 500,
+    notas: 'extensión de servicio inspector Baraona $500 efectivo',
+  };
+  function conVueloDe(gastos: Fila[], vuelo: Fila = {}) {
+    const t = tablas(gastos);
+    t.vuelo = [{ ...t.vuelo[0], ...vuelo }];
+    const service = new DineroReportService(fakeSupabase(t), {} as never);
+    return (service as unknown as Privado).buildPayload(DESDE, HASTA);
+  }
+  const extraExtension = {
+    monto_total_usd: 3200,
+    monto_total_mxn: 64000,
+    extras_total_usd: 1200,
+    calculo_snapshot: {
+      desglose: [
+        { clave: 'TIEMPO_VUELO', concepto: 'Tiempo de vuelo', monto_usd: 2000 },
+        { clave: 'EXTRA', concepto: 'Extensión de servicios', monto_usd: 1200 },
+      ],
+    },
+  };
+
+  it('#192: la línea «extensión de servicios» cobrada lleva el egreso pagado', async () => {
+    const p = await conVueloDe([gExt192], extraExtension);
+    const fila = p.otros_ingresos.find((f) =>
+      /extensión de servicios/.test(f.concepto_ingreso ?? ''),
+    );
+    expect(fila).toMatchObject({
+      ingreso_mxn: 24000,
+      concepto_egreso: 'extensión de horario pagada',
+      egreso_mxn: 4549.06,
+      fecha_egreso: '2026-09-06',
+      remanente_mxn: 19450.94,
+    });
+    // Se ANOTA como el TUA: utilidades = solo ingresos.
+    const sin = await conVueloDe([], extraExtension);
+    expect(p.utilidades_otros_ingresos_mxn).toBe(
+      sin.utilidades_otros_ingresos_mxn,
+    );
+  });
+
+  it('#314 sin línea cobrada: fila de SOLO-egreso que lo dice', async () => {
+    const p = await conVueloDe([gExt314]);
+    const fila = p.otros_ingresos.find((f) =>
+      /extensión de horario pagada/.test(f.concepto_egreso ?? ''),
+    );
+    expect(fila).toMatchObject({
+      concepto_egreso:
+        'extensión de horario pagada (sin línea de extensión cobrada)',
+      egreso_mxn: 500,
+      ingreso_mxn: null,
+      remanente_mxn: -500,
+    });
+  });
+
+  it('una extensión capturada como OTRO va ENTERA a «otros gastos» y no sale como egreso', async () => {
+    const p = await conVueloDe(
+      [{ ...gExt192, id: 'g-otro-ext', categoria: 'OTRO' }],
+      extraExtension,
+    );
+    expect(
+      p.otros_ingresos.map((f) => f.concepto_egreso ?? '').join(' | '),
+    ).not.toMatch(/extensi/i);
+    expect(p.otros_gastos[0].monto_mxn).toBe(4549.06);
+  });
+});

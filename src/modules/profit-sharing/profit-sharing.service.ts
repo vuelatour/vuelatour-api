@@ -24,7 +24,7 @@ import {
   pagoVendedorUsd,
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
-import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
+import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
 import { cuadreSobre } from '../groups/particion-cobro.util';
 import {
   avionDelGasto,
@@ -116,12 +116,22 @@ export const PAGO_VENDEDOR_CLAVE_DETALLE =
   'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)';
 /**
  * TUA EMBEBIDO en facturas de aeródromo/handling (leído por IA): esa parte se
- * descuenta del costo del avión con la FUENTE ÚNICA `tuaEmbebidoDeGasto`
- * (toda categoría CON vuelo salvo CATS_SIN_TUA_EMBEBIDO) — la MISMA regla que
+ * descuenta del costo del avión con la FUENTE ÚNICA `trasladosEmbebidosDeGasto`
+ * (`.tua`; toda categoría CON vuelo salvo CATS_SIN_TUA_EMBEBIDO y las de
+ * EMPRESA) — la MISMA regla que
  * el Balance por avión y el Libro Dinero. Antes este archivo traía su propia
  * lista blanca de 4 categorías y el reparto divergía del balance.
  */
 const TUA_EMBEBIDO_CLAVE_DETALLE = 'TUA embebido (excluido)';
+/**
+ * EXTENSIÓN DE HORARIO embebida (1-oct-2026, caso #192): la parte «extensión
+ * y/o antelación de horario» de una factura de aeródromo (conceptos IA o, sin
+ * ellos, el respaldo por TEXTO de las notas — caso #314) es un traslado al
+ * cliente como el TUA: se descuenta del costo del avión con la MISMA fuente
+ * única (`trasladosEmbebidosDeGasto`) y sale en su propia fila informativa
+ * (solo cuando hubo: sin extensiones el detalle es byte-idéntico).
+ */
+const EXTENSION_EMBEBIDA_CLAVE_DETALLE = 'Extensión de horario (excluido)';
 /**
  * Leyenda del bloque informativo `tc_oficial` (regla del cliente, 29-ago-2026):
  * una cotización sin TC (no se sabía cuándo volaría) y un gasto MXN sin TC
@@ -275,6 +285,8 @@ interface GastoRow {
   valor_ia_extraido?: {
     conceptos?: Array<{ concepto: string; monto: number }> | null;
   } | null;
+  /** Notas: respaldo por TEXTO de la extensión de horario sin IA. */
+  notas?: string | null;
   /** Clon parcial generado por el reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
 }
@@ -1141,6 +1153,8 @@ export class ProfitSharingService {
     // cruda de sus gastos).
     let tuaEmbebidoUsd = 0;
     let tuaEmbebidoCount = 0;
+    let extensionEmbebidaUsd = 0;
+    let extensionEmbebidaCount = 0;
     for (const g of ctx.gastos) {
       // Avión del gasto (Regla B, misma prioridad en todos los lectores):
       // avión del TRAMO ligado (con herencia) → avión sellado en el gasto →
@@ -1228,10 +1242,17 @@ export class ProfitSharingService {
       // "quitarle" su TUA embebido sería una deducción fantasma en la fila
       // informativa (y doble conteo contra la hoja "otros gastos", donde el
       // gasto entra ENTERO).
-      const tuaEmbebido = grupo === 'EXCLUIDO' ? 0 : tuaEmbebidoDeGasto(g);
+      // La EXTENSIÓN DE HORARIO embebida (1-oct-2026) se descuenta igual.
+      const traslados =
+        grupo === 'EXCLUIDO'
+          ? { tua: 0, extension: 0 }
+          : trasladosEmbebidosDeGasto(g);
+      const tuaEmbebido = traslados.tua;
+      const extensionEmbebida = traslados.extension;
+      const descontado = round2(tuaEmbebido + extensionEmbebida);
       const conv = this.toUsd(
-        tuaEmbebido > 0
-          ? { ...g, monto: round2(Number(g.monto) - tuaEmbebido) }
+        descontado > 0
+          ? { ...g, monto: round2(Number(g.monto) - descontado) }
           : g,
         ctx.tcOficialGasto,
       );
@@ -1251,6 +1272,12 @@ export class ProfitSharingService {
             this.toUsd({ ...g, monto: tuaEmbebido }, ctx.tcOficialGasto)?.usd ??
             0;
         }
+        if (extensionEmbebida > 0) {
+          extensionEmbebidaCount += 1;
+          extensionEmbebidaUsd +=
+            this.toUsd({ ...g, monto: extensionEmbebida }, ctx.tcOficialGasto)
+              ?.usd ?? 0;
+        }
       }
       porCategoria.set(clave, acc);
     }
@@ -1262,6 +1289,20 @@ export class ProfitSharingService {
         categoria: null,
         count: tuaEmbebidoCount,
         usd: tuaEmbebidoUsd,
+        sin_tc_count: 0,
+        sin_tc_mxn: 0,
+        tc_oficial_count: 0,
+        tc_oficial_mxn: 0,
+      });
+    }
+    if (extensionEmbebidaCount > 0) {
+      // Fila informativa (grupo EXCLUIDO): cuánta extensión de horario se le
+      // quitó al costo del avión en este periodo (1-oct-2026).
+      porCategoria.set(EXTENSION_EMBEBIDA_CLAVE_DETALLE, {
+        grupo: 'EXCLUIDO',
+        categoria: null,
+        count: extensionEmbebidaCount,
+        usd: extensionEmbebidaUsd,
         sin_tc_count: 0,
         sin_tc_mxn: 0,
         tc_oficial_count: 0,
@@ -2923,11 +2964,12 @@ export class ProfitSharingService {
     const { data, error } = await this.supabase.service
       .from('gasto')
       // propina + valor_ia_extraido: para separar el TUA embebido en
-      // facturas de aeródromo (regla 7) con la misma regla del balance.
+      // facturas de aeródromo (regla 7) con la misma regla del balance;
+      // notas: respaldo por texto de la extensión de horario (1-oct-2026).
       // escala_id: avión del gasto por tramo (Regla B, avionDelGasto).
       // fecha_gasto: día del TC oficial de respaldo (29-ago) en MXN sin TC.
       .select(
-        'id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, fecha_gasto',
+        'id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto',
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);

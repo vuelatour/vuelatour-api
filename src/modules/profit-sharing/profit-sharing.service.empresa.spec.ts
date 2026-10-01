@@ -260,3 +260,72 @@ describe('Reparto a socios — la comisión del vendedor NO es costo del avión 
     expect(JSON.stringify(sinFilaInformativa)).toBe(JSON.stringify(sin));
   });
 });
+
+/**
+ * EXTENSIÓN DE HORARIO EMBEBIDA (1-oct-2026, caso #192): se descuenta del
+ * costo del avión IGUAL que el TUA embebido (fuente única
+ * `trasladosEmbebidosDeGasto`) y sale en su fila informativa
+ * «Extensión de horario (excluido)» — solo cuando hubo.
+ */
+describe('Reparto a socios — la extensión de horario NO es costo del avión (1-oct-2026)', () => {
+  const op: Fila = {
+    ...gastoBase,
+    id: 'g-op',
+    categoria: 'OPERACIONES',
+    monto: 300,
+    vuelo_id: VUELO,
+  };
+  const ext192: Fila = {
+    ...gastoBase,
+    id: 'g-ext-192',
+    categoria: 'OPERACIONES',
+    monto: 4549.06,
+    vuelo_id: VUELO,
+    valor_ia_extraido: {
+      conceptos: [
+        { concepto: 'AE-Extension y/o antelacion de horario', monto: 3921.6 },
+        { concepto: 'IVA 16%', monto: 627.46 },
+      ],
+    },
+  };
+
+  it('#192: la factura de extensión no resta; su fila informativa la muestra', () => {
+    const r = computar([op, ext192]);
+    expect(r.gastos.directos_usd).toBe(300);
+    expect(fila(r, 'Extensión de horario (excluido)')).toMatchObject({
+      grupo: 'EXCLUIDO',
+      usd: 4549.06,
+    });
+    expect(fila(r, 'TUA embebido (excluido)')).toBeUndefined();
+  });
+
+  it('#314 por notas (sin IA): tampoco resta', () => {
+    const r = computar([
+      op,
+      {
+        ...gastoBase,
+        id: 'g-ext-314',
+        categoria: 'OPERACIONES',
+        monto: 500,
+        vuelo_id: VUELO,
+        notas: 'extensión de servicio inspector Baraona $500 efectivo',
+      },
+    ]);
+    expect(r.gastos.directos_usd).toBe(300);
+    expect(fila(r, 'Extensión de horario (excluido)')).toMatchObject({
+      usd: 500,
+    });
+  });
+
+  it('sin extensiones el detalle NO lleva la fila nueva (idéntico a antes)', () => {
+    const r = computar([op]);
+    expect(fila(r, 'Extensión de horario (excluido)')).toBeUndefined();
+  });
+
+  it('capturada como OTRO (empresa): EXCLUIDO entero, sin descuento fantasma', () => {
+    const r = computar([op, { ...ext192, id: 'g-otro', categoria: 'OTRO' }]);
+    expect(r.gastos.directos_usd).toBe(300);
+    expect(fila(r, 'OTRO')).toMatchObject({ grupo: 'EXCLUIDO', usd: 4549.06 });
+    expect(fila(r, 'Extensión de horario (excluido)')).toBeUndefined();
+  });
+});

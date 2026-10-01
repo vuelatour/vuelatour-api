@@ -523,3 +523,293 @@ describe('Pendientes de captura — horas voladas vs cobradas (11-sep-2026)', ()
     expect(nota).not.toMatch(/recotizar/i);
   });
 });
+
+/**
+ * EXTENSIÓN Y/O ANTELACIÓN DE HORARIO = TRASLADO AL CLIENTE (1-oct-2026).
+ * Pedido de Ale con la captura del balance XA-VGV/N4142R, vuelo #192: «en
+ * este vuelo me se está poniendo la extensión de servicios como Operación y
+ * no va en ese apartado». Mismo trato que el TUA: en la fila del vuelo es
+ * SOLO NOTA (ni OPERACIONES ni OTROS) y su egreso vive en «Otros
+ * movimientos» del general («extensión de horario pagada»). Conceptos REALES
+ * de prod (gasto 8ab208c4).
+ */
+describe('Balance — extensión de horario: traslado al cliente, no costo del avión (1-oct-2026)', () => {
+  const CONCEPTOS_192 = {
+    conceptos: [
+      { concepto: 'AE-Extension y/o antelacion de horario', monto: 3921.6 },
+      { concepto: 'IVA 16%', monto: 627.46 },
+    ],
+  };
+  const gOp: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-op',
+    categoria: 'OPERACIONES',
+    monto: 300,
+  };
+  const gExt192: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-ext-192',
+    categoria: 'OPERACIONES',
+    monto: 4549.06,
+    medio_pago: 'TARJETA_CORP',
+    notas:
+      'AE-Extension y/o antelacion de horario · Proveedor: GRUPO AEROPORTUARIO',
+    valor_ia_extraido: CONCEPTOS_192,
+  };
+  /** #314 (0d2c6f0c): sin IA, la extensión sale por el TEXTO de las notas. */
+  const gExt314: Fila = {
+    ...gastoBase,
+    ...conVuelo,
+    id: 'g-ext-314',
+    categoria: 'OPERACIONES',
+    monto: 500,
+    medio_pago: 'EFECTIVO',
+    notas: 'extensión de servicio inspector Baraona $500 efectivo',
+    valor_ia_extraido: null,
+  };
+  const filaDe = async (gastos: Fila[], ov: { vuelo?: Fila } = {}) => {
+    const payload = await priv(armar(gastos, ov)).buildPayload(
+      AV,
+      DESDE,
+      HASTA,
+    );
+    return {
+      payload,
+      fila: payload.vuelos.find((v) => String(v.folio) === '501')!,
+    };
+  };
+
+  it('#192: la factura de extensión NO suma a OPERACIONES ni a OTROS; va en la nota con **', async () => {
+    const { payload, fila } = await filaDe([gOp, gExt192]);
+    expect(fila.op_mxn).toBe(300);
+    expect(fila.otros_mxn).toBeNull();
+    expect(fila.tua_pagado_mxn).toBeNull();
+    expect(fila.extension_pagada_mxn).toBe(4549.06);
+    expect((fila.op_detalle ?? []).join(' | ')).toContain(
+      'Extensión de horario (IVA incluido) $4,549.06**',
+    );
+    expect(payload.totales.extension_pagada_mxn).toBe(4549.06);
+    // No cuesta al avión: costo y remanente IDÉNTICOS al vuelo sin ella.
+    const { fila: sin } = await filaDe([gOp]);
+    expect(fila.costo_total_mxn).toBe(sin.costo_total_mxn);
+    expect(fila.remanente_mxn).toBe(sin.remanente_mxn);
+    expect(fila.ganancia_mxn).toBe(sin.ganancia_mxn);
+  });
+
+  it('#314: sin IA, OPERACIONES con «extensión de servicio …» en las notas ⇒ todo es extensión', async () => {
+    const { fila } = await filaDe([gOp, gExt314]);
+    expect(fila.op_mxn).toBe(300);
+    expect(fila.extension_pagada_mxn).toBe(500);
+    expect((fila.op_detalle ?? []).join(' | ')).toContain(
+      'Extensión de horario (IVA incluido) $500.00**',
+    );
+  });
+
+  it('factura MIXTA (aterrizaje + extensión + IVA): a OPERACIONES va SOLO el aterrizaje', async () => {
+    const { fila } = await filaDe([
+      gOp,
+      {
+        ...gastoBase,
+        ...conVuelo,
+        id: 'g-mixta',
+        categoria: 'ATERRIZAJE',
+        monto: 1740,
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Aterrizaje', monto: 500 },
+            { concepto: 'Extensión de horario', monto: 1000 },
+            { concepto: 'IVA 16%', monto: 240 },
+          ],
+        },
+      },
+    ]);
+    expect(fila.op_mxn).toBe(880); // 300 + 580
+    expect(fila.extension_pagada_mxn).toBe(1160);
+    expect((fila.op_detalle ?? []).join(' | ')).toContain(
+      'Operación $580.00 · Extensión de horario (IVA incluido) $1,160.00**',
+    );
+  });
+
+  it('USD con TUA + extensión y Operación 0: el centavo del redondeo lo absorbe la extensión (no cae entera a OPERACIONES)', async () => {
+    // 60.01 USD × 18.5 = 1,110.185 MXN; por parte: TUA 185.00 y extensión
+    // round2(925.185) = 925.19 ⇒ Operación −0.01. Antes: `null` y la
+    // factura ENTERA a OPERACIONES mientras «Otros movimientos» separaba
+    // TUA y extensión (doble conteo).
+    const { fila } = await filaDe([
+      gOp,
+      {
+        ...gastoBase,
+        ...conVuelo,
+        id: 'g-usd',
+        categoria: 'OPERACIONES',
+        monto: 60.01,
+        moneda: 'USD',
+        tc_gasto: 18.5,
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'TUA', monto: 10 },
+            { concepto: 'Extensión de horario', monto: 50.01 },
+          ],
+        },
+      },
+    ]);
+    expect(fila.op_mxn).toBe(300);
+    expect(fila.tua_pagado_mxn).toBe(185);
+    expect(fila.extension_pagada_mxn).toBe(925.18);
+  });
+
+  it('la IA leyó mal (no cuadra): la factura entera se queda en OPERACIONES, sin llave nueva', async () => {
+    const { payload, fila } = await filaDe([
+      gOp,
+      {
+        ...gExt192,
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Extensión de horario', monto: 4000 },
+            { concepto: 'IVA 16%', monto: 640 },
+          ],
+        },
+      },
+    ]);
+    expect(fila.op_mxn).toBe(4849.06);
+    expect('extension_pagada_mxn' in fila).toBe(false);
+    expect('extension_pagada_mxn' in payload.totales).toBe(false);
+  });
+
+  it('sin extensiones la fila y los totales NO llevan la llave (payload byte-idéntico al 0.0.46)', async () => {
+    const { payload, fila } = await filaDe([gOp]);
+    expect('extension_pagada_mxn' in fila).toBe(false);
+    expect('extension_pagada_mxn' in payload.totales).toBe(false);
+  });
+
+  it('categoría de EMPRESA (OTRO, como las de Roman Zúñiga): ni fila ni nota de extensión', async () => {
+    const { fila } = await filaDe([
+      gOp,
+      {
+        ...gExt192,
+        id: 'g-otro-ext',
+        categoria: 'OTRO',
+        notas: '3 horas ext servicios ctm N4142R · Proveedor: Roman Zuñiga',
+      },
+    ]);
+    expect(fila.op_mxn).toBe(300);
+    expect('extension_pagada_mxn' in fila).toBe(false);
+    expect((fila.op_detalle ?? []).join(' | ')).not.toMatch(/extensi/i);
+  });
+
+  type PrivadoOM = {
+    buildOtrosMovimientos: (
+      desde: string,
+      hasta: string,
+      memoTc: Map<string, unknown>,
+      empresaYSueltos: { empresa: unknown[]; tuasSueltos: unknown[] },
+    ) => Promise<{
+      filas: Array<{
+        concepto_ingreso: string | null;
+        ingreso_mxn: number | null;
+        concepto_egreso: string | null;
+        egreso_mxn: number | null;
+        fecha_egreso: string | null;
+        remanente_mxn: number | null;
+        nota_egreso?: string | null;
+      }>;
+    }>;
+  };
+  const om = async (gastos: Fila[], ov: { vuelo?: Fila } = {}) =>
+    (
+      await (armar(gastos, ov) as unknown as PrivadoOM).buildOtrosMovimientos(
+        DESDE,
+        HASTA,
+        new Map(),
+        {
+          empresa: [],
+          tuasSueltos: [],
+        },
+      )
+    ).filas;
+  /** Cotización de #192: cobra el EXTRA «Extensión de servicios» $1,200 USD. */
+  const conExtraExtension = {
+    vuelo: {
+      monto_total_usd: 3200,
+      monto_total_mxn: 64000,
+      extras_total_usd: 1200,
+      calculo_snapshot: {
+        desglose: [
+          {
+            clave: 'TIEMPO_VUELO',
+            concepto: 'Tiempo de vuelo',
+            monto_usd: 2000,
+          },
+          {
+            clave: 'EXTRA',
+            concepto: 'Extensión de servicios',
+            monto_usd: 1200,
+          },
+        ],
+      },
+    },
+  };
+
+  it('Otros movimientos: «Extensión de servicios» cobrada ↔ «extensión de horario pagada» (mismo vuelo, fecha del gasto)', async () => {
+    const filas = await om([gOp, gExt192], conExtraExtension);
+    expect(filas).toHaveLength(1);
+    expect(filas[0]).toMatchObject({
+      concepto_ingreso: 'Extensión de servicios',
+      ingreso_mxn: 24000,
+      concepto_egreso: 'extensión de horario pagada',
+      egreso_mxn: 4549.06,
+      fecha_egreso: DIA,
+      remanente_mxn: 19450.94,
+    });
+  });
+
+  it('sin línea de extensión cobrada (#190, #314): fila de SOLO-egreso, como el TUA sin línea', async () => {
+    const filas = await om([gOp, gExt314]);
+    expect(filas).toHaveLength(1);
+    expect(filas[0]).toMatchObject({
+      concepto_ingreso: null,
+      concepto_egreso: 'extensión de horario pagada',
+      egreso_mxn: 500,
+      remanente_mxn: -500,
+    });
+  });
+
+  it('TUA y extensión del MISMO vuelo: una fila con los dos egresos y la nota de cada uno', async () => {
+    const filas = await om([
+      gExt314,
+      {
+        ...gastoBase,
+        ...conVuelo,
+        id: 'g-tuas',
+        categoria: 'TUAS',
+        monto: 250,
+      },
+    ]);
+    expect(filas).toHaveLength(1);
+    expect(filas[0].egreso_mxn).toBe(750);
+    expect(filas[0].concepto_egreso).toContain('extensión de horario');
+    expect(filas[0].nota_egreso).toContain(
+      'extensión de horario pagada = $500.00',
+    );
+    expect(filas[0].nota_egreso).toContain('tuas pagadas = $250.00');
+  });
+
+  it('una extensión capturada como OTRO NO sale como egreso (ya vive entera en «otros gastos»)', async () => {
+    const filas = await om(
+      [
+        {
+          ...gExt192,
+          id: 'g-otro-ext',
+          categoria: 'OTRO',
+        },
+      ],
+      conExtraExtension,
+    );
+    expect(filas.map((f) => f.concepto_egreso ?? '').join(' | ')).not.toMatch(
+      /extensi/i,
+    );
+    expect(filas.reduce((a, f) => a + (f.egreso_mxn ?? 0), 0)).toBe(0);
+  });
+});

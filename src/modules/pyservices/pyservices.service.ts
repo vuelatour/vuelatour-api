@@ -733,6 +733,17 @@ export interface BalanceAvionVueloPayload {
    * STATUS DE COBROS, sin sumar en TOTALES; uno viejo la ignora.
    */
   factura_vuelatour: string | null;
+  /**
+   * EXTENSIÓN DE HORARIO PAGADA del vuelo, MXN (1-oct-2026, API 0.0.47,
+   * ADITIVO): la parte «extensión y/o antelación de horario» de las facturas
+   * de aeródromo (conceptos IA o, sin ellos, el respaldo por TEXTO de las
+   * notas — `partesDeGasto`). Traslado al cliente como el TUA: SOLO nota en
+   * OPERACIONES («Extensión de horario (IVA incluido) $X**»), no suma en
+   * OPERACIONES ni en OTROS ni en la cascada. La llave SOLO viaja cuando la
+   * fila tiene extensión (≠ 0): sin extensiones el payload es byte-idéntico
+   * y pyservices pinta el pie ** de siempre.
+   */
+  extension_pagada_mxn?: number | null;
 }
 
 export interface BalanceAvionTotalesPayload {
@@ -776,6 +787,10 @@ export interface BalanceAvionTotalesPayload {
   tua_pagado_mxn?: number | null;
   /** Σ comisiones bancarias convertibles de los cobros de las filas. */
   comision_banco_mxn?: number | null;
+  /** Σ extension_pagada_mxn de las filas (1-oct-2026, ADITIVO): informativo,
+   *  NO resta en ninguna hoja ni cascada. La llave SOLO viaja cuando la suma
+   *  ≠ 0 (sin extensiones, totales byte-idénticos). */
+  extension_pagada_mxn?: number | null;
 }
 
 export interface BalanceAvionGastoFilaPayload {

@@ -17,7 +17,11 @@ import {
 } from '../../common/pago-vendedor.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { round6, totalMxnDeVuelo } from '../../common/tc.util';
-import { tuaEmbebidoDeGasto } from '../../common/desglose-gasto.util';
+import {
+  CONCEPTO_EXTENSION_PAGADA,
+  esExtension,
+  trasladosEmbebidosDeGasto,
+} from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import {
@@ -247,7 +251,7 @@ export class DineroReportService {
         ? sb
             .from('gasto')
             .select(
-              'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, valor_ia_extraido',
+              'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, notas, valor_ia_extraido',
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve({ data: [], error: null } as const),
@@ -893,7 +897,7 @@ export class DineroReportService {
       // pernocta, TUA y plataforma"), calculado UNA vez por vuelo, a MXN con
       // la MISMA regla del Balance general: MXN directo; USD × tc_gasto o,
       // sin él, el TC de venta; sin NINGÚN TC no se suma en falso — queda
-      // como nota en el concepto. FUENTE ÚNICA `tuaEmbebidoDeGasto`: misma
+      // como nota en el concepto. FUENTE ÚNICA `trasladosEmbebidosDeGasto`: misma
       // regla y exclusiones (CATS_SIN_TUA_EMBEBIDO) que el reparto y el
       // Balance por avión — antes cada lector traía su propia lista y los
       // números divergían. Se aparea a la PRIMERA línea TUAS cobrada; si el
@@ -907,6 +911,16 @@ export class DineroReportService {
       let tuaPagadoHubo = false;
       let tuaSinTc = false;
       let fechaTua: string | null = null;
+      // EXTENSIÓN DE HORARIO PAGADA (1-oct-2026, caso #192): igual que el
+      // TUA — parte «extensión y/o antelación de horario» de las facturas
+      // de aeródromo (fuente única `trasladosEmbebidosDeGasto`, la MISMA del
+      // Balance general y del reparto), egreso apareado con la línea EXTRA
+      // de extensión cobrada o fila de solo-egreso. Como el TUA, se ANOTA
+      // (no se descuenta de utilidades: solo cuentan los ingresos).
+      let extensionPagadaMxn = 0;
+      let extensionPagadaHubo = false;
+      let extensionSinTc = false;
+      let fechaExtension: string | null = null;
       for (const g of gastosV) {
         // COROLARIO de "la categoría de EMPRESA manda" (11-sep-2026): un
         // OTRO/NOMINA/GASOLINA/FIJO/VISITA con vuelo ya restó ENTERO en la
@@ -915,28 +929,53 @@ export class DineroReportService {
         // categoría de empresa: su apareo cobrado↔pagado sigue igual.)
         if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
         const monto = num(g.monto) ?? 0;
-        const parte =
+        const traslados =
           g.categoria === 'TUAS'
-            ? monto
-            : tuaEmbebidoDeGasto({
+            ? { tua: monto, extension: 0 }
+            : trasladosEmbebidosDeGasto({
                 vuelo_id: g.vuelo_id as string | null,
                 categoria: g.categoria as string | null,
                 monto: g.monto as string | number | null,
                 propina: g.propina as string | number | null,
                 valor_ia_extraido: g.valor_ia_extraido,
+                notas: (g.notas as string | null) ?? null,
               });
-        if (parte <= 0) continue;
-        const parteMxn = pagadoAMxn(parte, g);
-        if (parteMxn == null) {
-          // USD sin ningún TC: rastro en el concepto, jamás sumado en falso.
-          tuaSinTc = true;
-          continue;
+        if (traslados.tua > 0) {
+          const parteMxn = pagadoAMxn(traslados.tua, g);
+          if (parteMxn == null) {
+            // USD sin ningún TC: rastro en el concepto, jamás sumado en falso.
+            tuaSinTc = true;
+          } else if (parteMxn > 0) {
+            tuaPagadoMxn += parteMxn;
+            tuaPagadoHubo = true;
+            fechaTua ??= (g.fecha_gasto as string) ?? null;
+          }
         }
-        if (parteMxn <= 0) continue;
-        tuaPagadoMxn += parteMxn;
-        tuaPagadoHubo = true;
-        fechaTua ??= (g.fecha_gasto as string) ?? null;
+        if (traslados.extension > 0) {
+          const parteMxn = pagadoAMxn(traslados.extension, g);
+          if (parteMxn == null) {
+            extensionSinTc = true;
+          } else if (parteMxn > 0) {
+            extensionPagadaMxn += parteMxn;
+            extensionPagadaHubo = true;
+            fechaExtension ??= (g.fecha_gasto as string) ?? null;
+          }
+        }
       }
+      const conceptoExtensionPagada = (extra?: string): string => {
+        const notas = [
+          extensionSinTc
+            ? extensionPagadaHubo
+              ? 'parcial: USD sin TC'
+              : 'USD sin TC'
+            : null,
+          extra ?? null,
+        ].filter(Boolean);
+        return notas.length
+          ? `${CONCEPTO_EXTENSION_PAGADA} (${notas.join('; ')})`
+          : CONCEPTO_EXTENSION_PAGADA;
+      };
+      let egresoExtensionAsignado = false;
       const conceptoTuasPagadas = (extra?: string): string => {
         const notas = [
           tuaSinTc
@@ -971,6 +1010,20 @@ export class DineroReportService {
           conceptoEgreso = conceptoTuasPagadas();
           fechaEgreso = fechaTua;
           egresoTuasAsignado = true;
+        }
+        // Extensión de servicios cobrada ↔ extensión de horario pagada
+        // (1-oct-2026, misma mecánica que el TUA: solo la PRIMERA línea EXTRA
+        // de extensión lleva el egreso).
+        if (
+          claveLinea === 'EXTRA' &&
+          esExtension(linea.concepto) &&
+          !egresoExtensionAsignado &&
+          (extensionPagadaHubo || extensionSinTc)
+        ) {
+          egresoMxn = extensionPagadaHubo ? r2(extensionPagadaMxn) : null;
+          conceptoEgreso = conceptoExtensionPagada();
+          fechaEgreso = fechaExtension;
+          egresoExtensionAsignado = true;
         }
         // Comisión cobrada ↔ pago al vendedor (Regla A; invariante 31 desde
         // el 28-sep-2026). Lo que aquí sale como egreso se descuenta de
@@ -1042,6 +1095,27 @@ export class DineroReportService {
           ),
           egreso_mxn: egreso,
           fecha_egreso: fechaTua,
+          concepto_ingreso: null,
+          ingreso_mxn: null,
+          fecha_ingreso: null,
+          remanente_mxn: egreso != null ? r2(-egreso) : null,
+          factura: facturaPorVuelo.get(v.id as string) ?? null,
+        });
+      }
+
+      // EXTENSIÓN DE HORARIO pagada SIN línea de extensión cobrada (#190,
+      // #314): fila de SOLO-egreso, idéntica en trato al TUA sin línea
+      // (ingreso null ⇒ utilidades no cambian; el total de egresos sí).
+      if ((extensionPagadaHubo || extensionSinTc) && !egresoExtensionAsignado) {
+        const egreso = extensionPagadaHubo ? r2(extensionPagadaMxn) : null;
+        otrosIngresos.push({
+          clave: claveDe(v),
+          fecha_vuelo: (v.fecha_vuelo as string) ?? null,
+          concepto_egreso: conceptoExtensionPagada(
+            esCancelado ? 'vuelo cancelado' : 'sin línea de extensión cobrada',
+          ),
+          egreso_mxn: egreso,
+          fecha_egreso: fechaExtension,
           concepto_ingreso: null,
           ingreso_mxn: null,
           fecha_ingreso: null,

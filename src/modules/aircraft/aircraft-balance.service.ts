@@ -30,8 +30,10 @@ import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
-  desgloseGastoPartes,
-  tuaEmbebidoDeGasto,
+  CONCEPTO_EXTENSION_PAGADA,
+  esExtension,
+  partesDeGasto,
+  trasladosEmbebidosDeGasto,
 } from '../../common/desglose-gasto.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
@@ -693,6 +695,7 @@ export class AircraftBalanceService {
     };
     // TUA pagado de flota: null cuando la suma es 0 (celda vacía, no "$0").
     const tuaPagadoFlota = sumT((t) => t.tua_pagado_mxn ?? null);
+    const extensionPagadaFlota = sumT((t) => t.extension_pagada_mxn ?? null);
     const totalesFlota: BalanceAvionPayload['totales'] = {
       horas_cobradas: sumT((t) => t.horas_cobradas),
       tiempo_vuelo: sumT((t) => t.tiempo_vuelo),
@@ -723,6 +726,10 @@ export class AircraftBalanceService {
       total_cotizacion_mxn: sumT((t) => t.total_cotizacion_mxn ?? null),
       tua_pagado_mxn: tuaPagadoFlota !== 0 ? tuaPagadoFlota : null,
       comision_banco_mxn: sumT((t) => t.comision_banco_mxn ?? null),
+      // Extensión de horario pagada (1-oct-2026): solo con suma ≠ 0.
+      ...(extensionPagadaFlota !== 0
+        ? { extension_pagada_mxn: extensionPagadaFlota }
+        : {}),
     };
     const porFecha = (
       x: { fecha: string | null },
@@ -2139,6 +2146,9 @@ export class AircraftBalanceService {
       // TUA pagado de la fila (categoría TUAS + parte embebida): SOLO
       // informativo (regla 7, 28-ago) — no entra a Y ni a ninguna hoja.
       let tuaPagadoMxn: number | null = null;
+      // Extensión de horario pagada (1-oct-2026, misma regla que el TUA):
+      // SOLO informativo, no suma a OPERACIONES ni a OTROS.
+      let extensionPagadaMxn: number | null = null;
       let usdSinTc = 0;
       let usdSinTcMonto = 0;
       // Desglose por celda (nota de Excel): una línea por gasto, con la
@@ -2253,6 +2263,10 @@ export class AircraftBalanceService {
         // operación, el FBO se separa a la columna OTROS (SÍ es costo — ej.
         // factura $154.14 = Op $67.14 + FBO $87.00) y el TUA no suma a ningún
         // costo (traslado al pasajero); la nota lleva las partes POR SEPARADO.
+        // EXTENSIÓN DE HORARIO (1-oct-2026, caso #192): mismo trato que el
+        // TUA — traslado al cliente, solo nota «Extensión de horario (IVA
+        // incluido) $X**»; sin IA, el respaldo por TEXTO de las notas
+        // (`partesDeGasto`, caso #314).
         // Exclusiones: CATS_SIN_TUA_EMBEBIDO + las categorías de EMPRESA
         // (11-sep-2026), que ni siquiera llegan aquí (el loop las saltó
         // arriba) y que "Otros movimientos" del general también salta — el
@@ -2262,6 +2276,7 @@ export class AircraftBalanceService {
           opParte: number;
           tuaParte: number;
           fboParte: number;
+          extParte: number;
         } | null => {
           // Un parcial del reparto manual jamás se separa: sus renglones IA
           // son de la factura completa y no cuadran con el parcial.
@@ -2269,19 +2284,33 @@ export class AircraftBalanceService {
             return null;
           const montoNativo = num(g.monto) ?? 0;
           if (montoNativo <= 0) return null;
-          const partes = desgloseGastoPartes(
-            g.valor_ia_extraido?.conceptos ?? [],
-            round2(montoNativo - (num(g.propina) ?? 0)),
-          );
-          if (!partes || (partes.tua <= 0 && partes.fbo <= 0)) return null;
+          // Fuente única: conceptos IA (base = monto − propina) o, sin
+          // ellos, el respaldo por texto de la extensión.
+          const partes = partesDeGasto(g);
+          if (
+            !partes ||
+            (partes.tua <= 0 && partes.fbo <= 0 && partes.extension <= 0)
+          )
+            return null;
           // Conversión proporcional a MXN con el MISMO factor del gasto; la
           // operación cierra por diferencia para que las partes SUMEN el
           // gasto exacto (fiabilidad numérica del libro).
           const tuaParte = round2((partes.tua * mxn) / montoNativo);
           const fboParte = round2((partes.fbo * mxn) / montoNativo);
-          const opParte = round2(mxn - tuaParte - fboParte);
+          let extParte = round2((partes.extension * mxn) / montoNativo);
+          let opParte = round2(mxn - tuaParte - fboParte - extParte);
+          // Gasto USD con varias partes y Operación 0 (TUA + extensión, p.
+          // ej.): el redondeo por parte puede dejar −1/−2 ¢. SOLO con
+          // extensión (misma regla que `desgloseGastoPartes`) los absorbe la
+          // extensión — sin esto la factura entera caía a OPERACIONES y la
+          // extensión se contaba además en «Otros movimientos». Sin
+          // extensión, la regla de siempre (null).
+          if (opParte < 0 && opParte >= -0.02 && extParte > 0) {
+            extParte = round2(extParte + opParte);
+            opParte = 0;
+          }
           if (opParte < 0) return null; // no cuadra: mejor no separar
-          return { opParte, tuaParte, fboParte };
+          return { opParte, tuaParte, fboParte, extParte };
         };
         if (CAT_PILOTO.has(g.categoria)) {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
@@ -2290,13 +2319,18 @@ export class AircraftBalanceService {
           // OPERACIONES, ATERRIZAJE, REFACCION, FIJO, FBO, OTRO y cualquier
           // categoría futura no mapeada. Con desglose IA reconocible la
           // factura se REPARTE entre columnas (op → OPERACIONES, FBO →
-          // OTROS, TUA → solo nota); sin desglose, la categoría decide la
-          // columna completa como siempre.
+          // OTROS, TUA y extensión de horario → solo nota); sin desglose, la
+          // categoría decide la columna completa como siempre.
           const sep = separarPartes();
           if (sep) {
             // Espejo EXACTO del desglose impreso en las notas del gasto
-            // (Operación / TUA (IVA incluido)): leyendas distintas hacían
-            // dudar de la fuente. La regla del TUA vive en el pie **.
+            // (Operación / TUA (IVA incluido) / Extensión de horario (IVA
+            // incluido)): leyendas distintas hacían dudar de la fuente. La
+            // regla de los traslados vive en el pie **.
+            const trozoExt =
+              sep.extParte > 0
+                ? `Extensión de horario (IVA incluido) $${fmtMonto(sep.extParte)}**`
+                : null;
             const trozos = [
               sep.opParte > 0 ? `Operación $${fmtMonto(sep.opParte)}` : null,
               sep.fboParte > 0
@@ -2305,14 +2339,19 @@ export class AircraftBalanceService {
               sep.tuaParte > 0
                 ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
                 : null,
+              trozoExt,
             ]
               .filter(Boolean)
               .join(' · ');
             // Regla 28-ago-2026: la parte TUA embebida es SOLO NOTA (no
             // resta en ninguna hoja); las partes de operación/FBO se quedan
-            // en las columnas del vuelo. Informativo por fila.
+            // en las columnas del vuelo. Informativo por fila. La extensión
+            // de horario (1-oct-2026) igual: ni OPERACIONES ni OTROS.
             if (sep.tuaParte > 0) {
               tuaPagadoMxn = (tuaPagadoMxn ?? 0) + sep.tuaParte;
+            }
+            if (sep.extParte > 0) {
+              extensionPagadaMxn = (extensionPagadaMxn ?? 0) + sep.extParte;
             }
             if (sep.opParte > 0) {
               sumarOp(g, sep.opParte);
@@ -2332,14 +2371,16 @@ export class AircraftBalanceService {
                     sep.opParte <= 0 && sep.tuaParte > 0
                       ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
                       : null,
+                    sep.opParte <= 0 ? trozoExt : null,
                   ]
                     .filter(Boolean)
                     .join(' · '),
                 ),
               );
             }
-            // Factura que quedó SOLO en TUA (op y FBO en cero): no toca
-            // columnas, pero el dinero no desaparece del vistazo.
+            // Factura que quedó SOLO en traslados (TUA y/o extensión de
+            // horario; op y FBO en cero — caso #192): no toca columnas, pero
+            // el dinero no desaparece del vistazo.
             if (sep.opParte <= 0 && sep.fboParte <= 0) {
               opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
             }
@@ -3032,6 +3073,12 @@ export class AircraftBalanceService {
         // la misma etiqueta en todas sus filas (multi-avión, CANCELADO,
         // «solo gastos»); pyservices la pinta al final de STATUS DE COBROS.
         factura_vuelatour: facturaPorVuelo.get(v.id) ?? null,
+        // EXTENSIÓN DE HORARIO pagada (1-oct-2026, ADITIVO al final): solo
+        // nota, como el TUA. La llave SOLO viaja con extensión ≠ 0 — sin
+        // extensiones la fila es byte-idéntica al 0.0.46.
+        ...(extensionPagadaMxn != null && round2(extensionPagadaMxn) !== 0
+          ? { extension_pagada_mxn: round2(extensionPagadaMxn) }
+          : {}),
       });
     }
 
@@ -3074,6 +3121,7 @@ export class AircraftBalanceService {
       round2(filasVuelo.reduce((acc, r) => acc + (f(r) ?? 0), 0));
     const horasVoladas = sum((r) => r.tiempo_vuelo);
     const tuaPagadoPeriodo = sum((r) => r.tua_pagado_mxn ?? null);
+    const extensionPagadaPeriodo = sum((r) => r.extension_pagada_mxn ?? null);
     const totales = {
       horas_cobradas: sum((r) => r.horas_cobradas),
       tiempo_vuelo: horasVoladas,
@@ -3120,6 +3168,11 @@ export class AircraftBalanceService {
           0,
         ),
       ),
+      // Extensión de horario pagada (1-oct-2026, solo nota como el TUA): la
+      // llave SOLO viaja cuando hubo (totales byte-idénticos sin ella).
+      ...(extensionPagadaPeriodo !== 0
+        ? { extension_pagada_mxn: extensionPagadaPeriodo }
+        : {}),
     };
 
     // ===== Hojas de gastos: clasificación por ORIGEN (regla 28-ago-2026,
@@ -3928,6 +3981,13 @@ export class AircraftBalanceService {
       if (t.startsWith('viáticos') || t.startsWith('viaticos'))
         return 'pernocta';
       if (t.startsWith('sobrecobro')) return 'sobrecobro';
+      // Extensión de horario PAGADA (1-oct-2026): su propio tipo en la nota
+      // del egreso (antes de que el genérico la parta en «extensión»).
+      if (
+        t.startsWith('extensión de horario') ||
+        t.startsWith('extension de horario')
+      )
+        return 'extensión de horario';
       if (t.startsWith('hotel')) return 'hotel';
       // Comisión del VENDEDOR (regla A) y su pago: ANTES del genérico
       // "comisión…", que está reservado a la comisión BANCARIA.
@@ -4020,8 +4080,10 @@ export class AircraftBalanceService {
    * conceptos cobrados al cliente (líneas TUAS/EXTRA/PERNOCTA/
    * COMISION_VENDEDOR del desglose canónico v1.3, en MXN con el TC de
    * venta) apareados con lo PAGADO solo cuando el mapeo es ESTRUCTURAL —
-   * TUAS ↔ gastos TUAS + TUA embebido (tuaEmbebidoDeGasto, misma regla del
-   * Libro Dinero), PERNOCTA ↔ gastos HOTEL del vuelo (solo REFERENCIA: el
+   * TUAS ↔ gastos TUAS + TUA embebido (trasladosEmbebidosDeGasto, misma
+   * regla del Libro Dinero), EXTRA de extensión ↔ extensión de horario
+   * pagada (1-oct-2026, la otra mitad de los traslados embebidos; sin línea
+   * cobrada ⇒ solo-egreso), PERNOCTA ↔ gastos HOTEL del vuelo (solo REFERENCIA: el
    * hotel ya resta en PILOTO del avión), comisión bancaria de los cobros ↔
    * línea BillPocket, COMISIÓN DEL VENDEDOR ↔ su pago al vendedor (regla A,
    * 28-ago tarde; invariante 31 desde el 28-sep-2026: los gastos
@@ -4111,7 +4173,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, valor_ia_extraido',
+              'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, valor_ia_extraido',
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve(vacio),
@@ -4343,7 +4405,7 @@ export class AircraftBalanceService {
       let comisionBancoAsignada = false;
 
       // TUA PAGADO del vuelo (categoría TUAS + parte TUA embebida en
-      // facturas de aeródromo vía tuaEmbebidoDeGasto — FUENTE ÚNICA, misma
+      // facturas de aeródromo vía trasladosEmbebidosDeGasto — FUENTE ÚNICA, misma
       // exclusión CATS_SIN_TUA_EMBEBIDO que la fila del vuelo en la hoja
       // maestra), a MXN con la regla del workbook. Regla 7 (28-ago): el TUA
       // pagado no resta en ninguna hoja por avión — ESTA pestaña es su único
@@ -4354,6 +4416,16 @@ export class AircraftBalanceService {
       let tuaPagadoHubo = false;
       let tuaSinTc = false;
       let fechaTua: string | null = null;
+      // EXTENSIÓN DE HORARIO PAGADA del vuelo (1-oct-2026, caso #192): la
+      // MISMA mecánica que el TUA — parte «extensión y/o antelación de
+      // horario» de las facturas de aeródromo (fuente única
+      // `trasladosEmbebidosDeGasto`, mismas exclusiones), a MXN con la regla
+      // del workbook; apareada con la línea EXTRA de extensión cobrada o,
+      // sin ella, fila de solo-egreso. Mismo vuelo, fecha del gasto.
+      let extensionPagadaMxn = 0;
+      let extensionPagadaHubo = false;
+      let extensionSinTc = false;
+      let fechaExtension: string | null = null;
       for (const g of gastosV) {
         // LA CATEGORÍA DE EMPRESA MANDA (11-sep-2026): un OTRO/FIJO con
         // vuelo ya viaja ENTERO a la hoja "otros gastos" del general
@@ -4361,31 +4433,44 @@ export class AircraftBalanceService {
         // embebido. Separarlo AQUÍ como egreso lo restaría DOS veces en el
         // mismo libro y rompería la identidad "el TUA pagado de un vuelo es
         // el MISMO número en ambas hojas" (la fila de la maestra ya salta
-        // estas categorías antes de llegar a `separarPartes`).
+        // estas categorías antes de llegar a `separarPartes`). Lo mismo para
+        // la extensión de horario (las de Roman Zúñiga capturadas como OTRO
+        // se quedan en «otros gastos»).
         if (CAT_EMPRESA.has((g.categoria as string | null) ?? '')) continue;
         const monto = num(g.monto) ?? 0;
-        const parte =
+        const traslados =
           g.categoria === 'TUAS'
-            ? monto
-            : tuaEmbebidoDeGasto({
+            ? { tua: monto, extension: 0 }
+            : trasladosEmbebidosDeGasto({
                 vuelo_id: (g.vuelo_id as string | null) ?? null,
                 categoria: (g.categoria as string | null) ?? null,
                 monto: g.monto as string | number | null,
                 propina: g.propina as string | number | null,
                 valor_ia_extraido: g.valor_ia_extraido,
                 es_reparto_parcial: g.es_reparto_parcial === true,
+                notas: (g.notas as string | null) ?? null,
               });
-        if (parte <= 0) continue;
-        const parteMxn = gastoMxn(g, parte);
-        if (parteMxn == null) {
-          // USD sin ningún TC: rastro en la fila, jamás sumado en falso.
-          tuaSinTc = true;
-          continue;
+        if (traslados.tua > 0) {
+          const parteMxn = gastoMxn(g, traslados.tua);
+          if (parteMxn == null) {
+            // USD sin ningún TC: rastro en la fila, jamás sumado en falso.
+            tuaSinTc = true;
+          } else if (parteMxn > 0) {
+            tuaPagadoMxn += parteMxn;
+            tuaPagadoHubo = true;
+            fechaTua ??= (g.fecha_gasto as string) ?? null;
+          }
         }
-        if (parteMxn <= 0) continue;
-        tuaPagadoMxn += parteMxn;
-        tuaPagadoHubo = true;
-        fechaTua ??= (g.fecha_gasto as string) ?? null;
+        if (traslados.extension > 0) {
+          const parteMxn = gastoMxn(g, traslados.extension);
+          if (parteMxn == null) {
+            extensionSinTc = true;
+          } else if (parteMxn > 0) {
+            extensionPagadaMxn += parteMxn;
+            extensionPagadaHubo = true;
+            fechaExtension ??= (g.fecha_gasto as string) ?? null;
+          }
+        }
       }
       const conceptoTuasPagadas = `tuas pagadas${
         tuaSinTc
@@ -4394,6 +4479,14 @@ export class AircraftBalanceService {
             : ' (USD sin TC)'
           : ''
       }`;
+      const conceptoExtensionPagada = `${CONCEPTO_EXTENSION_PAGADA}${
+        extensionSinTc
+          ? extensionPagadaHubo
+            ? ' (parcial: USD sin TC)'
+            : ' (USD sin TC)'
+          : ''
+      }`;
+      let egresoExtensionAsignado = false;
 
       // Comisión bancaria de los cobros del vuelo, a MXN (MXN directo; USD
       // con su TC propio o el de venta; sin TC no se suma en falso).
@@ -4608,6 +4701,19 @@ export class AircraftBalanceService {
           }
         } else if (
           claveLinea === 'EXTRA' &&
+          esExtension(linea.concepto) &&
+          !egresoExtensionAsignado &&
+          (extensionPagadaHubo || extensionSinTc)
+        ) {
+          // Extensión de servicios cobrada ↔ extensión de horario pagada
+          // (1-oct-2026, misma mecánica que TUA cobrado ↔ TUA pagado; solo
+          // la PRIMERA línea de extensión lleva el egreso).
+          egresoMxn = extensionPagadaHubo ? r2(extensionPagadaMxn) : null;
+          conceptoEgreso = conceptoExtensionPagada;
+          fechaEgreso = fechaExtension;
+          egresoExtensionAsignado = true;
+        } else if (
+          claveLinea === 'EXTRA' &&
           String(linea.concepto ?? '').startsWith('Comisión BillPocket') &&
           !comisionBancoAsignada &&
           comisionBancoMxn > 0
@@ -4723,6 +4829,21 @@ export class AircraftBalanceService {
           concepto_egreso: conceptoTuasPagadas,
           egreso_mxn: egreso,
           fecha_egreso: fechaTua,
+          remanente_mxn: egreso != null ? r2(-egreso) : null,
+        });
+      }
+
+      // EXTENSIÓN DE HORARIO pagada SIN línea de extensión cobrada (vuelo
+      // cotizado sin el extra, CANCELADO, extensión que apareció en la
+      // factura del aeródromo — #190, #314): fila de solo-egreso, igual que
+      // el TUA sin línea TUAS. El pago existe y no se esconde.
+      if ((extensionPagadaHubo || extensionSinTc) && !egresoExtensionAsignado) {
+        const egreso = extensionPagadaHubo ? r2(extensionPagadaMxn) : null;
+        filas.push({
+          ...filaVacia,
+          concepto_egreso: conceptoExtensionPagada,
+          egreso_mxn: egreso,
+          fecha_egreso: fechaExtension,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
         });
       }
