@@ -1715,6 +1715,10 @@ export class IngresosService {
 
   /** Movimiento del banco (abono) con todo lo que deciden los candados. */
   private async leerAbono(movId: string): Promise<Row> {
+    // 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): aquí NO se
+    // lee `gastos_n` a propósito — solo un CARGO admite partes (la BD lo
+    // exige) y esta lectura rechaza todo lo que no sea ABONO; un abono
+    // siempre tiene `gastos_n = 0` y su liga a gasto sería `gasto_id`.
     const { data, error } = await this.sb
       .from('movimiento_bancario')
       .select(

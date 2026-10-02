@@ -14,7 +14,9 @@ import {
   patronTraspaso,
   primeraLinea,
   puntuarDescripcion,
+  separarPorDesfase,
   terminacionDeMovimiento,
+  textoSoloCentavo,
   tokensTexto,
   ventanaDias,
   type GastoCandidatoCruce,
@@ -267,6 +269,114 @@ describe('elegirMovimiento — camino inverso (gasto capturado después)', () =>
       TARJETAS,
     );
     expect(r.movimiento_id).toBeNull();
+  });
+});
+
+/**
+ * DESFASE 0.00 GANA AL ±0.01 (2-oct-2026). Caso REAL de prod: el SPEI de
+ * SAESA de $2,231.38 (24-sep, GASTOS GNRAL) se ligó solo al gasto #318 de
+ * $2,231.37 y el gasto EXACTO #321 de $2,231.38 se capturó 15 min después.
+ */
+describe('desfase 0.00 vs ±0.01 — el exacto gana, el centavo solo NO liga', () => {
+  const g318: GastoCandidatoCruce = {
+    id: 'g318',
+    monto: 2231.37,
+    notas: 'Pago VIP SAESA',
+  };
+  const g321: GastoCandidatoCruce = {
+    id: 'g321',
+    monto: 2231.38,
+    notas: 'Pago VIP SAESA',
+  };
+
+  it('con el exacto (#321) presente, el de un centavo (#318) se descarta', () => {
+    const r = elegirCandidato({ monto: 2231.38 }, [g318, g321], TARJETAS);
+    expect(r.gasto_id).toBe('g321');
+    expect(r.criterio).toBe('MONTO_EXACTO');
+    expect(r.candidatos_n).toBe(1);
+  });
+
+  it('SOLO el de un centavo (#318, antes de capturar #321): AMBIGUO, no liga', () => {
+    const r = elegirCandidato({ monto: 2231.38 }, [g318], TARJETAS);
+    expect(r.gasto_id).toBeNull();
+    expect(r.motivo).toBe('AMBIGUO');
+    expect(r.candidatos_n).toBe(1);
+    expect(r.detalle).toBe(textoSoloCentavo(1, 'gasto'));
+  });
+
+  it('dos exactos siguen el desempate de siempre (los del centavo no cuentan)', () => {
+    const r = elegirCandidato(
+      { monto: 2231.38 },
+      [g318, g321, { ...g321, id: 'g321b' }],
+      TARJETAS,
+    );
+    expect(r.gasto_id).toBeNull();
+    expect(r.motivo).toBe('AMBIGUO');
+    expect(r.candidatos_n).toBe(2);
+  });
+
+  it('FALTANTE: compara contra monto_cruce (lo que le falta), no el monto total', () => {
+    const exacto = elegirCandidato(
+      { monto: 1000 },
+      [{ id: 'g', monto: 3000, monto_cruce: 1000 }],
+      [],
+      { criterioBase: 'FALTANTE' },
+    );
+    expect(exacto.gasto_id).toBe('g');
+    const centavo = elegirCandidato(
+      { monto: 1000 },
+      [{ id: 'g', monto: 3000, monto_cruce: 1000.01 }],
+      [],
+      { criterioBase: 'FALTANTE' },
+    );
+    expect(centavo.gasto_id).toBeNull();
+    expect(centavo.motivo).toBe('AMBIGUO');
+  });
+
+  it('camino inverso: el gasto #321 elige el cargo exacto y no el de un centavo', () => {
+    const r = elegirMovimiento(
+      g321,
+      [
+        { id: 'm-237', monto: 2231.37 },
+        { id: 'm-238', monto: 2231.38 },
+      ],
+      TARJETAS,
+    );
+    expect(r.movimiento_id).toBe('m-238');
+    expect(r.criterio).toBe('MONTO_EXACTO');
+  });
+
+  it('camino inverso con SOLO un cargo a un centavo: nadie, con el porqué', () => {
+    const r = elegirMovimiento(
+      g318,
+      [{ id: 'm-238', monto: 2231.38 }],
+      TARJETAS,
+    );
+    expect(r.movimiento_id).toBeNull();
+    expect(r.detalle).toBe(textoSoloCentavo(1, 'cargo'));
+  });
+
+  it('camino inverso: monto_cruce (faltante) manda sobre el monto', () => {
+    const r = elegirMovimiento(
+      { id: 'g', monto: 3000, monto_cruce: 1000 },
+      [{ id: 'm', monto: 1000 }],
+      TARJETAS,
+    );
+    expect(r.movimiento_id).toBe('m');
+  });
+
+  it('separarPorDesfase en centavos enteros (sin ruido de flotantes)', () => {
+    const r = separarPorDesfase(0.3, [0.1 + 0.2, 0.31, 0.29, 0.5], (x) => x);
+    expect(r.exactos).toHaveLength(1);
+    expect(r.centavo).toEqual([0.31, 0.29]);
+    expect(r.otros).toEqual([0.5]);
+  });
+
+  it('textos del centavo', () => {
+    expect(textoSoloCentavo(2, 'gasto')).toBe(
+      '2 gastos difieren por un centavo y ninguno cuadra exacto: vincúlalo a mano.',
+    );
+    expect(textoSoloCentavo(1, 'cargo')).toContain('Solo un cargo del banco');
   });
 });
 

@@ -28,17 +28,20 @@ import {
   ConciliacionParseDto,
   CrearClasificacionDto,
   EmparejarReversoDto,
+  GastosCandidatosQuery,
   ImportarMovimientosDto,
   LinkMovimientoCobroDto,
   LinkMovimientoDto,
   LinkMovimientoIngresoDto,
   ListConciliacionQuery,
+  loteInvalido,
   PaywiseAuditoriaQuery,
   ReporteConciliacionQuery,
   SugerirAbonosDto,
   SugerirLoteDto,
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
+import { MENSAJE_LOTE_AMBOS } from './conciliacion-parcial.util';
 
 @ApiTags('Conciliación')
 @ApiBearerAuth()
@@ -319,14 +322,35 @@ export class ConciliacionController {
   @Patch('movimientos/:id')
   @ApiOperation({
     summary:
-      'Vincula o desvincula un movimiento con un gasto. PAGOS PARCIALES (14-sep-2026): un gasto admite VARIOS cargos de su MISMA moneda mientras la suma no rebase su monto (+1.00 de tolerancia); moneda distinta (gasto USD ↔ cuenta MXN) sigue siendo 1 ↔ 1. `gasto.conciliado` se recalcula con la suma: parcial ⇒ sigue en gastos-sin-banco. Respuesta ADITIVA: gasto_conciliado, monto_vinculado, faltante (null al desvincular). Si no cabe: 409 GASTO_YA_CUBIERTO con details {motivo, monto_gasto, suma_ligada, faltante, movimientos[]}.',
+      'Vincula o desvincula un movimiento con uno o VARIOS gastos. PAGOS PARCIALES (14-sep-2026): un gasto admite VARIOS cargos de su MISMA moneda mientras la suma no rebase su monto (+1.00 de tolerancia); moneda distinta (gasto USD ↔ cuenta MXN) sigue siendo 1 ↔ 1. LOTE (2-oct-2026): `gasto_ids` (2..50) = un cargo que paga varios gastos; cada gasto entra por lo que le falta y la suma debe cuadrar con el cargo (tolerancia 0.01 × N, mínimo 0.02 y máximo 1.00). `gasto_id: null` desliga TODO (también un lote). `gasto_ids` y `gasto_id` juntos ⇒ 400 LOTE_INVALIDO. `gasto.conciliado` lo recalcula la BD: parcial ⇒ sigue en gastos-sin-banco. Respuesta ADITIVA: gastos_estado[] y, con UNA parte, gasto_conciliado, monto_vinculado, faltante (null al desvincular o con varias). 409: GASTO_YA_CUBIERTO (details {motivo, monto_gasto, suma_ligada, faltante, gasto_id, movimientos[]}), CARGO_NO_CUADRA, LOTE_MONEDA_DISTINTA, MOVIMIENTO_CON_LOTE, MOVIMIENTO_YA_LIGADO, REVERSO_INVALIDO, CARGO_EXCEDIDO, LOTE_SOLO_API_NUEVO; 503 CONCILIACION_PARTES_NO_DISPONIBLE con varios gastos sin la migración.',
   })
   link(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: LinkMovimientoDto,
     @CurrentUser() c: AuthenticatedUser,
   ) {
+    if (loteInvalido(dto)) {
+      throw new BadRequestException({
+        message: MENSAJE_LOTE_AMBOS,
+        error: 'LOTE_INVALIDO',
+      });
+    }
+    if (Array.isArray(dto.gasto_ids)) {
+      return this.conciliacion.linkGastos(id, dto.gasto_ids, c.userId);
+    }
     return this.conciliacion.link(id, dto.gasto_id ?? null, c.userId);
+  }
+
+  @Get('movimientos/:id/gastos-candidatos')
+  @ApiOperation({
+    summary:
+      'Gastos que podrían pagar este CARGO (uno o varios): bancarios, sin conciliar (los de pago parcial con su faltante), en la moneda de la cuenta y a ±dias (default 30, 1..180) de la fecha del cargo; en cuenta MXN y sin búsqueda también los USD con T.C. implícito 15–25 (cruzado: true, solo 1 a 1). q: monto entero ⇒ [q, q+1), con decimales ⇒ ±0.01; texto ⇒ proveedor, nota, lugar o folio del ticket. Orden: los que cuadran con el cargo, cercanía de monto, cercanía de fecha, fecha desc. Respuesta {movimiento {id, fecha, monto, moneda}, ventana {desde, hasta}, candidatos[], truncado}. 400 SOLO_CARGOS en un abono; 503 CONCILIACION_PARTES_NO_DISPONIBLE sin la migración.',
+  })
+  gastosCandidatos(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: GastosCandidatosQuery,
+  ) {
+    return this.conciliacion.gastosCandidatosDeMovimiento(id, q);
   }
 
   @Patch('movimientos/:id/cobro')

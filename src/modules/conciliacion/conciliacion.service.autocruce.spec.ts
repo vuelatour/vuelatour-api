@@ -3,6 +3,7 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { IaUsoService } from '../ia-uso/ia-uso.service';
 import { TipoMovimientoBancario } from './dto/conciliacion.dto';
+import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
 
 /**
  * AUTO-CRUCE RESILIENTE Y RE-CRUCE (15-sep-2026).
@@ -17,6 +18,10 @@ import { TipoMovimientoBancario } from './dto/conciliacion.dto';
  *  - el auto-cruce desempata por tarjeta pero JAMÁS liga lo ambiguo;
  *  - los traspasos internos se clasifican solos;
  *  - un gasto capturado DESPUÉS del estado de cuenta se cruza solo.
+ *
+ * Desde el 0.0.52 (2-oct-2026) la liga se escribe por la RPC de la puente
+ * `movimiento_bancario_gasto` (emulada en `conciliacion-partes.fixture-spec`)
+ * y un candidato EXACTO gana al de ±0.01; si SOLO hay de ±0.01, AMBIGUO.
  */
 
 type Row = Record<string, unknown>;
@@ -156,6 +161,9 @@ function fakeSupabase(db: Tablas, fallos: Record<string, unknown> = {}) {
       };
       return api;
     },
+    // RPC de la puente (migración 20261002000002) emulada en memoria.
+    rpc: (nombre: string, args: Row) =>
+      Promise.resolve(rpcPartes(db, nombre, args)),
   };
   return { service } as unknown as SupabaseService;
 }
@@ -180,6 +188,7 @@ function mundo(extra: Partial<Tablas> = {}): Tablas {
 }
 
 function armar(db: Tablas, fallos: Record<string, unknown> = {}) {
+  sembrarPartes(db);
   return new ConciliacionService(
     {
       get: () => '',
@@ -354,7 +363,10 @@ describe('auto-cruce de un CARGO — liga lo inequívoco, nunca lo ambiguo', () 
     expect(db.movimiento_bancario[0].gasto_id).toBe('g-2');
   });
 
-  it('tolera un centavo de diferencia (redondeo de la terminal)', async () => {
+  // 2-oct-2026 (corrección de fiabilidad): un centavo de diferencia YA NO
+  // se liga solo. Caso REAL: el SPEI de SAESA de $2,231.38 se ligó al gasto
+  // #318 de $2,231.37 y el gasto EXACTO #321 se capturó 15 min después.
+  it('SOLO un gasto a un centavo (redondeo de la terminal): AMBIGUO, lo confirma un humano', async () => {
     const db = mundo({ gasto: [gastoBase('g-1', 480.5)] });
     const svc = armar(db);
     const r = (await svc.importar(
@@ -364,7 +376,37 @@ describe('auto-cruce de un CARGO — liga lo inequívoco, nunca lo ambiguo', () 
       },
       USER,
     )) as Record<string, unknown>;
+    expect(r.conciliados).toBe(0);
+    expect(r.ambiguos).toBe(1);
+    expect((r.detalle as Array<{ motivo: string }>)[0].motivo).toContain(
+      'un centavo',
+    );
+    expect(db.gasto[0].conciliado).toBe(false);
+  });
+
+  it('SAESA: con el EXACTO (#321, $2,231.38) presente, el de un centavo (#318) se descarta', async () => {
+    const db = mundo({
+      gasto: [
+        gastoBase('g-318', 2231.37, { notas: 'Pago VIP SAESA' }),
+        gastoBase('g-321', 2231.38, { notas: 'Pago VIP SAESA' }),
+      ],
+    });
+    const svc = armar(db);
+    const r = (await svc.importar(
+      {
+        cuenta_bancaria_id: CTA,
+        movimientos: [cargo('2026-09-08', 2231.38, { descripcion: 'SPEI' })],
+      },
+      USER,
+    )) as Record<string, unknown>;
     expect(r.conciliados).toBe(1);
+    expect(db.movimiento_bancario[0].gasto_id).toBe('g-321');
+    expect(db.gasto.find((g) => g.id === 'g-318')!.conciliado).toBe(false);
+    expect(db.gasto.find((g) => g.id === 'g-321')!.conciliado).toBe(true);
+    // La liga vive en la puente (y el espejo la refleja).
+    expect(db.movimiento_bancario_gasto).toEqual([
+      expect.objectContaining({ gasto_id: 'g-321', monto_parte: 2231.38 }),
+    ]);
   });
 
   it('un gasto EFECTIVO jamás se cruza con el banco', async () => {

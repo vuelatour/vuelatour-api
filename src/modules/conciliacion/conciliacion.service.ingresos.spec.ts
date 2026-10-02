@@ -8,6 +8,7 @@ import { ConciliacionService } from './conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { IaUsoService } from '../ia-uso/ia-uso.service';
+import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
 
 /**
  * CONCILIACIÓN DE INGRESOS (24-sep-2026, contrato §6 y §12.7). Se congela:
@@ -259,6 +260,9 @@ function fakeSupabase(db: Tablas, opts: { sinMigracion?: boolean } = {}) {
       };
       return api;
     },
+    // RPC de la puente (migración 20261002000002) emulada en memoria.
+    rpc: (nombre: string, args: Row) =>
+      Promise.resolve(rpcPartes(db, nombre, args)),
   };
   return { supabase: { service } as unknown as SupabaseService, log };
 }
@@ -372,6 +376,7 @@ function armar(
   db: Tablas,
   opts: { sinMigracion?: boolean; config?: Record<string, string> } = {},
 ) {
+  sembrarPartes(db);
   const f = fakeSupabase(db, opts);
   const registrar = jest.fn();
   const config = opts.config ?? {};

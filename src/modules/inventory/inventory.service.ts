@@ -66,6 +66,7 @@ import {
   type MovEliminable,
 } from './eliminar-movimiento.util';
 import { esFuncionInexistente } from '../../common/updated-at-trigger.util';
+import { partesDisponibles } from '../../common/partes-disponible.util';
 import { hoyCancun } from '../../common/fecha-cancun.util';
 import { capturadoAhora } from '../../common/capturado-en.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
@@ -3376,9 +3377,13 @@ export class InventoryService {
     // candados los repite la función de BD: si aquí faltaran, la vista previa
     // diría «se puede» y el DELETE contestaría 409.
     const ids = filas.map((g) => String(g.id));
+    // 1 cargo ↔ N gastos (2-oct-2026): con la puente, una PARTE (también la
+    // de un cargo que paga varios gastos, con `gasto_id` espejo null) es el
+    // cargo ligado — el mismo `exists` que la función de BD.
+    const conPartes = await partesDisponibles(this.supabase.service);
     const [cargosRes, facturasRes] = await Promise.all([
       this.supabase.service
-        .from('movimiento_bancario')
+        .from(conPartes ? 'movimiento_bancario_gasto' : 'movimiento_bancario')
         .select('gasto_id')
         .in('gasto_id', ids),
       this.supabase.service
@@ -4040,10 +4045,16 @@ export class InventoryService {
           }
           const montoEnDev = round(monto * aDev, 2);
           if (montoEnDev <= porRevertir + EPS) {
-            await this.supabase.service
+            // El error del DELETE se LEE (2-oct-2026): con la puente
+            // `movimiento_bancario_gasto` (FK `on delete restrict`) borrar un
+            // gasto conciliado falla, y tragárselo descontaba lo «revertido»
+            // sin haber borrado nada. Al lanzar, lo que falta queda en
+            // `sin_revertir` (ajuste manual) y el log lo dice.
+            const { error: delErr } = await this.supabase.service
               .from('gasto')
               .delete()
               .eq('id', g.id as string);
+            if (delErr) throw new Error(delErr.message);
             porRevertir = round(porRevertir - montoEnDev, 2);
           } else {
             await this.supabase.service

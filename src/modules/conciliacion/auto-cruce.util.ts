@@ -13,6 +13,8 @@
  *
  * Desempates, en orden (el primero que deja UN solo candidato gana):
  *  1. MONTO — banda de centavos (±0.01): un solo candidato ⇒ se liga.
+ *     Desde el 2-oct-2026 un candidato EXACTO (desfase 0.00) descarta a los
+ *     de ±0.01, y si SOLO hay de ±0.01 queda AMBIGUO (`separarPorDesfase`).
  *  2. TARJETA — los últimos 4 dígitos de `referencia` (el estado de cuenta
  *     de Scotiabank los trae al final: '0025830577' ⇒ 0577) contra
  *     `gasto.tarjeta_terminacion`. Evidencia DURA: solo cuenta si la
@@ -399,6 +401,53 @@ export interface GastoCandidatoCruce extends TextoDelGasto {
   id: string;
   monto: number;
   tarjeta_terminacion?: string | null;
+  /**
+   * Lo que se compara contra el cargo cuando NO es `monto` (2-oct-2026): el
+   * FALTANTE de un gasto con pago parcial, o lo que el gasto todavía espera
+   * del banco en el camino inverso. Default: `monto`.
+   */
+  monto_cruce?: number | null;
+}
+
+/**
+ * DESFASE 0.00 GANA AL ±0.01 (2-oct-2026, corrección de fiabilidad). Caso
+ * REAL: el SPEI de SAESA de $2,231.38 se ligó SOLO al gasto #318 de
+ * $2,231.37 (cabía en la banda de centavos) y el gasto EXACTO #321 de
+ * $2,231.38 se capturó 15 min después. Regla: si hay algún candidato con
+ * desfase 0.00, los de ±0.01 se descartan; si SOLO hay de ±0.01, el
+ * auto-cruce NO decide (AMBIGUO, lo confirma un humano). Los candidatos
+ * cuyo monto comparable cae FUERA de la banda (el llamador no dio
+ * `monto_cruce`) no se clasifican: se conservan como antes.
+ */
+export function separarPorDesfase<T>(
+  objetivo: number,
+  items: readonly T[],
+  montoDe: (t: T) => number,
+): { exactos: T[]; centavo: T[]; otros: T[] } {
+  const cent = (x: number) => Math.round(Math.abs(Number(x) || 0) * 100);
+  const obj = cent(objetivo);
+  const exactos: T[] = [];
+  const centavo: T[] = [];
+  const otros: T[] = [];
+  for (const it of items) {
+    const d = Math.abs(cent(montoDe(it)) - obj);
+    if (d === 0) exactos.push(it);
+    else if (d <= Math.round(TOLERANCIA_CENTAVOS * 100)) centavo.push(it);
+    else otros.push(it);
+  }
+  return { exactos, centavo, otros };
+}
+
+/** Texto del AMBIGUO cuando solo hay candidatos a un centavo. */
+export function textoSoloCentavo(n: number, sujeto: 'gasto' | 'cargo'): string {
+  if (n === 1) {
+    return sujeto === 'gasto'
+      ? 'Solo un gasto difiere por un centavo y ninguno cuadra exacto: vincúlalo a mano para confirmarlo.'
+      : 'Solo un cargo del banco difiere por un centavo y ninguno cuadra exacto: vincúlalo a mano para confirmarlo.';
+  }
+  return sujeto === 'gasto'
+    ? `${n} gastos difieren por un centavo y ninguno cuadra exacto: vincúlalo a mano.`
+    : `${n} cargos del banco difieren por un centavo y ninguno cuadra exacto: vincúlalo a mano.`;
 }
 
 export type MotivoPendiente = 'SIN_CANDIDATOS' | 'AMBIGUO';
@@ -426,12 +475,30 @@ export function elegirCandidato(
   opts: { criterioBase?: CriterioCruce } = {},
 ): EleccionCruce {
   const criterioBase = opts.criterioBase ?? 'MONTO_EXACTO';
-  const n = candidatos.length;
   const terminacion = terminacionDeMovimiento(
     mov.referencia,
     mov.descripcion,
     terminacionesValidas,
   );
+  // Desfase 0.00 gana; solo ±0.01 ⇒ AMBIGUO (ver `separarPorDesfase`).
+  const desfase = separarPorDesfase(
+    mov.monto,
+    candidatos,
+    (c) => c.monto_cruce ?? c.monto,
+  );
+  if (desfase.exactos.length > 0) {
+    candidatos = desfase.exactos;
+  } else if (desfase.centavo.length > 0 && desfase.otros.length === 0) {
+    return {
+      gasto_id: null,
+      criterio: null,
+      motivo: 'AMBIGUO',
+      candidatos_n: desfase.centavo.length,
+      terminacion,
+      detalle: textoSoloCentavo(desfase.centavo.length, 'gasto'),
+    };
+  }
+  const n = candidatos.length;
   if (n === 0) {
     return {
       gasto_id: null,
@@ -515,8 +582,28 @@ export function elegirMovimiento(
   gasto: GastoCandidatoCruce,
   movimientos: ReadonlyArray<MovimientoCruce & { id: string }>,
   terminacionesValidas: Iterable<string> = [],
-): { movimiento_id: string | null; criterio: CriterioCruce | null } {
+): {
+  movimiento_id: string | null;
+  criterio: CriterioCruce | null;
+  /** ADITIVO (2-oct-2026): por qué no se eligió (solo ±0.01). */
+  detalle?: string;
+} {
   if (movimientos.length === 0) return { movimiento_id: null, criterio: null };
+  // Desfase 0.00 gana; solo ±0.01 ⇒ nadie (ver `separarPorDesfase`).
+  const desfase = separarPorDesfase(
+    gasto.monto_cruce ?? gasto.monto,
+    movimientos,
+    (m) => m.monto,
+  );
+  if (desfase.exactos.length > 0) {
+    movimientos = desfase.exactos;
+  } else if (desfase.centavo.length > 0 && desfase.otros.length === 0) {
+    return {
+      movimiento_id: null,
+      criterio: null,
+      detalle: textoSoloCentavo(desfase.centavo.length, 'cargo'),
+    };
+  }
   if (movimientos.length === 1) {
     return { movimiento_id: movimientos[0].id, criterio: 'MONTO_EXACTO' };
   }

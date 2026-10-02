@@ -7,6 +7,7 @@ import { ConciliacionService } from './conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { IaUsoService } from '../ia-uso/ia-uso.service';
+import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
 
 /**
  * REVERSOS (30-sep-2026): «¿Cómo puedo conciliar los cargos reembolsados?».
@@ -104,6 +105,7 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
                   clasificacion_id: null,
                   ingreso_id: null,
                   reverso_de_id: null,
+                  gastos_n: 0,
                   notas: null,
                   created_at: `2026-09-30T00:00:0${seq}Z`,
                 }
@@ -256,6 +258,11 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
       };
       return api;
     },
+    // RPC de la puente (migración 20261002000002) emulada en memoria.
+    rpc: (nombre: string, args: Row) => {
+      log.push({ tabla: `rpc:${nombre}`, texto: '', op: 'rpc' });
+      return Promise.resolve(rpcPartes(db, nombre, args));
+    },
   };
   return { supabase: { service } as unknown as SupabaseService, log };
 }
@@ -357,6 +364,7 @@ function mundo(extra: Partial<Tablas> = {}): Tablas {
 }
 
 function armar(db: Tablas, opts: OpcionesFake = {}) {
+  sembrarPartes(db);
   const f = fakeSupabase(db, opts);
   const generateTablaXlsx = jest.fn().mockResolvedValue(Buffer.from('xlsx'));
   const svc = new ConciliacionService(
@@ -1243,5 +1251,79 @@ describe('revisión adversaria — lo que NO debe emparejarse ni ligarse', () =>
       USER,
     );
     expect(fila(db, 'dev').cobro_id).toBe('cobro-cliente');
+  });
+});
+
+/**
+ * 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): un cargo que
+ * paga VARIOS gastos tiene `gasto_id` null (espejo) y `gastos_n ≥ 2`. Para
+ * el par cargo ↔ devolución cuenta como ligado a gasto: jamás se empareja
+ * ni se ofrece, y frena al automático igual que un cargo con UN gasto.
+ */
+describe('reversos con un cargo que paga VARIOS gastos (lote)', () => {
+  const LOTE = 'c-lote';
+  const conLote = () => {
+    const db = mundo();
+    // El cargo del gasto pasa a pagar DOS gastos: espejo null, 2 partes.
+    db.movimiento_bancario = db.movimiento_bancario.filter(
+      (m) => m.id !== CARGO_CON_GASTO,
+    );
+    db.movimiento_bancario.push(
+      mov(LOTE, { conciliado: true, gasto_id: null }),
+    );
+    db.movimiento_bancario_gasto = [
+      {
+        movimiento_id: LOTE,
+        gasto_id: 'g-a',
+        monto_parte: 412.56,
+        moneda: 'MXN',
+      },
+      {
+        movimiento_id: LOTE,
+        gasto_id: 'g-b',
+        monto_parte: 412.57,
+        moneda: 'MXN',
+      },
+    ];
+    return db;
+  };
+
+  it('el cargo del lote NO es candidato y su diálogo responde 409', async () => {
+    const { svc, db } = armar(conLote());
+    expect(fila(db, LOTE).gastos_n).toBe(2);
+    const c = await svc.candidatosReverso(ABONO_1);
+    expect(c.map((x) => x.id)).not.toContain(LOTE);
+    expect(c.map((x) => x.id).sort()).toEqual([...CARGOS_IDS].sort());
+    expect((await error(svc.candidatosReverso(LOTE))).code).toBe(
+      'MOVIMIENTO_YA_LIGADO',
+    );
+  });
+
+  it('emparejar a mano con el cargo del lote ⇒ 409 que dice cuántos gastos', async () => {
+    const { svc, db } = armar(conLote());
+    const r = await error(svc.emparejarReverso(ABONO_1, LOTE, USER));
+    expect(r.code).toBe('REVERSO_INVALIDO');
+    expect(r.message).toBe(
+      'El cargo ya está conciliado con 2 gastos: quítalo antes.',
+    );
+    expect(fila(db, ABONO_1).reverso_de_id).toBeNull();
+    expect(fila(db, LOTE)).toMatchObject({ conciliado: true, gastos_n: 2 });
+  });
+
+  it('«Emparejar devoluciones» jamás toca el cargo del lote', async () => {
+    const { svc, db } = armar(conLote());
+    const r = await svc.autoReversos(
+      { desde: '2026-09-01', hasta: '2026-09-30' },
+      USER,
+    );
+    expect(r.emparejados).toBe(7);
+    expect(fila(db, LOTE)).toMatchObject({
+      clasificacion_id: null,
+      notas: null,
+      gastos_n: 2,
+    });
+    expect(
+      ABONOS.map(([id]) => fila(db, id).reverso_de_id).includes(LOTE),
+    ).toBe(false);
   });
 });

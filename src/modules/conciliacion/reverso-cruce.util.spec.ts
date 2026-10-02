@@ -2,6 +2,8 @@ import {
   abonosCandidatosDeCargo,
   anteponerNotaReverso,
   cargoLigadoConDinero,
+  gastosLigadosN,
+  ligadoAGasto,
   cargosCandidatosDeAbono,
   elegirCargoReverso,
   emparejarReversos,
@@ -713,5 +715,59 @@ describe('cargoLigadoConDinero', () => {
       cargoLigadoConDinero({ ...base, tipo: 'ABONO', gasto_id: 'g' }),
     ).toBe(false);
     expect(cargoLigadoConDinero(base)).toBe(false);
+  });
+});
+
+/**
+ * 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): un cargo que
+ * paga VARIOS gastos tiene `gasto_id` null (espejo) y `gastos_n ≥ 2`. Para
+ * el par cargo ↔ devolución cuenta como ligado a gasto, igual que el
+ * trigger (`gasto_id is not null or gastos_n > 0`).
+ */
+describe('reversos con gastos_n (lote)', () => {
+  const lote = (n: number | string | null): MovimientoParReverso => ({
+    id: 'c',
+    tipo: 'CARGO',
+    cuenta_bancaria_id: CTA,
+    monto: 8404.2,
+    conciliado: true,
+    gasto_id: null,
+    gastos_n: n,
+  });
+
+  it('ligadoAGasto / gastosLigadosN', () => {
+    expect(ligadoAGasto(lote(3))).toBe(true);
+    expect(gastosLigadosN(lote(3))).toBe(3);
+    expect(gastosLigadosN(lote('2'))).toBe(2);
+    expect(ligadoAGasto(lote(0))).toBe(false);
+    expect(ligadoAGasto(lote(null))).toBe(false);
+    expect(ligadoAGasto({ ...lote(null), gasto_id: 'g' })).toBe(true);
+  });
+
+  it('un cargo con 3 gastos NO está libre aunque gasto_id sea null', () => {
+    expect(movimientoLibreParaReverso({ ...lote(3), conciliado: false })).toBe(
+      false,
+    );
+  });
+
+  it('cargo con lote = ligado con dinero (frena al automático)', () => {
+    expect(cargoLigadoConDinero(lote(3))).toBe(true);
+    expect(cargoLigadoConDinero(lote(0))).toBe(false);
+  });
+
+  it('el 409 dice cuántos gastos', () => {
+    const abono = fila({ id: 'a', tipo: 'ABONO' });
+    expect(
+      motivoParInvalido(abono, {
+        ...fila({ id: 'c', tipo: 'CARGO' }),
+        gastos_n: 3,
+      }),
+    ).toBe('El cargo ya está conciliado con 3 gastos: quítalo antes.');
+    expect(
+      motivoParInvalido(abono, {
+        ...fila({ id: 'c', tipo: 'CARGO' }),
+        gastos_n: 1,
+      }),
+    ).toBe('El cargo ya está conciliado con un gasto: quítalo antes.');
   });
 });

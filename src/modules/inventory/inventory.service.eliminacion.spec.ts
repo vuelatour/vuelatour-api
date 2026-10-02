@@ -51,6 +51,13 @@ interface Cfg {
   /** Fila de inventario_movimiento_eliminado por client_request_id. */
   eliminadoPorLlave?: Res;
   rpc?: Res;
+  /**
+   * Migración 20261002000002 (1 cargo ↔ N gastos) SIN aplicar: la sonda
+   * `movimiento_bancario.gastos_n` responde 42703 y los cargos ligados se
+   * leen del espejo `movimiento_bancario.gasto_id` (0.0.51). Con ella, de la
+   * puente `movimiento_bancario_gasto` (las MISMAS filas `cargos`).
+   */
+  sinPartes?: boolean;
 }
 
 const ITEM: Fila = { id: 'it-1', nombre: 'Aceite 15W-50', precio_venta: null };
@@ -160,6 +167,21 @@ function armar(cfg: Cfg) {
         case 'gasto':
           return { data: cfg.gastos ?? [GASTO], error: null };
         case 'movimiento_bancario':
+          // Sonda de la puente (columna gastos_n).
+          if (sel?.args[0] === 'gastos_n') {
+            return cfg.sinPartes
+              ? {
+                  data: null,
+                  error: {
+                    code: '42703',
+                    message:
+                      'column movimiento_bancario.gastos_n does not exist',
+                  },
+                }
+              : { data: [], error: null };
+          }
+          return { data: cfg.sinPartes ? (cfg.cargos ?? []) : [], error: null };
+        case 'movimiento_bancario_gasto':
           return { data: cfg.cargos ?? [], error: null };
         case 'factura_recibida':
           return { data: cfg.facturas ?? [], error: null };
@@ -274,11 +296,32 @@ describe('previewEliminacionMovimiento', () => {
     expect(r.mensaje).toContain('Conciliación');
   });
 
-  it('gasto con CARGO bancario ligado (conciliación parcial) también bloquea', async () => {
-    const { service } = armar({ cargos: [{ gasto_id: 'g-1' }] });
-    const r = await service.previewEliminacionMovimiento('it-1', 'S1');
-    expect(r.codigo_bloqueo).toBe('GASTO_BLOQUEADO');
-  });
+  it.each([
+    ['con la puente (parte de movimiento_bancario_gasto)', false],
+    ['sin la migración (espejo movimiento_bancario.gasto_id)', true],
+  ])(
+    'gasto con CARGO bancario ligado (conciliación parcial) también bloquea — %s',
+    async (_modo, sinPartes) => {
+      const { service, llamadas } = armar({
+        cargos: [{ gasto_id: 'g-1' }],
+        sinPartes,
+      });
+      const r = await service.previewEliminacionMovimiento('it-1', 'S1');
+      expect(r.codigo_bloqueo).toBe('GASTO_BLOQUEADO');
+      // Lee la tabla que corresponde (y sin la migración jamás la puente).
+      const tablas = llamadas
+        .filter((l) => l.metodo === 'in' && l.args[0] === 'gasto_id')
+        .map((l) => l.tabla);
+      expect(tablas).toContain(
+        sinPartes ? 'movimiento_bancario' : 'movimiento_bancario_gasto',
+      );
+      if (sinPartes) {
+        expect(
+          llamadas.some((l) => l.tabla === 'movimiento_bancario_gasto'),
+        ).toBe(false);
+      }
+    },
+  );
 
   it('gasto FACTURADO bloquea', async () => {
     const { service } = armar({

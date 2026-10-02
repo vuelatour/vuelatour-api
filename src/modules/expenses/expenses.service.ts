@@ -21,6 +21,7 @@ import {
   SEGUNDOS_URL_PUNTUAL,
 } from '../../common/url-firmada.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
+import { partesDisponibles } from '../../common/partes-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import {
   diaCancun,
@@ -426,7 +427,25 @@ export class ExpensesService {
     const suma = new Map<string, number>();
     try {
       const CHUNK = 200;
+      // 1 cargo ↔ N gastos (2-oct-2026, migración 20261002000002): con la
+      // puente, lo vinculado sale de `v_gasto_conciliacion` (Σ `monto_parte`
+      // no cruzadas; con parte cruzada, el monto del gasto) — nunca el
+      // |monto| del movimiento, que en un lote paga VARIOS gastos.
+      const conPartes = await partesDisponibles(this.supabase.service);
       for (let i = 0; i < ids.length; i += CHUNK) {
+        if (conPartes) {
+          const { data, error } = await this.supabase.service
+            .from('v_gasto_conciliacion')
+            .select('gasto_id, monto_vinculado')
+            .in('gasto_id', ids.slice(i, i + CHUNK));
+          if (error) throw new Error(error.message);
+          for (const v of (data ?? []) as Array<Record<string, unknown>>) {
+            if (typeof v.gasto_id !== 'string') continue;
+            const n = Math.round((Number(v.monto_vinculado) || 0) * 100) / 100;
+            if (n > 0) suma.set(v.gasto_id, n);
+          }
+          continue;
+        }
         const { data, error } = await this.supabase.service
           .from('movimiento_bancario')
           .select('gasto_id, monto')
@@ -2387,6 +2406,17 @@ export class ExpensesService {
   }
 
   private async cargosBancariosDe(gastoId: string): Promise<number> {
+    // 1 cargo ↔ N gastos (2-oct-2026): con la puente, CUALQUIER parte cuenta
+    // (también la de un cargo que paga varios gastos, cuyo `gasto_id`
+    // espejo es null). El contrato del 409 (`movimientos_ligados`) no cambia.
+    if (await partesDisponibles(this.supabase.service)) {
+      const { count, error } = await this.supabase.service
+        .from('movimiento_bancario_gasto')
+        .select('movimiento_id', { count: 'exact', head: true })
+        .eq('gasto_id', gastoId);
+      if (error) throw new Error(error.message);
+      return count ?? 0;
+    }
     const { count, error } = await this.supabase.service
       .from('movimiento_bancario')
       .select('id', { count: 'exact', head: true })

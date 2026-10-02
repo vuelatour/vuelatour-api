@@ -489,12 +489,40 @@ export interface MovimientoParReverso {
   cuenta_bancaria_id: string;
   monto: number | string;
   conciliado?: boolean | null;
+  /** ESPEJO: el gasto cuando el cargo paga UNO (null con 0 o ≥ 2). */
   gasto_id?: string | null;
+  /**
+   * Partes en la puente `movimiento_bancario_gasto` (2-oct-2026, migración
+   * 20261002000002; ausente sin ella). «Ligado a gasto» = `gasto_id` puesto
+   * O `gastos_n > 0`: un cargo que paga 3 gastos tiene `gasto_id` null.
+   */
+  gastos_n?: number | string | null;
   cobro_id?: string | null;
   cobro_grupo_id?: string | null;
   ingreso_id?: string | null;
   clasificacion_id?: string | null;
   reverso_de_id?: string | null;
+}
+
+/** Lo único que miran `gastosLigadosN` / `ligadoAGasto` de una fila. */
+export interface LigaGastoDeFila {
+  gasto_id?: unknown;
+  gastos_n?: unknown;
+}
+
+/** Partes que el movimiento tiene en la puente (0 sin la columna). */
+export function gastosLigadosN(m: LigaGastoDeFila): number {
+  const n = Math.trunc(Number(m.gastos_n) || 0);
+  return n > 0 ? n : 0;
+}
+
+/**
+ * ¿Ligado a gasto(s)? FUENTE ÚNICA de «ligado a gasto» del par:
+ * `gasto_id is not null or gastos_n > 0` (el mismo predicado que el
+ * trigger `tg_mov_bancario_reverso` desde la migración 20261002000002).
+ */
+export function ligadoAGasto(m: LigaGastoDeFila): boolean {
+  return !!m.gasto_id || gastosLigadosN(m) > 0;
 }
 
 /**
@@ -505,7 +533,7 @@ export interface MovimientoParReverso {
 export function movimientoLibreParaReverso(m: MovimientoParReverso): boolean {
   return (
     m.conciliado !== true &&
-    !m.gasto_id &&
+    !ligadoAGasto(m) &&
     !m.cobro_id &&
     !m.cobro_grupo_id &&
     !m.ingreso_id &&
@@ -524,7 +552,7 @@ export function cargoLigadoConDinero(m: MovimientoParReverso): boolean {
   return (
     m.tipo === 'CARGO' &&
     !m.reverso_de_id &&
-    !!(m.gasto_id || m.cobro_id || m.cobro_grupo_id || m.ingreso_id)
+    (ligadoAGasto(m) || !!(m.cobro_id || m.cobro_grupo_id || m.ingreso_id))
   );
 }
 
@@ -557,7 +585,9 @@ export function motivoTriggerReverso(
 }
 
 function ligaDe(m: MovimientoParReverso): string | null {
-  if (m.gasto_id) return 'un gasto';
+  const n = gastosLigadosN(m);
+  if (n >= 2) return `${n} gastos`;
+  if (ligadoAGasto(m)) return 'un gasto';
   if (m.cobro_id) return 'un cobro de vuelo';
   if (m.cobro_grupo_id) return 'el sobre de un grupo';
   if (m.ingreso_id) return 'un ingreso';

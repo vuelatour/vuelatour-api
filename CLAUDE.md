@@ -261,6 +261,15 @@ auditoria` (lectura), `POST …/auditoria/conciliar` (liga lo que cuadra),
    `GET …/auditoria.xlsx` (3 hojas). `GET /conciliacion/cobros-sin-banco`
    = espejo de gastos-sin-banco; el pre-cierre lo expone como aviso
    `cobros_bancarios_sin_conciliar` (no bloquea).
+   **DESDE EL 0.0.52 (2-oct-2026) la liga cargo ↔ gasto vive en la PUENTE
+   `movimiento_bancario_gasto` y vale en los DOS sentidos (1 gasto ↔ N
+   cargos y 1 cargo ↔ N gastos): ver invariante 40.** Lo de abajo sigue
+   siendo la regla POR GASTO; donde dice «|monto| del cargo» léase
+   `monto_parte` de la puente, el trigger `tg_mov_bancario_gasto_suma` pasó
+   a ser solo el candado de monto/cuenta de un cargo con partes, y
+   `conciliado`/`tc_gasto` los escribe SOLO la BD
+   (`recalcular_gasto_conciliado`) — el `recalcularGasto` TS queda para el
+   camino directo SIN la migración.
    **PAGOS PARCIALES — 1 gasto ↔ N movimientos (14-sep-2026, caso real: UNA
    factura de ASUR cobrada en DOS cargos, operación y FBO por separado)**:
    un gasto admite VARIOS `movimiento_bancario` ligados SOLO si todos son de
@@ -320,7 +329,15 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      pendiente por un fallo se quedaba pendiente **para siempre**
      (re-importar responde «N duplicados» y no reintenta el cruce de nadie).
    - **El auto-cruce solo liga lo INEQUÍVOCO.** Orden: monto ±0.01 y ventana
-     ±`MATCH_DAYS` → si hay ≥2 candidatos, **terminación de tarjeta**
+     ±`MATCH_DAYS` — **desde el 2-oct-2026 un candidato EXACTO (desfase
+     0.00) descarta a los de ±0.01, y si SOLO hay de ±0.01 queda AMBIGUO**
+     (`separarPorDesfase` + `textoSoloCentavo`, en `elegirCandidato`,
+     `elegirMovimiento` y por tanto en `autoMatchCargo`, la lista
+     «se puede cruzar» e `intentarCruzarGasto`; el FALTANTE compara con
+     `monto_cruce`). Caso REAL: el SPEI de SAESA de $2,231.38 se ligó solo al
+     gasto #318 de $2,231.37 y el EXACTO #321 se capturó 15 min después —
+     un centavo de diferencia ya no se liga sin un humano → si hay ≥2
+     candidatos, **terminación de tarjeta**
      (últimos 4 dígitos de `referencia` SOLO si la referencia tiene ≥8
      dígitos y esos 4 son una terminación real de
      `tarjeta_corporativa`: la referencia de 6 dígitos '174465' no inventa
@@ -2882,6 +2899,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       nuevas ⇒ 503 `REVERSOS_NO_DISPONIBLE` y NINGUNA otra consulta nombra
       la columna (lista/reporte/re-cruce/importación/ligas como el 0.0.43;
       `reverso_de`/`revertido_por` viajan null).
+    - **Cargo que paga VARIOS gastos (2-oct-2026, invariante 40)**: su
+      `gasto_id` es null (espejo) y `gastos_n ≥ 2`. «Ligado a gasto» del par
+      = `gasto_id is not null or gastos_n > 0` (fuente única
+      `ligadoAGasto`/`gastosLigadosN` en `reverso-cruce.util`, el MISMO
+      predicado del trigger reescrito): `movimientoLibreParaReverso`,
+      `cargoLigadoConDinero` (freno), `ligaDe` («El cargo ya está conciliado
+      con 3 gastos: quítalo antes.»), el check inline de `emparejarReverso`
+      y `reverso-candidatos` lo usan; `MOV_REVERSO_COLS` suma `gastos_n` y
+      los 4 CAS (`escribirParReverso` abono y cargo, `completarCargoReverso`,
+      `desemparejarReverso`) agregan `.eq('gastos_n', 0)` — todo detrás de la
+      sonda de partes. Sin ella, como el 0.0.51.
     - **Lo que NO se tocó (pendiente)**: `analizarAbono` / `sugerir-abonos`
       de Ingresos siguen marcando `patron: 'REVERSO'` SOLO con el prefijo
       «REV …» y proponiendo `CLASIFICAR_REVERSO` (clasifica solo el abono):
@@ -3605,6 +3633,145 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (visión, vencimientos, compras y conciliación `parse` / `sugerir` /
       `sugerir-abonos`).
 
+40. **1 CARGO DEL BANCO ↔ N GASTOS («lote», 2-oct-2026, API 0.0.52,
+    migración `20261002000002_conciliacion_partes.sql`).** Caso real
+    (verificado en prod): 29 «Pago VIP SAESA» capturados por Jimmy Chi el
+    30-sep y los SPEI del 24-sep de GASTOS GNRAL — 8,404.20 = 3 × 2,801.40
+    (#315, #319, #326), 4,462.75 = 2,231.37 + 2,231.38 (o 2 × 2,231.37 +
+    0.01: SAESA factura 2,231.375) y 2,236.25 = 2 × 1,118.12 + 0.01. Hasta
+    el 0.0.51 el modelo era 1 gasto ↔ N cargos y un cargo no podía pagar
+    varios gastos.
+    - **Ligado a gasto = `gasto_id is not null or gastos_n > 0`.**
+      `movimiento_bancario.gasto_id` es un ESPEJO (el gasto cuando hay UNA
+      parte; null con 0 o ≥ 2) que siguen leyendo panel/app viejos y el embed
+      `gasto:gasto!gasto_id(...)`. La FUENTE ÚNICA de la liga es la puente
+      `movimiento_bancario_gasto (movimiento_id, gasto_id, monto_parte,
+      moneda = la de la CUENTA del cargo)`; `gastos_n` = número de partes.
+      **`gasto.conciliado` y `gasto.tc_gasto` los escribe SOLO la función de
+      BD `recalcular_gasto_conciliado`** (el TS ya no los escribe con la
+      sonda encendida). **El centavo del lote vive en `gastos_diferencia` y
+      JAMÁS se ajusta el gasto.**
+    - **Reglas** (espejo puro en `conciliacion-parcial.util.ts`, con spec y
+      los montos SAESA; el candado real es la BD): parte CRUZADA =
+      `parte.moneda ≠ gasto.moneda` (solo el 1 ↔ 1 USD↔MXN). Por gasto: Σ
+      partes no cruzadas ≤ `gasto.monto + 1.00`. Lote (N ≥ 2): todos en la
+      moneda de la cuenta (`LOTE_MONEDA_DISTINTA`), cada gasto entra por su
+      `faltante_lote` (`faltanteLote`: 0 si sus OTRAS partes ya lo cubren;
+      si no `monto − Σ partes no cruzadas de OTROS cargos` — las de este
+      cargo no cuentan, así el reemplazo [A] → [A, B] no rebota) o
+      `GASTO_YA_CUBIERTO`, y `|Σ − |cargo|| ≤ toleranciaLote(N) =
+      least(1.00, greatest(0.02, 0.01 × N))` o `CARGO_NO_CUADRA`
+      (`puedeRepartirCargo`). No existe el «cargo parcial». Con N = 1 la
+      regla de siempre (`puedeLigar`, `monto_parte = |monto|`). Solo un
+      CARGO admite partes (400 `SOLO_CARGOS`).
+    - **Sonda ÚNICA** `common/partes-disponible.util.ts`
+      (`partesDisponibles` = `columnaOpcional(movimiento_bancario.gastos_n)`,
+      re-sondeo ≤ 10 min; `errorPartesNoDisponibles` ⇒ 503
+      `CONCILIACION_PARTES_NO_DISPONIBLE`; `esPartesAusentes` = RPC o tabla
+      fuera del schema cache ⇒ 503). **REGLA DURA: todo select/update/filtro
+      que nombre `gastos_n`, la puente o `v_gasto_conciliacion` va detrás de
+      la sonda.** Sin la migración: lectores con el espejo y |monto|
+      (0.0.51), `link()` con UN gasto por el camino directo
+      (`linkDirecto`, intacto) y lote / candidatos ⇒ 503 (spec que falla si
+      alguna consulta nombra lo nuevo).
+    - **`PATCH /v1/conciliacion/movimientos/:id`** (ADMIN, FACTURACION):
+      `LinkMovimientoDto.gasto_ids?: string[] | null` (1..50, únicos, uuid;
+      `null` = ausente) además de `gasto_id`. Los DOS en el cuerpo ⇒ 400
+      `LOTE_INVALIDO` (`loteInvalido`: presente = `!== undefined`; con
+      target ES2022 `'gasto_id' in dto` siempre es true). `gasto_ids` de UN
+      elemento = `gasto_id`; `gasto_id: null` desliga TODO (también un lote).
+      Con la sonda la escritura es SOLO por las RPC
+      `conciliacion_ligar_cargo_gastos(p_movimiento_id, p_gasto_ids,
+      p_actor)` (valida, escribe la puente como DIFF y recalcula; una
+      re-liga idéntica es no-op) y `conciliacion_desligar_cargo_gastos`;
+      antes, en TS y con los MISMOS textos, la pre-validación (`puedeLigar` /
+      `puedeRepartirCargo`) para responder 409 sin tocar nada. Lote sobre un
+      cargo que ya paga ≥ 2 y llega UN gasto ⇒ 409 `MOVIMIENTO_CON_LOTE`
+      (panel viejo). Error de la BD: `code = hint ?? prefijo «CODIGO:»`,
+      `details` = el JSON de `detail` sobre los de la pre-validación
+      (`leerErrorPartes`); `GASTO_YA_CUBIERTO` conserva su forma (con el
+      `includes('MONEDA')` anidado) + `details.gasto_id`; 409:
+      `CARGO_EXCEDIDO`, `CARGO_NO_CUADRA {monto_cargo, suma_gastos,
+      diferencia, tolerancia, moneda, gastos[{id, monto, faltante}]}`,
+      `LOTE_MONEDA_DISTINTA {gasto_id, moneda_gasto, moneda_cuenta}`,
+      `MOVIMIENTO_CON_LOTE`, `MOVIMIENTO_YA_LIGADO`, `REVERSO_INVALIDO`,
+      `LOTE_SOLO_API_NUEVO`; `LOTE_INVALIDO` ⇒ 400. Respuesta: la fila
+      RELEÍDA (`movCols()` + `gastos_n`) + `gastos_estado[{gasto_id,
+      monto_parte, moneda, gasto_conciliado, monto_vinculado, faltante}]`
+      (de `v_gasto_conciliacion`) SIEMPRE y, con exactamente UNA parte, los
+      tres planos de siempre (null con 0 o ≥ 2). Desligar un movimiento sin
+      partes es un no-op (ya no le quita la clasificación). Textos nuevos:
+      `MENSAJE_LOTE_AMBOS`, `mensajeLoteInvalido`, `MENSAJE_SOLO_CARGOS`,
+      `mensajeMovimientoConLote`, `mensajeLoteMonedaDistinta`,
+      `mensajeCargoNoCuadra`, `textoSinPrefijo` (todos con spec).
+    - **`GET /v1/conciliacion/movimientos/:id/gastos-candidatos`** (ADMIN,
+      FACTURACION; `GastosCandidatosQuery {q ≤ 80, dias 1..180 = 30,
+      limite 1..300 = 100}`): gastos bancarios sin conciliar (con pago
+      parcial, por su faltante) en la moneda de la cuenta y ±`dias` de la
+      fecha del cargo; en cuenta MXN y sin `q`, también USD con T.C.
+      implícito 15–25 (`cruzado: true`, al final). `q`
+      (`interpretarBusquedaGasto`, `gastos-candidatos.util.ts`): entero ⇒
+      [q, q+1), con decimales ⇒ ±0.01, texto ⇒ DOS consultas (proveedor
+      `ilike` ≤ 50 ids, luego `or(notas|lugar|folio_ticket ilike,
+      proveedor_id.in)` con `patronIlikeSeguro` de facturas-emitidas). Orden
+      `ordenarCandidatosGasto`: los que cuadran (|monto o faltante − cargo|
+      ≤ 1.00), cercanía de monto, cercanía de fecha, fecha desc. Respuesta
+      `{movimiento {id, fecha, monto, moneda}, ventana {desde, hasta},
+      candidatos (forma de la IA + cruzado?, nota, lugar, vuelo_folio,
+      matricula, capturado_por, monto_vinculado, faltante), truncado}`
+      (tope de lectura 1000). ABONO ⇒ 400 `SOLO_CARGOS`; sin sonda ⇒ 503.
+      La ficha del candidato es UNA (`aCandidatoGasto`, la misma de la IA).
+    - **Lectores** (sobre la puente / `v_gasto_conciliacion`, regla de parte
+      cruzada; nunca el |monto| del movimiento): `sumasLigadasDe`,
+      `cargosDeGasto` (monto = `monto_parte`), `estadoConciliacion`,
+      `conflictoGastoCubierto` (`details.movimientos[].monto_parte` y
+      `details.gasto_id`), `candidatosCercanos`, `gastosSinBanco`,
+      `reporteGastosSinBancoXlsx`, `candidatoPorFaltante`,
+      `intentarCruzarGasto`, `expenses.anexarConciliacionParcial`,
+      `expenses.cargosBancariosDe` (cuenta PARTES: el 409
+      `GASTO_CONCILIADO` + `details.movimientos_ligados` no cambia),
+      `inventory.gastosDeMovimiento`. `inventory.revertirGastoPorDevolucion`
+      ahora LEE el error del DELETE (con la FK `restrict` de la puente un
+      gasto conciliado no se borra: lo que falta queda en `sin_revertir`).
+      `GET movimientos` (ADITIVOS, en lote por página, best-effort: si una
+      lectura falla no se anota NADA): `gastos_n`, `gastos:
+      MovimientoGasto[]` (+ `monto_parte`, `moneda_parte`, `monto_vinculado`,
+      `faltante`, `lugar`, `notas_primera_linea`; sin `notas` crudas),
+      `gastos_suma`, `gastos_diferencia` (`diferenciaLote`: |monto| − Σ;
+      null sin partes o con parte cruzada). `resumen` por cuenta:
+      `diferencia_lotes` (Σ de los cargos con ≥ 2; null si la lectura
+      falla). Excel: «Conciliado con» = `etiquetaConciliadoLote` («3 gastos:
+      Operaciones · vuelo #315 ($2,801.40) · …» + «· diferencia $0.01») y
+      «Matrícula» = unión con « + »; con UNA parte, como siempre.
+      `clasificarMovimiento` (no clasifica un cargo con partes; «quitar» no
+      lo desconcilia), `linkCobro` (`conciliado … || gastos_n > 0`) y
+      `linkIngreso` usan `ligadoAGasto`. `ingresos.leerAbono` no aplica
+      (ABONO).
+    - **Fuera de alcance (v1)**: `UpdateGastoDto.conciliado` (override
+      manual) sobre un gasto con partes se SOBRESCRIBE en el siguiente
+      cambio de la puente; `anotarMotivoPendiente` no propone lotes (criterio
+      SUMA) y la IA tampoco.
+    - Specs: `partes-disponible.util.spec`, `conciliacion-parcial.util.spec`
+      (SAESA real, tolerancia, textos, `leerErrorPartes`, Excel),
+      `gastos-candidatos.util.spec`, `auto-cruce.util.spec` (desfase),
+      `reverso-cruce.util.spec` (gastos_n), `dto/conciliacion.dto.lote.spec`
+      (plainToInstance + validate), `conciliacion.service.lote.spec` (lote
+      SAESA, 409/400/503, desligar, reemplazo, no-op, lectores, candidatos y
+      «sin migración»), `conciliacion.controller.lote.spec` (HTTP real),
+      `conciliacion.service.parcial.spec` (TODO el contrato del 14-sep en
+      los dos modos; se borró el caso 23505 obsoleto), y los fakes de
+      `autocruce`, `reverso`, `ingresos`, `expenses.service.conciliado` e
+      `inventory.service.eliminacion` con la RPC emulada
+      (`conciliacion-partes.fixture-spec.ts`: G/H/B/I y la vista en memoria,
+      fuera del build y de jest).
+    - **Orden de deploy**: migración (dry-run → aplicar → advisors) → API
+      0.0.52 → panel ENSEGUIDA (un panel viejo pinta un lote como
+      «Pendiente» y ofrece «Vincular gasto»: el API responde 409
+      `MOVIMIENTO_CON_LOTE`, no destruye nada). Con la migración y el API
+      0.0.51, el trigger de compatibilidad de la BD mantiene la puente (y el
+      camino directo del 0.0.52 traduce sus códigos a 409 en la ventana de la
+      sonda).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -4288,6 +4455,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR** — `20261002000002_conciliacion_partes.sql`
+  (invariante 40, 1 cargo ↔ N gastos): tabla puente
+  `movimiento_bancario_gasto`, `movimiento_bancario.gastos_n`, vista
+  `v_gasto_conciliacion`, RPC `conciliacion_ligar_cargo_gastos` /
+  `conciliacion_desligar_cargo_gastos`, `recalcular_gasto_conciliado`,
+  triggers de la puente y de compatibilidad, `tg_mov_bancario_gasto_suma` y
+  `tg_mov_bancario_reverso` reescritos e `inventario_eliminar_movimiento`
+  con la puente; backfill de las ligas `gasto_id` existentes. **Antes de
+  aplicar**: el DRY-RUN de su cabecera (escrituras REALES que terminan en
+  `raise exception 'DRYRUN_OK …'`) en prod; después `get_advisors` y la
+  verificación del backfill. El API 0.0.52 es desplegable ANTES (sonda:
+  todo como el 0.0.51 y 503 en lo nuevo). El orquestador marca aquí la
+  aplicación.
 - **APLICADA en prod el 1-oct-2026 (noche; dry-run corrido en prod: `DRYRUN_OK · N4142R · socio Mauricio Roque · C1–C7`, sin residuos; después tablas, función con search_path fijo, triggers e índices verificados; `get_advisors` solo el INFO de RLS sin policies)** —
   `20261002000001_reparto_cuenta_socio.sql` (invariante 38 v2, cuenta
   corriente del socio). Requiere `20261001000001` aplicada. (1)
@@ -4833,6 +5013,12 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
+  gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito
+  agrupado); motivo `SUMA_DE_VARIOS` en `anotarMotivoPendiente` y la IA de
+  lotes (hoy ninguno propone un lote); qué hacer con los 35,536.33 de SAESA
+  sin cargo importado (la oficina dice cómo se pagaron).
 
 - Candado de cobro anticipado (origen ≠ CUN), regla TUAS por tramo, monto de
   pernocta al piloto, costo de PILOTO como categoría del reparto (doc 4.8) —

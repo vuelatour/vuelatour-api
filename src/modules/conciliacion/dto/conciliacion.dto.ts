@@ -3,6 +3,8 @@ import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
+  ArrayUnique,
   Matches,
   IsArray,
   IsBoolean,
@@ -226,14 +228,89 @@ export class ListConciliacionQuery {
   offset: number = 0;
 }
 
+/** Tope de gastos de UN cargo (lote): el caso real más grande son 29. */
+export const LOTE_GASTOS_MAX = 50;
+
 export class LinkMovimientoDto {
   @ApiPropertyOptional({
-    description: 'Gasto a vincular. null para desvincular.',
+    description:
+      'Gasto a vincular. null para desvincular TODO (también un lote de varios gastos).',
     nullable: true,
   })
   @IsOptional()
   @IsUUID()
   gasto_id?: string | null;
+
+  /**
+   * 1 cargo ↔ N gastos (2-oct-2026, API 0.0.52). `null` = ausente. Con UN
+   * elemento es la misma liga que `gasto_id`. Excluyente con `gasto_id`
+   * (400 `LOTE_INVALIDO`, ver `loteInvalido`).
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    nullable: true,
+    description: `Gastos que paga este cargo (1..${LOTE_GASTOS_MAX}, sin repetir). Excluyente con gasto_id. Con 2 o más, cada gasto entra por lo que le falta y la suma debe cuadrar con el cargo (tolerancia de 1 centavo por gasto, mínimo 0.02 y máximo 1.00).`,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(LOTE_GASTOS_MAX)
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  gasto_ids?: string[] | null;
+}
+
+/**
+ * REGLA DEL 400 `LOTE_INVALIDO` del PATCH: `gasto_ids` (arreglo) y
+ * `gasto_id` en el MISMO cuerpo son ambiguos. Un JSON no puede llevar
+ * `undefined`, así que «presente» = `!== undefined` (con `null` incluido:
+ * `{gasto_ids:[…], gasto_id:null}` también rebota). No se usa `'gasto_id' in
+ * dto`: con `target` ES2022+ los campos declarados de la clase existen
+ * SIEMPRE en la instancia (valen `undefined`).
+ */
+export function loteInvalido(dto: {
+  gasto_id?: string | null;
+  gasto_ids?: string[] | null;
+}): boolean {
+  return Array.isArray(dto.gasto_ids) && dto.gasto_id !== undefined;
+}
+
+/**
+ * `GET /v1/conciliacion/movimientos/:id/gastos-candidatos` (2-oct-2026):
+ * gastos bancarios sin conciliar que podrían pagar este CARGO (uno o varios).
+ */
+export class GastosCandidatosQuery {
+  @ApiPropertyOptional({
+    maxLength: 80,
+    description:
+      'Búsqueda: monto («2801» = [2801, 2802); «2801.40» = ±0.01) o texto (proveedor, nota, lugar o folio del ticket). El panel la manda ya normalizada.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  q?: string;
+
+  @ApiPropertyOptional({
+    default: 30,
+    description: 'Ventana ±días alrededor de la fecha del cargo (1..180).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(180)
+  dias: number = 30;
+
+  @ApiPropertyOptional({
+    default: 100,
+    description: 'Máximo de candidatos en la respuesta (1..300).',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(300)
+  limite: number = 100;
 }
 
 /**

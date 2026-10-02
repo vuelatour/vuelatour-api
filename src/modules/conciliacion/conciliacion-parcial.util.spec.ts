@@ -1,12 +1,27 @@
 import {
   cubreGasto,
+  diferenciaLote,
+  etiquetaConciliadoLote,
   faltanteDe,
+  faltanteLote,
   fechaCortaEs,
+  leerErrorPartes,
+  MENSAJE_LOTE_AMBOS,
+  MENSAJE_SOLO_CARGOS,
+  mensajeCargoNoCuadra,
   mensajeGastoYaCubierto,
+  mensajeLoteInvalido,
+  mensajeLoteMonedaDistinta,
   mensajeMonedaDistinta,
+  mensajeMovimientoConLote,
   montoBonito,
+  parteCruzada,
   puedeLigar,
+  puedeRepartirCargo,
+  textoSinPrefijo,
+  toleranciaLote,
   TOLERANCIA_CONCILIACION,
+  type GastoDeLote,
 } from './conciliacion-parcial.util';
 
 /**
@@ -244,6 +259,435 @@ describe('mensajeGastoYaCubierto — sin cargos previos', () => {
       'Ese gasto ya está cubierto: $277.79 de $277.79 (cargo del 07 sep). ' +
         'Si este cargo es otro pago de la misma factura, el gasto debe valer ' +
         'la suma de los dos.',
+    );
+  });
+});
+
+// =======================================================================
+// 1 CARGO ↔ N GASTOS (2-oct-2026). Montos REALES de SAESA en prod: 29
+// «Pago VIP SAESA» (1,118.12 ×5, 2,231.37 ×11, 2,231.38 ×2, 2,801.40 ×8,
+// 1,108.38, 384.89, 1,066.97 = 59,569.87) y los SPEI del 24-sep de GASTOS
+// GNRAL: 8,404.20 · 4,462.75 ×2 · 2,236.25 · 1,118.12 ×2 · 2,231.38.
+// =======================================================================
+
+const MXN = 'MXN';
+const g = (
+  id: string,
+  monto: number,
+  otras: GastoDeLote['otras'] = [],
+  moneda: string | null = MXN,
+): GastoDeLote => ({ id, monto, moneda, otras });
+
+describe('toleranciaLote — least(1.00, greatest(0.02, 0.01 × N))', () => {
+  it.each([
+    [0, 0.02],
+    [1, 0.02],
+    [2, 0.02],
+    [3, 0.03],
+    [7, 0.07],
+    [29, 0.29],
+    [100, 1],
+    [150, 1],
+  ])('N=%i ⇒ %d', (n, t) => {
+    expect(toleranciaLote(n)).toBe(t);
+  });
+
+  it('N no entero o basura no revienta', () => {
+    expect(toleranciaLote(3.9)).toBe(0.03);
+    expect(toleranciaLote(Number.NaN)).toBe(0.02);
+  });
+});
+
+describe('puedeRepartirCargo — casos SAESA reales', () => {
+  it('SPEI 8,404.20 = 3 × 2,801.40 (#315, #319, #326): cuadra exacto', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 8404.2,
+      monedaCuenta: MXN,
+      gastos: [g('g315', 2801.4), g('g319', 2801.4), g('g326', 2801.4)],
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      motivo: null,
+      n: 3,
+      suma: 8404.2,
+      diferencia: 0,
+      tolerancia: 0.03,
+      moneda: MXN,
+    });
+    expect(r.partes).toEqual([
+      { gasto_id: 'g315', monto_parte: 2801.4 },
+      { gasto_id: 'g319', monto_parte: 2801.4 },
+      { gasto_id: 'g326', monto_parte: 2801.4 },
+    ]);
+  });
+
+  it('SPEI 4,462.75 = 2,231.37 + 2,231.38: cuadra exacto', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 4462.75,
+      monedaCuenta: MXN,
+      gastos: [g('g318', 2231.37), g('g321', 2231.38)],
+    });
+    expect(r).toMatchObject({ ok: true, suma: 4462.75, diferencia: 0 });
+  });
+
+  it('SPEI 4,462.75 = 2 × 2,231.37 (SAESA factura 2,231.375): diferencia 0.01 ≤ 0.02', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 4462.75,
+      monedaCuenta: MXN,
+      gastos: [g('g318', 2231.37), g('g322', 2231.37)],
+    });
+    expect(r).toMatchObject({
+      ok: true,
+      suma: 4462.74,
+      diferencia: 0.01,
+      tolerancia: 0.02,
+    });
+  });
+
+  it('SPEI 2,236.25 = 2 × 1,118.12 + 0.01 (factura 1,118.125): cuadra', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 2236.25,
+      monedaCuenta: MXN,
+      gastos: [g('a', 1118.12), g('b', 1118.12)],
+    });
+    expect(r).toMatchObject({ ok: true, suma: 2236.24, diferencia: 0.01 });
+  });
+
+  it('8,404.20 con SOLO 2 × 2,801.40: CARGO_NO_CUADRA con los números', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 8404.2,
+      monedaCuenta: MXN,
+      gastos: [g('g315', 2801.4), g('g319', 2801.4)],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      motivo: 'CARGO_NO_CUADRA',
+      monto_cargo: 8404.2,
+      suma: 5602.8,
+      diferencia: 2801.4,
+      tolerancia: 0.02,
+      moneda: MXN,
+    });
+    expect(r.partes).toEqual([]);
+    expect(r.gastos).toEqual([
+      { id: 'g315', monto: 2801.4, faltante: 2801.4 },
+      { id: 'g319', monto: 2801.4, faltante: 2801.4 },
+    ]);
+  });
+
+  it('se pasa por 0.03 con 2 gastos (tolerancia 0.02): NO cuadra', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 4462.71,
+      monedaCuenta: MXN,
+      gastos: [g('a', 2231.37), g('b', 2231.37)],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      motivo: 'CARGO_NO_CUADRA',
+      diferencia: -0.03,
+    });
+  });
+
+  it('los 29 gastos SAESA (59,569.87): tolerancia 0.29', () => {
+    const montos = [
+      ...Array<number>(5).fill(1118.12),
+      ...Array<number>(11).fill(2231.37),
+      ...Array<number>(2).fill(2231.38),
+      ...Array<number>(8).fill(2801.4),
+      1108.38,
+      384.89,
+      1066.97,
+    ];
+    const gastos = montos.map((m, i) => g(`s${i}`, m));
+    const ok = puedeRepartirCargo({
+      montoCargo: 59569.87 + 0.29,
+      monedaCuenta: MXN,
+      gastos,
+    });
+    expect(ok).toMatchObject({
+      ok: true,
+      n: 29,
+      suma: 59569.87,
+      tolerancia: 0.29,
+    });
+    const no = puedeRepartirCargo({
+      montoCargo: 59569.87 + 0.3,
+      monedaCuenta: MXN,
+      gastos,
+    });
+    expect(no.motivo).toBe('CARGO_NO_CUADRA');
+  });
+
+  it('un gasto en USD en un cargo MXN: LOTE_MONEDA_DISTINTA (se liga 1 a 1)', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 4000,
+      monedaCuenta: MXN,
+      gastos: [g('a', 2000), g('usd', 100, [], 'USD')],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      motivo: 'LOTE_MONEDA_DISTINTA',
+      gasto_id: 'usd',
+      moneda_gasto: 'USD',
+      moneda: MXN,
+    });
+  });
+
+  it('un gasto YA cubierto por otro cargo: GASTO_YA_CUBIERTO con su id', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 5602.8,
+      monedaCuenta: MXN,
+      gastos: [
+        g('g315', 2801.4),
+        g('g236', 2801.4, [{ monto_parte: 2801.4, moneda: MXN }]),
+      ],
+    });
+    expect(r).toMatchObject({
+      ok: false,
+      motivo: 'GASTO_YA_CUBIERTO',
+      gasto_id: 'g236',
+      motivo_gasto: 'GASTO_YA_CUBIERTO',
+    });
+  });
+
+  it('un gasto con pago PARCIAL en otro cargo entra por lo que le FALTA', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 2801.4 + 1801.4,
+      monedaCuenta: MXN,
+      gastos: [
+        g('g315', 2801.4),
+        g('g319', 2801.4, [{ monto_parte: 1000, moneda: MXN }]),
+      ],
+    });
+    expect(r.ok).toBe(true);
+    expect(r.partes).toEqual([
+      { gasto_id: 'g315', monto_parte: 2801.4 },
+      { gasto_id: 'g319', monto_parte: 1801.4 },
+    ]);
+  });
+
+  it('un gasto USD con su cargo cruzado (1 ↔ 1) no admite más: MONEDA_DISTINTA', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 200,
+      monedaCuenta: 'USD',
+      gastos: [
+        g('a', 100, [], 'USD'),
+        g('b', 100, [{ monto_parte: 1850, moneda: MXN }], 'USD'),
+      ],
+    });
+    expect(r).toMatchObject({
+      motivo: 'GASTO_YA_CUBIERTO',
+      gasto_id: 'b',
+      motivo_gasto: 'MONEDA_DISTINTA',
+    });
+  });
+
+  it('menos de 2, más de 50 o repetidos: LOTE_INVALIDO', () => {
+    const base = { montoCargo: 100, monedaCuenta: MXN };
+    expect(puedeRepartirCargo({ ...base, gastos: [g('a', 100)] }).motivo).toBe(
+      'LOTE_INVALIDO',
+    );
+    expect(
+      puedeRepartirCargo({ ...base, gastos: [g('a', 50), g('a', 50)] }).motivo,
+    ).toBe('LOTE_INVALIDO');
+    const muchos = Array.from({ length: 51 }, (_, i) => g(`x${i}`, 1));
+    expect(puedeRepartirCargo({ ...base, gastos: muchos }).motivo).toBe(
+      'LOTE_INVALIDO',
+    );
+  });
+});
+
+describe('faltanteLote / parteCruzada', () => {
+  it('sin otras partes falta todo el gasto', () => {
+    expect(faltanteLote(g('a', 2801.4))).toEqual({
+      faltante: 2801.4,
+      cruzado: false,
+    });
+  });
+
+  it('otra parte que ya lo cubre (dentro de 1.00) ⇒ 0', () => {
+    expect(
+      faltanteLote(g('a', 277.79, [{ monto_parte: 276.8, moneda: MXN }]))
+        .faltante,
+    ).toBe(0);
+  });
+
+  it('parte cruzada = moneda de su cuenta ≠ moneda del gasto', () => {
+    expect(parteCruzada('MXN', 'USD')).toBe(true);
+    expect(parteCruzada('MXN', 'MXN')).toBe(false);
+    expect(parteCruzada(null, 'USD')).toBe(false);
+  });
+});
+
+describe('diferenciaLote (gastos_diferencia del listado y del resumen)', () => {
+  it('|cargo| − Σ partes a centavos', () => {
+    expect(
+      diferenciaLote(-4462.75, [
+        { monto_parte: 2231.37 },
+        { monto_parte: 2231.37 },
+      ]),
+    ).toBe(0.01);
+    expect(
+      diferenciaLote(8404.2, [
+        { monto_parte: 2801.4 },
+        { monto_parte: 2801.4 },
+        { monto_parte: 2801.4 },
+      ]),
+    ).toBe(0);
+  });
+
+  it('sin partes o con parte cruzada ⇒ null', () => {
+    expect(diferenciaLote(100, [])).toBeNull();
+    expect(
+      diferenciaLote(1850, [{ monto_parte: 1850, cruzada: true }]),
+    ).toBeNull();
+  });
+});
+
+describe('textos del lote (es-MX)', () => {
+  it('LOTE_INVALIDO', () => {
+    expect(MENSAJE_LOTE_AMBOS).toBe(
+      'Manda la lista de gastos (gasto_ids) o un solo gasto (gasto_id), no los dos.',
+    );
+    expect(mensajeLoteInvalido('NO_EXISTE')).toContain('ya no existe');
+    expect(mensajeLoteInvalido('REPETIDOS')).toContain('repetidos');
+    expect(mensajeLoteInvalido('TAMANO')).toBe(
+      'Elige de 2 a 50 gastos para un mismo cargo.',
+    );
+  });
+
+  it('SOLO_CARGOS', () => {
+    expect(MENSAJE_SOLO_CARGOS).toBe(
+      'Solo un cargo (salida de dinero) se concilia contra gastos.',
+    );
+  });
+
+  it('MOVIMIENTO_CON_LOTE dice cuántos y qué hacer', () => {
+    expect(mensajeMovimientoConLote(3)).toBe(
+      'Este cargo ya paga 3 gastos: desvincúlalos primero («Desvincular los 3 gastos») y vuelve a vincularlo.',
+    );
+  });
+
+  it('LOTE_MONEDA_DISTINTA', () => {
+    const t = mensajeLoteMonedaDistinta({
+      monedaGasto: 'USD',
+      monedaCuenta: 'MXN',
+    });
+    expect(t).toContain('está en USD');
+    expect(t).toContain('cuenta del cargo en MXN');
+    expect(t).toContain('1 a 1');
+  });
+
+  it('CARGO_NO_CUADRA: faltan / se pasan', () => {
+    expect(
+      mensajeCargoNoCuadra({
+        n: 2,
+        suma: 5602.8,
+        montoCargo: 8404.2,
+        tolerancia: 0.02,
+      }),
+    ).toBe(
+      'Los 2 gastos suman $5,602.80 y el cargo es de $8,404.20: faltan $2,801.40 (se acepta hasta $0.02 de diferencia). Revisa qué gastos paga este cargo.',
+    );
+    expect(
+      mensajeCargoNoCuadra({
+        n: 2,
+        suma: 4462.74,
+        montoCargo: 4462.71,
+        tolerancia: 0.02,
+      }),
+    ).toContain('se pasan por $0.03');
+  });
+
+  it('textoSinPrefijo quita «CODIGO:» y pone mayúscula', () => {
+    expect(
+      textoSinPrefijo(
+        'LOTE_SOLO_API_NUEVO: este cargo paga 3 gastos; desligarlo exige la conciliación actualizada',
+      ),
+    ).toBe(
+      'Este cargo paga 3 gastos; desligarlo exige la conciliación actualizada',
+    );
+    expect(textoSinPrefijo(null)).toBe('');
+    expect(textoSinPrefijo('sin prefijo')).toBe('Sin prefijo');
+  });
+});
+
+describe('leerErrorPartes — hint, prefijo y detail JSON', () => {
+  it('hint manda; detail JSON se parsea', () => {
+    const r = leerErrorPartes({
+      code: '23514',
+      message:
+        'CARGO_NO_CUADRA: los 2 gastos suman 5602.80 y el cargo es de 8404.20',
+      hint: 'CARGO_NO_CUADRA',
+      details: '{"monto_cargo": 8404.2, "suma_gastos": 5602.8}',
+    });
+    expect(r.codigo).toBe('CARGO_NO_CUADRA');
+    expect(r.details).toEqual({ monto_cargo: 8404.2, suma_gastos: 5602.8 });
+    expect(r.texto).toBe('Los 2 gastos suman 5602.80 y el cargo es de 8404.20');
+  });
+
+  it('sin hint toma el prefijo; detail que no es JSON ⇒ null', () => {
+    const r = leerErrorPartes({
+      message: 'GASTO_YA_CUBIERTO: el gasto x ya está cubierto',
+      details: 'Failing row contains (…)',
+    });
+    expect(r.codigo).toBe('GASTO_YA_CUBIERTO');
+    expect(r.details).toBeNull();
+  });
+
+  it('el código en medio del texto (formato viejo del trigger) también cuenta', () => {
+    expect(
+      leerErrorPartes({ message: 'ERROR: GASTO_YA_CUBIERTO: otra MONEDA' })
+        .codigo,
+    ).toBe('GASTO_YA_CUBIERTO');
+  });
+
+  it('un error ajeno ⇒ codigo null', () => {
+    expect(
+      leerErrorPartes({ code: '57014', message: 'canceling statement' }).codigo,
+    ).toBeNull();
+    expect(leerErrorPartes(null).codigo).toBeNull();
+  });
+
+  it('JSON roto en detail no revienta', () => {
+    expect(
+      leerErrorPartes({ message: 'LOTE_INVALIDO: x', details: '{roto' })
+        .details,
+    ).toBeNull();
+  });
+});
+
+describe('etiquetaConciliadoLote («Conciliado con» del Excel)', () => {
+  it('3 gastos SAESA con su vuelo y monto', () => {
+    expect(
+      etiquetaConciliadoLote(
+        [315, 319, 326].map((folio) => ({
+          categoria: 'Operaciones',
+          vuelo_folio: folio,
+          monto_parte: 2801.4,
+        })),
+        0,
+      ),
+    ).toBe(
+      '3 gastos: Operaciones · vuelo #315 ($2,801.40) · Operaciones · vuelo #319 ($2,801.40) · Operaciones · vuelo #326 ($2,801.40)',
+    );
+  });
+
+  it('con diferencia de un centavo la dice', () => {
+    expect(
+      etiquetaConciliadoLote(
+        [
+          {
+            categoria: 'Operaciones',
+            proveedor: 'SAESA',
+            monto_parte: 2231.37,
+          },
+          { categoria: 'Operaciones', monto_parte: 2231.37 },
+        ],
+        0.01,
+      ),
+    ).toBe(
+      '2 gastos: Operaciones · SAESA ($2,231.37) · Operaciones ($2,231.37) · diferencia $0.01',
     );
   });
 });
