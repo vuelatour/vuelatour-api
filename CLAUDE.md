@@ -3231,7 +3231,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de vuelo y `invoices/file-urls` vs recibidas).
 
 38. **PAGOS DE UTILIDADES A SOCIOS (1-oct-2026, API 0.0.49, migración
-    `20261001000001` — PENDIENTE DE APLICAR).** Pedido del cliente con la
+    `20261001000001` — APLICADA en prod el 1-oct-2026).** Pedido del cliente con la
     captura de /admin/profit-sharing: «cada socio debe recibir los pagos de
     lo que generó el avión en el mes […] Mauricio Roque, %, Monto de
     utilidad, estatus de si ya se pagó o aún no, con cuánto se le pagó,
@@ -4065,7 +4065,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (dry-run probado en PGlite el 1-oct-2026: `DRYRUN_OK`; aplicada dos veces = idempotente; NO corrido en prod)** —
+- **APLICADA en prod el 1-oct-2026 (dry-run corrido en prod: `DRYRUN_OK · N4142R · socio Mauricio Roque · C1–C6`, sin residuos; después tabla, bucket privado, trigger e índices verificados y `get_advisors` solo con el INFO de RLS sin policies)** —
   `20261001000001_reparto_pago.sql` (invariante 38): tabla `reparto_pago`
   (RLS sin policies; índices parciales `(aeronave_id, socio_id, periodo)` y
   `(periodo)` con `deleted_at is null` + único parcial de
