@@ -66,6 +66,28 @@ export function esColumnaInexistente(
   );
 }
 
+/**
+ * ¿El error de PostgREST/Postgres es «esa TABLA (o vista) no existe»?
+ * (migración sin aplicar). Mismo criterio que `esColumnaInexistente`, para
+ * una tabla: `42P01` (undefined_table) o `PGRST205` (fuera del schema
+ * cache). Movido aquí desde `inventory/eliminar-movimiento.util` (que lo
+ * reexporta) el 2-oct-2026: `common/` no importa de `modules/`.
+ */
+export function esTablaInexistente(
+  err: ErrorColumnaLike | null | undefined,
+): boolean {
+  if (!err) return false;
+  if (err.code === '42P01' || err.code === 'PGRST205') return true;
+  const msg = (err.message ?? '').toLowerCase();
+  if (msg.includes('relation') && msg.includes('does not exist')) return true;
+  return (
+    msg.includes('could not find the table') ||
+    (msg.includes('could not find') &&
+      msg.includes('table') &&
+      msg.includes('schema cache'))
+  );
+}
+
 export interface ColumnaOpcionalOpciones {
   /** Ventana entre sondeos cuando la columna no existe (default 10 min). */
   reintentoMs?: number;

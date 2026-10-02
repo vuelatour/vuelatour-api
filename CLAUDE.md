@@ -3667,10 +3667,21 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Sonda ÚNICA** `common/partes-disponible.util.ts`
       (`partesDisponibles` = `columnaOpcional(movimiento_bancario.gastos_n)`,
       re-sondeo ≤ 10 min; `errorPartesNoDisponibles` ⇒ 503
-      `CONCILIACION_PARTES_NO_DISPONIBLE`; `esPartesAusentes` = RPC o tabla
-      fuera del schema cache ⇒ 503). **REGLA DURA: todo select/update/filtro
-      que nombre `gastos_n`, la puente o `v_gasto_conciliacion` va detrás de
-      la sonda.** Sin la migración: lectores con el espejo y |monto|
+      `CONCILIACION_PARTES_NO_DISPONIBLE`). `esPartesAusentes` ⇒ 503 SOLO
+      con `PGRST202`/`PGRST205` o un 42883/42P01 cuyo mensaje NOMBRA
+      `OBJETOS_PARTES` (las 2 RPC, la puente, la vista); **42883 también es
+      «operator does not exist» (el `public.moneda = text` del 15-sep): eso
+      sube como 500 con su texto real**, y `errorRpcPartes` registra en el
+      log el code y el mensaje de Postgres ANTES de traducir (antes se
+      disfrazaba de «falta aplicar una actualización» y se perdía). **El «sí»
+      de la sonda se memoriza para siempre: si se ejecuta el ROLLBACK de
+      20261002000002 hay que REINICIAR o redesplegar el API** (si no, lista,
+      resumen y reporte responden 500 por `gastos_n` y la liga 503).
+      **REGLA DURA: todo select/update/filtro que nombre `gastos_n`, la
+      puente o `v_gasto_conciliacion` va detrás de la sonda.** Las partes se
+      leen con `leerPorLotesPaginado` (lotes de 200 ids, cada uno paginado
+      por la PK con `.order().range()`: 200 cargos × 50 partes rebasan el
+      tope de 1000 de PostgREST). Sin la migración: lectores con el espejo y |monto|
       (0.0.51), `link()` con UN gasto por el camino directo
       (`linkDirecto`, intacto) y lote / candidatos ⇒ 503 (spec que falla si
       alguna consulta nombra lo nuevo).
@@ -3695,7 +3706,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       diferencia, tolerancia, moneda, gastos[{id, monto, faltante}]}`,
       `LOTE_MONEDA_DISTINTA {gasto_id, moneda_gasto, moneda_cuenta}`,
       `MOVIMIENTO_CON_LOTE`, `MOVIMIENTO_YA_LIGADO`, `REVERSO_INVALIDO`,
-      `LOTE_SOLO_API_NUEVO`; `LOTE_INVALIDO` ⇒ 400. Respuesta: la fila
+      `LOTE_SOLO_API_NUEVO`, `PARTES_INCOHERENTES` y `CARGO_LIGADO` (el
+      cargo cambió: `MENSAJE_CARGO_CAMBIO`); `LOTE_INVALIDO` ⇒ 400. Sus
+      textos salen de helpers (`mensajeErrorPartes`,
+      `mensajeLoteInvalidoDeBd`), NUNCA del texto de la BD (trae uuid
+      crudos). `GASTO_YA_CUBIERTO`: `details.motivo` de la BD gana
+      (`motivoGastoCubiertoDeBd`; el `includes('MONEDA')` queda de
+      respaldo) y un gasto ya cubierto 1 ↔ 1 en otra moneda se explica como
+      MONEDA_DISTINTA (`afinarMotivoGastoCubierto`). Lote con la moneda de
+      la cuenta ilegible ⇒ 503 `CUENTA_SIN_MONEDA` (`errorSinMonedaCuenta`,
+      el mismo de los candidatos), jamás un LOTE_MONEDA_DISTINTA. Los ids se
+      comparan en minúsculas (`normalizarUuid` en `link`/`linkGastos`). Respuesta: la fila
       RELEÍDA (`movCols()` + `gastos_n`) + `gastos_estado[{gasto_id,
       monto_parte, moneda, gasto_conciliado, monto_vinculado, faltante}]`
       (de `v_gasto_conciliacion`) SIEMPRE y, con exactamente UNA parte, los
@@ -3731,8 +3752,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `expenses.cargosBancariosDe` (cuenta PARTES: el 409
       `GASTO_CONCILIADO` + `details.movimientos_ligados` no cambia),
       `inventory.gastosDeMovimiento`. `inventory.revertirGastoPorDevolucion`
-      ahora LEE el error del DELETE (con la FK `restrict` de la puente un
-      gasto conciliado no se borra: lo que falta queda en `sin_revertir`).
+      SALTA los gastos con cargo del banco ligado (ni DELETE ni ajuste del
+      monto) y LEE el error del DELETE y del UPDATE: el que falla se salta y
+      se sigue con el siguiente (lo que falte queda en `sin_revertir`).
       `GET movimientos` (ADITIVOS, en lote por página, best-effort: si una
       lectura falla no se anota NADA): `gastos_n`, `gastos:
       MovimientoGasto[]` (+ `monto_parte`, `moneda_parte`, `monto_vinculado`,
@@ -3744,8 +3766,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Operaciones · vuelo #315 ($2,801.40) · …» + «· diferencia $0.01») y
       «Matrícula» = unión con « + »; con UNA parte, como siempre.
       `clasificarMovimiento` (no clasifica un cargo con partes; «quitar» no
-      lo desconcilia), `linkCobro` (`conciliado … || gastos_n > 0`) y
-      `linkIngreso` usan `ligadoAGasto`. `ingresos.leerAbono` no aplica
+      lo desconcilia), `linkCobro` (`conciliado … || gastos_n > 0`; y un
+      movimiento ligado a gasto(s) NO admite un cobro/sobre: 409
+      `MOVIMIENTO_YA_LIGADO` `mensajeMovimientoConGastos` — la BD no tiene
+      CHECK de exclusividad gasto ↔ cobro y su dinero se contaría dos
+      veces) y `linkIngreso` usan `ligadoAGasto`. `ingresos.leerAbono` no aplica
       (ABONO).
     - **Fuera de alcance (v1)**: `UpdateGastoDto.conciliado` (override
       manual) sobre un gasto con partes se SOBRESCRIBE en el siguiente

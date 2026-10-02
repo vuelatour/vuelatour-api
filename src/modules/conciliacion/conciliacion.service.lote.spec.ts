@@ -1,8 +1,10 @@
 import {
   BadRequestException,
   ConflictException,
+  HttpException,
   NotFoundException,
   ServiceUnavailableException,
+  type Logger,
 } from '@nestjs/common';
 import { ConciliacionService } from './conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
@@ -16,6 +18,13 @@ import {
   VISTA_CONCILIACION,
   type OpcionesRpc,
 } from './conciliacion-partes.fixture-spec';
+import {
+  MENSAJE_CARGO_CAMBIO,
+  mensajeErrorPartes,
+  mensajeLoteInvalido,
+  mensajeMovimientoConGastos,
+} from './conciliacion-parcial.util';
+import { MENSAJE_SIN_MONEDA_CUENTA } from './gastos-candidatos.util';
 
 /**
  * 1 CARGO DEL BANCO ↔ N GASTOS («lote», 2-oct-2026, API 0.0.52, migración
@@ -93,6 +102,10 @@ interface OpcionesFake {
   rpc?: OpcionesRpc;
   /** Tablas cuya lectura falla (lectura best-effort de la lista). */
   fallaLectura?: string[];
+  /** Tope de filas por respuesta, como `max-rows` de PostgREST (sin aviso). */
+  maxFilas?: number;
+  /** UPDATE que la BD rechaza (trigger / constraint diferido). */
+  falloUpdate?: { tabla: string; error: Row };
 }
 
 /** Mini-PostgREST en memoria: filtros, `or`, embeds, orden, RPC y bitácora. */
@@ -158,6 +171,9 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
             count: null,
           };
         }
+        if (op === 'update' && opts.falloUpdate?.tabla === tabla) {
+          return { data: null, error: opts.falloUpdate.error, count: null };
+        }
         const filas = (db[tabla] ?? []).filter((r) =>
           filtros.every((f) => f(r)),
         );
@@ -169,6 +185,7 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
         const total = out.length;
         if (rango) out = out.slice(rango[0], rango[1] + 1);
         if (limite != null) out = out.slice(0, limite);
+        if (opts.maxFilas != null) out = out.slice(0, opts.maxFilas);
         if (head) return { data: null, error: null, count: total };
         return {
           data: unico ? (out[0] ?? null) : out,
@@ -591,7 +608,7 @@ describe('cambiar o quitar un lote', () => {
     const r = await error(svc.link('m8404', 'g236', USER));
     expect(r.code).toBe('MOVIMIENTO_CON_LOTE');
     expect(r.message).toBe(
-      'Este cargo ya paga 3 gastos: desvincúlalos primero («Desvincular los 3 gastos») y vuelve a vincularlo.',
+      'Este cargo ya paga 3 gastos: desvincúlalos primero desde Conciliación (recarga la página) y vuelve a vincularlo.',
     );
     expect(r.details).toMatchObject({ movimiento_id: 'm8404', gastos_n: 3 });
     expect(partesDe(db, 'm8404')).toHaveLength(3);
@@ -702,31 +719,114 @@ describe('errores de la BD (carrera) y la migración a medias', () => {
     ['REVERSO_INVALIDO'],
     ['CARGO_EXCEDIDO'],
     ['LOTE_SOLO_API_NUEVO'],
-  ])(
-    '%s de la BD ⇒ 409 con el texto de la BD sin el prefijo',
+    // Antes caían a un 500 técnico (revisión 2-oct-2026).
+    ['PARTES_INCOHERENTES'],
+    ['CARGO_LIGADO'],
+  ] as const)(
+    '%s de la BD ⇒ 409 con el texto del helper (nunca el de la BD con uuid crudos)',
     async (codigo) => {
+      const crudo =
+        'texto de la base con el cargo 9a1b2c3d-1111-4222-8333-444455556666';
       const { svc } = armar(mundo(), {
-        rpc: { fallo: () => errorBd(codigo, 'texto de la base', { x: 1 }) },
+        rpc: { fallo: () => errorBd(codigo, crudo, { x: 1 }) },
       });
       const r = await error(
         svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
       );
       expect(r.e).toBeInstanceOf(ConflictException);
       expect(r.code).toBe(codigo);
-      expect(r.message).toBe('Texto de la base');
+      expect(r.message).toBe(mensajeErrorPartes(codigo, { x: 1 }));
+      expect(r.message).not.toContain('9a1b2c3d');
       expect(r.details).toMatchObject({ movimiento_id: 'm8404', x: 1 });
     },
   );
 
-  it('LOTE_INVALIDO de la BD ⇒ 400', async () => {
+  it('PARTES_INCOHERENTES del camino directo (ventana de la sonda) ⇒ 409 «el cargo cambió», no un 500', async () => {
     const { svc } = armar(mundo(), {
-      rpc: { fallo: () => errorBd('LOTE_INVALIDO', 'gasto inexistente') },
+      sinPartes: true,
+      falloUpdate: {
+        tabla: 'movimiento_bancario',
+        error: errorBd(
+          'PARTES_INCOHERENTES',
+          'el cargo m8404 quedó con sus gastos a medias (conciliado)',
+          { movimiento_id: 'm8404', motivo: 'conciliado' },
+        ),
+      },
+    });
+    const r = await error(svc.link('m8404', null, USER));
+    expect(r.e).toBeInstanceOf(ConflictException);
+    expect(r.code).toBe('PARTES_INCOHERENTES');
+    expect(r.message).toBe(MENSAJE_CARGO_CAMBIO);
+  });
+
+  it('LOTE_INVALIDO de la BD ⇒ 400 con el texto de siempre (sin el uuid del gasto)', async () => {
+    const { svc } = armar(mundo(), {
+      rpc: {
+        fallo: () =>
+          errorBd(
+            'LOTE_INVALIDO',
+            'el gasto 9a1b2c3d-1111-4222-8333-444455556666 no existe',
+            { gasto_id: '9a1b2c3d-1111-4222-8333-444455556666' },
+          ),
+      },
     });
     const r = await error(
       svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
     );
     expect(r.e).toBeInstanceOf(BadRequestException);
     expect(r.code).toBe('LOTE_INVALIDO');
+    expect(r.message).toBe(mensajeLoteInvalido('NO_EXISTE'));
+  });
+
+  it('GASTO_YA_CUBIERTO de la BD: details.motivo MONEDA_DISTINTA gana aunque el texto no diga MONEDA', async () => {
+    const { svc } = armar(mundo(), {
+      rpc: {
+        fallo: () =>
+          errorBd('GASTO_YA_CUBIERTO', 'el gasto g315 ya está cubierto', {
+            motivo: 'MONEDA_DISTINTA',
+            gasto_id: 'g315',
+          }),
+      },
+    });
+    const r = await error(
+      svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
+    );
+    expect(r.code).toBe('GASTO_YA_CUBIERTO');
+    expect(r.details).toMatchObject({
+      motivo: 'MONEDA_DISTINTA',
+      gasto_id: 'g315',
+    });
+  });
+
+  it('GASTO_YA_CUBIERTO de G con el gasto ya cubierto 1 ↔ 1 en otra moneda (carrera) ⇒ motivo MONEDA_DISTINTA', async () => {
+    const db = mundo();
+    const { svc } = armar(db, {
+      rpc: {
+        // Mientras se pre-validaba, otro cargo (cuenta USD) tomó g315 1 ↔ 1.
+        fallo: () => {
+          db[TABLA_PARTES].push({
+            movimiento_id: 'm-usd',
+            gasto_id: 'g315',
+            monto_parte: 150,
+            moneda: 'USD',
+            created_at: '2026-10-02T00:00:00Z',
+          });
+          return errorBd(
+            'GASTO_YA_CUBIERTO',
+            'el gasto g315 ya está cubierto por otros cargos (0.00 de 2801.40)',
+            { motivo: 'GASTO_YA_CUBIERTO', gasto_id: 'g315' },
+          );
+        },
+      },
+    });
+    const r = await error(
+      svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
+    );
+    expect(r.code).toBe('GASTO_YA_CUBIERTO');
+    expect(r.details).toMatchObject({
+      motivo: 'MONEDA_DISTINTA',
+      gasto_id: 'g315',
+    });
   });
 
   it('RPC fuera del schema cache (PGRST202) ⇒ 503 CONCILIACION_PARTES_NO_DISPONIBLE', async () => {
@@ -744,6 +844,55 @@ describe('errores de la BD (carrera) y la migración a medias', () => {
     );
     expect(r.e).toBeInstanceOf(ServiceUnavailableException);
     expect(r.code).toBe('CONCILIACION_PARTES_NO_DISPONIBLE');
+  });
+
+  it('42883 «operator does not exist» (incidente 15-sep) ⇒ 500 con su texto real y en el log, NO 503', async () => {
+    const { svc } = armar(mundo(), {
+      rpc: {
+        fallo: () => ({
+          code: '42883',
+          message: 'operator does not exist: public.moneda = text',
+        }),
+      },
+    });
+    const logError = jest
+      .spyOn((svc as unknown as { logger: Logger }).logger, 'error')
+      .mockImplementation(() => undefined);
+    const r = await error(
+      svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
+    );
+    expect(r.e).not.toBeInstanceOf(HttpException);
+    expect((r.e as Error).message).toBe(
+      'operator does not exist: public.moneda = text',
+    );
+    expect(logError).toHaveBeenCalledTimes(1);
+    expect(String(logError.mock.calls[0][0])).toContain('42883');
+    expect(String(logError.mock.calls[0][0])).toContain(
+      'operator does not exist: public.moneda = text',
+    );
+  });
+
+  it('42883 que NOMBRA la RPC ⇒ 503 (y el error real queda en el log)', async () => {
+    const { svc } = armar(mundo(), {
+      rpc: {
+        fallo: () => ({
+          code: '42883',
+          message:
+            'function public.conciliacion_ligar_cargo_gastos(uuid, uuid[], uuid) does not exist',
+        }),
+      },
+    });
+    const logError = jest
+      .spyOn((svc as unknown as { logger: Logger }).logger, 'error')
+      .mockImplementation(() => undefined);
+    const r = await error(
+      svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER),
+    );
+    expect(r.e).toBeInstanceOf(ServiceUnavailableException);
+    expect(r.code).toBe('CONCILIACION_PARTES_NO_DISPONIBLE');
+    expect(String(logError.mock.calls[0][0])).toContain(
+      'conciliacion_ligar_cargo_gastos',
+    );
   });
 
   it('un error ajeno de la RPC sube tal cual (500)', async () => {
@@ -1031,5 +1180,107 @@ describe('SIN la migración 20261002000002 — todo como el 0.0.51', () => {
     const { svc, db } = armar(mundo(), { sinPartes: true });
     await svc.linkGastos('m2231', ['g321'], USER);
     expect(mov(db, 'm2231').gasto_id).toBe('g321');
+  });
+});
+
+describe('revisión 2-oct-2026: moneda de la cuenta, uuid, cobros y anti-tope', () => {
+  it('lote con la moneda de la cuenta ilegible ⇒ 503 CUENTA_SIN_MONEDA (no un LOTE_MONEDA_DISTINTA que culpa al operador)', async () => {
+    const db = mundo();
+    db.movimiento_bancario.push(
+      cargo('m-sin-cuenta', 5602.8, { cuenta_bancaria_id: 'cta-borrada' }),
+    );
+    const { svc, log } = armar(db);
+    const r = await error(
+      svc.linkGastos('m-sin-cuenta', ['g315', 'g319'], USER),
+    );
+    expect(r.e).toBeInstanceOf(ServiceUnavailableException);
+    expect(r.code).toBe('CUENTA_SIN_MONEDA');
+    expect(r.message).toBe(MENSAJE_SIN_MONEDA_CUENTA);
+    expect(log.some((q) => q.tabla.startsWith('rpc:'))).toBe(false);
+    // El endpoint de candidatos responde lo MISMO.
+    const c = await error(svc.gastosCandidatosDeMovimiento('m-sin-cuenta', {}));
+    expect(c.code).toBe('CUENTA_SIN_MONEDA');
+  });
+
+  it('uuid en MAYÚSCULAS en gasto_ids / gasto_id: se encuentra el gasto (antes «ya no existe»)', async () => {
+    const U = (n: number) => `aaaaaaaa-0000-4000-8000-000000000${n}`;
+    const db = mundo({
+      gasto: [
+        saesa(U(315), 2801.4, 315),
+        saesa(U(319), 2801.4, 319),
+        saesa(U(326), 2801.4, 326),
+        saesa(U(321), 2231.38, 321),
+      ],
+    });
+    const { svc } = armar(db);
+    await svc.linkGastos(
+      'm8404',
+      [U(315), U(319), U(326)].map((x) => x.toUpperCase()),
+      USER,
+    );
+    expect(partesDe(db, 'm8404').map((p) => p.gasto_id)).toEqual([
+      U(315),
+      U(319),
+      U(326),
+    ]);
+    await svc.link('m2231', U(321).toUpperCase(), USER);
+    expect(mov(db, 'm2231').gasto_id).toBe(U(321));
+    // Repetidos que solo difieren en mayúsculas: LOTE_INVALIDO.
+    const r = await error(
+      svc.linkGastos('m4462', [U(315), U(315).toUpperCase()], USER),
+    );
+    expect(r.code).toBe('LOTE_INVALIDO');
+  });
+
+  it('linkCobro sobre un cargo que ya paga gastos ⇒ 409 MOVIMIENTO_YA_LIGADO (su dinero no se cuenta dos veces)', async () => {
+    const { svc, db } = armar(mundo());
+    await svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    const r = await error(svc.linkCobro('m8404', { cobro_id: 'c-1' }, USER));
+    expect(r.e).toBeInstanceOf(ConflictException);
+    expect(r.code).toBe('MOVIMIENTO_YA_LIGADO');
+    expect(r.message).toBe(mensajeMovimientoConGastos(3));
+    expect(r.details).toMatchObject({ liga: 'GASTO', gastos_n: 3 });
+    expect(mov(db, 'm8404').cobro_id).toBeNull();
+    // Con UNA parte (espejo gasto_id) también.
+    await svc.link('m2231', 'g321', USER);
+    const uno = await error(
+      svc.linkCobro('m2231', { cobro_grupo_id: 'sobre-1' }, USER),
+    );
+    expect(uno.code).toBe('MOVIMIENTO_YA_LIGADO');
+    expect(uno.message).toBe(mensajeMovimientoConGastos(1));
+    // Desvincular el cobro (ambos null) sigue pasando y no le quita los gastos.
+    await svc.linkCobro('m8404', {}, USER);
+    expect(mov(db, 'm8404')).toMatchObject({ conciliado: true, gastos_n: 3 });
+  });
+
+  it('la lista lee TODAS las partes aunque pasen de 1000 (PostgREST corta en max-rows sin avisar)', async () => {
+    const cargos: Row[] = [];
+    const gastos: Row[] = [];
+    const partes: Row[] = [];
+    for (let i = 0; i < 30; i += 1) {
+      cargos.push(cargo(`mc${i}`, 400, { conciliado: true }));
+      for (let j = 0; j < 40; j += 1) {
+        const gid = `gc${i}-${j}`;
+        gastos.push(saesa(gid, 10, 315, { conciliado: true }));
+        partes.push({
+          movimiento_id: `mc${i}`,
+          gasto_id: gid,
+          monto_parte: 10,
+          moneda: 'MXN',
+          created_at: '2026-10-02T00:00:00Z',
+          created_by: USER,
+        });
+      }
+    }
+    const db = mundo({ movimiento_bancario: cargos, gasto: gastos });
+    db[TABLA_PARTES] = partes;
+    const { svc } = armar(db, { maxFilas: 1000 });
+    const lista = await svc.list({ limit: 100, offset: 0 });
+    expect(lista.data).toHaveLength(30);
+    for (const fila of lista.data) {
+      expect(fila.gastos_n).toBe(40);
+      expect(fila.gastos as Row[]).toHaveLength(40);
+      expect(fila).toMatchObject({ gastos_suma: 400, gastos_diferencia: 0 });
+    }
   });
 });

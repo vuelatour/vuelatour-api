@@ -178,26 +178,13 @@ export interface EvaluacionEliminacion {
 export const MIGRACION_MOVIMIENTO_ELIMINADO = '20260921000001';
 
 /**
- * ¿El error de PostgREST/Postgres es «esa TABLA no existe»? (migración sin
- * aplicar). Mismo criterio que `esColumnaInexistente`, para una tabla:
- * `42P01` (undefined_table) o `PGRST205` (fuera del schema cache). Con la
- * tabla ausente los LECTORES devuelven vacío y avisan en el log; el borrado
- * responde 503 — jamás un borrado a medias.
+ * ¿El error de PostgREST/Postgres es «esa TABLA no existe»? Vive en
+ * `common/columna-opcional.util` (junto a `esColumnaInexistente`, 2-oct-2026:
+ * `common/` no importa de `modules/`); se reexporta aquí para los lectores
+ * de siempre. Con la tabla ausente los LECTORES devuelven vacío y avisan en
+ * el log; el borrado responde 503 — jamás un borrado a medias.
  */
-export function esTablaInexistente(
-  err: { code?: string | null; message?: string | null } | null | undefined,
-): boolean {
-  if (!err) return false;
-  if (err.code === '42P01' || err.code === 'PGRST205') return true;
-  const msg = (err.message ?? '').toLowerCase();
-  if (msg.includes('relation') && msg.includes('does not exist')) return true;
-  return (
-    msg.includes('could not find the table') ||
-    (msg.includes('could not find') &&
-      msg.includes('table') &&
-      msg.includes('schema cache'))
-  );
-}
+export { esTablaInexistente } from '../../common/columna-opcional.util';
 
 // ===== Texto (es-MX) =====
 

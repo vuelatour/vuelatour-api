@@ -4022,9 +4022,21 @@ export class InventoryService {
           .in('inventario_movimiento_id', movIds)
           .order('fecha_gasto', { ascending: false })
           .order('created_at', { ascending: false });
+        const conBanco = await this.gastosConCargoBancario(
+          (gastos ?? []).map((g) => String(g.id)),
+        );
 
         for (const g of gastos ?? []) {
           if (porRevertir <= 0) break;
+          // Un gasto con cargo del banco ligado NO se borra ni se reduce
+          // (revisión 2-oct-2026): el DELETE choca con la FK `restrict` de la
+          // puente y bajarle el monto dejaría su conciliación incoherente.
+          if (conBanco.has(String(g.id))) {
+            this.logger.warn(
+              `DEVOLUCION de ${itemNombre}: el gasto ${String(g.id)} tiene un cargo del banco ligado; no se revierte (se sigue con el siguiente).`,
+            );
+            continue;
+          }
           const monto = Number(g.monto);
           const monedaG: 'MXN' | 'USD' = g.moneda === 'MXN' ? 'MXN' : 'USD';
           // `aDev` = multiplicador gasto → moneda de la devolución. Misma
@@ -4048,16 +4060,22 @@ export class InventoryService {
             // El error del DELETE se LEE (2-oct-2026): con la puente
             // `movimiento_bancario_gasto` (FK `on delete restrict`) borrar un
             // gasto conciliado falla, y tragárselo descontaba lo «revertido»
-            // sin haber borrado nada. Al lanzar, lo que falta queda en
+            // sin haber borrado nada. Ese gasto se SALTA (sin descontar) y se
+            // sigue con el siguiente: lo que no alcance queda en
             // `sin_revertir` (ajuste manual) y el log lo dice.
             const { error: delErr } = await this.supabase.service
               .from('gasto')
               .delete()
               .eq('id', g.id as string);
-            if (delErr) throw new Error(delErr.message);
+            if (delErr) {
+              this.logger.warn(
+                `DEVOLUCION de ${itemNombre}: no se pudo borrar el gasto ${String(g.id)} (${delErr.message}); se sigue con el siguiente.`,
+              );
+              continue;
+            }
             porRevertir = round(porRevertir - montoEnDev, 2);
           } else {
-            await this.supabase.service
+            const { error: upErr } = await this.supabase.service
               .from('gasto')
               .update({
                 monto: round(monto - porRevertir / aDev, 2),
@@ -4065,6 +4083,12 @@ export class InventoryService {
                 updated_by: userId,
               })
               .eq('id', g.id as string);
+            if (upErr) {
+              this.logger.warn(
+                `DEVOLUCION de ${itemNombre}: no se pudo ajustar el gasto ${String(g.id)} (${upErr.message}); se sigue con el siguiente.`,
+              );
+              continue;
+            }
             porRevertir = 0;
           }
         }
@@ -4089,6 +4113,35 @@ export class InventoryService {
       };
     }
     return null;
+  }
+
+  /**
+   * Ids (de estos) con algún cargo del banco ligado: con la puente (sonda
+   * `partesDisponibles`) cualquier PARTE, sin ella el espejo `gasto_id` — el
+   * mismo criterio que la vista previa del borrado. Best-effort: si la
+   * lectura falla devuelve vacío (el DELETE sigue protegido por la FK).
+   */
+  private async gastosConCargoBancario(
+    ids: ReadonlyArray<string>,
+  ): Promise<Set<string>> {
+    const out = new Set<string>();
+    if (ids.length === 0) return out;
+    try {
+      const conPartes = await partesDisponibles(this.supabase.service);
+      const { data, error } = await this.supabase.service
+        .from(conPartes ? 'movimiento_bancario_gasto' : 'movimiento_bancario')
+        .select('gasto_id')
+        .in('gasto_id', [...ids]);
+      if (error) throw new Error(error.message);
+      for (const f of (data ?? []) as Array<{ gasto_id: unknown }>) {
+        if (typeof f.gasto_id === 'string') out.add(f.gasto_id);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer qué gastos tienen cargo del banco: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return out;
   }
 
   async listMovimientos(filters: ListMovimientosQuery) {

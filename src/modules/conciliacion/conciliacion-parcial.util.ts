@@ -261,6 +261,21 @@ export interface GastoDeLote {
   otras: ReadonlyArray<ParteDeGasto>;
 }
 
+/**
+ * Un uuid se compara SIEMPRE en minúsculas (revisión 2-oct-2026): PostgREST
+ * devuelve los ids en minúsculas y `@IsUUID` acepta MAYÚSCULAS, así que un
+ * `gasto_ids` en mayúsculas no encontraba su gasto en el `Map` de la
+ * pre-validación («ya no existe») aunque existiera. Lo que no parece uuid se
+ * deja tal cual.
+ */
+export function normalizarUuid(id: string): string {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    id,
+  )
+    ? id.toLowerCase()
+    : id;
+}
+
 /** Motivo por el que el lote NO se puede ligar. */
 export type MotivoNoRepartir =
   | 'LOTE_INVALIDO'
@@ -332,14 +347,19 @@ export function faltanteLote(g: GastoDeLote): {
 
 /**
  * ¿Este cargo puede pagar EXACTAMENTE estos gastos (N ≥ 2)? Espejo de
- * `conciliacion_ligar_cargo_gastos` (en el MISMO orden de reglas):
+ * `conciliacion_ligar_cargo_gastos` (G), en su orden:
  * 1. 2..50 gastos distintos (si no, LOTE_INVALIDO);
- * 2. todos en la moneda de la cuenta (LOTE_MONEDA_DISTINTA — un gasto en
- *    otra moneda solo se liga 1 a 1);
- * 3. cada gasto entra por su `faltante_lote` > 0 (GASTO_YA_CUBIERTO);
- * 4. `|Σ − |cargo|| ≤ toleranciaLote(N)` (CARGO_NO_CUADRA). No existe el
+ * 2. GASTO POR GASTO, en el orden de la lista (como el loop de G): primero
+ *    su moneda = la de la cuenta (LOTE_MONEDA_DISTINTA — un gasto en otra
+ *    moneda solo se liga 1 a 1) y luego su `faltante_lote` > 0
+ *    (GASTO_YA_CUBIERTO). Con un gasto cubierto en la posición 1 y uno en
+ *    USD en la 2, el motivo es GASTO_YA_CUBIERTO, igual que en la BD;
+ * 3. `|Σ − |cargo|| ≤ toleranciaLote(N)` (CARGO_NO_CUADRA). No existe el
  *    «cargo parcial»: el centavo que sobre o falte vive en
  *    `gastos_diferencia`, jamás se ajusta un gasto.
+ * Única diferencia deliberada: sin la moneda de la cuenta (`null`) el TS
+ * rechaza (LOTE_MONEDA_DISTINTA) y G no compara; el servicio no llega aquí
+ * sin ella (lanza `MENSAJE_SIN_MONEDA_CUENTA` antes).
  */
 export function puedeRepartirCargo(
   input: PuedeRepartirInput,
@@ -367,17 +387,6 @@ export function puedeRepartirCargo(
   if (n < 2 || n > 50 || new Set(ids).size !== n) {
     return { ...base, motivo: 'LOTE_INVALIDO' };
   }
-  const otraMoneda = input.gastos.find(
-    (g) => moneda == null || g.moneda == null || g.moneda !== moneda,
-  );
-  if (otraMoneda) {
-    return {
-      ...base,
-      motivo: 'LOTE_MONEDA_DISTINTA',
-      gasto_id: otraMoneda.id,
-      moneda_gasto: otraMoneda.moneda ?? null,
-    };
-  }
   const gastos = input.gastos.map((g) => {
     const f = faltanteLote(g);
     return { g, ...f };
@@ -387,16 +396,26 @@ export function puedeRepartirCargo(
     monto: Math.abs(c2(g.monto)),
     faltante,
   }));
-  const cubierto = gastos.find((x) => !(x.faltante > 0));
-  if (cubierto) {
-    return {
-      ...base,
-      gastos: filas,
-      motivo: 'GASTO_YA_CUBIERTO',
-      gasto_id: cubierto.g.id,
-      motivo_gasto: cubierto.cruzado ? 'MONEDA_DISTINTA' : 'GASTO_YA_CUBIERTO',
-      moneda_gasto: cubierto.g.moneda ?? null,
-    };
+  // Gasto por gasto, en el orden de la lista (el loop de G).
+  for (const x of gastos) {
+    if (moneda == null || x.g.moneda == null || x.g.moneda !== moneda) {
+      return {
+        ...base,
+        motivo: 'LOTE_MONEDA_DISTINTA',
+        gasto_id: x.g.id,
+        moneda_gasto: x.g.moneda ?? null,
+      };
+    }
+    if (!(x.faltante > 0)) {
+      return {
+        ...base,
+        gastos: filas,
+        motivo: 'GASTO_YA_CUBIERTO',
+        gasto_id: x.g.id,
+        motivo_gasto: x.cruzado ? 'MONEDA_DISTINTA' : 'GASTO_YA_CUBIERTO',
+        moneda_gasto: x.g.moneda ?? null,
+      };
+    }
   }
   const suma = c2(filas.reduce((acc, f) => acc + f.faltante, 0));
   const diferencia = c2(montoCargo - suma);
@@ -452,13 +471,28 @@ export function mensajeLoteInvalido(
 export const MENSAJE_SOLO_CARGOS =
   'Solo un cargo (salida de dinero) se concilia contra gastos.';
 
-/** 409 `MOVIMIENTO_CON_LOTE`: cambiar a UN gasto un cargo que paga varios. */
+/**
+ * 409 `MOVIMIENTO_CON_LOTE`: cambiar a UN gasto un cargo que paga varios.
+ * Lo recibe justo el panel VIEJO (que no tiene el menú «Desvincular los N
+ * gastos»): el texto no nombra un menú, manda a recargar Conciliación.
+ */
 export function mensajeMovimientoConLote(n: number): string {
   const k = Math.max(2, Math.trunc(Number(n) || 0));
   return (
-    `Este cargo ya paga ${k} gastos: desvincúlalos primero ` +
-    `(«Desvincular los ${k} gastos») y vuelve a vincularlo.`
+    `Este cargo ya paga ${k} gastos: desvincúlalos primero desde ` +
+    'Conciliación (recarga la página) y vuelve a vincularlo.'
   );
+}
+
+/**
+ * 409 `MOVIMIENTO_YA_LIGADO` de `linkCobro`: el movimiento ya paga gasto(s)
+ * y un cobro encima contaría su dinero dos veces.
+ */
+export function mensajeMovimientoConGastos(n: number): string {
+  const k = Math.max(1, Math.trunc(Number(n) || 0));
+  return k >= 2
+    ? `Este movimiento ya está conciliado con ${k} gastos: desvincúlalos antes de conciliarlo con un cobro.`
+    : 'Este movimiento ya está conciliado con un gasto: desvincúlalo antes de conciliarlo con un cobro.';
 }
 
 /** 409 `LOTE_MONEDA_DISTINTA`. */
@@ -505,6 +539,122 @@ export function textoSinPrefijo(mensaje: string | null | undefined): string {
     .replace(/^\s*[A-Z][A-Z_]+\s*:\s*/, '')
     .trim();
   return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+}
+
+/** 400 `LOTE_INVALIDO`: el movimiento del banco ya no existe. */
+export const MENSAJE_MOVIMIENTO_NO_EXISTE =
+  'Ese movimiento del banco ya no existe: recarga la página.';
+
+/**
+ * Texto del 400 `LOTE_INVALIDO` que lanza la BD (G/H), sin los uuid crudos
+ * de su mensaje: cada variante a su texto de siempre.
+ */
+export function mensajeLoteInvalidoDeBd(
+  mensaje: string | null | undefined,
+  details: Record<string, unknown> | null | undefined,
+): string {
+  const m = String(mensaje ?? '').toLowerCase();
+  if (typeof details?.tipo === 'string') return MENSAJE_SOLO_CARGOS;
+  if (m.includes('repetido')) return mensajeLoteInvalido('REPETIDOS');
+  if (m.includes('al menos') || m.includes('vacío') || m.includes('vacio')) {
+    return mensajeLoteInvalido('TAMANO');
+  }
+  if (/el movimiento .*no existe/.test(m)) return MENSAJE_MOVIMIENTO_NO_EXISTE;
+  return mensajeLoteInvalido('NO_EXISTE');
+}
+
+/** Texto común de la carrera: el cargo cambió entre la lectura y la escritura. */
+export const MENSAJE_CARGO_CAMBIO =
+  'El cargo cambió mientras lo conciliabas: recarga la página y vuelve a intentarlo.';
+
+/**
+ * Texto (es-MX, sin uuid crudos) de los 409 cuyo mensaje antes pasaba tal
+ * cual desde la BD (revisión 2-oct-2026). `details` = el JSON del `detail`.
+ */
+export function mensajeErrorPartes(
+  codigo:
+    | 'CARGO_EXCEDIDO'
+    | 'MOVIMIENTO_YA_LIGADO'
+    | 'REVERSO_INVALIDO'
+    | 'LOTE_SOLO_API_NUEVO'
+    | 'PARTES_INCOHERENTES'
+    | 'CARGO_LIGADO',
+  details?: Record<string, unknown> | null,
+): string {
+  const num = (k: string): number | null => {
+    const v = details?.[k];
+    const n =
+      typeof v === 'number' ? v : typeof v === 'string' ? Number(v) : NaN;
+    return Number.isFinite(n) ? n : null;
+  };
+  switch (codigo) {
+    case 'CARGO_EXCEDIDO': {
+      const cargo = num('monto_cargo');
+      const suma = num('suma_partes');
+      const parte = num('monto_parte');
+      if (cargo != null && suma != null && parte != null) {
+        return (
+          `Los gastos de este cargo ya suman ${montoBonito(suma)} y con este ` +
+          `(${montoBonito(parte)}) rebasarían el cargo (${montoBonito(cargo)}): ` +
+          'recarga la página y revisa qué gastos paga.'
+        );
+      }
+      return 'Los gastos elegidos rebasarían el monto de este cargo: recarga la página y revisa qué gastos paga.';
+    }
+    case 'MOVIMIENTO_YA_LIGADO':
+      return 'Este movimiento ya está conciliado con un cobro, un sobre de grupo o un ingreso: desvincúlalo antes de vincularle gastos.';
+    case 'REVERSO_INVALIDO':
+      return details?.reverso_de_id
+        ? 'Este movimiento es la devolución de un cargo: no se concilia contra gastos.'
+        : 'Este cargo está conciliado con su devolución del banco: quita el emparejamiento («Quitar») antes de vincularle gastos.';
+    case 'LOTE_SOLO_API_NUEVO': {
+      const n = num('gastos_n');
+      const cuantos =
+        n != null && n >= 2 ? `${Math.trunc(n)} gastos` : 'varios gastos';
+      return (
+        `Este cargo paga ${cuantos} y el servidor se está actualizando: ` +
+        'vuelve a intentarlo en unos minutos desde Conciliación (recarga la página).'
+      );
+    }
+    case 'PARTES_INCOHERENTES':
+    case 'CARGO_LIGADO':
+    default:
+      return MENSAJE_CARGO_CAMBIO;
+  }
+}
+
+/**
+ * Motivo del 409 `GASTO_YA_CUBIERTO` que viene de la BD: `details.motivo`
+ * (MONEDA_DISTINTA | GASTO_YA_CUBIERTO) gana; sin él, el `includes('MONEDA')`
+ * del texto, como siempre (respaldo).
+ */
+export function motivoGastoCubiertoDeBd(
+  mensaje: string | null | undefined,
+  details: Record<string, unknown> | null | undefined,
+): MotivoNoLigar {
+  const m = details?.motivo;
+  if (m === 'MONEDA_DISTINTA' || m === 'GASTO_YA_CUBIERTO') {
+    return m;
+  }
+  return String(mensaje ?? '').includes('MONEDA')
+    ? 'MONEDA_DISTINTA'
+    : 'GASTO_YA_CUBIERTO';
+}
+
+/**
+ * Un gasto «ya cubierto» por un cargo en OTRA moneda (1 ↔ 1 cruzado) se
+ * explica como MONEDA_DISTINTA aunque la BD diga GASTO_YA_CUBIERTO (G lo
+ * hace así cuando `cruzada_otras`): mismo criterio que `faltanteLote`.
+ */
+export function afinarMotivoGastoCubierto(
+  motivo: MotivoNoLigar,
+  monedaGasto: string | null | undefined,
+  monedasCargos: ReadonlyArray<string | null | undefined>,
+): MotivoNoLigar {
+  if (motivo === 'MONEDA_DISTINTA') return motivo;
+  return monedasCargos.some((m) => parteCruzada(m, monedaGasto))
+    ? 'MONEDA_DISTINTA'
+    : motivo;
 }
 
 /** Códigos que la BD lanza con prefijo/hint al escribir partes. */

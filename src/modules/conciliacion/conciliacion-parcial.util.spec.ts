@@ -13,8 +13,16 @@ import {
   mensajeLoteInvalido,
   mensajeLoteMonedaDistinta,
   mensajeMonedaDistinta,
+  mensajeMovimientoConGastos,
   mensajeMovimientoConLote,
+  mensajeErrorPartes,
+  mensajeLoteInvalidoDeBd,
+  MENSAJE_CARGO_CAMBIO,
+  MENSAJE_MOVIMIENTO_NO_EXISTE,
   montoBonito,
+  motivoGastoCubiertoDeBd,
+  afinarMotivoGastoCubierto,
+  normalizarUuid,
   parteCruzada,
   puedeLigar,
   puedeRepartirCargo,
@@ -482,6 +490,43 @@ describe('puedeRepartirCargo — casos SAESA reales', () => {
     });
   });
 
+  it('orden de G: gasto por gasto (un cubierto en la posición 1 gana a un USD en la 2)', () => {
+    const cubiertoPrimero = puedeRepartirCargo({
+      montoCargo: 2901.4,
+      monedaCuenta: MXN,
+      gastos: [
+        g('g236', 2801.4, [{ monto_parte: 2801.4, moneda: MXN }]),
+        g('usd', 100, [], 'USD'),
+      ],
+    });
+    expect(cubiertoPrimero).toMatchObject({
+      motivo: 'GASTO_YA_CUBIERTO',
+      gasto_id: 'g236',
+    });
+    // Al revés, el USD va primero: LOTE_MONEDA_DISTINTA (como la BD).
+    const usdPrimero = puedeRepartirCargo({
+      montoCargo: 2901.4,
+      monedaCuenta: MXN,
+      gastos: [
+        g('usd', 100, [], 'USD'),
+        g('g236', 2801.4, [{ monto_parte: 2801.4, moneda: MXN }]),
+      ],
+    });
+    expect(usdPrimero).toMatchObject({
+      motivo: 'LOTE_MONEDA_DISTINTA',
+      gasto_id: 'usd',
+    });
+  });
+
+  it('sin la moneda de la cuenta el TS rechaza (el servicio no llega aquí sin ella)', () => {
+    const r = puedeRepartirCargo({
+      montoCargo: 5602.8,
+      monedaCuenta: null,
+      gastos: [g('g315', 2801.4), g('g319', 2801.4)],
+    });
+    expect(r.motivo).toBe('LOTE_MONEDA_DISTINTA');
+  });
+
   it('menos de 2, más de 50 o repetidos: LOTE_INVALIDO', () => {
     const base = { montoCargo: 100, monedaCuenta: MXN };
     expect(puedeRepartirCargo({ ...base, gastos: [g('a', 100)] }).motivo).toBe(
@@ -562,10 +607,22 @@ describe('textos del lote (es-MX)', () => {
     );
   });
 
-  it('MOVIMIENTO_CON_LOTE dice cuántos y qué hacer', () => {
+  it('MOVIMIENTO_CON_LOTE dice cuántos y qué hacer SIN nombrar un menú que el panel viejo no tiene', () => {
     expect(mensajeMovimientoConLote(3)).toBe(
-      'Este cargo ya paga 3 gastos: desvincúlalos primero («Desvincular los 3 gastos») y vuelve a vincularlo.',
+      'Este cargo ya paga 3 gastos: desvincúlalos primero desde Conciliación (recarga la página) y vuelve a vincularlo.',
     );
+    expect(mensajeMovimientoConLote(3)).not.toContain('«Desvincular');
+    expect(mensajeMovimientoConLote(0)).toContain('ya paga 2 gastos');
+  });
+
+  it('MOVIMIENTO_YA_LIGADO de linkCobro: el cargo ya paga gasto(s)', () => {
+    expect(mensajeMovimientoConGastos(3)).toBe(
+      'Este movimiento ya está conciliado con 3 gastos: desvincúlalos antes de conciliarlo con un cobro.',
+    );
+    expect(mensajeMovimientoConGastos(1)).toBe(
+      'Este movimiento ya está conciliado con un gasto: desvincúlalo antes de conciliarlo con un cobro.',
+    );
+    expect(mensajeMovimientoConGastos(Number.NaN)).toContain('con un gasto');
   });
 
   it('LOTE_MONEDA_DISTINTA', () => {
@@ -689,5 +746,148 @@ describe('etiquetaConciliadoLote («Conciliado con» del Excel)', () => {
     ).toBe(
       '2 gastos: Operaciones · SAESA ($2,231.37) · Operaciones ($2,231.37) · diferencia $0.01',
     );
+  });
+});
+
+describe('textos de los errores de la BD (sin uuid crudos, revisión 2-oct-2026)', () => {
+  const UUID = '9a1b2c3d-1111-4222-8333-444455556666';
+
+  it('CARGO_EXCEDIDO con los números de la BD', () => {
+    const t = mensajeErrorPartes('CARGO_EXCEDIDO', {
+      movimiento_id: UUID,
+      monto_cargo: 8404.2,
+      suma_partes: 5602.8,
+      monto_parte: 2801.41,
+    });
+    expect(t).toBe(
+      'Los gastos de este cargo ya suman $5,602.80 y con este ($2,801.41) rebasarían el cargo ($8,404.20): recarga la página y revisa qué gastos paga.',
+    );
+    expect(t).not.toContain(UUID);
+    expect(mensajeErrorPartes('CARGO_EXCEDIDO', null)).toBe(
+      'Los gastos elegidos rebasarían el monto de este cargo: recarga la página y revisa qué gastos paga.',
+    );
+  });
+
+  it('REVERSO_INVALIDO: devolución vs cargo emparejado, sin el id del abono', () => {
+    expect(
+      mensajeErrorPartes('REVERSO_INVALIDO', {
+        movimiento_id: UUID,
+        reverso_de_id: UUID,
+      }),
+    ).toBe(
+      'Este movimiento es la devolución de un cargo: no se concilia contra gastos.',
+    );
+    const t = mensajeErrorPartes('REVERSO_INVALIDO', {
+      movimiento_id: UUID,
+      devolucion_id: UUID,
+    });
+    expect(t).toBe(
+      'Este cargo está conciliado con su devolución del banco: quita el emparejamiento («Quitar») antes de vincularle gastos.',
+    );
+    expect(t).not.toContain(UUID);
+  });
+
+  it('PARTES_INCOHERENTES y CARGO_LIGADO: el cargo cambió (recarga)', () => {
+    expect(mensajeErrorPartes('PARTES_INCOHERENTES', { motivo: 'x' })).toBe(
+      MENSAJE_CARGO_CAMBIO,
+    );
+    expect(mensajeErrorPartes('CARGO_LIGADO', { gastos_n: 3 })).toBe(
+      MENSAJE_CARGO_CAMBIO,
+    );
+    expect(MENSAJE_CARGO_CAMBIO).toBe(
+      'El cargo cambió mientras lo conciliabas: recarga la página y vuelve a intentarlo.',
+    );
+  });
+
+  it('MOVIMIENTO_YA_LIGADO y LOTE_SOLO_API_NUEVO', () => {
+    expect(mensajeErrorPartes('MOVIMIENTO_YA_LIGADO')).toBe(
+      'Este movimiento ya está conciliado con un cobro, un sobre de grupo o un ingreso: desvincúlalo antes de vincularle gastos.',
+    );
+    expect(mensajeErrorPartes('LOTE_SOLO_API_NUEVO', { gastos_n: 3 })).toBe(
+      'Este cargo paga 3 gastos y el servidor se está actualizando: vuelve a intentarlo en unos minutos desde Conciliación (recarga la página).',
+    );
+    expect(mensajeErrorPartes('LOTE_SOLO_API_NUEVO', {})).toContain(
+      'paga varios gastos',
+    );
+  });
+
+  it('LOTE_INVALIDO de la BD ⇒ el texto de siempre, sin uuid', () => {
+    expect(
+      mensajeLoteInvalidoDeBd(`LOTE_INVALIDO: el gasto ${UUID} no existe`, {
+        gasto_id: UUID,
+      }),
+    ).toBe(mensajeLoteInvalido('NO_EXISTE'));
+    expect(
+      mensajeLoteInvalidoDeBd(
+        'LOTE_INVALIDO: la lista trae el mismo gasto repetido',
+        null,
+      ),
+    ).toBe(mensajeLoteInvalido('REPETIDOS'));
+    expect(
+      mensajeLoteInvalidoDeBd('LOTE_INVALIDO: manda al menos un gasto', null),
+    ).toBe(mensajeLoteInvalido('TAMANO'));
+    expect(
+      mensajeLoteInvalidoDeBd(
+        'LOTE_INVALIDO: la lista trae un gasto vacío',
+        null,
+      ),
+    ).toBe(mensajeLoteInvalido('TAMANO'));
+    expect(
+      mensajeLoteInvalidoDeBd(
+        `LOTE_INVALIDO: el movimiento ${UUID} no existe`,
+        {
+          movimiento_id: UUID,
+        },
+      ),
+    ).toBe(MENSAJE_MOVIMIENTO_NO_EXISTE);
+    expect(
+      mensajeLoteInvalidoDeBd('LOTE_INVALIDO: solo un CARGO del banco …', {
+        tipo: 'ABONO',
+      }),
+    ).toBe(MENSAJE_SOLO_CARGOS);
+  });
+});
+
+describe('motivo del GASTO_YA_CUBIERTO que manda la BD', () => {
+  it('details.motivo gana; sin él, el includes(MONEDA) de respaldo', () => {
+    expect(
+      motivoGastoCubiertoDeBd('GASTO_YA_CUBIERTO: ya está cubierto', {
+        motivo: 'MONEDA_DISTINTA',
+      }),
+    ).toBe('MONEDA_DISTINTA');
+    expect(
+      motivoGastoCubiertoDeBd('GASTO_YA_CUBIERTO: otra MONEDA', {
+        motivo: 'GASTO_YA_CUBIERTO',
+      }),
+    ).toBe('GASTO_YA_CUBIERTO');
+    expect(motivoGastoCubiertoDeBd('… otra MONEDA (1 a 1)', null)).toBe(
+      'MONEDA_DISTINTA',
+    );
+    expect(motivoGastoCubiertoDeBd('… rebasan su monto', { motivo: 'x' })).toBe(
+      'GASTO_YA_CUBIERTO',
+    );
+  });
+
+  it('un cargo en OTRA moneda que ya lo cubre (1 ↔ 1) ⇒ MONEDA_DISTINTA', () => {
+    expect(afinarMotivoGastoCubierto('GASTO_YA_CUBIERTO', 'USD', ['MXN'])).toBe(
+      'MONEDA_DISTINTA',
+    );
+    expect(
+      afinarMotivoGastoCubierto('GASTO_YA_CUBIERTO', 'MXN', ['MXN', null]),
+    ).toBe('GASTO_YA_CUBIERTO');
+    expect(afinarMotivoGastoCubierto('MONEDA_DISTINTA', 'MXN', [])).toBe(
+      'MONEDA_DISTINTA',
+    );
+  });
+});
+
+describe('normalizarUuid', () => {
+  it('un uuid en MAYÚSCULAS pasa a minúsculas (como lo devuelve la BD)', () => {
+    expect(normalizarUuid('9A1B2C3D-1111-4222-8333-44445555AAAA')).toBe(
+      '9a1b2c3d-1111-4222-8333-44445555aaaa',
+    );
+  });
+  it('lo que no es uuid se deja tal cual', () => {
+    expect(normalizarUuid('gA')).toBe('gA');
   });
 });

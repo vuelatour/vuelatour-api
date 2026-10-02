@@ -1,6 +1,8 @@
 import {
   cuadraConCargo,
+  errorSinMonedaCuenta,
   interpretarBusquedaGasto,
+  MENSAJE_SIN_MONEDA_CUENTA,
   ordenarCandidatosGasto,
 } from './gastos-candidatos.util';
 
@@ -119,5 +121,19 @@ describe('ordenarCandidatosGasto — orden por defecto', () => {
     ];
     ordenarCandidatosGasto(entrada, { montoCargo: 1, fecha: '2026-09-24' });
     expect(entrada.map((c) => c.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('errorSinMonedaCuenta (candidatos y liga de un lote)', () => {
+  it('503 CUENTA_SIN_MONEDA con el texto legible (un Error suelto lo perdía en el filtro global)', () => {
+    const e = errorSinMonedaCuenta();
+    expect(e.getStatus()).toBe(503);
+    expect(e.getResponse()).toEqual({
+      message: MENSAJE_SIN_MONEDA_CUENTA,
+      error: 'CUENTA_SIN_MONEDA',
+    });
+    expect(MENSAJE_SIN_MONEDA_CUENTA).toBe(
+      'No se pudo leer la moneda de la cuenta bancaria del cargo: vuelve a intentarlo en unos minutos.',
+    );
   });
 });

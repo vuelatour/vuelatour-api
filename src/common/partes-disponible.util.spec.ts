@@ -2,6 +2,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   MENSAJE_PARTES_NO_DISPONIBLE,
   MIGRACION_PARTES,
+  OBJETOS_PARTES,
   errorPartesNoDisponibles,
   esPartesAusentes,
   partesDisponibles,
@@ -69,15 +70,68 @@ describe('errorPartesNoDisponibles', () => {
   });
 });
 
-describe('esPartesAusentes — la RPC o la puente no están en el schema cache', () => {
+describe('esPartesAusentes — la RPC, la puente o la vista no están', () => {
   it.each([
+    // Fuera del schema cache: la llamada ni llegó a Postgres.
     [{ code: 'PGRST202', message: 'Could not find the function' }, true],
-    [{ code: '42883', message: 'function does not exist' }, true],
     [{ code: 'PGRST205', message: 'Could not find the table' }, true],
-    [{ code: '42P01', message: 'relation does not exist' }, true],
+    // «No existe» que NOMBRA un objeto de la migración.
+    [
+      {
+        code: '42883',
+        message:
+          'function public.conciliacion_ligar_cargo_gastos(uuid, uuid[], uuid) does not exist',
+      },
+      true,
+    ],
+    [
+      {
+        code: '42P01',
+        message: 'relation "public.movimiento_bancario_gasto" does not exist',
+      },
+      true,
+    ],
+    [
+      {
+        code: '42P01',
+        message: 'relation "public.v_gasto_conciliacion" does not exist',
+      },
+      true,
+    ],
+    // El incidente del 15-sep-2026: 42883 TAMBIÉN es «operator does not
+    // exist» dentro de un trigger. Es un BUG, no una migración ausente.
+    [
+      {
+        code: '42883',
+        message: 'operator does not exist: public.moneda = text',
+      },
+      false,
+    ],
+    // «No existe» de OTRO objeto (cuerpo plpgsql roto): 500, no 503.
+    [{ code: '42883', message: 'function does not exist' }, false],
+    [
+      {
+        code: '42883',
+        message: 'function public.tolerancia_lote(integer) does not exist',
+      },
+      false,
+    ],
+    [
+      { code: '42P01', message: 'relation "public.otra" does not exist' },
+      false,
+    ],
     [{ code: '23514', message: 'CARGO_NO_CUADRA: …' }, false],
     [null, false],
   ])('%j ⇒ %s', (err, esperado) => {
     expect(esPartesAusentes(err)).toBe(esperado);
+  });
+
+  it('OBJETOS_PARTES nombra la RPC de ligar y desligar, la puente y la vista', () => {
+    expect([...OBJETOS_PARTES]).toEqual([
+      'conciliacion_ligar_cargo_gastos',
+      'conciliacion_desligar_cargo_gastos',
+      'movimiento_bancario_gasto',
+      'v_gasto_conciliacion',
+    ]);
   });
 });

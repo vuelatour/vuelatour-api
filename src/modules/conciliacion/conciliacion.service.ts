@@ -111,15 +111,21 @@ import {
   diferenciaLote,
   etiquetaConciliadoLote,
   faltanteDe,
+  afinarMotivoGastoCubierto,
   leerErrorPartes,
   MENSAJE_SOLO_CARGOS,
   mensajeCargoNoCuadra,
+  mensajeErrorPartes,
   mensajeLoteInvalido,
+  mensajeLoteInvalidoDeBd,
   mensajeLoteMonedaDistinta,
+  mensajeMovimientoConGastos,
   mensajeMovimientoConLote,
   montoBonito,
   mensajeGastoYaCubierto,
   mensajeMonedaDistinta,
+  motivoGastoCubiertoDeBd,
+  normalizarUuid,
   parteCruzada,
   puedeLigar,
   puedeRepartirCargo,
@@ -128,8 +134,8 @@ import {
   type PuedeRepartirResultado,
 } from './conciliacion-parcial.util';
 import {
+  errorSinMonedaCuenta,
   interpretarBusquedaGasto,
-  MENSAJE_SIN_MONEDA_CUENTA,
   ordenarCandidatosGasto,
 } from './gastos-candidatos.util';
 import {
@@ -663,15 +669,24 @@ export class ConciliacionService {
     };
   }
 
-  /** Partes de estos movimientos (lotes de ≤ 200 ids; un error se LANZA). */
+  /**
+   * Partes de estos movimientos (lotes de ≤ 200 ids, cada lote PAGINADO por
+   * la PK de la puente: 200 cargos × hasta 50 partes son 10,000 filas y
+   * PostgREST corta en 1000 sin avisar; un error se LANZA).
+   */
   private async partesDeMovimientos(
     movIds: ReadonlyArray<string>,
   ): Promise<ParteCargoGasto[]> {
-    const filas = await this.leerPorLotes(movIds, (lote) =>
-      this.supabase.service
-        .from('movimiento_bancario_gasto')
-        .select(PARTE_COLS)
-        .in('movimiento_id', lote),
+    const filas = await this.leerPorLotesPaginado(
+      movIds,
+      (lote, desde, hasta) =>
+        this.supabase.service
+          .from('movimiento_bancario_gasto')
+          .select(PARTE_COLS)
+          .in('movimiento_id', lote)
+          .order('movimiento_id', { ascending: true })
+          .order('gasto_id', { ascending: true })
+          .range(desde, hasta),
     );
     return filas
       .map((f) => this.aParte(f))
@@ -688,15 +703,23 @@ export class ConciliacionService {
       );
   }
 
-  /** Partes de estos gastos (todas sus ligas, de cualquier cargo). */
+  /**
+   * Partes de estos gastos (todas sus ligas, de cualquier cargo), en lotes
+   * de ≤ 200 ids PAGINADOS por la PK de la puente (anti-tope de 1000).
+   */
   private async partesDeGastos(
     gastoIds: ReadonlyArray<string>,
   ): Promise<ParteCargoGasto[]> {
-    const filas = await this.leerPorLotes(gastoIds, (lote) =>
-      this.supabase.service
-        .from('movimiento_bancario_gasto')
-        .select(PARTE_COLS)
-        .in('gasto_id', lote),
+    const filas = await this.leerPorLotesPaginado(
+      gastoIds,
+      (lote, desde, hasta) =>
+        this.supabase.service
+          .from('movimiento_bancario_gasto')
+          .select(PARTE_COLS)
+          .in('gasto_id', lote)
+          .order('gasto_id', { ascending: true })
+          .order('movimiento_id', { ascending: true })
+          .range(desde, hasta),
     );
     return filas.map((f) => this.aParte(f));
   }
@@ -829,6 +852,42 @@ export class ConciliacionService {
       const { data, error } = await consulta(unicos.slice(i, i + 200));
       if (error) throw new Error(error.message);
       out.push(...((data ?? []) as Array<Record<string, unknown>>));
+    }
+    return out;
+  }
+
+  /**
+   * `leerPorLotes` + PAGINADO de cada lote (revisión 2-oct-2026, regla
+   * anti-tope de 1000): pide páginas de `PAGINA_BD` hasta recibir una
+   * incompleta. La consulta DEBE ordenar por una llave ÚNICA (la PK) para
+   * que las páginas no se pisen ni se salten filas. Un error se LANZA.
+   */
+  private async leerPorLotesPaginado(
+    ids: ReadonlyArray<string>,
+    consulta: (
+      lote: string[],
+      desde: number,
+      hasta: number,
+    ) => PromiseLike<{
+      data: unknown[] | null;
+      error: { message: string } | null;
+    }>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const unicos = [...new Set(ids.filter(Boolean))];
+    const out: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < unicos.length; i += 200) {
+      const lote = unicos.slice(i, i + 200);
+      for (let desde = 0; ; desde += PAGINA_BD) {
+        const { data, error } = await consulta(
+          lote,
+          desde,
+          desde + PAGINA_BD - 1,
+        );
+        if (error) throw new Error(error.message);
+        const pagina = (data ?? []) as Array<Record<string, unknown>>;
+        out.push(...pagina);
+        if (pagina.length < PAGINA_BD) break;
+      }
     }
     return out;
   }
@@ -2610,6 +2669,24 @@ export class ConciliacionService {
     // aquí (su camino es PATCH movimientos/:id/ingreso).
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
+    }
+    // Un movimiento que ya paga gasto(s) NO admite además un cobro (revisión
+    // 2-oct-2026): su dinero se contaría dos veces. El trigger A custodia el
+    // sentido contrario (partes en un movimiento con cobro); este, el que
+    // no tiene CHECK en la BD. Desvincular (ambos null) sí pasa.
+    if ((cobroId !== null || sobreId !== null) && ligadoAGasto(mov)) {
+      throw new ConflictException({
+        message: mensajeMovimientoConGastos(
+          Math.max(gastosLigadosN(mov), mov.gasto_id ? 1 : 0),
+        ),
+        error: 'MOVIMIENTO_YA_LIGADO',
+        details: {
+          liga: 'GASTO',
+          movimiento_id: movId,
+          gasto_id: mov.gasto_id,
+          gastos_n: Math.max(gastosLigadosN(mov), mov.gasto_id ? 1 : 0),
+        },
+      });
     }
 
     if (cobroId) {
@@ -6551,7 +6628,10 @@ export class ConciliacionService {
    * (`recalcular_gasto_conciliado`), jamás este servicio. Sin la migración,
    * el camino directo de siempre (`linkDirecto`).
    */
-  async link(movId: string, gastoId: string | null, userId: string) {
+  async link(movIdRaw: string, gastoIdRaw: string | null, userId: string) {
+    // uuid en minúsculas, como los devuelve la BD (`normalizarUuid`).
+    const movId = normalizarUuid(movIdRaw);
+    const gastoId = gastoIdRaw === null ? null : normalizarUuid(gastoIdRaw);
     if (!(await this.partesOn())) {
       return this.linkDirecto(movId, gastoId, userId);
     }
@@ -6565,8 +6645,12 @@ export class ConciliacionService {
    * gastos («lote»; caso real: el SPEI de SAESA de $8,404.20 = 3 × $2,801.40).
    * Con UN id es la misma liga que `gasto_id`. Sin la migración ⇒ 503.
    */
-  async linkGastos(movId: string, gastoIds: string[], userId: string) {
-    const ids = gastoIds.filter((x) => typeof x === 'string' && x);
+  async linkGastos(movIdRaw: string, gastoIds: string[], userId: string) {
+    // uuid en minúsculas ANTES de buscar repetidos y de pre-validar.
+    const movId = normalizarUuid(movIdRaw);
+    const ids = gastoIds
+      .filter((x) => typeof x === 'string' && x)
+      .map((x) => normalizarUuid(x));
     if (new Set(ids).size !== ids.length) {
       throw new BadRequestException({
         message: mensajeLoteInvalido('REPETIDOS'),
@@ -6654,6 +6738,10 @@ export class ConciliacionService {
       });
     }
     const cuentaMoneda = await this.monedaCuenta(mov.cuenta_bancaria_id);
+    // Lote sin la moneda de la cuenta (lectura caída: `cuenta_bancaria.moneda`
+    // es NOT NULL): el MISMO error legible que el endpoint de candidatos, no
+    // un 409 LOTE_MONEDA_DISTINTA que culpa al operador de su elección.
+    if (ids.length >= 2 && !cuentaMoneda) throw errorSinMonedaCuenta();
     type GastoLink = {
       id: string;
       conciliado: boolean;
@@ -6902,7 +6990,13 @@ export class ConciliacionService {
     return this.conflictoGastoCubierto(
       gasto,
       cargos,
-      motivo,
+      // Cubierto por un cargo en OTRA moneda (1 ↔ 1) ⇒ MONEDA_DISTINTA,
+      // aunque la BD (G) lo mande como GASTO_YA_CUBIERTO.
+      afinarMotivoGastoCubierto(
+        motivo,
+        gasto.moneda ?? null,
+        cargos.map((c) => c.moneda),
+      ),
       ctx.cuentaMoneda,
       ctx.ids.length === 1 ? ctx.montoCargo : undefined,
     );
@@ -6911,33 +7005,47 @@ export class ConciliacionService {
   /**
    * Traduce el error de la RPC / triggers de partes (2-oct-2026): `code =
    * hint ?? prefijo «CODIGO:»`, `details` = el JSON de `detail` de la BD
-   * sobre los de la pre-validación TS. RPC o tabla ausente (PGRST202/42883,
-   * PGRST205/42P01) ⇒ 503. Un error que no es de esta regla SUBE tal cual.
+   * sobre los de la pre-validación TS. Un error que NO es de esta regla se
+   * REGISTRA tal cual (código y mensaje de Postgres) antes de traducirlo:
+   * solo «la RPC/puente/vista no está» (`esPartesAusentes`) es 503; todo lo
+   * demás —p. ej. un 42883 «operator does not exist» de un cuerpo plpgsql,
+   * el incidente del 15-sep— SUBE como 500 con su texto real.
    */
   private async errorRpcPartes(
     error: ErrorPartesLike,
     ctx: CtxErrorPartes,
   ): Promise<Error> {
-    if (esPartesAusentes(error)) return errorPartesNoDisponibles();
     const { codigo, texto, details } = leerErrorPartes(error);
     const msg = error.message ?? '';
+    if (!codigo) {
+      this.logger.error(
+        `Conciliación del movimiento ${ctx.movId}: la base respondió ${error.code ?? 'sin código'}: ${msg}`,
+      );
+      if (esPartesAusentes(error)) return errorPartesNoDisponibles();
+      return new Error(msg);
+    }
+    // Regla de negocio que la pre-validación TS no vio (carrera): se anota.
+    this.logger.warn(
+      `Conciliación del movimiento ${ctx.movId}: la base rechazó la liga (${codigo}): ${msg}`,
+    );
     switch (codigo) {
       case 'GASTO_YA_CUBIERTO': {
-        // Forma de SIEMPRE (`details.motivo`), con el `includes('MONEDA')`
-        // anidado como hoy; gana `details.gasto_id`.
+        // Forma de SIEMPRE (`details.motivo`): el motivo que manda la BD
+        // gana; el `includes('MONEDA')` queda de respaldo. Gana
+        // `details.gasto_id`.
         const gastoId =
           (typeof details?.gasto_id === 'string' ? details.gasto_id : null) ??
           ctx.lote?.gasto_id ??
           (ctx.ids.length === 1 ? ctx.ids[0] : null);
         return this.conflictoGastoCubiertoDe(
           gastoId,
-          msg.includes('MONEDA') ? 'MONEDA_DISTINTA' : 'GASTO_YA_CUBIERTO',
+          motivoGastoCubiertoDeBd(msg, details),
           ctx,
         );
       }
       case 'LOTE_INVALIDO':
         return new BadRequestException({
-          message: texto || mensajeLoteInvalido('NO_EXISTE'),
+          message: mensajeLoteInvalidoDeBd(msg, details),
           error: 'LOTE_INVALIDO',
           details: details ?? undefined,
         });
@@ -6995,12 +7103,17 @@ export class ConciliacionService {
           details: { movimiento_id: ctx.movId, ...(details ?? {}) },
         });
       }
+      // PARTES_INCOHERENTES (constraint diferido: cargo «a medias») y
+      // CARGO_LIGADO (candado de monto / cuenta): el cargo cambió entre la
+      // lectura y la escritura ⇒ 409, ya no un 500 técnico.
       case 'CARGO_EXCEDIDO':
       case 'MOVIMIENTO_YA_LIGADO':
       case 'REVERSO_INVALIDO':
       case 'LOTE_SOLO_API_NUEVO':
+      case 'PARTES_INCOHERENTES':
+      case 'CARGO_LIGADO':
         return new ConflictException({
-          message: texto,
+          message: mensajeErrorPartes(codigo, details),
           error: codigo,
           details: { movimiento_id: ctx.movId, ...(details ?? {}) },
         });
@@ -7689,7 +7802,7 @@ export class ConciliacionService {
       });
     }
     const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id as string);
-    if (!moneda) throw new Error(MENSAJE_SIN_MONEDA_CUENTA);
+    if (!moneda) throw errorSinMonedaCuenta();
     const fecha = typeof mov.fecha === 'string' ? mov.fecha.slice(0, 10) : '';
     const montoCargo = r2(Math.abs(Number(mov.monto)) || 0);
     const ventana = ventanaDias(fecha, dias);

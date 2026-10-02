@@ -5,6 +5,7 @@
  * panel (200 gastos) dejaba fuera el del 14-sep. Aquí vive, PURO y con
  * spec, cómo se interpreta la búsqueda y en qué orden se ofrecen.
  */
+import { ServiceUnavailableException } from '@nestjs/common';
 import { difDias } from './paywise-cruce.util';
 import { TOLERANCIA_CONCILIACION } from './conciliacion-parcial.util';
 
@@ -115,6 +116,19 @@ export function ordenarCandidatosGasto<T extends CandidatoOrdenable>(
     .map((x) => x.c);
 }
 
-/** 500 legible: sin la moneda de la cuenta no se filtra divisa (jamás se adivina). */
+/** Sin la moneda de la cuenta no se filtra divisa ni se liga un lote (jamás se adivina). */
 export const MENSAJE_SIN_MONEDA_CUENTA =
   'No se pudo leer la moneda de la cuenta bancaria del cargo: vuelve a intentarlo en unos minutos.';
+
+/**
+ * 503 `CUENTA_SIN_MONEDA` (transitorio: `cuenta_bancaria.moneda` es NOT
+ * NULL, un null es una lectura caída). Lo usan los candidatos y la liga de
+ * un lote (revisión 2-oct-2026): con un `Error` suelto el filtro global
+ * respondía «Ocurrió un error inesperado» y el texto legible se perdía.
+ */
+export function errorSinMonedaCuenta(): ServiceUnavailableException {
+  return new ServiceUnavailableException({
+    message: MENSAJE_SIN_MONEDA_CUENTA,
+    error: 'CUENTA_SIN_MONEDA',
+  });
+}

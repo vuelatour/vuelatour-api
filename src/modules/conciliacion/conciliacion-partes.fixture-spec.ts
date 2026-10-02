@@ -96,10 +96,18 @@ export function sembrarPartes(db: Tablas): Tablas {
   return db;
 }
 
-/** `v_gasto_conciliacion` (solo gastos con partes). */
+/**
+ * `v_gasto_conciliacion`: como la vista real (`from gasto cross join
+ * lateral`), TODOS los gastos — los que no tienen partes con `n_partes 0`,
+ * `suma 0`, `faltante = monto` y `cubierto false` — más las partes cuyo
+ * gasto no está sembrado en `db.gasto`.
+ */
 export function vistaConciliacion(db: Tablas): Row[] {
   const out: Row[] = [];
   const porGasto = new Map<string, Row[]>();
+  for (const g of db.gasto ?? []) {
+    if (typeof g.id === 'string') porGasto.set(g.id, []);
+  }
   for (const p of partes(db)) {
     const l = porGasto.get(p.gasto_id as string) ?? [];
     l.push(p);
@@ -239,7 +247,11 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
   }
   if (mov.tipo !== 'CARGO') {
     return fallo(
-      errorBd('MOVIMIENTO_YA_LIGADO', 'solo un CARGO admite gastos'),
+      errorBd(
+        'LOTE_INVALIDO',
+        `solo un CARGO del banco se concilia con gastos (este movimiento es un ${String(mov.tipo)})`,
+        { movimiento_id: movId, tipo: mov.tipo },
+      ),
     );
   }
   if (mov.cobro_id || mov.cobro_grupo_id || mov.ingreso_id) {
@@ -292,7 +304,7 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
         errorBd(
           'GASTO_YA_CUBIERTO',
           `el gasto ${String(g.id)} se concilió contra otra MONEDA: solo admite un cargo (1 a 1)`,
-          { gasto_id: g.id },
+          { motivo: 'MONEDA_DISTINTA', gasto_id: g.id },
         ),
       );
     }
@@ -303,13 +315,22 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
           errorBd(
             'GASTO_YA_CUBIERTO',
             `los cargos ligados al gasto ${String(g.id)} suman ${suma} y con este (${montoCargo}) rebasan su monto (${abs2(g.monto)})`,
-            { gasto_id: g.id, suma_ligada: suma, monto_nuevo: montoCargo },
+            {
+              motivo: 'GASTO_YA_CUBIERTO',
+              gasto_id: g.id,
+              suma_ligada: suma,
+              monto_nuevo: montoCargo,
+            },
           ),
         );
       }
     }
     nuevas.push({ gasto_id: g.id as string, monto_parte: montoCargo });
   } else {
+    // Como el loop de G: GASTO POR GASTO en el orden de la lista, primero la
+    // moneda y luego el faltante (con un cubierto en la posición 1 y un USD
+    // en la 2 la BD dice GASTO_YA_CUBIERTO). G manda motivo
+    // GASTO_YA_CUBIERTO también cuando el gasto ya tiene su 1 ↔ 1 cruzado.
     for (const g of gastos) {
       if (g!.moneda !== monedaCuenta) {
         return fallo(
@@ -324,8 +345,6 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
           ),
         );
       }
-    }
-    for (const g of gastos) {
       const otras = partes(db).filter(
         (p) => p.gasto_id === g!.id && p.movimiento_id !== movId,
       );
@@ -342,8 +361,8 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
         return fallo(
           errorBd(
             'GASTO_YA_CUBIERTO',
-            `el gasto ${String(g!.id)} ya está cubierto`,
-            { gasto_id: g!.id },
+            `el gasto ${String(g!.id)} ya está cubierto por otros cargos (${suma} de ${abs2(g!.monto)})`,
+            { motivo: 'GASTO_YA_CUBIERTO', gasto_id: g!.id },
           ),
         );
       }
@@ -424,6 +443,14 @@ function ligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
 function desligar(db: Tablas, args: Row): { data: unknown; error: unknown } {
   const movId = args.p_movimiento_id as string;
   const actor = (args.p_actor as string | null) ?? null;
+  if (!(db.movimiento_bancario ?? []).some((m) => m.id === movId)) {
+    return {
+      data: null,
+      error: errorBd('LOTE_INVALIDO', `el movimiento ${movId} no existe`, {
+        movimiento_id: movId,
+      }),
+    };
+  }
   const salientes = partes(db).filter((p) => p.movimiento_id === movId);
   db[TABLA_PARTES] = partes(db).filter((p) => p.movimiento_id !== movId);
   if (salientes.length > 0) sincronizarMovimiento(db, movId, actor);
