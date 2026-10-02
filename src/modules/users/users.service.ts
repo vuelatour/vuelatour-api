@@ -1,11 +1,13 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { esColumnaInexistente } from '../../common/columna-opcional.util';
+import { Rol } from '../../common/types/auth.types';
 import { SupabaseService } from '../supabase/supabase.service';
 import { EmailService } from '../notifications/email.service';
 import { PushService } from '../realtime/push.service';
@@ -13,6 +15,17 @@ import type { CreateUsuarioDto } from './dto/create-usuario.dto';
 import type { ListUsuariosQuery } from './dto/list-usuarios.query';
 import type { UpdateUsuarioDto } from './dto/update-usuario.dto';
 import type { UpdateSelfDto } from './dto/update-self.dto';
+import {
+  CODIGO_SOLO_ADMIN_EDITA_USUARIOS,
+  CODIGO_TARJETA_DE_OTRO_USUARIO,
+  MENSAJE_SOLO_ADMIN_EDITA_USUARIOS,
+  MENSAJE_USUARIO_DE_OFICINA,
+  camposFueraDeAlcanceCoordinador,
+  esDestinoEditablePorCoordinador,
+  mensajeCamposSoloAdmin,
+  mensajeTarjetaDeOtroUsuario,
+  tarjetaEsDeOtro,
+} from './usuario-edicion.util';
 
 const COLUMNS_BASE =
   'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
@@ -382,7 +395,83 @@ export class UsersService {
     }
   }
 
-  async update(id: string, patch: UpdateUsuarioDto, updatedBy: string): Promise<UsuarioRow> {
+  /**
+   * Edición ACOTADA (2-oct-2026, `usuario-edicion.util`): quien no es ADMIN
+   * —hoy solo el COORDINADOR llega por la ruta— edita nombre, teléfono,
+   * apodo y tarjeta de un PILOTO de base o externo. Todo lo demás ⇒ 403
+   * `SOLO_ADMIN_EDITA_USUARIOS`; una tarjeta vinculada a otra persona ⇒ 403
+   * `TARJETA_DE_OTRO_USUARIO` (reasignar es cosa de un ADMIN en Tarjetas
+   * corp.). Se valida ANTES de escribir nada.
+   */
+  private async autorizarEdicionAcotada(
+    id: string,
+    patch: UpdateUsuarioDto,
+    actorRol: Rol,
+  ): Promise<void> {
+    // Defensa en profundidad: la ruta solo deja pasar ADMIN y COORDINADOR.
+    if (actorRol !== Rol.COORDINADOR) {
+      throw new ForbiddenException({
+        message: MENSAJE_SOLO_ADMIN_EDITA_USUARIOS,
+        error: CODIGO_SOLO_ADMIN_EDITA_USUARIOS,
+      });
+    }
+    const prohibidos = camposFueraDeAlcanceCoordinador(
+      patch as unknown as Record<string, unknown>,
+    );
+    if (prohibidos.length > 0) {
+      throw new ForbiddenException({
+        message: mensajeCamposSoloAdmin(prohibidos),
+        error: CODIGO_SOLO_ADMIN_EDITA_USUARIOS,
+      });
+    }
+    const destino = await this.findById(id);
+    if (!esDestinoEditablePorCoordinador(destino)) {
+      throw new ForbiddenException({
+        message: MENSAJE_USUARIO_DE_OFICINA,
+        error: CODIGO_SOLO_ADMIN_EDITA_USUARIOS,
+      });
+    }
+    const terminacion = patch.tarjeta_terminacion;
+    if (typeof terminacion === 'string' && terminacion !== '') {
+      const sb = this.supabase.service;
+      const { data: tarjeta, error } = await sb
+        .from('tarjeta_corporativa')
+        .select('id, usuario_id')
+        .eq('terminacion', terminacion)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      // Sin tarjeta: el 400 de siempre lo da `sincronizarTarjeta`.
+      const dueno = (tarjeta as { usuario_id?: string | null } | null) ?? null;
+      if (tarjetaEsDeOtro(dueno, id)) {
+        const { data: otro } = await sb
+          .from('usuario')
+          .select('nombre')
+          .eq('id', String(dueno?.usuario_id))
+          .maybeSingle();
+        throw new ForbiddenException({
+          message: mensajeTarjetaDeOtroUsuario(
+            (otro as { nombre?: string | null } | null)?.nombre,
+          ),
+          error: CODIGO_TARJETA_DE_OTRO_USUARIO,
+        });
+      }
+    }
+  }
+
+  /**
+   * `actorRol` (2-oct-2026): el rol de quien edita. ADMIN (o un llamado
+   * interno sin rol, p. ej. `softDelete`) edita todo como siempre; cualquier
+   * otro rol pasa por `autorizarEdicionAcotada`.
+   */
+  async update(
+    id: string,
+    patch: UpdateUsuarioDto,
+    updatedBy: string,
+    actorRol?: Rol,
+  ): Promise<UsuarioRow> {
+    if (actorRol !== undefined && actorRol !== Rol.ADMIN) {
+      await this.autorizarEdicionAcotada(id, patch, actorRol);
+    }
     if (Object.keys(patch).length === 0) {
       return this.findById(id);
     }

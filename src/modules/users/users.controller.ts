@@ -59,16 +59,17 @@ export class UsersController {
   }
 
   @Patch(':id')
-  @Roles(Rol.ADMIN)
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
   @ApiOperation({
-    summary: 'Update user (admin only — includes rol, estado, fondo)',
+    summary:
+      'Update user. ADMIN: todo (rol, estado, fondo, tarjeta). COORDINADOR (2-oct-2026): solo nombre, teléfono, apodo y tarjeta (libre o ya suya) de un PILOTO de base o externo; lo demás ⇒ 403 SOLO_ADMIN_EDITA_USUARIOS / TARJETA_DE_OTRO_USUARIO.',
   })
   update(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: UpdateUsuarioDto,
     @CurrentUser() current: AuthenticatedUser,
   ) {
-    return this.users.update(id, body, current.userId);
+    return this.users.update(id, body, current.userId, current.rol);
   }
 
   @Post(':id/reset-password')

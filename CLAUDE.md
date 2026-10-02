@@ -3772,6 +3772,30 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       camino directo del 0.0.52 traduce sus códigos a 409 en la ventana de la
       sonda).
 
+41. **EDITAR DATOS DEL PILOTO DESDE «PILOTOS» (2-oct-2026, sin migración).**
+    `PATCH /v1/users/:id` = ADMIN y COORDINADOR; el controller pasa el rol
+    (`users.update(id, patch, updatedBy, actorRol?)`; sin rol —llamados
+    internos como `softDelete`— = ADMIN). ADMIN sin cambio. COORDINADOR
+    (fuente única PURA `users/usuario-edicion.util.ts`, con spec): (1) solo
+    campos ⊆ {nombre, telefono, apodo, tarjeta_terminacion} — «presente» =
+    `!== undefined` (el DTO ES2022 define TODAS sus llaves) — si no 403
+    `SOLO_ADMIN_EDITA_USUARIOS`; (2) solo si el destino es `rol = 'PILOTO'` o
+    `es_piloto_externo = true`: alguien de oficina que también vuela
+    (`es_piloto` con rol ADMIN/SOCIO/…, p. ej. Pablo Canales) NO cuenta ⇒ 403
+    `SOLO_ADMIN_EDITA_USUARIOS` «Ese usuario es de oficina: solo un ADMIN lo
+    edita»; (3) la tarjeta debe estar LIBRE o ya ser del piloto, si no 403
+    `TARJETA_DE_OTRO_USUARIO` «Esa tarjeta es de <nombre>: un ADMIN la
+    reasigna desde Tarjetas corp.». Todo ANTES de escribir nada. `pilots`
+    `USUARIO_COLS` lleva `es_piloto` en duro y `apodo` con la MISMA
+    degradación que `users.service`. **La tarjeta del gasto se SELLA al
+    capturar** (`gasto.tarjeta_terminacion`): cambiar la tarjeta del piloto no
+    toca gastos anteriores (salvo uno viejo SIN terminación que se edite con
+    medio TARJETA_CORP). Procedimiento: alta de la tarjeta nueva en Tarjetas
+    corp. (ADMIN) → vincularla al piloto → INACTIVAR la vieja (nunca editar su
+    terminación). Specs: `usuario-edicion.util.spec`,
+    `users.controller.pilotos.spec` (HTTP real con el servicio real) y
+    `pilots.service.es-piloto.spec`. Deploy: API antes que panel.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

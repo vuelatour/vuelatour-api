@@ -3,10 +3,14 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
-import { clientRequestIdDescanso } from '../../common/columna-opcional.util';
+import {
+  clientRequestIdDescanso,
+  esColumnaInexistente,
+} from '../../common/columna-opcional.util';
 import { SupabaseService } from '../supabase/supabase.service';
 import { CalendarSyncService } from '../calendar/calendar-sync.service';
 import { CalendarService } from '../calendar/calendar.service';
@@ -18,8 +22,23 @@ import type {
   ListPilotsQuery,
 } from './dto/pilots.dto';
 
-const USUARIO_COLS =
-  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
+/**
+ * Columnas del piloto. `es_piloto` (doble rol, 2-oct-2026) va EN DURO: existe
+ * desde siempre y el panel lo necesita para el switch «También es piloto»
+ * del diálogo «Editar datos» (sin él lo pinta deshabilitado).
+ */
+const USUARIO_COLS_BASE =
+  'id, supabase_auth_id, nombre, email, rol, estado, tiene_fondo_caja, tarjeta_terminacion, es_piloto, es_piloto_externo, telefono, avatar_url, created_at, updated_at';
+
+/**
+ * `apodo` (migración `20260917000001`): nombre corto del calendario. MISMA
+ * degradación que `users.service`: si la columna no existe (42703 en el
+ * SELECT, `esColumnaInexistente`) se apaga UNA vez y se sigue sin ella.
+ */
+const USUARIO_COLS = `${USUARIO_COLS_BASE}, apodo`;
+
+/** Migración que crea `usuario.apodo`. */
+const MIGRACION_APODO = '20260917000001';
 
 const VUELO_COLS =
   'id, folio, estado, origen_iata, destino_iata, pasajeros, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_fin, cobrado, piloto_id, copiloto_id, apoyo_id';
@@ -33,6 +52,15 @@ interface RolTramoCtx {
 
 @Injectable()
 export class PilotsService {
+  private readonly logger = new Logger(PilotsService.name);
+
+  /**
+   * `usuario.apodo` existe. Arranca en `true` y solo se apaga si la lectura
+   * responde «la columna no existe» (patrón de `users.service`): la lista y
+   * el detalle de pilotos nunca se caen por la migración del apodo.
+   */
+  private apodoDisponible = true;
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly calendarSync: CalendarSyncService,
@@ -40,6 +68,26 @@ export class PilotsService {
     private readonly users: UsersService,
     private readonly notifications: NotificationsService,
   ) {}
+
+  /** Columnas del piloto: con `apodo` mientras la columna exista. */
+  private usuarioCols(): string {
+    return this.apodoDisponible ? USUARIO_COLS : USUARIO_COLS_BASE;
+  }
+
+  /**
+   * Apaga `apodo` si el error es «la columna no existe» y dice si hay que
+   * reintentar SIN ella. Cualquier otro error se propaga tal cual.
+   */
+  private degradarApodo(
+    error: { code?: string | null; message?: string | null } | null,
+  ): boolean {
+    if (!this.apodoDisponible || !esColumnaInexistente(error)) return false;
+    this.apodoDisponible = false;
+    this.logger.warn(
+      `Columna usuario.apodo no existe todavía (migración ${MIGRACION_APODO} pendiente): la lista de pilotos sigue sin el nombre corto.`,
+    );
+    return true;
+  }
 
   /** Hoy en hora Cancún (YYYY-MM-DD) — la operación vive en UTC−5. */
   private hoyCancun(): string {
@@ -156,30 +204,40 @@ export class PilotsService {
    * próximos, capturas del mes y fecha del último vuelo.
    */
   async list(filters: ListPilotsQuery) {
-    let query = this.supabase.service
-      .from('usuario')
-      .select(USUARIO_COLS, { count: 'exact' })
-      .or('rol.eq.PILOTO,es_piloto.eq.true')
-      .order('nombre', { ascending: true })
-      .range(filters.offset, filters.offset + filters.limit - 1);
+    const consultar = (columnas: string) => {
+      let query = this.supabase.service
+        .from('usuario')
+        .select(columnas, { count: 'exact' })
+        .or('rol.eq.PILOTO,es_piloto.eq.true')
+        .order('nombre', { ascending: true })
+        .range(filters.offset, filters.offset + filters.limit - 1);
 
-    if (filters.estado) query = query.eq('estado', filters.estado);
-    if (typeof filters.externo === 'boolean') {
-      query = query.eq('es_piloto_externo', filters.externo);
-    }
-    if (filters.q) {
-      const term = `%${filters.q}%`;
-      query = query.or(`nombre.ilike.${term},email.ilike.${term}`);
-    }
+      if (filters.estado) query = query.eq('estado', filters.estado);
+      if (typeof filters.externo === 'boolean') {
+        query = query.eq('es_piloto_externo', filters.externo);
+      }
+      if (filters.q) {
+        const term = `%${filters.q}%`;
+        query = query.or(`nombre.ilike.${term},email.ilike.${term}`);
+      }
+      return query;
+    };
 
-    const { data: pilots, error, count } = await query;
+    let { data, error, count } = await consultar(this.usuarioCols());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error, count } = await consultar(this.usuarioCols()));
+    }
     if (error) throw new Error(`Failed to list pilots: ${error.message}`);
+    const pilots = (data ?? []) as unknown as Array<
+      Record<string, unknown> & { id: string }
+    >;
 
-    const ids = (pilots ?? []).map((p) => p.id);
-    const stats = ids.length > 0 ? await this.bulkStats(ids) : new Map();
+    const ids = pilots.map((p) => p.id);
+    const stats: Map<string, unknown> =
+      ids.length > 0 ? await this.bulkStats(ids) : new Map<string, unknown>();
 
     return {
-      data: (pilots ?? []).map((p) => ({
+      data: pilots.map((p) => ({
         ...p,
         stats: stats.get(p.id) ?? {
           vuelos_mes: 0,
@@ -224,23 +282,31 @@ export class PilotsService {
         `Ya existe un piloto externo llamado "${nombre}". Si es otra persona, distínguelo (ej. apellido).`,
       );
     }
-    const { data, error } = await this.supabase.service
-      .from('usuario')
-      .insert({
-        nombre,
-        email: dto.email?.trim() ? dto.email.trim().toLowerCase() : null,
-        rol: 'PILOTO',
-        estado: 'ACTIVO',
-        es_piloto: true,
-        es_piloto_externo: true,
-        tiene_fondo_caja: false,
-        telefono: dto.telefono ?? '',
-        avatar_url: '',
-        created_by: createdBy,
-        updated_by: createdBy,
-      })
-      .select(USUARIO_COLS)
-      .maybeSingle();
+    const insertar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .insert({
+          nombre,
+          email: dto.email?.trim() ? dto.email.trim().toLowerCase() : null,
+          rol: 'PILOTO',
+          estado: 'ACTIVO',
+          es_piloto: true,
+          es_piloto_externo: true,
+          tiene_fondo_caja: false,
+          telefono: dto.telefono ?? '',
+          avatar_url: '',
+          created_by: createdBy,
+          updated_by: createdBy,
+        })
+        .select(columnas)
+        .maybeSingle();
+    let { data, error } = await insertar(this.usuarioCols());
+    // El payload NO lleva `apodo`: solo el SELECT de vuelta puede fallar por
+    // la columna; el reintento sin ella es seguro porque un 42703 del
+    // RETURNING aborta el INSERT completo (no queda fila a medias).
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await insertar(this.usuarioCols()));
+    }
     if (error) {
       if (error.code === '23505')
         throw new ConflictException(
@@ -248,22 +314,30 @@ export class PilotsService {
         );
       throw new Error(error.message);
     }
-    return data!;
+    // Mismo contrato de siempre (`data!`): la fila insertada.
+    return data as unknown as Record<string, unknown> & { id: string };
   }
 
   /**
    * Detalle del piloto: perfil + próximos vuelos + actividad reciente.
    */
   async findById(id: string, mes?: string) {
-    const { data: pilot, error } = await this.supabase.service
-      .from('usuario')
-      .select(USUARIO_COLS)
-      .eq('id', id)
-      .or('rol.eq.PILOTO,es_piloto.eq.true')
-      .maybeSingle();
+    const consultar = (columnas: string) =>
+      this.supabase.service
+        .from('usuario')
+        .select(columnas)
+        .eq('id', id)
+        .or('rol.eq.PILOTO,es_piloto.eq.true')
+        .maybeSingle();
+
+    let { data, error } = await consultar(this.usuarioCols());
+    if (error && this.degradarApodo(error)) {
+      ({ data, error } = await consultar(this.usuarioCols()));
+    }
 
     if (error) throw new Error(`Failed to load pilot: ${error.message}`);
-    if (!pilot) throw new NotFoundException(`Pilot ${id} not found`);
+    if (!data) throw new NotFoundException(`Pilot ${id} not found`);
+    const pilot = data as unknown as Record<string, unknown> & { id: string };
 
     // Las stats son DEL MES elegido (?mes=YYYY-MM; default mes corriente):
     // el expediente permite revisar meses pasados. Activos/próximos y las
