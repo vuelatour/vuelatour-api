@@ -4504,7 +4504,22 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR** — `20261002000002_conciliacion_partes.sql`
+- **`movimiento_bancario` tiene un constraint trigger DIFERIDO**
+  (`trg_mov_bancario_partes_coherentes`, 20261002000002): una transacción
+  que escriba en esa tabla (conciliado, gasto_id, gastos_n, monto,
+  clasificacion_id, cobro_id, cobro_grupo_id, ingreso_id) y DESPUÉS haga
+  `ALTER TABLE` sobre ella falla con 55006 «pending trigger events»: toda
+  migración o dry-run que mezcle DML y DDL corre `set constraints all
+  immediate;` antes del ALTER. Una limpieza SQL que BORRE movimientos con
+  partes fija antes `select set_config('vt.actor_id', '<uuid>', true);` o
+  la bitácora atribuye la desconciliación al `created_by` de la parte. Con
+  un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
+  (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
+- **APLICADA el 2-oct-2026** (dry-run previo en prod revertido: DRYRUN_OK, huella
+  fc41134798faddb5afc628f6f99d2ec8; tras aplicar: 375 partes = 375 ligas
+  `gasto_id`, 0 cargos incoherentes, 1 gasto con bandera ≠ regla (ASUR
+  0e8ead24, esperado), advisors sin hallazgos nuevos salvo el INFO de la FK
+  `created_by` sin índice) — `20261002000002_conciliacion_partes.sql`
   (invariante 40, 1 cargo ↔ N gastos): tabla puente
   `movimiento_bancario_gasto`, `movimiento_bancario.gastos_n`, vista
   `v_gasto_conciliacion`, RPC `conciliacion_ligar_cargo_gastos` /
