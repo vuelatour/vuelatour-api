@@ -12,6 +12,10 @@ import {
   rolPuedeFirmar,
   validarSolicitudFirma,
 } from './storage-firma.util';
+import {
+  BUCKET_REPARTO_COMPROBANTES,
+  ROLES_PAGOS_SOCIOS_LECTURA,
+} from '../profit-sharing/reparto-pago.util';
 
 // Paths REALES de prod (1-oct-2026): así se guardan en la BD.
 const GASTO =
@@ -23,7 +27,7 @@ const VOUCHER =
 
 describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
   describe('lista blanca de buckets', () => {
-    it('exactamente los 9 buckets acordados', () => {
+    it('exactamente los 10 buckets acordados', () => {
       expect([...BUCKETS_FIRMABLES].sort()).toEqual(
         [
           'cobro-vouchers',
@@ -34,9 +38,14 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
           'ingresos',
           'inventario-fotos',
           'planes-vuelo',
+          'reparto-comprobantes',
           'taco-fotos',
         ].sort(),
       );
+    });
+
+    it('reparto-comprobantes es el bucket de los pagos a socios (fuente única)', () => {
+      expect(BUCKETS_FIRMABLES).toContain(BUCKET_REPARTO_COMPROBANTES);
     });
 
     it('csd (certificados del SAT), avatars, aeronave-imagenes y cualquier otro ⇒ fuera', () => {
@@ -78,6 +87,13 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
       ingresos: ADMIN_COORD_FACT,
       'documentos-flota': [Rol.ADMIN, Rol.COORDINADOR],
       'estados-cuenta': [Rol.ADMIN, Rol.FACTURACION],
+      // = `GET profit-sharing/pagos` (ROLES_PAGOS_SOCIOS_LECTURA).
+      'reparto-comprobantes': [
+        Rol.ADMIN,
+        Rol.FACTURACION,
+        Rol.ANALISTA,
+        Rol.SOCIO,
+      ],
     };
 
     it('cada bucket de la lista blanca tiene su matriz de roles exacta', () => {
@@ -89,6 +105,20 @@ describe('storage-firma.util — firma genérica acotada (1-oct-2026)', () => {
         for (const rol of Object.values(Rol)) {
           expect(rolPuedeFirmar(rol, b)).toBe(MATRIZ[b].includes(rol));
         }
+      }
+    });
+
+    it('reparto-comprobantes copia los roles de GET profit-sharing/pagos', () => {
+      expect([...ROLES_POR_BUCKET['reparto-comprobantes']].sort()).toEqual(
+        [...ROLES_PAGOS_SOCIOS_LECTURA].sort(),
+      );
+      for (const rol of [
+        Rol.COORDINADOR,
+        Rol.PILOTO,
+        Rol.MECANICO,
+        Rol.VISITANTE,
+      ]) {
+        expect(rolPuedeFirmar(rol, 'reparto-comprobantes')).toBe(false);
       }
     });
 

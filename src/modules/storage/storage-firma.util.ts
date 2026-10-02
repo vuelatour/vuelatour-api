@@ -48,6 +48,8 @@ export const BUCKETS_FIRMABLES = [
   'documentos-flota',
   'ingresos',
   'inventario-fotos',
+  // Pagos de utilidades a socios (1-oct-2026, API 0.0.49): comprobantes.
+  'reparto-comprobantes',
 ] as const;
 
 export type BucketFirmable = (typeof BUCKETS_FIRMABLES)[number];
@@ -102,6 +104,10 @@ export const ROLES_POR_BUCKET: Readonly<
   'documentos-flota': [Rol.ADMIN, Rol.COORDINADOR],
   // estados-cuenta = controller de conciliación.
   'estados-cuenta': [Rol.ADMIN, Rol.FACTURACION],
+  // reparto-comprobantes = `GET profit-sharing/pagos`
+  // (`ROLES_PAGOS_SOCIOS_LECTURA`): el SOCIO ve el comprobante de SUS pagos
+  // (el listado solo le entrega sus renglones y sus paths).
+  'reparto-comprobantes': [Rol.ADMIN, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO],
 };
 
 /** Todos los roles que llegan al endpoint (para `@Roles`). */

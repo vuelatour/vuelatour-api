@@ -3186,7 +3186,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       a Supabase. Firma con `SEGUNDOS_URL_MINIATURA`. Reglas, en este orden:
       1. **Lista blanca** `BUCKETS_FIRMABLES` (gasto-fotos, taco-fotos,
          cobro-vouchers, planes-vuelo, facturas, estados-cuenta,
-         documentos-flota, ingresos, inventario-fotos). Otro bucket ⇒ 400
+         documentos-flota, ingresos, inventario-fotos y, desde el 0.0.49,
+         reparto-comprobantes — invariante 38). Otro bucket ⇒ 400
          `BUCKET_NO_PERMITIDO` aun para ADMIN: se firma con la service key y
          `csd` guarda los certificados de sello del SAT. **Un bucket nuevo
          NO entra solo**: agregarlo aquí es una decisión explícita.
@@ -3207,7 +3208,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
          FACTURACION (= `cobro-voucher-urls`, `archivo-url` de facturas,
          `ROLES_INGRESOS`); documentos-flota = ADMIN, COORDINADOR (=
          `expirations/:id/archivo` y la póliza); estados-cuenta = ADMIN,
-         FACTURACION (= conciliación). `@Roles` = la unión. Rol fuera ⇒ 403
+         FACTURACION (= conciliación); reparto-comprobantes = ADMIN,
+         FACTURACION, ANALISTA, SOCIO (= `GET profit-sharing/pagos`, que al
+         SOCIO solo le entrega SUS pagos y sus paths). `@Roles` = la unión. Rol fuera ⇒ 403
          `BUCKET_FUERA_DE_ROL` (el panel pinta su placeholder). VISITANTE ⇒
          403 del RolesGuard. **Un bucket nuevo en la lista blanca exige su
          fila en la matriz** (el tipo `Record<BucketFirmable, …>` no
@@ -3226,6 +3229,158 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       RolesGuard reales; matriz por bucket) y `firmas-vigencia.spec.ts`
       (8 h vs 1 h: photo-urls, vouchers, fotos de tacómetro del vuelo, plan
       de vuelo y `invoices/file-urls` vs recibidas).
+
+38. **PAGOS DE UTILIDADES A SOCIOS (1-oct-2026, API 0.0.49, migración
+    `20261001000001` — PENDIENTE DE APLICAR).** Pedido del cliente con la
+    captura de /admin/profit-sharing: «cada socio debe recibir los pagos de
+    lo que generó el avión en el mes […] Mauricio Roque, %, Monto de
+    utilidad, estatus de si ya se pagó o aún no, con cuánto se le pagó,
+    cuándo y quién se lo entregó […] que no se nos escape ninguno».
+    - **La utilidad NO se persiste**: sale de `compute()` del MES
+      (`reparto[].monto_usd`, residuo mayor). `reparto_pago` guarda solo los
+      PAGOS; `utilidad_snapshot_usd` es la foto al registrar (o al corregir
+      el dinero) para el aviso `utilidad_difiere` (> $1). Nadie recalcula el
+      reparto aparte.
+    - **Tabla `reparto_pago`**: un pago por fila (avión, socio, `periodo` =
+      día 1 del mes por CHECK). `moneda`/`metodo` = TEXTO + CHECK (no el enum
+      `moneda`). `tc_usd_mxn` (12,6) ⇔ MXN. `monto_usd` = lo que descuenta
+      (USD = monto, CHECK; MXN = round(monto / T.C., 2) en el API). Soft
+      delete `deleted_at/_by` + `motivo_baja`: **TODO lector filtra
+      `deleted_at is null`**. Avión, socio y quién entregó ON DELETE
+      RESTRICT. `client_request_id` único parcial (incluye borradas). Bucket
+      privado `reparto-comprobantes` (10 MB, imagen/PDF).
+    - **Fuente única PURA** `profit-sharing/reparto-pago.util.ts` (spec con
+      N4142R 69/29/2 sobre $2,023.10 ⇒ 1,395.94 / 586.70 / 40.46):
+      `mesDePeriodo`, `rangoDeMes`, `montoUsdDePago`, `validarDineroPago`
+      (MXN con T.C. fuera de **15–25** —la banda del costo externo y de la
+      conciliación, paridad congelada en spec— ⇒ 400 `TC_FUERA_DE_RANGO`:
+      un dedazo 1.8/180 movía el pendiente en silencio y 1,000,000
+      desbordaba `numeric(12,6)` ⇒ 500), `validarFechaPago`,
+      `estadoPagoSocio` (en centavos: utilidad ≤ 0 ⇒ SIN_UTILIDAD; pagado ≥
+      utilidad − $1 ⇒ PAGADO con pendiente 0; pagado > 0 ⇒ PARCIAL; si no
+      PENDIENTE; `exceso_usd` = pagado − **max(utilidad, 0)** cuando pasa de
+      $1 — DESVIACIÓN CONSCIENTE del contrato «pagado − utilidad»: con
+      utilidad −500 y pagado 100 el exceso es 100, no 600; la copia del
+      panel `lib/admin/reparto-pagos.ts#estadoPagoSocio` debe usar el MISMO
+      `max(u, 0)`), `excedeUtilidad`, `utilidadDifiere`, `armarFilasPagos`,
+      `resumenPorSocio` (la pérdida de un avión NO compensa la utilidad de
+      otro: cada avión se liquida aparte), `totalesPagos`,
+      `resumenPrecierrePagos` y los textos. **Un solo cálculo de cada
+      número** (revisión adversaria 1-oct-2026): utilidad y % del socio =
+      `partesDeSociosEnAvion` (suma las vigencias duplicadas; la usan
+      `utilidadDeSocioEnAvion` —409 y foto— y los renglones); lo pagado =
+      `sumaMontoUsd` (renglón, `pagadoDe` del 409 y la carrera); spec de
+      PARIDAD 409 ⇔ renglón con dos vigencias y numeric en texto. Orden de
+      CAPTURA = `compararCaptura` (`created_at` en MICROsegundos con
+      `microsDeInstante` —`Date.parse` trunca a ms—, empate por id).
+      `utilidad_al_pagar_usd` = foto del último pago CAPTURADO
+      (`fotoMasReciente`), no del último por `fecha_pago`: un efectivo
+      entregado antes y capturado después ya trae la utilidad nueva (antes
+      daba un «la utilidad cambió» falso). Límite: corregir el DINERO de un
+      pago viejo renueva SU foto, pero la referencia sigue siendo el último
+      capturado. Renglón con pagos de un avión que `compute` no trae (dado de
+      baja: `compute` trae TODOS los activos) ⇒ `avisoAvionDadoDeBaja(mes)`
+      («El avión está dado de baja: el reparto no calcula su utilidad…»), no
+      `AVISO_SOCIO_NO_VIGENTE` (que manda a buscar un error de captura).
+    - **Sonda ÚNICA** `reparto-pago.lector.ts` (tabla: 42P01/PGRST205,
+      re-sondeo ≤ 10 min, una instancia por cliente). La comparten
+      `RepartoPagoService` y el pre-cierre: vive APARTE para que
+      `ProfitSharingService` no inyecte `RepartoPagoService` (que sí inyecta
+      `ProfitSharingService` para `compute`) — sin ciclo. Sin la migración:
+      GET ⇒ `disponible:false` con listas vacías (sin calcular el reparto);
+      escrituras ⇒ 503 `PAGOS_SOCIOS_NO_DISPONIBLE`. La lectura del mes va
+      PAGINADA (1000, tope 10 páginas ⇒ error, nunca una lista recortada).
+    - **Rutas** (literales bajo `pagos/`, `@Roles` en CADA una, constantes
+      `ROLES_PAGOS_SOCIOS_*`): `GET pagos?mes&aeronave_id` (ADMIN, ANALISTA,
+      FACTURACION, SOCIO — el SOCIO solo SUS renglones y la consulta ya
+      filtra por él) ⇒ `{disponible, mes, desde, hasta, filas, por_socio,
+      totales}`; renglón = avión × socio del cómputo + los (avión, socio)
+      con pagos que ya no están en el reparto (utilidad 0; ADITIVOS
+      `vigente:false` y `aviso`). `POST pagos` (ADMIN, FACTURACION) ⇒ 201
+      `{pago, fila}`; replay ⇒ 200 `idempotente:true` (la idempotencia va
+      PRIMERO; llave de otro renglón o de un pago borrado ⇒ 409
+      `CLIENT_REQUEST_ID_EN_USO`). Reglas: socio en `aeronave_socio` con
+      vigencia que toca el mes (400 `SOCIO_NO_ES_DE_LA_AERONAVE`, antes de
+      calcular); utilidad ≤ 0 o avión fuera del cómputo ⇒ 409
+      `SIN_UTILIDAD_QUE_PAGAR` aun con `aceptar_exceso`; pagado + monto >
+      utilidad + $1 ⇒ 409 `PAGO_EXCEDE_UTILIDAD` `details {utilidad_usd,
+      pagado_usd, monto_usd, exceso_usd}` salvo `aceptar_exceso` (booleano
+      CRUDO del body); MXN sin T.C. ⇒ 400 `TC_REQUERIDO`, USD con T.C. ⇒
+      400 `TC_NO_APLICA`, T.C. fuera de 15–25 ⇒ 400 `TC_FUERA_DE_RANGO`
+      (DTO: `@Max(999_999)`, lo que cabe en la columna; y un 22003 de la BD
+      ⇒ 400 `PAGO_INVALIDO`, nunca 500); fecha futura (día Cancún) ⇒ 400
+      `FECHA_PAGO_FUTURA`; `entregado_por_id` (default el actor) ACTIVO o
+      400 `ENTREGADO_POR_INVALIDO`. **Carreras (revisión adversaria
+      1-oct-2026)**: (a) doble envío con la MISMA llave — antes de responder
+      `SIN_UTILIDAD_QUE_PAGAR` o `PAGO_EXCEDE_UTILIDAD` se vuelve a buscar la
+      llave (`replaySiYaQuedo`): si la 1.ª ya insertó, es replay (200
+      `idempotente`), no un exceso con el pago propio contado como «ya
+      pagado»; (b) dos altas con llaves DISTINTAS que pasan a la vez el
+      candado (leer-luego-insertar, sin candado de BD por contrato) — sin
+      `aceptar_exceso`, tras el INSERT se relee el renglón
+      (`perdioCarreraDeAlta` → `excedeEnOrdenDeCaptura`): la capturada
+      DESPUÉS se da de baja (`MOTIVO_BAJA_CARRERA_ALTA`, `deleted_by` = su
+      actor) **liberando su `client_request_id`** (única excepción a «una
+      llave usada no se recicla»: sin eso, confirmar el 409 con la MISMA
+      llave daría `CLIENT_REQUEST_ID_EN_USO`) y responde 409
+      `PAGO_EXCEDE_UTILIDAD`; la primera se queda. Best-effort: si la
+      relectura o la baja fallan, el pago se queda (201) y lo avisa el
+      pre-cierre. Ventana residual de milisegundos (la otra confirma después
+      de la relectura ⇒ las dos se quedan): también la avisa el pre-cierre.
+      El PATCH no tiene esta revisión (CAS por fila, no por renglón). `PATCH pagos/:id` (estado FUSIONADO;
+      pasar a USD limpia el T.C.; SOLO si el monto en USD SUBE se re-corren
+      SIN_UTILIDAD y exceso; corregir el dinero renueva la foto; CAS por
+      `updated_at` ⇒ 409 `PAGO_CAMBIO_CONCURRENTE`; vacío ⇒ 400
+      `PAGO_SIN_CAMBIOS`; `null` en monto/moneda/fecha/método/entregó ⇒
+      400). `DELETE pagos/:id {motivo 5–300}` ⇒ `{deleted, fila}` (404
+      `PAGO_NO_EXISTE` también si ya estaba borrado; el panel CONFIRMA).
+      `POST pagos/:id/comprobante` (multipart `file`, imagen o PDF ≤ 10 MB,
+      `validarComprobanteCobro`) ⇒ `{pago}`; path
+      `<avión>/<YYYY-MM>/<pago>/<uuid>.<ext>` (un uuid por subida: el
+      anterior se CONSERVA en el bucket) con CAS sobre el path anterior (409
+      `COMPROBANTE_CAMBIO`). `comprobante_url` firmada 8 h
+      (`SEGUNDOS_URL_MINIATURA`); el visor la renueva con `storage/firmar`.
+    - **Pre-cierre**: item `pagos_socios_pendientes` SOLO si el periodo es
+      un mes calendario; NO bloqueante (sin `informativo`). `count` =
+      renglones PENDIENTE|PARCIAL, `monto_usd`, `socios[{socio, aeronave,
+      pendiente_usd, estado}]` (máx 50, pendiente mayor primero), `mes`,
+      `detalle`, `lectura_fallida`, `disponible` y el ADITIVO `sobrepagos`.
+      Sin tabla o con un fallo (cálculo o lectura) ⇒ count 0 +
+      `lectura_fallida: true`. Corre `compute` del mes en paralelo con el
+      seguimiento. **Item APARTE `pagos_socios_sobrepagados`** («Pagos a
+      socios por encima de la utilidad del mes», NO bloqueante; solo con la
+      lectura buena): `count` = renglones con `exceso_usd > 0` (la utilidad
+      bajó después de pagar, carrera de altas, pagos fuera del reparto),
+      `monto_usd` = Σ exceso, `sobrepagados[{socio, aeronave, exceso_usd,
+      estado}]` (máx 50) — en `sobrepagados` y NO en `socios`, porque el
+      panel pinta `socios` como pendientes. Es item aparte (y no solo un
+      conteo) porque el panel OCULTA los items con `count` 0: con todo
+      pagado, un sobrepago se escapaba del cierre. **Roles** (revisión
+      adversaria 1-oct-2026): el controller pasa `@CurrentUser().rol` a
+      `preCierre(q, rol)` y los dos items solo se arman (y `compute` solo
+      corre) para `ROLES_PAGOS_SOCIOS_LECTURA`; COORDINADOR (que entra al
+      pre-cierre pero recibe 403 en `GET pagos` y en `GET /profit-sharing`)
+      y una llamada sin rol NO los reciben — ningún endpoint da a un rol más
+      de lo que le dan los específicos (misma regla que `storage/firmar`,
+      invariante 37).
+    - **Riesgos / pendientes**: dos altas simultáneas del mismo socio se
+      resuelven DESPUÉS del insert (arriba; ventana residual de ms avisada
+      por el pre-cierre); la parte de
+      «Aero Charter Cancun S.A. de C.V.» (socio = la propia empresa) sale
+      PENDIENTE hasta que se registre (decisión del cliente); un avión dado
+      de baja no sale en `compute` ⇒ no hay utilidad que pagar desde aquí;
+      una utilidad positiva < $1 cuenta como PAGADA por la tolerancia (misma
+      regla que los cobros). **Rollback del bucket**: `storage.buckets`
+      tiene `protect_buckets_delete` (42501 «Direct deletion from storage
+      tables is not allowed») ⇒ se vacía y borra con la Storage API (pie de
+      la migración), nunca con un `delete` directo.
+    - Specs: `reparto-pago.util.spec`, `reparto-pago.service.spec` (BD en
+      memoria; las dos carreras con una PUERTA en `compute` FALLAN sin los
+      arreglos), `profit-sharing.controller.reparto-pago.spec` (HTTP real
+      con RolesGuard, DTO y filtro; el pre-cierre recibe el rol),
+      `profit-sharing.service.pagos-socios.spec` (pre-cierre con el
+      `computeAvion` REAL, COORDINADOR sin items, sobrepagos) y
+      `storage-firma.util.spec` / `storage.controller.spec` (bucket nuevo).
 
 ## Convenciones NestJS
 
@@ -3910,6 +4065,34 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (dry-run probado en PGlite el 1-oct-2026: `DRYRUN_OK`; aplicada dos veces = idempotente; NO corrido en prod)** —
+  `20261001000001_reparto_pago.sql` (invariante 38): tabla `reparto_pago`
+  (RLS sin policies; índices parciales `(aeronave_id, socio_id, periodo)` y
+  `(periodo)` con `deleted_at is null` + único parcial de
+  `client_request_id`), `trg_reparto_pago_set_updated_at` y el bucket
+  privado `reparto-comprobantes`. Sin enums, sin funciones, sin backfill, sin
+  tocar tablas existentes. **Antes de aplicar**: el DRY-RUN de su cabecera
+  (UNA sentencia `do $dry$`, la sección 1 pegada en B): A contexto (socio
+  vigente en sep-2026 —de preferencia N4142R, el de mayor %— y un ADMIN
+  activo; tabla y bucket NO existen), C1 estructura (RLS sin policies,
+  índices, único, trigger, FKs `aeronave/socio/entregado_por = r`,
+  `created_by/deleted_by = n`, `moneda` = text, T.C. con escala 6, bucket
+  privado), C2 alta USD REAL, C3 alta MXN REAL (T.C. 18.234567 sin truncar,
+  `monto_usd` 548.41, pagado vivo 1,944.35), C4 rechazos (MXN sin T.C., USD
+  con T.C., T.C. 0, periodo día 15, monto 0, `monto_usd` 0, USD con
+  `monto_usd` ≠ monto, método/moneda inválidos, largos, motivo/quién sin
+  baja, FKs, NOT NULL, llave repetida), C5 UPDATE real (`updated_at`,
+  corregir, MXN ↔ USD) y C6 soft delete (fila conservada, lectores sin
+  borradas, llave reservada) ⇒ `DRYRUN_OK`; después
+  `to_regclass('public.reparto_pago')` ⇒ NULL y 0 filas en `storage.buckets`
+  para el bucket ⇒ `apply_migration` ⇒ `get_advisors` (esperado el INFO de
+  RLS sin policies y FKs sin índice hacia `usuario`). El API 0.0.49 es
+  desplegable ANTES (GET `disponible:false`, escrituras 503
+  `PAGOS_SOCIOS_NO_DISPONIBLE`, pre-cierre con `lectura_fallida`). Tras
+  aplicar: `GET /v1/profit-sharing/pagos?mes=2026-09` ⇒ `disponible: true`
+  (la sonda re-sondea en ≤ 10 min o reiniciar el API). Rollback al pie del
+  archivo (el BUCKET se vacía y se borra con la Storage API: un `delete from
+  storage.buckets` directo lo bloquea `protect_buckets_delete` con 42501).
 - **PENDIENTE DE APLICAR (DRY-RUN corrido en prod el 30-sep-2026: `DRYRUN_OK · par REAL`)** —
   `20260930000001_movimiento_bancario_reverso.sql` (invariante 33):
   columna `movimiento_bancario.reverso_de_id` (FK a sí misma `on delete set

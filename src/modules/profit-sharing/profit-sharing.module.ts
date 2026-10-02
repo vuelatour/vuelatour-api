@@ -5,6 +5,7 @@ import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingController } from './profit-sharing.controller';
 import { ProfitSharingService } from './profit-sharing.service';
+import { RepartoPagoService } from './reparto-pago.service';
 
 @Module({
   // TipoCambioModule: TC oficial de referencia (open.er-api / BCE) para
@@ -13,7 +14,10 @@ import { ProfitSharingService } from './profit-sharing.service';
   // pre-cierre sale de la MISMA lectura que GET /conciliacion/cobros-sin-banco.
   imports: [PyservicesModule, TipoCambioModule, ConciliacionModule],
   controllers: [ProfitSharingController],
-  providers: [ProfitSharingService, DineroReportService],
+  // RepartoPagoService (1-oct-2026): pagos de utilidades a socios. Inyecta
+  // ProfitSharingService (la utilidad sale de compute); el pre-cierre NO lo
+  // inyecta — comparte solo la sonda/lectura de `reparto-pago.lector.ts`.
+  providers: [ProfitSharingService, DineroReportService, RepartoPagoService],
   exports: [ProfitSharingService],
 })
 export class ProfitSharingModule {}

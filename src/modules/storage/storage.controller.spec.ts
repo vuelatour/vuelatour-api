@@ -197,6 +197,11 @@ describe('StorageController — POST /v1/storage/firmar', () => {
         ['documentos-flota', Rol.FACTURACION, 403],
         ['cobro-vouchers', Rol.FACTURACION, 200],
         ['cobro-vouchers', Rol.SOCIO, 403],
+        // Pagos a socios (1-oct-2026): = GET profit-sharing/pagos.
+        ['reparto-comprobantes', Rol.SOCIO, 200],
+        ['reparto-comprobantes', Rol.ANALISTA, 200],
+        ['reparto-comprobantes', Rol.FACTURACION, 200],
+        ['reparto-comprobantes', Rol.COORDINADOR, 403],
       ];
       for (const [bucket, r, status] of casos) {
         rol = r;

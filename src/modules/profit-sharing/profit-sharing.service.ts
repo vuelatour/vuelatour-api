@@ -8,6 +8,7 @@ import {
 } from '../tipo-cambio/tipo-cambio.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
+import type { Rol } from '../../common/types/auth.types';
 import {
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
@@ -43,6 +44,22 @@ import {
   type SeguimientoPrecierreRow,
 } from '../flights/vuelo-seguimiento.util';
 import { esTablaInexistente } from '../inventory/eliminar-movimiento.util';
+import { lectorPagosSocios } from './reparto-pago.lector';
+import {
+  CLAVE_PRECIERRE_PAGOS_SOCIOS,
+  CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS,
+  DETALLE_PRECIERRE_PAGOS_LECTURA_FALLIDA,
+  DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE,
+  ROLES_PAGOS_SOCIOS_LECTURA,
+  TITULO_PRECIERRE_PAGOS_SOCIOS,
+  TITULO_PRECIERRE_SOBREPAGOS_SOCIOS,
+  aPagoSocio,
+  armarFilasPagos,
+  mesDePeriodo,
+  periodoDeMes,
+  resumenPrecierrePagos,
+  type ResumenPrecierrePagos,
+} from './reparto-pago.util';
 import {
   detalleTacosEnRevision,
   pilotosDeTacosEnRevision,
@@ -301,6 +318,22 @@ interface ReservaRow {
   aeronave_id: string;
   monto_por_hora_usd: string;
   horas_acumuladas: string;
+}
+
+/**
+ * Items del pre-cierre de PAGOS A SOCIOS (`pagos_socios_pendientes` y
+ * `pagos_socios_sobrepagados`): lo común tipado; el resto (socios,
+ * sobrepagados, disponible…) viaja tal cual.
+ */
+export interface ItemPrecierrePagosSocios {
+  clave: string;
+  titulo: string;
+  mes: string;
+  detalle: string;
+  count: number;
+  monto_usd: number;
+  lectura_fallida: boolean;
+  [extra: string]: unknown;
 }
 
 @Injectable()
@@ -1639,8 +1672,14 @@ export class ProfitSharingService {
    * Checklist de PRE-CIERRE: todo lo que dejaría el cierre mensual incompleto
    * o mentiroso, detectado por el sistema en vez de cazado a mano. La meta es
    * que el empleado solo supervise: si `listo` es true, se puede cerrar.
+   *
+   * `rol` = quién pregunta (el controller lo pasa). Los items de PAGOS A
+   * SOCIOS (nombres, aviones y montos de cada socio) solo salen para
+   * `ROLES_PAGOS_SOCIOS_LECTURA`: ningún endpoint le da a un rol más de lo
+   * que le dan los específicos (COORDINADOR recibe 403 en `GET pagos` y en
+   * `GET /profit-sharing`). Sin `rol` ⇒ se omiten (falla cerrado).
    */
-  async preCierre(q: ProfitSharingQuery) {
+  async preCierre(q: ProfitSharingQuery, rol?: Rol) {
     if (q.desde > q.hasta) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
@@ -2489,10 +2528,22 @@ export class ProfitSharingService {
     // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): vuelos del periodo con
     // ajustes PENDIENTES de reflejar en la cotización («los pax pidieron
     // transporte…»). Aviso NO bloqueante; best-effort como cobros sin banco.
-    const seguimiento = await this.seguimientoCotizacionPendiente(
-      desdeTs,
-      hastaTs,
-    );
+    //
+    // PAGOS A SOCIOS (1-oct-2026): SOLO cuando el periodo es un MES
+    // calendario (los pagos se registran por mes). Aviso NO bloqueante;
+    // sin la tabla o con la lectura caída ⇒ count 0 + `lectura_fallida`.
+    // Los dos son best-effort (nunca lanzan): van en paralelo.
+    // Solo para quien puede LEER la relación de pagos (ver arriba): para
+    // los demás ni se calcula.
+    const mesCierre = mesDePeriodo(q.desde, q.hasta);
+    const veePagosSocios =
+      rol != null && ROLES_PAGOS_SOCIOS_LECTURA.includes(rol);
+    const [seguimiento, itemsPagosSocios] = await Promise.all([
+      this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
+      mesCierre && veePagosSocios
+        ? this.itemsPagosSocios(mesCierre, q.desde, q.hasta)
+        : Promise.resolve([]),
+    ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
@@ -2585,6 +2636,7 @@ export class ProfitSharingService {
         // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
         lectura_fallida: seguimiento === null,
       },
+      ...itemsPagosSocios,
       {
         clave: 'extras_sin_desglose',
         titulo: 'Vuelos con TUAS/extras sin desglose exacto',
@@ -2831,6 +2883,105 @@ export class ProfitSharingService {
         `pre-cierre: seguimiento de la cotización no disponible: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
+    }
+  }
+
+  /**
+   * Pre-cierre · PAGOS A SOCIOS (1-oct-2026): renglones (avión × socio) del
+   * MES con utilidad sin pagar o con pago parcial. La utilidad sale de
+   * `compute` del mismo periodo (fuente única) y lo pagado de la relación
+   * `reparto_pago` (sonda compartida con `RepartoPagoService`). NO bloquea.
+   * Sin la tabla o con CUALQUIER fallo (cálculo o lectura) ⇒ count 0 con
+   * `lectura_fallida: true` y un texto que lo dice (jamás «no hay pendientes»
+   * sin haber leído).
+   *
+   * Con la lectura buena va además el item `pagos_socios_sobrepagados`
+   * (revisión adversaria 1-oct-2026): renglones pagados POR ENCIMA de la
+   * utilidad. Item aparte porque el panel oculta los de `count` 0 y un
+   * sobrepago con todo pagado se habría escapado. Su lista va en
+   * `sobrepagados` (no en `socios`: el panel pinta `socios` como
+   * pendientes). Con la lectura fallida no se emite: el principal ya dice
+   * «sin verificar».
+   */
+  private async itemsPagosSocios(
+    mes: string,
+    desde: string,
+    hasta: string,
+  ): Promise<ItemPrecierrePagosSocios[]> {
+    const [principal, sobrepagos] = await this.itemPagosSocios(
+      mes,
+      desde,
+      hasta,
+    );
+    return sobrepagos ? [principal, sobrepagos] : [principal];
+  }
+
+  private async itemPagosSocios(
+    mes: string,
+    desde: string,
+    hasta: string,
+  ): Promise<[ItemPrecierrePagosSocios, ItemPrecierrePagosSocios | null]> {
+    const base = {
+      clave: CLAVE_PRECIERRE_PAGOS_SOCIOS,
+      titulo: TITULO_PRECIERRE_PAGOS_SOCIOS,
+      mes,
+    };
+    const fallida = (detalle: string, disponible: boolean) => ({
+      ...base,
+      detalle,
+      count: 0,
+      monto_usd: 0,
+      socios: [] as ResumenPrecierrePagos['socios'],
+      lectura_fallida: true,
+      disponible,
+    });
+    try {
+      const lector = lectorPagosSocios(this.supabase.service);
+      if (!(await lector.disponible())) {
+        return [fallida(DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE, false), null];
+      }
+      const [calculo, rows] = await Promise.all([
+        this.compute({ desde, hasta }),
+        lector.pagosDelMes(periodoDeMes(mes)),
+      ]);
+      if (rows === 'sin_tabla') {
+        return [fallida(DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE, false), null];
+      }
+      const r = resumenPrecierrePagos(
+        armarFilasPagos({
+          aviones: calculo.aviones,
+          pagos: rows.map((row) => aPagoSocio(row)),
+        }),
+        mes,
+      );
+      return [
+        {
+          ...base,
+          detalle: r.detalle,
+          count: r.count,
+          monto_usd: r.monto_usd,
+          socios: r.socios,
+          // ADITIVO: renglones pagados por encima de la utilidad.
+          sobrepagos: r.sobrepagos,
+          lectura_fallida: false,
+          disponible: true,
+        },
+        {
+          clave: CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS,
+          titulo: TITULO_PRECIERRE_SOBREPAGOS_SOCIOS,
+          mes,
+          detalle: r.detalle_sobrepagos,
+          count: r.sobrepagos,
+          monto_usd: r.sobrepagos_usd,
+          sobrepagados: r.sobrepagados,
+          lectura_fallida: false,
+        },
+      ];
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: pagos a socios no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return [fallida(DETALLE_PRECIERRE_PAGOS_LECTURA_FALLIDA, true), null];
     }
   }
 
