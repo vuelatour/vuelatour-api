@@ -18,8 +18,60 @@ import {
 } from '../flights/factura-solicitud.util';
 import type { ResponsablesFacturacion } from '../facturas-emitidas/facturas-emitidas.types';
 import { MARGEN_VENTA_PCT_DEFAULT } from '../inventory/inventario-cardex.util';
+import {
+  CATALOGO_MODELOS_IA,
+  DESCRIPCION_CONFIG_IA_MODELO,
+  MENSAJE_MODELO_INVALIDO,
+  avisoModeloIa,
+  esIdModeloValido,
+  headersModeloIa,
+  modeloDeValorJson,
+  resolverModeloEfectivo,
+  valorJsonDeModelo,
+  type ModeloIaCatalogo,
+} from '../../common/ia-modelo.util';
 
 const COLS = 'clave, activa, valor_numerico, descripcion, updated_at';
+
+/**
+ * Tope (ms) de la lectura del modelo de IA: la consulta corre ANTES de cada
+ * llamada a pyservices (PDFs, Excel y lecturas con IA) y supabase-js no trae
+ * timeout propio. Un PostgREST lento o colgado no puede retrasar esas
+ * llamadas más que esto: al vencer se usa el último valor conocido (o el del
+ * servidor).
+ */
+export const TOPE_LECTURA_MODELO_IA_MS = 1_500;
+
+/**
+ * Tras una lectura fallida del modelo de IA (error o tope vencido) no se
+ * vuelve a consultar durante este lapso (ms): sin él, con la BD caída y el
+ * caché frío CADA llamada a pyservices pagaba la espera completa.
+ */
+export const ESPERA_TRAS_FALLO_MODELO_IA_MS = 10_000;
+
+/**
+ * `p` con tope de `ms`: si no se resuelve a tiempo, rechaza con `motivo` y
+ * dispara `alVencer` (aborta la petición de fondo). Limpia su timer siempre.
+ */
+async function conTope<T>(
+  p: Promise<T>,
+  ms: number,
+  motivo: string,
+  alVencer?: () => void,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const vencido = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      alVencer?.();
+      reject(new Error(motivo));
+    }, ms);
+  });
+  try {
+    return await Promise.race([p, vencido]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** Claves conocidas (no regar strings sueltos por el código). */
 export const CONFIG_CAPTURA_TACO_FOTO_IA = 'captura_taco_foto_ia';
@@ -95,15 +147,30 @@ export const CONFIG_RESPONSABLES_FACTURACION = 'responsables_facturacion';
 export const CONFIG_EDITORES_COTIZACION_COBRADA = 'editores_cotizacion_cobrada';
 
 /**
- * Claves de LISTA (`valor_json`): su `activa` no significa nada, así que no
- * salen en el listado general de banderas (el panel pinta cada fila como
- * switch) y `PATCH :clave` las rechaza. Cada una tiene su sección y su ruta.
+ * MODELO DE IA (2-oct-2026, API 0.0.51, SIN migración: la fila se crea con
+ * upsert en el primer PUT). `valor_json` = `["<id>"]` (la BD solo admite
+ * null o ARREGLO en esa columna) o null = «el del servidor» (`ANTHROPIC_MODEL`
+ * de pyservices, hoy claude-opus-4-8). Toda llamada a pyservices lleva el
+ * header `X-IA-Modelo` SOLO con un modelo configurado. Su `activa` no
+ * significa nada: se EXCLUYE de `GET /v1/config` y `PATCH :clave` la
+ * rechaza; se edita en `PUT /v1/config/ia-modelo`. Reglas puras en
+ * `common/ia-modelo.util.ts`.
  */
-const CLAVES_LISTA: Record<string, string> = {
+export const CONFIG_IA_MODELO = 'ia_modelo';
+
+/**
+ * Claves con SECCIÓN PROPIA (`valor_json`): su `activa` no significa nada,
+ * así que no salen en el listado general de banderas (el panel pinta cada
+ * fila como switch) y `PATCH :clave` las rechaza. Cada una tiene su sección y
+ * su ruta.
+ */
+const CLAVES_SECCION_PROPIA: Record<string, string> = {
   [CONFIG_RESPONSABLES_FACTURACION]:
     'Esta configuración se edita en Responsables de facturación.',
   [CONFIG_EDITORES_COTIZACION_COBRADA]:
     'Esta configuración se edita en «Editan cotizaciones cobradas».',
+  [CONFIG_IA_MODELO]:
+    'Esta configuración se edita en Créditos de IA → Modelo de IA.',
 };
 
 /** Roles de oficina que pueden ser responsables de facturación. */
@@ -149,6 +216,25 @@ export interface EditoresCotizacionCobrada {
   candidatos: Array<UsuarioNombre & { rol: string }>;
 }
 
+/** `GET|PUT /v1/config/ia-modelo` (ADMIN). */
+export interface ModeloIaConfig {
+  /** Id guardado en la configuración; `null` = el del servidor. */
+  configurado: string | null;
+  /**
+   * `ANTHROPIC_MODEL` de pyservices (`GET /ia/modelo`, best-effort): `null`
+   * si pyservices es viejo (404), está caído o no está configurado.
+   */
+  default_servidor: string | null;
+  /** El que usarán las próximas lecturas: configurado ?? default_servidor. */
+  efectivo: string | null;
+  catalogo: ModeloIaCatalogo[];
+  /** Último cambio (null = nunca se ha guardado). */
+  actualizado_at: string | null;
+  actualizado_por_nombre: string | null;
+  /** Aviso del configurado fuera del catálogo (verificar id / sin tarifa). */
+  aviso: string | null;
+}
+
 /** Permisos por PERSONA que viajan en `GET /v1/me` (`permisos`). */
 export interface PermisosUsuario {
   /** Puede revisar una cotización con cobros registrados. */
@@ -170,20 +256,33 @@ export class ConfiguracionService {
   private cache: { data: Map<string, ConfigRow>; at: number } | null = null;
   /** Caché corto (60 s) de las listas de ids (`valor_json`) por clave. */
   private cacheListas = new Map<string, { ids: string[]; at: number }>();
+  /**
+   * Caché corto (MISMO TTL de 60 s) del modelo de IA configurado: lo lee
+   * cada llamada a pyservices. Se rearma al escribir (`setModeloIa`).
+   */
+  private cacheModeloIa: { modelo: string | null; at: number } | null = null;
+  /** Último fallo al leer el modelo (epoch ms): ver `ESPERA_TRAS_FALLO…`. */
+  private falloModeloIaAt: number | null = null;
+  /** Lectura del modelo EN CURSO: N llamadas simultáneas comparten una. */
+  private lecturaModeloIa: Promise<string | null> | null = null;
+  /**
+   * Sube con cada escritura del caché del modelo (PUT o GET): una lectura
+   * de fondo que empezó ANTES no pisa con un valor viejo lo recién escrito.
+   */
+  private versionModeloIa = 0;
   private static readonly TTL_MS = 60_000;
 
   constructor(private readonly supabase: SupabaseService) {}
 
   async list() {
-    const { data, error } = await this.supabase.service
-      .from('configuracion_sistema')
-      .select(COLS)
-      // Las LISTAS (responsables de facturación, editores de cotizaciones
-      // cobradas) se editan en su propia sección: su `activa` no significa
-      // nada y el panel pinta cada fila como switch.
-      .neq('clave', CONFIG_RESPONSABLES_FACTURACION)
-      .neq('clave', CONFIG_EDITORES_COTIZACION_COBRADA)
-      .order('clave');
+    // Las claves con SECCIÓN PROPIA (responsables de facturación, editores
+    // de cotizaciones cobradas, modelo de IA) no salen aquí: su `activa` no
+    // significa nada y el panel pinta cada fila como switch.
+    let q = this.supabase.service.from('configuracion_sistema').select(COLS);
+    for (const clave of Object.keys(CLAVES_SECCION_PROPIA)) {
+      q = q.neq('clave', clave);
+    }
+    const { data, error } = await q.order('clave');
     if (error) throw new Error(error.message);
     return data ?? [];
   }
@@ -236,8 +335,11 @@ export class ConfiguracionService {
   }
 
   async update(clave: string, dto: UpdateConfiguracionDto, userId: string) {
-    const seccion = Object.prototype.hasOwnProperty.call(CLAVES_LISTA, clave)
-      ? CLAVES_LISTA[clave]
+    const seccion = Object.prototype.hasOwnProperty.call(
+      CLAVES_SECCION_PROPIA,
+      clave,
+    )
+      ? CLAVES_SECCION_PROPIA[clave]
       : null;
     if (seccion) {
       throw new BadRequestException({
@@ -686,5 +788,185 @@ export class ConfiguracionService {
       });
     }
     return this.editoresCotizacionCobrada(userId);
+  }
+
+  // ===================== MODELO DE IA (2-oct-2026) =====================
+
+  /**
+   * Fila `ia_modelo` tal cual (sin caché). `null` = nunca se ha guardado.
+   * Con `signal`, la consulta se cancela al abortarlo.
+   */
+  private async leerFilaModeloIa(signal?: AbortSignal): Promise<{
+    valor_json: unknown;
+    updated_at: string | null;
+    updated_by: string | null;
+  } | null> {
+    let q = this.supabase.service
+      .from('configuracion_sistema')
+      .select('clave, valor_json, updated_at, updated_by')
+      .eq('clave', CONFIG_IA_MODELO);
+    if (signal) q = q.abortSignal(signal);
+    const { data, error } = await q.maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) return null;
+    const fila = data as Record<string, unknown>;
+    return {
+      valor_json: fila.valor_json,
+      updated_at: typeof fila.updated_at === 'string' ? fila.updated_at : null,
+      updated_by: typeof fila.updated_by === 'string' ? fila.updated_by : null,
+    };
+  }
+
+  /**
+   * Modelo de IA configurado (`null` = el del servidor). Caché de 60 s (lo
+   * consulta cada llamada a pyservices). Best-effort: NUNCA lanza y NUNCA
+   * tarda más de `TOPE_LECTURA_MODELO_IA_MS` — si la lectura falla o se
+   * cuelga responde el último valor conocido (o `null`, y pyservices usa el
+   * suyo): una consulta caída o lenta jamás tumba ni retrasa una lectura de
+   * ticket, un PDF o un Excel. Tras un fallo no se reintenta durante
+   * `ESPERA_TRAS_FALLO_MODELO_IA_MS`, y las llamadas simultáneas comparten
+   * una sola consulta.
+   */
+  async modeloIa(): Promise<string | null> {
+    const now = Date.now();
+    const c = this.cacheModeloIa;
+    if (c && now - c.at <= ConfiguracionService.TTL_MS) return c.modelo;
+    if (
+      this.falloModeloIaAt !== null &&
+      now - this.falloModeloIaAt < ESPERA_TRAS_FALLO_MODELO_IA_MS
+    ) {
+      return c?.modelo ?? null;
+    }
+    if (!this.lecturaModeloIa) {
+      this.lecturaModeloIa = this.refrescarModeloIa().finally(() => {
+        this.lecturaModeloIa = null;
+      });
+    }
+    return this.lecturaModeloIa;
+  }
+
+  /** Lectura con tope de `modeloIa()`. Nunca lanza. */
+  private async refrescarModeloIa(): Promise<string | null> {
+    const version = this.versionModeloIa;
+    const corte = new AbortController();
+    try {
+      const fila = await conTope(
+        this.leerFilaModeloIa(corte.signal),
+        TOPE_LECTURA_MODELO_IA_MS,
+        `la lectura tardó más de ${TOPE_LECTURA_MODELO_IA_MS} ms`,
+        () => corte.abort(),
+      );
+      const modelo = modeloDeValorJson(fila?.valor_json);
+      // Si alguien escribió el caché mientras leíamos (PUT/GET), lo suyo es
+      // más nuevo que esta lectura: se respeta.
+      if (version !== this.versionModeloIa && this.cacheModeloIa) {
+        return this.cacheModeloIa.modelo;
+      }
+      this.fijarCacheModeloIa(modelo);
+      return modelo;
+    } catch (e) {
+      this.falloModeloIaAt = Date.now();
+      this.logger.warn(
+        `No se pudo leer ${CONFIG_IA_MODELO}: ${e instanceof Error ? e.message : String(e)}. Se usa el último conocido (o el del servidor).`,
+      );
+      return this.cacheModeloIa?.modelo ?? null;
+    }
+  }
+
+  /** Escribe el caché del modelo (y olvida el último fallo). */
+  private fijarCacheModeloIa(modelo: string | null): void {
+    this.versionModeloIa += 1;
+    this.cacheModeloIa = { modelo, at: Date.now() };
+    this.falloModeloIaAt = null;
+  }
+
+  /**
+   * Headers de la llamada a pyservices: `{ 'X-IA-Modelo': id }` SOLO con
+   * modelo configurado; `{}` si no (o si la lectura falla). Nunca lanza.
+   */
+  async headersModeloIa(): Promise<Record<string, string>> {
+    return headersModeloIa(await this.modeloIa());
+  }
+
+  /**
+   * `GET /v1/config/ia-modelo` (sin caché; refresca el de 60 s). El default
+   * del servidor lo trae el controller de pyservices (best-effort).
+   */
+  async modeloIaConfig(
+    defaultServidor: string | null,
+  ): Promise<ModeloIaConfig> {
+    const fila = await this.leerFilaModeloIa();
+    const configurado = modeloDeValorJson(fila?.valor_json);
+    this.fijarCacheModeloIa(configurado);
+    let actualizadoPor: string | null = null;
+    if (fila?.updated_by) {
+      const { data, error } = await this.supabase.service
+        .from('usuario')
+        .select('id, nombre')
+        .eq('id', fila.updated_by)
+        .maybeSingle();
+      if (!error && data) {
+        const nombre = (data as { nombre?: string | null }).nombre;
+        actualizadoPor = (nombre ?? '').trim() || 'Sin nombre';
+      }
+    }
+    return {
+      configurado,
+      default_servidor: defaultServidor,
+      efectivo: resolverModeloEfectivo(configurado, defaultServidor),
+      catalogo: CATALOGO_MODELOS_IA.map((m) => ({ ...m })),
+      actualizado_at: fila ? fila.updated_at : null,
+      actualizado_por_nombre: actualizadoPor,
+      aviso: avisoModeloIa(configurado),
+    };
+  }
+
+  /**
+   * `PUT /v1/config/ia-modelo` ({ modelo }, ADMIN). `null` = volver al del
+   * servidor. Un id que no cumple la forma ⇒ 400 `MODELO_INVALIDO` (un id
+   * FUERA del catálogo con forma válida se acepta: la respuesta trae
+   * `aviso`). No hay migración: (1) la fila se CREA si no existe (`upsert`
+   * con `ignoreDuplicates` = ON CONFLICT DO NOTHING; `activa` y la
+   * descripción fija solo se escriben al nacer) y (2) se actualizan SOLO
+   * `valor_json` y quién/cuándo — una descripción editada en la BD no se
+   * pisa. El caché de este proceso se rearma al instante; otras réplicas,
+   * en ≤ 60 s.
+   */
+  async setModeloIa(modelo: string | null, userId: string): Promise<void> {
+    let id: string | null = null;
+    if (modelo !== null) {
+      const limpio = typeof modelo === 'string' ? modelo.trim() : '';
+      if (!esIdModeloValido(limpio)) {
+        throw new BadRequestException({
+          message: MENSAJE_MODELO_INVALIDO,
+          error: 'MODELO_INVALIDO',
+          details: { modelo },
+        });
+      }
+      id = limpio;
+    }
+    const cambio = {
+      valor_json: valorJsonDeModelo(id),
+      updated_at: new Date().toISOString(),
+      updated_by: userId,
+    };
+    const creada = await this.supabase.service
+      .from('configuracion_sistema')
+      .upsert(
+        {
+          clave: CONFIG_IA_MODELO,
+          activa: true,
+          descripcion: DESCRIPCION_CONFIG_IA_MODELO,
+          ...cambio,
+        },
+        { onConflict: 'clave', ignoreDuplicates: true },
+      );
+    if (creada.error) throw new Error(creada.error.message);
+    const { error } = await this.supabase.service
+      .from('configuracion_sistema')
+      .update(cambio)
+      .eq('clave', CONFIG_IA_MODELO);
+    if (error) throw new Error(error.message);
+    this.fijarCacheModeloIa(id);
   }
 }

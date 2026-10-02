@@ -2,12 +2,14 @@ import {
   BadRequestException,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { SupabaseService } from '../supabase/supabase.service';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import type { EnvVars } from '../../config/env.schema';
 import { calcularCompra, type CargoFactura } from '../compras/compras.calculo';
 import { InventoryService } from './inventory.service';
@@ -116,6 +118,8 @@ export class ComprasService {
     private readonly supabase: SupabaseService,
     private readonly inventory: InventoryService,
     private readonly iaUso: IaUsoService,
+    // Modelo de IA configurado (2-oct-2026) ⇒ header `X-IA-Modelo`.
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
 
   async extraer(
@@ -140,6 +144,9 @@ export class ComprasService {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': token,
+          ...(this.configuracion
+            ? await this.configuracion.headersModeloIa()
+            : {}),
         },
         body: JSON.stringify({ pdf_base64: dto.pdf_base64 }),
         signal: controller.signal,

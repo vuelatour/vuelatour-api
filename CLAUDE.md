@@ -3507,6 +3507,104 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       entregar ni adelantado, positivo a medias ⇒ adelanto, `es_empresa`,
       COORDINADOR sin items).
 
+39. **MODELO DE IA CONFIGURABLE (2-oct-2026, API 0.0.51, SIN migración).**
+    Pedido del cliente en Configuración → Créditos de IA: «dejar una opción en
+    la configuración para adaptar el modelo que quieran utilizar, aunque
+    ahorita dejaremos por default el que estamos usando actualmente». **En
+    prod NO cambia nada al desplegar**: la clave arranca sin configurar ⇒
+    pyservices usa su `ANTHROPIC_MODEL` (claude-opus-4-8).
+    - **Fuente única PURA** `common/ia-modelo.util.ts` (spec): catálogo
+      `CATALOGO_MODELOS_IA` `{id, nombre, descripcion, in_usd_por_millon,
+      out_usd_por_millon}` (opus-4-8, sonnet-4-6, haiku-4-5-20251001;
+      tarifas DERIVADAS de `TARIFAS`, que `ia-uso.service` ahora EXPORTA
+      junto con `tarifaIa`, la regla única de prefijo que también usa
+      `costoIaUsd`), `REGEX_ID_MODELO_IA = ^claude-[a-z0-9.-]{3,80}$` (misma
+      en pyservices y panel), `esIdModeloValido`, `tarifaDe`,
+      `resolverModeloEfectivo`, `headersModeloIa`, `avisoModeloIa` y los
+      textos. El panel (`lib/admin/ia-modelo.ts`) guarda una COPIA LITERAL
+      del catálogo y de `TARIFAS` con test de paridad (lee este repo si está
+      al lado): si cambia aquí, cambia allá en el mismo cambio.
+    - **El catálogo SOLO lleva modelos que NO piensan cuando pyservices omite
+      `thinking`** (revisión del 2-oct-2026). Sonnet 5 y Opus 5.5 corren
+      thinking ADAPTATIVO si se omite (Opus 5.5 ni deja apagarlo: `disabled`
+      = 400) y esos tokens cuentan contra los `max_tokens` chicos de
+      pyservices (800 tacómetro/gasto→vuelo, 1000 combustible/constancia,
+      1024 vencimientos, 2048 compras): la lectura podía salir truncada o
+      vacía. Se sacaron del catálogo; siguen elegibles por «Otro» (con
+      `AVISO_FUERA_DE_CATALOGO` y su tarifa). **Para volverlos al catálogo**:
+      primero pyservices decide `thinking`/`effort` por modelo junto a
+      `modelo_actual()` (Sonnet 5: `thinking={'type':'disabled'}`; Opus 5.5:
+      `output_config={'effort':'low'}` y más `max_tokens`) y se prueban con
+      un ticket y un tacómetro reales.
+    - **Tarifas**: Opus 5.5 tiene renglón propio (4/20) ANTES de
+      `claude-opus-5` (5/25) — `tarifaIa` toma la PRIMERA coincidencia por
+      prefijo y antes caía en la de Opus 5 (+25 %). Su lectura de caché es
+      0.05x (`FACTOR_LECTURA_CACHE`, aparte de `TARIFAS` para no cambiar la
+      forma de sus renglones); los demás, 0.10x.
+    - **Clave `configuracion_sistema.ia_modelo`** (`CONFIG_IA_MODELO`):
+      `valor_json = ["<id>"]` — **ARREGLO de un elemento, no string**: el
+      CHECK `configuracion_sistema_valor_json_chk` solo admite null o arreglo
+      (un string suelto revienta con 23514); se LEE también un string suelto
+      por si algún día se relaja. `null` = el del servidor. La fila NO existe
+      hasta el primer PUT, que la CREA con `upsert` + `ignoreDuplicates` (ON
+      CONFLICT DO NOTHING: `activa: true` y la descripción fija solo al
+      nacer) y luego hace `update` de SOLO `valor_json`/`updated_at`/
+      `updated_by` — una descripción editada en la BD no se pisa. Se EXCLUYE
+      de `GET /v1/config` y `PATCH :clave` la rechaza (400
+      `CLAVE_NO_EDITABLE_AQUI`), como las listas (`CLAVES_SECCION_PROPIA`).
+    - `ConfiguracionService.modeloIa()` = caché de 60 s (mismo TTL), **nunca
+      lanza y nunca tarda más de `TOPE_LECTURA_MODELO_IA_MS` (1.5 s)**: corre
+      ANTES de CADA llamada a pyservices (PDFs y Excel incluidos) y
+      supabase-js no trae timeout; al vencer aborta la consulta
+      (`abortSignal`) y responde el último conocido o null. Tras un fallo no
+      reconsulta en `ESPERA_TRAS_FALLO_MODELO_IA_MS` (10 s), las llamadas
+      simultáneas comparten UNA consulta y una lectura lenta no pisa lo que
+      un PUT/GET escribió mientras tanto (`versionModeloIa`). El PUT y el GET
+      rearman el caché al instante en este proceso (otra réplica: ≤ 60 s).
+      `headersModeloIa()` ⇒ `{ 'X-IA-Modelo': id }` SOLO con modelo válido.
+    - **El header viaja en TODA llamada del API a pyservices que lee con IA.
+      OJO: no todas pasan por `PyservicesService`**: visión (tickets,
+      tacómetros, combustible, constancia, inventario y `health`),
+      vencimientos, compras y conciliación (`parse`, `sugerir`,
+      `sugerir-abonos`) hacen su propio `fetch`. Cada uno recibe
+      `ConfiguracionService` `@Optional()` (último parámetro; sus módulos
+      importan `ConfiguracionModule`) y suma el header; `PyservicesService`
+      lo pone en `postForJson`/`postForBuffer`/`getForBuffer`. **Un cliente
+      NUEVO de pyservices con IA tiene que hacer lo mismo** o usará el modelo
+      del servidor en silencio. Quedan sin header a propósito los que no usan
+      IA (`quotes-pdf.service`, `facturacion.client`).
+    - **DI**: `ConfiguracionModule` ↔ `PyservicesModule` con `forwardRef` en
+      los DOS imports (la ruta GET pide a pyservices su default; pyservices
+      lee el modelo configurado). Entre providers no hay ciclo;
+      `PyservicesService` inyecta `@Optional() @Inject(forwardRef(() =>
+      ConfiguracionService))`. Verificado compilando `AppModule` completo.
+    - **Rutas** (literales ANTES de `:clave`, solo ADMIN): `GET
+      /v1/config/ia-modelo` ⇒ `{configurado, default_servidor, efectivo,
+      catalogo, actualizado_at, actualizado_por_nombre, aviso}`
+      (`default_servidor` = pyservices `GET /ia/modelo`, best-effort con
+      tope de 5 s: viejo/caído ⇒ null; `efectivo = configurado ??
+      default_servidor`); `PUT /v1/config/ia-modelo {modelo: string|null}`
+      (DTO: `modelo` obligatorio, string ≤ 200 o null; la forma la valida el
+      service ⇒ 400 `MODELO_INVALIDO`; recorta espacios) ⇒ lo mismo que el
+      GET. Un id con forma válida FUERA del catálogo se acepta y `aviso` lo
+      dice (`AVISO_FUERA_DE_CATALOGO` + `AVISO_SIN_TARIFA` si no tiene tarifa:
+      su consumo se registra con costo 0).
+    - **Riesgo asumido**: un id con forma válida que Anthropic no conoce
+      tumba TODAS las lecturas con IA hasta corregirlo (nadie lo prueba al
+      guardar). `GET /v1/vision/health` ya viaja con el modelo configurado:
+      sirve para confirmarlo (consume una llamada).
+    - Compatibilidad: pyservices viejo ignora el header; API viejo no lo
+      manda. Orden de deploy pyservices → API → panel, tolerante en
+      cualquier orden. Specs: `ia-modelo.util.spec`, `ia-uso.service.spec`,
+      `configuracion.ia-modelo.spec` (alta sin pisar la descripción,
+      arreglo, caché, tope, espera tras fallo, lectura compartida,
+      invalidación, exclusión, PATCH),
+      `configuracion.controller.ia-modelo.spec` (HTTP real),
+      `pyservices.service.ia-modelo.spec` (incluye BD colgada ⇒ la petición
+      sale a los 1.5 s sin header) y `vision.service.ia-modelo.spec`
+      (visión, vencimientos, compras y conciliación `parse` / `sugerir` /
+      `sugerir-abonos`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

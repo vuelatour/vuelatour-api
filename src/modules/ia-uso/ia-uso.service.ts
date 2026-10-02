@@ -14,7 +14,10 @@ export interface UsoIaPayload {
   output_tokens?: number | null;
   /** Tokens escritos a caché (cache_control ephemeral): se cobran a 1.25x. */
   cache_creation_input_tokens?: number | null;
-  /** Tokens leídos de caché: se cobran a 0.10x de la tarifa input. */
+  /**
+   * Tokens leídos de caché: se cobran a 0.10x de la tarifa input (0.05x en
+   * Opus 5.5, `FACTOR_LECTURA_CACHE`).
+   */
   cache_read_input_tokens?: number | null;
 }
 
@@ -23,24 +26,58 @@ export interface RegistroIaOpts {
   contexto?: Record<string, unknown>;
 }
 
+/** Tarifa USD por MILLÓN de tokens de un prefijo de id de modelo. */
+export interface TarifaIa {
+  prefijo: string;
+  inUsdPorMillon: number;
+  outUsdPorMillon: number;
+}
+
 /**
  * Tarifas USD por MILLÓN de tokens, por prefijo del id de modelo (el id real
  * trae sufijos de versión). Modelo desconocido = costo 0 CONSERVANDO modelo y
  * tokens: la fila queda reparable retroactivamente cuando se agregue la tarifa.
+ * EXPORTADA (2-oct-2026): el catálogo de «Modelo de IA» de Configuración
+ * (`common/ia-modelo.util.ts`) lee de aquí su tarifa — una sola tabla.
  */
-const TARIFAS: ReadonlyArray<{
-  prefijo: string;
-  inUsdPorMillon: number;
-  outUsdPorMillon: number;
-}> = [
+export const TARIFAS: ReadonlyArray<TarifaIa> = [
   { prefijo: 'claude-opus-4-8', inUsdPorMillon: 5, outUsdPorMillon: 25 },
   { prefijo: 'claude-opus-4-7', inUsdPorMillon: 5, outUsdPorMillon: 25 },
   { prefijo: 'claude-opus-4-6', inUsdPorMillon: 5, outUsdPorMillon: 25 },
+  // Opus 5.5 ANTES que `claude-opus-5`: `tarifaIa` toma la PRIMERA
+  // coincidencia por prefijo y `claude-opus-5-5` también empieza con
+  // `claude-opus-5` (que cuesta 5/25; Opus 5.5 cuesta 4/20).
+  { prefijo: 'claude-opus-5-5', inUsdPorMillon: 4, outUsdPorMillon: 20 },
   { prefijo: 'claude-opus-5', inUsdPorMillon: 5, outUsdPorMillon: 25 },
   { prefijo: 'claude-sonnet-4-6', inUsdPorMillon: 3, outUsdPorMillon: 15 },
   { prefijo: 'claude-sonnet-5', inUsdPorMillon: 2, outUsdPorMillon: 10 },
   { prefijo: 'claude-haiku-4-5', inUsdPorMillon: 1, outUsdPorMillon: 5 },
 ];
+
+/**
+ * Tarifa de un id de modelo por PREFIJO (`claude-haiku-4-5-20251001` ⇒
+ * `claude-haiku-4-5`), sin distinguir mayúsculas. `null` = sin tarifa
+ * conocida (el consumo se registra con costo 0). Regla ÚNICA: la usan
+ * `costoIaUsd` y el catálogo de modelos (`ia-modelo.util#tarifaDe`).
+ */
+export function tarifaIa(modelo: string | null | undefined): TarifaIa | null {
+  const m = (modelo ?? '').trim().toLowerCase();
+  if (!m) return null;
+  return TARIFAS.find((t) => m.startsWith(t.prefijo)) ?? null;
+}
+
+/**
+ * Factor de la LECTURA de caché sobre la tarifa de entrada, por prefijo de
+ * `TARIFAS`. Lo normal es 0.10x; Opus 5.5 cobra la lectura a $0.20 por
+ * millón con entrada de $4 ⇒ 0.05x. Va aparte de `TARIFAS` para no cambiar
+ * la forma de sus renglones (el panel copia esa tabla literal).
+ */
+export const FACTOR_LECTURA_CACHE: Readonly<Record<string, number>> = {
+  'claude-opus-5-5': 0.05,
+};
+
+/** Factor por defecto de la lectura de caché (0.10x de la tarifa input). */
+const FACTOR_LECTURA_CACHE_DEFAULT = 0.1;
 
 /** Entero >= 0 defensivo (None/undefined/strings raros del wire → 0). */
 function tokens(v: unknown): number {
@@ -55,9 +92,10 @@ function round6(n: number): number {
 
 /**
  * Costo en USD de una llamada. Los tokens de caché NO vienen incluidos en
- * input_tokens: creación a 1.25x y lectura a 0.10x de la tarifa input —
- * ignorarlos subestimaría el costo (el system prompt de gasto-ticket es enorme
- * y viaja con cache_control en TODAS las llamadas).
+ * input_tokens: creación a 1.25x y lectura a 0.10x de la tarifa input (o el
+ * factor del modelo en `FACTOR_LECTURA_CACHE`) — ignorarlos subestimaría el
+ * costo (el system prompt de gasto-ticket es enorme y viaja con
+ * cache_control en TODAS las llamadas).
  */
 export function costoIaUsd(
   modelo: string,
@@ -66,13 +104,14 @@ export function costoIaUsd(
   cacheCreacion: number,
   cacheLectura: number,
 ): number {
-  const m = modelo.trim().toLowerCase();
-  const tarifa = TARIFAS.find((t) => m.startsWith(t.prefijo));
+  const tarifa = tarifaIa(modelo);
   if (!tarifa) return 0;
+  const factorLectura =
+    FACTOR_LECTURA_CACHE[tarifa.prefijo] ?? FACTOR_LECTURA_CACHE_DEFAULT;
   const usd =
     (input * tarifa.inUsdPorMillon +
       cacheCreacion * tarifa.inUsdPorMillon * 1.25 +
-      cacheLectura * tarifa.inUsdPorMillon * 0.1 +
+      cacheLectura * tarifa.inUsdPorMillon * factorLectura +
       output * tarifa.outUsdPorMillon) /
     1e6;
   return round6(usd);

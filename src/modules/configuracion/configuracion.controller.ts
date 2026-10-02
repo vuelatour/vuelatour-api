@@ -19,11 +19,13 @@ import {
   EditoresCotizacionCobradaDto,
   IaSaldoDto,
   IaUsoQuery,
+  ModeloIaDto,
   ResponsablesFacturacionDto,
   UpdateConfiguracionDto,
 } from './dto/configuracion.dto';
 import { ConfiguracionService } from './configuracion.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 
 @ApiTags('Config')
 @ApiBearerAuth()
@@ -32,6 +34,7 @@ export class ConfiguracionController {
   constructor(
     private readonly config: ConfiguracionService,
     private readonly iaUsoSvc: IaUsoService,
+    private readonly pyservices: PyservicesService,
   ) {}
 
   @Get()
@@ -66,6 +69,33 @@ export class ConfiguracionController {
       dto.notas ?? null,
       c.userId,
     );
+  }
+
+  // Modelo de IA (2-oct-2026): qué modelo usan las lecturas con IA.
+  // Literales ANTES de ':clave'. El default del servidor lo reporta
+  // pyservices (`GET /ia/modelo`, best-effort: viejo o caído ⇒ null).
+  @Get('ia-modelo')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Modelo de IA de las lecturas (tickets, tacómetros, PDFs, sugerencias): { configurado (null = el del servidor), default_servidor (ANTHROPIC_MODEL de pyservices; null si no responde), efectivo, catalogo: {id, nombre, descripcion, in_usd_por_millon, out_usd_por_millon}[], actualizado_at, actualizado_por_nombre, aviso }.',
+  })
+  async modeloIa() {
+    return this.config.modeloIaConfig(await this.pyservices.modeloIaServidor());
+  }
+
+  @Put('ia-modelo')
+  @Roles(Rol.ADMIN)
+  @ApiOperation({
+    summary:
+      'Guarda el modelo de IA ({ modelo: string | null }; null = volver al del servidor). 400 MODELO_INVALIDO si el id no cumple ^claude-[a-z0-9.-]{3,80}$. Un id fuera del catálogo se acepta con `aviso`. Responde lo mismo que el GET.',
+  })
+  async setModeloIa(
+    @Body() dto: ModeloIaDto,
+    @CurrentUser() current: AuthenticatedUser,
+  ) {
+    await this.config.setModeloIa(dto.modelo, current.userId);
+    return this.config.modeloIaConfig(await this.pyservices.modeloIaServidor());
   }
 
   // Responsables de facturación (24-sep-2026): quién recibe el aviso

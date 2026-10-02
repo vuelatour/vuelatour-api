@@ -1,9 +1,10 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
 import { normalizarCodigo } from '../inventory/inventario-codigo.util';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 
 /**
  * Datos de registro del consumo de IA de una lectura (best-effort). El call
@@ -196,7 +197,23 @@ export class VisionService implements OnModuleInit {
   constructor(
     private readonly config: ConfigService<EnvVars, true>,
     private readonly iaUso: IaUsoService,
+    // Modelo de IA configurado (2-oct-2026) ⇒ header `X-IA-Modelo`.
+    // @Optional: sin él, pyservices usa su ANTHROPIC_MODEL (como antes).
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
+
+  /**
+   * Headers de TODA llamada a pyservices: token interno + `X-IA-Modelo`
+   * SOLO con un modelo configurado (Configuración → Créditos de IA). La
+   * lectura del modelo es best-effort y nunca lanza.
+   */
+  private async headersPy(): Promise<Record<string, string>> {
+    return {
+      'Content-Type': 'application/json',
+      'X-Internal-Token': this.token,
+      ...(this.configuracion ? await this.configuracion.headersModeloIa() : {}),
+    };
+  }
 
   onModuleInit() {
     this.baseUrl = this.config
@@ -254,10 +271,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/tacometro`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         // 1px PNG transparente: válida para el contrato, basta para ver si la
         // IA responde o falla por config (llave/cuota).
         body: JSON.stringify({
@@ -312,10 +326,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/tacometro`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         body: JSON.stringify({
           image_base64: input.imageBase64,
           media_type: input.mediaType,
@@ -382,10 +393,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/gasto`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         body: JSON.stringify({
           image_base64: input.imageBase64,
           media_type: input.mediaType,
@@ -476,10 +484,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/constancia-fiscal`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         body: JSON.stringify({
           pdf_base64: input.pdfBase64,
           image_base64: input.imageBase64,
@@ -538,10 +543,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/combustible`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         body: JSON.stringify({
           image_base64: input.imageBase64,
           media_type: input.mediaType,
@@ -599,10 +601,7 @@ export class VisionService implements OnModuleInit {
     try {
       const res = await fetch(`${this.baseUrl}/vision/inventario-item`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Internal-Token': this.token,
-        },
+        headers: await this.headersPy(),
         body: JSON.stringify({
           images: images.map((i) => ({
             image_base64: i.imageBase64,

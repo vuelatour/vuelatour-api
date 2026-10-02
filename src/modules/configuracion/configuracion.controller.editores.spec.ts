@@ -6,6 +6,9 @@ jest.mock('./configuracion.service', () => ({
   ConfiguracionService: class {},
 }));
 jest.mock('../ia-uso/ia-uso.service', () => ({ IaUsoService: class {} }));
+jest.mock('../pyservices/pyservices.service', () => ({
+  PyservicesService: class {},
+}));
 
 import {
   BadRequestException,
@@ -25,6 +28,7 @@ import { Rol } from '../../common/types/auth.types';
 import { ConfiguracionController } from './configuracion.controller';
 import { ConfiguracionService } from './configuracion.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
+import { PyservicesService } from '../pyservices/pyservices.service';
 
 type Servidor = Parameters<typeof request>[0];
 const ALE = 'c691cc8b-3034-4f04-a383-d0b25c1971ec';
@@ -75,6 +79,7 @@ describe('ConfiguracionController — editores de cotizaciones cobradas', () => 
         providers: [
           { provide: ConfiguracionService, useValue: svc },
           { provide: IaUsoService, useValue: {} },
+          { provide: PyservicesService, useValue: {} },
         ],
       }).compile();
       app = moduleRef.createNestApplication();

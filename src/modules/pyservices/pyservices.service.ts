@@ -1,12 +1,16 @@
 import {
   BadGatewayException,
+  Inject,
   Injectable,
   Logger,
+  Optional,
   ServiceUnavailableException,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import type { UsoIaPayload } from '../ia-uso/ia-uso.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 
 export interface RepartoSocioPayload {
   socio_nombre: string;
@@ -1700,7 +1704,56 @@ export interface MapaPuntoPdfPayload {
 export class PyservicesService {
   private readonly logger = new Logger(PyservicesService.name);
 
-  constructor(private readonly config: ConfigService<EnvVars, true>) {}
+  /**
+   * `configuracion` (2-oct-2026): modelo de IA configurado ⇒ header
+   * `X-IA-Modelo` en TODA petición a pyservices. @Optional: los specs viejos
+   * construyen el service sin él (⇒ sin header, todo como antes).
+   */
+  constructor(
+    private readonly config: ConfigService<EnvVars, true>,
+    @Optional()
+    @Inject(forwardRef(() => ConfiguracionService))
+    private readonly configuracion?: ConfiguracionService,
+  ) {}
+
+  /**
+   * `{ 'X-IA-Modelo': id }` SOLO con modelo configurado; `{}` sin
+   * `ConfiguracionService` o sin modelo (pyservices usa su ANTHROPIC_MODEL).
+   * Nunca lanza y nunca tarda más de `TOPE_LECTURA_MODELO_IA_MS` (la
+   * lectura del modelo es best-effort y con tope: corre ANTES del timer de
+   * la petición, así que no le resta tiempo a pyservices).
+   */
+  private async headersModeloIa(): Promise<Record<string, string>> {
+    if (!this.configuracion) return {};
+    try {
+      return await this.configuracion.headersModeloIa();
+    } catch {
+      return {};
+    }
+  }
+
+  /**
+   * Modelo DEFAULT de pyservices (`GET /ia/modelo` ⇒ `default_servidor`, su
+   * ANTHROPIC_MODEL). Best-effort con tope de 5 s: un pyservices viejo
+   * (404), caído, lento o sin configurar ⇒ `null` (la tarjeta del panel dice
+   * «el del servidor» sin nombrarlo). Jamás lanza.
+   */
+  async modeloIaServidor(): Promise<string | null> {
+    try {
+      const buf = await this.getForBuffer('/ia/modelo', 5_000);
+      const body = JSON.parse(buf.toString('utf8')) as {
+        default_servidor?: unknown;
+      } | null;
+      const v = body?.default_servidor;
+      const id = typeof v === 'string' ? v.trim() : '';
+      return id && id.length <= 200 ? id : null;
+    } catch (e) {
+      this.logger.warn(
+        `GET /ia/modelo de pyservices sin respuesta útil: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+  }
 
   async generateRepartoPdf(payload: RepartoPdfPayload): Promise<Buffer> {
     return this.postForBuffer('/pdf/reparto', payload);
@@ -1965,6 +2018,7 @@ export class PyservicesService {
         'pyservices no configurado (PYSERVICES_BASE_URL / INTERNAL_SHARED_TOKEN)',
       );
     }
+    const modeloIa = await this.headersModeloIa();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -1973,6 +2027,7 @@ export class PyservicesService {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': token,
+          ...modeloIa,
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -2036,6 +2091,7 @@ export class PyservicesService {
       );
     }
 
+    const modeloIa = await this.headersModeloIa();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -2046,6 +2102,7 @@ export class PyservicesService {
             ? { 'Content-Type': 'application/json' }
             : {}),
           'X-Internal-Token': token,
+          ...modeloIa,
         },
         ...(req.method === 'POST' ? { body: JSON.stringify(req.body) } : {}),
         signal: controller.signal,

@@ -10,6 +10,7 @@ import {
   Matches,
   MaxLength,
   Min,
+  ValidateIf,
 } from 'class-validator';
 
 /**
@@ -94,4 +95,24 @@ export class EditoresCotizacionCobradaDto {
   @ArrayMaxSize(20)
   @IsUUID('all', { each: true })
   usuario_ids!: string[];
+}
+
+/**
+ * `PUT /v1/config/ia-modelo` (2-oct-2026): modelo de IA de las lecturas.
+ * `modelo` es OBLIGATORIO y puede ser `null` (= volver al del servidor). La
+ * FORMA del id (`^claude-[a-z0-9.-]{3,80}$`) la valida el service para
+ * responder con el código `MODELO_INVALIDO` (el ValidationPipe solo daría un
+ * 400 genérico sin código).
+ */
+export class ModeloIaDto {
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'Id del modelo de Anthropic (p. ej. claude-sonnet-5); null = usar el del servidor (ANTHROPIC_MODEL de pyservices). Un id fuera del catálogo se acepta si tiene forma válida.',
+  })
+  @ValidateIf((o: { modelo?: unknown }) => o.modelo !== null)
+  @IsString()
+  @MaxLength(200)
+  modelo!: string | null;
 }

@@ -1,7 +1,8 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
 import type { UsoIaPayload } from '../ia-uso/ia-uso.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 
 export interface VencimientoExtraerInput {
   /** PDF en base64 (sin prefijo data:). */
@@ -39,7 +40,11 @@ export class ExpirationsClient implements OnModuleInit {
   private token = '';
   private timeoutMs = 30000;
 
-  constructor(private readonly config: ConfigService<EnvVars, true>) {}
+  constructor(
+    private readonly config: ConfigService<EnvVars, true>,
+    // Modelo de IA configurado (2-oct-2026) ⇒ header `X-IA-Modelo`.
+    @Optional() private readonly configuracion?: ConfiguracionService,
+  ) {}
 
   onModuleInit() {
     this.baseUrl = this.config
@@ -79,6 +84,9 @@ export class ExpirationsClient implements OnModuleInit {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': this.token,
+          ...(this.configuracion
+            ? await this.configuracion.headersModeloIa()
+            : {}),
         },
         body: JSON.stringify({
           pdf_base64: input.pdfBase64,

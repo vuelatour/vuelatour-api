@@ -5,12 +5,14 @@ import {
   InternalServerErrorException,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../supabase/supabase.service';
 import { PyservicesService } from '../pyservices/pyservices.service';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
+import { ConfiguracionService } from '../configuracion/configuracion.service';
 import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
@@ -516,7 +518,16 @@ export class ConciliacionService {
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
     private readonly iaUso: IaUsoService,
+    // Modelo de IA configurado (2-oct-2026) ⇒ header `X-IA-Modelo` en las
+    // llamadas DIRECTAS a pyservices (parse / sugerir / sugerir-abonos).
+    // @Optional: los specs construyen el service sin él.
+    @Optional() private readonly configuracion?: ConfiguracionService,
   ) {}
+
+  /** `{ 'X-IA-Modelo': id }` con modelo configurado; `{}` si no. Nunca lanza. */
+  private async headersModeloIa(): Promise<Record<string, string>> {
+    return this.configuracion ? this.configuracion.headersModeloIa() : {};
+  }
 
   // =====================================================================
   // INGRESOS (24-sep-2026): sonda ÚNICA de la migración 20260924000004.
@@ -704,6 +715,7 @@ export class ConciliacionService {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': token,
+          ...(await this.headersModeloIa()),
         },
         body: JSON.stringify({
           filename: dto.filename,
@@ -6301,6 +6313,7 @@ export class ConciliacionService {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': token,
+          ...(await this.headersModeloIa()),
         },
         body: JSON.stringify({
           movimiento: {
@@ -8152,6 +8165,7 @@ export class ConciliacionService {
         headers: {
           'Content-Type': 'application/json',
           'X-Internal-Token': token,
+          ...(await this.headersModeloIa()),
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
