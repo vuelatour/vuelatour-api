@@ -5,6 +5,7 @@ import { TipoCambioModule } from '../tipo-cambio/tipo-cambio.module';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingController } from './profit-sharing.controller';
 import { ProfitSharingService } from './profit-sharing.service';
+import { RepartoCuentaService } from './reparto-cuenta.service';
 import { RepartoPagoService } from './reparto-pago.service';
 
 @Module({
@@ -14,10 +15,16 @@ import { RepartoPagoService } from './reparto-pago.service';
   // pre-cierre sale de la MISMA lectura que GET /conciliacion/cobros-sin-banco.
   imports: [PyservicesModule, TipoCambioModule, ConciliacionModule],
   controllers: [ProfitSharingController],
-  // RepartoPagoService (1-oct-2026): pagos de utilidades a socios. Inyecta
-  // ProfitSharingService (la utilidad sale de compute); el pre-cierre NO lo
-  // inyecta — comparte solo la sonda/lectura de `reparto-pago.lector.ts`.
-  providers: [ProfitSharingService, DineroReportService, RepartoPagoService],
+  // Cuenta corriente del socio (v2, 2-oct-2026): RepartoCuentaService
+  // inyecta ProfitSharingService (utilidades por mes = compute memoizado) y
+  // RepartoPagoService inyecta RepartoCuentaService. El pre-cierre NO los
+  // inyecta — comparte solo la sonda/lectura de `reparto-cuenta.lector.ts`.
+  providers: [
+    ProfitSharingService,
+    DineroReportService,
+    RepartoCuentaService,
+    RepartoPagoService,
+  ],
   exports: [ProfitSharingService],
 })
 export class ProfitSharingModule {}

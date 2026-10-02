@@ -15,16 +15,19 @@ import type { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import { ProfitSharingService } from './profit-sharing.service';
 import {
-  CLAVE_PRECIERRE_PAGOS_SOCIOS,
-  CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS,
-} from './reparto-pago.util';
+  CLAVE_PRECIERRE_SOCIOS_ADELANTADOS,
+  CLAVE_PRECIERRE_SOCIOS_POR_ENTREGAR,
+} from './reparto-cuenta.util';
 
 /**
- * PRE-CIERRE · PAGOS A SOCIOS (1-oct-2026): aviso NO bloqueante «Socios con
- * utilidad del mes sin pagar o con pago parcial», SOLO cuando el periodo es
- * un mes calendario. La utilidad sale del reparto REAL (`computeAvion`):
- * N4142R, septiembre 2026, un vuelo cobrado en $2,023.10 y socios 69 / 29 /
- * 2 ⇒ $1,395.94 · $586.70 · $40.46 (residuo mayor en centavos).
+ * PRE-CIERRE · CUENTAS DE LOS SOCIOS (v2, 2-oct-2026): avisos NO
+ * bloqueantes «Socios con utilidad por entregar» (utilidades HASTA el mes
+ * del cierre y TODAS las entregas) y «Socios con entregas adelantadas»
+ * (saldo SIN el mes en curso < −$1: el mismo número del candado del
+ * adelanto), SOLO cuando el periodo es un mes calendario. La
+ * utilidad sale del reparto REAL (`computeAvion`): N4142R, septiembre 2026,
+ * un vuelo cobrado en $2,023.10 y socios 69 / 29 / 2 ⇒ $1,395.94 · $586.70
+ * · $40.46 (residuo mayor en centavos). «Hoy» = 1-oct-2026 (Cancún).
  */
 type Fila = Record<string, unknown>;
 
@@ -32,6 +35,7 @@ const N4142R = 'aaaaaaaa-0000-4000-8000-000000004142';
 const MAURICIO = 'bbbbbbbb-0000-4000-8000-000000000069';
 const AERO = 'bbbbbbbb-0000-4000-8000-000000000029';
 const SAAB = 'bbbbbbbb-0000-4000-8000-000000000002';
+const ALE = 'cccccccc-0000-4000-8000-0000000000a1';
 const SEPTIEMBRE = { desde: '2026-09-01', hasta: '2026-09-30' };
 
 type Privado = {
@@ -132,56 +136,117 @@ function avionN4142R(svc: ProfitSharingService) {
 
 interface Opciones {
   pagos?: Fila[];
-  sinTabla?: boolean;
+  cuentas?: Fila[];
+  sinMigracion?: boolean;
+  /** Utilidad de Mauricio en OCTUBRE (mes en curso); default: sin avión. */
+  octubreMauricio?: number;
 }
 
+const SEMBRADAS = new Set([
+  'reparto_pago',
+  'reparto_cuenta_socio',
+  'aeronave_socio',
+  'aeronave',
+  'usuario',
+]);
+
 function armar(opts: Opciones = {}) {
+  const tablas: Record<string, Fila[]> = {
+    reparto_pago: opts.pagos ?? [],
+    reparto_cuenta_socio: opts.cuentas ?? [],
+    aeronave_socio: [MAURICIO, AERO, SAAB].map((socio_id, i) => ({
+      aeronave_id: N4142R,
+      socio_id,
+      porcentaje: ['69.000', '29.000', '2.000'][i],
+      vigente_desde: '2026-01-01',
+      vigente_hasta: null,
+    })),
+    aeronave: [{ id: N4142R, matricula: 'N4142R', activa: true }],
+    usuario: [
+      {
+        id: MAURICIO,
+        nombre: 'Mauricio Roque',
+        rol: 'SOCIO',
+        estado: 'ACTIVO',
+      },
+      {
+        id: AERO,
+        nombre: 'Aero Charter Cancun S.A. de C.V.',
+        rol: 'SOCIO',
+        estado: 'INACTIVO',
+        es_empresa: true,
+      },
+      {
+        id: SAAB,
+        nombre: 'Alexander E. Saab',
+        rol: 'PILOTO',
+        estado: 'ACTIVO',
+      },
+      { id: ALE, nombre: 'Ale Canales', rol: 'ADMIN', estado: 'ACTIVO' },
+    ],
+  };
   const consultasPagos: Array<Array<[string, unknown]>> = [];
   const from = (tabla: string) => {
-    const filtros: Array<[string, unknown]> = [];
+    const filtros: Array<[string, unknown, 'eq' | 'in' | 'gte' | 'lte']> = [];
+    let cols = '*';
     const q: Record<string, unknown> = {};
-    for (const m of [
-      'select',
-      'neq',
-      'in',
-      'not',
-      'or',
-      'gte',
-      'lte',
-      'order',
-      'limit',
-      'range',
-    ]) {
+    for (const m of ['neq', 'not', 'or', 'order', 'limit', 'range']) {
       q[m] = () => q;
     }
+    q.select = (c?: string) => {
+      if (typeof c === 'string') cols = c;
+      return q;
+    };
     q.eq = (c: string, v: unknown) => {
-      filtros.push([c, v]);
+      filtros.push([c, v, 'eq']);
       return q;
     };
     q.is = (c: string, v: unknown) => {
-      filtros.push([c, v]);
+      filtros.push([c, v, 'eq']);
+      return q;
+    };
+    q.in = (c: string, v: unknown) => {
+      filtros.push([c, v, 'in']);
+      return q;
+    };
+    q.gte = (c: string, v: unknown) => {
+      filtros.push([c, v, 'gte']);
+      return q;
+    };
+    q.lte = (c: string, v: unknown) => {
+      filtros.push([c, v, 'lte']);
       return q;
     };
     q.maybeSingle = () => Promise.resolve({ data: null, error: null });
     q.then = (res: (v: unknown) => unknown) => {
-      if (tabla === 'reparto_pago') {
-        if (opts.sinTabla) {
-          return Promise.resolve({
-            data: null,
-            error: {
-              code: 'PGRST205',
-              message:
-                "Could not find the table 'public.reparto_pago' in the schema cache",
-            },
-          }).then(res);
-        }
-        consultasPagos.push(filtros);
-        const filas = (opts.pagos ?? []).filter((p) =>
-          filtros.every(([c, v]) => (v === null ? p[c] == null : p[c] === v)),
-        );
-        return Promise.resolve({ data: filas, error: null }).then(res);
+      if (
+        opts.sinMigracion &&
+        (tabla === 'reparto_cuenta_socio' ||
+          (tabla === 'reparto_pago' && cols.includes('saldo_snapshot_usd')))
+      ) {
+        return Promise.resolve({
+          data: null,
+          error: {
+            code: '42703',
+            message: 'column reparto_pago.saldo_snapshot_usd does not exist',
+          },
+        }).then(res);
       }
-      return Promise.resolve({ data: [], error: null, count: 0 }).then(res);
+      if (!SEMBRADAS.has(tabla)) {
+        return Promise.resolve({ data: [], error: null, count: 0 }).then(res);
+      }
+      if (tabla === 'reparto_pago') {
+        consultasPagos.push(filtros.map(([c, v]) => [c, v]));
+      }
+      const filas = tablas[tabla].filter((f) =>
+        filtros.every(([c, v, op]) => {
+          if (op === 'in') return (v as unknown[]).includes(f[c]);
+          if (op === 'gte') return String(f[c]) >= String(v);
+          if (op === 'lte') return String(f[c]) <= String(v);
+          return v === null ? f[c] == null : f[c] === v;
+        }),
+      );
+      return Promise.resolve({ data: filas, error: null }).then(res);
     };
     return q;
   };
@@ -193,31 +258,49 @@ function armar(opts: Opciones = {}) {
   } as unknown as ConciliacionService;
   const nada = {} as never;
   const svc = new ProfitSharingService(supabase, nada, nada, conciliacion);
+  svc.ahora = () => new Date('2026-10-01T18:00:00Z'); // 13:00 Cancún
   const avion = avionN4142R(svc);
-  // `compute` del mes = el avión REAL de arriba (el resto del cómputo se
-  // prueba en sus propios specs).
-  const compute = jest
-    .spyOn(svc, 'compute')
-    .mockResolvedValue({ aviones: [avion] } as unknown as Awaited<
-      ReturnType<ProfitSharingService['compute']>
-    >);
+  // `compute` de cada mes: septiembre = el avión REAL de arriba; octubre
+  // (en curso) todavía sin vuelos cerrados — o, con `octubreMauricio`, el
+  // avión con la utilidad parcial de octubre (p. ej. negativa: gastos ya
+  // capturados y ningún vuelo cobrado).
+  const octubre =
+    opts.octubreMauricio == null
+      ? []
+      : [
+          {
+            aeronave: avion.aeronave,
+            reparto_porcentaje_total: 100,
+            reparto: avion.reparto.map((r) => ({
+              ...r,
+              monto_usd: r.socio_id === MAURICIO ? opts.octubreMauricio : 0,
+            })),
+          },
+        ];
+  const compute = jest.spyOn(svc, 'compute').mockImplementation((q) =>
+    Promise.resolve({
+      aviones: q.desde === '2026-09-01' ? [avion] : octubre,
+    } as unknown as Awaited<ReturnType<ProfitSharingService['compute']>>),
+  );
   return { svc, compute, avion, consultasPagos };
 }
 
-function pago(p: Fila): Fila {
+function entrega(p: Fila): Fila {
   return {
     id: `p-${Math.random()}`,
-    aeronave_id: N4142R,
+    aeronave_id: null,
     socio_id: MAURICIO,
-    periodo: '2026-09-01',
+    periodo: null,
     monto: 1000,
     moneda: 'USD',
     tc_usd_mxn: null,
     monto_usd: 1000,
-    utilidad_snapshot_usd: 1395.94,
+    utilidad_snapshot_usd: null,
+    saldo_snapshot_usd: null,
     fecha_pago: '2026-10-01',
     metodo: 'TRANSFERENCIA',
-    entregado_por: MAURICIO,
+    entregado_por: ALE,
+    created_by: ALE,
     created_at: '2026-10-01T15:00:00Z',
     updated_at: '2026-10-01T15:00:00Z',
     deleted_at: null,
@@ -225,15 +308,14 @@ function pago(p: Fila): Fila {
   };
 }
 
-function itemDe(r: { items: Array<Record<string, unknown>> }) {
-  return r.items.find((i) => i.clave === CLAVE_PRECIERRE_PAGOS_SOCIOS);
-}
+type Respuesta = { listo: boolean; items: Array<Record<string, unknown>> };
 
-function sobrepagosDe(r: { items: Array<Record<string, unknown>> }) {
-  return r.items.find((i) => i.clave === CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS);
-}
+const porEntregarDe = (r: Respuesta) =>
+  r.items.find((i) => i.clave === CLAVE_PRECIERRE_SOCIOS_POR_ENTREGAR);
+const adelantadosDe = (r: Respuesta) =>
+  r.items.find((i) => i.clave === CLAVE_PRECIERRE_SOCIOS_ADELANTADOS);
 
-describe('ProfitSharingService.preCierre — pagos a socios', () => {
+describe('ProfitSharingService.preCierre — cuentas de los socios', () => {
   it('el reparto REAL de N4142R: $2,023.10 ⇒ 1,395.94 / 586.70 / 40.46', () => {
     const { avion } = armar();
     expect(avion.saldo_disponible_usd).toBe(2023.1);
@@ -246,112 +328,212 @@ describe('ProfitSharingService.preCierre — pagos a socios', () => {
     ]);
   });
 
-  it('mes completo: lista PENDIENTE y PARCIAL (sin borrados) y NO bloquea el cierre', async () => {
-    const { svc, compute, consultasPagos } = armar({
+  it('septiembre sin entregas: los 3 socios POR ENTREGAR (mayor primero), compute UNO por mes, y NO bloquea el cierre', async () => {
+    const { svc, compute } = armar();
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    // Un compute por MES calendario (septiembre y el mes en curso).
+    expect(compute.mock.calls.map((c) => [c[0].desde, c[0].hasta])).toEqual([
+      ['2026-09-01', '2026-09-30'],
+      ['2026-10-01', '2026-10-31'],
+    ]);
+    expect(porEntregarDe(r)).toMatchObject({
+      titulo: 'Socios con utilidad por entregar',
+      mes: '2026-09',
+      count: 3,
+      monto_usd: 2023.1,
+      lectura_fallida: false,
+      disponible: true,
+      socios: [
+        {
+          socio: { id: MAURICIO, nombre: 'Mauricio Roque' },
+          por_entregar_usd: 1395.94,
+        },
+        {
+          // La propia empresa como socio viaja MARCADA (la oficina decide).
+          socio: {
+            id: AERO,
+            nombre: 'Aero Charter Cancun S.A. de C.V.',
+            es_empresa: true,
+          },
+          por_entregar_usd: 586.7,
+        },
+        {
+          socio: {
+            id: SAAB,
+            nombre: 'Alexander E. Saab',
+            es_empresa: false,
+          },
+          por_entregar_usd: 40.46,
+        },
+      ],
+    });
+    expect(String(porEntregarDe(r)!.detalle)).toContain(
+      '3 socio(s) con utilidad por entregar hasta septiembre 2026 por $2,023.10 USD',
+    );
+    expect(porEntregarDe(r)).not.toHaveProperty('informativo');
+    // Misma forma que «por entregar» (incluye `disponible`).
+    expect(adelantadosDe(r)).toMatchObject({
+      count: 0,
+      lectura_fallida: false,
+      disponible: true,
+    });
+    expect(r.listo).toBe(true);
+    // Mes cerrado memoizado: otra corrida solo recalcula el mes en curso.
+    await svc.preCierre(SEPTIEMBRE, Rol.ADMIN);
+    expect(compute).toHaveBeenCalledTimes(3);
+  });
+
+  it('una entrega de OCTUBRE por la utilidad de septiembre limpia septiembre; el ADELANTO de 70,000 MXN sale en adelantados; las borradas no cuentan', async () => {
+    const { svc, consultasPagos } = armar({
       pagos: [
-        pago({}),
-        pago({ socio_id: SAAB, monto: 40.46, monto_usd: 40.46 }),
-        // Borrado: no cuenta (el lector filtra deleted_at is null).
-        pago({
+        entrega({
+          monto: 1395.94,
+          monto_usd: 1395.94,
+          periodo: '2026-09-01',
+          aeronave_id: N4142R,
+        }),
+        entrega({
           socio_id: AERO,
-          monto: 586.7,
-          monto_usd: 586.7,
+          monto: 70000,
+          moneda: 'MXN',
+          tc_usd_mxn: 18.5,
+          monto_usd: 3783.78,
+          metodo: 'EFECTIVO',
+        }),
+        entrega({
+          socio_id: SAAB,
+          monto_usd: 40.46,
           deleted_at: '2026-10-01T16:00:00Z',
         }),
       ],
     });
-    const r = (await svc.preCierre(SEPTIEMBRE, Rol.ADMIN)) as unknown as {
-      listo: boolean;
-      items: Array<Record<string, unknown>>;
-    };
-    expect(compute).toHaveBeenCalledWith({
-      desde: '2026-09-01',
-      hasta: '2026-09-30',
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    expect(porEntregarDe(r)).toMatchObject({
+      count: 1,
+      monto_usd: 40.46,
+      socios: [{ socio: { id: SAAB }, por_entregar_usd: 40.46 }],
     });
-    const item = itemDe(r)!;
-    expect(item).toMatchObject({
-      titulo: 'Socios con utilidad del mes sin pagar o con pago parcial',
-      mes: '2026-09',
-      count: 2,
-      monto_usd: 982.64,
+    expect(adelantadosDe(r)).toMatchObject({
+      titulo: 'Socios con entregas adelantadas (más de lo generado)',
+      count: 1,
+      monto_usd: 3197.08,
+      socios: [
+        {
+          socio: { id: AERO, nombre: 'Aero Charter Cancun S.A. de C.V.' },
+          por_entregar_usd: -3197.08,
+          adelantado_usd: 3197.08,
+        },
+      ],
       lectura_fallida: false,
-      disponible: true,
     });
-    expect(
-      (
-        item.socios as Array<{
-          socio: { nombre: string };
-          aeronave: { matricula: string };
-          pendiente_usd: number;
-          estado: string;
-        }>
-      ).map((s) => [
-        s.socio.nombre,
-        s.aeronave.matricula,
-        s.pendiente_usd,
-        s.estado,
-      ]),
-    ).toEqual([
-      ['Aero Charter Cancun S.A. de C.V.', 'N4142R', 586.7, 'PENDIENTE'],
-      ['Mauricio Roque', 'N4142R', 395.94, 'PARCIAL'],
-    ]);
-    expect(String(item.detalle)).toContain(
-      '2 pago(s) a socios pendientes de septiembre 2026',
+    expect(String(adelantadosDe(r)!.detalle)).toContain(
+      'Aero Charter Cancun S.A. de C.V. $3,197.08 USD',
     );
-    expect(item).not.toHaveProperty('informativo');
     expect(r.listo).toBe(true);
-    // [0] es la sonda (select id limit 1); la lectura del mes trae filtros.
+    // Las entregas se leen VIVAS.
     expect(consultasPagos.find((f) => f.length > 0)).toEqual(
-      expect.arrayContaining([
-        ['periodo', '2026-09-01'],
-        ['deleted_at', null],
-      ]),
+      expect.arrayContaining([['deleted_at', null]]),
     );
   });
 
-  it('todo pagado: count 0, sin lectura fallida', async () => {
+  it('mes en curso NEGATIVO (gastos de octubre ya capturados): entregar EXACTAMENTE lo que dice «por entregar» de septiembre deja al socio al corriente, no «adelantado» (el MISMO criterio del candado del 409)', async () => {
     const { svc } = armar({
+      octubreMauricio: -345,
       pagos: [
-        pago({ monto: 1395.94, monto_usd: 1395.94 }),
-        pago({ socio_id: AERO, monto: 586.7, monto_usd: 586.7 }),
-        pago({ socio_id: SAAB, monto: 40.46, monto_usd: 40.46 }),
+        entrega({
+          monto: 1395.94,
+          monto_usd: 1395.94,
+          periodo: '2026-09-01',
+          aeronave_id: N4142R,
+        }),
       ],
     });
-    const item = itemDe(await svc.preCierre(SEPTIEMBRE, Rol.ADMIN))!;
-    expect(item).toMatchObject({
-      count: 0,
-      socios: [],
-      lectura_fallida: false,
-    });
-    expect(String(item.detalle)).toContain('tienen su pago registrado');
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    const ids = (x: Record<string, unknown> | undefined) =>
+      (x!.socios as Array<{ socio: { id: string } }>).map((s) => s.socio.id);
+    expect(ids(porEntregarDe(r))).toEqual([AERO, SAAB]);
+    // Antes (saldo de HOY, con octubre −345) salía «Mauricio Roque $345 USD
+    // … recibieron más de lo generado».
+    expect(adelantadosDe(r)).toMatchObject({ count: 0, monto_usd: 0 });
+    expect(ids(adelantadosDe(r))).toEqual([]);
   });
 
-  it('periodo que NO es un mes completo: el aviso no aparece ni se calcula el reparto', async () => {
+  it('mes en curso POSITIVO a medias: una entrega por encima de lo CERRADO sí sale como adelanto en el pre-cierre (utilidad no realizada)', async () => {
+    const { svc } = armar({
+      octubreMauricio: 500,
+      pagos: [entrega({ monto: 1895.94, monto_usd: 1895.94 })],
+    });
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    expect(adelantadosDe(r)).toMatchObject({
+      count: 1,
+      monto_usd: 500,
+      socios: [
+        {
+          socio: { id: MAURICIO, es_empresa: false },
+          por_entregar_usd: -500,
+          adelantado_usd: 500,
+        },
+      ],
+    });
+  });
+
+  it('agosto (antes del arranque default de las cuentas): count 0 con el texto que lo explica', async () => {
+    const { svc } = armar();
+    const r = (await svc.preCierre(
+      { desde: '2026-08-01', hasta: '2026-08-31' },
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    expect(porEntregarDe(r)).toMatchObject({
+      count: 0,
+      lectura_fallida: false,
+    });
+    expect(String(porEntregarDe(r)!.detalle)).toBe(
+      'Las cuentas de los socios arrancan después de agosto 2026: no hay nada que revisar en este mes.',
+    );
+  });
+
+  it('periodo que NO es un mes completo: los avisos no aparecen ni se calcula nada', async () => {
     const { svc, compute } = armar();
     for (const q of [
       { desde: '2026-09-01', hasta: '2026-09-15' },
       { desde: '2026-08-01', hasta: '2026-09-30' },
       { desde: '2026-10-01', hasta: '2026-10-01' },
     ]) {
-      expect(itemDe(await svc.preCierre(q, Rol.ADMIN))).toBeUndefined();
+      const r = (await svc.preCierre(q, Rol.ADMIN)) as unknown as Respuesta;
+      expect(porEntregarDe(r)).toBeUndefined();
+      expect(adelantadosDe(r)).toBeUndefined();
     }
     expect(compute).not.toHaveBeenCalled();
   });
 
-  it('sin la migración: count 0 MARCADO como lectura fallida (no «no hay pendientes»)', async () => {
-    const { svc, compute } = armar({ sinTabla: true });
-    const r = (await svc.preCierre(SEPTIEMBRE, Rol.ADMIN)) as unknown as {
-      listo: boolean;
-      items: Array<Record<string, unknown>>;
-    };
-    const item = itemDe(r)!;
-    expect(item).toMatchObject({
+  it('sin la migración: count 0 MARCADO como lectura fallida (no «no hay pendientes»), sin adelantados ni cálculo', async () => {
+    const { svc, compute } = armar({ sinMigracion: true });
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    expect(porEntregarDe(r)).toMatchObject({
       count: 0,
       lectura_fallida: true,
       disponible: false,
       socios: [],
     });
-    expect(String(item.detalle)).toContain('todavía no está habilitado');
+    expect(String(porEntregarDe(r)!.detalle)).toContain(
+      'todavía no están habilitadas',
+    );
+    expect(adelantadosDe(r)).toBeUndefined();
     expect(compute).not.toHaveBeenCalled();
     expect(r.listo).toBe(true);
   });
@@ -359,83 +541,33 @@ describe('ProfitSharingService.preCierre — pagos a socios', () => {
   it('si el cálculo falla: count 0 con lectura_fallida y un texto que lo dice; el pre-cierre no se cae', async () => {
     const { svc, compute } = armar();
     compute.mockRejectedValueOnce(new Error('timeout'));
-    const item = itemDe(await svc.preCierre(SEPTIEMBRE, Rol.ADMIN))!;
-    expect(item).toMatchObject({
+    const r = (await svc.preCierre(
+      SEPTIEMBRE,
+      Rol.ADMIN,
+    )) as unknown as Respuesta;
+    expect(porEntregarDe(r)).toMatchObject({
       count: 0,
       lectura_fallida: true,
       disponible: true,
     });
-    expect(String(item.detalle)).toContain(
-      'No se pudieron leer los pagos a socios',
+    expect(String(porEntregarDe(r)!.detalle)).toContain(
+      'No se pudieron leer las cuentas de los socios',
     );
+    expect(adelantadosDe(r)).toBeUndefined();
   });
-  it('COORDINADOR (y sin rol): NO recibe los items de pagos a socios ni se calcula el reparto — ningún otro endpoint le da esas cifras', async () => {
-    const { svc, compute } = armar({ pagos: [pago({})] });
+
+  it('COORDINADOR (y sin rol): NO recibe los avisos de las cuentas ni se calcula nada — ningún otro endpoint le da esas cifras', async () => {
+    const { svc, compute } = armar({ pagos: [entrega({})] });
     for (const rol of [Rol.COORDINADOR, undefined]) {
-      const r = (await svc.preCierre(SEPTIEMBRE, rol)) as unknown as {
-        items: Array<Record<string, unknown>>;
-      };
-      expect(itemDe(r)).toBeUndefined();
-      expect(sobrepagosDe(r)).toBeUndefined();
+      const r = (await svc.preCierre(SEPTIEMBRE, rol)) as unknown as Respuesta;
+      expect(porEntregarDe(r)).toBeUndefined();
+      expect(adelantadosDe(r)).toBeUndefined();
       expect(JSON.stringify(r)).not.toContain('Mauricio Roque');
     }
     expect(compute).not.toHaveBeenCalled();
-    // ANALISTA y FACTURACION sí (leen la relación de pagos).
     for (const rol of [Rol.ANALISTA, Rol.FACTURACION]) {
-      const r = (await svc.preCierre(SEPTIEMBRE, rol)) as unknown as {
-        items: Array<Record<string, unknown>>;
-      };
-      expect(itemDe(r)).toBeDefined();
+      const r = (await svc.preCierre(SEPTIEMBRE, rol)) as unknown as Respuesta;
+      expect(porEntregarDe(r)).toBeDefined();
     }
-  });
-
-  it('SOBREPAGOS: con todo pagado pero un pago de más, el item aparte trae count > 0 (el panel oculta los de count 0) y no bloquea', async () => {
-    const { svc } = armar({
-      pagos: [
-        pago({ monto: 1895.94, monto_usd: 1895.94 }),
-        pago({ socio_id: AERO, monto: 586.7, monto_usd: 586.7 }),
-        pago({ socio_id: SAAB, monto: 40.46, monto_usd: 40.46 }),
-      ],
-    });
-    const r = (await svc.preCierre(SEPTIEMBRE, Rol.ADMIN)) as unknown as {
-      listo: boolean;
-      items: Array<Record<string, unknown>>;
-    };
-    expect(itemDe(r)).toMatchObject({ count: 0, sobrepagos: 1 });
-    expect(String(itemDe(r)!.detalle)).toContain(
-      'pero 1 pago(s) quedaron por encima de la utilidad',
-    );
-    const sobre = sobrepagosDe(r)!;
-    expect(sobre).toMatchObject({
-      titulo: 'Pagos a socios por encima de la utilidad del mes',
-      mes: '2026-09',
-      count: 1,
-      monto_usd: 500,
-      lectura_fallida: false,
-    });
-    // La lista va en `sobrepagados`, NO en `socios` (el panel pinta
-    // `socios` como pendientes).
-    expect(sobre).not.toHaveProperty('socios');
-    expect(sobre.sobrepagados).toEqual([
-      {
-        socio: { id: MAURICIO, nombre: 'Mauricio Roque' },
-        aeronave: { id: N4142R, matricula: 'N4142R', modelo: 'Cessna 206' },
-        exceso_usd: 500,
-        estado: 'PAGADO',
-      },
-    ]);
-    expect(String(sobre.detalle)).toContain(
-      'Mauricio Roque (N4142R) $500 USD de más',
-    );
-    expect(r.listo).toBe(true);
-  });
-
-  it('lectura fallida: sin item de sobrepagos (el principal ya dice «sin verificar»)', async () => {
-    const { svc } = armar({ sinTabla: true });
-    const r = (await svc.preCierre(SEPTIEMBRE, Rol.ADMIN)) as unknown as {
-      items: Array<Record<string, unknown>>;
-    };
-    expect(itemDe(r)).toMatchObject({ lectura_fallida: true });
-    expect(sobrepagosDe(r)).toBeUndefined();
   });
 });

@@ -3209,8 +3209,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
          `ROLES_INGRESOS`); documentos-flota = ADMIN, COORDINADOR (=
          `expirations/:id/archivo` y la póliza); estados-cuenta = ADMIN,
          FACTURACION (= conciliación); reparto-comprobantes = ADMIN,
-         FACTURACION, ANALISTA, SOCIO (= `GET profit-sharing/pagos`, que al
-         SOCIO solo le entrega SUS pagos y sus paths). `@Roles` = la unión. Rol fuera ⇒ 403
+         FACTURACION, ANALISTA, SOCIO (= `GET profit-sharing/pagos` y
+         `GET profit-sharing/socios/:id/estado-cuenta`, que al SOCIO solo le
+         entregan SUS entregas y sus paths — invariante 38 v2). `@Roles` = la unión. Rol fuera ⇒ 403
          `BUCKET_FUERA_DE_ROL` (el panel pinta su placeholder). VISITANTE ⇒
          403 del RolesGuard. **Un bucket nuevo en la lista blanca exige su
          fila en la matriz** (el tipo `Record<BucketFirmable, …>` no
@@ -3230,157 +3231,281 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (8 h vs 1 h: photo-urls, vouchers, fotos de tacómetro del vuelo, plan
       de vuelo y `invoices/file-urls` vs recibidas).
 
-38. **PAGOS DE UTILIDADES A SOCIOS (1-oct-2026, API 0.0.49, migración
-    `20261001000001` — APLICADA en prod el 1-oct-2026).** Pedido del cliente con la
-    captura de /admin/profit-sharing: «cada socio debe recibir los pagos de
-    lo que generó el avión en el mes […] Mauricio Roque, %, Monto de
-    utilidad, estatus de si ya se pagó o aún no, con cuánto se le pagó,
-    cuándo y quién se lo entregó […] que no se nos escape ninguno».
-    - **La utilidad NO se persiste**: sale de `compute()` del MES
-      (`reparto[].monto_usd`, residuo mayor). `reparto_pago` guarda solo los
-      PAGOS; `utilidad_snapshot_usd` es la foto al registrar (o al corregir
-      el dinero) para el aviso `utilidad_difiere` (> $1). Nadie recalcula el
-      reparto aparte.
-    - **Tabla `reparto_pago`**: un pago por fila (avión, socio, `periodo` =
-      día 1 del mes por CHECK). `moneda`/`metodo` = TEXTO + CHECK (no el enum
-      `moneda`). `tc_usd_mxn` (12,6) ⇔ MXN. `monto_usd` = lo que descuenta
-      (USD = monto, CHECK; MXN = round(monto / T.C., 2) en el API). Soft
-      delete `deleted_at/_by` + `motivo_baja`: **TODO lector filtra
-      `deleted_at is null`**. Avión, socio y quién entregó ON DELETE
-      RESTRICT. `client_request_id` único parcial (incluye borradas). Bucket
-      privado `reparto-comprobantes` (10 MB, imagen/PDF).
-    - **Fuente única PURA** `profit-sharing/reparto-pago.util.ts` (spec con
-      N4142R 69/29/2 sobre $2,023.10 ⇒ 1,395.94 / 586.70 / 40.46):
-      `mesDePeriodo`, `rangoDeMes`, `montoUsdDePago`, `validarDineroPago`
-      (MXN con T.C. fuera de **15–25** —la banda del costo externo y de la
-      conciliación, paridad congelada en spec— ⇒ 400 `TC_FUERA_DE_RANGO`:
-      un dedazo 1.8/180 movía el pendiente en silencio y 1,000,000
-      desbordaba `numeric(12,6)` ⇒ 500), `validarFechaPago`,
-      `estadoPagoSocio` (en centavos: utilidad ≤ 0 ⇒ SIN_UTILIDAD; pagado ≥
-      utilidad − $1 ⇒ PAGADO con pendiente 0; pagado > 0 ⇒ PARCIAL; si no
-      PENDIENTE; `exceso_usd` = pagado − **max(utilidad, 0)** cuando pasa de
-      $1 — DESVIACIÓN CONSCIENTE del contrato «pagado − utilidad»: con
-      utilidad −500 y pagado 100 el exceso es 100, no 600; la copia del
-      panel `lib/admin/reparto-pagos.ts#estadoPagoSocio` debe usar el MISMO
-      `max(u, 0)`), `excedeUtilidad`, `utilidadDifiere`, `armarFilasPagos`,
-      `resumenPorSocio` (la pérdida de un avión NO compensa la utilidad de
-      otro: cada avión se liquida aparte), `totalesPagos`,
-      `resumenPrecierrePagos` y los textos. **Un solo cálculo de cada
-      número** (revisión adversaria 1-oct-2026): utilidad y % del socio =
-      `partesDeSociosEnAvion` (suma las vigencias duplicadas; la usan
-      `utilidadDeSocioEnAvion` —409 y foto— y los renglones); lo pagado =
-      `sumaMontoUsd` (renglón, `pagadoDe` del 409 y la carrera); spec de
-      PARIDAD 409 ⇔ renglón con dos vigencias y numeric en texto. Orden de
-      CAPTURA = `compararCaptura` (`created_at` en MICROsegundos con
-      `microsDeInstante` —`Date.parse` trunca a ms—, empate por id).
-      `utilidad_al_pagar_usd` = foto del último pago CAPTURADO
-      (`fotoMasReciente`), no del último por `fecha_pago`: un efectivo
-      entregado antes y capturado después ya trae la utilidad nueva (antes
-      daba un «la utilidad cambió» falso). Límite: corregir el DINERO de un
-      pago viejo renueva SU foto, pero la referencia sigue siendo el último
-      capturado. Renglón con pagos de un avión que `compute` no trae (dado de
-      baja: `compute` trae TODOS los activos) ⇒ `avisoAvionDadoDeBaja(mes)`
-      («El avión está dado de baja: el reparto no calcula su utilidad…»), no
-      `AVISO_SOCIO_NO_VIGENTE` (que manda a buscar un error de captura).
-    - **Sonda ÚNICA** `reparto-pago.lector.ts` (tabla: 42P01/PGRST205,
-      re-sondeo ≤ 10 min, una instancia por cliente). La comparten
-      `RepartoPagoService` y el pre-cierre: vive APARTE para que
-      `ProfitSharingService` no inyecte `RepartoPagoService` (que sí inyecta
-      `ProfitSharingService` para `compute`) — sin ciclo. Sin la migración:
-      GET ⇒ `disponible:false` con listas vacías (sin calcular el reparto);
-      escrituras ⇒ 503 `PAGOS_SOCIOS_NO_DISPONIBLE`. La lectura del mes va
-      PAGINADA (1000, tope 10 páginas ⇒ error, nunca una lista recortada).
-    - **Rutas** (literales bajo `pagos/`, `@Roles` en CADA una, constantes
-      `ROLES_PAGOS_SOCIOS_*`): `GET pagos?mes&aeronave_id` (ADMIN, ANALISTA,
-      FACTURACION, SOCIO — el SOCIO solo SUS renglones y la consulta ya
-      filtra por él) ⇒ `{disponible, mes, desde, hasta, filas, por_socio,
-      totales}`; renglón = avión × socio del cómputo + los (avión, socio)
-      con pagos que ya no están en el reparto (utilidad 0; ADITIVOS
-      `vigente:false` y `aviso`). `POST pagos` (ADMIN, FACTURACION) ⇒ 201
-      `{pago, fila}`; replay ⇒ 200 `idempotente:true` (la idempotencia va
-      PRIMERO; llave de otro renglón o de un pago borrado ⇒ 409
-      `CLIENT_REQUEST_ID_EN_USO`). Reglas: socio en `aeronave_socio` con
-      vigencia que toca el mes (400 `SOCIO_NO_ES_DE_LA_AERONAVE`, antes de
-      calcular); utilidad ≤ 0 o avión fuera del cómputo ⇒ 409
-      `SIN_UTILIDAD_QUE_PAGAR` aun con `aceptar_exceso`; pagado + monto >
-      utilidad + $1 ⇒ 409 `PAGO_EXCEDE_UTILIDAD` `details {utilidad_usd,
-      pagado_usd, monto_usd, exceso_usd}` salvo `aceptar_exceso` (booleano
-      CRUDO del body); MXN sin T.C. ⇒ 400 `TC_REQUERIDO`, USD con T.C. ⇒
-      400 `TC_NO_APLICA`, T.C. fuera de 15–25 ⇒ 400 `TC_FUERA_DE_RANGO`
-      (DTO: `@Max(999_999)`, lo que cabe en la columna; y un 22003 de la BD
-      ⇒ 400 `PAGO_INVALIDO`, nunca 500); fecha futura (día Cancún) ⇒ 400
-      `FECHA_PAGO_FUTURA`; `entregado_por_id` (default el actor) ACTIVO o
-      400 `ENTREGADO_POR_INVALIDO`. **Carreras (revisión adversaria
-      1-oct-2026)**: (a) doble envío con la MISMA llave — antes de responder
-      `SIN_UTILIDAD_QUE_PAGAR` o `PAGO_EXCEDE_UTILIDAD` se vuelve a buscar la
-      llave (`replaySiYaQuedo`): si la 1.ª ya insertó, es replay (200
-      `idempotente`), no un exceso con el pago propio contado como «ya
-      pagado»; (b) dos altas con llaves DISTINTAS que pasan a la vez el
-      candado (leer-luego-insertar, sin candado de BD por contrato) — sin
-      `aceptar_exceso`, tras el INSERT se relee el renglón
-      (`perdioCarreraDeAlta` → `excedeEnOrdenDeCaptura`): la capturada
-      DESPUÉS se da de baja (`MOTIVO_BAJA_CARRERA_ALTA`, `deleted_by` = su
-      actor) **liberando su `client_request_id`** (única excepción a «una
-      llave usada no se recicla»: sin eso, confirmar el 409 con la MISMA
-      llave daría `CLIENT_REQUEST_ID_EN_USO`) y responde 409
-      `PAGO_EXCEDE_UTILIDAD`; la primera se queda. Best-effort: si la
-      relectura o la baja fallan, el pago se queda (201) y lo avisa el
-      pre-cierre. Ventana residual de milisegundos (la otra confirma después
-      de la relectura ⇒ las dos se quedan): también la avisa el pre-cierre.
-      El PATCH no tiene esta revisión (CAS por fila, no por renglón). `PATCH pagos/:id` (estado FUSIONADO;
-      pasar a USD limpia el T.C.; SOLO si el monto en USD SUBE se re-corren
-      SIN_UTILIDAD y exceso; corregir el dinero renueva la foto; CAS por
-      `updated_at` ⇒ 409 `PAGO_CAMBIO_CONCURRENTE`; vacío ⇒ 400
-      `PAGO_SIN_CAMBIOS`; `null` en monto/moneda/fecha/método/entregó ⇒
-      400). `DELETE pagos/:id {motivo 5–300}` ⇒ `{deleted, fila}` (404
-      `PAGO_NO_EXISTE` también si ya estaba borrado; el panel CONFIRMA).
-      `POST pagos/:id/comprobante` (multipart `file`, imagen o PDF ≤ 10 MB,
-      `validarComprobanteCobro`) ⇒ `{pago}`; path
-      `<avión>/<YYYY-MM>/<pago>/<uuid>.<ext>` (un uuid por subida: el
-      anterior se CONSERVA en el bucket) con CAS sobre el path anterior (409
-      `COMPROBANTE_CAMBIO`). `comprobante_url` firmada 8 h
-      (`SEGUNDOS_URL_MINIATURA`); el visor la renueva con `storage/firmar`.
-    - **Pre-cierre**: item `pagos_socios_pendientes` SOLO si el periodo es
-      un mes calendario; NO bloqueante (sin `informativo`). `count` =
-      renglones PENDIENTE|PARCIAL, `monto_usd`, `socios[{socio, aeronave,
-      pendiente_usd, estado}]` (máx 50, pendiente mayor primero), `mes`,
-      `detalle`, `lectura_fallida`, `disponible` y el ADITIVO `sobrepagos`.
-      Sin tabla o con un fallo (cálculo o lectura) ⇒ count 0 +
-      `lectura_fallida: true`. Corre `compute` del mes en paralelo con el
-      seguimiento. **Item APARTE `pagos_socios_sobrepagados`** («Pagos a
-      socios por encima de la utilidad del mes», NO bloqueante; solo con la
-      lectura buena): `count` = renglones con `exceso_usd > 0` (la utilidad
-      bajó después de pagar, carrera de altas, pagos fuera del reparto),
-      `monto_usd` = Σ exceso, `sobrepagados[{socio, aeronave, exceso_usd,
-      estado}]` (máx 50) — en `sobrepagados` y NO en `socios`, porque el
-      panel pinta `socios` como pendientes. Es item aparte (y no solo un
-      conteo) porque el panel OCULTA los items con `count` 0: con todo
-      pagado, un sobrepago se escapaba del cierre. **Roles** (revisión
-      adversaria 1-oct-2026): el controller pasa `@CurrentUser().rol` a
-      `preCierre(q, rol)` y los dos items solo se arman (y `compute` solo
-      corre) para `ROLES_PAGOS_SOCIOS_LECTURA`; COORDINADOR (que entra al
-      pre-cierre pero recibe 403 en `GET pagos` y en `GET /profit-sharing`)
-      y una llamada sin rol NO los reciben — ningún endpoint da a un rol más
-      de lo que le dan los específicos (misma regla que `storage/firmar`,
-      invariante 37).
-    - **Riesgos / pendientes**: dos altas simultáneas del mismo socio se
-      resuelven DESPUÉS del insert (arriba; ventana residual de ms avisada
-      por el pre-cierre); la parte de
-      «Aero Charter Cancun S.A. de C.V.» (socio = la propia empresa) sale
-      PENDIENTE hasta que se registre (decisión del cliente); un avión dado
-      de baja no sale en `compute` ⇒ no hay utilidad que pagar desde aquí;
-      una utilidad positiva < $1 cuenta como PAGADA por la tolerancia (misma
-      regla que los cobros). **Rollback del bucket**: `storage.buckets`
-      tiene `protect_buckets_delete` (42501 «Direct deletion from storage
-      tables is not allowed») ⇒ se vacía y borra con la Storage API (pie de
-      la migración), nunca con un `delete` directo.
-    - Specs: `reparto-pago.util.spec`, `reparto-pago.service.spec` (BD en
-      memoria; las dos carreras con una PUERTA en `compute` FALLAN sin los
-      arreglos), `profit-sharing.controller.reparto-pago.spec` (HTTP real
-      con RolesGuard, DTO y filtro; el pre-cierre recibe el rol),
+38. **CUENTA CORRIENTE DEL SOCIO — PAGOS DE UTILIDADES v2 (2-oct-2026, API
+    0.0.50; migraciones `20261001000001` APLICADA y `20261002000001`
+    PENDIENTE DE APLICAR).** La v1 (0.0.49, 1-oct) llevaba un estatus por
+    avión × mes; el cliente aclaró por audio el 1-oct: «cuando el socio dice:
+    necesito que me adelanten 70,000 pesos de mis utilidades, necesitamos
+    poder grabarlo en algún lado y que se lleve el HISTÓRICO de cuánto se le
+    ha ido repartiendo a los socios, cuánto falta por repartir, cómo se le
+    repartió (transferencia o efectivo), la fecha de la entrega y algún
+    comprobante escaneado». Es una CUENTA CORRIENTE por socio. La v1 se
+    REFORMÓ (0 filas en prod): ya no existen los estados PENDIENTE/PARCIAL/
+    PAGADO/SIN_UTILIDAD por mes, ni `SIN_UTILIDAD_QUE_PAGAR` /
+    `PAGO_EXCEDE_UTILIDAD`, ni los items `pagos_socios_pendientes` /
+    `pagos_socios_sobrepagados`, ni `GET pagos?mes=` (⇒ 410).
+    - **Saldo (lo POR ENTREGAR) = `saldo_inicial_usd` + Σ utilidades
+      generadas − Σ entregas vivas.** Estados: |saldo| ≤ $1.00 ⇒
+      `AL_CORRIENTE`; > $1.00 ⇒ `POR_ENTREGAR`; < −$1.00 ⇒ `ADELANTADO` (se
+      le entregó más de lo generado). Aritmética en CENTAVOS.
+    - **Las utilidades NO se guardan**: salen de `compute(primer día, último
+      día)` de CADA mes calendario desde `cuenta_desde` hasta el mes EN
+      CURSO inclusive (hora Cancún) — jamás un compute de todo el rango: los
+      % con vigencia cambian por mes. Del reparto de cada avión se LEE
+      `reparto[].monto_usd` (residuo mayor); dos vigencias del mismo socio en
+      un mes se suman (`partesDeSociosEnAvion`). Fuente ÚNICA:
+      `ProfitSharingService.utilidadesSociosPorMes(meses, mesActual)` →
+      `reparto-utilidades.memo.ts#UtilidadesMensualesSocios` (vive en
+      ProfitSharingService, dueño de `compute`, para que el pre-cierre y los
+      servicios de la cuenta compartan la memoria sin ciclo): meses CERRADOS
+      memoizados 10 min en las LECTURAS (un cobro/gasto tardío de un mes
+      cerrado se refleja a lo más 10 min después; nadie llama `olvidar()`
+      desde cobros ni gastos), el mes en curso JAMÁS se memoiza, ≤ 3
+      computes en paralelo, un fallo no se memoiza y SUBE (nunca un número
+      parcial). Las ESCRITURAS de entregas (alta y corrección:
+      `RepartoPagoService.contexto` ⇒ `contextoSocio({fresco:true})`) piden
+      `{fresco: true}`: recalculan sin leer la memoria y la renuevan — el
+      candado y `saldo_snapshot_usd` nunca deciden con utilidades viejas.
+      El mes en curso viaja aparte (`mes_en_curso_usd`, `en_curso:true`).
+    - **El candado del ADELANTO mide lo por entregar de MESES CERRADOS**:
+      `por_entregar_cerrado_usd` (ADITIVO en el renglón del resumen y en
+      `totales` del estado de cuenta) = por entregar − mes en curso. Contra
+      ESE número deciden el 409 del alta y de la corrección, el `disponible`
+      de la carrera de altas, `saldo_snapshot_usd` y el aviso
+      `socios_adelantados` del pre-cierre. Motivo (revisión 2-oct): el mes en
+      curso se mueve — a principios de mes suele ir NEGATIVO (gastos ya
+      capturados, ningún vuelo cobrado) y entregar exactamente lo que el
+      pre-cierre dice que se debe pedía confirmar un «adelanto» y luego lo
+      marcaba adelantado; a medias va POSITIVO y se podía entregar utilidad
+      no realizada sin confirmar. `por_entregar_usd` (con el mes en curso) y
+      `estado` siguen siendo lo que se MUESTRA (contrato): en los primeros
+      días del mes un socio pagado al corriente puede verse «Adelantado» en
+      el resumen por los gastos del mes — el diálogo «Registrar entrega»
+      debe mostrar `por_entregar_cerrado_usd` como el tope sin confirmación.
+    - **Un mes con PÉRDIDA resta** (utilidad negativa del avión ⇒ cargo
+      negativo en la cuenta): la cuenta suma lo que dice el reparto, tal
+      cual. DECISIÓN DE LA V2 pendiente de confirmar con el cliente (la v1
+      no compensaba pérdidas entre aviones); si se decide que la empresa
+      absorbe las pérdidas, el cambio es UNA línea en `movimientosDeCuenta`.
+    - **Tablas**: `reparto_pago` = una ENTREGA por fila (`socio_id` NOT NULL;
+      `aeronave_id` y `periodo` NULL-ables = «corresponde a» INFORMATIVO —
+      `periodo` null = ADELANTO A CUENTA; `utilidad_snapshot_usd` legado
+      NULL-able, la v2 SIEMPRE lo deja null; `saldo_snapshot_usd` = lo por
+      entregar de meses cerrados ANTES de la entrega —el número del
+      candado—; `updated_by` = quién corrigió por última vez, sellado por
+      el API en TODA escritura: corrección, comprobante, baja y la baja por
+      carrera).
+      `moneda`/`metodo` TEXTO + CHECK (no el enum), `tc_usd_mxn` (12,6) ⇔
+      MXN, `monto_usd` = lo que descuenta (USD = monto; MXN = round(monto /
+      T.C., 2) con T.C. en la banda 15–25). Soft delete `deleted_at/_by` +
+      `motivo_baja`: **TODO lector filtra `deleted_at is null`**.
+      `client_request_id` único parcial (incluye borradas). Bucket privado
+      `reparto-comprobantes`. `reparto_cuenta_socio` (opcional por socio):
+      `cuenta_desde` (día 1), `saldo_inicial_usd` (positivo = se le debía;
+      negativo = ya se le había adelantado), `notas` ≤ 500, `created_*`/
+      `updated_*`. **Sin fila ⇒ default 2026-09 con saldo 0 y
+      `configurada:false`** (el panel invita a ajustarla).
+      **`reparto_bitacora`** (trigger `tg_reparto_bitacora`, AFTER
+      INSERT/UPDATE/DELETE en las DOS tablas, patrón `tg_gasto_bitacora`,
+      atómico con la escritura): `{tabla, registro_id (reparto_pago.id o
+      reparto_cuenta_socio.socio_id), socio_id, accion, actor_id (updated_by;
+      deleted_by en la baja; created_by en el alta), diff {col: {antes,
+      despues}} de las columnas de NEGOCIO (sellos y llave fuera), snapshot
+      (solo DELETE), created_at}`. Es el HISTÓRICO de correcciones del
+      dinero entregado y del saldo inicial (sin endpoint todavía: se
+      consulta en BD). Sin FK a propósito; RLS sin policies.
+    - **Fuentes únicas PURAS** (con spec): `reparto-cuenta.util.ts` (meses
+      `mesesEntre`/`mesActualCancun`, `cuentaDefault`/`aCuentaSocio`,
+      `estadoCuenta`, `excedeSaldo`, `excedeSaldoEnOrdenDeCaptura`,
+      `utilidadMesDesdeAviones`, `armarSociosBase` (universo),
+      **`movimientosDeCuenta` = EL CORAZÓN: saldo corrido de toda la cuenta
+      — lo leen el resumen, el estado de cuenta, el candado del adelanto y el
+      pre-cierre**, `totalesDeMovimientos`, `filaCuentaSocio`,
+      `totalesCuentas`, `armarEstadoCuenta`, `resumenPrecierreCuentas`,
+      conceptos y textos) y `reparto-pago.util.ts` (UNA entrega: dinero,
+      fecha, `aPagoSocio`, orden de captura en microsegundos, path del
+      comprobante `<socio>/<entrega>/<uuid>.<ext>`). El panel NUNCA
+      recalcula: pinta lo que llega.
+    - **Universo de socios** = todos los de `aeronave_socio` (cualquier
+      vigencia) ∪ quien tenga cuenta ∪ quien tenga entregas; aviones del
+      socio con `porcentaje` (Σ de las vigencias de HOY, o la más reciente),
+      `vigente` (hoy) y el ADITIVO `activa`. Nombre sin fila de usuario ⇒
+      'Socio' (respaldo de `compute`). Un avión dado de baja NO suma (compute
+      solo trae activos) y la cuenta lo AVISA. `socio.es_empresa` (ADITIVO,
+      de `usuario.es_empresa`): la propia empresa como socio («Aero Charter
+      Cancún») viaja MARCADA en el resumen, el estado de cuenta y los
+      `socios[]` del pre-cierre; NO se excluye de nada (decisión pendiente de
+      la oficina). **Avisos de la cuenta** (`avisos[]`, texto listo):
+      entregas antes del arranque, aviones dados de baja y, por avión-mes
+      desde el arranque, los % de los socios ≠ 100
+      (`avisosPorcentajesDeReparto`, lee `reparto_porcentaje_total` de
+      compute vía `UtilidadMesSocios.aviones[].reparto_porcentaje_total`):
+      p. ej. 69 % + 70 % = 139 % cuando se cierra una vigencia y se abre otra
+      en el MISMO mes (compute da a cada una su % completo) — la cuenta suma
+      lo que dice el reparto, tal cual, y avisa.
+    - **Sonda ÚNICA** `reparto-cuenta.lector.ts` (columna
+      `reparto_pago.saldo_snapshot_usd`; 42703/PGRST204/42P01/PGRST205 ⇒
+      no disponible, re-sondeo ≤ 10 min; mecánica de `columnaOpcional`),
+      compartida por los servicios y el pre-cierre (vive APARTE: sin ciclo).
+      Lecturas de entregas PAGINADAS (1000, tope 10 páginas ⇒ error, nunca
+      recortada); `usuario` en lotes de 150. Sin la migración: lecturas
+      `disponible:false`, escrituras 503 `CUENTA_SOCIO_NO_DISPONIBLE`
+      (`details.migracion = 20261002000001`) — el 0.0.50 es desplegable
+      antes de aplicarla.
+    - **Rutas** (literales `socios/…` y `pagos/…`, `@Roles` en CADA una;
+      lectura `ROLES_PAGOS_SOCIOS_LECTURA` = ADMIN, ANALISTA, FACTURACION,
+      SOCIO; escritura `ROLES_PAGOS_SOCIOS_ESCRITURA` = ADMIN, FACTURACION):
+      - `GET socios` ⇒ `{disponible, hasta_mes, socios: [{socio {id, nombre,
+        rol, estado, es_empresa}, cuenta {cuenta_desde 'YYYY-MM',
+        saldo_inicial_usd, notas, configurada, updated_at}, generado_usd,
+        mes_en_curso_usd, entregado_usd, por_entregar_usd,
+        por_entregar_cerrado_usd, estado, ultimo_pago {id,
+        fecha_pago, monto, moneda, monto_usd, metodo} | null, aviones [{id,
+        matricula, porcentaje, vigente, activa}], avisos[]}], totales
+        {generado_usd, entregado_usd, por_entregar_usd (Σ de los saldos
+        POSITIVOS: un adelanto no compensa lo que se le debe a otro),
+        adelantado_usd, socios_por_entregar, socios_adelantados} | null}`.
+        SOCIO: solo el suyo (la lectura ya va acotada) y `totales: null`.
+      - `GET socios/:socioId/estado-cuenta?desde=YYYY-MM&hasta=YYYY-MM`
+        (default arranque … mes en curso; `hasta` futuro se recorta; >120
+        meses o invertido ⇒ 400 `RANGO_INVALIDO`; SOCIO ajeno ⇒ 403
+        `SOCIO_SOLO_SU_CUENTA` sin leer nada; socio desconocido ⇒ 404
+        `SOCIO_NO_EXISTE`) ⇒ `{disponible, socio, cuenta, aviones, desde,
+        hasta, saldo_anterior_usd, movimientos [{fecha, tipo SALDO_INICIAL |
+        SALDO_ANTERIOR | UTILIDAD | ENTREGA, concepto, mes, aeronave {id,
+        matricula} | null, porcentaje, cargo_usd (lo que SUMA; negativo solo
+        en un mes con pérdida), abono_usd (lo que RESTA, ≥ 0), saldo_usd,
+        en_curso, pago}], por_mes [{mes, utilidad_usd, en_curso, por_avion
+        [{aeronave, porcentaje, monto_usd}], entregado_usd (por fecha de
+        entrega)}], totales (cuenta COMPLETA de hoy) {generado_usd,
+        mes_en_curso_usd, entregado_usd, por_entregar_usd,
+        por_entregar_cerrado_usd, estado}, rango
+        {generado_usd, entregado_usd, saldo_final_usd}, avisos[]}`. Lo
+        anterior a `desde` se colapsa en SALDO_ANTERIOR («Saldo al cierre de
+        ago 2026»). UTILIDAD fechada el ÚLTIMO día del mes, una línea por mes
+        y avión («Utilidad sep 2026 · N4142R 69 %»; una utilidad de $0 no hace
+        renglón); el mismo día: saldo inicial, utilidades por matrícula,
+        entregas por captura. ENTREGA «Entrega · Transferencia · ref … ·
+        corresponde a sep 2026 · N4142R» o, sin mes, «Adelanto a cuenta ·
+        Efectivo · $70,000 MXN a T.C. 18.5». Entregas fechadas antes del
+        arranque SÍ cuentan (y se avisa). `pago` = PagoSocio con nombres
+        (`entregado_por_nombre`, `created_by_nombre` y los ADITIVOS
+        `updated_by` / `updated_by_nombre`), avión y `comprobante_url` (8 h).
+      - `PUT socios/:socioId/cuenta {cuenta_desde 'YYYY-MM', saldo_inicial_usd,
+        notas?}` ⇒ el renglón del resumen. Sin fila INSERT (`created_by`), con
+        fila UPDATE (conserva `created_by`; carrera 23505 ⇒ UPDATE); `notas`
+        omitidas = null (PUT reemplaza). 400 `SOCIO_INVALIDO` (no está en
+        `aeronave_socio`), `CUENTA_DESDE_FUTURA`, `CUENTA_DESDE_FUERA_DE_RANGO`
+        (> 36 meses atrás: cada mes es un compute), `SALDO_INICIAL_INVALIDO`.
+      - `GET pagos?desde=YYYY-MM-DD&hasta=YYYY-MM-DD[&socio_id]` ⇒
+        `{disponible, pagos: PagoSocio[]}` (vivas, MÁS RECIENTE PRIMERO;
+        SOCIO solo las suyas, otro socio ⇒ 403). `?mes=` y `?aeronave_id=`
+        (v1; el panel 0.0.49 manda los DOS cuando el reparto está filtrado
+        por avión) se DECLARAN en el DTO solo para responder **410
+        `PAGOS_POR_MES_RETIRADO`** con un mensaje claro a un panel viejo (sin
+        declararlos, `forbidNonWhitelisted` daba un 400 genérico).
+      - `POST pagos {socio_id, monto, moneda, tc_usd_mxn?, fecha_pago, metodo,
+        referencia?, entregado_por_id?, recibido_por?, factura_folio?, notas?,
+        aeronave_id?, mes?, aceptar_exceso?, client_request_id?}` ⇒ 201
+        `{pago, cuenta}` (cuenta = el renglón del resumen ya recalculado; la
+        respuesta REUTILIZA las utilidades de la misma petición). Orden:
+        idempotencia PRIMERO (replay ⇒ 200 `idempotente:true`; llave de otro
+        socio o de una entrega borrada ⇒ 409 `CLIENT_REQUEST_ID_EN_USO`),
+        dinero (`TC_REQUERIDO`/`TC_NO_APLICA`/`TC_FUERA_DE_RANGO`/
+        `MONTO_INVALIDO`), fecha no futura (`FECHA_PAGO_FUTURA`), `mes` no
+        futuro (`MES_FUTURO`), quién entregó ACTIVO, socio en
+        `aeronave_socio` (`SOCIO_INVALIDO`) y avión del socio (cualquier
+        vigencia, `SOCIO_NO_ES_DE_LA_AERONAVE`) — ANTES de calcular
+        utilidades —, y el saldo: **monto_usd > por entregar de MESES
+        CERRADOS + $1.00 ⇒ 409 `PAGO_EXCEDE_SALDO` `details
+        {por_entregar_usd (cerrado), mes_en_curso_usd, monto_usd,
+        exceso_usd, saldo_despues_usd}`** («Esta entrega de $X USD supera lo
+        que hay por entregar ($Y USD). Se registrará como ADELANTO y el saldo
+        quedará a favor de VuelaTour por $Z USD. ¿Registrar?»; si el mes en
+        curso ≠ $0 el paréntesis dice «($Y USD, sin contar el mes en curso:
+        $W USD)» — `mensajeExcedeSaldo`, el panel copia el `message`) salvo
+        `aceptar_exceso` (booleano CRUDO del body): un ADELANTO es legítimo
+        y se guarda. `saldo_snapshot_usd` = lo por entregar de meses
+        cerrados ANTES. Carreras:
+        (a) misma llave ⇒ `replaySiYaQuedo` antes del 409 y el 23505 ⇒
+        replay; (b) llaves distintas que juntas rebasan sin confirmar ⇒ tras
+        el INSERT se releen las entregas del socio
+        (`excedeSaldoEnOrdenDeCaptura`, disponible = saldo inicial +
+        generado en meses cerrados): la capturada DESPUÉS se da de baja
+        (`MOTIVO_BAJA_CARRERA_ALTA`) liberando su llave y responde el 409
+        para confirmar el adelanto con la MISMA llave. Best-effort (si
+        falla, la entrega se queda y el pre-cierre la avisa como adelanto).
+      - `PATCH pagos/:id` (estado FUSIONADO; no cambia el socio; «corresponde
+        a» `aeronave_id`/`mes` sí, `null` los limpia; una entrega de alguien
+        que ya no está en `aeronave_socio` SÍ se corrige) ⇒ `{pago, cuenta}`.
+        Si el monto en USD SUBE ⇒ se mide contra el saldo de meses cerrados
+        SIN esta entrega (409 `PAGO_EXCEDE_SALDO` salvo `aceptar_exceso`);
+        corregir el dinero renueva `saldo_snapshot_usd`; sella `updated_by`
+        (el valor anterior queda en `reparto_bitacora`). CAS por `updated_at` ⇒ 409
+        `PAGO_CAMBIO_CONCURRENTE`; vacío ⇒ 400 `PAGO_SIN_CAMBIOS`.
+      - `DELETE pagos/:id {motivo 5–300}` ⇒ `{deleted, cuenta}` (404
+        `PAGO_NO_EXISTE` también si ya estaba borrada; el panel CONFIRMA).
+      - `POST pagos/:id/comprobante` (multipart `file`, imagen o PDF ≤ 10 MB)
+        ⇒ `{pago}`; path `<socio>/<entrega>/<uuid>.<ext>` (el anterior se
+        CONSERVA en el bucket), CAS sobre el path (409 `COMPROBANTE_CAMBIO`).
+    - **Pre-cierre** (solo mes calendario, NO bloqueantes, solo para
+      `ROLES_PAGOS_SOCIOS_LECTURA` — COORDINADOR y sin rol no los reciben ni
+      se calcula nada): `socios_por_entregar` («Socios con utilidad por
+      entregar»: saldo > $1.00 con las utilidades HASTA el mes del cierre y
+      TODAS las entregas registradas hoy — una entrega de octubre por la
+      utilidad de septiembre sí limpia septiembre; solo socios cuya cuenta
+      ya había arrancado; `count`, `monto_usd`, `socios[≤50] {socio {id,
+      nombre, es_empresa}, por_entregar_usd}` mayor primero, `detalle`,
+      `lectura_fallida`, `disponible`) y `socios_adelantados` («Socios con
+      entregas adelantadas (más de lo generado)»: saldo SIN el mes en curso
+      < −$1.00 —utilidades hasta `mesHastaAdelantosPrecierre` = el último
+      mes cerrado, o el mes revisado si ES el en curso, para que nadie salga
+      «por entregar» y «adelantado» a la vez— y todas las entregas: el MISMO
+      número del candado; `socios[] {socio, por_entregar_usd,
+      adelantado_usd}`; MISMA forma, incluye `disponible`; solo con la
+      lectura buena). Sin la migración o con cualquier fallo ⇒ count 0 +
+      `lectura_fallida: true` y un texto que lo dice.
+    - **Riesgos / pendientes**: «Aero Charter Cancun S.A. de C.V.» (la propia
+      empresa como socio) sale POR ENTREGAR cada mes — ya viaja marcada
+      (`es_empresa`); excluirla o separarla es decisión del cliente;
+      pérdidas que restan (arriba); `GET socios` lee TODAS las entregas
+      vivas y calcula el mes en curso en cada lectura; el PDF/Excel del
+      reparto no imprimen las entregas; en LECTURAS la utilidad de un mes
+      cerrado puede tardar 10 min en reflejar un cobro tardío (memo; las
+      escrituras van frescas). **La utilidad de los meses cerrados NO está
+      congelada**: la cuenta los recalcula con los datos de HOY, así que (a)
+      dar de baja un avión borra lo que generó (aviso), (b) `PATCH
+      /v1/aircraft/owners/:id {porcentaje}` reescribe el % de TODOS los
+      meses de esa vigencia (sin aviso: no queda rastro del % anterior) y
+      (c) cerrar y abrir vigencia en el mismo mes suma los dos % (aviso de
+      Σ % ≠ 100). Las entregas ya hechas pasan a «adelanto» o «por
+      entregar» sin que nadie entregue nada. DECISIÓN DE FONDO pendiente con
+      el cliente: congelar la utilidad mensual por socio al cerrar el mes
+      (snapshot) o rechazar el PATCH de `porcentaje` cuando la vigencia ya
+      cubre meses cerrados (forzar cerrar + crear). No se incluyen aviones
+      dados de baja en meses pasados a propósito: la cuenta debe cuadrar
+      con la pantalla del reparto de ese mes (que tampoco los trae).
+      **Rollback del API a 0.0.49 con CUALQUIER entrega v2 capturada:
+      PROHIBIDO** (la v1 asume avión, mes y `utilidad_snapshot_usd`).
+      Rollback del bucket: Storage API (pie de `20261001000001`).
+    - Specs: `reparto-cuenta.util.spec` (N4142R 69/29/2 sobre $2,023.10, el
+      adelanto de 70,000 MXN a 18.5 = $3,783.78 que deja ADELANTADO, saldo
+      anterior, pérdidas, en curso, pre-cierre), `reparto-pago.util.spec`,
+      `reparto-utilidades.memo.spec` (memo, en curso, `fresco`, ≤ 3, fallo),
+      `reparto-cuenta.service.spec` y `reparto-pago.service.spec` (BD en
+      memoria del mundo compartido `reparto-cuenta.fixture-spec.ts`: cuenta
+      default vs configurada, saldo anterior, 409 y `aceptar_exceso` con la
+      misma llave, replay y las dos carreras —la de llaves distintas FALLA sin
+      la baja—, candado contra meses CERRADOS con octubre en −$345 y en
+      +$500, escrituras `fresco`, `updated_by` en toda escritura, SOCIO solo
+      la suya, soft delete, sin migración ⇒ `disponible:false`/503),
+      `profit-sharing.controller.reparto-pago.spec` (HTTP real: rutas, roles,
+      DTO, codes, 410 también con `?mes=&aeronave_id=`) y
       `profit-sharing.service.pagos-socios.spec` (pre-cierre con el
-      `computeAvion` REAL, COORDINADOR sin items, sobrepagos) y
-      `storage-firma.util.spec` / `storage.controller.spec` (bucket nuevo).
+      `computeAvion` REAL, compute UNO por mes con memo, entrega de octubre
+      que limpia septiembre, adelanto, mes en curso negativo ⇒ ni por
+      entregar ni adelantado, positivo a medias ⇒ adelanto, `es_empresa`,
+      COORDINADOR sin items).
 
 ## Convenciones NestJS
 
@@ -4065,8 +4190,71 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
+- **PENDIENTE DE APLICAR (dry-run en la cabecera; correrlo en prod antes)** —
+  `20261002000001_reparto_cuenta_socio.sql` (invariante 38 v2, cuenta
+  corriente del socio). Requiere `20261001000001` aplicada. (1)
+  `reparto_pago`: `periodo`, `aeronave_id` y `utilidad_snapshot_usd` pasan a
+  NULL-ables; el CHECK de `periodo` se recrea como `periodo is null or
+  extract(day from periodo) = 1`; columnas nuevas `saldo_snapshot_usd
+  numeric(12,2)` (la SONDA del API) y `updated_by uuid` (FK usuario `on
+  delete set null`, constraint aparte del ADD COLUMN para que re-aplicar no
+  la duplique); índice nuevo `(socio_id, fecha_pago) where deleted_at is
+  null` y se retira `idx_reparto_pago_periodo` (solo lo usaba la v1; el de
+  `(aeronave_id, socio_id, periodo)` se queda: cubre la FK de avión);
+  COMMENTs. (2) Tabla nueva `reparto_cuenta_socio` (`socio_id` PK FK usuario
+  `on delete restrict`, `cuenta_desde date` CHECK día 1, `saldo_inicial_usd
+  numeric(12,2)` default 0, `notas` ≤ 500, `created_by/updated_by` FK `on
+  delete set null`, `created_at/updated_at`, RLS sin policies,
+  `trg_reparto_cuenta_socio_set_updated_at` con `public.tg_set_updated_at()`).
+  (3) BITÁCORA: tabla `reparto_bitacora` (sin FK a propósito, CHECK de
+  `tabla`/`accion`, 2 índices, RLS sin policies) + función
+  `public.tg_reparto_bitacora()` (`search_path = ''`, solo copia jsonb: no
+  compara el enum `moneda`) + triggers `trg_reparto_pago_bitacora` y
+  `trg_reparto_cuenta_socio_bitacora` AFTER INSERT/UPDATE/DELETE. Sin enums
+  ni backfill (0 filas en `reparto_pago` el 1-oct). **Antes de aplicar**: el
+  DRY-RUN de su cabecera, UNA sentencia `do $dry$` AUTOCONTENIDA — la
+  sección B ya trae la sección 1 (la genera el mismo script; se ejecuta
+  quitando el prefijo «--   » de las líneas entre `--   do $dry$` y
+  `--   end $dry$;` y dejando vacías las «--», sin pegar nada): A contexto
+  (v1 aplicada, v2 no —tampoco la bitácora ni `updated_by`—; existe
+  `tg_set_updated_at`; socio vigente en sep-2026 —de preferencia N4142R— y
+  ADMIN activo; cuenta las filas de `reparto_pago`), C1 estructura (RLS sin
+  policies en las 2 tablas, PK, FKs `socio = r` / `created_by, updated_by =
+  n` y `reparto_pago_updated_by_fkey = n`, los 4 triggers, `search_path`
+  fijo, nulabilidad de las 6 columnas, escala 2, índices), C2 INSERTs REALES
+  como los escribe el API (el ADELANTO del audio: $70,000 MXN a 18.5 sin mes
+  ni avión ⇒ `monto_usd` 3,783.78; con mes y avión; con mes sin avión) y sus
+  3 renglones INSERT en la bitácora con actor = created_by, C3 rechazos
+  (periodo día 15, MXN sin T.C., USD con `monto_usd` ≠ monto, socio null, FK
+  de avión y de `updated_by`, llave repetida, tabla ajena en la bitácora; los
+  rechazos no dejan bitácora), C4 cuenta REAL (INSERT, trigger `updated_at`
+  con un UPDATE REAL, saldo inicial negativo, PK duplicada, día 15, notas de
+  501, NOT NULL, FK de socio; historial INSERT + UPDATE con el saldo inicial
+  ANTERIOR 0 ⇒ −1,500.25 y actor), C5 lecturas del API (entregado 3,933.78 ⇒
+  saldo −4,038.09 ADELANTADO), C6 soft delete con `updated_by` (fila
+  conservada, llave reservada, baja en la bitácora con motivo y actor) y C7
+  corrección de dinero REAL 100 ⇒ 10 USD (antes/después y actor; un UPDATE
+  solo de sellos/llave no deja renglón; 7 renglones en total) ⇒ `DRYRUN_OK`;
+  después `to_regclass('public.reparto_cuenta_socio')` y
+  `to_regclass('public.reparto_bitacora')` ⇒ NULL,
+  `to_regprocedure('public.tg_reparto_bitacora()')` ⇒ NULL, las columnas
+  `saldo_snapshot_usd`/`updated_by` no existen y `periodo` vuelve a
+  `is_nullable = NO` ⇒ `apply_migration` ⇒ `get_advisors` (esperado el INFO
+  de RLS sin policies de las 2 tablas y FKs sin índice hacia `usuario`). El
+  dry-run se corrió en PGlite (2-oct): DRYRUN_OK sin residuos, aplicar dos
+  veces idempotente, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`, bitácora
+  con las escrituras del API y rollback probado. El API 0.0.50 es
+  desplegable ANTES (lecturas `disponible:false`, escrituras 503
+  `CUENTA_SOCIO_NO_DISPONIBLE`, pre-cierre con `lectura_fallida`). Tras
+  aplicar: `GET /v1/profit-sharing/socios` ⇒ `disponible: true` (la sonda
+  re-sondea en ≤ 10 min o reiniciar el API). Rollback al pie del archivo, en
+  UNA transacción (`begin … commit`, jamás línea por línea): su paso 0
+  ABORTA si existe CUALQUIER entrega v2 (`utilidad_snapshot_usd`, `periodo`
+  o `aeronave_id` null — la v2 SIEMPRE deja `utilidad_snapshot_usd` null,
+  también con avión y mes); exportar la cuenta y la bitácora antes.
 - **APLICADA en prod el 1-oct-2026 (dry-run corrido en prod: `DRYRUN_OK · N4142R · socio Mauricio Roque · C1–C6`, sin residuos; después tabla, bucket privado, trigger e índices verificados y `get_advisors` solo con el INFO de RLS sin policies)** —
-  `20261001000001_reparto_pago.sql` (invariante 38): tabla `reparto_pago`
+  `20261001000001_reparto_pago.sql` (invariante 38; la v2
+  `20261002000001` la reforma a ENTREGAS de la cuenta corriente): tabla `reparto_pago`
   (RLS sin policies; índices parciales `(aeronave_id, socio_id, periodo)` y
   `(periodo)` con `deleted_at is null` + único parcial de
   `client_request_id`), `trg_reparto_pago_set_updated_at` y el bucket
@@ -4090,7 +4278,8 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   desplegable ANTES (GET `disponible:false`, escrituras 503
   `PAGOS_SOCIOS_NO_DISPONIBLE`, pre-cierre con `lectura_fallida`). Tras
   aplicar: `GET /v1/profit-sharing/pagos?mes=2026-09` ⇒ `disponible: true`
-  (la sonda re-sondea en ≤ 10 min o reiniciar el API). Rollback al pie del
+  (la sonda re-sondea en ≤ 10 min o reiniciar el API) — registro de la v1:
+  desde el 0.0.50 esa ruta con `?mes=` responde 410. Rollback al pie del
   archivo (el BUCKET se vacía y se borra con la Storage API: un `delete from
   storage.buckets` directo lo bloquea `protect_buckets_delete` con 42501).
 - **PENDIENTE DE APLICAR (DRY-RUN corrido en prod el 30-sep-2026: `DRYRUN_OK · par REAL`)** —

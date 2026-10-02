@@ -1,345 +1,55 @@
-// La utilidad sale de ProfitSharingService.compute (aquí un doble): el
-// servicio real arrastra pyservices/tipo de cambio/conciliación.
+// Las utilidades salen de ProfitSharingService.utilidadesSociosPorMes (aquí
+// un doble): el servicio real arrastra pyservices/tipo de cambio/conciliación.
 jest.mock('./profit-sharing.service', () => ({
   ProfitSharingService: class {},
 }));
 
-import { HttpException } from '@nestjs/common';
 import { Rol } from '../../common/types/auth.types';
-import type { SupabaseService } from '../supabase/supabase.service';
-import type { ProfitSharingService } from './profit-sharing.service';
 import type { CrearPagoSocioDto } from './dto/reparto-pago.dto';
-import { RepartoPagoService } from './reparto-pago.service';
-import type { RepartoAvionInput } from './reparto-pago.util';
+import {
+  AERO,
+  ALE,
+  BAJA,
+  KEY,
+  KEY2,
+  MARY,
+  MAURICIO,
+  N4142R,
+  N990GG,
+  PILOTO,
+  avionN4142R,
+  errorDe,
+  mundo,
+  pagoFila,
+} from './reparto-cuenta.fixture-spec';
+import type { RepartoAvionInput } from './reparto-cuenta.util';
+
+/** N4142R en OCTUBRE (mes en curso): solo Mauricio con `m` (parcial). */
+function octubreN4142R(m: number): RepartoAvionInput {
+  const a = avionN4142R();
+  return {
+    ...a,
+    reparto: a.reparto.map((r) => ({
+      ...r,
+      monto_usd: r.socio_id === MAURICIO ? m : 0,
+    })),
+  };
+}
 
 /**
- * PAGOS DE UTILIDADES A SOCIOS (1-oct-2026) contra una BD en memoria
- * mínima: listado por mes (SOCIO solo lo suyo), alta USD/MXN, exceso 409 y
- * con `aceptar_exceso`, SIN_UTILIDAD, socio ajeno, idempotencia, PATCH con
- * estado fusionado y CAS, soft delete, comprobante y 503 sin la migración.
- * Números REALES: N4142R, septiembre 2026, saldo $2,023.10 ⇒ 69 / 29 / 2.
+ * ENTREGAS A LA CUENTA DEL SOCIO (v2, 2-oct-2026) contra la BD en memoria:
+ * alta USD/MXN, el ADELANTO del audio (70,000 MXN a 18.5) con 409 y con
+ * `aceptar_exceso`, «corresponde a» mes/avión, idempotencia y carreras,
+ * PATCH con el saldo sin la propia entrega y CAS, soft delete, comprobante,
+ * listado por fechas (SOCIO solo las suyas, 410 por mes) y sin la migración.
+ * Mauricio Roque: septiembre 2026 generó $1,395.94 (69 % de $2,023.10).
  */
-type Fila = Record<string, unknown>;
-
-const N4142R = 'aaaaaaaa-0000-4000-8000-000000004142';
-const N990GG = 'aaaaaaaa-0000-4000-8000-000000000990';
-const MAURICIO = 'bbbbbbbb-0000-4000-8000-000000000069';
-const AERO = 'bbbbbbbb-0000-4000-8000-000000000029';
-const SAAB = 'bbbbbbbb-0000-4000-8000-000000000002';
-const ALE = 'cccccccc-0000-4000-8000-0000000000a1';
-const MARY = 'cccccccc-0000-4000-8000-0000000000a2';
-const BAJA = 'cccccccc-0000-4000-8000-0000000000b0';
-const KEY = 'eeeeeeee-0000-4000-8000-000000000001';
-
 const ADMIN = { userId: ALE, rol: Rol.ADMIN };
-
-const AVION_N4142R: RepartoAvionInput = {
-  aeronave: { id: N4142R, matricula: 'N4142R', modelo: 'Cessna 206' },
-  reparto: [
-    {
-      socio_id: MAURICIO,
-      socio_nombre: 'Mauricio Roque',
-      porcentaje: 69,
-      monto_usd: 1395.94,
-    },
-    {
-      socio_id: AERO,
-      socio_nombre: 'Aero Charter Cancun S.A. de C.V.',
-      porcentaje: 29,
-      monto_usd: 586.7,
-    },
-    {
-      socio_id: SAAB,
-      socio_nombre: 'Alexander E. Saab',
-      porcentaje: 2,
-      monto_usd: 40.46,
-    },
-  ],
-};
-
-interface Opciones {
-  /** La migración 20261001000001 no está aplicada. */
-  sinTabla?: boolean;
-  /** Se ejecuta justo antes de cada UPDATE de reparto_pago (carreras). */
-  antesDeUpdate?: (tablas: Record<string, Fila[]>) => void;
-  /** Error de Postgres que devuelve el INSERT de reparto_pago. */
-  errorEnInsert?: { code: string; message: string };
-}
-
-function fakeDb(datos: Record<string, Fila[]>, opts: Opciones = {}) {
-  const tablas: Record<string, Fila[]> = {};
-  for (const [k, v] of Object.entries(datos))
-    tablas[k] = v.map((f) => ({ ...f }));
-  const tabla = (t: string) => (tablas[t] ??= []);
-  const consultas: Array<{
-    tabla: string;
-    op: string;
-    filtros: Array<[string, unknown]>;
-  }> = [];
-  const escrituras: Array<{ tabla: string; op: string; valor: Fila }> = [];
-  let seq = 100;
-  let reloj = 0;
-  const sello = () =>
-    `2026-10-01T16:00:${String(++reloj).padStart(2, '0')}.000000+00:00`;
-
-  const from = (t: string) => {
-    let op: 'select' | 'insert' | 'update' = 'select';
-    let valor: Fila = {};
-    const filtros: Array<(f: Fila) => boolean> = [];
-    const filtrosLog: Array<[string, unknown]> = [];
-    let orden: { col: string; asc: boolean } | null = null;
-    let rango: [number, number] | null = null;
-    const ejecutar = (): { data: unknown; error: unknown } => {
-      consultas.push({ tabla: t, op, filtros: filtrosLog });
-      if (t === 'reparto_pago' && opts.sinTabla) {
-        return {
-          data: null,
-          error: {
-            code: 'PGRST205',
-            message:
-              "Could not find the table 'public.reparto_pago' in the schema cache",
-          },
-        };
-      }
-      if (op === 'insert') {
-        if (t === 'reparto_pago' && opts.errorEnInsert) {
-          return { data: null, error: opts.errorEnInsert };
-        }
-        if (
-          valor.client_request_id &&
-          tabla(t).some((f) => f.client_request_id === valor.client_request_id)
-        ) {
-          return {
-            data: null,
-            error: {
-              code: '23505',
-              message: 'duplicate key uq_reparto_pago_client_request',
-            },
-          };
-        }
-        const ts = sello();
-        const nueva: Fila = {
-          id: `dddddddd-0000-4000-8000-${String(++seq).padStart(12, '0')}`,
-          comprobante_path: null,
-          created_at: ts,
-          updated_at: ts,
-          deleted_at: null,
-          deleted_by: null,
-          motivo_baja: null,
-          ...valor,
-        };
-        tabla(t).push(nueva);
-        escrituras.push({ tabla: t, op, valor });
-        return { data: [{ ...nueva }], error: null };
-      }
-      if (op === 'update' && t === 'reparto_pago') opts.antesDeUpdate?.(tablas);
-      let filas = tabla(t).filter((f) => filtros.every((fn) => fn(f)));
-      if (op === 'update') {
-        const ts = sello();
-        for (const f of filas) Object.assign(f, valor, { updated_at: ts });
-        escrituras.push({ tabla: t, op, valor });
-      }
-      if (orden) {
-        const { col, asc } = orden;
-        filas = [...filas].sort((a, b) =>
-          String(a[col]) < String(b[col]) ? (asc ? -1 : 1) : asc ? 1 : -1,
-        );
-      }
-      if (rango) filas = filas.slice(rango[0], rango[1] + 1);
-      return { data: filas.map((f) => ({ ...f })), error: null };
-    };
-    const q: Record<string, unknown> = {};
-    q.select = () => q;
-    q.insert = (v: Fila) => {
-      op = 'insert';
-      valor = v;
-      return q;
-    };
-    q.update = (v: Fila) => {
-      op = 'update';
-      valor = v;
-      return q;
-    };
-    q.eq = (c: string, v: unknown) => {
-      filtrosLog.push([c, v]);
-      filtros.push((f) => f[c] === v);
-      return q;
-    };
-    q.in = (c: string, arr: unknown[]) => {
-      filtrosLog.push([c, arr]);
-      filtros.push((f) => arr.includes(f[c]));
-      return q;
-    };
-    q.is = (c: string, v: unknown) => {
-      filtrosLog.push([c, v]);
-      filtros.push((f) => (v === null ? f[c] == null : f[c] === v));
-      return q;
-    };
-    q.order = (col: string, o?: { ascending?: boolean }) => {
-      orden = { col, asc: o?.ascending !== false };
-      return q;
-    };
-    q.range = (a: number, b: number) => {
-      rango = [a, b];
-      return q;
-    };
-    q.limit = () => q;
-    const uno = () => {
-      const r = ejecutar();
-      return Promise.resolve({
-        data: Array.isArray(r.data)
-          ? ((r.data as unknown[])[0] ?? null)
-          : r.data,
-        error: r.error,
-      });
-    };
-    q.maybeSingle = uno;
-    q.single = uno;
-    q.then = (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
-      Promise.resolve(ejecutar()).then(res, rej);
-    return q;
-  };
-
-  const archivos = new Map<string, Buffer>();
-  const removidos: string[] = [];
-  const storage = {
-    from: (bucket: string) => ({
-      upload: (path: string, buf: Buffer) => {
-        archivos.set(`${bucket}/${path}`, buf);
-        return Promise.resolve({ data: { path }, error: null });
-      },
-      remove: (paths: string[]) => {
-        removidos.push(...paths);
-        return Promise.resolve({ data: [], error: null });
-      },
-      createSignedUrls: (paths: string[], seg: number) =>
-        Promise.resolve({
-          data: paths.map((p) => ({
-            path: p,
-            signedUrl: `https://firmada/${bucket}/${p}?exp=${seg}`,
-            error: null,
-          })),
-          error: null,
-        }),
-    }),
-  };
-
-  return {
-    supabase: { service: { from, storage } } as unknown as SupabaseService,
-    tablas,
-    consultas,
-    escrituras,
-    archivos,
-    removidos,
-  };
-}
-
-function base(
-  opts: Opciones & { pagos?: Fila[]; aviones?: RepartoAvionInput[] } = {},
-) {
-  const db = fakeDb(
-    {
-      usuario: [
-        { id: ALE, nombre: 'Ale Canales', estado: 'ACTIVO' },
-        { id: MARY, nombre: 'Mary Cruz', estado: 'ACTIVO' },
-        { id: BAJA, nombre: 'Ex empleado', estado: 'INACTIVO' },
-        { id: MAURICIO, nombre: 'Mauricio Roque', estado: 'ACTIVO' },
-        {
-          id: AERO,
-          nombre: 'Aero Charter Cancun S.A. de C.V.',
-          estado: 'INACTIVO',
-        },
-        { id: SAAB, nombre: 'Alexander E. Saab', estado: 'ACTIVO' },
-      ],
-      aeronave: [
-        { id: N4142R, matricula: 'N4142R', modelo: 'Cessna 206' },
-        { id: N990GG, matricula: 'N990GG', modelo: 'C182' },
-      ],
-      aeronave_socio: [
-        {
-          aeronave_id: N4142R,
-          socio_id: MAURICIO,
-          porcentaje: 69,
-          vigente_desde: '2026-01-01',
-          vigente_hasta: null,
-        },
-        {
-          aeronave_id: N4142R,
-          socio_id: AERO,
-          porcentaje: 29,
-          vigente_desde: '2026-01-01',
-          vigente_hasta: null,
-        },
-        {
-          aeronave_id: N4142R,
-          socio_id: SAAB,
-          porcentaje: 2,
-          vigente_desde: '2026-01-01',
-          vigente_hasta: null,
-        },
-        // Socio de N990GG solo hasta julio: no toca septiembre.
-        {
-          aeronave_id: N990GG,
-          socio_id: MAURICIO,
-          porcentaje: 50,
-          vigente_desde: '2026-01-01',
-          vigente_hasta: '2026-07-31',
-        },
-      ],
-      reparto_pago: opts.pagos ?? [],
-    },
-    opts,
-  );
-  const aviones = opts.aviones ?? [AVION_N4142R];
-  const compute = jest.fn((q: { aeronave_id?: string }) =>
-    Promise.resolve({
-      aviones: q.aeronave_id
-        ? aviones.filter((a) => a.aeronave.id === q.aeronave_id)
-        : aviones,
-    }),
-  );
-  const svc = new RepartoPagoService(db.supabase, {
-    compute,
-  } as unknown as ProfitSharingService);
-  svc.ahora = () => new Date('2026-10-01T18:00:00Z'); // 13:00 Cancún
-  return { svc, compute, ...db };
-}
-
-function pagoFila(p: Partial<Fila> = {}): Fila {
-  return {
-    id: 'dddddddd-0000-4000-8000-000000000001',
-    aeronave_id: N4142R,
-    socio_id: MAURICIO,
-    periodo: '2026-09-01',
-    monto: 1000,
-    moneda: 'USD',
-    tc_usd_mxn: null,
-    monto_usd: 1000,
-    utilidad_snapshot_usd: 1395.94,
-    fecha_pago: '2026-10-01',
-    metodo: 'TRANSFERENCIA',
-    referencia: 'SPEI 001',
-    entregado_por: MARY,
-    recibido_por: null,
-    factura_folio: null,
-    comprobante_path: null,
-    notas: null,
-    client_request_id: null,
-    created_by: ALE,
-    created_at: '2026-10-01T15:00:00.000000+00:00',
-    updated_at: '2026-10-01T15:00:00.000000+00:00',
-    deleted_at: null,
-    deleted_by: null,
-    motivo_baja: null,
-    ...p,
-  };
-}
+const MARY_FACT = { userId: MARY, rol: Rol.FACTURACION };
 
 function dtoAlta(p: Partial<CrearPagoSocioDto> = {}): CrearPagoSocioDto {
   return {
-    aeronave_id: N4142R,
     socio_id: MAURICIO,
-    mes: '2026-09',
     monto: 1395.94,
     moneda: 'USD',
     fecha_pago: '2026-10-01',
@@ -348,651 +58,241 @@ function dtoAlta(p: Partial<CrearPagoSocioDto> = {}): CrearPagoSocioDto {
   };
 }
 
-async function errorDe(
-  p: Promise<unknown>,
-): Promise<{ status: number; code: string; details?: unknown }> {
-  try {
-    await p;
-  } catch (e) {
-    if (e instanceof HttpException) {
-      const r = e.getResponse() as { error?: string; details?: unknown };
-      return {
-        status: e.getStatus(),
-        code: String(r.error),
-        details: r.details,
-      };
-    }
-    throw e;
-  }
-  throw new Error('se esperaba un error');
-}
-
-describe('RepartoPagoService.listar', () => {
-  it('renglones del mes con utilidad, pagos (nombres + URL 8 h), consolidado y totales', async () => {
-    const { svc, compute, consultas } = base({
-      pagos: [
-        pagoFila({ comprobante_path: `${N4142R}/2026-09/p1/u.pdf` }),
-        // Borrado: no cuenta ni se lista.
-        pagoFila({
-          id: 'dddddddd-0000-4000-8000-000000000009',
-          monto_usd: 500,
-          deleted_at: '2026-10-01T17:00:00Z',
-        }),
-        // Otro mes: no cuenta.
-        pagoFila({
-          id: 'dddddddd-0000-4000-8000-000000000008',
-          periodo: '2026-08-01',
-        }),
-      ],
-    });
-    const r = await svc.listar('2026-09', undefined, ADMIN);
-    expect(compute).toHaveBeenCalledWith({
-      desde: '2026-09-01',
-      hasta: '2026-09-30',
-      aeronave_id: undefined,
-    });
-    expect(r).toMatchObject({
-      disponible: true,
-      mes: '2026-09',
-      desde: '2026-09-01',
-      hasta: '2026-09-30',
-    });
-    expect(
-      r.filas.map((f) => [
-        f.socio.nombre,
-        f.utilidad_usd,
-        f.pagado_usd,
-        f.pendiente_usd,
-        f.estado,
-      ]),
-    ).toEqual([
-      ['Mauricio Roque', 1395.94, 1000, 395.94, 'PARCIAL'],
-      ['Aero Charter Cancun S.A. de C.V.', 586.7, 0, 586.7, 'PENDIENTE'],
-      ['Alexander E. Saab', 40.46, 0, 40.46, 'PENDIENTE'],
-    ]);
-    const p = r.filas[0].pagos[0];
-    expect(p).toMatchObject({
-      entregado_por: MARY,
-      entregado_por_nombre: 'Mary Cruz',
-      created_by_nombre: 'Ale Canales',
-      comprobante_url: `https://firmada/reparto-comprobantes/${N4142R}/2026-09/p1/u.pdf?exp=28800`,
-    });
-    expect(r.totales).toEqual({
-      utilidad_usd: 2023.1,
-      pagado_usd: 1000,
-      pendiente_usd: 1023.1,
-      socios_pendientes: 3,
-    });
-    expect(r.por_socio).toHaveLength(3);
-    // La lectura: mes (día 1) y solo vivos.
-    const q = consultas.find(
-      (c) =>
-        c.tabla === 'reparto_pago' && c.filtros.some(([k]) => k === 'periodo'),
-    )!;
-    expect(q.filtros).toEqual(
-      expect.arrayContaining([
-        ['periodo', '2026-09-01'],
-        ['deleted_at', null],
-      ]),
-    );
-  });
-
-  it('SOCIO: solo SUS renglones (y la consulta ya filtra por él)', async () => {
-    const { svc, consultas } = base({
-      pagos: [
-        pagoFila(),
-        pagoFila({
-          id: 'dddddddd-0000-4000-8000-000000000002',
-          socio_id: SAAB,
-          monto_usd: 40.46,
-          monto: 40.46,
-        }),
-      ],
-    });
-    const r = await svc.listar('2026-09', undefined, {
-      userId: MAURICIO,
-      rol: Rol.SOCIO,
-    });
-    expect(r.filas.map((f) => f.socio.id)).toEqual([MAURICIO]);
-    expect(r.por_socio.map((s) => s.socio.id)).toEqual([MAURICIO]);
-    expect(r.totales).toEqual({
-      utilidad_usd: 1395.94,
-      pagado_usd: 1000,
-      pendiente_usd: 395.94,
-      socios_pendientes: 1,
-    });
-    const q = consultas.find(
-      (c) =>
-        c.tabla === 'reparto_pago' && c.filtros.some(([k]) => k === 'periodo'),
-    )!;
-    expect(q.filtros).toContainEqual(['socio_id', MAURICIO]);
-  });
-
-  it('sin la migración: disponible:false con listas vacías (sin calcular el reparto)', async () => {
-    const { svc, compute } = base({ sinTabla: true });
-    const r = await svc.listar('2026-09', undefined, ADMIN);
-    expect(r).toEqual({
-      disponible: false,
-      mes: '2026-09',
-      desde: '2026-09-01',
-      hasta: '2026-09-30',
-      filas: [],
-      por_socio: [],
-      totales: {
-        utilidad_usd: 0,
-        pagado_usd: 0,
-        pendiente_usd: 0,
-        socios_pendientes: 0,
-      },
-    });
-    expect(compute).not.toHaveBeenCalled();
-  });
-
-  it('pagos en un avión dado de baja (no viene en el cálculo): renglón con el aviso del AVIÓN, no de captura', async () => {
-    const { svc } = base({
-      pagos: [pagoFila({ aeronave_id: N990GG, monto_usd: 25, monto: 25 })],
-    });
-    const r = await svc.listar('2026-09', undefined, ADMIN);
-    const f = r.filas.find((x) => x.aeronave.id === N990GG)!;
-    expect(f).toMatchObject({
-      aeronave: { matricula: 'N990GG' },
-      socio: { id: MAURICIO, nombre: 'Mauricio Roque' },
-      utilidad_usd: 0,
-      estado: 'SIN_UTILIDAD',
-      exceso_usd: 25,
-      vigente: false,
-    });
-    expect(f.aviso).toBe(
-      'El avión está dado de baja: el reparto no calcula su utilidad de septiembre 2026, así que no hay nada que pagar desde aquí. Los pagos que ya se registraron se conservan en esta relación.',
-    );
-    expect(f.aviso).not.toContain('avión correcto');
-  });
-
-  it('pagos de un socio que ya no está en el reparto de un avión ACTIVO: aviso de revisar la captura', async () => {
-    const { svc } = base({
-      pagos: [pagoFila({ socio_id: MARY, monto_usd: 25, monto: 25 })],
-    });
-    const r = await svc.listar('2026-09', undefined, ADMIN);
-    const f = r.filas.find((x) => x.socio.id === MARY)!;
-    expect(f).toMatchObject({
-      aeronave: { matricula: 'N4142R' },
-      socio: { nombre: 'Mary Cruz' },
-      vigente: false,
-    });
-    expect(f.aviso).toContain('ya no está en el reparto');
-  });
-});
+/** El caso del audio: «adelántenme 70,000 pesos de mis utilidades». */
+const ADELANTO_70K: Partial<CrearPagoSocioDto> = {
+  monto: 70000,
+  moneda: 'MXN',
+  tc_usd_mxn: 18.5,
+  metodo: 'EFECTIVO',
+  recibido_por: 'El socio en persona',
+};
 
 describe('RepartoPagoService.crear', () => {
-  it('alta USD: monto_usd = monto, foto de la utilidad, entregó = el actor; fila recalculada', async () => {
-    const { svc, tablas } = base();
-    const r = await svc.crear(
-      dtoAlta({ monto: 1000, referencia: '  SPEI 0012345 ', notas: '' }),
+  it('entrega USD que «corresponde a» septiembre y al avión: saldo antes guardado, entregó = el actor; cuenta recalculada', async () => {
+    const { pagos, tablas } = mundo();
+    const r = await pagos.crear(
+      dtoAlta({
+        mes: '2026-09',
+        aeronave_id: N4142R,
+        referencia: ' SPEI 1 ',
+        client_request_id: KEY,
+      }),
       ADMIN,
     );
-    expect(tablas.reparto_pago).toHaveLength(1);
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      aeronave_id: N4142R,
-      socio_id: MAURICIO,
-      periodo: '2026-09-01',
-      monto: 1000,
-      moneda: 'USD',
-      tc_usd_mxn: null,
-      monto_usd: 1000,
-      utilidad_snapshot_usd: 1395.94,
-      fecha_pago: '2026-10-01',
-      metodo: 'TRANSFERENCIA',
-      referencia: 'SPEI 0012345',
-      notas: null,
-      entregado_por: ALE,
-      created_by: ALE,
-    });
+    expect(tablas.reparto_pago).toEqual([
+      expect.objectContaining({
+        socio_id: MAURICIO,
+        aeronave_id: N4142R,
+        periodo: '2026-09-01',
+        monto: 1395.94,
+        moneda: 'USD',
+        tc_usd_mxn: null,
+        monto_usd: 1395.94,
+        utilidad_snapshot_usd: null,
+        saldo_snapshot_usd: 1395.94,
+        entregado_por: ALE,
+        created_by: ALE,
+        referencia: 'SPEI 1',
+        client_request_id: KEY,
+      }),
+    ]);
     expect(r.pago).toMatchObject({
-      monto_usd: 1000,
+      mes: '2026-09',
+      aeronave: { id: N4142R, matricula: 'N4142R' },
       entregado_por_nombre: 'Ale Canales',
     });
-    expect(r.fila).toMatchObject({
+    expect(r.cuenta).toMatchObject({
       socio: { id: MAURICIO },
-      utilidad_usd: 1395.94,
-      pagado_usd: 1000,
-      pendiente_usd: 395.94,
-      estado: 'PARCIAL',
+      generado_usd: 1395.94,
+      entregado_usd: 1395.94,
+      por_entregar_usd: 0,
+      estado: 'AL_CORRIENTE',
     });
     expect(r).not.toHaveProperty('idempotente');
   });
 
-  it('alta MXN: T.C. de 6 decimales y monto_usd = round(monto / tc, 2); entregó otra persona', async () => {
-    const { svc, tablas } = base();
-    const r = await svc.crear(
-      dtoAlta({
-        monto: 10000,
-        moneda: 'MXN',
-        tc_usd_mxn: 18.2345674,
-        entregado_por_id: MARY,
-        recibido_por: 'Contador del socio',
-        factura_folio: 'A-123',
-      }),
-      ADMIN,
-    );
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      monto: 10000,
-      moneda: 'MXN',
-      tc_usd_mxn: 18.234567,
-      monto_usd: 548.41,
-      entregado_por: MARY,
-      recibido_por: 'Contador del socio',
-      factura_folio: 'A-123',
-    });
-    expect(r.fila).toMatchObject({
-      pagado_usd: 548.41,
-      pendiente_usd: 847.53,
-      estado: 'PARCIAL',
-    });
-  });
-
-  it('exceso: 409 PAGO_EXCEDE_UTILIDAD sin escribir; con aceptar_exceso y la MISMA llave se guarda', async () => {
-    const { svc, tablas } = base({ pagos: [pagoFila()] });
+  it('el ADELANTO de 70,000 MXN a 18.5: 409 PAGO_EXCEDE_SALDO sin escribir; con aceptar_exceso y la MISMA llave se guarda y la cuenta queda ADELANTADA', async () => {
+    const { pagos, tablas } = mundo();
     const e = await errorDe(
-      svc.crear(dtoAlta({ monto: 500, client_request_id: KEY }), ADMIN),
+      pagos.crear(dtoAlta({ ...ADELANTO_70K, client_request_id: KEY }), ADMIN),
     );
     expect(e).toEqual({
       status: 409,
-      code: 'PAGO_EXCEDE_UTILIDAD',
+      code: 'PAGO_EXCEDE_SALDO',
+      message:
+        'Esta entrega de $3,783.78 USD supera lo que hay por entregar ($1,395.94 USD). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $2,387.84 USD. ¿Registrar?',
       details: {
-        utilidad_usd: 1395.94,
-        pagado_usd: 1000,
-        monto_usd: 500,
-        exceso_usd: 104.06,
+        por_entregar_usd: 1395.94,
+        mes_en_curso_usd: 0,
+        monto_usd: 3783.78,
+        exceso_usd: 2387.84,
+        saldo_despues_usd: -2387.84,
       },
     });
-    expect(tablas.reparto_pago).toHaveLength(1);
-    const r = await svc.crear(
-      dtoAlta({ monto: 500, client_request_id: KEY, aceptar_exceso: true }),
-      ADMIN,
-    );
-    expect(tablas.reparto_pago).toHaveLength(2);
-    expect(r.fila).toMatchObject({
-      pagado_usd: 1500,
-      estado: 'PAGADO',
-      exceso_usd: 104.06,
-      pendiente_usd: 0,
-    });
-  });
-
-  it('dentro de la tolerancia de $1 no es exceso', async () => {
-    const { svc, tablas } = base({ pagos: [pagoFila()] });
-    await svc.crear(dtoAlta({ monto: 396.94 }), ADMIN);
-    expect(tablas.reparto_pago).toHaveLength(2);
-  });
-
-  it('SIN utilidad: 409 SIN_UTILIDAD_QUE_PAGAR, también con aceptar_exceso', async () => {
-    const perdida: RepartoAvionInput = {
-      ...AVION_N4142R,
-      reparto: AVION_N4142R.reparto.map((x) => ({
-        ...x,
-        monto_usd: -x.monto_usd,
-      })),
-    };
-    const { svc, tablas } = base({ aviones: [perdida] });
-    for (const aceptar of [undefined, true]) {
-      const e = await errorDe(
-        svc.crear(dtoAlta({ monto: 10, aceptar_exceso: aceptar }), ADMIN),
-      );
-      expect(e.status).toBe(409);
-      expect(e.code).toBe('SIN_UTILIDAD_QUE_PAGAR');
-      expect(e.details).toMatchObject({
-        utilidad_usd: -1395.94,
-        avion_activo: true,
-        mes: '2026-09',
-      });
-    }
     expect(tablas.reparto_pago).toHaveLength(0);
-  });
-
-  it('socio que no es del avión (o cuya vigencia no toca el mes): 400 sin calcular nada', async () => {
-    const { svc, compute, tablas } = base();
-    const ajeno = await errorDe(svc.crear(dtoAlta({ socio_id: MARY }), ADMIN));
-    expect(ajeno).toMatchObject({
-      status: 400,
-      code: 'SOCIO_NO_ES_DE_LA_AERONAVE',
-    });
-    // Mauricio fue socio de N990GG hasta julio: septiembre no.
-    const vencido = await errorDe(
-      svc.crear(dtoAlta({ aeronave_id: N990GG }), ADMIN),
-    );
-    expect(vencido).toMatchObject({
-      status: 400,
-      code: 'SOCIO_NO_ES_DE_LA_AERONAVE',
-    });
-    expect(compute).not.toHaveBeenCalled();
-    expect(tablas.reparto_pago).toHaveLength(0);
-  });
-
-  it('reglas de forma: T.C. según moneda, fecha no futura, quién entregó activo', async () => {
-    const { svc, tablas } = base();
-    expect(
-      (await errorDe(svc.crear(dtoAlta({ moneda: 'MXN', monto: 100 }), ADMIN)))
-        .code,
-    ).toBe('TC_REQUERIDO');
-    expect(
-      (await errorDe(svc.crear(dtoAlta({ tc_usd_mxn: 18.2 }), ADMIN))).code,
-    ).toBe('TC_NO_APLICA');
-    expect(
-      (await errorDe(svc.crear(dtoAlta({ fecha_pago: '2026-10-02' }), ADMIN)))
-        .code,
-    ).toBe('FECHA_PAGO_FUTURA');
-    expect(
-      (await errorDe(svc.crear(dtoAlta({ entregado_por_id: BAJA }), ADMIN)))
-        .code,
-    ).toBe('ENTREGADO_POR_INVALIDO');
-    expect(tablas.reparto_pago).toHaveLength(0);
-  });
-
-  it('idempotencia: el replay devuelve el MISMO pago (idempotente) sin escribir otra vez', async () => {
-    const { svc, tablas } = base();
-    const a = await svc.crear(
-      dtoAlta({ monto: 1000, client_request_id: KEY }),
+    const r = await pagos.crear(
+      dtoAlta({
+        ...ADELANTO_70K,
+        client_request_id: KEY,
+        aceptar_exceso: true,
+      }),
       ADMIN,
     );
-    // El replay llega aunque ahora «excedería» (va ANTES de todo candado).
-    const b = await svc.crear(
-      dtoAlta({ monto: 1000, client_request_id: KEY }),
-      ADMIN,
-    );
-    expect(tablas.reparto_pago).toHaveLength(1);
-    expect(b.idempotente).toBe(true);
-    expect(b.pago.id).toBe(a.pago.id);
-    expect(b.fila).toMatchObject({ pagado_usd: 1000 });
-    // La misma llave para OTRO renglón ⇒ 409, jamás el pago ajeno.
-    const e = await errorDe(
-      svc.crear(
-        dtoAlta({ socio_id: SAAB, monto: 10, client_request_id: KEY }),
-        ADMIN,
-      ),
-    );
-    expect(e).toMatchObject({ status: 409, code: 'CLIENT_REQUEST_ID_EN_USO' });
-  });
-
-  it('sin la migración: 503 PAGOS_SOCIOS_NO_DISPONIBLE', async () => {
-    const { svc } = base({ sinTabla: true });
-    expect(await errorDe(svc.crear(dtoAlta(), ADMIN))).toMatchObject({
-      status: 503,
-      code: 'PAGOS_SOCIOS_NO_DISPONIBLE',
-      details: { migracion: '20261001000001' },
-    });
-  });
-});
-
-describe('RepartoPagoService.actualizar', () => {
-  const P1 = 'dddddddd-0000-4000-8000-000000000001';
-
-  it('solo metadatos: no re-valida el exceso y escribe SOLO lo que cambió', async () => {
-    const { svc, escrituras } = base({
-      pagos: [pagoFila({ monto: 1500, monto_usd: 1500 })],
-    });
-    const r = await svc.actualizar(
-      P1,
-      {
-        notas: 'Entregado en la oficina',
-        referencia: 'SPEI 001',
-      },
-      ADMIN,
-    );
-    const upd = escrituras.filter(
-      (w) => w.tabla === 'reparto_pago' && w.op === 'update',
-    );
-    expect(upd).toHaveLength(1);
-    expect(upd[0].valor).toEqual({ notas: 'Entregado en la oficina' });
-    expect(r.pago.notas).toBe('Entregado en la oficina');
-    expect(r.fila).toMatchObject({ pagado_usd: 1500, exceso_usd: 104.06 });
-  });
-
-  it('subir el monto re-valida el exceso sobre el estado fusionado; con aceptar_exceso pasa y renueva la foto', async () => {
-    const { svc, tablas } = base({
-      pagos: [pagoFila({ utilidad_snapshot_usd: 1200 })],
-    });
-    const e = await errorDe(svc.actualizar(P1, { monto: 1500 }, ADMIN));
-    expect(e).toMatchObject({
-      status: 409,
-      code: 'PAGO_EXCEDE_UTILIDAD',
-      details: { pagado_usd: 0, monto_usd: 1500 },
-    });
-    await svc.actualizar(P1, { monto: 1500, aceptar_exceso: true }, ADMIN);
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      monto: 1500,
-      monto_usd: 1500,
-      utilidad_snapshot_usd: 1395.94,
-    });
-  });
-
-  it('bajar el monto nunca se bloquea (aunque hoy no haya utilidad)', async () => {
-    const perdida: RepartoAvionInput = {
-      ...AVION_N4142R,
-      reparto: AVION_N4142R.reparto.map((x) => ({
-        ...x,
-        monto_usd: -x.monto_usd,
-      })),
-    };
-    const { svc, tablas } = base({ pagos: [pagoFila()], aviones: [perdida] });
-    await svc.actualizar(P1, { monto: 900 }, ADMIN);
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      monto: 900,
-      monto_usd: 900,
-    });
-  });
-
-  it('moneda: a MXN exige T.C.; a USD lo limpia solo', async () => {
-    const { svc, tablas } = base({ pagos: [pagoFila()] });
-    expect(
-      (await errorDe(svc.actualizar(P1, { moneda: 'MXN' }, ADMIN))).code,
-    ).toBe('TC_REQUERIDO');
-    await svc.actualizar(
-      P1,
-      {
+    expect(tablas.reparto_pago).toEqual([
+      expect.objectContaining({
+        aeronave_id: null,
+        periodo: null,
+        monto: 70000,
         moneda: 'MXN',
-        monto: 18234.57,
-        tc_usd_mxn: 18.234567,
-      },
-      ADMIN,
-    );
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      moneda: 'MXN',
-      tc_usd_mxn: 18.234567,
-      monto_usd: 1000,
-    });
-    await svc.actualizar(P1, { moneda: 'USD', monto: 1000 }, ADMIN);
-    expect(tablas.reparto_pago[0]).toMatchObject({
-      moneda: 'USD',
-      tc_usd_mxn: null,
-      monto_usd: 1000,
+        tc_usd_mxn: 18.5,
+        monto_usd: 3783.78,
+        saldo_snapshot_usd: 1395.94,
+        metodo: 'EFECTIVO',
+        recibido_por: 'El socio en persona',
+      }),
+    ]);
+    expect(r.pago).toMatchObject({ mes: null, aeronave: null });
+    expect(r.cuenta).toMatchObject({
+      entregado_usd: 3783.78,
+      por_entregar_usd: -2387.84,
+      estado: 'ADELANTADO',
     });
   });
 
-  it('cuerpo vacío ⇒ 400; pago borrado ⇒ 404; quién entregó inactivo ⇒ 400', async () => {
-    const { svc } = base({
-      pagos: [
-        pagoFila(),
-        pagoFila({
-          id: 'dddddddd-0000-4000-8000-000000000002',
-          deleted_at: '2026-10-01T17:00:00Z',
-        }),
-      ],
+  it('candado contra MESES CERRADOS: con octubre (en curso) en −$345, entregar exactamente lo de septiembre NO pide confirmar; con octubre en +$500 a medias, entregar $1,895.94 SÍ (y el 409 dice cuánto lleva el mes en curso)', async () => {
+    const neg = mundo({
+      utilidades: {
+        '2026-09': [avionN4142R()],
+        '2026-10': [octubreN4142R(-345)],
+      },
+    });
+    const r = await neg.pagos.crear(dtoAlta({ monto: 1395.94 }), ADMIN);
+    expect(neg.tablas.reparto_pago).toEqual([
+      // El snapshot guarda el número contra el que se decidió (cerrado).
+      expect.objectContaining({
+        monto_usd: 1395.94,
+        saldo_snapshot_usd: 1395.94,
+      }),
+    ]);
+    expect(r.cuenta).toMatchObject({
+      por_entregar_usd: -345,
+      mes_en_curso_usd: -345,
+      por_entregar_cerrado_usd: 0,
+    });
+    // La escritura decide con utilidades FRESCAS (sin la memoria de 10 min).
+    expect(neg.utilidadesSociosPorMes).toHaveBeenCalledWith(
+      ['2026-09', '2026-10'],
+      '2026-10',
+      { fresco: true },
+    );
+
+    const pos = mundo({
+      utilidades: {
+        '2026-09': [avionN4142R()],
+        '2026-10': [octubreN4142R(500)],
+      },
     });
     expect(
-      (await errorDe(svc.actualizar(P1, { aceptar_exceso: true }, ADMIN))).code,
-    ).toBe('PAGO_SIN_CAMBIOS');
+      await errorDe(pos.pagos.crear(dtoAlta({ monto: 1895.94 }), ADMIN)),
+    ).toEqual({
+      status: 409,
+      code: 'PAGO_EXCEDE_SALDO',
+      message:
+        'Esta entrega de $1,895.94 USD supera lo que hay por entregar ($1,395.94 USD, sin contar el mes en curso: $500 USD). Se registrará como ADELANTO y el saldo quedará a favor de VuelaTour por $500 USD. ¿Registrar?',
+      details: {
+        por_entregar_usd: 1395.94,
+        mes_en_curso_usd: 500,
+        monto_usd: 1895.94,
+        exceso_usd: 500,
+        saldo_despues_usd: -500,
+      },
+    });
+    expect(pos.tablas.reparto_pago).toHaveLength(0);
+  });
+
+  it('dentro de la tolerancia de $1 no es adelanto', async () => {
+    const { pagos, tablas } = mundo();
+    await pagos.crear(dtoAlta({ monto: 1396.94 }), ADMIN);
+    expect(tablas.reparto_pago).toHaveLength(1);
+  });
+
+  it('socio que no es de ningún avión ⇒ 400 SOCIO_INVALIDO; avión que no es suyo ⇒ 400 SOCIO_NO_ES_DE_LA_AERONAVE; sin calcular utilidades', async () => {
+    const { pagos, tablas, utilidadesSociosPorMes } = mundo();
+    expect(
+      await errorDe(pagos.crear(dtoAlta({ socio_id: PILOTO }), ADMIN)),
+    ).toMatchObject({ status: 400, code: 'SOCIO_INVALIDO' });
     expect(
       await errorDe(
-        svc.actualizar(
-          'dddddddd-0000-4000-8000-000000000002',
-          { notas: 'x' },
-          ADMIN,
-        ),
+        pagos.crear(dtoAlta({ socio_id: AERO, aeronave_id: N990GG }), ADMIN),
       ),
-    ).toMatchObject({ status: 404, code: 'PAGO_NO_EXISTE' });
-    expect(
-      (await errorDe(svc.actualizar(P1, { entregado_por_id: BAJA }, ADMIN)))
-        .code,
-    ).toBe('ENTREGADO_POR_INVALIDO');
-  });
-
-  it('CAS por updated_at: otra persona lo cambió entre la lectura y la escritura ⇒ 409', async () => {
-    const { svc } = base({
-      pagos: [pagoFila()],
-      antesDeUpdate: (t) => {
-        t.reparto_pago[0].updated_at = '2026-10-01T16:59:59.000000+00:00';
-      },
-    });
-    expect(
-      await errorDe(svc.actualizar(P1, { notas: 'x' }, ADMIN)),
-    ).toMatchObject({
-      status: 409,
-      code: 'PAGO_CAMBIO_CONCURRENTE',
-    });
-  });
-});
-
-describe('RepartoPagoService.eliminar', () => {
-  const P1 = 'dddddddd-0000-4000-8000-000000000001';
-
-  it('soft delete: la fila se conserva con quién/cuándo/motivo y el renglón vuelve a PENDIENTE', async () => {
-    const { svc, tablas } = base({ pagos: [pagoFila()] });
-    const r = await svc.eliminar(P1, '  Capturado dos veces  ', {
-      userId: MARY,
-      rol: Rol.FACTURACION,
-    });
+    ).toMatchObject({ status: 400, code: 'SOCIO_NO_ES_DE_LA_AERONAVE' });
+    // N990GG sí fue de Mauricio (hasta julio): «corresponde a» es
+    // informativo, cualquier vigencia vale.
+    await pagos.crear(dtoAlta({ monto: 10, aeronave_id: N990GG }), ADMIN);
     expect(tablas.reparto_pago).toHaveLength(1);
+    // Los rechazos no calcularon nada y la respuesta del alta REUTILIZA las
+    // utilidades de la misma petición (el mes en curso no se recalcula).
+    expect(utilidadesSociosPorMes).toHaveBeenCalledTimes(1);
+  });
+
+  it('reglas de forma: T.C. según moneda y banda, fecha no futura, mes no futuro, quién entregó activo', async () => {
+    const { pagos, tablas } = mundo();
+    const code = async (p: Partial<CrearPagoSocioDto>) =>
+      (await errorDe(pagos.crear(dtoAlta(p), ADMIN))).code;
+    expect(await code({ moneda: 'MXN', monto: 100 })).toBe('TC_REQUERIDO');
+    expect(await code({ tc_usd_mxn: 18.2 })).toBe('TC_NO_APLICA');
+    expect(await code({ moneda: 'MXN', monto: 70000, tc_usd_mxn: 1.85 })).toBe(
+      'TC_FUERA_DE_RANGO',
+    );
+    expect(await code({ fecha_pago: '2026-10-02' })).toBe('FECHA_PAGO_FUTURA');
+    expect(await code({ mes: '2026-11' })).toBe('MES_FUTURO');
+    expect(await code({ entregado_por_id: BAJA })).toBe(
+      'ENTREGADO_POR_INVALIDO',
+    );
+    expect(tablas.reparto_pago).toHaveLength(0);
+    // Entregó otra persona (activa): se respeta.
+    await pagos.crear(dtoAlta({ monto: 100, entregado_por_id: MARY }), ADMIN);
     expect(tablas.reparto_pago[0]).toMatchObject({
-      deleted_by: MARY,
-      motivo_baja: 'Capturado dos veces',
-    });
-    expect(tablas.reparto_pago[0].deleted_at).toBeTruthy();
-    expect(r).toMatchObject({
-      deleted: true,
-      fila: {
-        pagado_usd: 0,
-        estado: 'PENDIENTE',
-        pendiente_usd: 1395.94,
-        pagos: [],
-      },
-    });
-    // Ya borrado ⇒ 404.
-    expect(await errorDe(svc.eliminar(P1, 'otra vez', ADMIN))).toMatchObject({
-      status: 404,
-      code: 'PAGO_NO_EXISTE',
+      entregado_por: MARY,
+      created_by: ALE,
     });
   });
 
-  it('motivo corto ⇒ 400; sin migración ⇒ 503', async () => {
-    const { svc } = base({ pagos: [pagoFila()] });
-    expect((await errorDe(svc.eliminar(P1, 'ups', ADMIN))).code).toBe(
-      'MOTIVO_INVALIDO',
-    );
-    const sin = base({ sinTabla: true });
-    expect(
-      (await errorDe(sin.svc.eliminar(P1, 'Capturado dos veces', ADMIN)))
-        .status,
-    ).toBe(503);
-  });
-});
-
-describe('RepartoPagoService.subirComprobante', () => {
-  const P1 = 'dddddddd-0000-4000-8000-000000000001';
-  const pdf = (bytes = 2048) => ({
-    buffer: Buffer.alloc(bytes, 1),
-    nombre: 'spei.pdf',
-    mime: 'application/pdf',
-  });
-
-  it('sube a <avión>/<mes>/<pago>/<uuid>.pdf, guarda el path y firma 8 h; reemplazar CONSERVA el anterior', async () => {
-    const { svc, tablas, archivos, removidos } = base({ pagos: [pagoFila()] });
-    const r1 = await svc.subirComprobante(P1, pdf(), ADMIN);
-    const path1 = String(tablas.reparto_pago[0].comprobante_path);
-    expect(path1).toMatch(
-      new RegExp(`^${N4142R}/2026-09/${P1}/[0-9a-f-]{36}\\.pdf$`),
-    );
-    expect(archivos.has(`reparto-comprobantes/${path1}`)).toBe(true);
-    expect(r1.pago.comprobante_url).toBe(
-      `https://firmada/reparto-comprobantes/${path1}?exp=28800`,
-    );
-    await svc.subirComprobante(
-      P1,
-      { buffer: Buffer.alloc(10, 1), nombre: 'foto.jpg', mime: 'image/jpeg' },
+  it('idempotencia: el replay devuelve LA MISMA entrega (200) sin escribir, aunque hoy «excedería»; llave de otro socio ⇒ 409', async () => {
+    const { pagos, tablas } = mundo();
+    const a = await pagos.crear(
+      dtoAlta({ monto: 1000, client_request_id: KEY }),
       ADMIN,
     );
-    const path2 = String(tablas.reparto_pago[0].comprobante_path);
-    expect(path2).not.toBe(path1);
-    expect(path2.endsWith('.jpg')).toBe(true);
-    expect(removidos).toEqual([]);
-  });
-
-  it('tipo inválido ⇒ 400; más de 10 MB ⇒ 413; pago borrado ⇒ 404', async () => {
-    const { svc } = base({
-      pagos: [pagoFila({ deleted_at: '2026-10-01T17:00:00Z' })],
-    });
-    expect(
-      (
-        await errorDe(
-          svc.subirComprobante(
-            P1,
-            {
-              buffer: Buffer.alloc(10),
-              nombre: 'x.exe',
-              mime: 'application/x-msdownload',
-            },
-            ADMIN,
-          ),
-        )
-      ).code,
-    ).toBe('ARCHIVO_TIPO_INVALIDO');
-    expect(
-      (
-        await errorDe(
-          svc.subirComprobante(P1, pdf(10 * 1024 * 1024 + 1), ADMIN),
-        )
-      ).status,
-    ).toBe(413);
-    expect((await errorDe(svc.subirComprobante(P1, pdf(), ADMIN))).code).toBe(
-      'PAGO_NO_EXISTE',
+    const b = await pagos.crear(
+      dtoAlta({ monto: 1000, client_request_id: KEY }),
+      ADMIN,
     );
+    expect(b.idempotente).toBe(true);
+    expect(b.pago.id).toBe(a.pago.id);
+    expect(b.cuenta.por_entregar_usd).toBe(395.94);
+    expect(tablas.reparto_pago).toHaveLength(1);
+    expect(
+      await errorDe(
+        pagos.crear(dtoAlta({ socio_id: AERO, client_request_id: KEY }), ADMIN),
+      ),
+    ).toMatchObject({ status: 409, code: 'CLIENT_REQUEST_ID_EN_USO' });
   });
-});
 
-describe('RepartoPagoService — revisión adversaria (1-oct-2026)', () => {
-  const KEY2 = 'eeeeeeee-0000-4000-8000-000000000002';
-
-  /** Puerta: las primeras `n` llamadas a compute esperan a que lleguen todas. */
-  function barrera(compute: jest.Mock, n: number) {
-    let llegadas = 0;
-    let soltar!: () => void;
-    const puerta = new Promise<void>((r) => (soltar = r));
-    const original = compute.getMockImplementation() as (q: {
-      aeronave_id?: string;
-    }) => Promise<unknown>;
-    compute.mockImplementation(async (q: { aeronave_id?: string }) => {
-      llegadas += 1;
-      if (llegadas === n) soltar();
-      if (llegadas <= n) await puerta;
-      return original(q);
-    });
-  }
-
-  it('doble envío con la MISMA llave: la 2.ª ve el pago de la 1.ª como «pagado» y aun así responde 200 idempotente (no 409)', async () => {
-    const { svc, compute, tablas } = base();
-    // La 2.ª petición pasa la búsqueda de la llave ANTES de que la 1.ª
-    // inserte, y su compute espera a que la 1.ª termine.
+  it('doble envío con la MISMA llave: la 2.ª ve la entrega de la 1.ª en el saldo y aun así responde 200 idempotente (no 409)', async () => {
+    const { pagos, tablas, utilidadesSociosPorMes } = mundo();
     let soltar!: () => void;
     const r1Lista = new Promise<void>((r) => (soltar = r));
-    const original = compute.getMockImplementation()!;
+    const original = utilidadesSociosPorMes.getMockImplementation()!;
     let llamada = 0;
-    compute.mockImplementation(async (q: { aeronave_id?: string }) => {
+    utilidadesSociosPorMes.mockImplementation(async (meses, mesActual) => {
       llamada += 1;
       if (llamada === 2) await r1Lista;
-      return original(q);
+      return original(meses, mesActual);
     });
     const dto = dtoAlta({ client_request_id: KEY });
-    const p1 = svc.crear(dto, ADMIN);
-    const p2 = svc.crear({ ...dto }, ADMIN);
+    const p1 = pagos.crear(dto, ADMIN);
+    const p2 = pagos.crear({ ...dto }, ADMIN);
     const r1 = await p1;
     soltar();
     const r2 = await p2;
@@ -1002,127 +302,435 @@ describe('RepartoPagoService — revisión adversaria (1-oct-2026)', () => {
     expect(tablas.reparto_pago).toHaveLength(1);
   });
 
-  it('dos altas simultáneas con llaves DISTINTAS que juntas rebasan: la capturada después se da de baja (llave libre) y responde 409; confirmarla con la MISMA llave la guarda', async () => {
-    const { svc, compute, tablas } = base();
-    barrera(compute, 2);
-    const MARY_FACT = { userId: MARY, rol: Rol.FACTURACION };
+  it('dos entregas simultáneas con llaves DISTINTAS que juntas rebasan: la capturada después se da de baja (llave libre) y responde 409; confirmarla con la MISMA llave la guarda', async () => {
+    const { pagos, tablas, utilidadesSociosPorMes } = mundo();
+    // Puerta: las dos primeras lecturas del saldo esperan a que lleguen ambas.
+    let llegadas = 0;
+    let soltar!: () => void;
+    const puerta = new Promise<void>((r) => (soltar = r));
+    const original = utilidadesSociosPorMes.getMockImplementation()!;
+    utilidadesSociosPorMes.mockImplementation(async (meses, mesActual) => {
+      llegadas += 1;
+      if (llegadas === 2) soltar();
+      if (llegadas <= 2) await puerta;
+      return original(meses, mesActual);
+    });
     const res = await Promise.allSettled([
-      svc.crear(dtoAlta({ client_request_id: KEY }), ADMIN),
-      svc.crear(dtoAlta({ client_request_id: KEY2 }), MARY_FACT),
+      pagos.crear(dtoAlta({ monto: 1000, client_request_id: KEY }), ADMIN),
+      pagos.crear(dtoAlta({ monto: 1000, client_request_id: KEY2 }), MARY_FACT),
     ]);
-    // Las DOS pasaron el candado previo (las dos filas se insertaron)…
     expect(tablas.reparto_pago).toHaveLength(2);
-    // …y solo una se queda: la capturada primero.
     const ganadora = res.findIndex((r) => r.status === 'fulfilled');
     const perdedora = res.findIndex((r) => r.status === 'rejected');
     expect([ganadora, perdedora].sort()).toEqual([0, 1]);
-    const razon = (res[perdedora] as PromiseRejectedResult).reason as Error;
-    const e = await errorDe(Promise.reject(razon));
-    expect(e).toEqual({
+    const e = await errorDe(
+      Promise.reject((res[perdedora] as PromiseRejectedResult).reason as Error),
+    );
+    expect(e).toMatchObject({
       status: 409,
-      code: 'PAGO_EXCEDE_UTILIDAD',
+      code: 'PAGO_EXCEDE_SALDO',
       details: {
-        utilidad_usd: 1395.94,
-        pagado_usd: 1395.94,
-        monto_usd: 1395.94,
-        exceso_usd: 1395.94,
+        por_entregar_usd: 395.94,
+        monto_usd: 1000,
+        exceso_usd: 604.06,
+        saldo_despues_usd: -604.06,
       },
     });
-    const llaves = [KEY, KEY2];
     const vivas = tablas.reparto_pago.filter((f) => f.deleted_at == null);
-    expect(vivas.map((f) => f.client_request_id)).toEqual([llaves[ganadora]]);
+    expect(vivas.map((f) => f.client_request_id)).toEqual([
+      [KEY, KEY2][ganadora],
+    ]);
     const baja = tablas.reparto_pago.find((f) => f.deleted_at != null)!;
-    // La viva es la capturada ANTES (orden determinista para las dos).
     expect(String(vivas[0].created_at) < String(baja.created_at)).toBe(true);
     expect(baja).toMatchObject({
       deleted_by: [ALE, MARY][perdedora],
       client_request_id: null,
     });
     expect(String(baja.motivo_baja)).toContain('al mismo tiempo');
-    // El renglón NO quedó sobrepagado.
-    const lista = await svc.listar('2026-09', undefined, ADMIN);
-    expect(lista.filas[0]).toMatchObject({
-      pagado_usd: 1395.94,
-      exceso_usd: 0,
-      estado: 'PAGADO',
-    });
-    // El panel confirma «¿Registrar de todas formas?» con la MISMA llave.
-    const r = await svc.crear(
-      dtoAlta({ client_request_id: llaves[perdedora], aceptar_exceso: true }),
+    // El panel confirma el ADELANTO con la MISMA llave.
+    const r = await pagos.crear(
+      dtoAlta({
+        monto: 1000,
+        client_request_id: [KEY, KEY2][perdedora],
+        aceptar_exceso: true,
+      }),
       [ADMIN, MARY_FACT][perdedora],
     );
-    expect(r).not.toHaveProperty('idempotente');
-    expect(r.fila).toMatchObject({ pagado_usd: 2791.88, exceso_usd: 1395.94 });
-  });
-
-  it('dos altas simultáneas que juntas NO rebasan: las dos se quedan', async () => {
-    const { svc, compute, tablas } = base();
-    barrera(compute, 2);
-    await Promise.all([
-      svc.crear(dtoAlta({ monto: 600, client_request_id: KEY }), ADMIN),
-      svc.crear(dtoAlta({ monto: 700, client_request_id: KEY2 }), ADMIN),
-    ]);
-    expect(
-      tablas.reparto_pago.filter((f) => f.deleted_at == null),
-    ).toHaveLength(2);
-  });
-
-  it('paridad del 409 y del renglón con un socio de DOS vigencias en el mes (una sola suma)', async () => {
-    const dosVigencias: RepartoAvionInput = {
-      aeronave: AVION_N4142R.aeronave,
-      reparto: [
-        {
-          socio_id: MAURICIO,
-          socio_nombre: 'Mauricio Roque',
-          porcentaje: 50,
-          monto_usd: 1011.55,
-        },
-        {
-          socio_id: MAURICIO,
-          socio_nombre: 'Mauricio Roque',
-          porcentaje: 19,
-          monto_usd: 384.39,
-        },
-      ],
-    };
-    const { svc } = base({
-      aviones: [dosVigencias],
-      pagos: [pagoFila({ monto: '600.10', monto_usd: '600.10' })],
+    expect(r.cuenta).toMatchObject({
+      entregado_usd: 2000,
+      por_entregar_usd: -604.06,
+      estado: 'ADELANTADO',
     });
-    const e = await errorDe(svc.crear(dtoAlta({ monto: 900 }), ADMIN));
-    const lista = await svc.listar('2026-09', undefined, ADMIN);
-    const f = lista.filas[0];
-    expect(e.code).toBe('PAGO_EXCEDE_UTILIDAD');
-    expect(e.details).toMatchObject({
-      utilidad_usd: f.utilidad_usd,
-      pagado_usd: f.pagado_usd,
-    });
-    expect([f.utilidad_usd, f.pagado_usd, f.porcentaje]).toEqual([
-      1395.94, 600.1, 69,
-    ]);
-  });
-
-  it('T.C. fuera de la banda razonable ⇒ 400 TC_FUERA_DE_RANGO sin escribir (antes: 500 por numeric overflow)', async () => {
-    const { svc, tablas } = base();
-    for (const tc of [1_000_000, 999_999.9999999, 1.8, 180, 0.000001]) {
-      const e = await errorDe(
-        svc.crear(
-          dtoAlta({ monto: 10000, moneda: 'MXN', tc_usd_mxn: tc }),
-          ADMIN,
-        ),
-      );
-      expect([tc, e.status, e.code]).toEqual([tc, 400, 'TC_FUERA_DE_RANGO']);
-    }
-    expect(tablas.reparto_pago).toHaveLength(0);
   });
 
   it('22003 (numeric fuera de rango) de la BD ⇒ 400 PAGO_INVALIDO, nunca 500', async () => {
-    const { svc } = base({
+    const { pagos } = mundo({
       errorEnInsert: { code: '22003', message: 'numeric field overflow' },
     });
-    expect(await errorDe(svc.crear(dtoAlta(), ADMIN))).toMatchObject({
+    expect(
+      await errorDe(pagos.crear(dtoAlta({ monto: 10 }), ADMIN)),
+    ).toMatchObject({
       status: 400,
       code: 'PAGO_INVALIDO',
+    });
+  });
+
+  it('sin la migración: 503 CUENTA_SOCIO_NO_DISPONIBLE', async () => {
+    const { pagos } = mundo({ sinMigracion: true });
+    expect(await errorDe(pagos.crear(dtoAlta(), ADMIN))).toMatchObject({
+      status: 503,
+      code: 'CUENTA_SOCIO_NO_DISPONIBLE',
+      details: { migracion: '20261002000001' },
+    });
+  });
+});
+
+describe('RepartoPagoService.actualizar', () => {
+  const PAGO = 'dddddddd-0000-4000-8000-000000000001';
+
+  it('solo metadatos: no re-valida el saldo y escribe SOLO lo que cambió', async () => {
+    const { pagos, escrituras } = mundo({
+      pagos: [pagoFila({ monto: 3000, monto_usd: 3000 })],
+    });
+    const r = await pagos.actualizar(
+      PAGO,
+      { notas: 'Recibió su contador' },
+      ADMIN,
+    );
+    const upd = escrituras.filter((e) => e.op === 'update');
+    expect(upd).toHaveLength(1);
+    // Solo lo que cambió + quién corrigió (actor de la bitácora).
+    expect(upd[0].valor).toEqual({
+      notas: 'Recibió su contador',
+      updated_by: ALE,
+    });
+    expect(r.cuenta).toMatchObject({
+      por_entregar_usd: -1604.06,
+      estado: 'ADELANTADO',
+    });
+  });
+
+  it('subir el monto se mide contra el saldo SIN esta entrega; con aceptar_exceso pasa y renueva saldo_snapshot', async () => {
+    const { pagos, tablas } = mundo({
+      pagos: [pagoFila({ saldo_snapshot_usd: 999 })],
+    });
+    const e = await errorDe(pagos.actualizar(PAGO, { monto: 1500 }, ADMIN));
+    expect(e).toMatchObject({
+      status: 409,
+      code: 'PAGO_EXCEDE_SALDO',
+      details: {
+        por_entregar_usd: 1395.94,
+        monto_usd: 1500,
+        exceso_usd: 104.06,
+        saldo_despues_usd: -104.06,
+      },
+    });
+    const r = await pagos.actualizar(
+      PAGO,
+      { monto: 1500, aceptar_exceso: true },
+      ADMIN,
+    );
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      monto: 1500,
+      monto_usd: 1500,
+      saldo_snapshot_usd: 1395.94,
+    });
+    expect(r.cuenta.por_entregar_usd).toBe(-104.06);
+  });
+
+  it('bajar el monto nunca se bloquea; pasar a MXN exige T.C.; a USD lo limpia', async () => {
+    const { pagos, tablas } = mundo({
+      pagos: [pagoFila({ monto: 3000, monto_usd: 3000 })],
+    });
+    await pagos.actualizar(PAGO, { monto: 2000 }, ADMIN);
+    expect(tablas.reparto_pago[0]).toMatchObject({ monto_usd: 2000 });
+    expect(
+      (await errorDe(pagos.actualizar(PAGO, { moneda: 'MXN' }, ADMIN))).code,
+    ).toBe('TC_REQUERIDO');
+    await pagos.actualizar(
+      PAGO,
+      { moneda: 'MXN', monto: 20000, tc_usd_mxn: 18.5 },
+      ADMIN,
+    );
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      moneda: 'MXN',
+      tc_usd_mxn: 18.5,
+      monto_usd: 1081.08,
+    });
+    await pagos.actualizar(PAGO, { moneda: 'USD', monto: 100 }, ADMIN);
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      moneda: 'USD',
+      tc_usd_mxn: null,
+      monto_usd: 100,
+    });
+  });
+
+  it('corregir la entrega de alguien que YA no está en aeronave_socio sí se puede (el alta no)', async () => {
+    const { pagos, tablas } = mundo({
+      pagos: [pagoFila({ socio_id: PILOTO, aeronave_id: null, periodo: null })],
+    });
+    const r = await pagos.actualizar(PAGO, { referencia: 'SPEI 999' }, ADMIN);
+    expect(tablas.reparto_pago[0]).toMatchObject({ referencia: 'SPEI 999' });
+    expect(r.cuenta).toMatchObject({
+      socio: { id: PILOTO },
+      por_entregar_usd: -1000,
+      estado: 'ADELANTADO',
+    });
+    expect(
+      await errorDe(pagos.crear(dtoAlta({ socio_id: PILOTO }), ADMIN)),
+    ).toMatchObject({ status: 400, code: 'SOCIO_INVALIDO' });
+  });
+
+  it('«corresponde a» se corrige: mes y avión a null (adelanto a cuenta) o a otro avión del socio', async () => {
+    const { pagos, tablas } = mundo({ pagos: [pagoFila()] });
+    const r = await pagos.actualizar(
+      PAGO,
+      { mes: null, aeronave_id: null },
+      ADMIN,
+    );
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      periodo: null,
+      aeronave_id: null,
+    });
+    expect(r.pago).toMatchObject({ mes: null, aeronave: null });
+    expect(
+      await errorDe(
+        pagos.actualizar(
+          PAGO,
+          { aeronave_id: 'aaaaaaaa-0000-4000-8000-0000000000ff' },
+          ADMIN,
+        ),
+      ),
+    ).toMatchObject({ code: 'SOCIO_NO_ES_DE_LA_AERONAVE' });
+    expect(
+      await errorDe(pagos.actualizar(PAGO, { mes: '2026-12' }, ADMIN)),
+    ).toMatchObject({
+      code: 'MES_FUTURO',
+    });
+  });
+
+  it('cuerpo vacío ⇒ 400; entrega borrada ⇒ 404; CAS por updated_at ⇒ 409', async () => {
+    const { pagos } = mundo({
+      pagos: [pagoFila({ deleted_at: '2026-10-01T16:00:00Z' })],
+    });
+    expect((await errorDe(pagos.actualizar(PAGO, {}, ADMIN))).code).toBe(
+      'PAGO_SIN_CAMBIOS',
+    );
+    expect(
+      await errorDe(pagos.actualizar(PAGO, { notas: 'x' }, ADMIN)),
+    ).toMatchObject({ status: 404, code: 'PAGO_NO_EXISTE' });
+
+    const m = mundo({ pagos: [pagoFila()] });
+    const original = m.tablas.reparto_pago[0];
+    // Otra persona lo cambia entre la lectura y la escritura.
+    const svc = m.pagos as unknown as {
+      pagoVivo: (id: string) => Promise<Record<string, unknown>>;
+    };
+    const leer = svc.pagoVivo.bind(m.pagos);
+    svc.pagoVivo = async (id: string) => {
+      const r = await leer(id);
+      original.updated_at = '2026-10-01T17:00:00.000000+00:00';
+      return r;
+    };
+    expect(
+      await errorDe(m.pagos.actualizar(PAGO, { notas: 'x' }, ADMIN)),
+    ).toMatchObject({ status: 409, code: 'PAGO_CAMBIO_CONCURRENTE' });
+  });
+});
+
+describe('RepartoPagoService.eliminar', () => {
+  const PAGO = 'dddddddd-0000-4000-8000-000000000001';
+
+  it('soft delete: la fila se conserva con quién/cuándo/motivo y la cuenta vuelve a POR ENTREGAR', async () => {
+    const { pagos, tablas } = mundo({ pagos: [pagoFila()] });
+    const r = await pagos.eliminar(PAGO, '  Capturado dos veces ', ADMIN);
+    expect(tablas.reparto_pago[0]).toMatchObject({
+      deleted_by: ALE,
+      motivo_baja: 'Capturado dos veces',
+    });
+    expect(tablas.reparto_pago[0].deleted_at).toBeTruthy();
+    expect(r).toMatchObject({
+      deleted: true,
+      cuenta: {
+        entregado_usd: 0,
+        por_entregar_usd: 1395.94,
+        estado: 'POR_ENTREGAR',
+      },
+    });
+    expect(
+      await errorDe(pagos.eliminar(PAGO, 'otra vez', ADMIN)),
+    ).toMatchObject({
+      status: 404,
+      code: 'PAGO_NO_EXISTE',
+    });
+  });
+
+  it('motivo corto ⇒ 400; sin migración ⇒ 503', async () => {
+    const { pagos } = mundo({ pagos: [pagoFila()] });
+    expect((await errorDe(pagos.eliminar(PAGO, 'ups', ADMIN))).code).toBe(
+      'MOTIVO_INVALIDO',
+    );
+    const sin = mundo({ sinMigracion: true });
+    expect(
+      (await errorDe(sin.pagos.eliminar(PAGO, 'Capturado dos veces', ADMIN)))
+        .status,
+    ).toBe(503);
+  });
+});
+
+describe('RepartoPagoService — quién corrigió (bitácora)', () => {
+  const PAGO = 'dddddddd-0000-4000-8000-000000000001';
+
+  it('TODA escritura sobre una entrega sella updated_by (el trigger reparto_bitacora lo toma como actor); el panel recibe updated_by_nombre', async () => {
+    const { pagos, escrituras } = mundo({ pagos: [pagoFila()] });
+    const r = await pagos.actualizar(PAGO, { monto: 700 }, MARY_FACT);
+    expect(r.pago).toMatchObject({
+      updated_by: MARY,
+      updated_by_nombre: 'Mary Cruz',
+    });
+    await pagos.subirComprobante(
+      PAGO,
+      {
+        buffer: Buffer.alloc(10, 1),
+        nombre: 'spei.pdf',
+        mime: 'application/pdf',
+      },
+      ADMIN,
+    );
+    await pagos.eliminar(PAGO, 'Capturado dos veces', MARY_FACT);
+    const upd = escrituras.filter(
+      (e) => e.tabla === 'reparto_pago' && e.op === 'update',
+    );
+    expect(upd.map((e) => e.valor.updated_by)).toEqual([MARY, ALE, MARY]);
+  });
+});
+
+describe('RepartoPagoService.subirComprobante', () => {
+  const PAGO = 'dddddddd-0000-4000-8000-000000000001';
+  const pdf = (bytes = 100) => ({
+    buffer: Buffer.alloc(bytes, 1),
+    nombre: 'spei.pdf',
+    mime: 'application/pdf',
+  });
+
+  it('sube a <socio>/<entrega>/<uuid>.pdf, guarda el path y firma 8 h; reemplazar CONSERVA el anterior', async () => {
+    const { pagos, tablas, removidos } = mundo({ pagos: [pagoFila()] });
+    const r1 = await pagos.subirComprobante(PAGO, pdf(), ADMIN);
+    const p1 = String(tablas.reparto_pago[0].comprobante_path);
+    expect(p1).toMatch(new RegExp(`^${MAURICIO}/${PAGO}/[0-9a-f-]{36}\\.pdf$`));
+    expect(r1.pago.comprobante_url).toBe(
+      `https://firmada/reparto-comprobantes/${p1}?exp=28800`,
+    );
+    await pagos.subirComprobante(PAGO, pdf(), ADMIN);
+    expect(tablas.reparto_pago[0].comprobante_path).not.toBe(p1);
+    expect(removidos).toEqual([]);
+  });
+
+  it('tipo inválido ⇒ 400; más de 10 MB ⇒ 413; entrega borrada ⇒ 404', async () => {
+    const { pagos } = mundo({
+      pagos: [pagoFila({ deleted_at: '2026-10-01T16:00:00Z' })],
+    });
+    expect(
+      (
+        await errorDe(
+          pagos.subirComprobante(
+            PAGO,
+            { ...pdf(), nombre: 'x.exe', mime: 'application/x-msdownload' },
+            ADMIN,
+          ),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await errorDe(
+          pagos.subirComprobante(PAGO, pdf(10 * 1024 * 1024 + 1), ADMIN),
+        )
+      ).status,
+    ).toBe(413);
+    expect(
+      (await errorDe(pagos.subirComprobante(PAGO, pdf(), ADMIN))).code,
+    ).toBe('PAGO_NO_EXISTE');
+  });
+});
+
+describe('RepartoPagoService.listar', () => {
+  it('por fecha de entrega (más reciente primero), sin borradas, con nombres, avión y comprobante firmado', async () => {
+    const { pagos } = mundo({
+      pagos: [
+        pagoFila({
+          id: 'p-1',
+          fecha_pago: '2026-09-15',
+          comprobante_path: 'a/b/c.pdf',
+        }),
+        pagoFila({
+          id: 'p-2',
+          fecha_pago: '2026-10-01',
+          socio_id: AERO,
+          aeronave_id: null,
+          periodo: null,
+        }),
+        pagoFila({
+          id: 'p-3',
+          fecha_pago: '2026-09-20',
+          deleted_at: '2026-10-01T00:00:00Z',
+        }),
+        pagoFila({ id: 'p-4', fecha_pago: '2026-08-31' }),
+      ],
+    });
+    const r = await pagos.listar(
+      { desde: '2026-09-01', hasta: '2026-10-31' },
+      ADMIN,
+    );
+    expect(r.disponible).toBe(true);
+    expect(r.pagos.map((p) => p.id)).toEqual(['p-2', 'p-1']);
+    expect(r.pagos[1]).toMatchObject({
+      entregado_por_nombre: 'Mary Cruz',
+      aeronave: { id: N4142R, matricula: 'N4142R' },
+      comprobante_url:
+        'https://firmada/reparto-comprobantes/a/b/c.pdf?exp=28800',
+    });
+    const solo = await pagos.listar({ socio_id: AERO }, ADMIN);
+    expect(solo.pagos.map((p) => p.id)).toEqual(['p-2']);
+  });
+
+  it('SOCIO: solo las suyas (la consulta ya filtra); pedir otro socio ⇒ 403', async () => {
+    const { pagos } = mundo({
+      pagos: [pagoFila({ id: 'p-1' }), pagoFila({ id: 'p-2', socio_id: AERO })],
+    });
+    const socio = { userId: MAURICIO, rol: Rol.SOCIO };
+    expect((await pagos.listar({}, socio)).pagos.map((p) => p.id)).toEqual([
+      'p-1',
+    ]);
+    expect(
+      await errorDe(pagos.listar({ socio_id: AERO }, socio)),
+    ).toMatchObject({
+      status: 403,
+      code: 'SOCIO_SOLO_SU_CUENTA',
+    });
+  });
+
+  it('?mes= / ?aeronave_id= (v1) ⇒ 410 PAGOS_POR_MES_RETIRADO; rango invertido ⇒ 400; sin migración ⇒ disponible:false', async () => {
+    const { pagos } = mundo();
+    for (const q of [
+      { mes: '2026-09' },
+      { mes: '2026-09', aeronave_id: 'avion-n4142r' },
+      { aeronave_id: 'avion-n4142r' },
+    ]) {
+      expect(await errorDe(pagos.listar(q, ADMIN))).toMatchObject({
+        status: 410,
+        code: 'PAGOS_POR_MES_RETIRADO',
+      });
+    }
+    expect(
+      await errorDe(
+        pagos.listar({ desde: '2026-10-02', hasta: '2026-10-01' }, ADMIN),
+      ),
+    ).toMatchObject({ status: 400, code: 'RANGO_INVALIDO' });
+    const sin = mundo({ sinMigracion: true });
+    expect(await sin.pagos.listar({}, ADMIN)).toEqual({
+      disponible: false,
+      pagos: [],
     });
   });
 });

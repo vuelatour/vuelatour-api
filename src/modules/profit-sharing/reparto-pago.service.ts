@@ -1,17 +1,16 @@
 import {
   BadRequestException,
   ConflictException,
+  ForbiddenException,
+  GoneException,
   Injectable,
   Logger,
   NotFoundException,
   PayloadTooLargeException,
-  ServiceUnavailableException,
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { hoyCancun } from '../../common/fecha-cancun.util';
-import { fetchNombresUsuarios } from '../../common/registrado-por.util';
+import { esColumnaInexistente } from '../../common/columna-opcional.util';
 import { Rol } from '../../common/types/auth.types';
-import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
 import {
   LIMITE_COMPROBANTE_BYTES,
   validarComprobanteCobro,
@@ -21,69 +20,70 @@ import { SupabaseService } from '../supabase/supabase.service';
 import type {
   ActualizarPagoSocioDto,
   CrearPagoSocioDto,
+  PagosQuery,
 } from './dto/reparto-pago.dto';
-import { ProfitSharingService } from './profit-sharing.service';
-import { lectorPagosSocios } from './reparto-pago.lector';
+import { SIN_MIGRACION } from './reparto-cuenta.lector';
+import {
+  RepartoCuentaService,
+  errorCuentaNoDisponible,
+  type ActorCuenta,
+  type ContextoSocio,
+} from './reparto-cuenta.service';
+import {
+  MENSAJE_RANGO_FECHAS_INVALIDO,
+  MENSAJE_SOCIO_SOLO_SU_CUENTA,
+  excedeSaldo,
+  excedeSaldoEnOrdenDeCaptura,
+  mensajeExcedeSaldo,
+  type FilaCuentaSocio,
+  type UtilidadMesSocios,
+} from './reparto-cuenta.util';
 import {
   BUCKET_REPARTO_COMPROBANTES,
   COLS_REPARTO_PAGO,
   MENSAJE_CLIENT_REQUEST_ID_EN_USO_PAGO,
   MENSAJE_COMPROBANTE_PAGO_CAMBIO,
   MENSAJE_ENTREGADO_POR_INVALIDO,
+  MENSAJE_MES_FUTURO,
   MENSAJE_MES_INVALIDO,
   MENSAJE_MOTIVO_BAJA_PAGO,
   MENSAJE_PAGO_CAMBIO_CONCURRENTE,
   MENSAJE_PAGO_NO_EXISTE,
   MENSAJE_PAGO_SIN_CAMBIOS,
-  MENSAJE_PAGOS_NO_DISPONIBLE,
+  MENSAJE_PAGOS_POR_MES_RETIRADO,
+  MENSAJE_SOCIO_INVALIDO,
   MENSAJE_SOCIO_NO_ES_DE_LA_AERONAVE,
-  MIGRACION_REPARTO_PAGO,
   MOTIVO_BAJA_CARRERA_ALTA,
   MOTIVO_BAJA_PAGO_MAX,
   MOTIVO_BAJA_PAGO_MIN,
   TABLA_REPARTO_PAGO,
-  aPagoSocio,
-  armarFilasPagos,
+  compararCaptura,
+  esFechaDia,
   esMes,
-  excedeEnOrdenDeCaptura,
-  excedeUtilidad,
-  mensajeExcedeUtilidad,
-  mensajeSinUtilidad,
-  mesDeFechaPeriodo,
   pathComprobantePago,
   periodoDeMes,
-  rangoDeMes,
-  resumenPorSocio,
-  sumaMontoUsd,
   textoOpcional,
-  totalesPagos,
-  utilidadDeSocioEnAvion,
   validarDineroPago,
   validarFechaPago,
-  type AeronaveRef,
-  type FilaPagoSocio,
   type PagoSocio,
-  type RepartoAvionInput,
   type RepartoPagoRow,
-  type ResumenSocioPagos,
-  type TotalesPagos,
 } from './reparto-pago.util';
 
 /** Quién pide (de `@CurrentUser`). */
-export interface ActorPagos {
-  userId: string;
-  rol: Rol;
-}
+export type ActorPagos = ActorCuenta;
 
 /** Respuesta de `GET /v1/profit-sharing/pagos`. */
-export interface PagosDelMes {
+export interface ListaPagos {
   disponible: boolean;
-  mes: string;
-  desde: string;
-  hasta: string;
-  filas: FilaPagoSocio[];
-  por_socio: ResumenSocioPagos[];
-  totales: TotalesPagos;
+  /** Más reciente primero (fecha_pago, luego captura). */
+  pagos: PagoSocio[];
+}
+
+/** Respuesta de alta / edición: la entrega + el renglón del socio ya recalculado. */
+export interface RespuestaPago {
+  pago: PagoSocio;
+  cuenta: FilaCuentaSocio;
+  idempotente?: true;
 }
 
 /** Archivo multipart ya leído por el controller. */
@@ -93,13 +93,18 @@ export interface ArchivoComprobantePago {
   mime: string | null;
 }
 
-/** 503 estructurado: la migración 20261001000001 aún no está aplicada. */
-export function errorPagosNoDisponible(): ServiceUnavailableException {
-  return new ServiceUnavailableException({
-    message: MENSAJE_PAGOS_NO_DISPONIBLE,
-    error: 'PAGOS_SOCIOS_NO_DISPONIBLE',
-    details: { migracion: MIGRACION_REPARTO_PAGO },
-  });
+/**
+ * Detalles del 409 `PAGO_EXCEDE_SALDO`. `por_entregar_usd` = lo por
+ * entregar de MESES CERRADOS (sin el mes en curso: contra eso se decide el
+ * adelanto); `mes_en_curso_usd` (ADITIVO) = lo que lleva el mes abierto, que
+ * NO cuenta. `exceso_usd`/`saldo_despues_usd` se miden contra lo cerrado.
+ */
+interface DetalleExceso {
+  por_entregar_usd: number;
+  mes_en_curso_usd: number;
+  monto_usd: number;
+  exceso_usd: number;
+  saldo_despues_usd: number;
 }
 
 function pagoNoExiste(id: string): NotFoundException {
@@ -114,31 +119,28 @@ function bad(code: string, message: string, details?: unknown) {
   return new BadRequestException({ message, error: code, details });
 }
 
-const TOTALES_EN_CERO: Readonly<TotalesPagos> = Object.freeze({
-  utilidad_usd: 0,
-  pagado_usd: 0,
-  pendiente_usd: 0,
-  socios_pendientes: 0,
-});
+const sinMigracion = (e: { code?: string | null; message?: string | null }) =>
+  esColumnaInexistente(e) || esTablaInexistente(e);
 
 /**
- * PAGOS DE UTILIDADES A SOCIOS (1-oct-2026, API 0.0.49). Reglas puras en
- * `reparto-pago.util.ts`; la utilidad SIEMPRE sale de
- * `ProfitSharingService.compute` del mes (fuente única del reparto). Sonda
- * de la tabla en `reparto-pago.lector.ts` (compartida con el pre-cierre):
- * sin la migración, las LECTURAS responden `disponible:false` con listas
- * vacías y las ESCRITURAS 503 `PAGOS_SOCIOS_NO_DISPONIBLE`.
+ * ENTREGAS A LA CUENTA CORRIENTE DEL SOCIO (v2, 2-oct-2026, invariante 38).
+ * El saldo del socio (lo por entregar) lo arma `RepartoCuentaService` con
+ * la fuente única `reparto-cuenta.util`; aquí solo se registran, corrigen y
+ * dan de baja entregas y su comprobante. Una entrega que rebasa lo por
+ * entregar de MESES CERRADOS (`por_entregar_cerrado_usd`: el mes en curso
+ * no cuenta) es un ADELANTO legítimo: se CONFIRMA (409 `PAGO_EXCEDE_SALDO` ⇒
+ * `aceptar_exceso` con la MISMA llave), no se prohíbe. Toda escritura sella
+ * `updated_by` (la bitácora `reparto_bitacora` lo toma como actor). Sin la migración
+ * 20261002000001: lecturas `disponible:false`, escrituras 503
+ * `CUENTA_SOCIO_NO_DISPONIBLE`.
  */
 @Injectable()
 export class RepartoPagoService {
   private readonly logger = new Logger(RepartoPagoService.name);
 
-  /** Reloj inyectable (specs): «hoy» Cancún para la fecha del pago. */
-  ahora: () => Date = () => new Date();
-
   constructor(
     private readonly supabase: SupabaseService,
-    private readonly profitSharing: ProfitSharingService,
+    private readonly cuentas: RepartoCuentaService,
   ) {}
 
   private get sb() {
@@ -146,11 +148,7 @@ export class RepartoPagoService {
   }
 
   private get lector() {
-    return lectorPagosSocios(this.sb);
-  }
-
-  private async assertDisponible(): Promise<void> {
-    if (!(await this.lector.disponible())) throw errorPagosNoDisponible();
+    return this.cuentas.lector;
   }
 
   // =================================================================
@@ -158,222 +156,72 @@ export class RepartoPagoService {
   // =================================================================
 
   /**
-   * `GET /v1/profit-sharing/pagos?mes&aeronave_id`: renglones (avión ×
-   * socio) del mes con la utilidad calculada HOY, lo pagado y el estado;
-   * consolidado por socio y totales. SOCIO: solo sus renglones.
+   * `GET /v1/profit-sharing/pagos?desde&hasta&socio_id` (fechas de
+   * entrega). SOCIO: solo las suyas (403 si pide otro socio). `?mes=` o
+   * `?aeronave_id=` (el listado por mes/avión de la v1) ⇒ 410
+   * `PAGOS_POR_MES_RETIRADO`.
    */
-  async listar(
-    mes: string,
-    aeronaveId: string | undefined,
-    actor: ActorPagos,
-  ): Promise<PagosDelMes> {
-    if (!esMes(mes)) throw bad('MES_INVALIDO', MENSAJE_MES_INVALIDO);
-    const { desde, hasta } = rangoDeMes(mes);
-    const vacio: PagosDelMes = {
-      disponible: false,
-      mes,
-      desde,
-      hasta,
-      filas: [],
-      por_socio: [],
-      totales: { ...TOTALES_EN_CERO },
-    };
-    if (!(await this.lector.disponible())) return vacio;
-    const esSocio = actor.rol === Rol.SOCIO;
-    const [calculo, rows] = await Promise.all([
-      this.profitSharing.compute({ desde, hasta, aeronave_id: aeronaveId }),
-      this.lector.pagosDelMes(periodoDeMes(mes), {
-        aeronave_id: aeronaveId,
-        socio_id: esSocio ? actor.userId : undefined,
-      }),
-    ]);
-    if (rows === 'sin_tabla') return vacio;
-    const todas = await this.armarFilas(calculo.aviones, rows);
-    const filas = esSocio
-      ? todas.filter((f) => f.socio.id === actor.userId)
-      : todas;
-    const por_socio = resumenPorSocio(filas);
-    return {
-      disponible: true,
-      mes,
-      desde,
-      hasta,
-      filas,
-      por_socio,
-      totales: totalesPagos(por_socio),
-    };
-  }
-
-  /** Filas del util con nombres, firmas y aviones dados de baja resueltos. */
-  private async armarFilas(
-    aviones: ReadonlyArray<RepartoAvionInput>,
-    rows: ReadonlyArray<RepartoPagoRow>,
-  ): Promise<FilaPagoSocio[]> {
-    const enCalculo = new Set(aviones.map((a) => a.aeronave.id));
-    const sociosCalculo = new Set(
-      aviones.flatMap((a) =>
-        a.reparto.map((r) => `${a.aeronave.id}|${r.socio_id}`),
-      ),
-    );
-    // Socios con pagos que ya no están en el reparto: su nombre viaja en la
-    // MISMA lectura de usuarios que «entregó»/«registró» (una consulta).
-    const sociosExtra = rows
-      .filter((r) => !sociosCalculo.has(`${r.aeronave_id}|${r.socio_id}`))
-      .map((r) => r.socio_id);
-    const [{ pagos, nombres }, aeronavesExtra] = await Promise.all([
-      this.enriquecerConNombres(rows, sociosExtra),
-      this.aeronavesDe(
-        rows.map((r) => r.aeronave_id).filter((id) => !enCalculo.has(id)),
-      ),
-    ]);
-    return armarFilasPagos({
-      aviones,
-      pagos,
-      aeronavesExtra,
-      nombresSocios: nombres,
+  async listar(q: PagosQuery, actor: ActorPagos): Promise<ListaPagos> {
+    if (q.mes !== undefined || q.aeronave_id !== undefined) {
+      throw new GoneException({
+        message: MENSAJE_PAGOS_POR_MES_RETIRADO,
+        error: 'PAGOS_POR_MES_RETIRADO',
+      });
+    }
+    for (const f of [q.desde, q.hasta]) {
+      if (f !== undefined && !esFechaDia(f)) {
+        throw bad('RANGO_INVALIDO', MENSAJE_RANGO_FECHAS_INVALIDO);
+      }
+    }
+    if (q.desde && q.hasta && q.desde > q.hasta) {
+      throw bad('RANGO_INVALIDO', MENSAJE_RANGO_FECHAS_INVALIDO);
+    }
+    let socioId = q.socio_id;
+    if (actor.rol === Rol.SOCIO) {
+      if (socioId && socioId !== actor.userId) {
+        throw new ForbiddenException({
+          message: MENSAJE_SOCIO_SOLO_SU_CUENTA,
+          error: 'SOCIO_SOLO_SU_CUENTA',
+        });
+      }
+      socioId = actor.userId;
+    }
+    if (!(await this.lector.disponible())) {
+      return { disponible: false, pagos: [] };
+    }
+    const rows = await this.lector.entregasVivas({
+      socio_id: socioId,
+      desde: q.desde,
+      hasta: q.hasta,
     });
+    if (rows === SIN_MIGRACION) return { disponible: false, pagos: [] };
+    const pagos = await this.enriquecer(rows);
+    pagos.sort(
+      (a, b) =>
+        b.fecha_pago.localeCompare(a.fecha_pago) || compararCaptura(b, a),
+    );
+    return { disponible: true, pagos };
   }
 
-  /** Nombres (entregó / registró) y URL firmada de 8 h, en lote. */
+  /** Nombres, matrícula y URL firmada (8 h), en lote. */
   private async enriquecer(
     rows: ReadonlyArray<RepartoPagoRow>,
   ): Promise<PagoSocio[]> {
-    return (await this.enriquecerConNombres(rows, [])).pagos;
-  }
-
-  private async enriquecerConNombres(
-    rows: ReadonlyArray<RepartoPagoRow>,
-    idsExtra: ReadonlyArray<string>,
-  ): Promise<{ pagos: PagoSocio[]; nombres: Map<string, string> }> {
-    if (rows.length === 0) return { pagos: [], nombres: new Map() };
-    const [nombres, urls] = await Promise.all([
-      // Nunca lanza: usuario borrado o lectura fallida ⇒ nombre null.
-      fetchNombresUsuarios(this.sb, [
-        ...rows.flatMap((r) => [r.entregado_por, r.created_by]),
-        ...idsExtra,
-      ]),
-      this.firmarComprobantes(
-        rows.map((r) => r.comprobante_path).filter((p): p is string => !!p),
+    if (rows.length === 0) return [];
+    const [usuarios, aeronaves] = await Promise.all([
+      this.lector.usuarios(
+        rows.flatMap((r) => [r.entregado_por, r.created_by, r.updated_by]),
       ),
+      this.lector.aeronaves(),
     ]);
-    return { pagos: rows.map((r) => aPagoSocio(r, nombres, urls)), nombres };
-  }
-
-  /** Firma por lote (8 h). Nunca lanza: sin URL el panel pinta su aviso. */
-  private async firmarComprobantes(
-    paths: ReadonlyArray<string>,
-  ): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    const unicos = [...new Set(paths)];
-    if (unicos.length === 0) return out;
-    try {
-      const { data, error } = await this.sb.storage
-        .from(BUCKET_REPARTO_COMPROBANTES)
-        .createSignedUrls(unicos, SEGUNDOS_URL_MINIATURA);
-      if (error) {
-        this.logger.warn(
-          `No se pudieron firmar ${unicos.length} comprobante(s) de pagos a socios: ${error.message}`,
-        );
-        return out;
-      }
-      for (const it of data ?? []) {
-        if (it.path && it.signedUrl) out.set(it.path, it.signedUrl);
-      }
-    } catch (e) {
-      this.logger.warn(
-        `Falló la firma de comprobantes de pagos a socios: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    return out;
-  }
-
-  /** Aviones que el cálculo no trae (dados de baja). Best-effort. */
-  private async aeronavesDe(
-    ids: ReadonlyArray<string>,
-  ): Promise<Map<string, AeronaveRef>> {
-    const out = new Map<string, AeronaveRef>();
-    const unicos = [...new Set(ids)];
-    if (unicos.length === 0) return out;
-    try {
-      const { data, error } = await this.sb
-        .from('aeronave')
-        .select('id, matricula, modelo')
-        .in('id', unicos);
-      if (error) {
-        this.logger.warn(
-          `No se pudieron leer aviones de pagos: ${error.message}`,
-        );
-        return out;
-      }
-      const filas = (data ?? []) as Array<{
-        id: string;
-        matricula: string | null;
-        modelo: string | null;
-      }>;
-      for (const a of filas) {
-        out.set(a.id, {
-          id: a.id,
-          matricula: a.matricula ?? '',
-          modelo: a.modelo ?? '',
-        });
-      }
-    } catch (e) {
-      this.logger.warn(
-        `Falló la lectura de aviones de pagos: ${e instanceof Error ? e.message : String(e)}`,
-      );
-    }
-    return out;
-  }
-
-  /**
-   * El renglón (avión, socio, mes) ya recalculado tras una escritura.
-   * `null` cuando ya no hay renglón (socio fuera del reparto y sin pagos
-   * vivos).
-   */
-  private async filaDe(
-    aeronaveId: string,
-    socioId: string,
-    periodo: string,
-    aviones?: ReadonlyArray<RepartoAvionInput>,
-  ): Promise<FilaPagoSocio | null> {
-    let avionesMes = aviones;
-    if (!avionesMes) {
-      const { desde, hasta } = rangoDeMes(mesDeFechaPeriodo(periodo));
-      const calc = await this.profitSharing.compute({
-        desde,
-        hasta,
-        aeronave_id: aeronaveId,
-      });
-      avionesMes = calc.aviones;
-    }
-    const rows = await this.lector.pagosDelMes(periodo, {
-      aeronave_id: aeronaveId,
-      socio_id: socioId,
-    });
-    if (rows === 'sin_tabla') throw errorPagosNoDisponible();
-    const delAvion = avionesMes
-      .filter((a) => a.aeronave.id === aeronaveId)
-      .map((a) => ({
-        aeronave: a.aeronave,
-        reparto: a.reparto.filter((r) => r.socio_id === socioId),
-      }));
-    const filas = await this.armarFilas(delAvion, rows);
-    return (
-      filas.find(
-        (f) => f.aeronave.id === aeronaveId && f.socio.id === socioId,
-      ) ?? null
-    );
+    return this.cuentas.entregasDe(rows, { usuarios, aeronaves }, true);
   }
 
   // =================================================================
   // Helpers de escritura
   // =================================================================
 
-  private hoy(): string {
-    return hoyCancun(this.ahora());
-  }
-
-  /** Pago VIVO o 404; tabla ausente ⇒ 503. */
+  /** Entrega VIVA o 404; migración ausente ⇒ 503. */
   private async pagoVivo(id: string): Promise<RepartoPagoRow> {
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
@@ -382,9 +230,9 @@ export class RepartoPagoService {
       .is('deleted_at', null)
       .maybeSingle();
     if (error) {
-      if (esTablaInexistente(error)) {
+      if (sinMigracion(error)) {
         this.lector.marcarAusente();
-        throw errorPagosNoDisponible();
+        throw errorCuentaNoDisponible();
       }
       throw new Error(error.message);
     }
@@ -392,7 +240,7 @@ export class RepartoPagoService {
     return data;
   }
 
-  /** Pago (vivo o borrado) con esa llave de idempotencia, o null. */
+  /** Entrega (viva o borrada) con esa llave de idempotencia, o null. */
   private async pagoPorLlave(key: string): Promise<RepartoPagoRow | null> {
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
@@ -400,9 +248,9 @@ export class RepartoPagoService {
       .eq('client_request_id', key)
       .maybeSingle();
     if (error) {
-      if (esTablaInexistente(error)) {
+      if (sinMigracion(error)) {
         this.lector.marcarAusente();
-        throw errorPagosNoDisponible();
+        throw errorCuentaNoDisponible();
       }
       throw new Error(error.message);
     }
@@ -411,113 +259,86 @@ export class RepartoPagoService {
 
   /** `entregado_por_id` debe ser un usuario ACTIVO (400 si no). */
   private async assertUsuarioActivo(id: string): Promise<void> {
-    const { data, error } = await this.sb
-      .from('usuario')
-      .select('id, estado')
-      .eq('id', id)
-      .maybeSingle();
-    if (error) throw new Error(error.message);
-    const estado = (data as { estado?: unknown } | null)?.estado;
-    if (!data || String(estado) !== 'ACTIVO') {
+    const u = (await this.lector.usuarios([id])).get(id);
+    if (!u || String(u.estado) !== 'ACTIVO') {
       throw bad('ENTREGADO_POR_INVALIDO', MENSAJE_ENTREGADO_POR_INVALIDO, {
         entregado_por_id: id,
       });
     }
   }
 
-  /** El socio está en `aeronave_socio` del avión con vigencia que toca el mes. */
-  private async assertSocioDeAeronave(
-    aeronaveId: string,
-    socioId: string,
-    mes: string,
-  ): Promise<void> {
-    const { desde, hasta } = rangoDeMes(mes);
-    const { data, error } = await this.sb
-      .from('aeronave_socio')
-      .select('aeronave_id, socio_id, vigente_desde, vigente_hasta')
-      .eq('aeronave_id', aeronaveId)
-      .eq('socio_id', socioId);
-    if (error) throw new Error(error.message);
-    const filas = (data ?? []) as Array<{
-      vigente_desde: string;
-      vigente_hasta: string | null;
-    }>;
-    // Misma regla de vigencia que `compute` (traslape con el mes).
-    const vigente = filas.some(
-      (s) =>
-        s.vigente_desde <= hasta &&
-        (s.vigente_hasta == null || s.vigente_hasta >= desde),
-    );
-    if (!vigente) {
-      throw bad(
-        'SOCIO_NO_ES_DE_LA_AERONAVE',
-        MENSAJE_SOCIO_NO_ES_DE_LA_AERONAVE,
-        { aeronave_id: aeronaveId, socio_id: socioId, mes },
-      );
+  /** «Corresponde a» mes: AAAA-MM y no posterior al mes en curso. */
+  private assertMes(mes: string): void {
+    if (!esMes(mes)) throw bad('MES_INVALIDO', MENSAJE_MES_INVALIDO);
+    if (mes > this.cuentas.mesActual()) {
+      throw bad('MES_FUTURO', MENSAJE_MES_FUTURO, { mes });
     }
   }
 
-  /** Utilidad del socio en el mes (compute) + 409 si no hay qué pagar. */
-  private async utilidadDelMes(
-    aeronaveId: string,
+  /**
+   * Contexto del socio para escribir. En el ALTA (`exigirSocio`) debe estar
+   * en `aeronave_socio` (400 `SOCIO_INVALIDO`); en la corrección no (la
+   * entrega ya existe aunque el socio haya salido del avión). Si se pide un
+   * avión («corresponde a»), debe serlo de ESE avión (400
+   * `SOCIO_NO_ES_DE_LA_AERONAVE`). Las validaciones van ANTES de calcular
+   * las utilidades (el universo se lee primero).
+   */
+  private async contexto(
     socioId: string,
-    mes: string,
-  ): Promise<{ utilidad: number; aviones: RepartoAvionInput[] }> {
-    const { desde, hasta } = rangoDeMes(mes);
-    const calc = await this.profitSharing.compute({
-      desde,
-      hasta,
-      aeronave_id: aeronaveId,
+    v: { exigirSocio: boolean; aeronaveId?: string | null },
+  ): Promise<ContextoSocio> {
+    const ctx = await this.cuentas.contextoSocio(socioId, {
+      // El candado del adelanto decide con utilidades al día (sin la memoria
+      // de 10 min de las lecturas).
+      fresco: true,
+      validar: (base, aeronaves) => {
+        if (v.exigirSocio && !base.en_aeronave_socio) {
+          throw bad('SOCIO_INVALIDO', MENSAJE_SOCIO_INVALIDO, {
+            socio_id: socioId,
+          });
+        }
+        if (v.aeronaveId && !aeronaves.has(v.aeronaveId)) {
+          throw bad(
+            'SOCIO_NO_ES_DE_LA_AERONAVE',
+            MENSAJE_SOCIO_NO_ES_DE_LA_AERONAVE,
+            { socio_id: socioId, aeronave_id: v.aeronaveId },
+          );
+        }
+      },
     });
-    const u = utilidadDeSocioEnAvion(calc.aviones, aeronaveId, socioId);
-    return {
-      utilidad: u.avion_activo ? u.utilidad_usd : 0,
-      aviones: calc.aviones,
-    };
+    if (!ctx) {
+      throw bad('SOCIO_INVALIDO', MENSAJE_SOCIO_INVALIDO, {
+        socio_id: socioId,
+      });
+    }
+    return ctx;
   }
 
-  private sinUtilidad(
-    mes: string,
-    aviones: ReadonlyArray<RepartoAvionInput>,
-    aeronaveId: string,
-    utilidad: number,
-  ): ConflictException {
-    const activo = aviones.some((a) => a.aeronave.id === aeronaveId);
-    return new ConflictException({
-      message: mensajeSinUtilidad(mes, activo),
-      error: 'SIN_UTILIDAD_QUE_PAGAR',
-      details: { utilidad_usd: utilidad, avion_activo: activo, mes },
+  /**
+   * La cuenta YA recalculada tras escribir (relee entregas; reutiliza las
+   * utilidades de la misma petición: el mes en curso no se recalcula).
+   */
+  private async despues(
+    socioId: string,
+    utilidades: ReadonlyArray<UtilidadMesSocios>,
+  ): Promise<ContextoSocio> {
+    const ctx = await this.cuentas.contextoSocio(socioId, {
+      utilidadesPrevias: utilidades,
     });
+    if (!ctx) {
+      throw bad('SOCIO_INVALIDO', MENSAJE_SOCIO_INVALIDO, {
+        socio_id: socioId,
+      });
+    }
+    return ctx;
   }
 
-  private excede(d: {
-    utilidad_usd: number;
-    pagado_usd: number;
-    monto_usd: number;
-    exceso_usd: number;
-  }): ConflictException {
+  private excede(d: DetalleExceso): ConflictException {
     return new ConflictException({
-      message: mensajeExcedeUtilidad(d),
-      error: 'PAGO_EXCEDE_UTILIDAD',
+      message: mensajeExcedeSaldo(d),
+      error: 'PAGO_EXCEDE_SALDO',
       details: d,
     });
-  }
-
-  /** Σ monto_usd de los pagos VIVOS del renglón, sin `excluirId`. */
-  private async pagadoDe(
-    aeronaveId: string,
-    socioId: string,
-    periodo: string,
-    excluirId?: string,
-  ): Promise<number> {
-    const rows = await this.lector.pagosDelMes(periodo, {
-      aeronave_id: aeronaveId,
-      socio_id: socioId,
-    });
-    if (rows === 'sin_tabla') throw errorPagosNoDisponible();
-    // MISMA suma que el renglón (fuente única): el 409 y la fila no pueden
-    // decir números distintos.
-    return sumaMontoUsd(rows.filter((r) => r.id !== excluirId));
   }
 
   /** Error de BD de un insert/update ⇒ excepción legible (nunca 500 por dato). */
@@ -525,34 +346,43 @@ export class RepartoPagoService {
     code?: string | null;
     message?: string | null;
   }): Error {
-    if (esTablaInexistente(error)) {
+    if (sinMigracion(error)) {
       this.lector.marcarAusente();
-      return errorPagosNoDisponible();
+      return errorCuentaNoDisponible();
     }
     if (error.code === '23514') {
       return bad(
         'PAGO_INVALIDO',
-        'Algún dato del pago no es válido (monto, moneda, T.C., método o largo de un texto).',
+        'Algún dato de la entrega no es válido (monto, moneda, T.C., método, mes o largo de un texto).',
         { tecnico: error.message },
       );
     }
     if (error.code === '22003') {
-      // numeric fuera de rango (monto o T.C. que no caben en la columna):
-      // el DTO y la banda del T.C. ya lo atajan; esto es el cinturón.
+      // numeric fuera de rango: el DTO y la banda del T.C. ya lo atajan;
+      // esto es el cinturón.
       return bad(
         'PAGO_INVALIDO',
-        'Algún número del pago es demasiado grande para guardarse (monto o tipo de cambio): revisa la captura.',
+        'Algún número de la entrega es demasiado grande para guardarse (monto o tipo de cambio): revisa la captura.',
         { tecnico: error.message },
       );
     }
     if (error.code === '23503') {
       return bad(
         'PAGO_REFERENCIA_INVALIDA',
-        'El avión, el socio o quien entregó el pago ya no existe.',
+        'El socio, el avión o quien entregó ya no existe.',
         { tecnico: error.message },
       );
     }
-    return new Error(error.message ?? 'Error al guardar el pago');
+    return new Error(error.message ?? 'Error al guardar la entrega');
+  }
+
+  /** La entrega recién escrita, desde el contexto ya releído (con URL). */
+  private async pagoDe(ctx: ContextoSocio, id: string): Promise<PagoSocio> {
+    const p = ctx.pagos.find((x) => x.id === id);
+    if (!p) throw pagoNoExiste(id);
+    if (!p.comprobante_path) return p;
+    const urls = await this.lector.firmarComprobantes([p.comprobante_path]);
+    return { ...p, comprobante_url: urls.get(p.comprobante_path) ?? null };
   }
 
   // =================================================================
@@ -562,74 +392,66 @@ export class RepartoPagoService {
   /**
    * `POST /v1/profit-sharing/pagos`. Idempotencia PRIMERO (el reintento de
    * un alta que sí quedó no debe rebotar en ningún candado); luego forma,
-   * quién entregó, socio del avión, utilidad del mes (compute) y exceso.
+   * quién entregó, socio (y avión), saldo y adelanto.
    */
   async crear(
     dto: CrearPagoSocioDto,
     actor: ActorPagos,
-  ): Promise<{
-    pago: PagoSocio;
-    fila: FilaPagoSocio | null;
-    idempotente?: true;
-  }> {
-    await this.assertDisponible();
+  ): Promise<RespuestaPago> {
+    await this.cuentas.assertDisponible();
     if (dto.client_request_id) {
       const ya = await this.pagoPorLlave(dto.client_request_id);
       if (ya) return this.respuestaIdempotente(ya, dto);
     }
-    if (!esMes(dto.mes)) throw bad('MES_INVALIDO', MENSAJE_MES_INVALIDO);
     const dinero = validarDineroPago(dto);
     if (!dinero.ok) throw bad(dinero.codigo, dinero.mensaje);
-    const fecha = validarFechaPago(dto.fecha_pago, this.hoy());
+    const fecha = validarFechaPago(dto.fecha_pago, this.cuentas.hoy());
     if (!fecha.ok) throw bad(fecha.codigo, fecha.mensaje);
+    const mes = dto.mes ?? null;
+    if (mes != null) this.assertMes(mes);
     const entregadoPor = dto.entregado_por_id ?? actor.userId;
-    if (dto.entregado_por_id)
+    if (dto.entregado_por_id) {
       await this.assertUsuarioActivo(dto.entregado_por_id);
-    await this.assertSocioDeAeronave(dto.aeronave_id, dto.socio_id, dto.mes);
-
-    const periodo = periodoDeMes(dto.mes);
-    const { utilidad, aviones } = await this.utilidadDelMes(
-      dto.aeronave_id,
-      dto.socio_id,
-      dto.mes,
-    );
-    // No se paga lo que no hay — ni con `aceptar_exceso`.
-    if (utilidad <= 0) {
-      const replay = await this.replaySiYaQuedo(dto);
-      if (replay) return replay;
-      throw this.sinUtilidad(dto.mes, aviones, dto.aeronave_id, utilidad);
     }
-    const pagado = await this.pagadoDe(dto.aeronave_id, dto.socio_id, periodo);
-    const ex = excedeUtilidad({
-      utilidad_usd: utilidad,
-      pagado_usd: pagado,
+
+    const ctx = await this.contexto(dto.socio_id, {
+      exigirSocio: true,
+      aeronaveId: dto.aeronave_id,
+    });
+    // Meses CERRADOS: el mes en curso todavía se mueve (ver invariante 38).
+    const porEntregar = ctx.fila.por_entregar_cerrado_usd;
+    const enCurso = ctx.fila.mes_en_curso_usd;
+    const ex = excedeSaldo({
+      por_entregar_usd: porEntregar,
       monto_usd: dinero.monto_usd,
     });
     if (ex.excede && dto.aceptar_exceso !== true) {
       // Doble envío con la MISMA llave: la 1.ª pudo insertar entre la
-      // búsqueda de la llave (arriba) y `pagadoDe`, que ya la cuenta como
-      // «pagado». Es un replay, no un exceso (revisión adversaria 1-oct-2026).
+      // búsqueda de la llave (arriba) y la lectura del saldo, que ya la
+      // cuenta como entregada. Es un replay, no un adelanto.
       const replay = await this.replaySiYaQuedo(dto);
       if (replay) return replay;
       throw this.excede({
-        utilidad_usd: utilidad,
-        pagado_usd: pagado,
+        por_entregar_usd: porEntregar,
+        mes_en_curso_usd: enCurso,
         monto_usd: dinero.monto_usd,
         exceso_usd: ex.exceso_usd,
+        saldo_despues_usd: ex.saldo_despues_usd,
       });
     }
 
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
       .insert({
-        aeronave_id: dto.aeronave_id,
         socio_id: dto.socio_id,
-        periodo,
+        aeronave_id: dto.aeronave_id ?? null,
+        periodo: mes ? periodoDeMes(mes) : null,
         monto: dinero.monto,
         moneda: dinero.moneda,
         tc_usd_mxn: dinero.tc_usd_mxn,
         monto_usd: dinero.monto_usd,
-        utilidad_snapshot_usd: utilidad,
+        utilidad_snapshot_usd: null,
+        saldo_snapshot_usd: porEntregar,
         fecha_pago: fecha.fecha,
         metodo: dto.metodo,
         referencia: textoOpcional(dto.referencia),
@@ -650,76 +472,67 @@ export class RepartoPagoService {
       }
       throw this.errorDeEscritura(error);
     }
-    const row = data;
+    const row: RepartoPagoRow = data;
     if (dto.aceptar_exceso !== true) {
-      const perdio = await this.perdioCarreraDeAlta(row, utilidad, actor);
+      // Saldo inicial + generado en meses cerrados (todo menos entregas).
+      const disponible =
+        Math.round((porEntregar + ctx.fila.entregado_usd) * 100) / 100;
+      const perdio = await this.perdioCarreraDeAlta(
+        row,
+        disponible,
+        enCurso,
+        actor,
+      );
       if (perdio) throw this.excede(perdio);
     }
     this.logger.log(
-      `Pago a socio ${row.id}: avión ${row.aeronave_id}, socio ${row.socio_id}, ${dto.mes}, ${row.monto} ${row.moneda} (${row.monto_usd} USD) por ${actor.userId}${ex.excede ? ' — EXCEDE la utilidad (aceptado)' : ''}`,
+      `Entrega a socio ${row.id}: socio ${row.socio_id}, ${row.monto} ${row.moneda} (${row.monto_usd} USD), por entregar antes ${porEntregar} USD (meses cerrados; mes en curso ${enCurso} USD), por ${actor.userId}${ex.excede ? ' — ADELANTO (aceptado)' : ''}`,
     );
-    const [pago] = await this.enriquecer([row]);
-    const fila = await this.filaDe(
-      dto.aeronave_id,
-      dto.socio_id,
-      periodo,
-      aviones,
-    );
-    return { pago, fila };
+    const despues = await this.despues(dto.socio_id, ctx.utilidades);
+    return { pago: await this.pagoDe(despues, row.id), cuenta: despues.fila };
   }
 
   /**
-   * Antes de responder un 409 de dinero: si la llave del alta YA existe, la
-   * primera petición ganó la carrera ⇒ replay (200 idempotente). Sin llave,
-   * `null`.
+   * Antes de responder el 409 del saldo: si la llave del alta YA existe, la
+   * primera petición ganó la carrera ⇒ replay (200 idempotente).
    */
-  private async replaySiYaQuedo(dto: CrearPagoSocioDto): Promise<{
-    pago: PagoSocio;
-    fila: FilaPagoSocio | null;
-    idempotente: true;
-  } | null> {
+  private async replaySiYaQuedo(
+    dto: CrearPagoSocioDto,
+  ): Promise<RespuestaPago | null> {
     if (!dto.client_request_id) return null;
     const ya = await this.pagoPorLlave(dto.client_request_id);
     return ya ? this.respuestaIdempotente(ya, dto) : null;
   }
 
   /**
-   * CARRERA DE ALTAS (revisión adversaria 1-oct-2026): el candado del exceso
-   * es «leer y luego insertar», así que dos altas del mismo renglón pueden
-   * pasarlo a la vez y juntas rebasar la utilidad sin que nadie mandara
-   * `aceptar_exceso`. Ya insertada ESTA fila, se relee el renglón y se
-   * decide con el orden de CAPTURA (`excedeEnOrdenDeCaptura`, determinista
-   * para las dos peticiones): si ESTA es la que sobra, se da de baja (soft
-   * delete con `MOTIVO_BAJA_CARRERA_ALTA`) y se LIBERA su llave para que el
-   * operador confirme con la MISMA llave + `aceptar_exceso` (sin liberarla
-   * el reintento chocaría con `CLIENT_REQUEST_ID_EN_USO`). Devuelve los
-   * `details` del 409, o `null` si la fila se queda.
+   * CARRERA DE ALTAS: el candado del saldo es «leer y luego insertar»; dos
+   * entregas al mismo socio pueden pasarlo a la vez y juntas rebasar lo por
+   * entregar sin que nadie confirmara el adelanto. Ya insertada ESTA fila,
+   * se releen las entregas vivas del socio y se decide con el orden de
+   * CAPTURA (determinista para las dos peticiones): si ESTA es la que sobra,
+   * se da de baja (`MOTIVO_BAJA_CARRERA_ALTA`) y se LIBERA su llave para que
+   * el operador confirme el adelanto con la MISMA llave + `aceptar_exceso`.
    * Best-effort: si la relectura o la baja fallan, la fila SE QUEDA (201) y
-   * el sobrepago lo avisa el pre-cierre (`pagos_socios_sobrepagados`).
-   * Ventana residual: si la otra alta confirma DESPUÉS de esta relectura,
-   * las dos se quedan (milisegundos; también lo avisa el pre-cierre).
+   * el pre-cierre la avisa como adelanto (`socios_adelantados`).
    */
   private async perdioCarreraDeAlta(
     row: RepartoPagoRow,
-    utilidad: number,
+    disponibleUsd: number,
+    mesEnCursoUsd: number,
     actor: ActorPagos,
-  ): Promise<{
-    utilidad_usd: number;
-    pagado_usd: number;
-    monto_usd: number;
-    exceso_usd: number;
-  } | null> {
-    let r: ReturnType<typeof excedeEnOrdenDeCaptura>;
+  ): Promise<DetalleExceso | null> {
+    let r: ReturnType<typeof excedeSaldoEnOrdenDeCaptura>;
     try {
-      const vivos = await this.lector.pagosDelMes(row.periodo, {
-        aeronave_id: row.aeronave_id,
-        socio_id: row.socio_id,
+      const vivos = await this.lector.entregasVivas({ socio_id: row.socio_id });
+      if (vivos === SIN_MIGRACION) return null;
+      r = excedeSaldoEnOrdenDeCaptura({
+        disponible_usd: disponibleUsd,
+        vivos,
+        nuevo: row,
       });
-      if (vivos === 'sin_tabla') return null;
-      r = excedeEnOrdenDeCaptura({ utilidad_usd: utilidad, vivos, nuevo: row });
     } catch (e) {
       this.logger.warn(
-        `Pago a socio ${row.id}: no se pudo revisar la carrera de altas (se conserva): ${e instanceof Error ? e.message : String(e)}`,
+        `Entrega a socio ${row.id}: no se pudo revisar la carrera de altas (se conserva): ${e instanceof Error ? e.message : String(e)}`,
       );
       return null;
     }
@@ -727,10 +540,11 @@ export class RepartoPagoService {
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
       .update({
-        deleted_at: this.ahora().toISOString(),
+        deleted_at: this.cuentas.ahora().toISOString(),
         deleted_by: actor.userId,
         motivo_baja: MOTIVO_BAJA_CARRERA_ALTA,
         client_request_id: null,
+        updated_by: actor.userId,
       })
       .eq('id', row.id)
       .is('deleted_at', null)
@@ -738,60 +552,60 @@ export class RepartoPagoService {
       .maybeSingle();
     if (error || !data) {
       this.logger.error(
-        `Pago a socio ${row.id}: perdió la carrera de altas (rebasa la utilidad por ${r.exceso_usd} USD) y NO se pudo dar de baja: ${error?.message ?? 'la fila ya no estaba viva'}. Queda registrado; el pre-cierre lo avisa como sobrepago.`,
+        `Entrega a socio ${row.id}: perdió la carrera de altas (rebasa lo por entregar por ${r.exceso_usd} USD) y NO se pudo dar de baja: ${error?.message ?? 'la fila ya no estaba viva'}. Queda registrada; el pre-cierre la avisa como adelanto.`,
       );
       return null;
     }
     this.logger.warn(
-      `Pago a socio ${row.id} dado de baja por carrera de altas: ${row.monto_usd} USD sobre ${r.pagado_antes_usd} ya pagados rebasan la utilidad de ${utilidad} USD (avión ${row.aeronave_id}, socio ${row.socio_id}, ${row.periodo}).`,
+      `Entrega a socio ${row.id} dada de baja por carrera de altas: ${row.monto_usd} USD sobre ${r.por_entregar_antes_usd} USD por entregar (socio ${row.socio_id}).`,
     );
+    const monto = Number(row.monto_usd);
     return {
-      utilidad_usd: utilidad,
-      pagado_usd: r.pagado_antes_usd,
-      monto_usd: Number(row.monto_usd),
+      por_entregar_usd: r.por_entregar_antes_usd,
+      mes_en_curso_usd: mesEnCursoUsd,
+      monto_usd: monto,
       exceso_usd: r.exceso_usd,
+      saldo_despues_usd:
+        Math.round((r.por_entregar_antes_usd - monto) * 100) / 100,
     };
   }
 
-  /** Replay de la llave: solo si es EL MISMO pago (mismo renglón y vivo). */
+  /** Replay de la llave: solo si es LA MISMA entrega (mismo socio y viva). */
   private async respuestaIdempotente(
     ya: RepartoPagoRow,
     dto: CrearPagoSocioDto,
-  ): Promise<{
-    pago: PagoSocio;
-    fila: FilaPagoSocio | null;
-    idempotente: true;
-  }> {
-    const mismo =
-      ya.aeronave_id === dto.aeronave_id &&
-      ya.socio_id === dto.socio_id &&
-      esMes(dto.mes) &&
-      ya.periodo === periodoDeMes(dto.mes) &&
-      ya.deleted_at == null;
-    if (!mismo) {
+  ): Promise<RespuestaPago> {
+    if (ya.socio_id !== dto.socio_id || ya.deleted_at != null) {
       throw new ConflictException({
         message: MENSAJE_CLIENT_REQUEST_ID_EN_USO_PAGO,
         error: 'CLIENT_REQUEST_ID_EN_USO',
         details: { client_request_id: dto.client_request_id },
       });
     }
-    const [pago] = await this.enriquecer([ya]);
-    const fila = await this.filaDe(ya.aeronave_id, ya.socio_id, ya.periodo);
-    return { pago, fila, idempotente: true };
+    const ctx = await this.cuentas.contextoSocio(ya.socio_id);
+    if (!ctx) throw pagoNoExiste(ya.id);
+    return {
+      pago: await this.pagoDe(ctx, ya.id),
+      cuenta: ctx.fila,
+      idempotente: true,
+    };
   }
 
   /**
    * `PATCH /v1/profit-sharing/pagos/:id`. Re-valida el DINERO sobre el
-   * estado FUSIONADO; si el monto en dólares SUBE se vuelven a correr
-   * SIN_UTILIDAD y el exceso (bajar nunca empeora nada). Corregir el dinero
-   * renueva la foto de la utilidad. CAS por `updated_at`.
+   * estado FUSIONADO; si el monto en dólares SUBE se vuelve a revisar el
+   * saldo de MESES CERRADOS (sin contar ESTA entrega) ⇒ 409
+   * `PAGO_EXCEDE_SALDO` salvo `aceptar_exceso` (bajar nunca empeora nada).
+   * Corregir el dinero renueva `saldo_snapshot_usd`. «Corresponde a»
+   * (avión/mes) se puede corregir. CAS por `updated_at`; sella `updated_by`
+   * (el valor anterior queda en `reparto_bitacora`, por trigger).
    */
   async actualizar(
     id: string,
     dto: ActualizarPagoSocioDto,
     actor: ActorPagos,
-  ): Promise<{ pago: PagoSocio; fila: FilaPagoSocio | null }> {
-    await this.assertDisponible();
+  ): Promise<RespuestaPago> {
+    await this.cuentas.assertDisponible();
     const campos = (
       [
         'monto',
@@ -804,13 +618,14 @@ export class RepartoPagoService {
         'recibido_por',
         'factura_folio',
         'notas',
+        'aeronave_id',
+        'mes',
       ] as const
     ).filter((k) => dto[k] !== undefined);
     if (campos.length === 0) {
       throw bad('PAGO_SIN_CAMBIOS', MENSAJE_PAGO_SIN_CAMBIOS);
     }
     const actual = await this.pagoVivo(id);
-    const mes = mesDeFechaPeriodo(actual.periodo);
 
     const moneda = dto.moneda ?? actual.moneda;
     let tc: unknown;
@@ -826,51 +641,46 @@ export class RepartoPagoService {
     });
     if (!dinero.ok) throw bad(dinero.codigo, dinero.mensaje);
     if (dto.fecha_pago !== undefined) {
-      const f = validarFechaPago(dto.fecha_pago, this.hoy());
+      const f = validarFechaPago(dto.fecha_pago, this.cuentas.hoy());
       if (!f.ok) throw bad(f.codigo, f.mensaje);
     }
+    if (dto.mes != null) this.assertMes(dto.mes);
     if (dto.entregado_por_id !== undefined) {
       await this.assertUsuarioActivo(dto.entregado_por_id);
     }
 
     const tcActual =
       actual.tc_usd_mxn == null ? null : Number(actual.tc_usd_mxn);
+    const montoUsdActual = Number(actual.monto_usd);
     const cambiaDinero =
       dinero.monto !== Number(actual.monto) ||
       dinero.moneda !== actual.moneda ||
       dinero.tc_usd_mxn !== tcActual ||
-      Math.round(dinero.monto_usd * 100) !==
-        Math.round(Number(actual.monto_usd) * 100);
+      Math.round(dinero.monto_usd * 100) !== Math.round(montoUsdActual * 100);
     const sube =
-      Math.round(dinero.monto_usd * 100) >
-      Math.round(Number(actual.monto_usd) * 100);
+      Math.round(dinero.monto_usd * 100) > Math.round(montoUsdActual * 100);
 
-    const { utilidad, aviones } = await this.utilidadDelMes(
-      actual.aeronave_id,
-      actual.socio_id,
-      mes,
-    );
-    if (sube) {
-      if (utilidad <= 0) {
-        throw this.sinUtilidad(mes, aviones, actual.aeronave_id, utilidad);
-      }
-      const otros = await this.pagadoDe(
-        actual.aeronave_id,
-        actual.socio_id,
-        actual.periodo,
-        actual.id,
-      );
-      const ex = excedeUtilidad({
-        utilidad_usd: utilidad,
-        pagado_usd: otros,
+    const ctx = await this.contexto(actual.socio_id, {
+      exigirSocio: false,
+      aeronaveId: dto.aeronave_id,
+    });
+    // Lo por entregar de meses cerrados SIN esta entrega (la cuenta ya la
+    // descontó).
+    const sinEsta =
+      Math.round((ctx.fila.por_entregar_cerrado_usd + montoUsdActual) * 100) /
+      100;
+    if (sube && dto.aceptar_exceso !== true) {
+      const ex = excedeSaldo({
+        por_entregar_usd: sinEsta,
         monto_usd: dinero.monto_usd,
       });
-      if (ex.excede && dto.aceptar_exceso !== true) {
+      if (ex.excede) {
         throw this.excede({
-          utilidad_usd: utilidad,
-          pagado_usd: otros,
+          por_entregar_usd: sinEsta,
+          mes_en_curso_usd: ctx.fila.mes_en_curso_usd,
           monto_usd: dinero.monto_usd,
           exceso_usd: ex.exceso_usd,
+          saldo_despues_usd: ex.saldo_despues_usd,
         });
       }
     }
@@ -881,7 +691,7 @@ export class RepartoPagoService {
       patch.moneda = dinero.moneda;
       patch.tc_usd_mxn = dinero.tc_usd_mxn;
       patch.monto_usd = dinero.monto_usd;
-      patch.utilidad_snapshot_usd = utilidad;
+      patch.saldo_snapshot_usd = sinEsta;
     }
     const comparar = (col: keyof RepartoPagoRow, nuevo: unknown) => {
       if (nuevo !== (actual[col] ?? null)) patch[col] = nuevo;
@@ -901,12 +711,19 @@ export class RepartoPagoService {
       comparar('factura_folio', textoOpcional(dto.factura_folio));
     }
     if (dto.notas !== undefined) comparar('notas', textoOpcional(dto.notas));
+    if (dto.aeronave_id !== undefined) {
+      comparar('aeronave_id', dto.aeronave_id ?? null);
+    }
+    if (dto.mes !== undefined) {
+      comparar('periodo', dto.mes ? periodoDeMes(dto.mes) : null);
+    }
 
-    let row = actual;
     if (Object.keys(patch).length > 0) {
       const { data, error } = await this.sb
         .from(TABLA_REPARTO_PAGO)
-        .update(patch)
+        // Quién corrigió (actor de la bitácora; el antes/después lo guarda
+        // el trigger `trg_reparto_pago_bitacora`).
+        .update({ ...patch, updated_by: actor.userId })
         .eq('id', id)
         .is('deleted_at', null)
         // CAS: el parche se calculó sobre ESTA versión.
@@ -915,38 +732,31 @@ export class RepartoPagoService {
         .maybeSingle();
       if (error) throw this.errorDeEscritura(error);
       if (!data) {
-        await this.pagoVivo(id); // 404 si lo borraron
+        await this.pagoVivo(id); // 404 si la borraron
         throw new ConflictException({
           message: MENSAJE_PAGO_CAMBIO_CONCURRENTE,
           error: 'PAGO_CAMBIO_CONCURRENTE',
           details: { pago_id: id },
         });
       }
-      row = data;
       this.logger.log(
-        `Pago a socio ${id} corregido por ${actor.userId}: ${Object.keys(patch).join(', ')}`,
+        `Entrega a socio ${id} corregida por ${actor.userId}: ${Object.keys(patch).join(', ')}`,
       );
     }
-    const [pago] = await this.enriquecer([row]);
-    const fila = await this.filaDe(
-      row.aeronave_id,
-      row.socio_id,
-      row.periodo,
-      aviones,
-    );
-    return { pago, fila };
+    const despues = await this.despues(actual.socio_id, ctx.utilidades);
+    return { pago: await this.pagoDe(despues, id), cuenta: despues.fila };
   }
 
   /**
    * `DELETE /v1/profit-sharing/pagos/:id` — SOFT delete con motivo (5–300).
-   * El panel CONFIRMA antes (regla del cliente). Borrado ⇒ 404.
+   * El panel CONFIRMA antes (regla del cliente). Borrada ⇒ 404.
    */
   async eliminar(
     id: string,
     motivo: string,
     actor: ActorPagos,
-  ): Promise<{ deleted: true; fila: FilaPagoSocio | null }> {
-    await this.assertDisponible();
+  ): Promise<{ deleted: true; cuenta: FilaCuentaSocio }> {
+    await this.cuentas.assertDisponible();
     const m = String(motivo ?? '').trim();
     if (m.length < MOTIVO_BAJA_PAGO_MIN || m.length > MOTIVO_BAJA_PAGO_MAX) {
       throw bad('MOTIVO_INVALIDO', MENSAJE_MOTIVO_BAJA_PAGO);
@@ -955,9 +765,10 @@ export class RepartoPagoService {
     const { data, error } = await this.sb
       .from(TABLA_REPARTO_PAGO)
       .update({
-        deleted_at: this.ahora().toISOString(),
+        deleted_at: this.cuentas.ahora().toISOString(),
         deleted_by: actor.userId,
         motivo_baja: m,
+        updated_by: actor.userId,
       })
       .eq('id', id)
       .is('deleted_at', null)
@@ -966,29 +777,25 @@ export class RepartoPagoService {
     if (error) throw this.errorDeEscritura(error);
     if (!data) throw pagoNoExiste(id);
     this.logger.log(
-      `Pago a socio ${id} (${actual.monto} ${actual.moneda}) eliminado por ${actor.userId}: ${m}`,
+      `Entrega a socio ${id} (${actual.monto} ${actual.moneda}) eliminada por ${actor.userId}: ${m}`,
     );
-    const fila = await this.filaDe(
-      actual.aeronave_id,
-      actual.socio_id,
-      actual.periodo,
-    );
-    return { deleted: true, fila };
+    const ctx = await this.cuentas.contextoSocio(actual.socio_id);
+    if (!ctx) throw pagoNoExiste(id);
+    return { deleted: true, cuenta: ctx.fila };
   }
 
   /**
    * `POST /v1/profit-sharing/pagos/:id/comprobante`: foto o PDF ≤ 10 MB.
-   * Sube a `reparto-comprobantes/<avión>/<YYYY-MM>/<pago>/<uuid>.<ext>` y
-   * guarda el path con CAS sobre el anterior; el ANTERIOR se conserva en el
-   * bucket (patrón de facturas emitidas). Si guardar falla, el archivo
-   * recién subido se retira.
+   * Sube a `reparto-comprobantes/<socio>/<entrega>/<uuid>.<ext>` y guarda el
+   * path con CAS sobre el anterior; el ANTERIOR se conserva en el bucket.
+   * Si guardar falla, el archivo recién subido se retira.
    */
   async subirComprobante(
     id: string,
     archivo: ArchivoComprobantePago,
     actor: ActorPagos,
   ): Promise<{ pago: PagoSocio }> {
-    await this.assertDisponible();
+    await this.cuentas.assertDisponible();
     const v = validarComprobanteCobro({
       nombre: archivo.nombre,
       mime: archivo.mime,
@@ -1010,8 +817,7 @@ export class RepartoPagoService {
     const actual = await this.pagoVivo(id);
     const anterior = actual.comprobante_path ?? null;
     const path = pathComprobantePago(
-      actual.aeronave_id,
-      mesDeFechaPeriodo(actual.periodo),
+      actual.socio_id,
       id,
       randomUUID(),
       v.extension,
@@ -1036,7 +842,7 @@ export class RepartoPagoService {
     };
     let upd = this.sb
       .from(TABLA_REPARTO_PAGO)
-      .update({ comprobante_path: path })
+      .update({ comprobante_path: path, updated_by: actor.userId })
       .eq('id', id)
       .is('deleted_at', null);
     upd = anterior
@@ -1049,7 +855,7 @@ export class RepartoPagoService {
     }
     if (!data) {
       await retirarNuevo();
-      await this.pagoVivo(id); // 404 si lo borraron
+      await this.pagoVivo(id); // 404 si la borraron
       throw new ConflictException({
         message: MENSAJE_COMPROBANTE_PAGO_CAMBIO,
         error: 'COMPROBANTE_CAMBIO',
@@ -1057,7 +863,7 @@ export class RepartoPagoService {
       });
     }
     this.logger.log(
-      `Comprobante del pago a socio ${id} por ${actor.userId}: ${anterior ?? '(sin comprobante)'} → ${path}${anterior ? ' — el anterior se CONSERVA en el bucket' : ''}`,
+      `Comprobante de la entrega a socio ${id} por ${actor.userId}: ${anterior ?? '(sin comprobante)'} → ${path}${anterior ? ' — el anterior se CONSERVA en el bucket' : ''}`,
     );
     const [pago] = await this.enriquecer([data]);
     return { pago };

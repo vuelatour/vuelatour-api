@@ -44,22 +44,32 @@ import {
   type SeguimientoPrecierreRow,
 } from '../flights/vuelo-seguimiento.util';
 import { esTablaInexistente } from '../inventory/eliminar-movimiento.util';
-import { lectorPagosSocios } from './reparto-pago.lector';
+import { SIN_MIGRACION, lectorCuentaSocios } from './reparto-cuenta.lector';
 import {
-  CLAVE_PRECIERRE_PAGOS_SOCIOS,
-  CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS,
-  DETALLE_PRECIERRE_PAGOS_LECTURA_FALLIDA,
-  DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE,
+  CLAVE_PRECIERRE_SOCIOS_ADELANTADOS,
+  CLAVE_PRECIERRE_SOCIOS_POR_ENTREGAR,
+  DETALLE_PRECIERRE_CUENTAS_LECTURA_FALLIDA,
+  DETALLE_PRECIERRE_CUENTAS_NO_DISPONIBLE,
+  TITULO_PRECIERRE_SOCIOS_ADELANTADOS,
+  TITULO_PRECIERRE_SOCIOS_POR_ENTREGAR,
+  armarSociosBase,
+  mesActualCancun,
+  mesHastaAdelantosPrecierre,
+  mesesEntre,
+  movimientosDeCuenta,
+  resumenPrecierreCuentas,
+  utilidadMesDesdeAviones,
+  type ResumenPrecierreCuentas,
+  type UtilidadMesSocios,
+} from './reparto-cuenta.util';
+import {
   ROLES_PAGOS_SOCIOS_LECTURA,
-  TITULO_PRECIERRE_PAGOS_SOCIOS,
-  TITULO_PRECIERRE_SOBREPAGOS_SOCIOS,
   aPagoSocio,
-  armarFilasPagos,
   mesDePeriodo,
-  periodoDeMes,
-  resumenPrecierrePagos,
-  type ResumenPrecierrePagos,
+  rangoDeMes,
 } from './reparto-pago.util';
+import { UtilidadesMensualesSocios } from './reparto-utilidades.memo';
+import { hoyCancun } from '../../common/fecha-cancun.util';
 import {
   detalleTacosEnRevision,
   pilotosDeTacosEnRevision,
@@ -321,11 +331,11 @@ interface ReservaRow {
 }
 
 /**
- * Items del pre-cierre de PAGOS A SOCIOS (`pagos_socios_pendientes` y
- * `pagos_socios_sobrepagados`): lo común tipado; el resto (socios,
- * sobrepagados, disponible…) viaja tal cual.
+ * Items del pre-cierre de la CUENTA CORRIENTE DE LOS SOCIOS
+ * (`socios_por_entregar` y `socios_adelantados`, invariante 38 v2): lo
+ * común tipado; el resto (socios, disponible…) viaja tal cual.
  */
-export interface ItemPrecierrePagosSocios {
+export interface ItemPrecierreCuentasSocios {
   clave: string;
   titulo: string;
   mes: string;
@@ -346,6 +356,23 @@ export class ProfitSharingService {
   ) {}
 
   private readonly logger = new Logger(ProfitSharingService.name);
+
+  /**
+   * Reloj inyectable (specs): decide el MES EN CURSO de las cuentas de los
+   * socios en el pre-cierre (hora Cancún).
+   */
+  ahora: () => Date = () => new Date();
+
+  /**
+   * Utilidades por MES de los socios (cuenta corriente, invariante 38 v2):
+   * un `compute` por mes calendario, meses cerrados memoizados 10 min, el
+   * mes en curso nunca, ≤ 3 a la vez. Vive AQUÍ (dueño de `compute`) para
+   * que el pre-cierre y los servicios de la cuenta compartan la memoria sin
+   * ciclo de dependencias.
+   */
+  private readonly utilidadesMes = new UtilidadesMensualesSocios(
+    (mes, enCurso) => this.utilidadMesSocios(mes, enCurso),
+  );
 
   /** Construye el payload (compartido por el PDF y el Excel) desde el cómputo. */
   private async buildRepartoPayload(q: ProfitSharingQuery) {
@@ -828,6 +855,30 @@ export class ProfitSharingService {
       },
       aviones,
     };
+  }
+
+  /**
+   * Utilidades de los socios de esos meses (en el mismo orden): fuente
+   * ÚNICA de «cuánto generó cada socio cada mes» para la cuenta corriente.
+   * `mesActual` (YYYY-MM, Cancún) decide qué mes está en curso. `fresco`
+   * (las ESCRITURAS de entregas: el candado del adelanto) recalcula los
+   * meses cerrados sin leer la memoria de 10 min, y la renueva.
+   */
+  async utilidadesSociosPorMes(
+    meses: ReadonlyArray<string>,
+    mesActual: string,
+    opts: { fresco?: boolean } = {},
+  ): Promise<UtilidadMesSocios[]> {
+    return this.utilidadesMes.deMeses(meses, mesActual, opts);
+  }
+
+  private async utilidadMesSocios(
+    mes: string,
+    enCurso: boolean,
+  ): Promise<UtilidadMesSocios> {
+    const { desde, hasta } = rangoDeMes(mes);
+    const calculo = await this.compute({ desde, hasta });
+    return utilidadMesDesdeAviones(mes, calculo.aviones, enCurso);
   }
 
   private computeAvion(
@@ -1673,11 +1724,12 @@ export class ProfitSharingService {
    * o mentiroso, detectado por el sistema en vez de cazado a mano. La meta es
    * que el empleado solo supervise: si `listo` es true, se puede cerrar.
    *
-   * `rol` = quién pregunta (el controller lo pasa). Los items de PAGOS A
-   * SOCIOS (nombres, aviones y montos de cada socio) solo salen para
+   * `rol` = quién pregunta (el controller lo pasa). Los items de las
+   * CUENTAS DE LOS SOCIOS (nombres y montos de cada socio) solo salen para
    * `ROLES_PAGOS_SOCIOS_LECTURA`: ningún endpoint le da a un rol más de lo
-   * que le dan los específicos (COORDINADOR recibe 403 en `GET pagos` y en
-   * `GET /profit-sharing`). Sin `rol` ⇒ se omiten (falla cerrado).
+   * que le dan los específicos (COORDINADOR recibe 403 en `GET socios`, en
+   * `GET pagos` y en `GET /profit-sharing`). Sin `rol` ⇒ se omiten (falla
+   * cerrado).
    */
   async preCierre(q: ProfitSharingQuery, rol?: Rol) {
     if (q.desde > q.hasta) {
@@ -2529,20 +2581,19 @@ export class ProfitSharingService {
     // ajustes PENDIENTES de reflejar en la cotización («los pax pidieron
     // transporte…»). Aviso NO bloqueante; best-effort como cobros sin banco.
     //
-    // PAGOS A SOCIOS (1-oct-2026): SOLO cuando el periodo es un MES
-    // calendario (los pagos se registran por mes). Aviso NO bloqueante;
-    // sin la tabla o con la lectura caída ⇒ count 0 + `lectura_fallida`.
-    // Los dos son best-effort (nunca lanzan): van en paralelo.
-    // Solo para quien puede LEER la relación de pagos (ver arriba): para
-    // los demás ni se calcula.
+    // CUENTAS DE LOS SOCIOS (v2, 2-oct-2026): SOLO cuando el periodo es un
+    // MES calendario. Avisos NO bloqueantes; sin la migración o con la
+    // lectura caída ⇒ count 0 + `lectura_fallida`. Los dos son best-effort
+    // (nunca lanzan): van en paralelo. Solo para quien puede LEER las
+    // cuentas (ver arriba): para los demás ni se calcula.
     const mesCierre = mesDePeriodo(q.desde, q.hasta);
-    const veePagosSocios =
+    const veeCuentasSocios =
       rol != null && ROLES_PAGOS_SOCIOS_LECTURA.includes(rol);
-    const [seguimiento, itemsPagosSocios] = await Promise.all([
+    const [seguimiento, itemsCuentasSocios] = await Promise.all([
       this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
-      mesCierre && veePagosSocios
-        ? this.itemsPagosSocios(mesCierre, q.desde, q.hasta)
-        : Promise.resolve([]),
+      mesCierre && veeCuentasSocios
+        ? this.itemsCuentasSocios(mesCierre)
+        : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
     ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
@@ -2636,7 +2687,7 @@ export class ProfitSharingService {
         // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
         lectura_fallida: seguimiento === null,
       },
-      ...itemsPagosSocios,
+      ...itemsCuentasSocios,
       {
         clave: 'extras_sin_desglose',
         titulo: 'Vuelos con TUAS/extras sin desglose exacto',
@@ -2887,101 +2938,141 @@ export class ProfitSharingService {
   }
 
   /**
-   * Pre-cierre · PAGOS A SOCIOS (1-oct-2026): renglones (avión × socio) del
-   * MES con utilidad sin pagar o con pago parcial. La utilidad sale de
-   * `compute` del mismo periodo (fuente única) y lo pagado de la relación
-   * `reparto_pago` (sonda compartida con `RepartoPagoService`). NO bloquea.
-   * Sin la tabla o con CUALQUIER fallo (cálculo o lectura) ⇒ count 0 con
-   * `lectura_fallida: true` y un texto que lo dice (jamás «no hay pendientes»
-   * sin haber leído).
-   *
-   * Con la lectura buena va además el item `pagos_socios_sobrepagados`
-   * (revisión adversaria 1-oct-2026): renglones pagados POR ENCIMA de la
-   * utilidad. Item aparte porque el panel oculta los de `count` 0 y un
-   * sobrepago con todo pagado se habría escapado. Su lista va en
-   * `sobrepagados` (no en `socios`: el panel pinta `socios` como
-   * pendientes). Con la lectura fallida no se emite: el principal ya dice
-   * «sin verificar».
+   * Pre-cierre · CUENTAS DE LOS SOCIOS (v2, 2-oct-2026, invariante 38):
+   *  - `socios_por_entregar`: socios con saldo > $1.00 contando las
+   *    utilidades HASTA el mes del cierre (inclusive) y TODAS las entregas
+   *    registradas hoy (una entrega de octubre por la utilidad de septiembre
+   *    sí limpia septiembre). Solo socios cuya cuenta ya había arrancado.
+   *  - `socios_adelantados`: socios cuyo saldo SIN el mes en curso (meses
+   *    cerrados + todas las entregas; `mesHastaAdelantosPrecierre`) es
+   *    < −$1.00 — el MISMO número del candado del adelanto (409), para que
+   *    entregar lo que dice «por entregar» no los marque como adelantados.
+   * Las utilidades salen de `utilidadesSociosPorMes` (la MISMA memoria que
+   * las cuentas). NO bloquean. Sin la migración o con CUALQUIER fallo ⇒
+   * count 0 con `lectura_fallida: true` y un texto que lo dice (jamás «no
+   * hay pendientes» sin haber leído); con la lectura fallida no se emite el
+   * de adelantados (el principal ya dice «sin verificar»).
    */
-  private async itemsPagosSocios(
+  private async itemsCuentasSocios(
     mes: string,
-    desde: string,
-    hasta: string,
-  ): Promise<ItemPrecierrePagosSocios[]> {
-    const [principal, sobrepagos] = await this.itemPagosSocios(
-      mes,
-      desde,
-      hasta,
-    );
-    return sobrepagos ? [principal, sobrepagos] : [principal];
-  }
-
-  private async itemPagosSocios(
-    mes: string,
-    desde: string,
-    hasta: string,
-  ): Promise<[ItemPrecierrePagosSocios, ItemPrecierrePagosSocios | null]> {
+  ): Promise<ItemPrecierreCuentasSocios[]> {
     const base = {
-      clave: CLAVE_PRECIERRE_PAGOS_SOCIOS,
-      titulo: TITULO_PRECIERRE_PAGOS_SOCIOS,
+      clave: CLAVE_PRECIERRE_SOCIOS_POR_ENTREGAR,
+      titulo: TITULO_PRECIERRE_SOCIOS_POR_ENTREGAR,
       mes,
     };
-    const fallida = (detalle: string, disponible: boolean) => ({
+    const fallida = (
+      detalle: string,
+      disponible: boolean,
+    ): ItemPrecierreCuentasSocios => ({
       ...base,
       detalle,
       count: 0,
       monto_usd: 0,
-      socios: [] as ResumenPrecierrePagos['socios'],
+      socios: [] as ResumenPrecierreCuentas['por_entregar']['socios'],
       lectura_fallida: true,
       disponible,
     });
     try {
-      const lector = lectorPagosSocios(this.supabase.service);
+      const lector = lectorCuentaSocios(this.supabase.service);
       if (!(await lector.disponible())) {
-        return [fallida(DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE, false), null];
+        return [fallida(DETALLE_PRECIERRE_CUENTAS_NO_DISPONIBLE, false)];
       }
-      const [calculo, rows] = await Promise.all([
-        this.compute({ desde, hasta }),
-        lector.pagosDelMes(periodoDeMes(mes)),
-      ]);
-      if (rows === 'sin_tabla') {
-        return [fallida(DETALLE_PRECIERRE_PAGOS_NO_DISPONIBLE, false), null];
+      const u = await lector.universo();
+      if (u === SIN_MIGRACION) {
+        return [fallida(DETALLE_PRECIERRE_CUENTAS_NO_DISPONIBLE, false)];
       }
-      const r = resumenPrecierrePagos(
-        armarFilasPagos({
-          aviones: calculo.aviones,
-          pagos: rows.map((row) => aPagoSocio(row)),
-        }),
-        mes,
+      const ahora = this.ahora();
+      const mesActual = mesActualCancun(ahora);
+      const socios = armarSociosBase({
+        sociosAeronave: u.sociosAeronave,
+        cuentas: u.cuentas,
+        sociosConEntregas: u.entregas.map((p) => p.socio_id),
+        usuarios: u.usuarios,
+        aeronaves: u.aeronaves,
+        hoy: hoyCancun(ahora),
+      });
+      const desdeMin = socios.reduce(
+        (min, s) => (s.cuenta.cuenta_desde < min ? s.cuenta.cuenta_desde : min),
+        mesActual,
       );
+      const utilidades =
+        socios.length === 0
+          ? []
+          : await this.utilidadesSociosPorMes(
+              mesesEntre(desdeMin, mesActual),
+              mesActual,
+            );
+      const pagos = u.entregas.map((r) => aPagoSocio(r));
+      const mesRevision = mes > mesActual ? mesActual : mes;
+      const mesAdelantos = mesHastaAdelantosPrecierre(mesRevision, mesActual);
+      const filas: Array<{
+        socio: { id: string; nombre: string; es_empresa: boolean };
+        por_entregar_hasta_mes_usd: number;
+        por_entregar_cerrado_usd: number;
+      }> = [];
+      let sinCuenta = 0;
+      for (const s of socios) {
+        if (s.cuenta.cuenta_desde > mesRevision) {
+          sinCuenta += 1;
+          continue;
+        }
+        const entrada = {
+          socioId: s.socio.id,
+          cuenta: s.cuenta,
+          utilidades,
+          pagos,
+        };
+        const hastaMes = movimientosDeCuenta({
+          ...entrada,
+          utilidadesHasta: mesRevision,
+        });
+        const cerrado = movimientosDeCuenta({
+          ...entrada,
+          utilidadesHasta: mesAdelantos,
+        });
+        filas.push({
+          socio: {
+            id: s.socio.id,
+            nombre: s.socio.nombre,
+            es_empresa: s.socio.es_empresa,
+          },
+          por_entregar_hasta_mes_usd: hastaMes[hastaMes.length - 1].saldo_usd,
+          por_entregar_cerrado_usd: cerrado[cerrado.length - 1].saldo_usd,
+        });
+      }
+      const r = resumenPrecierreCuentas({
+        mes,
+        filas,
+        sin_cuenta_en_mes: sinCuenta,
+      });
       return [
         {
           ...base,
-          detalle: r.detalle,
-          count: r.count,
-          monto_usd: r.monto_usd,
-          socios: r.socios,
-          // ADITIVO: renglones pagados por encima de la utilidad.
-          sobrepagos: r.sobrepagos,
+          detalle: r.por_entregar.detalle,
+          count: r.por_entregar.count,
+          monto_usd: r.por_entregar.monto_usd,
+          socios: r.por_entregar.socios,
           lectura_fallida: false,
           disponible: true,
         },
         {
-          clave: CLAVE_PRECIERRE_SOBREPAGOS_SOCIOS,
-          titulo: TITULO_PRECIERRE_SOBREPAGOS_SOCIOS,
+          clave: CLAVE_PRECIERRE_SOCIOS_ADELANTADOS,
+          titulo: TITULO_PRECIERRE_SOCIOS_ADELANTADOS,
           mes,
-          detalle: r.detalle_sobrepagos,
-          count: r.sobrepagos,
-          monto_usd: r.sobrepagos_usd,
-          sobrepagados: r.sobrepagados,
+          detalle: r.adelantados.detalle,
+          count: r.adelantados.count,
+          monto_usd: r.adelantados.monto_usd,
+          socios: r.adelantados.socios,
           lectura_fallida: false,
+          disponible: true,
         },
       ];
     } catch (err) {
       this.logger.warn(
-        `pre-cierre: pagos a socios no disponibles: ${err instanceof Error ? err.message : String(err)}`,
+        `pre-cierre: cuentas de los socios no disponibles: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return [fallida(DETALLE_PRECIERRE_PAGOS_LECTURA_FALLIDA, true), null];
+      return [fallida(DETALLE_PRECIERRE_CUENTAS_LECTURA_FALLIDA, true)];
     }
   }
 

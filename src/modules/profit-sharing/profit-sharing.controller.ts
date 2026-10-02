@@ -10,6 +10,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Put,
   Query,
   Res,
   StreamableFile,
@@ -33,14 +34,19 @@ import {
 } from '../flights/factura-cliente.util';
 import { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import {
+  ConfigurarCuentaSocioDto,
+  EstadoCuentaQuery,
+} from './dto/reparto-cuenta.dto';
+import {
   ActualizarPagoSocioDto,
   CrearPagoSocioDto,
   EliminarPagoSocioDto,
-  PagosMesQuery,
+  PagosQuery,
   SinCamposComprobantePagoDto,
 } from './dto/reparto-pago.dto';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingService } from './profit-sharing.service';
+import { RepartoCuentaService } from './reparto-cuenta.service';
 import { RepartoPagoService } from './reparto-pago.service';
 import {
   ROLES_PAGOS_SOCIOS_ESCRITURA,
@@ -54,6 +60,7 @@ export class ProfitSharingController {
   constructor(
     private readonly profitSharing: ProfitSharingService,
     private readonly dinero: DineroReportService,
+    private readonly cuentasSocios: RepartoCuentaService,
     private readonly pagosSocios: RepartoPagoService,
   ) {}
 
@@ -78,34 +85,73 @@ export class ProfitSharingController {
     @Query() q: ProfitSharingQuery,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    // El rol decide si salen los items de pagos a socios (nombres y montos
-    // por socio): COORDINADOR no los lee en ningún otro endpoint.
+    // El rol decide si salen los items de las cuentas de los socios
+    // (nombres y montos por socio): COORDINADOR no los lee en ningún otro
+    // endpoint.
     return this.profitSharing.preCierre(q, c.rol);
   }
 
-  // ============ Pagos de utilidades a socios (1-oct-2026) ============
-  // Reglas puras en reparto-pago.util.ts. Rutas LITERALES bajo `pagos/`
-  // (convención: antes de cualquier `:id` del controller); `@Roles`
-  // explícito en CADA una.
+  // ===== Cuenta corriente del socio (v2, 2-oct-2026, invariante 38) =====
+  // Reglas puras en reparto-cuenta.util.ts / reparto-pago.util.ts. Rutas
+  // LITERALES bajo `socios/` y `pagos/` (convención: antes de cualquier
+  // `:id` del controller); `@Roles` explícito en CADA una.
+
+  @Get('socios')
+  @Roles(...ROLES_PAGOS_SOCIOS_LECTURA)
+  @ApiOperation({
+    summary:
+      'Cuentas corrientes de los socios: por socio, lo generado (compute mes a mes desde el arranque hasta el mes en curso), lo del mes en curso, lo entregado, lo POR ENTREGAR y el estado (AL_CORRIENTE | POR_ENTREGAR | ADELANTADO), último pago y aviones. SOCIO: solo la suya y sin totales. Sin la migración: disponible:false.',
+  })
+  resumenCuentasSocios(@CurrentUser() c: AuthenticatedUser) {
+    return this.cuentasSocios.resumen(c);
+  }
+
+  @Get('socios/:socioId/estado-cuenta')
+  @Roles(...ROLES_PAGOS_SOCIOS_LECTURA)
+  @ApiOperation({
+    summary:
+      'Estado de cuenta del socio con saldo corrido: saldo inicial / saldo anterior, utilidades por mes y avión (el mes en curso marcado) y entregas (método, quién, comprobante), por mes y totales. ?desde=AAAA-MM&hasta=AAAA-MM (default: arranque … mes en curso). SOCIO: solo la suya (403 SOCIO_SOLO_SU_CUENTA). 404 SOCIO_NO_EXISTE.',
+  })
+  estadoCuentaSocio(
+    @Param('socioId', ParseUUIDPipe) socioId: string,
+    @Query() q: EstadoCuentaQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.cuentasSocios.estadoDeCuenta(socioId, q, c);
+  }
+
+  @Put('socios/:socioId/cuenta')
+  @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
+  @ApiOperation({
+    summary:
+      'Configura la cuenta del socio: mes de arranque (AAAA-MM, no futuro, ≤ 36 meses atrás), saldo inicial en USD (negativo = ya se le había adelantado) y notas. Responde su renglón del resumen. 400 SOCIO_INVALIDO / CUENTA_DESDE_FUTURA / CUENTA_DESDE_FUERA_DE_RANGO / SALDO_INICIAL_INVALIDO; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
+  })
+  configurarCuentaSocio(
+    @Param('socioId', ParseUUIDPipe) socioId: string,
+    @Body() dto: ConfigurarCuentaSocioDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.cuentasSocios.configurarCuenta(socioId, dto, c);
+  }
 
   @Get('pagos')
   @Roles(...ROLES_PAGOS_SOCIOS_LECTURA)
   @ApiOperation({
     summary:
-      'Relación de pagos a socios de un MES (AAAA-MM): por avión × socio, la utilidad calculada HOY con el reparto del mes, lo pagado (pagos vivos), lo pendiente, el exceso, el estado (PENDIENTE | PARCIAL | PAGADO | SIN_UTILIDAD) y los pagos; consolidado por socio y totales. SOCIO: solo sus renglones. Sin la migración: disponible:false con listas vacías.',
+      'Entregas a socios (vivas) por fecha de entrega: ?desde=AAAA-MM-DD&hasta=AAAA-MM-DD[&socio_id]. Más reciente primero, con nombres, avión y comprobante firmado (8 h). SOCIO: solo las suyas. ?mes= (v1) ⇒ 410 PAGOS_POR_MES_RETIRADO. Sin la migración: disponible:false.',
   })
   listarPagosSocios(
-    @Query() q: PagosMesQuery,
+    @Query() q: PagosQuery,
     @CurrentUser() c: AuthenticatedUser,
   ) {
-    return this.pagosSocios.listar(q.mes, q.aeronave_id, c);
+    return this.pagosSocios.listar(q, c);
   }
 
   @Post('pagos')
   @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
   @ApiOperation({
     summary:
-      'Registra un pago de utilidad a un socio (mes completo). 201 {pago, fila}; replay de client_request_id ⇒ 200 idempotente:true. 400 SOCIO_NO_ES_DE_LA_AERONAVE / TC_REQUERIDO / TC_NO_APLICA / FECHA_PAGO_FUTURA / ENTREGADO_POR_INVALIDO; 409 PAGO_EXCEDE_UTILIDAD (confirmar con aceptar_exceso) y SIN_UTILIDAD_QUE_PAGAR; 503 PAGOS_SOCIOS_NO_DISPONIBLE.',
+      'Registra una ENTREGA a la cuenta del socio («corresponde a» mes/avión opcional; sin mes = adelanto a cuenta). 201 {pago, cuenta}; replay de client_request_id ⇒ 200 idempotente:true. 400 SOCIO_INVALIDO / SOCIO_NO_ES_DE_LA_AERONAVE / TC_REQUERIDO / TC_NO_APLICA / TC_FUERA_DE_RANGO / FECHA_PAGO_FUTURA / MES_FUTURO / ENTREGADO_POR_INVALIDO; 409 PAGO_EXCEDE_SALDO si rebasa lo por entregar de MESES CERRADOS (el mes en curso no cuenta; details.mes_en_curso_usd) — adelanto: confirmar con aceptar_exceso y la MISMA llave; 503 CUENTA_SOCIO_NO_DISPONIBLE.',
   })
   async crearPagoSocio(
     @Body() dto: CrearPagoSocioDto,
@@ -121,7 +167,7 @@ export class ProfitSharingController {
   @Roles(...ROLES_PAGOS_SOCIOS_ESCRITURA)
   @ApiOperation({
     summary:
-      'Corrige un pago (no cambia avión, socio ni mes). Re-valida el dinero sobre el estado fusionado; si el monto en USD sube, vuelve a revisar SIN_UTILIDAD y el exceso. {pago, fila}. 404 PAGO_NO_EXISTE, 409 PAGO_CAMBIO_CONCURRENTE.',
+      'Corrige una entrega (no cambia el socio; «corresponde a» avión/mes sí). Re-valida el dinero sobre el estado fusionado; si el monto en USD sube, vuelve a revisar el saldo de meses cerrados (409 PAGO_EXCEDE_SALDO salvo aceptar_exceso). {pago, cuenta}. 404 PAGO_NO_EXISTE, 409 PAGO_CAMBIO_CONCURRENTE.',
   })
   actualizarPagoSocio(
     @Param('id', ParseUUIDPipe) id: string,
@@ -136,7 +182,7 @@ export class ProfitSharingController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Elimina un pago (soft delete con motivo de 5–300 caracteres; la confirmación la pide la UI). {deleted: true, fila}. 404 PAGO_NO_EXISTE (también si ya estaba eliminado).',
+      'Elimina una entrega (soft delete con motivo de 5–300 caracteres; la confirmación la pide la UI). {deleted: true, cuenta}. 404 PAGO_NO_EXISTE (también si ya estaba eliminada).',
   })
   eliminarPagoSocio(
     @Param('id', ParseUUIDPipe) id: string,
@@ -159,7 +205,7 @@ export class ProfitSharingController {
   @ApiConsumes('multipart/form-data')
   @ApiOperation({
     summary:
-      'Adjunta (o reemplaza) el comprobante del pago: foto (JPG, PNG, WEBP, HEIC) o PDF, ≤ 10 MB, campo `file`. El anterior se CONSERVA en el bucket privado reparto-comprobantes. {pago} con comprobante_url (8 h).',
+      'Adjunta (o reemplaza) el comprobante de la entrega: foto (JPG, PNG, WEBP, HEIC) o PDF, ≤ 10 MB, campo `file`. El anterior se CONSERVA en el bucket privado reparto-comprobantes. {pago} con comprobante_url (8 h).',
   })
   subirComprobantePagoSocio(
     @Param('id', ParseUUIDPipe) id: string,

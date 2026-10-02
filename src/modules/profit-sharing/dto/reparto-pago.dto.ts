@@ -33,9 +33,10 @@ import {
 } from '../reparto-pago.util';
 
 /**
- * PAGOS DE UTILIDADES A SOCIOS (1-oct-2026, API 0.0.49). Las reglas de
- * negocio (T.C. según moneda, fecha no futura, exceso, socio del avión)
- * viven en `reparto-pago.util.ts` y el servicio; aquí solo forma.
+ * ENTREGAS A LA CUENTA DEL SOCIO (v2, 2-oct-2026, API 0.0.50). Las reglas
+ * de negocio (T.C. según moneda, fecha no futura, saldo/adelanto, socio del
+ * avión) viven en `reparto-pago.util.ts`, `reparto-cuenta.util.ts` y los
+ * servicios; aquí solo forma.
  */
 
 const recortar = ({ value }: { value: unknown }) =>
@@ -49,41 +50,66 @@ const recortar = ({ value }: { value: unknown }) =>
 const booleanoCrudo = ({ obj, key }: { obj: unknown; key: string }) =>
   (obj as Record<string, unknown>)[key];
 
-const MENSAJE_FECHA = 'La fecha del pago debe tener el formato AAAA-MM-DD.';
+const MENSAJE_FECHA = 'La fecha debe tener el formato AAAA-MM-DD.';
 
-/** `GET /v1/profit-sharing/pagos?mes=YYYY-MM[&aeronave_id]`. */
-export class PagosMesQuery {
-  @ApiProperty({ example: '2026-09', description: 'Mes calendario (AAAA-MM).' })
+/**
+ * `GET /v1/profit-sharing/pagos?desde=YYYY-MM-DD&hasta=YYYY-MM-DD[&socio_id]`.
+ * `mes` y `aeronave_id` (el listado por mes —y por avión— de la v1) se
+ * DECLARAN solo para responder 410 `PAGOS_POR_MES_RETIRADO` con un mensaje
+ * claro: el panel 0.0.49 manda `?mes=…&aeronave_id=…` cuando el reparto
+ * está filtrado por avión, y sin declararlos `forbidNonWhitelisted` le
+ * daría un 400 genérico.
+ */
+export class PagosQuery {
+  @ApiPropertyOptional({
+    example: '2026-09-01',
+    description: 'fecha_pago desde (AAAA-MM-DD, inclusive).',
+  })
+  @IsOptional()
   @IsString()
-  @Matches(MES_REGEX, { message: MENSAJE_MES_INVALIDO })
-  mes!: string;
+  @Matches(FECHA_DIA_REGEX, { message: MENSAJE_FECHA })
+  desde?: string;
 
-  @ApiPropertyOptional({ description: 'Limitar a una aeronave' })
+  @ApiPropertyOptional({
+    example: '2026-10-31',
+    description: 'fecha_pago hasta (AAAA-MM-DD, inclusive).',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(FECHA_DIA_REGEX, { message: MENSAJE_FECHA })
+  hasta?: string;
+
+  @ApiPropertyOptional({ description: 'Solo las entregas de ese socio.' })
   @IsOptional()
   @IsUUID()
+  socio_id?: string;
+
+  @ApiPropertyOptional({
+    deprecated: true,
+    description: 'RETIRADO en la v2 ⇒ 410 PAGOS_POR_MES_RETIRADO.',
+  })
+  @IsOptional()
+  @IsString()
+  mes?: string;
+
+  @ApiPropertyOptional({
+    deprecated: true,
+    description:
+      'RETIRADO en la v2 (filtro por avión del listado por mes) ⇒ 410 PAGOS_POR_MES_RETIRADO.',
+  })
+  @IsOptional()
+  @IsString()
   aeronave_id?: string;
 }
 
-/** `POST /v1/profit-sharing/pagos`. */
+/** `POST /v1/profit-sharing/pagos` — una ENTREGA a la cuenta del socio. */
 export class CrearPagoSocioDto {
-  @ApiProperty()
-  @IsUUID()
-  aeronave_id!: string;
-
   @ApiProperty({ description: 'usuario.id del socio (aeronave_socio).' })
   @IsUUID()
   socio_id!: string;
 
   @ApiProperty({
-    example: '2026-09',
-    description: 'Mes que se paga (AAAA-MM).',
-  })
-  @IsString()
-  @Matches(MES_REGEX, { message: MENSAJE_MES_INVALIDO })
-  mes!: string;
-
-  @ApiProperty({
-    description: 'Monto entregado en la moneda del pago (≤ 2 decimales).',
+    description: 'Monto entregado en la moneda de la entrega (≤ 2 decimales).',
   })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
@@ -111,7 +137,7 @@ export class CrearPagoSocioDto {
 
   @ApiProperty({
     example: '2026-10-01',
-    description: 'Día del pago (Cancún); no futuro.',
+    description: 'Día de la entrega (Cancún); no futuro.',
   })
   @IsString()
   @Matches(FECHA_DIA_REGEX, { message: MENSAJE_FECHA })
@@ -166,8 +192,28 @@ export class CrearPagoSocioDto {
   notas?: string | null;
 
   @ApiPropertyOptional({
+    nullable: true,
     description:
-      'Confirma un pago que rebasa la utilidad del mes (+ $1.00): sin él ⇒ 409 PAGO_EXCEDE_UTILIDAD. No abre SIN_UTILIDAD_QUE_PAGAR.',
+      '«Corresponde a» este avión (informativo): el socio debe serlo de ese avión. Vacío = de toda su cuenta.',
+  })
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string | null;
+
+  @ApiPropertyOptional({
+    example: '2026-09',
+    nullable: true,
+    description:
+      '«Corresponde a» este mes (AAAA-MM, informativo, no futuro). Vacío = ADELANTO A CUENTA.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(MES_REGEX, { message: MENSAJE_MES_INVALIDO })
+  mes?: string | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Confirma un ADELANTO: la entrega rebasa lo por entregar de meses cerrados (+ $1.00; el mes en curso no cuenta). Sin él ⇒ 409 PAGO_EXCEDE_SALDO.',
   })
   @IsOptional()
   @Transform(booleanoCrudo)
@@ -176,7 +222,7 @@ export class CrearPagoSocioDto {
 
   @ApiPropertyOptional({
     description:
-      'Llave de idempotencia (uuid por captura). El reintento devuelve el pago ya registrado (200, idempotente:true).',
+      'Llave de idempotencia (uuid por apertura del diálogo). El reintento devuelve la entrega ya registrada (200, idempotente:true).',
   })
   @IsOptional()
   @IsUUID()
@@ -185,9 +231,9 @@ export class CrearPagoSocioDto {
 
 /**
  * `PATCH /v1/profit-sharing/pagos/:id` — al menos un campo (sin contar
- * `aceptar_exceso`). No cambia avión, socio ni mes. `null` en monto,
- * moneda, fecha, método o quién entregó ⇒ 400 (solo el campo AUSENTE se
- * omite); en los textos y el T.C., `null` limpia.
+ * `aceptar_exceso`). No cambia el socio. `null` en monto, moneda, fecha,
+ * método o quién entregó ⇒ 400 (solo el campo AUSENTE se omite); en los
+ * textos, el T.C., `aeronave_id` y `mes`, `null` limpia.
  */
 export class ActualizarPagoSocioDto {
   @ApiPropertyOptional()
@@ -212,8 +258,6 @@ export class ActualizarPagoSocioDto {
   @Type(() => Number)
   @IsNumber()
   @Min(0)
-  // Lo que cabe en numeric(12,6); la banda REALISTA (15–25) la aplica
-  // `validarDineroPago` con 400 TC_FUERA_DE_RANGO.
   @Max(999_999)
   tc_usd_mxn?: number | null;
 
@@ -260,6 +304,24 @@ export class ActualizarPagoSocioDto {
   @IsString()
   @MaxLength(NOTAS_PAGO_MAX)
   notas?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: '«Corresponde a» este avión; null lo quita.',
+  })
+  @IsOptional()
+  @IsUUID()
+  aeronave_id?: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      '«Corresponde a» este mes (AAAA-MM); null = adelanto a cuenta.',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(MES_REGEX, { message: MENSAJE_MES_INVALIDO })
+  mes?: string | null;
 
   @ApiPropertyOptional()
   @IsOptional()

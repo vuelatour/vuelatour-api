@@ -1,7 +1,8 @@
-// Cableado HTTP REAL de los PAGOS A SOCIOS (1-oct-2026): ValidationPipe de
-// main.ts (whitelist + forbidNonWhitelisted + conversión implícita) +
-// AllExceptionsFilter + versionado URI + RolesGuard. Los servicios se
-// stubbean (el real arrastra pyservices / tipo de cambio / conciliación).
+// Cableado HTTP REAL de la CUENTA CORRIENTE DEL SOCIO (v2, 2-oct-2026):
+// ValidationPipe de main.ts (whitelist + forbidNonWhitelisted + conversión
+// implícita) + AllExceptionsFilter + versionado URI + RolesGuard. Los
+// servicios se stubbean (el real arrastra pyservices / tipo de cambio /
+// conciliación).
 jest.mock('./profit-sharing.service', () => ({
   ProfitSharingService: class {},
 }));
@@ -11,9 +12,14 @@ jest.mock('./dinero-report.service', () => ({
 jest.mock('./reparto-pago.service', () => ({
   RepartoPagoService: class {},
 }));
+jest.mock('./reparto-cuenta.service', () => ({
+  RepartoCuentaService: class {},
+}));
 
 import {
   ConflictException,
+  ForbiddenException,
+  GoneException,
   ServiceUnavailableException,
   ValidationPipe,
   VersioningType,
@@ -30,6 +36,7 @@ import { Rol } from '../../common/types/auth.types';
 import { DineroReportService } from './dinero-report.service';
 import { ProfitSharingController } from './profit-sharing.controller';
 import { ProfitSharingService } from './profit-sharing.service';
+import { RepartoCuentaService } from './reparto-cuenta.service';
 import { RepartoPagoService } from './reparto-pago.service';
 import {
   ROLES_PAGOS_SOCIOS_ESCRITURA,
@@ -44,22 +51,25 @@ const KEY = 'eeeeeeee-0000-4000-8000-000000000001';
 
 type Servidor = Parameters<typeof request>[0];
 
+/** El caso del audio: 70,000 MXN a 18.5 en efectivo, sin mes (a cuenta). */
 const ALTA = {
-  aeronave_id: N4142R,
   socio_id: MAURICIO,
-  mes: '2026-09',
-  monto: 1395.94,
-  moneda: 'USD',
+  monto: 70000,
+  moneda: 'MXN',
+  tc_usd_mxn: 18.5,
   fecha_pago: '2026-10-01',
-  metodo: 'TRANSFERENCIA',
+  metodo: 'EFECTIVO',
 };
 
-describe('ProfitSharingController — pagos a socios: @Roles en CADA ruta', () => {
+describe('ProfitSharingController — cuenta del socio: @Roles en CADA ruta', () => {
   const proto = ProfitSharingController.prototype as unknown as Record<
     string,
     object
   >;
   it.each([
+    ['resumenCuentasSocios', ROLES_PAGOS_SOCIOS_LECTURA],
+    ['estadoCuentaSocio', ROLES_PAGOS_SOCIOS_LECTURA],
+    ['configurarCuentaSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
     ['listarPagosSocios', ROLES_PAGOS_SOCIOS_LECTURA],
     ['crearPagoSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
     ['actualizarPagoSocio', ROLES_PAGOS_SOCIOS_ESCRITURA],
@@ -70,9 +80,12 @@ describe('ProfitSharingController — pagos a socios: @Roles en CADA ruta', () =
   });
 });
 
-describe('ProfitSharingController — pagos a socios por HTTP', () => {
+describe('ProfitSharingController — cuenta del socio por HTTP', () => {
   let app: INestApplication;
   let rol: Rol = Rol.ADMIN;
+  const resumen = jest.fn();
+  const estadoDeCuenta = jest.fn();
+  const configurarCuenta = jest.fn();
   const listar = jest.fn();
   const crear = jest.fn();
   const actualizar = jest.fn();
@@ -88,6 +101,10 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
       providers: [
         { provide: ProfitSharingService, useValue: { compute, preCierre } },
         { provide: DineroReportService, useValue: {} },
+        {
+          provide: RepartoCuentaService,
+          useValue: { resumen, estadoDeCuenta, configurarCuenta },
+        },
         {
           provide: RepartoPagoService,
           useValue: { listar, crear, actualizar, eliminar, subirComprobante },
@@ -120,6 +137,9 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
   beforeEach(() => {
     rol = Rol.ADMIN;
     for (const f of [
+      resumen,
+      estadoDeCuenta,
+      configurarCuenta,
       listar,
       crear,
       actualizar,
@@ -130,31 +150,26 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     ])
       f.mockReset();
     preCierre.mockResolvedValue({ listo: true, items: [] });
-    listar.mockResolvedValue({ disponible: true, mes: '2026-09', filas: [] });
-    crear.mockResolvedValue({ pago: { id: PAGO }, fila: null });
-    actualizar.mockResolvedValue({ pago: { id: PAGO }, fila: null });
-    eliminar.mockResolvedValue({ deleted: true, fila: null });
+    resumen.mockResolvedValue({ disponible: true, socios: [], totales: null });
+    estadoDeCuenta.mockResolvedValue({ disponible: true, movimientos: [] });
+    configurarCuenta.mockResolvedValue({ socio: { id: MAURICIO } });
+    listar.mockResolvedValue({ disponible: true, pagos: [] });
+    crear.mockResolvedValue({ pago: { id: PAGO }, cuenta: {} });
+    actualizar.mockResolvedValue({ pago: { id: PAGO }, cuenta: {} });
+    eliminar.mockResolvedValue({ deleted: true, cuenta: {} });
     subirComprobante.mockResolvedValue({ pago: { id: PAGO } });
   });
 
-  it('GET pagos: ADMIN, ANALISTA, FACTURACION y SOCIO leen; el service recibe (mes, avión, actor)', async () => {
+  it('GET socios: ADMIN, ANALISTA, FACTURACION y SOCIO leen (el service recibe al actor); los demás ⇒ 403; no cae en el reparto', async () => {
     for (const r of [Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.SOCIO]) {
       rol = r;
-      const res = await request(http()).get(
-        `/v1/profit-sharing/pagos?mes=2026-09&aeronave_id=${N4142R}`,
-      );
-      expect(res.status).toBe(200);
+      expect(
+        (await request(http()).get('/v1/profit-sharing/socios')).status,
+      ).toBe(200);
     }
-    expect(listar).toHaveBeenLastCalledWith(
-      '2026-09',
-      N4142R,
+    expect(resumen).toHaveBeenLastCalledWith(
       expect.objectContaining({ userId: USER, rol: Rol.SOCIO }),
     );
-    // La ruta literal `pagos` NO cae en el reparto (`GET /`).
-    expect(compute).not.toHaveBeenCalled();
-  });
-
-  it('GET pagos: COORDINADOR, PILOTO, MECANICO y VISITANTE ⇒ 403', async () => {
     for (const r of [
       Rol.COORDINADOR,
       Rol.PILOTO,
@@ -163,14 +178,160 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     ]) {
       rol = r;
       expect(
-        (await request(http()).get('/v1/profit-sharing/pagos?mes=2026-09'))
-          .status,
+        (await request(http()).get('/v1/profit-sharing/socios')).status,
       ).toBe(403);
     }
-    expect(listar).not.toHaveBeenCalled();
+    expect(resumen).toHaveBeenCalledTimes(4);
+    expect(compute).not.toHaveBeenCalled();
   });
 
-  it('GET pre-cierre: el controller pasa el ROL al service (decide si salen los items de pagos a socios); COORDINADOR sigue entrando', async () => {
+  it('GET socios/:socioId/estado-cuenta: meses AAAA-MM al service; uuid o mes inválido ⇒ 400; el 403 del SOCIO ajeno llega con code', async () => {
+    const ok = await request(http()).get(
+      `/v1/profit-sharing/socios/${MAURICIO}/estado-cuenta?desde=2026-09&hasta=2026-10`,
+    );
+    expect(ok.status).toBe(200);
+    expect(estadoDeCuenta).toHaveBeenCalledWith(
+      MAURICIO,
+      { desde: '2026-09', hasta: '2026-10' },
+      expect.objectContaining({ userId: USER, rol: Rol.ADMIN }),
+    );
+    for (const url of [
+      '/v1/profit-sharing/socios/no-uuid/estado-cuenta',
+      `/v1/profit-sharing/socios/${MAURICIO}/estado-cuenta?desde=2026-9`,
+      `/v1/profit-sharing/socios/${MAURICIO}/estado-cuenta?hasta=2026-10-01`,
+      `/v1/profit-sharing/socios/${MAURICIO}/estado-cuenta?mes=2026-10`,
+    ]) {
+      expect([url, (await request(http()).get(url)).status]).toEqual([
+        url,
+        400,
+      ]);
+    }
+    expect(estadoDeCuenta).toHaveBeenCalledTimes(1);
+    rol = Rol.SOCIO;
+    estadoDeCuenta.mockRejectedValueOnce(
+      new ForbiddenException({
+        message: 'Solo puedes consultar tu propia cuenta.',
+        error: 'SOCIO_SOLO_SU_CUENTA',
+      }),
+    );
+    const r403 = await request(http()).get(
+      `/v1/profit-sharing/socios/${N4142R}/estado-cuenta`,
+    );
+    expect(r403.status).toBe(403);
+    expect(r403.body).toMatchObject({ code: 'SOCIO_SOLO_SU_CUENTA' });
+    rol = Rol.COORDINADOR;
+    expect(
+      (
+        await request(http()).get(
+          `/v1/profit-sharing/socios/${MAURICIO}/estado-cuenta`,
+        )
+      ).status,
+    ).toBe(403);
+  });
+
+  it('PUT socios/:socioId/cuenta: ADMIN/FACTURACION; DTO (mes AAAA-MM, saldo con ≤ 2 decimales y negativo válido, notas recortadas); otros roles 403', async () => {
+    const ok = await request(http())
+      .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
+      .send({
+        cuenta_desde: '2026-08',
+        saldo_inicial_usd: -1500.25,
+        notas: '  Ya adelantado ',
+      });
+    expect(ok.status).toBe(200);
+    expect(configurarCuenta).toHaveBeenCalledWith(
+      MAURICIO,
+      {
+        cuenta_desde: '2026-08',
+        saldo_inicial_usd: -1500.25,
+        notas: 'Ya adelantado',
+      },
+      expect.objectContaining({ userId: USER }),
+    );
+    for (const malo of [
+      { cuenta_desde: '2026-08-01', saldo_inicial_usd: 0 },
+      { cuenta_desde: '2026-08', saldo_inicial_usd: 1.005 },
+      { cuenta_desde: '2026-08' },
+      { cuenta_desde: '2026-08', saldo_inicial_usd: 0, notas: 'n'.repeat(501) },
+      { cuenta_desde: '2026-08', saldo_inicial_usd: 0, socio_id: MAURICIO },
+    ]) {
+      const res = await request(http())
+        .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
+        .send(malo);
+      expect([JSON.stringify(malo), res.status]).toEqual([
+        JSON.stringify(malo),
+        400,
+      ]);
+    }
+    for (const r of [Rol.ANALISTA, Rol.SOCIO, Rol.COORDINADOR]) {
+      rol = r;
+      expect(
+        (
+          await request(http())
+            .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
+            .send({ cuenta_desde: '2026-09', saldo_inicial_usd: 0 })
+        ).status,
+      ).toBe(403);
+    }
+    rol = Rol.FACTURACION;
+    expect(
+      (
+        await request(http())
+          .put(`/v1/profit-sharing/socios/${MAURICIO}/cuenta`)
+          .send({ cuenta_desde: '2026-09', saldo_inicial_usd: 0 })
+      ).status,
+    ).toBe(200);
+    expect(configurarCuenta).toHaveBeenCalledTimes(2);
+  });
+
+  it('GET pagos: rango de fechas y socio al service; ?mes= (y ?mes=&aeronave_id= del panel 0.0.49) llega al service y su 410 sale con code; COORDINADOR ⇒ 403', async () => {
+    const ok = await request(http()).get(
+      `/v1/profit-sharing/pagos?desde=2026-09-01&hasta=2026-10-31&socio_id=${MAURICIO}`,
+    );
+    expect(ok.status).toBe(200);
+    expect(listar).toHaveBeenCalledWith(
+      { desde: '2026-09-01', hasta: '2026-10-31', socio_id: MAURICIO },
+      expect.objectContaining({ userId: USER }),
+    );
+    listar.mockRejectedValueOnce(
+      new GoneException({
+        message: 'El listado de pagos por mes se retiró…',
+        error: 'PAGOS_POR_MES_RETIRADO',
+      }),
+    );
+    const r410 = await request(http()).get(
+      '/v1/profit-sharing/pagos?mes=2026-09',
+    );
+    expect(r410.status).toBe(410);
+    expect(r410.body).toMatchObject({ code: 'PAGOS_POR_MES_RETIRADO' });
+    // El panel 0.0.49 filtrado por avión manda los DOS: no debe chocar con
+    // `forbidNonWhitelisted` (400 genérico) sino llegar al 410 del service.
+    listar.mockRejectedValueOnce(
+      new GoneException({
+        message: 'El listado de pagos por mes se retiró…',
+        error: 'PAGOS_POR_MES_RETIRADO',
+      }),
+    );
+    const r410Avion = await request(http()).get(
+      `/v1/profit-sharing/pagos?mes=2026-09&aeronave_id=${MAURICIO}`,
+    );
+    expect(r410Avion.status).toBe(410);
+    expect(r410Avion.body).toMatchObject({ code: 'PAGOS_POR_MES_RETIRADO' });
+    expect(listar).toHaveBeenLastCalledWith(
+      { mes: '2026-09', aeronave_id: MAURICIO },
+      expect.objectContaining({ userId: USER }),
+    );
+    for (const q of ['?desde=01/09/2026', '?socio_id=x', '?otra=1']) {
+      expect(
+        (await request(http()).get(`/v1/profit-sharing/pagos${q}`)).status,
+      ).toBe(400);
+    }
+    rol = Rol.COORDINADOR;
+    expect((await request(http()).get('/v1/profit-sharing/pagos')).status).toBe(
+      403,
+    );
+  });
+
+  it('GET pre-cierre: el controller pasa el ROL al service; COORDINADOR sigue entrando', async () => {
     for (const r of [
       Rol.ADMIN,
       Rol.ANALISTA,
@@ -189,43 +350,32 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     }
   });
 
-  it('GET pagos: mes inválido o ausente ⇒ 400 sin tocar el service', async () => {
-    for (const q of [
-      '',
-      '?mes=2026-9',
-      '?mes=2026-13',
-      '?mes=2026-09-01',
-      '?mes=2026-09&aeronave_id=x',
-    ]) {
-      expect(
-        (await request(http()).get(`/v1/profit-sharing/pagos${q}`)).status,
-      ).toBe(400);
-    }
-    expect(listar).not.toHaveBeenCalled();
-  });
-
-  it('POST pagos: 201 con el DTO limpio; replay idempotente ⇒ 200', async () => {
+  it('POST pagos: 201 con el DTO limpio («corresponde a» opcional); replay idempotente ⇒ 200', async () => {
     const res = await request(http())
       .post('/v1/profit-sharing/pagos')
       .send({
         ...ALTA,
-        referencia: '  SPEI 1  ',
-        aceptar_exceso: false,
+        recibido_por: '  El socio en persona  ',
+        aceptar_exceso: true,
         client_request_id: KEY,
       });
     expect(res.status).toBe(201);
     expect(crear).toHaveBeenCalledWith(
       expect.objectContaining({
         ...ALTA,
-        referencia: 'SPEI 1',
-        aceptar_exceso: false,
+        recibido_por: 'El socio en persona',
+        aceptar_exceso: true,
         client_request_id: KEY,
       }),
       expect.objectContaining({ userId: USER }),
     );
+    const conMes = await request(http())
+      .post('/v1/profit-sharing/pagos')
+      .send({ ...ALTA, mes: '2026-09', aeronave_id: N4142R });
+    expect(conMes.status).toBe(201);
     crear.mockResolvedValueOnce({
       pago: { id: PAGO },
-      fila: null,
+      cuenta: {},
       idempotente: true,
     });
     const replay = await request(http())
@@ -243,8 +393,12 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     expect(crear).not.toHaveBeenCalled();
   });
 
-  it('POST pagos: forma inválida ⇒ 400 (campo extra, monto con 3 decimales, método, moneda, fecha)', async () => {
+  it('POST pagos: forma inválida ⇒ 400 (sin socio, campo extra, monto con 3 decimales, método, moneda, fecha, mes)', async () => {
+    const { socio_id: _sinSocio, ...sinSocio } = ALTA;
+    void _sinSocio;
     for (const malo of [
+      sinSocio,
+      { ...ALTA, socio_id: 'x' },
       { ...ALTA, aeronave_id: 'x' },
       { ...ALTA, monto: 10.005 },
       { ...ALTA, monto: 0 },
@@ -253,7 +407,6 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
       { ...ALTA, fecha_pago: '01/10/2026' },
       { ...ALTA, mes: '2026-09-01' },
       { ...ALTA, referencia: 'r'.repeat(121) },
-      { ...ALTA, factura_folio: 'f'.repeat(61) },
       { ...ALTA, notas: 'n'.repeat(501) },
       { ...ALTA, socio_nombre: 'Mauricio' },
     ]) {
@@ -283,16 +436,17 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     ).toBe(201);
   });
 
-  it('el 409 del exceso y el 503 sin migración llegan con code y details por el filtro', async () => {
+  it('el 409 del ADELANTO y el 503 sin migración llegan con code y details por el filtro', async () => {
     crear.mockRejectedValueOnce(
       new ConflictException({
-        message: 'Con este pago…',
-        error: 'PAGO_EXCEDE_UTILIDAD',
+        message:
+          'Esta entrega de $3,783.78 USD supera lo que hay por entregar…',
+        error: 'PAGO_EXCEDE_SALDO',
         details: {
-          utilidad_usd: 1395.94,
-          pagado_usd: 1000,
-          monto_usd: 500,
-          exceso_usd: 104.06,
+          por_entregar_usd: 1395.94,
+          monto_usd: 3783.78,
+          exceso_usd: 2387.84,
+          saldo_despues_usd: -2387.84,
         },
       }),
     );
@@ -301,27 +455,33 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
       .send(ALTA);
     expect(r409.status).toBe(409);
     expect(r409.body).toMatchObject({
-      code: 'PAGO_EXCEDE_UTILIDAD',
-      details: { exceso_usd: 104.06 },
+      code: 'PAGO_EXCEDE_SALDO',
+      details: { exceso_usd: 2387.84 },
     });
     crear.mockRejectedValueOnce(
       new ServiceUnavailableException({
         message: 'no disponible',
-        error: 'PAGOS_SOCIOS_NO_DISPONIBLE',
-        details: { migracion: '20261001000001' },
+        error: 'CUENTA_SOCIO_NO_DISPONIBLE',
+        details: { migracion: '20261002000001' },
       }),
     );
     const r503 = await request(http())
       .post('/v1/profit-sharing/pagos')
       .send(ALTA);
     expect(r503.status).toBe(503);
-    expect(r503.body).toMatchObject({ code: 'PAGOS_SOCIOS_NO_DISPONIBLE' });
+    expect(r503.body).toMatchObject({ code: 'CUENTA_SOCIO_NO_DISPONIBLE' });
   });
 
-  it('PATCH pagos/:id: parcial; null en monto ⇒ 400; null en notas/T.C. limpia; uuid inválido ⇒ 400', async () => {
+  it('PATCH pagos/:id: parcial; null en monto ⇒ 400; null en notas/T.C./mes/avión limpia; uuid inválido ⇒ 400; socio no se cambia', async () => {
     const ok = await request(http())
       .patch(`/v1/profit-sharing/pagos/${PAGO}`)
-      .send({ notas: null, tc_usd_mxn: null, metodo: 'EFECTIVO' });
+      .send({
+        notas: null,
+        tc_usd_mxn: null,
+        metodo: 'EFECTIVO',
+        mes: null,
+        aeronave_id: null,
+      });
     expect(ok.status).toBe(200);
     expect(actualizar).toHaveBeenCalledWith(
       PAGO,
@@ -329,6 +489,8 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
         notas: null,
         tc_usd_mxn: null,
         metodo: 'EFECTIVO',
+        mes: null,
+        aeronave_id: null,
       }),
       expect.objectContaining({ userId: USER }),
     );
@@ -337,7 +499,8 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
       { moneda: null },
       { fecha_pago: null },
       { metodo: null },
-      { aeronave_id: N4142R },
+      { socio_id: MAURICIO },
+      { mes: '2026-9' },
     ]) {
       expect(
         (
@@ -357,12 +520,12 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     expect(actualizar).toHaveBeenCalledTimes(1);
   });
 
-  it('DELETE pagos/:id: 200 con motivo recortado; sin motivo o corto ⇒ 400', async () => {
+  it('DELETE pagos/:id: 200 con motivo recortado; sin motivo o corto ⇒ 400; ANALISTA ⇒ 403', async () => {
     const ok = await request(http())
       .delete(`/v1/profit-sharing/pagos/${PAGO}`)
       .send({ motivo: '  Capturado dos veces  ' });
     expect(ok.status).toBe(200);
-    expect(ok.body).toEqual({ deleted: true, fila: null });
+    expect(ok.body).toEqual({ deleted: true, cuenta: {} });
     expect(eliminar).toHaveBeenCalledWith(
       PAGO,
       'Capturado dos veces',
@@ -389,7 +552,7 @@ describe('ProfitSharingController — pagos a socios por HTTP', () => {
     expect(eliminar).toHaveBeenCalledTimes(1);
   });
 
-  it('POST pagos/:id/comprobante: multipart `file` ⇒ 200; sin archivo ⇒ 400 SIN_ARCHIVO; campo extra ⇒ 400', async () => {
+  it('POST pagos/:id/comprobante: multipart `file` ⇒ 200; sin archivo ⇒ 400 SIN_ARCHIVO; campo extra ⇒ 400; SOCIO ⇒ 403', async () => {
     const ok = await request(http())
       .post(`/v1/profit-sharing/pagos/${PAGO}/comprobante`)
       .attach('file', Buffer.from('%PDF-1.4 hola'), {
