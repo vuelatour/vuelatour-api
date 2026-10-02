@@ -3232,8 +3232,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       de vuelo y `invoices/file-urls` vs recibidas).
 
 38. **CUENTA CORRIENTE DEL SOCIO — PAGOS DE UTILIDADES v2 (2-oct-2026, API
-    0.0.50; migraciones `20261001000001` APLICADA y `20261002000001`
-    PENDIENTE DE APLICAR).** La v1 (0.0.49, 1-oct) llevaba un estatus por
+    0.0.50; migraciones `20261001000001` y `20261002000001` APLICADAS en
+    prod el 1-oct-2026).** La v1 (0.0.49, 1-oct) llevaba un estatus por
     avión × mes; el cliente aclaró por audio el 1-oct: «cuando el socio dice:
     necesito que me adelanten 70,000 pesos de mis utilidades, necesitamos
     poder grabarlo en algún lado y que se lleve el HISTÓRICO de cuánto se le
@@ -4190,7 +4190,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
   Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
   usa service key).
-- **PENDIENTE DE APLICAR (dry-run en la cabecera; correrlo en prod antes)** —
+- **APLICADA en prod el 1-oct-2026 (noche; dry-run corrido en prod: `DRYRUN_OK · N4142R · socio Mauricio Roque · C1–C7`, sin residuos; después tablas, función con search_path fijo, triggers e índices verificados; `get_advisors` solo el INFO de RLS sin policies)** —
   `20261002000001_reparto_cuenta_socio.sql` (invariante 38 v2, cuenta
   corriente del socio). Requiere `20261001000001` aplicada. (1)
   `reparto_pago`: `periodo`, `aeronave_id` y `utilidad_snapshot_usd` pasan a
@@ -4282,7 +4282,7 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   desde el 0.0.50 esa ruta con `?mes=` responde 410. Rollback al pie del
   archivo (el BUCKET se vacía y se borra con la Storage API: un `delete from
   storage.buckets` directo lo bloquea `protect_buckets_delete` con 42501).
-- **PENDIENTE DE APLICAR (DRY-RUN corrido en prod el 30-sep-2026: `DRYRUN_OK · par REAL`)** —
+- **APLICADA en prod el 30-sep-2026 (DRY-RUN corrido en prod: `DRYRUN_OK · par REAL`; verificado el 1-oct: columna, índice único y trigger existen)** —
   `20260930000001_movimiento_bancario_reverso.sql` (invariante 33):
   columna `movimiento_bancario.reverso_de_id` (FK a sí misma `on delete set
   null`) + índice ÚNICO parcial `uq_mov_bancario_reverso_de` + trigger
