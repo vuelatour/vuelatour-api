@@ -17,6 +17,7 @@ import {
   TABLA_PARTES,
   VISTA_CONCILIACION,
   type OpcionesRpc,
+  ErrorBd,
 } from './conciliacion-partes.fixture-spec';
 import {
   MENSAJE_CARGO_CAMBIO,
@@ -105,7 +106,7 @@ interface OpcionesFake {
   /** Tope de filas por respuesta, como `max-rows` de PostgREST (sin aviso). */
   maxFilas?: number;
   /** UPDATE que la BD rechaza (trigger / constraint diferido). */
-  falloUpdate?: { tabla: string; error: Row };
+  falloUpdate?: { tabla: string; error: Row | ErrorBd };
 }
 
 /** Mini-PostgREST en memoria: filtros, `or`, embeds, orden, RPC y bitácora. */
