@@ -82,6 +82,13 @@ import {
   mensajeNoFacturableSinMigracion,
 } from '../../common/facturacion-gasto.util';
 import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
+import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
+import {
+  anexarLineaUnica,
+  avisoCombustibleCorregido,
+  resolverTipoCombustible,
+  type ResultadoTipoCombustible,
+} from '../../common/combustible.util';
 import type {
   CreateGastoDto,
   CreateTarifaAerodromoDto,
@@ -1475,19 +1482,68 @@ export class ExpensesService {
     const matriculaIA = (
       dto.valor_ia_extraido as { matricula?: unknown } | undefined
     )?.matricula;
-    if (typeof matriculaIA === 'string' && matriculaIA.trim() && aeronaveId) {
-      const { data: flotaMat } = await this.supabase.service
+    const conMatriculaIA =
+      typeof matriculaIA === 'string' && !!matriculaIA.trim() && !!aeronaveId;
+    // COMBUSTIBLE DEL AVIÓN (5-oct-2026, invariante 43, caso XB-PEV #280):
+    // una carga GAS lleva el combustible DEL AVIÓN al que quedó (el MISMO
+    // `aeronaveId` de la validación de matrícula: elegido o heredado del
+    // tramo/vuelo). Se lee en la MISMA consulta de flota, sumando la columna
+    // solo si la migración 20261005000001 ya está (sonda única).
+    const esGasConAvion = dto.categoria === CategoriaGasto.GAS && !!aeronaveId;
+    let flotaMat: Array<{
+      id: string;
+      matricula: string;
+      combustible?: string | null;
+    }> = [];
+    const conCombustible =
+      esGasConAvion &&
+      (await combustibleAeronaveDisponible(this.supabase.service));
+    if (conMatriculaIA || conCombustible) {
+      const { data } = await this.supabase.service
         .from('aeronave')
-        .select('id, matricula');
+        .select(
+          conCombustible ? 'id, matricula, combustible' : 'id, matricula',
+        );
+      // Select dinámico (con o sin la columna): supabase-js no puede tipar
+      // la fila, se declara a mano.
+      flotaMat = (data ?? []) as unknown as typeof flotaMat;
+    }
+    if (conMatriculaIA && typeof matriculaIA === 'string') {
       const normMat = (m: string) => m.toUpperCase().replace(/[^A-Z0-9]/g, '');
-      const delRecibo = (flotaMat ?? []).find(
-        (a) => normMat(a.matricula as string) === normMat(matriculaIA),
+      const delRecibo = flotaMat.find(
+        (a) => normMat(a.matricula) === normMat(matriculaIA),
       );
       if (delRecibo && delRecibo.id !== aeronaveId) {
-        const asignada = (flotaMat ?? []).find((a) => a.id === aeronaveId);
-        discrepanciaMatricula = `el comprobante trae la matrícula ${delRecibo.matricula as string} pero el gasto quedó en ${(asignada?.matricula as string | undefined) ?? 'otro avión'}`;
+        const asignada = flotaMat.find((a) => a.id === aeronaveId);
+        discrepanciaMatricula = `el comprobante trae la matrícula ${delRecibo.matricula} pero el gasto quedó en ${asignada?.matricula ?? 'otro avión'}`;
         const linea = `⚠ ${discrepanciaMatricula} — revisar`;
         notas = notas ? `${notas}\n${linea}` : linea;
+      }
+    }
+    // Ajuste del combustible al del avión (fuente única
+    // `resolverTipoCombustible`): vacío ⇒ se rellena sin nota; distinto ⇒
+    // se corrige, nota «⚠ … — revisar», visto bueno y aviso a oficina por el
+    // MISMO canal que la matrícula. Sin la columna (migración pendiente) o
+    // sin el avión en la lectura, se guarda tal cual.
+    let tipoCombustible: string | undefined = dto.tipo_combustible;
+    let combustibleCorregido: {
+      resultado: ResultadoTipoCombustible;
+      matricula: string | null;
+    } | null = null;
+    if (conCombustible) {
+      const avionGas = flotaMat.find((a) => a.id === aeronaveId);
+      const resultado = resolverTipoCombustible({
+        capturado: dto.tipo_combustible,
+        delAvion: avionGas?.combustible,
+        matricula: avionGas?.matricula ?? null,
+      });
+      tipoCombustible = resultado.tipo ?? undefined;
+      if (resultado.corregido && resultado.nota) {
+        notas = anexarLineaUnica(notas, resultado.nota);
+        combustibleCorregido = {
+          resultado,
+          matricula: avionGas?.matricula ?? null,
+        };
       }
     }
     // Propina: sub-parte informativa del monto (monto = ticket + propina, es
@@ -1503,8 +1559,11 @@ export class ExpensesService {
       // Prellenado con IA desde la app (flujo admin): pendiente del visto
       // bueno de administración en el panel. No bloquea nada. Una matrícula
       // que no coincide con el avión asignado también exige visto bueno.
+      // Un combustible corregido al del avión (invariante 43) también.
       requiere_visto_bueno:
-        dto.requiere_visto_bueno === true || discrepanciaMatricula != null,
+        dto.requiere_visto_bueno === true ||
+        discrepanciaMatricula != null ||
+        combustibleCorregido != null,
       categoria: dto.categoria,
       monto: dto.monto,
       propina: dto.propina ?? 0,
@@ -1521,7 +1580,7 @@ export class ExpensesService {
       aeronave_id: aeronaveId,
       proveedor_id: dto.proveedor_id,
       litros: dto.litros,
-      tipo_combustible: dto.tipo_combustible,
+      tipo_combustible: tipoCombustible,
       lugar: dto.lugar,
       fecha_hora_carga: dto.fecha_hora_carga,
       estatus_comprobante: dto.estatus_comprobante ?? 'SIN_COMPROBANTE',
@@ -1624,6 +1683,29 @@ export class ExpensesService {
       };
       void this.notifications.notifyRole(Rol.ADMIN, avisoMat);
       void this.notifications.notifyRole(Rol.ANALISTA, avisoMat);
+    }
+    // Mismo canal para el combustible corregido al del avión (invariante 43):
+    // texto propio de `avisoCombustibleCorregido`.
+    if (combustibleCorregido && data && opts?.notificar !== false) {
+      const texto = avisoCombustibleCorregido({
+        resultado: combustibleCorregido.resultado,
+        matricula: combustibleCorregido.matricula,
+        litros: dto.litros ?? null,
+        monto: Number(dto.monto),
+        moneda: dto.moneda,
+      });
+      const avisoComb = {
+        tipo: 'alerta_sistema',
+        titulo: texto.titulo,
+        cuerpo: texto.cuerpo,
+        data: {
+          gasto_id: data.id as string,
+          motivo: 'combustible_corregido',
+        },
+        link: '/admin/expenses',
+      };
+      void this.notifications.notifyRole(Rol.ADMIN, avisoComb);
+      void this.notifications.notifyRole(Rol.ANALISTA, avisoComb);
     }
 
     // Captura OFFLINE con foto: el piloto no tuvo IA en campo — el servidor
@@ -2703,6 +2785,8 @@ export class ExpensesService {
       dto.medio_pago !== undefined ||
       // La línea de bitácora se anexa a las notas VIGENTES.
       lineaSello !== null ||
+      // Combustible del avión (invariante 43): se compara contra el VIGENTE.
+      dto.tipo_combustible !== undefined ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
       // el gasto o se sella (voucher IA → tarjeta del capturador).
       (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
@@ -2720,6 +2804,7 @@ export class ExpensesService {
           tarjeta_terminacion?: string | null;
           usuario_captura_id?: string | null;
           valor_ia_extraido?: unknown;
+          tipo_combustible?: string | null;
         })
       : null;
     // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.
@@ -3061,6 +3146,12 @@ export class ExpensesService {
     if (dto.folio_ticket !== undefined) {
       cols.folio_ticket = dto.folio_ticket?.trim() || null;
     }
+    // COMBUSTIBLE DEL AVIÓN (invariante 43): con un PATCH que trae
+    // `tipo_combustible` o mueve el gasto GAS de avión/vuelo/tramo (o lo
+    // vuelve GAS), la regla se re-aplica contra el avión VIGENTE tras el
+    // merge. La oficina tampoco deja un tipo distinto al del avión: si el
+    // avión de verdad cambió de combustible, se corrige en su ficha.
+    await this.ajustarCombustibleEnUpdate(dto, actual, cols);
     // Bitácora de la corrección tardía (B3): se anexa a las notas VIGENTES
     // (las del PATCH, o las que ya tenía el gasto) y el trigger
     // tg_gasto_bitacora la registra como diff de `notas`.
@@ -3131,6 +3222,68 @@ export class ExpensesService {
       this.cruzarConBancoBestEffort(data, userId);
     }
     return data;
+  }
+
+  /**
+   * Re-aplica `resolverTipoCombustible` en un PATCH de un gasto GAS
+   * (invariante 43). Escribe en `cols` (el UPDATE que se va a mandar):
+   * `tipo_combustible` cuando cambia, la nota «⚠ … — revisar» SIN
+   * duplicarla y `requiere_visto_bueno = true` si corrigió. Sin la columna
+   * (migración pendiente), sin avión o sin el avión en la BD: no toca nada.
+   * Si el PATCH no trae `tipo_combustible` (solo movió el gasto de
+   * avión/vuelo/tramo), el valor que se compara es el que el gasto YA tenía
+   * y la nota lo dice así («el gasto traía …»).
+   */
+  private async ajustarCombustibleEnUpdate(
+    dto: UpdateGastoDto,
+    actual: {
+      categoria?: string;
+      aeronave_id?: string | null;
+      notas?: string | null;
+      tipo_combustible?: string | null;
+    } | null,
+    cols: Record<string, unknown>,
+  ): Promise<void> {
+    if (!actual) return;
+    const toca =
+      dto.tipo_combustible !== undefined ||
+      dto.aeronave_id !== undefined ||
+      dto.vuelo_id !== undefined ||
+      dto.escala_id !== undefined ||
+      dto.categoria !== undefined;
+    const categoria = dto.categoria ?? actual.categoria;
+    if (!toca || categoria !== CategoriaGasto.GAS) return;
+    const avionId =
+      cols.aeronave_id !== undefined
+        ? (cols.aeronave_id as string | null)
+        : (actual.aeronave_id ?? null);
+    if (!avionId) return;
+    if (!(await combustibleAeronaveDisponible(this.supabase.service))) return;
+    const { data: avion } = await this.supabase.service
+      .from('aeronave')
+      .select('id, matricula, combustible')
+      .eq('id', avionId)
+      .maybeSingle();
+    if (!avion) return;
+    const enPatch = dto.tipo_combustible !== undefined;
+    const vigente = enPatch ? dto.tipo_combustible : actual.tipo_combustible;
+    const resultado = resolverTipoCombustible({
+      capturado: vigente,
+      delAvion: (avion as { combustible?: unknown }).combustible,
+      matricula: (avion as { matricula?: string | null }).matricula ?? null,
+      motivo: enPatch ? 'captura' : 'cambio_avion',
+    });
+    if (resultado.tipo && resultado.tipo !== (vigente ?? null)) {
+      cols.tipo_combustible = resultado.tipo;
+    }
+    if (!resultado.corregido || !resultado.nota) return;
+    const notasBase =
+      cols.notas !== undefined
+        ? (cols.notas as string | null)
+        : (actual.notas ?? null);
+    const notasNuevas = anexarLineaUnica(notasBase, resultado.nota);
+    if (notasNuevas !== (notasBase ?? '')) cols.notas = notasNuevas;
+    cols.requiere_visto_bueno = true;
   }
 
   /**

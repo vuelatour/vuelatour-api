@@ -13,6 +13,8 @@ import {
   tiempoPlaneador,
 } from '../../common/horas-componente.util';
 import { columnaOpcional } from '../../common/columna-opcional.util';
+import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
+import { COMBUSTIBLE_DEFAULT } from '../../common/combustible.util';
 import {
   MANT_HITO_COLS,
   ordenAbiertaDelHito,
@@ -959,10 +961,61 @@ export class AircraftService {
     return out;
   }
 
+  // ============ Combustible (5-oct-2026, migración 20261005000001) ============
+
+  /**
+   * ¿Existe `aeronave.combustible`? Sonda ÚNICA compartida con `expenses`
+   * (`common/combustible-disponible.util`). Sin la migración la flota se lee
+   * y se escribe como el 0.0.55: sin el campo.
+   */
+  private conCombustible(): Promise<boolean> {
+    return combustibleAeronaveDisponible(this.supabase.service);
+  }
+
+  /**
+   * `AERONAVE_COLS` + `combustible` cuando la columna existe (ADITIVO). El
+   * tipo se queda en el de `AERONAVE_COLS` a propósito: con un string
+   * dinámico supabase-js pierde el tipo de TODA la fila; `combustible` viaja
+   * tal cual en la respuesta (nadie del API lo lee de esta fila).
+   */
+  private async aeronaveCols(): Promise<typeof AERONAVE_COLS> {
+    return (
+      (await this.conCombustible())
+        ? `${AERONAVE_COLS}, combustible`
+        : AERONAVE_COLS
+    ) as typeof AERONAVE_COLS;
+  }
+
+  /**
+   * Prepara `combustible` para un insert/update: `null` = no se manda (la
+   * columna es NOT NULL; null en el PATCH = «sin cambio»); en el ALTA sin
+   * valor vale el default AVGAS; sin la migración el campo se omite (la BD
+   * respondería PGRST204) y queda en el log.
+   */
+  private async prepararCombustible(
+    fila: Record<string, unknown>,
+    modo: 'alta' | 'edicion',
+  ): Promise<void> {
+    const pedido = fila.combustible;
+    if (!(await this.conCombustible())) {
+      if (pedido != null) {
+        this.logger.warn(
+          `combustible ${JSON.stringify(pedido)} ignorado: falta la migración 20261005000001 (aeronave.combustible)`,
+        );
+      }
+      delete fila.combustible;
+      return;
+    }
+    if (pedido == null) {
+      if (modo === 'alta') fila.combustible = COMBUSTIBLE_DEFAULT;
+      else delete fila.combustible;
+    }
+  }
+
   async list(filters: ListAeronavesQuery) {
     let query = this.supabase.service
       .from('aeronave')
-      .select(AERONAVE_COLS, { count: 'exact' })
+      .select(await this.aeronaveCols(), { count: 'exact' })
       .order('matricula', { ascending: true })
       .range(filters.offset, filters.offset + filters.limit - 1);
 
@@ -1127,7 +1180,7 @@ export class AircraftService {
   async findById(id: string) {
     const { data, error } = await this.supabase.service
       .from('aeronave')
-      .select(AERONAVE_COLS)
+      .select(await this.aeronaveCols())
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
@@ -1686,10 +1739,12 @@ export class AircraftService {
 
   async create(dto: CreateAeronaveDto, createdBy: string) {
     const { servicio_etapas, ...rest } = dto;
+    const fila: Record<string, unknown> = { ...rest };
+    await this.prepararCombustible(fila, 'alta');
     const { data, error } = await this.supabase.service
       .from('aeronave')
-      .insert({ ...rest, created_by: createdBy, updated_by: createdBy })
-      .select(AERONAVE_COLS)
+      .insert({ ...fila, created_by: createdBy, updated_by: createdBy })
+      .select(await this.aeronaveCols())
       .maybeSingle();
     if (error) {
       if (error.code === '23505')
@@ -1710,6 +1765,7 @@ export class AircraftService {
     if (Object.keys(dto).length === 0) return this.findById(id);
     const { servicio_etapas, ...rest } = dto;
     const patch: Record<string, unknown> = { ...rest, updated_by: updatedBy };
+    await this.prepararCombustible(patch, 'edicion');
     // Programa de servicio: las etapas (con tareas) son la fuente de verdad y
     // servicio_intervalos se deriva de ellas — un solo camino de escritura.
     if (servicio_etapas !== undefined) {
@@ -1748,7 +1804,7 @@ export class AircraftService {
       .from('aeronave')
       .update(patch)
       .eq('id', id)
-      .select(AERONAVE_COLS)
+      .select(await this.aeronaveCols())
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Aeronave ${id} not found`);

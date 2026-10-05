@@ -5,6 +5,12 @@ import type { FilaCombustibleCruda } from '../pyservices/pyservices.service';
 import { ExpensesService } from './expenses.service';
 import { Rol } from '../../common/types/auth.types';
 import { round6 } from '../../common/tc.util';
+import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
+import {
+  avisoFilaCombustible,
+  normalizarCombustible,
+  resolverTipoCombustible,
+} from '../../common/combustible.util';
 import {
   CategoriaGasto,
   EstatusComprobante,
@@ -27,6 +33,8 @@ interface AeronaveCat {
   id: string;
   matricula: string;
   activa: boolean;
+  /** `aeronave.combustible` (null sin la migración 20261005000001). */
+  combustible: string | null;
 }
 interface ProveedorCat {
   id: string;
@@ -221,6 +229,7 @@ export class CombustibleMasivoService {
 
     const errores: Array<{ fila: number; error: string }> = [];
     const saltadas: Array<{ fila: number; aviso: string }> = [];
+    const avisos: Array<{ fila: number; aviso: string }> = [];
     let creados = 0;
     // En orden y una por una: si una fila falla, las demás siguen.
     for (const fila of dto.filas) {
@@ -250,7 +259,7 @@ export class CombustibleMasivoService {
         continue;
       }
       try {
-        await this.expenses.create(
+        const creado = await this.expenses.create(
           {
             categoria: CategoriaGasto.GAS,
             monto: fila.monto,
@@ -282,6 +291,23 @@ export class CombustibleMasivoService {
           { notificar: false },
         );
         creados += 1;
+        // COMBUSTIBLE DEL AVIÓN (invariante 43): `create` ya ajustó la carga
+        // al combustible del avión de la matrícula (misma regla que la app y
+        // el panel). Una fila corregida NO se rechaza: se reporta con el
+        // valor que de verdad quedó guardado.
+        const corregida = avisoFilaCombustible(
+          resolverTipoCombustible({
+            capturado: fila.tipo_combustible,
+            delAvion: normalizarCombustible(
+              (creado as { tipo_combustible?: unknown } | null)
+                ?.tipo_combustible,
+            ),
+            matricula: fila.matricula ?? null,
+          }),
+          fila.matricula,
+          'guardada',
+        );
+        if (corregida) avisos.push({ fila: fila.fila, aviso: corregida });
         // La fila recién creada también cuenta como existente: dos renglones
         // idénticos dentro del MISMO archivo tampoco se duplican.
         existentesKeys.add(clave);
@@ -295,9 +321,9 @@ export class CombustibleMasivoService {
     }
 
     this.logger.log(
-      `Carga masiva de combustibles: ${creados} gastos creados, ${saltadas.length} filas omitidas (idénticas a gastos existentes), ${errores.length} filas con error (usuario ${userId})`,
+      `Carga masiva de combustibles: ${creados} gastos creados, ${saltadas.length} filas omitidas (idénticas a gastos existentes), ${errores.length} filas con error, ${avisos.length} con el combustible ajustado al del avión (usuario ${userId})`,
     );
-    return { creados, errores, saltadas };
+    return { creados, errores, saltadas, avisos };
   }
 
   // ===== Normalización y validación =====
@@ -314,11 +340,13 @@ export class CombustibleMasivoService {
     const datos: Partial<FilaCombustibleDto> = { fila: f.fila };
 
     // Matrícula → aeronave (case-insensitive, ignora guiones/espacios).
+    let avFila: AeronaveCat | undefined;
     const matCruda = (f.matricula ?? '').trim();
     if (!matCruda) {
       errores.push('Falta la matrícula.');
     } else {
       const av = aeronaves.get(this.normMatricula(matCruda));
+      avFila = av;
       if (!av) {
         errores.push(`La matrícula '${matCruda}' no existe en la flota.`);
       } else {
@@ -392,6 +420,21 @@ export class CombustibleMasivoService {
         errores.push(
           `Tipo de combustible '${f.tipo_combustible ?? ''}' inválido (TURBOSINA o AVGAS).`,
         );
+    }
+    // COMBUSTIBLE DEL AVIÓN (invariante 43), misma regla que el alta: vacío
+    // ⇒ se rellena con el del avión; distinto ⇒ AVISO (no error): al
+    // guardar se corrige y queda para revisión. Un tipo inválido ya es error.
+    if (avFila && (!tipo || datos.tipo_combustible)) {
+      const r = resolverTipoCombustible({
+        capturado: datos.tipo_combustible,
+        delAvion: avFila.combustible,
+        matricula: avFila.matricula,
+      });
+      if (r.rellenado && r.tipo) {
+        datos.tipo_combustible = r.tipo as TipoCombustible;
+      }
+      const aviso = avisoFilaCombustible(r, avFila.matricula, 'preview');
+      if (aviso) advertencias.push(aviso);
     }
 
     const lugar = (f.lugar ?? '').trim();
@@ -565,17 +608,27 @@ export class CombustibleMasivoService {
 
   private async loadAeronaves(): Promise<Map<string, AeronaveCat>> {
     // TODAS (no solo activas): una carga histórica de un avión hoy inactivo
-    // debe entrar — con advertencia, no con error.
+    // debe entrar — con advertencia, no con error. `combustible` solo con la
+    // migración 20261005000001 (sonda única).
+    const conCombustible = await combustibleAeronaveDisponible(
+      this.supabase.service,
+    );
     const { data, error } = await this.supabase.service
       .from('aeronave')
-      .select('id, matricula, activa');
+      .select(
+        conCombustible
+          ? 'id, matricula, activa, combustible'
+          : 'id, matricula, activa',
+      );
     if (error) throw new Error(error.message);
     const map = new Map<string, AeronaveCat>();
-    for (const a of data ?? []) {
+    const filas = (data ?? []) as unknown as Array<Record<string, unknown>>;
+    for (const a of filas) {
       map.set(this.normMatricula(a.matricula as string), {
         id: a.id as string,
         matricula: a.matricula as string,
         activa: a.activa !== false,
+        combustible: (a.combustible as string | null | undefined) ?? null,
       });
     }
     return map;

@@ -188,4 +188,10 @@ export interface CargaMasivaCombustibleResult {
    * reintento del archivo tras un corte/timeout es inocuo, no duplica.
    */
   saltadas: Array<{ fila: number; aviso: string }>;
+  /**
+   * ADITIVO (5-oct-2026, invariante 43): filas CREADAS cuyo tipo de
+   * combustible no era el del avión y se guardaron con el del avión (con
+   * nota «⚠ … — revisar» y visto bueno pendiente). No son errores.
+   */
+  avisos: Array<{ fila: number; aviso: string }>;
 }

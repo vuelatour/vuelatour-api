@@ -3927,6 +3927,76 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `fecha_vuelo` sin zona ⇒ 400). Deploy: API antes que panel (con un API
       viejo el «Sí» responde 404 y el panel lo explica).
 
+43. **COMBUSTIBLE POR AERONAVE: LA CARGA GAS SE AJUSTA AL COMBUSTIBLE DEL
+    AVIÓN (5-oct-2026, API 0.0.56, migración `20261005000001`).** Caso real:
+    Luis capturó desde la app 74 L para el vuelo #280 del XB-PEV (Chetumal,
+    tarjeta ****0585) y eligió «Turbosina»; el PEV (Cessna 205, pistón) solo
+    carga AVGAS y el balance Excel del avión mostró «Combustible TURBOSINA».
+    Pedido aprobado: «dejar registrado en cada avión qué combustible usa, y
+    que al capturar una carga el sistema la ajuste al combustible del avión y
+    la marque para revisión si el piloto eligió otro».
+    - **Dato**: `aeronave.combustible` text NOT NULL default 'AVGAS' + CHECK
+      `aeronave_combustible_chk` (AVGAS | TURBOSINA; texto, NO enum). Las
+      turbinas son N58BT y N621TX; el resto AVGAS. `gasto.tipo_combustible`
+      sigue TEXT sin enum y NO se migró (el 5-oct las 134 cargas GAS ya
+      coincidían con su avión; 82 en null).
+    - **Fuente única PURA** `common/combustible.util.ts` (spec):
+      `COMBUSTIBLES`, `COMBUSTIBLE_DEFAULT`, `normalizarCombustible`,
+      `etiquetaCombustible` («Avgas» / «Turbosina»),
+      `resolverTipoCombustible({capturado, delAvion, matricula, motivo?}) →
+      {tipo, nota, corregido, rellenado, …}`: sin `delAvion` ⇒ tal cual;
+      `capturado` vacío ⇒ el del avión SIN nota (`rellenado`); igual ⇒ nada;
+      distinto ⇒ el del avión + `nota` «⚠ se capturó TURBOSINA pero el XB-PEV
+      carga AVGAS: se corrigió a AVGAS — revisar» (`motivo: 'cambio_avion'`
+      ⇒ «el gasto traía …»). Además `anexarLineaUnica` (sin duplicar),
+      `avisoCombustibleCorregido` (push a oficina), `avisoFilaCombustible`
+      (carga masiva, `preview` / `guardada`) y `MENSAJE_COMBUSTIBLE_INVALIDO`
+      (400 del DTO). El panel y la app COPIAN las etiquetas.
+    - **Sonda ÚNICA** `common/combustible-disponible.util.ts`
+      (`combustibleAeronaveDisponible` = `columnaOpcional(aeronave.
+      combustible)`, re-sondeo ≤ 10 min). **REGLA DURA: todo select/insert/
+      update que nombre `aeronave.combustible` va detrás de ella.** Sin la
+      migración: flota y gastos como el 0.0.55 (sin el campo; las cargas se
+      guardan tal cual). El «sí» se memoriza: tras un ROLLBACK de la
+      migración hay que reiniciar el API.
+    - **Flota** (`aircraft.service`): `GET /v1/aircraft`, `GET /:id`, alta y
+      edición devuelven `combustible` (ADITIVO, `aeronaveCols()`).
+      `CreateAeronaveDto`/`UpdateAeronaveDto`: `combustible?: 'AVGAS' |
+      'TURBOSINA'` (`@IsOptional @IsIn`). Alta sin valor ⇒ AVGAS; `null` en
+      la edición = sin cambio (la columna es NOT NULL); sin la migración el
+      campo se OMITE del insert/update (warn) en vez de un 500.
+    - **Alta de gasto** (`expenses.create`): con `categoria = GAS` y avión
+      resuelto (el MISMO `aeronaveId` de la validación de matrícula: elegido
+      o heredado del tramo/vuelo) se lee `combustible` en la MISMA consulta de
+      flota que la matrícula (UNA lectura sirve a las dos) y se aplica la
+      regla. Si corrige: la nota va a `notas` (al final), `requiere_visto_bueno
+      = true` y aviso a ADMIN y ANALISTA por el MISMO canal que la matrícula
+      (`alerta_sistema`, título «Carga de combustible corregida», `data
+      {gasto_id, motivo: 'combustible_corregido'}`, `link /admin/expenses`;
+      `notificar:false` lo calla, como en la carga masiva). Vacío ⇒ solo se
+      rellena.
+    - **PATCH de gasto** (`ajustarCombustibleEnUpdate`): si el PATCH trae
+      `tipo_combustible` o cambia `aeronave_id`/`vuelo_id`/`escala_id`/
+      `categoria` de un gasto GAS, la regla se re-aplica contra el avión
+      VIGENTE tras el merge (heredado / tramo auto-limpiado incluidos); si
+      corrige, nota SIN duplicar la misma línea y `requiere_visto_bueno =
+      true`. **La oficina tampoco deja un tipo distinto al del avión**: si el
+      avión de verdad cambió de combustible, se corrige en su ficha. El PATCH
+      no avisa por push (la oficina ve la respuesta; el visto bueno queda).
+    - **Carga masiva** (`combustible-masivo.service`): el preview lee la flota
+      con la columna; tipo vacío ⇒ el del avión; distinto ⇒ ADVERTENCIA (no
+      error). La carga pasa por `create` (que corrige) y la respuesta suma el
+      ADITIVO `avisos: [{fila, aviso}]` con las filas que quedaron con el
+      combustible del avión (derivado del `tipo_combustible` GUARDADO).
+    - Specs: `combustible.util.spec`, `combustible-disponible.util.spec`,
+      `expenses.service.combustible.spec` (caso #280 con herencia del vuelo,
+      relleno, coincide, avión ausente, masiva sin push, matrícula + combustible
+      en UNA lectura, otra categoría, sin migración; PATCH que cambia de
+      avión, oficina que manda otro tipo, sin duplicar, null, sin tocar,
+      no-GAS, sin migración), `combustible-masivo.service.spec`,
+      `aircraft.service.combustible.spec` y `dto/create-aeronave.dto.spec`.
+      Deploy: migración → API → panel → app.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -4632,6 +4702,25 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
+- **PENDIENTE DE APLICAR** — `20261005000001_aeronave_combustible.sql`
+  (invariante 43): `aeronave.combustible` text NOT NULL default 'AVGAS' +
+  CHECK `aeronave_combustible_chk` (AVGAS | TURBOSINA) + UPDATE de las dos
+  turbinas (N58BT, N621TX) + COMMENT + verificación `do $ver$` que aborta si
+  no quedaron. Sin triggers nuevos; el UPDATE dispara
+  `trg_aeronave_set_updated_at` (mueve `updated_at` de las 2 turbinas) y NO
+  el fan-out de Google (solo escucha matrícula/color). **Antes de aplicar**:
+  el DRY-RUN de su cabecera (UNA sentencia `do $dry$`, se ejecuta quitando
+  el prefijo «-- »): A contexto (sin columna, N58BT/N621TX/XB-PEV existen),
+  B cuerpo real, C1 valores y default, C2 CHECK con UPDATE REAL (DIESEL y
+  minúsculas ⇒ 23514), C3 NOT NULL ⇒ 23502, C4 PATCH real y alta REAL sin el
+  campo ⇒ AVGAS, C5 cola de Google sin cambios, C6 re-aplicar = no-op ⇒
+  `DRYRUN_OK`; después la columna NO existe y no queda `XX-DRY1`. Probado en
+  PGlite (5-oct): `DRYRUN_OK`, aplicar dos veces idempotente, dry-run sobre la
+  aplicada ⇒ `DRYRUN_FALLA A`, verificación que aborta si una turbina no
+  quedó y rollback. Tras aplicar: `get_advisors` y `GET /v1/aircraft` con
+  `combustible` por fila (la sonda re-sondea en ≤ 10 min). El API 0.0.56 es
+  desplegable ANTES (sin la columna, todo como el 0.0.55). Rollback al pie
+  del archivo (reiniciar el API después).
 - **APLICADA el 2-oct-2026** (dry-run previo en prod revertido: DRYRUN_OK, huella
   fc41134798faddb5afc628f6f99d2ec8; tras aplicar: 375 partes = 375 ligas
   `gasto_id`, 0 cargos incoherentes, 1 gasto con bandera ≠ regla (ASUR

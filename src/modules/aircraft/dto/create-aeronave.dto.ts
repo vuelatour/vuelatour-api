@@ -16,6 +16,12 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import {
+  COMBUSTIBLES,
+  COMBUSTIBLE_DEFAULT,
+  MENSAJE_COMBUSTIBLE_INVALIDO,
+  type CombustibleAeronave,
+} from '../../../common/combustible.util';
 
 /**
  * Etapa del programa cíclico de servicio: intervalo en horas + tareas mayores
@@ -201,6 +207,16 @@ export class CreateAeronaveDto {
   @IsNumber()
   @Min(0)
   planeador_taco_ref?: number;
+
+  @ApiPropertyOptional({
+    description:
+      'Combustible que carga el avión: AVGAS (pistón) o TURBOSINA (turbina). Toda carga de combustible (GAS) se ajusta a este valor al capturarla y queda para revisión si se eligió otro. Sin valor en el alta = AVGAS; null en la edición = sin cambio (5-oct-2026, migración 20261005000001).',
+    enum: COMBUSTIBLES,
+    default: COMBUSTIBLE_DEFAULT,
+  })
+  @IsOptional()
+  @IsIn([...COMBUSTIBLES], { message: MENSAJE_COMBUSTIBLE_INVALIDO })
+  combustible?: CombustibleAeronave;
 
   @ApiPropertyOptional()
   @IsOptional()
