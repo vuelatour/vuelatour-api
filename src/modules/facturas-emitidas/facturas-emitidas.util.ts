@@ -176,9 +176,33 @@ export function claveCompacta(
   serie: string | null | undefined,
   folio: string | null | undefined,
 ): string {
-  return sinAcentosMayus(`${serie ?? ''}${folio ?? ''}`)
+  return sinAcentosMayus(`${serie ?? ''}${folioSinSerie(serie, folio) ?? ''}`)
     .replace(/[^A-Z0-9Ñ]/g, '')
     .replace(/(^|[^0-9])0+(?=[0-9])/g, '$1');
+}
+
+/**
+ * Folio SIN la serie repetida al frente (5-oct-2026, factura A-0411): la
+ * oficina captura o la lectura del PDF entrega el folio ya con su serie
+ * («A-0411» con serie «A») mientras el XML del CFDI los trae separados
+ * («A» + «0411»). `claveCompacta` duplicaba la serie («AA411» vs «A411») y
+ * el XML se rechazaba como de OTRA factura aunque la etiqueta dijera
+ * «A-0411» en los dos lados. Se recorta SOLO cuando el folio empieza con la
+ * serie seguida de un separador (guion, espacio, barra…): «A123» con serie
+ * «A» se deja tal cual (no hay forma de saber si esa A es la serie).
+ */
+export function folioSinSerie(
+  serie: string | null | undefined,
+  folio: string | null | undefined,
+): string | null {
+  if (folio == null) return null;
+  const s = (serie ?? '').trim();
+  if (!s) return folio;
+  const m = new RegExp(
+    `^${s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^A-Za-z0-9Ññ]+`,
+    'i',
+  ).exec(folio.trim());
+  return m ? folio.trim().slice(m[0].length).trim() || folio : folio;
 }
 
 /**

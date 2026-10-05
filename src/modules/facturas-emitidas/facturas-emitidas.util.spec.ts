@@ -3,6 +3,7 @@ import {
   buscarYaRegistrada,
   calcularAlertas,
   claveCompacta,
+  folioSinSerie,
   cobroResumenDe,
   compararFacturas,
   enLotes,
@@ -47,6 +48,18 @@ describe('claveCompacta (número de factura comparable)', () => {
     expect(claveCompacta(null, 'a 123')).toBe(k);
     expect(claveCompacta('A', '/ 123')).toBe(k);
     expect(claveCompacta('a', '0123')).toBe(k);
+  });
+  it('la serie repetida al frente del folio no cuenta dos veces (A-0411, 5-oct-2026)', () => {
+    const k = claveCompacta('A', '0411');
+    expect(claveCompacta('A', 'A-0411')).toBe(k);
+    expect(claveCompacta('a', 'A 0411')).toBe(k);
+    expect(claveCompacta(null, 'A-0411')).toBe(k);
+    expect(folioSinSerie('A', 'A-0411')).toBe('0411');
+    expect(folioSinSerie('A', '0411')).toBe('0411');
+    expect(folioSinSerie(null, 'A-0411')).toBe('A-0411');
+    // Sin separador no se recorta: esa «A» puede ser parte del folio.
+    expect(folioSinSerie('A', 'A123')).toBe('A123');
+    expect(claveCompacta('A', 'A123')).toBe('AA123');
   });
   it('otra serie u otro número NO chocan', () => {
     expect(claveCompacta('B', '123')).not.toBe(claveCompacta('A', '123'));

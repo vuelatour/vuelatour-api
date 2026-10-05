@@ -4503,6 +4503,17 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
     necesita optimista, se resuelve UNA vez y se pasa a las partes — nunca
     una consulta por parte de sobre.
 
+- **Facturas emitidas: la serie repetida al frente del folio no cuenta dos
+  veces (5-oct-2026, API 0.0.54).** La A-0411 quedó guardada con serie «A» y
+  folio «A-0411» (la lectura del PDF/la oficina traen el folio ya con su
+  serie) y el XML separa «A» + «0411»: `claveCompacta` daba «AA411» vs «A411»
+  y el XML se rechazaba como de OTRA factura aunque la etiqueta dijera
+  «A-0411» en los dos lados. `folioSinSerie(serie, folio)` recorta la serie
+  del folio SOLO con separador (guion/espacio/barra; «A123» se respeta);
+  la usan `claveCompacta` (409, ya_registrada, XML) y la normalización al
+  guardar (`datos.folio`). El panel tiene el espejo en
+  `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
+
 ## Migraciones y despliegue
 
 - Migración = archivo en `supabase/migrations/` **y** aplicada vía MCP al
