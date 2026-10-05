@@ -1,7 +1,9 @@
 import {
   diaCancun,
+  diasEntreDiasCancun,
   fechaHoraCancun,
   hoyCancun,
+  moverDiasHoraParedCancun,
   restarMeses,
   fechaCortaCancun,
 } from './fecha-cancun.util';
@@ -95,5 +97,78 @@ describe('fechaCortaCancun', () => {
   it('valor nulo o inválido → cadena vacía (nunca lanza)', () => {
     expect(fechaCortaCancun(null)).toBe('');
     expect(fechaCortaCancun('ayer', { hora: true })).toBe('');
+  });
+});
+
+describe('diasEntreDiasCancun', () => {
+  it('días calendario entre dos fechas de pared (con signo)', () => {
+    expect(diasEntreDiasCancun('2026-10-10', '2026-10-13')).toBe(3);
+    expect(diasEntreDiasCancun('2026-10-13', '2026-10-10')).toBe(-3);
+    expect(diasEntreDiasCancun('2026-10-10', '2026-10-10')).toBe(0);
+  });
+
+  it('cruza meses, años y bisiestos', () => {
+    expect(diasEntreDiasCancun('2026-09-30', '2026-10-01')).toBe(1);
+    expect(diasEntreDiasCancun('2026-12-31', '2027-01-01')).toBe(1);
+    expect(diasEntreDiasCancun('2028-02-28', '2028-03-01')).toBe(2);
+  });
+
+  it('fecha inválida → error legible', () => {
+    expect(() => diasEntreDiasCancun('2026-10-1', '2026-10-10')).toThrow(
+      /Fecha inválida/,
+    );
+  });
+});
+
+describe('moverDiasHoraParedCancun', () => {
+  it('conserva la hora de pared Cancún al sumar días', () => {
+    // 09:00 Cancún del 10-oct ⇒ 09:00 del 13-oct.
+    expect(moverDiasHoraParedCancun('2026-10-10T14:00:00.000Z', 3)).toBe(
+      '2026-10-13T14:00:00.000Z',
+    );
+    expect(
+      fechaHoraCancun(moverDiasHoraParedCancun('2026-10-10T14:00:00Z', 3)),
+    ).toBe('2026-10-13 09:00');
+  });
+
+  it('días negativos y cruce de mes', () => {
+    expect(moverDiasHoraParedCancun('2026-11-02T01:30:00.000Z', -3)).toBe(
+      '2026-10-30T01:30:00.000Z',
+    );
+    // 20:30 del 1-nov en Cancún ⇒ 20:30 del 29-oct.
+    expect(
+      fechaHoraCancun(moverDiasHoraParedCancun('2026-11-02T01:30:00Z', -3)),
+    ).toBe('2026-10-29 20:30');
+  });
+
+  it('respeta segundos y milisegundos; 0 días devuelve el mismo instante', () => {
+    expect(moverDiasHoraParedCancun('2026-10-10T14:05:07.123Z', 1)).toBe(
+      '2026-10-11T14:05:07.123Z',
+    );
+    expect(moverDiasHoraParedCancun('2026-10-10T09:00:00-05:00', 0)).toBe(
+      '2026-10-10T14:00:00.000Z',
+    );
+  });
+
+  it('NUNCA suma 86 400 s a ciegas: con cambio de horario (Cancún 2014, UTC−6 → UTC−5) conserva la hora de pared', () => {
+    // 1-mar-2014 09:00 Cancún (UTC−6) + 60 días = 30-abr-2014 09:00 (ya UTC−5).
+    const movido = moverDiasHoraParedCancun('2014-03-01T15:00:00.000Z', 60);
+    expect(fechaHoraCancun(movido)).toBe('2014-04-30 09:00');
+    expect(movido).toBe('2014-04-30T14:00:00.000Z');
+    // Sumar 60 × 86 400 s a ciegas habría dado las 10:00.
+    expect(
+      fechaHoraCancun(
+        new Date(Date.parse('2014-03-01T15:00:00Z') + 60 * 86_400_000),
+      ),
+    ).toBe('2014-04-30 10:00');
+  });
+
+  it('fecha inválida o días no enteros → error', () => {
+    expect(() => moverDiasHoraParedCancun('no-es-fecha', 1)).toThrow(
+      /Fecha inválida/,
+    );
+    expect(() => moverDiasHoraParedCancun('2026-10-10T14:00:00Z', 1.5)).toThrow(
+      /Días inválidos/,
+    );
   });
 });

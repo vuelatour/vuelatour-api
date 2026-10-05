@@ -162,6 +162,19 @@ import {
 // flights ↔ quotes en runtime).
 import type { FichaAvionMin } from '../quotes/quotes.service';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
+import { estadoVueloVolado } from '../quotes/aeronave-revision.util';
+import {
+  avisoReagendaVuelo,
+  errorSinFecha,
+  errorTramosNoMovidos,
+  errorVueloCancelado,
+  errorVueloYaVolo,
+  planAlinearFecha,
+  respuestaAlinearFecha,
+  type RespuestaAlinearFecha,
+  type TramoAlinearInput,
+} from './alinear-fecha.util';
+import type { AlinearFechaTramosDto } from './dto/alinear-fecha.dto';
 import {
   avisosCapacidad,
   excesoDeCapacidad,
@@ -3470,21 +3483,19 @@ export class FlightsService {
         asignandoPiloto && dto.piloto_id !== current.piloto_id
           ? [dto.piloto_id!]
           : [];
-      const partes: string[] = [];
-      if (fechaCambio) {
-        partes.push(`ahora sale ${this.fechaCancunTxt(dto.fecha_vuelo)}`);
-      }
-      if (regresoCambio) {
-        partes.push(
-          `el REGRESO ahora sale ${this.fechaCancunTxt(dto.fecha_traslado_final)}`,
-        );
-      }
+      // Texto ÚNICO de la reagenda (`avisoReagendaVuelo`): lo comparte la
+      // alineación de tramos con la cotización (5-oct-2026).
       void this.notificarTripulacion(
         data,
-        {
-          titulo: `Vuelo #${current.folio as number} reagendado`,
-          cuerpo: `${current.origen_iata as string} → ${current.destino_iata as string} ${partes.join(' y ')} (hora Cancún).`,
-        },
+        avisoReagendaVuelo({
+          folio: current.folio as number,
+          origen: current.origen_iata as string,
+          destino: current.destino_iata as string,
+          salida: fechaCambio ? this.fechaCancunTxt(dto.fecha_vuelo) : null,
+          regreso: regresoCambio
+            ? this.fechaCancunTxt(dto.fecha_traslado_final)
+            : null,
+        }),
         excluir,
       );
     }
@@ -3504,6 +3515,191 @@ export class FlightsService {
       void this.notifications.notifyRole(Rol.COORDINADOR, payload, updatedBy);
     }
     return data;
+  }
+
+  /**
+   * ALINEAR LA FECHA DE LOS TRAMOS CON LA COTIZACIÓN (5-oct-2026, API 0.0.55,
+   * invariante 42). `revise` escribe `vuelo.fecha_vuelo` pero no mueve los
+   * tramos; el panel pregunta en un modal y, con «Sí», llama aquí. Mueve cada
+   * tramo vivo con fecha los días que separan su día Cancún del de la
+   * cotización CONSERVANDO SU HORA DE PARED (plan PURO en
+   * `alinear-fecha.util`). Delta 0 ⇒ no escribe nada (idempotente).
+   * Candados ANTES de escribir: 404 VUELO_NO_EXISTE, 409 VUELO_CANCELADO,
+   * 409 VUELO_YA_VOLO (fuente única `estadoVueloVolado`), 400 SIN_FECHA.
+   * Cada escritura lleva CAS (fecha leída, tramo vivo y SIN tacómetro): un
+   * tramo que cambió entre la lectura y la escritura se queda como está. Si
+   * la BD falla a medio camino, lo ya movido se REGRESA y responde 503
+   * TRAMOS_NO_MOVIDOS (dice si quedó algo a medias). Después: permisos de
+   * pista, Google Calendar y el MISMO aviso de reagenda de `update`.
+   */
+  async alinearFechaTramos(
+    id: string,
+    dto: AlinearFechaTramosDto,
+    userId: string,
+  ): Promise<RespuestaAlinearFecha> {
+    const vuelo = await this.findById(id);
+    if (vuelo.estado === 'CANCELADO') {
+      throw errorVueloCancelado(id, vuelo.folio);
+    }
+    const { data: escalas, error: escErr } = await this.supabase.service
+      .from('escala')
+      .select(
+        'id, orden, origen_iata, destino_iata, fecha_salida_plan, taco_salida, taco_llegada, cancelada_at',
+      )
+      .eq('vuelo_id', id)
+      .is('cancelada_at', null)
+      .order('orden', { ascending: true });
+    if (escErr) throw new Error(escErr.message);
+    const vivas = (escalas ?? []) as Array<
+      TramoAlinearInput & { taco_salida?: unknown; taco_llegada?: unknown }
+    >;
+    if (estadoVueloVolado(vuelo.estado, vivas).ya_volo) {
+      throw errorVueloYaVolo(id, vuelo.folio);
+    }
+    const objetivo =
+      dto.fecha_vuelo ?? (vuelo.fecha_vuelo as string | null) ?? null;
+    if (!objetivo) throw errorSinFecha(id);
+    const plan = planAlinearFecha({
+      fechaObjetivo: objetivo,
+      tramos: vivas,
+      fechaTrasladoFinal: (vuelo.fecha_traslado_final as string | null) ?? null,
+    });
+
+    const movidos = new Set<string>();
+    const reversas: Array<() => Promise<boolean>> = [];
+    let regresoMovido = false;
+    try {
+      for (const t of plan.tramos) {
+        if (!plan.mover.includes(t.id)) continue;
+        const ok = await this.escribirFechaTramo(
+          id,
+          t.id,
+          t.fecha_salida_plan_antes,
+          t.fecha_salida_plan,
+          userId,
+        );
+        if (!ok) continue;
+        movidos.add(t.id);
+        reversas.push(() =>
+          this.escribirFechaTramo(
+            id,
+            t.id,
+            t.fecha_salida_plan,
+            t.fecha_salida_plan_antes,
+            userId,
+          ),
+        );
+      }
+      if (plan.mover_traslado_final) {
+        const { data: reg, error: regErr } = await aplicarCas(
+          this.supabase.service
+            .from('vuelo')
+            .update({
+              fecha_traslado_final: plan.fecha_traslado_final,
+              updated_by: userId,
+            })
+            .eq('id', id),
+          plan.fecha_traslado_final_antes,
+          'fecha_traslado_final',
+        )
+          .select('id')
+          .maybeSingle();
+        if (regErr) throw new Error(regErr.message);
+        regresoMovido = !!reg;
+      }
+    } catch (err) {
+      const revertido = await this.revertirAlineacion(id, reversas);
+      throw errorTramosNoMovidos(
+        id,
+        revertido,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+
+    const respuesta = respuestaAlinearFecha({
+      vueloId: id,
+      folio: vuelo.folio,
+      plan,
+      movidos,
+      regresoMovido,
+    });
+    if (respuesta.tramos_movidos > 0 || regresoMovido) {
+      // Regla de la casa: TODO camino que toca la ruta o sus fechas refresca
+      // los permisos de pista (best-effort, nunca lanza).
+      await this.airports.refreshPermisosDeVuelo(id);
+      void this.calendar.syncFlight(id);
+      // «Ahora sale» = el PRIMER tramo vivo con fecha, ya movido.
+      const salida =
+        respuesta.tramos.find((t) => t.fecha_salida_plan)?.fecha_salida_plan ??
+        null;
+      void this.notificarTripulacion(
+        vuelo,
+        avisoReagendaVuelo({
+          folio: vuelo.folio as number,
+          origen: vuelo.origen_iata as string,
+          destino: vuelo.destino_iata as string,
+          salida:
+            respuesta.tramos_movidos > 0 ? this.fechaCancunTxt(salida) : null,
+          regreso: regresoMovido
+            ? this.fechaCancunTxt(respuesta.fecha_traslado_final)
+            : null,
+        }),
+      );
+    }
+    return respuesta;
+  }
+
+  /**
+   * Escribe la fecha planeada de UN tramo con CAS: solo si sigue vivo, sin
+   * tacómetro y con la fecha que se leyó (`antes`; null = sin fecha). true =
+   * se escribió; false = cambió entre la lectura y la escritura (no se toca).
+   * Un error de la BD SUBE (el caller revierte).
+   */
+  private async escribirFechaTramo(
+    vueloId: string,
+    escalaId: string,
+    antes: string | null,
+    nueva: string | null,
+    userId: string,
+  ): Promise<boolean> {
+    const base = this.supabase.service
+      .from('escala')
+      .update({ fecha_salida_plan: nueva, updated_by: userId })
+      .eq('id', escalaId)
+      .eq('vuelo_id', vueloId)
+      .is('cancelada_at', null)
+      .is('taco_salida', null)
+      .is('taco_llegada', null);
+    const q = antes
+      ? aplicarCas(base, antes, 'fecha_salida_plan')
+      : base.is('fecha_salida_plan', null);
+    const { data, error } = await q.select('id').maybeSingle();
+    if (error) throw new Error(error.message);
+    return !!data;
+  }
+
+  /**
+   * Regresa a su fecha anterior los tramos que la alineación YA movió cuando
+   * la BD falla a medio camino. true = todo quedó como antes. Nunca lanza.
+   */
+  private async revertirAlineacion(
+    vueloId: string,
+    reversas: Array<() => Promise<boolean>>,
+  ): Promise<boolean> {
+    let todo = true;
+    for (const revertir of reversas) {
+      try {
+        if (!(await revertir())) todo = false;
+      } catch {
+        todo = false;
+      }
+    }
+    if (!todo) {
+      this.logger.error(
+        `alinearFechaTramos ${vueloId}: falló a medio camino y no se pudo regresar todo; revisar las fechas de los tramos.`,
+      );
+    }
+    return todo;
   }
 
   /**

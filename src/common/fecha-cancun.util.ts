@@ -108,3 +108,74 @@ export function fechaCortaCancun(
   const hora = p.hour === '24' ? '00' : p.hour;
   return `${dia} ${hora}:${p.minute}`;
 }
+
+/**
+ * Días calendario de `desde` a `hasta` (ambas YYYY-MM-DD, días de pared
+ * Cancún): positivo si `hasta` es posterior. Aritmética de fechas sin zona
+ * (mediodía UTC), así que no le afecta ningún cambio de horario.
+ */
+export function diasEntreDiasCancun(desde: string, hasta: string): number {
+  const ms = (dia: string): number => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
+    if (!m) throw new Error(`Fecha inválida: ${dia}`);
+    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12);
+  };
+  return Math.round((ms(hasta) - ms(desde)) / 86_400_000);
+}
+
+const FORMATO_PARED_CANCUN = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/Cancun',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+/** Desfase de Cancún (hora de pared − UTC, en ms) en el instante dado. */
+function desfaseCancunMs(ms: number): number {
+  const p: Record<string, string> = {};
+  for (const parte of FORMATO_PARED_CANCUN.formatToParts(new Date(ms))) {
+    p[parte.type] = parte.value;
+  }
+  const pared = Date.UTC(
+    Number(p.year),
+    Number(p.month) - 1,
+    Number(p.day),
+    p.hour === '24' ? 0 : Number(p.hour),
+    Number(p.minute),
+    Number(p.second),
+  );
+  return pared - Math.floor(ms / 1000) * 1000;
+}
+
+/**
+ * Mueve un instante `dias` días calendario CONSERVANDO SU HORA DE PARED en
+ * Cancún (09:00 del 10-oct + 3 ⇒ 09:00 del 13-oct), segundos y milisegundos
+ * incluidos. Nunca suma 86 400 s a ciegas: si el desfase de Cancún cambió
+ * entre ambos días (horario de verano, vigente hasta 2015) se compensa. ISO
+ * UTC de salida; lanza con una fecha inválida o días no enteros.
+ */
+export function moverDiasHoraParedCancun(
+  iso: string | Date,
+  dias: number,
+): string {
+  const d = iso instanceof Date ? iso : new Date(iso);
+  if (Number.isNaN(d.getTime())) {
+    throw new Error(`Fecha inválida: ${String(iso)}`);
+  }
+  if (!Number.isInteger(dias)) throw new Error(`Días inválidos: ${dias}`);
+  const t0 = d.getTime();
+  const base = t0 + dias * 86_400_000;
+  const desfase0 = desfaseCancunMs(t0);
+  let t = base;
+  // Dos vueltas bastan: la segunda solo confirma el desfase del destino.
+  for (let i = 0; i < 2; i += 1) {
+    const siguiente = base + desfase0 - desfaseCancunMs(t);
+    if (siguiente === t) break;
+    t = siguiente;
+  }
+  return new Date(t).toISOString();
+}

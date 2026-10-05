@@ -83,6 +83,7 @@ import { CobroReciboService } from './cobro-recibo.service';
 import { FacturaClienteService } from './factura-cliente.service';
 import { FacturaSolicitudService } from './factura-solicitud.service';
 import { SolicitarFacturaDto } from './dto/solicitud-factura.dto';
+import { AlinearFechaTramosDto } from './dto/alinear-fecha.dto';
 import { SinCamposComprobanteDto } from './dto/cobros.dto';
 import { errorFacturasNoDisponibles } from '../../common/factura-emitida-disponible.util';
 import { FlightReportService } from './flight-report.service';
@@ -429,6 +430,21 @@ export class FlightsController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.flights.update(id, dto, c.userId);
+  }
+
+  @Post(':id/tramos/alinear-fecha')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      'Mueve los tramos vivos al DÍA (hora Cancún) de la fecha del vuelo —o de `fecha_vuelo` del cuerpo— conservando la hora de cada tramo (5-oct-2026, modal de la cotización). Delta 0 ⇒ no escribe (idempotente). 409 VUELO_YA_VOLO / VUELO_CANCELADO, 400 SIN_FECHA, 503 TRAMOS_NO_MOVIDOS. Respuesta: {vuelo_id, folio, delta_dias, fecha_objetivo, tramos[], fecha_traslado_final, tramos_movidos}.',
+  })
+  alinearFechaTramos(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AlinearFechaTramosDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.flights.alinearFechaTramos(id, dto ?? {}, c.userId);
   }
 
   @Get(':id/pilotos-disponibilidad')
