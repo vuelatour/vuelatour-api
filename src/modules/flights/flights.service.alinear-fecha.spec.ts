@@ -22,10 +22,12 @@ import {
 import { FlightsService } from './flights.service';
 import { fechaHoraCancun } from '../../common/fecha-cancun.util';
 import {
+  CODE_OPERACION_CAMBIO,
   CODE_SIN_FECHA,
   CODE_TRAMOS_NO_MOVIDOS,
   CODE_VUELO_CANCELADO,
   CODE_VUELO_YA_VOLO,
+  MENSAJE_OPERACION_CAMBIO,
   MENSAJE_VUELO_YA_VOLO,
 } from './alinear-fecha.util';
 import type { SupabaseService } from '../supabase/supabase.service';
@@ -65,8 +67,8 @@ const comparar = (a: unknown, b: unknown): number => {
 };
 
 interface Opciones {
-  /** Error de BD en el n-ésimo UPDATE de `escala` (1 = el primero). */
-  errorEnUpdateEscala?: number;
+  /** Error de BD en el (o los) n-ésimo UPDATE de `escala` (1 = el primero). */
+  errorEnUpdateEscala?: number | number[];
   /** Corre ANTES de cada UPDATE (simula a otra persona escribiendo). */
   antesDeUpdate?: (tabla: string, n: number) => void;
 }
@@ -86,7 +88,10 @@ function bdEnMemoria(tablas: Record<string, Row[]>, opts: Opciones = {}) {
           conteo[tabla] = (conteo[tabla] ?? 0) + 1;
           const n = conteo[tabla];
           opts.antesDeUpdate?.(tabla, n);
-          if (tabla === 'escala' && opts.errorEnUpdateEscala === n) {
+          const fallas = ([] as number[]).concat(
+            opts.errorEnUpdateEscala ?? [],
+          );
+          if (tabla === 'escala' && fallas.includes(n)) {
             return { data: [], error: { message: 'timeout de escritura' } };
           }
           const tocadas = filas.filter((r) => filtros.every((f) => f(r)));
@@ -536,16 +541,48 @@ describe('FlightsService.alinearFechaTramos', () => {
     expect(horaPared(t1)).toBe('2026-10-13 09:00');
   });
 
-  it('CAS: un tramo que capturó tacómetro mientras tanto NO se mueve', async () => {
+  it('CAS: un tramo que capturó tacómetro mientras tanto NO se mueve (si es el ancla ⇒ 409 sin mover nada)', async () => {
     const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
     const m = armar(vuelo(), [t1], {
       antesDeUpdate: (tabla) => {
         if (tabla === 'escala') t1.taco_salida = 1500.2;
       },
     });
-    const r = await m.flights.alinearFechaTramos(V, {}, USER);
-    expect(r.tramos_movidos).toBe(0);
+    const { e, cuerpo } = await errorDe(
+      m.flights.alinearFechaTramos(V, {}, USER),
+    );
+    await vaciarPromesas();
+    expect(e).toBeInstanceOf(ConflictException);
+    expect(cuerpo.error).toBe(CODE_OPERACION_CAMBIO);
     expect(t1.fecha_salida_plan).toBe('2026-10-10T14:00:00+00:00');
+    expect(m.notificar).not.toHaveBeenCalled();
+  });
+
+  it('CAS del ANCLA: alguien movió el tramo de referencia ⇒ 409 OPERACION_CAMBIO y los demás NO se mueven', async () => {
+    const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
+    const t2 = escala('e2', 2, '2026-10-10T18:00:00+00:00');
+    const m = armar(vuelo(), [t1, t2], {
+      antesDeUpdate: (tabla, n) => {
+        // Justo antes de escribir el ancla, la oficina la reagenda.
+        if (tabla === 'escala' && n === 1) {
+          t1.fecha_salida_plan = '2026-10-12T15:00:00+00:00';
+        }
+      },
+    });
+    const { e, cuerpo } = await errorDe(
+      m.flights.alinearFechaTramos(V, {}, USER),
+    );
+    await vaciarPromesas();
+    expect(e).toBeInstanceOf(ConflictException);
+    expect(cuerpo.error).toBe(CODE_OPERACION_CAMBIO);
+    expect(cuerpo.message).toBe(MENSAJE_OPERACION_CAMBIO);
+    // Antes del arreglo t2 se movía +3 con un delta calculado sobre una
+    // referencia que ya no existía.
+    expect(t2.fecha_salida_plan).toBe('2026-10-10T18:00:00+00:00');
+    expect(m.updates.filter((u) => u.filas > 0)).toHaveLength(0);
+    expect(m.notificar).not.toHaveBeenCalled();
+    expect(m.syncFlight).not.toHaveBeenCalled();
+    expect(m.refreshPermisosDeVuelo).not.toHaveBeenCalled();
   });
 
   it('la BD falla a medio camino ⇒ 503 TRAMOS_NO_MOVIDOS y lo ya movido se REGRESA', async () => {
@@ -573,7 +610,77 @@ describe('FlightsService.alinearFechaTramos', () => {
     expect(m.syncFlight).not.toHaveBeenCalled();
   });
 
-  it('avisa a la tripulación UNA vez con el MISMO texto de reagenda de «Editar datos»', async () => {
+  it('la BD falla y la REVERSA también ⇒ 503 a medias, pero permisos y Google se refrescan', async () => {
+    const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
+    const t2 = escala('e2', 2, '2026-10-10T18:00:00+00:00');
+    // 1 = t1 (ok), 2 = t2 (falla), 3 = reversa de t1 (falla).
+    const m = armar(vuelo(), [t1, t2], { errorEnUpdateEscala: [2, 3] });
+    const { e, cuerpo } = await errorDe(
+      m.flights.alinearFechaTramos(V, {}, USER),
+    );
+    await vaciarPromesas();
+    expect(e).toBeInstanceOf(ServiceUnavailableException);
+    expect(cuerpo.error).toBe(CODE_TRAMOS_NO_MOVIDOS);
+    expect(cuerpo.details).toEqual(
+      expect.objectContaining({ revertido: false }),
+    );
+    expect(horaPared(t1)).toBe('2026-10-13 09:00');
+    expect(m.refreshPermisosDeVuelo).toHaveBeenCalledWith(V);
+    expect(m.syncFlight).toHaveBeenCalledWith(V);
+    expect(m.notificar).not.toHaveBeenCalled();
+  });
+
+  it('REPRO de la revisión: tramo final llenado por revise con el regreso nuevo ⇒ no se mueve ni se reescribe el regreso', async () => {
+    // Antes del guardado: tramo 1 el 10-oct 09:00, tramo 2 sin fecha, sin
+    // regreso. La oficina guardó salida 15-oct 09:00 y regreso 17-oct 16:00:
+    // revise dejó fecha_vuelo=15, fecha_traslado_final=17 21:00Z y el tramo
+    // 2 en 17 21:00Z. Antes del arreglo: t2 y regreso al 22.
+    const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
+    const t2 = escala('e2', 2, '2026-10-17T21:00:00+00:00');
+    const v = vuelo({
+      fecha_vuelo: '2026-10-15T14:00:00+00:00',
+      fecha_traslado_final: '2026-10-17T21:00:00+00:00',
+    });
+    const m = armar(v, [t1, t2]);
+    const r = await m.flights.alinearFechaTramos(V, {}, USER);
+    await vaciarPromesas();
+    expect(r.delta_dias).toBe(5);
+    expect([horaPared(t1), horaPared(t2)]).toEqual([
+      '2026-10-15 09:00',
+      '2026-10-17 16:00',
+    ]);
+    expect(t2.fecha_salida_plan).toBe('2026-10-17T21:00:00+00:00');
+    expect(v.fecha_traslado_final).toBe('2026-10-17T21:00:00+00:00');
+    expect(m.updates.filter((u) => u.tabla === 'vuelo')).toHaveLength(0);
+    expect(r.tramos_movidos).toBe(1);
+    expect(r.fecha_traslado_final_movida).toBe(false);
+    expect(r.tramos[1]).toEqual(
+      expect.objectContaining({
+        id: 'e2',
+        movido: false,
+        se_conserva: 'dia_del_regreso',
+      }),
+    );
+  });
+
+  it('viaje de UN día movido hacia atrás: tramos y regreso se mueven juntos', async () => {
+    const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
+    const t2 = escala('e2', 2, '2026-10-10T21:00:00+00:00');
+    const v = vuelo({
+      fecha_vuelo: '2026-10-09T14:00:00+00:00',
+      fecha_traslado_final: '2026-10-10T21:00:00+00:00',
+    });
+    const m = armar(v, [t1, t2]);
+    const r = await m.flights.alinearFechaTramos(V, {}, USER);
+    expect([horaPared(t1), horaPared(t2)]).toEqual([
+      '2026-10-09 09:00',
+      '2026-10-09 16:00',
+    ]);
+    expect(v.fecha_traslado_final).toBe('2026-10-09T21:00:00.000Z');
+    expect(r.fecha_traslado_final_movida).toBe(true);
+  });
+
+  it('aviso PROPIO a la tripulación, UNA vez, con cada tramo movido y su hora (no repite el «reagendado» de revise)', async () => {
     const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00', {
       copiloto_id: COPILOTO,
     });
@@ -590,16 +697,18 @@ describe('FlightsService.alinearFechaTramos', () => {
       data: Row;
       link: string;
     };
+    // Mismo `tipo` de siempre: la app lo pinta con su ícono y el tap abre
+    // el vuelo (`data.vuelo_id`); lo distinto es el texto.
     expect(aviso.tipo).toBe('vuelo_asignado');
-    expect(aviso.titulo).toBe('Vuelo #338 reagendado');
-    expect(aviso.cuerpo).toMatch(
-      /^CUN → CZM ahora sale 13\/10\/26, 9:00[\s\u00a0\u202f]*a\.[\s\u00a0\u202f]*m\. \(hora Cancún\)\.$/u,
+    expect(aviso.titulo).toBe('Vuelo #338: la operación cambió de día');
+    expect(aviso.cuerpo).toBe(
+      'Tramos movidos (hora Cancún): CUN → CZM mar 13 oct 09:00.',
     );
     expect(aviso.data).toEqual(expect.objectContaining({ vuelo_id: V }));
     expect(aviso.link).toBe(`/flights/${V}`);
   });
 
-  it('con el regreso movido, el aviso también lo dice', async () => {
+  it('multi-día: el aviso nombra cada tramo con SU hora (y solo los que se movieron)', async () => {
     const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
     const t2 = escala('e2', 2, '2026-10-12T21:00:00+00:00');
     const m = armar(
@@ -612,8 +721,27 @@ describe('FlightsService.alinearFechaTramos', () => {
     await m.flights.alinearFechaTramos(V, {}, USER);
     await vaciarPromesas();
     const aviso = m.notifyUser.mock.calls[0][1] as { cuerpo: string };
-    expect(aviso.cuerpo).toMatch(/^CUN → CZM ahora sale 15\/10\/26, 9:00/u);
-    expect(aviso.cuerpo).toMatch(/ y el REGRESO ahora sale 17\/10\/26, 4:00/u);
+    expect(aviso.cuerpo).toBe(
+      'Tramos movidos (hora Cancún): CUN → CZM jue 15 oct 09:00 · CZM → CUN sáb 17 oct 16:00.',
+    );
+  });
+
+  it('el aviso no anuncia un tramo que NO se movió (CAS de un tramo no-ancla)', async () => {
+    const t1 = escala('e1', 1, '2026-10-10T14:00:00+00:00');
+    const t2 = escala('e2', 2, '2026-10-10T18:00:00+00:00');
+    const m = armar(vuelo(), [t1, t2], {
+      antesDeUpdate: (tabla, n) => {
+        if (tabla === 'escala' && n === 2) {
+          t2.fecha_salida_plan = '2026-10-11T19:00:00+00:00';
+        }
+      },
+    });
+    await m.flights.alinearFechaTramos(V, {}, USER);
+    await vaciarPromesas();
+    const aviso = m.notifyUser.mock.calls[0][1] as { cuerpo: string };
+    expect(aviso.cuerpo).toBe(
+      'Tramos movidos (hora Cancún): CUN → CZM mar 13 oct 09:00.',
+    );
   });
 
   it('sin tripulación asignada: se mueve pero no sale ningún aviso', async () => {

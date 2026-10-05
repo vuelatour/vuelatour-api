@@ -437,7 +437,7 @@ export class FlightsController {
   @HttpCode(HttpStatus.OK)
   @ApiOperation({
     summary:
-      'Mueve los tramos vivos al DÍA (hora Cancún) de la fecha del vuelo —o de `fecha_vuelo` del cuerpo— conservando la hora de cada tramo (5-oct-2026, modal de la cotización). Delta 0 ⇒ no escribe (idempotente). 409 VUELO_YA_VOLO / VUELO_CANCELADO, 400 SIN_FECHA, 503 TRAMOS_NO_MOVIDOS. Respuesta: {vuelo_id, folio, delta_dias, fecha_objetivo, tramos[], fecha_traslado_final, tramos_movidos}.',
+      'Mueve los tramos vivos al DÍA (hora Cancún) de la fecha del vuelo —o de `fecha_vuelo` del cuerpo, instante ISO con zona— conservando la hora de cada tramo (5-oct-2026, modal de la cotización). No reescribe lo que la cotización acaba de guardar: el regreso se respeta mientras sea coherente y los tramos que ya están en su día (o en la fecha nueva) se quedan (`se_conserva`). Delta 0 ⇒ no escribe (idempotente). 409 VUELO_YA_VOLO / VUELO_CANCELADO / OPERACION_CAMBIO, 400 SIN_FECHA, 503 TRAMOS_NO_MOVIDOS. Respuesta: {vuelo_id, folio, delta_dias, fecha_objetivo, tramos[], fecha_traslado_final, tramos_movidos}.',
   })
   alinearFechaTramos(
     @Param('id', ParseUUIDPipe) id: string,

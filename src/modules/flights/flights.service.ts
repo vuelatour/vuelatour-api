@@ -164,7 +164,9 @@ import type { FichaAvionMin } from '../quotes/quotes.service';
 import { resolverCostoExterno } from '../../common/costo-externo.util';
 import { estadoVueloVolado } from '../quotes/aeronave-revision.util';
 import {
+  avisoOperacionMovida,
   avisoReagendaVuelo,
+  errorOperacionCambio,
   errorSinFecha,
   errorTramosNoMovidos,
   errorVueloCancelado,
@@ -3483,8 +3485,8 @@ export class FlightsService {
         asignandoPiloto && dto.piloto_id !== current.piloto_id
           ? [dto.piloto_id!]
           : [];
-      // Texto ÚNICO de la reagenda (`avisoReagendaVuelo`): lo comparte la
-      // alineación de tramos con la cotización (5-oct-2026).
+      // Texto de la reagenda en `avisoReagendaVuelo` (revise conserva su
+      // propia copia; la alineación de tramos usa `avisoOperacionMovida`).
       void this.notificarTripulacion(
         data,
         avisoReagendaVuelo({
@@ -3520,17 +3522,22 @@ export class FlightsService {
   /**
    * ALINEAR LA FECHA DE LOS TRAMOS CON LA COTIZACIÓN (5-oct-2026, API 0.0.55,
    * invariante 42). `revise` escribe `vuelo.fecha_vuelo` pero no mueve los
-   * tramos; el panel pregunta en un modal y, con «Sí», llama aquí. Mueve cada
-   * tramo vivo con fecha los días que separan su día Cancún del de la
-   * cotización CONSERVANDO SU HORA DE PARED (plan PURO en
-   * `alinear-fecha.util`). Delta 0 ⇒ no escribe nada (idempotente).
+   * tramos; el panel pregunta en un modal (o desde el detalle del vuelo) y,
+   * con «Sí», llama aquí. Mueve los tramos vivos que siguen en el calendario
+   * viejo los días que separan la referencia del día de la cotización
+   * CONSERVANDO SU HORA DE PARED, y NO reescribe lo que la cotización acaba de
+   * guardar (regreso coherente, tramos que revise llenó): plan PURO en
+   * `alinear-fecha.util`. Delta 0 ⇒ no escribe nada (idempotente).
    * Candados ANTES de escribir: 404 VUELO_NO_EXISTE, 409 VUELO_CANCELADO,
    * 409 VUELO_YA_VOLO (fuente única `estadoVueloVolado`), 400 SIN_FECHA.
-   * Cada escritura lleva CAS (fecha leída, tramo vivo y SIN tacómetro): un
-   * tramo que cambió entre la lectura y la escritura se queda como está. Si
-   * la BD falla a medio camino, lo ya movido se REGRESA y responde 503
-   * TRAMOS_NO_MOVIDOS (dice si quedó algo a medias). Después: permisos de
-   * pista, Google Calendar y el MISMO aviso de reagenda de `update`.
+   * Cada escritura lleva CAS (fecha leída, tramo vivo y SIN tacómetro). El
+   * tramo ANCLA va primero: si cambió entre la lectura y la escritura, el
+   * delta ya no vale y responde 409 OPERACION_CAMBIO sin mover nada; otro
+   * tramo que cambió se queda como está (`movido: false`). Si la BD falla a
+   * medio camino, lo ya movido se REGRESA y responde 503 TRAMOS_NO_MOVIDOS
+   * (dice si quedó algo a medias; a medias, permisos y Google se refrescan
+   * igual). Después: permisos de pista, Google Calendar y un aviso PROPIO a
+   * la tripulación con los tramos movidos (`avisoOperacionMovida`).
    */
   async alinearFechaTramos(
     id: string,
@@ -3565,12 +3572,19 @@ export class FlightsService {
       fechaTrasladoFinal: (vuelo.fecha_traslado_final as string | null) ?? null,
     });
 
+    // El ANCLA se escribe PRIMERO: el delta se calculó sobre SU fecha.
+    const aEscribir = plan.tramos
+      .filter((t) => plan.mover.includes(t.id))
+      .sort(
+        (a, b) =>
+          Number(b.id === plan.ancla_id) - Number(a.id === plan.ancla_id),
+      );
     const movidos = new Set<string>();
     const reversas: Array<() => Promise<boolean>> = [];
     let regresoMovido = false;
+    let anclaCambio = false;
     try {
-      for (const t of plan.tramos) {
-        if (!plan.mover.includes(t.id)) continue;
+      for (const t of aEscribir) {
         const ok = await this.escribirFechaTramo(
           id,
           t.id,
@@ -3578,7 +3592,13 @@ export class FlightsService {
           t.fecha_salida_plan,
           userId,
         );
-        if (!ok) continue;
+        if (!ok) {
+          if (t.id === plan.ancla_id) {
+            anclaCambio = true;
+            break;
+          }
+          continue;
+        }
         movidos.add(t.id);
         reversas.push(() =>
           this.escribirFechaTramo(
@@ -3590,7 +3610,7 @@ export class FlightsService {
           ),
         );
       }
-      if (plan.mover_traslado_final) {
+      if (!anclaCambio && plan.mover_traslado_final) {
         const { data: reg, error: regErr } = await aplicarCas(
           this.supabase.service
             .from('vuelo')
@@ -3609,11 +3629,27 @@ export class FlightsService {
       }
     } catch (err) {
       const revertido = await this.revertirAlineacion(id, reversas);
+      // A medias: la operación SÍ cambió — permisos y Google la reflejan.
+      if (!revertido) await this.refrescarTrasAlinear(id);
       throw errorTramosNoMovidos(
         id,
         revertido,
         err instanceof Error ? err.message : String(err),
       );
+    }
+    if (anclaCambio) {
+      // El ancla va primero: normalmente no hay nada que regresar.
+      const revertido =
+        reversas.length === 0 || (await this.revertirAlineacion(id, reversas));
+      if (!revertido) {
+        await this.refrescarTrasAlinear(id);
+        throw errorTramosNoMovidos(
+          id,
+          false,
+          'el tramo de referencia cambió mientras se guardaba',
+        );
+      }
+      throw errorOperacionCambio(id, vuelo.folio);
     }
 
     const respuesta = respuestaAlinearFecha({
@@ -3624,29 +3660,37 @@ export class FlightsService {
       regresoMovido,
     });
     if (respuesta.tramos_movidos > 0 || regresoMovido) {
-      // Regla de la casa: TODO camino que toca la ruta o sus fechas refresca
-      // los permisos de pista (best-effort, nunca lanza).
-      await this.airports.refreshPermisosDeVuelo(id);
-      void this.calendar.syncFlight(id);
-      // «Ahora sale» = el PRIMER tramo vivo con fecha, ya movido.
-      const salida =
-        respuesta.tramos.find((t) => t.fecha_salida_plan)?.fecha_salida_plan ??
-        null;
+      await this.refrescarTrasAlinear(id);
+    }
+    const tramosMovidos = respuesta.tramos.filter((t) => t.movido);
+    if (tramosMovidos.length > 0) {
+      // Aviso PROPIO (no el «reagendado» de revise, que ya salió): nombra
+      // cada tramo movido con la hora que conservó.
       void this.notificarTripulacion(
         vuelo,
-        avisoReagendaVuelo({
+        avisoOperacionMovida({
           folio: vuelo.folio as number,
-          origen: vuelo.origen_iata as string,
-          destino: vuelo.destino_iata as string,
-          salida:
-            respuesta.tramos_movidos > 0 ? this.fechaCancunTxt(salida) : null,
-          regreso: regresoMovido
-            ? this.fechaCancunTxt(respuesta.fecha_traslado_final)
-            : null,
+          tramos: tramosMovidos,
         }),
       );
     }
     return respuesta;
+  }
+
+  /**
+   * Tras mover tramos (también a medias): permisos de pista (regla de la
+   * casa: TODO camino que toca la ruta o sus fechas; best-effort, nunca
+   * lanza) y el espejo de Google Calendar (void).
+   */
+  private async refrescarTrasAlinear(vueloId: string): Promise<void> {
+    try {
+      await this.airports.refreshPermisosDeVuelo(vueloId);
+    } catch (err) {
+      this.logger.warn(
+        `alinearFechaTramos ${vueloId}: no se pudieron refrescar los permisos de pista: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    void this.calendar.syncFlight(vueloId);
   }
 
   /**

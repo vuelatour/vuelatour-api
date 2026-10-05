@@ -29,7 +29,13 @@ import { FacturaClienteService } from './factura-cliente.service';
 import { FlightReportService } from './flight-report.service';
 import { FlightsController } from './flights.controller';
 import { FlightsService } from './flights.service';
-import { errorVueloYaVolo, MENSAJE_VUELO_YA_VOLO } from './alinear-fecha.util';
+import {
+  errorOperacionCambio,
+  errorVueloYaVolo,
+  MENSAJE_FECHA_VUELO_SIN_ZONA,
+  MENSAJE_OPERACION_CAMBIO,
+  MENSAJE_VUELO_YA_VOLO,
+} from './alinear-fecha.util';
 
 const V = 'aaaaaaaa-0000-4000-8000-000000000338';
 const USER = 'aaaaaaaa-0000-4000-8000-00000000000f';
@@ -167,6 +173,32 @@ describe('FlightsController — POST :id/tramos/alinear-fecha por HTTP', () => {
     expect(alinearFechaTramos).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['solo fecha (medianoche UTC = el día ANTERIOR en Cancún)', '2026-10-13'],
+    ['sin zona (depende de la TZ del servidor)', '2026-10-13T02:00'],
+    ['sin zona, con segundos', '2026-10-13T02:00:00'],
+  ])(
+    '`fecha_vuelo` %s ⇒ 400 con el texto del helper, sin llamar al service',
+    async (_caso, fecha) => {
+      const res = await request(http()).post(RUTA).send({ fecha_vuelo: fecha });
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toContain(MENSAJE_FECHA_VUELO_SIN_ZONA);
+      expect(alinearFechaTramos).not.toHaveBeenCalled();
+    },
+  );
+
+  it('`fecha_vuelo` con offset ⇒ 200 tal cual', async () => {
+    const res = await request(http())
+      .post(RUTA)
+      .send({ fecha_vuelo: '2026-10-13T09:00:00-05:00' });
+    expect(res.status).toBe(200);
+    expect(
+      (
+        alinearFechaTramos.mock.calls[0] as [string, { fecha_vuelo?: string }]
+      )[1].fecha_vuelo,
+    ).toBe('2026-10-13T09:00:00-05:00');
+  });
+
   it('id que no es uuid ⇒ 400 antes de tocar el service', async () => {
     const res = await request(http())
       .post('/v1/flights/abc/tramos/alinear-fecha')
@@ -182,5 +214,13 @@ describe('FlightsController — POST :id/tramos/alinear-fecha por HTTP', () => {
     const cuerpo = res.body as { code: string; message: string };
     expect(cuerpo.code).toBe('VUELO_YA_VOLO');
     expect(cuerpo.message).toBe(MENSAJE_VUELO_YA_VOLO);
+  });
+  it('el 409 OPERACION_CAMBIO llega con su `code` y su texto', async () => {
+    alinearFechaTramos.mockRejectedValue(errorOperacionCambio(V, 338));
+    const res = await request(http()).post(RUTA).send({});
+    expect(res.status).toBe(409);
+    const cuerpo = res.body as { code: string; message: string };
+    expect(cuerpo.code).toBe('OPERACION_CAMBIO');
+    expect(cuerpo.message).toBe(MENSAJE_OPERACION_CAMBIO);
   });
 });

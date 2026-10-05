@@ -5,14 +5,21 @@ import {
 } from '@nestjs/common';
 import { fechaHoraCancun } from '../../common/fecha-cancun.util';
 import {
+  CODE_OPERACION_CAMBIO,
   CODE_SIN_FECHA,
   CODE_TRAMOS_NO_MOVIDOS,
   CODE_VUELO_CANCELADO,
   CODE_VUELO_YA_VOLO,
+  MAX_TRAMOS_EN_AVISO,
+  MENSAJE_FECHA_VUELO_SIN_ZONA,
+  MENSAJE_OPERACION_CAMBIO,
   MENSAJE_SIN_FECHA,
   MENSAJE_VUELO_CANCELADO,
   MENSAJE_VUELO_YA_VOLO,
+  RE_INSTANTE_ISO_CON_ZONA,
+  avisoOperacionMovida,
   avisoReagendaVuelo,
+  errorOperacionCambio,
   errorSinFecha,
   errorTramosNoMovidos,
   errorVueloCancelado,
@@ -50,6 +57,35 @@ describe('textos de la alineación (es-MX, fuente única)', () => {
     expect(MENSAJE_SIN_FECHA).toBe(
       'El vuelo no tiene fecha: captúrala en la cotización o en el detalle del vuelo antes de mover los tramos.',
     );
+    expect(MENSAJE_OPERACION_CAMBIO).toBe(
+      'El vuelo operativo cambió mientras guardabas y no se movió nada. Recarga y vuelve a intentarlo, o mueve la fecha desde el detalle del vuelo.',
+    );
+    expect(MENSAJE_FECHA_VUELO_SIN_ZONA).toBe(
+      'fecha_vuelo debe ser un instante ISO 8601 con hora y zona (Z u offset), p. ej. 2026-10-13T14:00:00.000Z.',
+    );
+  });
+
+  it('fecha_vuelo del cuerpo: solo instantes completos con zona', () => {
+    for (const ok of [
+      '2026-10-13T14:00:00.000Z',
+      '2026-10-13T14:00:00Z',
+      '2026-10-13T14:00Z',
+      '2026-10-13T09:00:00-05:00',
+      '2026-10-13T09:00:00+0000',
+      '2026-10-13T14:00:00+00',
+      '2026-10-13T14:00:00.123456+00:00',
+    ]) {
+      expect(RE_INSTANTE_ISO_CON_ZONA.test(ok)).toBe(true);
+    }
+    for (const mal of [
+      '2026-10-13',
+      '2026-10-13T02:00',
+      '2026-10-13T02:00:00',
+      '2026-10-13 14:00:00Z',
+      '13/10/2026',
+    ]) {
+      expect(RE_INSTANTE_ISO_CON_ZONA.test(mal)).toBe(false);
+    }
   });
 
   it('falla a medio camino: dice si se regresó todo o quedó algo a medias', () => {
@@ -76,6 +112,13 @@ describe('textos de la alineación (es-MX, fuente única)', () => {
       error: CODE_VUELO_CANCELADO,
       details: { vuelo_id: V, folio: null },
     });
+    const cambio = errorOperacionCambio(V, 338);
+    expect(cambio).toBeInstanceOf(ConflictException);
+    expect(cambio.getResponse()).toEqual({
+      message: MENSAJE_OPERACION_CAMBIO,
+      error: CODE_OPERACION_CAMBIO,
+      details: { vuelo_id: V, folio: 338 },
+    });
     const sinFecha = errorSinFecha(V);
     expect(sinFecha).toBeInstanceOf(BadRequestException);
     expect(sinFecha.getResponse()).toEqual({
@@ -90,6 +133,47 @@ describe('textos de la alineación (es-MX, fuente única)', () => {
       error: CODE_TRAMOS_NO_MOVIDOS,
       details: { vuelo_id: V, revertido: true, tecnico: 'timeout' },
     });
+  });
+
+  it('aviso de la alineación: PROPIO (no el «reagendado» de revise) y con cada tramo movido', () => {
+    const t = (o: string, d: string, f: string | null) => ({
+      origen_iata: o,
+      destino_iata: d,
+      fecha_salida_plan: f,
+    });
+    expect(
+      avisoOperacionMovida({
+        folio: 338,
+        tramos: [
+          t('CUN', 'HOL', '2026-10-15T13:00:00.000Z'),
+          t('HOL', 'CUN', '2026-10-17T21:00:00.000Z'),
+        ],
+      }),
+    ).toEqual({
+      titulo: 'Vuelo #338: la operación cambió de día',
+      cuerpo:
+        'Tramos movidos (hora Cancún): CUN → HOL jue 15 oct 08:00 · HOL → CUN sáb 17 oct 16:00.',
+    });
+    expect(avisoOperacionMovida({ folio: 338, tramos: [] }).titulo).not.toMatch(
+      /reagendado/,
+    );
+    // Hasta MAX_TRAMOS_EN_AVISO se nombran todos; con más, 3 y «y N más».
+    const muchos = (n: number) =>
+      Array.from({ length: n }, (_, i) =>
+        t('CUN', `T${i + 1}`, '2026-10-15T13:00:00.000Z'),
+      );
+    expect(MAX_TRAMOS_EN_AVISO).toBe(4);
+    expect(
+      avisoOperacionMovida({ folio: 1, tramos: muchos(4) }).cuerpo,
+    ).toMatch(/CUN → T4 jue 15 oct 08:00\.$/u);
+    const seis = avisoOperacionMovida({ folio: 1, tramos: muchos(6) }).cuerpo;
+    expect(seis).toMatch(/CUN → T3 jue 15 oct 08:00 · y 3 más\.$/u);
+    expect(seis).not.toMatch(/T4/);
+    // Sin fecha legible: lo dice, nunca «Invalid Date».
+    expect(
+      avisoOperacionMovida({ folio: 1, tramos: [t('CUN', 'CZM', null)] })
+        .cuerpo,
+    ).toBe('Tramos movidos (hora Cancún): CUN → CZM sin fecha.');
   });
 
   it('aviso de reagenda: el MISMO texto que mandaba «Editar datos» del vuelo', () => {
@@ -273,6 +357,186 @@ describe('planAlinearFecha', () => {
     expect(plan.mover_traslado_final).toBe(false);
   });
 
+  describe('lo que la cotización ACABA de escribir no se vuelve a mover (revisión 5-oct)', () => {
+    const horas = (plan: ReturnType<typeof planAlinearFecha>) =>
+      plan.tramos.map((t) => fechaHoraCancun(t.fecha_salida_plan));
+
+    it('tramo final SIN fecha + regreso capturado en el mismo guardado (repro de la revisión)', () => {
+      // Antes: tramo 1 el 10-oct 09:00, tramo 2 sin fecha, sin regreso. La
+      // oficina guarda salida 15-oct 09:00 y regreso 17-oct 16:00: revise
+      // escribe fecha_vuelo=15, fecha_traslado_final=17 y LLENA el tramo 2
+      // con el regreso (`fechas.fin`). Antes del arreglo: t2 y regreso al 22.
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-15T14:00:00+00:00',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00+00:00'),
+          tramo('t2', 2, '2026-10-17T21:00:00+00:00'),
+        ],
+        fechaTrasladoFinal: '2026-10-17T21:00:00+00:00',
+      });
+      expect(plan.delta_dias).toBe(5);
+      expect(plan.mover).toEqual(['t1']);
+      expect(horas(plan)).toEqual(['2026-10-15 09:00', '2026-10-17 16:00']);
+      expect(plan.tramos[1].se_conserva).toBe('dia_del_regreso');
+      expect(plan.tramos[0].se_conserva).toBeNull();
+      expect(plan.mover_traslado_final).toBe(false);
+      expect(plan.fecha_traslado_final).toBe('2026-10-17T21:00:00+00:00');
+      expect(plan.ancla_id).toBe('t1');
+    });
+
+    it('la oficina movió salida Y regreso: los tramos siguen al regreso nuevo y el regreso no se toca', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-15T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-11T15:00:00.000Z'),
+          tramo('t3', 3, '2026-10-12T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-17T21:00:00.000Z',
+      });
+      expect(plan.mover).toEqual(['t1', 't2', 't3']);
+      expect(horas(plan)).toEqual([
+        '2026-10-15 09:00',
+        '2026-10-16 10:00',
+        '2026-10-17 16:00',
+      ]);
+      expect(plan.mover_traslado_final).toBe(false);
+    });
+
+    it('cambio de días hacia ATRÁS con el regreso nuevo capturado: el tramo llenado se queda', () => {
+      // t2 vacío; la oficina guarda salida 8-oct y regreso 9-oct 16:00.
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-08T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-09T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-09T21:00:00.000Z',
+      });
+      expect(plan.delta_dias).toBe(-2);
+      expect(horas(plan)).toEqual(['2026-10-08 09:00', '2026-10-09 16:00']);
+      expect(plan.mover_traslado_final).toBe(false);
+    });
+
+    it('viaje de UN día hacia atrás: se mueve completo, regreso incluido', () => {
+      // 71 de 79 vuelos con regreso lo tienen el mismo día de la salida.
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-09T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-10T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-10T21:00:00.000Z',
+      });
+      expect(plan.delta_dias).toBe(-1);
+      expect(horas(plan)).toEqual(['2026-10-09 09:00', '2026-10-09 16:00']);
+      expect(plan.mover_traslado_final).toBe(true);
+      expect(fechaHoraCancun(plan.fecha_traslado_final)).toBe(
+        '2026-10-09 16:00',
+      );
+    });
+
+    it('viaje de un día hacia atrás con el regreso YA movido por la oficina: el regreso no se toca', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-09T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-10T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-09T21:00:00.000Z',
+      });
+      expect(horas(plan)).toEqual(['2026-10-09 09:00', '2026-10-09 16:00']);
+      expect(plan.mover_traslado_final).toBe(false);
+    });
+
+    it('viaje de varios días acortado (el regreso de la cotización sigue después de la salida nueva): manda el regreso', () => {
+      // 10 → 12 en la operación; la cotización ahora dice 11 → 12.
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-11T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-12T15:00:00.000Z'),
+          tramo('t3', 3, '2026-10-12T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-12T21:00:00.000Z',
+      });
+      // Sin el arreglo t2 quedaba el 13 DESPUÉS de t3 (12), y el regreso
+      // de la cotización se reescribía al 13.
+      expect(horas(plan)).toEqual([
+        '2026-10-11 09:00',
+        '2026-10-12 10:00',
+        '2026-10-12 16:00',
+      ]);
+      expect(plan.tramos.map((t) => t.se_conserva)).toEqual([
+        null,
+        'dia_del_regreso',
+        'dia_del_regreso',
+      ]);
+      expect(plan.mover_traslado_final).toBe(false);
+    });
+
+    it('tramo 1 SIN fecha que revise llenó con la salida nueva: no es referencia; se recorre el resto', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-15T14:00:00+00:00',
+        tramos: [
+          tramo('t1', 1, '2026-10-15T14:00:00+00:00'),
+          tramo('t2', 2, '2026-10-12T21:00:00+00:00'),
+          tramo('t3', 3, '2026-10-13T21:00:00+00:00'),
+        ],
+      });
+      expect(plan.dia_referencia).toBe('2026-10-12');
+      expect(plan.delta_dias).toBe(3);
+      expect(plan.ancla_id).toBe('t2');
+      expect(plan.mover).toEqual(['t2', 't3']);
+      expect(plan.tramos[0].se_conserva).toBe('ya_en_la_fecha');
+      expect(horas(plan)).toEqual([
+        '2026-10-15 09:00',
+        '2026-10-15 16:00',
+        '2026-10-16 16:00',
+      ]);
+    });
+
+    it('control: tramo 1 ya alineado y el resto DESPUÉS ⇒ delta 0, nada se mueve', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-15T14:00:00+00:00',
+        tramos: [
+          tramo('t1', 1, '2026-10-15T14:00:00+00:00'),
+          tramo('t2', 2, '2026-10-17T21:00:00+00:00'),
+        ],
+      });
+      expect(plan.delta_dias).toBe(0);
+      expect(plan.mover).toEqual([]);
+      expect(plan.tramos.map((t) => t.se_conserva)).toEqual([null, null]);
+    });
+
+    it('regreso incoherente de antes (anterior a la salida nueva) con delta negativo: no se toca y no frena tramos', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-08T14:00:00.000Z',
+        tramos: [
+          tramo('t1', 1, '2026-10-10T14:00:00.000Z'),
+          tramo('t2', 2, '2026-10-11T21:00:00.000Z'),
+        ],
+        fechaTrasladoFinal: '2026-10-05T21:00:00.000Z',
+      });
+      expect(plan.mover).toEqual(['t1', 't2']);
+      expect(plan.mover_traslado_final).toBe(false);
+    });
+
+    it('sin referencia, el ancla es el primer tramo vivo', () => {
+      const plan = planAlinearFecha({
+        fechaObjetivo: '2026-10-12T16:15:00.000Z',
+        tramos: [tramo('t2', 2, null), tramo('t1', 1, null)],
+      });
+      expect(plan.ancla_id).toBe('t1');
+      expect(
+        planAlinearFecha({
+          fechaObjetivo: '2026-10-12T16:15:00.000Z',
+          tramos: [],
+        }).ancla_id,
+      ).toBeNull();
+    });
+  });
+
   it('acepta Date como objetivo y rechaza una fecha inválida', () => {
     expect(
       planAlinearFecha({
@@ -317,6 +581,7 @@ describe('respuestaAlinearFecha', () => {
           destino_iata: 'CZM',
           fecha_salida_plan_antes: '2026-10-10T14:00:00.000Z',
           fecha_salida_plan: '2026-10-15T14:00:00.000Z',
+          se_conserva: null,
           movido: true,
         },
         {
@@ -326,6 +591,7 @@ describe('respuestaAlinearFecha', () => {
           destino_iata: 'CZM',
           fecha_salida_plan_antes: '2026-10-12T21:00:00.000Z',
           fecha_salida_plan: '2026-10-12T21:00:00.000Z',
+          se_conserva: null,
           movido: false,
         },
       ],

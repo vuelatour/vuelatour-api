@@ -3831,59 +3831,100 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     una cotización con OTRA fecha, un modal pregunta si el vuelo operativo se
     mueve también (solo FECHA: la hora de cada tramo se edita desde el
     vuelo). `revise` NO cambió: escribe `vuelo.fecha_vuelo` y NO mueve los
-    tramos. Si la oficina dice «Sí», el panel llama
+    tramos — salvo los EXTREMOS que no tenían fecha, que `replaceEscalas`
+    llena con la salida/regreso NUEVOS (`fechas.inicio/fin`). Si la oficina
+    dice «Sí» (o usa la banda del detalle del vuelo), el panel llama
     `POST /v1/flights/:id/tramos/alinear-fecha` (ADMIN, COORDINADOR; 200;
-    `AlinearFechaTramosDto {fecha_vuelo?: ISO}` — el panel manda `{}` y
-    vale la `fecha_vuelo` persistida).
+    `AlinearFechaTramosDto {fecha_vuelo?}` — el panel manda `{}` y vale la
+    `fecha_vuelo` persistida). **REGLA RECTORA (revisión 5-oct-2026): el «Sí»
+    mueve el vuelo OPERATIVO y jamás reescribe lo que la cotización acaba de
+    guardar.**
     - **Plan PURO** `flights/alinear-fecha.util.ts#planAlinearFecha` (spec):
-      tramos VIVOS por `orden`; referencia = día Cancún del PRIMER tramo con
-      `fecha_salida_plan`; `delta_dias` = objetivo − referencia (días
-      calendario Cancún); cada tramo con fecha se mueve `delta` días
-      CONSERVANDO SU HORA DE PARED (`common/fecha-cancun.util#
-      moverDiasHoraParedCancun`: compensa el desfase, jamás 86 400 s a
-      ciegas; `diasEntreDiasCancun`); sin fecha se queda sin fecha. **Delta
-      0 ⇒ no escribe nada** (idempotente: un 2.º «Sí» o un reintento no
-      vuelve a sumar días). Sin ningún tramo con fecha, el primero recibe el
-      objetivo tal cual (`delta_dias: null`).
-    - **`fecha_traslado_final` se mueve `delta` días SOLO si estaba alineada
-      con la operación** (mismo día Cancún que el ÚLTIMO tramo vivo con
-      fecha, antes de mover). DESVIACIÓN CONSCIENTE del contrato («también
-      +delta»): `revise` ya escribe el regreso de la cotización, así que si
-      la oficina cambió salida Y regreso, el regreso ya dice el día nuevo y
-      moverlo otra vez lo desplazaría DOS veces. En prod (5-oct) 77 de los 79
-      vuelos con regreso lo tienen el mismo día que su último tramo.
-      `vuelo.fecha_vuelo` NO se toca (es lo que escribió la cotización).
+      tramos VIVOS por `orden`; **referencia** = primer tramo con
+      `fecha_salida_plan`, salvo que esté EXACTAMENTE en el instante objetivo
+      y algún tramo posterior tenga un día anterior (revise llenó el tramo 1
+      vacío con la salida nueva: `se_conserva: 'ya_en_la_fecha'`, no se mueve
+      y la referencia es el siguiente). `delta_dias` = objetivo − referencia
+      (días calendario Cancún, `diasEntreDiasCancun`); cada tramo que se
+      recorre CONSERVA SU HORA DE PARED (`common/fecha-cancun.util#
+      moverDiasHoraParedCancun`: jamás 86 400 s a ciegas); sin fecha se queda
+      sin fecha. **Delta 0 ⇒ no escribe nada** (idempotente). Sin ningún
+      tramo con fecha, el primero recibe el objetivo tal cual
+      (`delta_dias: null`).
+    - **El REGRESO (`fecha_traslado_final`) es de la COTIZACIÓN** («Fecha
+      traslado final» del formulario) y se RESPETA mientras sea coherente
+      (su día Cancún ≥ el día objetivo). Se recorre `delta` días SOLO si (a)
+      quedó ANTES de la salida nueva (`delta > 0`: la oficina olvidó el
+      regreso; en prod, 3 de los 79 vuelos con regreso de los últimos 120
+      días lo tienen así) o (b) el vuelo operativo era
+      de UN DÍA (todos los tramos con fecha y el regreso en el día de la
+      referencia): un viaje de un día se mueve completo, regreso incluido
+      (71 de esos 79 lo tienen el mismo día de la salida). Si
+      el regreso NO se mueve y es coherente, los tramos —salvo la
+      referencia— que YA están en su día se quedan (`se_conserva:
+      'dia_del_regreso'`): revise llenó el tramo final vacío con el regreso
+      nuevo, o la operación ya coincide. Bug que esto cierra (repro de la
+      revisión): t1 10-oct, t2 sin fecha, sin regreso; la oficina guardó
+      salida 15 y regreso 17-oct 16:00 ⇒ revise llenó t2 = 17 y el «Sí»
+      corría t2 Y el regreso de la cotización al 22 (15 de 63 vuelos
+      abiertos tenían el último tramo sin fecha ni regreso). Ambigüedad
+      aceptada: sin saber qué cambió la oficina en ESE guardado, un viaje de
+      varios días con el regreso intacto sigue a la cotización (acortarlo o
+      alargarlo no se adivina). El arreglo exacto exige que el panel mande
+      `tramos_antes` / `fecha_traslado_final_antes` (campos ADITIVOS, NO
+      implementados: la banda del detalle del vuelo no los tiene).
+      `vuelo.fecha_vuelo` NO se toca nunca (tampoco con `fecha_vuelo` en el
+      cuerpo: eso solo mueve la operación).
+    - **`fecha_vuelo` del cuerpo = instante ISO CON hora y zona**
+      (`RE_INSTANTE_ISO_CON_ZONA` + `MENSAJE_FECHA_VUELO_SIN_ZONA`, 400):
+      `@IsDateString` solo aceptaba «2026-10-13» (medianoche UTC = el 12 en
+      Cancún) y «2026-10-13T02:00» (TZ del servidor).
     - **Candados ANTES de escribir**: 404 `VUELO_NO_EXISTE`; 409
       `VUELO_CANCELADO`; 409 `VUELO_YA_VOLO` «La operación ya empezó: la
       fecha de cada tramo se edita desde el vuelo.» (fuente única
       `estadoVueloVolado`: EN_VUELO/COMPLETADO o algún tramo VIVO con
       tacómetro); 400 `SIN_FECHA`. Textos y errores en el util (con spec).
     - **Escritura con CAS por tramo** (`escribirFechaTramo`: fecha LEÍDA con
-      `aplicarCas` —o `is null`—, tramo vivo y SIN tacómetro): un tramo que
-      otra persona reagendó, o que capturó taco, entre la lectura y la
-      escritura NO se pisa (`movido: false`, no cuenta). Regreso con CAS
-      sobre `fecha_traslado_final`. Si la BD falla a medio camino, lo ya
-      movido se REGRESA (`revertirAlineacion`) y responde **503
-      `TRAMOS_NO_MOVIDOS`** (`details.revertido` dice si quedó algo a
-      medias). Se escribe primero el tramo de referencia: con la reversa
-      fallida, un reintento da delta 0 en vez de mover dos veces.
+      `aplicarCas` —o `is null`—, tramo vivo y SIN tacómetro). El tramo
+      **ANCLA** (`plan.ancla_id`: la referencia, o el que recibe el objetivo)
+      se escribe PRIMERO: si su CAS falla, el delta ya no vale ⇒ **409
+      `OPERACION_CAMBIO`** sin mover nada (antes movía el resto con un delta
+      viejo y respondía 200). Otro tramo que cambió entre la lectura y la
+      escritura NO se pisa (`movido: false`). Regreso con CAS sobre
+      `fecha_traslado_final`. Si la BD falla a medio camino, lo ya movido se
+      REGRESA (`revertirAlineacion`) y responde **503 `TRAMOS_NO_MOVIDOS`**
+      (`details.revertido`); a medias (`revertido: false`) se refrescan igual
+      permisos y Google. Con la reversa fallida un reintento da delta 0 (el
+      ancla ya está en el día nuevo) y los tramos que faltaron se corrigen a
+      mano desde el vuelo — lo dice el texto del 503.
     - **Después** (solo si algo se movió): `refreshPermisosDeVuelo`,
-      `calendar.syncFlight` y `notificarTripulacion` con el MISMO texto de
-      «Editar datos» — fuente única `avisoReagendaVuelo` («Vuelo #N
-      reagendado» · «CUN → CZM ahora sale <fechaCancunTxt> [y el REGRESO
-      ahora sale …] (hora Cancún).»), que `update` ahora también usa. Sin
-      tripulación, sin aviso.
+      `calendar.syncFlight` (`refrescarTrasAlinear`, nunca lanza) y un aviso
+      PROPIO a la tripulación `avisoOperacionMovida` («Vuelo #N: la operación
+      cambió de día» · «Tramos movidos (hora Cancún): CUN → HOL jue 15 oct
+      08:00 · HOL → CUN sáb 17 oct 16:00.», solo los tramos MOVIDOS, más de 4
+      ⇒ 3 y «y N más»; `tipo` de siempre `vuelo_asignado`). NO es el texto
+      de reagenda: `revise` ya mandó segundos antes «Vuelo #N reagendado ·
+      ahora sale <fecha de la cotización>» y repetirlo con la hora del tramo
+      daba al piloto dos «ahora sale» con horas distintas (desviación
+      consciente del contrato, que pedía el mismo texto). Es el SEGUNDO aviso
+      de la secuencia. `avisoReagendaVuelo` queda solo para «Editar datos»
+      (`update`); **revise conserva su PROPIA copia de esa plantilla**
+      (pendiente migrarla al helper cuando se toque revise). Sin tripulación,
+      sin aviso.
     - **Respuesta** `{vuelo_id, folio, delta_dias, fecha_objetivo, tramos
       [{id, orden, origen_iata, destino_iata, fecha_salida_plan_antes,
-      fecha_salida_plan, movido}], fecha_traslado_final, tramos_movidos}` +
-      ADITIVOS `fecha_traslado_final_antes` y `fecha_traslado_final_movida`.
-    - Specs: `alinear-fecha.util.spec`, `fecha-cancun.util.spec` (hora de
-      pared con el cambio de horario de Cancún 2014),
+      fecha_salida_plan, se_conserva, movido}], fecha_traslado_final,
+      tramos_movidos}` + ADITIVOS `fecha_traslado_final_antes`,
+      `fecha_traslado_final_movida` y `tramos[].se_conserva`.
+    - Specs: `alinear-fecha.util.spec` (incluye el repro de la revisión,
+      salida y regreso movidos, hacia atrás con el tramo llenado, viaje de un
+      día hacia atrás con y sin regreso movido, viaje acortado, tramo 1
+      llenado, regex del DTO y el aviso propio), `fecha-cancun.util.spec`,
       `flights.service.alinear-fecha.spec` (BD en memoria que interpreta los
-      filtros: ±delta, día Cancún, multi-día, regreso ya movido, sin fecha,
-      delta 0 sin escrituras, reintento, volado/cancelado sin escrituras,
-      CAS, reversa, aviso una vez) y `flights.controller.alinear-fecha.spec`
-      (HTTP real con RolesGuard). Deploy: API antes que panel (con un API
+      filtros: repro, 409 del ancla sin escrituras, 503 a medias con
+      refrescos, aviso solo con lo movido) y
+      `flights.controller.alinear-fecha.spec` (HTTP real con RolesGuard;
+      `fecha_vuelo` sin zona ⇒ 400). Deploy: API antes que panel (con un API
       viejo el «Sí» responde 404 y el panel lo explica).
 
 ## Convenciones NestJS
