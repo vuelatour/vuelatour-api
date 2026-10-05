@@ -25,14 +25,18 @@ export type CombustibleAeronave = (typeof COMBUSTIBLES)[number];
 /** Default de la columna (pistón): el de la mayoría de la flota. */
 export const COMBUSTIBLE_DEFAULT: CombustibleAeronave = 'AVGAS';
 
-/** 400 del DTO de aeronave cuando `combustible` no es del catálogo. */
-export const MENSAJE_COMBUSTIBLE_INVALIDO =
-  'El combustible del avión es AVGAS (pistón) o TURBOSINA (turbina).';
-
+/**
+ * Cómo lo llama el cliente (botón de la app, selector del panel, categoría
+ * «Gasavión / Turbosina»). Solo TEXTO para humanos: lo que se guarda en
+ * `gasto.tipo_combustible` / `aeronave.combustible` sigue siendo el código.
+ */
 const ETIQUETA: Record<CombustibleAeronave, string> = {
-  AVGAS: 'Avgas',
+  AVGAS: 'Gasavión',
   TURBOSINA: 'Turbosina',
 };
+
+/** 400 del DTO de aeronave cuando `combustible` no es del catálogo. */
+export const MENSAJE_COMBUSTIBLE_INVALIDO = `El combustible del avión es ${ETIQUETA.AVGAS} (pistón) o ${ETIQUETA.TURBOSINA} (turbina).`;
 
 /**
  * Valor de BD/DTO a `CombustibleAeronave` (sin espacios, mayúsculas) o
@@ -52,7 +56,7 @@ function elAvion(matricula: string | null | undefined): string {
   return m ? `el ${m}` : 'el avión';
 }
 
-/** «Avgas» / «Turbosina»; «—» si no se sabe. */
+/** «Gasavión» / «Turbosina»; «—» si no se sabe. */
 export function etiquetaCombustible(v: unknown): string {
   const c = normalizarCombustible(v);
   return c ? ETIQUETA[c] : '—';
@@ -93,7 +97,9 @@ export interface ResultadoTipoCombustible {
  *  - sin `delAvion` (avión sin dato o migración sin aplicar) ⇒ tal cual;
  *  - `capturado` vacío ⇒ se rellena con el del avión, sin nota;
  *  - igual ⇒ nada;
- *  - distinto ⇒ el del avión + nota «⚠ … — revisar» (`corregido`).
+ *  - distinto ⇒ el del avión + nota «⚠ … — revisar» (`corregido`), con
+ *    ETIQUETAS: «⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se
+ *    corrigió a Gasavión — revisar».
  */
 export function resolverTipoCombustible(
   entrada: EntradaTipoCombustible,
@@ -131,12 +137,13 @@ export function resolverTipoCombustible(
   const avion = elAvion(entrada.matricula);
   const origen =
     entrada.motivo === 'cambio_avion'
-      ? `el gasto traía ${capturado}`
-      : `se capturó ${capturado}`;
+      ? `el gasto traía ${ETIQUETA[capturado]}`
+      : `se capturó ${ETIQUETA[capturado]}`;
+  const final = ETIQUETA[delAvion];
   return {
     ...base,
     tipo: delAvion,
-    nota: `⚠ ${origen} pero ${avion} carga ${delAvion}: se corrigió a ${delAvion} — revisar`,
+    nota: `⚠ ${origen} pero ${avion} carga ${final}: se corrigió a ${final} — revisar`,
     corregido: true,
     rellenado: false,
   };
@@ -145,10 +152,21 @@ export function resolverTipoCombustible(
 /**
  * Renglón «⚠ … — revisar» que deja `resolverTipoCombustible` (forma EXACTA:
  * es la clave para leerlo y retirarlo). Grupo 3 = lo que va tras «el »: la
- * matrícula o «avión» cuando no la había.
+ * matrícula o «avión» cuando no la había. Los combustibles (grupos 2, 4 y
+ * 5) se validan con `combustibleDeNota`: la ETIQUETA vigente («Gasavión» /
+ * «Turbosina») o, por tolerancia, el código crudo de la primera forma
+ * («… carga AVGAS: se corrigió a AVGAS …»).
  */
 const NOTA_COMBUSTIBLE_RE =
-  /^⚠ (se capturó|el gasto traía) (AVGAS|TURBOSINA) pero el (.+?) carga (AVGAS|TURBOSINA): se corrigió a (AVGAS|TURBOSINA) — revisar$/;
+  /^⚠ (se capturó|el gasto traía) (\S+) pero el (.+?) carga (\S+): se corrigió a (\S+) — revisar$/;
+
+/** Combustible escrito en una nota ⚠ (etiqueta o código exacto) o null. */
+function combustibleDeNota(texto: string): CombustibleAeronave | null {
+  for (const c of COMBUSTIBLES) {
+    if (texto === c || texto === ETIQUETA[c]) return c;
+  }
+  return null;
+}
 
 /** Una nota de combustible leída de `gasto.notas`. */
 export interface NotaCombustible {
@@ -168,11 +186,15 @@ export function leerNotaCombustible(
 ): NotaCombustible | null {
   const m = NOTA_COMBUSTIBLE_RE.exec((linea ?? '').trim());
   if (!m) return null;
+  const capturado = combustibleDeNota(m[2]);
+  const delAvion = combustibleDeNota(m[4]);
+  const corregidoA = combustibleDeNota(m[5]);
+  if (!capturado || !delAvion || !corregidoA) return null;
   return {
     motivo: m[1] === 'se capturó' ? 'captura' : 'cambio_avion',
-    capturado: m[2] as CombustibleAeronave,
+    capturado,
     matricula: m[3] === 'avión' ? null : m[3],
-    corregidoA: m[5] as CombustibleAeronave,
+    corregidoA,
   };
 }
 
@@ -207,6 +229,73 @@ export function quitarNotaCombustible(
 /** Matrícula comparable (sin guiones/espacios, mayúsculas). */
 function matriculaComparable(m: string | null | undefined): string {
   return (m ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+/**
+ * ¿Dos notas de combustible dicen lo mismo? (sin importar si una está en la
+ * forma vieja con códigos y la otra con etiquetas).
+ */
+function mismaNotaCombustible(a: NotaCombustible, b: NotaCombustible) {
+  return (
+    a.motivo === b.motivo &&
+    a.capturado === b.capturado &&
+    a.corregidoA === b.corregidoA &&
+    matriculaComparable(a.matricula) === matriculaComparable(b.matricula)
+  );
+}
+
+/**
+ * Agrega la nota ⚠ de combustible SIN duplicarla: ni como renglón idéntico
+ * (`anexarLineaUnica`) ni como la MISMA nota escrita en la forma vieja con
+ * códigos («… carga AVGAS: se corrigió a AVGAS …»).
+ */
+function anexarNotaCombustible(
+  notas: string | null | undefined,
+  nota: string,
+): string {
+  const nueva = leerNotaCombustible(nota);
+  if (
+    nueva &&
+    notas &&
+    notasCombustible(notas).some((n) => mismaNotaCombustible(n, nueva))
+  ) {
+    return notas;
+  }
+  return anexarLineaUnica(notas, nota);
+}
+
+/**
+ * Renglón que arma la app al capturar una carga: «Combustible TURBOSINA · 74
+ * L · …» (código crudo al INICIO del renglón). El balance Excel por avión
+ * toma el detalle de la hoja «combustible» de `gasto.notas`, no de
+ * `tipo_combustible`: si la regla corrige el tipo y el renglón no, el Excel
+ * sigue diciendo «Combustible TURBOSINA» en el XB-PEV (síntoma del #280).
+ */
+const LINEA_COMBUSTIBLE_RE = /^Combustible (AVGAS|TURBOSINA)\b/;
+
+/**
+ * Reescribe el código del PRIMER renglón que empieza con «Combustible AVGAS»
+ * o «Combustible TURBOSINA» con `codigoFinal` (el combustible que quedó en
+ * el gasto). Una sola reescritura; no toca otros renglones ni un
+ * «Combustible …» a media línea. Sin ese renglón, si ya coincide o si
+ * `codigoFinal` no es del catálogo ⇒ `notas` intactas (misma referencia).
+ */
+export function reescribirLineaCombustible<T extends string | null | undefined>(
+  notas: T,
+  codigoFinal: unknown,
+): T {
+  const codigo = normalizarCombustible(codigoFinal);
+  if (!notas || !codigo) return notas;
+  const renglones = notas.split('\n');
+  const i = renglones.findIndex((r) => LINEA_COMBUSTIBLE_RE.test(r));
+  if (i < 0) return notas;
+  const reescrito = renglones[i].replace(
+    LINEA_COMBUSTIBLE_RE,
+    `Combustible ${codigo}`,
+  );
+  if (reescrito === renglones[i]) return notas;
+  renglones[i] = reescrito;
+  return renglones.join('\n') as T;
 }
 
 export interface EntradaCombustiblePatch {
@@ -247,6 +336,9 @@ export interface ResultadoCombustiblePatch {
  *  - El visto bueno se marca solo si la corrección es NUEVA: cambia el valor
  *    guardado o el PATCH mandó otro tipo. Mover la carga entre dos aviones
  *    del mismo combustible solo reescribe la nota con el avión nuevo.
+ *  - Cuando la regla corrige, o cuando se retiró la nota vieja por cambio de
+ *    avión, el renglón «Combustible AVGAS|TURBOSINA …» de la app queda con
+ *    el tipo FINAL (`reescribirLineaCombustible`) ANTES de anexar la nota ⚠.
  * Devuelve null si no hay contra qué comparar (avión sin dato).
  */
 export function ajustarCombustiblePatch(
@@ -281,10 +373,14 @@ export function ajustarCombustiblePatch(
     motivo,
   });
   const tipo = resultado.tipo ?? delAvion;
+  const conLinea =
+    resultado.corregido || cambioDeAvion
+      ? reescribirLineaCombustible(base, tipo)
+      : base;
   const notas =
     resultado.corregido && resultado.nota
-      ? anexarLineaUnica(base, resultado.nota)
-      : base;
+      ? anexarNotaCombustible(conLinea, resultado.nota)
+      : conLinea;
   return {
     tipo,
     notas: notas ?? null,

@@ -87,6 +87,7 @@ import {
   anexarLineaUnica,
   ajustarCombustiblePatch,
   avisoCombustibleCorregido,
+  reescribirLineaCombustible,
   resolverTipoCombustible,
   type ResultadoTipoCombustible,
 } from '../../common/combustible.util';
@@ -1529,8 +1530,11 @@ export class ExpensesService {
     // Ajuste del combustible al del avión (fuente única
     // `resolverTipoCombustible`): vacío ⇒ se rellena sin nota; distinto ⇒
     // se corrige, nota «⚠ … — revisar», visto bueno y aviso a oficina por el
-    // MISMO canal que la matrícula. Sin la columna (migración pendiente) o
-    // sin el avión en la lectura, se guarda tal cual.
+    // MISMO canal que la matrícula. Al corregir, el renglón de la app
+    // «Combustible TURBOSINA · 74 L · …» (de ahí sale el detalle del balance
+    // Excel por avión) se reescribe con el código del avión ANTES de anexar
+    // la nota. Sin la columna (migración pendiente) o sin el avión en la
+    // lectura, se guarda tal cual.
     let tipoCombustible: string | undefined = dto.tipo_combustible;
     let combustibleCorregido: {
       resultado: ResultadoTipoCombustible;
@@ -1545,7 +1549,10 @@ export class ExpensesService {
       });
       tipoCombustible = resultado.tipo ?? undefined;
       if (resultado.corregido && resultado.nota) {
-        notas = anexarLineaUnica(notas, resultado.nota);
+        notas = anexarLineaUnica(
+          reescribirLineaCombustible(notas, resultado.tipo),
+          resultado.nota,
+        );
         combustibleCorregido = {
           resultado,
           matricula: avionGas?.matricula ?? null,
@@ -3247,7 +3254,8 @@ export class ExpensesService {
    * (invariante 43, fuente única PURA `ajustarCombustiblePatch`). Escribe en
    * `cols` (el UPDATE que se va a mandar): `tipo_combustible` cuando cambia,
    * las notas (la corrección de OTRO avión se retira; la nueva se agrega SIN
-   * duplicarla) y `requiere_visto_bueno = true` solo con una corrección
+   * duplicarla; el renglón «Combustible AVGAS|TURBOSINA …» de la app queda
+   * con el tipo final) y `requiere_visto_bueno = true` solo con una corrección
    * NUEVA. Sin la columna (migración pendiente), sin avión o sin el avión en
    * la BD: no toca nada.
    *

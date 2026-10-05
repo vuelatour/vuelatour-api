@@ -64,7 +64,7 @@ const ESCALAS: Record<
 const matriculaDe = (id: string | null) =>
   FLOTA.find((a) => a.id === id)?.matricula ?? null;
 const LINEA_PEV =
-  '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+  '⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar';
 
 type Op = { m: string; a: unknown[] };
 type Consulta = { tabla: string; ops: Op[]; fin: 'then' | 'maybeSingle' };
@@ -292,7 +292,7 @@ describe('ExpensesService.create — combustible del avión', () => {
       tipo: 'alerta_sistema',
       titulo: 'Carga de combustible corregida',
       cuerpo:
-        'Se capturó Turbosina pero el XB-PEV carga Avgas (74 L · $2,738.50 MXN). Se guardó como Avgas y quedó para revisión.',
+        'Se capturó Turbosina pero el XB-PEV carga Gasavión (74 L · $2,738.50 MXN). Se guardó como Gasavión y quedó para revisión.',
       data: { gasto_id: 'g-nuevo', motivo: 'combustible_corregido' },
       link: '/admin/expenses',
     });
@@ -316,6 +316,42 @@ describe('ExpensesService.create — combustible del avión', () => {
       Rol.PILOTO,
     );
     expect(insertado(consultas).notas).toBe(`Carga en Chetumal\n${LINEA_PEV}`);
+  });
+
+  it('las notas de la app «Combustible TURBOSINA · 74 L · …» se reescriben con el código del avión ANTES de la nota ⚠', async () => {
+    const { service, consultas } = armar();
+    await service.create(
+      cargaPev({
+        notas: 'Combustible TURBOSINA · 74 L · CTM\nTarjeta ****0585',
+      }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    expect(insertado(consultas).notas).toBe(
+      `Combustible AVGAS · 74 L · CTM\nTarjeta ****0585\n${LINEA_PEV}`,
+    );
+  });
+
+  it('sin corrección el renglón «Combustible …» no se toca (ni con «Combustible» a media línea)', async () => {
+    const { service, consultas } = armar();
+    await service.create(
+      cargaPev({
+        tipo_combustible: TipoCombustible.AVGAS,
+        notas: 'Combustible AVGAS · 74 L · CTM',
+      }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    expect(insertado(consultas).notas).toBe('Combustible AVGAS · 74 L · CTM');
+    const otro = armar();
+    await otro.service.create(
+      cargaPev({ notas: 'Ticket con Combustible TURBOSINA · 74 L' }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    expect(insertado(otro.consultas).notas).toBe(
+      `Ticket con Combustible TURBOSINA · 74 L\n${LINEA_PEV}`,
+    );
   });
 
   it('tipo vacío ⇒ se rellena con el del avión, SIN nota, visto bueno ni aviso', async () => {
@@ -374,6 +410,23 @@ describe('ExpensesService.create — combustible del avión', () => {
       requiere_visto_bueno: true,
     });
     expect(notifyRole).not.toHaveBeenCalled();
+  });
+
+  it('carga masiva: la fila corregida también deja el renglón «Combustible …» con el código del avión', async () => {
+    const { service, consultas } = armar();
+    await service.create(
+      cargaPev({
+        vuelo_id: undefined,
+        aeronave_id: PEV,
+        notas: 'Combustible TURBOSINA · factura A-123',
+      }),
+      'u-admin',
+      Rol.ADMIN,
+      { notificar: false },
+    );
+    expect(insertado(consultas).notas).toBe(
+      `Combustible AVGAS · factura A-123\n${LINEA_PEV}`,
+    );
   });
 
   it('con matrícula leída por la IA: UNA sola lectura de flota sirve a las dos validaciones', async () => {
@@ -443,7 +496,7 @@ describe('ExpensesService.create — combustible del avión', () => {
     expect(q.tipo_combustible).toBe('TURBOSINA');
     expect(q.requiere_visto_bueno).toBe(true);
     expect(String(q.notas)).toContain(
-      '⚠ se capturó AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+      '⚠ se capturó Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
     );
   });
 
@@ -493,7 +546,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       tipo_combustible: 'TURBOSINA',
       requiere_visto_bueno: true,
       notas:
-        'Carga en Chetumal\n⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+        'Carga en Chetumal\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
     });
   });
 
@@ -544,6 +597,19 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       Rol.ADMIN,
     );
     expect(actualizado(consultas).notas).toBe(`Ticket 0585\n${LINEA_PEV}`);
+  });
+
+  it('la corrección reescribe el renglón «Combustible …» de la app con el tipo del avión', async () => {
+    const { service, consultas } = armar({
+      actual: { ...GAS_PEV, notas: 'Combustible AVGAS · 74 L · CTM' },
+    });
+    await service.update('g-1', { aeronave_id: N621TX }, 'u-admin', Rol.ADMIN);
+    expect(actualizado(consultas)).toMatchObject({
+      tipo_combustible: 'TURBOSINA',
+      requiere_visto_bueno: true,
+      notas:
+        'Combustible TURBOSINA · 74 L · CTM\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
+    });
   });
 
   it('tipo null ⇒ se rellena con el del avión, sin nota ni visto bueno', async () => {
@@ -610,7 +676,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       tipo_combustible: 'TURBOSINA',
       requiere_visto_bueno: true,
       notas:
-        'Carga en Chetumal\n⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+        'Carga en Chetumal\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
     });
   });
 
@@ -632,7 +698,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       tipo_combustible: 'AVGAS',
       requiere_visto_bueno: true,
       notas:
-        'Carga en Chetumal\n⚠ el gasto traía TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar',
+        'Carga en Chetumal\n⚠ el gasto traía Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar',
     });
   });
 
@@ -655,7 +721,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       tipo_combustible: 'AVGAS',
       requiere_visto_bueno: true,
       notas:
-        'Carga en Chetumal\n⚠ el gasto traía TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar',
+        'Carga en Chetumal\n⚠ el gasto traía Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar',
     });
   });
 
@@ -677,6 +743,23 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
     expect(u).not.toHaveProperty('requiere_visto_bueno');
   });
 
+  it('caso #280 al revés con el renglón de la app: al retirar la nota vieja el renglón queda con el tipo FINAL', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        notas: `Combustible AVGAS · 74 L · CTM\n${LINEA_PEV}`,
+        requiere_visto_bueno: true,
+      },
+    });
+    await service.update('g-1', { aeronave_id: N621TX }, 'u-admin', Rol.ADMIN);
+    const u = actualizado(consultas);
+    expect(u).toMatchObject({
+      tipo_combustible: 'TURBOSINA',
+      notas: 'Combustible TURBOSINA · 74 L · CTM',
+    });
+    expect(u).not.toHaveProperty('requiere_visto_bueno');
+  });
+
   it('mover la carga corregida a otro avión AVGAS ⇒ la nota se reescribe con el avión nuevo (sin apilar)', async () => {
     const { service, consultas } = armar({
       actual: {
@@ -688,7 +771,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
     await service.update('g-1', { aeronave_id: N4142R }, 'u-admin', Rol.ADMIN);
     const u = actualizado(consultas);
     expect(u.notas).toBe(
-      'Carga en Chetumal\n⚠ se capturó TURBOSINA pero el N4142R carga AVGAS: se corrigió a AVGAS — revisar',
+      'Carga en Chetumal\n⚠ se capturó Turbosina pero el N4142R carga Gasavión: se corrigió a Gasavión — revisar',
     );
     expect(u).not.toHaveProperty('tipo_combustible');
     expect(u).not.toHaveProperty('requiere_visto_bueno');
@@ -713,7 +796,7 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       tipo_combustible: 'TURBOSINA',
       requiere_visto_bueno: true,
       notas:
-        'Carga en Chetumal\n⚠ se capturó AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+        'Carga en Chetumal\n⚠ se capturó Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
     });
   });
 

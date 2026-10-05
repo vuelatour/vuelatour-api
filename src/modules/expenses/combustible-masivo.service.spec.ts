@@ -168,7 +168,7 @@ describe('CombustibleMasivoService — combustible del avión', () => {
     expect(distinto.errores).toEqual([]);
     expect(distinto.datos.tipo_combustible).toBe('TURBOSINA');
     expect(distinto.advertencias).toEqual([
-      'La fila dice Turbosina pero el XB-PEV carga Avgas: se guardará como Avgas y quedará marcada para revisión.',
+      'La fila dice Turbosina pero el XB-PEV carga Gasavión: se guardará como Gasavión y quedará marcada para revisión.',
     ]);
     expect(igual.advertencias).toEqual([]);
     expect(r.resumen).toMatchObject({ validas: 3, con_advertencia: 1 });
@@ -225,7 +225,7 @@ describe('CombustibleMasivoService — combustible del avión', () => {
       {
         fila: 2,
         aviso:
-          'La fila decía Turbosina pero el XB-PEV carga Avgas: se guardó como Avgas y quedó marcada para revisión.',
+          'La fila decía Turbosina pero el XB-PEV carga Gasavión: se guardó como Gasavión y quedó marcada para revisión.',
       },
     ]);
     // `create` recibe lo que trae la fila (él aplica la regla única) y sin push.

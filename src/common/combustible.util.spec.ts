@@ -11,6 +11,7 @@ import {
   normalizarCombustible,
   notasCombustible,
   quitarNotaCombustible,
+  reescribirLineaCombustible,
   resolverTipoCombustible,
 } from './combustible.util';
 
@@ -25,7 +26,7 @@ describe('combustible.util', () => {
     expect(COMBUSTIBLES).toEqual(['AVGAS', 'TURBOSINA']);
     expect(COMBUSTIBLE_DEFAULT).toBe('AVGAS');
     expect(MENSAJE_COMBUSTIBLE_INVALIDO).toBe(
-      'El combustible del avión es AVGAS (pistón) o TURBOSINA (turbina).',
+      'El combustible del avión es Gasavión (pistón) o Turbosina (turbina).',
     );
   });
 
@@ -39,8 +40,8 @@ describe('combustible.util', () => {
     expect(normalizarCombustible(3)).toBeNull();
   });
 
-  it('etiquetas es-MX', () => {
-    expect(etiquetaCombustible('AVGAS')).toBe('Avgas');
+  it('etiquetas es-MX: el cliente llama «Gasavión» al AVGAS', () => {
+    expect(etiquetaCombustible('AVGAS')).toBe('Gasavión');
     expect(etiquetaCombustible('TURBOSINA')).toBe('Turbosina');
     expect(etiquetaCombustible(null)).toBe('—');
     expect(etiquetaCombustible('X')).toBe('—');
@@ -55,7 +56,7 @@ describe('combustible.util', () => {
       });
       expect(r).toEqual({
         tipo: 'AVGAS',
-        nota: '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar',
+        nota: '⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar',
         corregido: true,
         rellenado: false,
         capturado: 'TURBOSINA',
@@ -114,7 +115,7 @@ describe('combustible.util', () => {
         resolverTipoCombustible({ capturado: 'AVGAS', delAvion: 'TURBOSINA' })
           .nota,
       ).toBe(
-        '⚠ se capturó AVGAS pero el avión carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+        '⚠ se capturó Gasavión pero el avión carga Turbosina: se corrigió a Turbosina — revisar',
       );
       expect(
         resolverTipoCombustible({
@@ -124,14 +125,14 @@ describe('combustible.util', () => {
           motivo: 'cambio_avion',
         }).nota,
       ).toBe(
-        '⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+        '⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
       );
     });
   });
 
   describe('anexarLineaUnica', () => {
     const linea =
-      '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+      '⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar';
     it('sin notas ⇒ la línea sola', () => {
       expect(anexarLineaUnica(null, linea)).toBe(linea);
       expect(anexarLineaUnica('', linea)).toBe(linea);
@@ -150,11 +151,11 @@ describe('combustible.util', () => {
 
   describe('notas de combustible: leer y quitar', () => {
     const PEV =
-      '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+      '⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar';
     const N621 =
-      '⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar';
+      '⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar';
     const SIN_MAT =
-      '⚠ se capturó AVGAS pero el avión carga TURBOSINA: se corrigió a TURBOSINA — revisar';
+      '⚠ se capturó Gasavión pero el avión carga Turbosina: se corrigió a Turbosina — revisar';
     const TRAMO =
       '⚠ el gasto se asignó a XB-PEV pero el tramo CTM→CUN lo voló N621TX: en balance y reparto cuenta al avión del tramo — revisar';
 
@@ -174,8 +175,33 @@ describe('combustible.util', () => {
       expect(leerNotaCombustible(SIN_MAT)?.matricula).toBeNull();
     });
 
+    it('tolerancia: también lee la forma vieja con códigos AVGAS/TURBOSINA', () => {
+      const VIEJA_PEV =
+        '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+      const VIEJA_N621 =
+        '⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar';
+      expect(leerNotaCombustible(VIEJA_PEV)).toEqual(leerNotaCombustible(PEV));
+      expect(leerNotaCombustible(VIEJA_N621)).toEqual(
+        leerNotaCombustible(N621),
+      );
+      expect(
+        quitarNotaCombustible(`Carga en Chetumal\n${VIEJA_PEV}\n${TRAMO}`),
+      ).toBe(`Carga en Chetumal\n${TRAMO}`);
+    });
+
     it('no confunde otras notas ⚠ ni texto libre', () => {
       expect(leerNotaCombustible(TRAMO)).toBeNull();
+      // Un combustible que no es etiqueta ni código exacto no es la nota.
+      expect(
+        leerNotaCombustible(
+          '⚠ se capturó Diesel pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar',
+        ),
+      ).toBeNull();
+      expect(
+        leerNotaCombustible(
+          '⚠ se capturó Turbosina pero el XB-PEV carga Avgas: se corrigió a Avgas — revisar',
+        ),
+      ).toBeNull();
       expect(leerNotaCombustible('Carga en Chetumal')).toBeNull();
       expect(leerNotaCombustible(`Nota: ${PEV}`)).toBeNull();
       expect(leerNotaCombustible(null)).toBeNull();
@@ -203,7 +229,7 @@ describe('combustible.util', () => {
 
   describe('ajustarCombustiblePatch (PATCH de una carga GAS)', () => {
     const PEV =
-      '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+      '⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar';
 
     it('caso #280 al revés: la carga corregida en el PEV se mueve al N621TX ⇒ vuelve a TURBOSINA, sin nota y sin otro visto bueno', () => {
       expect(
@@ -247,14 +273,14 @@ describe('combustible.util', () => {
       ).toMatchObject({
         tipo: 'AVGAS',
         notas:
-          'Carga en Chetumal\n⚠ se capturó TURBOSINA pero el N4142R carga AVGAS: se corrigió a AVGAS — revisar',
+          'Carga en Chetumal\n⚠ se capturó Turbosina pero el N4142R carga Gasavión: se corrigió a Gasavión — revisar',
         marcarVistoBueno: false,
       });
     });
 
     it('notas viejas con DOS líneas que se contradicen ⇒ se retiran ambas y manda la captura original', () => {
       const N621 =
-        '⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar';
+        '⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar';
       expect(
         ajustarCombustiblePatch({
           notas: `${PEV}\n${N621}`,
@@ -280,7 +306,7 @@ describe('combustible.util', () => {
       ).toMatchObject({
         tipo: 'TURBOSINA',
         notas:
-          'Carga en Chetumal\n⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+          'Carga en Chetumal\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
         marcarVistoBueno: true,
       });
     });
@@ -308,6 +334,100 @@ describe('combustible.util', () => {
       ).toMatchObject({ tipo: 'AVGAS', notas, marcarVistoBueno: false });
     });
 
+    it('corrige ⇒ el renglón «Combustible …» de la app queda con el tipo del avión ANTES de la nota ⚠', () => {
+      expect(
+        ajustarCombustiblePatch({
+          notas: 'Combustible TURBOSINA · 74 L · Chetumal',
+          guardado: 'AVGAS',
+          enviado: 'TURBOSINA',
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        }),
+      ).toMatchObject({
+        tipo: 'AVGAS',
+        notas: `Combustible AVGAS · 74 L · Chetumal\n${PEV}`,
+        marcarVistoBueno: true,
+      });
+      // Mover sin nota previa a un avión de otro combustible también corrige.
+      expect(
+        ajustarCombustiblePatch({
+          notas: 'Combustible AVGAS · 74 L · Chetumal',
+          guardado: 'AVGAS',
+          delAvion: 'TURBOSINA',
+          matricula: 'N621TX',
+        })?.notas,
+      ).toBe(
+        'Combustible TURBOSINA · 74 L · Chetumal\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
+      );
+    });
+
+    it('caso #280 al revés con el renglón de la app: se retira la nota y el renglón vuelve al tipo FINAL', () => {
+      expect(
+        ajustarCombustiblePatch({
+          notas: `Combustible AVGAS · 74 L · Chetumal\n${PEV}`,
+          guardado: 'AVGAS',
+          delAvion: 'TURBOSINA',
+          matricula: 'N621TX',
+        }),
+      ).toMatchObject({
+        tipo: 'TURBOSINA',
+        notas: 'Combustible TURBOSINA · 74 L · Chetumal',
+        marcarVistoBueno: false,
+      });
+      // A otro avión del MISMO combustible: el renglón ya coincide.
+      expect(
+        ajustarCombustiblePatch({
+          notas: `Combustible AVGAS · 74 L · Chetumal\n${PEV}`,
+          guardado: 'AVGAS',
+          delAvion: 'AVGAS',
+          matricula: 'N4142R',
+        })?.notas,
+      ).toBe(
+        'Combustible AVGAS · 74 L · Chetumal\n⚠ se capturó Turbosina pero el N4142R carga Gasavión: se corrigió a Gasavión — revisar',
+      );
+    });
+
+    it('sin corrección ni cambio de avión el renglón de la app NO se toca', () => {
+      const notas = 'Combustible TURBOSINA · 74 L · Chetumal';
+      expect(
+        ajustarCombustiblePatch({
+          notas,
+          guardado: 'AVGAS',
+          enviado: 'AVGAS',
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        })?.notas,
+      ).toBe(notas);
+    });
+
+    it('la MISMA nota en la forma vieja (códigos) no se duplica', () => {
+      const vieja =
+        '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
+      const notas = `Carga en Chetumal\n${vieja}`;
+      expect(
+        ajustarCombustiblePatch({
+          notas,
+          guardado: 'AVGAS',
+          enviado: 'TURBOSINA',
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        }),
+      ).toMatchObject({ tipo: 'AVGAS', notas, marcarVistoBueno: true });
+      // La vieja de OTRO avión se retira igual que la nueva.
+      expect(
+        ajustarCombustiblePatch({
+          notas,
+          guardado: 'AVGAS',
+          delAvion: 'TURBOSINA',
+          matricula: 'N621TX',
+        }),
+      ).toMatchObject({
+        tipo: 'TURBOSINA',
+        notas: 'Carga en Chetumal',
+        marcarVistoBueno: false,
+      });
+    });
+
     it('vacío ⇒ se rellena sin nota; avión sin dato ⇒ null (no se toca)', () => {
       expect(
         ajustarCombustiblePatch({
@@ -328,6 +448,71 @@ describe('combustible.util', () => {
     });
   });
 
+  describe('reescribirLineaCombustible (renglón «Combustible …» de la app)', () => {
+    it('reescribe SOLO el código del primer renglón que lo empieza', () => {
+      expect(
+        reescribirLineaCombustible(
+          'Combustible TURBOSINA · 74 L · Chetumal',
+          'AVGAS',
+        ),
+      ).toBe('Combustible AVGAS · 74 L · Chetumal');
+      expect(
+        reescribirLineaCombustible(
+          'Ticket 0585\nCombustible AVGAS · 120 L\nTarjeta ****0585',
+          'TURBOSINA',
+        ),
+      ).toBe('Ticket 0585\nCombustible TURBOSINA · 120 L\nTarjeta ****0585');
+      // Renglón que es SOLO el código.
+      expect(reescribirLineaCombustible('Combustible TURBOSINA', 'AVGAS')).toBe(
+        'Combustible AVGAS',
+      );
+    });
+
+    it('una sola reescritura: los renglones siguientes quedan como estaban', () => {
+      expect(
+        reescribirLineaCombustible(
+          'Combustible TURBOSINA · 74 L\nCombustible TURBOSINA · 20 L',
+          'AVGAS',
+        ),
+      ).toBe('Combustible AVGAS · 74 L\nCombustible TURBOSINA · 20 L');
+    });
+
+    it('sin renglón, ya coincide o código inválido ⇒ intacto (misma referencia)', () => {
+      const sinRenglon = 'Carga en Chetumal\nTarjeta ****0585';
+      expect(reescribirLineaCombustible(sinRenglon, 'AVGAS')).toBe(sinRenglon);
+      const coincide = 'Combustible AVGAS · 74 L\nCombustible TURBOSINA · 20 L';
+      expect(reescribirLineaCombustible(coincide, 'AVGAS')).toBe(coincide);
+      const original = 'Combustible TURBOSINA · 74 L';
+      expect(reescribirLineaCombustible(original, 'DIESEL')).toBe(original);
+      expect(reescribirLineaCombustible(original, null)).toBe(original);
+      expect(reescribirLineaCombustible(null, 'AVGAS')).toBeNull();
+      expect(reescribirLineaCombustible(undefined, 'AVGAS')).toBeUndefined();
+      expect(reescribirLineaCombustible('', 'AVGAS')).toBe('');
+    });
+
+    it('no toca «Combustible …» a media línea, otra palabra ni la nota ⚠', () => {
+      const medio = 'Pagado en efectivo. Combustible TURBOSINA · 74 L';
+      expect(reescribirLineaCombustible(medio, 'AVGAS')).toBe(medio);
+      const sangria = '  Combustible TURBOSINA · 74 L';
+      expect(reescribirLineaCombustible(sangria, 'AVGAS')).toBe(sangria);
+      const otraPalabra = 'Combustible TURBOSINAS de prueba';
+      expect(reescribirLineaCombustible(otraPalabra, 'AVGAS')).toBe(
+        otraPalabra,
+      );
+      const minusculas = 'combustible turbosina · 74 L';
+      expect(reescribirLineaCombustible(minusculas, 'AVGAS')).toBe(minusculas);
+      const conNota =
+        'Carga en Chetumal\n⚠ se capturó Turbosina pero el XB-PEV carga Gasavión: se corrigió a Gasavión — revisar';
+      expect(reescribirLineaCombustible(conNota, 'TURBOSINA')).toBe(conNota);
+    });
+
+    it('acepta el código en minúsculas como destino y escribe el código canónico', () => {
+      expect(
+        reescribirLineaCombustible('Combustible AVGAS · 74 L', ' turbosina '),
+      ).toBe('Combustible TURBOSINA · 74 L');
+    });
+  });
+
   it('aviso a oficina con litros, monto y etiquetas (el cuerpo no repite el título)', () => {
     const resultado = resolverTipoCombustible({
       capturado: 'TURBOSINA',
@@ -345,14 +530,14 @@ describe('combustible.util', () => {
     ).toEqual({
       titulo: 'Carga de combustible corregida',
       cuerpo:
-        'Se capturó Turbosina pero el XB-PEV carga Avgas (74 L · $2,738.50 MXN). Se guardó como Avgas y quedó para revisión.',
+        'Se capturó Turbosina pero el XB-PEV carga Gasavión (74 L · $2,738.50 MXN). Se guardó como Gasavión y quedó para revisión.',
     });
     // Sin litros ni matrícula.
     expect(
       avisoCombustibleCorregido({ resultado, monto: 1200, moneda: 'USD' })
         .cuerpo,
     ).toBe(
-      'Se capturó Turbosina pero el avión carga Avgas ($1,200 USD). Se guardó como Avgas y quedó para revisión.',
+      'Se capturó Turbosina pero el avión carga Gasavión ($1,200 USD). Se guardó como Gasavión y quedó para revisión.',
     );
   });
 
@@ -362,10 +547,10 @@ describe('combustible.util', () => {
       delAvion: 'AVGAS',
     });
     expect(avisoFilaCombustible(corregido, 'XB-PEV', 'preview')).toBe(
-      'La fila dice Turbosina pero el XB-PEV carga Avgas: se guardará como Avgas y quedará marcada para revisión.',
+      'La fila dice Turbosina pero el XB-PEV carga Gasavión: se guardará como Gasavión y quedará marcada para revisión.',
     );
     expect(avisoFilaCombustible(corregido, 'XB-PEV', 'guardada')).toBe(
-      'La fila decía Turbosina pero el XB-PEV carga Avgas: se guardó como Avgas y quedó marcada para revisión.',
+      'La fila decía Turbosina pero el XB-PEV carga Gasavión: se guardó como Gasavión y quedó marcada para revisión.',
     );
     const relleno = resolverTipoCombustible({
       capturado: null,

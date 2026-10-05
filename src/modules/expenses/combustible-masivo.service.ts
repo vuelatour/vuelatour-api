@@ -293,7 +293,8 @@ export class CombustibleMasivoService {
         creados += 1;
         // COMBUSTIBLE DEL AVIÓN (invariante 43): `create` ya ajustó la carga
         // al combustible del avión de la matrícula (misma regla que la app y
-        // el panel). Una fila corregida NO se rechaza: se reporta con el
+        // el panel, incluido el renglón «Combustible AVGAS|TURBOSINA …» de
+        // las notas). Una fila corregida NO se rechaza: se reporta con el
         // valor que de verdad quedó guardado.
         const corregida = avisoFilaCombustible(
           resolverTipoCombustible({
