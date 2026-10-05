@@ -8,7 +8,9 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { SupabaseService } from '../supabase/supabase.service';
+import { Cron } from '@nestjs/schedule';
 import { columnaOpcional } from '../../common/columna-opcional.util';
+import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
 import { FacturaClienteService } from '../flights/factura-cliente.service';
 import { normalizarTc, totalMxnDeVuelo } from '../../common/tc.util';
 import { SEGUNDOS_URL_PUNTUAL } from '../../common/url-firmada.util';
@@ -21,6 +23,13 @@ import {
   type TimbrarResult,
 } from './facturacion.client';
 import type { UpdateRecibidaDto } from './dto/invoices.dto';
+import {
+  camposSerieFolioInsert,
+  clasificarFalloRelectura,
+  notasConFolioNoLegible,
+  RELECTURA_FOLIO_LOTE,
+  serieFolioDelCfdi,
+} from './recibida-folio.util';
 
 interface ListPendientesFilters {
   desde?: string;
@@ -156,6 +165,25 @@ const RECIBIDA_COLS =
  */
 const MIGRACION_PDF_RECIBIDA = '20260923000001';
 
+/**
+ * Resultado de UNA corrida del cron `recibidas-releer-folio` (5-oct-2026):
+ * cuántas facturas leyó y qué pasó con cada una (log + specs).
+ */
+export interface ResumenRelecturaFolio {
+  /** `false` = la migración 20261005000002 no está aplicada: no hizo nada. */
+  disponible: boolean;
+  /** Filas tomadas del buzón (≤ RELECTURA_FOLIO_LOTE). */
+  leidas: number;
+  /** Selladas con folio (serie opcional). */
+  con_folio: number;
+  /** Selladas sin folio (el CFDI no trae Serie/Folio). */
+  sin_folio: number;
+  /** Selladas como ilegibles (XML roto o ausente) con la nota. */
+  ilegibles: number;
+  /** NO selladas: pyservices/Storage caído o pyservices viejo. */
+  reintentar: number;
+}
+
 /** El embed de gastos amarrados, igual en todas las respuestas de recibidas. */
 const RECIBIDA_EMBED_GASTOS =
   'gastos:gasto!factura_recibida_id(id, categoria, monto, moneda, fecha_gasto, vuelo_id, lugar)';
@@ -256,11 +284,23 @@ export class InvoicesService {
     ).disponible();
   }
 
+  /**
+   * ¿Existen ya `factura_recibida.serie/folio/folio_releido_at`? (migración
+   * 20261005000002; sonda ÚNICA `common/serie-folio-recibida-disponible`).
+   */
+  private conSerieFolioRecibida(): Promise<boolean> {
+    return serieFolioRecibidaDisponible(this.supabase.service);
+  }
+
   /** Columnas de `factura_recibida` según lo que exista en la BD. */
   private async colsRecibida(): Promise<string> {
-    return (await this.conPdfRecibida())
-      ? `${RECIBIDA_COLS}, pdf_url`
-      : RECIBIDA_COLS;
+    const [conPdf, conSerie] = await Promise.all([
+      this.conPdfRecibida(),
+      this.conSerieFolioRecibida(),
+    ]);
+    // ADITIVAS y al final: `pdf_url` (20260923000001) y `serie`, `folio`
+    // (20261005000002, 5-oct-2026: número de la factura del proveedor).
+    return `${RECIBIDA_COLS}${conPdf ? ', pdf_url' : ''}${conSerie ? ', serie, folio' : ''}`;
   }
 
   /** Sube un XML recibido: lo parsea, lo guarda en Storage e inserta la fila. */
@@ -294,6 +334,12 @@ export class InvoicesService {
         fecha_emision: p.fecha_emision,
         conceptos_resumen: p.conceptos_resumen,
         xml_url: path,
+        // ADITIVOS (5-oct-2026): serie/folio del CFDI, ya leídos del XML.
+        ...camposSerieFolioInsert(
+          p as unknown as Record<string, unknown>,
+          await this.conSerieFolioRecibida(),
+          new Date().toISOString(),
+        ),
         created_by: userId,
         updated_by: userId,
       })
@@ -589,6 +635,12 @@ export class InvoicesService {
           conceptos_resumen: p?.conceptos_resumen ?? null,
           xml_url: xmlPath,
           ...(conPdf ? { pdf_url: pdfPath } : {}),
+          // ADITIVOS (5-oct-2026): serie/folio del CFDI (solo con XML).
+          ...camposSerieFolioInsert(
+            p as unknown as Record<string, unknown> | null,
+            await this.conSerieFolioRecibida(),
+            new Date().toISOString(),
+          ),
           // Nace amarrada: llegó desde la fila de un gasto concreto.
           estado: 'CLASIFICADA',
           gasto_id: dto.gasto_id,
@@ -673,6 +725,164 @@ export class InvoicesService {
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Factura recibida ${id} not found`);
     return data as unknown as Record<string, unknown>;
+  }
+
+  // ===== Relectura del folio de las recibidas ya guardadas (5-oct-2026) =====
+
+  /** Candado en proceso: una relectura a la vez (una instancia de Railway ⇒
+   *  el mutex en memoria basta, como los crones de `alerts`). */
+  private relecturaFolioEnCurso = false;
+
+  /**
+   * RELECTURA DEL FOLIO (5-oct-2026, API 0.0.57, invariante 44). Pedido del
+   * cliente: el número de la factura en la columna «Notas» del Excel de
+   * conciliación. Las 62 recibidas de prod se registraron cuando el parser
+   * no leía `Serie`/`Folio`; este cron relee su XML guardado y las rellena
+   * (59 con XML ⇒ ≤ 2 corridas; las 3 solo-PDF no tienen nada que leer).
+   *
+   * Reglas:
+   * - Solo con la migración 20261005000002 (sonda): sin ella, no hace nada.
+   * - Toma hasta `RELECTURA_FOLIO_LOTE` filas con `xml_url` y
+   *   `folio_releido_at is null` (las más viejas primero).
+   * - Leída ⇒ `serie`, `folio`, `folio_releido_at = now()` (con o sin
+   *   folio: un CFDI sin Serie/Folio no se reintenta eternamente).
+   * - XML ilegible (pyservices 400/422) o ausente en Storage ⇒ se sella y se
+   *   anota «Folio no legible del XML» al final de `notas`.
+   * - pyservices caído/lento/sin configurar o VIEJO (sin las llaves
+   *   serie/folio) ⇒ NO se sella y se corta la corrida (todas fallarían
+   *   igual): el siguiente tick reintenta. Un error de red de Storage solo
+   *   salta ESA fila.
+   * - El UPDATE lleva `folio_releido_at is null` (CAS): jamás pisa una fila
+   *   que otro camino ya selló.
+   * Nunca lanza: un fallo se registra con `warn`.
+   */
+  @Cron('*/10 * * * *', { name: 'recibidas-releer-folio' })
+  async releerFoliosRecibidas(): Promise<ResumenRelecturaFolio | null> {
+    if (this.relecturaFolioEnCurso) return null;
+    this.relecturaFolioEnCurso = true;
+    try {
+      return await this.releerFoliosRecibidasLote();
+    } catch (err) {
+      this.logger.warn(
+        `releerFoliosRecibidas falló: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    } finally {
+      this.relecturaFolioEnCurso = false;
+    }
+  }
+
+  private async releerFoliosRecibidasLote(): Promise<ResumenRelecturaFolio> {
+    const resumen: ResumenRelecturaFolio = {
+      disponible: false,
+      leidas: 0,
+      con_folio: 0,
+      sin_folio: 0,
+      ilegibles: 0,
+      reintentar: 0,
+    };
+    if (!(await this.conSerieFolioRecibida())) return resumen;
+    resumen.disponible = true;
+    const sb = this.supabase.service;
+    const { data, error } = await sb
+      .from('factura_recibida')
+      .select('id, xml_url, notas')
+      .not('xml_url', 'is', null)
+      .is('folio_releido_at', null)
+      .order('created_at', { ascending: true })
+      .limit(RELECTURA_FOLIO_LOTE);
+    if (error) throw new Error(error.message);
+    const filas = (data ?? []) as Array<{
+      id: string;
+      xml_url: string | null;
+      notas: string | null;
+    }>;
+
+    /** UPDATE con CAS; `false` si la BD lo rechazó (se reintenta). */
+    const sellar = async (
+      id: string,
+      patch: Record<string, unknown>,
+    ): Promise<boolean> => {
+      const { error: uErr } = await sb
+        .from('factura_recibida')
+        .update(patch)
+        .eq('id', id)
+        .is('folio_releido_at', null);
+      if (uErr) {
+        this.logger.warn(
+          `Relectura de folio: no se pudo guardar la factura ${id}: ${uErr.message}`,
+        );
+        return false;
+      }
+      return true;
+    };
+
+    for (const fila of filas) {
+      if (!fila.xml_url) continue;
+      resumen.leidas += 1;
+      let parsed: Record<string, unknown>;
+      try {
+        const b64 = await this.downloadB64('facturas', fila.xml_url);
+        try {
+          parsed = (await this.pyservices.parseFacturaRecibida(
+            b64,
+          )) as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (clasificarFalloRelectura(err) === 'TRANSITORIO') {
+            // pyservices caído: las demás fallarían igual ⇒ siguiente tick.
+            resumen.reintentar += 1;
+            this.logger.warn(
+              `Relectura de folio pausada (pyservices): ${err instanceof Error ? err.message : String(err)}`,
+            );
+            break;
+          }
+          throw err;
+        }
+      } catch (err) {
+        if (clasificarFalloRelectura(err) === 'TRANSITORIO') {
+          // Storage con un error de red: solo se salta ESTA fila.
+          resumen.reintentar += 1;
+          this.logger.warn(
+            `Relectura de folio: factura ${fila.id} sin leer (se reintenta): ${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
+        const ok = await sellar(fila.id, {
+          folio_releido_at: new Date().toISOString(),
+          notas: notasConFolioNoLegible(fila.notas),
+        });
+        if (ok) resumen.ilegibles += 1;
+        else resumen.reintentar += 1;
+        this.logger.warn(
+          `Relectura de folio: factura ${fila.id} con XML ilegible: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
+      const sf = serieFolioDelCfdi(parsed);
+      if (!sf.leido) {
+        // pyservices anterior al 5-oct: no lee Serie/Folio. Sellar aquí
+        // dejaría la factura sin folio PARA SIEMPRE.
+        resumen.reintentar += 1;
+        this.logger.warn(
+          'Relectura de folio pausada: pyservices todavía no devuelve serie/folio (actualizarlo)',
+        );
+        break;
+      }
+      const ok = await sellar(fila.id, {
+        serie: sf.serie,
+        folio: sf.folio,
+        folio_releido_at: new Date().toISOString(),
+      });
+      if (!ok) resumen.reintentar += 1;
+      else if (sf.folio) resumen.con_folio += 1;
+      else resumen.sin_folio += 1;
+    }
+    if (resumen.leidas > 0) {
+      this.logger.log(
+        `Relectura de folio de recibidas: ${resumen.leidas} leídas · ${resumen.con_folio} con folio · ${resumen.sin_folio} sin folio · ${resumen.ilegibles} ilegibles · ${resumen.reintentar} por reintentar`,
+      );
+    }
+    return resumen;
   }
 
   async deleteRecibida(id: string) {

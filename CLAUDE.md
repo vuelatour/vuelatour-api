@@ -4076,6 +4076,89 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `aircraft.service.combustible.spec` y `dto/create-aeronave.dto.spec`.
       Deploy: migración → API → panel → app.
 
+44. **NÚMERO DE FACTURA DEL GASTO EN CONCILIACIÓN (5-oct-2026, API 0.0.57,
+    migración `20261005000002`).** Pedido del cliente con la captura del
+    Excel de conciliación: «al momento de la conciliación me apoyan a poner
+    el número de la factura con la que se enlaza el movimiento. Aquí en
+    notas estaría perfecto» (la columna «Notas» salía vacía).
+    - **Fuente única PURA** `common/folio-comprobante.util.ts` (spec):
+      `folioComprobanteDeGasto({folio_ticket, ia_folio, factura})` con esta
+      prioridad: (1) factura recibida ligada (`gasto.factura_recibida_id`)
+      con `folio` ⇒ `[serie, folio].join('-')` («A-0411»,
+      «FEACZM-72128»); (2) `gasto.folio_ticket` recortado; (3)
+      `valor_ia_extraido->>folio` (lectura IA no persistida); (4) factura con
+      `uuid_fiscal` ⇒ «CFDI <uuid>»; (5) null. `folioComprobanteDeFila`
+      (fila cruda de PostgREST, embed objeto o arreglo), `embedFolioGasto
+      (conSerieFolio)` (las columnas que hay que pedir del gasto:
+      `folio_ticket, ia_folio:valor_ia_extraido->>folio,
+      factura:factura_recibida!factura_recibida_id(serie, folio,
+      uuid_fiscal)`; sin la migración la factura pide SOLO `uuid_fiscal`),
+      `conFolioComprobante(g)` (agrega `folio_comprobante` y RETIRA los
+      campos crudos: la respuesta crece en UN campo),
+      `etiquetaFacturasReporte(folios)` (1 ⇒ «Factura X»; N ⇒ «Facturas X ·
+      Y», sin vacíos ni duplicados; 0 ⇒ null) y `notasReporteConFactura
+      (etiqueta, notasBanco)` (etiqueta PRIMERO, « · », y sin factura la nota
+      del banco BYTE A BYTE como el 0.0.56). **Nadie más arma el número.**
+    - **Excel de conciliación** (`reporteXlsx`): el embed del gasto 1 ↔ 1 y
+      `GASTO_PARTE_REPORTE_COLS` (lotes) llevan `embedFolioGasto`; «Notas» =
+      `notasReporteConFactura(etiquetaFacturasReporte(folios de los gastos
+      ligados), m.notas)` — un lote lista el de cada gasto en el orden de sus
+      partes, sin duplicar. Cobros, ingresos, clasificaciones, reversos y
+      gastos sin número: la nota del banco como hoy. «Gastos sin banco»
+      (`reporteGastosSinBancoXlsx`) gana la columna «Factura» AL FINAL (el
+      resalte naranja sigue en la col 7 = Monto).
+    - **Panel al conciliar (aditivos)**: `GET /v1/conciliacion/movimientos`
+      ⇒ `gasto.folio_comprobante` y cada `gastos[].folio_comprobante` del
+      lote; `GET movimientos/:id/gastos-candidatos` y `sugerir` /
+      `sugerir-lote` ⇒ cada candidato con `folio_comprobante`
+      (`aCandidatoGasto`; `gastoRicoCols()` = `GASTO_RICO_COLS` + embed). El
+      candidato viaja a pyservices `/conciliacion/sugerir` con el campo de
+      más: pydantic lo IGNORA (extra por default).
+    - **Facturas recibidas**: `factura_recibida.serie`, `.folio`,
+      `.folio_releido_at` (migración 20261005000002). pyservices
+      `parse_cfdi` devuelve `serie`/`folio` (atributos del Comprobante,
+      recortados, vacío ⇒ null); `FacturaRecibidaParsed.serie?/folio?`
+      ADITIVOS. **Sonda ÚNICA** `common/serie-folio-recibida-disponible.util`
+      (`serieFolioRecibidaDisponible` = `columnaOpcional(factura_recibida.
+      serie)`; las 3 columnas entran en UN ALTER). **REGLA DURA: todo
+      select/insert/update que nombre esas columnas va detrás de ella**
+      (conciliación incluida: el embed de la factura). Con la columna,
+      `crearRecibida` y `crearRecibidaDeGasto` (con XML) insertan `serie`,
+      `folio` y `folio_releido_at = now()` (`recibida-folio.util#
+      camposSerieFolioInsert`), y `colsRecibida()` devuelve `serie, folio`
+      en lista/detalle. **Un pyservices VIEJO** (respuesta SIN las llaves
+      `serie`/`folio`) deja `folio_releido_at` null: sellar diría «ya se
+      leyó» y la factura quedaría sin folio para siempre. Un amarre a una
+      factura YA registrada (mismo UUID) no la relee: lo hace el cron.
+    - **Cron `recibidas-releer-folio`** (`*/10 * * * *`,
+      `InvoicesService.releerFoliosRecibidas`, candado en memoria como los
+      de `alerts`): con la sonda en «sí», toma hasta 50
+      (`RELECTURA_FOLIO_LOTE`) filas con `xml_url` y `folio_releido_at is
+      null` (las más viejas primero), descarga el XML
+      (`downloadB64('facturas', xml_url)`), lo parsea y escribe `serie`,
+      `folio`, `folio_releido_at = now()` con CAS `folio_releido_at is
+      null` (jamás pisa una fila sellada). CFDI sin Serie/Folio ⇒ sellado
+      sin folio (no se reintenta eternamente). `clasificarFalloRelectura`:
+      pyservices 400/422 (XML roto, DTD) o «Object not found» de Storage ⇒
+      ILEGIBLE: se sella y `notas` += «Folio no legible del XML»
+      (`notasConFolioNoLegible`, línea nueva, sin duplicar). pyservices
+      caído/lento/sin configurar/5xx/401 o VIEJO ⇒ NO se sella y se CORTA
+      la corrida (todas fallarían igual); un error de red de Storage solo
+      salta esa fila. Las 3 recibidas solo-PDF de prod quedan sin folio
+      (nada que leer). En prod (5-oct): 62 recibidas, 59 con XML ⇒ ≤ 2
+      corridas.
+    - Specs: `folio-comprobante.util.spec`,
+      `serie-folio-recibida-disponible.util.spec`,
+      `facturacion/recibida-folio.util.spec`,
+      `facturacion/invoices.service.recibida-folio.spec` (cron: sin
+      migración, relleno, sin Serie/Folio, ilegible con nota, XML ausente,
+      red de Storage, pyservices caído, pyservices viejo, lote de 50, CAS y
+      candado; altas con/sin migración, pyservices viejo, solo PDF) y el
+      bloque «NÚMERO DE FACTURA» de `conciliacion.service.lote.spec` (Notas
+      1 ↔ 1 y lote, «CFDI <uuid>», «Factura» de gastos sin banco, lista y
+      candidatos con `folio_comprobante`, sin la migración ninguna consulta
+      nombra `serie`). Deploy: pyservices → migración → API → panel.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -4781,6 +4864,32 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
+- **PENDIENTE DE APLICAR** — `20261005000002_factura_recibida_serie_folio.sql`
+  (invariante 44): `factura_recibida.serie text null`, `.folio text null`,
+  `.folio_releido_at timestamptz null` en UN `ALTER` (idempotente) +
+  COMMENTs + verificación `do $ver$` que aborta si alguna no quedó con su
+  tipo. Sin triggers, funciones, índices ni backfill (los UPDATE del cron
+  disparan el `trg_factura_recibida_set_updated_at` existente). **Antes de
+  aplicar**: el DRY-RUN de su cabecera (UNA sentencia `do $dry$`, se
+  ejecuta quitando el prefijo «-- »): A contexto (sin las 3 columnas; cuenta
+  recibidas y con XML), B cuerpo real, C1 tipos/nulabilidad/sin default y
+  TODAS las existentes con XML pendientes, C2 alta REAL como el 0.0.57
+  (serie/folio sellados), C3 alta REAL como el 0.0.56 (pendiente) y
+  solo-PDF fuera del lote del cron, C4 UPDATE REAL del cron con CAS (la
+  segunda escritura no pisa), C5 ilegible REAL sobre una pendiente con notas
+  («Proveedor X\nFolio no legible del XML») y PATCH del panel, C6
+  re-aplicar = no-op ⇒ `DRYRUN_OK`; después las columnas NO existen y no
+  queda ningún `DRYRUN-20261005000002-%`. Probado en PGlite (5-oct):
+  `DRYRUN_OK · 62 recibidas, 59 por releer` sin residuos, aplicar dos veces
+  idempotente, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`, verificación
+  que aborta con una columna de otro tipo y rollback. Tras aplicar:
+  `get_advisors` y, con el API 0.0.57 y pyservices con serie/folio
+  desplegados, `select count(*) from factura_recibida where xml_url is not
+  null and folio_releido_at is null` baja de 59 a 0 en ≤ 2 corridas del
+  cron (la sonda re-sondea en ≤ 10 min). El API 0.0.57 es desplegable
+  ANTES (sin la columna: recibidas como el 0.0.56, cron inactivo, folio de
+  ticket/IA/UUID en conciliación). Rollback al pie del archivo (reiniciar
+  el API después). El orquestador marca aquí la aplicación.
 - **APLICADA (5-oct-2026 vía MCP, tras DRYRUN_OK de la cabecera en prod; sin
   residuos; advisors sin hallazgos nuevos; 82 cargas GAS con tipo null
   rellenadas con el combustible de su avión, ids en el scratchpad de la

@@ -49,6 +49,14 @@ import {
   esPartesAusentes,
   partesDisponibles,
 } from '../../common/partes-disponible.util';
+import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
+import {
+  conFolioComprobante,
+  embedFolioGasto,
+  etiquetaFacturasReporte,
+  folioComprobanteDeFila,
+  notasReporteConFactura,
+} from '../../common/folio-comprobante.util';
 import { patronIlikeSeguro } from '../facturas-emitidas/facturas-emitidas.util';
 import {
   CATEGORIAS_INGRESO,
@@ -386,6 +394,12 @@ export interface SugerenciaConciliacion {
     matricula?: string | null;
     vuelo_folio?: number | null;
     capturado_por?: string | null;
+    /**
+     * ADITIVO (5-oct-2026, API 0.0.57): número de la factura del gasto
+     * («FEACZM-72128», «CFDI <uuid>»; null = sin folio). Fuente única
+     * `common/folio-comprobante.util`.
+     */
+    folio_comprobante?: string | null;
   }>;
 }
 
@@ -580,7 +594,11 @@ const GASTO_PARTE_LISTA_COLS =
 const GASTO_PARTE_REPORTE_COLS =
   'id, categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)';
 
-/** Gasto candidato con TODO el contexto (IA, selector del panel). */
+/**
+ * Gasto candidato con TODO el contexto (IA, selector del panel). Se pide
+ * SIEMPRE junto con `embedFolioGasto(…)` (`gastoRicoCols()`): el número de
+ * factura depende de la sonda de la migración 20261005000002.
+ */
 const GASTO_RICO_COLS = `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio), captura:usuario!usuario_captura_id(nombre)`;
 
 /** Lo que la traducción de errores de partes necesita saber del intento. */
@@ -631,6 +649,23 @@ export class ConciliacionService {
   /** ¿Está aplicada la migración de ingresos? (memorizado, re-sondeo ≤ 10 min). */
   private ingresosOn(): Promise<boolean> {
     return ingresosDisponibles(this.supabase.service);
+  }
+
+  /**
+   * NÚMERO DE FACTURA DEL GASTO (5-oct-2026, API 0.0.57): columnas del gasto
+   * para calcular su `folio_comprobante` (`common/folio-comprobante.util`).
+   * `serie`/`folio` de la factura recibida solo con la migración
+   * 20261005000002 (sonda ÚNICA); sin ella, la factura aporta su UUID.
+   */
+  private async embedFolio(): Promise<string> {
+    return embedFolioGasto(
+      await serieFolioRecibidaDisponible(this.supabase.service),
+    );
+  }
+
+  /** `GASTO_RICO_COLS` + las columnas del número de factura. */
+  private async gastoRicoCols(): Promise<string> {
+    return `${GASTO_RICO_COLS}, ${await this.embedFolio()}`;
   }
 
   /**
@@ -5629,12 +5664,14 @@ export class ConciliacionService {
     // cargo que paga VARIOS gastos salen de la puente.
     const conPartesReporte = await this.partesOn();
     const colPartesReporte: string = conPartesReporte ? ', gastos_n' : '';
+    // NÚMERO DE FACTURA (5-oct-2026): «Notas» lleva la factura del gasto.
+    const embedFolioReporte = await this.embedFolio();
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
         // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
         // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
-        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${embedFolioReporte}), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
@@ -5670,6 +5707,10 @@ export class ConciliacionService {
         | { folio?: number; aeronave_id?: string | null }
         | { folio?: number; aeronave_id?: string | null }[]
         | null;
+      /** Número de factura (`embedFolioGasto`, 5-oct-2026). */
+      folio_ticket?: string | null;
+      ia_folio?: string | null;
+      factura?: unknown;
     };
     const lotes = new Map<
       string,
@@ -5686,7 +5727,7 @@ export class ConciliacionService {
           (lote) =>
             this.supabase.service
               .from('gasto')
-              .select(GASTO_PARTE_REPORTE_COLS)
+              .select(`${GASTO_PARTE_REPORTE_COLS}, ${embedFolioReporte}`)
               .in('id', lote),
         );
         const gastoDe = new Map(
@@ -5892,6 +5933,24 @@ export class ConciliacionService {
       return '';
     };
 
+    /**
+     * Números de factura de los gastos que paga la línea: los de cada gasto
+     * del LOTE (en el orden de sus partes) o el del gasto 1 ↔ 1. La etiqueta
+     * quita vacíos y duplicados (`etiquetaFacturasReporte`).
+     */
+    const foliosDeMov = (m: Record<string, unknown>): Array<string | null> => {
+      const lote = lotes.get(m.id as string);
+      if (lote && lote.length >= 2) {
+        return lote.map(({ gasto }) =>
+          folioComprobanteDeFila(gasto as Record<string, unknown> | null),
+        );
+      }
+      const gasto = unwrapOne<Record<string, unknown>>(
+        m.gasto as Record<string, unknown> | null,
+      );
+      return gasto ? [folioComprobanteDeFila(gasto)] : [];
+    };
+
     let totalCargos = 0;
     let totalAbonos = 0;
     let conciliados = 0;
@@ -5916,7 +5975,14 @@ export class ConciliacionService {
         esCargo ? null : monto,
         ok ? 'Conciliado' : 'PENDIENTE',
         ok ? conQue(m) : '',
-        (m.notas as string | null) ?? '',
+        // «Notas» = número de la(s) factura(s) del/los gasto(s) ligado(s) +
+        // la nota del banco (5-oct-2026, pedido del cliente). Sin gasto con
+        // folio (cobros, ingresos, clasificaciones, reversos, gastos sin
+        // número) queda la nota del banco como hasta el 0.0.56.
+        notasReporteConFactura(
+          etiquetaFacturasReporte(foliosDeMov(m)),
+          m.notas as string | null,
+        ),
       ];
     });
 
@@ -5970,11 +6036,13 @@ export class ConciliacionService {
     desde: string,
     hasta: string,
   ): Promise<{ buffer: Buffer; etiqueta: string }> {
+    // + número de factura (5-oct-2026): columna «Factura» al final. String
+    // plano: el parser TIPADO de supabase-js no digiere columnas
+    // condicionales (mismo caso que `recibidaPorId`).
+    const cols: string = `id, fecha_gasto, categoria, monto, moneda, medio_pago, tarjeta_terminacion, lugar, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${await this.embedFolio()}`;
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select(
-        'id, fecha_gasto, categoria, monto, moneda, medio_pago, tarjeta_terminacion, lugar, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), captura:usuario!usuario_captura_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id)',
-      )
+      .select(cols)
       .in('medio_pago', MEDIOS_BANCARIOS)
       .eq('conciliado', false)
       // fecha_gasto es DATE: comparación de días, sin componente horaria.
@@ -5983,7 +6051,7 @@ export class ConciliacionService {
       .order('fecha_gasto', { ascending: true })
       .limit(5000);
     if (error) throw new Error(error.message);
-    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
 
     const unwrapOne = <T>(v: T | T[] | null | undefined): T | null =>
       Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
@@ -6043,6 +6111,8 @@ export class ConciliacionService {
           if (!(ligado > 0)) return '';
           return `parcial · faltan ${montoBonito(faltanteDe(monto, ligado))} de ${montoBonito(monto)}`;
         })(),
+        // «Factura» (5-oct-2026): el número de la factura del gasto.
+        folioComprobanteDeFila(g) ?? '',
       ];
     });
 
@@ -6061,6 +6131,8 @@ export class ConciliacionService {
         { label: 'Moneda', tipo: 'texto' },
         // Aditiva y AL FINAL: el resalte naranja apunta a la col 7 (Monto).
         { label: 'Parcial', tipo: 'texto' },
+        // Aditiva y AL FINAL del todo (5-oct-2026): número de factura.
+        { label: 'Factura', tipo: 'texto' },
       ],
       filas,
       // Nada de esta pestaña está conciliado: TODOS los montos en naranja
@@ -6157,12 +6229,15 @@ export class ConciliacionService {
     // 1 cargo ↔ N gastos (2-oct-2026): con la migración, cuántos gastos paga.
     const conPartes = await this.partesOn();
     const colPartes: string = conPartes ? ', gastos_n' : '';
+    // NÚMERO DE FACTURA (5-oct-2026): `gasto.folio_comprobante` y el de cada
+    // `gastos[]` del lote (ADITIVOS; los campos crudos no viajan).
+    const embedFolioLista = await this.embedFolio();
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
-        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -6182,11 +6257,18 @@ export class ConciliacionService {
     const filas = await this.normalizarSobresEnMovs(
       (data ?? []) as unknown as Array<Record<string, unknown>>,
     );
+    // ADITIVO (5-oct-2026): `gasto.folio_comprobante` (número de factura).
+    for (const m of filas) {
+      const gasto = unwrapOne<Record<string, unknown>>(
+        m.gasto as Record<string, unknown> | null,
+      );
+      if (gasto) m.gasto = conFolioComprobante(gasto);
+    }
     await this.anotarMotivoPendiente(filas);
     // ADITIVOS (30-sep-2026): `reverso_de` (abono) / `revertido_por` (cargo).
     await this.anotarReversos(filas);
     // ADITIVOS (2-oct-2026): `gastos[]`, `gastos_suma`, `gastos_diferencia`.
-    if (conPartes) await this.anotarPartes(filas);
+    if (conPartes) await this.anotarPartes(filas, embedFolioLista);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
       data: filas,
@@ -6209,6 +6291,7 @@ export class ConciliacionService {
    */
   private async anotarPartes(
     filas: Array<Record<string, unknown>>,
+    embedFolioLista: string,
   ): Promise<void> {
     const conPartes = filas.filter((m) => Number(m.gastos_n) > 0);
     try {
@@ -6220,7 +6303,7 @@ export class ConciliacionService {
         this.leerPorLotes(gastoIds, (lote) =>
           this.supabase.service
             .from('gasto')
-            .select(GASTO_PARTE_LISTA_COLS)
+            .select(`${GASTO_PARTE_LISTA_COLS}, ${embedFolioLista}`)
             .in('id', lote),
         ),
         this.estadosVistaDe(gastoIds),
@@ -6235,9 +6318,10 @@ export class ConciliacionService {
       for (const m of filas) {
         const ps = porMov.get(m.id as string) ?? [];
         const items = ps.map((p) => {
-          const g: Record<string, unknown> = gastoDe.get(p.gasto_id) ?? {
-            id: p.gasto_id,
-          };
+          // + `folio_comprobante` (5-oct-2026), sin los campos crudos.
+          const g: Record<string, unknown> = conFolioComprobante(
+            gastoDe.get(p.gasto_id) ?? { id: p.gasto_id },
+          );
           const e = estados.get(p.gasto_id);
           const { notas, ...resto } = g;
           const monedaGasto = typeof g.moneda === 'string' ? g.moneda : null;
@@ -7762,6 +7846,8 @@ export class ConciliacionService {
       vuelo_folio: vuelo?.folio == null ? null : Number(vuelo.folio),
       capturado_por:
         typeof captura?.nombre === 'string' ? captura.nombre : null,
+      // ADITIVO (5-oct-2026): número de la factura del gasto.
+      folio_comprobante: folioComprobanteDeFila(g),
     };
   }
 
@@ -7831,10 +7917,11 @@ export class ConciliacionService {
       ].join(',');
     }
 
+    const colsRicas = await this.gastoRicoCols();
     const leer = async (monedaQ: string) => {
       let qb = this.supabase.service
         .from('gasto')
-        .select(GASTO_RICO_COLS)
+        .select(colsRicas)
         .eq('conciliado', false)
         .in('medio_pago', MEDIOS_BANCARIOS)
         .eq('moneda', monedaQ)
@@ -7919,7 +8006,7 @@ export class ConciliacionService {
   }> {
     let q = this.supabase.service
       .from('gasto')
-      .select(GASTO_RICO_COLS)
+      .select(await this.gastoRicoCols())
       .eq('conciliado', false)
       .in('medio_pago', MEDIOS_BANCARIOS)
       .gte('fecha_gasto', opts.desde)

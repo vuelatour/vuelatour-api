@@ -107,6 +107,8 @@ interface OpcionesFake {
   maxFilas?: number;
   /** UPDATE que la BD rechaza (trigger / constraint diferido). */
   falloUpdate?: { tabla: string; error: Row | ErrorBd };
+  /** Migración 20261005000002 SIN aplicar (`factura_recibida.serie`). */
+  sinSerieFolio?: boolean;
 }
 
 /** Mini-PostgREST en memoria: filtros, `or`, embeds, orden, RPC y bitácora. */
@@ -115,6 +117,15 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
   const embeber = (fila: Row, sel: string): Row => {
     const out: Row = { ...fila };
     for (const campo of partirNivel0(sel)) {
+      // Ruta JSON `alias:columna->>llave` (5-oct-2026: `ia_folio`).
+      const j = /^(\w+):(\w+)->>(\w+)$/.exec(campo);
+      if (j) {
+        const [, alias, col, llave] = j;
+        const doc = fila[col] as Row | null | undefined;
+        const v = doc && typeof doc === 'object' ? doc[llave] : null;
+        out[alias] = v == null ? null : txt(v);
+        continue;
+      }
       const m = /^(\w+):([\w]+)(?:!(\w+))?\((.*)\)$/s.exec(campo);
       if (!m) continue;
       const [, alias, origen, fk, interior] = m;
@@ -158,6 +169,20 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
             error: {
               code: '42P01',
               message: `relation ${tabla} does not exist`,
+            },
+            count: null,
+          };
+        }
+        if (
+          opts.sinSerieFolio &&
+          ((tabla === 'factura_recibida' && /\bserie\b/.test(entrada.texto)) ||
+            /factura_recibida_id\([^)]*\bserie\b/.test(entrada.texto))
+        ) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message: 'column factura_recibida.serie does not exist',
             },
             count: null,
           };
@@ -1283,5 +1308,159 @@ describe('revisión 2-oct-2026: moneda de la cuenta, uuid, cobros y anti-tope', 
       expect(fila.gastos as Row[]).toHaveLength(40);
       expect(fila).toMatchObject({ gastos_suma: 400, gastos_diferencia: 0 });
     }
+  });
+});
+
+// =====================================================================
+describe('NÚMERO DE FACTURA del gasto en conciliación (5-oct-2026, API 0.0.57)', () => {
+  /**
+   * Pedido del cliente: «al momento de la conciliación me apoyan a poner el
+   * número de la factura con la que se enlaza el movimiento. Aquí en notas
+   * estaría perfecto». Mundo SAESA + las tres fuentes del folio: factura
+   * recibida con Serie/Folio, `folio_ticket` (ASUR «FEACZM 72128») y la
+   * lectura IA (`valor_ia_extraido.folio`).
+   */
+  const conFolios = (opts: OpcionesFake = {}) => {
+    const db = mundo({
+      factura_recibida: [
+        { id: 'fr-a', serie: 'A', folio: '0411', uuid_fiscal: 'uuid-a' },
+        { id: 'fr-solo-uuid', serie: null, folio: null, uuid_fiscal: 'uuid-z' },
+      ],
+    });
+    Object.assign(gasto(db, 'g315'), { factura_recibida_id: 'fr-a' });
+    Object.assign(gasto(db, 'g326'), { factura_recibida_id: 'fr-a' });
+    Object.assign(gasto(db, 'g319'), {
+      valor_ia_extraido: { folio: 'AB1144717', total: 2801.4 },
+    });
+    // ±3 días del cargo (24-sep): candidato de «Sugerir».
+    Object.assign(gasto(db, 'g321'), {
+      folio_ticket: 'FEACZM 72128',
+      fecha_gasto: '2026-09-23',
+    });
+    Object.assign(gasto(db, 'g322'), { factura_recibida_id: 'fr-solo-uuid' });
+    Object.assign(mov(db, 'm2231'), { notas: 'pago SAESA' });
+    Object.assign(mov(db, 'm4462'), { notas: 'nota del banco' });
+    Object.assign(mov(db, 'm4462b'), { notas: 'nota del banco' });
+    return armar(db, opts);
+  };
+  const ligar = async (w: ReturnType<typeof armar>) => {
+    await w.svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    await w.svc.link('m2231', 'g321', USER);
+    return w;
+  };
+  const filasExcel = (gen: jest.Mock) =>
+    ((gen.mock.calls[0] as unknown[])[0] as { filas: unknown[][] }).filas;
+
+  it('Excel «Notas»: 1 ↔ 1 con folio_ticket + nota del banco; lote con factura e IA sin duplicar', async () => {
+    const w = await ligar(conFolios());
+    await w.svc.reporteXlsx(CTA, '2026-09-01', '2026-09-30', 'todos');
+    const filas = filasExcel(w.generateTablaXlsx);
+    const de = (id: string) =>
+      filas.find(
+        (f) =>
+          f[4] === Number(mov(w.db, id).monto) &&
+          (id === 'm4462b' ? f[6] === 'PENDIENTE' : f[6] === 'Conciliado'),
+      )!;
+    // 1 ↔ 1: «Factura <folio_ticket> · <nota del banco>».
+    expect(de('m2231')[8]).toBe('Factura FEACZM 72128 · pago SAESA');
+    // Lote: g315 y g326 con la MISMA factura A-0411, g319 con la IA.
+    expect(de('m8404')[8]).toBe('Facturas A-0411 · AB1144717');
+    // Sin gasto: la nota del banco tal cual (como el 0.0.56).
+    expect(de('m4462b')[8]).toBe('nota del banco');
+    // «Conciliado con» no cambia.
+    expect(de('m2231')[7]).toBe('Gasto Operaciones · vuelo #321');
+  });
+
+  it('Excel: la factura SIN Serie/Folio sale como «CFDI <uuid>»', async () => {
+    const w = conFolios();
+    await w.svc.link('m2231', 'g322', USER);
+    await w.svc.reporteXlsx(CTA, '2026-09-01', '2026-09-30', 'conciliados');
+    const filas = filasExcel(w.generateTablaXlsx);
+    expect(filas.find((f) => f[4] === 2231.38)![8]).toBe(
+      'Factura CFDI uuid-z · pago SAESA',
+    );
+  });
+
+  it('gastos sin banco: columna «Factura» al FINAL (después de «Parcial»)', async () => {
+    const w = conFolios();
+    await w.svc.reporteXlsx(undefined, '2026-09-01', '2026-09-30', 'sin_banco');
+    const arg = (w.generateTablaXlsx.mock.calls[0] as unknown[])[0] as {
+      columnas: Array<{ label: string }>;
+      filas: unknown[][];
+      resaltes: Array<{ col: number }>;
+    };
+    expect(arg.columnas.map((c) => c.label).slice(-2)).toEqual([
+      'Parcial',
+      'Factura',
+    ]);
+    // El resalte naranja sigue en Monto (col 7).
+    expect(arg.resaltes.every((r) => r.col === 7)).toBe(true);
+    const ultima = (folio: number) =>
+      arg.filas.find((f) => f[5] === `#${folio}`)!.at(-1);
+    expect(ultima(315)).toBe('A-0411');
+    expect(ultima(319)).toBe('AB1144717');
+    expect(ultima(321)).toBe('FEACZM 72128');
+    expect(ultima(322)).toBe('CFDI uuid-z');
+    expect(ultima(318)).toBe('');
+  });
+
+  it('lista de movimientos: gasto.folio_comprobante y gastos[].folio_comprobante, sin campos crudos', async () => {
+    const w = await ligar(conFolios());
+    const lista = await w.svc.list({ limit: 100, offset: 0 });
+    const uno = lista.data.find((m) => m.id === 'm2231')!;
+    const g = uno.gasto as Row;
+    expect(g).toMatchObject({ id: 'g321', folio_comprobante: 'FEACZM 72128' });
+    for (const k of ['folio_ticket', 'ia_folio', 'factura']) {
+      expect(g).not.toHaveProperty(k);
+    }
+    expect((uno.gastos as Row[])[0].folio_comprobante).toBe('FEACZM 72128');
+    const lote = lista.data.find((m) => m.id === 'm8404')!;
+    const gastos = lote.gastos as Row[];
+    expect(gastos.map((x) => [x.id, x.folio_comprobante])).toEqual([
+      ['g315', 'A-0411'],
+      ['g319', 'AB1144717'],
+      ['g326', 'A-0411'],
+    ]);
+    for (const k of ['folio_ticket', 'ia_folio', 'factura']) {
+      expect(gastos[0]).not.toHaveProperty(k);
+    }
+  });
+
+  it('candidatos de «Vincular gasto» y de «Sugerir» traen folio_comprobante', async () => {
+    const w = conFolios();
+    const r = await w.svc.gastosCandidatosDeMovimiento('m8404', {
+      q: '2801.40',
+    });
+    const porId = new Map(r.candidatos.map((c) => [c.id, c.folio_comprobante]));
+    expect(porId.get('g315')).toBe('A-0411');
+    expect(porId.get('g319')).toBe('AB1144717');
+    // Sin ningún número: null (el campo siempre viaja).
+    expect(porId.has('g236')).toBe(true);
+    expect(porId.get('g236')).toBeNull();
+    const s = await w.svc.sugerir('m2231');
+    const c = s.candidatos.find((x) => x.id === 'g321')!;
+    expect(c.folio_comprobante).toBe('FEACZM 72128');
+  });
+
+  it('SIN la migración 20261002000002: ninguna consulta nombra serie (salvo la sonda) y el folio sale de ticket/IA/UUID', async () => {
+    const w = await ligar(conFolios({ sinSerieFolio: true }));
+    await w.svc.reporteXlsx(CTA, '2026-09-01', '2026-09-30', 'todos');
+    const lista = await w.svc.list({ limit: 100, offset: 0 });
+    await w.svc.gastosCandidatosDeMovimiento('m8404', {});
+    await w.svc.reporteXlsx(undefined, '2026-09-01', '2026-09-30', 'sin_banco');
+    const conSerie = w.log.filter(
+      (q) =>
+        /\bserie\b/.test(q.texto) &&
+        !(q.tabla === 'factura_recibida' && q.texto.trim() === 'select(serie)'),
+    );
+    expect(conSerie).toEqual([]);
+    const filas = filasExcel(w.generateTablaXlsx);
+    expect(
+      filas.find((f) => f[4] === 2231.38 && f[6] === 'Conciliado')![8],
+    ).toBe('Factura FEACZM 72128 · pago SAESA');
+    expect(
+      (lista.data.find((m) => m.id === 'm2231')!.gasto as Row)
+        .folio_comprobante,
+    ).toBe('FEACZM 72128');
   });
 });

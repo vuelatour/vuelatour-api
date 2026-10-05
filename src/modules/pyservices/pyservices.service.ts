@@ -1650,6 +1650,14 @@ export interface FacturaRecibidaParsed {
   moneda: string | null;
   fecha_emision: string | null;
   conceptos_resumen: string | null;
+  /**
+   * ADITIVOS (5-oct-2026, API 0.0.57): atributos `Serie`/`Folio` del
+   * `cfdi:Comprobante` (recortados; vacío ⇒ null). Un pyservices anterior NO
+   * trae las llaves (`undefined`): `recibida-folio.util#serieFolioDelCfdi`
+   * lo distingue para no sellar la relectura.
+   */
+  serie?: string | null;
+  folio?: string | null;
 }
 
 /**
