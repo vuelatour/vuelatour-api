@@ -76,6 +76,24 @@ import {
   resumenTacosEnRevision,
   type EscalaEnRevisionRow,
 } from './tacos-revision.util';
+import {
+  CATEGORIAS_GASTO_OPERACIONES,
+  CLAVE_PRECIERRE_VUELOS_SIN_GASTO,
+  DETALLE_PRECIERRE_VUELOS_SIN_GASTO,
+  DETALLE_PRECIERRE_VUELOS_SIN_GASTO_FALLIDA,
+  TITULO_PRECIERRE_VUELOS_SIN_GASTO,
+  candidatosSinGastoOperaciones,
+  vuelosSinGastoOperaciones,
+  type VueloCompletadoSinGastoRow,
+  type VueloSinGastoOperaciones,
+} from './vuelos-sin-gasto.util';
+
+/** Lecturas `in (…)` en lote: ids por consulta (URL acotada). */
+const LOTE_IDS = 200;
+/** max-rows de PostgREST: una respuesta NUNCA trae más filas. */
+const PAGINA_POSTGREST = 1000;
+/** Tope de páginas por lote (200 vuelos × 20,000 filas ⇒ algo anda mal). */
+const LOTE_PAGINADO_MAX_PAGINAS = 20;
 
 /** Categorias de gasto que cuentan como GASTO DIRECTO del avion (doc 4.8). */
 const DIRECTO = new Set([
@@ -1773,7 +1791,9 @@ export class ProfitSharingService {
         // (29-ago) para cobros MXN sin TC de cotizaciones sin tc_usd_mxn.
         .select(
           // grupo_id (4-sep-2026): folio del grupo ADITIVO en cobros_pendientes.
-          'id, folio, piloto_id, cliente_id, grupo_id, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
+          // aeronave_id/es_externo (5-oct-2026): universo de
+          // vuelos_sin_gasto_operaciones (solo vuelos PROPIOS con avión).
+          'id, folio, piloto_id, cliente_id, grupo_id, aeronave_id, es_externo, monto_total_usd, tc_usd_mxn, fecha_vuelo, fecha_solicitud, cobrado, subtotal_vuelo_usd, ajuste_final_usd, comision_vendedor_usd, iva_usd, iva_pct, tuas_usd, extras_total_usd, viaticos_pernocta_usd, calculo_snapshot',
         )
         .eq('estado', 'COMPLETADO')
         .gte('fecha_vuelo', desdeTs)
@@ -2589,11 +2609,26 @@ export class ProfitSharingService {
     const mesCierre = mesDePeriodo(q.desde, q.hasta);
     const veeCuentasSocios =
       rol != null && ROLES_PAGOS_SOCIOS_LECTURA.includes(rol);
-    const [seguimiento, itemsCuentasSocios] = await Promise.all([
+    //
+    // VUELOS SIN GASTO DE OPERACIONES (5-oct-2026): completados PROPIOS del
+    // periodo sin ninguna pista/aterrizaje ligada — lo que la conciliación no
+    // puede ver (gasto nunca capturado ni pagado con la tarjeta). Aviso NO
+    // bloqueante y best-effort: lectura caída ⇒ `null` ⇒ lectura_fallida.
+    const matriculaPorAvion = new Map(
+      (flotaPre ?? []).map((a) => [a.id as string, a.matricula as string]),
+    );
+    const [seguimiento, itemsCuentasSocios, sinGastoOps] = await Promise.all([
       this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
       mesCierre && veeCuentasSocios
         ? this.itemsCuentasSocios(mesCierre)
         : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
+      this.vuelosSinGastoOperaciones(
+        candidatosSinGastoOperaciones(
+          completados as VueloCompletadoSinGastoRow[],
+          clientesInternos,
+        ),
+        matriculaPorAvion,
+      ),
     ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
@@ -2776,6 +2811,21 @@ export class ProfitSharingService {
         count: pistasSinGasto,
       },
       {
+        // Junto a pistas_sin_gasto: aquella mira el TRAMO fuera de CUN sin su
+        // cuota; esta, el VUELO completado sin NINGÚN gasto de pista
+        // (incluye CUN→CUN y gastos de cualquier fecha). NO bloquea.
+        clave: CLAVE_PRECIERRE_VUELOS_SIN_GASTO,
+        titulo: TITULO_PRECIERRE_VUELOS_SIN_GASTO,
+        detalle: sinGastoOps
+          ? DETALLE_PRECIERRE_VUELOS_SIN_GASTO
+          : DETALLE_PRECIERRE_VUELOS_SIN_GASTO_FALLIDA,
+        count: sinGastoOps?.length ?? 0,
+        // {id, folio, fecha_vuelo, matricula} por fecha_vuelo.
+        vuelos: sinGastoOps ?? [],
+        // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
+        lectura_fallida: sinGastoOps === null,
+      },
+      {
         clave: 'externos_sin_honorario',
         titulo: 'Vuelos de piloto externo sin honorario capturado',
         detalle:
@@ -2935,6 +2985,103 @@ export class ProfitSharingService {
       );
       return null;
     }
+  }
+
+  /**
+   * Pre-cierre · VUELOS COMPLETADOS SIN GASTO DE OPERACIONES (5-oct-2026):
+   * de los `candidatos` (propios, con avión, cliente no interno —
+   * `candidatosSinGastoOperaciones`) quita los de SERVICIO (sus tramos,
+   * `esVueloDeServicio`) y los que tienen algún gasto OPERACIONES/
+   * ATERRIZAJE ligado por `vuelo_id` (de CUALQUIER fecha). Lecturas en
+   * lotes de ids y paginadas (anti-cap-1000 de PostgREST: un vuelo cuyo
+   * gasto quedara pasada la fila 1000 saldría «sin gasto» en falso).
+   * Cualquier fallo ⇒ `null` + `warn` (no tumba el pre-cierre).
+   */
+  private async vuelosSinGastoOperaciones(
+    candidatos: VueloCompletadoSinGastoRow[],
+    matriculas: ReadonlyMap<string, string>,
+  ): Promise<VueloSinGastoOperaciones[] | null> {
+    if (candidatos.length === 0) return [];
+    try {
+      const ids = candidatos.map((v) => v.id as string);
+      const [escalas, gastosOps] = await Promise.all([
+        this.leerEnLotesPaginado(ids, (lote, desde, hasta) =>
+          this.supabase.service
+            .from('escala')
+            .select('id, vuelo_id, tipo_parada, pasajeros, cancelada_at')
+            .in('vuelo_id', lote)
+            .order('id', { ascending: true })
+            .range(desde, hasta),
+        ),
+        this.leerEnLotesPaginado(ids, (lote, desde, hasta) =>
+          this.supabase.service
+            .from('gasto')
+            .select('id, vuelo_id')
+            .in('vuelo_id', lote)
+            .in('categoria', [...CATEGORIAS_GASTO_OPERACIONES])
+            .order('id', { ascending: true })
+            .range(desde, hasta),
+        ),
+      ]);
+      return vuelosSinGastoOperaciones({
+        candidatos,
+        escalas: escalas,
+        vuelosConGasto: new Set(
+          gastosOps
+            .map((g) => g.vuelo_id)
+            .filter((id): id is string => typeof id === 'string'),
+        ),
+        matriculas,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: vuelos sin gasto de operaciones no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * `in (…)` en lotes de ≤ 200 ids y cada lote PAGINADO de 1000 en 1000
+   * (PostgREST corta en max-rows = 1000 sin avisar). La consulta debe
+   * ordenar por una llave TOTAL (id) para que las páginas no se traslapen.
+   * Más de `LOTE_PAGINADO_MAX_PAGINAS` páginas en un lote ⇒ error (jamás
+   * una lectura recortada presentada como completa).
+   */
+  private async leerEnLotesPaginado(
+    ids: ReadonlyArray<string>,
+    consulta: (
+      lote: string[],
+      desde: number,
+      hasta: number,
+    ) => PromiseLike<{
+      data: unknown[] | null;
+      error: { message: string } | null;
+    }>,
+  ): Promise<Array<Record<string, unknown>>> {
+    const unicos = [...new Set(ids.filter(Boolean))];
+    const out: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < unicos.length; i += LOTE_IDS) {
+      const lote = unicos.slice(i, i + LOTE_IDS);
+      for (let pagina = 0; ; pagina += 1) {
+        if (pagina >= LOTE_PAGINADO_MAX_PAGINAS) {
+          throw new Error(
+            `más de ${LOTE_PAGINADO_MAX_PAGINAS * PAGINA_POSTGREST} filas en un lote`,
+          );
+        }
+        const desde = pagina * PAGINA_POSTGREST;
+        const { data, error } = await consulta(
+          lote,
+          desde,
+          desde + PAGINA_POSTGREST - 1,
+        );
+        if (error) throw new Error(error.message);
+        const filas = (data ?? []) as Array<Record<string, unknown>>;
+        out.push(...filas);
+        if (filas.length < PAGINA_POSTGREST) break;
+      }
+    }
+    return out;
   }
 
   /**

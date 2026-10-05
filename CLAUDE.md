@@ -1545,6 +1545,12 @@ motivo, piloto_nombre}`), más un `detalle` que dice cuántos tramos en
     mientras que `count` es siempre el total real: quien pinte «y N más…»
     cuenta contra `count`, nunca contra `tramos.length`. «Resolver» sigue
     llevando a `/admin/taco-live`.
+    **`vuelos_sin_gasto_operaciones` (5-oct-2026, NO bloquea, junto a
+    `pistas_sin_gasto`)**: COMPLETADOS del periodo, propios con avión, cliente
+    no interno y no de servicio (`esVueloDeServicio`) SIN ningún gasto
+    OPERACIONES/ATERRIZAJE por `vuelo_id` (de cualquier fecha): lo que la
+    conciliación no ve (#295, #268). `vuelos-sin-gasto.util.ts`; vuelos `{id,
+    folio, fecha_vuelo, matricula}`; lotes paginados; fallo ⇒ `lectura_fallida`.
 
 20. **TIPO DE CAMBIO = 6 DECIMALES, y el total en pesos se LEE (17-sep-2026,
     caso del vuelo #314).** Fuente única `src/common/tc.util.ts`
