@@ -34,11 +34,35 @@ import { Rol } from '../../common/types/auth.types';
  */
 const PEV = '11111111-1111-4111-8111-111111111111';
 const N621TX = '22222222-2222-4222-8222-222222222222';
+const N4142R = '55555555-5555-4555-8555-555555555555';
 const VUELO_280 = '33333333-3333-4333-8333-333333333333';
+const VUELO_281 = '66666666-6666-4666-8666-666666666666';
+/** Tramo CTM→CUN del vuelo #280 que voló el N621TX (vuelo multi-avión). */
+const TRAMO_N621 = '77777777-7777-4777-8777-777777777777';
 const FLOTA = [
   { id: PEV, matricula: 'XB-PEV', combustible: 'AVGAS' },
   { id: N621TX, matricula: 'N621TX', combustible: 'TURBOSINA' },
+  { id: N4142R, matricula: 'N4142R', combustible: 'AVGAS' },
 ];
+/** Avión principal de cada vuelo (el #280 y el #281 son del PEV). */
+const VUELOS: Record<string, { folio: number; aeronave_id: string | null }> = {
+  [VUELO_280]: { folio: 280, aeronave_id: PEV },
+  [VUELO_281]: { folio: 281, aeronave_id: PEV },
+};
+/** Tramos: el del N621TX pertenece al vuelo #280. */
+const ESCALAS: Record<
+  string,
+  { vuelo_id: string; aeronave_id: string | null; o: string; d: string }
+> = {
+  [TRAMO_N621]: {
+    vuelo_id: VUELO_280,
+    aeronave_id: N621TX,
+    o: 'CTM',
+    d: 'CUN',
+  },
+};
+const matriculaDe = (id: string | null) =>
+  FLOTA.find((a) => a.id === id)?.matricula ?? null;
 const LINEA_PEV =
   '⚠ se capturó TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar';
 
@@ -80,14 +104,37 @@ function armar(
         error: null,
       };
     }
-    if (c.tabla === 'vuelo' && c.fin === 'maybeSingle') {
+    // Tramo con sus embebidos (`resolverTramoGasto`): avión propio y el
+    // del vuelo dueño, cada uno con su matrícula.
+    if (c.tabla === 'escala' && c.fin === 'maybeSingle') {
+      const id = op('eq')?.a[1] as string;
+      const e = ESCALAS[id];
+      if (!e) return { data: null, error: null };
+      const vuelo = VUELOS[e.vuelo_id];
       return {
         data: {
-          id: VUELO_280,
-          folio: 280,
-          aeronave_id: PEV,
-          piloto_id: 'u-luis',
+          id,
+          vuelo_id: e.vuelo_id,
+          orden: 2,
+          origen_iata: e.o,
+          destino_iata: e.d,
+          aeronave_id: e.aeronave_id,
+          aeronave: e.aeronave_id
+            ? { matricula: matriculaDe(e.aeronave_id) }
+            : null,
+          vuelo: {
+            aeronave_id: vuelo.aeronave_id,
+            aeronave: { matricula: matriculaDe(vuelo.aeronave_id) },
+          },
         },
+        error: null,
+      };
+    }
+    if (c.tabla === 'vuelo' && c.fin === 'maybeSingle') {
+      const id = op('eq')?.a[1] as string;
+      const v = VUELOS[id];
+      return {
+        data: v ? { id, ...v, piloto_id: 'u-luis' } : null,
         error: null,
       };
     }
@@ -245,10 +292,15 @@ describe('ExpensesService.create — combustible del avión', () => {
       tipo: 'alerta_sistema',
       titulo: 'Carga de combustible corregida',
       cuerpo:
-        'Carga de combustible corregida: se capturó Turbosina pero el XB-PEV carga Avgas (74 L · $2,738.50 MXN). Se guardó como Avgas y quedó para revisión.',
+        'Se capturó Turbosina pero el XB-PEV carga Avgas (74 L · $2,738.50 MXN). Se guardó como Avgas y quedó para revisión.',
       data: { gasto_id: 'g-nuevo', motivo: 'combustible_corregido' },
       link: '/admin/expenses',
     });
+    // Sin el actor (como «gasto_registrado»): quien capturó no se avisa.
+    expect(avisos.map((c) => (c as unknown[])[2])).toEqual([
+      'u-luis',
+      'u-luis',
+    ]);
     // UNA lectura de flota (con la columna) además de la sonda.
     expect(lecturasFlota(consultas)).toHaveLength(1);
     expect(lecturasFlota(consultas)[0].ops[0].a[0]).toBe(
@@ -341,6 +393,58 @@ describe('ExpensesService.create — combustible del avión', () => {
     const titulos = llamadas(notifyRole).map((c) => c[1].titulo);
     expect(titulos).toContain('Matrícula del comprobante no coincide');
     expect(titulos).toContain('Carga de combustible corregida');
+  });
+
+  it('con TRAMO: el avión sale del tramo (N621TX) y la TURBOSINA capturada se respeta', async () => {
+    const { service, consultas, notifyRole } = armar();
+    await service.create(
+      cargaPev({ vuelo_id: undefined, escala_id: TRAMO_N621 }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    const p = insertado(consultas);
+    expect(p).toMatchObject({
+      aeronave_id: N621TX,
+      vuelo_id: VUELO_280,
+      escala_id: TRAMO_N621,
+      tipo_combustible: 'TURBOSINA',
+      requiere_visto_bueno: false,
+    });
+    expect(p.notas).toBeUndefined();
+    expect(avisosCombustible(notifyRole)).toHaveLength(0);
+  });
+
+  it('avión EXPLÍCITO distinto al del tramo: el combustible es el del TRAMO (ahí cuenta el gasto en balance y reparto)', async () => {
+    const { service, consultas } = armar();
+    // El piloto capturó bien TURBOSINA en el tramo del N621TX aunque dejó
+    // el PEV como avión: NO se «corrige» a AVGAS.
+    await service.create(
+      cargaPev({ escala_id: TRAMO_N621, aeronave_id: PEV }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    const p = insertado(consultas);
+    expect(p.aeronave_id).toBe(PEV);
+    expect(p.tipo_combustible).toBe('TURBOSINA');
+    expect(String(p.notas)).toContain('lo voló N621TX');
+    expect(String(p.notas)).not.toContain('se corrigió');
+    // Y si eligió AVGAS, se corrige al del tramo, con su matrícula.
+    const otro = armar();
+    await otro.service.create(
+      cargaPev({
+        escala_id: TRAMO_N621,
+        aeronave_id: PEV,
+        tipo_combustible: TipoCombustible.AVGAS,
+      }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    const q = insertado(otro.consultas);
+    expect(q.tipo_combustible).toBe('TURBOSINA');
+    expect(q.requiere_visto_bueno).toBe(true);
+    expect(String(q.notas)).toContain(
+      '⚠ se capturó AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+    );
   });
 
   it('otra categoría no se toca ni lee la flota', async () => {
@@ -489,6 +593,149 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
     );
     expect(actualizado(consultas).tipo_combustible).toBe('TURBOSINA');
     expect(consultas.filter((c) => c.tabla === 'aeronave')).toHaveLength(0);
+  });
+
+  it('cambiar SOLO el tramo hereda su avión (N621TX) y re-aplica la regla', async () => {
+    const { service, consultas } = armar({ actual: GAS_PEV });
+    await service.update(
+      'g-1',
+      { escala_id: TRAMO_N621 },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(actualizado(consultas)).toMatchObject({
+      escala_id: TRAMO_N621,
+      vuelo_id: VUELO_280,
+      aeronave_id: N621TX,
+      tipo_combustible: 'TURBOSINA',
+      requiere_visto_bueno: true,
+      notas:
+        'Carga en Chetumal\n⚠ el gasto traía AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+    });
+  });
+
+  it('cambiar SOLO el vuelo (tramo viejo auto-limpiado) hereda el avión del vuelo nuevo', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        aeronave_id: N621TX,
+        vuelo_id: VUELO_280,
+        escala_id: TRAMO_N621,
+        tipo_combustible: 'TURBOSINA',
+      },
+    });
+    await service.update('g-1', { vuelo_id: VUELO_281 }, 'u-admin', Rol.ADMIN);
+    expect(actualizado(consultas)).toMatchObject({
+      vuelo_id: VUELO_281,
+      escala_id: null,
+      aeronave_id: PEV,
+      tipo_combustible: 'AVGAS',
+      requiere_visto_bueno: true,
+      notas:
+        'Carga en Chetumal\n⚠ el gasto traía TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar',
+    });
+  });
+
+  it('volver GAS un gasto de otra categoría con TURBOSINA en el PEV ⇒ AVGAS con nota', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        categoria: 'OPERACIONES',
+        tipo_combustible: 'TURBOSINA',
+      },
+    });
+    await service.update(
+      'g-1',
+      { categoria: CategoriaGasto.GAS },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(actualizado(consultas)).toMatchObject({
+      categoria: 'GAS',
+      tipo_combustible: 'AVGAS',
+      requiere_visto_bueno: true,
+      notas:
+        'Carga en Chetumal\n⚠ el gasto traía TURBOSINA pero el XB-PEV carga AVGAS: se corrigió a AVGAS — revisar',
+    });
+  });
+
+  it('caso #280 al revés: la carga ya corregida en el PEV se mueve al N621TX ⇒ vuelve a TURBOSINA, se retira la nota vieja y no se pide otro visto bueno', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        notas: `Carga en Chetumal\n${LINEA_PEV}`,
+        requiere_visto_bueno: true,
+      },
+    });
+    await service.update('g-1', { aeronave_id: N621TX }, 'u-admin', Rol.ADMIN);
+    const u = actualizado(consultas);
+    expect(u).toMatchObject({
+      aeronave_id: N621TX,
+      tipo_combustible: 'TURBOSINA',
+      notas: 'Carga en Chetumal',
+    });
+    expect(u).not.toHaveProperty('requiere_visto_bueno');
+  });
+
+  it('mover la carga corregida a otro avión AVGAS ⇒ la nota se reescribe con el avión nuevo (sin apilar)', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        notas: `Carga en Chetumal\n${LINEA_PEV}`,
+        requiere_visto_bueno: true,
+      },
+    });
+    await service.update('g-1', { aeronave_id: N4142R }, 'u-admin', Rol.ADMIN);
+    const u = actualizado(consultas);
+    expect(u.notas).toBe(
+      'Carga en Chetumal\n⚠ se capturó TURBOSINA pero el N4142R carga AVGAS: se corrigió a AVGAS — revisar',
+    );
+    expect(u).not.toHaveProperty('tipo_combustible');
+    expect(u).not.toHaveProperty('requiere_visto_bueno');
+  });
+
+  it('con tramo vigente, la regla usa el avión del TRAMO aunque el explícito sea otro', async () => {
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        vuelo_id: VUELO_280,
+        escala_id: TRAMO_N621,
+        tipo_combustible: 'TURBOSINA',
+      },
+    });
+    await service.update(
+      'g-1',
+      { tipo_combustible: TipoCombustible.AVGAS },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(actualizado(consultas)).toMatchObject({
+      tipo_combustible: 'TURBOSINA',
+      requiere_visto_bueno: true,
+      notas:
+        'Carga en Chetumal\n⚠ se capturó AVGAS pero el N621TX carga TURBOSINA: se corrigió a TURBOSINA — revisar',
+    });
+  });
+
+  it('quitar el avión de una carga con vuelo ⇒ la regla usa el avión del vuelo', async () => {
+    const { service, consultas } = armar({
+      actual: { ...GAS_PEV, vuelo_id: VUELO_280 },
+    });
+    await service.update(
+      'g-1',
+      {
+        aeronave_id: null,
+        tipo_combustible: TipoCombustible.TURBOSINA,
+      } as unknown as UpdateGastoDto,
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(actualizado(consultas)).toMatchObject({
+      aeronave_id: null,
+      tipo_combustible: 'AVGAS',
+      requiere_visto_bueno: true,
+      notas: `Carga en Chetumal\n${LINEA_PEV}`,
+    });
   });
 
   it('SIN la migración: el PATCH se guarda tal cual', async () => {

@@ -3949,9 +3949,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       distinto ⇒ el del avión + `nota` «⚠ se capturó TURBOSINA pero el XB-PEV
       carga AVGAS: se corrigió a AVGAS — revisar» (`motivo: 'cambio_avion'`
       ⇒ «el gasto traía …»). Además `anexarLineaUnica` (sin duplicar),
-      `avisoCombustibleCorregido` (push a oficina), `avisoFilaCombustible`
-      (carga masiva, `preview` / `guardada`) y `MENSAJE_COMBUSTIBLE_INVALIDO`
-      (400 del DTO). El panel y la app COPIAN las etiquetas.
+      `leerNotaCombustible` / `notasCombustible` / `quitarNotaCombustible`
+      (la nota tiene forma EXACTA: es la clave para leerla y retirarla, como
+      `quitarAvisoAvionTramo`), `ajustarCombustiblePatch` (regla del PATCH,
+      abajo), `avisoCombustibleCorregido` (push a oficina; el cuerpo NO
+      repite el título), `avisoFilaCombustible` (carga masiva, `preview` /
+      `guardada`) y `MENSAJE_COMBUSTIBLE_INVALIDO` (400 del DTO). El panel y
+      la app COPIAN las etiquetas.
     - **Sonda ÚNICA** `common/combustible-disponible.util.ts`
       (`combustibleAeronaveDisponible` = `columnaOpcional(aeronave.
       combustible)`, re-sondeo ≤ 10 min). **REGLA DURA: todo select/insert/
@@ -3965,24 +3969,46 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       'TURBOSINA'` (`@IsOptional @IsIn`). Alta sin valor ⇒ AVGAS; `null` en
       la edición = sin cambio (la columna es NOT NULL); sin la migración el
       campo se OMITE del insert/update (warn) en vez de un 500.
+    - **Avión de la regla = el avión al que CUENTA el gasto** (misma
+      prioridad que `avionDelGasto` en balance, reparto y Libro Dinero): el
+      del TRAMO (con herencia del vuelo) → el explícito/heredado del gasto →
+      el del vuelo. Con un avión explícito distinto al del tramo la carga
+      lleva el combustible del TRAMO (ahí la cuenta el balance; el aviso ⚠
+      avión≠tramo ya lo dice); si no, el balance del N621TX mostraría AVGAS,
+      el mismo síntoma del #280 al revés (revisión 5-oct). La validación de
+      matrícula sigue contra el avión asignado.
     - **Alta de gasto** (`expenses.create`): con `categoria = GAS` y avión
-      resuelto (el MISMO `aeronaveId` de la validación de matrícula: elegido
-      o heredado del tramo/vuelo) se lee `combustible` en la MISMA consulta de
-      flota que la matrícula (UNA lectura sirve a las dos) y se aplica la
-      regla. Si corrige: la nota va a `notas` (al final), `requiere_visto_bueno
-      = true` y aviso a ADMIN y ANALISTA por el MISMO canal que la matrícula
+      resuelto se lee `combustible` en la MISMA consulta de flota que la
+      matrícula (UNA lectura sirve a las dos) y se aplica la regla. Si
+      corrige: la nota va a `notas` (al final), `requiere_visto_bueno = true`
+      y aviso a ADMIN y ANALISTA por el MISMO canal que la matrícula
       (`alerta_sistema`, título «Carga de combustible corregida», `data
       {gasto_id, motivo: 'combustible_corregido'}`, `link /admin/expenses`;
-      `notificar:false` lo calla, como en la carga masiva). Vacío ⇒ solo se
-      rellena.
-    - **PATCH de gasto** (`ajustarCombustibleEnUpdate`): si el PATCH trae
-      `tipo_combustible` o cambia `aeronave_id`/`vuelo_id`/`escala_id`/
-      `categoria` de un gasto GAS, la regla se re-aplica contra el avión
-      VIGENTE tras el merge (heredado / tramo auto-limpiado incluidos); si
-      corrige, nota SIN duplicar la misma línea y `requiere_visto_bueno =
-      true`. **La oficina tampoco deja un tipo distinto al del avión**: si el
-      avión de verdad cambió de combustible, se corrige en su ficha. El PATCH
-      no avisa por push (la oficina ve la respuesta; el visto bueno queda).
+      SIN el actor, como «gasto_registrado»; `notificar:false` lo calla, como
+      en la carga masiva). Vacío ⇒ solo se rellena.
+    - **PATCH de gasto** (`ajustarCombustibleEnUpdate` → PURA
+      `ajustarCombustiblePatch`): si el PATCH trae `tipo_combustible` o
+      cambia `aeronave_id`/`vuelo_id`/`escala_id`/`categoria` de un gasto GAS,
+      la regla se re-aplica contra el avión VIGENTE tras el merge (tramo
+      heredado / auto-limpiado incluidos; quitar el avión de una carga con
+      vuelo ⇒ el del vuelo). **La oficina tampoco deja un tipo distinto al
+      del avión**: si el avión de verdad cambió de combustible, se corrige en
+      su ficha. Reglas finas (revisión 5-oct): (a) reenviar el MISMO tipo
+      que ya tenía el gasto (formulario completo) cuenta como «lo que el
+      gasto traía», no como captura; (b) si las notas traen una corrección
+      de OTRO avión (matrícula de la nota ≠ la vigente) se RETIRAN todas las
+      de combustible y se re-evalúa con el valor de ANTES de la primera
+      corrección: caso #280 al revés (piloto capturó bien TURBOSINA, el gasto
+      quedó en el PEV ⇒ AVGAS + nota; la oficina lo mueve al N621TX ⇒
+      TURBOSINA, sin nota y sin otro visto bueno); (c) `requiere_visto_bueno
+      = true` SOLO con una corrección NUEVA (cambia el valor guardado o el
+      PATCH mandó otro tipo); mover entre dos aviones del mismo combustible
+      solo reescribe la nota con el avión nuevo. Nunca se APAGA el visto
+      bueno. El PATCH no avisa por push (la oficina ve la respuesta).
+    - **Enriquecimiento IA offline** (`enriquecerGastoConIA`) NO pasa por la
+      regla y no la necesita: nunca cambia la categoría (solo anota la
+      discrepancia) y solo pone avión a gastos SIN avión, cosa que una carga
+      GAS no puede ser (el alta lo exige y ahí ya se rellenó el tipo).
     - **Carga masiva** (`combustible-masivo.service`): el preview lee la flota
       con la columna; tipo vacío ⇒ el del avión; distinto ⇒ ADVERTENCIA (no
       error). La carga pasa por `create` (que corrige) y la respuesta suma el
@@ -3991,9 +4017,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - Specs: `combustible.util.spec`, `combustible-disponible.util.spec`,
       `expenses.service.combustible.spec` (caso #280 con herencia del vuelo,
       relleno, coincide, avión ausente, masiva sin push, matrícula + combustible
-      en UNA lectura, otra categoría, sin migración; PATCH que cambia de
-      avión, oficina que manda otro tipo, sin duplicar, null, sin tocar,
-      no-GAS, sin migración), `combustible-masivo.service.spec`,
+      en UNA lectura, tramo que dicta el avión, explícito ≠ tramo, otra
+      categoría, sin migración; PATCH que cambia de avión, oficina que manda
+      otro tipo, sin duplicar, null, sin tocar, no-GAS, solo tramo, solo
+      vuelo con tramo auto-limpiado, OTRA→GAS, #280 al revés con la nota
+      vieja retirada, a otro AVGAS, tramo vigente ≠ explícito, avión quitado
+      con vuelo, sin migración; el harness responde `escala` y `vuelo` por
+      id), `combustible-masivo.service.spec`,
       `aircraft.service.combustible.spec` y `dto/create-aeronave.dto.spec`.
       Deploy: migración → API → panel → app.
 
@@ -4706,7 +4736,8 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   (invariante 43): `aeronave.combustible` text NOT NULL default 'AVGAS' +
   CHECK `aeronave_combustible_chk` (AVGAS | TURBOSINA) + UPDATE de las dos
   turbinas (N58BT, N621TX) + COMMENT + verificación `do $ver$` que aborta si
-  no quedaron. Sin triggers nuevos; el UPDATE dispara
+  no quedaron o si alguna de las dos no existe con esa matrícula exacta
+  (`v_ok <> 2`). Sin triggers nuevos; el UPDATE dispara
   `trg_aeronave_set_updated_at` (mueve `updated_at` de las 2 turbinas) y NO
   el fan-out de Google (solo escucha matrícula/color). **Antes de aplicar**:
   el DRY-RUN de su cabecera (UNA sentencia `do $dry$`, se ejecuta quitando
@@ -4717,7 +4748,8 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `DRYRUN_OK`; después la columna NO existe y no queda `XX-DRY1`. Probado en
   PGlite (5-oct): `DRYRUN_OK`, aplicar dos veces idempotente, dry-run sobre la
   aplicada ⇒ `DRYRUN_FALLA A`, verificación que aborta si una turbina no
-  quedó y rollback. Tras aplicar: `get_advisors` y `GET /v1/aircraft` con
+  quedó o si la matrícula viene escrita distinto («N-58BT» ⇒ «1 de 2
+  turbinas en TURBOSINA») y rollback. Tras aplicar: `get_advisors` y `GET /v1/aircraft` con
   `combustible` por fila (la sonda re-sondea en ≤ 10 min). El API 0.0.56 es
   desplegable ANTES (sin la columna, todo como el 0.0.55). Rollback al pie
   del archivo (reiniciar el API después).

@@ -85,6 +85,7 @@ import { CategoriaGasto, MedioPago } from './dto/expenses.dto';
 import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
 import {
   anexarLineaUnica,
+  ajustarCombustiblePatch,
   avisoCombustibleCorregido,
   resolverTipoCombustible,
   type ResultadoTipoCombustible,
@@ -1485,11 +1486,16 @@ export class ExpensesService {
     const conMatriculaIA =
       typeof matriculaIA === 'string' && !!matriculaIA.trim() && !!aeronaveId;
     // COMBUSTIBLE DEL AVIÓN (5-oct-2026, invariante 43, caso XB-PEV #280):
-    // una carga GAS lleva el combustible DEL AVIÓN al que quedó (el MISMO
-    // `aeronaveId` de la validación de matrícula: elegido o heredado del
-    // tramo/vuelo). Se lee en la MISMA consulta de flota, sumando la columna
-    // solo si la migración 20261005000001 ya está (sonda única).
-    const esGasConAvion = dto.categoria === CategoriaGasto.GAS && !!aeronaveId;
+    // una carga GAS lleva el combustible del avión al que CUENTA el gasto
+    // (misma prioridad que `avionDelGasto` en balance, reparto y Libro
+    // Dinero): el avión del TRAMO si lo hay; si no, el elegido o heredado
+    // del vuelo (`aeronaveId`). Con un avión explícito distinto al del tramo
+    // la carga lleva el combustible del TRAMO (el balance la cuenta ahí; el
+    // aviso ⚠ avión≠tramo ya lo dice). Se lee en la MISMA consulta de flota
+    // que la matrícula, sumando la columna solo si la migración
+    // 20261005000001 ya está (sonda única).
+    const avionGasId = tramoRef?.aeronave_id ?? aeronaveId;
+    const esGasConAvion = dto.categoria === CategoriaGasto.GAS && !!avionGasId;
     let flotaMat: Array<{
       id: string;
       matricula: string;
@@ -1531,7 +1537,7 @@ export class ExpensesService {
       matricula: string | null;
     } | null = null;
     if (conCombustible) {
-      const avionGas = flotaMat.find((a) => a.id === aeronaveId);
+      const avionGas = flotaMat.find((a) => a.id === avionGasId);
       const resultado = resolverTipoCombustible({
         capturado: dto.tipo_combustible,
         delAvion: avionGas?.combustible,
@@ -1704,8 +1710,10 @@ export class ExpensesService {
         },
         link: '/admin/expenses',
       };
-      void this.notifications.notifyRole(Rol.ADMIN, avisoComb);
-      void this.notifications.notifyRole(Rol.ANALISTA, avisoComb);
+      // Sin el actor (como «gasto_registrado»): la oficina que captura en el
+      // panel ya vio el aviso ámbar y la respuesta; no se avisa a sí misma.
+      void this.notifications.notifyRole(Rol.ADMIN, avisoComb, userId);
+      void this.notifications.notifyRole(Rol.ANALISTA, avisoComb, userId);
     }
 
     // Captura OFFLINE con foto: el piloto no tuvo IA en campo — el servidor
@@ -3151,7 +3159,17 @@ export class ExpensesService {
     // vuelve GAS), la regla se re-aplica contra el avión VIGENTE tras el
     // merge. La oficina tampoco deja un tipo distinto al del avión: si el
     // avión de verdad cambió de combustible, se corrige en su ficha.
-    await this.ajustarCombustibleEnUpdate(dto, actual, cols);
+    await this.ajustarCombustibleEnUpdate(dto, actual, cols, {
+      tramoRef,
+      escalaVigente:
+        dtoNull.escala_id !== undefined
+          ? dtoNull.escala_id
+          : (actual?.escala_id ?? null),
+      vueloVigente:
+        dto.vuelo_id !== undefined
+          ? (dtoNull.vuelo_id ?? null)
+          : (actual?.vuelo_id ?? null),
+    });
     // Bitácora de la corrección tardía (B3): se anexa a las notas VIGENTES
     // (las del PATCH, o las que ya tenía el gasto) y el trigger
     // tg_gasto_bitacora la registra como diff de `notas`.
@@ -3225,14 +3243,19 @@ export class ExpensesService {
   }
 
   /**
-   * Re-aplica `resolverTipoCombustible` en un PATCH de un gasto GAS
-   * (invariante 43). Escribe en `cols` (el UPDATE que se va a mandar):
-   * `tipo_combustible` cuando cambia, la nota «⚠ … — revisar» SIN
-   * duplicarla y `requiere_visto_bueno = true` si corrigió. Sin la columna
-   * (migración pendiente), sin avión o sin el avión en la BD: no toca nada.
-   * Si el PATCH no trae `tipo_combustible` (solo movió el gasto de
-   * avión/vuelo/tramo), el valor que se compara es el que el gasto YA tenía
-   * y la nota lo dice así («el gasto traía …»).
+   * Re-aplica la regla del combustible en un PATCH de un gasto GAS
+   * (invariante 43, fuente única PURA `ajustarCombustiblePatch`). Escribe en
+   * `cols` (el UPDATE que se va a mandar): `tipo_combustible` cuando cambia,
+   * las notas (la corrección de OTRO avión se retira; la nueva se agrega SIN
+   * duplicarla) y `requiere_visto_bueno = true` solo con una corrección
+   * NUEVA. Sin la columna (migración pendiente), sin avión o sin el avión en
+   * la BD: no toca nada.
+   *
+   * El avión es aquel al que CUENTA el gasto tras el merge, con la MISMA
+   * prioridad que `avionDelGasto` (balance, reparto, Libro Dinero): el del
+   * TRAMO vigente (con herencia del vuelo) → el explícito (o heredado) del
+   * gasto → el del vuelo vigente. Así un PATCH que quita el avión de una
+   * carga con vuelo también pasa por la regla.
    */
   private async ajustarCombustibleEnUpdate(
     dto: UpdateGastoDto,
@@ -3243,6 +3266,11 @@ export class ExpensesService {
       tipo_combustible?: string | null;
     } | null,
     cols: Record<string, unknown>,
+    vigente: {
+      tramoRef: TramoGastoRef | null;
+      escalaVigente: string | null;
+      vueloVigente: string | null;
+    },
   ): Promise<void> {
     if (!actual) return;
     const toca =
@@ -3253,37 +3281,53 @@ export class ExpensesService {
       dto.categoria !== undefined;
     const categoria = dto.categoria ?? actual.categoria;
     if (!toca || categoria !== CategoriaGasto.GAS) return;
-    const avionId =
+    if (!(await combustibleAeronaveDisponible(this.supabase.service))) return;
+    let avionId: string | null = null;
+    if (vigente.escalaVigente) {
+      const tramo =
+        vigente.tramoRef?.escala_id === vigente.escalaVigente
+          ? vigente.tramoRef
+          : await this.resolverTramoGasto(vigente.escalaVigente);
+      avionId = tramo.aeronave_id;
+    }
+    avionId ??=
       cols.aeronave_id !== undefined
         ? (cols.aeronave_id as string | null)
         : (actual.aeronave_id ?? null);
+    if (!avionId && vigente.vueloVigente) {
+      const { data: vueloRef } = await this.supabase.service
+        .from('vuelo')
+        .select('aeronave_id')
+        .eq('id', vigente.vueloVigente)
+        .maybeSingle();
+      avionId = (vueloRef?.aeronave_id as string | null) ?? null;
+    }
     if (!avionId) return;
-    if (!(await combustibleAeronaveDisponible(this.supabase.service))) return;
     const { data: avion } = await this.supabase.service
       .from('aeronave')
       .select('id, matricula, combustible')
       .eq('id', avionId)
       .maybeSingle();
     if (!avion) return;
-    const enPatch = dto.tipo_combustible !== undefined;
-    const vigente = enPatch ? dto.tipo_combustible : actual.tipo_combustible;
-    const resultado = resolverTipoCombustible({
-      capturado: vigente,
-      delAvion: (avion as { combustible?: unknown }).combustible,
-      matricula: (avion as { matricula?: string | null }).matricula ?? null,
-      motivo: enPatch ? 'captura' : 'cambio_avion',
-    });
-    if (resultado.tipo && resultado.tipo !== (vigente ?? null)) {
-      cols.tipo_combustible = resultado.tipo;
-    }
-    if (!resultado.corregido || !resultado.nota) return;
     const notasBase =
       cols.notas !== undefined
         ? (cols.notas as string | null)
         : (actual.notas ?? null);
-    const notasNuevas = anexarLineaUnica(notasBase, resultado.nota);
-    if (notasNuevas !== (notasBase ?? '')) cols.notas = notasNuevas;
-    cols.requiere_visto_bueno = true;
+    const r = ajustarCombustiblePatch({
+      notas: notasBase,
+      guardado: actual.tipo_combustible,
+      enviado: dto.tipo_combustible,
+      delAvion: (avion as { combustible?: unknown }).combustible,
+      matricula: (avion as { matricula?: string | null }).matricula ?? null,
+    });
+    if (!r) return;
+    const tipoEfectivo =
+      cols.tipo_combustible !== undefined
+        ? (cols.tipo_combustible as string | null)
+        : (actual.tipo_combustible ?? null);
+    if (r.tipo !== tipoEfectivo) cols.tipo_combustible = r.tipo;
+    if ((r.notas ?? null) !== (notasBase ?? null)) cols.notas = r.notas;
+    if (r.marcarVistoBueno) cols.requiere_visto_bueno = true;
   }
 
   /**

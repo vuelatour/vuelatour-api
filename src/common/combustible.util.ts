@@ -143,6 +143,157 @@ export function resolverTipoCombustible(
 }
 
 /**
+ * Renglón «⚠ … — revisar» que deja `resolverTipoCombustible` (forma EXACTA:
+ * es la clave para leerlo y retirarlo). Grupo 3 = lo que va tras «el »: la
+ * matrícula o «avión» cuando no la había.
+ */
+const NOTA_COMBUSTIBLE_RE =
+  /^⚠ (se capturó|el gasto traía) (AVGAS|TURBOSINA) pero el (.+?) carga (AVGAS|TURBOSINA): se corrigió a (AVGAS|TURBOSINA) — revisar$/;
+
+/** Una nota de combustible leída de `gasto.notas`. */
+export interface NotaCombustible {
+  /** `captura` = «se capturó …»; `cambio_avion` = «el gasto traía …». */
+  motivo: 'captura' | 'cambio_avion';
+  /** Valor ANTES de la corrección (lo que se capturó / traía el gasto). */
+  capturado: CombustibleAeronave;
+  /** Matrícula del avión de la nota; null si decía «el avión». */
+  matricula: string | null;
+  /** Valor al que se corrigió (el combustible de ese avión). */
+  corregidoA: CombustibleAeronave;
+}
+
+/** Lee UN renglón; null si no es una nota de combustible. */
+export function leerNotaCombustible(
+  linea: string | null | undefined,
+): NotaCombustible | null {
+  const m = NOTA_COMBUSTIBLE_RE.exec((linea ?? '').trim());
+  if (!m) return null;
+  return {
+    motivo: m[1] === 'se capturó' ? 'captura' : 'cambio_avion',
+    capturado: m[2] as CombustibleAeronave,
+    matricula: m[3] === 'avión' ? null : m[3],
+    corregidoA: m[5] as CombustibleAeronave,
+  };
+}
+
+/** Todas las notas de combustible de `notas`, en orden (la más vieja primero). */
+export function notasCombustible(
+  notas: string | null | undefined,
+): NotaCombustible[] {
+  if (!notas) return [];
+  return notas
+    .split('\n')
+    .map((l) => leerNotaCombustible(l))
+    .filter((n): n is NotaCombustible => n !== null);
+}
+
+/**
+ * Notas sin ningún renglón de corrección de combustible (null si no queda
+ * nada). Espejo de `quitarAvisoAvionTramo`: al mover la carga a OTRO avión la
+ * nota vieja deja de ser cierta y se retira antes de re-evaluar.
+ */
+export function quitarNotaCombustible(
+  notas: string | null | undefined,
+): string | null {
+  if (!notas) return null;
+  const limpias = notas
+    .split('\n')
+    .filter((l) => leerNotaCombustible(l) === null)
+    .join('\n')
+    .replace(/\n+$/, '');
+  return limpias.trim() ? limpias : null;
+}
+
+/** Matrícula comparable (sin guiones/espacios, mayúsculas). */
+function matriculaComparable(m: string | null | undefined): string {
+  return (m ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+export interface EntradaCombustiblePatch {
+  /** Notas sobre las que se trabaja (las del PATCH o las vigentes). */
+  notas: string | null | undefined;
+  /** `gasto.tipo_combustible` GUARDADO antes del PATCH. */
+  guardado: unknown;
+  /** `tipo_combustible` del PATCH; `undefined` = el PATCH no lo trae. */
+  enviado?: unknown;
+  /** Combustible del avión VIGENTE tras el merge. */
+  delAvion: unknown;
+  /** Matrícula del avión vigente. */
+  matricula: string | null | undefined;
+}
+
+export interface ResultadoCombustiblePatch {
+  /** Valor que debe quedar en `gasto.tipo_combustible`. */
+  tipo: CombustibleAeronave;
+  /** Notas resultantes (null = vacías). Iguales a la entrada si no cambian. */
+  notas: string | null;
+  /** true = marcar `requiere_visto_bueno` (corrección NUEVA). */
+  marcarVistoBueno: boolean;
+  /** Resultado de la regla única (para quien lo necesite). */
+  resultado: ResultadoTipoCombustible;
+}
+
+/**
+ * Regla del PATCH de una carga GAS (invariante 43), PURA:
+ *  - Reenviar el MISMO tipo que ya tenía el gasto no es «capturar» (el
+ *    formulario completo del panel lo manda siempre): cuenta como lo que el
+ *    gasto traía.
+ *  - Si las notas traen una corrección de combustible de OTRO avión (la
+ *    carga se movió de avión), esa nota ya no es cierta: se RETIRAN todas y
+ *    se re-evalúa con el valor de ANTES de la primera corrección (lo que el
+ *    piloto capturó). Caso #280 al revés: el piloto capturó bien TURBOSINA
+ *    pero el gasto quedó en el XB-PEV (⇒ AVGAS + nota); la oficina lo mueve
+ *    al N621TX ⇒ vuelve a TURBOSINA, sin nota y sin pedir otro visto bueno.
+ *  - El visto bueno se marca solo si la corrección es NUEVA: cambia el valor
+ *    guardado o el PATCH mandó otro tipo. Mover la carga entre dos aviones
+ *    del mismo combustible solo reescribe la nota con el avión nuevo.
+ * Devuelve null si no hay contra qué comparar (avión sin dato).
+ */
+export function ajustarCombustiblePatch(
+  entrada: EntradaCombustiblePatch,
+): ResultadoCombustiblePatch | null {
+  const delAvion = normalizarCombustible(entrada.delAvion);
+  if (!delAvion) return null;
+  const guardado = normalizarCombustible(entrada.guardado);
+  const tocaTipo =
+    entrada.enviado !== undefined &&
+    normalizarCombustible(entrada.enviado) !== guardado;
+  const notasBase = entrada.notas ?? null;
+  const previas = notasCombustible(notasBase);
+  const actual = matriculaComparable(entrada.matricula);
+  const cambioDeAvion = previas.some(
+    (n) => matriculaComparable(n.matricula) !== actual,
+  );
+  const base = cambioDeAvion ? quitarNotaCombustible(notasBase) : notasBase;
+  let capturado: unknown = guardado;
+  let motivo: 'captura' | 'cambio_avion' = 'cambio_avion';
+  if (tocaTipo) {
+    capturado = entrada.enviado;
+    motivo = 'captura';
+  } else if (cambioDeAvion) {
+    capturado = previas[0].capturado;
+    motivo = previas[0].motivo;
+  }
+  const resultado = resolverTipoCombustible({
+    capturado,
+    delAvion,
+    matricula: entrada.matricula ?? null,
+    motivo,
+  });
+  const tipo = resultado.tipo ?? delAvion;
+  const notas =
+    resultado.corregido && resultado.nota
+      ? anexarLineaUnica(base, resultado.nota)
+      : base;
+  return {
+    tipo,
+    notas: notas ?? null,
+    marcarVistoBueno: resultado.corregido && (tocaTipo || tipo !== guardado),
+    resultado,
+  };
+}
+
+/**
  * Agrega `linea` al final de `notas` SOLO si no está ya como renglón
  * completo (repetir el PATCH no apila la misma nota).
  */
@@ -159,7 +310,8 @@ export function anexarLineaUnica(
 
 /**
  * Aviso a oficina (mismo canal que la discrepancia de matrícula) cuando el
- * alta corrigió el combustible.
+ * alta corrigió el combustible. El título ya dice «Carga de combustible
+ * corregida»: el cuerpo NO lo repite (en la app y el panel se leía doble).
  */
 export function avisoCombustibleCorregido(args: {
   resultado: ResultadoTipoCombustible;
@@ -177,7 +329,7 @@ export function avisoCombustibleCorregido(args: {
   return {
     titulo: 'Carga de combustible corregida',
     cuerpo:
-      `Carga de combustible corregida: se capturó ${etiquetaCombustible(resultado.capturado)} ` +
+      `Se capturó ${etiquetaCombustible(resultado.capturado)} ` +
       `pero ${avion} carga ${etiquetaCombustible(resultado.delAvion)} ` +
       `(${litros}${fmtDineroTexto(Number(args.monto), args.moneda)}). ` +
       `Se guardó como ${etiquetaCombustible(resultado.tipo)} y quedó para revisión.`,

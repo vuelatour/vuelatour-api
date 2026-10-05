@@ -18,7 +18,8 @@
 --      XB-PEV, XB-ANU) se queda en el default AVGAS.
 --   3. COMMENT de la columna.
 --   4. Verificación (`do $ver$`) que ABORTA la migración si las turbinas no
---      quedaron en TURBOSINA o si algún valor quedó fuera del CHECK.
+--      quedaron en TURBOSINA, si alguna de las dos NO existe con esa
+--      matrícula exacta o si algún valor quedó fuera del CHECK.
 --
 -- Sin triggers nuevos, sin funciones, sin tocar `gasto`. El UPDATE de la
 -- sección 2 dispara los triggers EXISTENTES de `aeronave`:
@@ -207,6 +208,7 @@ comment on column public.aeronave.combustible is
 do $ver$
 declare
   v_faltan int;
+  v_ok int;
   v_fuera int;
 begin
   select count(*) into v_faltan
@@ -215,6 +217,17 @@ begin
      and combustible <> 'TURBOSINA';
   if v_faltan > 0 then
     raise exception 'VERIFICACION_FALLA 20261005000001: % turbina(s) sin TURBOSINA', v_faltan;
+  end if;
+  -- Que las DOS existan con esa ortografía: si una matrícula estuviera
+  -- escrita distinto (p. ej. «N-58BT») el UPDATE no tocaría nada, v_faltan
+  -- daría 0 y esa turbina quedaría en AVGAS (cada carga suya se
+  -- «corregiría» a AVGAS con nota y push).
+  select count(*) into v_ok
+    from public.aeronave
+   where matricula in ('N58BT', 'N621TX')
+     and combustible = 'TURBOSINA';
+  if v_ok <> 2 then
+    raise exception 'VERIFICACION_FALLA 20261005000001: % de 2 turbinas en TURBOSINA (¿matrícula distinta?)', v_ok;
   end if;
   select count(*) into v_fuera
     from public.aeronave
