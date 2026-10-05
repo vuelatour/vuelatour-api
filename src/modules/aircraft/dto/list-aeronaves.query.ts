@@ -9,6 +9,7 @@ import {
   Max,
   Min,
 } from 'class-validator';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 
 export class ListAeronavesQuery {
   @ApiPropertyOptional({ enum: ['MX', 'USA'] })
@@ -18,7 +19,7 @@ export class ListAeronavesQuery {
 
   @ApiPropertyOptional({ description: 'Activas únicamente. Default: true' })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   activa?: boolean;
 

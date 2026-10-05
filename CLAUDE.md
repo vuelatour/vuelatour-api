@@ -2216,12 +2216,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       paridad del `.or` con `list`) y `quotes.controller.vecinos.spec.ts`
       (HTTP real con `RolesGuard`: ruta antes de `:id`, roles = los de la
       lista, `limit` ⇒ 400).
-    - **Hueco conocido, AJENO a esto**: con `enableImplicitConversion` el
-      `@ToBooleanQuery()` recibe el valor YA convertido (`'false'` ⇒ `true`),
-      así que `?es_externo=false` filtra como `true` — en la lista y en las
-      flechas por igual (el panel no manda ese filtro). Afecta también a
-      `conciliado`, `pendientes`, `duplicados`, `activo` y `forzar` de otros
-      DTOs; no se tocó aquí.
+    - **CORREGIDO el 5-oct-2026 (API 0.0.53)**: con `enableImplicitConversion`
+      class-transformer convierte `'false'` ⇒ `true` ANTES de los
+      `@Transform`, así que `@ToBooleanQuery()` recibía el valor ya
+      invertido y `?conciliado=false` (pestaña «Pendientes» de Conciliación)
+      devolvía los conciliados; igual `pendientes`, `duplicados`, `activo`,
+      `activa`, `es_externo` y `forzar`. Ahora el decorador lee el valor CRUDO
+      de la query (`obj[key]`) y `@Type(() => Boolean)` ya no se usa en
+      ningún query DTO (airports `activo`, aeronaves `activa` pasaron a
+      `@ToBooleanQuery()`). Spec: `to-boolean-query.decorator.spec.ts` con
+      las MISMAS opciones del pipe. Todo booleano de query nace con
+      `@ToBooleanQuery()`, nunca con `@Type(() => Boolean)`.
 
 29. **INGRESOS Y ANTICIPOS + CONCILIACIÓN DE INGRESOS (24-sep-2026, API
     0.0.34, migración `20260924000004` — APLICADA el 24-sep-2026 tras

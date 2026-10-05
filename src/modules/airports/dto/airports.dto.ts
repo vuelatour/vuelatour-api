@@ -14,6 +14,7 @@ import {
   ArrayNotEmpty,
   ValidateNested,
 } from 'class-validator';
+import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 
 export class ListAirportsQuery {
   @ApiPropertyOptional({ description: 'Búsqueda por IATA, ICAO, nombre o ciudad' })
@@ -29,7 +30,7 @@ export class ListAirportsQuery {
 
   @ApiPropertyOptional({ default: true })
   @IsOptional()
-  @Type(() => Boolean)
+  @ToBooleanQuery()
   @IsBoolean()
   activo?: boolean;
 
