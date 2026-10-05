@@ -185,6 +185,40 @@ describe('CombustibleMasivoService — combustible del avión', () => {
     expect(r.filas[0].ok).toBe(false);
     expect(r.filas[0].datos.tipo_combustible).toBeUndefined();
     expect(r.filas[0].advertencias).toEqual([]);
+    // Etiqueta Y código, en el mismo vocabulario que las advertencias.
+    expect(r.filas[0].errores).toEqual([
+      "Tipo de combustible 'DIESEL' inválido: escribe Gasavión (AVGAS) o Turbosina (TURBOSINA).",
+    ]);
+  });
+
+  it('preview: la ETIQUETA («Gasavión», «gasavion») se acepta y se guarda el CÓDIGO', async () => {
+    const { service, filasCrudas } = armar();
+    filasCrudas.push(
+      cruda({ fila: 2, tipo_combustible: 'Gasavión' }),
+      cruda({ fila: 3, tipo_combustible: 'gasavion', monto: 1000 }),
+      cruda({
+        fila: 4,
+        matricula: 'N621TX',
+        tipo_combustible: 'Gasavión',
+        monto: 2000,
+      }),
+    );
+    const r = await service.preview({
+      archivo_base64: 'x',
+      filename: 'c.xlsx',
+    });
+    const [pev, pev2, n621] = r.filas;
+    for (const f of [pev, pev2]) {
+      expect(f.errores).toEqual([]);
+      expect(f.datos.tipo_combustible).toBe('AVGAS');
+      expect(f.advertencias).toEqual([]);
+    }
+    // En la turbina, Gasavión es la etiqueta de OTRO combustible: aviso.
+    expect(n621.errores).toEqual([]);
+    expect(n621.datos.tipo_combustible).toBe('AVGAS');
+    expect(n621.advertencias).toEqual([
+      'La fila dice Gasavión pero el N621TX carga Turbosina: se guardará como Turbosina y quedará marcada para revisión.',
+    ]);
   });
 
   it('preview SIN la migración: ni aviso ni relleno, y la flota se lee sin la columna', async () => {

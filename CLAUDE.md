@@ -3962,19 +3962,34 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `avisoCombustibleCorregido` (push a oficina; el cuerpo NO repite el
       título), `avisoFilaCombustible` (carga masiva, `preview` / `guardada`)
       y `MENSAJE_COMBUSTIBLE_INVALIDO` (400 del DTO: «El combustible del
-      avión es Gasavión (pistón) o Turbosina (turbina).»). Push, avisos de la
-      masiva, nota y 400 usan las ETIQUETAS, nunca el código crudo. El panel
-      y la app COPIAN las etiquetas.
+      avión es Gasavión (AVGAS, pistón) o Turbosina (TURBOSINA, turbina).»).
+      Push, avisos de la masiva y nota usan las ETIQUETAS, nunca el código
+      crudo; los dos textos de ERROR (400 del DTO y tipo inválido de una fila
+      de la masiva, `mensajeTipoCombustibleFilaInvalido`) dicen etiqueta Y
+      código, porque la API solo acepta el código. El panel y la app COPIAN
+      las etiquetas.
     - **Renglón «Combustible …» de la app** (`reescribirLineaCombustible
       (notas, codigoFinal)`, PURA): la app arma las notas de una carga como
       «Combustible TURBOSINA · 74 L · …» y el balance Excel por avión toma el
       detalle de la hoja «combustible» de `g.notas` (NO de
-      `tipo_combustible`). Cuando la regla CORRIGE (alta, PATCH y, por
-      `create`, la carga masiva) el PRIMER renglón que EMPIEZA con
-      «Combustible AVGAS» / «Combustible TURBOSINA» se reescribe con el
-      código del avión ANTES de anexar la nota ⚠: solo el código, una sola
+      `tipo_combustible`). **El renglón sigue al tipo cuando el tipo CAMBIA**:
+      en el alta (y por `create` la carga masiva) cuando el tipo guardado no
+      es el capturado (la regla corrige o rellena un vacío); en el PATCH
+      cuando la regla corrige, cuando el tipo final es distinto al GUARDADO
+      (relleno, o la oficina eligió a mano el del avión: el panel pinta
+      «El XB-PEV carga Gasavión…» y el operador elige Gasavión) o al retirar
+      la nota vieja por cambio de avión. Ahí el PRIMER renglón que EMPIEZA
+      con «Combustible AVGAS» / «Combustible TURBOSINA» se reescribe con el
+      código final ANTES de anexar la nota ⚠: solo el código, una sola
       reescritura, sin tocar otros renglones ni un «Combustible …» a media
-      línea; sin renglón o si ya coincide ⇒ notas intactas.
+      línea; sin renglón o si ya coincide ⇒ notas intactas. **Si el tipo no
+      cambia (se respeta el capturado/guardado), el renglón no se toca**
+      aunque diga otro (spec en las dos rutas). Sin renglón de la app
+      (panel, masiva con notas vacías) la nota ⚠ queda como PRIMERA línea:
+      la hoja «combustible» del balance pinta las notas completas y la del
+      Libro Dinero la primera línea entera («⚠ se capturó Turbosina pero el
+      XB-PEV carga Gasavión: se corrigió a Gasavión — revisar»). Es
+      intencional: dice a qué se corrigió y pide revisión.
     - **Sonda ÚNICA** `common/combustible-disponible.util.ts`
       (`combustibleAeronaveDisponible` = `columnaOpcional(aeronave.
       combustible)`, re-sondeo ≤ 10 min). **REGLA DURA: todo select/insert/
@@ -4024,19 +4039,25 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       TURBOSINA, sin nota y sin otro visto bueno); (c) `requiere_visto_bueno
       = true` SOLO con una corrección NUEVA (cambia el valor guardado o el
       PATCH mandó otro tipo); mover entre dos aviones del mismo combustible
-      solo reescribe la nota con el avión nuevo; (d) si corrige, o si se
-      retiró la nota vieja por cambio de avión, el renglón «Combustible …»
-      de la app queda con el tipo FINAL (el #280 al revés vuelve a
-      «Combustible TURBOSINA …»). Nunca se APAGA el visto bueno. El PATCH no
+      solo reescribe la nota con el avión nuevo; (d) si corrige, si el tipo
+      final es distinto al guardado o si se retiró la nota vieja por cambio
+      de avión, el renglón «Combustible …» de la app queda con el tipo FINAL
+      (el #280 al revés vuelve a «Combustible TURBOSINA …»; la oficina que
+      elige Gasavión sobre una carga TURBOSINA del PEV deja «Combustible
+      AVGAS …»). Nunca se APAGA el visto bueno. El PATCH no
       avisa por push (la oficina ve la respuesta).
     - **Enriquecimiento IA offline** (`enriquecerGastoConIA`) NO pasa por la
       regla y no la necesita: nunca cambia la categoría (solo anota la
       discrepancia) y solo pone avión a gastos SIN avión, cosa que una carga
       GAS no puede ser (el alta lo exige y ahí ya se rellenó el tipo).
     - **Carga masiva** (`combustible-masivo.service`): el preview lee la flota
-      con la columna; tipo vacío ⇒ el del avión; distinto ⇒ ADVERTENCIA (no
-      error). La carga pasa por `create` (que corrige, renglón «Combustible
-      …» de las notas incluido) y la respuesta suma el
+      con la columna; la columna «tipo» acepta el código o la etiqueta
+      («Gasavión», «gasavion», «Turbosina»; `combustibleDeTexto`) y guarda el
+      código; tipo vacío ⇒ el del avión; distinto ⇒ ADVERTENCIA (no error);
+      otro texto ⇒ error con etiqueta y código. La carga pasa por `create`
+      (que corrige, y reescribe el renglón «Combustible …» SI la fila lo trae
+      en sus notas —casi nunca: la nota ⚠ queda como primera línea—) y la
+      respuesta suma el
       ADITIVO `avisos: [{fila, aviso}]` con las filas que quedaron con el
       combustible del avión (derivado del `tipo_combustible` GUARDADO).
     - Specs: `combustible.util.spec`, `combustible-disponible.util.spec`,
@@ -4048,8 +4069,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vuelo con tramo auto-limpiado, OTRA→GAS, #280 al revés con la nota
       vieja retirada, a otro AVGAS, tramo vigente ≠ explícito, avión quitado
       con vuelo, sin migración; renglón «Combustible …» reescrito en alta,
-      masiva y PATCH, intacto sin corrección o a media línea, y de vuelta al
-      tipo final en el #280 al revés; el harness responde `escala` y `vuelo`
+      masiva y PATCH, intacto si el tipo no cambia o a media línea, de vuelta
+      al tipo final en el #280 al revés, con el relleno y cuando la oficina
+      elige a mano el del avión; el harness responde `escala` y `vuelo`
       por id), `combustible-masivo.service.spec`,
       `aircraft.service.combustible.spec` y `dto/create-aeronave.dto.spec`.
       Deploy: migración → API → panel → app.

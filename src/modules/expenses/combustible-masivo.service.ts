@@ -8,6 +8,8 @@ import { round6 } from '../../common/tc.util';
 import { combustibleAeronaveDisponible } from '../../common/combustible-disponible.util';
 import {
   avisoFilaCombustible,
+  combustibleDeTexto,
+  mensajeTipoCombustibleFilaInvalido,
   normalizarCombustible,
   resolverTipoCombustible,
 } from '../../common/combustible.util';
@@ -412,15 +414,15 @@ export class CombustibleMasivoService {
       );
     }
 
-    // Tipo de combustible (opcional; si viene, debe ser del catálogo).
-    const tipo = (f.tipo_combustible ?? '').trim().toUpperCase();
+    // Tipo de combustible (opcional; si viene, debe ser del catálogo). La
+    // oficina lo escribe como lo llama: se acepta el código (AVGAS,
+    // TURBOSINA) o la etiqueta («Gasavión», «Turbosina»), sin distinguir
+    // mayúsculas ni acentos; se guarda SIEMPRE el código (`combustibleDeTexto`).
+    const tipo = (f.tipo_combustible ?? '').trim();
     if (tipo) {
-      if ((Object.values(TipoCombustible) as string[]).includes(tipo))
-        datos.tipo_combustible = tipo as TipoCombustible;
-      else
-        errores.push(
-          `Tipo de combustible '${f.tipo_combustible ?? ''}' inválido (TURBOSINA o AVGAS).`,
-        );
+      const codigo = combustibleDeTexto(tipo);
+      if (codigo) datos.tipo_combustible = codigo as TipoCombustible;
+      else errores.push(mensajeTipoCombustibleFilaInvalido(tipo));
     }
     // COMBUSTIBLE DEL AVIÓN (invariante 43), misma regla que el alta: vacío
     // ⇒ se rellena con el del avión; distinto ⇒ AVISO (no error): al

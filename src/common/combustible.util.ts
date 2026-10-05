@@ -35,8 +35,13 @@ const ETIQUETA: Record<CombustibleAeronave, string> = {
   TURBOSINA: 'Turbosina',
 };
 
-/** 400 del DTO de aeronave cuando `combustible` no es del catálogo. */
-export const MENSAJE_COMBUSTIBLE_INVALIDO = `El combustible del avión es ${ETIQUETA.AVGAS} (pistón) o ${ETIQUETA.TURBOSINA} (turbina).`;
+/**
+ * 400 del DTO de aeronave cuando `combustible` no es del catálogo. Lleva la
+ * ETIQUETA (cómo lo llama la oficina) Y el CÓDIGO (lo único que acepta la
+ * API): quien integre directo y siga el mensaje manda el código, no
+ * «Gasavión».
+ */
+export const MENSAJE_COMBUSTIBLE_INVALIDO = `El combustible del avión es ${ETIQUETA.AVGAS} (AVGAS, pistón) o ${ETIQUETA.TURBOSINA} (TURBOSINA, turbina).`;
 
 /**
  * Valor de BD/DTO a `CombustibleAeronave` (sin espacios, mayúsculas) o
@@ -48,6 +53,41 @@ export function normalizarCombustible(v: unknown): CombustibleAeronave | null {
   return (COMBUSTIBLES as readonly string[]).includes(s)
     ? (s as CombustibleAeronave)
     : null;
+}
+
+/** Texto comparable: sin acentos, espacios ni guiones, en mayúsculas. */
+function comparable(v: string): string {
+  return v
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[\s-]+/g, '')
+    .toUpperCase();
+}
+
+/**
+ * Tipo de combustible ESCRITO POR UNA PERSONA (columna de la plantilla de la
+ * carga masiva): acepta el código (`AVGAS`, `TURBOSINA`) o la ETIQUETA con
+ * que la oficina lo llama («Gasavión», «gasavion», «Gas avión»,
+ * «Turbosina»), sin distinguir mayúsculas, acentos, espacios ni guiones.
+ * Devuelve el CÓDIGO (lo que se guarda) o `null`. Para valores de BD/DTO se
+ * usa `normalizarCombustible` (solo códigos).
+ */
+export function combustibleDeTexto(v: unknown): CombustibleAeronave | null {
+  if (typeof v !== 'string') return null;
+  const s = comparable(v.trim());
+  if (!s) return null;
+  for (const c of COMBUSTIBLES) {
+    if (s === c || s === comparable(ETIQUETA[c])) return c;
+  }
+  return null;
+}
+
+/**
+ * Error de una fila de la carga masiva con un tipo que no es del catálogo:
+ * etiqueta Y código, como el 400 del DTO de aeronave.
+ */
+export function mensajeTipoCombustibleFilaInvalido(valor: string): string {
+  return `Tipo de combustible '${valor}' inválido: escribe ${ETIQUETA.AVGAS} (AVGAS) o ${ETIQUETA.TURBOSINA} (TURBOSINA).`;
 }
 
 /** «el XB-PEV» (o «el avión» sin matrícula): sujeto de todos los textos. */
@@ -336,9 +376,12 @@ export interface ResultadoCombustiblePatch {
  *  - El visto bueno se marca solo si la corrección es NUEVA: cambia el valor
  *    guardado o el PATCH mandó otro tipo. Mover la carga entre dos aviones
  *    del mismo combustible solo reescribe la nota con el avión nuevo.
- *  - Cuando la regla corrige, o cuando se retiró la nota vieja por cambio de
- *    avión, el renglón «Combustible AVGAS|TURBOSINA …» de la app queda con
- *    el tipo FINAL (`reescribirLineaCombustible`) ANTES de anexar la nota ⚠.
+ *  - Cuando la regla corrige, cuando el tipo final es distinto al GUARDADO
+ *    (relleno de un vacío o la oficina eligió a mano el del avión) o cuando
+ *    se retiró la nota vieja por cambio de avión, el renglón «Combustible
+ *    AVGAS|TURBOSINA …» de la app queda con el tipo FINAL
+ *    (`reescribirLineaCombustible`) ANTES de anexar la nota ⚠. Si el tipo no
+ *    cambia, el renglón no se toca.
  * Devuelve null si no hay contra qué comparar (avión sin dato).
  */
 export function ajustarCombustiblePatch(
@@ -373,8 +416,15 @@ export function ajustarCombustiblePatch(
     motivo,
   });
   const tipo = resultado.tipo ?? delAvion;
+  // El renglón de la app sigue al tipo FINAL siempre que ese tipo cambia
+  // respecto al GUARDADO (la regla corrige, rellena un vacío o la oficina
+  // eligió a mano el del avión) o se retiró la nota vieja por cambio de
+  // avión. Sin `tipo !== guardado`, elegir «Gasavión» en el XB-PEV sobre una
+  // carga guardada como TURBOSINA dejaba «Combustible TURBOSINA · 74 L …»
+  // en un gasto AVGAS (el síntoma del #280). Si el tipo no cambia, el
+  // renglón no se toca.
   const conLinea =
-    resultado.corregido || cambioDeAvion
+    resultado.corregido || cambioDeAvion || tipo !== guardado
       ? reescribirLineaCombustible(base, tipo)
       : base;
   const notas =

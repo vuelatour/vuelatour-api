@@ -354,6 +354,42 @@ describe('ExpensesService.create — combustible del avión', () => {
     );
   });
 
+  it('el tipo capturado se respeta ⇒ el renglón «Combustible …» queda INTACTO aunque diga otro', async () => {
+    // Regla del alta (y del PATCH): el renglón solo sigue al tipo cuando el
+    // tipo guardado NO es el capturado. Aquí se capturó AVGAS en el PEV.
+    const { service, consultas, notifyRole } = armar();
+    await service.create(
+      cargaPev({
+        tipo_combustible: TipoCombustible.AVGAS,
+        notas: 'Combustible TURBOSINA · 74 L',
+      }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    const p = insertado(consultas);
+    expect(p.tipo_combustible).toBe('AVGAS');
+    expect(p.notas).toBe('Combustible TURBOSINA · 74 L');
+    expect(p.requiere_visto_bueno).toBe(false);
+    expect(avisosCombustible(notifyRole)).toHaveLength(0);
+  });
+
+  it('tipo vacío con el renglón de la app ⇒ se rellena y el renglón queda con el código del avión, SIN nota ni visto bueno', async () => {
+    const { service, consultas, notifyRole } = armar();
+    await service.create(
+      cargaPev({
+        tipo_combustible: undefined,
+        notas: 'Combustible TURBOSINA · 74 L',
+      }),
+      'u-luis',
+      Rol.PILOTO,
+    );
+    const p = insertado(consultas);
+    expect(p.tipo_combustible).toBe('AVGAS');
+    expect(p.notas).toBe('Combustible AVGAS · 74 L');
+    expect(p.requiere_visto_bueno).toBe(false);
+    expect(avisosCombustible(notifyRole)).toHaveLength(0);
+  });
+
   it('tipo vacío ⇒ se rellena con el del avión, SIN nota, visto bueno ni aviso', async () => {
     const { service, consultas, notifyRole } = armar();
     await service.create(
@@ -610,6 +646,28 @@ describe('ExpensesService.update — combustible contra el avión VIGENTE', () =
       notas:
         'Combustible TURBOSINA · 74 L · CTM\n⚠ el gasto traía Gasavión pero el N621TX carga Turbosina: se corrigió a Turbosina — revisar',
     });
+  });
+
+  it('la oficina elige a mano el del avión sobre una carga guardada con otro ⇒ el renglón de la app lo sigue, sin visto bueno', async () => {
+    // El panel pinta «El XB-PEV carga Gasavión…» y el operador elige
+    // Gasavión: la regla ya no corrige, pero el tipo guardado cambia.
+    const { service, consultas } = armar({
+      actual: {
+        ...GAS_PEV,
+        tipo_combustible: 'TURBOSINA',
+        notas: 'Combustible TURBOSINA · 74 L · $32/L · aeropuerto CTM',
+      },
+    });
+    await service.update(
+      'g-1',
+      { tipo_combustible: TipoCombustible.AVGAS },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    const u = actualizado(consultas);
+    expect(u.tipo_combustible).toBe('AVGAS');
+    expect(u.notas).toBe('Combustible AVGAS · 74 L · $32/L · aeropuerto CTM');
+    expect(u).not.toHaveProperty('requiere_visto_bueno');
   });
 
   it('tipo null ⇒ se rellena con el del avión, sin nota ni visto bueno', async () => {

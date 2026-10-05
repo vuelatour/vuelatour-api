@@ -6,8 +6,10 @@ import {
   anexarLineaUnica,
   avisoCombustibleCorregido,
   avisoFilaCombustible,
+  combustibleDeTexto,
   etiquetaCombustible,
   leerNotaCombustible,
+  mensajeTipoCombustibleFilaInvalido,
   normalizarCombustible,
   notasCombustible,
   quitarNotaCombustible,
@@ -25,8 +27,35 @@ describe('combustible.util', () => {
   it('catálogo: AVGAS y TURBOSINA, default AVGAS', () => {
     expect(COMBUSTIBLES).toEqual(['AVGAS', 'TURBOSINA']);
     expect(COMBUSTIBLE_DEFAULT).toBe('AVGAS');
+    // Etiqueta Y código: la API solo acepta el código (quien integre directo
+    // y siga el mensaje no debe mandar «Gasavión» y recibir el mismo 400).
     expect(MENSAJE_COMBUSTIBLE_INVALIDO).toBe(
-      'El combustible del avión es Gasavión (pistón) o Turbosina (turbina).',
+      'El combustible del avión es Gasavión (AVGAS, pistón) o Turbosina (TURBOSINA, turbina).',
+    );
+  });
+
+  it('combustibleDeTexto (plantilla de la carga masiva): código o etiqueta ⇒ código', () => {
+    for (const v of [
+      'AVGAS',
+      'avgas',
+      ' Gasavión ',
+      'GASAVIÓN',
+      'gasavion',
+      'Gas avión',
+      'gas-avion',
+    ]) {
+      expect(combustibleDeTexto(v)).toBe('AVGAS');
+    }
+    for (const v of ['TURBOSINA', 'Turbosina', 'turbosina ']) {
+      expect(combustibleDeTexto(v)).toBe('TURBOSINA');
+    }
+    for (const v of ['DIESEL', 'Jet-A', 'Gas', '', '   ', null, undefined, 3]) {
+      expect(combustibleDeTexto(v)).toBeNull();
+    }
+    // Lo de BD/DTO sigue aceptando SOLO códigos.
+    expect(normalizarCombustible('Gasavión')).toBeNull();
+    expect(mensajeTipoCombustibleFilaInvalido('DIESEL')).toBe(
+      "Tipo de combustible 'DIESEL' inválido: escribe Gasavión (AVGAS) o Turbosina (TURBOSINA).",
     );
   });
 
@@ -205,6 +234,23 @@ describe('combustible.util', () => {
       expect(leerNotaCombustible('Carga en Chetumal')).toBeNull();
       expect(leerNotaCombustible(`Nota: ${PEV}`)).toBeNull();
       expect(leerNotaCombustible(null)).toBeNull();
+    });
+
+    it('el «carga X» (combustible del avión) también se valida', () => {
+      expect(
+        leerNotaCombustible(
+          '⚠ se capturó Turbosina pero el XB-PEV carga Diesel: se corrigió a Gasavión — revisar',
+        ),
+      ).toBeNull();
+    });
+
+    it('texto humano DESPUÉS de «— revisar» ⇒ ya no es la nota: no se lee ni se retira', () => {
+      const conTexto = `${PEV} (dice el piloto que fue error)`;
+      expect(leerNotaCombustible(conTexto)).toBeNull();
+      expect(quitarNotaCombustible(conTexto)).toBe(conTexto);
+      expect(quitarNotaCombustible(`Carga en Chetumal\n${conTexto}`)).toBe(
+        `Carga en Chetumal\n${conTexto}`,
+      );
     });
 
     it('notasCombustible: en orden, la más vieja primero', () => {
@@ -398,6 +444,51 @@ describe('combustible.util', () => {
           matricula: 'XB-PEV',
         })?.notas,
       ).toBe(notas);
+    });
+
+    it('la oficina elige a mano el tipo del avión (XB-PEV: TURBOSINA ⇒ AVGAS) ⇒ el renglón también pasa a AVGAS', () => {
+      // Sin corrección (la oficina ya mandó el del avión) pero el tipo
+      // GUARDADO cambia: el renglón de la app lo sigue. Antes quedaba
+      // «Combustible TURBOSINA · 74 L …» en un gasto AVGAS (síntoma #280).
+      expect(
+        ajustarCombustiblePatch({
+          notas: 'Combustible TURBOSINA · 74 L · $32/L · aeropuerto CTM',
+          guardado: 'TURBOSINA',
+          enviado: 'AVGAS',
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        }),
+      ).toMatchObject({
+        tipo: 'AVGAS',
+        notas: 'Combustible AVGAS · 74 L · $32/L · aeropuerto CTM',
+        marcarVistoBueno: false,
+      });
+    });
+
+    it('relleno (tipo guardado vacío) ⇒ el renglón de la app queda con el tipo del avión, sin nota', () => {
+      // El PATCH no trae el tipo (mueve el gasto) …
+      expect(
+        ajustarCombustiblePatch({
+          notas: 'Combustible TURBOSINA · 74 L',
+          guardado: null,
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        }),
+      ).toMatchObject({
+        tipo: 'AVGAS',
+        notas: 'Combustible AVGAS · 74 L',
+        marcarVistoBueno: false,
+      });
+      // … o trae el del avión sobre un guardado vacío.
+      expect(
+        ajustarCombustiblePatch({
+          notas: 'Combustible TURBOSINA · 74 L',
+          guardado: null,
+          enviado: 'AVGAS',
+          delAvion: 'AVGAS',
+          matricula: 'XB-PEV',
+        })?.notas,
+      ).toBe('Combustible AVGAS · 74 L');
     });
 
     it('la MISMA nota en la forma vieja (códigos) no se duplica', () => {

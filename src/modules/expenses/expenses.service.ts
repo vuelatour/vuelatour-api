@@ -1530,11 +1530,13 @@ export class ExpensesService {
     // Ajuste del combustible al del avión (fuente única
     // `resolverTipoCombustible`): vacío ⇒ se rellena sin nota; distinto ⇒
     // se corrige, nota «⚠ … — revisar», visto bueno y aviso a oficina por el
-    // MISMO canal que la matrícula. Al corregir, el renglón de la app
-    // «Combustible TURBOSINA · 74 L · …» (de ahí sale el detalle del balance
-    // Excel por avión) se reescribe con el código del avión ANTES de anexar
-    // la nota. Sin la columna (migración pendiente) o sin el avión en la
-    // lectura, se guarda tal cual.
+    // MISMO canal que la matrícula. Cuando el tipo guardado NO es el
+    // capturado (corrige o rellena), el renglón de la app «Combustible
+    // TURBOSINA · 74 L · …» (de ahí sale el detalle del balance Excel por
+    // avión) se reescribe con el código del avión ANTES de anexar la nota;
+    // si el tipo capturado se respeta, el renglón no se toca (misma regla
+    // que el PATCH, `ajustarCombustiblePatch`). Sin la columna (migración
+    // pendiente) o sin el avión en la lectura, se guarda tal cual.
     let tipoCombustible: string | undefined = dto.tipo_combustible;
     let combustibleCorregido: {
       resultado: ResultadoTipoCombustible;
@@ -1548,11 +1550,11 @@ export class ExpensesService {
         matricula: avionGas?.matricula ?? null,
       });
       tipoCombustible = resultado.tipo ?? undefined;
+      if (resultado.corregido || resultado.rellenado) {
+        notas = reescribirLineaCombustible(notas, resultado.tipo);
+      }
       if (resultado.corregido && resultado.nota) {
-        notas = anexarLineaUnica(
-          reescribirLineaCombustible(notas, resultado.tipo),
-          resultado.nota,
-        );
+        notas = anexarLineaUnica(notas, resultado.nota);
         combustibleCorregido = {
           resultado,
           matricula: avionGas?.matricula ?? null,
