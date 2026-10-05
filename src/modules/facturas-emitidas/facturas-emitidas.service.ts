@@ -1431,7 +1431,10 @@ export class FacturasEmitidasService {
     if (tiene('folio')) {
       // Serie repetida al frente del folio («A-0411» con serie «A»): se guarda
       // sin ella para que el número quede como en el XML (5-oct-2026).
-      const folio = folioSinSerie(datos.serie ?? null, normalizarFolio(d.folio));
+      const folio = folioSinSerie(
+        datos.serie ?? null,
+        normalizarFolio(d.folio),
+      );
       if (!folio) mensajes.push('El folio no puede ir vacío');
       else if (folio.length > 40)
         mensajes.push('El folio no puede pasar de 40 caracteres');
