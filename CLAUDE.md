@@ -4781,8 +4781,10 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
-- **PENDIENTE DE APLICAR** — `20261005000001_aeronave_combustible.sql`
-  (invariante 43): `aeronave.combustible` text NOT NULL default 'AVGAS' +
+- **APLICADA (5-oct-2026 vía MCP, tras DRYRUN_OK de la cabecera en prod; sin
+  residuos; advisors sin hallazgos nuevos; 82 cargas GAS con tipo null
+  rellenadas con el combustible de su avión, ids en el scratchpad de la
+  sesión)** — `20261005000001_aeronave_combustible.sql` (invariante 43): `aeronave.combustible` text NOT NULL default 'AVGAS' +
   CHECK `aeronave_combustible_chk` (AVGAS | TURBOSINA) + UPDATE de las dos
   turbinas (N58BT, N621TX) + COMMENT + verificación `do $ver$` que aborta si
   no quedaron o si alguna de las dos no existe con esa matrícula exacta
