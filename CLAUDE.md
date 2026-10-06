@@ -4222,7 +4222,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       o sin desempate—, anti-cap y lectura fallida).
 
 46. **RELECTURA CON IA DEL FOLIO DE LOS COMPROBANTES (6-oct-2026, API
-    0.0.58, migración `20261006000001` PENDIENTE DE APLICAR).** Pedido
+    0.0.58, migración `20261006000001` APLICADA 6-oct-2026).** Pedido
     aprobado por el cliente: el Excel de conciliación pone el número de
     factura solo si el gasto tiene folio (invariante 44) y en prod (6-oct)
     477 gastos con foto no tenían NINGUNO (ni `folio_ticket`, ni factura
