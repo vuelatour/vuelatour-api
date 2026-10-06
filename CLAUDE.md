@@ -2366,7 +2366,6 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `conciliacion.service.ingresos`, `flights.service.anticipo`,
       `dinero-report.service.ingresos` y `aircraft-balance.service.ingresos`.
 
-
 30. **EDITORES DE COTIZACIONES COBRADAS — el candado D3 se abre POR PERSONA
     (26-sep-2026, API 0.0.37, migración `20260926000001` APLICADA el 26-sep tras
     DRYRUN_OK).** Pedido de Alejandro y Pablo Canales por WhatsApp con las
@@ -3106,6 +3105,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     horario» 3,921.60 + IVA 627.46) caía ENTERA en la columna OPERACIONES:
     costo del avión que no es suyo.
     - **Fuente única `common/desglose-gasto.util.ts`** (spec
+
       `desglose-gasto.util.spec.ts` con los conceptos REALES de #192 y #190).
       `esExtension` (regex: «extensión [y/o] [antelación] [de] horario |
       servicio(s)», «antelación de horario», «AE-Extension»; una palabra
@@ -3118,6 +3118,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       regla de siempre (null). `desgloseGastoLineas` imprime «Extensión de
       horario (IVA incluido) - $X MXN» (notas del gasto, sync IA y vista
       previa del panel, que LEE `desglose_lineas` del API: no hay copia).
+    - **Claves ASUR sin nombre (6-oct-2026, API 0.0.61):** `CLAVES_TUA = ['130700', '230700']` en `common/desglose-gasto.util.ts` (130700 = TUA nacional Cozumel, factura FEACZM 72139 vuelo #305; 230700 = TUA Cozumel jul-2026). 210100/210200/210300 son aterrizaje/plataformas (operación). Una clave nueva de TUA se agrega SOLO ahí, con la factura que la prueba.
     - **RESPALDO POR TEXTO** (`extensionPorNotas` / `partesDeGasto`): un
       gasto SIN conceptos IA (null, `[]` o sin renglones válidos) de
       categoría OPERACIONES/ATERRIZAJE (`CATS_EXTENSION_POR_NOTAS`) cuya

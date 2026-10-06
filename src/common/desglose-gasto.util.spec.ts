@@ -496,3 +496,82 @@ describe('trasladosEmbebidosDeGasto / tuaEmbebidoDeGasto', () => {
     ).toEqual({ tua: 0, extension: 0 });
   });
 });
+
+describe('claves ASUR sin nombre de concepto («Servicio (clave NNNNNN)»)', () => {
+  /** #305 · gasto cf30b0c6 · OPERACIONES $923.88 MXN · Aeropuerto de Cozumel,
+   *  factura FEACZM 72139 (21-sep-2026). La oficina: «ese es el TUA, no forma
+   *  parte de la operación» (2 × $374.31 − descuento $6.40 = neto $742.22).
+   *  Conceptos REALES de prod (SELECT del 6-oct-2026). */
+  const CONCEPTOS_305 = [
+    { concepto: 'Servicio (clave 210200)', monto: 22.12 },
+    { concepto: 'Servicio (clave 210100)', monto: 32.11 },
+    { concepto: 'Servicio (clave 130700) neto con descuento', monto: 742.22 },
+    { concepto: 'IVA 16%', monto: 127.43 },
+  ];
+
+  it('130700 (TUA nacional Cozumel): TUA $860.98 con IVA, Operación $62.90', () => {
+    expect(desgloseGastoPartes(CONCEPTOS_305, 923.88)).toEqual({
+      operacion: 62.9,
+      tua: 860.98,
+      fbo: 0,
+      extension: 0,
+    });
+    expect(
+      trasladosEmbebidosDeGasto({
+        vuelo_id: VUELO,
+        categoria: 'OPERACIONES',
+        propina: '0.00',
+        monto: '923.88',
+        valor_ia_extraido: { conceptos: CONCEPTOS_305 },
+      }),
+    ).toEqual({ tua: 860.98, extension: 0 });
+  });
+
+  it('230700 (TUA Cozumel, ticket jul-2026) sigue siendo TUA', () => {
+    expect(
+      desgloseGastoPartes(
+        [
+          { concepto: 'Servicio (clave 230700)', monto: 1484.44 },
+          { concepto: 'IVA 16%', monto: 237.51 },
+        ],
+        1721.95,
+      ),
+    ).toEqual({ operacion: 0, tua: 1721.95, fbo: 0, extension: 0 });
+  });
+
+  it('210100/210200/210300 (aterrizaje, plataformas) NO son TUA: nada que separar', () => {
+    // #324 · $825.13: solo plataforma de pernocta + IVA.
+    expect(
+      desgloseGastoPartes(
+        [
+          { concepto: 'Plataforma de Pernocta (clave 210300)', monto: 711.32 },
+          { concepto: 'IVA 16%', monto: 113.81 },
+        ],
+        825.13,
+      ),
+    ).toBeNull();
+    expect(
+      desgloseGastoPartes(
+        [
+          { concepto: 'Servicio (clave 210100)', monto: 34.27 },
+          { concepto: 'Servicio (clave 210300)', monto: 186.37 },
+          { concepto: 'Servicio (clave 210200)', monto: 47.22 },
+          { concepto: 'IVA 16%', monto: 42.86 },
+        ],
+        310.72,
+      ),
+    ).toBeNull();
+  });
+
+  it('la clave se compara completa (1307001 o 2130700 no son TUA)', () => {
+    expect(
+      desgloseGastoPartes(
+        [
+          { concepto: 'Servicio (clave 1307001)', monto: 100 },
+          { concepto: 'IVA 16%', monto: 16 },
+        ],
+        116,
+      ),
+    ).toBeNull();
+  });
+});

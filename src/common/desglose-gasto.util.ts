@@ -29,10 +29,18 @@ import { categoriaEsDeEmpresa } from './categoria-gasto.util';
  * facturas reales capturadas en el sistema:
  * - 230700 = TUA en Aeropuerto de Cozumel (ticket jul-2026: neto $1,484.44
  *   × 1.16 = $1,721.95, cuadra exacto con la separación manual de oficina).
+ * - 130700 = TUA NACIONAL en Aeropuerto de Cozumel (factura FEACZM 72139,
+ *   21-sep-2026, vuelo #305 XB-PEV: 2 × $374.31 − descuento $6.40 = neto
+ *   $742.22 × 1.16 = $860.98; la oficina: «ese es el TUA, no forma parte de
+ *   la operación»). La IA imprime «Servicio (clave 130700)» porque la
+ *   factura no trae el nombre del concepto legible.
+ * NO son TUA (operación del avión, verificado en prod 6-oct-2026): 210100
+ * aterrizaje, 210200 plataforma de embarque/desembarque, 210300 plataforma
+ * de pernocta.
  * Al confirmar claves nuevas de otros aeropuertos, agregarlas aquí (única
  * fuente de la regla).
  */
-const CLAVES_TUA = ['230700'];
+const CLAVES_TUA = ['130700', '230700'];
 
 // FBO / FOB (así lo imprime ASUR en la tabla resumen).
 const esFbo = (c: string) => /\bf(?:bo|ob)\b/i.test(c);
