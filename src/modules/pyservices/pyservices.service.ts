@@ -549,6 +549,25 @@ export interface BalanceAvionCobroPayload {
   comision_mxn?: number | null;
   /** Cuenta destino del cobro (cobro_vuelo.cuenta_destino). */
   cuenta?: string | null;
+  /**
+   * Etiqueta HUMANA del método (`etiquetaMetodoCobro`: «Transferencia»,
+   * «Efectivo», «Link de pago (Paywise)»…) con el MISMO sufijo de parte que
+   * `metodo` en multi-avión; null sin método (6-oct-2026, API 0.0.60,
+   * ADITIVO).
+   */
+  metodo_etiqueta?: string | null;
+  /** Nombre de quien REGISTRÓ el cobro (`cobro_vuelo.registrado_por`); null
+   *  si no hay o el usuario ya no existe (ADITIVO, 0.0.60). */
+  registro?: string | null;
+  /**
+   * «Cómo se cobró», YA ARMADO por la fuente única `etiquetaCobradoCon`
+   * (`common/cobro-etiqueta.util.ts`): «Transferencia → Scotiabank Pesos ·
+   * Registró: Itzi», sin cuenta «Efectivo · Registró: Itzi», sin registro
+   * «Transferencia → Scotiabank Pesos»; en multi-avión la parte de la fila
+   * va al final. null = nada que decir. pyservices lo pinta tal cual en la
+   * nota de la celda «COBRO n» (ADITIVO, 0.0.60).
+   */
+  cobrado_con?: string | null;
 }
 
 export interface BalanceAvionVueloPayload {

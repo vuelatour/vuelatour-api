@@ -26,6 +26,9 @@ import {
   type GastoPagoVendedorRow,
 } from '../../common/pago-vendedor.util';
 import { etiquetaMedioPago } from '../../common/medio-pago.util';
+import { etiquetaMetodoCobro } from '../../common/metodo-cobro.util';
+import { etiquetaCobradoCon } from '../../common/cobro-etiqueta.util';
+import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { pendienteCobro } from '../../common/semaforo-cobro.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
@@ -233,6 +236,13 @@ interface CobroRow {
   comision_banco_monto?: string | number | null;
   comision_banco_pct?: string | number | null;
   cuenta_destino?: string | null;
+  /** Quién CAPTURÓ el cobro (FK a `usuario`). */
+  registrado_por?: string | null;
+  /**
+   * Embed `registro:usuario!registrado_por(nombre)` (6-oct-2026): objeto,
+   * arreglo de uno o null. Se lee SOLO con `nombreDeRelacionUsuario`.
+   */
+  registro?: unknown;
 }
 
 interface GastoRow {
@@ -1401,7 +1411,12 @@ export class AircraftBalanceService {
         ? sb
             .from('cobro_vuelo')
             .select(
-              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_monto, comision_banco_pct, cuenta_destino',
+              // `registro` (6-oct-2026, API 0.0.60): nombre de quien
+              // registró el cobro, en la MISMA consulta (embed por la FK
+              // `cobro_vuelo_registrado_por_fkey`; cobro_vuelo tiene otras
+              // dos FK a usuario, de ahí el `!registrado_por`). Alimenta
+              // `cobrado_con` de cada parcialidad.
+              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_monto, comision_banco_pct, cuenta_destino, registrado_por, registro:usuario!registrado_por(nombre)',
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_cobro', { ascending: true })
@@ -2684,15 +2699,19 @@ export class AircraftBalanceService {
       const parteFila = (montoVuelo: number): number =>
         parteFilaDeCobro(montoVuelo, p, part, aircraftId, reporta, cancelado);
       // Texto del método en multi-avión: qué lleva esta fila del cobro.
-      const sufijoParteFila = multiAvion
-        ? ` · parte de esta fila (${pctTexto} de la venta del avión${
+      // `textoParteFila` (sin el « · » inicial) es también la `parte` de
+      // `cobrado_con`, que la pone AL FINAL de la línea.
+      const textoParteFila = multiAvion
+        ? `parte de esta fila (${pctTexto} de la venta del avión${
             p != null && !cancelado && p.total_usd > 0 && p.vuelatour_usd > 0
               ? reporta
                 ? ' + ingreso VuelaTour'
                 : '; el ingreso VuelaTour va en la fila que reporta'
               : ''
           })`
-        : '';
+        : null;
+      const sufijoParteFila =
+        textoParteFila != null ? ` · ${textoParteFila}` : '';
       let cobroSinTc = 0;
       let comisionSinTc = 0;
       // Depósitos REALES del vuelo entero en MXN (sin repartir): red de
@@ -2726,6 +2745,16 @@ export class AircraftBalanceService {
                 : null;
           if (comisionMxn == null) comisionSinTc += 1;
         }
+        // CÓMO SE COBRÓ (6-oct-2026, API 0.0.60; ADITIVOS al final):
+        // etiqueta humana del método (con el MISMO sufijo de parte que
+        // `metodo` en multi-avión), quién registró el cobro y la línea ya
+        // armada por la fuente única `etiquetaCobradoCon` — pyservices solo
+        // la pinta (nota de la celda «COBRO n»).
+        const cuenta = c.cuenta_destino?.trim() || null;
+        const registro = nombreDeRelacionUsuario(c.registro);
+        const metodoEtiquetaBase = c.metodo_cobro
+          ? etiquetaMetodoCobro(c.metodo_cobro)
+          : null;
         return {
           fecha: diaCancun(c.fecha_cobro),
           monto_mxn: mxn != null ? parteFila(mxn) : null,
@@ -2733,7 +2762,17 @@ export class AircraftBalanceService {
             ? `${c.metodo_cobro ?? '—'}${sufijoParteFila}`
             : (c.metodo_cobro ?? null),
           comision_mxn: comisionMxn != null ? parteFila(comisionMxn) : null,
-          cuenta: c.cuenta_destino?.trim() || null,
+          cuenta,
+          metodo_etiqueta: multiAvion
+            ? `${etiquetaMetodoCobro(c.metodo_cobro)}${sufijoParteFila}`
+            : metodoEtiquetaBase,
+          registro,
+          cobrado_con: etiquetaCobradoCon({
+            metodo_etiqueta: metodoEtiquetaBase,
+            cuenta,
+            registro,
+            parte: textoParteFila,
+          }),
         };
       });
       cobradoRealVueloMxn = round2(cobradoRealVueloMxn);

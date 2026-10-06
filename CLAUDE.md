@@ -5116,6 +5116,33 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
     necesita optimista, se resuelve UNA vez y se pasa a las partes — nunca
     una consulta por parte de sobre.
 
+- **«Cómo se cobró» cada parcialidad en el BALANCE (6-oct-2026, API 0.0.60,
+  sin migración).** Pedido del cliente con el Excel «reporte horas FLOTA»:
+  «al lado de la columna STATUS, si ya se pagó, que venga la misma
+  información de cómo se cobró, quién lo cobró y, si es posible, a qué
+  cuenta». Cada `BalanceAvionCobroPayload` (libro individual, libros del
+  general y su consolidado) gana AL FINAL tres campos ADITIVOS:
+  `metodo_etiqueta` (`etiquetaMetodoCobro`, con el MISMO sufijo «· parte de
+  esta fila (…)» que `metodo` en multi-avión; null sin método), `registro`
+  (nombre de quien registró; null sin dato o usuario borrado) y
+  `cobrado_con`, la línea YA ARMADA por la fuente única PURA
+  `common/cobro-etiqueta.util.ts#etiquetaCobradoCon` (spec): «Transferencia
+  → Scotiabank Pesos · Registró: Itzi», sin cuenta «Efectivo · Registró:
+  Itzi», sin registro «Transferencia → Scotiabank Pesos», en multi-avión la
+  parte de la fila AL FINAL (la flecha queda pegada al método), nada que
+  decir ⇒ null. «Registró» y no el nombre a secas: el sistema sabe quién
+  CAPTURÓ el cobro, no quién recibió el dinero (misma palabra que el panel,
+  `textoRegistroCobro`). El nombre viaja en la MISMA consulta de cobros del
+  libro (`registro:usuario!registrado_por(nombre)`; `cobro_vuelo` tiene
+  otras dos FK a `usuario`, de ahí el hint) y se lee SOLO con
+  `nombreDeRelacionUsuario` — ninguna consulta nueva y ningún número se
+  mueve (spec). pyservices pinta `cobrado_con` como NOTA de la celda «COBRO
+  n» (sin columnas nuevas) y tolera su ausencia. Spec:
+  `aircraft-balance.service.cobrado-con.spec.ts` (completo, sin cuenta, sin
+  registro, embed en arreglo, campos al final, fixture sin datos ⇒ null,
+  select con el embed, payload idéntico con y sin registro, multi-avión en el
+  individual, en los dos libros del general y en el consolidado).
+
 - **Facturas emitidas: la serie repetida al frente del folio no cuenta dos
   veces (5-oct-2026, API 0.0.54).** La A-0411 quedó guardada con serie «A» y
   folio «A-0411» (la lectura del PDF/la oficina traen el folio ya con su
