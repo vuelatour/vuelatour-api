@@ -62,8 +62,23 @@ export function folioTicketDeLectura(raw: unknown): string | null {
   else return null;
   const folio = texto.trim().slice(0, FOLIO_TICKET_MAX).trim();
   const norm = normalizarFolio(folio);
-  if (!norm || FOLIOS_VACIOS.has(norm)) return null;
+  if (!norm || FOLIOS_VACIOS.has(norm) || esFolioDeRelleno(norm)) return null;
   return folio;
+}
+
+/**
+ * Folio de RELLENO (normalizado): «12345», «1234567», «0000», «XXXX»… Lo
+ * escribe la oficina como marcador o lo «lee» la IA de un comprobante que
+ * trae un folio de muestra (6-oct-2026: tres gastos de PAYWISE/transferencia
+ * sin relación compartían «12345» y la relectura los marcó como duplicados).
+ * Regla: solo dígitos consecutivos ascendentes desde 1 (≥ 3) o un mismo
+ * carácter repetido (≥ 3). Un folio real que contenga «12345» entre más
+ * caracteres NO se descarta.
+ */
+export function esFolioDeRelleno(norm: string): boolean {
+  if (norm.length < 3) return false;
+  if (/^(.)\1+$/.test(norm)) return true;
+  return '1234567890'.startsWith(norm);
 }
 
 /** ¿El folio choca con el índice único (≥ 4 alfanuméricos)? */
