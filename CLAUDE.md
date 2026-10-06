@@ -5073,7 +5073,9 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
-- **PENDIENTE DE APLICAR** — `20261006000001_gasto_folio_releido.sql`
+- **APLICADA (6-oct-2026 vía MCP, tras DRYRUN_OK A–C8 en prod: 476 con foto
+  y sin folio, 118 en la cola; sin residuos; advisors sin hallazgos nuevos)** —
+  `20261006000001_gasto_folio_releido.sql`
   (invariante 46): `gasto.folio_releido_at timestamptz null` (sin default:
   todas las filas existentes quedan pendientes) + COMMENT + índice parcial
   `gasto_folio_releer_idx (fecha_gasto desc) where foto_url is not null and
