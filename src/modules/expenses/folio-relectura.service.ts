@@ -23,16 +23,22 @@ import {
   FOLIOS_RELEER_DESDE_DEFAULT,
   FOLIOS_RELEER_LOTE_DEFAULT,
   POSTERGADOS_MAX,
+  archivosDelComprobante,
   corteCapturadosHasta,
+  destinoTrasFallo,
   esArchivoAusente,
   evaluarLecturaFolio,
-  fotosAdicionalesDe,
+  falloSinCosto,
   lecturaConFolio,
   lineaFolioDuplicado,
   loteRelectura,
+  mismoComprobante,
   notasConLinea,
   ordenarCandidatos,
+  registrarFallo,
   tipoDocumento,
+  type EstadoPostergado,
+  type FalloGasto,
 } from './folio-relectura.util';
 
 /**
@@ -51,11 +57,18 @@ export interface ResumenRelecturaFolioGasto {
   duplicados: number;
   /** Lectura legible SIN folio: sellados. */
   sin_folio: number;
-  /** Comprobante ilegible / archivo ausente / IA que no lo procesa: sellados. */
+  /**
+   * Comprobante ilegible / archivo ausente o vacío / IA que no lo procesa /
+   * gasto que falló `FALLOS_CON_IA_PARA_SELLAR` veces con la IA viva:
+   * sellados.
+   */
   ilegibles: number;
-  /** El gasto cambió mientras se leía (folio a mano, factura, sello): nada. */
+  /**
+   * El gasto cambió mientras se leía (folio a mano, factura, sello, OTRA
+   * foto u otras hojas): no se escribe nada.
+   */
   omitidos: number;
-  /** NO sellados (pyservices, IA, Storage o BD): se reintentan. */
+  /** NO sellados (pyservices, IA, Storage o BD): se reintentan (≥ 1 h). */
   fallos: number;
 }
 
@@ -70,6 +83,7 @@ interface GastoCandidato {
 /** Fila releída JUSTO antes de escribir (CAS). */
 interface GastoVigente {
   id: string;
+  foto_url: string | null;
   folio_ticket: string | null;
   factura_recibida_id: string | null;
   folio_releido_at: string | null;
@@ -101,7 +115,7 @@ const BUCKET_FOTOS = 'gasto-fotos';
 
 const COLS_CANDIDATO = 'id, fecha_gasto, foto_url, valor_ia_extraido';
 const COLS_VIGENTE =
-  'id, folio_ticket, factura_recibida_id, folio_releido_at, notas, valor_ia_extraido, ia_folio:valor_ia_extraido->>folio, updated_at';
+  'id, foto_url, folio_ticket, factura_recibida_id, folio_releido_at, notas, valor_ia_extraido, ia_folio:valor_ia_extraido->>folio, updated_at';
 
 /**
  * RELECTURA CON IA DEL FOLIO DE LOS COMPROBANTES (6-oct-2026, API 0.0.58,
@@ -126,10 +140,17 @@ const COLS_VIGENTE =
  *   otro gasto — revisar» en notas; (c) legible sin folio o ilegible ⇒ solo
  *   el sello; (d) pyservices caído / IA sin saldo / red ⇒ NO se sella y la
  *   corrida se corta (sin saldo de inmediato; lo transitorio con DOS fallos
- *   seguidos, como el cron de recibidas).
- * - Toda escritura relee la fila y lleva CAS (`folio_ticket`,
- *   `folio_releido_at` y `factura_recibida_id` en null + `updated_at`): un
- *   folio tecleado o una factura ligada mientras la IA leía jamás se pisa.
+ *   seguidos, como el cron de recibidas). Un gasto que falla se reintenta
+ *   a lo más cada hora; con `FALLOS_CON_IA_PARA_SELLAR` fallos «con la IA
+ *   viva» se sella como ilegible y con `INTENTOS_MAX_POR_GASTO` sin esa
+ *   prueba sale de la cola hasta reiniciar (`registrarFallo`): ningún
+ *   gasto se lee sin tope.
+ * - Toda escritura relee la fila: si el comprobante ya no es el que se leyó
+ *   (otra foto u otras hojas, `mismoComprobante`) o alguien puso folio,
+ *   factura o sello, no escribe nada. El UPDATE lleva CAS (`folio_ticket`,
+ *   `folio_releido_at` y `factura_recibida_id` en null + `updated_at` de la
+ *   fila releída): lo que cambie entre la relectura y el UPDATE tampoco se
+ *   pisa. Otros cambios (monto, notas) no invalidan el folio leído.
  * - Actor: `updated_by = null` en (a) y (b) ⇒ la bitácora (`tg_gasto_
  *   bitacora`, actor = `new.updated_by`) lo pinta «Sistema»; sin él el
  *   cambio se atribuiría a quien editó el gasto por última vez (el piloto).
@@ -144,12 +165,16 @@ export class FolioRelecturaService {
   private enCurso = false;
 
   /**
-   * Gastos con fallo transitorio en una corrida anterior (orden de
-   * inserción = del más viejo al más reciente): van AL FINAL de la cola
+   * Gastos que fallaron sin sellarse, con sus contadores
+   * (`EstadoPostergado`; orden de inserción = del que falló hace más al más
+   * reciente): van AL FINAL de la cola, a lo más una vez por hora
    * (`ordenarCandidatos`). En memoria y acotado: un reinicio los olvida y
-   * vuelven a su lugar, nunca se excluyen.
+   * vuelven a su lugar con los contadores en cero.
    */
-  private readonly postergados = new Map<string, number>();
+  private readonly postergados = new Map<string, EstadoPostergado>();
+
+  /** Epoch ms de la última lectura que la IA CONTESTÓ (cualquier gasto). */
+  private ultimaRespuestaIa: number | null = null;
 
   private avisadoSinVision = false;
 
@@ -178,6 +203,12 @@ export class FolioRelecturaService {
   /** Ids postergados en su orden (specs). */
   postergadosActuales(): string[] {
     return [...this.postergados.keys()];
+  }
+
+  /** Contadores de un gasto postergado (specs). */
+  estadoPostergado(id: string): EstadoPostergado | undefined {
+    const e = this.postergados.get(id);
+    return e ? { ...e } : undefined;
   }
 
   private async releerLote(): Promise<ResumenRelecturaFolioGasto> {
@@ -240,29 +271,37 @@ export class FolioRelecturaService {
       .order('id', { ascending: false })
       .limit(lote + this.postergados.size);
     if (error) throw new Error(error.message);
+    const inicioCorrida = Date.now();
     const filas = ordenarCandidatos(
       (data ?? []) as GastoCandidato[],
-      this.postergadosActuales(),
+      this.postergados,
       lote,
+      inicioCorrida,
     );
 
     // Fallos TRANSITORIOS de lectura seguidos (vuelve a 0 cuando la IA
-    // responde, con o sin folio). Storage no cuenta: solo salta esa fila.
+    // contesta, con o sin folio, aunque sea algo inservible). Storage no
+    // cuenta: solo salta esa fila.
     let fallosSeguidos = 0;
     for (const fila of filas) {
       resumen.tomados += 1;
-      const entrada = await this.entradaVision(fila);
+      // Lo que se lee AHORA es lo que se compara antes de escribir.
+      const archivos = archivosDelComprobante(
+        fila.foto_url,
+        fila.valor_ia_extraido,
+      );
+      const entrada = await this.entradaVision(archivos);
       let decision: Decision;
       if (!entrada.ok) {
         if (!entrada.ausente) {
           resumen.fallos += 1;
-          this.postergar(fila.id);
+          this.anotarFallo(fila.id, 'STORAGE', false, inicioCorrida);
           this.logger.warn(
-            `Relectura de folio: gasto ${fila.id} sin leer por Storage (se reintenta): ${entrada.motivo}`,
+            `Relectura de folio: gasto ${fila.id} sin leer por Storage (se reintenta en 1 h): ${entrada.motivo}`,
           );
           continue;
         }
-        // El archivo ya no existe: no hay nada que leer.
+        // El archivo ya no existe o está vacío: no hay nada que leer.
         decision = { tipo: 'ILEGIBLE' };
       } else {
         const lectura = await this.vision.readGastoTicket(entrada.input, {
@@ -272,42 +311,71 @@ export class FolioRelecturaService {
         });
         const ev = evaluarLecturaFolio(lectura);
         if (ev.tipo === 'FALLO') {
-          resumen.fallos += 1;
           if (ev.fallo === 'IA_NO_DISPONIBLE') {
             // Ninguna otra lectura funcionará (sin saldo, llave, modelo).
+            resumen.fallos += 1;
             this.logger.warn(
               `Relectura de folio de gastos pausada (IA no disponible): ${ev.motivo}`,
             );
             break;
           }
-          fallosSeguidos += 1;
-          this.postergar(fila.id);
-          if (cortarRelecturaPorPyservices(fallosSeguidos)) {
-            this.logger.warn(
-              `Relectura de folio de gastos pausada (pyservices/IA): ${ev.motivo}`,
-            );
-            break;
+          if (ev.fallo === 'RESPUESTA_IA') {
+            // La IA contestó (algo inservible): pyservices y la IA viven.
+            fallosSeguidos = 0;
+            this.ultimaRespuestaIa = Date.now();
+          } else {
+            fallosSeguidos += 1;
           }
-          this.logger.warn(
-            `Relectura de folio: gasto ${fila.id} sin leer (se reintenta): ${ev.motivo}`,
+          const fallo: FalloGasto = ev.fallo;
+          const destino = this.anotarFallo(
+            fila.id,
+            fallo,
+            fallo === 'TRANSITORIO' && falloSinCosto(ev.motivo),
+            inicioCorrida,
           );
-          continue;
+          if (destino === 'SELLAR') {
+            // Mismo comprobante, mismo fallo, con la IA contestando a
+            // otros: el problema es ESTE archivo. Se sella como ilegible.
+            const e = this.postergados.get(fila.id);
+            this.logger.warn(
+              `Relectura de folio: gasto ${fila.id} sellado como ilegible tras ${e?.conIa ?? 0} fallos con la IA viva: ${ev.motivo}`,
+            );
+            decision = { tipo: 'ILEGIBLE' };
+          } else {
+            resumen.fallos += 1;
+            this.avisarFallo(fila.id, destino, ev.motivo);
+            if (cortarRelecturaPorPyservices(fallosSeguidos)) {
+              this.logger.warn(
+                `Relectura de folio de gastos pausada (pyservices/IA): ${ev.motivo}`,
+              );
+              break;
+            }
+            continue;
+          }
+        } else {
+          fallosSeguidos = 0;
+          this.ultimaRespuestaIa = Date.now();
+          decision =
+            ev.tipo === 'FOLIO'
+              ? {
+                  tipo: 'FOLIO',
+                  folio: ev.folio,
+                  lectura: lectura as unknown as Record<string, unknown>,
+                }
+              : { tipo: ev.tipo };
         }
-        fallosSeguidos = 0;
-        decision =
-          ev.tipo === 'FOLIO'
-            ? {
-                tipo: 'FOLIO',
-                folio: ev.folio,
-                lectura: lectura as unknown as Record<string, unknown>,
-              }
-            : { tipo: ev.tipo };
       }
 
-      const r = await this.escribir(fila.id, decision);
+      const r = await this.escribir(fila.id, archivos, decision);
       if (r === 'FALLO') {
         resumen.fallos += 1;
-        this.postergar(fila.id);
+        const destino = this.anotarFallo(
+          fila.id,
+          'ESCRITURA',
+          false,
+          inicioCorrida,
+        );
+        this.avisarFallo(fila.id, destino, 'no se pudo guardar');
         continue;
       }
       this.postergados.delete(fila.id);
@@ -325,35 +393,75 @@ export class FolioRelecturaService {
     return resumen;
   }
 
-  /** Al final de la cola (y el más viejo se olvida si se pasa del tope). */
-  private postergar(id: string): void {
+  /**
+   * Registra UN fallo del gasto (`registrarFallo`), lo manda al final de la
+   * cola (el más viejo se olvida si se pasa del tope) y dice qué sigue
+   * (`destinoTrasFallo`). `RETIRAR` lo deja en el mapa marcado: no se
+   * reintenta hasta reiniciar el API.
+   */
+  private anotarFallo(
+    id: string,
+    fallo: FalloGasto,
+    sinCosto: boolean,
+    inicioCorrida: number,
+  ): 'SELLAR' | 'RETIRAR' | 'POSTERGAR' {
+    const estado = registrarFallo(this.postergados.get(id), {
+      fallo,
+      sinCosto,
+      ahora: Date.now(),
+      inicioCorrida,
+      ultimaRespuestaIa: this.ultimaRespuestaIa,
+    });
+    const destino = destinoTrasFallo(estado, fallo);
+    if (destino === 'RETIRAR') estado.retirado = true;
     this.postergados.delete(id);
-    this.postergados.set(id, Date.now());
+    this.postergados.set(id, estado);
     while (this.postergados.size > POSTERGADOS_MAX) {
       const [primero] = this.postergados.keys();
       this.postergados.delete(primero);
     }
+    return destino;
+  }
+
+  private avisarFallo(
+    id: string,
+    destino: 'SELLAR' | 'RETIRAR' | 'POSTERGAR',
+    motivo: string,
+  ): void {
+    const e = this.postergados.get(id);
+    this.logger.warn(
+      destino === 'RETIRAR'
+        ? `Relectura de folio: gasto ${id} fuera de la cola hasta reiniciar el API tras ${e?.intentos ?? 0} intentos fallidos (sin sellar): ${motivo}`
+        : `Relectura de folio: gasto ${id} sin leer (se reintenta en 1 h): ${motivo}`,
+    );
   }
 
   /**
    * Lo que se le manda a la IA, como `reanalizarConIA`: PDF/Excel en bytes,
    * imagen por URL firmada de 1 h (`SEGUNDOS_URL_PUNTUAL`: se le entrega a
-   * un tercero) y, si hay `fotos_adicionales`, TODAS las hojas juntas.
-   * Archivo ausente en Storage ⇒ `ausente` (se sella); cualquier otro error
-   * de Storage ⇒ transitorio.
+   * un tercero) y, si hay `fotos_adicionales`, TODAS las hojas juntas
+   * (`archivos` = `archivosDelComprobante`). Archivo ausente o VACÍO en
+   * Storage ⇒ `ausente` (se sella: con 0 bytes `readGastoTicket` devolvería
+   * null, que se confunde con «visión deshabilitada» y atoraría la cola);
+   * cualquier otro error de Storage ⇒ transitorio.
    */
-  private async entradaVision(fila: GastoCandidato): Promise<EntradaVision> {
-    const path = (fila.foto_url ?? '').trim();
+  private async entradaVision(
+    archivos: readonly string[],
+  ): Promise<EntradaVision> {
+    const [path] = archivos;
     if (!path) return { ok: false, ausente: true, motivo: 'sin foto' };
     const bucket = this.supabase.service.storage.from(BUCKET_FOTOS);
     const doc = tipoDocumento(path);
     if (doc) {
       const { data, error } = await bucket.download(path);
       if (error || !data) {
-        const motivo = error?.message ?? 'archivo vacío';
+        const motivo = error?.message ?? 'sin respuesta de Storage';
         return { ok: false, ausente: esArchivoAusente(motivo), motivo };
       }
       const b64 = Buffer.from(await data.arrayBuffer()).toString('base64');
+      if (b64.length === 0) {
+        return { ok: false, ausente: true, motivo: 'archivo vacío' };
+      }
       return {
         ok: true,
         input:
@@ -365,10 +473,7 @@ export class FolioRelecturaService {
               },
       };
     }
-    const adicionales = fotosAdicionalesDe(fila.valor_ia_extraido).filter(
-      (p) => p !== path,
-    );
-    const paths = [path, ...adicionales];
+    const paths = [...archivos];
     const { data, error } = await bucket.createSignedUrls(
       paths,
       SEGUNDOS_URL_PUNTUAL,
@@ -391,7 +496,7 @@ export class FolioRelecturaService {
       const motivo = errorPrincipal ?? 'no se pudo firmar la foto';
       return { ok: false, ausente: esArchivoAusente(motivo), motivo };
     }
-    if (adicionales.length > 0) {
+    if (paths.length > 1) {
       return {
         ok: true,
         input: {
@@ -407,13 +512,17 @@ export class FolioRelecturaService {
   /**
    * Escribe el resultado con la fila RELEÍDA y CAS. Si la fila ya no es
    * candidata (folio a mano, factura ligada, sellada por otro camino,
-   * lectura IA con folio, borrada) ⇒ OMITIDO sin escribir. Un 23505 al
+   * lectura IA con folio, borrada) o su comprobante ya no es el que se leyó
+   * (`archivos` ≠ `archivosDelComprobante` de la fila releída: otra foto u
+   * otras hojas mientras la IA leía) ⇒ OMITIDO sin escribir: el folio sería
+   * de la foto VIEJA y la nueva se lee en otra corrida. Un 23505 al
    * escribir el folio = el índice único `uq_gasto_folio_ticket_norm`: ese
    * folio ya es de otro gasto ⇒ se reintenta como DUPLICADO. 0 filas por el
    * CAS de `updated_at` ⇒ se relee y se decide otra vez (a lo más 3).
    */
   private async escribir(
     gastoId: string,
+    archivos: readonly string[],
     decision: Decision,
   ): Promise<Escritura> {
     const sb = this.supabase.service;
@@ -437,7 +546,11 @@ export class FolioRelecturaService {
         actual.folio_ticket ||
         actual.factura_recibida_id ||
         actual.folio_releido_at ||
-        folioTicketDeLectura(actual.ia_folio)
+        folioTicketDeLectura(actual.ia_folio) ||
+        !mismoComprobante(
+          archivos,
+          archivosDelComprobante(actual.foto_url, actual.valor_ia_extraido),
+        )
       ) {
         return 'OMITIDO';
       }

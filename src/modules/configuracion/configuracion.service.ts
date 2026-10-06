@@ -18,6 +18,7 @@ import {
 } from '../flights/factura-solicitud.util';
 import type { ResponsablesFacturacion } from '../facturas-emitidas/facturas-emitidas.types';
 import { MARGEN_VENTA_PCT_DEFAULT } from '../inventory/inventario-cardex.util';
+import { FOLIOS_RELEER_LOTE_MAX } from '../expenses/folio-relectura.util';
 import {
   CATALOGO_MODELOS_IA,
   DESCRIPCION_CONFIG_IA_MODELO,
@@ -106,12 +107,13 @@ export const INVENTARIO_MARGEN_VENTA_PCT_DEFAULT = MARGEN_VENTA_PCT_DEFAULT;
 /**
  * RELECTURA CON IA DEL FOLIO DE LOS COMPROBANTES (6-oct-2026, API 0.0.58,
  * cron `gastos-releer-folio`, `expenses/folio-relectura.service.ts`). Sin
- * fila en `configuracion_sistema` aplica el default de cada clave (la
- * migración 20261006000001 NO las siembra):
+ * fila en `configuracion_sistema` aplica el default de cada clave. La
+ * migración 20261006000001 SIEMBRA las dos que el panel puede editar
+ * (Configuración; `update` responde 404 sin fila):
  * - `folios_releer_activo` (`activa`, default true): apagarla detiene el
  *   cron en ≤ 60 s (caché) sin redeploy.
- * - `folios_releer_lote` (`valor_numerico`, default 15, 1–50): gastos por
- *   corrida (cada 5 min).
+ * - `folios_releer_lote` (`valor_numerico`, default 15, 1–50, rango en
+ *   `RANGOS_NUMERICOS`): gastos por corrida (cada 5 min).
  * - `folios_releer_desde` (`valor_json` = `["AAAA-MM-DD"]`, default
  *   2026-09-01): solo gastos con `fecha_gasto` desde ese día.
  * - `folios_releer_capturados_hasta` (`valor_json` = `["AAAA-MM-DD"]`,
@@ -120,7 +122,9 @@ export const INVENTARIO_MARGEN_VENTA_PCT_DEFAULT = MARGEN_VENTA_PCT_DEFAULT;
  *   prompt afinado (2-oct-2026) y además es lo que piloto y oficina siguen
  *   editando: el cron no lo toca ni gasta créditos en él.
  * Las fechas viven en `valor_json` porque la tabla no tiene columna de
- * texto (CHECK `configuracion_sistema_valor_json_chk`: arreglo).
+ * texto (CHECK `configuracion_sistema_valor_json_chk`: arreglo). NO se
+ * siembran (se cambian por SQL): una fila suya saldría en el panel como un
+ * switch sin significado.
  */
 export const CONFIG_FOLIOS_RELEER_ACTIVO = 'folios_releer_activo';
 export const CONFIG_FOLIOS_RELEER_LOTE = 'folios_releer_lote';
@@ -140,6 +144,11 @@ const RANGOS_NUMERICOS: Record<
     min: 0,
     max: 100,
     mensaje: 'El margen de la tienda va de 0 a 100 %.',
+  },
+  [CONFIG_FOLIOS_RELEER_LOTE]: {
+    min: 1,
+    max: FOLIOS_RELEER_LOTE_MAX,
+    mensaje: `Los comprobantes por corrida van de 1 a ${FOLIOS_RELEER_LOTE_MAX}.`,
   },
 };
 /**

@@ -4237,10 +4237,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       nada (ni Storage ni IA ni créditos). **REGLA DURA: todo select/update
       que nombre `folio_releido_at` va detrás de ella.** Sin visión
       configurada tampoco lee.
-    - **Configuración** (`configuracion_sistema`, SIN fila = default; la
-      migración NO las siembra): `folios_releer_activo` (`activa`, default
-      true: apagarla detiene el cron en ≤ 60 s), `folios_releer_lote`
-      (`valor_numerico`, default 15, 1–50), `folios_releer_desde`
+    - **Configuración** (`configuracion_sistema`, SIN fila = default). La
+      migración SIEMBRA las dos que el panel edita (Configuración; `update`
+      responde 404 sin fila, así que sin sembrar no había cómo PAUSAR):
+      `folios_releer_activo` (`activa`, default true: apagarla detiene el
+      cron en ≤ 60 s), `folios_releer_lote` (`valor_numerico`, default 15;
+      el PATCH valida 1–50 en `RANGOS_NUMERICOS`). Las fechas NO se siembran
+      (se cambian por SQL; una fila suya saldría en el panel como switch sin
+      significado): `folios_releer_desde`
       (`valor_json` = `["AAAA-MM-DD"]`, default 2026-09-01, sobre
       `fecha_gasto`) y `folios_releer_capturados_hasta` (`valor_json`,
       default **2026-10-05**, día Cancún inclusive sobre `created_at`: lo
@@ -4253,11 +4257,23 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Cola**: `foto_url` not null, `folio_ticket`, `factura_recibida_id`,
       `folio_releido_at` y `valor_ia_extraido->>folio` null, `fecha_gasto >=
       desde`, `created_at < corteCapturadosHasta(hasta)`, `fecha_gasto`
-      desc (empate por id). Un gasto con fallo TRANSITORIO va AL FINAL de la
-      cola en las corridas siguientes (`postergados`, en memoria, tope 50,
-      `ordenarCandidatos`): dos fotos que siempre tumban la lectura no
-      bloquean la cola (con dos fallos seguidos la corrida se corta y el
-      lote sale siempre en el mismo orden). Nunca se excluye a nadie.
+      desc (empate por id). **Ningún gasto se lee sin tope** (revisión
+      6-oct): uno que falla (lectura, Storage o BD) va AL FINAL de la cola
+      y se reintenta a lo más cada hora (`REINTENTO_POSTERGADO_MS`,
+      `ordenarCandidatos`; `postergados` en memoria, tope 500, un reinicio
+      lo olvida). Contadores puros (`registrarFallo`/`destinoTrasFallo`):
+      los fallos que NO cuestan (`falloSinCosto`: «Sin conexión con
+      pyservices», `pyservices 502/503/504` de la orilla de Railway, IA
+      «saturada») y los de Storage solo mueven la hora; los demás suman un
+      `intento` y, si la IA está viva (el fallo es `RESPUESTA_IA` o la IA le
+      contestó a OTRO gasto después de que éste empezó a fallar —en su
+      primer fallo, antes en la misma corrida—), un `conIa`. Con 3 `conIa`
+      ⇒ se SELLA como ilegible (warn); con 6 `intentos` sin esa prueba ⇒
+      sale de la cola de ESTE proceso sin sellar (warn; un reinicio lo
+      regresa). Un fallo de ESCRITURA (la IA ya cobró, la BD rechazó) suma
+      `intento` pero nunca `conIa`. Antes, con la cola vacía, un gasto que
+      siempre fallaba (422 «Respuesta truncada», timeout) se leía en CADA
+      corrida (~288 lecturas/día, sin rastro en `ia_uso`).
     - **Lectura** como `reanalizarConIA`: imagen por URL firmada de 1 h
       (`SEGUNDOS_URL_PUNTUAL`), TODAS las hojas si hay
       `fotos_adicionales`, PDF/Excel en bytes (`download`). Consumo en
@@ -4288,14 +4304,28 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       genérico, texto desconocido) es TRANSITORIO ⇒ no sella, se posterga y
       con DOS seguidos (`cortarRelecturaPorPyservices`, el MISMO del cron de
       recibidas) se corta; un error de red de Storage solo salta esa fila.
+      `RESPUESTA_IA` (422 de `/vision/gasto` DESPUÉS de que la IA contestó:
+      «Respuesta truncada», «Respuesta sin JSON», «JSON inválido», «No se
+      pudo interpretar», `N validation error(s) for`; se reconoce por el
+      INICIO del texto, el resto puede traer lo que escribió el modelo) NO
+      cuenta para el corte (la IA vive) y sí para sellar ese gasto. Los 422
+      de Excel antes de la IA («Excel viejo», «está vacío o no se pudo
+      leer») son COMPROBANTE. Archivo VACÍO (0 bytes) = ausente ⇒ (c):
+      con él `readGastoTicket` devolvía null («visión deshabilitada») y la
+      corrida se cortaba en ese gasto para siempre.
       Los textos que se reconocen son los de `pyservices/app/services/
       ia_errores.py`: si cambian allá, caen en TRANSITORIO (lado seguro).
     - **Escritura con la fila RELEÍDA y CAS** (`folio_ticket`,
       `folio_releido_at` y `factura_recibida_id` null + `updated_at` vía
       `aplicarCas`): un folio tecleado, una factura ligada, una lectura IA
-      con folio o un sello de otro camino mientras la IA leía ⇒ `omitidos`
-      sin escribir; 0 filas ⇒ relee y decide otra vez (≤ 3 vueltas, el
-      23505 cuenta una). **Actor**: `tg_gasto_bitacora` registra
+      con folio, un sello de otro camino o **OTRO comprobante** (foto u
+      hojas distintas de las que se leyeron: `archivosDelComprobante` es la
+      fuente única de lo que se manda a la IA y de lo que se compara,
+      `mismoComprobante`) mientras la IA leía ⇒ `omitidos` sin escribir (y
+      sin postergar: la foto nueva se lee en la siguiente corrida). Antes
+      el folio de la foto VIEJA se escribía y el sello impedía releer la
+      nueva. Otros cambios (monto, notas) no invalidan el folio leído. 0
+      filas ⇒ relee y decide otra vez (≤ 3 vueltas, el 23505 cuenta una). **Actor**: `tg_gasto_bitacora` registra
       `folio_ticket`/`notas` con `actor_id = new.updated_by`; sin el
       `updated_by = null` el cambio se atribuiría a quien editó el gasto
       por última vez (el piloto). Null ⇒ el historial del panel pinta
@@ -4309,17 +4339,33 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       un saldo de ~16. Los 477 completos (desde julio) costarían ~25 USD:
       ampliar `folios_releer_desde` solo tras recargar. Cada lectura tarda
       20–40 s con Opus: una corrida de 15 dura ~5–10 min y el candado salta
-      el tick que la alcance.
+      el tick que la alcance, así que en la práctica corre cada 10–15 min ⇒
+      118 / 15 = 8 corridas = **entre 1 y 2 horas** después del deploy Y de
+      aplicar la migración, más ≤ 10 min de la sonda (lo que se le dice al
+      usuario: «entre 1 y 2 horas, unos 6 USD»). Tope de lo que puede
+      gastar un gasto que falla siempre: 4 lecturas si la IA vive (se
+      sella), 6 por arranque del API si no hay prueba (se retira).
     - Specs: `folio-ticket.util.spec`, `folio-relectura.util.spec`,
       `folio-relectura.service.spec` (sin migración, config apagada, sin
       visión, (a) con y sin lectura previa, (b) 23505, (c) en sus 6 formas
-      incl. PDF y archivo borrado, (d) pyservices caído / sin saldo /
+      incl. PDF y archivo borrado, PDF borrado en `download` y PDF VACÍO
+      (sella sin IA y la corrida sigue), (d) pyservices caído / sin saldo /
       transitorio aislado / Storage, lote y orden con los filtros de la
       cola, configuración, postergados, multi-hoja, CAS —folio a mano
       durante la lectura, entre la relectura y el UPDATE, notas editadas
-      antes del UPDATE del duplicado— y candado; 13 mutaciones detectadas
-      el 6-oct), `folio-releido-gasto-disponible.util.spec` y
-      `configuracion/configuracion.fecha.spec`.
+      antes del UPDATE del duplicado, FOTO reemplazada y HOJAS cambiadas
+      durante la lectura— , reintentos acotados con reloj simulado
+      —timeout siempre en el mismo gasto ⇒ 1/h y sellado, «Respuesta
+      truncada» no corta y sella, solo en la cola ⇒ 6 y retirado,
+      pyservices caído toda la noche ⇒ ni sella ni retira, BD que rechaza
+      ⇒ 6 y retirado— y candado; el mock PROYECTA las columnas del
+      `select` como PostgREST; 13 mutaciones detectadas el 6-oct y 13 más
+      en la revisión), `folio-relectura.util.spec`
+      (`registrarFallo`/`destinoTrasFallo`, `falloSinCosto`,
+      `RESPUESTA_IA`, `archivosDelComprobante`/`mismoComprobante`),
+      `folio-releido-gasto-disponible.util.spec`,
+      `configuracion/configuracion.fecha.spec` y
+      `configuracion.service.spec` (lote 1–50).
 
 ## Convenciones NestJS
 
@@ -5032,8 +5078,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   todas las filas existentes quedan pendientes) + COMMENT + índice parcial
   `gasto_folio_releer_idx (fecha_gasto desc) where foto_url is not null and
   folio_ticket is null and factura_recibida_id is null and folio_releido_at
-  is null` + verificación `do $ver$` que aborta si la columna o el índice no
-  quedaron. Sin triggers, funciones ni backfill; los UPDATE del cron
+  is null` + siembra en `configuracion_sistema` de `folios_releer_activo`
+  (activa) y `folios_releer_lote` (15) con `on conflict do nothing` (el
+  panel puede pausar y cambiar el lote; sin fila el PATCH da 404) +
+  verificación `do $ver$` que aborta si la columna, el índice o las dos
+  claves no quedaron. Sin triggers, funciones ni backfill; los UPDATE del cron
   disparan los 4 triggers EXISTENTES de `gasto` (`updated_at`, bitácora con
   `updated_by = null` ⇒ «Sistema», sync de facturación y personal del
   dueño, que no cambian nada). **Antes de aplicar**: el DRY-RUN de su
@@ -5046,14 +5095,19 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   CAS no deja pisar, C4 (b) el MISMO folio en otro gasto ⇒ 23505 y el sello
   del duplicado con nota y actor null, C5 (c) solo el sello: sin renglón de
   bitácora y `updated_by` intacto, C6 la cola baja en 3, C7 re-aplicar =
-  no-op ⇒ `DRYRUN_OK`; después la columna NO existe y no queda ningún
-  `DRYRUN-20261006000001-%`. Probado en PGlite (6-oct) con el esquema de
+  no-op, C8 las dos claves sembradas, pausables con el UPDATE del panel y
+  re-aplicar no pisa el lote ⇒ `DRYRUN_OK`; después la columna NO existe,
+  no queda ningún `DRYRUN-20261006000001-%` ni las dos claves. Probado en PGlite (6-oct) con el esquema de
   `gasto` de prod y sus 4 triggers REALES (texto de `pg_get_functiondef`):
   `DRYRUN_OK` sin residuos (huella md5 idéntica), aplicar dos veces
   idempotente, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`, verificación
   que aborta con la columna de otro tipo, cola corta ⇒ `DRYRUN_FALLA A` y
-  rollback. Tras aplicar: `get_advisors` y, con el API 0.0.58 desplegado,
-  la cola (SQL al pie de la cabecera; 118 el 6-oct) baja ~15 cada 5 min. El
+  rollback; re-probado tras la revisión (6-oct) con `configuracion_sistema`
+  y sus CHECK de prod: `DRYRUN_OK` A–C8 sin residuos, aplicar dos veces
+  idempotente, rollback borra las dos claves, un lote previo (30) se
+  respeta. Tras aplicar: `get_advisors` y, con el API 0.0.58 desplegado,
+  la cola (SQL al pie de la cabecera; 118 el 6-oct) baja ~15 por corrida
+  (cada 10–15 min: 1–2 h en total). El
   API 0.0.58 es desplegable ANTES (sin la columna el cron no hace nada).
   Rollback al pie del archivo (reiniciar el API después).
 - **APLICADA (5-oct-2026 vía MCP, tras DRYRUN_OK de la cabecera en prod con 62

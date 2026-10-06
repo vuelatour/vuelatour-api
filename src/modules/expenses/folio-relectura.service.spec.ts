@@ -23,9 +23,14 @@ import { normalizarFolio } from './folio-ticket.util';
  *    sello, con `updated_by = null` (bitácora «Sistema»);
  *  - (b) 23505 del índice único ⇒ sin folio, posible duplicado y la línea
  *    en notas;
- *  - (c) legible sin folio / ilegible / archivo ausente ⇒ solo el sello;
+ *  - (c) legible sin folio / ilegible / archivo ausente o vacío ⇒ solo el
+ *    sello;
  *  - (d) pyservices caído / IA sin saldo / red ⇒ NO se sella y se corta;
- *  - lote, orden, cola de postergados, CAS y candado anti-solape.
+ *  - lote, orden, cola de postergados, CAS y candado anti-solape;
+ *  - foto u hojas reemplazadas mientras la IA leía ⇒ OMITIDO (revisión
+ *    6-oct-2026);
+ *  - un gasto que falla siempre se lee con tope: 1 vez por hora, sellado
+ *    tras 3 fallos con la IA viva, fuera de la cola tras 6 sin prueba.
  */
 
 type Row = Record<string, unknown>;
@@ -47,8 +52,11 @@ interface Mundo {
   /** Configuración (clave ⇒ valor); sin clave ⇒ el default del llamador. */
   config?: Record<string, unknown>;
   visionApagada?: boolean;
-  /** Se llama justo ANTES de aplicar cada UPDATE de `gasto` (carreras). */
-  antesDeUpdate?: (db: Row[], patch: Row, n: number) => void;
+  /**
+   * Se llama justo ANTES de aplicar cada UPDATE de `gasto` (carreras). Si
+   * devuelve un objeto, ese es el `error` del UPDATE (no se escribe nada).
+   */
+  antesDeUpdate?: (db: Row[], patch: Row, n: number) => Row | void;
 }
 
 const valorIaFolio = (r: Row): string | null => {
@@ -126,7 +134,8 @@ function armar(m: Mundo = {}) {
         if (upd) {
           updates += 1;
           const patch = upd.args[0] as Row;
-          m.antesDeUpdate?.(db, patch, updates);
+          const errUpd = m.antesDeUpdate?.(db, patch, updates);
+          if (errUpd) return { data: null, error: errUpd };
           const filas = db.filter(pasa);
           if (typeof patch.folio_ticket === 'string') {
             const norm = normalizarFolio(patch.folio_ticket);
@@ -168,13 +177,25 @@ function armar(m: Mundo = {}) {
         }
         const lim = op('limit');
         if (lim) filas = filas.slice(0, lim.args[0] as number);
-        const conAlias = /ia_folio:/.test(sel());
-        return {
-          data: filas.map((r) =>
-            conAlias ? { ...r, ia_folio: valorIaFolio(r) } : { ...r },
-          ),
-          error: null,
+        // Como PostgREST: SOLO las columnas pedidas (una columna que el
+        // código olvide pedir llega undefined y el spec lo nota).
+        const cols = sel()
+          .split(',')
+          .map((c) => c.trim())
+          .filter(Boolean);
+        const proyectar = (r: Row): Row => {
+          if (cols.length === 0 || cols.includes('*')) return { ...r };
+          const out: Row = {};
+          for (const c of cols) {
+            if (c === 'ia_folio:valor_ia_extraido->>folio') {
+              out.ia_folio = valorIaFolio(r);
+            } else {
+              out[c] = r[c];
+            }
+          }
+          return out;
         };
+        return { data: filas.map(proyectar), error: null };
       };
       for (const met of [
         'select',
@@ -811,6 +832,252 @@ describe('cron gastos-releer-folio', () => {
       ],
     });
     expect(db[0].valor_ia_extraido).toEqual({ ...previa, folio: 'M-55' });
+  });
+
+  it('(c) PDF BORRADO de Storage («Object not found» en download) ⇒ sello ilegible sin llamar a la IA', async () => {
+    const pdf = `${PILOTO}/2026-09/borrado.pdf`;
+    const { svc, db, readGastoTicket, descargas, escrituras } = armar({
+      conColumna: true,
+      gastos: [gasto('pdf', { foto_url: pdf })],
+      archivos: {},
+      leer: () => lectura('NO-DEBE'),
+    });
+    const r = await svc.releerFoliosGastos();
+    expect(r).toMatchObject({ tomados: 1, ilegibles: 1, fallos: 0 });
+    expect(descargas).toEqual([pdf]);
+    expect(readGastoTicket).not.toHaveBeenCalled();
+    expect(db[0].folio_releido_at).not.toBeNull();
+    expect(db[0].folio_ticket).toBeNull();
+    expect(Object.keys(escrituras()[0].patch)).toEqual(['folio_releido_at']);
+    expect(svc.postergadosActuales()).toEqual([]);
+  });
+
+  it('(c) PDF VACÍO (0 bytes) ⇒ sello ilegible sin llamar a la IA y la corrida SIGUE (no atora la cola)', async () => {
+    const pdf = `${PILOTO}/2026-09/vacio.pdf`;
+    const { svc, db, readGastoTicket } = armar({
+      conColumna: true,
+      gastos: [
+        gasto('vacio', { fecha_gasto: '2026-09-09', foto_url: pdf }),
+        gasto('sigue', { fecha_gasto: '2026-09-08' }),
+      ],
+      archivos: { [pdf]: '', ...archivosDe('sigue') },
+      leer: () => lectura('S-1'),
+    });
+    const r = await svc.releerFoliosGastos();
+    expect(r).toMatchObject({ tomados: 2, ilegibles: 1, con_folio: 1 });
+    expect(readGastoTicket).toHaveBeenCalledTimes(1);
+    expect(db.find((g) => g.id === 'vacio')!.folio_releido_at).not.toBeNull();
+    expect(db.find((g) => g.id === 'sigue')!.folio_ticket).toBe('S-1');
+  });
+
+  it('foto REEMPLAZADA mientras la IA leía ⇒ OMITIDO (el folio de la vieja no se escribe) y la nueva se lee en la siguiente corrida', async () => {
+    const nueva = `${PILOTO}/2026-09/g1-nueva.jpg`;
+    const a = armar({
+      conColumna: true,
+      gastos: [gasto('g1')],
+      archivos: { ...archivosDe('g1'), [nueva]: 'jpg' },
+      leer: (input) => {
+        const url = String(input.imageUrl);
+        if (url.endsWith('/g1.jpg')) {
+          // El piloto cambia la foto (y la app guarda su propia lectura,
+          // sin folio) mientras la IA lee la vieja.
+          const g = a.db[0];
+          g.foto_url = nueva;
+          g.valor_ia_extraido = { legible: true, monto: 99, folio: null };
+          g.updated_at = ahoraIso();
+          return lectura('FOLIO-DE-LA-FOTO-VIEJA');
+        }
+        return lectura('FOLIO-NUEVO');
+      },
+    });
+    const r1 = await a.svc.releerFoliosGastos();
+    expect(r1).toMatchObject({ tomados: 1, omitidos: 1, con_folio: 0 });
+    expect(a.escrituras()).toHaveLength(0);
+    expect(a.db[0].folio_ticket).toBeNull();
+    expect(a.db[0].folio_releido_at).toBeNull();
+    expect(a.db[0].valor_ia_extraido).toEqual({
+      legible: true,
+      monto: 99,
+      folio: null,
+    });
+    // No es un fallo: no se posterga y la siguiente corrida lee la NUEVA.
+    expect(a.svc.postergadosActuales()).toEqual([]);
+    const r2 = await a.svc.releerFoliosGastos();
+    expect(r2).toMatchObject({ tomados: 1, con_folio: 1 });
+    expect(a.db[0].folio_ticket).toBe('FOLIO-NUEVO');
+    expect(a.readGastoTicket.mock.calls[1][0]).toEqual({
+      imageUrl: `https://firmada/${nueva}`,
+    });
+  });
+
+  it('hojas (`fotos_adicionales`) cambiadas mientras la IA leía ⇒ OMITIDO; un sello tampoco se escribe', async () => {
+    const hoja2 = `${PILOTO}/2026-09/h2.jpg`;
+    const a = armar({
+      conColumna: true,
+      gastos: [gasto('g1'), gasto('g2', { fecha_gasto: '2026-09-01' })],
+      archivos: { ...archivosDe('g1', 'g2'), [hoja2]: 'jpg' },
+      leer: (input) => {
+        const url = String(input.imageUrl);
+        const id = url.endsWith('/g1.jpg') ? 'g1' : 'g2';
+        const g = a.db.find((x) => x.id === id)!;
+        g.valor_ia_extraido = {
+          ...(g.valor_ia_extraido as Row),
+          fotos_adicionales: [hoja2],
+        };
+        g.updated_at = ahoraIso();
+        return id === 'g1' ? lectura('H-1') : lectura(null);
+      },
+    });
+    const r = await a.svc.releerFoliosGastos();
+    expect(r).toMatchObject({ tomados: 2, omitidos: 2, sin_folio: 0 });
+    expect(a.escrituras()).toHaveLength(0);
+    for (const g of a.db) {
+      expect(g.folio_ticket).toBeNull();
+      expect(g.folio_releido_at).toBeNull();
+    }
+  });
+
+  describe('reintentos acotados: ningún gasto se lee sin tope', () => {
+    let reloj = Date.parse('2026-10-06T18:00:00.000Z');
+    const MIN = 60 * 1000;
+    beforeEach(() => {
+      jest.spyOn(Date, 'now').mockImplementation(() => reloj);
+    });
+
+    it('timeout SIEMPRE en el mismo gasto con la IA contestando a otros ⇒ 1 lectura por hora y se sella como ilegible', async () => {
+      const { svc, db, readGastoTicket } = armar({
+        conColumna: true,
+        gastos: [
+          gasto('veneno', { fecha_gasto: '2026-09-09' }),
+          gasto('o1', { fecha_gasto: '2026-09-08' }),
+          gasto('o2', { fecha_gasto: '2026-09-07' }),
+          gasto('o3', { fecha_gasto: '2026-09-06' }),
+        ],
+        archivos: archivosDe('veneno', 'o1', 'o2', 'o3'),
+        leer: porId({
+          veneno: fallo('La lectura tardó demasiado (timeout API→pyservices)'),
+          o1: lectura('O-1'),
+          o2: lectura('O-2'),
+          o3: lectura('O-3'),
+        }),
+        config: { [CONFIG_FOLIOS_RELEER_LOTE]: 2 },
+      });
+      const lecturasVeneno = () =>
+        readGastoTicket.mock.calls.filter((c) =>
+          String(c[0].imageUrl).endsWith('/veneno.jpg'),
+        ).length;
+      // 4 h de corridas cada 5 min (48 corridas).
+      for (let i = 0; i < 48; i += 1) {
+        await svc.releerFoliosGastos();
+        if (i === 11) {
+          // Primera hora: lo leyó UNA vez (no en cada corrida).
+          expect(lecturasVeneno()).toBe(1);
+        }
+        reloj += 5 * MIN;
+      }
+      const v = db.find((g) => g.id === 'veneno')!;
+      expect(v.folio_releido_at).not.toBeNull();
+      expect(v.folio_ticket).toBeNull();
+      // 1.ª sin prueba (fue el primero de su corrida) + 3 con la IA viva.
+      expect(lecturasVeneno()).toBe(4);
+      expect(svc.postergadosActuales()).toEqual([]);
+      for (const id of ['o1', 'o2', 'o3']) {
+        expect(db.find((g) => g.id === id)!.folio_ticket).toBe(
+          id.toUpperCase().replace('O', 'O-'),
+        );
+      }
+    });
+
+    it('«Respuesta truncada» (la IA contestó y cobró) no corta la corrida y sella tras 3 lecturas', async () => {
+      const { svc, db, readGastoTicket } = armar({
+        conColumna: true,
+        gastos: [
+          gasto('t1', { fecha_gasto: '2026-09-09' }),
+          gasto('t2', { fecha_gasto: '2026-09-08' }),
+          gasto('t3', { fecha_gasto: '2026-09-07' }),
+        ],
+        archivos: archivosDe('t1', 't2', 't3'),
+        leer: () =>
+          fallo('Respuesta truncada por max_tokens (subir el límite)'),
+      });
+      const r1 = await svc.releerFoliosGastos();
+      // Tres seguidos y NO se corta: pyservices y la IA están vivos.
+      expect(r1).toMatchObject({ tomados: 3, fallos: 3, ilegibles: 0 });
+      expect(svc.estadoPostergado('t1')).toMatchObject({
+        intentos: 1,
+        conIa: 1,
+      });
+      for (let i = 0; i < 36; i += 1) {
+        reloj += 5 * MIN;
+        await svc.releerFoliosGastos();
+      }
+      expect(readGastoTicket).toHaveBeenCalledTimes(9);
+      for (const g of db) {
+        expect(g.folio_releido_at).not.toBeNull();
+        expect(g.folio_ticket).toBeNull();
+      }
+    });
+
+    it('solo en la cola, sin nadie más que pruebe que la IA vive ⇒ 6 lecturas y sale de la cola SIN sellarse', async () => {
+      const { svc, db, readGastoTicket } = armar({
+        conColumna: true,
+        gastos: [gasto('solo')],
+        archivos: archivosDe('solo'),
+        leer: () => fallo('pyservices 500'),
+      });
+      for (let i = 0; i < 24; i += 1) {
+        await svc.releerFoliosGastos();
+        reloj += 60 * MIN;
+      }
+      expect(readGastoTicket).toHaveBeenCalledTimes(6);
+      expect(db[0].folio_releido_at).toBeNull();
+      expect(svc.estadoPostergado('solo')).toMatchObject({
+        intentos: 6,
+        conIa: 0,
+        retirado: true,
+      });
+    });
+
+    it('pyservices CAÍDO toda la noche (sin conexión: no cuesta) ⇒ se reintenta cada hora sin sellar ni retirar', async () => {
+      const { svc, db, readGastoTicket } = armar({
+        conColumna: true,
+        gastos: [gasto('a')],
+        archivos: archivosDe('a'),
+        leer: () => fallo('Sin conexión con pyservices: fetch failed'),
+      });
+      for (let i = 0; i < 10 * 12; i += 1) {
+        await svc.releerFoliosGastos();
+        reloj += 5 * MIN;
+      }
+      expect(readGastoTicket).toHaveBeenCalledTimes(10);
+      expect(db[0].folio_releido_at).toBeNull();
+      expect(svc.estadoPostergado('a')).toMatchObject({
+        intentos: 0,
+        conIa: 0,
+        retirado: false,
+      });
+    });
+
+    it('la BD rechaza SIEMPRE el UPDATE de un gasto ⇒ a lo más 6 lecturas (la IA ya cobró cada una) y fuera de la cola', async () => {
+      const { svc, db, readGastoTicket } = armar({
+        conColumna: true,
+        gastos: [gasto('g1')],
+        archivos: archivosDe('g1'),
+        leer: () => lectura('A-1'),
+        antesDeUpdate: () => ({ code: 'P0001', message: 'trigger rechazó' }),
+      });
+      for (let i = 0; i < 24; i += 1) {
+        await svc.releerFoliosGastos();
+        reloj += 60 * MIN;
+      }
+      expect(readGastoTicket).toHaveBeenCalledTimes(6);
+      expect(db[0].folio_ticket).toBeNull();
+      expect(svc.estadoPostergado('g1')).toMatchObject({
+        intentos: 6,
+        conIa: 0,
+        retirado: true,
+      });
+    });
   });
 
   describe('CAS: jamás pisa lo que la oficina hizo mientras la IA leía', () => {

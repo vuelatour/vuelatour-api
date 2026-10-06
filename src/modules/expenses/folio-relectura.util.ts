@@ -11,8 +11,12 @@
  * aquí vive lo que decide con cada lectura:
  *   - qué gastos entran y en qué orden (`loteRelectura`,
  *     `corteCapturadosHasta`, `ordenarCandidatos`);
+ *   - qué archivos se leen y si siguen siendo los del gasto al escribir
+ *     (`archivosDelComprobante`, `mismoComprobante`);
  *   - qué se hizo con la lectura (`evaluarLecturaFolio`,
- *     `clasificarMotivoLectura`);
+ *     `clasificarMotivoLectura`, `falloSinCosto`);
+ *   - qué pasa con un gasto que falla una y otra vez (`registrarFallo`,
+ *     `destinoTrasFallo`);
  *   - qué se escribe (`lecturaConFolio`, `lineaFolioDuplicado`,
  *     `notasConLinea`, `fotosAdicionalesDe`).
  * El folio que se guarda lo decide `folio-ticket.util#folioTicketDeLectura`
@@ -34,8 +38,32 @@ export const FOLIOS_RELEER_DESDE_DEFAULT = '2026-09-01';
 export const FOLIOS_RELEER_CAPTURADOS_HASTA_DEFAULT = '2026-10-05';
 /** Categoría del consumo de IA (`ia_uso.categoria`). */
 export const CATEGORIA_IA_RELEER_FOLIO = 'RELEER_FOLIO';
-/** Gastos con fallo transitorio que se recuerdan (al final de la cola). */
-export const POSTERGADOS_MAX = 50;
+/**
+ * Gastos con fallo transitorio que se recuerdan (en memoria). Holgado a
+ * propósito: la cola por default es de 118 y aun con `folios_releer_desde`
+ * en julio (477) cabe completa; olvidar a uno lo regresaría a su lugar con
+ * sus contadores en cero.
+ */
+export const POSTERGADOS_MAX = 500;
+/**
+ * Un gasto que falló (transitorio o Storage) no se vuelve a intentar antes
+ * de este lapso (revisión 6-oct-2026): con la cola ya vacía, un gasto que
+ * siempre falla se leía en CADA corrida de 5 min.
+ */
+export const REINTENTO_POSTERGADO_MS = 60 * 60 * 1000;
+/**
+ * Fallos «con la IA viva» (ver `registrarFallo`) del MISMO gasto que lo
+ * sellan como ilegible: el problema es ese comprobante, no pyservices.
+ */
+export const FALLOS_CON_IA_PARA_SELLAR = 3;
+/**
+ * Intentos fallidos que pudieron costar créditos (`falloSinCosto` = false)
+ * tras los cuales el gasto sale de la cola de ESTE proceso SIN sellarse
+ * (no hay prueba de que el comprobante sea el problema). Un reinicio del API
+ * lo devuelve a la cola. Es el tope del gasto que, solo en la cola, falla
+ * siempre (nadie más contesta y la prueba de «IA viva» nunca llega).
+ */
+export const INTENTOS_MAX_POR_GASTO = 6;
 
 /** Lote saneado: entero 1–50; cualquier otra cosa ⇒ el default. */
 export function loteRelectura(v: unknown): number {
@@ -55,25 +83,130 @@ export function corteCapturadosHasta(dia: string): string {
 }
 
 /**
+ * Lo que el cron recuerda de un gasto que falló sin sellarse (en memoria:
+ * un reinicio lo olvida y el gasto vuelve a su lugar con todo en cero).
+ */
+export interface EstadoPostergado {
+  /** Intentos fallidos que PUDIERON costar créditos (`falloSinCosto` no). */
+  intentos: number;
+  /** De esos, los que fallaron con la IA contestando a otros gastos. */
+  conIa: number;
+  /** Epoch ms del primer fallo (de cualquier tipo). */
+  primerFallo: number;
+  /** Epoch ms del último fallo (de cualquier tipo). */
+  ultimoIntento: number;
+  /** Agotó `INTENTOS_MAX_POR_GASTO` sin prueba: fuera de la cola. */
+  retirado: boolean;
+}
+
+/**
  * Orden de la corrida: los candidatos tal como salen de la consulta
- * (`fecha_gasto` desc) y AL FINAL los postergados (fallo transitorio en
- * una corrida anterior), del más viejo al más reciente; se toman `lote`.
- * Así dos fotos que siempre tumban la lectura no encabezan la cola para
- * siempre (con dos fallos seguidos la corrida se corta y el lote sale
- * siempre en el mismo orden). Nunca se excluye a nadie: un postergado se
- * relee cuando ya no hay otros por delante.
+ * (`fecha_gasto` desc) y AL FINAL los postergados (fallo en una corrida
+ * anterior), del que falló hace más tiempo al más reciente; se toman
+ * `lote`. Un postergado se reintenta solo si pasó `REINTENTO_POSTERGADO_MS`
+ * desde su último fallo, y uno `retirado` ya no (hasta reiniciar el API).
+ * Así dos fotos que siempre tumban la lectura no encabezan la cola (con dos
+ * fallos seguidos la corrida se corta y el lote sale siempre en el mismo
+ * orden) ni se leen en cada corrida cuando la cola ya se vació.
  */
 export function ordenarCandidatos<T extends { id: string }>(
   filas: readonly T[],
-  postergados: readonly string[],
+  postergados: ReadonlyMap<
+    string,
+    Pick<EstadoPostergado, 'ultimoIntento' | 'retirado'>
+  >,
   lote: number,
+  ahora: number,
 ): T[] {
-  const orden = new Map(postergados.map((id, i) => [id, i]));
-  const libres = filas.filter((f) => !orden.has(f.id));
-  const atras = filas
-    .filter((f) => orden.has(f.id))
-    .sort((a, b) => orden.get(a.id)! - orden.get(b.id)!);
-  return [...libres, ...atras].slice(0, Math.max(0, lote));
+  const libres = filas.filter((f) => !postergados.has(f.id));
+  const listos = filas
+    .filter((f) => {
+      const p = postergados.get(f.id);
+      return (
+        !!p && !p.retirado && ahora - p.ultimoIntento >= REINTENTO_POSTERGADO_MS
+      );
+    })
+    .sort(
+      (a, b) =>
+        postergados.get(a.id)!.ultimoIntento -
+        postergados.get(b.id)!.ultimoIntento,
+    );
+  return [...libres, ...listos].slice(0, Math.max(0, lote));
+}
+
+/**
+ * Tipo de fallo que el cron registra contra UN gasto:
+ * - `STORAGE`: no se pudo bajar/firmar el archivo (red); la IA no se llamó.
+ * - `TRANSITORIO` / `RESPUESTA_IA`: la lectura falló (`clasificarMotivoLectura`).
+ * - `ESCRITURA`: la IA leyó pero la BD no guardó (error o CAS agotado).
+ */
+export type FalloGasto =
+  | 'STORAGE'
+  | 'TRANSITORIO'
+  | 'RESPUESTA_IA'
+  | 'ESCRITURA';
+
+/**
+ * Estado del gasto tras UN fallo más (PURO):
+ * - `STORAGE` y los `TRANSITORIO` `sinCosto` (pyservices inalcanzable, IA
+ *   saturada) solo mueven `ultimoIntento`: la IA no cobró nada y no dicen
+ *   nada del comprobante.
+ * - Los demás suman un `intento` (la IA pudo cobrar).
+ * - Cuentan además «con la IA viva» (`conIa`) los de LECTURA cuando el
+ *   fallo mismo lo prueba (`RESPUESTA_IA`: la IA contestó algo inservible)
+ *   o cuando la IA le contestó a OTRO gasto después de que éste empezó a
+ *   fallar (en su primer fallo: antes, en la MISMA corrida). Un pyservices
+ *   caído o colgado no suma `conIa` a nadie: nadie contesta. `ESCRITURA`
+ *   nunca suma `conIa` (sellarlo pasaría por el mismo UPDATE que falla).
+ */
+export function registrarFallo(
+  previo: EstadoPostergado | undefined,
+  p: {
+    fallo: FalloGasto;
+    sinCosto: boolean;
+    ahora: number;
+    inicioCorrida: number;
+    /** Epoch ms de la última lectura que la IA contestó (cualquier gasto). */
+    ultimaRespuestaIa: number | null;
+  },
+): EstadoPostergado {
+  const base: EstadoPostergado = previo
+    ? { ...previo }
+    : {
+        intentos: 0,
+        conIa: 0,
+        primerFallo: p.ahora,
+        ultimoIntento: p.ahora,
+        retirado: false,
+      };
+  base.ultimoIntento = p.ahora;
+  if (p.fallo === 'STORAGE' || p.sinCosto) return base;
+  base.intentos += 1;
+  if (p.fallo === 'ESCRITURA') return base;
+  const desde = previo ? previo.primerFallo : p.inicioCorrida;
+  const iaViva =
+    p.fallo === 'RESPUESTA_IA' ||
+    (p.ultimaRespuestaIa != null && p.ultimaRespuestaIa >= desde);
+  if (iaViva) base.conIa += 1;
+  return base;
+}
+
+/**
+ * Qué hacer con el gasto tras registrar su fallo: `SELLAR` como ilegible
+ * (falló `FALLOS_CON_IA_PARA_SELLAR` veces con la IA viva; nunca tras un
+ * fallo de `ESCRITURA`), `RETIRAR` de la cola de este proceso sin sellar
+ * (agotó `INTENTOS_MAX_POR_GASTO` sin esa prueba) o `POSTERGAR` (se
+ * reintenta tras `REINTENTO_POSTERGADO_MS`).
+ */
+export function destinoTrasFallo(
+  e: Pick<EstadoPostergado, 'intentos' | 'conIa'>,
+  fallo: FalloGasto,
+): 'SELLAR' | 'RETIRAR' | 'POSTERGAR' {
+  if (fallo !== 'ESCRITURA' && e.conIa >= FALLOS_CON_IA_PARA_SELLAR) {
+    return 'SELLAR';
+  }
+  if (e.intentos >= INTENTOS_MAX_POR_GASTO) return 'RETIRAR';
+  return 'POSTERGAR';
 }
 
 /** Hojas 2..N de una factura multi-hoja (`valor_ia_extraido.fotos_adicionales`). */
@@ -96,23 +229,70 @@ export function tipoDocumento(path: string): 'PDF' | 'EXCEL' | null {
 }
 
 /**
+ * Archivos (paths de `gasto-fotos`, en orden) que se le mandan a la IA para
+ * UN gasto: PDF/Excel solo el documento; imagen, la foto y sus hojas 2..N
+ * (`fotos_adicionales`). FUENTE ÚNICA de lo que se lee (`entradaVision`) y
+ * de lo que se compara antes de escribir (`mismoComprobante`).
+ */
+export function archivosDelComprobante(
+  fotoUrl: string | null | undefined,
+  valorIa: unknown,
+): string[] {
+  const path = (fotoUrl ?? '').trim();
+  if (!path) return [];
+  if (tipoDocumento(path)) return [path];
+  return [path, ...fotosAdicionalesDe(valorIa).filter((p) => p !== path)];
+}
+
+/**
+ * ¿El gasto conserva EXACTAMENTE los archivos que se leyeron? Si la foto o
+ * sus hojas cambiaron mientras la IA leía (20–40 s), el folio es de la foto
+ * VIEJA: no se escribe nada y la foto nueva se lee en otra corrida.
+ */
+export function mismoComprobante(
+  leidos: readonly string[],
+  vigentes: readonly string[],
+): boolean {
+  return (
+    leidos.length === vigentes.length &&
+    leidos.every((p, i) => p === vigentes[i])
+  );
+}
+
+/**
  * Qué significa una lectura FALLIDA (`motivo` de `VisionService`, que
- * reenvía el texto de `pyservices/app/services/ia_errores.py`):
+ * reenvía el texto de `pyservices/app/services/ia_errores.py` o el `detail`
+ * del 422 de `/vision/gasto`):
+ * - `RESPUESTA_IA`: la IA SÍ contestó (y cobró) pero la respuesta no sirvió
+ *   (truncada por `max_tokens`, sin JSON, JSON inválido, fuera del esquema).
+ *   Prueba que pyservices y la IA están vivos: no cuenta para cortar la
+ *   corrida y sí para sellar ESE gasto (`registrarFallo`). Se reconoce por
+ *   el INICIO del texto (el resto puede traer lo que escribió el modelo).
  * - `IA_NO_DISPONIBLE`: ninguna lectura funcionará (sin saldo, límite de
  *   gasto, llave inválida, modelo inexistente, pyservices sin token) ⇒ no
  *   se sella y la corrida se CORTA ya.
  * - `COMPROBANTE`: ESTE archivo no se puede leer (pesa demasiado, formato no
- *   soportado, foto ilegible, documento largo…) y reintentar no lo arregla
- *   ⇒ se sella como ilegible.
+ *   soportado, foto ilegible, documento largo, Excel viejo o vacío…) y
+ *   reintentar no lo arregla ⇒ se sella como ilegible.
  * - `TRANSITORIO`: todo lo demás (pyservices caído, timeout, IA saturada,
  *   «Claude no disponible (…)» genérico) ⇒ no se sella; dos seguidos cortan
  *   la corrida. Un texto que no se reconoce cae AQUÍ (lado seguro: jamás
- *   sella por un error que no entiende).
+ *   sella por un error que no entiende a la primera).
  */
 export type FalloLecturaFolio =
   | 'IA_NO_DISPONIBLE'
   | 'COMPROBANTE'
+  | 'RESPUESTA_IA'
   | 'TRANSITORIO';
+
+/** Inicio del `detail` del 422 de `/vision/gasto` cuando la IA ya contestó. */
+const PREFIJOS_RESPUESTA_IA: readonly RegExp[] = [
+  /^respuesta truncada/,
+  /^respuesta sin json/,
+  /^json inválido/,
+  /^no se pudo interpretar/,
+  /^\d+ validation errors? for /,
+];
 
 const MOTIVOS_IA_NO_DISPONIBLE = [
   'sin saldo de créditos',
@@ -135,17 +315,38 @@ const MOTIVOS_COMPROBANTE = [
   'no pudo leer la foto',
   'demasiado largo para la ia',
   'demasiadas fotos',
+  // 422 de pyservices ANTES de llamar a la IA (`_excel_to_text`).
+  'excel viejo',
+  'está vacío o no se pudo leer',
 ];
 
 export function clasificarMotivoLectura(
   motivo: string | null | undefined,
 ): FalloLecturaFolio {
-  const m = (motivo ?? '').toLowerCase();
+  const m = (motivo ?? '').trim().toLowerCase();
+  if (PREFIJOS_RESPUESTA_IA.some((re) => re.test(m))) return 'RESPUESTA_IA';
   if (MOTIVOS_IA_NO_DISPONIBLE.some((x) => m.includes(x))) {
     return 'IA_NO_DISPONIBLE';
   }
   if (MOTIVOS_COMPROBANTE.some((x) => m.includes(x))) return 'COMPROBANTE';
   return 'TRANSITORIO';
+}
+
+/**
+ * ¿El fallo TRANSITORIO seguro NO costó créditos? pyservices inalcanzable
+ * (red o el 502/503/504 de la orilla de Railway con el servicio abajo) o la
+ * IA rechazó por saturación/límite de peticiones antes de leer. Esos no
+ * cuentan como intento del gasto (`registrarFallo`): un pyservices caído
+ * toda la noche no agota ni sella a nadie. Timeout, 500 y lo desconocido
+ * SÍ cuentan (la IA pudo haber leído y cobrado).
+ */
+export function falloSinCosto(motivo: string | null | undefined): boolean {
+  const m = (motivo ?? '').trim().toLowerCase();
+  return (
+    m.startsWith('sin conexión con pyservices') ||
+    /^pyservices 50[234]\b/.test(m) ||
+    m.includes('está saturada')
+  );
 }
 
 /** Lectura tal como la devuelve `VisionService.readGastoTicket`. */
@@ -171,7 +372,10 @@ export type ResultadoLecturaFolio =
 
 /**
  * Qué se sacó de UNA lectura:
- * - `null` (visión deshabilitada) ⇒ FALLO `IA_NO_DISPONIBLE`.
+ * - `null` (visión deshabilitada) ⇒ FALLO `IA_NO_DISPONIBLE`. El cron
+ *   jamás manda una entrada vacía (la otra causa de `null`): un archivo
+ *   vacío se sella como ilegible antes de llamar a la IA.
+ * - `RESPUESTA_IA` también es FALLO (no se sella a la primera).
  * - `motivo` sin `monto` (la forma de error de `readGastoTicket`, la misma
  *   que usa `reanalizarConIA`) ⇒ según `clasificarMotivoLectura`.
  * - `legible !== true` ⇒ ILEGIBLE (un folio de una lectura ilegible NO se

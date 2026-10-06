@@ -1,5 +1,6 @@
 import { HttpException } from '@nestjs/common';
 import {
+  CONFIG_FOLIOS_RELEER_LOTE,
   CONFIG_INVENTARIO_MARGEN_VENTA_PCT,
   CONFIG_RESPONSABLES_FACTURACION,
   ConfiguracionService,
@@ -270,5 +271,47 @@ describe('ConfiguracionService — margen de la tienda', () => {
     await expect(
       svc.update('dias_gracia_gastos_semana', { valor_numerico: 150 }, MARY),
     ).resolves.toBeDefined();
+  });
+});
+
+/**
+ * RELECTURA DEL FOLIO (6-oct-2026, revisión): `folios_releer_lote` se edita
+ * desde el panel (la migración 20261006000001 siembra la fila) y va de 1 a
+ * 50; fuera de eso, 400 legible en vez de un valor que el cron ignoraría.
+ */
+describe('ConfiguracionService — lote de la relectura de folios', () => {
+  it.each([0, 51, 0.5])(
+    '%p ⇒ 400 VALOR_FUERA_DE_RANGO (y no escribe)',
+    async (v) => {
+      const { svc, llamadas } = armar({});
+      try {
+        await svc.update(
+          CONFIG_FOLIOS_RELEER_LOTE,
+          { valor_numerico: v },
+          MARY,
+        );
+        throw new Error('no lanzó');
+      } catch (e) {
+        expect(e).toBeInstanceOf(HttpException);
+        expect((e as HttpException).getStatus()).toBe(400);
+        expect((e as HttpException).getResponse()).toMatchObject({
+          error: 'VALOR_FUERA_DE_RANGO',
+          message: 'Los comprobantes por corrida van de 1 a 50.',
+          details: { clave: 'folios_releer_lote', min: 1, max: 50 },
+        });
+      }
+      expect(llamadas.some((l) => l.ops.some((o) => o.m === 'update'))).toBe(
+        false,
+      );
+    },
+  );
+
+  it('1, 15 y 50 pasan', async () => {
+    for (const v of [1, 15, 50]) {
+      const { svc, llamadas } = armar({});
+      await svc.update(CONFIG_FOLIOS_RELEER_LOTE, { valor_numerico: v }, MARY);
+      const upd = llamadas.flatMap((l) => l.ops).find((o) => o.m === 'update');
+      expect((upd?.args[0] as Fila).valor_numerico).toBe(v);
+    }
   });
 });

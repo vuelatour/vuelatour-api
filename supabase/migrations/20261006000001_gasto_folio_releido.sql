@@ -19,8 +19,17 @@
 --   2. COMMENT.
 --   3. Índice parcial `gasto_folio_releer_idx (fecha_gasto desc)` sobre la
 --      cola del cron (foto, sin folio, sin factura, sin sellar).
---   4. Verificación (`do $ver$`) que ABORTA si la columna o el índice no
---      quedaron.
+--   4. Siembra en `configuracion_sistema` (revisión 6-oct-2026) de las dos
+--      claves que la oficina puede cambiar desde el panel (Configuración;
+--      el PATCH responde 404 sin fila): `folios_releer_activo` (activa =
+--      true; apagarla PAUSA el cron en ≤ 60 s) y `folios_releer_lote`
+--      (valor_numerico = 15; el API valida 1–50). `on conflict do nothing`:
+--      una fila previa se respeta. Las fechas (`folios_releer_desde`,
+--      `folios_releer_capturados_hasta`) NO se siembran: el default vive en
+--      el API y una fila suya saldría en el panel como un switch sin
+--      significado. `configuracion_sistema` no tiene triggers.
+--   5. Verificación (`do $ver$`) que ABORTA si la columna, el índice o las
+--      dos claves no quedaron.
 --
 -- Sin triggers nuevos, sin funciones, sin backfill. Los UPDATE del cron
 -- disparan los triggers EXISTENTES de `gasto`: `trg_gasto_set_updated_at`
@@ -103,7 +112,7 @@
 --   end if;
 --   raise notice 'okA · % con foto y sin folio, % en la cola del cron', v_total, v_cola;
 --
---   -- B) CUERPO REAL (secciones 1–3 pegadas TAL CUAL)
+--   -- B) CUERPO REAL (secciones 1–4 pegadas TAL CUAL)
 --   alter table public.gasto
 --     add column if not exists folio_releido_at timestamptz null;
 --   comment on column public.gasto.folio_releido_at is
@@ -114,7 +123,14 @@
 --       and folio_ticket is null
 --       and factura_recibida_id is null
 --       and folio_releido_at is null;
---   -- (la sección 4 `do $ver$` no se puede anidar: C1 la repite)
+--   insert into public.configuracion_sistema (clave, activa, valor_numerico, descripcion)
+--   values
+--     ('folios_releer_activo', true, null,
+--      'Relectura con IA del folio de los comprobantes de gastos con foto y sin folio (septiembre en adelante), para que el número de factura salga en el Excel de conciliación. Apagada: se pausa en menos de un minuto; los gastos ya leídos no cambian. Consume créditos de IA (unos 5 centavos de dólar por comprobante).'),
+--     ('folios_releer_lote', true, 15,
+--      'Comprobantes que relee la IA en cada corrida de la relectura de folios (cada 5 minutos; de 1 a 50). Más = termina antes, mismo costo por comprobante.')
+--   on conflict (clave) do nothing;
+--   -- (la sección 5 `do $ver$` no se puede anidar: C1 y C8 la repiten)
 --
 --   -- C1) ESTRUCTURA: tipo, nulabilidad, sin default, índice con su
 --   --     predicado y TODAS las filas existentes pendientes.
@@ -276,7 +292,32 @@
 --     raise exception 'DRYRUN_FALLA C7: % índices tras re-aplicar', v_n;
 --   end if;
 --
---   raise exception 'DRYRUN_OK 20261006000001 · A–C7 (% con foto y sin folio, % en la cola; folio escrito, duplicado 23505 con nota, sello sin bitácora, actor «Sistema», CAS, idempotente)', v_total, v_cola;
+--   -- C8) CONFIGURACIÓN: las dos claves quedaron (activo encendido, lote
+--   --     1–50) y el panel las puede cambiar con el MISMO UPDATE que hace
+--   --     `ConfiguracionService.update` (1 fila; sin fila sería 404).
+--   select count(*) into v_n from public.configuracion_sistema
+--    where (clave = 'folios_releer_activo' and activa)
+--       or (clave = 'folios_releer_lote' and valor_numerico between 1 and 50);
+--   if v_n <> 2 then
+--     raise exception 'DRYRUN_FALLA C8: % de 2 claves sembradas', v_n;
+--   end if;
+--   update public.configuracion_sistema
+--      set activa = false, updated_at = now()
+--    where clave = 'folios_releer_activo';
+--   get diagnostics v_n = row_count;
+--   if v_n <> 1 then
+--     raise exception 'DRYRUN_FALLA C8: pausar desde el panel tocó % filas', v_n;
+--   end if;
+--   insert into public.configuracion_sistema (clave, activa, valor_numerico, descripcion)
+--   values ('folios_releer_lote', true, 40, 'x')
+--   on conflict (clave) do nothing;
+--   if (select valor_numerico from public.configuracion_sistema
+--        where clave = 'folios_releer_lote') = 40 then
+--     raise exception 'DRYRUN_FALLA C8: re-aplicar pisó el lote';
+--   end if;
+--   raise notice 'okC7–C8 · idempotente; claves sembradas y editables';
+--
+--   raise exception 'DRYRUN_OK 20261006000001 · A–C8 (% con foto y sin folio, % en la cola; folio escrito, duplicado 23505 con nota, sello sin bitácora, actor «Sistema», CAS, idempotente, configuración sembrada)', v_total, v_cola;
 -- end $dry$;
 --
 -- Tras el DRYRUN_OK:
@@ -284,6 +325,8 @@
 --    where table_schema = 'public' and table_name = 'gasto'
 --      and column_name = 'folio_releido_at';                        ⇒ 0
 --   select count(*) from public.gasto where folio_ticket like 'DRYRUN-20261006000001-%';  ⇒ 0
+--   select count(*) from public.configuracion_sistema
+--    where clave in ('folios_releer_activo', 'folios_releer_lote');   ⇒ 0
 -- Aplicar (MCP `apply_migration`) ⇒ `get_advisors` ⇒ con el API 0.0.58
 -- desplegado (la sonda re-sondea en ≤ 10 min):
 --   select count(*) from public.gasto
@@ -292,7 +335,10 @@
 --      and valor_ia_extraido->>'folio' is null
 --      and fecha_gasto >= '2026-09-01'
 --      and created_at < '2026-10-06T00:00:00-05:00';
---   (118 el 6-oct; baja ~15 cada 5 min mientras la IA tenga saldo)
+--   (118 el 6-oct; baja ~15 por corrida mientras la IA tenga saldo. Una
+--   corrida de 15 lecturas dura 5–10 min y el candado salta el tick que la
+--   alcance: en la práctica corre cada 10–15 min ⇒ 8 corridas, entre 1 y
+--   2 h, más ≤ 10 min de la sonda. Unos 6 USD de créditos.)
 -- ---------------------------------------------------------------------------
 
 -- 1) Columna (idempotente).
@@ -311,11 +357,21 @@ create index if not exists gasto_folio_releer_idx
     and factura_recibida_id is null
     and folio_releido_at is null;
 
--- 4) Verificación: aborta la migración (y la revierte) si algo no quedó.
+-- 4) Configuración que el panel puede cambiar (pausa y tamaño del lote).
+insert into public.configuracion_sistema (clave, activa, valor_numerico, descripcion)
+values
+  ('folios_releer_activo', true, null,
+   'Relectura con IA del folio de los comprobantes de gastos con foto y sin folio (septiembre en adelante), para que el número de factura salga en el Excel de conciliación. Apagada: se pausa en menos de un minuto; los gastos ya leídos no cambian. Consume créditos de IA (unos 5 centavos de dólar por comprobante).'),
+  ('folios_releer_lote', true, 15,
+   'Comprobantes que relee la IA en cada corrida de la relectura de folios (cada 5 minutos; de 1 a 50). Más = termina antes, mismo costo por comprobante.')
+on conflict (clave) do nothing;
+
+-- 5) Verificación: aborta la migración (y la revierte) si algo no quedó.
 do $ver$
 declare
   v_ok int;
   v_idx int;
+  v_cfg int;
 begin
   select count(*) into v_ok
     from information_schema.columns
@@ -330,10 +386,13 @@ begin
      and tablename = 'gasto'
      and indexname = 'gasto_folio_releer_idx'
      and indexdef like '%folio_releido_at IS NULL%';
-  if v_ok <> 1 or v_idx <> 1 then
-    raise exception 'VERIFICACION_FALLA 20261006000001: columna % de 1, índice % de 1', v_ok, v_idx;
+  select count(*) into v_cfg
+    from public.configuracion_sistema
+   where clave in ('folios_releer_activo', 'folios_releer_lote');
+  if v_ok <> 1 or v_idx <> 1 or v_cfg <> 2 then
+    raise exception 'VERIFICACION_FALLA 20261006000001: columna % de 1, índice % de 1, configuración % de 2', v_ok, v_idx, v_cfg;
   end if;
-  raise notice 'VERIFICACION_OK 20261006000001 · gasto.folio_releido_at + gasto_folio_releer_idx';
+  raise notice 'VERIFICACION_OK 20261006000001 · gasto.folio_releido_at + gasto_folio_releer_idx + configuración';
 end
 $ver$;
 
@@ -348,5 +407,7 @@ $ver$;
 -- begin;
 --   drop index if exists public.gasto_folio_releer_idx;
 --   alter table public.gasto drop column if exists folio_releido_at;
+--   delete from public.configuracion_sistema
+--    where clave in ('folios_releer_activo', 'folios_releer_lote');
 -- commit;
 -- ---------------------------------------------------------------------------
