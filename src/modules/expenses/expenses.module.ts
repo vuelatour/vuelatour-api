@@ -8,6 +8,7 @@ import { PyservicesModule } from '../pyservices/pyservices.module';
 import { CombustibleMasivoService } from './combustible-masivo.service';
 import { ExpensesController } from './expenses.controller';
 import { ExpensesService } from './expenses.service';
+import { FolioRelecturaService } from './folio-relectura.service';
 
 @Module({
   imports: [
@@ -23,7 +24,8 @@ import { ExpensesService } from './expenses.service';
     forwardRef(() => ConciliacionModule),
   ],
   controllers: [ExpensesController],
-  providers: [ExpensesService, CombustibleMasivoService],
+  // FolioRelecturaService (6-oct-2026): cron `gastos-releer-folio`.
+  providers: [ExpensesService, CombustibleMasivoService, FolioRelecturaService],
   exports: [ExpensesService],
 })
 export class ExpensesModule {}

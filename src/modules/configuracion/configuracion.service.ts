@@ -104,6 +104,31 @@ export const CONFIG_INVENTARIO_MARGEN_VENTA_PCT = 'inventario_margen_venta_pct';
 export const INVENTARIO_MARGEN_VENTA_PCT_DEFAULT = MARGEN_VENTA_PCT_DEFAULT;
 
 /**
+ * RELECTURA CON IA DEL FOLIO DE LOS COMPROBANTES (6-oct-2026, API 0.0.58,
+ * cron `gastos-releer-folio`, `expenses/folio-relectura.service.ts`). Sin
+ * fila en `configuracion_sistema` aplica el default de cada clave (la
+ * migración 20261006000001 NO las siembra):
+ * - `folios_releer_activo` (`activa`, default true): apagarla detiene el
+ *   cron en ≤ 60 s (caché) sin redeploy.
+ * - `folios_releer_lote` (`valor_numerico`, default 15, 1–50): gastos por
+ *   corrida (cada 5 min).
+ * - `folios_releer_desde` (`valor_json` = `["AAAA-MM-DD"]`, default
+ *   2026-09-01): solo gastos con `fecha_gasto` desde ese día.
+ * - `folios_releer_capturados_hasta` (`valor_json` = `["AAAA-MM-DD"]`,
+ *   default 2026-10-05, día Cancún inclusive): solo gastos CAPTURADOS
+ *   (`created_at`) hasta ese día. Lo capturado después ya se leyó con el
+ *   prompt afinado (2-oct-2026) y además es lo que piloto y oficina siguen
+ *   editando: el cron no lo toca ni gasta créditos en él.
+ * Las fechas viven en `valor_json` porque la tabla no tiene columna de
+ * texto (CHECK `configuracion_sistema_valor_json_chk`: arreglo).
+ */
+export const CONFIG_FOLIOS_RELEER_ACTIVO = 'folios_releer_activo';
+export const CONFIG_FOLIOS_RELEER_LOTE = 'folios_releer_lote';
+export const CONFIG_FOLIOS_RELEER_DESDE = 'folios_releer_desde';
+export const CONFIG_FOLIOS_RELEER_CAPTURADOS_HASTA =
+  'folios_releer_capturados_hasta';
+
+/**
  * Rango permitido por clave numérica (PATCH `valor_numerico`). Fuera de él
  * ⇒ 400 VALOR_FUERA_DE_RANGO. La BD solo exige ≥ 0.
  */
@@ -256,6 +281,8 @@ export class ConfiguracionService {
   private cache: { data: Map<string, ConfigRow>; at: number } | null = null;
   /** Caché corto (60 s) de las listas de ids (`valor_json`) por clave. */
   private cacheListas = new Map<string, { ids: string[]; at: number }>();
+  /** Caché corto (60 s) de las fechas en `valor_json` por clave. */
+  private cacheFechas = new Map<string, { valor: string | null; at: number }>();
   /**
    * Caché corto (MISMO TTL de 60 s) del modelo de IA configurado: lo lee
    * cada llamada a pyservices. Se rearma al escribir (`setModeloIa`).
@@ -332,6 +359,44 @@ export class ConfiguracionService {
    */
   async numero(clave: string, porDefecto: number): Promise<number> {
     return (await this.cachedRow(clave))?.valor_numerico ?? porDefecto;
+  }
+
+  /**
+   * FECHA guardada en `valor_json` como `["AAAA-MM-DD"]` (primer elemento;
+   * 6-oct-2026, relectura del folio de gastos). Fila inexistente, valor que
+   * no es una fecha de calendario válida o consulta caída ⇒ `porDefecto`
+   * (best-effort, como `isActiva`/`numero`; con la BD caída responde el
+   * último valor leído). Caché de 60 s por clave.
+   */
+  async fecha(clave: string, porDefecto: string): Promise<string> {
+    const now = Date.now();
+    const c = this.cacheFechas.get(clave);
+    if (c && now - c.at <= ConfiguracionService.TTL_MS) {
+      return c.valor ?? porDefecto;
+    }
+    const { data, error } = await this.supabase.service
+      .from('configuracion_sistema')
+      .select('clave, valor_json')
+      .eq('clave', clave)
+      .maybeSingle();
+    if (error) return c ? (c.valor ?? porDefecto) : porDefecto;
+    const valor = ConfiguracionService.fechaDeValorJson(
+      (data as { valor_json?: unknown } | null)?.valor_json,
+    );
+    this.cacheFechas.set(clave, { valor, at: now });
+    return valor ?? porDefecto;
+  }
+
+  /** Primer elemento de `valor_json` si es `AAAA-MM-DD` real; si no, null. */
+  static fechaDeValorJson(raw: unknown): string | null {
+    const v: unknown = Array.isArray(raw) ? raw[0] : raw;
+    if (typeof v !== 'string') return null;
+    const t = v.trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(t)) return null;
+    const d = new Date(`${t}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === t
+      ? t
+      : null;
   }
 
   async update(clave: string, dto: UpdateConfiguracionDto, userId: string) {

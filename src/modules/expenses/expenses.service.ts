@@ -44,6 +44,12 @@ import {
   lineaSelloCorreccion,
   resolverSelloCorreccion,
 } from './ventana-correccion.util';
+// Folio del comprobante: fuente única con el cron `gastos-releer-folio`.
+import {
+  FOLIO_CANDADO_MIN,
+  folioTicketDeLectura,
+  normalizarFolio,
+} from './folio-ticket.util';
 import {
   CATEGORIAS_REPARTIBLES,
   fetchRepartos,
@@ -145,17 +151,6 @@ const MEDIOS_PAGO_BANCARIOS: string[] = [
  *  mismo ticket capturado "días después" por otra persona se escapaba. */
 const DUP_DAYS = 7;
 const DUP_DAYS_SIN_PROVEEDOR = 3;
-
-/** Normalización del folio del ticket: la MISMA regla que la columna
- *  generada `folio_ticket_norm` de la BD (solo alfanumérico, mayúsculas). */
-function normalizarFolio(folio: string | null | undefined): string | null {
-  const norm = (folio ?? '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
-  return norm.length > 0 ? norm : null;
-}
-
-/** Largo mínimo del folio normalizado para el candado duro (los cortos son
- *  demasiado genéricos para rechazar; solo llevan el flag blando). */
-const FOLIO_CANDADO_MIN = 4;
 
 /** Tramo al que se enlaza un gasto, con su avión YA resuelto con herencia
  *  (`escala.aeronave_id ?? vuelo.aeronave_id`) — regla B 28-ago-2026. */
@@ -1973,8 +1968,12 @@ export class ExpensesService {
     // en otro gasto, NO se escribe (el índice único reventaría el patch):
     // se marca posible duplicado y queda la nota — es justo el caso "dos
     // personas capturaron el mismo ticket" detectado por la foto.
-    if (!gasto.folio_ticket && ai.folio) {
-      const folioLeido = String(ai.folio).slice(0, 60);
+    // `folioTicketDeLectura` (6-oct-2026): la MISMA regla que el cron
+    // `gastos-releer-folio` (recorte, 60 caracteres, sin «S/N»).
+    const folioLeido = gasto.folio_ticket
+      ? null
+      : folioTicketDeLectura(ai.folio);
+    if (folioLeido) {
       const norm = normalizarFolio(folioLeido);
       if (norm && norm.length >= FOLIO_CANDADO_MIN) {
         const { data: repetido } = await this.supabase.service
