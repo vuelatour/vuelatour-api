@@ -4599,6 +4599,40 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       [q, q+1)) y `conciliacion.controller.lote.spec` (DTO por HTTP:
       recorte, vacía, 10–300, `incluir_no_bancarios` 1/true/0/false/otro).
 
+49. **«BALANCE MENSUAL» Y «BALANCE GENERAL»: `?modo=` EN LA DESCARGA DE LA
+    FLOTA (6-oct-2026, API 0.0.64, sin migración).** Pedido del cliente: el
+    libro de siempre se llama «Balance mensual» y el nuevo «Balance general»
+    resume la hoja «reporte horas FLOTA» a COSTO TOTAL y COSTO POR HORA («el
+    total de todos los gastos, entre el tiempo volado, entre el tipo de
+    cambio del día, entre 1.16»). `GET
+    /v1/aircraft/balance-general.xlsx?modo=mensual|general` (DTO
+    `BalanceGeneralQuery extends BalanceAvionQuery`): sin `modo` =
+    `mensual` (el panel previo baja lo de siempre); cualquier otro valor
+    —«GENERAL», vacío, repetido— ⇒ 400 «El modo del balance debe ser
+    «mensual» o «general».»; el libro de UN avión NO acepta `modo` (400).
+    `xlsxGeneral(desde, hasta, modo)` valida ANTES de leer nada y manda
+    `variante = modo` AL FINAL del payload (aditivo: pyservices sin
+    `variante` o con `mensual` pinta el libro byte-idéntico). **Es lo ÚNICO
+    que cambia**: el payload se arma igual —mismos números, mismas
+    consultas— y las columnas de la variante general salen de atributos que
+    cada fila YA trae (`subtotal_mxn`, `tiempo_vuelo`, `costo_total_mxn`,
+    `tc_costos`, `costo_usd`, `costo_hr_usd`, `costo_hr_usd_siva` = AO = Y
+    ÷ z ÷ O ÷ 1.16, `iva_pagado_*`, `remanente_mxn`): lo que falte se arma en
+    pyservices como FÓRMULA de esas celdas, nunca como un número paralelo
+    aquí. Archivo: `balance-<modo>-vuelatour-<desde>-a-<hasta>.xlsx` (el
+    `balance-general-vuelatour-…` de antes hoy es el MENSUAL). Fuente única
+    `aircraft/balance-general-modo.util.ts` (`MODOS_BALANCE_GENERAL`,
+    default, mensaje, `esModoBalanceGeneral`, `nombreArchivoBalanceGeneral`;
+    el tipo `VarianteBalanceGeneral` vive en `pyservices.service.ts`).
+    Specs: `balance-general-modo.util.spec`, `aircraft.controller.spec`
+    (HTTP con el ValidationPipe de main.ts: default, general, mensual
+    explícito, los 400, roles ADMIN/ANALISTA, orden de rutas, libro por
+    avión sin `modo`) y `aircraft-balance.service.modo.spec` (variante por
+    modo, payload IDÉNTICO salvo `variante` y con las mismas tablas leídas,
+    llave al final, 400 sin leer la BD). Deploy: pyservices (tolera
+    `variante`) → API → panel (el API previo responde 400 a `?modo=` por
+    `forbidNonWhitelisted`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

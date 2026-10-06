@@ -25,6 +25,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import { BalanceAvionQuery } from './dto/balance-avion.query';
+import { BalanceGeneralQuery } from './dto/balance-general.query';
 import { BitacoraTacoQuery } from './dto/bitacora-taco.query';
 import { CreateAeronaveDto } from './dto/create-aeronave.dto';
 import { ListAeronavesQuery } from './dto/list-aeronaves.query';
@@ -47,6 +48,7 @@ import {
 } from './dto/upsert-aeronave-discrepancia.dto';
 import { AircraftBalanceService } from './aircraft-balance.service';
 import { AircraftService } from './aircraft.service';
+import { nombreArchivoBalanceGeneral } from './balance-general-modo.util';
 
 @ApiTags('Aircraft')
 @ApiBearerAuth()
@@ -79,18 +81,19 @@ export class AircraftController {
   @Roles(Rol.ADMIN, Rol.ANALISTA)
   @ApiOperation({
     summary:
-      'Balance general VuelaTour: consolidado de toda la flota en un solo libro — RESUMEN con una fila por avión (los TOTALES de su libro del periodo, mismo motor que el balance por avión) + totales de flota, y un juego de hojas con los datos de todos los aviones juntos. Default: mes corriente en hora Cancún.',
+      'Balance VuelaTour de toda la flota en un solo libro — RESUMEN con una fila por avión (los TOTALES de su libro del periodo, mismo motor que el balance por avión) + totales de flota, y un juego de hojas con los datos de todos los aviones juntos. modo=mensual (default) = «Balance mensual», el libro completo de siempre; modo=general = «Balance general», el mismo libro con la hoja de vuelos resumida a costo total y costo por hora. Mismos números en los dos. Default del periodo: mes corriente en hora Cancún.',
   })
   async balanceGeneralXlsx(
-    @Query() q: BalanceAvionQuery,
+    @Query() q: BalanceGeneralQuery,
   ): Promise<StreamableFile> {
-    const { buffer, desde, hasta } = await this.balance.xlsxGeneral(
+    const { buffer, desde, hasta, modo } = await this.balance.xlsxGeneral(
       q.desde,
       q.hasta,
+      q.modo,
     );
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-      disposition: `attachment; filename="balance-general-vuelatour-${desde}-a-${hasta}.xlsx"`,
+      disposition: `attachment; filename="${nombreArchivoBalanceGeneral(modo, desde, hasta)}"`,
     });
   }
 

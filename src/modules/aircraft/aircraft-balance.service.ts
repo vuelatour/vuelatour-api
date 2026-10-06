@@ -89,6 +89,14 @@ import {
   movimientosConTc,
   participacionesEmpresa,
 } from './balance-empresa.util';
+// «Balance mensual» / «Balance general» (6-oct-2026, API 0.0.64): `modo` de
+// la descarga = `variante` del payload; solo cambia la presentación.
+import {
+  MENSAJE_MODO_BALANCE_INVALIDO,
+  MODO_BALANCE_GENERAL_DEFAULT,
+  esModoBalanceGeneral,
+  type ModoBalanceGeneral,
+} from './balance-general-modo.util';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
@@ -580,11 +588,26 @@ export class AircraftBalanceService {
    * al RESUMEN (fila EXTERNOS) y a cobranza, con el costo del operador en
    * OPERACIONES. No generan bloque en la hoja "balance" (no tienen socios)
    * y sus TUAs/extras siguen la regla de todos en "Otros movimientos".
+   *
+   * `modo` (6-oct-2026, API 0.0.64): «Balance mensual» (`mensual`, default:
+   * el libro de siempre) o «Balance general» (`general`: la hoja de vuelos
+   * resumida a costo total y costo por hora). Viaja TAL CUAL como
+   * `variante` y es lo ÚNICO que cambia entre los dos: el payload se arma
+   * igual, sin un número distinto (spec). Se valida ANTES de leer nada.
    */
   async xlsxGeneral(
     desde?: string,
     hasta?: string,
-  ): Promise<{ buffer: Buffer; desde: string; hasta: string }> {
+    modo: ModoBalanceGeneral = MODO_BALANCE_GENERAL_DEFAULT,
+  ): Promise<{
+    buffer: Buffer;
+    desde: string;
+    hasta: string;
+    modo: ModoBalanceGeneral;
+  }> {
+    if (!esModoBalanceGeneral(modo)) {
+      throw new BadRequestException(MENSAJE_MODO_BALANCE_INVALIDO);
+    }
     const def = this.mesCorrienteCancun();
     const d = desde ?? def.desde;
     const h = hasta ?? def.hasta;
@@ -1023,8 +1046,11 @@ export class AircraftBalanceService {
       inventario: inventarioTiendita,
       // Bloque «VUELATOUR (empresa)» de la hoja "balance" (6-oct-2026).
       empresa,
+      // «Balance mensual» o «Balance general» (6-oct-2026, API 0.0.64): AL
+      // FINAL (aditivo). Solo elige la presentación en pyservices.
+      variante: modo,
     });
-    return { buffer, desde: d, hasta: h };
+    return { buffer, desde: d, hasta: h, modo };
   }
 
   /** Periodo default: mes corriente EN HORA CANCÚN (no UTC). */

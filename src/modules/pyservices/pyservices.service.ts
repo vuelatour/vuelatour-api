@@ -1139,7 +1139,24 @@ export interface BalanceGeneralPayload {
    * de la hoja «balance». Sin él (API viejo) pyservices no lo pinta.
    */
   empresa?: BalanceEmpresaBloquePayload;
+  /**
+   * ADITIVO (6-oct-2026, API 0.0.64): qué libro pinta pyservices con ESTE
+   * MISMO payload (`?modo=` de la descarga; el API lo manda SIEMPRE).
+   * 'mensual' (o ausente: API viejo) = el libro de siempre, byte-idéntico;
+   * 'general' = la hoja «reporte horas FLOTA» resumida a COSTO TOTAL y
+   * COSTO POR HORA (sin desglose de operación/piloto/AFAC). Solo cambia la
+   * PRESENTACIÓN: ningún número del payload depende de la variante.
+   */
+  variante: VarianteBalanceGeneral;
 }
+
+/**
+ * Variante del libro del Balance general VuelaTour (6-oct-2026, API 0.0.64).
+ * Espejo de `BalanceGeneralRequest.variante` en pyservices (default
+ * 'mensual'). La lista de valores válidos vive en
+ * `aircraft/balance-general-modo.util.ts` (`MODOS_BALANCE_GENERAL`).
+ */
+export type VarianteBalanceGeneral = 'mensual' | 'general';
 
 /** Fila de la pestaña "Otros movimientos" (28-ago, hoja manual del cliente):
  *  egreso (lo pagado) apareado por concepto ESTRUCTURAL con el ingreso (lo
@@ -2008,7 +2025,8 @@ export class PyservicesService {
     return this.postForBuffer('/pdf/balance-avion-xlsx', payload, 30_000);
   }
 
-  /** Balance general VuelaTour (toda la flota) en Excel. */
+  /** Balance VuelaTour de toda la flota en Excel; `payload.variante` elige
+   *  el libro: 'mensual' (el de siempre) o 'general' (costo por hora). */
   async generateBalanceGeneralXlsx(
     payload: BalanceGeneralPayload,
   ): Promise<Buffer> {
