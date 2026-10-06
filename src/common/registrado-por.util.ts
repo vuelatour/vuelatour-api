@@ -74,6 +74,33 @@ export function nombreDeRelacionUsuario(relacion: unknown): string | null {
   return nombreStr((fila as { nombre?: unknown }).nombre);
 }
 
+/**
+ * ¿PostgREST NO pudo resolver un EMBED (relación) de la consulta? PURA.
+ *
+ * Códigos de PostgREST: `PGRST200` = no encontró la relación en su caché de
+ * esquema (FK renombrada o borrada, caché sin recargar tras una migración) y
+ * `PGRST201` = encontró MÁS de una y el hint no desambigua. Respaldo por el
+ * texto («Could not find a relationship…», «more than one relationship…»)
+ * por si el error llega sin `code`.
+ *
+ * Para qué (6-oct-2026, revisión del balance 0.0.60): un lector que trae el
+ * nombre de quien registró en la MISMA consulta que el dinero
+ * (`registro:usuario!registrado_por(nombre)`) puede repetir la consulta SIN
+ * el embed y resolver los nombres en lote con `fetchNombresUsuarios` — la
+ * regla 2 de arriba: el dinero vale más que la cortesía de un nombre.
+ * Cualquier OTRO error (red, timeout, columna inexistente) NO es esto y debe
+ * subir como siempre.
+ */
+export function esEmbedNoResuelto(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  if (code === 'PGRST200' || code === 'PGRST201') return true;
+  return (
+    typeof message === 'string' &&
+    /could not find a relationship|more than one relationship/i.test(message)
+  );
+}
+
 /** Ids DISTINTOS de `registrado_por` presentes en la lista (sin nulls). */
 export function idsRegistradoPor(
   filas: ReadonlyArray<ConRegistradoPor>,

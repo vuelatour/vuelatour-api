@@ -10,6 +10,7 @@ jest.mock('../tipo-cambio/tipo-cambio.service', () => ({
   TipoCambioService: class {},
 }));
 
+import { Logger } from '@nestjs/common';
 import { AircraftBalanceService } from './aircraft-balance.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type {
@@ -189,8 +190,29 @@ function mundoCobros(): Record<string, Fila[]> {
   };
 }
 
+type ErrorPostgrest = { code: string; message: string };
+
+/** Errores que puede inyectar el spec en la lectura de `cobro_vuelo`. */
+interface OpcionesCobro {
+  /** Falla la consulta CON el embed del nombre. */
+  errorEmbed?: ErrorPostgrest;
+  /** Falla la consulta SIN el embed (la del respaldo). */
+  errorSinEmbed?: ErrorPostgrest;
+}
+
+/** Consulta de PostgREST que responde `error` (encadenable como la real). */
+function consultaFallida(error: ErrorPostgrest) {
+  const q: Record<string, unknown> = {
+    in: () => q,
+    order: () => q,
+    then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
+      Promise.resolve({ data: null, error }).then(res, rej),
+  };
+  return q;
+}
+
 /** Supabase del mundo + registro del `select` pedido a `cobro_vuelo`. */
-function supabaseCon(mundo: Record<string, Fila[]>) {
+function supabaseCon(mundo: Record<string, Fila[]>, opts: OpcionesCobro = {}) {
   const base = fakeSupabase(mundo);
   const selectsCobro: string[] = [];
   const from = (tabla: string) => {
@@ -199,7 +221,10 @@ function supabaseCon(mundo: Record<string, Fila[]>) {
       const selectOriginal = q.select as (cols?: string) => unknown;
       q.select = (cols?: string) => {
         selectsCobro.push(cols ?? '');
-        return selectOriginal(cols);
+        const falla = (cols ?? '').includes('registro:')
+          ? opts.errorEmbed
+          : opts.errorSinEmbed;
+        return falla ? consultaFallida(falla) : selectOriginal(cols);
       };
     }
     return q;
@@ -207,8 +232,8 @@ function supabaseCon(mundo: Record<string, Fila[]>) {
   return { supabase: { service: { from } }, selectsCobro };
 }
 
-function armar(mundo: Record<string, Fila[]>) {
-  const s = supabaseCon(mundo);
+function armar(mundo: Record<string, Fila[]>, opts: OpcionesCobro = {}) {
+  const s = supabaseCon(mundo, opts);
   const enviados: { individual?: BalanceAvionPayload; general?: unknown } = {};
   const pyservices = {
     generateBalanceAvionXlsx: (p: BalanceAvionPayload) => {
@@ -244,9 +269,15 @@ const filaDe = (
   return f;
 };
 
-/** Lo que el cliente ve de cada cobro, en el orden del libro. */
+/**
+ * Lo que el cliente ve de cada cobro, en el orden del libro — los NÚMEROS
+ * incluidos (revisión 6-oct-2026): sin `monto_mxn` y `comision_mxn` aquí, un
+ * cambio en el cálculo de la parcialidad pasaba todos los specs.
+ */
 const comoSeCobro = (cobros: BalanceAvionCobroPayload[]) =>
   cobros.map((c) => ({
+    monto_mxn: c.monto_mxn,
+    comision_mxn: c.comision_mxn,
     metodo: c.metodo,
     cuenta: c.cuenta,
     metodo_etiqueta: c.metodo_etiqueta,
@@ -264,6 +295,8 @@ describe('Balance por avión — «cómo se cobró» cada parcialidad (6-oct-202
     const fila = filaDe(enviados.individual!.vuelos, V1);
     expect(comoSeCobro(fila.cobros)).toEqual([
       {
+        monto_mxn: 20000,
+        comision_mxn: 350,
         metodo: 'TRANSFERENCIA',
         cuenta: 'Scotiabank Pesos',
         metodo_etiqueta: 'Transferencia',
@@ -273,6 +306,8 @@ describe('Balance por avión — «cómo se cobró» cada parcialidad (6-oct-202
       {
         // Cuenta en blanco = sin cuenta; el embed en arreglo también se lee
         // y el nombre sale limpio.
+        monto_mxn: 10000,
+        comision_mxn: null,
         metodo: 'EFECTIVO',
         cuenta: null,
         metodo_etiqueta: 'Efectivo',
@@ -281,7 +316,9 @@ describe('Balance por avión — «cómo se cobró» cada parcialidad (6-oct-202
       },
       {
         // Usuario borrado (FK on delete set null ⇒ embed null): sin
-        // «Registró», jamás un nombre inventado.
+        // «Registró», jamás un nombre inventado. USD 500 × T.C. 20.
+        monto_mxn: 10000,
+        comision_mxn: null,
         metodo: 'TRANSFERENCIA',
         cuenta: 'HSBC Dólares',
         metodo_etiqueta: 'Transferencia',
@@ -289,6 +326,8 @@ describe('Balance por avión — «cómo se cobró» cada parcialidad (6-oct-202
         cobrado_con: 'Transferencia → HSBC Dólares',
       },
     ]);
+    // La comisión del libro = Σ de las comisiones de sus parcialidades.
+    expect(enviados.individual!.totales.comision_banco_mxn).toBe(350);
   });
 
   it('los campos nuevos van AL FINAL de cada cobro (aditivos)', async () => {
@@ -377,6 +416,9 @@ describe('Balance por avión — «cómo se cobró» cada parcialidad (6-oct-202
     const fila = filaDe(enviados.individual!.vuelos, V3);
     expect(fila.cobros).toHaveLength(1);
     const c = fila.cobros[0];
+    // La parte de ESTA fila del depósito de $36,000 (50 %).
+    expect(c.monto_mxn).toBe(18000);
+    expect(c.comision_mxn).toBeNull();
     expect(c.metodo).toBe(
       'TRANSFERENCIA · parte de esta fila (50 % de la venta del avión)',
     );
@@ -434,5 +476,186 @@ describe('Balance GENERAL — «cómo se cobró» en los dos libros y en el cons
       'Efectivo · Registró: Pablo Canales',
       'Transferencia → HSBC Dólares',
     ]);
+  });
+});
+
+/**
+ * El #503 multi-avión cobrado en DOS parcialidades, la primera con comisión
+ * bancaria: $20,000 (comisión $630) + $16,000 = $36,000 al 50 %. Con UNA sola
+ * parcialidad el ajuste del centavo (la última línea absorbe la diferencia
+ * contra `cobrado_real_mxn`) escondía un `monto_mxn` sin la parte de la fila.
+ */
+function mundoMultiDosCobros(): Record<string, Fila[]> {
+  const m = mundoCobros();
+  return {
+    ...m,
+    cobro_vuelo: [
+      ...m.cobro_vuelo.filter((c) => c.id !== 'c-4'),
+      cobro('c-4', V3, {
+        fecha: '2026-09-15T20:00:00+00:00',
+        monto: 20000,
+        tc_usd_mxn: 18,
+        comision_banco_monto: 630,
+        metodo_cobro: 'TRANSFERENCIA',
+        cuenta_destino: 'Scotiabank Pesos',
+        registrado_por: 'u-itzi',
+        registro: { nombre: 'Itzi' },
+      }),
+      cobro('c-5', V3, {
+        fecha: '2026-09-16T20:00:00+00:00',
+        monto: 16000,
+        tc_usd_mxn: 18,
+        metodo_cobro: 'EFECTIVO',
+        registrado_por: 'u-pablo',
+        registro: { nombre: 'Pablo Canales' },
+      }),
+    ],
+  };
+}
+
+/** Montos de las parcialidades de una fila: [monto_mxn, comision_mxn]. */
+const montos = (cobros: BalanceAvionCobroPayload[]) =>
+  cobros.map((c) => [c.monto_mxn, c.comision_mxn]);
+
+describe('Balance — los NÚMEROS de cada parcialidad (revisión 6-oct-2026)', () => {
+  it('multi-avión con dos parcialidades: cada una con la parte de ESTA fila, comisión incluida', async () => {
+    const { service, enviados } = armar(mundoMultiDosCobros());
+    await service.xlsx(AV, DESDE, HASTA);
+    const p = enviados.individual!;
+    expect(montos(filaDe(p.vuelos, V3).cobros)).toEqual([
+      [10000, 315],
+      [8000, null],
+    ]);
+    // 350 del #501 + 315 (la mitad de la comisión del #503).
+    expect(p.totales.comision_banco_mxn).toBe(665);
+  });
+
+  it('general: cada libro lleva su mitad y Σ entre libros == el depósito real', async () => {
+    const { service, enviados } = armar(mundoMultiDosCobros());
+    await service.xlsxGeneral(DESDE, HASTA);
+    const g = enviados.general as General;
+    const porLibro = Object.fromEntries(
+      g.aviones.map((p) => [p.matricula, montos(filaDe(p.vuelos, V3).cobros)]),
+    );
+    expect(porLibro).toEqual({
+      'XB-DOS': [
+        [10000, 315],
+        [8000, null],
+      ],
+      'XB-TST': [
+        [10000, 315],
+        [8000, null],
+      ],
+    });
+    const comisionPorLibro = Object.fromEntries(
+      g.aviones.map((p) => [p.matricula, p.totales.comision_banco_mxn]),
+    );
+    expect(comisionPorLibro).toEqual({ 'XB-DOS': 315, 'XB-TST': 665 });
+    // Comisión real del periodo: 350 + 630, sin contarla dos veces.
+    expect(g.consolidado.totales.comision_banco_mxn).toBe(980);
+  });
+});
+
+describe('Balance — el nombre de quien registró NUNCA tumba el libro (revisión 6-oct-2026)', () => {
+  /** Los cobros del mundo SIN el embed (lo que PostgREST devuelve sin él). */
+  function mundoSinEmbed(): Record<string, Fila[]> {
+    const m = mundoCobros();
+    return {
+      ...m,
+      cobro_vuelo: m.cobro_vuelo.map((c) => {
+        const { registro: _registro, ...resto } = c;
+        void _registro;
+        return resto;
+      }),
+      usuario: [
+        { id: 'u-itzi', nombre: 'Itzi' },
+        { id: 'u-pablo', nombre: ' Pablo   Canales ' },
+      ],
+    };
+  }
+
+  const PGRST200: ErrorPostgrest = {
+    code: 'PGRST200',
+    message:
+      "Could not find a relationship between 'cobro_vuelo' and 'usuario' in the schema cache",
+  };
+  const TIMEOUT: ErrorPostgrest = {
+    code: '57014',
+    message: 'canceling statement due to statement timeout',
+  };
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('embed sin resolver: repite SIN él, lee los nombres en lote y el payload es IDÉNTICO', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const normal = armar(mundoCobros());
+    await normal.service.xlsx(AV, DESDE, HASTA);
+    const respaldo = armar(mundoSinEmbed(), { errorEmbed: PGRST200 });
+    await respaldo.service.xlsx(AV, DESDE, HASTA);
+    expect(respaldo.selectsCobro).toHaveLength(2);
+    expect(respaldo.selectsCobro[0]).toContain(
+      'registro:usuario!registrado_por(nombre)',
+    );
+    expect(respaldo.selectsCobro[1]).not.toContain('registro:');
+    expect(respaldo.selectsCobro[1]).toContain('registrado_por');
+    expect(sinSello(respaldo.enviados.individual!)).toEqual(
+      sinSello(normal.enviados.individual!),
+    );
+    expect(
+      filaDe(respaldo.enviados.individual!.vuelos, V1).cobros.map(
+        (c) => c.cobrado_con,
+      ),
+    ).toEqual([
+      'Transferencia → Scotiabank Pesos · Registró: Itzi',
+      'Efectivo · Registró: Pablo Canales',
+      'Transferencia → HSBC Dólares',
+    ]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('no resolvió el embed'),
+    );
+  });
+
+  it('embed sin resolver y sin nombres que resuelvan: los números salen igual y sin «Registró»', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const mundo = mundoSinEmbed();
+    delete mundo.usuario;
+    const { service, enviados } = armar(mundo, { errorEmbed: PGRST200 });
+    await service.xlsx(AV, DESDE, HASTA);
+    const fila = filaDe(enviados.individual!.vuelos, V1);
+    expect(montos(fila.cobros)).toEqual([
+      [20000, 350],
+      [10000, null],
+      [10000, null],
+    ]);
+    expect(fila.cobros.map((c) => c.registro)).toEqual([null, null, null]);
+    expect(fila.cobros.map((c) => c.cobrado_con)).toEqual([
+      'Transferencia → Scotiabank Pesos',
+      'Efectivo',
+      'Transferencia → HSBC Dólares',
+    ]);
+  });
+
+  it('cualquier OTRO error de los cobros tumba el libro como siempre (sin reintentar)', async () => {
+    const { service, selectsCobro } = armar(mundoCobros(), {
+      errorEmbed: TIMEOUT,
+    });
+    await expect(service.xlsx(AV, DESDE, HASTA)).rejects.toThrow(
+      'Balance XB-TST: fallo al leer cobros: canceling statement due to statement timeout',
+    );
+    expect(selectsCobro).toHaveLength(1);
+  });
+
+  it('si la consulta SIN el embed también falla, el libro se cae con ESE error', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { service, selectsCobro } = armar(mundoSinEmbed(), {
+      errorEmbed: PGRST200,
+      errorSinEmbed: TIMEOUT,
+    });
+    await expect(service.xlsx(AV, DESDE, HASTA)).rejects.toThrow(
+      'fallo al leer cobros: canceling statement due to statement timeout',
+    );
+    expect(selectsCobro).toHaveLength(2);
   });
 });

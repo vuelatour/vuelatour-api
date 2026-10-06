@@ -1,6 +1,7 @@
 import {
   adjuntarNombreRegistrado,
   conNombreRegistrado,
+  esEmbedNoResuelto,
   fetchNombresUsuarios,
   idsRegistradoPor,
   USUARIO_NOMBRE_COLS,
@@ -193,5 +194,52 @@ describe('registrado-por.util (fuente única de registrado_por_nombre)', () => {
       { id: 'c1', registrado_por: 'u-x' },
     ]);
     expect(salida.registrado_por_nombre).toBe('Ana María');
+  });
+});
+
+describe('esEmbedNoResuelto (respaldo del embed del nombre, 6-oct-2026)', () => {
+  it('PGRST200 / PGRST201 de PostgREST ⇒ sí', () => {
+    expect(
+      esEmbedNoResuelto({
+        code: 'PGRST200',
+        message:
+          "Could not find a relationship between 'cobro_vuelo' and 'usuario' in the schema cache",
+      }),
+    ).toBe(true);
+    expect(
+      esEmbedNoResuelto({
+        code: 'PGRST201',
+        message:
+          "Could not embed because more than one relationship was found for 'cobro_vuelo' and 'usuario'",
+      }),
+    ).toBe(true);
+  });
+
+  it('sin code, por el texto de PostgREST ⇒ sí', () => {
+    expect(
+      esEmbedNoResuelto({
+        message:
+          "Could not find a relationship between 'cobro_vuelo' and 'usuario' in the schema cache",
+      }),
+    ).toBe(true);
+  });
+
+  it('cualquier otro error (timeout, columna, red) o nada ⇒ no', () => {
+    expect(
+      esEmbedNoResuelto({
+        code: '57014',
+        message: 'canceling statement due to statement timeout',
+      }),
+    ).toBe(false);
+    expect(
+      esEmbedNoResuelto({
+        code: '42703',
+        message: 'column cobro_vuelo.registrado_por does not exist',
+      }),
+    ).toBe(false);
+    expect(esEmbedNoResuelto({ message: 'fetch failed' })).toBe(false);
+    expect(esEmbedNoResuelto(null)).toBe(false);
+    expect(esEmbedNoResuelto(undefined)).toBe(false);
+    expect(esEmbedNoResuelto('PGRST200')).toBe(false);
   });
 });

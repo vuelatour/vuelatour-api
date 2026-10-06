@@ -1,6 +1,7 @@
 import {
   BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
@@ -28,7 +29,11 @@ import {
 import { etiquetaMedioPago } from '../../common/medio-pago.util';
 import { etiquetaMetodoCobro } from '../../common/metodo-cobro.util';
 import { etiquetaCobradoCon } from '../../common/cobro-etiqueta.util';
-import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
+import {
+  esEmbedNoResuelto,
+  fetchNombresUsuarios,
+  nombreDeRelacionUsuario,
+} from '../../common/registrado-por.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import { pendienteCobro } from '../../common/semaforo-cobro.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
@@ -243,6 +248,24 @@ interface CobroRow {
    * arreglo de uno o null. Se lee SOLO con `nombreDeRelacionUsuario`.
    */
   registro?: unknown;
+}
+
+/** Columnas de `cobro_vuelo` que lee el libro (el dinero de cada parcialidad). */
+const COBRO_LIBRO_COLS =
+  'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_monto, comision_banco_pct, cuenta_destino, registrado_por';
+
+/**
+ * Nombre de quien REGISTRÓ el cobro, en la MISMA consulta (6-oct-2026, API
+ * 0.0.60): embed por la FK `cobro_vuelo_registrado_por_fkey`. `cobro_vuelo`
+ * tiene otras dos FK a `usuario` (created_by, updated_by), de ahí el hint
+ * `!registrado_por`. Alimenta `cobrado_con` de cada parcialidad.
+ */
+const COBRO_LIBRO_EMBED_REGISTRO = 'registro:usuario!registrado_por(nombre)';
+
+/** Resultado de la lectura de cobros del libro (forma de PostgREST). */
+interface LecturaCobrosLibro {
+  data: unknown[] | null;
+  error: { message: string } | null;
 }
 
 interface GastoRow {
@@ -479,6 +502,8 @@ function ivaPctDe(v: VueloRow): number {
  */
 @Injectable()
 export class AircraftBalanceService {
+  private readonly logger = new Logger(AircraftBalanceService.name);
+
   constructor(
     private readonly supabase: SupabaseService,
     private readonly pyservices: PyservicesService,
@@ -1170,6 +1195,59 @@ export class AircraftBalanceService {
   }
 
   /**
+   * Cobros de los vuelos del libro con el nombre de quien los REGISTRÓ
+   * (6-oct-2026, API 0.0.60; revisión del mismo día).
+   *
+   * Camino normal: UNA consulta con el embed `COBRO_LIBRO_EMBED_REGISTRO`.
+   * Si PostgREST NO resuelve ese embed (`esEmbedNoResuelto`: caché de esquema
+   * sin la relación, FK renombrada…), el libro NO se cae por un nombre: se
+   * repite la consulta SIN el embed y los nombres se leen en lote con
+   * `fetchNombresUsuarios` (nunca lanza; si falla, `registro` sale null y
+   * `cobrado_con` sin «Registró»). Los números son los MISMOS en los dos
+   * caminos (spec). Cualquier OTRO error se devuelve tal cual y tumba el libro
+   * como siempre: un balance sin cobros sería una mentira numérica.
+   */
+  private async leerCobrosDelLibro(
+    vueloIds: ReadonlyArray<string>,
+    matricula: string,
+  ): Promise<LecturaCobrosLibro> {
+    const sb = this.supabase.service;
+    const consulta = async (cols: string): Promise<LecturaCobrosLibro> => {
+      const { data, error } = await sb
+        .from('cobro_vuelo')
+        .select(cols)
+        .in('vuelo_id', [...vueloIds])
+        .order('fecha_cobro', { ascending: true });
+      return { data: data ?? null, error };
+    };
+    const conNombre = await consulta(
+      `${COBRO_LIBRO_COLS}, ${COBRO_LIBRO_EMBED_REGISTRO}`,
+    );
+    if (!conNombre.error || !esEmbedNoResuelto(conNombre.error)) {
+      return conNombre;
+    }
+    this.logger.warn(
+      `Balance ${matricula}: PostgREST no resolvió el embed de quién registró los cobros (${conNombre.error.message}); se leen los cobros sin él y los nombres en lote.`,
+    );
+    const sinNombre = await consulta(COBRO_LIBRO_COLS);
+    if (sinNombre.error) return sinNombre;
+    const filas = (sinNombre.data ?? []) as CobroRow[];
+    const nombres = await fetchNombresUsuarios(
+      sb,
+      filas.map((c) => c.registrado_por),
+    );
+    return {
+      data: filas.map((c) => {
+        const nombre = c.registrado_por ? nombres.get(c.registrado_por) : null;
+        // Misma forma que el embed (objeto `{ nombre }` o null): el armador
+        // la lee con `nombreDeRelacionUsuario`, sin saber por qué camino vino.
+        return { ...c, registro: nombre ? { nombre } : null };
+      }),
+      error: null,
+    };
+  }
+
+  /**
    * Etiqueta «FACTURA VUELATOUR» de cada vuelo (30-sep-2026) sobre la FUENTE
    * ÚNICA `etiquetasFacturaDeVuelos`, con MEMO POR VUELO compartido entre
    * los libros del general y la pestaña «Otros movimientos» (mismo patrón
@@ -1407,19 +1485,12 @@ export class AircraftBalanceService {
             // localmente (comportamiento previo intacto).
             .order('orden', { ascending: true })
         : Promise.resolve(vacio),
+      // Cobros con el nombre de quien registró (embed en la MISMA
+      // consulta; si PostgREST no resuelve el embed, `leerCobrosDelLibro`
+      // repite SIN él y resuelve los nombres en lote: un nombre jamás tumba
+      // el libro).
       vueloIds.length
-        ? sb
-            .from('cobro_vuelo')
-            .select(
-              // `registro` (6-oct-2026, API 0.0.60): nombre de quien
-              // registró el cobro, en la MISMA consulta (embed por la FK
-              // `cobro_vuelo_registrado_por_fkey`; cobro_vuelo tiene otras
-              // dos FK a usuario, de ahí el `!registrado_por`). Alimenta
-              // `cobrado_con` de cada parcialidad.
-              'vuelo_id, monto, moneda, tc_usd_mxn, metodo_cobro, fecha_cobro, comision_banco_monto, comision_banco_pct, cuenta_destino, registrado_por, registro:usuario!registrado_por(nombre)',
-            )
-            .in('vuelo_id', vueloIds)
-            .order('fecha_cobro', { ascending: true })
+        ? this.leerCobrosDelLibro(vueloIds, matricula)
         : Promise.resolve(vacio),
       vueloIds.length
         ? sb

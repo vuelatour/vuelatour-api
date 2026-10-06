@@ -5136,12 +5136,25 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   libro (`registro:usuario!registrado_por(nombre)`; `cobro_vuelo` tiene
   otras dos FK a `usuario`, de ahí el hint) y se lee SOLO con
   `nombreDeRelacionUsuario` — ninguna consulta nueva y ningún número se
-  mueve (spec). pyservices pinta `cobrado_con` como NOTA de la celda «COBRO
-  n» (sin columnas nuevas) y tolera su ausencia. Spec:
+  mueve (spec). **Un nombre jamás tumba el libro** (revisión 6-oct-2026): la
+  lectura vive en `leerCobrosDelLibro`; si PostgREST NO resuelve el embed
+  (`registrado-por.util#esEmbedNoResuelto`: PGRST200/PGRST201 — caché de
+  esquema sin la relación, FK renombrada), repite la consulta SIN él y lee
+  los nombres en lote con `fetchNombresUsuarios` (nunca lanza; sin nombre ⇒
+  `registro` null y `cobrado_con` sin «Registró»), con un `warn`. Cualquier
+  OTRO error de los cobros tumba el libro como siempre (sin reintentar).
+  pyservices pinta `cobrado_con` como NOTA de la celda «COBRO n» (sin
+  columnas nuevas) y tolera su ausencia. Spec:
   `aircraft-balance.service.cobrado-con.spec.ts` (completo, sin cuenta, sin
   registro, embed en arreglo, campos al final, fixture sin datos ⇒ null,
   select con el embed, payload idéntico con y sin registro, multi-avión en el
-  individual, en los dos libros del general y en el consolidado).
+  individual, en los dos libros del general y en el consolidado; los NÚMEROS
+  de cada parcialidad —`monto_mxn`, `comision_mxn` y
+  `totales.comision_banco_mxn`—, incluido un multi-avión con DOS
+  parcialidades y comisión: con una sola, el ajuste del centavo de la última
+  línea escondía un monto sin la parte de la fila; y el respaldo del embed:
+  payload IDÉNTICO por los dos caminos, sin nombres que resuelvan, otro error
+  que sí tumba y respaldo que también falla).
 
 - **Facturas emitidas: la serie repetida al frente del folio no cuenta dos
   veces (5-oct-2026, API 0.0.54).** La A-0411 quedó guardada con serie «A» y
