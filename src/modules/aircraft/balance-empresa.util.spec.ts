@@ -172,6 +172,21 @@ describe('movimientosConTc — empareja filas y T.C. por índice', () => {
     ]);
   });
 
+  it('pega también la parte por cobrar de cada fila; desalineada ⇒ lanza', () => {
+    const fila = {
+      concepto_ingreso: 'TUA CUN',
+      ingreso_mxn: 2000,
+      concepto_egreso: null,
+      egreso_mxn: null,
+    };
+    expect(movimientosConTc([fila], [20], 'filas', [12.5])).toEqual([
+      { ...fila, tc: 20, por_cobrar_usd: 12.5 },
+    ]);
+    expect(() => movimientosConTc([fila], [20], 'filas', [])).toThrow(
+      'Bloque VUELATOUR: «otros movimientos» (filas) trae 1 fila(s) y 0 monto(s) por cobrar',
+    );
+  });
+
   it('desalineadas ⇒ lanza (jamás se adivina el emparejado)', () => {
     expect(() =>
       movimientosConTc(
@@ -308,6 +323,60 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     expect(tiendaSinTc.tienda_utilidad_usd).toBeNull();
     expect(tiendaSinTc.tc_usado).toBeNull();
     expect(tiendaSinTc.resultado_usd).toBeNull();
+  });
+
+  it('la nota NOMBRA el avión sin utilidad cobrada que vacía la participación', () => {
+    const b = armarBalanceEmpresa({
+      ...base,
+      participaciones: [
+        ...base.participaciones,
+        {
+          matricula: 'XB-ANU',
+          socio: EMPRESA,
+          porcentaje: 30,
+          monto_usd: null,
+        },
+      ],
+    });
+    expect(b.participacion_usd).toBeNull();
+    expect(b.nota).toContain('XB-ANU sin utilidad cobrada');
+    expect(b.nota).not.toContain('N4142R sin utilidad');
+  });
+
+  it('por cobrar de VuelaTour: INFORMATIVO (Σ de las filas, en la nota) y NO se resta', () => {
+    const b = armarBalanceEmpresa({
+      ...base,
+      movimientos: [
+        mov({
+          ingreso_mxn: 4600,
+          egreso_mxn: 3450,
+          tc: 20,
+          por_cobrar_usd: 23.72,
+        }),
+        mov({ ingreso_mxn: 900, tc: 18, por_cobrar_usd: 50 }),
+        mov({ egreso_mxn: 80, tc: 25, por_cobrar_usd: 0 }),
+      ],
+    });
+    expect(b.ingresos_propios_usd).toBe(280); // 230 + 50: lo cotizado
+    expect(b.ingresos_por_cobrar_usd).toBe(73.72);
+    expect(b.vuelos_por_cobrar).toBe(2);
+    // 1790.25 + 280 − 175.7 − 36.84 + 100: el por cobrar no resta.
+    expect(b.resultado_usd).toBe(1957.71);
+    expect(b.nota).toContain(
+      'De esos ingresos, $73.72 USD de 2 vuelo(s) aún están por cobrar.',
+    );
+    expect(b.nota).toContain('Ingresos = lo COTIZADO');
+    // Sin por cobrar, ni el número ni la frase.
+    const sin = armarBalanceEmpresa(base);
+    expect(sin.ingresos_por_cobrar_usd).toBe(0);
+    expect(sin.vuelos_por_cobrar).toBe(0);
+    expect(sin.nota).not.toContain('por cobrar');
+  });
+
+  it('la nota de la tienda no lleva doble punto', () => {
+    const b = armarBalanceEmpresa(base);
+    expect(b.nota).toContain('÷ el mismo T.C. promedio.');
+    expect(b.nota).not.toContain('T.C..');
   });
 
   it('avisa la utilidad USD legado de la tienda que no entra', () => {

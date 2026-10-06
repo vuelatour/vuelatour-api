@@ -4392,7 +4392,7 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vuelo = el K de venta del vuelo (sin K, el promedio de la pestaña);
       suelta USD = el T.C. que la llevó a pesos (`tc_gasto` / promedio /
       el del ingreso); suelta en pesos = T.C. oficial de su día
-      (`tcOficialDelDia`, mismo `memoTc`; respaldo, el promedio).
+      (`tcOficialDeDias`, mismo `memoTc`; respaldo, el promedio).
       Desalineadas ⇒ se LANZA.
     - `otros_gastos_empresa_usd` = EXACTAMENTE `gastos_empresa.usd` (la
       celda TOTAL USD de «otros gastos») y `tc_usado` = `tc_promedio` =
@@ -4412,6 +4412,31 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       día y su respaldo, gasto USD con su T.C., sin inventario / con
       inventario, sin socio-empresa, fila sin T.C. ⇒ vacío, payload de la
       pestaña idéntico). Deploy: pyservices (tolera `empresa` ausente) → API.
+    - **Revisión (6-oct-2026, mismo 0.0.59):**
+      - **Avión SIN vuelos ⇒ sus hojas con el T.C. OFICIAL del cierre.** Sin
+        un vuelo no hay Z: las hojas con pesos salían sin USD y vaciaban la
+        utilidad, el reparto y TODO el bloque VUELATOUR (XB-ANU, oct-2026:
+        0 vuelos, empresa al 30 %, PERMISO $2,549 + $2,969). Hoy
+        `buildPayload` convierte esas hojas con el oficial del último día
+        del periodo (u hoy si no ha terminado), lo pone en
+        `totales.tc_promedio` y lo dice en un pendiente; la utilidad es la
+        pérdida (−gastos) y el reparto la refleja. SOLO con `vuelos = 0`
+        (con un vuelo sin T.C. las hojas siguen vacías: la venta no se
+        omite). El T.C. de la FLOTA promedia solo libros con vuelos
+        (idéntico al de antes). Sin oficial, null como siempre y la `nota`
+        NOMBRA el avión que vacía la participación.
+      - **Base de «otros movimientos» = lo COTIZADO** de los vuelos no
+        cancelados (COTIZADO/RESERVA incluidos), no lo cobrado — opción
+        «etiqueta» de la revisión, alineada con pyservices. La parte de
+        VuelaTour AÚN POR COBRAR viaja INFORMATIVA
+        (`ingresos_por_cobrar_usd`, `vuelos_por_cobrar`, aditivos; NO se
+        resta): `cobrosEnUsd` con el K del vuelo, `cobradoParteVuelatour`
+        y la tolerancia de `pendienteCobro`; la `nota` la dice con monto.
+        Si el cliente pide el bloque «sobre lo cobrado», se resta ESE
+        número de `ingresos_propios_usd` (una línea en el util).
+      - **T.C. oficial: puerta única `tcOficialDeDias`** (memo por día +
+        máx. 5 consultas a la vez) para el K de respaldo, las sueltas en
+        pesos y el respaldo de las hojas; el atajo sin límite se quitó.
 
 ## Convenciones NestJS
 

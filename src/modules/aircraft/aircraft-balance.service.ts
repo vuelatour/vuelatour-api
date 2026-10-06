@@ -27,6 +27,7 @@ import {
 } from '../../common/pago-vendedor.util';
 import { etiquetaMedioPago } from '../../common/medio-pago.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { pendienteCobro } from '../../common/semaforo-cobro.util';
 import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
@@ -38,6 +39,7 @@ import {
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   cobradoParteAvion,
+  cobradoParteVuelatour,
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
   sobrecobroUsd,
@@ -327,6 +329,11 @@ interface SocioRow {
 interface TcFilasOtrosMovimientos {
   filas: Array<number | null>;
   sueltas: Array<number | null>;
+  /**
+   * Parte de VuelaTour AÚN POR COBRAR del vuelo de cada fila (USD), alineada
+   * con `filas` (revisión 6-oct-2026; informativa, no se resta).
+   */
+  porCobrarVtUsd: number[];
 }
 
 /** Número finito o null (null se PROPAGA: nunca un 0 falso). */
@@ -706,8 +713,16 @@ export class AircraftBalanceService {
     // criterio que la nota al pie del libro individual).
     const sumT = (f: (t: BalanceAvionPayload['totales']) => number | null) =>
       round2(libros.reduce((s, p) => s + (f(p.totales) ?? 0), 0));
-    const avgT = (f: (t: BalanceAvionPayload['totales']) => number | null) => {
+    // `soloConVuelos` (revisión 6-oct-2026): el T.C. promedio de la FLOTA es
+    // el de los T.C. de costos de los VUELOS — un libro sin vuelos ahora
+    // trae en `tc_promedio` el oficial de respaldo de sus hojas y NO entra
+    // (antes valía null y tampoco entraba: el promedio es idéntico).
+    const avgT = (
+      f: (t: BalanceAvionPayload['totales']) => number | null,
+      soloConVuelos = false,
+    ) => {
       const vals = libros
+        .filter((p) => !soloConVuelos || p.vuelos.length > 0)
         .map((p) => f(p.totales))
         .filter((x): x is number => x != null);
       return vals.length
@@ -738,7 +753,7 @@ export class AircraftBalanceService {
       cobrado_mxn: sumT((t) => t.cobrado_mxn),
       por_cobrar_mxn: sumT((t) => t.por_cobrar_mxn),
       por_cobrar_usd: sumT((t) => t.por_cobrar_usd),
-      tc_promedio: avgT((t) => t.tc_promedio),
+      tc_promedio: avgT((t) => t.tc_promedio, true),
       costo_hr_prom_usd: avgT((t) => t.costo_hr_prom_usd),
       otros_ingresos_usd: sumT((t) => t.otros_ingresos_usd),
       // Campos 28-ago (total del cliente, cobrado real, TUA nota, comisión
@@ -810,7 +825,11 @@ export class AircraftBalanceService {
     // en la hoja "otros gastos" del general, antes "gastos VuelaTour" —
     // misma lectura, el dinero UNA vez). `tcFilasOM` (6-oct-2026) recoge el
     // T.C. de cada fila para el bloque «VUELATOUR (empresa)».
-    const tcFilasOM: TcFilasOtrosMovimientos = { filas: [], sueltas: [] };
+    const tcFilasOM: TcFilasOtrosMovimientos = {
+      filas: [],
+      sueltas: [],
+      porCobrarVtUsd: [],
+    };
     const otrosMovimientos = await this.buildOtrosMovimientos(
       d,
       h,
@@ -920,7 +939,12 @@ export class AircraftBalanceService {
     const empresa = armarBalanceEmpresa({
       participaciones: participacionesEmpresa(librosAviones),
       movimientos: [
-        ...movimientosConTc(otrosMovimientos.filas, tcFilasOM.filas, 'filas'),
+        ...movimientosConTc(
+          otrosMovimientos.filas,
+          tcFilasOM.filas,
+          'filas',
+          tcFilasOM.porCobrarVtUsd,
+        ),
         ...movimientosConTc(
           otrosMovimientos.filas_sueltas,
           tcFilasOM.sueltas,
@@ -1057,13 +1081,40 @@ export class AircraftBalanceService {
       const dia = diaCancun(str(v.fecha_solicitud) ?? str(v.fecha_vuelo));
       if (dia) diaPorVuelo.set(v.id, dia);
     }
-    // Verificación 28-ago: los días se resolvían EN SERIE (await dentro del
-    // for) — el primer balance de un mes sin filas en tipo_cambio_oficial
-    // pedía ~25 días al BCE uno tras otro. Ahora TODAS las promesas por día
-    // se crean primero (memo compartido entre libros: un día = una promesa)
-    // y se esperan después, con concurrencia acotada (~5 a la vez) para no
-    // saturar a los proveedores. `oficialDetallePara` nunca lanza; el catch
-    // es defensa (un día sin dato → sin respaldo, jamás rompe el libro).
+    const porDia = await this.tcOficialDeDias(diaPorVuelo.values(), memoPorDia);
+    for (const [vueloId, dia] of diaPorVuelo) {
+      const det = porDia.get(dia);
+      if (det != null) out.set(vueloId, det);
+    }
+    return out;
+  }
+
+  /**
+   * T.C. OFICIAL de varios DÍAS (YYYY-MM-DD) — la ÚNICA puerta del balance
+   * a `TipoCambioService.oficialDetallePara`. La usan el respaldo de K por
+   * vuelo (`tcOficialPorVuelos`), las sueltas en pesos de «otros
+   * movimientos» (bloque VUELATOUR) y el T.C. de respaldo de las hojas de un
+   * avión SIN vuelos. Devuelve el detalle de cada día CON dato (un día sin
+   * dato no viene en el mapa). Nunca lanza.
+   *
+   * Verificación 28-ago: los días se resolvían EN SERIE (await dentro del
+   * for) — el primer balance de un mes sin filas en tipo_cambio_oficial
+   * pedía ~25 días al BCE uno tras otro. Ahora TODAS las promesas por día
+   * se crean primero (memo compartido entre libros: un día = una promesa)
+   * y se esperan después, con concurrencia acotada (~5 a la vez) para no
+   * saturar a los proveedores. Revisión 6-oct-2026: el T.C. de las sueltas
+   * del bloque VUELATOUR pasaba por un atajo SIN ese límite (todas las
+   * descargas a la vez); hoy todo camino entra por aquí. `oficialDetallePara`
+   * nunca lanza; el catch es defensa (un día sin dato → sin respaldo, jamás
+   * rompe el libro).
+   */
+  private async tcOficialDeDias(
+    dias: Iterable<string>,
+    memoPorDia: Map<string, Promise<TipoCambioDetalle | null>>,
+  ): Promise<Map<string, TipoCambioDetalle>> {
+    const unicos = [...new Set(dias)].filter((d) =>
+      /^\d{4}-\d{2}-\d{2}$/.test(d),
+    );
     const MAX_CONCURRENTES = 5;
     let activos = 0;
     const cola: Array<() => void> = [];
@@ -1084,7 +1135,7 @@ export class AircraftBalanceService {
       const siguiente = cola.shift();
       if (siguiente) siguiente();
     };
-    for (const dia of new Set(diaPorVuelo.values())) {
+    for (const dia of unicos) {
       if (memoPorDia.has(dia)) continue;
       memoPorDia.set(
         dia,
@@ -1100,34 +1151,12 @@ export class AircraftBalanceService {
         })(),
       );
     }
-    for (const [vueloId, dia] of diaPorVuelo) {
+    const out = new Map<string, TipoCambioDetalle>();
+    for (const dia of unicos) {
       const det = await memoPorDia.get(dia);
-      if (det != null && det.tc > 0) out.set(vueloId, det);
+      if (det != null && det.tc > 0) out.set(dia, det);
     }
     return out;
-  }
-
-  /**
-   * T.C. OFICIAL de UN día (YYYY-MM-DD) con el MISMO memo por día del
-   * general (`memoTc`): un día ya consultado para un vuelo no se vuelve a
-   * pedir. Lo usa el bloque «VUELATOUR (empresa)» para regresar a USD las
-   * filas sueltas nativas en pesos. Nunca lanza: sin dato ⇒ null.
-   */
-  private async tcOficialDelDia(
-    dia: string | null,
-    memoPorDia: Map<string, Promise<TipoCambioDetalle | null>>,
-  ): Promise<number | null> {
-    const d = typeof dia === 'string' ? dia.slice(0, 10) : '';
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
-    let p = memoPorDia.get(d);
-    if (!p) {
-      p = Promise.resolve()
-        .then(() => this.tipoCambio.oficialDetallePara(d))
-        .catch(() => null);
-      memoPorDia.set(d, p);
-    }
-    const det = await p;
-    return det != null && det.tc > 0 ? det.tc : null;
   }
 
   /**
@@ -3378,54 +3407,9 @@ export class AircraftBalanceService {
         `${etiquetaAvion}: ${tuasSinVuelo.length} gasto(s) TUAS sin vuelo por ${montos} — no restan en ninguna hoja (regla 28-ago: el TUA es solo nota); viven en "Otros movimientos" del Balance general (pestaña que lista vuelos de TODOS los estados) — liga cada gasto a su vuelo si lo tiene`,
       );
     }
-    // Nombre de PESTAÑA con el que los pendientes citan la hoja (2-sep-2026):
-    // el libro individual pinta `gastos_indirectos` y `otros_gastos` en UNA
-    // sola pestaña "Gastos Indirectos" (antes 'gastos indirectos de avión' y
-    // 'otros gastos'). En el general las filas de `otros_gastos` viven en
-    // "repartidos a aviones"; el prefijo "Avión X:" del pendiente ubica.
-    const hojaIndirectos = this.buildHoja(
-      filasIndirectos,
-      tcPromedio,
-      horasVoladas,
-      'Gastos Indirectos',
-      pendientes,
-    );
-    // Hoja "refacciones": mismo ledger + el id del movimiento de cardex y
-    // el `tc_gasto` de SU gasto por fila (mismo orden estable por fecha que
-    // buildHoja — patrón de los litros de combustible): el GENERAL convierte
-    // el costo de la salida con el MISMO T.C. con que la fila convirtió la
-    // venta (25-sep-2026).
-    const hojaRefaccionesBase = this.buildHoja(
-      filasRefacciones,
-      tcPromedio,
-      horasVoladas,
-      'refacciones',
-      pendientes,
-    );
-    const hojaRefacciones = {
-      ...hojaRefaccionesBase,
-      filas: adjuntarLigasRefacciones(
-        hojaRefaccionesBase.filas,
-        filasRefacciones,
-      ),
-    };
-    // Misma pestaña que `gastos_indirectos` en el individual (2-sep-2026);
-    // la lista viaja aparte para "repartidos a aviones" del general.
-    const hojaOtros = this.buildHoja(
-      filasOtros,
-      tcPromedio,
-      horasVoladas,
-      'Gastos Indirectos',
-      pendientes,
-    );
-    const hojaPermisos = this.buildHoja(
-      filasPermisos,
-      tcPromedio,
-      horasVoladas,
-      'permisos',
-      pendientes,
-    );
     // ===== Hoja COMBUSTIBLE (26-ago-2026): el gas del avión en el MES =====
+    // (Sus cargas se resuelven aquí, ANTES de construir las hojas: el T.C.
+    // de respaldo de un avión sin vuelos, abajo, mira las cinco listas.)
     // Eje fecha_gasto, con o sin vuelo. Litros y $/L viven aquí, ya no por
     // vuelo. El avión de cada carga es el de la FUENTE ÚNICA `avionDelGasto`
     // (verificación 28-ago; misma regla que la fila del vuelo, el reparto a
@@ -3453,9 +3437,99 @@ export class AircraftBalanceService {
             : null;
           return avionDelGasto(g, mapa, vueloAvion) === aircraftId;
         });
+
+    // ===== T.C. de RESPALDO de las HOJAS de un avión SIN vuelos (revisión
+    // 6-oct-2026) =====
+    // Sin un solo vuelo en el periodo no hay T.C. de costos (Z): las hojas
+    // con pesos salían sin USD y la utilidad, el reparto a socios y —en el
+    // general— el bloque «VUELATOUR (empresa)» completo quedaban VACÍOS
+    // aunque el dinero fuera un permiso de $2,549 (XB-ANU, oct-2026: 0
+    // vuelos, la empresa socia al 30 %). Ahora sus hojas se convierten con
+    // el T.C. OFICIAL de referencia del cierre del periodo (su último día,
+    // u HOY si aún no termina) por la puerta única `tcOficialDeDias` (mismo
+    // memo del general: un día = una consulta), y la utilidad es la pérdida
+    // de esos gastos (número, no vacío). Viaja en `totales.tc_promedio` (la
+    // celda TC PROMEDIO de las hojas lo muestra) y un pendiente lo dice. Con
+    // vuelos NADA cambia, y el T.C. de la FLOTA del general ignora este
+    // respaldo (promedia solo libros con vuelos — idéntico al de antes).
+    // Sin dato oficial: null, como siempre (el pendiente de abajo lo grita).
+    let tcHojas = tcPromedio;
+    if (
+      tcPromedio == null &&
+      vuelos.length === 0 &&
+      [
+        filasIndirectos,
+        filasRefacciones,
+        filasOtros,
+        filasPermisos,
+        gastosGas,
+      ].some((l) => l.length > 0)
+    ) {
+      const hoy = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Cancun',
+      }).format(new Date());
+      const diaCierre = hasta < hoy ? hasta : hoy;
+      const det = (await this.tcOficialDeDias([diaCierre], memoTc)).get(
+        diaCierre,
+      );
+      if (det != null) {
+        tcHojas = det.tc;
+        totales.tc_promedio = round2(det.tc);
+        pendientes.push(
+          `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es la pérdida de esos gastos`,
+        );
+      }
+    }
+    // Nombre de PESTAÑA con el que los pendientes citan la hoja (2-sep-2026):
+    // el libro individual pinta `gastos_indirectos` y `otros_gastos` en UNA
+    // sola pestaña "Gastos Indirectos" (antes 'gastos indirectos de avión' y
+    // 'otros gastos'). En el general las filas de `otros_gastos` viven en
+    // "repartidos a aviones"; el prefijo "Avión X:" del pendiente ubica.
+    const hojaIndirectos = this.buildHoja(
+      filasIndirectos,
+      tcHojas,
+      horasVoladas,
+      'Gastos Indirectos',
+      pendientes,
+    );
+    // Hoja "refacciones": mismo ledger + el id del movimiento de cardex y
+    // el `tc_gasto` de SU gasto por fila (mismo orden estable por fecha que
+    // buildHoja — patrón de los litros de combustible): el GENERAL convierte
+    // el costo de la salida con el MISMO T.C. con que la fila convirtió la
+    // venta (25-sep-2026).
+    const hojaRefaccionesBase = this.buildHoja(
+      filasRefacciones,
+      tcHojas,
+      horasVoladas,
+      'refacciones',
+      pendientes,
+    );
+    const hojaRefacciones = {
+      ...hojaRefaccionesBase,
+      filas: adjuntarLigasRefacciones(
+        hojaRefaccionesBase.filas,
+        filasRefacciones,
+      ),
+    };
+    // Misma pestaña que `gastos_indirectos` en el individual (2-sep-2026);
+    // la lista viaja aparte para "repartidos a aviones" del general.
+    const hojaOtros = this.buildHoja(
+      filasOtros,
+      tcHojas,
+      horasVoladas,
+      'Gastos Indirectos',
+      pendientes,
+    );
+    const hojaPermisos = this.buildHoja(
+      filasPermisos,
+      tcHojas,
+      horasVoladas,
+      'permisos',
+      pendientes,
+    );
     const hojaCombustibleBase = this.buildHoja(
       gastosGas,
-      tcPromedio,
+      tcHojas,
       horasVoladas,
       'combustible',
       pendientes,
@@ -4406,6 +4480,9 @@ export class AircraftBalanceService {
     // MISMO K de venta con que la fila llegó a pesos; un vuelo sin K usa el
     // T.C. promedio de esta pestaña (el de sus gastos USD sin T.C. propio).
     const tcPorFila: Array<number | null> = [];
+    // Parte de VuelaTour AÚN POR COBRAR de cada fila por vuelo (bloque
+    // VUELATOUR, revisión 6-oct-2026), alineada con `tcPorFila`.
+    const porCobrarVtPorFila: number[] = [];
     // ¿Algún vuelo del periodo tiene pago REAL al vendedor? (invariante 31):
     // solo entonces la hoja lleva `hay_pago_vendedor_real` (las leyendas de
     // pyservices cambian solo con ella ⇒ sin pagos reales, byte-idéntico).
@@ -5039,7 +5116,46 @@ export class AircraftBalanceService {
       } else if (filasVuelo.length === 1) {
         filas.push(filasVuelo[0]);
       }
-      if (filasVuelo.length > 0) tcPorFila.push(tc ?? tcPromedio);
+      if (filasVuelo.length > 0) {
+        tcPorFila.push(tc ?? tcPromedio);
+        // Parte de VuelaTour AÚN POR COBRAR (revisión 6-oct-2026): el
+        // ingreso de esta pestaña es lo COTIZADO (todos los estados no
+        // cancelados); el bloque VUELATOUR lo dice con este monto. MISMA
+        // lectura que el por cobrar del avión — `cobrosEnUsd` con el K del
+        // vuelo y `cobradoParteVuelatour` (el complemento de
+        // `cobradoParteAvion`) — y la tolerancia de redondeo de
+        // `pendienteCobro` (≤ 1 USD no es deuda). Solo se calcula para el
+        // general (`tcFilas`): la pestaña no cambia.
+        let porCobrarVt = 0;
+        if (
+          tcFilas &&
+          !canceladoOM &&
+          !p.inconsistente &&
+          p.vuelatour_usd > 0
+        ) {
+          const cobradoUsd = cobrosEnUsd(
+            (
+              (cobrosPorVuelo.get(v.id as string) ?? []) as Array<{
+                monto: string | number | null;
+                moneda: string | null;
+                tc_usd_mxn: string | number | null;
+              }>
+            ).map((c) => ({
+              monto: c.monto,
+              moneda: c.moneda,
+              tc_usd_mxn: c.tc_usd_mxn,
+            })),
+            tc ?? undefined,
+          ).total_usd;
+          if (pendienteCobro(p.total_usd, cobradoUsd) > 0) {
+            porCobrarVt = Math.max(
+              0,
+              round2(p.vuelatour_usd - cobradoParteVuelatour(cobradoUsd, p)),
+            );
+          }
+        }
+        porCobrarVtPorFila.push(porCobrarVt);
+      }
     }
 
     // ===== Filas SUELTAS: dinero sin avión y sin vuelo (hoy invisible en
@@ -5159,14 +5275,21 @@ export class AircraftBalanceService {
 
     if (tcFilas) {
       tcFilas.filas.push(...tcPorFila);
+      tcFilas.porCobrarVtUsd.push(...porCobrarVtPorFila);
+      // Sueltas nativas en pesos: el oficial de SU día por la puerta única
+      // (memo + concurrencia acotada); sin dato, el promedio de la pestaña.
+      const diaSuelta = (k: { dia: string | null }): string =>
+        typeof k.dia === 'string' ? k.dia.slice(0, 10) : '';
+      const oficialPorDia = await this.tcOficialDeDias(
+        tcSueltas.flatMap((k) => ('dia' in k ? [diaSuelta(k)] : [])),
+        memoTc,
+      );
       tcFilas.sueltas.push(
-        ...(await Promise.all(
-          tcSueltas.map(async (k) =>
-            'tc' in k
-              ? k.tc
-              : ((await this.tcOficialDelDia(k.dia, memoTc)) ?? tcPromedio),
-          ),
-        )),
+        ...tcSueltas.map((k) =>
+          'tc' in k
+            ? k.tc
+            : (oficialPorDia.get(diaSuelta(k))?.tc ?? tcPromedio),
+        ),
       );
     }
 

@@ -898,7 +898,12 @@ export interface BalanceEmpresaBloquePayload {
   participaciones: BalanceEmpresaParticipacionPayload[];
   /** round2(Σ participaciones.monto_usd); 0 sin participaciones; null si alguna es null. */
   participacion_usd: number | null;
-  /** Σ `ingreso_mxn` de «otros movimientos» (filas + sueltas) ÷ el T.C. de cada fila. */
+  /**
+   * Σ `ingreso_mxn` de «otros movimientos» (filas + sueltas) ÷ el T.C. de
+   * cada fila. BASE: lo COTIZADO de los vuelos del periodo no cancelados
+   * (COTIZADO y RESERVA incluidos), no lo cobrado — ver
+   * `ingresos_por_cobrar_usd`.
+   */
   ingresos_propios_usd: number | null;
   /**
    * Σ `egreso_mxn` de «otros movimientos» (filas + sueltas) ÷ el T.C. de
@@ -920,6 +925,16 @@ export interface BalanceEmpresaBloquePayload {
   nota: string;
   /** Filas de «otros movimientos» que no se pudieron llevar a USD. */
   movimientos_sin_tc: number;
+  /**
+   * ADITIVO (revisión 6-oct-2026), INFORMATIVO: parte de VuelaTour de los
+   * vuelos del periodo AÚN POR COBRAR (USD) — ya incluida en
+   * `ingresos_propios_usd` (lo cotizado); NO se resta del resultado. Misma
+   * lectura que el por cobrar del avión: `cobrosEnUsd` con el K del vuelo,
+   * `cobradoParteVuelatour` y la tolerancia de `pendienteCobro`.
+   */
+  ingresos_por_cobrar_usd?: number;
+  /** ADITIVO: vuelos con parte de VuelaTour por cobrar (> 0). */
+  vuelos_por_cobrar?: number;
 }
 
 export interface BalanceAvionBalancePayload {

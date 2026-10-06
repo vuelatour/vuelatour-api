@@ -15,6 +15,11 @@ import type {
  *  - INGRESOS y EGRESOS propios: la hoja «otros movimientos» (filas por
  *    vuelo + sueltas), cada fila de regreso a USD con SU T.C. (el K del
  *    vuelo; una suelta, el T.C. que la convirtió o el oficial del día).
+ *    BASE (revisión 6-oct-2026): el ingreso de esa hoja es lo COTIZADO de
+ *    los vuelos del periodo no cancelados —COTIZADO y RESERVA incluidos—,
+ *    no lo cobrado; el egreso, todo lo que la hoja resta (pagado o
+ *    provisionado). La parte de VuelaTour AÚN POR COBRAR viaja aparte e
+ *    INFORMATIVA (`ingresos_por_cobrar_usd`): no se resta.
  *  - OTROS GASTOS de la empresa: EXACTAMENTE el TOTAL USD de la hoja «otros
  *    gastos» (total MXN ÷ T.C. promedio de la flota).
  *  - TIENDA: la utilidad de la hoja «inventario» ÷ el mismo T.C. promedio.
@@ -102,12 +107,19 @@ export interface MovimientoParaEmpresa {
   egreso_mxn: number | null;
   /** K del vuelo de la fila; en una suelta, su T.C. (ver el servicio). */
   tc: number | null;
+  /**
+   * Parte de VuelaTour del vuelo de la fila AÚN POR COBRAR, en USD
+   * (informativa; 0 en sueltas, cancelados y vuelos cobrados).
+   */
+  por_cobrar_usd?: number;
 }
 
 /**
- * Empareja las filas de «otros movimientos» con sus T.C. (mismo índice).
- * Distinto número de filas y de T.C. es un error de programación que
- * movería dinero entre filas: se LANZA (jamás se adivina el emparejado).
+ * Empareja las filas de «otros movimientos» con sus T.C. (mismo índice) y,
+ * si viene, con la parte de VuelaTour por cobrar de cada fila. Distinto
+ * número de filas y de T.C. (o de montos por cobrar) es un error de
+ * programación que movería dinero entre filas: se LANZA (jamás se adivina
+ * el emparejado).
  */
 export function movimientosConTc(
   filas: ReadonlyArray<{
@@ -118,10 +130,16 @@ export function movimientosConTc(
   }>,
   tcs: ReadonlyArray<number | null>,
   hoja: string,
+  porCobrarUsd?: ReadonlyArray<number>,
 ): MovimientoParaEmpresa[] {
   if (filas.length !== tcs.length) {
     throw new Error(
       `Bloque VUELATOUR: «otros movimientos» (${hoja}) trae ${filas.length} fila(s) y ${tcs.length} T.C. — no se puede convertir a USD`,
+    );
+  }
+  if (porCobrarUsd && porCobrarUsd.length !== filas.length) {
+    throw new Error(
+      `Bloque VUELATOUR: «otros movimientos» (${hoja}) trae ${filas.length} fila(s) y ${porCobrarUsd.length} monto(s) por cobrar`,
     );
   }
   return filas.map((f, i) => ({
@@ -130,6 +148,7 @@ export function movimientosConTc(
     concepto_egreso: f.concepto_egreso,
     egreso_mxn: f.egreso_mxn,
     tc: tcs[i],
+    ...(porCobrarUsd ? { por_cobrar_usd: porCobrarUsd[i] } : {}),
   }));
 }
 
@@ -204,6 +223,12 @@ export function armarBalanceEmpresa(
     (m) =>
       ladoEnUsd([m], 'ingreso').sinTc > 0 || ladoEnUsd([m], 'egreso').sinTc > 0,
   ).length;
+  // Parte de VuelaTour AÚN POR COBRAR (informativa: NO se resta — el
+  // ingreso de la hoja es lo cotizado; la nota lo dice con su monto).
+  const porCobrar = e.movimientos
+    .map((m) => num(m.por_cobrar_usd) ?? 0)
+    .filter((x) => x > 0);
+  const ingresosPorCobrarUsd = round2(porCobrar.reduce((a, x) => a + x, 0));
 
   // (−) Otros gastos: EXACTAMENTE el TOTAL USD de su hoja.
   const otrosUsd = e.otrosGastos.usd;
@@ -247,6 +272,9 @@ export function armarBalanceEmpresa(
       participaciones: e.participaciones,
       participacionUsd,
       movimientosSinTc,
+      ingresosUsd: ingresos.usd,
+      ingresosPorCobrarUsd,
+      vuelosPorCobrar: porCobrar.length,
       otrosGastos: e.otrosGastos,
       tc,
       utilidadTiendaMxn,
@@ -254,6 +282,8 @@ export function armarBalanceEmpresa(
       utilidadTiendaUsdLegado: num(e.inventario?.total_utilidad_usd),
     }),
     movimientos_sin_tc: movimientosSinTc,
+    ingresos_por_cobrar_usd: ingresosPorCobrarUsd,
+    vuelos_por_cobrar: porCobrar.length,
   };
 }
 
@@ -262,6 +292,9 @@ function notaBalanceEmpresa(n: {
   participaciones: BalanceEmpresaParticipacionPayload[];
   participacionUsd: number | null;
   movimientosSinTc: number;
+  ingresosUsd: number | null;
+  ingresosPorCobrarUsd: number;
+  vuelosPorCobrar: number;
   otrosGastos: { total_mxn: number; usd: number | null };
   tc: number | null;
   utilidadTiendaMxn: number | null;
@@ -269,12 +302,21 @@ function notaBalanceEmpresa(n: {
   utilidadTiendaUsdLegado: number | null;
 }): string {
   const aviones = [...new Set(n.participaciones.map((p) => p.matricula))];
+  // Revisión 6-oct-2026: la nota NOMBRA el avión que vacía la participación
+  // (antes decía «algún avión» y la oficina no sabía dónde buscar).
+  const sinUtilidad = [
+    ...new Set(
+      n.participaciones
+        .filter((p) => p.monto_usd == null)
+        .map((p) => p.matricula),
+    ),
+  ];
   const partes: string[] = [];
   partes.push(
     aviones.length > 0
       ? `Participación: utilidad COBRADA de ${aviones.join(', ')} × % de la empresa como socia${
-          n.participacionUsd == null
-            ? ' (algún avión sin utilidad cobrada: queda vacía)'
+          n.participacionUsd == null && sinUtilidad.length > 0
+            ? ` (${sinUtilidad.join(', ')} sin utilidad cobrada —revisa los pendientes de su libro—: queda vacía)`
             : ''
         }.`
       : 'Participación: la empresa no es socia de ningún avión del periodo.',
@@ -282,8 +324,15 @@ function notaBalanceEmpresa(n: {
   partes.push(
     "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
       'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +
-      'Egresos = pago al vendedor, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
+      'COTIZADO y RESERVA incluidos. ' +
+      'Egresos = pago al vendedor (real o provisión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
   );
+  if (n.ingresosUsd != null && n.ingresosPorCobrarUsd > 0) {
+    partes.push(
+      `De esos ingresos, $${fmt(n.ingresosPorCobrarUsd)} USD de ${n.vuelosPorCobrar} vuelo(s) aún están por cobrar.`,
+    );
+  }
   if (n.movimientosSinTc > 0) {
     partes.push(
       `${n.movimientosSinTc} fila(s) de 'otros movimientos' sin T.C.: ingresos/egresos y resultado quedan vacíos hasta capturarlo.`,
@@ -299,7 +348,7 @@ function notaBalanceEmpresa(n: {
     partes.push('Tienda: sin inventario en el periodo.');
   } else {
     partes.push(
-      `Tienda: utilidad de la hoja 'inventario' ($${fmt(n.utilidadTiendaMxn)} MXN) ÷ el mismo T.C.${
+      `Tienda: utilidad de la hoja 'inventario' ($${fmt(n.utilidadTiendaMxn)} MXN) ÷ el mismo T.C. promedio${
         n.tiendaSinTc ? ' — sin T.C.: el resultado queda vacío' : ''
       }.`,
     );
