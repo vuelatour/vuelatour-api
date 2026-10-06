@@ -72,6 +72,13 @@ import {
   costoMxnDeFilaRefaccion,
 } from './refacciones-costo.util';
 import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
+// Bloque «VUELATOUR (empresa)» de la hoja «balance» del general (6-oct-2026):
+// aritmética pura, con spec.
+import {
+  armarBalanceEmpresa,
+  movimientosConTc,
+  participacionesEmpresa,
+} from './balance-empresa.util';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
@@ -305,7 +312,21 @@ interface SocioRow {
   porcentaje: string | number;
   vigente_desde: string;
   vigente_hasta: string | null;
-  usuario: { nombre?: string } | { nombre?: string }[] | null;
+  usuario:
+    | { nombre?: string; es_empresa?: boolean | null }
+    | { nombre?: string; es_empresa?: boolean | null }[]
+    | null;
+}
+
+/**
+ * T.C. con que cada fila de «otros movimientos» regresa a USD (bloque
+ * «VUELATOUR (empresa)» del general, 6-oct-2026), alineado por índice con
+ * `filas` y `filas_sueltas` de la pestaña. Uso interno: no viaja a
+ * pyservices.
+ */
+interface TcFilasOtrosMovimientos {
+  filas: Array<number | null>;
+  sueltas: Array<number | null>;
 }
 
 /** Número finito o null (null se PROPAGA: nunca un 0 falso). */
@@ -783,6 +804,21 @@ export class AircraftBalanceService {
       'otros gastos',
       pendientesEmpresa,
     );
+    // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
+    // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL. Desde el
+    // 29-ago sus filas sueltas ya NO llevan los gastos de empresa (viven
+    // en la hoja "otros gastos" del general, antes "gastos VuelaTour" —
+    // misma lectura, el dinero UNA vez). `tcFilasOM` (6-oct-2026) recoge el
+    // T.C. de cada fila para el bloque «VUELATOUR (empresa)».
+    const tcFilasOM: TcFilasOtrosMovimientos = { filas: [], sueltas: [] };
+    const otrosMovimientos = await this.buildOtrosMovimientos(
+      d,
+      h,
+      memoTc,
+      empresaYSueltos,
+      memoFactura,
+      tcFilasOM,
+    );
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
       matricula: 'FLOTA',
@@ -852,18 +888,8 @@ export class AircraftBalanceService {
         utilidad_cobrada_usd: null,
         socios: [],
       },
-      // Pestaña "Otros movimientos" (28-ago): conceptos cobrados vs pagados
-      // por vuelo + dinero sin avión/sin vuelo. Solo en el GENERAL. Desde el
-      // 29-ago sus filas sueltas ya NO llevan los gastos de empresa (viven
-      // en la hoja "otros gastos" del general, antes "gastos VuelaTour" —
-      // misma lectura, el dinero UNA vez).
-      otros_movimientos: await this.buildOtrosMovimientos(
-        d,
-        h,
-        memoTc,
-        empresaYSueltos,
-        memoFactura,
-      ),
+      // Pestaña "Otros movimientos" (calculada arriba).
+      otros_movimientos: otrosMovimientos,
       pendientes: [
         // Cargas de combustible SIN avión: no aparecen en NINGÚN balance ni
         // en el reparto — el dinero jamás desaparece en silencio.
@@ -883,6 +909,28 @@ export class AircraftBalanceService {
         ),
       ],
     };
+
+    // ===== Bloque «VUELATOUR (empresa)» al final de la hoja "balance"
+    // (6-oct-2026, API 0.0.59): participación como socia (los socios
+    // `es_empresa` de cada bloque de avión) + ingresos − egresos propios de
+    // «otros movimientos» (cada fila a USD con SU T.C.) − la hoja «otros
+    // gastos» (su TOTAL USD exacto) + la utilidad de la tienda. Aritmética
+    // en la fuente única PURA `balance-empresa.util.ts`; aquí solo se juntan
+    // insumos que el general YA calculó (cero cálculos paralelos).
+    const empresa = armarBalanceEmpresa({
+      participaciones: participacionesEmpresa(librosAviones),
+      movimientos: [
+        ...movimientosConTc(otrosMovimientos.filas, tcFilasOM.filas, 'filas'),
+        ...movimientosConTc(
+          otrosMovimientos.filas_sueltas,
+          tcFilasOM.sueltas,
+          'sueltas',
+        ),
+      ],
+      otrosGastos: hojaGastosEmpresa,
+      tcPromedio: totalesFlota.tc_promedio,
+      inventario: inventarioTiendita,
+    });
 
     const buffer = await this.pyservices.generateBalanceGeneralXlsx({
       generado: new Date().toISOString(),
@@ -914,6 +962,8 @@ export class AircraftBalanceService {
       gastos_empresa: hojaGastosEmpresa,
       // Hoja "inventario" (tiendita, 30-ago): resumen por ítem del periodo.
       inventario: inventarioTiendita,
+      // Bloque «VUELATOUR (empresa)» de la hoja "balance" (6-oct-2026).
+      empresa,
     });
     return { buffer, desde: d, hasta: h };
   }
@@ -1055,6 +1105,29 @@ export class AircraftBalanceService {
       if (det != null && det.tc > 0) out.set(vueloId, det);
     }
     return out;
+  }
+
+  /**
+   * T.C. OFICIAL de UN día (YYYY-MM-DD) con el MISMO memo por día del
+   * general (`memoTc`): un día ya consultado para un vuelo no se vuelve a
+   * pedir. Lo usa el bloque «VUELATOUR (empresa)» para regresar a USD las
+   * filas sueltas nativas en pesos. Nunca lanza: sin dato ⇒ null.
+   */
+  private async tcOficialDelDia(
+    dia: string | null,
+    memoPorDia: Map<string, Promise<TipoCambioDetalle | null>>,
+  ): Promise<number | null> {
+    const d = typeof dia === 'string' ? dia.slice(0, 10) : '';
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+    let p = memoPorDia.get(d);
+    if (!p) {
+      p = Promise.resolve()
+        .then(() => this.tipoCambio.oficialDetallePara(d))
+        .catch(() => null);
+      memoPorDia.set(d, p);
+    }
+    const det = await p;
+    return det != null && det.tc > 0 ? det.tc : null;
   }
 
   /**
@@ -1377,7 +1450,9 @@ export class AircraftBalanceService {
         ? sb
             .from('aeronave_socio')
             .select(
-              'socio_id, porcentaje, vigente_desde, vigente_hasta, usuario:socio_id(nombre)',
+              // `es_empresa` (6-oct-2026): la propia empresa como socia —
+              // alimenta el bloque «VUELATOUR (empresa)» del general.
+              'socio_id, porcentaje, vigente_desde, vigente_hasta, usuario:socio_id(nombre, es_empresa)',
             )
             .eq('aeronave_id', aircraftId)
         : Promise.resolve(vacio),
@@ -3484,6 +3559,9 @@ export class AircraftBalanceService {
             utilidadCobrada != null
               ? round2((pct / 100) * utilidadCobrada)
               : null,
+          // ADITIVO (6-oct-2026, API 0.0.59): la empresa como socia. El
+          // bloque «VUELATOUR (empresa)» del general suma ESTE monto.
+          es_empresa: u?.es_empresa === true,
         };
       });
 
@@ -4136,6 +4214,11 @@ export class AircraftBalanceService {
     // (30-sep-2026): aquí solo se consultan los vuelos que ningún libro
     // cargó — normalmente ninguno.
     memoFactura: Map<string, Promise<string | null>> = new Map(),
+    // Bloque «VUELATOUR (empresa)» de la hoja «balance» (6-oct-2026): si
+    // viene, se llena con el T.C. con que CADA fila regresa a USD, alineado
+    // por índice con `filas` y `filas_sueltas`. NO viaja a pyservices (el
+    // payload de la pestaña no cambia) y sin él no hay ni una consulta más.
+    tcFilas?: TcFilasOtrosMovimientos,
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
@@ -4319,6 +4402,10 @@ export class AircraftBalanceService {
           : null;
 
     const filas: BalanceOtroMovimientoFilaPayload[] = [];
+    // T.C. con que cada fila por vuelo regresa a USD (bloque VUELATOUR): el
+    // MISMO K de venta con que la fila llegó a pesos; un vuelo sin K usa el
+    // T.C. promedio de esta pestaña (el de sus gastos USD sin T.C. propio).
+    const tcPorFila: Array<number | null> = [];
     // ¿Algún vuelo del periodo tiene pago REAL al vendedor? (invariante 31):
     // solo entonces la hoja lleva `hay_pago_vendedor_real` (las leyendas de
     // pyservices cambian solo con ella ⇒ sin pagos reales, byte-idéntico).
@@ -4952,6 +5039,7 @@ export class AircraftBalanceService {
       } else if (filasVuelo.length === 1) {
         filas.push(filasVuelo[0]);
       }
+      if (filasVuelo.length > 0) tcPorFila.push(tc ?? tcPromedio);
     }
 
     // ===== Filas SUELTAS: dinero sin avión y sin vuelo (hoy invisible en
@@ -4959,6 +5047,17 @@ export class AircraftBalanceService {
     // el promedio del periodo; sin ninguno, la fila sale con egreso vacío y
     // la nota (USD sin TC) — visible, jamás sumada en falso. =====
     const sueltas: BalanceOtroMovimientoFilaPayload[] = [];
+    // T.C. de regreso a USD de cada suelta (bloque VUELATOUR), alineado con
+    // `sueltas`: la que llegó a pesos con un T.C. (gasto USD, ingreso USD)
+    // regresa con ESE; la nativa en pesos, con el T.C. oficial de SU día
+    // (respaldo: el promedio de la pestaña).
+    const tcSueltas: Array<{ tc: number | null } | { dia: string | null }> = [];
+    const tcDeGastoSuelto = (
+      g: Record<string, unknown>,
+    ): { tc: number | null } | { dia: string | null } =>
+      g.moneda === 'MXN'
+        ? { dia: (g.fecha_gasto as string | null) ?? null }
+        : { tc: pos(g.tc_gasto) ?? tcPromedio };
     const sueltaDe = (
       g: Record<string, unknown>,
       clave: string,
@@ -4994,9 +5093,9 @@ export class AircraftBalanceService {
     // vuelo sin avión (regla 7: su
     // único lugar) y el "gas sin avión" de abajo.
     for (const g of empresaYSueltos.tuasSueltos) {
-      sueltas.push(
-        sueltaDe(g as unknown as Record<string, unknown>, 'tuas sin vuelo'),
-      );
+      const gr = g as unknown as Record<string, unknown>;
+      sueltas.push(sueltaDe(gr, 'tuas sin vuelo'));
+      tcSueltas.push(tcDeGastoSuelto(gr));
     }
     for (const g of (gasRes.data ?? []) as Array<Record<string, unknown>>) {
       // GAS de un vuelo EXTERNO sin avión: hoja "combustible" del libro
@@ -5008,6 +5107,7 @@ export class AircraftBalanceService {
       // señalando para que se selle la aeronave).
       if (avionDeGastoEmbebido(g) != null) continue;
       sueltas.push(sueltaDe(g, 'gas sin avión'));
+      tcSueltas.push(tcDeGastoSuelto(g));
     }
     // TUAS sin vuelo CON avión (regla 7, 28-ago): el libro del avión solo
     // los avisa (no restan en ninguna hoja) — aquí es su único lugar, con la
@@ -5024,6 +5124,7 @@ export class AircraftBalanceService {
           base.concepto_egreso ?? 'tuas'
         }`,
       });
+      tcSueltas.push(tcDeGastoSuelto(g));
     }
     // INGRESOS SIN VUELO de RESULTADO (24-sep-2026): intereses, reembolsos
     // recibidos, ventas de activos… registrados en Ingresos (clave ING-n),
@@ -5049,6 +5150,24 @@ export class AircraftBalanceService {
         remanente_mxn: f.remanente_mxn,
         factura: null,
       });
+      // Mismo T.C. que `filaLibroDeIngreso`: el PROPIO del ingreso en USD;
+      // en pesos, el oficial de su día.
+      tcSueltas.push(
+        ing.moneda === 'MXN' ? { dia: ing.fecha } : { tc: pos(ing.tc_usd_mxn) },
+      );
+    }
+
+    if (tcFilas) {
+      tcFilas.filas.push(...tcPorFila);
+      tcFilas.sueltas.push(
+        ...(await Promise.all(
+          tcSueltas.map(async (k) =>
+            'tc' in k
+              ? k.tc
+              : ((await this.tcOficialDelDia(k.dia, memoTc)) ?? tcPromedio),
+          ),
+        )),
+      );
     }
 
     return {

@@ -866,6 +866,60 @@ export interface BalanceAvionSocioPayload {
   nombre: string;
   porcentaje: number;
   monto_usd: number | null;
+  /**
+   * ADITIVO (6-oct-2026, API 0.0.59): `usuario.es_empresa` del socio — la
+   * propia empresa (Aero Charter Cancún) como socia del avión. El general
+   * cita ESA celda MONTO USD en el bloque «VUELATOUR (empresa)» de la hoja
+   * «balance». Siempre viaja (true/false); un pyservices viejo la ignora.
+   */
+  es_empresa?: boolean;
+}
+
+/** Participación de la EMPRESA como socia de UN avión (bloque VUELATOUR). */
+export interface BalanceEmpresaParticipacionPayload {
+  matricula: string;
+  /** Nombre del socio-empresa tal cual viaja en `balance.socios`. */
+  socio: string;
+  porcentaje: number;
+  /** = `monto_usd` de ese socio en el bloque del avión (utilidad COBRADA × %). */
+  monto_usd: number | null;
+}
+
+/**
+ * Bloque «VUELATOUR (empresa)» al final de la hoja «balance» del Balance
+ * GENERAL (6-oct-2026, API 0.0.59). Lo arma la fuente única PURA
+ * `aircraft/balance-empresa.util.ts#armarBalanceEmpresa`; pyservices solo
+ * pinta (fórmulas donde reproducen estos números). Todo en USD; `null` =
+ * no se puede afirmar el número (falta un T.C. o una utilidad del avión) —
+ * jamás un 0 falso.
+ */
+export interface BalanceEmpresaBloquePayload {
+  /** Socios `es_empresa` de cada bloque de avión, en el orden de `aviones`. */
+  participaciones: BalanceEmpresaParticipacionPayload[];
+  /** round2(Σ participaciones.monto_usd); 0 sin participaciones; null si alguna es null. */
+  participacion_usd: number | null;
+  /** Σ `ingreso_mxn` de «otros movimientos» (filas + sueltas) ÷ el T.C. de cada fila. */
+  ingresos_propios_usd: number | null;
+  /**
+   * Σ `egreso_mxn` de «otros movimientos» (filas + sueltas) ÷ el T.C. de
+   * cada fila: pago al vendedor, TUAs pagadas, extensión de horario,
+   * comisión bancaria y gastos sueltos (todo lo que la hoja resta).
+   */
+  pagos_vendedor_usd: number | null;
+  /** EXACTAMENTE el TOTAL USD de la hoja «otros gastos» (`gastos_empresa.usd`). */
+  otros_gastos_empresa_usd: number | null;
+  /** T.C. con que se convirtieron «otros gastos» y la tienda (= `tc_promedio`). */
+  tc_usado: number | null;
+  /** `inventario.total_utilidad_mxn` ÷ `tc_usado`; null sin inventario. */
+  tienda_utilidad_usd: number | null;
+  /** round2(participación + ingresos − pagos − otros gastos + tienda). */
+  resultado_usd: number | null;
+  /** T.C. promedio de la flota (fila TOTALES de la hoja maestra). */
+  tc_promedio: number | null;
+  /** Base de cada línea, lista para la nota del bloque. */
+  nota: string;
+  /** Filas de «otros movimientos» que no se pudieron llevar a USD. */
+  movimientos_sin_tc: number;
 }
 
 export interface BalanceAvionBalancePayload {
@@ -1046,6 +1100,11 @@ export interface BalanceGeneralPayload {
    * ignora y un API viejo no lo manda (pyservices pinta "refacciones").
    */
   inventario?: BalanceHojaInventarioPayload;
+  /**
+   * ADITIVO (6-oct-2026, API 0.0.59): bloque «VUELATOUR (empresa)» al final
+   * de la hoja «balance». Sin él (API viejo) pyservices no lo pinta.
+   */
+  empresa?: BalanceEmpresaBloquePayload;
 }
 
 /** Fila de la pestaña "Otros movimientos" (28-ago, hoja manual del cliente):

@@ -4367,6 +4367,52 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `configuracion/configuracion.fecha.spec` y
       `configuracion.service.spec` (lote 1–50).
 
+47. **BLOQUE «VUELATOUR (empresa)» AL FINAL DE LA HOJA «balance» DEL
+    GENERAL (6-oct-2026, API 0.0.59, sin migración).** Pedido del cliente:
+    «en la hoja de balance falta, hasta el final, el balance de la empresa
+    VuelaTour». Campo ADITIVO `empresa` del payload del general (pyservices
+    lo pinta; sin él, el libro es el de antes) y `es_empresa` (de
+    `usuario.es_empresa`, SIEMPRE booleano) en cada `balance.socios[]` de
+    los dos libros. Aritmética en la fuente única PURA
+    `aircraft/balance-empresa.util.ts` (spec); `xlsxGeneral` solo junta
+    insumos ya calculados — **nadie recalcula una utilidad, un T.C. ni una
+    hoja**:
+    - `participaciones` / `participacion_usd`: el `monto_usd` de los socios
+      `es_empresa` de cada bloque de `aviones` (utilidad COBRADA × %), tal
+      cual; Σ redondeada; sin socio-empresa ⇒ `[]` y 0.
+    - `ingresos_propios_usd` / `pagos_vendedor_usd`: Σ `ingreso_mxn` /
+      Σ `egreso_mxn` de «otros movimientos» (filas + sueltas), cada fila ÷
+      SU T.C., redondeo al final. **`pagos_vendedor_usd` son TODOS los
+      egresos de la pestaña** (pago al vendedor, TUAs pagadas, extensión de
+      horario, comisión bancaria, gastos sueltos): restar solo el pago al
+      vendedor dejaría las TUAs cobradas como ingreso sin su costo. El T.C.
+      por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
+      `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
+      que sale byte-idéntico, y sin él no hay consultas nuevas): fila por
+      vuelo = el K de venta del vuelo (sin K, el promedio de la pestaña);
+      suelta USD = el T.C. que la llevó a pesos (`tc_gasto` / promedio /
+      el del ingreso); suelta en pesos = T.C. oficial de su día
+      (`tcOficialDelDia`, mismo `memoTc`; respaldo, el promedio).
+      Desalineadas ⇒ se LANZA.
+    - `otros_gastos_empresa_usd` = EXACTAMENTE `gastos_empresa.usd` (la
+      celda TOTAL USD de «otros gastos») y `tc_usado` = `tc_promedio` =
+      `consolidado.totales.tc_promedio`. `tienda_utilidad_usd` =
+      `inventario.total_utilidad_mxn` ÷ ese T.C. (null sin inventario; la
+      utilidad USD legado sin T.C. NO entra y la `nota` lo dice).
+    - `resultado_usd` = round2(participación + ingresos − egresos − otros
+      gastos + tienda). **`null` se propaga**: una participación null, una
+      fila de la pestaña rotulada «sin TC» (o con pesos y sin T.C.) —
+      `movimientos_sin_tc` las cuenta—, «otros gastos» sin USD o la tienda
+      sin T.C. dejan su renglón y el resultado vacíos. `nota` = la base de
+      cada línea, lista para pintar. PERSONAL_DUENO ya está fuera de todas
+      las fuentes.
+    - Specs: `balance-empresa.util.spec.ts` y
+      `aircraft-balance.service.bloque-empresa.spec.ts` (socia en 2 aviones
+      = las celdas de cada bloque, filas y sueltas con su T.C., oficial del
+      día y su respaldo, gasto USD con su T.C., sin inventario / con
+      inventario, sin socio-empresa, fila sin T.C. ⇒ vacío, payload de la
+      pestaña idéntico). Deploy: pyservices (tolera `empresa` ausente) → API.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
