@@ -1400,6 +1400,7 @@ describe('SIN la migración (sonda false): todo como hoy', () => {
             id: 'g1',
             monto: 400,
             moneda: 'MXN',
+            medio_pago: 'TARJETA_CORP',
             conciliado: false,
             tc_gasto: null,
           },

@@ -213,6 +213,38 @@ describe('motivoExclusion — precedencia', () => {
       expect(motivoExclusion(g('x', { medio_pago: medio }), CTX)).toBeNull();
     }
   });
+
+  it('incluirNoBancarios (6-oct-2026): efectivo / PERSONAL_* ya son del universo; BODEGA y sin medio NO', () => {
+    const CON = { ...CTX, incluirNoBancarios: true };
+    for (const medio of ['EFECTIVO', 'PERSONAL_PABLO', 'PERSONAL_ALE']) {
+      expect(motivoExclusion(g('x', { medio_pago: medio }), CON)).toBeNull();
+      // Su motivo pasa a ser el siguiente de la precedencia.
+      expect(
+        motivoExclusion(g('x', { medio_pago: medio, conciliado: true }), CON),
+      ).toBe('YA_CONCILIADO');
+      expect(
+        motivoExclusion(g('x', { medio_pago: medio, moneda: 'USD' }), CON),
+      ).toBe('OTRA_MONEDA');
+      expect(
+        motivoExclusion(
+          g('x', { medio_pago: medio, fecha_gasto: '2026-06-12' }),
+          CON,
+        ),
+      ).toBe('FUERA_DE_VENTANA');
+    }
+    for (const medio of ['BODEGA', null]) {
+      expect(motivoExclusion(g('x', { medio_pago: medio }), CON)).toBe(
+        'EFECTIVO_U_OTRO_MEDIO',
+      );
+    }
+    // Sin la bandera (o false), lo de siempre.
+    expect(
+      motivoExclusion(g('x', { medio_pago: 'EFECTIVO' }), {
+        ...CTX,
+        incluirNoBancarios: false,
+      }),
+    ).toBe('EFECTIVO_U_OTRO_MEDIO');
+  });
 });
 
 describe('agruparExcluidos — mezcla, tope por motivo y limpieza', () => {
@@ -288,6 +320,26 @@ describe('agruparExcluidos — mezcla, tope por motivo y limpieza', () => {
       CTX,
     );
     expect(mismoDia[0].gastos.map((x) => x.id)).toEqual(['a', 'b']);
+  });
+
+  it('con incluirNoBancarios el caso real ya no se explica (son candidatos); BODEGA sí', () => {
+    const CON = { ...CTX, incluirNoBancarios: true };
+    expect(agruparExcluidos(REALES, CON)).toEqual([]);
+    expect(
+      resumen(
+        agruparExcluidos(
+          [
+            ...REALES,
+            g('bodega', { medio_pago: 'BODEGA', categoria: 'REFACCION' }),
+            efectivo('efe-conc', '2026-09-20', 330),
+          ].map((x) => (x.id === 'efe-conc' ? { ...x, conciliado: true } : x)),
+          CON,
+        ),
+      ),
+    ).toEqual([
+      ['EFECTIVO_U_OTRO_MEDIO', 1, ['bodega']],
+      ['YA_CONCILIADO', 1, ['efe-conc']],
+    ]);
   });
 
   it('un id repetido cuenta una vez; los del universo no se reportan; nada ⇒ []', () => {

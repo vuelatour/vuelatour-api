@@ -19,6 +19,9 @@ describe('ToBooleanQuery con la conversión implícita del pipe global', () => {
     ['true', true],
     [false, false],
     [true, true],
+    // 6-oct-2026: el panel manda `incluir_no_bancarios=1`.
+    ['1', true],
+    ['0', false],
   ] as const)('%p ⇒ %p', (entrada, esperado) => {
     const dto = plainToInstance(
       QueryDePrueba,
@@ -36,13 +39,15 @@ describe('ToBooleanQuery con la conversión implícita del pipe global', () => {
   });
 
   it('un valor que no es booleano NO se adivina: lo rechaza @IsBoolean', () => {
-    const dto = plainToInstance(
-      QueryDePrueba,
-      { conciliado: 'quizas' },
-      COMO_EL_PIPE,
-    );
-    expect(dto.conciliado).toBe('quizas');
-    expect(validateSync(dto).length).toBeGreaterThan(0);
+    for (const raro of ['quizas', '2', 'si', 'TRUE']) {
+      const dto = plainToInstance(
+        QueryDePrueba,
+        { conciliado: raro },
+        COMO_EL_PIPE,
+      );
+      expect(dto.conciliado).toBe(raro);
+      expect(validateSync(dto).length).toBeGreaterThan(0);
+    }
   });
 
   it('el bug que se corrige: sin leer el valor crudo, Boolean("false") es true', () => {

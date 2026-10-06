@@ -142,11 +142,27 @@ import {
   type PuedeRepartirResultado,
 } from './conciliacion-parcial.util';
 import {
+  clasificarMediosVinculo,
   errorSinMonedaCuenta,
+  esMedioBancario,
   interpretarBusquedaGasto,
+  MEDIO_BODEGA,
   MEDIOS_BANCARIOS,
   ordenarCandidatosGasto,
 } from './gastos-candidatos.util';
+import {
+  agregarNotaVinculo,
+  JUSTIFICACION_MIN,
+  limpiarJustificacion,
+  lineaNotaCargo,
+  lineaNotaGasto,
+  mensajeGastoBodega,
+  mensajeJustificacionRequerida,
+  quitarNotasVinculoNoBancario,
+  tieneNotasVinculoNoBancario,
+  type CargoDeNota,
+  type GastoDeNota,
+} from '../../common/vinculo-no-bancario.util';
 import {
   agruparExcluidos,
   bandaMontoExcluidos,
@@ -319,16 +335,80 @@ export interface CargoDeGasto {
  * Respuesta de `GET movimientos/:id/gastos-candidatos`. `excluidos` y
  * `excluidos_monto` (ADITIVOS, 6-oct-2026, API 0.0.63) viajan SOLO cuando
  * `candidatos` queda vacío (y no viajan si su lectura falló).
+ * `no_bancario` (ADITIVO, mismo 0.0.63): SIEMPRE en cada candidato; `true`
+ * solo con `incluir_no_bancarios` (efectivo / PERSONAL_*), y esos van
+ * DESPUÉS de todos los bancarios.
  */
 export interface GastosCandidatosRespuesta {
   movimiento: { id: string; fecha: string; monto: number; moneda: string };
   ventana: { desde: string; hasta: string };
   candidatos: Array<
-    SugerenciaConciliacion['candidatos'][number] & { cruzado?: true }
+    SugerenciaConciliacion['candidatos'][number] & {
+      cruzado?: true;
+      no_bancario: boolean;
+    }
   >;
   truncado: boolean;
   excluidos?: ExcluidosCandidatos['excluidos'];
   excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
+}
+
+/**
+ * GASTO NO BANCARIO CON JUSTIFICACIÓN (6-oct-2026, API 0.0.63): lo que el
+ * controller pasa al PATCH `movimientos/:id` además de los ids.
+ */
+export interface OpcionesVinculo {
+  /** Por qué se liga un gasto en efectivo / PERSONAL_* a este cargo. */
+  justificacion?: string | null;
+  /** Nombre de quien liga (firma de las notas; vacío ⇒ «Oficina»). */
+  usuarioNombre?: string | null;
+}
+
+/**
+ * ADITIVO de la respuesta del PATCH cuando ENTRÓ al menos un gasto no
+ * bancario: cuáles y si sus notas quedaron escritas (la liga ya quedó
+ * aunque `notas_anotadas` sea false: el panel avisa y la oficina las pone a
+ * mano).
+ */
+export interface VinculoNoBancarioRespuesta {
+  gasto_ids: string[];
+  notas_anotadas: boolean;
+}
+
+/** Fila mínima para reescribir `notas` con CAS (`updated_at`). */
+interface FilaNotas {
+  id: string;
+  notas: string | null;
+  updated_at: string | null;
+}
+
+function filaNotas(f: Record<string, unknown>): FilaNotas {
+  return {
+    id: f.id as string,
+    notas: typeof f.notas === 'string' ? f.notas : null,
+    updated_at: typeof f.updated_at === 'string' ? f.updated_at : null,
+  };
+}
+
+/** Columnas del gasto para sus notas del vínculo no bancario. */
+const GASTO_NOTA_COLS =
+  'id, fecha_gasto, monto, moneda, medio_pago, categoria, notas, updated_at, vuelo:vuelo!vuelo_id(folio)';
+
+/** Fila `GASTO_NOTA_COLS` ⇒ lo que la nota del cargo dice del gasto. */
+function gastoDeNota(g: Record<string, unknown>): GastoDeNota {
+  const vuelo = unwrapOne(
+    g.vuelo as { folio?: unknown } | { folio?: unknown }[] | null | undefined,
+  );
+  const folio = vuelo?.folio == null ? null : Number(vuelo.folio);
+  return {
+    fecha_gasto:
+      typeof g.fecha_gasto === 'string' ? g.fecha_gasto.slice(0, 10) : null,
+    monto: Number(g.monto) || 0,
+    moneda: typeof g.moneda === 'string' ? g.moneda : null,
+    medio_pago: typeof g.medio_pago === 'string' ? g.medio_pago : null,
+    categoria: typeof g.categoria === 'string' ? g.categoria : null,
+    vuelo_folio: folio != null && Number.isFinite(folio) ? folio : null,
+  };
 }
 
 function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
@@ -607,9 +687,13 @@ const VISTA_CONCILIACION_COLS =
 /** Columnas de la puente que leen los lectores. */
 const PARTE_COLS = 'movimiento_id, gasto_id, monto_parte, moneda, created_at';
 
-/** Gasto de cada parte en la lista de movimientos (forma de `MovimientoGasto`). */
+/**
+ * Gasto de cada parte en la lista de movimientos (forma de `MovimientoGasto`).
+ * `medio_pago` (ADITIVO 6-oct-2026): el panel marca «Efectivo» en un gasto
+ * no bancario ligado con justificación.
+ */
 const GASTO_PARTE_LISTA_COLS =
-  'id, monto, moneda, categoria, fecha_gasto, vuelo_id, lugar, notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
+  'id, monto, moneda, categoria, fecha_gasto, vuelo_id, lugar, notas, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
 
 /** Gasto de cada parte en el Excel (categoría, matrícula, vuelo). */
 const GASTO_PARTE_REPORTE_COLS =
@@ -6258,7 +6342,8 @@ export class ConciliacionService {
       .select(
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
-        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        // `gasto.medio_pago` (ADITIVO 6-oct-2026): «Efectivo» en la celda.
+        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -6732,17 +6817,32 @@ export class ConciliacionService {
    * `gasto.conciliado` y `tc_gasto` los escribe la BD
    * (`recalcular_gasto_conciliado`), jamás este servicio. Sin la migración,
    * el camino directo de siempre (`linkDirecto`).
+   *
+   * GASTO NO BANCARIO (6-oct-2026, API 0.0.63; caso real: el cargo de
+   * $212.00 del 07-sep de ASUR que «ningún piloto subió», ligado al
+   * estacionamiento facturado del 28-sep en EFECTIVO): un gasto en efectivo
+   * o PERSONAL_* que ENTRA a la liga exige `opts.justificacion`
+   * (`validarMediosVinculo`: 400 `JUSTIFICACION_REQUERIDA`; BODEGA ⇒ 409
+   * `GASTO_BODEGA`). Con ella la liga es la de siempre —NO cambia
+   * `medio_pago`, ni `verificado_*`, ni `requiere_visto_bueno`; caja chica no
+   * lee `conciliado`— y DESPUÉS se anotan los dos lados
+   * (`sincronizarNotasVinculo`); desvincular retira esas líneas.
    */
-  async link(movIdRaw: string, gastoIdRaw: string | null, userId: string) {
+  async link(
+    movIdRaw: string,
+    gastoIdRaw: string | null,
+    userId: string,
+    opts: OpcionesVinculo = {},
+  ) {
     // uuid en minúsculas, como los devuelve la BD (`normalizarUuid`).
     const movId = normalizarUuid(movIdRaw);
     const gastoId = gastoIdRaw === null ? null : normalizarUuid(gastoIdRaw);
     if (!(await this.partesOn())) {
-      return this.linkDirecto(movId, gastoId, userId);
+      return this.linkDirecto(movId, gastoId, userId, opts);
     }
     return gastoId === null
       ? this.desligarPartes(movId, userId)
-      : this.ligarPartes(movId, [gastoId], userId);
+      : this.ligarPartes(movId, [gastoId], userId, opts);
   }
 
   /**
@@ -6750,7 +6850,12 @@ export class ConciliacionService {
    * gastos («lote»; caso real: el SPEI de SAESA de $8,404.20 = 3 × $2,801.40).
    * Con UN id es la misma liga que `gasto_id`. Sin la migración ⇒ 503.
    */
-  async linkGastos(movIdRaw: string, gastoIds: string[], userId: string) {
+  async linkGastos(
+    movIdRaw: string,
+    gastoIds: string[],
+    userId: string,
+    opts: OpcionesVinculo = {},
+  ) {
     // uuid en minúsculas ANTES de buscar repetidos y de pre-validar.
     const movId = normalizarUuid(movIdRaw);
     const ids = gastoIds
@@ -6768,9 +6873,9 @@ export class ConciliacionService {
         error: 'LOTE_INVALIDO',
       });
     }
-    if (ids.length === 1) return this.link(movId, ids[0], userId);
+    if (ids.length === 1) return this.link(movId, ids[0], userId, opts);
     if (!(await this.partesOn())) throw errorPartesNoDisponibles();
-    return this.ligarPartes(movId, ids, userId);
+    return this.ligarPartes(movId, ids, userId, opts);
   }
 
   /** Movimiento para ligar/desligar partes (404 si no existe). */
@@ -6813,8 +6918,19 @@ export class ConciliacionService {
    * pre-valida para responder un 409 claro sin tocar nada: `puedeLigar`
    * para UN gasto, `puedeRepartirCargo` para el lote. La BD es el candado
    * real (carreras): su error se traduce con `errorRpcPartes`.
+   *
+   * Gasto no bancario (6-oct-2026): al final de la pre-validación,
+   * `validarMediosVinculo` (BODEGA / justificación); tras la RPC,
+   * `sincronizarNotasVinculo` anota los no bancarios que entraron y retira
+   * las líneas de los gastos que la RPC soltó (la puente se escribe como
+   * DIFF: un reemplazo suelta los que ya no vienen).
    */
-  private async ligarPartes(movId: string, ids: string[], userId: string) {
+  private async ligarPartes(
+    movId: string,
+    ids: string[],
+    userId: string,
+    opts: OpcionesVinculo = {},
+  ) {
     // Emparejado como cargo devuelto / devolución (30-sep-2026).
     await this.bloquearSiEnReverso(movId);
     const mov = await this.leerMovimientoPartes(movId);
@@ -6853,14 +6969,22 @@ export class ConciliacionService {
       moneda: string | null;
       monto: number;
       tc_gasto: number | null;
+      /** NOT NULL en BD; null solo si la lectura no lo trajo. */
+      medio_pago: string | null;
+      fecha_gasto: string | null;
     };
     const { data: gastosRaw, error: gErr } = await this.supabase.service
       .from('gasto')
-      .select('id, conciliado, moneda, monto, tc_gasto')
+      .select(
+        'id, conciliado, moneda, monto, tc_gasto, medio_pago, fecha_gasto',
+      )
       .in('id', ids);
     if (gErr) throw new Error(gErr.message);
     const gastos = new Map(
-      ((gastosRaw ?? []) as GastoLink[]).map((g) => [g.id, g]),
+      ((gastosRaw ?? []) as GastoLink[]).map((g) => [
+        g.id,
+        { ...g, medio_pago: g.medio_pago ?? null },
+      ]),
     );
     const ctx: CtxErrorPartes = {
       movId,
@@ -6943,12 +7067,286 @@ export class ConciliacionService {
       if (!veredicto.ok) throw await this.errorLote(veredicto, ctx);
     }
 
+    // Gasto no bancario (6-oct-2026): ANTES de escribir nada.
+    const vinculo = this.validarMediosVinculo(
+      ids.map((id) => gastos.get(id)).filter((g): g is GastoLink => !!g),
+      new Set(actuales.map((p) => p.gasto_id)),
+      opts.justificacion,
+    );
+
     const { error } = await this.supabase.service.rpc(
       'conciliacion_ligar_cargo_gastos',
       { p_movimiento_id: movId, p_gasto_ids: ids, p_actor: userId },
     );
     if (error) throw await this.errorRpcPartes(error, ctx);
-    return this.respuestaPartes(movId);
+
+    // La liga YA quedó: las notas solo documentan (best-effort, jamás la
+    // deshacen). Los que la RPC soltó pierden su línea de ESTE cargo.
+    const soltados = [
+      ...new Set(
+        actuales.map((p) => p.gasto_id).filter((id) => !ids.includes(id)),
+      ),
+    ];
+    let notasAnotadas = true;
+    if (vinculo.agregar.length > 0 || soltados.length > 0) {
+      notasAnotadas = await this.sincronizarNotasVinculo({
+        movId,
+        agregar: vinculo.agregar,
+        soltar: soltados,
+        todoElCargo: false,
+        justificacion: vinculo.justificacion,
+        usuarioNombre: opts.usuarioNombre,
+        userId,
+        cuentaMoneda,
+      });
+    }
+    return this.respuestaPartes(movId, {
+      medios: new Map(
+        [...gastos.values()].map((g) => [g.id, g.medio_pago ?? null]),
+      ),
+      vinculo:
+        vinculo.agregar.length > 0
+          ? { gasto_ids: vinculo.agregar, notas_anotadas: notasAnotadas }
+          : null,
+    });
+  }
+
+  /**
+   * Medios del vínculo (6-oct-2026, API 0.0.63), ANTES de escribir nada:
+   * - BODEGA (salida de inventario) ⇒ 409 `GASTO_BODEGA`, siempre: jamás
+   *   tocó el banco, ni con justificación.
+   * - Un gasto NO bancario (efectivo, PERSONAL_*) que ENTRA a la liga sin
+   *   justificación válida (≥ `JUSTIFICACION_MIN` ya limpia) ⇒ 400
+   *   `JUSTIFICACION_REQUERIDA` con `details.gastos_no_bancarios[{id,
+   *   medio_pago, fecha_gasto, monto}]`. Los que este cargo YA pagaba no la
+   *   piden otra vez (la re-liga idéntica sigue siendo un no-op).
+   * Devuelve los no bancarios que entran (se anotan tras la liga) y la
+   * razón en UNA línea.
+   */
+  private validarMediosVinculo(
+    gastos: ReadonlyArray<{
+      id: string;
+      medio_pago: string | null;
+      fecha_gasto?: string | null;
+      monto?: unknown;
+    }>,
+    yaLigados: ReadonlySet<string>,
+    justificacion: string | null | undefined,
+  ): { agregar: string[]; justificacion: string } {
+    const ficha = (g: (typeof gastos)[number]) => ({
+      id: g.id,
+      medio_pago: g.medio_pago ?? null,
+      fecha_gasto:
+        typeof g.fecha_gasto === 'string' ? g.fecha_gasto.slice(0, 10) : null,
+      monto: r2(Number(g.monto) || 0),
+    });
+    const cronologico = (
+      a: ReturnType<typeof ficha>,
+      b: ReturnType<typeof ficha>,
+    ) =>
+      (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? '') ||
+      a.id.localeCompare(b.id);
+    const { bodega, noBancariosNuevos } = clasificarMediosVinculo(
+      gastos,
+      yaLigados,
+    );
+    if (bodega.length > 0) {
+      const fichas = bodega.map(ficha).sort(cronologico);
+      throw new ConflictException({
+        message: mensajeGastoBodega(fichas),
+        error: 'GASTO_BODEGA',
+        details: {
+          gastos_bodega: fichas.map(({ id, fecha_gasto, monto }) => ({
+            id,
+            fecha_gasto,
+            monto,
+          })),
+        },
+      });
+    }
+    const razon = limpiarJustificacion(justificacion);
+    if (noBancariosNuevos.length > 0 && razon.length < JUSTIFICACION_MIN) {
+      const fichas = noBancariosNuevos.map(ficha).sort(cronologico);
+      throw new BadRequestException({
+        message: mensajeJustificacionRequerida(fichas),
+        error: 'JUSTIFICACION_REQUERIDA',
+        details: { gastos_no_bancarios: fichas },
+      });
+    }
+    return {
+      agregar: noBancariosNuevos.map((g) => g.id),
+      justificacion: razon,
+    };
+  }
+
+  /**
+   * NOTAS DEL VÍNCULO NO BANCARIO (6-oct-2026, API 0.0.63), DESPUÉS de
+   * ligar/desligar: la liga ya quedó y esto solo la documenta.
+   * - Cargo: con `todoElCargo` (desvincular TODO) pierde todas sus líneas;
+   *   pierde la de cada gasto de `soltar` y gana la de cada gasto de
+   *   `agregar` («Vinculado a gasto en EFECTIVO del …»).
+   * - Gastos de `soltar`: pierden la línea de ESTE cargo.
+   * - Gastos de `agregar`: ganan «⚠ Conciliado con el cargo bancario del …
+   *   sin cambiar el medio de pago (EFECTIVO): …».
+   * Textos y regex en `common/vinculo-no-bancario.util` (idempotentes). Cada
+   * escritura toca SOLO `notas` + `updated_by`, con CAS (`reescribirNotas`).
+   * Si algo falla, la liga se queda (jamás una liga a medias): warn y
+   * `false` (el PATCH lo dice en `vinculo_no_bancario.notas_anotadas`).
+   */
+  private async sincronizarNotasVinculo(args: {
+    movId: string;
+    agregar: readonly string[];
+    soltar: readonly string[];
+    todoElCargo: boolean;
+    justificacion: string;
+    usuarioNombre: string | null | undefined;
+    userId: string;
+    /** Moneda de la cuenta si ya se leyó (si no, se lee). */
+    cuentaMoneda?: string | null;
+  }): Promise<boolean> {
+    const sb = this.supabase.service;
+    try {
+      const { data: movRaw, error: movErr } = await sb
+        .from('movimiento_bancario')
+        .select(
+          'id, fecha, monto, descripcion, notas, updated_at, cuenta_bancaria_id',
+        )
+        .eq('id', args.movId)
+        .maybeSingle();
+      if (movErr) throw new Error(movErr.message);
+      if (!movRaw) throw new Error('el movimiento ya no existe');
+      const mov = movRaw as unknown as Record<string, unknown>;
+      const ids = [...new Set([...args.agregar, ...args.soltar])];
+      const gastos =
+        ids.length === 0
+          ? []
+          : await this.leerPorLotes(ids, (lote) =>
+              sb.from('gasto').select(GASTO_NOTA_COLS).in('id', lote),
+            );
+      const gastoDe = new Map(gastos.map((g) => [g.id as string, g]));
+      for (const id of args.agregar) {
+        if (!gastoDe.has(id)) throw new Error(`el gasto ${id} ya no existe`);
+      }
+      // Solo los soltados que SÍ traen una línea del vínculo se reescriben
+      // (desligar un cargo de tarjeta no escribe ni lee nada más).
+      const soltarConLinea = args.soltar.filter((id) =>
+        tieneNotasVinculoNoBancario(
+          gastoDe.get(id)?.notas as string | null | undefined,
+        ),
+      );
+      // El cargo como lo nombra la nota del gasto (con la moneda de SU
+      // cuenta): solo hace falta si un gasto gana o pierde su línea.
+      const cargo: CargoDeNota | null =
+        args.agregar.length > 0 || soltarConLinea.length > 0
+          ? {
+              fecha:
+                typeof mov.fecha === 'string' ? mov.fecha.slice(0, 10) : null,
+              monto: Math.abs(Number(mov.monto)) || 0,
+              moneda:
+                args.cuentaMoneda ??
+                (await this.monedaCuenta(mov.cuenta_bancaria_id as string)),
+              descripcion:
+                typeof mov.descripcion === 'string' ? mov.descripcion : null,
+            }
+          : null;
+      const firma = {
+        justificacion: args.justificacion,
+        usuario: args.usuarioNombre,
+        hoy: hoyCancun(),
+      };
+      // 1) El CARGO: una línea por gasto no bancario que paga.
+      await this.reescribirNotas(
+        'movimiento_bancario',
+        filaNotas(mov),
+        (notas) => {
+          let n = args.todoElCargo
+            ? quitarNotasVinculoNoBancario(notas)
+            : notas;
+          for (const id of args.soltar) {
+            const g = gastoDe.get(id);
+            if (g) {
+              n = quitarNotasVinculoNoBancario(n, { gasto: gastoDeNota(g) });
+            }
+          }
+          for (const id of args.agregar) {
+            n = agregarNotaVinculo(
+              n,
+              lineaNotaCargo(gastoDeNota(gastoDe.get(id)!), firma),
+            );
+          }
+          return n;
+        },
+        args.userId,
+      );
+      if (!cargo) return true;
+      // 2) Los que se soltaron: fuera la línea de ESTE cargo.
+      for (const id of soltarConLinea) {
+        await this.reescribirNotas(
+          'gasto',
+          filaNotas(gastoDe.get(id)!),
+          (n) => quitarNotasVinculoNoBancario(n, { cargo }),
+          args.userId,
+        );
+      }
+      // 3) Los no bancarios que entraron: su línea, SIN tocar el medio.
+      for (const id of args.agregar) {
+        const g = gastoDe.get(id)!;
+        const medio = typeof g.medio_pago === 'string' ? g.medio_pago : null;
+        await this.reescribirNotas(
+          'gasto',
+          filaNotas(g),
+          (n) => agregarNotaVinculo(n, lineaNotaGasto(cargo, medio, firma)),
+          args.userId,
+        );
+      }
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `Conciliación del movimiento ${args.movId}: la liga quedó, pero no se pudieron ${args.agregar.length > 0 ? 'anotar' : 'limpiar'} las notas del vínculo con un gasto no bancario: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Reescribe `notas` de UNA fila con CAS sobre `updated_at`: si alguien la
+   * escribió entre la lectura y el update (0 filas), se relee y se
+   * reintenta UNA vez; si vuelve a pasar, LANZA. Sin cambio ⇒ ni una
+   * escritura. Solo toca `notas` y `updated_by` (la bitácora del gasto
+   * registra quién): JAMÁS `medio_pago`, `verificado_*` ni
+   * `requiere_visto_bueno`.
+   */
+  private async reescribirNotas(
+    tabla: 'gasto' | 'movimiento_bancario',
+    fila: FilaNotas,
+    transformar: (notas: string | null) => string | null,
+    userId: string,
+  ): Promise<void> {
+    const sb = this.supabase.service;
+    let actual = fila;
+    for (let intento = 0; intento < 2; intento += 1) {
+      const nuevo = transformar(actual.notas);
+      if ((nuevo ?? null) === (actual.notas ?? null)) return;
+      let q = sb
+        .from(tabla)
+        .update({ notas: nuevo, updated_by: userId })
+        .eq('id', actual.id);
+      if (actual.updated_at) q = q.eq('updated_at', actual.updated_at);
+      const { data, error } = await q.select('id');
+      if (error) throw new Error(error.message);
+      if (Array.isArray(data) && data.length > 0) return;
+      const { data: fresca, error: lecturaErr } = await sb
+        .from(tabla)
+        .select('id, notas, updated_at')
+        .eq('id', actual.id)
+        .maybeSingle();
+      if (lecturaErr) throw new Error(lecturaErr.message);
+      if (!fresca) throw new Error(`${tabla} ${actual.id} ya no existe`);
+      actual = filaNotas(fresca);
+    }
+    throw new Error(
+      `las notas de ${tabla} ${fila.id} cambiaron mientras se anotaban`,
+    );
   }
 
   /**
@@ -6964,6 +7362,16 @@ export class ConciliacionService {
     if (mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
     }
+    // Gasto no bancario (6-oct-2026): quiénes pierden su línea de este
+    // cargo. Si la lectura falla, el cargo igual se limpia (warn).
+    const previas = await this.partesDeMovimientos([movId]).catch(
+      (err: unknown) => {
+        this.logger.warn(
+          `Conciliación del movimiento ${movId}: no se leyeron sus gastos antes de desvincular (sus notas del vínculo no se limpian): ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return [] as ParteCargoGasto[];
+      },
+    );
     const { error } = await this.supabase.service.rpc(
       'conciliacion_desligar_cargo_gastos',
       { p_movimiento_id: movId, p_actor: userId },
@@ -6978,6 +7386,15 @@ export class ConciliacionService {
         lote: null,
       });
     }
+    await this.sincronizarNotasVinculo({
+      movId,
+      agregar: [],
+      soltar: [...new Set(previas.map((p) => p.gasto_id))],
+      todoElCargo: true,
+      justificacion: '',
+      usuarioNombre: null,
+      userId,
+    });
     return this.respuestaPartes(movId);
   }
 
@@ -6987,8 +7404,20 @@ export class ConciliacionService {
    * la BD). `gastos_estado` SIEMPRE; con exactamente UNA parte, además los
    * tres campos planos de siempre (`gasto_conciliado`, `monto_vinculado`,
    * `faltante`); con 0 o ≥ 2, null.
+   *
+   * ADITIVOS (6-oct-2026, API 0.0.63): `gastos_estado[].medio_pago` (el
+   * panel marca «Efectivo») y, solo si ENTRÓ un gasto no bancario,
+   * `vinculo_no_bancario {gasto_ids, notas_anotadas}`. La fila se lee
+   * DESPUÉS de anotar: sus `notas` ya traen la línea.
    */
-  private async respuestaPartes(movId: string) {
+  private async respuestaPartes(
+    movId: string,
+    extra: {
+      /** Medios ya leídos (id ⇒ medio); los que falten se leen. */
+      medios?: ReadonlyMap<string, string | null>;
+      vinculo?: VinculoNoBancarioRespuesta | null;
+    } = {},
+  ) {
     const { data, error } = await this.supabase.service
       .from('movimiento_bancario')
       .select(await this.movCols())
@@ -6997,6 +7426,10 @@ export class ConciliacionService {
     if (error) throw new Error(error.message);
     const partes = await this.partesDeMovimientos([movId]);
     const estados = await this.estadosVistaDe(partes.map((p) => p.gasto_id));
+    const medios = await this.mediosDeGastos(
+      partes.map((p) => p.gasto_id),
+      extra.medios,
+    );
     const gastos_estado = partes.map((p) => {
       const e = estados.get(p.gasto_id);
       return {
@@ -7006,6 +7439,7 @@ export class ConciliacionService {
         gasto_conciliado: e ? e.cubierto : false,
         monto_vinculado: e ? e.monto_vinculado : p.monto_parte,
         faltante: e ? e.faltante : null,
+        medio_pago: medios.get(p.gasto_id) ?? null,
       };
     });
     const una = gastos_estado.length === 1 ? gastos_estado[0] : null;
@@ -7017,7 +7451,45 @@ export class ConciliacionService {
       gasto_conciliado: una ? una.gasto_conciliado : null,
       monto_vinculado: una ? una.monto_vinculado : null,
       faltante: una ? una.faltante : null,
+      ...(extra.vinculo ? { vinculo_no_bancario: extra.vinculo } : {}),
     };
+  }
+
+  /**
+   * id ⇒ `medio_pago` de estos gastos: los `conocidos` y, los que falten,
+   * en UNA lectura. Best-effort: si falla, esos salen `null` (un medio no
+   * vale tumbar la respuesta de una liga que ya quedó).
+   */
+  private async mediosDeGastos(
+    ids: readonly string[],
+    conocidos?: ReadonlyMap<string, string | null>,
+  ): Promise<Map<string, string | null>> {
+    const out = new Map<string, string | null>();
+    const faltan: string[] = [];
+    for (const id of ids) {
+      if (conocidos?.has(id)) out.set(id, conocidos.get(id) ?? null);
+      else faltan.push(id);
+    }
+    if (faltan.length === 0) return out;
+    try {
+      const filas = await this.leerPorLotes(faltan, (lote) =>
+        this.supabase.service
+          .from('gasto')
+          .select('id, medio_pago')
+          .in('id', lote),
+      );
+      for (const f of filas) {
+        out.set(
+          f.id as string,
+          typeof f.medio_pago === 'string' ? f.medio_pago : null,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer el medio de pago de ${faltan.length} gasto(s) de la respuesta: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    return out;
   }
 
   /** 409/400 del lote que la pre-validación TS ya sabe que no entra. */
@@ -7230,12 +7702,14 @@ export class ConciliacionService {
   /**
    * Camino DIRECTO (hasta el 0.0.51; hoy solo sin la migración
    * 20261002000002): escribe `movimiento_bancario.gasto_id` y recalcula el
-   * gasto en TS. Intacto a propósito.
+   * gasto en TS. Intacto a propósito, salvo la regla del gasto no bancario
+   * (6-oct-2026), que es la MISMA del camino con la puente.
    */
   private async linkDirecto(
     movId: string,
     gastoId: string | null,
     userId: string,
+    opts: OpcionesVinculo = {},
   ) {
     // Emparejado como cargo devuelto / devolución (30-sep-2026): ni se liga
     // ni se desvincula por aquí — el camino es DELETE movimientos/:id/reverso.
@@ -7272,13 +7746,22 @@ export class ConciliacionService {
       moneda: string | null;
       monto: number;
       tc_gasto: number | null;
+      medio_pago: string | null;
+      fecha_gasto: string | null;
     };
     let gastoVinculado: GastoLink | null = null;
     let cuentaMoneda: string | null = null;
+    // Gasto no bancario (6-oct-2026): los que entran y la razón limpia.
+    let vinculo: { agregar: string[]; justificacion: string } = {
+      agregar: [],
+      justificacion: '',
+    };
     if (gastoId) {
       const { data: gasto, error: gastoErr } = await this.supabase.service
         .from('gasto')
-        .select('id, conciliado, moneda, monto, tc_gasto')
+        .select(
+          'id, conciliado, moneda, monto, tc_gasto, medio_pago, fecha_gasto',
+        )
         .eq('id', gastoId)
         .maybeSingle();
       if (gastoErr) throw new Error(gastoErr.message);
@@ -7327,6 +7810,11 @@ export class ConciliacionService {
           );
         }
       }
+      vinculo = this.validarMediosVinculo(
+        [{ ...gastoVinculado, medio_pago: gastoVinculado.medio_pago ?? null }],
+        new Set(prevGasto ? [prevGasto] : []),
+        opts.justificacion,
+      );
     }
 
     const { data, error } = await this.supabase.service
@@ -7425,13 +7913,50 @@ export class ConciliacionService {
       }
       estado = await this.recalcularGasto(gastoId, userId, { tcDerivado });
     }
+    // Gasto no bancario (6-oct-2026): la liga ya quedó; las notas la
+    // documentan (best-effort) y el que se soltó pierde su línea.
+    const soltados = prevGasto && prevGasto !== gastoId ? [prevGasto] : [];
+    let fila = data as unknown as Record<string, unknown>;
+    let notasAnotadas = true;
+    if (vinculo.agregar.length > 0 || soltados.length > 0) {
+      notasAnotadas = await this.sincronizarNotasVinculo({
+        movId,
+        agregar: vinculo.agregar,
+        soltar: soltados,
+        todoElCargo: gastoId === null,
+        justificacion: vinculo.justificacion,
+        usuarioNombre: opts.usuarioNombre,
+        userId,
+        cuentaMoneda,
+      });
+      // Las notas del cargo cambiaron después del UPDATE: se releen.
+      const { data: releida } = await this.supabase.service
+        .from('movimiento_bancario')
+        .select('notas')
+        .eq('id', movId)
+        .maybeSingle();
+      if (releida) {
+        fila = {
+          ...fila,
+          notas: (releida as { notas?: unknown }).notas ?? null,
+        };
+      }
+    }
     // Aditivos (14-sep-2026): el panel decide el toast «Gasto cubierto» vs
     // «Pago parcial: faltan $X» con la respuesta, sin recalcular nada.
     return {
-      ...(data as unknown as Record<string, unknown>),
+      ...fila,
       gasto_conciliado: estado ? estado.cubierto : null,
       monto_vinculado: estado ? estado.suma : null,
       faltante: estado ? estado.faltante : null,
+      ...(vinculo.agregar.length > 0
+        ? {
+            vinculo_no_bancario: {
+              gasto_ids: vinculo.agregar,
+              notas_anotadas: notasAnotadas,
+            } satisfies VinculoNoBancarioRespuesta,
+          }
+        : {}),
     };
   }
 
@@ -7891,14 +8416,27 @@ export class ConciliacionService {
    * `excluidos` + `excluidos_monto` (`excluidosDeCandidatos`): los gastos
    * del mismo monto que NO entraron y por qué. Con candidatos la respuesta
    * es la del 0.0.62 y no se hace ninguna consulta extra.
+   *
+   * NO BANCARIOS (6-oct-2026, API 0.0.63): con `incluir_no_bancarios` el
+   * universo es todo medio MENOS BODEGA (efectivo y PERSONAL_* entran con
+   * las mismas reglas: sin conciliar, moneda, ventana, búsqueda, cruzados);
+   * cada candidato lleva `no_bancario` y los no bancarios van DESPUÉS de
+   * todos los bancarios (cada bloque con `ordenarCandidatosGasto`). Ligarlos
+   * exige `justificacion` en el PATCH.
    */
   async gastosCandidatosDeMovimiento(
     movId: string,
-    query: Partial<Pick<GastosCandidatosQuery, 'q' | 'dias' | 'limite'>>,
+    query: Partial<
+      Pick<
+        GastosCandidatosQuery,
+        'q' | 'dias' | 'limite' | 'incluir_no_bancarios'
+      >
+    >,
   ): Promise<GastosCandidatosRespuesta> {
     if (!(await this.partesOn())) throw errorPartesNoDisponibles();
     const dias = Math.min(180, Math.max(1, Math.trunc(query.dias ?? 30)));
     const limite = Math.min(300, Math.max(1, Math.trunc(query.limite ?? 100)));
+    const incluirNoBancarios = query.incluir_no_bancarios === true;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select('id, fecha, monto, tipo, cuenta_bancaria_id')
@@ -7948,8 +8486,13 @@ export class ConciliacionService {
       let qb = this.supabase.service
         .from('gasto')
         .select(colsRicas)
-        .eq('conciliado', false)
-        .in('medio_pago', MEDIOS_BANCARIOS)
+        .eq('conciliado', false);
+      // Universo por medio: bancarios (siempre) o, con la bandera, todo
+      // menos BODEGA (`medio_pago` es NOT NULL: el `neq` no pierde nulos).
+      qb = incluirNoBancarios
+        ? qb.neq('medio_pago', MEDIO_BODEGA)
+        : qb.in('medio_pago', MEDIOS_BANCARIOS);
+      qb = qb
         .eq('moneda', monedaQ)
         .gte('fecha_gasto', ventana.desde)
         .lte('fecha_gasto', ventana.hasta);
@@ -7985,23 +8528,40 @@ export class ConciliacionService {
       ...propios.map((g) => g.id as string),
       ...cruzados.map((x) => x.g.id as string),
     ]);
+    const conMedio = <T extends { medio_pago?: string | null }>(c: T) => ({
+      ...c,
+      no_bancario: !esMedioBancario(c.medio_pago),
+    });
     const candidatos = [
       ...propios.map((g) =>
-        this.aCandidatoGasto(g, null, vinculado.get(g.id as string) ?? 0),
-      ),
-      ...cruzados.map((x) => ({
-        ...this.aCandidatoGasto(
-          x.g,
-          round6(x.tc),
-          vinculado.get(x.g.id as string) ?? 0,
+        conMedio(
+          this.aCandidatoGasto(g, null, vinculado.get(g.id as string) ?? 0),
         ),
-        cruzado: true as const,
-      })),
+      ),
+      ...cruzados.map((x) =>
+        conMedio({
+          ...this.aCandidatoGasto(
+            x.g,
+            round6(x.tc),
+            vinculado.get(x.g.id as string) ?? 0,
+          ),
+          cruzado: true as const,
+        }),
+      ),
     ];
-    const ordenados = ordenarCandidatosGasto(candidatos, {
-      montoCargo,
-      fecha,
-    });
+    // Bancarios primero; luego (solo con la bandera) los no bancarios, cada
+    // bloque con el orden de siempre.
+    const ref = { montoCargo, fecha };
+    const ordenados = [
+      ...ordenarCandidatosGasto(
+        candidatos.filter((c) => !c.no_bancario),
+        ref,
+      ),
+      ...ordenarCandidatosGasto(
+        candidatos.filter((c) => c.no_bancario),
+        ref,
+      ),
+    ];
     const respuesta: GastosCandidatosRespuesta = {
       movimiento: { id: movId, fecha, monto: montoCargo, moneda },
       ventana,
@@ -8020,6 +8580,7 @@ export class ConciliacionService {
       fecha,
       dias,
       ventana,
+      incluirNoBancarios,
     });
     return excluidos ? { ...respuesta, ...excluidos } : respuesta;
   }
@@ -8044,6 +8605,8 @@ export class ConciliacionService {
     fecha: string;
     dias: number;
     ventana: { desde: string; hasta: string };
+    /** Con la bandera, efectivo / PERSONAL_* ya son del universo. */
+    incluirNoBancarios?: boolean;
   }): Promise<ExcluidosCandidatos | null> {
     const monto = montoReferenciaExcluidos(opts.q, opts.montoCargo);
     if (!(monto > 0)) return { excluidos: [], excluidos_monto: monto };
@@ -8068,6 +8631,7 @@ export class ConciliacionService {
         monedaCuenta: opts.monedaCuenta,
         ventana: opts.ventana,
         fechaCargo: opts.fecha,
+        incluirNoBancarios: opts.incluirNoBancarios === true,
       });
       const yaConciliados = grupos.find((g) => g.motivo === 'YA_CONCILIADO');
       if (!yaConciliados) return { excluidos: grupos, excluidos_monto: monto };

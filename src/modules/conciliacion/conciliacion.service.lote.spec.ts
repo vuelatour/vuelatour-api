@@ -27,6 +27,8 @@ import {
 } from './conciliacion-parcial.util';
 import { MENSAJE_SIN_MONEDA_CUENTA } from './gastos-candidatos.util';
 import { GASTO_EXCLUIDO_COLS } from './candidatos-excluidos.util';
+import { fechaNota } from '../../common/vinculo-no-bancario.util';
+import { hoyCancun } from '../../common/fecha-cancun.util';
 
 /**
  * 1 CARGO DEL BANCO ↔ N GASTOS («lote», 2-oct-2026, API 0.0.52, migración
@@ -112,6 +114,11 @@ interface OpcionesFake {
   sinSerieFolio?: boolean;
   /** Lectura puntual que falla (tabla + texto acumulado de la consulta). */
   fallaConsulta?: (tabla: string, texto: string) => boolean;
+  /**
+   * Corre ANTES de aplicar cada UPDATE (con el patch): simula que alguien
+   * escribió la fila entre la lectura y el update (CAS de las notas).
+   */
+  antesDeUpdate?: (tabla: string, patch: Row, db: Tablas) => void;
 }
 
 /** Mini-PostgREST en memoria: filtros, `or`, embeds, orden, RPC y bitácora. */
@@ -206,6 +213,7 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
         if (op === 'update' && opts.falloUpdate?.tabla === tabla) {
           return { data: null, error: opts.falloUpdate.error, count: null };
         }
+        if (op === 'update') opts.antesDeUpdate?.(tabla, patch, db);
         const filas = (db[tabla] ?? []).filter((r) =>
           filtros.every((f) => f(r)),
         );
@@ -1867,5 +1875,514 @@ describe('GET …/gastos-candidatos — excluidos: POR QUÉ no aparece (6-oct-20
     expect(String(warnPuente.mock.calls[0][0])).toContain(
       'con qué cargo están conciliados',
     );
+  });
+});
+
+// =====================================================================
+describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => {
+  // Caso REAL: cargo de $212.00 del 07-sep (ASUR CANCUN, GASTOS GNRAL) que
+  // «ningún piloto subió»; el 27 y 28-sep hubo dos estacionamientos de ese
+  // monto en EFECTIVO (#330) que Mari facturó. Se liga al del 28 SIN
+  // cambiar el medio de pago (la caja de los pilotos no se mueve).
+  const RAZON =
+    'Nadie capturó el estacionamiento del 7 de septiembre; se usa el ticket facturado del 28 para no perder la deducción.';
+  const VINCULO = { justificacion: RAZON, usuarioNombre: 'Mari' };
+  const HOY = fechaNota(hoyCancun());
+  const NOTA_ASUR =
+    'Aeropuerto de Cancún S.A de C.V. · Cobro estancia (estacionamiento)';
+  const lineaCargo = (fecha: string) =>
+    `Vinculado a gasto en EFECTIVO del ${fecha} (Taxi / estacionamiento · vuelo #330 · $212.00): ${RAZON} — Mari, ${HOY}`;
+  const lineaGasto = (monto = '$212.00') =>
+    `⚠ Conciliado con el cargo bancario del 07-sep-2026 (${monto} · ASUR CANCUN) sin cambiar el medio de pago (EFECTIVO): ${RAZON} — Mari, ${HOY}`;
+
+  const efectivo = (
+    id: string,
+    fecha: string,
+    folio: number,
+    extra: Row = {},
+  ): Row =>
+    saesa(id, 212, folio, {
+      fecha_gasto: fecha,
+      medio_pago: 'EFECTIVO',
+      categoria: 'TAXI',
+      notas: NOTA_ASUR,
+      verificado_por: 'u-mari',
+      verificado_at: '2026-10-01T15:00:00+00:00',
+      requiere_visto_bueno: false,
+      updated_at: '2026-10-01T15:00:00+00:00',
+      ...extra,
+    });
+  const mundoAsur = (gastos: Row[] = [], movs: Row[] = []) =>
+    mundo({
+      vuelo: [
+        ...mundo().vuelo,
+        { id: 'v-338', folio: 338, aeronave_id: 'av-n41' },
+        { id: 'v-330', folio: 330, aeronave_id: 'av-vgv' },
+      ],
+      gasto: [
+        efectivo('g-24', '2026-09-24', 338),
+        efectivo('g-27', '2026-09-27', 330),
+        efectivo('g-28', '2026-09-28', 330),
+        ...gastos,
+      ],
+      movimiento_bancario: [
+        cargo('m212', 212, {
+          fecha: '2026-09-07',
+          descripcion: 'ASUR CANCUN',
+          updated_at: '2026-10-02T12:00:00+00:00',
+        }),
+        ...movs,
+      ],
+    });
+  const updatesDe = (
+    log: Array<{ tabla: string; texto: string }>,
+    tabla: string,
+  ) => log.filter((q) => q.tabla === tabla && q.texto.includes('update('));
+
+  // ------------------------- candidatos -------------------------------
+
+  it('candidatos SIN la bandera: el efectivo no sale y todo candidato dice no_bancario: false', async () => {
+    const { svc } = armar(
+      mundoAsur([
+        saesa('g-tdc', 212, 315, {
+          fecha_gasto: '2026-09-06',
+          medio_pago: 'TARJETA_CORP',
+        }),
+      ]),
+    );
+    const r = await svc.gastosCandidatosDeMovimiento('m212', { q: '212' });
+    expect(r.candidatos.map((c) => [c.id, c.no_bancario])).toEqual([
+      ['g-tdc', false],
+    ]);
+  });
+
+  it('con incluir_no_bancarios: bancarios primero, luego efectivo / PERSONAL_* (orden de siempre); BODEGA y conciliados nunca', async () => {
+    const { svc, log } = armar(
+      mundoAsur([
+        // Bancario MÁS LEJOS del cargo que el efectivo: aun así va primero.
+        saesa('g-tdc', 212, 315, {
+          fecha_gasto: '2026-09-30',
+          medio_pago: 'TARJETA_CORP',
+        }),
+        efectivo('g-pablo', '2026-09-08', 315, {
+          medio_pago: 'PERSONAL_PABLO',
+        }),
+        saesa('g-bodega', 212, 315, {
+          fecha_gasto: '2026-09-07',
+          medio_pago: 'BODEGA',
+          categoria: 'REFACCION',
+        }),
+        efectivo('g-conc', '2026-09-07', 330, { conciliado: true }),
+      ]),
+    );
+    const r = await svc.gastosCandidatosDeMovimiento('m212', {
+      q: '212',
+      incluir_no_bancarios: true,
+    });
+    expect(
+      r.candidatos.map((c) => [c.id, c.medio_pago, c.no_bancario]),
+    ).toEqual([
+      ['g-tdc', 'TARJETA_CORP', false],
+      ['g-pablo', 'PERSONAL_PABLO', true],
+      ['g-24', 'EFECTIVO', true],
+      ['g-27', 'EFECTIVO', true],
+      ['g-28', 'EFECTIVO', true],
+    ]);
+    expect(r).not.toHaveProperty('excluidos');
+    // El universo cambió de filtro: todo menos BODEGA (no la lista bancaria).
+    const lecturas = log.filter(
+      (q) => q.tabla === 'gasto' && q.texto.includes('eq:conciliado'),
+    );
+    expect(lecturas.some((q) => q.texto.includes('neq:medio_pago'))).toBe(true);
+    expect(lecturas.some((q) => q.texto.includes('in:medio_pago'))).toBe(false);
+  });
+
+  it('con la bandera y la lista vacía: excluidos ya no cuenta el efectivo como «efectivo u otro medio» (BODEGA sí)', async () => {
+    const { svc } = armar(
+      mundo({
+        vuelo: [
+          ...mundo().vuelo,
+          { id: 'v-330', folio: 330, aeronave_id: 'av-vgv' },
+        ],
+        gasto: [
+          saesa('g-bodega', 212, 315, {
+            fecha_gasto: '2026-09-15',
+            medio_pago: 'BODEGA',
+            categoria: 'REFACCION',
+          }),
+          efectivo('g-conc', '2026-09-20', 330, { conciliado: true }),
+          efectivo('g-usd', '2026-09-21', 330, { moneda: 'USD' }),
+          efectivo('g-jun', '2026-06-12', 330),
+        ],
+        movimiento_bancario: [
+          cargo('m212', 212, { fecha: '2026-09-07', descripcion: 'ASUR' }),
+        ],
+      }),
+    );
+    const con = await svc.gastosCandidatosDeMovimiento('m212', {
+      q: '212',
+      incluir_no_bancarios: true,
+    });
+    expect(con.candidatos).toEqual([]);
+    expect(
+      con.excluidos!.map((x) => [x.motivo, x.n, x.gastos.map((y) => y.id)]),
+    ).toEqual([
+      ['EFECTIVO_U_OTRO_MEDIO', 1, ['g-bodega']],
+      ['YA_CONCILIADO', 1, ['g-conc']],
+      ['OTRA_MONEDA', 1, ['g-usd']],
+      ['FUERA_DE_VENTANA', 1, ['g-jun']],
+    ]);
+    // Sin la bandera, lo del 0.0.63: los 4 son «efectivo u otro medio».
+    const sin = await svc.gastosCandidatosDeMovimiento('m212', { q: '212' });
+    expect(sin.excluidos!.map((x) => [x.motivo, x.n])).toEqual([
+      ['EFECTIVO_U_OTRO_MEDIO', 4],
+    ]);
+  });
+
+  // --------------------------- PATCH ----------------------------------
+
+  it('PATCH: un gasto en efectivo SIN justificación ⇒ 400 JUSTIFICACION_REQUERIDA y NADA escrito', async () => {
+    const { svc, db, log } = armar(mundoAsur());
+    for (const opts of [
+      undefined,
+      {},
+      { justificacion: null },
+      { justificacion: '   corta \n ' },
+    ]) {
+      const r = await error(svc.link('m212', 'g-28', USER, opts));
+      expect(r.e).toBeInstanceOf(BadRequestException);
+      expect(r.code).toBe('JUSTIFICACION_REQUERIDA');
+      expect(r.message).toBe(
+        'El gasto del 28 sep está en efectivo: para vincularlo a un cargo del banco escribe por qué (no cambia el medio de pago).',
+      );
+      expect(r.details).toEqual({
+        gastos_no_bancarios: [
+          {
+            id: 'g-28',
+            medio_pago: 'EFECTIVO',
+            fecha_gasto: '2026-09-28',
+            monto: 212,
+          },
+        ],
+      });
+    }
+    expect(partesDe(db, 'm212')).toEqual([]);
+    expect(log.some((q) => q.tabla.startsWith('rpc:'))).toBe(false);
+    expect(log.some((q) => q.texto.includes('update('))).toBe(false);
+    expect(gasto(db, 'g-28').notas).toBe(NOTA_ASUR);
+  });
+
+  it('PATCH con justificación: liga, NO toca medio / verificado / visto bueno y anota los DOS lados (con CAS)', async () => {
+    const { svc, db, log } = armar(mundoAsur());
+    const r = (await svc.link('m212', 'g-28', USER, VINCULO)) as Row;
+    // La liga de siempre (la «BD» recalcula el gasto).
+    expect(partesDe(db, 'm212').map((p) => p.gasto_id)).toEqual(['g-28']);
+    expect(mov(db, 'm212')).toMatchObject({
+      gasto_id: 'g-28',
+      gastos_n: 1,
+      conciliado: true,
+      notas: lineaCargo('28-sep-2026'),
+    });
+    expect(gasto(db, 'g-28')).toMatchObject({
+      conciliado: true,
+      medio_pago: 'EFECTIVO',
+      verificado_por: 'u-mari',
+      verificado_at: '2026-10-01T15:00:00+00:00',
+      requiere_visto_bueno: false,
+      notas: `${NOTA_ASUR}\n\n${lineaGasto()}`,
+    });
+    // Solo `notas` + `updated_by`, con CAS sobre updated_at, en los dos lados.
+    for (const tabla of ['gasto', 'movimiento_bancario']) {
+      const ups = updatesDe(log, tabla);
+      expect(ups).toHaveLength(1);
+      expect(ups[0].texto).toContain('update(notas,updated_by)');
+      expect(ups[0].texto).toContain('eq:updated_at');
+    }
+    // Respuesta: la fila ya anotada, el medio y el aditivo.
+    expect(r).toMatchObject({
+      notas: lineaCargo('28-sep-2026'),
+      gasto_conciliado: true,
+      vinculo_no_bancario: { gasto_ids: ['g-28'], notas_anotadas: true },
+    });
+    expect(r.gastos_estado).toEqual([
+      expect.objectContaining({ gasto_id: 'g-28', medio_pago: 'EFECTIVO' }),
+    ]);
+    // Los otros dos de efectivo, intactos.
+    expect(gasto(db, 'g-27').notas).toBe(NOTA_ASUR);
+    expect(gasto(db, 'g-24')).not.toHaveProperty('updated_by');
+  });
+
+  it('desvincular (gasto_id: null) retira las líneas de los dos lados; lo de la oficina se queda', async () => {
+    const { svc, db } = armar(mundoAsur());
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    mov(db, 'm212').notas =
+      `${String(mov(db, 'm212').notas)}\nRevisado con Mari`;
+    const r = (await svc.link('m212', null, USER)) as Row;
+    expect(partesDe(db, 'm212')).toEqual([]);
+    expect(mov(db, 'm212').notas).toBe('Revisado con Mari');
+    expect(gasto(db, 'g-28')).toMatchObject({
+      conciliado: false,
+      medio_pago: 'EFECTIVO',
+      notas: NOTA_ASUR,
+    });
+    expect(r).toMatchObject({ gastos_estado: [], notas: 'Revisado con Mari' });
+    expect(r).not.toHaveProperty('vinculo_no_bancario');
+  });
+
+  it('desligar un cargo de gastos bancarios no escribe notas ni lee la cuenta (cero costo para lo de siempre)', async () => {
+    const { svc, log } = armar(mundo());
+    await svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    const antes = log.length;
+    await svc.link('m8404', null, USER);
+    const despues = log.slice(antes);
+    expect(despues.some((q) => q.texto.includes('update(notas'))).toBe(false);
+    expect(despues.some((q) => q.tabla === 'cuenta_bancaria')).toBe(false);
+  });
+
+  it('lote mixto (transferencia + efectivo): sin razón 400 SOLO por el de efectivo; con ella liga los dos y anota SOLO el de efectivo', async () => {
+    const { svc, db } = armar(
+      mundoAsur(
+        [
+          saesa('g-tr', 212, 315, {
+            fecha_gasto: '2026-09-06',
+            medio_pago: 'TRANSFERENCIA',
+            notas: 'SPEI ASUR',
+          }),
+        ],
+        [
+          cargo('m424', 424, {
+            fecha: '2026-09-07',
+            descripcion: 'ASUR CANCUN',
+          }),
+        ],
+      ),
+    );
+    const sinRazon = await error(
+      svc.linkGastos('m424', ['g-tr', 'g-28'], USER),
+    );
+    expect(sinRazon.code).toBe('JUSTIFICACION_REQUERIDA');
+    expect(sinRazon.details).toEqual({
+      gastos_no_bancarios: [
+        {
+          id: 'g-28',
+          medio_pago: 'EFECTIVO',
+          fecha_gasto: '2026-09-28',
+          monto: 212,
+        },
+      ],
+    });
+    expect(partesDe(db, 'm424')).toEqual([]);
+
+    const r = (await svc.linkGastos(
+      'm424',
+      ['g-tr', 'g-28'],
+      USER,
+      VINCULO,
+    )) as Row;
+    expect(
+      partesDe(db, 'm424')
+        .map((p) => p.gasto_id)
+        .sort(),
+    ).toEqual(['g-28', 'g-tr']);
+    expect(mov(db, 'm424').notas).toBe(lineaCargo('28-sep-2026'));
+    expect(gasto(db, 'g-tr').notas).toBe('SPEI ASUR');
+    expect(gasto(db, 'g-28').notas).toBe(
+      `${NOTA_ASUR}\n\n${lineaGasto('$424.00')}`,
+    );
+    expect(r.vinculo_no_bancario).toEqual({
+      gasto_ids: ['g-28'],
+      notas_anotadas: true,
+    });
+    expect(
+      (r.gastos_estado as Row[]).map((x) => [x.gasto_id, x.medio_pago]).sort(),
+    ).toEqual([
+      ['g-28', 'EFECTIVO'],
+      ['g-tr', 'TRANSFERENCIA'],
+    ]);
+    // Dos de efectivo en el MISMO cargo: una línea por gasto, renglón seguido.
+    const w = armar(
+      mundoAsur(
+        [],
+        [
+          cargo('m424', 424, {
+            fecha: '2026-09-07',
+            descripcion: 'ASUR CANCUN',
+          }),
+        ],
+      ),
+    );
+    await w.svc.linkGastos('m424', ['g-27', 'g-28'], USER, VINCULO);
+    expect(mov(w.db, 'm424').notas).toBe(
+      `${lineaCargo('27-sep-2026')}\n${lineaCargo('28-sep-2026')}`,
+    );
+  });
+
+  it('BODEGA (salida de inventario) ⇒ 409 GASTO_BODEGA aunque traiga justificación; nada escrito', async () => {
+    const { svc, db, log } = armar(
+      mundoAsur([
+        saesa('g-bodega', 212, 315, {
+          fecha_gasto: '2026-09-15',
+          medio_pago: 'BODEGA',
+          categoria: 'REFACCION',
+        }),
+      ]),
+    );
+    const r = await error(svc.link('m212', 'g-bodega', USER, VINCULO));
+    expect(r.e).toBeInstanceOf(ConflictException);
+    expect(r.code).toBe('GASTO_BODEGA');
+    expect(r.message).toBe(
+      'El gasto del 15 sep es una salida de inventario (Bodega): no se pagó con el banco y no se puede vincular a un cargo.',
+    );
+    expect(r.details).toEqual({
+      gastos_bodega: [
+        { id: 'g-bodega', fecha_gasto: '2026-09-15', monto: 212 },
+      ],
+    });
+    expect(partesDe(db, 'm212')).toEqual([]);
+    expect(log.some((q) => q.tabla.startsWith('rpc:'))).toBe(false);
+  });
+
+  it('idempotencia: re-ligar el mismo gasto no pide razón ni duplica; ligar → desligar → ligar deja UNA línea por lado', async () => {
+    const { svc, db } = armar(mundoAsur());
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    const notasMov = mov(db, 'm212').notas;
+    const notasGasto = gasto(db, 'g-28').notas;
+    // Panel que reintenta: la re-liga idéntica es no-op, sin razón.
+    const r = (await svc.link('m212', 'g-28', USER)) as Row;
+    expect(r).not.toHaveProperty('vinculo_no_bancario');
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    expect(mov(db, 'm212').notas).toBe(notasMov);
+    expect(gasto(db, 'g-28').notas).toBe(notasGasto);
+    await svc.link('m212', null, USER);
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    expect(mov(db, 'm212').notas).toBe(lineaCargo('28-sep-2026'));
+    expect(gasto(db, 'g-28').notas).toBe(`${NOTA_ASUR}\n\n${lineaGasto()}`);
+  });
+
+  it('cambiar el gasto del cargo (28 → 27): el que se suelta pierde su línea en los dos lados', async () => {
+    const { svc, db } = armar(mundoAsur());
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    await svc.link('m212', 'g-27', USER, VINCULO);
+    expect(partesDe(db, 'm212').map((p) => p.gasto_id)).toEqual(['g-27']);
+    expect(mov(db, 'm212').notas).toBe(lineaCargo('27-sep-2026'));
+    expect(gasto(db, 'g-28')).toMatchObject({
+      conciliado: false,
+      notas: NOTA_ASUR,
+    });
+    expect(gasto(db, 'g-27').notas).toBe(`${NOTA_ASUR}\n\n${lineaGasto()}`);
+  });
+
+  it('CAS: si alguien escribe las notas entre la lectura y el update, se relee y se reintenta sin perder lo suyo', async () => {
+    let primera = true;
+    const { svc, db, log } = armar(mundoAsur(), {
+      antesDeUpdate: (tabla, patch, base) => {
+        if (tabla !== 'gasto' || !('notas' in patch) || !primera) return;
+        primera = false;
+        const g = base.gasto.find((x) => x.id === 'g-28')!;
+        g.notas = `${NOTA_ASUR}\nLo editó Itzi al mismo tiempo`;
+        g.updated_at = '2026-10-06T20:00:00+00:00';
+      },
+    });
+    const r = (await svc.link('m212', 'g-28', USER, VINCULO)) as Row;
+    expect(gasto(db, 'g-28').notas).toBe(
+      `${NOTA_ASUR}\nLo editó Itzi al mismo tiempo\n\n${lineaGasto()}`,
+    );
+    expect(updatesDe(log, 'gasto')).toHaveLength(2);
+    expect(r.vinculo_no_bancario).toEqual({
+      gasto_ids: ['g-28'],
+      notas_anotadas: true,
+    });
+  });
+
+  it('si la anotación falla DESPUÉS de ligar, la liga se queda (notas_anotadas: false) y hay warn', async () => {
+    const { svc, db } = armar(mundoAsur(), {
+      falloUpdate: { tabla: 'gasto', error: { message: 'caída' } },
+    });
+    const warn = jest
+      .spyOn((svc as unknown as { logger: Logger }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const r = (await svc.link('m212', 'g-28', USER, VINCULO)) as Row;
+    expect(partesDe(db, 'm212').map((p) => p.gasto_id)).toEqual(['g-28']);
+    expect(gasto(db, 'g-28')).toMatchObject({
+      conciliado: true,
+      medio_pago: 'EFECTIVO',
+      notas: NOTA_ASUR,
+    });
+    expect(r.vinculo_no_bancario).toEqual({
+      gasto_ids: ['g-28'],
+      notas_anotadas: false,
+    });
+    expect(String(warn.mock.calls.at(-1)?.[0])).toContain('la liga quedó');
+  });
+
+  it('lista: `gasto.medio_pago` (una parte) y `gastos[].medio_pago` (lote) para marcar «Efectivo»', async () => {
+    const { svc, log } = armar(
+      mundoAsur(
+        [
+          saesa('g-tr', 212, 315, {
+            fecha_gasto: '2026-09-06',
+            medio_pago: 'TRANSFERENCIA',
+          }),
+        ],
+        [
+          cargo('m424', 424, {
+            fecha: '2026-09-07',
+            descripcion: 'ASUR CANCUN',
+          }),
+        ],
+      ),
+    );
+    await svc.link('m212', 'g-28', USER, VINCULO);
+    await svc.linkGastos('m424', ['g-tr', 'g-27'], USER, VINCULO);
+    const lista = await svc.list({ limit: 100, offset: 0 });
+    const uno = lista.data.find((m) => m.id === 'm212')!;
+    expect((uno.gasto as Row).medio_pago).toBe('EFECTIVO');
+    const lote = lista.data.find((m) => m.id === 'm424')!;
+    expect((lote.gastos as Row[]).map((g) => [g.id, g.medio_pago])).toEqual([
+      ['g-tr', 'TRANSFERENCIA'],
+      ['g-27', 'EFECTIVO'],
+    ]);
+    // Y es porque se PIDE (el PostgREST de prueba embebe la fila entera).
+    expect(
+      log.some((q) =>
+        q.texto.includes(
+          'gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago,',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      log.some(
+        (q) =>
+          q.tabla === 'gasto' &&
+          q.texto.includes(
+            'select(id, monto, moneda, categoria, fecha_gasto, vuelo_id, lugar, notas, medio_pago,',
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it('SIN la migración de partes (camino directo): la MISMA regla y las mismas notas', async () => {
+    const { svc, db } = armar(mundoAsur(), { sinPartes: true });
+    const r0 = await error(svc.link('m212', 'g-28', USER));
+    expect(r0.code).toBe('JUSTIFICACION_REQUERIDA');
+    expect(mov(db, 'm212').gasto_id).toBeNull();
+    const r = (await svc.link('m212', 'g-28', USER, VINCULO)) as Row;
+    expect(mov(db, 'm212')).toMatchObject({
+      gasto_id: 'g-28',
+      conciliado: true,
+      notas: lineaCargo('28-sep-2026'),
+    });
+    expect(gasto(db, 'g-28')).toMatchObject({
+      conciliado: true,
+      medio_pago: 'EFECTIVO',
+      notas: `${NOTA_ASUR}\n\n${lineaGasto()}`,
+    });
+    expect(r).toMatchObject({
+      notas: lineaCargo('28-sep-2026'),
+      vinculo_no_bancario: { gasto_ids: ['g-28'], notas_anotadas: true },
+    });
+    await svc.link('m212', null, USER);
+    expect(mov(db, 'm212').notas).toBeNull();
+    expect(gasto(db, 'g-28').notas).toBe(NOTA_ASUR);
   });
 });

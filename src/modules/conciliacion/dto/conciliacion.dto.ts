@@ -1,6 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
+import {
+  JUSTIFICACION_MAX,
+  JUSTIFICACION_MIN,
+} from '../../../common/vinculo-no-bancario.util';
 import {
   ArrayMaxSize,
   ArrayMinSize,
@@ -20,6 +24,7 @@ import {
   Max,
   MaxLength,
   Min,
+  MinLength,
   ValidateNested,
 } from 'class-validator';
 
@@ -231,6 +236,13 @@ export class ListConciliacionQuery {
 /** Tope de gastos de UN cargo (lote): el caso real más grande son 29. */
 export const LOTE_GASTOS_MAX = 50;
 
+/** Texto recortado; vacío o solo espacios ⇒ ausente (`undefined`). */
+const recortarOpcional = ({ value }: { value: unknown }): unknown => {
+  if (typeof value !== 'string') return value;
+  const t = value.trim();
+  return t ? t : undefined;
+};
+
 export class LinkMovimientoDto {
   @ApiPropertyOptional({
     description:
@@ -258,6 +270,31 @@ export class LinkMovimientoDto {
   @ArrayUnique()
   @IsUUID(undefined, { each: true })
   gasto_ids?: string[] | null;
+
+  /**
+   * GASTO NO BANCARIO (6-oct-2026, API 0.0.63): POR QUÉ se liga un gasto en
+   * efectivo (o PERSONAL_*) a este cargo del banco. Obligatoria cuando entra
+   * un gasto así (si no, 400 `JUSTIFICACION_REQUERIDA`); con gastos
+   * bancarios se ignora. Se recorta; vacía o solo espacios = ausente.
+   */
+  @ApiPropertyOptional({
+    nullable: true,
+    minLength: JUSTIFICACION_MIN,
+    maxLength: JUSTIFICACION_MAX,
+    example:
+      'Nadie capturó el estacionamiento del 7 de septiembre; se usa el ticket facturado del 28 para no perder la deducción.',
+    description: `Razón para ligar un gasto que NO se pagó con el banco (efectivo, Personal Pablo/Ale) a este cargo (${JUSTIFICACION_MIN}–${JUSTIFICACION_MAX} caracteres). No cambia el medio de pago ni la caja del piloto: queda anotada en las notas del cargo y del gasto. Sin ella, un gasto así responde 400 JUSTIFICACION_REQUERIDA.`,
+  })
+  @IsOptional()
+  @Transform(recortarOpcional)
+  @IsString()
+  @MinLength(JUSTIFICACION_MIN, {
+    message: `La justificación debe tener al menos ${JUSTIFICACION_MIN} caracteres.`,
+  })
+  @MaxLength(JUSTIFICACION_MAX, {
+    message: `La justificación admite hasta ${JUSTIFICACION_MAX} caracteres.`,
+  })
+  justificacion?: string | null;
 }
 
 /**
@@ -311,6 +348,22 @@ export class GastosCandidatosQuery {
   @Min(1)
   @Max(300)
   limite: number = 100;
+
+  /**
+   * ADITIVO (6-oct-2026, API 0.0.63): con `true`/`1` el universo incluye
+   * también los gastos NO bancarios (EFECTIVO, PERSONAL_*), menos BODEGA,
+   * con las mismas reglas (sin conciliar, moneda, ventana, búsqueda); van
+   * DESPUÉS de los bancarios y cada candidato dice `no_bancario`.
+   */
+  @ApiPropertyOptional({
+    default: false,
+    description:
+      'true/1 ⇒ incluye los gastos que NO se pagaron con el banco (efectivo, Personal Pablo/Ale; nunca Bodega) después de los bancarios, con `no_bancario: true`. Ligarlos exige `justificacion` en el PATCH.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  incluir_no_bancarios?: boolean;
 }
 
 /**

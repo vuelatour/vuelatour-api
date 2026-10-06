@@ -292,7 +292,8 @@ export class ConciliacionController {
 
   @Get('movimientos')
   @ApiOperation({
-    summary: 'Lista movimientos bancarios con su gasto conciliado',
+    summary:
+      'Lista movimientos bancarios con su gasto conciliado (gasto.medio_pago y gastos[].medio_pago aditivos, 0.0.63: un gasto en efectivo ligado con justificación se marca en el panel).',
   })
   list(@Query() q: ListConciliacionQuery) {
     return this.conciliacion.list(q);
@@ -322,7 +323,7 @@ export class ConciliacionController {
   @Patch('movimientos/:id')
   @ApiOperation({
     summary:
-      'Vincula o desvincula un movimiento con uno o VARIOS gastos. PAGOS PARCIALES (14-sep-2026): un gasto admite VARIOS cargos de su MISMA moneda mientras la suma no rebase su monto (+1.00 de tolerancia); moneda distinta (gasto USD ↔ cuenta MXN) sigue siendo 1 ↔ 1. LOTE (2-oct-2026): `gasto_ids` (2..50) = un cargo que paga varios gastos; cada gasto entra por lo que le falta y la suma debe cuadrar con el cargo (tolerancia 0.01 × N, mínimo 0.02 y máximo 1.00). `gasto_id: null` desliga TODO (también un lote). `gasto_ids` y `gasto_id` juntos ⇒ 400 LOTE_INVALIDO. `gasto.conciliado` lo recalcula la BD: parcial ⇒ sigue en gastos-sin-banco. Respuesta ADITIVA: gastos_estado[] y, con UNA parte, gasto_conciliado, monto_vinculado, faltante (null al desvincular o con varias). 409: GASTO_YA_CUBIERTO (details {motivo, monto_gasto, suma_ligada, faltante, gasto_id, movimientos[]}), CARGO_NO_CUADRA, LOTE_MONEDA_DISTINTA, MOVIMIENTO_CON_LOTE, MOVIMIENTO_YA_LIGADO, REVERSO_INVALIDO, CARGO_EXCEDIDO, LOTE_SOLO_API_NUEVO; 503 CONCILIACION_PARTES_NO_DISPONIBLE con varios gastos sin la migración.',
+      'Vincula o desvincula un movimiento con uno o VARIOS gastos. PAGOS PARCIALES (14-sep-2026): un gasto admite VARIOS cargos de su MISMA moneda mientras la suma no rebase su monto (+1.00 de tolerancia); moneda distinta (gasto USD ↔ cuenta MXN) sigue siendo 1 ↔ 1. LOTE (2-oct-2026): `gasto_ids` (2..50) = un cargo que paga varios gastos; cada gasto entra por lo que le falta y la suma debe cuadrar con el cargo (tolerancia 0.01 × N, mínimo 0.02 y máximo 1.00). `gasto_id: null` desliga TODO (también un lote). `gasto_ids` y `gasto_id` juntos ⇒ 400 LOTE_INVALIDO. `gasto.conciliado` lo recalcula la BD: parcial ⇒ sigue en gastos-sin-banco. Respuesta ADITIVA: gastos_estado[] y, con UNA parte, gasto_conciliado, monto_vinculado, faltante (null al desvincular o con varias). 409: GASTO_YA_CUBIERTO (details {motivo, monto_gasto, suma_ligada, faltante, gasto_id, movimientos[]}), CARGO_NO_CUADRA, LOTE_MONEDA_DISTINTA, MOVIMIENTO_CON_LOTE, MOVIMIENTO_YA_LIGADO, REVERSO_INVALIDO, CARGO_EXCEDIDO, LOTE_SOLO_API_NUEVO; 503 CONCILIACION_PARTES_NO_DISPONIBLE con varios gastos sin la migración. GASTO NO BANCARIO (6-oct-2026, 0.0.63): un gasto en EFECTIVO o PERSONAL_* que ENTRA a la liga exige `justificacion` (10–300) ⇒ si falta, 400 JUSTIFICACION_REQUERIDA {details.gastos_no_bancarios[{id, medio_pago, fecha_gasto, monto}]}; BODEGA ⇒ 409 GASTO_BODEGA {details.gastos_bodega[]}. Con ella la liga procede igual (no cambia medio_pago ni verificado) y se anota en las notas del cargo y del gasto; desvincular retira esas líneas. Respuesta ADITIVA: gastos_estado[].medio_pago y, si entró un gasto no bancario, vinculo_no_bancario {gasto_ids, notas_anotadas}.',
   })
   link(
     @Param('id', ParseUUIDPipe) id: string,
@@ -335,16 +336,22 @@ export class ConciliacionController {
         error: 'LOTE_INVALIDO',
       });
     }
+    // Gasto no bancario (6-oct-2026): la razón y quién la escribió van a
+    // las notas del cargo y del gasto.
+    const vinculo = {
+      justificacion: dto.justificacion ?? null,
+      usuarioNombre: c.nombre,
+    };
     if (Array.isArray(dto.gasto_ids)) {
-      return this.conciliacion.linkGastos(id, dto.gasto_ids, c.userId);
+      return this.conciliacion.linkGastos(id, dto.gasto_ids, c.userId, vinculo);
     }
-    return this.conciliacion.link(id, dto.gasto_id ?? null, c.userId);
+    return this.conciliacion.link(id, dto.gasto_id ?? null, c.userId, vinculo);
   }
 
   @Get('movimientos/:id/gastos-candidatos')
   @ApiOperation({
     summary:
-      'Gastos que podrían pagar este CARGO (uno o varios): bancarios, sin conciliar (los de pago parcial con su faltante), en la moneda de la cuenta y a ±dias (default 30, 1..180) de la fecha del cargo; en cuenta MXN y sin búsqueda también los USD con T.C. implícito 15–25 (cruzado: true, solo 1 a 1). q: monto entero ⇒ [q, q+1), con decimales ⇒ ±0.01; texto ⇒ proveedor, nota, lugar o folio del ticket. Orden: los que cuadran con el cargo, cercanía de monto, cercanía de fecha, fecha desc. Respuesta {movimiento {id, fecha, monto, moneda}, ventana {desde, hasta}, candidatos[], truncado}; con candidatos[] VACÍO también excluidos[{motivo EFECTIVO_U_OTRO_MEDIO | YA_CONCILIADO | OTRA_MONEDA | FUERA_DE_VENTANA, n, gastos[≤5]}] y excluidos_monto (gastos del mismo monto ±0.01 —el de q si es numérico— a ±max(120, dias) que no entraron y por qué; aditivos, 0.0.63). 400 SOLO_CARGOS en un abono; 503 CONCILIACION_PARTES_NO_DISPONIBLE sin la migración.',
+      'Gastos que podrían pagar este CARGO (uno o varios): bancarios, sin conciliar (los de pago parcial con su faltante), en la moneda de la cuenta y a ±dias (default 30, 1..180) de la fecha del cargo; en cuenta MXN y sin búsqueda también los USD con T.C. implícito 15–25 (cruzado: true, solo 1 a 1). q: monto entero ⇒ [q, q+1), con decimales ⇒ ±0.01; texto ⇒ proveedor, nota, lugar o folio del ticket. Orden: los que cuadran con el cargo, cercanía de monto, cercanía de fecha, fecha desc. Respuesta {movimiento {id, fecha, monto, moneda}, ventana {desde, hasta}, candidatos[], truncado}; con candidatos[] VACÍO también excluidos[{motivo EFECTIVO_U_OTRO_MEDIO | YA_CONCILIADO | OTRA_MONEDA | FUERA_DE_VENTANA, n, gastos[≤5]}] y excluidos_monto (gastos del mismo monto ±0.01 —el de q si es numérico— a ±max(120, dias) que no entraron y por qué; aditivos, 0.0.63). incluir_no_bancarios=true|1 (0.0.63): el universo suma los gastos en EFECTIVO / PERSONAL_* (nunca BODEGA) con las mismas reglas, DESPUÉS de los bancarios; cada candidato lleva no_bancario (boolean) y, con la bandera, excluidos ya no los cuenta como EFECTIVO_U_OTRO_MEDIO. 400 SOLO_CARGOS en un abono; 503 CONCILIACION_PARTES_NO_DISPONIBLE sin la migración.',
   })
   gastosCandidatos(
     @Param('id', ParseUUIDPipe) id: string,

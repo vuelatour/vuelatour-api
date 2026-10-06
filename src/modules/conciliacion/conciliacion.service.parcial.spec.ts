@@ -172,11 +172,14 @@ function mundo() {
       { id: CTA_MXN, moneda: 'MXN', tipo: 'BANCO' },
       { id: CTA_USD, moneda: 'USD', tipo: 'BANCO' },
     ],
+    // `medio_pago` es NOT NULL en BD; desde el 0.0.63 un gasto NO bancario
+    // pide justificación para ligarse (aquí son de tarjeta).
     gasto: [
       {
         id: 'g-asur',
         monto: 277.79,
         moneda: 'MXN',
+        medio_pago: 'TARJETA_CORP',
         conciliado: false,
         tc_gasto: null,
       },
@@ -184,6 +187,7 @@ function mundo() {
         id: 'g-usd',
         monto: 100,
         moneda: 'USD',
+        medio_pago: 'TARJETA_CORP',
         conciliado: false,
         tc_gasto: null,
       },

@@ -1,7 +1,12 @@
 import {
+  clasificarMediosVinculo,
   cuadraConCargo,
   errorSinMonedaCuenta,
+  esMedioBancario,
+  esMedioNoBancarioVinculable,
   interpretarBusquedaGasto,
+  MEDIO_BODEGA,
+  MEDIOS_BANCARIOS,
   MENSAJE_SIN_MONEDA_CUENTA,
   ordenarCandidatosGasto,
 } from './gastos-candidatos.util';
@@ -135,5 +140,52 @@ describe('errorSinMonedaCuenta (candidatos y liga de un lote)', () => {
     expect(MENSAJE_SIN_MONEDA_CUENTA).toBe(
       'No se pudo leer la moneda de la cuenta bancaria del cargo: vuelve a intentarlo en unos minutos.',
     );
+  });
+});
+
+/**
+ * Gasto NO bancario con justificación (6-oct-2026, API 0.0.63): qué medio
+ * entra al universo con `incluir_no_bancarios` y qué pide el PATCH.
+ */
+describe('medios del vínculo', () => {
+  it('bancarios: TARJETA_CORP, TRANSFERENCIA y PAYWISE; sin medio ⇒ no', () => {
+    for (const m of MEDIOS_BANCARIOS) expect(esMedioBancario(m)).toBe(true);
+    for (const m of ['EFECTIVO', 'PERSONAL_PABLO', 'BODEGA', null, '']) {
+      expect(esMedioBancario(m)).toBe(false);
+    }
+  });
+
+  it('vinculables con justificación: todo lo NO bancario menos BODEGA (y sin medio)', () => {
+    expect(esMedioNoBancarioVinculable('EFECTIVO')).toBe(true);
+    expect(esMedioNoBancarioVinculable('PERSONAL_PABLO')).toBe(true);
+    expect(esMedioNoBancarioVinculable('PERSONAL_ALE')).toBe(true);
+    expect(esMedioNoBancarioVinculable(MEDIO_BODEGA)).toBe(false);
+    expect(esMedioNoBancarioVinculable('TARJETA_CORP')).toBe(false);
+    expect(esMedioNoBancarioVinculable(null)).toBe(false);
+  });
+
+  it('clasificarMediosVinculo: BODEGA siempre; no bancarios solo si ENTRAN; sin medio pide razón', () => {
+    const g = (id: string, medio_pago: string | null) => ({ id, medio_pago });
+    const r = clasificarMediosVinculo(
+      [
+        g('tdc', 'TARJETA_CORP'),
+        g('efe', 'EFECTIVO'),
+        g('efe-ya', 'EFECTIVO'),
+        g('pablo', 'PERSONAL_PABLO'),
+        g('bod', 'BODEGA'),
+        g('bod-ya', 'BODEGA'),
+        g('nulo', null),
+      ],
+      new Set(['efe-ya', 'bod-ya']),
+    );
+    expect(r.bodega.map((x) => x.id)).toEqual(['bod', 'bod-ya']);
+    expect(r.noBancariosNuevos.map((x) => x.id)).toEqual([
+      'efe',
+      'pablo',
+      'nulo',
+    ]);
+    expect(
+      clasificarMediosVinculo([g('tdc', 'TRANSFERENCIA')], new Set()),
+    ).toEqual({ bodega: [], noBancariosNuevos: [] });
   });
 });

@@ -16,8 +16,9 @@
  */
 import { TOLERANCIA_CENTAVOS, ventanaDias } from './auto-cruce.util';
 import {
+  esMedioBancario,
+  esMedioNoBancarioVinculable,
   interpretarBusquedaGasto,
-  MEDIOS_BANCARIOS,
 } from './gastos-candidatos.util';
 import { difDias } from './paywise-cruce.util';
 
@@ -26,7 +27,9 @@ import { difDias } from './paywise-cruce.util';
  * gana el motivo que ninguna otra acción del diálogo arregla.
  * - `EFECTIVO_U_OTRO_MEDIO`: medio fuera de `MEDIOS_BANCARIOS` (EFECTIVO,
  *   BODEGA, PERSONAL_*). Ampliar la ventana no lo trae: hay que corregir el
- *   medio de pago del gasto (si de verdad se pagó con tarjeta).
+ *   medio de pago del gasto (si de verdad se pagó con tarjeta) o, desde el
+ *   6-oct-2026, pedirlos con `incluir_no_bancarios` y ligarlos con una
+ *   justificación (sin tocar el medio). Con esa bandera solo BODEGA cae aquí.
  * - `YA_CONCILIADO`: ya está cubierto por otro(s) cargo(s). Gana a la moneda:
  *   un gasto USD conciliado 1 ↔ 1 contra pesos ya está tomado, y su moneda no
  *   se edita (candado `GASTO_CONCILIADO`).
@@ -129,6 +132,14 @@ export interface ContextoExclusion {
   ventana: { desde: string; hasta: string };
   /** Fecha del cargo (YYYY-MM-DD): elige los más cercanos. */
   fechaCargo: string;
+  /**
+   * `incluir_no_bancarios` (6-oct-2026): el universo YA trae EFECTIVO y
+   * PERSONAL_*, así que esos dejan de ser `EFECTIVO_U_OTRO_MEDIO` (si no
+   * salieron fue por conciliado / moneda / ventana / búsqueda de texto);
+   * BODEGA sigue siéndolo siempre. Ausente = false (lo del 0.0.63 sin la
+   * bandera, byte-idéntico).
+   */
+  incluirNoBancarios?: boolean;
 }
 
 const c2 = (x: number) => Math.round(x * 100) / 100;
@@ -202,15 +213,20 @@ export function gastoExcluibleDeFila(
 
 /**
  * Por qué ESTE gasto no es candidato del cargo (precedencia de
- * `MOTIVOS_EXCLUSION`). `null` = SÍ es del universo (medio bancario, sin
- * conciliar, moneda de la cuenta y dentro de la ventana): si no salió fue
- * por la búsqueda de TEXTO, y eso no se reporta.
+ * `MOTIVOS_EXCLUSION`). `null` = SÍ es del universo (medio bancario —o, con
+ * `incluirNoBancarios`, cualquiera menos BODEGA—, sin conciliar, moneda de
+ * la cuenta y dentro de la ventana): si no salió fue por la búsqueda de
+ * TEXTO, y eso no se reporta.
  */
 export function motivoExclusion(
   g: GastoExcluible,
   ctx: ContextoExclusion,
 ): MotivoExclusion | null {
-  if (!MEDIOS_BANCARIOS.includes(g.medio_pago ?? '')) {
+  const enUniversoPorMedio =
+    esMedioBancario(g.medio_pago) ||
+    (ctx.incluirNoBancarios === true &&
+      esMedioNoBancarioVinculable(g.medio_pago));
+  if (!enUniversoPorMedio) {
     return 'EFECTIVO_U_OTRO_MEDIO';
   }
   if (g.conciliado) return 'YA_CONCILIADO';

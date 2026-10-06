@@ -29,6 +29,52 @@ export const MEDIOS_BANCARIOS: readonly string[] = [
   'PAYWISE',
 ];
 
+/**
+ * Salida de inventario (cargo contable del cardex): JAMÁS toca el banco y
+ * no se liga a un cargo ni con justificación (409 `GASTO_BODEGA`).
+ */
+export const MEDIO_BODEGA = 'BODEGA';
+
+/** ¿El medio toca el banco? Sin medio ⇒ NO (`gasto.medio_pago` es NOT NULL). */
+export function esMedioBancario(medio: string | null | undefined): boolean {
+  return MEDIOS_BANCARIOS.includes(medio ?? '');
+}
+
+/**
+ * GASTO NO BANCARIO CON JUSTIFICACIÓN (6-oct-2026, API 0.0.63): ¿entra al
+ * universo de «Vincular gasto» con `incluir_no_bancarios`? Todo medio NO
+ * bancario (EFECTIVO, PERSONAL_*) MENOS BODEGA; sin medio, no.
+ */
+export function esMedioNoBancarioVinculable(
+  medio: string | null | undefined,
+): boolean {
+  return !!medio && !esMedioBancario(medio) && medio !== MEDIO_BODEGA;
+}
+
+/**
+ * Los medios de un vínculo (PATCH movimientos/:id), PURO:
+ * - `bodega`: TODOS los BODEGA del cuerpo (siempre 409, ligados o no);
+ * - `noBancariosNuevos`: los no bancarios que ENTRAN con esta liga (los que
+ *   ya pagaba este cargo no piden la razón otra vez: la re-liga idéntica
+ *   sigue siendo un no-op). Un gasto sin medio cuenta como no bancario: si
+ *   una lectura no lo trajo, se pide la razón (jamás se liga a ciegas).
+ */
+export function clasificarMediosVinculo<
+  T extends { id: string; medio_pago: string | null },
+>(
+  gastos: readonly T[],
+  yaLigados: ReadonlySet<string>,
+): { bodega: T[]; noBancariosNuevos: T[] } {
+  const bodega = gastos.filter((g) => g.medio_pago === MEDIO_BODEGA);
+  const noBancariosNuevos = gastos.filter(
+    (g) =>
+      g.medio_pago !== MEDIO_BODEGA &&
+      !esMedioBancario(g.medio_pago) &&
+      !yaLigados.has(g.id),
+  );
+  return { bodega, noBancariosNuevos };
+}
+
 /** Búsqueda ya interpretada. */
 export type BusquedaGasto =
   | { tipo: 'vacia' }
