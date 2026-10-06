@@ -9,6 +9,26 @@ import { ServiceUnavailableException } from '@nestjs/common';
 import { difDias } from './paywise-cruce.util';
 import { TOLERANCIA_CONCILIACION } from './conciliacion-parcial.util';
 
+/**
+ * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
+ * estado de cuenta (PAYWISE entró el 2-sep-2026: sus cargos también aparecen
+ * en el estado de cuenta). EFECTIVO sale de caja chica (del cajón), BODEGA es
+ * un cargo contable de inventario y los PERSONAL_* llegan al banco después
+ * como reintegro, no como el gasto original. Cruzarlos generaba matches
+ * falsos.
+ *
+ * FUENTE ÚNICA del universo de candidatos de conciliación (auto-cruce,
+ * «Vincular gasto», gastos sin banco, IA) y de la clasificación de los
+ * EXCLUIDOS (`candidatos-excluidos.util`, 6-oct-2026): si la lista cambia,
+ * el motivo «efectivo u otro medio» cambia con ella. Hasta el 0.0.62 vivía
+ * en `conciliacion.service.ts`.
+ */
+export const MEDIOS_BANCARIOS: readonly string[] = [
+  'TARJETA_CORP',
+  'TRANSFERENCIA',
+  'PAYWISE',
+];
+
 /** Búsqueda ya interpretada. */
 export type BusquedaGasto =
   | { tipo: 'vacia' }

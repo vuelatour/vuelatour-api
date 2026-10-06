@@ -144,8 +144,23 @@ import {
 import {
   errorSinMonedaCuenta,
   interpretarBusquedaGasto,
+  MEDIOS_BANCARIOS,
   ordenarCandidatosGasto,
 } from './gastos-candidatos.util';
+import {
+  agruparExcluidos,
+  bandaMontoExcluidos,
+  cargosConciliadosPorGasto,
+  conCargosConciliados,
+  EXCLUIDOS_LECTURA_TOPE,
+  GASTO_EXCLUIDO_COLS,
+  gastoExcluibleDeFila,
+  montoReferenciaExcluidos,
+  ventanaExcluidos,
+  type CargoConciliadoExcluido,
+  type ExcluidosCandidatos,
+  type GastoExcluible,
+} from './candidatos-excluidos.util';
 import {
   CLASIFICACION_TRASPASO,
   conteoVacio,
@@ -300,6 +315,22 @@ export interface CargoDeGasto {
   moneda: string | null;
 }
 
+/**
+ * Respuesta de `GET movimientos/:id/gastos-candidatos`. `excluidos` y
+ * `excluidos_monto` (ADITIVOS, 6-oct-2026, API 0.0.63) viajan SOLO cuando
+ * `candidatos` queda vacío (y no viajan si su lectura falló).
+ */
+export interface GastosCandidatosRespuesta {
+  movimiento: { id: string; fecha: string; monto: number; moneda: string };
+  ventana: { desde: string; hasta: string };
+  candidatos: Array<
+    SugerenciaConciliacion['candidatos'][number] & { cruzado?: true }
+  >;
+  truncado: boolean;
+  excluidos?: ExcluidosCandidatos['excluidos'];
+  excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
+}
+
 function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
   return Array.isArray(v) ? (v[0] ?? null) : (v ?? null);
 }
@@ -307,16 +338,6 @@ function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
 function r2(x: number): number {
   return Math.round(x * 100) / 100;
 }
-/**
- * Solo estos medios de pago tocan el banco y pueden cruzarse con un CARGO del
- * estado de cuenta (PAYWISE entró el 2-sep-2026: sus cargos también aparecen
- * en el estado de cuenta). EFECTIVO sale de caja chica (del cajón), BODEGA es
- * un cargo contable de inventario y los PERSONAL_* llegan al banco después
- * como reintegro, no como el gasto original. Cruzarlos generaba matches
- * falsos.
- */
-const MEDIOS_BANCARIOS = ['TARJETA_CORP', 'TRANSFERENCIA', 'PAYWISE'];
-
 // Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. El cruce
 // USD↔MXN solo se acepta si el TC implícito (cargo MXN ÷ gasto USD) cae en
 // esta banda plausible — fuera de ella es casi seguro otro gasto. Ajustar si
@@ -7865,11 +7886,16 @@ export class ConciliacionService {
    * con decimales ⇒ ±0.01; texto ⇒ proveedor (consulta aparte, ≤ 50 ids) o
    * nota/lugar/folio del ticket (`patronIlikeSeguro`). Orden
    * `ordenarCandidatosGasto`; `truncado` = había más de los que caben.
+   *
+   * EXCLUIDOS (6-oct-2026, API 0.0.63): SOLO con la lista VACÍA viajan
+   * `excluidos` + `excluidos_monto` (`excluidosDeCandidatos`): los gastos
+   * del mismo monto que NO entraron y por qué. Con candidatos la respuesta
+   * es la del 0.0.62 y no se hace ninguna consulta extra.
    */
   async gastosCandidatosDeMovimiento(
     movId: string,
     query: Partial<Pick<GastosCandidatosQuery, 'q' | 'dias' | 'limite'>>,
-  ) {
+  ): Promise<GastosCandidatosRespuesta> {
     if (!(await this.partesOn())) throw errorPartesNoDisponibles();
     const dias = Math.min(180, Math.max(1, Math.trunc(query.dias ?? 30)));
     const limite = Math.min(300, Math.max(1, Math.trunc(query.limite ?? 100)));
@@ -7976,7 +8002,7 @@ export class ConciliacionService {
       montoCargo,
       fecha,
     });
-    return {
+    const respuesta: GastosCandidatosRespuesta = {
       movimiento: { id: movId, fecha, monto: montoCargo, moneda },
       ventana,
       candidatos: ordenados.slice(0, limite),
@@ -7985,6 +8011,107 @@ export class ConciliacionService {
         propios.length >= CANDIDATOS_GASTO_TOPE ||
         leidosUsd >= CANDIDATOS_GASTO_TOPE,
     };
+    if (ordenados.length > 0) return respuesta;
+    const excluidos = await this.excluidosDeCandidatos({
+      movId,
+      q: query.q,
+      montoCargo,
+      monedaCuenta: moneda,
+      fecha,
+      dias,
+      ventana,
+    });
+    return excluidos ? { ...respuesta, ...excluidos } : respuesta;
+  }
+
+  /**
+   * `excluidos` de «Vincular gasto» (6-oct-2026, API 0.0.63; caso real: el
+   * cargo de $212.00 del 07-sep y sus tres gastos de $212.00 en EFECTIVO).
+   * Gastos del MISMO monto (el de `q` si es numérico; si no, el del cargo;
+   * ±0.01) a ±max(120, dias) del cargo que NO entraron a los candidatos,
+   * agrupados por motivo (`candidatos-excluidos.util`, puro). UNA consulta
+   * extra filtrada por monto y fechas (el tope de 1000 no aplica) y, SOLO
+   * si hay `YA_CONCILIADO`, la puente de esos ≤ 5 gastos para decir con qué
+   * cargo (detrás de la sonda: el endpoint ya respondió 503 sin ella).
+   * BEST-EFFORT: si la consulta falla devuelve null y la respuesta sale
+   * SIN `excluidos`, como el 0.0.62 (el panel pinta el vacío de siempre).
+   */
+  private async excluidosDeCandidatos(opts: {
+    movId: string;
+    q: string | undefined;
+    montoCargo: number;
+    monedaCuenta: string;
+    fecha: string;
+    dias: number;
+    ventana: { desde: string; hasta: string };
+  }): Promise<ExcluidosCandidatos | null> {
+    const monto = montoReferenciaExcluidos(opts.q, opts.montoCargo);
+    if (!(monto > 0)) return { excluidos: [], excluidos_monto: monto };
+    try {
+      const banda = bandaMontoExcluidos(monto);
+      const rango = ventanaExcluidos(opts.fecha, opts.dias);
+      const { data, error } = await this.supabase.service
+        .from('gasto')
+        .select(GASTO_EXCLUIDO_COLS)
+        .gte('monto', banda.min)
+        .lte('monto', banda.max)
+        .gte('fecha_gasto', rango.desde)
+        .lte('fecha_gasto', rango.hasta)
+        .order('fecha_gasto', { ascending: false })
+        .order('id', { ascending: true })
+        .limit(EXCLUIDOS_LECTURA_TOPE);
+      if (error) throw new Error(error.message);
+      const filas = ((data ?? []) as unknown as Array<Record<string, unknown>>)
+        .map((f) => gastoExcluibleDeFila(f))
+        .filter((g): g is GastoExcluible => g !== null);
+      const grupos = agruparExcluidos(filas, {
+        monedaCuenta: opts.monedaCuenta,
+        ventana: opts.ventana,
+        fechaCargo: opts.fecha,
+      });
+      const yaConciliados = grupos.find((g) => g.motivo === 'YA_CONCILIADO');
+      if (!yaConciliados) return { excluidos: grupos, excluidos_monto: monto };
+      const cargos = await this.cargosConciliadosDe(
+        yaConciliados.gastos.map((g) => g.id),
+      );
+      return {
+        excluidos: conCargosConciliados(grupos, cargos),
+        excluidos_monto: monto,
+      };
+    } catch (err) {
+      this.logger.warn(
+        `gastos-candidatos ${opts.movId}: no se pudieron leer los excluidos: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * gasto_id ⇒ cargos con los que YA está conciliado (puente + fecha y
+   * cuenta del movimiento). `null` si la lectura falla: el grupo
+   * `YA_CONCILIADO` viaja igual, sin decir con qué cargo.
+   */
+  private async cargosConciliadosDe(
+    gastoIds: string[],
+  ): Promise<Map<string, CargoConciliadoExcluido[]> | null> {
+    try {
+      const partes = await this.partesDeGastos(gastoIds);
+      if (partes.length === 0) return new Map();
+      const movs = await this.leerPorLotes(
+        partes.map((p) => p.movimiento_id),
+        (lote) =>
+          this.supabase.service
+            .from('movimiento_bancario')
+            .select('id, fecha, cuenta:cuenta_bancaria(alias)')
+            .in('id', lote),
+      );
+      return cargosConciliadosPorGasto(partes, movs);
+    } catch (err) {
+      this.logger.warn(
+        `gastos-candidatos: no se pudo leer con qué cargo están conciliados ${gastoIds.length} gasto(s): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
   }
 
   /**

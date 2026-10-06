@@ -3749,6 +3749,36 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       matricula, capturado_por, monto_vinculado, faltante), truncado}`
       (tope de lectura 1000). ABONO ⇒ 400 `SOLO_CARGOS`; sin sonda ⇒ 503.
       La ficha del candidato es UNA (`aCandidatoGasto`, la misma de la IA).
+    - **`excluidos`: POR QUÉ un gasto NO es candidato (6-oct-2026, API
+      0.0.63, sin migración).** Caso real: cargo de $212.00 del 07-sep
+      (ASUR CANCUN, GASTOS GNRAL); la oficina buscó «212», vio «Ningún gasto
+      pendiente coincide…» y creyó que era un bug: los TRES gastos de $212.00
+      (estacionamiento ASUR del 24, 27 y 28-sep, #338 y #330) estaban en
+      EFECTIVO. **Solo con `candidatos` VACÍO** viajan los ADITIVOS
+      `excluidos` y `excluidos_monto`; con candidatos la respuesta es
+      byte-idéntica al 0.0.62 y NO hay consulta extra. Se hace UNA consulta a
+      `gasto` por monto (el de `q` si es numérico —entero «212» ⇒ 212,
+      «2801.40» ⇒ 2801.40—; sin `q` o con texto, el |monto| del cargo; ±0.01)
+      y fechas (±max(120, dias) del cargo), SIN filtro de medio, conciliado
+      ni moneda; el tope de 1000 no aplica (`.limit(500)`). Clasificación
+      PURA en `conciliacion/candidatos-excluidos.util.ts` (spec), con
+      precedencia `EFECTIVO_U_OTRO_MEDIO` (medio ∉ `MEDIOS_BANCARIOS`:
+      EFECTIVO, BODEGA, PERSONAL_*) > `YA_CONCILIADO` > `OTRA_MONEDA` >
+      `FUERA_DE_VENTANA` (dentro de ±120 pero fuera de ±dias); un gasto que SÍ
+      es del universo (no lo trajo la búsqueda de TEXTO) no se reporta.
+      Forma: `excluidos: [{motivo, n, gastos: [{id, fecha_gasto, monto,
+      moneda, medio_pago, categoria, vuelo_id, vuelo_folio,
+      conciliado_con?}]}]` — grupos en ese orden fijo y solo con gastos; `n`
+      = TODOS los del motivo; `gastos` = los 5 más CERCANOS al cargo, en orden
+      cronológico. `conciliado_con` SOLO en `YA_CONCILIADO`:
+      `[{movimiento_id, fecha, monto (monto_parte), moneda, cuenta (alias)}]`
+      de la puente (`[]` sin partes; `null` si esa lectura falla). BEST-EFFORT:
+      si la consulta extra falla, la respuesta sale SIN los dos campos (el
+      panel pinta el vacío de siempre). `MEDIOS_BANCARIOS` se mudó a
+      `gastos-candidatos.util.ts` (fuente única del universo y del motivo).
+      Specs: `candidatos-excluidos.util.spec` y el bloque «excluidos» de
+      `conciliacion.service.lote.spec` (caso real, mezcla de motivos, con
+      candidatos no viaja, `q` de texto ⇒ monto del cargo, best-effort).
     - **Lectores** (sobre la puente / `v_gasto_conciliacion`, regla de parte
       cruzada; nunca el |monto| del movimiento): `sumasLigadasDe`,
       `cargosDeGasto` (monto = `monto_parte`), `estadoConciliacion`,

@@ -26,6 +26,7 @@ import {
   mensajeMovimientoConGastos,
 } from './conciliacion-parcial.util';
 import { MENSAJE_SIN_MONEDA_CUENTA } from './gastos-candidatos.util';
+import { GASTO_EXCLUIDO_COLS } from './candidatos-excluidos.util';
 
 /**
  * 1 CARGO DEL BANCO ↔ N GASTOS («lote», 2-oct-2026, API 0.0.52, migración
@@ -109,6 +110,8 @@ interface OpcionesFake {
   falloUpdate?: { tabla: string; error: Row | ErrorBd };
   /** Migración 20261005000002 SIN aplicar (`factura_recibida.serie`). */
   sinSerieFolio?: boolean;
+  /** Lectura puntual que falla (tabla + texto acumulado de la consulta). */
+  fallaConsulta?: (tabla: string, texto: string) => boolean;
 }
 
 /** Mini-PostgREST en memoria: filtros, `or`, embeds, orden, RPC y bitácora. */
@@ -158,6 +161,9 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
       };
       const ejecutar = (unico: boolean) => {
         if (opts.fallaLectura?.includes(tabla)) {
+          return { data: null, error: { message: 'caída' }, count: null };
+        }
+        if (opts.fallaConsulta?.(tabla, entrada.texto)) {
           return { data: null, error: { message: 'caída' }, count: null };
         }
         if (
@@ -1586,5 +1592,280 @@ describe('NÚMERO DE FACTURA del gasto en conciliación (5-oct-2026, API 0.0.57)
       (lista.data.find((m) => m.id === 'm2231')!.gasto as Row)
         .folio_comprobante,
     ).toBe('FEACZM 72128');
+  });
+});
+
+// =====================================================================
+describe('GET …/gastos-candidatos — excluidos: POR QUÉ no aparece (6-oct-2026, API 0.0.63)', () => {
+  // Caso REAL de prod: cargo de $212.00 del 07-sep, «ASUR CANCUN», GASTOS
+  // GNRAL (MXN). La oficina buscó «212» y vio «Ningún gasto pendiente
+  // coincide…»: los tres gastos de $212.00 (estacionamiento ASUR del 24, 27
+  // y 28-sep, vuelos #338 y #330) estaban en EFECTIVO.
+  const asur = (
+    id: string,
+    fecha: string,
+    folio: number,
+    extra: Row = {},
+  ): Row =>
+    saesa(id, 212, folio, {
+      fecha_gasto: fecha,
+      medio_pago: 'EFECTIVO',
+      categoria: 'TAXI',
+      notas:
+        'Aeropuerto de Cancún S.A de C.V. · Cobro estancia (estacionamiento)',
+      ...extra,
+    });
+  const mundo212 = (gastos: Row[] = [], movs: Row[] = []) =>
+    mundo({
+      vuelo: [
+        ...mundo().vuelo,
+        { id: 'v-338', folio: 338, aeronave_id: 'av-n41' },
+        { id: 'v-330', folio: 330, aeronave_id: 'av-vgv' },
+      ],
+      gasto: [
+        asur('g-24', '2026-09-24', 338),
+        asur('g-27', '2026-09-27', 330),
+        asur('g-28', '2026-09-28', 330),
+        ...gastos,
+      ],
+      movimiento_bancario: [
+        cargo('m212', 212, { fecha: '2026-09-07', descripcion: 'ASUR CANCUN' }),
+        ...movs,
+      ],
+    });
+  const ficha = (id: string, fecha: string, folio: number) => ({
+    id,
+    fecha_gasto: fecha,
+    monto: 212,
+    moneda: 'MXN',
+    medio_pago: 'EFECTIVO',
+    categoria: 'TAXI',
+    vuelo_id: `v-${folio}`,
+    vuelo_folio: folio,
+  });
+  const consultaExcluidos = (log: Array<{ tabla: string; texto: string }>) =>
+    log.filter(
+      (q) =>
+        q.tabla === 'gasto' &&
+        q.texto.includes(`select(${GASTO_EXCLUIDO_COLS})`),
+    );
+
+  it('caso real: «212» sin candidatos ⇒ los 3 gastos de $212.00 en EFECTIVO, con fecha y vuelo', async () => {
+    const { svc, log } = armar(mundo212());
+    const r = await svc.gastosCandidatosDeMovimiento('m212', { q: '212' });
+    expect(r.candidatos).toEqual([]);
+    expect(r.ventana).toEqual({ desde: '2026-08-08', hasta: '2026-10-07' });
+    expect(r.excluidos_monto).toBe(212);
+    expect(r.excluidos).toEqual([
+      {
+        motivo: 'EFECTIVO_U_OTRO_MEDIO',
+        n: 3,
+        gastos: [
+          ficha('g-24', '2026-09-24', 338),
+          ficha('g-27', '2026-09-27', 330),
+          ficha('g-28', '2026-09-28', 330),
+        ],
+      },
+    ]);
+    // UNA consulta extra, sin filtro de medio/conciliado/moneda.
+    const extra = consultaExcluidos(log);
+    expect(extra).toHaveLength(1);
+    expect(extra[0].texto).not.toMatch(/in:medio_pago|eq:conciliado|eq:moneda/);
+    // Sin búsqueda la lista también queda vacía: lo mismo.
+    const sinQ = await svc.gastosCandidatosDeMovimiento('m212', {});
+    expect(sinQ.candidatos).toEqual([]);
+    expect(sinQ.excluidos).toEqual(r.excluidos);
+  });
+
+  it('mezcla de motivos: efectivo/bodega, ya conciliado (con su cargo), dólares y fuera de ±30 días', async () => {
+    const db = mundo212(
+      [
+        // Bodega de $212.01 (±0.01): otro medio que no toca el banco.
+        saesa('g-bodega', 212.01, 315, {
+          fecha_gasto: '2026-09-15',
+          medio_pago: 'BODEGA',
+          categoria: 'REFACCION',
+        }),
+        // Con tarjeta pero YA cubierto por el cargo del 05-sep.
+        saesa('g-conc', 212, 318, {
+          fecha_gasto: '2026-09-04',
+          medio_pago: 'TARJETA_CORP',
+          conciliado: true,
+        }),
+        // Con tarjeta, en DÓLARES (T.C. implícito 1: no es cruzado).
+        saesa('g-usd', 212, 319, {
+          fecha_gasto: '2026-09-10',
+          medio_pago: 'TARJETA_CORP',
+          moneda: 'USD',
+        }),
+        // Transferencia del 12-jun: fuera de ±30 pero dentro de ±120.
+        saesa('g-jun', 212, 321, { fecha_gasto: '2026-06-12' }),
+        // Ni del 05-ene (fuera de ±120) ni de otro monto: no se reportan.
+        saesa('g-ene', 212, 322, { fecha_gasto: '2026-01-05' }),
+        asur('g-213', '2026-09-24', 338, { monto: 213 }),
+      ],
+      [
+        cargo('m-05sep', 212, {
+          fecha: '2026-09-05',
+          gasto_id: 'g-conc',
+          conciliado: true,
+        }),
+      ],
+    );
+    const { svc } = armar(db);
+    const r = await svc.gastosCandidatosDeMovimiento('m212', { q: '212' });
+    expect(r.candidatos).toEqual([]);
+    const excluidos = r.excluidos!;
+    expect(
+      excluidos.map((x) => [x.motivo, x.n, x.gastos.map((y) => y.id)]),
+    ).toEqual([
+      ['EFECTIVO_U_OTRO_MEDIO', 4, ['g-bodega', 'g-24', 'g-27', 'g-28']],
+      ['YA_CONCILIADO', 1, ['g-conc']],
+      ['OTRA_MONEDA', 1, ['g-usd']],
+      ['FUERA_DE_VENTANA', 1, ['g-jun']],
+    ]);
+    expect(excluidos[0].gastos[0]).toMatchObject({
+      medio_pago: 'BODEGA',
+      monto: 212.01,
+    });
+    expect(excluidos[0].gastos[0]).not.toHaveProperty('conciliado_con');
+    expect(excluidos[1].gastos[0].conciliado_con).toEqual([
+      {
+        movimiento_id: 'm-05sep',
+        fecha: '2026-09-05',
+        monto: 212,
+        moneda: 'MXN',
+        cuenta: 'GASTOS GNRAL',
+      },
+    ]);
+    expect(excluidos[2].gastos[0].moneda).toBe('USD');
+    expect(excluidos[3].gastos[0]).toMatchObject({
+      fecha_gasto: '2026-06-12',
+      medio_pago: 'TRANSFERENCIA',
+      vuelo_folio: 321,
+    });
+    // El consejo es cierto: con ±120 días el del 12-jun YA es candidato (y
+    // entonces no viaja `excluidos`).
+    const amplio = await svc.gastosCandidatosDeMovimiento('m212', {
+      q: '212',
+      dias: 120,
+    });
+    expect(amplio.candidatos.map((c) => c.id)).toEqual(['g-jun']);
+    expect(amplio).not.toHaveProperty('excluidos');
+  });
+
+  it('con candidatos NO viaja (ni se hace la consulta extra): la respuesta del 0.0.62', async () => {
+    const db = mundo212([
+      saesa('g-tdc', 212, 315, {
+        fecha_gasto: '2026-09-06',
+        medio_pago: 'TARJETA_CORP',
+      }),
+    ]);
+    const { svc, log } = armar(db);
+    for (const q of ['212', undefined]) {
+      const r = await svc.gastosCandidatosDeMovimiento('m212', { q });
+      expect(r.candidatos.map((c) => c.id)).toEqual(['g-tdc']);
+      expect(Object.keys(r).sort()).toEqual([
+        'candidatos',
+        'movimiento',
+        'truncado',
+        'ventana',
+      ]);
+    }
+    expect(consultaExcluidos(log)).toEqual([]);
+  });
+
+  it('q de TEXTO ⇒ se explica con el monto del CARGO; q numérico ⇒ con el monto de q', async () => {
+    const { svc } = armar(mundo212());
+    const r = await svc.gastosCandidatosDeMovimiento('m212', { q: 'asur' });
+    expect(r.candidatos).toEqual([]);
+    expect(r.excluidos_monto).toBe(212);
+    expect(r.excluidos!.map((x) => [x.motivo, x.n])).toEqual([
+      ['EFECTIVO_U_OTRO_MEDIO', 3],
+    ]);
+
+    // Lote: SPEI de 8,404.20 buscado por el monto de cada gasto (2,801.40),
+    // capturados en efectivo.
+    const lote = mundo({
+      gasto: [
+        saesa('g315', 2801.4, 315, { medio_pago: 'EFECTIVO' }),
+        saesa('g319', 2801.4, 319, { medio_pago: 'EFECTIVO' }),
+      ],
+      movimiento_bancario: [cargo('m8404', 8404.2)],
+    });
+    const w = armar(lote);
+    const porGasto = await w.svc.gastosCandidatosDeMovimiento('m8404', {
+      q: '2801.40',
+    });
+    expect(porGasto.excluidos_monto).toBe(2801.4);
+    expect(
+      porGasto.excluidos!.map((x) => [
+        x.motivo,
+        x.n,
+        x.gastos.map((y) => y.id),
+      ]),
+    ).toEqual([['EFECTIVO_U_OTRO_MEDIO', 2, ['g315', 'g319']]]);
+    // Con texto se busca el monto del cargo: nadie de 8,404.20 ⇒ [] (viaja
+    // vacío: el API sí buscó).
+    const texto = await w.svc.gastosCandidatosDeMovimiento('m8404', {
+      q: 'saesa',
+    });
+    expect(texto.candidatos).toEqual([]);
+    expect(texto.excluidos_monto).toBe(8404.2);
+    expect(texto.excluidos).toEqual([]);
+  });
+
+  it('best-effort: si la consulta extra falla, la respuesta sale como el 0.0.62; si falla la puente, conciliado_con = null', async () => {
+    const caida = armar(mundo212(), {
+      fallaConsulta: (tabla, texto) =>
+        tabla === 'gasto' && texto.includes(`select(${GASTO_EXCLUIDO_COLS})`),
+    });
+    const warnCaida = jest
+      .spyOn((caida.svc as unknown as { logger: Logger }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const r = await caida.svc.gastosCandidatosDeMovimiento('m212', {
+      q: '212',
+    });
+    expect(r.candidatos).toEqual([]);
+    expect(r).not.toHaveProperty('excluidos');
+    expect(r).not.toHaveProperty('excluidos_monto');
+    expect(String(warnCaida.mock.calls[0][0])).toContain(
+      'no se pudieron leer los excluidos',
+    );
+
+    const conConciliado = () =>
+      mundo212(
+        [
+          saesa('g-conc', 212, 318, {
+            fecha_gasto: '2026-09-04',
+            medio_pago: 'TARJETA_CORP',
+            conciliado: true,
+          }),
+        ],
+        [
+          cargo('m-05sep', 212, {
+            fecha: '2026-09-05',
+            gasto_id: 'g-conc',
+            conciliado: true,
+          }),
+        ],
+      );
+    const sinPuente = armar(conConciliado(), {
+      fallaConsulta: (tabla) => tabla === TABLA_PARTES,
+    });
+    const warnPuente = jest
+      .spyOn((sinPuente.svc as unknown as { logger: Logger }).logger, 'warn')
+      .mockImplementation(() => undefined);
+    const s = await sinPuente.svc.gastosCandidatosDeMovimiento('m212', {
+      q: '212',
+    });
+    expect(s.excluidos!.map((x) => x.motivo)).toEqual([
+      'EFECTIVO_U_OTRO_MEDIO',
+      'YA_CONCILIADO',
+    ]);
+    expect(s.excluidos![1].gastos[0].conciliado_con).toBeNull();
+    expect(String(warnPuente.mock.calls[0][0])).toContain(
+      'con qué cargo están conciliados',
+    );
   });
 });
