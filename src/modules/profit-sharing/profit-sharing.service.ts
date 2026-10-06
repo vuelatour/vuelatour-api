@@ -2611,9 +2611,11 @@ export class ProfitSharingService {
       rol != null && ROLES_PAGOS_SOCIOS_LECTURA.includes(rol);
     //
     // VUELOS SIN GASTO DE OPERACIONES (5-oct-2026): completados PROPIOS del
-    // periodo sin ninguna pista/aterrizaje ligada — lo que la conciliación no
-    // puede ver (gasto nunca capturado ni pagado con la tarjeta). Aviso NO
-    // bloqueante y best-effort: lectura caída ⇒ `null` ⇒ lectura_fallida.
+    // periodo —cliente interno y servicio INCLUIDOS: su pista también resta
+    // en el balance— sin ninguna pista/aterrizaje ligada; lo que la
+    // conciliación no puede ver (gasto nunca capturado ni pagado con la
+    // tarjeta). Aviso NO bloqueante y best-effort: lectura caída ⇒ `null` ⇒
+    // lectura_fallida.
     const matriculaPorAvion = new Map(
       (flotaPre ?? []).map((a) => [a.id as string, a.matricula as string]),
     );
@@ -2625,7 +2627,6 @@ export class ProfitSharingService {
       this.vuelosSinGastoOperaciones(
         candidatosSinGastoOperaciones(
           completados as VueloCompletadoSinGastoRow[],
-          clientesInternos,
         ),
         matriculaPorAvion,
       ),
@@ -2989,12 +2990,11 @@ export class ProfitSharingService {
 
   /**
    * Pre-cierre · VUELOS COMPLETADOS SIN GASTO DE OPERACIONES (5-oct-2026):
-   * de los `candidatos` (propios, con avión, cliente no interno —
-   * `candidatosSinGastoOperaciones`) quita los de SERVICIO (sus tramos,
-   * `esVueloDeServicio`) y los que tienen algún gasto OPERACIONES/
-   * ATERRIZAJE ligado por `vuelo_id` (de CUALQUIER fecha). Lecturas en
-   * lotes de ids y paginadas (anti-cap-1000 de PostgREST: un vuelo cuyo
-   * gasto quedara pasada la fila 1000 saldría «sin gasto» en falso).
+   * de los `candidatos` (propios con avión, cliente interno y servicio
+   * incluidos — `candidatosSinGastoOperaciones`) quita los que tienen algún
+   * gasto OPERACIONES/ATERRIZAJE ligado por `vuelo_id` (de CUALQUIER fecha).
+   * Lectura en lotes de ids y paginada (anti-cap-1000 de PostgREST: un vuelo
+   * cuyo gasto quedara pasada la fila 1000 saldría «sin gasto» en falso).
    * Cualquier fallo ⇒ `null` + `warn` (no tumba el pre-cierre).
    */
   private async vuelosSinGastoOperaciones(
@@ -3004,16 +3004,9 @@ export class ProfitSharingService {
     if (candidatos.length === 0) return [];
     try {
       const ids = candidatos.map((v) => v.id as string);
-      const [escalas, gastosOps] = await Promise.all([
-        this.leerEnLotesPaginado(ids, (lote, desde, hasta) =>
-          this.supabase.service
-            .from('escala')
-            .select('id, vuelo_id, tipo_parada, pasajeros, cancelada_at')
-            .in('vuelo_id', lote)
-            .order('id', { ascending: true })
-            .range(desde, hasta),
-        ),
-        this.leerEnLotesPaginado(ids, (lote, desde, hasta) =>
+      const gastosOps = await this.leerEnLotesPaginado(
+        ids,
+        (lote, desde, hasta) =>
           this.supabase.service
             .from('gasto')
             .select('id, vuelo_id')
@@ -3021,11 +3014,9 @@ export class ProfitSharingService {
             .in('categoria', [...CATEGORIAS_GASTO_OPERACIONES])
             .order('id', { ascending: true })
             .range(desde, hasta),
-        ),
-      ]);
+      );
       return vuelosSinGastoOperaciones({
         candidatos,
-        escalas: escalas,
         vuelosConGasto: new Set(
           gastosOps
             .map((g) => g.vuelo_id)

@@ -1,8 +1,3 @@
-import {
-  esVueloDeServicio,
-  type TramoServicio,
-} from '../../common/vuelo-servicio.util';
-
 /**
  * PRE-CIERRE → «Vuelos completados sin gasto de operaciones» (5-oct-2026).
  *
@@ -13,17 +8,23 @@ import {
  * tarjeta (efectivo del piloto, pago en ventanilla…). Casos reales: #295
  * (ACP, 12-sep, XA-VGV, CUN→PPS→CUN, cobrado, 0 gastos) y #268 (7-sep,
  * N4142R, CUN→CUN, 0 gastos); en agosto #142, #194 y #206 traían UN gasto,
- * ninguno de pista. Este renglón cierra el hueco desde el lado del VUELO.
+ * ninguno de pista, y #136 (CET→CUN, cliente interno) tampoco. Este renglón
+ * cierra el hueco desde el lado del VUELO.
  *
  * Universo: vuelos COMPLETADO del periodo, PROPIOS (no `es_externo`, con
- * `aeronave_id`), de cliente NO interno y que NO sean de servicio
- * (`esVueloDeServicio`, fuente única). Un vuelo cuenta como «sin gasto» si
- * NO existe ningún gasto con `vuelo_id` = el vuelo y categoría
- * `OPERACIONES`/`ATERRIZAJE` — la FECHA del gasto no importa (la cuota de
- * pista se paga días después y puede caer en otro mes).
+ * `aeronave_id`). **Incluye cliente interno y vuelos de servicio**
+ * (revisión 5-oct-2026): lo que importa aquí es el COSTO, no el cobro — su
+ * pista resta en el balance por avión y en el reparto igual que la de un
+ * vuelo de cliente. En prod, de los 14 de ago-sep que una exclusión habría
+ * escondido, 13 traían su pista y el único sin ella (#136) era un gasto
+ * faltante de verdad. Un vuelo cuenta como «sin gasto» si NO existe ningún
+ * gasto con `vuelo_id` = el vuelo y categoría `OPERACIONES`/`ATERRIZAJE` —
+ * la FECHA del gasto no importa (la cuota de pista se paga días después y
+ * puede caer en otro mes).
  *
- * Aviso NO bloqueante: un vuelo local sin cargo de pista es posible; la
- * oficina captura el gasto o confirma con el piloto que no lo hubo.
+ * Aviso NO bloqueante. No hay forma de descartarlo: el vuelo sigue en la
+ * lista mientras no tenga un gasto de pista ligado (marcar «sin cargo
+ * confirmado» exigiría una columna nueva; fuera de alcance).
  *
  * Helpers PUROS: la consulta vive en `profit-sharing.service`
  * (`vuelosSinGastoOperaciones`); aquí solo el universo y la respuesta.
@@ -35,7 +36,7 @@ export const TITULO_PRECIERRE_VUELOS_SIN_GASTO =
   'Vuelos completados sin gasto de operaciones';
 
 export const DETALLE_PRECIERRE_VUELOS_SIN_GASTO =
-  'Vuelos propios COMPLETADOS del periodo sin ningún gasto de OPERACIONES/ATERRIZAJE (pista, plataforma, aterrizaje). La conciliación no puede verlos: el piloto no capturó el gasto o se pagó fuera de la tarjeta. Captúralo o confirma con el piloto que no hubo cargo.';
+  'Vuelos propios COMPLETADOS del periodo (también los de cliente interno y los de servicio) sin ningún gasto de OPERACIONES/ATERRIZAJE (pista, plataforma, aterrizaje). La conciliación no puede verlos: el piloto no capturó el gasto o se pagó fuera de la tarjeta. Captura el gasto en el vuelo: el aviso no bloquea el cierre, pero el vuelo sigue en esta lista mientras no tenga uno.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_VUELOS_SIN_GASTO_FALLIDA =
@@ -54,12 +55,6 @@ export interface VueloCompletadoSinGastoRow {
   fecha_vuelo?: unknown;
   aeronave_id?: unknown;
   es_externo?: unknown;
-  cliente_id?: unknown;
-}
-
-/** Tramo con lo que pide `esVueloDeServicio` + su vuelo. */
-export interface EscalaServicioRow extends TramoServicio {
-  vuelo_id?: unknown;
 }
 
 /** Chip del checklist (mismo shape que los demás + `matricula` aditiva). */
@@ -71,45 +66,35 @@ export interface VueloSinGastoOperaciones {
 }
 
 /**
- * Candidatos a revisar: propios (no externos y con avión) y de cliente NO
- * interno. Los de servicio se descartan después, con sus tramos.
+ * Candidatos a revisar: los PROPIOS (no externos y con avión), sin importar
+ * el cliente (interno incluido) ni si es vuelo de servicio.
  */
 export function candidatosSinGastoOperaciones<
   T extends VueloCompletadoSinGastoRow,
->(completados: ReadonlyArray<T>, clientesInternos: ReadonlySet<string>): T[] {
+>(completados: ReadonlyArray<T>): T[] {
   return completados.filter(
     (v) =>
       typeof v.id === 'string' &&
       v.es_externo !== true &&
-      v.aeronave_id != null &&
-      !(typeof v.cliente_id === 'string' && clientesInternos.has(v.cliente_id)),
+      v.aeronave_id != null,
   );
 }
 
 /**
- * Los candidatos que NO son de servicio y no tienen ningún gasto de
- * operaciones ligado, ordenados por `fecha_vuelo` (y folio).
+ * Los candidatos que no tienen ningún gasto de operaciones ligado,
+ * ordenados por `fecha_vuelo` (empate por folio; sin fecha, al final).
  */
 export function vuelosSinGastoOperaciones(args: {
   candidatos: ReadonlyArray<VueloCompletadoSinGastoRow>;
-  escalas: ReadonlyArray<EscalaServicioRow>;
   /** `vuelo_id` de los gastos OPERACIONES/ATERRIZAJE ligados. */
   vuelosConGasto: ReadonlySet<string>;
   /** aeronave.id → matrícula (lo que no resuelva sale `null`). */
   matriculas: ReadonlyMap<string, string>;
 }): VueloSinGastoOperaciones[] {
-  const tramosPorVuelo = new Map<string, EscalaServicioRow[]>();
-  for (const e of args.escalas) {
-    if (typeof e.vuelo_id !== 'string') continue;
-    const lista = tramosPorVuelo.get(e.vuelo_id) ?? [];
-    lista.push(e);
-    tramosPorVuelo.set(e.vuelo_id, lista);
-  }
   const out: VueloSinGastoOperaciones[] = [];
   for (const v of args.candidatos) {
     const id = v.id as string;
     if (args.vuelosConGasto.has(id)) continue;
-    if (esVueloDeServicio(tramosPorVuelo.get(id))) continue;
     out.push({
       id,
       folio: Number(v.folio ?? 0),

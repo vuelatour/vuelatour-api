@@ -1544,13 +1544,8 @@ motivo, piloto_nombre}`), más un `detalle` que dice cuántos tramos en
     nombre inventado). `tramos` va TOPADO a `MAX_TRAMOS_EN_REVISION = 200`
     mientras que `count` es siempre el total real: quien pinte «y N más…»
     cuenta contra `count`, nunca contra `tramos.length`. «Resolver» sigue
-    llevando a `/admin/taco-live`.
-    **`vuelos_sin_gasto_operaciones` (5-oct-2026, NO bloquea, junto a
-    `pistas_sin_gasto`)**: COMPLETADOS del periodo, propios con avión, cliente
-    no interno y no de servicio (`esVueloDeServicio`) SIN ningún gasto
-    OPERACIONES/ATERRIZAJE por `vuelo_id` (de cualquier fecha): lo que la
-    conciliación no ve (#295, #268). `vuelos-sin-gasto.util.ts`; vuelos `{id,
-    folio, fecha_vuelo, matricula}`; lotes paginados; fallo ⇒ `lectura_fallida`.
+    llevando a `/admin/taco-live`. (El renglón `vuelos_sin_gasto_operaciones`
+    tiene su propio numeral: invariante 45.)
 
 20. **TIPO DE CAMBIO = 6 DECIMALES, y el total en pesos se LEE (17-sep-2026,
     caso del vuelo #314).** Fuente única `src/common/tc.util.ts`
@@ -4164,6 +4159,51 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       1 ↔ 1 y lote, «CFDI <uuid>», «Factura» de gastos sin banco, lista y
       candidatos con `folio_comprobante`, sin la migración ninguna consulta
       nombra `serie`). Deploy: pyservices → migración → API → panel.
+
+45. **PRE-CIERRE «VUELOS COMPLETADOS SIN GASTO DE OPERACIONES» (5-oct-2026,
+    sin migración).** Pregunta del cliente: «la conciliación no tiene
+    pendientes, pero en el balance por avión hay vuelos sin ningún gasto:
+    ¿cómo confío en el cierre?». La conciliación prueba que cada movimiento
+    del BANCO tiene su gasto; no ve un gasto que nunca se capturó ni pasó por
+    la tarjeta. Este renglón cierra el hueco desde el lado del VUELO, para
+    que el cierre quede en DOS señales: «Pendientes de conciliación» vacío y
+    pre-cierre sin avisos.
+    - **Item `vuelos_sin_gasto_operaciones`**, NO bloqueante (fuera de
+      `bloqueantes`, sin `informativo`), justo DESPUÉS de `pistas_sin_gasto`
+      (aquella mira el TRAMO fuera de CUN sin su cuota; esta, el VUELO sin
+      NINGUNA pista — incluye CUN→CUN). `count` = vuelos;
+      `vuelos[] {id, folio, fecha_vuelo, matricula}` por `fecha_vuelo`
+      (empate por folio);
+      `lectura_fallida: true` (count 0 y texto «No se pudo verificar…»)
+      cuando la lectura falla — jamás un 0 silencioso.
+    - **Universo**: vuelos COMPLETADO del periodo (cortes Cancún, invariante
+      4), PROPIOS (no `es_externo`, con `aeronave_id`). **Cliente interno y
+      vuelos de servicio ENTRAN** (revisión 5-oct-2026): aquí importa el
+      COSTO, no el cobro — su pista resta en el balance por avión y en el
+      reparto como la de cualquier vuelo. En prod, de los 14 de ago-sep que
+      la exclusión original escondía, 13 traían su pista y el único sin ella
+      era un faltante real (#136, CET→CUN de reposicionamiento). Fuera:
+      externos, sin avión y cancelados (esos los cubre
+      `gastos_en_cancelados`). «Sin gasto» = NINGÚN gasto `OPERACIONES` /
+      `ATERRIZAJE` con `vuelo_id` = el vuelo, de CUALQUIER fecha (la cuota se
+      paga días después). Casos reales: #295 y #268 (sep), #136, #142, #194 y
+      #206 (ago).
+    - **Fuente única PURA** `profit-sharing/vuelos-sin-gasto.util.ts`
+      (`candidatosSinGastoOperaciones`, `vuelosSinGastoOperaciones`, textos).
+      La lectura de gastos va en lotes de ≤ 200 ids, cada lote PAGINADO por
+      `id` (anti-cap-1000: un vuelo cuyo gasto quedara pasada la fila 1000
+      saldría «sin gasto» en falso). No lee tramos.
+    - **No se puede descartar**: el vuelo sigue en la lista mientras no tenga
+      un gasto de pista ligado (el texto lo dice: «Captura el gasto en el
+      vuelo…»). Un vuelo que de verdad no pagó pista deja el aviso vivo ese
+      mes; marcarlo «sin cargo confirmado» exigiría una columna nueva
+      (pendiente, decisión del cliente).
+    - Spec: `profit-sharing.service.pre-cierre-vuelos-sin-gasto.spec.ts` (BD
+      en memoria con max-rows 1000: #295/#268, COMIDA no cuenta, pista de
+      otro mes y ATERRIZAJE sí, interno y servicio listados, externo / sin
+      avión / cancelado / fuera de periodo no, orden por fecha con folio
+      menor posterior y empate por folio —falla si se ordena solo por folio
+      o sin desempate—, anti-cap y lectura fallida).
 
 ## Convenciones NestJS
 

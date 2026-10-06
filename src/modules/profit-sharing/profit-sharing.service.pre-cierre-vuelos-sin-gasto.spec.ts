@@ -22,7 +22,9 @@ import type { ConciliacionService } from '../conciliacion/conciliacion.service';
  * (ACP, 12-sep, XA-VGV, CUN→PPS→CUN, cobrado y con 0 gastos) y #268 (7-sep,
  * N4142R, CUN→CUN). Este renglón los lista desde el lado del VUELO: propios,
  * COMPLETADOS, sin ningún gasto OPERACIONES/ATERRIZAJE ligado (de cualquier
- * fecha). Aviso NO bloqueante; lectura caída ⇒ `lectura_fallida`.
+ * fecha). Cliente interno y vuelos de servicio ENTRAN (revisión 5-oct-2026:
+ * su pista también resta en el balance; #136 de agosto era interno y le
+ * faltaba). Aviso NO bloqueante; lectura caída ⇒ `lectura_fallida`.
  *
  * Fake: BD EN MEMORIA que aplica los filtros de PostgREST que usa el
  * pre-cierre (eq/neq/in/is/not/gte/lte, order, range, limit) y entrega como
@@ -261,12 +263,20 @@ function septiembre(): Record<string, Fila[]> {
       vuelo('v320', 320, { es_externo: true, aeronave_id: 'av-gg' }),
       // Sin avión ⇒ NO.
       vuelo('v321', 321, { aeronave_id: null }),
-      // Cliente interno ⇒ NO.
+      // Cliente interno: su pista también resta en el balance ⇒ listado
+      // (caso real #136 de agosto, CET→CUN de reposicionamiento).
       vuelo('v330', 330, { cliente_id: 'cli-int' }),
-      // Vuelo de SERVICIO (parada SERVICIO, cero pax) ⇒ NO.
+      // Vuelo de SERVICIO (parada SERVICIO, cero pax): también paga pista ⇒
+      // listado.
       vuelo('v340', 340),
-      // Parada SERVICIO pero CON pasajeros: no es de servicio ⇒ listado.
+      // Parada SERVICIO CON pasajeros ⇒ listado.
       vuelo('v341', 341, { fecha_vuelo: '2026-09-20T15:00:00+00:00' }),
+      // ORDEN: folio MENOR con fecha POSTERIOR ⇒ va por fecha, no por folio.
+      vuelo('v200', 200, { fecha_vuelo: '2026-09-25T15:00:00+00:00' }),
+      // ORDEN: misma fecha, folios INVERTIDOS en la lectura ⇒ desempate por
+      // folio (350 antes que 351).
+      vuelo('v351', 351, { fecha_vuelo: '2026-09-27T15:00:00+00:00' }),
+      vuelo('v350', 350, { fecha_vuelo: '2026-09-27T15:00:00+00:00' }),
       // Cancelado ⇒ NO (no voló: lo cubre gastos_en_cancelados).
       vuelo('v348', 348, { estado: 'CANCELADO' }),
       // 31-ago 23:30 en Cancún (01-sep UTC) ⇒ fuera del periodo ⇒ NO.
@@ -300,42 +310,34 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
     expect(item).toMatchObject({
       titulo: 'Vuelos completados sin gasto de operaciones',
       detalle:
-        'Vuelos propios COMPLETADOS del periodo sin ningún gasto de OPERACIONES/ATERRIZAJE (pista, plataforma, aterrizaje). La conciliación no puede verlos: el piloto no capturó el gasto o se pagó fuera de la tarjeta. Captúralo o confirma con el piloto que no hubo cargo.',
-      count: 5,
+        'Vuelos propios COMPLETADOS del periodo (también los de cliente interno y los de servicio) sin ningún gasto de OPERACIONES/ATERRIZAJE (pista, plataforma, aterrizaje). La conciliación no puede verlos: el piloto no capturó el gasto o se pagó fuera de la tarjeta. Captura el gasto en el vuelo: el aviso no bloquea el cierre, pero el vuelo sigue en esta lista mientras no tenga uno.',
+      count: 10,
       lectura_fallida: false,
     });
-    // Por fecha_vuelo; matrícula aditiva del avión del vuelo.
+    // Por fecha_vuelo (no por folio: #200 va después de #341) y, con la
+    // misma fecha, por folio (#301 · #330 · #340 y #350 · #351); matrícula
+    // aditiva del avión del vuelo.
+    expect((item.vuelos as Fila[]).map((v) => v.folio)).toEqual([
+      268, 295, 301, 330, 340, 341, 200, 350, 351, 360,
+    ]);
+    // Forma completa del chip (matrícula del avión del vuelo).
+    const chip = (folio: number, fecha: string, matricula = 'XA-VGV') => ({
+      id: `v${folio}`,
+      folio,
+      fecha_vuelo: fecha,
+      matricula,
+    });
     expect(item.vuelos).toEqual([
-      {
-        id: 'v268',
-        folio: 268,
-        fecha_vuelo: '2026-09-07T16:00:00+00:00',
-        matricula: 'N4142R',
-      },
-      {
-        id: 'v295',
-        folio: 295,
-        fecha_vuelo: '2026-09-12T15:00:00+00:00',
-        matricula: 'XA-VGV',
-      },
-      {
-        id: 'v301',
-        folio: 301,
-        fecha_vuelo: '2026-09-15T15:00:00+00:00',
-        matricula: 'XA-VGV',
-      },
-      {
-        id: 'v341',
-        folio: 341,
-        fecha_vuelo: '2026-09-20T15:00:00+00:00',
-        matricula: 'XA-VGV',
-      },
-      {
-        id: 'v360',
-        folio: 360,
-        fecha_vuelo: '2026-10-01T03:00:00+00:00',
-        matricula: 'XA-VGV',
-      },
+      chip(268, '2026-09-07T16:00:00+00:00', 'N4142R'),
+      chip(295, '2026-09-12T15:00:00+00:00'),
+      chip(301, '2026-09-15T15:00:00+00:00'),
+      chip(330, '2026-09-15T15:00:00+00:00'),
+      chip(340, '2026-09-15T15:00:00+00:00'),
+      chip(341, '2026-09-20T15:00:00+00:00'),
+      chip(200, '2026-09-25T15:00:00+00:00'),
+      chip(350, '2026-09-27T15:00:00+00:00'),
+      chip(351, '2026-09-27T15:00:00+00:00'),
+      chip(360, '2026-10-01T03:00:00+00:00'),
     ]);
     // Aviso, no candado: sin bloqueantes el periodo sigue «listo».
     expect(r.listo).toBe(true);
@@ -359,7 +361,7 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
     expect(qGasto.ops.some((o) => o[1][0] === 'fecha_gasto')).toBe(false);
   });
 
-  it('cada regla por separado: COMIDA sí lista; pista de otra fecha, externo, interno, servicio y cancelado NO', async () => {
+  it('cada regla por separado: COMIDA, cliente interno y servicio SÍ listan; pista de otra fecha, externo, sin avión y cancelado NO', async () => {
     const casos: Array<[string, Record<string, Fila[]>, number[]]> = [
       [
         'sin ningún gasto',
@@ -402,6 +404,16 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
           cliente: CLIENTES,
           vuelo: [vuelo('a', 1, { cliente_id: 'cli-int' })],
         },
+        [1],
+      ],
+      [
+        'cliente interno CON pista',
+        {
+          aeronave: AERONAVES,
+          cliente: CLIENTES,
+          vuelo: [vuelo('a', 1, { cliente_id: 'cli-int' })],
+          gasto: [gasto('g', 'a', 'OPERACIONES', '2026-09-15')],
+        },
         [],
       ],
       [
@@ -411,6 +423,15 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
           cliente: CLIENTES,
           vuelo: [vuelo('a', 1)],
           escala: [tramo('e', 'a', { tipo_parada: 'SERVICIO', pasajeros: 0 })],
+        },
+        [1],
+      ],
+      [
+        'sin avión',
+        {
+          aeronave: AERONAVES,
+          cliente: CLIENTES,
+          vuelo: [vuelo('a', 1, { aeronave_id: null })],
         },
         [],
       ],
@@ -482,21 +503,13 @@ describe('ProfitSharingService.preCierre — vuelos completados sin gasto de ope
     }
   });
 
-  it('lectura fallida (gastos o tramos) ⇒ count 0 MARCADO con lectura_fallida, sin tumbar el pre-cierre', async () => {
+  it('lectura fallida de los gastos ⇒ count 0 MARCADO con lectura_fallida, sin tumbar el pre-cierre', async () => {
     const fallas: Array<[string, (tabla: string, ops: Op[]) => boolean]> = [
       [
         'gastos de pista',
         (tabla, ops) =>
           tabla === 'gasto' &&
           ops.some((o) => o[0] === 'in' && o[1][0] === 'categoria'),
-      ],
-      [
-        'tramos (servicio)',
-        (tabla, ops) =>
-          tabla === 'escala' &&
-          ops.some(
-            (o) => o[0] === 'select' && String(o[1][0]).includes('tipo_parada'),
-          ),
       ],
     ];
     for (const [nombre, fallar] of fallas) {
