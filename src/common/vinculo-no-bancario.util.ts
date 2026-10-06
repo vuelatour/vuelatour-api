@@ -16,20 +16,32 @@
  *
  *  - Cargo (`movimiento_bancario.notas`), una línea por gasto:
  *    «Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi / estacionamiento
- *    · vuelo #330 · $212.00): <justificación> — <usuario>, 06-oct-2026»
+ *    · vuelo #330 · $212.00 · gasto 3f9a1c2e): <justificación> — <usuario>,
+ *    06-oct-2026»
  *  - Gasto (`gasto.notas`), una línea por cargo:
  *    «⚠ Conciliado con el cargo bancario del 07-sep-2026 ($212.00 · ASUR
  *    CANCUN) sin cambiar el medio de pago (EFECTIVO): <justificación> —
  *    <usuario>, 06-oct-2026»
  *
+ * «gasto 3f9a1c2e» (revisión 6-oct-2026) = los 8 primeros caracteres del id
+ * del gasto: es la LLAVE de la línea del cargo. Con fecha · categoría ·
+ * vuelo · monto como llave, dos estacionamientos iguales del mismo día en
+ * un lote compartían UNA línea (y soltar uno borraba la del otro), y un
+ * gasto al que le cambiaban la categoría o el vuelo después de ligarse
+ * (siguen editables) dejaba su línea huérfana en el cargo al soltarlo. La
+ * línea del GASTO no lo necesita: fecha, monto y leyenda del cargo vienen
+ * del estado de cuenta y no se editan.
+ *
  * Aquí vive, PURO y con spec, TODO el texto de la regla: las dos líneas, su
  * alta idempotente (una línea por par cargo ↔ gasto; la misma no se
  * duplica, una razón nueva la reemplaza), su retiro al desvincular (regex de
- * la forma EXACTA: lo que escribió la oficina queda intacto) y los mensajes
- * del 400 `JUSTIFICACION_REQUERIDA` y del 409 `GASTO_BODEGA`. Etiquetas de
- * medio y categoría: las utils de siempre (`etiquetaMedioPago`,
- * `etiquetaCategoriaGasto`). Fechas `dd-mmm-aaaa` cortando el texto
- * (jamás `new Date`: restaría un día en Cancún).
+ * la forma EXACTA: lo que escribió la oficina —texto, renglones en blanco,
+ * espacios y fines de línea— queda intacto) y los mensajes del 400
+ * `JUSTIFICACION_REQUERIDA` y de los 409 `GASTO_BODEGA` y
+ * `NO_BANCARIO_OTRA_MONEDA`. Etiquetas de medio y categoría: las utils de
+ * siempre (`etiquetaMedioPago`, `etiquetaCategoriaGasto`). Fechas
+ * `dd-mmm-aaaa` cortando el texto (jamás `new Date`: restaría un día en
+ * Cancún).
  */
 import { etiquetaCategoriaGasto } from './categoria-gasto.util';
 import { etiquetaMedioPago } from './medio-pago.util';
@@ -43,6 +55,8 @@ const DESCRIPCION_NOTA_MAX = 80;
 
 /** Lo que la nota del CARGO dice del gasto. */
 export interface GastoDeNota {
+  /** Id del gasto: sus 8 primeros caracteres son la llave de la línea. */
+  id: string;
   fecha_gasto: string | null;
   monto: number;
   moneda: string | null;
@@ -155,6 +169,14 @@ function detalleGasto(g: GastoDeNota): string {
     .join(' · ');
 }
 
+/** Referencia corta del gasto en la línea del cargo: «3f9a1c2e» (uuid en minúsculas). */
+export function refGastoNota(id: string | null | undefined): string {
+  return String(id ?? '')
+    .trim()
+    .slice(0, 8)
+    .toLowerCase();
+}
+
 /** «$212.00 · ASUR CANCUN». */
 function detalleCargo(c: CargoDeNota): string {
   return [montoNota(c.monto, c.moneda), descripcionNota(c.descripcion) || null]
@@ -168,14 +190,14 @@ function cola(firma: FirmaVinculo): string {
 
 /**
  * Línea del CARGO: «Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi /
- * estacionamiento · vuelo #330 · $212.00): <justificación> — <usuario>,
- * 06-oct-2026».
+ * estacionamiento · vuelo #330 · $212.00 · gasto 3f9a1c2e): <justificación>
+ * — <usuario>, 06-oct-2026».
  */
 export function lineaNotaCargo(
   gasto: GastoDeNota,
   firma: FirmaVinculo,
 ): string {
-  return `Vinculado a gasto en ${medioNota(gasto.medio_pago)} del ${fechaNota(gasto.fecha_gasto)} (${detalleGasto(gasto)}): ${cola(firma)}`;
+  return `Vinculado a gasto en ${medioNota(gasto.medio_pago)} del ${fechaNota(gasto.fecha_gasto)} (${detalleGasto(gasto)} · gasto ${refGastoNota(gasto.id)}): ${cola(firma)}`;
 }
 
 /**
@@ -193,9 +215,9 @@ export function lineaNotaGasto(
 
 const FECHA_RE = String.raw`(?:\d{2}-[a-z]{3}-\d{4}|sin fecha)`;
 
-/** Forma EXACTA de la línea del cargo (grupos 2 y 3 = la llave del gasto). */
+/** Forma EXACTA de la línea del cargo (grupo 4 = la llave: «gasto 3f9a1c2e»). */
 const RE_LINEA_CARGO = new RegExp(
-  String.raw`^Vinculado a gasto en (.+?) del (${FECHA_RE}) \((.+?)\): (.+) — (.+), ${FECHA_RE}$`,
+  String.raw`^Vinculado a gasto en (.+?) del (${FECHA_RE}) \((.+?) · gasto ([\w-]{1,8})\): (.+) — (.+), ${FECHA_RE}$`,
 );
 
 /** Forma EXACTA de la línea del gasto (grupos 1 y 2 = la llave del cargo). */
@@ -207,16 +229,17 @@ type FormaLinea = 'CARGO' | 'GASTO';
 
 /**
  * ¿Es una línea del vínculo? ⇒ su forma y su LLAVE (el otro lado del par:
- * fecha + detalle del gasto en la nota del cargo; fecha + detalle del cargo
- * en la del gasto). El medio NO entra en la llave: si la oficina corrige el
- * medio después, la línea se sigue reconociendo.
+ * la referencia «gasto 3f9a1c2e» en la nota del cargo; fecha + detalle del
+ * cargo en la del gasto). Ni el medio ni la categoría, el vuelo o la fecha
+ * del gasto entran en la llave del cargo: si la oficina los corrige
+ * después, la línea se sigue reconociendo.
  */
 function llaveDeLinea(
   linea: string,
 ): { forma: FormaLinea; llave: string } | null {
   const l = linea.trim();
   const c = RE_LINEA_CARGO.exec(l);
-  if (c) return { forma: 'CARGO', llave: `${c[2]}|${c[3]}` };
+  if (c) return { forma: 'CARGO', llave: c[4].toLowerCase() };
   const g = RE_LINEA_GASTO.exec(l);
   if (g) return { forma: 'GASTO', llave: `${g[1]}|${g[2]}` };
   return null;
@@ -237,24 +260,47 @@ export function tieneNotasVinculoNoBancario(
   );
 }
 
-/** Llave con la que la nota del CARGO nombra a este gasto. */
-function llaveGasto(g: GastoDeNota): string {
-  return `${fechaNota(g.fecha_gasto)}|${detalleGasto(g)}`;
-}
-
 /** Llave con la que la nota del GASTO nombra a este cargo. */
 function llaveCargo(c: CargoDeNota): string {
   return `${fechaNota(c.fecha)}|${detalleCargo(c)}`;
 }
 
 /**
+ * Un renglón de las notas con el fin de línea que lo SEPARA del anterior
+ * (`''` en el primero). Reescribir por renglones así deja el texto de la
+ * oficina byte a byte: sus espacios, sus renglones en blanco y sus `\r\n`.
+ */
+interface Renglon {
+  texto: string;
+  antes: string;
+}
+
+function renglones(notas: string): Renglon[] {
+  const partes = notas.split(/(\r?\n)/);
+  const out: Renglon[] = [];
+  for (let i = 0; i < partes.length; i += 2) {
+    out.push({ texto: partes[i], antes: i === 0 ? '' : partes[i - 1] });
+  }
+  return out;
+}
+
+/** Une los renglones; el primero que quede pierde su separador. */
+function unirRenglones(rs: readonly Renglon[]): string {
+  return rs.map((r, i) => (i === 0 ? r.texto : r.antes + r.texto)).join('');
+}
+
+const enBlanco = (r: Renglon | undefined) => !!r && r.texto.trim() === '';
+
+/**
  * Agrega la línea SIN pisar lo que ya había. Idempotente: si ya está la
  * MISMA línea, las notas no cambian; si ya hay una línea del MISMO par
  * (misma llave) con otra razón, se reemplaza en su lugar (una línea por
- * par). Va al FINAL, separada por un renglón en blanco (el bloque
- * «Desglose:» del panel termina en el primer renglón vacío: pegada a él, la
- * limpieza del desglose se la llevaría); junto a otra línea del vínculo va
- * renglón seguido.
+ * par). Va justo después del ÚLTIMO renglón con texto, separada por un
+ * renglón en blanco (el bloque «Desglose:» del panel termina en el primer
+ * renglón vacío: pegada a él, la limpieza del desglose se la llevaría);
+ * junto a otra línea del vínculo va renglón seguido. Lo de la oficina no se
+ * toca (ni los blancos del final, que quedan después de la línea) y el fin
+ * de línea es el de las notas (`\r\n` si ya lo usan).
  */
 export function agregarNotaVinculo(
   notas: string | null | undefined,
@@ -262,70 +308,96 @@ export function agregarNotaVinculo(
 ): string {
   const nueva = linea.trim();
   const base = typeof notas === 'string' ? notas : '';
-  const lineas = base.split(/\r?\n/);
+  const rs = renglones(base);
   const k = llaveDeLinea(nueva);
   if (k) {
-    const i = lineas.findIndex((l) => {
-      const otra = llaveDeLinea(l);
+    const i = rs.findIndex((r) => {
+      const otra = llaveDeLinea(r.texto);
       return !!otra && otra.forma === k.forma && otra.llave === k.llave;
     });
     if (i >= 0) {
-      if (lineas[i].trim() === nueva) return base;
-      lineas[i] = nueva;
-      return lineas.join('\n');
+      if (rs[i].texto.trim() === nueva) return base;
+      rs[i] = { ...rs[i], texto: nueva };
+      return unirRenglones(rs);
     }
   }
-  if (lineas.some((l) => l.trim() === nueva)) return base;
-  const cuerpo = base.replace(/\s+$/, '');
-  if (!cuerpo) return nueva;
-  const ultima = cuerpo.split(/\r?\n/).pop() ?? '';
-  const sep = llaveDeLinea(ultima) ? '\n' : '\n\n';
-  return `${cuerpo}${sep}${nueva}`;
+  if (rs.some((r) => r.texto.trim() === nueva)) return base;
+  let ultimo = -1;
+  for (let i = rs.length - 1; i >= 0; i -= 1) {
+    if (!enBlanco(rs[i])) {
+      ultimo = i;
+      break;
+    }
+  }
+  if (ultimo < 0) return nueva;
+  const eol = base.includes('\r\n') ? '\r\n' : '\n';
+  const insertar: Renglon[] = llaveDeLinea(rs[ultimo].texto)
+    ? [{ texto: nueva, antes: eol }]
+    : [
+        { texto: '', antes: eol },
+        { texto: nueva, antes: eol },
+      ];
+  rs.splice(ultimo + 1, 0, ...insertar);
+  return unirRenglones(rs);
 }
 
 /** Qué líneas del vínculo se retiran (sin filtro: TODAS). */
 export interface FiltroNotasVinculo {
   /** En las notas de un GASTO: solo la línea de ESTE cargo. */
   cargo?: CargoDeNota;
-  /** En las notas de un CARGO: solo la línea de ESTE gasto. */
-  gasto?: GastoDeNota;
+  /** En las notas de un CARGO: solo la línea de ESTE gasto (por su id). */
+  gastoId?: string;
 }
 
 /**
  * Retira las líneas del vínculo (al DESVINCULAR, en los dos lados). Sin
  * filtro, todas las de las dos formas; con `cargo`, solo la línea del gasto
- * que nombra a ese cargo; con `gasto`, solo la línea del cargo que nombra a
- * ese gasto. Lo que escribió la oficina queda intacto; los renglones en
- * blanco que dejó el retiro se compactan. Sin nada que retirar, las notas
- * salen IDÉNTICAS; vacías ⇒ null.
+ * que nombra a ese cargo; con `gastoId`, solo la línea del cargo que nombra
+ * a ese gasto («gasto 3f9a1c2e»). Se van SOLO esas líneas y, si un bloque
+ * de líneas del vínculo se va COMPLETO, el renglón en blanco que
+ * `agregarNotaVinculo` puso antes de él: agregar y quitar devuelve las notas
+ * de antes byte a byte (texto, blancos y fines de línea de la oficina). Sin
+ * nada que retirar, las notas salen IDÉNTICAS; vacías (o solo blancos) ⇒
+ * null.
  */
 export function quitarNotasVinculoNoBancario(
   notas: string | null | undefined,
   filtro?: FiltroNotasVinculo,
 ): string | null {
   if (typeof notas !== 'string') return null;
+  // Sin filtro = TODAS; con filtro (aunque su id venga vacío) solo lo suyo:
+  // un `gastoId` vacío jamás puede volverse «borra todo».
+  const sinFiltro = filtro?.cargo == null && filtro?.gastoId == null;
   const deCargo = filtro?.cargo ? llaveCargo(filtro.cargo) : null;
-  const deGasto = filtro?.gasto ? llaveGasto(filtro.gasto) : null;
-  const sinFiltro = deCargo === null && deGasto === null;
-  const lineas = notas.split(/\r?\n/);
-  const quedan = lineas.filter((l) => {
-    const k = llaveDeLinea(l);
-    if (!k) return true;
-    if (sinFiltro) return false;
+  const deGasto =
+    filtro?.gastoId != null ? refGastoNota(filtro.gastoId) || null : null;
+  const rs = renglones(notas);
+  const llaves = rs.map((r) => llaveDeLinea(r.texto));
+  const quitar = llaves.map((k) => {
+    if (!k) return false;
+    if (sinFiltro) return true;
     if (deCargo !== null && k.forma === 'GASTO' && k.llave === deCargo) {
-      return false;
+      return true;
     }
-    if (deGasto !== null && k.forma === 'CARGO' && k.llave === deGasto) {
-      return false;
-    }
-    return true;
+    return deGasto !== null && k.forma === 'CARGO' && k.llave === deGasto;
   });
-  if (quedan.length === lineas.length) return notas;
-  const texto = quedan
-    .join('\n')
-    .replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n')
-    .trim();
-  return texto ? texto : null;
+  if (!quitar.some(Boolean)) return notas;
+  // Bloque de líneas del vínculo que se va entero ⇒ también el renglón en
+  // blanco de justo antes (el separador que puso el alta).
+  for (let i = 0; i < rs.length; ) {
+    if (!llaves[i]) {
+      i += 1;
+      continue;
+    }
+    let fin = i;
+    while (fin + 1 < rs.length && llaves[fin + 1]) fin += 1;
+    let entero = true;
+    for (let j = i; j <= fin; j += 1) entero = entero && quitar[j];
+    if (entero && i > 0 && enBlanco(rs[i - 1])) quitar[i - 1] = true;
+    i = fin + 1;
+  }
+  const texto = unirRenglones(rs.filter((_, i) => !quitar[i]));
+  return texto.trim() ? texto : null;
 }
 
 /** «28 sep», «27 sep y 28 sep», «24 sep, 27 sep, 28 sep y 2 más». */
@@ -385,4 +457,27 @@ export function mensajeGastoBodega(
     return `El gasto del ${fechas[0] ?? 'sin fecha'} es una salida de inventario (Bodega): no se pagó con el banco y no se puede vincular a un cargo.`;
   }
   return `Los gastos del ${listaFechas(fechas)} son salidas de inventario (Bodega): no se pagaron con el banco y no se pueden vincular a un cargo.`;
+}
+
+/**
+ * Texto del 409 `NO_BANCARIO_OTRA_MONEDA` (revisión 6-oct-2026): un gasto
+ * que no pasó por el banco solo se liga a un cargo de SU moneda. Cruzado
+ * (dólares contra una cuenta en pesos), la BD le derivaría el tipo de cambio
+ * de ese cargo (`recalcular_gasto_conciliado`), y ese cargo no lo pagó.
+ */
+export function mensajeNoBancarioOtraMoneda(
+  gastos: ReadonlyArray<{ fecha_gasto: string | null; moneda: string | null }>,
+  monedaCuenta: string | null | undefined,
+): string {
+  const monedas = [...new Set(gastos.map((g) => (g.moneda ?? '').trim()))];
+  const en =
+    monedas.length === 1 && monedas[0] ? `en ${monedas[0]}` : 'en otra moneda';
+  const cuenta = monedaCuenta
+    ? ` (este cargo es de una cuenta en ${monedaCuenta})`
+    : '';
+  if (gastos.length <= 1) {
+    return `El gasto del ${fechaMensaje(gastos[0]?.fecha_gasto)} está ${en} y no se pagó con el banco: solo se puede vincular a un cargo de su misma moneda${cuenta}, para no cambiarle el tipo de cambio.`;
+  }
+  const fechas = gastos.map((g) => fechaMensaje(g.fecha_gasto));
+  return `Los gastos del ${listaFechas(fechas)} están ${en} y no se pagaron con el banco: solo se pueden vincular a un cargo de su misma moneda${cuenta}, para no cambiarles el tipo de cambio.`;
 }

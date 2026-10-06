@@ -9,8 +9,9 @@
  * la ventana. La oficina creyó que era un bug.
  *
  * Con la lista de candidatos VACÍA, `GET movimientos/:id/gastos-candidatos`
- * hace UNA consulta extra —gastos del MISMO monto (±0.01) a ±max(120, dias)
- * del cargo, sin filtrar medio, conciliado ni moneda— y aquí, PURO y con
+ * hace UNA consulta extra —gastos del MISMO monto (±0.01; con una búsqueda
+ * entera, su mismo rango [q, q+1)) a ±max(120, dias) del cargo, sin filtrar
+ * medio, conciliado ni moneda— y aquí, PURO y con
  * spec, se decide el motivo de cada uno y se arman los grupos que viajan en
  * `excluidos`. Nadie más clasifica: el panel solo redacta.
  */
@@ -53,7 +54,7 @@ export const EXCLUIDOS_DIAS = 120;
 export const EXCLUIDOS_POR_MOTIVO = 5;
 
 /**
- * Tope de la consulta extra. Va filtrada por monto (±0.01) y por fechas: ni
+ * Tope de la consulta extra. Va filtrada por monto (±0.01, o [q, q+1)) y por fechas: ni
  * los 29 «Pago VIP SAESA» iguales se acercan, así que el tope de 1000 de
  * PostgREST no aplica (no se pagina).
  */
@@ -176,6 +177,27 @@ export function bandaMontoExcluidos(monto: number): {
   return {
     min: c2(m - TOLERANCIA_CENTAVOS),
     max: c2(m + TOLERANCIA_CENTAVOS),
+  };
+}
+
+/**
+ * Rango de MONTO de la consulta extra = el de la búsqueda de los candidatos
+ * (revisión 6-oct-2026): entero «212» ⇒ [212, 213) (`maxExclusivo`) —con
+ * ±0.01 un gasto de $212.40 que la búsqueda SÍ abarca quedaba sin
+ * explicar—; con decimales ⇒ ±0.01; sin búsqueda o con texto ⇒ el |monto|
+ * del cargo ±0.01 (`bandaMontoExcluidos`).
+ */
+export function rangoMontoExcluidos(
+  q: string | null | undefined,
+  montoCargo: number,
+): { min: number; max: number; maxExclusivo: boolean } {
+  const b = interpretarBusquedaGasto(q);
+  if (b.tipo === 'monto' && b.maxExclusivo) {
+    return { min: c2(b.min), max: c2(b.max), maxExclusivo: true };
+  }
+  return {
+    ...bandaMontoExcluidos(montoReferenciaExcluidos(q, montoCargo)),
+    maxExclusivo: false,
   };
 }
 

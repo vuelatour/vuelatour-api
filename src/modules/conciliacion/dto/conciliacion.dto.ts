@@ -352,13 +352,15 @@ export class GastosCandidatosQuery {
   /**
    * ADITIVO (6-oct-2026, API 0.0.63): con `true`/`1` el universo incluye
    * también los gastos NO bancarios (EFECTIVO, PERSONAL_*), menos BODEGA,
-   * con las mismas reglas (sin conciliar, moneda, ventana, búsqueda); van
-   * DESPUÉS de los bancarios y cada candidato dice `no_bancario`.
+   * con las mismas reglas (sin conciliar, moneda de la cuenta, ventana,
+   * búsqueda; nunca cruzados) y cada candidato dice `no_bancario`. Orden
+   * por niveles: lo que cuadra con el cargo (bancario y luego no bancario)
+   * antes que el resto.
    */
   @ApiPropertyOptional({
     default: false,
     description:
-      'true/1 ⇒ incluye los gastos que NO se pagaron con el banco (efectivo, Personal Pablo/Ale; nunca Bodega) después de los bancarios, con `no_bancario: true`. Ligarlos exige `justificacion` en el PATCH.',
+      'true/1 ⇒ incluye los gastos que NO se pagaron con el banco (efectivo, Personal Pablo/Ale; nunca Bodega), solo en la moneda de la cuenta, con `no_bancario: true`. Orden: bancarios que cuadran con el cargo, no bancarios que cuadran, resto de bancarios, resto de no bancarios. Ligarlos exige `justificacion` en el PATCH.',
   })
   @IsOptional()
   @ToBooleanQuery()

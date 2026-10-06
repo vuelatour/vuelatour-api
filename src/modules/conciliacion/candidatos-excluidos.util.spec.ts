@@ -10,6 +10,7 @@ import {
   montoReferenciaExcluidos,
   motivoExclusion,
   MOTIVOS_EXCLUSION,
+  rangoMontoExcluidos,
   ventanaExcluidos,
   type ContextoExclusion,
   type GastoExcluible,
@@ -367,6 +368,33 @@ describe('monto, banda y ventana de la consulta extra', () => {
     expect(bandaMontoExcluidos(212)).toEqual({ min: 211.99, max: 212.01 });
     expect(bandaMontoExcluidos(2801.4)).toEqual({ min: 2801.39, max: 2801.41 });
     expect(bandaMontoExcluidos(-212)).toEqual({ min: 211.99, max: 212.01 });
+  });
+
+  it('rango: el MISMO de la búsqueda de los candidatos (entero ⇒ [q, q+1)); si no, la banda ±0.01', () => {
+    // Revisión 6-oct-2026: «212» buscaba [212, 213) pero se explicaba con
+    // 212.00 ±0.01, y un efectivo de $212.40 quedaba sin explicar.
+    expect(rangoMontoExcluidos('212', 212)).toEqual({
+      min: 212,
+      max: 213,
+      maxExclusivo: true,
+    });
+    expect(rangoMontoExcluidos('$ 2,801', 8404.2)).toEqual({
+      min: 2801,
+      max: 2802,
+      maxExclusivo: true,
+    });
+    expect(rangoMontoExcluidos('2801.40', 8404.2)).toEqual({
+      min: 2801.39,
+      max: 2801.41,
+      maxExclusivo: false,
+    });
+    for (const q of [undefined, '  ', 'asur']) {
+      expect(rangoMontoExcluidos(q, -212)).toEqual({
+        min: 211.99,
+        max: 212.01,
+        maxExclusivo: false,
+      });
+    }
   });
 
   it(`ventana: ±${EXCLUIDOS_DIAS} días del cargo, o ±dias si se pidió más`, () => {

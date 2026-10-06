@@ -3759,9 +3759,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       EFECTIVO. **Solo con `candidatos` VACÍO** viajan los ADITIVOS
       `excluidos` y `excluidos_monto`; con candidatos la respuesta es
       byte-idéntica al 0.0.62 y NO hay consulta extra. Se hace UNA consulta a
-      `gasto` por monto (el de `q` si es numérico —entero «212» ⇒ 212,
-      «2801.40» ⇒ 2801.40—; sin `q` o con texto, el |monto| del cargo; ±0.01)
-      y fechas (±max(120, dias) del cargo), SIN filtro de medio, conciliado
+      `gasto` por monto (`rangoMontoExcluidos`: el MISMO rango que la
+      búsqueda de los candidatos —entero «212» ⇒ [212, 213), «2801.40» ⇒
+      ±0.01—; sin `q` o con texto, el |monto| del cargo ±0.01; revisión
+      6-oct-2026: con 212.00 ±0.01 un efectivo de $212.40 que la búsqueda
+      «212» sí abarca quedaba sin explicar; `excluidos_monto` sigue siendo
+      212) y fechas (±max(120, dias) del cargo), SIN filtro de medio, conciliado
       ni moneda; el tope de 1000 no aplica (`.limit(500)`). Clasificación
       PURA en `conciliacion/candidatos-excluidos.util.ts` (spec), con
       precedencia `EFECTIVO_U_OTRO_MEDIO` (medio ∉ `MEDIOS_BANCARIOS`:
@@ -4489,20 +4492,37 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`@ToBooleanQuery`, que desde hoy también acepta `1`/`0`; default
       false) cambia el filtro de medio de `in(MEDIOS_BANCARIOS)` a
       `neq(BODEGA)` con las MISMAS reglas (sin conciliar, moneda de la
-      cuenta, ventana, búsqueda, cruzados USD). `no_bancario: boolean` viaja
-      SIEMPRE en cada candidato; los no bancarios van DESPUÉS de TODOS los
-      bancarios (cada bloque con `ordenarCandidatosGasto`). Con la bandera,
-      `excluidos` (`ContextoExclusion.incluirNoBancarios`) solo cuenta BODEGA
-      (y sin medio) como `EFECTIVO_U_OTRO_MEDIO`. Helpers PUROS en
+      cuenta, ventana, búsqueda). **Los cruzados (USD contra cuenta MXN)
+      siguen SOLO bancarios** aun con la bandera (`leer('USD', false)`):
+      ligado 1 ↔ 1, `recalcular_gasto_conciliado` le derivaría `tc_gasto`
+      del cargo a un efectivo en dólares que ese cargo no pagó.
+      `no_bancario: boolean` viaja SIEMPRE en cada candidato. **Orden por
+      NIVELES** (`ordenarCandidatosPorNiveles`, revisión 6-oct-2026), cada
+      uno con `ordenarCandidatosGasto`: bancarios que CUADRAN, no bancarios
+      que CUADRAN, resto de bancarios, resto de no bancarios. Antes iban
+      «todos los bancarios y después el efectivo» y, con el corte a
+      `limite` (100), el caso real (prod: 254 bancarios sin conciliar en ±30
+      días, ninguno de $212, y 223 no bancarios) devolvía 100 bancarios y
+      CERO de los tres estacionamientos de $212.00: encender el interruptor
+      no mostraba nada. Sin no bancarios el orden es EXACTAMENTE el del
+      0.0.62 (spec). Con la bandera, `excluidos`
+      (`ContextoExclusion.incluirNoBancarios`) solo cuenta BODEGA (y sin
+      medio) como `EFECTIVO_U_OTRO_MEDIO`. Helpers PUROS en
       `gastos-candidatos.util.ts`: `MEDIO_BODEGA`, `esMedioBancario`,
-      `esMedioNoBancarioVinculable`, `clasificarMediosVinculo`.
+      `esMedioNoBancarioVinculable`, `clasificarMediosVinculo`,
+      `ordenarCandidatosPorNiveles`.
     - **PATCH `movimientos/:id`**: `justificacion?` (recortada; vacía o solo
       espacios = ausente; 10–300 o 400 de validación). `validarMediosVinculo`
       corre al FINAL de la pre-validación y ANTES de la RPC (también en
       `linkDirecto`): BODEGA en el cuerpo ⇒ 409 `GASTO_BODEGA
       {details.gastos_bodega[{id, fecha_gasto, monto}]}` SIEMPRE; un no
-      bancario que ENTRA (no estaba en las partes del cargo; sin medio
-      cuenta como no bancario) sin razón válida ⇒ 400
+      bancario que ENTRA en OTRA moneda que la de la cuenta ⇒ 409
+      `NO_BANCARIO_OTRA_MONEDA {details.moneda_cuenta,
+      details.gastos_otra_moneda[{id, moneda, fecha_gasto, monto}]}` ni con
+      razón (`mensajeNoBancarioOtraMoneda`; el T.C. de arriba), y sin la
+      moneda de la cuenta (lectura caída) ⇒ 503 `CUENTA_SIN_MONEDA` (no se
+      adivina); un no bancario que ENTRA (no estaba en las partes del
+      cargo; sin medio cuenta como no bancario) sin razón válida ⇒ 400
       `JUSTIFICACION_REQUERIDA {details.gastos_no_bancarios[{id,
       medio_pago, fecha_gasto, monto}]}` (cronológico) y message de
       `mensajeJustificacionRequerida` («El gasto del 28 sep está en
@@ -4513,27 +4533,44 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **La liga es la de siempre** (RPC/puente; `gasto.conciliado` lo
       recalcula la BD) y DESPUÉS `sincronizarNotasVinculo` anota los DOS
       lados: cargo += «Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi /
-      estacionamiento · vuelo #330 · $212.00): <razón> — <usuario>,
-      06-oct-2026» (una por gasto); gasto += «⚠ Conciliado con el cargo
-      bancario del 07-sep-2026 ($212.00 · ASUR CANCUN) sin cambiar el medio
-      de pago (EFECTIVO): <razón> — <usuario>, 06-oct-2026». Fuente única
-      PURA `common/vinculo-no-bancario.util.ts` (spec): etiquetas
+      estacionamiento · vuelo #330 · $212.00 · gasto 3f9a1c2e): <razón> —
+      <usuario>, 06-oct-2026» (una por gasto); gasto += «⚠ Conciliado con el
+      cargo bancario del 07-sep-2026 ($212.00 · ASUR CANCUN) sin cambiar el
+      medio de pago (EFECTIVO): <razón> — <usuario>, 06-oct-2026». Fuente
+      única PURA `common/vinculo-no-bancario.util.ts` (spec): etiquetas
       `etiquetaMedioPago` (en mayúsculas) / `etiquetaCategoriaGasto`, fechas
       dd-mmm-aaaa cortando el texto (hoy = `hoyCancun()`), firma = nombre
       del usuario (`c.nombre`; vacío ⇒ «Oficina»). UNA línea por PAR cargo ↔
-      gasto (la misma no se duplica; otra razón la reemplaza en su lugar; el
-      medio no entra en la llave), al FINAL tras un renglón en blanco (la
-      limpieza del «Desglose:» del panel se lleva las líneas pegadas a él) y
-      renglón seguido entre líneas del vínculo. Escritura `reescribirNotas`:
+      gasto (la misma no se duplica; otra razón la reemplaza en su lugar).
+      **Llaves** (revisión 6-oct-2026): en el CARGO, «gasto 3f9a1c2e» = los
+      8 primeros caracteres del id del gasto (`refGastoNota`, minúsculas) —
+      con fecha · categoría · vuelo · monto como llave, dos estacionamientos
+      iguales del mismo día en un lote compartían UNA línea (soltar uno
+      borraba la del otro) y un gasto al que le cambiaban categoría o vuelo
+      después de ligarse (siguen editables; monto/moneda/medio no) dejaba su
+      línea huérfana al soltarlo—; en el GASTO, fecha + monto + leyenda del
+      cargo (vienen del estado de cuenta, no se editan; el formato no
+      cambió). Ni el medio ni los datos editables del gasto entran en la
+      llave. Va justo después del ÚLTIMO renglón con texto, tras un renglón
+      en blanco (la limpieza del «Desglose:» del panel se lleva las líneas
+      pegadas a él), renglón seguido entre líneas del vínculo, y con el fin
+      de línea de las notas (`\r\n` si ya lo usan). Escritura `reescribirNotas`:
       SOLO `notas` + `updated_by` (la bitácora del gasto registra quién), CAS
       sobre `updated_at` (0 filas ⇒ relee y reintenta UNA vez), sin cambio ⇒
       cero escrituras. **Best-effort**: si falla, la liga SE QUEDA (jamás una
       liga a medias), warn y `vinculo_no_bancario.notas_anotadas: false`.
-    - **Desvincular** (`gasto_id: null`): el cargo pierde TODAS sus líneas y
-      cada gasto que pagaba pierde la línea de ESE cargo
-      (`quitarNotasVinculoNoBancario`, regex de la forma EXACTA; lo de la
-      oficina intacto, blancos que deja el retiro compactados). Un reemplazo
-      (la RPC escribe la puente como DIFF) hace lo mismo con los que soltó.
+    - **Desvincular** (`gasto_id: null`): el cargo pierde TODAS sus líneas
+      (`todoElCargo`: aunque la lectura previa de sus partes falle —warn— y
+      aunque el gasto haya cambiado) y cada gasto que pagaba pierde la línea
+      de ESE cargo (`quitarNotasVinculoNoBancario`, regex de la forma
+      EXACTA). Un reemplazo (la RPC escribe la puente como DIFF) quita del
+      cargo la línea de cada gasto que soltó POR SU ID (`{gastoId}`) y del
+      gasto la de este cargo. **Lo de la oficina queda byte a byte**
+      (revisión 6-oct-2026; antes un regex global compactaba sus renglones
+      en blanco, `trim` y `\r\n` ⇒ `\n`): se quitan SOLO las líneas del
+      vínculo y, si un bloque de ellas se va COMPLETO, el renglón en blanco
+      que el alta puso antes; agregar → quitar devuelve las notas de antes
+      exactas (spec con blancos, espacios finales, tabs y `\r\n`).
       Desligar un cargo de gastos bancarios no lee la cuenta ni escribe.
     - **Respuestas ADITIVAS**: PATCH ⇒ `gastos_estado[].medio_pago` y, solo
       si entró un no bancario, `vinculo_no_bancario {gasto_ids,
@@ -4541,15 +4578,26 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       movimientos` ⇒ `gasto.medio_pago` y `gastos[].medio_pago`.
     - **Panel**: `expense-verify-dialog.tsx` pinta «La IA detectó
       discrepancias» con CUALQUIER «⚠» en las notas; la línea del gasto lo
-      dispararía (excluir `/^⚠ Conciliado con el cargo bancario del /`).
+      dispararía (excluir `/^⚠ Conciliado con el cargo bancario del /`). El
+      panel reconoce la línea del cargo solo por su prefijo «Vinculado a
+      gasto en» (el «gasto 3f9a1c2e» va dentro del paréntesis). Si
+      `vinculo_no_bancario.notas_anotadas` llega `false`, la liga quedó pero
+      la razón no: el panel debe avisar (re-ligar el mismo gasto es un no-op
+      y NO re-anota; desvincular y volver a vincular sí).
     - Specs: `vinculo-no-bancario.util.spec`, `gastos-candidatos.util.spec`
-      y `candidatos-excluidos.util.spec` (medios y bandera), el bloque «GASTO
-      NO BANCARIO» de `conciliacion.service.lote.spec` (candidatos con y sin
-      la bandera, BODEGA nunca, 400 sin razón y nada escrito, liga con razón
-      sin tocar medio/verificado, desvincular, lote mixto, idempotencia,
-      reemplazo, CAS con reintento, fallo tras ligar, lista, camino directo)
-      y `conciliacion.controller.lote.spec` (DTO por HTTP: recorte, vacía,
-      10–300, `incluir_no_bancarios` 1/true/0/false/otro).
+      (medios, bandera y niveles: el caso real 254 + 3) y
+      `candidatos-excluidos.util.spec` (medios, bandera y
+      `rangoMontoExcluidos`), el bloque «GASTO NO BANCARIO» de
+      `conciliacion.service.lote.spec` (candidatos con y sin la bandera, MÁS
+      bancarios que el límite, cruzados solo bancarios, BODEGA nunca, 409
+      `NO_BANCARIO_OTRA_MONEDA` en los dos caminos, 503 sin moneda, 400 sin
+      razón y nada escrito, liga con razón sin tocar medio/verificado,
+      desvincular —también con el gasto editado y con la lectura previa
+      caída—, lote mixto, gastos IGUALES en un lote, idempotencia,
+      reemplazo —también con el gasto editado—, CAS con reintento, fallo
+      tras ligar, lista, camino directo), el de «excluidos» (`q` entero ⇒
+      [q, q+1)) y `conciliacion.controller.lote.spec` (DTO por HTTP:
+      recorte, vacía, 10–300, `incluir_no_bancarios` 1/true/0/false/otro).
 
 ## Convenciones NestJS
 

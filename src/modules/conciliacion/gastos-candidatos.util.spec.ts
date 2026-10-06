@@ -9,6 +9,7 @@ import {
   MEDIOS_BANCARIOS,
   MENSAJE_SIN_MONEDA_CUENTA,
   ordenarCandidatosGasto,
+  ordenarCandidatosPorNiveles,
 } from './gastos-candidatos.util';
 
 /**
@@ -126,6 +127,90 @@ describe('ordenarCandidatosGasto — orden por defecto', () => {
     ];
     ordenarCandidatosGasto(entrada, { montoCargo: 1, fecha: '2026-09-24' });
     expect(entrada.map((c) => c.id)).toEqual(['b', 'a']);
+  });
+});
+
+describe('ordenarCandidatosPorNiveles — con gastos en efectivo (revisión 6-oct-2026)', () => {
+  const ref = { montoCargo: 212, fecha: '2026-09-07' };
+
+  it('niveles: bancarios que cuadran, no bancarios que cuadran, resto de bancarios (cruzados al final), resto de no bancarios', () => {
+    const r = ordenarCandidatosPorNiveles(
+      [
+        { id: 'ef-lejos', monto: 500, fecha: '2026-09-07', no_bancario: true },
+        {
+          id: 'tdc-lejos',
+          monto: 900,
+          fecha: '2026-09-07',
+          no_bancario: false,
+        },
+        { id: 'ef-212', monto: 212, fecha: '2026-09-28', no_bancario: true },
+        {
+          id: 'usd',
+          monto: 11,
+          fecha: '2026-09-07',
+          cruzado: true,
+          no_bancario: false,
+        },
+        {
+          id: 'tdc-212',
+          monto: 212.5,
+          fecha: '2026-09-30',
+          no_bancario: false,
+        },
+        { id: 'ef-211', monto: 211.4, fecha: '2026-09-27', no_bancario: true },
+        { id: 'tdc-300', monto: 300, fecha: '2026-09-08', no_bancario: false },
+      ],
+      ref,
+    );
+    expect(r.map((c) => c.id)).toEqual([
+      'tdc-212',
+      'ef-212',
+      'ef-211',
+      'tdc-300',
+      'tdc-lejos',
+      'usd',
+      'ef-lejos',
+    ]);
+  });
+
+  it('caso real (prod): 254 bancarios que no cuadran y el efectivo exacto ⇒ el efectivo entra en los primeros 100', () => {
+    const bancarios = Array.from({ length: 254 }, (_, i) => ({
+      id: `tdc-${String(i).padStart(3, '0')}`,
+      monto: 300 + i,
+      fecha: '2026-09-10',
+      no_bancario: false,
+    }));
+    const efectivo = ['2026-09-24', '2026-09-27', '2026-09-28'].map((f) => ({
+      id: `ef-${f.slice(8)}`,
+      monto: 212,
+      fecha: f,
+      no_bancario: true,
+    }));
+    const primeros = ordenarCandidatosPorNiveles(
+      [...bancarios, ...efectivo],
+      ref,
+    ).slice(0, 100);
+    expect(primeros.slice(0, 3).map((c) => c.id)).toEqual([
+      'ef-24',
+      'ef-27',
+      'ef-28',
+    ]);
+    expect(primeros.filter((c) => c.no_bancario)).toHaveLength(3);
+  });
+
+  it('sin no bancarios es EXACTAMENTE ordenarCandidatosGasto (el orden del 0.0.62)', () => {
+    const entrada = [
+      { id: 'lejos', monto: 5000, fecha: '2026-09-24' },
+      { id: 'usd', monto: 120, fecha: '2026-09-24', cruzado: true },
+      { id: 'g318', monto: 2231.37, fecha: '2026-09-20', no_bancario: false },
+      { id: 'g321', monto: 2231.38, fecha: '2026-09-20' },
+      { id: 'parcial', monto: 9000, faltante: 2231.38, fecha: '2026-09-10' },
+      { id: 'cerca', monto: 2300, fecha: '2026-09-24' },
+    ];
+    const r2 = { montoCargo: 2231.38, fecha: '2026-09-24' };
+    expect(ordenarCandidatosPorNiveles(entrada, r2)).toEqual(
+      ordenarCandidatosGasto(entrada, r2),
+    );
   });
 });
 

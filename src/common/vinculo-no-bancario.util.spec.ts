@@ -10,8 +10,10 @@ import {
   medioNota,
   mensajeGastoBodega,
   mensajeJustificacionRequerida,
+  mensajeNoBancarioOtraMoneda,
   montoNota,
   quitarNotasVinculoNoBancario,
+  refGastoNota,
   tieneNotasVinculoNoBancario,
   type CargoDeNota,
   type FirmaVinculo,
@@ -34,6 +36,7 @@ const FIRMA: FirmaVinculo = {
 };
 
 const GASTO_28: GastoDeNota = {
+  id: '3f9a1c2e-5b7d-4e21-9c0a-2d8e6f4b1a30',
   fecha_gasto: '2026-09-28',
   monto: 212,
   moneda: 'MXN',
@@ -49,7 +52,14 @@ const CARGO_07: CargoDeNota = {
   descripcion: 'ASUR CANCUN',
 };
 
-const LINEA_CARGO = `Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi / estacionamiento · vuelo #330 · $212.00): ${RAZON} — Mari, 06-oct-2026`;
+/** El estacionamiento del 27-sep (otro gasto: otra referencia). */
+const GASTO_27: GastoDeNota = {
+  ...GASTO_28,
+  id: 'a1b2c3d4-0e0f-4a1b-8c2d-3e4f5a6b7c8d',
+  fecha_gasto: '2026-09-27',
+};
+
+const LINEA_CARGO = `Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi / estacionamiento · vuelo #330 · $212.00 · gasto 3f9a1c2e): ${RAZON} — Mari, 06-oct-2026`;
 const LINEA_GASTO = `⚠ Conciliado con el cargo bancario del 07-sep-2026 ($212.00 · ASUR CANCUN) sin cambiar el medio de pago (EFECTIVO): ${RAZON} — Mari, 06-oct-2026`;
 
 /** La limpieza del desglose del panel (`expense-verify-dialog.tsx`). */
@@ -92,7 +102,7 @@ describe('las dos líneas — caso real ($212.00 del 07-sep ↔ estacionamiento 
         { ...FIRMA, usuario: '  ' },
       ),
     ).toBe(
-      `Vinculado a gasto en PERSONAL PABLO del 28-sep-2026 (Hotel · $1,234.50 USD): ${RAZON} — Oficina, 06-oct-2026`,
+      `Vinculado a gasto en PERSONAL PABLO del 28-sep-2026 (Hotel · $1,234.50 USD · gasto 3f9a1c2e): ${RAZON} — Oficina, 06-oct-2026`,
     );
     expect(
       lineaNotaGasto(
@@ -195,10 +205,7 @@ describe('agregarNotaVinculo — idempotente y sin pisar nada', () => {
   });
 
   it('dos pares distintos: renglón seguido entre ellos', () => {
-    const otroGasto = lineaNotaCargo(
-      { ...GASTO_28, fecha_gasto: '2026-09-27' },
-      FIRMA,
-    );
+    const otroGasto = lineaNotaCargo(GASTO_27, FIRMA);
     const r = agregarNotaVinculo(
       agregarNotaVinculo('Nota de la oficina', LINEA_CARGO),
       otroGasto,
@@ -212,14 +219,60 @@ describe('agregarNotaVinculo — idempotente y sin pisar nada', () => {
     const con = agregarNotaVinculo(notas, LINEA_GASTO);
     expect(limpiarDesgloseDelPanel(con)).toContain(LINEA_GASTO);
   });
+
+  it('dos gastos IGUALES en un lote (mismo día, categoría, vuelo y monto): UNA línea POR GASTO', () => {
+    // Revisión 6-oct-2026: con fecha · detalle como llave compartían línea.
+    const gemelo: GastoDeNota = {
+      ...GASTO_28,
+      id: '0c4d5e6f-1a2b-4c3d-8e9f-a0b1c2d3e4f5',
+    };
+    const r = agregarNotaVinculo(
+      agregarNotaVinculo(null, LINEA_CARGO),
+      lineaNotaCargo(gemelo, FIRMA),
+    );
+    expect(r).toBe(`${LINEA_CARGO}\n${lineaNotaCargo(gemelo, FIRMA)}`);
+    expect(r).toContain('· gasto 3f9a1c2e)');
+    expect(r).toContain('· gasto 0c4d5e6f)');
+  });
+
+  it('el MISMO gasto con categoría, vuelo, fecha o monto corregidos después: es el mismo par (se reemplaza)', () => {
+    const una = agregarNotaVinculo('Nota de la oficina', LINEA_CARGO);
+    const corregido = lineaNotaCargo(
+      {
+        ...GASTO_28,
+        categoria: 'OPERACIONES',
+        vuelo_folio: 338,
+        fecha_gasto: '2026-09-29',
+        monto: 211.5,
+      },
+      FIRMA,
+    );
+    expect(agregarNotaVinculo(una, corregido)).toBe(
+      `Nota de la oficina\n\n${corregido}`,
+    );
+  });
+
+  it('respeta lo de la oficina: blancos del final después de la línea y su fin de línea (\\r\\n)', () => {
+    expect(
+      agregarNotaVinculo('Línea 1\n\n\n\nLínea 2  \n\n', LINEA_GASTO),
+    ).toBe(`Línea 1\n\n\n\nLínea 2  \n\n${LINEA_GASTO}\n\n`);
+    expect(agregarNotaVinculo('A\r\nB', LINEA_GASTO)).toBe(
+      `A\r\nB\r\n\r\n${LINEA_GASTO}`,
+    );
+    // Reemplazar la razón en su lugar no toca los \r\n de alrededor.
+    const otra = lineaNotaCargo(GASTO_28, {
+      ...FIRMA,
+      justificacion: 'Otra razón más precisa para ligarlo',
+    });
+    expect(agregarNotaVinculo(`A\r\n\r\n${LINEA_CARGO}\r\nB`, otra)).toBe(
+      `A\r\n\r\n${otra}\r\nB`,
+    );
+  });
 });
 
 describe('quitarNotasVinculoNoBancario — al desvincular, en los dos lados', () => {
   it('sin filtro: fuera TODAS las líneas del vínculo; lo de la oficina intacto', () => {
-    const otroGasto = lineaNotaCargo(
-      { ...GASTO_28, fecha_gasto: '2026-09-27' },
-      FIRMA,
-    );
+    const otroGasto = lineaNotaCargo(GASTO_27, FIRMA);
     const notas = `Nota de la oficina\n\n${LINEA_CARGO}\n${otroGasto}`;
     expect(quitarNotasVinculoNoBancario(notas)).toBe('Nota de la oficina');
   });
@@ -238,6 +291,74 @@ describe('quitarNotasVinculoNoBancario — al desvincular, en los dos lados', ()
     expect(
       quitarNotasVinculoNoBancario(agregarNotaVinculo(previas, LINEA_GASTO)),
     ).toBe(previas);
+  });
+
+  it('agregar y quitar es exacto byte a byte: renglones en blanco, espacios finales y \\r\\n de la oficina', () => {
+    // Revisión 6-oct-2026: antes quedaba «Línea 1\\n\\nLínea 2» (regex global + trim).
+    for (const previas of [
+      'Línea 1\n\n\n\nLínea 2  \n\n',
+      'A\r\nB',
+      'A\r\n\r\n\r\nB\r\n',
+      '  sangría\n\tcon tab\n',
+      'Desglose:\nCobro estancia (base) - $182.76 MXN\nIVA 16% - $29.24 MXN',
+    ]) {
+      const con = agregarNotaVinculo(previas, LINEA_GASTO);
+      expect(quitarNotasVinculoNoBancario(con)).toBe(previas);
+      expect(quitarNotasVinculoNoBancario(con, { cargo: CARGO_07 })).toBe(
+        previas,
+      );
+      const enCargo = agregarNotaVinculo(
+        agregarNotaVinculo(previas, LINEA_CARGO),
+        lineaNotaCargo(GASTO_27, FIRMA),
+      );
+      expect(quitarNotasVinculoNoBancario(enCargo)).toBe(previas);
+      // Soltar uno y luego el otro también regresa a lo de antes.
+      const sinUno = quitarNotasVinculoNoBancario(enCargo, {
+        gastoId: GASTO_28.id,
+      });
+      expect(sinUno).toBe(
+        agregarNotaVinculo(previas, lineaNotaCargo(GASTO_27, FIRMA)),
+      );
+      expect(
+        quitarNotasVinculoNoBancario(sinUno, { gastoId: GASTO_27.id }),
+      ).toBe(previas);
+    }
+  });
+
+  it('los renglones en blanco de la oficina FUERA del bloque no se tocan', () => {
+    const notas = `Arriba\n\n\n\nMedio\n\n${LINEA_CARGO}\n\nAbajo  `;
+    expect(quitarNotasVinculoNoBancario(notas)).toBe(
+      'Arriba\n\n\n\nMedio\n\nAbajo  ',
+    );
+  });
+
+  it('soltar UNO de dos gastos iguales deja la línea del que sigue ligado', () => {
+    const gemelo: GastoDeNota = {
+      ...GASTO_28,
+      id: '0c4d5e6f-1a2b-4c3d-8e9f-a0b1c2d3e4f5',
+    };
+    const notas = `${LINEA_CARGO}\n${lineaNotaCargo(gemelo, FIRMA)}`;
+    expect(quitarNotasVinculoNoBancario(notas, { gastoId: GASTO_28.id })).toBe(
+      lineaNotaCargo(gemelo, FIRMA),
+    );
+  });
+
+  it('con `gastoId`: la línea se reconoce aunque al gasto le hayan corregido categoría, vuelo, fecha o monto', () => {
+    // La línea se escribió con los datos de entonces; hoy el gasto dice otra cosa.
+    expect(
+      quitarNotasVinculoNoBancario(`Nota\n\n${LINEA_CARGO}`, {
+        gastoId: GASTO_28.id,
+      }),
+    ).toBe('Nota');
+    // Un uuid en MAYÚSCULAS es el mismo gasto.
+    expect(
+      quitarNotasVinculoNoBancario(`Nota\n\n${LINEA_CARGO}`, {
+        gastoId: GASTO_28.id.toUpperCase(),
+      }),
+    ).toBe('Nota');
+    expect(refGastoNota(GASTO_28.id)).toBe('3f9a1c2e');
+    expect(refGastoNota('  g-28 ')).toBe('g-28');
+    expect(refGastoNota(null)).toBe('');
   });
 
   it('en el GASTO, con `cargo`: solo la línea de ESE cargo (pago en dos cargos)', () => {
@@ -259,20 +380,18 @@ describe('quitarNotasVinculoNoBancario — al desvincular, en los dos lados', ()
   });
 
   it('en el CARGO, con `gasto`: solo la línea de ESE gasto (lote)', () => {
-    const otroGasto = lineaNotaCargo(
-      { ...GASTO_28, fecha_gasto: '2026-09-27' },
-      FIRMA,
-    );
+    const otroGasto = lineaNotaCargo(GASTO_27, FIRMA);
     const notas = `${LINEA_CARGO}\n${otroGasto}`;
-    expect(quitarNotasVinculoNoBancario(notas, { gasto: GASTO_28 })).toBe(
+    expect(quitarNotasVinculoNoBancario(notas, { gastoId: GASTO_28.id })).toBe(
       otroGasto,
     );
-    // El medio corregido después no impide reconocer la línea.
+    // Un id que no está anotado: nada cambia.
     expect(
-      quitarNotasVinculoNoBancario(notas, {
-        gasto: { ...GASTO_28, medio_pago: 'TARJETA_CORP' },
-      }),
-    ).toBe(otroGasto);
+      quitarNotasVinculoNoBancario(notas, { gastoId: 'ffffffff-0000' }),
+    ).toBe(notas);
+    // Un id VACÍO es un filtro que no nombra a nadie: jamás «borra todo».
+    expect(quitarNotasVinculoNoBancario(notas, { gastoId: '' })).toBe(notas);
+    expect(quitarNotasVinculoNoBancario(notas, { gastoId: '   ' })).toBe(notas);
   });
 
   it('regex de la forma EXACTA: razones con «—», «): » o paréntesis; categorías con paréntesis', () => {
@@ -287,7 +406,7 @@ describe('quitarNotasVinculoNoBancario — al desvincular, en los dos lados', ()
     expect(esLineaVinculoNoBancario(rara)).toBe(true);
     expect(
       quitarNotasVinculoNoBancario(`Nota\n\n${rara}`, {
-        gasto: { ...GASTO_28, categoria: 'PILOTO_EXTERNO' },
+        gastoId: GASTO_28.id,
       }),
     ).toBe('Nota');
     const leyenda = lineaNotaGasto(
@@ -366,6 +485,28 @@ describe('mensajes de error', () => {
       ]),
     ).toBe(
       'Los gastos del 15 sep y 16 sep son salidas de inventario (Bodega): no se pagaron con el banco y no se pueden vincular a un cargo.',
+    );
+  });
+
+  it('409 NO_BANCARIO_OTRA_MONEDA: uno y varios', () => {
+    expect(
+      mensajeNoBancarioOtraMoneda(
+        [{ fecha_gasto: '2026-09-21', moneda: 'USD' }],
+        'MXN',
+      ),
+    ).toBe(
+      'El gasto del 21 sep está en USD y no se pagó con el banco: solo se puede vincular a un cargo de su misma moneda (este cargo es de una cuenta en MXN), para no cambiarle el tipo de cambio.',
+    );
+    expect(
+      mensajeNoBancarioOtraMoneda(
+        [
+          { fecha_gasto: '2026-09-21', moneda: 'USD' },
+          { fecha_gasto: '2026-09-22', moneda: null },
+        ],
+        null,
+      ),
+    ).toBe(
+      'Los gastos del 21 sep y 22 sep están en otra moneda y no se pagaron con el banco: solo se pueden vincular a un cargo de su misma moneda, para no cambiarles el tipo de cambio.',
     );
   });
 });

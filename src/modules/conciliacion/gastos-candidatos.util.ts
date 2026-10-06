@@ -43,7 +43,9 @@ export function esMedioBancario(medio: string | null | undefined): boolean {
 /**
  * GASTO NO BANCARIO CON JUSTIFICACIÓN (6-oct-2026, API 0.0.63): ¿entra al
  * universo de «Vincular gasto» con `incluir_no_bancarios`? Todo medio NO
- * bancario (EFECTIVO, PERSONAL_*) MENOS BODEGA; sin medio, no.
+ * bancario (EFECTIVO, PERSONAL_*) MENOS BODEGA; sin medio, no. Solo en la
+ * moneda de la cuenta: jamás como cruzado (USD contra pesos), porque la BD le
+ * derivaría `tc_gasto` de un cargo que no lo pagó.
  */
 export function esMedioNoBancarioVinculable(
   medio: string | null | undefined,
@@ -180,6 +182,37 @@ export function ordenarCandidatosGasto<T extends CandidatoOrdenable>(
       return a.c.id < b.c.id ? -1 : a.c.id > b.c.id ? 1 : 0;
     })
     .map((x) => x.c);
+}
+
+/** Candidato con la marca del medio (`no_bancario`, API 0.0.63). */
+export interface CandidatoOrdenableConMedio extends CandidatoOrdenable {
+  no_bancario?: boolean;
+}
+
+/**
+ * Orden de «Vincular gasto» con `incluir_no_bancarios` (revisión 6-oct-2026):
+ * por NIVELES, cada uno con `ordenarCandidatosGasto`:
+ *   1. bancarios que CUADRAN con el cargo;
+ *   2. no bancarios que CUADRAN;
+ *   3. el resto de los bancarios (los cruzados al final, como siempre);
+ *   4. el resto de los no bancarios.
+ * Caso real (prod): el cargo de $212.00 del 07-sep tenía 254 gastos
+ * bancarios sin conciliar en ±30 días (ninguno de $212) y 223 no bancarios.
+ * Con «todos los bancarios y DESPUÉS los no bancarios», el corte a `limite`
+ * (100) dejaba fuera los tres estacionamientos de $212.00 en EFECTIVO:
+ * encender el interruptor no mostraba ni uno. Sin no bancarios el resultado
+ * es EXACTAMENTE `ordenarCandidatosGasto` (el orden del 0.0.62).
+ */
+export function ordenarCandidatosPorNiveles<
+  T extends CandidatoOrdenableConMedio,
+>(candidatos: readonly T[], ref: { montoCargo: number; fecha: string }): T[] {
+  const niveles: T[][] = [[], [], [], []];
+  for (const c of candidatos) {
+    const noBancario = c.no_bancario === true ? 1 : 0;
+    const resto = cuadraConCargo(c, ref.montoCargo) ? 0 : 2;
+    niveles[resto + noBancario].push(c);
+  }
+  return niveles.flatMap((nivel) => ordenarCandidatosGasto(nivel, ref));
 }
 
 /** Sin la moneda de la cuenta no se filtra divisa ni se liga un lote (jamás se adivina). */

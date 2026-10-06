@@ -148,7 +148,7 @@ import {
   interpretarBusquedaGasto,
   MEDIO_BODEGA,
   MEDIOS_BANCARIOS,
-  ordenarCandidatosGasto,
+  ordenarCandidatosPorNiveles,
 } from './gastos-candidatos.util';
 import {
   agregarNotaVinculo,
@@ -158,6 +158,7 @@ import {
   lineaNotaGasto,
   mensajeGastoBodega,
   mensajeJustificacionRequerida,
+  mensajeNoBancarioOtraMoneda,
   quitarNotasVinculoNoBancario,
   tieneNotasVinculoNoBancario,
   type CargoDeNota,
@@ -165,13 +166,13 @@ import {
 } from '../../common/vinculo-no-bancario.util';
 import {
   agruparExcluidos,
-  bandaMontoExcluidos,
   cargosConciliadosPorGasto,
   conCargosConciliados,
   EXCLUIDOS_LECTURA_TOPE,
   GASTO_EXCLUIDO_COLS,
   gastoExcluibleDeFila,
   montoReferenciaExcluidos,
+  rangoMontoExcluidos,
   ventanaExcluidos,
   type CargoConciliadoExcluido,
   type ExcluidosCandidatos,
@@ -336,8 +337,9 @@ export interface CargoDeGasto {
  * `excluidos_monto` (ADITIVOS, 6-oct-2026, API 0.0.63) viajan SOLO cuando
  * `candidatos` queda vacío (y no viajan si su lectura falló).
  * `no_bancario` (ADITIVO, mismo 0.0.63): SIEMPRE en cada candidato; `true`
- * solo con `incluir_no_bancarios` (efectivo / PERSONAL_*), y esos van
- * DESPUÉS de todos los bancarios.
+ * solo con `incluir_no_bancarios` (efectivo / PERSONAL_*). Orden por
+ * niveles (`ordenarCandidatosPorNiveles`): bancarios que cuadran, no
+ * bancarios que cuadran, resto de bancarios, resto de no bancarios.
  */
 export interface GastosCandidatosRespuesta {
   movimiento: { id: string; fecha: string; monto: number; moneda: string };
@@ -401,6 +403,7 @@ function gastoDeNota(g: Record<string, unknown>): GastoDeNota {
   );
   const folio = vuelo?.folio == null ? null : Number(vuelo.folio);
   return {
+    id: typeof g.id === 'string' ? g.id : '',
     fecha_gasto:
       typeof g.fecha_gasto === 'string' ? g.fecha_gasto.slice(0, 10) : null,
     monto: Number(g.monto) || 0,
@@ -7072,6 +7075,7 @@ export class ConciliacionService {
       ids.map((id) => gastos.get(id)).filter((g): g is GastoLink => !!g),
       new Set(actuales.map((p) => p.gasto_id)),
       opts.justificacion,
+      cuentaMoneda,
     );
 
     const { error } = await this.supabase.service.rpc(
@@ -7115,6 +7119,11 @@ export class ConciliacionService {
    * Medios del vínculo (6-oct-2026, API 0.0.63), ANTES de escribir nada:
    * - BODEGA (salida de inventario) ⇒ 409 `GASTO_BODEGA`, siempre: jamás
    *   tocó el banco, ni con justificación.
+   * - Un gasto NO bancario que ENTRA en otra moneda que la de la cuenta ⇒
+   *   409 `NO_BANCARIO_OTRA_MONEDA` (revisión 6-oct-2026), ni con razón:
+   *   cruzado (dólares contra pesos), `recalcular_gasto_conciliado` le
+   *   derivaría `tc_gasto` de este cargo, que no lo pagó. Sin la moneda de
+   *   la cuenta (lectura caída) ⇒ 503 `CUENTA_SIN_MONEDA`: no se adivina.
    * - Un gasto NO bancario (efectivo, PERSONAL_*) que ENTRA a la liga sin
    *   justificación válida (≥ `JUSTIFICACION_MIN` ya limpia) ⇒ 400
    *   `JUSTIFICACION_REQUERIDA` con `details.gastos_no_bancarios[{id,
@@ -7127,11 +7136,13 @@ export class ConciliacionService {
     gastos: ReadonlyArray<{
       id: string;
       medio_pago: string | null;
+      moneda?: string | null;
       fecha_gasto?: string | null;
       monto?: unknown;
     }>,
     yaLigados: ReadonlySet<string>,
     justificacion: string | null | undefined,
+    cuentaMoneda: string | null,
   ): { agregar: string[]; justificacion: string } {
     const ficha = (g: (typeof gastos)[number]) => ({
       id: g.id,
@@ -7163,6 +7174,30 @@ export class ConciliacionService {
           })),
         },
       });
+    }
+    if (noBancariosNuevos.length > 0) {
+      if (!cuentaMoneda) throw errorSinMonedaCuenta();
+      const otraMoneda = noBancariosNuevos
+        .filter((g) => (g.moneda ?? '') !== cuentaMoneda)
+        .map((g) => ({ ...ficha(g), moneda: g.moneda ?? null }))
+        .sort(cronologico);
+      if (otraMoneda.length > 0) {
+        throw new ConflictException({
+          message: mensajeNoBancarioOtraMoneda(otraMoneda, cuentaMoneda),
+          error: 'NO_BANCARIO_OTRA_MONEDA',
+          details: {
+            moneda_cuenta: cuentaMoneda,
+            gastos_otra_moneda: otraMoneda.map(
+              ({ id, moneda, fecha_gasto, monto }) => ({
+                id,
+                moneda,
+                fecha_gasto,
+                monto,
+              }),
+            ),
+          },
+        });
+      }
     }
     const razon = limpiarJustificacion(justificacion);
     if (noBancariosNuevos.length > 0 && razon.length < JUSTIFICACION_MIN) {
@@ -7254,7 +7289,9 @@ export class ConciliacionService {
         usuario: args.usuarioNombre,
         hoy: hoyCancun(),
       };
-      // 1) El CARGO: una línea por gasto no bancario que paga.
+      // 1) El CARGO: una línea por gasto no bancario que paga. La de cada
+      // soltado se reconoce por su id («gasto 3f9a1c2e»), aunque al gasto le
+      // hayan cambiado la categoría o el vuelo después de ligarlo.
       await this.reescribirNotas(
         'movimiento_bancario',
         filaNotas(mov),
@@ -7263,10 +7300,7 @@ export class ConciliacionService {
             ? quitarNotasVinculoNoBancario(notas)
             : notas;
           for (const id of args.soltar) {
-            const g = gastoDe.get(id);
-            if (g) {
-              n = quitarNotasVinculoNoBancario(n, { gasto: gastoDeNota(g) });
-            }
+            n = quitarNotasVinculoNoBancario(n, { gastoId: id });
           }
           for (const id of args.agregar) {
             n = agregarNotaVinculo(
@@ -7814,6 +7848,7 @@ export class ConciliacionService {
         [{ ...gastoVinculado, medio_pago: gastoVinculado.medio_pago ?? null }],
         new Set(prevGasto ? [prevGasto] : []),
         opts.justificacion,
+        cuentaMoneda,
       );
     }
 
@@ -8419,10 +8454,15 @@ export class ConciliacionService {
    *
    * NO BANCARIOS (6-oct-2026, API 0.0.63): con `incluir_no_bancarios` el
    * universo es todo medio MENOS BODEGA (efectivo y PERSONAL_* entran con
-   * las mismas reglas: sin conciliar, moneda, ventana, búsqueda, cruzados);
-   * cada candidato lleva `no_bancario` y los no bancarios van DESPUÉS de
-   * todos los bancarios (cada bloque con `ordenarCandidatosGasto`). Ligarlos
-   * exige `justificacion` en el PATCH.
+   * las mismas reglas: sin conciliar, moneda de la cuenta, ventana,
+   * búsqueda) y cada candidato lleva `no_bancario`. Los cruzados (USD contra
+   * cuenta MXN) siguen siendo SOLO bancarios: la BD le derivaría `tc_gasto`
+   * del cargo a un gasto en efectivo que ese cargo no pagó. Orden por
+   * NIVELES (`ordenarCandidatosPorNiveles`, revisión 6-oct-2026): bancarios
+   * que cuadran, no bancarios que cuadran, resto de bancarios, resto de no
+   * bancarios — con «todos los bancarios primero», el corte a `limite` dejaba
+   * fuera el efectivo que SÍ cuadraba. Ligarlos exige `justificacion` en el
+   * PATCH.
    */
   async gastosCandidatosDeMovimiento(
     movId: string,
@@ -8482,14 +8522,14 @@ export class ConciliacionService {
     }
 
     const colsRicas = await this.gastoRicoCols();
-    const leer = async (monedaQ: string) => {
+    const leer = async (monedaQ: string, conNoBancarios: boolean) => {
       let qb = this.supabase.service
         .from('gasto')
         .select(colsRicas)
         .eq('conciliado', false);
       // Universo por medio: bancarios (siempre) o, con la bandera, todo
       // menos BODEGA (`medio_pago` es NOT NULL: el `neq` no pierde nulos).
-      qb = incluirNoBancarios
+      qb = conNoBancarios
         ? qb.neq('medio_pago', MEDIO_BODEGA)
         : qb.in('medio_pago', MEDIOS_BANCARIOS);
       qb = qb
@@ -8511,11 +8551,14 @@ export class ConciliacionService {
       return (data ?? []) as unknown as Array<Record<string, unknown>>;
     };
 
-    const propios = await leer(moneda);
+    const propios = await leer(moneda, incluirNoBancarios);
     let cruzados: Array<{ g: Record<string, unknown>; tc: number }> = [];
     let leidosUsd = 0;
     if (moneda === 'MXN' && busqueda.tipo === 'vacia' && montoCargo > 0) {
-      const usd = await leer('USD');
+      // Cruzados SOLO bancarios, también con la bandera (revisión
+      // 6-oct-2026): ligar 1 ↔ 1 un gasto en efectivo en dólares haría que
+      // `recalcular_gasto_conciliado` le derive `tc_gasto` de ESTE cargo.
+      const usd = await leer('USD', false);
       leidosUsd = usd.length;
       cruzados = usd
         .map((g) => {
@@ -8549,19 +8592,13 @@ export class ConciliacionService {
         }),
       ),
     ];
-    // Bancarios primero; luego (solo con la bandera) los no bancarios, cada
-    // bloque con el orden de siempre.
-    const ref = { montoCargo, fecha };
-    const ordenados = [
-      ...ordenarCandidatosGasto(
-        candidatos.filter((c) => !c.no_bancario),
-        ref,
-      ),
-      ...ordenarCandidatosGasto(
-        candidatos.filter((c) => c.no_bancario),
-        ref,
-      ),
-    ];
+    // Por NIVELES: lo que cuadra con el cargo (bancario y luego no
+    // bancario) antes que el resto, para que el corte a `limite` no deje
+    // fuera el efectivo exacto. Sin la bandera es el orden del 0.0.62.
+    const ordenados = ordenarCandidatosPorNiveles(candidatos, {
+      montoCargo,
+      fecha,
+    });
     const respuesta: GastosCandidatosRespuesta = {
       movimiento: { id: movId, fecha, monto: montoCargo, moneda },
       ventana,
@@ -8588,8 +8625,9 @@ export class ConciliacionService {
   /**
    * `excluidos` de «Vincular gasto» (6-oct-2026, API 0.0.63; caso real: el
    * cargo de $212.00 del 07-sep y sus tres gastos de $212.00 en EFECTIVO).
-   * Gastos del MISMO monto (el de `q` si es numérico; si no, el del cargo;
-   * ±0.01) a ±max(120, dias) del cargo que NO entraron a los candidatos,
+   * Gastos del MISMO monto (el de `q` si es numérico —entero ⇒ su mismo
+   * rango [q, q+1), `rangoMontoExcluidos`—; si no, el del cargo; ±0.01) a
+   * ±max(120, dias) del cargo que NO entraron a los candidatos,
    * agrupados por motivo (`candidatos-excluidos.util`, puro). UNA consulta
    * extra filtrada por monto y fechas (el tope de 1000 no aplica) y, SOLO
    * si hay `YA_CONCILIADO`, la puente de esos ≤ 5 gastos para decir con qué
@@ -8611,13 +8649,19 @@ export class ConciliacionService {
     const monto = montoReferenciaExcluidos(opts.q, opts.montoCargo);
     if (!(monto > 0)) return { excluidos: [], excluidos_monto: monto };
     try {
-      const banda = bandaMontoExcluidos(monto);
+      // El MISMO rango de monto que la búsqueda de los candidatos («212» ⇒
+      // [212, 213)): lo que la búsqueda abarca y no salió, se explica.
+      const montos = rangoMontoExcluidos(opts.q, opts.montoCargo);
       const rango = ventanaExcluidos(opts.fecha, opts.dias);
-      const { data, error } = await this.supabase.service
+      const consulta = this.supabase.service
         .from('gasto')
         .select(GASTO_EXCLUIDO_COLS)
-        .gte('monto', banda.min)
-        .lte('monto', banda.max)
+        .gte('monto', montos.min);
+      const { data, error } = await (
+        montos.maxExclusivo
+          ? consulta.lt('monto', montos.max)
+          : consulta.lte('monto', montos.max)
+      )
         .gte('fecha_gasto', rango.desde)
         .lte('fecha_gasto', rango.hasta)
         .order('fecha_gasto', { ascending: false })
