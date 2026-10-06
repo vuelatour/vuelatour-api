@@ -5,6 +5,7 @@ import {
 import {
   camposSerieFolioInsert,
   clasificarFalloRelectura,
+  cortarRelecturaPorPyservices,
   NOTA_FOLIO_NO_LEGIBLE,
   notasConFolioNoLegible,
   RELECTURA_FOLIO_LOTE,
@@ -71,7 +72,7 @@ describe('camposSerieFolioInsert', () => {
 });
 
 describe('clasificarFalloRelectura', () => {
-  it('pyservices 422/400 (XML roto) ⇒ ILEGIBLE', () => {
+  it('pyservices 422/400 con `detail` de TEXTO (XML roto) ⇒ ILEGIBLE', () => {
     expect(
       clasificarFalloRelectura(
         new BadGatewayException(
@@ -80,8 +81,22 @@ describe('clasificarFalloRelectura', () => {
       ),
     ).toBe('ILEGIBLE');
     expect(
-      clasificarFalloRelectura(new Error('pyservices respondio 400: x')),
+      clasificarFalloRelectura(
+        new Error('pyservices respondió 400: { "detail" : "base64 inválido" }'),
+      ),
     ).toBe('ILEGIBLE');
+  });
+
+  it('422 de VALIDACIÓN de FastAPI (`detail` LISTA) o 400/422 sin JSON ⇒ TRANSITORIO (no sella las 59)', () => {
+    for (const msg of [
+      'pyservices respondio 422: {"detail":[{"type":"missing","loc":["body","xml_b64"],"msg":"Field required"}]}',
+      'pyservices respondio 422: ',
+      'pyservices respondio 400: x',
+    ]) {
+      expect(clasificarFalloRelectura(new BadGatewayException(msg))).toBe(
+        'TRANSITORIO',
+      );
+    }
   });
 
   it('el XML ya no está en Storage ⇒ ILEGIBLE', () => {
@@ -132,5 +147,14 @@ describe('notasConFolioNoLegible', () => {
 
   it('lote del cron = 50', () => {
     expect(RELECTURA_FOLIO_LOTE).toBe(50);
+  });
+});
+
+describe('cortarRelecturaPorPyservices', () => {
+  it('UN fallo transitorio sigue con la siguiente; DOS seguidos cortan', () => {
+    expect(cortarRelecturaPorPyservices(0)).toBe(false);
+    expect(cortarRelecturaPorPyservices(1)).toBe(false);
+    expect(cortarRelecturaPorPyservices(2)).toBe(true);
+    expect(cortarRelecturaPorPyservices(3)).toBe(true);
   });
 });

@@ -311,9 +311,7 @@ describe('cron recibidas-releer-folio', () => {
     const lote = llamadas.find(
       (l) =>
         l.tabla === 'factura_recibida' &&
-        l.ops.some(
-          (o) => o.m === 'select' && o.args[0] === 'id, xml_url, notas',
-        ),
+        l.ops.some((o) => o.m === 'select' && o.args[0] === 'id, xml_url'),
     )!;
     expect(lote.ops).toEqual(
       expect.arrayContaining([
@@ -370,11 +368,15 @@ describe('cron recibidas-releer-folio', () => {
     expect(db.find((x) => x.id === 'ok')).toMatchObject({ folio: '15' });
   });
 
-  it('pyservices CAÍDO ⇒ no sella nada y corta la corrida (reintenta el siguiente tick)', async () => {
+  it('pyservices CAÍDO ⇒ no sella nada y corta la corrida tras DOS fallos seguidos (reintenta el siguiente tick)', async () => {
     const { svc, db, llamadas, parseFacturaRecibida } = armar({
       conSerie: true,
-      recibidas: [fila('a'), fila('b')],
-      archivos: { 'recibidas/a.xml': '{}', 'recibidas/b.xml': '{}' },
+      recibidas: [fila('a'), fila('b'), fila('c')],
+      archivos: {
+        'recibidas/a.xml': '{}',
+        'recibidas/b.xml': '{}',
+        'recibidas/c.xml': '{}',
+      },
       parse: () =>
         Promise.reject(
           new BadGatewayException(
@@ -383,11 +385,125 @@ describe('cron recibidas-releer-folio', () => {
         ),
     });
     const r = await svc.releerFoliosRecibidas();
-    expect(r).toMatchObject({ leidas: 1, reintentar: 1, ilegibles: 0 });
-    expect(parseFacturaRecibida).toHaveBeenCalledTimes(1);
+    expect(r).toMatchObject({ leidas: 2, reintentar: 2, ilegibles: 0 });
+    expect(parseFacturaRecibida).toHaveBeenCalledTimes(2);
     expect(updates(llamadas)).toHaveLength(0);
     expect(db.every((x) => x.folio_releido_at === null)).toBe(true);
     expect(db.every((x) => x.notas === null)).toBe(true);
+  });
+
+  it('un XML que TUMBA a pyservices (5xx) no bloquea la cola: se salta y siguen las demás', async () => {
+    // Revisión 5-oct-2026: el lote sale siempre en el mismo orden; antes un
+    // 5xx de UNA factura cortaba la corrida y esa fila, sin sellar,
+    // encabezaba todas las siguientes ⇒ ninguna otra se releía jamás.
+    const tumba = (xml: string): Promise<Row> =>
+      xml === 'VENENO'
+        ? Promise.reject(
+            new BadGatewayException(
+              'pyservices respondio 500: Internal Server Error',
+            ),
+          )
+        : parseJson(xml);
+    const { svc, db } = armar({
+      conSerie: true,
+      recibidas: [fila('veneno'), fila('b'), fila('veneno2'), fila('c')],
+      archivos: {
+        'recibidas/veneno.xml': 'VENENO',
+        'recibidas/b.xml': JSON.stringify({ serie: 'A', folio: '1' }),
+        'recibidas/veneno2.xml': 'VENENO',
+        'recibidas/c.xml': JSON.stringify({ serie: 'A', folio: '2' }),
+      },
+      parse: tumba,
+    });
+    const r = await svc.releerFoliosRecibidas();
+    expect(r).toMatchObject({
+      leidas: 4,
+      con_folio: 2,
+      ilegibles: 0,
+      reintentar: 2,
+    });
+    // Las envenenadas NO se sellan (el siguiente tick las reintenta)…
+    expect(db.find((x) => x.id === 'veneno')!.folio_releido_at).toBeNull();
+    expect(db.find((x) => x.id === 'veneno2')!.folio_releido_at).toBeNull();
+    expect(db.find((x) => x.id === 'veneno')!.notas).toBeNull();
+    // …y las de atrás sí se leyeron (el contador se reinicia al responder).
+    expect(db.find((x) => x.id === 'b')).toMatchObject({ folio: '1' });
+    expect(db.find((x) => x.id === 'c')).toMatchObject({ folio: '2' });
+  });
+
+  it('422 de VALIDACIÓN de FastAPI (detail lista) NO sella: es pyservices, no el XML', async () => {
+    const { svc, db, llamadas } = armar({
+      conSerie: true,
+      recibidas: [fila('a'), fila('b'), fila('c')],
+      archivos: {
+        'recibidas/a.xml': '{}',
+        'recibidas/b.xml': '{}',
+        'recibidas/c.xml': '{}',
+      },
+      parse: () =>
+        Promise.reject(
+          new BadGatewayException(
+            'pyservices respondio 422: {"detail":[{"type":"missing","loc":["body","xml_b64"],"msg":"Field required"}]}',
+          ),
+        ),
+    });
+    const r = await svc.releerFoliosRecibidas();
+    expect(r).toMatchObject({ leidas: 2, reintentar: 2, ilegibles: 0 });
+    expect(updates(llamadas)).toHaveLength(0);
+    expect(db.every((x) => x.folio_releido_at === null)).toBe(true);
+    expect(db.every((x) => x.notas === null)).toBe(true);
+  });
+
+  it('ilegible: relee las notas JUSTO antes de sellar (no pisa una edición de la oficina) y lleva CAS sobre ellas', async () => {
+    let tabla: Row[] = [];
+    const { svc, db, llamadas } = armar({
+      conSerie: true,
+      recibidas: [fila('rota', { notas: 'Proveedor X' })],
+      archivos: { 'recibidas/rota.xml': 'ROTO' },
+      // La oficina edita las notas (PATCH de recibidas) mientras la
+      // corrida descarga y parsea.
+      parse: (xml) => {
+        const f = tabla.find((x) => x.id === 'rota')!;
+        f.notas = 'Proveedor X · pagar el viernes';
+        return parseJson(xml);
+      },
+    });
+    tabla = db;
+    const r = await svc.releerFoliosRecibidas();
+    expect(r).toMatchObject({ ilegibles: 1, reintentar: 0 });
+    expect(db[0].notas).toBe(
+      `Proveedor X · pagar el viernes\n${NOTA_FOLIO_NO_LEGIBLE}`,
+    );
+    const u = updates(llamadas);
+    expect(u).toHaveLength(1);
+    expect(u[0].cas).toBe(true);
+    const opsUpdate = llamadas.find(
+      (l) =>
+        l.tabla === 'factura_recibida' && l.ops.some((o) => o.m === 'update'),
+    )!.ops;
+    expect(opsUpdate).toEqual(
+      expect.arrayContaining([
+        { m: 'eq', args: ['notas', 'Proveedor X · pagar el viernes'] },
+      ]),
+    );
+  });
+
+  it('ilegible SIN notas: CAS `notas is null`', async () => {
+    const { svc, db, llamadas } = armar({
+      conSerie: true,
+      recibidas: [fila('rota')],
+      archivos: { 'recibidas/rota.xml': 'ROTO' },
+      parse: parseJson,
+    });
+    expect(await svc.releerFoliosRecibidas()).toMatchObject({ ilegibles: 1 });
+    expect(db[0].notas).toBe(NOTA_FOLIO_NO_LEGIBLE);
+    const opsUpdate = llamadas.find(
+      (l) =>
+        l.tabla === 'factura_recibida' && l.ops.some((o) => o.m === 'update'),
+    )!.ops;
+    expect(opsUpdate).toEqual(
+      expect.arrayContaining([{ m: 'is', args: ['notas', null] }]),
+    );
   });
 
   it('pyservices VIEJO (sin las llaves serie/folio) ⇒ no sella y corta', async () => {

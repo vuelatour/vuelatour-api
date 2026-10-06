@@ -7,13 +7,29 @@
  * vacío ⇒ null). Aquí vive lo que el API decide con eso:
  *   - qué se guarda al registrar una factura (`camposSerieFolioInsert`);
  *   - qué hace el cron de relectura con cada XML ya guardado
- *     (`clasificarFalloRelectura`, `notasConFolioNoLegible`).
+ *     (`clasificarFalloRelectura`, `cortarRelecturaPorPyservices`,
+ *     `notasConFolioNoLegible`).
  * Cómo se ROTULA el número («A-0411», respaldo al UUID) NO vive aquí: es de
  * `common/folio-comprobante.util` (fuente única).
  */
 
 /** Facturas que relee el cron por corrida (las 59 de prod caben en 2). */
 export const RELECTURA_FOLIO_LOTE = 50;
+
+/**
+ * Fallos TRANSITORIOS de pyservices SEGUIDOS que cortan la corrida
+ * (revisión 5-oct-2026). Con UNO solo el cron sigue con la siguiente
+ * factura: un XML concreto que tumba a pyservices (5xx, timeout) no debe
+ * bloquear la cola para siempre (el lote se toma siempre en el mismo orden
+ * y esa fila, sin sellar, encabezaría todas las corridas). Con DOS seguidos
+ * pyservices está caído o desactualizado: todas fallarían igual.
+ */
+export const RELECTURA_FOLIO_FALLOS_SEGUIDOS = 2;
+
+/** ¿Cortar la corrida tras `fallosSeguidos` fallos transitorios seguidos? */
+export function cortarRelecturaPorPyservices(fallosSeguidos: number): boolean {
+  return fallosSeguidos >= RELECTURA_FOLIO_FALLOS_SEGUIDOS;
+}
 
 /** Nota que deja el cron cuando el XML guardado no se pudo leer. */
 export const NOTA_FOLIO_NO_LEGIBLE = 'Folio no legible del XML';
@@ -76,19 +92,26 @@ export function camposSerieFolioInsert(
 /**
  * Qué hacer cuando la relectura de UN XML falla:
  * - `ILEGIBLE`: el XML no se puede leer y reintentar no lo arreglará
- *   (pyservices respondió 400/422 = CFDI roto, base64 inválido o con
- *   DTD/ENTITY; o el archivo ya no existe en Storage) ⇒ se SELLA
- *   `folio_releido_at` y se anota «Folio no legible del XML».
- * - `TRANSITORIO`: pyservices caído, sin configurar, lento, 5xx/401/404, o
- *   Storage con un error de red ⇒ NO se sella: el siguiente tick reintenta.
+ *   (pyservices respondió 400/422 con `detail` de TEXTO = CFDI roto, base64
+ *   inválido o con DTD/ENTITY; o el archivo ya no existe en Storage) ⇒ se
+ *   SELLA `folio_releido_at` y se anota «Folio no legible del XML».
+ * - `TRANSITORIO`: pyservices caído, sin configurar, lento, 5xx/401/404, un
+ *   422 de VALIDACIÓN de FastAPI (`detail` es una LISTA: el body no cumple
+ *   el schema, p. ej. un pyservices que cambió `ParseRecibidaRequest`; sellar
+ *   dejaría las 59 recibidas sin folio para siempre con XML sanos) o Storage
+ *   con un error de red ⇒ NO se sella: el siguiente tick reintenta.
  */
 export type FalloRelectura = 'ILEGIBLE' | 'TRANSITORIO';
 
 export function clasificarFalloRelectura(err: unknown): FalloRelectura {
   const msg =
     err instanceof Error ? err.message : typeof err === 'string' ? err : '';
-  // `PyservicesService.postForJson`: «pyservices respondio 422: …».
-  if (/pyservices respondi[oó] (400|422)\b/i.test(msg)) return 'ILEGIBLE';
+  // `PyservicesService.postForJson`: «pyservices respondio 422: <body>». El
+  // 422 PROPIO de `/facturacion/parse-recibida` trae `{"detail":"<texto>"}`;
+  // el de validación de FastAPI, `{"detail":[{…}]}` (revisión 5-oct-2026).
+  if (/pyservices respondi[oó] (400|422):\s*\{\s*"detail"\s*:\s*"/i.test(msg)) {
+    return 'ILEGIBLE';
+  }
   // `downloadB64`: «No se pudo leer facturas/…: Object not found».
   if (/object not found|not_found/i.test(msg)) return 'ILEGIBLE';
   return 'TRANSITORIO';

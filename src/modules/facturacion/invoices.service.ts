@@ -26,6 +26,7 @@ import type { UpdateRecibidaDto } from './dto/invoices.dto';
 import {
   camposSerieFolioInsert,
   clasificarFalloRelectura,
+  cortarRelecturaPorPyservices,
   notasConFolioNoLegible,
   RELECTURA_FOLIO_LOTE,
   serieFolioDelCfdi,
@@ -746,12 +747,17 @@ export class InvoicesService {
    *   `folio_releido_at is null` (las más viejas primero).
    * - Leída ⇒ `serie`, `folio`, `folio_releido_at = now()` (con o sin
    *   folio: un CFDI sin Serie/Folio no se reintenta eternamente).
-   * - XML ilegible (pyservices 400/422) o ausente en Storage ⇒ se sella y se
-   *   anota «Folio no legible del XML» al final de `notas`.
-   * - pyservices caído/lento/sin configurar o VIEJO (sin las llaves
-   *   serie/folio) ⇒ NO se sella y se corta la corrida (todas fallarían
-   *   igual): el siguiente tick reintenta. Un error de red de Storage solo
-   *   salta ESA fila.
+   * - XML ilegible (pyservices 400/422 con `detail` de texto) o ausente en
+   *   Storage ⇒ se sella y se anota «Folio no legible del XML» al final de
+   *   `notas`, releídas JUSTO antes del UPDATE y con CAS sobre ellas (una
+   *   edición de la oficina durante la corrida no se pisa).
+   * - pyservices caído/lento/sin configurar (fallo TRANSITORIO) ⇒ esa fila
+   *   NO se sella y se sigue con la siguiente; con DOS fallos seguidos
+   *   (`cortarRelecturaPorPyservices`) se corta la corrida (todas fallarían
+   *   igual). Así un XML que tumba a pyservices no bloquea la cola. Un
+   *   pyservices VIEJO (sin las llaves serie/folio) corta de inmediato. Un
+   *   error de red de Storage solo salta ESA fila. El siguiente tick
+   *   reintenta lo no sellado.
    * - El UPDATE lleva `folio_releido_at is null` (CAS): jamás pisa una fila
    *   que otro camino ya selló.
    * Nunca lanza: un fallo se registra con `warn`.
@@ -786,7 +792,7 @@ export class InvoicesService {
     const sb = this.supabase.service;
     const { data, error } = await sb
       .from('factura_recibida')
-      .select('id, xml_url, notas')
+      .select('id, xml_url')
       .not('xml_url', 'is', null)
       .is('folio_releido_at', null)
       .order('created_at', { ascending: true })
@@ -795,7 +801,6 @@ export class InvoicesService {
     const filas = (data ?? []) as Array<{
       id: string;
       xml_url: string | null;
-      notas: string | null;
     }>;
 
     /** UPDATE con CAS; `false` si la BD lo rechazó (se reintenta). */
@@ -817,6 +822,60 @@ export class InvoicesService {
       return true;
     };
 
+    /**
+     * Sella una factura ILEGIBLE con la nota al final de `notas`. Las notas
+     * se RELEEN justo antes del UPDATE (la corrida tarda minutos: la oficina
+     * pudo editarlas con el PATCH de recibidas) y el UPDATE lleva CAS sobre
+     * ellas además de `folio_releido_at is null`; si cambiaron en medio, se
+     * reintenta una vez. `false` = no se pudo (el siguiente tick reintenta).
+     */
+    const sellarIlegible = async (id: string): Promise<boolean> => {
+      for (let intento = 0; intento < 2; intento += 1) {
+        const { data: actual, error: rErr } = await sb
+          .from('factura_recibida')
+          .select('notas')
+          .eq('id', id)
+          .is('folio_releido_at', null)
+          .maybeSingle();
+        if (rErr) {
+          this.logger.warn(
+            `Relectura de folio: no se pudieron releer las notas de la factura ${id}: ${rErr.message}`,
+          );
+          return false;
+        }
+        // Ya la selló otro camino (o se borró): nada que hacer.
+        if (!actual) return true;
+        const notasLeidas = (actual as { notas?: string | null }).notas ?? null;
+        let q = sb
+          .from('factura_recibida')
+          .update({
+            folio_releido_at: new Date().toISOString(),
+            notas: notasConFolioNoLegible(notasLeidas),
+          })
+          .eq('id', id)
+          .is('folio_releido_at', null);
+        q =
+          notasLeidas === null
+            ? q.is('notas', null)
+            : q.eq('notas', notasLeidas);
+        const { data: escritas, error: uErr } = await q.select('id');
+        if (uErr) {
+          this.logger.warn(
+            `Relectura de folio: no se pudo guardar la factura ${id}: ${uErr.message}`,
+          );
+          return false;
+        }
+        if ((escritas ?? []).length > 0) return true;
+      }
+      this.logger.warn(
+        `Relectura de folio: las notas de la factura ${id} cambiaron durante la corrida (se reintenta)`,
+      );
+      return false;
+    };
+
+    // Fallos TRANSITORIOS de pyservices seguidos (se reinicia cuando
+    // pyservices responde, bien o con un XML ilegible).
+    let fallosPyservicesSeguidos = 0;
     for (const fila of filas) {
       if (!fila.xml_url) continue;
       resumen.leidas += 1;
@@ -827,15 +886,26 @@ export class InvoicesService {
           parsed = (await this.pyservices.parseFacturaRecibida(
             b64,
           )) as unknown as Record<string, unknown>;
+          fallosPyservicesSeguidos = 0;
         } catch (err) {
           if (clasificarFalloRelectura(err) === 'TRANSITORIO') {
-            // pyservices caído: las demás fallarían igual ⇒ siguiente tick.
             resumen.reintentar += 1;
+            fallosPyservicesSeguidos += 1;
+            const motivo = err instanceof Error ? err.message : String(err);
+            if (cortarRelecturaPorPyservices(fallosPyservicesSeguidos)) {
+              // Caído de verdad: las demás fallarían igual ⇒ siguiente tick.
+              this.logger.warn(
+                `Relectura de folio pausada (pyservices): ${motivo}`,
+              );
+              break;
+            }
+            // Puede ser ESTE XML: se sigue con la siguiente factura.
             this.logger.warn(
-              `Relectura de folio pausada (pyservices): ${err instanceof Error ? err.message : String(err)}`,
+              `Relectura de folio: factura ${fila.id} sin leer por pyservices (se reintenta): ${motivo}`,
             );
-            break;
+            continue;
           }
+          fallosPyservicesSeguidos = 0;
           throw err;
         }
       } catch (err) {
@@ -847,10 +917,7 @@ export class InvoicesService {
           );
           continue;
         }
-        const ok = await sellar(fila.id, {
-          folio_releido_at: new Date().toISOString(),
-          notas: notasConFolioNoLegible(fila.notas),
-        });
+        const ok = await sellarIlegible(fila.id);
         if (ok) resumen.ilegibles += 1;
         else resumen.reintentar += 1;
         this.logger.warn(

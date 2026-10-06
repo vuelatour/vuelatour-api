@@ -1371,6 +1371,106 @@ describe('NÚMERO DE FACTURA del gasto en conciliación (5-oct-2026, API 0.0.57)
     expect(de('m2231')[7]).toBe('Gasto Operaciones · vuelo #321');
   });
 
+  it('Excel «Notas»: cobros, ingresos, clasificaciones y reversos llevan SOLO la nota del banco (como el 0.0.56)', async () => {
+    // Revisión 5-oct-2026: ninguna línea SIN gasto puede ganar una
+    // «Factura …» (ni siquiera con un gasto con folio en el mismo reporte).
+    const w = await ligar(conFolios());
+    const conciliado = (id: string, extra: Row): Row => ({
+      ...cargo(id, 0),
+      conciliado: true,
+      ...extra,
+    });
+    w.db.cobro_vuelo = [
+      { id: 'cv-1', metodo_cobro: 'TRANSFERENCIA', vuelo_id: 'v-315' },
+      { id: 'cv-2', metodo_cobro: 'EFECTIVO', vuelo_id: 'v-318' },
+    ];
+    w.db.ingreso = [
+      {
+        id: 'ing-1',
+        folio: 12,
+        categoria: 'OTROS',
+        descripcion: 'Reembolso aseguradora',
+      },
+    ];
+    w.db.conciliacion_clasificacion.push({
+      id: 'cl-reverso',
+      nombre: 'Cargo devuelto',
+      activo: true,
+    });
+    w.db.movimiento_bancario.push(
+      conciliado('m-cobro', {
+        tipo: 'ABONO',
+        monto: 15000,
+        descripcion: 'SPEI RECIBIDO CLIENTE',
+        cobro_id: 'cv-1',
+        notas: 'depósito de Juan',
+      }),
+      conciliado('m-cobro-sin', {
+        tipo: 'ABONO',
+        monto: 900,
+        descripcion: 'DEPOSITO SIN NOTA',
+        cobro_id: 'cv-2',
+        notas: null,
+      }),
+      conciliado('m-ingreso', {
+        tipo: 'ABONO',
+        monto: 500,
+        descripcion: 'SPEI RECIBIDO ASEGURADORA',
+        ingreso_id: 'ing-1',
+        notas: 'reembolso del seguro',
+      }),
+      conciliado('m-clasif', {
+        monto: 35.5,
+        descripcion: 'COMISION SPEI',
+        clasificacion_id: 'cl-comision',
+        notas: 'comisión del mes',
+      }),
+      conciliado('m-rev-c', {
+        monto: 1200,
+        fecha: '2026-09-21',
+        descripcion: 'ASUR CANCUN',
+        clasificacion_id: 'cl-reverso',
+        notas: 'cargo indebido',
+      }),
+      conciliado('m-rev-a', {
+        tipo: 'ABONO',
+        monto: 1200,
+        fecha: '2026-09-23',
+        descripcion: 'DEVOLUCION ASUR',
+        clasificacion_id: 'cl-reverso',
+        reverso_de_id: 'm-rev-c',
+        notas: null,
+      }),
+    );
+    await w.svc.reporteXlsx(CTA, '2026-09-01', '2026-09-30', 'todos');
+    const filas = filasExcel(w.generateTablaXlsx);
+    const de = (descripcion: string) => {
+      const f = filas.find((x) => x[1] === descripcion);
+      if (!f) throw new Error(`sin fila ${descripcion}`);
+      return f;
+    };
+    // Cada línea se reconoce como lo que es («Conciliado con»)…
+    expect(de('SPEI RECIBIDO CLIENTE')[7]).toMatch(/^Cobro · vuelo #315/);
+    expect(de('DEPOSITO SIN NOTA')[7]).toMatch(/^Cobro · vuelo #318/);
+    expect(de('SPEI RECIBIDO ASEGURADORA')[7]).toMatch(/^Ingreso /);
+    expect(de('COMISION SPEI')[7]).toBe('Clasificación: Comisión del banco');
+    expect(de('ASUR CANCUN')[7]).toMatch(/^Cargo devuelto · devuelto el /);
+    expect(de('DEVOLUCION ASUR')[7]).toMatch(
+      /^Cargo devuelto · devuelve el cargo del /,
+    );
+    // …y su «Notas» es la nota del banco BYTE A BYTE ('' sin nota).
+    expect(de('SPEI RECIBIDO CLIENTE')[8]).toBe('depósito de Juan');
+    expect(de('DEPOSITO SIN NOTA')[8]).toBe('');
+    expect(de('SPEI RECIBIDO ASEGURADORA')[8]).toBe('reembolso del seguro');
+    expect(de('COMISION SPEI')[8]).toBe('comisión del mes');
+    expect(de('ASUR CANCUN')[8]).toBe('cargo indebido');
+    expect(de('DEVOLUCION ASUR')[8]).toBe('');
+    // En el MISMO reporte las líneas con gasto sí llevan su factura.
+    expect(
+      filas.some((f) => f[8] === 'Factura FEACZM 72128 · pago SAESA'),
+    ).toBe(true);
+  });
+
   it('Excel: la factura SIN Serie/Folio sale como «CFDI <uuid>»', async () => {
     const w = conFolios();
     await w.svc.link('m2231', 'g322', USER);
@@ -1437,12 +1537,36 @@ describe('NÚMERO DE FACTURA del gasto en conciliación (5-oct-2026, API 0.0.57)
     // Sin ningún número: null (el campo siempre viaja).
     expect(porId.has('g236')).toBe(true);
     expect(porId.get('g236')).toBeNull();
+    // «Sugerir» (±3 días y ±5 % del cargo de 2,231.38 del 24-sep): un
+    // candidato con la factura ligada y otro solo con la lectura IA. El
+    // folio de los dos sale del EMBED de `gastoRicoCols()` (no de una
+    // columna plana): si el select regresara a `GASTO_RICO_COLS` a secas,
+    // los dos saldrían null.
+    Object.assign(gasto(w.db, 'g318'), {
+      fecha_gasto: '2026-09-25',
+      factura_recibida_id: 'fr-a',
+    });
+    Object.assign(gasto(w.db, 'g322'), {
+      fecha_gasto: '2026-09-22',
+      factura_recibida_id: null,
+      valor_ia_extraido: { folio: 'IA-0077', total: 2231.37 },
+    });
     const s = await w.svc.sugerir('m2231');
-    const c = s.candidatos.find((x) => x.id === 'g321')!;
-    expect(c.folio_comprobante).toBe('FEACZM 72128');
+    const folioDe = (id: string) => {
+      const c = s.candidatos.find((x) => x.id === id);
+      if (!c) throw new Error(`sin candidato ${id}`);
+      return c.folio_comprobante;
+    };
+    expect(folioDe('g321')).toBe('FEACZM 72128');
+    expect(folioDe('g318')).toBe('A-0411');
+    expect(folioDe('g322')).toBe('IA-0077');
+    // Sin los campos crudos del cálculo.
+    for (const k of ['ia_folio', 'factura']) {
+      expect(s.candidatos[0]).not.toHaveProperty(k);
+    }
   });
 
-  it('SIN la migración 20261002000002: ninguna consulta nombra serie (salvo la sonda) y el folio sale de ticket/IA/UUID', async () => {
+  it('SIN la migración 20261005000002: ninguna consulta nombra serie (salvo la sonda) y el folio sale de ticket/IA/UUID', async () => {
     const w = await ligar(conFolios({ sinSerieFolio: true }));
     await w.svc.reporteXlsx(CTA, '2026-09-01', '2026-09-30', 'todos');
     const lista = await w.svc.list({ limit: 100, offset: 0 });

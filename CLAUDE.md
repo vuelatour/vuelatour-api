@@ -4140,25 +4140,41 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `folio`, `folio_releido_at = now()` con CAS `folio_releido_at is
       null` (jamás pisa una fila sellada). CFDI sin Serie/Folio ⇒ sellado
       sin folio (no se reintenta eternamente). `clasificarFalloRelectura`:
-      pyservices 400/422 (XML roto, DTD) o «Object not found» de Storage ⇒
-      ILEGIBLE: se sella y `notas` += «Folio no legible del XML»
-      (`notasConFolioNoLegible`, línea nueva, sin duplicar). pyservices
-      caído/lento/sin configurar/5xx/401 o VIEJO ⇒ NO se sella y se CORTA
-      la corrida (todas fallarían igual); un error de red de Storage solo
-      salta esa fila. Las 3 recibidas solo-PDF de prod quedan sin folio
-      (nada que leer). En prod (5-oct): 62 recibidas, 59 con XML ⇒ ≤ 2
-      corridas.
+      pyservices 400/422 con `detail` de TEXTO (`{"detail":"…"}`: XML roto,
+      DTD) o «Object not found» de Storage ⇒ ILEGIBLE: se sella y `notas`
+      += «Folio no legible del XML» (`notasConFolioNoLegible`, línea nueva,
+      sin duplicar) con las notas RELEÍDAS justo antes del UPDATE y CAS
+      sobre ellas (`eq notas` / `is notas null`, un reintento): la corrida
+      tarda minutos y jamás pisa una edición de la oficina (PATCH de
+      recibidas). **Un 422 de VALIDACIÓN de FastAPI (`detail` LISTA: el body
+      no cumple el schema) es TRANSITORIO**, nunca ILEGIBLE (sellaría las 59
+      con XML sanos). pyservices caído/lento/sin configurar/5xx/401 ⇒ esa
+      fila NO se sella y se SIGUE con la siguiente; con DOS fallos
+      transitorios SEGUIDOS (`cortarRelecturaPorPyservices`,
+      `RELECTURA_FOLIO_FALLOS_SEGUIDOS = 2`; el contador vuelve a 0 cuando
+      pyservices responde) se CORTA la corrida: así un XML que tumba a
+      pyservices no bloquea la cola (el lote sale siempre en el mismo orden
+      y esa fila encabezaría todas las corridas). pyservices VIEJO (sin las
+      llaves) corta de inmediato; un error de red de Storage solo salta esa
+      fila. Las 3 recibidas solo-PDF de prod quedan sin folio (nada que
+      leer). En prod (5-oct): 62 recibidas, 59 con XML ⇒ ≤ 2 corridas.
     - Specs: `folio-comprobante.util.spec`,
       `serie-folio-recibida-disponible.util.spec`,
       `facturacion/recibida-folio.util.spec`,
       `facturacion/invoices.service.recibida-folio.spec` (cron: sin
       migración, relleno, sin Serie/Folio, ilegible con nota, XML ausente,
-      red de Storage, pyservices caído, pyservices viejo, lote de 50, CAS y
-      candado; altas con/sin migración, pyservices viejo, solo PDF) y el
-      bloque «NÚMERO DE FACTURA» de `conciliacion.service.lote.spec` (Notas
-      1 ↔ 1 y lote, «CFDI <uuid>», «Factura» de gastos sin banco, lista y
-      candidatos con `folio_comprobante`, sin la migración ninguna consulta
-      nombra `serie`). Deploy: pyservices → migración → API → panel.
+      red de Storage, pyservices caído (corta tras 2 seguidos), XML que
+      tumba a pyservices sin bloquear la cola, 422 de validación sin
+      sellar, notas editadas durante la corrida con CAS, pyservices viejo,
+      lote de 50, CAS y candado; altas con/sin migración, pyservices viejo,
+      solo PDF) y el bloque «NÚMERO DE FACTURA» de
+      `conciliacion.service.lote.spec` (Notas 1 ↔ 1 y lote, cobros /
+      ingresos / clasificaciones / reversos con la nota del banco BYTE A
+      BYTE, «CFDI <uuid>», «Factura» de gastos sin banco, lista y
+      candidatos con `folio_comprobante` — en «Sugerir» con folio de la
+      factura y de la IA, que solo llegan por el embed de `gastoRicoCols()`
+      —, sin la migración ninguna consulta nombra `serie`). Deploy:
+      pyservices → migración → API → panel.
 
 45. **PRE-CIERRE «VUELOS COMPLETADOS SIN GASTO DE OPERACIONES» (5-oct-2026,
     sin migración).** Pregunta del cliente: «la conciliación no tiene
@@ -4922,10 +4938,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   TODAS las existentes con XML pendientes, C2 alta REAL como el 0.0.57
   (serie/folio sellados), C3 alta REAL como el 0.0.56 (pendiente) y
   solo-PDF fuera del lote del cron, C4 UPDATE REAL del cron con CAS (la
-  segunda escritura no pisa), C5 ilegible REAL sobre una pendiente con notas
-  («Proveedor X\nFolio no legible del XML») y PATCH del panel, C6
+  segunda escritura no pisa), C5 ilegible REAL como el cron (notas
+  releídas, texto literal y CAS sobre ellas: tras una edición de la oficina
+  el sello con las notas viejas escribe 0 filas y el de las vigentes deja
+  «Proveedor X · pagar el viernes\nFolio no legible del XML»; sin notas,
+  CAS `notas is null`) y PATCH del panel, C6
   re-aplicar = no-op ⇒ `DRYRUN_OK`; después las columnas NO existen y no
-  queda ningún `DRYRUN-20261005000002-%`. Probado en PGlite (5-oct):
+  queda ningún `DRYRUN-20261005000002-%`. Probado en PGlite (5-oct; C5
+  re-probado tras la revisión):
   `DRYRUN_OK · 62 recibidas, 59 por releer` sin residuos, aplicar dos veces
   idempotente, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`, verificación
   que aborta con una columna de otro tipo y rollback. Tras aplicar:

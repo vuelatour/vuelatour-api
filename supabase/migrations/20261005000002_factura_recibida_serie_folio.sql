@@ -154,19 +154,46 @@
 --   end if;
 --
 --   -- C5) UPDATE REAL del cron con XML ilegible sobre una fila PENDIENTE
---   --     con notas: sella sin folio y anota al final (CAS incluido).
+--   --     con notas, COMO LO HACE EL CRON: notas releídas justo antes y
+--   --     el texto calculado en el API (literal), con CAS sobre
+--   --     `folio_releido_at is null` Y sobre las notas releídas. Antes, la
+--   --     oficina edita las notas (PATCH de recibidas): un sello con las
+--   --     notas VIEJAS no escribe nada (0 filas) y el de las vigentes sí.
 --   insert into public.factura_recibida (uuid_fiscal, xml_url, notas)
 --   values ('DRYRUN-20261005000002-3', 'recibidas/DRYRUN-3.xml', 'Proveedor X')
 --   returning id into v_id4;
+--   update public.factura_recibida set notas = 'Proveedor X · pagar el viernes'
+--    where id = v_id4;
 --   update public.factura_recibida
 --      set folio_releido_at = now(),
---          notas = coalesce(nullif(rtrim(notas), '') || E'\n', '') || 'Folio no legible del XML'
---    where id = v_id4 and folio_releido_at is null;
+--          notas = E'Proveedor X\nFolio no legible del XML'
+--    where id = v_id4 and folio_releido_at is null and notas = 'Proveedor X';
+--   get diagnostics v_n = row_count;
+--   if v_n <> 0 then
+--     raise exception 'DRYRUN_FALLA C5: el CAS de notas dejó pisar la edición de la oficina';
+--   end if;
+--   update public.factura_recibida
+--      set folio_releido_at = now(),
+--          notas = E'Proveedor X · pagar el viernes\nFolio no legible del XML'
+--    where id = v_id4 and folio_releido_at is null
+--      and notas = 'Proveedor X · pagar el viernes';
 --   get diagnostics v_n = row_count;
 --   if v_n <> 1 or (select notas from public.factura_recibida where id = v_id4)
---        <> E'Proveedor X\nFolio no legible del XML'
+--        <> E'Proveedor X · pagar el viernes\nFolio no legible del XML'
 --      or (select folio from public.factura_recibida where id = v_id4) is not null then
 --     raise exception 'DRYRUN_FALLA C5: ilegible mal sellada (% filas)', v_n;
+--   end if;
+--   -- Sin notas: CAS `notas is null` (la fila C3 solo-PDF no entra: no
+--   -- tiene XML; se usa una pendiente nueva).
+--   insert into public.factura_recibida (uuid_fiscal, xml_url)
+--   values ('DRYRUN-20261005000002-4', 'recibidas/DRYRUN-4.xml')
+--   returning id into v_id1;
+--   update public.factura_recibida
+--      set folio_releido_at = now(), notas = 'Folio no legible del XML'
+--    where id = v_id1 and folio_releido_at is null and notas is null;
+--   get diagnostics v_n = row_count;
+--   if v_n <> 1 then
+--     raise exception 'DRYRUN_FALLA C5: ilegible sin notas no se selló (% filas)', v_n;
 --   end if;
 --   -- Edición del panel (PATCH de recibida, sin los campos nuevos) intacta.
 --   update public.factura_recibida set notas = 'editada', estado = 'CLASIFICADA' where id = v_id3;
