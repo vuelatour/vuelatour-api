@@ -144,8 +144,12 @@ type MovTiendita = MovCardex & { id: string; item_id: string };
 const EMPAQUE_COLS =
   'id, item_id, nombre, factor, codigo, activo, created_at, updated_at';
 /** Joins del cardex: avión, proveedor y el empaque con que se capturó. */
+// `registro` (6-oct-2026): quién registró el movimiento (FK
+// inventario_movimiento_registrado_por_fkey → usuario.nombre) para el
+// historial del cardex del panel («salió 1 aceite para el N58BT y yo no lo
+// saqué»: era una PRUEBA de otro usuario). Aditivo: el panel lo pinta si viene.
 const MOV_JOINS =
-  'aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre), empaque:inventario_item_empaque!empaque_id(nombre, factor)';
+  'aeronave:aeronave!aeronave_id(matricula), proveedor:proveedor!proveedor_id(nombre), empaque:inventario_item_empaque!empaque_id(nombre, factor), registro:usuario!inventario_movimiento_registrado_por_fkey(nombre)';
 
 /** Bucket PÚBLICO de fotos de producto (el cliente sube; el API borra). */
 const FOTOS_BUCKET = 'inventario-fotos';
