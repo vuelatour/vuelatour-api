@@ -4926,7 +4926,9 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
-- **PENDIENTE DE APLICAR** — `20261005000002_factura_recibida_serie_folio.sql`
+- **APLICADA (5-oct-2026 vía MCP, tras DRYRUN_OK de la cabecera en prod con 62
+  recibidas y 59 por releer; sin residuos; advisors sin hallazgos nuevos)** —
+  `20261005000002_factura_recibida_serie_folio.sql`
   (invariante 44): `factura_recibida.serie text null`, `.folio text null`,
   `.folio_releido_at timestamptz null` en UN `ALTER` (idempotente) +
   COMMENTs + verificación `do $ver$` que aborta si alguna no quedó con su
