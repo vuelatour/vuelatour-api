@@ -3,12 +3,13 @@ import {
   SUFIJO_COMISION_BANCO_PARTE_VUELATOUR,
   aplicaComisionesAlAvion,
   comisionesDelVuelo,
-  conceptoVendedorACargoDelAvion,
   etiquetaReglaComisiones,
   fmtMxnNota,
   fmtPctNota,
+  pagoVendedorCubiertoPorAvion,
   type ComisionesDelVueloInput,
 } from './comisiones-avion.util';
+import type { PagosVendedorDeVuelo } from './pago-vendedor.util';
 import {
   particionIngresoVuelo,
   type VueloIngresoInput,
@@ -563,10 +564,7 @@ describe('textos de la regla', () => {
     );
   });
 
-  it('concepto del ingreso de VuelaTour en «otros movimientos»', () => {
-    expect(conceptoVendedorACargoDelAvion('XB-PEV', '2026-09-01')).toBe(
-      'comisión del vendedor a cargo del avión XB-PEV (regla sep-2026)',
-    );
+  it('sufijo del egreso de comisión bancaria de VuelaTour en «otros movimientos»', () => {
     expect(SUFIJO_COMISION_BANCO_PARTE_VUELATOUR).toBe(
       ' (parte VuelaTour: la del avión va en su columna COMISIONES)',
     );
@@ -578,5 +576,143 @@ describe('textos de la regla', () => {
     expect(fmtPctNota(5)).toBe('5');
     expect(fmtPctNota(5.0001)).toBe('5');
     expect(fmtPctNota(3.828)).toBe('3.83');
+  });
+});
+
+/**
+ * EGRESO DEL VENDEDOR CUBIERTO POR LOS AVIONES (7-oct-2026, API 0.0.66):
+ * pedido del cliente «en "otros movimientos", en el ingreso estás duplicando
+ * la comisión». La provisión ya resta en la columna COMISIONES de cada avión:
+ * VuelaTour solo paga lo que el pago real la EXCEDE.
+ */
+describe('pagoVendedorCubiertoPorAvion', () => {
+  const sinPago: PagosVendedorDeVuelo = {
+    n: 0,
+    pagadoMxn: null,
+    sinTc: 0,
+    fecha: null,
+  };
+  const pago = (
+    pagadoMxn: number | null,
+    extra: Partial<PagosVendedorDeVuelo> = {},
+  ): PagosVendedorDeVuelo => ({
+    n: 1,
+    pagadoMxn,
+    sinTc: 0,
+    fecha: '2026-09-28',
+    ...extra,
+  });
+  const xbPev = [{ matricula: 'XB-PEV', vendedor_mxn: 5467.97 }];
+  const PABLO = 'comisión vendedor (Pablo Canales)';
+
+  it('sin pago real: egreso 0 y el concepto del contrato (caso del cliente, $5,467.97)', () => {
+    expect(
+      pagoVendedorCubiertoPorAvion({
+        etiquetaComision: PABLO,
+        aviones: xbPev,
+        pagos: sinPago,
+      }),
+    ).toEqual({
+      egreso_mxn: 0,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-PEV (provisión $5,467.97 en su balance)',
+      provision_mxn: 5467.97,
+    });
+  });
+
+  it('pago real MAYOR que la provisión: VuelaTour paga SOLO el exceso y el concepto dice «excede»', () => {
+    const r = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: PABLO,
+      aviones: [{ matricula: 'XB-DOS', vendedor_mxn: 2700 }],
+      pagos: pago(3000),
+    });
+    expect(r.egreso_mxn).toBe(300);
+    expect(r.concepto).toBe(
+      'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-DOS (provisión $2,700.00 en su balance) · gasto real $3,000.00 · excede $300.00 MXN',
+    );
+  });
+
+  it('pago real MENOR que la provisión: egreso 0 y «parcial: faltan» (aún se le debe al vendedor; el avión ya lo cargó)', () => {
+    const r = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: 'comisión vendedor (Alex Saab)',
+      aviones: [{ matricula: 'XB-TST', vendedor_mxn: 1800 }],
+      pagos: pago(1500),
+    });
+    expect(r.egreso_mxn).toBe(0);
+    expect(r.concepto).toBe(
+      'pago comisión vendedor (Alex Saab) · cubierto por el avión XB-TST (provisión $1,800.00 en su balance) · gasto real $1,500.00 · parcial: faltan $300.00 MXN',
+    );
+  });
+
+  it('pago real IGUAL a la provisión (caso #251, $4,080): egreso 0, sin «excede» ni «faltan»', () => {
+    const r = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: 'comisión vendedor (Alex Saab)',
+      aviones: [{ matricula: 'N990GG', vendedor_mxn: 4080 }],
+      pagos: pago(4080),
+    });
+    expect(r.egreso_mxn).toBe(0);
+    expect(r.concepto).toBe(
+      'pago comisión vendedor (Alex Saab) · cubierto por el avión N990GG (provisión $4,080.00 en su balance) · gasto real $4,080.00',
+    );
+  });
+
+  it('diferencias menores a la tolerancia: el egreso es EXACTO aunque el texto no las nombre', () => {
+    const r = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: PABLO,
+      aviones: [{ matricula: 'XB-DOS', vendedor_mxn: 2700 }],
+      pagos: pago(2700.4),
+    });
+    expect(r.egreso_mxn).toBe(0.4);
+    expect(r.concepto).not.toMatch(/excede|faltan/);
+  });
+
+  it('MULTI-AVIÓN: cada avión con SU provisión; Σ provisiones cubre el pago y los de 0 no aparecen', () => {
+    const r = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: PABLO,
+      aviones: [
+        { matricula: 'XB-TST', vendedor_mxn: 900 },
+        { matricula: 'XB-DOS', vendedor_mxn: 900 },
+        { matricula: 'XB-TRES', vendedor_mxn: 0 },
+      ],
+      pagos: pago(2000, { n: 2 }),
+    });
+    expect(r.provision_mxn).toBe(1800);
+    expect(r.egreso_mxn).toBe(200);
+    expect(r.concepto).toBe(
+      'pago comisión vendedor (Pablo Canales) · cubierto por los aviones XB-TST (provisión $900.00 en su balance) y XB-DOS (provisión $900.00 en su balance) · gasto real $2,000.00 (2 pagos) · excede $200.00 MXN',
+    );
+  });
+
+  it('pagos USD sin T.C.: ninguno convierte ⇒ egreso null (jamás un 0 falso); parcial ⇒ el exceso de lo que sí convirtió, sin comparar', () => {
+    const ninguno = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: PABLO,
+      aviones: xbPev,
+      pagos: pago(null, { sinTc: 1 }),
+    });
+    expect(ninguno.egreso_mxn).toBeNull();
+    expect(ninguno.concepto).toBe(
+      'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-PEV (provisión $5,467.97 en su balance) · gasto real (USD sin TC)',
+    );
+    const parcial = pagoVendedorCubiertoPorAvion({
+      etiquetaComision: PABLO,
+      aviones: xbPev,
+      pagos: pago(6000, { n: 2, sinTc: 1 }),
+    });
+    expect(parcial.egreso_mxn).toBe(532.03);
+    expect(parcial.concepto).toBe(
+      'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-PEV (provisión $5,467.97 en su balance) · gasto real $6,000.00 (2 pagos) (parcial: USD sin TC)',
+    );
+  });
+
+  it('todos los conceptos empiezan con «pago comisión vendedor» (el clasificador de la nota los reconoce)', () => {
+    for (const pagos of [sinPago, pago(3000), pago(null, { sinTc: 1 })]) {
+      expect(
+        pagoVendedorCubiertoPorAvion({
+          etiquetaComision: 'comisión vendedor',
+          aviones: xbPev,
+          pagos,
+        }).concepto.startsWith('pago comisión vendedor · cubierto por'),
+      ).toBe(true);
+    }
   });
 });

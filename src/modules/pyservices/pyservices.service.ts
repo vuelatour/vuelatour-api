@@ -1026,6 +1026,27 @@ export interface BalanceAvionBalancePayload {
   por_cobrar_usd: number;
   utilidad_cobrada_usd: number | null;
   socios: BalanceAvionSocioPayload[];
+  /**
+   * ADITIVO (7-oct-2026, API 0.0.66) — SOLO si alguna fila de avión del
+   * libro cae en la vigencia de `comisiones_al_avion_desde` (sin ella no
+   * viaja: payload byte-idéntico). Las COMISIONES (banco + vendedor) que
+   * ESTE avión absorbe en el periodo, en USD: Σ por vuelo de
+   * `comisionesDelVuelo(...).total_usd`, la MISMA cifra por vuelo que el
+   * reparto a socios (`ingresos.comisiones_venta_usd`); el total coincide
+   * con el reparto salvo la comisión bancaria de anticipos de vuelos aún no
+   * realizados (el balance cuenta su cobro; el reparto no lee el vuelo).
+   * Solo filas cuya ganancia USD restó comisiones.
+   */
+  comisiones_usd?: number;
+  /**
+   * ADITIVO (7-oct-2026, API 0.0.66), junto con `comisiones_usd`:
+   * round2(`utilidad_antes_usd` + `comisiones_usd`) — la línea «UTILIDAD
+   * ANTES DE GASTOS USD (antes de comisiones)» de la cascada del GENERAL,
+   * cuya hoja de vuelos ya no pinta la columna COMISIONES. round2(antes −
+   * comisiones) == `utilidad_antes_usd` al centavo; después, cobrada y
+   * socios no cambian.
+   */
+  utilidad_antes_comisiones_usd?: number;
 }
 
 /** Fila del RESUMEN del balance general (= totales del libro de un avión). */

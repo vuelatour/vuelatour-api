@@ -931,8 +931,11 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     (default 2026-09-01, invariante 50) el balance por avión y el reparto SÍ
     la DESCUENTAN** — la provisión (solo de vuelos COMPLETADOS), con la parte
     del avión de la comisión bancaria, en COMISIONES / `comisiones_venta_usd`
-    — y VuelaTour la recibe en «otros movimientos»; lo cobrado al cliente
-    por ella sigue siendo ingreso de VuelaTour. El Libro Dinero no cambia.
+    — y en «otros movimientos» esa provisión CUBRE el pago al vendedor
+    (desde el 0.0.66 VuelaTour solo paga lo que el pago real la EXCEDE; ya
+    no hay línea de ingreso «a cargo del avión»); lo cobrado al cliente por
+    ella sigue siendo ingreso de VuelaTour, UNA vez. El Libro Dinero no
+    cambia.
     En vuelos
     MULTI-AVIÓN (tramos en aviones distintos) la venta del avión y lo que
     deriva de ella se REPARTE con `participacionPorAeronave` +
@@ -2551,12 +2554,18 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       con ella). **Desde el 0.0.65 (invariante 50)**, en los vuelos de la
       vigencia de `comisiones_al_avion_desde` el AVIÓN absorbe la provisión
       (lo cobrado al cliente, comisión + IVA, × su parte; SOLO si el vuelo
-      está COMPLETADO) en su columna COMISIONES y la fila del vuelo gana una
-      línea de INGRESO por avión
-      «comisión del vendedor a cargo del avión XB-PEV (regla sep-2026)»; el
-      ingreso cobrado y el egreso de siempre (real con «faltan/excede» o
-      PROVISIÓN) NO cambian, y la provisión del avión NO depende del gasto
-      real.
+      está COMPLETADO) en su columna COMISIONES, y la provisión del avión NO
+      depende del gasto real. **Desde el 0.0.66 (7-oct-2026)** en esos
+      vuelos el ingreso cobrado se queda UNA vez y el egreso del vendedor es
+      `pagoVendedorCubiertoPorAvion`: «pago comisión vendedor (X) ·
+      cubierto por el avión XB-PEV (provisión $… en su balance)» por 0 sin
+      gasto real, o SOLO el exceso del gasto real sobre la provisión («·
+      gasto real $… · excede $… MXN»; menor ⇒ 0 con «· parcial: faltan $…
+      MXN»). El 0.0.65 sumaba una línea de INGRESO «comisión del vendedor a
+      cargo del avión … (regla sep-2026)» con el egreso completo y el
+      cliente la leyó como comisión duplicada: ELIMINADA. Sin provisión de
+      avión (antes de la vigencia, vuelo no realizado, EXTERNOS, llamada
+      directa) la rama de siempre, byte a byte.
     - **Libro Dinero** («Otros ingresos» y utilidades): misma partición por
       vuelo. `n = 0` ⇒ provisión (`comisionProvisionadaMxn`); `n > 0` ⇒
       egreso real en la primera línea de comisión con `NOTA_PAGO_VENDEDOR_REAL`
@@ -4440,9 +4449,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       horario, comisión bancaria, gastos sueltos): restar solo el pago al
       vendedor dejaría las TUAs cobradas como ingreso sin su costo. Desde el
       0.0.65 (invariante 50) la comisión bancaria de la pestaña es SOLO la
-      parte de VuelaTour y los ingresos incluyen la provisión del vendedor
-      que paga cada avión («a cargo del avión»): el bloque los toma de las
-      filas sin cambio de código; la participación como socia ya viene
+      parte de VuelaTour; desde el 0.0.66 los ingresos son lo cobrado a los
+      clientes (sin la línea «a cargo del avión») y el pago al vendedor que
+      cubre la provisión de los aviones egresa 0 (solo su exceso): el bloque
+      los toma de las filas sin cambio de código y su resultado es el del
+      0.0.65 salvo un pago real MENOR que la provisión (el 0.0.65 contaba
+      ese faltante como ingreso); la participación como socia ya viene
       después de comisiones. El T.C.
       por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
       `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
@@ -4746,7 +4758,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (compat). Totales (libro y flota): `comisiones_mxn` y sus dos partes
       SOLO si alguna fila trae la regla. RESUMEN del general:
       `comisiones_mxn` = las del libro (VENTA − COSTO − COMBUSTIBLE −
-      COMISIONES = GANANCIA).
+      COMISIONES = GANANCIA). Bloque `balance` (0.0.66, ADITIVOS al final,
+      con la MISMA condición que los totales): `comisiones_usd` y
+      `utilidad_antes_comisiones_usd` (ver «Ajuste 0.0.66» abajo).
     - **«Otros movimientos»** (`buildOtrosMovimientos`, parámetro
       `comisionesAvion` que arma `xlsxGeneral` con las partes TAL CUAL de
       las filas de los libros — nadie las recalcula ahí): el egreso de
@@ -4754,13 +4768,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       los aviones; $0 ⇒ no se pinta; sufijo «(parte VuelaTour: la del avión
       va en su columna COMISIONES)»), también el apareado con «Comisión
       BillPocket»; la fila del vuelo conserva el ingreso de la comisión
-      cobrada y su egreso (real o PROVISIÓN) y gana UNA línea de INGRESO por
-      avión `conceptoVendedorACargoDelAvion` («comisión del vendedor a cargo
-      del avión XB-PEV (regla sep-2026)», la etiqueta sale de la vigencia),
-      que `colapsarFilasDeVuelo` clasifica antes de la comisión bancaria. Sin
-      partes (fuera de la vigencia, sin avión o llamada directa) la pestaña
-      es la de siempre (golden). El bloque «VUELATOUR (empresa)» sale solo de
-      esas filas (invariante 47).
+      cobrada (UNA vez) y, si los aviones cargan la provisión del vendedor
+      (`comision_vendedor_prov_mxn` > 0 en sus filas), su egreso del
+      vendedor es `pagoVendedorCubiertoPorAvion` (0.0.66, abajo). El 0.0.65
+      agregaba UNA línea de INGRESO por avión «comisión del vendedor a cargo
+      del avión XB-PEV (regla sep-2026)» con el egreso completo (provisión o
+      real): ELIMINADA en el 0.0.66 junto con `conceptoVendedorACargoDelAvion`
+      y su clasificación en `colapsarFilasDeVuelo` (`etiquetaReglaComisiones`
+      se conserva: pyservices ya acepta `regla_comisiones`). Sin partes
+      (fuera de la vigencia, sin avión o llamada directa) la pestaña es la de
+      siempre (golden). El bloque «VUELATOUR (empresa)» sale solo de esas
+      filas (invariante 47).
     - **Reparto a socios** (`computeAvion`): por vuelo de la vigencia,
       `comisionesDelVuelo(...).total_usd` (con `parte` = `repartirUsd` y el
       K capturado ?? oficial) se suma en `ingresos.comisiones_venta_usd` —
@@ -4799,6 +4817,67 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - **Consecuencia aceptada**: el reparto de SEPTIEMBRE ya entregado baja
       (comisiones bancarias y del vendedor): la cuenta corriente puede marcar
       adelantos — avisar al cliente.
+    - **Ajuste 0.0.66 (7-oct-2026, SIN migración; contrato «comisiones
+      ajuste general»).** Pedido del cliente: «Estas comisiones se están
+      duplicando en la general, ya que las tenemos en el apartado de "Otros
+      movimientos"… deben aparecer pero en el individual de los avioncitos,
+      ya que en el reporte de los aviones no está la pestaña "Otros
+      movimientos"», y «en "otros movimientos", en el ingreso estás
+      duplicando la comisión» (#247: «comisión vendedor (Pablo Canales) =
+      $5,467.97 · comisión del vendedor a cargo del avión N4142R (regla
+      sep-2026) = $5,467.97» ⇒ ingreso $10,935.94).
+      - **Lo que NO cambia** (fixture CONGELADO del 0.0.65 en
+        `aircraft-balance.service.comisiones-general.spec`): el cálculo de
+        `comisionesDelVuelo`, la fila (COMISIONES, ganancia), la cascada
+        (antes/después/cobrada), los socios, el RESUMEN, el reparto, las
+        utilidades por mes y la cuenta corriente. Ni un centavo.
+      - **«Otros movimientos»**: sin la línea «a cargo del avión»; con
+        provisión de los aviones el egreso del vendedor es
+        `pagoVendedorCubiertoPorAvion` (`comisiones-avion.util.ts`, puro):
+        «pago comisión vendedor (Pablo Canales) · cubierto por el avión
+        XB-PEV (provisión $5,467.97 en su balance)» por $0 sin gasto real;
+        con gasto real «· gasto real $X[ (N pagos)]» y egreso =
+        max(0, round2(pagado − provisión)) con «· excede $X MXN» (≥ 1.00);
+        menor ⇒ egreso 0 con «· parcial: faltan $X MXN» (aún se le debe al
+        vendedor; el avión ya lo cargó); USD sin T.C. como
+        `conceptoPagoVendedorReal` (ninguno convierte ⇒ egreso null).
+        Multi-avión: «cubierto por los aviones A (provisión $a en su
+        balance) y B (provisión $b en su balance)». Solo la PRIMERA línea de
+        comisión lleva el egreso (la provisión cubre todas); el pago real
+        queda apareado (no sale como solo-egreso). Fecha: la del pago más
+        reciente o la del vuelo. Remanente de cada fila y resultado del
+        bloque VUELATOUR = los del 0.0.65 (Σ ingreso − egreso no cambia:
+        sale la provisión de los dos lados), SALVO un pago real MENOR que la
+        provisión: el 0.0.65 contaba ese faltante como ingreso de VuelaTour
+        y ahora no (queda «parcial: faltan»; PENDIENTE de confirmar con el
+        cliente, ver «Pendientes conocidos»). Conservación (spec): Σ
+        ganancia de los libros + Σ remanente de la pestaña == la regla
+        anterior menos esos faltantes.
+      - **`balance.comisiones_usd`** (por avión, ADITIVO): Σ por fila de
+        `comisionesDelVuelo(...).total_usd` — la MISMA cifra por vuelo que
+        `ingresos.comisiones_venta_usd` del reparto (fuente única) —, solo
+        de filas cuya ganancia USD restó comisiones (`comisiones_mxn` ≠ null
+        y `ganancia_usd` ≠ null; sin K la fila no restó nada en pesos y ya
+        grita pendiente). Coincide con el reparto al centavo salvo la
+        comisión bancaria de ANTICIPOS de vuelos aún no realizados (el
+        balance cuenta su cobro y su comisión; el reparto no lee el vuelo —
+        septiembre real: #314 CONFIRMADO con $5,000 de comisión Paywise).
+        **`balance.utilidad_antes_comisiones_usd`** = round2(utilidad_antes
+        + comisiones): la línea «UTILIDAD ANTES DE GASTOS USD (antes de
+        comisiones)» de la cascada del GENERAL; round2(antes − comisiones)
+        == `utilidad_antes_usd` al centavo. Puede diferir por CENTAVOS de Σ
+        round2(REMANENTE ÷ T.C.) de las filas (el reparto redondea cada
+        comisión en USD por vuelo; la fila redondea su ganancia neta): se
+        eligió la cifra EXACTA del reparto para «(−) COMISIONES».
+      - **pyservices** (mismo contrato): el libro GENERAL ya no pinta la
+        columna COMISIONES MXN en «reporte horas FLOTA» (GANANCIA MXN =
+        ROUND(REMANENTE, 2) en el mensual; REMANENTE VENTA MENOS COMPRA =
+        ROUND(VENTA − PROVEEDOR, 2) en el general) y su cascada gana «antes
+        de comisiones» (valor del API) y «(−) COMISIONES (banco + vendedor)
+        USD»; el INDIVIDUAL no cambia. El RESUMEN del general conserva su
+        columna COMISIONES MXN. Sin `comisiones_usd` (API ≤ 0.0.65) la
+        cascada del general queda como antes. Deploy: pyservices ANTES del
+        API 0.0.66.
     - **Deploy**: pyservices (pinta `neto_mxn`, COMISIONES y GANANCIA =
       REMANENTE − COMISIONES; tolera la ausencia de los campos) ANTES del API
       0.0.65: un pyservices previo pinta COBRO n en bruto y GANANCIA =
@@ -4819,7 +4898,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       solo del COMPLETADO; BillPocket apareado con conservación del dinero;
       sobrecobro; vuelo sin K con T.C. oficial), reparto (corte por día
       Cancún; cobro MXN sin T.C. en vuelo sin K; cruces con no realizados y
-      sin K) y `dashboards.service.overview-comisiones.spec`.
+      sin K) y `dashboards.service.overview-comisiones.spec`. 0.0.66:
+      `aircraft-balance.service.comisiones-general.spec` (mundo
+      `comisiones-general.fixture-spec`: dos aviones con socios, multi-avión,
+      externo, anticipo CONFIRMADO, BillPocket, el #247 con IVA y pagos reales
+      por encima y por debajo de la provisión) — fixture CONGELADO del 0.0.65
+      (bloques del individual y del general, reparto, RESUMEN, pestaña
+      número por número), `comisiones_usd` == reparto, la identidad de la
+      cascada, «otros movimientos» sin la línea y con el egreso cubierto,
+      bloque VUELATOUR y conservación; `comisiones-avion.util.spec`
+      (`pagoVendedorCubiertoPorAvion`) y los casos del 0.0.65 de
+      `aircraft-balance.service.comisiones.spec` actualizados a la regla.
 
 ## Convenciones NestJS
 
@@ -6235,7 +6324,13 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   `comisiones_venta_usd` «Comisiones de venta · regla anterior — hoy es
   ingreso/egreso de VuelaTour» y el PDF/XLSX del reparto «(-) Comisiones de
   venta», aunque desde septiembre son la parte del avión de la comisión
-  bancaria + la provisión del vendedor.
+  bancaria + la provisión del vendedor. Ajuste 0.0.66 (7-oct-2026, pedido
+  del cliente): sin ingreso duplicado en «otros movimientos» y
+  `comisiones_usd` en la cascada del general (invariante 50). (c) Por
+  confirmar con el cliente: un pago real al vendedor MENOR que la provisión
+  que carga el avión queda como «parcial: faltan» (aún se le debe) y ya no
+  como ingreso de VuelaTour (el 0.0.65 sí lo contaba); hoy el único pago
+  real de la vigencia (#251, $4,080) es igual a su provisión.
 
 - **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
   gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito
