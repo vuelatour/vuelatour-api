@@ -4632,6 +4632,32 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     llave al final, 400 sin leer la BD). Deploy: pyservices (tolera
     `variante`) → API → panel (el API previo responde 400 a `?modo=` por
     `forbidNonWhitelisted`).
+    - **Revisión (6-oct-2026, mismo 0.0.64):**
+      - **Orden de deploy OBLIGATORIO, cada push solo tras verificar el
+        paso anterior.** (1) pyservices con `variante` (commit e9ac370 o
+        posterior) como deployment ACTIVO en Railway. Un pyservices previo
+        IGNORA la llave (`extra="ignore"`) y pinta el libro MENSUAL: con el
+        API 0.0.64 arriba, «Descargar balance general» bajaría EN SILENCIO
+        el libro mensual con nombre `balance-general-…`, sin un solo error.
+        El API no lo puede detectar: pyservices no expone su versión
+        (`/health` fijo) y responde los mismos encabezados en las dos
+        variantes. (2) API: `GET /v1/version` = `0.0.64` (un health 200 no
+        prueba que corra la imagen nueva). (3) Panel: manda `modo` SIEMPRE,
+        también el mensual, así que contra un API ≤ 0.0.63 los DOS botones
+        responden 400.
+      - **TOTALES vacíos por diseño en la variante general**: COSTO X HORA
+        (DLLS S/IVA), IVA X HR, TOTAL PARA PROVEEDOR (DLLS), IVA TOTAL
+        PAGADO (DLLS y PESOS) y TOTAL PAGADO S/IVA. `totales` y
+        `totalesFlota` no traen `costo_usd`, `costo_usd_siva`,
+        `iva_pagado_usd`, `iva_pagado_mxn` ni un promedio de
+        `costo_hr_usd_siva` (tampoco antes: el mensual deja vacías COSTO
+        TOTAL USD, USD S/IVA, IVA PAGADO y COSTO X HORA USD S/IVA) y
+        pyservices no inventa totales. Si el cliente los pide: campos
+        ADITIVOS en los dos objetos, con la semántica de las fórmulas de
+        pyservices, en un contrato aparte. Sus filas son fórmulas SIN
+        redondeo (`=Y/z`, `=AE−AE/1.16`, `=AG×z`), así que el total que
+        cuadra con `ROUND(SUM())` es `round2(Σ Y÷z)` sobre las filas con
+        T.C., no la Σ de los `costo_usd` ya redondeados.
 
 ## Convenciones NestJS
 
@@ -6035,6 +6061,39 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Comisiones en el balance del avión (pedido del cliente, 6-oct-2026;
+  NO implementado: toca el dinero de los socios).** Texto: «en el balance
+  cuando hay una comisión de un banco, en la parte de total cobrado no
+  refleja el monto real que entró a la cuenta» y «la comisión del banco y
+  vendedor se puede ir a la columna de (comisiones del vendedor) pero
+  cambiar en nombre a "comisiones" y poner notas el tipo de comisión y si
+  hay más de una. Y la comisión del vendedor también entra en el balance
+  del avión […] para que el monto Real total cobrado ya sea después de
+  cualquier comisión». **Hoy (0.0.64)**: `cobros[].monto_mxn` y
+  `cobrado_real_mxn` son BRUTOS; la comisión viaja aparte en
+  `cobros[].comision_mxn` y `totales.comision_banco_mxn`, que pyservices
+  pinta solo en «cobranza» (la hoja «reporte horas» no la muestra en
+  ninguna celda ni nota). `cobrado_mxn` (base de POR COBRAR) es bruto
+  y DEBE seguir así: el cliente pagó completo y la comisión no es saldo por
+  cobrar. La comisión bancaria es egreso de VUELATOUR en «otros
+  movimientos» (apareada con la línea BillPocket cobrada al cliente, o
+  solo-egreso) y entra a `pagos_vendedor_usd` del bloque VUELATOUR
+  (invariante 47). La del vendedor es ingreso y egreso de VuelaTour
+  (invariantes 10 y 31): la columna `comision_vendedor_mxn` (AK) va null.
+  Ninguna de las dos resta en la utilidad del avión ni en el reparto.
+  **Antes de tocar nada, el cliente decide**: (a) si la comisión bancaria
+  resta en la utilidad del avión (toda, o solo la parte del avión en la
+  venta) y si la línea BillPocket cobrada al cliente se mueve con ella;
+  (b) si la del vendedor, que se SUMA al precio del cliente y queda fuera
+  de la venta del avión, la paga el avión sin recibirla, entra como
+  ingreso Y egreso (neto 0) o solo se muestra; (c) qué libros cambian.
+  Reporte horas, libro individual, Libro Dinero, reparto, cuenta
+  corriente del socio y bloque VUELATOUR deben seguir cuadrando entre sí
+  (fuente única).
+  Sin esa decisión, lo único seguro es ADITIVO y de presentación: el
+  cobrado neto (Σ depósitos − Σ comisiones) por fila y en totales, más el
+  detalle por tipo, sin mover ganancia ni reparto.
 
 - **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
   gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito
