@@ -1,5 +1,6 @@
 import {
   COMISIONES_AL_AVION_DESDE_DEFAULT,
+  MARCA_PROVISION_SIN_GASTO_REAL,
   SUFIJO_COMISION_BANCO_PARTE_VUELATOUR,
   aplicaComisionesAlAvion,
   comisionesDelVuelo,
@@ -605,7 +606,7 @@ describe('pagoVendedorCubiertoPorAvion', () => {
   const xbPev = [{ matricula: 'XB-PEV', vendedor_mxn: 5467.97 }];
   const PABLO = 'comisión vendedor (Pablo Canales)';
 
-  it('sin pago real: egreso 0 y el concepto del contrato (caso del cliente, $5,467.97)', () => {
+  it('sin pago real: egreso 0 y el concepto del contrato con la marca de PROVISIÓN (caso del cliente, $5,467.97)', () => {
     expect(
       pagoVendedorCubiertoPorAvion({
         etiquetaComision: PABLO,
@@ -615,9 +616,52 @@ describe('pagoVendedorCubiertoPorAvion', () => {
     ).toEqual({
       egreso_mxn: 0,
       concepto:
-        'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-PEV (provisión $5,467.97 en su balance)',
+        'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-PEV (provisión $5,467.97 en su balance) · PROVISIÓN (sin gasto real capturado)',
       provision_mxn: 5467.97,
     });
+  });
+
+  /**
+   * AMARILLO DE PROVISIÓN (revisión 7-oct-2026 del 0.0.66): pyservices pinta
+   * en amarillo el pago al vendedor SIN gasto real cuando su concepto (o una
+   * línea de la nota de la fila colapsada) trae «· PROVISIÓN (» en
+   * mayúsculas — `_MARCA_PROVISION` de `balance_avion_xlsx.py`, copiada aquí
+   * TAL CUAL. Sin la marca, los vuelos completados de la regla perdían el
+   * amarillo que el cliente pidió el 6-oct.
+   */
+  const MARCA_PYSERVICES = /·\s*PROVISI[OÓ]N\s*\(/;
+
+  it('la marca es la que busca pyservices y SOLO la lleva el pago sin gasto real', () => {
+    expect(MARCA_PROVISION_SIN_GASTO_REAL).toBe(
+      ' · PROVISIÓN (sin gasto real capturado)',
+    );
+    expect(MARCA_PYSERVICES.test(MARCA_PROVISION_SIN_GASTO_REAL)).toBe(true);
+    const concepto = (pagos: PagosVendedorDeVuelo) =>
+      pagoVendedorCubiertoPorAvion({
+        etiquetaComision: PABLO,
+        aviones: [
+          { matricula: 'XB-TST', vendedor_mxn: 900 },
+          { matricula: 'XB-DOS', vendedor_mxn: 900 },
+        ],
+        pagos,
+      }).concepto;
+    // Sin gasto real: provisión (amarillo), también en multi-avión.
+    expect(concepto(sinPago)).toBe(
+      'pago comisión vendedor (Pablo Canales) · cubierto por los aviones XB-TST (provisión $900.00 en su balance) y XB-DOS (provisión $900.00 en su balance) · PROVISIÓN (sin gasto real capturado)',
+    );
+    expect(MARCA_PYSERVICES.test(concepto(sinPago))).toBe(true);
+    // Con gasto real (excede, igual, faltan, USD sin T.C.): nunca amarillo.
+    // La «(provisión $… en su balance)» de los aviones va en minúsculas y
+    // sin «·» delante: no es la marca.
+    for (const pagos of [
+      pago(3000),
+      pago(1800),
+      pago(1500),
+      pago(null, { sinTc: 1 }),
+      pago(6000, { n: 2, sinTc: 1 }),
+    ]) {
+      expect(MARCA_PYSERVICES.test(concepto(pagos))).toBe(false);
+    }
   });
 
   it('pago real MAYOR que la provisión: VuelaTour paga SOLO el exceso y el concepto dice «excede»', () => {

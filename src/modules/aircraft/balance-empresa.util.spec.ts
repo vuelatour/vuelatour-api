@@ -373,6 +373,27 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     expect(sin.nota).not.toContain('por cobrar');
   });
 
+  it('pago al vendedor cubierto por el avión (API 0.0.66, revisión 7-oct-2026): la nota precisa el egreso; sin la señal (o false), la nota de siempre byte a byte y el dinero no cambia', () => {
+    const siempre = armarBalanceEmpresa(base);
+    const conFalse = armarBalanceEmpresa({
+      ...base,
+      pagoVendedorCubiertoPorAvion: false,
+    });
+    const cubierto = armarBalanceEmpresa({
+      ...base,
+      pagoVendedorCubiertoPorAvion: true,
+    });
+    expect(conFalse).toEqual(siempre);
+    expect(siempre.nota).toContain(
+      'Egresos = pago al vendedor (real o provisión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+    );
+    expect(cubierto.nota).toContain(
+      'Egresos = pago al vendedor (real o provisión; en los vuelos completados de la regla de comisiones, solo lo que el pago real exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+    );
+    // Solo la nota: los números del bloque son los mismos.
+    expect({ ...cubierto, nota: null }).toEqual({ ...siempre, nota: null });
+  });
+
   it('la nota de la tienda no lleva doble punto', () => {
     const b = armarBalanceEmpresa(base);
     expect(b.nota).toContain('÷ el mismo T.C. promedio.');

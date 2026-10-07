@@ -203,6 +203,15 @@ export interface InsumosBalanceEmpresa {
     total_utilidad_mxn?: number | null;
     total_utilidad_usd?: number | null;
   } | null;
+  /**
+   * ¿Algún avión del periodo cubre con su PROVISIÓN el pago al vendedor de
+   * un vuelo (API 0.0.66: comisiones a cargo del avión, vuelo COMPLETADO de
+   * la vigencia)? Solo cambia la NOTA: «Egresos = pago al vendedor (real o
+   * provisión…» se precisa con que en esos vuelos la pestaña solo trae lo
+   * que el pago real EXCEDE la provisión (revisión 7-oct-2026). Ausente o
+   * false ⇒ la nota de siempre, byte a byte.
+   */
+  pagoVendedorCubiertoPorAvion?: boolean;
 }
 
 /** Arma el bloque «VUELATOUR (empresa)» — fuente ÚNICA de su aritmética. */
@@ -280,6 +289,7 @@ export function armarBalanceEmpresa(
       utilidadTiendaMxn,
       tiendaSinTc,
       utilidadTiendaUsdLegado: num(e.inventario?.total_utilidad_usd),
+      pagoVendedorCubiertoPorAvion: e.pagoVendedorCubiertoPorAvion === true,
     }),
     movimientos_sin_tc: movimientosSinTc,
     ingresos_por_cobrar_usd: ingresosPorCobrarUsd,
@@ -300,6 +310,7 @@ function notaBalanceEmpresa(n: {
   utilidadTiendaMxn: number | null;
   tiendaSinTc: boolean;
   utilidadTiendaUsdLegado: number | null;
+  pagoVendedorCubiertoPorAvion: boolean;
 }): string {
   const aviones = [...new Set(n.participaciones.map((p) => p.matricula))];
   // Revisión 6-oct-2026: la nota NOMBRA el avión que vacía la participación
@@ -321,12 +332,20 @@ function notaBalanceEmpresa(n: {
         }.`
       : 'Participación: la empresa no es socia de ningún avión del periodo.',
   );
+  // Revisión 7-oct-2026 (API 0.0.66): con vuelos cuyo pago al vendedor ya
+  // cubre la provisión de los aviones, «real o provisión» a secas
+  // contradecía el pie de pyservices («los egresos propios solo traen lo que
+  // el pago real la exceda»): la nota lo precisa. Sin esos vuelos, el texto
+  // de siempre.
+  const pagoVendedor = n.pagoVendedorCubiertoPorAvion
+    ? 'pago al vendedor (real o provisión; en los vuelos completados de la regla de comisiones, solo lo que el pago real exceda la provisión que ya carga el avión)'
+    : 'pago al vendedor (real o provisión)';
   partes.push(
     "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
       'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +
       'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
       'COTIZADO y RESERVA incluidos. ' +
-      'Egresos = pago al vendedor (real o provisión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.`,
   );
   if (n.ingresosUsd != null && n.ingresosPorCobrarUsd > 0) {
     partes.push(

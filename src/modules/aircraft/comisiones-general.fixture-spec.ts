@@ -314,3 +314,116 @@ export function mundoCierre(): Record<string, Fila[]> {
     ],
   };
 }
+
+// ===== Casos de la REVISIÓN del 0.0.66 (7-oct-2026) =====
+
+type Mundo = Record<string, Fila[]>;
+
+export const V21 = 'v-21';
+export const V22 = 'v-22';
+
+/**
+ * + #521 XB-DOS SIN K (27-sep, COMPLETADO): 1,100 USD = 1,000 de tiempo + 100
+ * de comisión del vendedor («Sin K»), sin T.C. capturado (y el spec no da
+ * oficial); cobro 19,800 MXN con T.C. propio 18 y 396 de comisión bancaria.
+ * La provisión del vendedor NO llega a pesos (`vendedor_sin_tc`); la parte
+ * del avión de la comisión bancaria sí (396 × 1,000/1,100 = 360). Sin K la
+ * venta tampoco llega a pesos: remanente 0 y ganancia −360.
+ */
+export function conVueloSinK(m: Mundo): Mundo {
+  return {
+    ...m,
+    vuelo: [
+      ...m.vuelo,
+      vuelo2({
+        id: V21,
+        folio: 521,
+        aeronave_id: AV2,
+        fecha_vuelo: '2026-09-27T15:00:00+00:00',
+        comision_vendedor_usd: 100,
+        comision_vendedor_nombre: 'Sin K',
+        monto_total_usd: 1100,
+        monto_total_mxn: null,
+        tc_usd_mxn: null,
+      }),
+    ],
+    cobro_vuelo: [
+      ...m.cobro_vuelo,
+      cobro('c-21', V21, 19800, 'MXN', 18, '2026-09-27T20:00:00+00:00', 396),
+    ],
+  };
+}
+
+/**
+ * XB-DOS con UN solo vuelo, el #521 sin K: el libro no tiene NINGÚN T.C.
+ * (sin T.C. de costos ni promedio) ⇒ la fila resta en pesos pero su ganancia
+ * USD queda vacía. XB-TST conserva sus vuelos (sin el multi-avión #503).
+ */
+export function mundoDosSoloSinK(): Mundo {
+  const m = mundoCierre();
+  const fuera = new Set([V3, V5, V7, V14]);
+  return conVueloSinK({
+    ...m,
+    vuelo: m.vuelo.filter((v) => !fuera.has(v.id as string)),
+    escala: m.escala.filter((e) => !fuera.has(e.vuelo_id as string)),
+    cobro_vuelo: m.cobro_vuelo.filter((c) => !fuera.has(c.vuelo_id as string)),
+    gasto: m.gasto.filter((g) => !fuera.has(g.vuelo_id as string)),
+  });
+}
+
+/**
+ * + #522 XB-DOS (28-sep, K 18, COMPLETADO) con DOS líneas
+ * `COMISION_VENDEDOR` en el desglose (100 + 50 USD, Pablo Canales): la
+ * partición suma las dos (150 USD ⇒ provisión de 2,700 MXN en la fila) y
+ * «otros movimientos» lista dos ingresos (1,800 + 900). `pagoMxn` = pago
+ * real al vendedor (gasto `COMISION_VENDEDOR`); null = sin pago.
+ */
+export function conVueloDosComisiones(m: Mundo, pagoMxn: number | null): Mundo {
+  return {
+    ...m,
+    vuelo: [
+      ...m.vuelo,
+      vuelo2({
+        id: V22,
+        folio: 522,
+        aeronave_id: AV2,
+        fecha_vuelo: '2026-09-28T15:00:00+00:00',
+        comision_vendedor_usd: 150,
+        comision_vendedor_nombre: 'Pablo Canales',
+        monto_total_usd: 1150,
+        monto_total_mxn: 20700,
+        calculo_snapshot: {
+          desglose: [
+            {
+              clave: 'TIEMPO_VUELO',
+              concepto: 'Tiempo de vuelo · 1 hr × $1000/hr',
+              monto_usd: 1000,
+            },
+            {
+              clave: 'COMISION_VENDEDOR',
+              concepto: 'Comisión del vendedor',
+              monto_usd: 100,
+            },
+            {
+              clave: 'COMISION_VENDEDOR',
+              concepto: 'Comisión del vendedor (segunda línea)',
+              monto_usd: 50,
+            },
+          ],
+          meta: { comision_vendedor_nombre: 'Pablo Canales' },
+        },
+      }),
+    ],
+    cobro_vuelo: [
+      ...m.cobro_vuelo,
+      cobro('c-22', V22, 20700, 'MXN', 18, '2026-09-28T20:00:00+00:00', null),
+    ],
+    gasto:
+      pagoMxn == null
+        ? m.gasto
+        : [
+            ...m.gasto,
+            pagoVendedor('g-com-522', V22, 522, AV2, pagoMxn, '2026-09-30'),
+          ],
+  };
+}

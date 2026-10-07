@@ -1148,6 +1148,13 @@ export class AircraftBalanceService {
       otrosGastos: hojaGastosEmpresa,
       tcPromedio: totalesFlota.tc_promedio,
       inventario: inventarioTiendita,
+      // Solo la NOTA (revisión 7-oct-2026): con provisión del vendedor en
+      // algún avión —la MISMA condición con que «otros movimientos» toma la
+      // rama «cubierto por el avión»— el egreso del vendedor de esos vuelos
+      // es solo el exceso del pago real, y la nota lo dice.
+      pagoVendedorCubiertoPorAvion: [...comisionesAvionPorVuelo.values()].some(
+        (partes) => partes.some((x) => x.vendedor_mxn > 0),
+      ),
     });
 
     const buffer = await this.pyservices.generateBalanceGeneralXlsx({
@@ -2967,15 +2974,30 @@ export class AircraftBalanceService {
       const tcGanancia = z ?? tcPromedio;
       const AM =
         AL != null && tcGanancia != null ? round2(AL / tcGanancia) : null;
-      // `balance.comisiones_usd` (0.0.66): la cifra USD del reparto para
-      // este vuelo, SOLO si la ganancia USD de la fila restó comisiones (con
-      // K, lo normal, MXN y USD salen del mismo recorrido; una fila sin T.C.
-      // no restó nada en pesos y ya grita en pendientes). Se suma al
-      // publicar la fila (abajo).
+      // `balance.comisiones_usd` (0.0.66): lo que la fila RESTÓ, en USD. Se
+      // suma al publicar la fila (abajo). Sin comisiones en pesos o sin
+      // ganancia USD (ningún T.C. en el libro), 0: la fila no restó nada.
+      //  - Con K (lo normal): la cifra del reparto para este vuelo
+      //    (`comisionesDelVuelo(...).total_usd`; MXN y USD salen del mismo
+      //    recorrido y difieren por centavos de redondeo mientras el T.C. de
+      //    costos y el de cada cobro sean el K, como en prod).
+      //  - SIN K (revisión 7-oct-2026): el util no puede llevar las dos
+      //    monedas por el mismo camino — la provisión del vendedor no llega a
+      //    pesos (`vendedor_sin_tc`, pendiente «sin TC de venta») y un cobro
+      //    sin T.C. propio solo llega a una de las dos —, así que su
+      //    `total_usd` traía dinero que la fila NO restó (la provisión) e
+      //    inflaba «antes de comisiones» del general. La fila restó
+      //    `comisionesMxn` en pesos y su ganancia USD es esa resta ÷ el T.C.
+      //    de la ganancia: aquí va lo mismo, comisionesMxn ÷ ese T.C.
       const comisionesUsdFila =
-        comisiones != null && comisionesMxn != null && AM != null
-          ? comisiones.total_usd
-          : 0;
+        comisiones == null ||
+        comisionesMxn == null ||
+        AM == null ||
+        tcGanancia == null
+          ? 0
+          : K != null
+            ? comisiones.total_usd
+            : round2(comisionesMxn / tcGanancia);
       const AN = AE != null && O != null && O > 0 ? AE / O : null;
       const AO = AN != null ? AN / 1.16 : null;
       // Y=0 (fila compartida sin gastos sellados a este avión aún) daría un

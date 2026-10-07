@@ -230,6 +230,20 @@ export interface ProvisionVendedorDeAvion {
   vendedor_mxn: number;
 }
 
+/**
+ * Calificador del pago al vendedor «cubierto por el avión» SIN gasto real
+ * capturado (revisión 7-oct-2026 del API 0.0.66). Es la MISMA marca
+ * «· PROVISIÓN (» (en MAYÚSCULAS, seguida de paréntesis) con la que
+ * pyservices pinta en AMARILLO el pago al vendedor sin gasto real
+ * (`_MARCA_PROVISION` de `balance_avion_xlsx.py`; pedido del cliente del
+ * 6-oct: «los que están en provisión… en amarillo»). Sin ella, los vuelos
+ * COMPLETADOS de la regla perdían el amarillo y el operador leía que esos
+ * pagos ya estaban capturados, mientras la leyenda «Amarillo = provisión»
+ * seguía saliendo por algún vuelo no realizado.
+ */
+export const MARCA_PROVISION_SIN_GASTO_REAL =
+  ' · PROVISIÓN (sin gasto real capturado)';
+
 /** Egreso del pago al vendedor de VuelaTour cuando los aviones ya lo cargan. */
 export interface PagoVendedorCubiertoPorAvion {
   /**
@@ -265,6 +279,10 @@ export interface PagoVendedorCubiertoPorAvion {
  *    $5,467.97 en su balance)`; varios: `… · cubierto por los aviones XB-TST
  *    (provisión $900.00 en su balance) y XB-DOS (provisión $900.00 en su
  *    balance)`.
+ *  - sin gasto real (n = 0): + `MARCA_PROVISION_SIN_GASTO_REAL` ⇒ `… (provisión
+ *    $5,467.97 en su balance) · PROVISIÓN (sin gasto real capturado)`: el
+ *    pago sigue siendo una provisión y pyservices lo pinta en amarillo
+ *    (revisión 7-oct-2026). Con gasto real nunca lleva la marca.
  *  - con gasto real (n ≥ 1): `· gasto real $X` (o `· gasto real` si ninguno
  *    convirtió) + ` (N pagos)` con N ≥ 2; con `pagadoMxn` y `sinTc = 0`, d =
  *    round2(pagado − provisión): d ≥ 1.00 ⇒ ` · excede $X MXN`; d ≤ −1.00 ⇒
@@ -295,9 +313,12 @@ export function pagoVendedorCubiertoPorAvion(a: {
         }`;
   const { pagos } = a;
   if (pagos.n === 0) {
+    // Sin gasto real: VuelaTour no paga nada (la provisión ya resta en los
+    // aviones), pero el pago SIGUE siendo una provisión ⇒ la marca del
+    // amarillo de pyservices.
     return {
       egreso_mxn: 0,
-      concepto: `pago ${a.etiquetaComision} · ${quien}`,
+      concepto: `pago ${a.etiquetaComision} · ${quien}${MARCA_PROVISION_SIN_GASTO_REAL}`,
       provision_mxn: provision,
     };
   }

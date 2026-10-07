@@ -4455,7 +4455,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       los toma de las filas sin cambio de código y su resultado es el del
       0.0.65 salvo un pago real MENOR que la provisión (el 0.0.65 contaba
       ese faltante como ingreso); la participación como socia ya viene
-      después de comisiones. El T.C.
+      después de comisiones. Su `nota` (revisión 7-oct-2026, insumo
+      opcional `pagoVendedorCubiertoPorAvion`, que `xlsxGeneral` prende
+      cuando algún avión carga provisión del vendedor —la misma condición
+      de la rama «cubierto por el avión»—) dice «Egresos = pago al vendedor
+      (real o provisión; en los vuelos completados de la regla de
+      comisiones, solo lo que el pago real exceda la provisión que ya carga
+      el avión), …»; sin la señal, la nota de siempre byte a byte (el
+      «real o provisión» a secas contradecía el pie de pyservices). El T.C.
       por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
       `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
       que sale byte-idéntico, y sin él no hay consultas nuevas): fila por
@@ -4835,7 +4842,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
         provisión de los aviones el egreso del vendedor es
         `pagoVendedorCubiertoPorAvion` (`comisiones-avion.util.ts`, puro):
         «pago comisión vendedor (Pablo Canales) · cubierto por el avión
-        XB-PEV (provisión $5,467.97 en su balance)» por $0 sin gasto real;
+        XB-PEV (provisión $5,467.97 en su balance) · PROVISIÓN (sin gasto
+        real capturado)» por $0 sin gasto real (la cola es
+        `MARCA_PROVISION_SIN_GASTO_REAL`, revisión 7-oct-2026: es la marca
+        «· PROVISIÓN (» con que pyservices pinta el AMARILLO pedido el 6-oct
+        —`_MARCA_PROVISION`—; sin ella los completados de la regla salían
+        sin amarillo, como si el pago ya estuviera capturado, mientras la
+        leyenda «Amarillo = provisión» seguía saliendo por algún vuelo no
+        realizado; con gasto real NUNCA la lleva);
         con gasto real «· gasto real $X[ (N pagos)]» y egreso =
         max(0, round2(pagado − provisión)) con «· excede $X MXN» (≥ 1.00);
         menor ⇒ egreso 0 con «· parcial: faltan $X MXN» (aún se le debe al
@@ -4854,21 +4868,35 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
         ganancia de los libros + Σ remanente de la pestaña == la regla
         anterior menos esos faltantes.
       - **`balance.comisiones_usd`** (por avión, ADITIVO): Σ por fila de
+        lo que la fila RESTÓ, en USD. Con K (lo normal):
         `comisionesDelVuelo(...).total_usd` — la MISMA cifra por vuelo que
-        `ingresos.comisiones_venta_usd` del reparto (fuente única) —, solo
-        de filas cuya ganancia USD restó comisiones (`comisiones_mxn` ≠ null
-        y `ganancia_usd` ≠ null; sin K la fila no restó nada en pesos y ya
-        grita pendiente). Coincide con el reparto al centavo salvo la
-        comisión bancaria de ANTICIPOS de vuelos aún no realizados (el
-        balance cuenta su cobro y su comisión; el reparto no lee el vuelo —
-        septiembre real: #314 CONFIRMADO con $5,000 de comisión Paywise).
+        `ingresos.comisiones_venta_usd` del reparto (fuente única). SIN K
+        (revisión 7-oct-2026): `comisiones_mxn` ÷ el T.C. con que la fila
+        convierte su ganancia (`z ?? tcPromedio`) — el util no puede llevar
+        las dos monedas por el mismo camino (la provisión del vendedor no
+        llega a pesos, `vendedor_sin_tc`, y un cobro sin T.C. propio solo
+        llega a una), así que `total_usd` traía la provisión que la fila NO
+        restó e inflaba «antes de comisiones»; el reparto sí la resta en USD
+        y la diferencia ya la grita el pendiente «comisión del vendedor sin
+        TC de venta». Fila sin comisiones en pesos o sin ganancia USD
+        (ningún T.C. en el libro): 0. Coincide con el reparto al centavo
+        salvo la comisión bancaria de ANTICIPOS de vuelos aún no realizados
+        (el balance cuenta su cobro y su comisión; el reparto no lee el
+        vuelo — septiembre real: #314 CONFIRMADO con $5,000 de comisión
+        Paywise) y los vuelos sin K.
         **`balance.utilidad_antes_comisiones_usd`** = round2(utilidad_antes
         + comisiones): la línea «UTILIDAD ANTES DE GASTOS USD (antes de
         comisiones)» de la cascada del GENERAL; round2(antes − comisiones)
         == `utilidad_antes_usd` al centavo. Puede diferir por CENTAVOS de Σ
         round2(REMANENTE ÷ T.C.) de las filas (el reparto redondea cada
         comisión en USD por vuelo; la fila redondea su ganancia neta): se
-        eligió la cifra EXACTA del reparto para «(−) COMISIONES».
+        eligió la cifra EXACTA del reparto para «(−) COMISIONES». Solo
+        centavos porque, en prod, el T.C. de costos de la fila (Z) y el de
+        cada cobro son el K: los gastos MXN ligados a un vuelo no traen
+        `tc_gasto` (ago–oct: 0 de 592) y los cobros con comisión de la
+        vigencia llevan el T.C. de su cotización (12 de 12); si eso cambia,
+        la diferencia es la de convertir las comisiones a esos T.C. y no al
+        de la ganancia de la fila.
       - **pyservices** (mismo contrato): el libro GENERAL ya no pinta la
         columna COMISIONES MXN en «reporte horas FLOTA» (GANANCIA MXN =
         ROUND(REMANENTE, 2) en el mensual; REMANENTE VENTA MENOS COMPRA =
@@ -4878,6 +4906,34 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
         columna COMISIONES MXN. Sin `comisiones_usd` (API ≤ 0.0.65) la
         cascada del general queda como antes. Deploy: pyservices ANTES del
         API 0.0.66.
+      - **Revisión (7-oct-2026, mismo 0.0.66, sin migración)**: (1) el pago
+        al vendedor «cubierto por el avión» SIN gasto real conserva la
+        marca de PROVISIÓN (`MARCA_PROVISION_SIN_GASTO_REAL`, arriba): con
+        el pyservices de hoy vuelve el amarillo que el primer 0.0.66 les
+        quitaba (en prod, los completados de la vigencia sin gasto
+        `COMISION_VENDEDOR`: 14 de septiembre y 4 de octubre), sin tocar
+        pyservices (su `_MARCA_PROVISION` ya la busca; verificado pintando
+        el general con el pyservices 3e33997: amarillas las mismas filas que
+        con la regla anterior). Su test `_FILA_CUBIERTA` todavía copia el
+        texto SIN la marca. (2)
+        `comisiones_usd` sin K = lo que la fila restó (arriba). (3) La
+        `nota` del bloque VUELATOUR precisa el egreso del vendedor cubierto
+        (invariante 47). (4) `regla_comisiones` sigue SIN viajar (ni en los
+        balances ni en el reparto): pyservices escribe su respaldo «regla de
+        septiembre 2026», que ES la vigencia default y la de prod (no hay
+        fila `comisiones_al_avion_desde`). **Antes de cambiar la vigencia
+        por SQL** hay que mandar `regla_comisiones:
+        etiquetaReglaComisiones(vigencia)` en los TRES payloads (individual,
+        general y reparto) —por eso la función se conserva— o los textos
+        seguirán diciendo septiembre. Specs nuevos: util (la marca es la de
+        pyservices y solo la lleva el pago sin gasto real), general (vigencia
+        a mitad del periodo en `comisiones_usd` y en la pestaña; vuelo SIN
+        K; libro sin ningún T.C.; DOS líneas `COMISION_VENDEDOR` con pago
+        mayor que la provisión ⇒ el exceso UNA vez; el amarillo; la nota de
+        la empresa) y `balance-empresa.util.spec` (la nota con y sin la
+        señal); mundos `conVueloSinK`, `mundoDosSoloSinK` y
+        `conVueloDosComisiones` en `comisiones-general.fixture-spec`.
+        Mutación: 14 mutantes de las cuatro reglas, todos muertos.
     - **Deploy**: pyservices (pinta `neto_mxn`, COMISIONES y GANANCIA =
       REMANENTE − COMISIONES; tolera la ausencia de los campos) ANTES del API
       0.0.65: un pyservices previo pinta COBRO n en bruto y GANANCIA =
@@ -6330,7 +6386,14 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   confirmar con el cliente: un pago real al vendedor MENOR que la provisión
   que carga el avión queda como «parcial: faltan» (aún se le debe) y ya no
   como ingreso de VuelaTour (el 0.0.65 sí lo contaba); hoy el único pago
-  real de la vigencia (#251, $4,080) es igual a su provisión.
+  real de la vigencia (#251, $4,080) es igual a su provisión. (d) Avisar al
+  cliente con el deploy: «(−) COMISIONES» del general no es al centavo la
+  fila del reparto cuando hay anticipos con comisión bancaria de vuelos aún
+  no realizados (#314 de N4142R en septiembre, $5,000; #375 y #376 de XA-VGV
+  en octubre). (e) Cambiar `comisiones_al_avion_desde` exige mandar antes
+  `regla_comisiones` en los tres payloads (invariante 50, revisión del
+  0.0.66). (f) pyservices: su test `_FILA_CUBIERTA` debe copiar el texto con
+  la marca de PROVISIÓN y esperar el amarillo.
 
 - **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
   gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito
