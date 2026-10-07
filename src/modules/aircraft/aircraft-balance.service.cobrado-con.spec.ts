@@ -45,6 +45,16 @@ import {
 const AV2 = 'av-2';
 const V3 = 'v-3';
 
+/**
+ * Vigencia de las COMISIONES A CARGO DEL AVIÓN (API 0.0.65) POSTERIOR a los
+ * vuelos de septiembre de este mundo: aquí se prueba «cómo se cobró» de
+ * siempre (pre-vigencia, byte a byte). Con la regla, la nota empieza con
+ * «Bruto · comisión banco · neto»: `aircraft-balance.service.comisiones.spec`.
+ */
+const CONFIG_VIGENCIA_POSTERIOR = {
+  fecha: () => Promise.resolve('2026-12-01'),
+};
+
 /** Tramo con la forma que leen el libro y la cadena de tacos. */
 function tramo(
   id: string,
@@ -251,6 +261,7 @@ function armar(mundo: Record<string, Fila[]>, opts: OpcionesCobro = {}) {
     { proximoServicio: () => null } as never,
     { oficialDetallePara: () => Promise.resolve(null) } as never,
     { resumenTiendita: () => Promise.resolve({ items: [] }) } as never,
+    CONFIG_VIGENCIA_POSTERIOR as never,
   );
   return { service, enviados, selectsCobro: s.selectsCobro };
 }

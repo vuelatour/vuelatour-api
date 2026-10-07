@@ -97,10 +97,25 @@ import {
   esModoBalanceGeneral,
   type ModoBalanceGeneral,
 } from './balance-general-modo.util';
+// COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): vigencia por
+// configuración y la aritmética en la fuente única pura (la misma del
+// reparto a socios).
+import {
+  CONFIG_COMISIONES_AL_AVION_DESDE,
+  ConfiguracionService,
+} from '../configuracion/configuracion.service';
+import {
+  COMISIONES_AL_AVION_DESDE_DEFAULT,
+  SUFIJO_COMISION_BANCO_PARTE_VUELATOUR,
+  aplicaComisionesAlAvion,
+  comisionesDelVuelo,
+  conceptoVendedorACargoDelAvion,
+  type ComisionesDelVuelo,
+} from '../../common/comisiones-avion.util';
 
 /** Columnas del vuelo que consume el balance (nombres reales de la tabla). */
 const VUELO_COLS =
-  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, operador_externo, costo_externo_usd, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_pct, iva_usd, subtotal_vuelo_usd, ajuste_final_usd, tuas_usd, extras_total_usd, viaticos_pernocta_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, cobrado, calculo_snapshot';
+  'id, folio, cliente_id, aeronave_id, estado, tipo, es_externo, operador_externo, costo_externo_usd, fecha_vuelo, fecha_solicitud, fecha_traslado_final, origen_iata, destino_iata, tiempo_cobrable_hr, tarifa_hora_usd, iva_pct, iva_usd, subtotal_vuelo_usd, ajuste_final_usd, tuas_usd, extras_total_usd, viaticos_pernocta_usd, monto_total_usd, monto_total_mxn, tc_usd_mxn, comision_vendedor_usd, comision_vendedor_nombre, cobrado, calculo_snapshot';
 
 // Mapeo de categorías de gasto por vuelo (contrato del balance):
 // GAS aparte (litros/$ x litro); PERMISO a la hoja "permisos" e INDIRECTO a
@@ -204,6 +219,8 @@ interface VueloRow {
   monto_total_mxn: string | number | null;
   tc_usd_mxn: string | number | null;
   comision_vendedor_usd: string | number | null;
+  /** Quién cobra la comisión del vendedor (nota de COMISIONES, 0.0.65). */
+  comision_vendedor_nombre?: string | null;
   cobrado: boolean | null;
   /** Snapshot del cotizador v1.3 (jsonb): desglose canónico e IVA. */
   calculo_snapshot?: unknown;
@@ -482,6 +499,46 @@ function ivaPctDe(v: VueloRow): number {
 }
 
 /**
+ * Quién cobra la comisión del vendedor (regla A): columna del vuelo; respaldo,
+ * la meta del snapshot. Lo leen la línea de comisión de «otros movimientos»
+ * y la nota de COMISIONES de la hoja de vuelos (6-oct-2026): el MISMO nombre
+ * en las dos.
+ */
+function nombreVendedorDeVuelo(v: {
+  comision_vendedor_nombre?: unknown;
+  calculo_snapshot?: unknown;
+}): string | null {
+  const snapshot = v.calculo_snapshot as {
+    meta?: { comision_vendedor_nombre?: unknown } | null;
+  } | null;
+  return (
+    (typeof v.comision_vendedor_nombre === 'string' &&
+      v.comision_vendedor_nombre.trim()) ||
+    (typeof snapshot?.meta?.comision_vendedor_nombre === 'string' &&
+      snapshot.meta.comision_vendedor_nombre.trim()) ||
+    null
+  );
+}
+
+/**
+ * Lo que UN avión absorbió de las comisiones de UN vuelo (6-oct-2026, API
+ * 0.0.65): sale TAL CUAL de las filas de los libros (`comision_banco_avion_mxn`
+ * / `comision_vendedor_prov_mxn`) hacia «otros movimientos» del general —
+ * nadie lo recalcula ahí. Uso interno: no viaja a pyservices.
+ */
+interface ComisionAvionDeVuelo {
+  matricula: string;
+  banco_mxn: number;
+  vendedor_mxn: number;
+}
+
+/** Partes de los aviones por vuelo + la vigencia con que se calcularon. */
+interface ComisionesAvionOtrosMovimientos {
+  vigencia: string;
+  porVuelo: Map<string, ComisionAvionDeVuelo[]>;
+}
+
+/**
  * Balance mensual POR AVIÓN: réplica sistematizada del Excel de control del
  * equipo ("Balance N990GG"). El API calcula TODO el dinero (fórmulas del
  * contrato, verificadas contra el libro original); pyservices solo pinta el
@@ -518,7 +575,25 @@ export class AircraftBalanceService {
     private readonly aircraft: AircraftService,
     private readonly tipoCambio: TipoCambioService,
     private readonly inventory: InventoryService,
+    // Vigencia de las comisiones a cargo del avión (6-oct-2026, API 0.0.65).
+    // Opcional SOLO para los specs que arman el servicio a mano (sin ella
+    // rige el default en código); en la app la inyecta Nest.
+    private readonly configuracion?: ConfiguracionService,
   ) {}
+
+  /**
+   * Primer día (Cancún, por `fecha_vuelo`) de las COMISIONES A CARGO DEL
+   * AVIÓN (6-oct-2026, API 0.0.65): `comisiones_al_avion_desde` de la
+   * configuración (caché de 60 s, best-effort: con la BD caída, el último
+   * valor leído o el default) o `COMISIONES_AL_AVION_DESDE_DEFAULT`.
+   */
+  private async vigenciaComisiones(): Promise<string> {
+    if (!this.configuracion) return COMISIONES_AL_AVION_DESDE_DEFAULT;
+    return this.configuracion.fecha(
+      CONFIG_COMISIONES_AL_AVION_DESDE,
+      COMISIONES_AL_AVION_DESDE_DEFAULT,
+    );
+  }
 
   async xlsx(
     aircraftId: string,
@@ -617,6 +692,10 @@ export class AircraftBalanceService {
     if (d > h) {
       throw new BadRequestException('desde no puede ser posterior a hasta');
     }
+    // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura de
+    // la vigencia para TODOS los libros y «otros movimientos» — un cambio de
+    // la configuración a media descarga no parte el general en dos reglas.
+    const vigenciaComisiones = await this.vigenciaComisiones();
     const { data: aviones, error } = await this.supabase.service
       .from('aeronave')
       .select('id, matricula, color_calendario')
@@ -708,6 +787,11 @@ export class AircraftBalanceService {
       const combustibleMxn = p.combustible?.total_mxn ?? 0;
       const gananciaMxn =
         t.ganancia_mxn != null ? round2(t.ganancia_mxn - combustibleMxn) : null;
+      // COMISIONES (6-oct-2026, API 0.0.65): las que el avión absorbe desde
+      // `comisiones_al_avion_desde` — su ganancia YA viene después de ellas
+      // (VENTA − COSTO − COMBUSTIBLE − COMISIONES = GANANCIA). Sin vuelos
+      // en la vigencia, el `comision_vendedor_mxn` de siempre (0).
+      const comisionesMxn = t.comisiones_mxn ?? t.comision_vendedor_mxn;
       resumen.push({
         matricula: p.matricula,
         color: p.avion_color,
@@ -717,7 +801,7 @@ export class AircraftBalanceService {
         venta_mxn: t.total_mxn,
         costo_mxn: t.costo_total_mxn,
         combustible_mxn: combustibleMxn,
-        comisiones_mxn: t.comision_vendedor_mxn,
+        comisiones_mxn: comisionesMxn,
         ganancia_mxn: gananciaMxn,
         cobrado_mxn: t.cobrado_mxn,
         por_cobrar_mxn: t.por_cobrar_mxn,
@@ -732,7 +816,7 @@ export class AircraftBalanceService {
       acc.venta += t.total_mxn ?? 0;
       acc.costo += t.costo_total_mxn ?? 0;
       acc.combustible += combustibleMxn;
-      acc.comisiones += t.comision_vendedor_mxn ?? 0;
+      acc.comisiones += comisionesMxn ?? 0;
       acc.ganancia += gananciaMxn ?? 0;
       acc.cobrado += t.cobrado_mxn ?? 0;
       acc.porCobrar += t.por_cobrar_mxn ?? 0;
@@ -740,7 +824,14 @@ export class AircraftBalanceService {
     };
     for (const a of aviones ?? []) {
       registrar(
-        await this.buildPayload(a.id as string, d, h, memoTc, memoFactura),
+        await this.buildPayload(
+          a.id as string,
+          d,
+          h,
+          memoTc,
+          memoFactura,
+          vigenciaComisiones,
+        ),
         (a.color_calendario as string | null) ?? null,
         true,
       );
@@ -750,7 +841,14 @@ export class AircraftBalanceService {
     // (maestra, cobranza, totales) y al RESUMEN como una fila más; no a los
     // bloques de "balance" (sin socios). Solo si tuvo actividad.
     registrar(
-      await this.buildPayload(null, d, h, memoTc, memoFactura),
+      await this.buildPayload(
+        null,
+        d,
+        h,
+        memoTc,
+        memoFactura,
+        vigenciaComisiones,
+      ),
       null,
       false,
     );
@@ -824,6 +922,19 @@ export class AircraftBalanceService {
       ...(extensionPagadaFlota !== 0
         ? { extension_pagada_mxn: extensionPagadaFlota }
         : {}),
+      // COMISIONES (6-oct-2026, API 0.0.65): Σ de los libros SOLO si alguno
+      // las trae (sin vuelos en la vigencia, totales byte-idénticos).
+      ...(libros.some((p) => p.totales.comisiones_mxn !== undefined)
+        ? {
+            comisiones_mxn: sumT((t) => t.comisiones_mxn ?? null),
+            comision_banco_avion_mxn: sumT(
+              (t) => t.comision_banco_avion_mxn ?? null,
+            ),
+            comision_vendedor_prov_mxn: sumT(
+              (t) => t.comision_vendedor_prov_mxn ?? null,
+            ),
+          }
+        : {}),
     };
     const porFecha = (
       x: { fecha: string | null },
@@ -888,6 +999,23 @@ export class AircraftBalanceService {
       sueltas: [],
       porCobrarVtUsd: [],
     };
+    // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): lo que cada
+    // avión ya absorbió de cada vuelo, TAL CUAL de las filas de su libro.
+    // «Otros movimientos» deja a VuelaTour solo su parte de la comisión
+    // bancaria y le acredita la provisión del vendedor que paga el avión.
+    const comisionesAvionPorVuelo = new Map<string, ComisionAvionDeVuelo[]>();
+    for (const p of librosAviones) {
+      for (const f of p.vuelos) {
+        if (!f.vuelo_id || f.comisiones_detalle === undefined) continue;
+        const lista = comisionesAvionPorVuelo.get(f.vuelo_id) ?? [];
+        lista.push({
+          matricula: p.matricula,
+          banco_mxn: f.comision_banco_avion_mxn ?? 0,
+          vendedor_mxn: f.comision_vendedor_prov_mxn ?? 0,
+        });
+        comisionesAvionPorVuelo.set(f.vuelo_id, lista);
+      }
+    }
     const otrosMovimientos = await this.buildOtrosMovimientos(
       d,
       h,
@@ -895,6 +1023,7 @@ export class AircraftBalanceService {
       empresaYSueltos,
       memoFactura,
       tcFilasOM,
+      { vigencia: vigenciaComisiones, porVuelo: comisionesAvionPorVuelo },
     );
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
@@ -1332,9 +1461,14 @@ export class AircraftBalanceService {
     // entre los libros del general y «otros movimientos» — un vuelo se
     // consulta UNA vez (ver `etiquetasFacturaMemo`).
     memoFactura: Map<string, Promise<string | null>> = new Map(),
+    // Primer día de las comisiones a cargo del avión (6-oct-2026, API
+    // 0.0.65): el general la lee UNA vez para todos sus libros; sin ella
+    // (libro individual) se lee aquí.
+    vigenciaComisiones?: string,
   ): Promise<BalanceAvionPayload> {
     const sb = this.supabase.service;
     const modoExternos = aircraftId == null;
+    const vigencia = vigenciaComisiones ?? (await this.vigenciaComisiones());
 
     interface AvionBalance {
       id: string | null;
@@ -2245,6 +2379,38 @@ export class AircraftBalanceService {
       // CANCELADO: 100 % del avión (sin partición).
       const ventaFactor = p != null ? (cancelado ? 1 : p.factor_avion) : null;
 
+      // ----- COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65) -----
+      // Vigencia por día Cancún del vuelo ≥ `comisiones_al_avion_desde`.
+      // `reglaComisiones` decide lo que ENTRÓ (cada COBRO n y COBRADO REAL en
+      // NETO: bruto − comisión bancaria) en TODA fila, EXTERNOS incluido;
+      // `comisiones` (columna COMISIONES y ganancia después de ellas) solo en
+      // la fila de un AVIÓN con parte de la venta — el libro EXTERNOS no
+      // tiene avión ni socios que absorban nada: su comisión bancaria sigue
+      // completa en «otros movimientos» de VuelaTour. Aritmética en la fuente
+      // única `comisionesDelVuelo` (la MISMA del reparto a socios): banco =
+      // comisión × el factor con que el cobro se prorratea al avión
+      // (`ventaFactor`) y la parte de ESTE avión con `parteAvion`; vendedor =
+      // provisión (comisión + IVA cotizados) al K del vuelo × `parteAvion`.
+      // Antes de la vigencia: null y la fila es la de siempre.
+      const reglaComisiones = aplicaComisionesAlAvion(
+        diaCancun(v.fecha_vuelo),
+        vigencia,
+      );
+      const comisiones: ComisionesDelVuelo | null =
+        reglaComisiones && !modoExternos && conParte
+          ? comisionesDelVuelo({
+              diaVuelo: diaCancun(v.fecha_vuelo),
+              vigenteDesde: vigencia,
+              cobros: vCobros,
+              tcVenta: K,
+              particion: p,
+              cancelado,
+              parteAvion,
+              participacion: factor,
+              vendedorNombre: nombreVendedorDeVuelo(v),
+            })
+          : null;
+
       // ----- Bloque TIEMPO/TACO (derivado de tacómetros, fuente única) -----
       // Solo tramos volados en ESTE avión: con asignación por tramo, un tramo
       // en otro avión tiene tacómetro propio y mezclaría lecturas.
@@ -2764,7 +2930,16 @@ export class AircraftBalanceService {
       // (Antes: AK = comisión × K restaba aquí y 0 en cancelados; ahora no
       // aplica en ningún estado.)
       const AK: number | null = null;
-      const AL = AI;
+      // COMISIONES (6-oct-2026, API 0.0.65): desde la vigencia, la ganancia
+      // es el remanente MENOS lo que el avión absorbe (banco + provisión del
+      // vendedor); null = sin comisiones (celda vacía, ganancia = remanente).
+      // AK sigue null por compatibilidad: la columna nueva viaja aparte.
+      const comisionesMxn =
+        comisiones != null && comisiones.total_mxn !== 0
+          ? comisiones.total_mxn
+          : null;
+      const AL =
+        AI != null && comisionesMxn != null ? round2(AI - comisionesMxn) : AI;
       // Ganancia USD con respaldo de TC (verificación 26-ago): un vuelo sin
       // z (traslado sin cotizar con gastos MXN) aportaba su AL a
       // ganancia_mxn pero desaparecía de ganancia_usd — la utilidad USD de
@@ -2814,6 +2989,16 @@ export class AircraftBalanceService {
       // Depósitos REALES del vuelo entero en MXN (sin repartir): red de
       // seguridad de "pagado completo" contra el total del cliente.
       let cobradoRealVueloMxn = 0;
+      // Insumos de la nota de cada parcialidad, alineados con `cobrosOut`:
+      // la línea se vuelve a armar con bruto · comisión · neto de la fila
+      // cuando el vuelo cae en la vigencia de las comisiones (abajo, ya con
+      // el centavo de la última línea absorbido).
+      const notaDeCobro: Array<{
+        metodo_etiqueta: string | null;
+        cuenta: string | null;
+        registro: string | null;
+        pct: number | null;
+      }> = [];
       const cobrosOut: BalanceAvionCobroPayload[] = (
         conParte ? vCobros : []
       ).map((c) => {
@@ -2852,6 +3037,12 @@ export class AircraftBalanceService {
         const metodoEtiquetaBase = c.metodo_cobro
           ? etiquetaMetodoCobro(c.metodo_cobro)
           : null;
+        notaDeCobro.push({
+          metodo_etiqueta: metodoEtiquetaBase,
+          cuenta,
+          registro,
+          pct: pos(c.comision_banco_pct),
+        });
         return {
           fecha: diaCancun(c.fecha_cobro),
           monto_mxn: mxn != null ? parteFila(mxn) : null,
@@ -2908,6 +3099,46 @@ export class AircraftBalanceService {
           if (ultima)
             ultima.monto_mxn = round2((ultima.monto_mxn ?? 0) + delta);
         }
+      }
+      // LO QUE ENTRÓ (6-oct-2026, API 0.0.65; vuelos en la vigencia de las
+      // comisiones): cada parcialidad gana `neto_mxn` (bruto − comisión
+      // bancaria de ESTA fila) y su nota empieza con «Bruto … · comisión
+      // banco … · neto …»; COBRADO REAL de la fila = Σ netos (la celda es la
+      // SUMA de las COBRO n). Lo COBRADO AL AVIÓN (cobrado_mxn), el por
+      // cobrar y la red de «pagado completo» siguen en BRUTO: la comisión no
+      // es deuda del cliente — la absorbe la columna COMISIONES.
+      let cobradoRealFilaMxn = cobradoRealMxn;
+      if (reglaComisiones) {
+        let sumaNetos = 0;
+        cobrosOut.forEach((c, idx) => {
+          const neto =
+            c.monto_mxn != null
+              ? round2(c.monto_mxn - (c.comision_mxn ?? 0))
+              : null;
+          if (
+            c.monto_mxn != null &&
+            neto != null &&
+            c.comision_mxn != null &&
+            c.comision_mxn > 0
+          ) {
+            const d = notaDeCobro[idx];
+            c.cobrado_con = etiquetaCobradoCon({
+              metodo_etiqueta: d.metodo_etiqueta,
+              cuenta: d.cuenta,
+              registro: d.registro,
+              parte: textoParteFila,
+              comision: {
+                bruto_mxn: c.monto_mxn,
+                comision_mxn: c.comision_mxn,
+                pct: d.pct,
+                neto_mxn: neto,
+              },
+            });
+          }
+          c.neto_mxn = neto;
+          if (neto != null) sumaNetos += neto;
+        });
+        cobradoRealFilaMxn = round2(sumaNetos);
       }
       // Parte del AVIÓN de lo cobrado: la MISMA fuente que el reparto a
       // socios (cobrosEnUsd con K de respaldo → cobradoParteAvion) y UNA
@@ -3061,6 +3292,13 @@ export class AircraftBalanceService {
       if (comisionSinTc > 0 && reporta) {
         pendientes.push(
           `${etiqueta}: ${comisionSinTc} comisión(es) bancaria(s) en USD sin TC (ni TC del vuelo) — no entra al total de comisiones`,
+        );
+      }
+      // Provisión del vendedor sin T.C. de venta (6-oct-2026, API 0.0.65):
+      // no se convierte a pesos ni se suma en falso — se grita.
+      if (comisiones?.vendedor_sin_tc === true && reporta) {
+        pendientes.push(
+          `${etiqueta}: comisión del vendedor sin TC de venta — su provisión no entra a COMISIONES en pesos (captura el TC en la cotización)`,
         );
       }
       // (El combustible ya no se vigila POR VUELO: la vigilancia es mensual
@@ -3306,7 +3544,7 @@ export class AircraftBalanceService {
         status_cobro: conParte ? statusCobro : '—',
         cobros: cobrosOut,
         cobrado_mxn: cobradoMxn,
-        cobrado_real_mxn: cobradoRealMxn,
+        cobrado_real_mxn: cobradoRealFilaMxn,
         por_cobrar_mxn: porCobrarMxn,
         por_cobrar_usd: porCobrarUsd,
         // FACTURA VUELATOUR (30-sep-2026, ADITIVO al final): es del VUELO —
@@ -3318,6 +3556,17 @@ export class AircraftBalanceService {
         // extensiones la fila es byte-idéntica al 0.0.46.
         ...(extensionPagadaMxn != null && round2(extensionPagadaMxn) !== 0
           ? { extension_pagada_mxn: round2(extensionPagadaMxn) }
+          : {}),
+        // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65, ADITIVOS al
+        // final): SOLO en filas de un avión con parte de la venta y vuelo en
+        // la vigencia — antes de ella la fila es byte-idéntica.
+        ...(comisiones != null
+          ? {
+              comisiones_mxn: comisionesMxn,
+              comisiones_detalle: comisiones.detalle,
+              comision_banco_avion_mxn: comisiones.banco_mxn,
+              comision_vendedor_prov_mxn: comisiones.vendedor_mxn,
+            }
           : {}),
       });
     }
@@ -3412,6 +3661,20 @@ export class AircraftBalanceService {
       // llave SOLO viaja cuando hubo (totales byte-idénticos sin ella).
       ...(extensionPagadaPeriodo !== 0
         ? { extension_pagada_mxn: extensionPagadaPeriodo }
+        : {}),
+      // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): Σ de las filas
+      // SOLO si alguna las trae (vuelos en la vigencia); sin ellas, totales
+      // byte-idénticos. ganancia_mxn/usd de arriba YA son después de ellas.
+      ...(filasVuelo.some((r) => r.comisiones_detalle !== undefined)
+        ? {
+            comisiones_mxn: sum((r) => r.comisiones_mxn ?? null),
+            comision_banco_avion_mxn: sum(
+              (r) => r.comision_banco_avion_mxn ?? null,
+            ),
+            comision_vendedor_prov_mxn: sum(
+              (r) => r.comision_vendedor_prov_mxn ?? null,
+            ),
+          }
         : {}),
     };
 
@@ -4289,6 +4552,13 @@ export class AircraftBalanceService {
         t.startsWith('comision vendedor')
       )
         return 'comisión vendedor';
+      // Provisión del vendedor que PAGA el avión (6-oct-2026, API 0.0.65):
+      // también antes del genérico (no es comisión bancaria).
+      if (
+        t.startsWith('comisión del vendedor') ||
+        t.startsWith('comision del vendedor')
+      )
+        return 'comisión vendedor a cargo del avión';
       if (t.startsWith('comisión') || t.startsWith('comision'))
         return 'comisión bancaria';
       if (t.startsWith('ajuste')) return 'ajuste';
@@ -4429,6 +4699,10 @@ export class AircraftBalanceService {
     // por índice con `filas` y `filas_sueltas`. NO viaja a pyservices (el
     // payload de la pestaña no cambia) y sin él no hay ni una consulta más.
     tcFilas?: TcFilasOtrosMovimientos,
+    // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): lo que cada
+    // avión ya absorbió de cada vuelo (de las filas de los libros del
+    // general, tal cual). Sin él la pestaña es la de siempre.
+    comisionesAvion?: ComisionesAvionOtrosMovimientos,
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
@@ -4634,17 +4908,12 @@ export class AircraftBalanceService {
       const gastosV = gastosPorVuelo.get(v.id as string) ?? [];
       const snapshot = v.calculo_snapshot as {
         desglose?: { clave?: string; concepto?: string; monto_usd?: number }[];
-        meta?: { comision_vendedor_nombre?: unknown } | null;
       } | null;
       // Quién cobra la comisión del vendedor (regla A): columna del vuelo;
-      // respaldo, la meta del snapshot. Etiqueta corta de la línea de
-      // ingreso y de su pago apareado.
-      const nombreVendedor =
-        (typeof v.comision_vendedor_nombre === 'string' &&
-          v.comision_vendedor_nombre.trim()) ||
-        (typeof snapshot?.meta?.comision_vendedor_nombre === 'string' &&
-          snapshot.meta.comision_vendedor_nombre.trim()) ||
-        null;
+      // respaldo, la meta del snapshot (`nombreVendedorDeVuelo`, la MISMA
+      // de la nota de COMISIONES). Etiqueta corta de la línea de ingreso y
+      // de su pago apareado.
+      const nombreVendedor = nombreVendedorDeVuelo(v);
       const etiquetaComision = `comisión vendedor${
         nombreVendedor ? ` (${nombreVendedor})` : ''
       }`;
@@ -4809,6 +5078,30 @@ export class AircraftBalanceService {
         // timestamptz → DÍA Cancún.
         fechaComision ??= diaCancun((c.fecha_cobro as string) ?? null);
       }
+      // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): si los libros
+      // del general ya cargaron a sus aviones una parte de la comisión
+      // bancaria de este vuelo, el egreso de VuelaTour es SOLO el resto
+      // (comisión − partes de los aviones; $0 ⇒ no se pinta). Sin partes,
+      // el número de siempre.
+      const partesAvion = comisionesAvion?.porVuelo.get(v.id as string) ?? null;
+      const bancoAvionesMxn =
+        partesAvion != null
+          ? round2(partesAvion.reduce((a, x) => a + x.banco_mxn, 0))
+          : 0;
+      const comisionBancoEgresoMxn =
+        partesAvion != null && bancoAvionesMxn !== 0
+          ? Math.max(0, round2(round2(comisionBancoMxn) - bancoAvionesMxn))
+          : comisionBancoMxn;
+      const sufijoParteVT =
+        partesAvion != null && bancoAvionesMxn !== 0
+          ? SUFIJO_COMISION_BANCO_PARTE_VUELATOUR
+          : '';
+      // ¿Queda egreso de comisión bancaria para VuelaTour? Sin partes de los
+      // aviones, la condición de siempre (> 0), byte a byte.
+      const hayEgresoBanco =
+        partesAvion != null && bancoAvionesMxn !== 0
+          ? comisionBancoEgresoMxn >= 0.005
+          : comisionBancoMxn > 0;
 
       // Líneas de VuelaTour del desglose con su IVA YA SUMADO (pedido del
       // cliente 28-ago tarde: "TUA MHL = $500" y se entiende, sin renglón
@@ -5016,12 +5309,13 @@ export class AircraftBalanceService {
           claveLinea === 'EXTRA' &&
           String(linea.concepto ?? '').startsWith('Comisión BillPocket') &&
           !comisionBancoAsignada &&
-          comisionBancoMxn > 0
+          hayEgresoBanco
         ) {
           // La comisión cobrada al cliente (línea BillPocket) contra lo que
-          // el banco realmente descontó de los cobros.
-          egresoMxn = r2(comisionBancoMxn);
-          conceptoEgreso = `comisión del banco${
+          // el banco realmente descontó de los cobros (desde la vigencia de
+          // las comisiones a cargo del avión, solo la parte de VuelaTour).
+          egresoMxn = r2(comisionBancoEgresoMxn);
+          conceptoEgreso = `comisión del banco${sufijoParteVT}${
             comisionSinTc ? ' (parcial: cobro USD sin TC)' : ''
           }`;
           fechaEgreso = fechaComision;
@@ -5151,13 +5445,13 @@ export class AircraftBalanceService {
       // Banco que descontó comisión SIN línea BillPocket que la cubra
       // (transferencia HSBC, links): fila de solo-egreso — el costo existe
       // aunque no se haya cobrado al cliente.
-      if ((comisionBancoMxn > 0 || comisionSinTc) && !comisionBancoAsignada) {
-        const egreso = comisionBancoMxn > 0 ? r2(comisionBancoMxn) : null;
+      if ((hayEgresoBanco || comisionSinTc) && !comisionBancoAsignada) {
+        const egreso = hayEgresoBanco ? r2(comisionBancoEgresoMxn) : null;
         filas.push({
           ...filaVacia,
-          concepto_egreso: `comisión bancaria${
+          concepto_egreso: `comisión bancaria${sufijoParteVT}${
             comisionSinTc
-              ? comisionBancoMxn > 0
+              ? hayEgresoBanco
                 ? ' (parcial: cobro USD sin TC)'
                 : ' (USD sin TC)'
               : ''
@@ -5193,6 +5487,29 @@ export class AircraftBalanceService {
           fecha_egreso: pagosVend.fecha,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
         });
+      }
+
+      // COMISIÓN DEL VENDEDOR A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65):
+      // lo cobrado al cliente por la comisión sigue siendo ingreso de
+      // VuelaTour (línea de arriba) y el pago al vendedor sigue siendo su
+      // egreso (gasto real o PROVISIÓN); desde la vigencia, además, cada
+      // avión que la absorbió le PAGA a VuelaTour su provisión: una línea de
+      // INGRESO por avión con el monto de su fila (tal cual del libro).
+      if (comisionesAvion != null && partesAvion != null) {
+        for (const parte of partesAvion) {
+          if (!(parte.vendedor_mxn > 0)) continue;
+          const ingreso = round2(parte.vendedor_mxn);
+          filas.push({
+            ...filaVacia,
+            concepto_ingreso: conceptoVendedorACargoDelAvion(
+              parte.matricula,
+              comisionesAvion.vigencia,
+            ),
+            ingreso_mxn: ingreso,
+            fecha_ingreso: fechaVuelo,
+            remanente_mxn: ingreso,
+          });
+        }
       }
 
       // SOBRECOBRO (regla del cliente 28-ago-2026): lo cobrado por encima de

@@ -23,11 +23,22 @@
  * (`cobro_vuelo.registrado_por`), no quién recibió el dinero — es la misma
  * palabra que pinta el panel (`textoRegistroCobro`).
  *
+ * COMISIÓN BANCARIA (6-oct-2026, API 0.0.65, vuelos en la vigencia de
+ * `comisiones-avion.util`): con `comision` la línea EMPIEZA con lo que entró
+ * de verdad — `Bruto $20,400.00 · comisión banco 5 % $1,020.00 · neto
+ * $19,380.00 · Transferencia → Scotiabank Pesos · Registró: Itzi` — porque la
+ * celda «COBRO n» muestra el NETO. Los montos son los de ESTA fila (en
+ * multi-avión, su parte). Sin método, cuenta ni registro queda solo la
+ * comisión (sí hay algo que decir). Sin `comision` (o en 0) la línea es la
+ * de siempre, byte a byte.
+ *
  * PURA: no consulta nada. El nombre lo resuelve quien llama (en el balance,
  * el embed `registro:usuario!registrado_por(nombre)` +
  * `nombreDeRelacionUsuario`) y la etiqueta del método sale de
  * `etiquetaMetodoCobro` (`metodo-cobro.util`).
  */
+
+import { fmtMxnNota, fmtPctNota } from './comisiones-avion.util';
 
 /** Entre el método y la cuenta destino. */
 export const FLECHA_CUENTA_COBRO = ' → ';
@@ -54,6 +65,40 @@ export interface DatosCobradoCon {
    * un solo avión.
    */
   parte?: string | null;
+  /**
+   * Comisión bancaria de la parcialidad (6-oct-2026, API 0.0.65): solo en
+   * vuelos de la vigencia y con comisión > 0. null/ausente = línea de
+   * siempre.
+   */
+  comision?: ComisionCobradoCon | null;
+}
+
+/** Bruto / comisión / neto de ESTA fila (los de la celda y su nota). */
+export interface ComisionCobradoCon {
+  /** Lo depositado en bruto (`monto_mxn` de la fila). */
+  bruto_mxn: number;
+  /** Comisión bancaria (`comision_mxn` de la fila). */
+  comision_mxn: number;
+  /** % capturado en el cobro (puntos: 5 = 5 %); null = no se capturó. */
+  pct?: number | null;
+  /** bruto − comisión (`neto_mxn` de la fila): lo que entró. */
+  neto_mxn: number;
+}
+
+/** Antes del % y del monto de la comisión en la línea. */
+export const PREFIJO_COMISION_BANCO_COBRO = 'comisión banco ';
+
+/** «Bruto $20,400.00 · comisión banco 5 % $1,020.00 · neto $19,380.00». */
+export function textoComisionCobro(c: ComisionCobradoCon): string {
+  const pct =
+    c.pct != null && Number.isFinite(c.pct) && c.pct > 0
+      ? `${fmtPctNota(c.pct)} % `
+      : '';
+  return [
+    `Bruto ${fmtMxnNota(c.bruto_mxn)}`,
+    `${PREFIJO_COMISION_BANCO_COBRO}${pct}${fmtMxnNota(c.comision_mxn)}`,
+    `neto ${fmtMxnNota(c.neto_mxn)}`,
+  ].join(SEPARADOR_COBRADO_CON);
 }
 
 const UUID_RE =
@@ -67,8 +112,8 @@ function limpio(v: unknown): string | null {
 }
 
 /**
- * La línea «cómo se cobró» de una parcialidad, o `null` si no hay método,
- * cuenta ni registro. Ver la cabecera para la forma exacta.
+ * La línea «cómo se cobró» de una parcialidad, o `null` si no hay comisión,
+ * método, cuenta ni registro. Ver la cabecera para la forma exacta.
  */
 export function etiquetaCobradoCon(d: DatosCobradoCon): string | null {
   const metodoTxt = limpio(d.metodo_etiqueta);
@@ -81,6 +126,9 @@ export function etiquetaCobradoCon(d: DatosCobradoCon): string | null {
   const parte = limpio(d.parte);
 
   const piezas: string[] = [];
+  const comision =
+    d.comision != null && d.comision.comision_mxn > 0 ? d.comision : null;
+  if (comision != null) piezas.push(textoComisionCobro(comision));
   if (metodo != null && cuenta != null) {
     piezas.push(`${metodo}${FLECHA_CUENTA_COBRO}${cuenta}`);
   } else if (metodo != null) {

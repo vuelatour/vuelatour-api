@@ -7,6 +7,19 @@ import {
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
+// COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): vigencia por
+// configuración y la aritmética en la fuente única pura (la MISMA del
+// balance por avión).
+import {
+  CONFIG_COMISIONES_AL_AVION_DESDE,
+  ConfiguracionService,
+} from '../configuracion/configuracion.service';
+import {
+  COMISIONES_AL_AVION_DESDE_DEFAULT,
+  aplicaComisionesAlAvion,
+  comisionesDelVuelo,
+  type ComisionesDelVuelo,
+} from '../../common/comisiones-avion.util';
 import type { ProfitSharingQuery } from './dto/profit-sharing.dto';
 import type { Rol } from '../../common/types/auth.types';
 import {
@@ -292,6 +305,13 @@ interface CobroRow {
   monto: string;
   moneda: string;
   tc_usd_mxn: string | null;
+  /**
+   * Comisión bancaria del cobro (en su moneda), su % y el método: insumos de
+   * las comisiones a cargo del avión (6-oct-2026, API 0.0.65).
+   */
+  comision_banco_monto?: string | number | null;
+  comision_banco_pct?: string | number | null;
+  metodo_cobro?: string | null;
 }
 interface EscalaHorasRow {
   id: string;
@@ -371,7 +391,25 @@ export class ProfitSharingService {
     private readonly pyservices: PyservicesService,
     private readonly tipoCambio: TipoCambioService,
     private readonly conciliacion: ConciliacionService,
+    // Vigencia de las comisiones a cargo del avión (6-oct-2026, API 0.0.65).
+    // Opcional SOLO para los specs que arman el servicio a mano (sin ella
+    // rige el default en código); en la app la inyecta Nest.
+    private readonly configuracion?: ConfiguracionService,
   ) {}
+
+  /**
+   * Primer día (Cancún, por `fecha_vuelo`) de las COMISIONES A CARGO DEL
+   * AVIÓN (6-oct-2026, API 0.0.65): `comisiones_al_avion_desde` de la
+   * configuración (caché de 60 s, best-effort) o el default en código — la
+   * MISMA lectura que el balance por avión.
+   */
+  private async vigenciaComisiones(): Promise<string> {
+    if (!this.configuracion) return COMISIONES_AL_AVION_DESDE_DEFAULT;
+    return this.configuracion.fecha(
+      CONFIG_COMISIONES_AL_AVION_DESDE,
+      COMISIONES_AL_AVION_DESDE_DEFAULT,
+    );
+  }
 
   private readonly logger = new Logger(ProfitSharingService.name);
 
@@ -544,12 +582,16 @@ export class ProfitSharingService {
       };
     }
 
-    const [vuelos, gastos, socios, reservas] = await Promise.all([
-      this.fetchVuelos(q.desde, q.hasta),
-      this.fetchGastos(q.desde, q.hasta),
-      this.fetchSocios(),
-      this.fetchReservas(),
-    ]);
+    const [vuelos, gastos, socios, reservas, vigenciaComisiones] =
+      await Promise.all([
+        this.fetchVuelos(q.desde, q.hasta),
+        this.fetchGastos(q.desde, q.hasta),
+        this.fetchSocios(),
+        this.fetchReservas(),
+        // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura
+        // para todos los aviones del cómputo.
+        this.vigenciaComisiones(),
+      ]);
     const vueloIds = vuelos.map((v) => v.id);
     const [cobros, escalas] = await Promise.all([
       this.fetchCobros(vueloIds),
@@ -715,6 +757,7 @@ export class ProfitSharingService {
         periodo: q,
         tcOficialVuelo: tcOficial.vuelo,
         tcOficialGasto: tcOficial.gasto,
+        vigenciaComisiones,
       }),
     );
 
@@ -930,6 +973,13 @@ export class ProfitSharingService {
        */
       tcOficialVuelo: Map<string, TipoCambioDetalle>;
       tcOficialGasto: Map<string, TipoCambioDetalle>;
+      /**
+       * Primer día de las comisiones a cargo del avión (6-oct-2026, API
+       * 0.0.65): vuelos con `fecha_vuelo` (día Cancún) desde ese día
+       * descuentan la parte del avión de la comisión bancaria y la provisión
+       * del vendedor (`comisionesDelVuelo`).
+       */
+      vigenciaComisiones: string;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -985,11 +1035,17 @@ export class ProfitSharingService {
     // (Itzy/Pablo/broker) es INGRESO DE VUELATOUR, como un extra — el
     // cliente la paga sumada al precio (regla 23-jul) y VuelaTour se la paga
     // al vendedor. Ya NO viaja en la venta del avión (particionIngresoVuelo
-    // la manda a vuelatour_usd) y el avión NO la descuenta como costo:
-    // `comisiones_venta_usd` queda en 0 SIEMPRE (el campo se conserva por
-    // compatibilidad de shape con PDF/XLSX/panel). El pago al vendedor vive
-    // apareado con su ingreso en Otros movimientos del Balance general.
-    const comisionesVenta = 0;
+    // la manda a vuelatour_usd).
+    // COMISIONES A CARGO DEL AVIÓN (cliente, 6-oct-2026, API 0.0.65; vuelos
+    // con `fecha_vuelo` desde `comisiones_al_avion_desde`): el avión SÍ
+    // absorbe la parte de la comisión BANCARIA con que su cobro se prorratea
+    // y la PROVISIÓN de la comisión del vendedor (lo cobrado al cliente por
+    // ese concepto, que se queda como ingreso de VuelaTour). Fuente única
+    // `comisionesDelVuelo` (la MISMA del balance por avión), en USD, y se
+    // descuentan en `comisiones_venta_usd` (el campo de siempre: PDF/XLSX y
+    // panel ya lo restan en la cascada). Antes de la vigencia, 0 como desde
+    // el 28-ago.
+    let comisionesVenta = 0;
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
     // que los agregados (misma conversión cobrosEnUsd, misma partición,
     // mismo reparto multi-avión) para que la suma del detalle cuadre exacto
@@ -1053,6 +1109,15 @@ export class ProfitSharingService {
        * de la cotización (tc, día real del dato y fuente legible).
        */
       tc_oficial?: { tc: number; fecha_dato: string; fuente: string };
+      /**
+       * ADITIVOS (6-oct-2026, API 0.0.65): comisiones que ESTE avión absorbe
+       * del vuelo (USD; parte de la comisión bancaria + provisión del
+       * vendedor). SOLO en vuelos de la vigencia; Σ ==
+       * `ingresos.comisiones_venta_usd`.
+       */
+      comisiones_avion_usd?: number;
+      comision_banco_avion_usd?: number;
+      comision_vendedor_prov_usd?: number;
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -1107,6 +1172,26 @@ export class ProfitSharingService {
       // avión la parte es el monto completo. ----
       const parte = (monto: number): number =>
         repartirUsd(monto, part).get(a.id) ?? 0;
+      // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): misma fuente
+      // única y mismos insumos que la fila del balance — cobros del vuelo,
+      // K (capturado ?? oficial del día de la cotización), la partición, el
+      // factor del cobro (1 si CANCELADO) y la parte de ESTE avión
+      // (`parte`, repartirUsd). En USD.
+      const diaVuelo = diaCancun(v.fecha_vuelo);
+      const comisionesVuelo: ComisionesDelVuelo | null =
+        aplicaComisionesAlAvion(diaVuelo, ctx.vigenciaComisiones)
+          ? comisionesDelVuelo({
+              diaVuelo,
+              vigenteDesde: ctx.vigenciaComisiones,
+              cobros: ctx.cobrosPorVuelo.get(v.id) ?? [],
+              tcVenta: pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
+              particion: p,
+              cancelado: esCancelado,
+              parteAvion: parte,
+              participacion: factor,
+            })
+          : null;
+      if (comisionesVuelo != null) comisionesVenta += comisionesVuelo.total_usd;
       const ventaAvion = parte(ventaAvionVuelo);
       const cobradoAvion = parte(cobradoAvionVuelo);
       const pendienteAvion = parte(pendienteAvionVuelo);
@@ -1236,6 +1321,13 @@ export class ProfitSharingService {
               fuente: fuenteTcLegible(tcOficialVuelo.fuente),
             }
           : undefined,
+        ...(comisionesVuelo != null
+          ? {
+              comisiones_avion_usd: comisionesVuelo.total_usd,
+              comision_banco_avion_usd: comisionesVuelo.banco_usd,
+              comision_vendedor_prov_usd: comisionesVuelo.vendedor_usd,
+            }
+          : {}),
       });
     }
     detalleVuelos.sort(
@@ -1538,6 +1630,11 @@ export class ProfitSharingService {
         otros_ingresos_vuelatour_pendiente_usd: round2(
           otrosIngresosVTPendiente,
         ),
+        // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): Σ de las
+        // comisiones que absorbe (parte de la bancaria + provisión del
+        // vendedor) en los vuelos de la vigencia; 0 antes de ella. Resta en
+        // `saldo_disponible_usd` (la cascada de siempre) y por lo tanto en
+        // el reparto, las utilidades por mes y la cuenta corriente.
         comisiones_venta_usd: comisionesR,
         // Parte del AVIÓN aún no cobrada (coherente con la cascada: es lo que
         // le falta al avión para repartir). El nombre se conserva (PDF/XLSX/
@@ -3264,7 +3361,11 @@ export class ProfitSharingService {
     if (vueloIds.length === 0) return [];
     const { data, error } = await this.supabase.service
       .from('cobro_vuelo')
-      .select('vuelo_id, monto, moneda, tc_usd_mxn')
+      // comision_banco_*/metodo_cobro (6-oct-2026, API 0.0.65): comisiones a
+      // cargo del avión (`comisionesDelVuelo`).
+      .select(
+        'vuelo_id, monto, moneda, tc_usd_mxn, comision_banco_monto, comision_banco_pct, metodo_cobro',
+      )
       .in('vuelo_id', vueloIds);
     if (error) throw new Error(error.message);
     return data ?? [];

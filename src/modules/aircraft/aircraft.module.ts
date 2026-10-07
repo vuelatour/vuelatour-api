@@ -10,6 +10,10 @@ import { PyservicesModule } from '../pyservices/pyservices.module';
 // InventoryModule no importa AircraftModule (sus imports: Pyservices,
 // Realtime, Configuracion y TipoCambio).
 import { InventoryModule } from '../inventory/inventory.module';
+// Vigencia de las comisiones a cargo del avión (`comisiones_al_avion_desde`,
+// 6-oct-2026, API 0.0.65). ConfiguracionModule no importa AircraftModule:
+// sin ciclo.
+import { ConfiguracionModule } from '../configuracion/configuracion.module';
 
 @Module({
   imports: [
@@ -17,6 +21,7 @@ import { InventoryModule } from '../inventory/inventory.module';
     PyservicesModule,
     TipoCambioModule,
     InventoryModule,
+    ConfiguracionModule,
   ],
   controllers: [AircraftController],
   providers: [AircraftService, AircraftBalanceService],

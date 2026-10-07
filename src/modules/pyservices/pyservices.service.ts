@@ -566,8 +566,21 @@ export interface BalanceAvionCobroPayload {
    * «Transferencia → Scotiabank Pesos»; en multi-avión la parte de la fila
    * va al final. null = nada que decir. pyservices lo pinta tal cual en la
    * nota de la celda «COBRO n» (ADITIVO, 0.0.60).
+   * COMISIÓN BANCARIA (0.0.65, solo vuelos en la vigencia de
+   * `comisiones-avion.util`): con comisión la línea EMPIEZA con «Bruto
+   * $20,400.00 · comisión banco 5 % $1,020.00 · neto $19,380.00 · …»
+   * (montos de ESTA fila).
    */
   cobrado_con?: string | null;
+  /**
+   * LO QUE ENTRÓ a la cuenta (6-oct-2026, API 0.0.65, ADITIVO al final):
+   * `monto_mxn − comision_mxn` de ESTA fila (null si `monto_mxn` es null).
+   * La llave SOLO viaja en vuelos con `fecha_vuelo` ≥
+   * `comisiones_al_avion_desde` (en todos sus cobros, con o sin comisión):
+   * pyservices pinta la celda «COBRO n MXN» con `neto_mxn` si viene (si no,
+   * `monto_mxn`) y `cobrado_real_mxn` de la fila es Σ de estos netos.
+   */
+  neto_mxn?: number | null;
 }
 
 export interface BalanceAvionVueloPayload {
@@ -716,9 +729,9 @@ export interface BalanceAvionVueloPayload {
   /** null solo en una fila COMPARTIDA sin participación en la venta. */
   remanente_mxn: number | null;
   dif_iva_mxn: number | null;
-  /** SIEMPRE null (regla A, 28-ago tarde): la comisión del vendedor ya no
-   *  es costo del avión — vive en "Otros movimientos" del general. Campo
-   *  conservado por compatibilidad de shape. */
+  /** SIEMPRE null (regla A, 28-ago tarde; se conserva por compatibilidad de
+   *  shape). Las comisiones que el avión SÍ absorbe desde
+   *  `comisiones_al_avion_desde` viajan en `comisiones_mxn` (API 0.0.65). */
   comision_vendedor_mxn: number | null;
   ganancia_mxn: number | null;
   ganancia_usd: number | null;
@@ -736,7 +749,9 @@ export interface BalanceAvionVueloPayload {
    *  la fila que reporta; una sola partición; las líneas de `cobros` suman
    *  exactamente esto). Difiere de cobrado_mxn en filas repartidas (caminos
    *  USD vs MXN distintos a propósito; la fila que reporta lleva además lo
-   *  cobrado de VuelaTour). */
+   *  cobrado de VuelaTour). Desde el API 0.0.65, en vuelos de la vigencia de
+   *  `comisiones_al_avion_desde` es Σ `cobros[].neto_mxn` (lo que ENTRÓ:
+   *  bruto − comisión bancaria); antes, Σ brutos como siempre. */
   cobrado_real_mxn?: number | null;
   /** total_mxn − cobrado_mxn TAL CUAL (semántica del libro): NEGATIVO =
    *  sobrecobro o cobros en un vuelo sin TC/sin precio — se muestra, no se
@@ -767,6 +782,26 @@ export interface BalanceAvionVueloPayload {
    * y pyservices pinta el pie ** de siempre.
    */
   extension_pagada_mxn?: number | null;
+  /**
+   * COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65, ADITIVOS al
+   * final; fuente única `common/comisiones-avion.util.ts`). Las CUATRO
+   * llaves SOLO viajan en filas de un AVIÓN (no el libro EXTERNOS) con
+   * participación en la venta y `fecha_vuelo` ≥ `comisiones_al_avion_desde`;
+   * sin ellas la fila es la de siempre (ganancia = remanente).
+   * - `comisiones_mxn`: parte del avión de la comisión bancaria de los
+   *   cobros (comisión × el MISMO factor que prorratea el cobro al avión) +
+   *   la PROVISIÓN de la comisión del vendedor (comisión + IVA cotizados al
+   *   K del vuelo × la parte del avión). null = sin comisiones (celda
+   *   vacía). `ganancia_mxn` = round2(remanente − comisiones_mxn).
+   * - `comisiones_detalle`: nota de la celda COMISIONES (una línea por
+   *   concepto; con más de uno, primero «N conceptos»).
+   * - `comision_banco_avion_mxn` / `comision_vendedor_prov_mxn`: las dos
+   *   partes (0 si no hay); `comisiones_mxn` = su suma.
+   */
+  comisiones_mxn?: number | null;
+  comisiones_detalle?: string[];
+  comision_banco_avion_mxn?: number;
+  comision_vendedor_prov_mxn?: number;
 }
 
 export interface BalanceAvionTotalesPayload {
@@ -814,6 +849,16 @@ export interface BalanceAvionTotalesPayload {
    *  NO resta en ninguna hoja ni cascada. La llave SOLO viaja cuando la suma
    *  ≠ 0 (sin extensiones, totales byte-idénticos). */
   extension_pagada_mxn?: number | null;
+  /**
+   * Σ de las filas (6-oct-2026, API 0.0.65, ADITIVOS): COMISIONES y sus dos
+   * partes. Las tres llaves SOLO viajan si alguna fila del libro trae las
+   * comisiones (vuelos en la vigencia de `comisiones_al_avion_desde`); sin
+   * ellas los totales son byte-idénticos. `ganancia_mxn` / `ganancia_usd` ya
+   * son la Σ de las filas DESPUÉS de comisiones.
+   */
+  comisiones_mxn?: number | null;
+  comision_banco_avion_mxn?: number | null;
+  comision_vendedor_prov_mxn?: number | null;
 }
 
 export interface BalanceAvionGastoFilaPayload {
@@ -995,10 +1040,14 @@ export interface BalanceGeneralResumenFilaPayload {
   costo_mxn: number | null;
   /** "Gasto de combustible" del mes (hoja combustible del avión). */
   combustible_mxn?: number | null;
-  /** SIEMPRE 0 (regla A, 28-ago tarde): la comisión del vendedor ya no es
-   *  costo del avión. Campo conservado por compatibilidad de shape. */
+  /** COMISIONES que absorbe el avión (6-oct-2026, API 0.0.65): los
+   *  `totales.comisiones_mxn` del libro (banco, parte del avión + provisión
+   *  del vendedor, vuelos desde `comisiones_al_avion_desde`); sin ellas, el
+   *  `comision_vendedor_mxn` de siempre (0, regla A). */
   comisiones_mxn?: number | null;
-  /** VENTA − COSTO − COMBUSTIBLE = GANANCIA (leyenda impresa). */
+  /** VENTA − COSTO − COMBUSTIBLE − COMISIONES = GANANCIA (desde el API
+   *  0.0.65 la ganancia de cada libro ya viene después de comisiones; con
+   *  comisiones en 0 es la leyenda de siempre). */
   ganancia_mxn: number | null;
   cobrado_mxn: number | null;
   por_cobrar_mxn: number | null;

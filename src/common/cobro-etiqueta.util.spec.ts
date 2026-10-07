@@ -1,8 +1,10 @@
 import {
   FLECHA_CUENTA_COBRO,
+  PREFIJO_COMISION_BANCO_COBRO,
   PREFIJO_REGISTRO_COBRO,
   SEPARADOR_COBRADO_CON,
   etiquetaCobradoCon,
+  textoComisionCobro,
 } from './cobro-etiqueta.util';
 import { etiquetaMetodoCobro } from './metodo-cobro.util';
 
@@ -144,5 +146,86 @@ describe('etiquetaCobradoCon (fuente única de `cobrado_con`)', () => {
     expect(FLECHA_CUENTA_COBRO).toBe(' → ');
     expect(SEPARADOR_COBRADO_CON).toBe(' · ');
     expect(PREFIJO_REGISTRO_COBRO).toBe('Registró: ');
+  });
+});
+
+/**
+ * COMISIÓN BANCARIA EN LA NOTA (6-oct-2026, API 0.0.65): en los vuelos de la
+ * vigencia de `comisiones-avion.util` la celda «COBRO n» muestra el NETO y
+ * su nota EMPIEZA con bruto · comisión · neto (caso real #235: Transferencia
+ * de $20,400.00 con 5 % de comisión).
+ */
+describe('etiquetaCobradoCon — comisión bancaria (API 0.0.65)', () => {
+  const c235 = {
+    bruto_mxn: 20400,
+    comision_mxn: 1020,
+    pct: 5,
+    neto_mxn: 19380,
+  };
+
+  it('caso del contrato: bruto · comisión · neto y después cómo se cobró', () => {
+    expect(
+      etiquetaCobradoCon({
+        metodo_etiqueta: 'Transferencia',
+        cuenta: 'Scotiabank Pesos',
+        registro: 'Itzi',
+        comision: c235,
+      }),
+    ).toBe(
+      'Bruto $20,400.00 · comisión banco 5 % $1,020.00 · neto $19,380.00 · Transferencia → Scotiabank Pesos · Registró: Itzi',
+    );
+  });
+
+  it('sin % capturado: solo el monto de la comisión', () => {
+    expect(textoComisionCobro({ ...c235, pct: null })).toBe(
+      'Bruto $20,400.00 · comisión banco $1,020.00 · neto $19,380.00',
+    );
+    expect(textoComisionCobro({ ...c235, pct: 3.828 })).toBe(
+      'Bruto $20,400.00 · comisión banco 3.83 % $1,020.00 · neto $19,380.00',
+    );
+  });
+
+  it('sin método, cuenta ni registro: la comisión sí dice algo (no es null); la parte va al final', () => {
+    const parte = 'parte de esta fila (50 % de la venta del avión)';
+    expect(
+      etiquetaCobradoCon({
+        metodo_etiqueta: null,
+        cuenta: null,
+        registro: null,
+        comision: c235,
+        parte,
+      }),
+    ).toBe(
+      `Bruto $20,400.00 · comisión banco 5 % $1,020.00 · neto $19,380.00 · ${parte}`,
+    );
+  });
+
+  it('comisión en 0 o ausente: la línea de siempre, byte a byte', () => {
+    const base = {
+      metodo_etiqueta: 'Efectivo',
+      cuenta: null,
+      registro: 'Itzi',
+    };
+    expect(etiquetaCobradoCon({ ...base, comision: null })).toBe(
+      etiquetaCobradoCon(base),
+    );
+    expect(
+      etiquetaCobradoCon({
+        ...base,
+        comision: { ...c235, comision_mxn: 0, neto_mxn: 20400 },
+      }),
+    ).toBe('Efectivo · Registró: Itzi');
+    expect(
+      etiquetaCobradoCon({
+        metodo_etiqueta: null,
+        cuenta: null,
+        registro: null,
+        comision: { ...c235, comision_mxn: 0 },
+      }),
+    ).toBeNull();
+  });
+
+  it('el prefijo es el del contrato', () => {
+    expect(PREFIJO_COMISION_BANCO_COBRO).toBe('comisión banco ');
   });
 });

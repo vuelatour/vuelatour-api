@@ -57,6 +57,15 @@ const avionSinVuelos: Fila = {
 const EMPRESA = 'Aero Charter Cancun S.A. de C.V.';
 /** T.C. oficial que contesta el fake para CUALQUIER día. */
 const TC_OFICIAL = 25;
+/**
+ * Vigencia de las COMISIONES A CARGO DEL AVIÓN (API 0.0.65) POSTERIOR a los
+ * vuelos de septiembre de este mundo: aquí se prueba el bloque de siempre
+ * (pre-vigencia, byte a byte). El bloque con la regla vive en
+ * `aircraft-balance.service.comisiones.spec`.
+ */
+const CONFIG_VIGENCIA_POSTERIOR = {
+  fecha: () => Promise.resolve('2026-12-01'),
+};
 
 const socio = (
   aeronaveId: string,
@@ -183,6 +192,7 @@ function armar(
     {
       resumenTiendita: () => Promise.resolve(opts.inventario ?? { items: [] }),
     } as never,
+    CONFIG_VIGENCIA_POSTERIOR as never,
   );
   return { service, enviados, diasOficiales };
 }

@@ -133,6 +133,19 @@ export const CONFIG_FOLIOS_RELEER_CAPTURADOS_HASTA =
   'folios_releer_capturados_hasta';
 
 /**
+ * COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65, SIN migración):
+ * primer día (Cancún, por `fecha_vuelo`) en que la comisión bancaria (parte
+ * del avión) y la provisión de la comisión del vendedor se descuentan en el
+ * balance por avión y en el reparto a socios (`common/comisiones-avion.util`,
+ * fuente única). `valor_json` = `["AAAA-MM-DD"]`, leída con `fecha()`; sin
+ * fila (o fecha inválida) aplica `COMISIONES_AL_AVION_DESDE_DEFAULT`
+ * (2026-09-01, «desde septiembre, el cierre que estamos haciendo»). Como las
+ * fechas de la relectura de folios, NO se siembra (se cambia por SQL): una
+ * fila suya saldría en el panel como un switch sin significado.
+ */
+export const CONFIG_COMISIONES_AL_AVION_DESDE = 'comisiones_al_avion_desde';
+
+/**
  * Rango permitido por clave numérica (PATCH `valor_numerico`). Fuera de él
  * ⇒ 400 VALOR_FUERA_DE_RANGO. La BD solo exige ≥ 0.
  */
