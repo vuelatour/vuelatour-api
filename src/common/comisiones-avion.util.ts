@@ -29,13 +29,26 @@
  *    cual con un solo avión). Es el primer término de `parteFilaDeCobro`:
  *    por cobro, Σ de los aviones == round2(comisión × factor) al centavo y lo
  *    que resta (comisión − partes de los aviones) es de VuelaTour.
+ *    SOBRECOBRO (revisión 6-oct-2026): lo cobrado al avión se TOPA en su
+ *    venta (`cobradoParteAvion`) y el excedente es de VuelaTour («otros
+ *    movimientos»); con él, el factor también se topa — cobrado al avión ÷
+ *    cobrado del vuelo (`cobrosEnUsd`) — para que el avión no pague la
+ *    comisión del dinero que no le toca. Sin sobrecobro, `factor_avion`.
+ *    La comisión bancaria aplica en CUALQUIER estado: sigue al cobro, que el
+ *    balance cuenta (un anticipo de un CONFIRMADO ya entró a la cuenta).
  *  - VENDEDOR: la PROVISIÓN = lo cobrado al cliente por ese concepto
  *    (`pagoVendedorUsd`: comisión + su IVA si la cotización grava, fuente
  *    única) × la parte del avión (`parteAvion`); en MXN al T.C. de venta (K)
- *    del vuelo. Nunca en un CANCELADO (no se vendió) ni con la partición
- *    inconsistente (no hay comisión que separar: misma regla que «otros
- *    movimientos»). NO depende del gasto real `COMISION_VENDEDOR` (ese sigue
- *    apareado en «otros movimientos» con su «faltan/excede»).
+ *    del vuelo. SOLO en un vuelo COMPLETADO (revisión 6-oct-2026: el MISMO
+ *    universo que el reparto a socios, que solo lee COMPLETADO y CANCELADO).
+ *    Un vuelo aún no realizado (SOLICITUD, COTIZADO, RESERVA, CONFIRMADO,
+ *    EN_VUELO) no se ha vendido: el balance lo lista con su venta, que POR
+ *    COBRAR neutraliza, pero su provisión restaba de la utilidad cobrada y
+ *    de los socios una comisión que todavía no existe (y el balance dejaba
+ *    de cuadrar con el reparto). Nunca en un CANCELADO (no se vendió) ni con
+ *    la partición inconsistente (no hay comisión que separar: misma regla
+ *    que «otros movimientos»). NO depende del gasto real `COMISION_VENDEDOR`
+ *    (ese sigue apareado en «otros movimientos» con su «faltan/excede»).
  *
  * MXN (balance) y USD (reparto) salen del MISMO recorrido:
  *  - cobro MXN: comisión MXN tal cual; USD = comisión ÷ (T.C. del cobro ?? K)
@@ -48,9 +61,12 @@
  * PURO (sin Nest, sin consultas). `detalle` = la nota de la celda COMISIONES:
  * una línea por concepto y, con más de uno, el encabezado «N conceptos».
  */
+import { cobrosEnUsd } from './cobros-usd.util';
 import {
+  cobradoParteAvion,
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
+  sobrecobroUsd,
   type ParticionIngreso,
 } from './ingreso-vuelo.util';
 import { etiquetaMetodoCobro } from './metodo-cobro.util';
@@ -63,6 +79,11 @@ export const COMISIONES_AL_AVION_DESDE_DEFAULT = '2026-09-01';
 
 /** Lo que el cálculo necesita de un cobro (forma de `cobro_vuelo`). */
 export interface CobroComisionAvionInput {
+  /**
+   * Monto BRUTO del cobro en su moneda (negativo = reembolso): con
+   * `cobrosEnUsd` da lo cobrado del vuelo, que detecta el SOBRECOBRO.
+   */
+  monto?: unknown;
   moneda?: unknown;
   tc_usd_mxn?: unknown;
   /** Comisión bancaria en la MONEDA del cobro. */
@@ -87,8 +108,13 @@ export interface ComisionesDelVueloInput {
   tcVenta: number | null | undefined;
   /** Partición del ingreso (`particionIngresoVuelo`) del vuelo. */
   particion: ParticionIngreso | null;
-  /** Vuelo CANCELADO: lo retenido es 100 % del avión y no hay provisión. */
-  cancelado: boolean;
+  /**
+   * `vuelo.estado`. CANCELADO ⇒ lo retenido es 100 % del avión (factor 1)
+   * y no hay provisión; la PROVISIÓN del vendedor solo en COMPLETADO (ver la
+   * cabecera). Un solo dato para las dos reglas: los lectores no pueden
+   * mandarlas contradictorias.
+   */
+  estado: string | null | undefined;
   /**
    * Parte de ESTE avión de un monto del VUELO: la MISMA función con la que
    * el lector reparte la venta y el cobro (`repartirUsd` en multi-avión, el
@@ -223,6 +249,31 @@ function textoParte(
     : ` (parte del avión ${pct} %: ${fmtMxnNota(parteMxn)})`;
 }
 
+/**
+ * El MISMO factor con que el cobro se prorratea al avión
+ * (`cobradoParteAvion`): venta del avión ÷ total del cliente; con SOBRECOBRO
+ * (lo cobrado del vuelo, `cobrosEnUsd` con K de respaldo, supera el total)
+ * se topa como allá — cobrado al avión ÷ cobrado del vuelo —: el excedente y
+ * su comisión son de VuelaTour. CANCELADO o sin precio ⇒ 1 (lo retenido es
+ * 100 % del avión).
+ */
+function factorCobroAvion(
+  cobros: ReadonlyArray<CobroComisionAvionInput>,
+  k: number | null,
+  p: ParticionIngreso | null,
+  cancelado: boolean,
+): number {
+  if (cancelado || p == null || !(p.total_usd > 0)) return 1;
+  const cobradoUsd = cobrosEnUsd([...cobros], k).total_usd;
+  if (cobradoUsd > 0 && sobrecobroUsd(cobradoUsd, p) > 0) {
+    return Math.min(
+      p.factor_avion,
+      cobradoParteAvion(cobradoUsd, p) / cobradoUsd,
+    );
+  }
+  return p.factor_avion;
+}
+
 const VACIO: Omit<ComisionesDelVuelo, 'aplica' | 'detalle'> = {
   banco_mxn: 0,
   banco_usd: 0,
@@ -245,12 +296,11 @@ export function comisionesDelVuelo(
     return { aplica: false, ...VACIO, detalle: [] };
   }
   const p = i.particion;
-  // El MISMO factor que prorratea el cobro al avión (cobradoParteAvion):
-  // venta del avión ÷ total del cliente; CANCELADO o sin precio ⇒ 1.
-  const factorCobro =
-    i.cancelado || p == null || !(p.total_usd > 0) ? 1 : p.factor_avion;
-  const participacion = i.participacion > 0 ? i.participacion : 0;
+  const cancelado = i.estado === 'CANCELADO';
+  const completado = i.estado === 'COMPLETADO';
   const k = pos(i.tcVenta);
+  const factorCobro = factorCobroAvion(i.cobros, k, p, cancelado);
+  const participacion = i.participacion > 0 ? i.participacion : 0;
   const lineas: string[] = [];
 
   // ----- Comisión BANCARIA de cada cobro -----
@@ -298,10 +348,11 @@ export function comisionesDelVuelo(
   }
 
   // ----- PROVISIÓN del vendedor (lo cobrado al cliente por ese concepto) -----
+  // Solo en un vuelo COMPLETADO (el universo del reparto a socios).
   let vendedorMxn = 0;
   let vendedorUsd = 0;
   let vendedorSinTc = false;
-  if (!i.cancelado && p != null && !p.inconsistente) {
+  if (completado && p != null && !p.inconsistente) {
     const pagoUsd = pagoVendedorUsd(p);
     if (pagoUsd > 0) {
       vendedorUsd = i.parteAvion(pagoUsd);

@@ -136,19 +136,28 @@ export class DashboardsService {
     // cobrado_usd es la venta del avión; con esto se ve el bruto cobrado.
     let otrosIngresosVuelatour = 0;
     let gastos = 0;
+    let comisiones = 0;
     let saldo = 0;
     const porAvion = profit.aviones.map((a) => {
+      // COMISIONES A CARGO DEL AVIÓN (invariante 50, desde sep-2026): el
+      // saldo del reparto ya las descontó (cobrado − comisiones − gastos −
+      // reserva), así que también van en «Gastos» — si no, Ingresos − Gastos
+      // ≠ Saldo por ese monto en el KPI y en la tabla por avión. Antes de la
+      // vigencia valen 0 (nada cambia en meses viejos).
+      const comisionesAvion = a.ingresos.comisiones_venta_usd ?? 0;
       const gastosAvion =
         a.gastos.directos_usd +
         a.gastos.indirectos_usd +
         a.gastos.permisos_usd +
         a.gastos.otros_prorrateados_usd +
-        a.reserva_overhaul_usd;
+        a.reserva_overhaul_usd +
+        comisionesAvion;
       ingresosCobrados += a.ingresos.cobrado_usd;
       ingresosPendientes += a.ingresos.pendiente_bruto_usd;
       ingresosPendientesAvion += a.ingresos.pendiente_cobro_usd;
       otrosIngresosVuelatour += a.ingresos.otros_ingresos_vuelatour_usd;
       gastos += gastosAvion;
+      comisiones += comisionesAvion;
       saldo += a.saldo_disponible_usd;
       return {
         aeronave_id: a.aeronave.id,
@@ -158,6 +167,9 @@ export class DashboardsService {
         ingresos_cobrado_usd: a.ingresos.cobrado_usd,
         gastos_usd: round2(gastosAvion),
         saldo_usd: a.saldo_disponible_usd,
+        // ADITIVO (6-oct-2026): de `gastos_usd`, las comisiones que absorbe
+        // el avión (parte de la bancaria + provisión del vendedor).
+        comisiones_usd: round2(comisionesAvion),
       };
     });
 
@@ -197,6 +209,9 @@ export class DashboardsService {
         vuelos_periodo: vuelosPeriodo.length,
         vuelos_completados: completados,
         vuelos_cancelados: cancelados,
+        // ADITIVO (6-oct-2026): de `gastos_totales_usd`, las comisiones a
+        // cargo de los aviones (invariante 50).
+        comisiones_usd: round2(comisiones),
       },
       por_avion: porAvion,
       operacion: {

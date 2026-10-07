@@ -2389,8 +2389,13 @@ export class AircraftBalanceService {
       // completa en «otros movimientos» de VuelaTour. Aritmética en la fuente
       // única `comisionesDelVuelo` (la MISMA del reparto a socios): banco =
       // comisión × el factor con que el cobro se prorratea al avión
-      // (`ventaFactor`) y la parte de ESTE avión con `parteAvion`; vendedor =
-      // provisión (comisión + IVA cotizados) al K del vuelo × `parteAvion`.
+      // (`ventaFactor`, topado con sobrecobro) y la parte de ESTE avión con
+      // `parteAvion`; vendedor = provisión (comisión + IVA cotizados) al K
+      // del vuelo × `parteAvion`, SOLO si el vuelo está COMPLETADO (revisión
+      // 6-oct-2026: el universo del reparto — en un COTIZADO/RESERVA/
+      // CONFIRMADO/EN_VUELO la venta la neutraliza POR COBRAR y la provisión
+      // restaba de la utilidad cobrada una comisión que aún no existe). La
+      // regla de estados vive en la fuente única: aquí viaja `estado`.
       // Antes de la vigencia: null y la fila es la de siempre.
       const reglaComisiones = aplicaComisionesAlAvion(
         diaCancun(v.fecha_vuelo),
@@ -2404,7 +2409,7 @@ export class AircraftBalanceService {
               cobros: vCobros,
               tcVenta: K,
               particion: p,
-              cancelado,
+              estado: v.estado,
               parteAvion,
               participacion: factor,
               vendedorNombre: nombreVendedorDeVuelo(v),

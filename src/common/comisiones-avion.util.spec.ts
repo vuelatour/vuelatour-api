@@ -85,7 +85,7 @@ function entrada(
     cobros: [],
     tcVenta: 20,
     particion: particionIngresoVuelo(vuelo ?? V235),
-    cancelado: false,
+    estado: 'COMPLETADO',
     parteAvion: todo,
     participacion: 1,
     vendedorNombre: null,
@@ -364,7 +364,7 @@ describe('comisionesDelVuelo', () => {
     const r = comisionesDelVuelo(
       entrada({
         vuelo: V501,
-        cancelado: true,
+        estado: 'CANCELADO',
         cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
       }),
     );
@@ -426,6 +426,132 @@ describe('comisionesDelVuelo', () => {
     expect(r.total_mxn).toBe(
       Math.round((r.banco_mxn + r.vendedor_mxn) * 100) / 100,
     );
+  });
+});
+
+describe('comisionesDelVuelo — revisión 6-oct-2026', () => {
+  it('provisión del vendedor SOLO en COMPLETADO (el universo del reparto): un vuelo aún no realizado no la carga, pero su comisión bancaria sí (sigue al cobro)', () => {
+    for (const estado of [
+      'SOLICITUD',
+      'COTIZADO',
+      'RESERVA',
+      'CONFIRMADO',
+      'EN_VUELO',
+      null,
+      undefined,
+    ]) {
+      const r = comisionesDelVuelo(
+        entrada({
+          vuelo: V501,
+          estado,
+          cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+          vendedorNombre: 'Vendedor Uno',
+        }),
+      );
+      expect(r.aplica).toBe(true);
+      expect(r.vendedor_mxn).toBe(0);
+      expect(r.vendedor_usd).toBe(0);
+      expect(r.vendedor_sin_tc).toBe(false);
+      // La bancaria del anticipo, como en un COMPLETADO.
+      expect(r.banco_mxn).toBe(313.9);
+      expect(r.banco_usd).toBe(15.7);
+      expect(r.total_mxn).toBe(313.9);
+      expect(r.detalle).toEqual([
+        'Comisión bancaria · Transferencia 5 % · $350.00 (parte del avión 89.69 %: $313.90)',
+      ]);
+    }
+    // El mismo vuelo COMPLETADO sí la carga.
+    const completado = comisionesDelVuelo(
+      entrada({
+        vuelo: V501,
+        cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+      }),
+    );
+    expect(completado.vendedor_mxn).toBe(1600);
+    expect(completado.total_mxn).toBe(1913.9);
+  });
+
+  it('un vuelo aún no realizado SIN cobros no carga nada (ni nota): su venta la neutraliza POR COBRAR', () => {
+    const r = comisionesDelVuelo(
+      entrada({ vuelo: V501, estado: 'COTIZADO', cobros: [] }),
+    );
+    expect(r).toEqual({
+      aplica: true,
+      banco_mxn: 0,
+      banco_usd: 0,
+      vendedor_mxn: 0,
+      vendedor_usd: 0,
+      total_mxn: 0,
+      total_usd: 0,
+      detalle: [],
+      banco_sin_tc: 0,
+      vendedor_sin_tc: false,
+    });
+  });
+
+  it('SOBRECOBRO: el factor se topa como `cobradoParteAvion` (cobrado al avión ÷ cobrado del vuelo) — el excedente y su comisión son de VuelaTour', () => {
+    // #235: 1,200 USD todo del avión, cobrado 1,320 USD con 33 USD de
+    // comisión ⇒ el avión recibe 1,200 de 1,320 (90.91 %).
+    const usd = (monto: number, comision: number | null, tc = 18) => ({
+      monto,
+      moneda: 'USD',
+      tc_usd_mxn: tc,
+      comision_banco_monto: comision,
+      metodo_cobro: 'TRANSFERENCIA',
+    });
+    const r = comisionesDelVuelo(
+      entrada({ vuelo: V235, tcVenta: 18, cobros: [usd(1320, 33)] }),
+    );
+    // 33 × 1,200/1,320 = 30 USD; 594 MXN × 1,200/1,320 = 540.
+    expect(r.banco_usd).toBe(30);
+    expect(r.banco_mxn).toBe(540);
+    expect(r.detalle).toEqual([
+      'Comisión bancaria · Transferencia · $33.00 USD = $594.00 (parte del avión 90.91 %: $540.00)',
+    ]);
+    // Con parte de VuelaTour: #501 (factor 2,000/2,230 = 89.69 %) cobrado
+    // 2,400 USD ⇒ tope 2,000/2,400 = 83.33 %.
+    const r501 = comisionesDelVuelo(
+      entrada({
+        vuelo: V501,
+        tcVenta: 20,
+        cobros: [usd(2400, 24, 20)],
+      }),
+    );
+    expect(r501.banco_usd).toBe(20);
+    expect(r501.banco_mxn).toBe(400);
+    // Pagado EXACTO o parcial: el factor de siempre (sin tope).
+    const exacto = comisionesDelVuelo(
+      entrada({ vuelo: V235, tcVenta: 18, cobros: [usd(1200, 36)] }),
+    );
+    expect(exacto.banco_usd).toBe(36);
+    const parcial = comisionesDelVuelo(
+      entrada({ vuelo: V501, tcVenta: 20, cobros: [usd(1115, 22.3, 20)] }),
+    );
+    // 22.30 × 2,000/2,230 = 20.
+    expect(parcial.banco_usd).toBe(20);
+    // CANCELADO con dinero retenido: siempre 100 % del avión.
+    const cancelado = comisionesDelVuelo(
+      entrada({
+        vuelo: V235,
+        estado: 'CANCELADO',
+        cobros: [usd(1500, 45)],
+      }),
+    );
+    expect(cancelado.banco_usd).toBe(45);
+  });
+
+  it('SOBRECOBRO con cobros MXN sin T.C. propio: lo cobrado del vuelo sale con el K de respaldo (cadena de `cobrosEnUsd`)', () => {
+    // 1,200 USD × 20 = 24,000 MXN; se cobraron 26,400 MXN (1,320 USD al K)
+    // con 264 de comisión ⇒ 1,200/1,320 = 90.91 % ⇒ 240 MXN al avión.
+    const r = comisionesDelVuelo(
+      entrada({
+        vuelo: V235,
+        tcVenta: 20,
+        cobros: [cobroMxn(264, { monto: 26400, tc_usd_mxn: null })],
+      }),
+    );
+    expect(r.banco_mxn).toBe(240);
+    expect(r.banco_usd).toBe(12);
   });
 });
 

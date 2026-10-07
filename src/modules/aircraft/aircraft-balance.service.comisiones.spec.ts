@@ -90,11 +90,13 @@ const SIN_CONFIG = Symbol('sin-config');
 /**
  * Servicio con el mundo en memoria. `vigencia`: lo que contesta la
  * configuración (`undefined` ⇒ su default; `SIN_CONFIG` ⇒ el servicio se
- * arma SIN ConfiguracionService).
+ * arma SIN ConfiguracionService). `tcOficial`: lo que contesta el T.C.
+ * oficial de cualquier día (null ⇒ sin dato, como siempre).
  */
 function armar(
   mundo: Record<string, Fila[]>,
   vigencia?: string | typeof SIN_CONFIG,
+  tcOficial: number | null = null,
 ) {
   const f = fakeSupabase(mundo);
   const enviados: { individual?: BalanceAvionPayload; general?: General } = {};
@@ -122,7 +124,14 @@ function armar(
       },
     } as never,
     { proximoServicio: () => null } as never,
-    { oficialDetallePara: () => Promise.resolve(null) } as never,
+    {
+      oficialDetallePara: (dia: string) =>
+        Promise.resolve(
+          tcOficial == null
+            ? null
+            : { tc: tcOficial, fecha_dato: dia, fuente: 'OPEN_ER_API' },
+        ),
+    } as never,
     { resumenTiendita: () => Promise.resolve({ items: [] }) } as never,
     config as never,
   );
@@ -142,8 +151,9 @@ async function libro(
 async function general(
   mundo: Record<string, Fila[]>,
   vigencia?: string,
+  tcOficial: number | null = null,
 ): Promise<General> {
-  const a = armar(mundo, vigencia);
+  const a = armar(mundo, vigencia, tcOficial);
   await a.service.xlsxGeneral(DESDE, HASTA);
   return a.enviados.general!;
 }
@@ -688,5 +698,293 @@ describe('Balance GENERAL — COMISIONES en «otros movimientos», RESUMEN y blo
     const a = armar(mundoFlota());
     await a.service.xlsxGeneral(DESDE, HASTA);
     expect(a.lecturas).toHaveLength(1);
+  });
+});
+
+/**
+ * Vuelos de la vigencia que AÚN NO se realizan (revisión 6-oct-2026), con
+ * comisión del vendedor y K 18 (`vuelo2`):
+ *  - #510 COTIZADO: 1,000 de tiempo + 150 de comisión, sin cobros.
+ *  - #511 RESERVA: 1,000 + 100, sin cobros.
+ *  - #512 CONFIRMADO: 1,000 + 50, sin cobros.
+ *  - #513 CONFIRMADO con ANTICIPO: 1,000 + 80, cobro de 9,720 MXN con 486
+ *    de comisión bancaria (factor 1,000/1,080 ⇒ 450 al avión).
+ */
+function mundoNoRealizados(conAnticipo = true): Record<string, Fila[]> {
+  const m = mundoLibros();
+  const pendiente = (
+    id: string,
+    folio: number,
+    estado: string,
+    dia: string,
+    comision: number,
+  ): Fila =>
+    vuelo2({
+      id,
+      folio,
+      estado,
+      fecha_vuelo: `2026-09-${dia}T15:00:00+00:00`,
+      comision_vendedor_usd: comision,
+      comision_vendedor_nombre: 'Saab',
+      monto_total_usd: 1000 + comision,
+      monto_total_mxn: (1000 + comision) * 18,
+    });
+  return {
+    ...m,
+    vuelo: [
+      ...m.vuelo,
+      pendiente('v-10', 510, 'COTIZADO', '28', 150),
+      pendiente('v-11', 511, 'RESERVA', '27', 100),
+      pendiente('v-12', 512, 'CONFIRMADO', '26', 50),
+      ...(conAnticipo ? [pendiente('v-13', 513, 'CONFIRMADO', '25', 80)] : []),
+    ],
+    cobro_vuelo: [
+      ...m.cobro_vuelo,
+      ...(conAnticipo
+        ? [
+            {
+              id: 'c-13',
+              vuelo_id: 'v-13',
+              monto: 9720,
+              moneda: 'MXN',
+              tc_usd_mxn: 18,
+              fecha_cobro: '2026-09-20T16:00:00+00:00',
+              comision_banco_monto: 486,
+            },
+          ]
+        : []),
+    ],
+  };
+}
+
+/**
+ * #514 con la comisión BillPocket cobrada al cliente como EXTRA (desglose
+ * v1.3): 1,000 de tiempo + 50 «Comisión BillPocket (sin IVA)» = 1,050 USD,
+ * K 18, cobrado completo (18,900 MXN) con 945 de comisión bancaria ⇒ el
+ * avión absorbe 945 × 1,000/1,050 = 900 y VuelaTour 45.
+ */
+function mundoBillPocket(): Record<string, Fila[]> {
+  const m = mundoLibros();
+  return {
+    ...m,
+    vuelo: [
+      ...m.vuelo,
+      vuelo2({
+        id: 'v-14',
+        folio: 514,
+        fecha_vuelo: '2026-09-26T15:00:00+00:00',
+        extras_total_usd: 50,
+        monto_total_usd: 1050,
+        monto_total_mxn: 18900,
+        calculo_snapshot: {
+          desglose: [
+            {
+              clave: 'TIEMPO_VUELO',
+              concepto: 'Tiempo de vuelo · 1 hr × $1000/hr',
+              monto_usd: 1000,
+            },
+            {
+              clave: 'EXTRA',
+              concepto: 'Comisión BillPocket (sin IVA)',
+              monto_usd: 50,
+            },
+          ],
+        },
+      }),
+    ],
+    cobro_vuelo: [
+      ...m.cobro_vuelo,
+      {
+        id: 'c-14',
+        vuelo_id: 'v-14',
+        monto: 18900,
+        moneda: 'MXN',
+        tc_usd_mxn: 18,
+        fecha_cobro: '2026-09-26T20:00:00+00:00',
+        comision_banco_monto: 945,
+        metodo_cobro: 'BILLPOCKET',
+      },
+    ],
+  };
+}
+
+/** Σ ganancia de los libros + Σ remanente de «otros movimientos». */
+function dineroTotal(g: General): number {
+  const om = g.consolidado.otros_movimientos!;
+  return r2(
+    g.consolidado.vuelos.reduce((a, v) => a + (v.ganancia_mxn ?? 0), 0) +
+      [...om.filas, ...om.filas_sueltas].reduce(
+        (a, f) => a + (f.remanente_mxn ?? 0),
+        0,
+      ),
+  );
+}
+
+describe('Balance — COMISIONES: revisión 6-oct-2026', () => {
+  it('vuelos AÚN NO realizados (COTIZADO, RESERVA, CONFIRMADO): sin provisión del vendedor — su venta la neutraliza POR COBRAR y la utilidad cobrada solo baja por las comisiones del #501', async () => {
+    const p = await libro(mundoNoRealizados(false));
+    for (const id of ['v-10', 'v-11', 'v-12']) {
+      const f = filaDe(p.vuelos, id);
+      expect(f.comision_vendedor_prov_mxn).toBe(0);
+      expect(f.comision_banco_avion_mxn).toBe(0);
+      expect(f.comisiones_mxn).toBeNull();
+      expect(f.comisiones_detalle).toEqual([]);
+      expect(f.ganancia_mxn).toBe(f.remanente_mxn);
+    }
+    expect(p.totales.comisiones_mxn).toBe(1913.9);
+    // La cascada: solo las comisiones del #501 (95.70 USD ± el redondeo
+    // de la ganancia USD de la fila).
+    const antes = await libro(mundoNoRealizados(false), POSTERIOR);
+    expect(
+      Math.abs(
+        r2(
+          (p.balance.utilidad_cobrada_usd ?? 0) -
+            (antes.balance.utilidad_cobrada_usd ?? 0),
+        ) + 95.7,
+      ),
+    ).toBeLessThan(0.02);
+  });
+
+  it('CONFIRMADO con anticipo: su comisión bancaria SÍ la absorbe el avión (sigue al cobro, que el balance cuenta) y la provisión no', async () => {
+    const p = await libro(mundoNoRealizados());
+    const f = filaDe(p.vuelos, 'v-13');
+    expect(f.comision_banco_avion_mxn).toBe(450);
+    expect(f.comision_vendedor_prov_mxn).toBe(0);
+    expect(f.comisiones_mxn).toBe(450);
+    expect(f.comisiones_detalle).toEqual([
+      'Comisión bancaria · $486.00 (parte del avión 92.59 %: $450.00)',
+    ]);
+    expect(f.cobros.map((c) => [c.monto_mxn, c.neto_mxn])).toEqual([
+      [9720, 9234],
+    ]);
+    expect(p.totales.comisiones_mxn).toBe(r2(1913.9 + 450));
+  });
+
+  it('«otros movimientos»: solo el #501 (COMPLETADO) le paga a VuelaTour la provisión del vendedor', async () => {
+    const g = await general(mundoNoRealizados());
+    const conLinea = g.consolidado
+      .otros_movimientos!.filas.filter((f) =>
+        `${f.concepto_ingreso ?? ''}\n${f.nota_ingreso ?? ''}`.includes(
+          'a cargo del avión',
+        ),
+      )
+      .map((f) => f.clave);
+    expect(conLinea).toHaveLength(1);
+    expect(conLinea[0].endsWith('501')).toBe(true);
+  });
+
+  it('comisión BillPocket cobrada al cliente: el egreso apareado de VuelaTour es SOLO su parte (comisión − parte del avión) y el dinero se conserva', async () => {
+    const g = await general(mundoBillPocket());
+    const f = filaDe(g.consolidado.vuelos, 'v-14');
+    expect(f.comision_banco_avion_mxn).toBe(900);
+    expect(f.comisiones_mxn).toBe(900);
+    expect(f.comisiones_detalle).toEqual([
+      'Comisión bancaria · BillPocket · $945.00 (parte del avión 95.24 %: $900.00)',
+    ]);
+    expect(f.ganancia_mxn).toBe(r2((f.remanente_mxn ?? 0) - 900));
+    const om = omDe(g, 514);
+    // Ingreso: la línea BillPocket cobrada (50 USD × 18); egreso: 945 − 900.
+    expect(om.ingreso_mxn).toBe(900);
+    expect(om.egreso_mxn).toBe(45);
+    expect(om.remanente_mxn).toBe(855);
+    expect(om.concepto_egreso).toBe(
+      'comisión del banco (parte VuelaTour: la del avión va en su columna COMISIONES)',
+    );
+    // Antes de la vigencia: VuelaTour pagaba la comisión completa.
+    const antes = await general(mundoBillPocket(), POSTERIOR);
+    const omAntes = omDe(antes, 514);
+    expect(omAntes.egreso_mxn).toBe(945);
+    expect(omAntes.concepto_egreso).toBe('comisión del banco');
+    // Conservación: lo que el avión absorbe es lo que VuelaTour deja de
+    // pagar (y la provisión del #501 va y viene) — Σ ganancia de los libros
+    // + Σ remanente de «otros movimientos» == la regla anterior.
+    expect(dineroTotal(g)).toBe(dineroTotal(antes));
+  });
+
+  it('SOBRECOBRO: el avión absorbe la comisión SOLO de lo que le toca (cobrado al avión ÷ cobrado) y VuelaTour, que se queda el excedente, paga el resto', async () => {
+    // #508: 1,000 USD de tiempo (todo del avión), K 18, cobrado 1,100 USD
+    // con 33 USD de comisión (594 MXN) ⇒ 594 × 1,000/1,100 = 540 al avión.
+    const m = mundoLibros();
+    m.vuelo = [
+      ...m.vuelo,
+      vuelo2({
+        id: 'v-8',
+        folio: 508,
+        fecha_vuelo: '2026-09-24T15:00:00+00:00',
+      }),
+    ];
+    m.cobro_vuelo = [
+      ...m.cobro_vuelo,
+      {
+        id: 'c-8',
+        vuelo_id: 'v-8',
+        monto: 1100,
+        moneda: 'USD',
+        tc_usd_mxn: 18,
+        fecha_cobro: '2026-09-24T20:00:00+00:00',
+        comision_banco_monto: 33,
+      },
+    ];
+    const g = await general(m);
+    const f = filaDe(g.consolidado.vuelos, 'v-8');
+    expect(f.comision_banco_avion_mxn).toBe(540);
+    expect(f.comisiones_detalle).toEqual([
+      'Comisión bancaria · $33.00 USD = $594.00 (parte del avión 90.91 %: $540.00)',
+    ]);
+    // Lo cobrado AL AVIÓN sigue topado en su venta (por cobrar 0).
+    expect(f.cobrado_mxn).toBe(18000);
+    expect(f.por_cobrar_mxn).toBe(0);
+    const om = omDe(g, 508);
+    expect(om.nota_egreso ?? om.concepto_egreso).toContain(
+      'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES)',
+    );
+    expect(om.egreso_mxn).toBe(54);
+    // El dinero se conserva contra la regla anterior.
+    expect(dineroTotal(g)).toBe(dineroTotal(await general(m, POSTERIOR)));
+  });
+
+  it('vuelo SIN T.C. capturado: K = T.C. oficial del día de la cotización para la provisión y las comisiones USD sin T.C. propio (la misma cadena del reparto)', async () => {
+    // #501 sin T.C. en la cotización (oficial 18.75) y un cobro de 100 USD
+    // sin T.C. propio con 5 USD de comisión.
+    const m = mundoCon({
+      v1: {
+        tc_usd_mxn: null,
+        monto_total_mxn: null,
+        fecha_solicitud: '2026-09-01T15:00:00+00:00',
+      },
+    });
+    m.cobro_vuelo = [
+      ...m.cobro_vuelo,
+      {
+        id: 'c-3',
+        vuelo_id: V1,
+        monto: 100,
+        moneda: 'USD',
+        tc_usd_mxn: null,
+        fecha_cobro: '2026-09-12T18:00:00+00:00',
+        comision_banco_monto: 5,
+      },
+    ];
+    const a = armar(m, undefined, 18.75);
+    await a.service.xlsx(AV, DESDE, HASTA);
+    const p = a.enviados.individual!;
+    const f = filaDe(p.vuelos, V1);
+    expect(f.tc_venta).toBe(18.75);
+    // 80 USD × 18.75.
+    expect(f.comision_vendedor_prov_mxn).toBe(1500);
+    // 350 × 2,000/2,230 = 313.90 + round2(5 × 18.75) × 2,000/2,230 = 84.08.
+    expect(f.comision_banco_avion_mxn).toBe(397.98);
+    expect(f.comisiones_mxn).toBe(1897.98);
+    expect(f.comisiones_detalle).toContain(
+      'Comisión vendedor (Vendedor Uno) · $1,500.00 · provisión = cotizado (sin IVA)',
+    );
+    expect(
+      p.pendientes.some((x) => x.includes('comisión del vendedor sin TC')),
+    ).toBe(false);
+    // «Otros movimientos» cobra al avión la MISMA provisión de la fila.
+    const g = await general(m, undefined, 18.75);
+    expect(omDe(g, 501).nota_ingreso).toContain(
+      'comisión del vendedor a cargo del avión XB-TST (regla sep-2026) = $1,500.00',
+    );
   });
 });

@@ -1175,8 +1175,8 @@ export class ProfitSharingService {
       // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): misma fuente
       // única y mismos insumos que la fila del balance — cobros del vuelo,
       // K (capturado ?? oficial del día de la cotización), la partición, el
-      // factor del cobro (1 si CANCELADO) y la parte de ESTE avión
-      // (`parte`, repartirUsd). En USD.
+      // estado (CANCELADO ⇒ factor 1 y sin provisión; la provisión solo en
+      // COMPLETADO) y la parte de ESTE avión (`parte`, repartirUsd). En USD.
       const diaVuelo = diaCancun(v.fecha_vuelo);
       const comisionesVuelo: ComisionesDelVuelo | null =
         aplicaComisionesAlAvion(diaVuelo, ctx.vigenciaComisiones)
@@ -1186,7 +1186,7 @@ export class ProfitSharingService {
               cobros: ctx.cobrosPorVuelo.get(v.id) ?? [],
               tcVenta: pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
               particion: p,
-              cancelado: esCancelado,
+              estado: v.estado,
               parteAvion: parte,
               participacion: factor,
             })
