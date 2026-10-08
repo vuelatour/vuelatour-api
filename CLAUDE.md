@@ -4966,6 +4966,39 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`pagoVendedorCubiertoPorAvion`) y los casos del 0.0.65 de
       `aircraft-balance.service.comisiones.spec` actualizados a la regla.
 
+51. **RLS NO AÍSLA POR ROL: SIN POLÍTICAS DE LECTURA PARA USUARIOS FINALES
+    (8-oct-2026, migración `20261008000001` APLICADA).** Caso «los pilotos
+    ven vuelos que no son de ellos» (#404 Chetumal): la app y el panel NO
+    exponen vuelos ajenos (filtro `piloto_id` forzado en el controller de
+    `GET /flights`, `assertAccess` en detalle/snapshot/legs/payments,
+    `/v1/calendar` solo oficina, alertas sin PILOTO), pero desde mayo-2026
+    32 tablas (vuelo, escala, cobro_vuelo, gasto, cliente, cuenta_bancaria,
+    movimiento_bancario, tarjeta_corporativa…) tenían la política
+    `<tabla>_read_active_user` = «cualquier usuario ACTIVO lee todo» vía
+    PostgREST con la anon key del APK. Se dropearon las 32 (+
+    `aeronave_imagen_read_public`, qual `true`). Hallazgo del dry-run: en la
+    práctica NUNCA funcionaron porque `usuario_admin_select_all`
+    (`20260512000001`) consulta `usuario` dentro de su propio qual y toda
+    lectura autenticada que toque `usuario` termina en 42P17 «infinite
+    recursion»; solo `aeronave_imagen` (52 filas) se leía. Hoy toda lectura
+    directa como usuario final devuelve 0 filas; `usuario` sigue en 42P17
+    (no se tocó). Sin políticas de escritura para `authenticated`.
+    - **REGLA DURA:** el aislamiento por rol vive en el API (controller +
+      `assertAccess`), NUNCA en RLS; ni la app ni el panel leen tablas con
+      el token del usuario (cero `.from(` fuera de storage, cero
+      realtime/rpc, cero edge functions) y así debe seguir. Un endpoint
+      nuevo de lectura de vuelos fuerza el filtro en el controller o pasa
+      por `assertAccess`.
+    - **Pendientes de decisión del cliente (anotados, no tocados):**
+      `GET /expenses/sugerir-vuelo` (@Roles incluye PILOTO) devuelve la
+      siguiente salida de cualquier avión ±7/+14 días y la app de piloto no
+      lo usa (solo `FuelLoadScreen` del mecánico); `GET
+      /aircraft/:id/tacometros` sin @Roles (rutas pasadas de todos); el
+      mecánico ve TODOS los vuelos (decisión del 18-jun) y su «Vuelos de
+      hoy» en la app lista también los de mañana (`todayFlights` pide
+      ayer–mañana y solo ordena); el panel web solo bloquea VISITANTE
+      (PILOTO/MECANICO entran, el API les niega los datos).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -5699,8 +5732,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 - Migración = archivo en `supabase/migrations/` **y** aplicada vía MCP al
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
-  Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas (la API
-  usa service key).
+  Tras DDL correr `get_advisors`. RLS habilitado en todas las tablas y, desde
+  el 8-oct-2026, SIN políticas de lectura para usuarios finales (la API usa
+  service key; app y panel nunca leen tablas con el token del usuario —
+  invariante 51). El INFO `rls_enabled_no_policy` del advisor es el estado
+  deseado.
 - **`movimiento_bancario` tiene un constraint trigger DIFERIDO**
   (`trg_mov_bancario_partes_coherentes`, 20261002000002): una transacción
   que escriba en esa tabla (conciliado, gasto_id, gastos_n, monto,
@@ -5712,6 +5748,16 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   la bitácora atribuye la desconciliación al `created_by` de la parte. Con
   un lote vivo (`gastos_n >= 2`) el API NO se regresa al 0.0.51
   (`LOTE_SOLO_API_NUEVO`/`LOTE_INVALIDO` no se traducen ⇒ 500).
+- **APLICADA (8-oct-2026 vía MCP, tras DRYRUN_OK en prod simulando a un
+  PILOTO autenticado —`set local role authenticated` + `request.jwt.claims`—:
+  ANTES todas las tablas con política daban 42P17 salvo `aeronave_imagen`=52;
+  DESPUÉS vuelo/escala/cobro_vuelo/gasto/cliente/cuenta_bancaria/
+  movimiento_bancario/tarjeta_corporativa/aeronave_imagen/aeropuerto = 0
+  filas; advisors: solo el INFO `rls_enabled_no_policy`, que es el estado
+  deseado)** — `20261008000001_rls_sin_lectura_global_usuarios.sql`
+  (invariante 51): `drop policy` de las 32 `<tabla>_read_active_user` +
+  `aeronave_imagen_read_public`. Sin DML, sin residuos; reversión = recrear
+  la política (plantilla en la cabecera del archivo).
 - **APLICADA (6-oct-2026 vía MCP, tras DRYRUN_OK A–C8 en prod: 476 con foto
   y sin folio, 118 en la cola; sin residuos; advisors sin hallazgos nuevos)** —
   `20261006000001_gasto_folio_releido.sql`
