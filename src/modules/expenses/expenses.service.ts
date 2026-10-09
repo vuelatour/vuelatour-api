@@ -80,6 +80,7 @@ import {
   mensajeCheckGasto,
   terminacionPrevia,
 } from './medio-tarjeta.util';
+import { estadoBancoGasto, etiquetaEstadoBanco } from './estado-banco.util';
 import { etiquetaComprobante } from '../../common/comprobante.util';
 import {
   etiquetaFacturacion,
@@ -229,6 +230,10 @@ export class ExpensesService {
       { label: 'Proveedor' },
       { label: 'Capturó' },
       { label: 'Medio pago' },
+      // Banco (9-oct-2026): ¿ya cruzó con el estado de cuenta? Conciliado /
+      // Parcial / Sin conciliar; vacío en pagos que no se concilian
+      // (`etiquetaEstadoBanco`, fuente única con el panel).
+      { label: 'Banco' },
       { label: 'Comprobante' },
       { label: 'Facturación' },
       { label: 'Moneda' },
@@ -258,6 +263,7 @@ export class ExpensesService {
         proveedor?.nombre ?? '',
         captura?.nombre ?? '',
         etiquetaMedioPago(medio),
+        etiquetaEstadoBanco(estadoBancoGasto(x)),
         // Dos opciones (14-sep-2026): «Con comprobante» / «Sin
         // comprobante» — la palabra «Factura» salió de esta columna para
         // que no se confunda con el semáforo de facturación de al lado.
@@ -394,6 +400,11 @@ export class ExpensesService {
         .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`);
     }
     if (filters.duplicados === true) q = q.eq('duplicado_sospechado', true);
+    // Conciliación con el banco (9-oct-2026, pedido de oficina: «un apartado
+    // que me diga si el gasto está conciliado»): `gasto.conciliado` lo
+    // escribe solo la BD al cubrir el gasto con cargos (invariante de la
+    // conciliación); false incluye los cubiertos a medias.
+    if (filters.conciliado != null) q = q.eq('conciliado', filters.conciliado);
 
     const { data, error, count } = await q;
     if (error) throw new Error(error.message);

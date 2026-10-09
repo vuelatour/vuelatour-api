@@ -737,6 +737,15 @@ export class ListGastosQuery {
   duplicados?: boolean;
 
   @ApiPropertyOptional({
+    description:
+      'Conciliación con el banco (9-oct-2026): true = solo gastos CUBIERTOS por cargos del banco (gasto.conciliado); false = solo los que no (incluye los cubiertos a medias). Sin el parámetro, todos.',
+  })
+  @IsOptional()
+  @ToBooleanQuery()
+  @IsBoolean()
+  conciliado?: boolean;
+
+  @ApiPropertyOptional({
     enum: EstatusComprobante,
     description:
       'FACTURA y VALE son ambos "con comprobante" (VALE = legado); SIN_COMPROBANTE = sin comprobante.',

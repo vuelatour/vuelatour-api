@@ -1537,6 +1537,22 @@ aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
       mientras, usa Pendiente»), nunca 409 genérico ni 500 (un 500 dispara
       el reintento del outbox de la app).
 
+    - **Columna y filtro «Banco» (9-oct-2026, API 0.0.67; pedido de
+      oficina: «un apartado donde me diga si el gasto está conciliado con el
+      banco»)**: tercera pregunta, aparte de las dos de arriba: «¿ya cruzó
+      con el estado de cuenta?». Helper PURO `expenses/estado-banco.util.ts`
+      (`estadoBancoGasto`: CONCILIADO si `gasto.conciliado` —solo lo escribe
+      la BD al cubrir el gasto, también un efectivo ligado con
+      justificación—; PARCIAL si `monto_vinculado` > 0 sin cubrir; SIN_CONCILIAR
+      si el medio es bancario (TARJETA_CORP/TRANSFERENCIA/PAYWISE) sin cargo;
+      NO_APLICA el resto) → columna «Banco» del Excel de gastos (`listXlsx`,
+      vacía cuando no aplica) y espejo en el panel
+      (`lib/admin/conciliacion-estado.ts`, `BancoBadge`). `GET /expenses?
+      conciliado=true|false` filtra por `gasto.conciliado` (false incluye los
+      parciales); el panel lo manda con `?banco=conciliados|sin_conciliar` y el
+      Excel hereda el filtro. Solo lectura: el cruce sigue viviendo en
+      Conciliación.
+
 19. **Pre-cierre «Tacómetros en revisión»: QUÉ tramos son (14-sep-2026).**
     El item `tacos_en_revision` es ADITIVO — `clave`, `titulo` y `count`
     (= TRAMOS amarillos, no vuelos) no cambian — y ahora trae `vuelos`

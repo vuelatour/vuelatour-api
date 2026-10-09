@@ -136,6 +136,26 @@ describe('ExpensesService.list — capturado_en', () => {
     ).toBe(false);
   });
 
+  it('conciliado=true/false filtra por gasto.conciliado; sin el parámetro no filtra (9-oct-2026)', async () => {
+    const a = armar({});
+    await a.service.list({ ...filtrosBase, conciliado: true });
+    expect(a.llamadas).toContainEqual({
+      metodo: 'eq',
+      args: ['conciliado', true],
+    });
+    const b = armar({});
+    await b.service.list({ ...filtrosBase, conciliado: false });
+    expect(b.llamadas).toContainEqual({
+      metodo: 'eq',
+      args: ['conciliado', false],
+    });
+    const c = armar({});
+    await c.service.list(filtrosBase);
+    expect(
+      c.llamadas.some((l) => l.metodo === 'eq' && l.args[0] === 'conciliado'),
+    ).toBe(false);
+  });
+
   it('orden por default = fecha del consumo; orden=captura = capturado_en desc', async () => {
     const a = armar({});
     await a.service.list(filtrosBase);
