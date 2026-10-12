@@ -5081,6 +5081,31 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     en la MISMA consulta (cero round-trips). El panel pinta «vuelo 4 oct ·
     cobro 6 oct» (`fechasCandidatoCobro`); con un API previo, solo el cobro.
 
+55. **EL REPORTE DE CONCILIACIÓN SALE EN EL ORDEN DEL ESTADO DE CUENTA
+    (12-oct-2026, API 0.0.70, migración `20261012000001` PENDIENTE de
+    aplicar).** Pedido del cliente: «cuando se exporta el estado de cuenta
+    me lo acomoda diferente al estado de cuenta que subimos, y para comparar
+    necesitamos tenga el mismo orden».
+    - `movimiento_bancario.orden_archivo` = posición de la línea en el
+      archivo importado (1 = primera línea de `dto.movimientos`, contando
+      también las que se descartan por no traer fecha). `ejecutarImport` la
+      escribe SOLO con la columna aplicada (sonda única
+      `common/orden-archivo-disponible.util.ts#ordenArchivoDisponible`,
+      patrón `columnaOpcional`); la dedupe (`emparejarDuplicados`) conserva
+      el campo. Las líneas de antes quedan null (se insertaron en lote: su
+      orden original no se puede reconstruir).
+    - `reporteXlsx` lee `estado_cuenta_id` siempre y `orden_archivo` con la
+      sonda, y ordena con la fuente única PURA
+      `conciliacion/orden-estado-cuenta.util.ts#ordenarComoEstadoDeCuenta`:
+      si TODAS las líneas del reporte salieron del MISMO archivo y traen su
+      posición, el orden del archivo tal cual (aunque vaya del más nuevo al
+      más viejo: así lo ve el cliente en su banco); si no (varios archivos,
+      líneas a mano o anteriores), cronológico de siempre y, en el mismo día,
+      primero las del archivo por posición y luego las demás por
+      `created_at`. La lista del panel NO cambia (fecha desc).
+    - Sin la migración: nada cambia (la sonda apaga lectura y escritura).
+      Spec: `orden-estado-cuenta.util.spec.ts`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -5811,6 +5836,15 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **PENDIENTE de aplicar (12-oct-2026; el API 0.0.70 corre con o sin ella)**
+  — `20261012000001_movimiento_bancario_orden_archivo.sql` (invariante 55):
+  `movimiento_bancario.orden_archivo integer` (CHECK ≥ 1) + índice
+  `(estado_cuenta_id, orden_archivo)`. Aditiva, sin triggers ni backfill
+  (el dry-run de su cabecera ejerce el CHECK con un UPDATE real dentro de
+  `begin … rollback`). Al aplicarla la sonda se enciende sola en ≤ 10 min;
+  desde entonces cada importación guarda la posición y el reporte Excel sale
+  en el orden del archivo.
 
 - Migración = archivo en `supabase/migrations/` **y** aplicada vía MCP al
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).

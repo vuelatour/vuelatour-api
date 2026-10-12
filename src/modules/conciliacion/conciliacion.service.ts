@@ -223,6 +223,8 @@ import {
   type MovimientoReverso,
 } from './reverso-cruce.util';
 import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
+import { ordenArchivoDisponible } from '../../common/orden-archivo-disponible.util';
+import { ordenarComoEstadoDeCuenta } from './orden-estado-cuenta.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -804,6 +806,11 @@ export class ConciliacionService {
   // =====================================================================
 
   /** ¿Está aplicada la migración de partes? (memorizado, re-sondeo ≤ 10 min). */
+  /** ¿Existe `movimiento_bancario.orden_archivo`? (invariante 55; memorizado). */
+  private ordenArchivoOn(): Promise<boolean> {
+    return ordenArchivoDisponible(this.supabase.service);
+  }
+
   private partesOn(): Promise<boolean> {
     return partesDisponibles(this.supabase.service);
   }
@@ -1297,9 +1304,15 @@ export class ConciliacionService {
     userId: string,
     onProgress: (progreso: number, paso: string) => Promise<void>,
   ) {
+    // ORDEN DEL ARCHIVO (12-oct-2026, invariante 55): cada línea guarda su
+    // posición en el estado de cuenta (1 = la primera del archivo, contando
+    // también las que se descartan por no traer fecha) para que el reporte
+    // salga en el mismo orden que el archivo del banco.
     const base = dto.movimientos
-      .filter((m) => m.fecha)
-      .map((m) => ({
+      .map((m, i) => ({ m, orden_archivo: i + 1 }))
+      .filter(({ m }) => m.fecha)
+      .map(({ m, orden_archivo }) => ({
+        orden_archivo,
         cuenta_bancaria_id: dto.cuenta_bancaria_id,
         fecha: m.fecha,
         tipo: m.tipo,
@@ -1376,9 +1389,13 @@ export class ConciliacionService {
         detalle: [] as ResultadoMovimiento[],
       };
     }
-    const rows = nuevos.map((r) => ({
+    // La posición solo se escribe con la columna aplicada (sonda); sin ella
+    // la fila es la de siempre.
+    const conOrdenArchivo = await this.ordenArchivoOn();
+    const rows = nuevos.map(({ orden_archivo, ...r }) => ({
       ...r,
       estado_cuenta_id: estadoCuentaId,
+      ...(conOrdenArchivo ? { orden_archivo } : {}),
     }));
 
     await onProgress(30, `Guardando ${rows.length} movimientos…`);
@@ -5785,12 +5802,17 @@ export class ConciliacionService {
     const colPartesReporte: string = conPartesReporte ? ', gastos_n' : '';
     // NÚMERO DE FACTURA (5-oct-2026): «Notas» lleva la factura del gasto.
     const embedFolioReporte = await this.embedFolio();
+    // ORDEN DEL ARCHIVO (12-oct-2026, invariante 55): de qué estado de
+    // cuenta salió cada línea y en qué posición (la columna, con la sonda).
+    const colOrdenReporte: string = (await this.ordenArchivoOn())
+      ? ', estado_cuenta_id, orden_archivo'
+      : ', estado_cuenta_id';
     let q = this.supabase.service
       .from('movimiento_bancario')
       .select(
         // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
         // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
-        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${embedFolioReporte}), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}${colOrdenReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${embedFolioReporte}), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
@@ -5806,9 +5828,13 @@ export class ConciliacionService {
     if (estado === 'conciliados') q = q.eq('conciliado', true);
     const { data, error } = await q;
     if (error) throw new Error(error.message);
-    // Sobres de grupo normalizados (SOBRE_GRUPO con aviones_n).
-    const movs = await this.normalizarSobresEnMovs(
-      (data ?? []) as unknown as Array<Record<string, unknown>>,
+    // Sobres de grupo normalizados (SOBRE_GRUPO con aviones_n). Y en el
+    // ORDEN DEL ESTADO DE CUENTA (12-oct-2026, invariante 55): el del archivo
+    // cuando todas las líneas salieron del mismo; si no, cronológico.
+    const movs = ordenarComoEstadoDeCuenta(
+      await this.normalizarSobresEnMovs(
+        (data ?? []) as unknown as Array<Record<string, unknown>>,
+      ),
     );
     // Par cargo devuelto ↔ devolución (30-sep-2026): la otra fecha y leyenda.
     await this.anotarReversos(movs);
