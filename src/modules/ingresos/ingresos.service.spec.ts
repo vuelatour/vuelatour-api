@@ -773,6 +773,9 @@ describe('alta DESDE UN ABONO — candados anti doble conteo', () => {
           etiqueta: 'Cobro · vuelo #235',
           cliente: 'Cristy Chavez',
           fecha: '2026-09-08',
+          // ADITIVO (12-oct-2026, invariante 54): la fecha del vuelo viaja
+          // junto a la del cobro (null en este mundo sin fecha_vuelo).
+          fecha_vuelo: null,
           monto: 20400,
           neto: 19380,
         },
@@ -1494,6 +1497,9 @@ describe('«Es el pago de un vuelo» (cobro-de-vuelo desde un abono)', () => {
           etiqueta: 'Cobro · vuelo #312',
           cliente: 'Leticia León Alvarado',
           fecha: '2026-06-01',
+          // ADITIVO (12-oct-2026, invariante 54): la fecha del vuelo viaja
+          // junto a la del cobro (null en este mundo sin fecha_vuelo).
+          fecha_vuelo: null,
           monto: 20400,
           neto: 19380,
         },

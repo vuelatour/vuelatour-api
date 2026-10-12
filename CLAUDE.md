@@ -5038,6 +5038,49 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     roles, orden, cuerpo) y los specs del balance (el refactor del payload
     no cambia una llave: `aircraft-balance.service.modo.spec`).
 
+53. **PERMISO AFAC: TARIFA POR FILA EN EL GENERAL Y BLOQUE «PERMISOS AFAC»
+    EN «OTROS MOVIMIENTOS» (12-oct-2026, API 0.0.69, sin migración).**
+    Pedido de Ale: «una de las columnas de Permisos de AFAC necesitamos que
+    venga con la fórmula en el excel» (columna T, PERMISO AFAC (PROVISIÓN),
+    de la hoja de vuelos) y «en el balance general en la página de otros
+    movimientos no se ven los AFAC, aquí deben estar también».
+    - Cada fila de `BalanceAvionVueloPayload` gana el ADITIVO
+      `permiso_afac_usd_hr` = la tarifa del avión del libro
+      (`permisoAfacUsdHr`; null en EXTERNOS y sin tarifa). El consolidado la
+      hereda por el spread. La provisión `permiso_afac_mxn` NO cambia (sigue
+      siendo `round2(tarifa × z × D)`): pyservices solo la escribe como
+      fórmula por fila en la hoja de la flota (en el individual ya citaba
+      `$B$1`).
+    - `BalanceHojaOtrosMovimientosPayload.afac` (ADITIVO) lo arma la fuente
+      única PURA `aircraft/afac-otros-movimientos.util.ts#bloqueAfacOtrosMovimientos`
+      sobre los libros YA calculados: por avión la provisión del periodo (Σ
+      `totales.permiso_afac_mxn`, cuántas filas la traen, la tarifa) y los
+      permisos PAGADOS (filas de su hoja `permisos`, gastos PERMISO), con
+      totales y `remanente_mxn` = provisión − pagado. **INFORMATIVO por
+      diseño**: la provisión ya resta en cada avión y los permisos pagados en
+      su hoja «permisos»; pyservices lo pinta DEBAJO de TOTALES y no entra a
+      los totales de la pestaña ni al bloque VUELATOUR (invariante 47 lee
+      `filas`/`filas_sueltas`, no `afac`). Sin provisión ni pagos la llave NO
+      viaja (payload byte-idéntico). Nadie recalcula una provisión aquí.
+    - Deploy: pyservices (lee los dos aditivos; un pyservices previo los
+      ignora: columna como valor y sin bloque) → API. Specs:
+      `afac-otros-movimientos.util.spec.ts`.
+
+54. **FECHA DEL VUELO EN LOS CANDIDATOS DE COBRO (12-oct-2026, API 0.0.69,
+    sin migración).** Pedido del cliente: «agregar la fecha del vuelo y la
+    fecha de cobro porque por ejemplo el vuelo es del 04 de octubre y el 06
+    se cobró y solo estamos viendo el del cobro». ADITIVO `fecha_vuelo`
+    (ISO de `vuelo.fecha_vuelo` o `vuelo_grupo.fecha_vuelo`; null si no
+    resuelve — fuente única `common/fecha-vuelo-candidato.util.ts#fechaVueloDe`)
+    en TODO lo que lista cobros o sobres candidatos: `CandidatoCobroVuelo` y
+    `CandidatoSobreGrupo` de `GET conciliacion/movimientos/:id/candidatos-cobro`,
+    `CandidatoAbonoFicha` de `sugerir-abonos` (propuesta y alternativas) y
+    los candidatos del 409 `ABONO_TIENE_COBRO_CANDIDATO` (`details.candidatos`,
+    `cobrosQueCuadranConAbono`). Los embeds `vuelo:vuelo!vuelo_id(folio,
+    fecha_vuelo, …)` y `grupo:vuelo_grupo!grupo_id(…, fecha_vuelo, …)` van
+    en la MISMA consulta (cero round-trips). El panel pinta «vuelo 4 oct ·
+    cobro 6 oct» (`fechasCandidatoCobro`); con un API previo, solo el cobro.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

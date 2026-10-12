@@ -100,6 +100,7 @@ import type {
   ResumenIngresos,
   ResumenIngresosMoneda,
 } from './ingresos.types';
+import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
 
 /** Bucket PRIVADO del comprobante (lo crea la migración 20260924000004). */
 export const BUCKET_INGRESOS = 'ingresos';
@@ -1789,6 +1790,8 @@ export class IngresosService {
       etiqueta: string;
       cliente: string | null;
       fecha: string;
+      /** ADITIVO (12-oct-2026, invariante 54): día del vuelo (ISO). */
+      fecha_vuelo: string | null;
       monto: number;
       neto: number;
       /** Vuelo del cobro (null en sobres de grupo). */
@@ -1801,7 +1804,7 @@ export class IngresosService {
     let qCobros = this.sb
       .from('cobro_vuelo')
       .select(
-        'id, vuelo_id, monto, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+        'id, vuelo_id, monto, comision_banco_monto, fecha_cobro, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
       )
       .gt('monto', 0)
       .is('cobro_grupo_id', null)
@@ -1819,7 +1822,7 @@ export class IngresosService {
       this.sb
         .from('cobro_grupo')
         .select(
-          'id, monto, comision_banco_monto, fecha_cobro, grupo:vuelo_grupo!grupo_id(folio, cliente:cliente_id(nombre))',
+          'id, monto, comision_banco_monto, fecha_cobro, grupo:vuelo_grupo!grupo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
         )
         .gt('monto', 0)
         .in('metodo_cobro', [...METODOS_COBRO_ABONO_MANUAL])
@@ -1877,12 +1880,14 @@ export class IngresosService {
       const p = unwrapOne(
         rel as {
           folio?: unknown;
+          fecha_vuelo?: unknown;
           cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
         } | null,
       );
       const cli = unwrapOne(p?.cliente);
       return {
         folio: p?.folio == null ? null : Number(p.folio),
+        fecha_vuelo: fechaVueloDe(p?.fecha_vuelo),
         cliente: typeof cli?.nombre === 'string' ? cli.nombre : null,
       };
     };
@@ -1899,6 +1904,7 @@ export class IngresosService {
             etiqueta: `Cobro · vuelo #${n.folio ?? '?'}`,
             cliente: n.cliente,
             fecha: diaCancun(c.fecha_cobro as string),
+            fecha_vuelo: n.fecha_vuelo,
             monto: r2(Number(c.monto) || 0),
             neto: neto(c),
             vuelo_id: (c.vuelo_id as string | null) ?? null,
@@ -1914,6 +1920,7 @@ export class IngresosService {
             etiqueta: `Sobre G-${n.folio ?? '?'}`,
             cliente: n.cliente,
             fecha: diaCancun(s.fecha_cobro as string),
+            fecha_vuelo: n.fecha_vuelo,
             monto: r2(Number(s.monto) || 0),
             neto: neto(s),
             vuelo_id: null,

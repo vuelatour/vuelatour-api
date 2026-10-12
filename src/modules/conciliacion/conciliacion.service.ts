@@ -222,6 +222,7 @@ import {
   type MovimientoParReverso,
   type MovimientoReverso,
 } from './reverso-cruce.util';
+import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -291,6 +292,8 @@ export interface CandidatoCobroVuelo {
   cobro_id: string;
   vuelo_id: string;
   folio: number | null;
+  /** ADITIVO (12-oct-2026, invariante 54): día del vuelo, junto al del cobro. */
+  fecha_vuelo: string | null;
   cliente: string | null;
   fecha_cobro: string;
   monto: number;
@@ -309,6 +312,8 @@ export interface CandidatoSobreGrupo extends SobreConciliacion {
   id: string;
   cliente: string | null;
   dif_monto: number;
+  /** ADITIVO (12-oct-2026, invariante 54): fecha del vuelo del grupo. */
+  fecha_vuelo?: string | null;
 }
 
 export type CandidatoCobro = CandidatoCobroVuelo | CandidatoSobreGrupo;
@@ -592,6 +597,8 @@ interface CandidatoAbonoLeido {
   dia: string;
   /** ISO del cobro (o la fecha del ingreso). */
   fecha_cobro: string;
+  /** ADITIVO (12-oct-2026, invariante 54): día del vuelo (cobro o sobre); null en ingresos. */
+  fecha_vuelo?: string | null;
   metodo: string | null;
   cliente: string | null;
   /** Folio del vuelo, del grupo (G-n) o del ingreso (ING-n). */
@@ -3137,7 +3144,7 @@ export class ConciliacionService {
     let qc = this.supabase.service
       .from('cobro_vuelo')
       .select(
-        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+        'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
       )
       .gt('monto', 0)
       .is('cobro_grupo_id', null)
@@ -3150,7 +3157,7 @@ export class ConciliacionService {
     let qs = this.supabase.service
       .from('cobro_grupo')
       .select(
-        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, cliente:cliente_id(nombre))',
+        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, fecha_vuelo, cliente:cliente_id(nombre))',
       )
       .gt('monto', 0)
       .in('metodo_cobro', METODOS_ABONO_MANUAL)
@@ -3201,6 +3208,7 @@ export class ConciliacionService {
           const vuelo = unwrapOne(
             c.vuelo as {
               folio?: unknown;
+              fecha_vuelo?: unknown;
               cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
             } | null,
           );
@@ -3214,6 +3222,7 @@ export class ConciliacionService {
             cobro_id: c.id as string,
             vuelo_id: c.vuelo_id as string,
             folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+            fecha_vuelo: fechaVueloDe(vuelo?.fecha_vuelo),
             cliente:
               typeof cliente?.nombre === 'string' ? cliente.nombre : null,
             fecha_cobro: c.fecha_cobro as string,
@@ -3235,6 +3244,7 @@ export class ConciliacionService {
           );
           const grupo = unwrapOne(
             s.grupo as {
+              fecha_vuelo?: unknown;
               cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
             } | null,
           );
@@ -3245,6 +3255,7 @@ export class ConciliacionService {
             cliente:
               typeof cliente?.nombre === 'string' ? cliente.nombre : null,
             dif_monto: r2(Math.abs(norm.neto - montoMov)),
+            fecha_vuelo: fechaVueloDe(grupo?.fecha_vuelo),
           };
         }),
     ]
@@ -3400,8 +3411,8 @@ export class ConciliacionService {
     const conIngresos = await this.ingresosOn();
     const incluir = conIngresos && opts.anticipos === 'INCLUIR';
     const colsCobro: string = incluir
-      ? 'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))'
-      : 'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))';
+      ? 'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))'
+      : 'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))';
     let qc = this.supabase.service
       .from('cobro_vuelo')
       .select(colsCobro)
@@ -3418,7 +3429,7 @@ export class ConciliacionService {
     let qs = this.supabase.service
       .from('cobro_grupo')
       .select(
-        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, cliente:cliente_id(nombre))',
+        'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, nombre, fecha_vuelo, cliente:cliente_id(nombre))',
       )
       .gt('monto', 0)
       .in('metodo_cobro', [...metodos])
@@ -9254,7 +9265,7 @@ export class ConciliacionService {
             sb
               .from('cobro_vuelo')
               .select(
-                'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+                'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
               )
               .gt('monto', 0)
               .is('cobro_grupo_id', null)
@@ -9271,7 +9282,7 @@ export class ConciliacionService {
             sb
               .from('cobro_grupo')
               .select(
-                'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, cliente:cliente_id(nombre))',
+                'id, grupo_id, monto, moneda, metodo_cobro, fecha_cobro, referencia, comision_banco_monto, grupo:vuelo_grupo!grupo_id(folio, fecha_vuelo, cliente:cliente_id(nombre))',
               )
               .gt('monto', 0)
               .in('metodo_cobro', METODOS_ABONO_MANUAL)
@@ -9328,6 +9339,7 @@ export class ConciliacionService {
         const vuelo = unwrapOne(
           c.vuelo as {
             folio?: unknown;
+            fecha_vuelo?: unknown;
             cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
           } | null,
         );
@@ -9341,6 +9353,7 @@ export class ConciliacionService {
           tipo: 'COBRO_VUELO',
           id: c.id as string,
           monto,
+          fecha_vuelo: fechaVueloDe(vuelo?.fecha_vuelo),
           comision,
           neto: r2(monto - (comision ?? 0)),
           moneda: (c.moneda as string) ?? 'USD',
@@ -9364,6 +9377,7 @@ export class ConciliacionService {
         const grupo = unwrapOne(
           s.grupo as {
             folio?: unknown;
+            fecha_vuelo?: unknown;
             cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
           } | null,
         );
@@ -9377,6 +9391,7 @@ export class ConciliacionService {
           tipo: 'SOBRE_GRUPO',
           id: s.id as string,
           monto,
+          fecha_vuelo: fechaVueloDe(grupo?.fecha_vuelo),
           comision,
           neto: r2(monto - (comision ?? 0)),
           moneda: (s.moneda as string) ?? 'USD',
@@ -9762,6 +9777,7 @@ export class ConciliacionService {
       id: c.id,
       etiqueta,
       fecha: c.dia,
+      fecha_vuelo: c.fecha_vuelo ?? null,
       monto: c.monto,
       neto: c.neto,
       moneda: c.moneda === 'USD' ? 'USD' : 'MXN',

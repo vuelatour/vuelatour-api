@@ -714,6 +714,13 @@ export interface BalanceAvionVueloPayload {
   piloto_mxn: number | null;
   otros_mxn: number | null;
   permiso_afac_mxn: number | null;
+  /**
+   * ADITIVO (12-oct-2026, API 0.0.69, invariante 53): la «Aportación AFAC
+   * USD/hr» del AVIÓN de la fila (la del libro). En la hoja de vuelos de la
+   * FLOTA cada fila trae la de su avión y pyservices escribe PERMISO AFAC
+   * (PROVISIÓN) como fórmula por fila. null = avión sin tarifa / EXTERNOS.
+   */
+  permiso_afac_usd_hr?: number | null;
   costo_total_mxn: number;
   tc_costos: number | null;
   /** Desglose por celda (nota de Excel): una línea por gasto, p. ej.
@@ -1261,6 +1268,37 @@ export interface BalanceOtroMovimientoFilaPayload {
   nota_egreso?: string | null;
 }
 
+/** Provisión AFAC del periodo de UN avión (Σ de su columna PERMISO AFAC). */
+export interface BalanceAfacProvisionAvionPayload {
+  matricula: string;
+  tarifa_usd_hr: number | null;
+  /** Vuelos de ese libro con provisión ≠ 0. */
+  vuelos: number;
+  monto_mxn: number;
+}
+
+/** Permiso AFAC PAGADO en el periodo (fila de la hoja «permisos» de un libro). */
+export interface BalanceAfacPagadoPayload {
+  matricula: string;
+  fecha: string | null;
+  detalle: string;
+  monto_mxn: number | null;
+}
+
+/**
+ * Bloque INFORMATIVO «PERMISOS AFAC» de «otros movimientos» (12-oct-2026,
+ * API 0.0.69, invariante 53): provisión vs pagado. No entra a los totales
+ * de la pestaña ni al bloque VUELATOUR (se contaría dos veces).
+ */
+export interface BalanceAfacOtrosMovimientosPayload {
+  provision: BalanceAfacProvisionAvionPayload[];
+  provision_total_mxn: number;
+  pagados: BalanceAfacPagadoPayload[];
+  pagados_total_mxn: number;
+  /** provisión − pagado (negativo = se pagó más de lo provisionado). */
+  remanente_mxn: number;
+}
+
 export interface BalanceHojaOtrosMovimientosPayload {
   /** Filas ligadas a vuelos (agrupadas por clave). */
   filas: BalanceOtroMovimientoFilaPayload[];
@@ -1273,6 +1311,12 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * byte-idéntico; pyservices cambia sus leyendas solo con ella.
    */
   hay_pago_vendedor_real?: true;
+  /**
+   * ADITIVO (12-oct-2026, API 0.0.69): «PERMISOS AFAC» informativo. Solo
+   * viaja si algún libro trae provisión o permisos pagados; sin él el
+   * payload es byte-idéntico y pyservices pinta la pestaña de siempre.
+   */
+  afac?: BalanceAfacOtrosMovimientosPayload;
 }
 
 export interface BalanceAvionPayload {

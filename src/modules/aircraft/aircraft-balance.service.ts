@@ -76,6 +76,7 @@ import {
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 import type { LibroVista } from '../pyservices/libro-vista.types';
+import { bloqueAfacOtrosMovimientos } from './afac-otros-movimientos.util';
 import { InventoryService } from '../inventory/inventory.service';
 // Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
 // puro, con spec; el costo sale del util del inventario (fuente única).
@@ -1116,6 +1117,11 @@ export class AircraftBalanceService {
       tcFilasOM,
       { porVuelo: comisionesAvionPorVuelo },
     );
+    // «PERMISOS AFAC» en 'otros movimientos' (12-oct-2026, invariante 53):
+    // bloque INFORMATIVO (provisión por avión vs permisos pagados) armado
+    // de los libros ya calculados. Sin provisión ni pagos no viaja.
+    const afac = bloqueAfacOtrosMovimientos(librosAviones);
+    if (afac) otrosMovimientos.afac = afac;
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
       matricula: 'FLOTA',
@@ -3659,6 +3665,9 @@ export class AircraftBalanceService {
         piloto_detalle: pilotoDetalle,
         otros_detalle: otrosDetalle,
         permiso_afac_mxn: X,
+        // Tarifa del avión en CADA fila (12-oct-2026, invariante 53): la
+        // hoja de la flota escribe PERMISO AFAC como fórmula por fila.
+        permiso_afac_usd_hr: permisoAfacUsdHr,
         costo_total_mxn: Y,
         tc_costos: z,
         costo_usd: r2(AE),
