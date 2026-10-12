@@ -8,6 +8,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { LibroVista } from './libro-vista.types';
 import type { EnvVars } from '../../config/env.schema';
 import type { UsoIaPayload } from '../ia-uso/ia-uso.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
@@ -1178,6 +1179,8 @@ export interface BalanceHojaInventarioPayload {
  * avión). `consolidado` = el libro FLOTA; `aviones` alimenta los bloques de
  * la hoja "balance" (los socios son por avión).
  */
+export type { LibroVista } from './libro-vista.types';
+
 export interface BalanceGeneralPayload {
   generado: string;
   periodo_desde: string;
@@ -2102,6 +2105,32 @@ export class PyservicesService {
   ): Promise<Buffer> {
     // Varios libros completos en un workbook: tope más holgado.
     return this.postForBuffer('/pdf/balance-general-xlsx', payload, 60_000);
+  }
+
+  /** El MISMO libro individual como JSON para la VISTA EN PANTALLA
+   *  (12-oct-2026): hojas, celdas con el número del API y su texto
+   *  formateado, fórmulas visibles, estilos y notas. Mismo payload y mismo
+   *  tope que el .xlsx. */
+  async generateBalanceAvionLibro(
+    payload: BalanceAvionPayload,
+  ): Promise<LibroVista> {
+    return this.postForJson<LibroVista>(
+      '/pdf/balance-avion-libro',
+      payload,
+      30_000,
+    );
+  }
+
+  /** El MISMO libro de flota («Balance mensual» / «Balance general» según
+   *  `payload.variante`) como JSON para la vista en pantalla (12-oct-2026). */
+  async generateBalanceGeneralLibro(
+    payload: BalanceGeneralPayload,
+  ): Promise<LibroVista> {
+    return this.postForJson<LibroVista>(
+      '/pdf/balance-general-libro',
+      payload,
+      60_000,
+    );
   }
 
   /** Plantilla Excel de carga masiva de combustibles (catálogos → listas). */

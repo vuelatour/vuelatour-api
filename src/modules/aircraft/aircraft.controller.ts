@@ -97,6 +97,29 @@ export class AircraftController {
     });
   }
 
+  // Vista en pantalla (12-oct-2026): el MISMO libro, como JSON. Literal
+  // ANTES de ':id' (o Nest la captura como id).
+  @Get('balance-general/libro')
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Balance mensual / general VuelaTour como LIBRO JSON para verlo en pantalla sin descargar: las mismas hojas, números, fórmulas visibles, estilos y notas que balance-general.xlsx (es el mismo libro). Mismos parámetros (periodo y modo) y roles que el .xlsx; `archivo` = el nombre con el que bajaría.',
+  })
+  async balanceGeneralLibro(@Query() q: BalanceGeneralQuery) {
+    const { libro, desde, hasta, modo } = await this.balance.libroGeneral(
+      q.desde,
+      q.hasta,
+      q.modo,
+    );
+    return {
+      libro,
+      desde,
+      hasta,
+      modo,
+      archivo: nombreArchivoBalanceGeneral(modo, desde, hasta),
+    };
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get one aircraft' })
   getOne(@Param('id', ParseUUIDPipe) id: string) {
@@ -158,6 +181,30 @@ export class AircraftController {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: `attachment; filename="balance-${matricula}-${desde}-a-${hasta}.xlsx"`,
     });
+  }
+
+  @Get(':id/balance/libro')
+  @Roles(Rol.ADMIN, Rol.ANALISTA)
+  @ApiOperation({
+    summary:
+      'Balance del avión como LIBRO JSON para verlo en pantalla (12-oct-2026): el mismo libro que :id/balance.xlsx, con sus hojas, números, fórmulas visibles, estilos y notas. Mismo periodo y roles.',
+  })
+  async balanceLibro(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() q: BalanceAvionQuery,
+  ) {
+    const { libro, matricula, desde, hasta } = await this.balance.libro(
+      id,
+      q.desde,
+      q.hasta,
+    );
+    return {
+      libro,
+      matricula,
+      desde,
+      hasta,
+      archivo: `balance-${matricula}-${desde}-a-${hasta}.xlsx`,
+    };
   }
 
   @Get(':id/bitacora.pdf')

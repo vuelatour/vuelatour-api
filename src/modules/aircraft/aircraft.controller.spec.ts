@@ -27,6 +27,17 @@ const AVION = 'eeeeeeee-0000-4000-8000-000000000001';
 const XLSX =
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 const RUTA = '/v1/aircraft/balance-general.xlsx';
+/** Un libro JSON mínimo con la forma del contrato (`LibroVista`, versión 1). */
+const LIBRO_VACIO = {
+  version: 1,
+  titulo: 'Balance',
+  archivo: null,
+  generado: null,
+  ancho_columna_default: 8.43,
+  alto_fila_default: 15,
+  estilos: [],
+  hojas: [],
+};
 
 /**
  * «Balance mensual» / «Balance general» (6-oct-2026, API 0.0.64):
@@ -49,6 +60,15 @@ describe('AircraftController — balance de la flota por metadata', () => {
       Rol.ADMIN,
       Rol.ANALISTA,
     ]);
+    // La vista en pantalla (12-oct-2026) trae los mismos números: mismos roles.
+    expect(Reflect.getMetadata(ROLES_KEY, proto.balanceGeneralLibro)).toEqual([
+      Rol.ADMIN,
+      Rol.ANALISTA,
+    ]);
+    expect(Reflect.getMetadata(ROLES_KEY, proto.balanceLibro)).toEqual([
+      Rol.ADMIN,
+      Rol.ANALISTA,
+    ]);
   });
 
   it('`balance-general.xlsx` se declara ANTES de las rutas `:id`', () => {
@@ -59,6 +79,8 @@ describe('AircraftController — balance de la flota por metadata', () => {
     expect(primeraConId).toBeGreaterThanOrEqual(0);
     expect(rutas.indexOf('balance-general.xlsx')).toBeGreaterThanOrEqual(0);
     expect(rutas.indexOf('balance-general.xlsx')).toBeLessThan(primeraConId);
+    expect(rutas.indexOf('balance-general/libro')).toBeGreaterThanOrEqual(0);
+    expect(rutas.indexOf('balance-general/libro')).toBeLessThan(primeraConId);
   });
 });
 
@@ -79,6 +101,21 @@ describe('AircraftController — GET balance-general.xlsx por HTTP (modo)', () =
     ),
     xlsx: jest.fn().mockResolvedValue({
       buffer: Buffer.from('libro'),
+      matricula: 'XB-TST',
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+    }),
+    // Vista en pantalla (12-oct-2026): el mismo libro como JSON.
+    libroGeneral: jest.fn((desde?: string, hasta?: string, modo?: string) =>
+      Promise.resolve({
+        libro: LIBRO_VACIO,
+        desde: desde ?? '2026-10-01',
+        hasta: hasta ?? '2026-10-31',
+        modo,
+      }),
+    ),
+    libro: jest.fn().mockResolvedValue({
+      libro: LIBRO_VACIO,
       matricula: 'XB-TST',
       desde: '2026-09-01',
       hasta: '2026-09-30',
@@ -246,5 +283,67 @@ describe('AircraftController — GET balance-general.xlsx por HTTP (modo)', () =
       'attachment; filename="balance-XB-TST-2026-09-01-a-2026-09-30.xlsx"',
     );
     expect(balance.xlsx).toHaveBeenCalledWith(AVION, '2026-09-01', undefined);
+  });
+
+  it('GET balance-general/libro ⇒ el libro JSON con modo, periodo y el nombre del .xlsx (12-oct-2026)', async () => {
+    const res = await request(http()).get(
+      '/v1/aircraft/balance-general/libro?modo=general&desde=2026-09-01&hasta=2026-09-30',
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      libro: LIBRO_VACIO,
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+      modo: 'general',
+      archivo: 'balance-general-vuelatour-2026-09-01-a-2026-09-30.xlsx',
+    });
+    expect(balance.libroGeneral).toHaveBeenCalledWith(
+      '2026-09-01',
+      '2026-09-30',
+      'general',
+    );
+    expect(balance.xlsxGeneral).not.toHaveBeenCalled();
+    // Sin modo ⇒ mensual, como el .xlsx; un modo inválido ⇒ 400 sin generar.
+    const mensual = await request(http()).get(
+      '/v1/aircraft/balance-general/libro',
+    );
+    expect(mensual.status).toBe(200);
+    const cuerpoMensual = mensual.body as { modo: string; archivo: string };
+    expect(cuerpoMensual.modo).toBe('mensual');
+    expect(cuerpoMensual.archivo).toBe(
+      'balance-mensual-vuelatour-2026-10-01-a-2026-10-31.xlsx',
+    );
+    const malo = await request(http()).get(
+      '/v1/aircraft/balance-general/libro?modo=anual',
+    );
+    expect(malo.status).toBe(400);
+    expect(balance.libroGeneral).toHaveBeenCalledTimes(2);
+  });
+
+  it('GET :id/balance/libro ⇒ el libro JSON del avión; ANALISTA sí, SOCIO no (12-oct-2026)', async () => {
+    const res = await request(http()).get(
+      `/v1/aircraft/${AVION}/balance/libro?desde=2026-09-01`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      libro: LIBRO_VACIO,
+      matricula: 'XB-TST',
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+      archivo: 'balance-XB-TST-2026-09-01-a-2026-09-30.xlsx',
+    });
+    expect(balance.libro).toHaveBeenCalledWith(AVION, '2026-09-01', undefined);
+    rol = Rol.ANALISTA;
+    expect(
+      (await request(http()).get(`/v1/aircraft/${AVION}/balance/libro`)).status,
+    ).toBe(200);
+    rol = Rol.SOCIO;
+    expect(
+      (await request(http()).get(`/v1/aircraft/${AVION}/balance/libro`)).status,
+    ).toBe(403);
+    expect(
+      (await request(http()).get('/v1/aircraft/balance-general/libro')).status,
+    ).toBe(403);
+    expect(balance.libro).toHaveBeenCalledTimes(2);
   });
 });

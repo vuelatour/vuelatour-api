@@ -5015,6 +5015,29 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ayer–mañana y solo ordena); el panel web solo bloquea VISITANTE
       (PILOTO/MECANICO entran, el API les niega los datos).
 
+52. **VISTA EN PANTALLA DE LOS BALANCES = EL MISMO LIBRO (12-oct-2026, API
+    0.0.68).** Pedido del cliente: «ver el balance como el Excel sin
+    descargarlo… mismo formato, colores y estructura» y después «editar la
+    celda y que afecte a lo relacionado». `GET
+    /v1/aircraft/balance-general/libro?desde&hasta&modo` y `GET
+    /v1/aircraft/:id/balance/libro?desde&hasta` (ADMIN/ANALISTA, los mismos
+    DTOs y roles que los .xlsx; la literal va ANTES de `:id`) devuelven
+    `{libro, desde, hasta, modo | matricula, archivo}`: `libro` es el JSON
+    que arma pyservices (`libro_json`, `POST /pdf/balance-*-libro`) del
+    MISMO libro openpyxl que se descarga —hojas, celdas con el número del
+    API y su texto formateado, fórmulas visibles, estilos, combinadas, notas
+    y el rojo de los negativos— y `archivo`, el nombre con que bajaría el
+    .xlsx. REGLA: el payload se arma UNA sola vez (`payloadAvion` /
+    `payloadGeneral`, privados) y lo comparten `xlsx*` y `libro*`: la
+    pantalla y el Excel no pueden divergir ni en un número. El API no lee
+    ni recalcula celdas (`LibroVista` en `pyservices/libro-vista.types.ts`
+    es solo el tipo que transporta). Fase 2 (edición): cada celda podrá
+    traer `vinculo {tipo, id, campo}` que pyservices anota; el PATCH del
+    registro y la regeneración del libro vivirán aquí. Deploy: pyservices
+    (f407786) antes que el API. Spec: `aircraft.controller.spec` (rutas,
+    roles, orden, cuerpo) y los specs del balance (el refactor del payload
+    no cambia una llave: `aircraft-balance.service.modo.spec`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

@@ -69,11 +69,13 @@ import {
   type BalanceAvionGastoFilaPayload,
   type BalanceAvionHojaGastosPayload,
   type BalanceAvionPayload,
+  type BalanceGeneralPayload,
   type BalanceAvionVueloPayload,
   type BalanceGeneralResumenFilaPayload,
   type BalanceHojaOtrosMovimientosPayload,
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
+import type { LibroVista } from '../pyservices/libro-vista.types';
 import { InventoryService } from '../inventory/inventory.service';
 // Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
 // puro, con spec; el costo sale del util del inventario (fuente única).
@@ -600,16 +602,16 @@ export class AircraftBalanceService {
     );
   }
 
-  async xlsx(
+  /**
+   * Periodo validado + payload del libro INDIVIDUAL. UNA sola armadura que
+   * comparten el .xlsx y la vista en pantalla (12-oct-2026): la pantalla y
+   * el Excel no pueden divergir ni en un número.
+   */
+  private async payloadAvion(
     aircraftId: string,
     desde?: string,
     hasta?: string,
-  ): Promise<{
-    buffer: Buffer;
-    matricula: string;
-    desde: string;
-    hasta: string;
-  }> {
+  ): Promise<{ payload: BalanceAvionPayload; desde: string; hasta: string }> {
     const def = this.mesCorrienteCancun();
     const d = desde ?? def.desde;
     const h = hasta ?? def.hasta;
@@ -624,8 +626,46 @@ export class AircraftBalanceService {
     // una carga de combustible SIN avión podría ser de ESTE avión y aquí
     // resta cero veces sin señal — quien cierra con un solo libro debe verlo.
     payload.pendientes.unshift(...(await this.pendienteGasSinAvion(d, h)));
+    return { payload, desde: d, hasta: h };
+  }
+
+  async xlsx(
+    aircraftId: string,
+    desde?: string,
+    hasta?: string,
+  ): Promise<{
+    buffer: Buffer;
+    matricula: string;
+    desde: string;
+    hasta: string;
+  }> {
+    const {
+      payload,
+      desde: d,
+      hasta: h,
+    } = await this.payloadAvion(aircraftId, desde, hasta);
     const buffer = await this.pyservices.generateBalanceAvionXlsx(payload);
     return { buffer, matricula: payload.matricula, desde: d, hasta: h };
+  }
+
+  /** El MISMO libro individual, como JSON para la vista en pantalla (12-oct-2026). */
+  async libro(
+    aircraftId: string,
+    desde?: string,
+    hasta?: string,
+  ): Promise<{
+    libro: LibroVista;
+    matricula: string;
+    desde: string;
+    hasta: string;
+  }> {
+    const {
+      payload,
+      desde: d,
+      hasta: h,
+    } = await this.payloadAvion(aircraftId, desde, hasta);
+    const libro = await this.pyservices.generateBalanceAvionLibro(payload);
+    return { libro, matricula: payload.matricula, desde: d, hasta: h };
   }
 
   /**
@@ -681,6 +721,50 @@ export class AircraftBalanceService {
     modo: ModoBalanceGeneral = MODO_BALANCE_GENERAL_DEFAULT,
   ): Promise<{
     buffer: Buffer;
+    desde: string;
+    hasta: string;
+    modo: ModoBalanceGeneral;
+  }> {
+    const {
+      payload,
+      desde: d,
+      hasta: h,
+    } = await this.payloadGeneral(desde, hasta, modo);
+    const buffer = await this.pyservices.generateBalanceGeneralXlsx(payload);
+    return { buffer, desde: d, hasta: h, modo };
+  }
+
+  /** El MISMO libro de flota, como JSON para la vista en pantalla (12-oct-2026). */
+  async libroGeneral(
+    desde?: string,
+    hasta?: string,
+    modo: ModoBalanceGeneral = MODO_BALANCE_GENERAL_DEFAULT,
+  ): Promise<{
+    libro: LibroVista;
+    desde: string;
+    hasta: string;
+    modo: ModoBalanceGeneral;
+  }> {
+    const {
+      payload,
+      desde: d,
+      hasta: h,
+    } = await this.payloadGeneral(desde, hasta, modo);
+    const libro = await this.pyservices.generateBalanceGeneralLibro(payload);
+    return { libro, desde: d, hasta: h, modo };
+  }
+
+  /**
+   * Periodo y modo validados + payload del libro de flota. UNA sola armadura
+   * que comparten el .xlsx y la vista en pantalla (12-oct-2026): mismos
+   * números, siempre. El modo inválido es 400 ANTES de leer la BD.
+   */
+  private async payloadGeneral(
+    desde?: string,
+    hasta?: string,
+    modo: ModoBalanceGeneral = MODO_BALANCE_GENERAL_DEFAULT,
+  ): Promise<{
+    payload: BalanceGeneralPayload;
     desde: string;
     hasta: string;
     modo: ModoBalanceGeneral;
@@ -1157,7 +1241,7 @@ export class AircraftBalanceService {
       ),
     });
 
-    const buffer = await this.pyservices.generateBalanceGeneralXlsx({
+    const payload: BalanceGeneralPayload = {
       generado: new Date().toISOString(),
       periodo_desde: d,
       periodo_hasta: h,
@@ -1192,8 +1276,8 @@ export class AircraftBalanceService {
       // «Balance mensual» o «Balance general» (6-oct-2026, API 0.0.64): AL
       // FINAL (aditivo). Solo elige la presentación en pyservices.
       variante: modo,
-    });
-    return { buffer, desde: d, hasta: h, modo };
+    };
+    return { payload, desde: d, hasta: h, modo };
   }
 
   /** Periodo default: mes corriente EN HORA CANCÚN (no UTC). */
