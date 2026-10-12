@@ -5189,6 +5189,69 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       directo) y `conciliacion.controller.cobros-lote.spec` (HTTP real: DTO,
       roles, 503 con `code`).
 
+57. **REFACCIÓN A INVENTARIO/TIENDA DESDE EL ALTA DE GASTO (12-oct-2026,
+    API 0.0.72, sin migración).** Pedido del cliente: «si se selecciona un
+    avión al dar de alta un gasto de un artículo de inventario, una nota
+    visual: entra a inventario pero se asignará/venderá a ese avión,
+    quedando la traza del artículo»; «el gasto asignado directo al avión se
+    va al avión sin cambiar el precio de venta; desde inventario debe pedir
+    precio de venta obligatorio; el gasto REFACCION crea el ítem si no
+    existe». Hasta el 0.0.71 un gasto REFACCION con avión era SOLO un gasto
+    indirecto del avión y la bodega solo se alimentaba desde Compras.
+    - **Contrato**: `POST /v1/expenses` acepta, SOLO con `categoria =
+      REFACCION`, el bloque opcional `inventario: { item_id? | nombre (+
+      numero_parte?, categoria?), cantidad > 0, precio_venta ≥ 0 (0 = a
+      costo) OBLIGATORIO, precio_venta_moneda, vender_al_avion? }`
+      (`RefaccionInventarioDto`). Sin el bloque, el alta es la de siempre
+      («directo al avión»: gasto indirecto del avión, la bodega y el precio
+      de venta del artículo NO se tocan). Un PATCH con `inventario` rebota
+      400 `INVENTARIO_SOLO_AL_CREAR`.
+    - **Validación ANTES de tocar la BD** (`refaccion-inventario.util.ts`,
+      PURO + spec): `INVENTARIO_SOLO_REFACCION`, `INVENTARIO_MEDIO_BODEGA`,
+      `INVENTARIO_ITEM_REQUERIDO`, `INVENTARIO_CANTIDAD_INVALIDA`,
+      `INVENTARIO_PRECIO_INVALIDO`, `INVENTARIO_AVION_REQUERIDO` (vender al
+      avión sin `aeronave_id`) e `INVENTARIO_TC_REQUERIDO` (pesos sin
+      `tc_gasto` y sin T.C. oficial del día: la entrada se valoriza con el
+      del gasto o, en su defecto, el oficial, la MISMA fuente que las
+      compras). Códigos estables en `error`.
+    - **El gasto de COMPRA se crea SIN `aeronave_id`/`vuelo_id`/`escala_id`**
+      (`ExpensesService.create` → `crearGasto`): el avión recibe su cargo
+      por la SALIDA de bodega (gasto REFACCION medio BODEGA, hoja
+      «refacciones»); dejarle el avión al gasto de compra lo contaría DOS
+      veces (indirectos + refacciones). Es el mismo modelo que Compras.
+    - **La cadena** (`entrarRefaccionAInventario`, reutiliza lo que existe):
+      `ComprasService.create({gasto_mercancia_id, moneda del gasto,
+      tc_usd_mxn, UNA línea = monto ÷ cantidad a 4 decimales, item_id o
+      nombre/nº de parte/categoría})` → `ComprasService.recibir(id, userId,
+      forzar)` (la ENTRADA del cardex; `findOrCreateItem` crea el artículo
+      si no existe) → `InventoryService.updateItem(precio_venta,
+      precio_venta_moneda)` (el precio queda en la ficha: esta salida y las
+      siguientes lo usan) → con `vender_al_avion`,
+      `InventoryService.createMovimiento(SALIDA, cantidad, aeronave_id,
+      venta_unitaria = precio_venta, fecha = la del gasto, referencia «Gasto
+      <id8>»)` ⇒ el cargo de bodega del avión. Respuesta: el gasto fresco
+      (ya con `compra_id`) + `inventario: { item_id, item_nombre,
+      item_creado, compra_id, compra_folio, entrada_id,
+      precio_venta_guardado, salida {movimiento_id, gasto_id, monto,
+      moneda} | null, error: 'NO_DISPONIBLE'|'ITEM'|'COMPRA'|'RECIBIR'|
+      'SALIDA'|null, avisos[] }`.
+    - **El gasto YA creado NUNCA se borra** (candados de dinero, el patrón
+      del reparto): cada etapa que falla se anota en `inventario.error` +
+      `avisos` con qué hacer (la compra quedó ABIERTA → recibirla desde
+      Compras; la pieza entró pero no salió → darle salida desde el
+      artículo), lo hecho antes se conserva y el alta responde 201. Un
+      replay idempotente (`client_request_id`) de un gasto que ya tiene
+      `compra_id` NO arma otra compra (`inventario: null`).
+    - Módulos: `ExpensesModule` importa `ComprasModule` e `InventoryModule`
+      (ninguno importa `ExpensesModule`: sin ciclo); en el servicio van
+      `@Optional()` para que los specs que lo arman a mano no cambien.
+      Specs: `refaccion-inventario.util.spec.ts` y
+      `expenses.service.inventario.spec.ts` (validación sin insertar, la
+      cadena con sus argumentos exactos, cada etapa fallida, el PATCH).
+    - Panel: ver «Refacción: directo al avión o a Inventario/Tienda» en
+      `vuelatour-next/AGENTS.md` (segmento en el alta, precio de venta
+      obligatorio, nota de la traza con avión, toast por etapa).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,

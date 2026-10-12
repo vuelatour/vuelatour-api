@@ -23,6 +23,32 @@ import {
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
 import { partesDisponibles } from '../../common/partes-disponible.util';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
+// Refacción a Inventario/Tienda desde el alta (12-oct-2026, invariante 57):
+// compra → recibir → precio → salida. Opcionales: sin los módulos (specs) el
+// alta normal no se entera.
+import { ComprasService } from '../compras/compras.service';
+import { InventoryService } from '../inventory/inventory.service';
+import { TipoMovimientoInventario } from '../inventory/dto/inventory.dto';
+import {
+  AVISO_INVENTARIO_NO_DISPONIBLE,
+  CODIGO_INVENTARIO,
+  MENSAJE_SOLO_AL_CREAR,
+  MENSAJE_TC_REQUERIDO,
+  NOTAS_COMPRA_REFACCION,
+  avisoCompraNoCreada,
+  avisoCompraNoRecibida,
+  avisoItemNoExiste,
+  avisoPrecioNoGuardado,
+  avisoSalidaNoHecha,
+  errorRefaccionInventario,
+  lineaCompraDeRefaccion,
+  mensajeDe,
+  notasSalidaRefaccion,
+  referenciaSalidaRefaccion,
+  resultadoVacio,
+  type ItemRefaccion,
+  type RefaccionInventarioResultado,
+} from './refaccion-inventario.util';
 import {
   diaCancun,
   fechaHoraCancun,
@@ -103,6 +129,7 @@ import type {
   CreateTarifaAerodromoDto,
   GenerarPistasDto,
   ListGastosQuery,
+  RefaccionInventarioDto,
   UpdateGastoDto,
   UpdateTarifaAerodromoDto,
 } from './dto/expenses.dto';
@@ -184,6 +211,14 @@ export class ExpensesService {
     @Optional()
     @Inject(forwardRef(() => ConciliacionService))
     private readonly conciliacion?: ConciliacionService,
+    // Refacción a Inventario/Tienda (invariante 57). @Optional: los specs
+    // que arman el servicio a mano no los pasan y el alta normal no los usa.
+    @Optional()
+    @Inject(forwardRef(() => ComprasService))
+    private readonly compras?: ComprasService,
+    @Optional()
+    @Inject(forwardRef(() => InventoryService))
+    private readonly inventory?: InventoryService,
   ) {}
 
   /**
@@ -1190,7 +1225,262 @@ export class ExpensesService {
    * un vuelo (`generarPistas`, `update` al ligar vuelo/tramo) aplican la
    * misma herencia por tramo.
    */
+  /**
+   * Alta de gasto. Con `dto.inventario` (solo REFACCION, invariante 57) la
+   * pieza entra a Inventario/Tienda: se valida ANTES de tocar la BD, el gasto
+   * se crea SIN avión/vuelo (el avión recibe el cargo de bodega por la
+   * SALIDA; con `aeronave_id` en el gasto de compra se contaría dos veces) y
+   * luego se encadena compra → recibir → precio de venta → salida. El gasto
+   * YA creado nunca se borra: cada etapa que falle se DICE en
+   * `inventario.avisos` (candados de dinero, el patrón del reparto).
+   */
   async create(
+    dto: CreateGastoDto,
+    userId: string,
+    rol?: Rol,
+    opts?: { notificar?: boolean },
+  ) {
+    const inv = dto.inventario;
+    if (!inv) return this.crearGasto(dto, userId, rol, opts);
+    delete dto.inventario;
+    const invalido = errorRefaccionInventario(dto, inv);
+    if (invalido) {
+      throw new BadRequestException({
+        message: invalido.message,
+        error: invalido.code,
+      });
+    }
+    const tc = await this.tcParaRefaccion(dto);
+    const ctx = {
+      aeronaveId: dto.aeronave_id ?? null,
+      tc,
+      monto: Number(dto.monto),
+      moneda:
+        String(dto.moneda) === 'MXN' ? ('MXN' as const) : ('USD' as const),
+      fecha: dto.fecha_gasto,
+    };
+    delete dto.aeronave_id;
+    delete dto.vuelo_id;
+    delete dto.escala_id;
+    const gasto = (await this.crearGasto(dto, userId, rol, opts)) as Record<
+      string,
+      unknown
+    >;
+    // Replay idempotente (client_request_id): el gasto ya existía y ya tiene
+    // su compra; no se arma otra.
+    if (gasto.compra_id) return { ...gasto, inventario: null };
+    const r = await this.entrarRefaccionAInventario(gasto, inv, ctx, userId);
+    return { ...(r.gasto ?? gasto), inventario: r.inventario };
+  }
+
+  /** T.C. con el que se valoriza la entrada: el del gasto; en pesos sin él, el oficial del día (400 si tampoco). */
+  private async tcParaRefaccion(dto: CreateGastoDto): Promise<number | null> {
+    const propio =
+      dto.tc_gasto != null && Number(dto.tc_gasto) > 0
+        ? Number(dto.tc_gasto)
+        : null;
+    if (propio != null) return propio;
+    if (String(dto.moneda) !== 'MXN') return null;
+    const oficial = await this.inventory
+      ?.tcOficialDe(dto.fecha_gasto)
+      .catch(() => null);
+    const tc =
+      oficial?.tc != null && Number(oficial.tc) > 0 ? Number(oficial.tc) : null;
+    if (tc == null) {
+      throw new BadRequestException({
+        message: MENSAJE_TC_REQUERIDO,
+        error: CODIGO_INVENTARIO.TC_REQUERIDO,
+      });
+    }
+    return tc;
+  }
+
+  /**
+   * Compra → recibir (ENTRADA; ítem nuevo si no existía) → precio de venta en
+   * la ficha → SALIDA al avión (su cargo de bodega). Cada etapa que falla se
+   * anota y lo hecho antes se conserva: el operador termina desde
+   * Inventario/Tienda.
+   */
+  private async entrarRefaccionAInventario(
+    gasto: Record<string, unknown>,
+    inv: RefaccionInventarioDto,
+    ctx: {
+      aeronaveId: string | null;
+      tc: number | null;
+      monto: number;
+      moneda: 'MXN' | 'USD';
+      fecha: string;
+    },
+    userId: string,
+  ): Promise<{
+    gasto: Record<string, unknown> | null;
+    inventario: RefaccionInventarioResultado;
+  }> {
+    const res = resultadoVacio();
+    const gastoId = gasto.id as string;
+    if (!this.compras || !this.inventory) {
+      res.error = 'NO_DISPONIBLE';
+      res.avisos.push(AVISO_INVENTARIO_NO_DISPONIBLE);
+      return { gasto: null, inventario: res };
+    }
+    // 1. El artículo: existente (su nombre arma la línea) o nuevo.
+    let item: ItemRefaccion;
+    if (inv.item_id) {
+      try {
+        const it = await this.inventory.findItem(inv.item_id);
+        item = {
+          item_id: inv.item_id,
+          nombre:
+            typeof it.nombre === 'string' && it.nombre
+              ? it.nombre
+              : 'Refacción',
+          numero_parte:
+            typeof it.numero_parte === 'string' && it.numero_parte
+              ? it.numero_parte
+              : undefined,
+          categoria:
+            typeof it.categoria === 'string' && it.categoria
+              ? it.categoria
+              : undefined,
+        };
+      } catch (e) {
+        this.logger.warn(
+          `gasto ${gastoId}: refacción a inventario sin ítem ${inv.item_id}: ${mensajeDe(e)}`,
+        );
+        res.error = 'ITEM';
+        res.avisos.push(avisoItemNoExiste(inv.item_id));
+        return { gasto: null, inventario: res };
+      }
+    } else {
+      item = {
+        nombre: (inv.nombre ?? '').trim(),
+        numero_parte: inv.numero_parte?.trim() || undefined,
+        categoria: inv.categoria?.trim() || undefined,
+      };
+    }
+    // 2. La compra: el gasto es su factura de mercancía (una línea).
+    let compra: { id: string; folio?: number | null };
+    try {
+      compra = await this.compras.create(
+        {
+          gasto_mercancia_id: gastoId,
+          moneda: ctx.moneda,
+          ...(ctx.tc != null ? { tc_usd_mxn: ctx.tc } : {}),
+          notas: NOTAS_COMPRA_REFACCION,
+          lineas: [lineaCompraDeRefaccion(ctx.monto, inv, item)],
+        },
+        userId,
+      );
+    } catch (e) {
+      this.logger.warn(
+        `gasto ${gastoId}: no se creó la compra de la refacción: ${mensajeDe(e)}`,
+      );
+      res.error = 'COMPRA';
+      res.avisos.push(avisoCompraNoCreada(mensajeDe(e)));
+      return { gasto: null, inventario: res };
+    }
+    res.compra_id = compra.id;
+    res.compra_folio = compra.folio ?? null;
+    // 3. Recibirla: la ENTRADA del cardex (el ítem se crea si no existía).
+    let recibida: {
+      lineas?: Array<{
+        item_id?: string | null;
+        inventario_movimiento_id?: string | null;
+        nombre?: string | null;
+      }>;
+    };
+    try {
+      recibida = await this.compras.recibir(compra.id, userId, true);
+    } catch (e) {
+      this.logger.warn(
+        `gasto ${gastoId}: la compra ${compra.id} no se recibió: ${mensajeDe(e)}`,
+      );
+      res.error = 'RECIBIR';
+      res.avisos.push(avisoCompraNoRecibida(res.compra_folio, mensajeDe(e)));
+      return { gasto: await this.releerGasto(gastoId), inventario: res };
+    }
+    const linea = recibida.lineas?.[0];
+    res.item_id = linea?.item_id ?? inv.item_id ?? null;
+    res.item_nombre = linea?.nombre ?? item.nombre;
+    res.item_creado = !inv.item_id;
+    res.entrada_id = linea?.inventario_movimiento_id ?? null;
+    // 4. El precio de venta queda en la ficha (esta salida y las siguientes).
+    if (res.item_id) {
+      try {
+        await this.inventory.updateItem(
+          res.item_id,
+          {
+            precio_venta: inv.precio_venta,
+            precio_venta_moneda: inv.precio_venta_moneda,
+          },
+          userId,
+        );
+        res.precio_venta_guardado = true;
+      } catch (e) {
+        res.avisos.push(avisoPrecioNoGuardado(mensajeDe(e)));
+      }
+    }
+    // 5. Vendida al avión: SALIDA al precio de venta ⇒ cargo de bodega del avión.
+    if (inv.vender_al_avion && ctx.aeronaveId && res.item_id) {
+      try {
+        const mov = (await this.inventory.createMovimiento(
+          res.item_id,
+          {
+            tipo: TipoMovimientoInventario.SALIDA,
+            cantidad: inv.cantidad,
+            aeronave_id: ctx.aeronaveId,
+            venta_unitaria: inv.precio_venta,
+            venta_moneda: inv.precio_venta_moneda,
+            fecha_movimiento: ctx.fecha,
+            referencia: referenciaSalidaRefaccion(gastoId),
+            notas: notasSalidaRefaccion(
+              res.item_nombre ?? item.nombre,
+              inv.cantidad,
+              ctx.fecha,
+            ),
+          },
+          userId,
+        )) as {
+          id: string;
+          gasto_generado?: {
+            id?: string;
+            monto?: unknown;
+            moneda?: unknown;
+          } | null;
+        };
+        res.salida = {
+          movimiento_id: mov.id,
+          gasto_id: mov.gasto_generado?.id ?? null,
+          monto: Number(mov.gasto_generado?.monto ?? 0),
+          moneda:
+            typeof mov.gasto_generado?.moneda === 'string'
+              ? mov.gasto_generado.moneda
+              : inv.precio_venta_moneda,
+        };
+      } catch (e) {
+        this.logger.warn(
+          `gasto ${gastoId}: la salida al avión no se hizo: ${mensajeDe(e)}`,
+        );
+        res.error = 'SALIDA';
+        res.avisos.push(avisoSalidaNoHecha(res.compra_folio, mensajeDe(e)));
+      }
+    }
+    return { gasto: await this.releerGasto(gastoId), inventario: res };
+  }
+
+  /** El gasto fresco tras la cadena (ya con `compra_id`); null si no se pudo leer. */
+  private async releerGasto(
+    id: string,
+  ): Promise<Record<string, unknown> | null> {
+    const { data } = await this.supabase.service
+      .from('gasto')
+      .select(COLS)
+      .eq('id', id)
+      .maybeSingle();
+    return data ?? null;
+  }
+
+  private async crearGasto(
     dto: CreateGastoDto,
     userId: string,
     rol?: Rol,
@@ -2756,6 +3046,14 @@ export class ExpensesService {
   }
 
   async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
+    // La entrada a Inventario/Tienda es cosa del ALTA (invariante 57): un
+    // PATCH que la traiga (PartialType la hereda) rebota con código estable.
+    if ((dto as { inventario?: unknown }).inventario !== undefined) {
+      throw new BadRequestException({
+        message: MENSAJE_SOLO_AL_CREAR,
+        error: CODIGO_INVENTARIO.SOLO_AL_CREAR,
+      });
+    }
     // Control de versión (10-sep-2026, B1): `if_updated_at` NO es columna;
     // se aplica como CAS en el UPDATE final (0 filas ⇒ 409 CONFLICTO_VERSION).
     const ifUpdatedAt = dto.if_updated_at;

@@ -3,17 +3,19 @@ import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import { descripcionCategoriasGasto } from '../../../common/categoria-gasto.util';
 import {
+  ArrayMaxSize,
   ArrayMinSize,
   IsArray,
   IsBoolean,
   IsDateString,
   IsEnum,
+  IsISO8601,
   IsIn,
   IsInt,
-  IsISO8601,
   IsNumber,
   IsObject,
   IsOptional,
+  IsPositive,
   IsString,
   IsUUID,
   Matches,
@@ -21,7 +23,6 @@ import {
   MaxLength,
   Min,
   ValidateNested,
-  ArrayMaxSize,
 } from 'class-validator';
 
 export enum CategoriaGasto {
@@ -145,6 +146,75 @@ export enum EstatusFacturacion {
   SOLICITADA = 'SOLICITADA',
   FACTURADA = 'FACTURADA',
   NO_FACTURABLE = 'NO_FACTURABLE',
+}
+
+/**
+ * REFACCIÓN A INVENTARIO/TIENDA (12-oct-2026, invariante 57): con este
+ * bloque, el gasto REFACCION se registra como COMPRA recibida (la pieza
+ * entra al cardex con el monto del gasto como último precio de compra; el
+ * artículo se crea si no existe), el precio de venta queda en la ficha del
+ * artículo y, con `vender_al_avion`, sale de inmediato vendida al avión del
+ * gasto (que recibe el cargo de bodega). El gasto de compra NO carga al
+ * avión: el avión lo paga por su salida. Solo al crear.
+ */
+export class RefaccionInventarioDto {
+  @ApiPropertyOptional({
+    description: 'Artículo existente de Inventario/Tienda',
+  })
+  @IsOptional()
+  @IsUUID()
+  item_id?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 200,
+    description: 'Nombre del artículo NUEVO (sin item_id)',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  nombre?: string;
+
+  @ApiPropertyOptional({ maxLength: 50 })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  numero_parte?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 50,
+    description: "Categoría del artículo nuevo (default 'Refacción')",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(50)
+  categoria?: string;
+
+  @ApiProperty({ description: 'Unidades que entran a inventario (> 0)' })
+  @Type(() => Number)
+  @IsNumber()
+  @IsPositive()
+  cantidad!: number;
+
+  @ApiProperty({
+    description:
+      'Precio de venta UNITARIO al avión (0 = a costo). OBLIGATORIO.',
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(0)
+  precio_venta!: number;
+
+  @ApiProperty({ enum: ['MXN', 'USD'] })
+  @IsIn(['MXN', 'USD'])
+  precio_venta_moneda!: 'MXN' | 'USD';
+
+  @ApiPropertyOptional({
+    description:
+      'true = al guardar, SALIDA inmediata al avión del gasto (aeronave_id) al precio de venta.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  vender_al_avion?: boolean;
 }
 
 export class CreateGastoDto {
@@ -309,6 +379,16 @@ export class CreateGastoDto {
   @IsOptional()
   @IsString()
   notas?: string;
+
+  @ApiPropertyOptional({
+    type: RefaccionInventarioDto,
+    description:
+      'Solo categoría REFACCION y solo al CREAR (invariante 57): la pieza entra a Inventario/Tienda como compra recibida (ítem nuevo si no existe), con precio de venta obligatorio y salida inmediata al avión si se pide.',
+  })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RefaccionInventarioDto)
+  inventario?: RefaccionInventarioDto;
 
   @ApiPropertyOptional({
     description:
