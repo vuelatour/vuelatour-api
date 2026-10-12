@@ -391,6 +391,27 @@ export class LinkMovimientoCobroDto {
   @IsOptional()
   @IsUUID()
   cobro_grupo_id?: string | null;
+
+  /**
+   * 1 ABONO ↔ N COBROS (12-oct-2026, API 0.0.71, invariante 56): los cobros
+   * de vuelo que paga este abono (1..50, sin repetir). Excluyente con
+   * `cobro_id` / `cobro_grupo_id` (400 LOTE_INVALIDO). Con 2+, todos en la
+   * moneda de la cuenta y la suma de sus NETOS debe cuadrar con el abono
+   * (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00).
+   */
+  @ApiPropertyOptional({
+    type: [String],
+    nullable: true,
+    description:
+      'Cobros de vuelo que paga este abono (1..50, sin repetir). Excluyente con cobro_id / cobro_grupo_id. Con 2 o más, todos en la moneda de la cuenta y la suma de sus netos debe cuadrar con el abono (tolerancia de 1 centavo por cobro, mínimo 0.02 y máximo 1.00). 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(50)
+  @ArrayUnique()
+  @IsUUID(undefined, { each: true })
+  cobro_ids?: string[] | null;
 }
 
 /** Candidatos (cobros de vuelo + sobres de grupo) para conciliar un ABONO a mano. */

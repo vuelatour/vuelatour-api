@@ -124,7 +124,6 @@ import {
 } from '../../common/version-cas.util';
 import {
   conciliacionDeCobro,
-  filtroLigaCobros,
   movimientoDeCobro,
   MOV_LIGA_COLS,
   MOV_LIGA_COLS_CON_INGRESO,
@@ -133,6 +132,7 @@ import {
   type MovimientoLiga,
   type ViaConciliacion,
 } from '../../common/cobro-conciliado.util';
+import { leerLigasDeCobros } from '../conciliacion/ligas-cobro.lector';
 import { ingresosDisponibles } from '../../common/ingreso-disponible.util';
 import { etiquetaIngreso } from '../../common/categoria-ingreso.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
@@ -11618,8 +11618,9 @@ export class FlightsService {
       .filter((x): x is string => typeof x === 'string' && x.length > 0);
     // Liga con el banco (fuente única cobro-conciliado.util): los cobros
     // normales por `cobro_id`, las partes de sobre por el `cobro_grupo_id`
-    // de su sobre — una sola consulta con ambas columnas.
-    const filtro = filtroLigaCobros(cobroIds, ids);
+    // de su sobre. Desde el 12-oct-2026 (1 abono ↔ N cobros) el LECTOR
+    // ÚNICO `leerLigasDeCobros` suma las partes de la puente: un cobro
+    // pagado dentro de un lote también sale conciliado.
     // ANTICIPOS (24-sep-2026): solo con la migración de ingresos. Sin ella,
     // consultas y payload IDÉNTICOS a los de siempre (ni una consulta más).
     const conIngresos = await ingresosDisponibles(this.supabase.service);
@@ -11632,12 +11633,14 @@ export class FlightsService {
             )
             .in('id', ids)
         : Promise.resolve({ data: [], error: null }),
-      filtro
-        ? this.supabase.service
-            .from('movimiento_bancario')
-            .select(conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS)
-            .or(filtro)
-        : Promise.resolve({ data: [], error: null }),
+      leerLigasDeCobros<MovimientoLiga & { ingreso_id?: unknown }>(
+        this.supabase.service,
+        {
+          cobroIds,
+          sobreIds: ids,
+          cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+        },
+      ).then((data) => ({ data, error: null as { message: string } | null })),
       // Quién registró cada cobro: UNA consulta con los ids DISTINTOS.
       fetchNombresUsuarios(this.supabase.service, idsRegistradoPor(cobros)),
       conIngresos
@@ -12331,14 +12334,13 @@ export class FlightsService {
     // el cobro es parte de un sobre de grupo, la liga del sobre
     // (`cobro_grupo_id`) — el banco enlaza al sobre, nunca a la parte.
     const sobreId = sobreDeCobro(cobro);
-    const filtro = filtroLigaCobros([cobro.id], sobreId ? [sobreId] : []);
-    if (!filtro) return;
-    const { data, error } = await this.supabase.service
-      .from('movimiento_bancario')
-      .select(MOV_LIGA_COLS)
-      .or(filtro);
-    if (error) throw new Error(error.message);
-    const mov = movimientoDeCobro(cobro, (data ?? []) as MovimientoLiga[]);
+    // Lector único (12-oct-2026): espejo + puente de cobros (un cobro
+    // pagado dentro de un lote también está conciliado).
+    const data = await leerLigasDeCobros(this.supabase.service, {
+      cobroIds: [cobro.id],
+      sobreIds: sobreId ? [sobreId] : [],
+    });
+    const mov = movimientoDeCobro(cobro, data);
     if (mov) {
       throw new ConflictException(
         sobreId && typeof mov.cobro_grupo_id === 'string'

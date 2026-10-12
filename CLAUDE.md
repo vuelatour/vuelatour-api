@@ -5106,6 +5106,89 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - Sin la migración: nada cambia (la sonda apaga lectura y escritura).
       Spec: `orden-estado-cuenta.util.spec.ts`.
 
+56. **1 ABONO ↔ N COBROS DE VUELO («un pago para varios vuelos», 12-oct-2026,
+    API 0.0.71, migración `20261012000002` PENDIENTE de aplicar).** Pedido
+    del cliente: «al momento de vincular un cobro o ingreso puedas
+    seleccionar 2 para un solo cobro… hicieron un pago para el vuelo 379 y
+    380». Hasta el 0.0.70 un abono solo se ligaba a UN cobro
+    (`movimiento_bancario.cobro_id`, índice único).
+    - **Modelo (mismo patrón que la invariante 40)**: la liga vive en la
+      PUENTE `movimiento_bancario_cobro (movimiento_id, cobro_id,
+      monto_parte)` —índice ÚNICO por `cobro_id`: un cobro se concilia UNA
+      vez— y `movimiento_bancario.cobros_n` es su espejo. `cobro_id` queda
+      como ESPEJO DERIVADO (= la parte con `cobros_n = 1`; NULL con 0 o ≥ 2):
+      lo siguen leyendo panel/app previos y el embed `cobro:cobro_vuelo!
+      cobro_id(...)`. Triggers: A (candados por fila: ABONO sin
+      gasto/sobre/ingreso/reverso; cobro positivo, sin sobre, sin anticipo,
+      libre), B (espejos `cobros_n`/`cobro_id`/`conciliado`/
+      `clasificacion_id`/`updated_by`), C (espejo LEGADO: un `cobro_id`
+      escrito directo —API ≤ 0.0.70— se traduce a la puente; sobre un lote
+      ⇒ `LOTE_SOLO_API_NUEVO`), D (con cobros ligados no entra
+      gasto/sobre/ingreso/reverso —`MOVIMIENTO_YA_LIGADO`— y un LOTE no
+      cambia tipo/monto/cuenta ni se desconcilia —`ABONO_LIGADO`—) y K
+      (constraint trigger DIFERIDO: espejos = puente o `COBROS_INCOHERENTES`).
+      El CHECK de ingresos gana `and cobros_n = 0`. Backfill: cada
+      `cobro_id` de hoy ⇒ una parte por |monto| (el abono completo).
+    - **Regla (RPC `conciliacion_ligar_abono_cobros`, espejo PURO
+      `conciliacion/cobros-lote.util.ts#puedeLigarCobros`)**: 1 cobro ⇒
+      parte = |abono|, SIN cuadre ni moneda (la regla de siempre: el
+      operador decide). N ≥ 2 ⇒ todos en la MONEDA DE LA CUENTA
+      (`LOTE_MONEDA_DISTINTA`), parte = NETO del cobro (`monto −
+      comision_banco_monto`, lo que depositó el banco) y `|Σ netos − |abono||
+      ≤ tolerancia_lote(N)` = least(1.00, greatest(0.02, 0.01 × N))
+      (`ABONO_NO_CUADRA` con `details {monto_abono, suma_cobros,
+      diferencia, tolerancia, moneda, cobros[]}`). Otros 409:
+      `COBRO_YA_CONCILIADO` (también dentro del lote de OTRO abono),
+      `COBRO_DE_GRUPO`, `COBRO_DE_ANTICIPO`, `COBRO_INVALIDO` (reembolso),
+      `MOVIMIENTO_YA_LIGADO`, `REVERSO_INVALIDO`, `MOVIMIENTO_CON_LOTE` (un
+      `cobro_id` suelto sobre un lote: se cambia con `cobro_ids`); 400
+      `LOTE_INVALIDO`, `SOLO_ABONOS`, `COBRO_NO_EXISTE`. Errores 23514 con
+      `message «CODIGO: …»`, `hint = CODIGO`, `detail = jsonb`
+      (`leerErrorCobros`); los textos es-MX los arma `mensajeErrorCobros`.
+    - **`PATCH /v1/conciliacion/movimientos/:id/cobro`** gana `cobro_ids`
+      (1..50 uuid sin repetir; excluyente con `cobro_id`/`cobro_grupo_id`).
+      Con la sonda ENCENDIDA todo `cobro_ids` va por la RPC (también con 1:
+      así reemplaza un lote por un cobro en una transacción); `cobro_id`
+      suelto sigue por el camino directo (trigger C mantiene la puente) con
+      la pre-validación de ocupados ampliada a la puente; desvincular
+      (ambos null) sobre un lote llama `conciliacion_desligar_abono_cobros`
+      ANTES del camino de siempre. Respuesta ADITIVA: `cobros_n` y
+      `cobros_estado[{cobro_id, monto_parte, vuelo_id, folio, cliente,
+      fecha_cobro, monto, moneda, metodo_cobro, comision_banco_monto, neto}]`.
+    - **LECTOR ÚNICO `conciliacion/ligas-cobro.lector.ts#leerLigasDeCobros`**:
+      espejo (`cobro_id` / `cobro_grupo_id` / `ingreso_id`, en lotes de ≤
+      150 ids) + partes de la puente expandidas como ligas `{id:
+      movimiento_id, cobro_id}` (`ligasDesdePartes`), para que la fuente
+      única `cobro-conciliado.util` (`movimientoDeCobro`,
+      `cobroEstaConciliado`, `conciliacionDeCobro`) vea un cobro de un lote
+      sin cambiar una línea. Lo usan: `autoMatchAbono` (ocupados), el
+      conteo de libres, `candidatosCobro` (ocupados; `movimiento.cobros_n`
+      y `cobro_ids` ADITIVOS para que el panel marque los que ya paga),
+      `ligasDeCobros` (Paywise y «cobros sin banco»), `abonosPendientes`
+      (universo + puente paginada), `flights.adjuntarSobres` (chip
+      «conciliado» de la card de cobros), `flights.assertCobroSinConciliar`
+      (candado de PATCH/DELETE) e `ingresos.service` (vía de conciliación,
+      ocupados del 409 y el replay de `cobro-de-vuelo`). **Nadie vuelve a
+      consultar `movimiento_bancario` con `filtroLigaCobros` por su
+      cuenta.** `GET movimientos` suma `cobros_n` y, con 2+ partes,
+      `cobros[]` (vuelo, folio, cliente, montos), `cobros_suma` y
+      `cobros_diferencia` (best-effort); el Excel pinta «Conciliado con: 2
+      cobros: vuelo #379 ($1,000.00) · vuelo #380 ($2,500.00)» y la
+      matrícula como unión de sus aviones.
+    - **Sonda ÚNICA** `common/cobros-lote-disponible.util.ts`
+      (`columnaOpcional(movimiento_bancario.cobros_n)`). REGLA DURA: todo
+      select/update/filtro que nombre `cobros_n`, la puente o las RPC va
+      detrás de ella. Sin la migración: UN cobro como el 0.0.70, 2+ ⇒ 503
+      `CONCILIACION_COBROS_NO_DISPONIBLE`, lectores solo con el espejo. El
+      «sí» se memoriza: tras el ROLLBACK, reiniciar el API.
+    - Specs: `cobros-lote.util.spec`, `ligas-cobro.lector.spec`,
+      `cobros-lote-disponible.util.spec`,
+      `conciliacion.service.cobros-lote.spec` (RPC emulada: partes = neto,
+      espejo NULL, 409 sin escribir, lote de OTRO abono, DIFF, desvincular,
+      candidatos, cobros sin banco, lista; sin migración 503 / camino
+      directo) y `conciliacion.controller.cobros-lote.spec` (HTTP real: DTO,
+      roles, 503 con `code`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -5836,6 +5919,21 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **PENDIENTE de aplicar (12-oct-2026; el API 0.0.71 corre con o sin ella)**
+  — `20261012000002_conciliacion_abono_cobros.sql` (invariante 56): tabla
+  puente `movimiento_bancario_cobro` + `movimiento_bancario.cobros_n` +
+  CHECK de ingresos con `cobros_n = 0` + backfill de las ligas `cobro_id`
+  de hoy + 7 triggers (A/B×3/C/D/K) + 2 RPC. **Antes de aplicar**: el
+  DRY-RUN de su cabecera (UNA sentencia `do $dry$`, pegando las secciones
+  1–7 en B; crea filas DRYRUN-20261012000002 que el rollback borra) con
+  escrituras REALES: C1 estructura, C2 backfill, C3 dos cobros que cuadran,
+  C4 ABONO_NO_CUADRA sin escribir, C5 LOTE_MONEDA_DISTINTA, C6
+  COBRO_YA_CONCILIADO, C7 espejo legado y LOTE_SOLO_API_NUEVO, C8 candados
+  D, C9 desligar ⇒ `DRYRUN_OK`. Después `get_advisors` (esperado el INFO de
+  RLS sin policies de la tabla nueva). Depende de 20261002000002,
+  20260924000004 y 20260930000001 (aplicadas). Rollback al pie del archivo
+  (un lote vivo se pierde: desvincularlo antes; reiniciar el API después).
 
 - **PENDIENTE de aplicar (12-oct-2026; el API 0.0.70 corre con o sin ella)**
   — `20261012000001_movimiento_bancario_orden_archivo.sql` (invariante 55):

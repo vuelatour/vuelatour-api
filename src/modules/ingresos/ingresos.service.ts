@@ -43,6 +43,7 @@ import {
   type MovimientoLiga,
   type ViaConciliacion,
 } from '../../common/cobro-conciliado.util';
+import { leerLigasDeCobros } from '../conciliacion/ligas-cobro.lector';
 import {
   etiquetaMetodoCobro,
   METODOS_COBRO_ABONO_MANUAL,
@@ -667,29 +668,15 @@ export class IngresosService {
     const anticipoIds = cobros
       .map((c) => c.ingreso_anticipo_id)
       .filter((x): x is string => typeof x === 'string' && !!x);
-    const [porCobro, porSobre, porAnticipo] = await Promise.all([
-      this.leerPorLotes(cobroIds, (lote) =>
-        this.sb
-          .from('movimiento_bancario')
-          .select(MOV_LIGA_COLS_CON_INGRESO)
-          .in('cobro_id', lote),
-      ),
-      this.leerPorLotes(sobreIds, (lote) =>
-        this.sb
-          .from('movimiento_bancario')
-          .select(MOV_LIGA_COLS_CON_INGRESO)
-          .in('cobro_grupo_id', lote),
-      ),
-      this.leerPorLotes(anticipoIds, (lote) =>
-        this.sb
-          .from('movimiento_bancario')
-          .select(MOV_LIGA_COLS_CON_INGRESO)
-          .in('ingreso_id', lote),
-      ),
-    ]);
-    const movs = [...porCobro, ...porSobre, ...porAnticipo] as Array<
+    // Lector único (12-oct-2026): espejo + puente de cobros, en lotes.
+    const movs = await leerLigasDeCobros<
       MovimientoLiga & { ingreso_id?: unknown }
-    >;
+    >(this.sb, {
+      cobroIds,
+      sobreIds,
+      anticipoIds,
+      cols: MOV_LIGA_COLS_CON_INGRESO,
+    });
     for (const c of cobros) {
       const r = conciliacionDeCobro(
         {
@@ -1856,26 +1843,22 @@ export class IngresosService {
       ? []
       : ((sobres.data ?? []) as unknown as Row[]).filter(cuadra);
     if (cCuadran.length === 0 && sCuadran.length === 0) return [];
-    const [ligC, ligS] = await Promise.all([
-      this.leerPorLotes(
-        cCuadran.map((c) => c.id as string),
-        (lote) =>
-          this.sb
-            .from('movimiento_bancario')
-            .select('id, cobro_id')
-            .in('cobro_id', lote),
-      ),
-      this.leerPorLotes(
-        sCuadran.map((s) => s.id as string),
-        (lote) =>
-          this.sb
-            .from('movimiento_bancario')
-            .select('id, cobro_grupo_id')
-            .in('cobro_grupo_id', lote),
-      ),
-    ]);
-    const ocupC = new Set(ligC.map((m) => m.cobro_id as string));
-    const ocupS = new Set(ligS.map((m) => m.cobro_grupo_id as string));
+    // Lector único (12-oct-2026): un cobro pagado dentro de un lote también
+    // está ocupado aunque su espejo `cobro_id` sea NULL.
+    const ligas = await leerLigasDeCobros(this.sb, {
+      cobroIds: cCuadran.map((c) => c.id as string),
+      sobreIds: sCuadran.map((s) => s.id as string),
+    });
+    const ocupC = new Set(
+      ligas
+        .map((m) => m.cobro_id)
+        .filter((x): x is string => typeof x === 'string'),
+    );
+    const ocupS = new Set(
+      ligas
+        .map((m) => m.cobro_grupo_id)
+        .filter((x): x is string => typeof x === 'string'),
+    );
     const nombreDe = (rel: unknown) => {
       const p = unwrapOne(
         rel as {
@@ -2871,12 +2854,11 @@ export class IngresosService {
       if (ya.vuelo_id !== dto.vuelo_id) {
         throw clientRequestIdEnUso('cobro', dto.client_request_id);
       }
-      const { data: liga } = await this.sb
-        .from('movimiento_bancario')
-        .select('id')
-        .eq('cobro_id', ya.id as string)
-        .maybeSingle();
-      const ligadoA = (liga as { id?: string } | null)?.id ?? null;
+      // Lector único (12-oct-2026): también si quedó dentro de un lote.
+      const ligasYa = await leerLigasDeCobros(this.sb, {
+        cobroIds: [ya.id as string],
+      });
+      const ligadoA = (ligasYa[0]?.id as string | undefined) ?? null;
       if (ligadoA === movId) {
         return {
           cobro: await this.cobroPublico(dto.vuelo_id, ya.id as string, ya),

@@ -24,8 +24,6 @@ import {
 } from '../../common/gasto-reparto.util';
 import {
   esParteDeSobre,
-  filtroLigaCobros,
-  filtroLigaCobrosConAnticipos,
   MOV_LIGA_COLS,
   MOV_LIGA_COLS_CON_INGRESO,
   type MovimientoLiga,
@@ -49,6 +47,26 @@ import {
   esPartesAusentes,
   partesDisponibles,
 } from '../../common/partes-disponible.util';
+import {
+  cobrosLoteDisponibles,
+  errorCobrosLoteNoDisponibles,
+  esCobrosLoteAusente,
+} from '../../common/cobros-lote-disponible.util';
+import {
+  diferenciaLoteCobros,
+  etiquetaConciliadoCobros,
+  leerErrorCobros,
+  LOTE_COBROS_MAX,
+  mensajeErrorCobros,
+  netoDeCobro,
+  puedeLigarCobros,
+  type CobroParaLote,
+} from './cobros-lote.util';
+import {
+  leerLigasDeCobros,
+  partesDeAbonos,
+  type ParteCobroLeida,
+} from './ligas-cobro.lector';
 import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
 import {
   conFolioComprobante,
@@ -324,6 +342,14 @@ export type CandidatoCobro = CandidatoCobroVuelo | CandidatoSobreGrupo;
 export interface LigaCobroInput {
   cobro_id?: string | null;
   cobro_grupo_id?: string | null;
+  /**
+   * 1 ABONO ↔ N COBROS (12-oct-2026, invariante 56): los cobros de vuelo
+   * que paga este abono (1..50). Excluyente con `cobro_id` /
+   * `cobro_grupo_id`. Con la puente aplicada va por la RPC
+   * `conciliacion_ligar_abono_cobros`; con UN elemento y sin la migración
+   * es la liga de siempre.
+   */
+  cobro_ids?: string[] | null;
 }
 
 /**
@@ -790,11 +816,12 @@ export class ConciliacionService {
    * con la de partes (si no, las de siempre).
    */
   private async movCols(): Promise<string> {
-    const [ingresos, partes] = await Promise.all([
+    const [ingresos, partes, cobros] = await Promise.all([
       this.ingresosOn(),
       this.partesOn(),
+      this.cobrosLoteOn(),
     ]);
-    return `${MOV_COLS}${ingresos ? ', ingreso_id' : ''}${partes ? ', gastos_n' : ''}`;
+    return `${MOV_COLS}${ingresos ? ', ingreso_id' : ''}${partes ? ', gastos_n' : ''}${cobros ? ', cobros_n' : ''}`;
   }
 
   // =====================================================================
@@ -813,6 +840,11 @@ export class ConciliacionService {
 
   private partesOn(): Promise<boolean> {
     return partesDisponibles(this.supabase.service);
+  }
+
+  /** ¿Puente abono ↔ cobros aplicada? (12-oct-2026, invariante 56). */
+  private cobrosLoteOn(): Promise<boolean> {
+    return cobrosLoteDisponibles(this.supabase.service);
   }
 
   /** Fila cruda de la puente ⇒ parte (tipos normalizados). */
@@ -2585,15 +2617,15 @@ export class ConciliacionService {
     const ingresoIds = cuadran
       .filter((c) => c.tipo === 'INGRESO')
       .map((c) => c.id);
-    const filtro = conIngresos
-      ? filtroLigaCobrosConAnticipos(cobroIds, sobreIds, ingresoIds)
-      : filtroLigaCobros(cobroIds, sobreIds);
-    const { data: yaEnlazados } = filtro
-      ? await this.supabase.service
-          .from('movimiento_bancario')
-          .select(conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS)
-          .or(filtro)
-      : { data: [] as MovimientoLiga[] };
+    // Ligas del espejo + de la PUENTE de cobros (12-oct-2026): un cobro
+    // dentro del lote de otro abono también está ocupado.
+    const yaEnlazados = await leerLigasDeCobros(this.supabase.service, {
+      cobroIds,
+      sobreIds,
+      anticipoIds: conIngresos ? ingresoIds : [],
+      cols: conIngresos ? MOV_LIGA_COLS_CON_INGRESO : MOV_LIGA_COLS,
+      conPuente: await this.cobrosLoteOn(),
+    });
     const ocupados = new Set<string>();
     for (const m of (yaEnlazados ?? []) as Array<
       MovimientoLiga & { ingreso_id?: unknown }
@@ -2781,15 +2813,19 @@ export class ConciliacionService {
     const sobreIds = ((sobresRes.data ?? []) as Array<Record<string, unknown>>)
       .filter((s) => exacto('SOBRE_GRUPO', s))
       .map((s) => s.id as string);
-    const filtro = filtroLigaCobros(cobroIds, sobreIds);
-    if (!filtro) return 0;
-    const { data: ligados, error } = await sb
-      .from('movimiento_bancario')
-      .select(MOV_LIGA_COLS)
-      .or(filtro);
-    if (error) return null;
+    if (cobroIds.length === 0 && sobreIds.length === 0) return 0;
+    let ligados: MovimientoLiga[];
+    try {
+      ligados = await leerLigasDeCobros(sb, {
+        cobroIds,
+        sobreIds,
+        conPuente: await this.cobrosLoteOn(),
+      });
+    } catch {
+      return null;
+    }
     const ocupados = new Set<string>();
-    for (const m of (ligados ?? []) as MovimientoLiga[]) {
+    for (const m of ligados) {
       if (typeof m.cobro_id === 'string') ocupados.add(m.cobro_id);
       if (typeof m.cobro_grupo_id === 'string') ocupados.add(m.cobro_grupo_id);
     }
@@ -2804,21 +2840,55 @@ export class ConciliacionService {
    * («concilia contra el sobre del grupo G-n»).
    */
   async linkCobro(movId: string, liga: LigaCobroInput, userId: string) {
-    const cobroId = liga.cobro_id ?? null;
+    let cobroId = liga.cobro_id ?? null;
     const sobreId = liga.cobro_grupo_id ?? null;
     if (cobroId && sobreId) {
       throw new BadRequestException(
         'Indica un cobro de vuelo O un sobre de grupo, no los dos.',
       );
     }
+    // 1 ABONO ↔ N COBROS (12-oct-2026, invariante 56): `cobro_ids`. Con la
+    // puente aplicada SIEMPRE va por la RPC (también con un solo cobro: así
+    // reemplaza un lote por un cobro o al revés en una transacción); sin
+    // ella, UN cobro es la liga de siempre y 2+ responde 503.
+    if (Array.isArray(liga.cobro_ids)) {
+      if (cobroId || sobreId) {
+        throw new BadRequestException({
+          message: 'Manda cobro_ids O cobro_id / cobro_grupo_id, no los dos.',
+          error: 'LOTE_INVALIDO',
+        });
+      }
+      const ids = [
+        ...new Set(
+          liga.cobro_ids
+            .filter((x) => typeof x === 'string' && x)
+            .map((x) => normalizarUuid(x)),
+        ),
+      ];
+      if (ids.length === 0 || ids.length > LOTE_COBROS_MAX) {
+        throw new BadRequestException({
+          message:
+            ids.length === 0
+              ? 'Elige al menos un cobro.'
+              : `Un abono paga a lo más ${LOTE_COBROS_MAX} cobros.`,
+          error: 'LOTE_INVALIDO',
+        });
+      }
+      if (await this.cobrosLoteOn()) {
+        return this.ligarCobrosPorRpc(movId, ids, userId);
+      }
+      if (ids.length >= 2) throw errorCobrosLoteNoDisponibles();
+      cobroId = ids[0];
+    }
     // Emparejado como devolución de un cargo (30-sep-2026): 409 antes de
     // tocar nada (el trigger también lo rechazaría, con peor mensaje).
     await this.bloquearSiEnReverso(movId);
-    const [conIngresos, conPartes] = await Promise.all([
+    const [conIngresos, conPartes, conCobros] = await Promise.all([
       this.ingresosOn(),
       this.partesOn(),
+      this.cobrosLoteOn(),
     ]);
-    const colsMov = `id, gasto_id${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}`;
+    const colsMov = `id, gasto_id${conIngresos ? ', ingreso_id' : ''}${conPartes ? ', gastos_n' : ''}${conCobros ? ', cobros_n' : ''}`;
     const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
       .select(colsMov)
@@ -2831,11 +2901,30 @@ export class ConciliacionService {
       gasto_id: string | null;
       gastos_n?: number | null;
       ingreso_id?: string | null;
+      cobros_n?: number | null;
     };
     // Un abono conciliado con un INGRESO no se liga ni se desvincula por
     // aquí (su camino es PATCH movimientos/:id/ingreso).
     if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
       throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
+    }
+    // Un LOTE de cobros (2+, 12-oct-2026) solo se cambia con `cobro_ids`
+    // (RPC): el espejo `cobro_id` ya es NULL y el trigger legado rechazaría
+    // tocarlo. Desvincular (ambos null) sí: se sueltan las partes ANTES y
+    // el camino de siempre termina de dejarlo pendiente.
+    if (conCobros && Number(mov.cobros_n) >= 2) {
+      if (cobroId !== null || sobreId !== null) {
+        throw new ConflictException({
+          message: mensajeErrorCobros(
+            'LOTE_SOLO_API_NUEVO',
+            { cobros_n: mov.cobros_n },
+            '',
+          ),
+          error: 'MOVIMIENTO_CON_LOTE',
+          details: { movimiento_id: movId, cobros_n: mov.cobros_n },
+        });
+      }
+      await this.desligarCobrosPorRpc(movId, userId);
     }
     // Un movimiento que ya paga gasto(s) NO admite además un cobro (revisión
     // 2-oct-2026): su dinero se contaría dos veces. El trigger A custodia el
@@ -2915,6 +3004,19 @@ export class ConciliacionService {
           'Ese cobro ya está conciliado con otro movimiento bancario.',
         );
       }
+      // En la PUENTE (12-oct-2026): un cobro dentro del lote de OTRO abono
+      // no tiene espejo `cobro_id` y la consulta de arriba no lo ve.
+      if (conCobros) {
+        const ligas = await leerLigasDeCobros(this.supabase.service, {
+          cobroIds: [cobroId],
+          conPuente: true,
+        });
+        if (ligas.some((l) => l.id !== movId)) {
+          throw new ConflictException(
+            'Ese cobro ya está conciliado con otro movimiento bancario.',
+          );
+        }
+      }
     }
 
     if (sobreId) {
@@ -2986,6 +3088,21 @@ export class ConciliacionService {
             details: { liga: 'INGRESO' },
           });
         }
+        // Puente de cobros (12-oct-2026): el trigger legado rechaza tocar
+        // un lote y la puente un cobro ya ocupado en otro abono — 409 con
+        // su código y texto en es-MX, nunca el 400 genérico.
+        const deCobros = leerErrorCobros(error);
+        if (deCobros.codigo && deCobros.codigo !== 'LOTE_INVALIDO') {
+          throw new ConflictException({
+            message: mensajeErrorCobros(
+              deCobros.codigo,
+              deCobros.details,
+              deCobros.texto,
+            ),
+            error: deCobros.codigo,
+            details: deCobros.details ?? undefined,
+          });
+        }
         if (msg.includes('cobro_excluyente') || !msg) {
           throw new BadRequestException(
             'Un movimiento no puede ligar un cobro de vuelo y un sobre de grupo a la vez.',
@@ -2998,6 +3115,360 @@ export class ConciliacionService {
       throw new Error(error.message);
     }
     return data as unknown as Record<string, unknown>;
+  }
+
+  // =====================================================================
+  // 1 ABONO ↔ N COBROS (12-oct-2026, API 0.0.71, invariante 56)
+  // =====================================================================
+
+  /**
+   * Liga el abono con 1..N cobros por la RPC `conciliacion_ligar_abono_cobros`
+   * (UNA transacción en BD: valida, escribe la puente como DIFF y recalcula
+   * los espejos). Antes, en TS y con los MISMOS textos, se pre-valida para
+   * responder 409 claros sin tocar nada (`puedeLigarCobros`, ocupados por
+   * `leerLigasDeCobros`). La BD es el candado real (carreras): su error se
+   * traduce con `errorRpcCobros`.
+   */
+  private async ligarCobrosPorRpc(
+    movId: string,
+    ids: string[],
+    userId: string,
+  ) {
+    const sb = this.supabase.service;
+    await this.bloquearSiEnReverso(movId);
+    const [conIngresos, conPartes] = await Promise.all([
+      this.ingresosOn(),
+      this.partesOn(),
+    ]);
+    const colsMov = `id, tipo, monto, cuenta_bancaria_id, gasto_id, cobro_grupo_id, cobros_n${conPartes ? ', gastos_n' : ''}${conIngresos ? ', ingreso_id' : ''}`;
+    const { data: movRaw, error: movErr } = await sb
+      .from('movimiento_bancario')
+      .select(colsMov)
+      .eq('id', movId)
+      .maybeSingle();
+    if (movErr) throw new Error(movErr.message);
+    if (!movRaw) throw new NotFoundException(`Movimiento ${movId} not found`);
+    const mov = movRaw as unknown as {
+      id: string;
+      tipo: string;
+      monto: number | string;
+      cuenta_bancaria_id: string;
+      gasto_id: string | null;
+      gastos_n: number | null;
+      cobro_grupo_id: string | null;
+      cobros_n: number | null;
+      ingreso_id?: string | null;
+    };
+    if (mov.tipo !== (TipoMovimientoBancario.ABONO as string)) {
+      throw new BadRequestException({
+        message: mensajeErrorCobros('SOLO_ABONOS', null, ''),
+        error: 'SOLO_ABONOS',
+      });
+    }
+    if (typeof mov.ingreso_id === 'string' && mov.ingreso_id) {
+      throw await this.conflictoMovimientoConIngreso(mov.ingreso_id);
+    }
+    if (ligadoAGasto(mov)) {
+      throw new ConflictException({
+        message: mensajeMovimientoConGastos(
+          Math.max(gastosLigadosN(mov), mov.gasto_id ? 1 : 0),
+        ),
+        error: 'MOVIMIENTO_YA_LIGADO',
+        details: {
+          liga: 'GASTO',
+          movimiento_id: movId,
+          gasto_id: mov.gasto_id,
+          gastos_n: Math.max(gastosLigadosN(mov), mov.gasto_id ? 1 : 0),
+        },
+      });
+    }
+    if (mov.cobro_grupo_id) {
+      throw new ConflictException({
+        message:
+          'Este abono ya está conciliado con el sobre de un grupo: desvincúlalo antes de ligarle cobros de vuelo.',
+        error: 'MOVIMIENTO_YA_LIGADO',
+        details: {
+          liga: 'SOBRE',
+          movimiento_id: movId,
+          cobro_grupo_id: mov.cobro_grupo_id,
+        },
+      });
+    }
+    const monedaCuenta = await this.monedaCuenta(mov.cuenta_bancaria_id);
+    if (ids.length >= 2 && !monedaCuenta) {
+      throw new ServiceUnavailableException({
+        message:
+          'No se pudo leer la moneda de la cuenta del abono: vuelve a intentarlo en unos segundos.',
+        error: 'CUENTA_SIN_MONEDA',
+      });
+    }
+    const colsCobro = conIngresos
+      ? 'id, vuelo_id, monto, moneda, comision_banco_monto, cobro_grupo_id, ingreso_anticipo_id, vuelo:vuelo!vuelo_id(folio)'
+      : 'id, vuelo_id, monto, moneda, comision_banco_monto, cobro_grupo_id, vuelo:vuelo!vuelo_id(folio)';
+    const filas = await this.leerPorLotes(ids, (lote) =>
+      sb.from('cobro_vuelo').select(colsCobro).in('id', lote),
+    );
+    const porId = new Map(filas.map((c) => [String(c.id), c]));
+    const faltan = ids.filter((id) => !porId.has(id));
+    if (faltan.length > 0) {
+      throw new BadRequestException({
+        message: mensajeErrorCobros('COBRO_NO_EXISTE', null, ''),
+        error: 'COBRO_NO_EXISTE',
+        details: { cobro_ids: faltan },
+      });
+    }
+    const cobros: CobroParaLote[] = ids.map((id) => {
+      const c = porId.get(id)!;
+      return {
+        id,
+        monto: Number(c.monto) || 0,
+        moneda: typeof c.moneda === 'string' ? c.moneda : null,
+        comision_banco_monto: (c.comision_banco_monto as number | null) ?? null,
+        folio: unwrapOne(c.vuelo as { folio?: unknown } | null)?.folio as
+          | number
+          | null
+          | undefined,
+        cobro_grupo_id: c.cobro_grupo_id,
+        ingreso_anticipo_id: c.ingreso_anticipo_id,
+      };
+    });
+    // Un cobro de anticipo: 409 con el folio ING-n, como en la liga simple.
+    for (const c of cobros) {
+      if (typeof c.ingreso_anticipo_id === 'string' && c.ingreso_anticipo_id) {
+        throw await this.conflictoCobroDeAnticipo(c.ingreso_anticipo_id);
+      }
+    }
+    const veredicto = puedeLigarCobros({
+      montoAbono: mov.monto,
+      monedaCuenta,
+      cobros,
+    });
+    if (!veredicto.ok) {
+      const cuerpo = {
+        message: veredicto.mensaje,
+        error: veredicto.codigo,
+        details: { movimiento_id: movId, ...veredicto.details },
+      };
+      throw veredicto.codigo === 'LOTE_INVALIDO'
+        ? new BadRequestException(cuerpo)
+        : new ConflictException(cuerpo);
+    }
+    // Ocupados por OTRO movimiento (espejo o puente).
+    const ligas = await leerLigasDeCobros(sb, {
+      cobroIds: ids,
+      conPuente: true,
+    });
+    const ocupado = ligas.find((l) => l.id !== movId);
+    if (ocupado) {
+      const c = cobros.find((x) => x.id === ocupado.cobro_id);
+      throw new ConflictException({
+        message: mensajeErrorCobros(
+          'COBRO_YA_CONCILIADO',
+          { folio: c?.folio ?? null, cobro_id: ocupado.cobro_id },
+          '',
+        ),
+        error: 'COBRO_YA_CONCILIADO',
+        details: {
+          cobro_id: ocupado.cobro_id,
+          folio: c?.folio ?? null,
+          movimiento_id: ocupado.id,
+        },
+      });
+    }
+    const { error } = await sb.rpc('conciliacion_ligar_abono_cobros', {
+      p_movimiento_id: movId,
+      p_cobro_ids: ids,
+      p_actor: userId,
+    });
+    if (error) throw this.errorRpcCobros(error, movId);
+    return this.respuestaCobros(movId);
+  }
+
+  /** Suelta TODAS las partes de cobros del abono (RPC H). */
+  private async desligarCobrosPorRpc(
+    movId: string,
+    userId: string,
+  ): Promise<void> {
+    const { error } = await this.supabase.service.rpc(
+      'conciliacion_desligar_abono_cobros',
+      { p_movimiento_id: movId, p_actor: userId },
+    );
+    if (error) throw this.errorRpcCobros(error, movId);
+  }
+
+  /** Error de la RPC/puente de cobros ⇒ 409/400/503 con `code` y texto es-MX. */
+  private errorRpcCobros(
+    error: {
+      code?: string | null;
+      message?: string | null;
+      hint?: string | null;
+      details?: string | null;
+    },
+    movId: string,
+  ): Error {
+    const { codigo, texto, details } = leerErrorCobros(error);
+    const msg = error.message ?? '';
+    if (!codigo) {
+      this.logger.error(
+        `Conciliación del abono ${movId}: la base respondió ${error.code ?? 'sin código'}: ${msg}`,
+      );
+      if (esCobrosLoteAusente(error)) return errorCobrosLoteNoDisponibles();
+      return new Error(msg);
+    }
+    this.logger.warn(
+      `Conciliación del abono ${movId}: la base rechazó la liga (${codigo}): ${msg}`,
+    );
+    const cuerpo = {
+      message: mensajeErrorCobros(codigo, details, texto),
+      error: codigo,
+      details: details ?? undefined,
+    };
+    return codigo === 'LOTE_INVALIDO'
+      ? new BadRequestException(cuerpo)
+      : new ConflictException(cuerpo);
+  }
+
+  /**
+   * Respuesta tras ligar cobros: la fila RELEÍDA (`movCols` + `cobros_n`) +
+   * `cobros_estado[]` (cada parte con su vuelo), ADITIVOS. Con UNA parte el
+   * espejo `cobro_id` viaja como siempre.
+   */
+  private async respuestaCobros(movId: string) {
+    const { data, error } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select(await this.movCols())
+      .eq('id', movId)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    const partes = await partesDeAbonos(this.supabase.service, [movId]);
+    const fichas = await this.fichasDeCobrosEnLote(partes);
+    return {
+      ...((data as unknown as Record<string, unknown> | null) ?? {
+        id: movId,
+      }),
+      cobros_estado: partes.map((p) => ({
+        cobro_id: p.cobro_id,
+        monto_parte: p.monto_parte,
+        ...(fichas.get(p.cobro_id) ?? {}),
+      })),
+    };
+  }
+
+  /** Ficha corta de cada cobro de un lote (vuelo, folio, cliente, montos). */
+  private async fichasDeCobrosEnLote(
+    partes: ReadonlyArray<ParteCobroLeida>,
+  ): Promise<
+    Map<
+      string,
+      {
+        vuelo_id: string | null;
+        folio: number | null;
+        cliente: string | null;
+        fecha_cobro: string | null;
+        monto: number;
+        moneda: string | null;
+        metodo_cobro: string | null;
+        comision_banco_monto: number | null;
+        neto: number;
+      }
+    >
+  > {
+    const out = new Map<
+      string,
+      {
+        vuelo_id: string | null;
+        folio: number | null;
+        cliente: string | null;
+        fecha_cobro: string | null;
+        monto: number;
+        moneda: string | null;
+        metodo_cobro: string | null;
+        comision_banco_monto: number | null;
+        neto: number;
+      }
+    >();
+    const ids = [...new Set(partes.map((p) => p.cobro_id))];
+    if (ids.length === 0) return out;
+    const filas = await this.leerPorLotes(ids, (lote) =>
+      this.supabase.service
+        .from('cobro_vuelo')
+        .select(
+          'id, vuelo_id, monto, moneda, metodo_cobro, fecha_cobro, comision_banco_monto, vuelo:vuelo!vuelo_id(folio, cliente:cliente_id(nombre))',
+        )
+        .in('id', lote),
+    );
+    for (const c of filas) {
+      const vuelo = unwrapOne(
+        c.vuelo as {
+          folio?: unknown;
+          cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+        } | null,
+      );
+      const cliente = unwrapOne(vuelo?.cliente);
+      const comision = Number(c.comision_banco_monto) || 0;
+      out.set(String(c.id), {
+        vuelo_id: typeof c.vuelo_id === 'string' ? c.vuelo_id : null,
+        folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+        cliente: typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+        fecha_cobro: typeof c.fecha_cobro === 'string' ? c.fecha_cobro : null,
+        monto: r2(Number(c.monto) || 0),
+        moneda: typeof c.moneda === 'string' ? c.moneda : null,
+        metodo_cobro:
+          typeof c.metodo_cobro === 'string' ? c.metodo_cobro : null,
+        comision_banco_monto: comision > 0 ? r2(comision) : null,
+        neto: netoDeCobro(c.monto as number, c.comision_banco_monto as number),
+      });
+    }
+    return out;
+  }
+
+  /**
+   * 1 abono ↔ N cobros (12-oct-2026): a cada ABONO con 2+ partes de la
+   * página le pega `cobros[]` (cada parte con vuelo, folio, cliente,
+   * montos), `cobros_suma` y `cobros_diferencia` (= |monto| − Σ partes).
+   * Con UNA parte, el embed `cobro` de siempre basta. Best-effort: si una
+   * lectura falla no se anota NADA (el panel dice «detalle no disponible»).
+   */
+  private async anotarCobrosLote(
+    filas: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const conLote = filas.filter((m) => Number(m.cobros_n) >= 2);
+    if (conLote.length === 0) return;
+    try {
+      const partes = await partesDeAbonos(
+        this.supabase.service,
+        conLote.map((m) => m.id as string),
+      );
+      const fichas = await this.fichasDeCobrosEnLote(partes);
+      const porMov = new Map<string, ParteCobroLeida[]>();
+      for (const p of partes) {
+        const l = porMov.get(p.movimiento_id) ?? [];
+        l.push(p);
+        porMov.set(p.movimiento_id, l);
+      }
+      for (const m of conLote) {
+        const ps = porMov.get(m.id as string) ?? [];
+        m.cobros = ps.map((p) => ({
+          cobro_id: p.cobro_id,
+          monto_parte: p.monto_parte,
+          ...(fichas.get(p.cobro_id) ?? {}),
+        }));
+        m.cobros_suma =
+          ps.length > 0
+            ? r2(ps.reduce((acc, p) => acc + p.monto_parte, 0))
+            : null;
+        m.cobros_diferencia = diferenciaLoteCobros(Number(m.monto) || 0, ps);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudieron leer los cobros de cada abono (lote): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      for (const m of conLote) {
+        delete m.cobros;
+        delete m.cobros_suma;
+        delete m.cobros_diferencia;
+      }
+    }
   }
 
   /**
@@ -3136,22 +3607,34 @@ export class ConciliacionService {
     /** ADITIVO (24-sep-2026, solo con la migración de ingresos). */
     ingresos?: CandidatoIngresoAbono[];
   }> {
-    const { data: mov, error: movErr } = await this.supabase.service
+    // 1 abono ↔ N cobros (12-oct-2026): `cobros_n` y los cobros que YA paga
+    // (para que el panel los marque al editar el lote), con la sonda.
+    const conCobrosLote = await this.cobrosLoteOn();
+    const colsMovCand: string = `id, fecha, monto, tipo, cuenta_bancaria_id, cobro_id, cobro_grupo_id${conCobrosLote ? ', cobros_n' : ''}`;
+    const { data: movRaw, error: movErr } = await this.supabase.service
       .from('movimiento_bancario')
-      .select(
-        'id, fecha, monto, tipo, cuenta_bancaria_id, cobro_id, cobro_grupo_id',
-      )
+      .select(colsMovCand)
       .eq('id', movId)
       .maybeSingle();
     if (movErr) throw new Error(movErr.message);
-    if (!mov) throw new NotFoundException(`Movimiento ${movId} not found`);
-    if (mov.tipo !== TipoMovimientoBancario.ABONO) {
+    if (!movRaw) throw new NotFoundException(`Movimiento ${movId} not found`);
+    const mov = movRaw as unknown as {
+      id: string;
+      fecha: string;
+      monto: number | string;
+      tipo: string;
+      cuenta_bancaria_id: string;
+      cobro_id: string | null;
+      cobro_grupo_id: string | null;
+      cobros_n?: number | null;
+    };
+    if (mov.tipo !== (TipoMovimientoBancario.ABONO as string)) {
       throw new BadRequestException(
         'Solo un ABONO (entrada de dinero) se concilia contra cobros de vuelo o sobres de grupo.',
       );
     }
-    const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id as string);
-    const { lo, hi } = this.ventanaAbono(mov.fecha as string, dias);
+    const moneda = await this.monedaCuenta(mov.cuenta_bancaria_id);
+    const { lo, hi } = this.ventanaAbono(mov.fecha, dias);
     // INGRESOS (24-sep-2026): los cobros nacidos de un anticipo NUNCA son
     // candidatos (su dinero se concilia como anticipo) y los ingresos
     // registrados se ofrecen aparte (`ingresos`). Sin la migración: lo de
@@ -3192,32 +3675,36 @@ export class ConciliacionService {
     const cobros = (cobrosRes.data ?? []) as Array<Record<string, unknown>>;
     const sobres = (sobresRes.data ?? []) as Array<Record<string, unknown>>;
 
-    // Ya conciliados con OTRO movimiento (fuente única: MOV_LIGA_COLS).
-    const filtro = filtroLigaCobros(
-      cobros.map((c) => c.id as string),
-      sobres.map((s) => s.id as string),
-    );
+    // Ya conciliados con OTRO movimiento (fuente única: lector de ligas =
+    // espejo + puente de cobros). Los que YA paga ESTE abono siguen siendo
+    // candidatos (el panel los marca al editar el lote).
     const ocupadosCobro = new Set<string>();
     const ocupadosSobre = new Set<string>();
-    if (filtro) {
-      const { data: ligas, error: ligasErr } = await this.supabase.service
-        .from('movimiento_bancario')
-        .select(MOV_LIGA_COLS)
-        .or(filtro);
-      if (ligasErr) throw new Error(ligasErr.message);
-      for (const m of (ligas ?? []) as MovimientoLiga[]) {
+    {
+      const ligas = await leerLigasDeCobros(this.supabase.service, {
+        cobroIds: cobros.map((c) => c.id as string),
+        sobreIds: sobres.map((s) => s.id as string),
+        conPuente: conCobrosLote,
+      });
+      for (const m of ligas) {
         if (m.id === movId) continue;
         if (typeof m.cobro_id === 'string') ocupadosCobro.add(m.cobro_id);
         if (typeof m.cobro_grupo_id === 'string')
           ocupadosSobre.add(m.cobro_grupo_id);
       }
     }
+    const yaLigados: string[] =
+      conCobrosLote && Number(mov.cobros_n) > 0
+        ? (await partesDeAbonos(this.supabase.service, [movId])).map(
+            (p) => p.cobro_id,
+          )
+        : [];
     const partesN = await this.contarPartesPorSobre(
       sobres.map((s) => s.id as string),
     );
 
     const montoMov = Number(mov.monto) || 0;
-    const refMs = Date.parse(`${mov.fecha as string}T00:00:00Z`);
+    const refMs = Date.parse(`${mov.fecha}T00:00:00Z`);
     const candidatos: CandidatoCobro[] = [
       ...cobros
         .filter((c) => !ocupadosCobro.has(c.id as string))
@@ -3285,13 +3772,20 @@ export class ConciliacionService {
       .slice(0, CANDIDATOS_MAX);
     const salida = {
       movimiento: {
-        id: mov.id as string,
-        fecha: mov.fecha as string,
+        id: mov.id,
+        fecha: mov.fecha,
         monto: r2(montoMov),
-        tipo: mov.tipo as string,
+        tipo: mov.tipo,
         moneda,
-        cobro_id: (mov.cobro_id as string | null) ?? null,
-        cobro_grupo_id: (mov.cobro_grupo_id as string | null) ?? null,
+        cobro_id: mov.cobro_id ?? null,
+        cobro_grupo_id: mov.cobro_grupo_id ?? null,
+        // ADITIVOS (12-oct-2026): cuántos cobros paga ya y cuáles.
+        ...(conCobrosLote
+          ? {
+              cobros_n: Number(mov.cobros_n) || 0,
+              cobro_ids: yaLigados,
+            }
+          : {}),
       },
       candidatos,
       exactos: candidatos.filter((c) => c.dif_monto === 0).length,
@@ -3301,8 +3795,8 @@ export class ConciliacionService {
       ...salida,
       ingresos: await this.ingresosCandidatosDeAbono(
         movId,
-        mov.cuenta_bancaria_id as string,
-        mov.fecha as string,
+        mov.cuenta_bancaria_id,
+        mov.fecha,
         montoMov,
         moneda,
         dias,
@@ -3536,18 +4030,15 @@ export class ConciliacionService {
   private async ligasDeCobros(
     cobros: ReadonlyArray<CobroPaywise>,
   ): Promise<Map<string, string>> {
-    const filtro = filtroLigaCobros(
-      cobros.filter((c) => c.tipo === 'COBRO_VUELO').map((c) => c.id),
-      cobros.filter((c) => c.tipo === 'SOBRE_GRUPO').map((c) => c.id),
-    );
     const out = new Map<string, string>();
-    if (!filtro) return out;
-    const { data, error } = await this.supabase.service
-      .from('movimiento_bancario')
-      .select(MOV_LIGA_COLS)
-      .or(filtro);
-    if (error) throw new Error(error.message);
-    for (const m of (data ?? []) as MovimientoLiga[]) {
+    // Espejo + puente de cobros (12-oct-2026): un cobro de un lote también
+    // está conciliado.
+    const data = await leerLigasDeCobros(this.supabase.service, {
+      cobroIds: cobros.filter((c) => c.tipo === 'COBRO_VUELO').map((c) => c.id),
+      sobreIds: cobros.filter((c) => c.tipo === 'SOBRE_GRUPO').map((c) => c.id),
+      conPuente: await this.cobrosLoteOn(),
+    });
+    for (const m of data) {
       if (typeof m.cobro_id === 'string')
         out.set(`COBRO_VUELO:${m.cobro_id}`, m.id as string);
       if (typeof m.cobro_grupo_id === 'string')
@@ -5800,6 +6291,10 @@ export class ConciliacionService {
     // cargo que paga VARIOS gastos salen de la puente.
     const conPartesReporte = await this.partesOn();
     const colPartesReporte: string = conPartesReporte ? ', gastos_n' : '';
+    // 1 abono ↔ N cobros (12-oct-2026): «Conciliado con» y «Matrícula» de un
+    // abono que paga VARIOS cobros salen de la puente.
+    const conCobrosReporte = await this.cobrosLoteOn();
+    const colCobrosReporte: string = conCobrosReporte ? ', cobros_n' : '';
     // NÚMERO DE FACTURA (5-oct-2026): «Notas» lleva la factura del gasto.
     const embedFolioReporte = await this.embedFolio();
     // ORDEN DEL ARCHIVO (12-oct-2026, invariante 55): de qué estado de
@@ -5812,7 +6307,7 @@ export class ConciliacionService {
       .select(
         // escala_id/aeronave_id del gasto y aeronave_id de los vuelos: para
         // resolver la MATRÍCULA de la línea (avionDelGasto, fuente única).
-        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}${colOrdenReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${embedFolioReporte}), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoReporte}${colReversoReporte}${colPartesReporte}${colCobrosReporte}${colOrdenReporte}, gasto:gasto!gasto_id(categoria, vuelo_id, escala_id, aeronave_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio, aeronave_id), ${embedFolioReporte}), cobro:cobro_vuelo!cobro_id(metodo_cobro, vuelo:vuelo!vuelo_id(folio, aeronave_id)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
       )
       .eq('cuenta_bancaria_id', cuentaBancariaId)
       // `fecha` es DATE-only: se compara con YYYY-MM-DD a secas.
@@ -5887,6 +6382,61 @@ export class ConciliacionService {
     }
     const gastosDeLotes = [...lotes.values()].flat();
 
+    // Lotes de COBROS (12-oct-2026): partes y vuelos de los abonos con 2+
+    // cobros, en lote. Un fallo TUMBA el reporte (como con los gastos).
+    const lotesCobros = new Map<
+      string,
+      Array<{
+        cobro_id: string;
+        monto_parte: number;
+        folio: number | null;
+        cliente: string | null;
+        aeronave_id: string | null;
+      }>
+    >();
+    if (conCobrosReporte) {
+      const movsLoteCobros = movs.filter((m) => Number(m.cobros_n) >= 2);
+      if (movsLoteCobros.length > 0) {
+        const partes = await partesDeAbonos(
+          this.supabase.service,
+          movsLoteCobros.map((m) => m.id as string),
+        );
+        const cobrosLote = await this.leerPorLotes(
+          [...new Set(partes.map((p) => p.cobro_id))],
+          (lote) =>
+            this.supabase.service
+              .from('cobro_vuelo')
+              .select(
+                'id, vuelo:vuelo!vuelo_id(folio, aeronave_id, cliente:cliente_id(nombre))',
+              )
+              .in('id', lote),
+        );
+        const cobroDe = new Map(cobrosLote.map((c) => [String(c.id), c]));
+        for (const p of partes) {
+          const c = cobroDe.get(p.cobro_id);
+          const vuelo = unwrapOne(
+            c?.vuelo as {
+              folio?: unknown;
+              aeronave_id?: unknown;
+              cliente?: { nombre?: unknown } | { nombre?: unknown }[] | null;
+            } | null,
+          );
+          const cliente = unwrapOne(vuelo?.cliente);
+          const l = lotesCobros.get(p.movimiento_id) ?? [];
+          l.push({
+            cobro_id: p.cobro_id,
+            monto_parte: p.monto_parte,
+            folio: vuelo?.folio == null ? null : Number(vuelo.folio),
+            cliente:
+              typeof cliente?.nombre === 'string' ? cliente.nombre : null,
+            aeronave_id:
+              typeof vuelo?.aeronave_id === 'string' ? vuelo.aeronave_id : null,
+          });
+          lotesCobros.set(p.movimiento_id, l);
+        }
+      }
+    }
+
     // Mapas para la matrícula: repartos manuales de los gastos ligados y
     // aeronave/escala (patrón del Libro Dinero; la herencia escala→vuelo la
     // aplica avionDelGasto).
@@ -5933,6 +6483,18 @@ export class ConciliacionService {
     const matriculaDeMov = (m: Record<string, unknown>): string => {
       const lote = lotes.get(m.id as string);
       if (lote && lote.length >= 2) return matriculaDeLote(lote);
+      // Lote de COBROS: unión de las matrículas de sus vuelos con «+».
+      const loteCobros = lotesCobros.get(m.id as string);
+      if (loteCobros && loteCobros.length >= 2) {
+        const mats = new Set<string>();
+        for (const c of loteCobros) {
+          const mat = c.aeronave_id
+            ? (mapas.matriculas.get(c.aeronave_id) ?? '')
+            : '';
+          if (mat) mats.add(mat);
+        }
+        return [...mats].join(' + ');
+      }
       const gasto = unwrapOne(
         m.gasto as {
           escala_id?: string | null;
@@ -5973,6 +6535,14 @@ export class ConciliacionService {
     };
 
     const conQue = (m: Record<string, unknown>): string => {
+      // LOTE de COBROS (12-oct-2026): «2 cobros: vuelo #379 ($1,000.00) · …».
+      const loteCobros = lotesCobros.get(m.id as string);
+      if (loteCobros && loteCobros.length >= 2) {
+        return etiquetaConciliadoCobros(
+          loteCobros,
+          diferenciaLoteCobros(Number(m.monto) || 0, loteCobros),
+        );
+      }
       // LOTE: «3 gastos: Operaciones · vuelo #315 ($2,801.40) · …».
       const lote = lotes.get(m.id as string);
       if (lote && lote.length >= 2) {
@@ -6374,6 +6944,9 @@ export class ConciliacionService {
     // 1 cargo ↔ N gastos (2-oct-2026): con la migración, cuántos gastos paga.
     const conPartes = await this.partesOn();
     const colPartes: string = conPartes ? ', gastos_n' : '';
+    // 1 abono ↔ N cobros (12-oct-2026): con la migración, cuántos cobros paga.
+    const conCobrosLote = await this.cobrosLoteOn();
+    const colCobros: string = conCobrosLote ? ', cobros_n' : '';
     // NÚMERO DE FACTURA (5-oct-2026): `gasto.folio_comprobante` y el de cada
     // `gastos[]` del lote (ADITIVOS; los campos crudos no viajan).
     const embedFolioLista = await this.embedFolio();
@@ -6383,7 +6956,7 @@ export class ConciliacionService {
         // El gasto/cobro conciliado trae su detalle y su vuelo (folio) para
         // que la fila sea verificable de un clic desde el panel.
         // `gasto.medio_pago` (ADITIVO 6-oct-2026): «Efectivo» en la celda.
-        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
+        `${MOV_COLS}${embedIngresoLista}${colReverso}${colPartes}${colCobros}, gasto:gasto!gasto_id(id, monto, moneda, categoria, fecha_gasto, vuelo_id, medio_pago, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio), ${embedFolioLista}), cobro:cobro_vuelo!cobro_id(monto, moneda, metodo_cobro, fecha_cobro, vuelo_id, vuelo:vuelo!vuelo_id(folio)), ${SOBRE_EMBED}, clasificacion:conciliacion_clasificacion!clasificacion_id(nombre)`,
         { count: 'exact' },
       )
       .order('fecha', { ascending: false })
@@ -6415,6 +6988,8 @@ export class ConciliacionService {
     await this.anotarReversos(filas);
     // ADITIVOS (2-oct-2026): `gastos[]`, `gastos_suma`, `gastos_diferencia`.
     if (conPartes) await this.anotarPartes(filas, embedFolioLista);
+    // ADITIVOS (12-oct-2026): `cobros[]`, `cobros_suma`, `cobros_diferencia`.
+    if (conCobrosLote) await this.anotarCobrosLote(filas);
     return {
       // `cobro_grupo` (aditivo): sobre de grupo conciliado, forma SOBRE_GRUPO.
       data: filas,
@@ -9354,6 +9929,23 @@ export class ConciliacionService {
           ocupados.add(`SOBRE_GRUPO:${m.cobro_grupo_id}`);
         if (typeof m.ingreso_id === 'string')
           ocupados.add(`INGRESO:${m.ingreso_id}`);
+      }
+      // Puente de cobros (12-oct-2026): los cobros de un LOTE no tienen
+      // espejo `cobro_id`; se leen de la puente (universo, paginado).
+      if (await this.cobrosLoteOn()) {
+        const partes = await this.leerPaginado(
+          (a, b) =>
+            sb
+              .from('movimiento_bancario_cobro')
+              .select('cobro_id')
+              .order('cobro_id', { ascending: true })
+              .range(a, b),
+          TOPE_UNIVERSO * 3,
+        );
+        for (const p of partes.filas) {
+          if (typeof p.cobro_id === 'string')
+            ocupados.add(`COBRO_VUELO:${p.cobro_id}`);
+        }
       }
       const truncado =
         cobros.truncado ||

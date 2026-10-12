@@ -363,7 +363,7 @@ export class ConciliacionController {
   @Patch('movimientos/:id/cobro')
   @ApiOperation({
     summary:
-      'Vincula o desvincula un ABONO con un cobro de vuelo (cobro_id) O con el SOBRE de un grupo (cobro_grupo_id), excluyentes; ambos null = desvincular. Una parte de sobre responde 409 COBRO_DE_GRUPO.',
+      'Vincula o desvincula un ABONO con un cobro de vuelo (cobro_id) O con el SOBRE de un grupo (cobro_grupo_id), excluyentes; ambos null = desvincular (también un lote). Una parte de sobre responde 409 COBRO_DE_GRUPO. 1 ABONO ↔ N COBROS (12-oct-2026, 0.0.71): `cobro_ids` (1..50) = los cobros de vuelo que paga este abono; con 2+ todos en la moneda de la cuenta y Σ netos = abono ± tolerancia (1 ¢ por cobro, 0.02–1.00). Respuesta ADITIVA: cobros_n y cobros_estado[{cobro_id, monto_parte, vuelo_id, folio, cliente, monto, neto}]. 409: ABONO_NO_CUADRA {monto_abono, suma_cobros, diferencia, tolerancia, cobros[]}, LOTE_MONEDA_DISTINTA, COBRO_YA_CONCILIADO, COBRO_DE_GRUPO, COBRO_DE_ANTICIPO, COBRO_INVALIDO, MOVIMIENTO_YA_LIGADO, MOVIMIENTO_CON_LOTE (cobro_id suelto sobre un lote), REVERSO_INVALIDO; 400 LOTE_INVALIDO, SOLO_ABONOS; 503 CONCILIACION_COBROS_NO_DISPONIBLE con 2+ sin la migración.',
   })
   linkCobro(
     @Param('id', ParseUUIDPipe) id: string,
@@ -375,6 +375,7 @@ export class ConciliacionController {
       {
         cobro_id: dto.cobro_id ?? null,
         cobro_grupo_id: dto.cobro_grupo_id ?? null,
+        ...(Array.isArray(dto.cobro_ids) ? { cobro_ids: dto.cobro_ids } : {}),
       },
       c.userId,
     );
