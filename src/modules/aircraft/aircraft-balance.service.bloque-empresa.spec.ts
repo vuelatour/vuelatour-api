@@ -61,7 +61,10 @@ const TC_OFICIAL = 25;
  * Vigencia de las COMISIONES A CARGO DEL AVIÓN (API 0.0.65) POSTERIOR a los
  * vuelos de septiembre de este mundo: aquí se prueba el bloque de siempre
  * (pre-vigencia, byte a byte). El bloque con la regla vive en
- * `aircraft-balance.service.comisiones.spec`.
+ * `aircraft-balance.service.comisiones.spec`. Desde el 12-oct-2026 (API
+ * 0.0.73, invariante 58) el #501 sin gasto real ya no provisiona el pago al
+ * vendedor en «otros movimientos»: su egreso es 1,850 (TUAS + comisión
+ * bancaria) = 92.50 USD, 80 USD menos que hasta el 0.0.72.
  */
 const CONFIG_VIGENCIA_POSTERIOR = {
   fecha: () => Promise.resolve('2026-12-01'),
@@ -259,12 +262,15 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
   it('otros movimientos (filas y sueltas): cada fila regresa a USD con SU T.C.', async () => {
     const { g, diasOficiales } = await general(mundoEmpresa());
     const e = g.empresa!;
-    // Fila #501 (K 20): ingreso 4,600 ⇒ 230; egreso 3,450 ⇒ 172.50.
+    // Fila #501 (K 20): ingreso 4,600 ⇒ 230; egreso 1,850 ⇒ 92.50 (TUAS
+    // 1,500 + comisión bancaria 350; sin gasto real el pago al vendedor ya
+    // no se provisiona — invariante 58, API 0.0.73; hasta el 0.0.72 eran
+    // 3,450 ⇒ 172.50).
     // Sueltas en pesos con el oficial de su día (25): TUAS 80 ⇒ 3.20,
     // gas 250 ⇒ 10.00, ING-12 5,000 ⇒ 200 y su comisión 50 ⇒ 2.00.
     // ING-13 en USD con SU T.C. 18.5: 1,850 ⇒ 100.
     expect(e.ingresos_propios_usd).toBe(530);
-    expect(e.pagos_vendedor_usd).toBe(187.7);
+    expect(e.pagos_vendedor_usd).toBe(107.7);
     expect(e.movimientos_sin_tc).toBe(0);
     // #501 cobró 2,000 de 2,230 USD: la parte de VuelaTour (230) cobrada
     // es 2,000 − round2(2,000 × 2,000/2,230) = 206.28 ⇒ 23.72 por cobrar
@@ -339,7 +345,7 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(e.participaciones).toEqual([]);
     expect(e.participacion_usd).toBe(0);
     expect(e.ingresos_propios_usd).toBe(530);
-    expect(e.resultado_usd).toBe(r2(530 - 187.7 - e.otros_gastos_empresa_usd!));
+    expect(e.resultado_usd).toBe(r2(530 - 107.7 - e.otros_gastos_empresa_usd!));
     expect(e.nota).toContain('no es socia de ningún avión');
   });
 
@@ -348,7 +354,7 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     const e = g.empresa!;
     // T.C. promedio de «otros movimientos» = (20 + 18) / 2 = 19.
     expect(e.ingresos_propios_usd).toBe(r2(230 + 5000 / 19 + 100));
-    expect(e.pagos_vendedor_usd).toBe(r2(172.5 + (80 + 250 + 50) / 19));
+    expect(e.pagos_vendedor_usd).toBe(r2(92.5 + (80 + 250 + 50) / 19));
   });
 
   it('un gasto suelto en USD regresa con SU T.C. (el que lo llevó a pesos), no con el oficial', async () => {
@@ -368,8 +374,8 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     );
     const om = g.consolidado.otros_movimientos!;
     expect(om.filas_sueltas.some((s) => s.egreso_mxn === 170)).toBe(true);
-    // 187.70 de siempre + los 10 USD exactos (170 ÷ 17), no 170 ÷ 25.
-    expect(g.empresa!.pagos_vendedor_usd).toBe(197.7);
+    // 107.70 de siempre + los 10 USD exactos (170 ÷ 17), no 170 ÷ 25.
+    expect(g.empresa!.pagos_vendedor_usd).toBe(117.7);
   });
 
   it('una fila sin T.C. deja su lado y el resultado VACÍOS (jamás un número que omite dinero)', async () => {
@@ -384,7 +390,7 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     );
     const e = g.empresa!;
     expect(e.ingresos_propios_usd).toBeNull();
-    expect(e.pagos_vendedor_usd).toBe(187.7);
+    expect(e.pagos_vendedor_usd).toBe(107.7);
     expect(e.movimientos_sin_tc).toBe(1);
     expect(e.resultado_usd).toBeNull();
   });
@@ -473,9 +479,9 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     const om = g.consolidado.otros_movimientos!;
     expect(om.filas.some((f) => f.egreso_mxn === 190)).toBe(true);
     // Promedio de la pestaña = (20 + 18) / 2 = 19 (el vuelo sin K no
-    // cuenta): #501 172.50 + TUA 190 ÷ 19 = 10 + sueltas (80 + 250 + 50) ÷
+    // cuenta): #501 92.50 + TUA 190 ÷ 19 = 10 + sueltas (80 + 250 + 50) ÷
     // 19 = 20. Sin el respaldo, la fila saldría «sin T.C.» y el lado null.
-    expect(g.empresa!.pagos_vendedor_usd).toBe(202.5);
+    expect(g.empresa!.pagos_vendedor_usd).toBe(122.5);
     expect(g.empresa!.movimientos_sin_tc).toBe(0);
   });
 
@@ -513,7 +519,7 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(e.otros_gastos_empresa_usd).toBe(g.gastos_empresa.usd);
     expect(e.tienda_utilidad_usd).toBe(100); // 1,850 ÷ 18.5
     // Sueltas en pesos sin oficial: (80 + 250 + 50) ÷ 19 = 20.
-    expect(e.pagos_vendedor_usd).toBe(192.5);
+    expect(e.pagos_vendedor_usd).toBe(112.5);
     expect(e.ingresos_propios_usd).toBe(r2(230 + 5000 / 19 + 100));
   });
 

@@ -2581,7 +2581,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       cargo del avión … (regla sep-2026)» con el egreso completo y el
       cliente la leyó como comisión duplicada: ELIMINADA. Sin provisión de
       avión (antes de la vigencia, vuelo no realizado, EXTERNOS, llamada
-      directa) la rama de siempre, byte a byte.
+      directa) la rama de siempre, byte a byte. **SUPERSEDIDO el
+      12-oct-2026 (invariante 58): la PROVISIÓN ya no se pinta en «otros
+      movimientos»** — con `n = 0` la línea de comisión no lleva egreso
+      (ni «cubierto por el avión … · PROVISIÓN (sin gasto real capturado)»
+      por $0.00 ni la provisión por el mismo monto); todo lo de `n > 0`
+      sigue igual.
     - **Libro Dinero** («Otros ingresos» y utilidades): misma partición por
       vuelo. `n = 0` ⇒ provisión (`comisionProvisionadaMxn`); `n > 0` ⇒
       egreso real en la primera línea de comisión con `NOTA_PAGO_VENDEDOR_REAL`
@@ -4474,11 +4479,21 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       después de comisiones. Su `nota` (revisión 7-oct-2026, insumo
       opcional `pagoVendedorCubiertoPorAvion`, que `xlsxGeneral` prende
       cuando algún avión carga provisión del vendedor —la misma condición
-      de la rama «cubierto por el avión»—) dice «Egresos = pago al vendedor
-      (real o provisión; en los vuelos completados de la regla de
-      comisiones, solo lo que el pago real exceda la provisión que ya carga
-      el avión), …»; sin la señal, la nota de siempre byte a byte (el
-      «real o provisión» a secas contradecía el pie de pyservices). El T.C.
+      de la rama «cubierto por el avión»—) decía hasta el 0.0.72 «Egresos =
+      pago al vendedor (real o provisión; en los vuelos completados de la
+      regla de comisiones, solo lo que el pago real exceda la provisión que
+      ya carga el avión), …» y, sin la señal, «(real o provisión)» a secas
+      (que contradecía el pie de pyservices). Desde el 0.0.73 (invariante
+      58) la pestaña ya no provisiona el pago al vendedor y
+      `pagos_vendedor_usd` baja esas provisiones en los vuelos sin
+      provisión del avión, así que la `nota` dice «Egresos = pago al
+      vendedor (solo el gasto real «Comisión del vendedor» capturado; en
+      los vuelos completados de la regla de comisiones, solo lo que ese
+      pago exceda la provisión que ya carga el avión), …» y, sin la señal,
+      «(solo el gasto real «Comisión del vendedor» capturado)»: el «real o
+      provisión» era falso y chocaba con la fila 2 y el pie nuevos de
+      pyservices (revisión adversaria del 12-oct-2026; specs
+      `balance-empresa.util.spec` y `comisiones-general.spec`). El T.C.
       por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
       `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
       que sale byte-idéntico, y sin él no hay consultas nuevas): fila por
@@ -4793,7 +4808,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       BillPocket»; la fila del vuelo conserva el ingreso de la comisión
       cobrada (UNA vez) y, si los aviones cargan la provisión del vendedor
       (`comision_vendedor_prov_mxn` > 0 en sus filas), su egreso del
-      vendedor es `pagoVendedorCubiertoPorAvion` (0.0.66, abajo). El 0.0.65
+      vendedor es `pagoVendedorCubiertoPorAvion` (0.0.66, abajo).
+      **SUPERSEDIDO el 12-oct-2026 (invariante 58): la PROVISIÓN ya no se
+      pinta en «otros movimientos»** — sin gasto real `COMISION_VENDEDOR`
+      la fila no lleva egreso del vendedor (ni la marca del amarillo) en
+      ninguna regla; `pagoVendedorCubiertoPorAvion` solo se llama con gasto
+      real. El 0.0.65
       agregaba UNA línea de INGRESO por avión «comisión del vendedor a cargo
       del avión XB-PEV (regla sep-2026)» con el egreso completo (provisión o
       real): ELIMINADA en el 0.0.66 junto con `conceptoVendedorACargoDelAvion`
@@ -4882,7 +4902,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
         y ahora no (queda «parcial: faltan»; PENDIENTE de confirmar con el
         cliente, ver «Pendientes conocidos»). Conservación (spec): Σ
         ganancia de los libros + Σ remanente de la pestaña == la regla
-        anterior menos esos faltantes.
+        anterior menos esos faltantes. **SUPERSEDIDO el 12-oct-2026
+        (invariante 58) en lo que toca al pago SIN gasto real**: ya no sale
+        el egreso por $0 con la marca de PROVISIÓN (la fila no lleva egreso
+        del vendedor) y la conservación pasa a ser «la regla anterior − las
+        provisiones de los vuelos sin gasto real − esos faltantes»; con
+        gasto real, todo lo de arriba sigue byte a byte.
       - **`balance.comisiones_usd`** (por avión, ADITIVO): Σ por fila de
         lo que la fila RESTÓ, en USD. Con K (lo normal):
         `comisionesDelVuelo(...).total_usd` — la MISMA cifra por vuelo que
@@ -4931,7 +4956,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
         pyservices (su `_MARCA_PROVISION` ya la busca; verificado pintando
         el general con el pyservices 3e33997: amarillas las mismas filas que
         con la regla anterior). Su test `_FILA_CUBIERTA` todavía copia el
-        texto SIN la marca. (2)
+        texto SIN la marca. SUPERSEDIDO el 12-oct-2026 (invariante 58): con
+        el API 0.0.73 ninguna fila lleva la marca ni el amarillo. (2)
         `comisiones_usd` sin K = lo que la fila restó (arriba). (3) La
         `nota` del bloque VUELATOUR precisa el egreso del vendedor cubierto
         (invariante 47). (4) `regla_comisiones` sigue SIN viajar (ni en los
@@ -5251,6 +5277,99 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     - Panel: ver «Refacción: directo al avión o a Inventario/Tienda» en
       `vuelatour-next/AGENTS.md` (segmento en el alta, precio de venta
       obligatorio, nota de la traza con avión, toast por etapa).
+
+58. **SIN GASTO REAL, SIN PROVISIÓN DEL VENDEDOR EN «OTROS MOVIMIENTOS»
+    (12-oct-2026, API 0.0.73, sin migración).** Pedido del cliente (punto
+    17 del lote del 12-oct-2026), textual: «provisión: los gastos que
+    todavía no se hacen no deben aparecer». Con la captura de la hoja 'otros
+    movimientos' del Balance general en pantalla precisó: «son estas las
+    provisiones que están en amarillo las que te digo» — las filas de
+    vuelos con la línea de ingreso «comisión vendedor (Pablo Canales)
+    $12,148.35» cuyo EGRESO decía «pago comisión vendedor (Pablo Canales) ·
+    cubierto por el avión … · PROVISIÓN (sin gasto real capturado)» con
+    $0.00 en amarillo y, en vuelos sin provisión del avión, «pago comisión
+    vendedor (X) · PROVISIÓN (mismo monto que lo cobrado: comisión + IVA;
+    sin gasto real capturado)» con el monto.
+    - **Regla** (`buildOtrosMovimientos`, rama `COMISION_VENDEDOR &&
+      !p.inconsistente`): mientras NO exista un gasto real «Comisión del
+      vendedor» (`COMISION_VENDEDOR`) capturado en Gastos y ligado al vuelo
+      (`pagosVendedorDeVuelo(...).n === 0`), la línea de comisión NO lleva
+      egreso —`egreso_mxn`, `concepto_egreso` y `fecha_egreso` en null— en
+      NINGUNO de los dos sub-casos de hasta el 0.0.72: con provisiones de
+      los aviones (la rama «cubierto por el avión … · PROVISIÓN (sin gasto
+      real capturado)» por $0.00, la marca del amarillo) y sin ellas (la
+      PROVISIÓN por el mismo monto que lo cobrado con fecha del vuelo). El
+      ingreso cobrado al cliente sigue (es dinero real): su concepto, monto
+      y fecha no cambian, y el remanente conserva la fórmula de siempre
+      (ingreso − egreso; con egreso null ⇒ remanente = ingreso). Con
+      `n > 0` NADA cambia, byte a byte: `pagoVendedorCubiertoPorAvion` con
+      gasto real (exceso / «parcial: faltan» en la vigencia) o
+      `conceptoPagoVendedorReal` (gasto real sin provisión del avión, con
+      «faltan/excede»); `hay_pago_vendedor_real` sigue igual; el pago real
+      sin línea sigue saliendo como solo-egreso.
+    - **Bandera ADITIVA `sin_provision_vendedor: true`** (viaja SIEMPRE
+      desde el 0.0.73; declarada opcional en `pyservices.service.ts` porque
+      un API previo no la manda): en el payload de `otros_movimientos` del
+      general (al final del objeto, junto a `hay_pago_vendedor_real`) y al
+      nivel raíz del payload INDIVIDUAL de cada avión (`buildPayload`:
+      libros individuales y `aviones[]` del general; el consolidado «FLOTA»
+      del general, armado a mano, no la lleva: su nota no habla del pago al
+      vendedor). pyservices activa con ella sus leyendas nuevas (fila 2 de
+      'otros movimientos', fragmento del RESUMEN, reglas «cubre avión», la
+      base del pie del bloque VUELATOUR —sin «o provisionado»— y la nota
+      del libro individual); sin ella conserva las de hoy. Su amarillo
+      (`_MARCA_PROVISION`) no se toca: con el API nuevo no llega ninguna
+      marca y no pinta nada; con un API previo sigue pintando.
+    - **Lo que NO cambia**: `common/comisiones-avion.util.ts`
+      (`pagoVendedorCubiertoPorAvion`, `MARCA_PROVISION_SIN_GASTO_REAL`) es
+      PURO y conserva su rama `n = 0` y su spec — solo deja de llamarse con
+      `n = 0` desde el balance. El Libro Dinero (`dinero-report.service`)
+      SIGUE provisionando (`comisionProvisionadaMxn`,
+      `NOTA_PROVISION_PAGO_VENDEDOR`): no se tocó en esta ronda y se le dice
+      al cliente. La columna COMISIONES del libro individual y el reparto
+      siguen cargando la provisión del vendedor (decisión del 6-oct-2026,
+      invariante 50). El panel no cambia (la vista en pantalla lee el mismo
+      libro, invariante 52). Sin migración.
+    - **Consecuencia aceptada**: en vuelos SIN provisión del avión
+      —anteriores a la vigencia, no COMPLETADOS (CONFIRMADO con anticipo,
+      COTIZADO, RESERVA), EXTERNOS— el remanente de la fila y el bloque
+      «VUELATOUR (empresa)» de la hoja 'balance' SUBEN lo que valía la
+      provisión hasta que se capture el gasto real (en el mundo del spec el
+      #513 CONFIRMADO pasa de −36 a 1,404 y `pagos_vendedor_usd` baja 80
+      USD). En los vuelos COMPLETADOS de la vigencia nada se mueve (el
+      egreso ya era $0.00): la provisión solo resta en el avión, así que la
+      conservación de `comisiones-general.spec` pasa a ser «Σ ganancia de
+      los libros + Σ remanente de la pestaña == la regla anterior − las
+      provisiones de los vuelos sin gasto real − los faltantes». La `nota`
+      del bloque VUELATOUR (invariante 47) dice desde el 0.0.73 «pago al
+      vendedor (solo el gasto real «Comisión del vendedor» capturado; …)»:
+      el «real o provisión» de hasta el 0.0.72 era falso con esta regla
+      (revisión adversaria del mismo día); pyservices, con la bandera,
+      cambia también la base del pie del bloque («lo pagado (el pago al
+      vendedor solo cuando se captura el gasto real …)» en vez de «lo
+      pagado o provisionado»).
+    - **Orden de deploy**: API antes que pyservices (con el API nuevo y un
+      pyservices previo las filas ya no salen y las leyendas viejas quedan
+      un rato desfasadas; al revés, las leyendas nuevas no se activan
+      porque falta la bandera).
+    - Specs: `aircraft-balance.service.pago-vendedor.spec` (golden sin
+      gasto real = sin egreso del vendedor, `sin_provision_vendedor` y
+      ningún «PROVISIÓN (» en la hoja; Σ remanentes = Σ ingresos − Σ
+      egresos reales; e2–e5: COMPLETADO por llamada directa, CONFIRMADO,
+      EXTERNO y gasto real byte a byte),
+      `aircraft-balance.service.comisiones-general.spec` (#507/#501/#503/
+      #513/#522 sin egreso ni marca, #505/#506 idénticos, `OM_0073` y
+      `OM_ANTES` número por número, bloque VUELATOUR y conservación con las
+      provisiones de los aviones como fuente única),
+      `aircraft-balance.service.comisiones.spec` (multi-avión, no
+      realizados, BillPocket, sobrecobro y vuelo sin K: conservación −
+      provisión; la bandera RAÍZ de `buildPayload` en el libro individual y
+      en cada `aviones[]` del general, y su ausencia en el consolidado
+      FLOTA), `balance-empresa.util.spec` (la `nota` sin «real o
+      provisión»), `aircraft-balance.service.bloque-empresa.spec` y
+      `aircraft-balance.service.ingresos.spec` (goldens: egreso 1,850 y
+      remanente 2,750 del #501); `libros-pago-vendedor.fixture-spec`
+      (`GOLDEN_OM`) actualizado.
 
 ## Convenciones NestJS
 
@@ -6715,8 +6834,26 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   no realizados (#314 de N4142R en septiembre, $5,000; #375 y #376 de XA-VGV
   en octubre). (e) Cambiar `comisiones_al_avion_desde` exige mandar antes
   `regla_comisiones` en los tres payloads (invariante 50, revisión del
-  0.0.66). (f) pyservices: su test `_FILA_CUBIERTA` debe copiar el texto con
-  la marca de PROVISIÓN y esperar el amarillo.
+  0.0.66). (f) SUPERSEDIDO el 12-oct-2026 (invariante 58): con el API 0.0.73
+  ninguna fila de «otros movimientos» lleva la marca de PROVISIÓN ni el
+  amarillo; el test `_FILA_CUBIERTA` de pyservices se adapta en su propio
+  contrato (bandera `sin_provision_vendedor`). (g) Desde el 0.0.73: el
+  Libro Dinero SIGUE provisionando el pago al vendedor («Otros ingresos» y
+  utilidades) mientras «otros movimientos» ya no — se le dice al cliente;
+  unificarlo es un cambio aparte. (h) HECHO en la revisión del 12-oct-2026:
+  la `nota` del bloque VUELATOUR dice «pago al vendedor (solo el gasto real
+  «Comisión del vendedor» capturado; …)» (invariante 47) y pyservices
+  cambia con la bandera la base del pie del bloque («lo pagado (el pago al
+  vendedor solo cuando se captura el gasto real …)»). (i) Panel
+  (`vuelatour-next/src/lib/admin/categorias-gasto.ts`): la ayuda
+  `AYUDA_COMISION_VENDEDOR` de la categoría «Comisión del vendedor» (y los
+  comentarios de ese archivo y de `app/admin/expenses/schema.ts`) sigue
+  diciendo que el gasto «reemplaza la PROVISIÓN de ese vuelo» en 'otros
+  movimientos'; con el 0.0.73 ahí no hay provisión que reemplazar (solo en
+  el Libro Dinero). Texto nada más y fuera del contrato del 0.0.73 («el
+  panel no cambia»): se ajusta en el panel DESPUÉS del deploy del API
+  (su test `src/lib/admin/__tests__/categorias-gasto.test.ts` fija la
+  frase).
 
 - **Conciliación por lotes (2-oct-2026, invariante 40)**: 1 cargo ↔ N
   gastos **HECHO** (API 0.0.52). Pendientes: 1 abono ↔ N cobros (depósito

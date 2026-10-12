@@ -149,9 +149,11 @@ export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
  *
  * El pago al vendedor es dinero de VuelaTour (la comisión cobrada es ingreso
  * de VuelaTour, regla 28-ago-2026): NO es costo de ningún avión, NO va a la
- * hoja «otros gastos», y en «otros movimientos» (Balance general) / «Otros
- * ingresos» (Libro Dinero) se APAREA con la línea de comisión cobrada del
- * vuelo y REEMPLAZA a la PROVISIÓN (`src/common/pago-vendedor.util.ts`).
+ * hoja «otros gastos», y se APAREA con la línea de comisión cobrada del
+ * vuelo: en «Otros ingresos» (Libro Dinero) REEMPLAZA a la PROVISIÓN; en
+ * «otros movimientos» (Balance general) es el único egreso del vendedor
+ * (sin él la fila no lleva egreso: invariante 58, 12-oct-2026)
+ * (`src/common/pago-vendedor.util.ts`).
  */
 export const CATEGORIA_PAGO_VENDEDOR = 'COMISION_VENDEDOR';
 

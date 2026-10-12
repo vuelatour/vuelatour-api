@@ -47,8 +47,10 @@ export enum CategoriaGasto {
    *  - NO es costo del avión (fila del vuelo, libro del avión, reparto,
    *    ficha, tablero, grupo, reporte por vuelo) y NO va a «otros gastos».
    *  - Vive en «otros movimientos» (Balance general) y «Otros ingresos»
-   *    (Libro Dinero) apareado con la comisión cobrada: REEMPLAZA a la
-   *    PROVISIÓN (`pago-vendedor.util.ts`).
+   *    (Libro Dinero) apareado con la comisión cobrada: en «Otros ingresos»
+   *    REEMPLAZA a la PROVISIÓN; en «otros movimientos» es el ÚNICO egreso
+   *    del vendedor (sin él la fila no lleva egreso: invariante 58,
+   *    12-oct-2026) (`pago-vendedor.util.ts`).
    *  - Monto libre (parcial/exacto/mayor), varios por vuelo, proveedor
    *    opcional, cualquier moneda. No repartible. La IA de tickets no la
    *    sugiere. */

@@ -37,9 +37,16 @@ import {
  *
  * «¿Cómo registro el pago de la comisión a Saab para que aparezca en otros
  * movimientos? Si lo capturo como "Otros gastos VuelaTour" queda duplicado.»
- * Los gastos `COMISION_VENDEDOR` del vuelo REEMPLAZAN a la PROVISIÓN (espejo
+ * Los gastos `COMISION_VENDEDOR` del vuelo son el egreso apareado (espejo
  * de las TUAS pagadas), con «faltan/excede» cuando no cuadran con lo
- * cobrado; sin ningún gasto, la provisión de siempre, BYTE-IDÉNTICA.
+ * cobrado — esos casos (b–f, h) no cambian un byte desde el 0.0.39.
+ *
+ * SIN ningún gasto, desde el 12-oct-2026 (API 0.0.73, invariante 58; pedido
+ * del cliente: «los gastos que todavía no se hacen no deben aparecer»,
+ * señalando las filas en amarillo) la línea de comisión NO lleva egreso (ni
+ * concepto, ni monto, ni fecha): el ingreso cobrado se queda y el remanente
+ * es el ingreso. Hasta el 0.0.72 llevaba la PROVISIÓN por el mismo monto. La
+ * hoja viaja con `sin_provision_vendedor: true`.
  *
  * Mundo de los specs de ingresos: vuelo #501 (K 20), comisión 80 USD sin
  * IVA ⇒ línea de 1,600.00 MXN; TUAS pagadas 1,500; comisión bancaria 350.
@@ -115,11 +122,54 @@ const filaDe = (
   return f!;
 };
 
+/** Todo el texto de la hoja (conceptos y notas de filas y sueltas). */
+const textoHoja = (om: BalanceHojaOtrosMovimientosPayload): string =>
+  [...om.filas, ...om.filas_sueltas]
+    .flatMap((f) => [
+      f.concepto_ingreso,
+      f.nota_ingreso,
+      f.concepto_egreso,
+      f.nota_egreso,
+    ])
+    .filter(Boolean)
+    .join('\n');
+
 describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep-2026)', () => {
-  it('a) SIN gasto de comisión: payload BYTE-IDÉNTICO al golden (sin `hay_pago_vendedor_real`)', async () => {
+  it('a) SIN gasto de comisión: payload BYTE-IDÉNTICO al golden (sin `hay_pago_vendedor_real`, con `sin_provision_vendedor`) y SIN provisión del vendedor', async () => {
     const om = await otrosMovimientos(mundoCon());
     expect(JSON.stringify(om)).toBe(JSON.stringify(GOLDEN_OM));
     expect(om).not.toHaveProperty('hay_pago_vendedor_real');
+    expect(om.sin_provision_vendedor).toBe(true);
+    // La fila del #501 (COMPLETADO, sin gasto real): el ingreso cobrado se
+    // queda (comisión 1,600 + TUAs 3,000), el egreso son solo las TUAS
+    // pagadas y la comisión bancaria, y el remanente = ingreso − egreso.
+    const f = filaDe(om, 501);
+    expect(f.ingreso_mxn).toBe(4600);
+    expect(f.concepto_egreso).toBe(
+      'TUAs + comisión bancaria · 2 conceptos (ver nota)',
+    );
+    expect(f.egreso_mxn).toBe(1850);
+    expect(f.remanente_mxn).toBe(2750);
+    expect(`${f.concepto_egreso}\n${f.nota_egreso ?? ''}`).not.toMatch(
+      /pago comisi[oó]n vendedor|PROVISI[OÓ]N/,
+    );
+    // NINGÚN texto de provisión en toda la hoja (la marca del amarillo de
+    // pyservices es «· PROVISIÓN (»).
+    expect(textoHoja(om)).not.toMatch(/PROVISI[OÓ]N \(/);
+  });
+
+  it('a2) totales de la hoja: Σ remanentes == Σ ingresos − Σ egresos REALES (la provisión ya no resta)', async () => {
+    const om = await otrosMovimientos(mundoCon());
+    const todas = [...om.filas, ...om.filas_sueltas];
+    const suma = (k: 'ingreso_mxn' | 'egreso_mxn' | 'remanente_mxn') =>
+      Math.round(todas.reduce((a, f) => a + (f[k] ?? 0), 0) * 100) / 100;
+    expect(suma('ingreso_mxn')).toBe(4600);
+    // TUAS 1,500 + comisión bancaria 350 + sueltas (TUAS 80 + gas 250).
+    expect(suma('egreso_mxn')).toBe(2180);
+    expect(suma('remanente_mxn')).toBe(2420);
+    expect(suma('remanente_mxn')).toBe(
+      Math.round((suma('ingreso_mxn') - suma('egreso_mxn')) * 100) / 100,
+    );
   });
 
   it('b) 1 gasto exacto de $1,600 MXN ⇒ «gasto real», egreso 3,450, remanente 1,150 (sin provisión)', async () => {
@@ -183,16 +233,78 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
     expect(f.remanente_mxn).toBe(0);
   });
 
-  it('e2) control del mismo mundo SIN gasto ⇒ la PROVISIÓN de siempre a la fecha del vuelo', async () => {
+  it('e2) control del mismo mundo SIN gasto ⇒ SIN egreso (invariante 58): ni concepto, ni monto, ni fecha; el ingreso se queda y el remanente es el ingreso', async () => {
     const om = await otrosMovimientos(mundoSoloComision([]));
     const f = filaDe(om, 501);
-    expect(f.concepto_egreso).toBe(
-      'pago comisión vendedor (Vendedor Uno) · PROVISIÓN (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado)',
-    );
-    expect(f.egreso_mxn).toBe(1600);
-    expect(f.fecha_egreso).toBe('2026-09-10');
-    expect(f.remanente_mxn).toBe(0);
+    // Una sola línea en el vuelo ⇒ fila SIN colapsar: la línea de comisión
+    // tal cual, con su ingreso y sin ningún egreso.
+    expect(f.concepto_ingreso).toBe('comisión vendedor (Vendedor Uno)');
+    expect(f.ingreso_mxn).toBe(1600);
+    expect(f.fecha_ingreso).toBe('2026-09-10');
+    expect(f.concepto_egreso).toBeNull();
+    expect(f.egreso_mxn).toBeNull();
+    expect(f.fecha_egreso).toBeNull();
+    expect(f.nota_egreso ?? null).toBeNull();
+    expect(f.remanente_mxn).toBe(1600);
     expect(om).not.toHaveProperty('hay_pago_vendedor_real');
+    expect(om.sin_provision_vendedor).toBe(true);
+    expect(textoHoja(om)).not.toMatch(/PROVISI[OÓ]N \(|pago comisi[oó]n/);
+  });
+
+  it('e3) vuelo CONFIRMADO (aún no realizado) sin gasto ⇒ tampoco provisiona: el egreso son solo TUAS y comisión bancaria', async () => {
+    const om = await otrosMovimientos(
+      mundoCon({ v1: { estado: 'CONFIRMADO' } }),
+    );
+    const f = filaDe(om, 501);
+    expect(f.estado).toBe('CONFIRMADO');
+    expect(f.ingreso_mxn).toBe(4600);
+    expect(f.nota_egreso).toBe(
+      'tuas pagadas = $1,500.00\ncomisión bancaria = $350.00',
+    );
+    expect(f.egreso_mxn).toBe(1850);
+    expect(f.remanente_mxn).toBe(2750);
+    expect(textoHoja(om)).not.toMatch(/PROVISI[OÓ]N \(|pago comisi[oó]n/);
+  });
+
+  it('e4) vuelo EXTERNO sin gasto ⇒ sin egreso del vendedor (su comisión cobrada sigue siendo ingreso de VuelaTour)', async () => {
+    const om = await otrosMovimientos(
+      mundoCon({
+        v1: {
+          es_externo: true,
+          operador_externo: 'XA-TYV',
+          costo_externo_usd: 500,
+        },
+      }),
+    );
+    const f = filaDe(om, 501);
+    expect(f.ingreso_mxn).toBe(4600);
+    expect(f.egreso_mxn).toBe(1850);
+    expect(f.remanente_mxn).toBe(2750);
+    expect(textoHoja(om)).not.toMatch(/PROVISI[OÓ]N \(|pago comisi[oó]n/);
+  });
+
+  it('e5) con gasto real NADA cambia: la fila de b) es la de siempre, byte a byte, y la hoja no dice «PROVISIÓN»', async () => {
+    const om = await otrosMovimientos(
+      mundoCon({ gastos: [gastoComision('g-cv', 1600)] }),
+    );
+    const f = filaDe(om, 501);
+    expect(f.concepto_egreso).toBe(
+      'pago comisión vendedor + TUAs + comisión bancaria · 3 conceptos (ver nota)',
+    );
+    expect(f.nota_egreso).toBe(
+      [
+        'pago comisión vendedor (Vendedor Uno) · gasto real = $1,600.00',
+        'tuas pagadas = $1,500.00',
+        'comisión bancaria = $350.00',
+      ].join('\n'),
+    );
+    expect([f.ingreso_mxn, f.egreso_mxn, f.remanente_mxn]).toEqual([
+      4600, 3450, 1150,
+    ]);
+    expect(f.fecha_egreso).toBe('2026-09-10');
+    expect(om.hay_pago_vendedor_real).toBe(true);
+    expect(om.sin_provision_vendedor).toBe(true);
+    expect(textoHoja(om)).not.toMatch(/PROVISI[OÓ]N \(/);
   });
 
   it('f) 80 USD SIN tc_gasto ⇒ se convierte con el T.C. PROMEDIO del periodo (regla del workbook, como las TUAS pagadas)', async () => {
@@ -244,7 +356,7 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
         ],
       }),
     );
-    // El vuelo #501 (con su provisión) no cambia.
+    // El vuelo #501 (sin gasto real: sin egreso del vendedor) no cambia.
     expect(filaDe(om, 501)).toEqual(GOLDEN_OM.filas[0]);
     const f = filaDe(om, 502);
     expect(f.concepto_egreso).toBe(

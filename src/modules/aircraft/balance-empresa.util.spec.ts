@@ -373,7 +373,7 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     expect(sin.nota).not.toContain('por cobrar');
   });
 
-  it('pago al vendedor cubierto por el avión (API 0.0.66, revisión 7-oct-2026): la nota precisa el egreso; sin la señal (o false), la nota de siempre byte a byte y el dinero no cambia', () => {
+  it('pago al vendedor cubierto por el avión (API 0.0.66, revisión 7-oct-2026): la nota precisa el egreso; sin la señal (o false), la nota corta byte a byte y el dinero no cambia; desde el 0.0.73 (invariante 58) ninguna dice «real o provisión»: solo el gasto real capturado', () => {
     const siempre = armarBalanceEmpresa(base);
     const conFalse = armarBalanceEmpresa({
       ...base,
@@ -385,11 +385,17 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     });
     expect(conFalse).toEqual(siempre);
     expect(siempre.nota).toContain(
-      'Egresos = pago al vendedor (real o provisión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
     expect(cubierto.nota).toContain(
-      'Egresos = pago al vendedor (real o provisión; en los vuelos completados de la regla de comisiones, solo lo que el pago real exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones, solo lo que ese pago exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
+    // «otros movimientos» ya no provisiona el pago al vendedor (invariante
+    // 58): ninguna de las dos variantes lo promete.
+    for (const b of [siempre, cubierto]) {
+      expect(b.nota).not.toContain('real o provisión');
+      expect(b.nota).not.toContain('o provisión');
+    }
     // Solo la nota: los números del bloque son los mismos.
     expect({ ...cubierto, nota: null }).toEqual({ ...siempre, nota: null });
   });

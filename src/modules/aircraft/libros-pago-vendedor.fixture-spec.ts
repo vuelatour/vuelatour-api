@@ -394,7 +394,16 @@ export const INGRESOS_LIBROS: Fila[] = [
 ];
 // ===== fin del mundo compartido =====
 
-/** «Otros movimientos» del Balance general SIN gastos de comisión (código 0.0.38). */
+/**
+ * «Otros movimientos» del Balance general SIN gastos de comisión. Desde el
+ * 12-oct-2026 (API 0.0.73, invariante 58) la fila NO provisiona el pago al
+ * vendedor: el egreso son solo las TUAS pagadas y la comisión bancaria
+ * (1,850) y el remanente sube los 1,600 de la provisión; hasta el 0.0.72
+ * (código 0.0.38) llevaba «pago comisión vendedor (Vendedor Uno) · PROVISIÓN
+ * (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado) =
+ * $1,600.00» (egreso 3,450, remanente 1,150). La hoja viaja con la bandera
+ * `sin_provision_vendedor: true` AL FINAL.
+ */
 export const GOLDEN_OM = {
   filas: [
     {
@@ -409,13 +418,11 @@ export const GOLDEN_OM = {
       fecha_ingreso: '2026-09-10',
       nota_ingreso:
         'comisión vendedor (Vendedor Uno) = $1,600.00\ntuas/extras/pernocta cobrados + iva (sin desglose canónico: estimado con columnas) = $3,000.00',
-      concepto_egreso:
-        'pago comisión vendedor + TUAs + comisión bancaria · 3 conceptos (ver nota)',
-      egreso_mxn: 3450,
+      concepto_egreso: 'TUAs + comisión bancaria · 2 conceptos (ver nota)',
+      egreso_mxn: 1850,
       fecha_egreso: '2026-09-10',
-      nota_egreso:
-        'pago comisión vendedor (Vendedor Uno) · PROVISIÓN (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado) = $1,600.00\ntuas pagadas = $1,500.00\ncomisión bancaria = $350.00',
-      remanente_mxn: 1150,
+      nota_egreso: 'tuas pagadas = $1,500.00\ncomisión bancaria = $350.00',
+      remanente_mxn: 2750,
     },
   ],
   filas_sueltas: [
@@ -446,6 +453,7 @@ export const GOLDEN_OM = {
       factura: null,
     },
   ],
+  sin_provision_vendedor: true,
 } as unknown as BalanceHojaOtrosMovimientosPayload;
 
 /** Libro Dinero SIN gastos de comisión (0.0.38 + la nota NUEVA de la provisión). */

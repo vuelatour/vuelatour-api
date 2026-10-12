@@ -69,6 +69,18 @@ import { MARCA_PROVISION_SIN_GASTO_REAL } from '../../common/comisiones-avion.ut
  *
  * Mundo: `comisiones-general.fixture-spec` (cierre de septiembre con XB-TST y
  * XB-DOS; el #507 es el caso del cliente, $5,467.97).
+ *
+ * 12-oct-2026 (API 0.0.73, invariante 58; pedido del cliente: «los gastos
+ * que todavía no se hacen no deben aparecer», señalando las filas en
+ * amarillo): SIN gasto real `COMISION_VENDEDOR` la fila de «otros
+ * movimientos» ya NO lleva egreso del vendedor —ni «cubierto por el avión …
+ * · PROVISIÓN … = $0.00» en la vigencia, ni la PROVISIÓN por el mismo monto
+ * antes de ella—; el ingreso cobrado se queda y el remanente es ingreso −
+ * egresos reales. Con gasto real todo sigue byte a byte (#505 excede, #506
+ * parcial). Consecuencia aceptada: en vuelos SIN provisión del avión (#513
+ * CONFIRMADO, y todos antes de la vigencia) el remanente y el bloque
+ * VUELATOUR suben lo que valía la provisión. La hoja viaja con
+ * `sin_provision_vendedor: true`.
  */
 
 /** Vigencia POSTERIOR a todo el mundo de septiembre: la regla de siempre. */
@@ -326,17 +338,50 @@ const OM_0065: Record<number, Array<number | null>> = {
   514: [900, 45, 855],
 };
 
-/** «Otros movimientos» ANTES de la vigencia (0.0.64 = 0.0.65). */
+/**
+ * «Otros movimientos» ANTES de la vigencia desde el 0.0.73 (invariante 58:
+ * sin gasto real no hay provisión). Hasta el 0.0.72 (0.0.64 = 0.0.65 =
+ * 0.0.66) los vuelos sin gasto real llevaban la PROVISIÓN por lo cobrado:
+ * #507 [5467.97, 5467.97, 0], #501 [4600, 3450, 1150], #503 [1800, 2430.01,
+ * −630.01] y #513 [1440, 1926, −486]; los demás no cambian (#505 y #506
+ * tienen gasto real; #504 y #514 no tienen comisión del vendedor).
+ */
 const OM_ANTES: Record<number, Array<number | null>> = {
-  507: [5467.97, 5467.97, 0],
-  501: [4600, 3450, 1150],
-  503: [1800, 2430.01, -630.01],
+  507: [5467.97, null, 5467.97],
+  501: [4600, 1850, 2750],
+  503: [1800, 630.01, 1169.99],
   504: [null, 900, -900],
   505: [2700, 3000, -300],
   506: [1800, 2094, -294],
-  513: [1440, 1926, -486],
+  513: [1440, 486, 954],
   514: [900, 945, -45],
 };
+
+/**
+ * «Otros movimientos» con la vigencia default desde el 0.0.73: [ingreso,
+ * egreso, remanente] por folio. Respecto al 0.0.66 solo cambian el #507
+ * (egreso 0 ⇒ null: ya no hay renglón de pago al vendedor; el remanente es
+ * el mismo) y el #513 (CONFIRMADO, sin provisión del avión: hasta el 0.0.72
+ * VuelaTour provisionaba 1,440 ⇒ [1440, 1476, −36]).
+ */
+const OM_0073: Record<number, Array<number | null>> = {
+  507: [5467.97, null, 5467.97],
+  501: [4600, 1536.1, 3063.9],
+  503: [1800, 30, 1770],
+  504: [null, 900, -900],
+  505: [2700, 300, 2400],
+  506: [1800, 54, 1746],
+  513: [1440, 36, 1404],
+  514: [900, 45, 855],
+};
+
+/**
+ * Σ provisiones del vendedor de los vuelos COMPLETADOS de la vigencia SIN
+ * gasto real en `mundoCierre()`: #507 5,467.97 + #501 1,600 + #503 1,800
+ * (900 + 900). Las carga el avión en COMISIONES y, desde el 0.0.73,
+ * VuelaTour ya no las provisiona en ninguna regla.
+ */
+const PROVISIONES_SIN_GASTO_REAL = r2(5467.97 + 1600 + 1800);
 
 /** Bloque VUELATOUR (empresa) del 0.0.65. */
 const EMPRESA_0065 = {
@@ -621,16 +666,19 @@ describe('«Otros movimientos» SIN la comisión duplicada (API 0.0.66)', () => 
     expect(texto).not.toMatch(/regla sep-2026/);
   });
 
-  it('caso del cliente (#507, $5,467.97): el ingreso cobrado aparece UNA vez y el egreso del vendedor es 0, cubierto por el avión; el remanente es el del 0.0.65', async () => {
+  it('caso del cliente (#507, $5,467.97): el ingreso cobrado aparece UNA vez y, sin gasto real, la fila NO lleva egreso del vendedor (invariante 58); el remanente es el del 0.0.65 (= el ingreso)', async () => {
     const om = omDe(await general(), 507);
     expect(om.concepto_ingreso).toBe('comisión vendedor (Pablo Canales)');
     expect(om.ingreso_mxn).toBe(5467.97);
-    expect(om.concepto_egreso).toBe(
-      'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-DOS (provisión $5,467.97 en su balance) · PROVISIÓN (sin gasto real capturado)',
-    );
-    expect(om.egreso_mxn).toBe(0);
-    expect(om.fecha_egreso).toBe('2026-09-04');
+    expect(om.fecha_ingreso).toBe('2026-09-04');
+    // Hasta el 0.0.72: «pago comisión vendedor (Pablo Canales) · cubierto
+    // por el avión XB-DOS (provisión $5,467.97 en su balance) · PROVISIÓN
+    // (sin gasto real capturado)» por $0.00 con fecha del vuelo.
+    expect(om.concepto_egreso).toBeNull();
+    expect(om.egreso_mxn).toBeNull();
+    expect(om.fecha_egreso).toBeNull();
     expect(om.remanente_mxn).toBe(OM_0065[507][2]);
+    expect(om.remanente_mxn).toBe(om.ingreso_mxn);
   });
 
   it('#501 (fila colapsada): ingreso 4,600 sin los 1,600 de la línea duplicada; egreso = TUAS + parte VuelaTour de la comisión bancaria; remanente igual', async () => {
@@ -644,25 +692,34 @@ describe('«Otros movimientos» SIN la comisión duplicada (API 0.0.66)', () => 
         'tuas/extras/pernocta cobrados + iva (sin desglose canónico: estimado con columnas) = $3,000.00',
       ].join('\n'),
     );
+    // Sin gasto real, sin renglón de pago al vendedor (invariante 58; hasta
+    // el 0.0.72 iba primero «… · cubierto por el avión XB-TST (provisión
+    // $1,600.00 en su balance) · PROVISIÓN (sin gasto real capturado) =
+    // $0.00»).
+    expect(om.concepto_egreso).toBe(
+      'TUAs + comisión bancaria · 2 conceptos (ver nota)',
+    );
     expect(om.nota_egreso).toBe(
       [
-        'pago comisión vendedor (Vendedor Uno) · cubierto por el avión XB-TST (provisión $1,600.00 en su balance) · PROVISIÓN (sin gasto real capturado) = $0.00',
         'tuas pagadas = $1,500.00',
         'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES) = $36.10',
       ].join('\n'),
     );
   });
 
-  it('MULTI-AVIÓN (#503): el pago lo cubren los dos aviones con SU provisión; VuelaTour solo paga su parte de la comisión bancaria', async () => {
+  it('MULTI-AVIÓN (#503): la provisión la cargan los dos aviones; sin gasto real la fila solo trae la parte VuelaTour de la comisión bancaria', async () => {
     const om = omDe(await general(), 503);
     expect(om.ingreso_mxn).toBe(1800);
     expect(om.egreso_mxn).toBe(30);
     expect(om.remanente_mxn).toBe(OM_0065[503][2]);
+    // Un solo egreso ⇒ concepto directo (hasta el 0.0.72 iba además
+    // «cubierto por los aviones XB-DOS (…) y XB-TST (…) · PROVISIÓN (sin
+    // gasto real capturado) = $0.00»).
+    expect(om.concepto_egreso).toBe(
+      'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES)',
+    );
     expect(om.nota_egreso).toBe(
-      [
-        'pago comisión vendedor (Pablo Canales) · cubierto por los aviones XB-DOS (provisión $900.00 en su balance) y XB-TST (provisión $900.00 en su balance) · PROVISIÓN (sin gasto real capturado) = $0.00',
-        'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES) = $30.00',
-      ].join('\n'),
+      'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES) = $30.00',
     );
   });
 
@@ -687,59 +744,88 @@ describe('«Otros movimientos» SIN la comisión duplicada (API 0.0.66)', () => 
     expect(om.remanente_mxn).toBe(r2((OM_0065[506][2] ?? 0) - 300));
   });
 
-  it('vuelo AÚN NO realizado (#513 CONFIRMADO) y EXTERNO (#504): ningún avión carga provisión ⇒ la pestaña de siempre', async () => {
+  it('vuelo AÚN NO realizado (#513 CONFIRMADO) y EXTERNO (#504): ningún avión carga provisión y, sin gasto real, tampoco la provisiona VuelaTour (invariante 58)', async () => {
     const g = await general();
     const confirmado = omDe(g, 513);
-    expect(confirmado.nota_egreso).toContain(
-      'pago comisión vendedor (Saab) · PROVISIÓN (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado) = $1,440.00',
+    // Hasta el 0.0.72: «pago comisión vendedor (Saab) · PROVISIÓN (mismo
+    // monto que lo cobrado: comisión + IVA; sin gasto real capturado) =
+    // $1,440.00». Hoy solo la parte VuelaTour de la comisión bancaria del
+    // anticipo (486 − 450) y la comisión cobrada se queda como ingreso.
+    expect(confirmado.concepto_egreso).toBe(
+      'comisión bancaria (parte VuelaTour: la del avión va en su columna COMISIONES)',
     );
+    expect(
+      `${confirmado.concepto_egreso ?? ''}\n${confirmado.nota_egreso ?? ''}`,
+    ).not.toMatch(/pago comisi[oó]n vendedor|PROVISI[OÓ]N/);
+    expect([
+      confirmado.ingreso_mxn,
+      confirmado.egreso_mxn,
+      confirmado.remanente_mxn,
+    ]).toEqual([1440, 36, 1404]);
     const externo = omDe(g, 504);
     expect(externo.concepto_egreso).toBe('comisión bancaria');
     expect(externo.egreso_mxn).toBe(900);
     const n = numerosOm(g);
     expect([n[513], n[504], n[514]]).toEqual([
-      OM_0065[513],
+      OM_0073[513],
       OM_0065[504],
       OM_0065[514],
     ]);
   });
 
-  it('cada fila por vuelo: el remanente del 0.0.65 se conserva (salvo el faltante del #506) y solo baja el ingreso por la línea quitada', async () => {
+  it('cada fila por vuelo: los números del 0.0.73; el remanente del 0.0.65 se conserva salvo el faltante del #506 y el #513, que sube lo que valía su provisión (consecuencia aceptada)', async () => {
     const n = numerosOm(await general());
-    for (const folio of [507, 501, 503, 504, 505, 513, 514]) {
+    expect(n).toEqual(OM_0073);
+    for (const folio of [507, 501, 503, 504, 505, 514]) {
       expect([folio, n[folio][2]]).toEqual([folio, OM_0065[folio][2]]);
     }
-    // La línea quitada era la provisión de los aviones: el ingreso baja eso
-    // y el egreso baja lo mismo (la provisión que ya no paga VuelaTour).
+    expect(n[506][2]).toBe(r2((OM_0065[506][2] ?? 0) - 300));
+    // #513 (CONFIRMADO: ningún avión carga su provisión): hasta el 0.0.72
+    // VuelaTour provisionaba los 1,440 y el remanente era −36; hoy sube
+    // exactamente esa provisión, hasta que se capture el gasto real.
+    expect(n[513][2]).toBe(r2((OM_0065[513][2] ?? 0) + 1440));
+    // La línea quitada en el 0.0.66 era la provisión de los aviones: el
+    // ingreso bajó eso respecto al 0.0.65.
     expect(r2((OM_0065[507][0] ?? 0) - (n[507][0] ?? 0))).toBe(5467.97);
     expect(r2((OM_0065[503][0] ?? 0) - (n[503][0] ?? 0))).toBe(1800);
   });
 
-  it('el pago al vendedor SIN gasto real conserva la marca de PROVISIÓN (el amarillo de pyservices, pedido del 6-oct); con gasto real, no', async () => {
+  it('sin gasto real NINGUNA fila lleva la marca de PROVISIÓN ni egreso del vendedor (invariante 58: el amarillo de pyservices no se pinta); con gasto real, el apareo de siempre, sin marca', async () => {
     const g = await general();
+    const om = g.consolidado.otros_movimientos!;
     const amarillo = (f: BalanceOtroMovimientoFilaPayload) =>
       [f.concepto_egreso, f.nota_egreso].some(
         (t) => t != null && MARCA_AMARILLO_PYSERVICES.test(t),
       );
-    // #507, #501 y #503: completados de la regla sin gasto real (los cubre
-    // el avión con su provisión, egreso 0); #513: CONFIRMADO con la
-    // provisión de siempre. #505 y #506 ya tienen gasto real.
-    expect(
-      g.consolidado
-        .otros_movimientos!.filas.filter(amarillo)
-        .map((f) => Number(f.clave.replace(/\D/g, '')))
-        .sort((a, b) => a - b),
-    ).toEqual([501, 503, 507, 513]);
-    expect(omDe(g, 507).concepto_egreso).toContain(
-      `en su balance)${MARCA_PROVISION_SIN_GASTO_REAL}`,
-    );
-    expect(omDe(g, 507).egreso_mxn).toBe(0);
+    const egreso = (folio: number) =>
+      `${omDe(g, folio).concepto_egreso ?? ''}\n${omDe(g, folio).nota_egreso ?? ''}`;
+    // Hasta el 0.0.72 llevaban la marca #501, #503, #507 (completados de la
+    // regla, «cubierto por el avión … · PROVISIÓN (sin gasto real
+    // capturado)») y #513 (CONFIRMADO con la provisión de siempre).
+    expect(om.filas.filter(amarillo)).toEqual([]);
+    expect(om.filas_sueltas.filter(amarillo)).toEqual([]);
+    expect(textoOm(g)).not.toContain(MARCA_PROVISION_SIN_GASTO_REAL);
+    expect(textoOm(g)).not.toMatch(/PROVISI[OÓ]N \(/);
+    expect(om.sin_provision_vendedor).toBe(true);
+    // #505 y #506 tienen gasto real: la bandera de siempre sigue.
+    expect(om.hay_pago_vendedor_real).toBe(true);
+    for (const folio of [507, 501, 503, 513]) {
+      expect([
+        folio,
+        /pago comisi[oó]n vendedor|cubierto por/.test(egreso(folio)),
+      ]).toEqual([folio, false]);
+    }
+    // Con gasto real: «cubierto por el avión … · gasto real …», sin marca.
     for (const folio of [505, 506]) {
-      expect([folio, amarillo(omDe(g, folio))]).toEqual([folio, false]);
+      expect([
+        folio,
+        /cubierto por el avión .* · gasto real /.test(egreso(folio)),
+        amarillo(omDe(g, folio)),
+      ]).toEqual([folio, true, false]);
     }
   });
 
-  it('DOS líneas COMISION_VENDEDOR (#522) y pago real mayor que la provisión: el exceso egresa UNA sola vez; sin pago, la marca de PROVISIÓN va una sola vez', async () => {
+  it('DOS líneas COMISION_VENDEDOR (#522) y pago real mayor que la provisión: el exceso egresa UNA sola vez; sin pago, ninguna de las dos líneas lleva egreso', async () => {
     const conPago = conVueloDosComisiones(mundoCierre(), 3000);
     // La fila del avión carga la provisión de las DOS líneas (150 USD × 18).
     const f = (await libro(AV2, undefined, conPago)).vuelos.find(
@@ -764,14 +850,18 @@ describe('«Otros movimientos» SIN la comisión duplicada (API 0.0.66)', () => 
       await general(undefined, conVueloDosComisiones(mundoCierre(), null)),
       522,
     );
+    // Sin pago (invariante 58): las dos líneas de ingreso se quedan y no hay
+    // ningún egreso (hasta el 0.0.72: «… · cubierto por el avión XB-DOS
+    // (provisión $2,700.00 en su balance) · PROVISIÓN (sin gasto real
+    // capturado) = $0.00», una sola vez).
     expect([
       sinPago.ingreso_mxn,
       sinPago.egreso_mxn,
       sinPago.remanente_mxn,
-    ]).toEqual([2700, 0, 2700]);
-    expect(sinPago.nota_egreso).toBe(
-      'pago comisión vendedor (Pablo Canales) · cubierto por el avión XB-DOS (provisión $2,700.00 en su balance) · PROVISIÓN (sin gasto real capturado) = $0.00',
-    );
+    ]).toEqual([2700, null, 2700]);
+    expect(sinPago.concepto_egreso).toBeNull();
+    expect(sinPago.nota_egreso).toBeNull();
+    expect(sinPago.fecha_egreso).toBeNull();
   });
 
   it('vigencia a MITAD del periodo (15-sep): las filas de vuelos anteriores son las de la regla anterior byte a byte y las posteriores, las de la vigencia del 1-sep', async () => {
@@ -793,27 +883,39 @@ describe('«Otros movimientos» SIN la comisión duplicada (API 0.0.66)', () => 
     expect(mitad.size).toBe(8);
   });
 
-  it('ANTES de la vigencia: la pestaña del 0.0.64/0.0.65, número por número (sin «cubierto por el avión»)', async () => {
+  it('ANTES de la vigencia: la pestaña de siempre, número por número (sin «cubierto por el avión» y, desde el 0.0.73, sin PROVISIÓN)', async () => {
     const g = await general(POSTERIOR);
     expect(numerosOm(g)).toEqual(OM_ANTES);
     expect(textoOm(g)).not.toMatch(/cubierto por/);
+    expect(textoOm(g)).not.toMatch(/PROVISI[OÓ]N \(/);
+    // Con gasto real, el apareo de siempre con «faltan/excede».
+    expect(omDe(g, 505).concepto_egreso).toBe(
+      'pago comisión vendedor (Pablo Canales) · gasto real · excede $300.00 MXN',
+    );
+    expect(omDe(g, 506).nota_egreso).toContain(
+      'pago comisión vendedor (Alex Saab) · gasto real · parcial: faltan $300.00 MXN = $1,500.00',
+    );
   });
 });
 
 describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.66)', () => {
-  it('el bloque sale de las filas: ingresos propios = lo cobrado a los clientes (como antes de la regla); egresos sin la provisión que cubren los aviones; participación igual al 0.0.65', async () => {
+  it('el bloque sale de las filas: ingresos propios = lo cobrado a los clientes (como antes de la regla); egresos sin provisión alguna del vendedor (invariante 58); participación igual al 0.0.65', async () => {
     const con = (await general()).empresa!;
     const antes = (await general(POSTERIOR)).empresa!;
     expect(con.participacion_usd).toBe(EMPRESA_0065.participacion_usd);
     expect(con.ingresos_propios_usd).toBe(antes.ingresos_propios_usd);
     expect(con.ingresos_propios_usd).toBe(1032.48);
-    expect(con.pagos_vendedor_usd).toBe(250.85);
+    // Hasta el 0.0.72: 250.85 — incluía los 80 USD (1,440 ÷ 18) de la
+    // provisión del #513 (CONFIRMADO, sin provisión del avión), que desde
+    // la invariante 58 ya no egresa hasta que se capture el gasto real.
+    expect(con.pagos_vendedor_usd).toBe(r2(250.85 - 80));
     expect(con.otros_gastos_empresa_usd).toBe(
       EMPRESA_0065.otros_gastos_empresa_usd,
     );
     // El 0.0.65 contaba como ingreso de VuelaTour los 300 que aún se le
-    // deben al vendedor del #506 (300 ÷ 18 = 16.67 USD).
-    expect(con.resultado_usd).toBe(r2(EMPRESA_0065.resultado_usd - 16.67));
+    // deben al vendedor del #506 (300 ÷ 18 = 16.67 USD); el 0.0.73 suma los
+    // 80 USD de la provisión del #513 que ya no se resta.
+    expect(con.resultado_usd).toBe(r2(EMPRESA_0065.resultado_usd - 16.67 + 80));
     expect(con.resultado_usd).toBe(
       r2(
         (con.participacion_usd ?? 0) +
@@ -824,15 +926,18 @@ describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.66)', (
     );
   });
 
-  it('la nota del bloque precisa que, en los vuelos completados de la regla, el egreso del vendedor es solo lo que el pago real EXCEDE la provisión; antes de la vigencia, la de siempre', async () => {
+  it('la nota del bloque precisa que, en los vuelos completados de la regla, el egreso del vendedor es solo lo que el pago real EXCEDE la provisión; antes de la vigencia, la corta; ninguna dice «real o provisión» (invariante 58: solo el gasto real capturado)', async () => {
     const precisa =
-      'Egresos = pago al vendedor (real o provisión; en los vuelos completados de la regla de comisiones, solo lo que el pago real exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.';
-    expect((await general()).empresa!.nota).toContain(precisa);
+      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones, solo lo que ese pago exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.';
+    const conRegla = (await general()).empresa!.nota;
+    expect(conRegla).toContain(precisa);
+    expect(conRegla).not.toContain('o provisión');
     const siempre =
-      'Egresos = pago al vendedor (real o provisión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.';
+      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.';
     const antes = (await general(POSTERIOR)).empresa!.nota;
     expect(antes).toContain(siempre);
     expect(antes).not.toContain('en los vuelos completados');
+    expect(antes).not.toContain('o provisión');
     // Vuelo DE la vigencia sin comisiones (ni banco ni vendedor): ningún
     // avión cubre un pago al vendedor ⇒ la nota de siempre.
     const m = mundoCierre();
@@ -856,32 +961,57 @@ describe('Bloque VUELATOUR (empresa) y conservación del dinero (API 0.0.66)', (
     expect(nota).not.toContain('en los vuelos completados');
   });
 
-  it('sin pagos por debajo de la provisión, el resultado de la empresa es IDÉNTICO al 0.0.65 (quitar la línea duplicada no mueve el dinero)', async () => {
+  it('sin pagos por debajo de la provisión, el resultado de la empresa es el del 0.0.65 + la provisión del #513 que ya no egresa (quitar la línea duplicada no mueve el dinero; la invariante 58 solo sube los vuelos sin provisión del avión)', async () => {
     const con = (await general(undefined, mundoSinFaltante())).empresa!;
-    expect(con.resultado_usd).toBe(EMPRESA_0065_SIN_FALTANTE.resultado_usd);
+    expect(con.resultado_usd).toBe(
+      r2(EMPRESA_0065_SIN_FALTANTE.resultado_usd + 80),
+    );
     expect(con.participacion_usd).toBe(
       EMPRESA_0065_SIN_FALTANTE.participacion_usd,
     );
-    // Ingresos y egresos bajan EXACTAMENTE lo mismo (la provisión duplicada).
+    // Los ingresos bajan la provisión duplicada del 0.0.65; los egresos
+    // bajan lo mismo MÁS los 80 USD de la provisión del #513 (1,440 ÷ 18),
+    // que VuelaTour ya no provisiona.
     expect(
-      r2(
-        EMPRESA_0065_SIN_FALTANTE.ingresos_propios_usd -
-          (con.ingresos_propios_usd ?? 0),
-      ),
-    ).toBe(
       r2(
         EMPRESA_0065_SIN_FALTANTE.pagos_vendedor_usd -
           (con.pagos_vendedor_usd ?? 0),
       ),
+    ).toBe(
+      r2(
+        EMPRESA_0065_SIN_FALTANTE.ingresos_propios_usd -
+          (con.ingresos_propios_usd ?? 0) +
+          80,
+      ),
     );
   });
 
-  it('conservación: Σ ganancia de los libros + Σ remanente de «otros movimientos» == la regla anterior (menos el faltante del #506, que aún se le debe al vendedor)', async () => {
+  it('conservación: Σ ganancia de los libros + Σ remanente de «otros movimientos» == la regla anterior − las provisiones de los vuelos sin gasto real (que solo restan en el avión) − el faltante del #506', async () => {
+    // En `mundoSinFaltante` el #506 se queda sin pago real: su provisión
+    // (1,800) también deja de egresar en «otros movimientos».
     expect(dineroTotal(await general(undefined, mundoSinFaltante()))).toBe(
-      dineroTotal(await general(POSTERIOR, mundoSinFaltante())),
+      r2(
+        dineroTotal(await general(POSTERIOR, mundoSinFaltante())) -
+          PROVISIONES_SIN_GASTO_REAL -
+          1800,
+      ),
     );
     expect(dineroTotal(await general())).toBe(
-      r2(dineroTotal(await general(POSTERIOR)) - 300),
+      r2(
+        dineroTotal(await general(POSTERIOR)) -
+          PROVISIONES_SIN_GASTO_REAL -
+          300,
+      ),
     );
+    // Lo que se fue de la pestaña son EXACTAMENTE las provisiones que cada
+    // avión carga en su columna COMISIONES (fuente única).
+    const g = await general();
+    const provisionesAviones = r2(
+      g.aviones
+        .flatMap((a) => a.vuelos)
+        .filter((v) => [V7, 'v-1', V3].includes(v.vuelo_id ?? ''))
+        .reduce((s, v) => s + (v.comision_vendedor_prov_mxn ?? 0), 0),
+    );
+    expect(provisionesAviones).toBe(PROVISIONES_SIN_GASTO_REAL);
   });
 });

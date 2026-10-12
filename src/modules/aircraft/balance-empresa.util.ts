@@ -333,13 +333,17 @@ function notaBalanceEmpresa(n: {
       : 'Participación: la empresa no es socia de ningún avión del periodo.',
   );
   // Revisión 7-oct-2026 (API 0.0.66): con vuelos cuyo pago al vendedor ya
-  // cubre la provisión de los aviones, «real o provisión» a secas
-  // contradecía el pie de pyservices («los egresos propios solo traen lo que
-  // el pago real la exceda»): la nota lo precisa. Sin esos vuelos, el texto
-  // de siempre.
+  // cubre la provisión de los aviones, el texto corto a secas contradecía
+  // el pie de pyservices («los egresos propios solo traen lo que el pago
+  // real la exceda»): la nota lo precisa. Sin esos vuelos, el texto corto.
+  // Revisión 12-oct-2026 (API 0.0.73, invariante 58): «otros movimientos» ya
+  // NO provisiona el pago al vendedor (sin gasto real la fila no lleva
+  // egreso), así que el «real o provisión» de hasta el 0.0.72 era falso y
+  // chocaba con la fila 2 y el pie nuevos de pyservices: el único egreso del
+  // vendedor es el gasto real «Comisión del vendedor» capturado.
   const pagoVendedor = n.pagoVendedorCubiertoPorAvion
-    ? 'pago al vendedor (real o provisión; en los vuelos completados de la regla de comisiones, solo lo que el pago real exceda la provisión que ya carga el avión)'
-    : 'pago al vendedor (real o provisión)';
+    ? 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones, solo lo que ese pago exceda la provisión que ya carga el avión)'
+    : 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado)';
   partes.push(
     "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
       'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +

@@ -1317,6 +1317,17 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * payload es byte-idéntico y pyservices pinta la pestaña de siempre.
    */
   afac?: BalanceAfacOtrosMovimientosPayload;
+  /**
+   * ADITIVA (12-oct-2026, API 0.0.73, invariante 58): `true` = este libro
+   * ya NO provisiona el pago al vendedor en esta pestaña. Sin gasto real
+   * `COMISION_VENDEDOR` ligado al vuelo, la fila del vuelo no lleva egreso
+   * del vendedor (ni concepto, ni monto, ni fecha, ni la marca del
+   * amarillo); el ingreso cobrado al cliente se queda y el remanente es el
+   * ingreso. Con gasto real, el apareo de siempre. Desde el 0.0.73 viaja
+   * SIEMPRE; pyservices activa con ella sus leyendas nuevas (un API previo
+   * no la manda ⇒ las leyendas de hoy, byte a byte).
+   */
+  sin_provision_vendedor?: true;
 }
 
 export interface BalanceAvionPayload {
@@ -1356,6 +1367,16 @@ export interface BalanceAvionPayload {
   /** Pestaña "Otros movimientos" (28-ago): solo la manda el GENERAL. */
   otros_movimientos?: BalanceHojaOtrosMovimientosPayload;
   pendientes: string[];
+  /**
+   * ADITIVA (12-oct-2026, API 0.0.73, invariante 58), la misma llave que
+   * `otros_movimientos.sin_provision_vendedor`, al nivel raíz: el libro
+   * INDIVIDUAL no trae esa pestaña y la nota del pago al vendedor de su hoja
+   * de vuelos cambia solo con esta bandera (pyservices). `buildPayload` la
+   * manda SIEMPRE desde el 0.0.73 (libros individuales y los `aviones[]`
+   * del general); el consolidado «FLOTA» del general no la lleva (su nota
+   * no habla del pago al vendedor). Un API previo no la manda.
+   */
+  sin_provision_vendedor?: true;
 }
 
 export interface GastoVueloSugerenciaPayload {
