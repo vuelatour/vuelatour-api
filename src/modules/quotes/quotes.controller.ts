@@ -132,7 +132,8 @@ export class QuotesController {
   @Get()
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
-    summary: 'List quotes (vuelos) with filters. No accesible a pilotos.',
+    summary:
+      'List quotes (vuelos) with filters. No accesible a pilotos. desde/hasta (13-oct-2026) acotan fecha_vuelo en día Cancún (YYYY-MM-DD) o por instante ISO; con rango, las cotizaciones sin fecha de vuelo quedan fuera.',
   })
   list(@Query() q: ListQuotesQuery) {
     return this.quotes.list(q);
@@ -172,7 +173,7 @@ export class QuotesController {
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA, Rol.SOCIO)
   @ApiOperation({
     summary:
-      'Flechas «‹ Anterior» / «Siguiente ›» del detalle (24-sep-2026): la cotización anterior y la siguiente en orden CRONOLÓGICO de vuelo (fecha_vuelo, empate por folio), con los MISMOS filtros de GET /quotes (cliente_id, aeronave_id, estado, es_externo, grupo_id, q) y los mismos roles. {anterior, siguiente: {id, folio, fecha_vuelo, estado, cliente_nombre} | null, sin_fecha}. La cotización actual es el ancla aunque ya no cumpla el filtro; sin fecha de vuelo ⇒ sin_fecha:true y ambos null. 404 si no existe. Solo lectura; 5 consultas indexadas, nunca la lista entera.',
+      'Flechas «‹ Anterior» / «Siguiente ›» del detalle (24-sep-2026): la cotización anterior y la siguiente en orden CRONOLÓGICO de vuelo (fecha_vuelo, empate por folio), con los MISMOS filtros de GET /quotes (cliente_id, aeronave_id, estado, es_externo, grupo_id, q, desde, hasta) y los mismos roles. {anterior, siguiente: {id, folio, fecha_vuelo, estado, cliente_nombre} | null, sin_fecha}. La cotización actual es el ancla aunque ya no cumpla el filtro y el ancla puede quedar fuera del rango desde/hasta (13-oct-2026: el rango viaja a las 4 consultas; con rango, las cotizaciones sin fecha de vuelo quedan fuera); sin fecha de vuelo ⇒ sin_fecha:true y ambos null. 404 si no existe. Solo lectura; 5 consultas indexadas, nunca la lista entera.',
   })
   vecinos(
     @Param('id', ParseUUIDPipe) id: string,

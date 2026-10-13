@@ -27,9 +27,13 @@ import type { FlightsService } from '../flights/flights.service';
  * hasta el siguiente día»).
  *
  * La BD es EN MEMORIA y además INTERPRETA lo que el servicio le pide
- * (`eq/gt/lt/ilike/in/or/order/limit`), así que el orden cronológico, el
- * empate por folio y los filtros salen de las MISMAS consultas que corren en
- * producción — no de un mock que devuelve «lo que el test espera».
+ * (`eq/gt/lt/gte/lte/ilike/in/or/order/limit`), así que el orden cronológico,
+ * el empate por folio y los filtros salen de las MISMAS consultas que corren
+ * en producción — no de un mock que devuelve «lo que el test espera».
+ *
+ * Rango `desde`/`hasta` sobre `fecha_vuelo` (13-oct-2026, decisión 5 del
+ * lote): `gte`/`lte` comparan instantes (un ISO con offset `-05:00` se parsea
+ * igual que en Postgres) y una fecha NULL no cumple ninguno de los dos.
  */
 
 type Fila = Record<string, unknown>;
@@ -180,6 +184,15 @@ function bd(tablas: Record<string, Fila[]>, fallaEn?: (l: Llamada) => boolean) {
     b.lt = (c: string, v: unknown) => {
       filtros.push((f) => comparar(f[c], v) < 0);
       return reg('lt', c, v);
+    };
+    // NULL ⇒ `comparar` da NaN ⇒ la fila queda fuera, igual que en Postgres.
+    b.gte = (c: string, v: unknown) => {
+      filtros.push((f) => comparar(f[c], v) >= 0);
+      return reg('gte', c, v);
+    };
+    b.lte = (c: string, v: unknown) => {
+      filtros.push((f) => comparar(f[c], v) <= 0);
+      return reg('lte', c, v);
     };
     b.ilike = (c: string, p: string) => {
       filtros.push((f) => ilike(f[c], p));
@@ -538,6 +551,148 @@ describe('QuotesService.vecinos — MISMOS filtros que la lista', () => {
   });
 });
 
+describe('QuotesService.vecinos — rango desde/hasta en día Cancún (13-oct-2026)', () => {
+  const RANGO: VecinosQuotesQuery = {
+    desde: '2026-09-20',
+    hasta: '2026-09-21',
+  };
+  const GTE_20 = ['gte', 'fecha_vuelo', '2026-09-20T00:00:00-05:00'];
+  const LTE_21 = ['lte', 'fecha_vuelo', '2026-09-21T23:59:59-05:00'];
+  const vec = async (
+    svc: QuotesService,
+    folio: number,
+    f: VecinosQuotesQuery,
+  ) => folios(await svc.vecinos(idDe(folio), f));
+  /** Ops `gte`/`lte` de las 4 consultas vecinas (sin el ancla). */
+  const rangoDeVecinas = (llamadas: Llamada[]) =>
+    llamadas
+      .filter((l) => l.tabla === 'vuelo')
+      .slice(1)
+      .map((l) => l.ops.filter((o) => o[0] === 'gte' || o[0] === 'lte'));
+
+  it('(a) SEMANA con 20–21 sep: #341 ⇒ [null, 346] (#340 del 19 fuera), #346 ⇒ [341, 343], #343 ⇒ [346, null] (#350-352 del 22 fuera)', async () => {
+    const { supabase } = bd({ vuelo: SEMANA });
+    const svc = servicio(supabase);
+    expect(await vec(svc, 341, RANGO)).toEqual([null, 346]);
+    expect(await vec(svc, 346, RANGO)).toEqual([341, 343]);
+    expect(await vec(svc, 343, RANGO)).toEqual([346, null]);
+  });
+
+  it('(b) las 4 consultas vecinas llevan gte/lte con los límites del día Cancún (00:00 / 23:59:59, UTC−5 fijo) y conservan limit(1)', async () => {
+    const { supabase, llamadas } = bd({ vuelo: SEMANA });
+    await servicio(supabase).vecinos(idDe(341), RANGO);
+    const vecinas = llamadas.filter((l) => l.tabla === 'vuelo').slice(1);
+    expect(vecinas).toHaveLength(4);
+    for (const l of vecinas) {
+      expect(l.ops).toEqual(expect.arrayContaining([GTE_20, LTE_21]));
+      expect(l.ops).toContainEqual(['limit', 1]);
+    }
+    expect(rangoDeVecinas(llamadas)).toEqual([
+      [GTE_20, LTE_21],
+      [GTE_20, LTE_21],
+      [GTE_20, LTE_21],
+      [GTE_20, LTE_21],
+    ]);
+  });
+
+  it('(c) FRONTERA CANCÚN: un vuelo a las 23:30 del 20 (04:30Z del 21) ENTRA con hasta=20 y NO entra con desde=21', async () => {
+    const filas = [
+      vuelo(341, cancun('2026-09-20', '10:00')),
+      // = 2026-09-21T04:30:00+00:00: en UTC ya es día 21, en Cancún no.
+      vuelo(347, cancun('2026-09-20', '23:30')),
+      vuelo(343, cancun('2026-09-21', '08:00')),
+    ];
+    const { supabase } = bd({ vuelo: filas });
+    const svc = servicio(supabase);
+    // hasta=20: #347 sigue siendo del 20 en Cancún; #343 (día 21) queda fuera.
+    expect(await vec(svc, 341, { hasta: '2026-09-20' })).toEqual([null, 347]);
+    expect(await vec(svc, 347, { hasta: '2026-09-20' })).toEqual([341, null]);
+    // desde=21: #347 NO es del 21 (lo sería con medianoche UTC, no Cancún).
+    expect(await vec(svc, 343, { desde: '2026-09-21' })).toEqual([null, null]);
+    expect(await vec(svc, 341, { desde: '2026-09-21' })).toEqual([null, 343]);
+  });
+
+  it('(d) ISO con hora pasa tal cual: desde=20-sep 15:00 Cancún ⇒ #341 (10:00, ancla fuera) brinca a #346 (15:30)', async () => {
+    const { supabase, llamadas } = bd({ vuelo: SEMANA });
+    const desde = '2026-09-20T15:00:00-05:00';
+    const r = await servicio(supabase).vecinos(idDe(341), { desde });
+    expect(folios(r)).toEqual([null, 346]);
+    expect(rangoDeVecinas(llamadas)).toEqual([
+      [['gte', 'fecha_vuelo', desde]],
+      [['gte', 'fecha_vuelo', desde]],
+      [['gte', 'fecha_vuelo', desde]],
+      [['gte', 'fecha_vuelo', desde]],
+    ]);
+  });
+
+  it('(e) ancla FUERA del rango: #340 (19-sep) con desde=20 ⇒ [null, 341]; #352 (22-sep) con hasta=21 ⇒ [343, null]', async () => {
+    const { supabase } = bd({ vuelo: SEMANA });
+    const svc = servicio(supabase);
+    expect(await vec(svc, 340, { desde: '2026-09-20' })).toEqual([null, 341]);
+    expect(await vec(svc, 352, { hasta: '2026-09-21' })).toEqual([343, null]);
+  });
+
+  it('(f) con rango, una cotización SIN fecha (#360) nunca entra; el ancla sin fecha sigue siendo sin_fecha:true sin consultas extra', async () => {
+    const { supabase, llamadas } = bd({ vuelo: SEMANA });
+    const svc = servicio(supabase);
+    const amplio: VecinosQuotesQuery = {
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+    };
+    // #352 es la última CON fecha: aun con el mes completo, #360 no es su siguiente.
+    expect(await vec(svc, 352, amplio)).toEqual([351, null]);
+    llamadas.length = 0;
+    const r = await svc.vecinos(idDe(360), amplio);
+    expect(r).toEqual({ anterior: null, siguiente: null, sin_fecha: true });
+    expect(llamadas).toHaveLength(1);
+  });
+
+  it('(g) solo desde ⇒ una sola op gte; solo hasta ⇒ una sola op lte; sin rango ⇒ ninguna (comportamiento intacto)', async () => {
+    const ops = async (f: VecinosQuotesQuery) => {
+      const { supabase, llamadas } = bd({ vuelo: SEMANA });
+      await servicio(supabase).vecinos(idDe(341), f);
+      return rangoDeVecinas(llamadas);
+    };
+    expect(await ops({ desde: '2026-09-20' })).toEqual([
+      [GTE_20],
+      [GTE_20],
+      [GTE_20],
+      [GTE_20],
+    ]);
+    expect(await ops({ hasta: '2026-09-21' })).toEqual([
+      [LTE_21],
+      [LTE_21],
+      [LTE_21],
+      [LTE_21],
+    ]);
+    expect(await ops({})).toEqual([[], [], [], []]);
+  });
+
+  it('desde > hasta ⇒ sin vecinos (rango vacío, no 400) y sin_fecha:false', async () => {
+    const { supabase } = bd({ vuelo: SEMANA });
+    const r = await servicio(supabase).vecinos(idDe(341), {
+      desde: '2026-09-22',
+      hasta: '2026-09-20',
+    });
+    expect(r).toEqual({ anterior: null, siguiente: null, sin_fecha: false });
+  });
+
+  it('el rango se combina con los demás filtros (estado) sin perder ninguno', async () => {
+    const filas = [
+      vuelo(1, cancun('2026-09-20', '10:00')),
+      vuelo(2, cancun('2026-09-20', '12:00'), { estado: 'CONFIRMADO' }),
+      vuelo(3, cancun('2026-09-21', '10:00')),
+      vuelo(4, cancun('2026-09-22', '10:00')),
+    ];
+    const { supabase } = bd({ vuelo: filas });
+    const svc = servicio(supabase);
+    expect(
+      await vec(svc, 1, { ...RANGO, estado: EstadoVuelo.COTIZADO }),
+    ).toEqual([null, 3]);
+    expect(await vec(svc, 1, RANGO)).toEqual([null, 2]);
+  });
+});
+
 describe('QuotesService.list — el refactor no cambia la lista', () => {
   it('la lista arma el MISMO `.or(...)` de búsqueda y los mismos `eq` que las flechas', async () => {
     const { supabase, llamadas } = bd({
@@ -584,5 +739,50 @@ describe('QuotesService.list — el refactor no cambia la lista', () => {
       .slice(1)
       .map((l) => l.ops.find((o) => o[0] === 'or')?.[1]);
     expect(orVecinos).toEqual([orLista, orLista, orLista, orLista]);
+  });
+
+  it('PARIDAD del rango (13-oct-2026): list y vecinos emiten los MISMOS gte/lte de día Cancún; sin rango, ninguno', async () => {
+    const { supabase, llamadas } = bd({ vuelo: SEMANA, escala: [] });
+    const svc = servicio(supabase);
+    const GTE = ['gte', 'fecha_vuelo', '2026-09-20T00:00:00-05:00'];
+    const LTE = ['lte', 'fecha_vuelo', '2026-09-21T23:59:59-05:00'];
+    const rangoDe = (ops: Op[]) =>
+      ops.filter((o) => o[0] === 'gte' || o[0] === 'lte');
+    const r = await svc.list({
+      desde: '2026-09-20',
+      hasta: '2026-09-21',
+      limit: 50,
+      offset: 0,
+    });
+    // Exactamente las del 20 y del 21; #360 (sin fecha) queda fuera.
+    // `r.data` es la fila cruda (`Record<string, unknown>`) más `ruta_iatas`.
+    const foliosLista = r.data
+      .map((d) => Number((d as Record<string, unknown>).folio))
+      .sort((a, b) => a - b);
+    expect(foliosLista).toEqual([341, 343, 346]);
+    expect(r.count).toBe(3);
+    const lista = llamadas.find(
+      (l) => l.tabla === 'vuelo' && l.ops.some((o) => o[0] === 'range'),
+    );
+    expect(rangoDe(lista?.ops ?? [])).toEqual([GTE, LTE]);
+    // El orden de la lista no cambia.
+    expect(lista?.ops).toContainEqual([
+      'order',
+      'fecha_solicitud',
+      { ascending: false },
+    ]);
+
+    llamadas.length = 0;
+    await svc.vecinos(idDe(341), { desde: '2026-09-20', hasta: '2026-09-21' });
+    const vecinas = llamadas.filter((l) => l.tabla === 'vuelo').slice(1);
+    expect(vecinas).toHaveLength(4);
+    for (const l of vecinas) expect(rangoDe(l.ops)).toEqual([GTE, LTE]);
+
+    // Sin desde/hasta la lista NO emite gte/lte (comportamiento intacto).
+    llamadas.length = 0;
+    const todo = await svc.list({ limit: 50, offset: 0 });
+    expect(todo.count).toBe(SEMANA.length);
+    const sinRango = llamadas.find((l) => l.ops.some((o) => o[0] === 'range'));
+    expect(rangoDe(sinRango?.ops ?? [])).toEqual([]);
   });
 });

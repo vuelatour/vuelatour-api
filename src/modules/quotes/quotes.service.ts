@@ -345,6 +345,8 @@ const COLS_VECINO: string =
  */
 interface BuilderFiltrosLista<T> {
   eq(columna: string, valor: string | boolean): T;
+  gte(columna: string, valor: string): T;
+  lte(columna: string, valor: string): T;
   or(filtros: string): T;
 }
 
@@ -384,6 +386,23 @@ async function primerVecino(
   if (error) throw new Error(error.message);
   const fila = Array.isArray(data) ? (data[0] as unknown) : null;
   return fila ? vecinoDeFila(fila as Record<string, unknown>) : null;
+}
+
+/** Fecha simple `YYYY-MM-DD` (sin hora) del filtro `desde`/`hasta`. */
+const SOLO_FECHA = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Límite de `fecha_vuelo` para el rango `desde`/`hasta` de la lista y de las
+ * flechas (13-oct-2026). Fecha simple = límites del DÍA CANCÚN (regla del
+ * repo, mismo patrón que la lista de vuelos en `flights.service.ts`:
+ * `T00:00:00-05:00` para `desde` y `T23:59:59-05:00` para `hasta`, UTC−5
+ * fijo); un ISO con hora pasa tal cual a PostgREST.
+ */
+function limiteFechaVuelo(valor: string, extremo: 'desde' | 'hasta'): string {
+  if (!SOLO_FECHA.test(valor)) return valor;
+  return extremo === 'desde'
+    ? `${valor}T00:00:00-05:00`
+    : `${valor}T23:59:59-05:00`;
 }
 
 function round2(n: number): number {
@@ -1979,6 +1998,13 @@ export class QuotesService {
       q = q.eq('es_externo', filtros.es_externo);
     // Hijos de una cotización de GRUPO (4-sep-2026).
     if (filtros.grupo_id) q = q.eq('grupo_id', filtros.grupo_id);
+    // Rango sobre fecha_vuelo (13-oct-2026): con rango, las cotizaciones SIN
+    // fecha quedan fuera (NULL no cumple gte/lte) — en la lista y en las
+    // cuatro consultas de las flechas. `desde > hasta` = lista vacía, no 400.
+    if (filtros.desde)
+      q = q.gte('fecha_vuelo', limiteFechaVuelo(filtros.desde, 'desde'));
+    if (filtros.hasta)
+      q = q.lte('fecha_vuelo', limiteFechaVuelo(filtros.hasta, 'hasta'));
     if (condQ) q = q.or(condQ);
     return q;
   }
@@ -2052,6 +2078,10 @@ export class QuotesService {
    * - Sin `fecha_vuelo` no hay orden cronológico: `sin_fecha: true` y ninguna
    *   consulta más. Una cotización sin fecha tampoco es vecina de nadie
    *   (`eq/gt/lt` sobre null no empatan).
+   * - Con `desde`/`hasta` (13-oct-2026) las cuatro consultas llevan el rango
+   *   (día Cancún o instante ISO, `limiteFechaVuelo`); el ancla puede estar
+   *   fuera de él (se navega al primer/último vecino dentro del rango) y una
+   *   cotización sin fecha tampoco entra al rango.
    * - Las CANCELADAS entran, como en la lista (salvo que `estado` diga otra
    *   cosa).
    * - 404 como `findById` si el vuelo no existe.

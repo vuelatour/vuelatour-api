@@ -3,6 +3,7 @@ import { Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import {
   IsBoolean,
+  IsDateString,
   IsEnum,
   IsInt,
   IsOptional,
@@ -57,6 +58,32 @@ export class ListQuotesQuery {
   @IsString()
   q?: string;
 
+  // Rango sobre `fecha_vuelo` (13-oct-2026, decisión 5 del lote): mismo
+  // patrón que `ListFlightsQuery`; también viaja a `/vecinos` (flechas).
+  // String (no Date): una fecha simple se corta en día CANCÚN; pasarla por
+  // `new Date()` la vuelve medianoche UTC y mueve vuelos de día/mes.
+  @ApiPropertyOptional({
+    description:
+      'fecha_vuelo >= (YYYY-MM-DD = día Cancún desde las 00:00, o ISO con hora tal cual). Con desde/hasta las cotizaciones SIN fecha de vuelo quedan fuera.',
+  })
+  @IsOptional()
+  @IsDateString(
+    {},
+    { message: 'desde debe ser una fecha YYYY-MM-DD o un instante ISO 8601' },
+  )
+  desde?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'fecha_vuelo <= (YYYY-MM-DD = día Cancún hasta las 23:59:59, o ISO con hora tal cual). Con desde/hasta las cotizaciones SIN fecha de vuelo quedan fuera.',
+  })
+  @IsOptional()
+  @IsDateString(
+    {},
+    { message: 'hasta debe ser una fecha YYYY-MM-DD o un instante ISO 8601' },
+  )
+  hasta?: string;
+
   @ApiPropertyOptional({ default: 50 })
   @IsOptional()
   @Type(() => Number)
@@ -79,7 +106,9 @@ export class ListQuotesQuery {
  * me pueda brincar a la siguiente»). Son EXACTAMENTE los de la lista
  * (`GET /quotes`) sin paginar: las flechas recorren lo mismo que el operador
  * veía en la lista de donde vino. `limit`/`offset` no existen aquí (con
- * `forbidNonWhitelisted` mandarlos es 400).
+ * `forbidNonWhitelisted` mandarlos es 400). El rango `desde`/`hasta`
+ * (13-oct-2026) también viaja: las cuatro consultas de las flechas lo llevan
+ * y el ancla (la cotización abierta) puede quedar fuera de él.
  */
 export class VecinosQuotesQuery extends OmitType(ListQuotesQuery, [
   'limit',

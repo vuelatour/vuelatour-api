@@ -70,7 +70,7 @@ describe('VecinosQuotesQuery — los filtros de la lista, sin paginar', () => {
       enableImplicitConversion: true,
     });
 
-  it('acepta los 6 filtros de la lista', async () => {
+  it('acepta los 8 filtros de la lista (6 + desde/hasta)', async () => {
     const d = dto({
       cliente_id: CLIENTE,
       aeronave_id: CLIENTE,
@@ -78,9 +78,30 @@ describe('VecinosQuotesQuery — los filtros de la lista, sin paginar', () => {
       es_externo: 'true',
       grupo_id: GRUPO,
       q: 'maqar',
+      desde: '2026-09-01',
+      hasta: '2026-09-30T23:59:59-05:00',
     });
     expect(await validate(d, OPTS)).toEqual([]);
     expect(d.es_externo).toBe(true);
+    // Siguen siendo string (sin conversión implícita a Date): el día se corta
+    // en Cancún dentro del servicio, no en medianoche UTC.
+    expect(d.desde).toBe('2026-09-01');
+    expect(d.hasta).toBe('2026-09-30T23:59:59-05:00');
+  });
+
+  it('desde/hasta que no son fecha ⇒ error con mensaje es-MX', async () => {
+    const errores = await validate(
+      dto({ desde: '01/09/2026', hasta: 'ayer' }),
+      OPTS,
+    );
+    expect(errores.map((e) => e.property).sort()).toEqual(['desde', 'hasta']);
+    const mensajes = Object.fromEntries(
+      errores.map((e) => [e.property, e.constraints?.isDateString]),
+    );
+    expect(mensajes).toEqual({
+      desde: 'desde debe ser una fecha YYYY-MM-DD o un instante ISO 8601',
+      hasta: 'hasta debe ser una fecha YYYY-MM-DD o un instante ISO 8601',
+    });
   });
 
   it('limit/offset NO existen aquí (400 con forbidNonWhitelisted)', async () => {
@@ -165,7 +186,7 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
 
   it('llega a `vecinos` (no a `:id`) con los filtros ya transformados', async () => {
     const r = await request(http()).get(
-      `/v1/quotes/${ID}/vecinos?estado=COTIZADO&cliente_id=${CLIENTE}&q=maqar&grupo_id=${GRUPO}&es_externo=true`,
+      `/v1/quotes/${ID}/vecinos?estado=COTIZADO&cliente_id=${CLIENTE}&q=maqar&grupo_id=${GRUPO}&es_externo=true&desde=2026-09-20&hasta=2026-09-22`,
     );
     expect(r.status).toBe(200);
     expect(r.body).toEqual(respuesta);
@@ -179,6 +200,9 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
         q: 'maqar',
         grupo_id: GRUPO,
         es_externo: true,
+        // El rango llega INTACTO (string): el servicio lo corta en Cancún.
+        desde: '2026-09-20',
+        hasta: '2026-09-22',
       }),
     );
   });
@@ -203,7 +227,7 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
     }
   });
 
-  it('id que no es uuid ⇒ 400; `limit` ⇒ 400; estado inválido ⇒ 400', async () => {
+  it('id que no es uuid ⇒ 400; `limit` ⇒ 400; estado inválido ⇒ 400; `desde` que no es fecha ⇒ 400', async () => {
     expect(
       (await request(http()).get('/v1/quotes/no-es-uuid/vecinos')).status,
     ).toBe(400);
@@ -213,6 +237,9 @@ describe('QuotesController — GET /v1/quotes/:id/vecinos por HTTP', () => {
     expect(
       (await request(http()).get(`/v1/quotes/${ID}/vecinos?estado=NADA`))
         .status,
+    ).toBe(400);
+    expect(
+      (await request(http()).get(`/v1/quotes/${ID}/vecinos?desde=nada`)).status,
     ).toBe(400);
     expect(svc.vecinos).not.toHaveBeenCalled();
   });

@@ -2222,6 +2222,35 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `aplicarFiltrosLista(qb, filtros, condQ)` (síncrona). Si divergen, la
       flecha brinca a una cotización que la lista no enseña. `list` no cambió
       de comportamiento (el spec compara el `.or` de las dos).
+      - **`desde`/`hasta` (13-oct-2026, API 0.0.74, decisión 5 del lote, sin
+        migración ni pyservices)**: ambas rutas aceptan `desde`/`hasta` sobre
+        `fecha_vuelo` (`YYYY-MM-DD` = día Cancún `T00:00:00-05:00` /
+        `T23:59:59-05:00`, UTC−5 fijo; ISO con hora tal cual — mismo patrón
+        que `GET /flights`; cualquier otro texto ⇒ 400 con mensaje es-MX
+        «desde debe ser una fecha YYYY-MM-DD o un instante ISO 8601»),
+        aplicados en `aplicarFiltrosLista` (fuente única, helper puro
+        `limiteFechaVuelo`; `BuilderFiltrosLista` ganó `gte/lte` con las
+        firmas de `BuilderCas`) y por tanto en las CUATRO consultas de las
+        flechas, sobre `idx_vuelo_fecha_vuelo`. Con rango, las cotizaciones
+        SIN fecha de vuelo quedan fuera (NULL no cumple `gte`/`lte`); el
+        ancla sigue siendo la actual aunque caiga fuera del rango (anterior =
+        último dentro del rango antes del ancla; siguiente = primero dentro
+        del rango después); `desde > hasta` ⇒ lista vacía, no 400. Las
+        respuestas y el orden (`fecha_solicitud desc` en la lista, cronológico
+        en las flechas) no cambian. Por qué: el cliente pidió «Desde / Hasta»
+        en Cotizaciones y las flechas deben recorrer exactamente lo que la
+        lista enseña. **El panel YA manda el rango** (commit `147b925` del
+        13-oct-2026: `FILTROS_LISTA` de `src/lib/admin/quote-navegacion.ts`
+        incluye `desde`/`hasta`, solo `YYYY-MM-DD`, invertido se intercambia)
+        y contra un API sin este cambio recibe 400 y DEGRADA: relee SIN rango
+        la lista y `/vecinos` y avisa (`data-aviso="rango-api-viejo"`), así
+        que el filtro solo surte efecto con este API desplegado. Se prueba
+        con `quotes.service.vecinos.spec.ts` (describe «rango desde/hasta en
+        día Cancún»: semana 20–21, frontera 23:30 Cancún = 04:30Z, ISO tal
+        cual, ancla fuera, sin fecha, un solo extremo, invertido, combinado
+        con `estado`; y PARIDAD `list` ↔ `vecinos` de los `gte/lte`) y
+        `quotes.controller.vecinos.spec.ts` (DTO: 8 filtros y mensajes es-MX;
+        HTTP: `desde`/`hasta` llegan intactos, `?desde=nada` ⇒ 400).
     - **Barato**: ancla (`id, folio, fecha_vuelo`) + CUATRO consultas en
       paralelo con `limit(1)` sobre `idx_vuelo_fecha_vuelo` (mismo instante con
       folio mayor/menor · primer instante posterior · último anterior), así no
@@ -2236,12 +2265,14 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       chequeo de tipos de supabase-js (TS2589)— y `primerVecino` resuelve cada
       consulta a `QuoteVecino | null` fuera del `Promise.all`.
     - Specs: `quotes.service.vecinos.spec.ts` (BD en memoria que INTERPRETA
-      `eq/gt/lt/ilike/in/or/order/limit`: mismo día más tarde, día siguiente,
-      empate, extremos, recorrido completo ida y vuelta, filtros, `q` resuelta
-      una vez, ancla fuera del filtro, sin fecha, 404, error que sube, y la
-      paridad del `.or` con `list`) y `quotes.controller.vecinos.spec.ts`
-      (HTTP real con `RolesGuard`: ruta antes de `:id`, roles = los de la
-      lista, `limit` ⇒ 400).
+      `eq/gt/lt/gte/lte/ilike/in/or/order/limit`: mismo día más tarde, día
+      siguiente, empate, extremos, recorrido completo ida y vuelta, filtros,
+      `q` resuelta una vez, ancla fuera del filtro, sin fecha, 404, error que
+      sube, la paridad del `.or` con `list`, y desde el 13-oct-2026 el rango
+      Cancún `desde`/`hasta` y la paridad `gte/lte` con `list`) y
+      `quotes.controller.vecinos.spec.ts` (HTTP real con `RolesGuard`: ruta
+      antes de `:id`, roles = los de la lista, `limit` ⇒ 400, `desde`/`hasta`
+      intactos y `?desde=nada` ⇒ 400).
     - **CORREGIDO el 5-oct-2026 (API 0.0.53)**: con `enableImplicitConversion`
       class-transformer convierte `'false'` ⇒ `true` ANTES de los
       `@Transform`, así que `@ToBooleanQuery()` recibía el valor ya
