@@ -13,8 +13,10 @@ import type {
  *  - PARTICIPACIÓN como socia: el `monto_usd` de los socios `es_empresa` de
  *    cada bloque de avión (utilidad COBRADA × %), tal cual.
  *  - INGRESOS y EGRESOS propios: la hoja «otros movimientos» (filas por
- *    vuelo + sueltas), cada fila de regreso a USD con SU T.C. (el K del
- *    vuelo; una suelta, el T.C. que la convirtió o el oficial del día).
+ *    vuelo + AFAC por avión (invariante 62) + sueltas), cada fila de
+ *    regreso a USD con SU T.C. (el K del vuelo; una fila «AFAC ·
+ *    matrícula», el T.C. promedio de costos del libro de su avión; una
+ *    suelta, el T.C. que la convirtió o el oficial del día).
  *    BASE (revisión 6-oct-2026): el ingreso de esa hoja es lo COTIZADO de
  *    los vuelos del periodo no cancelados —COTIZADO y RESERVA incluidos—,
  *    no lo cobrado; el egreso, todo lo que la hoja resta (lo pagado; desde
@@ -215,6 +217,15 @@ export interface InsumosBalanceEmpresa {
    * Ausente o false ⇒ la nota corta de siempre, byte a byte.
    */
   pagoVendedorACargoDelAvion?: boolean;
+  /**
+   * ¿«otros movimientos» trae filas «AFAC · matrícula» (ADITIVO 13-oct-2026,
+   * API 0.0.74, invariante 62)? Solo cambia la NOTA —mismo patrón que
+   * `pagoVendedorACargoDelAvion`—: la aritmética ya toma las filas AFAC por
+   * `movimientos`, cada una ÷ su `tc` = `totales.tc_promedio` del libro de
+   * su avión (ingreso = la provisión AFAC del periodo; egreso = los
+   * permisos pagados). Ausente o false ⇒ la nota de siempre, byte a byte.
+   */
+  afacEnFilas?: boolean;
 }
 
 /** Arma el bloque «VUELATOUR (empresa)» — fuente ÚNICA de su aritmética. */
@@ -293,6 +304,7 @@ export function armarBalanceEmpresa(
       tiendaSinTc,
       utilidadTiendaUsdLegado: num(e.inventario?.total_utilidad_usd),
       pagoVendedorACargoDelAvion: e.pagoVendedorACargoDelAvion === true,
+      afacEnFilas: e.afacEnFilas === true,
     }),
     movimientos_sin_tc: movimientosSinTc,
     ingresos_por_cobrar_usd: ingresosPorCobrarUsd,
@@ -314,6 +326,7 @@ function notaBalanceEmpresa(n: {
   tiendaSinTc: boolean;
   utilidadTiendaUsdLegado: number | null;
   pagoVendedorACargoDelAvion: boolean;
+  afacEnFilas: boolean;
 }): string {
   const aviones = [...new Set(n.participaciones.map((p) => p.matricula))];
   // Revisión 6-oct-2026: la nota NOMBRA el avión que vacía la participación
@@ -346,12 +359,24 @@ function notaBalanceEmpresa(n: {
   const pagoVendedor = n.pagoVendedorACargoDelAvion
     ? 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00)'
     : 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado)';
+  // Revisión 13-oct-2026 (API 0.0.74, invariante 62): con filas «AFAC ·
+  // matrícula» en la pestaña, la nota dice que el ingreso incluye la
+  // provisión AFAC del periodo de cada avión y el egreso los permisos AFAC
+  // pagados, y con qué T.C. regresan a USD. Sin ellas, el texto de siempre
+  // byte a byte. `pagoVendedor` va TAL CUAL en los dos.
   partes.push(
-    "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
-      'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +
-      'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
-      'COTIZADO y RESERVA incluidos. ' +
-      `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.`,
+    n.afacEnFilas
+      ? "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo, AFAC por avión y sueltas), " +
+          'cada fila a USD con el T.C. de su vuelo; las filas «AFAC · matrícula» con el T.C. promedio de costos del libro de su avión (sin vuelos, el oficial del cierre); ' +
+          'las sueltas con su T.C. o el oficial del día. ' +
+          'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
+          'COTIZADO y RESERVA incluidos, más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC). ' +
+          `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.`
+      : "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +
+          'cada fila a USD con el T.C. de su vuelo; las sueltas con su T.C. o el oficial del día. ' +
+          'Ingresos = lo COTIZADO (TUAs, extras, pernocta y comisión del vendedor) de los vuelos del periodo no cancelados, ' +
+          'COTIZADO y RESERVA incluidos. ' +
+          `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.`,
   );
   if (n.ingresosUsd != null && n.ingresosPorCobrarUsd > 0) {
     partes.push(

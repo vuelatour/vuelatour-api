@@ -4576,7 +4576,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «… en los vuelos completados de la regla de comisiones lo carga el
       avión en su columna COMISIONES y aquí egresa $0.00)»: las filas «a
       cargo del avión» egresan 0, así que `pagos_vendedor_usd` no cuenta ese
-      pago (ya restó en el avión). El T.C.
+      pago (ya restó en el avión). Desde el 0.0.74 (invariante 62) la
+      pestaña trae además una fila «AFAC · matrícula» por avión:
+      `ingresos_propios_usd` incluye la provisión AFAC del periodo de cada
+      avión y `pagos_vendedor_usd` los permisos AFAC pagados (TODOS los
+      gastos PERMISO de su hoja «permisos»), cada fila ÷ el
+      `totales.tc_promedio` del libro de su avión (alineado en `tcFilas` por
+      `payloadGeneral`); el insumo `afacEnFilas` solo cambia la `nota`
+      («(por vuelo, AFAC por avión y sueltas)… más la provisión AFAC del
+      periodo de cada avión… permisos AFAC pagados…»). El T.C.
       por fila lo recoge `buildOtrosMovimientos` en el parámetro opcional
       `tcFilas` (alineado por índice; NO viaja en el payload de la pestaña,
       que sale byte-idéntico, y sin él no hay consultas nuevas): fila por
@@ -5187,6 +5195,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       los totales de la pestaña ni al bloque VUELATOUR (invariante 47 lee
       `filas`/`filas_sueltas`, no `afac`). Sin provisión ni pagos la llave NO
       viaja (payload byte-idéntico). Nadie recalcula una provisión aquí.
+      **SUPERSEDIDO el 13-oct-2026 (invariante 62)**: desde el API 0.0.74
+      las filas «AFAC · matrícula» SUMAN dentro de `filas` (TOTALES y bloque
+      VUELATOUR) y el API ya no manda `afac` (`bloqueAfacOtrosMovimientos`
+      se eliminó); el bloque informativo solo lo pinta pyservices para un
+      API 0.0.69–0.0.73.
     - Deploy: pyservices (lee los dos aditivos; un pyservices previo los
       ignora: columna como valor y sin bloque) → API. Specs:
       `afac-otros-movimientos.util.spec.ts`.
@@ -5520,8 +5533,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       por venir de `buildPayload` y el consolidado (`hojaFlota`) hereda
       `tc_aplicado` por el spread de cada fila pero NO copia la bandera, a
       propósito (útil para la Decisión 2: T.C. por fila de los egresos AFAC
-      en `tcFilas`, invariante 47 — nadie recalcula un T.C.).
-      `bloqueAfacOtrosMovimientos` y `adjuntarLigasRefacciones` no se tocan.
+      en `tcFilas`, invariante 47 — nadie recalcula un T.C.; al final la
+      Decisión 2, invariante 62, usó `totales.tc_promedio` del libro y no
+      `tc_aplicado`).
+      `bloqueAfacOtrosMovimientos` y `adjuntarLigasRefacciones` no se tocan
+      (desde la invariante 62 el bloque es `filasAfacOtrosMovimientos`, que
+      lee el MISMO `monto_mxn` ya convertido).
       La vista en pantalla (invariante 52) pinta el mismo libro: la columna
       T.C. aparece sola en 'permisos' (el panel no se toca; avisar al
       cliente). Sin migración.
@@ -5535,7 +5552,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `monto_mxn` 2,500/2,568.52/1,600, USD sin T.C. ⇒ null + pendiente,
       sin la opción ni una llave nueva por `Object.keys`, y `buildPayload`
       con la bandera SOLO en `permisos` y `permisos_usd` = 333.43
-      congelado); `afac-otros-movimientos.util.spec` sin cambios. En
+      congelado); `afac-otros-movimientos.util.spec` sin cambios en esta
+      decisión (lo reescribió la invariante 62). En
       pyservices, `tests/test_balance_formulas.py` (sección 3b) y
       `tests/test_libro_json.py`.
 
@@ -5948,6 +5966,166 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       pyservices, `tests/test_comision_vendedor_notas.py`,
       `test_balance_comisiones.py`, `test_balance_comisiones_general.py` y
       `test_reparto_comisiones.py`.
+
+62. **PERMISOS AFAC COMO FILAS QUE SUMAN EN «OTROS MOVIMIENTOS» DEL
+    BALANCE GENERAL (13-oct-2026, API 0.0.74, SIN migración).** Decisión 2
+    del lote del cliente del 13-oct-2026, textual: «AFAC en "otros
+    movimientos" del Balance general: filas en la tabla principal que suman
+    en TOTALES (provisión AFAC del periodo = ingreso de VuelaTour por avión;
+    cada permiso pagado = egreso), ya no bloque informativo bajo totales».
+    SUPERSEDE el punto (2) de la invariante 53 (el bloque informativo
+    `afac`).
+    - **Regla**: `payloadGeneral` (la UNA armadura que comparten
+      `xlsxGeneral` y `libroGeneral`, invariante 52; NO `xlsxGeneral`)
+      ANEXA AL FINAL de `otros_movimientos.filas` (después de la última fila
+      por vuelo; nunca en `filas_sueltas`) UNA fila «AFAC · matrícula» por
+      avión REAL de `librosAviones`, en su orden (el de los bloques de
+      «balance»; el libro EXTERNOS nunca llega: `esAvion = false`). INGRESO
+      = `totales.permiso_afac_mxn` del libro (= Σ de su columna T «PERMISO
+      AFAC (PROVISIÓN)», round2(tarifa × z × D) por vuelo, TAL CUAL: nadie
+      la recalcula); EGRESO = Σ `monto_mxn` de su hoja `permisos` (TODOS los
+      gastos PERMISO del avión del periodo, con o sin vuelo —no solo los de
+      AFAC—: exactamente `filasPermisos` de `buildPayload`). Apareados en la
+      MISMA fila como las TUAS (remanente = ingreso − egreso; pyservices
+      escribe `ROUND(G−D,2)` como en toda fila). Un avión sin provisión ni
+      permisos no genera fila. Como viven DENTRO de `filas`, suman en
+      TOTALES con las fórmulas de siempre y entran UNA vez al bloque
+      VUELATOUR (invariante 47: `ingresos_propios_usd` suma la provisión,
+      `pagos_vendedor_usd` los permisos pagados).
+    - **Fuente única PURA**
+      `aircraft/afac-otros-movimientos.util.ts#filasAfacOtrosMovimientos
+      (librosAviones) → {filas, tcs}` (spec; cero consultas, cero recálculo
+      de provisiones o de T.C.). `payloadGeneral` empuja EN EL MISMO PASO las
+      filas, su T.C. (`tcFilasOM.filas`) y su «por cobrar» 0
+      (`tcFilasOM.porCobrarVtUsd`), SIEMPRE después de
+      `buildOtrosMovimientos` (que ya llenó `tcFilasOM`) y antes de
+      `armarBalanceEmpresa` (`movimientosConTc` LANZA si los tres arreglos no
+      miden igual: un olvido tira el general con 500). `buildOtrosMovimientos`
+      no conoce los libros: su retorno sigue byte a byte.
+    - **Fila (orden de llaves fijo)**: `clave` «AFAC · XB-PEV» (la categoría
+      primero, para no imitar el «clave · ESTADO» de los vuelos),
+      `avion_color` del libro, SIN `estado`, `fecha_vuelo`/`fecha_ingreso`/
+      `factura` null y `seccion: 'AFAC'` como ÚLTIMA llave. Ingreso (solo con
+      provisión ≠ 0 o vuelos con provisión): «provisión AFAC del periodo · 3
+      vuelos · tarifa 25.00 USD/hr» («1 vuelo»; sin tarifa > 0, sin « ·
+      tarifa …») y `nota_ingreso` = «Provisión AFAC de cada vuelo de XB-PEV
+      (columna PERMISO AFAC de su hoja de vuelos): tarifa 25.00 USD/hr × T.C.
+      de costos × horas cobradas» + una línea «{clave del vuelo} =
+      $1,082.50» por vuelo con provisión. Egreso (solo con permisos): uno ⇒
+      «permiso AFAC pagado · {detalle}»; varios ⇒ «permisos AFAC pagados · N
+      conceptos (ver nota)» con `nota_egreso` de una línea por permiso
+      («permiso AFAC pagado · {detalle} = $2,500.00 · 05/09/2026»; «= —» sin
+      pesos); `fecha_egreso` = la fecha no nula más antigua; permisos en USD
+      sin T.C. ⇒ sufijo « (parcial: USD sin TC)» / « (USD sin TC)» (la marca
+      que `ladoEnUsd` respeta: ese lado del bloque queda vacío) y
+      `egreso_mxn` = Σ de los convertibles (null si ninguno). `remanente_mxn`
+      = round2(ingreso − egreso) con el lado sin monto en 0; los DOS sin
+      monto (solo permisos USD sin T.C. y sin provisión) ⇒ null, como
+      `colapsarFilasDeVuelo` (jamás un $0.00 falso). Ningún texto lleva «·
+      PROVISIÓN (» (la marca del amarillo de pyservices): «provisión» va en
+      minúsculas.
+    - **UN GASTO, UNA VEZ, UN MES**: las filas derivan EXCLUSIVAMENTE de los
+      libros ya calculados. La provisión sigue `fecha_vuelo` (día Cancún); el
+      permiso pagado, la regla del libro: `gastosAvion` (sin vuelo,
+      `fecha_gasto` ∈ periodo) y `gastosVueloDelAvion` (por el MES DEL VUELO
+      aunque `fecha_gasto` sea otro), parciales de reparto con su parte. Cada
+      permiso cae en el mismo libro/mes que su hoja «permisos» y nunca en
+      dos. Un PERMISO sin avión ni vuelo no entra (sigue en «otros gastos» ⇒
+      `otros_gastos_empresa_usd`, una vez); uno de un vuelo EXTERNO se queda
+      en el libro EXTERNOS (no egresa en VuelaTour). Reconstruir estas filas
+      con una consulta propia a `gasto` rompería esa identidad.
+    - **T.C. de la fila** (bloque VUELATOUR; NO viaja a pyservices):
+      `totales.tc_promedio` del libro de su avión (promedio de las z de
+      costos redondeado a 2; sin vuelos, el oficial del cierre —invariante
+      47—; null se propaga: la fila cuenta en `movimientos_sin_tc` y deja su
+      lado y el resultado vacíos, coherente con `permisos.usd` null). Drift
+      DOCUMENTADO: (a) la provisión en USD (Σ X_i ÷ promedio de z) difiere
+      de tarifa × Σ horas cuando z varía dentro del mes (con 100 USD/hr en
+      las 7 aeronaves puede ser de dólares, no de centavos); (b) el egreso en
+      USD difiere de `permisos.usd` por centavos (`tc_promedio` va redondeado
+      a 2; `tcHojas`, crudo). Refinamiento NO adoptado (aditivo, solo si el
+      cliente exige el USD exacto de la provisión): T.C. ponderado `ingreso ÷
+      Σ(X_i ÷ z_i)` para el ingreso + `tc_egreso` en `MovimientoParaEmpresa`.
+      El `tc_aplicado` por fila de la hoja «permisos» (invariante 59) NO se
+      usa aquí para recalcular nada.
+    - **Contrato (ADITIVO; skew en los dos sentidos)**:
+      `BalanceOtroMovimientoFilaPayload.seccion?: 'AFAC'` (solo las filas
+      AFAC) y `BalanceHojaOtrosMovimientosPayload.afac_en_filas?: true`, que
+      viaja SOLO con ≥ 1 fila AFAC y se asigna DESPUÉS de construir el objeto
+      (ÚLTIMA llave, tras `comision_vendedor_solo_gasto_real`): sin tarifa
+      AFAC ni PERMISO con avión, la pestaña y el bloque VUELATOUR salen byte a
+      byte como sin esta decisión (`GOLDEN_OM`). El API 0.0.74 YA NO manda
+      `afac` (sus 3 interfaces TS y `bloqueAfacOtrosMovimientos` se
+      eliminaron): nunca filas + bloque desde el mismo API (un pyservices
+      viejo pintaría las filas sumadas Y la leyenda «NO entran a los
+      TOTALES»). `armarBalanceEmpresa` gana el insumo `afacEnFilas?:
+      boolean`, que SOLO cambia la `nota`; la aritmética ya absorbe las filas
+      por `movimientos`.
+    - **`nota` del bloque VUELATOUR con la señal** (sin ella, byte a byte la
+      de siempre): «Ingresos y egresos propios: hoja 'otros movimientos' (por
+      vuelo, AFAC por avión y sueltas), cada fila a USD con el T.C. de su
+      vuelo; las filas «AFAC · matrícula» con el T.C. promedio de costos del
+      libro de su avión (sin vuelos, el oficial del cierre); las sueltas con
+      su T.C. o el oficial del día. Ingresos = lo COTIZADO (TUAs, extras,
+      pernocta y comisión del vendedor) de los vuelos del periodo no
+      cancelados, COTIZADO y RESERVA incluidos, más la provisión AFAC del
+      periodo de cada avión (la que ese avión ya carga como costo en su
+      columna PERMISO AFAC). Egresos = {pagoVendedor}, TUAs pagadas, extensión
+      de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.»
+      — `{pagoVendedor}` es el fragmento de la invariante 61, TAL CUAL.
+    - **Posición**: al FINAL de `filas` (pyservices las pinta tras el último
+      vuelo, con un encabezado de sección, y antes de «MOVIMIENTOS SIN AVIÓN
+      / SIN VUELO»). Si el cliente las prefiere al inicio es un `unshift` de
+      los TRES arreglos al mismo índice, sin cambio de contrato.
+    - **Variante «general»** (costo por hora): su hoja de la flota no lleva
+      la columna T, pero la provisión sale de `totales` ⇒ las MISMAS filas
+      AFAC en las dos variantes (spec). Pantalla = .xlsx (invariante 52).
+    - **Skew / deploy**: API 0.0.74 + pyservices previo (sin `afac_en_filas`:
+      4d206ab en prod, o 982488d) ⇒ filas AFAC pintadas y SUMADAS como filas
+      normales (sin encabezado ni leyendas, sin bloque): números idénticos al
+      bloque VUELATOUR. API 0.0.69–0.0.73 + pyservices nuevo ⇒ bloque
+      informativo de siempre, pestaña idéntica. API ≤ 0.0.68 ⇒ nada. El
+      payload mixto (`afac` + bandera) nunca lo manda el API; pyservices
+      nuevo prioriza las filas y omite el bloque. Orden RECOMENDADO
+      pyservices → API; los dos órdenes son numéricamente seguros (NO es
+      dependencia dura): en la ventana API nuevo + pyservices viejo los
+      INGRESOS PROPIOS y el RESULTADO suben con la provisión (~$27k
+      MXN/avión/mes con 100 USD/hr) sin que la etiqueta lo diga.
+    - **ALERTA DE DINERO (pregunta ABIERTA al cliente, ver «Pendientes
+      conocidos»)**: el permiso PAGADO ya resta en el avión (hoja «permisos»
+      → `permisos_usd` de la cascada → utilidad cobrada → socios; en el
+      reparto, el grupo PERMISO) y desde el 0.0.74 resta ADEMÁS como egreso
+      de VuelaTour: el grupo lo cuenta dos veces y VuelaTour lo resta 1 + su
+      % como socia. La provisión NO es doble (−T en el avión, +T en la
+      pestaña). Esta invariante NO toca la cascada ni el reparto (mueven
+      dinero de socios: solo con decisión expresa). Además TODA la hoja
+      «permisos» (internación, nocturno…) egresa rotulada «permiso AFAC
+      pagado» (el detalle va en la nota).
+    - **Fuera de alcance**: Libro Dinero, pre-cierre, la hoja «permisos» del
+      libro individual (invariante 59) y la columna T con la tarifa por fila
+      de la flota (invariante 53 (1)) no cambian. Sin migración.
+    - Specs: `afac-otros-movimientos.util.spec` (fila exacta, varios
+      permisos, USD sin T.C. parcial y total, solo permisos / solo
+      provisión, singular y sin tarifa, centavos, T.C. null, orden y
+      EXTERNOS, ningún texto con la marca del amarillo),
+      `aircraft-balance.service.afac-om.spec` (mundo con tarifa 25 y tres
+      permisos —uno del #501 pagado el 03-oct: cuenta en el MES DEL VUELO—:
+      fila al final con ingreso = `totales.permiso_afac_mxn` y egreso =
+      `permisos.total_mxn`, bandera última llave y sin `afac`, Σ remanente,
+      bloque VUELATOUR ± 0.01, conservación en DOS identidades —dinero total
+      == el mundo sin AFAC − P, y el doble conteo como aserción VIVA—, sin
+      AFAC `GOLDEN_OM` byte a byte, dos aviones en el orden de `aviones` con
+      el PERMISO de EXTERNOS en su libro, el inverso del caso «consolidado ==
+      buildOtrosMovimientos directo», variante general y un PERMISO de
+      empresa que sigue en «otros gastos»),
+      `aircraft-balance.service.bloque-empresa.spec` (los 3 casos con
+      PERMISO: XB-ANU sin vuelos con el T.C. del cierre y egresos +101.96
+      calculado —y la participación al 30 %: el doble conteo—, XB-DOS y
+      XB-ANU sin T.C. ⇒ lado y resultado vacíos; el caso «consolidado ==
+      directo» vale SOLO sin AFAC) y `balance-empresa.util.spec` (nota con y
+      sin la señal, con el fragmento «a cargo del avión» intacto; `ladoEnUsd`
+      y `movimientosConTc` con una fila AFAC). En pyservices,
+      `tests/test_balance_otros_movimientos_afac.py`.
 
 ## Convenciones NestJS
 
@@ -6680,6 +6858,14 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **13-oct-2026 — SIN migración** para los permisos AFAC como filas que
+  SUMAN en «otros movimientos» (invariante 62): solo payload API→pyservices
+  (`seccion: 'AFAC'` por fila y la bandera ADITIVA `afac_en_filas`; el API
+  deja de mandar `afac`). Orden RECOMENDADO pyservices → API; los dos
+  órdenes son numéricamente seguros (con el API nuevo y un pyservices
+  previo las filas se pintan y SUMAN sin encabezado ni leyendas; al revés,
+  el bloque informativo de siempre). Antes de REGENERAR septiembre: la
+  pregunta del doble conteo del permiso pagado («Pendientes conocidos»).
 - **13-oct-2026 — SIN migración** para la comisión del vendedor solo como
   gasto real (invariante 61): solo payload API→pyservices (bandera ADITIVA
   `comision_vendedor_solo_gasto_real` y llaves `comision_vendedor_real_*`).
@@ -7416,6 +7602,40 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Permiso AFAC pagado contado DOS veces (13-oct-2026, invariante 62) —
+  PREGUNTA ABIERTA al cliente, bloqueante para REGENERAR el cierre de
+  septiembre**: el permiso PAGADO hoy resta en la cascada del avión
+  (`buildPayload`: `utilidadDespues` resta `hojaPermisos.usd` ⇒
+  `balance.permisos_usd` ⇒ utilidad cobrada ⇒ socios) y en el reparto
+  (grupo PERMISO de `profit-sharing.service`), y desde el 0.0.74 resta
+  ADEMÁS como egreso de VuelaTour en la fila «AFAC · matrícula» de «otros
+  movimientos» ⇒ el grupo lo cuenta dos veces y VuelaTour lo resta 1 + su %
+  como socia. Cifras de prod citadas por la exploración (cotejar): XB-ANU
+  oct-2026 $5,518 (2,549 + 2,969; empresa socia al 30 %), N4142R sep-2026
+  $2,680. Mensaje al cliente (es-MX): «Con los permisos AFAC ya sumando en
+  'otros movimientos', cada permiso pagado resta hoy dos veces en el grupo:
+  en el avión (hoja 'permisos' y reparto) y en VuelaTour. ¿El permiso AFAC
+  pagado deja de restar en el avión (cascada y reparto) ahora que es egreso
+  de VuelaTour, o se queda en los dos?». Cambio alterno si responde «sale
+  del avión» (SOLO con decisión expresa: mueve utilidades y la cuenta
+  corriente de socios, y el reparto de septiembre ya se entregó):
+  `utilidadDespues` sin `hojaPermisos.usd`, `balance.permisos_usd` como solo
+  nota (mecánica del TUA pagado; pyservices necesita la variante de la
+  fórmula de la cascada `'permisos'!$C$5`), `_NOTA_PERMISOS` de pyservices,
+  el grupo PERMISO del reparto fuera del saldo (y decidir si entonces el
+  reparto cobra la provisión tarifa × horas) y el Libro Dinero
+  (`dinero-report.service`, `permisosPorAvion` ⇒ `utilidades_aviones[].
+  permisos_mxn`). El código de la pestaña NO cambia con ninguna de las dos
+  respuestas. Aserciones vivas: `aircraft-balance.service.afac-om.spec` (5b)
+  y el caso XB-ANU de `aircraft-balance.service.bloque-empresa.spec`.
+- **Todo PERMISO se rotula «permiso AFAC pagado» (13-oct-2026, invariante
+  62)**: la fila AFAC egresa TODA la hoja «permisos» del avión (internación,
+  nocturno, «mochada al comandante de AFAC MMCT»…), no solo los de AFAC;
+  hasta el 0.0.73 era informativo y ahora mueve TOTALES y el bloque
+  VUELATOUR. Mitigación: concepto y nota llevan el detalle de cada gasto y
+  la leyenda de pyservices lo dice («sean o no de AFAC»). Pendiente del
+  cliente: subcategoría o proveedor AFAC para separarlos.
 
 - **Comisiones a cargo del avión (pedido del cliente, 6-oct-2026)**:
   IMPLEMENTADO en el 0.0.65 (invariante 50: cobrado neto, columna

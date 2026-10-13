@@ -76,7 +76,7 @@ import {
   type BalanceOtroMovimientoFilaPayload,
 } from '../pyservices/pyservices.service';
 import type { LibroVista } from '../pyservices/libro-vista.types';
-import { bloqueAfacOtrosMovimientos } from './afac-otros-movimientos.util';
+import { filasAfacOtrosMovimientos } from './afac-otros-movimientos.util';
 import { InventoryService } from '../inventory/inventory.service';
 // Costo de cada salida de bodega en la hoja «refacciones» (25-sep-2026):
 // puro, con spec; el costo sale del util del inventario (fuente única).
@@ -1142,11 +1142,25 @@ export class AircraftBalanceService {
       tcFilasOM,
       { porVuelo: comisionesAvionPorVuelo },
     );
-    // «PERMISOS AFAC» en 'otros movimientos' (12-oct-2026, invariante 53):
-    // bloque INFORMATIVO (provisión por avión vs permisos pagados) armado
-    // de los libros ya calculados. Sin provisión ni pagos no viaja.
-    const afac = bloqueAfacOtrosMovimientos(librosAviones);
-    if (afac) otrosMovimientos.afac = afac;
+    // PERMISOS AFAC como FILAS que SUMAN (13-oct-2026, API 0.0.74,
+    // invariante 62; SUPERSEDE el bloque informativo de la invariante 53):
+    // una fila «AFAC · matrícula» por avión REAL (orden de `librosAviones`,
+    // EXTERNOS nunca), armada de los libros YA calculados — ingreso = su
+    // provisión AFAC del periodo, egreso = su hoja «permisos». Van al FINAL
+    // de `filas` (pyservices las pinta después de los vuelos y antes de
+    // «MOVIMIENTOS SIN AVIÓN / SIN VUELO») y su T.C. y su «por cobrar» 0 van
+    // alineados en `tcFilasOM` — SIEMPRE después de `buildOtrosMovimientos`
+    // (ya llenó `tcFilasOM`) y antes de `armarBalanceEmpresa`
+    // (`movimientosConTc` LANZA si se desalinean). La bandera se asigna
+    // DESPUÉS de construir el objeto: queda como la ÚLTIMA llave y, sin
+    // filas AFAC, el payload es byte-idéntico al 0.0.73.
+    const afac = filasAfacOtrosMovimientos(librosAviones);
+    if (afac.filas.length > 0) {
+      otrosMovimientos.filas.push(...afac.filas);
+      tcFilasOM.filas.push(...afac.tcs);
+      tcFilasOM.porCobrarVtUsd.push(...afac.filas.map(() => 0));
+      otrosMovimientos.afac_en_filas = true;
+    }
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
       matricula: 'FLOTA',
@@ -1280,6 +1294,11 @@ export class AircraftBalanceService {
       pagoVendedorACargoDelAvion: [...comisionesAvionPorVuelo.values()].some(
         (partes) => partes.some((x) => x.vendedor_absorbido),
       ),
+      // Solo la NOTA (13-oct-2026, API 0.0.74, invariante 62): las filas
+      // «AFAC · matrícula» ya entran a la aritmética por `movimientos` (cada
+      // una ÷ el T.C. promedio de costos del libro de su avión); la señal
+      // solo hace que la nota lo diga.
+      afacEnFilas: afac.filas.length > 0,
     });
 
     const payload: BalanceGeneralPayload = {
@@ -4957,6 +4976,10 @@ export class AircraftBalanceService {
    * sus gastos viven en la hoja maestra (libro del avión de referencia o
    * libro EXTERNOS del general); aquí solo sus TUAs/extras/pernocta, el
    * sobrecobro y la comisión bancaria, como en cualquier vuelo.
+   *
+   * Las filas «AFAC · matrícula» (13-oct-2026, invariante 62) NO se arman
+   * aquí: las anexa `payloadGeneral` desde los libros (esta función no los
+   * conoce y su retorno es byte a byte el de siempre).
    */
   private async buildOtrosMovimientos(
     desde: string,

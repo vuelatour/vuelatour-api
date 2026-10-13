@@ -1355,37 +1355,15 @@ export interface BalanceOtroMovimientoFilaPayload {
    */
   nota_ingreso?: string | null;
   nota_egreso?: string | null;
-}
-
-/** Provisión AFAC del periodo de UN avión (Σ de su columna PERMISO AFAC). */
-export interface BalanceAfacProvisionAvionPayload {
-  matricula: string;
-  tarifa_usd_hr: number | null;
-  /** Vuelos de ese libro con provisión ≠ 0. */
-  vuelos: number;
-  monto_mxn: number;
-}
-
-/** Permiso AFAC PAGADO en el periodo (fila de la hoja «permisos» de un libro). */
-export interface BalanceAfacPagadoPayload {
-  matricula: string;
-  fecha: string | null;
-  detalle: string;
-  monto_mxn: number | null;
-}
-
-/**
- * Bloque INFORMATIVO «PERMISOS AFAC» de «otros movimientos» (12-oct-2026,
- * API 0.0.69, invariante 53): provisión vs pagado. No entra a los totales
- * de la pestaña ni al bloque VUELATOUR (se contaría dos veces).
- */
-export interface BalanceAfacOtrosMovimientosPayload {
-  provision: BalanceAfacProvisionAvionPayload[];
-  provision_total_mxn: number;
-  pagados: BalanceAfacPagadoPayload[];
-  pagados_total_mxn: number;
-  /** provisión − pagado (negativo = se pagó más de lo provisionado). */
-  remanente_mxn: number;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 62): 'AFAC' = fila por
+   * avión de PERMISOS AFAC (ingreso: provisión del periodo; egreso:
+   * permisos pagados), anexada al final de `filas` por `payloadGeneral`;
+   * pyservices nuevo pinta un encabezado de sección antes de la primera; un
+   * pyservices previo la pinta como fila normal (suma igual). Las filas por
+   * vuelo y las sueltas no la traen.
+   */
+  seccion?: 'AFAC';
 }
 
 export interface BalanceHojaOtrosMovimientosPayload {
@@ -1400,12 +1378,6 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * viaja; pyservices cambia sus leyendas solo con ella.
    */
   hay_pago_vendedor_real?: true;
-  /**
-   * ADITIVO (12-oct-2026, API 0.0.69): «PERMISOS AFAC» informativo. Solo
-   * viaja si algún libro trae provisión o permisos pagados; sin él el
-   * payload es byte-idéntico y pyservices pinta la pestaña de siempre.
-   */
-  afac?: BalanceAfacOtrosMovimientosPayload;
   /**
    * ADITIVA (12-oct-2026, API 0.0.73, invariante 58): `true` = este libro
    * ya NO provisiona el pago al vendedor en esta pestaña. Sin gasto real
@@ -1427,6 +1399,17 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * `sin_provision_vendedor`).
    */
   comision_vendedor_solo_gasto_real?: true;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 62): viaja SOLO cuando
+   * `filas` termina con ≥1 fila `seccion: 'AFAC'` (sin provisión ni
+   * permisos pagados la llave NO existe ⇒ la pestaña sale byte a byte como
+   * sin esta decisión: ni filas AFAC ni bandera). Se asigna después de
+   * construir el objeto: es la ÚLTIMA llave (goldens con JSON.stringify). Con ella pyservices retira el bloque informativo
+   * `afac` del 0.0.69–0.0.73 (que este API ya no manda —invariante 53 (2)
+   * SUPERSEDIDA—; pyservices conserva su modelo por skew) y activa
+   * encabezado, fila 2 y textos del bloque VUELATOUR.
+   */
+  afac_en_filas?: true;
 }
 
 export interface BalanceAvionPayload {

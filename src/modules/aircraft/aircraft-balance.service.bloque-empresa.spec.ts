@@ -570,6 +570,72 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     ]);
     expect(e.participacion_usd).not.toBeNull();
     expect(e.resultado_usd).not.toBeNull();
+
+    // PERMISOS AFAC como FILAS que SUMAN (13-oct-2026, API 0.0.74,
+    // invariante 62): el PERMISO del XB-ANU (sin vuelos ⇒ sin provisión)
+    // egresa en «otros movimientos» en UNA fila «AFAC · XB-ANU» al FINAL de
+    // `filas`, con el T.C. de su libro (el oficial del cierre: el MISMO
+    // `anu.totales.tc_promedio` con que se convirtió su hoja «permisos»).
+    const om = g.consolidado.otros_movimientos!;
+    const filaAfac = om.filas.at(-1)!;
+    expect(filaAfac).toEqual({
+      clave: 'AFAC · XB-ANU',
+      avion_color: '#F59E0B',
+      fecha_vuelo: null,
+      concepto_egreso: `permiso AFAC pagado · ${anu.permisos.filas[0].detalle}`,
+      egreso_mxn: 2549,
+      fecha_egreso: gastoBase.fecha_gasto,
+      concepto_ingreso: null,
+      ingreso_mxn: null,
+      fecha_ingreso: null,
+      remanente_mxn: -2549,
+      factura: null,
+      seccion: 'AFAC',
+    });
+    expect('estado' in filaAfac).toBe(false);
+    expect(om.afac_en_filas).toBe(true);
+    expect(Object.keys(om).at(-1)).toBe('afac_en_filas');
+    expect('afac' in om).toBe(false);
+    expect(om.filas.filter((f) => f.seccion === 'AFAC')).toHaveLength(1);
+    expect(e.nota).toContain('más la provisión AFAC del periodo de cada avión');
+    expect(e.nota).toContain('permisos AFAC pagados');
+
+    // El MISMO mundo sin el PERMISO (XB-ANU sin actividad: ni libro ni fila).
+    const sinPermiso = mundoEmpresa({
+      socios: [
+        ...SOCIOS_CON_EMPRESA,
+        socio(AV3, 'u-mau', '70.000', 'Mauricio Roque', false),
+        socio(AV3, 'u-acc', '30.000', EMPRESA, true),
+      ],
+    });
+    sinPermiso.aeronave.push(avionSinVuelos);
+    const { g: gSin } = await general(sinPermiso);
+    const omSin = gSin.consolidado.otros_movimientos!;
+    expect(omSin.filas.some((f) => f.seccion === 'AFAC')).toBe(false);
+    expect('afac_en_filas' in omSin).toBe(false);
+    // Las filas de antes, intactas (la AFAC se ANEXA al final).
+    expect(om.filas.slice(0, -1)).toEqual(omSin.filas);
+    expect(om.filas_sueltas).toEqual(omSin.filas_sueltas);
+    const eSin = gSin.empresa!;
+    // La fila AFAC trae T.C. (25): no agrega filas «sin T.C.».
+    expect(e.movimientos_sin_tc).toBe(eSin.movimientos_sin_tc);
+    expect(e.ingresos_propios_usd).toBe(eSin.ingresos_propios_usd);
+    // Egresos propios = los de siempre + 2,549 ÷ 25 (101.96 USD).
+    expect(e.pagos_vendedor_usd).toBe(
+      r2(eSin.pagos_vendedor_usd! + 2549 / TC_OFICIAL),
+    );
+    // ALERTA DEL DOBLE CONTEO (pregunta ABIERTA al cliente, «Pendientes
+    // conocidos» del CLAUDE.md): el MISMO permiso resta en la cascada del
+    // XB-ANU —y por eso en la participación de la empresa como socia al
+    // 30 %— Y ADEMÁS como egreso propio de VuelaTour (100 %). El resultado
+    // baja 101.96 + 30.59. Si el cliente decide que el permiso SALE del
+    // avión, esta aserción cambia (y la cascada, no la pestaña).
+    expect(e.participacion_usd).toBe(
+      r2(eSin.participacion_usd! + r2(0.3 * -101.96)),
+    );
+    expect(e.resultado_usd).toBe(
+      r2(eSin.resultado_usd! - 101.96 + r2(0.3 * -101.96)),
+    );
   });
 
   it('el respaldo es SOLO para aviones sin vuelos: con un vuelo sin T.C. las hojas siguen vacías (jamás una utilidad que omite la venta)', async () => {
@@ -599,6 +665,21 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(
       dos.pendientes.some((t) => t.includes('sin vuelos en el periodo — sus')),
     ).toBe(false);
+    // Fila «AFAC · XB-DOS» (13-oct-2026, invariante 62): su egreso (2,549,
+    // en pesos) regresa a USD con el T.C. del libro del XB-DOS, que es null
+    // (un vuelo sin T.C.) ⇒ la fila va SIN T.C.: el lado de egresos y el
+    // resultado del bloque quedan vacíos (null se propaga, igual que
+    // `dos.permisos.usd`).
+    const filaAfac = g.consolidado.otros_movimientos!.filas.at(-1)!;
+    expect(filaAfac.clave).toBe('AFAC · XB-DOS');
+    expect(filaAfac.seccion).toBe('AFAC');
+    expect(filaAfac.egreso_mxn).toBe(2549);
+    expect(filaAfac.ingreso_mxn).toBeNull();
+    const e = g.empresa!;
+    expect(e.movimientos_sin_tc).toBeGreaterThanOrEqual(1);
+    expect(e.pagos_vendedor_usd).toBeNull();
+    expect(e.resultado_usd).toBeNull();
+    expect(e.nota).toContain("fila(s) de 'otros movimientos' sin T.C.");
   });
 
   it('avión sin vuelos y SIN T.C. oficial: participación y resultado vacíos y la nota NOMBRA el avión', async () => {
@@ -623,6 +704,17 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(e.participacion_usd).toBeNull();
     expect(e.resultado_usd).toBeNull();
     expect(e.nota).toContain('XB-ANU sin utilidad cobrada');
+    // Fila «AFAC · XB-ANU» (13-oct-2026, invariante 62): el libro del
+    // XB-ANU no tiene T.C. (ni vuelos ni oficial) ⇒ su fila va SIN T.C. y
+    // los egresos propios quedan vacíos (jamás 2,549 pesos sumados como
+    // dólares ni omitidos en silencio).
+    const anu = g.aviones.find((a) => a.matricula === 'XB-ANU')!;
+    expect(anu.totales.tc_promedio).toBeNull();
+    const filaAfac = g.consolidado.otros_movimientos!.filas.at(-1)!;
+    expect(filaAfac.clave).toBe('AFAC · XB-ANU');
+    expect(filaAfac.egreso_mxn).toBe(2549);
+    expect(e.pagos_vendedor_usd).toBeNull();
+    expect(e.movimientos_sin_tc).toBeGreaterThanOrEqual(1);
   });
 
   it('T.C. oficial de varios días: memo por día y NUNCA más de 5 consultas a la vez', async () => {
@@ -662,7 +754,13 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(pedidos).toHaveLength(12);
   });
 
-  it('el T.C. por fila NO cambia el payload de «otros movimientos» (mismo que sin pedirlo)', async () => {
+  it('el T.C. por fila NO cambia el payload de «otros movimientos» (mismo que sin pedirlo) — mundo SIN filas AFAC', async () => {
+    // La identidad «consolidado == `buildOtrosMovimientos` directo» vale SOLO
+    // sin filas AFAC (13-oct-2026, invariante 62): esas filas y la bandera
+    // `afac_en_filas` las ANEXA `payloadGeneral` desde los libros (sin
+    // tarifa AFAC ni PERMISO con avión, como aquí, no hay ninguna). El
+    // inverso —filas directas + filas AFAC— vive en
+    // `aircraft-balance.service.afac-om.spec.ts`.
     const mundo = mundoEmpresa();
     const { g } = await general(mundo);
     const { service } = armar(mundo);
