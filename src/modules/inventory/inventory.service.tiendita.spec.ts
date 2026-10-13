@@ -9,6 +9,8 @@ jest.mock('../realtime/notifications.service', () => ({
 import { Logger } from '@nestjs/common';
 import { InventoryService } from './inventory.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import { statsDe, type MovForFifo } from './inventario-cardex.util';
+import { hoyCancun } from '../../common/fecha-cancun.util';
 
 /**
  * Hoja "inventario" del Balance general (`resumenTiendita`) — MONEDAS.
@@ -132,6 +134,9 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       valor_costo_mxn: 0,
       valor_costo_usd: 3300,
       sin_tc: true,
+      // COSTO UNITARIO (0.0.74): último precio en USD y sin T.C. ⇒ en dólares.
+      costo_unitario_mxn: null,
+      costo_unitario_usd: 110,
     });
 
     // (b) MIXTO: 10 × $200 MXN + 5 × 40 USD sin TC. Último precio = la
@@ -142,6 +147,8 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       valor_costo_mxn: 0,
       valor_costo_usd: 600,
       sin_tc: true,
+      costo_unitario_mxn: null,
+      costo_unitario_usd: 40,
     });
 
     // (c) Todo en pesos: nada que reportar en dólares.
@@ -150,6 +157,8 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       valor_costo_mxn: 200,
       valor_costo_usd: null,
       sin_tc: false,
+      costo_unitario_mxn: 50,
+      costo_unitario_usd: null,
     });
 
     expect(r.total_piezas).toBe(49);
@@ -194,11 +203,19 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       valor_costo_mxn: 58320.57, // round2(3,300 × 17.6729)
       valor_costo_usd: null,
       sin_tc: false,
+      costo_unitario_mxn: 1944.02, // round2(110 × 17.6729)
+      costo_unitario_usd: null,
     });
     expect(porNombre.get('Bujia · REM40E')).toMatchObject({
       valor_costo_mxn: 10603.74, // round2(600 × 17.6729)
       valor_costo_usd: null,
       sin_tc: false,
+      costo_unitario_mxn: 706.92, // round2(40 × 17.6729)
+      costo_unitario_usd: null,
+    });
+    expect(porNombre.get('Cable')).toMatchObject({
+      costo_unitario_mxn: 50, // compra en pesos: tal cual
+      costo_unitario_usd: null,
     });
     expect(r.total_valor_mxn).toBe(69124.31);
     expect(r.total_valor_usd).toBe(0);
@@ -241,6 +258,9 @@ describe('resumenTiendita: el valor en dólares sin TC NUNCA se suma como pesos'
       // Compras del periodo en pesos, cada una al T.C. de SU día:
       // 4 × 50 + round2(12 × 18) = 200 + 216.
       compradas_costo_mxn: 416,
+      // COSTO UNITARIO: 6 USD al T.C. de HOY (18.5), no al 18 de su compra.
+      costo_unitario_mxn: 111,
+      costo_unitario_usd: null,
     });
     expect(r.total_valor_mxn).toBe(666);
     expect(r.total_valor_usd).toBe(0);
@@ -406,5 +426,106 @@ describe('resumenTiendita: utilidad USD en su columna (tienda, 25-sep-2026)', ()
       { numero: () => Promise.resolve(12.5) } as never,
     );
     expect((await conCfg.tiendaResumen()).margen_venta_pct).toBe(12.5);
+  });
+});
+
+/**
+ * 13-oct-2026 (API 0.0.74) · COSTO UNITARIO en la hoja «inventario» del
+ * Balance general (decisión 6 del lote del cliente): el último precio de
+ * compra de cada producto viaja por fila, en UNA sola moneda —
+ * `costo_unitario_mxn` en pesos (compra en MXN tal cual; USD × T.C. oficial
+ * de hoy) o `costo_unitario_usd` solo cuando el último precio es USD y no hay
+ * T.C. de hoy—, tomado TAL CUAL de `statsDe`: el mismo número que
+ * `precio_vigente.unitario_mxn_hoy` de la ficha del panel (fuente única).
+ * No es un importe: el VALOR A COSTO sigue siendo el de `statsDe`
+ * (`round2(round2(q × u) × tc)`) y NO se recalcula con el unitario redondeado.
+ */
+describe('resumenTiendita: COSTO UNITARIO = último precio de compra (13-oct-2026, API 0.0.74)', () => {
+  const AGO = ['2026-08-01', '2026-08-31'] as const;
+  const movsDe = (itemId: string): MovForFifo[] =>
+    CARDEX.filter((m) => m.item_id === itemId) as unknown as MovForFifo[];
+
+  it('nunca los dos a la vez: con y sin T.C. de hoy, cada fila trae a lo sumo UNA moneda', async () => {
+    for (const tc of [undefined, 17.6729]) {
+      const r = await armar(CARDEX, ITEMS, tc).resumenTiendita(...AGO);
+      expect(r.filas).toHaveLength(3);
+      for (const f of r.filas) {
+        expect(
+          f.costo_unitario_mxn != null && f.costo_unitario_usd != null,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('USD solo en la fila sin T.C.: con existencia coincide con `sin_tc`; con T.C. de hoy nadie trae dólares', async () => {
+    const sinTc = await armar().resumenTiendita(...AGO);
+    const conExistencia = sinTc.filas.filter((f) => (f.existencia ?? 0) > 0);
+    expect(conExistencia).toHaveLength(3);
+    for (const f of conExistencia) {
+      expect(f.costo_unitario_usd != null).toBe(f.sin_tc);
+    }
+    expect(
+      sinTc.filas.filter((f) => f.costo_unitario_usd != null),
+    ).toHaveLength(2);
+
+    const conTc = await armar(CARDEX, ITEMS, 17.6729).resumenTiendita(...AGO);
+    expect(conTc.filas.every((f) => f.costo_unitario_usd === null)).toBe(true);
+    expect(conTc.filas.every((f) => f.costo_unitario_mxn != null)).toBe(true);
+  });
+
+  it('sin compra con costo (ENTRADA a $0) ⇒ los dos null y la fila sigue en la hoja', async () => {
+    const gratis = [mov('c0', 'it-c', 'ENTRADA', 5, 0, 'MXN')];
+    const r = await armar(gratis, [ITEMS[2]], 17.6729).resumenTiendita(...AGO);
+    expect(r.filas).toHaveLength(1);
+    expect(r.filas[0]).toMatchObject({
+      nombre: 'Cable',
+      existencia: 5,
+      valor_costo_mxn: 0,
+      valor_costo_usd: null,
+      sin_tc: false,
+      costo_unitario_mxn: null,
+      costo_unitario_usd: null,
+    });
+  });
+
+  it('es el MISMO número que la ficha del panel (statsDe.costo_vigente_mxn, fuente única)', async () => {
+    const r = await armar(CARDEX, ITEMS, 17.6729).resumenTiendita(...AGO);
+    const porNombre = new Map(r.filas.map((f) => [f.nombre, f]));
+    const ficha = (itemId: string) =>
+      statsDe(movsDe(itemId), { hoy: hoyCancun(), tcHoy: 17.6729 })
+        .costo_vigente_mxn;
+    expect(porNombre.get('Aceite 15w 50')?.costo_unitario_mxn).toBe(
+      ficha('it-a'),
+    );
+    expect(porNombre.get('Bujia · REM40E')?.costo_unitario_mxn).toBe(
+      ficha('it-b'),
+    );
+    expect(porNombre.get('Cable')?.costo_unitario_mxn).toBe(ficha('it-c'));
+    expect([ficha('it-a'), ficha('it-b'), ficha('it-c')]).toEqual([
+      1944.02, 706.92, 50,
+    ]);
+  });
+
+  it('el VALOR A COSTO no se recalcula con el unitario redondeado (84 × 375.55 = 31,546.20 ≠ 31,546.13)', async () => {
+    // Caso real del aceite: 84 × 21.25 USD al T.C. 17.6729.
+    const aceite = [mov('a1', 'it-a', 'ENTRADA', 84, 21.25, 'USD')];
+    const r = await armar(aceite, [ITEMS[0]], 17.6729).resumenTiendita(...AGO);
+    expect(r.filas).toHaveLength(1);
+    expect(r.filas[0]).toMatchObject({
+      existencia: 84,
+      valor_costo_mxn: 31546.13, // round2(round2(84 × 21.25) × 17.6729)
+      costo_unitario_mxn: 375.55, // round2(21.25 × 17.6729)
+      costo_unitario_usd: null,
+    });
+    // El drift de centavos existe y se dice en la nota de la hoja; aquí se
+    // fija que el valor sigue siendo el de statsDe, no existencia × unitario.
+    expect(Math.round(84 * 375.55 * 100) / 100).toBe(31546.2);
+    expect(r.filas[0].valor_costo_mxn).toBe(
+      statsDe(aceite as unknown as MovForFifo[], {
+        hoy: hoyCancun(),
+        tcHoy: 17.6729,
+      }).valor_mxn,
+    );
+    expect(r.total_valor_mxn).toBe(31546.13);
   });
 });

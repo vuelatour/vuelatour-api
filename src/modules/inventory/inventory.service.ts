@@ -1193,6 +1193,9 @@ export class InventoryService {
    * Desde el API 0.0.36 (T.C. oficial en cada movimiento) las columnas en
    * dólares quedan vacías y pyservices las apaga solas; `tc_hoy` y
    * `regla_costo` viajan en la raíz para la nota del valor.
+   * Desde el 0.0.74 (13-oct-2026) cada fila lleva además
+   * `costo_unitario_mxn` / `costo_unitario_usd` (último precio de compra,
+   * una sola moneda por fila; ver el tipo).
    */
   async resumenTiendita(
     desde: string,
@@ -1273,6 +1276,19 @@ export class InventoryService {
         valor_costo_usd:
           stats.valor_usd_sin_tc !== 0 ? stats.valor_usd_sin_tc : null,
         sin_tc: !stats.pesos_exactos,
+        // ADITIVOS (13-oct-2026, API 0.0.74): COSTO UNITARIO = último precio
+        // de compra, el MISMO número que `precio_vigente.unitario_mxn_hoy` de
+        // la ficha (statsDe, fuente única). En pesos cuando se puede (compra
+        // en MXN tal cual; en USD × T.C. oficial de hoy); si el último precio
+        // es USD y no hay T.C., va EN DÓLARES en su propio campo (invariante
+        // 8: jamás un USD en un campo «mxn»). Nunca los dos a la vez; null
+        // sin compra con costo > 0 (fijaPrecio). pyservices pinta la columna
+        // solo si alguna fila trae valor: un pyservices viejo lo ignora.
+        costo_unitario_mxn: stats.costo_vigente_mxn,
+        costo_unitario_usd:
+          stats.costo_vigente != null && stats.costo_vigente_mxn == null
+            ? stats.costo_vigente.unitario_usd
+            : null,
         compradas_cant: a.compradas_cant,
         compradas_costo_mxn: a.compradas_costo_mxn,
         salidas_cant: a.salidas_cant,

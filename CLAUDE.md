@@ -536,6 +536,29 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
    `costo_fifo_mxn_actual = costo_vigente_mxn ?? 0` — jamás el USD en un
    campo «mxn» (antes caía al USD sin TC).
 
+   **COSTO UNITARIO en la hoja «inventario» (13-oct-2026, API 0.0.74).**
+   Pedido del cliente (decisión 6 del lote del 13-oct): ver el último
+   precio de compra de cada producto en el Balance general. Cada fila de
+   `resumenTiendita` lleva `costo_unitario_mxn` (= `statsDe.costo_vigente_mxn`,
+   el MISMO número que `precio_vigente.unitario_mxn_hoy` de la ficha del
+   panel: compra en MXN tal cual o USD × T.C. oficial de hoy) y
+   `costo_unitario_usd` (SOLO si el último precio es USD y no hay T.C. de
+   hoy —el caso `sin_tc`—, en dólares sin convertir); nunca los dos a la
+   vez; null sin compra con costo (`fijaPrecio`). ADITIVOS en los dos
+   sentidos: pyservices pinta «COSTO UNITARIO MXN» y «COSTO UNITARIO USD
+   (sin T.C.)» entre EXISTENCIA ACTUAL y VALOR A COSTO MXN solo si alguna
+   fila trae valor (payload viejo ⇒ hoja idéntica; pyservices viejo ⇒ los
+   ignora). No es un importe: TOTALES no lo suma y existencia × unitario
+   redondeado puede diferir centavos del VALOR A COSTO
+   (`round2(round2(q×u)×tc)`: aceite 84 × 375.55 = 31,546.20 vs 31,546.13);
+   la nota de la hoja lo dice — NO «corregirlo» tocando `statsDe` (movería
+   el valorizado del panel, el export y el bloque VUELATOUR) ni poniendo el
+   VALOR como fórmula. `StatsInventario`/`statsDe` NO se ampliaron (su
+   spread `{ ...item, ...stats }` llega al panel). Prueba:
+   `npx jest src/modules/inventory/inventory.service.tiendita.spec.ts`
+   (describe «COSTO UNITARIO»); en pyservices
+   `tests/test_balance_inventario_xlsx.py` (sección «COSTO UNITARIO»).
+
    **SALIDA «para todas las matrículas» (`para_flota`) ⇒ `aeronave_id` NULL**
    y el cargo se prorratea entre los aviones ACTIVOS (un gasto por avión,
    Σ EXACTA al centavo con el residuo en el primero). **La liga

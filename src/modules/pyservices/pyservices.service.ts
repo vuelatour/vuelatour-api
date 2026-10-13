@@ -1114,6 +1114,19 @@ export interface BalanceInventarioItemFilaPayload {
    * (`valor_costo_usd`) que NO entra al total en pesos.
    */
   sin_tc: boolean;
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.74): COSTO UNITARIO = último precio de
+   * compra del ítem. `costo_unitario_mxn` en PESOS redondeado a centavos
+   * (= `statsDe.costo_vigente_mxn`, el mismo número que la ficha del panel):
+   * compra en MXN tal cual o USD × T.C. oficial de hoy (`tc_hoy` de la hoja);
+   * null sin compra con costo o si el último precio es USD sin T.C.
+   * `costo_unitario_usd` SOLO en ese último caso, en DÓLARES sin convertir
+   * (coincide con `sin_tc` en las filas con existencia). Nunca los dos.
+   * pyservices pinta la(s) columna(s) solo si alguna fila trae valor:
+   * payload viejo ⇒ hoja idéntica; un pyservices viejo los ignora.
+   */
+  costo_unitario_mxn: number | null;
+  costo_unitario_usd: number | null;
   /** Cantidad y costo de las ENTRADAs del periodo (compras reales; una
    *  DEVOLUCION/AJUSTE suma stock pero no es compra). */
   compradas_cant: number | null;
