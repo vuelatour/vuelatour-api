@@ -104,6 +104,24 @@
 -- aplicar. Después: ninguna fila DRYRUN-20261012000002, la tabla y la
 -- columna NO existen.
 --
+-- POST-MORTEM del dry-run (12-oct-2026, al aplicarla en prod): el bloque de
+-- abajo, tal cual, FALLA con `55006 cannot ALTER TABLE "movimiento_bancario"
+-- because it has pending trigger events` en el `add column cobros_n` de la
+-- sección 2. Causa: la sección A inserta filas de prueba en movimiento_bancario
+-- ANTES del DDL y esa tabla tiene constraint triggers DIFERIDOS
+-- (trg_mov_bancario_partes_coherentes, de 20261002000002): quedan eventos
+-- pendientes y Postgres no deja alterar la tabla en esa transacción. No es un
+-- defecto de la migración (las secciones 0–7 se aplicaron limpias): es del
+-- guion. Corrección para el próximo dry-run de este patrón: PRIMERO el cuerpo
+-- (B), DESPUÉS las filas de prueba (A) y luego las pruebas (C). Segundo
+-- defecto: el paso de C8 que pone `clasificacion_id` sobre el lote deja al
+-- abono «conciliado por clasificación» cuando C9 lo desliga (B conserva la
+-- clasificación con n = 0) y C9 falla; quitar ese paso o limpiar
+-- `clasificacion_id` antes de C9. La cobertura C1–C9 (+ un solo cobro) se
+-- obtuvo DESPUÉS con un POSTCHECK sin DDL sobre el esquema aplicado
+-- (POSTCHECK_OK, 12-oct-2026); la migración se aplicó desde el SQL Editor
+-- porque el MCP de Supabase rechaza sentencias con DROP/DELETE/REVOKE.
+--
 -- do $dry$
 -- declare
 --   v_mov uuid; v_cuenta uuid; v_moneda text; v_vuelo uuid;

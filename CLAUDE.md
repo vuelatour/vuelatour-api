@@ -6102,29 +6102,38 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
-- **PENDIENTE de aplicar (12-oct-2026; el API 0.0.71 corre con o sin ella)**
-  — `20261012000002_conciliacion_abono_cobros.sql` (invariante 56): tabla
+- **APLICADA en prod la noche del 12-oct-2026** —
+  `20261012000002_conciliacion_abono_cobros.sql` (invariante 56): tabla
   puente `movimiento_bancario_cobro` + `movimiento_bancario.cobros_n` +
-  CHECK de ingresos con `cobros_n = 0` + backfill de las ligas `cobro_id`
-  de hoy + 7 triggers (A/B×3/C/D/K) + 2 RPC. **Antes de aplicar**: el
-  DRY-RUN de su cabecera (UNA sentencia `do $dry$`, pegando las secciones
-  1–7 en B; crea filas DRYRUN-20261012000002 que el rollback borra) con
-  escrituras REALES: C1 estructura, C2 backfill, C3 dos cobros que cuadran,
-  C4 ABONO_NO_CUADRA sin escribir, C5 LOTE_MONEDA_DISTINTA, C6
+  CHECK de ingresos con `cobros_n = 0` + backfill de las 29 ligas `cobro_id`
+  (29 partes, `updated_at` intacto) + 7 triggers (A/B×3/C/D/K) + 2 RPC.
+  Se aplicó desde el SQL Editor (el MCP de Supabase rechaza sentencias con
+  DROP/DELETE/REVOKE: ver el CLAUDE.md del workspace) y se registró en
+  `supabase_migrations.schema_migrations`. **El DRY-RUN de su cabecera, tal
+  cual, falla con `55006 pending trigger events`** (sección A inserta en
+  `movimiento_bancario` antes del `alter table`; post-mortem en el propio
+  archivo). La cobertura se obtuvo con un POSTCHECK sin DDL sobre el esquema
+  aplicado (C1 estructura, C2 backfill, C3 dos cobros que cuadran, C4
+  ABONO_NO_CUADRA sin escribir, C5 LOTE_MONEDA_DISTINTA, C6
   COBRO_YA_CONCILIADO, C7 espejo legado y LOTE_SOLO_API_NUEVO, C8 candados
-  D, C9 desligar ⇒ `DRYRUN_OK`. Después `get_advisors` (esperado el INFO de
-  RLS sin policies de la tabla nueva). Depende de 20261002000002,
-  20260924000004 y 20260930000001 (aplicadas). Rollback al pie del archivo
-  (un lote vivo se pierde: desvincularlo antes; reiniciar el API después).
+  D, C9 desligar, C11 un solo cobro ⇒ `POSTCHECK_OK`). `get_advisors`: solo
+  el INFO de RLS sin policies de la tabla nueva y la FK `created_by` sin
+  índice (como sus hermanas). Rollback al pie del archivo (un lote vivo se
+  pierde: desvincularlo antes; reiniciar el API después).
+- **Dry-run de una migración con escrituras de prueba: PRIMERO el DDL,
+  DESPUÉS las filas de prueba.** Una tabla con constraint triggers
+  DIFERIDOS (`movimiento_bancario`: partes/cobros coherentes) deja eventos
+  pendientes tras un INSERT/UPDATE y cualquier `alter table` posterior en la
+  misma transacción revienta con 55006. Orden: cuerpo → filas de prueba →
+  pruebas → `raise exception 'DRYRUN_OK'`.
 
-- **PENDIENTE de aplicar (12-oct-2026; el API 0.0.70 corre con o sin ella)**
-  — `20261012000001_movimiento_bancario_orden_archivo.sql` (invariante 55):
+- **APLICADA en prod la noche del 12-oct-2026** (dry-run por MCP
+  `DRYRUN_OK`: columna + CHECK con 1 aceptado y 0 rechazado + índice) —
+  `20261012000001_movimiento_bancario_orden_archivo.sql` (invariante 55):
   `movimiento_bancario.orden_archivo integer` (CHECK ≥ 1) + índice
-  `(estado_cuenta_id, orden_archivo)`. Aditiva, sin triggers ni backfill
-  (el dry-run de su cabecera ejerce el CHECK con un UPDATE real dentro de
-  `begin … rollback`). Al aplicarla la sonda se enciende sola en ≤ 10 min;
-  desde entonces cada importación guarda la posición y el reporte Excel sale
-  en el orden del archivo.
+  `(estado_cuenta_id, orden_archivo)`. Aditiva, sin triggers ni backfill.
+  La sonda se enciende sola en ≤ 10 min; desde entonces cada importación
+  guarda la posición y el reporte Excel sale en el orden del archivo.
 
 - Migración = archivo en `supabase/migrations/` **y** aplicada vía MCP al
   proyecto prod `bjesduasnzbzywofukbf` (existen dos proyectos; verificar).
