@@ -1053,6 +1053,9 @@ export class AircraftBalanceService {
       );
       const usd = round2(libros.reduce((s, p) => s + (pick(p).usd ?? 0), 0));
       const horas = totalesFlota.tiempo_vuelo;
+      // La bandera `tc_por_fila` (invariante 59) NO se copia a propósito:
+      // el general no pinta 'permisos'; `tc_aplicado` sí llega por el
+      // spread de cada fila (útil para el T.C. por fila de los AFAC).
       return {
         filas,
         total_mxn: totalMxn,
@@ -4073,12 +4076,16 @@ export class AircraftBalanceService {
       'Gastos Indirectos',
       pendientes,
     );
+    // T.C. por fila + MONTO MXN como fórmula en la hoja 'permisos'
+    // (13-oct-2026, invariante 59): SOLO esta hoja lleva `tc_aplicado` por
+    // fila y la bandera `tc_por_fila`; las demás siguen byte-idénticas.
     const hojaPermisos = this.buildHoja(
       filasPermisos,
       tcHojas,
       horasVoladas,
       'permisos',
       pendientes,
+      { tcPorFila: true },
     );
     const hojaCombustibleBase = this.buildHoja(
       gastosGas,
@@ -5962,6 +5969,15 @@ export class AircraftBalanceService {
    * `gastos_indirectos` y `otros_gastos` citan la misma: "Gastos
    * Indirectos"). Un gasto USD sin TC (ni tc_gasto ni promedio) queda con
    * monto_mxn null Y se reporta en pendientes — nunca desaparece.
+   *
+   * `opciones.tcPorFila` (13-oct-2026, invariante 59; hoy SOLO la hoja
+   * 'permisos'): cada fila lleva además el ADITIVO `tc_aplicado` —el MISMO
+   * número con que se multiplicó `monto_original` (tc_gasto o `tcPromedio`,
+   * sin re-redondear); null en MXN y en USD sin T.C.— y la hoja la bandera
+   * `tc_por_fila: true`, con las que pyservices pinta la columna T.C. y
+   * MONTO MXN como fórmula ROUND(MONTO ORIGINAL × T.C., 2). Sin la opción
+   * no se agrega NINGUNA llave: el payload de las demás hojas es
+   * byte-idéntico al de antes.
    */
   private buildHoja(
     gastos: GastoRow[],
@@ -5969,6 +5985,7 @@ export class AircraftBalanceService {
     horasVoladas: number,
     nombreHoja: string,
     pendientes: string[],
+    opciones: { tcPorFila?: boolean } = {},
   ): BalanceAvionHojaGastosPayload {
     const filas: BalanceAvionGastoFilaPayload[] = [...gastos]
       .sort((a, b) => (a.fecha_gasto ?? '').localeCompare(b.fecha_gasto ?? ''))
@@ -5987,11 +6004,17 @@ export class AircraftBalanceService {
           .filter(Boolean)
           .join(' · ');
         let mxn: number | null;
+        // T.C. con el que se convirtió ESTA fila (solo viaja con
+        // `opciones.tcPorFila`, invariante 59): null en MXN y sin T.C.
+        let tcAplicado: number | null = null;
         if (g.moneda === 'MXN') {
           mxn = round2(monto);
         } else {
           const tc = pos(g.tc_gasto) ?? tcPromedio;
           mxn = tc != null ? round2(monto * tc) : null;
+          // EXACTAMENTE el número que multiplicó, sin re-redondear:
+          // pyservices lo cita en la fórmula y debe reproducir el centavo.
+          if (mxn != null) tcAplicado = tc;
           if (mxn == null) {
             pendientes.push(
               `Hoja "${nombreHoja}" (${g.fecha_gasto ?? 'sin fecha'}): gasto en ${
@@ -6027,6 +6050,9 @@ export class AircraftBalanceService {
           monto_mxn: mxn,
           moneda_original: g.moneda !== 'MXN' ? (g.moneda ?? null) : null,
           monto_original: g.moneda !== 'MXN' ? round2(monto) : null,
+          // ADITIVO (13-oct-2026, invariante 59): SOLO con la opción — sin
+          // ella ni la llave (payload byte-idéntico de las demás hojas).
+          ...(opciones.tcPorFila ? { tc_aplicado: tcAplicado } : {}),
         };
       });
     const totalMxn = round2(
@@ -6046,6 +6072,13 @@ export class AircraftBalanceService {
           : null;
     const usdHr =
       usd != null && horasVoladas > 0 ? round2(usd / horasVoladas) : null;
-    return { filas, total_mxn: totalMxn, usd, usd_hr: usdHr };
+    return {
+      filas,
+      total_mxn: totalMxn,
+      usd,
+      usd_hr: usdHr,
+      // Bandera ADITIVA (13-oct-2026, invariante 59): solo con la opción.
+      ...(opciones.tcPorFila ? { tc_por_fila: true } : {}),
+    };
   }
 }

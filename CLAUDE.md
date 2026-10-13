@@ -5425,6 +5425,71 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       remanente 2,750 del #501); `libros-pago-vendedor.fixture-spec`
       (`GOLDEN_OM`) actualizado.
 
+59. **T.C. POR FILA Y MONTO MXN COMO FÓRMULA EN LA HOJA «PERMISOS»
+    (13-oct-2026, API 0.0.74, sin migración).** Decisión 1 del lote del
+    cliente del 13-oct-2026: en la hoja «permisos» del libro INDIVIDUAL del
+    balance por avión quiere ver con qué tipo de cambio se convirtió cada
+    gasto a pesos (columna «T.C.») y que MONTO MXN sea una FÓRMULA visible
+    (ROUND(MONTO ORIGINAL × T.C., 2)), no un número suelto. SOLO esa hoja
+    cambia; las demás hojas de gastos quedan byte a byte.
+    - **Contrato (ADITIVO, opcional, en `pyservices.service.ts`)**:
+      `BalanceAvionGastoFilaPayload.tc_aplicado?: number | null` = el T.C.
+      con el que `buildHoja` convirtió `monto_original` a `monto_mxn`
+      (`pos(g.tc_gasto) ?? tcHojas`: el `tc_gasto` del gasto o, sin él, el
+      T.C. de las hojas —promedio CRUDO del periodo, u oficial del cierre en
+      un avión sin vuelos—), **EXACTAMENTE el número que multiplicó, sin
+      re-redondear** (pyservices lo cita en la fórmula y debe reproducir el
+      centavo; redondearlo a 6 podría degradar a valor un gasto grande
+      convertido con el promedio); `null` en gastos en MXN y en USD sin
+      ningún T.C. (`monto_mxn` null). `BalanceAvionHojaGastosPayload.
+      tc_por_fila?: boolean` = `true` SOLO en `permisos`.
+    - **Cómo**: `buildHoja` gana el sexto parámetro `opciones: { tcPorFila?:
+      boolean }` y SOLO la llamada de `filasPermisos` lo pasa
+      (`{ tcPorFila: true }`); con él cada fila lleva `tc_aplicado` y la
+      hoja `tc_por_fila: true`; sin él no se agrega NINGUNA llave
+      (indirectos, refacciones, otros, combustible y gastos de empresa del
+      general salen byte-idénticos: ningún golden se mueve). pyservices
+      (`_hoja_gastos` kwarg `con_tc`, solo en la pestaña 'permisos' y solo
+      con la bandera) pinta la columna «T.C.» AL FINAL (letra calculada;
+      VALOR con formato `TC`, nota en el encabezado) y MONTO MXN como
+      fórmula verificada por `xlsx_formulas`: `=ROUND(F{r}*G{r},2)` en
+      moneda extranjera con T.C.; `=ROUND(F{r},2)` en pesos —para que exista
+      la fórmula, la fila en pesos muestra «MXN» en MONEDA ORIGINAL y su
+      importe en MONTO ORIGINAL: es una COPIA del `monto_mxn` del API, no
+      una conversión; el contrato `moneda_original`/`monto_original` null ⇔
+      gasto en MXN NO cambia—; celda vacía sin fórmula cuando `monto_mxn`
+      es null (USD sin T.C., como hoy); valor del API si llegara
+      `monto_mxn` sin `tc_aplicado` (defensa). A5 sigue siendo
+      `ROUND(SUM(D8:Dn),2)`; B5..E5 y la cascada `'permisos'!$C$5` no
+      cambian.
+    - **Lo que NO cambia**: ningún número (cada fórmula reproduce el
+      `monto_mxn` del API o `xlsx_formulas.finalizar` la degrada a ese
+      valor: total de la hoja, `(−) PERMISOS USD`, reparto y el bloque AFAC
+      de «otros movimientos» —que lee fecha/detalle/`monto_mxn`, invariante
+      53— intactos). El Balance general NO tiene hoja «permisos» (desde el
+      29-ago vive solo en el individual): sus `aviones[]` llevan la bandera
+      por venir de `buildPayload` y el consolidado (`hojaFlota`) hereda
+      `tc_aplicado` por el spread de cada fila pero NO copia la bandera, a
+      propósito (útil para la Decisión 2: T.C. por fila de los egresos AFAC
+      en `tcFilas`, invariante 47 — nadie recalcula un T.C.).
+      `bloqueAfacOtrosMovimientos` y `adjuntarLigasRefacciones` no se tocan.
+      La vista en pantalla (invariante 52) pinta el mismo libro: la columna
+      T.C. aparece sola en 'permisos' (el panel no se toca; avisar al
+      cliente). Sin migración.
+    - **Skew en ambos sentidos**: API 0.0.74 + pyservices previo ⇒
+      `extra="ignore"` descarta los dos campos ⇒ hoja de siempre; API ≤
+      0.0.73 + pyservices nuevo ⇒ sin bandera ⇒ `con_tc=False` ⇒ hoja
+      byte-idéntica (huella `_firma_hoja`). Orden de deploy recomendado:
+      pyservices → API (cualquier orden funciona).
+    - Specs: `aircraft-balance.service.empresa.spec` (describe «Hoja
+      «permisos» — T.C. por fila»: `tc_aplicado` null/17.123456/20 con
+      `monto_mxn` 2,500/2,568.52/1,600, USD sin T.C. ⇒ null + pendiente,
+      sin la opción ni una llave nueva por `Object.keys`, y `buildPayload`
+      con la bandera SOLO en `permisos` y `permisos_usd` = 333.43
+      congelado); `afac-otros-movimientos.util.spec` sin cambios. En
+      pyservices, `tests/test_balance_formulas.py` (sección 3b) y
+      `tests/test_libro_json.py`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -6155,6 +6220,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **13-oct-2026 — SIN migración** para el T.C. por fila y MONTO MXN como
+  fórmula de la hoja «permisos» (invariante 59): solo payload API→pyservices
+  (campos ADITIVOS `tc_aplicado` / `tc_por_fila`); deploy en cualquier
+  orden (de preferencia pyservices primero).
 
 - **APLICADA en prod la noche del 12-oct-2026** —
   `20261012000002_conciliacion_abono_cobros.sql` (invariante 56): tabla

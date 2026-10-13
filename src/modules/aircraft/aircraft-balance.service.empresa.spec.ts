@@ -301,7 +301,13 @@ type Privado = {
     horas: number,
     hoja: string,
     pendientes: string[],
-  ) => { filas: BalanceAvionGastoFilaPayload[]; total_mxn: number };
+    opciones?: { tcPorFila?: boolean },
+  ) => {
+    filas: BalanceAvionGastoFilaPayload[];
+    total_mxn: number;
+    usd: number | null;
+    tc_por_fila?: boolean;
+  };
 };
 
 const priv = (s: AircraftBalanceService) => s as unknown as Privado;
@@ -811,5 +817,140 @@ describe('Balance — extensión de horario: traslado al cliente, no costo del a
       /extensi/i,
     );
     expect(filas.reduce((a, f) => a + (f.egreso_mxn ?? 0), 0)).toBe(0);
+  });
+});
+
+/**
+ * Decisión 1 del lote del 13-oct-2026 (invariante 59): la hoja «permisos»
+ * lleva el T.C. con el que CADA gasto se convirtió a pesos (`tc_aplicado`,
+ * EXACTAMENTE el número que multiplicó) y la bandera `tc_por_fila`, con las
+ * que pyservices pinta la columna T.C. y MONTO MXN = ROUND(MONTO ORIGINAL ×
+ * T.C., 2). Las demás hojas NO llevan ni una llave nueva (byte-idénticas).
+ */
+describe('Hoja «permisos» — T.C. por fila y MONTO MXN como fórmula (13-oct-2026, invariante 59)', () => {
+  const PERMISOS: Fila[] = [
+    { ...gastoBase, id: 'p-mxn', categoria: 'PERMISO', monto: 2500 },
+    {
+      ...gastoBase,
+      id: 'p-usd-tc',
+      categoria: 'PERMISO',
+      monto: 150,
+      moneda: 'USD',
+      tc_gasto: '17.123456',
+    },
+    {
+      ...gastoBase,
+      id: 'p-usd-prom',
+      categoria: 'PERMISO',
+      monto: 80,
+      moneda: 'USD',
+    },
+  ];
+
+  it('con la opción: tc_aplicado = tc_gasto o el promedio tal cual (null en MXN) y la hoja lleva tc_por_fila', () => {
+    const pendientes: string[] = [];
+    const hoja = priv(armar()).buildHoja(
+      PERMISOS,
+      20,
+      0,
+      'permisos',
+      pendientes,
+      { tcPorFila: true },
+    );
+    expect(hoja.tc_por_fila).toBe(true);
+    expect(
+      hoja.filas.map((f) => [
+        f.monto_mxn,
+        f.moneda_original,
+        f.monto_original,
+        f.tc_aplicado,
+      ]),
+    ).toEqual([
+      [2500, null, null, null],
+      [2568.52, 'USD', 150, 17.123456],
+      // El promedio recibido TAL CUAL (sin re-redondear).
+      [1600, 'USD', 80, 20],
+    ]);
+    // La llave existe también en la fila MXN (null, no ausente).
+    for (const f of hoja.filas) expect('tc_aplicado' in f).toBe(true);
+    expect(hoja.total_mxn).toBe(6668.52);
+    expect(hoja.usd).toBe(333.43);
+    expect(pendientes).toEqual([]);
+  });
+
+  it('USD sin ningún T.C.: tc_aplicado y monto_mxn null, con el pendiente de siempre', () => {
+    const pendientes: string[] = [];
+    const hoja = priv(armar()).buildHoja(
+      [
+        {
+          ...gastoBase,
+          id: 'p-usd-sin-tc',
+          categoria: 'PERMISO',
+          monto: 99.99,
+          moneda: 'USD',
+        },
+      ],
+      null,
+      0,
+      'permisos',
+      pendientes,
+      { tcPorFila: true },
+    );
+    expect(hoja.tc_por_fila).toBe(true);
+    expect(hoja.filas).toHaveLength(1);
+    expect(hoja.filas[0].monto_mxn).toBeNull();
+    expect(hoja.filas[0].tc_aplicado).toBeNull();
+    expect('tc_aplicado' in hoja.filas[0]).toBe(true);
+    expect(hoja.filas[0].monto_original).toBe(99.99);
+    expect(hoja.usd).toBeNull();
+    expect(pendientes).toEqual([expect.stringContaining('sin ningún TC')]);
+  });
+
+  it('sin la opción NO hay ni una llave nueva (payload byte-idéntico de las demás hojas)', () => {
+    const hoja = priv(armar()).buildHoja(
+      PERMISOS,
+      20,
+      0,
+      'Gastos Indirectos',
+      [],
+    );
+    expect(Object.keys(hoja)).toEqual(['filas', 'total_mxn', 'usd', 'usd_hr']);
+    for (const f of hoja.filas) {
+      expect(Object.keys(f)).not.toContain('tc_aplicado');
+    }
+    // Los números son los MISMOS con y sin la opción.
+    expect(hoja.filas.map((f) => f.monto_mxn)).toEqual([2500, 2568.52, 1600]);
+    expect(hoja.total_mxn).toBe(6668.52);
+  });
+
+  it('buildPayload: solo `permisos` lleva la bandera y el T.C. por fila; la cascada no se mueve', async () => {
+    const payload = await priv(
+      armar([...GASTOS, ...PERMISOS.map((g) => ({ ...g, aeronave_id: AV }))]),
+    ).buildPayload(AV, DESDE, HASTA);
+    expect(payload.permisos.tc_por_fila).toBe(true);
+    expect(payload.permisos.filas).toHaveLength(3);
+    for (const f of payload.permisos.filas)
+      expect('tc_aplicado' in f).toBe(true);
+    expect(payload.permisos.filas.map((f) => f.tc_aplicado)).toEqual([
+      null,
+      17.123456,
+      20,
+    ]);
+    // Las demás hojas del libro: ni la bandera ni la llave por fila.
+    const otras = [
+      payload.gastos_indirectos,
+      payload.otros_gastos,
+      payload.refacciones,
+      payload.combustible,
+    ];
+    for (const hoja of otras) {
+      expect(hoja).toBeDefined();
+      expect('tc_por_fila' in hoja!).toBe(false);
+      for (const f of hoja!.filas) expect('tc_aplicado' in f).toBe(false);
+    }
+    // Números congelados ANTES del cambio: 2,500 + 2,568.52 + 1,600 MXN y
+    // 6,668.52 ÷ T.C. 20 en la cascada `(−) PERMISOS USD`.
+    expect(payload.permisos.total_mxn).toBe(6668.52);
+    expect(payload.balance.permisos_usd).toBe(333.43);
   });
 });

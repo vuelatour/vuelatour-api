@@ -911,6 +911,18 @@ export interface BalanceAvionGastoFilaPayload {
    * promedio del libro). pyservices lo ignora (`extra="ignore"`).
    */
   tc_gasto?: number | null;
+  /**
+   * T.C. con el que el API convirtió `monto_original` a `monto_mxn` (el
+   * `tc_gasto` del gasto o, sin él, el T.C. de las hojas —promedio del
+   * periodo u oficial del cierre en un avión sin vuelos—), EXACTAMENTE el
+   * número que multiplicó (sin re-redondear: pyservices lo cita en la
+   * fórmula). null = gasto en MXN o sin ningún T.C. (`monto_mxn` null).
+   * Hoy viaja SOLO en la hoja «permisos» (decisión del cliente
+   * 13-oct-2026, invariante 59): pyservices pinta la columna T.C. y
+   * MONTO MXN = ROUND(MONTO ORIGINAL × T.C., 2). Opcional por skew (un
+   * pyservices previo lo ignora; un API previo no lo manda).
+   */
+  tc_aplicado?: number | null;
   /** Solo hoja "refacciones" del GENERAL (29-ago): costo de la salida (el
    *  guardado en su fila: último precio de compra) y VENTA al avión (= monto
    *  del gasto). pyservices pinta GANANCIA = venta − costo. */
@@ -925,6 +937,14 @@ export interface BalanceAvionHojaGastosPayload {
   usd: number | null;
   /** usd / horas voladas del periodo. */
   usd_hr: number | null;
+  /**
+   * true = cada fila trae `tc_aplicado` y pyservices puede pintar la
+   * columna T.C. con MONTO MXN como fórmula (13-oct-2026, invariante 59).
+   * Solo la hoja «permisos» la lleva (opción `tcPorFila` de `buildHoja`);
+   * opcional por skew (un pyservices previo la ignora; un API previo no la
+   * manda ⇒ hoja de siempre).
+   */
+  tc_por_fila?: boolean;
 }
 
 /** Hoja "combustible" (26-ago-2026): el gas del avión POR MES, con litros. */
