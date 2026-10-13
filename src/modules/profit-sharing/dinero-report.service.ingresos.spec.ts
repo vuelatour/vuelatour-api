@@ -4,6 +4,7 @@ jest.mock('../pyservices/pyservices.service', () => ({
 }));
 
 import { DineroReportService } from './dinero-report.service';
+import { ETIQUETA_FACTURA_NO_LLEVA } from '../flights/factura-cliente.util';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { DineroXlsxPayload } from '../pyservices/pyservices.service';
 
@@ -438,7 +439,9 @@ const GOLDEN_DINERO = {
       ],
       total_cobros_mxn: 40000,
       me_deben_mxn: 4600,
-      factura_vuelatour: null,
+      // 13-oct-2026 (invariante 60): dos cobros sin cuenta ni método ⇒
+      // ninguno exige factura.
+      factura_vuelatour: ETIQUETA_FACTURA_NO_LLEVA,
       participacion: 1,
       multi_avion: false,
     },
@@ -455,7 +458,7 @@ const GOLDEN_DINERO = {
       ingreso_mxn: 2000,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 500,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
       clave: 'vtleticia',
@@ -468,7 +471,7 @@ const GOLDEN_DINERO = {
       ingreso_mxn: 1000,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 1000,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
       clave: 'vtleticia',
@@ -482,7 +485,7 @@ const GOLDEN_DINERO = {
       ingreso_mxn: 1600,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 0,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
   ],
   otros_gastos: [

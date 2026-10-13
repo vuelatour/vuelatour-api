@@ -4,6 +4,10 @@ jest.mock('../pyservices/pyservices.service', () => ({
 }));
 
 import { DineroReportService } from './dinero-report.service';
+import {
+  ETIQUETA_FACTURA_NO_LLEVA,
+  ETIQUETA_FACTURA_PENDIENTE,
+} from '../flights/factura-cliente.util';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { DineroXlsxPayload } from '../pyservices/pyservices.service';
 
@@ -394,6 +398,44 @@ describe('Libro Dinero — columna «FACTURA VUELATOUR» (24-sep-2026)', () => {
   it('sin factura de ningún tipo ⇒ vacío (como antes)', async () => {
     const p = await conFactura({ facturado: false });
     expect(p.vuelos[0].factura_vuelatour).toBeNull();
+  });
+
+  // 13-oct-2026 (invariante 60): paso 5 de la cascada, lo que dicen los
+  // cobros del vuelo.
+  function conCobros(cobros: Fila[]) {
+    const t = tablas([]);
+    t.vuelo = [{ ...t.vuelo[0], facturado: false }];
+    t.cobro_vuelo = cobros.map((c, i) => ({
+      id: `c-${i + 1}`,
+      vuelo_id: V1,
+      monto: 1000,
+      moneda: 'USD',
+      tc_usd_mxn: 20,
+      fecha_cobro: `${DIA}T16:00:00+00:00`,
+      comision_banco_monto: null,
+      cuenta_destino: null,
+      ...c,
+    }));
+    const service = new DineroReportService(fakeSupabase(t), {} as never);
+    return (service as unknown as Privado).buildPayload(DESDE, HASTA);
+  }
+
+  it('con cobros que NO exigen factura y sin factura ⇒ «No lleva factura» (hoja 1 y «otros ingresos»)', async () => {
+    const p = await conCobros([{ metodo_cobro: 'EFECTIVO' }]);
+    expect(p.vuelos[0].factura_vuelatour).toBe(ETIQUETA_FACTURA_NO_LLEVA);
+    for (const f of p.otros_ingresos.filter(
+      (f) => f.clave === p.vuelos[0].clave,
+    )) {
+      expect(f.factura).toBe(ETIQUETA_FACTURA_NO_LLEVA);
+    }
+  });
+
+  it('con un cobro en HSBC Pesos y sin factura ⇒ «Pendiente de factura»', async () => {
+    const p = await conCobros([
+      { metodo_cobro: 'BILLPOCKET' },
+      { metodo_cobro: 'TRANSFERENCIA', cuenta_destino: 'HSBC Pesos' },
+    ]);
+    expect(p.vuelos[0].factura_vuelatour).toBe(ETIQUETA_FACTURA_PENDIENTE);
   });
 });
 

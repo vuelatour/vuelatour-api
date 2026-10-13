@@ -1216,6 +1216,11 @@ export class AircraftBalanceService {
           p.pendientes.map((texto) => `${p.matricula}: ${texto}`),
         ),
       ],
+      // ADITIVA (13-oct-2026, API 0.0.74, invariante 60): a diferencia de
+      // `sin_provision_vendedor`, el consolidado SÍ la lleva: su hoja
+      // «reporte horas FLOTA» se pinta con `_hoja_maestra(ws, cons, …)` y la
+      // nota al pie de FACTURA VUELATOUR sale del `req` que recibe.
+      factura_vuelatour_segun_cobros: true as const,
     };
 
     // ===== Bloque «VUELATOUR (empresa)» al final de la hoja "balance"
@@ -1522,7 +1527,9 @@ export class AircraftBalanceService {
    * leído por la hoja principal no se vuelve a pedir. Devuelve solo los
    * vuelos CON etiqueta (mismo contrato que la helper). Un fallo de lectura
    * rechaza TODAS las promesas del lote: quien espera recibe el error (nunca
-   * una etiqueta vacía inventada).
+   * una etiqueta vacía inventada). Desde el 13-oct-2026 (invariante 60) la
+   * etiqueta puede ser «Pendiente de factura» / «No lleva factura» y la
+   * ausencia significa «sin cobros» (la helper ya lo decide: sin lógica aquí).
    */
   private async etiquetasFacturaMemo(
     vueloIds: ReadonlyArray<string>,
@@ -1844,9 +1851,11 @@ export class AircraftBalanceService {
         : Promise.resolve(vacio),
       // Columna «FACTURA VUELATOUR» de la hoja principal (30-sep-2026):
       // FUENTE ÚNICA `etiquetasFacturaDeVuelos` (CFDI vivo → facturas
-      // EMITIDAS vigentes → folio tecleado → estatus), en lote y con el memo
-      // del general. Un fallo de lectura tumba el libro como cualquier otro:
-      // jamás un Excel con la columna vacía en silencio.
+      // EMITIDAS vigentes → folio tecleado → estatus → desde el 13-oct-2026
+      // «Pendiente de factura» / «No lleva factura» por los cobros, vacío =
+      // sin cobros; invariante 60), en lote y con el memo del general. Un
+      // fallo de lectura (también el de `cobro_vuelo`) tumba el libro como
+      // cualquier otro: jamás un Excel con la columna vacía en silencio.
       this.etiquetasFacturaMemo(vueloIds, memoFactura).catch(
         (e: unknown): never => {
           throw new Error(
@@ -3701,6 +3710,10 @@ export class AircraftBalanceService {
         // FACTURA VUELATOUR (30-sep-2026, ADITIVO al final): es del VUELO —
         // la misma etiqueta en todas sus filas (multi-avión, CANCELADO,
         // «solo gastos»); pyservices la pinta al final de STATUS DE COBROS.
+        // Desde el 13-oct-2026 (invariante 60) puede decir «Pendiente de
+        // factura» / «No lleva factura» según los cobros del vuelo y `null`
+        // = sin cobros: FUENTE ÚNICA `etiquetasFacturaDeVuelos`, sin lógica
+        // aquí.
         factura_vuelatour: facturaPorVuelo.get(v.id) ?? null,
         // EXTENSIÓN DE HORARIO pagada (1-oct-2026, ADITIVO al final): solo
         // nota, como el TUA. La llave SOLO viaja con extensión ≠ 0 — sin
@@ -4338,6 +4351,13 @@ export class AircraftBalanceService {
       // esa pestaña y la nota del pago al vendedor de su hoja de vuelos
       // cambia solo con esta bandera raíz (pyservices). Viaja SIEMPRE.
       sin_provision_vendedor: true as const,
+      // ADITIVA (13-oct-2026, API 0.0.74, invariante 60): la columna FACTURA
+      // VUELATOUR dice «Pendiente de factura» / «No lleva factura» / vacío =
+      // sin cobros según los cobros y la solicitud del vuelo (fuente única
+      // `facturasDeVuelos`); pyservices cambia SOLO la nota al pie de la hoja
+      // maestra. Viaja SIEMPRE (libro individual y `aviones[]` del general;
+      // el consolidado FLOTA la lleva aparte, en `xlsxGeneral`).
+      factura_vuelatour_segun_cobros: true as const,
     };
   }
 

@@ -4,6 +4,7 @@ import {
   ParticionCobroError,
   particionCobroGrupo,
   semaforoCobroGrupo,
+  vuelosConParteCobrada,
   type HijoParticionCobro,
   type ParticionCobroInput,
 } from './particion-cobro.util';
@@ -574,5 +575,21 @@ describe('cuadreSobre / diagnosticoSobres (invariante Σ partes == sobre)', () =
   it('centavos de float no descuadran (0.1 + 0.2)', () => {
     const c = cuadreSobre({ monto: 0.3, partes: partes([0.1, 0.2]) });
     expect(c.cuadra).toBe(true);
+  });
+});
+
+describe('vuelosConParteCobrada (factura obligatoria por cuenta de cobro, invariante 60)', () => {
+  it('vuelo_id únicos de las partes con monto > 0, en orden; la parte en 0 y los reembolsos quedan fuera', () => {
+    expect(
+      vuelosConParteCobrada([
+        { vuelo_id: 'v2', monto: 300 },
+        { vuelo_id: 'v1', monto: 500 },
+        { vuelo_id: 'v3', monto: 0 },
+        { vuelo_id: 'v4', monto: -200 },
+        { vuelo_id: 'v2', monto: 10 },
+      ]),
+    ).toEqual(['v2', 'v1']);
+    expect(vuelosConParteCobrada([])).toEqual([]);
+    expect(vuelosConParteCobrada([{ vuelo_id: 'v1', monto: -1 }])).toEqual([]);
   });
 });

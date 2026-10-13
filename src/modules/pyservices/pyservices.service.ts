@@ -327,6 +327,12 @@ export interface DineroVueloFilaPayload {
   cobros?: DineroCobroPagoPayload[];
   total_cobros_mxn?: number | null;
   me_deben_mxn?: number | null;
+  /**
+   * Columna «FACTURA VUELATOUR» (fuente única `etiquetasFacturaDeVuelos`):
+   * folio/estatus registrado o, desde el 13-oct-2026 (invariante 60),
+   * «Pendiente de factura» / «No lleva factura» según los cobros del vuelo;
+   * `null` = sin cobros. pyservices lo pinta tal cual.
+   */
   factura_vuelatour?: string | null;
   /**
    * Total que paga el CLIENTE (monto_total_usd y su MXN): informativo al
@@ -355,6 +361,7 @@ export interface DineroOtroIngresoFilaPayload {
   ingreso_mxn?: number | null;
   fecha_ingreso?: string | null;
   remanente_mxn?: number | null;
+  /** Misma etiqueta que `factura_vuelatour` de la hoja 1 (invariante 60: «Pendiente de factura» / «No lleva factura» / null = sin cobros). */
   factura?: string | null;
 }
 export interface DineroOtroGastoFilaPayload {
@@ -773,7 +780,10 @@ export interface BalanceAvionVueloPayload {
    * SERVICIO emitida al cliente, con la FUENTE ÚNICA
    * `etiquetasFacturaDeVuelos` (CFDI timbrado vivo → facturas EMITIDAS
    * vigentes «A-0424» → `vuelo.factura_folio` tecleado → etiqueta del
-   * estatus → `null`), la MISMA que «otros movimientos» y el Libro Dinero.
+   * estatus → desde el 13-oct-2026 (invariante 60) «Pendiente de factura»
+   * si algún cobro exige factura o hay solicitud viva / «No lleva factura»
+   * si hay cobros y ninguno exige → `null` = SIN COBROS), la MISMA que
+   * «otros movimientos» y el Libro Dinero.
    * Es del VUELO: todas sus filas llevan la misma etiqueta (multi-avión,
    * CANCELADO y «solo gastos» incluidos). pyservices la pinta al final de
    * STATUS DE COBROS, sin sumar en TOTALES; uno viejo la ignora.
@@ -1292,6 +1302,7 @@ export interface BalanceOtroMovimientoFilaPayload {
   ingreso_mxn: number | null;
   fecha_ingreso: string | null;
   remanente_mxn: number | null;
+  /** «factura vuelatour» (col J): misma etiqueta que `factura_vuelatour` de la hoja maestra (invariante 60: «Pendiente de factura» / «No lleva factura» / null = sin cobros). */
   factura: string | null;
   /**
    * Desglose línea por línea de la celda (una fila por vuelo, 28-ago):
@@ -1410,6 +1421,15 @@ export interface BalanceAvionPayload {
    * no habla del pago al vendedor). Un API previo no la manda.
    */
   sin_provision_vendedor?: true;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 60): la columna FACTURA
+   * VUELATOUR dice «Pendiente de factura» / «No lleva factura» / vacío = sin
+   * cobros según los cobros y la solicitud del vuelo. Viaja SIEMPRE en el
+   * libro individual, en cada `aviones[]` del general Y en el consolidado
+   * FLOTA (los dos usan `_hoja_maestra`); pyservices cambia SOLO la nota al
+   * pie de la hoja maestra. Un API previo no la manda ⇒ nota de hoy.
+   */
+  factura_vuelatour_segun_cobros?: true;
 }
 
 export interface GastoVueloSugerenciaPayload {

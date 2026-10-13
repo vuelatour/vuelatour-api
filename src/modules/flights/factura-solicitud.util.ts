@@ -29,6 +29,22 @@ export const COLS_SOLICITUD_FACTURA =
 /** Tope de la nota (mismo que el CHECK `vuelo_factura_solicitud_nota_chk`). */
 export const LIMITE_NOTA_SOLICITUD = 500;
 
+/**
+ * Nota que deja la SOLICITUD AUTOMÁTICA por un cobro que exige factura
+ * (13-oct-2026, invariante 60): «Solicitada automáticamente: cobro en HSBC
+ * Pesos» / «… cobro por Transferencia» (`origenCobroTexto`), recortada al
+ * tope del CHECK.
+ */
+export const PREFIJO_NOTA_SOLICITUD_AUTOMATICA =
+  'Solicitada automáticamente: cobro ';
+
+export function notaSolicitudAutomatica(origen: string): string {
+  return (PREFIJO_NOTA_SOLICITUD_AUTOMATICA + origen).slice(
+    0,
+    LIMITE_NOTA_SOLICITUD,
+  );
+}
+
 export interface VueloSolicitudRow {
   id?: string;
   estado?: string | null;
@@ -250,6 +266,16 @@ export function folios(folios: ReadonlyArray<number>): string {
  * ese tramo — nunca «Total $0 USD»); de grupo: «… de los vuelos #341, #342 y
  * #343 (grupo G-12) · Maqar · 27 sep.». + « El cliente paga hasta recibir la
  * factura.» + « Nota: …».
+ *
+ * SOLICITUD AUTOMÁTICA por un cobro (13-oct-2026, invariante 60; campo
+ * OPCIONAL `automatica`, sin él la salida es byte-idéntica): título «Factura
+ * pendiente: vuelo #341» (grupo: «Factura pendiente: grupo G-12» / «Factura
+ * pendiente: vuelos #341, #342 y #343») y cuerpo «Cobro en HSBC Pesos
+ * registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep ·
+ * Total $8,050.40 USD.» (grupo: «… los vuelos #341, #342 y #343 (grupo
+ * G-12) necesitan factura · Maqar · 27 sep.»). Sin el tramo «El cliente paga
+ * hasta recibir la factura.» (siempre false) ni «Nota: …» (la nota
+ * persistida ya dice lo mismo).
  */
 export function textoAvisoSolicitud(p: {
   actor: string;
@@ -262,19 +288,38 @@ export function textoAvisoSolicitud(p: {
   grupoFolio?: number | null;
   pagaContraFactura?: boolean;
   nota?: string | null;
+  /** Solicitud automática por un cobro: `origen` = «en HSBC Pesos» / «por Transferencia». */
+  automatica?: { origen: string };
 }): { titulo: string; cuerpo: string } {
   const ordenados = [...p.vuelos].sort((a, b) => a.folio - b.folio);
   const primero = ordenados[0];
   const esGrupo = ordenados.length > 1;
   const partes: string[] = [];
   let titulo: string;
-  if (esGrupo) {
+  const lista = folios(ordenados.map((v) => v.folio));
+  if (p.automatica) {
+    const origen = p.automatica.origen;
+    if (esGrupo) {
+      const g = p.grupoFolio != null ? `G-${p.grupoFolio}` : null;
+      titulo = g
+        ? `Factura pendiente: grupo ${g}`
+        : `Factura pendiente: vuelos ${lista}`;
+      partes.push(
+        `Cobro ${origen} registrado por ${p.actor}: los vuelos ${lista}${g ? ` (grupo ${g})` : ''} necesitan factura`,
+      );
+    } else {
+      titulo = `Factura pendiente: vuelo #${primero?.folio ?? '?'}`;
+      partes.push(
+        `Cobro ${origen} registrado por ${p.actor}: el vuelo #${primero?.folio ?? '?'} necesita factura`,
+      );
+    }
+  } else if (esGrupo) {
     const g = p.grupoFolio != null ? `G-${p.grupoFolio}` : null;
     titulo = g
       ? `Factura pedida: grupo ${g}`
-      : `Factura pedida: vuelos ${folios(ordenados.map((v) => v.folio))}`;
+      : `Factura pedida: vuelos ${lista}`;
     partes.push(
-      `${p.actor} pidió factura de los vuelos ${folios(ordenados.map((v) => v.folio))}${g ? ` (grupo ${g})` : ''}`,
+      `${p.actor} pidió factura de los vuelos ${lista}${g ? ` (grupo ${g})` : ''}`,
     );
   } else {
     titulo = `Factura pedida: vuelo #${primero?.folio ?? '?'}`;
@@ -290,10 +335,12 @@ export function textoAvisoSolicitud(p: {
     }
   }
   let cuerpo = `${partes.join(' · ')}.`;
-  if (p.pagaContraFactura)
-    cuerpo += ' El cliente paga hasta recibir la factura.';
-  const nota = (p.nota ?? '').trim();
-  if (nota) cuerpo += ` Nota: ${nota}`;
+  if (!p.automatica) {
+    if (p.pagaContraFactura)
+      cuerpo += ' El cliente paga hasta recibir la factura.';
+    const nota = (p.nota ?? '').trim();
+    if (nota) cuerpo += ` Nota: ${nota}`;
+  }
   return { titulo, cuerpo };
 }
 

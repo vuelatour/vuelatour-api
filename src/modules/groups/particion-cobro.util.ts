@@ -585,3 +585,24 @@ export function diagnosticoSobres(
   }
   return out;
 }
+
+// ===== Factura obligatoria por cuenta de cobro (13-oct-2026, invariante 60) =====
+
+/**
+ * Vuelos (hijos) que RECIBIERON dinero de un sobre: `vuelo_id` únicos de
+ * las partes con `monto > 0`, en orden de aparición. La parte en 0 y los
+ * reembolsos de sobre quedan fuera. Es lo único de la decisión que vive en
+ * grupos como lógica pura: a esos hijos se les pide la factura del servicio
+ * cuando el sobre cae en una cuenta que la exige
+ * (`GroupsService#solicitarFacturaPorSobre`).
+ */
+export function vuelosConParteCobrada(
+  partes: ReadonlyArray<{ vuelo_id: string; monto: number }>,
+): string[] {
+  const out: string[] = [];
+  for (const parte of partes) {
+    if (!(Number(parte.monto) > 0)) continue;
+    if (!out.includes(parte.vuelo_id)) out.push(parte.vuelo_id);
+  }
+  return out;
+}

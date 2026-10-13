@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto';
 import { anexarSello, selloCapturaApp } from '../../common/capturado-en.util';
 import { avisoAeronaveEnTaller } from '../../common/aviso-taller.util';
 import { SEGUNDOS_URL_MINIATURA } from '../../common/url-firmada.util';
+import { cobroExigeFactura } from '../../common/cuentas-cobro';
 import {
   buscarClientePorNombre,
   nombreClienteParaCrear,
@@ -67,7 +68,11 @@ import {
   type BloqueFacturaCliente,
   type VueloFacturaRow,
 } from './factura-cliente.util';
-import { FacturaSolicitudService } from './factura-solicitud.service';
+import {
+  FacturaSolicitudService,
+  type ResultadoSolicitudPorCobro,
+  type SolicitudPorCobro,
+} from './factura-solicitud.service';
 import {
   VueloSeguimientoService,
   type ContadoresSeguimientoONulos,
@@ -533,6 +538,9 @@ export class FlightsService {
     // bloques ADITIVOS `factura_servicio` (snapshot) y
     // `factura_servicio_resumen` (lista). @Optional por la misma razón que
     // `facturaCliente`: sin él (specs) se responde `null` — «sin datos».
+    // Desde el 13-oct-2026 (invariante 60) también dispara la SOLICITUD
+    // AUTOMÁTICA de factura por un cobro en HSBC/Scotiabank
+    // (`solicitarFacturaPorCobros`); sigue @Optional: sin él no hay gancho.
     @Optional()
     private readonly facturaSolicitud?: FacturaSolicitudService,
     // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026): contadores ADITIVOS
@@ -11790,6 +11798,29 @@ export class FlightsService {
   }
 
   /**
+   * FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, invariante 60):
+   * puerta ÚNICA de la solicitud automática de factura desde un cobro (por
+   * vuelo o sobre de grupo — `GroupsService` la llama por aquí). Best-effort
+   * por partida doble: sin `facturaSolicitud` inyectado (specs posicionales)
+   * ⇒ null; cobro que no exige ⇒ null; el service nunca lanza y aquí se
+   * atrapa lo que se escape. JAMÁS 5xx, JAMÁS revierte dinero.
+   */
+  async solicitarFacturaPorCobros(
+    p: SolicitudPorCobro,
+  ): Promise<ResultadoSolicitudPorCobro | null> {
+    if (!this.facturaSolicitud) return null;
+    if (!cobroExigeFactura(p.cobro)) return null;
+    try {
+      return await this.facturaSolicitud.solicitarPorCobro(p);
+    } catch (e) {
+      this.logger.warn(
+        `Solicitud automática de factura falló (el cobro ${p.cobroGrupoId ?? p.cobroId ?? '?'} quedó registrado): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Una parte de un SOBRE de grupo se edita/borra SOLO desde el grupo (el
    * sobre concilia con el banco como un todo y Σ partes == sobre es
    * invariante): 409 estructurado `COBRO_DE_GRUPO` para que el panel mande
@@ -12094,6 +12125,26 @@ export class FlightsService {
     };
     // Parte de un sobre: el grupo avisa UNA vez por sobre, no N veces.
     if (!sobre?.silenciarPush) this.notificarCobroRegistrado(payload, userId);
+    // FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, invariante 60):
+    // si el cobro cayó en HSBC/Scotiabank (o por transferencia, link HSBC o
+    // cheque sin cuenta) se pide la factura del servicio por la MISMA vía
+    // que «Necesito factura». FIRE-AND-FORGET como `notificarCobroRegistrado`:
+    // el POST del outbox del piloto (HSBC_LINK) no espera lecturas ni pushes
+    // (un timeout daría un «fallido» falso, invariante 13). El replay
+    // idempotente y el 23505 retornaron ANTES y no re-disparan; las partes
+    // de un sobre tampoco: lo hace el grupo UNA vez por sobre.
+    if (!sobre) {
+      void this.solicitarFacturaPorCobros({
+        vueloIds: [vueloId],
+        cobro: {
+          monto: cobro!.monto,
+          cuenta_destino: cobro!.cuenta_destino,
+          metodo_cobro: cobro!.metodo_cobro,
+        },
+        actorId: userId,
+        cobroId: cobro!.id as string,
+      }).catch(() => undefined);
+    }
 
     return cobro!;
   }
@@ -12506,6 +12557,23 @@ export class FlightsService {
       this.logger.error(
         `updateCobro ${cobroId}: el cobro quedó corregido pero refreshCobradoFlag falló: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+    // FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, invariante 60):
+    // corregir HACIA una cuenta/método que exige factura pide la factura
+    // (`await` best-effort: la oficina no tiene outbox; nunca 5xx). Corregir
+    // hacia BillPocket/Paywise NO retira nada (retiro manual con
+    // confirmación). `assertNoEsParteDeSobre` ya rebotó las partes de sobre.
+    if (dto.cuenta_destino !== undefined || dto.metodo_cobro !== undefined) {
+      await this.solicitarFacturaPorCobros({
+        vueloIds: [existing.vuelo_id as string],
+        cobro: {
+          monto: data!.monto,
+          cuenta_destino: data!.cuenta_destino,
+          metodo_cobro: data!.metodo_cobro,
+        },
+        actorId: userId,
+        cobroId,
+      });
     }
     return data!;
   }

@@ -256,8 +256,11 @@ export class DineroReportService {
             .in('vuelo_id', vueloIds)
         : Promise.resolve({ data: [], error: null } as const),
       // FACTURA del vuelo (24-sep-2026): fuente única compartida con el
-      // Balance — CFDI vivo → folio de la factura del servicio → estatus
-      // manual («Facturado» / «Factura elaborada y enviada»). En lote.
+      // Balance — CFDI vivo → emitidas VIGENTES → folio de la factura del
+      // servicio → estatus manual («Facturado» / «Factura elaborada y
+      // enviada») → desde el 13-oct-2026 (invariante 60) «Pendiente de
+      // factura» / «No lleva factura» según los cobros; null = sin cobros.
+      // En lote (4 consultas por cada 200 vuelos, la de cobros paginada).
       etiquetasFacturaDeVuelos(sb, vueloIds),
       // "Otros gastos" del mes: los sueltos SIN vuelo de siempre (pensión,
       // cera, nómina, etc.) MÁS, desde el 11-sep-2026, todos los de

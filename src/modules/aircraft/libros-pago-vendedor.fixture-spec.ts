@@ -2,6 +2,7 @@ import type {
   BalanceHojaOtrosMovimientosPayload,
   DineroXlsxPayload,
 } from '../pyservices/pyservices.service';
+import { ETIQUETA_FACTURA_NO_LLEVA } from '../flights/factura-cliente.util';
 
 /**
  * MUNDO DE LOS LIBROS para los specs de la COMISIÓN DEL VENDEDOR como gasto
@@ -402,7 +403,9 @@ export const INGRESOS_LIBROS: Fila[] = [
  * (código 0.0.38) llevaba «pago comisión vendedor (Vendedor Uno) · PROVISIÓN
  * (mismo monto que lo cobrado: comisión + IVA; sin gasto real capturado) =
  * $1,600.00» (egreso 3,450, remanente 1,150). La hoja viaja con la bandera
- * `sin_provision_vendedor: true` AL FINAL.
+ * `sin_provision_vendedor: true` AL FINAL. Desde el 13-oct-2026
+ * (invariante 60) la columna `factura` del #501 dice «No lleva factura»:
+ * tiene dos cobros sin cuenta ni método (ninguno exige factura).
  */
 export const GOLDEN_OM = {
   filas: [
@@ -411,7 +414,7 @@ export const GOLDEN_OM = {
       avion_color: '#3B82F6',
       estado: 'COMPLETADO',
       fecha_vuelo: '2026-09-10',
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
       concepto_ingreso:
         'comisión vendedor + TUAs con IVA · 2 conceptos (ver nota)',
       ingreso_mxn: 4600,
@@ -501,7 +504,7 @@ export const GOLDEN_DINERO = {
       ],
       total_cobros_mxn: 40000,
       me_deben_mxn: 4600,
-      factura_vuelatour: null,
+      factura_vuelatour: ETIQUETA_FACTURA_NO_LLEVA,
       participacion: 1,
       multi_avion: false,
     },
@@ -518,7 +521,7 @@ export const GOLDEN_DINERO = {
       ingreso_mxn: 2000,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 500,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
       clave: 'vtleticia',
@@ -531,7 +534,7 @@ export const GOLDEN_DINERO = {
       ingreso_mxn: 1000,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 1000,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
     {
       clave: 'vtleticia',
@@ -545,7 +548,7 @@ export const GOLDEN_DINERO = {
       ingreso_mxn: 1600,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 0,
-      factura: null,
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
   ],
   otros_gastos: [

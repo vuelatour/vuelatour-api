@@ -215,6 +215,7 @@ function consultaFallida(error: ErrorPostgrest) {
   const q: Record<string, unknown> = {
     in: () => q,
     order: () => q,
+    range: () => q,
     then: (res: (v: unknown) => unknown, rej?: (e: unknown) => unknown) =>
       Promise.resolve({ data: null, error }).then(res, rej),
   };
@@ -230,6 +231,12 @@ function supabaseCon(mundo: Record<string, Fila[]>, opts: OpcionesCobro = {}) {
     if (tabla === 'cobro_vuelo') {
       const selectOriginal = q.select as (cols?: string) => unknown;
       q.select = (cols?: string) => {
+        // La lectura PAGINADA de la columna FACTURA VUELATOUR (13-oct-2026,
+        // invariante 60: `id, vuelo_id, monto, cuenta_destino, metodo_cobro`,
+        // sin `registrado_por`) no es la de los cobros del libro: ni se
+        // cuenta ni se le inyecta el error.
+        if (!(cols ?? '').includes('registrado_por'))
+          return selectOriginal(cols);
         selectsCobro.push(cols ?? '');
         const falla = (cols ?? '').includes('registro:')
           ? opts.errorEmbed

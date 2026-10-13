@@ -1,11 +1,14 @@
 import {
   ESTATUS_FACTURA_CLIENTE,
   ETIQUETAS_FACTURA_CLIENTE,
+  ETIQUETA_FACTURA_NO_LLEVA,
+  ETIQUETA_FACTURA_PENDIENTE,
   LIMITE_ARCHIVO_FACTURA_BYTES,
   bloqueFacturaCliente,
   bloqueaBajarEstatus,
   estatusFacturaCliente,
   etiquetaEmitidasVigentes,
+  etiquetaFacturaRegistrada,
   etiquetaFacturaVuelo,
   extraerCfdiCompleto,
   nombreArchivoSeguro,
@@ -374,5 +377,77 @@ describe('etiquetaEmitidasVigentes + cascada del Excel', () => {
     expect(
       etiquetaFacturaVuelo({ vuelo: { factura_estatus: 'FACTURADO' } }),
     ).toBe('Facturado');
+  });
+
+  it('etiquetaFacturaRegistrada ≡ los pasos 1-4 de la cascada (sin cobros ni solicitud)', () => {
+    const vuelo = { factura_estatus: 'FACTURADO', factura_folio: 'LEG-1' };
+    expect(
+      etiquetaFacturaRegistrada({ cfdi: 'VT-1', emitidas: 'A-1', vuelo }),
+    ).toBe('VT-1');
+    expect(etiquetaFacturaRegistrada({ emitidas: 'A-1', vuelo })).toBe('A-1');
+    expect(etiquetaFacturaRegistrada({ vuelo })).toBe('LEG-1');
+    expect(
+      etiquetaFacturaRegistrada({
+        vuelo: { factura_estatus: 'ELABORADA_ENVIADA' },
+      }),
+    ).toBe('Factura elaborada y enviada');
+    expect(
+      etiquetaFacturaRegistrada({ vuelo: { factura_estatus: 'SIN_FACTURA' } }),
+    ).toBeNull();
+    expect(etiquetaFacturaRegistrada({})).toBeNull();
+  });
+
+  describe('paso 5 — lo que dicen los cobros (13-oct-2026, invariante 60)', () => {
+    it('la factura REGISTRADA gana a la exigencia y a la solicitud', () => {
+      expect(
+        etiquetaFacturaVuelo({
+          cfdi: 'VT-1',
+          exigencia: 'EXIGE',
+          solicitada: true,
+        }),
+      ).toBe('VT-1');
+      expect(
+        etiquetaFacturaVuelo({
+          vuelo: { factura_estatus: 'ELABORADA_ENVIADA' },
+          exigencia: 'EXIGE',
+        }),
+      ).toBe('Factura elaborada y enviada');
+    });
+
+    it('EXIGE ⇒ «Pendiente de factura»', () => {
+      expect(etiquetaFacturaVuelo({ exigencia: 'EXIGE' })).toBe(
+        ETIQUETA_FACTURA_PENDIENTE,
+      );
+      expect(
+        etiquetaFacturaVuelo({
+          vuelo: { factura_estatus: 'SIN_FACTURA' },
+          exigencia: 'EXIGE',
+          solicitada: false,
+        }),
+      ).toBe('Pendiente de factura');
+    });
+
+    it('solicitud VIVA ⇒ «Pendiente de factura» aunque no exija o no haya cobros (refinamiento documentado)', () => {
+      expect(
+        etiquetaFacturaVuelo({ exigencia: 'NO_EXIGE', solicitada: true }),
+      ).toBe(ETIQUETA_FACTURA_PENDIENTE);
+      expect(
+        etiquetaFacturaVuelo({ exigencia: 'SIN_COBROS', solicitada: true }),
+      ).toBe(ETIQUETA_FACTURA_PENDIENTE);
+    });
+
+    it('NO_EXIGE ⇒ «No lleva factura»; SIN_COBROS o sin insumos ⇒ null (idéntico a antes)', () => {
+      expect(etiquetaFacturaVuelo({ exigencia: 'NO_EXIGE' })).toBe(
+        ETIQUETA_FACTURA_NO_LLEVA,
+      );
+      expect(
+        etiquetaFacturaVuelo({ exigencia: 'NO_EXIGE', solicitada: false }),
+      ).toBe('No lleva factura');
+      expect(etiquetaFacturaVuelo({ exigencia: 'SIN_COBROS' })).toBeNull();
+      expect(
+        etiquetaFacturaVuelo({ vuelo: { factura_estatus: 'SIN_FACTURA' } }),
+      ).toBeNull();
+      expect(etiquetaFacturaVuelo({})).toBeNull();
+    });
   });
 });

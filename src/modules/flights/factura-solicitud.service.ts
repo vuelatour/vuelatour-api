@@ -13,9 +13,20 @@ import {
 } from '../../common/factura-emitida-disponible.util';
 import { fetchNombresUsuarios } from '../../common/registrado-por.util';
 import {
+  cobroExigeFactura,
+  origenCobroTexto,
+  type CobroExigeFacturaRow,
+} from '../../common/cuentas-cobro';
+import {
+  facturasDeVuelos,
+  type FacturaDeVuelo,
+} from './factura-cliente-etiquetas';
+import {
   COLS_FACTURA_LIGADA,
   COLS_SOLICITUD_FACTURA,
   bloqueFacturaServicio,
+  folios,
+  notaSolicitudAutomatica,
   resumenFacturaServicio,
   textoAvisoSolicitud,
   type FacturaLigadaRow,
@@ -56,6 +67,40 @@ export interface ActorSolicitud {
   nombre?: string | null;
 }
 
+/**
+ * SOLICITUD AUTOMÁTICA por un cobro que exige factura (13-oct-2026,
+ * invariante 60): los vuelos (uno, o los hijos con parte > 0 de un sobre),
+ * el cobro/sobre que la dispara (`cuenta_destino`/`metodo_cobro`/`monto`) y
+ * quién lo registró (queda como solicitante).
+ */
+export interface SolicitudPorCobro {
+  vueloIds: string[];
+  cobro: CobroExigeFacturaRow;
+  actorId: string;
+  cobroId?: string | null;
+  cobroGrupoId?: string | null;
+}
+
+export interface ResultadoSolicitudPorCobro {
+  /** Folios con solicitud NUEVA (los que ENTRARON al CAS). */
+  solicitados: number[];
+  /** Nombres a quienes se persistió la notificación. */
+  notificados: string[];
+  /** Por qué no se pidió nada (ausente cuando sí se pidió). */
+  motivo?: 'NO_EXIGE' | 'NO_DISPONIBLE' | 'SIN_CANDIDATOS' | 'FALLO';
+}
+
+/** Por qué un vuelo NO recibe la solicitud automática (para la bitácora). */
+function motivoSinSolicitud(
+  v: VueloSolicitudRow,
+  f: FacturaDeVuelo | undefined,
+): string {
+  if (v.estado === 'CANCELADO') return 'cancelado';
+  if (f?.registrada) return `ya tiene factura «${f.registrada}»`;
+  if (v.factura_solicitada_at) return 'solicitud viva';
+  return 'sin factura leída';
+}
+
 function lotes<T>(arr: ReadonlyArray<T>): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += LOTE_IDS) {
@@ -73,6 +118,13 @@ function lotes<T>(arr: ReadonlyArray<T>): T[][] {
  * `FacturasEmitidasService`); NO inyecta `FlightsService` (sin ciclos).
  * Sin la migración 20260924000003: bloques `null`/mapa vacío y la
  * solicitud responde 503 `FACTURAS_EMITIDAS_NO_DISPONIBLE`.
+ *
+ * Desde el 13-oct-2026 (invariante 60) también la SOLICITUD AUTOMÁTICA por
+ * un cobro que exige factura (`solicitarPorCobro`): la MISMA vía que
+ * «Necesito factura» —mismas 4 columnas, mismo CAS, mismo aviso y link— con
+ * origen automático (nota «Solicitada automáticamente: cobro en HSBC
+ * Pesos», `data.origen = 'COBRO'`). Nunca lanza, nunca 503: un cobro ya
+ * registrado jamás falla por esto.
  */
 @Injectable()
 export class FacturaSolicitudService {
@@ -368,6 +420,134 @@ export class FacturaSolicitudService {
     };
   }
 
+  /**
+   * SOLICITUD AUTOMÁTICA por un cobro que EXIGE factura (13-oct-2026,
+   * invariante 60): la MISMA vía que «Necesito factura» (mismas 4 columnas,
+   * mismo CAS `.is('factura_solicitada_at', null)` con `.select('id,
+   * folio')`, mismo aviso a `destinatariosFacturacion(actorId)` que excluye
+   * al actor, mismo link `#por-facturar`), con origen automático. JAMÁS
+   * lanza: el cobro ya quedó registrado y un fallo aquí no lo revierte ni
+   * responde 5xx (un 5xx dispararía el reintento del outbox de la app y
+   * duplicaría dinero). IDEMPOTENTE: solo entran los vuelos sin factura
+   * registrada (CFDI vivo, emitida VIGENTE, folio o estatus manual), sin
+   * solicitud viva y no CANCELADOS; los demás se omiten sin tocar su nota.
+   * Sin la migración 20260924000003 es un no-op con log (nunca 503). Deja
+   * bitácora en el log de cada decisión.
+   */
+  async solicitarPorCobro(
+    p: SolicitudPorCobro,
+  ): Promise<ResultadoSolicitudPorCobro> {
+    const vacio = (
+      motivo: ResultadoSolicitudPorCobro['motivo'],
+    ): ResultadoSolicitudPorCobro => ({
+      solicitados: [],
+      notificados: [],
+      motivo,
+    });
+    const idCobro = p.cobroGrupoId
+      ? `sobre ${p.cobroGrupoId}`
+      : (p.cobroId ?? '?');
+    try {
+      if (!cobroExigeFactura(p.cobro)) return vacio('NO_EXIGE');
+      if (!(await this.disponible())) {
+        this.logger.log(
+          'Solicitud automática de factura omitida: sin la migración 20260924000003 no hay bandeja «Por facturar»',
+        );
+        return vacio('NO_DISPONIBLE');
+      }
+      const ids = [...new Set(p.vueloIds.filter(Boolean))];
+      if (ids.length === 0) return vacio('SIN_CANDIDATOS');
+      const sb = this.supabase.service;
+      const origen = origenCobroTexto(p.cobro);
+      const [filasRes, facturas] = await Promise.all([
+        sb.from('vuelo').select(COLS_VUELO_SOLICITUD).in('id', ids),
+        facturasDeVuelos(sb, ids),
+      ]);
+      if (filasRes.error) throw new Error(filasRes.error.message);
+      const filas = (filasRes.data ?? []) as unknown as VueloSolicitud[];
+      const candidatos = filas.filter(
+        (v) =>
+          v.estado !== 'CANCELADO' &&
+          !v.factura_solicitada_at &&
+          facturas.get(v.id)?.registrada == null,
+      );
+      if (candidatos.length === 0) {
+        const motivos = filas.map(
+          (v) => `#${v.folio}: ${motivoSinSolicitud(v, facturas.get(v.id))}`,
+        );
+        this.logger.log(
+          `Solicitud automática de factura: nada que pedir para vuelo(s) ${folios(filas.map((v) => Number(v.folio)))} (cobro ${idCobro} ${origen}): ${motivos.join('; ') || 'sin vuelos'}`,
+        );
+        return vacio('SIN_CANDIDATOS');
+      }
+      // UN update con el MISMO CAS de `solicitar`: los que ENTRARON son los
+      // únicos que se avisan (una carrera deja fuera a alguno sin re-aviso).
+      const ahora = new Date().toISOString();
+      const { data, error } = await sb
+        .from('vuelo')
+        .update({
+          factura_solicitada_at: ahora,
+          factura_solicitada_por: p.actorId,
+          factura_solicitud_nota: notaSolicitudAutomatica(origen),
+          factura_paga_contra_factura: false,
+          updated_by: p.actorId,
+        })
+        .in(
+          'id',
+          candidatos.map((v) => v.id),
+        )
+        .is('factura_solicitada_at', null)
+        .select('id, folio');
+      if (error) throw new Error(error.message);
+      const nuevos = (
+        (data ?? []) as Array<{ id: string; folio: unknown }>
+      ).map((r) => ({ id: r.id, folio: Number(r.folio) }));
+      if (nuevos.length === 0) return vacio('SIN_CANDIDATOS');
+      const vuelosNuevos = candidatos.filter((v) =>
+        nuevos.some((n) => n.id === v.id),
+      );
+      // Folio del grupo SOLO si los nuevos son hermanos (sobre de grupo).
+      let grupoFolio: number | null = null;
+      let grupoId: string | null = null;
+      const grupos = new Set(vuelosNuevos.map((v) => v.grupo_id ?? null));
+      if (vuelosNuevos.length > 1 && grupos.size === 1) {
+        const [g] = [...grupos];
+        if (g) {
+          grupoId = g;
+          const { data: grupo } = await sb
+            .from('vuelo_grupo')
+            .select('id, folio')
+            .eq('id', g)
+            .maybeSingle();
+          const gf = (grupo as { folio?: unknown } | null)?.folio;
+          grupoFolio = gf == null ? null : Number(gf);
+        }
+      }
+      const notificados = await this.avisarSolicitud(vuelosNuevos, {
+        actor: { userId: p.actorId },
+        grupoFolio,
+        grupoId,
+        pagaContraFactura: false,
+        nota: null,
+        automatica: {
+          origen,
+          cobroId: p.cobroId ?? null,
+          cobroGrupoId: p.cobroGrupoId ?? null,
+        },
+      });
+      const solicitados = nuevos.map((n) => n.folio).sort((a, b) => a - b);
+      this.logger.log(
+        `Solicitud automática de factura: vuelo(s) ${folios(solicitados)} por cobro ${idCobro} ${origen} (registró ${p.actorId}); aviso a: ${notificados.join(', ') || 'nadie'}`,
+      );
+      return { solicitados, notificados };
+    } catch (e) {
+      this.logger.warn(
+        `Solicitud automática de factura falló (el cobro ${idCobro} quedó registrado): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return vacio('FALLO');
+    }
+  }
+
   private async avisarSolicitud(
     vuelos: VueloSolicitud[],
     p: {
@@ -376,6 +556,12 @@ export class FacturaSolicitudService {
       grupoId: string | null;
       pagaContraFactura: boolean;
       nota: string | null;
+      /** Solicitud automática por un cobro (invariante 60): origen y liga. */
+      automatica?: {
+        origen: string;
+        cobroId: string | null;
+        cobroGrupoId: string | null;
+      };
     },
   ): Promise<string[]> {
     try {
@@ -409,11 +595,23 @@ export class FacturaSolicitudService {
         grupoFolio: ordenados.length > 1 ? p.grupoFolio : null,
         pagaContraFactura: p.pagaContraFactura,
         nota: p.nota,
+        ...(p.automatica
+          ? { automatica: { origen: p.automatica.origen } }
+          : {}),
       });
       const data: Record<string, unknown> = {
         vuelo_id: primero.id,
         folio: primero.folio,
         paga_contra_factura: p.pagaContraFactura,
+        // Llaves ADITIVAS de la solicitud automática (la app ignora `data`
+        // que no conoce).
+        ...(p.automatica
+          ? {
+              origen: 'COBRO',
+              cobro_id: p.automatica.cobroId,
+              cobro_grupo_id: p.automatica.cobroGrupoId,
+            }
+          : {}),
       };
       if (ordenados.length > 1) {
         data.vuelo_ids = ordenados.map((v) => v.id);

@@ -11,6 +11,7 @@ import {
 } from '../../common/avion-ocupado.util';
 import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd } from '../../common/cobros-usd.util';
+import { cobroExigeFactura } from '../../common/cuentas-cobro';
 import { normalizarTc } from '../../common/tc.util';
 import { horasPactadasPersistidas } from '../../common/horas.util';
 import { tarifaPersistida } from '../../common/tarifa.util';
@@ -86,6 +87,7 @@ import {
   ParticionCobroError,
   particionCobroGrupo,
   semaforoCobroGrupo,
+  vuelosConParteCobrada,
   type HijoParticionCobro,
   type ParticionCobroResult,
   type SemaforoCobro,
@@ -3520,6 +3522,44 @@ export class GroupsService {
   }
 
   /**
+   * FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, invariante 60):
+   * un sobre que cae en HSBC/Scotiabank (o por transferencia, link HSBC o
+   * cheque sin cuenta) pide la factura del servicio de los hijos con parte
+   * > 0 — UNA vez por sobre (las partes se crean con `silenciarPush` y no
+   * disparan nada; no se usa `todo_el_grupo`: avisaría a hermanos sin
+   * dinero) — por la puerta única `FlightsService.solicitarFacturaPorCobros`
+   * (la MISMA vía que «Necesito factura»). Best-effort: un fallo NUNCA
+   * revierte el sobre ni calla el aviso `cobro_registrado`.
+   */
+  private async solicitarFacturaPorSobre(
+    cab: CabeceraRow,
+    sobre: SobreRow,
+    partes: ReadonlyArray<{ vuelo_id: string; monto: number }>,
+    userId: string,
+  ): Promise<void> {
+    const vueloIds = vuelosConParteCobrada(partes);
+    if (vueloIds.length === 0) return;
+    const cobro = {
+      monto: sobre.monto,
+      cuenta_destino: sobre.cuenta_destino,
+      metodo_cobro: sobre.metodo_cobro,
+    };
+    if (!cobroExigeFactura(cobro)) return;
+    try {
+      await this.flights.solicitarFacturaPorCobros({
+        vueloIds,
+        cobro,
+        actorId: userId,
+        cobroGrupoId: sobre.id,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Sobre ${sobre.id} del grupo G-${cab.folio}: la solicitud automática de factura falló (el sobre quedó registrado): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
    * Revierte un sobre a medio escribir: partes + sobre (best-effort, con
    * log). Devuelve `true` solo si NO quedó nada en BD — el mensaje al
    * operador depende de eso (jamás decir "no se guardó nada" en falso).
@@ -3683,6 +3723,9 @@ export class GroupsService {
           : `No se pudo registrar el cobro del grupo G-${cab.folio}: ${msg}. El sobre quedó a medias: revísalo en Cobros del grupo (elimínalo o re-pártelo) antes de volver a capturarlo.`,
       );
     }
+    // Factura obligatoria por cuenta de cobro (invariante 60): UNA vez por
+    // sobre, DESPUÉS de escribir las partes y ANTES del aviso de cobro.
+    await this.solicitarFacturaPorSobre(cab, sobre, p.partes, userId);
     // UN aviso por sobre (no uno por avión), a quien hoy recibe cobro_registrado.
     const n = p.partes.length;
     this.flights.notificarCobroRegistrado(
@@ -3825,6 +3868,14 @@ export class GroupsService {
     // Los hijos que RECIBIERON parte ya se refrescaron en createCobro; los
     // que la PERDIERON (cancelados) se refrescan aquí.
     await this.refrescarCobrado(vuelosViejos, userId);
+    // Factura obligatoria por cuenta de cobro (invariante 60): la repartición
+    // puede dar dinero a un hijo que tenía 0; idempotente para los demás.
+    await this.solicitarFacturaPorSobre(
+      cab,
+      sobre,
+      prep.particion.partes,
+      userId,
+    );
     const avisos = [...prep.avisos];
     if (prep.particion.modo_particion !== sobre.modo_particion) {
       avisos.push(

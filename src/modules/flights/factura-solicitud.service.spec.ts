@@ -2,7 +2,7 @@ jest.mock('../realtime/notifications.service', () => ({
   NotificationsService: class {},
 }));
 
-import { HttpException } from '@nestjs/common';
+import { HttpException, Logger } from '@nestjs/common';
 import { FacturaSolicitudService } from './factura-solicitud.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { NotificationsService } from '../realtime/notifications.service';
@@ -100,6 +100,7 @@ function fakeDb(
     };
     q.limit = () => q;
     q.order = () => q;
+    q.range = () => q;
     q.maybeSingle = () => {
       const r = ejecutar();
       return Promise.resolve({
@@ -365,6 +366,260 @@ describe('FacturaSolicitudService.retirar y lectores', () => {
       por_facturar: false,
       paga_contra_factura: false,
       facturas: 1,
+    });
+  });
+});
+
+describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)', () => {
+  const HSBC = {
+    monto: 8050.4,
+    cuenta_destino: 'HSBC Pesos',
+    metodo_cobro: 'TRANSFERENCIA',
+  };
+
+  it('crea la solicitud con la nota exacta, el actor como solicitante, paga=false, UN aviso con data.origen COBRO y cobro_id; excluye al actor', async () => {
+    const { svc, db, notifyUser, destinatariosFacturacion } = armar({
+      vuelo: [vuelo(V1, 341)],
+    });
+    const r = await svc.solicitarPorCobro({
+      vueloIds: [V1],
+      cobro: HSBC,
+      actorId: ITZI,
+      cobroId: 'c-1',
+    });
+    expect(r).toEqual({ solicitados: [341], notificados: ['Mary Cruz'] });
+    expect(db.tablas.vuelo[0]).toMatchObject({
+      factura_solicitada_por: ITZI,
+      factura_solicitud_nota: 'Solicitada automáticamente: cobro en HSBC Pesos',
+      factura_paga_contra_factura: false,
+      updated_by: ITZI,
+    });
+    expect(typeof db.tablas.vuelo[0].factura_solicitada_at).toBe('string');
+    const upd = db.updates.filter((u) => u.tabla === 'vuelo');
+    expect(upd).toHaveLength(1);
+    expect(upd[0].ids).toEqual([V1]);
+    expect(destinatariosFacturacion).toHaveBeenCalledWith(ITZI);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(notifyUser).toHaveBeenCalledWith(MARY, {
+      tipo: 'factura_solicitada',
+      titulo: 'Factura pendiente: vuelo #341',
+      cuerpo:
+        'Cobro en HSBC Pesos registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep · Total $8,050.40 USD.',
+      link: `/admin/facturas-emitidas?resaltar=${V1}#por-facturar`,
+      data: {
+        vuelo_id: V1,
+        folio: 341,
+        paga_contra_factura: false,
+        origen: 'COBRO',
+        cobro_id: 'c-1',
+        cobro_grupo_id: null,
+      },
+    });
+  });
+
+  it('IDEMPOTENTE: la segunda llamada no escribe ni re-avisa (SIN_CANDIDATOS)', async () => {
+    const { svc, db, notifyUser } = armar({ vuelo: [vuelo(V1, 341)] });
+    await svc.solicitarPorCobro({ vueloIds: [V1], cobro: HSBC, actorId: ITZI });
+    const r = await svc.solicitarPorCobro({
+      vueloIds: [V1],
+      cobro: HSBC,
+      actorId: MARY,
+      cobroId: 'c-2',
+    });
+    expect(r).toEqual({
+      solicitados: [],
+      notificados: [],
+      motivo: 'SIN_CANDIDATOS',
+    });
+    expect(db.updates.filter((u) => u.tabla === 'vuelo')).toHaveLength(1);
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    expect(db.tablas.vuelo[0].factura_solicitada_por).toBe(ITZI);
+  });
+
+  it('vuelo con solicitud PREVIA («Necesito factura») ⇒ nota intacta y 0 avisos', async () => {
+    const { svc, db, notifyUser } = armar({
+      vuelo: [
+        vuelo(V1, 341, {
+          factura_solicitada_at: '2026-09-20T10:00:00Z',
+          factura_solicitada_por: MARY,
+          factura_solicitud_nota: 'Lo pide para pagar',
+          factura_paga_contra_factura: true,
+        }),
+      ],
+    });
+    const r = await svc.solicitarPorCobro({
+      vueloIds: [V1],
+      cobro: HSBC,
+      actorId: ITZI,
+    });
+    expect(r.motivo).toBe('SIN_CANDIDATOS');
+    expect(db.updates).toHaveLength(0);
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(db.tablas.vuelo[0]).toMatchObject({
+      factura_solicitada_por: MARY,
+      factura_solicitud_nota: 'Lo pide para pagar',
+      factura_paga_contra_factura: true,
+    });
+  });
+
+  it('con factura REGISTRADA (emitida VIGENTE / CFDI / folio / estatus FACTURADO) o CANCELADO ⇒ nada que pedir', async () => {
+    const emitida = {
+      id: 'f-1',
+      serie: 'A',
+      folio: '0424',
+      folio_num: 424,
+      uuid: null,
+      fecha_emision: '2026-09-24',
+      estatus: 'VIGENTE',
+      total: '8050.40',
+      moneda: 'USD',
+      metodo_pago: 'PPD',
+      pdf_path: 'emitidas/f-1/a.pdf',
+      xml_path: null,
+      deleted_at: null,
+    };
+    const casos: Array<[string, Record<string, Fila[]>]> = [
+      [
+        'emitida VIGENTE',
+        {
+          vuelo: [vuelo(V1, 341)],
+          factura_emitida: [emitida],
+          factura_emitida_vuelo: [{ factura_id: 'f-1', vuelo_id: V1 }],
+        },
+      ],
+      [
+        'CFDI vivo',
+        {
+          vuelo: [vuelo(V1, 341, { facturado: true })],
+          factura: [
+            { vuelo_id: V1, serie: 'VT', folio: '5', estado: 'TIMBRADA' },
+          ],
+        },
+      ],
+      ['folio tecleado', { vuelo: [vuelo(V1, 341, { factura_folio: 'A-1' })] }],
+      [
+        'estatus FACTURADO',
+        { vuelo: [vuelo(V1, 341, { factura_estatus: 'FACTURADO' })] },
+      ],
+      ['CANCELADO', { vuelo: [vuelo(V1, 341, { estado: 'CANCELADO' })] }],
+    ];
+    for (const [nombre, datos] of casos) {
+      const { svc, db, notifyUser } = armar(datos);
+      const r = await svc.solicitarPorCobro({
+        vueloIds: [V1],
+        cobro: HSBC,
+        actorId: ITZI,
+      });
+      expect([nombre, r]).toEqual([
+        nombre,
+        { solicitados: [], notificados: [], motivo: 'SIN_CANDIDATOS' },
+      ]);
+      expect([nombre, db.updates.length]).toEqual([nombre, 0]);
+      expect([nombre, notifyUser.mock.calls.length]).toEqual([nombre, 0]);
+      expect([nombre, db.tablas.vuelo[0].factura_solicitada_at]).toEqual([
+        nombre,
+        null,
+      ]);
+    }
+  });
+
+  it('cobro que NO exige (BillPocket) ⇒ NO_EXIGE sin tocar la BD', async () => {
+    const { svc, db, notifyUser } = armar({ vuelo: [vuelo(V1, 341)] });
+    const r = await svc.solicitarPorCobro({
+      vueloIds: [V1],
+      cobro: { monto: 100, metodo_cobro: 'BILLPOCKET' },
+      actorId: ITZI,
+    });
+    expect(r).toEqual({ solicitados: [], notificados: [], motivo: 'NO_EXIGE' });
+    expect(db.updates).toHaveLength(0);
+    expect(notifyUser).not.toHaveBeenCalled();
+    expect(db.tablas.vuelo[0].factura_solicitada_at).toBeNull();
+  });
+
+  it('sin la migración ⇒ NO_DISPONIBLE sin lanzar (nunca 503 desde un cobro)', async () => {
+    const { svc, db } = armar(
+      { vuelo: [vuelo(V1, 341)] },
+      { migracion: false },
+    );
+    await expect(
+      svc.solicitarPorCobro({ vueloIds: [V1], cobro: HSBC, actorId: ITZI }),
+    ).resolves.toEqual({
+      solicitados: [],
+      notificados: [],
+      motivo: 'NO_DISPONIBLE',
+    });
+    expect(db.updates).toHaveLength(0);
+  });
+
+  it('un fallo de la BD ⇒ resuelve FALLO con warn (jamás rechaza)', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const { svc, db } = armar({ vuelo: [vuelo(V1, 341)] });
+      const servicio = db.supabase.service as unknown as {
+        from: (t: string) => unknown;
+      };
+      const original = servicio.from;
+      servicio.from = (t: string) => {
+        if (t === 'cobro_vuelo') throw new Error('timeout');
+        return original(t);
+      };
+      await expect(
+        svc.solicitarPorCobro({
+          vueloIds: [V1],
+          cobro: HSBC,
+          actorId: ITZI,
+          cobroId: 'c-9',
+        }),
+      ).resolves.toEqual({ solicitados: [], notificados: [], motivo: 'FALLO' });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Solicitud automática de factura falló (el cobro c-9 quedó registrado): timeout',
+        ),
+      );
+      expect(db.updates).toHaveLength(0);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('dos vuelos de un SOBRE ⇒ UN update y UNA notificación por destinatario con «grupo G-12» y cobro_grupo_id', async () => {
+    const { svc, db, notifyUser } = armar({
+      vuelo: [
+        vuelo(V1, 341, { grupo_id: G }),
+        vuelo(V2, 342, { grupo_id: G }),
+        vuelo(V3, 343, { grupo_id: G }),
+      ],
+      vuelo_grupo: [{ id: G, folio: 12 }],
+    });
+    const r = await svc.solicitarPorCobro({
+      vueloIds: [V1, V2],
+      cobro: HSBC,
+      actorId: ITZI,
+      cobroGrupoId: 'sg-1',
+    });
+    expect(r).toEqual({ solicitados: [341, 342], notificados: ['Mary Cruz'] });
+    const upd = db.updates.filter((u) => u.tabla === 'vuelo');
+    expect(upd).toHaveLength(1);
+    expect([...upd[0].ids].sort()).toEqual([V1, V2].sort());
+    // El hermano sin parte (V3) no se toca.
+    expect(db.tablas.vuelo[2].factura_solicitada_at).toBeNull();
+    expect(notifyUser).toHaveBeenCalledTimes(1);
+    const [, n] = notifyUser.mock.calls[0] as [string, Fila];
+    expect(n.titulo).toBe('Factura pendiente: grupo G-12');
+    expect(n.cuerpo).toBe(
+      'Cobro en HSBC Pesos registrado por Itzi: los vuelos #341 y #342 (grupo G-12) necesitan factura · Maqar · 27 sep.',
+    );
+    expect(n.data).toEqual({
+      vuelo_id: V1,
+      folio: 341,
+      paga_contra_factura: false,
+      vuelo_ids: [V1, V2],
+      grupo_id: G,
+      origen: 'COBRO',
+      cobro_id: null,
+      cobro_grupo_id: 'sg-1',
     });
   });
 });

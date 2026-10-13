@@ -938,8 +938,19 @@ describe('Balance — COMISIONES: revisión 6-oct-2026', () => {
       true,
     );
     expect(g.consolidado).not.toHaveProperty('sin_provision_vendedor');
-    expect((await libro(mundoNoRealizados())).sin_provision_vendedor).toBe(
-      true,
+    const individual = await libro(mundoNoRealizados());
+    expect(individual.sin_provision_vendedor).toBe(true);
+    // FACTURA VUELATOUR según los cobros (13-oct-2026, invariante 60): la
+    // bandera raíz viaja en el individual, en cada `aviones[]` Y en el
+    // consolidado FLOTA (a diferencia de `sin_provision_vendedor`); la
+    // pestaña «otros movimientos» no la lleva.
+    expect(individual.factura_vuelatour_segun_cobros).toBe(true);
+    expect(
+      g.aviones.every((a) => a.factura_vuelatour_segun_cobros === true),
+    ).toBe(true);
+    expect(g.consolidado.factura_vuelatour_segun_cobros).toBe(true);
+    expect(g.consolidado.otros_movimientos).not.toHaveProperty(
+      'factura_vuelatour_segun_cobros',
     );
   });
 

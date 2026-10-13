@@ -11,6 +11,10 @@ jest.mock('../tipo-cambio/tipo-cambio.service', () => ({
 }));
 
 import { AircraftBalanceService } from './aircraft-balance.service';
+import {
+  ETIQUETA_FACTURA_NO_LLEVA,
+  ETIQUETA_FACTURA_PENDIENTE,
+} from '../flights/factura-cliente.util';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type {
   BalanceAvionPayload,
@@ -199,7 +203,7 @@ function mundoFacturas(): Record<string, Fila[]> {
  */
 function supabaseCon(
   mundo: Record<string, Fila[]>,
-  opts: { fallaFactura?: boolean } = {},
+  opts: { fallaFactura?: boolean; fallaCobros?: boolean } = {},
 ) {
   const base = fakeSupabase(mundo);
   const lotesFactura: string[][] = [];
@@ -222,6 +226,23 @@ function supabaseCon(
           }).then(res, rej);
       }
     }
+    // `fallaCobros`: falla SOLO la lectura PAGINADA de `cobro_vuelo` de la
+    // columna FACTURA VUELATOUR (la de los cobros del libro sigue viva).
+    if (tabla === 'cobro_vuelo' && opts.fallaCobros) {
+      const rangeOriginal = q.range as (a: number, b: number) => unknown;
+      q.range = (a: number, b: number) => {
+        rangeOriginal(a, b);
+        q.then = (
+          res: (v: unknown) => unknown,
+          rej?: (e: unknown) => unknown,
+        ) =>
+          Promise.resolve({
+            data: null,
+            error: { code: '57014', message: 'statement timeout' },
+          }).then(res, rej);
+        return q;
+      };
+    }
     return q;
   };
   return { supabase: { service: { from } }, lotesFactura };
@@ -229,7 +250,7 @@ function supabaseCon(
 
 function armar(
   mundo: Record<string, Fila[]>,
-  opts: { fallaFactura?: boolean } = {},
+  opts: { fallaFactura?: boolean; fallaCobros?: boolean } = {},
 ) {
   const s = supabaseCon(mundo, opts);
   const enviados: { individual?: BalanceAvionPayload; general?: unknown } = {};
@@ -283,13 +304,13 @@ describe('Balance por avión — columna «FACTURA VUELATOUR» en la hoja princi
     expect(cancelado.factura_vuelatour).toBe('B-77');
   });
 
-  it('libro sin facturas: la clave viaja en TODAS las filas, en null', async () => {
+  it('libro sin facturas: la clave viaja en TODAS las filas; el #501 (cobros sin cuenta ni método) dice «No lleva factura»', async () => {
     const { service, enviados } = armar(mundoLibros());
     await service.xlsx(AV, DESDE, HASTA);
     const p = enviados.individual!;
     expect(p.vuelos.length).toBeGreaterThan(0);
     for (const f of p.vuelos) {
-      expect(f).toHaveProperty('factura_vuelatour', null);
+      expect(f).toHaveProperty('factura_vuelatour', ETIQUETA_FACTURA_NO_LLEVA);
     }
   });
 
@@ -308,7 +329,13 @@ describe('Balance por avión — columna «FACTURA VUELATOUR» en la hoja princi
     await sin.service.xlsx(AV, DESDE, HASTA);
     const pCon = con.enviados.individual!;
     const pSin = sin.enviados.individual!;
-    expect(pSin.vuelos.every((f) => f.factura_vuelatour === null)).toBe(true);
+    // Sin facturas registradas: #501 (con cobros sin cuenta ni método) «No
+    // lleva factura»; #503 y #502 (sin cobros) vacíos (invariante 60).
+    expect(pSin.vuelos.map((f) => [f.folio, f.factura_vuelatour])).toEqual([
+      ['501', ETIQUETA_FACTURA_NO_LLEVA],
+      ['503', null],
+      ['502', null],
+    ]);
     const quitar = (p: BalanceAvionPayload) =>
       sinSello({
         ...p,
@@ -514,14 +541,108 @@ describe('Balance GENERAL — «FACTURA VUELATOUR» en la hoja principal consoli
     expect(new Set(pedidos).size).toBe(pedidos.length);
   });
 
-  it('general sin facturas: todas las filas de la hoja principal en null', async () => {
+  it('general sin facturas: todas las filas de la hoja principal con «No lleva factura» (el #501 tiene cobros que no exigen)', async () => {
     const { service, enviados } = armar(mundoLibros());
     await service.xlsxGeneral(DESDE, HASTA);
     const g = enviados.general as General;
     expect(g.consolidado.vuelos.length).toBeGreaterThan(0);
     for (const f of g.consolidado.vuelos) {
-      expect(f).toHaveProperty('factura_vuelatour', null);
+      expect(f).toHaveProperty('factura_vuelatour', ETIQUETA_FACTURA_NO_LLEVA);
     }
+  });
+});
+
+describe('paso 5 — «FACTURA VUELATOUR» según los COBROS (13-oct-2026, invariante 60)', () => {
+  /**
+   * El mundo de las facturas SIN ninguna factura registrada + un cobro en
+   * HSBC Pesos del #503 (multi-avión). El #501 conserva sus dos cobros sin
+   * cuenta ni método; #502, #504 y #505 no tienen cobros.
+   */
+  function mundoCobros(): Record<string, Fila[]> {
+    const m = mundoFacturas();
+    m.factura = [];
+    m.factura_emitida_vuelo = [];
+    m.vuelo = m.vuelo.map((v) => ({
+      ...v,
+      factura_estatus: null,
+      factura_folio: null,
+    }));
+    m.cobro_vuelo = [
+      ...m.cobro_vuelo,
+      {
+        id: 'c-3',
+        vuelo_id: V3,
+        monto: 500,
+        moneda: 'USD',
+        tc_usd_mxn: 18,
+        fecha_cobro: '2026-09-15T16:00:00+00:00',
+        comision_banco_monto: null,
+        cuenta_destino: 'HSBC Pesos',
+        metodo_cobro: 'TRANSFERENCIA',
+      },
+    ];
+    return m;
+  }
+
+  it('libro individual: #501 «No lleva factura», #503 (cobro en HSBC Pesos) «Pendiente de factura», #502 (sin cobros) vacío; bandera raíz', async () => {
+    const { service, enviados } = armar(mundoCobros());
+    await service.xlsx(AV, DESDE, HASTA);
+    const p = enviados.individual!;
+    expect(p.vuelos.map((f) => [f.folio, f.factura_vuelatour])).toEqual([
+      ['501', ETIQUETA_FACTURA_NO_LLEVA],
+      ['503', ETIQUETA_FACTURA_PENDIENTE],
+      ['502', null],
+    ]);
+    expect(p.factura_vuelatour_segun_cobros).toBe(true);
+  });
+
+  it('general: la misma etiqueta en LOS DOS libros del multi-avión, en el consolidado y en «otros movimientos» (col J), con UNA lectura por vuelo; bandera en aviones[] y consolidado', async () => {
+    const { service, enviados, lotesFactura } = armar(mundoCobros());
+    await service.xlsxGeneral(DESDE, HASTA);
+    const g = enviados.general as General;
+    expect(
+      filasDe(g.consolidado.vuelos, V3).map((f) => f.factura_vuelatour),
+    ).toEqual([ETIQUETA_FACTURA_PENDIENTE, ETIQUETA_FACTURA_PENDIENTE]);
+    const porLibro = Object.fromEntries(
+      g.aviones.map((p) => [
+        p.matricula,
+        p.vuelos.map((f) => [f.folio, f.factura_vuelatour]),
+      ]),
+    );
+    expect(porLibro).toEqual({
+      'XB-DOS': [
+        ['503', ETIQUETA_FACTURA_PENDIENTE],
+        ['504', null],
+      ],
+      'XB-TST': [
+        ['501', ETIQUETA_FACTURA_NO_LLEVA],
+        ['503', ETIQUETA_FACTURA_PENDIENTE],
+        ['502', null],
+      ],
+    });
+    const om = g.consolidado.otros_movimientos!;
+    expect(om.filas.find((f) => f.clave.endsWith('501'))?.factura).toBe(
+      ETIQUETA_FACTURA_NO_LLEVA,
+    );
+    // Una sola lectura por vuelo (memo compartido con la pestaña).
+    expect(lotesFactura.map((l) => [...l].sort())).toEqual([
+      [V3, V4],
+      [V1, V2],
+      [V5],
+    ]);
+    // Bandera raíz: cada aviones[] y el consolidado; la pestaña no.
+    expect(
+      g.aviones.every((a) => a.factura_vuelatour_segun_cobros === true),
+    ).toBe(true);
+    expect(g.consolidado.factura_vuelatour_segun_cobros).toBe(true);
+    expect(om).not.toHaveProperty('factura_vuelatour_segun_cobros');
+  });
+
+  it('un fallo al leer `cobro_vuelo` (la 4.ª consulta) tumba el libro con contexto, jamás «sin cobros» en silencio', async () => {
+    const { service } = armar(mundoCobros(), { fallaCobros: true });
+    await expect(service.xlsx(AV, DESDE, HASTA)).rejects.toThrow(
+      'Balance XB-TST: fallo al leer facturas: statement timeout',
+    );
   });
 });
 

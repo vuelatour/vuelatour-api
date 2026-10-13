@@ -11,6 +11,7 @@ jest.mock('../tipo-cambio/tipo-cambio.service', () => ({
 }));
 
 import { AircraftBalanceService } from './aircraft-balance.service';
+import { ETIQUETA_FACTURA_NO_LLEVA } from '../flights/factura-cliente.util';
 import { DineroReportService } from '../profit-sharing/dinero-report.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type {
@@ -420,7 +421,9 @@ const GOLDEN_OM = {
       avion_color: '#3B82F6',
       estado: 'COMPLETADO',
       fecha_vuelo: '2026-09-10',
-      factura: null,
+      // 13-oct-2026 (invariante 60): dos cobros sin cuenta ni método ⇒
+      // ninguno exige factura.
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
       concepto_ingreso:
         'comisión vendedor + TUAs con IVA · 2 conceptos (ver nota)',
       ingreso_mxn: 4600,

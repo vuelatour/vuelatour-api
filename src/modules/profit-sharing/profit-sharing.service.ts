@@ -100,6 +100,16 @@ import {
   type VueloCompletadoSinGastoRow,
   type VueloSinGastoOperaciones,
 } from './vuelos-sin-gasto.util';
+import {
+  CLAVE_PRECIERRE_VUELOS_SIN_FACTURA,
+  DETALLE_PRECIERRE_VUELOS_SIN_FACTURA,
+  DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA,
+  TITULO_PRECIERRE_VUELOS_SIN_FACTURA,
+  vuelosCobradosSinFactura,
+  type VueloCobradoRow,
+  type VueloCobradoSinFactura,
+} from './vuelos-sin-factura.util';
+import { facturasDeVuelos } from '../flights/factura-cliente-etiquetas';
 
 /** Lecturas `in (…)` en lote: ids por consulta (URL acotada). */
 const LOTE_IDS = 200;
@@ -1869,7 +1879,9 @@ export class ProfitSharingService {
       // Vuelos del periodo que NO llegaron a COMPLETADO ni CANCELADO.
       sb
         .from('vuelo')
-        .select('id, folio, estado, fecha_vuelo')
+        // aeronave_id (13-oct-2026): matrícula del item
+        // vuelos_cobrados_sin_factura (invariante 60).
+        .select('id, folio, estado, fecha_vuelo, aeronave_id')
         .in('estado', [
           'SOLICITUD',
           'COTIZADO',
@@ -1900,7 +1912,9 @@ export class ProfitSharingService {
       // enumeran para que la oficina confirme que ese dinero es de verdad.
       sb
         .from('vuelo')
-        .select('id, folio, tc_usd_mxn, fecha_vuelo, fecha_solicitud')
+        .select(
+          'id, folio, tc_usd_mxn, fecha_vuelo, fecha_solicitud, aeronave_id',
+        )
         .eq('estado', 'CANCELADO')
         .gte('fecha_vuelo', desdeTs)
         .lte('fecha_vuelo', hastaTs),
@@ -2716,18 +2730,32 @@ export class ProfitSharingService {
     const matriculaPorAvion = new Map(
       (flotaPre ?? []).map((a) => [a.id as string, a.matricula as string]),
     );
-    const [seguimiento, itemsCuentasSocios, sinGastoOps] = await Promise.all([
-      this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
-      mesCierre && veeCuentasSocios
-        ? this.itemsCuentasSocios(mesCierre)
-        : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
-      this.vuelosSinGastoOperaciones(
-        candidatosSinGastoOperaciones(
-          completados as VueloCompletadoSinGastoRow[],
+    //
+    // VUELOS COBRADOS EN CUENTAS QUE EXIGEN FACTURA SIN FACTURA REGISTRADA
+    // (13-oct-2026, invariante 60): TODOS los vuelos del periodo que ya lee
+    // el pre-cierre (pendientes + completados + cancelados). Aviso NO
+    // bloqueante y best-effort: lectura caída ⇒ `null` ⇒ lectura_fallida.
+    const [seguimiento, itemsCuentasSocios, sinGastoOps, sinFactura] =
+      await Promise.all([
+        this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
+        mesCierre && veeCuentasSocios
+          ? this.itemsCuentasSocios(mesCierre)
+          : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
+        this.vuelosSinGastoOperaciones(
+          candidatosSinGastoOperaciones(
+            completados as VueloCompletadoSinGastoRow[],
+          ),
+          matriculaPorAvion,
         ),
-        matriculaPorAvion,
-      ),
-    ]);
+        this.vuelosCobradosSinFactura(
+          [
+            ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
+            ...(completados as VueloCobradoRow[]),
+            ...(cancelados as VueloCobradoRow[]),
+          ],
+          matriculaPorAvion,
+        ),
+      ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
@@ -2931,6 +2959,23 @@ export class ProfitSharingService {
         count: externosSinHonorario,
         vuelos: externosSinHonorarioVuelos,
       },
+      {
+        // FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, invariante
+        // 60): vuelos del periodo (cualquier estado) con algún cobro en
+        // HSBC/Scotiabank (o transferencia/link HSBC/cheque sin cuenta) y
+        // sin factura del servicio registrada. NO bloquea; la solicitud viva
+        // solo informa (`solicitada`).
+        clave: CLAVE_PRECIERRE_VUELOS_SIN_FACTURA,
+        titulo: TITULO_PRECIERRE_VUELOS_SIN_FACTURA,
+        detalle: sinFactura
+          ? DETALLE_PRECIERRE_VUELOS_SIN_FACTURA
+          : DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA,
+        count: sinFactura?.length ?? 0,
+        // {id, folio, fecha_vuelo, matricula, solicitada, cuentas}.
+        vuelos: sinFactura ?? [],
+        // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
+        lectura_fallida: sinFactura === null,
+      },
       // Informativos (no bloquean): el dinero de vuelos cancelados YA cuenta
       // en el reparto; solo se pide confirmar que sea real.
       {
@@ -3124,6 +3169,34 @@ export class ProfitSharingService {
     } catch (err) {
       this.logger.warn(
         `pre-cierre: vuelos sin gasto de operaciones no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pre-cierre · VUELOS COBRADOS EN CUENTAS QUE EXIGEN FACTURA SIN FACTURA
+   * REGISTRADA (13-oct-2026, invariante 60): sobre TODOS los vuelos del
+   * periodo que ya lee el pre-cierre (pendientes + completados +
+   * cancelados), con el lector único `facturasDeVuelos` (4 consultas por
+   * cada 200 vuelos, la de `cobro_vuelo` PAGINADA: anti-cap-1000). El
+   * filtro, el shape y el orden viven en `vuelos-sin-factura.util`.
+   * Cualquier fallo ⇒ `null` + `warn` (no tumba el pre-cierre).
+   */
+  private async vuelosCobradosSinFactura(
+    vuelos: ReadonlyArray<VueloCobradoRow>,
+    matriculas: ReadonlyMap<string, string>,
+  ): Promise<VueloCobradoSinFactura[] | null> {
+    if (vuelos.length === 0) return [];
+    try {
+      const ids = vuelos
+        .map((v) => v.id)
+        .filter((id): id is string => typeof id === 'string' && id !== '');
+      const facturas = await facturasDeVuelos(this.supabase.service, ids);
+      return vuelosCobradosSinFactura({ vuelos, facturas, matriculas });
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: vuelos cobrados sin factura no disponible: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }

@@ -3,6 +3,9 @@ import {
   elegirDestinatarios,
   esPorFacturar,
   fechaDiaMes,
+  LIMITE_NOTA_SOLICITUD,
+  notaSolicitudAutomatica,
+  PREFIJO_NOTA_SOLICITUD_AUTOMATICA,
   resumenFacturaServicio,
   textoAvisoEmitida,
   textoAvisoSolicitud,
@@ -228,5 +231,105 @@ describe('textos de los avisos (§5)', () => {
     ).toBe(
       'Mary Cruz registró la factura A-123 de los vuelos #341 y #342 · Maqar.',
     );
+  });
+});
+
+describe('solicitud AUTOMÁTICA por un cobro que exige factura (13-oct-2026, invariante 60)', () => {
+  const vuelo341 = {
+    folio: 341,
+    fecha_vuelo: '2026-09-27T14:00:00Z',
+    monto_total_usd: '8050.4',
+  };
+
+  it('sin `automatica` la salida es byte a byte la de siempre', () => {
+    const base = {
+      actor: 'Itzi',
+      vuelos: [vuelo341],
+      cliente: 'Maqar',
+      pagaContraFactura: true,
+      nota: 'Mandó datos por correo',
+    };
+    expect(textoAvisoSolicitud({ ...base, automatica: undefined })).toEqual(
+      textoAvisoSolicitud(base),
+    );
+    expect(textoAvisoSolicitud(base).titulo).toBe('Factura pedida: vuelo #341');
+  });
+
+  it('vuelo con cliente, fecha y total: título y cuerpo exactos; nunca «Nota:» ni «paga contra factura»', () => {
+    expect(
+      textoAvisoSolicitud({
+        actor: 'Itzi',
+        vuelos: [vuelo341],
+        cliente: 'Maqar',
+        pagaContraFactura: true,
+        nota: 'Mandó datos por correo',
+        automatica: { origen: 'en HSBC Pesos' },
+      }),
+    ).toEqual({
+      titulo: 'Factura pendiente: vuelo #341',
+      cuerpo:
+        'Cobro en HSBC Pesos registrado por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep · Total $8,050.40 USD.',
+    });
+  });
+
+  it('sin fecha ni total se omiten los tramos; sin cuenta el origen es «por Transferencia»', () => {
+    expect(
+      textoAvisoSolicitud({
+        actor: 'Alguien de la oficina',
+        vuelos: [{ folio: 12, fecha_vuelo: null, monto_total_usd: 0 }],
+        cliente: null,
+        automatica: { origen: 'por Transferencia' },
+      }),
+    ).toEqual({
+      titulo: 'Factura pendiente: vuelo #12',
+      cuerpo:
+        'Cobro por Transferencia registrado por Alguien de la oficina: el vuelo #12 necesita factura.',
+    });
+  });
+
+  it('grupo con folio G-12 y grupo sin folio', () => {
+    const vuelos = [
+      { folio: 343, fecha_vuelo: '2026-09-27T14:00:00Z' },
+      { folio: 341, fecha_vuelo: '2026-09-27T14:00:00Z' },
+      { folio: 342, fecha_vuelo: '2026-09-27T14:00:00Z' },
+    ];
+    expect(
+      textoAvisoSolicitud({
+        actor: 'Itzi',
+        vuelos,
+        cliente: 'Maqar',
+        grupoFolio: 12,
+        automatica: { origen: 'en HSBC Pesos' },
+      }),
+    ).toEqual({
+      titulo: 'Factura pendiente: grupo G-12',
+      cuerpo:
+        'Cobro en HSBC Pesos registrado por Itzi: los vuelos #341, #342 y #343 (grupo G-12) necesitan factura · Maqar · 27 sep.',
+    });
+    expect(
+      textoAvisoSolicitud({
+        actor: 'Itzi',
+        vuelos,
+        cliente: 'Maqar',
+        grupoFolio: null,
+        automatica: { origen: 'por Cheque' },
+      }),
+    ).toEqual({
+      titulo: 'Factura pendiente: vuelos #341, #342 y #343',
+      cuerpo:
+        'Cobro por Cheque registrado por Itzi: los vuelos #341, #342 y #343 necesitan factura · Maqar · 27 sep.',
+    });
+  });
+
+  it('notaSolicitudAutomatica: prefijo + origen, recortada al tope del CHECK', () => {
+    expect(notaSolicitudAutomatica('en HSBC Pesos')).toBe(
+      'Solicitada automáticamente: cobro en HSBC Pesos',
+    );
+    expect(notaSolicitudAutomatica('por Transferencia')).toBe(
+      'Solicitada automáticamente: cobro por Transferencia',
+    );
+    const larga = notaSolicitudAutomatica('x'.repeat(600));
+    expect(larga).toHaveLength(LIMITE_NOTA_SOLICITUD);
+    expect(larga.startsWith(PREFIJO_NOTA_SOLICITUD_AUTOMATICA)).toBe(true);
   });
 });

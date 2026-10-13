@@ -24,6 +24,8 @@
  * envió — que alguien lo decida a mano.
  */
 
+import type { ExigenciaFacturaVuelo } from '../../common/cuentas-cobro';
+
 export const ESTATUS_FACTURA_CLIENTE = [
   'SIN_FACTURA',
   'ELABORADA_ENVIADA',
@@ -39,6 +41,14 @@ export const ETIQUETAS_FACTURA_CLIENTE: Record<EstatusFacturaCliente, string> =
     ELABORADA_ENVIADA: 'Factura elaborada y enviada',
     FACTURADO: 'Facturado',
   };
+
+/**
+ * Paso 5 de la cascada «FACTURA VUELATOUR» (13-oct-2026, invariante 60):
+ * sin factura registrada, lo que dicen los COBROS del vuelo. `null` en la
+ * columna significa desde entonces «sin cobros».
+ */
+export const ETIQUETA_FACTURA_PENDIENTE = 'Pendiente de factura';
+export const ETIQUETA_FACTURA_NO_LLEVA = 'No lleva factura';
 
 /** Tope del archivo de la factura del servicio: 10 MB. */
 export const LIMITE_ARCHIVO_FACTURA_BYTES = 10 * 1024 * 1024;
@@ -509,21 +519,12 @@ export function etiquetaEmitidasVigentes(
 }
 
 /**
- * Lo que dice la columna «FACTURA VUELATOUR» del Libro Dinero y «factura
- * vuelatour» del balance — FUENTE ÚNICA (24-sep-2026). Cascada:
- *  1. CFDI timbrado VIVO por el sistema (`serie-folio` de la tabla `factura`,
- *     no cancelado) — manda, es el documento fiscal;
- *  2. las facturas EMITIDAS a mano VIGENTES del registro (`factura_emitida`
- *     vía el puente, «A-123, A-130»; `etiquetaEmitidasVigentes`) — parámetro
- *     OPCIONAL `emitidas` (24-sep-2026, migración 20260924000003);
- *  3. el folio de la factura del servicio (`vuelo.factura_folio`: tecleado
- *     por la oficina o sacado del XML que subió — LEGADO);
- *  4. sin folio pero con seguimiento (`factura_estatus` ≠ SIN_FACTURA): la
- *     etiqueta del estatus («Facturado» / «Factura elaborada y enviada») —
- *     el Excel ya no dice «nada» de un vuelo que la oficina marcó facturado;
- *  5. vacío (`null`).
+ * Pasos 1-4 de la cascada «FACTURA VUELATOUR»: la factura REGISTRADA del
+ * vuelo (CFDI vivo → emitidas VIGENTES → folio tecleado → etiqueta del
+ * estatus) o `null` si no hay ninguna. Es lo que la solicitud automática y
+ * el pre-cierre (invariante 60) llaman «factura registrada».
  */
-export function etiquetaFacturaVuelo(p: {
+export function etiquetaFacturaRegistrada(p: {
   cfdi?: string | null;
   emitidas?: string | null;
   vuelo?: VueloFacturaRow | null;
@@ -536,6 +537,47 @@ export function etiquetaFacturaVuelo(p: {
   if (folio) return folio;
   const estatus = estatusFacturaCliente(p.vuelo);
   return estatus === 'SIN_FACTURA' ? null : ETIQUETAS_FACTURA_CLIENTE[estatus];
+}
+
+/**
+ * Lo que dice la columna «FACTURA VUELATOUR» del Libro Dinero y «factura
+ * vuelatour» del balance — FUENTE ÚNICA (24-sep-2026). Cascada:
+ *  1. CFDI timbrado VIVO por el sistema (`serie-folio` de la tabla `factura`,
+ *     no cancelado) — manda, es el documento fiscal;
+ *  2. las facturas EMITIDAS a mano VIGENTES del registro (`factura_emitida`
+ *     vía el puente, «A-123, A-130»; `etiquetaEmitidasVigentes`) — parámetro
+ *     OPCIONAL `emitidas` (24-sep-2026, migración 20260924000003);
+ *  3. el folio de la factura del servicio (`vuelo.factura_folio`: tecleado
+ *     por la oficina o sacado del XML que subió — LEGADO);
+ *  4. sin folio pero con seguimiento (`factura_estatus` ≠ SIN_FACTURA): la
+ *     etiqueta del estatus («Facturado» / «Factura elaborada y enviada») —
+ *     el Excel ya no dice «nada» de un vuelo que la oficina marcó facturado;
+ *  5. (13-oct-2026, invariante 60) sin factura registrada, lo que dicen los
+ *     COBROS del vuelo, con dos insumos OPCIONALES: «Pendiente de factura»
+ *     si `exigencia === 'EXIGE'` (algún cobro positivo cayó en una cuenta
+ *     que exige factura: HSBC/Scotiabank, o transferencia/link HSBC/cheque
+ *     sin cuenta — `vueloExigeFactura`) O si hay solicitud VIVA desde el
+ *     vuelo (`solicitada`; refinamiento documentado sobre la decisión
+ *     literal: la columna nunca contradice la bandeja «Por facturar» ni el
+ *     caso «paga contra factura»; el pre-cierre NO usa esta rama); «No
+ *     lleva factura» si `exigencia === 'NO_EXIGE'` (hay cobros y ninguno
+ *     exige); `null` si no hay cobros (`'SIN_COBROS'`) o sin insumos.
+ *     Sin los dos campos nuevos el resultado es EXACTAMENTE el de antes.
+ */
+export function etiquetaFacturaVuelo(p: {
+  cfdi?: string | null;
+  emitidas?: string | null;
+  vuelo?: VueloFacturaRow | null;
+  exigencia?: ExigenciaFacturaVuelo;
+  solicitada?: boolean;
+}): string | null {
+  const registrada = etiquetaFacturaRegistrada(p);
+  if (registrada) return registrada;
+  if (p.solicitada === true || p.exigencia === 'EXIGE') {
+    return ETIQUETA_FACTURA_PENDIENTE;
+  }
+  if (p.exigencia === 'NO_EXIGE') return ETIQUETA_FACTURA_NO_LLEVA;
+  return null;
 }
 
 /**

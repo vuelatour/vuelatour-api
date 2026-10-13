@@ -2075,10 +2075,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `FACTURA_FOLIO_NO_DISPONIBLE` **antes** de escribir o subir nada.
     - **La columna «FACTURA VUELATOUR» de los Excel tiene FUENTE ÚNICA**:
       `flights/factura-cliente-etiquetas.ts#etiquetasFacturaDeVuelos` (en
-      lote, 2 consultas por cada 200 vuelos, tolerante a las dos
-      migraciones) sobre la cascada PURA `etiquetaFacturaVuelo`: CFDI vivo
-      (`serie-folio` no cancelado) → `vuelo.factura_folio` → etiqueta del
-      estatus («Facturado» / «Factura elaborada y enviada») → vacío. La usan
+      lote, 4 consultas por cada 200 vuelos —la de `cobro_vuelo` PAGINADA—,
+      tolerante a las dos migraciones; envoltorio de `facturasDeVuelos`
+      desde el 13-oct-2026) sobre la cascada PURA `etiquetaFacturaVuelo`:
+      CFDI vivo (`serie-folio` no cancelado) → `vuelo.factura_folio` →
+      etiqueta del estatus («Facturado» / «Factura elaborada y enviada») →
+      «Pendiente de factura» / «No lleva factura» / vacío = sin cobros
+      (invariante 60). La usan
       el Libro Dinero (hoja 1 y «otros ingresos»), «otros movimientos» del
       Balance y, desde el 30-sep-2026 (API 0.0.45), la hoja PRINCIPAL del
       balance por avión y del general (`factura_vuelatour` por fila,
@@ -2191,7 +2194,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`extraerCfdiCompleto`, DOCTYPE ⇒ 422). La columna «FACTURA VUELATOUR»
       de los Excel suma el paso «emitidas VIGENTES» a su cascada única
       (`etiquetaFacturaVuelo`): CFDI PAC → «A-123, A-130» → folio legado →
-      estatus. Las rutas viejas `flights/:id/factura-cliente/*` siguen vivas
+      estatus → «Pendiente de factura» / «No lleva factura» / vacío = sin
+      cobros (invariante 60). Las rutas viejas `flights/:id/factura-cliente/*` siguen vivas
       (compatibilidad); el panel ya no sube por ahí.
     - **Solicitud en `vuelo`** (`factura_solicitada_at/_por`,
       `factura_solicitud_nota`, `factura_paga_contra_factura`): `POST|DELETE
@@ -3042,7 +3046,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       fila de `BalanceAvionPayload.vuelos` (después de `por_cobrar_usd`),
       con la etiqueta de la FUENTE ÚNICA `etiquetasFacturaDeVuelos`
       (invariante 25/27: CFDI vivo → emitidas VIGENTES «A-0424» → folio
-      tecleado → estatus → `null`). Es del VUELO: un multi-avión lleva la
+      tecleado → estatus → «Pendiente de factura» / «No lleva factura» /
+      `null` = sin cobros, invariante 60). Es del VUELO: un multi-avión lleva la
       MISMA etiqueta en la fila de cada libro, y un CANCELADO o una fila
       «solo gastos de tramo cancelado» también la llevan. Ningún número del
       payload cambia: con y sin facturas el libro es idéntico salvo esa
@@ -5490,6 +5495,192 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       pyservices, `tests/test_balance_formulas.py` (sección 3b) y
       `tests/test_libro_json.py`.
 
+60. **FACTURA OBLIGATORIA POR CUENTA DE COBRO (13-oct-2026, API 0.0.74, SIN
+    migración).** Decisión 4 del lote del cliente del 13-oct-2026: un cobro
+    que cae en HSBC Dólares / HSBC Pesos / Scotiabank Dólares / Scotiabank
+    Pesos EXIGE factura del servicio al cliente. Tres piezas y UNA regla;
+    NINGÚN número se mueve: solo texto por vuelo, las 4 columnas de
+    solicitud de `vuelo` que ya existen desde `20260924000003` (aplicada en
+    prod) y un item NO bloqueante del pre-cierre. Nada se suma, así que nada
+    puede contarse dos veces ni en dos meses.
+    - **Regla ÚNICA y PURA `common/cuentas-cobro.ts`**: `cuentaExigeFactura`
+      (la CUENTA manda: las 4 de banco ⇒ sí; 'Paywise' ⇒ no; vacía, null o
+      fuera del catálogo ⇒ no decide) y `cobroExigeFactura` (monto no finito
+      o ≤ 0 —reembolsos— ⇒ nunca; sin cuenta decide el MÉTODO:
+      `METODOS_COBRO_EXIGEN_FACTURA_SIN_CUENTA` = HSBC_LINK, TRANSFERENCIA,
+      CHEQUE; BILLPOCKET/EFECTIVO/PAYWISE/DOLARES/OTRO/vacío ⇒ no);
+      `vueloExigeFactura(cobros)` tri-estado EXIGE | NO_EXIGE | SIN_COBROS
+      sobre TODOS los cobros positivos del vuelo (de cualquier fecha; las
+      partes de un sobre entran porque `crearParte` copia cuenta y método
+      del sobre); `cuentaDeCobroTexto` ('HSBC Pesos' / 'Transferencia sin
+      cuenta destino'), `origenCobroTexto` ('en HSBC Pesos' / 'por
+      Transferencia') y `cuentasQueExigenFactura` (distintas, en orden).
+      **Es por cuenta/método, NO por rol**: el PILOTO también la dispara
+      desde la app con HSBC_LINK (está en `METODOS_COBRO_PILOTO`). Etiquetas
+      de método SIEMPRE por `etiquetaMetodoCobro` (invariante 7).
+      `CUENTAS_COBRO` y los `@IsIn` de los DTO no cambian.
+    - **Columna «FACTURA VUELATOUR» — paso 5 de la cascada única**
+      (`etiquetaFacturaVuelo`, dos insumos OPCIONALES `exigencia` y
+      `solicitada`; los pasos 1-4 se extrajeron a
+      `etiquetaFacturaRegistrada`): sin factura registrada ⇒
+      `ETIQUETA_FACTURA_PENDIENTE` = «Pendiente de factura» si EXIGE **o si
+      hay solicitud viva** (refinamiento explícito sobre la decisión
+      literal: la columna nunca contradice la bandeja «Por facturar» ni
+      «paga contra factura»; el pre-cierre NO usa esta rama);
+      `ETIQUETA_FACTURA_NO_LLEVA` = «No lleva factura» si NO_EXIGE; `null` =
+      SIN COBROS (desde ahora la celda vacía significa «sin cobros», no
+      «sin factura»). Un CANCELADO con cobro retenido en HSBC dice
+      «Pendiente de factura». Sin los dos campos el resultado es
+      EXACTAMENTE el de antes. El lector en lote se partió en
+      `facturasDeVuelos` (detalle `{registrada, exigencia, solicitada,
+      estado, cuentas_exigen, etiqueta}` de TODOS los ids pedidos; **4
+      consultas por cada 200 vuelos**: la de `cobro_vuelo` va PAGINADA con
+      `.order('id', {ascending: true}).range()` de 1000 en 1000 y tope de 20
+      páginas —nunca `.limit(10000)`: PostgREST corta en max-rows sin avisar
+      y un vuelo cuyos cobros cayeran después de la fila 1000 saldría «sin
+      cobros» en falso—; el select de `vuelo` suma SIEMPRE `estado` y, solo
+      con la sonda `20260924000003`, `factura_solicitada_at`; cualquier
+      error de las 4 LANZA) y `etiquetasFacturaDeVuelos` quedó como
+      envoltorio con la MISMA firma y contrato (solo vuelos con etiqueta),
+      así que el balance individual (col AU), el general («reporte horas
+      FLOTA»), «otros movimientos» (col J) y el Libro Dinero (hoja 1 y
+      «otros ingresos») pintan el texto nuevo sin cambiar código — y, por
+      la invariante 34, un fallo al leer `cobro_vuelo` TUMBA el libro
+      («fallo al leer facturas»); en el pre-cierre el item degrada a
+      `lectura_fallida`. Hacia pyservices viaja SOLO la bandera raíz
+      ADITIVA `factura_vuelatour_segun_cobros: true` (libro individual,
+      cada `aviones[]` **y el consolidado FLOTA**, a diferencia de
+      `sin_provision_vendedor`, porque los dos usan `_hoja_maestra`; NO en
+      `otros_movimientos` ni en el Libro Dinero) que cambia ÚNICAMENTE la
+      nota al pie de la hoja maestra; sin bandera, libro byte-idéntico
+      (huellas `_firma_hoja`).
+    - **Solicitud AUTOMÁTICA** `FacturaSolicitudService.solicitarPorCobro`
+      = la MISMA vía que «Necesito factura»: mismas 4 columnas, mismo CAS
+      `.in('id', candidatos).is('factura_solicitada_at', null).select('id,
+      folio')` (se avisa SOLO por los que ENTRARON; una carrera deja fuera a
+      alguno sin re-aviso), misma `avisarSolicitud` →
+      `ConfiguracionService.destinatariosFacturacion(actorId)` (excluye al
+      actor como hoy y no baja de nivel), mismo link `#por-facturar`. JAMÁS
+      lanza (todo en try/catch ⇒ `{solicitados: [], notificados: [],
+      motivo: 'FALLO'}` + warn «Solicitud automática de factura falló (el
+      cobro <id> quedó registrado): …»); idempotente: solo vuelos con
+      `registrada == null` (un CFDI vivo, una emitida VIGENTE, un folio o
+      un estatus ≠ SIN_FACTURA lo omiten), sin solicitud viva (no se toca
+      su nota ni se re-avisa) y estado ≠ CANCELADO; sin la migración ⇒
+      no-op con log, NUNCA 503 desde un cobro. Persiste
+      `factura_solicitada_por` = quien registró/corrigió el cobro (ese
+      usuario recibirá «Ya está la factura A-123», comportamiento de la vía
+      existente), `factura_solicitud_nota` = `notaSolicitudAutomatica` =
+      «Solicitada automáticamente: cobro en HSBC Pesos» / «… cobro por
+      Transferencia» (≤ 500), `factura_paga_contra_factura = false`,
+      `updated_by`. Aviso `factura_solicitada` con
+      `textoAvisoSolicitud({automatica: {origen}})`: título «Factura
+      pendiente: vuelo #341» (grupo: «Factura pendiente: grupo G-12» / «…
+      vuelos #341, #342 y #343»), cuerpo «Cobro en HSBC Pesos registrado
+      por Itzi: el vuelo #341 necesita factura · Maqar · 27 sep · Total
+      $8,050.40 USD.» (tramos vacíos se omiten; sin «Nota:» ni «paga contra
+      factura»; nombre vacío ⇒ «Alguien de la oficina», nunca el uuid) y
+      `data` con las llaves ADITIVAS `origen: 'COBRO'`, `cobro_id`,
+      `cobro_grupo_id` (la app ignora `data` que no conoce). «Por facturar»
+      sigue DERIVADO y la bandeja la muestra como cualquier solicitud; se
+      retira igual (`DELETE :id/solicitud-factura`). Bitácora en el log de
+      cada decisión (pedida / nada que pedir con el motivo por vuelo /
+      omitida sin migración / falló).
+    - **Ganchos** (puerta pública `FlightsService.solicitarFacturaPorCobros`:
+      sin `facturaSolicitud` inyectado —specs posicionales— ⇒ null; cobro
+      que no exige ⇒ null; try/catch con warn; jamás 5xx, jamás revierte
+      dinero): `createCobro` sin sobre ⇒ **FIRE-AND-FORGET** (`void
+      …catch(() => undefined)` después de `notificarCobroRegistrado`: el
+      POST del outbox del piloto con HSBC_LINK no espera 4 lecturas + update
+      + pushes —un timeout daría un «fallido» falso, invariante 13—; el
+      replay idempotente y el 23505 retornan ANTES y no re-disparan; las
+      PARTES de sobre no disparan); `updateCobro` (solo oficina) cuando el
+      PATCH trae `cuenta_destino` o `metodo_cobro` ⇒ `await` best-effort
+      (la oficina no tiene outbox); sobre de grupo UNA vez en
+      `registrarCobro` (tras `escribirPartes` OK, ANTES del aviso
+      `cobro_registrado`) y en `repartirCobro` (tras re-escribir las
+      partes), con los vuelos de las partes con monto > 0
+      (`vuelosConParteCobrada`, puro en `particion-cobro.util.ts`) y
+      `cobroGrupoId`; `GroupsService` NO inyecta nada nuevo (usa
+      `this.flights`). Heredan sin tocar `ingresos.service.ts`: el anticipo
+      aplicado (método del anticipo, sin cuenta) y «Es el pago de un vuelo»
+      desde el banco (TRANSFERENCIA ⇒ exige; PAYWISE ⇒ no) — ruido esperado
+      en facturación (cada uno crea solicitud y avisa; se deduplica por
+      vuelo con el CAS), dicho al cliente. NO disparan: `createReembolso`,
+      `deleteCobro`, `eliminarCobro`, ni corregir HACIA BillPocket/Paywise
+      (sin retiro automático: la oficina retira a mano, con confirmación).
+      Las respuestas HTTP de los endpoints de cobro no cambian ni un byte.
+    - **Pre-cierre**: item ADITIVO NO bloqueante `vuelos_cobrados_sin_factura`
+      («Vuelos cobrados en cuentas que exigen factura sin factura
+      registrada»; clave, título y textos en
+      `profit-sharing/vuelos-sin-factura.util.ts`, PURO) sobre TODOS los
+      vuelos del periodo que ya lee el pre-cierre (pendientes + completados
+      + cancelados; externos y sin avión entran con `matricula: null`),
+      estrictamente `exigencia === 'EXIGE' && registrada == null` (la
+      solicitud viva NO lo mete ni lo saca: `solicitada` solo informa),
+      `vuelos[] {id, folio, fecha_vuelo, matricula, solicitada, cuentas}`
+      por `fecha_vuelo` (empate por folio, sin fecha al final),
+      `lectura_fallida` (count 0 + «No se pudo verificar…»), justo después
+      de `externos_sin_honorario`; `bloqueantes` y `listo` no cambian. Los
+      selects de `pendRes` y `canceladosRes` suman `aeronave_id`.
+      Consecuencia documentada: un cobro en HSBC registrado DESPUÉS de
+      cerrar el mes ya no sale en el pre-cierre de ese mes (lo cubre la
+      solicitud automática); los cobros HISTÓRICOS no reciben solicitud
+      retroactiva (no hay backfill): el pre-cierre los lista hasta que se
+      registre la factura. Bordes aceptados: `cuenta_destino` legado fuera
+      del catálogo o método OTRO sin cuenta ⇒ no exige (la oficina captura
+      la cuenta); en `createCobro` el snapshot que el panel refresca
+      milisegundos después puede todavía no traer la solicitud.
+    - **Skew / deploy**: sin migración ni cambios en panel (la vista en
+      pantalla lee el mismo libro, invariante 52; la bandeja «Por facturar»
+      ya pinta nota y solicitante; el pre-cierre ignora `vuelos[]` extra) ni
+      Flutter (respuestas de cobro idénticas; `data` desconocido se ignora).
+      pyservices nuevo + API ≤ 0.0.73 ⇒ libro byte-idéntico (sin bandera;
+      `extra="ignore"`); API 0.0.74 + pyservices viejo ⇒ los textos nuevos
+      se pintan y SOLO la nota al pie vieja («vacía = sin factura») queda
+      desfasada hasta desplegar pyservices (cero 422). Orden recomendado:
+      pyservices → API (al revés de la invariante 58, cuya lógica es la
+      opuesta).
+    - Specs: `common/cuentas-cobro.spec` (tabla de verdad),
+      `factura-cliente.util.spec` (paso 5; `etiquetaFacturaRegistrada` ≡
+      cascada vieja), `factura-cliente-etiquetas.spec` (3 consultas por lote
+      + puente con la sonda, select con `estado`/`factura_solicitada_at`,
+      paginación 1 001 cobros ⇒ 2 páginas sin perder el vuelo 1 001,
+      solicitud viva solo con la sonda, reembolso no cuenta, `facturasDeVuelos`
+      con TODOS los ids, error de `cobro_vuelo` lanza),
+      `factura-solicitud.util.spec` (textos byte a byte sin `automatica`;
+      título/cuerpo/nota exactos), `factura-solicitud.service.spec`
+      (`solicitarPorCobro`: nota/actor/CAS/aviso/`data`, idempotencia,
+      registrada en sus 4 formas, cancelado, NO_EXIGE sin tocar la BD,
+      NO_DISPONIBLE sin lanzar, FALLO con warn, sobre G-12 con UN update y
+      UN aviso; los 6 de `solicitar` intactos),
+      `flights.service.factura-por-cobro.spec` (`createCobro` con
+      `setImmediate` para vaciar la cola, TRANSFERENCIA sin cuenta, PILOTO
+      con HSBC_LINK, BillPocket/Paywise/efectivo no, parte de sobre no,
+      replay no, mock que rechaza ⇒ cobro igual y solo warn, reembolso
+      nunca; `updateCobro` con cuenta ⇒ `await`, solo referencia/notas no,
+      hacia BillPocket no; 9 argumentos ⇒ null),
+      `groups/particion-cobro.util.spec` (`vuelosConParteCobrada`),
+      `groups/groups.service.cobro-factura.spec` (orden sobre → partes →
+      factura → aviso, BillPocket, fallo, sin partes con dinero,
+      `repartirCobro`), `profit-sharing/vuelos-sin-factura.util.spec` y
+      `profit-sharing.service.pre-cierre-vuelos-sin-factura.spec` (BD en
+      memoria con max-rows 1000: 7 casos + orden, no bloquea, cada regla,
+      anti-cap con páginas `[0,999]`/`[1000,1999]`, lectura fallida),
+      `aircraft-balance.service.factura.spec` (paso 5 en el individual, en
+      los dos libros del multi-avión, en el consolidado y en col J con UNA
+      lectura por vuelo; bandera en individual, `aviones[]` y consolidado y
+      no en la pestaña; fallo de `cobro_vuelo` tumba el libro) y
+      `aircraft-balance.service.comisiones.spec` (bandera raíz). Goldens
+      actualizados SOLO en el texto de `factura`/`factura_vuelatour` con
+      `ETIQUETA_FACTURA_NO_LLEVA` donde el vuelo tiene cobros sin cuenta ni
+      método (`libros-pago-vendedor.fixture-spec`,
+      `aircraft-balance.service.ingresos.spec`,
+      `dinero-report.service.ingresos/pago-vendedor.spec`) y
+      `dinero-report.service.empresa.spec` gana «con cobros ⇒ No lleva
+      factura / HSBC ⇒ Pendiente». En pyservices,
+      `tests/test_balance_factura_vuelatour.py`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -6221,6 +6412,12 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **13-oct-2026 — SIN migración** para la factura obligatoria por cuenta de
+  cobro (invariante 60): las 4 columnas de solicitud de `vuelo` existen
+  desde `20260924000003` (aplicada); solo la bandera ADITIVA
+  `factura_vuelatour_segun_cobros` hacia pyservices. Orden de deploy:
+  pyservices → API (con el API nuevo y un pyservices previo solo la nota al
+  pie de la hoja maestra queda desfasada; al revés, libro byte-idéntico).
 - **13-oct-2026 — SIN migración** para el T.C. por fila y MONTO MXN como
   fórmula de la hoja «permisos» (invariante 59): solo payload API→pyservices
   (campos ADITIVOS `tc_aplicado` / `tc_por_fila`); deploy en cualquier

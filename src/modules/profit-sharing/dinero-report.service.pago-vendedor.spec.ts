@@ -13,6 +13,7 @@ jest.mock('../tipo-cambio/tipo-cambio.service', () => ({
 }));
 
 import { DineroReportService } from './dinero-report.service';
+import { ETIQUETA_FACTURA_NO_LLEVA } from '../flights/factura-cliente.util';
 import { AircraftBalanceService } from '../aircraft/aircraft-balance.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type {
@@ -132,7 +133,9 @@ describe('Libro Dinero — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep-2026
       ingreso_mxn: 1600,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
       remanente_mxn: 0,
-      factura: null,
+      // 13-oct-2026 (invariante 60): el #501 tiene cobros sin cuenta ni
+      // método ⇒ «No lleva factura».
+      factura: ETIQUETA_FACTURA_NO_LLEVA,
     });
     expect(p.utilidades_comision_vendedor_provisionada_mxn).toBe(0);
     expect(p.utilidades_comision_vendedor_pagada_mxn).toBe(1600);
