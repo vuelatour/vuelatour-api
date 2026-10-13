@@ -9,8 +9,14 @@ jest.mock('../conciliacion/conciliacion.service', () => ({
   ConciliacionService: class {},
 }));
 
-import { ProfitSharingService } from './profit-sharing.service';
+import {
+  PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+  PAGO_VENDEDOR_CLAVE_DETALLE,
+  PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE,
+  ProfitSharingService,
+} from './profit-sharing.service';
 import type { SupabaseService } from '../supabase/supabase.service';
+import { participacionPorAeronave } from '../../common/participacion-aeronave.util';
 
 /**
  * REPARTO A SOCIOS — **la categoría de EMPRESA manda sobre el vuelo**
@@ -46,6 +52,8 @@ type Privado = {
     ctx: Record<string, unknown>,
   ) => {
     gastos: { directos_usd: number; indirectos_usd: number };
+    ingresos: { comisiones_venta_usd: number };
+    saldo_disponible_usd: number;
     detalle: {
       gastos_por_categoria: Array<{
         categoria: string;
@@ -68,7 +76,7 @@ const gastoBase = {
 };
 
 /** computeAvion con el mundo mínimo: solo los gastos importan aquí. */
-function computar(gastos: Fila[]) {
+function computar(gastos: Fila[], extra: Record<string, unknown> = {}) {
   const service = armar();
   return (service as unknown as Privado).computeAvion(
     { id: AV, matricula: 'XB-TST', modelo: 'C206' },
@@ -95,6 +103,9 @@ function computar(gastos: Fila[]) {
       periodo: { desde: '2026-09-01', hasta: '2026-09-30' },
       tcOficialVuelo: new Map(),
       tcOficialGasto: new Map(),
+      vigenciaComisiones: '2026-09-01',
+      gastosVendedorPorVuelo: new Map(),
+      ...extra,
     },
   );
 }
@@ -210,12 +221,16 @@ describe('Reparto a socios — la categoría de EMPRESA manda sobre el vuelo (11
 });
 
 /**
- * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): jamás es
- * costo del avión — grupo EXCLUIDO explícito, con una clave de detalle que
- * EMPIEZA con el código (espejo de `TUAS (egreso VuelaTour — Otros
- * movimientos)`) para que la etiqueta derivada conserve el sufijo.
+ * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): por el
+ * eje fecha_gasto (`ctx.gastos`) jamás suma a `gastos.*` — grupo EXCLUIDO
+ * explícito, con una clave de detalle que EMPIEZA con el código (espejo de
+ * `TUAS (egreso VuelaTour — Otros movimientos)`) para que la etiqueta
+ * derivada conserve el sufijo. Desde el 13-oct-2026 (API 0.0.74, invariante
+ * 61) la comisión cuenta en el mes del VUELO por la lectura POR VUELO
+ * (`gastosVendedorPorVuelo` ⇒ `comisiones_venta_usd`) y la clave EXCLUIDO
+ * dice cuál de los tres casos es.
  */
-describe('Reparto a socios — la comisión del vendedor NO es costo del avión (28-sep-2026)', () => {
+describe('Reparto a socios — la comisión del vendedor NO es costo del avión por fecha_gasto (28-sep-2026; claves del 13-oct-2026)', () => {
   const op: Fila = {
     ...gastoBase,
     id: 'g-op',
@@ -230,34 +245,166 @@ describe('Reparto a socios — la comisión del vendedor NO es costo del avión 
     monto: 116,
     vuelo_id: VUELO,
   };
+  /** #501 COMPLETADO de la vigencia: 2,000 de tiempo + 80 de comisión. */
+  const vuelo501: Fila = {
+    id: VUELO,
+    aeronave_id: AV,
+    cliente_id: null,
+    estado: 'COMPLETADO',
+    monto_total_usd: 2080,
+    tc_usd_mxn: 20,
+    cobrado: true,
+    comision_vendedor_usd: 80,
+    folio: 501,
+    fecha_vuelo: '2026-09-10T15:00:00+00:00',
+    fecha_solicitud: null,
+    origen_iata: 'CUN',
+    destino_iata: 'MID',
+    es_externo: false,
+    costo_externo_usd: null,
+    subtotal_vuelo_usd: 2000,
+    ajuste_final_usd: 0,
+    iva_usd: 0,
+    iva_pct: 0,
+    tuas_usd: 0,
+    extras_total_usd: 0,
+    viaticos_pernocta_usd: 0,
+    calculo_snapshot: null,
+  };
+  /** El mismo pago, en la lectura POR VUELO (forma de `GastoVendedorVueloRow`). */
+  const porVuelo = new Map([
+    [
+      VUELO,
+      [
+        {
+          vuelo_id: VUELO,
+          categoria: 'COMISION_VENDEDOR',
+          monto: 116,
+          moneda: 'USD',
+          tc_gasto: null,
+          fecha_gasto: '2026-09-10',
+        },
+      ],
+    ],
+  ]);
+  /** El vuelo #501 en el reparto de ESTE avión (un solo avión, factor 1). */
+  const conVuelo = (vuelo: Fila) => ({
+    vuelos: [vuelo],
+    participacionPorVuelo: new Map([
+      [VUELO, participacionPorAeronave(vuelo, [])],
+    ]),
+    cobrosPorVuelo: new Map([
+      [
+        VUELO,
+        [
+          {
+            vuelo_id: VUELO,
+            monto: 2080,
+            moneda: 'USD',
+            tc_usd_mxn: 20,
+            comision_banco_monto: null,
+            comision_banco_pct: null,
+            metodo_cobro: null,
+          },
+        ],
+      ],
+    ]),
+    gastosVendedorPorVuelo: porVuelo,
+  });
+  const detalleDe = (r: ReturnType<Privado['computeAvion']>) =>
+    r.detalle.gastos_por_categoria.filter((x) =>
+      x.categoria.startsWith('COMISION_VENDEDOR'),
+    ) as Array<{
+      categoria: string;
+      grupo: string;
+      usd: number;
+      etiqueta?: string;
+    }>;
 
-  it('grupo EXCLUIDO con la clave «COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)» y su etiqueta', () => {
-    const r = computar([op, comisionVendedor]);
-    const f = r.detalle.gastos_por_categoria.find(
-      (x) =>
-        x.categoria ===
-        'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)',
-    ) as { grupo: string; usd: number; etiqueta?: string } | undefined;
-    expect(f).toMatchObject({ grupo: 'EXCLUIDO', usd: 116 });
-    expect(f!.etiqueta).toBe(
-      'Comisión del vendedor (egreso VuelaTour — Otros movimientos)',
+  it('las TRES claves EXCLUIDO empiezan con el código (la etiqueta derivada conserva el sufijo)', () => {
+    expect(PAGO_VENDEDOR_CLAVE_DETALLE).toBe(
+      'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)',
+    );
+    expect(PAGO_VENDEDOR_AVION_CLAVE_DETALLE).toBe(
+      'COMISION_VENDEDOR (gasto real a cargo del avión — resta en Comisiones)',
+    );
+    expect(PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE).toBe(
+      'COMISION_VENDEDOR (vuelo de otro periodo o aún no completado — cuenta en el mes del vuelo)',
     );
   });
 
-  it('la utilidad del avión es IDÉNTICA al caso sin el gasto (solo cambia la fila informativa del detalle)', () => {
-    const sin = computar([op]);
-    const con = computar([op, comisionVendedor]);
-    expect(con.gastos).toEqual(sin.gastos);
-    const sinFilaInformativa = {
-      ...con,
-      detalle: {
-        ...con.detalle,
-        gastos_por_categoria: con.detalle.gastos_por_categoria.filter(
-          (x) => !x.categoria.startsWith('COMISION_VENDEDOR'),
-        ),
-      },
+  it('vuelo FUERA de este reparto (otro periodo o aún no completado) ⇒ «vuelo de otro periodo o aún no completado — cuenta en el mes del vuelo», EXCLUIDO, sin restar', () => {
+    const r = computar([op, comisionVendedor]);
+    expect(detalleDe(r)).toEqual([
+      expect.objectContaining({
+        categoria: PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE,
+        grupo: 'EXCLUIDO',
+        usd: 116,
+        etiqueta:
+          'Comisión del vendedor (vuelo de otro periodo o aún no completado — cuenta en el mes del vuelo)',
+      }),
+    ]);
+    expect(r.ingresos.comisiones_venta_usd).toBe(0);
+  });
+
+  it('vuelo del periodo cuyo pago NO lo absorbe el avión (aquí: sin comisión cotizada) ⇒ la clave de siempre «egreso VuelaTour — Otros movimientos»', () => {
+    const sinComision = {
+      ...vuelo501,
+      comision_vendedor_usd: 0,
+      monto_total_usd: 2000,
     };
-    expect(JSON.stringify(sinFilaInformativa)).toBe(JSON.stringify(sin));
+    const r = computar([op, comisionVendedor], conVuelo(sinComision));
+    expect(detalleDe(r)).toEqual([
+      expect.objectContaining({
+        categoria: PAGO_VENDEDOR_CLAVE_DETALLE,
+        grupo: 'EXCLUIDO',
+        usd: 116,
+        etiqueta:
+          'Comisión del vendedor (egreso VuelaTour — Otros movimientos)',
+      }),
+    ]);
+    // El avión no lo absorbe: VuelaTour lo paga en «otros movimientos».
+    expect(r.ingresos.comisiones_venta_usd).toBe(0);
+  });
+
+  it('vuelo COMPLETADO de la vigencia con comisión cotizada ⇒ el avión ABSORBE el pago real por la lectura POR VUELO (`comisiones_venta_usd` = 116) y la fila por fecha_gasto dice «gasto real a cargo del avión — resta en Comisiones» SIN restar otra vez', () => {
+    const r = computar([op, comisionVendedor], conVuelo(vuelo501));
+    expect(detalleDe(r)).toEqual([
+      expect.objectContaining({
+        categoria: PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+        grupo: 'EXCLUIDO',
+        usd: 116,
+        etiqueta:
+          'Comisión del vendedor (gasto real a cargo del avión — resta en Comisiones)',
+      }),
+    ]);
+    expect(r.ingresos.comisiones_venta_usd).toBe(116);
+    // Los agregados por fecha_gasto NO lo suman (sería doble): solo OPERACIONES.
+    expect(r.gastos.directos_usd).toBe(300);
+    // Sin el gasto por fecha (p. ej. capturado en otro mes), el avión lo
+    // resta IGUAL: la comisión cuenta en el mes del VUELO.
+    const sinPorFecha = computar([op], conVuelo(vuelo501));
+    expect(sinPorFecha.ingresos.comisiones_venta_usd).toBe(116);
+    expect(sinPorFecha.saldo_disponible_usd).toBe(r.saldo_disponible_usd);
+  });
+
+  it('la utilidad del avión es IDÉNTICA con o sin el gasto por el eje fecha_gasto (solo cambia la fila informativa del detalle)', () => {
+    for (const extra of [{}, conVuelo(vuelo501)]) {
+      const sin = computar([op], extra);
+      const con = computar([op, comisionVendedor], extra);
+      expect(con.gastos).toEqual(sin.gastos);
+      expect(con.saldo_disponible_usd).toBe(sin.saldo_disponible_usd);
+      const sinFilaInformativa = {
+        ...con,
+        detalle: {
+          ...con.detalle,
+          gastos_por_categoria: con.detalle.gastos_por_categoria.filter(
+            (x) => !x.categoria.startsWith('COMISION_VENDEDOR'),
+          ),
+        },
+      };
+      expect(JSON.stringify(sinFilaInformativa)).toBe(JSON.stringify(sin));
+    }
   });
 });
 

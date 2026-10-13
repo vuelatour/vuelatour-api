@@ -405,7 +405,9 @@ export const INGRESOS_LIBROS: Fila[] = [
  * $1,600.00» (egreso 3,450, remanente 1,150). La hoja viaja con la bandera
  * `sin_provision_vendedor: true` AL FINAL. Desde el 13-oct-2026
  * (invariante 60) la columna `factura` del #501 dice «No lleva factura»:
- * tiene dos cobros sin cuenta ni método (ninguno exige factura).
+ * tiene dos cobros sin cuenta ni método (ninguno exige factura); y
+ * (invariante 61, API 0.0.74) la hoja suma `comision_vendedor_solo_gasto_real:
+ * true` después de `sin_provision_vendedor`.
  */
 export const GOLDEN_OM = {
   filas: [
@@ -457,9 +459,20 @@ export const GOLDEN_OM = {
     },
   ],
   sin_provision_vendedor: true,
+  comision_vendedor_solo_gasto_real: true,
 } as unknown as BalanceHojaOtrosMovimientosPayload;
 
-/** Libro Dinero SIN gastos de comisión (0.0.38 + la nota NUEVA de la provisión). */
+/**
+ * Libro Dinero SIN gastos de comisión. Desde el 13-oct-2026 (API 0.0.74,
+ * invariante 61) ya NO hay provisión: la fila de la comisión del #501 no
+ * lleva egreso (concepto, monto, fecha y nota en null) y su remanente es el
+ * ingreso (1,600); `utilidades_otros_ingresos_mxn` sube los 1,600 de la
+ * provisión (3,000 ⇒ 4,600), `utilidades_comision_vendedor_provisionada_mxn`
+ * viaja en 0 (clave conservada) y el payload termina con
+ * `comision_vendedor_solo_gasto_real: true`. Hasta el 0.0.73: «pago comisión
+ * vendedor (Vendedor Uno) · provisión» = 1,600 con la nota de la PROVISIÓN y
+ * remanente 0.
+ */
 export const GOLDEN_DINERO = {
   periodo_desde: '2026-09-01',
   periodo_hasta: '2026-09-30',
@@ -539,15 +552,14 @@ export const GOLDEN_DINERO = {
     {
       clave: 'vtleticia',
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
-      concepto_egreso: 'pago comisión vendedor (Vendedor Uno) · provisión',
-      egreso_mxn: 1600,
-      fecha_egreso: '2026-09-10T15:00:00+00:00',
-      nota_egreso:
-        'PROVISIÓN: pago al vendedor por el mismo monto de la comisión cobrada (comisión + IVA = pagoVendedorUsd; neto de VuelaTour = precio base). Aún no hay gasto real: captúralo en Gastos con la categoría «Comisión del vendedor» ligado a este vuelo y reemplaza esta provisión (no lo captures como «Otros gastos VuelaTour»: quedaría duplicado). En la hoja utilidades ya está descontado de "otros ingresos".',
+      concepto_egreso: null,
+      egreso_mxn: null,
+      fecha_egreso: null,
+      nota_egreso: null,
       concepto_ingreso: 'comisión vendedor (Vendedor Uno)',
       ingreso_mxn: 1600,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
-      remanente_mxn: 0,
+      remanente_mxn: 1600,
       factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
   ],
@@ -590,8 +602,8 @@ export const GOLDEN_DINERO = {
   combustible_precio_litro: 32.5,
   combustible_sin_avion: 1,
   utilidades_combustible_mxn: 3250,
-  utilidades_otros_ingresos_mxn: 3000,
-  utilidades_comision_vendedor_provisionada_mxn: 1600,
+  utilidades_otros_ingresos_mxn: 4600,
+  utilidades_comision_vendedor_provisionada_mxn: 0,
   utilidades_otros_gastos_mxn: 700,
   utilidades_tc: 20,
   utilidades_aviones: [
@@ -603,6 +615,7 @@ export const GOLDEN_DINERO = {
       combustible_mxn: 3000,
     },
   ],
+  comision_vendedor_solo_gasto_real: true,
 } as unknown as DineroXlsxPayload;
 
 // ===== Constructores para los casos de la comisión del vendedor =====

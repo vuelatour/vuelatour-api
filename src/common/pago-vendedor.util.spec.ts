@@ -1,11 +1,12 @@
 import {
   NOTA_PAGO_VENDEDOR_REAL,
   NOTA_PAGO_VENDEDOR_SIN_LINEA,
-  NOTA_PROVISION_PAGO_VENDEDOR,
   TOLERANCIA_PAGO_VENDEDOR_MXN,
   conceptoPagoVendedorReal,
+  cuerpoGastoRealPagoVendedor,
   motivoSinLineaComision,
   pagosVendedorDeVuelo,
+  sufijoUsdSinTc,
   type GastoPagoVendedorRow,
   type PagosVendedorDeVuelo,
 } from './pago-vendedor.util';
@@ -13,7 +14,11 @@ import {
 /**
  * PAGO REAL AL VENDEDOR ↔ COMISIÓN COBRADA (28-sep-2026, invariante 31):
  * fuente única del apareo que usan el Balance general («otros movimientos»)
- * y el Libro Dinero («Otros ingresos»).
+ * y el Libro Dinero («Otros ingresos»). Desde el 13-oct-2026 (invariante 61)
+ * también la columna COMISIONES del avión (`comisiones-avion.util`), con el
+ * MISMO `pagosVendedorDeVuelo` y dos conversores; `conceptoPagoVendedorReal`
+ * se compone de `cuerpoGastoRealPagoVendedor` + `sufijoUsdSinTc` (su salida
+ * sigue byte a byte).
  */
 
 const g = (
@@ -341,14 +346,69 @@ describe('motivoSinLineaComision (misma regla en los dos libros)', () => {
   });
 });
 
+describe('cuerpoGastoRealPagoVendedor + sufijoUsdSinTc (el refactor del 13-oct-2026 no mueve un byte)', () => {
+  it('cuerpo = «gasto real[ (N pagos)][ · parcial: faltan | · excede]», SIN sufijo de T.C.', () => {
+    expect(cuerpoGastoRealPagoVendedor(pagos({}), 2030)).toBe('gasto real');
+    expect(cuerpoGastoRealPagoVendedor(pagos({ n: 2 }), 2030)).toBe(
+      'gasto real (2 pagos)',
+    );
+    expect(cuerpoGastoRealPagoVendedor(pagos({ pagadoMxn: 1750 }), 2030)).toBe(
+      'gasto real · parcial: faltan $280.00 MXN',
+    );
+    expect(cuerpoGastoRealPagoVendedor(pagos({ pagadoMxn: 2500 }), 2030)).toBe(
+      'gasto real · excede $470.00 MXN',
+    );
+    expect(cuerpoGastoRealPagoVendedor(pagos({ pagadoMxn: 500 }), null)).toBe(
+      'gasto real',
+    );
+    // Con pagos sin T.C. no se compara, y el sufijo no vive aquí.
+    expect(
+      cuerpoGastoRealPagoVendedor(
+        pagos({ n: 2, pagadoMxn: 1000, sinTc: 1 }),
+        2030,
+      ),
+    ).toBe('gasto real (2 pagos)');
+  });
+
+  it('sufijo: «(parcial: USD sin TC)» | «(USD sin TC)» | vacío', () => {
+    expect(sufijoUsdSinTc(pagos({}))).toBe('');
+    expect(sufijoUsdSinTc(pagos({ n: 2, pagadoMxn: 1000, sinTc: 1 }))).toBe(
+      ' (parcial: USD sin TC)',
+    );
+    expect(sufijoUsdSinTc(pagos({ pagadoMxn: null, sinTc: 1 }))).toBe(
+      ' (USD sin TC)',
+    );
+  });
+
+  it('conceptoPagoVendedorReal == «pago <etiqueta> · » + cuerpo + sufijo', () => {
+    for (const p of [
+      pagos({}),
+      pagos({ n: 2, pagadoMxn: 2500 }),
+      pagos({ pagadoMxn: 1750 }),
+      pagos({ n: 2, pagadoMxn: 1000, sinTc: 1 }),
+      pagos({ pagadoMxn: null, sinTc: 1 }),
+    ]) {
+      expect(
+        conceptoPagoVendedorReal({
+          etiquetaComision: SAAB,
+          pagos: p,
+          lineaMxn: 2030,
+        }),
+      ).toBe(
+        `pago ${SAAB} · ${cuerpoGastoRealPagoVendedor(p, 2030)}${sufijoUsdSinTc(p)}`,
+      );
+    }
+  });
+});
+
 describe('notas de celda del Libro Dinero', () => {
-  it('textos EXACTOS', () => {
-    expect(NOTA_PROVISION_PAGO_VENDEDOR).toBe(
-      'PROVISIÓN: pago al vendedor por el mismo monto de la comisión cobrada (comisión + IVA = pagoVendedorUsd; neto de VuelaTour = precio base). Aún no hay gasto real: captúralo en Gastos con la categoría «Comisión del vendedor» ligado a este vuelo y reemplaza esta provisión (no lo captures como «Otros gastos VuelaTour»: quedaría duplicado). En la hoja utilidades ya está descontado de "otros ingresos".',
-    );
+  it('textos EXACTOS (sin «provisión» desde el 13-oct-2026, invariante 61)', () => {
     expect(NOTA_PAGO_VENDEDOR_REAL).toBe(
-      'GASTO REAL: pago al vendedor capturado como «Comisión del vendedor» ligado a este vuelo; reemplaza la provisión. En la hoja utilidades ya está descontado de "otros ingresos".',
+      'GASTO REAL: pago al vendedor capturado como «Comisión del vendedor» ligado a este vuelo. En la hoja utilidades ya está descontado de "otros ingresos".',
     );
+    for (const t of [NOTA_PAGO_VENDEDOR_REAL, NOTA_PAGO_VENDEDOR_SIN_LINEA]) {
+      expect(t.toLowerCase()).not.toContain('provisi');
+    }
     expect(NOTA_PAGO_VENDEDOR_SIN_LINEA).toBe(
       'GASTO REAL: pago al vendedor capturado como «Comisión del vendedor» en un vuelo sin comisión cobrada en la cotización (revisa la cotización o el vuelo del gasto). En la hoja utilidades ya está descontado de "otros ingresos".',
     );

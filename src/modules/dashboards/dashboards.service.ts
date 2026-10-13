@@ -168,7 +168,8 @@ export class DashboardsService {
         gastos_usd: round2(gastosAvion),
         saldo_usd: a.saldo_disponible_usd,
         // ADITIVO (6-oct-2026): de `gastos_usd`, las comisiones que absorbe
-        // el avión (parte de la bancaria + provisión del vendedor).
+        // el avión (parte de la bancaria + el pago REAL del vendedor desde
+        // el API 0.0.74, invariante 61; hasta el 0.0.73, su provisión).
         comisiones_usd: round2(comisionesAvion),
       };
     });

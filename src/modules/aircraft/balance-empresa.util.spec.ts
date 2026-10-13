@@ -373,31 +373,69 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     expect(sin.nota).not.toContain('por cobrar');
   });
 
-  it('pago al vendedor cubierto por el avión (API 0.0.66, revisión 7-oct-2026): la nota precisa el egreso; sin la señal (o false), la nota corta byte a byte y el dinero no cambia; desde el 0.0.73 (invariante 58) ninguna dice «real o provisión»: solo el gasto real capturado', () => {
+  it('pago al vendedor A CARGO DEL AVIÓN (API 0.0.74, invariante 61): con la señal la nota dice que el avión lo carga en su columna COMISIONES y aquí egresa $0.00; sin la señal (o false), la nota corta byte a byte; ninguna dice «provisión» y el dinero no cambia', () => {
     const siempre = armarBalanceEmpresa(base);
     const conFalse = armarBalanceEmpresa({
       ...base,
-      pagoVendedorCubiertoPorAvion: false,
+      pagoVendedorACargoDelAvion: false,
     });
-    const cubierto = armarBalanceEmpresa({
+    const aCargo = armarBalanceEmpresa({
       ...base,
-      pagoVendedorCubiertoPorAvion: true,
+      pagoVendedorACargoDelAvion: true,
     });
     expect(conFalse).toEqual(siempre);
     expect(siempre.nota).toContain(
       'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
-    expect(cubierto.nota).toContain(
-      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones, solo lo que ese pago exceda la provisión que ya carga el avión), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+    expect(aCargo.nota).toContain(
+      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
-    // «otros movimientos» ya no provisiona el pago al vendedor (invariante
-    // 58): ninguna de las dos variantes lo promete.
-    for (const b of [siempre, cubierto]) {
-      expect(b.nota).not.toContain('real o provisión');
-      expect(b.nota).not.toContain('o provisión');
+    // Ya no hay provisión en ningún libro (invariantes 58 y 61).
+    for (const b of [siempre, aCargo]) {
+      expect(b.nota.toLowerCase()).not.toContain('provisi');
+      expect(b.nota).not.toContain('exceda');
     }
     // Solo la nota: los números del bloque son los mismos.
-    expect({ ...cubierto, nota: null }).toEqual({ ...siempre, nota: null });
+    expect({ ...aCargo, nota: null }).toEqual({ ...siempre, nota: null });
+  });
+
+  it('una fila «a cargo del avión» (egreso 0, concepto SIN «sin TC») no baja `pagos_vendedor_usd` ni anula el lado; la misma fila con egreso real sí resta', () => {
+    const aCargo = mov({
+      concepto_ingreso: 'comisión vendedor (Pablo Canales)',
+      ingreso_mxn: 1600,
+      concepto_egreso:
+        'pago comisión vendedor (Pablo Canales) · gasto real · a cargo del avión XB-PEV ($1,600.00 en su columna COMISIONES)',
+      egreso_mxn: 0,
+      tc: 20,
+    });
+    const lado = ladoEnUsd([aCargo], 'egreso');
+    expect(lado.sinTc).toBe(0);
+    expect(lado.usd).toBe(0);
+    const b = armarBalanceEmpresa({
+      ...base,
+      movimientos: [aCargo],
+      pagoVendedorACargoDelAvion: true,
+    });
+    expect(b.ingresos_propios_usd).toBe(80);
+    expect(b.pagos_vendedor_usd).toBe(0);
+    expect(b.movimientos_sin_tc).toBe(0);
+    expect(b.resultado_usd).not.toBeNull();
+    // Control: la misma fila pagada por VuelaTour (egreso real) sí resta.
+    const vt = armarBalanceEmpresa({
+      ...base,
+      movimientos: [
+        mov({
+          concepto_ingreso: 'comisión vendedor (Pablo Canales)',
+          ingreso_mxn: 1600,
+          concepto_egreso:
+            'pago comisión vendedor (Pablo Canales) · gasto real',
+          egreso_mxn: 1600,
+          tc: 20,
+        }),
+      ],
+    });
+    expect(vt.pagos_vendedor_usd).toBe(80);
+    expect(b.resultado_usd! - vt.resultado_usd!).toBeCloseTo(80, 10);
   });
 
   it('la nota de la tienda no lleva doble punto', () => {

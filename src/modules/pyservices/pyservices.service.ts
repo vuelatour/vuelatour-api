@@ -109,6 +109,15 @@ export interface RepartoPdfPayload {
   otros_ingresos_vuelatour_desglose?: RepartoOtrosIngresosDesglosePayload;
   /** Nota global del TC oficial de respaldo (29-ago); opcional. */
   tc_oficial?: RepartoTcOficialPayload;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
+   * vendedor resta SOLO como GASTO REAL (gastos «Comisión del vendedor»
+   * ligados al vuelo) — `comisiones_venta_usd` = parte del avión de la
+   * comisión bancaria + el pago REAL (× su parte), sin provisión. Viaja
+   * SIEMPRE desde el 0.0.74; pyservices cambia con ella solo textos
+   * («provisión» ⇒ «pago real»). Un API previo no la manda.
+   */
+  comision_vendedor_solo_gasto_real?: true;
 }
 
 export type TablaColumnaTipo = 'texto' | 'money' | 'numero' | 'entero' | 'pct';
@@ -413,13 +422,18 @@ export interface DineroXlsxPayload {
   utilidades_combustible_mxn?: number | null;
   /**
    * Otros ingresos del mes NETOS del pago al vendedor (Σ ingreso_mxn de la
-   * hoja "otros ingresos" − Σ provisiones de comisión − Σ pagado de verdad
-   * con gastos COMISION_VENDEDOR − comisiones de ingresos): esos egresos no
-   * son gasto de ninguna otra hoja, así que si no se descuentan aquí la
-   * utilidad los cuenta como ingreso puro.
+   * hoja "otros ingresos" − Σ pagado de verdad con gastos COMISION_VENDEDOR
+   * − comisiones de ingresos; hasta el 0.0.73 también − Σ provisiones de
+   * comisión): esos egresos no son gasto de ninguna otra hoja, así que si
+   * no se descuentan aquí la utilidad los cuenta como ingreso puro.
    */
   utilidades_otros_ingresos_mxn?: number | null;
-  /** Provisión VIVA del pago al vendedor (vuelos sin gasto real) ya descontada arriba (informativo). */
+  /**
+   * Provisión VIVA del pago al vendedor (vuelos sin gasto real) ya descontada
+   * arriba (informativo). SIEMPRE 0 desde el API 0.0.74 (invariante 61: ya
+   * no hay provisión en ningún libro); la llave se conserva por compat de
+   * forma — retirar en un lote futuro.
+   */
   utilidades_comision_vendedor_provisionada_mxn?: number | null;
   /**
    * ADITIVO (28-sep-2026, invariante 31): pagado DE VERDAD al vendedor
@@ -431,6 +445,15 @@ export interface DineroXlsxPayload {
   utilidades_otros_gastos_mxn?: number | null;
   utilidades_tc?: number | null;
   utilidades_aviones?: DineroUtilidadAvionPayload[];
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): sin gasto real
+   * «Comisión del vendedor» la fila de comisión de 'Otros ingresos' NO lleva
+   * egreso (ya no hay provisión) y `utilidades_otros_ingresos_mxn` solo
+   * resta lo pagado de verdad. Viaja SIEMPRE desde el 0.0.74; pyservices
+   * cambia con ella solo las leyendas (fila 2 de 'Otros ingresos' y fila 9
+   * de 'utilidades'). Un API previo no la manda.
+   */
+  comision_vendedor_solo_gasto_real?: true;
 }
 
 export interface ReporteVueloPayload {
@@ -808,18 +831,31 @@ export interface BalanceAvionVueloPayload {
    * sin ellas la fila es la de siempre (ganancia = remanente).
    * - `comisiones_mxn`: parte del avión de la comisión bancaria de los
    *   cobros (comisión × el MISMO factor que prorratea el cobro al avión) +
-   *   la PROVISIÓN de la comisión del vendedor (comisión + IVA cotizados al
-   *   K del vuelo × la parte del avión). null = sin comisiones (celda
-   *   vacía). `ganancia_mxn` = round2(remanente − comisiones_mxn).
+   *   el pago REAL del vendedor (desde el 0.0.74, invariante 61: Σ de los
+   *   gastos «Comisión del vendedor» ligados al vuelo × la parte del avión,
+   *   solo en vuelos COMPLETADOS con comisión cotizada; hasta el 0.0.73 era
+   *   la PROVISIÓN = comisión + IVA cotizados al K). null = sin comisiones
+   *   (celda vacía). `ganancia_mxn` = round2(remanente − comisiones_mxn).
    * - `comisiones_detalle`: nota de la celda COMISIONES (una línea por
    *   concepto; con más de uno, primero «N conceptos»).
-   * - `comision_banco_avion_mxn` / `comision_vendedor_prov_mxn`: las dos
+   * - `comision_banco_avion_mxn` / `comision_vendedor_real_mxn`: las dos
    *   partes (0 si no hay); `comisiones_mxn` = su suma.
+   * - `comision_vendedor_prov_mxn`: SIEMPRE 0 desde el 0.0.74 (ya no hay
+   *   provisión; compat de forma — retirar en un lote futuro).
    */
   comisiones_mxn?: number | null;
   comisiones_detalle?: string[];
   comision_banco_avion_mxn?: number;
   comision_vendedor_prov_mxn?: number;
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.74, invariante 61), junto con las llaves
+   * de arriba (solo en filas de la vigencia): la parte de ESTE avión del Σ
+   * de los gastos «Comisión del vendedor» del vuelo, en MXN (0 si el avión
+   * no lo absorbe), y cuántos pagos absorbió (0 = no absorbió, aunque haya
+   * gastos: VuelaTour los paga en «otros movimientos»).
+   */
+  comision_vendedor_real_mxn?: number;
+  comision_vendedor_real_pagos?: number;
 }
 
 export interface BalanceAvionTotalesPayload {
@@ -876,7 +912,14 @@ export interface BalanceAvionTotalesPayload {
    */
   comisiones_mxn?: number | null;
   comision_banco_avion_mxn?: number | null;
+  /** SIEMPRE 0 desde el API 0.0.74 (invariante 61; compat de forma). */
   comision_vendedor_prov_mxn?: number | null;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.74, invariante 61): Σ de las filas de
+   * `comision_vendedor_real_mxn` (libro, `aviones[]` y consolidado), junto
+   * con las llaves de arriba.
+   */
+  comision_vendedor_real_mxn?: number | null;
 }
 
 export interface BalanceAvionGastoFilaPayload {
@@ -1067,7 +1110,8 @@ export interface BalanceAvionBalancePayload {
   /**
    * ADITIVO (7-oct-2026, API 0.0.66) — SOLO si alguna fila de avión del
    * libro cae en la vigencia de `comisiones_al_avion_desde` (sin ella no
-   * viaja: payload byte-idéntico). Las COMISIONES (banco + vendedor) que
+   * viaja: payload byte-idéntico). Las COMISIONES (banco + vendedor; el
+   * vendedor = su pago REAL capturado desde el 0.0.74, invariante 61) que
    * ESTE avión absorbe en el periodo, en USD: Σ por vuelo de
    * `comisionesDelVuelo(...).total_usd`, la MISMA cifra por vuelo que el
    * reparto a socios (`ingresos.comisiones_venta_usd`); el total coincide
@@ -1100,9 +1144,10 @@ export interface BalanceGeneralResumenFilaPayload {
   /** "Gasto de combustible" del mes (hoja combustible del avión). */
   combustible_mxn?: number | null;
   /** COMISIONES que absorbe el avión (6-oct-2026, API 0.0.65): los
-   *  `totales.comisiones_mxn` del libro (banco, parte del avión + provisión
-   *  del vendedor, vuelos desde `comisiones_al_avion_desde`); sin ellas, el
-   *  `comision_vendedor_mxn` de siempre (0, regla A). */
+   *  `totales.comisiones_mxn` del libro (banco, parte del avión + el pago
+   *  REAL del vendedor —gastos «Comisión del vendedor», desde el 0.0.74,
+   *  invariante 61—, vuelos desde `comisiones_al_avion_desde`); sin ellas,
+   *  el `comision_vendedor_mxn` de siempre (0, regla A). */
   comisiones_mxn?: number | null;
   /** VENTA − COSTO − COMBUSTIBLE − COMISIONES = GANANCIA (desde el API
    *  0.0.65 la ganancia de cada libro ya viene después de comisiones; con
@@ -1350,9 +1395,9 @@ export interface BalanceHojaOtrosMovimientosPayload {
   filas_sueltas: BalanceOtroMovimientoFilaPayload[];
   /**
    * ADITIVA (28-sep-2026, invariante 31): `true` SOLO si algún vuelo del
-   * periodo tiene gasto real `COMISION_VENDEDOR` (el pago al vendedor ya
-   * reemplaza a la provisión). Sin pagos reales la clave NO viaja ⇒ payload
-   * byte-idéntico; pyservices cambia sus leyendas solo con ella.
+   * periodo tiene gasto real `COMISION_VENDEDOR` (desde el 0.0.74 no hay
+   * provisión que reemplazar: invariante 61). Sin pagos reales la clave NO
+   * viaja; pyservices cambia sus leyendas solo con ella.
    */
   hay_pago_vendedor_real?: true;
   /**
@@ -1372,6 +1417,16 @@ export interface BalanceHojaOtrosMovimientosPayload {
    * no la manda ⇒ las leyendas de hoy, byte a byte).
    */
   sin_provision_vendedor?: true;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
+   * vendedor resta SOLO como gasto real en todos los libros. En los vuelos
+   * COMPLETADOS de la regla de comisiones con comisión cotizada, el pago
+   * real lo carga el avión en su columna COMISIONES y esta pestaña lo
+   * muestra apareado con egreso $0.00 «· a cargo del avión …». Viaja
+   * SIEMPRE desde el 0.0.74 (pyservices cambia solo leyendas; manda sobre
+   * `sin_provision_vendedor`).
+   */
+  comision_vendedor_solo_gasto_real?: true;
 }
 
 export interface BalanceAvionPayload {
@@ -1430,6 +1485,17 @@ export interface BalanceAvionPayload {
    * pie de la hoja maestra. Un API previo no la manda ⇒ nota de hoy.
    */
   factura_vuelatour_segun_cobros?: true;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
+   * vendedor resta SOLO como gasto real (COMISIONES = parte del avión de la
+   * comisión bancaria + el pago real capturado; sin gasto, solo la
+   * bancaria). Viaja SIEMPRE en el libro individual, en cada `aviones[]`
+   * del general Y en el consolidado FLOTA (a diferencia de
+   * `sin_provision_vendedor`; como `factura_vuelatour_segun_cobros`: las
+   * notas de la hoja de vuelos del general salen del consolidado).
+   * pyservices cambia con ella solo textos. Un API previo no la manda.
+   */
+  comision_vendedor_solo_gasto_real?: true;
 }
 
 export interface GastoVueloSugerenciaPayload {

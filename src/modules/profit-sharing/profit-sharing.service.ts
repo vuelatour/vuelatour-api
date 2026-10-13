@@ -171,17 +171,34 @@ const FIJO = 'FIJO';
 const TUAS_CAT = 'TUAS';
 const TUAS_CLAVE_DETALLE = 'TUAS (egreso VuelaTour — Otros movimientos)';
 /**
- * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): grupo
- * EXCLUIDO del reparto — la comisión cobrada es ingreso de VuelaTour y su
- * pago vive en «otros movimientos» del Balance general apareado con ella;
- * jamás es costo del avión. Espejo EXACTO de `TUAS_CLAVE_DETALLE`: la clave
- * EMPIEZA con el código para que `detalleGastos` derive la etiqueta
- * «Comisión del vendedor (egreso VuelaTour — Otros movimientos)» por
- * `categoria.startsWith(acc.categoria)` (con una clave en español el sufijo
- * se perdía).
+ * PAGO AL VENDEDOR (COMISION_VENDEDOR, 28-sep-2026, invariante 31): por el
+ * eje de `fetchGastos` (fecha_gasto) es SIEMPRE grupo EXCLUIDO — informativo,
+ * jamás suma a `gastos.*`. Desde el 13-oct-2026 (API 0.0.74, invariante 61)
+ * la comisión cuenta en el MES DEL VUELO por OTRA vía: la lectura por vuelo
+ * (`fetchGastosVendedorDeVuelos`) que alimenta `comisionesDelVuelo`; en los
+ * vuelos COMPLETADOS de la regla de comisiones con comisión cotizada el pago
+ * real lo absorbe el avión en `comisiones_venta_usd`. Por fecha_gasto queda
+ * solo como transparencia, con UNA de tres claves (todas EMPIEZAN con el
+ * código para que `detalleGastos` derive «Comisión del vendedor (…)» por
+ * `categoria.startsWith(acc.categoria)`; espejo de `TUAS_CLAVE_DETALLE`):
+ *  - la de siempre: vuelo del periodo cuyo pago NO lo absorbe el avión
+ *    (VuelaTour lo egresa en «otros movimientos» del Balance general);
+ *  - «a cargo del avión»: vuelo del periodo cuyo pago ya resta en Comisiones;
+ *  - «vuelo de otro periodo o aún no completado»: el vuelo del gasto no está
+ *    en este reparto (cuenta en el mes de SU vuelo, nunca por fecha_gasto).
  */
 export const PAGO_VENDEDOR_CLAVE_DETALLE =
   'COMISION_VENDEDOR (egreso VuelaTour — Otros movimientos)';
+/** Pago real que el avión absorbe en Comisiones (invariante 61). */
+export const PAGO_VENDEDOR_AVION_CLAVE_DETALLE =
+  'COMISION_VENDEDOR (gasto real a cargo del avión — resta en Comisiones)';
+/**
+ * Gasto cuyo vuelo NO está en este reparto: de otro periodo o, del mismo,
+ * aún no completado (el reparto solo lee COMPLETADO y CANCELADO). Cuenta en
+ * el mes de SU vuelo, nunca por su fecha_gasto.
+ */
+export const PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE =
+  'COMISION_VENDEDOR (vuelo de otro periodo o aún no completado — cuenta en el mes del vuelo)';
 /**
  * TUA EMBEBIDO en facturas de aeródromo/handling (leído por IA): esa parte se
  * descuenta del costo del avión con la FUENTE ÚNICA `trasladosEmbebidosDeGasto`
@@ -365,6 +382,20 @@ interface GastoRow {
   /** Clon parcial generado por el reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
 }
+/**
+ * Gasto de la lectura POR VUELO del pago al vendedor (13-oct-2026, API
+ * 0.0.74, invariante 61; `fetchGastosVendedorDeVuelos`). Compatible con
+ * `GastoPagoVendedorRow` (`pago-vendedor.util`): `comisionesDelVuelo` lo
+ * convierte con tc_gasto ?? K y filtra la categoría en JS.
+ */
+type GastoVendedorVueloRow = {
+  vuelo_id: string | null;
+  categoria: string;
+  monto: string | number;
+  moneda: string;
+  tc_gasto: string | null;
+  fecha_gasto: string | null;
+};
 interface SocioRow {
   aeronave_id: string;
   socio_id: string;
@@ -519,6 +550,11 @@ export class ProfitSharingService {
           tramos_avion: v.tramos_ruta_avion ?? v.tramos_avion ?? null,
         })),
       })),
+      // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
+      // vendedor resta SOLO como gasto real — `comisiones_venta_usd` = parte
+      // del avión de la bancaria + el pago REAL capturado. pyservices cambia
+      // con ella solo textos («provisión» ⇒ «pago real»). Viaja SIEMPRE.
+      comision_vendedor_solo_gasto_real: true as const,
     };
     return {
       payload,
@@ -603,9 +639,14 @@ export class ProfitSharingService {
         this.vigenciaComisiones(),
       ]);
     const vueloIds = vuelos.map((v) => v.id);
-    const [cobros, escalas] = await Promise.all([
+    const [cobros, escalas, gastosVendedorPorVuelo] = await Promise.all([
       this.fetchCobros(vueloIds),
       this.fetchEscalasHoras(vueloIds),
+      // PAGO REAL AL VENDEDOR por VUELO (13-oct-2026, API 0.0.74, invariante
+      // 61): la comisión cuenta en el mes del VUELO (los gastos de cada
+      // vuelo del periodo, de cualquier fecha_gasto) — la ÚNICA vía por la
+      // que el reparto la resta (`comisionesDelVuelo`).
+      this.fetchGastosVendedorDeVuelos(vueloIds),
     ]);
 
     // Ingreso canónico por vuelo: suma de cobro_vuelo convertida a USD
@@ -768,6 +809,7 @@ export class ProfitSharingService {
         tcOficialVuelo: tcOficial.vuelo,
         tcOficialGasto: tcOficial.gasto,
         vigenciaComisiones,
+        gastosVendedorPorVuelo,
       }),
     );
 
@@ -986,10 +1028,17 @@ export class ProfitSharingService {
       /**
        * Primer día de las comisiones a cargo del avión (6-oct-2026, API
        * 0.0.65): vuelos con `fecha_vuelo` (día Cancún) desde ese día
-       * descuentan la parte del avión de la comisión bancaria y la provisión
-       * del vendedor (`comisionesDelVuelo`).
+       * descuentan la parte del avión de la comisión bancaria y, desde el
+       * 0.0.74 (invariante 61), el pago REAL del vendedor
+       * (`comisionesDelVuelo`).
        */
       vigenciaComisiones: string;
+      /**
+       * Gastos «Comisión del vendedor» de cada vuelo del periodo (13-oct-2026,
+       * invariante 61; `fetchGastosVendedorDeVuelos`, eje = VUELO, de
+       * cualquier fecha_gasto): el pago real que absorbe el avión.
+       */
+      gastosVendedorPorVuelo: Map<string, GastoVendedorVueloRow[]>;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -1049,13 +1098,22 @@ export class ProfitSharingService {
     // COMISIONES A CARGO DEL AVIÓN (cliente, 6-oct-2026, API 0.0.65; vuelos
     // con `fecha_vuelo` desde `comisiones_al_avion_desde`): el avión SÍ
     // absorbe la parte de la comisión BANCARIA con que su cobro se prorratea
-    // y la PROVISIÓN de la comisión del vendedor (lo cobrado al cliente por
-    // ese concepto, que se queda como ingreso de VuelaTour). Fuente única
-    // `comisionesDelVuelo` (la MISMA del balance por avión), en USD, y se
-    // descuentan en `comisiones_venta_usd` (el campo de siempre: PDF/XLSX y
-    // panel ya lo restan en la cascada). Antes de la vigencia, 0 como desde
-    // el 28-ago.
+    // y, desde el 0.0.74 (13-oct-2026, invariante 61), el pago REAL de la
+    // comisión del vendedor (los gastos «Comisión del vendedor» del vuelo,
+    // solo en COMPLETADOS con comisión cotizada; lo cobrado al cliente sigue
+    // siendo ingreso de VuelaTour). Sin gasto capturado no se resta nada (la
+    // provisión murió). Fuente única `comisionesDelVuelo` (la MISMA del
+    // balance por avión), en USD, y se descuentan en `comisiones_venta_usd`
+    // (el campo de siempre: PDF/XLSX y panel ya lo restan en la cascada).
+    // Antes de la vigencia, 0 como desde el 28-ago.
     let comisionesVenta = 0;
+    // Pagos del vendedor en MXN que no llegaron a USD (sin tc_gasto ni K):
+    // la parte de ESTE avión va a `gastos_sin_tc_*` (integridad de siempre).
+    let vendedorSinTcN = 0;
+    let vendedorSinTcMxn = 0;
+    // Vuelos cuyo pago real al vendedor absorbió ESTE avión (solo la clave
+    // EXCLUIDO del detalle por fecha_gasto: «a cargo del avión»).
+    const vuelosVendedorACargo = new Set<string>();
     // Desglose por vuelo: se llena en el MISMO loop y con los MISMOS números
     // que los agregados (misma conversión cobrosEnUsd, misma partición,
     // mismo reparto multi-avión) para que la suma del detalle cuadre exacto
@@ -1121,13 +1179,18 @@ export class ProfitSharingService {
       tc_oficial?: { tc: number; fecha_dato: string; fuente: string };
       /**
        * ADITIVOS (6-oct-2026, API 0.0.65): comisiones que ESTE avión absorbe
-       * del vuelo (USD; parte de la comisión bancaria + provisión del
-       * vendedor). SOLO en vuelos de la vigencia; Σ ==
-       * `ingresos.comisiones_venta_usd`.
+       * del vuelo (USD; parte de la comisión bancaria + el pago REAL del
+       * vendedor desde el 0.0.74, invariante 61). SOLO en vuelos de la
+       * vigencia; Σ == `ingresos.comisiones_venta_usd`.
+       * `comision_vendedor_prov_usd`: SIEMPRE 0 desde el 0.0.74 (ya no hay
+       * provisión; compat de forma — retirar en un lote futuro).
+       * `comision_vendedor_real_usd` (ADITIVO, 0.0.74): parte de ESTE avión
+       * del Σ de gastos «Comisión del vendedor» del vuelo, en USD.
        */
       comisiones_avion_usd?: number;
       comision_banco_avion_usd?: number;
       comision_vendedor_prov_usd?: number;
+      comision_vendedor_real_usd?: number;
     }> = [];
     for (const v of ctx.vuelos) {
       // Regla B: el vuelo entra al avión si voló al menos un tramo activo
@@ -1184,9 +1247,12 @@ export class ProfitSharingService {
         repartirUsd(monto, part).get(a.id) ?? 0;
       // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): misma fuente
       // única y mismos insumos que la fila del balance — cobros del vuelo,
-      // K (capturado ?? oficial del día de la cotización), la partición, el
-      // estado (CANCELADO ⇒ factor 1 y sin provisión; la provisión solo en
-      // COMPLETADO) y la parte de ESTE avión (`parte`, repartirUsd). En USD.
+      // gastos «Comisión del vendedor» del vuelo (13-oct-2026, invariante
+      // 61: la lectura POR VUELO, de cualquier fecha_gasto — la comisión
+      // cuenta en el mes del VUELO), K (capturado ?? oficial del día de la
+      // cotización), la partición, el estado (CANCELADO ⇒ factor 1 y el
+      // avión no absorbe el pago al vendedor; solo en COMPLETADO) y la parte
+      // de ESTE avión (`parte`, repartirUsd). En USD.
       const diaVuelo = diaCancun(v.fecha_vuelo);
       const comisionesVuelo: ComisionesDelVuelo | null =
         aplicaComisionesAlAvion(diaVuelo, ctx.vigenciaComisiones)
@@ -1194,6 +1260,7 @@ export class ProfitSharingService {
               diaVuelo,
               vigenteDesde: ctx.vigenciaComisiones,
               cobros: ctx.cobrosPorVuelo.get(v.id) ?? [],
+              gastos: ctx.gastosVendedorPorVuelo.get(v.id) ?? [],
               tcVenta: pos(v.tc_usd_mxn) ?? tcOficialVuelo?.tc ?? null,
               particion: p,
               estado: v.estado,
@@ -1201,7 +1268,21 @@ export class ProfitSharingService {
               participacion: factor,
             })
           : null;
-      if (comisionesVuelo != null) comisionesVenta += comisionesVuelo.total_usd;
+      if (comisionesVuelo != null) {
+        comisionesVenta += comisionesVuelo.total_usd;
+        // Pagos MXN del vendedor sin T.C. (ni tc_gasto ni K): no restan en
+        // USD — su parte de ESTE avión se grita en `gastos_sin_tc_*`.
+        if (comisionesVuelo.vendedor_usd_sin_tc_mxn > 0) {
+          vendedorSinTcN += comisionesVuelo.vendedor_usd_sin_tc_n;
+          vendedorSinTcMxn += comisionesVuelo.vendedor_usd_sin_tc_mxn;
+        }
+        if (
+          comisionesVuelo.vendedor_absorbe &&
+          comisionesVuelo.vendedor_pagos_n > 0
+        ) {
+          vuelosVendedorACargo.add(v.id);
+        }
+      }
       const ventaAvion = parte(ventaAvionVuelo);
       const cobradoAvion = parte(cobradoAvionVuelo);
       const pendienteAvion = parte(pendienteAvionVuelo);
@@ -1335,7 +1416,9 @@ export class ProfitSharingService {
           ? {
               comisiones_avion_usd: comisionesVuelo.total_usd,
               comision_banco_avion_usd: comisionesVuelo.banco_usd,
-              comision_vendedor_prov_usd: comisionesVuelo.vendedor_usd,
+              // Siempre 0 desde el 0.0.74 (invariante 61; compat de forma).
+              comision_vendedor_prov_usd: 0,
+              comision_vendedor_real_usd: comisionesVuelo.vendedor_usd,
             }
           : {}),
       });
@@ -1359,6 +1442,16 @@ export class ProfitSharingService {
     let tuaEmbebidoCount = 0;
     let extensionEmbebidaUsd = 0;
     let extensionEmbebidaCount = 0;
+    // Clave EXCLUIDO del pago al vendedor por el eje fecha_gasto (13-oct-2026,
+    // invariante 61): SOLO transparencia — ninguna suma a `gastos.*`; la
+    // comisión ya contó (o contará) por la lectura POR VUELO.
+    const vuelosDelPeriodo = new Set(ctx.vuelos.map((v) => v.id));
+    const clavePagoVendedor = (g: GastoRow): string =>
+      g.vuelo_id != null && !vuelosDelPeriodo.has(g.vuelo_id)
+        ? PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE
+        : g.vuelo_id != null && vuelosVendedorACargo.has(g.vuelo_id)
+          ? PAGO_VENDEDOR_AVION_CLAVE_DETALLE
+          : PAGO_VENDEDOR_CLAVE_DETALLE;
     for (const g of ctx.gastos) {
       // Avión del gasto (Regla B, misma prioridad en todos los lectores):
       // avión del TRAMO ligado (con herencia) → avión sellado en el gasto →
@@ -1392,6 +1485,8 @@ export class ProfitSharingService {
         categoriaEsDeEmpresa(g.categoria) && !g.es_reparto_parcial;
       // Pago al vendedor (invariante 31): EXCLUIDO explícito (antes de la
       // regla ya caía al default EXCLUIDO; la rama lo hace a propósito).
+      // Desde el 0.0.74 (invariante 61) cuenta por la lectura POR VUELO
+      // (`comisionesDelVuelo`); por fecha_gasto JAMÁS suma (sería doble).
       const esPagoVendedor = categoriaEsPagoVendedor(g.categoria);
       const grupo: GrupoGasto =
         // TUA pagado (regla 7): jamás costo del avión, con o sin reparto.
@@ -1423,7 +1518,7 @@ export class ProfitSharingService {
       const clave = esTuas
         ? TUAS_CLAVE_DETALLE
         : esPagoVendedor
-          ? PAGO_VENDEDOR_CLAVE_DETALLE
+          ? clavePagoVendedor(g)
           : g.es_reparto_parcial
             ? `${g.categoria} (repartido)`
             : g.categoria;
@@ -1460,13 +1555,21 @@ export class ProfitSharingService {
           : g,
         ctx.tcOficialGasto,
       );
+      // El pago al vendedor que ESTE avión absorbe (13-oct-2026, invariante
+      // 61) tiene su integridad en la lectura POR VUELO (convertido con
+      // tc_gasto ?? K; `vendedor_usd_sin_tc_*` ⇒ `gastos_sin_tc_*`): por
+      // fecha_gasto no se cuenta OTRA vez como «sin T.C.» ni como «T.C.
+      // oficial» (un gasto, UNA vez también en los avisos).
+      const integridadPorVuelo = clave === PAGO_VENDEDOR_AVION_CLAVE_DETALLE;
       if (conv === null) {
-        acc.sin_tc_count += 1;
-        acc.sin_tc_mxn += Number(g.monto);
+        if (!integridadPorVuelo) {
+          acc.sin_tc_count += 1;
+          acc.sin_tc_mxn += Number(g.monto);
+        }
       } else {
         acc.count += 1;
         acc.usd += conv.usd;
-        if (conv.oficial) {
+        if (conv.oficial && !integridadPorVuelo) {
           acc.tc_oficial_count += 1;
           acc.tc_oficial_mxn += Number(g.monto);
         }
@@ -1532,6 +1635,10 @@ export class ProfitSharingService {
       tcOficialCount += acc.tc_oficial_count;
       tcOficialMxn += acc.tc_oficial_mxn;
     }
+    // Pagos del vendedor en MXN que no llegaron a USD (13-oct-2026,
+    // invariante 61): la parte de ESTE avión, como cualquier gasto sin T.C.
+    sinTc += vendedorSinTcN;
+    sinTcMxn += vendedorSinTcMxn;
     const detalleGastos = [...porCategoria.entries()]
       .map(([categoria, acc]) => ({
         categoria,
@@ -1641,10 +1748,11 @@ export class ProfitSharingService {
           otrosIngresosVTPendiente,
         ),
         // COMISIONES A CARGO DEL AVIÓN (6-oct-2026, API 0.0.65): Σ de las
-        // comisiones que absorbe (parte de la bancaria + provisión del
-        // vendedor) en los vuelos de la vigencia; 0 antes de ella. Resta en
-        // `saldo_disponible_usd` (la cascada de siempre) y por lo tanto en
-        // el reparto, las utilidades por mes y la cuenta corriente.
+        // comisiones que absorbe (parte de la bancaria + el pago REAL del
+        // vendedor desde el 0.0.74, invariante 61) en los vuelos de la
+        // vigencia; 0 antes de ella. Resta en `saldo_disponible_usd` (la
+        // cascada de siempre) y por lo tanto en el reparto, las utilidades
+        // por mes y la cuenta corriente.
         comisiones_venta_usd: comisionesR,
         // Parte del AVIÓN aún no cobrada (coherente con la cascada: es lo que
         // le falta al avión para repartir). El nombre se conserva (PDF/XLSX/
@@ -3442,6 +3550,44 @@ export class ProfitSharingService {
       .in('vuelo_id', vueloIds);
     if (error) throw new Error(error.message);
     return data ?? [];
+  }
+
+  /**
+   * PAGO REAL AL VENDEDOR POR VUELO (13-oct-2026, API 0.0.74, invariante 61):
+   * los gastos de los vuelos del periodo, de CUALQUIER fecha_gasto (el eje es
+   * el VUELO: un pago capturado en octubre de un vuelo de septiembre cuenta
+   * en septiembre). Lotes de ≤ 200 ids y páginas de 1000 ordenadas por `id`
+   * (`leerEnLotesPaginado`: PostgREST corta en max-rows sin avisar). SIN
+   * `.eq('categoria', …)` a propósito (invariante 31: un literal de enum que
+   * la BD no tenga revienta la LECTURA con 22P02 y tumbaría el reparto
+   * completo): la categoría se filtra AQUÍ, en JS, y el mapa solo guarda los
+   * `COMISION_VENDEDOR`. Es la ÚNICA vía por la que el reparto cuenta la
+   * comisión; `fetchGastos` (eje fecha_gasto) la sigue dejando EXCLUIDA.
+   */
+  private async fetchGastosVendedorDeVuelos(
+    vueloIds: string[],
+  ): Promise<Map<string, GastoVendedorVueloRow[]>> {
+    const out = new Map<string, GastoVendedorVueloRow[]>();
+    if (vueloIds.length === 0) return out;
+    const filas = await this.leerEnLotesPaginado(
+      vueloIds,
+      (lote, desde, hasta) =>
+        this.supabase.service
+          .from('gasto')
+          .select('vuelo_id, categoria, monto, moneda, tc_gasto, fecha_gasto')
+          .in('vuelo_id', lote)
+          .order('id', { ascending: true })
+          .range(desde, hasta),
+    );
+    for (const f of filas) {
+      const g = f as unknown as GastoVendedorVueloRow;
+      if (typeof g.vuelo_id !== 'string') continue;
+      if (!categoriaEsPagoVendedor(g.categoria)) continue;
+      const lista = out.get(g.vuelo_id) ?? [];
+      lista.push(g);
+      out.set(g.vuelo_id, lista);
+    }
+    return out;
   }
 
   private async fetchEscalasHoras(

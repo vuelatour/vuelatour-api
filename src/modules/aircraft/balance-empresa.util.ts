@@ -17,9 +17,10 @@ import type {
  *    vuelo; una suelta, el T.C. que la convirtió o el oficial del día).
  *    BASE (revisión 6-oct-2026): el ingreso de esa hoja es lo COTIZADO de
  *    los vuelos del periodo no cancelados —COTIZADO y RESERVA incluidos—,
- *    no lo cobrado; el egreso, todo lo que la hoja resta (pagado o
- *    provisionado). La parte de VuelaTour AÚN POR COBRAR viaja aparte e
- *    INFORMATIVA (`ingresos_por_cobrar_usd`): no se resta.
+ *    no lo cobrado; el egreso, todo lo que la hoja resta (lo pagado; desde
+ *    el 0.0.73-0.0.74 ya no hay provisión del vendedor, invariantes 58 y
+ *    61). La parte de VuelaTour AÚN POR COBRAR viaja aparte e INFORMATIVA
+ *    (`ingresos_por_cobrar_usd`): no se resta.
  *  - OTROS GASTOS de la empresa: EXACTAMENTE el TOTAL USD de la hoja «otros
  *    gastos» (total MXN ÷ T.C. promedio de la flota).
  *  - TIENDA: la utilidad de la hoja «inventario» ÷ el mismo T.C. promedio.
@@ -204,14 +205,16 @@ export interface InsumosBalanceEmpresa {
     total_utilidad_usd?: number | null;
   } | null;
   /**
-   * ¿Algún avión del periodo cubre con su PROVISIÓN el pago al vendedor de
-   * un vuelo (API 0.0.66: comisiones a cargo del avión, vuelo COMPLETADO de
-   * la vigencia)? Solo cambia la NOTA: «Egresos = pago al vendedor (real o
-   * provisión…» se precisa con que en esos vuelos la pestaña solo trae lo
-   * que el pago real EXCEDE la provisión (revisión 7-oct-2026). Ausente o
-   * false ⇒ la nota de siempre, byte a byte.
+   * ¿Algún avión del periodo carga en su columna COMISIONES el pago REAL al
+   * vendedor de un vuelo (13-oct-2026, API 0.0.74, invariante 61: vuelo
+   * COMPLETADO de la regla de comisiones con comisión cotizada y gasto
+   * «Comisión del vendedor» capturado)? Solo cambia la NOTA: en esos vuelos
+   * la pestaña trae el pago apareado con egreso $0.00 «a cargo del avión».
+   * La aritmética no cambia: `pagos_vendedor_usd` = Σ egresos de la pestaña
+   * y esas filas valen 0 (el pago ya restó en el avión: nunca dos veces).
+   * Ausente o false ⇒ la nota corta de siempre, byte a byte.
    */
-  pagoVendedorCubiertoPorAvion?: boolean;
+  pagoVendedorACargoDelAvion?: boolean;
 }
 
 /** Arma el bloque «VUELATOUR (empresa)» — fuente ÚNICA de su aritmética. */
@@ -289,7 +292,7 @@ export function armarBalanceEmpresa(
       utilidadTiendaMxn,
       tiendaSinTc,
       utilidadTiendaUsdLegado: num(e.inventario?.total_utilidad_usd),
-      pagoVendedorCubiertoPorAvion: e.pagoVendedorCubiertoPorAvion === true,
+      pagoVendedorACargoDelAvion: e.pagoVendedorACargoDelAvion === true,
     }),
     movimientos_sin_tc: movimientosSinTc,
     ingresos_por_cobrar_usd: ingresosPorCobrarUsd,
@@ -310,7 +313,7 @@ function notaBalanceEmpresa(n: {
   utilidadTiendaMxn: number | null;
   tiendaSinTc: boolean;
   utilidadTiendaUsdLegado: number | null;
-  pagoVendedorCubiertoPorAvion: boolean;
+  pagoVendedorACargoDelAvion: boolean;
 }): string {
   const aviones = [...new Set(n.participaciones.map((p) => p.matricula))];
   // Revisión 6-oct-2026: la nota NOMBRA el avión que vacía la participación
@@ -332,17 +335,16 @@ function notaBalanceEmpresa(n: {
         }.`
       : 'Participación: la empresa no es socia de ningún avión del periodo.',
   );
-  // Revisión 7-oct-2026 (API 0.0.66): con vuelos cuyo pago al vendedor ya
-  // cubre la provisión de los aviones, el texto corto a secas contradecía
-  // el pie de pyservices («los egresos propios solo traen lo que el pago
-  // real la exceda»): la nota lo precisa. Sin esos vuelos, el texto corto.
   // Revisión 12-oct-2026 (API 0.0.73, invariante 58): «otros movimientos» ya
   // NO provisiona el pago al vendedor (sin gasto real la fila no lleva
-  // egreso), así que el «real o provisión» de hasta el 0.0.72 era falso y
-  // chocaba con la fila 2 y el pie nuevos de pyservices: el único egreso del
-  // vendedor es el gasto real «Comisión del vendedor» capturado.
-  const pagoVendedor = n.pagoVendedorCubiertoPorAvion
-    ? 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones, solo lo que ese pago exceda la provisión que ya carga el avión)'
+  // egreso): el único egreso del vendedor es el gasto real «Comisión del
+  // vendedor» capturado. Desde el 13-oct-2026 (API 0.0.74, invariante 61)
+  // tampoco el avión carga provisión: en los vuelos completados de la regla
+  // de comisiones el pago real lo carga el avión en su columna COMISIONES y
+  // la pestaña lo trae con egreso $0.00 — con esos vuelos la nota lo dice;
+  // sin ellos, el texto corto de siempre.
+  const pagoVendedor = n.pagoVendedorACargoDelAvion
+    ? 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00)'
     : 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado)';
   partes.push(
     "Ingresos y egresos propios: hoja 'otros movimientos' (por vuelo y sueltas), " +

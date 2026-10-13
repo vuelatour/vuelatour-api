@@ -22,14 +22,16 @@ import {
  *  - #504 EXTERNO sin avión (18-sep, K 18): 1,000 USD, cobro 18,000 MXN con
  *    900 de comisión bancaria (sin avión que absorba nada).
  *  - #505 XB-DOS (22-sep, K 18): 1,150 USD = 1,000 + 150 de comisión (Pablo
- *    Canales); cobrado; PAGO REAL al vendedor 3,000 MXN > provisión 2,700.
+ *    Canales); cobrado; PAGO REAL al vendedor 3,000 MXN > lo cobrado por la
+ *    comisión (2,700).
  *  - #506 XB-TST (24-sep, K 18): 1,100 USD = 1,000 + 100 de comisión (Alex
  *    Saab); cobro Paywise 19,800 MXN con 594 de comisión; PAGO REAL 1,500 MXN
- *    < provisión 1,800 (parcial: faltan 300).
+ *    < lo cobrado (1,800: parcial, faltan 300).
  *  - #507 XB-DOS (4-sep, K 16.956) — el caso del cliente (#247): desglose
  *    v1.3 con IVA 16 %: 1,000 de tiempo + 278 de comisión (Pablo Canales) +
- *    204.48 de IVA = 1,482.48 USD; provisión 322.48 USD × 16.956 =
- *    $5,467.97; cobrado en USD.
+ *    204.48 de IVA = 1,482.48 USD; comisión + IVA cobrados = 322.48 USD ×
+ *    16.956 = $5,467.97 (hasta el API 0.0.73, la provisión del avión); sin
+ *    pago real capturado; cobrado en USD.
  *  - #513 XB-TST CONFIRMADO (25-sep, K 18): 1,080 USD = 1,000 + 80 (Saab);
  *    ANTICIPO 9,720 MXN con 486 de comisión bancaria (el reparto no lee el
  *    vuelo; el balance sí cuenta su cobro y su comisión).
@@ -326,9 +328,10 @@ export const V22 = 'v-22';
  * + #521 XB-DOS SIN K (27-sep, COMPLETADO): 1,100 USD = 1,000 de tiempo + 100
  * de comisión del vendedor («Sin K»), sin T.C. capturado (y el spec no da
  * oficial); cobro 19,800 MXN con T.C. propio 18 y 396 de comisión bancaria.
- * La provisión del vendedor NO llega a pesos (`vendedor_sin_tc`); la parte
- * del avión de la comisión bancaria sí (396 × 1,000/1,100 = 360). Sin K la
- * venta tampoco llega a pesos: remanente 0 y ganancia −360.
+ * Sin gasto real el vendedor no resta nada (hasta el API 0.0.73 la provisión
+ * no llegaba a pesos, `vendedor_sin_tc`); la parte del avión de la comisión
+ * bancaria sí (396 × 1,000/1,100 = 360). Sin K la venta tampoco llega a
+ * pesos: remanente 0 y ganancia −360.
  */
 export function conVueloSinK(m: Mundo): Mundo {
   return {
@@ -374,9 +377,10 @@ export function mundoDosSoloSinK(): Mundo {
 /**
  * + #522 XB-DOS (28-sep, K 18, COMPLETADO) con DOS líneas
  * `COMISION_VENDEDOR` en el desglose (100 + 50 USD, Pablo Canales): la
- * partición suma las dos (150 USD ⇒ provisión de 2,700 MXN en la fila) y
- * «otros movimientos» lista dos ingresos (1,800 + 900). `pagoMxn` = pago
- * real al vendedor (gasto `COMISION_VENDEDOR`); null = sin pago.
+ * partición suma las dos (150 USD = 2,700 MXN cobrados) y «otros
+ * movimientos» lista dos ingresos (1,800 + 900). `pagoMxn` = pago real al
+ * vendedor (gasto `COMISION_VENDEDOR`; desde el API 0.0.74 lo carga el
+ * avión en COMISIONES); null = sin pago.
  */
 export function conVueloDosComisiones(m: Mundo, pagoMxn: number | null): Mundo {
   return {

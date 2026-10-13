@@ -411,8 +411,9 @@ const INGRESOS_LIBROS: Fila[] = [
  * fila ya NO provisiona el pago al vendedor (egreso 1,850 = TUAS + comisión
  * bancaria, remanente 2,750; hasta el 0.0.72 llevaba la PROVISIÓN de
  * $1,600.00: egreso 3,450, remanente 1,150) y la hoja lleva la bandera
- * `sin_provision_vendedor: true` al final. Lo que prueba este spec —los
- * ingresos sin vuelo— no cambia.
+ * `sin_provision_vendedor: true` al final y, desde el 13-oct-2026 (API
+ * 0.0.74, invariante 61), `comision_vendedor_solo_gasto_real: true` después.
+ * Lo que prueba este spec —los ingresos sin vuelo— no cambia.
  */
 const GOLDEN_OM = {
   filas: [
@@ -466,6 +467,7 @@ const GOLDEN_OM = {
     },
   ],
   sin_provision_vendedor: true,
+  comision_vendedor_solo_gasto_real: true,
 } as unknown as BalanceHojaOtrosMovimientosPayload;
 
 type PrivadoOM = {

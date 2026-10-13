@@ -394,7 +394,14 @@ const INGRESOS_LIBROS: Fila[] = [
 ];
 // ===== fin del mundo compartido =====
 
-/** Payload del Libro Dinero ANTES del cambio (código sin modificar). */
+/**
+ * Payload del Libro Dinero ANTES del cambio (código sin modificar). Desde el
+ * 13-oct-2026 (API 0.0.74, invariante 61) sin la PROVISIÓN del vendedor: la
+ * fila de la comisión del #501 no lleva egreso (remanente = ingreso 1,600),
+ * `utilidades_otros_ingresos_mxn` 3,000 ⇒ 4,600, la provisionada en 0 y la
+ * bandera `comision_vendedor_solo_gasto_real: true` al final. Lo que prueba
+ * este spec —los ingresos sin vuelo— no cambia.
+ */
 const GOLDEN_DINERO = {
   periodo_desde: '2026-09-01',
   periodo_hasta: '2026-09-30',
@@ -476,15 +483,14 @@ const GOLDEN_DINERO = {
     {
       clave: 'vtleticia',
       fecha_vuelo: '2026-09-10T15:00:00+00:00',
-      concepto_egreso: 'pago comisión vendedor (Vendedor Uno) · provisión',
-      egreso_mxn: 1600,
-      fecha_egreso: '2026-09-10T15:00:00+00:00',
-      nota_egreso:
-        'PROVISIÓN: pago al vendedor por el mismo monto de la comisión cobrada (comisión + IVA = pagoVendedorUsd; neto de VuelaTour = precio base). Aún no hay gasto real: captúralo en Gastos con la categoría «Comisión del vendedor» ligado a este vuelo y reemplaza esta provisión (no lo captures como «Otros gastos VuelaTour»: quedaría duplicado). En la hoja utilidades ya está descontado de "otros ingresos".',
+      concepto_egreso: null,
+      egreso_mxn: null,
+      fecha_egreso: null,
+      nota_egreso: null,
       concepto_ingreso: 'comisión vendedor (Vendedor Uno)',
       ingreso_mxn: 1600,
       fecha_ingreso: '2026-09-10T15:00:00+00:00',
-      remanente_mxn: 0,
+      remanente_mxn: 1600,
       factura: ETIQUETA_FACTURA_NO_LLEVA,
     },
   ],
@@ -527,8 +533,8 @@ const GOLDEN_DINERO = {
   combustible_precio_litro: 32.5,
   combustible_sin_avion: 1,
   utilidades_combustible_mxn: 3250,
-  utilidades_otros_ingresos_mxn: 3000,
-  utilidades_comision_vendedor_provisionada_mxn: 1600,
+  utilidades_otros_ingresos_mxn: 4600,
+  utilidades_comision_vendedor_provisionada_mxn: 0,
   utilidades_otros_gastos_mxn: 700,
   utilidades_tc: 20,
   utilidades_aviones: [
@@ -540,6 +546,7 @@ const GOLDEN_DINERO = {
       combustible_mxn: 3000,
     },
   ],
+  comision_vendedor_solo_gasto_real: true,
 } as unknown as DineroXlsxPayload;
 
 type Privado = {
@@ -621,8 +628,8 @@ describe('Libro Dinero — ingresos sin vuelo (24-sep-2026)', () => {
           100,
       ) / 100,
     );
-    // Nada más cambia (ni vuelos, ni otros gastos, ni combustible, ni la
-    // provisión del vendedor).
+    // Nada más cambia (ni vuelos, ni otros gastos, ni combustible, ni el
+    // pago al vendedor).
     const sinIngresos = {
       ...p,
       otros_ingresos: p.otros_ingresos.slice(0, n),

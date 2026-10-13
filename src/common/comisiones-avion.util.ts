@@ -36,37 +36,61 @@
  *    comisión del dinero que no le toca. Sin sobrecobro, `factor_avion`.
  *    La comisión bancaria aplica en CUALQUIER estado: sigue al cobro, que el
  *    balance cuenta (un anticipo de un CONFIRMADO ya entró a la cuenta).
- *  - VENDEDOR: la PROVISIÓN = lo cobrado al cliente por ese concepto
- *    (`pagoVendedorUsd`: comisión + su IVA si la cotización grava, fuente
- *    única) × la parte del avión (`parteAvion`); en MXN al T.C. de venta (K)
- *    del vuelo. SOLO en un vuelo COMPLETADO (revisión 6-oct-2026: el MISMO
- *    universo que el reparto a socios, que solo lee COMPLETADO y CANCELADO).
- *    Un vuelo aún no realizado (SOLICITUD, COTIZADO, RESERVA, CONFIRMADO,
- *    EN_VUELO) no se ha vendido: el balance lo lista con su venta, que POR
- *    COBRAR neutraliza, pero su provisión restaba de la utilidad cobrada y
- *    de los socios una comisión que todavía no existe (y el balance dejaba
- *    de cuadrar con el reparto). Nunca en un CANCELADO (no se vendió) ni con
- *    la partición inconsistente (no hay comisión que separar: misma regla
- *    que «otros movimientos»). NO depende del gasto real `COMISION_VENDEDOR`:
- *    desde el 0.0.66 (7-oct-2026) ese pago, en «otros movimientos», solo le
- *    cuesta a VuelaTour lo que EXCEDE la provisión que ya cargan los aviones
- *    (`pagoVendedorCubiertoPorAvion`, abajo).
+ *  - VENDEDOR = SOLO EL GASTO REAL (13-oct-2026, API 0.0.74, invariante 61;
+ *    decisión 3 del lote del cliente: «comisión del vendedor SOLO como gasto
+ *    real en todos lados»). Lo que resta es Σ de los gastos
+ *    `COMISION_VENDEDOR` LIGADOS AL VUELO (`gastos` de la entrada: TODOS los
+ *    gastos del vuelo, sin filtrar por avión sellado —el avión del gasto es
+ *    solo referencia, invariante 31—; la categoría se filtra aquí con
+ *    `pagosVendedorDeVuelo`, en JS, nunca en el query). La PROVISIÓN
+ *    (`pagoVendedorUsd`: comisión cotizada + IVA) YA NO resta en ningún
+ *    libro: sin gasto capturado el avión no resta nada (COMISIONES = solo su
+ *    parte de la comisión bancaria, que es REAL).
+ *    QUIÉN LA CARGA (nunca dos veces) — universo EXACTO de la invariante 50
+ *    más n ≥ 1: el avión absorbe el pago real cuando el vuelo está en la
+ *    vigencia ∧ `estado === 'COMPLETADO'` ∧ partición consistente ∧
+ *    `pagoVendedorUsd(p) > 0` ∧ la fila es de un AVIÓN con parte de la
+ *    venta (el lector no llama al util para EXTERNOS) ∧ hay gastos. Esa
+ *    puerta es `vendedor_absorbe` (independiente de los gastos: con ella y
+ *    n = 0 el balance grita el pendiente de captura). Fuera de ella (antes
+ *    de la vigencia, CONFIRMADO/COTIZADO/RESERVA/EN_VUELO, CANCELADO,
+ *    partición inconsistente, sin comisión cotizada, EXTERNOS) el avión
+ *    manda 0 y VuelaTour paga el gasto real en «otros movimientos» con sus
+ *    ramas de siempre. En los vuelos que el avión absorbe, «otros
+ *    movimientos» conserva el INGRESO cobrado (una vez) y muestra el pago
+ *    con egreso $0.00 «· a cargo del avión …»
+ *    (`conceptoPagoVendedorACargoDelAvion`, abajo).
+ *    MES EN QUE CUENTA = el del VUELO (`fecha_vuelo`, día Cancún), nunca
+ *    `fecha_gasto`: los tres libros leen los gastos del vuelo por `vuelo_id`
+ *    sin filtro de fecha; el pago es una partida del vuelo (se aparea con su
+ *    ingreso y con la venta de ese avión en esa fila); un gasto tiene UN
+ *    `vuelo_id` y un vuelo UNA `fecha_vuelo` ⇒ cae en UN mes y UN libro por
+ *    construcción; el reparto arma sus vuelos por `fecha_vuelo` y así
+ *    `balance.comisiones_usd == ingresos.comisiones_venta_usd` fila por fila.
  *
  * MXN (balance) y USD (reparto) salen del MISMO recorrido:
  *  - cobro MXN: comisión MXN tal cual; USD = comisión ÷ (T.C. del cobro ?? K)
  *    — la cadena de `cobrosEnUsd`.
  *  - cobro USD: comisión USD tal cual; MXN = comisión × (T.C. del cobro ?? K)
  *    — la cadena del balance.
+ *  - gasto MXN: MXN tal cual; USD = monto ÷ (tc_gasto > 0 ?? K).
+ *  - gasto USD: USD tal cual; MXN = monto × (tc_gasto > 0 ?? K).
+ *  - suma CRUDA y `round2` UNA vez por moneda (`pagosVendedorDeVuelo` con
+ *    dos conversores inyectados), después `parteAvion`.
  *  - sin ningún T.C. ese lado no se convierte ni se suma (`banco_sin_tc`
- *    cuenta las que no llegan a MXN y la nota lo dice): jamás un 0 falso.
+ *    cuenta las comisiones bancarias que no llegan a MXN; `vendedor_sin_tc`
+ *    = algún pago USD no llegó a pesos —pendiente del balance; el reparto sí
+ *    lo resta en USD—; `vendedor_usd_sin_tc_n` / `vendedor_usd_sin_tc_mxn`
+ *    = pagos MXN que no llegaron a dólares y su parte del avión en MXN, que
+ *    el reparto manda a `gastos_sin_tc_mxn`): jamás un 0 falso.
  *
  * PURO (sin Nest, sin consultas). `detalle` = la nota de la celda COMISIONES:
  * una línea por concepto y, con más de uno, el encabezado «N conceptos».
  */
 import { cobrosEnUsd } from './cobros-usd.util';
+import { categoriaEsPagoVendedor } from './categoria-gasto.util';
 import {
   cobradoParteAvion,
-  ivaComisionVendedorUsd,
   pagoVendedorUsd,
   sobrecobroUsd,
   type ParticionIngreso,
@@ -74,6 +98,9 @@ import {
 import { etiquetaMetodoCobro } from './metodo-cobro.util';
 import {
   TOLERANCIA_PAGO_VENDEDOR_MXN,
+  cuerpoGastoRealPagoVendedor,
+  pagosVendedorDeVuelo,
+  type GastoPagoVendedorRow,
   type PagosVendedorDeVuelo,
 } from './pago-vendedor.util';
 
@@ -108,17 +135,26 @@ export interface ComisionesDelVueloInput {
   /** Cobros del VUELO (todos; los que no traen comisión no cuentan). */
   cobros: ReadonlyArray<CobroComisionAvionInput>;
   /**
+   * TODOS los gastos del VUELO (sin filtrar por avión sellado: una comisión
+   * sellada a otro avión sigue siendo de este vuelo, invariante 31). El
+   * util filtra la categoría `COMISION_VENDEDOR` en JS
+   * (`pagosVendedorDeVuelo`); los demás gastos no cuentan. OBLIGATORIO: un
+   * caller que lo olvide dejaría la parte del vendedor en 0 en silencio
+   * (tsc lo delata; los specs sin gastos pasan `[]`).
+   */
+  gastos: ReadonlyArray<GastoPagoVendedorRow>;
+  /**
    * T.C. de venta del vuelo (K: el de la cotización o el oficial de su día):
-   * respaldo de los cobros sin T.C. propio y conversión de la provisión.
+   * respaldo de los cobros y de los gastos sin T.C. propio.
    */
   tcVenta: number | null | undefined;
   /** Partición del ingreso (`particionIngresoVuelo`) del vuelo. */
   particion: ParticionIngreso | null;
   /**
    * `vuelo.estado`. CANCELADO ⇒ lo retenido es 100 % del avión (factor 1)
-   * y no hay provisión; la PROVISIÓN del vendedor solo en COMPLETADO (ver la
-   * cabecera). Un solo dato para las dos reglas: los lectores no pueden
-   * mandarlas contradictorias.
+   * y el avión no absorbe el pago al vendedor; el pago REAL del vendedor
+   * solo lo absorbe en COMPLETADO (ver la cabecera). Un solo dato para las
+   * dos reglas: los lectores no pueden mandarlas contradictorias.
    */
   estado: string | null | undefined;
   /**
@@ -140,9 +176,12 @@ export interface ComisionesDelVuelo {
   banco_mxn: number;
   /** La misma parte en USD (reparto a socios). */
   banco_usd: number;
-  /** Provisión del vendedor × parte del avión (MXN, al K del vuelo). */
+  /**
+   * Pago REAL al vendedor (gastos `COMISION_VENDEDOR` del vuelo) × la parte
+   * del avión, en MXN. > 0 SOLO con `vendedor_absorbe` y gastos capturados.
+   */
   vendedor_mxn: number;
-  /** La misma provisión en USD (reparto a socios). */
+  /** El mismo pago real × parte del avión en USD (reparto a socios). */
   vendedor_usd: number;
   total_mxn: number;
   total_usd: number;
@@ -150,8 +189,24 @@ export interface ComisionesDelVuelo {
   detalle: string[];
   /** Comisiones bancarias que no llegaron a MXN (cobro USD sin T.C. ni K). */
   banco_sin_tc: number;
-  /** Provisión del vendedor sin T.C. de venta: no entra en MXN. */
+  /**
+   * Algún pago real (USD sin tc_gasto y sin K) no llegó a pesos: no entra a
+   * COMISIONES en MXN (pendiente del balance); el reparto sí lo resta en USD.
+   */
   vendedor_sin_tc: boolean;
+  /**
+   * ¿ESTE avión es quien carga el pago real del vendedor de este vuelo?
+   * (vigencia ∧ COMPLETADO ∧ partición consistente ∧ comisión cotizada > 0).
+   * Independiente de los gastos: con ella y `vendedor_pagos_n = 0` el balance
+   * avisa que falta capturar el gasto.
+   */
+  vendedor_absorbe: boolean;
+  /** Gastos `COMISION_VENDEDOR` del vuelo (absorba o no el avión). */
+  vendedor_pagos_n: number;
+  /** Pagos MXN que no llegaron a dólares (sin tc_gasto ni K). */
+  vendedor_usd_sin_tc_n: number;
+  /** Su parte del avión en MXN (va a `gastos_sin_tc_mxn` del reparto). */
+  vendedor_usd_sin_tc_mxn: number;
 }
 
 const round2 = (n: number): number =>
@@ -221,136 +276,84 @@ export function etiquetaReglaComisiones(vigenteDesde: string): string {
 }
 
 /**
- * Provisión del vendedor que UN avión absorbió de UN vuelo: el
- * `comision_vendedor_prov_mxn` de la fila del vuelo en el libro de ese
- * avión, TAL CUAL (nadie la recalcula en «otros movimientos»).
+ * Lo que UN avión cargó del pago real al vendedor de UN vuelo: el
+ * `comision_vendedor_real_mxn` de la fila del vuelo en el libro de ese avión
+ * TAL CUAL (nadie lo recalcula en «otros movimientos») y si lo absorbió
+ * (`comision_vendedor_real_pagos > 0`; la señal es esa, NO `vendedor_mxn >
+ * 0`: un avión sin pesos —gasto USD sin tc_gasto y vuelo sin K— lo absorbe
+ * en USD en su reparto y aquí trae 0).
  */
-export interface ProvisionVendedorDeAvion {
+export interface ComisionVendedorDeAvion {
   matricula: string;
   vendedor_mxn: number;
+  absorbido: boolean;
 }
 
 /**
- * Calificador del pago al vendedor «cubierto por el avión» SIN gasto real
- * capturado (revisión 7-oct-2026 del API 0.0.66). Es la MISMA marca
- * «· PROVISIÓN (» (en MAYÚSCULAS, seguida de paréntesis) con la que
- * pyservices pinta en AMARILLO el pago al vendedor sin gasto real
- * (`_MARCA_PROVISION` de `balance_avion_xlsx.py`; pedido del cliente del
- * 6-oct: «los que están en provisión… en amarillo»). Sin ella, los vuelos
- * COMPLETADOS de la regla perdían el amarillo y el operador leía que esos
- * pagos ya estaban capturados, mientras la leyenda «Amarillo = provisión»
- * seguía saliendo por algún vuelo no realizado.
+ * Sufijo del egreso del vendedor en «otros movimientos» cuando el pago real
+ * ya lo cargan los aviones en su columna COMISIONES (13-oct-2026, API
+ * 0.0.74, invariante 61). Lista = los aviones `absorbido`; vacía ⇒ ''.
+ *  - Un avión: ` · a cargo del avión XB-PEV ($3,000.00 en su columna
+ *    COMISIONES)`; varios: ` · a cargo de los aviones XB-TST ($900.00 en su
+ *    columna COMISIONES) y XB-DOS ($900.00 en su columna COMISIONES)`.
+ *  - La cifra del avión se imprime SOLO si todos los aviones tienen pesos y
+ *    |Σ partes − `pagadoMxn` de la pestaña| < `TOLERANCIA_PAGO_VENDEDOR_MXN`
+ *    (las cadenas de T.C. de los libros pueden diferir con un pago USD sin
+ *    tc_gasto: un solo monto por fila, nunca dos que no cuadran); si no,
+ *    `XB-PEV (resta en su columna COMISIONES)`.
+ *  - Avión sin pesos: `XB-PEV (sin T.C. no entra en pesos a su columna
+ *    COMISIONES; resta en USD en su reparto)`.
  */
-export const MARCA_PROVISION_SIN_GASTO_REAL =
-  ' · PROVISIÓN (sin gasto real capturado)';
-
-/** Egreso del pago al vendedor de VuelaTour cuando los aviones ya lo cargan. */
-export interface PagoVendedorCubiertoPorAvion {
-  /**
-   * Lo que sale de la bolsa de VuelaTour: lo pagado de verdad que EXCEDE la
-   * provisión de los aviones (≥ 0); 0 sin pago real o sin exceso; null si
-   * ningún pago real convirtió a pesos (no se inventa un 0).
-   */
-  egreso_mxn: number | null;
-  /** «pago comisión vendedor (X) · cubierto por el avión M (provisión …)». */
-  concepto: string;
-  /** Σ de las provisiones de los aviones (MXN). */
-  provision_mxn: number;
+export function sufijoPagoVendedorACargoDelAvion(
+  aviones: ReadonlyArray<ComisionVendedorDeAvion>,
+  pagadoMxn: number | null,
+): string {
+  const lista = aviones.filter((x) => x.absorbido);
+  if (lista.length === 0) return '';
+  const sumaPartes = round2(lista.reduce((s, x) => s + x.vendedor_mxn, 0));
+  const conMonto =
+    pagadoMxn != null &&
+    lista.every((x) => x.vendedor_mxn > 0) &&
+    Math.abs(sumaPartes - pagadoMxn) < TOLERANCIA_PAGO_VENDEDOR_MXN;
+  const parte = (x: ComisionVendedorDeAvion): string =>
+    conMonto
+      ? `${x.matricula} (${fmtMxnNota(x.vendedor_mxn)} en su columna COMISIONES)`
+      : x.vendedor_mxn > 0
+        ? `${x.matricula} (resta en su columna COMISIONES)`
+        : `${x.matricula} (sin T.C. no entra en pesos a su columna COMISIONES; resta en USD en su reparto)`;
+  const partes = lista.map(parte);
+  return partes.length === 1
+    ? ` · a cargo del avión ${partes[0]}`
+    : ` · a cargo de los aviones ${partes.slice(0, -1).join(', ')} y ${
+        partes[partes.length - 1]
+      }`;
 }
 
 /**
- * EGRESO DEL VENDEDOR EN «OTROS MOVIMIENTOS» CUANDO LOS AVIONES YA CARGAN SU
- * PROVISIÓN (7-oct-2026, API 0.0.66; pedido del cliente: «en "otros
- * movimientos", en el ingreso estás duplicando la comisión»). Desde la
- * vigencia, en un vuelo COMPLETADO cada avión absorbe la provisión del
- * vendedor en su columna COMISIONES (`comisionesDelVuelo`): ese dinero ya
- * pagó al vendedor. La fila del vuelo conserva su ingreso (lo cobrado al
- * cliente, UNA vez) y su egreso es SOLO lo que el pago real EXCEDE la
- * provisión — el 0.0.65 pintaba además una línea de INGRESO «comisión del
- * vendedor a cargo del avión …» y el egreso completo, y el ingreso se leía
- * doble. El remanente de VuelaTour es el mismo con o sin la línea: Σ
- * ingreso − egreso no cambia (salvo un pago real MENOR que la provisión:
- * lo que falta se queda como «parcial: faltan» —aún se le debe al vendedor
- * y el avión ya lo cargó—).
- *
- * Gramática EXACTA (todos empiezan con `pago comisión vendedor` ⇒
- * `colapsarFilasDeVuelo` los clasifica sin cambio):
- *  - un avión: `pago <etiqueta> · cubierto por el avión XB-PEV (provisión
- *    $5,467.97 en su balance)`; varios: `… · cubierto por los aviones XB-TST
- *    (provisión $900.00 en su balance) y XB-DOS (provisión $900.00 en su
- *    balance)`.
- *  - sin gasto real (n = 0): + `MARCA_PROVISION_SIN_GASTO_REAL` ⇒ `… (provisión
- *    $5,467.97 en su balance) · PROVISIÓN (sin gasto real capturado)`: el
- *    pago sigue siendo una provisión y pyservices lo pinta en amarillo
- *    (revisión 7-oct-2026). Con gasto real nunca lleva la marca.
- *  - con gasto real (n ≥ 1): `· gasto real $X` (o `· gasto real` si ninguno
- *    convirtió) + ` (N pagos)` con N ≥ 2; con `pagadoMxn` y `sinTc = 0`, d =
- *    round2(pagado − provisión): d ≥ 1.00 ⇒ ` · excede $X MXN`; d ≤ −1.00 ⇒
- *    ` · parcial: faltan $X MXN` (misma tolerancia que el apareo de siempre);
- *    al final ` (parcial: USD sin TC)` / ` (USD sin TC)` como
- *    `conceptoPagoVendedorReal`.
- *  - `egreso_mxn` = max(0, round2(pagado − provisión)) (exacto, aunque el
- *    texto calle diferencias menores a la tolerancia); 0 sin gasto real.
+ * Concepto del egreso del vendedor en «otros movimientos» cuando el avión
+ * ya carga el pago real (egreso $0.00 VERDADERO en la pestaña): `pago
+ * <etiqueta> · gasto real[ (N pagos)][ · parcial: faltan $X MXN | · excede
+ * $X MXN]` (`cuerpoGastoRealPagoVendedor`: faltan/excede vs lo COBRADO con
+ * la cadena de la pestaña, tolerancia 1.00) + el sufijo de arriba. SIN los
+ * sufijos « (USD sin TC)» / « (parcial: USD sin TC)»: el egreso es 0 de
+ * verdad y la marca «sin TC» anularía el lado en el bloque VUELATOUR
+ * (`ladoEnUsd`). Todos empiezan con `pago comisión vendedor`
+ * (`colapsarFilasDeVuelo` los clasifica sin cambio).
  */
-export function pagoVendedorCubiertoPorAvion(a: {
+export function conceptoPagoVendedorACargoDelAvion(a: {
   /** 'comisión vendedor (Pablo Canales)' | 'comisión vendedor'. */
   etiquetaComision: string;
-  /** Las provisiones de los aviones (las de 0 no cuentan). */
-  aviones: ReadonlyArray<ProvisionVendedorDeAvion>;
-  /** Lo pagado de verdad al vendedor (`pagosVendedorDeVuelo`). */
+  /** Lo pagado de verdad al vendedor (`pagosVendedorDeVuelo` de la pestaña). */
   pagos: PagosVendedorDeVuelo;
-}): PagoVendedorCubiertoPorAvion {
-  const aviones = a.aviones.filter((x) => x.vendedor_mxn > 0);
-  const provision = round2(aviones.reduce((s, x) => s + x.vendedor_mxn, 0));
-  const parteDe = (x: ProvisionVendedorDeAvion) =>
-    `${x.matricula} (provisión ${fmtMxnNota(x.vendedor_mxn)} en su balance)`;
-  const nombres = aviones.map(parteDe);
-  const quien =
-    nombres.length <= 1
-      ? `cubierto por el avión ${nombres[0] ?? '—'}`
-      : `cubierto por los aviones ${nombres.slice(0, -1).join(', ')} y ${
-          nombres[nombres.length - 1]
-        }`;
-  const { pagos } = a;
-  if (pagos.n === 0) {
-    // Sin gasto real: VuelaTour no paga nada (la provisión ya resta en los
-    // aviones), pero el pago SIGUE siendo una provisión ⇒ la marca del
-    // amarillo de pyservices.
-    return {
-      egreso_mxn: 0,
-      concepto: `pago ${a.etiquetaComision} · ${quien}${MARCA_PROVISION_SIN_GASTO_REAL}`,
-      provision_mxn: provision,
-    };
-  }
-  const nPagos = pagos.n >= 2 ? ` (${pagos.n} pagos)` : '';
-  const real =
-    pagos.pagadoMxn != null
-      ? ` · gasto real ${fmtMxnNota(pagos.pagadoMxn)}${nPagos}`
-      : ` · gasto real${nPagos}`;
-  let cmp = '';
-  let egreso: number | null = null;
-  if (pagos.pagadoMxn != null) {
-    const d = round2(pagos.pagadoMxn - provision);
-    egreso = d > 0 ? d : 0;
-    if (pagos.sinTc === 0) {
-      if (d >= TOLERANCIA_PAGO_VENDEDOR_MXN) {
-        cmp = ` · excede ${fmtMxnNota(d)} MXN`;
-      } else if (d <= -TOLERANCIA_PAGO_VENDEDOR_MXN) {
-        cmp = ` · parcial: faltan ${fmtMxnNota(-d)} MXN`;
-      }
-    }
-  }
-  const usd =
-    pagos.sinTc > 0
-      ? pagos.pagadoMxn != null
-        ? ' (parcial: USD sin TC)'
-        : ' (USD sin TC)'
-      : '';
-  return {
-    egreso_mxn: egreso,
-    concepto: `pago ${a.etiquetaComision} · ${quien}${real}${cmp}${usd}`,
-    provision_mxn: provision,
-  };
+  /** Σ ingreso MXN de las líneas de comisión; null = sin T.C. de venta. */
+  lineaMxn: number | null;
+  /** Las partes de los aviones (los no absorbidos no aparecen). */
+  aviones: ReadonlyArray<ComisionVendedorDeAvion>;
+}): string {
+  return `pago ${a.etiquetaComision} · ${cuerpoGastoRealPagoVendedor(
+    a.pagos,
+    a.lineaMxn,
+  )}${sufijoPagoVendedorACargoDelAvion(a.aviones, a.pagos.pagadoMxn)}`;
 }
 
 /**
@@ -406,6 +409,10 @@ const VACIO: Omit<ComisionesDelVuelo, 'aplica' | 'detalle'> = {
   total_usd: 0,
   banco_sin_tc: 0,
   vendedor_sin_tc: false,
+  vendedor_absorbe: false,
+  vendedor_pagos_n: 0,
+  vendedor_usd_sin_tc_n: 0,
+  vendedor_usd_sin_tc_mxn: 0,
 };
 
 /**
@@ -470,39 +477,86 @@ export function comisionesDelVuelo(
     );
   }
 
-  // ----- PROVISIÓN del vendedor (lo cobrado al cliente por ese concepto) -----
-  // Solo en un vuelo COMPLETADO (el universo del reparto a socios).
+  // ----- PAGO REAL al vendedor (gastos COMISION_VENDEDOR del vuelo) -----
+  // Universo del avión = invariante 50 + n ≥ 1 (ver la cabecera): fuera de
+  // él el avión manda 0 aunque haya gastos (VuelaTour los paga en «otros
+  // movimientos»). Sin gasto capturado NADA resta: la provisión murió.
+  const absorbe =
+    completado && p != null && !p.inconsistente && pagoVendedorUsd(p) > 0;
+  const montoDe = (g: GastoPagoVendedorRow): number | null => {
+    const m = Number(g.monto);
+    return Number.isFinite(m) ? m : null;
+  };
+  // T.C. del gasto: su `tc_gasto` (> 0) o, sin él, el K del vuelo.
+  const tcDe = (g: GastoPagoVendedorRow): number | null => pos(g.tc_gasto) ?? k;
+  const aMxn = (g: GastoPagoVendedorRow): number | null => {
+    const m = montoDe(g);
+    if (m == null) return null;
+    if (g.moneda === 'MXN') return m;
+    const tc = tcDe(g);
+    return tc != null ? m * tc : null;
+  };
+  const aUsd = (g: GastoPagoVendedorRow): number | null => {
+    const m = montoDe(g);
+    if (m == null) return null;
+    if (g.moneda !== 'MXN') return m;
+    const tc = tcDe(g);
+    return tc != null ? m / tc : null;
+  };
+  const pagosMxn = pagosVendedorDeVuelo(i.gastos, aMxn);
+  // OJO: `pagadoMxn` de ESTA llamada son DÓLARES — es «la suma convertida por
+  // el conversor inyectado» (`sinTc` = pagos MXN que no llegaron a USD).
+  const pagosUsd = pagosVendedorDeVuelo(i.gastos, aUsd);
   let vendedorMxn = 0;
   let vendedorUsd = 0;
   let vendedorSinTc = false;
-  if (completado && p != null && !p.inconsistente) {
-    const pagoUsd = pagoVendedorUsd(p);
-    if (pagoUsd > 0) {
-      vendedorUsd = i.parteAvion(pagoUsd);
-      const nombre =
-        typeof i.vendedorNombre === 'string' && i.vendedorNombre.trim()
-          ? ` (${i.vendedorNombre.trim()})`
-          : '';
-      if (k != null) {
-        const totalMxn = round2(pagoUsd * k);
-        vendedorMxn = i.parteAvion(totalMxn);
-        const base =
-          ivaComisionVendedorUsd(p) > 0
-            ? 'provisión = cotizado + IVA'
-            : 'provisión = cotizado (sin IVA)';
-        const parte =
-          round2(vendedorMxn) === totalMxn
-            ? ''
-            : textoParte(participacion, totalMxn, vendedorMxn);
-        lineas.push(
-          `Comisión vendedor${nombre} · ${fmtMxnNota(totalMxn)} · ${base}${parte}`,
-        );
-      } else {
-        vendedorSinTc = true;
-        lineas.push(
-          `Comisión vendedor${nombre} · ${fmtMxnNota(pagoUsd)} USD sin T.C. de venta — no suma en pesos`,
-        );
-      }
+  let vendedorUsdSinTcN = 0;
+  let vendedorUsdSinTcMxn = 0;
+  if (absorbe && pagosMxn.n > 0) {
+    vendedorMxn = i.parteAvion(pagosMxn.pagadoMxn ?? 0);
+    vendedorUsd = i.parteAvion(pagosUsd.pagadoMxn ?? 0);
+    vendedorSinTc = pagosMxn.sinTc > 0;
+    vendedorUsdSinTcN = pagosUsd.sinTc;
+    if (pagosUsd.sinTc > 0) {
+      // Pagos MXN sin tc_gasto ni K: no llegan a USD — su parte del avión va
+      // a `gastos_sin_tc_mxn` del reparto (integridad de siempre).
+      const mxnSinUsd = i.gastos
+        .filter(
+          (g) =>
+            categoriaEsPagoVendedor(g.categoria ?? null) &&
+            g.moneda === 'MXN' &&
+            tcDe(g) == null,
+        )
+        .reduce((s, g) => s + (montoDe(g) ?? 0), 0);
+      vendedorUsdSinTcMxn = i.parteAvion(round2(mxnSinUsd));
+    }
+    const nombre =
+      typeof i.vendedorNombre === 'string' && i.vendedorNombre.trim()
+        ? ` (${i.vendedorNombre.trim()})`
+        : '';
+    const nPagos = pagosMxn.n >= 2 ? ` (${pagosMxn.n} pagos)` : '';
+    if (pagosMxn.pagadoMxn != null) {
+      const totalMxn = pagosMxn.pagadoMxn;
+      const parte =
+        round2(vendedorMxn) === round2(totalMxn)
+          ? ''
+          : textoParte(participacion, totalMxn, vendedorMxn);
+      const sinTc =
+        pagosMxn.sinTc === 0
+          ? ''
+          : pagosMxn.sinTc === 1
+            ? ' · 1 pago USD sin T.C. — no suma en pesos'
+            : ` · ${pagosMxn.sinTc} pagos USD sin T.C. — no suman en pesos`;
+      lineas.push(
+        `Comisión vendedor${nombre} · ${fmtMxnNota(totalMxn)} · gasto real${nPagos}${parte}${sinTc}`,
+      );
+    } else {
+      // Ningún pago llegó a pesos (todos USD sin tc_gasto y vuelo sin K): el
+      // reparto sí lo resta en USD; en el balance lo grita el pendiente.
+      // (`pagosUsd.pagadoMxn` son DÓLARES: la suma del conversor a USD.)
+      lineas.push(
+        `Comisión vendedor${nombre} · ${fmtMxnNota(pagosUsd.pagadoMxn ?? 0)} USD sin T.C. — no suma en pesos`,
+      );
     }
   }
 
@@ -522,5 +576,9 @@ export function comisionesDelVuelo(
     detalle: lineas,
     banco_sin_tc: bancoSinTc,
     vendedor_sin_tc: vendedorSinTc,
+    vendedor_absorbe: absorbe,
+    vendedor_pagos_n: pagosMxn.n,
+    vendedor_usd_sin_tc_n: vendedorUsdSinTcN,
+    vendedor_usd_sin_tc_mxn: round2(vendedorUsdSinTcMxn),
   };
 }
