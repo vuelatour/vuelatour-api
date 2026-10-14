@@ -652,3 +652,168 @@ describe('Libro Dinero — ingresos sin vuelo (24-sep-2026)', () => {
     );
   });
 });
+
+/**
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): un
+ * ingreso con avión cuenta UNA vez, en su avión — aquí sale de «Otros
+ * ingresos» (y de `utilidades_otros_ingresos_mxn`, ingreso Y comisión) y va
+ * APARTE en `otros_ingresos_avion` (misma fila de `filaLibroDeIngreso` +
+ * matrícula y color) y en la columna `otros_ingresos_mxn` de su avión.
+ */
+describe('Libro Dinero — ingreso ASIGNADO a un avión (invariante 67)', () => {
+  const ING_AVION: Fila = {
+    id: 'i-av',
+    folio: 14,
+    categoria: 'REEMBOLSO_DEVOLUCION',
+    fecha: '2026-09-04',
+    descripcion: 'TRANSF INTERBANCARIA SPEI',
+    monto: 46550.8,
+    comision_monto: null,
+    moneda: 'MXN',
+    tc_usd_mxn: null,
+    pagador: 'angel alvarez',
+    aeronave_id: AV,
+    aeronave: { matricula: 'XB-TST', color_calendario: '#3B82F6' },
+    cuenta: { alias: 'EJE SCOTIA', banco: 'Scotiabank' },
+    notas: 'reembolso del pago del serv de 50 hrs en toledo, fact 53',
+    deleted_at: null,
+    cliente: null,
+    vuelo: null,
+  };
+
+  /** El mundo de los libros + un segundo avión SIN gastos (XB-DOS). */
+  async function dineroCon(ingresos: Fila[], conDos = false) {
+    const m = mundoLibros(ingresos);
+    const mundo = conDos
+      ? {
+          ...m,
+          aeronave: [
+            ...m.aeronave,
+            {
+              id: 'av-2',
+              matricula: 'XB-DOS',
+              modelo: 'C206',
+              color_calendario: '#10B981',
+            },
+          ],
+        }
+      : m;
+    const f = fakeSupabase(mundo);
+    const service = new DineroReportService(
+      f.supabase as unknown as SupabaseService,
+      {} as never,
+    );
+    const p = await (service as unknown as Privado).buildPayload(DESDE, HASTA);
+    return { ...p, generado: 'FIJO' };
+  }
+
+  it('(a) sale de «Otros ingresos» y va en `otros_ingresos_avion` con su matrícula y color (la MISMA fila de siempre)', async () => {
+    const p = await dineroCon([...INGRESOS_LIBROS, ING_AVION]);
+    expect(p.otros_ingresos.some((f) => f.clave === 'ING-14')).toBe(false);
+    expect(p.otros_ingresos_avion).toEqual([
+      {
+        clave: 'ING-14',
+        fecha_vuelo: null,
+        concepto_egreso: null,
+        egreso_mxn: null,
+        fecha_egreso: null,
+        nota_egreso: null,
+        concepto_ingreso:
+          'Reembolsos y devoluciones recibidos · TRANSF INTERBANCARIA SPEI · angel alvarez · XB-TST',
+        ingreso_mxn: 46550.8,
+        fecha_ingreso: '2026-09-04',
+        remanente_mxn: 46550.8,
+        factura: null,
+        matricula: 'XB-TST',
+        avion_color: '#3B82F6',
+      },
+    ]);
+    // Justo después de `otros_ingresos`.
+    const llaves = Object.keys(p);
+    expect(llaves[llaves.indexOf('otros_ingresos') + 1]).toBe(
+      'otros_ingresos_avion',
+    );
+  });
+
+  it('(b) `utilidades_otros_ingresos_mxn` NO se mueve: ni su ingreso ni su comisión', async () => {
+    const soloVt = await dineroCon(INGRESOS_LIBROS);
+    const con = await dineroCon([
+      ...INGRESOS_LIBROS,
+      { ...ING_AVION, comision_monto: 550.8 },
+    ]);
+    expect(con.utilidades_otros_ingresos_mxn).toBe(
+      soloVt.utilidades_otros_ingresos_mxn,
+    );
+    expect(con.otros_ingresos).toEqual(soloVt.otros_ingresos);
+  });
+
+  it('(c) columna OTROS INGRESOS de su avión = Σ remanente; un avión con SOLO ingresos entra con las otras 4 llaves en null', async () => {
+    const p = await dineroCon([...INGRESOS_LIBROS, ING_AVION]);
+    expect(p.utilidades_aviones).toEqual([
+      {
+        matricula: 'XB-TST',
+        gastos_indirectos_mxn: null,
+        otros_gastos_mxn: null,
+        permisos_mxn: null,
+        combustible_mxn: 3000,
+        otros_ingresos_mxn: 46550.8,
+      },
+    ]);
+    const dos = await dineroCon(
+      [
+        {
+          ...ING_AVION,
+          aeronave_id: 'av-2',
+          aeronave: { matricula: 'XB-DOS' },
+        },
+      ],
+      true,
+    );
+    expect(dos.utilidades_aviones).toEqual([
+      {
+        matricula: 'XB-DOS',
+        gastos_indirectos_mxn: null,
+        otros_gastos_mxn: null,
+        permisos_mxn: null,
+        combustible_mxn: null,
+        otros_ingresos_mxn: 46550.8,
+      },
+      {
+        matricula: 'XB-TST',
+        gastos_indirectos_mxn: null,
+        otros_gastos_mxn: null,
+        permisos_mxn: null,
+        combustible_mxn: 3000,
+      },
+    ]);
+  });
+
+  it('(d) USD 2,000 × 17.5 con comisión 100 ⇒ fila con egreso 1,750 y columna = 35,000 − 1,750 = 33,250', async () => {
+    const p = await dineroCon([
+      {
+        ...ING_AVION,
+        moneda: 'USD',
+        monto: 2000,
+        tc_usd_mxn: 17.5,
+        comision_monto: 100,
+      },
+    ]);
+    expect(p.otros_ingresos_avion?.[0]).toMatchObject({
+      ingreso_mxn: 35000,
+      concepto_egreso: 'comisión bancaria',
+      egreso_mxn: 1750,
+      fecha_egreso: '2026-09-04',
+      remanente_mxn: 33250,
+    });
+    expect(p.utilidades_aviones?.[0].otros_ingresos_mxn).toBe(33250);
+  });
+
+  it('(e) sin ingresos con avión ⇒ el JSON del GOLDEN: ninguna llave nueva', async () => {
+    const p = await dineroCon([]);
+    expect(JSON.stringify(p)).toBe(JSON.stringify(GOLDEN_DINERO));
+    expect('otros_ingresos_avion' in p).toBe(false);
+    expect(
+      (p.utilidades_aviones ?? []).some((a) => 'otros_ingresos_mxn' in a),
+    ).toBe(false);
+  });
+});

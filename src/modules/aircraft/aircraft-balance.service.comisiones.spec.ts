@@ -522,11 +522,18 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
     expect(p.totales.ganancia_mxn).toBe(39686.1);
     expect(p.totales.comision_vendedor_mxn).toBe(0);
     expect(p.balance.utilidad_antes_usd).toBe(p.totales.ganancia_usd);
-    // Bandera raíz (invariante 61): viaja SIEMPRE, al final.
+    // Bandera raíz (invariante 61): viaja SIEMPRE; desde el 0.0.75
+    // (invariante 67) la sigue la hoja «Otros ingresos» (vacía sin ingresos).
     expect(p.comision_vendedor_solo_gasto_real).toBe(true);
-    expect(Object.keys(p).slice(-1)).toEqual([
+    expect(Object.keys(p).slice(-2)).toEqual([
       'comision_vendedor_solo_gasto_real',
+      'otros_ingresos_avion',
     ]);
+    expect(p.otros_ingresos_avion).toEqual({
+      filas: [],
+      total_mxn: 0,
+      usd: 0,
+    });
   });
 
   it('ANTES de la vigencia todo es el libro de siempre: sin llaves nuevas y SOLO cambian ganancia, cobrado real, la nota del cobro con comisión y la cascada', async () => {
@@ -1338,9 +1345,11 @@ describe('Balance — COMISIONES: revisión 6-oct-2026', () => {
     expect(g.consolidado.comision_vendedor_solo_gasto_real).toBe(true);
     const om = g.consolidado.otros_movimientos!;
     expect(om.comision_vendedor_solo_gasto_real).toBe(true);
-    expect(Object.keys(om).slice(-2)).toEqual([
+    // + `otros_ingresos_por_avion` (13-oct-2026, invariante 67) al final.
+    expect(Object.keys(om).slice(-3)).toEqual([
       'sin_provision_vendedor',
       'comision_vendedor_solo_gasto_real',
+      'otros_ingresos_por_avion',
     ]);
   });
 

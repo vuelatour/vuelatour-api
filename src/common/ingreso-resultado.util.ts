@@ -15,6 +15,15 @@
  *   pesos (defensa: el CHECK `ingreso_tc_resultado_chk` ya lo impide).
  * - Comisión bancaria del ingreso ⇒ egreso «comisión bancaria» con la MISMA
  *   conversión y `remanente_mxn = ingreso − comisión`.
+ *
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): un
+ * ingreso de resultado cuenta UNA vez: su avión XOR VuelaTour;
+ * `ingreso.fecha` decide el mes. La partición ÚNICA es
+ * `partirIngresosPorAvion` (la usan el libro individual, el Balance general
+ * —una sola lectura—, el Libro Dinero y el reparto): con `aeronave_id` ⇒ la
+ * hoja «Otros ingresos» de ese avión, su cascada y su reparto; sin avión ⇒
+ * «otros movimientos» del general y «Otros ingresos» del Libro Dinero, como
+ * siempre. `filaLibroDeIngreso` y `leerIngresosDeResultado` NO cambian.
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
@@ -42,6 +51,17 @@ export interface IngresoParaLibro {
   vuelo_folio: number | null;
   matricula: string | null;
   aeronave_color: string | null;
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.75, invariante 67), OPCIONALES para que
+   * los literales de los specs sigan compilando: el avión al que CUENTA el
+   * ingreso (null = VuelaTour), sus notas (recortadas; vacío ⇒ null) y la
+   * cuenta donde entró (alias y banco; null = efectivo / caja). Solo los
+   * leen `partirIngresosPorAvion` y la hoja «Otros ingresos» del avión.
+   */
+  aeronave_id?: string | null;
+  notas?: string | null;
+  cuenta_alias?: string | null;
+  cuenta_banco?: string | null;
 }
 
 export interface FilaLibroIngreso {
@@ -102,9 +122,13 @@ export function filaLibroDeIngreso(
   };
 }
 
-/** Columnas del lector (embeds por la columna FK: sin ambigüedad). */
+/**
+ * Columnas del lector (embeds por la columna FK: sin ambigüedad). Desde el
+ * 13-oct-2026 (invariante 67) también `aeronave_id`, `notas` y la cuenta
+ * (alias y banco) para la hoja «Otros ingresos» del avión.
+ */
 export const COLS_INGRESO_LIBRO =
-  'id, folio, categoria, fecha, descripcion, monto, comision_monto, moneda, tc_usd_mxn, pagador, cliente:cliente_id(nombre), vuelo:vuelo_id(folio), aeronave:aeronave_id(matricula, color_calendario)';
+  'id, folio, categoria, fecha, descripcion, monto, comision_monto, moneda, tc_usd_mxn, pagador, cliente:cliente_id(nombre), vuelo:vuelo_id(folio), aeronave:aeronave_id(matricula, color_calendario), aeronave_id, notas, cuenta:cuenta_bancaria_id(alias, banco)';
 
 const PAGINA = 1000;
 
@@ -121,6 +145,10 @@ export function ingresoParaLibroDeFila(
   const avion = unwrapOne(
     f.aeronave as { matricula?: unknown; color_calendario?: unknown } | null,
   );
+  const cuenta = unwrapOne(
+    f.cuenta as { alias?: unknown; banco?: unknown } | null,
+  );
+  const notas = typeof f.notas === 'string' ? f.notas.trim() : '';
   return {
     id: f.id as string,
     folio: Number(f.folio),
@@ -139,7 +167,76 @@ export function ingresoParaLibroDeFila(
       typeof avion?.color_calendario === 'string'
         ? avion.color_calendario
         : null,
+    // ADITIVOS (13-oct-2026, invariante 67).
+    aeronave_id:
+      typeof f.aeronave_id === 'string' && f.aeronave_id ? f.aeronave_id : null,
+    notas: notas || null,
+    cuenta_alias: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
+    cuenta_banco: typeof cuenta?.banco === 'string' ? cuenta.banco : null,
   };
+}
+
+/**
+ * ¿El ingreso cuenta para un AVIÓN? (invariante 67): de resultado Y con
+ * `aeronave_id`. Un anticipo o una aportación con avión (imposible tras el
+ * CHECK `ingreso_aeronave_chk`) NO: no son resultado de nadie.
+ */
+export function ingresoEsDelAvion(
+  i: Pick<IngresoParaLibro, 'categoria' | 'aeronave_id'>,
+): boolean {
+  return categoriaIngresoSumaAResultados(i.categoria) && !!i.aeronave_id;
+}
+
+/** Ingresos de resultado partidos: VuelaTour (`empresa`) XOR su avión. */
+export interface IngresosDeResultadoPartidos {
+  /** Sin avión: «otros movimientos» del general y el Libro Dinero. */
+  empresa: IngresoParaLibro[];
+  /** `aeronave_id` ⇒ sus ingresos (hoja «Otros ingresos», cascada y reparto). */
+  porAvion: ReadonlyMap<string, IngresoParaLibro[]>;
+}
+
+/**
+ * PARTICIÓN ÚNICA de los ingresos de resultado (13-oct-2026, invariante 67)
+ * — la usan el libro individual, el Balance general (una sola lectura), el
+ * Libro Dinero y el reparto. PURA. Conserva el orden del lector (fecha,
+ * folio). Cada ingreso de RESULTADO cae en EXACTAMENTE un lado; lo que no es
+ * de resultado (anticipo, aportación) no cae en ninguno (defensa: el lector
+ * ya los filtra).
+ */
+export function partirIngresosPorAvion(
+  ingresos: readonly IngresoParaLibro[],
+): IngresosDeResultadoPartidos {
+  const empresa: IngresoParaLibro[] = [];
+  const porAvion = new Map<string, IngresoParaLibro[]>();
+  for (const i of ingresos) {
+    if (!categoriaIngresoSumaAResultados(i.categoria)) continue;
+    if (i.aeronave_id) {
+      const lista = porAvion.get(i.aeronave_id) ?? [];
+      lista.push(i);
+      porAvion.set(i.aeronave_id, lista);
+    } else {
+      empresa.push(i);
+    }
+  }
+  return { empresa, porAvion };
+}
+
+/**
+ * NETO del ingreso (monto − comisión bancaria) en USD — el número que SUMA
+ * al saldo del reparto de su avión (invariante 67). USD ⇒ el neto tal cual;
+ * MXN ⇒ neto ÷ `tcMxn` (el T.C. propio del ingreso o el oficial de su día:
+ * lo decide el llamador); sin T.C. positivo ⇒ null (jamás se inventa uno).
+ * Centavos: el neto y el resultado van redondeados a 2.
+ */
+export function netoIngresoUsd(
+  i: Pick<IngresoParaLibro, 'monto' | 'comision_monto' | 'moneda'>,
+  tcMxn: number | null,
+): number | null {
+  const monto = Number(i.monto) || 0;
+  const comision = Number(i.comision_monto) > 0 ? Number(i.comision_monto) : 0;
+  const neto = r2(monto - comision);
+  if (i.moneda === 'USD') return neto;
+  return tcMxn != null && tcMxn > 0 ? r2(neto / tcMxn) : null;
 }
 
 /**

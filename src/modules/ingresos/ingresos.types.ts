@@ -69,6 +69,12 @@ export interface Ingreso {
   vuelo_folio: number | null;
   aeronave_id: string | null;
   matricula: string | null;
+  /** ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): a dónde cuenta el
+   *  ingreso (un ingreso de resultado CON avión cuenta para ESE avión) y su
+   *  texto (`textoDestinoIngreso`). El API los manda siempre; opcionales
+   *  porque un API previo no los manda. */
+  destino?: 'AVION' | 'VUELATOUR' | 'FUERA_DE_RESULTADOS';
+  destino_etiqueta?: string;
   gasto_id: string | null;
   notas: string | null;
   archivo: {

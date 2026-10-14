@@ -8,7 +8,17 @@ import { SupabaseService } from '../supabase/supabase.service';
 import {
   filaLibroDeIngreso,
   leerIngresosDeResultado,
+  partirIngresosPorAvion,
+  type IngresoParaLibro,
+  type IngresosDeResultadoPartidos,
 } from '../../common/ingreso-resultado.util';
+// INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): hoja
+// «Otros ingresos» del libro de cada avión y su consolidada del general
+// (puro, con spec). `buildHoja` NO se toca.
+import {
+  fusionarOtrosIngresosFlota,
+  hojaOtrosIngresosAvion,
+} from './otros-ingresos-avion.util';
 import { AircraftService } from './aircraft.service';
 import {
   TipoCambioService,
@@ -624,6 +634,16 @@ interface ComisionesAvionOtrosMovimientos {
  * Columna **PAGO** (11-sep-2026): cada fila de hoja ledger viaja con la
  * forma de pago (`etiquetaMedioPago`, espejo del panel) para conciliar las
  * cargas de combustible contra el estado de cuenta del banco.
+ *
+ * **OTROS INGRESOS DEL AVIÓN (13-oct-2026, API 0.0.75, invariante 67).** Un
+ * ingreso de RESULTADO registrado en Ingresos con `aeronave_id` cuenta UNA
+ * vez, en el mes de su `fecha`, para ESE avión: hoja «Otros ingresos» de su
+ * libro (`otros_ingresos_avion`, siempre presente) y la línea «(+) OTROS
+ * INGRESOS USD» que SUMA en la cascada (`balance.otros_ingresos_avion_usd`)
+ * — y de ahí la utilidad cobrada y los socios. Ya no está en «otros
+ * movimientos» ni en el bloque VUELATOUR (empresa). El general los lee UNA
+ * vez (`partirIngresosPorAvion`) y pinta además la hoja consolidada «otros
+ * ingresos aviones» (solo con filas).
  */
 @Injectable()
 export class AircraftBalanceService {
@@ -767,6 +787,14 @@ export class AircraftBalanceService {
    * resumida a costo total y costo por hora). Viaja TAL CUAL como
    * `variante` y es lo ÚNICO que cambia entre los dos: el payload se arma
    * igual, sin un número distinto (spec). Se valida ANTES de leer nada.
+   *
+   * OTROS INGRESOS ASIGNADOS A UN AVIÓN (13-oct-2026, API 0.0.75, invariante
+   * 67): UNA lectura de `ingreso` para todo el general, partida su avión XOR
+   * VuelaTour. Los del avión SUMAN en la cascada de su bloque de «balance»
+   * («(+) OTROS INGRESOS USD») y salen en la hoja consolidada «otros
+   * ingresos aviones» (solo con filas); los de VuelaTour siguen en las
+   * sueltas de «otros movimientos». Un avión con solo un ingreso también
+   * entra al general.
    */
   async xlsxGeneral(
     desde?: string,
@@ -843,6 +871,13 @@ export class AircraftBalanceService {
       .select('id, matricula, color_calendario')
       .order('matricula');
     if (error) throw new Error(error.message);
+    // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67):
+    // UNA sola lectura de los ingresos de resultado del periodo, partida UNA
+    // vez (su avión XOR VuelaTour) para TODOS los libros y «otros
+    // movimientos»: cada ingreso cae en exactamente un lugar del general.
+    const ingresosPartidos = partirIngresosPorAvion(
+      await leerIngresosDeResultado(this.supabase.service, d, h),
+    );
 
     // `libros` = TODO lo que consolida el general (aviones + EXTERNOS):
     // hoja maestra, cobranza, hojas de gastos, totales de flota.
@@ -890,6 +925,8 @@ export class AircraftBalanceService {
       filas: Array<{ monto_mxn: number | null }>;
       total_mxn: number;
     }) => hoja.total_mxn !== 0 || hoja.filas.some((f) => f.monto_mxn == null);
+    // Un avión sin vuelos ni gastos pero con un ingreso asignado (13-oct-2026,
+    // invariante 67) también entra: su reembolso suma en SU bloque.
     const tieneActividad = (p: BalanceAvionPayload): boolean => {
       const t = p.totales;
       return (
@@ -899,7 +936,8 @@ export class AircraftBalanceService {
         hojaConDinero(p.combustible ?? { filas: [], total_mxn: 0 }) ||
         hojaConDinero(p.gastos_indirectos) ||
         hojaConDinero(p.otros_gastos) ||
-        hojaConDinero(p.permisos)
+        hojaConDinero(p.permisos) ||
+        (p.otros_ingresos_avion?.filas.length ?? 0) > 0
       );
     };
     // UNA sola aritmética de RESUMEN para todos los libros (aviones y
@@ -973,6 +1011,7 @@ export class AircraftBalanceService {
           memoTc,
           memoFactura,
           vigenciaComisiones,
+          ingresosPartidos,
         ),
         (a.color_calendario as string | null) ?? null,
         true,
@@ -990,6 +1029,7 @@ export class AircraftBalanceService {
         memoTc,
         memoFactura,
         vigenciaComisiones,
+        ingresosPartidos,
       ),
       null,
       false,
@@ -1172,6 +1212,9 @@ export class AircraftBalanceService {
         comisionesAvionPorVuelo.set(f.vuelo_id, lista);
       }
     }
+    // Las sueltas ING-n: SOLO los ingresos de VuelaTour (sin avión) de la
+    // MISMA lectura (13-oct-2026, invariante 67): los asignados a un avión ya
+    // suman en la cascada de su libro; aquí contarían dos veces.
     const otrosMovimientos = await this.buildOtrosMovimientos(
       d,
       h,
@@ -1180,6 +1223,7 @@ export class AircraftBalanceService {
       memoFactura,
       tcFilasOM,
       { porVuelo: comisionesAvionPorVuelo },
+      ingresosPartidos.empresa,
     );
     // PERMISOS AFAC como FILAS que SUMAN (13-oct-2026, API 0.0.74,
     // invariante 62; SUPERSEDE el bloque informativo de la invariante 53):
@@ -1202,6 +1246,12 @@ export class AircraftBalanceService {
       tcFilasOM.porCobrarVtUsd.push(...afac.filas.map(() => 0));
       otrosMovimientos.afac_en_filas = true;
     }
+    // Hoja consolidada «otros ingresos aviones» (13-oct-2026, API 0.0.75,
+    // invariante 67): las hojas «Otros ingresos» de los libros con filas,
+    // fusionadas (cada fila con su matrícula y color). Sin filas en ningún
+    // libro ⇒ null y el consolidado NO lleva la llave (pyservices no pinta
+    // la hoja). Cada una YA suma en el bloque de su avión: no se recalcula.
+    const oiFlota = fusionarOtrosIngresosFlota(libros);
     const consolidado: BalanceAvionPayload = {
       generado: new Date().toISOString(),
       matricula: 'FLOTA',
@@ -1301,6 +1351,9 @@ export class AircraftBalanceService {
       // `sin_provision_vendedor`): las notas de COMISIONES de la hoja de
       // vuelos del general salen del `req` = este consolidado.
       comision_vendedor_solo_gasto_real: true as const,
+      // ADITIVA (13-oct-2026, API 0.0.75, invariante 67), ÚLTIMA llave y
+      // SOLO con filas: la hoja «otros ingresos aviones» del general.
+      ...(oiFlota ? { otros_ingresos_avion: oiFlota } : {}),
     };
 
     // ===== Bloque «VUELATOUR (empresa)» al final de la hoja "balance"
@@ -1666,6 +1719,10 @@ export class AircraftBalanceService {
     // 0.0.65): el general la lee UNA vez para todos sus libros; sin ella
     // (libro individual) se lee aquí.
     vigenciaComisiones?: string,
+    // Ingresos de resultado YA partidos (13-oct-2026, API 0.0.75,
+    // invariante 67): el general los lee UNA vez para todos sus libros y
+    // «otros movimientos»; sin ellos (libro individual) se leen aquí.
+    ingresosPartidos?: IngresosDeResultadoPartidos,
   ): Promise<BalanceAvionPayload> {
     const sb = this.supabase.service;
     const modoExternos = aircraftId == null;
@@ -4216,6 +4273,22 @@ export class AircraftBalanceService {
     // vuelos NADA cambia, y el T.C. de la FLOTA del general ignora este
     // respaldo (promedia solo libros con vuelos — idéntico al de antes).
     // Sin dato oficial: null, como siempre (el pendiente de abajo lo grita).
+    //
+    // INGRESOS ASIGNADOS A ESTE AVIÓN (13-oct-2026, API 0.0.75, invariante
+    // 67): los de RESULTADO con `aeronave_id` = este avión y `fecha` en el
+    // periodo — partición ÚNICA `partirIngresosPorAvion` (el general la pasa
+    // ya hecha: una sola lectura de `ingreso`). EXTERNOS no lee ni lleva
+    // ingresos. Cuentan en el respaldo como una hoja más: un avión sin
+    // vuelos con un reembolso también se convierte con el oficial del cierre.
+    const ingresosAvion: IngresoParaLibro[] =
+      aircraftId == null
+        ? []
+        : ((
+            ingresosPartidos ??
+            partirIngresosPorAvion(
+              await leerIngresosDeResultado(sb, desde, hasta),
+            )
+          ).porAvion.get(aircraftId) ?? []);
     let tcHojas = tcPromedio;
     if (
       tcPromedio == null &&
@@ -4226,6 +4299,7 @@ export class AircraftBalanceService {
         filasOtros,
         filasPermisos,
         gastosGas,
+        ingresosAvion,
       ].some((l) => l.length > 0)
     ) {
       const hoy = new Intl.DateTimeFormat('en-CA', {
@@ -4238,8 +4312,12 @@ export class AircraftBalanceService {
       if (det != null) {
         tcHojas = det.tc;
         totales.tc_promedio = round2(det.tc);
+        // Con ingresos asignados (invariante 67) el texto dice «gastos e
+        // ingresos» y «resultado»; sin ellos, el de siempre byte a byte.
         pendientes.push(
-          `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es la pérdida de esos gastos`,
+          ingresosAvion.length > 0
+            ? `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos e ingresos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es el resultado de esos movimientos`
+            : `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es la pérdida de esos gastos`,
         );
       }
     }
@@ -4319,6 +4397,14 @@ export class AircraftBalanceService {
           ? round2(hojaCombustibleBase.total_mxn / litrosTotal)
           : null,
     };
+    // Hoja «Otros ingresos» (13-oct-2026, API 0.0.75, invariante 67): los
+    // ingresos asignados a este avión, netos de comisión, al MISMO T.C. de
+    // las hojas de gastos (`tcHojas`). Su TOTAL USD SUMA en la cascada.
+    const hojaOtrosIngresos = hojaOtrosIngresosAvion(
+      ingresosAvion,
+      tcHojas,
+      pendientes,
+    );
     // Vigilancia MENSUAL del combustible (sustituye a los regaños por vuelo):
     // un avión que voló sin una sola carga en el mes es captura faltante.
     if (horasVoladas > 0 && gastosGas.length === 0) {
@@ -4357,6 +4443,9 @@ export class AircraftBalanceService {
     // ===== Balance (todo USD; null se propaga si falta TC) =====
     // Refacciones (29-ago) restan como hoja propia: indirectos + refacciones
     // == los indirectos de antes — la utilidad NO cambia.
+    // «(+) OTROS INGRESOS USD» (13-oct-2026, API 0.0.75, invariante 67): los
+    // ingresos asignados a este avión SUMAN (0 sin ingresos: la cascada de
+    // siempre); su null también se propaga.
     const utilidadAntes = totales.ganancia_usd;
     const hojasUsd = [
       hojaCombustible.usd,
@@ -4364,6 +4453,7 @@ export class AircraftBalanceService {
       hojaRefacciones.usd,
       hojaOtros.usd,
       hojaPermisos.usd,
+      hojaOtrosIngresos.usd,
     ];
     const utilidadDespues = hojasUsd.every((u) => u != null)
       ? round2(
@@ -4372,7 +4462,8 @@ export class AircraftBalanceService {
             (hojaIndirectos.usd ?? 0) -
             (hojaRefacciones.usd ?? 0) -
             (hojaOtros.usd ?? 0) -
-            (hojaPermisos.usd ?? 0),
+            (hojaPermisos.usd ?? 0) +
+            (hojaOtrosIngresos.usd ?? 0),
         )
       : null;
     const porCobrarUsdTotal = totales.por_cobrar_usd;
@@ -4538,6 +4629,10 @@ export class AircraftBalanceService {
               ),
             }
           : {}),
+        // ADITIVA (13-oct-2026, API 0.0.75, invariante 67), ÚLTIMA llave del
+        // bloque: el TOTAL USD de la hoja «Otros ingresos» que
+        // `utilidad_despues_usd` YA suma (línea «(+) OTROS INGRESOS USD»).
+        otros_ingresos_avion_usd: hojaOtrosIngresos.usd,
       },
       pendientes,
       // ADITIVA (12-oct-2026, API 0.0.73, invariante 58), la misma llave que
@@ -4558,6 +4653,11 @@ export class AircraftBalanceService {
       // solo textos. Viaja SIEMPRE (libro individual y `aviones[]`; el
       // consolidado FLOTA la lleva aparte, en `xlsxGeneral`).
       comision_vendedor_solo_gasto_real: true as const,
+      // ADITIVA (13-oct-2026, API 0.0.75, invariante 67), ÚLTIMA llave: la
+      // hoja «Otros ingresos» de este avión. Viaja SIEMPRE (EXTERNOS y un
+      // avión sin ingresos: `{filas: [], total_mxn: 0, usd: 0}`); con ella
+      // pyservices pinta la pestaña y la línea «(+) OTROS INGRESOS USD».
+      otros_ingresos_avion: hojaOtrosIngresos,
     };
   }
 
@@ -5084,6 +5184,11 @@ export class AircraftBalanceService {
    * Las filas «AFAC · matrícula» (13-oct-2026, invariante 62) NO se arman
    * aquí: las anexa `payloadGeneral` desde los libros (esta función no los
    * conoce y su retorno es byte a byte el de siempre).
+   *
+   * Los INGRESOS ASIGNADOS A UN AVIÓN (13-oct-2026, API 0.0.75, invariante
+   * 67) tampoco: cuentan en la hoja «Otros ingresos» de su libro y en su
+   * cascada; aquí solo quedan los ingresos de VuelaTour (sin avión) y la
+   * bandera `otros_ingresos_por_avion` lo dice.
    */
   private async buildOtrosMovimientos(
     desde: string,
@@ -5108,6 +5213,11 @@ export class AircraftBalanceService {
     // columna COMISIONES (la pestaña lo muestra con egreso $0.00 «a cargo
     // del avión …»). Sin él la pestaña es la de siempre.
     comisionesAvion?: ComisionesAvionOtrosMovimientos,
+    // Ingresos de resultado SIN avión (13-oct-2026, API 0.0.75, invariante
+    // 67): `payloadGeneral` los pasa de su ÚNICA lectura; sin ellos (specs
+    // de 4 argumentos) se leen y se parten aquí. Los asignados a un avión
+    // nunca llegan a esta pestaña.
+    ingresosEmpresa?: IngresoParaLibro[],
   ): Promise<BalanceHojaOtrosMovimientosPayload> {
     const sb = this.supabase.service;
     const { data: vuelosData, error: vErr } = await sb
@@ -6152,10 +6262,20 @@ export class AircraftBalanceService {
     // recibidos, ventas de activos… registrados en Ingresos (clave ING-n),
     // con la MISMA fila que el Libro Dinero (fuente única
     // `filaLibroDeIngreso`: TC propio, comisión como egreso). Anticipos y
-    // aportaciones NO aparecen (no son resultado). Ni la hoja maestra, ni la
-    // cascada por avión, ni el reparto cambian. Sin la migración
-    // 20260924000004 no se consulta nada: la pestaña sale idéntica.
-    for (const ing of await leerIngresosDeResultado(sb, desde, hasta)) {
+    // aportaciones NO aparecen (no son resultado). La hoja maestra no
+    // cambia. Sin la migración 20260924000004 no se consulta nada: la
+    // pestaña sale idéntica.
+    // Desde el 13-oct-2026 (API 0.0.75, invariante 67) SOLO los de VuelaTour
+    // (sin avión): los ingresos CON avión cuentan en la hoja «Otros
+    // ingresos» de su libro y en su cascada (y en su reparto); aquí
+    // contarían dos veces. El bloque VUELATOUR (empresa) los excluye por
+    // construcción. Se saltan ANTES de empujar `sueltas` y `tcSueltas`: el
+    // T.C. por fila nunca se desalinea.
+    const ingresosDeVuelatour =
+      ingresosEmpresa ??
+      partirIngresosPorAvion(await leerIngresosDeResultado(sb, desde, hasta))
+        .empresa;
+    for (const ing of ingresosDeVuelatour) {
       const f = filaLibroDeIngreso(ing);
       if (!f) continue;
       sueltas.push({
@@ -6216,6 +6336,11 @@ export class AircraftBalanceService {
       // regla el pago lo carga el avión y aquí sale con egreso $0.00 «a
       // cargo del avión …». Viaja SIEMPRE (pyservices cambia leyendas).
       comision_vendedor_solo_gasto_real: true as const,
+      // ADITIVA (13-oct-2026, API 0.0.75, invariante 67): los ingresos
+      // asignados a un avión ya no están en las sueltas (cuentan en su
+      // libro). Viaja SIEMPRE; `afac_en_filas` la sigue anexando
+      // `payloadGeneral` DESPUÉS (pyservices cambia solo la fila 2).
+      otros_ingresos_por_avion: true as const,
     };
   }
 

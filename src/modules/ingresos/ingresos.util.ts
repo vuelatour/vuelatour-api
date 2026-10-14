@@ -196,3 +196,20 @@ export function coincideBusqueda(
     (t) => t != null && normalizarBusqueda(String(t)).includes(n),
   );
 }
+
+// ═══════ Ingreso asignado a un avión (13-oct-2026, API 0.0.75, invariante 67) ═══════
+// Textos ÚNICOS del API (el panel no los copia: llegan como `message` del 400
+// o en `avisos[]` de la respuesta). El spec congela los tres literales.
+
+/** 400 `AVION_SOLO_EN_RESULTADO` (servicio y CHECK `ingreso_aeronave_chk`). */
+export const MSG_AVION_SOLO_EN_RESULTADO =
+  'Un anticipo o una aportación no se asigna a un avión: el avión solo aplica a ingresos que suman a resultados (otros ingresos, intereses, reembolsos y ventas).';
+
+/** Aviso al dar de alta (o cambiar) un ingreso de resultado CON avión. */
+export function avisoIngresoConAvion(matricula: string): string {
+  return `Este ingreso cuenta para el avión ${matricula}: entra a la hoja «Otros ingresos» de su balance y a su reparto a socios; ya no cuenta como ingreso de VuelaTour.`;
+}
+
+/** Aviso al QUITAR el avión de un ingreso de resultado. */
+export const AVISO_INGRESO_SIN_AVION =
+  'Este ingreso ya no cuenta para ningún avión: vuelve a ser ingreso de VuelaTour (Balance general y Libro Dinero).';

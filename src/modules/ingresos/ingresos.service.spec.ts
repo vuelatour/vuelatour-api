@@ -13,7 +13,7 @@ import {
   NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { IngresosService } from './ingresos.service';
+import { IngresosService, traducirErrorIngreso } from './ingresos.service';
 import { ConciliacionService } from '../conciliacion/conciliacion.service';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { FlightsService } from '../flights/flights.service';
@@ -1953,5 +1953,245 @@ describe('vuelos candidatos y detalle', () => {
     await expect(w.svc.obtener('no-existe')).rejects.toBeInstanceOf(
       NotFoundException,
     );
+  });
+});
+
+// =====================================================================
+/**
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): el
+ * avión SOLO en ingresos de resultado (400 AVION_SOLO_EN_RESULTADO, espejo
+ * del CHECK `ingreso_aeronave_chk`), avisos al poner y quitar el avión, el
+ * avión se cambia aunque el ingreso esté conciliado, `destino` /
+ * `destino_etiqueta` y el filtro `?aeronave_id`.
+ */
+describe('ingreso asignado a un avión (invariante 67)', () => {
+  const AV_N990 = 'd0000000-0000-4000-8000-000000000990';
+  const MSG =
+    'Un anticipo o una aportación no se asigna a un avión: el avión solo aplica a ingresos que suman a resultados (otros ingresos, intereses, reembolsos y ventas).';
+  const AVISO_CON =
+    'Este ingreso cuenta para el avión N990GG: entra a la hoja «Otros ingresos» de su balance y a su reparto a socios; ya no cuenta como ingreso de VuelaTour.';
+  const AVISO_SIN =
+    'Este ingreso ya no cuenta para ningún avión: vuelve a ser ingreso de VuelaTour (Balance general y Libro Dinero).';
+  const conAvion = (extra: Partial<Tablas> = {}) =>
+    mundo({
+      aeronave: [
+        { id: 'av-1', matricula: 'XA-VGV' },
+        { id: AV_N990, matricula: 'N990GG' },
+      ],
+      ...extra,
+    });
+
+  it('alta de un REEMBOLSO con avión ⇒ 201 con el aviso LITERAL y destino AVION', async () => {
+    const { svc, db } = armar(conAvion());
+    const r = await svc.crear(
+      datos({
+        categoria: 'REEMBOLSO_DEVOLUCION',
+        descripcion: 'TRANSF INTERBANCARIA SPEI',
+        aeronave_id: AV_N990,
+      }),
+      undefined,
+      ADMIN,
+    );
+    expect(db.ingreso[0].aeronave_id).toBe(AV_N990);
+    expect(r.avisos).toEqual([AVISO_CON]);
+    expect(r.ingreso.destino).toBe('AVION');
+    // El insert del fake no resuelve el embed de la matrícula: el texto
+    // genérico del avión (con la matrícula lo prueba la lista, abajo).
+    expect(r.ingreso.destino_etiqueta).toBe(
+      'Otros ingresos del avión (balance del avión y reparto a socios)',
+    );
+  });
+
+  it('alta de un ANTICIPO (con cliente) y avión ⇒ 400 AVION_SOLO_EN_RESULTADO con el texto exacto, sin escribir ni subir nada', async () => {
+    const { svc, db, subidos } = armar(conAvion());
+    const r = await error(
+      svc.crear(
+        datos({
+          categoria: 'ANTICIPO_CLIENTE',
+          cliente_id: K_CRISTY,
+          aeronave_id: AV_N990,
+        }),
+        pdf,
+        ADMIN,
+      ),
+    );
+    expect(r.code).toBe('AVION_SOLO_EN_RESULTADO');
+    expect(r.message).toBe(MSG);
+    expect(db.ingreso).toHaveLength(0);
+    expect(subidos).toHaveLength(0);
+    // Una aportación tampoco.
+    expect(
+      (
+        await error(
+          svc.crear(
+            datos({ categoria: 'APORTACION_PRESTAMO', aeronave_id: AV_N990 }),
+            undefined,
+            ADMIN,
+          ),
+        )
+      ).code,
+    ).toBe('AVION_SOLO_EN_RESULTADO');
+  });
+
+  it('avión inexistente ⇒ el mismo 400 AERONAVE_NO_EXISTE de siempre', async () => {
+    const { svc } = armar(conAvion());
+    const r = await error(
+      svc.crear(
+        datos({ aeronave_id: '99999999-9999-4999-8999-999999999999' }),
+        undefined,
+        ADMIN,
+      ),
+    );
+    expect(r.code).toBe('AERONAVE_NO_EXISTE');
+    expect(r.message).toBe('Ese avión no existe.');
+  });
+
+  it('PATCH que reclasifica a APORTACIÓN conservando el avión ⇒ 400; con `aeronave_id: null` ⇒ 200 y SIN el aviso de VuelaTour', async () => {
+    const reembolso = () =>
+      conAvion({
+        ingreso: [
+          ingresoRow('i1', {
+            categoria: 'REEMBOLSO_DEVOLUCION',
+            aeronave_id: AV_N990,
+          }),
+        ],
+      });
+    const w = armar(reembolso());
+    const r = await error(
+      w.svc.editar(
+        'i1',
+        JSON.stringify({ categoria: 'APORTACION_PRESTAMO' }),
+        undefined,
+        ADMIN,
+      ),
+    );
+    expect(r.code).toBe('AVION_SOLO_EN_RESULTADO');
+    expect(w.db.ingreso[0].categoria).toBe('REEMBOLSO_DEVOLUCION');
+    const ok = await w.svc.editar(
+      'i1',
+      JSON.stringify({ categoria: 'APORTACION_PRESTAMO', aeronave_id: null }),
+      undefined,
+      ADMIN,
+    );
+    expect(w.db.ingreso[0]).toMatchObject({
+      categoria: 'APORTACION_PRESTAMO',
+      aeronave_id: null,
+    });
+    expect(ok.avisos).not.toContain(AVISO_SIN);
+    expect(ok.ingreso.destino).toBe('FUERA_DE_RESULTADOS');
+  });
+
+  it('PATCH SOLO de `aeronave_id` sobre un ingreso CONCILIADO ⇒ 200 (no 409) con el aviso', async () => {
+    const w = armar(
+      conAvion({
+        ingreso: [ingresoRow('i1', { categoria: 'REEMBOLSO_DEVOLUCION' })],
+        movimiento_bancario: [
+          { id: 'm1', ingreso_id: 'i1', fecha: '2026-09-10', monto: 5000 },
+        ],
+      }),
+    );
+    const r = await w.svc.editar(
+      'i1',
+      JSON.stringify({ aeronave_id: AV_N990 }),
+      undefined,
+      ADMIN,
+    );
+    expect(w.db.ingreso[0].aeronave_id).toBe(AV_N990);
+    expect(r.avisos).toEqual([AVISO_CON]);
+    expect(r.ingreso.conciliacion.estado).toBe('CONCILIADO');
+  });
+
+  it('PATCH que QUITA el avión a un reembolso ⇒ aviso «vuelve a ser ingreso de VuelaTour» y destino VUELATOUR', async () => {
+    const w = armar(
+      conAvion({
+        ingreso: [
+          ingresoRow('i1', {
+            categoria: 'REEMBOLSO_DEVOLUCION',
+            aeronave_id: AV_N990,
+          }),
+        ],
+      }),
+    );
+    const r = await w.svc.editar(
+      'i1',
+      JSON.stringify({ aeronave_id: null }),
+      undefined,
+      ADMIN,
+    );
+    expect(w.db.ingreso[0].aeronave_id).toBeNull();
+    expect(r.avisos).toEqual([AVISO_SIN]);
+    expect(r.ingreso.destino).toBe('VUELATOUR');
+    expect(r.ingreso.destino_etiqueta).toBe(
+      'Otros ingresos (Balance general VuelaTour y Libro Dinero)',
+    );
+  });
+
+  it('el 23514 del CHECK `ingreso_aeronave_chk` ⇒ 400 con el MISMO code (nunca 500)', () => {
+    const t = traducirErrorIngreso({
+      code: '23514',
+      message:
+        'new row for relation "ingreso" violates check constraint "ingreso_aeronave_chk"',
+    });
+    expect(t?.getStatus()).toBe(400);
+    expect(t?.getResponse()).toEqual({
+      message: MSG,
+      error: 'AVION_SOLO_EN_RESULTADO',
+    });
+  });
+
+  it('`?aeronave_id` filtra; destino y destino_etiqueta (con la matrícula) en la lista', async () => {
+    const w = armar(
+      conAvion({
+        ingreso: [
+          ingresoRow('i1', {
+            folio: 4,
+            categoria: 'REEMBOLSO_DEVOLUCION',
+            aeronave_id: AV_N990,
+            aeronave: { matricula: 'N990GG' },
+          }),
+          ingresoRow('i2', { folio: 5 }),
+          ingresoRow('i3', {
+            folio: 6,
+            categoria: 'ANTICIPO_CLIENTE',
+            cliente_id: K_CRISTY,
+          }),
+        ],
+      }),
+    );
+    const todos = await w.svc.lista({
+      vista: 'todos',
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+      limit: 50,
+      offset: 0,
+    });
+    expect(
+      todos.data.map((i) => [i.etiqueta, i.destino, i.destino_etiqueta]),
+    ).toEqual([
+      [
+        'ING-6',
+        'FUERA_DE_RESULTADOS',
+        'Fuera de resultados hasta aplicarse a un vuelo (ahí cuenta como cobro del vuelo)',
+      ],
+      [
+        'ING-5',
+        'VUELATOUR',
+        'Otros ingresos (Balance general VuelaTour y Libro Dinero)',
+      ],
+      [
+        'ING-4',
+        'AVION',
+        'Otros ingresos del avión N990GG (balance del avión y reparto a socios)',
+      ],
+    ]);
+    const delAvion = await w.svc.lista({
+      vista: 'todos',
+      aeronave_id: AV_N990,
+      desde: '2026-09-01',
+      hasta: '2026-09-30',
+      limit: 50,
+      offset: 0,
+    });
+    expect(delAvion.data.map((i) => i.etiqueta)).toEqual(['ING-4']);
   });
 });

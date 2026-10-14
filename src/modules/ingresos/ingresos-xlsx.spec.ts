@@ -171,6 +171,53 @@ describe('ingresos-xlsx', () => {
     ).toBe('Efectivo / caja');
   });
 
+  it('«Destino» con avión = el texto del avión (13-oct-2026, invariante 67); sin avión, el de la categoría; encabezados sin cambio', () => {
+    const conAvion = filaExcelIngreso(
+      ingreso({
+        categoria: 'REEMBOLSO_DEVOLUCION',
+        categoria_etiqueta: 'Reembolsos y devoluciones recibidos',
+        aeronave_id: 'av-n990gg',
+        matricula: 'N990GG',
+      }),
+    );
+    expect(conAvion[3]).toBe(
+      'Otros ingresos del avión N990GG (balance del avión y reparto a socios)',
+    );
+    // La columna «Matrícula» se queda.
+    expect(conAvion[15]).toBe('N990GG');
+    expect(filaExcelIngreso(ingreso({ matricula: 'XA-VGV' }))[3]).toBe(
+      'Otros ingresos (Balance general VuelaTour y Libro Dinero)',
+    );
+    // Un anticipo (jamás lleva avión) dice SU destino.
+    expect(
+      filaExcelIngreso(
+        ingreso({ categoria: 'ANTICIPO_CLIENTE', aeronave_id: 'av-x' }),
+      )[3],
+    ).toBe(
+      'Fuera de resultados hasta aplicarse a un vuelo (ahí cuenta como cobro del vuelo)',
+    );
+    expect(COLUMNAS_INGRESOS.map((c) => c.label)).toEqual([
+      'ING',
+      'Fecha',
+      'Categoría',
+      'Destino',
+      'Concepto',
+      'Cliente / Pagador',
+      'Cuenta',
+      'Método',
+      'Moneda',
+      'Monto',
+      'Comisión',
+      'Neto',
+      'T.C.',
+      'Conciliación',
+      'Vuelo',
+      'Matrícula',
+      'Registró',
+      'Notas',
+    ]);
+  });
+
   it('fila de un cobro: reembolso en negativo y anticipo', () => {
     const f = filaExcelCobro(
       cobro({

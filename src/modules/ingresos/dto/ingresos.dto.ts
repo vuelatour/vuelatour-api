@@ -173,6 +173,15 @@ export class ListIngresosQuery extends ResumenIngresosQuery {
   @IsUUID('all')
   cliente_id?: string;
 
+  /** Ingresos que cuentan para ese avión (13-oct-2026, invariante 67). */
+  @ApiPropertyOptional({
+    description:
+      'Solo los ingresos asignados a ese avión (cuentan en su balance y su reparto).',
+  })
+  @IsOptional()
+  @IsUUID('all')
+  aeronave_id?: string;
+
   @ApiPropertyOptional({ enum: FILTROS_CONCILIACION_INGRESO })
   @IsOptional()
   @IsIn(FILTROS_CONCILIACION_INGRESO)
@@ -327,6 +336,13 @@ export class CrearIngresoDto {
   @IsUUID('all')
   vuelo_id?: string | null;
 
+  /**
+   * Avión al que CUENTA este ingreso (13-oct-2026, API 0.0.75, invariante
+   * 67; solo categorías que suman a resultados; si no, 400
+   * AVION_SOLO_EN_RESULTADO): entra a la hoja «Otros ingresos» de su balance
+   * y a su reparto. null = ingreso de VuelaTour. Sin validación cruzada aquí:
+   * la regla vive en el servicio (sobre el estado fusionado).
+   */
   @IsOptional()
   @IsUUID('all')
   aeronave_id?: string | null;

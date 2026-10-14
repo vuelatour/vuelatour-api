@@ -87,6 +87,36 @@ export interface RepartoAvionPayload {
    */
   gastos_tc_oficial?: { count: number; monto_mxn: number };
   cobros_tc_oficial_count?: number;
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): ingresos registrados
+   * en Ingresos y ASIGNADOS a este avión, netos de comisión bancaria.
+   * `otros_ingresos_avion_usd` SUMA al saldo (`saldo_usd` YA lo incluye: el
+   * renderer jamás lo vuelve a sumar); `otros_ingresos_avion_sin_tc_mxn` =
+   * los MXN sin T.C. propio ni oficial (NO entraron al saldo); la lista es
+   * el detalle por ingreso. El API los manda SIEMPRE (0 / []). OJO: NO son
+   * `otros_ingresos_vuelatour_usd` (TUAs/extras de VuelaTour, informativo).
+   */
+  otros_ingresos_avion_usd?: number;
+  otros_ingresos_avion_sin_tc_mxn?: number;
+  otros_ingresos_avion?: RepartoOtroIngresoLineaPayload[];
+}
+
+/**
+ * Un ingreso ASIGNADO a un avión en el PDF/XLSX del reparto (13-oct-2026,
+ * API 0.0.75, invariante 67) — nombres exactos de `RepartoOtroIngresoLinea`
+ * (pyservices app/schemas/reparto.py). `categoria` = etiqueta amable;
+ * `concepto` = descripción · cliente|pagador; `monto` = BRUTO en su moneda;
+ * `usd` = lo que SUMÓ al saldo (null = MXN sin T.C.: no entró).
+ */
+export interface RepartoOtroIngresoLineaPayload {
+  clave: string;
+  fecha: string;
+  categoria: string;
+  concepto: string;
+  monto: number;
+  moneda: 'MXN' | 'USD';
+  comision: number | null;
+  usd: number | null;
 }
 
 /** Resumen global del TC oficial de respaldo usado en el periodo (nota). */
@@ -96,6 +126,12 @@ export interface RepartoTcOficialPayload {
   /** Fuentes legibles ("open.er-api", "BCE (frankfurter)"). */
   fuentes: string[];
   leyenda: string;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 67): otros ingresos de los
+   * aviones en MXN convertidos con el T.C. oficial de su día (Σ neto MXN).
+   * Informativo para el panel; pyservices hoy lo ignora (`extra` ignorado).
+   */
+  ingresos?: { count: number; monto_mxn: number };
 }
 
 export interface RepartoPdfPayload {
@@ -373,6 +409,14 @@ export interface DineroOtroIngresoFilaPayload {
   remanente_mxn?: number | null;
   /** Misma etiqueta que `factura_vuelatour` de la hoja 1 (invariante 60: «Pendiente de factura» / «No lleva factura» / null = sin cobros). */
   factura?: string | null;
+  /**
+   * ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): SOLO en las filas de
+   * `DineroXlsxPayload.otros_ingresos_avion` (ingresos ING-n asignados a un
+   * avión): su matrícula y su color (la CLAVE se tiñe). Las demás filas no
+   * los llevan.
+   */
+  matricula?: string | null;
+  avion_color?: string | null;
 }
 export interface DineroOtroGastoFilaPayload {
   fecha?: string | null;
@@ -387,6 +431,13 @@ export interface DineroUtilidadAvionPayload {
   permisos_mxn?: number | null;
   /** "Gasto de combustible" del mes del avión (pestaña Combustible). */
   combustible_mxn?: number | null;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 67): Σ NETO MXN
+   * (remanente: ingreso − comisión bancaria) de los ingresos ING-n
+   * asignados a este avión. La llave viaja SOLO con dato; un avión que solo
+   * tiene ingresos entra con las otras 4 llaves en null.
+   */
+  otros_ingresos_mxn?: number | null;
 }
 
 /** Fila de la pestaña "Combustible" del Libro Dinero (26-ago-2026). */
@@ -411,6 +462,16 @@ export interface DineroXlsxPayload {
   }[];
   vuelos: DineroVueloFilaPayload[];
   otros_ingresos: DineroOtroIngresoFilaPayload[];
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.75, invariante 67): los ingresos ING-n
+   * ASIGNADOS a un avión (misma fila de `filaLibroDeIngreso` + `matricula`
+   * y `avion_color`), en el orden del lector. NO están en `otros_ingresos`
+   * ni en `utilidades_otros_ingresos_mxn` (ni su ingreso ni su comisión):
+   * cuentan en el balance y el reparto de su avión y, en 'utilidades', en
+   * `utilidades_aviones[].otros_ingresos_mxn`. Viaja SOLO con filas: sin
+   * ingresos con avión el payload es byte-idéntico.
+   */
+  otros_ingresos_avion?: DineroOtroIngresoFilaPayload[];
   otros_gastos: DineroOtroGastoFilaPayload[];
   /** Pestaña "Combustible": el gas del mes por avión (26-ago-2026). */
   combustible?: DineroCombustibleFilaPayload[];
@@ -1018,6 +1079,50 @@ export interface BalanceAvionHojaGastosPayload {
   tc_por_fila?: boolean;
 }
 
+/**
+ * Fila de la hoja «Otros ingresos» de un avión (13-oct-2026, API 0.0.75,
+ * invariante 67): un ingreso registrado en Ingresos (ING-n) y ASIGNADO a ese
+ * avión. Pesos con la fuente única `filaLibroDeIngreso` (MXN directo; USD ×
+ * su `tc_usd_mxn` PROPIO): `ingreso_mxn` / `comision_mxn` (null sin
+ * comisión) / `neto_mxn` = remanente. `tc_aplicado`: USD ⇒ el `tc_usd_mxn`
+ * EXACTO (sin redondear: pyservices lo cita en la fórmula); MXN ⇒ null.
+ * `detalle` = clave · descripción · cliente|pagador · 'vuelo #n'.
+ * `ingreso_id` viaja para el futuro vínculo celda → registro (punto 5).
+ * `matricula` y `avion_color` SOLO en el consolidado FLOTA (ahí el detalle
+ * llega con «MATRÍCULA · » al frente).
+ */
+export interface BalanceAvionOtroIngresoFilaPayload {
+  ingreso_id: string;
+  clave: string;
+  fecha: string;
+  categoria: string;
+  detalle: string;
+  moneda_original: 'MXN' | 'USD';
+  monto_original: number;
+  tc_aplicado: number | null;
+  ingreso_mxn: number | null;
+  comision_mxn: number | null;
+  neto_mxn: number | null;
+  cuenta: string;
+  notas: string | null;
+  matricula?: string;
+  avion_color?: string | null;
+}
+
+/**
+ * Hoja «Otros ingresos» de un avión (13-oct-2026, API 0.0.75, invariante
+ * 67). `total_mxn` = round2(Σ neto MXN); `usd` = TOTAL USD que SUMA en la
+ * cascada = total ÷ el T.C. de las hojas de gastos del libro (`tcHojas`;
+ * avión sin vuelos: el oficial del cierre), con la regla de `buildHoja`:
+ * alguna fila sin MXN ⇒ null; total 0 ⇒ 0; sin T.C. ⇒ null. En el
+ * consolidado FLOTA: Σ de los libros con filas (null se PROPAGA).
+ */
+export interface BalanceAvionHojaOtrosIngresosPayload {
+  filas: BalanceAvionOtroIngresoFilaPayload[];
+  total_mxn: number;
+  usd: number | null;
+}
+
 /** Hoja "combustible" (26-ago-2026): el gas del avión POR MES, con litros. */
 export interface BalanceAvionHojaCombustiblePayload extends BalanceAvionHojaGastosPayload {
   litros_total: number;
@@ -1147,6 +1252,15 @@ export interface BalanceAvionBalancePayload {
    * socios no cambian.
    */
   utilidad_antes_comisiones_usd?: number;
+  /**
+   * ADITIVO (13-oct-2026, API 0.0.75, invariante 67): = `otros_ingresos_avion.usd`
+   * del libro (la hoja «Otros ingresos» del avión). `utilidad_despues_usd`
+   * YA lo SUMA (línea «(+) OTROS INGRESOS USD», entre «(−) PERMISOS USD» y
+   * «UTILIDAD DESPUÉS DE GASTOS USD»); null se propaga. Viaja SIEMPRE junto
+   * con la hoja (0 sin ingresos), como ÚLTIMA llave del bloque. OJO: NO es
+   * `otros_ingresos_usd` de los vuelos/totales (TUAs/extras de VuelaTour).
+   */
+  otros_ingresos_avion_usd?: number | null;
 }
 
 /** Fila del RESUMEN del balance general (= totales del libro de un avión). */
@@ -1420,6 +1534,15 @@ export interface BalanceHojaOtrosMovimientosPayload {
    */
   comision_vendedor_solo_gasto_real?: true;
   /**
+   * ADITIVA (13-oct-2026, API 0.0.75, invariante 67): los ingresos de
+   * resultado ASIGNADOS a un avión ya NO están en `filas_sueltas` (cuentan
+   * en la hoja «Otros ingresos» de su libro, en su cascada y en su reparto;
+   * el bloque VUELATOUR los excluye por construcción). Viaja SIEMPRE desde
+   * el 0.0.75, después de `comision_vendedor_solo_gasto_real` y antes de
+   * `afac_en_filas`; pyservices cambia con ella solo la fila 2.
+   */
+  otros_ingresos_por_avion?: true;
+  /**
    * ADITIVA (13-oct-2026, API 0.0.74, invariante 62): viaja SOLO cuando
    * `filas` termina con ≥1 fila `seccion: 'AFAC'` (sin provisión ni
    * permisos pagados la llave NO existe ⇒ la pestaña sale byte a byte como
@@ -1500,6 +1623,16 @@ export interface BalanceAvionPayload {
    * pyservices cambia con ella solo textos. Un API previo no la manda.
    */
   comision_vendedor_solo_gasto_real?: true;
+  /**
+   * ADITIVA (13-oct-2026, API 0.0.75, invariante 67): hoja «Otros ingresos»
+   * del avión (ingresos de resultado registrados en Ingresos con ESTE avión,
+   * en el mes de su `fecha`). SIEMPRE en los libros de avión (individual y
+   * cada `aviones[]` del general; vacía = `{filas: [], total_mxn: 0, usd:
+   * 0}`), también en EXTERNOS (vacía); en el consolidado FLOTA SOLO si algún
+   * libro trae filas (hoja «otros ingresos aviones»). ÚLTIMA llave del
+   * libro. Su presencia manda en pyservices (pestaña y línea de la cascada).
+   */
+  otros_ingresos_avion?: BalanceAvionHojaOtrosIngresosPayload;
 }
 
 export interface GastoVueloSugerenciaPayload {

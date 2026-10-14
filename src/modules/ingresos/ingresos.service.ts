@@ -24,13 +24,16 @@ import {
 import { validarComprobanteCobro } from '../flights/comprobante-cobro.util';
 import { Rol, type AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  categoriaIngresoAdmiteAvion,
   categoriaIngresoAdmiteVuelo,
   categoriaIngresoExigeCliente,
   categoriaIngresoSumaAResultados,
+  destinoIngreso,
   esAnticipo,
   esCategoriaIngreso,
   etiquetaCategoriaIngreso,
   etiquetaIngreso,
+  textoDestinoIngreso,
   type CategoriaIngreso,
 } from '../../common/categoria-ingreso.util';
 import {
@@ -61,6 +64,9 @@ import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import { posibleDuplicado } from '../conciliacion/abono-cruce.util';
 import { primeraLinea, ventanaDias } from '../conciliacion/auto-cruce.util';
 import {
+  AVISO_INGRESO_SIN_AVION,
+  MSG_AVION_SOLO_EN_RESULTADO,
+  avisoIngresoConAvion,
   coincideBusqueda,
   comisionDeAplicacion,
   estadoConciliacionCobro,
@@ -214,6 +220,13 @@ const CHECK_A_CODE: ReadonlyArray<[string, string, string]> = [
     'ingreso_baja_chk',
     'MOTIVO_INVALIDO',
     'El motivo de la baja debe tener entre 5 y 500 caracteres.',
+  ],
+  // 13-oct-2026 (API 0.0.75, invariante 67; migración 20261013000005): el
+  // avión solo en ingresos de RESULTADO. Espejo del 400 de `validarEstado`.
+  [
+    'ingreso_aeronave_chk',
+    'AVION_SOLO_EN_RESULTADO',
+    MSG_AVION_SOLO_EN_RESULTADO,
   ],
 ];
 
@@ -535,6 +548,17 @@ export class IngresosService {
       vuelo_folio: vuelo?.folio == null ? null : Number(vuelo.folio),
       aeronave_id: (f.aeronave_id as string | null) ?? null,
       matricula: typeof avion?.matricula === 'string' ? avion.matricula : null,
+      // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): a dónde cuenta
+      // (un ingreso de resultado CON avión cuenta para ESE avión) y su texto.
+      destino: destinoIngreso(
+        categoria,
+        (f.aeronave_id as string | null) ?? null,
+      ),
+      destino_etiqueta: textoDestinoIngreso(
+        categoria,
+        (f.aeronave_id as string | null) ?? null,
+        typeof avion?.matricula === 'string' ? avion.matricula : null,
+      ),
       gasto_id: (f.gasto_id as string | null) ?? null,
       notas: (f.notas as string | null) ?? null,
       archivo:
@@ -1198,6 +1222,8 @@ export class IngresosService {
       if (q.cuenta_bancaria_id)
         qb = qb.eq('cuenta_bancaria_id', q.cuenta_bancaria_id);
       if (q.cliente_id) qb = qb.eq('cliente_id', q.cliente_id);
+      // Ingresos de un avión (13-oct-2026, invariante 67).
+      if (q.aeronave_id) qb = qb.eq('aeronave_id', q.aeronave_id);
       return qb
         .order('fecha', { ascending: false })
         .order('folio', { ascending: false })
@@ -1497,6 +1523,14 @@ export class IngresosService {
         'El pago de un vuelo se registra como cobro del vuelo; aquí contaría dos veces.',
       );
     }
+    // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67):
+    // el avión solo en categorías de RESULTADO (espejo del CHECK
+    // `ingreso_aeronave_chk`). Sobre el estado FUSIONADO: reclasificar a
+    // anticipo o aportación con el avión vigente también es 400 (el panel
+    // manda `aeronave_id: null` al reclasificar).
+    if (s.aeronave_id && !categoriaIngresoAdmiteAvion(s.categoria)) {
+      throw bad('AVION_SOLO_EN_RESULTADO', MSG_AVION_SOLO_EN_RESULTADO);
+    }
     if (s.gasto_id && s.categoria !== 'REEMBOLSO_DEVOLUCION') {
       throw bad(
         'GASTO_SOLO_EN_REEMBOLSO',
@@ -1557,13 +1591,24 @@ export class IngresosService {
         'Ese vuelo no existe.',
       );
     }
-    if (verificar.has('aeronave_id')) {
-      await existe(
-        'aeronave',
-        s.aeronave_id,
-        'AERONAVE_NO_EXISTE',
-        'Ese avión no existe.',
-      );
+    if (verificar.has('aeronave_id') && s.aeronave_id) {
+      // Existe + su matrícula (13-oct-2026, invariante 67): al darlo de alta
+      // o cambiarlo, el aviso dice para qué avión cuenta.
+      const { data, error } = await this.sb
+        .from('aeronave')
+        .select('id, matricula')
+        .eq('id', s.aeronave_id)
+        .maybeSingle();
+      if (error) throw new Error(error.message);
+      if (!data) throw bad('AERONAVE_NO_EXISTE', 'Ese avión no existe.');
+      const matricula = (data as { matricula?: unknown }).matricula;
+      if (categoriaIngresoAdmiteAvion(s.categoria)) {
+        avisos.push(
+          avisoIngresoConAvion(
+            typeof matricula === 'string' && matricula ? matricula : 'elegido',
+          ),
+        );
+      }
     }
     if (verificar.has('gasto_id')) {
       await existe(
@@ -2302,6 +2347,20 @@ export class IngresosService {
     }
     // TODAS las reglas de alta sobre el estado FUSIONADO.
     const { estado, avisos } = await this.validarEstado(fusion, cambiados);
+    // Quitar el avión de un ingreso de RESULTADO (13-oct-2026, invariante
+    // 67): vuelve a ser de VuelaTour. SIN candado nuevo, a propósito:
+    // `aeronave_id` es asignación, no dinero del banco — el 409
+    // `INGRESO_CONCILIADO` de arriba y `tg_ingreso_candados` no lo vigilan
+    // (se cambia aunque el ingreso esté conciliado) y la bitácora lo
+    // registra sola (`tg_ingreso_bitacora`).
+    if (
+      cambiados.has('aeronave_id') &&
+      actual.aeronave_id &&
+      !estado.aeronave_id &&
+      categoriaIngresoSumaAResultados(estado.categoria)
+    ) {
+      avisos.push(AVISO_INGRESO_SIN_AVION);
+    }
     const patch: Record<string, unknown> = {};
     for (const k of CAMPOS_ESTADO) {
       if (!igual(k, estado[k], actual[k])) patch[k] = estado[k];

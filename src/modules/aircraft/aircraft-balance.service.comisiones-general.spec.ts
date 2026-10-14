@@ -454,11 +454,25 @@ const EMPRESA_0074 = {
 
 const MATRICULAS = ['XB-TST', 'XB-DOS'] as const;
 
+/**
+ * El bloque sin la llave del 0.0.75 (13-oct-2026, invariante 67: la línea
+ * «(+) OTROS INGRESOS USD», 0 en este mundo sin ingresos asignados): el
+ * bloque CONGELADO de antes. Aparte se prueba que vale 0 y va al final.
+ */
+function sinOtrosIngresosAvion(
+  b: BalanceAvionPayload['balance'],
+): Record<string, unknown> {
+  const resto: Record<string, unknown> = { ...b };
+  expect(resto.otros_ingresos_avion_usd).toBe(0);
+  delete resto.otros_ingresos_avion_usd;
+  return resto;
+}
+
 /** El bloque sin las dos llaves del 0.0.66 (las de la cascada del general). */
 function sinLlavesNuevas(
   b: BalanceAvionPayload['balance'],
 ): Record<string, unknown> {
-  const resto: Record<string, unknown> = { ...b };
+  const resto = sinOtrosIngresosAvion(b);
   delete resto.comisiones_usd;
   delete resto.utilidad_antes_comisiones_usd;
   return resto;
@@ -470,9 +484,11 @@ describe('Utilidad cobrada por avión: CONGELADA en el 0.0.74 (pago REAL del ven
     for (const m of MATRICULAS) {
       const b = (await libro(ID_DE[m])).balance;
       expect(sinLlavesNuevas(b)).toEqual(BALANCE_0074[m]);
-      expect(Object.keys(b).slice(-2)).toEqual([
+      // … seguidas por la del 0.0.75 (invariante 67), la ÚLTIMA.
+      expect(Object.keys(b).slice(-3)).toEqual([
         'comisiones_usd',
         'utilidad_antes_comisiones_usd',
+        'otros_ingresos_avion_usd',
       ]);
     }
   });
@@ -536,10 +552,10 @@ describe('Utilidad cobrada por avión: CONGELADA en el 0.0.74 (pago REAL del ven
     const g = await general(POSTERIOR, mundoVt);
     for (const m of MATRICULAS) {
       const ind = await libro(ID_DE[m], POSTERIOR, mundoVt);
-      expect(ind.balance).toEqual(BALANCE_ANTES[m]);
+      expect(sinOtrosIngresosAvion(ind.balance)).toEqual(BALANCE_ANTES[m]);
       expect('comisiones_usd' in ind.balance).toBe(false);
       expect('utilidad_antes_comisiones_usd' in ind.balance).toBe(false);
-      expect(bloqueDe(g, m)).toEqual(BALANCE_ANTES[m]);
+      expect(sinOtrosIngresosAvion(bloqueDe(g, m))).toEqual(BALANCE_ANTES[m]);
       for (const v of ind.vuelos) {
         expect([v.folio, 'comision_vendedor_real_mxn' in v]).toEqual([
           v.folio,

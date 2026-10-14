@@ -412,7 +412,8 @@ const INGRESOS_LIBROS: Fila[] = [
  * bancaria, remanente 2,750; hasta el 0.0.72 llevaba la PROVISIÓN de
  * $1,600.00: egreso 3,450, remanente 1,150) y la hoja lleva la bandera
  * `sin_provision_vendedor: true` al final y, desde el 13-oct-2026 (API
- * 0.0.74, invariante 61), `comision_vendedor_solo_gasto_real: true` después.
+ * 0.0.74, invariante 61), `comision_vendedor_solo_gasto_real: true` después
+ * y (API 0.0.75, invariante 67) `otros_ingresos_por_avion: true` al final.
  * Lo que prueba este spec —los ingresos sin vuelo— no cambia.
  */
 const GOLDEN_OM = {
@@ -468,6 +469,7 @@ const GOLDEN_OM = {
   ],
   sin_provision_vendedor: true,
   comision_vendedor_solo_gasto_real: true,
+  otros_ingresos_por_avion: true,
 } as unknown as BalanceHojaOtrosMovimientosPayload;
 
 type PrivadoOM = {
@@ -605,5 +607,53 @@ describe('Balance general «Otros movimientos» — ingresos sin vuelo (24-sep-2
       (dineroSin.utilidades_otros_ingresos_mxn ?? 0);
     expect(Math.round(deltaBalance * 100) / 100).toBe(6800);
     expect(Math.round(deltaUtilidades * 100) / 100).toBe(6800);
+  });
+
+  it('un ingreso ASIGNADO a un avión (13-oct-2026, invariante 67) no toca la pestaña ni el total de VuelaTour: sueltas IDÉNTICAS y el delta de utilidades sigue en 6,800', async () => {
+    const ingAvion: Fila = {
+      id: 'i-av',
+      folio: 14,
+      categoria: 'REEMBOLSO_DEVOLUCION',
+      fecha: '2026-09-04',
+      descripcion: 'TRANSF INTERBANCARIA SPEI',
+      monto: 46550.8,
+      comision_monto: null,
+      moneda: 'MXN',
+      tc_usd_mxn: null,
+      pagador: 'angel alvarez',
+      aeronave_id: AV,
+      aeronave: { matricula: 'XB-TST', color_calendario: '#3B82F6' },
+      deleted_at: null,
+      cliente: null,
+      vuelo: null,
+    };
+    const { om: soloVt } = await otrosMovimientos(INGRESOS_LIBROS);
+    const { om: conAvion } = await otrosMovimientos([
+      ...INGRESOS_LIBROS,
+      ingAvion,
+    ]);
+    expect(conAvion.filas_sueltas).toEqual(soloVt.filas_sueltas);
+    expect(JSON.stringify(conAvion)).toBe(JSON.stringify(soloVt));
+    const dineroDe = async (ingresos: Fila[]) =>
+      (
+        new DineroReportService(
+          fakeSupabase(mundoLibros(ingresos))
+            .supabase as unknown as SupabaseService,
+          {} as never,
+        ) as unknown as {
+          buildPayload: (a: string, b: string) => Promise<DineroXlsxPayload>;
+        }
+      ).buildPayload(DESDE, HASTA);
+    const [sin, con] = await Promise.all([
+      dineroDe([]),
+      dineroDe([...INGRESOS_LIBROS, ingAvion]),
+    ]);
+    expect(
+      Math.round(
+        ((con.utilidades_otros_ingresos_mxn ?? 0) -
+          (sin.utilidades_otros_ingresos_mxn ?? 0)) *
+          100,
+      ) / 100,
+    ).toBe(6800);
   });
 });

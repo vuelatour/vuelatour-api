@@ -407,7 +407,9 @@ export const INGRESOS_LIBROS: Fila[] = [
  * (invariante 60) la columna `factura` del #501 dice «No lleva factura»:
  * tiene dos cobros sin cuenta ni método (ninguno exige factura); y
  * (invariante 61, API 0.0.74) la hoja suma `comision_vendedor_solo_gasto_real:
- * true` después de `sin_provision_vendedor`.
+ * true` después de `sin_provision_vendedor`. Desde el 13-oct-2026 (API
+ * 0.0.75, invariante 67) la ÚNICA diferencia es `otros_ingresos_por_avion:
+ * true` después de `comision_vendedor_solo_gasto_real` (viaja SIEMPRE).
  */
 export const GOLDEN_OM = {
   filas: [
@@ -460,6 +462,7 @@ export const GOLDEN_OM = {
   ],
   sin_provision_vendedor: true,
   comision_vendedor_solo_gasto_real: true,
+  otros_ingresos_por_avion: true,
 } as unknown as BalanceHojaOtrosMovimientosPayload;
 
 /**

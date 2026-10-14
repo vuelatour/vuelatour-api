@@ -50,7 +50,9 @@ import {
 import { etiquetasFacturaDeVuelos } from '../flights/factura-cliente-etiquetas';
 import {
   filaLibroDeIngreso,
+  ingresoEsDelAvion,
   leerIngresosDeResultado,
+  partirIngresosPorAvion,
 } from '../../common/ingreso-resultado.util';
 import {
   PyservicesService,
@@ -1220,8 +1222,18 @@ export class DineroReportService {
     // que el pago al vendedor: no es gasto de ninguna otra hoja; sin
     // restarla, utilidades y el TOTAL remanente del Balance general dirían
     // números distintos). =====
+    //
+    // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67):
+    // un ingreso con avión cuenta UNA vez: en su avión (balance, reparto y su
+    // columna OTROS INGRESOS de 'utilidades'), nunca en OTROS INGRESOS de
+    // VuelaTour. Partición ÚNICA `partirIngresosPorAvion`: este bucle corre
+    // solo sobre los de VuelaTour (sus filas y `comisionIngresosMxn`, byte a
+    // byte las de siempre) y los del avión van APARTE en
+    // `otros_ingresos_avion`, sin tocar `otrosIngresos` ni la comisión: así
+    // `utilidades_otros_ingresos_mxn` los excluye ÍNTEGROS por construcción.
+    const partidos = partirIngresosPorAvion(ingresosResultado);
     let comisionIngresosMxn = 0;
-    for (const ing of ingresosResultado) {
+    for (const ing of partidos.empresa) {
       const f = filaLibroDeIngreso(ing);
       if (!f) continue;
       otrosIngresos.push({
@@ -1240,6 +1252,37 @@ export class DineroReportService {
       });
       if (f.ingreso_mxn != null && f.egreso_mxn != null) {
         comisionIngresosMxn += f.egreso_mxn;
+      }
+    }
+    // Los ASIGNADOS a un avión, en el orden del lector (fecha, folio): la
+    // MISMA fila de `filaLibroDeIngreso` + su matrícula y color, y su
+    // remanente (ingreso − comisión) acreditado a SU avión en 'utilidades'.
+    const otrosIngresosAvion: DineroOtroIngresoFilaPayload[] = [];
+    const otrosIngresosPorAvion = new Map<string, number>();
+    for (const ing of ingresosResultado.filter(ingresoEsDelAvion)) {
+      const f = filaLibroDeIngreso(ing);
+      if (!f) continue;
+      otrosIngresosAvion.push({
+        clave: f.clave,
+        fecha_vuelo: null,
+        concepto_egreso: f.concepto_egreso,
+        egreso_mxn: f.egreso_mxn,
+        fecha_egreso:
+          f.egreso_mxn != null || f.concepto_egreso ? f.fecha : null,
+        nota_egreso: null,
+        concepto_ingreso: f.concepto_ingreso,
+        ingreso_mxn: f.ingreso_mxn,
+        fecha_ingreso: f.fecha,
+        remanente_mxn: f.remanente_mxn,
+        factura: null,
+        matricula: ing.matricula ?? null,
+        avion_color: ing.aeronave_color ?? null,
+      });
+      if (ing.aeronave_id && f.remanente_mxn != null) {
+        otrosIngresosPorAvion.set(
+          ing.aeronave_id,
+          (otrosIngresosPorAvion.get(ing.aeronave_id) ?? 0) + f.remanente_mxn,
+        );
       }
     }
 
@@ -1427,19 +1470,32 @@ export class DineroReportService {
     }
 
     // ===== Hoja 4: utilidades (lo computable hoy) =====
+    // + la columna OTROS INGRESOS del avión (13-oct-2026, invariante 67):
+    // Σ remanente de sus ingresos asignados; la llave SOLO con dato y un
+    // avión con solo ingresos entra con las otras 4 en null.
     const utilidadesAviones: DineroUtilidadAvionPayload[] = [];
     for (const [id, a] of aviones) {
       const ind = indirectosPorAvion.get(id);
       const otr = otrosPorAvion.get(id);
       const per = permisosPorAvion.get(id);
       const comb = combustiblePorAvion.get(id);
-      if (ind == null && otr == null && per == null && comb == null) continue;
+      const oi = otrosIngresosPorAvion.get(id);
+      if (
+        ind == null &&
+        otr == null &&
+        per == null &&
+        comb == null &&
+        oi == null
+      ) {
+        continue;
+      }
       utilidadesAviones.push({
         matricula: a.matricula,
         gastos_indirectos_mxn: r2(ind ?? null),
         otros_gastos_mxn: r2(otr ?? null),
         permisos_mxn: r2(per ?? null),
         combustible_mxn: r2(comb ?? null),
+        ...(oi != null ? { otros_ingresos_mxn: r2(oi) } : {}),
       });
     }
     // Solo INGRESOS (las filas de solo-egreso — TUA pagado sin línea TUAS —
@@ -1472,6 +1528,11 @@ export class DineroReportService {
       })),
       vuelos: filas,
       otros_ingresos: otrosIngresos,
+      // ADITIVA (13-oct-2026, API 0.0.75, invariante 67), SOLO con filas:
+      // los ingresos asignados a un avión, aparte y fuera de TOTALES.
+      ...(otrosIngresosAvion.length
+        ? { otros_ingresos_avion: otrosIngresosAvion }
+        : {}),
       otros_gastos: otrosGastos,
       combustible: combustibleFilas,
       combustible_total_mxn: r2(combustibleAcum),

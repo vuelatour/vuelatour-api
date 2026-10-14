@@ -41,6 +41,20 @@ import {
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
 import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
+// INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): los
+// ingresos de resultado CON avión suman al saldo de ESE avión (partición
+// única `partirIngresosPorAvion`, la misma del balance y el Libro Dinero).
+import {
+  ingresoEsDelAvion,
+  leerIngresosDeResultado,
+  netoIngresoUsd,
+  partirIngresosPorAvion,
+  type IngresoParaLibro,
+} from '../../common/ingreso-resultado.util';
+import {
+  etiquetaCategoriaIngreso,
+  etiquetaIngreso,
+} from '../../common/categoria-ingreso.util';
 // «TUA incluida» de la oficina (13-oct-2026, invariante 66): sonda ÚNICA de
 // `gasto.tua_incluida` (reparto y pre-cierre la leen detrás de ella).
 import {
@@ -586,6 +600,23 @@ export class ProfitSharingService {
           multi_avion: v.multi_avion ?? false,
           tramos_avion: v.tramos_ruta_avion ?? v.tramos_avion ?? null,
         })),
+        // ADITIVOS (13-oct-2026, API 0.0.75, invariante 67): los ingresos
+        // asignados a este avión. `saldo_usd` YA incluye
+        // `otros_ingresos_avion_usd` (pyservices jamás lo vuelve a sumar);
+        // los MXN sin T.C. NO entraron al saldo (se avisan). Siempre (0 / []).
+        otros_ingresos_avion_usd: a.ingresos.otros_ingresos_avion_usd,
+        otros_ingresos_avion_sin_tc_mxn:
+          a.ingresos.otros_ingresos_avion_sin_tc_mxn,
+        otros_ingresos_avion: a.detalle.otros_ingresos_avion.map((l) => ({
+          clave: l.clave,
+          fecha: l.fecha,
+          categoria: l.categoria_etiqueta,
+          concepto: l.concepto,
+          monto: l.monto,
+          moneda: l.moneda,
+          comision: l.comision,
+          usd: l.usd,
+        })),
       })),
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real, en dos categorías —
@@ -638,6 +669,8 @@ export class ProfitSharingService {
           gastos: { count: 0, monto_mxn: 0 },
           fuentes: [] as string[],
           leyenda: TC_OFICIAL_LEYENDA,
+          // ADITIVO (13-oct-2026, invariante 67): mismo shape que la normal.
+          ingresos: { count: 0, monto_mxn: 0 },
         },
         externos: {
           vuelos: 0,
@@ -666,16 +699,34 @@ export class ProfitSharingService {
       };
     }
 
-    const [vuelos, gastos, socios, reservas, vigenciaComisiones] =
-      await Promise.all([
-        this.fetchVuelos(q.desde, q.hasta),
-        this.fetchGastos(q.desde, q.hasta),
-        this.fetchSocios(),
-        this.fetchReservas(),
-        // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura
-        // para todos los aviones del cómputo.
-        this.vigenciaComisiones(),
-      ]);
+    const [
+      vuelos,
+      gastos,
+      socios,
+      reservas,
+      vigenciaComisiones,
+      ingresosResultado,
+    ] = await Promise.all([
+      this.fetchVuelos(q.desde, q.hasta),
+      this.fetchGastos(q.desde, q.hasta),
+      this.fetchSocios(),
+      this.fetchReservas(),
+      // Comisiones a cargo del avión (6-oct-2026, API 0.0.65): UNA lectura
+      // para todos los aviones del cómputo.
+      this.vigenciaComisiones(),
+      // INGRESOS ASIGNADOS A UN AVIÓN (13-oct-2026, API 0.0.75, invariante
+      // 67): los de resultado del periodo (`ingreso.fecha` ∈ [desde, hasta],
+      // día Cancún). La sonda va dentro: sin la migración de ingresos
+      // devuelve [] sin consultar la tabla.
+      leerIngresosDeResultado(this.supabase.service, q.desde, q.hasta),
+    ]);
+    // Partición ÚNICA (su avión XOR VuelaTour): aquí solo cuentan los de los
+    // aviones de ESTE cómputo (activos; `q.aeronave_id` limita). Los de
+    // VuelaTour no son de ningún reparto.
+    const ingresosPartidos = partirIngresosPorAvion(ingresosResultado);
+    const ingresosDeAviones = aeronaves.flatMap(
+      (a) => ingresosPartidos.porAvion.get(a.id) ?? [],
+    );
     const vueloIds = vuelos.map((v) => v.id);
     const [cobros, escalas, gastosVendedorPorVuelo] = await Promise.all([
       this.fetchCobros(vueloIds),
@@ -723,6 +774,8 @@ export class ProfitSharingService {
         )
         .map((v) => v.id),
     );
+    // (d) INGRESOS de los aviones en MXN sin T.C. propio (13-oct-2026,
+    // invariante 67): el oficial del día del INGRESO, en el MISMO lote.
     const tcResuelto = await this.resolverTcOficial(
       vuelos.filter(
         (v) =>
@@ -733,12 +786,14 @@ export class ProfitSharingService {
           ),
       ),
       gastos,
+      ingresosDeAviones,
     );
     const tcOficial = {
       vuelo: new Map(
         [...tcResuelto.vuelo].filter(([id]) => vuelosTcCobros.has(id)),
       ),
       gasto: tcResuelto.gasto,
+      ingreso: tcResuelto.ingreso,
     };
     const tcKComisionesVuelo = new Map(
       [...tcResuelto.vuelo].filter(([id]) => !vuelosTcCobros.has(id)),
@@ -907,6 +962,8 @@ export class ProfitSharingService {
         vigenciaComisiones,
         gastosVendedorPorVuelo,
         vuelosConPagoVendedorAvion,
+        ingresosAvion: ingresosPartidos.porAvion.get(a.id) ?? [],
+        tcOficialIngreso: tcOficial.ingreso,
       }),
     );
 
@@ -1005,11 +1062,26 @@ export class ProfitSharingService {
       }),
       { count: fijosTcOficialCount, monto_mxn: fijosTcOficialMxn },
     );
+    // Otros ingresos de los aviones convertidos con el T.C. oficial del día
+    // (13-oct-2026, invariante 67): informativo, ya DENTRO de sus saldos.
+    const tcOficialIngresos = aviones.reduce(
+      (acc, a) => {
+        for (const l of a.detalle.otros_ingresos_avion) {
+          if (!l.tc_oficial) continue;
+          acc.count += 1;
+          acc.monto_mxn += l.neto;
+        }
+        return acc;
+      },
+      { count: 0, monto_mxn: 0 },
+    );
     const tcOficialFuentes = [
       ...new Set(
-        [...tcOficial.vuelo.values(), ...tcOficial.gasto.values()].map((d) =>
-          fuenteTcLegible(d.fuente),
-        ),
+        [
+          ...tcOficial.vuelo.values(),
+          ...tcOficial.gasto.values(),
+          ...tcOficial.ingreso.values(),
+        ].map((d) => fuenteTcLegible(d.fuente)),
       ),
     ].sort();
 
@@ -1031,6 +1103,13 @@ export class ProfitSharingService {
         },
         fuentes: tcOficialFuentes,
         leyenda: TC_OFICIAL_LEYENDA,
+        // ADITIVO (13-oct-2026, API 0.0.75, invariante 67): otros ingresos
+        // de los aviones en MXN convertidos con el T.C. oficial de su día
+        // (mismo shape que `gastos`; Σ neto MXN).
+        ingresos: {
+          count: tcOficialIngresos.count,
+          monto_mxn: round2(tcOficialIngresos.monto_mxn),
+        },
       },
       externos: {
         vuelos: externosVuelos.length,
@@ -1152,6 +1231,20 @@ export class ProfitSharingService {
        * `compute()`): solo decide la clave EXCLUIDO del eje fecha_gasto.
        */
       vuelosConPagoVendedorAvion: ReadonlySet<string>;
+      /**
+       * Ingresos de resultado ASIGNADOS a este avión (13-oct-2026, API
+       * 0.0.75, invariante 67; `partirIngresosPorAvion`, mes de
+       * `ingreso.fecha`): SUMAN al saldo, netos de comisión bancaria.
+       * Opcional SOLO para los specs que arman el ctx a mano (sin él, []);
+       * `compute()` lo manda siempre.
+       */
+      ingresosAvion?: ReadonlyArray<IngresoParaLibro>;
+      /**
+       * T.C. oficial del día de cada ingreso MXN sin T.C. propio (ingreso.id
+       * → detalle; mismo lote de días que vuelos y gastos). Opcional como el
+       * de arriba (sin él, ninguno).
+       */
+      tcOficialIngreso?: ReadonlyMap<string, TipoCambioDetalle>;
     },
   ) {
     // "Solo se reparte lo cobrado" (doc 4.8) con DINERO REAL: la suma de
@@ -1168,6 +1261,10 @@ export class ProfitSharingService {
     // proporción) y se TOPA en la venta del avión: el sobrecobro es de
     // VuelaTour (cobradoParteAvion), así el bruto cobrado siempre es parte
     // avión + parte VuelaTour al centavo y nada desaparece.
+    // OJO (13-oct-2026, API 0.0.75, invariante 67): lo que NO es de vuelo y
+    // la oficina registró en Ingresos CON este avión (reembolso de su
+    // servicio, venta de una pieza suya…) SÍ entra a la cascada: suma al
+    // saldo como «otros ingresos del avión», aparte de la venta (abajo).
     //
     // REGLA B (cliente, 28-ago-2026): vuelo MULTI-AVIÓN (tramos en aviones
     // distintos) — la venta del avión y lo que deriva de ella (cobrado,
@@ -1797,6 +1894,71 @@ export class ProfitSharingService {
     const reservaOverhaul = horasPeriodo * tarifaReserva;
     const reservaIncompleta = horasPeriodo > 0 && tarifaReserva <= 0;
 
+    // ===== OTROS INGRESOS DEL AVIÓN (13-oct-2026, API 0.0.75, invariante
+    // 67) ===== Ingresos de RESULTADO registrados en Ingresos con ESTE avión
+    // (reembolso de su servicio, venta de una pieza suya…): SUMAN al saldo,
+    // netos de la comisión bancaria. USD ⇒ el neto; MXN ⇒ neto ÷ (T.C.
+    // propio del ingreso ?? oficial del día de su `fecha`). Sin T.C. NO suma
+    // (va a `otros_ingresos_avion_sin_tc_mxn`): jamás se inventa uno. Cada
+    // usd se redondea a centavos y el total = round2(Σ). El balance convierte
+    // la hoja con su T.C. promedio: pueden diferir centavos, como los gastos.
+    let otrosIngresosAvion = 0;
+    let otrosIngresosSinTcMxn = 0;
+    let otrosIngresosTcOficialCount = 0;
+    const detalleOtrosIngresos: Array<{
+      id: string;
+      clave: string;
+      fecha: string;
+      categoria: string;
+      categoria_etiqueta: string;
+      concepto: string;
+      moneda: 'MXN' | 'USD';
+      monto: number;
+      comision: number | null;
+      neto: number;
+      usd: number | null;
+      tc: number | null;
+      tc_oficial: boolean;
+    }> = [];
+    for (const i of ctx.ingresosAvion ?? []) {
+      if (!ingresoEsDelAvion(i)) continue;
+      const monto = Number(i.monto) || 0;
+      const com = Number(i.comision_monto) > 0 ? Number(i.comision_monto) : 0;
+      const neto = round2(monto - com);
+      const propio = pos(i.tc_usd_mxn);
+      const ofi = ctx.tcOficialIngreso?.get(i.id);
+      const tc = i.moneda === 'USD' ? null : (propio ?? ofi?.tc ?? null);
+      const usd = netoIngresoUsd(i, tc);
+      const tcOficialUsado =
+        i.moneda !== 'USD' && propio == null && ofi != null && usd != null;
+      if (usd == null) {
+        otrosIngresosSinTcMxn += neto;
+      } else {
+        otrosIngresosAvion += usd;
+        if (tcOficialUsado) otrosIngresosTcOficialCount += 1;
+      }
+      detalleOtrosIngresos.push({
+        id: i.id,
+        clave: etiquetaIngreso(i.folio),
+        fecha: i.fecha,
+        categoria: i.categoria,
+        categoria_etiqueta: etiquetaCategoriaIngreso(i.categoria),
+        concepto: [
+          i.descripcion?.trim() || null,
+          i.cliente_nombre?.trim() || i.pagador?.trim() || null,
+        ]
+          .filter(Boolean)
+          .join(' · '),
+        moneda: i.moneda,
+        monto: round2(monto),
+        comision: com > 0 ? round2(com) : null,
+        neto,
+        usd,
+        tc,
+        tc_oficial: tcOficialUsado,
+      });
+    }
+
     // Disciplina v1.3 (redondear ANTES de sumar): el saldo se calcula con los
     // MISMOS componentes redondeados que se publican, así la cascada del PDF
     // cuadra al centavo (antes difería 1-3 ¢ por decimales largos de TC).
@@ -1809,6 +1971,8 @@ export class ProfitSharingService {
     // de la cascada (otros_prorrateados) — el PDF/XLSX no cambia de shape.
     const otrosR = round2(ctx.otrosPorAvion + fijoManual);
     const reservaR = round2(reservaOverhaul);
+    // + los otros ingresos del avión (invariante 67; 0 sin ingresos).
+    const otrosIngresosAvionR = round2(otrosIngresosAvion);
     const saldo = round2(
       cobradoR -
         comisionesR -
@@ -1816,7 +1980,8 @@ export class ProfitSharingService {
         indirectosR -
         permisosR -
         otrosR -
-        reservaR,
+        reservaR +
+        otrosIngresosAvionR,
     );
 
     // Reparto por residuo mayor (en centavos): con porcentajes que suman 100,
@@ -1897,6 +2062,15 @@ export class ProfitSharingService {
         // cotización — ya DENTRO de cobrado_usd; cobros_sin_tc_mxn solo
         // conserva lo que ni así convirtió.
         cobros_tc_oficial_count: cobrosTcOficialCount,
+        // ADITIVOS y SIEMPRE (13-oct-2026, API 0.0.75, invariante 67): los
+        // ingresos asignados a este avión, netos de comisión, en USD — YA
+        // dentro de `saldo_disponible_usd` (y de ahí el reparto, las
+        // utilidades por mes y la cuenta corriente); NO se mezclan con la
+        // venta (`cobrado_usd`). Los MXN sin T.C. no suman; cuántos usaron
+        // el T.C. oficial de su día.
+        otros_ingresos_avion_usd: otrosIngresosAvionR,
+        otros_ingresos_avion_sin_tc_mxn: round2(otrosIngresosSinTcMxn),
+        otros_ingresos_avion_tc_oficial_count: otrosIngresosTcOficialCount,
       },
       horas_voladas_hr: horasPeriodo,
       gastos: {
@@ -1944,6 +2118,11 @@ export class ProfitSharingService {
             iva_usd: round2(desgloseVT.iva_usd),
           },
         },
+        // ADITIVO y SIEMPRE (13-oct-2026, API 0.0.75, invariante 67): un
+        // renglón por ingreso asignado a este avión ([] sin ingresos); Σ usd
+        // no nulos == `ingresos.otros_ingresos_avion_usd` (salvo el redondeo
+        // final del total).
+        otros_ingresos_avion: detalleOtrosIngresos,
       },
     };
   }
@@ -1987,9 +2166,16 @@ export class ProfitSharingService {
     gastos: ReadonlyArray<
       Pick<GastoRow, 'id' | 'moneda' | 'tc_gasto' | 'fecha_gasto'>
     >,
+    // Ingresos ASIGNADOS a un avión (13-oct-2026, invariante 67): los MXN
+    // sin T.C. propio piden el oficial del día de su `fecha` (date), en el
+    // MISMO lote. Los otros llamadores no los mandan (mapa vacío).
+    ingresos: ReadonlyArray<
+      Pick<IngresoParaLibro, 'id' | 'moneda' | 'tc_usd_mxn' | 'fecha'>
+    > = [],
   ): Promise<{
     vuelo: Map<string, TipoCambioDetalle>;
     gasto: Map<string, TipoCambioDetalle>;
+    ingreso: Map<string, TipoCambioDetalle>;
   }> {
     const diaVuelo = new Map<string, string>();
     for (const v of vuelos) {
@@ -2003,9 +2189,16 @@ export class ProfitSharingService {
       const dia = diaDeFecha(g.fecha_gasto ?? null);
       if (dia) diaGasto.set(g.id, dia);
     }
+    const diaIngreso = new Map<string, string>();
+    for (const i of ingresos) {
+      if (i.moneda !== 'MXN' || pos(i.tc_usd_mxn) != null) continue;
+      const dia = diaDeFecha(i.fecha ?? null);
+      if (dia) diaIngreso.set(i.id, dia);
+    }
     const porDia = await this.tcOficialPorDias([
       ...diaVuelo.values(),
       ...diaGasto.values(),
+      ...diaIngreso.values(),
     ]);
     const vuelo = new Map<string, TipoCambioDetalle>();
     for (const [id, dia] of diaVuelo) {
@@ -2017,7 +2210,12 @@ export class ProfitSharingService {
       const det = porDia.get(dia);
       if (det) gasto.set(id, det);
     }
-    return { vuelo, gasto };
+    const ingreso = new Map<string, TipoCambioDetalle>();
+    for (const [id, dia] of diaIngreso) {
+      const det = porDia.get(dia);
+      if (det) ingreso.set(id, det);
+    }
+    return { vuelo, gasto, ingreso };
   }
 
   /**

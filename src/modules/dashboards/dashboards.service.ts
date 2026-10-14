@@ -141,6 +141,13 @@ export class DashboardsService {
     let gastos = 0;
     let comisiones = 0;
     let saldo = 0;
+    // OTROS INGRESOS DE LOS AVIONES (13-oct-2026, API 0.0.75, invariante 67):
+    // ingresos registrados en Ingresos con un avión, que el saldo del reparto
+    // YA suma. Van APARTE de `ingresos_cobrados_usd` (que sigue siendo SOLO la
+    // venta) para que la identidad de la invariante 50 siga leyéndose en
+    // pantalla: ingresos_cobrados_usd + otros_ingresos_aviones_usd −
+    // gastos_totales_usd == saldo_disponible_usd, por avión y en el resumen.
+    let otrosIngresosAviones = 0;
     const porAvion = profit.aviones.map((a) => {
       // COMISIONES A CARGO DEL AVIÓN (invariante 50, desde sep-2026): el
       // saldo del reparto ya las descontó (cobrado − comisiones − gastos −
@@ -155,6 +162,8 @@ export class DashboardsService {
         a.gastos.otros_prorrateados_usd +
         a.reserva_overhaul_usd +
         comisionesAvion;
+      const otrosAvion = a.ingresos.otros_ingresos_avion_usd ?? 0;
+      otrosIngresosAviones += otrosAvion;
       ingresosCobrados += a.ingresos.cobrado_usd;
       ingresosPendientes += a.ingresos.pendiente_bruto_usd;
       ingresosPendientesAvion += a.ingresos.pendiente_cobro_usd;
@@ -174,6 +183,10 @@ export class DashboardsService {
         // el avión (parte de la bancaria + el pago REAL del vendedor desde
         // el API 0.0.74, invariante 61; hasta el 0.0.73, su provisión).
         comisiones_usd: round2(comisionesAvion),
+        // ADITIVO (13-oct-2026, API 0.0.75, invariante 67), ÚLTIMA llave:
+        // otros ingresos del avión que su saldo ya suma (ingresos + otros −
+        // gastos == saldo).
+        otros_ingresos_avion_usd: round2(otrosAvion),
       };
     });
 
@@ -216,6 +229,9 @@ export class DashboardsService {
         // ADITIVO (6-oct-2026): de `gastos_totales_usd`, las comisiones a
         // cargo de los aviones (invariante 50).
         comisiones_usd: round2(comisiones),
+        // ADITIVO (13-oct-2026, API 0.0.75, invariante 67): Σ otros ingresos
+        // de los aviones (ya dentro de `saldo_disponible_usd`).
+        otros_ingresos_aviones_usd: round2(otrosIngresosAviones),
       },
       por_avion: porAvion,
       operacion: {

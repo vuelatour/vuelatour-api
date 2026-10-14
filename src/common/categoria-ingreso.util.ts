@@ -20,6 +20,17 @@
  * TUAs/extras de los vuelos en el reparto y los dashboards
  * (`otros_ingresos_vuelatour`) y el operador creería que suma ahí.
  *
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): un
+ * ingreso de RESULTADO con `aeronave_id` cuenta UNA vez, para ESE avión
+ * (hoja «Otros ingresos» de su balance y su reparto a socios) y deja de ser
+ * ingreso de VuelaTour. Anticipos y aportaciones jamás llevan avión (CHECK
+ * `ingreso_aeronave_chk` + 400 `AVION_SOLO_EN_RESULTADO`). Las tablas
+ * LABEL/DESTINO/AYUDA NO cambian: el destino con avión lo dice
+ * `textoDestinoIngreso`. El panel copia los 5 exports de esa sección
+ * (`categoriaIngresoAdmiteAvion`, `DestinoIngreso`, `destinoIngreso`,
+ * `destinoIngresoAvion`, `textoDestinoIngreso`) con los MISMOS nombres y
+ * textos, byte por byte (test de paridad por nombre).
+ *
  * PURO: sin BD ni reloj.
  */
 import { normalizarPlano } from '../modules/conciliacion/auto-cruce.util';
@@ -122,6 +133,68 @@ export function categoriaIngresoAdmiteVuelo(
   c: string | null | undefined,
 ): boolean {
   return c === 'REEMBOLSO_DEVOLUCION';
+}
+
+// ═══════ Ingreso asignado a un avión (13-oct-2026, API 0.0.75, invariante 67) ═══════
+// El panel COPIA estos 5 exports (mismos nombres y textos) en
+// `src/lib/admin/categorias-ingreso.ts`.
+
+/**
+ * ¿La categoría admite avión (`aeronave_id`)? ≡ suma a resultados: espejo
+ * del CHECK `ingreso_aeronave_chk` (migración 20261013000005). Un anticipo
+ * cuenta como cobro del vuelo al aplicarse y una aportación es capital:
+ * ninguno es ingreso de un avión.
+ */
+export function categoriaIngresoAdmiteAvion(
+  c: string | null | undefined,
+): boolean {
+  return categoriaIngresoSumaAResultados(c);
+}
+
+/** A dónde cuenta un ingreso. */
+export type DestinoIngreso = 'AVION' | 'VUELATOUR' | 'FUERA_DE_RESULTADOS';
+
+/**
+ * A dónde cuenta un ingreso: fuera de resultados (anticipo, aportación) ⇒
+ * 'FUERA_DE_RESULTADOS'; de resultado CON avión ⇒ 'AVION' (su balance y su
+ * reparto); de resultado sin avión ⇒ 'VUELATOUR'.
+ */
+export function destinoIngreso(
+  categoria: string | null | undefined,
+  aeronaveId: string | null | undefined,
+): DestinoIngreso {
+  if (!categoriaIngresoSumaAResultados(categoria)) return 'FUERA_DE_RESULTADOS';
+  return aeronaveId ? 'AVION' : 'VUELATOUR';
+}
+
+/** Destino legible de un ingreso con avión (con o sin la matrícula a la mano). */
+export function destinoIngresoAvion(
+  matricula: string | null | undefined,
+): string {
+  const m = (matricula ?? '').trim();
+  return m
+    ? `Otros ingresos del avión ${m} (balance del avión y reparto a socios)`
+    : 'Otros ingresos del avión (balance del avión y reparto a socios)';
+}
+
+/**
+ * Texto del destino (`destino_etiqueta` del JSON de Ingresos, columna
+ * «Destino» de su Excel; el panel lo usa en el «Va a:» del alta): con
+ * avión, el del avión; si no, el destino de la categoría (tabla congelada).
+ */
+export function textoDestinoIngreso(
+  categoria: string | null | undefined,
+  aeronaveId: string | null | undefined,
+  matricula?: string | null,
+): string {
+  if (destinoIngreso(categoria, aeronaveId) === 'AVION') {
+    return destinoIngresoAvion(matricula);
+  }
+  return (
+    (CATEGORIA_INGRESO_DESTINO as Record<string, string | undefined>)[
+      categoria ?? ''
+    ] ?? ''
+  );
 }
 
 /** Etiqueta legible; código desconocido ⇒ capitalizado; vacío ⇒ ''. */

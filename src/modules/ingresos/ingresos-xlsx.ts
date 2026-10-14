@@ -8,7 +8,7 @@
  * lo SIN conciliar resaltado en naranja.
  */
 import type { TablaXlsxPayload } from '../pyservices/pyservices.service';
-import { CATEGORIA_INGRESO_DESTINO } from '../../common/categoria-ingreso.util';
+import { textoDestinoIngreso } from '../../common/categoria-ingreso.util';
 import type {
   EntradaDinero,
   EstadoConciliacionEntrada,
@@ -105,13 +105,18 @@ export const COLUMNAS_ANTICIPOS: TablaXlsxPayload['columnas'] = [
   texto('Vuelos'),
 ];
 
-/** Una fila del Excel por ingreso (mismo orden de columnas). */
+/**
+ * Una fila del Excel por ingreso (mismo orden de columnas). «Destino»
+ * (13-oct-2026, API 0.0.75, invariante 67) = `textoDestinoIngreso`: con
+ * avión, «Otros ingresos del avión N990GG (balance del avión y reparto a
+ * socios)»; sin avión, el destino de la categoría de siempre.
+ */
 export function filaExcelIngreso(i: Ingreso): (string | number | null)[] {
   return [
     i.etiqueta,
     ddmmaaaa(i.fecha),
     i.categoria_etiqueta,
-    CATEGORIA_INGRESO_DESTINO[i.categoria] ?? '',
+    textoDestinoIngreso(i.categoria, i.aeronave_id, i.matricula),
     i.descripcion,
     i.cliente_nombre ?? i.pagador ?? '',
     i.cuenta ? `${i.cuenta.alias} · ${i.cuenta.banco}` : 'Efectivo / caja',

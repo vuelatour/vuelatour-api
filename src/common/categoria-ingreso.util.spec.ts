@@ -5,14 +5,18 @@ import {
   CATEGORIA_INGRESO_DESTINO,
   CATEGORIA_INGRESO_LABEL,
   DESTINO_INGRESO_RESULTADO,
+  categoriaIngresoAdmiteAvion,
   categoriaIngresoAdmiteVuelo,
   categoriaIngresoExigeCliente,
   categoriaIngresoSumaAResultados,
   categoriaSugeridaDeDescripcion,
+  destinoIngreso,
+  destinoIngresoAvion,
   esAnticipo,
   esCategoriaIngreso,
   etiquetaCategoriaIngreso,
   etiquetaIngreso,
+  textoDestinoIngreso,
 } from './categoria-ingreso.util';
 
 /**
@@ -163,6 +167,94 @@ describe('categoriaSugeridaDeDescripcion — descripciones REALES de prod (24-se
       const r = categoriaSugeridaDeDescripcion(m);
       expect(r).not.toBe('OTRO_INGRESO');
       expect(r).not.toBe('ANTICIPO_CLIENTE');
+    }
+  });
+});
+
+/**
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67). El
+ * panel copia los 5 exports con los MISMOS nombres y textos
+ * (`src/lib/admin/__tests__/categorias-ingreso.test.ts` congela los mismos
+ * casos literales).
+ */
+describe('ingreso asignado a un avión — destino (invariante 67)', () => {
+  const AV = 'av-n990gg';
+
+  it('categoriaIngresoAdmiteAvion ≡ suma a resultados (membresía congelada: 4 sí, 2 no)', () => {
+    for (const c of [
+      'OTRO_INGRESO',
+      'INGRESO_BANCARIO',
+      'REEMBOLSO_DEVOLUCION',
+      'VENTA_ACTIVO',
+    ]) {
+      expect(categoriaIngresoAdmiteAvion(c)).toBe(true);
+    }
+    for (const c of ['ANTICIPO_CLIENTE', 'APORTACION_PRESTAMO', null, 'XXX']) {
+      expect(categoriaIngresoAdmiteAvion(c)).toBe(false);
+    }
+    expect(categoriaIngresoAdmiteAvion(undefined)).toBe(false);
+    for (const c of CATEGORIAS_INGRESO) {
+      expect(categoriaIngresoAdmiteAvion(c)).toBe(
+        categoriaIngresoSumaAResultados(c),
+      );
+    }
+  });
+
+  it('destinoIngreso en sus 3 ramas', () => {
+    expect(destinoIngreso('REEMBOLSO_DEVOLUCION', AV)).toBe('AVION');
+    expect(destinoIngreso('INGRESO_BANCARIO', null)).toBe('VUELATOUR');
+    expect(destinoIngreso('OTRO_INGRESO', '')).toBe('VUELATOUR');
+    expect(destinoIngreso('ANTICIPO_CLIENTE', AV)).toBe('FUERA_DE_RESULTADOS');
+    expect(destinoIngreso('APORTACION_PRESTAMO', null)).toBe(
+      'FUERA_DE_RESULTADOS',
+    );
+    expect(destinoIngreso(null, AV)).toBe('FUERA_DE_RESULTADOS');
+  });
+
+  it('destinoIngresoAvion: con matrícula (recortada) y sin ella, LITERALES', () => {
+    expect(destinoIngresoAvion('N990GG')).toBe(
+      'Otros ingresos del avión N990GG (balance del avión y reparto a socios)',
+    );
+    expect(destinoIngresoAvion('  N990GG ')).toBe(
+      'Otros ingresos del avión N990GG (balance del avión y reparto a socios)',
+    );
+    for (const m of [null, undefined, '', '  ']) {
+      expect(destinoIngresoAvion(m)).toBe(
+        'Otros ingresos del avión (balance del avión y reparto a socios)',
+      );
+    }
+  });
+
+  it('textoDestinoIngreso: con avión el del avión; si no, la tabla congelada', () => {
+    expect(textoDestinoIngreso('REEMBOLSO_DEVOLUCION', AV, 'N990GG')).toBe(
+      'Otros ingresos del avión N990GG (balance del avión y reparto a socios)',
+    );
+    expect(textoDestinoIngreso('VENTA_ACTIVO', AV)).toBe(
+      'Otros ingresos del avión (balance del avión y reparto a socios)',
+    );
+    // Un anticipo con avión (dato legado) dice SU destino: no cuenta al avión.
+    expect(textoDestinoIngreso('ANTICIPO_CLIENTE', AV, 'N990GG')).toBe(
+      CATEGORIA_INGRESO_DESTINO.ANTICIPO_CLIENTE,
+    );
+    expect(textoDestinoIngreso('OTRO_INGRESO', null, 'N990GG')).toBe(
+      DESTINO_INGRESO_RESULTADO,
+    );
+    expect(textoDestinoIngreso('XXX', null)).toBe('');
+    expect(textoDestinoIngreso(null, AV, 'N990GG')).toBe('');
+  });
+
+  it('ningún texto nuevo dice «Otros ingresos VuelaTour» y las tablas siguen intactas', () => {
+    const nuevos = [
+      destinoIngresoAvion('N990GG'),
+      destinoIngresoAvion(null),
+      ...CATEGORIAS_INGRESO.map((c) => textoDestinoIngreso(c, AV, 'N990GG')),
+      ...CATEGORIAS_INGRESO.map((c) => textoDestinoIngreso(c, null)),
+    ];
+    for (const t of nuevos) expect(t).not.toMatch(/Otros ingresos VuelaTour/);
+    for (const [codigo, etiqueta, destino, ayuda] of TABLA) {
+      expect(CATEGORIA_INGRESO_LABEL[codigo]).toBe(etiqueta);
+      expect(CATEGORIA_INGRESO_DESTINO[codigo]).toBe(destino);
+      expect(CATEGORIA_INGRESO_AYUDA[codigo]).toBe(ayuda);
     }
   });
 });

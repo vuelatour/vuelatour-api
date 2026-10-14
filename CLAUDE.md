@@ -2450,7 +2450,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `utilidades_otros_ingresos_mxn` (sube exactamente Σ remanente). Balance
       general: filas al final de las sueltas de «Otros movimientos». Reparto,
       pre-cierre, balance por avión, dashboards y reporte por vuelo NO
-      cambian (decisión del cliente). **Sin ingresos, payload BYTE-IDÉNTICO**
+      cambian (decisión del cliente) — salvo los ingresos de resultado CON
+      avión desde el API 0.0.75 (invariante 67): cuentan en el balance y el
+      reparto de ese avión y salen de «otros movimientos» y de utilidades
+      del Libro Dinero. **Sin ingresos, payload BYTE-IDÉNTICO**
       (specs con golden capturado del código sin modificar).
     - **Sonda ÚNICA** `common/ingreso-disponible.util` (columna
       `movimiento_bancario.ingreso_id`, re-sondeo ≤ 10 min): TODO lo que
@@ -6814,6 +6817,173 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       consulta sin fecha ni categoría, anti-cap [0,999]/[1000,1999], externo
       y cancelado, lectura fallida, sonda en false).
 
+67. **INGRESO ASIGNADO A UN AVIÓN: CUENTA PARA ESE AVIÓN (13-oct-2026, API
+    0.0.75, migración `20261013000005` = solo CHECK + COMMENT; la columna
+    `ingreso.aeronave_id`, su FK, el índice y su bitácora existen desde
+    `20260924000004`).** Pedido (Diego Rmz, 13-oct-2026 12:16–12:44;
+    decisión del usuario el mismo día): «`ingreso.aeronave_id` + hoja «Otros
+    ingresos» en el balance por avión que SUMA al remanente y entra al
+    reparto». Hasta el 0.0.74 el avión de un ingreso era «solo referencia»
+    (invariante 29) y el dinero iba a VuelaTour.
+    - **Regla (una vez, un mes, un lugar)**: un ingreso VIVO de RESULTADO
+      (OTRO_INGRESO, INGRESO_BANCARIO, REEMBOLSO_DEVOLUCION, VENTA_ACTIVO)
+      con `aeronave_id` cuenta UNA vez, en el mes de `ingreso.fecha` (DATE,
+      día Cancún), para ESE avión — y deja de ser ingreso de VuelaTour.
+      Anticipos y aportaciones JAMÁS llevan avión: CHECK
+      `ingreso_aeronave_chk` + 400 `AVION_SOLO_EN_RESULTADO` («Un anticipo o
+      una aportación no se asigna a un avión: el avión solo aplica a
+      ingresos que suman a resultados (otros ingresos, intereses, reembolsos
+      y ventas).»), validado sobre el estado FUSIONADO (alta y PATCH:
+      reclasificar a anticipo/aportación con el avión vigente ⇒ 400; el panel
+      manda `aeronave_id: null` al reclasificar) y antes de escribir o subir
+      nada; el 23514 del CHECK sale con el MISMO code (`CHECK_A_CODE`).
+    - **Fuentes únicas (PURAS, con spec)**: `common/categoria-ingreso.util`
+      — `categoriaIngresoAdmiteAvion` (≡ `categoriaIngresoSumaAResultados`,
+      espejo del CHECK), `DestinoIngreso`, `destinoIngreso`,
+      `destinoIngresoAvion`, `textoDestinoIngreso` (el panel copia los 5 con
+      los MISMOS nombres y textos; las tablas LABEL/DESTINO/AYUDA NO
+      cambiaron); `common/ingreso-resultado.util` — `partirIngresosPorAvion`
+      (LA partición: su avión XOR VuelaTour, orden del lector, lo que no es
+      resultado en ningún lado), `ingresoEsDelAvion`, `netoIngresoUsd`;
+      `aircraft/otros-ingresos-avion.util` — `filaHojaOtrosIngresos`,
+      `hojaOtrosIngresosAvion`, `fusionarOtrosIngresosFlota`. Los pesos
+      salen SIEMPRE de `filaLibroDeIngreso` (sin cambio): MXN directo, USD ×
+      su `tc_usd_mxn` PROPIO, comisión bancaria como egreso, neto =
+      remanente. `filaLibroDeIngreso`, `leerIngresosDeResultado` (lee además
+      `aeronave_id`, `notas` y `cuenta:cuenta_bancaria_id(alias, banco)`) y
+      `buildHoja` no cambiaron de comportamiento. Prohibido reimplementar la
+      partición en un lector.
+    - **Dónde SÍ cuenta**: (1) hoja «Otros ingresos» del libro de su avión
+      (`otros_ingresos_avion` = `{filas, total_mxn, usd}`; fila `{ingreso_id,
+      clave, fecha, categoria (etiqueta), detalle (clave · descripción ·
+      cliente|pagador · vuelo #n), moneda_original, monto_original,
+      tc_aplicado (USD: el T.C. EXACTO; MXN: null), ingreso_mxn, comision_mxn,
+      neto_mxn, cuenta ('alias · banco' | 'Efectivo / caja'), notas}`);
+      (2) la línea «(+) OTROS INGRESOS USD» que SUMA en la cascada
+      (`balance.otros_ingresos_avion_usd` = hoja.usd; `utilidad_despues_usd`
+      = round2(antes − combustible − indirectos − refacciones − otros −
+      permisos + otros ingresos), null se propaga) ⇒ utilidad cobrada ⇒
+      socios ⇒ participación de la empresa en el bloque VUELATOUR; (3) el
+      reparto (`computeAvion`: `ingresos.otros_ingresos_avion_usd` SUMA a
+      `saldo_disponible_usd`, NO se mezcla con `cobrado_usd`) ⇒ utilidades
+      por mes, cuenta corriente y dashboards; (4) Libro Dinero: lista APARTE
+      `otros_ingresos_avion` (misma fila + `matricula`/`avion_color`, solo con
+      filas) y la columna `utilidades_aviones[].otros_ingresos_mxn` = Σ
+      remanente (llave solo con dato; un avión con solo ingresos entra con
+      las otras 4 en null).
+    - **Dónde NO**: «otros movimientos» del general (las sueltas ING-n son
+      solo las de VuelaTour; bandera `otros_ingresos_por_avion: true`), el
+      bloque VUELATOUR (empresa) —`ingresos_propios_usd` los excluye por
+      construcción— y `utilidades_otros_ingresos_mxn` / TOTALES de «Otros
+      ingresos» del Libro Dinero (ni su ingreso ni su comisión). CRUCE con
+      spec: Σ remanente ING del Libro Dinero (las dos listas) == Σ sueltas
+      ING del general + Σ `aviones[].otros_ingresos_avion.total_mxn`.
+    - **Conversiones (dos T.C. por diseño, como los gastos)**: balance = Σ
+      neto MXN ÷ `tcHojas` (el T.C. de las hojas de gastos del libro; avión
+      SIN vuelos: el oficial del cierre — los ingresos cuentan para ese
+      respaldo y el pendiente dice «sus hojas de gastos e ingresos se
+      convirtieron… la utilidad del periodo es el resultado de esos
+      movimientos»; sin ingresos, el texto de siempre); regla de `buildHoja`
+      copiada: fila sin MXN ⇒ null (pendiente «Hoja "Otros ingresos"
+      (fecha): ingreso ING-n en USD sin tipo de cambio…»), total 0 ⇒ 0. Reparto
+      = USD ⇒ neto; MXN ⇒ neto ÷ (T.C. propio ?? oficial del día de `fecha`,
+      MISMO lote de `resolverTcOficial` —un día, una consulta—); sin T.C. no
+      suma (`otros_ingresos_avion_sin_tc_mxn`); cada usd a centavos y total
+      = round2(Σ). Pueden diferir centavos entre libros: NO es bug.
+    - **Presencia de llaves (todo ADITIVO; skew en los dos sentidos)**: hoja
+      y línea SIEMPRE en los libros de avión (individual y `aviones[]`; vacía
+      `{filas: [], total_mxn: 0, usd: 0}`, también EXTERNOS, que no lee
+      `ingreso`), como ÚLTIMAS llaves de la raíz y del bloque `balance`;
+      `consolidado.otros_ingresos_avion` (hoja «otros ingresos aviones») SOLO
+      con filas, ÚLTIMA llave, detalle «MATRÍCULA · …», usd = round2(Σ) con
+      null que se PROPAGA; `otros_movimientos.otros_ingresos_por_avion: true`
+      SIEMPRE, tras `comision_vendedor_solo_gasto_real` y antes de
+      `afac_en_filas`; Libro Dinero solo con dato; reparto SIEMPRE (0 / [] en
+      `ingresos` y `detalle.otros_ingresos_avion`), `tc_oficial.ingresos`
+      `{count, monto_mxn}` y el payload del PDF/XLSX por avión con
+      `otros_ingresos_avion_usd`, `otros_ingresos_avion_sin_tc_mxn` y
+      `otros_ingresos_avion` (`saldo_usd` YA lo incluye). El general LEE
+      `ingreso` UNA vez (`payloadGeneral` pasa la partición a cada
+      `buildPayload` —7.º parámetro opcional— y a `buildOtrosMovimientos` —8.º
+      opcional, sin él se lee y se parte ahí—); un avión con solo un ingreso
+      entra al general (`tieneActividad`). Sin ingresos con avión: libros,
+      pestaña y reparto byte a byte salvo esas llaves (specs con
+      `diferencias`).
+    - **API de Ingresos (ADITIVO)**: `Ingreso.destino` ('AVION' |
+      'VUELATOUR' | 'FUERA_DE_RESULTADOS') y `destino_etiqueta`
+      (`textoDestinoIngreso`: «Otros ingresos del avión N990GG (balance del
+      avión y reparto a socios)»); columna «Destino» del Excel = ese texto
+      («Matrícula» se queda); `GET /v1/ingresos?aeronave_id=`; `avisos[]` al
+      dar de alta o cambiar el avión («Este ingreso cuenta para el avión
+      {matrícula}: entra a la hoja «Otros ingresos» de su balance y a su
+      reparto a socios; ya no cuenta como ingreso de VuelaTour.») y al
+      quitarlo de un ingreso de resultado («Este ingreso ya no cuenta para
+      ningún avión: vuelve a ser ingreso de VuelaTour (Balance general y
+      Libro Dinero).»). Textos ÚNICOS del API en `ingresos/ingresos.util`.
+      **`aeronave_id` se cambia aunque el ingreso esté conciliado** (es
+      asignación, no dinero del banco: ni el 409 `INGRESO_CONCILIADO` ni
+      `tg_ingreso_candados` lo vigilan; `tg_ingreso_bitacora` lo registra).
+    - **Avión dado de baja (XB-IJP)**: el reparto computa SOLO aviones
+      activos: su ingreso sale en su libro, en el general y en el Libro
+      Dinero, pero en NINGÚN reparto (el panel lo marca «Dado de baja: cuenta
+      en su balance, no en el reparto» al elegirlo, sin deshabilitarlo).
+    - **Dashboards** (`overview`, invariante 50): `ingresos_cobrados_usd`
+      sigue siendo SOLO la venta; aparte `resumen.otros_ingresos_aviones_usd`
+      y `por_avion[].otros_ingresos_avion_usd` (ÚLTIMAS llaves) con la
+      identidad `ingresos_cobrados_usd + otros_ingresos_aviones_usd −
+      gastos_totales_usd == saldo_disponible_usd`, por avión y en el resumen.
+    - **Pendiente (punto 5 del lote)**: el vínculo celda → registro
+      `{tipo:'ingreso'}` de la hoja «Otros ingresos» NO se anota aún; el
+      `ingreso_id` ya viaja por fila.
+    - **Efecto RETROACTIVO en septiembre 2026 (PASO 0 BLOQUEANTE antes del
+      push del API)**: ING-4 (N990GG, REEMBOLSO_DEVOLUCION, $46,550.80 MXN,
+      4-sep, conciliado, pagador «angel alvarez» = socio al 51 % de N990GG;
+      notas «reembolso del pago del serv de 50 hrs en toledo, fact 53») sale
+      de «otros movimientos», del bloque VUELATOUR y de OTROS INGRESOS del
+      Libro Dinero y entra a la hoja, la cascada y el reparto de N990GG (51 %
+      Angel Alvarez / 49 % Aero Charter): VuelaTour baja y el avión y sus
+      socios suben. OJO: el único «Servicio 50hrs … Toledo» de jun–oct es de
+      N4142R ($45,483.60, 15-sep): la oficina confirma ING-4 en el panel
+      ACTUAL antes del deploy (es de N990GG ⇒ nada; de otro avión o de
+      VuelaTour ⇒ Editar → Avión). `reparto_pago` tiene 0 filas (ningún
+      snapshot de entregas queda inconsistente). La cuenta corriente lo ve en
+      ≤ 10 min (memo de utilidades mensuales).
+    - **Deploy**: pyservices (tolera la ausencia de todas las llaves) → API
+      0.0.75 → migración `20261013000005` (recomendada DESPUÉS del API: así el
+      23514 llega traducido; antes también es seguro: hoy ningún anticipo
+      lleva avión) → panel (único que ofrece el selector nuevo). Si el API
+      sale antes que pyservices los números quedan correctos pero sin la
+      pestaña ni la línea (UTILIDAD DESPUÉS como valor): subir pyservices de
+      inmediato. Flutter: sin cambio.
+    - Specs: `categoria-ingreso.util.spec` (los 5 exports, membresía,
+      literales, sin «Otros ingresos VuelaTour»), `ingreso-resultado.util.spec`
+      (mapeo de los campos nuevos, fila byte-idéntica, partición, neto USD),
+      `otros-ingresos-avion.util.spec` (fila ING-4 literal, USD con
+      comisión, sin T.C., vacía, fusión con orden estable y null que se
+      propaga), `aircraft-balance.service.otros-ingresos-avion.spec`
+      (individual 2,327.54 con cascada y socios, `diferencias` acotadas,
+      ajenos y anticipo forzado fuera, EXTERNOS sin leer `ingreso`, avión sin
+      vuelos con oficial 18 y su pendiente, general con UNA lectura, sueltas,
+      consolidado, bandera, bloque VUELATOUR y el CRUCE con el Libro Dinero),
+      `aircraft-balance.service.ingresos.spec` (sueltas idénticas con un
+      ingreso de avión; delta 6,800), goldens de «otros movimientos» con la
+      bandera (fixture `libros-pago-vendedor`, ingresos, comisiones,
+      comisiones-general, afac-om), `dinero-report.service.ingresos.spec`
+      (lista aparte, utilidades sin moverse, columna por avión, USD 33,250,
+      golden intacto), `profit-sharing.service.otros-ingresos-avion.spec`
+      (oficial 18 ⇒ 2,586.16, T.C. propio, USD neto, sin T.C., ajenos,
+      `q.aeronave_id`, sin ingresos/sin migración idénticos, un día = una
+      consulta, payload del PDF y utilidades por mes),
+      `dashboards.service.overview-otros-ingresos.spec` (identidad al
+      centavo), `ingresos.service.spec` / `ingresos.util.spec` /
+      `ingresos-xlsx.spec` (201 con aviso, 400 en alta y PATCH, conciliado
+      200, quitar avión, CHECK ⇒ 400, `?aeronave_id`, destinos, literales,
+      «Destino»). Migración ensayada en PGlite (14-oct-2026) con el esquema
+      REAL de `ingreso` y sus 3 triggers: `DRYRUN_OK` sin residuos, cuerpo
+      idempotente, CHECK validado, anticipo/aportación con avión ⇒ 23514
+      `ingreso_aeronave_chk`, cambio de avión de un conciliado con su
+      bitácora, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7545,6 +7715,38 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000005_ingreso_aeronave_resultado.sql`**
+  (invariante 67, ingreso asignado a un avión; NO aplicada: la aplica el
+  orquestador por el MCP). SOLO el CHECK `ingreso_aeronave_chk`
+  (`aeronave_id is null or categoria in ('OTRO_INGRESO','INGRESO_BANCARIO',
+  'REEMBOLSO_DEVOLUCION','VENTA_ACTIVO')`, idempotente dentro de `do $$ … if
+  not exists … $$`) + COMMENT en `ingreso.aeronave_id` + verificación `do
+  $ver$` (aborta sin el CHECK validado). NO crea columna ni índice (existen
+  desde `20260924000004`); sin triggers nuevos; `tg_ingreso_candados` no se
+  toca. El archivo COMPLETO (comentarios incluidos) no lleva drop/delete/
+  revoke en ninguna capitalización (`grep -niE` vacío): el MCP lo acepta
+  entero (o solo el cuerpo entre «>>> CUERPO» y «<<< CUERPO»). Procedimiento
+  (proyecto `bjesduasnzbzywofukbf`; confirmar con un SELECT del ING-4): dry-run
+  de su cabecera por `execute_sql` (UN bloque `do $dry$`, quitando «-- »: A
+  contexto —sin el CHECK, 0 filas que lo violen, un ADMIN activo, un avión y
+  un cliente activos—, B cuerpo REAL, C1 estructura, C2 INSERT REAL con avión
+  + bitácora, C3 UPDATE a anticipo con avión ⇒ 23514 del CHECK, C4 alta de
+  aportación con avión ⇒ 23514, C5 quitar/poner el avión con bitácora UPDATE,
+  C6 filas reales cumplen e idempotente ⇒ `DRYRUN_OK · C1 … C6`) ⇒ lecturas
+  (0 CHECK, 0 filas `DRYRUN-20261013000005%`) ⇒ `apply_migration` (name
+  `20261013000005_ingreso_aeronave_resultado`) ⇒ POSTCHECK
+  (`pg_get_constraintdef` validado, `col_description`, ING-4 intacto) ⇒
+  `get_advisors` (nada nuevo esperado). Ensayada en PGlite (14-oct-2026,
+  esquema REAL de `ingreso` + sus 3 triggers): `DRYRUN_OK` sin residuos,
+  cuerpo dos veces = 1 CHECK validado, anticipo y aportación con avión ⇒
+  23514 `ingreso_aeronave_chk`, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`.
+  **Sin dependencia dura**; se recomienda DESPUÉS del push del API 0.0.75
+  (así el 23514 siempre llega traducido a `AVION_SOLO_EN_RESULTADO`). Orden
+  del punto: PASO 0 (la oficina confirma ING-4, invariante 67) → pyservices
+  → API 0.0.75 → esta migración → panel. **REVERSA (SOLO SQL Editor; el MCP
+  la rechaza)**: `alter table public.ingreso drop constraint if exists
+  ingreso_aeronave_chk;` (y registrar la reversa en el historial si se
+  aplica).
 - **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000008_gasto_tua_incluida.sql`**
   (invariante 66, TUA sistémica; era la 000003 del diseño, renumerada: la
   000003 es la categoría COMISION_VENDEDOR_AVION; NO aplicada: la aplica el
@@ -8647,7 +8849,8 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   `POST /v1/calendar/resync` (o esperar al reconcile de las 00:15).
 - **Ingresos (24-sep-2026, invariante 29) — decisiones del cliente
   pendientes** (v1 hace lo indicado entre paréntesis): ingresos sin vuelo en
-  el reparto a socios (fuera); ingreso con avión (solo referencia); reembolso
+  el reparto a socios (fuera); ingreso con avión (desde el 13-oct-2026
+  cuenta para ESE avión: invariante 67); reembolso
   de proveedor ligado a un gasto (ingreso de VuelaTour); venta de activos
   (resultado; la salida de bodega aparte); efectivo recibido y caja chica
   (no entra al fondo); devolución o retención de un anticipo sin vuelo

@@ -1,7 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
   filaLibroDeIngreso,
+  ingresoEsDelAvion,
+  ingresoParaLibroDeFila,
   leerIngresosDeResultado,
+  netoIngresoUsd,
+  partirIngresosPorAvion,
   type IngresoParaLibro,
 } from './ingreso-resultado.util';
 
@@ -184,5 +188,165 @@ describe('leerIngresosDeResultado', () => {
       [0, 999],
       [1000, 1999],
     ]);
+  });
+});
+
+/**
+ * INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): los
+ * campos aditivos del lector, la partición ÚNICA (su avión XOR VuelaTour) y
+ * el neto en USD del reparto.
+ */
+describe('ingreso asignado a un avión (invariante 67)', () => {
+  const crudo = (extra: Record<string, unknown> = {}) => ({
+    id: 'i-4',
+    folio: 4,
+    categoria: 'REEMBOLSO_DEVOLUCION',
+    fecha: '2026-09-04',
+    descripcion: 'TRANSF INTERBANCARIA SPEI',
+    monto: '46550.80',
+    comision_monto: null,
+    moneda: 'MXN',
+    tc_usd_mxn: null,
+    pagador: 'angel alvarez',
+    cliente: null,
+    vuelo: null,
+    aeronave: { matricula: 'N990GG', color_calendario: '#F59E0B' },
+    aeronave_id: 'av-n990gg',
+    notas: '  reembolso del pago del serv de 50 hrs en toledo, fact 53  ',
+    cuenta: { alias: 'EJE SCOTIA', banco: 'Scotiabank' },
+    ...extra,
+  });
+
+  it('ingresoParaLibroDeFila mapea aeronave_id, notas (recortadas) y la cuenta (embed objeto o arreglo)', () => {
+    const i = ingresoParaLibroDeFila(crudo());
+    expect(i).toMatchObject({
+      aeronave_id: 'av-n990gg',
+      notas: 'reembolso del pago del serv de 50 hrs en toledo, fact 53',
+      cuenta_alias: 'EJE SCOTIA',
+      cuenta_banco: 'Scotiabank',
+      matricula: 'N990GG',
+      monto: 46550.8,
+    });
+    const arreglo = ingresoParaLibroDeFila(
+      crudo({ cuenta: [{ alias: 'BBVA MXN', banco: 'BBVA' }] }),
+    );
+    expect([arreglo.cuenta_alias, arreglo.cuenta_banco]).toEqual([
+      'BBVA MXN',
+      'BBVA',
+    ]);
+  });
+
+  it('campos ausentes ⇒ null (notas vacías, sin cuenta, sin avión)', () => {
+    const i = ingresoParaLibroDeFila(
+      crudo({
+        aeronave_id: undefined,
+        notas: '   ',
+        cuenta: null,
+        aeronave: null,
+      }),
+    );
+    expect([i.aeronave_id, i.notas, i.cuenta_alias, i.cuenta_banco]).toEqual([
+      null,
+      null,
+      null,
+      null,
+    ]);
+    const sinLlaves = ingresoParaLibroDeFila({
+      id: 'x',
+      folio: 1,
+      categoria: 'OTRO_INGRESO',
+      fecha: '2026-09-01',
+      descripcion: 'abc',
+      monto: 1,
+      moneda: 'MXN',
+    });
+    expect([
+      sinLlaves.aeronave_id,
+      sinLlaves.notas,
+      sinLlaves.cuenta_alias,
+      sinLlaves.cuenta_banco,
+    ]).toEqual([null, null, null, null]);
+  });
+
+  it('filaLibroDeIngreso sale BYTE-IDÉNTICA con los campos nuevos presentes', () => {
+    const conCampos: IngresoParaLibro = {
+      ...base,
+      aeronave_id: 'av-1',
+      notas: 'nota',
+      cuenta_alias: 'EJE SCOTIA',
+      cuenta_banco: 'Scotiabank',
+    };
+    expect(JSON.stringify(filaLibroDeIngreso(conCampos))).toBe(
+      JSON.stringify(filaLibroDeIngreso(base)),
+    );
+  });
+
+  const ing = (
+    id: string,
+    folio: number,
+    aeronave_id: string | null,
+    categoria = 'OTRO_INGRESO',
+  ): IngresoParaLibro => ({ ...base, id, folio, aeronave_id, categoria });
+
+  it('partirIngresosPorAvion: cada ingreso de resultado en EXACTAMENTE un lado, en el orden del lector', () => {
+    const lista = [
+      ing('e1', 1, null),
+      ing('a1', 2, 'av-A', 'REEMBOLSO_DEVOLUCION'),
+      ing('b1', 3, 'av-B', 'VENTA_ACTIVO'),
+      ing('e2', 4, null, 'INGRESO_BANCARIO'),
+      ing('a2', 5, 'av-A', 'INGRESO_BANCARIO'),
+      // Anticipo con avión FORZADO (imposible tras el CHECK): ningún lado.
+      ing('x1', 6, 'av-A', 'ANTICIPO_CLIENTE'),
+      ing('x2', 7, null, 'APORTACION_PRESTAMO'),
+    ];
+    const p = partirIngresosPorAvion(lista);
+    expect(p.empresa.map((i) => i.id)).toEqual(['e1', 'e2']);
+    expect(p.porAvion.get('av-A')?.map((i) => i.id)).toEqual(['a1', 'a2']);
+    expect(p.porAvion.get('av-B')?.map((i) => i.id)).toEqual(['b1']);
+    expect([...p.porAvion.keys()].sort()).toEqual(['av-A', 'av-B']);
+    const lados = [...p.empresa, ...[...p.porAvion.values()].flat()].map(
+      (i) => i.id,
+    );
+    expect(lados.sort()).toEqual(['a1', 'a2', 'b1', 'e1', 'e2']);
+    expect(partirIngresosPorAvion([])).toEqual({
+      empresa: [],
+      porAvion: new Map(),
+    });
+  });
+
+  it('ingresoEsDelAvion: de resultado Y con avión', () => {
+    expect(ingresoEsDelAvion(ing('a', 1, 'av-A'))).toBe(true);
+    expect(ingresoEsDelAvion(ing('b', 2, null))).toBe(false);
+    expect(ingresoEsDelAvion(ing('c', 3, 'av-A', 'ANTICIPO_CLIENTE'))).toBe(
+      false,
+    );
+    expect(ingresoEsDelAvion({ categoria: 'OTRO_INGRESO' })).toBe(false);
+  });
+
+  it('netoIngresoUsd: USD neto; MXN ÷ T.C.; sin T.C. (o 0) ⇒ null', () => {
+    expect(
+      netoIngresoUsd({ monto: 100, comision_monto: 5, moneda: 'USD' }, null),
+    ).toBe(95);
+    expect(
+      netoIngresoUsd(
+        { monto: 46550.8, comision_monto: null, moneda: 'MXN' },
+        18,
+      ),
+    ).toBe(2586.16);
+    expect(
+      netoIngresoUsd({ monto: 1000, comision_monto: 50, moneda: 'MXN' }, 20),
+    ).toBe(47.5);
+    expect(
+      netoIngresoUsd(
+        { monto: 46550.8, comision_monto: null, moneda: 'MXN' },
+        null,
+      ),
+    ).toBeNull();
+    expect(
+      netoIngresoUsd(
+        { monto: 46550.8, comision_monto: null, moneda: 'MXN' },
+        0,
+      ),
+    ).toBeNull();
   });
 });

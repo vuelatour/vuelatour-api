@@ -1,5 +1,8 @@
 import {
+  AVISO_INGRESO_SIN_AVION,
+  MSG_AVION_SOLO_EN_RESULTADO,
   TOLERANCIA_INGRESO,
+  avisoIngresoConAvion,
   coincideBusqueda,
   comisionDeAplicacion,
   estadoConciliacionCobro,
@@ -200,5 +203,29 @@ describe('textos', () => {
     expect(coincideBusqueda('ING-12', ['ING-12'])).toBe(true);
     expect(coincideBusqueda('xyz', ['abc', null, 312])).toBe(false);
     expect(coincideBusqueda('', ['abc'])).toBe(true);
+  });
+});
+
+describe('ingreso asignado a un avión — textos ÚNICOS del API (invariante 67)', () => {
+  it('los tres literales congelados', () => {
+    expect(MSG_AVION_SOLO_EN_RESULTADO).toBe(
+      'Un anticipo o una aportación no se asigna a un avión: el avión solo aplica a ingresos que suman a resultados (otros ingresos, intereses, reembolsos y ventas).',
+    );
+    expect(avisoIngresoConAvion('N990GG')).toBe(
+      'Este ingreso cuenta para el avión N990GG: entra a la hoja «Otros ingresos» de su balance y a su reparto a socios; ya no cuenta como ingreso de VuelaTour.',
+    );
+    expect(AVISO_INGRESO_SIN_AVION).toBe(
+      'Este ingreso ya no cuenta para ningún avión: vuelve a ser ingreso de VuelaTour (Balance general y Libro Dinero).',
+    );
+  });
+
+  it('ninguno dice «Otros ingresos VuelaTour» (el bloque de TUAs/extras)', () => {
+    for (const t of [
+      MSG_AVION_SOLO_EN_RESULTADO,
+      avisoIngresoConAvion('XB-TST'),
+      AVISO_INGRESO_SIN_AVION,
+    ]) {
+      expect(t).not.toMatch(/Otros ingresos VuelaTour/);
+    }
   });
 });
