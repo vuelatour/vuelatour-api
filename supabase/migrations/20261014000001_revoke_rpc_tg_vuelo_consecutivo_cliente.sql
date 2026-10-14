@@ -1,0 +1,23 @@
+-- 20261014000001 · tg_vuelo_consecutivo_cliente() fuera del RPC (advisor 0028/0029)
+--
+-- La 20261013000006 (ID de vuelo por cliente, invariante 68) creó
+-- public.tg_vuelo_consecutivo_cliente() como SECURITY DEFINER (escribe el
+-- contador cliente_consecutivo_vuelo, que tiene RLS sin políticas). El
+-- advisor de seguridad de Supabase lo marcó el 14-oct-2026 con dos WARN:
+-- «anon/authenticated can execute SECURITY DEFINER function via
+-- /rest/v1/rpc/tg_vuelo_consecutivo_cliente». Es una función de TRIGGER:
+-- llamarla por RPC truena («trigger functions can only be called as
+-- triggers»), pero el patrón del repo es no exponer ninguna por RPC (mismo
+-- cierre que 20260807000001, 20260807000002 y la sección 8 de
+-- 20260924000004).
+--
+-- El trigger vuelo_consecutivo_cliente SIGUE corriendo: Postgres no revisa
+-- EXECUTE al disparar un trigger (solo al crearlo). Sin tablas, sin datos.
+--
+-- CÓMO APLICAR: el MCP de Supabase declina esta sentencia (palabra
+-- «revoke»): va por el SQL Editor del proyecto bjesduasnzbzywofukbf con el
+-- paquete docs/sql-aplicar-14-oct-2026/ (aplicar + registrar el historial) y
+-- después se verifica por MCP con has_function_privilege (debe dar false
+-- para anon y authenticated) y get_advisors (sin los dos WARN).
+
+revoke execute on function public.tg_vuelo_consecutivo_cliente() from public, anon, authenticated;

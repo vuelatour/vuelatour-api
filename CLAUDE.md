@@ -8670,6 +8670,16 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   14 + 7; 0 nuevos); jest 309 suites / 5,123 pruebas, 0 fallos (en
   `db54502d`: 263 / 4,433, 0 fallos; las 15 pruebas de antes que ya no
   están con su nombre son renombres o reemplazos intencionales del lote).
+- **PENDIENTE (14-oct-2026) — `20261014000001_revoke_rpc_tg_vuelo_consecutivo_cliente.sql`**
+  (solo SQL Editor: el MCP declina el `revoke`). Tras aplicar la 000006 el
+  advisor marcó dos WARN (0028/0029): `tg_vuelo_consecutivo_cliente()` es
+  SECURITY DEFINER y anon/authenticated la podían invocar por RPC. Es función
+  de TRIGGER (por RPC truena), pero el patrón del repo es no exponer ninguna:
+  `revoke execute … from public, anon, authenticated` (el trigger sigue
+  corriendo: Postgres no revisa EXECUTE al dispararlo). Paquete en
+  `docs/sql-aplicar-14-oct-2026/` (aplicar + registrar el historial);
+  verificar después por MCP con `has_function_privilege('anon', …,
+  'EXECUTE')` ⇒ false y `get_advisors` sin los dos WARN.
 - **CHECKLIST DE DATOS ANTES DE REGENERAR SEPTIEMBRE (revisión del lote 2,
   14-oct-2026; dato de prod, NO código: nada se toca sin la oficina).** En
   septiembre hay DOS repartos de utilidades a socios capturados como
