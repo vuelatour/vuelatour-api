@@ -569,3 +569,57 @@ describe('Reparto a socios — la extensión de horario NO es costo del avión (
     expect(fila(r, 'Extensión de horario (excluido)')).toBeUndefined();
   });
 });
+
+/**
+ * COMISARIATO (13-oct-2026, invariante 63): snacks/bebidas de los PASAJEROS
+ * = costo DIRECTO del vuelo (columna OTROS del balance por avión). Fuera del
+ * set DIRECTO caería a EXCLUIDO y la utilidad de los socios quedaría inflada
+ * mientras el balance sí lo resta: dos libros del mismo cierre, dos números.
+ */
+describe('Reparto a socios — Comisariato es gasto DIRECTO del avión (13-oct-2026)', () => {
+  const comisariato: Fila = {
+    ...gastoBase,
+    id: 'g-comis',
+    categoria: 'COMISARIATO',
+    monto: 250,
+    vuelo_id: VUELO,
+  };
+
+  it('con vuelo del avión ⇒ grupo DIRECTO con clave COMISARIATO y la utilidad baja EXACTAMENTE su monto', () => {
+    const sin = computar([]);
+    const con = computar([comisariato]);
+    expect(fila(con, 'COMISARIATO')).toMatchObject({
+      grupo: 'DIRECTO',
+      usd: 250,
+    });
+    expect(con.gastos.directos_usd).toBe(250);
+    expect(
+      Math.round((sin.saldo_disponible_usd - con.saldo_disponible_usd) * 100) /
+        100,
+    ).toBe(250);
+  });
+
+  it('ENTERO aunque la IA traiga renglones que «parecen» de aeródromo (sin TUA embebido)', () => {
+    const con = computar([
+      {
+        ...comisariato,
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Servicio FBO', monto: 150 },
+            { concepto: 'TUA', monto: 100 },
+          ],
+        },
+      },
+    ]);
+    expect(con.gastos.directos_usd).toBe(250);
+    expect(fila(con, 'TUA embebido (excluido)')).toBeUndefined();
+  });
+
+  it('control: el MISMO gasto como OTRO (captura vieja) es EXCLUIDO y la utilidad no cambia', () => {
+    const sin = computar([]);
+    const otro = computar([{ ...comisariato, categoria: 'OTRO' }]);
+    expect(fila(otro, 'OTRO')).toMatchObject({ grupo: 'EXCLUIDO', usd: 250 });
+    expect(otro.gastos.directos_usd).toBe(0);
+    expect(otro.saldo_disponible_usd).toBe(sin.saldo_disponible_usd);
+  });
+});

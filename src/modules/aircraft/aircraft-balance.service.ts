@@ -15,6 +15,7 @@ import {
   type TipoCambioDetalle,
 } from '../tipo-cambio/tipo-cambio.service';
 import {
+  CATEGORIA_COMISARIATO,
   CATEGORIAS_GASTO_EMPRESA,
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
   categoriaEsPagoVendedor,
@@ -142,9 +143,12 @@ const VUELO_COLS =
 // (litros/precio). El medio EFECTIVO solo se señala como "(efectivo)" en la
 // nota de la celda.
 const CAT_PILOTO = new Set(['COMIDA', 'HOTEL', 'TAXI', 'PILOTO_EXTERNO']);
-// OTROS de la fila del vuelo = SOLO FBO desde el 11-sep-2026 (antes FBO +
-// OTRO): ver CAT_EMPRESA — la categoría OTRO ya no resta en el avión.
-const CAT_OTROS = new Set(['FBO']);
+// OTROS de la fila del vuelo = FBO (regla 27-jul; OTRO salió el 11-sep-2026:
+// ver CAT_EMPRESA — la categoría OTRO ya no resta en el avión) + COMISARIATO
+// (13-oct-2026, pedido del cliente: snacks/bebidas de los PASAJEROS como
+// costo directo del vuelo, invariante 63). COMISARIATO está en
+// CATS_SIN_TUA_EMBEBIDO ⇒ `separarPartes` da null y entra ENTERO aquí.
+const CAT_OTROS = new Set(['FBO', CATEGORIA_COMISARIATO]);
 /**
  * LA CATEGORÍA MANDA SOBRE EL VUELO (regla del cliente, 11-sep-2026).
  *
@@ -2908,8 +2912,9 @@ export class AircraftBalanceService {
           pilotoMxn = (pilotoMxn ?? 0) + mxn;
           pilotoDetalle.push(lineaDetalle(g, mxn, sufijo));
         } else {
-          // OPERACIONES, ATERRIZAJE, REFACCION, FIJO, FBO, OTRO y cualquier
-          // categoría futura no mapeada. Con desglose IA reconocible la
+          // OPERACIONES, ATERRIZAJE, REFACCION, SERVICIOS, FBO, COMISARIATO
+          // y cualquier categoría futura no mapeada (FIJO/OTRO ya no llegan:
+          // CAT_FUERA_DEL_AVION arriba). Con desglose IA reconocible la
           // factura se REPARTE entre columnas (op → OPERACIONES, FBO →
           // OTROS, TUA y extensión de horario → solo nota); sin desglose, la
           // categoría decide la columna completa como siempre.
@@ -2977,7 +2982,9 @@ export class AircraftBalanceService {
               opDetalle.push(lineaDetalle(g, mxn, sufijo, trozos));
             }
           } else if (CAT_OTROS.has(g.categoria)) {
-            // OTROS = solo FBO + categoría OTRO (comisariatos, varios).
+            // OTROS = FBO sin desglose IA reconocible + COMISARIATO
+            // (13-oct-2026, invariante 63): entero, con su línea en
+            // `otros_detalle` («Comisariato · <proveedor/nota> — $X»).
             otrosMxn = (otrosMxn ?? 0) + mxn;
             otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
           } else {

@@ -754,6 +754,7 @@ export interface BalanceAvionVueloPayload {
   gas_precio_litro: number | null;
   op_mxn: number | null;
   piloto_mxn: number | null;
+  /** Columna OTROS = FBO + COMISARIATO (13-oct-2026, invariante 63). */
   otros_mxn: number | null;
   permiso_afac_mxn: number | null;
   /**

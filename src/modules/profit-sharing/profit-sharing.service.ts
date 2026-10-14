@@ -138,6 +138,10 @@ const DIRECTO = new Set([
   // Honorario del piloto externo (freelance, doc 3.7): costo directo del
   // vuelo — fuera de este set el reparto lo ignoraría e inflaría la utilidad.
   'PILOTO_EXTERNO',
+  // COMISARIATO (13-oct-2026, invariante 63): snacks/bebidas de los
+  // PASAJEROS = costo directo del vuelo (columna OTROS del balance); fuera
+  // de este set caería a EXCLUIDO e inflaría la utilidad de los socios.
+  'COMISARIATO',
   // 'OTRO' YA NO está aquí (regla del cliente, 11-sep-2026 — LA CATEGORÍA DE
   // EMPRESA MANDA SOBRE EL VUELO): un OTRO con vuelo es gasto de VuelaTour,
   // no costo del avión. Ver `categoriaEsDeEmpresa` en el clasificador de

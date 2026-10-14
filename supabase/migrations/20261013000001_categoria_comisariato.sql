@@ -1,0 +1,130 @@
+-- 13-oct-2026 · CATEGORÍA DE GASTO «Comisariato» (COMISARIATO). API 0.0.75,
+-- invariante 63 del CLAUDE.md del API.
+--
+-- PEDIDO DEL CLIENTE (Jimmy, 12-oct-2026): «agregar en la categoría de
+-- gastos: Comisariato; entraría en [la columna OTROS de costos directos] en
+-- el balance del avión». Hoy el comisariato de los pasajeros (snacks,
+-- bebidas, hielo) se captura como «Otros gastos VuelaTour» (OTRO) y, desde
+-- el 11-sep-2026, un OTRO con vuelo es gasto de la EMPRESA: no llega al
+-- avión.
+--
+-- QUÉ HACE: agrega el valor `COMISARIATO` AL FINAL del enum
+-- `public.categoria_gasto` (queda el 22.º: 20261013000003 ya puso
+-- COMISION_VENDEDOR_AVION justo después de COMISION_VENDEDOR). Nada más: sin
+-- filas, sin triggers, sin CHECK. La reclasificación de los 4 gastos OTRO de
+-- agosto va en 20261013000002 (otra transacción: el valor nuevo no se puede
+-- usar en la transacción que lo crea).
+--
+-- REGLAS DE LA CATEGORÍA (las aplica el API 0.0.75; invariante 63):
+--   1. Gasto DIRECTO del vuelo (destino = el de COMIDA, «Gastos directos del
+--      vuelo»): en la fila del vuelo cae ENTERO en la columna OTROS de costos
+--      directos, junto al FBO (`CAT_OTROS`); en el reparto a socios, grupo
+--      DIRECTO.
+--   2. Exige vuelo SOLO al PILOTO (derivado del destino, como COMIDA); la
+--      oficina la captura suelta y la liga después. Con avión y sin vuelo va
+--      a «Gastos Indirectos» del avión; sin nada, pendiente de avión.
+--   3. Sin TUA embebido (`CATS_SIN_TUA_EMBEBIDO`), no repartible
+--      (`tg_gasto_reparto_valida` sin cambio), no ligable a compras; la IA de
+--      tickets SÍ la sugiere (pyservices) para snacks/bebidas de PASAJEROS.
+--      La comida de la tripulación sigue en COMIDA.
+--
+-- SOLA EN SU ARCHIVO A PROPÓSITO (patrón 20260928000001 / 20261013000003):
+-- un valor nuevo de enum no se puede USAR —ni escribir ni leer con el
+-- literal: 55P04— en la transacción que lo crea.
+--
+-- DEPENDENCIA DURA DEL API 0.0.75: el API acepta el valor (IsEnum) y hace
+-- `.eq('categoria', 'COMISARIATO')` en los candados anti-duplicado ANTES del
+-- insert y en `GET /v1/expenses?categoria=COMISARIATO`: contra una BD sin el
+-- valor eso revienta 22P02 (500; el cinturón del 400 solo cubre el
+-- insert/update). ⇒ ESTA MIGRACIÓN VA ANTES DEL PUSH DEL API, comprobando
+-- `pg_enum` justo antes. Ningún filtro PostgREST del API nombra el literal en
+-- una lista fija (`CATEGORIAS_GASTO_SIN_AVION` NO lo lleva: sin avión SÍ es
+-- pendiente real).
+--
+-- ROLLBACK: no hay; un valor de enum no se retira sin recrear el tipo, y sin
+-- filas es inofensivo. Con gastos COMISARIATO capturados queda PROHIBIDO
+-- regresar el API a ≤ 0.0.74 (no conoce la categoría: la fila del vuelo la
+-- sumaría a OPERACIONES y el reparto la dejaría EXCLUIDA, inflando la
+-- utilidad); primero reclasificarlos o corregir hacia adelante.
+--
+-- Por MCP se aplica SOLO el CUERPO (apply_migration, name
+-- '20261013000001_categoria_comisariato'). Sin palabras destructivas: el MCP
+-- la acepta.
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN (ANTES de aplicar). UNA sentencia por MCP `execute_sql`; el `raise
+-- exception` final revierte todo. Cualquier 'DRYRUN_FALLA …' u otro error =
+-- NO aplicar. Conteo RELATIVO (hoy 21 ⇒ 22): no depende de qué otras
+-- migraciones del lote ya estén aplicadas. El DDL va ANTES de cualquier
+-- escritura de prueba. Si el MCP rechazara el ADD VALUE dentro del DO, se
+-- repite como `begin; …; rollback;` en una sola llamada (patrón del 28-sep).
+--
+-- do $dry$
+-- declare
+--   v_n0 int; v_n int; v_ult text;
+--   v_vuelo uuid; v_avion uuid; v_usr uuid; v_g uuid; v_b int;
+-- begin
+--   -- A) CONTEXTO
+--   if exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--              where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISARIATO') then
+--     raise exception 'DRYRUN_FALLA A: COMISARIATO ya existe (¿migración aplicada?)';
+--   end if;
+--   if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--                  where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMIDA') then
+--     raise exception 'DRYRUN_FALLA A: el enum no tiene COMIDA (¿otro proyecto?)';
+--   end if;
+--   select count(*) into v_n0 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   select v.id, v.aeronave_id into v_vuelo, v_avion from public.vuelo v where v.folio = 164;
+--   select u.id into v_usr from public.usuario u where u.rol::text = 'ADMIN' and u.estado::text = 'ACTIVO' order by u.created_at limit 1;
+--   if v_vuelo is null or v_avion is null or v_usr is null then
+--     raise exception 'DRYRUN_FALLA A: sin vuelo #164 con avión o sin ADMIN activo';
+--   end if;
+--   raise notice 'okA · % valores (esperado 21 con 20261013000003 aplicada)', v_n0;
+--   -- B) CUERPO REAL (pegado TAL CUAL, antes de cualquier escritura)
+--   alter type public.categoria_gasto add value if not exists 'COMISARIATO';
+--   -- C1) uno más y AL FINAL por enumsortorder
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C1: % valores tras el ADD (esperado %)', v_n, v_n0 + 1; end if;
+--   select e.enumlabel into v_ult from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto' order by e.enumsortorder desc limit 1;
+--   if v_ult is distinct from 'COMISARIATO' then raise exception 'DRYRUN_FALLA C1: el último valor es % (esperado COMISARIATO)', v_ult; end if;
+--   -- C2) re-ejecutar el cuerpo es no-op (IF NOT EXISTS)
+--   alter type public.categoria_gasto add value if not exists 'COMISARIATO';
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C2: el cuerpo no es idempotente (% valores)', v_n; end if;
+--   -- C3) ESCRITURA REAL con el tipo ya alterado (los 4 triggers de gasto), con un literal que YA existía
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto, medio_pago, vuelo_id, aeronave_id, notas, origen, created_by, updated_by)
+--   values (v_usr, 'COMIDA', 176.50, 'MXN', date '2026-10-13', 'TARJETA_CORP', v_vuelo, v_avion, 'DRYRUN 20261013000001', 'OFICINA', v_usr, v_usr)
+--   returning id into v_g;
+--   update public.gasto set monto = 180.00, updated_by = v_usr where id = v_g;
+--   select count(*) into v_b from public.gasto_bitacora where gasto_id = v_g;
+--   if v_b <> 2 then raise exception 'DRYRUN_FALLA C3: bitácora = % (esperado INSERT + UPDATE)', v_b; end if;
+--   -- C4) el valor nuevo NO se puede usar antes del COMMIT (55P04): por eso la reclasificación va en 000002 y el API sale DESPUÉS
+--   begin
+--     update public.gasto set categoria = 'COMISARIATO', updated_by = v_usr where id = v_g;
+--     raise exception 'DRYRUN_FALLA C4: se escribió el valor nuevo antes del commit';
+--   exception when sqlstate '55P04' then
+--     raise notice 'okC4 · 55P04 al escribir antes del commit';
+--   end;
+--   raise exception 'DRYRUN_OK 20261013000001 · A–C4 (% → % valores, COMISARIATO al final, idempotente, triggers de gasto intactos, 55P04 antes del commit)', v_n0, v_n0 + 1;
+-- end $dry$;
+--
+-- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada:
+--   select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto' and e.enumlabel = 'COMISARIATO';   ⇒ 0
+--   select count(*) from public.gasto where notas = 'DRYRUN 20261013000001';  ⇒ 0
+--
+-- APLICAR el CUERPO con apply_migration y VERIFICAR:
+--   - 22 valores y el último por enumsortorder es COMISARIATO;
+--   - select count(*) from public.gasto where categoria::text = 'COMISARIATO'
+--     ⇒ 0 (la reclasificación es 20261013000002, DESPUÉS del API 0.0.75);
+--   - get_advisors sin hallazgos nuevos.
+-- JUSTO ANTES DEL PUSH DEL API 0.0.75:
+--   select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto' and e.enumlabel = 'COMISARIATO';  ⇒ 1 fila
+-- ---------------------------------------------------------------------------
+
+alter type public.categoria_gasto add value if not exists 'COMISARIATO';

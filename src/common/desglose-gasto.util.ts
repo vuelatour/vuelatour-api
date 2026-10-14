@@ -235,6 +235,14 @@ export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
   // en un query.
   'COMISION_VENDEDOR',
   'COMISION_VENDEDOR_AVION',
+  // COMISARIATO (13-oct-2026, invariante 63): ticket de súper/OXXO/comedor,
+  // jamás factura de aeródromo con TUA/FBO/extensión embebidos. Además
+  // garantiza la columna: `separarPartes` del balance devuelve null para
+  // esta categoría y la fila cae ENTERA en OTROS aunque la IA traiga
+  // conceptos (gasto 83da7c99: «Mafer surtido salado 120g $53 · Cristal agua
+  // 600ml $22…»). Cubre balance, reparto y Libro Dinero por la fuente única
+  // `trasladosEmbebidosDeGasto`. Se usa en JS, nunca en un query.
+  'COMISARIATO',
 ]);
 
 export interface GastoParaTuaEmbebido {

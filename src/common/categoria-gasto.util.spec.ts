@@ -1,5 +1,6 @@
 import { CategoriaGasto } from '../modules/expenses/dto/expenses.dto';
 import {
+  CATEGORIA_COMISARIATO,
   CATEGORIA_GASTO_DESTINO,
   CATEGORIA_GASTO_LABEL,
   CATEGORIA_PAGO_VENDEDOR,
@@ -10,6 +11,7 @@ import {
   CATEGORIAS_GASTO_SIN_AVION,
   CATEGORIAS_GASTO_VUELO_OBLIGATORIO,
   MENSAJE_CATEGORIA_SIN_MIGRACION,
+  MENSAJE_COMISARIATO_SIN_MIGRACION,
   MIGRACION_DE_CATEGORIA,
   categoriaDeCheckExigeVuelo,
   categoriaEsDeEmpresa,
@@ -29,12 +31,15 @@ import { CATS_SIN_TUA_EMBEBIDO } from './desglose-gasto.util';
 describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', () => {
   const codigos = Object.values(CategoriaGasto);
 
-  it('el enum tiene las 21 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después desde el 13-oct-2026)', () => {
-    // 22 cuando entre COMISARIATO (lote de Comisariato del 13-oct-2026).
-    expect(codigos).toHaveLength(21);
+  it('el enum tiene las 22 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después y COMISARIATO justo después de COMIDA desde el 13-oct-2026)', () => {
+    expect(codigos).toHaveLength(22);
     expect(codigos).toContain('COMISION_VENDEDOR');
     const i = codigos.indexOf(CategoriaGasto.COMISION_VENDEDOR);
     expect(codigos[i + 1]).toBe('COMISION_VENDEDOR_AVION');
+    // Mismo orden que el selector del panel y los chips de la app.
+    expect(codigos).toContain('COMISARIATO');
+    const j = codigos.indexOf(CategoriaGasto.COMIDA);
+    expect(codigos[j + 1]).toBe('COMISARIATO');
   });
 
   it('toda categoría del enum tiene etiqueta y destino no vacíos (y nada extra)', () => {
@@ -67,6 +72,9 @@ describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', (
     expect(etiquetaCategoriaGasto(CategoriaGasto.TUAS)).toBe('TUAS');
     expect(etiquetaCategoriaGasto(CategoriaGasto.FBO)).toBe('FBO');
     expect(etiquetaCategoriaGasto(CategoriaGasto.COMIDA)).toBe('Comida');
+    expect(etiquetaCategoriaGasto(CategoriaGasto.COMISARIATO)).toBe(
+      'Comisariato',
+    );
     expect(etiquetaCategoriaGasto(CategoriaGasto.HOTEL)).toBe('Hotel');
     expect(etiquetaCategoriaGasto(CategoriaGasto.TAXI)).toBe(
       'Taxi / estacionamiento',
@@ -106,6 +114,8 @@ describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', (
       CategoriaGasto.TUAS,
       CategoriaGasto.FBO,
       CategoriaGasto.COMIDA,
+      // 13-oct-2026: el MISMO destino que COMIDA (snacks de los pasajeros).
+      CategoriaGasto.COMISARIATO,
       CategoriaGasto.HOTEL,
       CategoriaGasto.TAXI,
       CategoriaGasto.PILOTO_EXTERNO,
@@ -186,6 +196,8 @@ describe('categoriaExigeVuelo', () => {
     CategoriaGasto.TUAS,
     CategoriaGasto.FBO,
     CategoriaGasto.COMIDA,
+    // 13-oct-2026: COMISARIATO entra por su destino (candado del PILOTO).
+    CategoriaGasto.COMISARIATO,
     CategoriaGasto.HOTEL,
     CategoriaGasto.TAXI,
     CategoriaGasto.PERMISO,
@@ -369,8 +381,9 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(texto).toContain(
       'COMISION_VENDEDOR_AVION → Comisión del vendedor (avión) → Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
     );
-    // Una línea más que antes del 13-oct-2026 (21 categorías + el título).
-    expect(texto.split('\n')).toHaveLength(22);
+    // 22 categorías (COMISION_VENDEDOR_AVION y COMISARIATO entraron el
+    // 13-oct-2026) + el título.
+    expect(texto.split('\n')).toHaveLength(23);
   });
 
   it('exige vuelo (piloto) Y para TODOS los roles (solo las dos)', () => {
@@ -521,6 +534,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(MIGRACION_DE_CATEGORIA).toEqual({
       COMISION_VENDEDOR: '20260928000001',
       COMISION_VENDEDOR_AVION: '20261013000003',
+      COMISARIATO: '20261013000001',
     });
     const errAvion = {
       code: '22P02',
@@ -598,5 +612,90 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
     expect(
       categoriaDeCheckExigeVuelo({ code: '23514', message: null }),
     ).toBeNull();
+  });
+});
+
+/**
+ * COMISARIATO (13-oct-2026, invariante 63; pedido del cliente: «agregar en
+ * la categoría de gastos: Comisariato; entraría en [la columna OTROS de
+ * costos directos] en el balance del avión»): snacks/bebidas de los
+ * PASAJEROS. Entra SOLO por su destino (el de COMIDA): ninguna lista de
+ * empresa / sin avión / fuera del avión / vuelo obligatorio cambia.
+ */
+describe('COMISARIATO (13-oct-2026)', () => {
+  it('código, etiqueta y destino EXACTOS (paridad manual panel/app)', () => {
+    expect(CATEGORIA_COMISARIATO).toBe('COMISARIATO');
+    expect(CATEGORIA_GASTO_LABEL.COMISARIATO).toBe('Comisariato');
+    expect(CATEGORIA_GASTO_DESTINO.COMISARIATO).toBe(
+      'Gastos directos del vuelo (en el balance del avión)',
+    );
+    // El MISMO destino que COMIDA (la comida de la tripulación).
+    expect(CATEGORIA_GASTO_DESTINO.COMISARIATO).toBe(
+      CATEGORIA_GASTO_DESTINO.COMIDA,
+    );
+    expect(descripcionCategoriasGasto()).toContain(
+      'COMISARIATO → Comisariato → Gastos directos del vuelo (en el balance del avión)',
+    );
+  });
+
+  it('exige vuelo SOLO al PILOTO (derivado del destino), no a todos los roles', () => {
+    expect(categoriaExigeVuelo('COMISARIATO')).toBe(true);
+    expect(categoriaExigeVueloSiempre('COMISARIATO')).toBe(false);
+    expect([...CATEGORIAS_GASTO_VUELO_OBLIGATORIO].sort()).toEqual([
+      'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
+    ]);
+  });
+
+  it('NO es de empresa, NO es «sin avión» (sin avión es pendiente real) y NO queda fuera del avión', () => {
+    expect(categoriaEsDeEmpresa('COMISARIATO')).toBe(false);
+    expect([...CATEGORIAS_GASTO_EMPRESA].sort()).toEqual([
+      'FIJO',
+      'GASOLINA',
+      'NOMINA',
+      'OTRO',
+      'VISITA',
+    ]);
+    expect(CATEGORIAS_GASTO_SIN_AVION).not.toContain('COMISARIATO');
+    expect(categoriaFueraDelAvion('COMISARIATO')).toBe(false);
+    expect(categoriaEsPagoVendedor('COMISARIATO')).toBe(false);
+    expect(ladoPagoVendedor('COMISARIATO')).toBeNull();
+  });
+
+  it('SIN TUA embebido (columna OTROS entera) y NO repartible', () => {
+    expect(CATS_SIN_TUA_EMBEBIDO.has('COMISARIATO')).toBe(true);
+    expect(CATEGORIAS_REPARTIBLES.has('COMISARIATO')).toBe(false);
+  });
+
+  it('22P02 del enum sin la migración 20261013000001 ⇒ texto 400 con «Comisariato»; la comisión sigue byte a byte', () => {
+    const err = {
+      code: '22P02',
+      message: 'invalid input value for enum categoria_gasto: "COMISARIATO"',
+    };
+    expect(mensajeCategoriaSinMigracion(err, 'COMISARIATO')).toBe(
+      MENSAJE_COMISARIATO_SIN_MIGRACION,
+    );
+    expect(MENSAJE_COMISARIATO_SIN_MIGRACION).toBe(
+      '«Comisariato» necesita la migración 20261013000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
+    // Otro código, otro enum, otra categoría enviada ⇒ null.
+    expect(
+      mensajeCategoriaSinMigracion({ ...err, code: '23514' }, 'COMISARIATO'),
+    ).toBeNull();
+    expect(
+      mensajeCategoriaSinMigracion(
+        {
+          code: '22P02',
+          message: 'invalid input value for enum moneda: "COMISARIATO"',
+        },
+        'COMISARIATO',
+      ),
+    ).toBeNull();
+    expect(mensajeCategoriaSinMigracion(err, 'COMIDA')).toBeNull();
+    expect(mensajeCategoriaSinMigracion(err, 'COMISION_VENDEDOR')).toBeNull();
+    // El texto de la comisión del 28-sep no se movió.
+    expect(MENSAJE_CATEGORIA_SIN_MIGRACION).toBe(
+      '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
   });
 });

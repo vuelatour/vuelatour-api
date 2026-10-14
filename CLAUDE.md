@@ -1002,7 +1002,8 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     (`gastosEmpresaYSueltos`, eje `fecha_gasto`) AUNQUE el gasto traiga
     vuelo o aeronave sellados — el vuelo queda solo como referencia en el
     detalle ("· vuelo #123"). Esas categorías **no restan** en la fila del
-    vuelo (la columna OTROS quedó en SOLO FBO; antes OTRO con vuelo caía
+    vuelo (la columna OTROS quedó en SOLO FBO —y desde el 13-oct-2026 FBO
+    + COMISARIATO, invariante 63—; antes OTRO con vuelo caía
     ahí — regla del 27-jul), ni en "Gastos Indirectos"/"otros gastos" del
     libro del avión, ni en la cascada de `utilidad_despues_usd`.
     En el **reparto a socios** (`profit-sharing.service`) 'OTRO' SALIÓ del
@@ -1490,7 +1491,8 @@ aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
     (`src/common/categoria-gasto.util.ts`, derivada del destino por default +
     la lista corta TUAS/PERMISO/PILOTO_EXTERNO): exigen vuelo las que
     dicen «Gastos directos del vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO,
-    COMIDA, HOTEL, TAXI, PILOTO_EXTERNO) más PERMISO; las de
+    COMIDA, COMISARIATO —desde el 13-oct-2026, invariante 63—, HOTEL, TAXI,
+    PILOTO_EXTERNO) más PERMISO; las de
     empresa/indirectos/refacción/servicios (REFACCION, INDIRECTO, SERVICIOS,
     NOMINA, GASOLINA, OTRO, VISITA, FIJO, PERSONAL_DUENO) van sin vuelo.
     **GAS salió de la lista el 11-sep-2026** (decisión del cliente): un
@@ -6365,6 +6367,107 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «USD sin T.C.»— y `movimientosConTc` con una fila AFAC). En
       pyservices, `tests/test_balance_otros_movimientos_afac.py`.
 
+63. **COMISARIATO (13-oct-2026, API 0.0.75, migraciones `20261013000001`
+    y `20261013000002`).** Pedido del cliente (Jimmy, 12-oct-2026): «agregar
+    en la categoría de gastos: Comisariato; entraría en [la columna OTROS de
+    costos directos] en el balance del avión». Hasta hoy el comisariato de
+    los PASAJEROS (snacks, bebidas, hielo) se capturaba como «Otros gastos
+    VuelaTour» (OTRO) y, desde el 11-sep-2026, un OTRO con vuelo es gasto de
+    la EMPRESA: no llegaba al avión.
+    - **Tabla canónica** (IDÉNTICA en API `categoria-gasto.util`, panel
+      `categorias-gasto.ts` y app `categoria_gasto.dart` —la app ya la
+      tiene desde 66e8036/+81—; va JUSTO después de COMIDA en el enum del
+      DTO, en el selector del panel y en los chips de la app): código
+      `COMISARIATO`, etiqueta «Comisariato», destino «Gastos directos del
+      vuelo (en el balance del avión)» (el MISMO de COMIDA). En la BD es el
+      22.º valor del enum `categoria_gasto`, AL FINAL (21 ⇒ 22: la 000003
+      del lote 1 ya puso COMISION_VENDEDOR_AVION). `CATEGORIA_COMISARIATO`
+      exporta el literal.
+    - **Reglas** (todas derivadas o por lista existente; ninguna lista de
+      `categoria-gasto.util` cambió): directa del vuelo ⇒
+      `categoriaExigeVuelo` true, candado SOLO del PILOTO (400
+      `GASTO_REQUIERE_VUELO` «Esta categoría es del vuelo: elige el vuelo.
+      «Comisariato» siempre se registra con el vuelo al que pertenece.»,
+      `details` {categoria, categoria_label 'Comisariato', destino}); la
+      oficina la captura SUELTA y la liga después; NO está en
+      `CATEGORIAS_GASTO_VUELO_OBLIGATORIO` (la única con vuelo para todos
+      sigue siendo la comisión), NO es de EMPRESA, NO es «sin avión» (sin
+      avión SÍ es pendiente real: bandeja `?pendientes=1`,
+      `sugerirAsignaciones`, alerta `gastos_sin_avion` y pre-cierre, como
+      COMIDA), NO queda fuera del avión. SÍ en `CATS_SIN_TUA_EMBEBIDO`
+      (ticket de súper/OXXO: jamás se separa TUA/FBO/extensión), en
+      `CATEGORIAS_NO_LIGABLES` de compras; no repartible
+      (`CATEGORIAS_REPARTIBLES` y `tg_gasto_reparto_valida` sin cambio). La
+      IA de tickets SÍ la sugiere (pyservices: «snacks/bebidas para los
+      PASAJEROS»; sin señas ⇒ tripulación); el enriquecimiento offline nunca
+      pisa la categoría (si difiere, «⚠ categoría capturada Comida, la IA
+      sugiere Comisariato»).
+    - **Libros (sin campos nuevos; con 0 gastos COMISARIATO todo payload es
+      byte-idéntico)**: Balance por avión, fila del vuelo: `CAT_OTROS` =
+      {FBO, COMISARIATO} ⇒ `otros_mxn` += el monto ENTERO en MXN con la
+      cadena de siempre (`tc_gasto ?? z ?? tcPromedio`; USD sin T.C. ⇒
+      `usd_sin_tc` como cualquier directa) y una línea en `otros_detalle`
+      («Comisariato · <proveedor/primera línea> — $X[ (efectivo)]»); nunca
+      OPERACIONES ni PILOTO (CATS_SIN_TUA_EMBEBIDO ⇒ `separarPartes` null
+      aunque la IA traiga renglones); su `tc_gasto` MXN pesa en Z como
+      cualquier directa. Con avión y SIN vuelo ⇒ hoja «Gastos Indirectos»
+      del avión (la regla de COMIDA); sin vuelo NI avión ⇒ suelto en «otros
+      gastos» del general (regla existente) y pendiente de avión. Reparto a
+      socios: set `DIRECTO` (clave `COMISARIATO`, etiqueta «Comisariato»):
+      resta de la utilidad y de los socios. Libro Dinero: acreditado al avión
+      del vuelo (rama de siempre). Reporte por vuelo, tablero, ficha del
+      avión y grupos: gasto del vuelo (no está en `categoriaFueraDelAvion`).
+      «Otros movimientos»/TUAS pagadas: no lo ven.
+    - **Cinturón 22P02**: `MIGRACION_DE_CATEGORIA` gana `COMISARIATO:
+      '20261013000001'` ⇒ sin la migración el alta/edición responde 400
+      «Comisariato» necesita la migración 20261013000001 en la base de
+      datos; avisa a sistemas (el gasto no se guardó).
+      (`MENSAJE_COMISARIATO_SIN_MIGRACION`); el de la comisión no cambió ni
+      un byte. **Dependencia dura**: el API hace `.eq('categoria',
+      'COMISARIATO')` en el anti-duplicado ANTES del insert y acepta
+      `?categoria=COMISARIATO` ⇒ contra una BD sin el valor, 22P02/500: la
+      migración 000001 va ANTES del push del API (comprobar `pg_enum` justo
+      antes).
+    - **Reclasificación de agosto (000002, datos, con bitácora)**: los 4
+      OTRO de agosto CON vuelo cuyas notas dicen «comisariato» pasan a
+      COMISARIATO: 30ab4bca (#141 N58BT, 441.50, conciliado), 83da7c99
+      (#164 XA-VGV, 176.50), fab45352 (#175 N990GG, 120.00 efectivo) y
+      962ecdf4 (#178 N621TX, 553.00) = **1,291.00 MXN**; línea de traza al
+      final de `notas`, sello de verificación limpio, `updated_by` null ⇒
+      bitácora «Sistema»; NO toca dinero ni ligas (el cargo de 30ab4bca no
+      se entera). Excluidos a propósito: 671d350a (Walmart, 935.50,
+      «refrescos oficina y artículos de limpieza», SIN vuelo ni avión,
+      conciliado y facturado: compra de OFICINA; como COMISARIATO sería un
+      pendiente de avión eterno) y b54126d5 (COMIDA «torta para 2 pilotos»:
+      tripulación). Función `pg_temp` idempotente con guardas (todas o
+      nada). Va DESPUÉS de la 000001 Y con el API 0.0.75 ya desplegado. **Efecto
+      en dinero ya cerrado** (avisar al cliente y regenerar agosto): N58BT
+      +441.50, XA-VGV +176.50, N990GG +120.00 y N621TX +553.00 en la
+      columna OTROS de su vuelo ⇒ baja la ganancia y el reparto de agosto
+      (ya entregado ⇒ la cuenta corriente de los socios puede marcar unos
+      dólares «adelantados»); «otros gastos» del general de agosto baja
+      1,291.00. Un peso, una vez, en el mismo mes.
+    - **Skew / rollback**: panel previo ⇒ pinta «Comisariato» por el
+      fallback capitalizado y no la propone al crear; app ≤ +80 la lee como
+      código con etiqueta capitalizada. pyservices nuevo ANTES del API ⇒ la
+      app +81 aplicaría la sugerencia y un API ≤ 0.0.74 rebota 400 IsEnum
+      (por eso pyservices va DESPUÉS del API). **ROLLBACK del API a ≤
+      0.0.74 PROHIBIDO con gastos COMISARIATO** (la fila los sumaría a
+      OPERACIONES como «categoría futura no mapeada» y el reparto los dejaría
+      EXCLUIDOS); el valor del enum no se retira (inofensivo sin filas).
+    - Specs: `categoria-gasto.util.spec` (22 valores, COMISARIATO justo
+      después de COMIDA, tabla exacta, partición DEL_VUELO, derivados, 22P02
+      de las tres categorías nuevas sin cruce), `desglose-gasto.util.spec`
+      (nada se separa de un COMISARIATO), `aircraft-balance.service.
+      comisariato.spec` (OTROS 750 = FBO 500 + 250 con IA de OXXO, OP 300,
+      PILOTO null, línea en `otros_detalle`, OTRO con vuelo fuera, cascada
+      −250 exacto, con avión sin vuelo ⇒ «Gastos Indirectos» como COMIDA,
+      mismas llaves con y sin comisariato), `profit-sharing.service.
+      empresa.spec` (DIRECTO con su monto exacto, sin TUA embebido; control
+      OTRO ⇒ EXCLUIDO) y `expenses.service.sin-vuelo.spec` (las 10 del
+      vuelo rebotan al PILOTO; oficina sin vuelo; hereda avión; 22P02 ⇒
+      400; reclasificar OTRO→Comisariato con cargo ligado).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7096,6 +7199,33 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **PENDIENTES (lote 2 del 13-oct-2026) — `20261013000001_categoria_comisariato.sql`
+  y `20261013000002_comisariato_reclasificacion.sql`** (invariante 63,
+  Comisariato; NO aplicadas: las aplica el orquestador por el MCP). 000001
+  lleva SOLO `alter type public.categoria_gasto add value if not exists
+  'COMISARIATO'` (AL FINAL: 21 ⇒ 22; sola en su archivo, el valor nuevo no
+  se puede usar en la transacción que lo crea —55P04—). Dry-run de su
+  cabecera por `execute_sql` (UN bloque `do … raise exception
+  'DRYRUN_OK 20261013000001 · A–C4'`: conteo RELATIVO, COMISARIATO al
+  final, idempotente, INSERT+UPDATE REALES de un COMIDA en el #164 después
+  del DDL con bitácora +2, 55P04 al usar el valor antes del commit) ⇒
+  comprobar que no quedó nada ⇒ `apply_migration` (name
+  `20261013000001_categoria_comisariato`, SOLO el cuerpo) ⇒ `pg_enum` (22,
+  último COMISARIATO) ⇒ `get_advisors`. **ANTES del push del API 0.0.75**
+  (`select 1 from pg_enum … enumlabel = 'COMISARIATO'` ⇒ 1 fila). 000002 =
+  datos (función `pg_temp` + `select`), SOLO con la 000001 confirmada Y el
+  API 0.0.75 YA desplegado: dry-run = la sección 1) del archivo TAL CUAL +
+  el bloque `do $dry$` de su cabecera en UNA llamada ⇒ `DRYRUN_OK
+  20261013000002 · A–C5` (4 reclasificados = 1,291.00 MXN, bitácora +4
+  actor Sistema, huella de dinero intacta, 671d350a/b54126d5 intactos,
+  segunda corrida YA_APLICADA, guarda ABORTADA) ⇒ `count(categoria =
+  COMISARIATO)` = 0 ⇒ `apply_migration` (name
+  `20261013000002_comisariato_reclasificacion`) ⇒ 4 ⇒ `get_advisors` ⇒
+  regenerar los libros de AGOSTO (N58BT, XA-VGV, N990GG, N621TX y el
+  general) y avisar al cliente. Ninguna de las dos lleva palabras
+  destructivas (el MCP las acepta). Los tres cuerpos plpgsql (los dos
+  dry-run y la función) se compilaron en prod el 13-oct-2026 dentro de un
+  bloque que termina en `raise exception` (sin ejecutar nada).
 - **ORDEN DE DESPLIEGUE DEL LOTE 0.0.74 (13-oct-2026: decisiones 1–6, D3
   con el ajuste de dos categorías y la revisión adversaria).** Nada tiene
   push todavía (API sobre `e18e0fb0`, pyservices sobre `4d206ab`, panel

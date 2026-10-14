@@ -471,6 +471,38 @@ describe('trasladosEmbebidosDeGasto / tuaEmbebidoDeGasto', () => {
     expect(CATS_SIN_TUA_EMBEBIDO.has('INDIRECTO')).toBe(true);
   });
 
+  it('COMISARIATO (13-oct-2026): nada se separa aunque los renglones IA «parezcan» de aeródromo', () => {
+    // Ticket de súper/OXXO de los pasajeros: jamás factura con TUA/FBO
+    // embebidos — la fila del balance lo lleva ENTERO a la columna OTROS.
+    expect(CATS_SIN_TUA_EMBEBIDO.has('COMISARIATO')).toBe(true);
+    expect(
+      trasladosEmbebidosDeGasto({
+        ...base,
+        categoria: 'COMISARIATO',
+        monto: '80',
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Servicio FBO', monto: 50 },
+            { concepto: 'TUA', monto: 30 },
+          ],
+        },
+      }),
+    ).toEqual({ tua: 0, extension: 0 });
+    // Control: la MISMA lectura como OPERACIONES sí separa el TUA.
+    expect(
+      trasladosEmbebidosDeGasto({
+        ...base,
+        monto: '80',
+        valor_ia_extraido: {
+          conceptos: [
+            { concepto: 'Servicio FBO', monto: 50 },
+            { concepto: 'TUA', monto: 30 },
+          ],
+        },
+      }).tua,
+    ).toBe(30);
+  });
+
   it('parcial del reparto manual o gasto SIN vuelo: nada', () => {
     const g = {
       ...base,

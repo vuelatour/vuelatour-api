@@ -76,6 +76,9 @@ const CATEGORIAS_NO_LIGABLES = [
   // `assertGastoLigable`, en JS (nunca en un query).
   'COMISION_VENDEDOR',
   'COMISION_VENDEDOR_AVION',
+  // COMISARIATO (13-oct-2026, invariante 63): los snacks y bebidas de los
+  // pasajeros no son costo de bodega de una refacción.
+  'COMISARIATO',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 

@@ -32,6 +32,19 @@ export enum CategoriaGasto {
   TUAS = 'TUAS',
   FBO = 'FBO',
   COMIDA = 'COMIDA',
+  /** «Comisariato» (13-oct-2026, pedido del cliente —Jimmy, 12-oct—:
+   *  «agregar en la categoría de gastos: Comisariato; entraría en [la columna
+   *  OTROS de costos directos] en el balance del avión»): snacks, bebidas y
+   *  comisariato para los PASAJEROS. Invariante 63 del CLAUDE.md del API:
+   *  - Gasto DIRECTO del vuelo (destino = el de COMIDA): columna OTROS de la
+   *    fila del vuelo junto al FBO, grupo DIRECTO en el reparto a socios.
+   *  - Exige vuelo SOLO al PILOTO (derivado del destino, como COMIDA); la
+   *    oficina la captura suelta y la liga después.
+   *  - Sin TUA embebido, no repartible, no ligable a compras; la IA de
+   *    tickets SÍ la sugiere (pyservices). La comida de la TRIPULACIÓN
+   *    sigue en COMIDA.
+   *  - La migración 20261013000001 (valor del enum) va ANTES del API. */
+  COMISARIATO = 'COMISARIATO',
   HOTEL = 'HOTEL',
   TAXI = 'TAXI',
   REFACCION = 'REFACCION',

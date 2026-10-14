@@ -2216,9 +2216,11 @@ export class ExpensesService {
     const discrepancias: string[] = [];
 
     // Categoría: la app ya NO preselecciona OTRO (24-ago) — un OTRO que
-    // llega es elección deliberada (p. ej. comisariato de pasajeros). La IA
-    // nunca pisa la categoría: toda diferencia queda como discrepancia
-    // visible para que oficina decida en Verificar.
+    // llega es elección deliberada (desde el 13-oct-2026 el comisariato de
+    // pasajeros tiene categoría propia, COMISARIATO, invariante 63; un OTRO
+    // con vuelo ya solo es gasto de empresa). La IA nunca pisa la
+    // categoría: toda diferencia queda como discrepancia visible para que
+    // oficina decida en Verificar.
     if (ai.categoria_sugerida && ai.categoria_sugerida !== gasto.categoria) {
       discrepancias.push(
         `categoría capturada ${etiquetaCategoriaGasto(gasto.categoria as string)}, la IA sugiere ${etiquetaCategoriaGasto(ai.categoria_sugerida)}`,
@@ -2862,9 +2864,11 @@ export class ExpensesService {
    * Errores de BD del insert/update ligados a la COMISIÓN DEL VENDEDOR
    * (28-sep-2026; las DOS categorías desde el 13-oct-2026, invariante 61):
    * nunca 500 ni el 409 genérico del CHECK.
-   *  - 22P02 del enum sin la migración de SU categoría (20260928000001 o
-   *    20261013000003) ⇒ 400 legible (cinturón: `mensajeCategoriaSinMigracion`
-   *    ya distingue por categoría, con el literal entre comillas dobles).
+   *  - 22P02 del enum sin la migración de SU categoría (20260928000001,
+   *    20261013000003 o —COMISARIATO, invariante 63— 20261013000001) ⇒ 400
+   *    legible (cinturón: `mensajeCategoriaSinMigracion` cubre TODO valor de
+   *    `MIGRACION_DE_CATEGORIA`, con el literal entre comillas dobles). El
+   *    23514 de abajo sigue siendo SOLO de los CHECK de la comisión.
    *  - 23514 de cualquiera de los dos CHECK «exige vuelo» (respaldo de BD de
    *    la regla del API; p. ej. una carrera que desligó el vuelo) ⇒ el mismo
    *    400 `GASTO_REQUIERE_VUELO` del formulario, con la categoría que nombra

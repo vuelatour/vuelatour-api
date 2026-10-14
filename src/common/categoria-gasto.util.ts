@@ -39,6 +39,17 @@
  * del avión?») usa la UNIÓN (`categoriaEsPagoVendedor`,
  * `CATEGORIAS_GASTO_FUERA_DEL_AVION`); QUIÉN paga lo decide SOLO
  * `ladoPagoVendedor`.
+ *
+ * COMISARIATO (13-oct-2026, API 0.0.75, invariante 63 del CLAUDE.md del
+ * API; pedido del cliente: «agregar en la categoría de gastos: Comisariato;
+ * entraría en [la columna OTROS de costos directos] en el balance del
+ * avión»): snacks/bebidas de los PASAJEROS. Entró SOLO por su destino (el
+ * de COMIDA, «Gastos directos del vuelo»): `categoriaExigeVuelo` la
+ * deriva (candado del PILOTO) y NINGUNA lista de aquí cambió — no es de
+ * EMPRESA, no es «sin avión» (sin avión SÍ es pendiente real, como COMIDA),
+ * no es fuera del avión ni exige vuelo a todos los roles. Lo que la hace
+ * columna OTROS y DIRECTO vive en sus lectores (`CAT_OTROS` del balance,
+ * `DIRECTO` del reparto, `CATS_SIN_TUA_EMBEBIDO`, `CATEGORIAS_NO_LIGABLES`).
  */
 import type { CategoriaGasto } from '../modules/expenses/dto/expenses.dto';
 
@@ -50,6 +61,10 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
   TUAS: 'TUAS',
   FBO: 'FBO',
   COMIDA: 'Comida',
+  /** Snacks/bebidas de los PASAJEROS (13-oct-2026, invariante 63): gasto
+   *  directo del vuelo, columna OTROS del balance del avión. La comida de la
+   *  tripulación es COMIDA. */
+  COMISARIATO: 'Comisariato',
   HOTEL: 'Hotel',
   TAXI: 'Taxi / estacionamiento',
   REFACCION: 'Refacción',
@@ -82,6 +97,9 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   TUAS: 'Gastos directos del vuelo (en el balance del avión)',
   FBO: 'Gastos directos del vuelo (en el balance del avión)',
   COMIDA: 'Gastos directos del vuelo (en el balance del avión)',
+  // COMISARIATO (13-oct-2026, invariante 63): el MISMO destino que COMIDA ⇒
+  // `categoriaExigeVuelo` la deriva sola (candado solo del PILOTO).
+  COMISARIATO: 'Gastos directos del vuelo (en el balance del avión)',
   HOTEL: 'Gastos directos del vuelo (en el balance del avión)',
   TAXI: 'Gastos directos del vuelo (en el balance del avión)',
   PILOTO_EXTERNO: 'Gastos directos del vuelo (en el balance del avión)',
@@ -201,6 +219,14 @@ export const CATEGORIA_PAGO_VENDEDOR = 'COMISION_VENDEDOR';
  */
 export const CATEGORIA_PAGO_VENDEDOR_AVION = 'COMISION_VENDEDOR_AVION';
 
+/**
+ * «Comisariato» (13-oct-2026, invariante 63): snacks/bebidas/comisariato de
+ * los PASAJEROS. Gasto DIRECTO del vuelo: columna OTROS de la fila del vuelo
+ * (junto al FBO), grupo DIRECTO en el reparto, exige vuelo solo al PILOTO.
+ * Para los lectores que necesitan el literal (balance, reparto, compras).
+ */
+export const CATEGORIA_COMISARIATO = 'COMISARIATO';
+
 /** Quién paga un pago al vendedor: VuelaTour o el avión del vuelo. */
 export type LadoPagoVendedor = 'VUELATOUR' | 'AVION';
 
@@ -287,6 +313,8 @@ export function categoriaFueraDelAvion(
 export const MIGRACION_DE_CATEGORIA: Readonly<Record<string, string>> = {
   COMISION_VENDEDOR: '20260928000001',
   COMISION_VENDEDOR_AVION: '20261013000003',
+  // COMISARIATO (13-oct-2026, invariante 63): 22.º valor del enum, al final.
+  COMISARIATO: '20261013000001',
 };
 
 /**
@@ -296,6 +324,14 @@ export const MIGRACION_DE_CATEGORIA: Readonly<Record<string, string>> = {
  */
 export const MENSAJE_CATEGORIA_SIN_MIGRACION =
   '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
+
+/**
+ * Texto del 400 cuando la BD todavía no tiene el valor `COMISARIATO`
+ * (migración 20261013000001): lo arma `mensajeCategoriaSinMigracion` con la
+ * misma plantilla; aquí queda escrito para los specs y la paridad.
+ */
+export const MENSAJE_COMISARIATO_SIN_MIGRACION =
+  '«Comisariato» necesita la migración 20261013000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
 
 /**
  * 22P02 «invalid input value for enum categoria_gasto: "COMISION_VENDEDOR_AVION"»
@@ -423,8 +459,9 @@ const DESTINO_DIRECTO_DE_VUELO = 'Gastos directos del vuelo';
  * "quiero registrar un gasto sin vuelo").
  *
  * Regla: es del vuelo si su destino por default son los «Gastos directos del
- * vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO, COMIDA, HOTEL, TAXI,
- * PILOTO_EXTERNO) o si está en la lista de arriba (PERMISO y, desde el
+ * vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO, COMIDA, COMISARIATO —desde el
+ * 13-oct-2026, solo por su destino—, HOTEL, TAXI, PILOTO_EXTERNO) o si está
+ * en la lista de arriba (PERMISO y, desde el
  * 28-sep-2026, COMISION_VENDEDOR —y desde el 13-oct-2026
  * COMISION_VENDEDOR_AVION— que además exigen vuelo a TODOS los roles, ver
  * `categoriaExigeVueloSiempre`). Las de

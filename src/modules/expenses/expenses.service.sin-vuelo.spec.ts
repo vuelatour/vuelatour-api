@@ -15,6 +15,7 @@ import type { CreateGastoDto } from './dto/expenses.dto';
 import type { SupabaseService } from '../supabase/supabase.service';
 import type { NotificationsService } from '../realtime/notifications.service';
 import { Rol } from '../../common/types/auth.types';
+import { MENSAJE_COMISARIATO_SIN_MIGRACION } from '../../common/categoria-gasto.util';
 
 /**
  * GASTO DE PILOTO SIN VUELO (11-sep-2026, backend del pedido de la app).
@@ -142,18 +143,21 @@ describe('ExpensesService.create — gasto de PILOTO sin vuelo', () => {
     expect(llamadas).toHaveLength(0);
   });
 
-  it('las 9 categorías del vuelo rebotan; las de empresa/indirectos/refacción SÍ se guardan sin vuelo', async () => {
+  it('las 10 categorías del vuelo rebotan; las de empresa/indirectos/refacción SÍ se guardan sin vuelo', async () => {
     const delVuelo = [
       CategoriaGasto.ATERRIZAJE,
       CategoriaGasto.OPERACIONES,
       CategoriaGasto.TUAS,
       CategoriaGasto.FBO,
       CategoriaGasto.COMIDA,
+      // COMISARIATO (13-oct-2026, invariante 63): del vuelo por su destino.
+      CategoriaGasto.COMISARIATO,
       CategoriaGasto.HOTEL,
       CategoriaGasto.TAXI,
       CategoriaGasto.PERMISO,
       CategoriaGasto.PILOTO_EXTERNO,
     ];
+    expect(delVuelo).toHaveLength(10);
     for (const categoria of delVuelo) {
       const { service } = armar();
       const r = await rebote(
@@ -894,5 +898,116 @@ describe('ExpensesService — COMISION_VENDEDOR_AVION (13-oct-2026)', () => {
     expect(r2.body.message).toBe(
       '«Comisión del vendedor (avión)» necesita la migración 20261013000003 en la base de datos; avisa a sistemas (el gasto no se guardó).',
     );
+  });
+});
+
+/**
+ * COMISARIATO (13-oct-2026, invariante 63): snacks/bebidas de los PASAJEROS.
+ * Es del vuelo por su destino (el de COMIDA): el PILOTO no la captura sin
+ * vuelo, la OFICINA sí (la liga después). Sin la migración 20261013000001 el
+ * alta responde 400 legible, nunca 500.
+ */
+describe('ExpensesService — COMISARIATO (13-oct-2026)', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(HOY));
+  afterEach(() => jest.useRealTimers());
+
+  const comisariato = (extra: Partial<CreateGastoDto> = {}) =>
+    dto({
+      categoria: CategoriaGasto.COMISARIATO,
+      monto: 176.5,
+      medio_pago: MedioPago.TARJETA_CORP,
+      ...extra,
+    });
+
+  it('PILOTO sin vuelo ⇒ 400 GASTO_REQUIERE_VUELO con «Comisariato», SIN tocar la BD', async () => {
+    const { service, llamadas } = armarConTablas();
+    const r = await rebote(
+      service.create(comisariato(), 'u-piloto', Rol.PILOTO),
+    );
+    expect(r.status).toBe(400);
+    expect(r.body.error).toBe('GASTO_REQUIERE_VUELO');
+    expect(r.body.message).toBe(
+      'Esta categoría es del vuelo: elige el vuelo. «Comisariato» siempre se registra con el vuelo al que pertenece.',
+    );
+    expect(r.body.details).toEqual({
+      categoria: 'COMISARIATO',
+      categoria_label: 'Comisariato',
+      destino: 'Gastos directos del vuelo (en el balance del avión)',
+    });
+    expect(llamadas).toHaveLength(0);
+  });
+
+  it('la OFICINA la captura SIN vuelo (no es de vuelo obligatorio para todos)', async () => {
+    for (const rol of [Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION]) {
+      const { service, insertado } = armarConTablas();
+      await service.create(comisariato(), 'u-oficina', rol, {
+        notificar: false,
+      });
+      expect(insertado()).toMatchObject({ categoria: 'COMISARIATO' });
+      expect(insertado()?.vuelo_id).toBeUndefined();
+    }
+  });
+
+  it('PILOTO con vuelo ⇒ se guarda y HEREDA el avión del vuelo', async () => {
+    const { service, insertado } = armarConTablas();
+    await service.create(
+      comisariato({ vuelo_id: VUELO_A }),
+      'u-piloto',
+      Rol.PILOTO,
+      { notificar: false },
+    );
+    expect(insertado()).toMatchObject({
+      categoria: 'COMISARIATO',
+      vuelo_id: VUELO_A,
+      aeronave_id: AVION_A,
+      monto: 176.5,
+    });
+  });
+
+  it('BD sin la migración 20261013000001 (22P02 del enum) ⇒ 400 legible, nunca 500', async () => {
+    const { service } = armarConTablas({
+      errorInsert: {
+        code: '22P02',
+        message: 'invalid input value for enum categoria_gasto: "COMISARIATO"',
+      },
+    });
+    const r = await rebote(
+      service.create(comisariato({ vuelo_id: VUELO_A }), 'u-admin', Rol.ADMIN, {
+        notificar: false,
+      }),
+    );
+    expect(r.status).toBe(400);
+    expect(r.body.message).toBe(MENSAJE_COMISARIATO_SIN_MIGRACION);
+    expect(r.body.message).toBe(
+      '«Comisariato» necesita la migración 20261013000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
+  });
+
+  it('update: reclasificar un OTRO CON vuelo a COMISARIATO ⇒ OK (camino manual de las capturas viejas)', async () => {
+    const { service, actualizado } = armarConTablas({
+      gastoActual: {
+        id: 'g-otro',
+        categoria: 'OTRO',
+        vuelo_id: VUELO_A,
+        escala_id: null,
+        aeronave_id: AVION_A,
+        monto: 441.5,
+        propina: 0,
+        moneda: 'MXN',
+        medio_pago: 'TARJETA_CORP',
+        notas: 'Bebidas, bolsa hielera y hielo (comisariato)',
+        tarjeta_terminacion: null,
+        usuario_captura_id: 'u-admin',
+        valor_ia_extraido: null,
+      },
+      cargos: 1,
+    });
+    await service.update(
+      'g-otro',
+      { categoria: CategoriaGasto.COMISARIATO },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(actualizado()).toMatchObject({ categoria: 'COMISARIATO' });
   });
 });
