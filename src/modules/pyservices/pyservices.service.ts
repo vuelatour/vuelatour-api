@@ -394,6 +394,13 @@ export interface DineroVueloFilaPayload {
    */
   participacion?: number | null;
   multi_avion?: boolean;
+  /**
+   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
+   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
+   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
+   * llave, el libro sale byte a byte el de antes.
+   */
+  clave_cliente?: string;
 }
 export interface DineroOtroIngresoFilaPayload {
   clave: string;
@@ -417,6 +424,13 @@ export interface DineroOtroIngresoFilaPayload {
    */
   matricula?: string | null;
   avion_color?: string | null;
+  /**
+   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
+   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
+   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
+   * llave, el libro sale byte a byte el de antes.
+   */
+  clave_cliente?: string;
 }
 export interface DineroOtroGastoFilaPayload {
   fecha?: string | null;
@@ -696,7 +710,11 @@ export interface BalanceAvionVueloPayload {
    * consolidado de flota) — pyservices no la pinta.
    */
   orden_ts?: string | null;
-  /** Columna CLAVE del libro: "#<folio> · <cliente>". */
+  /**
+   * Columna CLAVE del libro: "#<folio> · <ID del cliente> · <cliente>"
+   * («#364 · beh05-011026 · Beh Kay »); sin ID (13-oct-2026, invariante 68),
+   * "#<folio> · <cliente>" como siempre (fuente única `claveLibro`).
+   */
   clave: string;
   /**
    * Id del vuelo (28-ago): el consolidado de flota deduplica con él el
@@ -934,6 +952,13 @@ export interface BalanceAvionVueloPayload {
    */
   comision_vendedor_real_mxn?: number;
   comision_vendedor_real_pagos?: number;
+  /**
+   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
+   * SOLO cuando el vuelo tiene ID («beh05-011026»); pyservices no lo pinta
+   * (la CLAVE ya llega armada), solo decide el ancho de la columna A. Sin la
+   * llave, el libro sale byte a byte el de antes.
+   */
+  clave_cliente?: string;
 }
 
 export interface BalanceAvionTotalesPayload {
@@ -1497,6 +1522,13 @@ export interface BalanceOtroMovimientoFilaPayload {
    * vuelo y las sueltas no la traen.
    */
   seccion?: 'AFAC';
+  /**
+   * ID de vuelo por cliente (13-oct-2026, API 0.0.75, invariante 68): viaja
+   * SOLO en filas de un vuelo con ID (la CLAVE ya dice «#364 ·
+   * beh05-011026»; sin ID, «vtbeh364» como siempre); pyservices no lo pinta,
+   * solo decide el ancho de la columna A. Sueltas y AFAC no lo llevan.
+   */
+  clave_cliente?: string;
 }
 
 export interface BalanceHojaOtrosMovimientosPayload {

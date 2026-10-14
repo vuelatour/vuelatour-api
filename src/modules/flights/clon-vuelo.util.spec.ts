@@ -68,6 +68,17 @@ describe('payloadClonVuelo (reassignAircraft)', () => {
     expect(CAMPOS_NO_CLONABLES).toContain('google_calendar_regreso_id');
   });
 
+  it('no arrastra el número de vuelo del cliente (ID por cliente, 13-oct-2026): el clon toma el siguiente por el trigger', () => {
+    expect(CAMPOS_NO_CLONABLES).toContain('consecutivo_cliente');
+    const c = payloadClonVuelo(
+      { ...original, consecutivo_cliente: 2 },
+      { aeronaveId: 'av-nueva', userId: 'u-1', matricula: 'N4142R' },
+    );
+    expect(c).not.toHaveProperty('consecutivo_cliente');
+    // El cliente sí viaja: el número nuevo es del MISMO cliente.
+    expect(c.cliente_id).toBe('cli-1');
+  });
+
   it('no clona la llave de idempotencia del alta (uq_vuelo_client_request reventaría el INSERT)', () => {
     const c = payloadClonVuelo(original, {
       aeronaveId: 'av-nueva',

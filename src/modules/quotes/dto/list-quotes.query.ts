@@ -53,7 +53,10 @@ export class ListQuotesQuery {
   @IsUUID()
   grupo_id?: string;
 
-  @ApiPropertyOptional({ description: 'Búsqueda por folio, origen, destino' })
+  @ApiPropertyOptional({
+    description:
+      'Búsqueda por folio, ID del cliente (diego02 o diego02-211026), origen, destino, cliente o ciudad',
+  })
   @IsOptional()
   @IsString()
   q?: string;

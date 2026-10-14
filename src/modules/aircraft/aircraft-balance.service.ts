@@ -65,6 +65,13 @@ import {
   colTuaIncluida,
   tuaIncluidaDisponible,
 } from '../../common/tua-incluida-disponible.util';
+// ID de vuelo por cliente (13-oct-2026, invariante 68): solo ETIQUETAS de la
+// CLAVE (lector único best-effort + fuente pura del texto); ningún número.
+import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import {
+  claveLibro,
+  claveOtrosMovimientos,
+} from '../../common/clave-cliente.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   cobradoParteAvion,
@@ -1890,6 +1897,7 @@ export class AircraftBalanceService {
       gastosGasRes,
       sociosRes,
       facturaPorVuelo,
+      clavesCliente,
     ] = await Promise.all([
       vueloIds.length
         ? sb
@@ -2008,6 +2016,10 @@ export class AircraftBalanceService {
           );
         },
       ),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): SOLO la
+      // etiqueta de la CLAVE. Best-effort y todo o nada: sin migración o con
+      // un fallo, Map vacío y la CLAVE de siempre (jamás tumba el libro).
+      clavesClienteDeVuelos(sb, vueloIds),
     ]);
     // Un query fallido NO degrada a "sin datos": un balance sin cobros o sin
     // gastos de un mes real es una mentira numérica silenciosa.
@@ -3826,11 +3838,14 @@ export class AircraftBalanceService {
       const cliente = v.cliente_id
         ? (clientePorId.get(v.cliente_id) ?? null)
         : null;
+      const claveCli = clavesCliente.get(v.id) ?? null;
       filasVuelo.push({
-        // CLAVE del libro: folio del sistema + nombre del cliente (el libro
-        // original usaba claves tipo "vt<apellido>"; el nombre real es más
-        // claro para el equipo y el folio amarra la fila al sistema).
-        clave: `#${folio}${cliente ? ` · ${cliente}` : ''}`,
+        // CLAVE del libro: folio del sistema + ID del vuelo por cliente
+        // (13-oct-2026, invariante 68) + nombre del cliente — «#364 ·
+        // beh05-011026 · Beh Kay » (el libro original usaba claves tipo
+        // "vt<apellido>"; el folio amarra la fila al sistema). Sin ID, la
+        // de siempre «#364 · Beh Kay » (fuente única `claveLibro`).
+        clave: claveLibro({ folio, claveCliente: claveCli, cliente }),
         // Id del vuelo (verificación 28-ago): el consolidado de flota
         // deduplica con él el conteo de VUELOS (un multi-avión es una fila
         // por libro). pyservices no lo pinta.
@@ -3978,6 +3993,10 @@ export class AircraftBalanceService {
                 : 0,
             }
           : {}),
+        // ID DE VUELO POR CLIENTE (13-oct-2026, invariante 68, ADITIVO al
+        // final): SOLO con valor — pyservices no lo pinta (la CLAVE ya lo
+        // trae), solo ensancha la columna A. Sin ID la fila es byte-idéntica.
+        ...(claveCli ? { clave_cliente: claveCli } : {}),
       });
     }
 
@@ -5122,6 +5141,9 @@ export class AircraftBalanceService {
         ing.monto == null && egr.monto == null
           ? null
           : round2((ing.monto ?? 0) - (egr.monto ?? 0)),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): viaja SOLO con
+      // valor, igual que en las filas que se colapsan.
+      ...(base.clave_cliente ? { clave_cliente: base.clave_cliente } : {}),
     };
   }
 
@@ -5252,6 +5274,7 @@ export class AircraftBalanceService {
       facturasRes,
       gasRes,
       tuasSinVueloRes,
+      clavesCliente,
     ] = await Promise.all([
       sb.from('aeronave').select('id, matricula, color_calendario'),
       vueloIds.length
@@ -5307,6 +5330,9 @@ export class AircraftBalanceService {
         .gte('fecha_gasto', desde)
         .lte('fecha_gasto', hasta)
         .order('fecha_gasto', { ascending: true }),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): SOLO la
+      // etiqueta de la CLAVE; best-effort, todo o nada (nunca lanza).
+      clavesClienteDeVuelos(sb, vueloIds),
     ]);
     for (const r of [
       avionesRes,
@@ -5390,6 +5416,8 @@ export class AircraftBalanceService {
 
     // Clave del libro manual: vt + primer nombre del cliente + folio (el
     // folio da la traza al vuelo; el libro manual lleva su propio contador).
+    // Desde el 13-oct-2026 (invariante 68) es el LEGADO: con ID de vuelo por
+    // cliente la CLAVE es «#364 · beh05-011026» (`claveOtrosMovimientos`).
     const claveDe = (v: Record<string, unknown>): string => {
       const cli = Array.isArray(v.cliente) ? v.cliente[0] : v.cliente;
       const nombre = ((cli as { nombre?: string } | null)?.nombre ?? '').trim();
@@ -5422,7 +5450,12 @@ export class AircraftBalanceService {
     for (const v of vuelos) {
       const avion = aviones.get(v.aeronave_id as string);
       const tc = tcDe(v);
-      const clave = claveDe(v);
+      const claveCli = clavesCliente.get(v.id as string) ?? null;
+      const clave = claveOtrosMovimientos({
+        folio: String((v.folio as number | string | null) ?? ''),
+        claveCliente: claveCli,
+        legado: claveDe(v),
+      });
       const color = avion?.color ?? null;
       const factura = facturaPorVuelo.get(v.id as string) ?? null;
       // timestamptz → DÍA Cancún (un vuelo vespertino se corría al día UTC).
@@ -5456,6 +5489,9 @@ export class AircraftBalanceService {
         // Estado del vuelo (mismo universo que la maestra): pyservices pinta
         // CANCELADO en rojo. Las filas sueltas (sin vuelo) no lo llevan.
         estado: (v.estado as string | null) ?? null,
+        // ID de vuelo por cliente (13-oct-2026, invariante 68, ADITIVO al
+        // final): SOLO con valor (pyservices ensancha la columna A con él).
+        ...(claveCli ? { clave_cliente: claveCli } : {}),
       };
       const filaVacia = {
         ...base,

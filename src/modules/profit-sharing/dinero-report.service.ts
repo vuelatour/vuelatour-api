@@ -33,6 +33,10 @@ import {
 } from '../../common/tua-incluida-disponible.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
+// ID de vuelo por cliente (13-oct-2026, invariante 68): solo la ETIQUETA de
+// la CLAVE (lector único best-effort + fuente pura); ningún importe.
+import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
+import { claveDinero } from '../../common/clave-cliente.util';
 import {
   ivaComisionVendedorUsd,
   pagoVendedorUsd,
@@ -241,6 +245,7 @@ export class DineroReportService {
       gastosEmpresaYSueltos,
       gastosGasRes,
       ingresosResultado,
+      clavesCliente,
     ] = await Promise.all([
       sb
         .from('aeronave')
@@ -328,6 +333,9 @@ export class DineroReportService {
       // Balance general. Sin la migración 20260924000004 devuelve [] sin
       // consultar nada — el libro sale byte-idéntico al de siempre.
       leerIngresosDeResultado(sb, desde, hasta),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): SOLO la
+      // etiqueta de la CLAVE; best-effort y todo o nada (nunca lanza).
+      clavesClienteDeVuelos(sb, vueloIds),
     ]);
     for (const r of [
       aeronavesRes,
@@ -429,18 +437,33 @@ export class DineroReportService {
         gastosPorVuelo.has(v.id as string),
     );
 
-    // CLAVE del libro: "vt" + primer nombre del cliente en minúsculas
-    // (vtchacon, vtmagaña). Vuelo de SERVICIO (tramo de taller sin pax) →
-    // "vtservicio", como en el libro manual. La regla es la ÚNICA de
-    // `common/vuelo-servicio.util` (la misma del candado de cotización y del
-    // CAFÉ del calendario); `escalasPorVuelo` ya trae solo tramos activos.
+    // CLAVE del libro (fuente única `claveDinero`, 13-oct-2026, invariante
+    // 68): el ID de vuelo por cliente («beh05-011026»); sin ID, el LEGADO
+    // "vt" + primer nombre del cliente en minúsculas (vtchacon, vtmagaña).
+    // Vuelo de SERVICIO (tramo de taller sin pax) → SIEMPRE "vtservicio",
+    // como en el libro manual, aunque tenga ID. La regla de servicio es la
+    // ÚNICA de `common/vuelo-servicio.util` (la misma del candado de
+    // cotización y del CAFÉ del calendario); `escalasPorVuelo` ya trae solo
+    // tramos activos.
     const claveDe = (v: Record<string, unknown>): string => {
       const escalas = escalasPorVuelo.get(v.id as string) ?? [];
-      if (esVueloDeServicio(escalas)) return 'vtservicio';
       const nombre = clientes.get(v.cliente_id as string) ?? '';
       const primera = nombre.trim().split(/\s+/)[0] ?? '';
       const limpia = primera.toLowerCase().replace(/[^a-záéíóúüñ0-9]/gi, '');
-      return limpia ? `vt${limpia.toLowerCase()}` : 'vt';
+      return claveDinero({
+        servicio: esVueloDeServicio(escalas),
+        claveCliente: clavesCliente.get(v.id as string) ?? null,
+        legado: limpia ? `vt${limpia.toLowerCase()}` : 'vt',
+      });
+    };
+    // La llave ADITIVA `clave_cliente` (SOLO con valor) que acompaña a la
+    // CLAVE en las filas del vuelo: pyservices ensancha la columna A con
+    // ella (no la pinta). Sin ID, las filas son byte a byte las de siempre.
+    const extraClaveCliente = (
+      v: Record<string, unknown>,
+    ): { clave_cliente?: string } => {
+      const claveCli = clavesCliente.get(v.id as string);
+      return claveCli ? { clave_cliente: claveCli } : {};
     };
 
     const rutaDe = (vueloId: string): string => {
@@ -731,6 +754,7 @@ export class DineroReportService {
           factura_vuelatour: facturaPorVuelo.get(v.id as string) ?? null,
           participacion: fa.factor,
           multi_avion: part.multi_avion,
+          ...extraClaveCliente(v),
         });
       }
 
@@ -1123,6 +1147,7 @@ export class DineroReportService {
           remanente_mxn:
             ingresoMxn != null ? r2(ingresoMxn - (egresoMxn ?? 0)) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
+          ...extraClaveCliente(v),
         });
       }
       // (El IVA de TUAS/extras ya viaja PLEGADO en cada línea de arriba,
@@ -1151,6 +1176,7 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
+          ...extraClaveCliente(v),
         });
       }
 
@@ -1172,6 +1198,7 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
+          ...extraClaveCliente(v),
         });
       }
 
@@ -1209,6 +1236,7 @@ export class DineroReportService {
           fecha_ingreso: null,
           remanente_mxn: egreso != null ? r2(-egreso) : null,
           factura: facturaPorVuelo.get(v.id as string) ?? null,
+          ...extraClaveCliente(v),
         });
         comisionPagadaMxn += egreso ?? 0;
       }

@@ -16,6 +16,11 @@ import {
   Min,
   ValidateNested,
 } from 'class-validator';
+import {
+  ALIAS_REGEX,
+  MENSAJE_ALIAS_INVALIDO,
+  normalizarAliasEntrada,
+} from '../../../common/clave-cliente.util';
 
 // Normaliza claves SAT a MAYÚSCULAS (RFC/uso CFDI): el SAT las rechaza en
 // minúsculas y el equipo las captura como sea.
@@ -32,7 +37,7 @@ export enum CanalCliente {
 
 export class ListClientesQuery {
   @ApiPropertyOptional({
-    description: 'Búsqueda por nombre, email, teléfono o RFC',
+    description: 'Búsqueda por nombre, alias, email, teléfono o RFC',
   })
   @IsOptional()
   @IsString()
@@ -76,6 +81,26 @@ export class CreateClienteDto {
   @IsString()
   @MaxLength(200)
   nombre!: string;
+
+  /**
+   * ID DE VUELO POR CLIENTE (13-oct-2026, API 0.0.75, invariante 68): alias
+   * con el que se arma el ID de cada vuelo del cliente («diego» ⇒
+   * diego01-131026). Se recorta y pasa a minúsculas; '' ⇒ null. null (o
+   * vacío) = volver al SUGERIDO: el trigger `trg_cliente_alias_default` lo
+   * recalcula del nombre ACTUAL. Ausente = no se toca. Sin la migración
+   * 20261013000006, mandarlo (aunque sea null) ⇒ 503 ID_CLIENTE_NO_DISPONIBLE.
+   */
+  @ApiPropertyOptional({
+    nullable: true,
+    maxLength: 24,
+    description:
+      'Alias para el ID de los vuelos del cliente (diego ⇒ diego01-131026): 1 a 24 letras minúsculas a-z. null o vacío = el sugerido (primera palabra del nombre sin acentos). Requiere la migración del ID por cliente; sin ella, 503 ID_CLIENTE_NO_DISPONIBLE.',
+  })
+  @IsOptional()
+  @Transform(({ value }) => normalizarAliasEntrada(value))
+  @IsString({ message: MENSAJE_ALIAS_INVALIDO })
+  @Matches(ALIAS_REGEX, { message: MENSAJE_ALIAS_INVALIDO })
+  alias?: string | null;
 
   @ApiPropertyOptional({ maxLength: 20 })
   @IsOptional()
@@ -188,11 +213,34 @@ export class CreateClienteDto {
   notas?: string;
 }
 
+// `alias` se hereda con su validación y su @Transform (PartialType): un
+// `null` explícito = volver al alias sugerido (lo recalcula el trigger).
 export class UpdateClienteDto extends PartialType(CreateClienteDto) {
   @ApiPropertyOptional()
   @IsOptional()
   @IsBoolean()
   activo?: boolean;
+}
+
+/**
+ * `GET /v1/clients/alias-en-uso` (13-oct-2026, invariante 68): ¿qué clientes
+ * ya usan este alias? Aviso NO bloqueante del formulario de clientes (el
+ * alias no es único; dos clientes con el mismo alias tendrían IDs de vuelo
+ * iguales).
+ */
+export class AliasEnUsoQuery {
+  @ApiProperty({ example: 'juan' })
+  @Transform(({ value }) => normalizarAliasEntrada(value))
+  @IsString({ message: MENSAJE_ALIAS_INVALIDO })
+  @Matches(ALIAS_REGEX, { message: MENSAJE_ALIAS_INVALIDO })
+  alias!: string;
+
+  @ApiPropertyOptional({
+    description: 'Cliente que se está editando (no cuenta como en uso)',
+  })
+  @IsOptional()
+  @IsUUID()
+  excluir?: string;
 }
 
 /** Tarifa preferencial pactada con el cliente para una aeronave. */

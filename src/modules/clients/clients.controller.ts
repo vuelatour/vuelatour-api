@@ -18,6 +18,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  AliasEnUsoQuery,
   CreateClienteDto,
   ListClientesQuery,
   SetTarifasClienteDto,
@@ -40,6 +41,19 @@ export class ClientsController {
   @ApiOperation({ summary: 'List clients (no accesible a pilotos/mecánicos)' })
   list(@Query() q: ListClientesQuery) {
     return this.clients.list(q);
+  }
+
+  // ID DE VUELO POR CLIENTE (13-oct-2026, invariante 68). Ruta LITERAL:
+  // declarada ANTES de ':id' (si no, ParseUUIDPipe responde 400 a
+  // «alias-en-uso»). Solo quien da de alta o edita clientes.
+  @Get('alias-en-uso')
+  @Roles(Rol.ADMIN, Rol.COORDINADOR)
+  @ApiOperation({
+    summary:
+      '¿Qué clientes ya usan este alias? (aviso no bloqueante del formulario de clientes)',
+  })
+  aliasEnUso(@Query() q: AliasEnUsoQuery) {
+    return this.clients.aliasEnUso(q.alias, q.excluir);
   }
 
   @Post()

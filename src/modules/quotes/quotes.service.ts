@@ -84,6 +84,11 @@ import {
 } from './edicion-con-cobros.util';
 import { nombreDeRelacionUsuario } from '../../common/registrado-por.util';
 import { normalizarTc } from '../../common/tc.util';
+import { parseBusquedaClave } from '../../common/clave-cliente.util';
+import {
+  clavesClienteDeVuelos,
+  vueloIdsPorClaveCliente,
+} from '../../common/clave-cliente-lectura.util';
 import {
   esEcoDeHorasPactadas,
   horasPactadasPersistidas,
@@ -1932,8 +1937,17 @@ export class QuotesService {
 
   /**
    * Condición `.or(...)` de la BÚSQUEDA `q` de la lista de cotizaciones, ya
-   * resuelta: folio exacto, IATA de origen/destino, nombre de cliente y
+   * resuelta: folio exacto, ID del cliente («january02» o «january02-211026»,
+   * 13-oct-2026, invariante 68), IATA de origen/destino, nombre de cliente y
    * ciudad/nombre de aeropuerto. `null` = sin búsqueda.
+   *
+   * ID del cliente: SOLO cuando `q` tiene forma de ID (`parseBusquedaClave`;
+   * la fecha escrita se ignora) se SUMA `id.in.(…)` con los vuelos de ese
+   * alias + número, resueltos en consultas APARTE (`vueloIdsPorClaveCliente`,
+   * detrás de la sonda, nunca lanza). El `.or()` JAMÁS nombra
+   * `consecutivo_cliente`: una sonda que dijera «sí» por error no tumba la
+   * lista con 42703. Cualquier otro `q` hace exactamente las consultas de
+   * siempre.
    *
    * Es ASÍNCRONA (lee `cliente` y `aeropuerto`) y por eso va APARTE de
    * `aplicarFiltrosLista` (24-sep-2026, flechas entre cotizaciones): `vecinos`
@@ -1953,6 +1967,16 @@ export class QuotesService {
     const conds = [`origen_iata.ilike.${term}`, `destino_iata.ilike.${term}`];
     // Folio exacto si es numérico.
     if (/^\d+$/.test(raw)) conds.push(`folio.eq.${raw}`);
+    // Por ID del cliente (13-oct-2026, invariante 68): «january02» ⇒ los
+    // vuelos de los clientes con alias «january» y número 2.
+    const porClave = parseBusquedaClave(raw);
+    if (porClave) {
+      const ids = await vueloIdsPorClaveCliente(
+        this.supabase.service,
+        porClave,
+      );
+      if (ids.length > 0) conds.push(`id.in.(${ids.join(',')})`);
+    }
     // Por nombre de cliente ("¿cuánto le cobré a Punta Pájaros?").
     const { data: clientes } = await this.supabase.service
       .from('cliente')
@@ -2025,12 +2049,15 @@ export class QuotesService {
     // Ruta COMPLETA (origen → escalas → destino) por cotización para el listado.
     const rows = (data ?? []) as Array<Record<string, unknown>>;
     const ids = rows.map((r) => r.id as string);
-    const [rutas, resumenFactura] = await Promise.all([
+    const [rutas, resumenFactura, claves] = await Promise.all([
       this.rutasIatasPorVuelo(ids),
       // «Por facturar» (24-sep-2026): null sin la migración 20260924000003.
       this.facturaSolicitud
         ? this.facturaSolicitud.resumenesDeVuelos(ids)
         : Promise.resolve(null),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): UNA lectura
+      // por página, best-effort (nunca lanza).
+      clavesClienteDeVuelos(this.supabase.service, ids),
     ]);
     const dataConRuta = rows.map((r) => ({
       ...r,
@@ -2043,6 +2070,9 @@ export class QuotesService {
               resumenFactura?.get(r.id as string) ?? null,
           }
         : {}),
+      // ADITIVO (13-oct-2026, invariante 68): «january02-211026» bajo el
+      // folio en el panel; null = sin migración, sin alias o lectura fallida.
+      clave_cliente: claves.get(r.id as string) ?? null,
     }));
     return {
       data: dataConRuta,
@@ -2241,15 +2271,22 @@ export class QuotesService {
    * confirm, cancel, PDF…) siguen con `findById` sin la lectura extra; el
    * panel rehidrata con esta ruta tras guardar (router.refresh). Tabla
    * ausente ⇒ 0/[]; lectura fallida ⇒ contadores `null` y detalle `[]`.
+   *
+   * ID DE VUELO POR CLIENTE (13-oct-2026, invariante 68, ADITIVO):
+   * `clave_cliente` («january02-211026», o null) va aquí y NO en `findById`
+   * (que usan revise/confirm/cancel/PDF/preview y cuya forma no cambia); el
+   * chip copiable de la cabecera del cotizador lo pinta.
    */
   async detalle(id: string) {
-    const [fila, seguimiento] = await Promise.all([
+    const [fila, seguimiento, claves] = await Promise.all([
       this.findById(id),
       this.seguimiento
         ? this.seguimiento.deCotizacion(id)
         : Promise.resolve(null),
+      clavesClienteDeVuelos(this.supabase.service, [id]),
     ]);
-    return seguimiento ? { ...fila, ...seguimiento } : fila;
+    const conClave = { ...fila, clave_cliente: claves.get(id) ?? null };
+    return seguimiento ? { ...conClave, ...seguimiento } : conClave;
   }
 
   async findVersions(vueloId: string) {

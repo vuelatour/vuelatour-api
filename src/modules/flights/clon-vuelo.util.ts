@@ -33,6 +33,11 @@ export const CAMPOS_NO_CLONABLES: readonly string[] = [
   // Llave de idempotencia del ALTA (8-sep-2026, índice único parcial
   // uq_vuelo_client_request): clonarla reventaría el INSERT por duplicado.
   'client_request_id',
+  // ID de vuelo por cliente (13-oct-2026, decisión 6, fijo al crear): el
+  // clon de un cambio de avión es OTRO folio y recibe el siguiente número
+  // del cliente por el trigger vuelo_consecutivo_cliente, que ignoraría el
+  // valor de todos modos; no se arrastra.
+  'consecutivo_cliente',
 ];
 
 export function payloadClonVuelo(

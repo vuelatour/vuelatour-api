@@ -9,6 +9,12 @@ jest.mock('../calendar/calendar-sync.service', () => ({
 jest.mock('../notifications/email.service', () => ({
   EmailService: class {},
 }));
+// ID de vuelo por cliente (13-oct-2026, invariante 68): `detalle` suma
+// `clave_cliente`; aquí el lector responde «sin clave» (sin BD).
+jest.mock('../../common/clave-cliente-lectura.util', () => ({
+  clavesClienteDeVuelos: jest.fn().mockResolvedValue(new Map()),
+  vueloIdsPorClaveCliente: jest.fn().mockResolvedValue([]),
+}));
 
 import { NotFoundException } from '@nestjs/common';
 import { QuotesService } from './quotes.service';
@@ -66,7 +72,11 @@ describe('QuotesService.detalle — seguimiento de la cotización (ADITIVO)', ()
   it('agrega los contadores y el detalle a la fila de siempre (prefijo intacto)', async () => {
     const deCotizacion = jest.fn().mockResolvedValue(bloque);
     const { svc } = armar({ deCotizacion });
-    await expect(svc.detalle(V358)).resolves.toEqual({ ...FILA, ...bloque });
+    await expect(svc.detalle(V358)).resolves.toEqual({
+      ...FILA,
+      clave_cliente: null,
+      ...bloque,
+    });
     expect(deCotizacion).toHaveBeenCalledWith(V358);
   });
 
@@ -77,12 +87,19 @@ describe('QuotesService.detalle — seguimiento de la cotización (ADITIVO)', ()
       seguimiento_pendientes_detalle: [],
     };
     const { svc } = armar({ deCotizacion: jest.fn().mockResolvedValue(vacio) });
-    await expect(svc.detalle(V358)).resolves.toEqual({ ...FILA, ...vacio });
+    await expect(svc.detalle(V358)).resolves.toEqual({
+      ...FILA,
+      clave_cliente: null,
+      ...vacio,
+    });
   });
 
-  it('sin el service (specs / arranque parcial): exactamente findById', async () => {
+  it('sin el service (specs / arranque parcial): findById + clave_cliente', async () => {
     const { svc } = armar(undefined);
-    await expect(svc.detalle(V358)).resolves.toEqual(FILA);
+    await expect(svc.detalle(V358)).resolves.toEqual({
+      ...FILA,
+      clave_cliente: null,
+    });
   });
 
   it('404 de la cotización se propaga (no se inventa una respuesta)', async () => {

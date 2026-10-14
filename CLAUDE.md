@@ -6984,6 +6984,163 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `ingreso_aeronave_chk`, cambio de avión de un conciliado con su
       bitácora, dry-run sobre la aplicada ⇒ `DRYRUN_FALLA A`.
 
+68. **ID DE VUELO POR CLIENTE JUNTO AL FOLIO (13-oct-2026, API 0.0.75,
+    migración `20261013000006_vuelo_id_cliente`; decisión 6 del lote del
+    13-oct-2026).** Cada vuelo muestra, JUNTO a su folio (nunca en su
+    lugar), un ID por cliente «january02-211026».
+    - **Forma**: alias del cliente + número de vuelo de ESE cliente con 2
+      dígitos mínimo (100 ⇒ «diego100») + '-' + DDMMAA del DÍA CANCÚN de
+      `fecha_vuelo` (03:30Z del 14 ⇒ «…-131026»); sin fecha, sin sufijo.
+      Prod: #364 «beh05-011026», #376 «january02-211026», #166 (sin fecha)
+      «francisco10», #115 cancelado «riviera02-050826» y su clon #117
+      «riviera03-050826».
+    - **BD, alias**: `cliente.alias` text NOT NULL, CHECK `cliente_alias_chk`
+      `^[a-z]{1,24}$`, **NO único** (9 grupos repetidos en prod: juan ×4,
+      victor ×3…; el panel avisa). Default por `trg_cliente_alias_default`
+      (BEFORE INSERT OR UPDATE OF alias) = `public.cliente_alias_default(nombre)`:
+      primera palabra, sin acentos (translate de 50 caracteres, espejo
+      EXACTO de `aliasSugerido` del panel), minúsculas, solo a-z, máx. 24;
+      vacío ⇒ 'cliente'. null o '' ⇒ se recalcula del nombre ACTUAL;
+      cualquier otro valor ⇒ `lower(btrim(valor))`. **Renombrar NO toca el
+      alias.**
+    - **BD, contador y número**: `cliente_consecutivo_vuelo (cliente_id PK →
+      cliente, ultimo ≥ 0, updated_at)` con RLS SIN políticas (invariante
+      51; solo lo usa el trigger, el API nunca lo lee ni lo escribe).
+      `vuelo.consecutivo_cliente` integer NOT NULL ≥ 1, UNIQUE
+      `uq_vuelo_cliente_consecutivo (cliente_id, consecutivo_cliente)`; lo
+      asigna SOLO `vuelo_consecutivo_cliente` (BEFORE INSERT OR UPDATE OF
+      cliente_id, consecutivo_cliente; SECURITY DEFINER, patrón
+      `calendar_sync_encolar`, para que un escritor que no sea service_role
+      no falle por la RLS sin políticas; `search_path ''`). Alta ⇒ siguiente
+      del contador AUNQUE el payload traiga otro valor (el clon de
+      `reassignAircraft` toma número NUEVO; además `consecutivo_cliente`
+      está en `CAMPOS_NO_CLONABLES`). Cambio de `cliente_id` ⇒ siguiente
+      del cliente nuevo (el contador anterior no baja). Editarlo ⇒ 23514
+      `CONSECUTIVO_CLIENTE_INMUTABLE: el número del vuelo #<folio> dentro de
+      su cliente se asigna al crear y no se edita`. **Nunca se reutiliza**:
+      borrar o compensar un alta deja hueco; un alta RECHAZADA no gasta
+      número (su +1 se revierte con ella). Cotizaciones, reservas,
+      cancelados, cada avión de un grupo y el clon de un cambio de avión
+      CONSUMEN número (el Libro Dinero mostrará huecos: es la decisión).
+      Histórico por `(fecha_vuelo asc nulls last, folio)` (75 vuelos de 13
+      clientes quedan en orden distinto al del folio); desde la migración,
+      por orden de captura. **NO renombrar el trigger a «trg_…»**: corre
+      DESPUÉS de `trg_vuelo_set_updated_at` (los BEFORE van por orden
+      alfabético) a propósito, para que el llenado conserve
+      `vuelo.updated_at` (cero 409 CONFLICTO_VERSION falsos en la app).
+      **La FK del contador no tiene cláusula de borrado** (el MCP filtra la
+      palabra): fusionar o borrar físicamente un cliente con contador exige
+      mover o borrar ANTES su fila del contador (SQL Editor, con
+      confirmación del usuario).
+    - **Fuentes únicas**: `common/clave-cliente.util.ts` (PURA: `ALIAS_REGEX`
+      y `MENSAJE_ALIAS_INVALIDO` —mismos literales que el CHECK y que
+      `src/lib/admin/clave-cliente.ts` del panel, cuyo vitest los compara—,
+      `normalizarAliasEntrada`, `ddmmaaCancun`, `claveCliente`,
+      `parseBusquedaClave`, `claveLibro`, `claveOtrosMovimientos`,
+      `claveDinero`); `common/clave-cliente-lectura.util.ts` (el ÚNICO que
+      lee `consecutivo_cliente` y `cliente.alias` para armar o buscar IDs:
+      `clavesClienteDeVuelos` en lotes de 150 en paralelo y
+      `vueloIdsPorClaveCliente`; best-effort, TODO O NADA por llamada,
+      NUNCA lanza —un fallo es `warn` y vacío—); `common/id-cliente-disponible.util.ts`
+      (sonda `columnaOpcional` de `vuelo.consecutivo_cliente`,
+      `MIGRACION_ID_CLIENTE`, 503 `ID_CLIENTE_NO_DISPONIBLE`). **REGLA DURA
+      de la sonda**: todo select, insert, update, filtro o embed que nombre
+      `consecutivo_cliente`, `cliente.alias` o `cliente_consecutivo_vuelo` va
+      detrás de `await idClienteDisponible(sb)` (el «sí» se memoriza para
+      siempre: tras la reversa hay que REINICIAR el API). `VUELO_COLS` de
+      flights y quotes NO lleva las columnas (se usan en escrituras y en
+      `insert().select()`); el `.or()` de la búsqueda JAMÁS las nombra.
+    - **Se calcula al LEER y no se guarda**: cambiar el alias o reprogramar
+      el vuelo re-etiqueta TODOS sus vuelos (un Excel ya enviado conserva la
+      etiqueta vieja). El FOLIO sigue siendo la llave del dinero (cobros,
+      gastos, facturas, conciliación, bitácoras, flechas, reparto, PDFs):
+      el ID es una etiqueta. Panel, pyservices y app NUNCA lo recalculan.
+    - **Superficies (todo ADITIVO; sin la migración responde como el
+      0.0.74)**: `GET /v1/flights` (cada fila, AL FINAL tras `servicio`,
+      SIEMPRE presente; también a PILOTO/MECANICO) y `/flights/:id/snapshot`
+      (tras `cliente_razon_social`) ⇒ `clave_cliente: string|null`; `GET
+      /v1/quotes` (filas, al final) y `GET /v1/quotes/:id` (se arma en
+      `detalle()`, `findById` no cambia) ⇒ `clave_cliente`. `?q=` de
+      cotizaciones y de `/vecinos`: si `q.trim()` cumple
+      `/^([a-z]{1,24})([0-9]{1,4})(-[0-9]{6})?$/i` con número ≥ 1, se SUMA
+      `id.in.(ids)` (clientes con ese alias ≤ 50 ⇒ sus vuelos con ese número
+      ≤ 50, en consultas aparte; la fecha escrita se IGNORA: un vuelo
+      reprogramado se encuentra con su ID viejo); cualquier otro `q` hace
+      las consultas de siempre. `/v1/clients`: `alias_disponible: boolean`
+      al FINAL de la lista (true solo con la migración); con la migración
+      cada fila (lista, `:id`, POST, PATCH) += `alias` y
+      `alias_compartido_con` (nombres recortados de OTROS clientes con el
+      mismo alias —activos e inactivos, todo el catálogo—, orden es-MX,
+      máx. 5; [] si nadie; **null si no se pudo leer: jamás un [] falso**) y
+      `q` busca también en el alias. Body de POST/PATCH: `alias?: string |
+      null` (trim + minúsculas, '' ⇒ null; null = volver al sugerido; 400
+      class-validator con `MENSAJE_ALIAS_INVALIDO` «Alias inválido: usa de 1
+      a 24 letras minúsculas, sin acentos, espacios, números ni signos (ej.
+      diego).»; 23514 de `cliente_alias_chk` ⇒ 400 `ALIAS_INVALIDO`; alias
+      definido —aunque sea null— sin la migración ⇒ 503
+      `ID_CLIENTE_NO_DISPONIBLE` ANTES de escribir; OJO: con target ES2022
+      la clase DTO define TODAS sus llaves en undefined, así que el servicio
+      decide por VALOR, nunca por presencia). Ruta NUEVA `GET
+      /v1/clients/alias-en-uso?alias=&excluir=` (ADMIN y COORDINADOR,
+      declarada ANTES de `:id`) ⇒ `{alias, clientes: [{id, nombre,
+      activo}]}` por nombre, sin el excluido; 400 alias inválido o excluir
+      no-uuid; 503 sin la migración. **Libros** (solo etiquetas; ningún
+      importe, T.C., partición ni total cambia): maestra y cobranza
+      `claveLibro` «#364 · beh05-011026 · Beh Kay » (libro individual,
+      `aviones[]` del general, EXTERNOS y, por el spread, el consolidado
+      FLOTA; la nota de la fila «AFAC · matrícula» cita esa CLAVE); «otros
+      movimientos» `claveOtrosMovimientos` «#364 · beh05-011026» (sin ID el
+      legado «vtbeh364»; también tras `colapsarFilasDeVuelo`); Libro Dinero
+      `claveDinero` «beh05-011026» (+ « (50 % N4142R)» en multi-avión; un
+      vuelo de SERVICIO siempre «vtservicio»; sin ID «vtbeh») en dinero-vlos
+      y en las CUATRO filas «Otros ingresos» del vuelo (ING-n sin cambio).
+      `clave_cliente` viaja a pyservices SOLO con valor (última llave de la
+      fila del libro y de la de Dinero; en «otros movimientos», en la base
+      de la fila): pyservices no la pinta, solo ensancha la columna A por
+      contenido con tope (48 balances / 40 Dinero). **Sin ID, cada libro
+      sale byte a byte como el 0.0.74** (lector vacío ⇒ ninguna llave).
+      Costo: a lo más UNA lectura de claves por cada 150 vuelos de cada
+      libro/lista, en paralelo; `alias_compartido_con` una consulta por
+      llamada a `/v1/clients`.
+    - **Lo que NO cambia**: `findById` de vuelos y cotizaciones, POST
+      reserva/externo/clon, PATCH de vuelos, `QuoteVecino`, PDFs, reparto,
+      pre-cierre, conciliación, facturas, Google Calendar (ninguna columna
+      nueva está en `trg_vuelo_calendar_sync` ni en
+      `trg_cliente_calendar_fanout`) y la app (lee por llave y sigue
+      mostrando «#376»; el delta `updated_since` no se entera de un cambio
+      de alias porque no mueve `vuelo.updated_at`).
+    - **Deploy**: migración (cualquier momento: el API la sondea; con el
+      0.0.74 los triggers numeran y ponen el alias en silencio) →
+      pyservices (antes que el API, para no ver la CLAVE cortada en la
+      columna A de 16) → API 0.0.75 → panel. Si el API sale antes que la
+      migración no hay ningún 500: `clave_cliente` null,
+      `alias_disponible: false` y todo aparece solo ≤ 10 min después de
+      aplicarla. Flutter: sin cambio.
+    - Specs: `clave-cliente.util.spec` (regex, mensaje, normalizar, día
+      Cancún, IDs de prod, búsqueda, plantilla de siempre con ID null,
+      'vtservicio'), `id-cliente-disponible.util.spec` (sonda, 42703 y
+      PGRST204, 503 exacto), `clave-cliente-lectura.util.spec` (sin ids = 0
+      consultas, sonda 42703, lotes 150+1, embed objeto/arreglo, todo o
+      nada, sin `.from`, búsqueda), `clients.service.spec` (con y sin
+      migración, `alias_compartido_con` es-MX/máx. 5/null si falla, 503 sin
+      escribir, 23514), `clients.controller.alias.spec` (roles, orden de
+      rutas, DTO y HTTP con el ValidationPipe de main.ts),
+      `flights.service.clave-cliente.spec` (list una lectura por página,
+      PILOTO con redacción, snapshot, `findById` sin lector),
+      `clon-vuelo.util.spec` (`consecutivo_cliente` no clonable),
+      `quotes.service.clave-cliente.spec` (lista/detalle, búsqueda por ID,
+      sin migración, cero consultas nuevas sin forma de ID, paridad con
+      `/vecinos`), `quotes.service.seguimiento.spec` (ajustado:
+      `clave_cliente: null`), `aircraft-balance.service.clave-cliente.spec`
+      (maestra, general, FLOTA, multi-avión, otros movimientos colapsada,
+      AFAC, sin ID sin llaves e importes idénticos) y
+      `dinero-report.service.clave-cliente.spec` (ID, sufijo multi-avión,
+      'vtservicio', otros ingresos, golden sin ID, totales idénticos). La
+      migración se ensayó en PGlite (13 y 14-oct-2026) con el esquema y los
+      triggers REALES de prod: `DRYRUN_OK C1–C12` sin residuos, idempotente,
+      `DRYRUN_FALLA A` sobre la aplicada, §4 aborta con un contador
+      atrasado, `updated_at` y la cola de Google intactos.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7715,6 +7872,84 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000006_vuelo_id_cliente.sql`**
+  (invariante 68, ID de vuelo por cliente; NO aplicada: la aplica el
+  orquestador por el MCP; UNA sola migración atómica, independiente de las
+  demás del lote). `cliente.alias` + `cliente_alias_default` +
+  `trg_cliente_alias_default`, contador `cliente_consecutivo_vuelo` (RLS sin
+  políticas), `vuelo.consecutivo_cliente` + `uq_vuelo_cliente_consecutivo` +
+  `vuelo_consecutivo_cliente` (SECURITY DEFINER), llenado histórico por
+  `(fecha_vuelo asc nulls last, folio)` y verificación §4 que aborta todo.
+  El archivo COMPLETO no lleva drop/delete/revoke/disable/truncate (ni en
+  comentarios): va por `apply_migration` ENTERO. Procedimiento (proyecto
+  `bjesduasnzbzywofukbf`; verificar el project_ref, hay DOS): (1) lecturas
+  previas `select (select last_value from public.vuelo_folio_seq) seq,
+  (select count(*) from public.calendar_sync_cola) cola, (select
+  max(updated_at) from public.vuelo) vuelo_max, (select count(*) from
+  public.vuelo) vuelos;` (2) dry-run por `execute_sql` con poco tráfico
+  (toma ACCESS EXCLUSIVE sobre vuelo y cliente ~1 s): el bloque `do $dry$`
+  de la cabecera sin el prefijo «-- » y con §1, §2 y §3 pegados TAL CUAL en
+  las DOS marcas (B y C12) —si se arma con `String.replace` de JS, usar la
+  forma de FUNCIÓN: el cuerpo trae `$'` dentro de '^[a-z]{1,24}$'—; escrituras
+  REALES, DDL antes de las filas de prueba, vuelos de prueba con folio
+  NEGATIVO (nextval no se revierte) ⇒ se espera `DRYRUN_OK · clientes 102 ·
+  alias distintos 90 · grupos repetidos 9 · vuelos 387+ · clientes con
+  vuelos 90+ · C1–C12`; CUALQUIER `DRYRUN_FALLA` u otro error ⇒ NO aplicar
+  (si C1 reporta otro orden de los BEFORE de vuelo, revisar que ningún
+  BEFORE que toque `updated_at` quede DESPUÉS de `vuelo_consecutivo_cliente`;
+  si C5 dice otros números para #364/#375/#376, alguien capturó un vuelo
+  anterior de esos clientes: revisar antes de seguir); (3) residuo cero en
+  consultas aparte (las dos columnas no existen, `to_regclass` /
+  `to_regprocedure` NULL, 0 clientes y 0 vuelos con la marca
+  `DRYRUN-ID-CLIENTE`, mismo `last_value`; el id bigserial de
+  `calendar_sync_cola` sí avanza, inocuo); (4) `apply_migration` (name
+  `20261013000006_vuelo_id_cliente`, el archivo EXACTO; si el MCP
+  declinara: SQL Editor envuelto en `begin … commit` + `insert into
+  supabase_migrations.schema_migrations (version, name, statements) values
+  ('20261013000006', '20261013000006_vuelo_id_cliente', array['-- aplicada
+  desde el SQL Editor; contenido en supabase/migrations'])`); (5)
+  `get_advisors` security y performance: esperado SOLO el INFO
+  `rls_enabled_no_policy` de `cliente_consecutivo_vuelo` (estado deseado,
+  invariante 51), ningún `function_search_path_mutable` (las 3 funciones
+  fijan `search_path ''`), a lo más un INFO de índice sin uso de
+  `uq_vuelo_cliente_consecutivo`; (6) post-checks: `select count(*) from
+  public.vuelo where consecutivo_cliente is null` ⇒ 0; `select count(*)
+  from public.cliente_consecutivo_vuelo` ⇒ clientes con vuelos (90 el
+  13-oct); `select folio, consecutivo_cliente from public.vuelo where folio
+  in (115,117,166,261,267,364,375,376,383,448) order by folio` ⇒ 115=2,
+  117=3, 166=10, 261=2, 267=3, 364=5, 375=1, 376=2, 383=4, 448=42; `max(updated_at)`
+  de vuelo igual al previo (salvo actividad real); grupos de alias
+  repetidos (`select alias, count(*), string_agg(nombre, ' | ' order by
+  nombre) from public.cliente group by 1 having count(*) > 1 order by 2
+  desc, 1` ⇒ angel, eduardo, erick, fernando, francisco, juan ×4,
+  mauricio, tatiana, victor ×3) y genéricos (`… where alias in
+  ('cliente','fly','grupo','jet','lic','servicio','this','vuelos')`): las
+  DOS listas se entregan a la oficina. PGRST204/42703 al pedir las
+  columnas ⇒ `notify pgrst, 'reload schema';`. Ensayada en PGlite (13 y
+  14-oct-2026, esquema y textos REALES de `tg_set_updated_at`,
+  `calendar_sync_encolar`, `calendar_sync_fanout_cliente` y
+  `trg_vuelo_recompute_fecha_fin`): `DRYRUN_OK C1–C12` sin residuos,
+  aplicada dos veces idempotente, `DRYRUN_FALLA A` sobre la aplicada, §4
+  aborta con un contador atrasado, `vuelo.updated_at` y la cola de Google
+  intactos, alta = siguiente número, clon con número en el payload =
+  número NUEVO, editar = 23514 con el mensaje exacto, alta sin cliente =
+  23502. Marcarla «APLICADA» con la fecha al aplicarla. **REVERSA (SOLO
+  aquí, NUNCA en el .sql; SOLO por el SQL Editor y con confirmación del
+  usuario: es una baja física)** — antes, anotar los alias editados por la
+  oficina (se pierden): `select id, nombre, alias from public.cliente where
+  alias is distinct from public.cliente_alias_default(nombre);` y luego:
+  `begin; drop trigger if exists vuelo_consecutivo_cliente on public.vuelo;
+  drop function if exists public.tg_vuelo_consecutivo_cliente(); drop
+  index if exists public.uq_vuelo_cliente_consecutivo; alter table
+  public.vuelo drop column if exists consecutivo_cliente; drop table if
+  exists public.cliente_consecutivo_vuelo; drop trigger if exists
+  trg_cliente_alias_default on public.cliente; drop function if exists
+  public.tg_cliente_alias_default(); alter table public.cliente drop column
+  if exists alias; drop function if exists public.cliente_alias_default(text);
+  delete from supabase_migrations.schema_migrations where name =
+  '20261013000006_vuelo_id_cliente'; commit;` ⇒ **REINICIAR el API en
+  Railway** (la sonda memoriza el «sí»: `/v1/clients` y las listas
+  responderían 42703). Panel y pyservices no se revierten: degradan solos.
 - **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000005_ingreso_aeronave_resultado.sql`**
   (invariante 67, ingreso asignado a un avión; NO aplicada: la aplica el
   orquestador por el MCP). SOLO el CHECK `ingreso_aeronave_chk`

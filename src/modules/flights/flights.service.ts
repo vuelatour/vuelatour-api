@@ -225,6 +225,7 @@ import {
   type InfoUsuarios,
   type ResumenEscalas,
 } from '../../common/busqueda-vuelo.util';
+import { clavesClienteDeVuelos } from '../../common/clave-cliente-lectura.util';
 
 const VUELO_COLS =
   'id, folio, cliente_id, aeronave_id, piloto_id, copiloto_id, apoyo_id, ruta_id, tipo, estado, es_externo, operador_externo, costo_externo_usd, costo_externo_monto, costo_externo_moneda, costo_externo_tc, avion_externo_modelo, avion_externo_matricula, cotizacion_version, origen_iata, destino_iata, pasajeros, pasajeros_nombres, monto_total_usd, monto_total_mxn, tc_usd_mxn, metodo_cobro, cotizacion_abierta, itinerario_operativo, combinado_con_id, combinado:vuelo!combinado_con_id(folio), fecha_vuelo, fecha_traslado_final, fecha_fin, fecha_confirmacion, motivo_cancelacion, estado_permiso, foto_plan_vuelo_url, facturado, cobrado, notas, notas_internas, client_request_id, google_calendar_id, created_at, updated_at, grupo_id, grupo_posicion, grupo_pax, grupo:vuelo_grupo!grupo_id(id, folio, nombre, pasajeros_total)';
@@ -2397,11 +2398,14 @@ export class FlightsService {
     const idsVuelos = rows.map(
       (r) => (r as Record<string, unknown>).id as string,
     );
-    const [resumenEscalas, apoyosFilas] = await Promise.all([
+    const [resumenEscalas, apoyosFilas, clavesCliente] = await Promise.all([
       this.resumenEscalasPorVuelo(idsVuelos),
       // Apoyos (29-ago, aditivo): las tarjetas pintan la lista completa de
       // nivel vuelo, no solo el espejo apoyo_id.
       this.apoyosFilasPorVuelo(idsVuelos),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): UNA lectura
+      // por página (lotes de 150), best-effort — nunca lanza.
+      clavesClienteDeVuelos(this.supabase.service, idsVuelos),
     ]);
     const idsUsuarios = new Set<string>();
     for (const filas of apoyosFilas.values()) {
@@ -2480,6 +2484,10 @@ export class FlightsService {
           // `esVueloDeServicio`). La app pinta con él el CAFÉ del calendario
           // del piloto (Mis vuelos), el mismo que `GET /v1/calendar`.
           servicio: resumen?.servicio ?? false,
+          // ID de vuelo por cliente (13-oct-2026, invariante 68): lo arma el
+          // API; null = sin migración, sin alias o lectura fallida. Llega a
+          // todos los roles (no es dato sensible).
+          clave_cliente: clavesCliente.get(vid) ?? null,
         },
         current,
       );
@@ -2955,6 +2963,7 @@ export class FlightsService {
       facturaClienteBloque,
       facturaServicioBloque,
       seguimientoContadores,
+      clavesCliente,
     ] = await Promise.all([
       this.listEscalas(id),
       this.listCobros(id),
@@ -3001,6 +3010,9 @@ export class FlightsService {
       // SEGUIMIENTO DE LA COTIZACIÓN (29-sep-2026, ADITIVO): contadores de
       // notas PENDIENTE; `{}` para la tripulación (llaves omitidas).
       this.seguimientoAditivo(id, current),
+      // ID de vuelo por cliente (13-oct-2026, invariante 68): best-effort,
+      // nunca lanza (findById no lo lee: VUELO_COLS se usa en escrituras).
+      clavesClienteDeVuelos(this.supabase.service, [id]),
     ]);
     const escalasEnriquecidas = await this.attachTramoEstimado(
       await this.enrichEscalasAssignment(escalas),
@@ -3084,6 +3096,10 @@ export class FlightsService {
       aeronave_modelo: aeronave?.modelo ?? null,
       cliente_nombre: clienteResumen?.nombre ?? null,
       cliente_razon_social: clienteResumen?.razon_social_default ?? null,
+      // ID de vuelo por cliente (13-oct-2026, invariante 68, ADITIVO): la
+      // cabecera del panel lo pinta junto a «Vuelo #376»; null = sin
+      // migración, sin alias o lectura fallida.
+      clave_cliente: clavesCliente.get(id) ?? null,
       ...participacion,
       piloto_nombre: pilotoNombre,
       copiloto_nombre: copilotoNombre,
