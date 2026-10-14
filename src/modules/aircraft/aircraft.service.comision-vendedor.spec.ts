@@ -82,10 +82,11 @@ function armar(gastos: Array<Record<string, unknown>>) {
 }
 
 describe('aircraftMetrics().finanzas — COMISION_VENDEDOR (28-sep-2026)', () => {
-  it('la comisión del vendedor (y el OTRO de empresa) NO restan en la ficha del avión', async () => {
+  it('la comisión del vendedor —las DOS categorías— (y el OTRO de empresa) NO restan en la ficha del avión (deuda documentada: la ficha va por fecha_gasto y no ve la columna COMISIONES)', async () => {
     const m = await armar([
       { monto: 300, moneda: 'MXN', categoria: 'OPERACIONES' },
       { monto: 1600, moneda: 'MXN', categoria: 'COMISION_VENDEDOR' },
+      { monto: 1305, moneda: 'MXN', categoria: 'COMISION_VENDEDOR_AVION' },
       { monto: 700, moneda: 'MXN', categoria: 'OTRO' },
     ]).aircraftMetrics(AVION);
     const mxn = (

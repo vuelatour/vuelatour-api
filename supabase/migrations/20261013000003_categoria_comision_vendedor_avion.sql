@@ -1,0 +1,141 @@
+-- 13-oct-2026 · CATEGORÍA DE GASTO «Comisión del vendedor (avión)»
+-- (COMISION_VENDEDOR_AVION). API 0.0.74, invariante 61 del CLAUDE.md del API
+-- (reescrita: «COMISIÓN DEL VENDEDOR SOLO COMO GASTO REAL, EN DOS
+-- CATEGORÍAS»).
+--
+-- PEDIDO DEL CLIENTE (13-oct-2026, 17:10), textual: «aqui en las categorias
+-- necesitamos una opcion que sea Comision del vendedor pero que esa opcion si
+-- se cargue al balance del avión, y dejamos el otro que se va a balance de
+-- vuelatour para tener esas 2 opciones».
+--
+-- QUÉ HACE: agrega el valor `COMISION_VENDEDOR_AVION` al enum
+-- `public.categoria_gasto`, JUSTO DESPUÉS de `COMISION_VENDEDOR` (AFTER). Nada
+-- más: sin filas, sin triggers, sin CHECK (el CHECK va en 20261013000004).
+-- `COMISION_VENDEDOR` conserva su código: solo cambia su etiqueta (en el API,
+-- el panel y la app) a «Comisión del vendedor (VuelaTour)».
+--
+-- REGLAS DE LA CATEGORÍA (las aplica el API 0.0.74; invariante 61):
+--   1. COMISION_VENDEDOR = «Comisión del vendedor (VuelaTour)»: SIEMPRE la
+--      paga VuelaTour en «otros movimientos» del Balance general; nunca es
+--      costo del avión (tampoco dentro de `comisiones_al_avion_desde`).
+--   2. COMISION_VENDEDOR_AVION = «Comisión del vendedor (avión)»: la carga el
+--      avión del vuelo en su columna COMISIONES (ganancia, cascada, socios) y
+--      en el reparto, en el MES DEL VUELO, por participación en multi-avión,
+--      con el vuelo COMPLETADO o CANCELADO con cobros retenidos; fuera de eso
+--      la paga VuelaTour con aviso. Lo cobrado al cliente sigue siendo
+--      ingreso de VuelaTour, una sola vez.
+--   3. Las dos: vuelo obligatorio a TODOS los roles (400 GASTO_REQUIERE_VUELO;
+--      respaldo de BD: el CHECK de 20260928000002 y el de 20261013000004), no
+--      repartibles (`tg_gasto_reparto_valida` sin cambio), sin TUA embebido,
+--      no ligables a compras y la IA no las sugiere. Reclasificar entre las
+--      dos está permitido aunque el gasto esté conciliado.
+--
+-- SOLA EN SU ARCHIVO A PROPÓSITO (patrón 20260928000001): un valor nuevo de
+-- enum no se puede USAR —ni escribir ni leer con el literal: 55P04— en la
+-- transacción que lo crea; el CHECK y su dry-run con escrituras del valor
+-- nuevo van en 20261013000004.
+--
+-- DEPENDENCIA DEL API 0.0.74: el API acepta el valor (IsEnum). Sin esta
+-- migración, el alta o la edición con la categoría nueva responde 400
+-- legible («Comisión del vendedor (avión)» necesita la migración
+-- 20261013000003 en la base de datos…) y GET /v1/expenses?categoria=COMISION_VENDEDOR_AVION
+-- daría 500. Ningún filtro PostgREST del API nombra el literal
+-- (`CATEGORIAS_GASTO_SIN_AVION` NO lo lleva). Aun así ⇒ ESTA MIGRACIÓN VA
+-- ANTES DEL PUSH DEL API, comprobando `pg_enum` justo antes.
+--
+-- NUMERACIÓN: 20261013000001/2 están reservadas para Comisariato y el orden
+-- entre los dos lotes es indistinto: con el AFTER, COMISARIATO queda al final
+-- en cualquier orden. Si ESTA se aplica antes, el dry-run de Comisariato debe
+-- contar RELATIVO (21 ⇒ 22), no «20 ⇒ 21».
+--
+-- ROLLBACK: no hay; un valor de enum no se retira sin recrear el tipo, y sin
+-- filas es inofensivo. Con gastos COMISION_VENDEDOR_AVION capturados queda
+-- PROHIBIDO regresar el API a ≤ 0.0.73 (no conoce la categoría: la fila del
+-- vuelo la sumaría a OPERACIONES y el reparto volvería a provisionar);
+-- primero reclasificarlos a «(VuelaTour)» o corregir hacia adelante.
+--
+-- Por MCP se aplica SOLO el CUERPO (apply_migration, name
+-- '20261013000003_categoria_comision_vendedor_avion').
+--
+-- ---------------------------------------------------------------------------
+-- DRY-RUN (ANTES de aplicar). UNA sentencia por MCP `execute_sql`; el `raise
+-- exception` final revierte todo y no lleva palabras destructivas. Cualquier
+-- 'DRYRUN_FALLA …' u otro error = NO aplicar. Si el MCP rechazara el ADD
+-- VALUE dentro del DO, se repite como `begin; …; rollback;` en una sola
+-- llamada (patrón del 28-sep). El DDL va ANTES de cualquier escritura.
+--
+-- do $dry$
+-- declare
+--   v_n0 int; v_n int; v_pos real; v_sig text;
+--   v_vuelo uuid; v_avion uuid; v_usr uuid; v_g uuid; v_b int;
+-- begin
+--   -- A) CONTEXTO (conteo RELATIVO: Comisariato puede estar aplicada o no)
+--   if not exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--                  where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISION_VENDEDOR') then
+--     raise exception 'DRYRUN_FALLA A: falta COMISION_VENDEDOR (20260928000001)';
+--   end if;
+--   if exists (select 1 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--              where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISION_VENDEDOR_AVION') then
+--     raise exception 'DRYRUN_FALLA A: COMISION_VENDEDOR_AVION ya existe (¿migración aplicada?)';
+--   end if;
+--   select count(*) into v_n0 from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   select v.id, v.aeronave_id into v_vuelo, v_avion from public.vuelo v where v.folio = 251;
+--   select u.id into v_usr from public.usuario u where u.rol::text = 'ADMIN' and u.estado::text = 'ACTIVO' order by u.created_at limit 1;
+--   if v_vuelo is null or v_avion is null or v_usr is null then
+--     raise exception 'DRYRUN_FALLA A: sin vuelo #251 con avión o sin ADMIN activo';
+--   end if;
+--   raise notice 'okA · % valores', v_n0;
+--   -- B) CUERPO REAL (pegado TAL CUAL, antes de cualquier escritura)
+--   alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR_AVION' after 'COMISION_VENDEDOR';
+--   -- C1) uno más y JUSTO después de COMISION_VENDEDOR
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C1: % valores tras el ADD (esperado %)', v_n, v_n0 + 1; end if;
+--   select e.enumsortorder into v_pos from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumlabel = 'COMISION_VENDEDOR';
+--   select e.enumlabel into v_sig from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto' and e.enumsortorder > v_pos order by e.enumsortorder limit 1;
+--   if v_sig is distinct from 'COMISION_VENDEDOR_AVION' then raise exception 'DRYRUN_FALLA C1: después de COMISION_VENDEDOR va %', v_sig; end if;
+--   -- C2) re-ejecutar el cuerpo es no-op (IF NOT EXISTS)
+--   alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR_AVION' after 'COMISION_VENDEDOR';
+--   select count(*) into v_n from pg_enum e join pg_type t on t.oid = e.enumtypid join pg_namespace n on n.oid = t.typnamespace
+--    where n.nspname = 'public' and t.typname = 'categoria_gasto';
+--   if v_n <> v_n0 + 1 then raise exception 'DRYRUN_FALLA C2: el cuerpo no es idempotente (% valores)', v_n; end if;
+--   -- C3) ESCRITURA REAL con el tipo ya alterado (los 4 triggers de gasto), con un literal que YA existía
+--   insert into public.gasto (usuario_captura_id, categoria, monto, moneda, fecha_gasto, medio_pago, vuelo_id, aeronave_id, notas, origen, created_by, updated_by)
+--   values (v_usr, 'COMISION_VENDEDOR', 1305.00, 'MXN', date '2026-10-13', 'TRANSFERENCIA', v_vuelo, v_avion, 'DRYRUN 20261013000003', 'OFICINA', v_usr, v_usr)
+--   returning id into v_g;
+--   update public.gasto set monto = 1400.00, updated_by = v_usr where id = v_g;
+--   select count(*) into v_b from public.gasto_bitacora where gasto_id = v_g;
+--   if v_b <> 2 then raise exception 'DRYRUN_FALLA C3: bitácora = % (esperado INSERT + UPDATE)', v_b; end if;
+--   -- C4) el valor nuevo NO se puede usar antes del COMMIT (55P04): por eso el CHECK va en 000004 y el API sale DESPUÉS
+--   begin
+--     update public.gasto set categoria = 'COMISION_VENDEDOR_AVION', updated_by = v_usr where id = v_g;
+--     raise exception 'DRYRUN_FALLA C4: se escribió el valor nuevo antes del commit';
+--   exception when sqlstate '55P04' then
+--     raise notice 'okC4 · 55P04 al escribir antes del commit';
+--   end;
+--   begin
+--     perform 1 from public.gasto where categoria = 'COMISION_VENDEDOR_AVION' limit 1;
+--     raise notice 'avisoC4b · leer con el literal no dio 55P04 (solo informativo)';
+--   exception when sqlstate '55P04' then
+--     raise notice 'okC4b · 55P04 también al leer con el literal antes del commit';
+--   end;
+--   raise exception 'DRYRUN_OK 20261013000003 · A–C4 (% → % valores, COMISION_VENDEDOR_AVION justo después de COMISION_VENDEDOR, idempotente, triggers de gasto intactos, 55P04 antes del commit)', v_n0, v_n0 + 1;
+-- end $dry$;
+--
+-- TRAS EL DRYRUN_OK hay que comprobar que no quedó nada:
+--   select count(*) from pg_enum e join pg_type t on t.oid = e.enumtypid
+--    where t.typname = 'categoria_gasto' and e.enumlabel = 'COMISION_VENDEDOR_AVION';   ⇒ 0
+--   select count(*) from public.gasto where notas = 'DRYRUN 20261013000003';       ⇒ 0
+--
+-- APLICAR el CUERPO con apply_migration y VERIFICAR:
+--   - el valor existe y es el siguiente de COMISION_VENDEDOR por enumsortorder;
+--   - select count(*) from public.gasto where categoria not in
+--     ('INDIRECTO','PERSONAL_DUENO','COMISION_VENDEDOR','COMISION_VENDEDOR_AVION')
+--     responde sin 22P02;
+--   - get_advisors sin hallazgos nuevos.
+-- ---------------------------------------------------------------------------
+
+alter type public.categoria_gasto add value if not exists 'COMISION_VENDEDOR_AVION' after 'COMISION_VENDEDOR';

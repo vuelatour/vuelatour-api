@@ -134,7 +134,7 @@ describe('Reporte por vuelo — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep
     expect(con.gastos_total_usd).toBe(20); // solo los 400 MXN / 20
     expect(con.pago_vendedor_usd).toBe(80);
     const linea = (con.gastos ?? []).find(
-      (g) => g.concepto === 'Comisión del vendedor',
+      (g) => g.concepto === 'Comisión del vendedor (VuelaTour)',
     );
     expect(linea).toBeDefined();
     expect(linea!.detalle).toBe(
@@ -192,6 +192,32 @@ describe('Reporte por vuelo — pago REAL al vendedor (COMISION_VENDEDOR, 28-sep
     const r = await reporte(vuelo({ estado: 'CANCELADO' }), [COMISION]);
     expect(r.notas_horas).toContain(
       'Pago real al vendedor capturado: $80 USD en 1 gasto(s) (vuelo cancelado: este reporte no resta pago al vendedor).',
+    );
+  });
+
+  it('«Comisión del vendedor (avión)» (13-oct-2026, invariante 61): se lista con su nota y queda FUERA del costo (la ganancia del reporte sigue restando el cotizado: deuda heredada)', async () => {
+    const sin = await reporte(vuelo(), [OPERACION]);
+    const conAvion = await reporte(vuelo(), [
+      OPERACION,
+      gasto('COMISION_VENDEDOR_AVION', 1600, { notas: 'Pago comisión Saab' }),
+    ]);
+    for (const k of [
+      'gastos_total_usd',
+      'remanente_usd',
+      'ganancia_final_usd',
+      'pago_vendedor_usd',
+    ] as const) {
+      expect(conAvion[k]).toEqual(sin[k]);
+    }
+    const linea = (conAvion.gastos ?? []).find(
+      (g) => g.concepto === 'Comisión del vendedor (avión)',
+    );
+    expect(linea).toBeDefined();
+    expect(linea!.detalle).toBe(
+      'Pago comisión Saab · pago al vendedor — ya descontado en «pago al vendedor» (no resta aparte)',
+    );
+    expect(conAvion.notas_horas).toContain(
+      'Pago real al vendedor capturado: $80 USD en 1 gasto(s) (la ganancia de este reporte resta el pago cotizado de $80 USD).',
     );
   });
 

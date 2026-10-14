@@ -1,5 +1,8 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
-import { categoriaFueraDelAvion } from '../../common/categoria-gasto.util';
+import {
+  categoriaFueraDelAvion,
+  ladoPagoVendedor,
+} from '../../common/categoria-gasto.util';
 import {
   expandirConReparto,
   fetchRepartos,
@@ -358,6 +361,13 @@ export class DashboardsService {
     let sinTc = 0;
     let gastoSinAvion = 0;
     let gastoEmpresa = 0;
+    // «Comisión del vendedor (avión)» (13-oct-2026, API 0.0.74, invariante
+    // 61): renglón ADITIVO. Es costo del avión, pero por la columna
+    // COMISIONES en el MES DEL VUELO (el reparto: `overview`), no por este
+    // tablero, que va por fecha_gasto: queda DENTRO del total y FUERA de
+    // gastos_avion_usd, del costo por hora, de la utilidad por avión y de
+    // gastos_empresa_usd.
+    let gastoComisionAvion = 0;
     // Un gasto repartido SIN TC debe contar UNA vez en el aviso (por padre,
     // no por parcial) — verificación 26-ago: antes contaba CERO veces y el
     // dinero desaparecía del tablero sin bandera.
@@ -386,8 +396,14 @@ export class DashboardsService {
       // renglón). Sin esto, el tablero pintaba un costo por hora que el
       // balance del mismo avión ya no reconocía. Los PARCIALES de un reparto
       // manual sí son del avión (el reparto gana). COMISION_VENDEDOR
-      // (28-sep-2026, invariante 31): el pago al vendedor es dinero de
-      // VuelaTour ⇒ también al bloque de EMPRESA (`categoriaFueraDelAvion`).
+      // (28-sep-2026, invariante 31; «(VuelaTour)» desde el 13-oct-2026): el
+      // pago al vendedor que paga VuelaTour ⇒ también al bloque de EMPRESA
+      // (`categoriaFueraDelAvion`). La «(avión)» va ANTES a su propio balde
+      // (lado EXACTO: `ladoPagoVendedor`).
+      if (!g.es_reparto_parcial && ladoPagoVendedor(g.categoria) === 'AVION') {
+        gastoComisionAvion += usd;
+        continue;
+      }
       if (!g.es_reparto_parcial && categoriaFueraDelAvion(g.categoria)) {
         gastoEmpresa += usd;
         continue;
@@ -428,13 +444,18 @@ export class DashboardsService {
     return {
       periodo: { desde: q.desde, hasta: q.hasta },
       resumen: {
-        gastos_totales_usd: round2(totalGasto + gastoSinAvion + gastoEmpresa),
+        gastos_totales_usd: round2(
+          totalGasto + gastoSinAvion + gastoEmpresa + gastoComisionAvion,
+        ),
         gastos_avion_usd: round2(totalGasto),
         gastos_sin_avion_usd: round2(gastoSinAvion),
         // Gasto de la EMPRESA VuelaTour: remanentes de repartos manuales +
         // (11-sep-2026) TODA categoría de empresa sin reparto — OTRO,
         // NOMINA, GASOLINA, FIJO, VISITA — aunque traiga avión sellado.
         gastos_empresa_usd: round2(gastoEmpresa),
+        // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): pagos «Comisión
+        // del vendedor (avión)» del periodo por fecha_gasto (ver arriba).
+        gastos_comision_vendedor_avion_usd: round2(gastoComisionAvion),
         horas_voladas: round2(totalHoras),
         costo_hora_promedio_usd:
           totalHoras > 0 ? round2(totalGasto / totalHoras) : null,

@@ -958,12 +958,14 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     (desde el 0.0.66 VuelaTour solo paga lo que el pago real la EXCEDE; ya
     no hay línea de ingreso «a cargo del avión»); lo cobrado al cliente por
     ella sigue siendo ingreso de VuelaTour, UNA vez. El Libro Dinero no
-    cambia. **SUPERSEDIDO el 13-oct-2026 (invariante 61)**: ya no hay
-    PROVISIÓN en ningún libro — el balance y el reparto descuentan el pago
-    REAL (gastos `COMISION_VENDEDOR` del vuelo) solo en los vuelos
-    COMPLETADOS de la regla con comisión cotizada, «otros movimientos» lo
-    trae «a cargo del avión» con egreso $0.00 y el Libro Dinero resta solo
-    el gasto real (sin él, nada).
+    cambia. **SUPERSEDIDO el 13-oct-2026 (invariante 61, dos categorías)**:
+    ya no hay PROVISIÓN en ningún libro — el balance y el reparto descuentan
+    SOLO el pago capturado como «Comisión del vendedor (avión)»
+    (`COMISION_VENDEDOR_AVION`) en vuelos COMPLETADOS o CANCELADOS con cobros
+    retenidos, en cualquier fecha, y «otros movimientos» lo trae «a cargo del
+    avión» con egreso $0.00; la «Comisión del vendedor (VuelaTour)»
+    (`COMISION_VENDEDOR`) la paga siempre VuelaTour; el Libro Dinero resta
+    los pagos de las dos (sin pago, nada).
     En vuelos
     MULTI-AVIÓN (tramos en aviones distintos) la venta del avión y lo que
     deriva de ella se REPARTE con `participacionPorAeronave` +
@@ -973,9 +975,14 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     parte de VuelaTour y los avisos del vuelo los reporta UNA vez
     `avionQueReporta`. Los gastos NO se reparten: van al avión del tramo
     (`avionDelGasto`: escala → gasto → vuelo, y `expenses.service` sella el
-    avión del tramo al capturar). El pago al vendedor es `pagoVendedorUsd`
-    (comisión + su IVA) en todos los lectores. Ningún lector recalcula estas
-    particiones a mano.
+    avión del tramo al capturar). **EXCEPCIÓN documentada (13-oct-2026,
+    invariante 61)**: la «Comisión del vendedor (avión)» es costo de la
+    VENTA, no de un tramo — se reparte entre los aviones por participación
+    (`parteAvion`/`repartirUsd`, como la venta y la comisión bancaria; Σ de
+    los aviones == el pago al centavo) y el avión sellado en el gasto es solo
+    referencia. La comisión COTIZADA que se compara contra el pago es
+    `pagoVendedorUsd` (comisión + su IVA) en todos los lectores. Ningún
+    lector recalcula estas particiones a mano.
     **Balance por avión (Excel, 2-sep-2026)**: la hoja "Gastos Indirectos"
     del libro INDIVIDUAL = `gastos_indirectos` + `otros_gastos` pintados
     JUNTOS por pyservices (fusión de presentación); el contrato del payload
@@ -1020,7 +1027,8 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
     alerta `gastos_sin_avion` y pre-cierre): fuente única
     `CATEGORIAS_GASTO_SIN_AVION` = empresa + INDIRECTO + PERSONAL_DUENO +
     COMISION_VENDEDOR (28-sep-2026, invariante 31) — sin `vuelo_id` en la
-    condición. Antes cada lector traía la lista a mano
+    condición; `COMISION_VENDEDOR_AVION` NO está a propósito (13-oct-2026,
+    invariante 61: arma el `not.in` de PostgREST). Antes cada lector traía la lista a mano
     con un `.or('categoria.neq.OTRO,vuelo_id.not.is.null')` que dejaba
     DENTRO al «OTRO CON vuelo»: pendiente eterno de un dinero que ya no es
     de ningún avión.
@@ -1497,10 +1505,12 @@ aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
     (el tramo lo resuelve). OFICINA y MECÁNICO quedan FUERA del candado a
     propósito (la oficina liga después; el mecánico carga GAS en base). Con
     vuelo, las reglas de siempre no cambian. **Excepción (28-sep-2026,
-    invariante 31): `COMISION_VENDEDOR` exige vuelo para TODOS los roles**
-    (oficina incluida, en el alta Y en la edición: desligar el vuelo o
-    reclasificar a comisión un gasto sin vuelo ⇒ el mismo 400;
-    `categoriaExigeVueloSiempre` / `CATEGORIAS_GASTO_VUELO_OBLIGATORIO`).
+    invariante 31; las DOS categorías desde el 13-oct-2026, invariante 61):
+    `COMISION_VENDEDOR` y `COMISION_VENDEDOR_AVION` exigen vuelo para TODOS
+    los roles** (oficina incluida, en el alta Y en la edición: desligar el
+    vuelo o reclasificar a comisión un gasto sin vuelo ⇒ el mismo 400 con la
+    etiqueta de SU categoría; `categoriaExigeVueloSiempre` /
+    `CATEGORIAS_GASTO_VUELO_OBLIGATORIO`).
 
 17. **Historial de gastos: la bitácora de un gasto MOVIDO vive bajo el vuelo
     DESTINO (14-sep-2026, caso real #260 → #268).** `tg_gasto_bitacora`
@@ -2575,8 +2585,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     en Gastos como "Otros gastos VuelaTour" me lo manda a la hoja de Otros
     gastos como un gasto aparte: queda duplicado.» Hasta el 0.0.38 el pago
     al vendedor SOLO existía como provisión calculada.
-    - **Categoría nueva** `COMISION_VENDEDOR` = «Comisión del vendedor»,
-      destino «Pago al vendedor (otros movimientos VuelaTour; no es costo del
+    - **13-oct-2026 (invariante 61): DOS categorías.** `COMISION_VENDEDOR`
+      pasó a llamarse «Comisión del vendedor (VuelaTour)» (solo la etiqueta;
+      la paga SIEMPRE VuelaTour) y nació `COMISION_VENDEDOR_AVION` =
+      «Comisión del vendedor (avión)», destino «Pago al vendedor (columna
+      COMISIONES del balance del avión; sí es costo del avión)», que carga el
+      avión del vuelo. Las reglas (1)–(6) de abajo valen para las DOS (la
+      (3) para la «(avión)» es «no es costo GENÉRICO del avión: resta SOLO
+      en COMISIONES por `comisionesDelVuelo`»). Lo de abajo describe la
+      historia de la «(VuelaTour)»; la regla vigente del dinero es la
+      invariante 61.
+    - **Categoría nueva** `COMISION_VENDEDOR` = «Comisión del vendedor»
+      (desde el 13-oct-2026 «Comisión del vendedor (VuelaTour)»), destino
+      «Pago al vendedor (otros movimientos VuelaTour; no es costo del
       avión)» (tabla canónica IDÉNTICA en API, panel y app). Reglas: (1)
       **exige vuelo a TODOS los roles** — 400 `GASTO_REQUIERE_VUELO` con el
       mismo `message`/`details` que el del piloto (`errorGastoRequiereVuelo`),
@@ -2682,7 +2703,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       en 0. Con `n > 0`, igual (la nota ya no dice «reemplaza la
       provisión»).
     - **Fuera del avión — cada lector** (`CATEGORIAS_GASTO_FUERA_DEL_AVION` =
-      empresa ∪ {COMISION_VENDEDOR}, `categoriaFueraDelAvion`): Balance por
+      empresa ∪ las DOS del pago al vendedor —`CATEGORIAS_GASTO_PAGO_VENDEDOR`,
+      13-oct-2026—, `categoriaFueraDelAvion`; la «(avión)» entra a un libro
+      SOLO por `comisionesDelVuelo`, nunca por este eje): Balance por
       avión (`CAT_FUERA_DEL_AVION`: fila del vuelo —sin esto caía a
       OPERACIONES como «categoría no mapeada»—, aviso de doble costo del
       externo, pendiente de fechas fuera del periodo, «Gastos Indirectos»;
@@ -2717,8 +2740,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (facturación, conciliación, gasto en cancelado, duplicados); solo cambia
       su membresía en `CATEGORIAS_GASTO_SIN_AVION` (no pide avión).
     - **`GET /flights/:id/gastos-resumen`**: PILOTO y MECÁNICO NO ven los
-      gastos `COMISION_VENDEDOR` (lo pagado al vendedor no es de la
-      tripulación); la oficina sí. Filtro en JS, NUNCA en el query.
+      gastos del pago al vendedor —las DOS categorías desde el 13-oct-2026—
+      (lo pagado al vendedor no es de la tripulación); la oficina sí. Filtro
+      en JS, NUNCA en el query.
     - **DEPENDENCIA DURA DE LA MIGRACIÓN** (crítica verificada en prod): un
       literal de enum que no existe revienta la LECTURA PostgREST (22P02), no
       solo la escritura — `not.in(CATEGORIAS_GASTO_SIN_AVION)` (bandeja de
@@ -2729,8 +2753,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       antes del push; sonda `GET /v1/version` = 0.0.39 y
       `GET /v1/expenses?pendientes=1` = 200). Todo filtro NUEVO por esta
       categoría va en JS. `mensajeCategoriaSinMigracion` (22P02 del enum con
-      COMISION_VENDEDOR ⇒ 400 «…necesita la migración 20260928000001…») es
-      solo un cinturón del insert/update.
+      COMISION_VENDEDOR ⇒ 400 «…necesita la migración 20260928000001…»; con
+      COMISION_VENDEDOR_AVION, «…20261013000003…») es solo un cinturón del
+      insert/update. **13-oct-2026**: `CATEGORIAS_GASTO_SIN_AVION` NO lleva
+      `COMISION_VENDEDOR_AVION` (ningún query de PostgREST nombra el literal
+      nuevo) — consecuencia aceptada: una «(avión)» con `aeronave_id` null
+      (vuelo sin avión de la flota) sale en la bandeja, la alerta y el
+      pre-cierre; la salida es reclasificarla a «(VuelaTour)».
       **ROLLBACK a 0.0.38 PROHIBIDO con comisiones capturadas**: el 0.0.38
       las restaría como OPERACIONES en la fila del vuelo Y seguiría
       provisionando ⇒ doble conteo. Solo tras reclasificarlas o con un fix
@@ -4576,7 +4605,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «… en los vuelos completados de la regla de comisiones lo carga el
       avión en su columna COMISIONES y aquí egresa $0.00)»: las filas «a
       cargo del avión» egresan 0, así que `pagos_vendedor_usd` no cuenta ese
-      pago (ya restó en el avión). Desde el 0.0.74 (invariante 62) la
+      pago (ya restó en el avión). **Ajuste del 13-oct-2026 (dos categorías,
+      invariante 61)**: la señal es «algún avión absorbió un pago «Comisión
+      del vendedor (avión)»» y la `nota` dice «Egresos = pago al vendedor
+      (solo los gastos reales capturados: la «Comisión del vendedor
+      (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga
+      un avión en su columna COMISIONES aquí egresa $0.00), …»; sin ella,
+      «(solo los gastos reales de comisión del vendedor capturados)».
+      `pagos_vendedor_usd` = Σ «(VuelaTour)» + «(avión)» que nadie carga.
+      Desde el 0.0.74 (invariante 62) la
       pestaña trae además una fila «AFAC · matrícula» por avión:
       `ingresos_propios_usd` incluye la provisión AFAC del periodo de cada
       avión y `pagos_vendedor_usd` los permisos AFAC pagados (TODOS los
@@ -4873,7 +4910,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       comisión cotizada > 0) el avión absorbe el pago REAL (Σ gastos
       `COMISION_VENDEDOR` del vuelo, entrada `gastos` del util) y sin gasto,
       nada; `comision_vendedor_prov_mxn` viaja en 0 y nacen
-      `comision_vendedor_real_mxn` / `_real_pagos`.
+      `comision_vendedor_real_mxn` / `_real_pagos`. **AJUSTADO el mismo
+      13-oct-2026 (dos categorías, invariante 61)**: la parte del vendedor
+      es SOLO la «Comisión del vendedor (avión)» (`COMISION_VENDEDOR_AVION`)
+      y su universo ya NO es el de esta invariante: COMPLETADO, o CANCELADO
+      con cobros retenidos, en CUALQUIER fecha —también ANTES de la vigencia
+      (la fila y sus llaves nacen solo si absorbe, con banco 0)— y sin exigir
+      comisión cotizada ni partición consistente. Esta vigencia gobierna SOLO
+      la parte BANCARIA. La «Comisión del vendedor (VuelaTour)» nunca la
+      absorbe el avión.
     - **Balance por avión** (`buildPayload`). R1, en TODA fila de la
       vigencia (EXTERNOS incluido): cada cobro gana `neto_mxn` (=
       `monto_mxn − comision_mxn` de la fila, AL FINAL) y `cobrado_con`
@@ -5743,229 +5788,325 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       factura / HSBC ⇒ Pendiente». En pyservices,
       `tests/test_balance_factura_vuelatour.py`.
 
-61. **COMISIÓN DEL VENDEDOR SOLO COMO GASTO REAL EN TODOS LOS LIBROS
-    (13-oct-2026, API 0.0.74, SIN migración).** Decisión 3 del lote del
-    cliente del 13-oct-2026: la comisión del vendedor resta SOLO como gasto
-    real — en el Libro Dinero, en la columna COMISIONES del balance por avión
-    (y su cascada) y en el reparto a socios. La PROVISIÓN (`pagoVendedorUsd`
-    = comisión cotizada + IVA) desaparece de los tres lectores que aún la
-    usaban (la pestaña «otros movimientos» ya no la pintaba desde la
-    invariante 58).
-    - **Regla única** (fuente única PURA `common/comisiones-avion.util.ts#
-      comisionesDelVuelo`, prohibido reimplementarla): lo que resta es Σ de
-      los gastos `COMISION_VENDEDOR` LIGADOS AL VUELO. Entrada OBLIGATORIA
-      `gastos` (TODOS los gastos del vuelo, sin filtrar por el avión
-      sellado: el avión del gasto es solo referencia —invariante 31—; la
-      categoría se filtra en JS con `pagosVendedorDeVuelo`, NUNCA en el
-      query: 22P02 en una BD sin el enum). Sin gasto capturado NINGÚN libro
-      resta nada: COMISIONES = solo la parte del avión de la comisión
-      bancaria (que es real y se queda); la provisión AFAC no se toca.
-    - **Quién lo carga (nunca dos veces)** — universo EXACTO de la
-      invariante 50 más n ≥ 1: el AVIÓN absorbe el pago real cuando el vuelo
-      está en la vigencia (`fecha_vuelo` día Cancún ≥
-      `comisiones_al_avion_desde`) ∧ `estado === 'COMPLETADO'` ∧ partición
-      consistente ∧ `pagoVendedorUsd(p) > 0` ∧ fila de un AVIÓN con parte de
-      la venta (no EXTERNOS) ∧ hay gastos. El util expone `vendedor_absorbe`
-      (la puerta, independiente de los gastos) y `vendedor_pagos_n`; si
-      absorbe, `vendedor_mxn/_usd` = la parte de ESTE avión (`parteAvion` =
-      `repartirUsd` en multi-avión: Σ aviones == el gasto al centavo). En
-      esos vuelos «otros movimientos» conserva el INGRESO cobrado (una vez) y
-      muestra el pago con `egreso_mxn: 0` VERDADERO y
-      `conceptoPagoVendedorACargoDelAvion`: «pago comisión vendedor (Pablo
-      Canales) · gasto real[ (N pagos)][ · parcial: faltan $X MXN | · excede
-      $X MXN] · a cargo del avión XB-PEV ($3,000.00 en su columna
-      COMISIONES)» (faltan/excede vs lo COBRADO con la cadena de la pestaña,
-      tolerancia 1.00; SIN « (USD sin TC)» —la marca anularía el lado del
-      bloque VUELATOUR—; la cifra del avión se imprime solo si todos los
-      aviones tienen pesos y |Σ partes − pagado de la pestaña| < 1.00; si no
-      «(resta en su columna COMISIONES)»; sin pesos «(sin T.C. no entra en
-      pesos a su columna COMISIONES; resta en USD en su reparto)»; varios: «a
-      cargo de los aviones A (…), B (…) y C (…)»); fecha = el pago más
-      reciente. El bloque VUELATOUR (empresa) hereda ese 0 de las filas
-      (invariante 47, sin código nuevo): `pagos_vendedor_usd` ya no cuenta el
-      pago que restó el avión. Fuera del universo (antes de la vigencia,
-      CONFIRMADO/COTIZADO/RESERVA/EN_VUELO, CANCELADO, partición
-      inconsistente, sin comisión cotizada —SIN_LINEA—, EXTERNOS, llamada
-      directa) el avión manda 0 y VuelaTour paga el gasto real en «otros
-      movimientos» con las ramas de siempre, byte a byte
-      (`conceptoPagoVendedorReal` apareado, o solo-egreso con
-      `motivoSinLineaComision`: un AVISO de gasto probablemente mal ligado).
-      La rama «solo-egreso con partes» es inalcanzable (absorber exige
-      comisión cotizada y partición consistente ⇒ existe la línea); queda
-      una GUARDA: si pasara, no se emite fila (jamás un egreso doble) y se
-      avisa en el log. La SEÑAL entre libros es `comision_vendedor_real_pagos
-      > 0` (`vendedor_absorbido` en `ComisionAvionDeVuelo`), NUNCA
-      `vendedor_mxn > 0`: un avión sin pesos lo absorbe en USD.
-    - **MES EN QUE CUENTA = MES DEL VUELO** (`fecha_vuelo`, día Cancún),
-      nunca `fecha_gasto`: (1) es la regla de los tres libros que aparean el
-      pago (balance y Libro Dinero leen los gastos del vuelo por `vuelo_id`
-      sin filtro de fecha); (2) el pago es una partida DEL VUELO: se aparea
-      con el ingreso «comisión vendedor» de ese vuelo y con la venta de ese
-      avión en esa fila (ingreso y costo en el mismo mes mantienen
-      verdaderos el remanente y la ganancia); (3) un gasto tiene UN
-      `vuelo_id` (CHECK `gasto_comision_vendedor_exige_vuelo`) y un vuelo UNA
-      `fecha_vuelo` ⇒ cae en UN solo mes y UN solo libro por construcción;
-      (4) el reparto arma sus vuelos por `fecha_vuelo` y así
-      `balance.comisiones_usd == ingresos.comisiones_venta_usd` se sostiene
-      fila por fila. Consecuencia aceptada: un pago capturado tarde cambia el
-      mes cerrado al regenerarlo (como cualquier gasto ligado al vuelo); el
-      pendiente de captura lo avisa antes del cierre.
-    - **Conversión** (dentro del util, la misma cadena que la bancaria):
-      gasto MXN ⇒ MXN tal cual, USD = ÷ (tc_gasto > 0 ?? K); gasto USD ⇒
-      USD tal cual, MXN = × (tc_gasto > 0 ?? K); suma CRUDA y round2 UNA vez
-      por moneda (`pagosVendedorDeVuelo` con DOS conversores: en la llamada
-      USD, `pagadoMxn` son DÓLARES) y después `parteAvion`. Los dos «sin
-      T.C.»: `vendedor_sin_tc` = algún pago USD no llegó a pesos (pendiente
-      del balance «… en USD sin T.C. (ni tc_gasto ni T.C. de venta) — no
-      entra a COMISIONES en pesos; en el reparto sí resta en USD …»; el
-      reparto sí lo resta en USD) y `vendedor_usd_sin_tc_n/_mxn` = pagos MXN
-      que no llegaron a dólares (su parte del avión va a `gastos_sin_tc_*`
-      del reparto). Caso «avión sin pesos» (gasto USD sin tc_gasto y vuelo
-      sin K ni T.C. oficial; inexistente en prod): el avión lo absorbe en
-      USD en el reparto y la pestaña lo deja en $0.00 con el sufijo «sin
-      T.C.».
-    - **Contrato / skew (todo ADITIVO)**: bandera `comision_vendedor_solo_
-      gasto_real: true` (viaja SIEMPRE) en la raíz de cada
-      `BalanceAvionPayload` —individual, cada `aviones[]` Y el consolidado
-      FLOTA (a diferencia de `sin_provision_vendedor`; como
-      `factura_vuelatour_segun_cobros`)—, en `otros_movimientos` (después de
-      `sin_provision_vendedor`), en `RepartoPdfPayload` y en
-      `DineroXlsxPayload`. Fila del balance: `comision_vendedor_real_mxn`
-      (parte del avión; 0 si no absorbe) y `comision_vendedor_real_pagos`
-      (pagos absorbidos; 0 = no absorbió aunque haya gastos), solo en filas
-      de la vigencia; `comision_vendedor_prov_mxn` se CONSERVA en 0 (compat
-      de forma; retirar en un lote futuro); `comisiones_mxn` = banco + pago
-      real (null si 0). Totales (libro, `aviones[]`, consolidado):
-      `comision_vendedor_real_mxn`. Reparto: `detalle.vuelos[].
-      comision_vendedor_real_usd` y `comision_vendedor_prov_usd: 0`. Libro
-      Dinero: `utilidades_comision_vendedor_provisionada_mxn: 0` (conservada),
-      `utilidades_comision_vendedor_pagada_mxn` solo con pagos (igual),
-      `utilidades_otros_ingresos_mxn = r2(Σ ingreso − pagado − comisiones de
-      ingresos)`. pyservices sin la bandera ⇒ libros byte-idénticos; con ella
-      cambian SOLO textos. API 0.0.74 + pyservices previo ⇒ números
-      correctos y leyendas con «PROVISIÓN» un rato (cero 422); rollback del
-      API a 0.0.73 con pyservices nuevo ⇒ inocuo (sin bandera, textos de
-      siempre; pero VUELVE la provisión: ver consecuencias).
-    - **Reparto** (`profit-sharing.service`): lectura NUEVA
-      `fetchGastosVendedorDeVuelos(vueloIds)` con `leerEnLotesPaginado`
-      (lotes de 200 ids, páginas de 1000 con `.order('id')`, SIN filtro de
-      categoría ni de fecha; el mapa solo guarda `COMISION_VENDEDOR`), en el
-      `Promise.all` de cobros/escalas; `computeAvion` la pasa a
-      `comisionesDelVuelo` (`ctx.gastosVendedorPorVuelo`). Es la ÚNICA vía
-      por la que el reparto cuenta la comisión: `fetchGastos` (eje
-      `fecha_gasto`) NO cambia y la sigue dejando EXCLUIDA con UNA de tres
-      claves (todas empiezan con el código; ninguna suma):
-      `PAGO_VENDEDOR_CLAVE_DETALLE` «COMISION_VENDEDOR (egreso VuelaTour —
-      Otros movimientos)» (vuelo del periodo que el avión no absorbe),
-      `PAGO_VENDEDOR_AVION_CLAVE_DETALLE` «COMISION_VENDEDOR (gasto real a
-      cargo del avión — resta en Comisiones)» y
-      `PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE` «COMISION_VENDEDOR (vuelo de
-      otro periodo o aún no completado — cuenta en el mes del vuelo)» (el
-      vuelo no está en este reparto: otro mes, o del mismo mes pero aún no
-      completado —el reparto solo lee COMPLETADO y CANCELADO—; el texto del
-      contrato decía solo «vuelo de otro periodo», falso para un CONFIRMADO
-      del mes). Para no avisar DOS veces, las filas EXCLUIDO «a cargo del
-      avión» no suman a `gastos_sin_tc_*` ni a `gastos_tc_oficial` (su
-      integridad la lleva la lectura por vuelo: `vendedor_usd_sin_tc_*`).
-      `vendedor_usd_sin_tc_mxn/_n` del util suman a `gastos_sin_tc_mxn/_count`.
-      El bloque informativo `externos` NO cambia (sigue restando
-      `pagoVendedorUsd` cotizado a la utilidad externa, que no se reparte).
-    - **Balance** (`aircraft-balance.service`): `buildPayload` pasa
-      `gastos: gastosPorVuelo.get(v.id)` (la lista COMPLETA del vuelo, NO
-      `vGastos`, que filtra por avión: una comisión sellada a otro avión
-      —caso i5— se perdería). PENDIENTE DE CAPTURA nuevo (checklist que
-      reemplaza al amarillo; no es dinero ni consulta nada nuevo), una vez,
-      en el avión que reporta, solo si `vendedor_absorbe && vendedor_pagos_n
-      === 0`: «Vuelo #… : comisión del vendedor cotizada ($240.00 USD) sin
-      gasto «Comisión del vendedor» capturado — no resta en COMISIONES hasta
-      capturarlo en Gastos ligado a este vuelo» (USD = comisión + IVA
-      cotizados). `xlsxGeneral` arma `comisionesAvionPorVuelo` con
-      `vendedor_mxn = comision_vendedor_real_mxn` y `vendedor_absorbido =
-      comision_vendedor_real_pagos > 0`; el insumo `pagoVendedorACargoDelAvion`
-      del bloque empresa cambia SOLO su `nota` («pago al vendedor (solo el
-      gasto real «Comisión del vendedor» capturado; en los vuelos
-      completados de la regla de comisiones lo carga el avión en su columna
-      COMISIONES y aquí egresa $0.00)»; sin señal, el texto corto de hoy).
-    - **Libro Dinero** (`dinero-report.service`): con `n === 0` la fila de
-      comisión NO lleva egreso (remanente = ingreso); con `n > 0`, igual que
-      siempre (`conceptoPagoVendedorReal` + `NOTA_PAGO_VENDEDOR_REAL`, ya sin
-      «reemplaza la provisión»). Este libro NO modela la vigencia (no tiene
-      columna COMISIONES por avión): resta el gasto real ENTERO una vez en
-      todo vuelo. **Diferencia ESPERADA y documentada**: en los vuelos
-      completados de la regla, el Balance general lo trae «a cargo del
-      avión» con $0.00 (lo resta el avión) y el Dinero lo egresa completo
-      (lo resta en «otros ingresos» de VuelaTour): `pagos_vendedor_usd` del
-      bloque VUELATOUR y la hoja utilidades difieren exactamente en esos
-      pagos. Dentro de cada libro, UNA vez. Unificarlo exige una columna por
-      avión en 'dinero-vlos': decisión aparte.
-    - **Eliminado** (código muerto que re-cablearía la provisión):
+61. **COMISIÓN DEL VENDEDOR SOLO COMO GASTO REAL, EN DOS CATEGORÍAS
+    (13-oct-2026, API 0.0.74, migraciones `20261013000003` y
+    `20261013000004`).** Decisión 3 del lote del cliente del 13-oct-2026
+    («comisión del vendedor SOLO como gasto real en todos lados»: la
+    PROVISIÓN —`pagoVendedorUsd` = comisión cotizada + IVA— desaparece de
+    todos los libros) AJUSTADA el mismo día a las 17:10, textual: «aqui en
+    las categorias necesitamos una opcion que sea Comision del vendedor pero
+    que esa opcion si se cargue al balance del avión, y dejamos el otro que
+    se va a balance de vuelatour para tener esas 2 opciones». La versión de
+    dd431583 hacía que el avión absorbiera la `COMISION_VENDEDOR` por
+    vigencia: ya no existe (la D3 se corrigió EN SU LUGAR, sin bandera nueva;
+    D3 y ajuste salen JUNTOS en el 0.0.74 y nunca se empuja uno sin el otro).
+    - **Las dos categorías** (tabla canónica IDÉNTICA en API
+      `categoria-gasto.util`, panel `categorias-gasto.ts` y app
+      `categoria_gasto.dart`; en el selector del panel, justo después de
+      PILOTO_EXTERNO y en este orden):
+      | código | etiqueta | destino |
+      |---|---|---|
+      | `COMISION_VENDEDOR` | Comisión del vendedor (VuelaTour) | Pago al vendedor (otros movimientos VuelaTour; no es costo del avión) |
+      | `COMISION_VENDEDOR_AVION` | Comisión del vendedor (avión) | Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión) |
+      `COMISION_VENDEDOR` conserva su código (solo cambia la etiqueta). Ni
+      una ni otra empieza con «Gastos directos del vuelo» ni es destino de
+      EMPRESA ⇒ `CATEGORIAS_GASTO_EMPRESA` NO cambia.
+    - **Reglas comunes** (las dos): vuelo obligatorio a TODOS los roles (400
+      `GASTO_REQUIERE_VUELO` en alta y en el estado fusionado del PATCH, con
+      la etiqueta de SU categoría; `escala_id` cuenta como vuelo; respaldo
+      CHECK `gasto_comision_vendedor_exige_vuelo` (28-sep) y
+      `gasto_comision_vendedor_avion_exige_vuelo` (000004), cuyo 23514 se
+      traduce al MISMO 400 con la categoría que nombra el CHECK
+      —`categoriaDeCheckExigeVuelo`, nunca la del dto: un PATCH que solo
+      quita el vuelo trae `categoria` undefined—); no repartibles
+      (`CATEGORIAS_REPARTIBLES` y `tg_gasto_reparto_valida` sin cambio); sin
+      TUA ni extensión embebidos (`CATS_SIN_TUA_EMBEBIDO`); no ligables a
+      compras (`CATEGORIAS_NO_LIGABLES`); la IA no las sugiere ni las pisa
+      (`valid_cats` de pyservices no las tiene). **Reclasificar entre las
+      dos** en «Verificar / editar» está permitido aunque el gasto esté
+      conciliado (`GASTO_CONCILIADO` cubre solo monto, moneda y medio).
+      22P02 (enum sin migración) ⇒ 400 «Comisión del vendedor (avión)»
+      necesita la migración 20261013000003 en la base de datos; avisa a
+      sistemas (el gasto no se guardó). —la etiqueta y la migración de SU
+      categoría, `MIGRACION_DE_CATEGORIA`— solo si el mensaje trae la
+      categoría ENVIADA entre comillas dobles (`mensajeCategoriaSinMigracion`;
+      con un `includes` sin comillas 'COMISION_VENDEDOR' casaría con el
+      mensaje de la nueva).
+    - **Quién paga.** (1) La «(VuelaTour)» la paga SIEMPRE VuelaTour: egresa
+      en «otros movimientos» del Balance general y en «Otros ingresos» del
+      Libro Dinero con las ramas de siempre, byte a byte; nunca es costo del
+      avión, tampoco dentro de `comisiones_al_avion_desde`. (2) La «(avión)»
+      la absorbe el avión del vuelo en su columna COMISIONES (ganancia,
+      cascada, `balance.comisiones_usd`, socios) y en el reparto
+      (`ingresos.comisiones_venta_usd` ⇒ utilidades por mes, cuenta
+      corriente, `dashboards.overview`), SIEMPRE en el MES DEL VUELO; lo
+      cobrado al cliente sigue siendo ingreso de VuelaTour, UNA vez, y en
+      «otros movimientos» el pago sale con egreso $0.00 «a cargo del avión
+      …». Un vuelo puede traer pagos de las DOS: cada uno va a su lado y
+      ninguno se cuenta dos veces. (3) Sin pago capturado nadie resta nada
+      (sin provisión en ningún libro); la parte BANCARIA del avión solo en la
+      vigencia (invariante 50); la provisión AFAC no se toca.
+    - **Universo de la «(avión)»** (`pagoVendedorAvionEnUniverso`, PURO):
+      vuelo COMPLETADO, o CANCELADO con cobros retenidos —`retieneCobros(
+      cobrosEnUsd(cobros, K))` = USD > 0 o MXN sin T.C. > 0, el MISMO
+      criterio con que el reparto salta al cancelado sin cobros (que ahora
+      usa esa función)—, y que la fila sea de un avión con parte de la
+      venta (el lector no llama al util para EXTERNOS). NO exige comisión
+      cotizada ni partición consistente (la elección explícita manda): sin
+      línea que aparear la nota de COMISIONES lo dice con
+      `TEXTO_SIN_LINEA_COMISION`. (a) **Antes de la vigencia SÍ la carga el
+      avión**: la vigencia ya solo gobierna la parte bancaria; la columna y
+      sus llaves nacen en una fila anterior SOLO si absorbe un pago
+      «(avión)» (con `comision_banco_avion_mxn` 0, `aplica: false`,
+      `lleva_comisiones: true`); sin él, la fila byte a byte. (c)
+      **Multi-avión**: se reparte por participación (`parteAvion` /
+      `repartirUsd`, como la venta y la bancaria) — EXCEPCIÓN documentada a
+      la invariante 10 (es costo de la venta, no de un tramo); el avión
+      sellado en el gasto es solo referencia; Σ de los aviones == el pago al
+      centavo. EXTERNO con avión de referencia: lo carga ese avión (factor
+      1 en balance y reparto). **Fuera del universo** (CONFIRMADO, COTIZADO,
+      RESERVA, SOLICITUD, EN_VUELO, CANCELADO sin cobros, vuelo sin avión de
+      la flota) nadie lo absorbe: VuelaTour lo egresa con el motivo en el
+      concepto y el libro que reporta el vuelo lo lista en pendientes. Nunca
+      se pierde: «otros movimientos» decide con las FILAS de los libros
+      (`comision_vendedor_real_pagos > 0`) y jamás recalcula el universo.
+    - **Fuente única** `common/comisiones-avion.util#comisionesDelVuelo` +
+      los helpers puros de `comisiones-avion.util` y `pago-vendedor.util`
+      (prohibido reimplementarlos). `ComisionesDelVuelo`: `aplica` (vigencia,
+      solo bancaria), `lleva_comisiones` (= aplica ∨ vendedor_absorbido),
+      `vendedor_avion_universo`, `vendedor_avion_pagos_n`,
+      `vendedor_vuelatour_pagos_n`, `vendedor_absorbido` (= universo ∧ ≥ 1
+      «(avión)»: la SEÑAL entre libros), `vendedor_pendiente_captura`
+      (vigencia ∧ COMPLETADO ∧ partición consistente ∧ comisión cotizada ∧
+      CERO pagos de las dos), `vendedor_mxn/_usd` (parte de ESTE avión de
+      las «(avión)»), `vendedor_sin_tc`, `vendedor_usd_sin_tc_n/_mxn` (solo
+      «(avión)»: el filtro es `ladoPagoVendedor === 'AVION'`, así una
+      «(VuelaTour)» MXN sin K nunca cae en `gastos_sin_tc` del avión). Se
+      QUITARON `vendedor_absorbe` y `vendedor_pagos_n` de la D3.
+      **Conversión** (la de la D3, sin cambio): gasto MXN ⇒ MXN tal cual,
+      USD = ÷ (tc_gasto > 0 ?? K); gasto USD ⇒ USD tal cual, MXN = ×
+      (tc_gasto > 0 ?? K); suma CRUDA y round2 UNA vez por moneda
+      (`pagosVendedorDeVuelo` con dos conversores: en la llamada USD
+      `pagadoMxn` son DÓLARES) y después `parteAvion`.
+    - **Regla de lectores (prefijo PROHIBIDO)**: 'COMISION_VENDEDOR' es
+      prefijo de 'COMISION_VENDEDOR_AVION' ⇒ toda comparación es EXACTA
+      (`Set.has` / `===`), nunca `startsWith`/`includes`/LIKE/regex sin
+      ancla. Eje GENÉRICO («¿es pago al vendedor?», «¿fuera del costo
+      genérico del avión?»): la UNIÓN —`categoriaEsPagoVendedor`,
+      `CATEGORIAS_GASTO_PAGO_VENDEDOR`, `CATEGORIAS_GASTO_FUERA_DEL_AVION` =
+      empresa ∪ las dos, `CATEGORIAS_GASTO_VUELO_OBLIGATORIO` = las dos—, sin
+      cambio de código en cada lector (fila del vuelo, Z, aviso del externo,
+      fechas fuera, avión que no vuela, Gastos Indirectos, ficha, grupo,
+      reporte por vuelo, gastos-resumen del piloto, acreditación del
+      Dinero). QUIÉN paga: SOLO `ladoPagoVendedor` ('VUELATOUR' | 'AVION' |
+      null). `pagosVendedorDeVuelo(gastos, aMxn, lado)` y
+      `contarPagosVendedor(gastos, lado)` EXIGEN el lado ('VUELATOUR' |
+      'AVION' | 'AMBOS', sin default: tsc delata a quien no lo decida). La
+      «(avión)» entra a un libro SOLO por `comisionesDelVuelo`.
+      `CATEGORIAS_GASTO_SIN_AVION` NO lleva el literal nuevo (arma el
+      `not.in` de PostgREST): ningún query de PostgREST del API nombra la
+      categoría nueva.
+    - **«Otros movimientos»: gramática ÚNICA del egreso del vendedor**
+      (`egresoPagoVendedorDeVuelo`, 8 casos; etiqueta «comisión vendedor
+      (Pablo Canales)»): D1 con línea, solo «(VuelaTour)» (byte a byte):
+      «pago comisión vendedor (Pablo Canales) · gasto real · parcial: faltan
+      $500.00 MXN», egreso Σ VuelaTour. D2 con línea, solo «(avión)» que
+      carga un avión (byte a byte D3): «… · gasto real · a cargo del avión
+      XB-PEV ($3,000.00 en su columna COMISIONES)», egreso $0.00. D3 con
+      línea, MIXTO: «… · gasto real (2 pagos) · VuelaTour $2,000.00 · a cargo
+      del avión XB-PEV ($1,000.00 en su columna COMISIONES)», egreso
+      $2,000.00 (faltan/excede contra lo pagado en TOTAL; «(USD sin TC)»
+      solo del tramo VuelaTour: «· VuelaTour (USD sin TC)» o «· VuelaTour
+      $2,000.00 (parcial: USD sin TC)»). D4 con línea y una «(avión)» que
+      ningún avión carga: «… · gasto real · incluye «Comisión del vendedor
+      (avión)» que ningún avión carga (el vuelo aún no se completa: al
+      completarse lo cargará el avión): la paga VuelaTour», egreso Σ de las
+      dos. D5 sin línea, solo «(VuelaTour)» (byte a byte): «pago comisión
+      vendedor · sin comisión cobrada en la cotización». D6 sin línea, solo
+      «(avión)» que carga un avión: fila NUEVA, INFORMATIVA (sustituye la
+      guarda con `logger.warn` de la D3): «pago comisión vendedor · sin
+      comisión cobrada en la cotización · a cargo del avión N621TX
+      ($1,305.00 en su columna COMISIONES)», egreso $0.00, remanente 0 (nunca
+      −0). D7 sin línea, MIXTO: «… · vuelo cancelado: sin comisión cobrada (2
+      pagos) · VuelaTour $500.00 · a cargo del avión …», egreso $500.00. D8
+      sin línea y una «(avión)» que nadie carga: «… · vuelo cancelado: sin
+      comisión cobrada · incluye «Comisión del vendedor (avión)» que ningún
+      avión carga (vuelo cancelado sin cobros retenidos): la paga VuelaTour».
+      Motivos (en este orden): «vuelo sin avión de la flota» · «vuelo
+      cancelado sin cobros retenidos» · «el vuelo aún no se completa: al
+      completarse lo cargará el avión» · «ningún libro de avión la cargó»
+      (defensivo). Variantes del sufijo de la D3 sin cambio (varios aviones;
+      «(resta en su columna COMISIONES)» si las cifras no cuadran; «(sin
+      T.C. no entra en pesos …)»). Todos empiezan con «pago comisión
+      vendedor»; ninguno con «PROVISIÓN (»; las filas con $0.00 nunca llevan
+      «sin TC».
+    - **Bloque VUELATOUR** (invariante 47, sin cambio de aritmética): nota con
+      la señal `pagoVendedorACargoDelAvion` «pago al vendedor (solo los
+      gastos reales capturados: la «Comisión del vendedor (VuelaTour)»
+      egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en
+      su columna COMISIONES aquí egresa $0.00)»; sin ella «pago al vendedor
+      (solo los gastos reales de comisión del vendedor capturados)».
+      `pagos_vendedor_usd` = Σ «(VuelaTour)» + «(avión)» que nadie carga; las
+      filas $0.00 no lo bajan ni anulan el lado.
+    - **Balance** (`buildPayload`): `calcComisiones` para TODA fila de avión
+      con parte (con `gastosPorVuelo.get(v.id)`, la lista COMPLETA del vuelo,
+      NUNCA `vGastos`); la fila lleva COMISIONES con `lleva_comisiones`.
+      `comision_vendedor_real_pagos = vendedor_absorbido ?
+      vendedor_avion_pagos_n : 0`. Pendientes (una vez por vuelo, en el
+      avión que reporta): captura («Vuelo #233 (03-sep …): comisión del
+      vendedor cotizada ($162.40 USD) sin pago capturado — captúralo en
+      Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo
+      carga el avión (resta en su columna COMISIONES) o como «Comisión del
+      vendedor (VuelaTour)» si lo paga VuelaTour ('otros movimientos' del
+      Balance general)»), sin T.C. de la «(avión)» y «gasto «Comisión del
+      vendedor (avión)» que ningún avión carga (motivo) — lo paga VuelaTour
+      …; si el pago es de VuelaTour, reclasifícalo a «Comisión del vendedor
+      (VuelaTour)»» (plural «N gastos … los paga … reclasifícalos»; en el
+      libro EXTERNOS cuenta las «(avión)» de sus vuelos con motivo «sin
+      avión»).
+    - **Reparto** (`profit-sharing.service`): `compute()` arma el Set GLOBAL
+      `vuelosConPagoVendedorAvion` (universo con el MISMO K de los cobros ∧
+      algún factor > 0) y lo pasa en `ctx`; `computeAvion` calcula
+      `comisionesDelVuelo` SIEMPRE (`comisionesVuelo = lleva_comisiones ?
+      calc : null`), salta el cancelado con `!retieneCobros(conv)` y ya no
+      tiene `vuelosVendedorACargo`. `fetchGastosVendedorDeVuelos` sin filtro
+      de categoría ni de fecha (el mapa guarda las dos por la unión; el
+      util elige el lado). Cuatro claves EXCLUIDO por el eje fecha_gasto
+      (SOLO transparencia, ninguna suma; cada una empieza con el código
+      EXACTO y « · » para que `detalleGastos` derive la etiqueta):
+      «COMISION_VENDEDOR · egreso en «otros movimientos» del Balance
+      general» (toda «(VuelaTour)»), «COMISION_VENDEDOR_AVION · resta en
+      Comisiones del avión (mes del vuelo)», «COMISION_VENDEDOR_AVION · vuelo
+      de otro periodo o aún no completado (cuenta en el mes de su vuelo)» y
+      «COMISION_VENDEDOR_AVION · ningún avión la carga: la paga VuelaTour en
+      «otros movimientos»». El Set global arregla la clave de una comisión
+      sellada a OTRO avión (caso i5). Integridad sin doble aviso: la clave
+      «resta en Comisiones» no suma a `gastos_sin_tc_*` ni a T.C. oficial.
+      El bloque `externos` NO cambia (sigue restando `pagoVendedorUsd`
+      cotizado a la utilidad externa, que no se reparte).
+    - **Libro Dinero** (d): aritmética SIN cambio — es la CAJA de VuelaTour
+      (sin utilidad por avión) y resta UNA vez los pagos de las DOS
+      categorías (`pagosVendedorDeVuelo(…, 'AMBOS')`;
+      `utilidades_comision_vendedor_pagada_mxn` = Σ de las dos;
+      `utilidades_otros_ingresos_mxn = r2(Σ ingreso − pagada − comisiones de
+      ingresos)`; provisionada 0). Cambian el concepto (`+
+      sufijoParteAvionDinero`: « · incluye «Comisión del vendedor (avión)»
+      por $3,000.00: la resta el avión en el Balance general» o « · incluye
+      «Comisión del vendedor (avión)» que ningún avión carga») y la nota
+      (`NOTA_PAGO_VENDEDOR_REAL` / `_SIN_LINEA` nuevas + `notaParteAvionDinero`),
+      que solo deciden textos (`avionLaCarga` = universo con el K del libro ∧
+      algún factor > 0, nunca dinero). Llave NUEVA informativa
+      `utilidades_comision_vendedor_avion_mxn` (Σ MXN de las «(avión)» que
+      carga un avión; solo > 0). **Diferencia ESPERADA** con el bloque
+      VUELATOUR del Balance general == esa llave (la «(VuelaTour)» resta
+      igual en los dos libros). Si CHARTERS/UTILIDAD llegan a tener regla
+      por avión, la «(avión)» que carga un avión debe dejar de restarse en
+      el Dinero (se contaría dos veces).
+    - **`dashboards.gastos`**: renglón ADITIVO
+      `resumen.gastos_comision_vendedor_avion_usd` (la «(avión)», por
+      fecha_gasto, antes del corte por `categoriaFueraDelAvion`): DENTRO de
+      `gastos_totales_usd`, FUERA de `gastos_avion_usd`, costo por hora,
+      utilidad por avión y `gastos_empresa_usd` (el costo del avión lo lleva
+      `overview` vía el reparto). La «(VuelaTour)» sigue en empresa.
+    - **Contrato / skew (todo ADITIVO, sin bandera nueva)**: la bandera
+      `comision_vendedor_solo_gasto_real: true` de la D3 (raíz de cada
+      `BalanceAvionPayload` —individual, cada `aviones[]` y el consolidado
+      FLOTA—, `otros_movimientos`, `RepartoPdfPayload` y `DineroXlsxPayload`)
+      significa desde el 0.0.74 «solo gasto real, en dos categorías» y
+      pyservices reescribe EN SU LUGAR sus textos (sin ella, byte a byte).
+      Fila del balance: `comision_vendedor_real_mxn` = parte de ESTE avión de
+      las «(avión)» que absorbe; `comision_vendedor_real_pagos` = cuántas
+      (LA señal; nunca `vendedor_mxn > 0`); `comision_vendedor_prov_mxn` 0;
+      `comisiones_mxn` = banco + «(avión)» (null si 0); las llaves viajan en
+      la vigencia y en filas ANTERIORES que absorben. Reparto:
+      `detalle.vuelos[].comision_vendedor_real_usd` = solo «(avión)»;
+      `comisiones_venta_usd` puede ser ≠ 0 en un mes anterior a la regla.
+      Dinero: `utilidades_comision_vendedor_avion_mxn?: number | null`.
+      Skew: pyservices nuevo + API ≤ 0.0.73 ⇒ sin bandera, libros de
+      siempre; API 0.0.74 + pyservices de prod (4d206ab) ⇒ números
+      correctos, leyendas viejas un rato, cero 422 (`extra="ignore"`); panel
+      nuevo + API 0.0.73 ⇒ la categoría nueva rebota con el 400 de IsEnum
+      (panel DESPUÉS del API); API 0.0.74 sin 000003 ⇒ solo fallan el alta y
+      la edición de «(avión)» (400 legible) y el filtro `?categoria=…` (500).
+      **ROLLBACK del API a ≤ 0.0.73 PROHIBIDO con gastos «(avión)»
+      capturados** (la fila los sumaría a OPERACIONES y el reparto volvería
+      a provisionar): primero reclasificarlos a «(VuelaTour)».
+    - **Datos y consecuencias para el cliente** (prod, 13-oct): #251
+      (N990GG, $4,080.00 en efectivo) y #332 (N621TX, $1,305.00,
+      conciliado, sin comisión cotizada) se quedan «(VuelaTour)»: nada se
+      reclasifica solo. Con el 0.0.74 y sin reclasificar, al regenerar
+      septiembre N990GG deja de restar 240 USD en COMISIONES y VuelaTour
+      egresa los $4,080.00; si el pago le toca al avión, la oficina lo cambia
+      a «(avión)» en Verificar / editar y queda como hoy («a cargo del avión
+      N990GG ($4,080.00 …)»). #332 no cambia; si se reclasifica, N621TX resta
+      $1,305.00 y la pestaña pinta la fila informativa $0.00. Comisiones
+      cotizadas SIN pago (el pendiente de captura las lista): #233, #237,
+      #260 y #317 (N4142R, septiembre), #404 y #417 (N990GG, octubre) y #442
+      (XA-VGV, CONFIRMADO para el 30-oct) — capturarlas con el monto real en
+      la categoría correcta y SOLO después regenerar septiembre y octubre
+      (balance, reparto, cuenta corriente y Libro Dinero). Elegir la
+      categoría equivocada mueve utilidad entre los socios y VuelaTour
+      (defensas: etiquetas y destinos simétricos, ayudas por categoría,
+      reclasificación libre). Una «(avión)» de un vuelo aún no completado la
+      paga VuelaTour hasta completarse (regenerar la pasa al avión). Una
+      «(avión)» de un vuelo sin avión aparece en la bandeja «sin avión», la
+      alerta y el pre-cierre (no se puede poner el literal en
+      `CATEGORIAS_GASTO_SIN_AVION`); asignarle avión al gasto no cambia quién
+      paga: la salida es reclasificarla a «(VuelaTour)».
+    - **Eliminado** (D3, código muerto que re-cablearía la provisión):
       `pagoVendedorCubiertoPorAvion`, `PagoVendedorCubiertoPorAvion`,
       `ProvisionVendedorDeAvion`, `MARCA_PROVISION_SIN_GASTO_REAL` y
-      `NOTA_PROVISION_PAGO_VENDEDOR`, con sus specs. Nuevos:
-      `ComisionVendedorDeAvion`, `sufijoPagoVendedorACargoDelAvion`,
-      `conceptoPagoVendedorACargoDelAvion` (comisiones-avion.util) y
-      `cuerpoGastoRealPagoVendedor` + `sufijoUsdSinTc` (refactor interno de
-      `conceptoPagoVendedorReal`, salida byte a byte).
-    - **Consecuencias (avisar al cliente)**: el reparto de SEPTIEMBRE ya
-      entregado SUBE (los COMPLETADOS de la vigencia sin gasto dejan de
-      restar la provisión: prod 12-oct, 14 de 15 en septiembre y 11 de 11 en
-      octubre; solo #251 tiene gasto, 4,080 MXN = 240 USD × K 17) y vuelve a
-      bajar con cada gasto capturado; la cuenta corriente puede marcar
-      utilidades por pagar y luego adelantos. Un pago capturado tarde mueve
-      el mes del VUELO al regenerarlo. Un pago capturado como «Otros gastos
-      VuelaTour» cae a 'otros gastos' (empresa) y el avión no lo resta: la
-      oficina debe usar «Comisión del vendedor» ligada al vuelo correcto
-      («un gasto por vuelo», invariante 31). Rollback a 0.0.73 tras
-      regenerar ⇒ vuelve a provisionar (los documentos entregados cambiarían
-      dos veces).
-    - **Deploy y operación**: pyservices → API 0.0.74 (al revés funciona:
-      números correctos, leyendas con «PROVISIÓN» un rato). Después: la
-      oficina captura las comisiones reales pendientes (el pendiente nuevo
-      las lista por vuelo) y SOLO entonces se regeneran septiembre y
-      octubre. Panel NO se toca (no lee `comision_vendedor_prov_*`; solo
-      `comisiones_venta_usd`): sus rótulos «provisión del vendedor»
-      (`avion-reparto-card.tsx:199`, comentario de `kpi-strip.tsx:39`,
-      `AYUDA_COMISION_VENDEDOR`) quedan como texto desfasado para el lote
-      del panel. DEUDA que esta decisión NO toca: el reporte por vuelo sigue
-      restando el pago COTIZADO `pagoVendedorUsd` en su ganancia
-      (`flight-report.service`); los lectores por categoría
-      (`categoriaFueraDelAvion`: `dashboards.gastos`, `aircraft.metrics`,
-      `groups.gastosPorHijo`) siguen clasificando la comisión fuera del
-      avión; `regla_comisiones` sigue sin viajar.
-    - Specs: `comisiones-avion.util.spec` (gastos MXN/USD, tc_gasto vs K,
-      sin ningún T.C., MXN sin K, mixto, multi-avión Σ == gasto, gating por
-      estado/partición/sin comisión, antes de la vigencia, sufijo y
-      concepto «a cargo del avión» con su gramática exacta),
-      `pago-vendedor.util.spec` (refactor byte a byte, nota sin
-      «provisión»), `aircraft-balance.service.comisiones.spec` (fila con y
-      sin gasto —sellado a otro avión—, pendiente de captura solo en el
-      COMPLETADO, multi-avión con centavo impar y «a cargo de los aviones»,
-      «avión sin pesos», banderas raíz en individual/`aviones[]`/consolidado
-      y en la pestaña, conservación del dinero == regla anterior al
-      centavo), `aircraft-balance.service.comisiones-general.spec`
-      (re-congelado «0.0.74» con números verificados a mano, `comisiones_usd
-      == comisiones_venta_usd`, ESPEC CRUZADO por estado: cada pago real en
-      el avión O en la pestaña, nunca en los dos, y el dinero total baja
-      exactamente el pago), `aircraft-balance.service.pago-vendedor.spec`
-      (b)–h) sin partes byte a byte; i)/i4) byte a byte antes de la
-      vigencia y en la vigencia solo COMISIONES; i5) la comisión sellada a
-      otro avión SÍ entra a COMISIONES; b′/f′/g′/h′ por el general),
-      `balance-empresa.util.spec` (nota con y sin señal; fila «a cargo del
-      avión» no baja `pagos_vendedor_usd` ni anula el lado),
-      `profit-sharing.service.comisiones.spec` (sin gasto sube 80 USD; mes
-      del vuelo; query por lotes/páginas sin filtros; EXCLUIDO; CANCELADO y
-      CONFIRMADO no restan; multi-avión; MXN sin K una sola vez en
-      `gastos_sin_tc_*`; cruce con el balance; bandera del payload),
-      `profit-sharing.service.empresa.spec` (las tres claves y la utilidad
-      idéntica por fecha_gasto), `dinero-report.service.pago-vendedor.spec` /
-      `.ingresos.spec` (golden sin provisión: utilidades 3,000 ⇒ 4,600;
-      diferencia ESPERADA con el Balance dentro de la vigencia).
-      `dashboards.service.overview-comisiones.spec`,
-      `dashboards.service.comision-vendedor.spec` y
-      `aircraft.service.comision-vendedor.spec`: sin cambio, verdes. En
+      `NOTA_PROVISION_PAGO_VENDEDOR`; del ajuste: `vendedor_absorbe`,
+      `vendedor_pagos_n`, `vuelosVendedorACargo`,
+      `PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE` y la guarda con
+      `logger.warn` de «otros movimientos».
+    - **Deploy y operación**: migraciones 000003 → 000004 (ver «Migraciones
+      y despliegue») → pyservices → API 0.0.74 (justo antes del push,
+      `pg_enum` con el valor) → panel (SIEMPRE después del API) → Flutter
+      (commit local +82). Después: avisar al cliente, la oficina decide
+      #251/#332 y captura los pendientes, y SOLO entonces se regeneran
+      septiembre y octubre. DEUDA que el ajuste NO toca: `aircraft.metrics.
+      finanzas` y `groups.gastosPorHijo` (por fecha_gasto, no ven
+      COMISIONES); el reporte por vuelo sigue restando el pago COTIZADO; un
+      avión dado de baja que voló absorbe en el balance y no en el reparto
+      (`compute()` solo trae activos); `regla_comisiones` sigue sin viajar;
+      T.C. heredado de la D3 (COMISIONES y reparto con tc_gasto ?? K; la
+      pestaña con tc_gasto ?? promedio; el Dinero con tc_gasto ?? T.C. de
+      venta: un pago USD sin tc_gasto puede diferir por centavos, hoy 0
+      casos); el universo del Dinero (solo textos y la llave) puede diferir
+      del Balance únicamente en un CANCELADO con reembolso neto cero en otra
+      moneda sin T.C.; sin QA visual en navegador.
+    - Specs: `categoria-gasto.util.spec` (21 valores con AVION justo después
+      de COMISION_VENDEDOR —22 con Comisariato—, tabla exacta, EMPRESA
+      congelada, unión/lado exactos, SIN_AVION sin el literal, 22P02 sin
+      cruce de prefijo, `categoriaDeCheckExigeVuelo`, guardián del prefijo),
+      `cobros-usd.util.spec` (`retieneCobros`), `pago-vendedor.util.spec`
+      (lados VT 2,000 / avión 1,000 / ambos 3,000, `contarPagosVendedor`,
+      notas nuevas), `comisiones-avion.util.spec` (D3 re-apuntada a
+      «(avión)» con las mismas cifras; universo; antes de la vigencia;
+      SIN_LINEA/inconsistente/cancelado con cobros; mixto; multi 1,000.01;
+      «(VuelaTour)» MXN sin K fuera de `gastos_sin_tc`; pendiente de captura;
+      motivos; los 8 casos de `egresoPagoVendedorDeVuelo` exactos; textos de
+      pendientes y del Dinero), `aircraft-balance.service.comisiones.spec`
+      (describe «dos categorías»: VT byte a byte, mixto, cancelado con/sin
+      cobros, CONFIRMADO, EXTERNOS, externo con avión, antes de la vigencia,
+      multi), `.comisiones-general.spec` (espec CRUZADO estado × categoría:
+      cada pago en EXACTAMENTE un lado y el dinero baja el pago una vez;
+      conservación con `aVuelatour`; antes de la vigencia con las dos),
+      `.pago-vendedor.spec` (b)–h) VT byte a byte; i)/i4)/i5) con las dos;
+      g″) D6 informativa), `balance-empresa.util.spec` (notas, fila mixta),
+      `profit-sharing.service.comisiones.spec` / `.empresa.spec` (las cuatro
+      claves con sus etiquetas, Set global i5, cancelado con/sin cobros,
+      agosto con «(avión)»), `dinero-report.service.pago-vendedor.spec`
+      (sufijo y notas, llave, cruce con el Balance), `expenses.service.
+      sin-vuelo.spec` (400 por categoría en los 4 roles, reclasificación
+      conciliada, 23514 de cada CHECK sin categoría en el dto, 22P02 de la
+      nueva), `dashboards.service.comision-vendedor.spec` (balde nuevo),
+      `flights.service.gastos-resumen.spec`, `flight-report.service.
+      pago-vendedor.spec` y `aircraft.service.comision-vendedor.spec`. En
       pyservices, `tests/test_comision_vendedor_notas.py`,
-      `test_balance_comisiones.py`, `test_balance_comisiones_general.py` y
-      `test_reparto_comisiones.py`.
+      `test_balance_comisiones.py`, `test_balance_comisiones_general.py`,
+      `test_reparto_comisiones.py` y `test_vision_validaciones.py`.
 
 62. **PERMISOS AFAC COMO FILAS QUE SUMAN EN «OTROS MOVIMIENTOS» DEL
     BALANCE GENERAL (13-oct-2026, API 0.0.74, SIN migración).** Decisión 2
@@ -6866,14 +7007,51 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   previo las filas se pintan y SUMAN sin encabezado ni leyendas; al revés,
   el bloque informativo de siempre). Antes de REGENERAR septiembre: la
   pregunta del doble conteo del permiso pagado («Pendientes conocidos»).
-- **13-oct-2026 — SIN migración** para la comisión del vendedor solo como
-  gasto real (invariante 61): solo payload API→pyservices (bandera ADITIVA
-  `comision_vendedor_solo_gasto_real` y llaves `comision_vendedor_real_*`).
-  Deploy: pyservices → API (al revés: números correctos y leyendas con
-  «PROVISIÓN» un rato). Después: capturar las comisiones reales pendientes
-  (el pendiente de captura las lista por vuelo) y SOLO entonces regenerar
-  septiembre y octubre; avisar al cliente que el reparto de septiembre ya
-  entregado sube y vuelve a bajar con cada gasto capturado.
+- **PENDIENTES (13-oct-2026) — `20261013000003_categoria_comision_vendedor_avion.sql`
+  y `20261013000004_gasto_comision_vendedor_avion_exige_vuelo.sql`**
+  (invariante 61, comisión del vendedor en DOS categorías; NO aplicadas: las
+  aplica el orquestador por el MCP ANTES del push del API). 000003 lleva
+  SOLO `alter type public.categoria_gasto add value if not exists
+  'COMISION_VENDEDOR_AVION' after 'COMISION_VENDEDOR'` (sola en su archivo:
+  un valor nuevo no se puede usar —ni escribir ni leer con el literal,
+  55P04— en la transacción que lo crea). 000004 = CHECK SEPARADO
+  `gasto_comision_vendedor_avion_exige_vuelo` (`categoria::text <>
+  'COMISION_VENDEDOR_AVION' or vuelo_id is not null`; convive con el del
+  28-sep, que no se toca: ampliarlo exigiría quitarlo y recrearlo, y el MCP
+  lo declina), cuerpo idempotente (DO que consulta `pg_constraint` + COMMENT)
+  sin palabras destructivas; el rollback va solo como comentario y solo por
+  el SQL Editor. Proceso por cada una: dry-run de su cabecera por MCP
+  `execute_sql` (UN bloque `do … raise exception 'DRYRUN_OK …'`, escrituras
+  REALES, DDL antes de las filas de prueba; el de 000004 reclasifica ida y
+  vuelta las comisiones REALES de #251 y #332 —conciliada— por folio) ⇒
+  comprobar que no quedó nada ⇒ `apply_migration` con SOLO el CUERPO
+  (names `20261013000003_categoria_comision_vendedor_avion` y
+  `20261013000004_gasto_comision_vendedor_avion_exige_vuelo`) ⇒ verificar
+  (`pg_enum`: el valor justo después de COMISION_VENDEDOR; lectura con el
+  literal sin 22P02; `pg_get_constraintdef`) ⇒ `get_advisors`. 000004 solo
+  con 000003 YA confirmada (su dry-run escribe el valor) y en horario
+  tranquilo (candado breve sobre `gasto`). Si el MCP declinara: paquete en
+  `docs/` para el SQL Editor + insert en `supabase_migrations.
+  schema_migrations`. Orden: migraciones → pyservices → API 0.0.74 (justo
+  antes del push, `select 1 from pg_enum … enumlabel =
+  'COMISION_VENDEDOR_AVION'` ⇒ 1 fila) → panel (SIEMPRE después del API:
+  el 0.0.73 rechaza la categoría por IsEnum) → Flutter (commit local).
+  **ROLLBACK del API a ≤ 0.0.73 PROHIBIDO con gastos «(avión)» capturados**
+  (reclasificarlos antes a «(VuelaTour)»); el valor del enum se queda
+  (inofensivo). **Aviso a Comisariato** (20261013000001/2, reservadas): su
+  dry-run exigía «20 valores ⇒ 21, COMISARIATO al final»; con 000003
+  aplicada antes el enum ya tiene 21 ⇒ debe contar RELATIVO (21 ⇒ 22) y su
+  spec del enum pasa a 22 (el nuestro a 21); con el AFTER, el orden final
+  del enum es el mismo en cualquier orden de aplicación.
+- **13-oct-2026 — payload** de la comisión del vendedor solo como gasto
+  real (invariante 61): bandera ADITIVA `comision_vendedor_solo_gasto_real`
+  (desde el ajuste: «en dos categorías», sin bandera nueva), llaves
+  `comision_vendedor_real_*` y, en el Dinero,
+  `utilidades_comision_vendedor_avion_mxn`. Deploy: pyservices → API (al
+  revés: números correctos y leyendas viejas un rato). Después: avisar al
+  cliente de las dos categorías, decidir #251/#332, capturar las comisiones
+  reales pendientes en la categoría correcta (el pendiente de captura las
+  lista por vuelo) y SOLO entonces regenerar septiembre y octubre.
 - **13-oct-2026 — SIN migración** para la factura obligatoria por cuenta de
   cobro (invariante 60): las 4 columnas de solicitud de `vuelo` existen
   desde `20260924000003` (aplicada); solo la bandera ADITIVA
@@ -7602,6 +7780,23 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Comisión del vendedor en DOS categorías (13-oct-2026, invariante 61)**
+  — lo que el ajuste NO resuelve (decírselo al cliente): (1) **Libro Dinero
+  frente a CHARTERS**: el Dinero resta las dos categorías (caja de
+  VuelaTour); cuando CHARTERS/UTILIDAD tengan regla por avión, la «(avión)»
+  que carga un avión debe dejar de restarse ahí (si no, se contaría dos
+  veces). (2) `aircraft.metrics.finanzas`, `groups.gastosPorHijo` (por
+  fecha_gasto, no ven la columna COMISIONES) y el reporte por vuelo (sigue
+  restando el pago COTIZADO). (3) **Avión inactivo** que voló: absorbe la
+  «(avión)» en el balance y no en el reparto (`compute()` solo trae
+  activos); «otros movimientos» la marcaría «ningún libro de avión la
+  cargó». (4) **No se puede cargar la «(avión)» a UN solo avión de un vuelo
+  multi-avión**: se reparte por participación como la venta; si el cliente
+  lo pide, es otra decisión. (5) **La «(avión)» de un vuelo sin avión de la
+  flota aparece en la bandeja «sin avión»**, la alerta y el pre-cierre
+  (`CATEGORIAS_GASTO_SIN_AVION` no puede llevar el literal); asignarle avión
+  al gasto no cambia quién paga: reclasificarla a «(VuelaTour)».
 
 - **Permiso AFAC pagado contado DOS veces (13-oct-2026, invariante 62) —
   PREGUNTA ABIERTA al cliente, bloqueante para REGENERAR el cierre de

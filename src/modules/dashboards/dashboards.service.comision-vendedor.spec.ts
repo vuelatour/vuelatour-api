@@ -72,5 +72,50 @@ describe('dashboards.gastos — COMISION_VENDEDOR (28-sep-2026)', () => {
     // El dinero no desaparece: entra al total del tablero.
     expect(con.resumen.gastos_totales_usd).toBe(216);
     expect(con.resumen.gastos_avion_usd).toBe(100);
+    expect(con.resumen.gastos_comision_vendedor_avion_usd).toBe(0);
+  });
+});
+
+/**
+ * «COMISIÓN DEL VENDEDOR (AVIÓN)» (13-oct-2026, invariante 61): renglón
+ * ADITIVO del tablero — DENTRO del total; FUERA de gastos_avion_usd, del
+ * costo por hora, de la utilidad por avión y de gastos_empresa_usd (este
+ * tablero va por fecha_gasto; el costo del avión lo lleva el reparto en el
+ * mes del vuelo). La «(VuelaTour)» sigue en empresa.
+ */
+describe('dashboards.gastos — dos categorías del pago al vendedor (13-oct-2026)', () => {
+  it('«(avión)» al balde nuevo; «(VuelaTour)» a empresa; las dos dentro del total', async () => {
+    const sin = await armar([gasto('g-op', 'OPERACIONES', 100)]).gastos({
+      desde: '2026-10-01',
+      hasta: '2026-10-31',
+    });
+    const con = await armar([
+      gasto('g-op', 'OPERACIONES', 100),
+      gasto('g-vt', 'COMISION_VENDEDOR', 116),
+      gasto('g-av', 'COMISION_VENDEDOR_AVION', 75),
+    ]).gastos({ desde: '2026-10-01', hasta: '2026-10-31' });
+    expect(con.por_avion).toEqual(sin.por_avion);
+    expect(con.por_avion[0].gastos_usd).toBe(100);
+    expect(con.por_avion[0].costo_hora_usd).toBe(10);
+    expect(con.por_avion[0].utilidad_usd).toBe(sin.por_avion[0].utilidad_usd);
+    expect(con.resumen.gastos_avion_usd).toBe(100);
+    expect(con.resumen.gastos_empresa_usd).toBe(116);
+    expect(con.resumen.gastos_comision_vendedor_avion_usd).toBe(75);
+    expect(con.resumen.gastos_totales_usd).toBe(291);
+    expect(con.resumen.costo_hora_promedio_usd).toBe(
+      sin.resumen.costo_hora_promedio_usd,
+    );
+  });
+
+  it('una «(avión)» sin T.C. va a gastos_sin_tc (no al balde)', async () => {
+    const r = await armar([
+      {
+        ...gasto('g-av', 'COMISION_VENDEDOR_AVION', 1305),
+        moneda: 'MXN',
+        tc_gasto: null,
+      },
+    ]).gastos({ desde: '2026-10-01', hasta: '2026-10-31' });
+    expect(r.resumen.gastos_comision_vendedor_avion_usd).toBe(0);
+    expect(r.resumen.gastos_sin_tc).toBe(1);
   });
 });

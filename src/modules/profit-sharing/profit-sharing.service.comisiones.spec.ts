@@ -19,8 +19,9 @@ jest.mock('../aircraft/aircraft.service', () => ({
 
 import {
   PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+  PAGO_VENDEDOR_AVION_OTRO_PERIODO_CLAVE_DETALLE,
+  PAGO_VENDEDOR_AVION_VUELATOUR_CLAVE_DETALLE,
   PAGO_VENDEDOR_CLAVE_DETALLE,
-  PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE,
   ProfitSharingService,
 } from './profit-sharing.service';
 import { AircraftBalanceService } from '../aircraft/aircraft-balance.service';
@@ -28,9 +29,11 @@ import type { SupabaseService } from '../supabase/supabase.service';
 import type { BalanceAvionPayload } from '../pyservices/pyservices.service';
 import {
   AV,
+  AVION,
   DESDE,
   HASTA,
   V1,
+  VUELATOUR,
   fakeSupabase,
   gastoComision,
   mundoCon,
@@ -47,12 +50,16 @@ import {
  * aquí en USD — en `comisiones_venta_usd`, el campo que el PDF/XLSX y el
  * panel ya restan en la cascada del saldo.
  *
- * 13-oct-2026 (API 0.0.74, invariante 61; decisión 3 del lote del cliente):
- * la parte del VENDEDOR es su PAGO REAL — Σ de los gastos «Comisión del
- * vendedor» ligados al vuelo (lectura POR VUELO, de cualquier fecha_gasto:
- * cuenta en el MES DEL VUELO), convertidos con tc_gasto ?? K — y solo en
- * vuelos COMPLETADOS con comisión cotizada; sin gasto no se resta nada (la
- * provisión de 80 USD murió).
+ * 13-oct-2026 (API 0.0.74, invariante 61; decisión 3 del lote del cliente
+ * ajustada el mismo día: DOS categorías): la parte del VENDEDOR es el pago
+ * capturado como «Comisión del vendedor (avión)» — Σ de esos gastos ligados
+ * al vuelo (lectura POR VUELO, de cualquier fecha_gasto: cuenta en el MES DEL
+ * VUELO), convertidos con tc_gasto ?? K — con el vuelo COMPLETADO o
+ * CANCELADO con cobros retenidos, en CUALQUIER fecha (la vigencia ya solo
+ * gobierna la parte bancaria). La «Comisión del vendedor (VuelaTour)» nunca
+ * resta en el reparto. Sin pago no se resta nada (la provisión de 80 USD
+ * murió). Los casos de absorción de la D3 se re-apuntaron a la «(avión)»
+ * (`conPagoReal`) con las MISMAS cifras.
  *
  * Mundo de los libros: #501 COMPLETADO de XB-TST (10-sep, K 20), 2,230 USD
  * = 2,000 de tiempo + 100 TUAS + 50 extras + 80 de comisión del vendedor;
@@ -269,11 +276,33 @@ function diferencias(a: unknown, b: unknown, ruta = ''): string[] {
   return [ruta];
 }
 
-/** #501 + un gasto real «Comisión del vendedor» (MXN, sin tc_gasto). */
-const conPagoReal = (monto: number, extra: Fila = {}) =>
+/**
+ * #501 + un pago real al vendedor (MXN, sin tc_gasto): «Comisión del
+ * vendedor (avión)» por default; `VUELATOUR` para la que paga VuelaTour.
+ */
+const conPagoReal = (
+  monto: number,
+  extra: Fila = {},
+  categoria: typeof VUELATOUR | typeof AVION = AVION,
+) =>
   mundoReparto({
-    gasto: mundoCon({ gastos: [gastoComision('g-cv', monto, extra)] }).gasto,
+    gasto: mundoCon({
+      gastos: [gastoComision('g-cv', monto, extra, categoria)],
+    }).gasto,
   });
+
+/** Las CUATRO claves EXCLUIDO del pago al vendedor (comparación EXACTA). */
+const CLAVES_PAGO_VENDEDOR = new Set([
+  PAGO_VENDEDOR_CLAVE_DETALLE,
+  PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+  PAGO_VENDEDOR_AVION_OTRO_PERIODO_CLAVE_DETALLE,
+  PAGO_VENDEDOR_AVION_VUELATOUR_CLAVE_DETALLE,
+]);
+/** La fila EXCLUIDO del pago al vendedor del detalle (si la hay). */
+const filaPagoVendedor = (a: Avion) =>
+  a.detalle.gastos_por_categoria.find((x) =>
+    CLAVES_PAGO_VENDEDOR.has(x.categoria),
+  );
 
 /** El multi-avión #503 (XB-TST + un tramo de XB-DOS, K 18). */
 function mundoMultiAvion(gastos: Fila[] = []): Record<string, Fila[]> {
@@ -411,11 +440,7 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
     expect(sep.ingresos.comisiones_venta_usd).toBe(95.7);
     expect(sep.saldo_disponible_usd).toBe(1698.02);
     // En septiembre el gasto no llega por fecha_gasto: no hay fila EXCLUIDO.
-    expect(
-      sep.detalle.gastos_por_categoria.some((x) =>
-        x.categoria.startsWith('COMISION_VENDEDOR'),
-      ),
-    ).toBe(false);
+    expect(filaPagoVendedor(sep)).toBeUndefined();
     const oct = (
       await svc.compute({ desde: '2026-10-01', hasta: '2026-10-31' })
     ).aviones[0];
@@ -423,12 +448,8 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
     expect(oct.gastos.directos_usd).toBe(0);
     expect(oct.gastos.indirectos_usd).toBe(0);
     expect(oct.gastos.permisos_usd).toBe(0);
-    expect(
-      oct.detalle.gastos_por_categoria.find((x) =>
-        x.categoria.startsWith('COMISION_VENDEDOR'),
-      ),
-    ).toMatchObject({
-      categoria: PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE,
+    expect(filaPagoVendedor(oct)).toMatchObject({
+      categoria: PAGO_VENDEDOR_AVION_OTRO_PERIODO_CLAVE_DETALLE,
       grupo: 'EXCLUIDO',
     });
   });
@@ -469,11 +490,7 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
       b.gastos.gastos_sin_tc_count,
       b.gastos.gastos_sin_tc_mxn,
     ]);
-    expect(
-      a.detalle.gastos_por_categoria.find((x) =>
-        x.categoria.startsWith('COMISION_VENDEDOR'),
-      ),
-    ).toMatchObject({
+    expect(filaPagoVendedor(a)).toMatchObject({
       categoria: PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
       grupo: 'EXCLUIDO',
       usd: 80,
@@ -487,7 +504,14 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
     const gastos: Fila[] = Array.from({ length: 1001 }, (_, i) => ({
       id: `g-${String(i).padStart(5, '0')}`,
       vuelo_id: 'v-x0',
-      categoria: i === 1000 ? 'COMISION_VENDEDOR' : 'OPERACIONES',
+      // Las DOS categorías (13-oct-2026): la «(VuelaTour)» en la 1.ª página
+      // y la «(avión)» en la fila 1,001 (2.ª página).
+      categoria:
+        i === 1000
+          ? 'COMISION_VENDEDOR_AVION'
+          : i === 0
+            ? 'COMISION_VENDEDOR'
+            : 'OPERACIONES',
       monto: 10,
       moneda: 'MXN',
       tc_gasto: null,
@@ -501,10 +525,11 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         ) => Promise<Map<string, Fila[]>>;
       }
     ).fetchGastosVendedorDeVuelos(ids);
-    // Solo la categoría: el mapa no guarda los OPERACIONES.
+    // Solo las dos categorías (la UNIÓN): el mapa no guarda los OPERACIONES.
     expect([...mapa.keys()]).toEqual(['v-x0']);
     expect(mapa.get('v-x0')!.map((g) => g.categoria)).toEqual([
       'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
     ]);
     const llamadas = consultasVendedor(consultasGasto);
     const lotes = llamadas.map(
@@ -542,20 +567,52 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         'aviones.0.saldo_disponible_usd',
       ].sort(),
     );
-    // Antes de la vigencia un gasto real tampoco resta: VuelaTour lo paga.
+    // Antes de la vigencia una «(VuelaTour)» tampoco resta: la paga VuelaTour.
     const conGasto = (
-      await armar(conPagoReal(1600), POSTERIOR).svc.compute({
+      await armar(conPagoReal(1600, {}, VUELATOUR), POSTERIOR).svc.compute({
         desde: DESDE,
         hasta: HASTA,
       })
     ).aviones[0];
     expect(conGasto.ingresos.comisiones_venta_usd).toBe(0);
     expect(conGasto.saldo_disponible_usd).toBe(1793.72);
-    expect(
-      conGasto.detalle.gastos_por_categoria.find((x) =>
-        x.categoria.startsWith('COMISION_VENDEDOR'),
-      )?.categoria,
-    ).toBe(PAGO_VENDEDOR_CLAVE_DETALLE);
+    expect(filaPagoVendedor(conGasto)?.categoria).toBe(
+      PAGO_VENDEDOR_CLAVE_DETALLE,
+    );
+    // Una «(avión)» SÍ: la elección explícita manda en cualquier fecha
+    // (13-oct-2026) — solo ella, sin la parte bancaria (que es de la
+    // vigencia), y con las llaves del detalle.
+    const conAvion = (
+      await armar(conPagoReal(1600), POSTERIOR).svc.compute({
+        desde: DESDE,
+        hasta: HASTA,
+      })
+    ).aviones[0];
+    expect(conAvion.ingresos.comisiones_venta_usd).toBe(80);
+    expect(conAvion.saldo_disponible_usd).toBe(r2(1793.72 - 80));
+    const v = conAvion.detalle.vuelos.find((x) => x.id === V1)!;
+    expect([
+      v.comisiones_avion_usd,
+      v.comision_banco_avion_usd,
+      v.comision_vendedor_real_usd,
+    ]).toEqual([80, 0, 80]);
+    expect(filaPagoVendedor(conAvion)?.categoria).toBe(
+      PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+    );
+  });
+
+  it('«(VuelaTour)» en la vigencia: `comisiones_venta_usd` = SOLO la parte bancaria (el pago lo paga VuelaTour en «otros movimientos»)', async () => {
+    const a = await avion(conPagoReal(1600, {}, VUELATOUR));
+    expect(a.ingresos.comisiones_venta_usd).toBe(15.7);
+    expect(a.saldo_disponible_usd).toBe(1778.02);
+    const v = a.detalle.vuelos.find((x) => x.id === V1)!;
+    expect(v.comision_vendedor_real_usd).toBe(0);
+    expect(filaPagoVendedor(a)).toMatchObject({
+      categoria: PAGO_VENDEDOR_CLAVE_DETALLE,
+      grupo: 'EXCLUIDO',
+      etiqueta:
+        'Comisión del vendedor (VuelaTour) · egreso en «otros movimientos» del Balance general',
+    });
   });
 
   it('lee la vigencia de `comisiones_al_avion_desde` UNA vez y trae la comisión de cada cobro', async () => {
@@ -572,7 +629,7 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
     }
   });
 
-  it('CANCELADO con dinero retenido: el avión absorbe la comisión bancaria COMPLETA y NO el pago al vendedor, aunque haya gasto real (lo paga VuelaTour)', async () => {
+  it('CANCELADO con dinero retenido: el avión absorbe la comisión bancaria COMPLETA y NO la «(VuelaTour)» (la paga VuelaTour)', async () => {
     for (const gastos of [[], [gastoComision('g-cv', 1600)]]) {
       const a = await avion(
         mundoReparto({
@@ -590,29 +647,74 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
     }
   });
 
-  it('CONFIRMADO con gasto real: el reparto no lee el vuelo (solo COMPLETADO y CANCELADO) ⇒ no resta; por fecha_gasto sale EXCLUIDO «vuelo de otro periodo o aún no completado»', async () => {
+  it('CANCELADO con dinero retenido + «(avión)» (13-oct-2026): el avión SÍ la carga (el reparto lee el vuelo); SIN cobros retenidos el reparto se salta el vuelo (`retieneCobros`) y la clave dice que la paga VuelaTour', async () => {
+    const cancelado = mundoCon({ v1: { estado: 'CANCELADO' } }).vuelo;
     const a = await avion(
       mundoReparto({
-        vuelo: mundoCon({ v1: { estado: 'CONFIRMADO' } }).vuelo,
-        gasto: mundoCon({ gastos: [gastoComision('g-cv', 1600)] }).gasto,
+        vuelo: cancelado,
+        gasto: mundoCon({
+          gastos: [gastoComision('g-cv', 1600, {}, AVION)],
+        }).gasto,
       }),
     );
-    expect(a.ingresos.comisiones_venta_usd).toBe(0);
-    expect(a.detalle.vuelos).toHaveLength(0);
-    expect(
-      a.detalle.gastos_por_categoria.find((x) =>
-        x.categoria.startsWith('COMISION_VENDEDOR'),
-      )?.categoria,
-    ).toBe(PAGO_VENDEDOR_OTRO_PERIODO_CLAVE_DETALLE);
+    const v = a.detalle.vuelos.find((x) => x.id === V1)!;
+    expect([v.comision_banco_avion_usd, v.comision_vendedor_real_usd]).toEqual([
+      17.5, 80,
+    ]);
+    expect(a.ingresos.comisiones_venta_usd).toBe(97.5);
+    expect(a.saldo_disponible_usd).toBe(r2(2000 - 97.5));
+    expect(filaPagoVendedor(a)?.categoria).toBe(
+      PAGO_VENDEDOR_AVION_CLAVE_DETALLE,
+    );
+    // Sin cobros: el vuelo no entra al reparto (mismo criterio que antes) y
+    // la «(avión)» no la carga nadie.
+    const sinCobros = await avion(
+      mundoReparto({
+        vuelo: cancelado,
+        cobro_vuelo: [],
+        gasto: mundoCon({
+          gastos: [gastoComision('g-cv', 1600, {}, AVION)],
+        }).gasto,
+      }),
+    );
+    expect(sinCobros.detalle.vuelos).toHaveLength(0);
+    expect(sinCobros.ingresos.comisiones_venta_usd).toBe(0);
+    expect(filaPagoVendedor(sinCobros)?.categoria).toBe(
+      PAGO_VENDEDOR_AVION_VUELATOUR_CLAVE_DETALLE,
+    );
+  });
+
+  it('CONFIRMADO con pago real: el reparto no lee el vuelo (solo COMPLETADO y CANCELADO) ⇒ no resta; por fecha_gasto la «(avión)» sale EXCLUIDO «vuelo de otro periodo o aún no completado» y la «(VuelaTour)» con la suya', async () => {
+    for (const [categoria, clave] of [
+      [AVION, PAGO_VENDEDOR_AVION_OTRO_PERIODO_CLAVE_DETALLE],
+      [VUELATOUR, PAGO_VENDEDOR_CLAVE_DETALLE],
+    ] as const) {
+      const a = await avion(
+        mundoReparto({
+          vuelo: mundoCon({ v1: { estado: 'CONFIRMADO' } }).vuelo,
+          gasto: mundoCon({
+            gastos: [gastoComision('g-cv', 1600, {}, categoria)],
+          }).gasto,
+        }),
+      );
+      expect(a.ingresos.comisiones_venta_usd).toBe(0);
+      expect(a.detalle.vuelos).toHaveLength(0);
+      expect(filaPagoVendedor(a)?.categoria).toBe(clave);
+    }
   });
 
   it('MULTI-AVIÓN: cada avión descuenta SU parte (repartirUsd) de la bancaria y del pago REAL; Σ de los dos == comisión × factor + el gasto', async () => {
     const sinPago = mundoMultiAvion();
     const pago1800 = mundoMultiAvion([
-      gastoComision('g-cv-3', 1800, {
-        vuelo_id: V3,
-        vuelo: { folio: 503, aeronave_id: AV },
-      }),
+      gastoComision(
+        'g-cv-3',
+        1800,
+        {
+          vuelo_id: V3,
+          vuelo: { folio: 503, aeronave_id: AV },
+        },
+        AVION,
+      ),
     ]);
     const parte = async (mundo: Record<string, Fila[]>, id: string) =>
       (await avion(mundo, undefined, id)).detalle.vuelos.find(
@@ -654,7 +756,7 @@ describe('Reparto a socios — COMISIONES a cargo del avión (API 0.0.65; pago R
         gasto: mundoCon({ gastos }).gasto,
       });
     const sin = await avion(sinK([]));
-    const con = await avion(sinK([gastoComision('g-cv', 1600)]));
+    const con = await avion(sinK([gastoComision('g-cv', 1600, {}, AVION)]));
     expect(
       con.detalle.vuelos.find((x) => x.id === V1)!.comision_vendedor_real_usd,
     ).toBe(0);
@@ -750,25 +852,38 @@ describe('Reparto ↔ balance por avión: las MISMAS comisiones (fuente única)'
 });
 
 describe('Reparto — COMISIONES: revisión 6-oct-2026', () => {
-  it('la vigencia se corta por DÍA CANCÚN del vuelo: 31-ago 23:00 Cancún (1-sep 04:00 UTC) no aplica; 1-sep 00:00 Cancún sí', async () => {
-    const enFecha = async (fecha: string) => {
+  it('la vigencia (de la parte BANCARIA) se corta por DÍA CANCÚN del vuelo: 31-ago 23:00 Cancún (1-sep 04:00 UTC) no aplica; 1-sep 00:00 Cancún sí — la «(avión)» resta en los dos', async () => {
+    const enFecha = async (fecha: string, gastos: Fila[]) => {
       const m = mundoReparto({
         vuelo: mundoCon({ v1: { fecha_vuelo: fecha } }).vuelo,
-        gasto: mundoCon({ gastos: [gastoComision('g-cv', 1600)] }).gasto,
+        gasto: mundoCon({ gastos }).gasto,
       });
       const { svc } = armar(m);
       const r = await svc.compute({ desde: '2026-08-01', hasta: HASTA });
       return r.aviones.find((x) => x.aeronave.id === AV)!;
     };
-    const agosto = await enFecha('2026-09-01T04:00:00+00:00');
+    const agosto = await enFecha('2026-09-01T04:00:00+00:00', []);
     expect(agosto.ingresos.comisiones_venta_usd).toBe(0);
     expect(agosto.saldo_disponible_usd).toBe(1793.72);
     expect(
       'comisiones_avion_usd' in agosto.detalle.vuelos.find((x) => x.id === V1)!,
     ).toBe(false);
-    const septiembre = await enFecha('2026-09-01T05:00:00+00:00');
-    // Banco 15.70 + pago real 1,600 ÷ 20 = 80.
-    expect(septiembre.ingresos.comisiones_venta_usd).toBe(95.7);
+    const septiembre = await enFecha('2026-09-01T05:00:00+00:00', []);
+    expect(septiembre.ingresos.comisiones_venta_usd).toBe(15.7);
+    // Con una «(avión)» de 1,600 (÷ 20 = 80): agosto solo el pago (sin la
+    // bancaria) y con las llaves del detalle; septiembre banco + pago.
+    const pago = [gastoComision('g-cv', 1600, {}, AVION)];
+    const agostoPago = await enFecha('2026-09-01T04:00:00+00:00', pago);
+    expect(agostoPago.ingresos.comisiones_venta_usd).toBe(80);
+    const vAgo = agostoPago.detalle.vuelos.find((x) => x.id === V1)!;
+    expect([
+      vAgo.comision_banco_avion_usd,
+      vAgo.comision_vendedor_real_usd,
+    ]).toEqual([0, 80]);
+    expect(
+      (await enFecha('2026-09-01T05:00:00+00:00', pago)).ingresos
+        .comisiones_venta_usd,
+    ).toBe(95.7);
   });
 
   it('vuelo SIN T.C. capturado con un cobro MXN sin T.C. propio: la comisión bancaria y el pago real se convierten con el T.C. oficial del día de la cotización (la cadena de `cobrosEnUsd`)', async () => {
@@ -780,7 +895,8 @@ describe('Reparto — COMISIONES: revisión 6-oct-2026', () => {
           fecha_solicitud: '2026-09-01T15:00:00+00:00',
         },
       }).vuelo,
-      gasto: mundoCon({ gastos: [gastoComision('g-cv', 1500)] }).gasto,
+      gasto: mundoCon({ gastos: [gastoComision('g-cv', 1500, {}, AVION)] })
+        .gasto,
     });
     m.cobro_vuelo = m.cobro_vuelo.map((c) =>
       c.id === 'c-1' ? { ...c, tc_usd_mxn: null } : c,
@@ -806,18 +922,24 @@ describe('Reparto — COMISIONES: revisión 6-oct-2026', () => {
 });
 
 describe('Reparto ↔ balance por avión — revisión 6-oct-2026', () => {
-  it('vuelos AÚN NO realizados (COTIZADO, RESERVA, CONFIRMADO) con comisión del vendedor y hasta con gasto real: ni el balance ni el reparto se los cargan al avión ⇒ Δ utilidad cobrada del balance == Δ saldo del reparto', async () => {
+  it('vuelos AÚN NO realizados (COTIZADO, RESERVA, CONFIRMADO) con comisión del vendedor y hasta con una «(avión)»: ni el balance ni el reparto se los cargan al avión ⇒ Δ utilidad cobrada del balance == Δ saldo del reparto', async () => {
     const base = mundoConNoRealizados();
     const mundo = {
       ...base,
       gasto: [
         ...base.gasto,
-        gastoComision('g-cv', 1600),
-        // Pago real del #512 CONFIRMADO: lo paga VuelaTour (no el avión).
-        gastoComision('g-cv-512', 500, {
-          vuelo_id: 'v-12',
-          vuelo: { folio: 512, aeronave_id: AV },
-        }),
+        gastoComision('g-cv', 1600, {}, AVION),
+        // «(avión)» del #512 CONFIRMADO: fuera del universo, la paga
+        // VuelaTour (no el avión) hasta que se complete.
+        gastoComision(
+          'g-cv-512',
+          500,
+          {
+            vuelo_id: 'v-12',
+            vuelo: { folio: 512, aeronave_id: AV },
+          },
+          AVION,
+        ),
       ],
     };
     const balanceCon = await libroBalance(mundo);
@@ -831,8 +953,11 @@ describe('Reparto ↔ balance por avión — revisión 6-oct-2026', () => {
       (balanceCon.balance.utilidad_cobrada_usd ?? 0) -
         (balanceAntes.balance.utilidad_cobrada_usd ?? 0),
     );
-    // Banco 15.70 + el pago real del #501 (80): el del #512 no.
-    expect(dSaldo).toBe(-95.7);
+    // La «(avión)» del #501 resta en las DOS reglas (no depende de la
+    // vigencia): la diferencia es SOLO la bancaria (15.70); el #512 nunca.
+    expect(dSaldo).toBe(-15.7);
+    expect(repartoCon.ingresos.comisiones_venta_usd).toBe(95.7);
+    expect(repartoAntes.ingresos.comisiones_venta_usd).toBe(80);
     // Solo el redondeo de la ganancia USD de la fila (centavos).
     expect(Math.abs(dCobrada - dSaldo)).toBeLessThan(0.02);
     expect(balanceCon.totales.comision_vendedor_real_mxn).toBe(1600);
@@ -853,7 +978,8 @@ describe('Reparto ↔ balance por avión — revisión 6-oct-2026', () => {
           fecha_solicitud: '2026-09-01T15:00:00+00:00',
         },
       }).vuelo,
-      gasto: mundoCon({ gastos: [gastoComision('g-cv', 1500)] }).gasto,
+      gasto: mundoCon({ gastos: [gastoComision('g-cv', 1500, {}, AVION)] })
+        .gasto,
     });
     mundo.cobro_vuelo = mundo.cobro_vuelo.map((c) =>
       c.id === 'c-1' ? { ...c, tc_usd_mxn: null } : c,

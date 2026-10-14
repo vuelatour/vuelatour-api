@@ -620,11 +620,23 @@ export const GOLDEN_DINERO = {
 
 // ===== Constructores para los casos de la comisión del vendedor =====
 
-/** Gasto `COMISION_VENDEDOR` ligado al vuelo #501 (con avión sellado). */
+/** Las dos categorías del pago al vendedor (13-oct-2026, invariante 61). */
+export const VUELATOUR = 'COMISION_VENDEDOR';
+export const AVION = 'COMISION_VENDEDOR_AVION';
+
+/**
+ * Pago al vendedor ligado al vuelo #501 (con avión sellado). `categoria`
+ * (13-oct-2026, invariante 61): «Comisión del vendedor (VuelaTour)» por
+ * default (la paga VuelaTour en «otros movimientos», byte a byte con el
+ * 0.0.73) o «Comisión del vendedor (avión)» (`AVION`: la carga el avión en
+ * su columna COMISIONES; los casos de absorción de la D3 se re-apuntaron
+ * aquí con las mismas cifras).
+ */
 export function gastoComision(
   id: string,
   monto: number,
   extra: Fila = {},
+  categoria: typeof VUELATOUR | typeof AVION = VUELATOUR,
 ): Fila {
   return {
     ...gastoBase,
@@ -632,7 +644,7 @@ export function gastoComision(
     vuelo_id: V1,
     aeronave_id: AV,
     vuelo: { folio: 501, aeronave_id: AV },
-    categoria: 'COMISION_VENDEDOR',
+    categoria,
     monto,
     ...extra,
   };

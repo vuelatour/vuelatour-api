@@ -38,23 +38,38 @@ export enum CategoriaGasto {
   PERMISO = 'PERMISO',
   /** Honorario del piloto externo (freelance sin acceso; lo captura oficina). */
   PILOTO_EXTERNO = 'PILOTO_EXTERNO',
-  /** Pago al VENDEDOR de su comisión (28-sep-2026, pedido del cliente: «¿cómo
-   *  le pago la comisión a Saab sin que quede duplicada?»). Invariante 31 del
-   *  CLAUDE.md del API:
+  /** «Comisión del vendedor (VuelaTour)»: pago al VENDEDOR de su comisión
+   *  que paga VuelaTour (28-sep-2026, pedido del cliente: «¿cómo le pago la
+   *  comisión a Saab sin que quede duplicada?»; etiqueta «(VuelaTour)» desde
+   *  el 13-oct-2026). Invariantes 31 y 61 del CLAUDE.md del API:
    *  - Exige vuelo para TODOS los roles (400 `GASTO_REQUIERE_VUELO`; CHECK
    *    `gasto_comision_vendedor_exige_vuelo` de respaldo); el avión se hereda
    *    del vuelo solo como referencia.
-   *  - NO es costo del avión (fila del vuelo, libro del avión, reparto,
-   *    ficha, tablero, grupo, reporte por vuelo) y NO va a «otros gastos».
-   *  - Vive en «otros movimientos» (Balance general) y «Otros ingresos»
-   *    (Libro Dinero) apareado con la comisión cobrada: en «Otros ingresos»
-   *    REEMPLAZA a la PROVISIÓN; en «otros movimientos» es el ÚNICO egreso
-   *    del vendedor (sin él la fila no lleva egreso: invariante 58,
-   *    12-oct-2026) (`pago-vendedor.util.ts`).
+   *  - SIEMPRE la paga VuelaTour en «otros movimientos» (Balance general) y
+   *    en «Otros ingresos» (Libro Dinero), apareada con la comisión cobrada
+   *    (sin pago capturado la fila no lleva egreso: invariantes 58 y 61). NO
+   *    es costo del avión en ningún libro (tampoco dentro de
+   *    `comisiones_al_avion_desde`) y NO va a «otros gastos». Si el pago le
+   *    toca al avión, se usa `COMISION_VENDEDOR_AVION`.
    *  - Monto libre (parcial/exacto/mayor), varios por vuelo, proveedor
    *    opcional, cualquier moneda. No repartible. La IA de tickets no la
    *    sugiere. */
   COMISION_VENDEDOR = 'COMISION_VENDEDOR',
+  /** «Comisión del vendedor (avión)»: pago al vendedor A CARGO DEL AVIÓN
+   *  (13-oct-2026, pedido del cliente: «una opcion que sea Comision del
+   *  vendedor pero que esa opcion si se cargue al balance del avión»;
+   *  invariante 61 del CLAUDE.md del API):
+   *  - Exige vuelo para TODOS los roles (400 `GASTO_REQUIERE_VUELO` y, de
+   *    respaldo, el CHECK `gasto_comision_vendedor_avion_exige_vuelo`).
+   *  - El avión del gasto es solo referencia. Lo carga el avión del vuelo
+   *    SOLO por `comisionesDelVuelo`: vuelo COMPLETADO o CANCELADO con cobros
+   *    retenidos, por participación (multi-avión), en el MES DEL VUELO, en
+   *    su columna COMISIONES y en el reparto. Fuera de eso lo egresa
+   *    VuelaTour en «otros movimientos», con aviso.
+   *  - No es repartible, no lleva TUA embebido, no se liga a compras y la IA
+   *    no la sugiere.
+   *  - La migración 20261013000003 (valor del enum) va ANTES del API. */
+  COMISION_VENDEDOR_AVION = 'COMISION_VENDEDOR_AVION',
   FIJO = 'FIJO',
   /** Gasto indirecto de la operación (SIN vuelo; avión opcional). Por ahora
    *  fuera del reparto y de la bandeja de pendientes — pendiente de decidir

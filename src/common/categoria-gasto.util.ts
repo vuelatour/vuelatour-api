@@ -22,6 +22,23 @@
  * enum llegaría undefined al evaluar los records). El tipado
  * `Record<CategoriaGasto, string>` obliga a completar TODAS las claves: una
  * categoría nueva en el enum no compila hasta tener etiqueta y destino.
+ *
+ * DOS CATEGORÍAS DEL PAGO AL VENDEDOR (13-oct-2026, API 0.0.74, invariante
+ * 61 del CLAUDE.md del API; pedido del cliente: «necesitamos una opcion que
+ * sea Comision del vendedor pero que esa opcion si se cargue al balance del
+ * avión, y dejamos el otro que se va a balance de vuelatour»):
+ *  - `COMISION_VENDEDOR` = «Comisión del vendedor (VuelaTour)»: SIEMPRE la
+ *    paga VuelaTour («otros movimientos»); nunca es costo del avión.
+ *  - `COMISION_VENDEDOR_AVION` = «Comisión del vendedor (avión)»: la carga el
+ *    avión del vuelo en su columna COMISIONES y en el reparto (SOLO por la
+ *    fuente única `comisionesDelVuelo`).
+ * TODA comparación de estas categorías es EXACTA (`Set.has` / `===`):
+ * PROHIBIDO `startsWith` / `includes` / LIKE / regex sin ancla con
+ * 'COMISION_VENDEDOR', porque es PREFIJO de 'COMISION_VENDEDOR_AVION'. El
+ * eje genérico («¿es pago al vendedor?», «¿queda fuera del costo genérico
+ * del avión?») usa la UNIÓN (`categoriaEsPagoVendedor`,
+ * `CATEGORIAS_GASTO_FUERA_DEL_AVION`); QUIÉN paga lo decide SOLO
+ * `ladoPagoVendedor`.
  */
 import type { CategoriaGasto } from '../modules/expenses/dto/expenses.dto';
 
@@ -38,9 +55,13 @@ export const CATEGORIA_GASTO_LABEL: Record<CategoriaGasto, string> = {
   REFACCION: 'Refacción',
   PERMISO: 'Permiso',
   PILOTO_EXTERNO: 'Piloto externo (honorario)',
-  /** Pago al vendedor (28-sep-2026): se aparea con la comisión cobrada en
-   *  «otros movimientos» (invariante 31 del CLAUDE.md del API). */
-  COMISION_VENDEDOR: 'Comisión del vendedor',
+  /** Pago al vendedor que paga VuelaTour (28-sep-2026; «(VuelaTour)» desde
+   *  el 13-oct-2026): se aparea con la comisión cobrada en «otros
+   *  movimientos» (invariantes 31 y 61 del CLAUDE.md del API). */
+  COMISION_VENDEDOR: 'Comisión del vendedor (VuelaTour)',
+  /** Pago al vendedor a cargo del avión (13-oct-2026, invariante 61): resta
+   *  en la columna COMISIONES del avión del vuelo y en su reparto. */
+  COMISION_VENDEDOR_AVION: 'Comisión del vendedor (avión)',
   /** Legado, solo lectura (fuera de los selectores desde el 2-sep-2026). */
   FIJO: 'Gasto fijo',
   INDIRECTO: 'Gastos indirectos de avión',
@@ -64,10 +85,14 @@ export const CATEGORIA_GASTO_DESTINO: Record<CategoriaGasto, string> = {
   HOTEL: 'Gastos directos del vuelo (en el balance del avión)',
   TAXI: 'Gastos directos del vuelo (en el balance del avión)',
   PILOTO_EXTERNO: 'Gastos directos del vuelo (en el balance del avión)',
-  // NO empieza con «Gastos directos del vuelo» ni es el destino de EMPRESA:
-  // no es costo del avión ni va a «otros gastos» (invariante 31).
+  // Las dos del pago al vendedor (13-oct-2026, invariante 61): NO empiezan
+  // con «Gastos directos del vuelo» ni son el destino de EMPRESA ⇒
+  // `CATEGORIAS_GASTO_EMPRESA` NO cambia (ninguna va a «otros gastos»). Los
+  // textos son simétricos a propósito («no es / sí es costo del avión»).
   COMISION_VENDEDOR:
     'Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
+  COMISION_VENDEDOR_AVION:
+    'Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
   REFACCION:
     'Inventario en el Balance general VuelaTour; al salir del inventario se vende al avión y cae en sus Gastos Indirectos',
   PERMISO: 'Hoja de permisos (en el balance del avión)',
@@ -128,6 +153,16 @@ export function categoriaEsDeEmpresa(cat: string | null | undefined): boolean {
  *
  * `SERVICIOS` y `REFACCION` NO están: sin avión SÍ son pendientes reales.
  * Se expone como arreglo de strings para armar el `not.in(...)` de PostgREST.
+ *
+ * `COMISION_VENDEDOR_AVION` NO está A PROPÓSITO (13-oct-2026, invariante
+ * 61): este arreglo arma el `not.in(...)` de PostgREST y un literal que el
+ * enum de la BD todavía no conoce revienta la LECTURA (22P02) — la bandeja,
+ * la sugerencia por IA y la alerta diaria se caerían con un API desplegado
+ * antes de la migración 20261013000003. Consecuencia aceptada: una
+ * «Comisión del vendedor (avión)» con `aeronave_id` null (vuelo sin avión
+ * de la flota) sale en la bandeja «sin avión», en la alerta y en el
+ * pre-cierre (los cuatro usan ESTA MISMA lista); asignarle avión al gasto NO
+ * cambia quién paga: la salida es reclasificarla a «(VuelaTour)».
  */
 export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
   ...CATEGORIAS_GASTO_EMPRESA,
@@ -145,34 +180,74 @@ export const CATEGORIAS_GASTO_SIN_AVION: readonly string[] = [
  * COMISIÓN DEL VENDEDOR como gasto (pedido del cliente, 28-sep-2026: «¿cómo
  * registro el pago de la comisión a Saab para que aparezca en otros
  * movimientos? Si lo capturo como "Otros gastos VuelaTour" queda
- * duplicado»). Invariante 31 del CLAUDE.md del API.
+ * duplicado»). Invariantes 31 y 61 del CLAUDE.md del API.
  *
- * El pago al vendedor es dinero de VuelaTour (la comisión cobrada es ingreso
- * de VuelaTour, regla 28-ago-2026): NO es costo de ningún avión, NO va a la
+ * `CATEGORIA_PAGO_VENDEDOR` = «Comisión del vendedor (VuelaTour)»: el pago
+ * al vendedor que paga VuelaTour (la comisión cobrada es ingreso de
+ * VuelaTour, regla 28-ago-2026). NO es costo de ningún avión, NO va a la
  * hoja «otros gastos», y se APAREA con la línea de comisión cobrada del
- * vuelo: en «Otros ingresos» (Libro Dinero) REEMPLAZA a la PROVISIÓN; en
- * «otros movimientos» (Balance general) es el único egreso del vendedor
- * (sin él la fila no lleva egreso: invariante 58, 12-oct-2026)
- * (`src/common/pago-vendedor.util.ts`).
+ * vuelo en «otros movimientos» (Balance general) y en «Otros ingresos»
+ * (Libro Dinero) (`src/common/pago-vendedor.util.ts`); sin pago capturado
+ * la fila no lleva egreso (invariantes 58 y 61).
  */
 export const CATEGORIA_PAGO_VENDEDOR = 'COMISION_VENDEDOR';
 
-/** ¿Es el pago real al vendedor (categoría «Comisión del vendedor»)? */
+/**
+ * «Comisión del vendedor (avión)» (13-oct-2026, invariante 61): el pago al
+ * vendedor que CARGA EL AVIÓN del vuelo en su columna COMISIONES y en el
+ * reparto a socios (vuelo COMPLETADO o CANCELADO con cobros retenidos, por
+ * participación, en el mes del vuelo; fuente única `comisionesDelVuelo`).
+ * Fuera de ese universo la paga VuelaTour en «otros movimientos», con aviso.
+ */
+export const CATEGORIA_PAGO_VENDEDOR_AVION = 'COMISION_VENDEDOR_AVION';
+
+/** Quién paga un pago al vendedor: VuelaTour o el avión del vuelo. */
+export type LadoPagoVendedor = 'VUELATOUR' | 'AVION';
+
+/** Las DOS categorías del pago al vendedor (comparación EXACTA). */
+export const CATEGORIAS_GASTO_PAGO_VENDEDOR: ReadonlySet<string> = new Set([
+  CATEGORIA_PAGO_VENDEDOR,
+  CATEGORIA_PAGO_VENDEDOR_AVION,
+]);
+
+/**
+ * ¿Es un pago al vendedor de CUALQUIERA de las dos categorías? Es el
+ * predicado del EJE GENÉRICO («¿es pago al vendedor?»: fuera del costo
+ * genérico del avión, fuera de Z, fuera del aviso de avión que no vuela,
+ * oculto al piloto…). QUIÉN lo paga lo decide SOLO `ladoPagoVendedor`.
+ * Igualdad exacta (`Set.has`): nada de prefijos.
+ */
 export function categoriaEsPagoVendedor(
   cat: string | null | undefined,
 ): boolean {
-  return cat === CATEGORIA_PAGO_VENDEDOR;
+  return !!cat && CATEGORIAS_GASTO_PAGO_VENDEDOR.has(cat);
+}
+
+/**
+ * Lado del pago al vendedor, por IGUALDAD EXACTA: «(VuelaTour)» ⇒
+ * 'VUELATOUR', «(avión)» ⇒ 'AVION', cualquier otra cosa (otra categoría,
+ * minúsculas, prefijos, 'COMISION_VENDEDOR_AVIONX', null) ⇒ null.
+ */
+export function ladoPagoVendedor(
+  cat: string | null | undefined,
+): LadoPagoVendedor | null {
+  if (cat === CATEGORIA_PAGO_VENDEDOR) return 'VUELATOUR';
+  if (cat === CATEGORIA_PAGO_VENDEDOR_AVION) return 'AVION';
+  return null;
 }
 
 /**
  * Vuelo obligatorio para TODOS los roles (la oficina incluida). A diferencia
  * de `categoriaExigeVuelo` —que el API solo impone al PILOTO: la oficina
  * carga gastos sueltos y los liga después—, una comisión sin vuelo no tiene
- * con qué aparearse y quedaría fuera de todo libro. Respaldo en BD: CHECK
- * `gasto_comision_vendedor_exige_vuelo` (20260928000002).
+ * con qué aparearse y quedaría fuera de todo libro. Las DOS categorías del
+ * pago al vendedor (13-oct-2026). Respaldo en BD: CHECKs
+ * `gasto_comision_vendedor_exige_vuelo` (20260928000002) y
+ * `gasto_comision_vendedor_avion_exige_vuelo` (20261013000004).
  */
 export const CATEGORIAS_GASTO_VUELO_OBLIGATORIO: ReadonlySet<string> = new Set([
   CATEGORIA_PAGO_VENDEDOR,
+  CATEGORIA_PAGO_VENDEDOR_AVION,
 ]);
 
 /** ¿La categoría exige vuelo para CUALQUIER rol? (ver arriba). */
@@ -183,17 +258,19 @@ export function categoriaExigeVueloSiempre(
 }
 
 /**
- * NO son costo de ningún avión aunque traigan vuelo/avión sellados: las de
- * EMPRESA (van a «otros gastos») ∪ {COMISION_VENDEDOR} (va a «otros
- * movimientos»). Fuente única de los lectores cuyo propósito es «¿resta al
- * avión / al vuelo?» (fila del vuelo del balance, ficha, tablero, grupo,
- * reporte por vuelo, acreditación del Libro Dinero). Los lectores que arman
- * la hoja «otros gastos» siguen usando `CATEGORIAS_GASTO_EMPRESA`: la
- * comisión NO va ahí.
+ * NO son costo GENÉRICO de ningún avión aunque traigan vuelo/avión sellados:
+ * las de EMPRESA (van a «otros gastos») ∪ las DOS del pago al vendedor.
+ * Fuente única de los lectores cuyo propósito es «¿resta al avión / al vuelo
+ * por el eje genérico?» (fila del vuelo del balance, ficha, tablero, grupo,
+ * reporte por vuelo, acreditación del Libro Dinero). La «Comisión del
+ * vendedor (avión)» entra a un libro SOLO por `comisionesDelVuelo` (columna
+ * COMISIONES y reparto), nunca por este eje: si un lector la sumara aquí,
+ * se contaría dos veces. Los lectores que arman la hoja «otros gastos»
+ * siguen usando `CATEGORIAS_GASTO_EMPRESA`: ninguna comisión va ahí.
  */
 export const CATEGORIAS_GASTO_FUERA_DEL_AVION: ReadonlySet<string> = new Set([
   ...CATEGORIAS_GASTO_EMPRESA,
-  CATEGORIA_PAGO_VENDEDOR,
+  ...CATEGORIAS_GASTO_PAGO_VENDEDOR,
 ]);
 
 /** ¿El gasto queda fuera del costo del avión/vuelo? (ver arriba). */
@@ -203,32 +280,72 @@ export function categoriaFueraDelAvion(
   return !!cat && CATEGORIAS_GASTO_FUERA_DEL_AVION.has(cat);
 }
 
-/** Texto del 400 cuando la BD todavía no tiene el valor nuevo del enum. */
-export const MENSAJE_CATEGORIA_SIN_MIGRACION =
-  '«Comisión del vendedor» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
+/**
+ * Migración que agrega cada categoría NUEVA al enum `categoria_gasto` (el
+ * 400 del cinturón la nombra).
+ */
+export const MIGRACION_DE_CATEGORIA: Readonly<Record<string, string>> = {
+  COMISION_VENDEDOR: '20260928000001',
+  COMISION_VENDEDOR_AVION: '20261013000003',
+};
 
 /**
- * 22P02 «invalid input value for enum categoria_gasto: "COMISION_VENDEDOR"»
+ * Texto del 400 cuando la BD todavía no tiene el valor de
+ * «Comisión del vendedor (VuelaTour)» (el de siempre, con la etiqueta nueva:
+ * `mensajeCategoriaSinMigracion` lo arma igual para cada categoría).
+ */
+export const MENSAJE_CATEGORIA_SIN_MIGRACION =
+  '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).';
+
+/**
+ * 22P02 «invalid input value for enum categoria_gasto: "COMISION_VENDEDOR_AVION"»
  * al ESCRIBIR ⇒ texto 400 (nunca 500: un 500 invita al outbox a reintentar).
  *
  * (Crítica 28-sep-2026) Es SOLO un cinturón del insert/update: NO hace que el
  * API tolere una BD sin la migración — las LECTURAS con el literal nuevo
- * (`not.in` de `CATEGORIAS_GASTO_SIN_AVION`, `.eq('categoria', …)` de los
- * candados anti-duplicado que corren ANTES del insert) revientan con 22P02
- * primero. La garantía real es el orden del despliegue (migración antes del
- * API). Se exige que la categoría ENVIADA sea COMISION_VENDEDOR y que el
- * mensaje hable del enum `categoria_gasto`.
+ * (`.eq('categoria', …)` de los candados anti-duplicado, best-effort, y el
+ * filtro `?categoria=` del listado) pueden reventar con 22P02. La garantía
+ * real es el orden del despliegue (migración antes del API). Devuelve texto
+ * SOLO si se cumplen las cuatro:
+ *  - la categoría ENVIADA está en `MIGRACION_DE_CATEGORIA`;
+ *  - `code === '22P02'`;
+ *  - el mensaje habla del enum `categoria_gasto`;
+ *  - el mensaje trae la categoría enviada ENTRE COMILLAS DOBLES (Postgres
+ *    cita el valor así): con un `includes` sin comillas, 'COMISION_VENDEDOR'
+ *    casaría con el mensaje de 'COMISION_VENDEDOR_AVION' (es su prefijo).
  */
 export function mensajeCategoriaSinMigracion(
   error: { code?: string | null; message?: string | null },
   categoriaEnviada: string | null | undefined,
 ): string | null {
-  if (!categoriaEsPagoVendedor(categoriaEnviada)) return null;
+  if (!categoriaEnviada) return null;
+  const migracion = MIGRACION_DE_CATEGORIA[categoriaEnviada];
+  if (!migracion) return null;
   if (error.code !== '22P02') return null;
   const msg = error.message ?? '';
   if (!/categoria_gasto/.test(msg)) return null;
-  if (!msg.includes(CATEGORIA_PAGO_VENDEDOR)) return null;
-  return MENSAJE_CATEGORIA_SIN_MIGRACION;
+  if (!msg.includes(`"${categoriaEnviada}"`)) return null;
+  return `«${etiquetaCategoriaGasto(categoriaEnviada)}» necesita la migración ${migracion} en la base de datos; avisa a sistemas (el gasto no se guardó).`;
+}
+
+/**
+ * 23514 de uno de los dos CHECK «exige vuelo» del pago al vendedor ⇒ la
+ * categoría que nombra el CHECK (la del 400 GASTO_REQUIERE_VUELO). Sale del
+ * NOMBRE del CHECK y no del dto: en un PATCH que solo quita el vuelo,
+ * `dto.categoria` viene undefined. El nombre viejo
+ * (`gasto_comision_vendedor_exige_vuelo`) NO es subcadena del nuevo
+ * (`gasto_comision_vendedor_avion_exige_vuelo`). Cualquier otro error ⇒ null.
+ */
+export function categoriaDeCheckExigeVuelo(error: {
+  code?: string | null;
+  message?: string | null;
+}): string | null {
+  if (error.code !== '23514') return null;
+  const m = /gasto_comision_vendedor(_avion)?_exige_vuelo/.exec(
+    error.message ?? '',
+  );
+  if (!m) return null;
+  return m[1] ? CATEGORIA_PAGO_VENDEDOR_AVION : CATEGORIA_PAGO_VENDEDOR;
 }
 
 /**
@@ -291,9 +408,11 @@ const CATEGORIAS_GASTO_SIEMPRE_DE_VUELO: ReadonlySet<string> = new Set([
   'TUAS',
   'PERMISO',
   'PILOTO_EXTERNO',
-  // COMISION_VENDEDOR (28-sep-2026): la comisión siempre es de un vuelo; su
-  // candado además aplica a TODOS los roles (`categoriaExigeVueloSiempre`).
+  // COMISION_VENDEDOR (28-sep-2026) y COMISION_VENDEDOR_AVION (13-oct-2026):
+  // la comisión siempre es de un vuelo; su candado además aplica a TODOS los
+  // roles (`categoriaExigeVueloSiempre`).
   'COMISION_VENDEDOR',
+  'COMISION_VENDEDOR_AVION',
 ]);
 
 /** Prefijo del destino que marca a una categoría como "del vuelo". */
@@ -306,8 +425,9 @@ const DESTINO_DIRECTO_DE_VUELO = 'Gastos directos del vuelo';
  * Regla: es del vuelo si su destino por default son los «Gastos directos del
  * vuelo» (ATERRIZAJE, OPERACIONES, TUAS, FBO, COMIDA, HOTEL, TAXI,
  * PILOTO_EXTERNO) o si está en la lista de arriba (PERMISO y, desde el
- * 28-sep-2026, COMISION_VENDEDOR — que además exige vuelo a TODOS los roles,
- * ver `categoriaExigeVueloSiempre`). Las de
+ * 28-sep-2026, COMISION_VENDEDOR —y desde el 13-oct-2026
+ * COMISION_VENDEDOR_AVION— que además exigen vuelo a TODOS los roles, ver
+ * `categoriaExigeVueloSiempre`). Las de
  * EMPRESA/indirectos (INDIRECTO, SERVICIOS, NOMINA, GASOLINA, OTRO, VISITA,
  * FIJO, PERSONAL_DUENO), REFACCION (va a inventario) y GAS (11-sep-2026: el
  * piloto también carga combustible en base) se capturan sin vuelo.

@@ -1,5 +1,7 @@
 import {
   AV,
+  AVION,
+  VUELATOUR,
   gastoComision,
   mundoLibros,
   vuelo2,
@@ -23,10 +25,10 @@ import {
  *    900 de comisión bancaria (sin avión que absorba nada).
  *  - #505 XB-DOS (22-sep, K 18): 1,150 USD = 1,000 + 150 de comisión (Pablo
  *    Canales); cobrado; PAGO REAL al vendedor 3,000 MXN > lo cobrado por la
- *    comisión (2,700).
+ *    comisión (2,700), capturado como «Comisión del vendedor (avión)».
  *  - #506 XB-TST (24-sep, K 18): 1,100 USD = 1,000 + 100 de comisión (Alex
  *    Saab); cobro Paywise 19,800 MXN con 594 de comisión; PAGO REAL 1,500 MXN
- *    < lo cobrado (1,800: parcial, faltan 300).
+ *    < lo cobrado (1,800: parcial, faltan 300), «(avión)».
  *  - #507 XB-DOS (4-sep, K 16.956) — el caso del cliente (#247): desglose
  *    v1.3 con IVA 16 %: 1,000 de tiempo + 278 de comisión (Pablo Canales) +
  *    204.48 de IVA = 1,482.48 USD; comisión + IVA cobrados = 322.48 USD ×
@@ -123,21 +125,32 @@ function cobro(
   };
 }
 
-/** Gasto `COMISION_VENDEDOR` (pago real al vendedor) ligado a un vuelo. */
-function pagoVendedor(
+/**
+ * Pago real al vendedor ligado a un vuelo. `categoria` (13-oct-2026,
+ * invariante 61): «Comisión del vendedor (avión)» por default — los goldens
+ * del cierre de la D3 (el avión absorbía el pago) se re-apuntaron a ella con
+ * las MISMAS cifras —; `VUELATOUR` para la «(VuelaTour)».
+ */
+export function pagoVendedor(
   id: string,
   vueloId: string,
   folio: number,
   avion: string,
   monto: number,
   fecha: string,
+  categoria: typeof VUELATOUR | typeof AVION = AVION,
 ): Fila {
-  return gastoComision(id, monto, {
-    vuelo_id: vueloId,
-    aeronave_id: avion,
-    vuelo: { folio, aeronave_id: avion },
-    fecha_gasto: fecha,
-  });
+  return gastoComision(
+    id,
+    monto,
+    {
+      vuelo_id: vueloId,
+      aeronave_id: avion,
+      vuelo: { folio, aeronave_id: avion },
+      fecha_gasto: fecha,
+    },
+    categoria,
+  );
 }
 
 /** El mundo del cierre (ver la cabecera). Nunca muta el mundo base. */
@@ -379,8 +392,8 @@ export function mundoDosSoloSinK(): Mundo {
  * `COMISION_VENDEDOR` en el desglose (100 + 50 USD, Pablo Canales): la
  * partición suma las dos (150 USD = 2,700 MXN cobrados) y «otros
  * movimientos» lista dos ingresos (1,800 + 900). `pagoMxn` = pago real al
- * vendedor (gasto `COMISION_VENDEDOR`; desde el API 0.0.74 lo carga el
- * avión en COMISIONES); null = sin pago.
+ * vendedor (gasto «Comisión del vendedor (avión)»: desde el API 0.0.74 lo
+ * carga el avión en COMISIONES); null = sin pago.
  */
 export function conVueloDosComisiones(m: Mundo, pagoMxn: number | null): Mundo {
   return {

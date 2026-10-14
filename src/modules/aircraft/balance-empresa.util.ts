@@ -207,14 +207,15 @@ export interface InsumosBalanceEmpresa {
     total_utilidad_usd?: number | null;
   } | null;
   /**
-   * ¿Algún avión del periodo carga en su columna COMISIONES el pago REAL al
-   * vendedor de un vuelo (13-oct-2026, API 0.0.74, invariante 61: vuelo
-   * COMPLETADO de la regla de comisiones con comisión cotizada y gasto
-   * «Comisión del vendedor» capturado)? Solo cambia la NOTA: en esos vuelos
-   * la pestaña trae el pago apareado con egreso $0.00 «a cargo del avión».
-   * La aritmética no cambia: `pagos_vendedor_usd` = Σ egresos de la pestaña
-   * y esas filas valen 0 (el pago ya restó en el avión: nunca dos veces).
-   * Ausente o false ⇒ la nota corta de siempre, byte a byte.
+   * ¿Algún avión absorbió un pago «Comisión del vendedor (avión)» de un
+   * vuelo del periodo (13-oct-2026, API 0.0.74, invariante 61: vuelo
+   * COMPLETADO o CANCELADO con cobros retenidos, en su columna COMISIONES)?
+   * Solo cambia la NOTA: en esos vuelos la pestaña trae ese pago con egreso
+   * $0.00 «a cargo del avión». La aritmética no cambia: `pagos_vendedor_usd`
+   * = Σ egresos REALES de la pestaña («(VuelaTour)» + «(avión)» que nadie
+   * carga); las filas de $0.00 no lo bajan ni anulan el lado (no llevan
+   * «sin TC»): el pago ya restó en el avión, nunca dos veces. Ausente o
+   * false ⇒ la nota corta.
    */
   pagoVendedorACargoDelAvion?: boolean;
   /**
@@ -350,15 +351,14 @@ function notaBalanceEmpresa(n: {
   );
   // Revisión 12-oct-2026 (API 0.0.73, invariante 58): «otros movimientos» ya
   // NO provisiona el pago al vendedor (sin gasto real la fila no lleva
-  // egreso): el único egreso del vendedor es el gasto real «Comisión del
-  // vendedor» capturado. Desde el 13-oct-2026 (API 0.0.74, invariante 61)
-  // tampoco el avión carga provisión: en los vuelos completados de la regla
-  // de comisiones el pago real lo carga el avión en su columna COMISIONES y
-  // la pestaña lo trae con egreso $0.00 — con esos vuelos la nota lo dice;
-  // sin ellos, el texto corto de siempre.
+  // egreso). Desde el 13-oct-2026 (API 0.0.74, invariante 61) el pago real
+  // se captura en DOS categorías: la «Comisión del vendedor (VuelaTour)»
+  // egresa aquí y la «Comisión del vendedor (avión)» que carga un avión en
+  // su columna COMISIONES aquí egresa $0.00 — con esos vuelos la nota lo
+  // dice; sin ellos, el texto corto.
   const pagoVendedor = n.pagoVendedorACargoDelAvion
-    ? 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00)'
-    : 'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado)';
+    ? 'pago al vendedor (solo los gastos reales capturados: la «Comisión del vendedor (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en su columna COMISIONES aquí egresa $0.00)'
+    : 'pago al vendedor (solo los gastos reales de comisión del vendedor capturados)';
   // Revisión 13-oct-2026 (API 0.0.74, invariante 62): con filas «AFAC ·
   // matrícula» en la pestaña, la nota dice que el ingreso incluye la
   // provisión AFAC del periodo de cada avión y el egreso los permisos AFAC

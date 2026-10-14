@@ -373,7 +373,7 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     expect(sin.nota).not.toContain('por cobrar');
   });
 
-  it('pago al vendedor A CARGO DEL AVIÓN (API 0.0.74, invariante 61): con la señal la nota dice que el avión lo carga en su columna COMISIONES y aquí egresa $0.00; sin la señal (o false), la nota corta byte a byte; ninguna dice «provisión» y el dinero no cambia', () => {
+  it('pago al vendedor en DOS categorías (API 0.0.74, invariante 61): con la señal la nota dice que la «(VuelaTour)» egresa aquí y la «(avión)» que carga un avión aquí egresa $0.00; sin la señal (o false), la nota corta; ninguna dice «provisión» y el dinero no cambia', () => {
     const siempre = armarBalanceEmpresa(base);
     const conFalse = armarBalanceEmpresa({
       ...base,
@@ -385,10 +385,10 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     });
     expect(conFalse).toEqual(siempre);
     expect(siempre.nota).toContain(
-      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      'Egresos = pago al vendedor (solo los gastos reales de comisión del vendedor capturados), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
     expect(aCargo.nota).toContain(
-      'Egresos = pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
+      'Egresos = pago al vendedor (solo los gastos reales capturados: la «Comisión del vendedor (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en su columna COMISIONES aquí egresa $0.00), TUAs pagadas, extensión de horario, comisión bancaria y gastos sueltos.',
     );
     // Ya no hay provisión en ningún libro (invariantes 58 y 61).
     for (const b of [siempre, aCargo]) {
@@ -436,6 +436,34 @@ describe('armarBalanceEmpresa — el bloque completo', () => {
     });
     expect(vt.pagos_vendedor_usd).toBe(80);
     expect(b.resultado_usd! - vt.resultado_usd!).toBeCloseTo(80, 10);
+  });
+
+  it('fila MIXTA (dos categorías, 13-oct-2026): egresa SOLO la «(VuelaTour)»; si ésa no tiene T.C., la marca de su tramo SÍ anula el lado', () => {
+    const mixta = mov({
+      concepto_ingreso: 'comisión vendedor (Pablo Canales)',
+      ingreso_mxn: 3000,
+      concepto_egreso:
+        'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · VuelaTour $2,000.00 · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+      egreso_mxn: 2000,
+      tc: 20,
+    });
+    expect(ladoEnUsd([mixta], 'egreso')).toEqual({ usd: 100, sinTc: 0 });
+    const conMixta = armarBalanceEmpresa({
+      ...base,
+      movimientos: [mixta],
+      pagoVendedorACargoDelAvion: true,
+    });
+    // Solo los 2,000 de VuelaTour: los 1,000 del avión ya restaron allá.
+    expect(conMixta.pagos_vendedor_usd).toBe(100);
+    const vtSinTc = mov({
+      concepto_ingreso: 'comisión vendedor (Pablo Canales)',
+      ingreso_mxn: 3000,
+      concepto_egreso:
+        'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · VuelaTour (USD sin TC) · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+      egreso_mxn: null,
+      tc: 20,
+    });
+    expect(ladoEnUsd([vtSinTc], 'egreso')).toEqual({ usd: null, sinTc: 1 });
   });
 
   it('la nota de la tienda no lleva doble punto', () => {
@@ -489,9 +517,9 @@ describe('afacEnFilas (invariante 62)', () => {
     'COTIZADO y RESERVA incluidos, más la provisión AFAC del periodo de cada avión (la que ese avión ya carga como costo en su columna PERMISO AFAC). ' +
     `Egresos = ${pagoVendedor}, TUAs pagadas, extensión de horario, comisión bancaria, permisos AFAC pagados y gastos sueltos.`;
   const PAGO_CORTO =
-    'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado)';
+    'pago al vendedor (solo los gastos reales de comisión del vendedor capturados)';
   const PAGO_A_CARGO =
-    'pago al vendedor (solo el gasto real «Comisión del vendedor» capturado; en los vuelos completados de la regla de comisiones lo carga el avión en su columna COMISIONES y aquí egresa $0.00)';
+    'pago al vendedor (solo los gastos reales capturados: la «Comisión del vendedor (VuelaTour)» egresa aquí; la «Comisión del vendedor (avión)» que carga un avión en su columna COMISIONES aquí egresa $0.00)';
 
   it('con la señal: la nota dice que el ingreso incluye la provisión AFAC y el egreso los permisos pagados, con su T.C.; el resto de la nota y TODOS los números, idénticos', () => {
     const hoy = armarBalanceEmpresa(baseAfac);

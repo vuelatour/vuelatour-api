@@ -19,6 +19,7 @@ import type {
 } from '../pyservices/pyservices.service';
 import {
   AV,
+  AVION,
   DESDE,
   GOLDEN_OM,
   HASTA,
@@ -48,15 +49,17 @@ import {
  * es el ingreso. Hasta el 0.0.72 llevaba la PROVISIÓN por el mismo monto. La
  * hoja viaja con `sin_provision_vendedor: true`.
  *
- * 13-oct-2026 (API 0.0.74, invariante 61): en los vuelos COMPLETADOS de la
- * vigencia con comisión cotizada el pago REAL lo carga el AVIÓN en su
- * columna COMISIONES y la pestaña lo trae apareado con egreso $0.00 «· a
- * cargo del avión …». Los casos b)–h) llaman a `buildOtrosMovimientos` SIN
- * las partes de los aviones (= ningún avión lo absorbe, como antes de la
- * vigencia): VuelaTour lo paga con las ramas de siempre, byte a byte. Los
- * casos b′)/f′)/g′)/h′) pasan por el Balance GENERAL completo (con las
- * partes de los libros) y la vigencia default. La hoja viaja además con
- * `comision_vendedor_solo_gasto_real: true`.
+ * 13-oct-2026 (API 0.0.74, invariante 61, DOS categorías): el pago
+ * capturado como «Comisión del vendedor (avión)» lo carga el AVIÓN en su
+ * columna COMISIONES (vuelo COMPLETADO o CANCELADO con cobros retenidos) y
+ * la pestaña lo trae con egreso $0.00 «· a cargo del avión …»; el capturado
+ * como «Comisión del vendedor (VuelaTour)» (`gastoComision` por default) lo
+ * paga SIEMPRE VuelaTour. Los casos b)–h) llaman a `buildOtrosMovimientos`
+ * SIN las partes de los aviones con una «(VuelaTour)»: VuelaTour lo paga con
+ * las ramas de siempre, byte a byte. Los casos b′)/f′) pasan por el Balance
+ * GENERAL completo (con las partes de los libros) con una «(avión)»; g′)/h′)
+ * con la «(VuelaTour)» y g″) con la «(avión)» sin línea. La hoja viaja
+ * además con `comision_vendedor_solo_gasto_real: true`.
  *
  * Mundo de los specs de ingresos: vuelo #501 (K 20), comisión 80 USD sin
  * IVA ⇒ línea de 1,600.00 MXN; TUAS pagadas 1,500; comisión bancaria 350.
@@ -467,26 +470,43 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
     );
   });
 
-  it('i) EXCLUSIÓN: no es costo del avión — fuera de la vigencia el libro sale IDÉNTICO; en la vigencia solo resta en COMISIONES (nunca en OPERACIONES/PILOTO/OTROS ni en el costo); no va a «otros gastos»', async () => {
+  it('i) EXCLUSIÓN: no es costo de las columnas del avión — la «(VuelaTour)» deja el libro IDÉNTICO (fuera y dentro de la vigencia, salvo el checklist de captura); la «(avión)» resta SOLO en COMISIONES (nunca en OPERACIONES/PILOTO/OTROS ni en el costo); ninguna va a «otros gastos»', async () => {
     // Gasto con vuelo Y avión sellados, fechado FUERA del periodo (si
     // restara en la fila, el pendiente «FUERA del periodo» lo gritaría).
-    const comision = gastoComision('g-cv', 1600, { fecha_gasto: '2026-10-05' });
+    const vt = gastoComision('g-cv', 1600, { fecha_gasto: '2026-10-05' });
+    const comision = gastoComision(
+      'g-cv',
+      1600,
+      { fecha_gasto: '2026-10-05' },
+      AVION,
+    );
     const fijo = (p: BalanceAvionPayload) =>
       JSON.stringify({ ...p, generado: 'FIJO' });
-    // Antes de la vigencia (la regla de siempre): byte a byte.
+    // «(VuelaTour)» antes de la vigencia (la regla de siempre): byte a byte.
     const sinAntes = await servicio(mundoCon(), POSTERIOR).buildPayload(
       AV,
       DESDE,
       HASTA,
     );
     const conAntes = await servicio(
-      mundoCon({ gastos: [comision] }),
+      mundoCon({ gastos: [vt] }),
       POSTERIOR,
     ).buildPayload(AV, DESDE, HASTA);
     expect(fijo(conAntes)).toBe(fijo(sinAntes));
-    // En la vigencia (default): el pago real resta SOLO en COMISIONES (y lo
-    // que deriva: ganancia, cascada) — cuenta en el mes del VUELO aunque se
-    // haya capturado en octubre.
+    // «(VuelaTour)» en la vigencia: el libro solo pierde el checklist de
+    // captura (el pago ya está capturado); ni un peso cambia.
+    const sinVig = await servicio(mundoCon()).buildPayload(AV, DESDE, HASTA);
+    const conVig = await servicio(mundoCon({ gastos: [vt] })).buildPayload(
+      AV,
+      DESDE,
+      HASTA,
+    );
+    expect(fijo({ ...conVig, pendientes: [] })).toBe(
+      fijo({ ...sinVig, pendientes: [] }),
+    );
+    // «(avión)» en la vigencia (default): resta SOLO en COMISIONES (y lo que
+    // deriva: ganancia, cascada) — cuenta en el mes del VUELO aunque se haya
+    // capturado en octubre.
     const sin = await servicio(mundoCon()).buildPayload(AV, DESDE, HASTA);
     const con = await servicio(mundoCon({ gastos: [comision] })).buildPayload(
       AV,
@@ -511,11 +531,13 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
     expect(con.gastos_indirectos).toEqual(sin.gastos_indirectos);
     expect(con.otros_gastos).toEqual(sin.otros_gastos);
     expect(con.permisos).toEqual(sin.permisos);
-    // Hoja «otros gastos» del general: la comisión NO entra.
-    const { empresa } = await servicio(
-      mundoCon({ gastos: [gastoComision('g-cv', 1600)] }),
-    ).gastosEmpresaYSueltos(DESDE, HASTA);
-    expect(empresa.map((g) => g.id)).not.toContain('g-cv');
+    // Hoja «otros gastos» del general: ninguna de las dos entra.
+    for (const g of [vt, comision]) {
+      const { empresa } = await servicio(
+        mundoCon({ gastos: [g] }),
+      ).gastosEmpresaYSueltos(DESDE, HASTA);
+      expect(empresa.map((x) => x.id)).not.toContain('g-cv');
+    }
   });
 
   it('i4) EXCLUSIÓN del TC de costos (Z): una comisión MXN CON tc_gasto no mueve la ganancia USD ni el TC promedio del avión', async () => {
@@ -524,16 +546,18 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
     // pide para MXN) días después del vuelo: sin la exclusión, Z pasaba de
     // K (20) a 19.25 y cambiaban tc_costos, costo/ganancia USD y el TC
     // promedio de TODO el libro del avión.
-    const comision = gastoComision('g-cv-tc', 1600, { tc_gasto: 19.25 });
+    const comision = gastoComision('g-cv-tc', 1600, { tc_gasto: 19.25 }, AVION);
+    const vt = gastoComision('g-cv-tc', 1600, { tc_gasto: 19.25 });
     const fijo = (p: BalanceAvionPayload) =>
       JSON.stringify({ ...p, generado: 'FIJO' });
-    // Antes de la vigencia: el libro byte a byte.
+    // «(VuelaTour)» antes de la vigencia: el libro byte a byte.
     expect(
       fijo(
-        await servicio(
-          mundoCon({ gastos: [comision] }),
-          POSTERIOR,
-        ).buildPayload(AV, DESDE, HASTA),
+        await servicio(mundoCon({ gastos: [vt] }), POSTERIOR).buildPayload(
+          AV,
+          DESDE,
+          HASTA,
+        ),
       ),
     ).toBe(
       fijo(
@@ -581,7 +605,12 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
         ],
       };
     };
-    const comision = gastoComision('g-cv-av2', 1600, { aeronave_id: AV2 });
+    const comision = gastoComision(
+      'g-cv-av2',
+      1600,
+      { aeronave_id: AV2 },
+      AVION,
+    );
     const p = await servicio(conAvion2([comision])).buildPayload(
       AV,
       DESDE,
@@ -633,7 +662,7 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
   it('b′) VIGENCIA default, #501 COMPLETADO con comisión cotizada, gasto EXACTO de $1,600: el avión lo carga y la pestaña lo trae apareado con egreso $0.00 «a cargo del avión XB-TST ($1,600.00 en su columna COMISIONES)» y la fecha del pago; Σ remanentes == Σ ingresos − Σ egresos REALES', async () => {
     const { om, aviones } = await balanceGeneral(
       mundoSoloComision([
-        gastoComision('g-cv', 1600, { fecha_gasto: '2026-09-28' }),
+        gastoComision('g-cv', 1600, { fecha_gasto: '2026-09-28' }, AVION),
       ]),
     );
     const f = filaDe(om, 501);
@@ -662,7 +691,7 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
   it('f′) VIGENCIA default, 80 USD SIN tc_gasto con el T.C. promedio de la pestaña (19) ≠ K (20): el avión carga 1,600 (al K) y la pestaña 1,520 (al promedio) ⇒ el sufijo NO imprime cifra («resta en su columna COMISIONES») y el egreso es $0.00', async () => {
     const { om, aviones } = await balanceGeneral({
       ...mundoSoloComision([
-        gastoComision('g-cv', 80, { moneda: 'USD', tc_gasto: null }),
+        gastoComision('g-cv', 80, { moneda: 'USD', tc_gasto: null }, AVION),
       ]),
       vuelo: [...mundoSoloComision([]).vuelo, vuelo2()],
     });
@@ -678,7 +707,46 @@ describe('«Otros movimientos» — pago REAL al vendedor (COMISION_VENDEDOR, 28
     expect(fila.comision_vendedor_real_mxn).toBe(1600);
   });
 
-  it('g′)/h′) VIGENCIA default: un vuelo SIN comisión cotizada o CANCELADO con gasto real ⇒ el avión manda 0 y VuelaTour lo egresa como AVISO de solo-egreso (las ramas de siempre)', async () => {
+  it('g″) «(avión)» en un COMPLETADO SIN comisión cotizada: el avión la carga (la elección manda) y la pestaña pinta la fila INFORMATIVA de solo-egreso con $0.00 y remanente 0', async () => {
+    const { om, aviones } = await balanceGeneral(
+      mundoCon({
+        v2: vuelo2(),
+        gastos: [
+          gastoComision(
+            'g-cv',
+            500,
+            {
+              vuelo_id: V2,
+              vuelo: { folio: 502, aeronave_id: AV },
+              fecha_gasto: '2026-09-21',
+            },
+            AVION,
+          ),
+        ],
+      }),
+    );
+    const f = filaDe(om, 502);
+    expect(f.concepto_egreso).toBe(
+      'pago comisión vendedor · sin comisión cobrada en la cotización · a cargo del avión XB-TST ($500.00 en su columna COMISIONES)',
+    );
+    expect([f.ingreso_mxn, f.egreso_mxn, f.remanente_mxn]).toEqual([
+      null,
+      0,
+      0,
+    ]);
+    expect(Object.is(f.remanente_mxn, -0)).toBe(false);
+    expect(f.fecha_egreso).toBe('2026-09-21');
+    const fila = aviones
+      .flatMap((a) => a.vuelos)
+      .find((v) => String(v.folio) === '502')!;
+    expect(fila.comision_vendedor_real_mxn).toBe(500);
+    expect(fila.comision_vendedor_real_pagos).toBe(1);
+    expect(fila.comisiones_detalle).toEqual([
+      'Comisión vendedor · $500.00 · gasto real · sin comisión cobrada en la cotización',
+    ]);
+  });
+
+  it('g′)/h′) VIGENCIA default: un vuelo SIN comisión cotizada o CANCELADO con una «(VuelaTour)» ⇒ el avión manda 0 y VuelaTour lo egresa como AVISO de solo-egreso (las ramas de siempre)', async () => {
     const sinLinea = await balanceGeneral(
       mundoCon({
         v2: vuelo2(),

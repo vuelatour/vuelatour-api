@@ -294,6 +294,8 @@ function armarConTablas(
     gastoActual?: FilaBd;
     errorInsert?: { code: string; message: string };
     errorUpdate?: { code: string; message: string };
+    /** Cargos del banco ligados al gasto (candado GASTO_CONCILIADO). */
+    cargos?: number;
   } = {},
 ) {
   const llamadas: Array<Llamada & { tabla: string }> = [];
@@ -377,7 +379,15 @@ function armarConTablas(
           return Promise.resolve({ data: fila, error: null });
         };
         q.then = (resolve: (v: unknown) => unknown) =>
-          Promise.resolve({ data: [], error: null, count: 0 }).then(resolve);
+          Promise.resolve({
+            data: [],
+            error: null,
+            count:
+              tabla === 'movimiento_bancario_gasto' ||
+              tabla === 'movimiento_bancario'
+                ? (opts.cargos ?? 0)
+                : 0,
+          }).then(resolve);
         return q;
       },
     },
@@ -410,7 +420,9 @@ const comision = (extra: Partial<CreateGastoDto> = {}) =>
   dto({ categoria: CategoriaGasto.COMISION_VENDEDOR, monto: 2030, ...extra });
 
 const MSG_REQUIERE_VUELO =
-  'Esta categoría es del vuelo: elige el vuelo. «Comisión del vendedor» siempre se registra con el vuelo al que pertenece.';
+  'Esta categoría es del vuelo: elige el vuelo. «Comisión del vendedor (VuelaTour)» siempre se registra con el vuelo al que pertenece.';
+const MSG_REQUIERE_VUELO_AVION =
+  'Esta categoría es del vuelo: elige el vuelo. «Comisión del vendedor (avión)» siempre se registra con el vuelo al que pertenece.';
 
 describe('ExpensesService — COMISION_VENDEDOR exige vuelo a TODOS los roles (28-sep-2026)', () => {
   beforeEach(() => jest.useFakeTimers().setSystemTime(HOY));
@@ -430,7 +442,7 @@ describe('ExpensesService — COMISION_VENDEDOR exige vuelo a TODOS los roles (2
       expect(r.body.message).toBe(MSG_REQUIERE_VUELO);
       expect(r.body.details).toEqual({
         categoria: 'COMISION_VENDEDOR',
-        categoria_label: 'Comisión del vendedor',
+        categoria_label: 'Comisión del vendedor (VuelaTour)',
         destino:
           'Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
       });
@@ -498,7 +510,7 @@ describe('ExpensesService — COMISION_VENDEDOR exige vuelo a TODOS los roles (2
     );
     expect(r.status).toBe(400);
     expect(r.body.message).toBe(
-      '«Comisión del vendedor» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+      '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
     );
   });
 
@@ -649,5 +661,238 @@ describe('ExpensesService — COMISION_VENDEDOR exige vuelo a TODOS los roles (2
       service.update('g-cv', { vuelo_id: VUELO_B }, 'u-admin', Rol.ADMIN),
     );
     expect(r.status).toBe(409);
+  });
+});
+
+/**
+ * «COMISIÓN DEL VENDEDOR (AVIÓN)» (13-oct-2026, invariante 61): la misma
+ * regla de vuelo obligatorio a TODOS los roles, con SU etiqueta; el 23514 de
+ * cada CHECK da el 400 con la categoría que nombra el CHECK (aunque el PATCH
+ * no traiga categoría); el 22P02 de la nueva nombra 20261013000003; y
+ * reclasificar entre las dos con vuelo está permitido aun con cargos del
+ * banco ligados (GASTO_CONCILIADO solo cubre monto, moneda y medio).
+ */
+const comisionAvion = (extra: Partial<CreateGastoDto> = {}) =>
+  dto({
+    categoria: CategoriaGasto.COMISION_VENDEDOR_AVION,
+    monto: 1305,
+    ...extra,
+  });
+
+describe('ExpensesService — COMISION_VENDEDOR_AVION (13-oct-2026)', () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(HOY));
+  afterEach(() => jest.useRealTimers());
+
+  const avionViva: FilaBd = {
+    id: 'g-av',
+    categoria: 'COMISION_VENDEDOR_AVION',
+    vuelo_id: VUELO_A,
+    escala_id: null,
+    aeronave_id: AVION_A,
+    monto: 1305,
+    propina: 0,
+    moneda: 'MXN',
+    medio_pago: 'TRANSFERENCIA',
+    notas: null,
+    tarjeta_terminacion: null,
+    usuario_captura_id: 'u-admin',
+    valor_ia_extraido: null,
+  };
+
+  it('sin vuelo ⇒ 400 GASTO_REQUIERE_VUELO con «Comisión del vendedor (avión)» en los 4 roles, SIN tocar la BD', async () => {
+    for (const rol of [
+      Rol.ADMIN,
+      Rol.COORDINADOR,
+      Rol.FACTURACION,
+      Rol.PILOTO,
+    ]) {
+      const { service, llamadas } = armarConTablas();
+      const r = await rebote(service.create(comisionAvion(), 'u-1', rol));
+      expect(r.status).toBe(400);
+      expect(r.body.error).toBe('GASTO_REQUIERE_VUELO');
+      expect(r.body.message).toBe(MSG_REQUIERE_VUELO_AVION);
+      expect(r.body.details).toEqual({
+        categoria: 'COMISION_VENDEDOR_AVION',
+        categoria_label: 'Comisión del vendedor (avión)',
+        destino:
+          'Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
+      });
+      expect(llamadas).toHaveLength(0);
+    }
+  });
+
+  it('con vuelo ⇒ se guarda y hereda el avión del vuelo (solo referencia)', async () => {
+    const { service, insertado } = armarConTablas();
+    await service.create(
+      comisionAvion({ vuelo_id: VUELO_A }),
+      'u-admin',
+      Rol.ADMIN,
+      { notificar: false },
+    );
+    expect(insertado()).toMatchObject({
+      categoria: 'COMISION_VENDEDOR_AVION',
+      vuelo_id: VUELO_A,
+      aeronave_id: AVION_A,
+      monto: 1305,
+    });
+  });
+
+  it('update: desligar el vuelo de una «(avión)» o reclasificar a «(avión)» un gasto SIN vuelo ⇒ 400 (sin escribir)', async () => {
+    const desligar = armarConTablas({ gastoActual: avionViva });
+    const r1 = await rebote(
+      desligar.service.update(
+        'g-av',
+        { vuelo_id: null } as unknown as Parameters<
+          ExpensesService['update']
+        >[1],
+        'u-admin',
+        Rol.ADMIN,
+      ),
+    );
+    expect(r1.status).toBe(400);
+    expect(r1.body.message).toBe(MSG_REQUIERE_VUELO_AVION);
+    expect(desligar.actualizado()).toBeUndefined();
+    const sinVuelo = armarConTablas({
+      gastoActual: {
+        ...avionViva,
+        id: 'g-otro',
+        categoria: 'OTRO',
+        vuelo_id: null,
+        aeronave_id: null,
+      },
+    });
+    const r2 = await rebote(
+      sinVuelo.service.update(
+        'g-otro',
+        { categoria: CategoriaGasto.COMISION_VENDEDOR_AVION },
+        'u-admin',
+        Rol.ADMIN,
+      ),
+    );
+    expect(r2.body.error).toBe('GASTO_REQUIERE_VUELO');
+    expect(r2.body.message).toBe(MSG_REQUIERE_VUELO_AVION);
+    expect(sinVuelo.actualizado()).toBeUndefined();
+  });
+
+  it('update: reclasificar «(VuelaTour)» ↔ «(avión)» con vuelo ⇒ OK, también con cargos del banco ligados (el panel reenvía monto/moneda/medio iguales)', async () => {
+    const aAvion = armarConTablas({
+      gastoActual: { ...avionViva, categoria: 'COMISION_VENDEDOR' },
+      cargos: 1,
+    });
+    await aAvion.service.update(
+      'g-av',
+      {
+        categoria: CategoriaGasto.COMISION_VENDEDOR_AVION,
+        monto: 1305,
+        moneda: 'MXN',
+        medio_pago: 'TRANSFERENCIA',
+      } as unknown as Parameters<ExpensesService['update']>[1],
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(aAvion.actualizado()).toMatchObject({
+      categoria: 'COMISION_VENDEDOR_AVION',
+    });
+    const aVuelatour = armarConTablas({ gastoActual: avionViva, cargos: 1 });
+    await aVuelatour.service.update(
+      'g-av',
+      { categoria: CategoriaGasto.COMISION_VENDEDOR },
+      'u-admin',
+      Rol.ADMIN,
+    );
+    expect(aVuelatour.actualizado()).toMatchObject({
+      categoria: 'COMISION_VENDEDOR',
+    });
+    // Control: con cargos ligados, cambiar el MONTO sí rebota (409).
+    const monto = armarConTablas({ gastoActual: avionViva, cargos: 1 });
+    const r = await rebote(
+      monto.service.update('g-av', { monto: 1400 }, 'u-admin', Rol.ADMIN),
+    );
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe('GASTO_CONCILIADO');
+    expect(monto.actualizado()).toBeUndefined();
+  });
+
+  it('el 23514 de CADA CHECK da el 400 con SU categoría, aunque el PATCH no traiga categoría', async () => {
+    const checkAvion = armarConTablas({
+      // El gasto vigente dice «(VuelaTour)», pero rebotó el CHECK de la
+      // «(avión)» (carrera): manda el NOMBRE del CHECK.
+      gastoActual: { ...avionViva, categoria: 'COMISION_VENDEDOR' },
+      errorUpdate: {
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_comision_vendedor_avion_exige_vuelo"',
+      },
+    });
+    const r1 = await rebote(
+      checkAvion.service.update(
+        'g-av',
+        { vuelo_id: VUELO_B },
+        'u-admin',
+        Rol.ADMIN,
+      ),
+    );
+    expect(r1.status).toBe(400);
+    expect(r1.body.error).toBe('GASTO_REQUIERE_VUELO');
+    expect(r1.body.message).toBe(MSG_REQUIERE_VUELO_AVION);
+    expect(r1.body.details?.categoria).toBe('COMISION_VENDEDOR_AVION');
+    const checkVt = armarConTablas({
+      gastoActual: avionViva,
+      errorUpdate: {
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_comision_vendedor_exige_vuelo"',
+      },
+    });
+    const r2 = await rebote(
+      checkVt.service.update(
+        'g-av',
+        { vuelo_id: VUELO_B },
+        'u-admin',
+        Rol.ADMIN,
+      ),
+    );
+    expect(r2.status).toBe(400);
+    expect(r2.body.message).toBe(MSG_REQUIERE_VUELO);
+    expect(r2.body.details?.categoria).toBe('COMISION_VENDEDOR');
+  });
+
+  it('alta: 23514 del CHECK nuevo ⇒ 400 «(avión)»; 22P02 de la nueva ⇒ 400 con 20261013000003', async () => {
+    const check = armarConTablas({
+      errorInsert: {
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_comision_vendedor_avion_exige_vuelo"',
+      },
+    });
+    const r1 = await rebote(
+      check.service.create(
+        comisionAvion({ vuelo_id: VUELO_A }),
+        'u-admin',
+        Rol.ADMIN,
+        { notificar: false },
+      ),
+    );
+    expect(r1.status).toBe(400);
+    expect(r1.body.message).toBe(MSG_REQUIERE_VUELO_AVION);
+    const sinEnum = armarConTablas({
+      errorInsert: {
+        code: '22P02',
+        message:
+          'invalid input value for enum categoria_gasto: "COMISION_VENDEDOR_AVION"',
+      },
+    });
+    const r2 = await rebote(
+      sinEnum.service.create(
+        comisionAvion({ vuelo_id: VUELO_A }),
+        'u-admin',
+        Rol.ADMIN,
+        { notificar: false },
+      ),
+    );
+    expect(r2.status).toBe(400);
+    expect(r2.body.message).toBe(
+      '«Comisión del vendedor (avión)» necesita la migración 20261013000003 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
   });
 });

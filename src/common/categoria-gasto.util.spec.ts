@@ -3,11 +3,15 @@ import {
   CATEGORIA_GASTO_DESTINO,
   CATEGORIA_GASTO_LABEL,
   CATEGORIA_PAGO_VENDEDOR,
+  CATEGORIA_PAGO_VENDEDOR_AVION,
   CATEGORIAS_GASTO_EMPRESA,
   CATEGORIAS_GASTO_FUERA_DEL_AVION,
+  CATEGORIAS_GASTO_PAGO_VENDEDOR,
   CATEGORIAS_GASTO_SIN_AVION,
   CATEGORIAS_GASTO_VUELO_OBLIGATORIO,
   MENSAJE_CATEGORIA_SIN_MIGRACION,
+  MIGRACION_DE_CATEGORIA,
+  categoriaDeCheckExigeVuelo,
   categoriaEsDeEmpresa,
   categoriaEsPagoVendedor,
   categoriaExigeVuelo,
@@ -16,6 +20,7 @@ import {
   descripcionCategoriasGasto,
   destinoCategoriaGasto,
   etiquetaCategoriaGasto,
+  ladoPagoVendedor,
   mensajeCategoriaSinMigracion,
 } from './categoria-gasto.util';
 import { CATEGORIAS_REPARTIBLES } from './gasto-reparto.util';
@@ -24,9 +29,12 @@ import { CATS_SIN_TUA_EMBEBIDO } from './desglose-gasto.util';
 describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', () => {
   const codigos = Object.values(CategoriaGasto);
 
-  it('el enum tiene las 20 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026)', () => {
-    expect(codigos).toHaveLength(20);
+  it('el enum tiene las 21 categorías conocidas (COMISION_VENDEDOR desde el 28-sep-2026; COMISION_VENDEDOR_AVION justo después desde el 13-oct-2026)', () => {
+    // 22 cuando entre COMISARIATO (lote de Comisariato del 13-oct-2026).
+    expect(codigos).toHaveLength(21);
     expect(codigos).toContain('COMISION_VENDEDOR');
+    const i = codigos.indexOf(CategoriaGasto.COMISION_VENDEDOR);
+    expect(codigos[i + 1]).toBe('COMISION_VENDEDOR_AVION');
   });
 
   it('toda categoría del enum tiene etiqueta y destino no vacíos (y nada extra)', () => {
@@ -84,7 +92,10 @@ describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', (
       'Gasto personal del dueño',
     );
     expect(etiquetaCategoriaGasto(CategoriaGasto.COMISION_VENDEDOR)).toBe(
-      'Comisión del vendedor',
+      'Comisión del vendedor (VuelaTour)',
+    );
+    expect(etiquetaCategoriaGasto(CategoriaGasto.COMISION_VENDEDOR_AVION)).toBe(
+      'Comisión del vendedor (avión)',
     );
   });
 
@@ -132,9 +143,13 @@ describe('categoria-gasto.util (etiquetas y destino por default, 2-sep-2026)', (
     expect(destinoCategoriaGasto(CategoriaGasto.PERSONAL_DUENO)).toBe(
       'Gastos personales de los dueños (fuera de la empresa)',
     );
-    // 28-sep-2026 (tabla canónica IDÉNTICA en API, panel y app).
+    // 28-sep-2026 y 13-oct-2026 (tabla canónica IDÉNTICA en API, panel y
+    // app; textos simétricos «no es / sí es costo del avión»).
     expect(destinoCategoriaGasto(CategoriaGasto.COMISION_VENDEDOR)).toBe(
       'Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
+    );
+    expect(destinoCategoriaGasto(CategoriaGasto.COMISION_VENDEDOR_AVION)).toBe(
+      'Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
     );
   });
 
@@ -175,9 +190,10 @@ describe('categoriaExigeVuelo', () => {
     CategoriaGasto.TAXI,
     CategoriaGasto.PERMISO,
     CategoriaGasto.PILOTO_EXTERNO,
-    // 28-sep-2026: la comisión siempre es de un vuelo (y para TODOS los
-    // roles: `categoriaExigeVueloSiempre`).
+    // 28-sep-2026 / 13-oct-2026: la comisión siempre es de un vuelo (y
+    // para TODOS los roles: `categoriaExigeVueloSiempre`).
     CategoriaGasto.COMISION_VENDEDOR,
+    CategoriaGasto.COMISION_VENDEDOR_AVION,
   ];
   const SIN_VUELO: CategoriaGasto[] = [
     // GAS (11-sep-2026): el piloto también carga combustible EN BASE, sin
@@ -315,6 +331,13 @@ describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
       expect(CATEGORIAS_GASTO_SIN_AVION).not.toContain(c);
     }
   });
+
+  it('NO lleva COMISION_VENDEDOR_AVION (13-oct-2026): arma el `not.in` de PostgREST y un literal sin migración revienta la LECTURA', () => {
+    // El filtro de la «(avión)» va en JS en cada lector que lo necesita; la
+    // bandeja/alerta/pre-cierre la listan si su vuelo no tiene avión (a
+    // propósito: la salida es reclasificarla a «(VuelaTour)»).
+    expect(CATEGORIAS_GASTO_SIN_AVION).not.toContain('COMISION_VENDEDOR_AVION');
+  });
 });
 
 /**
@@ -324,27 +347,43 @@ describe('CATEGORIAS_GASTO_SIN_AVION (11-sep-2026)', () => {
  * comisión cobrada en «otros movimientos».
  */
 describe('COMISION_VENDEDOR (28-sep-2026)', () => {
-  it('etiqueta y destino EXACTOS (paridad manual panel/app)', () => {
+  it('etiqueta y destino EXACTOS de las DOS (paridad manual panel/app)', () => {
     expect(CATEGORIA_PAGO_VENDEDOR).toBe('COMISION_VENDEDOR');
+    expect(CATEGORIA_PAGO_VENDEDOR_AVION).toBe('COMISION_VENDEDOR_AVION');
     expect(CATEGORIA_GASTO_LABEL.COMISION_VENDEDOR).toBe(
-      'Comisión del vendedor',
+      'Comisión del vendedor (VuelaTour)',
     );
     expect(CATEGORIA_GASTO_DESTINO.COMISION_VENDEDOR).toBe(
       'Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
     );
-    expect(descripcionCategoriasGasto()).toContain(
-      'COMISION_VENDEDOR → Comisión del vendedor → Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
+    expect(CATEGORIA_GASTO_LABEL.COMISION_VENDEDOR_AVION).toBe(
+      'Comisión del vendedor (avión)',
     );
+    expect(CATEGORIA_GASTO_DESTINO.COMISION_VENDEDOR_AVION).toBe(
+      'Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
+    );
+    const texto = descripcionCategoriasGasto();
+    expect(texto).toContain(
+      'COMISION_VENDEDOR → Comisión del vendedor (VuelaTour) → Pago al vendedor (otros movimientos VuelaTour; no es costo del avión)',
+    );
+    expect(texto).toContain(
+      'COMISION_VENDEDOR_AVION → Comisión del vendedor (avión) → Pago al vendedor (columna COMISIONES del balance del avión; sí es costo del avión)',
+    );
+    // Una línea más que antes del 13-oct-2026 (21 categorías + el título).
+    expect(texto.split('\n')).toHaveLength(22);
   });
 
-  it('exige vuelo (piloto) Y para TODOS los roles (solo ella)', () => {
+  it('exige vuelo (piloto) Y para TODOS los roles (solo las dos)', () => {
     expect(categoriaExigeVuelo('COMISION_VENDEDOR')).toBe(true);
-    expect([...CATEGORIAS_GASTO_VUELO_OBLIGATORIO]).toEqual([
+    expect(categoriaExigeVuelo('COMISION_VENDEDOR_AVION')).toBe(true);
+    expect([...CATEGORIAS_GASTO_VUELO_OBLIGATORIO].sort()).toEqual([
       'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
     ]);
     for (const c of Object.values(CategoriaGasto)) {
       expect(categoriaExigeVueloSiempre(c)).toBe(
-        c === CategoriaGasto.COMISION_VENDEDOR,
+        c === CategoriaGasto.COMISION_VENDEDOR ||
+          c === CategoriaGasto.COMISION_VENDEDOR_AVION,
       );
     }
     expect(categoriaExigeVueloSiempre(null)).toBe(false);
@@ -360,11 +399,13 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       'VISITA',
     ]);
     expect(categoriaEsDeEmpresa('COMISION_VENDEDOR')).toBe(false);
+    expect(categoriaEsDeEmpresa('COMISION_VENDEDOR_AVION')).toBe(false);
   });
 
-  it('FUERA DEL AVIÓN = empresa + COMISION_VENDEDOR', () => {
+  it('FUERA DEL AVIÓN (eje genérico) = empresa + las DOS del pago al vendedor', () => {
     expect([...CATEGORIAS_GASTO_FUERA_DEL_AVION].sort()).toEqual([
       'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
       'FIJO',
       'GASOLINA',
       'NOMINA',
@@ -372,25 +413,71 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       'VISITA',
     ]);
     expect(categoriaFueraDelAvion('COMISION_VENDEDOR')).toBe(true);
+    expect(categoriaFueraDelAvion('COMISION_VENDEDOR_AVION')).toBe(true);
     expect(categoriaFueraDelAvion('OTRO')).toBe(true);
     for (const c of ['TUAS', 'OPERACIONES', 'GAS', 'PERSONAL_DUENO', null]) {
       expect(categoriaFueraDelAvion(c)).toBe(false);
     }
   });
 
-  it('categoriaEsPagoVendedor solo con el código exacto', () => {
+  it('categoriaEsPagoVendedor = la UNIÓN, con los códigos EXACTOS', () => {
+    expect([...CATEGORIAS_GASTO_PAGO_VENDEDOR].sort()).toEqual([
+      'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
+    ]);
     expect(categoriaEsPagoVendedor('COMISION_VENDEDOR')).toBe(true);
-    for (const c of ['comision_vendedor', 'OTRO', '', null, undefined]) {
+    expect(categoriaEsPagoVendedor('COMISION_VENDEDOR_AVION')).toBe(true);
+    for (const c of [
+      'comision_vendedor',
+      'comision_vendedor_avion',
+      'COMISION_VENDEDOR_AVIONX',
+      'COMISION_VENDEDOR_',
+      'COMISION',
+      'OTRO',
+      '',
+      null,
+      undefined,
+    ]) {
       expect(categoriaEsPagoVendedor(c)).toBe(false);
     }
   });
 
-  it('NO repartible (lista y trigger de BD sin cambio) y SIN TUA embebido', () => {
-    expect(CATEGORIAS_REPARTIBLES.has('COMISION_VENDEDOR')).toBe(false);
-    expect(CATS_SIN_TUA_EMBEBIDO.has('COMISION_VENDEDOR')).toBe(true);
+  it('ladoPagoVendedor: igualdad EXACTA (el código viejo es prefijo del nuevo)', () => {
+    expect(ladoPagoVendedor('COMISION_VENDEDOR')).toBe('VUELATOUR');
+    expect(ladoPagoVendedor('COMISION_VENDEDOR_AVION')).toBe('AVION');
+    for (const c of [
+      'COMISION_VENDEDOR_AVIONX',
+      'COMISION_VENDEDOR_',
+      'comision_vendedor',
+      'comision_vendedor_avion',
+      'COMISION',
+      'OTRO',
+      '',
+      null,
+      undefined,
+    ]) {
+      expect(ladoPagoVendedor(c)).toBeNull();
+    }
   });
 
-  it('mensajeCategoriaSinMigracion: 22P02 del enum con COMISION_VENDEDOR ⇒ texto 400', () => {
+  it('GUARDIÁN: ninguna comparación por prefijo — el código viejo es prefijo del nuevo', () => {
+    // Si alguien vuelve a comparar con startsWith/includes, este par lo
+    // delata: con prefijo, la «(avión)» caería del lado de VuelaTour.
+    expect('COMISION_VENDEDOR_AVION'.startsWith('COMISION_VENDEDOR')).toBe(
+      true,
+    );
+    expect(ladoPagoVendedor('COMISION_VENDEDOR_AVION')).not.toBe('VUELATOUR');
+    expect(categoriaEsDeEmpresa('COMISION_VENDEDOR_AVION')).toBe(false);
+  });
+
+  it('NO repartibles (lista y trigger de BD sin cambio) y SIN TUA embebido', () => {
+    for (const c of ['COMISION_VENDEDOR', 'COMISION_VENDEDOR_AVION']) {
+      expect(CATEGORIAS_REPARTIBLES.has(c)).toBe(false);
+      expect(CATS_SIN_TUA_EMBEBIDO.has(c)).toBe(true);
+    }
+  });
+
+  it('mensajeCategoriaSinMigracion: 22P02 del enum con COMISION_VENDEDOR ⇒ texto 400 con «(VuelaTour)»', () => {
     const err = {
       code: '22P02',
       message:
@@ -400,7 +487,7 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
       MENSAJE_CATEGORIA_SIN_MIGRACION,
     );
     expect(MENSAJE_CATEGORIA_SIN_MIGRACION).toBe(
-      '«Comisión del vendedor» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+      '«Comisión del vendedor (VuelaTour)» necesita la migración 20260928000001 en la base de datos; avisa a sistemas (el gasto no se guardó).',
     );
     // Otro código, otro enum, otra categoría enviada ⇒ null.
     expect(
@@ -427,6 +514,89 @@ describe('COMISION_VENDEDOR (28-sep-2026)', () => {
         },
         'COMISION_VENDEDOR',
       ),
+    ).toBeNull();
+  });
+
+  it('mensajeCategoriaSinMigracion: la nueva da 20261013000003 y NO se cruzan aunque una sea prefijo de la otra', () => {
+    expect(MIGRACION_DE_CATEGORIA).toEqual({
+      COMISION_VENDEDOR: '20260928000001',
+      COMISION_VENDEDOR_AVION: '20261013000003',
+    });
+    const errAvion = {
+      code: '22P02',
+      message:
+        'invalid input value for enum categoria_gasto: "COMISION_VENDEDOR_AVION"',
+    };
+    expect(
+      mensajeCategoriaSinMigracion(errAvion, 'COMISION_VENDEDOR_AVION'),
+    ).toBe(
+      '«Comisión del vendedor (avión)» necesita la migración 20261013000003 en la base de datos; avisa a sistemas (el gasto no se guardó).',
+    );
+    // El mensaje de la NUEVA contiene el código viejo como subcadena: con
+    // las comillas dobles NO casa al enviar la vieja (y al revés tampoco).
+    expect(
+      mensajeCategoriaSinMigracion(errAvion, 'COMISION_VENDEDOR'),
+    ).toBeNull();
+    expect(
+      mensajeCategoriaSinMigracion(
+        {
+          code: '22P02',
+          message:
+            'invalid input value for enum categoria_gasto: "COMISION_VENDEDOR"',
+        },
+        'COMISION_VENDEDOR_AVION',
+      ),
+    ).toBeNull();
+    // Otro enum ⇒ null.
+    expect(
+      mensajeCategoriaSinMigracion(
+        {
+          code: '22P02',
+          message:
+            'invalid input value for enum moneda: "COMISION_VENDEDOR_AVION"',
+        },
+        'COMISION_VENDEDOR_AVION',
+      ),
+    ).toBeNull();
+    expect(mensajeCategoriaSinMigracion(errAvion, null)).toBeNull();
+  });
+
+  it('categoriaDeCheckExigeVuelo: cada CHECK da SU categoría; otro 23514 ⇒ null', () => {
+    expect(
+      categoriaDeCheckExigeVuelo({
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_comision_vendedor_exige_vuelo"',
+      }),
+    ).toBe('COMISION_VENDEDOR');
+    expect(
+      categoriaDeCheckExigeVuelo({
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_comision_vendedor_avion_exige_vuelo"',
+      }),
+    ).toBe('COMISION_VENDEDOR_AVION');
+    // El nombre viejo NO es subcadena del nuevo.
+    expect(
+      'gasto_comision_vendedor_avion_exige_vuelo'.includes(
+        'gasto_comision_vendedor_exige_vuelo',
+      ),
+    ).toBe(false);
+    expect(
+      categoriaDeCheckExigeVuelo({
+        code: '23514',
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_medio_tarjeta_check"',
+      }),
+    ).toBeNull();
+    expect(
+      categoriaDeCheckExigeVuelo({
+        code: '22P02',
+        message: 'gasto_comision_vendedor_avion_exige_vuelo',
+      }),
+    ).toBeNull();
+    expect(
+      categoriaDeCheckExigeVuelo({ code: '23514', message: null }),
     ).toBeNull();
   });
 });

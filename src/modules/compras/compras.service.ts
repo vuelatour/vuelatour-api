@@ -70,9 +70,12 @@ const CATEGORIAS_NO_LIGABLES = [
   // ver con el costo de bodega de una refacción.
   'NOMINA',
   'SERVICIOS',
-  // COMISION_VENDEDOR (28-sep-2026): el pago al vendedor no es costo de una
-  // refacción.
+  // COMISION_VENDEDOR (28-sep-2026) y COMISION_VENDEDOR_AVION (13-oct-2026,
+  // invariante 61): el pago al vendedor —lo pague VuelaTour o el avión— no
+  // es costo de una refacción. Se usa con `.includes` en
+  // `assertGastoLigable`, en JS (nunca en un query).
   'COMISION_VENDEDOR',
+  'COMISION_VENDEDOR_AVION',
 ];
 const CATEGORIA_ITEM_DEFAULT = 'Refacción';
 

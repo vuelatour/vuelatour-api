@@ -66,6 +66,22 @@ function armar() {
       usuario_captura_id: 'u-admin',
       usuario: { nombre: 'Mary Cruz' },
     },
+    // «Comisión del vendedor (avión)» (13-oct-2026, invariante 61): la otra
+    // categoría del pago al vendedor — tampoco la ven piloto ni mecánico.
+    {
+      id: 'g-cva',
+      categoria: 'COMISION_VENDEDOR_AVION',
+      monto: '1305',
+      moneda: 'MXN',
+      medio_pago: 'TRANSFERENCIA',
+      fecha_gasto: '2026-09-29',
+      notas: 'Pago comisión (avión)',
+      created_at: '2026-09-29T18:00:00Z',
+      capturado_en: null,
+      origen: 'OFICINA',
+      usuario_captura_id: 'u-admin',
+      usuario: { nombre: 'Mary Cruz' },
+    },
   ];
   const service = {
     from: () => {
@@ -104,7 +120,7 @@ function armar() {
 }
 
 describe('FlightsService.gastosResumen — COMISION_VENDEDOR (28-sep-2026)', () => {
-  it('PILOTO y MECÁNICO NO ven el pago al vendedor', async () => {
+  it('PILOTO y MECÁNICO NO ven el pago al vendedor (ninguna de las DOS categorías)', async () => {
     for (const rol of [Rol.PILOTO, Rol.MECANICO]) {
       const { svc } = armar();
       const r = await svc.gastosResumen(VUELO, rol);
@@ -116,9 +132,12 @@ describe('FlightsService.gastosResumen — COMISION_VENDEDOR (28-sep-2026)', () 
     for (const rol of [Rol.ADMIN, Rol.COORDINADOR, undefined]) {
       const { svc } = armar();
       const r = await svc.gastosResumen(VUELO, rol);
-      expect(r.map((g) => g.id)).toEqual(['g-comida', 'g-cv']);
+      expect(r.map((g) => g.id)).toEqual(['g-comida', 'g-cv', 'g-cva']);
       expect(r.find((g) => g.id === 'g-cv')!.categoria).toBe(
         'COMISION_VENDEDOR',
+      );
+      expect(r.find((g) => g.id === 'g-cva')!.categoria).toBe(
+        'COMISION_VENDEDOR_AVION',
       );
     }
   });

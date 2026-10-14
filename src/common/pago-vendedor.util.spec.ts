@@ -3,6 +3,7 @@ import {
   NOTA_PAGO_VENDEDOR_SIN_LINEA,
   TOLERANCIA_PAGO_VENDEDOR_MXN,
   conceptoPagoVendedorReal,
+  contarPagosVendedor,
   cuerpoGastoRealPagoVendedor,
   motivoSinLineaComision,
   pagosVendedorDeVuelo,
@@ -18,7 +19,9 @@ import {
  * también la columna COMISIONES del avión (`comisiones-avion.util`), con el
  * MISMO `pagosVendedorDeVuelo` y dos conversores; `conceptoPagoVendedorReal`
  * se compone de `cuerpoGastoRealPagoVendedor` + `sufijoUsdSinTc` (su salida
- * sigue byte a byte).
+ * sigue byte a byte). Desde el ajuste del 13-oct-2026 (dos categorías) cada
+ * llamada DECIDE su lado: 'VUELATOUR' («Comisión del vendedor (VuelaTour)»),
+ * 'AVION' («Comisión del vendedor (avión)») o 'AMBOS'.
  */
 
 const g = (
@@ -60,7 +63,7 @@ const SAAB = 'comisión vendedor (Alex Saab)';
 
 describe('pagosVendedorDeVuelo', () => {
   it('sin gastos de la categoría ⇒ n 0, pagado null, sin fecha', () => {
-    expect(pagosVendedorDeVuelo([], conversor())).toEqual({
+    expect(pagosVendedorDeVuelo([], conversor(), 'AMBOS')).toEqual({
       n: 0,
       pagadoMxn: null,
       sinTc: 0,
@@ -78,6 +81,7 @@ describe('pagosVendedorDeVuelo', () => {
         g(10, { categoria: null }),
       ],
       conversor(),
+      'VUELATOUR',
     );
     expect(r).toEqual({
       n: 1,
@@ -91,6 +95,7 @@ describe('pagosVendedorDeVuelo', () => {
     const r = pagosVendedorDeVuelo(
       [g(1000), g(58, { moneda: 'USD', tc_gasto: 17.5 })],
       conversor(),
+      'VUELATOUR',
     );
     expect(r.pagadoMxn).toBe(2015);
     expect(r.n).toBe(2);
@@ -98,6 +103,7 @@ describe('pagosVendedorDeVuelo', () => {
     const r2 = pagosVendedorDeVuelo(
       [g(116, { moneda: 'USD', tc_gasto: null })],
       conversor({ tcRespaldo: 19 }),
+      'VUELATOUR',
     );
     expect(r2.pagadoMxn).toBe(2204);
   });
@@ -106,6 +112,7 @@ describe('pagosVendedorDeVuelo', () => {
     const r = pagosVendedorDeVuelo(
       [g(1000), g(50, { moneda: 'USD', tc_gasto: null })],
       conversor({ tcRespaldo: null }),
+      'VUELATOUR',
     );
     expect(r).toEqual({
       n: 2,
@@ -116,6 +123,7 @@ describe('pagosVendedorDeVuelo', () => {
     const todos = pagosVendedorDeVuelo(
       [g(50, { moneda: 'USD', tc_gasto: null })],
       conversor({ tcRespaldo: null }),
+      'VUELATOUR',
     );
     expect(todos.pagadoMxn).toBeNull();
     expect(todos.sinTc).toBe(1);
@@ -123,7 +131,11 @@ describe('pagosVendedorDeVuelo', () => {
 
   it('suma CRUDA y round2 al FINAL (no por gasto)', () => {
     // 3 × 0.004 = 0.012 ⇒ round2 al final = 0.01 (por gasto daría 0.00).
-    const r = pagosVendedorDeVuelo([g(0.004), g(0.004), g(0.004)], conversor());
+    const r = pagosVendedorDeVuelo(
+      [g(0.004), g(0.004), g(0.004)],
+      conversor(),
+      'VUELATOUR',
+    );
     expect(r.pagadoMxn).toBe(0.01);
   });
 
@@ -136,10 +148,96 @@ describe('pagosVendedorDeVuelo', () => {
         g(5, { fecha_gasto: null }),
       ],
       conversor(),
+      'VUELATOUR',
     );
     expect(r.fecha).toBe('2026-09-15');
     expect(r.pagadoMxn).toBe(1605);
     expect(r.n).toBe(3);
+  });
+});
+
+/**
+ * DOS CATEGORÍAS (13-oct-2026, invariante 61): un vuelo con «(VuelaTour)»
+ * 2,000, «(avión)» 1,000 y OPERACIONES 500. Cada lado cuenta lo suyo y
+ * 'AMBOS' es la suma: ningún pago se cuenta dos veces.
+ */
+describe('pagosVendedorDeVuelo por LADO (dos categorías)', () => {
+  const vuelo = [
+    g(2000, { fecha_gasto: '2026-10-02' }),
+    g(1000, {
+      categoria: 'COMISION_VENDEDOR_AVION',
+      fecha_gasto: '2026-10-05',
+    }),
+    g(500, { categoria: 'OPERACIONES', fecha_gasto: '2026-10-09' }),
+  ];
+
+  it('VUELATOUR / AVION / AMBOS: n, pagado, sinTc y fecha', () => {
+    expect(pagosVendedorDeVuelo(vuelo, conversor(), 'VUELATOUR')).toEqual({
+      n: 1,
+      pagadoMxn: 2000,
+      sinTc: 0,
+      fecha: '2026-10-02',
+    });
+    expect(pagosVendedorDeVuelo(vuelo, conversor(), 'AVION')).toEqual({
+      n: 1,
+      pagadoMxn: 1000,
+      sinTc: 0,
+      fecha: '2026-10-05',
+    });
+    expect(pagosVendedorDeVuelo(vuelo, conversor(), 'AMBOS')).toEqual({
+      n: 2,
+      pagadoMxn: 3000,
+      sinTc: 0,
+      fecha: '2026-10-05',
+    });
+  });
+
+  it('AMBOS = suma de los dos lados (también con un USD sin T.C.)', () => {
+    const conUsd = [
+      ...vuelo,
+      g(50, {
+        categoria: 'COMISION_VENDEDOR_AVION',
+        moneda: 'USD',
+        tc_gasto: null,
+      }),
+    ];
+    const conv = conversor({ tcRespaldo: null });
+    const vt = pagosVendedorDeVuelo(conUsd, conv, 'VUELATOUR');
+    const av = pagosVendedorDeVuelo(conUsd, conv, 'AVION');
+    const am = pagosVendedorDeVuelo(conUsd, conv, 'AMBOS');
+    expect(am.n).toBe(vt.n + av.n);
+    expect(am.sinTc).toBe(vt.sinTc + av.sinTc);
+    expect(am.pagadoMxn).toBe((vt.pagadoMxn ?? 0) + (av.pagadoMxn ?? 0));
+    expect(av).toEqual({
+      n: 2,
+      pagadoMxn: 1000,
+      sinTc: 1,
+      fecha: '2026-10-05',
+    });
+  });
+
+  it('lado EXACTO: un código con prefijo o en minúsculas no cuenta en ningún lado', () => {
+    const raros = [
+      g(1, { categoria: 'COMISION_VENDEDOR_AVIONX' }),
+      g(2, { categoria: 'comision_vendedor' }),
+      g(3, { categoria: 'COMISION_VENDEDOR_' }),
+    ];
+    for (const lado of ['VUELATOUR', 'AVION', 'AMBOS'] as const) {
+      expect(pagosVendedorDeVuelo(raros, conversor(), lado).n).toBe(0);
+    }
+  });
+
+  it('contarPagosVendedor: misma regla de lado, sin convertir', () => {
+    expect(contarPagosVendedor(vuelo, 'VUELATOUR')).toBe(1);
+    expect(contarPagosVendedor(vuelo, 'AVION')).toBe(1);
+    expect(contarPagosVendedor(vuelo, 'AMBOS')).toBe(2);
+    expect(contarPagosVendedor([], 'AMBOS')).toBe(0);
+    expect(
+      contarPagosVendedor(
+        [{ categoria: 'COMISION_VENDEDOR_AVIONX' }, { categoria: null }, {}],
+        'AMBOS',
+      ),
+    ).toBe(0);
   });
 });
 
@@ -402,15 +500,15 @@ describe('cuerpoGastoRealPagoVendedor + sufijoUsdSinTc (el refactor del 13-oct-2
 });
 
 describe('notas de celda del Libro Dinero', () => {
-  it('textos EXACTOS (sin «provisión» desde el 13-oct-2026, invariante 61)', () => {
+  it('textos EXACTOS (sin «provisión»; las dos categorías desde el 13-oct-2026, invariante 61)', () => {
     expect(NOTA_PAGO_VENDEDOR_REAL).toBe(
-      'GASTO REAL: pago al vendedor capturado como «Comisión del vendedor» ligado a este vuelo. En la hoja utilidades ya está descontado de "otros ingresos".',
+      'GASTO REAL: pago al vendedor capturado en Gastos y ligado a este vuelo («Comisión del vendedor (VuelaTour)» o «Comisión del vendedor (avión)»). En la hoja utilidades ya está descontado de "otros ingresos".',
     );
     for (const t of [NOTA_PAGO_VENDEDOR_REAL, NOTA_PAGO_VENDEDOR_SIN_LINEA]) {
       expect(t.toLowerCase()).not.toContain('provisi');
     }
     expect(NOTA_PAGO_VENDEDOR_SIN_LINEA).toBe(
-      'GASTO REAL: pago al vendedor capturado como «Comisión del vendedor» en un vuelo sin comisión cobrada en la cotización (revisa la cotización o el vuelo del gasto). En la hoja utilidades ya está descontado de "otros ingresos".',
+      'GASTO REAL: pago al vendedor capturado en Gastos y ligado a este vuelo («Comisión del vendedor (VuelaTour)» o «Comisión del vendedor (avión)») en un vuelo sin comisión cobrada en la cotización (revisa la cotización o el vuelo del gasto). En la hoja utilidades ya está descontado de "otros ingresos".',
     );
   });
 });

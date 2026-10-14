@@ -94,6 +94,7 @@ import {
   CATEGORIAS_GASTO_SIN_AVION,
   categoriaEsDeEmpresa,
   categoriaExigeVuelo,
+  categoriaDeCheckExigeVuelo,
   categoriaExigeVueloSiempre,
   destinoCategoriaGasto,
   etiquetaCategoriaGasto,
@@ -430,6 +431,11 @@ export class ExpensesService {
       //    pendiente eterno (se administra en Gastos personales).
       //  - SERVICIOS NO se excluye: como REFACCION, sin avión SÍ es
       //    pendiente.
+      //  - COMISION_VENDEDOR_AVION NO se excluye A PROPÓSITO (13-oct-2026,
+      //    invariante 61): es la restricción de PostgREST — un literal que el
+      //    enum de la BD no conoce revienta este `not.in` (22P02). Una
+      //    «(avión)» de un vuelo sin avión sale aquí (la salida es
+      //    reclasificarla a «(VuelaTour)»).
       q = q
         .is('aeronave_id', null)
         .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`);
@@ -777,7 +783,8 @@ export class ExpensesService {
       // Mismo universo que la bandeja (fuente única
       // `CATEGORIAS_GASTO_SIN_AVION`): PERSONAL_DUENO jamás tendrá vuelo y
       // las de EMPRESA ya no son de ningún avión — sugerirles uno quemaría
-      // llamadas de IA en un imposible.
+      // llamadas de IA en un imposible. Sin el literal
+      // COMISION_VENDEDOR_AVION: restricción de PostgREST (invariante 61).
       .not('categoria', 'in', `(${CATEGORIAS_GASTO_SIN_AVION.join(',')})`)
       .order('fecha_gasto', { ascending: false })
       .limit(15);
@@ -1536,11 +1543,15 @@ export class ExpensesService {
     ) {
       throw this.errorGastoRequiereVuelo(dto.categoria);
     }
-    // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31): vuelo obligatorio
-    // para TODOS los roles — la oficina incluida, que es quien la captura.
-    // Sin vuelo no tiene con qué aparearse en «otros movimientos» y quedaría
-    // fuera de todo libro. Mismo 400 que el del piloto, ANTES de tocar la BD
-    // (el CHECK `gasto_comision_vendedor_exige_vuelo` es solo el respaldo).
+    // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31; desde el
+    // 13-oct-2026, invariante 61, las DOS categorías: «(VuelaTour)» y
+    // «(avión)», por el Set de `categoriaExigeVueloSiempre`): vuelo
+    // obligatorio para TODOS los roles — la oficina incluida, que es quien
+    // la captura. Sin vuelo no tiene con qué aparearse en «otros
+    // movimientos» (ni avión que la cargue) y quedaría fuera de todo libro.
+    // Mismo 400 que el del piloto, con la etiqueta de SU categoría, ANTES de
+    // tocar la BD (los CHECK `gasto_comision_vendedor_exige_vuelo` y
+    // `gasto_comision_vendedor_avion_exige_vuelo` son solo el respaldo).
     if (
       !dto.vuelo_id &&
       !dto.escala_id &&
@@ -2771,7 +2782,9 @@ export class ExpensesService {
    * tocarlo: el diálogo del panel manda esos tres campos siempre, y sin
    * esta comparación un gasto con cargos ligados no se podría ni
    * reclasificar ni ligar a un vuelo (lo que la regla del 14-sep-2026
-   * deja explícitamente libre).
+   * deja explícitamente libre). Reclasificar entre «Comisión del vendedor
+   * (VuelaTour)» y «Comisión del vendedor (avión)» con vuelo está permitido
+   * aun conciliado (13-oct-2026, invariante 61): el banco no se toca.
    * Sin la fila vigente a la mano se responde `true` (fail-closed: mejor
    * pedir desvincular de más que descuadrar una conciliación).
    */
@@ -2826,8 +2839,10 @@ export class ExpensesService {
 
   /**
    * 400 ESTRUCTURADO `GASTO_REQUIERE_VUELO` (mismo `message`/`details` para el
-   * candado del PILOTO —categorías del vuelo— y el de TODOS los roles
-   * —COMISION_VENDEDOR, invariante 31—). La app lo distingue por `error`.
+   * candado del PILOTO —categorías del vuelo— y el de TODOS los roles —las
+   * dos del pago al vendedor, invariantes 31 y 61—). El mensaje nombra la
+   * etiqueta de la categoría («Comisión del vendedor (avión)» o «Comisión
+   * del vendedor (VuelaTour)»). La app lo distingue por `error`.
    */
   private errorGastoRequiereVuelo(
     categoria: string | null | undefined,
@@ -2845,12 +2860,16 @@ export class ExpensesService {
 
   /**
    * Errores de BD del insert/update ligados a la COMISIÓN DEL VENDEDOR
-   * (28-sep-2026): nunca 500 ni el 409 genérico del CHECK.
-   *  - 22P02 del enum sin la migración 20260928000001 ⇒ 400 legible
-   *    (cinturón: ver `mensajeCategoriaSinMigracion`).
-   *  - 23514 del CHECK `gasto_comision_vendedor_exige_vuelo` (respaldo de BD
-   *    de la regla del API; p. ej. una carrera que desligó el vuelo) ⇒ el
-   *    mismo 400 `GASTO_REQUIERE_VUELO` del formulario.
+   * (28-sep-2026; las DOS categorías desde el 13-oct-2026, invariante 61):
+   * nunca 500 ni el 409 genérico del CHECK.
+   *  - 22P02 del enum sin la migración de SU categoría (20260928000001 o
+   *    20261013000003) ⇒ 400 legible (cinturón: `mensajeCategoriaSinMigracion`
+   *    ya distingue por categoría, con el literal entre comillas dobles).
+   *  - 23514 de cualquiera de los dos CHECK «exige vuelo» (respaldo de BD de
+   *    la regla del API; p. ej. una carrera que desligó el vuelo) ⇒ el mismo
+   *    400 `GASTO_REQUIERE_VUELO` del formulario, con la categoría que nombra
+   *    el CHECK (`categoriaDeCheckExigeVuelo`) — NO la del dto: en un PATCH
+   *    que solo quita el vuelo, `categoria` viene undefined.
    */
   private lanzarErrorComisionVendedor(
     error: { code?: string | null; message?: string | null },
@@ -2858,12 +2877,8 @@ export class ExpensesService {
   ): void {
     const sinEnum = mensajeCategoriaSinMigracion(error, categoria);
     if (sinEnum) throw new BadRequestException(sinEnum);
-    if (
-      error.code === '23514' &&
-      (error.message ?? '').includes('gasto_comision_vendedor_exige_vuelo')
-    ) {
-      throw this.errorGastoRequiereVuelo(categoria ?? 'COMISION_VENDEDOR');
-    }
+    const cat = categoriaDeCheckExigeVuelo(error);
+    if (cat) throw this.errorGastoRequiereVuelo(cat);
   }
 
   /** Texto único del candado: «Este gasto tiene N cargos del banco ligados…». */
@@ -3210,7 +3225,8 @@ export class ExpensesService {
     }
     // Gasto con REPARTO MANUAL (gasto_reparto): mutar monto/categoría/vuelo/
     // moneda reubicaría dinero ya atribuido a aviones en silencio — se exige
-    // quitar o corregir el reparto primero (pantalla Otros gastos).
+    // quitar o corregir el reparto primero (pantalla Otros gastos). (Las dos
+    // del pago al vendedor no aplican: llevan vuelo y no son repartibles.)
     if (
       dto.monto !== undefined ||
       dto.categoria !== undefined ||
@@ -3290,10 +3306,12 @@ export class ExpensesService {
           'Un gasto de visita no lleva vuelo, avión ni escala: quítalos o usa otra categoría.',
         );
       }
-      // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31): espejo del
-      // create() para TODOS los roles — desligar el vuelo de una comisión o
-      // reclasificar a comisión un gasto sin vuelo ⇒ el mismo 400. Moverla a
-      // OTRO vuelo sigue permitido.
+      // COMISIÓN DEL VENDEDOR (28-sep-2026, invariante 31; las DOS
+      // categorías desde el 13-oct-2026, invariante 61): espejo del create()
+      // para TODOS los roles, sobre el estado FUSIONADO — desligar el vuelo
+      // de una comisión o reclasificar a comisión un gasto sin vuelo ⇒ el
+      // mismo 400. Moverla a OTRO vuelo o reclasificarla entre «(VuelaTour)»
+      // y «(avión)» con vuelo sigue permitido.
       if (categoriaExigeVueloSiempre(catEf) && !vueloEf && !escalaEf) {
         throw this.errorGastoRequiereVuelo(catEf);
       }

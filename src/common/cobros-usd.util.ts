@@ -70,3 +70,18 @@ export function cobrosEnUsd(
     sin_tc_mxn: Math.round(sinTcMxn * 100) / 100,
   };
 }
+
+/**
+ * ¿El reparto lee este CANCELADO? Lo cobrado y no reembolsado es venta del
+ * avión (invariante 2): un cancelado RETIENE cobros si lo convertido a USD
+ * es positivo o si quedan cobros MXN sin T.C. (positivos). Puro.
+ *
+ * FUENTE ÚNICA (13-oct-2026, invariante 61) que comparten: el salto del
+ * cancelado sin cobros en el reparto a socios (`profit-sharing`), el
+ * universo de la «Comisión del vendedor (avión)» (`comisiones-avion.util`,
+ * `pagoVendedorAvionEnUniverso`) y la nota del Libro Dinero. Si dijeran
+ * cosas distintas, el balance restaría un pago que el reparto no lee.
+ */
+export function retieneCobros(c: CobrosUsd): boolean {
+  return c.total_usd > 0 || c.sin_tc_mxn > 0;
+}

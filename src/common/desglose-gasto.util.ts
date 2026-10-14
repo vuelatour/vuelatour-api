@@ -227,9 +227,14 @@ export const CATS_SIN_TUA_EMBEBIDO: ReadonlySet<string> = new Set([
   'PERSONAL_DUENO',
   'GASOLINA',
   'VISITA',
-  // COMISION_VENDEDOR (28-sep-2026): el pago al vendedor jamás trae una
-  // factura de aeródromo con TUA embebido (cubre balance, reparto y Libro).
+  // COMISION_VENDEDOR (28-sep-2026) y COMISION_VENDEDOR_AVION (13-oct-2026,
+  // invariante 61): el pago al vendedor jamás trae una factura de aeródromo
+  // con TUA ni extensión embebidas (cubre balance, reparto, Libro Dinero y
+  // «otros movimientos»; sin esto `trasladosEmbebidosDeGasto` podría sacar
+  // unas «tuas pagadas» del desglose IA de la comisión). Se usa en JS, nunca
+  // en un query.
   'COMISION_VENDEDOR',
+  'COMISION_VENDEDOR_AVION',
 ]);
 
 export interface GastoParaTuaEmbebido {

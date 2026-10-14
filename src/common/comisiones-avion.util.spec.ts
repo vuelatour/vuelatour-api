@@ -1,13 +1,23 @@
 import {
   COMISIONES_AL_AVION_DESDE_DEFAULT,
   SUFIJO_COMISION_BANCO_PARTE_VUELATOUR,
+  TEXTO_PAGO_VENDEDOR_AVION_SIN_CARGO,
   aplicaComisionesAlAvion,
   comisionesDelVuelo,
   conceptoPagoVendedorACargoDelAvion,
+  egresoPagoVendedorDeVuelo,
   etiquetaReglaComisiones,
   fmtMxnNota,
   fmtPctNota,
+  motivoPagoVendedorAvionSinCargo,
+  notaParteAvionDinero,
+  pagoVendedorAvionEnUniverso,
+  sufijoParteAvionDinero,
   sufijoPagoVendedorACargoDelAvion,
+  sufijoPagoVendedorAvionSinCargo,
+  textoPendienteCapturaVendedor,
+  textoPendientePagoVendedorAvionSinCargo,
+  textoPendienteVendedorSinTc,
   type ComisionVendedorDeAvion,
   type ComisionesDelVueloInput,
 } from './comisiones-avion.util';
@@ -30,12 +40,16 @@ import {
  * de la vigencia, cobro USD con T.C., sin comisión, multi-avión (parte),
  * vendedor sin comisión, IVA 0 %.
  *
- * 13-oct-2026 (API 0.0.74, invariante 61; decisión 3 del lote del cliente):
- * la comisión del vendedor resta SOLO como GASTO REAL (gastos
- * `COMISION_VENDEDOR` ligados al vuelo, entrada `gastos`); la PROVISIÓN
- * (comisión cotizada + IVA) murió en los tres libros. El avión la carga en
- * el MISMO universo de la invariante 50 (vigencia ∧ COMPLETADO ∧ partición
- * consistente ∧ comisión cotizada > 0) y solo con gastos capturados.
+ * 13-oct-2026 (API 0.0.74, invariante 61; decisión 3 del lote del cliente
+ * ajustada el mismo día —«dos categorías»—): la comisión del vendedor resta
+ * SOLO como GASTO REAL y SOLO la «Comisión del vendedor (avión)»
+ * (`COMISION_VENDEDOR_AVION`, entrada `gastos`); la «(VuelaTour)»
+ * (`COMISION_VENDEDOR`) NUNCA la absorbe el avión. La PROVISIÓN murió en los
+ * tres libros. Universo de la «(avión)»: COMPLETADO, o CANCELADO con cobros
+ * retenidos (`retieneCobros`), en CUALQUIER fecha (la vigencia ya solo
+ * gobierna la parte bancaria), sin exigir comisión cotizada ni partición
+ * consistente. Los casos de absorción de la D3 se re-apuntaron a la
+ * «(avión)» con las MISMAS cifras.
  */
 
 const VIGENCIA = COMISIONES_AL_AVION_DESDE_DEFAULT;
@@ -88,27 +102,44 @@ const V247: VueloIngresoInput = {
   calculo_snapshot: null,
 };
 
-/** Gasto `COMISION_VENDEDOR` del vuelo (forma de `gasto`; MXN por default). */
+/**
+ * Gasto «Comisión del vendedor (avión)» del vuelo (forma de `gasto`; MXN por
+ * default): el ÚNICO que el avión absorbe (los casos de la D3 se
+ * re-apuntaron aquí con las mismas cifras).
+ */
 const gastoCv = (
   monto: number | string,
   extra: Partial<GastoPagoVendedorRow> = {},
 ): GastoPagoVendedorRow => ({
-  categoria: 'COMISION_VENDEDOR',
+  categoria: 'COMISION_VENDEDOR_AVION',
   monto,
   moneda: 'MXN',
   tc_gasto: null,
   fecha_gasto: '2026-09-28',
   ...extra,
 });
+/** Gasto «Comisión del vendedor (VuelaTour)»: el avión NUNCA lo absorbe. */
+const gastoVt = (
+  monto: number | string,
+  extra: Partial<GastoPagoVendedorRow> = {},
+): GastoPagoVendedorRow =>
+  gastoCv(monto, { categoria: 'COMISION_VENDEDOR', ...extra });
 
-/** Todo en 0/false: lo que trae un vuelo sin comisiones o antes de la vigencia. */
+/** Partes del vendedor en 0/false (sin pago «(avión)» absorbido). */
 const SIN_VENDEDOR = {
   vendedor_mxn: 0,
   vendedor_usd: 0,
   vendedor_sin_tc: false,
-  vendedor_pagos_n: 0,
   vendedor_usd_sin_tc_n: 0,
   vendedor_usd_sin_tc_mxn: 0,
+};
+/** Contadores de un vuelo COMPLETADO sin pagos al vendedor capturados. */
+const SIN_PAGOS_COMPLETADO = {
+  vendedor_avion_universo: true,
+  vendedor_avion_pagos_n: 0,
+  vendedor_vuelatour_pagos_n: 0,
+  vendedor_absorbido: false,
+  vendedor_pendiente_captura: false,
 };
 
 function entrada(
@@ -158,7 +189,31 @@ describe('aplicaComisionesAlAvion — vigencia por día Cancún del vuelo', () =
 });
 
 describe('comisionesDelVuelo', () => {
-  it('ANTES de la vigencia: no aplica y todo en 0/false (aunque haya comisiones Y gasto real)', () => {
+  it('ANTES de la vigencia SIN «(avión)»: no aplica, no lleva COMISIONES y todo en 0 (aunque haya comisión bancaria y una «(VuelaTour)»)', () => {
+    const r = comisionesDelVuelo(
+      entrada({
+        diaVuelo: '2026-08-31',
+        vuelo: V501,
+        cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+        gastos: [gastoVt(3000)],
+      }),
+    );
+    expect(r).toEqual({
+      aplica: false,
+      lleva_comisiones: false,
+      banco_mxn: 0,
+      banco_usd: 0,
+      total_mxn: 0,
+      total_usd: 0,
+      detalle: [],
+      banco_sin_tc: 0,
+      ...SIN_VENDEDOR,
+      ...SIN_PAGOS_COMPLETADO,
+      vendedor_vuelatour_pagos_n: 1,
+    });
+  });
+
+  it('ANTES de la vigencia CON «(avión)»: el avión SÍ la carga (la elección explícita manda); banco 0 aunque haya comisión bancaria y el detalle solo trae el vendedor', () => {
     const r = comisionesDelVuelo(
       entrada({
         diaVuelo: '2026-08-31',
@@ -169,14 +224,24 @@ describe('comisionesDelVuelo', () => {
     );
     expect(r).toEqual({
       aplica: false,
+      lleva_comisiones: true,
       banco_mxn: 0,
       banco_usd: 0,
-      total_mxn: 0,
-      total_usd: 0,
-      detalle: [],
+      vendedor_mxn: 3000,
+      vendedor_usd: 150,
+      total_mxn: 3000,
+      total_usd: 150,
+      detalle: ['Comisión vendedor · $3,000.00 · gasto real'],
       banco_sin_tc: 0,
-      vendedor_absorbe: false,
-      ...SIN_VENDEDOR,
+      vendedor_sin_tc: false,
+      vendedor_avion_universo: true,
+      vendedor_avion_pagos_n: 1,
+      vendedor_vuelatour_pagos_n: 0,
+      vendedor_absorbido: true,
+      // Fuera de la vigencia no hay checklist de captura.
+      vendedor_pendiente_captura: false,
+      vendedor_usd_sin_tc_n: 0,
+      vendedor_usd_sin_tc_mxn: 0,
     });
   });
 
@@ -194,9 +259,11 @@ describe('comisionesDelVuelo', () => {
         'Comisión bancaria · Transferencia 5 % · $1,020.00 (parte del avión 100 %)',
       ],
       banco_sin_tc: 0,
-      // #235 no cobra comisión del vendedor: el avión no absorbe nada de ella.
-      vendedor_absorbe: false,
+      lleva_comisiones: true,
+      // #235 no cobra comisión del vendedor ni trae pagos: nada del vendedor
+      // y ningún pendiente de captura.
       ...SIN_VENDEDOR,
+      ...SIN_PAGOS_COMPLETADO,
     });
   });
 
@@ -231,11 +298,13 @@ describe('comisionesDelVuelo', () => {
     // 350 × 0.896861 = 313.90 (MXN); 350 ÷ 20 = 17.50 USD × factor = 15.70.
     expect(r.banco_mxn).toBe(313.9);
     expect(r.banco_usd).toBe(15.7);
-    // COMPLETADO con comisión cotizada: el avión ES quien absorbe…
-    expect(r.vendedor_absorbe).toBe(true);
-    // …pero sin gasto capturado no resta ni un peso (hasta el 0.0.73: 1,600
+    // COMPLETADO de la vigencia con comisión cotizada y sin pagos: el
+    // balance avisa que falta capturarlo…
+    expect(r.vendedor_pendiente_captura).toBe(true);
+    expect(r.vendedor_absorbido).toBe(false);
+    // …pero sin pago capturado no resta ni un peso (hasta el 0.0.73: 1,600
     // de provisión = 80 USD × K 20).
-    expect(r.vendedor_pagos_n).toBe(0);
+    expect(r.vendedor_avion_pagos_n).toBe(0);
     expect(r.vendedor_usd).toBe(0);
     expect(r.vendedor_mxn).toBe(0);
     expect(r.total_mxn).toBe(313.9);
@@ -245,7 +314,7 @@ describe('comisionesDelVuelo', () => {
     ]);
   });
 
-  it('con gasto real: 1 gasto MXN de 3,000 en COMPLETADO consistente con comisión cotizada ⇒ resta EXACTAMENTE lo pagado (× parte del avión), USD = ÷ K', () => {
+  it('con «(avión)»: 1 gasto MXN de 3,000 en COMPLETADO consistente con comisión cotizada ⇒ resta EXACTAMENTE lo pagado (× parte del avión), USD = ÷ K', () => {
     const r = comisionesDelVuelo(
       entrada({
         vuelo: V501,
@@ -254,8 +323,9 @@ describe('comisionesDelVuelo', () => {
         vendedorNombre: 'Vendedor Uno',
       }),
     );
-    expect(r.vendedor_absorbe).toBe(true);
-    expect(r.vendedor_pagos_n).toBe(1);
+    expect(r.vendedor_absorbido).toBe(true);
+    expect(r.vendedor_avion_pagos_n).toBe(1);
+    expect(r.vendedor_pendiente_captura).toBe(false);
     expect(r.vendedor_mxn).toBe(3000);
     expect(r.vendedor_usd).toBe(150);
     expect(r.vendedor_sin_tc).toBe(false);
@@ -290,7 +360,7 @@ describe('comisionesDelVuelo', () => {
         vendedorNombre: 'Vendedor Uno',
       }),
     );
-    expect(r.vendedor_pagos_n).toBe(2);
+    expect(r.vendedor_avion_pagos_n).toBe(2);
     expect(r.vendedor_mxn).toBe(1600);
     expect(r.vendedor_usd).toBe(80);
     expect(r.detalle).toEqual([
@@ -335,8 +405,8 @@ describe('comisionesDelVuelo', () => {
         vendedorNombre: 'Vendedor Uno',
       }),
     );
-    expect(r.vendedor_absorbe).toBe(true);
-    expect(r.vendedor_pagos_n).toBe(1);
+    expect(r.vendedor_absorbido).toBe(true);
+    expect(r.vendedor_avion_pagos_n).toBe(1);
     expect(r.vendedor_sin_tc).toBe(true);
     expect(r.vendedor_mxn).toBe(0);
     expect(r.vendedor_usd).toBe(80);
@@ -356,7 +426,7 @@ describe('comisionesDelVuelo', () => {
       }),
     );
     expect(dos.vendedor_usd).toBe(130);
-    expect(dos.vendedor_pagos_n).toBe(2);
+    expect(dos.vendedor_avion_pagos_n).toBe(2);
     expect(dos.detalle).toEqual([
       'Comisión vendedor · $130.00 USD sin T.C. — no suma en pesos',
     ]);
@@ -382,7 +452,7 @@ describe('comisionesDelVuelo', () => {
         gastos: [gastoCv(1000), gastoCv(50, { moneda: 'USD' })],
       }),
     );
-    expect(r.vendedor_pagos_n).toBe(2);
+    expect(r.vendedor_avion_pagos_n).toBe(2);
     expect(r.vendedor_mxn).toBe(1000);
     expect(r.vendedor_usd).toBe(50);
     expect(r.vendedor_sin_tc).toBe(true);
@@ -425,21 +495,44 @@ describe('comisionesDelVuelo', () => {
     ]);
   });
 
-  it('vendedor SIN comisión cotizada: solo la bancaria (sin encabezado); un gasto real ahí NO lo absorbe el avión (es un aviso de VuelaTour en «otros movimientos»)', () => {
-    const r = comisionesDelVuelo(
+  it('vendedor SIN comisión cotizada: una «(VuelaTour)» NO la absorbe el avión (solo la bancaria); una «(avión)» SÍ, y la nota dice que no hay línea que aparear', () => {
+    const sinComision = {
+      ...V501,
+      comision_vendedor_usd: 0,
+      monto_total_usd: 2150,
+    };
+    const vt = comisionesDelVuelo(
       entrada({
-        vuelo: { ...V501, comision_vendedor_usd: 0, monto_total_usd: 2150 },
+        vuelo: sinComision,
+        cobros: [cobroMxn(500, { tc_usd_mxn: 20 })],
+        gastos: [gastoVt(500)],
+        vendedorNombre: 'Nadie',
+      }),
+    );
+    expect(vt.vendedor_absorbido).toBe(false);
+    expect(vt.vendedor_vuelatour_pagos_n).toBe(1);
+    expect(vt.vendedor_avion_pagos_n).toBe(0);
+    expect(vt.vendedor_mxn).toBe(0);
+    expect(vt.vendedor_usd).toBe(0);
+    expect(vt.detalle).toHaveLength(1);
+    expect(vt.detalle[0]).toMatch(/^Comisión bancaria · Transferencia 5 % · /);
+    // La «(avión)» no exige comisión cotizada (la elección explícita manda).
+    const av = comisionesDelVuelo(
+      entrada({
+        vuelo: sinComision,
         cobros: [cobroMxn(500, { tc_usd_mxn: 20 })],
         gastos: [gastoCv(500)],
         vendedorNombre: 'Nadie',
       }),
     );
-    expect(r.vendedor_absorbe).toBe(false);
-    expect(r.vendedor_pagos_n).toBe(1);
-    expect(r.vendedor_mxn).toBe(0);
-    expect(r.vendedor_usd).toBe(0);
-    expect(r.detalle).toHaveLength(1);
-    expect(r.detalle[0]).toMatch(/^Comisión bancaria · Transferencia 5 % · /);
+    expect(av.vendedor_absorbido).toBe(true);
+    expect(av.vendedor_mxn).toBe(500);
+    expect(av.vendedor_usd).toBe(25);
+    expect(av.detalle).toHaveLength(3);
+    expect(av.detalle[0]).toBe('2 conceptos');
+    expect(av.detalle[2]).toBe(
+      'Comisión vendedor (Nadie) · $500.00 · gasto real · sin comisión cobrada en la cotización',
+    );
   });
 
   it('cobro en USD con su T.C.: MXN = comisión × T.C. del cobro y USD tal cual', () => {
@@ -550,8 +643,9 @@ describe('comisionesDelVuelo', () => {
     expect(b.vendedor_mxn).toBe(2902.32);
     expect(a.vendedor_mxn + b.vendedor_mxn).toBe(5804.64);
     expect(a.vendedor_usd + b.vendedor_usd).toBeCloseTo(322.48, 10);
-    expect(a.vendedor_pagos_n).toBe(1);
-    expect(b.vendedor_pagos_n).toBe(1);
+    expect(a.vendedor_avion_pagos_n).toBe(1);
+    expect(b.vendedor_avion_pagos_n).toBe(1);
+    expect(a.vendedor_absorbido && b.vendedor_absorbido).toBe(true);
     // El centavo impar va al principal (residuo mayor, empate ⇒ principal).
     expect(a.banco_mxn).toBeGreaterThanOrEqual(b.banco_mxn);
     expect(a.detalle[0]).toBe('2 conceptos');
@@ -574,26 +668,58 @@ describe('comisionesDelVuelo', () => {
     );
   });
 
-  it('CANCELADO: lo retenido es 100 % del avión (comisión completa) y el avión NO absorbe el pago al vendedor aunque haya gasto', () => {
+  it('CANCELADO CON cobros retenidos: lo retenido es 100 % del avión (comisión completa) y la «(avión)» SÍ la absorbe, con la nota de que no hay comisión cobrada', () => {
     const r = comisionesDelVuelo(
       entrada({
         vuelo: V501,
         estado: 'CANCELADO',
-        cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+        cobros: [cobroMxn(350, { monto: 7000, tc_usd_mxn: 20 })],
         gastos: [gastoCv(1600)],
       }),
     );
     expect(r.banco_mxn).toBe(350);
-    expect(r.vendedor_absorbe).toBe(false);
-    expect(r.vendedor_pagos_n).toBe(1);
-    expect(r.vendedor_mxn).toBe(0);
-    expect(r.vendedor_usd).toBe(0);
+    expect(r.vendedor_avion_universo).toBe(true);
+    expect(r.vendedor_absorbido).toBe(true);
+    expect(r.vendedor_mxn).toBe(1600);
+    expect(r.vendedor_usd).toBe(80);
     expect(r.detalle).toEqual([
+      '2 conceptos',
       'Comisión bancaria · Transferencia 5 % · $350.00 (parte del avión 100 %)',
+      'Comisión vendedor · $1,600.00 · gasto real · vuelo cancelado: sin comisión cobrada',
     ]);
   });
 
-  it('partición INCONSISTENTE: el avión NO absorbe el pago al vendedor (no hay comisión que separar) y la bancaria completa al avión', () => {
+  it('CANCELADO SIN cobros retenidos (reembolso total / cobro sin monto): el avión NO absorbe la «(avión)» aunque haya gasto — la paga VuelaTour', () => {
+    for (const cobros of [
+      // cobro con comisión pero sin monto: nada retenido.
+      [cobroMxn(350, { tc_usd_mxn: 20 })],
+      // reembolso neto 0.
+      [
+        cobroMxn(350, { monto: 7000, tc_usd_mxn: 20 }),
+        cobroMxn(null, { monto: -7000, tc_usd_mxn: 20 }),
+      ],
+    ]) {
+      const r = comisionesDelVuelo(
+        entrada({
+          vuelo: V501,
+          estado: 'CANCELADO',
+          cobros,
+          gastos: [gastoCv(1600)],
+        }),
+      );
+      expect(r.banco_mxn).toBe(350);
+      expect(r.vendedor_avion_universo).toBe(false);
+      expect(r.vendedor_absorbido).toBe(false);
+      expect(r.vendedor_avion_pagos_n).toBe(1);
+      expect(r.vendedor_mxn).toBe(0);
+      expect(r.vendedor_usd).toBe(0);
+      expect(r.detalle).toEqual([
+        'Comisión bancaria · Transferencia 5 % · $350.00 (parte del avión 100 %)',
+      ]);
+    }
+  });
+
+  it('partición INCONSISTENTE: la bancaria completa al avión y la «(avión)» SÍ la absorbe (sin apareo: lo dice la nota)', () => {
     const r = comisionesDelVuelo(
       entrada({
         vuelo: { ...V501, monto_total_usd: 9999 },
@@ -604,10 +730,21 @@ describe('comisionesDelVuelo', () => {
     expect(
       particionIngresoVuelo({ ...V501, monto_total_usd: 9999 }).inconsistente,
     ).toBe(true);
-    expect(r.vendedor_absorbe).toBe(false);
-    expect(r.vendedor_mxn).toBe(0);
-    expect(r.vendedor_usd).toBe(0);
+    expect(r.vendedor_absorbido).toBe(true);
+    expect(r.vendedor_mxn).toBe(1600);
+    expect(r.vendedor_usd).toBe(80);
     expect(r.banco_mxn).toBe(350);
+    expect(r.detalle[2]).toBe(
+      'Comisión vendedor · $1,600.00 · gasto real · desglose de la cotización inconsistente: sin apareo',
+    );
+    // Sin pagos capturados, la partición inconsistente apaga el checklist.
+    const sinPago = comisionesDelVuelo(
+      entrada({
+        vuelo: { ...V501, monto_total_usd: 9999 },
+        cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+      }),
+    );
+    expect(sinPago.vendedor_pendiente_captura).toBe(false);
   });
 
   it('varias comisiones bancarias + vendedor (gasto real): una línea por concepto y «3 conceptos»', () => {
@@ -659,8 +796,9 @@ describe('comisionesDelVuelo — revisión 6-oct-2026 (universo del avión = inv
         }),
       );
       expect(r.aplica).toBe(true);
-      expect(r.vendedor_absorbe).toBe(false);
-      expect(r.vendedor_pagos_n).toBe(1);
+      expect(r.vendedor_avion_universo).toBe(false);
+      expect(r.vendedor_absorbido).toBe(false);
+      expect(r.vendedor_avion_pagos_n).toBe(1);
       expect(r.vendedor_mxn).toBe(0);
       expect(r.vendedor_usd).toBe(0);
       expect(r.vendedor_sin_tc).toBe(false);
@@ -680,7 +818,7 @@ describe('comisionesDelVuelo — revisión 6-oct-2026 (universo del avión = inv
         gastos: [gastoCv(1600)],
       }),
     );
-    expect(completado.vendedor_absorbe).toBe(true);
+    expect(completado.vendedor_absorbido).toBe(true);
     expect(completado.vendedor_mxn).toBe(1600);
     expect(completado.total_mxn).toBe(1913.9);
   });
@@ -697,8 +835,10 @@ describe('comisionesDelVuelo — revisión 6-oct-2026 (universo del avión = inv
       total_usd: 0,
       detalle: [],
       banco_sin_tc: 0,
-      vendedor_absorbe: false,
+      lleva_comisiones: true,
       ...SIN_VENDEDOR,
+      ...SIN_PAGOS_COMPLETADO,
+      vendedor_avion_universo: false,
     });
   });
 
@@ -885,10 +1025,21 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
   const xbPev: ComisionVendedorDeAvion[] = [
     { matricula: 'XB-PEV', vendedor_mxn: 3000, absorbido: true },
   ];
+  /**
+   * Los casos de la D3 (solo «(avión)», con línea): `pagos` = `pagosAvion`,
+   * sin VuelaTour ni `sinLinea` ⇒ la salida es byte a byte la de la D3.
+   */
+  const conceptoD3 = (a: {
+    etiquetaComision: string;
+    pagos: PagosVendedorDeVuelo;
+    lineaMxn: number | null;
+    aviones: ReadonlyArray<ComisionVendedorDeAvion>;
+  }): string =>
+    conceptoPagoVendedorACargoDelAvion({ ...a, pagosAvion: a.pagos });
 
   it('gramática exacta: pago exacto, «(2 pagos)», «excede» y «faltan» vs lo COBRADO con la tolerancia de siempre', () => {
     expect(
-      conceptoPagoVendedorACargoDelAvion({
+      conceptoD3({
         etiquetaComision: PABLO,
         pagos: pago(3000),
         lineaMxn: 3000,
@@ -898,7 +1049,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
       'pago comisión vendedor (Pablo Canales) · gasto real · a cargo del avión XB-PEV ($3,000.00 en su columna COMISIONES)',
     );
     expect(
-      conceptoPagoVendedorACargoDelAvion({
+      conceptoD3({
         etiquetaComision: PABLO,
         pagos: pago(3000, { n: 2 }),
         lineaMxn: 2700,
@@ -908,7 +1059,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
       'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · excede $300.00 MXN · a cargo del avión XB-PEV ($3,000.00 en su columna COMISIONES)',
     );
     expect(
-      conceptoPagoVendedorACargoDelAvion({
+      conceptoD3({
         etiquetaComision: 'comisión vendedor (Alex Saab)',
         pagos: pago(1500),
         lineaMxn: 1800,
@@ -919,7 +1070,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
     );
     // Tolerancia 0.99 / 1.00 (la misma de `conceptoPagoVendedorReal`).
     const c = (pagado: number) =>
-      conceptoPagoVendedorACargoDelAvion({
+      conceptoD3({
         etiquetaComision: PABLO,
         pagos: pago(pagado),
         lineaMxn: 2030,
@@ -934,7 +1085,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
   });
 
   it('NUNCA lleva « (USD sin TC)» aunque haya pagos sin T.C. (el egreso es 0 de verdad y la marca anularía el lado del bloque VUELATOUR)', () => {
-    const parcial = conceptoPagoVendedorACargoDelAvion({
+    const parcial = conceptoD3({
       etiquetaComision: PABLO,
       pagos: pago(6000, { n: 2, sinTc: 1 }),
       lineaMxn: 2700,
@@ -943,7 +1094,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
     expect(parcial).toBe(
       'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · a cargo del avión XB-PEV ($6,000.00 en su columna COMISIONES)',
     );
-    const ninguno = conceptoPagoVendedorACargoDelAvion({
+    const ninguno = conceptoD3({
       etiquetaComision: PABLO,
       pagos: pago(null, { sinTc: 1 }),
       lineaMxn: 2700,
@@ -964,7 +1115,7 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
       pago(null, { sinTc: 1 }),
       pago(1, { n: 3 }),
     ]) {
-      const t = conceptoPagoVendedorACargoDelAvion({
+      const t = conceptoD3({
         etiquetaComision: 'comisión vendedor',
         pagos,
         lineaMxn: 3000,
@@ -973,6 +1124,619 @@ describe('conceptoPagoVendedorACargoDelAvion', () => {
       expect(t.startsWith('pago comisión vendedor · gasto real')).toBe(true);
       expect(t).not.toMatch(/PROVISI[OÓ]N \(/);
       expect(t).not.toContain('cubierto por');
+    }
+  });
+});
+
+/** Pagos de un lado (forma de `pagosVendedorDeVuelo`). */
+const pagosDe = (
+  pagadoMxn: number | null,
+  extra: Partial<PagosVendedorDeVuelo> = {},
+): PagosVendedorDeVuelo => ({
+  n: 1,
+  pagadoMxn,
+  sinTc: 0,
+  fecha: '2026-09-28',
+  ...extra,
+});
+const NINGUNO: PagosVendedorDeVuelo = {
+  n: 0,
+  pagadoMxn: null,
+  sinTc: 0,
+  fecha: null,
+};
+const PABLO_CANALES = 'comisión vendedor (Pablo Canales)';
+const avionDe = (
+  matricula: string,
+  vendedor_mxn: number,
+): ComisionVendedorDeAvion => ({ matricula, vendedor_mxn, absorbido: true });
+
+/**
+ * DOS CATEGORÍAS (13-oct-2026, invariante 61): la «(VuelaTour)» nunca la
+ * absorbe el avión; la «(avión)» sí, en su universo (COMPLETADO o CANCELADO
+ * con cobros retenidos), en cualquier fecha.
+ */
+describe('comisionesDelVuelo — dos categorías (13-oct-2026)', () => {
+  it('(1) una «(VuelaTour)» en un COMPLETADO de la vigencia con comisión cotizada: vendedor 0, no absorbida, contada, detalle solo bancario', () => {
+    const r = comisionesDelVuelo(
+      entrada({
+        vuelo: V501,
+        cobros: [cobroMxn(350, { tc_usd_mxn: 20 })],
+        gastos: [gastoVt(3000)],
+        vendedorNombre: 'Vendedor Uno',
+      }),
+    );
+    expect(r.aplica).toBe(true);
+    expect(r.lleva_comisiones).toBe(true);
+    expect(r.vendedor_mxn).toBe(0);
+    expect(r.vendedor_usd).toBe(0);
+    expect(r.vendedor_absorbido).toBe(false);
+    expect(r.vendedor_vuelatour_pagos_n).toBe(1);
+    expect(r.vendedor_avion_pagos_n).toBe(0);
+    // Hay pago (de VuelaTour): el checklist de captura se apaga.
+    expect(r.vendedor_pendiente_captura).toBe(false);
+    expect(r.total_mxn).toBe(313.9);
+    expect(r.detalle).toEqual([
+      'Comisión bancaria · Transferencia 5 % · $350.00 (parte del avión 89.69 %: $313.90)',
+    ]);
+  });
+
+  it('(5) mixto: solo la parte «(avión)» resta en el avión', () => {
+    const r = comisionesDelVuelo(
+      entrada({
+        vuelo: V501,
+        gastos: [gastoVt(2000), gastoCv(1000)],
+      }),
+    );
+    expect(r.vendedor_avion_pagos_n).toBe(1);
+    expect(r.vendedor_vuelatour_pagos_n).toBe(1);
+    expect(r.vendedor_absorbido).toBe(true);
+    expect(r.vendedor_mxn).toBe(1000);
+    expect(r.vendedor_usd).toBe(50);
+    expect(r.detalle).toEqual(['Comisión vendedor · $1,000.00 · gasto real']);
+  });
+
+  it('(7) una «(VuelaTour)» MXN sin K NO entra a `vendedor_usd_sin_tc_*` (filtro EXACTO por lado)', () => {
+    const mixto = comisionesDelVuelo(
+      entrada({
+        vuelo: V501,
+        tcVenta: null,
+        gastos: [gastoVt(3000), gastoCv(1000)],
+      }),
+    );
+    expect(mixto.vendedor_usd_sin_tc_n).toBe(1);
+    expect(mixto.vendedor_usd_sin_tc_mxn).toBe(1000);
+    const soloVt = comisionesDelVuelo(
+      entrada({ vuelo: V501, tcVenta: null, gastos: [gastoVt(3000)] }),
+    );
+    expect(soloVt.vendedor_usd_sin_tc_n).toBe(0);
+    expect(soloVt.vendedor_usd_sin_tc_mxn).toBe(0);
+    expect(soloVt.vendedor_mxn).toBe(0);
+  });
+
+  it('(8) `vendedor_pendiente_captura` solo con vigencia ∧ COMPLETADO ∧ consistente ∧ cotizada ∧ 0 pagos de las dos', () => {
+    const base = { vuelo: V501, cobros: [] };
+    expect(comisionesDelVuelo(entrada(base)).vendedor_pendiente_captura).toBe(
+      true,
+    );
+    // Un pago de cualquiera de las dos lo apaga.
+    expect(
+      comisionesDelVuelo(entrada({ ...base, gastos: [gastoVt(1)] }))
+        .vendedor_pendiente_captura,
+    ).toBe(false);
+    expect(
+      comisionesDelVuelo(entrada({ ...base, gastos: [gastoCv(1)] }))
+        .vendedor_pendiente_captura,
+    ).toBe(false);
+    // No completado, antes de la vigencia o sin comisión cotizada: no.
+    for (const e of [
+      { estado: 'CONFIRMADO' },
+      { estado: 'CANCELADO' },
+      { diaVuelo: '2026-08-31' },
+      { vuelo: V235 },
+    ]) {
+      expect(
+        comisionesDelVuelo(entrada({ ...base, ...e }))
+          .vendedor_pendiente_captura,
+      ).toBe(false);
+    }
+  });
+
+  it('(3) antes de la vigencia: la parte bancaria NO entra aunque el vuelo absorba una «(avión)» (multi-avión incluido)', () => {
+    const vuelo = { aeronave_id: 'av-a', calculo_snapshot: null };
+    const part = participacionPorAeronave(vuelo, [
+      { id: 'e1', orden: 1, aeronave_id: null, cancelada_at: null },
+      { id: 'e2', orden: 2, aeronave_id: 'av-b', cancelada_at: null },
+    ]);
+    const parteDe = (avion: string) => (m: number) =>
+      repartirUsd(m, part).get(avion) ?? 0;
+    const comun = {
+      diaVuelo: '2026-08-20',
+      vuelo: V247,
+      tcVenta: 18,
+      cobros: [cobroMxn(630.01, { tc_usd_mxn: 18 })],
+      gastos: [gastoCv(1000.01)],
+      participacion: 0.5,
+    };
+    const a = comisionesDelVuelo(
+      entrada({ ...comun, parteAvion: parteDe('av-a') }),
+    );
+    const b = comisionesDelVuelo(
+      entrada({ ...comun, parteAvion: parteDe('av-b') }),
+    );
+    for (const r of [a, b]) {
+      expect(r.aplica).toBe(false);
+      expect(r.lleva_comisiones).toBe(true);
+      expect(r.banco_mxn).toBe(0);
+      expect(r.banco_usd).toBe(0);
+      expect(r.detalle).toHaveLength(1);
+    }
+    // (6) Σ de los aviones == el pago al centavo.
+    expect(Math.round((a.vendedor_mxn + b.vendedor_mxn) * 100) / 100).toBe(
+      1000.01,
+    );
+  });
+});
+
+describe('pagoVendedorAvionEnUniverso (2)', () => {
+  const usd = (monto: number) => ({ monto, moneda: 'USD', tc_usd_mxn: null });
+  const mxn = (monto: number) => ({ monto, moneda: 'MXN', tc_usd_mxn: null });
+
+  it('COMPLETADO ⇒ sí (con o sin cobros)', () => {
+    expect(
+      pagoVendedorAvionEnUniverso({
+        estado: 'COMPLETADO',
+        cobros: [],
+        tcVenta: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('CANCELADO: con cobro USD sí; con cobro MXN sin T.C. sí; con reembolso neto 0 o sin cobros no', () => {
+    expect(
+      pagoVendedorAvionEnUniverso({
+        estado: 'CANCELADO',
+        cobros: [usd(500)],
+        tcVenta: null,
+      }),
+    ).toBe(true);
+    expect(
+      pagoVendedorAvionEnUniverso({
+        estado: 'CANCELADO',
+        cobros: [mxn(8500)],
+        tcVenta: null,
+      }),
+    ).toBe(true);
+    expect(
+      pagoVendedorAvionEnUniverso({
+        estado: 'CANCELADO',
+        cobros: [usd(500), usd(-500)],
+        tcVenta: 17,
+      }),
+    ).toBe(false);
+    expect(
+      pagoVendedorAvionEnUniverso({
+        estado: 'CANCELADO',
+        cobros: [],
+        tcVenta: 17,
+      }),
+    ).toBe(false);
+  });
+
+  it('CONFIRMADO, EN_VUELO, RESERVA, COTIZADO, SOLICITUD y sin estado ⇒ no (aunque haya cobros)', () => {
+    for (const estado of [
+      'CONFIRMADO',
+      'EN_VUELO',
+      'RESERVA',
+      'COTIZADO',
+      'SOLICITUD',
+      null,
+      undefined,
+    ]) {
+      expect(
+        pagoVendedorAvionEnUniverso({
+          estado,
+          cobros: [usd(500)],
+          tcVenta: 17,
+        }),
+      ).toBe(false);
+    }
+  });
+});
+
+describe('motivoPagoVendedorAvionSinCargo (9) y sus textos', () => {
+  it('orden: sin avión ⇒ cancelado ⇒ no completado ⇒ sin fila', () => {
+    // Un externo sin avión cancelado dice «sin avión».
+    expect(
+      motivoPagoVendedorAvionSinCargo({
+        estado: 'CANCELADO',
+        tieneAvion: false,
+      }),
+    ).toBe('SIN_AVION');
+    expect(
+      motivoPagoVendedorAvionSinCargo({
+        estado: 'COMPLETADO',
+        tieneAvion: false,
+      }),
+    ).toBe('SIN_AVION');
+    expect(
+      motivoPagoVendedorAvionSinCargo({
+        estado: 'CANCELADO',
+        tieneAvion: true,
+      }),
+    ).toBe('CANCELADO');
+    for (const estado of ['CONFIRMADO', 'EN_VUELO', 'COTIZADO', null]) {
+      expect(
+        motivoPagoVendedorAvionSinCargo({ estado, tieneAvion: true }),
+      ).toBe('NO_COMPLETADO');
+    }
+    expect(
+      motivoPagoVendedorAvionSinCargo({
+        estado: 'COMPLETADO',
+        tieneAvion: true,
+      }),
+    ).toBe('SIN_FILA');
+  });
+
+  it('textos EXACTOS de cada motivo y del sufijo (sin «sin TC»)', () => {
+    expect(TEXTO_PAGO_VENDEDOR_AVION_SIN_CARGO).toEqual({
+      SIN_AVION: 'vuelo sin avión de la flota',
+      CANCELADO: 'vuelo cancelado sin cobros retenidos',
+      NO_COMPLETADO:
+        'el vuelo aún no se completa: al completarse lo cargará el avión',
+      SIN_FILA: 'ningún libro de avión la cargó',
+    });
+    expect(sufijoPagoVendedorAvionSinCargo('SIN_AVION')).toBe(
+      ' · incluye «Comisión del vendedor (avión)» que ningún avión carga (vuelo sin avión de la flota): la paga VuelaTour',
+    );
+    for (const m of [
+      'SIN_AVION',
+      'CANCELADO',
+      'NO_COMPLETADO',
+      'SIN_FILA',
+    ] as const) {
+      expect(sufijoPagoVendedorAvionSinCargo(m)).not.toMatch(/sin TC/);
+    }
+  });
+});
+
+/**
+ * «OTROS MOVIMIENTOS»: GRAMÁTICA ÚNICA DEL EGRESO DEL VENDEDOR (10) — los 8
+ * casos del contrato §D con string, egreso y fecha EXACTOS.
+ */
+describe('egresoPagoVendedorDeVuelo (8 casos del contrato §D)', () => {
+  const FECHA_VUELO = '2026-09-03';
+  const caso = (a: {
+    etiquetaComision?: string;
+    vt?: PagosVendedorDeVuelo;
+    av?: PagosVendedorDeVuelo;
+    todos: PagosVendedorDeVuelo;
+    lineaMxn?: number | null;
+    sinLinea?: 'SIN_LINEA' | 'CANCELADO' | 'INCONSISTENTE';
+    aviones?: ComisionVendedorDeAvion[];
+    motivo?: 'SIN_AVION' | 'CANCELADO' | 'NO_COMPLETADO' | 'SIN_FILA';
+  }) =>
+    egresoPagoVendedorDeVuelo({
+      etiquetaComision: a.etiquetaComision ?? PABLO_CANALES,
+      pagosVuelatour: a.vt ?? NINGUNO,
+      pagosAvion: a.av ?? NINGUNO,
+      pagosTodos: a.todos,
+      lineaMxn: a.lineaMxn ?? null,
+      sinLinea: a.sinLinea,
+      aviones: a.aviones ?? [],
+      motivoSinCargo: a.motivo ?? 'NO_COMPLETADO',
+      fechaVuelo: FECHA_VUELO,
+    });
+
+  it('sin pagos de ninguna de las dos ⇒ null (la fila no lleva egreso)', () => {
+    expect(caso({ todos: NINGUNO, lineaMxn: 3000 })).toBeNull();
+  });
+
+  it('D1 · con línea, solo «(VuelaTour)» (byte a byte 0.0.73/D3)', () => {
+    expect(
+      caso({ vt: pagosDe(2500), todos: pagosDe(2500), lineaMxn: 3000 }),
+    ).toEqual({
+      egresoMxn: 2500,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real · parcial: faltan $500.00 MXN',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('D2 · con línea, solo «(avión)» que carga un avión (byte a byte D3): egreso $0.00', () => {
+    expect(
+      caso({
+        av: pagosDe(3000),
+        todos: pagosDe(3000),
+        lineaMxn: 3000,
+        aviones: [avionDe('XB-PEV', 3000)],
+      }),
+    ).toEqual({
+      egresoMxn: 0,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real · a cargo del avión XB-PEV ($3,000.00 en su columna COMISIONES)',
+      fecha: '2026-09-28',
+    });
+    // Sin fecha de pago: la del vuelo.
+    expect(
+      caso({
+        av: pagosDe(3000, { fecha: null }),
+        todos: pagosDe(3000, { fecha: null }),
+        lineaMxn: 3000,
+        aviones: [avionDe('XB-PEV', 3000)],
+      })?.fecha,
+    ).toBe(FECHA_VUELO);
+  });
+
+  it('D3 · con línea, MIXTO: egreso = solo VuelaTour; faltan/excede vs el TOTAL pagado; «(USD sin TC)» solo del tramo VuelaTour', () => {
+    expect(
+      caso({
+        vt: pagosDe(2000, { fecha: '2026-10-02' }),
+        av: pagosDe(1000, { fecha: '2026-10-05' }),
+        todos: pagosDe(3000, { n: 2, fecha: '2026-10-05' }),
+        lineaMxn: 3000,
+        aviones: [avionDe('XB-PEV', 1000)],
+      }),
+    ).toEqual({
+      egresoMxn: 2000,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · VuelaTour $2,000.00 · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+      fecha: '2026-10-02',
+    });
+    // faltan contra lo pagado en TOTAL (2,500 de 3,000).
+    expect(
+      caso({
+        vt: pagosDe(1500),
+        av: pagosDe(1000),
+        todos: pagosDe(2500, { n: 2 }),
+        lineaMxn: 3000,
+        aviones: [avionDe('XB-PEV', 1000)],
+      })?.concepto,
+    ).toBe(
+      'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · parcial: faltan $500.00 MXN · VuelaTour $1,500.00 · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+    );
+    // VuelaTour sin T.C.: egreso null y la marca SOLO en su tramo.
+    const sinTc = caso({
+      vt: pagosDe(null, { sinTc: 1 }),
+      av: pagosDe(1000),
+      todos: pagosDe(1000, { n: 2, sinTc: 1 }),
+      lineaMxn: 3000,
+      aviones: [avionDe('XB-PEV', 1000)],
+    });
+    expect(sinTc).toEqual({
+      egresoMxn: null,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · VuelaTour (USD sin TC) · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+      fecha: '2026-09-28',
+    });
+    expect(
+      caso({
+        vt: pagosDe(2000, { n: 2, sinTc: 1 }),
+        av: pagosDe(1000),
+        todos: pagosDe(3000, { n: 3, sinTc: 1 }),
+        lineaMxn: 3000,
+        aviones: [avionDe('XB-PEV', 1000)],
+      })?.concepto,
+    ).toBe(
+      'pago comisión vendedor (Pablo Canales) · gasto real (3 pagos) · VuelaTour $2,000.00 (parcial: USD sin TC) · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+    );
+  });
+
+  it('D4 · con línea y una «(avión)» que ningún avión carga: VuelaTour egresa las dos y el concepto dice por qué', () => {
+    expect(
+      caso({
+        av: pagosDe(3000),
+        todos: pagosDe(3000),
+        lineaMxn: 3000,
+        motivo: 'NO_COMPLETADO',
+      }),
+    ).toEqual({
+      egresoMxn: 3000,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real · incluye «Comisión del vendedor (avión)» que ningún avión carga (el vuelo aún no se completa: al completarse lo cargará el avión): la paga VuelaTour',
+      fecha: '2026-09-28',
+    });
+    // Mixto que nadie carga: egreso = Σ de las dos.
+    expect(
+      caso({
+        vt: pagosDe(500),
+        av: pagosDe(1000),
+        todos: pagosDe(1500, { n: 2 }),
+        lineaMxn: 1500,
+        motivo: 'SIN_AVION',
+      }),
+    ).toEqual({
+      egresoMxn: 1500,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real (2 pagos) · incluye «Comisión del vendedor (avión)» que ningún avión carga (vuelo sin avión de la flota): la paga VuelaTour',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('D5 · sin línea, solo «(VuelaTour)» (byte a byte)', () => {
+    expect(
+      caso({
+        etiquetaComision: 'comisión vendedor',
+        vt: pagosDe(1305),
+        todos: pagosDe(1305),
+        sinLinea: 'SIN_LINEA',
+      }),
+    ).toEqual({
+      egresoMxn: 1305,
+      concepto:
+        'pago comisión vendedor · sin comisión cobrada en la cotización',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('D6 · sin línea, solo «(avión)» que carga un avión: fila INFORMATIVA, egreso $0.00', () => {
+    expect(
+      caso({
+        etiquetaComision: 'comisión vendedor',
+        av: pagosDe(1305),
+        todos: pagosDe(1305),
+        sinLinea: 'SIN_LINEA',
+        aviones: [avionDe('N621TX', 1305)],
+      }),
+    ).toEqual({
+      egresoMxn: 0,
+      concepto:
+        'pago comisión vendedor · sin comisión cobrada en la cotización · a cargo del avión N621TX ($1,305.00 en su columna COMISIONES)',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('D7 · sin línea, MIXTO (cancelado con cobros retenidos)', () => {
+    expect(
+      caso({
+        etiquetaComision: 'comisión vendedor',
+        vt: pagosDe(500),
+        av: pagosDe(1000),
+        todos: pagosDe(1500, { n: 2 }),
+        sinLinea: 'CANCELADO',
+        aviones: [avionDe('XB-PEV', 1000)],
+      }),
+    ).toEqual({
+      egresoMxn: 500,
+      concepto:
+        'pago comisión vendedor · vuelo cancelado: sin comisión cobrada (2 pagos) · VuelaTour $500.00 · a cargo del avión XB-PEV ($1,000.00 en su columna COMISIONES)',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('D8 · sin línea y una «(avión)» que nadie carga', () => {
+    expect(
+      caso({
+        etiquetaComision: 'comisión vendedor',
+        av: pagosDe(1000),
+        todos: pagosDe(1000),
+        sinLinea: 'CANCELADO',
+        motivo: 'CANCELADO',
+      }),
+    ).toEqual({
+      egresoMxn: 1000,
+      concepto:
+        'pago comisión vendedor · vuelo cancelado: sin comisión cobrada · incluye «Comisión del vendedor (avión)» que ningún avión carga (vuelo cancelado sin cobros retenidos): la paga VuelaTour',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('variantes del sufijo: varios aviones, cifras que no cuadran y avión sin pesos', () => {
+    expect(
+      caso({
+        av: pagosDe(1000),
+        todos: pagosDe(1000),
+        lineaMxn: 1000,
+        aviones: [avionDe('XB-TST', 500), avionDe('XB-DOS', 500)],
+      })?.concepto,
+    ).toBe(
+      'pago comisión vendedor (Pablo Canales) · gasto real · a cargo de los aviones XB-TST ($500.00 en su columna COMISIONES) y XB-DOS ($500.00 en su columna COMISIONES)',
+    );
+    expect(
+      caso({
+        av: pagosDe(1010),
+        todos: pagosDe(1010),
+        lineaMxn: 1010,
+        aviones: [avionDe('XB-PEV', 1000)],
+      })?.concepto,
+    ).toBe(
+      'pago comisión vendedor (Pablo Canales) · gasto real · a cargo del avión XB-PEV (resta en su columna COMISIONES)',
+    );
+    const sinPesos = caso({
+      av: pagosDe(null, { sinTc: 1 }),
+      todos: pagosDe(null, { sinTc: 1 }),
+      lineaMxn: 1000,
+      aviones: [avionDe('XB-PEV', 0)],
+    });
+    expect(sinPesos).toEqual({
+      egresoMxn: 0,
+      concepto:
+        'pago comisión vendedor (Pablo Canales) · gasto real · a cargo del avión XB-PEV (sin T.C. no entra en pesos a su columna COMISIONES; resta en USD en su reparto)',
+      fecha: '2026-09-28',
+    });
+  });
+
+  it('reglas fijas: todos empiezan con «pago comisión vendedor», ninguno con «PROVISIÓN (», los de $0.00 nunca llevan «sin TC»', () => {
+    const casos = [
+      caso({ vt: pagosDe(1), todos: pagosDe(1), lineaMxn: 1 }),
+      caso({
+        av: pagosDe(null, { sinTc: 2, n: 2 }),
+        todos: pagosDe(null, { sinTc: 2, n: 2 }),
+        lineaMxn: 1,
+        aviones: [avionDe('A', 0)],
+      }),
+      caso({
+        av: pagosDe(5, { sinTc: 1, n: 2 }),
+        todos: pagosDe(5, { sinTc: 1, n: 2 }),
+        sinLinea: 'INCONSISTENTE',
+        aviones: [avionDe('A', 5)],
+      }),
+      caso({
+        av: pagosDe(1),
+        todos: pagosDe(1),
+        sinLinea: 'SIN_LINEA',
+        motivo: 'SIN_FILA',
+      }),
+    ];
+    for (const f of casos) {
+      expect(f).not.toBeNull();
+      expect(f!.concepto).toMatch(/^pago comisión vendedor/);
+      expect(f!.concepto).not.toMatch(/PROVISI[OÓ]N \(/);
+      if (f!.egresoMxn === 0) expect(f!.concepto).not.toMatch(/\bsin TC\b/);
+    }
+  });
+});
+
+describe('textos de los pendientes del balance y del Libro Dinero (11)', () => {
+  const E = 'Vuelo #233 (03-sep CUN-MID)';
+
+  it('pendiente de captura: dice cómo capturarlo en cualquiera de las dos', () => {
+    expect(textoPendienteCapturaVendedor(E, 162.4)).toBe(
+      "Vuelo #233 (03-sep CUN-MID): comisión del vendedor cotizada ($162.40 USD) sin pago capturado — captúralo en Gastos ligado a este vuelo como «Comisión del vendedor (avión)» si lo carga el avión (resta en su columna COMISIONES) o como «Comisión del vendedor (VuelaTour)» si lo paga VuelaTour ('otros movimientos' del Balance general)",
+    );
+  });
+
+  it('pendiente sin T.C. de la «(avión)»', () => {
+    expect(textoPendienteVendedorSinTc(E)).toBe(
+      'Vuelo #233 (03-sep CUN-MID): pago al vendedor «Comisión del vendedor (avión)» en USD sin T.C. (ni tc_gasto ni T.C. de venta) — no entra a COMISIONES en pesos; en el reparto sí resta en USD (captura el T.C. del gasto o el de la cotización)',
+    );
+  });
+
+  it('pendiente «(avión)» que ningún avión carga: singular y plural', () => {
+    expect(textoPendientePagoVendedorAvionSinCargo(E, 1, 'NO_COMPLETADO')).toBe(
+      "Vuelo #233 (03-sep CUN-MID): gasto «Comisión del vendedor (avión)» que ningún avión carga (el vuelo aún no se completa: al completarse lo cargará el avión) — lo paga VuelaTour en 'otros movimientos' del Balance general; si el pago es de VuelaTour, reclasifícalo a «Comisión del vendedor (VuelaTour)»",
+    );
+    expect(textoPendientePagoVendedorAvionSinCargo(E, 2, 'SIN_AVION')).toBe(
+      "Vuelo #233 (03-sep CUN-MID): 2 gastos «Comisión del vendedor (avión)» que ningún avión carga (vuelo sin avión de la flota) — los paga VuelaTour en 'otros movimientos' del Balance general; si el pago es de VuelaTour, reclasifícalos a «Comisión del vendedor (VuelaTour)»",
+    );
+  });
+
+  it('Libro Dinero: sufijo del concepto y nota de la celda («» sin «(avión)»; jamás «sin TC»)', () => {
+    expect(sufijoParteAvionDinero(NINGUNO, true)).toBe('');
+    expect(notaParteAvionDinero(NINGUNO, false)).toBe('');
+    expect(sufijoParteAvionDinero(pagosDe(3000), true)).toBe(
+      ' · incluye «Comisión del vendedor (avión)» por $3,000.00: la resta el avión en el Balance general',
+    );
+    expect(sufijoParteAvionDinero(pagosDe(null, { sinTc: 1 }), true)).toBe(
+      ' · incluye «Comisión del vendedor (avión)»: la resta el avión en el Balance general',
+    );
+    expect(sufijoParteAvionDinero(pagosDe(3000), false)).toBe(
+      ' · incluye «Comisión del vendedor (avión)» que ningún avión carga',
+    );
+    expect(notaParteAvionDinero(pagosDe(3000), true)).toBe(
+      ' De ese pago, $3,000.00 MXN se capturó como «Comisión del vendedor (avión)»: en el Balance general y en el reparto lo resta el avión (columna COMISIONES); este libro registra la salida de dinero de VuelaTour.',
+    );
+    expect(notaParteAvionDinero(pagosDe(null, { sinTc: 1 }), true)).toBe(
+      ' De ese pago, una parte se capturó como «Comisión del vendedor (avión)»: en el Balance general y en el reparto lo resta el avión (columna COMISIONES); este libro registra la salida de dinero de VuelaTour.',
+    );
+    expect(notaParteAvionDinero(pagosDe(3000), false)).toBe(
+      ' Incluye pagos «Comisión del vendedor (avión)» de un vuelo que ningún avión carga: también en el Balance general los paga VuelaTour.',
+    );
+    for (const t of [
+      sufijoParteAvionDinero(pagosDe(null, { sinTc: 1 }), true),
+      notaParteAvionDinero(pagosDe(null, { sinTc: 1 }), true),
+    ]) {
+      expect(t).not.toMatch(/sin TC/);
     }
   });
 });
