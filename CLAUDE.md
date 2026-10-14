@@ -8579,44 +8579,97 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   invariante 63–73 y sobre el CLAUDE.md de pyservices).** Hasta la revisión
   había DOS órdenes incompatibles para el mismo push: «pyservices DESPUÉS
   del API» (Comisariato, invariante 63) y «pyservices ANTES del API»
-  (ingreso por avión, ID por cliente, TUA). Prod = `bjesduasnzbzywofukbf`
-  (existen DOS proyectos: confirmar con un SELECT). Cada paso SOLO con el
-  anterior verificado:
-  1. **Migraciones con dependencia DURA, ANTES del push del API**:
-     `20261013000001` (enum COMISARIATO) y `20261013000009` (enum
-     DOMICILIADO: sin ella, 22P02 en TODA la conciliación), cada una con el
-     dry-run de su cabecera ⇒ comprobar que no quedó nada ⇒
-     `apply_migration` ⇒ `pg_enum` ⇒ `get_advisors`. Pueden ir aquí también
-     (o en cualquier momento: el API las sondea) `20261013000006` (ID por
-     cliente) y `20261013000008` (TUA incluida). El dry-run SIN migración
-     del concepto del SPEI (invariante 69) también va antes del API.
+  (ingreso por avión, ID por cliente, TUA). Nada tiene push todavía: API
+  sobre `db54502d` (0.0.74, en prod), pyservices sobre `47e67a9`, panel
+  sobre `4eefb3b`; la app lleva 6 commits LOCALES sobre `0b1551f`. Prod =
+  `bjesduasnzbzywofukbf` (existen DOS proyectos: confirmar con un SELECT).
+  **Las migraciones NO van en orden numérico ni todas antes del API**:
+  aplicar `20261013000001 → 000002 → 000005 → 000006 → 000008 →
+  000009` seguidas y DESPUÉS subir el API dejaría los 4 gastos de agosto
+  de la 000002 como COMISARIATO frente a un API 0.0.74 que no conoce la
+  categoría (la fila del vuelo los suma a OPERACIONES, el reparto los deja
+  EXCLUIDOS y editarlos rebota 400 por IsEnum) mientras dure la ventana.
+  No hay 000007 (el ID por cliente cupo en UNA migración atómica). Ninguna
+  de las seis necesita el SQL Editor para APLICARSE (lo que se manda por
+  MCP no lleva drop/delete/revoke; de la 000008 va SOLO el cuerpo entre
+  «>>> CUERPO» y «<<< CUERPO»: su pie de rollback comentado sí dice drop);
+  las REVERSAS de 000005, 000006 y 000008 van SOLO por el SQL Editor y con
+  confirmación. Cada paso SOLO con el anterior verificado; cada migración =
+  dry-run de su cabecera por `execute_sql` (`DRYRUN_OK …`) ⇒ comprobar
+  que no quedó nada ⇒ `apply_migration` ⇒ postchecks ⇒ `get_advisors`
+  (detalle en el bullet PENDIENTE de cada una):
+  1. **Migraciones ANTES del push del API**, en este orden:
+     `20261013000001` (enum COMISARIATO; dependencia DURA) →
+     `20261013000006` (ID por cliente; independiente, el API la sondea) →
+     `20261013000008` (TUA incluida; independiente, el API la sondea) →
+     `20261013000009` (enum DOMICILIADO; dependencia DURA: sin ella, 22P02
+     en TODA la conciliación). El dry-run SIN migración del concepto del
+     SPEI (invariante 69) también va antes del API.
   2. **pyservices COMPLETO** (push a `main`, Railway; confirmar el
-     deployment ACTIVO). Seguro con el API 0.0.74 en prod: sin las llaves
-     nuevas todo libro sale byte a byte; la IA puede sugerir COMISARIATO
-     pero nadie la aplica (la app publicada +80 y el panel de prod solo
-     aplican sugerencias de SU catálogo y el API 0.0.74 nunca pisa la
-     categoría: solo anota la discrepancia); un estado de cuenta leído con
-     los renglones de continuación entra igual (el panel de prod manda los
+     deployment ACTIVO): `fefe97f` (COMISARIATO en visión) · `41b6ece`
+     (DOMICILIADO en el contexto de conciliación) · `97e0e5a` (TUA
+     sistémica, `tua_monto`) · `d445cab` (concepto del SPEI en el PDF del
+     estado de cuenta) · `dd81923` (rótulo «Comisiones (banco + vendedor)»)
+     · `d58faa1` (paridad de leyendas) · `07ecfaf` (otros ingresos del
+     avión) · `462ce75` (vínculos gasto → celda) · `4a53304` (CLAVE con ID
+     por cliente) · `b66df98` (revisión: reporte por vuelo con el contrato
+     0.0.75). Seguro con el API 0.0.74 en prod: sin las llaves nuevas
+     todo libro sale byte a byte; la IA puede sugerir COMISARIATO pero
+     nadie la aplica (la app publicada +80 y el panel de prod solo aplican
+     sugerencias de SU catálogo y el API 0.0.74 nunca pisa la categoría:
+     solo anota la discrepancia); un estado de cuenta leído con los
+     renglones de continuación entra igual (el panel de prod manda los
      campos del movimiento uno por uno, `MovimientoImportDto.descripcion`
      no tiene tope y el dedupe tolera el prefijo). Ventana inocua, pero sin
      re-subir estados de cuenta ni regenerar libros mientras dure.
-  3. **API 0.0.75** (push a `main`, Railway). Justo antes, `pg_enum` con
-     COMISARIATO y DOMICILIADO (1 fila cada uno). Después `GET /v1/version`
-     = la versión del lote (nunca un health). Al revés (API antes que
-     pyservices) los números quedan bien pero el libro de N990GG de
-     septiembre saldría SIN la pestaña «Otros ingresos» ni la línea «(+)
-     OTROS INGRESOS USD» con una UTILIDAD DESPUÉS que ya los suma, y la
-     CLAVE con ID por cliente cortada en la columna A.
-  4. **Migraciones DESPUÉS del API**: `20261013000005` (CHECK del ingreso
-     con avión: así su 23514 llega traducido) y `20261013000002`
-     (reclasificación de agosto: SOLO con el API 0.0.75 arriba; sus conteos
-     van acotados a los 4 ids).
-  5. **Panel** (push a `main`, Vercel) SIEMPRE después del API.
-  6. **APK** 1.1.3+81/+82/+83 (commits locales; push y APK los hace el
-     usuario) SOLO con la 000001 y el API 0.0.75 arriba.
-  Después, y ANTES de regenerar septiembre y octubre: el PASO 0 de la
-  invariante 67 (la oficina confirma ING-4), las capturas pendientes de la
-  invariante 61 y el checklist de datos del bullet siguiente.
+  3. **API 0.0.75** (push a `main`, Railway): `f48c5a71` (Comisariato,
+     inv. 63) · `72772dcc` (DOMICILIADO, inv. 64) · `d03e231f` (#376, inv.
+     65) · `c4cc9213` (TUA, inv. 66) · `00555624` (ingreso por avión, inv.
+     67) · `3b3a2272` (ID por cliente, inv. 68) · `72d5e21c` (concepto del
+     SPEI, inv. 69) · `2572a8b1` (USD contra pesos, inv. 70) · `79f79115`
+     (conciliación al revés, inv. 71) · `1a5c2792` (gasto → celda, inv. 72)
+     · `85b87dad` (pago REAL al vendedor, inv. 73) · `5da742a0` (revisión)
+     · «Versión 0.0.75» (este). Justo antes, `pg_enum` con COMISARIATO y
+     DOMICILIADO (1 fila cada uno). Después `GET /v1/version` = `0.0.75`
+     (nunca un health). Al revés (API antes que pyservices) los números
+     quedan bien pero el libro de N990GG de septiembre saldría SIN la
+     pestaña «Otros ingresos» ni la línea «(+) OTROS INGRESOS USD» con una
+     UTILIDAD DESPUÉS que ya los suma, y la CLAVE con ID por cliente
+     cortada en la columna A.
+  4. **Migraciones DESPUÉS del API**, en este orden: `20261013000002`
+     (reclasificación de agosto; dependencia DURA: SOLO con la 000001
+     confirmada Y el API 0.0.75 arriba; sus conteos van acotados a los 4
+     ids; después regenerar los libros de AGOSTO y avisar al cliente) →
+     `20261013000005` (CHECK del ingreso con avión; sin dependencia dura,
+     aquí para que su 23514 llegue traducido a `AVION_SOLO_EN_RESULTADO`).
+  5. **Panel** (push a `main`, Vercel) SIEMPRE después del API: `e6f66fb`
+     (Comisariato) · `f6b1b2e` (Pago domiciliado) · `f6a2e88` (factura
+     obligatoria en Cobros) · `aa732be` (rótulos de las dos comisiones) ·
+     `a28fb7b` (#376) · `4a1e227` (AGENTS.md) · `296c286` (TUA incluida) ·
+     `6692d0a` (ingreso por avión) · `2a7665e` (ID por cliente) · `e1c00be`
+     (concepto del SPEI y «Factura NNNN») · `7d51eb8` (USD contra el T.C.
+     oficial) · `5a703d2` (conciliación al revés) · `7378d63` (gasto →
+     celda) · `291300d` (revisión). Verificar el commit desplegado con la
+     API pública de GitHub (curl).
+  6. **App** (commits LOCALES; push y APK los hace el usuario): `66e8036`
+     (+81 Comisariato) · `3b121e7` (+82 dos categorías) · `bef85f9` (Pago
+     domiciliado) · `a86f3bf` (+83 ayuda en «Notas») · `8ae6972` (docs) ·
+     `1f49f36` (verificación). El APK 1.1.3+83 SOLO con la 000001, la
+     000009 y el API 0.0.75 arriba.
+  Más los commits «Verificación: …» que agreguen los carriles al cierre
+  (viajan en el push de su repo). Después, y ANTES de regenerar septiembre
+  y octubre: el PASO 0 de la invariante 67 (la oficina confirma ING-4), las
+  capturas pendientes de la invariante 61 y el checklist de datos del
+  bullet siguiente. **ROLLBACK del API a ≤ 0.0.74 PROHIBIDO** con gastos
+  COMISARIATO o DOMICILIADO en la BD (la 000002 ya cuenta). Verificado en
+  local el 14-oct-2026 (API): `tsc --noEmit` limpio (también con
+  `tsconfig.build.json`, el del build de Railway); eslint (sin --fix) de
+  los 152 `.ts` cambiados desde `db54502d`: 90 errores y 12 avisos,
+  idénticos (archivo, regla, mensaje y línea) a `db54502d`
+  (aircraft-balance 5, expenses 5, flights 64 + 5, dinero-report 2, quotes
+  14 + 7; 0 nuevos); jest 309 suites / 5,123 pruebas, 0 fallos (en
+  `db54502d`: 263 / 4,433, 0 fallos; las 15 pruebas de antes que ya no
+  están con su nombre son renombres o reemplazos intencionales del lote).
 - **CHECKLIST DE DATOS ANTES DE REGENERAR SEPTIEMBRE (revisión del lote 2,
   14-oct-2026; dato de prod, NO código: nada se toca sin la oficina).** En
   septiembre hay DOS repartos de utilidades a socios capturados como
