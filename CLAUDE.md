@@ -7858,9 +7858,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Regla y textos en `expenses/cambio-fecha-gasto.util.ts` (PURO);
       `ExpensesService.cambiarFechaGasto` solo lee y escribe. Respuesta 200
       `{ id, fecha_gasto, fecha_anterior, cambio, cambia_de_mes,
-      fecha_hora_carga, updated_at, aviso }` (`cambio: false` = ya tenía esa
-      fecha: no escribe ni mueve `updated_at`; `aviso` = la línea de «mes
-      terminado» cuando hubo confirmación).
+      fecha_hora_carga, fecha_hora_carga_movida, updated_at, aviso }`
+      (`cambio: false` = ya tenía esa fecha: no escribe ni mueve
+      `updated_at`; `fecha_hora_carga` = la que QUEDÓ en la fila y
+      `fecha_hora_carga_movida` = true SOLO si esta llamada la movió —una
+      carga que ya caía en el día nuevo no se toca y el panel no debe decir
+      que «pasó al mismo día»—; `aviso` = la línea de «mes terminado» cuando
+      hubo confirmación).
     - **JAMÁS dispara el auto-cruce**: escribe por `update(id, dto, userId,
       rol, { autoCruce: false })` con CAS sobre el `updated_at` LEÍDO por
       la propia petición (0 filas ⇒ 409 `CONFLICTO_VERSION`). El 5.º
@@ -7880,21 +7884,47 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (`MEDIOS_BANCARIOS`; EFECTIVO —su fecha decide qué reposición de caja
       chica lo cubre—, PERSONAL_*, BODEGA o sin medio ⇒ 409
       `FECHA_GASTO_SOLO_BANCARIOS` con `details.medio_pago`; se corrigen en
-      Gastos); (4) misma fecha ⇒ 200 `cambio: false` (doble clic
-      idempotente); (5) `fecha_anterior` ≠ la vigente ⇒ 409
+      Gastos); (3b) YA CONCILIADO (`gasto.conciliado`, en
+      `GASTO_CAMBIO_FECHA_COLS`) ⇒ 409 `FECHA_GASTO_YA_CONCILIADO` «Este
+      gasto ya quedó conciliado con un cargo del banco: su fecha es la de
+      ese pago y ya no se cambia desde Conciliación. Si ese cargo no es su
+      pago, desvincúlalo primero.», aun con `confirmar` y aunque la fecha
+      sea la misma (revisión del 14-oct-2026: el CAS solo ve lo que cambia
+      entre la lectura y el UPDATE de ESTA petición; quien ligó el gasto a
+      OTRO cargo —«Vincular», «Cruzar pendientes» o el auto-cruce del PATCH
+      general— mientras «Vincular gasto» seguía abierto dejaba que la ruta
+      lo fechara con el cargo equivocado y, con otro mes, lo movía de mes en
+      balance, reparto y Libro Dinero). El panel nunca ofrece conciliados,
+      así que solo atrapa esa carrera (y un «Deshacer» después de
+      vincular); un pago PARCIAL (`conciliado = false`) sí se corrige. El
+      flujo futuro sobre cargos ya conciliados (decisión del cliente) tendría
+      que relajarlo de forma explícita; (4) misma fecha ⇒ 200 `cambio:
+      false` (doble clic idempotente); (5) `fecha_anterior` ≠ la vigente ⇒ 409
       `FECHA_GASTO_CAMBIO` con `details.fecha_actual`; (6) mes del vuelo =
       ESPEJO EXACTO de `fechasFuera` del balance (gasto con vuelo de fecha
       legible, categoría fuera de `CATEGORIAS_GASTO_FUERA_DEL_AVION`, mes
       nuevo ≠ mes del vuelo —día Cancún— y ≠ el que ya tenía ⇒ 409
       `FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO`, aun con `confirmar`; también
       GAS y TUAS con vuelo; moverse dentro del mes y REGRESAR al mes del
-      vuelo sí se permiten); (7) confirmación (409 `FECHA_GASTO_CONFIRMAR`
-      con el texto armado por el API y `details { cambia_de_mes, mes_antes,
-      mes_despues, etiqueta_mes_despues, meses_terminados }`) cuando la
-      fecha mueve un libro de mes o cambia el T.C. del reparto con un mes
-      que ya terminó (mes < mes de hoy en Cancún); sin líneas de efecto
-      (pago al vendedor con vuelo, PERSONAL_DUENO, cambio dentro del mes en
-      curso) se guarda directo.
+      vuelo sí se permiten; fuente única `candadoMesDelVuelo`); (7)
+      confirmación (409 `FECHA_GASTO_CONFIRMAR` con el texto armado por el
+      API y `details { cambia_de_mes, mes_antes, mes_despues,
+      etiqueta_mes_despues, meses_terminados }`) cuando la fecha mueve un
+      libro de mes o cambia el T.C. con que un libro convierte el gasto con
+      un mes que ya terminó (mes < mes de hoy en Cancún): el del reparto
+      (pesos sin `tc_gasto` con alcance) o el del bloque VUELATOUR del
+      Balance general (sueltas en pesos de «otros movimientos», abajo); sin
+      líneas de efecto (pago al vendedor con vuelo, PERSONAL_DUENO, cambio
+      dentro del mes en curso) se guarda directo.
+    - **La ficha del candidato lleva el candado** (`aCandidatoGasto` de
+      Conciliación, ADITIVO 0.0.76): `candado_mes_vuelo { vuelo_dia,
+      vuelo_folio }` SOLO cuando `candadoMesDelVuelo` aplica (la llave no
+      viaja si no, como `tc_cruce`); `GASTO_RICO_COLS` pide `fecha_vuelo`
+      en el embed del vuelo. El panel ya no invita («corrígela con
+      «Fecha»») a mover la fecha a un mes que este candado rechaza y lo dice
+      antes de guardar (revisión del 14-oct-2026; caso vivo: TAXI 64ef1bd8
+      del vuelo #109 del 31-jul contra el cargo del Tren Maya del 10-ago).
+      La IA recibe la llave de más y pydantic la ignora.
     - **Banda de fechas = la de oficina de `update()`**: el borde de 365
       días es el MISMO (`assertFechaRazonable` rechaza `dias < -365`; la
       ruta, `diasEntreDiasCancun(nueva, hoy) > 365`: 365 pasa y 366 no, las
@@ -7908,15 +7938,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       antes del UPDATE) para que esa banda no se re-evalúe con otro reloj.
       La banda del PATCH general NO se tocó.
     - **Los textos son ESPEJO de los libros**, no reglas nuevas: el balance
-      por `ubicacionBalanceDeGasto` (invariante 72; TUAS sin vuelo ⇒
-      «otros movimientos» del general), el reparto por los conjuntos del
+      por `ubicacionBalanceDeGasto` (invariante 72) y las sueltas de «otros
+      movimientos» del general (`esSueltaOtrosMovimientos`: TUAS sin vuelo,
+      con o sin avión, y GAS sin avión que ningún tramo ni vuelo resuelve y
+      que no es de un externo sin avión — espejo de las tres lecturas de
+      `buildOtrosMovimientos`), el reparto por los conjuntos del
       ternario de `computeAvion` —MUDADOS tal cual a
       `profit-sharing/grupos-reparto.util.ts` (DIRECTO, INDIRECTO, PERMISO,
       FIJO, TUAS_CAT; el ternario y el pool de FIJO no cambiaron)— y el
       Libro Dinero por sus dos lecturas por `fecha_gasto` («otros gastos»
       sin vuelo o de EMPRESA salvo PERSONAL_DUENO; todo GAS). Mover una
       categoría o una lectura obliga a tocar el util: la ALARMA DE PARIDAD
-      de su spec lee `aircraft-balance.service.ts`,
+      de su spec lee `aircraft-balance.service.ts` (incluido
+      `tcDeGastoSuelto` y las tres lecturas de sueltas),
       `dinero-report.service.ts` y `profit-sharing.service.ts` como texto.
       Si un libro cambia, solo puede desfasarse un TEXTO, nunca un número.
     - **`fecha_hora_carga`** (GAS con hora de carga) se mueve a la MISMA
@@ -7933,14 +7967,19 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       Libro Dinero (gastos sin vuelo y GAS) cuentan por `fecha_gasto`, y el
       reparto convierte los pesos sin `tc_gasto` con el T.C. oficial del
       DÍA (septiembre: 16.8894 el 7-sep a 18.0243 el 30-sep, +6.7 %).
-    - **Hueco conocido (pendiente de decisión, solo TEXTO)**: «otros
-      movimientos» del balance general (bloque VUELATOUR) también convierte
-      con el oficial de SU día los gastos sueltos en pesos (TUAS sin vuelo,
-      gas sin avión, `tcDeGastoSuelto`). Moverlos DENTRO de un mes ya
-      terminado no pide confirmación (la línea de T.C. solo mira el
-      reparto), aunque al regenerar ese mes su bloque VUELATOUR cambie unos
-      dólares; entre meses sí se confirma («En el balance general pasa a
-      …»).
+    - **Sueltas del bloque VUELATOUR (hueco CERRADO en la revisión del
+      14-oct-2026)**: «otros movimientos» del Balance general convierte con
+      el oficial de SU día las sueltas en pesos (`tcDeGastoSuelto`, que
+      ignora `tc_gasto` en MXN). Moverlas dentro de un mes ya terminado se
+      guardaba sin confirmar aunque al regenerar ese mes su bloque VUELATOUR
+      cambiara (TUAS sin vuelo de $5,000 del 7 al 30 de septiembre: 296.04
+      → 277.40 USD). Hoy, en pesos y con cambio de mes o un mes terminado,
+      la confirmación suma «El balance general convierte este gasto a
+      dólares con el tipo de cambio oficial del día del gasto: con la fecha
+      nueva cambia lo que vale en dólares.» (nunca junto con la del reparto:
+      TUAS y el gas sin avión no tienen alcance) y el gas sin avión, al
+      cambiar de mes, dice también «En el balance general pasa a …». En
+      dólares no hay línea (su USD no cambia).
     - **Skew**: panel nuevo con API ≤ 0.0.75 ⇒ 404 «Cannot PATCH
       /v1/expenses/<id>/fecha» (el panel lo traduce a RUTA_NO_DISPONIBLE y
       no escribe nada); API nuevo con panel viejo ⇒ nadie llama la ruta y
@@ -7949,18 +7988,26 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       medios, candados en orden, los casos de prod Winjet 08c0632c,
       92bd5379 y b15080c3, todas las líneas de la confirmación con sus
       textos exactos, frontera Cancún, matrícula desconocida, tabla
-      congelada de las 22 categorías, Libro Dinero y la alarma de paridad),
+      congelada de las 22 categorías, Libro Dinero, el candado de
+      conciliado, `candadoMesDelVuelo` contra el 409, las sueltas del bloque
+      VUELATOUR y la alarma de paridad),
       `grupos-reparto.util.spec` (membresía congelada; el servicio ya no
       declara los conjuntos), `expenses.service.cambio-fecha.spec` (lee con
       `GASTO_CAMBIO_FECHA_COLS`, UPDATE EXACTO `{ fecha_gasto, updated_by }`
-      con CAS ±1 ms, cero consultas con fechas mal, 404/409 sin UPDATE,
-      CONFLICTO_VERSION, repartos solo de categorías repartibles,
+      con CAS ±1 ms, cero consultas con fechas mal, 404/409 sin UPDATE
+      —YA_CONCILIADO incluido—, CONFLICTO_VERSION,
+      `fecha_hora_carga_movida` (movida y ya en el día nuevo), repartos
+      solo de categorías repartibles,
       matrículas best-effort, el borde de 365 días del PATCH general sin
       tocar y la medianoche de Cancún a mitad de la petición; de CONTROL,
       el PATCH general de solo fecha SÍ dispara el auto-cruce) y
       `expenses.controller.cambio-fecha.spec` (HTTP real: roles, DTO
       estricto, code/details del filtro y `PATCH /:id` que sigue llegando a
-      `update` con 4 argumentos).
+      `update` con 4 argumentos) y, en Conciliación,
+      `conciliacion.service.lote.spec` (`candado_mes_vuelo` en la ficha
+      solo con candado y la `fecha_vuelo` del embed).
+    - **Versión**: `package.json` = `0.0.76` desde la revisión del
+      14-oct-2026 (`GET /v1/version` es la compuerta del panel).
 
 ## Convenciones NestJS
 

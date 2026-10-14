@@ -1149,6 +1149,38 @@ describe('GET movimientos/:id/gastos-candidatos', () => {
     expect(r.truncado).toBe(false);
   });
 
+  it('candado_mes_vuelo (0.0.76, invariante 74): la regla del 409 FUERA_DEL_MES_DEL_VUELO viaja en la ficha; solo con candado', async () => {
+    const db = mundo();
+    // El vuelo #321 a las 22:30 Cancún del 31-ago (03:30Z del 1-sep): agosto.
+    const v321 = db.vuelo.find((v) => v.id === 'v-321');
+    if (v321) v321.fecha_vuelo = '2026-09-01T03:30:00Z';
+    const v318 = db.vuelo.find((v) => v.id === 'v-318');
+    if (v318) v318.fecha_vuelo = '2026-09-20T15:00:00Z';
+    // El pago al vendedor no tiene candado (ningún libro lo lee por fecha).
+    const g318 = db.gasto.find((g) => g.id === 'g318');
+    if (g318) g318.categoria = 'COMISION_VENDEDOR';
+    const { svc, log } = armar(db);
+    const r = await svc.gastosCandidatosDeMovimiento('m2231', {});
+    const de = (id: string) => r.candidatos.find((c) => c.id === id);
+    expect(de('g321')?.candado_mes_vuelo).toEqual({
+      vuelo_dia: '2026-08-31',
+      vuelo_folio: 321,
+    });
+    // Sin fecha del vuelo o sin candado: la llave NO viaja (como tc_cruce).
+    expect(de('g322')).toBeDefined();
+    expect(de('g322')).not.toHaveProperty('candado_mes_vuelo');
+    expect(de('g318')).toBeDefined();
+    expect(de('g318')).not.toHaveProperty('candado_mes_vuelo');
+    // La fecha del vuelo sale del MISMO embed de la ficha (gastoRicoCols).
+    expect(
+      log.some(
+        (q) =>
+          q.tabla === 'gasto' &&
+          q.texto.includes('vuelo:vuelo!vuelo_id(folio, fecha_vuelo)'),
+      ),
+    ).toBe(true);
+  });
+
   it('q con decimales ⇒ ±0.01; q entero ⇒ [q, q+1)', async () => {
     const { svc } = armar(mundo());
     const a = await svc.gastosCandidatosDeMovimiento('m8404', { q: '2801.40' });

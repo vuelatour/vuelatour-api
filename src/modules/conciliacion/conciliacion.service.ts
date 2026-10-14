@@ -311,6 +311,7 @@ import {
   estadoBancoGasto,
   etiquetaMedioSinBanco,
 } from '../expenses/estado-banco.util';
+import { candadoMesDelVuelo } from '../expenses/cambio-fecha-gasto.util';
 import {
   necesitaTramosVivos,
   ubicacionBalanceDeGasto,
@@ -663,6 +664,19 @@ export interface SugerenciaConciliacion {
      * su nivel, su marca y sus textos (`tcCruceUsdPublico`).
      */
     tc_cruce?: TcCruceUsd;
+    /**
+     * ADITIVO (0.0.76, revisión del 14-oct-2026, invariante 74): el
+     * CANDADO DEL MES DEL VUELO del gasto (`candadoMesDelVuelo`, la misma
+     * regla del 409 FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO): su fecha solo se
+     * mueve dentro del mes que ya tiene o al mes de ese vuelo. Ausente =
+     * sin candado (sin vuelo, fecha ilegible o categoría que no lo lleva).
+     * El panel no invita a corregir la fecha a un mes que el API rechaza.
+     */
+    candado_mes_vuelo?: {
+      /** Día Cancún del vuelo (YYYY-MM-DD). */
+      vuelo_dia: string;
+      vuelo_folio: number | null;
+    } | null;
   }>;
 }
 
@@ -917,9 +931,11 @@ const GASTO_PARTE_REPORTE_COLS =
 /**
  * Gasto candidato con TODO el contexto (IA, selector del panel). Se pide
  * SIEMPRE junto con `embedFolioGasto(…)` (`gastoRicoCols()`): el número de
- * factura depende de la sonda de la migración 20261005000002.
+ * factura depende de la sonda de la migración 20261005000002. La
+ * `fecha_vuelo` del embed alimenta `candado_mes_vuelo` (revisión del
+ * 14-oct-2026).
  */
-const GASTO_RICO_COLS = `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio), captura:usuario!usuario_captura_id(nombre)`;
+const GASTO_RICO_COLS = `${GASTO_CRUCE_COLS}, aeronave:aeronave!aeronave_id(matricula), vuelo:vuelo!vuelo_id(folio, fecha_vuelo), captura:usuario!usuario_captura_id(nombre)`;
 
 /** Lo que la traducción de errores de partes necesita saber del intento. */
 interface CtxErrorPartes {
@@ -10865,6 +10881,7 @@ export class ConciliacionService {
     const vuelo = unwrapOne(g.vuelo as { folio?: unknown } | null);
     const avion = unwrapOne(g.aeronave as { matricula?: unknown } | null);
     const captura = unwrapOne(g.captura as { nombre?: unknown } | null);
+    const candado = candadoMesDelVuelo(g);
     return {
       id: g.id as string,
       fecha: (g.fecha_gasto as string | null) ?? null,
@@ -10898,6 +10915,16 @@ export class ConciliacionService {
           }
         : {}),
       ...(opts.tcCruce ? { tc_cruce: opts.tcCruce } : {}),
+      // ADITIVO (0.0.76): la regla del 409 FUERA_DEL_MES_DEL_VUELO. Solo
+      // viaja con candado (como `tc_cruce`): ausente = sin candado.
+      ...(candado
+        ? {
+            candado_mes_vuelo: {
+              vuelo_dia: candado.dia,
+              vuelo_folio: candado.folio,
+            },
+          }
+        : {}),
     };
   }
 

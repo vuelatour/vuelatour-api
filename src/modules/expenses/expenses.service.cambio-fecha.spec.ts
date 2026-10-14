@@ -233,6 +233,7 @@ describe('cambiarFechaGasto — el caso de la captura (Winjet)', () => {
       cambio: true,
       cambia_de_mes: false,
       fecha_hora_carga: null,
+      fecha_hora_carga_movida: false,
       updated_at: '2026-10-14T17:00:00.123456+00:00',
       aviso: null,
     });
@@ -302,6 +303,7 @@ describe('cambiarFechaGasto — el caso de la captura (Winjet)', () => {
       cambio: false,
       cambia_de_mes: false,
       fecha_hora_carga: null,
+      fecha_hora_carga_movida: false,
       updated_at: WINJET.updated_at,
       aviso: null,
     });
@@ -370,6 +372,38 @@ describe('cambiarFechaGasto — rechazos', () => {
         Rol.ADMIN,
       ),
     ).rejects.toThrow('timeout');
+  });
+
+  it('YA CONCILIADO (se ligó a otro cargo mientras «Vincular gasto» seguía abierto) ⇒ 409 FECHA_GASTO_YA_CONCILIADO, SIN UPDATE ni auto-cruce, aun con confirmar', async () => {
+    for (const confirmar of [false, true]) {
+      const { service, llamadas, intentarCruzarGasto } = armar({
+        gasto: [{ data: { ...WINJET, conciliado: true } }],
+      });
+      const e = await rechazo(
+        service.cambiarFechaGasto(
+          G,
+          {
+            fecha_gasto: '2026-10-12',
+            fecha_anterior: '2026-10-10',
+            confirmar,
+          },
+          'u-1',
+          Rol.FACTURACION,
+        ),
+      );
+      expect(e.getStatus()).toBe(409);
+      expect(e.getResponse()).toEqual({
+        message:
+          'Este gasto ya quedó conciliado con un cargo del banco: su fecha es la de ese pago y ya no se cambia desde Conciliación. Si ese cargo no es su pago, desvincúlalo primero.',
+        error: 'FECHA_GASTO_YA_CONCILIADO',
+      });
+      // La lectura pide `conciliado` (GASTO_CAMBIO_FECHA_COLS).
+      expect(String(lecturasGasto(llamadas)[0].args[0])).toContain(
+        'conciliado',
+      );
+      expect(de(llamadas, 'gasto', 'update')).toHaveLength(0);
+      expect(intentarCruzarGasto).not.toHaveBeenCalled();
+    }
   });
 
   it('FECHA_GASTO_CAMBIO, SOLO_BANCARIOS (efectivo) y FUERA del mes del vuelo (aun con confirmar) ⇒ 409 con code y details, SIN UPDATE', async () => {
@@ -576,6 +610,43 @@ describe('cambiarFechaGasto — confirmación, repartos y matrículas', () => {
       updated_by: 'u-1',
     });
     expect(r.fecha_hora_carga).toBe('2026-10-01T12:40:00+00:00');
+    expect(r.fecha_hora_carga_movida).toBe(true);
+  });
+
+  it('GAS cuya hora de carga YA cae en el día nuevo (21:00 Cancún del 12-oct = 02:00Z del 13-oct) ⇒ no se toca y fecha_hora_carga_movida es false aunque la fila traiga la hora', async () => {
+    const gas = {
+      ...REFACCION,
+      categoria: 'GAS',
+      medio_pago: 'TARJETA_CORP',
+      fecha_gasto: '2026-10-13',
+      fecha_hora_carga: '2026-10-13T02:00:00+00:00',
+    };
+    const { service, llamadas } = armar({
+      gasto: [
+        { data: gas },
+        {
+          data: filaActualizada({
+            fecha_gasto: '2026-10-12',
+            fecha_hora_carga: '2026-10-13T02:00:00+00:00',
+          }),
+        },
+      ],
+    });
+    const r = await service.cambiarFechaGasto(
+      G,
+      { fecha_gasto: '2026-10-12', fecha_anterior: '2026-10-13' },
+      'u-1',
+      Rol.ADMIN,
+    );
+    expect(de(llamadas, 'gasto', 'update')[0].args[0]).toEqual({
+      fecha_gasto: '2026-10-12',
+      updated_by: 'u-1',
+    });
+    expect(r).toMatchObject({
+      cambio: true,
+      fecha_hora_carga: '2026-10-13T02:00:00+00:00',
+      fecha_hora_carga_movida: false,
+    });
   });
 
   it('gasto_reparto se lee SOLO con categorías repartibles (OTRO sí; TAXI no, ver el caso Winjet)', async () => {

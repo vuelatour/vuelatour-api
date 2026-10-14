@@ -13,13 +13,18 @@
  * «Vincular»).
  *
  * Candados, en este orden (`decidirCambioFechaGasto`): medio bancario (409)
- * → misma fecha (200 sin escribir) → `fecha_anterior` ≠ la vigente (409) →
- * mes del vuelo = ESPEJO EXACTO de `fechasFuera` del balance (409) →
- * confirmación (409 FECHA_GASTO_CONFIRMAR) cuando la fecha mueve un libro de
- * mes o cambia el T.C. del reparto con un mes que ya terminó → aplicar.
+ * → YA CONCILIADO (409: su fecha es la del cargo con el que ya está ligado;
+ * revisión del 14-oct-2026) → misma fecha (200 sin escribir) →
+ * `fecha_anterior` ≠ la vigente (409) → mes del vuelo = ESPEJO EXACTO de
+ * `fechasFuera` del balance (409) → confirmación (409
+ * FECHA_GASTO_CONFIRMAR) cuando la fecha mueve un libro de mes o cambia el
+ * T.C. con que un libro convierte el gasto en un mes que ya terminó (el
+ * reparto, o el bloque VUELATOUR del Balance general para las sueltas de
+ * «otros movimientos») → aplicar.
  *
  * Los TEXTOS de la confirmación son ESPEJO de los libros, no reglas nuevas:
- * el balance por `ubicacionBalanceDeGasto` (invariante 72), el reparto por
+ * el balance por `ubicacionBalanceDeGasto` (invariante 72) y las filas
+ * sueltas de «otros movimientos» (`buildOtrosMovimientos`), el reparto por
  * los conjuntos de `profit-sharing/grupos-reparto.util` (los del ternario de
  * `computeAvion`) y el Libro Dinero por sus dos lecturas por `fecha_gasto`
  * (`dinero-report.service`). Si un libro cambia, solo puede desfasarse un
@@ -38,6 +43,7 @@ import {
 } from '../../common/fecha-cancun.util';
 import {
   avionDeGastoEmbebido,
+  esVueloExternoSinAvion,
   vueloEmbebido,
 } from '../../common/hojas-balance.util';
 import {
@@ -85,15 +91,23 @@ export const CODIGO_CAMBIO_FECHA = {
   CAMBIO: 'FECHA_GASTO_CAMBIO',
   FUERA_DEL_MES_DEL_VUELO: 'FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO',
   CONFIRMAR: 'FECHA_GASTO_CONFIRMAR',
+  /**
+   * Revisión del 14-oct-2026: el gasto ya quedó CUBIERTO por un cargo del
+   * banco (`gasto.conciliado`, lo escribe la BD al ligar). Su fecha es la de
+   * ese pago; el panel nunca ofrece conciliados, así que solo atrapa la
+   * carrera de quien lo ligó mientras «Vincular gasto» seguía abierto.
+   */
+  YA_CONCILIADO: 'FECHA_GASTO_YA_CONCILIADO',
 } as const;
 
 /**
  * Lo que la ruta lee del gasto: la forma de embeds de `GASTO_UBICACION_COLS`
  * (Conciliación, invariante 72) + el folio del vuelo, el medio, la moneda,
- * el T.C., la hora de la carga y el `updated_at` del CAS.
+ * el T.C., la hora de la carga, `conciliado` (candado del 14-oct-2026) y el
+ * `updated_at` del CAS.
  */
 export const GASTO_CAMBIO_FECHA_COLS =
-  'id, categoria, medio_pago, moneda, tc_gasto, monto, fecha_gasto, fecha_hora_carga, updated_at, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo)';
+  'id, categoria, medio_pago, moneda, tc_gasto, monto, fecha_gasto, fecha_hora_carga, conciliado, updated_at, vuelo_id, aeronave_id, escala_id, inventario_movimiento_id, escala:escala_id(aeronave_id), vuelo:vuelo_id(folio, fecha_vuelo, aeronave_id, es_externo)';
 
 /** Vuelo embebido (`vuelo:vuelo_id(…)`), con el folio para los textos. */
 export interface VueloCambioFecha {
@@ -110,6 +124,8 @@ export interface GastoCambioFecha extends GastoParaUbicacion {
   moneda: string | null;
   tc_gasto: number | string | null;
   fecha_hora_carga: string | null;
+  /** true = CUBIERTO por cargos del banco (lo escribe la BD al ligar). */
+  conciliado?: boolean | null;
   updated_at: string;
   vuelo?: VueloCambioFecha | VueloCambioFecha[] | null;
 }
@@ -143,7 +159,14 @@ export interface CambioFechaGastoRespuesta {
   /** false = ya tenía esa fecha: no escribió ni movió `updated_at`. */
   cambio: boolean;
   cambia_de_mes: boolean;
+  /** La hora de la carga que QUEDÓ en la fila (movida o no). */
   fecha_hora_carga: string | null;
+  /**
+   * ADITIVO (revisión del 14-oct-2026): true SOLO si ESTA llamada movió la
+   * hora de la carga al día nuevo. `fecha_hora_carga` es la de la fila y no
+   * basta: una carga que ya caía en el día nuevo no se toca.
+   */
+  fecha_hora_carga_movida: boolean;
   updated_at: string;
   /** La línea de «mes terminado» cuando hubo confirmación; si no, null. */
   aviso: string | null;
@@ -182,6 +205,21 @@ const TEXTO_SOLO_BANCARIOS_OTRO =
 
 const LINEA_TC_REPARTO =
   'El reparto convierte este gasto en pesos con el tipo de cambio oficial del día del gasto: con la fecha nueva cambia lo que vale en dólares.';
+
+/**
+ * Las filas SUELTAS de «otros movimientos» en pesos (TUAS sin vuelo, gas sin
+ * avión): el bloque VUELATOUR del Balance general las regresa a dólares con
+ * el T.C. oficial de SU día (`tcDeGastoSuelto`). Revisión del 14-oct-2026:
+ * antes, moverlas dentro de un mes TERMINADO se guardaba sin confirmar aunque
+ * al regenerar ese mes su bloque VUELATOUR cambiara (ej.: $5,000 del 7 al 30
+ * de septiembre ⇒ 296.04 → 277.40 USD).
+ */
+const LINEA_TC_BALANCE_GENERAL =
+  'El balance general convierte este gasto a dólares con el tipo de cambio oficial del día del gasto: con la fecha nueva cambia lo que vale en dólares.';
+
+/** 409 FECHA_GASTO_YA_CONCILIADO (revisión del 14-oct-2026). */
+export const TEXTO_YA_CONCILIADO =
+  'Este gasto ya quedó conciliado con un cargo del banco: su fecha es la de ese pago y ya no se cambia desde Conciliación. Si ese cargo no es su pago, desvincúlalo primero.';
 
 const LINEA_REPARTO_FLOTA =
   'Es un gasto fijo: el reparto a socios lo prorratea entre toda la flota, así que cambia la utilidad de todos los aviones en los dos meses.';
@@ -363,22 +401,102 @@ function diaCancunSeguro(iso: string): string | null {
   }
 }
 
+/** El vuelo de un gasto con fecha legible: su día y mes Cancún y su folio. */
+export interface VueloDeGastoFecha {
+  /** Día Cancún de `fecha_vuelo` (YYYY-MM-DD). */
+  dia: string;
+  /** YYYY-MM. */
+  mes: string;
+  folio: number | null;
+}
+
+/** El vuelo del gasto (`vuelo_id` + embed con `fecha_vuelo` legible) o null. */
+function vueloDeGasto(g: {
+  vuelo_id?: string | null;
+  vuelo?: unknown;
+}): VueloDeGastoFecha | null {
+  if (!g.vuelo_id) return null;
+  const v = vueloEmbebido(g);
+  const dia =
+    typeof v?.fecha_vuelo === 'string' ? diaCancunSeguro(v.fecha_vuelo) : null;
+  if (!dia) return null;
+  return {
+    dia,
+    mes: dia.slice(0, 7),
+    folio: typeof v?.folio === 'number' ? v.folio : null,
+  };
+}
+
+/**
+ * El CANDADO DEL MES DEL VUELO (ESPEJO EXACTO de `fechasFuera` del balance):
+ * un gasto con vuelo de fecha legible y categoría FUERA de
+ * `CATEGORIAS_GASTO_FUERA_DEL_AVION` solo mueve su fecha dentro del mes que
+ * ya tiene o al mes de su vuelo (día Cancún). null = no aplica. FUENTE
+ * ÚNICA: la usan `decidirCambioFechaGasto` (409
+ * FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO) y la ficha del candidato de
+ * «Vincular gasto» (`candado_mes_vuelo`, revisión del 14-oct-2026: el panel
+ * ya no invita a una fecha que aquí se rechaza; caso vivo: el TAXI del vuelo
+ * #109 del 31-jul contra el cargo del Tren Maya del 10-ago).
+ */
+export function candadoMesDelVuelo(g: {
+  categoria?: string | null;
+  vuelo_id?: string | null;
+  vuelo?: unknown;
+}): VueloDeGastoFecha | null {
+  if (CATEGORIAS_GASTO_FUERA_DEL_AVION.has(g.categoria ?? '')) return null;
+  return vueloDeGasto(g);
+}
+
+/**
+ * ¿El gasto es una fila SUELTA de «otros movimientos» del Balance general?
+ * ESPEJO de `buildOtrosMovimientos` (`aircraft-balance.service.ts`): TUAS
+ * sin vuelo, con o sin avión (`tuasSueltos` y `tuasSinVueloRes`), y GAS sin
+ * avión sellado que ningún tramo ni vuelo resuelve y que no es de un vuelo
+ * EXTERNO sin avión (`gasRes`). Se leen por `fecha_gasto` y, en pesos, el
+ * bloque VUELATOUR las convierte con el T.C. oficial de SU día.
+ */
+export function esSueltaOtrosMovimientos(g: GastoCambioFecha): boolean {
+  const cat = g.categoria ?? '';
+  if (cat === TUAS_CAT) return !g.vuelo_id;
+  if (cat !== 'GAS' || g.aeronave_id) return false;
+  const crudo = g as unknown as Record<string, unknown>;
+  return (
+    !esVueloExternoSinAvion(vueloEmbebido(crudo)) &&
+    avionDeGastoEmbebido(crudo) == null
+  );
+}
+
 /**
  * La decisión completa, en el orden de los candados (ver la cabecera). El
  * mes del vuelo es el ESPEJO EXACTO del predicado `fechasFuera` del balance
- * (`aircraft-balance.service.ts`): gasto con vuelo de fecha legible, su
- * categoría fuera de `CATEGORIAS_GASTO_FUERA_DEL_AVION`, y el mes nuevo
- * distinto del mes del vuelo (día Cancún) Y del mes que ya tenía —
- * Conciliación jamás CREA ese pendiente (sí deja moverse dentro de un mes y
- * REGRESAR al mes del vuelo). Responde así aunque llegue confirmar.
+ * (`aircraft-balance.service.ts`, fuente única `candadoMesDelVuelo`): gasto
+ * con vuelo de fecha legible, su categoría fuera de
+ * `CATEGORIAS_GASTO_FUERA_DEL_AVION`, y el mes nuevo distinto del mes del
+ * vuelo (día Cancún) Y del mes que ya tenía — Conciliación jamás CREA ese
+ * pendiente (sí deja moverse dentro de un mes y REGRESAR al mes del vuelo).
+ * Responde así aunque llegue confirmar.
  */
 export function decidirCambioFechaGasto(
   e: EntradaCambioFecha,
 ): DecisionCambioFecha {
   const g = e.gasto;
-  const cat = g.categoria ?? '';
   const noBancario = errorMedioNoBancario(g.medio_pago);
   if (noBancario) return { tipo: 'ERROR', error: noBancario };
+  // Revisión del 14-oct-2026: un gasto ya CUBIERTO por un cargo del banco
+  // tiene la fecha de ese pago. La lista de «Vincular gasto» no los ofrece;
+  // esto atrapa a quien lo ligó (con «Vincular», «Cruzar pendientes» o el
+  // PATCH de «Verificar / editar») mientras el diálogo seguía abierto —
+  // antes la fecha se movía a la de OTRO cargo y sacaba el gasto de su mes.
+  if (g.conciliado === true) {
+    return {
+      tipo: 'ERROR',
+      error: {
+        status: 409,
+        code: CODIGO_CAMBIO_FECHA.YA_CONCILIADO,
+        message: TEXTO_YA_CONCILIADO,
+      },
+    };
+  }
   const actual = String(g.fecha_gasto).slice(0, 10);
   if (actual === e.nueva) return { tipo: 'SIN_CAMBIO' };
   if (actual !== e.anterior) {
@@ -394,30 +512,27 @@ export function decidirCambioFechaGasto(
   }
   const mesActual = actual.slice(0, 7);
   const mesNuevo = e.nueva.slice(0, 7);
-  const v = vueloEmbebido(g as unknown as Record<string, unknown>);
-  const diaVuelo =
-    g.vuelo_id && typeof v?.fecha_vuelo === 'string'
-      ? diaCancunSeguro(v.fecha_vuelo)
-      : null;
-  const mesVuelo = diaVuelo ? diaVuelo.slice(0, 7) : null;
-  const folio = typeof v?.folio === 'number' ? v.folio : null;
-  if (
-    diaVuelo &&
-    mesVuelo &&
-    !CATEGORIAS_GASTO_FUERA_DEL_AVION.has(cat) &&
-    mesNuevo !== mesVuelo &&
-    mesNuevo !== mesActual
-  ) {
+  // El vuelo (para los textos) y su candado (solo si la categoría lo tiene).
+  const vuelo = vueloDeGasto(g);
+  const mesVuelo = vuelo?.mes ?? null;
+  const folio = vuelo?.folio ?? null;
+  const candado = candadoMesDelVuelo(g);
+  if (candado && mesNuevo !== candado.mes && mesNuevo !== mesActual) {
     return {
       tipo: 'ERROR',
       error: {
         status: 409,
         code: CODIGO_CAMBIO_FECHA.FUERA_DEL_MES_DEL_VUELO,
-        message: textoFueraDelMesDelVuelo(folio, diaVuelo, mesNuevo, mesVuelo),
+        message: textoFueraDelMesDelVuelo(
+          candado.folio,
+          candado.dia,
+          mesNuevo,
+          candado.mes,
+        ),
         details: {
-          vuelo_folio: folio,
-          vuelo_dia: diaVuelo,
-          mes_vuelo: mesVuelo,
+          vuelo_folio: candado.folio,
+          vuelo_dia: candado.dia,
+          mes_vuelo: candado.mes,
           mes_nuevo: mesNuevo,
         },
       },
@@ -456,6 +571,17 @@ export function decidirCambioFechaGasto(
     g.moneda === 'MXN' && !(Number(g.tc_gasto) > 0) && alcance !== null;
   if (tcCambia && (cambiaDeMes || terminados.length > 0)) {
     lineas.push(LINEA_TC_REPARTO);
+  }
+  // Las sueltas de «otros movimientos» en pesos: el bloque VUELATOUR las
+  // convierte con el oficial de SU día AUNQUE traigan tc_gasto
+  // (`tcDeGastoSuelto`). Nunca coincide con la del reparto (TUAS y el gas
+  // sin avión no tienen alcance).
+  if (
+    g.moneda === 'MXN' &&
+    esSueltaOtrosMovimientos(g) &&
+    (cambiaDeMes || terminados.length > 0)
+  ) {
+    lineas.push(LINEA_TC_BALANCE_GENERAL);
   }
   if (lineas.length === 0) {
     return {
@@ -496,9 +622,10 @@ export function decidirCambioFechaGasto(
 
 /**
  * Línea del BALANCE (solo cuando cambia el mes), espejo de
- * `ubicacionBalanceDeGasto`: TUAS sin vuelo vive en «otros movimientos» del
- * general por fecha; eje VUELO ⇒ el libro no se mueve (solo regresar al mes
- * del vuelo le quita su pendiente); eje GASTO ⇒ el libro pasa al mes nuevo.
+ * `ubicacionBalanceDeGasto`: las sueltas de «otros movimientos» (TUAS sin
+ * vuelo y gas sin avión, `esSueltaOtrosMovimientos`) viven en el general por
+ * fecha; eje VUELO ⇒ el libro no se mueve (solo regresar al mes del vuelo le
+ * quita su pendiente); eje GASTO ⇒ el libro pasa al mes nuevo.
  */
 function lineaBalance(
   g: GastoCambioFecha,
@@ -510,7 +637,7 @@ function lineaBalance(
   matricula: (aeronaveId: string) => string | null,
 ): string | null {
   const M = etiquetaMes(nueva.slice(0, 7));
-  if (g.categoria === TUAS_CAT && !g.vuelo_id) {
+  if (esSueltaOtrosMovimientos(g)) {
     return `En el balance general pasa a ${M}.`;
   }
   const u1 = ubicacionBalanceDeGasto({ ...g, fecha_gasto: nueva }, repartos);

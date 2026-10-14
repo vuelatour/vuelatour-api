@@ -4058,8 +4058,9 @@ export class ExpensesService {
    *  2. el gasto con `GASTO_CAMBIO_FECHA_COLS` (404 GASTO_NO_EXISTE);
    *  3. sus repartos (solo categorías repartibles) y, si cambia el mes, las
    *     matrículas de los textos (best-effort: si fallan, «del avión»);
-   *  4. la decisión (409 con `code` y `details`, o 200 sin escribir si ya
-   *     tenía esa fecha: doble clic idempotente);
+   *  4. la decisión (409 con `code` y `details` —también
+   *     FECHA_GASTO_YA_CONCILIADO si quien concilia lo ligó mientras tanto—,
+   *     o 200 sin escribir si ya tenía esa fecha: doble clic idempotente);
    *  5. la escritura por `update()` con CAS sobre el `updated_at` LEÍDO
    *     (409 CONFLICTO_VERSION si algo cambió entre la lectura y el UPDATE)
    *     y SIN auto-cruce: liga la persona con «Vincular».
@@ -4126,6 +4127,7 @@ export class ExpensesService {
         cambio: false,
         cambia_de_mes: false,
         fecha_hora_carga: gasto.fecha_hora_carga ?? null,
+        fecha_hora_carga_movida: false,
         updated_at: gasto.updated_at,
         aviso: null,
       };
@@ -4164,6 +4166,9 @@ export class ExpensesService {
       cambio: true,
       cambia_de_mes: d.cambia_de_mes,
       fecha_hora_carga: fila.fecha_hora_carga ?? null,
+      // Solo si ESTA llamada la movió (la de la fila puede ya caer en el
+      // día nuevo y no tocarse): el panel no afirma un cambio que no hubo.
+      fecha_hora_carga_movida: d.fecha_hora_carga != null,
       updated_at: fila.updated_at,
       aviso: d.aviso,
     };

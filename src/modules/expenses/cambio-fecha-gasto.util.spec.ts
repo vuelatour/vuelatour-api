@@ -7,12 +7,15 @@ import {
   CAMBIO_FECHA_DIAS_ATRAS_MAX,
   CODIGO_CAMBIO_FECHA,
   GASTO_CAMBIO_FECHA_COLS,
+  TEXTO_YA_CONCILIADO,
   alcanceRepartoPorFecha,
   avionesParaTextos,
+  candadoMesDelVuelo,
   decidirCambioFechaGasto,
   diaTexto,
   errorDeFechasCambio,
   errorMedioNoBancario,
+  esSueltaOtrosMovimientos,
   fechaHoraCargaAlDia,
   libroDineroPorFecha,
   type EntradaCambioFecha,
@@ -35,6 +38,9 @@ const LINEA_TC =
   'El reparto convierte este gasto en pesos con el tipo de cambio oficial del día del gasto: con la fecha nueva cambia lo que vale en dólares.';
 const SEP_TERMINO =
   'Septiembre 2026 ya terminó: si ya se entregaron sus libros o su reparto, hay que regenerarlos después de este cambio.';
+/** Las sueltas de «otros movimientos» en pesos (bloque VUELATOUR). */
+const LINEA_TC_GENERAL =
+  'El balance general convierte este gasto a dólares con el tipo de cambio oficial del día del gasto: con la fecha nueva cambia lo que vale en dólares.';
 
 /** Winjet (prod): TAXI con tarjeta, vuelo #436 de XB-PEV del 10-oct. */
 function winjet(extra: Partial<GastoCambioFecha> = {}): GastoCambioFecha {
@@ -153,6 +159,7 @@ describe('diaTexto y columnas', () => {
       'moneda',
       'tc_gasto',
       'fecha_hora_carga',
+      'conciliado',
       'updated_at',
       'inventario_movimiento_id',
       'escala:escala_id(aeronave_id)',
@@ -162,7 +169,7 @@ describe('diaTexto y columnas', () => {
     }
   });
 
-  it('los 7 códigos llevan el prefijo FECHA_GASTO_ (FECHA_PAGO_* es de las entregas a socios)', () => {
+  it('los 8 códigos llevan el prefijo FECHA_GASTO_ (FECHA_PAGO_* es de las entregas a socios)', () => {
     expect(Object.values(CODIGO_CAMBIO_FECHA)).toEqual([
       'FECHA_GASTO_INVALIDA',
       'FECHA_GASTO_FUTURA',
@@ -171,6 +178,7 @@ describe('diaTexto y columnas', () => {
       'FECHA_GASTO_CAMBIO',
       'FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO',
       'FECHA_GASTO_CONFIRMAR',
+      'FECHA_GASTO_YA_CONCILIADO',
     ]);
   });
 });
@@ -267,6 +275,50 @@ describe('decidirCambioFechaGasto — candados en orden', () => {
       tipo: 'ERROR',
       error: { status: 409, code: 'FECHA_GASTO_SOLO_BANCARIOS' },
     });
+  });
+
+  it('YA CONCILIADO (revisión del 14-oct-2026): 409 FECHA_GASTO_YA_CONCILIADO antes de cualquier otra cosa salvo el medio', () => {
+    // Escenario de la revisión: el gasto se ligó a OTRO cargo (C2, su pago
+    // real del 30-sep) mientras «Vincular gasto» del cargo C1 seguía abierto.
+    const ligado = sinVuelo({
+      categoria: 'OTRO',
+      aeronave_id: null,
+      fecha_gasto: '2026-09-28',
+      conciliado: true,
+    });
+    for (const [nueva, anterior, confirmar] of [
+      ['2026-10-02', '2026-09-28', false], // sacarlo de su mes
+      ['2026-10-02', '2026-09-28', true], // aun confirmado
+      ['2026-09-28', '2026-09-28', false], // la misma fecha
+      ['2026-09-24', '2026-09-20', false], // y aunque fecha_anterior difiera
+    ] as const) {
+      const d = decidir(ligado, nueva, { anterior, confirmar });
+      expect(d).toEqual({
+        tipo: 'ERROR',
+        error: {
+          status: 409,
+          code: 'FECHA_GASTO_YA_CONCILIADO',
+          message: TEXTO_YA_CONCILIADO,
+        },
+      });
+    }
+    expect(TEXTO_YA_CONCILIADO).toBe(
+      'Este gasto ya quedó conciliado con un cargo del banco: su fecha es la de ese pago y ya no se cambia desde Conciliación. Si ese cargo no es su pago, desvincúlalo primero.',
+    );
+    // El medio va primero (un efectivo ligado con justificación).
+    const efectivo = decidir(
+      { ...ligado, medio_pago: 'EFECTIVO' },
+      '2026-10-02',
+    );
+    expect(efectivo.tipo === 'ERROR' && efectivo.error.code).toBe(
+      'FECHA_GASTO_SOLO_BANCARIOS',
+    );
+    // Sin conciliar (o un pago PARCIAL: conciliado false) sigue como siempre.
+    for (const conciliado of [false, null, undefined]) {
+      expect(decidir(winjet({ conciliado }), '2026-10-12').tipo).toBe(
+        'APLICAR',
+      );
+    }
   });
 
   it('misma fecha ⇒ SIN_CAMBIO aunque fecha_anterior difiera (doble clic)', () => {
@@ -518,10 +570,10 @@ describe('confirmación — los textos son espejo de los libros', () => {
     });
   });
 
-  it('TUAS sin vuelo con avión: «otros movimientos» del general y Libro Dinero, sin reparto', () => {
+  it('TUAS sin vuelo con avión: «otros movimientos» del general, Libro Dinero y el T.C. del bloque VUELATOUR, sin reparto', () => {
     const g = sinVuelo({ categoria: 'TUAS' });
     expect(confirmacion(decidir(g, '2026-10-01')).message).toBe(
-      `Pasa de septiembre 2026 a octubre 2026. En el balance general pasa a octubre 2026. En el Libro Dinero pasa a octubre 2026. ${SEP_TERMINO}`,
+      `Pasa de septiembre 2026 a octubre 2026. En el balance general pasa a octubre 2026. En el Libro Dinero pasa a octubre 2026. ${LINEA_TC_GENERAL} ${SEP_TERMINO}`,
     );
   });
 
@@ -592,6 +644,200 @@ describe('confirmación — los textos son espejo de los libros', () => {
     expect(repartido.message).toContain(
       'En el reparto a socios pasan a octubre 2026 sus partes.',
     );
+  });
+});
+
+describe('sueltas de «otros movimientos»: el bloque VUELATOUR del Balance general (revisión del 14-oct-2026)', () => {
+  /** TUAS sin vuelo, TARJETA_CORP, $5,000 MXN del 7-sep (el caso de la revisión). */
+  const tuas = (extra: Partial<GastoCambioFecha> = {}) =>
+    sinVuelo({
+      categoria: 'TUAS',
+      medio_pago: 'TARJETA_CORP',
+      monto: '5000.00',
+      fecha_gasto: '2026-09-07',
+      aeronave_id: null,
+      ...extra,
+    });
+
+  it('DENTRO de un mes terminado ya NO se guarda en silencio: el bloque VUELATOUR la convierte con el oficial de SU día', () => {
+    // 5,000 ÷ 16.8894 (7-sep) = 296.04 USD; ÷ 18.0243 (30-sep) = 277.40 USD.
+    for (const g of [tuas(), tuas({ aeronave_id: N41 })]) {
+      const e = confirmacion(decidir(g, '2026-09-30'));
+      expect(e.message).toBe(
+        `La fecha cambia dentro de septiembre 2026. ${LINEA_TC_GENERAL} ${SEP_TERMINO}`,
+      );
+      expect(e.details).toMatchObject({
+        cambia_de_mes: false,
+        meses_terminados: ['2026-09'],
+      });
+      expect(decidir(g, '2026-09-30', { confirmar: true })).toEqual({
+        tipo: 'APLICAR',
+        fecha_hora_carga: null,
+        cambia_de_mes: false,
+        aviso: SEP_TERMINO,
+      });
+    }
+  });
+
+  it('en pesos CON tc_gasto también (tcDeGastoSuelto lo ignora); en dólares no: su valor en USD no cambia', () => {
+    const conTc = confirmacion(decidir(tuas({ tc_gasto: 18.2 }), '2026-09-30'));
+    expect(conTc.message).toContain(LINEA_TC_GENERAL);
+    expect(decidir(tuas({ moneda: 'USD' }), '2026-09-30')).toEqual({
+      tipo: 'APLICAR',
+      fecha_hora_carga: null,
+      cambia_de_mes: false,
+      aviso: null,
+    });
+  });
+
+  it('en el mes en curso se guarda directo (el mes no está cerrado)', () => {
+    expect(decidir(tuas({ fecha_gasto: '2026-10-03' }), '2026-10-12')).toEqual({
+      tipo: 'APLICAR',
+      fecha_hora_carga: null,
+      cambia_de_mes: false,
+      aviso: null,
+    });
+  });
+
+  it('GAS sin avión ni vuelo: es suelta («gas sin avión»): balance general, Libro Dinero y el T.C. del bloque VUELATOUR', () => {
+    const gas = sinVuelo({ categoria: 'GAS', aeronave_id: null });
+    expect(confirmacion(decidir(gas, '2026-10-01')).message).toBe(
+      `Pasa de septiembre 2026 a octubre 2026. En el balance general pasa a octubre 2026. En el Libro Dinero pasa a octubre 2026. ${LINEA_TC_GENERAL} ${SEP_TERMINO}`,
+    );
+    // Con avión NO es suelta: la convierte el REPARTO (la línea de siempre).
+    const conAvion = confirmacion(
+      decidir(sinVuelo({ categoria: 'GAS' }), '2026-10-01'),
+    ).message;
+    expect(conAvion).toContain(LINEA_TC);
+    expect(conAvion).not.toContain(LINEA_TC_GENERAL);
+  });
+
+  it('esSueltaOtrosMovimientos: espejo de las tres lecturas de buildOtrosMovimientos', () => {
+    expect(esSueltaOtrosMovimientos(tuas())).toBe(true);
+    expect(esSueltaOtrosMovimientos(tuas({ aeronave_id: N41 }))).toBe(true);
+    // TUAS CON vuelo: nota de la fila del vuelo, no suelta.
+    expect(esSueltaOtrosMovimientos(winjet({ categoria: 'TUAS' }))).toBe(false);
+    // GAS sin avión: suelta solo si ningún tramo ni vuelo lo resuelve…
+    expect(
+      esSueltaOtrosMovimientos(
+        sinVuelo({ categoria: 'GAS', aeronave_id: null }),
+      ),
+    ).toBe(true);
+    expect(
+      esSueltaOtrosMovimientos(
+        winjet({
+          categoria: 'GAS',
+          aeronave_id: null,
+          vuelo: { folio: 9, fecha_vuelo: null, aeronave_id: PEV },
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      esSueltaOtrosMovimientos(
+        winjet({
+          categoria: 'GAS',
+          aeronave_id: null,
+          escala_id: 'e-1',
+          escala: { aeronave_id: N41 },
+          vuelo: { folio: 9, fecha_vuelo: null, aeronave_id: null },
+        }),
+      ),
+    ).toBe(false);
+    // …y no es de un vuelo EXTERNO sin avión (vive en el libro EXTERNOS).
+    expect(
+      esSueltaOtrosMovimientos(
+        winjet({
+          categoria: 'GAS',
+          aeronave_id: null,
+          vuelo: {
+            folio: 9,
+            fecha_vuelo: null,
+            aeronave_id: null,
+            es_externo: true,
+          },
+        }),
+      ),
+    ).toBe(false);
+    // Con avión sellado o de otra categoría: no.
+    expect(esSueltaOtrosMovimientos(sinVuelo({ categoria: 'GAS' }))).toBe(
+      false,
+    );
+    expect(esSueltaOtrosMovimientos(sinVuelo({ aeronave_id: null }))).toBe(
+      false,
+    );
+  });
+});
+
+describe('candadoMesDelVuelo — la regla del 409 y de la ficha del candidato', () => {
+  it('con vuelo de fecha legible y categoría del avión ⇒ día, mes y folio del vuelo (día Cancún)', () => {
+    expect(candadoMesDelVuelo(caso92bd())).toEqual({
+      dia: '2026-08-27',
+      mes: '2026-08',
+      folio: 201,
+    });
+    // GAS con vuelo también (fechasFuera lo marca).
+    expect(candadoMesDelVuelo(caso92bd({ categoria: 'GAS' }))).toEqual({
+      dia: '2026-08-27',
+      mes: '2026-08',
+      folio: 201,
+    });
+    // 22:30 Cancún del 31-oct (03:30Z del 1-nov) es de OCTUBRE.
+    expect(
+      candadoMesDelVuelo(
+        winjet({
+          vuelo: {
+            folio: 9,
+            fecha_vuelo: '2026-11-01T03:30:00Z',
+            aeronave_id: PEV,
+          },
+        }),
+      ),
+    ).toEqual({ dia: '2026-10-31', mes: '2026-10', folio: 9 });
+  });
+
+  it('sin candado: categorías de empresa y las dos del pago al vendedor, sin vuelo o con la fecha ilegible', () => {
+    for (const categoria of [
+      'OTRO',
+      'FIJO',
+      'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
+    ]) {
+      expect(candadoMesDelVuelo(caso92bd({ categoria }))).toBeNull();
+    }
+    expect(candadoMesDelVuelo(sinVuelo())).toBeNull();
+    expect(
+      candadoMesDelVuelo(
+        caso92bd({
+          vuelo: { folio: 201, fecha_vuelo: 'ayer', aeronave_id: N41 },
+        }),
+      ),
+    ).toBeNull();
+    // `vuelo_id` null manda aunque el embed traiga algo.
+    expect(candadoMesDelVuelo(caso92bd({ vuelo_id: null }))).toBeNull();
+  });
+
+  it('el 409 FUERA_DEL_MES_DEL_VUELO sale EXACTAMENTE cuando el candado dice que el mes nuevo no se puede', () => {
+    const casos: Array<[GastoCambioFecha, string]> = [
+      [caso92bd(), '2026-09-07'],
+      [caso92bd(), '2026-08-30'],
+      [casoB150(), '2026-09-30'],
+      [casoB150(), '2026-08-25'],
+      [casoB150(), '2026-10-02'],
+      [caso92bd({ categoria: 'OTRO' }), '2026-09-07'],
+    ];
+    for (const [g, nueva] of casos) {
+      const c = candadoMesDelVuelo(g);
+      const mesActual = String(g.fecha_gasto).slice(0, 7);
+      const bloquea =
+        c != null &&
+        nueva.slice(0, 7) !== c.mes &&
+        nueva.slice(0, 7) !== mesActual;
+      const d = decidir(g, nueva, { confirmar: true });
+      expect(
+        d.tipo === 'ERROR' &&
+          d.error.code === 'FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO',
+      ).toBe(bloquea);
+    }
   });
 });
 
@@ -761,6 +1007,42 @@ describe('ALARMA DE PARIDAD con los libros que los textos imitan', () => {
       '!CAT_FUERA_DEL_AVION.has(g.categoria)',
       'g.fecha_gasto != null',
       '(g.fecha_gasto < desde || g.fecha_gasto > hasta)',
+    );
+  });
+
+  it('balance general: las sueltas de «otros movimientos» (TUAS sin vuelo, gas sin avión) y su T.C. oficial del DÍA en pesos', () => {
+    const balance = leer('aircraft', 'aircraft-balance.service.ts');
+    // El T.C. con que el bloque VUELATOUR regresa cada suelta a dólares.
+    enOrden(
+      balance,
+      'const tcDeGastoSuelto = (',
+      "g.moneda === 'MXN'",
+      '? { dia: (g.fecha_gasto as string | null) ?? null }',
+      ': { tc: pos(g.tc_gasto) ?? tcPromedio };',
+    );
+    // Las tres lecturas de sueltas, cada una con su T.C.
+    enOrden(
+      balance,
+      'for (const g of empresaYSueltos.tuasSueltos) {',
+      'tcSueltas.push(tcDeGastoSuelto(gr));',
+      'for (const g of (gasRes.data ?? []) as Array<Record<string, unknown>>) {',
+      'if (esVueloExternoSinAvion(vueloEmbebido(g))) continue;',
+      'if (avionDeGastoEmbebido(g) != null) continue;',
+      "sueltas.push(sueltaDe(g, 'gas sin avión'));",
+      'tcSueltas.push(tcDeGastoSuelto(g));',
+      'for (const g of (tuasSinVueloRes.data ?? []) as Array<',
+      'tcSueltas.push(tcDeGastoSuelto(g));',
+    );
+    // GAS sin avión sellado y TUAS sin vuelo con avión, por fecha_gasto.
+    enOrden(
+      balance,
+      ".eq('categoria', 'GAS')",
+      ".is('aeronave_id', null)",
+      ".gte('fecha_gasto', desde)",
+      ".eq('categoria', 'TUAS')",
+      ".is('vuelo_id', null)",
+      ".not('aeronave_id', 'is', null)",
+      ".gte('fecha_gasto', desde)",
     );
   });
 

@@ -429,7 +429,7 @@ export class ExpensesController {
   @Roles(...ROLES_CONCILIACION)
   @ApiOperation({
     summary:
-      'FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74): cambia SOLO fecha_gasto (y la hora de la carga al mismo día) de un gasto BANCARIO, SIN auto-cruce. 400 FECHA_GASTO_INVALIDA / FECHA_GASTO_FUTURA / FECHA_GASTO_MUY_ANTIGUA; 404 GASTO_NO_EXISTE; 409 FECHA_GASTO_SOLO_BANCARIOS, FECHA_GASTO_CAMBIO (fecha_anterior ≠ la vigente), FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO (espejo de fechasFuera del balance), FECHA_GASTO_CONFIRMAR (mueve dinero de mes o cambia un mes terminado: repetir con confirmar: true) y CONFLICTO_VERSION. Solo ADMIN y FACTURACION.',
+      'FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74): cambia SOLO fecha_gasto (y la hora de la carga al mismo día) de un gasto BANCARIO, SIN auto-cruce. 400 FECHA_GASTO_INVALIDA / FECHA_GASTO_FUTURA / FECHA_GASTO_MUY_ANTIGUA; 404 GASTO_NO_EXISTE; 409 FECHA_GASTO_SOLO_BANCARIOS, FECHA_GASTO_YA_CONCILIADO (ya está cubierto por un cargo del banco), FECHA_GASTO_CAMBIO (fecha_anterior ≠ la vigente), FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO (espejo de fechasFuera del balance), FECHA_GASTO_CONFIRMAR (mueve dinero de mes o cambia un mes terminado: repetir con confirmar: true) y CONFLICTO_VERSION. Solo ADMIN y FACTURACION.',
   })
   cambiarFecha(
     @Param('id', ParseUUIDPipe) id: string,
