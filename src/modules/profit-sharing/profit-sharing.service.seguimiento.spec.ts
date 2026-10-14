@@ -81,6 +81,10 @@ function armar(
     cobrosSinBanco: jest
       .fn()
       .mockResolvedValue({ data: [], total: 0, por_moneda: [] }),
+    // Pre-cierre de ligas USD por T.C. (invariante 70): sin ligas.
+    ligasUsdTcFueraDeLugar: jest
+      .fn()
+      .mockResolvedValue({ ligas: [], sin_verificar: 0 }),
   } as unknown as ConciliacionService;
   const nada = {} as never;
   const svc = new ProfitSharingService(supabase, nada, nada, conciliacion);

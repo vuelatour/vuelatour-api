@@ -553,3 +553,67 @@ describe('YA_CONCILIADO: con qué cargo', () => {
     expect(grupos[1].gastos[0]).not.toHaveProperty('conciliado_con');
   });
 });
+
+/**
+ * CRUCE USD (0.0.75, invariante 70): en una cuenta en pesos un gasto USD
+ * BANCARIO en banda del cargo es del universo de «Vincular gasto»: ya NO es
+ * OTRA_MONEDA.
+ */
+describe('motivoExclusion — USD bancario en banda contra un cargo en pesos', () => {
+  const CTX_USD: ContextoExclusion = {
+    monedaCuenta: 'MXN',
+    ventana: { desde: '2026-08-02', hasta: '2026-10-01' },
+    fechaCargo: '2026-09-01',
+    montoCargo: 7214.14,
+    cruzadosUsd: true,
+  };
+  const tubo = (extra: Partial<GastoExcluible> = {}) =>
+    g('tubo', {
+      monto: 422.86,
+      moneda: 'USD',
+      fecha_gasto: '2026-09-01',
+      medio_pago: 'TARJETA_CORP',
+      ...extra,
+    });
+
+  it('dentro de ±dias ⇒ null (es del universo); fuera ⇒ FUERA_DE_VENTANA', () => {
+    expect(motivoExclusion(tubo(), CTX_USD)).toBeNull();
+    expect(motivoExclusion(tubo({ fecha_gasto: '2026-12-20' }), CTX_USD)).toBe(
+      'FUERA_DE_VENTANA',
+    );
+  });
+
+  it('sigue siendo OTRA_MONEDA: USD de 212 contra un cargo de 212 MXN (cociente 1) y USD en EFECTIVO aun con incluir_no_bancarios', () => {
+    expect(
+      motivoExclusion(g('usd-212', { moneda: 'USD', monto: 212 }), {
+        ...CTX_USD,
+        montoCargo: 212,
+      }),
+    ).toBe('OTRA_MONEDA');
+    expect(
+      motivoExclusion(tubo({ medio_pago: 'EFECTIVO' }), {
+        ...CTX_USD,
+        incluirNoBancarios: true,
+      }),
+    ).toBe('OTRA_MONEDA');
+  });
+
+  it('la precedencia queda intacta: EFECTIVO_U_OTRO_MEDIO > YA_CONCILIADO > OTRA_MONEDA', () => {
+    expect(motivoExclusion(tubo({ conciliado: true }), CTX_USD)).toBe(
+      'YA_CONCILIADO',
+    );
+    expect(motivoExclusion(tubo({ medio_pago: 'EFECTIVO' }), CTX_USD)).toBe(
+      'EFECTIVO_U_OTRO_MEDIO',
+    );
+  });
+
+  it('sin montoCargo/cruzadosUsd la salida es la de siempre', () => {
+    expect(motivoExclusion(tubo(), CTX)).toBe('OTRA_MONEDA');
+    expect(motivoExclusion(tubo(), { ...CTX_USD, cruzadosUsd: false })).toBe(
+      'OTRA_MONEDA',
+    );
+    const sin = { ...CTX_USD };
+    delete sin.montoCargo;
+    expect(motivoExclusion(tubo(), sin)).toBe('OTRA_MONEDA');
+  });
+});

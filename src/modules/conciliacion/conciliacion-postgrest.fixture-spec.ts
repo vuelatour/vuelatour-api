@@ -57,6 +57,18 @@ export interface OpcionesFake {
 
 const num = (v: unknown) => Number(v);
 
+/** DEFAULT de columnas que la BD real pone al insertar. */
+const POR_DEFECTO: Record<string, Row> = {
+  movimiento_bancario: {
+    conciliado: false,
+    gasto_id: null,
+    cobro_id: null,
+    cobro_grupo_id: null,
+    clasificacion_id: null,
+    notas: null,
+  },
+};
+
 /** Texto de una celda para comparar (sin «[object Object]»). */
 function txt(v: unknown): string {
   if (typeof v === 'string') return v;
@@ -221,7 +233,12 @@ export function fakePostgrest(db: Tablas, opts: OpcionesFake = {}) {
         if (op.op === 'insert' || op.op === 'upsert') {
           const filas = (
             Array.isArray(op.cuerpo) ? op.cuerpo : [op.cuerpo ?? {}]
-          ).map((r) => ({ id: r.id ?? `${tabla}-${++seq}`, ...r }));
+          ).map((r) => ({
+            id: r.id ?? `${tabla}-${++seq}`,
+            // Los DEFAULT de la BD que el código no manda (como el real).
+            ...(POR_DEFECTO[tabla] ?? {}),
+            ...r,
+          }));
           db[tabla] = [...(db[tabla] ?? []), ...filas];
           const copia = filas.map((r) => ({ ...r }));
           return {

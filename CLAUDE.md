@@ -348,7 +348,10 @@ errores, por_criterio, detalle[]}`. El 15-sep un error de trigger en la
      tokens comunes y margen sobre el segundo) → si nada desempata,
      **AMBIGUO** y se queda pendiente con su motivo. Después del monto se
      prueba el **FALTANTE** de un gasto con pagos parciales y, en cuenta MXN,
-     la compra USD por TC implícito (15-25).
+     la compra USD por TC implícito (15-25). Desde el 0.0.75 exige además
+     el T.C. oficial del día del cargo a ±2 %, leyenda que coincide y
+     recíproco (invariante 70); el camino inverso NO cruza USD contra
+     cuentas MXN.
    - **Camino inverso**: `intentarCruzarGasto` (best-effort, nunca lanza) se
      dispara con `void` desde `expenses.service` al CREAR un gasto bancario y
      al editar `monto`/`moneda`/`fecha_gasto`/`medio_pago`. Un gasto
@@ -471,7 +474,10 @@ sugerir` (ADMIN) manda contexto RICO (referencia, tipo, alias y moneda
        cuadra (la banda 15-25 acepta cualquier gasto USD dentro de un ±25 %
        del cargo), así que desempatar por tarjeta o por descripción sería
        ligar «por parecerse» — con ≥2 plausibles queda **AMBIGUO**. El
-       comentario del código ya lo decía; el código no lo hacía.
+       comentario del código ya lo decía; el código no lo hacía. Desde el
+       0.0.75 exige además el T.C. oficial del día del cargo a ±2 %,
+       leyenda que coincide y recíproco (invariante 70); el camino inverso
+       NO cruza USD contra cuentas MXN.
      - **Sin moneda de la cuenta NO se cruza nada.** `cuenta_bancaria.moneda`
        es NOT NULL: un null solo puede venir de una lectura fallida, y sin
        moneda la consulta de candidatos no filtra divisa (un gasto de 125.82
@@ -3908,7 +3914,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       limite 1..300 = 100}`): gastos bancarios sin conciliar (con pago
       parcial, por su faltante) en la moneda de la cuenta y ±`dias` de la
       fecha del cargo; en cuenta MXN y sin `q`, también USD con T.C.
-      implícito 15–25 (`cruzado: true`, al final). `q`
+      implícito 15–25 (`cruzado: true`, al final; desde el 0.0.75 con
+      cualquier búsqueda, con `tc_cruce`, en su nivel y con `tc_oficial` en
+      la raíz: invariante 70). `q`
       (`interpretarBusquedaGasto`, `gastos-candidatos.util.ts`): entero ⇒
       [q, q+1), con decimales ⇒ ±0.01, texto ⇒ DOS consultas (proveedor
       `ilike` ≤ 50 ids, luego `or(notas|lugar|folio_ticket ilike,
@@ -4723,7 +4731,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       días, ninguno de $212, y 223 no bancarios) devolvía 100 bancarios y
       CERO de los tres estacionamientos de $212.00: encender el interruptor
       no mostraba nada. Sin no bancarios el orden es EXACTAMENTE el del
-      0.0.62 (spec). Con la bandera, `excluidos`
+      0.0.62 (spec). Desde el 0.0.75 son 7 niveles (invariante 70):
+      bancarios que cuadran · cruzados CERCA del oficial · no bancarios que
+      cuadran · resto de bancarios · cruzados SIN oficial · cruzados LEJOS
+      (o sin `tc_cruce`: la posición de siempre) · resto de no bancarios;
+      los cruzados siguen SOLO bancarios. Con la bandera, `excluidos`
       (`ContextoExclusion.incluirNoBancarios`) solo cuenta BODEGA (y sin
       medio) como `EFECTIVO_U_OTRO_MEDIO`. Helpers PUROS en
       `gastos-candidatos.util.ts`: `MEDIO_BODEGA`, `esMedioBancario`,
@@ -7294,6 +7306,147 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `dto/conciliacion.dto.enriquecer.spec` y
       `conciliacion.controller.enriquecer.spec` (HTTP y roles).
 
+70. **GASTO EN DÓLARES ↔ CARGO EN PESOS: SOLO CON EL T.C. OFICIAL DEL DÍA
+    DEL CARGO (13-oct-2026, lote 2, API 0.0.75, SIN migración).** Caso real
+    (Aircraft Spruce): el auto-cruce ligaba un gasto USD a un cargo MXN solo
+    porque el cociente caía en la banda 15–25 y el candidato era único. Así
+    el tubo Michelin (gasto 2d37d95e, 422.86 USD, 01-sep) quedó ligado a
+    «ASA CANCUN» $8,939.38 de COMBUSTIBLE (T.C. 21.14 contra un oficial de
+    17.01, +24.3 %; la BD derivó `tc_gasto` 21.140300) y las bujías
+    (340c3dc6, 794.61 USD, 24-sep) a «ASA CANCUN I\CARR CANC» $14,197.17
+    (+2.3 %), mientras sus cargos reales «AIRCRAFT SPRUCE AND SP» ($7,214.14
+    y $14,431.18) y los gastos GAS en pesos seguían pendientes. **La
+    corrección de datos YA se aplicó** el 13-oct-2026 a las 21:40 Cancún
+    (`gasto_bitacora` la registra con actor): 2 desligues + 5 ligas; hoy hay
+    6 ligas cruzadas y todas quedan entre −0.4 % y +1.5 % del oficial (tubo
+    17.060351, bujías 18.161337, 516.35 USD 17.550770, llantas 17.224360,
+    325.00 USD 18.508338, 203.90 USD 18.345414). Este lote NO la repite:
+    impide que vuelva a pasar y hace visible lo sospechoso. Ningún número
+    cambia: `tc_gasto` lo sigue derivando SOLO la BD
+    (`recalcular_gasto_conciliado`, banda 15–25 intacta) y el panel no
+    calcula.
+    - **Fuente única PURA `conciliacion/auto-cruce.util.ts`** (punto 4 del
+      encabezado): `TC_IMPLICITO_MIN/MAX` (15/25, espejo de la BD; se
+      mudaron del servicio), `TOLERANCIA_TC_OFICIAL_PCT` = 2 (ÚNICA; el
+      comentario lleva los datos de prod: correctas entre −0.4 % y +1.5 %,
+      equivocadas +24.3 % y +2.3 %, señuelo 7,380.80 ↔ tubo +3.0 %),
+      `TOPE_CRUCE_USD` = 25, `MIN_PALABRAS_COMUNES_USD` = 2,
+      `PALABRAS_SIN_IDENTIDAD_USD` (AND, THE, INC, LLC, LTD, CORP, FOR, WWW,
+      COM, PAYPAL; `VACIAS` no se tocó); `evaluarTcCruce` (tc_implicito =
+      round6(|mxn| ÷ |usd|), en_banda con el cociente SIN redondear como la
+      BD, desvío a 1 decimal con −0 ⇒ 0; CERCA ⟺ |desvío| ≤ 2 con el valor
+      que se MUESTRA: «+2.0 %» es CERCA), `ligaUsdFueraDeLugar` (no en banda
+      o LEJOS), `piezaTcCruce`/`textoTcCruce`/`tituloTcCruce`/
+      `tcCruceUsdPublico` («T.C. 17.06 · oficial 17.01 (+0.3 %)», «…: lejos
+      del oficial», «…: fuera de la banda 15–25», «T.C. 17.55 · sin T.C.
+      oficial del día»; el título con el T.C. exacto de 6 decimales, el
+      oficial de 4, el día REAL del dato y la fuente legible),
+      `contrasteDescripcionUsd` (tokens CRUDOS de `tokensTexto`, SIN
+      `expandirTokens`, sin ciudades/IATA, sin TODA palabra del giro
+      —llaves y valores de `SINONIMOS`— ni relleno en inglés: ≥ 2 comunes
+      COINCIDE, 1 DEBIL, 0 CONTRADICE, un lado vacío SIN_TEXTO; NO se
+      reutiliza `puntuarDescripcion`: «ASUR CANCUN» empataría con
+      «Aeropuerto de Cancún»), `decidirCruceUsd`, `competidoresCruceUsd`,
+      `textoReciprocoCruceUsd`, `textoSePuedeCruzarUsd` y los 4 textos
+      `TEXTO_CRUCE_USD_*`. `puntuarDescripcion`, `elegirCandidato`,
+      `separarPorDesfase` y el dedupe NO cambiaron.
+    - **Auto-cruce** (importación y «Cruzar pendientes»; pasos 1 —monto con
+      desfase— y 2 —FALTANTE— byte a byte): el paso 3 (solo cuentas MXN) lee
+      los USD bancarios sin conciliar EN BANDA del cargo (`rangoBandaUsd`,
+      ±MATCH_DAYS, `.limit(25)`; llegar al tope ⇒ AMBIGUO), sin los que ya
+      tienen partes, y liga SOLO si hay T.C. oficial del día del CARGO, el
+      gasto queda a ±2 %, la leyenda del banco COINCIDE con él y ningún otro
+      cargo pendiente de una cuenta en pesos cuadra igual (RECÍPROCO: fecha
+      del gasto ±MATCH_DAYS, |monto| en `rangoBandaMxnDeUsd`, tope 25; un
+      competidor CERCA o SIN oficial ⇒ AMBIGUO con candidatos 1 + n). Sin
+      oficial ⇒ AMBIGUO «No hay T.C. oficial del …»; ≥ 2 CERCA ⇒ AMBIGUO;
+      1 CERCA que no COINCIDE ⇒ AMBIGUO con el porqué; solo LEJOS ⇒
+      SIN_CANDIDATO con el motivo de siempre + el detalle. Lectura del
+      oficial fallida ⇒ ERROR `TEXTO_CRUCE_USD_SIN_LECTURA_TC`; lectura del
+      recíproco (o del oficial de un competidor) fallida ⇒ ERROR
+      `TEXTO_CRUCE_USD_RECIPROCO_ERROR`. El criterio sigue siendo
+      `TC_IMPLICITO`. **Camino inverso DIFERIDO**: `intentarCruzarGasto`
+      sigue solo con cuentas de la MISMA moneda (un gasto USD capturado
+      después se liga con «Cruzar pendientes» o a mano).
+    - **T.C. oficial**: tabla `tipo_cambio_oficial` con respaldo de 7 días
+      (`VENTANA_RESPALDO_TC_DIAS`), la misma fuente del cotizador.
+      `TipoCambioService.oficialesPorDias(dias, {descargar})` lee en UNA
+      consulta por tramo de ≤ 900 días (`tcOficialVigente`, PURA: la fila
+      válida más reciente de [día − 7, día], fuente legible); null = lectura
+      fallida (jamás «sin dato»). **Descarga híbrida**: la importación (job
+      asíncrono) y el pre-cierre bajan ≤ `DESCARGAS_TC_MAX` (5) días
+      faltantes vía `oficialDetallePara` (con sus throttles); lista,
+      «Vincular gasto», IA y «Cruzar pendientes» solo leen la tabla
+      (`CruceCtx.descargarTc`, memo por día por corrida). `ConciliacionService`
+      recibe `TipoCambioService` como 6.º parámetro @Optional y
+      `ConciliacionModule` importa `TipoCambioModule` (sin ciclo;
+      `conciliacion.module.spec` congela el import: sin él todo «funciona»
+      pero SIN oficial).
+    - **«Vincular gasto»** (`GET movimientos/:id/gastos-candidatos`): en
+      cuentas MXN los USD bancarios en banda salen con CUALQUIER búsqueda
+      (vacía o texto ⇒ la banda, + el `orTexto` de siempre; monto ⇒ DOS
+      lecturas: el rango en dólares tal cual y, con oficial, el equivalente
+      en pesos ÷ oficial ±3 % —`rangosUsdDeBusqueda`,
+      `TOLERANCIA_BUSQUEDA_EQUIVALENTE_PCT`, más ancha porque es un filtro
+      humano—; jamás `.or(and(…))`), se unen por id, se filtra EXACTO en
+      banda y se quitan los que tienen partes. Cada cruzado lleva
+      `tc_cruce` (oficial de TABLA; lectura fallida ⇒ SIN_OFICIAL y sin
+      rango equivalente) y el orden es de 7 niveles (ver invariante 48). La
+      raíz `tc_oficial {tc, fecha_dato, fuente} | null` viaja SIEMPRE (null
+      en cuenta no MXN, sin dato o con la lectura fallida): el panel la usa
+      como capacidad. `excluidos`: un USD bancario en banda deja de ser
+      OTRA_MONEDA (`ContextoExclusion.montoCargo/cruzadosUsd`).
+    - **Lista** (`GET movimientos`): cada CARGO con EXACTAMENTE una parte
+      cruzada lleva `tc_cruce` a nivel de FILA (en su propio try: si el
+      oficial no se puede leer, ninguna fila lo lleva); los CARGOS de cuentas
+      MXN que con la regla de siempre quedan SIN_CANDIDATOS pasan por la
+      regla USD (UNA lectura en lote de USD en banda, paginada, + oficiales
+      de tabla, SIN recíproco): LIGAR ⇒ SE_PUEDE_CRUZAR con `motivo_detalle`
+      = `textoSePuedeCruzarUsd`; AMBIGUO ⇒ AMBIGUO con el porqué;
+      SIN_CANDIDATOS con LEJOS ⇒ el detalle. Si esa lectura o la de
+      oficiales falla o se trunca, esos cargos quedan SIN anotar.
+    - **IA** (`sugerir`, `sugerir-lote`): los cruzados se leen en banda con
+      el oficial de tabla; los LEJOS ya NO se mandan y los que van llevan
+      `tc_cruce` (pyservices ignora el campo extra).
+    - **Pre-cierre** (`GET /v1/profit-sharing/pre-cierre`): item
+      `gastos_usd_tc_fuera_de_lugar` JUSTO después de
+      `gastos_bancarios_sin_conciliar`, NO bloqueante (`listo` no cambia):
+      `ligas[]` (`LigaUsdTcFueraDeLugar`, `conciliacion/ligas-usd-tc.util.ts`:
+      texto «$422.86 USD · <1.ª línea de la nota, ≤ 60> (01 sep) ↔ cargo
+      «ASA CANCUN» de $8,939.38 del 01 sep (COMBUSTIBLE): <tc_cruce.texto>»)
+      y `sin_verificar` (ligas en banda sin oficial del día de su cargo).
+      `ConciliacionService.ligasUsdTcFueraDeLugar(desde, hasta)` NUNCA lanza:
+      gastos USD conciliados por `fecha_gasto` (DATE, día Cancún; paginados,
+      tope 5,000) → partes cruzadas → cargos → oficiales (aquí SÍ descarga)
+      → `evaluarTcCruce`; sin la sonda de partes, sin el servicio o
+      truncado ⇒ null ⇒ «sin verificar». Textos en
+      `profit-sharing/ligas-usd-tc-precierre.util.ts`. El sistema NO corrige
+      nada: la oficina desvincula (con confirmación) y vincula el cargo
+      correcto, que sale primero con su línea de T.C.
+    - **Límites conocidos**: recíproco CONSERVADOR (con 2 cargos CERCA del
+      mismo gasto, o uno sin oficial, queda AMBIGUO sin mirar
+      descripciones); margen ±2 % estrecho (una compra legítima con
+      sobreprecio del banco > 2 % va a mano y el aviso la marca CADA mes:
+      «descartarla» exigiría decisión del cliente y una columna); cargos
+      anteriores a julio de 2026 (la tabla empieza el 01-jul) siempre a mano;
+      la lista no corre el recíproco ni el FALTANTE para USD (un
+      SE_PUEDE_CRUZAR puede terminar AMBIGUO al cruzar, con su motivo); el
+      prompt de pyservices sigue hablando de la banda 15–25.
+    - Specs: `auto-cruce.util.spec` (describe «T.C. oficial del día»: las 8
+      ligas reales, bordes ±2.0/2.1, textos y títulos, contraste con el
+      mutante de `expandirTokens`, decisión, recíproco),
+      `gastos-candidatos.util.spec` (7 niveles, golden, «220 + tubo»,
+      rangos), `candidatos-excluidos.util.spec`, `ligas-usd-tc.util.spec`,
+      `conciliacion.service.cruce-usd.spec` (PostgREST falso que respeta
+      `range` y los DEFAULT de la BD: auto-cruce, recíproco, errores,
+      descarga solo en la importación, lista, «Vincular gasto», injerto #8,
+      IA y el aviso del pre-cierre con las ligas de ANTES y DESPUÉS de la
+      corrección), `conciliacion.service.autocruce.spec` (UNO y DOS USD con
+      oficial 20), `conciliacion.service.lote.spec` (USD al buscar, raíz
+      `tc_oficial`), `conciliacion.module.spec`,
+      `tipo-cambio.service.oficiales.spec` y los dos del pre-cierre en
+      `profit-sharing`.
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -8025,6 +8178,31 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **13-oct-2026 — SIN migración** para el cruce de gastos en dólares
+  contra cargos en pesos (lote 2, invariante 70): solo lecturas nuevas
+  (`tipo_cambio_oficial`, `gasto`, `movimiento_bancario`, la puente) y una
+  regla más estricta ANTES de la RPC de siempre
+  (`conciliacion_ligar_cargo_gastos`); `recalcular_gasto_conciliado`,
+  `v_gasto_conciliacion` y la banda 15–25 de la BD no se tocan. La
+  corrección de datos del caso real YA se aplicó (13-oct-2026, 21:40
+  Cancún): NO repetirla. Orden: API 0.0.75 (verificar `/v1/version` y que
+  el log no traiga errores de DI de Nest) → panel (seguro en cualquier
+  orden: todo es aditivo). Verificación de SOLO LECTURA antes y después:
+  `select left(p.movimiento_id::text,8) mov, m.fecha, m.monto, m.descripcion,
+  c.alias, left(g.id::text,8) gasto, g.fecha_gasto, g.monto usd, g.tc_gasto,
+  round(abs(m.monto)/g.monto, 6) tc_implicito, o.tc tc_oficial, o.fecha
+  fecha_oficial, round((round(abs(m.monto)/g.monto, 6)/o.tc - 1)*100, 1)
+  desvio_pct from movimiento_bancario_gasto p join gasto g on g.id =
+  p.gasto_id join movimiento_bancario m on m.id = p.movimiento_id join
+  cuenta_bancaria c on c.id = m.cuenta_bancaria_id left join lateral
+  (select t.tc, t.fecha from tipo_cambio_oficial t where t.fecha between
+  m.fecha - 7 and m.fecha order by t.fecha desc limit 1) o on true where
+  p.moneda::text <> g.moneda::text order by m.fecha` ⇒ 6 filas, todas con
+  |desvío| ≤ 2. Smoke: `GET /v1/conciliacion/movimientos/<cargo MXN
+  pendiente>/gastos-candidatos` debe traer la raíz `tc_oficial` NO nula (si
+  sale null, revisar el import de `TipoCambioModule`) y el pre-cierre de
+  jul–oct `gastos_usd_tc_fuera_de_lugar` con count 0, sin_verificar 0 y
+  lectura_fallida false.
 - **13-oct-2026 — SIN migración** para el concepto del SPEI (lote 2,
   invariante 69): `movimiento_bancario.descripcion` es `text`, el rastro va
   en `conciliacion_import_job.resultados` (jsonb, desde 20260916000001) y
@@ -9139,6 +9317,18 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Cruce USD ↔ pesos (13-oct-2026, invariante 70)**: (1) el aviso del
+  pre-cierre `gastos_usd_tc_fuera_de_lugar` no tiene «descartar»: una compra
+  legítima con sobreprecio del banco > 2 % saldrá cada mes (marcarla exige
+  una columna nueva); (2) el margen ±2 % es estrecho (las correctas de prod
+  llegan a +1.5 %): si se mueve, es la constante ÚNICA
+  `TOLERANCIA_TC_OFICIAL_PCT` y se re-corre el spec con las ligas reales;
+  (3) camino inverso (`intentarCruzarGasto`) diferido; (4) afinar el prompt
+  de pyservices (sigue hablando de la banda 15–25) es otro contrato; (5) si
+  julio o septiembre ya se cerraron, la corrección del 13-oct movió sus
+  pesos (tubo −$1,725.25, bujías +$234.01, 516.35 USD a 17.550770): la
+  oficina decide si se regeneran.
 
 - **Concepto del SPEI (13-oct-2026, invariante 69)**: (1) **candado de
   reglas por texto** — el concepto que teclea un tercero se ve con

@@ -1136,14 +1136,20 @@ describe('GET movimientos/:id/gastos-candidatos', () => {
     const { svc } = armar(db);
     const r = await svc.gastosCandidatosDeMovimiento('m2231', {});
     const ultimo = r.candidatos[r.candidatos.length - 1];
+    // Sin TipoCambioService (este spec no lo inyecta): SIN_OFICIAL, al final
+    // de los bancarios (invariante 70, nivel 5).
     expect(ultimo).toMatchObject({
       id: 'g-usd',
       cruzado: true,
       tc_implicito: 18.594833,
+      tc_cruce: { nivel: 'SIN_OFICIAL', en_banda: true, fuera_de_lugar: false },
     });
+    expect(r.tc_oficial).toBeNull();
     expect(r.candidatos.map((c) => c.id)).not.toContain('g-usd-lejos');
+    // Desde el 0.0.75 los USD también salen AL BUSCAR (por su monto en
+    // dólares; con oficial, también por su equivalente en pesos).
     const conQ = await svc.gastosCandidatosDeMovimiento('m2231', { q: '120' });
-    expect(conQ.candidatos.map((c) => c.id)).not.toContain('g-usd');
+    expect(conQ.candidatos.map((c) => c.id)).toContain('g-usd');
   });
 
   it('limite ⇒ truncado; el pago parcial entra con su faltante', async () => {
@@ -1762,7 +1768,7 @@ describe('GET …/gastos-candidatos — excluidos: POR QUÉ no aparece (6-oct-20
     expect(amplio).not.toHaveProperty('excluidos');
   });
 
-  it('con candidatos NO viaja (ni se hace la consulta extra): la respuesta del 0.0.62', async () => {
+  it('con candidatos NO viaja (ni se hace la consulta extra): la respuesta del 0.0.62 (+ `tc_oficial`, 0.0.75)', async () => {
     const db = mundo212([
       saesa('g-tdc', 212, 315, {
         fecha_gasto: '2026-09-06',
@@ -1776,6 +1782,7 @@ describe('GET …/gastos-candidatos — excluidos: POR QUÉ no aparece (6-oct-20
       expect(Object.keys(r).sort()).toEqual([
         'candidatos',
         'movimiento',
+        'tc_oficial',
         'truncado',
         'ventana',
       ]);
@@ -2046,11 +2053,19 @@ describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => 
     ]);
     expect(r).not.toHaveProperty('excluidos');
     // El universo cambió de filtro: todo menos BODEGA (no la lista bancaria).
+    // Los cruzados en dólares (invariante 70: en cuenta MXN salen también al
+    // buscar) siguen SOLO bancarios aun con la bandera (invariante 48): esa
+    // es la ÚNICA lectura con la lista bancaria (sin oficial, solo el rango
+    // en dólares de «212»).
     const lecturas = log.filter(
       (q) => q.tabla === 'gasto' && q.texto.includes('eq:conciliado'),
     );
-    expect(lecturas.some((q) => q.texto.includes('neq:medio_pago'))).toBe(true);
-    expect(lecturas.some((q) => q.texto.includes('in:medio_pago'))).toBe(false);
+    expect(
+      lecturas.filter((q) => q.texto.includes('neq:medio_pago')),
+    ).toHaveLength(1);
+    expect(
+      lecturas.filter((q) => q.texto.includes('in:medio_pago')),
+    ).toHaveLength(1);
   });
 
   it('con la bandera y MÁS bancarios que el límite (caso real: 254 + 223): el efectivo que cuadra entra primero', async () => {

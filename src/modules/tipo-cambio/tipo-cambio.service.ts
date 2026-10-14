@@ -43,6 +43,63 @@ export function fuenteTcLegible(fuente: string | null | undefined): string {
   }
 }
 
+/**
+ * Ventana de RESPALDO del T.C. oficial: el último dato dentro de los 7 días
+ * anteriores a la fecha (fines de semana / festivos). Fuente única: la usan
+ * `oficialDetallePara` y `tcOficialVigente` (13-oct-2026, invariante 70).
+ */
+export const VENTANA_RESPALDO_TC_DIAS = 7;
+
+/**
+ * Días SIN dato que `oficialesPorDias({descargar: true})` intenta bajar por
+ * llamada (los más recientes primero): la importación (job) y el pre-cierre
+ * descargan; la lista, «Vincular gasto», la IA y «Cruzar pendientes» solo
+ * leen la tabla.
+ */
+export const DESCARGAS_TC_MAX = 5;
+
+/** Días por lectura de `oficialesPorDias` (+7 de respaldo < 1000 filas). */
+const TRAMO_LECTURA_DIAS = 900;
+
+/**
+ * T.C. oficial vigente para un DÍA, con la fuente LEGIBLE. Estructuralmente
+ * igual a `OficialDelDia` de `conciliacion/auto-cruce.util` (no se importa
+ * nada de conciliación: sin ciclo).
+ */
+export interface OficialDiaTc {
+  tc: number;
+  /** Día REAL del dato (≤ el pedido; respaldo de hasta 7 días). */
+  fecha_dato: string;
+  fuente: string;
+}
+
+/**
+ * PURA: el T.C. vigente para `dia` entre filas YA leídas (orden fecha
+ * DESCENDENTE): la más reciente con fecha ∈ [dia − 7, dia] y `tc` finito >
+ * 0 (una inválida se ignora); fuente legible. null si no hay.
+ */
+export function tcOficialVigente(
+  filasDesc: ReadonlyArray<{ fecha: unknown; tc: unknown; fuente?: unknown }>,
+  dia: string,
+): OficialDiaTc | null {
+  if (!fechaIsoValida(dia)) return null;
+  const desde = addDays(dia, -VENTANA_RESPALDO_TC_DIAS);
+  for (const f of filasDesc) {
+    const fecha = typeof f.fecha === 'string' ? f.fecha.slice(0, 10) : '';
+    if (!fecha || fecha > dia || fecha < desde) continue;
+    const tc = Number(f.tc);
+    if (!Number.isFinite(tc) || tc <= 0) continue;
+    return {
+      tc,
+      fecha_dato: fecha,
+      fuente: fuenteTcLegible(
+        typeof f.fuente === 'string' ? f.fuente : FUENTE_DIARIA,
+      ),
+    };
+  }
+  return null;
+}
+
 export interface TipoCambioDetalle {
   /** TC USD→MXN vigente para la fecha pedida. */
   tc: number;
@@ -116,7 +173,7 @@ export class TipoCambioService {
    */
   async oficialDetallePara(fecha: string): Promise<TipoCambioDetalle | null> {
     if (!fechaIsoValida(fecha)) return null;
-    const desde = addDays(fecha, -7);
+    const desde = addDays(fecha, -VENTANA_RESPALDO_TC_DIAS);
     try {
       const local = await this.buscar(desde, fecha);
       const hoy = hoyCancun();
@@ -144,6 +201,73 @@ export class TipoCambioService {
       );
       return null;
     }
+  }
+
+  /**
+   * T.C. oficial vigente de VARIOS días en UNA lectura por tramo de ≤ 900
+   * días (13-oct-2026, invariante 70: cruce de gastos USD contra cargos en
+   * pesos). Los días sin dato quedan FUERA del mapa. Con `descargar`, hasta
+   * `DESCARGAS_TC_MAX` días faltantes (los más recientes primero) pasan por
+   * `oficialDetallePara` (con sus throttles). Error de lectura ⇒ warn + null
+   * (el llamador lo trata como «no se pudo comprobar», jamás como «sin
+   * dato»). Nunca lanza.
+   */
+  async oficialesPorDias(
+    dias: readonly string[],
+    opts: { descargar?: boolean } = {},
+  ): Promise<Map<string, OficialDiaTc> | null> {
+    const unicos = [...new Set(dias.filter((d) => fechaIsoValida(d)))].sort();
+    const out = new Map<string, OficialDiaTc>();
+    if (unicos.length === 0) return out;
+    try {
+      for (let i = 0; i < unicos.length; ) {
+        const inicio = unicos[i];
+        const limite = addDays(inicio, TRAMO_LECTURA_DIAS);
+        let j = i;
+        while (j + 1 < unicos.length && unicos[j + 1] <= limite) j += 1;
+        const fin = unicos[j];
+        const { data, error } = await this.supabase.service
+          .from('tipo_cambio_oficial')
+          .select('fecha, tc, fuente')
+          .gte('fecha', addDays(inicio, -VENTANA_RESPALDO_TC_DIAS))
+          .lte('fecha', fin)
+          .order('fecha', { ascending: false })
+          .limit(1000);
+        if (error) throw new Error(error.message);
+        const filas = (data ?? []) as Array<{
+          fecha: unknown;
+          tc: unknown;
+          fuente?: unknown;
+        }>;
+        for (let k = i; k <= j; k++) {
+          const o = tcOficialVigente(filas, unicos[k]);
+          if (o) out.set(unicos[k], o);
+        }
+        i = j + 1;
+      }
+    } catch (err) {
+      this.logger.warn(
+        `TC oficial de ${unicos.length} día(s): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    if (opts.descargar) {
+      const faltan = unicos
+        .filter((d) => !out.has(d))
+        .sort((a, b) => (a < b ? 1 : -1))
+        .slice(0, DESCARGAS_TC_MAX);
+      for (const dia of faltan) {
+        const d = await this.oficialDetallePara(dia);
+        if (d) {
+          out.set(dia, {
+            tc: d.tc,
+            fecha_dato: d.fecha_dato,
+            fuente: fuenteTcLegible(d.fuente),
+          });
+        }
+      }
+    }
+    return out;
   }
 
   private async buscar(

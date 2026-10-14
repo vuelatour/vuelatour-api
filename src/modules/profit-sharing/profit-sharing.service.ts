@@ -132,6 +132,8 @@ import {
   type VueloCobradoSinFactura,
 } from './vuelos-sin-factura.util';
 import { facturasDeVuelos } from '../flights/factura-cliente-etiquetas';
+import { itemPrecierreLigasUsdTc } from './ligas-usd-tc-precierre.util';
+import type { ResultadoLigasUsdTc } from '../conciliacion/ligas-usd-tc.util';
 import {
   CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
   DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
@@ -3132,6 +3134,10 @@ export class ProfitSharingService {
     // transferencia / HSBC link / cheque / Paywise sin liga con ningún abono
     // importado — misma lectura que GET /conciliacion/cobros-sin-banco.
     // Best-effort: un fallo aquí no tumba el pre-cierre (se avisa en 0).
+    // GASTOS USD CON T.C. FUERA DE LUGAR (13-oct-2026, invariante 70): la
+    // promesa ARRANCA aquí (en paralelo con cobros sin banco) y se espera al
+    // armar los items: no suma latencia. Nunca lanza (null = sin verificar).
+    const ligasUsdTcPromesa = this.ligasUsdTcPrecierre(q.desde, q.hasta);
     let cobrosSinBanco: Awaited<
       ReturnType<ConciliacionService['cobrosSinBanco']>
     > | null = null;
@@ -3218,6 +3224,7 @@ export class ProfitSharingService {
       await this.fetchNombres(pilotosDeTacosEnRevision(tacosRows)),
     );
 
+    const ligasUsdTc = await ligasUsdTcPromesa;
     const items = [
       {
         clave: 'vuelos_sin_completar',
@@ -3362,6 +3369,10 @@ export class ProfitSharingService {
           'Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
         count: bancariosSinConciliar.length,
       },
+      // Junto a los bancarios sin conciliar (13-oct-2026, invariante 70):
+      // las ligas USD ↔ pesos a más de ±2 % del oficial del día del cargo.
+      // NO bloquea.
+      itemPrecierreLigasUsdTc(ligasUsdTc),
       {
         clave: 'cobros_bancarios_sin_conciliar',
         titulo: 'Cobros bancarios sin conciliar al corte',
@@ -3551,6 +3562,29 @@ export class ProfitSharingService {
    * Tabla ausente (migración 20260929000002 sin aplicar) ⇒ resumen vacío;
    * cualquier otro fallo ⇒ `null` + `warn` (no tumba el pre-cierre).
    */
+  /**
+   * Pre-cierre · GASTOS EN DÓLARES CON UN T.C. FUERA DE LUGAR (13-oct-2026,
+   * invariante 70): la lectura y la regla son de conciliación
+   * (`ligasUsdTcFueraDeLugar`). Un stub viejo sin el método, un null o una
+   * excepción ⇒ null (el renglón sale «sin verificar»); nunca lanza.
+   */
+  private async ligasUsdTcPrecierre(
+    desde: string,
+    hasta: string,
+  ): Promise<ResultadoLigasUsdTc | null> {
+    const conciliacion = this
+      .conciliacion as Partial<ConciliacionService> | null;
+    if (typeof conciliacion?.ligasUsdTcFueraDeLugar !== 'function') return null;
+    try {
+      return await conciliacion.ligasUsdTcFueraDeLugar(desde, hasta);
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: ligas USD por T.C. no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
   private async seguimientoCotizacionPendiente(
     desdeTs: string,
     hastaTs: string,

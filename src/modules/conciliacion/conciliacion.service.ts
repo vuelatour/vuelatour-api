@@ -167,6 +167,9 @@ import {
   MEDIO_BODEGA,
   MEDIOS_BANCARIOS,
   ordenarCandidatosPorNiveles,
+  rangoBandaMxnDeUsd,
+  rangoBandaUsd,
+  rangosUsdDeBusqueda,
 } from './gastos-candidatos.util';
 import {
   agregarNotaVinculo,
@@ -199,22 +202,48 @@ import {
 } from './candidatos-excluidos.util';
 import {
   CLASIFICACION_TRASPASO,
+  competidoresCruceUsd,
   conteoVacio,
+  decidirCruceUsd,
   elegirCandidato,
   elegirMovimiento,
   emparejarDuplicados,
+  evaluarTcCruce,
+  ligaUsdFueraDeLugar,
   montoCasa,
   ordenarPreviosParaDedupe,
   patronTraspaso,
   primeraLinea,
   sumarResultado,
+  TC_IMPLICITO_MAX,
+  TC_IMPLICITO_MIN,
+  tcCruceUsdPublico,
   terminacionDeMovimiento,
+  TEXTO_CRUCE_USD_RECIPROCO_ERROR,
+  TEXTO_CRUCE_USD_RECIPROCO_TRUNCADO,
+  TEXTO_CRUCE_USD_SIN_LECTURA_TC,
+  TEXTO_CRUCE_USD_TRUNCADO,
+  textoReciprocoCruceUsd,
+  textoSePuedeCruzarUsd,
   TOLERANCIA_CENTAVOS,
+  TOPE_CRUCE_USD,
   ventanaDias,
+  type CargoCompetidor,
   type CriterioCruce,
+  type DecisionCruceUsd,
   type GastoCandidatoCruce,
+  type OficialDelDia,
   type ResultadoCruce,
+  type TcCruceUsd,
 } from './auto-cruce.util';
+import {
+  descripcionGastoUsd,
+  ordenarLigasUsdTc,
+  textoLigaUsdTc,
+  type LigaUsdTcFueraDeLugar,
+  type ResultadoLigasUsdTc,
+} from './ligas-usd-tc.util';
+import { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
 import {
   CONCEPTO_TEXTO_MAX,
   direccionDeFechas,
@@ -420,6 +449,12 @@ export interface GastosCandidatosRespuesta {
     }
   >;
   truncado: boolean;
+  /**
+   * ADITIVO (0.0.75, invariante 70): T.C. oficial (de tabla) del día del
+   * cargo, SIEMPRE presente; null en cuenta no MXN, sin dato o con la
+   * lectura fallida. El panel lo usa como capacidad (`'tc_oficial' in r`).
+   */
+  tc_oficial?: { tc: number; fecha_dato: string; fuente: string } | null;
   excluidos?: ExcluidosCandidatos['excluidos'];
   excluidos_monto?: ExcluidosCandidatos['excluidos_monto'];
   /**
@@ -503,12 +538,10 @@ function unwrapOne<T>(v: T | T[] | null | undefined): T | null {
 function r2(x: number): number {
   return Math.round(x * 100) / 100;
 }
-// Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. El cruce
-// USD↔MXN solo se acepta si el TC implícito (cargo MXN ÷ gasto USD) cae en
-// esta banda plausible — fuera de ella es casi seguro otro gasto. Ajustar si
-// el peso se mueve de este rango.
-const TC_IMPLICITO_MIN = 15;
-const TC_IMPLICITO_MAX = 25;
+// Compras EN DÓLARES pagadas con tarjeta: el banco carga PESOS. La banda
+// plausible del T.C. implícito (TC_IMPLICITO_MIN/MAX, 15–25) y la regla del
+// T.C. OFICIAL del día del cargo (invariante 70) viven en `auto-cruce.util`
+// desde el 0.0.75: aquí solo se importan.
 
 export interface ParsedStatement {
   movimientos: Array<{
@@ -598,6 +631,12 @@ export interface SugerenciaConciliacion {
      * notas) es esa factura. Ordena dentro de su nivel; jamás liga.
      */
     coincide_factura?: boolean;
+    /**
+     * ADITIVO (0.0.75, invariante 70): SOLO en los cruzados (USD contra
+     * cuenta MXN): T.C. implícito contra el oficial del día del cargo, con
+     * su nivel, su marca y sus textos (`tcCruceUsdPublico`).
+     */
+    tc_cruce?: TcCruceUsd;
   }>;
 }
 
@@ -719,6 +758,19 @@ interface CruceCtx {
   terminaciones: string[];
   /** Id de la clasificación «Traspaso entre cuentas» (perezoso). */
   clasificacionTraspaso?: string | null;
+  /**
+   * CRUCE USD (0.0.75, invariante 70): T.C. oficial por DÍA, memorizado por
+   * corrida (se guarda la PROMESA: dos cargos del mismo día comparten la
+   * lectura). `fallo` = la lectura no se pudo hacer (≠ «no hay dato»).
+   */
+  tcOficial: Map<
+    string,
+    Promise<{ oficial: OficialDelDia | null; fallo: boolean }>
+  >;
+  /** ¿Puede descargar el T.C. que falte? (solo la importación, job asíncrono). */
+  descargarTc: boolean;
+  /** Ids de las cuentas en pesos (recíproco), memorizado; null = lectura fallida. */
+  cuentasMxn?: Promise<string[] | null>;
 }
 
 /**
@@ -835,6 +887,9 @@ const NO_ENCONTRADOS_DETALLE_MAX = 50;
 /** Universo de `repetida_en`: UNA página de PostgREST; llegar a ella ⇒ null. */
 const REPETIDAS_UNIVERSO_TOPE = 1000;
 
+/** Gastos USD conciliados que revisa el aviso del pre-cierre (más ⇒ null). */
+const LIGAS_USD_GASTOS_TOPE = 5000;
+
 /** Una fila completada, tal como viaja en el rastro y en la vista previa. */
 export interface DetalleEnriquecido {
   movimiento_id: string;
@@ -930,6 +985,11 @@ export class ConciliacionService {
     // llamadas DIRECTAS a pyservices (parse / sugerir / sugerir-abonos).
     // @Optional: los specs construyen el service sin él.
     @Optional() private readonly configuracion?: ConfiguracionService,
+    // T.C. OFICIAL del día del cargo (13-oct-2026, invariante 70): sin él no
+    // hay oficial ⇒ el cruce USD ↔ MXN queda AMBIGUO y
+    // `ligasUsdTcFueraDeLugar` responde null. @Optional: los specs
+    // construyen el service sin él.
+    @Optional() private readonly tipoCambio?: TipoCambioService,
   ) {}
 
   /** `{ 'X-IA-Modelo': id }` con modelo configurado; `{}` si no. Nunca lanza. */
@@ -2006,7 +2066,9 @@ export class ConciliacionService {
     // 4f9545e3 murió al 37 % con 101 movimientos YA insertados y 0
     // conciliados. Ahora cada movimiento va en su propio try/catch: el fallo
     // se cuenta con su motivo y el job termina LISTO diciendo cuántos.
-    const ctx = await this.cargarCtxCruce();
+    // La importación es un job asíncrono: puede descargar el T.C. oficial
+    // que falte para el cruce USD (invariante 70).
+    const ctx = await this.cargarCtxCruce({ descargarTc: true });
     const resultados: ResultadoMovimiento[] = [];
     const lista = inserted ?? [];
     if (lista.length !== rows.length) {
@@ -2317,53 +2379,213 @@ export class ConciliacionService {
     }
 
     // 3) Cuenta MXN: compra EN DÓLARES cuyo cargo llegó en pesos (Aircraft
-    //    Spruce). Solo con TC implícito plausible y candidato único.
+    //    Spruce). Desde el 0.0.75 (invariante 70) SOLO con el T.C. OFICIAL
+    //    del día del cargo a ±2 %, una leyenda que COINCIDE con el gasto y
+    //    ningún otro cargo que cuadre igual (recíproco). Antes bastaba la
+    //    banda 15–25 y candidato único: así el tubo de 422.86 USD se ligó a
+    //    «ASA CANCUN» $8,939.38 (+24.3 % sobre el oficial).
+    let detalleUsd: string | null = null;
     if (moneda === 'MXN' && monto > 0) {
-      const { data: usd, error: usdErr } = await this.gastosCandidatos({
-        moneda: 'USD',
+      const usd = await this.cruceUsdDeCargo(
+        mov,
+        monto,
+        base,
         desde,
         hasta,
-        limite: 25,
-      });
-      if (usdErr) {
-        return {
-          ...base,
-          resultado: 'ERROR',
-          motivo: `No se pudieron leer los gastos en USD: ${usdErr.message}`,
-        };
+        ctx,
+      );
+      if (usd.resultado) {
+        if (usd.resultado.ligar) {
+          return this.ligarCargo(mov.id, usd.resultado.ligar, userId, {
+            ...base,
+            criterio: 'TC_IMPLICITO',
+            candidatos_n: 1,
+          });
+        }
+        return usd.resultado.pendiente;
       }
-      const plausibles = (usd ?? [])
-        .filter((g) => {
-          const m = Number((g as { monto: unknown }).monto);
-          if (!(m > 0)) return false;
-          const tc = monto / m;
-          return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX;
-        })
-        .map((g) => this.aCandidatoCruce(g));
-      // OJO (revisión 15-sep-2026): aquí el monto NO cuadra — la banda de TC
-      // (15-25) acepta cualquier gasto USD dentro de un ±25 % del cargo. Por
-      // eso este camino liga SOLO con candidato ÚNICO: desempatar por
-      // descripción o por tarjeta entre montos que no coinciden sería ligar
-      // «por parecerse», justo lo que el auto-cruce tiene prohibido.
-      if (plausibles.length === 1) {
-        return this.ligarCargo(mov.id, plausibles[0].id, userId, {
-          ...base,
-          criterio: 'TC_IMPLICITO',
-          candidatos_n: 1,
-        });
-      }
-      if (plausibles.length > 1) {
-        return {
-          ...base,
-          resultado: 'AMBIGUO',
-          candidatos_n: plausibles.length,
-          motivo: `${plausibles.length} gastos en USD podrían corresponder a este cargo en pesos (tipo de cambio entre ${TC_IMPLICITO_MIN} y ${TC_IMPLICITO_MAX}): vincúlalo a mano.`,
-        };
-      }
+      detalleUsd = usd.detalle;
     }
     return {
       ...base,
-      motivo: `Ningún gasto bancario sin conciliar de ${montoBonito(monto)} ${moneda ?? ''} entre ${desde} y ${hasta}.`,
+      motivo: `Ningún gasto bancario sin conciliar de ${montoBonito(monto)} ${moneda ?? ''} entre ${desde} y ${hasta}.${detalleUsd ? ` ${detalleUsd}` : ''}`,
+    };
+  }
+
+  /**
+   * Paso 3 del auto-cruce de un CARGO en una cuenta en pesos (0.0.75,
+   * invariante 70): gastos USD bancarios sin conciliar EN BANDA del cargo
+   * (`rangoBandaUsd`, ±MATCH_DAYS, tope `TOPE_CRUCE_USD`: llegar a él ⇒
+   * AMBIGUO), sin los que ya tienen partes, decididos por `decidirCruceUsd`
+   * con el T.C. oficial del día del cargo (lectura fallida ⇒ ERROR) y, si
+   * diría LIGAR, el RECÍPROCO antes de escribir. `resultado.ligar` = el
+   * gasto a ligar; `resultado.pendiente` = el ResultadoMovimiento que queda;
+   * sin `resultado` ⇒ SIN_CANDIDATO con `detalle` (o null).
+   */
+  private async cruceUsdDeCargo(
+    mov: { id: string; fecha: string; descripcion: string | null },
+    monto: number,
+    base: ResultadoMovimiento,
+    desde: string,
+    hasta: string,
+    ctx: CruceCtx,
+  ): Promise<{
+    resultado?: { ligar?: string; pendiente: ResultadoMovimiento };
+    detalle: string | null;
+  }> {
+    const pendiente = (
+      resultado: ResultadoCruce,
+      motivo: string,
+      candidatos_n = 0,
+    ) => ({
+      resultado: { pendiente: { ...base, resultado, motivo, candidatos_n } },
+      detalle: null,
+    });
+    const banda = rangoBandaUsd(monto);
+    const { data: usd, error: usdErr } = await this.gastosCandidatos({
+      moneda: 'USD',
+      desde,
+      hasta,
+      montoMin: banda.min,
+      montoMax: banda.max,
+      limite: TOPE_CRUCE_USD,
+    });
+    if (usdErr) {
+      return pendiente(
+        'ERROR',
+        `No se pudieron leer los gastos en USD: ${usdErr.message}`,
+      );
+    }
+    const filas = usd ?? [];
+    if (filas.length >= TOPE_CRUCE_USD) {
+      return pendiente('AMBIGUO', TEXTO_CRUCE_USD_TRUNCADO, filas.length);
+    }
+    if (filas.length === 0) return { detalle: null };
+    // Un USD con partes ya está (parcialmente) pagado: un cruzado es 1 ↔ 1.
+    const ligados = await this.sumasLigadasDe(filas.map((g) => g.id as string));
+    const libres = filas.filter(
+      (g) => !((ligados.get(g.id as string) ?? 0) > 0),
+    );
+    // Solo los que caen EXACTO en la banda 15–25 (la lectura usa la banda
+    // redondeada): sin ninguno no hace falta ni el oficial.
+    const enBanda = libres.filter(
+      (g) => evaluarTcCruce(monto, Number(g.monto), null)?.en_banda === true,
+    );
+    if (enBanda.length === 0) return { detalle: null };
+    const of = await this.oficialDelDia(ctx, mov.fecha);
+    if (of.fallo) return pendiente('ERROR', TEXTO_CRUCE_USD_SIN_LECTURA_TC);
+    const decision = decidirCruceUsd(
+      { fecha: mov.fecha, monto, descripcion: mov.descripcion },
+      enBanda.map((g) => ({
+        id: g.id as string,
+        usd: Number(g.monto) || 0,
+        gasto: this.aCandidatoCruce(g),
+      })),
+      of.oficial,
+    );
+    if (decision.resultado === 'SIN_CANDIDATOS') {
+      return { detalle: decision.detalle };
+    }
+    if (decision.resultado === 'AMBIGUO' || !decision.elegido_id) {
+      return pendiente(
+        'AMBIGUO',
+        decision.detalle ?? '',
+        decision.candidatos_n,
+      );
+    }
+    const elegido = enBanda.find((g) => g.id === decision.elegido_id);
+    const reciproco = await this.reciprocoCruceUsd(
+      mov.id,
+      decision,
+      typeof elegido?.fecha_gasto === 'string'
+        ? elegido.fecha_gasto
+        : mov.fecha,
+      ctx,
+    );
+    if (reciproco) {
+      return pendiente(
+        reciproco.resultado,
+        reciproco.motivo,
+        reciproco.candidatos_n,
+      );
+    }
+    return {
+      resultado: {
+        ligar: decision.elegido_id,
+        pendiente: { ...base, candidatos_n: 1 },
+      },
+      detalle: null,
+    };
+  }
+
+  /**
+   * RECÍPROCO del cruce USD (conservador, límite conocido): ¿otro CARGO
+   * pendiente de una cuenta en pesos, a ±MATCH_DAYS de la fecha del GASTO y
+   * con |monto| en banda de ese gasto, quedaría también CERCA (o SIN
+   * oficial para descartarlo)? Entonces no se liga (AMBIGUO, candidatos 1 +
+   * n). Lectura fallida o el oficial de un competidor ilegible ⇒ ERROR;
+   * llegar al tope ⇒ AMBIGUO. null = sin competidores: se liga.
+   */
+  private async reciprocoCruceUsd(
+    cargoId: string,
+    decision: DecisionCruceUsd,
+    fechaGasto: string,
+    ctx: CruceCtx,
+  ): Promise<{
+    resultado: ResultadoCruce;
+    motivo: string;
+    candidatos_n: number;
+  } | null> {
+    const usd = Number(decision.elegido_usd) || 0;
+    const error = {
+      resultado: 'ERROR' as ResultadoCruce,
+      motivo: TEXTO_CRUCE_USD_RECIPROCO_ERROR,
+      candidatos_n: 1,
+    };
+    const cuentas = await this.cuentasMxnDe(ctx);
+    if (cuentas === null) return error;
+    if (cuentas.length === 0) return null;
+    const { desde, hasta } = ventanaDias(fechaGasto, MATCH_DAYS);
+    const { data, error: errLectura } = await this.supabase.service
+      .from('movimiento_bancario')
+      .select('id, fecha, monto, descripcion')
+      .eq('tipo', TipoMovimientoBancario.CARGO)
+      .eq('conciliado', false)
+      .in('cuenta_bancaria_id', cuentas)
+      .gte('fecha', desde)
+      .lte('fecha', hasta)
+      .gte('monto', rangoBandaMxnDeUsd(usd).min)
+      .lte('monto', rangoBandaMxnDeUsd(usd).max)
+      .neq('id', cargoId)
+      .limit(TOPE_CRUCE_USD);
+    if (errLectura) return error;
+    const otros = (data ?? []) as Array<Record<string, unknown>>;
+    if (otros.length >= TOPE_CRUCE_USD) {
+      return {
+        resultado: 'AMBIGUO',
+        motivo: TEXTO_CRUCE_USD_RECIPROCO_TRUNCADO,
+        candidatos_n: 1 + otros.length,
+      };
+    }
+    const cargos: CargoCompetidor[] = [];
+    for (const o of otros) {
+      const fecha = typeof o.fecha === 'string' ? o.fecha.slice(0, 10) : '';
+      const of = await this.oficialDelDia(ctx, fecha);
+      if (of.fallo) return error;
+      cargos.push({
+        id: o.id as string,
+        fecha,
+        monto: Math.abs(Number(o.monto) || 0),
+        descripcion: typeof o.descripcion === 'string' ? o.descripcion : null,
+        oficial: of.oficial,
+      });
+    }
+    const competidores = competidoresCruceUsd(cargoId, usd, cargos);
+    if (competidores.length === 0) return null;
+    return {
+      resultado: 'AMBIGUO',
+      motivo: textoReciprocoCruceUsd(usd, competidores) ?? '',
+      candidatos_n: 1 + competidores.length,
     };
   }
 
@@ -2549,8 +2771,22 @@ export class ConciliacionService {
   // RE-CRUCE (15-sep-2026): el auto-cruce ya no vive SOLO dentro del import
   // =====================================================================
 
-  /** Contexto del auto-cruce: se carga UNA vez por corrida, no por fila. */
-  private async cargarCtxCruce(): Promise<CruceCtx> {
+  /**
+   * Contexto del auto-cruce: se carga UNA vez por corrida, no por fila.
+   * `descargarTc` (0.0.75): SOLO la importación (job asíncrono) puede bajar
+   * el T.C. oficial que falte (≤ `DESCARGAS_TC_MAX` días); «Cruzar
+   * pendientes», la lista y la IA solo leen la tabla (sin latencia).
+   */
+  private async cargarCtxCruce(
+    opts: { descargarTc?: boolean } = {},
+  ): Promise<CruceCtx> {
+    const base = {
+      tcOficial: new Map<
+        string,
+        Promise<{ oficial: OficialDelDia | null; fallo: boolean }>
+      >(),
+      descargarTc: opts.descargarTc === true,
+    };
     const { data, error } = await this.supabase.service
       .from('tarjeta_corporativa')
       .select('terminacion, activa')
@@ -2558,13 +2794,220 @@ export class ConciliacionService {
     if (error) {
       // Sin catálogo no hay desempate por tarjeta, pero el cruce sigue.
       this.logger.warn(`No se pudo leer tarjeta_corporativa: ${error.message}`);
-      return { terminaciones: [] };
+      return { ...base, terminaciones: [] };
     }
     return {
+      ...base,
       terminaciones: (data ?? [])
         .map((t) => (t as { terminacion: unknown }).terminacion)
         .filter((t): t is string => typeof t === 'string'),
     };
+  }
+
+  /**
+   * T.C. oficial del DÍA del cargo para el auto-cruce (memorizado por
+   * corrida). Sin `TipoCambioService` ⇒ sin oficial (no es un fallo: el
+   * cruce USD queda AMBIGUO); lectura fallida ⇒ `fallo: true` (el cruce USD
+   * de ese cargo es ERROR y se reintenta con «Cruzar pendientes»).
+   */
+  private oficialDelDia(
+    ctx: CruceCtx,
+    fecha: string,
+  ): Promise<{ oficial: OficialDelDia | null; fallo: boolean }> {
+    const dia = String(fecha).slice(0, 10);
+    const memo = ctx.tcOficial.get(dia);
+    if (memo) return memo;
+    const lectura = (async () => {
+      if (!this.tipoCambio) return { oficial: null, fallo: false };
+      try {
+        const mapa = await this.tipoCambio.oficialesPorDias([dia], {
+          descargar: ctx.descargarTc,
+        });
+        if (mapa === null) return { oficial: null, fallo: true };
+        return { oficial: mapa.get(dia) ?? null, fallo: false };
+      } catch {
+        return { oficial: null, fallo: true };
+      }
+    })();
+    ctx.tcOficial.set(dia, lectura);
+    return lectura;
+  }
+
+  /**
+   * T.C. oficial de TABLA (sin descargar) para varios días: lista, «Vincular
+   * gasto» e IA. null = lectura fallida (quien llama no afirma nada); sin
+   * `TipoCambioService`, mapa vacío (= sin oficial).
+   */
+  private async oficialesTabla(
+    fechas: readonly string[],
+  ): Promise<Map<string, OficialDelDia> | null> {
+    if (!this.tipoCambio) return new Map();
+    try {
+      return await this.tipoCambio.oficialesPorDias(
+        fechas.map((f) => String(f).slice(0, 10)),
+        { descargar: false },
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * PRE-CIERRE «Gastos en dólares conciliados con un tipo de cambio fuera de
+   * lugar» (13-oct-2026, invariante 70): las ligas CRUZADAS (gasto USD ↔
+   * cargo en pesos) cuyo T.C. implícito queda a más de ±2 % del oficial del
+   * día del CARGO o fuera de la banda 15–25. El periodo se filtra por
+   * `fecha_gasto` (DATE, día Cancún). Gastos USD conciliados (paginados, ≤
+   * 5,000) → sus partes cruzadas (puente) → sus cargos → T.C. oficial de
+   * esos días (aquí SÍ se descarga lo que falte: ≤ `DESCARGAS_TC_MAX`) →
+   * `evaluarTcCruce`. Una liga en banda SIN oficial cuenta en `sin_verificar`.
+   * NUNCA lanza: sin la sonda de partes, sin `TipoCambioService`, con la
+   * lectura truncada o fallida ⇒ null (el pre-cierre lo dice). El sistema
+   * NO corrige nada: la oficina desvincula y vincula el cargo correcto.
+   */
+  async ligasUsdTcFueraDeLugar(
+    desde: string,
+    hasta: string,
+  ): Promise<ResultadoLigasUsdTc | null> {
+    try {
+      if (!this.tipoCambio || !(await this.partesOn())) return null;
+      const d = String(desde).slice(0, 10);
+      const h = String(hasta).slice(0, 10);
+      const { filas: gastos, truncado } = await this.leerPaginado(
+        (a, b) =>
+          this.supabase.service
+            .from('gasto')
+            .select(
+              'id, fecha_gasto, monto, moneda, tc_gasto, categoria, lugar, notas, vuelo_id, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)',
+            )
+            .eq('moneda', 'USD')
+            .eq('conciliado', true)
+            .gte('fecha_gasto', d)
+            .lte('fecha_gasto', h)
+            .order('id', { ascending: true })
+            .range(a, b),
+        LIGAS_USD_GASTOS_TOPE,
+      );
+      if (truncado) {
+        this.logger.warn(
+          `pre-cierre: más de ${LIGAS_USD_GASTOS_TOPE} gastos USD conciliados entre ${d} y ${h}: las ligas por T.C. no se revisan.`,
+        );
+        return null;
+      }
+      if (gastos.length === 0) return { ligas: [], sin_verificar: 0 };
+      const gastoDe = new Map(gastos.map((g) => [g.id as string, g]));
+      const partes = (await this.partesDeGastos([...gastoDe.keys()])).filter(
+        (p) => {
+          const g = gastoDe.get(p.gasto_id);
+          return parteCruzada(
+            p.moneda,
+            typeof g?.moneda === 'string' ? g.moneda : null,
+          );
+        },
+      );
+      if (partes.length === 0) return { ligas: [], sin_verificar: 0 };
+      const movs = await this.leerPorLotes(
+        partes.map((p) => p.movimiento_id),
+        (lote) =>
+          this.supabase.service
+            .from('movimiento_bancario')
+            .select(
+              'id, fecha, monto, descripcion, cuenta_bancaria_id, cuenta:cuenta_bancaria(alias)',
+            )
+            .in('id', lote),
+      );
+      const movDe = new Map(movs.map((m) => [m.id as string, m]));
+      const oficiales = await this.tipoCambio.oficialesPorDias(
+        [...new Set(movs.map((m) => String(m.fecha).slice(0, 10)))],
+        { descargar: true },
+      );
+      if (oficiales === null) return null;
+      const ligas: LigaUsdTcFueraDeLugar[] = [];
+      let sinVerificar = 0;
+      for (const p of partes) {
+        const g = gastoDe.get(p.gasto_id);
+        const m = movDe.get(p.movimiento_id);
+        if (!g || !m) continue;
+        const fechaCargo = String(m.fecha).slice(0, 10);
+        const montoCargo = r2(Math.abs(Number(m.monto) || 0));
+        const ev = evaluarTcCruce(
+          montoCargo,
+          Number(g.monto),
+          oficiales.get(fechaCargo) ?? null,
+        );
+        if (!ev) continue;
+        if (!ligaUsdFueraDeLugar(ev)) {
+          if (ev.nivel === 'SIN_OFICIAL') sinVerificar += 1;
+          continue;
+        }
+        const prov = unwrapOne(
+          g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
+        );
+        const vuelo = unwrapOne(
+          g.vuelo as { folio?: unknown } | { folio?: unknown }[] | null,
+        );
+        const cuenta = unwrapOne(
+          m.cuenta as { alias?: unknown } | { alias?: unknown }[] | null,
+        );
+        const folio = vuelo?.folio == null ? null : Number(vuelo.folio);
+        const liga: Omit<LigaUsdTcFueraDeLugar, 'texto'> = {
+          gasto_id: p.gasto_id,
+          fecha_gasto:
+            typeof g.fecha_gasto === 'string'
+              ? g.fecha_gasto.slice(0, 10)
+              : null,
+          monto_usd: r2(Math.abs(Number(g.monto) || 0)),
+          tc_gasto: g.tc_gasto == null ? null : Number(g.tc_gasto),
+          categoria: typeof g.categoria === 'string' ? g.categoria : null,
+          descripcion_gasto: descripcionGastoUsd({
+            notas: typeof g.notas === 'string' ? g.notas : null,
+            lugar: typeof g.lugar === 'string' ? g.lugar : null,
+            proveedor: typeof prov?.nombre === 'string' ? prov.nombre : null,
+          }),
+          vuelo_id: typeof g.vuelo_id === 'string' ? g.vuelo_id : null,
+          vuelo_folio: folio != null && Number.isFinite(folio) ? folio : null,
+          movimiento_id: p.movimiento_id,
+          fecha_cargo: fechaCargo,
+          monto_cargo: montoCargo,
+          cuenta_bancaria_id:
+            typeof m.cuenta_bancaria_id === 'string'
+              ? m.cuenta_bancaria_id
+              : null,
+          cuenta: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
+          descripcion_cargo:
+            typeof m.descripcion === 'string' ? m.descripcion : null,
+          tc_cruce: tcCruceUsdPublico(ev),
+        };
+        ligas.push({ ...liga, texto: textoLigaUsdTc(liga) });
+      }
+      return { ligas: ordenarLigasUsdTc(ligas), sin_verificar: sinVerificar };
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: no se pudieron revisar las ligas USD por T.C.: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /** Ids de las cuentas en PESOS (memorizado por corrida; null = lectura fallida). */
+  private cuentasMxnDe(ctx: CruceCtx): Promise<string[] | null> {
+    ctx.cuentasMxn ??= (async () => {
+      const { data, error } = await this.supabase.service
+        .from('cuenta_bancaria')
+        .select('id, moneda')
+        .eq('moneda', 'MXN')
+        .limit(200);
+      if (error) {
+        this.logger.warn(
+          `No se pudieron leer las cuentas en pesos: ${error.message}`,
+        );
+        return null;
+      }
+      return ((data ?? []) as Array<{ id?: unknown }>)
+        .map((c) => c.id)
+        .filter((id): id is string => typeof id === 'string');
+    })();
+    return ctx.cuentasMxn;
   }
 
   /**
@@ -2902,7 +3345,10 @@ export class ConciliacionService {
       if (!(objetivo > 0)) return nada('El gasto ya está cubierto.');
 
       // Cuentas de la MISMA moneda del gasto (un cargo de otra moneda es el
-      // caso cruzado USD↔MXN: 1 ↔ 1, se deja al operador).
+      // caso cruzado USD↔MXN: 1 ↔ 1, se deja al operador). Invariante 70
+      // (13-oct-2026): el camino inverso del cruce USD ↔ pesos queda
+      // DIFERIDO a propósito; ese gasto se liga con «Cruzar pendientes» (que
+      // aplica la regla del T.C. oficial) o a mano.
       const { data: cuentas, error: ctaErr } = await this.supabase.service
         .from('cuenta_bancaria')
         .select('id, moneda')
@@ -7587,6 +8033,9 @@ export class ConciliacionService {
     foliosPorMov?: Map<string, FoliosGasto[]>,
   ): Promise<void> {
     const conPartes = filas.filter((m) => Number(m.gastos_n) > 0);
+    // CRUCE USD (0.0.75, invariante 70): cargos con EXACTAMENTE UNA parte
+    // cruzada (USD contra pesos) ⇒ `tc_cruce` a nivel de FILA.
+    const cruzadas: Array<{ m: Record<string, unknown>; usd: number }> = [];
     try {
       const partes = await this.partesDeMovimientos(
         conPartes.map((m) => m.id as string),
@@ -7610,6 +8059,16 @@ export class ConciliacionService {
       }
       for (const m of filas) {
         const ps = porMov.get(m.id as string) ?? [];
+        if (
+          ps.length === 1 &&
+          m.tipo === (TipoMovimientoBancario.CARGO as string)
+        ) {
+          const g = gastoDe.get(ps[0].gasto_id);
+          const monedaGasto = typeof g?.moneda === 'string' ? g.moneda : null;
+          if (g && parteCruzada(ps[0].moneda, monedaGasto)) {
+            cruzadas.push({ m, usd: Math.abs(Number(g.monto) || 0) });
+          }
+        }
         if (foliosPorMov && ps.length > 0) {
           foliosPorMov.set(
             m.id as string,
@@ -7675,6 +8134,31 @@ export class ConciliacionService {
         // conserva los de su espejo).
         if (Number(m.gastos_n) >= 2) foliosPorMov?.delete(m.id as string);
       }
+      return;
+    }
+    // `tc_cruce` en su PROPIO try: si el T.C. oficial no se puede leer,
+    // ninguna fila lo lleva y lo demás sale igual (jamás uno a medias).
+    if (cruzadas.length === 0) return;
+    try {
+      const oficiales = await this.oficialesTabla(
+        cruzadas.map(({ m }) => String(m.fecha).slice(0, 10)),
+      );
+      if (oficiales === null) {
+        throw new Error('no se pudo leer el T.C. oficial');
+      }
+      for (const { m, usd } of cruzadas) {
+        const ev = evaluarTcCruce(
+          Math.abs(Number(m.monto) || 0),
+          usd,
+          oficiales.get(String(m.fecha).slice(0, 10)) ?? null,
+        );
+        if (ev) m.tc_cruce = tcCruceUsdPublico(ev);
+      }
+    } catch (err) {
+      this.logger.warn(
+        `Ligas USD ↔ MXN de la lista sin tc_cruce: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      for (const { m } of cruzadas) delete m.tc_cruce;
     }
   }
 
@@ -7882,10 +8366,129 @@ export class ConciliacionService {
             'SE_PUEDE_CRUZAR'
           : (eleccion.motivo ?? 'SIN_CANDIDATOS');
       }
+      // CRUCE USD (0.0.75, invariante 70): los cargos de cuentas en PESOS que
+      // con la regla de siempre quedan SIN_CANDIDATOS se revisan contra los
+      // gastos en dólares en banda, con la MISMA regla del auto-cruce (sin
+      // el recíproco: «Cruzar pendientes» lo corre al ligar).
+      const sinCandidatoMxn = pendientes.filter(
+        (m) =>
+          m.motivo_pendiente === 'SIN_CANDIDATOS' &&
+          monedaDe.get(m.cuenta_bancaria_id as string) === 'MXN' &&
+          Math.abs(Number(m.monto)) > 0,
+      );
+      if (sinCandidatoMxn.length > 0)
+        await this.anotarMotivoUsd(sinCandidatoMxn);
     } catch (err) {
       this.logger.warn(
         `No se pudo calcular el motivo de los pendientes: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /**
+   * Motivo de los cargos en PESOS sin candidato que podrían ser una compra
+   * en DÓLARES (0.0.75, invariante 70): UNA lectura en lote de gastos USD en
+   * banda para toda la página (mismo filtro que el paso 3 del auto-cruce,
+   * paginada) + el T.C. oficial de TABLA de sus fechas + `decidirCruceUsd`
+   * SIN recíproco. LIGAR ⇒ SE_PUEDE_CRUZAR con `motivo_detalle`; AMBIGUO ⇒
+   * AMBIGUO con el porqué; SIN_CANDIDATOS con descartados ⇒ solo el
+   * `motivo_detalle`. HONESTIDAD: si una lectura falla o se trunca, esos
+   * cargos quedan SIN anotar (un «sin candidato» falso es peor que el badge
+   * mudo).
+   */
+  private async anotarMotivoUsd(
+    cargos: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const olvidar = () => {
+      for (const m of cargos) {
+        delete m.motivo_pendiente;
+        delete m.candidatos_n;
+        delete m.motivo_detalle;
+      }
+    };
+    try {
+      const fechas = cargos.map((m) => String(m.fecha).slice(0, 10)).sort();
+      const desde = ventanaDias(fechas[0], MATCH_DAYS).desde;
+      const hasta = ventanaDias(fechas[fechas.length - 1], MATCH_DAYS).hasta;
+      const bandas = cargos.map((m) =>
+        rangoBandaUsd(Math.abs(Number(m.monto))),
+      );
+      const min = Math.min(...bandas.map((b) => b.min));
+      const max = Math.max(...bandas.map((b) => b.max));
+      const { filas, truncado } = await this.leerPaginado(
+        (d, h) =>
+          this.supabase.service
+            .from('gasto')
+            .select(GASTO_CRUCE_COLS)
+            .eq('conciliado', false)
+            .in('medio_pago', MEDIOS_BANCARIOS)
+            .eq('moneda', 'USD')
+            .gte('fecha_gasto', desde)
+            .lte('fecha_gasto', hasta)
+            .gte('monto', min)
+            .lte('monto', max)
+            .order('id', { ascending: true })
+            .range(d, h),
+        MOTIVO_GASTOS_MAX,
+      );
+      if (truncado) {
+        olvidar();
+        return;
+      }
+      const ligados =
+        filas.length > 0
+          ? await this.sumasLigadasDe(filas.map((g) => g.id as string))
+          : new Map<string, number>();
+      const libres = filas.filter(
+        (g) => !((ligados.get(g.id as string) ?? 0) > 0),
+      );
+      const oficiales = await this.oficialesTabla(fechas);
+      if (oficiales === null) {
+        olvidar();
+        return;
+      }
+      for (const m of cargos) {
+        const fecha = String(m.fecha).slice(0, 10);
+        const { desde: lo, hasta: hi } = ventanaDias(fecha, MATCH_DAYS);
+        const decision = decidirCruceUsd(
+          {
+            fecha,
+            monto: Math.abs(Number(m.monto)),
+            descripcion:
+              typeof m.descripcion === 'string' ? m.descripcion : null,
+          },
+          libres
+            .filter((g) => {
+              const f = g.fecha_gasto as string | null;
+              return !!f && f >= lo && f <= hi;
+            })
+            .map((g) => ({
+              id: g.id as string,
+              usd: Number(g.monto) || 0,
+              gasto: this.aCandidatoCruce(g),
+            })),
+          oficiales.get(fecha) ?? null,
+        );
+        if (decision.resultado === 'LIGAR' && decision.evaluacion) {
+          m.motivo_pendiente = 'SE_PUEDE_CRUZAR';
+          m.candidatos_n = 1;
+          m.motivo_detalle = textoSePuedeCruzarUsd(
+            decision.elegido_usd ?? 0,
+            decision.evaluacion,
+          );
+        } else if (decision.resultado === 'AMBIGUO') {
+          m.motivo_pendiente = 'AMBIGUO';
+          m.candidatos_n = decision.candidatos_n;
+          m.motivo_detalle = decision.detalle;
+        } else if (decision.detalle) {
+          m.motivo_detalle = decision.detalle;
+        }
+      }
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo revisar el cruce en dólares de los pendientes: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      olvidar();
     }
   }
 
@@ -9666,15 +10269,32 @@ export class ConciliacionService {
     // Cuenta en PESOS: una compra EN DÓLARES cuyo cargo llegó en MXN no cae
     // en la banda del monto — se ofrece aparte si su TC implícito (cargo ÷
     // gasto USD) es plausible, con el TC visible para que el operador decida.
+    // Desde el 0.0.75 (invariante 70): se leen EN BANDA, con el T.C. oficial
+    // de TABLA del día del cargo; los LEJOS del oficial ya NO se mandan a la
+    // IA y los que van llevan `tc_cruce` (pyservices ignora el campo extra).
     if (moneda !== 'MXN' || !(monto > 0)) return [...propios, ...parciales];
-    const usd = await traer({ moneda: 'USD', limite: 15, tolerante: true });
+    const banda = rangoBandaUsd(monto);
+    const usd = await traer({
+      moneda: 'USD',
+      montoMin: banda.min,
+      montoMax: banda.max,
+      limite: 15,
+      tolerante: true,
+    });
+    if (usd.length === 0) return [...propios, ...parciales];
+    const [ligadosUsd, oficiales] = await Promise.all([
+      this.sumasLigadasDe(usd.map((g) => g.id as string)),
+      this.oficialesTabla([fecha]),
+    ]);
+    const oficial = oficiales?.get(String(fecha).slice(0, 10)) ?? null;
     const cruzados = usd
+      .filter((g) => !((ligadosUsd.get(g.id as string) ?? 0) > 0))
       .map((g) => {
-        const m = Number(g.monto);
-        const tc = m > 0 ? monto / m : 0;
-        return tc >= TC_IMPLICITO_MIN && tc <= TC_IMPLICITO_MAX
-          ? aCandidato(g, round6(tc))
-          : null;
+        const ev = evaluarTcCruce(monto, Number(g.monto), oficial);
+        if (!ev || !ev.en_banda || ev.nivel === 'LEJOS') return null;
+        return this.aCandidatoGasto(g, ev.tc_implicito, 0, {
+          tcCruce: tcCruceUsdPublico(ev),
+        });
       })
       .filter((c): c is NonNullable<typeof c> => c !== null);
     return [...propios, ...parciales, ...cruzados];
@@ -9694,7 +10314,14 @@ export class ConciliacionService {
      * candidato lleva `coincide_factura` (de la fila CRUDA: `gastoRicoCols`
      * ya trae folio, IA, factura y notas). Sin ella, la ficha de siempre.
      */
-    opts: { factura?: FacturaConcepto | null } = {},
+    opts: {
+      factura?: FacturaConcepto | null;
+      /**
+       * ADITIVO (0.0.75, invariante 70): SOLO en los cruzados (USD contra
+       * cuenta MXN), su T.C. contra el oficial del día del cargo.
+       */
+      tcCruce?: TcCruceUsd | null;
+    } = {},
   ): SugerenciaConciliacion['candidatos'][number] {
     const prov = unwrapOne(
       g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
@@ -9734,6 +10361,7 @@ export class ConciliacionService {
             ),
           }
         : {}),
+      ...(opts.tcCruce ? { tc_cruce: opts.tcCruce } : {}),
     };
   }
 
@@ -9832,7 +10460,20 @@ export class ConciliacionService {
     }
 
     const colsRicas = await this.gastoRicoCols();
-    const leer = async (monedaQ: string, conNoBancarios: boolean) => {
+    type RangoMonto = { min: number; max: number; maxExclusivo: boolean };
+    const rangoBusqueda: RangoMonto | null =
+      busqueda.tipo === 'monto'
+        ? {
+            min: busqueda.min,
+            max: busqueda.max,
+            maxExclusivo: busqueda.maxExclusivo,
+          }
+        : null;
+    const leer = async (
+      monedaQ: string,
+      conNoBancarios: boolean,
+      montos: RangoMonto | null,
+    ) => {
       let qb = this.supabase.service
         .from('gasto')
         .select(colsRicas)
@@ -9846,11 +10487,11 @@ export class ConciliacionService {
         .eq('moneda', monedaQ)
         .gte('fecha_gasto', ventana.desde)
         .lte('fecha_gasto', ventana.hasta);
-      if (busqueda.tipo === 'monto') {
-        qb = qb.gte('monto', busqueda.min);
-        qb = busqueda.maxExclusivo
-          ? qb.lt('monto', busqueda.max)
-          : qb.lte('monto', busqueda.max);
+      if (montos) {
+        qb = qb.gte('monto', montos.min);
+        qb = montos.maxExclusivo
+          ? qb.lt('monto', montos.max)
+          : qb.lte('monto', montos.max);
       }
       if (orTexto) qb = qb.or(orTexto);
       const { data, error } = await qb
@@ -9861,26 +10502,55 @@ export class ConciliacionService {
       return (data ?? []) as unknown as Array<Record<string, unknown>>;
     };
 
-    const propios = await leer(moneda, incluirNoBancarios);
-    let cruzados: Array<{ g: Record<string, unknown>; tc: number }> = [];
+    const propios = await leer(moneda, incluirNoBancarios, rangoBusqueda);
+    // CRUCE USD (0.0.75, invariante 70): en una cuenta en PESOS los gastos
+    // USD BANCARIOS sin conciliar en banda del cargo entran SIEMPRE (también
+    // al buscar), cada uno con su `tc_cruce` contra el T.C. oficial de TABLA
+    // del día del cargo (lectura fallida ⇒ SIN_OFICIAL y sin el rango
+    // equivalente). Cruzados SOLO bancarios, también con la bandera
+    // (revisión 6-oct-2026): ligar 1 ↔ 1 un gasto en efectivo en dólares
+    // haría que `recalcular_gasto_conciliado` le derive `tc_gasto` de ESTE
+    // cargo. La raíz `tc_oficial` viaja SIEMPRE (capacidad del panel).
+    let tcOficial: OficialDelDia | null = null;
+    let cruzados: Array<{ g: Record<string, unknown>; ev: TcCruceUsd }> = [];
     let leidosUsd = 0;
-    if (moneda === 'MXN' && busqueda.tipo === 'vacia' && montoCargo > 0) {
-      // Cruzados SOLO bancarios, también con la bandera (revisión
-      // 6-oct-2026): ligar 1 ↔ 1 un gasto en efectivo en dólares haría que
-      // `recalcular_gasto_conciliado` le derive `tc_gasto` de ESTE cargo.
-      const usd = await leer('USD', false);
-      leidosUsd = usd.length;
+    if (moneda === 'MXN' && montoCargo > 0) {
+      const oficiales = await this.oficialesTabla([fecha]);
+      tcOficial = oficiales?.get(fecha) ?? null;
+      // Búsqueda de monto ⇒ DOS lecturas (dólares tal cual y, con oficial,
+      // el equivalente en pesos ÷ oficial ±3 %); vacía o texto ⇒ la banda.
+      // Nunca `.or(and(…))`: se unen por id y se filtra EXACTO en banda.
+      const rangos: RangoMonto[] =
+        busqueda.tipo === 'monto'
+          ? rangosUsdDeBusqueda(busqueda, tcOficial?.tc ?? null)
+          : [{ ...rangoBandaUsd(montoCargo), maxExclusivo: false }];
+      const porId = new Map<string, Record<string, unknown>>();
+      for (const r of rangos) {
+        const leidos = await leer('USD', false, r);
+        leidosUsd = Math.max(leidosUsd, leidos.length);
+        for (const g of leidos) {
+          if (typeof g.id === 'string' && !porId.has(g.id)) porId.set(g.id, g);
+        }
+      }
+      const usd = [...porId.values()];
+      const conPartes =
+        usd.length > 0
+          ? await this.sumasLigadasDe(usd.map((g) => g.id as string))
+          : new Map<string, number>();
       cruzados = usd
+        .filter((g) => !((conPartes.get(g.id as string) ?? 0) > 0))
         .map((g) => {
-          const m = Number(g.monto);
-          return { g, tc: m > 0 ? montoCargo / m : 0 };
+          const ev = evaluarTcCruce(montoCargo, Number(g.monto), tcOficial);
+          return ev && ev.en_banda ? { g, ev: tcCruceUsdPublico(ev) } : null;
         })
-        .filter((x) => x.tc >= TC_IMPLICITO_MIN && x.tc <= TC_IMPLICITO_MAX);
+        .filter(
+          (x): x is { g: Record<string, unknown>; ev: TcCruceUsd } =>
+            x !== null,
+        );
     }
-    const vinculado = await this.sumasLigadasDe([
-      ...propios.map((g) => g.id as string),
-      ...cruzados.map((x) => x.g.id as string),
-    ]);
+    const vinculado = await this.sumasLigadasDe(
+      propios.map((g) => g.id as string),
+    );
     const conMedio = <T extends { medio_pago?: string | null }>(c: T) => ({
       ...c,
       no_bancario: !esMedioBancario(c.medio_pago),
@@ -9895,12 +10565,10 @@ export class ConciliacionService {
       ),
       ...cruzados.map((x) =>
         conMedio({
-          ...this.aCandidatoGasto(
-            x.g,
-            round6(x.tc),
-            vinculado.get(x.g.id as string) ?? 0,
-            { factura: fc },
-          ),
+          ...this.aCandidatoGasto(x.g, x.ev.tc_implicito, 0, {
+            factura: fc,
+            tcCruce: x.ev,
+          }),
           cruzado: true as const,
         }),
       ),
@@ -9920,6 +10588,15 @@ export class ConciliacionService {
         ordenados.length > limite ||
         propios.length >= CANDIDATOS_GASTO_TOPE ||
         leidosUsd >= CANDIDATOS_GASTO_TOPE,
+      // ADITIVO (0.0.75, invariante 70): SIEMPRE presente (capacidad del
+      // panel); null en cuenta no MXN, sin dato o con la lectura fallida.
+      tc_oficial: tcOficial
+        ? {
+            tc: tcOficial.tc,
+            fecha_dato: tcOficial.fecha_dato,
+            fuente: tcOficial.fuente,
+          }
+        : null,
     };
     if (fc) {
       // ADITIVO (0.0.75): la factura del concepto y los OTROS gastos que la
@@ -9950,6 +10627,9 @@ export class ConciliacionService {
       dias,
       ventana,
       incluirNoBancarios,
+      // CRUCE USD (0.0.75): en cuenta MXN un USD bancario en banda es del
+      // universo (ya no OTRA_MONEDA).
+      cruzadosUsd: moneda === 'MXN',
     });
     return excluidos ? { ...respuesta, ...excluidos } : respuesta;
   }
@@ -10086,6 +10766,8 @@ export class ConciliacionService {
     ventana: { desde: string; hasta: string };
     /** Con la bandera, efectivo / PERSONAL_* ya son del universo. */
     incluirNoBancarios?: boolean;
+    /** Cuenta MXN (0.0.75): los USD bancarios en banda son del universo. */
+    cruzadosUsd?: boolean;
   }): Promise<ExcluidosCandidatos | null> {
     const monto = montoReferenciaExcluidos(opts.q, opts.montoCargo);
     if (!(monto > 0)) return { excluidos: [], excluidos_monto: monto };
@@ -10117,6 +10799,9 @@ export class ConciliacionService {
         ventana: opts.ventana,
         fechaCargo: opts.fecha,
         incluirNoBancarios: opts.incluirNoBancarios === true,
+        ...(opts.cruzadosUsd
+          ? { montoCargo: opts.montoCargo, cruzadosUsd: true }
+          : {}),
       });
       const yaConciliados = grupos.find((g) => g.motivo === 'YA_CONCILIADO');
       if (!yaConciliados) return { excluidos: grupos, excluidos_monto: monto };

@@ -15,7 +15,12 @@
  * spec, se decide el motivo de cada uno y se arman los grupos que viajan en
  * `excluidos`. Nadie más clasifica: el panel solo redacta.
  */
-import { TOLERANCIA_CENTAVOS, ventanaDias } from './auto-cruce.util';
+import {
+  TC_IMPLICITO_MAX,
+  TC_IMPLICITO_MIN,
+  TOLERANCIA_CENTAVOS,
+  ventanaDias,
+} from './auto-cruce.util';
 import {
   esMedioBancario,
   esMedioNoBancarioVinculable,
@@ -35,7 +40,9 @@ import { difDias } from './paywise-cruce.util';
  *   un gasto USD conciliado 1 ↔ 1 contra pesos ya está tomado, y su moneda no
  *   se edita (candado `GASTO_CONCILIADO`).
  * - `OTRA_MONEDA`: no está en la moneda de la cuenta del cargo (y no entró
- *   como cruzado con T.C. implícito 15–25).
+ *   como cruzado con T.C. implícito 15–25). Desde el 0.0.75 (invariante 70)
+ *   un USD BANCARIO en banda contra el cargo de una cuenta en pesos ya NO es
+ *   OTRA_MONEDA: es del universo (dentro de ±dias) o FUERA_DE_VENTANA.
  * - `FUERA_DE_VENTANA`: dentro de ±120 días pero fuera de los ±dias pedidos.
  */
 export const MOTIVOS_EXCLUSION = [
@@ -141,6 +148,14 @@ export interface ContextoExclusion {
    * bandera, byte-idéntico).
    */
   incluirNoBancarios?: boolean;
+  /**
+   * CRUCE USD (0.0.75, invariante 70; el servicio los pasa en cuentas MXN):
+   * |monto| del cargo y si los gastos USD BANCARIOS en banda (cociente
+   * |cargo| ÷ monto ∈ [15, 25]) son del universo («Vincular gasto» los
+   * ofrece como cruzados). Ausentes = la salida de siempre.
+   */
+  montoCargo?: number;
+  cruzadosUsd?: boolean;
 }
 
 const c2 = (x: number) => Math.round(x * 100) / 100;
@@ -234,6 +249,23 @@ export function gastoExcluibleDeFila(
 }
 
 /**
+ * ¿Gasto USD BANCARIO en banda contra el cargo de una cuenta en pesos? Es el
+ * universo de los cruzados de «Vincular gasto» (0.0.75): un USD de 212
+ * contra un cargo de 212 MXN (cociente 1) sigue siendo OTRA_MONEDA, y un USD
+ * en EFECTIVO también (los cruzados son SOLO bancarios, aun con
+ * `incluir_no_bancarios`).
+ */
+function cruzadoEnBanda(g: GastoExcluible, ctx: ContextoExclusion): boolean {
+  if (ctx.cruzadosUsd !== true || g.moneda !== 'USD') return false;
+  if (!esMedioBancario(g.medio_pago)) return false;
+  const cargo = Math.abs(Number(ctx.montoCargo) || 0);
+  const usd = Math.abs(Number(g.monto) || 0);
+  if (!(cargo > 0) || !(usd > 0)) return false;
+  const cociente = cargo / usd;
+  return cociente >= TC_IMPLICITO_MIN && cociente <= TC_IMPLICITO_MAX;
+}
+
+/**
  * Por qué ESTE gasto no es candidato del cargo (precedencia de
  * `MOTIVOS_EXCLUSION`). `null` = SÍ es del universo (medio bancario —o, con
  * `incluirNoBancarios`, cualquiera menos BODEGA—, sin conciliar, moneda de
@@ -252,7 +284,9 @@ export function motivoExclusion(
     return 'EFECTIVO_U_OTRO_MEDIO';
   }
   if (g.conciliado) return 'YA_CONCILIADO';
-  if ((g.moneda ?? '') !== ctx.monedaCuenta) return 'OTRA_MONEDA';
+  if ((g.moneda ?? '') !== ctx.monedaCuenta && !cruzadoEnBanda(g, ctx)) {
+    return 'OTRA_MONEDA';
+  }
   const f = (g.fecha_gasto ?? '').slice(0, 10);
   if (!f || f < ctx.ventana.desde || f > ctx.ventana.hasta) {
     return 'FUERA_DE_VENTANA';

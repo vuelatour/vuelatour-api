@@ -27,7 +27,16 @@
  *     `gasto.lugar` / primera línea de `gasto.notas` / proveedor, con tabla
  *     de sinónimos del giro. Exige ≥2 tokens compartidos, puntaje mínimo y
  *     MARGEN sobre el segundo lugar: un solo token en común nunca gana.
+ *  4. GASTO EN DÓLARES ↔ CARGO EN PESOS (13-oct-2026, lote 2, API 0.0.75,
+ *     invariante 70; al final del archivo): solo con el T.C. OFICIAL del día
+ *     del cargo a ±`TOLERANCIA_TC_OFICIAL_PCT`, una leyenda del banco que
+ *     COINCIDE con el gasto (≥ 2 palabras propias) y ningún otro cargo que
+ *     cuadre igual. Es el HOGAR ÚNICO de esa regla: la usan el auto-cruce, el
+ *     motivo de la lista, «Vincular gasto», «Sugerir con IA» y el pre-cierre.
  */
+import { redondearA } from '../../common/redondeo.util';
+import { round6 } from '../../common/tc.util';
+import { fechaCortaEs, montoBonito } from './conciliacion-parcial.util';
 
 /** Tolerancia de centavos entre el cargo del banco y el monto del gasto. */
 export const TOLERANCIA_CENTAVOS = 0.01;
@@ -1056,3 +1065,439 @@ export function ventanaDias(
     new Date(base + delta * 86_400_000).toISOString().slice(0, 10);
   return { desde: d(-Math.abs(dias)), hasta: d(Math.abs(dias)) };
 }
+
+// =======================================================================
+// GASTO EN DÓLARES ↔ CARGO EN PESOS (13-oct-2026, lote 2, API 0.0.75,
+// invariante 70). Caso real (Aircraft Spruce): el auto-cruce ligaba un gasto
+// USD a un cargo MXN solo porque el cociente caía en la banda 15–25 y el
+// candidato era único. Así el tubo Michelin (422.86 USD, 01-sep) quedó
+// ligado a «ASA CANCUN» $8,939.38 de COMBUSTIBLE: T.C. 21.14 contra un
+// oficial de 17.01 (+24.3 %), y la BD le derivó `tc_gasto` 21.140300; las
+// bujías (794.61 USD, 24-sep) a «ASA CANCUN I\CARR CANC» $14,197.17 (+2.3 %)
+// mientras sus cargos reales «AIRCRAFT SPRUCE AND SP» seguían pendientes.
+// La corrección de datos se aplicó el 13-oct a las 21:40 Cancún; aquí vive
+// la regla que impide que vuelva a pasar. `tc_gasto` lo sigue derivando SOLO
+// la BD (`recalcular_gasto_conciliado`): aquí nadie calcula pesos.
+// =======================================================================
+
+/**
+ * Banda plausible del T.C. implícito (pesos del cargo ÷ dólares del gasto).
+ * ESPEJO de `recalcular_gasto_conciliado` en la BD (15/25: fuera de la banda
+ * la BD no deriva `tc_gasto` de la liga). Antes vivían en el servicio.
+ */
+export const TC_IMPLICITO_MIN = 15;
+export const TC_IMPLICITO_MAX = 25;
+
+/**
+ * Tolerancia ÚNICA contra el T.C. OFICIAL del día del cargo (±%). Datos de
+ * prod (13-oct-2026): las 6 ligas cruzadas correctas caen entre −0.4 % y
+ * +1.5 %; las 2 equivocadas a +24.3 % (tubo ↔ ASA $8,939.38) y +2.3 %
+ * (bujías ↔ ASA I $14,197.17); el señuelo 7,380.80 ↔ tubo a +3.0 %. Si se
+ * cambia, volver a correr el describe con las ligas reales del spec.
+ */
+export const TOLERANCIA_TC_OFICIAL_PCT = 2;
+
+/** Gastos USD en banda que el auto-cruce lee por cargo (llegar al tope ⇒ AMBIGUO). */
+export const TOPE_CRUCE_USD = 25;
+
+/** Palabras propias que la leyenda y el gasto deben compartir para COINCIDIR. */
+export const MIN_PALABRAS_COMUNES_USD = 2;
+
+/**
+ * Relleno en inglés de las leyendas de comercios extranjeros: no identifica
+ * a nadie («AIRCRAFT SPRUCE AND SP»). OF y CO ya los tira `tokensTexto` (< 3
+ * letras). `VACIAS` NO se toca (es del desempate de siempre).
+ */
+export const PALABRAS_SIN_IDENTIDAD_USD: ReadonlySet<string> = new Set([
+  'AND',
+  'THE',
+  'INC',
+  'LLC',
+  'LTD',
+  'CORP',
+  'FOR',
+  'WWW',
+  'COM',
+  'PAYPAL',
+]);
+
+/** Palabras del GIRO (llaves y valores de `SINONIMOS`): ASA, TURBOSINA, CUN… */
+const PALABRAS_GIRO: ReadonlySet<string> = new Set([
+  ...Object.keys(SINONIMOS),
+  ...Object.values(SINONIMOS).flat(),
+]);
+
+export type NivelTcCruce = 'CERCA' | 'LEJOS' | 'SIN_OFICIAL';
+
+/** T.C. oficial vigente para un día (respaldo de hasta 7 días). */
+export interface OficialDelDia {
+  tc: number;
+  /** Día REAL del dato (YYYY-MM-DD). */
+  fecha_dato: string;
+  /** Fuente ya legible ('open.er-api', 'BCE (frankfurter)'…). */
+  fuente: string;
+}
+
+export interface EvaluacionTcCruce {
+  /** round6(|mxn| ÷ |usd|). */
+  tc_implicito: number;
+  /** Cociente SIN redondear ∈ [15, 25] (el mismo criterio de la BD). */
+  en_banda: boolean;
+  tc_oficial: number | null;
+  tc_oficial_fecha: string | null;
+  tc_oficial_fuente: string | null;
+  /** (tc_implicito ÷ oficial − 1) × 100 a 1 decimal (−0 ⇒ 0); null sin oficial. */
+  desvio_pct: number | null;
+  nivel: NivelTcCruce;
+}
+
+/** Lo que viaja al panel (`tc_cruce`): la evaluación + sus textos. */
+export type TcCruceUsd = EvaluacionTcCruce & {
+  tolerancia_pct: number;
+  /** No en banda, o LEJOS del oficial. */
+  fuera_de_lugar: boolean;
+  texto: string;
+  titulo: string;
+};
+
+export type ContrasteDescripcionUsd =
+  | 'COINCIDE'
+  | 'DEBIL'
+  | 'SIN_TEXTO'
+  | 'CONTRADICE';
+
+/** Un gasto en USD candidato a pagarse con el cargo en pesos. */
+export interface OpcionCruceUsd {
+  id: string;
+  usd: number;
+  gasto: TextoDelGasto;
+}
+
+export interface DecisionCruceUsd {
+  resultado: 'LIGAR' | 'AMBIGUO' | 'SIN_CANDIDATOS';
+  elegido_id: string | null;
+  elegido_usd: number | null;
+  candidatos_n: number;
+  /** En banda pero LEJOS del oficial (no se ligan). */
+  descartados_n: number;
+  detalle: string | null;
+  evaluacion: EvaluacionTcCruce | null;
+}
+
+/** Otro cargo pendiente que podría ser el MISMO gasto (recíproco). */
+export interface CargoCompetidor {
+  id: string;
+  fecha: string;
+  monto: number;
+  descripcion: string | null;
+  oficial: OficialDelDia | null;
+}
+
+const dec = (x: number, d: number) => redondearA(x, d).toFixed(d);
+
+/**
+ * Evalúa el T.C. implícito de una liga USD ↔ MXN contra el oficial del día
+ * del CARGO. null si |mxn| o |usd| ≤ 0. CERCA ⟺ |desvío| ≤ tolerancia,
+ * comparando el valor de 1 decimal que se MUESTRA («+2.0 %» es CERCA).
+ */
+export function evaluarTcCruce(
+  mxn: number,
+  usd: number,
+  oficial: OficialDelDia | null | undefined,
+): EvaluacionTcCruce | null {
+  const m = Math.abs(Number(mxn) || 0);
+  const u = Math.abs(Number(usd) || 0);
+  if (!(m > 0) || !(u > 0)) return null;
+  const cociente = m / u;
+  const tc = round6(cociente);
+  const enBanda = cociente >= TC_IMPLICITO_MIN && cociente <= TC_IMPLICITO_MAX;
+  const of =
+    oficial && Number.isFinite(oficial.tc) && oficial.tc > 0 ? oficial : null;
+  if (!of) {
+    return {
+      tc_implicito: tc,
+      en_banda: enBanda,
+      tc_oficial: null,
+      tc_oficial_fecha: null,
+      tc_oficial_fuente: null,
+      desvio_pct: null,
+      nivel: 'SIN_OFICIAL',
+    };
+  }
+  let desvio = redondearA((tc / of.tc - 1) * 100, 1);
+  if (desvio === 0) desvio = 0; // −0 ⇒ 0
+  return {
+    tc_implicito: tc,
+    en_banda: enBanda,
+    tc_oficial: of.tc,
+    tc_oficial_fecha: of.fecha_dato,
+    tc_oficial_fuente: of.fuente,
+    desvio_pct: desvio,
+    nivel: Math.abs(desvio) <= TOLERANCIA_TC_OFICIAL_PCT ? 'CERCA' : 'LEJOS',
+  };
+}
+
+/** ¿La liga está fuera de lugar? (fuera de la banda 15–25 o LEJOS del oficial). */
+export function ligaUsdFueraDeLugar(ev: EvaluacionTcCruce): boolean {
+  return !ev.en_banda || ev.nivel === 'LEJOS';
+}
+
+/** «+0.3 %» · «−0.4 %» (U+2212) · «0.0 %». */
+function desvioTexto(desvio: number): string {
+  if (desvio > 0) return `+${dec(desvio, 1)} %`;
+  if (desvio < 0) return `−${dec(Math.abs(desvio), 1)} %`;
+  return '0.0 %';
+}
+
+/** «T.C. 17.06 · oficial 17.01 (+0.3 %)» · «T.C. 17.55 · sin T.C. oficial del día». */
+export function piezaTcCruce(ev: EvaluacionTcCruce): string {
+  const tc = `T.C. ${dec(ev.tc_implicito, 2)}`;
+  if (ev.tc_oficial == null || ev.desvio_pct == null) {
+    return `${tc} · sin T.C. oficial del día`;
+  }
+  return `${tc} · oficial ${dec(ev.tc_oficial, 2)} (${desvioTexto(ev.desvio_pct)})`;
+}
+
+/** La pieza + «: fuera de la banda 15–25» o «: lejos del oficial». */
+export function textoTcCruce(ev: EvaluacionTcCruce): string {
+  const pieza = piezaTcCruce(ev);
+  if (!ev.en_banda) {
+    return `${pieza}: fuera de la banda ${TC_IMPLICITO_MIN}–${TC_IMPLICITO_MAX}`;
+  }
+  if (ev.nivel === 'LEJOS') return `${pieza}: lejos del oficial`;
+  return pieza;
+}
+
+/** «01 sep 2026». */
+function fechaConAnio(fecha: string | null): string {
+  const corta = fechaCortaEs(fecha);
+  return corta ? `${corta} ${String(fecha).slice(0, 4)}` : String(fecha ?? '');
+}
+
+/** Tooltip exacto de la liga (6 decimales, oficial con 4, fecha y fuente). */
+export function tituloTcCruce(ev: EvaluacionTcCruce): string {
+  const exacto = `T.C. exacto ${ev.tc_implicito.toFixed(6)} (pesos del cargo ÷ dólares del gasto)`;
+  const base =
+    ev.tc_oficial == null
+      ? `${exacto} · sin T.C. oficial del día del cargo: no se puede comparar`
+      : `${exacto} · oficial ${dec(ev.tc_oficial, 4)} del ${fechaConAnio(ev.tc_oficial_fecha)} · fuente ${ev.tc_oficial_fuente ?? 'T.C. oficial'} · tolerancia ±${TOLERANCIA_TC_OFICIAL_PCT} %`;
+  return ev.en_banda
+    ? base
+    : `${base} · fuera de la banda ${TC_IMPLICITO_MIN}–${TC_IMPLICITO_MAX}: la base de datos no deriva el T.C. de esta liga`;
+}
+
+/** `tc_cruce` del contrato (evaluación + tolerancia + marca + textos). */
+export function tcCruceUsdPublico(ev: EvaluacionTcCruce): TcCruceUsd {
+  return {
+    ...ev,
+    tolerancia_pct: TOLERANCIA_TC_OFICIAL_PCT,
+    fuera_de_lugar: ligaUsdFueraDeLugar(ev),
+    texto: textoTcCruce(ev),
+    titulo: tituloTcCruce(ev),
+  };
+}
+
+/** Tokens CRUDOS que identifican al comercio (sin ciudades, giro ni relleno). */
+function palabrasPropiasUsd(s: string | null | undefined): string[] {
+  return tokensTexto(s).filter(
+    (t) =>
+      !CIUDADES.has(t) &&
+      !PALABRAS_GIRO.has(t) &&
+      !PALABRAS_SIN_IDENTIDAD_USD.has(t),
+  );
+}
+
+/**
+ * ¿La leyenda del banco CONFIRMA que el cargo es ESE gasto en dólares?
+ * Tokens CRUDOS (`tokensTexto`, SIN `expandirTokens`) de la leyenda y de la
+ * 1.ª línea de las notas + lugar + proveedor, sin ciudades (incluye IATA),
+ * sin TODA palabra del giro (llaves y valores de `SINONIMOS`) y sin relleno
+ * en inglés. Un lado vacío ⇒ SIN_TEXTO; ≥ 2 comunes ⇒ COINCIDE; 1 ⇒ DEBIL;
+ * 0 ⇒ CONTRADICE. NO se reutiliza `puntuarDescripcion`: expande sinónimos
+ * (CANCUN+CUN, TURBOSINA+COMBUSTIBLE contarían como 2 palabras: «ASUR
+ * CANCUN» empataría con «Aeropuerto de Cancún»), ni
+ * `descripcionesSeContradicen` / `leyendasNombranDistinto`, que son del
+ * dedupe.
+ */
+export function contrasteDescripcionUsd(
+  descBanco: string | null | undefined,
+  gasto: TextoDelGasto,
+): ContrasteDescripcionUsd {
+  const banco = new Set(palabrasPropiasUsd(descBanco));
+  const delGasto = new Set([
+    ...palabrasPropiasUsd(gasto.lugar),
+    ...palabrasPropiasUsd(primeraLinea(gasto.notas)),
+    ...palabrasPropiasUsd(gasto.proveedor),
+  ]);
+  if (banco.size === 0 || delGasto.size === 0) return 'SIN_TEXTO';
+  let comunes = 0;
+  for (const t of banco) if (delGasto.has(t)) comunes += 1;
+  if (comunes >= MIN_PALABRAS_COMUNES_USD) return 'COINCIDE';
+  return comunes === 1 ? 'DEBIL' : 'CONTRADICE';
+}
+
+const gastoUsdTexto = (usd: number) =>
+  `El gasto en USD de ${montoBonito(usd)} USD`;
+
+/**
+ * LA decisión del cruce USD ↔ MXN de UN cargo (solo mira el lado CARGO;
+ * jamás la terminación de tarjeta). Opción fuera de banda ⇒ descartada.
+ * Sin oficial ⇒ AMBIGUO. ≥ 2 CERCA ⇒ AMBIGUO. 1 CERCA: la leyenda COINCIDE
+ * ⇒ LIGAR; si no, AMBIGUO (texto para CONTRADICE y para DEBIL/SIN_TEXTO).
+ * 0 CERCA ⇒ SIN_CANDIDATOS (con detalle si hubo LEJOS). El recíproco (otro
+ * cargo que cuadre igual con ese gasto) lo corre el servicio ANTES de ligar.
+ */
+export function decidirCruceUsd(
+  cargo: { fecha: string; monto: number; descripcion: string | null },
+  opciones: readonly OpcionCruceUsd[],
+  oficial: OficialDelDia | null,
+): DecisionCruceUsd {
+  const mxn = Math.abs(Number(cargo.monto) || 0);
+  const enBanda: Array<{ o: OpcionCruceUsd; ev: EvaluacionTcCruce }> = [];
+  for (const o of opciones) {
+    const ev = evaluarTcCruce(mxn, o.usd, oficial);
+    if (ev && ev.en_banda) enBanda.push({ o, ev });
+  }
+  const nada = {
+    elegido_id: null,
+    elegido_usd: null,
+    descartados_n: 0,
+    evaluacion: null,
+  };
+  if (enBanda.length === 0) {
+    return {
+      ...nada,
+      resultado: 'SIN_CANDIDATOS',
+      candidatos_n: 0,
+      detalle: null,
+    };
+  }
+  const dia = fechaCortaEs(cargo.fecha) ?? cargo.fecha;
+  if (!oficial || !(oficial.tc > 0)) {
+    return {
+      ...nada,
+      resultado: 'AMBIGUO',
+      candidatos_n: enBanda.length,
+      detalle:
+        enBanda.length === 1
+          ? `No hay T.C. oficial del ${dia} para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.`
+          : `No hay T.C. oficial del ${dia} para comprobar los ${enBanda.length} gastos en USD que podrían ser este cargo: vincúlalo a mano.`,
+    };
+  }
+  const oficial2 = dec(oficial.tc, 2);
+  const cerca = enBanda.filter((x) => x.ev.nivel === 'CERCA');
+  const lejos = enBanda.filter((x) => x.ev.nivel === 'LEJOS');
+  if (cerca.length >= 2) {
+    return {
+      ...nada,
+      resultado: 'AMBIGUO',
+      candidatos_n: cerca.length,
+      descartados_n: lejos.length,
+      detalle: `${cerca.length} gastos en USD cuadran con este cargo a ±${TOLERANCIA_TC_OFICIAL_PCT} % del T.C. oficial del ${dia} (${oficial2}): vincúlalo a mano.`,
+    };
+  }
+  if (cerca.length === 1) {
+    const { o, ev } = cerca[0];
+    const contraste = contrasteDescripcionUsd(cargo.descripcion, o.gasto);
+    if (contraste === 'COINCIDE') {
+      return {
+        resultado: 'LIGAR',
+        elegido_id: o.id,
+        elegido_usd: o.usd,
+        candidatos_n: 1,
+        descartados_n: lejos.length,
+        detalle: null,
+        evaluacion: ev,
+      };
+    }
+    return {
+      ...nada,
+      resultado: 'AMBIGUO',
+      candidatos_n: 1,
+      descartados_n: lejos.length,
+      evaluacion: ev,
+      detalle:
+        contraste === 'CONTRADICE'
+          ? `${gastoUsdTexto(o.usd)} cuadra con el T.C. oficial (${piezaTcCruce(ev)}), pero la descripción del banco («${cargo.descripcion ?? ''}») no coincide con el gasto: vincúlalo a mano si de verdad es ese.`
+          : `${gastoUsdTexto(o.usd)} cuadra con el T.C. oficial (${piezaTcCruce(ev)}), pero la descripción del banco no basta para confirmarlo: vincúlalo a mano.`,
+    };
+  }
+  if (lejos.length === 1) {
+    const { o, ev } = lejos[0];
+    return {
+      ...nada,
+      resultado: 'SIN_CANDIDATOS',
+      candidatos_n: 0,
+      descartados_n: 1,
+      evaluacion: ev,
+      detalle: `${gastoUsdTexto(o.usd)} daría ${piezaTcCruce(ev)}: fuera de ±${TOLERANCIA_TC_OFICIAL_PCT} %, no se liga.`,
+    };
+  }
+  return {
+    ...nada,
+    resultado: 'SIN_CANDIDATOS',
+    candidatos_n: 0,
+    descartados_n: lejos.length,
+    detalle: `${lejos.length} gastos en USD quedan a más de ±${TOLERANCIA_TC_OFICIAL_PCT} % del T.C. oficial del ${dia} (${oficial2}): no se liga ninguno.`,
+  };
+}
+
+/** Un competidor del recíproco con su evaluación. */
+export interface CompetidorCruceUsd {
+  cargo: CargoCompetidor;
+  evaluacion: EvaluacionTcCruce;
+}
+
+/**
+ * RECÍPROCO (conservador, límite conocido): los OTROS cargos en banda con
+ * ese gasto en dólares que quedan CERCA de su oficial o SIN oficial para
+ * descartarlos. Un LEJOS no compite; el propio cargo se excluye.
+ */
+export function competidoresCruceUsd(
+  cargoId: string,
+  usd: number,
+  cargos: readonly CargoCompetidor[],
+): CompetidorCruceUsd[] {
+  const out: CompetidorCruceUsd[] = [];
+  for (const c of cargos) {
+    if (c.id === cargoId) continue;
+    const ev = evaluarTcCruce(c.monto, usd, c.oficial);
+    if (ev && ev.en_banda && ev.nivel !== 'LEJOS') {
+      out.push({ cargo: c, evaluacion: ev });
+    }
+  }
+  return out;
+}
+
+/** Por qué el recíproco frena la liga (null sin competidores). */
+export function textoReciprocoCruceUsd(
+  usd: number,
+  competidores: readonly CompetidorCruceUsd[],
+): string | null {
+  if (competidores.length === 0) return null;
+  if (competidores.length > 1) {
+    return `${gastoUsdTexto(usd)} también podría corresponder a otros ${competidores.length} cargos del banco: vincúlalo a mano.`;
+  }
+  const { cargo, evaluacion } = competidores[0];
+  const cual = `el cargo del ${fechaCortaEs(cargo.fecha) ?? cargo.fecha} de ${montoBonito(cargo.monto)}${cargo.descripcion ? ` («${cargo.descripcion}»)` : ''}`;
+  return evaluacion.nivel === 'CERCA'
+    ? `${gastoUsdTexto(usd)} también cuadra con ${cual}: vincúlalo a mano.`
+    : `${gastoUsdTexto(usd)} también podría ser ${cual}, y no hay T.C. oficial de ese día para descartarlo: vincúlalo a mano.`;
+}
+
+/** Motivo de la lista cuando el cruce USD ya decidiría LIGAR. */
+export function textoSePuedeCruzarUsd(
+  usd: number,
+  ev: EvaluacionTcCruce,
+): string {
+  return `${gastoUsdTexto(usd)} cuadra con el T.C. oficial (${piezaTcCruce(ev)}) y la descripción del banco lo confirma: el cruce automático todavía no corre sobre este cargo. Pulsa «Cruzar pendientes» (o vincúlalo tú desde el menú).`;
+}
+
+export const TEXTO_CRUCE_USD_TRUNCADO =
+  'Hay demasiados gastos en USD en esas fechas para decidir solo: vincúlalo a mano.';
+export const TEXTO_CRUCE_USD_RECIPROCO_TRUNCADO =
+  'Hay demasiados cargos del banco en esas fechas para decidir solo: vincúlalo a mano.';
+export const TEXTO_CRUCE_USD_RECIPROCO_ERROR =
+  'No se pudo comprobar si el gasto en USD cuadra con otro cargo: el cruce no se intenta.';
+export const TEXTO_CRUCE_USD_SIN_LECTURA_TC =
+  'No se pudo leer el T.C. oficial del día del cargo: el cruce con gastos en USD no se intentó; vuelve a correr «Cruzar pendientes».';

@@ -1,6 +1,24 @@
 import {
   CLASIFICACION_TRASPASO,
   claveBucket,
+  competidoresCruceUsd,
+  contrasteDescripcionUsd,
+  decidirCruceUsd,
+  evaluarTcCruce,
+  ligaUsdFueraDeLugar,
+  piezaTcCruce,
+  TC_IMPLICITO_MAX,
+  TC_IMPLICITO_MIN,
+  tcCruceUsdPublico,
+  TEXTO_CRUCE_USD_RECIPROCO_ERROR,
+  TEXTO_CRUCE_USD_RECIPROCO_TRUNCADO,
+  TEXTO_CRUCE_USD_SIN_LECTURA_TC,
+  TEXTO_CRUCE_USD_TRUNCADO,
+  textoReciprocoCruceUsd,
+  textoSePuedeCruzarUsd,
+  textoTcCruce,
+  tituloTcCruce,
+  TOLERANCIA_TC_OFICIAL_PCT,
   descDedupe,
   descripcionesSeContradicen,
   elegirCandidato,
@@ -1147,5 +1165,422 @@ describe('ventanaDias', () => {
       desde: '2026-09-05',
       hasta: '2026-09-11',
     });
+  });
+});
+
+/**
+ * GASTO EN DÓLARES ↔ CARGO EN PESOS (13-oct-2026, lote 2, API 0.0.75,
+ * invariante 70). Datos REALES de prod (SELECT del 13-oct-2026, 22:00
+ * Cancún): las 6 ligas cruzadas correctas, las 2 equivocadas que se
+ * corrigieron a las 21:40 y el señuelo.
+ */
+describe('T.C. oficial del día (invariante 70)', () => {
+  const of = (
+    tc: number,
+    fecha_dato = '2026-09-01',
+    fuente = 'open.er-api',
+  ) => ({
+    tc,
+    fecha_dato,
+    fuente,
+  });
+  const ev = (
+    mxn: number,
+    usd: number,
+    oficial: ReturnType<typeof of> | null,
+  ) => evaluarTcCruce(mxn, usd, oficial)!;
+
+  it('(a) las 6 ligas correctas de prod: CERCA y en banda', () => {
+    const casos: Array<[number, number, number, number, number]> = [
+      [12451.49, 722.9, 17.2881, 17.22436, -0.4],
+      [9062.34, 516.35, 17.4803, 17.55077, 0.4],
+      [7214.14, 422.86, 17.0077, 17.060351, 0.3],
+      [14431.18, 794.61, 17.8992, 18.161337, 1.5],
+      [6015.21, 325.0, 18.4067, 18.508338, 0.6],
+      [3740.63, 203.9, 18.4067, 18.345414, -0.3],
+    ];
+    for (const [mxn, usd, oficial, tc, desvio] of casos) {
+      const e = ev(mxn, usd, of(oficial));
+      expect(e).toMatchObject({
+        tc_implicito: tc,
+        desvio_pct: desvio,
+        nivel: 'CERCA',
+        en_banda: true,
+      });
+      expect(ligaUsdFueraDeLugar(e)).toBe(false);
+    }
+  });
+
+  it('(a) LEJOS: las 2 equivocadas, el señuelo y las bujías contra el oficial del 24-sep (manda el día del CARGO)', () => {
+    expect(ev(8939.38, 422.86, of(17.0077))).toMatchObject({
+      tc_implicito: 21.140283,
+      desvio_pct: 24.3,
+      nivel: 'LEJOS',
+    });
+    expect(ev(14197.17, 794.61, of(17.4691))).toMatchObject({
+      tc_implicito: 17.86684,
+      desvio_pct: 2.3,
+      nivel: 'LEJOS',
+    });
+    expect(ev(7380.8, 422.86, of(16.9479))).toMatchObject({
+      tc_implicito: 17.454477,
+      desvio_pct: 3.0,
+      nivel: 'LEJOS',
+    });
+    expect(ev(14431.18, 794.61, of(17.4691))).toMatchObject({
+      desvio_pct: 4.0,
+      nivel: 'LEJOS',
+    });
+  });
+
+  it('(b) fuera de la banda 15–25: texto y marca', () => {
+    const e = ev(3740.63, 325, of(18.4067, '2026-10-12'));
+    expect(e).toMatchObject({
+      tc_implicito: 11.509631,
+      en_banda: false,
+      desvio_pct: -37.5,
+    });
+    expect(textoTcCruce(e)).toBe(
+      'T.C. 11.51 · oficial 18.41 (−37.5 %): fuera de la banda 15–25',
+    );
+    expect(ligaUsdFueraDeLugar(e)).toBe(true);
+    const e2 = ev(9000, 300, of(17));
+    expect(e2.en_banda).toBe(false);
+    expect(ligaUsdFueraDeLugar(e2)).toBe(true);
+  });
+
+  it('(c) bordes con oficial 17.0000 y 100 USD: se decide con el valor de 1 decimal que se MUESTRA', () => {
+    const o = of(17);
+    expect(ev(1734, 100, o)).toMatchObject({ desvio_pct: 2, nivel: 'CERCA' });
+    expect(ev(1735.7, 100, o)).toMatchObject({
+      desvio_pct: 2.1,
+      nivel: 'LEJOS',
+    });
+    expect(ev(1666, 100, o)).toMatchObject({ desvio_pct: -2, nivel: 'CERCA' });
+    expect(ev(1664.3, 100, o)).toMatchObject({
+      desvio_pct: -2.1,
+      nivel: 'LEJOS',
+    });
+    const cero = ev(1699.32, 100, o);
+    expect(Object.is(cero.desvio_pct, -0)).toBe(false);
+    expect(textoTcCruce(cero)).toBe('T.C. 16.99 · oficial 17.00 (0.0 %)');
+    expect(ev(1734, 100, null)).toMatchObject({
+      nivel: 'SIN_OFICIAL',
+      desvio_pct: null,
+      tc_oficial: null,
+    });
+    expect(evaluarTcCruce(1734, 0, o)).toBeNull();
+    expect(evaluarTcCruce(0, 100, o)).toBeNull();
+  });
+
+  it('(d) textos y títulos exactos', () => {
+    expect(textoTcCruce(ev(7214.14, 422.86, of(17.0077)))).toBe(
+      'T.C. 17.06 · oficial 17.01 (+0.3 %)',
+    );
+    expect(textoTcCruce(ev(8939.38, 422.86, of(17.0077)))).toBe(
+      'T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
+    );
+    expect(textoTcCruce(ev(12451.49, 722.9, of(17.2881, '2026-08-04')))).toBe(
+      'T.C. 17.22 · oficial 17.29 (−0.4 %)',
+    );
+    expect(textoTcCruce(ev(9062.34, 516.35, null))).toBe(
+      'T.C. 17.55 · sin T.C. oficial del día',
+    );
+    expect(tituloTcCruce(ev(7214.14, 422.86, of(17.0077)))).toBe(
+      'T.C. exacto 17.060351 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01 sep 2026 · fuente open.er-api · tolerancia ±2 %',
+    );
+    expect(
+      tituloTcCruce(
+        ev(12451.49, 722.9, of(17.2881, '2026-08-04', 'BCE (frankfurter)')),
+      ),
+    ).toBe(
+      'T.C. exacto 17.224360 (pesos del cargo ÷ dólares del gasto) · oficial 17.2881 del 04 ago 2026 · fuente BCE (frankfurter) · tolerancia ±2 %',
+    );
+    expect(tituloTcCruce(ev(9062.34, 516.35, null))).toBe(
+      'T.C. exacto 17.550770 (pesos del cargo ÷ dólares del gasto) · sin T.C. oficial del día del cargo: no se puede comparar',
+    );
+    expect(tituloTcCruce(ev(3740.63, 325, of(18.4067, '2026-10-12')))).toBe(
+      'T.C. exacto 11.509631 (pesos del cargo ÷ dólares del gasto) · oficial 18.4067 del 12 oct 2026 · fuente open.er-api · tolerancia ±2 % · fuera de la banda 15–25: la base de datos no deriva el T.C. de esta liga',
+    );
+    expect(tcCruceUsdPublico(ev(8939.38, 422.86, of(17.0077)))).toEqual({
+      tc_implicito: 21.140283,
+      en_banda: true,
+      tc_oficial: 17.0077,
+      tc_oficial_fecha: '2026-09-01',
+      tc_oficial_fuente: 'open.er-api',
+      desvio_pct: 24.3,
+      nivel: 'LEJOS',
+      tolerancia_pct: 2,
+      fuera_de_lugar: true,
+      texto: 'T.C. 21.14 · oficial 17.01 (+24.3 %): lejos del oficial',
+      titulo:
+        'T.C. exacto 21.140283 (pesos del cargo ÷ dólares del gasto) · oficial 17.0077 del 01 sep 2026 · fuente open.er-api · tolerancia ±2 %',
+    });
+  });
+
+  const TUBO =
+    'Aircraft Spruce & Specialty Co. · Michelin Tube 7.00-6/8.00-6 Straight Valve Stem (x2)';
+  const BUJIAS =
+    '1 Caja bujías Tempest Seneca, 1 filtro de aceite Champion 108, 1 llanta Goodyear 6.00-6';
+  const NOTA_516 =
+    'Champion Spark Plug RHB32E (bujías) · Proveedor: Aircraft Spruce & Specialty Co.';
+
+  it('(e) contrasteDescripcionUsd con tokens CRUDOS y exclusiones', () => {
+    expect(
+      contrasteDescripcionUsd('AIRCRAFT SPRUCE AND SP', { notas: TUBO }),
+    ).toBe('COINCIDE');
+    expect(
+      contrasteDescripcionUsd('AIRCRAFT SPRUCE AND SP 516.35 USD', {
+        notas: NOTA_516,
+      }),
+    ).toBe('COINCIDE');
+    expect(
+      contrasteDescripcionUsd('AIRCRAFT SPRUCE AND SP', { notas: BUJIAS }),
+    ).toBe('CONTRADICE');
+    expect(contrasteDescripcionUsd('ASA CANCUN', { lugar: 'Cancún' })).toBe(
+      'SIN_TEXTO',
+    );
+    expect(
+      contrasteDescripcionUsd('ASA CANCUN', {
+        notas: 'ASA Cancún · Carga de turbosina 374 L',
+      }),
+    ).not.toBe('COINCIDE');
+    // Mutante: con `expandirTokens` (ASUR → AEROPUERTO, CANCUN → CUN)
+    // coincidiría; con tokens crudos sin giro ni ciudades, no.
+    expect(
+      contrasteDescripcionUsd('ASUR CANCUN', { lugar: 'Aeropuerto de Cancún' }),
+    ).not.toBe('COINCIDE');
+    expect(contrasteDescripcionUsd('THE AND INC', { notas: TUBO })).toBe(
+      'SIN_TEXTO',
+    );
+    expect(
+      contrasteDescripcionUsd('GARMIN STORE', {
+        notas: 'Garmin actualización',
+      }),
+    ).toBe('DEBIL');
+    // Los specs de puntuarDescripcion no cambian (el desempate de siempre).
+    expect(
+      puntuarDescripcion('ASUR CANCUN', { lugar: 'Aeropuerto de Cancún' }),
+    ).toBeGreaterThanOrEqual(0.6);
+  });
+
+  const cargo = (fecha: string, monto: number, descripcion: string | null) => ({
+    fecha,
+    monto,
+    descripcion,
+  });
+  const opcion = (id: string, usd: number, notas: string) => ({
+    id,
+    usd,
+    gasto: { notas },
+  });
+
+  it('(f) decidirCruceUsd: LIGAR, LEJOS, dos CERCA, CONTRADICE, DEBIL y sin oficial', () => {
+    const ligar = decidirCruceUsd(
+      cargo('2026-09-01', 7214.14, 'AIRCRAFT SPRUCE AND SP'),
+      [opcion('tubo', 422.86, TUBO)],
+      of(17.0077),
+    );
+    expect(ligar).toMatchObject({
+      resultado: 'LIGAR',
+      elegido_id: 'tubo',
+      elegido_usd: 422.86,
+      candidatos_n: 1,
+      detalle: null,
+    });
+    expect(ligar.evaluacion?.desvio_pct).toBe(0.3);
+
+    const lejos = decidirCruceUsd(
+      cargo('2026-09-01', 8939.38, 'ASA CANCUN'),
+      [opcion('tubo', 422.86, TUBO)],
+      of(17.0077),
+    );
+    expect(lejos).toMatchObject({
+      resultado: 'SIN_CANDIDATOS',
+      candidatos_n: 0,
+      descartados_n: 1,
+      detalle:
+        'El gasto en USD de $422.86 USD daría T.C. 21.14 · oficial 17.01 (+24.3 %): fuera de ±2 %, no se liga.',
+    });
+
+    expect(
+      decidirCruceUsd(
+        cargo('2026-09-01', 2000, 'AIRCRAFT SPRUCE AND SP'),
+        [opcion('a', 100, TUBO), opcion('b', 99.5, TUBO)],
+        of(20),
+      ),
+    ).toMatchObject({
+      resultado: 'AMBIGUO',
+      candidatos_n: 2,
+      detalle:
+        '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 01 sep (20.00): vincúlalo a mano.',
+    });
+
+    // Sintético: las bujías dentro de la ventana del 14,431.18 de AIRCRAFT,
+    // pero la leyenda no nombra nada del gasto.
+    expect(
+      decidirCruceUsd(
+        cargo('2026-09-29', 14431.18, 'AIRCRAFT SPRUCE AND SP'),
+        [opcion('bujias', 794.61, BUJIAS)],
+        of(17.8992, '2026-09-29'),
+      ),
+    ).toMatchObject({
+      resultado: 'AMBIGUO',
+      candidatos_n: 1,
+      detalle:
+        'El gasto en USD de $794.61 USD cuadra con el T.C. oficial (T.C. 18.16 · oficial 17.90 (+1.5 %)), pero la descripción del banco («AIRCRAFT SPRUCE AND SP») no coincide con el gasto: vincúlalo a mano si de verdad es ese.',
+    });
+
+    expect(
+      decidirCruceUsd(
+        // La leyenda no trae palabras propias (solo el agregador): SIN_TEXTO.
+        cargo('2026-09-01', 2000, 'MERPAGO*'),
+        [opcion('x', 100, 'Compra en línea')],
+        of(20),
+      ),
+    ).toMatchObject({
+      resultado: 'AMBIGUO',
+      detalle:
+        'El gasto en USD de $100.00 USD cuadra con el T.C. oficial (T.C. 20.00 · oficial 20.00 (0.0 %)), pero la descripción del banco no basta para confirmarlo: vincúlalo a mano.',
+    });
+
+    expect(
+      decidirCruceUsd(
+        cargo('2026-06-27', 7214.14, 'AIRCRAFT SPRUCE AND SP'),
+        [opcion('tubo', 422.86, TUBO)],
+        null,
+      ),
+    ).toMatchObject({
+      resultado: 'AMBIGUO',
+      candidatos_n: 1,
+      detalle:
+        'No hay T.C. oficial del 27 jun para comprobar el gasto en USD que podría ser este cargo: vincúlalo a mano.',
+    });
+    expect(
+      decidirCruceUsd(
+        cargo('2026-06-27', 7214.14, 'AIRCRAFT SPRUCE AND SP'),
+        [opcion('a', 422.86, TUBO), opcion('b', 420, TUBO)],
+        null,
+      ).detalle,
+    ).toBe(
+      'No hay T.C. oficial del 27 jun para comprobar los 2 gastos en USD que podrían ser este cargo: vincúlalo a mano.',
+    );
+
+    expect(
+      decidirCruceUsd(
+        cargo('2026-09-01', 8939.38, 'ASA CANCUN'),
+        [opcion('a', 422.86, TUBO), opcion('b', 420, TUBO)],
+        of(17.0077),
+      ),
+    ).toMatchObject({
+      resultado: 'SIN_CANDIDATOS',
+      descartados_n: 2,
+      detalle:
+        '2 gastos en USD quedan a más de ±2 % del T.C. oficial del 01 sep (17.01): no se liga ninguno.',
+    });
+
+    // Fuera de banda: ni candidato ni descartado.
+    expect(
+      decidirCruceUsd(
+        cargo('2026-09-01', 2000, 'X'),
+        [opcion('a', 10, TUBO)],
+        of(20),
+      ),
+    ).toMatchObject({ resultado: 'SIN_CANDIDATOS', detalle: null });
+  });
+
+  it('(f) jamás usa la terminación de tarjeta: dos CERCA con tarjeta distinta siguen AMBIGUO', () => {
+    const r = decidirCruceUsd(
+      cargo('2026-09-01', 2000, 'AIRCRAFT SPRUCE AND SP 0577'),
+      [
+        { id: 'a', usd: 100, gasto: { notas: TUBO } },
+        { id: 'b', usd: 99.5, gasto: { notas: TUBO } },
+      ],
+      of(20),
+    );
+    expect(r.resultado).toBe('AMBIGUO');
+  });
+
+  it('(g) recíproco: CERCA y SIN_OFICIAL compiten, LEJOS y el propio cargo no; sus 3 textos', () => {
+    const competidor = (
+      id: string,
+      monto: number,
+      oficial: ReturnType<typeof of> | null,
+    ) => ({
+      id,
+      fecha: '2026-09-03',
+      monto,
+      descripcion: 'AIRCRAFT SPRUCE AND SP',
+      oficial,
+    });
+    const cerca = competidoresCruceUsd('propio', 422.86, [
+      competidor('propio', 7214.14, of(17.0077)),
+      competidor('c1', 7250, of(17.0077)),
+      competidor('asa', 8939.38, of(17.0077)),
+    ]);
+    expect(cerca.map((c) => c.cargo.id)).toEqual(['c1']);
+    expect(textoReciprocoCruceUsd(422.86, cerca)).toBe(
+      'El gasto en USD de $422.86 USD también cuadra con el cargo del 03 sep de $7,250.00 («AIRCRAFT SPRUCE AND SP»): vincúlalo a mano.',
+    );
+    const sinOficial = competidoresCruceUsd('propio', 422.86, [
+      competidor('c2', 7250, null),
+    ]);
+    expect(textoReciprocoCruceUsd(422.86, sinOficial)).toBe(
+      'El gasto en USD de $422.86 USD también podría ser el cargo del 03 sep de $7,250.00 («AIRCRAFT SPRUCE AND SP»), y no hay T.C. oficial de ese día para descartarlo: vincúlalo a mano.',
+    );
+    const dos = competidoresCruceUsd('propio', 422.86, [
+      competidor('c1', 7250, of(17.0077)),
+      competidor('c2', 7200, null),
+    ]);
+    expect(textoReciprocoCruceUsd(422.86, dos)).toBe(
+      'El gasto en USD de $422.86 USD también podría corresponder a otros 2 cargos del banco: vincúlalo a mano.',
+    );
+    expect(textoReciprocoCruceUsd(422.86, [])).toBeNull();
+  });
+
+  it('(h) ligaUsdFueraDeLugar marca EXACTAMENTE las 2 equivocadas entre las 8 ligas', () => {
+    const ligas: Array<[string, number, number, number]> = [
+      ['llantas', 12451.49, 722.9, 17.2881],
+      ['516.35', 9062.34, 516.35, 17.4803],
+      ['tubo ok', 7214.14, 422.86, 17.0077],
+      ['bujías ok', 14431.18, 794.61, 17.8992],
+      ['325', 6015.21, 325.0, 18.4067],
+      ['203.90', 3740.63, 203.9, 18.4067],
+      ['tubo ↔ ASA', 8939.38, 422.86, 17.0077],
+      ['bujías ↔ ASA I', 14197.17, 794.61, 17.4691],
+    ];
+    expect(
+      ligas
+        .filter(([, mxn, usd, o]) => ligaUsdFueraDeLugar(ev(mxn, usd, of(o))))
+        .map(([n]) => n),
+    ).toEqual(['tubo ↔ ASA', 'bujías ↔ ASA I']);
+  });
+
+  it('textoSePuedeCruzarUsd y las constantes', () => {
+    expect(
+      textoSePuedeCruzarUsd(422.86, ev(7214.14, 422.86, of(17.0077))),
+    ).toBe(
+      'El gasto en USD de $422.86 USD cuadra con el T.C. oficial (T.C. 17.06 · oficial 17.01 (+0.3 %)) y la descripción del banco lo confirma: el cruce automático todavía no corre sobre este cargo. Pulsa «Cruzar pendientes» (o vincúlalo tú desde el menú).',
+    );
+    expect(piezaTcCruce(ev(7214.14, 422.86, of(17.0077)))).toBe(
+      'T.C. 17.06 · oficial 17.01 (+0.3 %)',
+    );
+    expect(TEXTO_CRUCE_USD_TRUNCADO).toBe(
+      'Hay demasiados gastos en USD en esas fechas para decidir solo: vincúlalo a mano.',
+    );
+    expect(TEXTO_CRUCE_USD_RECIPROCO_TRUNCADO).toBe(
+      'Hay demasiados cargos del banco en esas fechas para decidir solo: vincúlalo a mano.',
+    );
+    expect(TEXTO_CRUCE_USD_RECIPROCO_ERROR).toBe(
+      'No se pudo comprobar si el gasto en USD cuadra con otro cargo: el cruce no se intenta.',
+    );
+    expect(TEXTO_CRUCE_USD_SIN_LECTURA_TC).toBe(
+      'No se pudo leer el T.C. oficial del día del cargo: el cruce con gastos en USD no se intentó; vuelve a correr «Cruzar pendientes».',
+    );
+    expect([
+      TC_IMPLICITO_MIN,
+      TC_IMPLICITO_MAX,
+      TOLERANCIA_TC_OFICIAL_PCT,
+    ]).toEqual([15, 25, 2]);
   });
 });

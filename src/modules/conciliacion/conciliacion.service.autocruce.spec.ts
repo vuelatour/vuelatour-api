@@ -4,6 +4,7 @@ import type { PyservicesService } from '../pyservices/pyservices.service';
 import type { IaUsoService } from '../ia-uso/ia-uso.service';
 import { TipoMovimientoBancario } from './dto/conciliacion.dto';
 import { rpcPartes, sembrarPartes } from './conciliacion-partes.fixture-spec';
+import type { TipoCambioService } from '../tipo-cambio/tipo-cambio.service';
 
 /**
  * AUTO-CRUCE RESILIENTE Y RE-CRUCE (15-sep-2026).
@@ -187,7 +188,12 @@ function mundo(extra: Partial<Tablas> = {}): Tablas {
   };
 }
 
-function armar(db: Tablas, fallos: Record<string, unknown> = {}) {
+function armar(
+  db: Tablas,
+  fallos: Record<string, unknown> = {},
+  // T.C. oficial (invariante 70): sin él, el cruce USD queda AMBIGUO.
+  tipoCambio?: TipoCambioService,
+) {
   sembrarPartes(db);
   return new ConciliacionService(
     {
@@ -196,7 +202,22 @@ function armar(db: Tablas, fallos: Record<string, unknown> = {}) {
     fakeSupabase(db, fallos),
     {} as PyservicesService,
     { registrar: jest.fn() } as unknown as IaUsoService,
+    undefined,
+    tipoCambio,
   );
+}
+
+/** TipoCambioService falso: el MISMO oficial para cualquier día. */
+function oficialFijo(tc: number): TipoCambioService {
+  return {
+    oficialesPorDias: jest.fn((dias: string[]) =>
+      Promise.resolve(
+        new Map(
+          dias.map((d) => [d, { tc, fecha_dato: d, fuente: 'open.er-api' }]),
+        ),
+      ),
+    ),
+  } as unknown as TipoCambioService;
 }
 
 const cargo = (fecha: string, monto: number, extra: Row = {}) => ({
@@ -600,9 +621,10 @@ describe('intentarCruzarGasto — el gasto capturado DESPUÉS del estado de cuen
 describe('candados de la revisión adversaria', () => {
   it('TC implícito: con DOS gastos USD plausibles NO desempata la descripción', async () => {
     // El cargo es de $2,000 MXN y ningún gasto en pesos cuadra. En dólares
-    // hay dos gastos cuyo TC cae en la banda 15-25 — pero sus MONTOS no
-    // coinciden con nada: desempatar ahí por texto sería ligar «por
-    // parecerse», que es justo lo prohibido.
+    // hay dos gastos que quedan a ±2 % del oficial (20.00): 100 USD (0.0 %)
+    // y 99.50 USD (+0.5 %). Desempatar ahí por texto sería ligar «por
+    // parecerse», que es justo lo prohibido (invariante 70: ≥ 2 CERCA ⇒
+    // AMBIGUO).
     const db = mundo({
       gasto: [
         gastoBase('g-usd-asa', 100, {
@@ -610,10 +632,10 @@ describe('candados de la revisión adversaria', () => {
           lugar: 'ASA Cancún',
           notas: 'Combustible AVGAS',
         }),
-        gastoBase('g-usd-otro', 95, { moneda: 'USD', lugar: 'Ferretería' }),
+        gastoBase('g-usd-otro', 99.5, { moneda: 'USD', lugar: 'Ferretería' }),
       ],
     });
-    const svc = armar(db);
+    const svc = armar(db, {}, oficialFijo(20));
     const r = (await svc.importar(
       {
         cuenta_bancaria_id: CTA,
@@ -623,19 +645,29 @@ describe('candados de la revisión adversaria', () => {
     )) as Record<string, unknown>;
     expect(r.conciliados).toBe(0);
     expect(r.ambiguos).toBe(1);
+    expect((r.detalle as Array<{ motivo: string }>)[0].motivo).toBe(
+      '2 gastos en USD cuadran con este cargo a ±2 % del T.C. oficial del 08 sep (20.00): vincúlalo a mano.',
+    );
     expect(db.gasto.every((g) => g.conciliado !== true)).toBe(true);
     expect(db.movimiento_bancario[0].gasto_id ?? null).toBeNull();
   });
 
-  it('TC implícito: con UN solo gasto USD plausible sí liga', async () => {
+  it('TC implícito: con UN solo gasto USD plausible sí liga (oficial del día a ±2 % y leyenda que COINCIDE)', async () => {
     const db = mundo({
-      gasto: [gastoBase('g-usd', 100, { moneda: 'USD', lugar: 'ASA Cancún' })],
+      gasto: [
+        gastoBase('g-usd', 100, {
+          moneda: 'USD',
+          notas: 'Aircraft Spruce & Specialty Co. · Michelin Tube',
+        }),
+      ],
     });
-    const svc = armar(db);
+    const svc = armar(db, {}, oficialFijo(20));
     const r = (await svc.importar(
       {
         cuenta_bancaria_id: CTA,
-        movimientos: [cargo('2026-09-08', 2000, { descripcion: 'ASA CANCUN' })],
+        movimientos: [
+          cargo('2026-09-08', 2000, { descripcion: 'AIRCRAFT SPRUCE AND SP' }),
+        ],
       },
       USER,
     )) as Record<string, unknown>;

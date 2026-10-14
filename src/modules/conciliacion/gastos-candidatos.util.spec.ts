@@ -10,6 +10,10 @@ import {
   MENSAJE_SIN_MONEDA_CUENTA,
   ordenarCandidatosGasto,
   ordenarCandidatosPorNiveles,
+  ordenarCruzadosPorTc,
+  rangoBandaMxnDeUsd,
+  rangoBandaUsd,
+  rangosUsdDeBusqueda,
 } from './gastos-candidatos.util';
 
 /**
@@ -349,5 +353,190 @@ describe('medios del vínculo', () => {
     expect(
       clasificarMediosVinculo([g('tdc', 'TRANSFERENCIA')], new Set()),
     ).toEqual({ bodega: [], noBancariosNuevos: [] });
+  });
+});
+
+describe('cruzados USD en 7 niveles (invariante 70)', () => {
+  const ref = { montoCargo: 7214.14, fecha: '2026-09-01' };
+  const tc = (
+    nivel: 'CERCA' | 'LEJOS' | 'SIN_OFICIAL',
+    desvio_pct: number | null,
+  ) => ({
+    nivel,
+    desvio_pct,
+  });
+
+  it('sin cruzados (o con cruzados sin tc_cruce) el orden es el de siempre (golden)', () => {
+    const entrada = [
+      { id: 'lejos', monto: 5000, fecha: '2026-09-02' },
+      { id: 'usd-a', monto: 420, fecha: '2026-09-01', cruzado: true },
+      { id: 'cuadra', monto: 7214.14, fecha: '2026-08-30' },
+      { id: 'ef', monto: 7214.14, fecha: '2026-09-01', no_bancario: true },
+      { id: 'usd-b', monto: 430, fecha: '2026-09-03', cruzado: true },
+      { id: 'ef-lejos', monto: 10, fecha: '2026-09-01', no_bancario: true },
+    ];
+    expect(ordenarCandidatosPorNiveles(entrada, ref).map((c) => c.id)).toEqual([
+      'cuadra',
+      'ef',
+      'lejos',
+      'usd-a',
+      'usd-b',
+      'ef-lejos',
+    ]);
+  });
+
+  it('los 7 niveles: cuadran · CERCA · no bancarios que cuadran · resto bancario · SIN_OFICIAL · LEJOS · resto no bancario', () => {
+    const r = ordenarCandidatosPorNiveles(
+      [
+        { id: 'ef-lejos', monto: 10, fecha: '2026-09-01', no_bancario: true },
+        {
+          id: 'lejos-usd',
+          monto: 300,
+          fecha: '2026-09-01',
+          cruzado: true,
+          tc_cruce: tc('LEJOS', 24.3),
+        },
+        {
+          id: 'sin-of',
+          monto: 400,
+          fecha: '2026-09-01',
+          cruzado: true,
+          tc_cruce: tc('SIN_OFICIAL', null),
+        },
+        { id: 'resto', monto: 5000, fecha: '2026-09-01' },
+        {
+          id: 'ef-cuadra',
+          monto: 7214.14,
+          fecha: '2026-09-01',
+          no_bancario: true,
+        },
+        {
+          id: 'cerca',
+          monto: 422.86,
+          fecha: '2026-09-01',
+          cruzado: true,
+          tc_cruce: tc('CERCA', 0.3),
+        },
+        { id: 'cuadra', monto: 7214.14, fecha: '2026-09-01' },
+      ],
+      ref,
+    );
+    expect(r.map((c) => c.id)).toEqual([
+      'cuadra',
+      'cerca',
+      'ef-cuadra',
+      'resto',
+      'sin-of',
+      'lejos-usd',
+      'ef-lejos',
+    ]);
+  });
+
+  it('caso real «220 + tubo»: con 220 bancarios MXN que no cuadran, el tubo CERCA queda en la posición 0 (antes del corte de 100)', () => {
+    const bancarios = Array.from({ length: 220 }, (_, i) => ({
+      id: `mxn-${String(i).padStart(3, '0')}`,
+      monto: 100 + i,
+      fecha: '2026-09-02',
+    }));
+    const tubo = {
+      id: 'tubo',
+      monto: 422.86,
+      fecha: '2026-09-01',
+      cruzado: true,
+      tc_cruce: tc('CERCA', 0.3),
+    };
+    const r = ordenarCandidatosPorNiveles([...bancarios, tubo], ref);
+    expect(r[0].id).toBe('tubo');
+  });
+
+  it('ordenarCruzadosPorTc: |desvío| (null al final), |días al cargo|, fecha desc, id', () => {
+    const r = ordenarCruzadosPorTc(
+      [
+        {
+          id: 'sin',
+          monto: 1,
+          fecha: '2026-09-01',
+          cruzado: true,
+          tc_cruce: tc('CERCA', null),
+        },
+        {
+          id: 'neg',
+          monto: 1,
+          fecha: '2026-09-05',
+          cruzado: true,
+          tc_cruce: tc('CERCA', -0.4),
+        },
+        {
+          id: 'pos',
+          monto: 1,
+          fecha: '2026-09-05',
+          cruzado: true,
+          tc_cruce: tc('CERCA', 0.3),
+        },
+        {
+          id: 'pos-cerca',
+          monto: 1,
+          fecha: '2026-09-02',
+          cruzado: true,
+          tc_cruce: tc('CERCA', 0.3),
+        },
+        {
+          id: 'b',
+          monto: 1,
+          fecha: '2026-08-31',
+          cruzado: true,
+          tc_cruce: tc('CERCA', 1.5),
+        },
+        {
+          id: 'a',
+          monto: 1,
+          fecha: '2026-09-02',
+          cruzado: true,
+          tc_cruce: tc('CERCA', 1.5),
+        },
+      ],
+      ref,
+    );
+    expect(r.map((c) => c.id)).toEqual([
+      'pos-cerca',
+      'pos',
+      'neg',
+      'a',
+      'b',
+      'sin',
+    ]);
+  });
+
+  it('rangoBandaUsd(7214.14) = [288.56, 480.95]', () => {
+    expect(rangoBandaUsd(7214.14)).toEqual({ min: 288.56, max: 480.95 });
+    expect(rangoBandaMxnDeUsd(422.86)).toEqual({ min: 6342.9, max: 10571.5 });
+  });
+
+  it('rangosUsdDeBusqueda con 17.0077: dólares tal cual + equivalente en pesos ±3 %', () => {
+    const of = 17.0077;
+    expect(
+      rangosUsdDeBusqueda(interpretarBusquedaGasto('7214.14'), of),
+    ).toEqual([
+      { min: 7214.13, max: 7214.15, maxExclusivo: false },
+      { min: 411.81, max: 437.29, maxExclusivo: false },
+    ]);
+    expect(rangosUsdDeBusqueda(interpretarBusquedaGasto('7214'), of)).toEqual([
+      { min: 7214, max: 7215, maxExclusivo: true },
+      { min: 411.8, max: 437.34, maxExclusivo: false },
+    ]);
+    expect(rangosUsdDeBusqueda(interpretarBusquedaGasto('422.86'), of)).toEqual(
+      [
+        { min: 422.85, max: 422.87, maxExclusivo: false },
+        { min: 24.13, max: 25.64, maxExclusivo: false },
+      ],
+    );
+    // Sin oficial: solo el rango en dólares; vacía o texto: nada.
+    expect(
+      rangosUsdDeBusqueda(interpretarBusquedaGasto('7214.14'), null),
+    ).toEqual([{ min: 7214.13, max: 7214.15, maxExclusivo: false }]);
+    expect(rangosUsdDeBusqueda(interpretarBusquedaGasto(''), of)).toEqual([]);
+    expect(rangosUsdDeBusqueda(interpretarBusquedaGasto('spruce'), of)).toEqual(
+      [],
+    );
   });
 });

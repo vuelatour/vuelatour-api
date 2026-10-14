@@ -343,7 +343,7 @@ export class GastosCandidatosQuery {
   @ApiPropertyOptional({
     maxLength: 80,
     description:
-      'Búsqueda: monto («2801» = [2801, 2802); «2801.40» = ±0.01) o texto (proveedor, nota, lugar o folio del ticket). El panel la manda ya normalizada.',
+      'Número = pesos del cargo o dólares del gasto (con decimales ±0.01; entero [q, q+1)); en cuentas en pesos los gastos en dólares se encuentran por su monto en dólares o por su equivalente en pesos (÷ T.C. oficial del día del cargo ±3 %); texto = proveedor, nota, lugar o folio. El panel la manda ya normalizada.',
   })
   @IsOptional()
   @IsString()
