@@ -1,0 +1,93 @@
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { CategoriaGasto } from '../expenses/dto/expenses.dto';
+import {
+  DIRECTO,
+  FIJO,
+  INDIRECTO,
+  PERMISO,
+  TUAS_CAT,
+} from './grupos-reparto.util';
+
+/**
+ * Grupos del clasificador del reparto a socios (14-oct-2026, invariante
+ * 74): se MUDARON tal cual de `profit-sharing.service.ts`. La membresía se
+ * CONGELA: mover una categoría de grupo cambia la utilidad de los socios y
+ * tiene que fallar aquí antes que en un reparto. Los specs del reparto
+ * siguen verdes SIN tocarse (la mudanza no cambia ninguna conducta).
+ */
+describe('grupos-reparto.util — membresía congelada', () => {
+  it('DIRECTO: las 9 categorías directas del vuelo (sin TUAS ni OTRO)', () => {
+    expect([...DIRECTO].sort()).toEqual(
+      [
+        'GAS',
+        'OPERACIONES',
+        'ATERRIZAJE',
+        'FBO',
+        'COMIDA',
+        'HOTEL',
+        'TAXI',
+        'PILOTO_EXTERNO',
+        'COMISARIATO',
+      ].sort(),
+    );
+  });
+
+  it('INDIRECTO = {REFACCION, SERVICIOS}; PERMISO = {PERMISO}; FIJO y TUAS_CAT', () => {
+    expect([...INDIRECTO].sort()).toEqual(['REFACCION', 'SERVICIOS']);
+    expect([...PERMISO]).toEqual(['PERMISO']);
+    expect(FIJO).toBe('FIJO');
+    expect(TUAS_CAT).toBe('TUAS');
+  });
+
+  it('ninguna categoría está en dos grupos y todas existen en el enum', () => {
+    const todas = [...DIRECTO, ...INDIRECTO, ...PERMISO, FIJO, TUAS_CAT];
+    expect(new Set(todas).size).toBe(todas.length);
+    const enumValores = Object.values(CategoriaGasto) as string[];
+    for (const c of todas) expect(enumValores).toContain(c);
+  });
+
+  it('la CATEGORÍA INDIRECTO, NOMINA, OTRO y el pago al vendedor NO están en ningún grupo (caen a EXCLUIDO)', () => {
+    for (const c of [
+      'INDIRECTO',
+      'NOMINA',
+      'OTRO',
+      'GASOLINA',
+      'VISITA',
+      'PERSONAL_DUENO',
+      'COMISION_VENDEDOR',
+      'COMISION_VENDEDOR_AVION',
+    ]) {
+      expect(DIRECTO.has(c) || INDIRECTO.has(c) || PERMISO.has(c)).toBe(false);
+    }
+  });
+});
+
+describe('profit-sharing.service.ts los IMPORTA (sin copias locales)', () => {
+  const fuente = readFileSync(
+    join(__dirname, 'profit-sharing.service.ts'),
+    'utf8',
+  );
+
+  it('ya no declara los conjuntos: los lee de grupos-reparto.util', () => {
+    expect(fuente).not.toContain('const DIRECTO = new Set(');
+    expect(fuente).not.toContain('const INDIRECTO = new Set(');
+    expect(fuente).not.toContain('const PERMISO = new Set(');
+    expect(fuente).not.toContain("const FIJO = 'FIJO'");
+    expect(fuente).not.toContain('const TUAS_CAT =');
+    expect(fuente).toContain("from './grupos-reparto.util'");
+  });
+
+  it('el ternario de computeAvion y el pool de FIJO siguen usándolos', () => {
+    const sinEspacios = fuente.replace(/\s+/g, '');
+    for (const patron of [
+      'const esTuas = g.categoria === TUAS_CAT;',
+      ': DIRECTO.has(g.categoria)',
+      ': INDIRECTO.has(g.categoria)',
+      ': PERMISO.has(g.categoria)',
+      'if (g.categoria !== FIJO || g.es_reparto_parcial) continue;',
+    ]) {
+      expect(sinEspacios).toContain(patron.replace(/\s+/g, ''));
+    }
+  });
+});

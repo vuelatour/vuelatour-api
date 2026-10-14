@@ -21,6 +21,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { Rol } from '../../common/types/auth.types';
 import type { AuthenticatedUser } from '../../common/types/auth.types';
 import {
+  CambioFechaGastoDto,
   CategoriaGasto,
   CreateGastoDto,
   CreateTarifaAerodromoDto,
@@ -42,7 +43,10 @@ import {
 } from './dto/combustible-masivo.dto';
 import { CombustibleMasivoService } from './combustible-masivo.service';
 import { ExpensesService } from './expenses.service';
-import { puedeVerDetalleBanco } from '../conciliacion/roles-conciliacion';
+import {
+  puedeVerDetalleBanco,
+  ROLES_CONCILIACION,
+} from '../conciliacion/roles-conciliacion';
 
 @ApiTags('Expenses')
 @ApiBearerAuth()
@@ -415,6 +419,24 @@ export class ExpensesController {
     @CurrentUser() c: AuthenticatedUser,
   ) {
     return this.expenses.darVistoBueno(id, c.userId);
+  }
+
+  // FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74): ruta
+  // APARTE del PATCH general (que sigue igual, auto-cruce incluido). Va antes
+  // de @Patch(':id'); no choca con @Patch('tarifas-aerodromo/:id') porque su
+  // segundo segmento es literal.
+  @Patch(':id/fecha')
+  @Roles(...ROLES_CONCILIACION)
+  @ApiOperation({
+    summary:
+      'FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74): cambia SOLO fecha_gasto (y la hora de la carga al mismo día) de un gasto BANCARIO, SIN auto-cruce. 400 FECHA_GASTO_INVALIDA / FECHA_GASTO_FUTURA / FECHA_GASTO_MUY_ANTIGUA; 404 GASTO_NO_EXISTE; 409 FECHA_GASTO_SOLO_BANCARIOS, FECHA_GASTO_CAMBIO (fecha_anterior ≠ la vigente), FECHA_GASTO_FUERA_DEL_MES_DEL_VUELO (espejo de fechasFuera del balance), FECHA_GASTO_CONFIRMAR (mueve dinero de mes o cambia un mes terminado: repetir con confirmar: true) y CONFLICTO_VERSION. Solo ADMIN y FACTURACION.',
+  })
+  cambiarFecha(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CambioFechaGastoDto,
+    @CurrentUser() c: AuthenticatedUser,
+  ) {
+    return this.expenses.cambiarFechaGasto(id, dto, c.userId, c.rol);
   }
 
   @Patch(':id')

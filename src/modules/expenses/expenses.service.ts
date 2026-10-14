@@ -38,6 +38,17 @@ import {
   SEGUNDOS_URL_MINIATURA,
   SEGUNDOS_URL_PUNTUAL,
 } from '../../common/url-firmada.util';
+// FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74): la
+// decisión y los textos de `PATCH /v1/expenses/:id/fecha` (PURO).
+import {
+  GASTO_CAMBIO_FECHA_COLS,
+  avionesParaTextos,
+  decidirCambioFechaGasto,
+  errorDeFechasCambio,
+  type CambioFechaGastoRespuesta,
+  type ErrorCambioFecha,
+  type GastoCambioFecha,
+} from './cambio-fecha-gasto.util';
 import { faltanteDe } from '../conciliacion/conciliacion-parcial.util';
 import { MEDIOS_BANCARIOS } from '../conciliacion/gastos-candidatos.util';
 import { MENSAJE_MEDIO_SOLO_OFICINA } from '../../common/medio-pago.util';
@@ -169,6 +180,7 @@ import {
   type ResultadoTipoCombustible,
 } from '../../common/combustible.util';
 import type {
+  CambioFechaGastoDto,
   CreateGastoDto,
   CreateTarifaAerodromoDto,
   GenerarPistasDto,
@@ -200,6 +212,24 @@ function quitarAvisoAvionTramo(
     .join('\n')
     .replace(/\n+$/, '');
   return limpias.trim() ? limpias : null;
+}
+
+/**
+ * Rechazo de la FECHA DEL PAGO desde Conciliación (invariante 74) con su
+ * `code` y `details` estables: el AllExceptionsFilter expone `error` como
+ * `code` y `details` tal cual (400 fechas; 409 los candados).
+ */
+function excepcionCambioFecha(
+  e: ErrorCambioFecha,
+): BadRequestException | ConflictException {
+  const cuerpo = {
+    message: e.message,
+    error: e.code,
+    ...(e.details ? { details: e.details } : {}),
+  };
+  return e.status === 400
+    ? new BadRequestException(cuerpo)
+    : new ConflictException(cuerpo);
 }
 
 // Para el panel admin: nombres legibles de proveedor, avión, persona que
@@ -3432,7 +3462,17 @@ export class ExpensesService {
     }
   }
 
-  async update(id: string, dto: UpdateGastoDto, userId: string, rol?: Rol) {
+  async update(
+    id: string,
+    dto: UpdateGastoDto,
+    userId: string,
+    rol?: Rol,
+    // FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74):
+    // `cambiarFechaGasto` escribe por aquí con `{ autoCruce: false }`. Es
+    // INTERNO y va AL FINAL: el PATCH general (el controller) no lo pasa y
+    // su conducta, auto-cruce incluido, es la de siempre.
+    opciones: { autoCruce?: boolean } = {},
+  ) {
     // La entrada a Inventario/Tienda es cosa del ALTA (invariante 57): un
     // PATCH que la traiga (PartialType la hereda) rebota con código estable.
     if ((dto as { inventario?: unknown }).inventario !== undefined) {
@@ -3992,16 +4032,176 @@ export class ExpensesService {
     }
     // AUTO-CRUCE con el banco: solo cuando cambió algo que decide el cruce
     // (monto, moneda, fecha o medio). Editar notas o el vuelo no dispara
-    // nada. Best-effort: jamás afecta la respuesta del PATCH.
+    // nada. Best-effort: jamás afecta la respuesta del PATCH. La fecha del
+    // pago desde Conciliación (invariante 74) lo APAGA: ahí liga la persona
+    // con «Vincular» (con montos repetidos el cruce podía ligar OTRO cargo
+    // sin que el panel se enterara).
     if (
-      dto.monto !== undefined ||
-      dto.moneda !== undefined ||
-      dto.fecha_gasto !== undefined ||
-      dto.medio_pago !== undefined
+      opciones.autoCruce !== false &&
+      (dto.monto !== undefined ||
+        dto.moneda !== undefined ||
+        dto.fecha_gasto !== undefined ||
+        dto.medio_pago !== undefined)
     ) {
       this.cruzarConBancoBestEffort(data, userId);
     }
     return data;
+  }
+
+  /**
+   * FECHA DEL PAGO DESDE CONCILIACIÓN (14-oct-2026, API 0.0.76, invariante
+   * 74): `PATCH /v1/expenses/:id/fecha`, solo ADMIN y FACTURACION. Cambia
+   * SOLO `fecha_gasto` (y `fecha_hora_carga` a la misma hora Cancún del día
+   * nuevo, si la tiene) de un gasto BANCARIO. La decisión y los textos son
+   * PUROS (`cambio-fecha-gasto.util`); aquí solo se lee y se escribe:
+   *  1. las dos fechas, ANTES de tocar la BD (400);
+   *  2. el gasto con `GASTO_CAMBIO_FECHA_COLS` (404 GASTO_NO_EXISTE);
+   *  3. sus repartos (solo categorías repartibles) y, si cambia el mes, las
+   *     matrículas de los textos (best-effort: si fallan, «del avión»);
+   *  4. la decisión (409 con `code` y `details`, o 200 sin escribir si ya
+   *     tenía esa fecha: doble clic idempotente);
+   *  5. la escritura por `update()` con CAS sobre el `updated_at` LEÍDO
+   *     (409 CONFLICTO_VERSION si algo cambió entre la lectura y el UPDATE)
+   *     y SIN auto-cruce: liga la persona con «Vincular».
+   * No toca verificado_*, el medio, el monto ni los cargos ligados; la
+   * bitácora (`tg_gasto_bitacora`) registra el antes/después con actor =
+   * `updated_by` (quien concilia).
+   */
+  async cambiarFechaGasto(
+    id: string,
+    dto: CambioFechaGastoDto,
+    userId: string,
+    rol?: Rol,
+  ): Promise<CambioFechaGastoRespuesta> {
+    // UN solo «hoy» para toda la petición (validación, meses terminados).
+    const hoy = hoyCancun();
+    const errFechas = errorDeFechasCambio(
+      dto.fecha_gasto,
+      dto.fecha_anterior,
+      hoy,
+    );
+    if (errFechas) throw excepcionCambioFecha(errFechas);
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(GASTO_CAMBIO_FECHA_COLS)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: 'Ese gasto ya no existe: recarga la página.',
+        error: 'GASTO_NO_EXISTE',
+      });
+    }
+    const gasto = data as unknown as GastoCambioFecha;
+    const repartos = CATEGORIAS_REPARTIBLES.has(gasto.categoria ?? '')
+      ? ((await fetchRepartos(this.supabase.service, [id])).get(id) ?? []).map(
+          (r) => ({ aeronave_id: r.aeronave_id, monto: r.monto }),
+        )
+      : [];
+    const actual = String(gasto.fecha_gasto).slice(0, 10);
+    const cambiaDeMes = actual.slice(0, 7) !== dto.fecha_gasto.slice(0, 7);
+    const matriculas = cambiaDeMes
+      ? await this.matriculasDe(
+          avionesParaTextos(gasto, dto.fecha_gasto, repartos),
+        )
+      : new Map<string, string>();
+    const d = decidirCambioFechaGasto({
+      gasto,
+      nueva: dto.fecha_gasto,
+      anterior: dto.fecha_anterior,
+      hoy,
+      confirmar: dto.confirmar === true,
+      repartos,
+      matricula: (a) => matriculas.get(a) ?? null,
+    });
+    if (d.tipo === 'ERROR' || d.tipo === 'CONFIRMAR') {
+      throw excepcionCambioFecha(d.error);
+    }
+    if (d.tipo === 'SIN_CAMBIO') {
+      return {
+        id,
+        fecha_gasto: actual,
+        fecha_anterior: actual,
+        cambio: false,
+        cambia_de_mes: false,
+        fecha_hora_carga: gasto.fecha_hora_carga ?? null,
+        updated_at: gasto.updated_at,
+        aviso: null,
+      };
+    }
+    const cambio: UpdateGastoDto = {
+      fecha_gasto: dto.fecha_gasto,
+      ...(d.fecha_hora_carga ? { fecha_hora_carga: d.fecha_hora_carga } : {}),
+      if_updated_at: gasto.updated_at,
+      // La banda de ESTA ruta (arriba, con el «hoy» de la petición) es la de
+      // oficina de `assertFechaRazonable` con el MISMO borde (365 días atrás
+      // pasa, 366 no; misma cuenta a mediodía UTC) y más estricta hacia
+      // adelante (nunca después de hoy). `update()` la volvería a evaluar
+      // con OTRO reloj: si la medianoche de Cancún cae entre la lectura y la
+      // escritura, una fecha de justo 365 días que la ruta ya aceptó saldría
+      // 400 con el texto del PATCH general («marca permitir fecha antigua»,
+      // que en Conciliación no existe). La bandera solo evita esa segunda
+      // evaluación; `update()` la quita antes del UPDATE (no es columna).
+      permitir_fecha_antigua: true,
+    };
+    const fila = (await this.update(id, cambio, userId, rol, {
+      autoCruce: false,
+    })) as unknown as {
+      fecha_gasto: string;
+      fecha_hora_carga: string | null;
+      updated_at: string;
+    };
+    this.logger.log(
+      `Fecha del gasto ${id} desde Conciliación: ${actual} → ${dto.fecha_gasto}${
+        d.fecha_hora_carga ? ` (carga ${d.fecha_hora_carga})` : ''
+      } por ${userId}`,
+    );
+    return {
+      id,
+      fecha_gasto: String(fila.fecha_gasto).slice(0, 10),
+      fecha_anterior: actual,
+      cambio: true,
+      cambia_de_mes: d.cambia_de_mes,
+      fecha_hora_carga: fila.fecha_hora_carga ?? null,
+      updated_at: fila.updated_at,
+      aviso: d.aviso,
+    };
+  }
+
+  /**
+   * Matrículas de los aviones que nombran los TEXTOS de la confirmación de
+   * la fecha del pago (invariante 74). Cosméticas: si la lectura falla, warn
+   * y un Map vacío (los textos dicen «del avión»). Nunca lanza.
+   */
+  private async matriculasDe(
+    ids: readonly string[],
+  ): Promise<Map<string, string>> {
+    const unicos = [...new Set(ids.filter((x) => !!x))];
+    const out = new Map<string, string>();
+    if (unicos.length === 0) return out;
+    try {
+      const { data, error } = await this.supabase.service
+        .from('aeronave')
+        .select('id, matricula')
+        .in('id', unicos);
+      if (error) {
+        this.logger.warn(`Cambio de fecha sin matrículas: ${error.message}`);
+        return out;
+      }
+      for (const a of (data ?? []) as Array<{
+        id: string;
+        matricula: string | null;
+      }>) {
+        if (a.matricula) out.set(a.id, a.matricula);
+      }
+      return out;
+    } catch (err) {
+      this.logger.warn(
+        `Cambio de fecha sin matrículas: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return new Map<string, string>();
+    }
   }
 
   /**

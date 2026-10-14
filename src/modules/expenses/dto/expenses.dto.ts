@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ToBooleanQuery } from '../../../common/decorators/to-boolean-query.decorator';
 import { descripcionCategoriasGasto } from '../../../common/categoria-gasto.util';
 import {
@@ -912,4 +912,50 @@ export class ListGastosQuery {
   @IsInt()
   @Min(0)
   offset: number = 0;
+}
+
+/**
+ * FECHA DEL PAGO desde Conciliación (14-oct-2026, invariante 74):
+ * `PATCH /v1/expenses/:id/fecha`. Solo la fecha; la regla vive en
+ * `cambio-fecha-gasto.util.ts`. Con whitelist + forbidNonWhitelisted
+ * (main.ts), cualquier otra llave (verificado, permitir_fecha_antigua,
+ * if_updated_at…) responde 400. `@Matches` y no `@IsDateString`: este último
+ * acepta timestamps, y uno en UTC podría correr el día.
+ */
+export class CambioFechaGastoDto {
+  @ApiProperty({
+    description:
+      'Fecha del PAGO (YYYY-MM-DD, día Cancún): normalmente la del cargo del banco.',
+    example: '2026-10-12',
+  })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'fecha_gasto debe ser AAAA-MM-DD',
+  })
+  fecha_gasto!: string;
+
+  @ApiProperty({
+    description:
+      'La fecha que el operador VIO en pantalla (candado de campo: si el gasto ya tiene otra, 409 FECHA_GASTO_CAMBIO).',
+    example: '2026-10-10',
+  })
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'fecha_anterior debe ser AAAA-MM-DD',
+  })
+  fecha_anterior!: string;
+
+  @ApiPropertyOptional({
+    description:
+      'true = el operador confirmó el texto del 409 FECHA_GASTO_CONFIRMAR.',
+  })
+  // Booleano ESTRICTO sobre el valor CRUDO del body (`obj[key]`): con
+  // `enableImplicitConversion` (main.ts) el texto 'false' llegaría como
+  // Boolean('false') = true y contaría como confirmado (patrón de
+  // `flights/dto/seguimiento.dto` y `profit-sharing/dto/reparto-pago.dto`).
+  @Transform(
+    ({ obj, key }: { obj: unknown; key: string }) =>
+      (obj as Record<string, unknown>)[key],
+  )
+  @IsOptional()
+  @IsBoolean({ message: 'confirmar debe ser true o false' })
+  confirmar?: boolean;
 }
