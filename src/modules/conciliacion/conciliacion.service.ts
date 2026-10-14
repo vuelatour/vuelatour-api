@@ -17,7 +17,7 @@ import type { EnvVars } from '../../config/env.schema';
 import { etiquetaCategoriaGasto } from '../../common/categoria-gasto.util';
 import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import { avionDelGasto } from '../../common/participacion-aeronave.util';
-import { round6 } from '../../common/tc.util';
+import { normalizarTc, round6 } from '../../common/tc.util';
 import {
   fetchRepartos,
   type GastoRepartoFila,
@@ -307,7 +307,19 @@ import {
 import { fechaVueloDe } from '../../common/fecha-vuelo-candidato.util';
 import { ordenArchivoDisponible } from '../../common/orden-archivo-disponible.util';
 import { ordenarComoEstadoDeCuenta } from './orden-estado-cuenta.util';
-import { etiquetaMedioSinBanco } from '../expenses/estado-banco.util';
+import {
+  estadoBancoGasto,
+  etiquetaMedioSinBanco,
+} from '../expenses/estado-banco.util';
+import {
+  aCargoDeGasto,
+  alertasConciliacionGasto,
+  cuentaDeFila,
+  ordenarCargosDeGasto,
+  type CargosDeGastoLeidos,
+  type ConciliacionDeGastoRespuesta,
+  type UltimoMovimientoCuenta,
+} from './cargos-de-gasto.util';
 
 // `cobro_grupo_id` (4-sep-2026): un ABONO concilia contra un cobro de vuelo
 // (`cobro_id`) O contra el SOBRE de un grupo (`cobro_grupo_id`), excluyentes.
@@ -819,6 +831,11 @@ interface ParteCargoGasto {
   monto_parte: number;
   moneda: string | null;
   created_at: string | null;
+  /**
+   * Quién registró la liga (`created_by` de la puente). Solo viene cuando
+   * se leyó con `{conAutor: true}` (conciliación al revés, invariante 71).
+   */
+  ligada_por?: string | null;
 }
 
 /** Estado de un gasto según `v_gasto_conciliacion` (fuente única en BD). */
@@ -837,6 +854,29 @@ const VISTA_CONCILIACION_COLS =
 
 /** Columnas de la puente que leen los lectores. */
 const PARTE_COLS = 'movimiento_id, gasto_id, monto_parte, moneda, created_at';
+
+/**
+ * CONCILIACIÓN AL REVÉS (13-oct-2026, API 0.0.75, invariante 71): quién
+ * registró la liga (FK `movimiento_bancario_gasto_created_by_fkey`).
+ */
+const PARTE_AUTOR_EMBED = 'ligador:usuario!created_by(nombre)';
+
+/**
+ * El cargo de un gasto con su cuenta, su estado de cuenta (y quién lo
+ * importó) y quién lo creó. JAMÁS `numero_cuenta`, `clabe` ni
+ * `storage_path` (la descarga es POST estados-cuenta/:id/url). FK
+ * verificadas en prod: movimiento_bancario_cuenta_bancaria_id_fkey,
+ * movimiento_bancario_estado_cuenta_id_fkey,
+ * estado_cuenta_archivo_created_by_fkey y
+ * movimiento_bancario_created_by_fkey. `gastos_n` y `orden_archivo` se
+ * agregan detrás de sus sondas.
+ */
+const MOV_DETALLE_GASTO_COLS =
+  'id, cuenta_bancaria_id, fecha, tipo, monto, descripcion, referencia, conciliado, gasto_id, origen, notas, created_at, estado_cuenta_id, cuenta:cuenta_bancaria!cuenta_bancaria_id(id, alias, banco, moneda, tipo), estado_cuenta:estado_cuenta_archivo!estado_cuenta_id(id, filename, formato, movimientos_importados, created_at, importo:usuario!created_by(nombre)), creo:usuario!created_by(nombre)';
+
+/** El gasto de la conciliación al revés (+ `embedFolio()` para su factura). */
+const GASTO_CONCILIACION_COLS =
+  'id, monto, moneda, tc_gasto, conciliado, medio_pago, tarjeta_terminacion, categoria, fecha_gasto, vuelo_id, lugar, notas, proveedor:proveedor!proveedor_id(nombre), vuelo:vuelo!vuelo_id(folio)';
 
 /**
  * Gasto de cada parte en la lista de movimientos (forma de `MovimientoGasto`).
@@ -1064,13 +1104,23 @@ export class ConciliacionService {
 
   /** Fila cruda de la puente ⇒ parte (tipos normalizados). */
   private aParte(f: Record<string, unknown>): ParteCargoGasto {
-    return {
+    const parte: ParteCargoGasto = {
       movimiento_id: f.movimiento_id as string,
       gasto_id: f.gasto_id as string,
       monto_parte: r2(Math.abs(Number(f.monto_parte) || 0)),
       moneda: typeof f.moneda === 'string' ? f.moneda : null,
       created_at: typeof f.created_at === 'string' ? f.created_at : null,
     };
+    // Solo si se pidió el autor (`{conAutor: true}`): sin él, la parte sale
+    // byte a byte como siempre.
+    if ('ligador' in f) {
+      const autor = unwrapOne(
+        f.ligador as { nombre?: unknown } | { nombre?: unknown }[] | null,
+      );
+      parte.ligada_por =
+        typeof autor?.nombre === 'string' ? autor.nombre : null;
+    }
+    return parte;
   }
 
   /**
@@ -1110,16 +1160,23 @@ export class ConciliacionService {
   /**
    * Partes de estos gastos (todas sus ligas, de cualquier cargo), en lotes
    * de ≤ 200 ids PAGINADOS por la PK de la puente (anti-tope de 1000).
+   * `conAutor` (conciliación al revés, invariante 71) agrega quién registró
+   * cada liga (`ligada_por`) en la MISMA lectura; sin la opción, la
+   * consulta es byte a byte la de siempre.
    */
   private async partesDeGastos(
     gastoIds: ReadonlyArray<string>,
+    opts: { conAutor?: boolean } = {},
   ): Promise<ParteCargoGasto[]> {
+    const cols: string = opts.conAutor
+      ? `${PARTE_COLS}, ${PARTE_AUTOR_EMBED}`
+      : PARTE_COLS;
     const filas = await this.leerPorLotesPaginado(
       gastoIds,
       (lote, desde, hasta) =>
         this.supabase.service
           .from('movimiento_bancario_gasto')
-          .select(PARTE_COLS)
+          .select(cols)
           .in('gasto_id', lote)
           .order('gasto_id', { ascending: true })
           .order('movimiento_id', { ascending: true })
@@ -8490,6 +8547,267 @@ export class ConciliacionService {
       );
       olvidar();
     }
+  }
+
+  // =====================================================================
+  // CONCILIACIÓN AL REVÉS (13-oct-2026, API 0.0.75, invariante 71): desde
+  // un GASTO, sus cargos del banco, la cuenta, el estado de cuenta y quién
+  // registró la liga. Solo LECTURAS; ningún número se recalcula.
+  // =====================================================================
+
+  /**
+   * LECTOR ÚNICO de los cargos de estos gastos: lo usan la hoja del panel
+   * (`conciliacionDeGasto`) y el Excel de gastos (pestaña «Cargos del
+   * banco»), así que los dos dicen lo mismo. El Map trae TODOS los ids
+   * pedidos (normalizados); un gasto sin cargos va con `cargos: []`.
+   *
+   * Con la sonda de partes: la puente por PK con su autor
+   * (`partesDeGastos({conAutor})`), la vista (salvo `{vista: false}`), los
+   * movimientos por id en lotes de 200 (con sus embeds y `gastos_n`;
+   * `orden_archivo` solo con su sonda) y el detalle de los lotes con
+   * `anotarPartes` —el MISMO lector de GET movimientos, best-effort: si
+   * falla, `lote.gastos` = null—. Sin la sonda (REGLA DURA de la invariante
+   * 40): el espejo `gasto_id` con una parte SINTÉTICA (|monto|, moneda de la
+   * cuenta, sin registro), `vista` y `lote` null; ningún select nombra
+   * `gastos_n`, la puente ni la vista. Nunca se nombra `cobros_n`. Un error
+   * de la puente, de los movimientos o de la vista se LANZA (jamás «sin
+   * cargos» por una lectura caída): quien llama decide.
+   */
+  async leerCargosDeGastos(
+    gastos: ReadonlyArray<{ id: string; moneda: string | null }>,
+    opts: { vista?: boolean } = {},
+  ): Promise<Map<string, CargosDeGastoLeidos>> {
+    const monedaDe = new Map<string, string | null>();
+    for (const g of gastos) {
+      if (!g.id) continue;
+      monedaDe.set(normalizarUuid(g.id), g.moneda ?? null);
+    }
+    const ids = [...monedaDe.keys()];
+    const out = new Map<string, CargosDeGastoLeidos>();
+    if (ids.length === 0) return out;
+    const conOrden = await this.ordenArchivoOn();
+    const colOrden = conOrden ? ', orden_archivo' : '';
+
+    if (!(await this.partesOn())) {
+      // ESPEJO (sin la migración 20261002000002): el gasto del cargo es
+      // `movimiento_bancario.gasto_id` y lo que aporta es su |monto|.
+      const movs = await this.leerPorLotesPaginado(ids, (lote, desde, hasta) =>
+        this.supabase.service
+          .from('movimiento_bancario')
+          .select(`${MOV_DETALLE_GASTO_COLS}${colOrden}`)
+          .in('gasto_id', lote)
+          .order('id', { ascending: true })
+          .range(desde, hasta),
+      );
+      for (const id of ids) {
+        out.set(id, { fuente: 'ESPEJO', vista: null, cargos: [] });
+      }
+      for (const m of movs) {
+        const gid =
+          typeof m.gasto_id === 'string' ? normalizarUuid(m.gasto_id) : null;
+        const destino = gid ? out.get(gid) : undefined;
+        if (!gid || !destino) continue;
+        const cuenta = unwrapOne(
+          m.cuenta as { moneda?: unknown } | { moneda?: unknown }[] | null,
+        );
+        destino.cargos.push(
+          aCargoDeGasto({
+            parte: {
+              movimiento_id: m.id as string,
+              monto_parte: r2(Math.abs(Number(m.monto) || 0)),
+              moneda: typeof cuenta?.moneda === 'string' ? cuenta.moneda : null,
+              created_at: null,
+            },
+            mov: m,
+            gasto: { id: gid, moneda: monedaDe.get(gid) ?? null },
+          }),
+        );
+      }
+      for (const v of out.values()) v.cargos = ordenarCargosDeGasto(v.cargos);
+      return out;
+    }
+
+    const partes = await this.partesDeGastos(ids, { conAutor: true });
+    const vistas = opts.vista === false ? null : await this.estadosVistaDe(ids);
+    const movs = await this.leerPorLotes(
+      partes.map((p) => p.movimiento_id),
+      (lote) =>
+        this.supabase.service
+          .from('movimiento_bancario')
+          .select(`${MOV_DETALLE_GASTO_COLS}, gastos_n${colOrden}`)
+          .in('id', lote),
+    );
+    // Detalle de los LOTES (≥ 2 gastos) con el lector de GET movimientos:
+    // `gastos[]`, `gastos_suma` y `gastos_diferencia` tal cual. Un cargo de
+    // UN gasto no lo necesita (no lleva `lote`).
+    const lotes = movs.filter((m) => Number(m.gastos_n) >= 2);
+    if (lotes.length > 0) {
+      await this.anotarPartes(lotes, await this.embedFolio());
+    }
+    const movDe = new Map(movs.map((m) => [m.id as string, m]));
+    for (const id of ids) {
+      out.set(id, {
+        fuente: 'PUENTE',
+        vista: vistas?.get(id) ?? null,
+        cargos: [],
+      });
+    }
+    for (const p of partes) {
+      const destino = out.get(p.gasto_id);
+      if (!destino) continue;
+      const mov = movDe.get(p.movimiento_id);
+      if (!mov) {
+        // Carrera (el cargo se borró entre las dos lecturas): se OMITE,
+        // jamás se inventa.
+        this.logger.warn(
+          `Conciliación al revés: el cargo ${p.movimiento_id} del gasto ${p.gasto_id} ya no se pudo leer`,
+        );
+        continue;
+      }
+      destino.cargos.push(
+        aCargoDeGasto({
+          parte: p,
+          mov,
+          gasto: { id: p.gasto_id, moneda: monedaDe.get(p.gasto_id) ?? null },
+        }),
+      );
+    }
+    for (const v of out.values()) v.cargos = ordenarCargosDeGasto(v.cargos);
+    return out;
+  }
+
+  /**
+   * Último día con movimientos de cada cuenta ACTIVA (por alias): «hasta qué
+   * día hay estado de cuenta importado». No garantiza que el periodo esté
+   * completo (un PDF puede empezar a media jornada). Best-effort: cualquier
+   * error ⇒ null (la hoja simplemente no lo pinta).
+   */
+  private async ultimosMovimientosPorCuenta(): Promise<
+    UltimoMovimientoCuenta[] | null
+  > {
+    try {
+      const { data, error } = await this.supabase.service
+        .from('cuenta_bancaria')
+        .select('id, alias, banco, moneda, tipo')
+        .eq('activa', true)
+        .order('alias', { ascending: true });
+      if (error) throw new Error(error.message);
+      const cuentas = (data ?? []) as Array<Record<string, unknown>>;
+      return await Promise.all(
+        cuentas.map(async (c) => {
+          const { data: filas, error: err } = await this.supabase.service
+            .from('movimiento_bancario')
+            .select('fecha')
+            .eq('cuenta_bancaria_id', c.id as string)
+            .order('fecha', { ascending: false })
+            .limit(1);
+          if (err) throw new Error(err.message);
+          const fila = ((filas ?? []) as Array<{ fecha?: unknown }>)[0];
+          return {
+            cuenta: cuentaDeFila(c),
+            ultima_fecha: typeof fila?.fecha === 'string' ? fila.fecha : null,
+          };
+        }),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `No se pudo leer el último movimiento por cuenta: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * `GET /v1/conciliacion/gastos/:id` — la conciliación AL REVÉS de UN
+   * gasto: su estado con el banco (`estadoBancoGasto`, la fuente única de
+   * la columna «Banco»), sus cargos (`leerCargosDeGastos`), las alertas y,
+   * si sigue pendiente, el último día importado por cuenta. CERO
+   * escrituras. Las notas crudas no viajan (solo la primera línea). 404
+   * `GASTO_NO_EXISTE`; una lectura principal caída ⇒ 500.
+   */
+  async conciliacionDeGasto(
+    gastoIdRaw: string,
+  ): Promise<ConciliacionDeGastoRespuesta> {
+    const id = normalizarUuid(gastoIdRaw);
+    const { data, error } = await this.supabase.service
+      .from('gasto')
+      .select(`${GASTO_CONCILIACION_COLS}, ${await this.embedFolio()}`)
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    if (!data) {
+      throw new NotFoundException({
+        message: 'Ese gasto ya no existe: recarga la página.',
+        error: 'GASTO_NO_EXISTE',
+      });
+    }
+    const g = data as unknown as Record<string, unknown>;
+    const moneda = typeof g.moneda === 'string' ? g.moneda : null;
+    const leidos = (await this.leerCargosDeGastos([{ id, moneda }])).get(
+      id,
+    ) ?? { fuente: 'PUENTE' as const, vista: null, cargos: [] };
+    const conciliado = g.conciliado === true;
+    const montoVinculado =
+      leidos.vista?.monto_vinculado ??
+      (leidos.fuente === 'ESPEJO'
+        ? r2(leidos.cargos.reduce((acc, c) => acc + c.parte.monto_parte, 0))
+        : 0);
+    const estado = estadoBancoGasto({
+      conciliado,
+      medio_pago: typeof g.medio_pago === 'string' ? g.medio_pago : null,
+      monto_vinculado: montoVinculado,
+    });
+    const tc = normalizarTc(g.tc_gasto);
+    const alertas = alertasConciliacionGasto({
+      conciliado,
+      vista: leidos.vista,
+      cargos: leidos.cargos,
+      tcGasto: tc,
+    });
+    const ultimos =
+      estado === 'SIN_CONCILIAR' || estado === 'PARCIAL'
+        ? await this.ultimosMovimientosPorCuenta()
+        : null;
+    const vuelo = unwrapOne(
+      g.vuelo as { folio?: unknown } | { folio?: unknown }[] | null,
+    );
+    const folioVuelo = vuelo?.folio == null ? null : Number(vuelo.folio);
+    const proveedor = unwrapOne(
+      g.proveedor as { nombre?: unknown } | { nombre?: unknown }[] | null,
+    );
+    const folioComprobante = conFolioComprobante(g).folio_comprobante;
+    return {
+      gasto: {
+        id,
+        fecha_gasto: typeof g.fecha_gasto === 'string' ? g.fecha_gasto : null,
+        categoria: typeof g.categoria === 'string' ? g.categoria : '',
+        monto: Number(g.monto) || 0,
+        moneda: moneda ?? '',
+        medio_pago: typeof g.medio_pago === 'string' ? g.medio_pago : null,
+        tarjeta_terminacion:
+          typeof g.tarjeta_terminacion === 'string'
+            ? g.tarjeta_terminacion
+            : null,
+        tc_gasto: tc,
+        conciliado,
+        vuelo_id: typeof g.vuelo_id === 'string' ? g.vuelo_id : null,
+        vuelo_folio:
+          folioVuelo != null && Number.isFinite(folioVuelo) ? folioVuelo : null,
+        proveedor:
+          typeof proveedor?.nombre === 'string' ? proveedor.nombre : null,
+        lugar: typeof g.lugar === 'string' ? g.lugar : null,
+        notas_primera_linea:
+          primeraLinea(typeof g.notas === 'string' ? g.notas : null) || null,
+        folio_comprobante:
+          typeof folioComprobante === 'string' ? folioComprobante : null,
+      },
+      estado,
+      fuente: leidos.fuente,
+      vista: leidos.vista,
+      cargos: leidos.cargos,
+      alertas,
+      ultimos_movimientos: ultimos,
+    };
   }
 
   /**

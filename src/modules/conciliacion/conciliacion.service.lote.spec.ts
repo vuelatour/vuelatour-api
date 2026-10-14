@@ -112,6 +112,12 @@ interface OpcionesFake {
   falloUpdate?: { tabla: string; error: Row | ErrorBd };
   /** Migración 20261005000002 SIN aplicar (`factura_recibida.serie`). */
   sinSerieFolio?: boolean;
+  /**
+   * Migración 20261012000001 SIN aplicar (`movimiento_bancario.orden_archivo`,
+   * conciliación al revés 13-oct-2026): la sonda y cualquier select que la
+   * nombre responden 42703.
+   */
+  sinOrdenArchivo?: boolean;
   /** Lectura puntual que falla (tabla + texto acumulado de la consulta). */
   fallaConsulta?: (tabla: string, texto: string) => boolean;
   /**
@@ -196,6 +202,17 @@ function fakeSupabase(db: Tablas, opts: OpcionesFake = {}) {
             error: {
               code: '42703',
               message: 'column factura_recibida.serie does not exist',
+            },
+            count: null,
+          };
+        }
+        if (opts.sinOrdenArchivo && /orden_archivo/.test(entrada.texto)) {
+          return {
+            data: null,
+            error: {
+              code: '42703',
+              message:
+                'column movimiento_bancario.orden_archivo does not exist',
             },
             count: null,
           };
@@ -1226,6 +1243,31 @@ describe('SIN la migración 20261002000002 — todo como el 0.0.51', () => {
     const { svc, db } = armar(mundo(), { sinPartes: true });
     await svc.linkGastos('m2231', ['g321'], USER);
     expect(mov(db, 'm2231').gasto_id).toBe('g321');
+  });
+
+  it('conciliación al revés (13-oct-2026): ESPEJO con la parte = |monto|, sin registro, vista ni lote', async () => {
+    const { svc, log } = armar(mundo(), { sinPartes: true });
+    await svc.link('m2231', 'g321', USER);
+    const r = await svc.conciliacionDeGasto('g321');
+    expect(r).toMatchObject({
+      estado: 'CONCILIADO',
+      fuente: 'ESPEJO',
+      vista: null,
+      alertas: [],
+    });
+    expect(r.cargos).toHaveLength(1);
+    expect(r.cargos[0]).toMatchObject({
+      movimiento_id: 'm2231',
+      monto: 2231.38,
+      lote: null,
+      parte: {
+        monto_parte: 2231.38,
+        moneda: 'MXN',
+        cruzada: false,
+        registro: null,
+      },
+    });
+    expect(nuevo(log)).toEqual([]);
   });
 });
 
@@ -2651,5 +2693,561 @@ describe('GASTO NO BANCARIO con justificación (6-oct-2026, API 0.0.63)', () => 
     await svc.link('m212', null, USER);
     expect(mov(db, 'm212').notas).toBeNull();
     expect(gasto(db, 'g-28').notas).toBe(NOTA_ASUR);
+  });
+});
+
+// =====================================================================
+describe('CONCILIACIÓN AL REVÉS — conciliacionDeGasto / leerCargosDeGastos (13-oct-2026)', () => {
+  // Pedido de la oficina: en Gastos, el badge «Conciliado» no decía CON QUÉ
+  // cargo. Mundo SAESA + Mary Cruz (USER), cuentas activas, una PASARELA y
+  // el archivo «scotia gastos (6).pdf» que importó Jimmy Chi (con un
+  // storage_path que JAMÁS debe salir).
+  const ARCHIVO = {
+    id: 'ec-gastos-6',
+    cuenta_bancaria_id: CTA,
+    filename: 'scotia gastos (6).pdf',
+    formato: 'pdf',
+    movimientos_importados: 87,
+    created_at: '2026-09-29T16:00:00+00:00',
+    created_by: 'u-jimmy',
+    storage_path: 'estados-cuenta/2026/09/scotia-gastos-6.pdf',
+  };
+  const CTA_PAYWISE = 'cta-paywise';
+  const conArchivo = (m: Row): Row => ({
+    estado_cuenta_id: ARCHIVO.id,
+    created_by: 'u-jimmy',
+    ...m,
+  });
+  const mundoRev = (extra: Partial<Tablas> = {}): Tablas => {
+    const base = mundo();
+    return {
+      ...base,
+      usuario: [
+        { id: 'u-jimmy', nombre: 'Jimmy Chi' },
+        { id: USER, nombre: 'Mary Cruz' },
+      ],
+      cuenta_bancaria: [
+        ...base.cuenta_bancaria.map((c) => ({
+          ...c,
+          activa: true,
+          // Lo que nunca debe viajar.
+          numero_cuenta: '0123456789',
+          clabe: '044180001234567890',
+        })),
+        {
+          id: CTA_PAYWISE,
+          alias: 'Paywise',
+          banco: 'Paywise',
+          moneda: 'MXN',
+          tipo: 'PASARELA',
+          activa: true,
+        },
+        {
+          id: 'cta-vieja',
+          alias: 'AAA CERRADA',
+          banco: 'Banamex',
+          moneda: 'MXN',
+          tipo: 'BANCO',
+          activa: false,
+        },
+      ],
+      estado_cuenta_archivo: [ARCHIVO],
+      movimiento_bancario: base.movimiento_bancario.map(conArchivo),
+      ...extra,
+    };
+  };
+  const despues = (
+    log: Array<{ tabla: string; texto: string }>,
+    desde: number,
+  ) => log.slice(desde);
+
+  it('(a) 1↔1: un cargo con su parte, sin lote, CONCILIADO y quién registró la liga', async () => {
+    const { svc } = armar(mundoRev());
+    await svc.link('m2231', 'g321', USER);
+    const r = await svc.conciliacionDeGasto('g321');
+    expect(r).toMatchObject({
+      estado: 'CONCILIADO',
+      fuente: 'PUENTE',
+      alertas: [],
+      ultimos_movimientos: null,
+      vista: {
+        n_partes: 1,
+        cruzado: false,
+        suma: 2231.38,
+        monto_vinculado: 2231.38,
+        faltante: 0,
+        cubierto: true,
+      },
+    });
+    expect(r.gasto).toEqual({
+      id: 'g321',
+      fecha_gasto: '2026-09-20',
+      categoria: 'OPERACIONES',
+      monto: 2231.38,
+      moneda: 'MXN',
+      medio_pago: 'TRANSFERENCIA',
+      tarjeta_terminacion: null,
+      tc_gasto: null,
+      conciliado: true,
+      vuelo_id: 'v-321',
+      vuelo_folio: 321,
+      proveedor: null,
+      lugar: null,
+      notas_primera_linea: 'Pago VIP SAESA',
+      folio_comprobante: null,
+    });
+    expect(r.cargos).toHaveLength(1);
+    expect(r.cargos[0]).toMatchObject({
+      movimiento_id: 'm2231',
+      fecha: '2026-09-24',
+      monto: 2231.38,
+      moneda: 'MXN',
+      lote: null,
+      cuenta: {
+        id: CTA,
+        alias: 'GASTOS GNRAL',
+        banco: 'Scotiabank',
+        moneda: 'MXN',
+        tipo: 'BANCO',
+      },
+      parte: { monto_parte: 2231.38, moneda: 'MXN', cruzada: false },
+      sin_archivo: null,
+      justificacion: null,
+      notas_oficina: null,
+    });
+    expect(r.cargos[0].parte.registro?.por).toBe('Mary Cruz');
+  });
+
+  it('(b) parte del BACKFILL (created_at 2026-10-02T00:00:00Z) ⇒ sin registro', async () => {
+    const db = mundoRev();
+    mov(db, 'm2231').gasto_id = 'g321';
+    mov(db, 'm2231').conciliado = true;
+    gasto(db, 'g321').conciliado = true;
+    const { svc } = armar(db);
+    const r = await svc.conciliacionDeGasto('g321');
+    expect(r.cargos).toHaveLength(1);
+    expect(r.cargos[0].parte.registro).toBeNull();
+  });
+
+  it('(c) lote visto desde #319: gastos[] de anotarPartes, suma y diferencia TAL CUAL; el centavo no toca el gasto', async () => {
+    const { svc, db } = armar(mundoRev());
+    await svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    await svc.linkGastos('m4462', ['g318', 'g322'], USER);
+    const r = await svc.conciliacionDeGasto('g319');
+    expect(r.estado).toBe('CONCILIADO');
+    const lote = r.cargos[0].lote!;
+    expect(lote).toMatchObject({
+      gastos_n: 3,
+      gastos_suma: 8404.2,
+      gastos_diferencia: 0,
+    });
+    expect((lote.gastos ?? []).map((g) => g.id)).toEqual([
+      'g315',
+      'g319',
+      'g326',
+    ]);
+    expect(lote.gastos![1]).toMatchObject({
+      monto_parte: 2801.4,
+      notas_primera_linea: 'Pago VIP SAESA',
+    });
+    expect(r.cargos[0].parte.monto_parte).toBe(2801.4);
+    const centavo = await svc.conciliacionDeGasto('g318');
+    expect(centavo.cargos[0].lote).toMatchObject({
+      gastos_n: 2,
+      gastos_suma: 4462.74,
+      gastos_diferencia: 0.01,
+    });
+    expect(centavo.gasto.monto).toBe(2231.37);
+    expect(gasto(db, 'g318').monto).toBe(2231.37);
+  });
+
+  it('(d) dos cargos que cubren el gasto (fecha e id); con uno solo ⇒ PARCIAL con el faltante de la vista', async () => {
+    const db = mundoRev({
+      gasto: [
+        ...mundo().gasto,
+        saesa('g-2000', 2000, 315, { fecha_gasto: '2026-09-23' }),
+      ],
+      movimiento_bancario: [
+        ...mundo().movimiento_bancario.map(conArchivo),
+        conArchivo(cargo('m-1200', 1200, { fecha: '2026-09-25' })),
+        conArchivo(cargo('m-0800', 800, { fecha: '2026-09-24' })),
+      ],
+    });
+    const { svc } = armar(db);
+    await svc.link('m-1200', 'g-2000', USER);
+    const parcial = await svc.conciliacionDeGasto('g-2000');
+    expect(parcial.estado).toBe('PARCIAL');
+    expect(parcial.vista).toMatchObject({ suma: 1200, faltante: 800 });
+    expect(parcial.ultimos_movimientos).not.toBeNull();
+    await svc.link('m-0800', 'g-2000', USER);
+    const r = await svc.conciliacionDeGasto('g-2000');
+    expect(r.estado).toBe('CONCILIADO');
+    expect(r.cargos.map((c) => [c.movimiento_id, c.parte.monto_parte])).toEqual(
+      [
+        ['m-0800', 800],
+        ['m-1200', 1200],
+      ],
+    );
+    expect(r.vista).toMatchObject({ n_partes: 2, suma: 2000, faltante: 0 });
+    expect(r.ultimos_movimientos).toBeNull();
+  });
+
+  it('(e) USD contra la cuenta en pesos: cruzada, el T.C. GUARDADO, suma 0; sin T.C. ⇒ TC_NO_REGISTRADO', async () => {
+    const usd = (tc: number | null) =>
+      mundoRev({
+        gasto: [
+          saesa('g-usd', 722.9, 315, {
+            moneda: 'USD',
+            categoria: 'REFACCION',
+            medio_pago: 'TARJETA_CORP',
+            conciliado: true,
+            tc_gasto: tc,
+          }),
+        ],
+        movimiento_bancario: [
+          conArchivo(
+            cargo('m-asp', 12451.49, {
+              fecha: '2026-08-07',
+              descripcion: 'AIRCRAFT SPRUCE AND SP',
+              gasto_id: 'g-usd',
+              conciliado: true,
+            }),
+          ),
+        ],
+      });
+    const { svc } = armar(usd(17.2244));
+    const r = await svc.conciliacionDeGasto('g-usd');
+    expect(r.cargos[0].parte).toMatchObject({
+      monto_parte: 12451.49,
+      moneda: 'MXN',
+      cruzada: true,
+    });
+    // El guardado, NO 12451.49 / 722.90 = 17.22436…
+    expect(r.gasto.tc_gasto).toBe(17.2244);
+    expect(r.vista).toMatchObject({
+      cruzado: true,
+      suma: 0,
+      monto_vinculado: 722.9,
+      faltante: 0,
+    });
+    expect(r.alertas).toEqual([]);
+    const sinTc = await armar(usd(null)).svc.conciliacionDeGasto('g-usd');
+    expect(sinTc.gasto.tc_gasto).toBeNull();
+    expect(sinTc.alertas).toEqual(['TC_NO_REGISTRADO']);
+  });
+
+  it('(f) efectivo ligado CON justificación: la razón y quién; notas de la oficina sin la línea; medio intacto', async () => {
+    const RAZON =
+      'Nadie capturó el estacionamiento del 7 de septiembre; se usa el ticket facturado del 28.';
+    const db = mundoRev({
+      vuelo: [
+        ...mundo().vuelo,
+        { id: 'v-330', folio: 330, aeronave_id: 'av-vgv' },
+      ],
+      gasto: [
+        saesa('g-28', 212, 330, {
+          fecha_gasto: '2026-09-28',
+          medio_pago: 'EFECTIVO',
+          categoria: 'TAXI',
+          notas: 'Cobro estancia (estacionamiento)',
+          updated_at: '2026-10-01T15:00:00+00:00',
+        }),
+      ],
+      movimiento_bancario: [
+        conArchivo(
+          cargo('m212', 212, {
+            fecha: '2026-09-07',
+            descripcion: 'ASUR CANCUN',
+            notas: 'Revisar con Jimmy',
+            updated_at: '2026-10-02T12:00:00+00:00',
+          }),
+        ),
+      ],
+    });
+    const { svc } = armar(db);
+    await svc.link('m212', 'g-28', USER, {
+      justificacion: RAZON,
+      usuarioNombre: 'Mary Cruz',
+    });
+    const r = await svc.conciliacionDeGasto('g-28');
+    expect(r.estado).toBe('CONCILIADO');
+    expect(r.gasto.medio_pago).toBe('EFECTIVO');
+    expect(r.cargos[0].justificacion).toMatchObject({
+      medio: 'EFECTIVO',
+      razon: RAZON,
+      firmante: 'Mary Cruz',
+      fecha: fechaNota(hoyCancun()),
+    });
+    expect(r.cargos[0].notas_oficina).toBe('Revisar con Jimmy');
+  });
+
+  it('(g) cuenta PASARELA ⇒ cuenta.tipo PASARELA', async () => {
+    const db = mundoRev({
+      gasto: [
+        saesa('g-pw', 7500, 315, { medio_pago: 'PAYWISE', conciliado: true }),
+      ],
+      movimiento_bancario: [
+        conArchivo(
+          cargo('m-pw', 7500, {
+            cuenta_bancaria_id: CTA_PAYWISE,
+            fecha: '2026-09-30',
+            descripcion: 'itzy 2da sep',
+            gasto_id: 'g-pw',
+            conciliado: true,
+          }),
+        ),
+      ],
+    });
+    const r = await armar(db).svc.conciliacionDeGasto('g-pw');
+    expect(r.cargos[0].cuenta).toEqual({
+      id: CTA_PAYWISE,
+      alias: 'Paywise',
+      banco: 'Paywise',
+      moneda: 'MXN',
+      tipo: 'PASARELA',
+    });
+  });
+
+  it('(h) sin archivo (importado el 16-jul) ⇒ el motivo y quién lo importó; con archivo, quién importó el estado de cuenta y NUNCA storage_path', async () => {
+    const db = mundoRev({
+      gasto: [
+        saesa('g-cozumel', 317.39, 315, { conciliado: true }),
+        saesa('g-con', 2231.38, 321, { conciliado: true }),
+      ],
+      movimiento_bancario: [
+        cargo('m-cozumel', 317.39, {
+          fecha: '2026-07-01',
+          descripcion: 'Aeropuerto de Cozumel',
+          estado_cuenta_id: null,
+          origen: 'IMPORTADO',
+          created_at: '2026-07-17T00:34:09Z',
+          created_by: 'u-jimmy',
+          gasto_id: 'g-cozumel',
+          conciliado: true,
+        }),
+        conArchivo(
+          cargo('m-con', 2231.38, { gasto_id: 'g-con', conciliado: true }),
+        ),
+      ],
+    });
+    const { svc } = armar(db);
+    const sin = await svc.conciliacionDeGasto('g-cozumel');
+    expect(sin.cargos[0]).toMatchObject({
+      estado_cuenta: null,
+      sin_archivo: 'IMPORTADO_SIN_ARCHIVO',
+      creado_at: '2026-07-17T00:34:09Z',
+      creado_por: 'Jimmy Chi',
+    });
+    const con = await svc.conciliacionDeGasto('g-con');
+    expect(con.cargos[0].estado_cuenta).toEqual({
+      id: ARCHIVO.id,
+      filename: 'scotia gastos (6).pdf',
+      formato: 'pdf',
+      importado_at: '2026-09-29T16:00:00+00:00',
+      importado_por: 'Jimmy Chi',
+      movimientos_importados: 87,
+    });
+    expect(con.cargos[0].sin_archivo).toBeNull();
+    for (const r of [sin, con]) {
+      const json = JSON.stringify(r);
+      expect(json).not.toContain('storage_path');
+      expect(json).not.toContain('numero_cuenta');
+      expect(json).not.toContain('clabe');
+    }
+  });
+
+  it('(i) SIN_CONCILIAR: sin cargos ni alertas, vista en 0 y el último día por cuenta ACTIVA (best-effort)', async () => {
+    const db = mundoRev();
+    const { svc } = armar(db);
+    const r = await svc.conciliacionDeGasto('g315');
+    expect(r).toMatchObject({
+      estado: 'SIN_CONCILIAR',
+      cargos: [],
+      alertas: [],
+    });
+    expect(r.vista).toMatchObject({ n_partes: 0, suma: 0, faltante: 2801.4 });
+    expect(r.ultimos_movimientos).toEqual([
+      {
+        cuenta: {
+          id: CTA,
+          alias: 'GASTOS GNRAL',
+          banco: 'Scotiabank',
+          moneda: 'MXN',
+          tipo: 'BANCO',
+        },
+        ultima_fecha: '2026-09-24',
+      },
+      {
+        cuenta: {
+          id: CTA_PAYWISE,
+          alias: 'Paywise',
+          banco: 'Paywise',
+          moneda: 'MXN',
+          tipo: 'PASARELA',
+        },
+        ultima_fecha: null,
+      },
+      {
+        cuenta: {
+          id: CTA_USD,
+          alias: 'USD',
+          banco: 'Scotiabank',
+          moneda: 'USD',
+          tipo: 'BANCO',
+        },
+        ultima_fecha: null,
+      },
+    ]);
+    // Falla la lectura de cuentas ⇒ 200 sin ese dato.
+    const falla = await armar(db, {
+      fallaLectura: ['cuenta_bancaria'],
+    }).svc.conciliacionDeGasto('g315');
+    expect(falla.estado).toBe('SIN_CONCILIAR');
+    expect(falla.ultimos_movimientos).toBeNull();
+    // CONCILIADO ⇒ null y CERO lecturas de cuenta_bancaria.
+    const w = armar(mundoRev());
+    await w.svc.link('m2231', 'g321', USER);
+    const desde = w.log.length;
+    const c = await w.svc.conciliacionDeGasto('g321');
+    expect(c.ultimos_movimientos).toBeNull();
+    expect(
+      despues(w.log, desde).filter((q) => q.tabla === 'cuenta_bancaria'),
+    ).toEqual([]);
+  });
+
+  it('(j) marcado conciliado SIN cargos ⇒ CONCILIADO_SIN_CARGOS', async () => {
+    const db = mundoRev();
+    gasto(db, 'g315').conciliado = true;
+    const r = await armar(db).svc.conciliacionDeGasto('g315');
+    expect(r.estado).toBe('CONCILIADO');
+    expect(r.cargos).toEqual([]);
+    expect(r.alertas).toEqual(['CONCILIADO_SIN_CARGOS']);
+  });
+
+  it('(k) gasto inexistente ⇒ 404 GASTO_NO_EXISTE', async () => {
+    const r = await error(armar(mundoRev()).svc.conciliacionDeGasto('g-nada'));
+    expect(r.e).toBeInstanceOf(NotFoundException);
+    expect(r.code).toBe('GASTO_NO_EXISTE');
+    expect(r.message).toBe('Ese gasto ya no existe: recarga la página.');
+  });
+
+  it('(l) ANTI-TOPE: 1,111 gastos y 1,050 partes con max-rows 1000 ⇒ todas', async () => {
+    const gastos: Row[] = [];
+    const movs: Row[] = [];
+    for (let i = 0; i < 1111; i += 1) {
+      gastos.push(saesa(`gt${i}`, 10, 315, { conciliado: i < 1050 }));
+      if (i < 1050) {
+        movs.push(
+          conArchivo(
+            cargo(`mt${i}`, 10, { gasto_id: `gt${i}`, conciliado: true }),
+          ),
+        );
+      }
+    }
+    const { svc } = armar(
+      mundoRev({ gasto: gastos, movimiento_bancario: movs }),
+      {
+        maxFilas: 1000,
+      },
+    );
+    const leidos = await svc.leerCargosDeGastos(
+      gastos.map((g) => ({ id: g.id as string, moneda: 'MXN' })),
+    );
+    expect(leidos.size).toBe(1111);
+    const total = [...leidos.values()].reduce((a, v) => a + v.cargos.length, 0);
+    expect(total).toBe(1050);
+    expect(leidos.get('gt1110')).toMatchObject({
+      fuente: 'PUENTE',
+      cargos: [],
+    });
+  }, 30_000);
+
+  it('(m) falla la lectura de gastos de anotarPartes ⇒ lote.gastos null y LOTE_SIN_DETALLE; lo demás intacto', async () => {
+    const w = armar(mundoRev());
+    await w.svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    const { svc } = armar(w.db, {
+      fallaConsulta: (tabla, texto) =>
+        tabla === 'gasto' &&
+        texto.includes(
+          'select(id, monto, moneda, categoria, fecha_gasto, vuelo_id, lugar, notas, medio_pago,',
+        ),
+    });
+    const r = await svc.conciliacionDeGasto('g319');
+    expect(r.estado).toBe('CONCILIADO');
+    expect(r.cargos[0].lote).toEqual({
+      gastos_n: 3,
+      gastos: null,
+      gastos_suma: null,
+      gastos_diferencia: null,
+    });
+    expect(r.cargos[0].parte.monto_parte).toBe(2801.4);
+    expect(r.alertas).toEqual(['LOTE_SIN_DETALLE']);
+  });
+
+  it('(n) una lectura PRINCIPAL caída (movimientos, puente o vista) LANZA: jamás «sin cargos»', async () => {
+    const w = armar(mundoRev());
+    await w.svc.link('m2231', 'g321', USER);
+    for (const tabla of [
+      'movimiento_bancario',
+      TABLA_PARTES,
+      VISTA_CONCILIACION,
+    ]) {
+      const { svc } = armar(w.db, { fallaLectura: [tabla] });
+      await expect(svc.conciliacionDeGasto('g321')).rejects.toThrow('caída');
+    }
+  });
+
+  it('(o) orden_archivo SOLO con su sonda', async () => {
+    const con = armar(mundoRev());
+    await con.svc.link('m2231', 'g321', USER);
+    const d1 = con.log.length;
+    await con.svc.conciliacionDeGasto('g321');
+    expect(
+      despues(con.log, d1).some(
+        (q) =>
+          q.tabla === 'movimiento_bancario' &&
+          q.texto.includes(', gastos_n, orden_archivo)'),
+      ),
+    ).toBe(true);
+    const sin = armar(con.db, { sinOrdenArchivo: true });
+    const r = await sin.svc.conciliacionDeGasto('g321');
+    expect(r.cargos[0].orden_archivo).toBeNull();
+    expect(
+      sin.log.filter(
+        (q) =>
+          /orden_archivo/.test(q.texto) &&
+          q.texto.trim() !== 'select(orden_archivo)',
+      ),
+    ).toEqual([]);
+  });
+
+  it('(p)(r) ningún select nombra cobros_n, storage_path, numero_cuenta ni clabe; cero escrituras', async () => {
+    const w = armar(mundoRev());
+    await w.svc.linkGastos('m8404', ['g315', 'g319', 'g326'], USER);
+    const desde = w.log.length;
+    await w.svc.conciliacionDeGasto('g319');
+    await w.svc.conciliacionDeGasto('g315');
+    const qs = despues(w.log, desde);
+    expect(qs.length).toBeGreaterThan(0);
+    for (const q of qs) {
+      expect(q.texto).not.toMatch(/cobros_n|storage_path|numero_cuenta|clabe/);
+      expect(q.texto).not.toMatch(/update\(|insert\(|delete\(/);
+      expect(q.tabla.startsWith('rpc:')).toBe(false);
+    }
+  });
+
+  it('(q) {vista: false} no consulta v_gasto_conciliacion', async () => {
+    const w = armar(mundoRev());
+    await w.svc.link('m2231', 'g321', USER);
+    const desde = w.log.length;
+    const leidos = await w.svc.leerCargosDeGastos(
+      [{ id: 'g321', moneda: 'MXN' }],
+      { vista: false },
+    );
+    expect(leidos.get('g321')).toMatchObject({ fuente: 'PUENTE', vista: null });
+    expect(leidos.get('g321')!.cargos).toHaveLength(1);
+    expect(
+      despues(w.log, desde).filter((q) => q.tabla === VISTA_CONCILIACION),
+    ).toEqual([]);
   });
 });

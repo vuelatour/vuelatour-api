@@ -1604,7 +1604,9 @@ aeronaveVuelo)` (+ guarda: un DTO que re-envía el avión que YA opera el
       conciliado=true|false` filtra por `gasto.conciliado` (false incluye los
       parciales); el panel lo manda con `?banco=conciliados|sin_conciliar` y el
       Excel hereda el filtro. Solo lectura: el cruce sigue viviendo en
-      Conciliación.
+      Conciliación — desde el 0.0.75 el badge de ADMIN/FACTURACION abre la
+      conciliación al revés y el Excel trae el detalle del banco a quien
+      concilia (invariante 71).
 
 19. **Pre-cierre «Tacómetros en revisión»: QUÉ tramos son (14-sep-2026).**
     El item `tacos_en_revision` es ADITIVO — `clave`, `titulo` y `count`
@@ -3966,7 +3968,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       (solo BODEGA lo sigue siendo): **invariante 48**.
     - **Lectores** (sobre la puente / `v_gasto_conciliacion`, regla de parte
       cruzada; nunca el |monto| del movimiento): `sumasLigadasDe`,
-      `cargosDeGasto` (monto = `monto_parte`), `estadoConciliacion`,
+      `cargosDeGasto` (monto = `monto_parte`), `leerCargosDeGastos` y
+      `conciliacionDeGasto` (conciliación al revés, invariante 71; la puente
+      con su autor por `partesDeGastos({conAutor})`), `estadoConciliacion`,
       `conflictoGastoCubierto` (`details.movimientos[].monto_parte` y
       `details.gasto_id`), `candidatosCercanos`, `gastosSinBanco`,
       `reporteGastosSinBancoXlsx`, `candidatoPorFaltante`,
@@ -7447,6 +7451,145 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `tipo-cambio.service.oficiales.spec` y los dos del pre-cierre en
       `profit-sharing`.
 
+71. **CONCILIACIÓN AL REVÉS DE UN GASTO (13-oct-2026, lote 2, API 0.0.75,
+    SIN migración).** Pedido de la oficina: en Gastos el badge «Conciliado»
+    de la columna «Banco» no decía CON QUÉ cargo; había que ir a
+    Conciliación y buscarlo a ojo. Ahora, desde el gasto: el cargo, la
+    cuenta, el estado de cuenta de origen y quién registró la liga; y el
+    Excel de gastos sale COMPLETO (antes se cortaba en 1,000 filas: prod
+    tiene 1,112 gastos) con ese detalle para quien concilia.
+    - **Ruta** `GET /v1/conciliacion/gastos/:id` en `ConciliacionController`
+      SIN `@Roles` propio: hereda los de la clase, que ahora es
+      `@Roles(...ROLES_CONCILIACION)` (`conciliacion/roles-conciliacion.ts`,
+      FUENTE ÚNICA de «quién ve el banco» = [ADMIN, FACTURACION]; la
+      metadata quedó idéntica). `roles-conciliacion.spec` la compara con la
+      metadata de la clase y con `ROLES_POR_BUCKET['estados-cuenta']`
+      (invariante 37): abrir uno sin el otro truena el spec. COORDINADOR,
+      ANALISTA, SOCIO, PILOTO, MECANICO y VISITANTE ⇒ 403 del RolesGuard;
+      uuid inválido ⇒ 400 (`ParseUUIDPipe`); gasto inexistente ⇒ 404
+      `GASTO_NO_EXISTE` «Ese gasto ya no existe: recarga la página.»; una
+      lectura PRINCIPAL caída (gasto, puente, movimientos o vista) ⇒ 500,
+      JAMÁS «sin cargos». CERO escrituras.
+    - **Lector ÚNICO** `ConciliacionService.leerCargosDeGastos(gastos,
+      {vista?})` ⇒ `Map<id, {fuente, vista, cargos}>` con TODOS los ids
+      pedidos (normalizados; sin cargos ⇒ `[]`). Lo usan la hoja
+      (`conciliacionDeGasto`) y el Excel: los dos dicen lo mismo. Orden de
+      lectura con la sonda de partes: puente por PK con su autor
+      (`partesDeGastos(ids, {conAutor: true})` = `PARTE_COLS +
+      ligador:usuario!created_by(nombre)`, la MISMA lectura paginada; sin la
+      opción, byte a byte la de siempre) → vista (salvo `{vista: false}`) →
+      movimientos por id en lotes de 200 con `MOV_DETALLE_GASTO_COLS`
+      (cuenta, estado de cuenta + quién lo importó, quién creó el cargo;
+      JAMÁS `numero_cuenta`, `clabe` ni `storage_path`) + `gastos_n` +
+      `orden_archivo` SOLO con su sonda → `anotarPartes` (el lector de GET
+      movimientos) SOLO para los cargos con `gastos_n` ≥ 2, best-effort (si
+      falla, `lote.gastos` = null y la alerta LOTE_SIN_DETALLE). Una parte
+      cuyo cargo ya no se lee (carrera) se OMITE con un warn, jamás se
+      inventa. Sin la sonda (REGLA DURA de la invariante 40): ESPEJO
+      `gasto_id` con parte SINTÉTICA (|monto|, moneda de la cuenta, sin
+      registro), `vista`/`lote` null, `fuente: 'ESPEJO'`. Nunca nombra
+      `cobros_n`. Un error de la puente, los movimientos o la vista se LANZA.
+    - **Ningún número se recalcula** (modelo PURO en
+      `conciliacion/cargos-de-gasto.util.ts`, con spec): estado =
+      `estadoBancoGasto` (la misma de la columna «Banco»; `monto_vinculado`
+      de la vista, en ESPEJO Σ de las partes); aporte de cada cargo =
+      `monto_parte`; suma y faltante = los de `v_gasto_conciliacion` TAL
+      CUAL (un cruzado tiene suma 0 y `monto_vinculado` = monto por
+      definición: el panel nunca escribe «suman $0.00»); T.C. =
+      `gasto.tc_gasto` GUARDADO (`normalizarTc`), nunca monto_parte/monto;
+      diferencia del lote = la de `anotarPartes` (`diferenciaLote`), que
+      jamás ajusta un gasto. Cargos ordenados por fecha y luego por id.
+    - **«Sin archivo» por ORIGEN y día Cancún** (`motivoSinArchivo`): con
+      `estado_cuenta_id` ⇒ null; `origen` MANUAL ⇒ CAPTURA_MANUAL; cualquier
+      otro ⇒ IMPORTADO_SIN_ARCHIVO. Prod (13-oct): 124 movimientos sin
+      archivo, TODOS IMPORTADO del 16-jul-2026 en hora Cancún (17-jul en
+      UTC), 7 de ellos ligados, 0 MANUAL — decir «capturado a mano» sería
+      falso; además viaja quién importó el cargo (`creado_por`).
+    - **«Registró la liga» SOLO desde `LIGAS_REGISTRADAS_DESDE`**
+      (`2026-10-02T05:00:00.000Z` = 2-oct-2026 00:00 Cancún,
+      `registroDeParte`): las partes anteriores son el BACKFILL de
+      20261002000002, que copió `updated_at`/`updated_by` del CARGO (373 de
+      506 en prod; la última del backfill 2026-10-01T22:54:57Z, la primera
+      real 2026-10-02T22:14:39Z). Para ellas `registro` = null y el Excel
+      dice «(anterior al 02-oct-2026)». En las ligas automáticas el registro
+      nombra a quien importó el estado de cuenta o capturó el gasto. Si
+      alguien vuelve a correr un backfill, la regla se revisa.
+    - **Justificación** de un gasto no bancario ligado (invariante 48):
+      `justificacionVinculoDeCargo(notas del cargo, gastoId)` en
+      `common/vinculo-no-bancario.util.ts` — la ÚNICA lectura de esa línea,
+      por la LLAVE «gasto 3f9a1c2e» (en un lote cada gasto la suya; una
+      línea vieja sin llave no se reconoce y se queda en las notas).
+      `notas_oficina` = las notas del cargo SIN las líneas del vínculo; las
+      notas crudas no viajan (del gasto solo `notas_primera_linea`).
+    - **Alertas** (solo hechos guardados, en este orden):
+      CONCILIADO_SIN_CARGOS (marcado conciliado sin partes),
+      ESTADO_DESFASADO (`conciliado` ≠ `cubierto` de la vista con partes),
+      TC_NO_REGISTRADO (parte cruzada sin `tc_gasto`), LOTE_SIN_DETALLE.
+      `ultimos_movimientos` (solo SIN_CONCILIAR o PARCIAL): última `fecha`
+      de cada cuenta `activa` por alias, best-effort (falla ⇒ null; en un
+      CONCILIADO ni se lee). La DESCARGA del estado de cuenta es el `POST
+      /v1/conciliacion/estados-cuenta/:id/url` de siempre (1 h, mismos
+      roles), NO `/storage/firmar`.
+    - **Excel de gastos** (`GET /v1/expenses/export`, roles SIN cambio):
+      `listParaXlsx` lee en páginas de 1000 (`PAGINA_XLSX_GASTOS`) hasta
+      20,000 (`TOPE_XLSX_GASTOS`; al llegar, el subtítulo dice « · OJO: se
+      exportaron 20,000 de N gastos (tope del Excel); acota los filtros»).
+      `list()` desempata por `id` (17 grupos de prod empatados en fecha +
+      alta: el offset repetía o saltaba filas, también en `listGastosAll`
+      del panel). Con `puedeVerDetalleBanco(rol)` (ADMIN/FACTURACION)
+      `listXlsx(q, {detalleBanco: true})` usa `hojas`: la pestaña de siempre
+      (mismo título, subtítulo, resumen, columnas y filas) + AL FINAL
+      «Factura», «Cargo del banco», «Estado de cuenta», y la pestaña «Cargos
+      del banco» (22 columnas, una fila por par gasto × cargo, «Diferencia
+      del lote» resaltada con |d| ≥ 0.005, T.C. como TEXTO, sin fila de
+      totales: no se suman monedas). COORDINADOR/ANALISTA: el libro de
+      siempre (raíz, sin `hojas`). Las dos lecturas del detalle son
+      INDEPENDIENTES y best-effort: cargos (`leerCargosDeGastos(…, {vista:
+      false})` solo de los conciliados o con algo vinculado; `faltante` y
+      `monto_vinculado` ya vienen de `list()`) ⇒ si fallan (o no hay módulo
+      de conciliación, @Optional) las dos celdas dicen «No se pudo leer el
+      detalle del banco (vuelve a exportar)» en las filas CONCILIADO o
+      PARCIAL, el subtítulo lo avisa y no sale la pestaña 2; folios
+      (`foliosDeGastos`, `folioComprobanteDeFila` con la sonda de serie de
+      la invariante 44) ⇒ si fallan, «Factura» vacía con su nota. Etiquetas
+      PURAS en `expenses/gastos-xlsx.util.ts` («30-sep-2026 · EJE SCOTIA ·
+      $11,205.60 (paga 4 gastos; a este $2,801.40)», «… (T.C. 17.2244)», «…
+      · faltan $X de $Y», «scotia eje sep.pdf (importado 06-oct-2026)»,
+      «Sin archivo (importado el 16-jul-2026)»). «Concepto» sale de
+      `conceptoDeGasto` (la misma expresión de siempre, ahora compartida).
+    - **`anexarConciliacionParcial`** (aditivos de `GET /expenses`): el
+      universo suma los NO bancarios que pueden tener un cargo ligado con
+      justificación (todo menos BODEGA) y siguen sin conciliar; esas filas
+      reciben `monto_vinculado`/`faltante`/`parcial` SOLO si tienen algo
+      ligado (si no, byte a byte igual): un efectivo ligado a medias dice
+      «Parcial» en vez de «—» (hoy 0 casos). Las bancarias, como siempre.
+    - Las dos ligas sospechosas que encontró el diseño (2d37d95e ↔ «ASA
+      CANCUN» $8,939.38 y 340c3dc6 ↔ «ASA CANCUN I\CARR CANC» $14,197.17)
+      ya se corrigieron con la invariante 70; la hoja muestra cualquier liga
+      tal cual (ni corrige ni avisa del T.C. contra el oficial: eso vive en
+      el pre-cierre, invariante 70).
+    - Specs: `roles-conciliacion.spec`, `cargos-de-gasto.util.spec` (filas
+      reales: lote SAESA, EJE SCOTIA 0.02, cruzado 913a7d19, sin archivo del
+      16-jul, Paywise; bordes del corte; nunca storage_path/numero_cuenta/
+      clabe), `vinculo-no-bancario.util.spec` (bloque
+      `justificacionVinculoDeCargo`), `conciliacion.service.lote.spec`
+      (describe «CONCILIACIÓN AL REVÉS» casos a–r: 1↔1 con registro,
+      backfill, lote con 0 y 0.01, dos cargos y PARCIAL, cruzado y
+      TC_NO_REGISTRADO, efectivo justificado, pasarela, sin archivo,
+      SIN_CONCILIAR con `ultimos_movimientos`, 404, anti-tope de 1,050
+      partes, lote best-effort, lecturas principales que lanzan,
+      `orden_archivo` con su sonda —el fake ganó `sinOrdenArchivo`—, sin
+      `cobros_n`/`storage_path`/`clabe`, `{vista: false}`, cero escrituras;
+      y ESPEJO en «SIN la migración»), `conciliacion.controller.lote.spec`
+      (metadata + HTTP 200/403/400/404), `gastos-xlsx.util.spec`,
+      `expenses.service.xlsx.spec` (1,112 filas en 2 páginas, desempate,
+      COORDINADOR igual que hoy, ADMIN con 2 hojas, fallas con su nota, sin
+      módulo, sin la sonda de serie, tope),
+      `expenses.controller.export.spec` (el rol decide `detalleBanco`;
+      PILOTO 403; cabeceras), `expenses.service.conciliado.spec` (no
+      bancarios con y sin la puente) y `expenses.service.spec` (orden con
+      `id`).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -8177,6 +8320,23 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `lib/admin/facturas-emitidas.ts` (lectura, formulario y aviso ámbar).
 
 ## Migraciones y despliegue
+
+- **13-oct-2026 — SIN migración** para la conciliación al revés (lote 2,
+  invariante 71): solo lecturas de objetos que ya existen en prod (la
+  puente con `created_at`/`created_by`, `v_gasto_conciliacion`,
+  `movimiento_bancario.gastos_n/orden_archivo/origen/estado_cuenta_id/
+  created_by`, `estado_cuenta_archivo`, `cuenta_bancaria.activa` y las FK
+  de los embeds, verificadas por SELECT). Sin dry-run, SQL Editor ni
+  `get_advisors`. Orden: API → panel (los dos órdenes son seguros: panel
+  antes ⇒ la hoja dice «falta actualizar el API»; API antes ⇒ solo cambia
+  el Excel de ADMIN/FACTURACION). Smoke como ADMIN: `GET
+  /v1/conciliacion/gastos/4e29c476-a956-440f-bd83-2c70f78279d4` ⇒ 1 cargo
+  (73a8d809…), `lote.gastos_n` 4 y `gastos_diferencia` 0, `parte.registro.por`
+  «Diego Ramírez», `estado_cuenta.filename` «scotia eje sep.pdf» y NINGUNA
+  llave `storage_path`; como COORDINADOR ⇒ 403 y el Excel de siempre; el
+  Excel sin filtros como ADMIN ⇒ más de 1,000 filas y 2 pestañas. Nota
+  para la oficina: el Excel ya sale completo (los totales por categoría
+  suben a su valor real) y trae la pestaña nueva «Cargos del banco».
 
 - **13-oct-2026 — SIN migración** para el cruce de gastos en dólares
   contra cargos en pesos (lote 2, invariante 70): solo lecturas nuevas
@@ -9317,6 +9477,19 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **Conciliación al revés (13-oct-2026, invariante 71)**: (a)
+  `?conciliado=false` (filtro «Sin conciliar» de Gastos) también devuelve
+  efectivo y bodega (NO_APLICA): comportamiento previo; (b) abrir el detalle
+  del banco (hoja y columnas del Excel) a COORDINADOR/ANALISTA es decisión
+  del cliente (hoy no leen movimientos, cuentas ni el bucket
+  `estados-cuenta`); (c) la hoja no compara el T.C. guardado contra el
+  oficial del día: ese aviso vive en el pre-cierre (invariante 70); (d)
+  **URGENTE, fuera de este alcance**: `ConciliacionService.resumen()` lee
+  `movimiento_bancario` SIN paginar (999 filas en prod el 13-oct; PostgREST
+  corta en 1000): con la próxima importación las tarjetas por cuenta de
+  Conciliación y `diferencia_lotes` contarán de menos en silencio. Arreglo:
+  `leerPaginado` ordenado por id, como el resto de los lectores.
 
 - **Cruce USD ↔ pesos (13-oct-2026, invariante 70)**: (1) el aviso del
   pre-cierre `gastos_usd_tc_fuera_de_lugar` no tiene «descartar»: una compra

@@ -160,20 +160,23 @@ describe('ExpensesService.list — capturado_en', () => {
     ).toBe(false);
   });
 
-  it('orden por default = fecha del consumo; orden=captura = capturado_en desc', async () => {
+  it('orden por default = fecha del consumo; orden=captura = capturado_en desc (+ id: desempate ESTABLE, 13-oct-2026)', async () => {
+    // El `id` final es intencional (invariante 71): con empates exactos de
+    // fecha + alta (17 grupos en prod) el paginado por offset repetía o
+    // saltaba filas.
     const a = armar({});
     await a.service.list(filtrosBase);
     const ordenesA = a.llamadas
       .filter((l) => l.metodo === 'order')
       .map((l) => l.args[0]);
-    expect(ordenesA).toEqual(['fecha_gasto', 'created_at']);
+    expect(ordenesA).toEqual(['fecha_gasto', 'created_at', 'id']);
 
     const b = armar({});
     await b.service.list({ ...filtrosBase, orden: 'captura' });
     const ordenesB = b.llamadas
       .filter((l) => l.metodo === 'order')
       .map((l) => l.args[0]);
-    expect(ordenesB).toEqual(['capturado_en', 'created_at']);
+    expect(ordenesB).toEqual(['capturado_en', 'created_at', 'id']);
   });
 });
 

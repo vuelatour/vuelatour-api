@@ -42,10 +42,13 @@ import {
 } from './dto/conciliacion.dto';
 import { ConciliacionService } from './conciliacion.service';
 import { MENSAJE_LOTE_AMBOS } from './conciliacion-parcial.util';
+import { ROLES_CONCILIACION } from './roles-conciliacion';
 
 @ApiTags('Conciliación')
 @ApiBearerAuth()
-@Roles(Rol.ADMIN, Rol.FACTURACION)
+// ROLES_CONCILIACION = [ADMIN, FACTURACION] (fuente única de «quién ve el
+// banco», 13-oct-2026, invariante 71): la metadata queda idéntica.
+@Roles(...ROLES_CONCILIACION)
 @Controller({ path: 'conciliacion', version: '1' })
 export class ConciliacionController {
   constructor(private readonly conciliacion: ConciliacionService) {}
@@ -302,6 +305,17 @@ export class ConciliacionController {
   })
   estadoCuentaUrl(@Param('id', ParseUUIDPipe) id: string) {
     return this.conciliacion.estadoCuentaUrl(id);
+  }
+
+  // CONCILIACIÓN AL REVÉS (13-oct-2026, API 0.0.75, invariante 71): roles
+  // de la CLASE (ROLES_CONCILIACION). Otro segmento que `gastos-sin-banco`.
+  @Get('gastos/:id')
+  @ApiOperation({
+    summary:
+      'Conciliación AL REVÉS de un gasto (13-oct-2026, API 0.0.75, invariante 71): sus cargos del banco (cuenta sin número ni CLABE, leyenda, referencia y lo que cada cargo aporta = monto_parte); el estado de cuenta del que salió o por qué no hay archivo; el lote que paga el cargo con su diferencia; la justificación de un gasto no bancario; quién registró la liga (desde el 2-oct-2026); alertas y, si sigue pendiente, el último día importado por cuenta. Solo lectura. 404 GASTO_NO_EXISTE.',
+  })
+  conciliacionDeGasto(@Param('id', ParseUUIDPipe) id: string) {
+    return this.conciliacion.conciliacionDeGasto(id);
   }
 
   @Get('movimientos')

@@ -4,6 +4,7 @@ import {
   fechaMensaje,
   fechaNota,
   JUSTIFICACION_MAX,
+  justificacionVinculoDeCargo,
   limpiarJustificacion,
   lineaNotaCargo,
   lineaNotaGasto,
@@ -508,5 +509,100 @@ describe('mensajes de error', () => {
     ).toBe(
       'Los gastos del 21 sep y 22 sep están en otra moneda y no se pagaron con el banco: solo se pueden vincular a un cargo de su misma moneda, para no cambiarles el tipo de cambio.',
     );
+  });
+});
+
+describe('justificacionVinculoDeCargo — la línea de ESTE gasto (conciliación al revés, 13-oct-2026)', () => {
+  const RAZON_MARY = 'Mari lo facturó para no perder la deducción';
+  const FIRMA_MARY: FirmaVinculo = {
+    justificacion: RAZON_MARY,
+    usuario: 'Mary Cruz',
+    hoy: '2026-10-06',
+  };
+  const linea28 = lineaNotaCargo(GASTO_28, FIRMA_MARY);
+  const linea27 = lineaNotaCargo(GASTO_27, FIRMA_MARY);
+
+  it('ida y vuelta con lineaNotaCargo (caso #330)', () => {
+    expect(justificacionVinculoDeCargo(linea28, GASTO_28.id)).toEqual({
+      linea: linea28,
+      medio: 'EFECTIVO',
+      razon: RAZON_MARY,
+      firmante: 'Mary Cruz',
+      fecha: '06-oct-2026',
+    });
+    // El id se compara en minúsculas (los 8 primeros caracteres).
+    expect(
+      justificacionVinculoDeCargo(linea28, GASTO_28.id.toUpperCase())?.razon,
+    ).toBe(RAZON_MARY);
+  });
+
+  it('un lote con dos estacionamientos iguales: a cada gasto SOLO la suya, por id', () => {
+    const otra = lineaNotaCargo(GASTO_27, {
+      ...FIRMA_MARY,
+      justificacion: 'El del 27 también lo facturó Mari',
+      usuario: 'Mari',
+    });
+    const notas = `${linea28}\n${otra}`;
+    expect(justificacionVinculoDeCargo(notas, GASTO_28.id)).toMatchObject({
+      razon: RAZON_MARY,
+      firmante: 'Mary Cruz',
+    });
+    expect(justificacionVinculoDeCargo(notas, GASTO_27.id)).toMatchObject({
+      linea: otra,
+      razon: 'El del 27 también lo facturó Mari',
+      firmante: 'Mari',
+    });
+    expect(linea27).not.toBe(linea28);
+  });
+
+  it('una referencia ajena ⇒ null', () => {
+    expect(
+      justificacionVinculoDeCargo(
+        linea28,
+        'ffffffff-0000-4000-8000-000000000000',
+      ),
+    ).toBeNull();
+  });
+
+  it('una razón con « — » se corta en el ÚLTIMO (el del firmante)', () => {
+    const razon = 'Ticket A — ticket B del mismo día';
+    const l = lineaNotaCargo(GASTO_28, { ...FIRMA_MARY, justificacion: razon });
+    expect(justificacionVinculoDeCargo(l, GASTO_28.id)).toMatchObject({
+      razon,
+      firmante: 'Mary Cruz',
+      fecha: '06-oct-2026',
+    });
+  });
+
+  it('renglones de la oficina antes y después; también con CRLF', () => {
+    const notas = `Revisar con Jimmy\n\n${linea28}\nOtra nota de la oficina`;
+    expect(justificacionVinculoDeCargo(notas, GASTO_28.id)?.linea).toBe(
+      linea28,
+    );
+    const crlf = `Revisar con Jimmy\r\n\r\n  ${linea28}  \r\nOtra nota`;
+    expect(justificacionVinculoDeCargo(crlf, GASTO_28.id)).toMatchObject({
+      linea: linea28,
+      razon: RAZON_MARY,
+      fecha: '06-oct-2026',
+    });
+  });
+
+  it('la forma vieja SIN llave no se reconoce (se queda en las notas de la oficina)', () => {
+    const vieja = `Vinculado a gasto en EFECTIVO del 28-sep-2026 (Taxi / estacionamiento · vuelo #330 · $212.00): ${RAZON_MARY} — Mary Cruz, 06-oct-2026`;
+    expect(justificacionVinculoDeCargo(vieja, GASTO_28.id)).toBeNull();
+    expect(quitarNotasVinculoNoBancario(vieja)).toBe(vieja);
+  });
+
+  it('«sin fecha» ⇒ fecha null; notas null o id vacío ⇒ null', () => {
+    const sinFecha = lineaNotaCargo(GASTO_28, { ...FIRMA_MARY, hoy: '' });
+    expect(sinFecha.endsWith(', sin fecha')).toBe(true);
+    expect(justificacionVinculoDeCargo(sinFecha, GASTO_28.id)).toMatchObject({
+      razon: RAZON_MARY,
+      fecha: null,
+    });
+    expect(justificacionVinculoDeCargo(null, GASTO_28.id)).toBeNull();
+    expect(justificacionVinculoDeCargo(undefined, GASTO_28.id)).toBeNull();
+    expect(justificacionVinculoDeCargo(linea28, '')).toBeNull();
+    expect(justificacionVinculoDeCargo(linea28, null)).toBeNull();
   });
 });

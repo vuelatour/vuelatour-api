@@ -105,7 +105,30 @@ import { NotificationsService } from '../realtime/notifications.service';
 import {
   PyservicesService,
   type TablaColumnaPayload,
+  type TablaHojaPayload,
 } from '../pyservices/pyservices.service';
+import type { CargosDeGastoLeidos } from '../conciliacion/cargos-de-gasto.util';
+import {
+  embedFolioGasto,
+  folioComprobanteDeFila,
+} from '../../common/folio-comprobante.util';
+import { serieFolioRecibidaDisponible } from '../../common/serie-folio-recibida-disponible.util';
+import {
+  COLUMNAS_BANCO_PRINCIPAL,
+  COLUMNAS_HOJA_CARGOS_BANCO,
+  conceptoDeGasto,
+  etiquetaCargosGastoReporte,
+  etiquetaEstadosCuentaReporte,
+  filasHojaCargosBanco,
+  NOTA_DETALLE_BANCO_NO_DISPONIBLE,
+  NOTA_FOLIOS_NO_DISPONIBLES,
+  notaTruncadoXlsx,
+  PAGINA_XLSX_GASTOS,
+  subtituloHojaCargosBanco,
+  TEXTO_DETALLE_BANCO_NO_DISPONIBLE,
+  TITULO_HOJA_CARGOS_BANCO,
+  TOPE_XLSX_GASTOS,
+} from './gastos-xlsx.util';
 import { VisionService } from '../vision/vision.service';
 import { IaUsoService } from '../ia-uso/ia-uso.service';
 import { Rol } from '../../common/types/auth.types';
@@ -292,9 +315,21 @@ export class ExpensesService {
     ) as typeof LIST_COLS;
   }
 
-  /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
-  async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
-    const { data } = await this.list({ ...filters, limit: 5000, offset: 0 });
+  /**
+   * Gastos por avión/categoría en Excel (respeta los filtros del listado).
+   * 13-oct-2026 (invariante 71): se lee PAGINADO (`listParaXlsx`; antes un
+   * solo range de 5000 que PostgREST cortaba en 1000 sin avisar) y, con
+   * `detalleBanco` (ADMIN / FACTURACION, `puedeVerDetalleBanco`), la
+   * pestaña de siempre gana al FINAL «Factura», «Cargo del banco» y «Estado
+   * de cuenta» y se agrega la pestaña «Cargos del banco» (un par gasto ×
+   * cargo por fila) — todo del lector único `leerCargosDeGastos`. Sin la
+   * opción, el libro de siempre (raíz, sin `hojas`).
+   */
+  async listXlsx(
+    filters: ListGastosQuery,
+    opts: { detalleBanco?: boolean } = {},
+  ): Promise<Buffer> {
+    const { data, count, truncado } = await this.listParaXlsx(filters);
     // Etiquetas legibles (el reporte lo lee gente de oficina, no la BD).
     // Medio de pago: fuente única `etiquetaMedioPago` (medio-tarjeta.util).
     // Comprobante = qué entregó el piloto (documento físico); Facturación =
@@ -335,12 +370,10 @@ export class ExpensesService {
       const medio = (x.medio_pago as string) ?? '';
       const comp = (x.estatus_comprobante as string) ?? '';
       const fact = (x.estatus_facturacion as string) ?? '';
-      const notas = ((x.notas as string | null) ?? '').split('\n')[0].trim();
-      const lugar = ((x.lugar as string | null) ?? '').trim();
       return [
         (x.fecha_gasto as string) ?? '',
         etiquetaCategoriaGasto(x.categoria as string | null),
-        notas || lugar,
+        conceptoDeGasto(x),
         // Gasto repartido entre aviones: no está "pendiente" de nada.
         Array.isArray(x.repartos) && x.repartos.length > 0
           ? `Repartido (${x.repartos.length})`
@@ -410,15 +443,210 @@ export class ExpensesService {
       filters.desde || filters.hasta
         ? ` · ${filters.desde ?? 'inicio'} a ${filters.hasta ?? 'hoy'}`
         : '';
+    // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
+    const subtitulo = `Generado ${this.cancunDate(new Date().toISOString())}${rango}${truncado ? notaTruncadoXlsx(data.length, count) : ''}`;
+    if (!opts.detalleBanco) {
+      return this.pyservices.generateTablaXlsx({
+        titulo: 'Gastos por avión / categoría',
+        subtitulo,
+        resumen_titulo: 'Total del periodo por categoría',
+        resumen,
+        columnas,
+        filas,
+      });
+    }
+
+    // ---- Detalle del banco (ADMIN / FACTURACION, invariante 71) ----
+    const det = await this.detalleBancoParaExcel(data);
+    const leidos = det.leidos;
+    const folios = det.folios;
+    const estados = data.map((x) => estadoBancoGasto(x));
+    const folioDe = (id: string): string =>
+      folios ? (folios.get(id) ?? '') : '';
+    const filasConBanco = data.map((x, i) => {
+      const id = x.id as string;
+      const estado = estados[i];
+      if (!leidos) {
+        // Lectura caída: se AVISA en las filas que sí tienen banco (jamás
+        // una celda vacía que parezca «sin cargo»).
+        const aviso =
+          estado === 'CONCILIADO' || estado === 'PARCIAL'
+            ? TEXTO_DETALLE_BANCO_NO_DISPONIBLE
+            : '';
+        return [...filas[i], folioDe(id), aviso, aviso];
+      }
+      const cargos = leidos.get(id)?.cargos ?? [];
+      return [
+        ...filas[i],
+        folioDe(id),
+        etiquetaCargosGastoReporte({
+          estado,
+          cargos,
+          monto: Number(x.monto),
+          moneda: typeof x.moneda === 'string' ? x.moneda : null,
+          faltante: x.faltante == null ? null : Number(x.faltante),
+          tcGasto: normalizarTc(x.tc_gasto),
+        }),
+        etiquetaEstadosCuentaReporte(cargos),
+      ];
+    });
+    const hojas: TablaHojaPayload[] = [
+      {
+        titulo: 'Gastos por avión / categoría',
+        subtitulo: `${subtitulo}${leidos ? '' : NOTA_DETALLE_BANCO_NO_DISPONIBLE}${folios ? '' : NOTA_FOLIOS_NO_DISPONIBLES}`,
+        resumen_titulo: 'Total del periodo por categoría',
+        resumen,
+        columnas: [...columnas, ...COLUMNAS_BANCO_PRINCIPAL],
+        filas: filasConBanco,
+      },
+    ];
+    if (leidos) {
+      const detalle: Array<Array<string | number | null>> = [];
+      const resaltes: Array<{ fila: number; col: number }> = [];
+      data.forEach((x, i) => {
+        const id = x.id as string;
+        const deGasto = leidos.get(id);
+        if (!deGasto || deGasto.cargos.length === 0) return;
+        const r = filasHojaCargosBanco({
+          fila: x,
+          leidos: deGasto,
+          etiquetaBanco: etiquetaEstadoBanco(estados[i]),
+          folio: folioDe(id),
+        });
+        for (const z of r.resaltes) {
+          resaltes.push({ fila: z.fila + detalle.length, col: z.col });
+        }
+        detalle.push(...r.filas);
+      });
+      hojas.push({
+        titulo: TITULO_HOJA_CARGOS_BANCO,
+        subtitulo: subtituloHojaCargosBanco(rango, detalle.length > 0),
+        columnas: [...COLUMNAS_HOJA_CARGOS_BANCO],
+        filas: detalle,
+        resaltes,
+      });
+    }
+    // Como la auditoría Paywise: con `hojas`, la raíz solo nombra el libro.
     return this.pyservices.generateTablaXlsx({
       titulo: 'Gastos por avión / categoría',
-      // Día Cancún (no UTC): de noche el UTC ya cambió de fecha.
-      subtitulo: `Generado ${this.cancunDate(new Date().toISOString())}${rango}`,
-      resumen_titulo: 'Total del periodo por categoría',
-      resumen,
-      columnas,
-      filas,
+      subtitulo,
+      columnas: [{ label: 'Resumen' }],
+      filas: [],
+      hojas,
     });
+  }
+
+  /**
+   * Todas las filas del filtro en páginas de `PAGINA_XLSX_GASTOS` (el
+   * `max-rows` de PostgREST) hasta `tope`. `truncado` = se llegó al tope y
+   * quedaron filas (el subtítulo lo avisa). Cada página pasa por `list()`
+   * (mismos filtros, aditivos y desempate por id).
+   */
+  private async listParaXlsx(
+    filters: ListGastosQuery,
+    tope: number = TOPE_XLSX_GASTOS,
+  ): Promise<{
+    data: Array<Record<string, unknown>>;
+    count: number;
+    truncado: boolean;
+  }> {
+    const data: Array<Record<string, unknown>> = [];
+    let count = 0;
+    for (let offset = 0; offset < tope; offset += PAGINA_XLSX_GASTOS) {
+      const page = await this.list({
+        ...filters,
+        limit: Math.min(PAGINA_XLSX_GASTOS, tope - offset),
+        offset,
+      });
+      count = page.count;
+      data.push(...page.data);
+      if (page.data.length < PAGINA_XLSX_GASTOS || data.length >= page.count) {
+        break;
+      }
+    }
+    return {
+      data,
+      count,
+      truncado: data.length >= tope && count > data.length,
+    };
+  }
+
+  /**
+   * Número de factura de cada gasto (`folioComprobanteDeFila`, la fuente
+   * única de conciliación) en lotes de 200. `serie`/`folio` de la factura
+   * recibida SOLO con su sonda (REGLA DURA de la invariante 44). Un error
+   * se LANZA (quien llama pone el aviso).
+   */
+  private async foliosDeGastos(
+    ids: ReadonlyArray<string>,
+  ): Promise<Map<string, string | null>> {
+    const embed = embedFolioGasto(
+      await serieFolioRecibidaDisponible(this.supabase.service),
+    );
+    const unicos = [...new Set(ids.filter(Boolean))];
+    const out = new Map<string, string | null>();
+    for (let i = 0; i < unicos.length; i += 200) {
+      const { data, error } = await this.supabase.service
+        .from('gasto')
+        .select(`id, ${embed}`)
+        .in('id', unicos.slice(i, i + 200));
+      if (error) throw new Error(error.message);
+      for (const f of (data ?? []) as unknown as Array<
+        Record<string, unknown>
+      >) {
+        if (typeof f.id === 'string') out.set(f.id, folioComprobanteDeFila(f));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Las DOS lecturas del detalle del banco del Excel, INDEPENDIENTES y
+   * best-effort: (a) los cargos de los gastos conciliados o con algo
+   * vinculado (`leerCargosDeGastos`, sin la vista: `monto_vinculado` y
+   * `faltante` ya vienen de `list()`, que lee la misma vista); (b) los
+   * números de factura de todos. null = esa lectura falló (o no hay módulo
+   * de conciliación): el Excel lo AVISA, nunca lo calla.
+   */
+  private async detalleBancoParaExcel(
+    data: ReadonlyArray<Record<string, unknown>>,
+  ): Promise<{
+    leidos: Map<string, CargosDeGastoLeidos> | null;
+    folios: Map<string, string | null> | null;
+  }> {
+    let leidos: Map<string, CargosDeGastoLeidos> | null = null;
+    try {
+      if (!this.conciliacion) {
+        throw new Error('el módulo de conciliación no está disponible');
+      }
+      const conAlgo = data
+        .filter((x) => x.conciliado === true || Number(x.monto_vinculado) > 0)
+        .map((x) => ({
+          id: x.id as string,
+          moneda: typeof x.moneda === 'string' ? x.moneda : null,
+        }));
+      leidos =
+        conAlgo.length > 0
+          ? await this.conciliacion.leerCargosDeGastos(conAlgo, {
+              vista: false,
+            })
+          : new Map<string, CargosDeGastoLeidos>();
+    } catch (err) {
+      this.logger.warn(
+        `Excel de gastos sin el detalle del banco: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      leidos = null;
+    }
+    let folios: Map<string, string | null> | null = null;
+    try {
+      folios = await this.foliosDeGastos(data.map((x) => x.id as string));
+    } catch (err) {
+      this.logger.warn(
+        `Excel de gastos sin los números de factura: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      folios = null;
+    }
+    return { leidos, folios };
   }
 
   async list(filters: ListGastosQuery) {
@@ -427,14 +655,21 @@ export class ExpensesService {
       .select(await this.listCols(), { count: 'exact' });
     // orden=captura (7-sep): "lo último que capturaron" sin importar la fecha
     // del ticket. Default: fecha del consumo y, dentro del día, llegada.
+    // `id` = desempate ESTABLE (13-oct-2026, invariante 71): en prod hay 17
+    // grupos (40 gastos) con la misma fecha_gasto + created_at y 4 grupos (79
+    // gastos) con el mismo capturado_en + created_at; con offset, una página
+    // podía repetir o saltarse filas (Excel paginado y `listGastosAll` del
+    // panel).
     q =
       filters.orden === 'captura'
         ? q
             .order('capturado_en', { ascending: false, nullsFirst: false })
             .order('created_at', { ascending: false })
+            .order('id', { ascending: true })
         : q
             .order('fecha_gasto', { ascending: false })
-            .order('created_at', { ascending: false });
+            .order('created_at', { ascending: false })
+            .order('id', { ascending: true });
     q = q.range(filters.offset, filters.offset + filters.limit - 1);
 
     if (filters.vuelo_id) q = q.eq('vuelo_id', filters.vuelo_id);
@@ -520,17 +755,25 @@ export class ExpensesService {
    * `monto_vinculado` / `faltante` / `parcial` (aditivos, 14-sep-2026): con
    * pagos parciales un gasto bancario puede tener cargos ligados sin estar
    * `conciliado` — el selector «Vincular gasto» del panel necesita ver
-   * «faltan $X de $Y» para elegir bien. Solo se consultan los gastos de
-   * medio BANCARIO (los únicos que cruzan con el banco): una consulta `in`
-   * por lotes, y si falla no rompe el listado (el dato es presentación).
+   * «faltan $X de $Y» para elegir bien. Se consultan los gastos de medio
+   * BANCARIO y (13-oct-2026, invariante 71) los NO bancarios que pueden
+   * tener un cargo ligado con justificación (invariante 48: todo menos
+   * BODEGA) y siguen sin conciliar: una consulta `in` por lotes, y si falla
+   * no rompe el listado (el dato es presentación). Una fila no bancaria
+   * recibe los aditivos SOLO si tiene algo ligado (si no, queda byte a byte
+   * igual): así un efectivo ligado a medias dice «Parcial» y no «—».
    */
   private async anexarConciliacionParcial(
     rows: Array<Record<string, unknown>>,
   ): Promise<void> {
+    const esBancario = (r: Record<string, unknown>) =>
+      MEDIOS_PAGO_BANCARIOS.includes(r.medio_pago as string);
+    const noBancarioLigable = (r: Record<string, unknown>) =>
+      !esBancario(r) && r.medio_pago !== 'BODEGA' && r.conciliado !== true;
     const ids = [
       ...new Set(
         rows
-          .filter((r) => MEDIOS_PAGO_BANCARIOS.includes(r.medio_pago as string))
+          .filter((r) => esBancario(r) || noBancarioLigable(r))
           .map((r) => r.id as string)
           .filter(Boolean),
       ),
@@ -577,11 +820,19 @@ export class ExpensesService {
       return;
     }
     for (const r of rows) {
-      if (!MEDIOS_PAGO_BANCARIOS.includes(r.medio_pago as string)) continue;
+      if (esBancario(r)) {
+        const ligado = suma.get(r.id as string) ?? 0;
+        r.monto_vinculado = ligado;
+        r.faltante = faltanteDe(Number(r.monto), ligado);
+        r.parcial = ligado > 0 && r.conciliado !== true;
+        continue;
+      }
+      if (!noBancarioLigable(r)) continue;
       const ligado = suma.get(r.id as string) ?? 0;
+      if (!(ligado > 0)) continue;
       r.monto_vinculado = ligado;
       r.faltante = faltanteDe(Number(r.monto), ligado);
-      r.parcial = ligado > 0 && r.conciliado !== true;
+      r.parcial = r.conciliado !== true;
     }
   }
 

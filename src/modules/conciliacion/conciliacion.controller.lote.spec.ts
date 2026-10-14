@@ -4,7 +4,11 @@
 // `movimientos/:id/gastos-candidatos` con los roles de la clase.
 jest.mock('./conciliacion.service', () => ({ ConciliacionService: class {} }));
 
-import { ValidationPipe, VersioningType } from '@nestjs/common';
+import {
+  NotFoundException,
+  ValidationPipe,
+  VersioningType,
+} from '@nestjs/common';
 import type { INestApplication } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
@@ -38,6 +42,20 @@ describe('ConciliacionController — lote por metadata', () => {
       Rol.FACTURACION,
     ]);
   });
+
+  it('conciliación al revés (13-oct-2026): GET gastos/:id hereda los roles de la clase', () => {
+    const proto = ConciliacionController.prototype as unknown as Record<
+      string,
+      object
+    >;
+    expect(
+      Reflect.getMetadata(ROLES_KEY, proto.conciliacionDeGasto),
+    ).toBeUndefined();
+    expect(Reflect.getMetadata(ROLES_KEY, ConciliacionController)).toEqual([
+      Rol.ADMIN,
+      Rol.FACTURACION,
+    ]);
+  });
 });
 
 describe('ConciliacionController — lote por HTTP', () => {
@@ -49,6 +67,8 @@ describe('ConciliacionController — lote por HTTP', () => {
     gastosCandidatosDeMovimiento: jest
       .fn()
       .mockResolvedValue({ candidatos: [], truncado: false }),
+    conciliacionDeGasto: jest.fn().mockResolvedValue({ cargos: [] }),
+    gastosSinBanco: jest.fn().mockResolvedValue({ data: [] }),
   };
   const http = (): Servidor => app.getHttpServer() as Servidor;
 
@@ -254,4 +274,49 @@ describe('ConciliacionController — lote por HTTP', () => {
       ).status,
     ).toBe(403);
   });
+
+  it('conciliación al revés: GET gastos/:id ⇒ ADMIN y FACTURACION 200; el resto 403; uuid inválido 400; 404 GASTO_NO_EXISTE', async () => {
+    const ruta = `/v1/conciliacion/gastos/${G1}`;
+    for (const r of [Rol.ADMIN, Rol.FACTURACION]) {
+      rol = r;
+      const res = await request(http()).get(ruta);
+      expect(res.status).toBe(200);
+      expect(svc.conciliacionDeGasto).toHaveBeenLastCalledWith(G1);
+    }
+    svc.conciliacionDeGasto.mockClear();
+    for (const r of [
+      Rol.COORDINADOR,
+      Rol.ANALISTA,
+      Rol.SOCIO,
+      Rol.PILOTO,
+      Rol.VISITANTE,
+    ]) {
+      rol = r;
+      expect((await request(http()).get(ruta)).status).toBe(403);
+    }
+    expect(svc.conciliacionDeGasto).not.toHaveBeenCalled();
+    rol = Rol.ADMIN;
+    expect(
+      (await request(http()).get('/v1/conciliacion/gastos/nada')).status,
+    ).toBe(400);
+    expect(svc.conciliacionDeGasto).not.toHaveBeenCalled();
+    svc.conciliacionDeGasto.mockRejectedValueOnce(
+      new NotFoundException({
+        message: 'Ese gasto ya no existe: recarga la página.',
+        error: 'GASTO_NO_EXISTE',
+      }),
+    );
+    const nf = await request(http()).get(ruta);
+    expect(nf.status).toBe(404);
+    expect(nf.body).toMatchObject({
+      code: 'GASTO_NO_EXISTE',
+      message: 'Ese gasto ya no existe: recarga la página.',
+    });
+    // gastos-sin-banco (otro segmento) sigue llegando a su método.
+    const sb = await request(http()).get(
+      '/v1/conciliacion/gastos-sin-banco?desde=2026-09-01&hasta=2026-09-30',
+    );
+    expect(sb.status).toBe(200);
+    expect(svc.gastosSinBanco).toHaveBeenCalledWith('2026-09-01', '2026-09-30');
+  }, 20_000);
 });

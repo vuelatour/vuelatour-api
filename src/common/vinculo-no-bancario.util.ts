@@ -400,6 +400,51 @@ export function quitarNotasVinculoNoBancario(
   return texto.trim() ? texto : null;
 }
 
+/**
+ * La línea del vínculo de UN gasto, leída de las notas de su cargo
+ * (conciliación al revés, 13-oct-2026, invariante 71).
+ */
+export interface JustificacionVinculo {
+  /** El renglón tal cual (recortado). */
+  linea: string;
+  /** Medio en MAYÚSCULAS como lo escribió `medioNota` («EFECTIVO»). */
+  medio: string;
+  /** La razón escrita (si trae « — », se corta en el ÚLTIMO). */
+  razon: string;
+  /** Quién ligó («Oficina» si no hubo nombre). */
+  firmante: string;
+  /** `dd-mmm-aaaa` de la liga; null si no cuadra o dice «sin fecha». */
+  fecha: string | null;
+}
+
+const RE_FECHA_FINAL = new RegExp(`, (${FECHA_RE})$`);
+
+/**
+ * La línea «Vinculado a gasto en EFECTIVO … · gasto 3f9a1c2e): <razón> —
+ * <usuario>, 06-oct-2026» de ESTE gasto en las notas de su cargo, por la
+ * LLAVE (`refGastoNota`): en un lote con dos estacionamientos iguales a
+ * cada gasto le toca SOLO la suya. Es la ÚNICA lectura de esa línea en el
+ * API (invariante 48): misma `RE_LINEA_CARGO` que el alta y el retiro. Una
+ * línea vieja SIN llave no se reconoce (se queda en las notas de la
+ * oficina, nunca se pierde). Sin notas o sin id ⇒ null.
+ */
+export function justificacionVinculoDeCargo(
+  notasCargo: string | null | undefined,
+  gastoId: string | null | undefined,
+): JustificacionVinculo | null {
+  const ref = refGastoNota(gastoId);
+  if (!ref || typeof notasCargo !== 'string') return null;
+  for (const r of renglones(notasCargo)) {
+    const linea = r.texto.trim();
+    const m = RE_LINEA_CARGO.exec(linea);
+    if (!m || m[4].toLowerCase() !== ref) continue;
+    const f = RE_FECHA_FINAL.exec(linea);
+    const fecha = f && f[1] !== 'sin fecha' ? f[1] : null;
+    return { linea, medio: m[1], razon: m[5], firmante: m[6], fecha };
+  }
+  return null;
+}
+
 /** «28 sep», «27 sep y 28 sep», «24 sep, 27 sep, 28 sep y 2 más». */
 function listaFechas(fechas: readonly string[]): string {
   const vistas = fechas.slice(0, 3);

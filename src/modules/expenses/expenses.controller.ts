@@ -42,6 +42,7 @@ import {
 } from './dto/combustible-masivo.dto';
 import { CombustibleMasivoService } from './combustible-masivo.service';
 import { ExpensesService } from './expenses.service';
+import { puedeVerDetalleBanco } from '../conciliacion/roles-conciliacion';
 
 @ApiTags('Expenses')
 @ApiBearerAuth()
@@ -55,12 +56,9 @@ export class ExpensesController {
   @Get()
   @ApiOperation({
     summary:
-      'List gastos (with filters). Pilotos see only own captures. Los gastos de medio BANCARIO traen los aditivos monto_vinculado / faltante / parcial (pagos parciales, 14-sep-2026).',
+      'List gastos (with filters). Pilotos see only own captures. Los gastos de medio BANCARIO traen los aditivos monto_vinculado / faltante / parcial (pagos parciales, 14-sep-2026) y los NO bancarios (salvo bodega) que tengan algún cargo ligado (efectivo con justificación) traen los aditivos monto_vinculado / faltante / parcial (13-oct-2026, invariante 71). Orden con desempate por id.',
   })
-  async list(
-    @Query() q: ListGastosQuery,
-    @CurrentUser() c: AuthenticatedUser,
-  ) {
+  async list(@Query() q: ListGastosQuery, @CurrentUser() c: AuthenticatedUser) {
     const filters = { ...q };
     // Pilotos y mecánicos solo ven sus propias capturas: se fuerza SIEMPRE su
     // propio id (con ?usuario_captura_id=<otro> listaban gastos ajenos). El
@@ -82,8 +80,8 @@ export class ExpensesController {
     ) {
       // El sello de confirmación es del PANEL (28-ago): a la app ni viaja.
       const res = await this.expenses.list(filters);
-      for (const g of (res as { data?: Array<Record<string, unknown>> })
-        .data ?? []) {
+      for (const g of (res as { data?: Array<Record<string, unknown>> }).data ??
+        []) {
         delete g.verificado_por;
         delete g.verificado_at;
         delete g.verificador;
@@ -127,10 +125,16 @@ export class ExpensesController {
   @Get('export')
   @Roles(Rol.ADMIN, Rol.COORDINADOR, Rol.FACTURACION, Rol.ANALISTA)
   @ApiOperation({
-    summary: 'Gastos por avión/categoría en Excel (respeta filtros)',
+    summary:
+      'Gastos por avión/categoría en Excel (respeta filtros). Lectura paginada de 1000 en 1000 (antes se cortaba en 1000 filas; tope 20,000 con aviso). ADMIN/FACTURACION: + «Factura», «Cargo del banco», «Estado de cuenta» al final y la pestaña «Cargos del banco» (conciliación al revés, invariante 71); COORDINADOR/ANALISTA: el libro de siempre.',
   })
-  async export(@Query() q: ListGastosQuery): Promise<StreamableFile> {
-    const buffer = await this.expenses.listXlsx(q);
+  async export(
+    @Query() q: ListGastosQuery,
+    @CurrentUser() c: AuthenticatedUser,
+  ): Promise<StreamableFile> {
+    const buffer = await this.expenses.listXlsx(q, {
+      detalleBanco: puedeVerDetalleBanco(c.rol),
+    });
     return new StreamableFile(buffer, {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       disposition: 'attachment; filename="gastos.xlsx"',

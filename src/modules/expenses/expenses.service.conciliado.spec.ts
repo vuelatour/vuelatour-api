@@ -20,6 +20,7 @@ import {
   TABLA_PARTES,
   VISTA_CONCILIACION,
 } from '../conciliacion/conciliacion-partes.fixture-spec';
+import { estadoBancoGasto } from './estado-banco.util';
 
 /**
  * CANDADO DE CONCILIACIÓN con PAGOS PARCIALES (14-sep-2026). Antes el
@@ -42,7 +43,10 @@ type Tablas = Record<string, Row[]>;
 const GASTO = 'gasto-1';
 const USER = 'user-1';
 
-function fakeSupabase(db: Tablas, sinPartes = false) {
+/** Bitácora de los `in(...)` (qué ids pidió cada lectura). */
+type ConsultaIn = { tabla: string; col: string; vals: unknown[] };
+
+function fakeSupabase(db: Tablas, sinPartes = false, consultas?: ConsultaIn[]) {
   const service = {
     from(tabla: string) {
       const filtros: Array<(r: Row) => boolean> = [];
@@ -87,6 +91,7 @@ function fakeSupabase(db: Tablas, sinPartes = false) {
           return api;
         },
         in(col: string, vals: unknown[]) {
+          consultas?.push({ tabla, col, vals: [...vals] });
           filtros.push((r) => vals.includes(r[col]));
           return api;
         },
@@ -138,10 +143,10 @@ function mundo(cargos: number[], conciliado = false): Tablas {
 /** Modo del describe.each: con la puente (0.0.52) o sin la migración. */
 let SIN_PARTES = false;
 
-function armar(db: Tablas) {
+function armar(db: Tablas, consultas?: ConsultaIn[]) {
   if (!SIN_PARTES) sembrarPartes(db);
   return new ExpensesService(
-    fakeSupabase(db, SIN_PARTES),
+    fakeSupabase(db, SIN_PARTES, consultas),
     {} as NotificationsService,
     {} as PyservicesService,
     {} as VisionService,
@@ -377,5 +382,113 @@ describe('candado con un cargo que paga VARIOS gastos (lote)', () => {
       faltante: 0,
       parcial: false,
     });
+  });
+});
+
+/**
+ * CONCILIACIÓN AL REVÉS (13-oct-2026, invariante 71): un gasto NO bancario
+ * (efectivo, PERSONAL_*) ligado con justificación (invariante 48) también
+ * recibe los aditivos SI tiene algo ligado: un efectivo de $424.00 ligado a
+ * un cargo de $212.00 dice «Parcial» en la columna «Banco» (antes «—»).
+ * Sin cargo, la fila queda byte a byte igual; el efectivo ya conciliado y la
+ * BODEGA ni se consultan. Con la puente y sin la migración (espejo).
+ */
+describe.each([
+  ['con la puente', false],
+  ['SIN la migración (espejo)', true],
+])('anexarConciliacionParcial — no bancarios ligados (%s)', (_m, sinPartes) => {
+  beforeEach(() => {
+    SIN_PARTES = sinPartes;
+  });
+  afterAll(() => {
+    SIN_PARTES = false;
+  });
+
+  const db = (): Tablas => ({
+    gasto: [],
+    cuenta_bancaria: [{ id: 'cta-mxn', moneda: 'MXN' }],
+    movimiento_bancario: [
+      {
+        id: 'm212',
+        gasto_id: 'g-ef',
+        monto: -212,
+        cuenta_bancaria_id: 'cta-mxn',
+      },
+      {
+        id: 'm-bod',
+        gasto_id: 'g-bod',
+        monto: -50,
+        cuenta_bancaria_id: 'cta-mxn',
+      },
+    ],
+    gasto_reparto: [],
+  });
+  const anexar = async (
+    svc: ExpensesService,
+    rows: Array<Record<string, unknown>>,
+  ) =>
+    (
+      svc as unknown as {
+        anexarConciliacionParcial: (r: typeof rows) => Promise<void>;
+      }
+    ).anexarConciliacionParcial(rows);
+
+  it('efectivo de 424.00 con UNA parte de 212.00 ⇒ Parcial; sin parte, la fila idéntica; bancarios como siempre', async () => {
+    const consultas: ConsultaIn[] = [];
+    const svc = armar(db(), consultas);
+    const rows: Array<Record<string, unknown>> = [
+      { id: 'g-ef', monto: 424, medio_pago: 'EFECTIVO', conciliado: false },
+      { id: 'g-libre', monto: 100, medio_pago: 'EFECTIVO', conciliado: false },
+      { id: 'g-ok', monto: 80, medio_pago: 'EFECTIVO', conciliado: true },
+      { id: 'g-bod', monto: 50, medio_pago: 'BODEGA', conciliado: false },
+      {
+        id: 'g-tdc',
+        monto: 99.5,
+        medio_pago: 'TARJETA_CORP',
+        conciliado: false,
+      },
+    ];
+    await anexar(svc, rows);
+    expect(rows[0]).toMatchObject({
+      monto_vinculado: 212,
+      faltante: 212,
+      parcial: true,
+    });
+    expect(estadoBancoGasto(rows[0])).toBe('PARCIAL');
+    // Sin cargo: byte a byte (sin las llaves nuevas).
+    expect(rows[1]).toEqual({
+      id: 'g-libre',
+      monto: 100,
+      medio_pago: 'EFECTIVO',
+      conciliado: false,
+    });
+    expect(rows[2]).toEqual({
+      id: 'g-ok',
+      monto: 80,
+      medio_pago: 'EFECTIVO',
+      conciliado: true,
+    });
+    expect(rows[3]).toEqual({
+      id: 'g-bod',
+      monto: 50,
+      medio_pago: 'BODEGA',
+      conciliado: false,
+    });
+    // Bancario sin cargo: los aditivos de siempre.
+    expect(rows[4]).toMatchObject({
+      monto_vinculado: 0,
+      faltante: 99.5,
+      parcial: false,
+    });
+    // El efectivo ya conciliado y la bodega NI se consultan.
+    const tabla = sinPartes ? 'movimiento_bancario' : VISTA_CONCILIACION;
+    const pedidos = consultas
+      .filter((c) => c.tabla === tabla)
+      .flatMap((c) => c.vals);
+    expect(pedidos).toEqual(
+      expect.arrayContaining(['g-ef', 'g-libre', 'g-tdc']),
+    );
+    expect(pedidos).not.toContain('g-ok');
+    expect(pedidos).not.toContain('g-bod');
   });
 });
