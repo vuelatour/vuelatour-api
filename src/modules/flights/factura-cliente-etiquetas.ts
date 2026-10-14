@@ -1,10 +1,11 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { columnaOpcional } from '../../common/columna-opcional.util';
 import { facturaEmitidaDisponible } from '../../common/factura-emitida-disponible.util';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   cuentasQueExigenFactura,
+  origenesQueExigenFactura,
   vueloExigeFactura,
-  type CobroExigeFacturaRow,
   type ExigenciaFacturaVuelo,
 } from '../../common/cuentas-cobro';
 import {
@@ -15,6 +16,12 @@ import {
   type FacturaEmitidaEtiquetaRow,
   type VueloFacturaRow,
 } from './factura-cliente.util';
+import {
+  esSolicitudAutomatica,
+  solicitudYaNoAplica,
+  type CobroParaFactura,
+  type VueloSolicitudRow,
+} from './factura-solicitud.util';
 
 /** Ids por consulta `.in(...)`: la URL de PostgREST no crece sin tope. */
 const LOTE_IDS = 200;
@@ -27,10 +34,14 @@ const MAX_PAGINAS_COBROS = 20;
 type VueloFacturaFila = VueloFacturaRow & {
   id: string;
   estado?: unknown;
+  /** T.C. de la cotización: respaldo de `cobrosEnUsd` (0.0.77). */
+  tc_usd_mxn?: unknown;
   factura_solicitada_at?: unknown;
+  /** Nota de la solicitud: distingue la AUTOMÁTICA (0.0.77). */
+  factura_solicitud_nota?: unknown;
 };
 
-type CobroFila = CobroExigeFacturaRow & { id?: unknown; vuelo_id?: unknown };
+type CobroFila = CobroParaFactura & { vuelo_id?: unknown };
 
 /**
  * DETALLE de la factura de un vuelo (13-oct-2026, invariante 60): lo que la
@@ -42,10 +53,17 @@ export interface FacturaDeVuelo {
   registrada: string | null;
   /**
    * Según TODOS los cobros del vuelo, neto de reembolsos por cuenta y moneda
-   * (`vueloExigeFactura`).
+   * (`vueloExigeFactura` con `cobrado` = `cobrosEnUsd(cobros,
+   * vuelo.tc_usd_mxn)`: un anticipo devuelto completo, por cualquier vía, no
+   * exige —decisión del cliente del 14-oct-2026—).
    */
   exigencia: ExigenciaFacturaVuelo;
-  /** Solicitud VIVA (`vuelo.factura_solicitada_at`; false sin la migración). */
+  /**
+   * Solicitud viva QUE CUENTA: manual (también en un CANCELADO que retuvo
+   * dinero: es el único aviso) o automática mientras el vuelo exige (una
+   * automática que ya no aplica NO pone «Pendiente de factura»; 14-oct-2026,
+   * revisión F2); false sin la migración.
+   */
   solicitada: boolean;
   /** `vuelo.estado` (null si el vuelo no existe). */
   estado: string | null;
@@ -53,6 +71,30 @@ export interface FacturaDeVuelo {
   cuentas_exigen: string[];
   /** Lo que dice la columna «FACTURA VUELATOUR» (`etiquetaFacturaVuelo`). */
   etiqueta: string | null;
+  /**
+   * ADITIVOS (14-oct-2026, API 0.0.77, invariante 60), al final:
+   * `origenes_exigen` = `origenesQueExigenFactura` («en HSBC Pesos» / «por
+   * Transferencia»; el chip del panel); `solicitud_automatica` = solicitud
+   * viva con la nota `PREFIJO_NOTA_SOLICITUD_AUTOMATICA`;
+   * `solicitud_ya_no_aplica` = automática y el vuelo ya no exige
+   * (`solicitudYaNoAplica`, sin mirar el estado del vuelo).
+   */
+  origenes_exigen: string[];
+  solicitud_automatica: boolean;
+  solicitud_ya_no_aplica: boolean;
+  /**
+   * SOLO con `{ conCobros: true }` (el aviso de transición de la solicitud
+   * automática): las filas de `cobro_vuelo` leídas y el T.C. del vuelo
+   * (respaldo de `cobrosEnUsd`). Sin la opción, las llaves no existen.
+   */
+  cobros?: CobroParaFactura[];
+  tc_vuelo?: number | null;
+}
+
+/** Opciones INTERNAS del lector (sin ellas, el contrato de siempre). */
+export interface OpcionesFacturasDeVuelos {
+  /** Cada detalle trae además `cobros` y `tc_vuelo` (aviso de transición). */
+  conCobros?: boolean;
 }
 
 /**
@@ -78,8 +120,12 @@ async function cobrosDeVuelosPaginado(
     const { data, error } = await sb
       .from('cobro_vuelo')
       // `moneda` (revisión 13-oct-2026): la exigencia se decide por el NETO
-      // de cada cuenta y moneda (un reembolso total ya no exige factura).
-      .select('id, vuelo_id, monto, moneda, cuenta_destino, metodo_cobro')
+      // de cada cuenta y moneda. `tc_usd_mxn` (14-oct-2026, API 0.0.77):
+      // `cobrado` = `cobrosEnUsd` del vuelo, insumo de la regla 2 del
+      // anticipo devuelto (devolución CRUZADA).
+      .select(
+        'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro',
+      )
       .in('vuelo_id', lote)
       .order('id', { ascending: true })
       .range(desde, desde + PAGINA_COBROS - 1);
@@ -101,27 +147,33 @@ async function cobrosDeVuelosPaginado(
  * (legado) → etiqueta del estatus («Facturado» / «Factura elaborada y
  * enviada») → paso 5 (13-oct-2026): sin factura registrada, «Pendiente de
  * factura» si en una cuenta que exige factura QUEDÓ dinero (neto de sus
- * reembolsos por moneda, `vueloExigeFactura`; revisión 13-oct-2026) o si
- * hay solicitud VIVA desde el vuelo; «No lleva
- * factura» si hay cobros y ninguno exige; `null` = SIN COBROS (desde ahora
- * la celda vacía significa «sin cobros», no «sin factura»).
+ * reembolsos por moneda, `vueloExigeFactura`; revisión 13-oct-2026; un
+ * anticipo devuelto completo, por cualquier vía, ya no exige: decisión del
+ * cliente del 14-oct-2026) o si la solicitud cuenta (`solicitada`: manual
+ * viva o automática mientras el vuelo exige); «No lleva factura» si hay
+ * cobros y ninguno exige; `null` = SIN COBROS (desde ahora la celda vacía
+ * significa «sin cobros», no «sin factura»).
  *
  * EN LOTE: 4 consultas por cada 200 vuelos — `factura` + columnas de `vuelo`
  * + `cobro_vuelo` (PAGINADA, nunca `.limit()`) y la cuarta al puente
  * `factura_emitida_vuelo` SOLO con la migración 20260924000003 aplicada —
- * nunca N+1.
+ * nunca N+1. Desde el 0.0.77 el select de `vuelo` suma SIEMPRE
+ * `tc_usd_mxn` (respaldo de `cobrosEnUsd`) y, con la sonda, la nota de la
+ * solicitud; el de `cobro_vuelo`, `tc_usd_mxn` (sin consultas nuevas).
  *
  * Tolerante a las migraciones pendientes (`columnaOpcional`, re-sondeo ≤ 10
  * min): sin `20260923000001` se lee solo `facturado`; sin `20260924000001`
  * no se pide `factura_folio`; sin `20260924000003` no se consulta el
- * registro de emitidas ni se pide `factura_solicitada_at` (`solicitada:
- * false`) — el Excel sale igual que antes, jamás un 500. Cualquier OTRO
- * error de lectura (en cualquiera de las 4) se lanza (misma regla que el
- * resto del libro: nunca un reporte con una columna vacía en silencio).
+ * registro de emitidas ni se piden `factura_solicitada_at` /
+ * `factura_solicitud_nota` (`solicitada: false`) — el Excel sale igual que
+ * antes, jamás un 500. Cualquier OTRO error de lectura (en cualquiera de las
+ * 4) se lanza (misma regla que el resto del libro: nunca un reporte con una
+ * columna vacía en silencio).
  */
 export async function facturasDeVuelos(
   sb: SupabaseClient,
   vueloIds: string[],
+  opciones: OpcionesFacturasDeVuelos = {},
 ): Promise<Map<string, FacturaDeVuelo>> {
   const out = new Map<string, FacturaDeVuelo>();
   const ids = [...new Set(vueloIds.filter(Boolean))];
@@ -144,7 +196,8 @@ export async function facturasDeVuelos(
     ...(conEstatus ? ['factura_estatus'] : []),
     ...(conFolio ? ['factura_folio'] : []),
     'estado',
-    ...(conEmitidas ? ['factura_solicitada_at'] : []),
+    'tc_usd_mxn',
+    ...(conEmitidas ? ['factura_solicitada_at', 'factura_solicitud_nota'] : []),
   ].join(', ');
 
   const cfdiPorVuelo = new Map<string, Array<Record<string, unknown>>>();
@@ -213,19 +266,49 @@ export async function facturasDeVuelos(
       emitidas: etiquetaEmitidasVigentes(emitidasPorVuelo.get(id) ?? []),
       vuelo: v,
     };
-    const exigencia = vueloExigeFactura(cobros);
-    const solicitada =
-      v?.factura_solicitada_at != null && v.factura_solicitada_at !== '';
+    // `cobrado` por la fuente única `cobrosEnUsd` con el respaldo del T.C.
+    // del vuelo (el mismo de `total_cobrado` del snapshot): insumo de la
+    // regla 2 del anticipo devuelto (14-oct-2026).
+    const tcVuelo = Number(v?.tc_usd_mxn) > 0 ? Number(v?.tc_usd_mxn) : null;
+    const cobrado = cobrosEnUsd(cobros, tcVuelo);
+    const exigencia = vueloExigeFactura(cobros, cobrado);
+    const solicitud = solicitudDeFila(v);
+    const yaNoAplica = solicitudYaNoAplica(solicitud, exigencia);
+    // La solicitud CUENTA: viva y no una automática que ya no aplica. NO
+    // hereda la exclusión de CANCELADO de `estadoSolicitud` (revisión F2):
+    // una manual viva de un cancelado que retuvo dinero sigue diciendo
+    // «Pendiente de factura» (la bandeja excluye cancelados: es el único aviso).
+    const solicitada = solicitud.factura_solicitada_at != null && !yaNoAplica;
     out.set(id, {
       registrada: etiquetaFacturaRegistrada(base),
       exigencia,
       solicitada,
       estado: typeof v?.estado === 'string' ? v.estado : null,
-      cuentas_exigen: cuentasQueExigenFactura(cobros),
+      cuentas_exigen: cuentasQueExigenFactura(cobros, cobrado),
       etiqueta: etiquetaFacturaVuelo({ ...base, exigencia, solicitada }),
+      origenes_exigen: origenesQueExigenFactura(cobros, cobrado),
+      solicitud_automatica: esSolicitudAutomatica(solicitud),
+      solicitud_ya_no_aplica: yaNoAplica,
+      ...(opciones.conCobros === true
+        ? {
+            cobros: cobros.map((c) => ({ ...c })),
+            tc_vuelo: tcVuelo,
+          }
+        : {}),
     });
   }
   return out;
+}
+
+/** Columnas de solicitud de la fila (texto no vacío o null). */
+function solicitudDeFila(v: VueloFacturaFila | null): VueloSolicitudRow {
+  const texto = (x: unknown): string | null =>
+    typeof x === 'string' && x !== '' ? x : null;
+  return {
+    estado: typeof v?.estado === 'string' ? v.estado : null,
+    factura_solicitada_at: texto(v?.factura_solicitada_at),
+    factura_solicitud_nota: texto(v?.factura_solicitud_nota),
+  };
 }
 
 /**

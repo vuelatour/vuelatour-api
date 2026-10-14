@@ -1,12 +1,17 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
+  COLS_INGRESO_LIBRO,
+  diaTcOficialIngreso,
   filaLibroDeIngreso,
   ingresoEsDelAvion,
   ingresoParaLibroDeFila,
   leerIngresosDeResultado,
   netoIngresoUsd,
   partirIngresosPorAvion,
+  usdDeIngresoAvion,
   type IngresoParaLibro,
+  type TcGastoLigado,
+  type TcOficialDia,
 } from './ingreso-resultado.util';
 
 /**
@@ -347,6 +352,170 @@ describe('ingreso asignado a un avión (invariante 67)', () => {
         { monto: 46550.8, comision_monto: null, moneda: 'MXN' },
         0,
       ),
+    ).toBeNull();
+  });
+});
+
+/**
+ * CONVERSIÓN ÚNICA DEL INGRESO DE UN AVIÓN (decisión del cliente del
+ * 14-oct-2026, API 0.0.77): `usdDeIngresoAvion` es la MISMA en balance,
+ * reparto y tablero; ING-4 (N990GG, $46,550.80 del 4-sep, sin T.C. propio)
+ * con el oficial de su día 16.9479 = 2,746.70 USD.
+ */
+describe('conversión única del ingreso de un avión (14-oct-2026, API 0.0.77)', () => {
+  const ING4: IngresoParaLibro = {
+    ...base,
+    id: 'i-4',
+    folio: 4,
+    categoria: 'REEMBOLSO_DEVOLUCION',
+    fecha: '2026-09-04',
+    descripcion: 'TRANSF INTERBANCARIA SPEI',
+    monto: 46550.8,
+    aeronave_id: 'av-n990gg',
+  };
+  const OFICIAL_0904: TcOficialDia = {
+    tc: 16.9479,
+    fecha_dato: '2026-09-04',
+    fuente: 'OPEN_ER_API',
+  };
+
+  it('el lector pide y mapea `gasto_id` (ADITIVO, al final del select)', () => {
+    expect(COLS_INGRESO_LIBRO.endsWith(', gasto_id')).toBe(true);
+    const fila = {
+      id: 'i-9',
+      folio: 9,
+      categoria: 'REEMBOLSO_DEVOLUCION',
+      fecha: '2026-09-04',
+      descripcion: 'x',
+      monto: 1,
+      moneda: 'MXN',
+    };
+    expect(
+      ingresoParaLibroDeFila({ ...fila, gasto_id: '70e8c3a4-0000' }).gasto_id,
+    ).toBe('70e8c3a4-0000');
+    expect(ingresoParaLibroDeFila({ ...fila, gasto_id: null }).gasto_id).toBe(
+      null,
+    );
+    expect(ingresoParaLibroDeFila(fila).gasto_id).toBe(null);
+  });
+
+  it('diaTcOficialIngreso: MXN sin T.C. ⇒ su fecha; con T.C. propio, USD o fecha inválida ⇒ null', () => {
+    expect(diaTcOficialIngreso(ING4)).toBe('2026-09-04');
+    expect(diaTcOficialIngreso({ ...ING4, tc_usd_mxn: 17.5 })).toBeNull();
+    expect(
+      diaTcOficialIngreso({ ...ING4, moneda: 'USD', tc_usd_mxn: null }),
+    ).toBeNull();
+    for (const fecha of [
+      '2026-02-30',
+      '04/09/2026',
+      '2026-09-04T00:00:00Z',
+      '',
+    ]) {
+      expect([fecha, diaTcOficialIngreso({ ...ING4, fecha })]).toEqual([
+        fecha,
+        null,
+      ]);
+    }
+  });
+
+  it('ING-4: oficial del día 16.9479 ⇒ 2,746.70 (OFICIAL_DEL_DIA); T.C. propio 17.5 ⇒ 2,660.05 (PROPIO); sin oficial ⇒ null', () => {
+    expect(usdDeIngresoAvion(ING4, { oficialDelDia: OFICIAL_0904 })).toEqual({
+      usd: 2746.7,
+      tc: 16.9479,
+      origen: 'OFICIAL_DEL_DIA',
+      oficial: OFICIAL_0904,
+      gasto: null,
+    });
+    expect(
+      usdDeIngresoAvion(
+        { ...ING4, tc_usd_mxn: 17.5 },
+        { oficialDelDia: OFICIAL_0904 },
+      ),
+    ).toEqual({
+      usd: 2660.05,
+      tc: 17.5,
+      origen: 'PROPIO',
+      oficial: null,
+      gasto: null,
+    });
+    expect(usdDeIngresoAvion(ING4, {})).toEqual({
+      usd: null,
+      tc: null,
+      origen: null,
+      oficial: null,
+      gasto: null,
+    });
+    // Oficial con T.C. 0: como si no hubiera.
+    expect(
+      usdDeIngresoAvion(ING4, { oficialDelDia: { ...OFICIAL_0904, tc: 0 } })
+        .usd,
+    ).toBeNull();
+  });
+
+  it('USD: su neto tal cual (1,000 − 30 ⇒ 970.00), sin T.C. aunque traiga uno propio', () => {
+    expect(
+      usdDeIngresoAvion(
+        {
+          ...ING4,
+          moneda: 'USD',
+          monto: 1000,
+          comision_monto: 30,
+          tc_usd_mxn: 18.0243,
+        },
+        { oficialDelDia: OFICIAL_0904 },
+      ),
+    ).toEqual({ usd: 970, tc: null, origen: null, oficial: null, gasto: null });
+  });
+
+  it('reembolso LIGADO: con el T.C. de SU gasto en este libro (GASTO_LIGADO); otro gasto_id u otra categoría ⇒ nunca', () => {
+    const ligado: TcGastoLigado = {
+      gasto_id: '70e8c3a4-aaaa',
+      tc: 17.237699,
+      fecha: '2026-09-15',
+      lugar: 'T.C. promedio de las hojas',
+    };
+    const reembolso = {
+      ...ING4,
+      monto: 45483.6,
+      gasto_id: '70e8c3a4-aaaa',
+    };
+    expect(
+      usdDeIngresoAvion(reembolso, {
+        oficialDelDia: OFICIAL_0904,
+        gastoLigado: ligado,
+      }),
+    ).toEqual({
+      usd: 2638.61,
+      tc: 17.237699,
+      origen: 'GASTO_LIGADO',
+      oficial: null,
+      gasto: ligado,
+    });
+    // El gasto ligado de OTRO gasto ⇒ el oficial del día.
+    expect(
+      usdDeIngresoAvion(reembolso, {
+        oficialDelDia: OFICIAL_0904,
+        gastoLigado: { ...ligado, gasto_id: 'otro' },
+      }).origen,
+    ).toBe('OFICIAL_DEL_DIA');
+    // Otra categoría (con gasto_id forzado) ⇒ jamás GASTO_LIGADO.
+    expect(
+      usdDeIngresoAvion(
+        { ...reembolso, categoria: 'OTRO_INGRESO' },
+        { oficialDelDia: OFICIAL_0904, gastoLigado: ligado },
+      ).origen,
+    ).toBe('OFICIAL_DEL_DIA');
+    // El T.C. PROPIO manda sobre el gasto ligado (captura explícita).
+    expect(
+      usdDeIngresoAvion(
+        { ...reembolso, tc_usd_mxn: 17.5 },
+        { gastoLigado: ligado },
+      ).origen,
+    ).toBe('PROPIO');
+    // Divisor 0 ⇒ se ignora.
+    expect(
+      usdDeIngresoAvion(reembolso, { gastoLigado: { ...ligado, tc: 0 } })
+        .origen,
     ).toBeNull();
   });
 });

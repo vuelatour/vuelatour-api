@@ -1,6 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { SupabaseService } from '../supabase/supabase.service';
+import {
+  FUENTE_DIARIA,
+  FUENTE_HISTORICA,
+  fuenteTcLegible,
+} from '../../common/fuente-tc-oficial.util';
 
 /**
  * Proveedores del TC oficial de referencia USD→MXN (decisión del cliente,
@@ -22,26 +27,14 @@ import { SupabaseService } from '../supabase/supabase.service';
  * Contrato: `oficialPara(fecha)` NUNCA lanza — sin red o sin dato devuelve
  * null y el reporte deja el TC vacío (jamás inventa un número).
  */
-export const FUENTE_DIARIA = 'OPEN_ER_API';
-export const FUENTE_HISTORICA = 'ECB_FRANKFURTER';
+// Las fuentes y su etiqueta viven en `common/fuente-tc-oficial.util` (PURO,
+// 14-oct-2026: los utils puros la importan de ahí sin depender del
+// servicio); se RE-EXPORTAN con los mismos nombres de siempre.
+export { FUENTE_DIARIA, FUENTE_HISTORICA, fuenteTcLegible };
 
 const OPEN_ER_API_URL = 'https://open.er-api.com/v6/latest/USD';
 const FRANKFURTER_URL = 'https://api.frankfurter.dev/v1';
 const TIMEOUT_MS = 6000;
-
-/** Etiqueta legible de la fuente del TC oficial (celdas/notas de reportes). */
-export function fuenteTcLegible(fuente: string | null | undefined): string {
-  switch (fuente) {
-    case FUENTE_DIARIA:
-      return 'open.er-api';
-    case FUENTE_HISTORICA:
-      return 'BCE (frankfurter)';
-    case 'BANXICO_FIX':
-      return 'Banxico FIX (histórico)';
-    default:
-      return fuente ?? 'TC oficial';
-  }
-}
 
 /**
  * Ventana de RESPALDO del T.C. oficial: el último dato dentro de los 7 días

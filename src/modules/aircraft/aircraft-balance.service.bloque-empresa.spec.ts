@@ -626,12 +626,10 @@ describe('Balance GENERAL — bloque «VUELATOUR (empresa)» (6-oct-2026)', () =
     expect(e.ingresos_propios_usd).toBe(eSin.ingresos_propios_usd);
     // Egresos propios = los de siempre: el permiso NO egresa en VuelaTour.
     expect(e.pagos_vendedor_usd).toBe(eSin.pagos_vendedor_usd);
-    // UN PERMISO PAGADO, UNA VEZ (revisión del 13-oct-2026; pregunta ABIERTA
-    // al cliente en «Pendientes conocidos» del CLAUDE.md): el permiso resta
-    // SOLO en la cascada del XB-ANU —y por eso en la participación de la
-    // empresa como socia al 30 %—; el resultado baja 30.59 (su %), no
-    // 101.96 + 30.59 como con el egreso doble. Si el cliente decide que el
-    // permiso SALE del avión, cambian juntas la cascada y la pestaña.
+    // UN PERMISO PAGADO, UNA VEZ (decisión del cliente del 14-oct-2026: «el
+    // AFAC lo cargan al Avión»; invariante 62): el permiso resta SOLO en la
+    // cascada del XB-ANU —y por eso en la participación de la empresa al
+    // 30 %—; el resultado baja 30.59, no 101.96 + 30.59.
     expect(e.participacion_usd).toBe(
       r2(eSin.participacion_usd! + r2(0.3 * -101.96)),
     );

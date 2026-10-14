@@ -8,10 +8,14 @@
  * pendiente de factura. Porque no en todos los vuelos hacemos facturas».
  *
  * «POR FACTURAR» ES DERIVADO — nunca se guarda (`estadoSolicitud`, definición
- * ÚNICA del contrato §3.8): solicitada AND vuelo no CANCELADO AND sin CFDI
- * del PAC (`facturado`) AND sin factura emitida VIGENTE ligada AND —desde
- * el 13-oct-2026 (caso #376, invariante 65)— sin el estatus MANUAL
- * «Facturado» (`factura_estatus`). Un vuelo pedido, sin factura registrada y
+ * ÚNICA del contrato §3.8). Cuatro estados: solicitada AND vuelo no
+ * CANCELADO AND sin CFDI del PAC (`facturado`) AND sin factura emitida
+ * VIGENTE ligada AND —desde el 13-oct-2026 (caso #376, invariante 65)— sin
+ * el estatus MANUAL «Facturado» (`factura_estatus`) AND —desde el 0.0.77
+ * (14-oct-2026, invariante 60)— no es una solicitud AUTOMÁTICA cuyo vuelo ya
+ * no exige factura (`YA_NO_APLICA`: sale de la bandeja y del badge y viaja
+ * en el aditivo `ya_no_aplican`; la decide el DINERO, no el estado del
+ * vuelo; una manual nunca). Un vuelo pedido, sin factura registrada y
  * marcado «Facturado» a mano YA NO cuenta como por facturar (ni en la
  * bandeja ni en el badge): es `MARCADO_SIN_REGISTRO` y viaja aparte, en la
  * NOTA aditiva `marcados_sin_registro`, para que la oficina registre su
@@ -21,11 +25,16 @@
 import { fechaCortaCancun } from '../../common/fecha-cancun.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
 import type {
+  CobroExigeFacturaRow,
+  ExigenciaFacturaVuelo,
+} from '../../common/cuentas-cobro';
+import type {
   FacturaEmitidaMini,
   FacturaServicioBloque,
   FacturaServicioResumen,
   SolicitudFactura,
 } from '../facturas-emitidas/facturas-emitidas.types';
+import type { FacturaDeVuelo } from './factura-cliente-etiquetas';
 
 /** Columnas de la solicitud en `vuelo` (migración 20260924000003). */
 export const COLS_SOLICITUD_FACTURA =
@@ -86,53 +95,117 @@ export const COLS_FACTURA_LIGADA =
   'id, serie, folio, folio_num, uuid, fecha_emision, estatus, total, moneda, metodo_pago, pdf_path, xml_path, deleted_at';
 
 /**
- * Estado de la SOLICITUD de factura de un vuelo (13-oct-2026, invariante 65):
+ * Estado de la SOLICITUD de factura de un vuelo (13-oct-2026, invariante 65;
+ * YA_NO_APLICA desde el 0.0.77, invariante 60):
  *  - 'POR_FACTURAR': solicitada AND no CANCELADO AND `facturado` (CFDI del
  *    PAC) ≠ true AND 0 facturas emitidas VIGENTES (no borradas) ligadas AND
- *    estatus manual ≠ FACTURADO. Bandeja «Por facturar» y badge del menú.
+ *    estatus manual ≠ FACTURADO AND no YA_NO_APLICA. Bandeja «Por facturar»
+ *    y badge del menú.
  *  - 'MARCADO_SIN_REGISTRO': lo mismo pero el vuelo está marcado
- *    «Facturado» a mano. Sale de la bandeja y del badge y va en la nota
+ *    «Facturado» a mano (gana sobre YA_NO_APLICA: alguien dice que ya se
+ *    facturó). Sale de la bandeja y del badge y va en la nota
  *    `marcados_sin_registro` («registra su factura aquí»).
+ *  - 'YA_NO_APLICA': lo mismo pero es una solicitud AUTOMÁTICA
+ *    (`esSolicitudAutomatica`) y el vuelo ya no exige factura (el dinero se
+ *    devolvió, o se corrigió o eliminó el cobro: «un anticipo devuelto no
+ *    lleva factura», decisión del cliente del 14-oct-2026). NO se retira
+ *    sola (retirar es destructivo y pide confirmación): sale de la bandeja y
+ *    del badge y viaja en el aditivo `ya_no_aplican`.
  *  - 'NINGUNO': cualquier otro caso (sin solicitud, cancelado, CFDI del PAC
  *    o con factura VIGENTE ligada).
  */
 export type EstadoSolicitudFactura =
   | 'POR_FACTURAR'
   | 'MARCADO_SIN_REGISTRO'
+  | 'YA_NO_APLICA'
   | 'NINGUNO';
 
-/** DEFINICIÓN ÚNICA de la regla (ver `EstadoSolicitudFactura`). */
+/** ¿Alguien pidió factura (`factura_solicitada_at` con valor)? */
+function solicitudPedida(v: VueloSolicitudRow): boolean {
+  return v.factura_solicitada_at != null && v.factura_solicitada_at !== '';
+}
+
+/**
+ * Solicitud AUTOMÁTICA (14-oct-2026): pedida y con la nota que deja
+ * `solicitarPorCobro` (empieza EXACTO con `PREFIJO_NOTA_SOLICITUD_AUTOMATICA`).
+ * Si la oficina edita la nota deja de serlo: la decidió una persona. NO mira
+ * el estado del vuelo.
+ */
+export function esSolicitudAutomatica(
+  v: VueloSolicitudRow | null | undefined,
+): boolean {
+  if (!v || !solicitudPedida(v)) return false;
+  const nota = v.factura_solicitud_nota;
+  return (
+    typeof nota === 'string' &&
+    nota.startsWith(PREFIJO_NOTA_SOLICITUD_AUTOMATICA)
+  );
+}
+
+/**
+ * La solicitud AUTOMÁTICA ya no aplica (14-oct-2026, invariante 60):
+ * automática AND exigencia LEÍDA (≠ null) AND ≠ 'EXIGE'. NO mira el estado
+ * del vuelo (el panel pinta su chip gris también en un cancelado). Una
+ * manual jamás; `exigencia` null (no leída) ⇒ false: como antes.
+ */
+export function solicitudYaNoAplica(
+  v: VueloSolicitudRow | null | undefined,
+  exigencia: ExigenciaFacturaVuelo | null,
+): boolean {
+  return esSolicitudAutomatica(v) && exigencia != null && exigencia !== 'EXIGE';
+}
+
+/**
+ * DEFINICIÓN ÚNICA de la regla (ver `EstadoSolicitudFactura`). El 3.er
+ * parámetro es OBLIGATORIO desde el 0.0.77 (revisión F8): `exigencia` del
+ * vuelo (`vueloExigeFactura` vía `facturasDeVuelos` / `exigenciasDeAutomaticas`)
+ * o `null` = no leída ⇒ se comporta como antes (nunca YA_NO_APLICA). Así cada
+ * lector decide de forma explícita.
+ */
 export function estadoSolicitud(
   v: VueloSolicitudRow | null | undefined,
   vigentesLigadas: number,
+  exigencia: ExigenciaFacturaVuelo | null,
 ): EstadoSolicitudFactura {
   if (!v) return 'NINGUNO';
   const viva =
-    v.factura_solicitada_at != null &&
-    v.factura_solicitada_at !== '' &&
+    solicitudPedida(v) &&
     v.estado !== 'CANCELADO' &&
     v.facturado !== true &&
     vigentesLigadas === 0;
   if (!viva) return 'NINGUNO';
-  return v.factura_estatus === 'FACTURADO'
-    ? 'MARCADO_SIN_REGISTRO'
-    : 'POR_FACTURAR';
+  if (v.factura_estatus === 'FACTURADO') return 'MARCADO_SIN_REGISTRO';
+  if (solicitudYaNoAplica(v, exigencia)) return 'YA_NO_APLICA';
+  return 'POR_FACTURAR';
 }
 
 /** «Por facturar» (§3.8): `estadoSolicitud` === 'POR_FACTURAR'. */
 export function esPorFacturar(
   v: VueloSolicitudRow | null | undefined,
   vigentesLigadas: number,
+  exigencia: ExigenciaFacturaVuelo | null,
 ): boolean {
-  return estadoSolicitud(v, vigentesLigadas) === 'POR_FACTURAR';
+  return estadoSolicitud(v, vigentesLigadas, exigencia) === 'POR_FACTURAR';
 }
 
 /** Pedida, sin factura registrada y marcada «Facturado» a mano (13-oct-2026). */
 export function esMarcadoSinRegistro(
   v: VueloSolicitudRow | null | undefined,
   vigentesLigadas: number,
+  exigencia: ExigenciaFacturaVuelo | null,
 ): boolean {
-  return estadoSolicitud(v, vigentesLigadas) === 'MARCADO_SIN_REGISTRO';
+  return (
+    estadoSolicitud(v, vigentesLigadas, exigencia) === 'MARCADO_SIN_REGISTRO'
+  );
+}
+
+/** Solicitud automática viva cuyo vuelo ya no exige factura (0.0.77). */
+export function esSolicitudYaNoAplica(
+  v: VueloSolicitudRow | null | undefined,
+  vigentesLigadas: number,
+  exigencia: ExigenciaFacturaVuelo | null,
+): boolean {
+  return estadoSolicitud(v, vigentesLigadas, exigencia) === 'YA_NO_APLICA';
 }
 
 /** La solicitud del vuelo (o null si nadie la pidió). */
@@ -216,36 +289,221 @@ export function clasificarLigadas(filas: ReadonlyArray<FacturaLigadaRow>): {
   };
 }
 
-/** Bloque ADITIVO `factura_servicio` del snapshot. */
+/**
+ * Bloque ADITIVO `factura_servicio` del snapshot. `f` = la factura del vuelo
+ * leída por `facturasDeVuelos` (exigencia y orígenes que la exigen) o `null`
+ * si no se pudo leer (el bloque sale igual: `exigencia: null`,
+ * `origenes_exigen: []`, `solicitud_ya_no_aplica: false`).
+ */
 export function bloqueFacturaServicio(
   v: VueloSolicitudRow,
   ligadas: ReadonlyArray<FacturaLigadaRow>,
-  nombreSolicitante?: string | null,
+  nombreSolicitante: string | null | undefined,
+  f: Pick<FacturaDeVuelo, 'exigencia' | 'origenes_exigen'> | null,
 ): FacturaServicioBloque {
   const { vigentes, canceladas } = clasificarLigadas(ligadas);
+  const exigencia = f?.exigencia ?? null;
   return {
     solicitud: solicitudDe(v, nombreSolicitante),
-    por_facturar: esPorFacturar(v, vigentes.length),
+    por_facturar: esPorFacturar(v, vigentes.length, exigencia),
     facturas: vigentes.map(miniDeFactura),
     canceladas,
     // ADITIVO (13-oct-2026, invariante 65): pedida, sin VIGENTE ligada y
     // marcada «Facturado» a mano (ya NO cuenta como por_facturar).
-    marcado_sin_registro: esMarcadoSinRegistro(v, vigentes.length),
+    marcado_sin_registro: esMarcadoSinRegistro(v, vigentes.length, exigencia),
+    // ADITIVOS (14-oct-2026, API 0.0.77, invariante 60), ÚLTIMAS llaves: la
+    // exigencia la decide el API y el panel solo la pinta (su espejo queda
+    // como respaldo de un API ≤ 0.0.76). `solicitud_ya_no_aplica` NO mira el
+    // estado del vuelo (chip gris también en un cancelado).
+    exigencia,
+    origenes_exigen: f ? [...f.origenes_exigen] : [],
+    solicitud_ya_no_aplica: solicitudYaNoAplica(v, exigencia),
   };
 }
 
-/** Campo ADITIVO `factura_servicio_resumen` por fila de las listas. */
+/**
+ * Campo ADITIVO `factura_servicio_resumen` por fila de las listas (forma sin
+ * cambio). `exigencia` = la de `exigenciasDeAutomaticas` (solo vuelos con
+ * solicitud automática viva) o null: su `por_facturar` ya excluye
+ * YA_NO_APLICA.
+ */
 export function resumenFacturaServicio(
   v: VueloSolicitudRow,
   ligadas: ReadonlyArray<FacturaLigadaRow>,
+  exigencia: ExigenciaFacturaVuelo | null,
 ): FacturaServicioResumen {
   const { vigentes } = clasificarLigadas(ligadas);
   return {
     solicitada: !!v.factura_solicitada_at,
-    por_facturar: esPorFacturar(v, vigentes.length),
+    por_facturar: esPorFacturar(v, vigentes.length, exigencia),
     paga_contra_factura: v.factura_paga_contra_factura === true,
     facturas: vigentes.length,
   };
+}
+
+// ================= SOLICITUD AUTOMÁTICA: TRANSICIONES (0.0.77) =================
+
+/** Un cobro tal como lo lee `facturasDeVuelos({ conCobros: true })`. */
+export type CobroParaFactura = CobroExigeFacturaRow & { id?: string | null };
+
+/**
+ * El cambio de dinero que acaba de pasar en un vuelo (14-oct-2026,
+ * invariante 60): ALTA (cobro o reembolso nuevo, por su id), BAJA (la fila
+ * borrada completa) o CAMBIO (el id y la fila con sus valores de ANTES).
+ */
+export type CambioDeCobro =
+  | { tipo: 'ALTA'; cobroId: string }
+  | { tipo: 'BAJA'; fila: CobroParaFactura }
+  | { tipo: 'CAMBIO'; cobroId: string; antes: CobroParaFactura };
+
+/** Por qué cambió el dinero (texto del aviso y `data.motivo`). */
+export type MotivoCambioSolicitud =
+  | 'COBRO_NUEVO'
+  | 'REEMBOLSO'
+  | 'COBRO_CORREGIDO'
+  | 'COBRO_ELIMINADO';
+
+/** Transición de una solicitud automática viva. */
+export type TransicionSolicitudAutomatica = 'YA_NO_APLICA' | 'VUELVE_A_APLICAR';
+
+/** Tipos de notificación (≤ 60 caracteres; la app pone el ícono por defecto). */
+export const TIPO_AVISO_SOLICITUD_YA_NO_APLICA =
+  'factura_solicitud_ya_no_aplica';
+export const TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR =
+  'factura_solicitud_vuelve_a_aplicar';
+
+/** Campos de dinero de un cobro (los que decide `vueloExigeFactura`). */
+const CAMPOS_DINERO_COBRO = [
+  'monto',
+  'moneda',
+  'cuenta_destino',
+  'metodo_cobro',
+  'tc_usd_mxn',
+] as const;
+
+/**
+ * Los cobros del vuelo ANTES del cambio, CONTRAFACTUAL sobre los de DESPUÉS
+ * (sin leer antes de escribir: cero latencia en el POST del outbox): ALTA ⇒
+ * sin la fila nueva; BAJA ⇒ + la fila borrada; CAMBIO ⇒ la fila del id con
+ * sus valores de ANTES (solo los campos de dinero presentes en `antes`; si
+ * la fila ya no está, se agrega `antes`). Puro.
+ */
+export function cobrosAntesDelCambio(
+  despues: ReadonlyArray<CobroParaFactura>,
+  cambio: CambioDeCobro,
+): CobroParaFactura[] {
+  if (cambio.tipo === 'ALTA') {
+    return despues.filter((c) => c.id !== cambio.cobroId);
+  }
+  if (cambio.tipo === 'BAJA') return [...despues, cambio.fila];
+  const dineroAntes: Record<string, unknown> = {};
+  for (const k of CAMPOS_DINERO_COBRO) {
+    if (Object.prototype.hasOwnProperty.call(cambio.antes, k)) {
+      dineroAntes[k] = cambio.antes[k];
+    }
+  }
+  let visto = false;
+  const out = despues.map((c): CobroParaFactura => {
+    if (c.id !== cambio.cobroId) return c;
+    visto = true;
+    return { ...c, ...dineroAntes };
+  });
+  return visto ? out : [...out, { ...cambio.antes, id: cambio.cobroId }];
+}
+
+/**
+ * Se avisa la TRANSICIÓN, no el estado (revisión F14): EXIGE ⇒ no exige =
+ * 'YA_NO_APLICA'; no exige ⇒ EXIGE = 'VUELVE_A_APLICAR'; si no, null (un 2.º
+ * reembolso o borrar otro cobro no repite el aviso).
+ */
+export function transicionSolicitudAutomatica(
+  antes: ExigenciaFacturaVuelo,
+  despues: ExigenciaFacturaVuelo,
+): TransicionSolicitudAutomatica | null {
+  if (antes === 'EXIGE' && despues !== 'EXIGE') return 'YA_NO_APLICA';
+  if (antes !== 'EXIGE' && despues === 'EXIGE') return 'VUELVE_A_APLICAR';
+  return null;
+}
+
+/**
+ * Link del aviso de transición: la tarjeta «ya no aplican» de la bandeja
+ * (ancla `ya-no-aplican`) o la de «Por facturar» (`por-facturar`).
+ */
+export function linkAvisoCambioSolicitud(
+  vueloId: string,
+  transicion: TransicionSolicitudAutomatica,
+): string {
+  const ancla =
+    transicion === 'YA_NO_APLICA' ? 'ya-no-aplican' : 'por-facturar';
+  return `/admin/facturas-emitidas?resaltar=${vueloId}#${ancla}`;
+}
+
+/**
+ * Textos del aviso de transición de una solicitud AUTOMÁTICA (14-oct-2026,
+ * invariante 60). Tramos vacíos se omiten (como `textoAvisoSolicitud`):
+ * «vuelo #341 · Maqar · 27 sep». `origen` = `origenCobroTexto` de la fila
+ * del cambio (solo lo cita «Entró dinero …»); `eraReembolso` = la fila
+ * borrada era un reembolso (COBRO_ELIMINADO). Un cobro NUEVO nunca quita la
+ * exigencia (solo sube sumas y lo cobrado): su texto de «ya no aplica» es
+ * defensivo.
+ */
+export function textoAvisoCambioSolicitud(p: {
+  transicion: TransicionSolicitudAutomatica;
+  motivo: MotivoCambioSolicitud;
+  vuelo: { folio: number; fecha_vuelo?: string | null };
+  cliente?: string | null;
+  origen?: string | null;
+  eraReembolso?: boolean;
+}): { titulo: string; cuerpo: string } {
+  const folio = `#${p.vuelo.folio}`;
+  const vuelo = [
+    `vuelo ${folio}`,
+    (p.cliente ?? '').trim() || null,
+    fechaDiaMes(p.vuelo.fecha_vuelo ?? null) || null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const fila = p.eraReembolso === true ? 'un reembolso' : 'un cobro';
+  if (p.transicion === 'YA_NO_APLICA') {
+    const cola =
+      ' Su solicitud automática salió de «Por facturar»; retírala desde ahí.';
+    const sinDinero =
+      'ya no quedó dinero en una cuenta que exija factura.' + cola;
+    let cuerpo: string;
+    switch (p.motivo) {
+      case 'REEMBOLSO':
+        cuerpo = `Se registró la devolución del dinero del ${vuelo}: un anticipo devuelto no lleva factura.${cola}`;
+        break;
+      case 'COBRO_CORREGIDO':
+        cuerpo = `Se corrigió un cobro del ${vuelo}: ${sinDinero}`;
+        break;
+      case 'COBRO_ELIMINADO':
+        cuerpo = `Se eliminó ${fila} del ${vuelo}: ${sinDinero}`;
+        break;
+      default:
+        cuerpo = `Se registró un cobro del ${vuelo}: ${sinDinero}`;
+    }
+    return { titulo: `Ya no aplica: factura del vuelo ${folio}`, cuerpo };
+  }
+  const regreso =
+    'quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».';
+  let cuerpo: string;
+  switch (p.motivo) {
+    case 'COBRO_NUEVO': {
+      const origen = (p.origen ?? '').trim();
+      cuerpo = `Entró dinero al ${vuelo}${origen ? ` (cobro ${origen})` : ''} y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».`;
+      break;
+    }
+    case 'COBRO_CORREGIDO':
+      cuerpo = `Se corrigió un cobro del ${vuelo}: ${regreso}`;
+      break;
+    case 'COBRO_ELIMINADO':
+      cuerpo = `Se eliminó ${fila} del ${vuelo}: ${regreso}`;
+      break;
+    default:
+      cuerpo = `Se registró un reembolso del ${vuelo}: ${regreso}`;
+  }
+  return { titulo: `Vuelve a aplicar: factura del vuelo ${folio}`, cuerpo };
 }
 
 // ============================ DESTINATARIOS ============================

@@ -6,15 +6,21 @@ import {
 } from '@nestjs/common';
 import { SupabaseService } from '../supabase/supabase.service';
 import {
+  diaTcOficialIngreso,
   filaLibroDeIngreso,
   leerIngresosDeResultado,
   partirIngresosPorAvion,
+  usdDeIngresoAvion,
+  type ConversionIngreso,
   type IngresoParaLibro,
   type IngresosDeResultadoPartidos,
+  type TcGastoLigado,
 } from '../../common/ingreso-resultado.util';
 // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): hoja
 // «Otros ingresos» del libro de cada avión y su consolidada del general
-// (puro, con spec). `buildHoja` NO se toca.
+// (puro, con spec). `buildHoja` NO se toca. Desde el 0.0.77 (decisión del
+// cliente del 14-oct-2026) cada ingreso se convierte con la fuente única
+// `usdDeIngresoAvion` (la MISMA del reparto y del tablero).
 import {
   fusionarOtrosIngresosFlota,
   hojaOtrosIngresosAvion,
@@ -1217,8 +1223,9 @@ export class AircraftBalanceService {
     // una fila «AFAC · matrícula» por avión REAL (orden de `librosAviones`,
     // EXTERNOS nunca), armada de los libros YA calculados — ingreso = su
     // provisión AFAC del periodo; su hoja «permisos» va CITADA con egreso
-    // $0.00 «a cargo del avión» (revisión 13-oct-2026: ya resta en SU
-    // cascada; egresarla aquí la contaba dos veces). Van al FINAL
+    // $0.00 «a cargo del avión» (revisión 13-oct-2026, confirmada por el
+    // cliente el 14-oct-2026: ya resta en SU cascada; egresarla aquí la
+    // contaba dos veces). Van al FINAL
     // de `filas` (pyservices las pinta después de los vuelos y antes de
     // «MOVIMIENTOS SIN AVIÓN / SIN VUELO») y su T.C. y su «por cobrar» 0 van
     // alineados en `tcFilasOM` — SIEMPRE después de `buildOtrosMovimientos`
@@ -1333,6 +1340,9 @@ export class AircraftBalanceService {
       // «reporte horas FLOTA» se pinta con `_hoja_maestra(ws, cons, …)` y la
       // nota al pie de FACTURA VUELATOUR sale del `req` que recibe.
       factura_vuelatour_segun_cobros: true as const,
+      // ADITIVA (14-oct-2026, API 0.0.77, invariante 60): la nota al pie de
+      // FACTURA VUELATOUR dice que un anticipo devuelto no lleva factura.
+      factura_vuelatour_devolucion: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): el consolidado
       // TAMBIÉN la lleva (como la de arriba y a diferencia de
       // `sin_provision_vendedor`): las notas de COMISIONES de la hoja de
@@ -4332,8 +4342,11 @@ export class AircraftBalanceService {
     // 67): los de RESULTADO con `aeronave_id` = este avión y `fecha` en el
     // periodo — partición ÚNICA `partirIngresosPorAvion` (el general la pasa
     // ya hecha: una sola lectura de `ingreso`). EXTERNOS no lee ni lleva
-    // ingresos. Cuentan en el respaldo como una hoja más: un avión sin
-    // vuelos con un reembolso también se convierte con el oficial del cierre.
+    // ingresos. Desde el 0.0.77 (decisión del cliente del 14-oct-2026) YA NO
+    // cuentan para este respaldo: cada ingreso se convierte por separado
+    // (`usdDeIngresoAvion`: su T.C. propio, el de su gasto ligado o el
+    // oficial de SU día), así que un avión con solo ingresos no necesita el
+    // oficial del cierre.
     const ingresosAvion: IngresoParaLibro[] =
       aircraftId == null
         ? []
@@ -4353,7 +4366,6 @@ export class AircraftBalanceService {
         filasOtros,
         filasPermisos,
         gastosGas,
-        ingresosAvion,
       ].some((l) => l.length > 0)
     ) {
       const hoy = new Intl.DateTimeFormat('en-CA', {
@@ -4366,11 +4378,12 @@ export class AircraftBalanceService {
       if (det != null) {
         tcHojas = det.tc;
         totales.tc_promedio = round2(det.tc);
-        // Con ingresos asignados (invariante 67) el texto dice «gastos e
-        // ingresos» y «resultado»; sin ellos, el de siempre byte a byte.
+        // Con ingresos asignados (invariante 67; 0.0.77) el texto dice que
+        // cada ingreso usó SU T.C. y «resultado»; sin ellos, el de siempre
+        // byte a byte.
         pendientes.push(
           ingresosAvion.length > 0
-            ? `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos e ingresos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es el resultado de esos movimientos`
+            ? `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}) y cada uno de sus otros ingresos con su T.C. propio o el oficial de su día; la utilidad del periodo es el resultado de esos movimientos`
             : `${etiquetaAvion}: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del ${det.fecha_dato} (${det.tc.toFixed(4)}, ${fuenteTcLegible(det.fuente)}); la utilidad del periodo es la pérdida de esos gastos`,
         );
       }
@@ -4452,12 +4465,93 @@ export class AircraftBalanceService {
           : null,
     };
     // Hoja «Otros ingresos» (13-oct-2026, API 0.0.75, invariante 67): los
-    // ingresos asignados a este avión, netos de comisión, al MISMO T.C. de
-    // las hojas de gastos (`tcHojas`). Su TOTAL USD SUMA en la cascada.
+    // ingresos asignados a este avión, netos de comisión. Su TOTAL USD SUMA
+    // en la cascada. CONVERSIÓN ÚNICA (decisión del cliente del 14-oct-2026,
+    // API 0.0.77): cada ingreso con `usdDeIngresoAvion` —la MISMA del reparto
+    // y del tablero— (ING-4 = 2,746.70 en los tres; antes ÷ `tcHojas` daba
+    // 2,710.47). El oficial de su día sale de la puerta única
+    // `tcOficialDeDias` (memo por día compartido con el general). REEMBOLSO
+    // LIGADO (revisión F3): un REEMBOLSO_DEVOLUCION en pesos cuyo gasto en
+    // pesos cuenta en ESTE libro se convierte con el divisor con que el libro
+    // convierte ese gasto, armado de lo que el libro YA calculó (cero
+    // consultas): los 'suma' de los vínculos de cada fila de vuelo ⇒
+    // `tc_costos ?? tcPromedio` (el divisor de `ganancia_usd`); las filas de
+    // sus hojas ledger ⇒ `tcHojas`. Así reembolso y gasto se anulan.
+    const gastoDeVueloPorId = new Map<string, GastoRow>();
+    for (const lista of gastosPorVuelo.values()) {
+      for (const g of lista) if (g.id) gastoDeVueloPorId.set(g.id, g);
+    }
+    const diaGasto = (g: GastoRow): string | null =>
+      typeof g.fecha_gasto === 'string' && g.fecha_gasto
+        ? g.fecha_gasto.slice(0, 10)
+        : null;
+    const divisorDeGastoMxn = new Map<string, TcGastoLigado>();
+    for (const fila of filasVuelo) {
+      const tc = fila.tc_costos ?? tcPromedio;
+      if (tc == null || !(tc > 0)) continue;
+      const lugar =
+        fila.tc_costos != null
+          ? `T.C. de costos del vuelo #${fila.folio}`
+          : 'T.C. promedio de las hojas';
+      for (const vinc of [
+        ...(fila.op_vinculos ?? []),
+        ...(fila.piloto_vinculos ?? []),
+        ...(fila.otros_vinculos ?? []),
+      ]) {
+        if (vinc.rol !== 'suma' || divisorDeGastoMxn.has(vinc.id)) continue;
+        const g = gastoDeVueloPorId.get(vinc.id);
+        if (!g || g.moneda !== 'MXN') continue;
+        divisorDeGastoMxn.set(vinc.id, {
+          gasto_id: vinc.id,
+          tc,
+          fecha: diaGasto(g),
+          lugar,
+        });
+      }
+    }
+    if (tcHojas != null && tcHojas > 0) {
+      for (const g of [
+        ...filasIndirectos,
+        ...filasRefacciones,
+        ...filasOtros,
+        ...filasPermisos,
+        ...gastosGas,
+      ]) {
+        if (!g.id || g.moneda !== 'MXN' || divisorDeGastoMxn.has(g.id)) {
+          continue;
+        }
+        divisorDeGastoMxn.set(g.id, {
+          gasto_id: g.id,
+          tc: tcHojas,
+          fecha: diaGasto(g),
+          lugar: 'T.C. promedio de las hojas',
+        });
+      }
+    }
+    const oficialIngresos = await this.tcOficialDeDias(
+      ingresosAvion
+        .map(diaTcOficialIngreso)
+        .filter((d): d is string => d != null),
+      memoTc,
+    );
+    const conversiones = new Map<string, ConversionIngreso>();
+    for (const i of ingresosAvion) {
+      const dia = diaTcOficialIngreso(i);
+      conversiones.set(
+        i.id,
+        usdDeIngresoAvion(i, {
+          oficialDelDia: dia ? (oficialIngresos.get(dia) ?? null) : null,
+          gastoLigado: i.gasto_id
+            ? (divisorDeGastoMxn.get(i.gasto_id) ?? null)
+            : null,
+        }),
+      );
+    }
     const hojaOtrosIngresos = hojaOtrosIngresosAvion(
       ingresosAvion,
-      tcHojas,
+      conversiones,
       pendientes,
+      new Set(divisorDeGastoMxn.keys()),
     );
     // Vigilancia MENSUAL del combustible (sustituye a los regaños por vuelo):
     // un avión que voló sin una sola carga en el mes es captura faltante.
@@ -4701,6 +4795,13 @@ export class AircraftBalanceService {
       // maestra. Viaja SIEMPRE (libro individual y `aviones[]` del general;
       // el consolidado FLOTA la lleva aparte, en `xlsxGeneral`).
       factura_vuelatour_segun_cobros: true as const,
+      // ADITIVA (14-oct-2026, API 0.0.77, invariante 60), justo después de
+      // la anterior: «un anticipo devuelto no lleva factura» — la columna
+      // dice «No lleva factura» también cuando el dinero se devolvió
+      // completo. pyservices cambia SOLO la nota al pie de la hoja maestra
+      // (sin ella, las dos notas de siempre). Viaja SIEMPRE (libro
+      // individual, `aviones[]` y, aparte, el consolidado FLOTA).
+      factura_vuelatour_devolucion: true as const,
       // ADITIVA (13-oct-2026, API 0.0.74, invariante 61): la comisión del
       // vendedor resta SOLO como gasto real (COMISIONES = banco + pago real
       // capturado; sin gasto, solo la bancaria). pyservices cambia con ella

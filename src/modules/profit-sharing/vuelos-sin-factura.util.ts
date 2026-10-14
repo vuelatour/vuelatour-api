@@ -22,8 +22,11 @@
  * responde 409 VUELO_CANCELADO; la solicitud automática los descarta): el
  * detalle dice que ahí se registra directo en Facturas emitidas y el chip
  * lleva `estado: 'CANCELADO'` (ADITIVO, SOLO en cancelados; el panel ya lo
- * pinta junto al folio). La exigencia es por el NETO de cada cuenta: un
- * anticipo devuelto completo ya no aparece (`vueloExigeFactura`).
+ * pinta junto al folio). La exigencia es por el NETO y un anticipo devuelto
+ * COMPLETO, por cualquier vía (misma cuenta, efectivo, otra cuenta, sin
+ * cuenta u otra moneda), ya no aparece (decisión del cliente del
+ * 14-oct-2026, API 0.0.77: `vueloExigeFactura` con sus reglas 1 y 2); lo
+ * retenido de una devolución parcial sí.
  *
  * Helpers PUROS: la lectura (`facturasDeVuelos`) vive en
  * `profit-sharing.service`; aquí solo el filtro, el shape y el orden.
@@ -36,7 +39,7 @@ export const TITULO_PRECIERRE_VUELOS_SIN_FACTURA =
   'Vuelos cobrados en cuentas que exigen factura sin factura registrada';
 
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA =
-  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y no se reembolsaron, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo. No bloquea el cierre.';
+  'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y siguen ahí —un anticipo devuelto completo, por cualquier vía, no lleva factura; si se devolvió solo una parte, lo retenido sí—, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo; si el dinero se devolvió, regístralo como reembolso. No bloquea el cierre.';
 
 /** Texto cuando la lectura FALLÓ: el 0 no significa «no hay». */
 export const DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA =
@@ -56,7 +59,10 @@ export interface VueloCobradoSinFactura {
   folio: number;
   fecha_vuelo: string | null;
   matricula: string | null;
-  /** Ya hay solicitud viva «Por facturar» (solo informa). */
+  /**
+   * Hay solicitud que cuenta (manual viva, o automática mientras el vuelo
+   * exige; `FacturaDeVuelo.solicitada`); solo informa.
+   */
   solicitada: boolean;
   /** Cuentas (texto) de los cobros que exigen factura, distintas. */
   cuentas: string[];

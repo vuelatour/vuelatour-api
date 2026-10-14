@@ -2238,7 +2238,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       DERIVADO, nunca se guarda** (`factura-solicitud.util#estadoSolicitud`,
       con `esPorFacturar` encima): solicitada AND no CANCELADO AND
       `facturado` (PAC) ≠ true AND 0 emitidas VIGENTES ligadas AND —desde el
-      13-oct-2026, invariante 65— `factura_estatus` ≠ FACTURADO; los
+      13-oct-2026, invariante 65— `factura_estatus` ≠ FACTURADO AND —desde
+      el 0.0.77, invariante 60— no es una solicitud AUTOMÁTICA cuyo vuelo ya
+      no exige factura (`YA_NO_APLICA`, aditivo `ya_no_aplican`); los
       FACTURADO a mano sin registro van en la NOTA `marcados_sin_registro`.
       Aviso `factura_solicitada` a
       `ConfiguracionService.destinatariosFacturacion` (config
@@ -5662,18 +5664,48 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       sobre entran porque `crearParte` copia cuenta y método del sobre):
       sin cobros positivos ⇒ SIN_COBROS; **por el NETO** (revisión
       13-oct-2026) ⇒ EXIGE solo si en alguna cuenta (o método sin cuenta)
-      que exige QUEDÓ dinero neto de sus reembolsos, por grupo
-      `cuentaDeCobroTexto` + `moneda` (`netosQueExigen`: el reembolso de
-      `createReembolso` se clasifica por SU cuenta/método sin mirar el
-      signo; tolerancia 0.005; un reembolso SIN moneda no netea —jamás se
-      suman USD y MXN—); si no ⇒ NO_EXIGE. Un anticipo en HSBC devuelto
-      COMPLETO en la misma cuenta ⇒ «No lleva factura» y fuera del
-      pre-cierre; devuelto en parte, en efectivo, en otra cuenta o en otra
-      moneda ⇒ sigue exigiendo (conservador). El lector suma `moneda` al
-      select de `cobro_vuelo`. `cuentaDeCobroTexto` ('HSBC Pesos' /
-      'Transferencia sin cuenta destino'), `origenCobroTexto` ('en HSBC
-      Pesos' / 'por Transferencia') y `cuentasQueExigenFactura` (distintas,
-      en orden, solo las de neto > 0). `cobroExigeFactura` (por cobro, los
+      que exige QUEDÓ dinero neto, por grupo `cuentaDeCobroTexto` + `moneda`
+      (`netosQueExigen`: un reembolso se clasifica por SU cuenta/método sin
+      mirar el signo; tolerancia 0.005; un reembolso SIN moneda no netea
+      —jamás se suman USD y MXN—); si no ⇒ NO_EXIGE. **ANTICIPO DEVUELTO
+      (decisión del cliente del 14-oct-2026: «¿Un anticipo devuelto lleva
+      CFDI?» ⇒ «eso no»; API 0.0.77)**: el dinero devuelto COMPLETO no lleva
+      factura salga por donde salga —misma cuenta, efectivo, otra cuenta,
+      sin cuenta u otra moneda— y se mide por DINERO, no por el estado del
+      vuelo. Dos reglas en `netosQueExigen(cobros, cobrado?)`: (1) **por
+      moneda, exacta y sin T.C.**: si la Σ de TODAS las filas de una moneda
+      (cobros y reembolsos de cualquier cuenta o método) es ≤ 0.005, ningún
+      grupo de esa moneda exige (los mismos pesos devueltos con otro T.C.
+      cuentan como devueltos); (2) **devolución CRUZADA**
+      (`devolucionCruzadaCompleta`): SOLO si alguna moneda quedó con Σ <
+      −0.005 (el reembolso salió en otra moneda), hay cobro y reembolso, toda
+      fila es USD o MXN, `cobrado` = `cobrosEnUsd(cobros, vuelo.tc_usd_mxn)`
+      convirtió todo (`sin_tc_count` 0) y quedó ≤ `TOLERANCIA_COBRO_USD`
+      (1). Sin una moneda negativa la (2) NO se evalúa: una devolución
+      PARCIAL en la misma moneda a ≤ 1 USD (p. ej. 1,500 MXN de penalización
+      retenidos en HSBC con el reembolso tecleado al T.C. mínimo que pasa el
+      candado de `createReembolso`) sigue EXIGIENDO (revisión del
+      14-oct-2026). Devuelto en PARTE ⇒ lo retenido EXIGE si quedó en un
+      grupo que exige; mezcla de cuentas en la MISMA moneda ⇒ conservador
+      (EXIGE); ENTRE monedas la moneda identifica el dinero (pesos devueltos
+      completos y dólares retenidos en un método que no exige ⇒ NO exige:
+      excepción consciente, pregunta abierta al cliente). Sin `cobrado` solo
+      aplica la (1). `dineroDevueltoCompleto` es la definición ÚNICA de «se
+      devolvió completo» (la usa el pre-cierre `cobros_en_cancelados` para
+      su marca `diferencia_cambiaria`; `retieneCobros` sigue siendo la
+      medida en USD del REPARTO y cuenta la diferencia cambiaria: decisión
+      de dinero aparte). El lector suma `moneda` y `tc_usd_mxn` al select de
+      `cobro_vuelo` y `tc_usd_mxn` al de `vuelo`. Desde el 0.0.77 el PANEL ya
+      no decide: pinta `factura_servicio.exigencia` / `origenes_exigen` y su
+      espejo queda como respaldo de un API ≤ 0.0.76. Producción al
+      14-oct-2026: 1 reembolso en toda la base (#215, BillPocket, NO_EXIGE
+      antes y después); 0 de 234 vuelos cambian. `cuentaDeCobroTexto`
+      ('HSBC Pesos' / 'Transferencia sin cuenta destino'),
+      `origenCobroTexto` ('en HSBC Pesos' / 'por Transferencia'),
+      `cuentasQueExigenFactura` (distintas, en orden, solo las de neto > 0)
+      y —0.0.77— `origenesQueExigenFactura` (los `origenCobroTexto` de esos
+      grupos: `factura_servicio.origenes_exigen`); las dos reciben `cobrado`
+      y aplican las reglas 1 y 2. `cobroExigeFactura` (por cobro, los
       ganchos) no cambia: un reembolso nunca exige por sí solo.
       **Es por cuenta/método, NO por rol**: el PILOTO también la dispara
       desde la app con HSBC_LINK (está en `METODOS_COBRO_PILOTO`). Etiquetas
@@ -5684,7 +5716,10 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `solicitada`; los pasos 1-4 se extrajeron a
       `etiquetaFacturaRegistrada`): sin factura registrada ⇒
       `ETIQUETA_FACTURA_PENDIENTE` = «Pendiente de factura» si EXIGE **o si
-      hay solicitud viva** (refinamiento explícito sobre la decisión
+      su solicitud CUENTA** (`solicitada`: MANUAL viva —también en un
+      CANCELADO que retuvo dinero— o AUTOMÁTICA mientras el vuelo exige; una
+      automática que YA NO APLICA ya no la pone «Pendiente», 14-oct-2026)
+      (refinamiento explícito sobre la decisión
       literal: la columna nunca contradice la bandeja «Por facturar» ni
       «paga contra factura»; el pre-cierre NO usa esta rama);
       `ETIQUETA_FACTURA_NO_LLEVA` = «No lleva factura» si NO_EXIGE; `null` =
@@ -5693,13 +5728,16 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       «Pendiente de factura». Sin los dos campos el resultado es
       EXACTAMENTE el de antes. El lector en lote se partió en
       `facturasDeVuelos` (detalle `{registrada, exigencia, solicitada,
-      estado, cuentas_exigen, etiqueta}` de TODOS los ids pedidos; **4
+      estado, cuentas_exigen, etiqueta}` + `origenes_exigen`,
+      `solicitud_automatica` y `solicitud_ya_no_aplica` (0.0.77; `cobros` y
+      `tc_vuelo` solo con `{conCobros: true}`) de TODOS los ids pedidos; **4
       consultas por cada 200 vuelos**: la de `cobro_vuelo` va PAGINADA con
       `.order('id', {ascending: true}).range()` de 1000 en 1000 y tope de 20
       páginas —nunca `.limit(10000)`: PostgREST corta en max-rows sin avisar
       y un vuelo cuyos cobros cayeran después de la fila 1000 saldría «sin
-      cobros» en falso—; el select de `vuelo` suma SIEMPRE `estado` y, solo
-      con la sonda `20260924000003`, `factura_solicitada_at`; cualquier
+      cobros» en falso—; el select de `vuelo` suma SIEMPRE `estado` y
+      `tc_usd_mxn` y, solo con la sonda `20260924000003`,
+      `factura_solicitada_at` y `factura_solicitud_nota`; cualquier
       error de las 4 LANZA) y `etiquetasFacturaDeVuelos` quedó como
       envoltorio con la MISMA firma y contrato (solo vuelos con etiqueta),
       así que el balance individual (col AU), el general («reporte horas
@@ -5713,7 +5751,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `sin_provision_vendedor`, porque los dos usan `_hoja_maestra`; NO en
       `otros_movimientos` ni en el Libro Dinero) que cambia ÚNICAMENTE la
       nota al pie de la hoja maestra; sin bandera, libro byte-idéntico
-      (huellas `_firma_hoja`).
+      (huellas `_firma_hoja`). Desde el 0.0.77 la sigue
+      `factura_vuelatour_devolucion: true` (mismos libros, justo después):
+      la nota al pie dice además que un anticipo devuelto no lleva factura
+      (`_NOTA_FACTURA_VUELATOUR_DEVOLUCION` de pyservices); sin ella, las
+      dos notas de siempre.
     - **Solicitud AUTOMÁTICA** `FacturaSolicitudService.solicitarPorCobro`
       = la MISMA vía que «Necesito factura»: mismas 4 columnas, mismo CAS
       `.in('id', candidatos).is('factura_solicitada_at', null).select('id,
@@ -5745,7 +5787,54 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       sigue DERIVADO y la bandeja la muestra como cualquier solicitud; se
       retira igual (`DELETE :id/solicitud-factura`). Bitácora en el log de
       cada decisión (pedida / nada que pedir con el motivo por vuelo /
-      omitida sin migración / falló).
+      omitida sin migración / falló). Desde el 0.0.77 solo pide si el vuelo
+      EXIGE (con las reglas del anticipo devuelto).
+    - **Solicitud AUTOMÁTICA que YA NO APLICA (14-oct-2026, API 0.0.77)**:
+      una solicitud viva con nota `PREFIJO_NOTA_SOLICITUD_AUTOMATICA`
+      («Solicitada automáticamente: cobro …») cuyo vuelo ya no EXIGE (dinero
+      devuelto, cuenta corregida o cobro eliminado) NO se retira sola
+      (retirar es destructivo y pide confirmación): `estadoSolicitud(v,
+      vigentes, exigencia)` —3.er parámetro OBLIGATORIO; `null` = no leída ⇒
+      como antes— da 'YA_NO_APLICA' (después de MARCADO_SIN_REGISTRO, antes
+      de POR_FACTURAR): sale de `por_facturar` (badge, bandeja, selector de
+      «Registrar factura»), viaja en el ADITIVO `ya_no_aplican` (lista y
+      conteo), el bloque `factura_servicio` gana `exigencia`,
+      `origenes_exigen` y `solicitud_ya_no_aplica` (últimas llaves) y la
+      columna dice «No lleva factura». Una MANUAL, nunca (si la oficina edita
+      la nota de una automática, pasa a ser manual); `solicitudYaNoAplica`
+      NO mira el estado del vuelo. Exigencia solo de las automáticas vivas
+      (`exigenciasDeAutomaticas`, en lote); si la lectura falla ⇒ warn y
+      POR_FACTURAR como antes. Avisos por TRANSICIÓN
+      (`FacturaSolicitudService.avisarCambioSolicitudAutomatica`, contrafactual
+      `cobrosAntesDelCambio` sobre los cobros de DESPUÉS —sin leer antes de
+      escribir—; compuerta de UNA consulta a `vuelo`, 42703 ⇒ `NO_DISPONIBLE`;
+      jamás lanza ni revierte dinero) a `destinatariosFacturacion(actor)`:
+      tipo `factura_solicitud_ya_no_aplica` (EXIGE ⇒ no exige; título «Ya no
+      aplica: factura del vuelo #341», link
+      `/admin/facturas-emitidas?resaltar=<vuelo>#ya-no-aplican`) y
+      `factura_solicitud_vuelve_a_aplicar` (no exige ⇒ EXIGE con la
+      automática todavía viva; «Vuelve a aplicar: factura del vuelo #341»,
+      `#por-facturar`); `data` = `{vuelo_id, folio, origen: 'YA_NO_APLICA' |
+      'VUELVE_A_APLICAR', motivo: COBRO_NUEVO | REEMBOLSO | COBRO_CORREGIDO |
+      COBRO_ELIMINADO, cobro_id}`; cuerpos en `textoAvisoCambioSolicitud`
+      (p. ej. «Se registró la devolución del dinero del vuelo #341 · Maqar ·
+      27 sep: un anticipo devuelto no lleva factura. Su solicitud automática
+      salió de «Por facturar»; retírala desde ahí.»). Desde `createCobro`
+      (sin sobre, cualquier método), «Es el pago de un vuelo»,
+      `createReembolso` (sin sobre), `deleteCobro` y `updateCobro` (dinero,
+      cuenta o método); sin transición no avisa (nunca repite). La
+      solicitud que el MISMO cobro acaba de crear no avisa (el aviso va
+      encadenado DESPUÉS de `solicitarPorCobro`); la compensación interna de
+      «Es el pago de un vuelo» (`deleteCobro(…, {omitirAvisoFactura:
+      true})`) tampoco; un replay idempotente tampoco. Sobres de grupo: no
+      avisan (0 en prod). Specs: `factura-solicitud.util.spec` (estados,
+      contrafactual, transiciones, textos y links exactos),
+      `factura-solicitud.service.spec` (compuerta, transición, sin
+      transición, motivos, `data`), `flights.service.factura-por-cobro.spec`
+      y `flights.service.anticipo.spec` (los cinco caminos, la solicitud
+      recién creada no avisa), `ingresos.service.spec` (compensación sin
+      aviso) y `facturas-emitidas.service.spec` (`ya_no_aplican` en lista y
+      conteo, fuera del badge).
     - **Ganchos** (puerta pública `FlightsService.solicitarFacturaPorCobros`:
       sin `facturaSolicitud` inyectado —specs posicionales— ⇒ null; cobro
       que no exige ⇒ null; try/catch con warn; jamás 5xx, jamás revierte
@@ -5774,9 +5863,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       liga falla (409 MOVIMIENTO_YA_LIGADO o un error de PostgREST) su
       compensación BORRA el cobro, y antes la solicitud («Por facturar»,
       «Pendiente de factura») y el aviso a facturación ya habían salido por
-      un cobro que no existe. NO disparan: `createReembolso`,
-      `deleteCobro`, `eliminarCobro`, ni corregir HACIA BillPocket/Paywise
-      (sin retiro automático: la oficina retira a mano, con confirmación).
+      un cobro que no existe. NO disparan la SOLICITUD: `createReembolso`,
+      `deleteCobro`, `eliminarCobro`, ni corregir HACIA BillPocket/Paywise.
+      Desde el 0.0.77 `createCobro` (sin sobre), «Es el pago de un vuelo»,
+      `createReembolso` (sin sobre), `deleteCobro` y `updateCobro` (dinero,
+      cuenta o método) llaman `avisarCambioSolicitudAutomatica`, que solo
+      AVISA la transición de una automática viva («ya no aplica» / «vuelve a
+      aplicar»); jamás la retira (la oficina, a mano y con confirmación).
       Las respuestas HTTP de los endpoints de cobro no cambian ni un byte.
     - **Pre-cierre**: item ADITIVO NO bloqueante `vuelos_cobrados_sin_factura`
       («Vuelos cobrados en cuentas que exigen factura sin factura
@@ -5804,7 +5897,17 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       registre la factura. Bordes aceptados: `cuenta_destino` legado fuera
       del catálogo o método OTRO sin cuenta ⇒ no exige (la oficina captura
       la cuenta); en `createCobro` el snapshot que el panel refresca
-      milisegundos después puede todavía no traer la solicitud.
+      milisegundos después puede todavía no traer la solicitud. Desde el
+      0.0.77 un anticipo devuelto COMPLETO, por cualquier vía, sale del
+      renglón (regla de `netosQueExigen`); el texto del detalle lo dice y
+      pide registrar el dinero devuelto como REEMBOLSO. El informativo
+      `cobros_en_cancelados` lista solo los cancelados que el reparto cuenta
+      (`retieneCobros`: ya no salen filas de $0.00) y marca
+      `diferencia_cambiaria: true` (ADITIVO, solo cuando aplica) cuando el
+      dinero ya se devolvió completo (`dineroDevueltoCompleto`): lo que queda
+      es la diferencia entre el T.C. del cobro y el del reembolso, que el
+      reparto cuenta como venta; su detalle lo explica y pide registrar el
+      reembolso (no eliminar el cobro).
     - **Skew / deploy**: sin migración ni cambios en panel (la vista en
       pantalla lee el mismo libro, invariante 52; la bandeja «Por facturar»
       ya pinta nota y solicitante; el pre-cierre ignora `vuelos[]` extra) ni
@@ -5815,12 +5918,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       desfasada hasta desplegar pyservices (cero 422). Orden recomendado:
       pyservices → API (al revés de la invariante 58, cuya lógica es la
       opuesta).
-    - Specs: `common/cuentas-cobro.spec` (tabla de verdad; NETO: devuelto
-      completo ⇒ NO_EXIGE, parcial ⇒ EXIGE, centavos, en efectivo / otra
-      moneda / sin moneda no netea; `cuentasQueExigenFactura` con neto),
+    - Specs: `common/cuentas-cobro.spec` (tabla de verdad: devuelto
+      completo por la misma cuenta, en efectivo, por otra cuenta o sin
+      cuenta ⇒ NO_EXIGE; mismos pesos con otro T.C. ⇒ NO_EXIGE; USD devuelto
+      en MXN con `cobrado` ⇒ NO_EXIGE y sin `cobrado` ⇒ EXIGE; parcial ⇒
+      EXIGE, también a ≤ 1 USD en la misma moneda (R1, R2, R3, R5, R6);
+      ambiguo en una moneda ⇒ EXIGE; pesos devueltos y dólares retenidos en
+      efectivo ⇒ NO_EXIGE (excepción consciente); otra moneda sin T.C. y sin
+      moneda ⇒ EXIGE; bordes 1.00 / 1.01; `devolucionCruzadaCompleta`,
+      `dineroDevueltoCompleto`, `origenesQueExigenFactura`),
       `factura-cliente.util.spec` (paso 5; `etiquetaFacturaRegistrada` ≡
       cascada vieja), `factura-cliente-etiquetas.spec` (CANCELADO con
-      anticipo devuelto completo / en parte y select con `moneda`; 3
+      anticipo devuelto completo / en parte, devuelto en efectivo o por otra
+      cuenta ⇒ fuera, automática que ya no aplica ⇒ «No lleva factura» y
+      select con `moneda` y `tc_usd_mxn`; 3
       consultas por lote + puente con la sonda, select con
       `estado`/`factura_solicitada_at`,
       paginación 1 001 cobros ⇒ 2 páginas sin perder el vuelo 1 001,
@@ -5850,7 +5961,9 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       memoria con max-rows 1000: 7 casos + orden, no bloquea, cada regla,
       anti-cap con páginas `[0,999]`/`[1000,1999]`, lectura fallida,
       `estado: 'CANCELADO'` solo en cancelados, CANCELADO devuelto completo
-      fuera y en parte dentro),
+      fuera y en parte dentro, devuelto en efectivo o por otra cuenta ⇒
+      fuera; `cobros_en_cancelados` sin filas de $0.00 y con
+      `diferencia_cambiaria`; `permisos_sin_avion`),
       `aircraft-balance.service.factura.spec` (paso 5 en el individual, en
       los dos libros del multi-avión, en el consolidado y en col J con UNA
       lectura por vuelo; bandera en individual, `aviones[]` y consolidado y
@@ -6222,7 +6335,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     cada permiso pagado = egreso), ya no bloque informativo bajo totales».
     SUPERSEDE el punto (2) de la invariante 53 (el bloque informativo
     `afac`). **Revisión del 13-oct-2026, ANTES del deploy (hallazgo alta de
-    la revisión adversaria)**: el permiso PAGADO ya resta en el avión, así
+    la revisión adversaria), CONFIRMADA por el cliente el 14-oct-2026 («el
+    AFAC lo cargan al Avión»)**: el permiso PAGADO resta en el avión, así
     que en la fila va CITADO con egreso **$0.00** «a cargo del avión» —ver
     «UN PERMISO PAGADO, UNA VEZ» abajo—; la provisión sí suma como ingreso.
     - **Regla**: `payloadGeneral` (la UNA armadura que comparten
@@ -6299,10 +6413,8 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       7 aeronaves puede ser de dólares, no de centavos); el egreso es $0.00
       (sin drift). Refinamiento NO adoptado (aditivo, solo si el cliente
       exige el USD exacto de la provisión): T.C. ponderado `ingreso ÷
-      Σ(X_i ÷ z_i)` para el ingreso. Si algún día el permiso egresa aquí,
-      su USD diferiría de `permisos.usd` por centavos (`tc_promedio` va
-      redondeado a 2; `tcHojas`, crudo): `tc_egreso` en
-      `MovimientoParaEmpresa`.
+      Σ(X_i ÷ z_i)` para el ingreso. El permiso pagado NO egresa aquí
+      (decisión del cliente del 14-oct-2026): no hace falta un `tc_egreso`.
       El `tc_aplicado` por fila de la hoja «permisos» (invariante 59) NO se
       usa aquí para recalcular nada.
     - **Contrato (ADITIVO; skew en los dos sentidos)**:
@@ -6350,31 +6462,40 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       dependencia dura): en la ventana API nuevo + pyservices viejo los
       INGRESOS PROPIOS y el RESULTADO suben con la provisión (~$27k
       MXN/avión/mes con 100 USD/hr) sin que la etiqueta lo diga.
-    - **UN PERMISO PAGADO, UNA VEZ (revisión del 13-oct-2026, antes del
-      deploy; pregunta ABIERTA al cliente, ver «Pendientes conocidos»)**: el
-      permiso PAGADO ya resta en el avión (hoja «permisos» → `permisos_usd`
-      de la cascada → utilidad cobrada → socios; en el reparto, el grupo
-      PERMISO) desde antes del 0.0.74, y el reparto de septiembre ya se
-      entregó así. La versión de c9ac1022 lo egresaba ADEMÁS en VuelaTour:
-      el grupo lo contaba dos veces (XB-ANU oct-2026: 5,518 de caja ⇒ −11,036
-      en el grupo; VuelaTour −5,518 − 30 % × 5,518) y lo publicaba cualquier
-      Balance general (pantalla y descarga) desde el deploy, no solo al
-      regenerar septiembre. Por eso, mientras el cliente no responda, la fila
-      lo CITA con egreso $0.00 (mismo patrón que la «Comisión del vendedor
-      (avión)», invariante 61): el grupo lo resta UNA vez (en el avión) y los
-      socios no cambian. Desviación consciente del texto literal de la
-      decisión 2 («cada permiso pagado = egreso»): gana el dinero correcto.
-      Si responde «sale del avión», el cambio va JUNTO en un solo deploy:
-      `utilidadDespues` sin `hojaPermisos.usd` (`permisos_usd` como nota;
-      pyservices: variante de la fórmula de la cascada `'permisos'!$C$5` y
-      `_NOTA_PERMISOS`), el grupo PERMISO fuera del saldo del reparto (y
-      decidir si el reparto cobra entonces la provisión), el Libro Dinero, y
-      aquí `egreso_mxn` = Σ `monto_mxn` con la marca «sin TC» de siempre
-      (más los 4 textos de pyservices). La provisión NO es doble (−T en el
-      avión, +T en la pestaña). TODA la hoja «permisos» (internación,
-      nocturno…) se cita rotulada «permiso AFAC pagado» (el detalle va en la
-      nota).
-    - **Fuera de alcance**: Libro Dinero, pre-cierre, la hoja «permisos» del
+    - **UN PERMISO PAGADO, UNA VEZ — DECISIÓN DEL CLIENTE (14-oct-2026,
+      pregunta CERRADA: «¿El permiso AFAC pagado lo carga el avión o lo paga
+      VuelaTour?» ⇒ «el AFAC lo cargan al Avión»)**: el permiso PAGADO resta
+      SOLO en su avión —hoja «permisos» → `permisos_usd` → utilidad cobrada
+      → socios (y la participación de la empresa como socia en el bloque
+      VUELATOUR); en el reparto, el grupo PERMISO (eje `fecha_gasto`)—, como
+      desde antes del 0.0.74 y como se entregó el reparto de septiembre. La
+      fila lo CITA con egreso $0.00 (patrón de la «Comisión del vendedor
+      (avión)», invariante 61): el grupo lo resta UNA vez. SUPERSEDE el texto
+      literal de la decisión 2 del 13-oct («cada permiso pagado = egreso»).
+      c9ac1022 lo egresaba además en VuelaTour (XB-ANU oct-2026: 5,518 de
+      caja ⇒ −11,036 en el grupo). **DESCARTADO** el cambio alterno (que
+      VuelaTour lo pague): no se implementa sin una decisión NUEVA del
+      cliente. **Candado (API 0.0.77, revisión del 14-oct-2026)**: un
+      PERMISO sin avión resoluble (`avionDelGasto`: tramo → sellado → vuelo)
+      y que no sea de un vuelo externo sin avión caería en «otros gastos» de
+      VuelaTour y en ningún reparto —lo contrario de la decisión—: el
+      pre-cierre lo BLOQUEA (item `permisos_sin_avion` «Permisos sin avión»,
+      justo después de `combustible_sin_avion` y en `bloqueantes`; `count`,
+      `monto_mxn` y, solo si hay, `monto_usd` —jamás se suman monedas—;
+      detalle «El permiso lo carga el avión (decisión del cliente del
+      14-oct-2026): sin avión no resta en ningún balance ni en el reparto y
+      el Balance general lo pondría como gasto de VuelaTour. Asígnale el
+      avión o el vuelo en Gastos.»; 0 casos al 14-oct-2026). Con UN solo
+      permiso el concepto copia su detalle SIN la marca «sin TC»
+      (`detalleSinMarcaSinTc` ⇒ «sin T.C.»: con la marca, `ladoEnUsd`
+      vaciaba EGRESOS y RESULTADO del bloque VUELATOUR aunque la fila egrese
+      $0.00; riesgo latente, 0 casos). La provisión NO es doble (−T en el
+      avión, +T en la pestaña). TODA la hoja «permisos» se cita rotulada
+      «permiso AFAC pagado» (el detalle en la nota). Fuera de esta decisión:
+      la aportación AFAC por hora (columna T) la carga el avión solo en el
+      balance; el reparto no la cobra (ver «Pendientes conocidos»).
+    - **Fuera de alcance**: Libro Dinero, pre-cierre (salvo el candado
+      `permisos_sin_avion` del 0.0.77), la hoja «permisos» del
       libro individual (invariante 59) y la columna T con la tarifa por fila
       de la flota (invariante 53 (1)) no cambian. Sin migración.
     - Specs: `afac-otros-movimientos.util.spec` (fila exacta con egreso
@@ -6382,7 +6503,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       total SIN la marca «sin TC», solo permisos (remanente 0) / solo
       provisión, singular y sin tarifa, centavos, T.C. null, orden y
       EXTERNOS, ningún texto con la marca del amarillo, «un permiso, una
-      vez»),
+      vez» y —0.0.77— UN permiso cuyo detalle trae «sin TC» ⇒ «sin T.C.» en
+      el concepto y los dos lados del bloque con número),
+      `profit-sharing.service.pre-cierre-vuelos-sin-factura.spec`
+      (`permisos_sin_avion`: sin avión ni vuelo ⇒ count, `monto_mxn` y
+      `monto_usd` aparte y `listo` false; con vuelo propio o de un externo
+      sin avión ⇒ no bloquea y sigue en `gastos_sin_avion`),
       `aircraft-balance.service.afac-om.spec` (mundo con tarifa 25 y tres
       permisos —uno del #501 pagado el 03-oct: cuenta en el MES DEL VUELO—:
       fila al final con ingreso = `totales.permiso_afac_mxn` y egreso $0.00
@@ -6598,11 +6724,15 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
     #376 tenía solicitud viva y CERO ligas ⇒ por facturar, correcto. El
     13-oct 13:21 Mary agregó #376 a A-0440 y el CAS lo subió a FACTURADO (el
     «FACTURADO manual» era el efecto de ligar). Sin arreglo de datos.
-    - **Regla nueva (fuente única `estadoSolicitud(v, vigentesLigadas)`)**:
-      'POR_FACTURAR' = lo de siempre ∧ `factura_estatus` ≠ 'FACTURADO';
-      'MARCADO_SIN_REGISTRO' = lo mismo pero marcado «Facturado» a mano;
-      'NINGUNO' en cualquier otro caso. `esPorFacturar` (misma firma) ≡
-      POR_FACTURAR y `esMarcadoSinRegistro` ≡ MARCADO_SIN_REGISTRO. Sin la
+    - **Regla (fuente única `estadoSolicitud(v, vigentesLigadas,
+      exigencia)` —el 3.er parámetro es OBLIGATORIO desde el 0.0.77: `null`
+      = no leída ⇒ como antes—)**: 'POR_FACTURAR' = lo de siempre ∧
+      `factura_estatus` ≠ 'FACTURADO' ∧ no YA_NO_APLICA;
+      'MARCADO_SIN_REGISTRO' = lo mismo pero marcado «Facturado» a mano
+      (gana sobre YA_NO_APLICA); 'YA_NO_APLICA' (0.0.77, invariante 60) =
+      solicitud AUTOMÁTICA viva y el vuelo ya no exige; 'NINGUNO' en
+      cualquier otro caso. `esPorFacturar`, `esMarcadoSinRegistro` y
+      `esSolicitudYaNoAplica` (misma firma) ≡ cada estado. Sin la
       llave `factura_estatus` la función se comporta como antes (todo
       lector que la alimenta la suma al select: `COLS_VUELO_SOLICITUD`,
       `filasSolicitud`, `conteoPorFacturar`, `porFacturar`,
@@ -6612,15 +6742,20 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ahora dicen lo mismo.
     - **Contrato (TODO aditivo; el panel trata cada campo como opcional)**:
       `GET /v1/facturas-emitidas/por-facturar` ⇒ `ListaPorFacturar { data,
-      count, marcados_sin_registro }` (`data` solo POR_FACTURAR con el orden
+      count, marcados_sin_registro, ya_no_aplican }` (`ya_no_aplican` desde
+      el 0.0.77, invariante 60, misma forma y orden; `data` solo
+      POR_FACTURAR con el orden
       de siempre; `marcados_sin_registro` con la MISMA forma y orden, cada
       item con `vuelo.estatus_manual: 'FACTURADO'`). `GET …/por-facturar/
       conteo` ⇒ `ConteoPorFacturar { por_facturar, paga_contra_factura,
-      marcados_sin_registro }` (el badge del menú lee SOLO `por_facturar`;
+      marcados_sin_registro, ya_no_aplican }` (el badge del menú lee SOLO
+      `por_facturar`;
       `ResumenFacturas.por_facturar` y la fila del Excel «Por facturar
       (pedidas sin factura)» = el mismo conteo). `factura_servicio`
       (snapshot, POST/DELETE solicitud-factura) ⇒ + `marcado_sin_registro:
-      boolean`; `factura_servicio_resumen` conserva su forma (su
+      boolean` y, desde el 0.0.77, `exigencia`, `origenes_exigen` y
+      `solicitud_ya_no_aplica` (últimas llaves); `factura_servicio_resumen`
+      conserva su forma (su
       `por_facturar` ya aplica la regla: el chip ámbar desaparece para los
       FACTURADO a mano).
     - **Parte B — prevención del caso (`PorFacturarItem.facturas_del_cliente`,
@@ -6891,21 +7026,35 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       los MISMOS nombres y textos; las tablas LABEL/DESTINO/AYUDA NO
       cambiaron); `common/ingreso-resultado.util` — `partirIngresosPorAvion`
       (LA partición: su avión XOR VuelaTour, orden del lector, lo que no es
-      resultado en ningún lado), `ingresoEsDelAvion`, `netoIngresoUsd`;
-      `aircraft/otros-ingresos-avion.util` — `filaHojaOtrosIngresos`,
-      `hojaOtrosIngresosAvion`, `fusionarOtrosIngresosFlota`. Los pesos
+      resultado en ningún lado), `ingresoEsDelAvion`, `netoIngresoUsd` y
+      —0.0.77— `diaTcOficialIngreso` y `usdDeIngresoAvion` (la conversión
+      ÚNICA, abajo); `aircraft/otros-ingresos-avion.util` —
+      `filaHojaOtrosIngresos`, `notaTcUsdIngreso`, `hojaOtrosIngresosAvion`,
+      `fusionarOtrosIngresosFlota`. Los pesos
       salen SIEMPRE de `filaLibroDeIngreso` (sin cambio): MXN directo, USD ×
       su `tc_usd_mxn` PROPIO, comisión bancaria como egreso, neto =
       remanente. `filaLibroDeIngreso`, `leerIngresosDeResultado` (lee además
-      `aeronave_id`, `notas` y `cuenta:cuenta_bancaria_id(alias, banco)`) y
+      `aeronave_id`, `notas`, `cuenta:cuenta_bancaria_id(alias, banco)` y,
+      desde el 0.0.77, `gasto_id`) y
       `buildHoja` no cambiaron de comportamiento. Prohibido reimplementar la
       partición en un lector.
     - **Dónde SÍ cuenta**: (1) hoja «Otros ingresos» del libro de su avión
-      (`otros_ingresos_avion` = `{filas, total_mxn, usd}`; fila `{ingreso_id,
-      clave, fecha, categoria (etiqueta), detalle (clave · descripción ·
-      cliente|pagador · vuelo #n), moneda_original, monto_original,
-      tc_aplicado (USD: el T.C. EXACTO; MXN: null), ingreso_mxn, comision_mxn,
-      neto_mxn, cuenta ('alias · banco' | 'Efectivo / caja'), notas}`);
+      (`otros_ingresos_avion` = `{filas, total_mxn, usd, usd_por_ingreso:
+      true}` —la bandera desde el 0.0.77, ÚLTIMA llave, SIEMPRE—; fila
+      `{ingreso_id, clave, fecha, categoria (etiqueta), detalle (clave ·
+      descripción · cliente|pagador · vuelo #n), moneda_original,
+      monto_original, tc_aplicado (USD: el T.C. EXACTO; MXN: null),
+      ingreso_mxn, comision_mxn, neto_mxn, cuenta ('alias · banco' |
+      'Efectivo / caja'), notas, tc_usd, neto_usd, tc_usd_origen ('PROPIO' |
+      'GASTO_LIGADO' | 'OFICIAL_DEL_DIA'), tc_usd_nota}` —las cuatro
+      últimas ADITIVAS del 0.0.77: `tc_usd` = el T.C. EXACTO que dividió
+      (USD: null), `neto_usd` = el USD de la conversión ÚNICA y
+      `tc_usd_nota` = `notaTcUsdIngreso` (OFICIAL_DEL_DIA ⇒ «T.C. oficial de
+      referencia del día del ingreso (open.er-api, dato del 2026-09-04): el
+      ingreso en pesos no traía tipo de cambio.»; GASTO_LIGADO ⇒ «T.C. con el
+      que este libro convierte el gasto que reembolsa (gasto 70e8c3a4 del
+      15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se anulan
+      en este libro.»; PROPIO o USD ⇒ null)—);
       (2) la línea «(+) OTROS INGRESOS USD» que SUMA en la cascada
       (`balance.otros_ingresos_avion_usd` = hoja.usd; `utilidad_despues_usd`
       = round2(antes − combustible − indirectos − refacciones − otros −
@@ -6925,41 +7074,74 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       ingresos» del Libro Dinero (ni su ingreso ni su comisión). CRUCE con
       spec: Σ remanente ING del Libro Dinero (las dos listas) == Σ sueltas
       ING del general + Σ `aviones[].otros_ingresos_avion.total_mxn`.
-    - **Conversiones (dos T.C. por diseño, como los gastos)**: balance = Σ
-      neto MXN ÷ `tcHojas` (el T.C. de las hojas de gastos del libro; avión
-      SIN vuelos: el oficial del cierre — los ingresos cuentan para ese
-      respaldo y el pendiente dice «sus hojas de gastos e ingresos se
-      convirtieron… la utilidad del periodo es el resultado de esos
-      movimientos»; sin ingresos, el texto de siempre); regla de `buildHoja`
-      copiada: fila sin MXN ⇒ null (pendiente «Hoja "Otros ingresos"
-      (fecha): ingreso ING-n en USD sin tipo de cambio…»), total 0 ⇒ 0. Reparto
-      = USD ⇒ neto; MXN ⇒ neto ÷ (T.C. propio ?? oficial del día de `fecha`,
-      MISMO lote de `resolverTcOficial` —un día, una consulta—); sin T.C. no
-      suma (`otros_ingresos_avion_sin_tc_mxn`); cada usd a centavos y total
-      = round2(Σ). Los dos libros PUEDEN DIFERIR y NO son centavos (revisión
-      del lote 2, 14-oct-2026: el texto decía «centavos» y era falso): la
-      diferencia crece con la distancia entre el T.C. del ingreso (propio u
-      oficial de su día; un USD cuenta su neto tal cual) y el promedio del
-      libro. Caso real ING-4 (N990GG, $46,550.80 MXN del 4-sep, sin T.C.
-      propio): balance ÷ 17.17442 = 2,710.47 USD; reparto ÷ 16.9479 = 2,746.70
-      USD (36.23 USD; ~18.48 para el socio al 51 %). Un USD de 1,000 a
-      18.0243 en un libro con promedio 17.21 sale ≈ 1,047.32 en el balance y
-      1,000.00 en el reparto. Es el MISMO diseño de las hojas de gastos (dos
-      T.C. por diseño): NO es bug, pero se le dice así al cliente (nota de la
-      pestaña en pyservices, `_NOTA_OTROS_INGRESOS_AVION`). Unificar (que la
-      cascada sume la conversión POR ingreso) exige cambiar a la vez la
-      fórmula C5 de pyservices (`ROUND(A5/AVERAGE(T.C. de costos),2)`):
-      decisión aparte.
+    - **Conversión ÚNICA del ingreso de un avión (decisión del cliente del
+      14-oct-2026: «hazlo, si es lo mejor hazlo»; API 0.0.77)**: balance,
+      reparto y tablero convierten CADA ingreso con la MISMA función pura
+      `usdDeIngresoAvion(i, {oficialDelDia, gastoLigado})`
+      (`common/ingreso-resultado.util`): USD ⇒ su neto (monto − comisión)
+      tal cual; MXN ⇒ neto ÷ (T.C. propio ?? T.C. del gasto LIGADO ?? oficial
+      del día de su `fecha`); cada usd a centavos y total = round2(Σ). El día
+      lo decide `diaTcOficialIngreso` (solo MXN sin T.C. propio y con una
+      `fecha` AAAA-MM-DD válida) y el oficial sale de la única puerta
+      `TipoCambioService.oficialDetallePara` (balance: `tcOficialDeDias` con
+      su memo por día, compartido por todo el general —un día, una
+      consulta—; reparto: `resolverTcOficial`, mismo lote de vuelos y
+      gastos). **Reembolso LIGADO** (REEMBOLSO_DEVOLUCION en pesos con
+      `gasto_id` de un gasto en pesos que ESE libro cuenta): se convierte con
+      el T.C. con el que ESE libro convierte su gasto —balance: el T.C. de
+      costos de la fila de su vuelo (`tc_costos ?? tcPromedio`, el divisor
+      de `ganancia_usd`; los vínculos 'suma' de la fila) o `tcHojas` si vive
+      en una hoja; reparto: `tc_gasto ?? oficial del día del gasto` (el
+      divisor de `toUsd`, solo gastos que restan: grupo ≠ EXCLUIDO)— para
+      que reembolso y gasto se anulen EXACTOS en cada libro (revisión del
+      14-oct-2026: con la regla por ingreso un reembolso exacto del gasto
+      70e8c3a4 dejaba +45.12 USD en el balance y +27.15 en el reparto que no
+      existen en pesos); su USD puede diferir entre libros igual que el de
+      su gasto; si el gasto no está en ese libro (otro mes, otro avión u
+      otra moneda) ⇒ la regla por ingreso y, en el balance, el pendiente
+      «Hoja "Otros ingresos" (fecha): ING-n reembolsa un gasto que este
+      libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con
+      el T.C. oficial de su día y no se anula exacto con su gasto». El
+      balance YA NO divide la hoja entre `tcHojas` y los ingresos YA NO
+      cuentan para el respaldo «avión sin vuelos» (con gastos E ingresos el
+      pendiente dice «sus hojas de gastos se convirtieron a USD con el T.C.
+      oficial de referencia del {día} ({tc}, {fuente}) y cada uno de sus
+      otros ingresos con su T.C. propio o el oficial de su día; la utilidad
+      del periodo es el resultado de esos movimientos»; solo gastos, el
+      texto de siempre byte a byte; solo ingresos, sin respaldo ni
+      pendiente). Sin T.C., cada libro su regla: balance ⇒ fila sin NETO
+      USD, hoja `usd` null, utilidad vacía y pendiente «… ingreso ING-n en
+      pesos sin T.C. propio ni T.C. oficial de su día — fila sin USD; la
+      utilidad después de gastos queda vacía»; reparto ⇒ no suma y va a
+      `otros_ingresos_avion_sin_tc_mxn`. Una fila USD ya no anula la hoja por
+      no tener pesos (su NETO USD sí suma; pendiente «… en USD sin tipo de
+      cambio — fila sin monto MXN (su NETO USD sí suma)»). ING-4 (N990GG,
+      $46,550.80 del 4-sep, oficial 16.9479, sin gasto ligado) = 2,746.70
+      USD en los tres (antes el balance daba 2,710.47 = ÷ 17.17442; +36.23
+      en N990GG sep-2026: +18.48 Angel Alvarez, +17.75 Aero Charter).
+      Reasignar un ingreso sin gasto ligado ya no cambia su USD. Reparto,
+      cuenta corriente, tablero y Libro Dinero NO cambian (el reparto solo
+      se refactoriza; 0 ingresos con `gasto_id` al 14-oct-2026). Los GASTOS
+      siguen con dos T.C. por diseño (hojas al promedio del libro, como el
+      Excel del cliente; reparto gasto por gasto). La etiqueta de la fuente
+      sale de `common/fuente-tc-oficial.util#fuenteTcLegible` (PURA;
+      `TipoCambioService` la re-exporta): el util de la hoja NO importa el
+      servicio, que los specs sustituyen con `jest.mock`.
     - **Presencia de llaves (todo ADITIVO; skew en los dos sentidos)**: hoja
       y línea SIEMPRE en los libros de avión (individual y `aviones[]`; vacía
-      `{filas: [], total_mxn: 0, usd: 0}`, también EXTERNOS, que no lee
+      `{filas: [], total_mxn: 0, usd: 0, usd_por_ingreso: true}`, también
+      EXTERNOS, que no lee
       `ingreso`), como ÚLTIMAS llaves de la raíz y del bloque `balance`;
       `consolidado.otros_ingresos_avion` (hoja «otros ingresos aviones») SOLO
       con filas, ÚLTIMA llave, detalle «MATRÍCULA · …», usd = round2(Σ) con
-      null que se PROPAGA; `otros_movimientos.otros_ingresos_por_avion: true`
+      null que se PROPAGA y `usd_por_ingreso: true` (0.0.77; las filas llevan
+      las cuatro llaves del 0.0.77 antes de `matricula`/`avion_color`);
+      `otros_movimientos.otros_ingresos_por_avion: true`
       SIEMPRE, tras `comision_vendedor_solo_gasto_real` y antes de
       `afac_en_filas`; Libro Dinero solo con dato; reparto SIEMPRE (0 / [] en
-      `ingresos` y `detalle.otros_ingresos_avion`), `tc_oficial.ingresos`
+      `ingresos` y `detalle.otros_ingresos_avion`, cuya línea gana
+      `tc_origen` AL FINAL desde el 0.0.77 —el PDF/XLSX del reparto no la
+      lleva—), `tc_oficial.ingresos`
       `{count, monto_mxn}` y el payload del PDF/XLSX por avión con
       `otros_ingresos_avion_usd`, `otros_ingresos_avion_sin_tc_mxn` y
       `otros_ingresos_avion` (`saldo_usd` YA lo incluye). El general LEE
@@ -7014,16 +7196,27 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       lleva avión) → panel (único que ofrece el selector nuevo). Si el API
       sale antes que pyservices los números quedan correctos pero sin la
       pestaña ni la línea (UTILIDAD DESPUÉS como valor): subir pyservices de
-      inmediato. Flutter: sin cambio.
+      inmediato. Flutter: sin cambio. **0.0.77** (conversión única):
+      pyservices (bandera `usd_por_ingreso`) ⇒ COMPUERTA del deployment
+      ACTIVO (invariante 49) ⇒ API; rollback primero el API (con el API
+      0.0.77 y un pyservices viejo la C5 vieja evalúa ÷ el promedio y
+      `finalizar` la deja como VALOR: números correctos, pero B5 y tres
+      notas desfasadas).
     - Specs: `categoria-ingreso.util.spec` (los 5 exports, membresía,
       literales, sin «Otros ingresos VuelaTour»), `ingreso-resultado.util.spec`
-      (mapeo de los campos nuevos, fila byte-idéntica, partición, neto USD),
-      `otros-ingresos-avion.util.spec` (fila ING-4 literal, USD con
-      comisión, sin T.C., vacía, fusión con orden estable y null que se
+      (mapeo de los campos nuevos —`gasto_id` desde el 0.0.77—, fila
+      byte-idéntica, partición, neto USD, `diaTcOficialIngreso` y
+      `usdDeIngresoAvion` con las cifras reales: 2,746.70 / 2,660.05 /
+      2,638.61), `otros-ingresos-avion.util.spec` (fila ING-4 literal con las
+      cuatro llaves del 0.0.77 —16.9479 ⇒ 2,746.70—, `notaTcUsdIngreso`, USD
+      con comisión, sin T.C., ligado y no ligado con sus pendientes
+      literales, vacía con la bandera, fusión con orden estable y null que se
       propaga), `aircraft-balance.service.otros-ingresos-avion.spec`
-      (individual 2,327.54 con cascada y socios, `diferencias` acotadas,
-      ajenos y anticipo forzado fuera, EXTERNOS sin leer `ingreso`, avión sin
-      vuelos con oficial 18 y su pendiente, general con UNA lectura, sueltas,
+      (individual 2,586.16 con el oficial 18 del día del ingreso —el libro
+      promedia 20—, cascada y socios, `diferencias` acotadas, ajenos y
+      anticipo forzado fuera, EXTERNOS sin leer `ingreso`, avión sin vuelos:
+      oficial de SU día y sin respaldo; con gastos e ingreso, el pendiente
+      nuevo; general con UNA lectura, sueltas,
       consolidado, bandera, bloque VUELATOUR y el CRUCE con el Libro Dinero),
       `aircraft-balance.service.ingresos.spec` (sueltas idénticas con un
       ingreso de avión; delta 6,800), goldens de «otros movimientos» con la
@@ -7033,7 +7226,13 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       golden intacto), `profit-sharing.service.otros-ingresos-avion.spec`
       (oficial 18 ⇒ 2,586.16, T.C. propio, USD neto, sin T.C., ajenos,
       `q.aeronave_id`, sin ingresos/sin migración idénticos, un día = una
-      consulta, payload del PDF y utilidades por mes),
+      consulta, payload del PDF y utilidades por mes; `tc_origen` y el
+      reembolso LIGADO con `tc_gasto` y con el oficial del día del gasto),
+      `aircraft-balance.service.ingreso-conversion-unica.spec` (0.0.77,
+      CRUCE: ING-4 = 2,746.70 en balance, reparto y tablero con un libro que
+      promedia 20; USD 970 en los tres; avión sin vuelos; una consulta del
+      oficial por día en el general; reembolso ligado a un gasto de hoja, de
+      la fila de un vuelo y de otro mes),
       `dashboards.service.overview-otros-ingresos.spec` (identidad al
       centavo), `ingresos.service.spec` / `ingresos.util.spec` /
       `ingresos-xlsx.spec` (201 con aviso, 400 en alta y PATCH, conciliado
@@ -8909,6 +9108,31 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   `GASTO_RICO_COLS`) comprobadas en prod por `information_schema` (solo
   SELECT): 22 de 22.
 
+- **14-oct-2026 — 0.0.77, lote A (reglas del 14-oct-2026), SIN migración
+  propia** (decisiones del cliente del 14-oct-2026; invariantes 60, 62 y
+  67): anticipo devuelto sin factura (regla 1 por moneda + regla 2 SOLO en
+  devolución cruzada; solicitud automática «ya no aplica» sin retiro
+  automático, con avisos de transición; el panel pinta la exigencia del
+  API), conversión ÚNICA del ingreso de un avión (`usdDeIngresoAvion`; hoja
+  «Otros ingresos» con T.C. A USD / NETO USD y C5 = `ROUND(SUM(K),2)` tras
+  la bandera `usd_por_ingreso`; reembolso ligado a su gasto ⇒ se anula
+  exacto en cada libro), nota al pie de FACTURA VUELATOUR con
+  `factura_vuelatour_devolucion` y candado del pre-cierre
+  `permisos_sin_avion`. Orden: pyservices ⇒ COMPUERTA (deployment ACTIVO
+  de pyservices = commit nuevo, invariante 49) ⇒ API (`GET /v1/version` =
+  `0.0.77`; el número lo sube el commit «Versión 0.0.77», y si otro lote
+  del mismo número trae migración, su orden manda) ⇒ panel. Rollback:
+  primero el API, nunca pyservices solo con el 0.0.77 arriba; el panel en
+  cualquier orden (sin la llave `exigencia` usa su respaldo). Humo como
+  ADMIN: snapshot de #215 ⇒ `factura_servicio.exigencia` 'NO_EXIGE',
+  `origenes_exigen` [], `solicitud_ya_no_aplica` false; conteo de «Por
+  facturar» igual que antes + `ya_no_aplican` 0; pre-cierre de jul–dic con
+  `permisos_sin_avion` 0 y `listo` como antes y `cobros_en_cancelados` sin
+  filas de $0.00; balance N990GG sep-2026: hoja «Otros ingresos» con T.C. A
+  USD 16.9479 y NETO USD 2,746.70 (= reparto y tablero). Regenerar SOLO
+  N990GG sep-2026 (individual y general) dentro de la regeneración de
+  septiembre (después del PASO 0 de ING-4 y del checklist de datos).
+
 - **13-oct-2026 — SIN migración** para el pago REAL al vendedor en el reporte
   por vuelo (lote 2, invariante 73): solo cambia la cuenta del PDF/Excel del
   vuelo; contrato con pyservices ADITIVO (la bandera
@@ -9295,7 +9519,8 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   Después del deploy y ANTES de regenerar: avisar al cliente de las dos
   categorías (#251 y #332 se quedan «(VuelaTour)»; comisiones cotizadas
   sin pago: #233, #237, #260, #317, #404, #417 y #442), de la compuerta
-  AFAC de la invariante 62 (bullet siguiente) y de lo de la invariante 60
+  AFAC de la invariante 62 (bullet siguiente; CERRADA el 14-oct-2026: el
+  permiso pagado lo carga el avión) y de lo de la invariante 60
   (solicitud viva aunque el cobro sea BillPocket/Paywise/efectivo, avisos
   por anticipos aplicados, sin backfill); SOLO entonces regenerar
   septiembre y octubre (balance, reparto, cuenta corriente y Libro
@@ -9316,11 +9541,11 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
   el bloque informativo de siempre). Revisión del 13-oct-2026 (antes del
   deploy): el permiso PAGADO va en la fila con egreso $0.00 «a cargo del
   avión» (ya resta en la cascada: sin doble conteo). **Compuerta del
-  verificador final**: avisar al cliente que, desde el deploy, la vista en
-  pantalla y la descarga del Balance general (octubre incluido) muestran la
+  verificador final — CERRADA el 14-oct-2026**: se avisó al cliente que la
+  vista en pantalla y la descarga del Balance general muestran la
   provisión AFAC de cada avión como INGRESO de VuelaTour y los permisos
-  pagados como filas informativas $0.00, y hacerle la pregunta abierta de
-  «Pendientes conocidos» (¿el permiso sale del avión?).
+  pagados como filas informativas $0.00; respondió «el AFAC lo cargan al
+  Avión»: se queda así (invariante 62), sin cambio de regla.
 - **PENDIENTES (13-oct-2026) — `20261013000003_categoria_comision_vendedor_avion.sql`
   y `20261013000004_gasto_comision_vendedor_avion_exige_vuelo.sql`**
   (invariante 61, comisión del vendedor en DOS categorías; NO aplicadas: las
@@ -10183,45 +10408,48 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   (`CATEGORIAS_GASTO_SIN_AVION` no puede llevar el literal); asignarle avión
   al gasto no cambia quién paga: reclasificarla a «(VuelaTour)».
 
-- **Permiso AFAC pagado: ¿lo carga el avión o VuelaTour? (13-oct-2026,
-  invariante 62) — PREGUNTA ABIERTA al cliente**. La decisión 2 decía «cada
-  permiso pagado = egreso» de VuelaTour, pero el permiso PAGADO ya resta en
-  la cascada del avión (`buildPayload`: `utilidadDespues` resta
-  `hojaPermisos.usd` ⇒ `balance.permisos_usd` ⇒ utilidad cobrada ⇒ socios) y
-  en el reparto (grupo PERMISO de `profit-sharing.service`). La versión
-  c9ac1022 lo egresaba ADEMÁS en la fila «AFAC · matrícula» ⇒ el grupo lo
-  contaba dos veces y VuelaTour lo restaba 1 + su % como socia, visible en
-  cualquier Balance general (pantalla y descarga) desde el deploy.
-  **Resuelto en el código ANTES del deploy (revisión del 13-oct-2026)**: la
-  fila lo CITA con egreso $0.00 «a cargo del avión» (un permiso, una vez;
-  los socios quedan como en el reparto de septiembre ya entregado). Cifras
-  de prod (cotejar): XB-ANU oct-2026 $5,518 (2,549 + 2,969; empresa socia al
-  30 %), N4142R sep-2026 $2,680. **Compuerta para el verificador final /
-  mensaje al cliente** (es-MX): «Con los permisos AFAC ya como filas en
-  'otros movimientos', la provisión AFAC de cada avión entra como ingreso de
-  VuelaTour y cada permiso pagado aparece en su fila con egreso $0.00
-  porque ya lo descuenta el avión (hoja 'permisos' y reparto a socios); así
-  no se cuenta dos veces. ¿El permiso AFAC pagado debe dejar de restar en el
-  avión y pagarlo VuelaTour, o se queda en el avión?». Cambio alterno si
-  responde «sale del avión» (SOLO con decisión expresa y TODO en un mismo
-  deploy: mueve utilidades y la cuenta corriente de socios, y el reparto de
-  septiembre ya se entregó): `utilidadDespues` sin `hojaPermisos.usd`,
-  `balance.permisos_usd` como solo nota (mecánica del TUA pagado; pyservices
-  necesita la variante de la fórmula de la cascada `'permisos'!$C$5`),
-  `_NOTA_PERMISOS` de pyservices, el grupo PERMISO del reparto fuera del
-  saldo (y decidir si entonces el reparto cobra la provisión tarifa × horas),
-  el Libro Dinero (`dinero-report.service`, `permisosPorAvion` ⇒
-  `utilidades_aviones[].permisos_mxn`) y, en la fila AFAC, `egreso_mxn` =
-  Σ `monto_mxn` con la marca «sin TC» de siempre (`filasAfacOtrosMovimientos`)
-  más los 4 textos de pyservices (`_OM_SECCION_AFAC`, `_OM_AFAC_EN_FILAS`,
-  `_EMPRESA_PAGOS_AFAC`, `_EMPRESA_AFAC_EN_FILAS`). Aserciones que cambian
-  juntas: `aircraft-balance.service.afac-om.spec` (5) y el caso XB-ANU de
-  `aircraft-balance.service.bloque-empresa.spec`.
+- **Anticipo devuelto sin factura (14-oct-2026, invariante 60) — preguntas
+  al cliente** (la regla del 0.0.77 asume lo que va entre paréntesis; 0
+  casos en prod): (a) si se devuelve solo una parte (penalización por no
+  show), ¿lo retenido lleva CFDI? (sí, cuando quedó en HSBC/Scotiabank;
+  conservador con mezcla de cuentas en la misma moneda); (b) pesos de HSBC
+  devueltos completos y dólares retenidos en efectivo (no exige: excepción
+  consciente entre monedas; si en realidad se retuvieron los pesos y se
+  devolvió en pesos el equivalente de los dólares, se perdería un CFDI);
+  (c) la DIFERENCIA CAMBIARIA de un cancelado cuyo dinero se devolvió
+  completo a otro T.C. sigue contando como venta en el reparto
+  (`retieneCobros`; el pre-cierre la marca «diferencia cambiaria»);
+  (d) al usuario: que el diálogo de reembolso del panel prellene moneda,
+  método, cuenta y T.C. del cobro que se devuelve (evita el residuo
+  cambiario y el 400 del candado de `createReembolso`).
+- **Permiso AFAC pagado — RESUELTO el 14-oct-2026 (invariante 62)**: el
+  cliente respondió «el AFAC lo cargan al Avión». Se queda lo del 0.0.74
+  (cascada del avión + grupo PERMISO del reparto; fila «AFAC · matrícula»
+  con egreso $0.00); el cambio alterno queda DESCARTADO. Candado nuevo del
+  0.0.77: pre-cierre `permisos_sin_avion` (bloqueante). Prod al 14-oct-2026
+  (9 PERMISO, MXN, todos con avión; solo #280 con vuelo): sep-2026 XA-VGV
+  $5,000 · XB-PEV $1,000 (#280) · N4142R $2,680; oct-2026 XB-ANU $5,518 ·
+  XA-VGV $18,278 (uno de 7,139 con `duplicado_sospechado`) · XB-PEV $381.
+- **Aportación AFAC por hora (columna T) solo en el balance (14-oct-2026;
+  NO implementar sin decisión del cliente)**: el balance la carga al avión
+  dentro de `Y` (réplica del Excel del cliente: `X16 = 100*Z16*D16` en
+  `Y16`) y la abona a VuelaTour en «AFAC · matrícula»; reparto, cuenta
+  corriente, tablero, reporte por vuelo y Libro Dinero NO (DF §4.8 solo
+  «(−) PERMISOS»). Así, además de reserva y fijos, «Reparto a socios» del
+  balance y el reparto difieren ≈ 100 USD × horas cobradas × % (N4142R
+  sep-2026 ≈ US$4,950; flota ≈ US$14,843, aprox.). Antecedente:
+  AUDITORIA_DINERO P-P4. Pregunta: «¿La aportación AFAC de 100 USD/hr
+  también se descuenta en el reparto a socios?».
+- **Permiso de un vuelo EXTERNO sin avión**: no vive en ningún libro (el
+  general no pinta su hoja «permisos»; ningún reparto); 0 casos; el
+  candado `permisos_sin_avion` no lo cubre; decide el cliente quién lo
+  carga.
 - **Todo PERMISO se rotula «permiso AFAC pagado» (13-oct-2026, invariante
   62)**: la fila AFAC cita TODA la hoja «permisos» del avión (internación,
   nocturno, «mochada al comandante de AFAC MMCT»…), no solo los de AFAC;
-  con egreso $0.00 no mueve TOTALES ni el bloque VUELATOUR (si el cliente
-  decide que VuelaTour los paga, sí los movería). Mitigación: concepto y
+  con egreso $0.00 no mueve TOTALES ni el bloque VUELATOUR (y no los
+  moverá: el 14-oct-2026 el cliente decidió que el permiso lo carga el
+  avión). Mitigación: concepto y
   nota llevan el detalle de cada gasto y la leyenda de pyservices lo dice
   («sean o no de AFAC»). Pendiente del cliente: subcategoría o proveedor AFAC
   para separarlos.
@@ -10335,7 +10563,9 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   roles (COORDINADOR registra y aplica pero no concilia ni desaplica);
   préstamos con saldo de deuda (no); **auto-cruce de la cuenta Paywise con
   cobros por TRANSFERENCIA** (no: se ven como «1 con el monto exacto» y se
-  ligan a mano o con la IA — caso #235); CFDI de anticipo (fuera); vuelo en
+  ligan a mano o con la IA — caso #235); CFDI de anticipo (fuera; un
+  anticipo DEVUELTO no lleva CFDI: decisión del cliente del 14-oct-2026,
+  invariante 60); vuelo en
   un ingreso solo para reembolsos recibidos; líneas duplicadas del banco
   (se avisan, no se borran).
 - **Hueco PREEXISTENTE (anotado el 24-sep-2026, no se tocó)**:

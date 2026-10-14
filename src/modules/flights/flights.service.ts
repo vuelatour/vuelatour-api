@@ -70,6 +70,8 @@ import {
 } from './factura-cliente.util';
 import {
   FacturaSolicitudService,
+  type AvisoCambioSolicitud,
+  type ResultadoAvisoCambioSolicitud,
   type ResultadoSolicitudPorCobro,
   type SolicitudPorCobro,
 } from './factura-solicitud.service';
@@ -11850,6 +11852,32 @@ export class FlightsService {
   }
 
   /**
+   * AVISO DE TRANSICIÓN de la solicitud AUTOMÁTICA de factura (14-oct-2026,
+   * API 0.0.77, invariante 60): puerta ÚNICA desde los cambios de dinero de
+   * un vuelo (`createCobro` sin sobre —cualquier método—, «Es el pago de un
+   * vuelo», `createReembolso` sin sobre, `deleteCobro` y `updateCobro` con
+   * dinero, cuenta o método). Solo AVISA «ya no aplica» / «vuelve a
+   * aplicar» de una automática viva; jamás la retira (la oficina, a mano y
+   * con confirmación) ni escribe `vuelo`. Mismo patrón que
+   * `solicitarFacturaPorCobros`: sin `facturaSolicitud` inyectado (specs
+   * posicionales) ⇒ null; try/catch con warn; JAMÁS 5xx, JAMÁS revierte
+   * dinero. Las respuestas HTTP de los cobros no cambian ni un byte.
+   */
+  async avisarCambioSolicitudAutomatica(
+    p: AvisoCambioSolicitud,
+  ): Promise<ResultadoAvisoCambioSolicitud | null> {
+    if (!this.facturaSolicitud) return null;
+    try {
+      return await this.facturaSolicitud.avisarCambioSolicitudAutomatica(p);
+    } catch (e) {
+      this.logger.warn(
+        `Aviso de la solicitud automática de factura falló (el dinero del vuelo ${p.vueloId} quedó registrado): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
    * Una parte de un SOBRE de grupo se edita/borra SOLO desde el grupo (el
    * sobre concilia con el banco como un todo y Σ partes == sobre es
    * invariante): 409 estructurado `COBRO_DE_GRUPO` para que el panel mande
@@ -12168,7 +12196,13 @@ export class FlightsService {
     // `interna.omitirSolicitudFactura` («Es el pago de un vuelo» desde el
     // banco) la dispara el llamador DESPUÉS de ligar el abono: si la liga
     // falla, su compensación borra el cobro y aquí no debe quedar nada.
+    // Después, en la MISMA cadena (14-oct-2026, API 0.0.77): el aviso de
+    // TRANSICIÓN de una solicitud automática que ya existía, para CUALQUIER
+    // método (un BillPocket también puede devolver la exigencia). Si este
+    // cobro acaba de CREAR la solicitud, no hay transición que avisar (ya
+    // salió «Factura pendiente»).
     if (!sobre && interna?.omitirSolicitudFactura !== true) {
+      const cobroId = cobro!.id as string;
       void this.solicitarFacturaPorCobros({
         vueloIds: [vueloId],
         cobro: {
@@ -12177,8 +12211,20 @@ export class FlightsService {
           metodo_cobro: cobro!.metodo_cobro,
         },
         actorId: userId,
-        cobroId: cobro!.id as string,
-      }).catch(() => undefined);
+        cobroId,
+      })
+        .catch(() => null)
+        .then((r) =>
+          (r?.solicitados.length ?? 0) > 0
+            ? null
+            : this.avisarCambioSolicitudAutomatica({
+                vueloId,
+                actorId: userId,
+                motivo: 'COBRO_NUEVO',
+                cambio: { tipo: 'ALTA', cobroId },
+              }),
+        )
+        .catch(() => undefined);
     }
 
     return cobro!;
@@ -12320,6 +12366,18 @@ export class FlightsService {
       link: `/admin/flights/${vueloId}`,
     };
     if (!sobre?.silenciarPush) this.notificarCobroRegistrado(payload, userId);
+    // Aviso de TRANSICIÓN de la solicitud automática (14-oct-2026, API
+    // 0.0.77, invariante 60): «un anticipo devuelto no lleva factura».
+    // FIRE-AND-FORGET; el reintento idempotente (23505) regresó antes y las
+    // partes de un sobre no avisan (el estado igual se calcula al leer).
+    if (!sobre) {
+      void this.avisarCambioSolicitudAutomatica({
+        vueloId,
+        actorId: userId,
+        motivo: 'REEMBOLSO',
+        cambio: { tipo: 'ALTA', cobroId: cobro!.id as string },
+      }).catch(() => undefined);
+    }
     return cobro!;
   }
 
@@ -12444,10 +12502,13 @@ export class FlightsService {
   ): Promise<Record<string, unknown>> {
     // Con la migración de ingresos se lee también la liga al ANTICIPO y el
     // dinero vigente (para comparar valor NUEVO contra VIGENTE).
+    // `cuenta_destino`/`tc_usd_mxn` (y `moneda`/`metodo_cobro` sin la
+    // migración; 14-oct-2026, API 0.0.77): la fila de ANTES del aviso de
+    // transición de la solicitud automática.
     const conIngresos = await ingresosDisponibles(this.supabase.service);
     const colsExistente: string = conIngresos
-      ? 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, comision_banco_monto, ingreso_anticipo_id'
-      : 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id';
+      ? 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, comision_banco_monto, ingreso_anticipo_id, cuenta_destino, tc_usd_mxn'
+      : 'id, vuelo_id, monto, comision_banco_pct, cobro_grupo_id, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn';
     const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select(colsExistente)
@@ -12598,8 +12659,11 @@ export class FlightsService {
     // (`await` best-effort: la oficina no tiene outbox; nunca 5xx). Corregir
     // hacia BillPocket/Paywise NO retira nada (retiro manual con
     // confirmación). `assertNoEsParteDeSobre` ya rebotó las partes de sobre.
-    if (dto.cuenta_destino !== undefined || dto.metodo_cobro !== undefined) {
-      await this.solicitarFacturaPorCobros({
+    const tocaCuentaOMetodo =
+      dto.cuenta_destino !== undefined || dto.metodo_cobro !== undefined;
+    let solicitudNueva = false;
+    if (tocaCuentaOMetodo) {
+      const r = await this.solicitarFacturaPorCobros({
         vueloIds: [existing.vuelo_id as string],
         cobro: {
           monto: data!.monto,
@@ -12609,19 +12673,48 @@ export class FlightsService {
         actorId: userId,
         cobroId,
       });
+      solicitudNueva = (r?.solicitados.length ?? 0) > 0;
+    }
+    // Aviso de TRANSICIÓN de la solicitud automática (14-oct-2026, API
+    // 0.0.77, invariante 60): cuando la corrección toca dinero, cuenta o
+    // método (`await` best-effort, DESPUÉS de la solicitud; si esta acaba de
+    // crearla no hay transición que avisar). Solo notas o referencia: no.
+    if (!solicitudNueva && (tocaDinero || tocaCuentaOMetodo)) {
+      await this.avisarCambioSolicitudAutomatica({
+        vueloId: existing.vuelo_id as string,
+        actorId: userId,
+        motivo: 'COBRO_CORREGIDO',
+        cambio: {
+          tipo: 'CAMBIO',
+          cobroId,
+          antes: existing,
+        },
+      });
     }
     return data!;
   }
 
-  /** Elimina un cobro capturado por error (oficina) y recalcula la bandera. */
-  async deleteCobro(cobroId: string, userId: string): Promise<{ ok: true }> {
+  /**
+   * Elimina un cobro capturado por error (oficina) y recalcula la bandera.
+   * `opts.omitirAvisoFactura` (INTERNO, jamás de un DTO; 14-oct-2026): la
+   * compensación de «Es el pago de un vuelo» borra un cobro que nadie llegó
+   * a ver — no avisa la transición de la solicitud automática.
+   */
+  async deleteCobro(
+    cobroId: string,
+    userId: string,
+    opts?: { omitirAvisoFactura?: boolean },
+  ): Promise<{ ok: true }> {
     // Con la migración de ingresos se lee la liga al ANTICIPO: desaplicar
     // desde el vuelo está PERMITIDO (el monto regresa al saldo del
     // anticipo) y deja la fila DESAPLICAR en la bitácora del anticipo.
+    // `monto, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn` en las DOS
+    // ramas (14-oct-2026, API 0.0.77): la fila borrada del aviso de
+    // transición de la solicitud automática.
     const conIngresos = await ingresosDisponibles(this.supabase.service);
     const colsExistente: string = conIngresos
-      ? 'id, vuelo_id, cobro_grupo_id, monto, moneda, ingreso_anticipo_id'
-      : 'id, vuelo_id, cobro_grupo_id';
+      ? 'id, vuelo_id, cobro_grupo_id, monto, moneda, ingreso_anticipo_id, metodo_cobro, cuenta_destino, tc_usd_mxn'
+      : 'id, vuelo_id, cobro_grupo_id, monto, moneda, metodo_cobro, cuenta_destino, tc_usd_mxn';
     const { data: existenteRaw, error: findErr } = await this.supabase.service
       .from('cobro_vuelo')
       .select(colsExistente)
@@ -12658,6 +12751,16 @@ export class FlightsService {
       .ingreso_anticipo_id;
     if (conIngresos && typeof anticipoId === 'string' && anticipoId) {
       await this.bitacoraDesaplicar(anticipoId, existing, userId);
+    }
+    // Aviso de TRANSICIÓN de la solicitud automática (14-oct-2026, API
+    // 0.0.77, invariante 60), FIRE-AND-FORGET con la fila borrada completa.
+    if (opts?.omitirAvisoFactura !== true) {
+      void this.avisarCambioSolicitudAutomatica({
+        vueloId: existing.vuelo_id as string,
+        actorId: userId,
+        motivo: 'COBRO_ELIMINADO',
+        cambio: { tipo: 'BAJA', fila: existing },
+      }).catch(() => undefined);
     }
     return { ok: true };
   }

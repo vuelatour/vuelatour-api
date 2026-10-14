@@ -42,6 +42,7 @@ import {
   ladoPagoVendedor,
 } from '../../common/categoria-gasto.util';
 import { cobrosEnUsd, retieneCobros } from '../../common/cobros-usd.util';
+import { dineroDevueltoCompleto } from '../../common/cuentas-cobro';
 import {
   expandirConReparto,
   fetchRepartos,
@@ -55,12 +56,17 @@ import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
 // INGRESO ASIGNADO A UN AVIÓN (13-oct-2026, API 0.0.75, invariante 67): los
 // ingresos de resultado CON avión suman al saldo de ESE avión (partición
 // única `partirIngresosPorAvion`, la misma del balance y el Libro Dinero).
+// Desde el 0.0.77 (decisión del cliente del 14-oct-2026) su USD sale de la
+// fuente única `usdDeIngresoAvion`: la MISMA conversión del balance.
 import {
+  diaTcOficialIngreso,
   ingresoEsDelAvion,
   leerIngresosDeResultado,
-  netoIngresoUsd,
   partirIngresosPorAvion,
+  usdDeIngresoAvion,
   type IngresoParaLibro,
+  type OrigenTcIngreso,
+  type TcGastoLigado,
 } from '../../common/ingreso-resultado.util';
 import {
   etiquetaCategoriaIngreso,
@@ -1605,6 +1611,13 @@ export class ProfitSharingService {
     // de avión). Los agregados directos/indirectos/permisos/sin_tc se derivan
     // de ESTE acumulador, así el desglose cuadra con ellos por construcción.
     const porCategoria = new Map<string, GastoCategoriaAcc>();
+    // REEMBOLSO LIGADO (14-oct-2026, API 0.0.77, revisión F3): divisor con
+    // que ESTE avión convierte cada gasto en pesos que RESTA (el de `toUsd`:
+    // `tc_gasto` ?? oficial del día del gasto), para que un
+    // REEMBOLSO_DEVOLUCION ligado a ese gasto se anule EXACTO con él (abajo,
+    // en los otros ingresos). El bucle de gastos corre antes que el de
+    // ingresos; un parcial del reparto comparte el id del padre.
+    const tcGastoReparto = new Map<string, TcGastoLigado>();
     // TUA EMBEBIDO en facturas de aeródromo (regla 7): se descuenta del costo
     // del avión ANTES de convertir y se acumula para una fila informativa
     // del detalle (transparencia: el total de la categoría ya no es la suma
@@ -1733,6 +1746,21 @@ export class ProfitSharingService {
           : g,
         ctx.tcOficialGasto,
       );
+      if (grupo !== 'EXCLUIDO' && g.moneda === 'MXN' && g.id) {
+        const propioGasto = pos(g.tc_gasto);
+        const divisor = propioGasto ?? ctx.tcOficialGasto.get(g.id)?.tc ?? null;
+        if (divisor != null && divisor > 0 && !tcGastoReparto.has(g.id)) {
+          tcGastoReparto.set(g.id, {
+            gasto_id: g.id,
+            tc: divisor,
+            fecha: diaDeFecha(g.fecha_gasto ?? null),
+            lugar:
+              propioGasto != null
+                ? 'T.C. del gasto'
+                : 'T.C. oficial del día del gasto',
+          });
+        }
+      }
       // La «(avión)» que carga un avión (13-oct-2026, invariante 61) tiene su
       // integridad en la lectura POR VUELO (convertida con tc_gasto ?? K;
       // `vendedor_usd_sin_tc_*` ⇒ `gastos_sin_tc_*`): por fecha_gasto no se
@@ -1856,13 +1884,14 @@ export class ProfitSharingService {
     // 67) ===== Ingresos de RESULTADO registrados en Ingresos con ESTE avión
     // (reembolso de su servicio, venta de una pieza suya…): SUMAN al saldo,
     // netos de la comisión bancaria. USD ⇒ el neto; MXN ⇒ neto ÷ (T.C.
-    // propio del ingreso ?? oficial del día de su `fecha`). Sin T.C. NO suma
-    // (va a `otros_ingresos_avion_sin_tc_mxn`): jamás se inventa uno. Cada
-    // usd se redondea a centavos y el total = round2(Σ). El balance convierte
-    // la hoja con su T.C. promedio: los dos PUEDEN DIFERIR y no son centavos
-    // (crece con la distancia entre el T.C. del ingreso y el promedio del
-    // libro: ING-4 2,746.70 aquí vs 2,710.47 en el balance), como los gastos
-    // (revisión del lote 2, 14-oct-2026; invariante 67).
+    // propio del ingreso ?? T.C. del gasto LIGADO ?? oficial del día de su
+    // `fecha`). Sin T.C. NO suma (va a `otros_ingresos_avion_sin_tc_mxn`):
+    // jamás se inventa uno. Cada usd se redondea a centavos y el total =
+    // round2(Σ). Es la MISMA conversión del balance (hoja «Otros ingresos») y
+    // del tablero: decisión del cliente del 14-oct-2026, fuente única
+    // `usdDeIngresoAvion` (ING-4 = 2,746.70 en los dos libros); un reembolso
+    // ligado a un gasto que este avión resta usa el T.C. de ese gasto para
+    // anularse con él.
     let otrosIngresosAvion = 0;
     let otrosIngresosSinTcMxn = 0;
     let otrosIngresosTcOficialCount = 0;
@@ -1880,18 +1909,22 @@ export class ProfitSharingService {
       usd: number | null;
       tc: number | null;
       tc_oficial: boolean;
+      /** ADITIVO al final (14-oct-2026, API 0.0.77): de dónde salió el T.C. */
+      tc_origen: OrigenTcIngreso | null;
     }> = [];
     for (const i of ctx.ingresosAvion ?? []) {
       if (!ingresoEsDelAvion(i)) continue;
       const monto = Number(i.monto) || 0;
       const com = Number(i.comision_monto) > 0 ? Number(i.comision_monto) : 0;
       const neto = round2(monto - com);
-      const propio = pos(i.tc_usd_mxn);
-      const ofi = ctx.tcOficialIngreso?.get(i.id);
-      const tc = i.moneda === 'USD' ? null : (propio ?? ofi?.tc ?? null);
-      const usd = netoIngresoUsd(i, tc);
-      const tcOficialUsado =
-        i.moneda !== 'USD' && propio == null && ofi != null && usd != null;
+      const conv = usdDeIngresoAvion(i, {
+        oficialDelDia: ctx.tcOficialIngreso?.get(i.id) ?? null,
+        gastoLigado: i.gasto_id
+          ? (tcGastoReparto.get(i.gasto_id) ?? null)
+          : null,
+      });
+      const usd = conv.usd;
+      const tcOficialUsado = conv.origen === 'OFICIAL_DEL_DIA';
       if (usd == null) {
         otrosIngresosSinTcMxn += neto;
       } else {
@@ -1915,8 +1948,9 @@ export class ProfitSharingService {
         comision: com > 0 ? round2(com) : null,
         neto,
         usd,
-        tc,
+        tc: conv.tc,
         tc_oficial: tcOficialUsado,
+        tc_origen: conv.origen,
       });
     }
 
@@ -2152,8 +2186,8 @@ export class ProfitSharingService {
     }
     const diaIngreso = new Map<string, string>();
     for (const i of ingresos) {
-      if (i.moneda !== 'MXN' || pos(i.tc_usd_mxn) != null) continue;
-      const dia = diaDeFecha(i.fecha ?? null);
+      // Fuente única del día (14-oct-2026, API 0.0.77): la MISMA del balance.
+      const dia = diaTcOficialIngreso(i);
       if (dia) diaIngreso.set(i.id, dia);
     }
     const porDia = await this.tcOficialPorDias([
@@ -2610,6 +2644,8 @@ export class ProfitSharingService {
       id: string;
       folio: number;
       cobrado_usd: number;
+      /** ADITIVO (14-oct-2026, API 0.0.77): solo cuando aplica. */
+      diferencia_cambiaria?: true;
     }> = [];
     let cobrosEnCanceladosUsd = 0;
     let gastosEnCanceladosCount = 0;
@@ -2632,12 +2668,24 @@ export class ProfitSharingService {
           // TC oficial de respaldo); los MXN que ni así convierten quedan
           // fuera del monto pero el vuelo sí cuenta.
           const conv = convCobros(v);
-          cobrosEnCancelados.push({
-            id: v.id as string,
-            folio: v.folio as number,
-            cobrado_usd: conv.total_usd,
-          });
-          cobrosEnCanceladosUsd += conv.total_usd;
+          // Desde el 0.0.77 (14-oct-2026) SOLO los cancelados que el reparto
+          // CUENTA: `retieneCobros`, el MISMO salto de `computeAvion` (antes
+          // salían también los devueltos completos con $0.00). Con la marca
+          // `diferencia_cambiaria` cuando el dinero ya se devolvió completo
+          // (`dineroDevueltoCompleto`, definición única): lo que el reparto
+          // todavía cuenta como venta es la diferencia entre el T.C. del
+          // cobro y el del reembolso (decisión de dinero pendiente).
+          if (retieneCobros(conv)) {
+            cobrosEnCancelados.push({
+              id: v.id as string,
+              folio: v.folio as number,
+              cobrado_usd: conv.total_usd,
+              ...(dineroDevueltoCompleto(lista, conv)
+                ? { diferencia_cambiaria: true as const }
+                : {}),
+            });
+            cobrosEnCanceladosUsd += conv.total_usd;
+          }
         }
         if (vuelosConGasto.has(v.id as string)) {
           vuelosConGastoCancelado.push({
@@ -2989,6 +3037,28 @@ export class ProfitSharingService {
         !esGasDeExternoSinAvion(g) &&
         avionResoluble(g) == null,
     );
+    // PERMISO sin avión (14-oct-2026, API 0.0.77, invariante 62; revisión F6):
+    // el cliente decidió que «el AFAC lo cargan al Avión»; un permiso sin
+    // avión RESOLUBLE caería en «otros gastos» de VuelaTour del Balance
+    // general y en NINGÚN reparto — lo contrario de la decisión. BLOQUEA el
+    // cierre con el MISMO criterio que el combustible (los dos helpers de
+    // arriba tal cual): uno de un vuelo EXTERNO sin avión queda fuera
+    // (riesgo documentado: no vive en ningún libro; sigue en
+    // `gastos_sin_avion`).
+    const permisosSinAvion = sinAvion.filter(
+      (g) =>
+        g.categoria === 'PERMISO' &&
+        !esGasDeExternoSinAvion(g) &&
+        avionResoluble(g) == null,
+    );
+    // Jamás se suman monedas: pesos y dólares por separado.
+    const montoPermisosSinAvion = (moneda: 'MXN' | 'USD'): number =>
+      round2(
+        permisosSinAvion
+          .filter((g) => (g.moneda === 'USD' ? 'USD' : 'MXN') === moneda)
+          .reduce((acc, g) => acc + Number(g.monto ?? 0), 0),
+      );
+    const permisosSinAvionUsd = montoPermisosSinAvion('USD');
     // El caso inverso: un FIJO capturado CON avión se prorratea igual entre
     // toda la flota (el pool no mira aeronave_id) y en el detalle del avión
     // asignado aparece EXCLUIDO — doble lectura silenciosa. Aviso, no candado.
@@ -3287,6 +3357,16 @@ export class ProfitSharingService {
         ),
       },
       {
+        clave: 'permisos_sin_avion',
+        titulo: 'Permisos sin avión',
+        detalle:
+          'El permiso lo carga el avión (decisión del cliente del 14-oct-2026): sin avión no resta en ningún balance ni en el reparto y el Balance general lo pondría como gasto de VuelaTour. Asígnale el avión o el vuelo en Gastos.',
+        count: permisosSinAvion.length,
+        monto_mxn: montoPermisosSinAvion('MXN'),
+        // Solo si hay permisos en dólares (jamás se suman monedas).
+        ...(permisosSinAvionUsd > 0 ? { monto_usd: permisosSinAvionUsd } : {}),
+      },
+      {
         clave: 'repartos_incoherentes',
         titulo: 'Repartos de gasto que suman MÁS que el gasto',
         detalle:
@@ -3423,7 +3503,7 @@ export class ProfitSharingService {
         titulo:
           'Vuelos cancelados con cobros retenidos (ya cuentan en el reparto)',
         detalle:
-          'Cargo por cancelación o anticipo no reembolsado: entra íntegro como venta del avión (repartido entre los aviones si el vuelo voló en más de uno), sin saldo pendiente. Confirma que no se haya devuelto al cliente; si se reembolsó, corrige o elimina el cobro en el detalle del vuelo.',
+          'Cargo por cancelación o anticipo no reembolsado: entra íntegro como venta del avión (repartido entre los aviones si el vuelo voló en más de uno), sin saldo pendiente. Confirma que no se haya devuelto al cliente; si se devolvió, regístralo como reembolso en el detalle del vuelo (no elimines el cobro: el reembolso deja el rastro). «(diferencia cambiaria)»: el dinero ya se devolvió completo y lo que queda es la diferencia entre el T.C. del cobro y el del reembolso, que el reparto cuenta como venta; para que no cuente, captura el reembolso con el T.C. del cobro.',
         count: cobrosEnCancelados.length,
         monto_usd: round2(cobrosEnCanceladosUsd),
         vuelos: cobrosEnCancelados,
@@ -3496,15 +3576,17 @@ export class ProfitSharingService {
     ];
 
     // Lo único que BLOQUEA números: vuelos sin completar, tacos amarillos,
-    // gastos/cobros MXN que no convierten ni con el TC oficial (29-ago) y
-    // combustible sin avión (el gas del mes es por avión). El resto es
-    // aviso (cobranza/conciliación son procesos).
+    // gastos/cobros MXN que no convierten ni con el TC oficial (29-ago),
+    // combustible sin avión (el gas del mes es por avión) y —desde el 0.0.77
+    // (14-oct-2026, invariante 62)— permisos sin avión (el permiso lo carga
+    // el avión). El resto es aviso (cobranza/conciliación son procesos).
     const bloqueantes = [
       'vuelos_sin_completar',
       'tacos_en_revision',
       'gastos_sin_tc',
       'cobros_sin_tc',
       'combustible_sin_avion',
+      'permisos_sin_avion',
     ];
     const listo = items
       .filter((i) => bloqueantes.includes(i.clave))

@@ -483,6 +483,66 @@ describe('ProfitSharingService.preCierre — vuelos cobrados en cuentas que exig
     ]);
   });
 
+  // Decisión del cliente del 14-oct-2026 («¿Un anticipo devuelto lleva
+  // CFDI?» ⇒ «eso no», API 0.0.77): devuelto COMPLETO por CUALQUIER vía
+  // (efectivo, otra cuenta) ⇒ fuera; lo retenido de una parcial, dentro.
+  it('anticipo devuelto en EFECTIVO o por OTRA cuenta ⇒ fuera; parcial en efectivo ⇒ dentro', async () => {
+    const { svc } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [
+        vuelo('e1', 460, { estado: 'CANCELADO' }),
+        vuelo('e2', 461, { estado: 'CANCELADO' }),
+        vuelo('e3', 462, { estado: 'CANCELADO' }),
+      ],
+      cobro_vuelo: [
+        cobro('c1', 'e1', {
+          metodo_cobro: 'TRANSFERENCIA',
+          cuenta_destino: 'HSBC Dólares',
+        }),
+        cobro('c2', 'e1', { monto: -1000, metodo_cobro: 'EFECTIVO' }),
+        cobro('c3', 'e2', {
+          monto: 30000,
+          moneda: 'MXN',
+          tc_usd_mxn: 17.3,
+          metodo_cobro: 'TRANSFERENCIA',
+          cuenta_destino: 'HSBC Pesos',
+        }),
+        cobro('c4', 'e2', {
+          monto: -30000,
+          moneda: 'MXN',
+          tc_usd_mxn: 17.3,
+          metodo_cobro: 'TRANSFERENCIA',
+          cuenta_destino: 'Scotiabank Pesos',
+        }),
+        cobro('c5', 'e3', {
+          monto: 30000,
+          moneda: 'MXN',
+          tc_usd_mxn: 17.3,
+          metodo_cobro: 'TRANSFERENCIA',
+          cuenta_destino: 'HSBC Pesos',
+        }),
+        cobro('c6', 'e3', {
+          monto: -28500,
+          moneda: 'MXN',
+          tc_usd_mxn: 17.3,
+          metodo_cobro: 'EFECTIVO',
+        }),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = itemDe(r);
+    expect(item.detalle).toBe(DETALLE_PRECIERRE_VUELOS_SIN_FACTURA);
+    expect(item.vuelos).toEqual([
+      expect.objectContaining({
+        id: 'e3',
+        folio: 462,
+        cuentas: ['HSBC Pesos'],
+        estado: 'CANCELADO',
+      }),
+    ]);
+  });
+
   it('cada regla por separado', async () => {
     const casos: Array<[string, Fila[], Fila[], Fila[] | undefined, number[]]> =
       [
@@ -715,5 +775,156 @@ describe('ProfitSharingService.preCierre — gastos bancarios sin conciliar con 
     expect(item.detalle).toBe(
       'Tarjeta corporativa, transferencia, PayWise o pago domiciliado sin cruzar con el banco: puede ser conciliación pendiente… o el sobrante de un pago duplicado. Revísalos en Conciliación.',
     );
+  });
+});
+
+/**
+ * PRE-CIERRE · `cobros_en_cancelados` (14-oct-2026, API 0.0.77; revisión
+ * F5): SOLO los cancelados que el reparto CUENTA (`retieneCobros`, el mismo
+ * salto de `computeAvion`) y la marca ADITIVA `diferencia_cambiaria` cuando
+ * el dinero ya se devolvió completo (`dineroDevueltoCompleto`).
+ */
+describe('ProfitSharingService.preCierre — cobros en cancelados (14-oct-2026, API 0.0.77)', () => {
+  const pesos = (
+    id: string,
+    vueloId: string,
+    monto: number,
+    tc: number,
+    extra: Fila = {},
+  ) =>
+    cobro(id, vueloId, {
+      monto,
+      moneda: 'MXN',
+      tc_usd_mxn: tc,
+      metodo_cobro: 'TRANSFERENCIA',
+      cuenta_destino: 'HSBC Pesos',
+      ...extra,
+    });
+
+  it('devuelto exacto al mismo T.C. ⇒ fuera; N4 (otro T.C.) ⇒ dentro con «diferencia cambiaria»; #215 ⇒ dentro sin la marca; detalle literal', async () => {
+    const { svc } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [
+        vuelo('k1', 470, { estado: 'CANCELADO', tc_usd_mxn: 17.3 }),
+        vuelo('k2', 471, { estado: 'CANCELADO', tc_usd_mxn: 17.3 }),
+        vuelo('k215', 215, { estado: 'CANCELADO', tc_usd_mxn: 17.300002 }),
+      ],
+      cobro_vuelo: [
+        pesos('a1', 'k1', 30000, 17.3),
+        pesos('a2', 'k1', -30000, 17.3, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+        pesos('b1', 'k2', 30000, 17.3),
+        pesos('b2', 'k2', -30000, 17.5, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+        pesos('p215', 'k215', 30000, 17.3, {
+          cuenta_destino: null,
+          metodo_cobro: 'BILLPOCKET',
+        }),
+        pesos('r215', 'k215', -14250, 17.2414, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = r.items.find((i) => i.clave === 'cobros_en_cancelados')!;
+    expect(item.vuelos).toEqual([
+      { id: 'k2', folio: 471, cobrado_usd: 19.82, diferencia_cambiaria: true },
+      { id: 'k215', folio: 215, cobrado_usd: 907.61 },
+    ]);
+    expect(item.count).toBe(2);
+    expect(item.monto_usd).toBe(927.43);
+    expect(item.informativo).toBe(true);
+    expect(item.detalle).toBe(
+      'Cargo por cancelación o anticipo no reembolsado: entra íntegro como venta del avión (repartido entre los aviones si el vuelo voló en más de uno), sin saldo pendiente. Confirma que no se haya devuelto al cliente; si se devolvió, regístralo como reembolso en el detalle del vuelo (no elimines el cobro: el reembolso deja el rastro). «(diferencia cambiaria)»: el dinero ya se devolvió completo y lo que queda es la diferencia entre el T.C. del cobro y el del reembolso, que el reparto cuenta como venta; para que no cuente, captura el reembolso con el T.C. del cobro.',
+    );
+  });
+});
+
+/**
+ * PRE-CIERRE · `permisos_sin_avion` (14-oct-2026, API 0.0.77, invariante 62;
+ * revisión F6): decisión del cliente «el AFAC lo cargan al Avión» — un
+ * PERMISO sin avión resoluble BLOQUEA el cierre (mismo criterio que el
+ * combustible); uno con vuelo propio o de un vuelo externo sin avión, no.
+ */
+describe('ProfitSharingService.preCierre — permisos sin avión (14-oct-2026, API 0.0.77)', () => {
+  const permiso = (id: string, extra: Fila = {}): Fila => ({
+    id,
+    vuelo_id: null,
+    aeronave_id: null,
+    escala_id: null,
+    categoria: 'PERMISO',
+    monto: 2549,
+    moneda: 'MXN',
+    tc_gasto: 17.5,
+    fecha_gasto: '2026-09-15',
+    estatus_facturacion: 'FACTURADA',
+    medio_pago: 'EFECTIVO',
+    conciliado: false,
+    duplicado_sospechado: false,
+    matricula_ia: null,
+    escala: null,
+    vuelo: null,
+    ...extra,
+  });
+  const ITEM = 'permisos_sin_avion';
+
+  it('sin avión ni vuelo ⇒ count, monto_mxn y monto_usd APARTE (jamás se suman monedas) y `listo` false', async () => {
+    const { svc } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [],
+      gasto: [
+        permiso('p-mxn'),
+        permiso('p-mxn2', { monto: 2969 }),
+        permiso('p-usd', { monto: 100, moneda: 'USD', tc_gasto: null }),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = r.items.find((i) => i.clave === ITEM)!;
+    expect(item).toEqual({
+      clave: ITEM,
+      titulo: 'Permisos sin avión',
+      detalle:
+        'El permiso lo carga el avión (decisión del cliente del 14-oct-2026): sin avión no resta en ningún balance ni en el reparto y el Balance general lo pondría como gasto de VuelaTour. Asígnale el avión o el vuelo en Gastos.',
+      count: 3,
+      monto_mxn: 5518,
+      monto_usd: 100,
+    });
+    // Justo después de `combustible_sin_avion`.
+    const claves = r.items.map((i) => i.clave);
+    expect(claves.indexOf(ITEM)).toBe(
+      claves.indexOf('combustible_sin_avion') + 1,
+    );
+    expect(r.listo).toBe(false);
+  });
+
+  it('con vuelo propio (avión resoluble) o de un vuelo EXTERNO sin avión ⇒ no bloquea (sigue en `gastos_sin_avion`); sin USD no viaja `monto_usd`', async () => {
+    const { svc } = armar({
+      aeronave: AERONAVES,
+      cliente: CLIENTES,
+      vuelo: [],
+      gasto: [
+        permiso('p-vuelo', {
+          vuelo_id: 'v1',
+          vuelo: { es_externo: false, aeronave_id: 'av-vgv' },
+        }),
+        permiso('p-ext', {
+          vuelo_id: 'v2',
+          vuelo: { es_externo: true, aeronave_id: null },
+        }),
+      ],
+    });
+    const r = (await svc.preCierre(PERIODO)) as unknown as Respuesta;
+    const item = r.items.find((i) => i.clave === ITEM)!;
+    expect(item).toEqual(expect.objectContaining({ count: 0, monto_mxn: 0 }));
+    expect(item).not.toHaveProperty('monto_usd');
+    expect(r.items.find((i) => i.clave === 'gastos_sin_avion')?.count).toBe(2);
+    expect(r.listo).toBe(true);
   });
 });

@@ -3041,7 +3041,11 @@ export class IngresosService {
       );
     } catch (err) {
       try {
-        await this.flights.deleteCobro(creado.id as string, actor.userId);
+        // Compensación: el cobro no llegó a verse (sin aviso de transición
+        // de la solicitud automática de factura, 14-oct-2026).
+        await this.flights.deleteCobro(creado.id as string, actor.userId, {
+          omitirAvisoFactura: true,
+        });
       } catch (delErr) {
         this.logger.error(
           `cobro-de-vuelo ${movId}: la liga falló y NO se pudo borrar el cobro ${creado.id as string}: ${delErr instanceof Error ? delErr.message : String(delErr)}`,
@@ -3055,7 +3059,11 @@ export class IngresosService {
     // el cobro pero la solicitud («Por facturar», «Pendiente de factura») y
     // el aviso a facturación ya habían salido por un cobro que no existe.
     // Mismo gancho best-effort y fire-and-forget de `createCobro` (nunca
-    // 5xx; en un reintento el CAS de la solicitud no duplica).
+    // 5xx; en un reintento el CAS de la solicitud no duplica). Después, en
+    // la MISMA cadena (14-oct-2026, API 0.0.77): el aviso de TRANSICIÓN de
+    // una solicitud automática que ya existía (no si la solicitud se acaba
+    // de crear ni en un reintento idempotente, que no movió dinero).
+    const idempotente = creado.idempotente === true;
     void this.flights
       .solicitarFacturaPorCobros({
         vueloIds: [dto.vuelo_id],
@@ -3067,6 +3075,17 @@ export class IngresosService {
         actorId: actor.userId,
         cobroId: creado.id as string,
       })
+      .catch(() => null)
+      .then((r) =>
+        idempotente || (r?.solicitados.length ?? 0) > 0
+          ? null
+          : this.flights.avisarCambioSolicitudAutomatica({
+              vueloId: dto.vuelo_id,
+              actorId: actor.userId,
+              motivo: 'COBRO_NUEVO',
+              cambio: { tipo: 'ALTA', cobroId: creado.id as string },
+            }),
+      )
       .catch(() => undefined);
     return {
       cobro: await this.cobroPublico(dto.vuelo_id, creado.id as string, creado),

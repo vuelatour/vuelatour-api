@@ -234,7 +234,11 @@ describe('etiquetasFacturaDeVuelos', () => {
       [V3]: 'Facturado',
     });
     const lectura = consultas.find((c) => c.tabla === 'vuelo' && c.ids)!;
-    expect(lectura.select).toBe('id, facturado, factura_estatus, estado');
+    // `tc_usd_mxn` SIEMPRE (14-oct-2026, API 0.0.77): respaldo de
+    // `cobrosEnUsd` para la regla 2 del anticipo devuelto.
+    expect(lectura.select).toBe(
+      'id, facturado, factura_estatus, estado, tc_usd_mxn',
+    );
   });
 
   it('sin NINGUNA de las dos migraciones: solo `facturado` (CFDI) y `estado`', async () => {
@@ -242,7 +246,7 @@ describe('etiquetasFacturaDeVuelos', () => {
     const m = await etiquetasFacturaDeVuelos(sb, [V1, V3]);
     expect(Object.fromEntries(m)).toEqual({ [V1]: 'VT-501' });
     const lectura = consultas.find((c) => c.tabla === 'vuelo' && c.ids)!;
-    expect(lectura.select).toBe('id, facturado, estado');
+    expect(lectura.select).toBe('id, facturado, estado, tc_usd_mxn');
   });
 
   describe('con el registro de facturas EMITIDAS (migración 20260924000003)', () => {
@@ -284,10 +288,12 @@ describe('etiquetasFacturaDeVuelos', () => {
         [V3]: 'Facturado',
         [V4]: '555',
       });
-      // Con la sonda, el select de `vuelo` pide la solicitud viva.
+      // Con la sonda, el select de `vuelo` pide la solicitud viva y su nota
+      // (la AUTOMÁTICA se distingue por la nota, 0.0.77); `tc_usd_mxn`
+      // siempre.
       const lectura = consultas.find((c) => c.tabla === 'vuelo' && c.ids)!;
       expect(lectura.select).toBe(
-        'id, facturado, factura_estatus, factura_folio, estado, factura_solicitada_at',
+        'id, facturado, factura_estatus, factura_folio, estado, tc_usd_mxn, factura_solicitada_at, factura_solicitud_nota',
       );
     });
 
@@ -352,6 +358,10 @@ describe('etiquetasFacturaDeVuelos', () => {
         estado: 'COMPLETADO',
         cuentas_exigen: ['HSBC Pesos'],
         etiqueta: ETIQUETA_FACTURA_PENDIENTE,
+        // ADITIVOS (14-oct-2026, API 0.0.77), al final.
+        origenes_exigen: ['en HSBC Pesos'],
+        solicitud_automatica: false,
+        solicitud_ya_no_aplica: false,
       });
       expect(d.get(V2)).toMatchObject({
         registrada: null,
@@ -367,6 +377,9 @@ describe('etiquetasFacturaDeVuelos', () => {
         estado: 'COMPLETADO',
         cuentas_exigen: [],
         etiqueta: null,
+        origenes_exigen: [],
+        solicitud_automatica: false,
+        solicitud_ya_no_aplica: false,
       });
     });
 
@@ -389,8 +402,10 @@ describe('etiquetasFacturaDeVuelos', () => {
     });
 
     // Revisión 13-oct-2026: la lectura trae `moneda` y la exigencia es por
-    // el NETO de cada cuenta y moneda.
-    it('un anticipo en HSBC Dólares devuelto COMPLETO (CANCELADO) ⇒ «No lleva factura» y fuera del pre-cierre; devuelto en parte ⇒ «Pendiente de factura»', async () => {
+    // el NETO de cada cuenta y moneda. Decisión del cliente del 14-oct-2026
+    // («¿Un anticipo devuelto lleva CFDI?» ⇒ «eso no»): devuelto COMPLETO
+    // POR CUALQUIER VÍA (misma cuenta o EFECTIVO) ⇒ «No lleva factura».
+    it('CANCELADO con HSBC Dólares +1000 devuelto COMPLETO en la misma cuenta o en EFECTIVO −1000 ⇒ «No lleva factura» (NO_EXIGE); devuelto en parte ⇒ «Pendiente de factura»', async () => {
       const hsbc = (id: string, vuelo: string, monto: number) =>
         cobro(id, vuelo, {
           monto,
@@ -403,15 +418,18 @@ describe('etiquetasFacturaDeVuelos', () => {
         vuelo: [
           { ...sinFactura(V1), estado: 'CANCELADO' },
           { ...sinFactura(V2), estado: 'CANCELADO' },
+          { ...sinFactura(V3), estado: 'CANCELADO' },
         ],
         cobro_vuelo: [
           hsbc('c-1', V1, 1000),
           hsbc('c-2', V1, -1000),
           hsbc('c-3', V2, 1000),
           hsbc('c-4', V2, -400),
+          hsbc('c-5', V3, 1000),
+          cobro('c-6', V3, { monto: -1000, moneda: 'USD' }),
         ],
       });
-      const d = await facturasDeVuelos(sb, [V1, V2]);
+      const d = await facturasDeVuelos(sb, [V1, V2, V3]);
       expect(d.get(V1)).toMatchObject({
         exigencia: 'NO_EXIGE',
         cuentas_exigen: [],
@@ -420,11 +438,61 @@ describe('etiquetasFacturaDeVuelos', () => {
       expect(d.get(V2)).toMatchObject({
         exigencia: 'EXIGE',
         cuentas_exigen: ['HSBC Dólares'],
+        origenes_exigen: ['en HSBC Dólares'],
         etiqueta: ETIQUETA_FACTURA_PENDIENTE,
       });
+      expect(d.get(V3)).toMatchObject({
+        exigencia: 'NO_EXIGE',
+        cuentas_exigen: [],
+        origenes_exigen: [],
+        etiqueta: ETIQUETA_FACTURA_NO_LLEVA,
+      });
       expect(consultas.find((c) => c.tabla === 'cobro_vuelo')?.select).toBe(
-        'id, vuelo_id, monto, moneda, cuenta_destino, metodo_cobro',
+        'id, vuelo_id, monto, moneda, tc_usd_mxn, cuenta_destino, metodo_cobro',
       );
+    });
+
+    it('USD devuelto en MXN con T.C. (regla 2, con `cobrado` del lector) ⇒ NO_EXIGE; con el T.C. del VUELO de respaldo también', async () => {
+      const { sb } = fake({
+        factura: [],
+        vuelo: [
+          { ...sinFactura(V1), estado: 'CANCELADO', tc_usd_mxn: 17.5 },
+          { ...sinFactura(V2), estado: 'CANCELADO', tc_usd_mxn: 17.5 },
+        ],
+        cobro_vuelo: [
+          cobro('c-1', V1, {
+            monto: 1000,
+            moneda: 'USD',
+            cuenta_destino: 'HSBC Dólares',
+            metodo_cobro: 'TRANSFERENCIA',
+          }),
+          cobro('c-2', V1, {
+            monto: -17500,
+            moneda: 'MXN',
+            tc_usd_mxn: 17.5,
+            cuenta_destino: 'HSBC Pesos',
+            metodo_cobro: 'TRANSFERENCIA',
+          }),
+          // Reembolso en pesos SIN T.C. propio: el del vuelo (17.5) lo
+          // convierte (`cobrosEnUsd`, invariante 2).
+          cobro('c-3', V2, {
+            monto: 1000,
+            moneda: 'USD',
+            cuenta_destino: 'HSBC Dólares',
+            metodo_cobro: 'TRANSFERENCIA',
+          }),
+          cobro('c-4', V2, { monto: -17500, moneda: 'MXN' }),
+        ],
+      });
+      const d = await facturasDeVuelos(sb, [V1, V2]);
+      expect(d.get(V1)).toMatchObject({
+        exigencia: 'NO_EXIGE',
+        etiqueta: ETIQUETA_FACTURA_NO_LLEVA,
+      });
+      expect(d.get(V2)).toMatchObject({
+        exigencia: 'NO_EXIGE',
+        etiqueta: ETIQUETA_FACTURA_NO_LLEVA,
+      });
     });
 
     it('la factura REGISTRADA gana a los cobros', async () => {
@@ -498,6 +566,9 @@ describe('etiquetasFacturaDeVuelos', () => {
         estado: null,
         cuentas_exigen: ['HSBC Dólares'],
         etiqueta: ETIQUETA_FACTURA_PENDIENTE,
+        origenes_exigen: ['en HSBC Dólares'],
+        solicitud_automatica: false,
+        solicitud_ya_no_aplica: false,
       });
     });
 
@@ -543,6 +614,157 @@ describe('etiquetasFacturaDeVuelos', () => {
       await expect(facturasDeVuelos(sb, [V1])).rejects.toThrow(
         'statement timeout',
       );
+    });
+  });
+
+  describe('solicitud que CUENTA (14-oct-2026, API 0.0.77, revisión F2)', () => {
+    const base = (id: string, extra: Fila = {}): Fila => ({
+      id,
+      estado: 'COMPLETADO',
+      facturado: false,
+      factura_estatus: 'SIN_FACTURA',
+      factura_folio: null,
+      factura_solicitada_at: '2026-10-01T10:00:00Z',
+      factura_solicitud_nota: null,
+      ...extra,
+    });
+    const NOTA_AUTO = 'Solicitada automáticamente: cobro en HSBC Pesos';
+    const hp = (id: string, vuelo: string, monto: number, extra: Fila = {}) =>
+      cobro(id, vuelo, {
+        monto,
+        moneda: 'MXN',
+        tc_usd_mxn: 17.3,
+        cuenta_destino: 'HSBC Pesos',
+        metodo_cobro: 'TRANSFERENCIA',
+        ...extra,
+      });
+    const efectivo = (id: string, vuelo: string, monto: number) =>
+      cobro(id, vuelo, { monto, moneda: 'MXN', tc_usd_mxn: 17.3 });
+
+    it('automática viva + NO_EXIGE ⇒ `solicitada` false y «No lleva factura»; manual viva + NO_EXIGE ⇒ «Pendiente de factura»', async () => {
+      const { sb } = fake({
+        factura: [],
+        emitida: true,
+        factura_emitida_vuelo: [],
+        vuelo: [
+          base(V1, { factura_solicitud_nota: NOTA_AUTO }),
+          base(V2, { factura_solicitud_nota: 'La pidió el cliente' }),
+        ],
+        cobro_vuelo: [
+          hp('c-1', V1, 30000),
+          efectivo('c-2', V1, -30000),
+          hp('c-3', V2, 30000),
+          efectivo('c-4', V2, -30000),
+        ],
+      });
+      const d = await facturasDeVuelos(sb, [V1, V2]);
+      expect(d.get(V1)).toMatchObject({
+        exigencia: 'NO_EXIGE',
+        solicitada: false,
+        solicitud_automatica: true,
+        solicitud_ya_no_aplica: true,
+        etiqueta: ETIQUETA_FACTURA_NO_LLEVA,
+      });
+      expect(d.get(V2)).toMatchObject({
+        exigencia: 'NO_EXIGE',
+        solicitada: true,
+        solicitud_automatica: false,
+        solicitud_ya_no_aplica: false,
+        etiqueta: ETIQUETA_FACTURA_PENDIENTE,
+      });
+    });
+
+    it('parcial ⇒ «Pendiente de factura» (la automática sigue contando)', async () => {
+      const { sb } = fake({
+        factura: [],
+        emitida: true,
+        factura_emitida_vuelo: [],
+        vuelo: [base(V1, { factura_solicitud_nota: NOTA_AUTO })],
+        cobro_vuelo: [hp('c-1', V1, 30000), efectivo('c-2', V1, -28500)],
+      });
+      expect((await facturasDeVuelos(sb, [V1])).get(V1)).toMatchObject({
+        exigencia: 'EXIGE',
+        solicitada: true,
+        solicitud_ya_no_aplica: false,
+        cuentas_exigen: ['HSBC Pesos'],
+        origenes_exigen: ['en HSBC Pesos'],
+        etiqueta: ETIQUETA_FACTURA_PENDIENTE,
+      });
+    });
+
+    it('CANCELADO + manual viva: con BillPocket retenido o con el dinero devuelto completo ⇒ «Pendiente de factura» (no hereda la exclusión de CANCELADO)', async () => {
+      const { sb } = fake({
+        factura: [],
+        emitida: true,
+        factura_emitida_vuelo: [],
+        vuelo: [
+          base(V1, {
+            estado: 'CANCELADO',
+            factura_solicitud_nota: 'Cargo por cancelación',
+          }),
+          base(V2, {
+            estado: 'CANCELADO',
+            factura_solicitud_nota: 'Cargo por cancelación',
+          }),
+        ],
+        cobro_vuelo: [
+          cobro('c-1', V1, {
+            monto: 30000,
+            moneda: 'MXN',
+            tc_usd_mxn: 17.3,
+            metodo_cobro: 'BILLPOCKET',
+          }),
+          hp('c-2', V2, 30000),
+          efectivo('c-3', V2, -30000),
+        ],
+      });
+      const d = await facturasDeVuelos(sb, [V1, V2]);
+      for (const id of [V1, V2]) {
+        expect([id, d.get(id)]).toEqual([
+          id,
+          expect.objectContaining({
+            exigencia: 'NO_EXIGE',
+            solicitada: true,
+            estado: 'CANCELADO',
+            etiqueta: ETIQUETA_FACTURA_PENDIENTE,
+          }),
+        ]);
+      }
+    });
+
+    it('`{ conCobros: true }` trae `cobros` y `tc_vuelo` (solo para el aviso); sin la opción, el contrato idéntico', async () => {
+      const mundoCobros: Mundo = {
+        factura: [],
+        vuelo: [base(V1, { tc_usd_mxn: 17.3 })],
+        cobro_vuelo: [hp('c-1', V1, 30000)],
+      };
+      const con = (
+        await facturasDeVuelos(fake(mundoCobros).sb, [V1], { conCobros: true })
+      ).get(V1)!;
+      expect(con.tc_vuelo).toBe(17.3);
+      expect(con.cobros).toEqual([
+        {
+          id: 'c-1',
+          vuelo_id: V1,
+          monto: 30000,
+          moneda: 'MXN',
+          tc_usd_mxn: 17.3,
+          cuenta_destino: 'HSBC Pesos',
+          metodo_cobro: 'TRANSFERENCIA',
+        },
+      ]);
+      const sin = (await facturasDeVuelos(fake(mundoCobros).sb, [V1])).get(V1)!;
+      expect(Object.keys(sin)).toEqual([
+        'registrada',
+        'exigencia',
+        'solicitada',
+        'estado',
+        'cuentas_exigen',
+        'etiqueta',
+        'origenes_exigen',
+        'solicitud_automatica',
+        'solicitud_ya_no_aplica',
+      ]);
     });
   });
 

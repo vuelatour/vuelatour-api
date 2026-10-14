@@ -903,7 +903,9 @@ export class FacturasEmitidasService {
    * `GET /v1/facturas-emitidas/por-facturar/conteo` (badge del menú). Desde
    * el 13-oct-2026 (invariante 65) `por_facturar` NO cuenta los vuelos
    * marcados «Facturado» a mano: van en el aditivo `marcados_sin_registro`
-   * (el badge sigue leyendo SOLO `por_facturar`).
+   * (el badge sigue leyendo SOLO `por_facturar`). Desde el 0.0.77
+   * (invariante 60) tampoco las solicitudes AUTOMÁTICAS cuyo vuelo ya no
+   * exige factura: van en el aditivo `ya_no_aplican`.
    */
   async conteoPorFacturar(): Promise<ConteoPorFacturar> {
     await this.asegurarDisponible();
@@ -912,19 +914,25 @@ export class FacturasEmitidasService {
         `id, estado, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}`,
       )
     ).filter((v) => v.facturado !== true);
-    const ligadas = await this.solicitud.ligadasDeVuelos(
-      vuelos.map((v) => v.id),
-    );
+    const [ligadas, exigencias] = await Promise.all([
+      this.solicitud.ligadasDeVuelos(vuelos.map((v) => v.id)),
+      this.solicitud.exigenciasDeAutomaticas(vuelos),
+    ]);
     let porFacturar = 0;
     let paga = 0;
     let marcados = 0;
+    let yaNoAplican = 0;
     for (const v of vuelos) {
       const vigentes = (ligadas.get(v.id) ?? []).filter(
         (f) => f.estatus === 'VIGENTE',
       ).length;
-      const estado = estadoSolicitud(v, vigentes);
+      const estado = estadoSolicitud(v, vigentes, exigencias.get(v.id) ?? null);
       if (estado === 'MARCADO_SIN_REGISTRO') {
         marcados += 1;
+        continue;
+      }
+      if (estado === 'YA_NO_APLICA') {
+        yaNoAplican += 1;
         continue;
       }
       if (estado !== 'POR_FACTURAR') continue;
@@ -935,6 +943,7 @@ export class FacturasEmitidasService {
       por_facturar: porFacturar,
       paga_contra_factura: paga,
       marcados_sin_registro: marcados,
+      ya_no_aplican: yaNoAplican,
     };
   }
 
@@ -1173,6 +1182,10 @@ export class FacturasEmitidasService {
    * más vieja y el folio) y el ADITIVO `marcados_sin_registro` = pedidos,
    * sin factura registrada y marcados «Facturado» a mano, con la MISMA forma
    * y orden. Cada item lleva el ADITIVO `facturas_del_cliente` (Parte B).
+   * Desde el 0.0.77 (invariante 60) el ADITIVO `ya_no_aplican` = solicitudes
+   * AUTOMÁTICAS cuyo vuelo ya no exige factura (anticipo devuelto, cobro
+   * corregido o eliminado), con la MISMA forma y orden: la oficina las retira
+   * desde la tarjeta (con confirmación).
    */
   async porFacturar(): Promise<ListaPorFacturar> {
     await this.asegurarDisponible();
@@ -1199,21 +1212,26 @@ export class FacturasEmitidasService {
         `id, folio, estado, fecha_vuelo, origen_iata, destino_iata, es_externo, facturado, factura_estatus, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, cotizacion_abierta, cliente_id, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(id, nombre, rfc, razon_social_default, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, es_interno), grupo:grupo_id(id, folio, nombre)`,
       )
     ).filter((v) => v.facturado !== true);
-    const ligadas = await this.solicitud.ligadasDeVuelos(
-      filas.map((v) => v.id),
-    );
+    const [ligadas, exigencias] = await Promise.all([
+      this.solicitud.ligadasDeVuelos(filas.map((v) => v.id)),
+      this.solicitud.exigenciasDeAutomaticas(filas),
+    ]);
     const pendientes: Fila[] = [];
     const marcados: Fila[] = [];
+    const yaNoAplican: Fila[] = [];
     for (const v of filas) {
       const estado = estadoSolicitud(
         v,
         (ligadas.get(v.id) ?? []).filter((f) => f.estatus === 'VIGENTE').length,
+        exigencias.get(v.id) ?? null,
       );
       if (estado === 'POR_FACTURAR') pendientes.push(v);
       else if (estado === 'MARCADO_SIN_REGISTRO') marcados.push(v);
+      else if (estado === 'YA_NO_APLICA') yaNoAplican.push(v);
     }
-    // Cobros, nombres, rutas, grupos y sugerencias UNA vez para las dos listas.
-    const todos = [...pendientes, ...marcados];
+    // Cobros, nombres, rutas, grupos y sugerencias UNA vez para las tres
+    // listas.
+    const todos = [...pendientes, ...marcados, ...yaNoAplican];
     const ids = todos.map((v) => v.id);
     const grupoIds = todos
       .map((v) => unwrap(v.grupo as { id: string } | null)?.id)
@@ -1303,6 +1321,8 @@ export class FacturasEmitidasService {
       data,
       count: data.length,
       marcados_sin_registro: marcados.map(armarItem).sort(comparar),
+      // ADITIVO al final (14-oct-2026, API 0.0.77, invariante 60).
+      ya_no_aplican: yaNoAplican.map(armarItem).sort(comparar),
     };
   }
 
@@ -1317,6 +1337,9 @@ export class FacturasEmitidasService {
     await this.asegurarDisponible();
     // `factura_estatus` (13-oct-2026, invariante 65): el chip «solicitud» y
     // el orden del ramo sin búsqueda siguen la regla de `estadoSolicitud`.
+    // Desde el 0.0.77 (invariante 60, revisión F8) con la exigencia de las
+    // solicitudes automáticas (`exigenciasDeAutomaticas`): una que ya no
+    // aplica NO va primero ni lleva el chip «Por facturar».
     const cols = `id, folio, fecha_vuelo, estado, cliente_id, monto_total_usd, monto_total_mxn, tc_usd_mxn, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(nombre, rfc), grupo:grupo_id(id, folio, nombre)`;
     type Fila = VueloSolicitudRow & {
       id: string;
@@ -1376,9 +1399,10 @@ export class FacturasEmitidasService {
               .limit(LIMITE),
           ),
         ]);
-        const ligadasP = await this.solicitud.ligadasDeVuelos(
-          pendientes.map((v) => v.id),
-        );
+        const [ligadasP, exigenciasP] = await Promise.all([
+          this.solicitud.ligadasDeVuelos(pendientes.map((v) => v.id)),
+          this.solicitud.exigenciasDeAutomaticas(pendientes),
+        ]);
         const porFacturar = pendientes
           .filter(
             (v) =>
@@ -1388,6 +1412,7 @@ export class FacturasEmitidasService {
                 (ligadasP.get(v.id) ?? []).filter(
                   (f) => f.estatus === 'VIGENTE',
                 ).length,
+                exigenciasP.get(v.id) ?? null,
               ),
           )
           .sort((a, b) =>
@@ -1450,9 +1475,10 @@ export class FacturasEmitidasService {
     const grupoIds = filas
       .map((v) => unwrap(v.grupo as { id: string } | null)?.id)
       .filter((x): x is string => !!x);
-    const [ligadas, conteoGrupos] = await Promise.all([
+    const [ligadas, conteoGrupos, exigencias] = await Promise.all([
       this.solicitud.ligadasDeVuelos(ids),
       this.avionesPorGrupo(grupoIds),
+      this.solicitud.exigenciasDeAutomaticas(filas),
     ]);
     return filas.map((v) => {
       const cli = unwrap(v.cliente as { nombre?: string; rfc?: string } | null);
@@ -1469,7 +1495,7 @@ export class FacturasEmitidasService {
         cliente_rfc: cli?.rfc ?? null,
         total: totalVueloDe(v),
         facturas_vigentes: vig.map((f) => etiquetaFactura(f.serie, f.folio)),
-        solicitud: esPorFacturar(v, vig.length),
+        solicitud: esPorFacturar(v, vig.length, exigencias.get(v.id) ?? null),
         grupo: this.grupoDe(v.grupo, conteoGrupos),
       };
     });

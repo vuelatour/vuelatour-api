@@ -1,16 +1,26 @@
 import {
   bloqueFacturaServicio,
+  cobrosAntesDelCambio,
   elegirDestinatarios,
   esMarcadoSinRegistro,
   esPorFacturar,
+  esSolicitudAutomatica,
+  esSolicitudYaNoAplica,
   estadoSolicitud,
   fechaDiaMes,
   LIMITE_NOTA_SOLICITUD,
+  linkAvisoCambioSolicitud,
   notaSolicitudAutomatica,
   PREFIJO_NOTA_SOLICITUD_AUTOMATICA,
   resumenFacturaServicio,
+  solicitudYaNoAplica,
+  textoAvisoCambioSolicitud,
   textoAvisoEmitida,
   textoAvisoSolicitud,
+  TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR,
+  TIPO_AVISO_SOLICITUD_YA_NO_APLICA,
+  transicionSolicitudAutomatica,
+  type CobroParaFactura,
   type FacturaLigadaRow,
 } from './factura-solicitud.util';
 
@@ -51,35 +61,37 @@ const ligada = (
 
 describe('esPorFacturar (definición ÚNICA §3.8)', () => {
   it('solicitada, no cancelado, sin CFDI y sin vigentes ⇒ por facturar', () => {
-    expect(esPorFacturar(SOLICITADA, 0)).toBe(true);
+    expect(esPorFacturar(SOLICITADA, 0, null)).toBe(true);
   });
   it('una vigente ligada lo saca', () => {
-    expect(esPorFacturar(SOLICITADA, 1)).toBe(false);
+    expect(esPorFacturar(SOLICITADA, 1, null)).toBe(false);
   });
   it('CANCELADO, CFDI del PAC o sin solicitud ⇒ no', () => {
-    expect(esPorFacturar({ ...SOLICITADA, estado: 'CANCELADO' }, 0)).toBe(
+    expect(esPorFacturar({ ...SOLICITADA, estado: 'CANCELADO' }, 0, null)).toBe(
       false,
     );
-    expect(esPorFacturar({ ...SOLICITADA, facturado: true }, 0)).toBe(false);
+    expect(esPorFacturar({ ...SOLICITADA, facturado: true }, 0, null)).toBe(
+      false,
+    );
     expect(
-      esPorFacturar({ ...SOLICITADA, factura_solicitada_at: null }, 0),
+      esPorFacturar({ ...SOLICITADA, factura_solicitada_at: null }, 0, null),
     ).toBe(false);
-    expect(esPorFacturar(null, 0)).toBe(false);
+    expect(esPorFacturar(null, 0, null)).toBe(false);
   });
 
   // Caso #376 (13-oct-2026, invariante 65): el estatus MANUAL «Facturado»
   // saca al vuelo de la bandeja y lo manda a la nota «marcados sin registro».
   it('FACTURADO a mano sin vigentes ⇒ MARCADO_SIN_REGISTRO (fuera de «por facturar»)', () => {
     const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
-    expect(estadoSolicitud(v, 0)).toBe('MARCADO_SIN_REGISTRO');
-    expect(esPorFacturar(v, 0)).toBe(false);
-    expect(esMarcadoSinRegistro(v, 0)).toBe(true);
+    expect(estadoSolicitud(v, 0, null)).toBe('MARCADO_SIN_REGISTRO');
+    expect(esPorFacturar(v, 0, null)).toBe(false);
+    expect(esMarcadoSinRegistro(v, 0, null)).toBe(true);
   });
   it('FACTURADO a mano CON una vigente ⇒ NINGUNO (ya está registrada)', () => {
     const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
-    expect(estadoSolicitud(v, 1)).toBe('NINGUNO');
-    expect(esPorFacturar(v, 1)).toBe(false);
-    expect(esMarcadoSinRegistro(v, 1)).toBe(false);
+    expect(estadoSolicitud(v, 1, null)).toBe('NINGUNO');
+    expect(esPorFacturar(v, 1, null)).toBe(false);
+    expect(esMarcadoSinRegistro(v, 1, null)).toBe(false);
   });
   it('ELABORADA_ENVIADA, SIN_FACTURA y sin la llave ⇒ POR_FACTURAR (como antes)', () => {
     for (const v of [
@@ -88,19 +100,21 @@ describe('esPorFacturar (definición ÚNICA §3.8)', () => {
       { ...SOLICITADA, factura_estatus: null },
       SOLICITADA,
     ]) {
-      expect(estadoSolicitud(v, 0)).toBe('POR_FACTURAR');
-      expect(esPorFacturar(v, 0)).toBe(true);
-      expect(esMarcadoSinRegistro(v, 0)).toBe(false);
+      expect(estadoSolicitud(v, 0, null)).toBe('POR_FACTURAR');
+      expect(esPorFacturar(v, 0, null)).toBe(true);
+      expect(esMarcadoSinRegistro(v, 0, null)).toBe(false);
     }
   });
   it('FACTURADO + CANCELADO, CFDI del PAC o sin solicitud ⇒ NINGUNO', () => {
     const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
-    expect(estadoSolicitud({ ...v, estado: 'CANCELADO' }, 0)).toBe('NINGUNO');
-    expect(estadoSolicitud({ ...v, facturado: true }, 0)).toBe('NINGUNO');
-    expect(estadoSolicitud({ ...v, factura_solicitada_at: null }, 0)).toBe(
+    expect(estadoSolicitud({ ...v, estado: 'CANCELADO' }, 0, null)).toBe(
       'NINGUNO',
     );
-    expect(estadoSolicitud(null, 0)).toBe('NINGUNO');
+    expect(estadoSolicitud({ ...v, facturado: true }, 0, null)).toBe('NINGUNO');
+    expect(
+      estadoSolicitud({ ...v, factura_solicitada_at: null }, 0, null),
+    ).toBe('NINGUNO');
+    expect(estadoSolicitud(null, 0, null)).toBe('NINGUNO');
   });
 });
 
@@ -115,6 +129,7 @@ describe('bloque y resumen', () => {
         ligada('50', 'VIGENTE', { deleted_at: '2026-09-24T00:00:00Z' }),
       ],
       'Itzi',
+      null,
     );
     expect(b.solicitud).toEqual({
       solicitada_at: '2026-09-24T15:00:00Z',
@@ -140,6 +155,7 @@ describe('bloque y resumen', () => {
       { ...SOLICITADA, factura_estatus: 'FACTURADO' },
       [ligada('99', 'CANCELADA')],
       'Itzi',
+      null,
     );
     expect(b.por_facturar).toBe(false);
     expect(b.marcado_sin_registro).toBe(true);
@@ -151,6 +167,8 @@ describe('bloque y resumen', () => {
     const conVigente = bloqueFacturaServicio(
       { ...SOLICITADA, factura_estatus: 'FACTURADO' },
       [ligada('440', 'VIGENTE')],
+      undefined,
+      null,
     );
     expect(conVigente.por_facturar).toBe(false);
     expect(conVigente.marcado_sin_registro).toBe(false);
@@ -158,14 +176,14 @@ describe('bloque y resumen', () => {
 
   it('resumen de la lista', () => {
     expect(
-      resumenFacturaServicio(SOLICITADA, [ligada('1', 'CANCELADA')]),
+      resumenFacturaServicio(SOLICITADA, [ligada('1', 'CANCELADA')], null),
     ).toEqual({
       solicitada: true,
       por_facturar: true,
       paga_contra_factura: true,
       facturas: 0,
     });
-    expect(resumenFacturaServicio({ estado: 'CONFIRMADO' }, [])).toEqual({
+    expect(resumenFacturaServicio({ estado: 'CONFIRMADO' }, [], null)).toEqual({
       solicitada: false,
       por_facturar: false,
       paga_contra_factura: false,
@@ -177,6 +195,7 @@ describe('bloque y resumen', () => {
       resumenFacturaServicio(
         { ...SOLICITADA, factura_estatus: 'FACTURADO' },
         [],
+        null,
       ),
     ).toEqual({
       solicitada: true,
@@ -404,5 +423,288 @@ describe('solicitud AUTOMÁTICA por un cobro que exige factura (13-oct-2026, inv
     const larga = notaSolicitudAutomatica('x'.repeat(600));
     expect(larga).toHaveLength(LIMITE_NOTA_SOLICITUD);
     expect(larga.startsWith(PREFIJO_NOTA_SOLICITUD_AUTOMATICA)).toBe(true);
+  });
+});
+
+/**
+ * ANTICIPO DEVUELTO — solicitud AUTOMÁTICA que YA NO APLICA (14-oct-2026,
+ * API 0.0.77, invariante 60): estado derivado (sin escribir `vuelo`), 3.er
+ * parámetro OBLIGATORIO de `estadoSolicitud` (F8), llaves del bloque y los
+ * avisos de TRANSICIÓN (F14) con su contrafactual.
+ */
+describe('solicitud AUTOMÁTICA que ya no aplica (14-oct-2026, API 0.0.77)', () => {
+  const AUTOMATICA = {
+    ...SOLICITADA,
+    factura_solicitud_nota: 'Solicitada automáticamente: cobro en HSBC Pesos',
+    factura_paga_contra_factura: false,
+  };
+
+  it('esSolicitudAutomatica: pedida y con el prefijo EXACTO; nota editada o sin solicitud ⇒ false', () => {
+    expect(esSolicitudAutomatica(AUTOMATICA)).toBe(true);
+    expect(esSolicitudAutomatica(SOLICITADA)).toBe(false);
+    expect(
+      esSolicitudAutomatica({
+        ...AUTOMATICA,
+        factura_solicitud_nota: 'Ya con datos fiscales (editada por Itzi)',
+      }),
+    ).toBe(false);
+    expect(
+      esSolicitudAutomatica({
+        ...AUTOMATICA,
+        factura_solicitud_nota:
+          ' Solicitada automáticamente: cobro en HSBC Pesos',
+      }),
+    ).toBe(false);
+    expect(
+      esSolicitudAutomatica({ ...AUTOMATICA, factura_solicitada_at: null }),
+    ).toBe(false);
+    expect(esSolicitudAutomatica(null)).toBe(false);
+    // No mira el estado del vuelo.
+    expect(esSolicitudAutomatica({ ...AUTOMATICA, estado: 'CANCELADO' })).toBe(
+      true,
+    );
+  });
+
+  it('solicitudYaNoAplica: automática + exigencia leída ≠ EXIGE; manual nunca; null = no leída', () => {
+    expect(solicitudYaNoAplica(AUTOMATICA, 'NO_EXIGE')).toBe(true);
+    expect(solicitudYaNoAplica(AUTOMATICA, 'SIN_COBROS')).toBe(true);
+    expect(solicitudYaNoAplica(AUTOMATICA, 'EXIGE')).toBe(false);
+    expect(solicitudYaNoAplica(AUTOMATICA, null)).toBe(false);
+    expect(solicitudYaNoAplica(SOLICITADA, 'NO_EXIGE')).toBe(false);
+    expect(
+      solicitudYaNoAplica({ ...AUTOMATICA, estado: 'CANCELADO' }, 'NO_EXIGE'),
+    ).toBe(true);
+  });
+
+  it('estadoSolicitud con 3 parámetros: YA_NO_APLICA, la manual sigue, null = como antes, FACTURADO gana, CANCELADO ⇒ NINGUNO', () => {
+    expect(estadoSolicitud(AUTOMATICA, 0, 'NO_EXIGE')).toBe('YA_NO_APLICA');
+    expect(estadoSolicitud(AUTOMATICA, 0, 'SIN_COBROS')).toBe('YA_NO_APLICA');
+    expect(estadoSolicitud(AUTOMATICA, 0, 'EXIGE')).toBe('POR_FACTURAR');
+    expect(estadoSolicitud(AUTOMATICA, 0, null)).toBe('POR_FACTURAR');
+    expect(estadoSolicitud(SOLICITADA, 0, 'NO_EXIGE')).toBe('POR_FACTURAR');
+    expect(
+      estadoSolicitud(
+        { ...AUTOMATICA, factura_estatus: 'FACTURADO' },
+        0,
+        'NO_EXIGE',
+      ),
+    ).toBe('MARCADO_SIN_REGISTRO');
+    expect(
+      estadoSolicitud({ ...AUTOMATICA, estado: 'CANCELADO' }, 0, 'NO_EXIGE'),
+    ).toBe('NINGUNO');
+    expect(estadoSolicitud(AUTOMATICA, 1, 'NO_EXIGE')).toBe('NINGUNO');
+    expect(esSolicitudYaNoAplica(AUTOMATICA, 0, 'NO_EXIGE')).toBe(true);
+    expect(esPorFacturar(AUTOMATICA, 0, 'NO_EXIGE')).toBe(false);
+    expect(esMarcadoSinRegistro(AUTOMATICA, 0, 'NO_EXIGE')).toBe(false);
+  });
+
+  it('bloque: las 3 llaves nuevas AL FINAL y en orden; sin factura leída ⇒ null / [] / false', () => {
+    const b = bloqueFacturaServicio(AUTOMATICA, [], 'Itzi', {
+      exigencia: 'NO_EXIGE',
+      origenes_exigen: [],
+    });
+    expect(Object.keys(b)).toEqual([
+      'solicitud',
+      'por_facturar',
+      'facturas',
+      'canceladas',
+      'marcado_sin_registro',
+      'exigencia',
+      'origenes_exigen',
+      'solicitud_ya_no_aplica',
+    ]);
+    expect(b).toMatchObject({
+      por_facturar: false,
+      exigencia: 'NO_EXIGE',
+      origenes_exigen: [],
+      solicitud_ya_no_aplica: true,
+    });
+    const exige = bloqueFacturaServicio(SOLICITADA, [], 'Itzi', {
+      exigencia: 'EXIGE',
+      origenes_exigen: ['en HSBC Pesos'],
+    });
+    expect(exige).toMatchObject({
+      por_facturar: true,
+      exigencia: 'EXIGE',
+      origenes_exigen: ['en HSBC Pesos'],
+      solicitud_ya_no_aplica: false,
+    });
+    const sinLeer = bloqueFacturaServicio(AUTOMATICA, [], null, null);
+    expect(sinLeer).toMatchObject({
+      por_facturar: true,
+      exigencia: null,
+      origenes_exigen: [],
+      solicitud_ya_no_aplica: false,
+    });
+    // En un cancelado el chip gris también sale (no mira el estado).
+    expect(
+      bloqueFacturaServicio({ ...AUTOMATICA, estado: 'CANCELADO' }, [], null, {
+        exigencia: 'NO_EXIGE',
+        origenes_exigen: [],
+      }).solicitud_ya_no_aplica,
+    ).toBe(true);
+  });
+
+  it('resumen: la automática que ya no aplica no es por_facturar (forma sin cambio)', () => {
+    expect(resumenFacturaServicio(AUTOMATICA, [], 'NO_EXIGE')).toEqual({
+      solicitada: true,
+      por_facturar: false,
+      paga_contra_factura: false,
+      facturas: 0,
+    });
+    expect(resumenFacturaServicio(AUTOMATICA, [], null).por_facturar).toBe(
+      true,
+    );
+  });
+
+  const C = (
+    id: string,
+    monto: number,
+    extra: Partial<CobroParaFactura> = {},
+  ): CobroParaFactura => ({
+    id,
+    monto,
+    moneda: 'MXN',
+    cuenta_destino: 'HSBC Pesos',
+    metodo_cobro: 'TRANSFERENCIA',
+    tc_usd_mxn: 17.3,
+    ...extra,
+  });
+
+  it('cobrosAntesDelCambio: ALTA sin la fila nueva; BAJA + la borrada; CAMBIO con los valores de ANTES', () => {
+    const despues = [
+      C('a', 30000),
+      C('r', -30000, { cuenta_destino: null, metodo_cobro: 'EFECTIVO' }),
+    ];
+    expect(
+      cobrosAntesDelCambio(despues, { tipo: 'ALTA', cobroId: 'r' }),
+    ).toEqual([C('a', 30000)]);
+    const borrada = C('x', 500, { moneda: 'USD', tc_usd_mxn: null });
+    expect(
+      cobrosAntesDelCambio(despues, { tipo: 'BAJA', fila: borrada }),
+    ).toEqual([...despues, borrada]);
+    const antes = cobrosAntesDelCambio(
+      [C('a', 30000, { cuenta_destino: 'Paywise', metodo_cobro: 'PAYWISE' })],
+      {
+        tipo: 'CAMBIO',
+        cobroId: 'a',
+        // Solo los campos de dinero presentes en ANTES (vuelo_id y demás no).
+        antes: {
+          id: 'a',
+          cuenta_destino: 'HSBC Pesos',
+          metodo_cobro: 'TRANSFERENCIA',
+          monto: 30000,
+        },
+      },
+    );
+    expect(antes).toEqual([C('a', 30000)]);
+    // Si la fila ya no está, entra la de ANTES.
+    expect(
+      cobrosAntesDelCambio([], {
+        tipo: 'CAMBIO',
+        cobroId: 'a',
+        antes: C('a', 100),
+      }),
+    ).toEqual([C('a', 100)]);
+  });
+
+  it('transicionSolicitudAutomatica: las 4 combinaciones (se avisa la TRANSICIÓN, no el estado)', () => {
+    expect(transicionSolicitudAutomatica('EXIGE', 'NO_EXIGE')).toBe(
+      'YA_NO_APLICA',
+    );
+    expect(transicionSolicitudAutomatica('EXIGE', 'SIN_COBROS')).toBe(
+      'YA_NO_APLICA',
+    );
+    expect(transicionSolicitudAutomatica('NO_EXIGE', 'EXIGE')).toBe(
+      'VUELVE_A_APLICAR',
+    );
+    expect(transicionSolicitudAutomatica('SIN_COBROS', 'EXIGE')).toBe(
+      'VUELVE_A_APLICAR',
+    );
+    expect(transicionSolicitudAutomatica('EXIGE', 'EXIGE')).toBeNull();
+    expect(transicionSolicitudAutomatica('NO_EXIGE', 'NO_EXIGE')).toBeNull();
+    expect(transicionSolicitudAutomatica('NO_EXIGE', 'SIN_COBROS')).toBeNull();
+  });
+
+  it('tipos (≤ 60 caracteres) y link a la tarjeta de la bandeja', () => {
+    expect(TIPO_AVISO_SOLICITUD_YA_NO_APLICA).toBe(
+      'factura_solicitud_ya_no_aplica',
+    );
+    expect(TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR).toBe(
+      'factura_solicitud_vuelve_a_aplicar',
+    );
+    expect(TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR.length).toBeLessThanOrEqual(
+      60,
+    );
+    expect(linkAvisoCambioSolicitud('v-341', 'YA_NO_APLICA')).toBe(
+      '/admin/facturas-emitidas?resaltar=v-341#ya-no-aplican',
+    );
+    expect(linkAvisoCambioSolicitud('v-341', 'VUELVE_A_APLICAR')).toBe(
+      '/admin/facturas-emitidas?resaltar=v-341#por-facturar',
+    );
+  });
+
+  it('textos LITERALES de los avisos (tramos vacíos se omiten)', () => {
+    const vuelo = { folio: 341, fecha_vuelo: '2026-09-27T14:00:00Z' };
+    const t = (
+      transicion: 'YA_NO_APLICA' | 'VUELVE_A_APLICAR',
+      motivo:
+        | 'COBRO_NUEVO'
+        | 'REEMBOLSO'
+        | 'COBRO_CORREGIDO'
+        | 'COBRO_ELIMINADO',
+      extra: { origen?: string; eraReembolso?: boolean } = {},
+    ) =>
+      textoAvisoCambioSolicitud({
+        transicion,
+        motivo,
+        vuelo,
+        cliente: 'Maqar',
+        ...extra,
+      });
+    expect(t('YA_NO_APLICA', 'REEMBOLSO')).toEqual({
+      titulo: 'Ya no aplica: factura del vuelo #341',
+      cuerpo:
+        'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+    });
+    expect(t('YA_NO_APLICA', 'COBRO_CORREGIDO').cuerpo).toBe(
+      'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+    );
+    expect(t('YA_NO_APLICA', 'COBRO_ELIMINADO').cuerpo).toBe(
+      'Se eliminó un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+    );
+    expect(
+      t('VUELVE_A_APLICAR', 'COBRO_NUEVO', { origen: 'en HSBC Pesos' }),
+    ).toEqual({
+      titulo: 'Vuelve a aplicar: factura del vuelo #341',
+      cuerpo:
+        'Entró dinero al vuelo #341 · Maqar · 27 sep (cobro en HSBC Pesos) y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
+    });
+    expect(t('VUELVE_A_APLICAR', 'COBRO_CORREGIDO').cuerpo).toBe(
+      'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+    );
+    expect(
+      t('VUELVE_A_APLICAR', 'COBRO_ELIMINADO', { eraReembolso: true }).cuerpo,
+    ).toBe(
+      'Se eliminó un reembolso del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+    );
+    expect(t('VUELVE_A_APLICAR', 'COBRO_ELIMINADO').cuerpo).toBe(
+      'Se eliminó un cobro del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+    );
+    expect(t('VUELVE_A_APLICAR', 'REEMBOLSO').cuerpo).toBe(
+      'Se registró un reembolso del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+    );
+    // Sin cliente, sin fecha y sin origen: los tramos se omiten.
+    expect(
+      textoAvisoCambioSolicitud({
+        transicion: 'VUELVE_A_APLICAR',
+        motivo: 'COBRO_NUEVO',
+        vuelo: { folio: 12, fecha_vuelo: null },
+        cliente: null,
+        origen: null,
+      }).cuerpo,
+    ).toBe(
+      'Entró dinero al vuelo #12 y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
+    );
   });
 });

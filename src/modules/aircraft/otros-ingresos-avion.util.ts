@@ -9,18 +9,28 @@
  * VUELATOUR (empresa) y en `utilidades_otros_ingresos_mxn` del Libro Dinero.
  *
  * PURO (sin BD ni reloj): `buildPayload` le pasa los ingresos de SU avión
- * (partición única `partirIngresosPorAvion`) y el T.C. de sus hojas de
- * gastos; `payloadGeneral` fusiona las hojas de los libros para la hoja
- * consolidada «otros ingresos aviones». Los pesos salen de la fuente única
+ * (partición única `partirIngresosPorAvion`) y la CONVERSIÓN de cada uno;
+ * `payloadGeneral` fusiona las hojas de los libros para la hoja consolidada
+ * «otros ingresos aviones». Los pesos salen de la fuente única
  * `filaLibroDeIngreso` (MXN directo; USD × su `tc_usd_mxn` PROPIO): nadie
- * reconvierte aquí. `buildHoja` NO se toca: su regla del USD de la hoja se
- * COPIA tal cual.
+ * reconvierte aquí.
+ *
+ * CONVERSIÓN ÚNICA (decisión del cliente del 14-oct-2026, API 0.0.77): el
+ * USD de cada fila es el de `usdDeIngresoAvion` (la MISMA del reparto y del
+ * tablero: USD ⇒ su neto; MXN ⇒ neto ÷ T.C. propio ?? T.C. del gasto ligado
+ * ?? oficial del día); TOTAL USD = round2(Σ NETO USD). La hoja YA NO divide
+ * entre el T.C. de las hojas de gastos (ING-4: 2,746.70 en los tres libros;
+ * antes el balance daba 2,710.47). Las hojas de GASTOS siguen con su T.C.
+ * promedio (dos T.C. por diseño, como el Excel del cliente).
  */
 import {
   filaLibroDeIngreso,
+  usdDeIngresoAvion,
+  type ConversionIngreso,
   type IngresoParaLibro,
 } from '../../common/ingreso-resultado.util';
 import { etiquetaCategoriaIngreso } from '../../common/categoria-ingreso.util';
+import { fuenteTcLegible } from '../../common/fuente-tc-oficial.util';
 import type {
   BalanceAvionHojaOtrosIngresosPayload,
   BalanceAvionOtroIngresoFilaPayload,
@@ -39,12 +49,64 @@ function cuentaDeIngreso(i: IngresoParaLibro): string {
   return banco ? `${alias} · ${banco}` : alias;
 }
 
+const MESES_CORTOS = [
+  'ene',
+  'feb',
+  'mar',
+  'abr',
+  'may',
+  'jun',
+  'jul',
+  'ago',
+  'sep',
+  'oct',
+  'nov',
+  'dic',
+];
+
+/** «15-sep-2026» de un `AAAA-MM-DD` (otro texto, tal cual). */
+function diaCorto(dia: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dia);
+  if (!m) return dia;
+  return `${Number(m[3])}-${MESES_CORTOS[Number(m[2]) - 1] ?? m[2]}-${m[1]}`;
+}
+
+/**
+ * Nota de la celda T.C. A USD (14-oct-2026, API 0.0.77): de dónde salió el
+ * T.C. de un ingreso en pesos que no traía el suyo. OFICIAL_DEL_DIA ⇒ «T.C.
+ * oficial de referencia del día del ingreso (open.er-api, dato del
+ * 2026-09-04): el ingreso en pesos no traía tipo de cambio.»; GASTO_LIGADO ⇒
+ * «T.C. con el que este libro convierte el gasto que reembolsa (gasto
+ * 70e8c3a4 del 15-sep-2026, T.C. promedio de las hojas): reembolso y gasto se
+ * anulan en este libro.»; PROPIO o USD ⇒ null. Pura.
+ */
+export function notaTcUsdIngreso(conv: ConversionIngreso): string | null {
+  if (conv.origen === 'OFICIAL_DEL_DIA' && conv.oficial) {
+    return `T.C. oficial de referencia del día del ingreso (${fuenteTcLegible(conv.oficial.fuente)}, dato del ${conv.oficial.fecha_dato}): el ingreso en pesos no traía tipo de cambio.`;
+  }
+  if (conv.origen === 'GASTO_LIGADO' && conv.gasto) {
+    const g = conv.gasto;
+    const cual = [
+      `gasto ${g.gasto_id.slice(0, 8)}`,
+      g.fecha ? `del ${diaCorto(g.fecha)}` : null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    return `T.C. con el que este libro convierte el gasto que reembolsa (${cual}, ${g.lugar}): reembolso y gasto se anulan en este libro.`;
+  }
+  return null;
+}
+
 /**
  * Fila de la hoja «Otros ingresos» de un ingreso (null si no es de
- * resultado: anticipos y aportaciones nunca llevan avión).
+ * resultado: anticipos y aportaciones nunca llevan avión). `conv` = su
+ * conversión (`usdDeIngresoAvion`): desde el 0.0.77 la fila termina con
+ * `tc_usd` (MXN: el T.C. EXACTO que dividió; USD: null), `neto_usd`,
+ * `tc_usd_origen` y `tc_usd_nota`.
  */
 export function filaHojaOtrosIngresos(
   i: IngresoParaLibro,
+  conv: ConversionIngreso,
 ): BalanceAvionOtroIngresoFilaPayload | null {
   const f = filaLibroDeIngreso(i);
   if (!f) return null;
@@ -73,48 +135,73 @@ export function filaHojaOtrosIngresos(
     neto_mxn: f.remanente_mxn,
     cuenta: cuentaDeIngreso(i),
     notas: i.notas ?? null,
+    // ADITIVOS (14-oct-2026, API 0.0.77, invariante 67), al final (antes de
+    // `matricula`/`avion_color` del consolidado). `tc_usd` EXACTO, sin
+    // re-redondear: pyservices lo cita en ROUND(NETO MXN / T.C., 2).
+    tc_usd: i.moneda === 'USD' ? null : conv.tc,
+    neto_usd: conv.usd,
+    tc_usd_origen: conv.origen,
+    tc_usd_nota: notaTcUsdIngreso(conv),
   };
 }
 
 /**
  * Hoja «Otros ingresos» de UN avión: filas en el orden recibido (fecha,
- * folio del lector), `total_mxn` = round2(Σ neto MXN) y `usd` con la MISMA
- * regla de `buildHoja` (copiada, no compartida): alguna fila sin MXN ⇒
- * null; total 0 ⇒ 0; si no, total ÷ `tcHojas` (sin T.C. ⇒ null). Un
- * ingreso USD sin T.C. (el CHECK `ingreso_tc_resultado_chk` ya lo impide)
- * se grita en `pendientes`: la utilidad después de gastos queda vacía.
- * OJO (revisión del lote 2, 14-oct-2026): el REPARTO convierte cada ingreso
- * por separado (USD = su neto; MXN ÷ su T.C. propio u oficial de su día), así
- * que este `usd` y el del reparto PUEDEN diferir más que centavos (ING-4:
- * 2,710.47 aquí vs 2,746.70 allá). Es el diseño de dos T.C. de las hojas de
- * gastos; unificarlo exige cambiar a la vez la fórmula C5 de pyservices.
+ * folio del lector), `total_mxn` = round2(Σ neto MXN) y —desde el 0.0.77
+ * (decisión del cliente del 14-oct-2026)— `usd` = round2(Σ NETO USD) de la
+ * conversión ÚNICA por ingreso (`conversiones`, una por `ingreso.id`; la
+ * MISMA del reparto y del tablero): alguna fila sin NETO USD ⇒ null; vacía
+ * ⇒ 0. Una fila USD ya no anula la hoja por no tener pesos (su NETO USD sí
+ * suma). ÚLTIMA llave `usd_por_ingreso: true` SIEMPRE (pyservices pinta
+ * T.C. A USD / NETO USD y C5 = ROUND(SUM(K),2) con ella). Pendientes: MXN
+ * sin T.C. propio ni oficial de su día (la utilidad queda vacía), USD sin
+ * T.C. (el CHECK `ingreso_tc_resultado_chk` lo impide) y un reembolso en
+ * pesos cuyo gasto NO cuenta en este libro (`gastosDelLibro` = ids de los
+ * gastos en pesos que este libro convierte): no se anula exacto con él.
  */
 export function hojaOtrosIngresosAvion(
   ingresos: readonly IngresoParaLibro[],
-  tcHojas: number | null,
+  conversiones: ReadonlyMap<string, ConversionIngreso>,
   pendientes: string[],
+  gastosDelLibro: ReadonlySet<string> = new Set(),
 ): BalanceAvionHojaOtrosIngresosPayload {
   const filas: BalanceAvionOtroIngresoFilaPayload[] = [];
   for (const i of ingresos) {
-    const fila = filaHojaOtrosIngresos(i);
+    // Sin conversión del llamador: la regla sin contexto (nunca un T.C.
+    // inventado: un MXN sin T.C. propio sale sin USD y con su pendiente).
+    const conv = conversiones.get(i.id) ?? usdDeIngresoAvion(i, {});
+    const fila = filaHojaOtrosIngresos(i, conv);
     if (!fila) continue;
+    const donde = `Hoja "Otros ingresos" (${fila.fecha})`;
     if (fila.neto_mxn == null) {
       pendientes.push(
-        `Hoja "Otros ingresos" (${fila.fecha}): ingreso ${fila.clave} en USD sin tipo de cambio — fila sin monto MXN; la utilidad después de gastos queda vacía`,
+        `${donde}: ingreso ${fila.clave} en USD sin tipo de cambio — fila sin monto MXN (su NETO USD sí suma)`,
+      );
+    }
+    if (i.moneda === 'MXN' && conv.usd == null) {
+      pendientes.push(
+        `${donde}: ingreso ${fila.clave} en pesos sin T.C. propio ni T.C. oficial de su día — fila sin USD; la utilidad después de gastos queda vacía`,
+      );
+    }
+    if (
+      i.categoria === 'REEMBOLSO_DEVOLUCION' &&
+      i.moneda === 'MXN' &&
+      i.gasto_id &&
+      conv.usd != null &&
+      conv.origen !== 'GASTO_LIGADO' &&
+      !gastosDelLibro.has(i.gasto_id)
+    ) {
+      pendientes.push(
+        `${donde}: ${fila.clave} reembolsa un gasto que este libro no cuenta (otro mes, otro avión u otra moneda): se convirtió con ${conv.origen === 'PROPIO' ? 'su T.C. propio' : 'el T.C. oficial de su día'} y no se anula exacto con su gasto`,
       );
     }
     filas.push(fila);
   }
   const totalMxn = round2(filas.reduce((s, f) => s + (f.neto_mxn ?? 0), 0));
-  const hayFilaSinMxn = filas.some((f) => f.neto_mxn == null);
-  const usd = hayFilaSinMxn
+  const usd = filas.some((f) => f.neto_usd == null)
     ? null
-    : totalMxn === 0
-      ? 0
-      : tcHojas != null
-        ? round2(totalMxn / tcHojas)
-        : null;
-  return { filas, total_mxn: totalMxn, usd };
+    : round2(filas.reduce((s, f) => s + (f.neto_usd ?? 0), 0));
+  return { filas, total_mxn: totalMxn, usd, usd_por_ingreso: true };
 }
 
 /**
@@ -123,9 +210,10 @@ export function hojaOtrosIngresosAvion(
  * fila lleva «MATRÍCULA · » al frente del detalle, su `matricula` y su
  * `avion_color`; orden por fecha con sort ESTABLE (a igual fecha, el orden
  * de los libros). `total_mxn` = round2(Σ); `usd` = round2(Σ usd de los
- * libros) — cada libro convirtió con SU T.C. promedio: no hay un T.C. de
- * flota que lo reproduzca — y un `usd` null de cualquier libro con filas se
- * PROPAGA (jamás `?? 0`).
+ * libros) — desde el 0.0.77 cada libro sumó la conversión ÚNICA por ingreso,
+ * así que es la Σ de NETO USD de todas las filas — y un `usd` null de
+ * cualquier libro con filas se PROPAGA (jamás `?? 0`). `usd_por_ingreso:
+ * true` como ÚLTIMA llave.
  */
 export function fusionarOtrosIngresosFlota(
   libros: ReadonlyArray<
@@ -157,5 +245,5 @@ export function fusionarOtrosIngresosFlota(
     : round2(
         conFilas.reduce((s, p) => s + (p.otros_ingresos_avion?.usd ?? 0), 0),
       );
-  return { filas, total_mxn: totalMxn, usd };
+  return { filas, total_mxn: totalMxn, usd, usd_por_ingreso: true };
 }

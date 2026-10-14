@@ -2,16 +2,18 @@ import {
   filasAfacOtrosMovimientos,
   type LibroParaAfac,
 } from './afac-otros-movimientos.util';
+import { ladoEnUsd } from './balance-empresa.util';
 
 /**
  * PERMISOS AFAC COMO FILAS QUE SUMAN en «otros movimientos» (13-oct-2026,
  * API 0.0.74, invariante 62; supersede el bloque informativo de la
  * invariante 53). Fuente única PURA: suma lo que los libros YA traen.
  *
- * Revisión del 13-oct-2026 (antes del deploy): los permisos PAGADOS se
- * listan con egreso $0.00 «a cargo del avión» — ya restan en la cascada del
- * avión (hoja «permisos») y en el grupo PERMISO del reparto; egresarlos
- * también aquí los contaba DOS veces. La provisión sí suma (ingreso).
+ * Revisión del 13-oct-2026, CONFIRMADA por el cliente el 14-oct-2026 («el
+ * AFAC lo cargan al Avión»): los permisos PAGADOS se listan con egreso $0.00
+ * «a cargo del avión» — ya restan en la cascada del avión (hoja «permisos»)
+ * y en el grupo PERMISO del reparto; egresarlos también aquí los contaba
+ * DOS veces. La provisión sí suma (ingreso).
  */
 
 /** Marca con que `ladoEnUsd` vacía un lado del bloque VUELATOUR. */
@@ -321,5 +323,41 @@ describe('filasAfacOtrosMovimientos (invariante 62)', () => {
     for (const f of r.filas) {
       expect(f.concepto_egreso ?? '').not.toMatch(MARCA_SIN_TC);
     }
+  });
+  it('(m) UN solo permiso cuyo detalle trae «sin TC»: el concepto lo copia como «sin T.C.» y el bloque VUELATOUR conserva sus números (revisión del 14-oct-2026, riesgo B4)', () => {
+    const r = filasAfacOtrosMovimientos([
+      libro(
+        'XA-TST',
+        25,
+        VUELOS_TST,
+        [
+          {
+            fecha: '2026-09-05',
+            detalle: 'Permiso de pista pagado sin TC. por la oficina',
+            monto_mxn: 2500,
+          },
+        ],
+        { tc_promedio: 18.5 },
+      ),
+    ]);
+    const fila = r.filas[0];
+    expect(fila.concepto_egreso).toBe(
+      'permiso AFAC pagado · Permiso de pista pagado sin T.C. por la oficina · a cargo del avión XA-TST ($2,500.00 en su hoja «permisos»)',
+    );
+    expect(fila.concepto_egreso).not.toMatch(MARCA_SIN_TC);
+    const movs = r.filas.map((f, i) => ({
+      concepto_ingreso: f.concepto_ingreso ?? null,
+      ingreso_mxn: f.ingreso_mxn ?? null,
+      concepto_egreso: f.concepto_egreso ?? null,
+      egreso_mxn: f.egreso_mxn ?? null,
+      tc: r.tcs[i],
+    }));
+    // Los dos lados del bloque tienen número (con la marca, EGRESOS y el
+    // RESULTADO se vaciaban aunque la fila egrese $0.00).
+    expect(ladoEnUsd(movs, 'egreso')).toEqual({ usd: 0, sinTc: 0 });
+    expect(ladoEnUsd(movs, 'ingreso')).toEqual({
+      usd: Math.round((3465 / 18.5) * 100) / 100,
+      sinTc: 0,
+    });
   });
 });

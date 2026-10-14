@@ -12,10 +12,14 @@ import {
   facturaEmitidaDisponible,
 } from '../../common/factura-emitida-disponible.util';
 import { fetchNombresUsuarios } from '../../common/registrado-por.util';
+import { esColumnaInexistente } from '../../common/columna-opcional.util';
+import { cobrosEnUsd } from '../../common/cobros-usd.util';
 import {
   cobroExigeFactura,
   origenCobroTexto,
+  vueloExigeFactura,
   type CobroExigeFacturaRow,
+  type ExigenciaFacturaVuelo,
 } from '../../common/cuentas-cobro';
 import {
   facturasDeVuelos,
@@ -24,12 +28,23 @@ import {
 import {
   COLS_FACTURA_LIGADA,
   COLS_SOLICITUD_FACTURA,
+  TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR,
+  TIPO_AVISO_SOLICITUD_YA_NO_APLICA,
   bloqueFacturaServicio,
+  cobrosAntesDelCambio,
+  esSolicitudAutomatica,
   folios,
+  linkAvisoCambioSolicitud,
   notaSolicitudAutomatica,
   resumenFacturaServicio,
+  textoAvisoCambioSolicitud,
   textoAvisoSolicitud,
+  transicionSolicitudAutomatica,
+  type CambioDeCobro,
+  type CobroParaFactura,
   type FacturaLigadaRow,
+  type MotivoCambioSolicitud,
+  type TransicionSolicitudAutomatica,
   type VueloSolicitudRow,
 } from './factura-solicitud.util';
 import type {
@@ -95,6 +110,33 @@ export interface ResultadoSolicitudPorCobro {
   motivo?: 'NO_EXIGE' | 'NO_DISPONIBLE' | 'SIN_CANDIDATOS' | 'FALLO';
 }
 
+/**
+ * AVISO DE TRANSICIÓN de una solicitud AUTOMÁTICA (14-oct-2026, API 0.0.77,
+ * invariante 60): el vuelo, quién movió el dinero (queda excluido del aviso),
+ * por qué y el cambio exacto (para el contrafactual ANTES).
+ */
+export interface AvisoCambioSolicitud {
+  vueloId: string;
+  actorId: string;
+  motivo: MotivoCambioSolicitud;
+  cambio: CambioDeCobro;
+}
+
+export interface ResultadoAvisoCambioSolicitud {
+  /** La transición avisada (null = no hubo aviso). */
+  transicion: TransicionSolicitudAutomatica | null;
+  /** Nombres a quienes se persistió la notificación. */
+  notificados: string[];
+  /** Por qué no se avisó (ausente cuando sí se avisó). */
+  motivo?:
+    | 'NO_DISPONIBLE'
+    | 'SIN_SOLICITUD_AUTOMATICA'
+    | 'NO_APLICA'
+    | 'REGISTRADA'
+    | 'SIN_TRANSICION'
+    | 'FALLO';
+}
+
 /** Por qué un vuelo NO recibe la solicitud automática (para la bitácora). */
 function motivoSinSolicitud(
   v: VueloSolicitudRow,
@@ -103,7 +145,41 @@ function motivoSinSolicitud(
   if (v.estado === 'CANCELADO') return 'cancelado';
   if (f?.registrada) return `ya tiene factura «${f.registrada}»`;
   if (v.factura_solicitada_at) return 'solicitud viva';
+  if (f && f.exigencia !== 'EXIGE') {
+    return 'ya no exige factura (el dinero se devolvió o no quedó en una cuenta que la exija)';
+  }
   return 'sin factura leída';
+}
+
+/**
+ * Bloque `factura_servicio` cuando no se pudo leer (respuesta de
+ * solicitar/retirar): todas las llaves, con las ADITIVAS del 0.0.77.
+ */
+function BLOQUE_VACIO(): FacturaServicioBloque {
+  return {
+    solicitud: null,
+    por_facturar: false,
+    facturas: [],
+    canceladas: 0,
+    marcado_sin_registro: false,
+    exigencia: null,
+    origenes_exigen: [],
+    solicitud_ya_no_aplica: false,
+  };
+}
+
+/**
+ * La fila del cambio (su `origenCobroTexto` va en el aviso): la nueva o
+ * corregida tal como quedó, o la borrada; null si ya no se encuentra.
+ */
+function filaDelCambio(
+  cambio: CambioDeCobro,
+  despues: ReadonlyArray<CobroParaFactura>,
+): CobroParaFactura | null {
+  if (cambio.tipo === 'BAJA') return cambio.fila;
+  const actual = despues.find((c) => c.id === cambio.cobroId);
+  if (actual) return actual;
+  return cambio.tipo === 'CAMBIO' ? cambio.antes : null;
 }
 
 function lotes<T>(arr: ReadonlyArray<T>): T[][] {
@@ -209,6 +285,10 @@ export class FacturaSolicitudService {
    * quien pidió — 3 consultas por cada 200 vuelos, nunca N+1. Sin migración
    * o si la lectura falla ⇒ mapa vacío (degradación explícita con `warn`: la
    * pantalla no se cae por el bloque nuevo; el panel oculta la burbuja).
+   * Desde el 0.0.77 (invariante 60) lee además la factura de sus vuelos con
+   * el lector único `facturasDeVuelos` (exigencia y orígenes; en paralelo y
+   * en un try PROPIO: si falla, el bloque sale igual con `exigencia: null`,
+   * `origenes_exigen: []` y `solicitud_ya_no_aplica: false`, con un warn).
    */
   async bloquesDeVuelos(
     ids: string[],
@@ -216,17 +296,27 @@ export class FacturaSolicitudService {
     const out = new Map<string, FacturaServicioBloque>();
     const limpios = [...new Set(ids.filter(Boolean))];
     if (limpios.length === 0 || !(await this.disponible())) return out;
+    const facturasP: Promise<Map<string, FacturaDeVuelo> | null> =
+      facturasDeVuelos(this.supabase.service, limpios).catch((e: unknown) => {
+        this.logger.warn(
+          `factura_servicio sin exigencia de ${limpios.length} vuelo(s) (el bloque sale igual): ${e instanceof Error ? e.message : String(e)}`,
+        );
+        return null;
+      });
     try {
       const [filas, ligadas] = await Promise.all([
         this.filasSolicitud(limpios),
         this.ligadasDeVuelos(limpios),
       ]);
-      const nombres = await fetchNombresUsuarios(
-        this.supabase.service,
-        [...filas.values()]
-          .map((v) => v.factura_solicitada_por)
-          .filter((x): x is string => typeof x === 'string'),
-      );
+      const [nombres, facturas] = await Promise.all([
+        fetchNombresUsuarios(
+          this.supabase.service,
+          [...filas.values()]
+            .map((v) => v.factura_solicitada_por)
+            .filter((x): x is string => typeof x === 'string'),
+        ),
+        facturasP,
+      ]);
       for (const [id, v] of filas) {
         const quien = v.factura_solicitada_por;
         out.set(
@@ -235,6 +325,7 @@ export class FacturaSolicitudService {
             v,
             ligadas.get(id) ?? [],
             quien ? (nombres.get(quien) ?? null) : null,
+            facturas?.get(id) ?? null,
           ),
         );
       }
@@ -248,9 +339,45 @@ export class FacturaSolicitudService {
   }
 
   /**
+   * EXIGENCIA de los vuelos con solicitud AUTOMÁTICA viva (14-oct-2026, API
+   * 0.0.77, invariante 60): `facturasDeVuelos` SOLO de esas filas (hoy 0 en
+   * producción ⇒ cero consultas). Alimenta `estadoSolicitud(v, vigentes,
+   * exigencia)` en las listas, el conteo, la bandeja y el selector: una
+   * automática cuyo vuelo ya no exige factura es 'YA_NO_APLICA'. Vuelo sin
+   * entrada en el mapa ⇒ `null` ⇒ como antes. Si la lectura falla ⇒ warn y
+   * mapa vacío (POR_FACTURAR como antes); nunca lanza.
+   */
+  async exigenciasDeAutomaticas(
+    filas: Iterable<VueloSolicitudRow & { id: string }>,
+  ): Promise<Map<string, ExigenciaFacturaVuelo>> {
+    const out = new Map<string, ExigenciaFacturaVuelo>();
+    const ids = [
+      ...new Set(
+        [...filas].filter((v) => esSolicitudAutomatica(v)).map((v) => v.id),
+      ),
+    ];
+    if (ids.length === 0) return out;
+    try {
+      for (const [id, f] of await facturasDeVuelos(
+        this.supabase.service,
+        ids,
+      )) {
+        out.set(id, f.exigencia);
+      }
+    } catch (e) {
+      this.logger.warn(
+        `No se pudo leer la exigencia de ${ids.length} solicitud(es) automática(s) (cuentan como «Por facturar», como antes): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return new Map();
+    }
+    return out;
+  }
+
+  /**
    * Resúmenes `factura_servicio_resumen` de una página de lista (vuelos o
-   * cotizaciones): 2 consultas por cada 200 vuelos. Sin migración o con
-   * error ⇒ mapa vacío (el llamador responde `null`).
+   * cotizaciones): 2 consultas por cada 200 vuelos (+ la exigencia de las
+   * solicitudes automáticas vivas, `exigenciasDeAutomaticas`). Sin migración
+   * o con error ⇒ mapa vacío (el llamador responde `null`).
    */
   async resumenesDeVuelos(
     ids: string[],
@@ -263,8 +390,16 @@ export class FacturaSolicitudService {
         this.filasSolicitud(limpios),
         this.ligadasDeVuelos(limpios),
       ]);
+      const exigencias = await this.exigenciasDeAutomaticas(filas.values());
       for (const [id, v] of filas) {
-        out.set(id, resumenFacturaServicio(v, ligadas.get(id) ?? []));
+        out.set(
+          id,
+          resumenFacturaServicio(
+            v,
+            ligadas.get(id) ?? [],
+            exigencias.get(id) ?? null,
+          ),
+        );
       }
     } catch (e) {
       this.logger.warn(
@@ -415,13 +550,7 @@ export class FacturaSolicitudService {
 
     const bloque = await this.bloqueDeVuelo(vueloId);
     return {
-      factura_servicio: bloque ?? {
-        solicitud: null,
-        por_facturar: false,
-        facturas: [],
-        canceladas: 0,
-        marcado_sin_registro: false,
-      },
+      factura_servicio: bloque ?? BLOQUE_VACIO(),
       nueva: nuevos.length > 0,
       vuelos: nuevos.map((n) => n.folio).sort((a, b) => a - b),
       notificados,
@@ -473,11 +602,15 @@ export class FacturaSolicitudService {
       ]);
       if (filasRes.error) throw new Error(filasRes.error.message);
       const filas = (filasRes.data ?? []) as unknown as VueloSolicitud[];
+      // Desde el 0.0.77 (invariante 60) el VUELO también debe exigir: corregir
+      // la cuenta de un cobro en un vuelo cuyo dinero ya se devolvió no pide
+      // factura (un anticipo devuelto no lleva CFDI).
       const candidatos = filas.filter(
         (v) =>
           v.estado !== 'CANCELADO' &&
           !v.factura_solicitada_at &&
-          facturas.get(v.id)?.registrada == null,
+          facturas.get(v.id)?.registrada == null &&
+          facturas.get(v.id)?.exigencia === 'EXIGE',
       );
       if (candidatos.length === 0) {
         const motivos = filas.map(
@@ -553,6 +686,167 @@ export class FacturaSolicitudService {
         `Solicitud automática de factura falló (el cobro ${idCobro} quedó registrado): ${e instanceof Error ? e.message : String(e)}`,
       );
       return vacio('FALLO');
+    }
+  }
+
+  /**
+   * AVISO DE TRANSICIÓN de una solicitud AUTOMÁTICA (14-oct-2026, API
+   * 0.0.77, invariante 60; revisión F14). Se avisa la TRANSICIÓN, no el
+   * estado: «ya no aplica» cuando el vuelo pasa de EXIGE a no exigir y
+   * «vuelve a aplicar» cuando pasa de no exigir a EXIGE con la automática
+   * todavía viva. El ANTES es CONTRAFACTUAL (`cobrosAntesDelCambio` sobre los
+   * cobros de DESPUÉS, con la MISMA regla): no se lee antes de escribir. NO
+   * re-sella `factura_solicitada_at` ni escribe `vuelo` (el estado se
+   * reclasifica al LEER; retirar es destructivo y lo hace la oficina con
+   * confirmación). JAMÁS lanza.
+   *  (1) Compuerta de UNA consulta a `vuelo` (`COLS_VUELO_SOLICITUD`): sale
+   *      sin la migración 20260924000003 (columna inexistente), si la
+   *      solicitud no es automática (o no hay), si el vuelo está CANCELADO o
+   *      tiene CFDI del PAC o el estatus manual «Facturado».
+   *  (2) `facturasDeVuelos(sb, [id], { conCobros: true })` ⇒ DESPUÉS; sale si
+   *      ya tiene factura registrada.
+   *  (3) ANTES = `vueloExigeFactura` de los cobros contrafactuales con su
+   *      `cobrosEnUsd` (T.C. del vuelo de respaldo).
+   *  (4) Con transición: aviso a `destinatariosFacturacion(actorId)` (excluye
+   *      al actor; no baja de nivel), tipo
+   *      'factura_solicitud_ya_no_aplica' / 'factura_solicitud_vuelve_a_aplicar',
+   *      link a la tarjeta de la bandeja y `data` {vuelo_id, folio, origen,
+   *      motivo, cobro_id}. Sin transición no avisa (nunca repite).
+   */
+  async avisarCambioSolicitudAutomatica(
+    p: AvisoCambioSolicitud,
+  ): Promise<ResultadoAvisoCambioSolicitud> {
+    const nada = (
+      motivo: ResultadoAvisoCambioSolicitud['motivo'],
+    ): ResultadoAvisoCambioSolicitud => ({
+      transicion: null,
+      notificados: [],
+      motivo,
+    });
+    try {
+      const sb = this.supabase.service;
+      const { data, error } = await sb
+        .from('vuelo')
+        .select(COLS_VUELO_SOLICITUD)
+        .eq('id', p.vueloId)
+        .maybeSingle();
+      if (error) {
+        if (esColumnaInexistente(error)) return nada('NO_DISPONIBLE');
+        throw new Error(error.message);
+      }
+      const v = (data ?? null) as unknown as VueloSolicitud | null;
+      if (!v || !esSolicitudAutomatica(v)) {
+        return nada('SIN_SOLICITUD_AUTOMATICA');
+      }
+      if (
+        v.estado === 'CANCELADO' ||
+        v.facturado === true ||
+        v.factura_estatus === 'FACTURADO'
+      ) {
+        return nada('NO_APLICA');
+      }
+      const f = (
+        await facturasDeVuelos(sb, [p.vueloId], { conCobros: true })
+      ).get(p.vueloId);
+      if (!f) return nada('FALLO');
+      if (f.registrada != null) return nada('REGISTRADA');
+      const despues = f.cobros ?? [];
+      const filasAntes = cobrosAntesDelCambio(despues, p.cambio);
+      const antes = vueloExigeFactura(
+        filasAntes,
+        cobrosEnUsd(filasAntes, f.tc_vuelo ?? null),
+      );
+      const transicion = transicionSolicitudAutomatica(antes, f.exigencia);
+      if (!transicion) return nada('SIN_TRANSICION');
+      const fila = filaDelCambio(p.cambio, despues);
+      const cobroId =
+        p.cambio.tipo === 'BAJA'
+          ? (p.cambio.fila.id ?? null)
+          : p.cambio.cobroId;
+      const notificados = await this.avisarTransicion(v, {
+        transicion,
+        motivo: p.motivo,
+        actorId: p.actorId,
+        cobroId,
+        origen: fila ? origenCobroTexto(fila) : null,
+        eraReembolso: fila != null && Number(fila.monto) < 0,
+      });
+      this.logger.log(
+        `Solicitud automática de factura del vuelo #${v.folio}: ${transicion === 'YA_NO_APLICA' ? 'ya no aplica' : 'vuelve a aplicar'} (${antes} ⇒ ${f.exigencia}, ${p.motivo}, cobro ${cobroId ?? '?'}, movió ${p.actorId}); aviso a: ${notificados.join(', ') || 'nadie'}`,
+      );
+      return { transicion, notificados };
+    } catch (e) {
+      this.logger.warn(
+        `Aviso de la solicitud automática de factura falló (el dinero del vuelo ${p.vueloId} quedó registrado): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return nada('FALLO');
+    }
+  }
+
+  /** Notificación de la transición (best-effort; nombres notificados). */
+  private async avisarTransicion(
+    v: VueloSolicitud,
+    p: {
+      transicion: TransicionSolicitudAutomatica;
+      motivo: MotivoCambioSolicitud;
+      actorId: string;
+      cobroId: string | null;
+      origen: string | null;
+      eraReembolso: boolean;
+    },
+  ): Promise<string[]> {
+    try {
+      const destinatarios = await this.configuracion.destinatariosFacturacion(
+        p.actorId,
+      );
+      if (destinatarios.length === 0) return [];
+      let cliente: string | null = null;
+      if (v.cliente_id) {
+        const { data } = await this.supabase.service
+          .from('cliente')
+          .select('nombre')
+          .eq('id', v.cliente_id)
+          .maybeSingle();
+        cliente = (data as { nombre?: string | null } | null)?.nombre ?? null;
+      }
+      const { titulo, cuerpo } = textoAvisoCambioSolicitud({
+        transicion: p.transicion,
+        motivo: p.motivo,
+        vuelo: { folio: Number(v.folio), fecha_vuelo: v.fecha_vuelo },
+        cliente,
+        origen: p.origen,
+        eraReembolso: p.eraReembolso,
+      });
+      const data: Record<string, unknown> = {
+        vuelo_id: v.id,
+        folio: Number(v.folio),
+        origen: p.transicion,
+        motivo: p.motivo,
+        cobro_id: p.cobroId,
+      };
+      const tipo =
+        p.transicion === 'YA_NO_APLICA'
+          ? TIPO_AVISO_SOLICITUD_YA_NO_APLICA
+          : TIPO_AVISO_SOLICITUD_VUELVE_A_APLICAR;
+      const link = linkAvisoCambioSolicitud(v.id, p.transicion);
+      const resultados = await Promise.all(
+        destinatarios.map(async (d) => ({
+          nombre: d.nombre,
+          ok: await this.notifications.notifyUser(d.id, {
+            tipo,
+            titulo,
+            cuerpo,
+            link,
+            data,
+          }),
+        })),
+      );
+      return resultados.filter((r) => r.ok).map((r) => r.nombre);
+    } catch (e) {
+      this.logger.warn(
+        `Aviso de la solicitud automática de factura del vuelo #${v.folio} falló: ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return [];
     }
   }
 
@@ -670,14 +964,6 @@ export class FacturaSolicitudService {
       .eq('id', vueloId);
     if (error) throw new Error(error.message);
     const bloque = await this.bloqueDeVuelo(vueloId);
-    return {
-      factura_servicio: bloque ?? {
-        solicitud: null,
-        por_facturar: false,
-        facturas: [],
-        canceladas: 0,
-        marcado_sin_registro: false,
-      },
-    };
+    return { factura_servicio: bloque ?? BLOQUE_VACIO() };
   }
 }

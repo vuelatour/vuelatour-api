@@ -24,6 +24,16 @@
  * hoja «Otros ingresos» de ese avión, su cascada y su reparto; sin avión ⇒
  * «otros movimientos» del general y «Otros ingresos» del Libro Dinero, como
  * siempre. `filaLibroDeIngreso` y `leerIngresosDeResultado` NO cambian.
+ *
+ * CONVERSIÓN ÚNICA DEL INGRESO DE UN AVIÓN (decisión del cliente del
+ * 14-oct-2026: «hazlo, si es lo mejor hazlo»; API 0.0.77, invariante 67):
+ * balance, reparto y tablero convierten CADA ingreso asignado a un avión con
+ * la MISMA función pura `usdDeIngresoAvion` (USD ⇒ su neto; MXN ⇒ neto ÷ T.C.
+ * propio ?? T.C. del gasto LIGADO ?? oficial del día de su `fecha`). El día
+ * del oficial lo decide `diaTcOficialIngreso` y el oficial sale de la única
+ * puerta `TipoCambioService.oficialDetallePara` (cada libro con su lote).
+ * El lector lee además `gasto_id` (el gasto que reembolsa un
+ * REEMBOLSO_DEVOLUCION; la columna existe desde 20260924000004).
  */
 import type { SupabaseClient } from '@supabase/supabase-js';
 import {
@@ -62,6 +72,13 @@ export interface IngresoParaLibro {
   notas?: string | null;
   cuenta_alias?: string | null;
   cuenta_banco?: string | null;
+  /**
+   * ADITIVO (14-oct-2026, API 0.0.77, invariante 67), OPCIONAL por los
+   * literales de los specs: el gasto que reembolsa un REEMBOLSO_DEVOLUCION
+   * (`ingreso.gasto_id`; CHECK `ingreso_gasto_chk`). Lo usa
+   * `usdDeIngresoAvion` para convertirlo como ESE libro convierte su gasto.
+   */
+  gasto_id?: string | null;
 }
 
 export interface FilaLibroIngreso {
@@ -125,10 +142,11 @@ export function filaLibroDeIngreso(
 /**
  * Columnas del lector (embeds por la columna FK: sin ambigüedad). Desde el
  * 13-oct-2026 (invariante 67) también `aeronave_id`, `notas` y la cuenta
- * (alias y banco) para la hoja «Otros ingresos» del avión.
+ * (alias y banco) para la hoja «Otros ingresos» del avión; desde el 0.0.77
+ * (14-oct-2026) `gasto_id` (reembolso ligado a su gasto).
  */
 export const COLS_INGRESO_LIBRO =
-  'id, folio, categoria, fecha, descripcion, monto, comision_monto, moneda, tc_usd_mxn, pagador, cliente:cliente_id(nombre), vuelo:vuelo_id(folio), aeronave:aeronave_id(matricula, color_calendario), aeronave_id, notas, cuenta:cuenta_bancaria_id(alias, banco)';
+  'id, folio, categoria, fecha, descripcion, monto, comision_monto, moneda, tc_usd_mxn, pagador, cliente:cliente_id(nombre), vuelo:vuelo_id(folio), aeronave:aeronave_id(matricula, color_calendario), aeronave_id, notas, cuenta:cuenta_bancaria_id(alias, banco), gasto_id';
 
 const PAGINA = 1000;
 
@@ -173,6 +191,8 @@ export function ingresoParaLibroDeFila(
     notas: notas || null,
     cuenta_alias: typeof cuenta?.alias === 'string' ? cuenta.alias : null,
     cuenta_banco: typeof cuenta?.banco === 'string' ? cuenta.banco : null,
+    // ADITIVO (14-oct-2026, API 0.0.77).
+    gasto_id: typeof f.gasto_id === 'string' && f.gasto_id ? f.gasto_id : null,
   };
 }
 
@@ -237,6 +257,149 @@ export function netoIngresoUsd(
   const neto = r2(monto - comision);
   if (i.moneda === 'USD') return neto;
   return tcMxn != null && tcMxn > 0 ? r2(neto / tcMxn) : null;
+}
+
+// ============ CONVERSIÓN ÚNICA DEL INGRESO DE UN AVIÓN (0.0.77) ============
+
+/**
+ * T.C. oficial de un día con su procedencia — la forma de
+ * `TipoCambioService.oficialDetallePara` (`common/` no importa módulos).
+ */
+export interface TcOficialDia {
+  tc: number;
+  /** Día del dato (≤ el pedido: fin de semana ⇒ el último publicado). */
+  fecha_dato: string;
+  fuente: string;
+}
+
+/**
+ * T.C. con el que ESTE libro convierte el gasto que el ingreso reembolsa: lo
+ * arma CADA libro con SU conversión de ese gasto (balance: la fila de su
+ * vuelo o sus hojas; reparto: `tc_gasto` ?? oficial del día del gasto).
+ * `lugar`: «T.C. promedio de las hojas» | «T.C. de costos del vuelo #430» |
+ * «T.C. del gasto» | «T.C. oficial del día del gasto».
+ */
+export interface TcGastoLigado {
+  gasto_id: string;
+  tc: number;
+  /** Día del gasto (YYYY-MM-DD) o null. */
+  fecha: string | null;
+  lugar: string;
+}
+
+/** De dónde salió el T.C. de un ingreso en pesos. */
+export type OrigenTcIngreso = 'PROPIO' | 'GASTO_LIGADO' | 'OFICIAL_DEL_DIA';
+
+/** El USD de un ingreso y con qué T.C. se llegó a él. */
+export interface ConversionIngreso {
+  /** NETO en USD a centavos (`netoIngresoUsd`); null = MXN sin T.C. */
+  usd: number | null;
+  /** El T.C. EXACTO que dividió (sin re-redondear); null en USD o sin T.C. */
+  tc: number | null;
+  /** null en USD o sin T.C. */
+  origen: OrigenTcIngreso | null;
+  /** El oficial del día que se usó (o que se tenía, si no alcanzó). */
+  oficial: TcOficialDia | null;
+  /** El gasto ligado cuyo T.C. se usó (solo GASTO_LIGADO). */
+  gasto: TcGastoLigado | null;
+}
+
+/** ¿`AAAA-MM-DD` de un día de calendario real? */
+function esDiaValido(x: unknown): x is string {
+  if (typeof x !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(x)) return false;
+  const [a, m, d] = x.split('-').map(Number);
+  const t = new Date(Date.UTC(a, m - 1, d));
+  return (
+    t.getUTCFullYear() === a &&
+    t.getUTCMonth() === m - 1 &&
+    t.getUTCDate() === d
+  );
+}
+
+/**
+ * Día cuyo T.C. oficial PUEDE necesitar el ingreso (14-oct-2026): MXN sin
+ * T.C. propio > 0 ⇒ su `fecha` (DATE, día de pared Cancún, `AAAA-MM-DD`
+ * válido); si no ⇒ null. La usan el lote de días del reparto
+ * (`resolverTcOficial`) y el del balance (`tcOficialDeDias`): un día, una
+ * consulta.
+ */
+export function diaTcOficialIngreso(
+  i: Pick<IngresoParaLibro, 'moneda' | 'tc_usd_mxn' | 'fecha'>,
+): string | null {
+  if (i.moneda !== 'MXN') return null;
+  if (Number(i.tc_usd_mxn) > 0) return null;
+  return esDiaValido(i.fecha) ? i.fecha : null;
+}
+
+/**
+ * USD de un ingreso ASIGNADO a un avión — FUENTE ÚNICA (decisión del cliente
+ * del 14-oct-2026; invariante 67): la MISMA en el balance (hoja «Otros
+ * ingresos» y su cascada), el reparto y, vía el reparto, el tablero.
+ *  - USD ⇒ su neto (monto − comisión) tal cual.
+ *  - MXN ⇒ neto ÷ (T.C. PROPIO del ingreso ?? T.C. del GASTO LIGADO ?? T.C.
+ *    oficial del día de su `fecha`), a centavos (`netoIngresoUsd`).
+ *  - GASTO LIGADO (revisión F3): un REEMBOLSO_DEVOLUCION en pesos con
+ *    `gasto_id` de un gasto en pesos que ESE libro cuenta (`ctx.gastoLigado`
+ *    con el mismo id) se convierte con el T.C. con que ESE libro convierte su
+ *    gasto: reembolso y gasto se ANULAN exactos en cada libro.
+ *  - Sin T.C. ⇒ `usd` null (jamás se inventa uno); cada libro decide qué
+ *    hace (balance: fila sin NETO USD y pendiente; reparto: no suma).
+ */
+export function usdDeIngresoAvion(
+  i: Pick<
+    IngresoParaLibro,
+    'monto' | 'comision_monto' | 'moneda' | 'tc_usd_mxn' | 'categoria'
+  > & { gasto_id?: string | null },
+  ctx: {
+    oficialDelDia?: TcOficialDia | null;
+    gastoLigado?: TcGastoLigado | null;
+  },
+): ConversionIngreso {
+  if (i.moneda === 'USD') {
+    return {
+      usd: netoIngresoUsd(i, null),
+      tc: null,
+      origen: null,
+      oficial: null,
+      gasto: null,
+    };
+  }
+  const propio = Number(i.tc_usd_mxn) > 0 ? Number(i.tc_usd_mxn) : null;
+  if (propio != null) {
+    return {
+      usd: netoIngresoUsd(i, propio),
+      tc: propio,
+      origen: 'PROPIO',
+      oficial: null,
+      gasto: null,
+    };
+  }
+  const g = ctx.gastoLigado;
+  if (
+    i.categoria === 'REEMBOLSO_DEVOLUCION' &&
+    i.gasto_id &&
+    g &&
+    g.gasto_id === i.gasto_id &&
+    g.tc > 0
+  ) {
+    return {
+      usd: netoIngresoUsd(i, g.tc),
+      tc: g.tc,
+      origen: 'GASTO_LIGADO',
+      oficial: null,
+      gasto: g,
+    };
+  }
+  const of =
+    ctx.oficialDelDia && ctx.oficialDelDia.tc > 0 ? ctx.oficialDelDia : null;
+  const usd = netoIngresoUsd(i, of?.tc ?? null);
+  return {
+    usd,
+    tc: of?.tc ?? null,
+    origen: of && usd != null ? 'OFICIAL_DEL_DIA' : null,
+    oficial: of,
+    gasto: null,
+  };
 }
 
 /**

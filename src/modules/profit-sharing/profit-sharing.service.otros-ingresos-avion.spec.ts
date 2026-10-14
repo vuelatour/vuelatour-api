@@ -40,6 +40,13 @@ import {
  * Mundo de los libros (#501 de XB-TST, K 20; sin pago al vendedor): saldo
  * base = 1,793.72 − 15.70 de comisión bancaria = 1,778.02 (el GAS sin T.C.
  * no convierte sin oficial; con oficial 18 sí resta: ver cada caso).
+ *
+ * Desde el 0.0.77 (decisión del cliente del 14-oct-2026) la conversión es la
+ * fuente ÚNICA `usdDeIngresoAvion` —la MISMA del balance y del tablero— y la
+ * línea de detalle trae `tc_origen` (PROPIO | GASTO_LIGADO |
+ * OFICIAL_DEL_DIA | null) AL FINAL. Un REEMBOLSO_DEVOLUCION ligado (`gasto_id`)
+ * a un gasto en pesos que ESTE avión resta usa el divisor de ese gasto
+ * (`tc_gasto` ?? oficial del día del GASTO): se anulan exactos.
  */
 
 const AV2 = 'av-2';
@@ -100,24 +107,32 @@ function mundoReparto(ingresos: Fila[] = []): Record<string, Fila[]> {
   };
 }
 
-/** Servicio sobre el mundo; `tcOficial` null = sin dato oficial. */
+/**
+ * Servicio sobre el mundo; `tcOficial` null = sin dato oficial; un mapa =
+ * el oficial POR DÍA (los días que no están: sin dato).
+ */
 function armar(
   mundo: Record<string, Fila[]>,
-  tcOficial: number | null = null,
+  tcOficial: number | null | Record<string, number> = null,
   opts: { sinMigracion?: boolean } = {},
 ) {
   const f = fakeSupabase(mundo, opts);
   const diasOficiales: string[] = [];
+  const tcDe = (dia: string): number | null =>
+    tcOficial == null
+      ? null
+      : typeof tcOficial === 'number'
+        ? tcOficial
+        : (tcOficial[dia] ?? null);
   const svc = new ProfitSharingService(
     f.supabase as unknown as SupabaseService,
     {} as never,
     {
       oficialDetallePara: (dia: string) => {
         diasOficiales.push(dia);
+        const tc = tcDe(dia);
         return Promise.resolve(
-          tcOficial == null
-            ? null
-            : { tc: tcOficial, fecha_dato: dia, fuente: 'OPEN_ER_API' },
+          tc == null ? null : { tc, fecha_dato: dia, fuente: 'OPEN_ER_API' },
         );
       },
     } as never,
@@ -184,8 +199,13 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
         usd: 2586.16,
         tc: 18,
         tc_oficial: true,
+        // ADITIVO al final (0.0.77): de dónde salió el T.C.
+        tc_origen: 'OFICIAL_DEL_DIA',
       },
     ]);
+    expect(Object.keys(a.detalle.otros_ingresos_avion[0]).at(-1)).toBe(
+      'tc_origen',
+    );
     expect(a.ingresos.otros_ingresos_avion_tc_oficial_count).toBe(1);
     expect(a.ingresos.otros_ingresos_avion_sin_tc_mxn).toBe(0);
     expect(r.tc_oficial.ingresos).toEqual({ count: 1, monto_mxn: 46550.8 });
@@ -202,6 +222,7 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
     expect(a.detalle.otros_ingresos_avion[0]).toMatchObject({
       tc: 17,
       tc_oficial: false,
+      tc_origen: 'PROPIO',
     });
     expect(a.ingresos.otros_ingresos_avion_tc_oficial_count).toBe(0);
     expect(diasOficiales).not.toContain('2026-09-04');
@@ -233,6 +254,7 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
       usd: 970,
       tc: null,
       tc_oficial: false,
+      tc_origen: null,
     });
   });
 
@@ -246,6 +268,7 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
       usd: null,
       tc: null,
       tc_oficial: false,
+      tc_origen: null,
     });
   });
 
@@ -391,5 +414,99 @@ describe('Reparto a socios — otros ingresos del avión (invariante 67)', () =>
     expect(Math.abs(r2(mau - mauSin) - 0.71 * 2586.16)).toBeLessThanOrEqual(
       0.01,
     );
+  });
+  describe('(k) REEMBOLSO LIGADO a un gasto en pesos que ESTE avión resta (0.0.77, revisión F3)', () => {
+    /** Gasto DIRECTO del XB-TST (GAS, MXN 3,000 del 10-sep) del mundo. */
+    const GASTO_LIGADO = 'g-gas';
+    const reembolso = (extra: Fila = {}): Fila => ({
+      ...ING_AVION,
+      id: 'i-lig',
+      folio: 40,
+      monto: 3000,
+      gasto_id: GASTO_LIGADO,
+      ...extra,
+    });
+    const conTcGasto = (m: Record<string, Fila[]>, tc: number) => ({
+      ...m,
+      gasto: m.gasto.map((g) =>
+        g.id === GASTO_LIGADO ? { ...g, tc_gasto: tc } : g,
+      ),
+    });
+    /** Oficial distinto el día del ingreso (09-04) y el del gasto (09-10). */
+    const POR_DIA = { '2026-09-04': 16.9479, '2026-09-10': 17.1211 };
+
+    it('con `tc_gasto` 17.5 del gasto: el reembolso se convierte con 17.5 (no con el oficial de SU día) y se anula EXACTO con el gasto', async () => {
+      const base = mundoReparto();
+      const { svc: sinSvc } = armar(conTcGasto(base, 17.5), POR_DIA);
+      const sin = avionDe(await sinSvc.compute({ desde: DESDE, hasta: HASTA }));
+      const { svc } = armar(
+        conTcGasto(mundoReparto([reembolso()]), 17.5),
+        POR_DIA,
+      );
+      const a = avionDe(await svc.compute({ desde: DESDE, hasta: HASTA }));
+      expect(a.detalle.otros_ingresos_avion[0]).toMatchObject({
+        clave: 'ING-40',
+        usd: r2(3000 / 17.5),
+        tc: 17.5,
+        tc_oficial: false,
+        tc_origen: 'GASTO_LIGADO',
+      });
+      expect(a.ingresos.otros_ingresos_avion_usd).toBe(171.43);
+      expect(a.ingresos.otros_ingresos_avion_tc_oficial_count).toBe(0);
+      // Lo que el gasto RESTÓ (toUsd con su tc_gasto) == lo que el reembolso
+      // SUMA: frente a un mundo sin el gasto, el reembolso lo anula al centavo.
+      const sinGasto = (m: Record<string, Fila[]>) => ({
+        ...m,
+        gasto: m.gasto.filter((g) => g.id !== GASTO_LIGADO),
+      });
+      const { svc: nadaSvc } = armar(sinGasto(base), POR_DIA);
+      const nada = avionDe(
+        await nadaSvc.compute({ desde: DESDE, hasta: HASTA }),
+      );
+      expect(r2(nada.saldo_disponible_usd - sin.saldo_disponible_usd)).toBe(
+        171.43,
+      );
+      expect(a.saldo_disponible_usd).toBe(nada.saldo_disponible_usd);
+    });
+
+    it('sin `tc_gasto`: el divisor es el oficial del día del GASTO (17.1211 del 10-sep), no el del ingreso (16.9479 del 4-sep)', async () => {
+      const { svc } = armar(mundoReparto([reembolso()]), POR_DIA);
+      const a = avionDe(await svc.compute({ desde: DESDE, hasta: HASTA }));
+      expect(a.detalle.otros_ingresos_avion[0]).toMatchObject({
+        usd: r2(3000 / 17.1211),
+        tc: 17.1211,
+        tc_oficial: false,
+        tc_origen: 'GASTO_LIGADO',
+      });
+      expect(a.ingresos.otros_ingresos_avion_usd).toBe(175.22);
+      expect(a.ingresos.otros_ingresos_avion_usd).not.toBe(r2(3000 / 16.9479));
+    });
+
+    it('ligado a un gasto que este avión NO resta (otro id, o una categoría que no es REEMBOLSO_DEVOLUCION): la regla por ingreso (oficial de SU día)', async () => {
+      const { svc } = armar(
+        mundoReparto([
+          reembolso({ gasto_id: 'g-de-otro-mes' }),
+          reembolso({
+            id: 'i-otro',
+            folio: 41,
+            categoria: 'OTRO_INGRESO',
+          }),
+        ]),
+        POR_DIA,
+      );
+      const a = avionDe(await svc.compute({ desde: DESDE, hasta: HASTA }));
+      expect(
+        a.detalle.otros_ingresos_avion.map((l) => [
+          l.clave,
+          l.usd,
+          l.tc,
+          l.tc_origen,
+        ]),
+      ).toEqual([
+        ['ING-40', r2(3000 / 16.9479), 16.9479, 'OFICIAL_DEL_DIA'],
+        ['ING-41', r2(3000 / 16.9479), 16.9479, 'OFICIAL_DEL_DIA'],
+      ]);
+      expect(a.ingresos.otros_ingresos_avion_tc_oficial_count).toBe(2);
+    });
   });
 });

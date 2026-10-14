@@ -18,8 +18,9 @@ import type {
  *  - INGRESO = la provisión AFAC del periodo de ese avión, TAL CUAL la trae
  *    su libro (`totales.permiso_afac_mxn` = Σ de su columna T «PERMISO AFAC
  *    (PROVISIÓN)», round2(tarifa × z × D) por vuelo). Nadie la recalcula.
- *  - EGRESO INFORMATIVO = $0.00 (revisión del 13-oct-2026, antes del
- *    deploy): las filas de su hoja «permisos» (TODOS los gastos PERMISO del
+ *  - EGRESO INFORMATIVO = $0.00 (revisión del 13-oct-2026; CONFIRMADO por
+ *    el cliente el 14-oct-2026: «el AFAC lo cargan al Avión»): las filas
+ *    de su hoja «permisos» (TODOS los gastos PERMISO del
  *    avión del periodo, con o sin vuelo —no solo los de AFAC—: exactamente
  *    `filasPermisos` de `buildPayload`) se LISTAN en el concepto y la nota
  *    con su monto, «· a cargo del avión XB-PEV ($5,518.00 en su hoja
@@ -43,8 +44,9 @@ import type {
  * por `fecha_gasto` y `gastosVueloDelAvion` en el MES DEL VUELO aunque
  * `fecha_gasto` sea otro; parciales de reparto con su parte). Cada permiso
  * cae en el mismo libro/mes que su hoja «permisos» y nunca en dos. Un
- * PERMISO sin avión ni vuelo no entra aquí (sigue en «otros gastos»); uno
- * de un vuelo EXTERNO se queda en el libro EXTERNOS. Reconstruir estas filas
+ * PERMISO sin avión ni vuelo no entra aquí (caería en «otros gastos»: desde
+ * el 0.0.77 el pre-cierre lo BLOQUEA, `permisos_sin_avion`); uno de un vuelo
+ * EXTERNO se queda en el libro EXTERNOS. Reconstruir estas filas
  * con una consulta propia a `gasto` rompería esa identidad.
  *
  * USD Y MXN NUNCA SE SUMAN: el monto que cita el concepto son pesos ya
@@ -62,23 +64,17 @@ import type {
  * USD (Σ X_i ÷ promedio de z) difiere de tarifa × Σ horas cuando z varía
  * dentro del mes (el egreso es $0.00: no tiene drift). Si el cliente exige
  * USD exacto, el refinamiento es aditivo (T.C. ponderado solo para el
- * ingreso). Si algún día el permiso egresa aquí (ver abajo), su USD
- * diferiría de `permisos.usd` del libro por centavos (`tc_promedio` va
- * redondeado a 2; `tcHojas`, crudo): `tc_egreso` en `MovimientoParaEmpresa`.
+ * ingreso). El permiso pagado no egresa aquí (decisión del cliente del
+ * 14-oct-2026): no hay T.C. de egreso que alinear.
  *
- * UN PERMISO PAGADO, UNA VEZ (revisión del 13-oct-2026; pregunta ABIERTA al
- * cliente en «Pendientes conocidos» del CLAUDE.md): la decisión 2 decía
- * «cada permiso pagado = egreso», pero el permiso PAGADO ya resta en el avión
- * (hoja «permisos» → `permisos_usd` de la cascada → utilidad cobrada →
- * socios, y en el reparto el grupo PERMISO) desde antes del 0.0.74 y el
- * reparto de septiembre ya se entregó así. Mientras el cliente no diga si
- * sale del avión, el egreso aquí es $0.00 INFORMATIVO: el grupo lo resta UNA
- * vez (en el avión) y los socios no cambian. Si responde «sale del avión»,
- * el cambio va JUNTO, en un solo deploy: `utilidadDespues` sin
- * `hojaPermisos.usd`, el grupo PERMISO fuera del saldo del reparto, y aquí
- * `egreso_mxn` = Σ `monto_mxn` (con la marca «sin TC» de siempre). La
- * provisión NO es doble (sale del avión en su columna T y entra a VuelaTour
- * aquí).
+ * UN PERMISO PAGADO, UNA VEZ — DECISIÓN DEL CLIENTE (14-oct-2026: «el AFAC lo
+ * cargan al Avión»; invariante 62): el permiso PAGADO resta en su avión (hoja
+ * «permisos» → `permisos_usd` → utilidad cobrada → socios; en el reparto,
+ * grupo PERMISO), como desde antes del 0.0.74. Por eso el egreso aquí es
+ * $0.00 INFORMATIVO: el grupo lo resta UNA vez. Supersede «cada permiso
+ * pagado = egreso» (decisión 2 del 13-oct). Egresarlo aquí lo contaría dos
+ * veces: PROHIBIDO sin decisión nueva. La provisión NO es doble (sale del
+ * avión en su columna T y entra a VuelaTour aquí).
  *
  * PROHIBIDO en cualquier texto generado aquí: la secuencia «· PROVISIÓN (»
  * (marca `_MARCA_PROVISION` del amarillo de pyservices). Por eso «provisión»
@@ -133,6 +129,17 @@ function fechaCorta(iso: string | null | undefined): string | null {
   if (t === '') return null;
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(t);
   return m ? `${m[3]}/${m[2]}/${m[1]}` : t;
+}
+
+/**
+ * El detalle de UN permiso copiado al concepto SIN la marca «sin TC»
+ * (palabra completa: la que `balance-empresa.util#ladoEnUsd` usa para vaciar
+ * EGRESOS y RESULTADO del bloque VUELATOUR antes de saltar el 0): la fila
+ * egresa $0.00, así que a ese lado no le falta nada. Revisión del
+ * 14-oct-2026 (riesgo latente B4; hoy 0 casos): «sin TC» ⇒ «sin T.C.».
+ */
+function detalleSinMarcaSinTc(detalle: string): string {
+  return detalle.replace(/\bsin TC\b\.?/g, 'sin T.C.');
 }
 
 /**
@@ -205,7 +212,7 @@ export function filasAfacOtrosMovimientos(
       const aCargo = ` · a cargo del avión ${p.matricula} (${cifra})`;
       conceptoEgreso =
         permisos.length === 1
-          ? `permiso AFAC pagado · ${permisos[0].detalle}${aCargo}`
+          ? `permiso AFAC pagado · ${detalleSinMarcaSinTc(permisos[0].detalle)}${aCargo}`
           : `permisos AFAC pagados · ${permisos.length} conceptos (ver nota)${aCargo}`;
       // La fecha NO nula más antigua (misma regla que `colapsarFilasDeVuelo`).
       fechaEgreso =

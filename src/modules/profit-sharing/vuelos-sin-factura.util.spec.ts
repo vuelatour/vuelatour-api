@@ -22,6 +22,9 @@ function factura(extra: Partial<FacturaDeVuelo> = {}): FacturaDeVuelo {
     estado: 'COMPLETADO',
     cuentas_exigen: ['HSBC Pesos'],
     etiqueta: 'Pendiente de factura',
+    origenes_exigen: ['en HSBC Pesos'],
+    solicitud_automatica: false,
+    solicitud_ya_no_aplica: false,
     ...extra,
   };
 }
@@ -39,8 +42,10 @@ describe('vuelosCobradosSinFactura (puro)', () => {
     expect(TITULO_PRECIERRE_VUELOS_SIN_FACTURA).toBe(
       'Vuelos cobrados en cuentas que exigen factura sin factura registrada',
     );
+    // Decisión del cliente del 14-oct-2026: un anticipo devuelto completo,
+    // por cualquier vía, no lleva factura (API 0.0.77).
     expect(DETALLE_PRECIERRE_VUELOS_SIN_FACTURA).toBe(
-      'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y no se reembolsaron, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo. No bloquea el cierre.',
+      'Cobros que entraron a HSBC Dólares, HSBC Pesos, Scotiabank Dólares o Scotiabank Pesos (o por link de pago HSBC, transferencia o cheque sin cuenta capturada) y siguen ahí —un anticipo devuelto completo, por cualquier vía, no lleva factura; si se devolvió solo una parte, lo retenido sí—, en vuelos del periodo que no tienen factura del servicio registrada. Regístrala en Facturas emitidas (o pídela desde el vuelo; si el vuelo está cancelado, regístrala directo en Facturas emitidas); si el cobro entró a otra cuenta, corrígelo en el detalle del vuelo; si el dinero se devolvió, regístralo como reembolso. No bloquea el cierre.',
     );
     expect(DETALLE_PRECIERRE_VUELOS_SIN_FACTURA_FALLIDA).toBe(
       'No se pudo verificar qué vuelos cobrados en cuentas que exigen factura siguen sin factura registrada: revisa Facturas emitidas → Por facturar antes de cerrar.',

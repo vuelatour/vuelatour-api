@@ -556,14 +556,18 @@ export function etiquetaFacturaRegistrada(p: {
  *     COBROS del vuelo, con dos insumos OPCIONALES: «Pendiente de factura»
  *     si `exigencia === 'EXIGE'` (en una cuenta que exige factura —
  *     HSBC/Scotiabank, o transferencia/link HSBC/cheque sin cuenta— QUEDÓ
- *     dinero, neto de sus reembolsos por moneda: `vueloExigeFactura`) O si
- *     hay solicitud VIVA desde el
- *     vuelo (`solicitada`; refinamiento documentado sobre la decisión
- *     literal: la columna nunca contradice la bandeja «Por facturar» ni el
- *     caso «paga contra factura»; el pre-cierre NO usa esta rama); «No
- *     lleva factura» si `exigencia === 'NO_EXIGE'` (hay cobros y ninguno
- *     exige); `null` si no hay cobros (`'SIN_COBROS'`) o sin insumos.
- *     Sin los dos campos nuevos el resultado es EXACTAMENTE el de antes.
+ *     dinero, neto de sus reembolsos por moneda: `vueloExigeFactura`; un
+ *     anticipo devuelto completo, por cualquier vía, ya no exige: decisión
+ *     del cliente del 14-oct-2026) O si la solicitud CUENTA (`solicitada`:
+ *     manual viva —también en un CANCELADO— o automática mientras el vuelo
+ *     exige; una automática que ya no aplica no pone «Pendiente», 0.0.77;
+ *     refinamiento documentado sobre la decisión literal: la columna nunca
+ *     contradice la bandeja «Por facturar» ni el caso «paga contra
+ *     factura»; el pre-cierre NO usa esta rama); «No lleva factura» si
+ *     `exigencia === 'NO_EXIGE'` (hay cobros y ninguno exige, o el dinero se
+ *     devolvió completo); `null` si no hay cobros (`'SIN_COBROS'`) o sin
+ *     insumos. Sin los dos campos nuevos el resultado es EXACTAMENTE el de
+ *     antes.
  */
 export function etiquetaFacturaVuelo(p: {
   cfdi?: string | null;

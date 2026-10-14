@@ -190,6 +190,26 @@ async function error(
 
 const actor = { userId: ITZI, nombre: 'Itzi' };
 
+/**
+ * Cobro de `cobro_vuelo` (el que dispara la solicitud ya está escrito cuando
+ * corre el gancho): desde el 0.0.77 el VUELO también debe exigir factura.
+ */
+const cobroFila = (
+  id: string,
+  vuelo_id: string,
+  monto: number,
+  extra: Fila = {},
+): Fila => ({
+  id,
+  vuelo_id,
+  monto,
+  moneda: 'MXN',
+  tc_usd_mxn: 17.3,
+  cuenta_destino: 'HSBC Pesos',
+  metodo_cobro: 'TRANSFERENCIA',
+  ...extra,
+});
+
 describe('FacturaSolicitudService.solicitar', () => {
   it('primera vez: guarda quién/cuándo/nota, avisa a facturación y devuelve el bloque', async () => {
     const { svc, db, notifyUser, destinatariosFacturacion } = armar({
@@ -455,6 +475,7 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
   it('crea la solicitud con la nota exacta, el actor como solicitante, paga=false, UN aviso con data.origen COBRO y cobro_id; excluye al actor', async () => {
     const { svc, db, notifyUser, destinatariosFacturacion } = armar({
       vuelo: [vuelo(V1, 341)],
+      cobro_vuelo: [cobroFila('c-1', V1, 8050.4)],
     });
     const r = await svc.solicitarPorCobro({
       vueloIds: [V1],
@@ -493,7 +514,10 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
   });
 
   it('IDEMPOTENTE: la segunda llamada no escribe ni re-avisa (SIN_CANDIDATOS)', async () => {
-    const { svc, db, notifyUser } = armar({ vuelo: [vuelo(V1, 341)] });
+    const { svc, db, notifyUser } = armar({
+      vuelo: [vuelo(V1, 341)],
+      cobro_vuelo: [cobroFila('c-1', V1, 8050.4)],
+    });
     await svc.solicitarPorCobro({ vueloIds: [V1], cobro: HSBC, actorId: ITZI });
     const r = await svc.solicitarPorCobro({
       vueloIds: [V1],
@@ -579,7 +603,12 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
       ['CANCELADO', { vuelo: [vuelo(V1, 341, { estado: 'CANCELADO' })] }],
     ];
     for (const [nombre, datos] of casos) {
-      const { svc, db, notifyUser } = armar(datos);
+      // Con el cobro en HSBC ya escrito (el vuelo SÍ exige): lo que lo deja
+      // fuera es la factura registrada o el estado.
+      const { svc, db, notifyUser } = armar({
+        ...datos,
+        cobro_vuelo: [cobroFila('c-1', V1, 8050.4)],
+      });
       const r = await svc.solicitarPorCobro({
         vueloIds: [V1],
         cobro: HSBC,
@@ -667,6 +696,11 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
         vuelo(V3, 343, { grupo_id: G }),
       ],
       vuelo_grupo: [{ id: G, folio: 12 }],
+      // Las partes del sobre (copian cuenta y método del sobre).
+      cobro_vuelo: [
+        cobroFila('p-1', V1, 4025.2, { cobro_grupo_id: 'sg-1' }),
+        cobroFila('p-2', V2, 4025.2, { cobro_grupo_id: 'sg-1' }),
+      ],
     });
     const r = await svc.solicitarPorCobro({
       vueloIds: [V1, V2],
@@ -695,6 +729,449 @@ describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)
       origen: 'COBRO',
       cobro_id: null,
       cobro_grupo_id: 'sg-1',
+    });
+  });
+});
+
+/**
+ * ANTICIPO DEVUELTO (14-oct-2026, API 0.0.77, invariante 60): la solicitud
+ * automática solo se pide si el vuelo EXIGE; el bloque lleva la exigencia;
+ * `exigenciasDeAutomaticas`; y el AVISO DE TRANSICIÓN (contrafactual, sin
+ * escribir `vuelo`, nunca lanza).
+ */
+describe('FacturaSolicitudService — anticipo devuelto (14-oct-2026, API 0.0.77)', () => {
+  const NOTA_AUTO = 'Solicitada automáticamente: cobro en HSBC Pesos';
+  const automatica = (extra: Fila = {}): Fila =>
+    vuelo(V1, 341, {
+      factura_solicitada_at: '2026-10-01T10:00:00Z',
+      factura_solicitada_por: ITZI,
+      factura_solicitud_nota: NOTA_AUTO,
+      tc_usd_mxn: 17.3,
+      ...extra,
+    });
+  const devuelto = () => [
+    cobroFila('c-1', V1, 30000),
+    cobroFila('r-1', V1, -30000, {
+      cuenta_destino: null,
+      metodo_cobro: 'EFECTIVO',
+    }),
+  ];
+
+  it('solicitarPorCobro sobre un vuelo cuyo dinero ya se devolvió ⇒ SIN_CANDIDATOS, sin update y el motivo en la bitácora', async () => {
+    const log = jest
+      .spyOn(Logger.prototype, 'log')
+      .mockImplementation(() => undefined);
+    try {
+      const { svc, db, notifyUser } = armar({
+        vuelo: [vuelo(V1, 341)],
+        cobro_vuelo: devuelto(),
+      });
+      // Corrigen la cuenta del cobro ya devuelto (updateCobro ⇒ gancho).
+      const r = await svc.solicitarPorCobro({
+        vueloIds: [V1],
+        cobro: { monto: 30000, cuenta_destino: 'HSBC Pesos' },
+        actorId: ITZI,
+        cobroId: 'c-1',
+      });
+      expect(r).toEqual({
+        solicitados: [],
+        notificados: [],
+        motivo: 'SIN_CANDIDATOS',
+      });
+      expect(db.updates).toHaveLength(0);
+      expect(notifyUser).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(
+        expect.stringContaining(
+          '#341: ya no exige factura (el dinero se devolvió o no quedó en una cuenta que la exija)',
+        ),
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('bloqueDeVuelo lleva exigencia, origenes_exigen y solicitud_ya_no_aplica (automática con el dinero devuelto)', async () => {
+    const { svc } = armar({ vuelo: [automatica()], cobro_vuelo: devuelto() });
+    const b = await svc.bloqueDeVuelo(V1);
+    expect(b).toMatchObject({
+      por_facturar: false,
+      marcado_sin_registro: false,
+      exigencia: 'NO_EXIGE',
+      origenes_exigen: [],
+      solicitud_ya_no_aplica: true,
+    });
+    const exige = armar({
+      vuelo: [automatica()],
+      cobro_vuelo: [cobroFila('c-1', V1, 30000)],
+    });
+    expect(await exige.svc.bloqueDeVuelo(V1)).toMatchObject({
+      por_facturar: true,
+      exigencia: 'EXIGE',
+      origenes_exigen: ['en HSBC Pesos'],
+      solicitud_ya_no_aplica: false,
+    });
+  });
+
+  it('si la lectura de la factura falla, el bloque sale igual (exigencia null, [] y false) con un warn', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const { svc, db } = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: devuelto(),
+      });
+      const servicio = db.supabase.service as unknown as {
+        from: (t: string) => unknown;
+      };
+      const original = servicio.from;
+      servicio.from = (t: string) => {
+        if (t === 'cobro_vuelo') throw new Error('timeout');
+        return original(t);
+      };
+      const b = await svc.bloqueDeVuelo(V1);
+      expect(b).toMatchObject({
+        solicitud: { nota: NOTA_AUTO },
+        por_facturar: true,
+        exigencia: null,
+        origenes_exigen: [],
+        solicitud_ya_no_aplica: false,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('factura_servicio sin exigencia de 1 vuelo(s)'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('exigenciasDeAutomaticas: SOLO las automáticas vivas (una manual ni se lee); si falla ⇒ mapa vacío + warn', async () => {
+    const { svc, db } = armar({
+      vuelo: [
+        automatica(),
+        vuelo(V2, 342, {
+          factura_solicitada_at: '2026-10-01T10:00:00Z',
+          factura_solicitud_nota: 'La pidió el cliente',
+        }),
+      ],
+      cobro_vuelo: [
+        ...devuelto(),
+        cobroFila('c-2', V2, 100, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+      ],
+    });
+    const filas = db.tablas.vuelo as unknown as Array<{ id: string }>;
+    const m = await svc.exigenciasDeAutomaticas(filas);
+    expect([...m.entries()]).toEqual([[V1, 'NO_EXIGE']]);
+    // Sin automáticas: cero consultas.
+    const servicio = db.supabase.service as unknown as {
+      from: (t: string) => unknown;
+    };
+    const spy = jest.spyOn(servicio, 'from');
+    expect((await svc.exigenciasDeAutomaticas([filas[1]])).size).toBe(0);
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const original = servicio.from;
+      servicio.from = (t: string) => {
+        if (t === 'cobro_vuelo') throw new Error('timeout');
+        return original(t);
+      };
+      expect((await svc.exigenciasDeAutomaticas(filas)).size).toBe(0);
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('cuentan como «Por facturar», como antes'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('resumenesDeVuelos: la automática que ya no aplica deja de ser por_facturar', async () => {
+    const { svc } = armar({ vuelo: [automatica()], cobro_vuelo: devuelto() });
+    expect((await svc.resumenesDeVuelos([V1])).get(V1)).toEqual({
+      solicitada: true,
+      por_facturar: false,
+      paga_contra_factura: false,
+      facturas: 0,
+    });
+  });
+
+  describe('avisarCambioSolicitudAutomatica (transición, nunca el estado)', () => {
+    it('reembolso que devuelve TODO ⇒ YA_NO_APLICA con tipo, título, cuerpo, link y data exactos (excluye al actor)', async () => {
+      const { svc, db, notifyUser, destinatariosFacturacion } = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: devuelto(),
+      });
+      const r = await svc.avisarCambioSolicitudAutomatica({
+        vueloId: V1,
+        actorId: MARY,
+        motivo: 'REEMBOLSO',
+        cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+      });
+      expect(r).toEqual({
+        transicion: 'YA_NO_APLICA',
+        notificados: ['Mary Cruz'],
+      });
+      expect(destinatariosFacturacion).toHaveBeenCalledWith(MARY);
+      expect(notifyUser).toHaveBeenCalledTimes(1);
+      expect(notifyUser).toHaveBeenCalledWith(MARY, {
+        tipo: 'factura_solicitud_ya_no_aplica',
+        titulo: 'Ya no aplica: factura del vuelo #341',
+        cuerpo:
+          'Se registró la devolución del dinero del vuelo #341 · Maqar · 27 sep: un anticipo devuelto no lleva factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+        link: `/admin/facturas-emitidas?resaltar=${V1}#ya-no-aplican`,
+        data: {
+          vuelo_id: V1,
+          folio: 341,
+          origen: 'YA_NO_APLICA',
+          motivo: 'REEMBOLSO',
+          cobro_id: 'r-1',
+        },
+      });
+      // Nunca escribe `vuelo` (el estado se reclasifica al LEER).
+      expect(db.updates).toHaveLength(0);
+    });
+
+    it('un cobro nuevo que devuelve la exigencia ⇒ VUELVE_A_APLICAR (también un BillPocket: ambigüedad en la misma moneda, N14)', async () => {
+      const { svc, notifyUser } = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: [
+          ...devuelto(),
+          cobroFila('b-1', V1, 5000, {
+            cuenta_destino: null,
+            metodo_cobro: 'BILLPOCKET',
+          }),
+        ],
+      });
+      const r = await svc.avisarCambioSolicitudAutomatica({
+        vueloId: V1,
+        actorId: ITZI,
+        motivo: 'COBRO_NUEVO',
+        cambio: { tipo: 'ALTA', cobroId: 'b-1' },
+      });
+      expect(r.transicion).toBe('VUELVE_A_APLICAR');
+      expect(notifyUser).toHaveBeenCalledWith(MARY, {
+        tipo: 'factura_solicitud_vuelve_a_aplicar',
+        titulo: 'Vuelve a aplicar: factura del vuelo #341',
+        cuerpo:
+          'Entró dinero al vuelo #341 · Maqar · 27 sep (cobro por BillPocket) y quedó en una cuenta que exige factura: su solicitud automática regresó a «Por facturar».',
+        link: `/admin/facturas-emitidas?resaltar=${V1}#por-facturar`,
+        data: {
+          vuelo_id: V1,
+          folio: 341,
+          origen: 'VUELVE_A_APLICAR',
+          motivo: 'COBRO_NUEVO',
+          cobro_id: 'b-1',
+        },
+      });
+    });
+
+    it('BAJA del reembolso ⇒ VUELVE_A_APLICAR «Se eliminó un reembolso …»; CAMBIO de cuenta hacia efectivo ⇒ YA_NO_APLICA', async () => {
+      const baja = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: [cobroFila('c-1', V1, 30000)],
+      });
+      const rb = await baja.svc.avisarCambioSolicitudAutomatica({
+        vueloId: V1,
+        actorId: ITZI,
+        motivo: 'COBRO_ELIMINADO',
+        cambio: {
+          tipo: 'BAJA',
+          fila: {
+            id: 'r-1',
+            monto: -30000,
+            moneda: 'MXN',
+            tc_usd_mxn: 17.3,
+            cuenta_destino: null,
+            metodo_cobro: 'EFECTIVO',
+          },
+        },
+      });
+      expect(rb.transicion).toBe('VUELVE_A_APLICAR');
+      const [, nb] = baja.notifyUser.mock.calls[0] as [string, Fila];
+      expect(nb.cuerpo).toBe(
+        'Se eliminó un reembolso del vuelo #341 · Maqar · 27 sep: quedó dinero en una cuenta que exige factura; su solicitud automática regresó a «Por facturar».',
+      );
+      expect(nb.data).toMatchObject({
+        cobro_id: 'r-1',
+        motivo: 'COBRO_ELIMINADO',
+      });
+
+      const cambio = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: [
+          cobroFila('c-1', V1, 30000, {
+            cuenta_destino: null,
+            metodo_cobro: 'EFECTIVO',
+          }),
+        ],
+      });
+      const rc = await cambio.svc.avisarCambioSolicitudAutomatica({
+        vueloId: V1,
+        actorId: ITZI,
+        motivo: 'COBRO_CORREGIDO',
+        cambio: {
+          tipo: 'CAMBIO',
+          cobroId: 'c-1',
+          antes: {
+            id: 'c-1',
+            monto: 30000,
+            cuenta_destino: 'HSBC Pesos',
+            metodo_cobro: 'TRANSFERENCIA',
+          },
+        },
+      });
+      expect(rc.transicion).toBe('YA_NO_APLICA');
+      const [, nc] = cambio.notifyUser.mock.calls[0] as [string, Fila];
+      expect(nc.cuerpo).toBe(
+        'Se corrigió un cobro del vuelo #341 · Maqar · 27 sep: ya no quedó dinero en una cuenta que exija factura. Su solicitud automática salió de «Por facturar»; retírala desde ahí.',
+      );
+    });
+
+    it('sin transición ⇒ 0 avisos: un 2.º reembolso no re-avisa; un 2.º pago normal tampoco', async () => {
+      const segundo = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: [
+          ...devuelto(),
+          cobroFila('r-2', V1, -10, {
+            cuenta_destino: null,
+            metodo_cobro: 'EFECTIVO',
+          }),
+        ],
+      });
+      expect(
+        await segundo.svc.avisarCambioSolicitudAutomatica({
+          vueloId: V1,
+          actorId: ITZI,
+          motivo: 'REEMBOLSO',
+          cambio: { tipo: 'ALTA', cobroId: 'r-2' },
+        }),
+      ).toEqual({
+        transicion: null,
+        notificados: [],
+        motivo: 'SIN_TRANSICION',
+      });
+      expect(segundo.notifyUser).not.toHaveBeenCalled();
+      const pago = armar({
+        vuelo: [automatica()],
+        cobro_vuelo: [cobroFila('c-1', V1, 1000), cobroFila('c-2', V1, 1000)],
+      });
+      expect(
+        (
+          await pago.svc.avisarCambioSolicitudAutomatica({
+            vueloId: V1,
+            actorId: ITZI,
+            motivo: 'COBRO_NUEVO',
+            cambio: { tipo: 'ALTA', cobroId: 'c-2' },
+          })
+        ).motivo,
+      ).toBe('SIN_TRANSICION');
+      expect(pago.notifyUser).not.toHaveBeenCalled();
+    });
+
+    it('manual, cancelado, FACTURADO a mano, CFDI del PAC o sin migración ⇒ nada y UNA sola consulta (la compuerta)', async () => {
+      const casos: Array<[string, Fila, { migracion?: boolean }, string]> = [
+        [
+          'manual',
+          automatica({ factura_solicitud_nota: 'La pidió el cliente' }),
+          {},
+          'SIN_SOLICITUD_AUTOMATICA',
+        ],
+        ['sin solicitud', vuelo(V1, 341), {}, 'SIN_SOLICITUD_AUTOMATICA'],
+        ['cancelado', automatica({ estado: 'CANCELADO' }), {}, 'NO_APLICA'],
+        [
+          'FACTURADO a mano',
+          automatica({ factura_estatus: 'FACTURADO' }),
+          {},
+          'NO_APLICA',
+        ],
+        ['CFDI del PAC', automatica({ facturado: true }), {}, 'NO_APLICA'],
+        ['sin migración', automatica(), { migracion: false }, 'NO_DISPONIBLE'],
+      ];
+      for (const [nombre, v, opts, motivo] of casos) {
+        const { svc, db, notifyUser } = armar(
+          { vuelo: [v], cobro_vuelo: devuelto() },
+          opts,
+        );
+        const servicio = db.supabase.service as unknown as {
+          from: (t: string) => unknown;
+        };
+        const spy = jest.spyOn(servicio, 'from');
+        const r = await svc.avisarCambioSolicitudAutomatica({
+          vueloId: V1,
+          actorId: ITZI,
+          motivo: 'REEMBOLSO',
+          cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+        });
+        expect([nombre, r]).toEqual([
+          nombre,
+          { transicion: null, notificados: [], motivo },
+        ]);
+        expect([nombre, spy.mock.calls.map((c) => c[0])]).toEqual([
+          nombre,
+          ['vuelo'],
+        ]);
+        expect([nombre, notifyUser.mock.calls.length]).toEqual([nombre, 0]);
+        spy.mockRestore();
+      }
+    });
+
+    it('con factura REGISTRADA ⇒ nada (REGISTRADA); un fallo ⇒ FALLO con warn, jamás rechaza', async () => {
+      const reg = armar({
+        vuelo: [automatica({ factura_folio: 'A-9' })],
+        cobro_vuelo: devuelto(),
+      });
+      expect(
+        (
+          await reg.svc.avisarCambioSolicitudAutomatica({
+            vueloId: V1,
+            actorId: ITZI,
+            motivo: 'REEMBOLSO',
+            cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+          })
+        ).motivo,
+      ).toBe('REGISTRADA');
+      const warn = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        const { svc, db } = armar({
+          vuelo: [automatica()],
+          cobro_vuelo: devuelto(),
+        });
+        const servicio = db.supabase.service as unknown as {
+          from: (t: string) => unknown;
+        };
+        const original = servicio.from;
+        servicio.from = (t: string) => {
+          if (t === 'cobro_vuelo') throw new Error('timeout');
+          return original(t);
+        };
+        await expect(
+          svc.avisarCambioSolicitudAutomatica({
+            vueloId: V1,
+            actorId: ITZI,
+            motivo: 'REEMBOLSO',
+            cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+          }),
+        ).resolves.toEqual({
+          transicion: null,
+          notificados: [],
+          motivo: 'FALLO',
+        });
+        expect(warn).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `Aviso de la solicitud automática de factura falló (el dinero del vuelo ${V1} quedó registrado): timeout`,
+          ),
+        );
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 });

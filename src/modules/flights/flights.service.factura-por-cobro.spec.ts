@@ -25,6 +25,7 @@ import type { VisionService } from '../vision/vision.service';
 import type { ConfiguracionService } from '../configuracion/configuracion.service';
 import type { PilotsService } from '../pilots/pilots.service';
 import type {
+  AvisoCambioSolicitud,
   FacturaSolicitudService,
   SolicitudPorCobro,
 } from './factura-solicitud.service';
@@ -115,6 +116,7 @@ const COBRO_EXISTENTE: Row = {
   cobro_grupo_id: null,
   ingreso_anticipo_id: null,
   cuenta_destino: null,
+  tc_usd_mxn: null,
   client_request_id: 'cccccccc-0000-4000-8000-000000000001',
 };
 
@@ -149,16 +151,41 @@ interface Mundo {
   sinFacturaSolicitud?: boolean;
   /** `solicitarPorCobro` rechaza. */
   falla?: boolean;
+  /**
+   * false = `solicitarPorCobro` NO crea solicitud (ya había una viva:
+   * SIN_CANDIDATOS). Default: la crea (solicitados [254]).
+   */
+  solicitudNueva?: boolean;
+  /** Sin la migración de ingresos (la sonda responde 42703). */
+  sinIngresos?: boolean;
+  /** El INSERT choca con `uq_cobro_vuelo_client_request` (23505). */
+  insertDuplicado?: boolean;
 }
 
 function armar(m: Mundo = {}) {
   const inserts: Row[] = [];
+  const selects: Array<{ tabla: string; cols: string }> = [];
   const { supabase } = fakeSupabase((tabla, ops, lista) => {
     const ins = ops.find((o) => o.m === 'insert');
     const upd = ops.find((o) => o.m === 'update');
+    const sel = ops.find((o) => o.m === 'select');
+    if (sel && !ins && !upd) {
+      selects.push({ tabla, cols: String(sel.args[0]) });
+    }
     const eq = (col: string) =>
       ops.find((o) => o.m === 'eq' && o.args[0] === col);
     switch (tabla) {
+      case 'movimiento_bancario': {
+        if (m.sinIngresos && String(sel?.args[0]) === 'ingreso_id') {
+          return {
+            error: {
+              code: '42703',
+              message: 'column movimiento_bancario.ingreso_id does not exist',
+            },
+          };
+        }
+        return {};
+      }
       case 'vuelo': {
         const fila = m.vuelo ?? vueloRow();
         if (upd) return { data: { ...fila, ...(upd.args[0] as Row) } };
@@ -166,6 +193,15 @@ function armar(m: Mundo = {}) {
       }
       case 'cobro_vuelo': {
         if (ins) {
+          if (m.insertDuplicado) {
+            return {
+              error: {
+                code: '23505',
+                message:
+                  'duplicate key value violates unique constraint "uq_cobro_vuelo_client_request"',
+              },
+            };
+          }
           inserts.push(ins.args[0] as Row);
           return { data: { id: 'c-new', ...(ins.args[0] as Row) } };
         }
@@ -187,10 +223,21 @@ function armar(m: Mundo = {}) {
     .mockImplementation(() =>
       m.falla
         ? Promise.reject(new Error('BD caída'))
-        : Promise.resolve({ solicitados: [254], notificados: ['Mary Cruz'] }),
+        : Promise.resolve(
+            m.solicitudNueva === false
+              ? { solicitados: [], notificados: [], motivo: 'SIN_CANDIDATOS' }
+              : { solicitados: [254], notificados: ['Mary Cruz'] },
+          ),
     );
+  // Aviso de TRANSICIÓN de la solicitud automática (14-oct-2026, API 0.0.77).
+  const avisarCambioSolicitudAutomatica = jest.fn().mockResolvedValue({
+    transicion: null,
+    notificados: [],
+    motivo: 'SIN_TRANSICION',
+  });
   const facturaSolicitud = {
     solicitarPorCobro,
+    avisarCambioSolicitudAutomatica,
   } as unknown as FacturaSolicitudService;
   const args = [
     supabase,
@@ -217,8 +264,18 @@ function armar(m: Mundo = {}) {
   const service = m.sinFacturaSolicitud
     ? new FlightsService(...args)
     : new FlightsService(...args, undefined, undefined, facturaSolicitud);
-  return { service, inserts, solicitarPorCobro };
+  return {
+    service,
+    inserts,
+    selects,
+    solicitarPorCobro,
+    avisarCambioSolicitudAutomatica,
+  };
 }
+
+/** Primer argumento de la primera llamada al aviso de transición. */
+const primerAviso = (fn: jest.Mock): AvisoCambioSolicitud =>
+  (fn.mock.calls as unknown as Array<[AvisoCambioSolicitud]>)[0][0];
 
 const dto = (extra: Partial<CreateCobroDto> = {}): CreateCobroDto => ({
   monto: 1000,
@@ -503,6 +560,281 @@ describe('solicitarFacturaPorCobros — puerta pública', () => {
       ).resolves.toBeNull();
       expect(warn).toHaveBeenCalledWith(
         expect.stringContaining('el cobro c-1 quedó registrado'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * AVISO DE TRANSICIÓN de la solicitud automática (14-oct-2026, API 0.0.77,
+ * invariante 60): los ganchos llaman `avisarCambioSolicitudAutomatica` con
+ * el cambio exacto; las respuestas HTTP no cambian ni un byte.
+ */
+describe('ganchos del aviso de transición (14-oct-2026, API 0.0.77)', () => {
+  it('createCobro: DESPUÉS de la solicitud y en la misma cadena, con ALTA y COBRO_NUEVO; si la solicitud se ACABA de crear, no avisa', async () => {
+    const ya = armar({ solicitudNueva: false });
+    const res = (await ya.service.createCobro(
+      V1,
+      dto({ cuenta_destino: 'HSBC Pesos' }),
+      USER,
+    )) as Row;
+    expect(res).not.toHaveProperty('aviso');
+    await vaciarCola();
+    expect(ya.solicitarPorCobro).toHaveBeenCalledTimes(1);
+    expect(ya.avisarCambioSolicitudAutomatica).toHaveBeenCalledTimes(1);
+    expect(primerAviso(ya.avisarCambioSolicitudAutomatica)).toEqual({
+      vueloId: V1,
+      actorId: USER,
+      motivo: 'COBRO_NUEVO',
+      cambio: { tipo: 'ALTA', cobroId: 'c-new' },
+    });
+    const nueva = armar();
+    await nueva.service.createCobro(
+      V1,
+      dto({ cuenta_destino: 'HSBC Pesos' }),
+      USER,
+    );
+    await vaciarCola();
+    expect(nueva.solicitarPorCobro).toHaveBeenCalledTimes(1);
+    expect(nueva.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+  });
+
+  it('createCobro con BillPocket también avisa (un cobro que no exige puede devolver la exigencia: N14)', async () => {
+    const { service, solicitarPorCobro, avisarCambioSolicitudAutomatica } =
+      armar();
+    await service.createCobro(
+      V1,
+      dto({ metodo_cobro: MetodoPago.BILLPOCKET }),
+      USER,
+    );
+    await vaciarCola();
+    expect(solicitarPorCobro).not.toHaveBeenCalled();
+    expect(primerAviso(avisarCambioSolicitudAutomatica)).toMatchObject({
+      motivo: 'COBRO_NUEVO',
+      cambio: { tipo: 'ALTA', cobroId: 'c-new' },
+    });
+  });
+
+  it('createCobro: replay idempotente, parte de sobre u `omitirSolicitudFactura` ⇒ sin aviso', async () => {
+    const replay = armar({
+      replay: { ...COBRO_EXISTENTE, cuenta_destino: 'HSBC Pesos' },
+      solicitudNueva: false,
+    });
+    await replay.service.createCobro(
+      V1,
+      dto({
+        cuenta_destino: 'HSBC Pesos',
+        client_request_id: COBRO_EXISTENTE.client_request_id as string,
+      }),
+      USER,
+    );
+    const parte = armar({ solicitudNueva: false });
+    await parte.service.createCobro(
+      V1,
+      dto({ cuenta_destino: 'HSBC Pesos' }),
+      USER,
+      undefined,
+      { cobro_grupo_id: 'sobre-1', grupo_factor: 1, silenciarPush: true },
+    );
+    const interna = armar({ solicitudNueva: false });
+    await interna.service.createCobro(
+      V1,
+      dto({ cuenta_destino: 'HSBC Pesos' }),
+      USER,
+      Rol.ADMIN,
+      undefined,
+      undefined,
+      { omitirSolicitudFactura: true },
+    );
+    await vaciarCola();
+    for (const a of [replay, parte, interna]) {
+      expect(a.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+    }
+  });
+
+  const reembolso: CreateReembolsoDto = {
+    monto: 100,
+    moneda: Moneda.USD,
+    metodo_cobro: MetodoPago.EFECTIVO,
+    motivo: 'Anticipo devuelto: no voló',
+  };
+
+  it('createReembolso sin sobre ⇒ avisa con ALTA y REEMBOLSO (y sigue sin pedir solicitud); la respuesta es la fila de siempre', async () => {
+    const { service, solicitarPorCobro, avisarCambioSolicitudAutomatica } =
+      armar({ cobros: [{ ...COBRO_EXISTENTE, cuenta_destino: 'HSBC Pesos' }] });
+    const res = (await service.createReembolso(V1, reembolso, USER)) as Row;
+    expect(res).toMatchObject({ id: 'c-new', monto: -100 });
+    await vaciarCola();
+    expect(solicitarPorCobro).not.toHaveBeenCalled();
+    expect(primerAviso(avisarCambioSolicitudAutomatica)).toEqual({
+      vueloId: V1,
+      actorId: USER,
+      motivo: 'REEMBOLSO',
+      cambio: { tipo: 'ALTA', cobroId: 'c-new' },
+    });
+  });
+
+  it('createReembolso con sobre o en el reintento idempotente (23505) ⇒ sin aviso', async () => {
+    const sobre = armar({
+      cobros: [{ ...COBRO_EXISTENTE, cuenta_destino: 'HSBC Pesos' }],
+    });
+    await sobre.service.createReembolso(V1, reembolso, USER, {
+      cobro_grupo_id: 'sobre-1',
+      grupo_factor: 1,
+      silenciarPush: true,
+    });
+    const reintento = armar({
+      cobros: [{ ...COBRO_EXISTENTE, cuenta_destino: 'HSBC Pesos' }],
+      insertDuplicado: true,
+      replay: { ...COBRO_EXISTENTE, id: 'r-ya', monto: -100 },
+    });
+    const res = (await reintento.service.createReembolso(
+      V1,
+      {
+        ...reembolso,
+        client_request_id: 'cccccccc-0000-4000-8000-000000000009',
+      },
+      USER,
+    )) as Row;
+    expect(res.id).toBe('r-ya');
+    await vaciarCola();
+    expect(sobre.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+    expect(reintento.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+  });
+
+  it('deleteCobro ⇒ avisa con BAJA y la fila COMPLETA (cuenta, método, moneda y T.C.) leída en las DOS ramas de columnas', async () => {
+    for (const sinIngresos of [false, true]) {
+      const { service, selects, avisarCambioSolicitudAutomatica } = armar({
+        sinIngresos,
+      });
+      await expect(service.deleteCobro('c-1', USER)).resolves.toEqual({
+        ok: true,
+      });
+      await vaciarCola();
+      const lectura = selects.find(
+        (x) => x.tabla === 'cobro_vuelo' && x.cols.startsWith('id, vuelo_id'),
+      )!;
+      for (const col of [
+        'monto',
+        'moneda',
+        'metodo_cobro',
+        'cuenta_destino',
+        'tc_usd_mxn',
+      ]) {
+        expect([sinIngresos, col, lectura.cols.includes(col)]).toEqual([
+          sinIngresos,
+          col,
+          true,
+        ]);
+      }
+      expect(primerAviso(avisarCambioSolicitudAutomatica)).toEqual({
+        vueloId: V1,
+        actorId: USER,
+        motivo: 'COBRO_ELIMINADO',
+        cambio: {
+          tipo: 'BAJA',
+          fila: expect.objectContaining({
+            id: 'c-1',
+            monto: 1000,
+            moneda: 'USD',
+            metodo_cobro: 'TRANSFERENCIA',
+            cuenta_destino: null,
+            tc_usd_mxn: null,
+          }) as unknown,
+        },
+      });
+    }
+  });
+
+  it('deleteCobro con la opción INTERNA `omitirAvisoFactura` (compensación de «Es el pago de un vuelo») ⇒ sin aviso', async () => {
+    const { service, avisarCambioSolicitudAutomatica } = armar();
+    await service.deleteCobro('c-1', USER, { omitirAvisoFactura: true });
+    await vaciarCola();
+    expect(avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+  });
+
+  it('updateCobro ⇒ CAMBIO con la fila de ANTES cuando toca dinero, cuenta o método; solo notas/referencia ⇒ no', async () => {
+    for (const patch of [
+      { cuenta_destino: 'Scotiabank Dólares' },
+      { metodo_cobro: MetodoPago.BILLPOCKET },
+      { monto: 900 },
+      { tc_usd_mxn: 18 },
+    ]) {
+      const { service, avisarCambioSolicitudAutomatica } = armar({
+        solicitudNueva: false,
+      });
+      await service.updateCobro('c-1', patch, USER);
+      expect([
+        patch,
+        avisarCambioSolicitudAutomatica.mock.calls.length,
+      ]).toEqual([patch, 1]);
+      expect(primerAviso(avisarCambioSolicitudAutomatica)).toEqual({
+        vueloId: V1,
+        actorId: USER,
+        motivo: 'COBRO_CORREGIDO',
+        cambio: {
+          tipo: 'CAMBIO',
+          cobroId: 'c-1',
+          antes: expect.objectContaining({
+            id: 'c-1',
+            monto: 1000,
+            moneda: 'USD',
+            metodo_cobro: 'TRANSFERENCIA',
+            cuenta_destino: null,
+          }) as unknown,
+        },
+      });
+    }
+    const notas = armar({ solicitudNueva: false });
+    await notas.service.updateCobro(
+      'c-1',
+      { referencia: 'SPEI 123', notas: 'ok' },
+      USER,
+    );
+    expect(notas.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+    // Si la corrección ACABA de crear la solicitud, no hay transición.
+    const nueva = armar();
+    await nueva.service.updateCobro(
+      'c-1',
+      { cuenta_destino: 'Scotiabank Dólares' },
+      USER,
+    );
+    expect(nueva.solicitarPorCobro).toHaveBeenCalledTimes(1);
+    expect(nueva.avisarCambioSolicitudAutomatica).not.toHaveBeenCalled();
+  });
+
+  it('puerta pública: sin el service ⇒ null; un rechazo ⇒ null con warn (jamás 5xx)', async () => {
+    const sin = armar({ sinFacturaSolicitud: true });
+    await expect(
+      sin.service.avisarCambioSolicitudAutomatica({
+        vueloId: V1,
+        actorId: USER,
+        motivo: 'REEMBOLSO',
+        cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+      }),
+    ).resolves.toBeNull();
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const mal = armar();
+      mal.avisarCambioSolicitudAutomatica.mockRejectedValueOnce(
+        new Error('BD caída'),
+      );
+      await expect(
+        mal.service.avisarCambioSolicitudAutomatica({
+          vueloId: V1,
+          actorId: USER,
+          motivo: 'REEMBOLSO',
+          cambio: { tipo: 'ALTA', cobroId: 'r-1' },
+        }),
+      ).resolves.toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `Aviso de la solicitud automática de factura falló (el dinero del vuelo ${V1} quedó registrado): BD caída`,
+        ),
       );
     } finally {
       warn.mockRestore();

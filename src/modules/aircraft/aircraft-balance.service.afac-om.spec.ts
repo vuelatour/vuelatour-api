@@ -302,12 +302,11 @@ describe('Balance GENERAL — PERMISOS AFAC como filas que SUMAN en «otros movi
     // de la pestaña (+T) == el mundo sin AFAC: la provisión es una
     // transferencia avión → VuelaTour y la pestaña no egresa el permiso.
     expect(dineroTotal(g)).toBe(dineroTotal(base));
-    // (b) Revisión del 13-oct-2026 (antes del deploy; pregunta ABIERTA al
-    // cliente en «Pendientes conocidos» del CLAUDE.md): el permiso pagado
-    // resta UNA vez — en la cascada del avión (hoja «permisos» →
-    // `permisos_usd` → utilidad cobrada → socios y, en el reparto, el grupo
-    // PERMISO) — y NO egresa en VuelaTour. Si el cliente responde «sale del
-    // avión», cambian JUNTAS esta aserción (la cascada) y la de la pestaña.
+    // (b) Decisión del cliente del 14-oct-2026 («el AFAC lo cargan al
+    // Avión»; invariante 62): el permiso pagado resta UNA vez — en la
+    // cascada del avión (hoja «permisos» → `permisos_usd` → utilidad
+    // cobrada → socios y, en el reparto, el grupo PERMISO) — y NO egresa en
+    // VuelaTour.
     expect(tst.balance.permisos_usd).toBe(r2(P / tst.totales.tc_promedio!));
     expect(fila.egreso_mxn).toBe(0);
     expect(g.empresa.pagos_vendedor_usd).toBe(base.empresa.pagos_vendedor_usd);

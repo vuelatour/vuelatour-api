@@ -9,6 +9,8 @@
  * ve con `GET :id/archivo-url` (URL firmada 600 s).
  */
 
+import type { ExigenciaFacturaVuelo } from '../../common/cuentas-cobro';
+
 export type EstatusFacturaEmitida = 'VIGENTE' | 'CANCELADA';
 export type MonedaFactura = 'MXN' | 'USD';
 export type MetodoPagoFactura = 'PUE' | 'PPD';
@@ -323,6 +325,25 @@ export interface FacturaServicioBloque {
    * chip gris «… marcada «Facturado» en el vuelo, sin factura registrada».
    */
   marcado_sin_registro: boolean;
+  /**
+   * ADITIVOS (14-oct-2026, API 0.0.77, invariante 60), ÚLTIMAS llaves y en
+   * este orden. `exigencia` = `vueloExigeFactura` del vuelo (neto por cuenta
+   * y moneda; un anticipo devuelto completo, por cualquier vía, NO exige —
+   * decisión del cliente del 14-oct-2026—); null = no se pudo leer. Desde el
+   * 0.0.77 la exigencia la decide el API: el panel pinta «Factura
+   * obligatoria» con `origenes_exigen` (`origenCobroTexto` de los grupos que
+   * la exigen: «en HSBC Pesos» / «por Transferencia») y su espejo queda
+   * como respaldo de un API ≤ 0.0.76 (cuando la llave falta).
+   */
+  exigencia: ExigenciaFacturaVuelo | null;
+  origenes_exigen: string[];
+  /**
+   * La solicitud viva es AUTOMÁTICA y el vuelo ya no exige factura (dinero
+   * devuelto, cobro corregido o eliminado): ya no cuenta en «Por facturar»
+   * y el panel pinta el chip gris «ya no aplica» con «Retirar». NO mira el
+   * estado del vuelo. Una manual, nunca.
+   */
+  solicitud_ya_no_aplica: boolean;
 }
 
 /** Campo ADITIVO por fila de GET /flights y GET /quotes. */
@@ -415,6 +436,13 @@ export interface ListaPorFacturar {
    * con la MISMA forma y orden que `data`.
    */
   marcados_sin_registro: PorFacturarItem[];
+  /**
+   * ADITIVO (14-oct-2026, API 0.0.77, invariante 60): solicitudes
+   * AUTOMÁTICAS cuyo vuelo ya no exige factura (`estadoSolicitud`
+   * 'YA_NO_APLICA'), con la MISMA forma y orden que `data`. No cuentan en
+   * «Por facturar»; la oficina las retira desde aquí (con confirmación).
+   */
+  ya_no_aplican: PorFacturarItem[];
 }
 
 /** `GET /v1/facturas-emitidas/por-facturar/conteo` (badge del menú). */
@@ -424,6 +452,8 @@ export interface ConteoPorFacturar {
   paga_contra_factura: number;
   /** ADITIVO (13-oct-2026, invariante 65). */
   marcados_sin_registro: number;
+  /** ADITIVO (14-oct-2026, API 0.0.77, invariante 60). */
+  ya_no_aplican: number;
 }
 
 export interface VueloCandidatoFactura {

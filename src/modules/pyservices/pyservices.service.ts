@@ -1182,22 +1182,40 @@ export interface BalanceAvionOtroIngresoFilaPayload {
   neto_mxn: number | null;
   cuenta: string;
   notas: string | null;
+  /**
+   * ADITIVOS (14-oct-2026, API 0.0.77, invariante 67; conversión ÚNICA por
+   * ingreso, la MISMA del reparto y del tablero): `tc_usd` = el T.C. EXACTO
+   * con que se dividió el NETO MXN (MXN; USD ⇒ null), `neto_usd` = el NETO en
+   * USD (`usdDeIngresoAvion`; null = MXN sin T.C.), `tc_usd_origen` = de
+   * dónde salió el T.C. y `tc_usd_nota` = el comentario de la celda (oficial
+   * del día o gasto ligado; null en los demás). Opcionales por skew (un API
+   * ≤ 0.0.76 no las manda).
+   */
+  tc_usd?: number | null;
+  neto_usd?: number | null;
+  tc_usd_origen?: 'PROPIO' | 'GASTO_LIGADO' | 'OFICIAL_DEL_DIA' | null;
+  tc_usd_nota?: string | null;
   matricula?: string;
   avion_color?: string | null;
 }
 
 /**
  * Hoja «Otros ingresos» de un avión (13-oct-2026, API 0.0.75, invariante
- * 67). `total_mxn` = round2(Σ neto MXN); `usd` = TOTAL USD que SUMA en la
- * cascada = total ÷ el T.C. de las hojas de gastos del libro (`tcHojas`;
- * avión sin vuelos: el oficial del cierre), con la regla de `buildHoja`:
- * alguna fila sin MXN ⇒ null; total 0 ⇒ 0; sin T.C. ⇒ null. En el
- * consolidado FLOTA: Σ de los libros con filas (null se PROPAGA).
+ * 67). `total_mxn` = round2(Σ neto MXN). Desde el 0.0.77 (decisión del
+ * cliente del 14-oct-2026) `usd` = TOTAL USD que SUMA en la cascada =
+ * round2(Σ `neto_usd` de las filas) —cada ingreso convertido por separado
+ * con `usdDeIngresoAvion`, ya no el total ÷ el T.C. de las hojas de
+ * gastos—: alguna fila sin NETO USD ⇒ null; vacía ⇒ 0. En el consolidado
+ * FLOTA: Σ de los libros con filas (null se PROPAGA). `usd_por_ingreso:
+ * true` (ÚLTIMA llave, SIEMPRE desde el 0.0.77) = pyservices pinta las
+ * columnas T.C. A USD / NETO USD y C5 = ROUND(SUM(K),2); sin ella (API
+ * ≤ 0.0.76) la hoja de siempre.
  */
 export interface BalanceAvionHojaOtrosIngresosPayload {
   filas: BalanceAvionOtroIngresoFilaPayload[];
   total_mxn: number;
   usd: number | null;
+  usd_por_ingreso?: true;
 }
 
 /** Hoja "combustible" (26-ago-2026): el gas del avión POR MES, con litros. */
@@ -1706,6 +1724,17 @@ export interface BalanceAvionPayload {
    * pie de la hoja maestra. Un API previo no la manda ⇒ nota de hoy.
    */
   factura_vuelatour_segun_cobros?: true;
+  /**
+   * ADITIVA (14-oct-2026, API 0.0.77, invariante 60), justo después de
+   * `factura_vuelatour_segun_cobros`: decisión del cliente «un anticipo
+   * devuelto no lleva factura» — «No lleva factura» también cuando el dinero
+   * del vuelo se devolvió completo. Viaja SIEMPRE en el libro individual, en
+   * cada `aviones[]` del general Y en el consolidado FLOTA; pyservices
+   * cambia SOLO la nota al pie de la hoja maestra
+   * (`_NOTA_FACTURA_VUELATOUR_DEVOLUCION`). Un API previo no la manda ⇒ las
+   * dos notas de siempre.
+   */
+  factura_vuelatour_devolucion?: true;
   /**
    * ADITIVA (13-oct-2026, API 0.0.74, invariante 61): «0.0.74: comisión del
    * vendedor solo como gasto real, en dos categorías» (COMISIONES = parte

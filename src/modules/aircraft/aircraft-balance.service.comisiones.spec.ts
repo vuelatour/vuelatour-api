@@ -523,7 +523,8 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
     expect(p.totales.comision_vendedor_mxn).toBe(0);
     expect(p.balance.utilidad_antes_usd).toBe(p.totales.ganancia_usd);
     // Bandera raíz (invariante 61): viaja SIEMPRE; desde el 0.0.75
-    // (invariante 67) la sigue la hoja «Otros ingresos» (vacía sin ingresos).
+    // (invariante 67) la sigue la hoja «Otros ingresos» (vacía sin ingresos;
+    // desde el 0.0.77 con su bandera `usd_por_ingreso`).
     expect(p.comision_vendedor_solo_gasto_real).toBe(true);
     expect(Object.keys(p).slice(-2)).toEqual([
       'comision_vendedor_solo_gasto_real',
@@ -533,6 +534,7 @@ describe('Balance por avión — COMISIONES a cargo del avión (API 0.0.65)', ()
       filas: [],
       total_mxn: 0,
       usd: 0,
+      usd_por_ingreso: true,
     });
   });
 

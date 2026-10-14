@@ -368,6 +368,7 @@ interface Mocks {
     cobroStatus: jest.Mock;
     listCobros: jest.Mock;
     solicitarFacturaPorCobros: jest.Mock;
+    avisarCambioSolicitudAutomatica: jest.Mock;
   };
   conciliacion: {
     linkIngreso: jest.Mock;
@@ -406,6 +407,7 @@ function armar(
       cobroStatus: jest.fn().mockResolvedValue({}),
       listCobros: jest.fn().mockResolvedValue([]),
       solicitarFacturaPorCobros: jest.fn().mockResolvedValue(null),
+      avisarCambioSolicitudAutomatica: jest.fn().mockResolvedValue(null),
     },
     conciliacion: {
       linkIngreso: jest.fn().mockResolvedValue({}),
@@ -1459,12 +1461,71 @@ describe('«Es el pago de un vuelo» (cobro-de-vuelo desde un abono)', () => {
       w.svc.cobroDeVueloDesdeAbono('m-leticia', dto(), ADMIN),
     );
     expect(r.code).toBe('MOVIMIENTO_YA_LIGADO');
+    // La compensación borra el cobro SIN aviso de transición (14-oct-2026):
+    // nadie llegó a verlo.
     expect(w.mocks.flights.deleteCobro).toHaveBeenCalledWith(
       'c-nuevo',
       'u-admin',
+      { omitirAvisoFactura: true },
     );
     // Ni solicitud ni aviso a facturación por un cobro que ya no existe.
     expect(w.mocks.flights.solicitarFacturaPorCobros).not.toHaveBeenCalled();
+    await new Promise((res) => setImmediate(res));
+    expect(
+      w.mocks.flights.avisarCambioSolicitudAutomatica,
+    ).not.toHaveBeenCalled();
+  });
+
+  // 14-oct-2026 (API 0.0.77, invariante 60): el aviso de TRANSICIÓN de una
+  // solicitud automática que ya existía sale DESPUÉS de la liga y de la
+  // solicitud (misma cadena); no si la solicitud se acaba de crear ni en un
+  // reintento idempotente.
+  it('el aviso de transición sale DESPUÉS de linkCobro con ALTA y COBRO_NUEVO; no si la solicitud se acaba de crear ni en un reintento', async () => {
+    const w = armar(conAbono());
+    await w.svc.cobroDeVueloDesdeAbono('m-leticia', dto(), ADMIN);
+    await new Promise((res) => setImmediate(res));
+    const aviso = w.mocks.flights.avisarCambioSolicitudAutomatica;
+    expect(aviso).toHaveBeenCalledTimes(1);
+    expect(aviso).toHaveBeenCalledWith({
+      vueloId: V_1,
+      actorId: 'u-admin',
+      motivo: 'COBRO_NUEVO',
+      cambio: { tipo: 'ALTA', cobroId: 'c-nuevo' },
+    });
+    expect(aviso.mock.invocationCallOrder[0]).toBeGreaterThan(
+      w.mocks.conciliacion.linkCobro.mock.invocationCallOrder[0],
+    );
+    expect(aviso.mock.invocationCallOrder[0]).toBeGreaterThan(
+      w.mocks.flights.solicitarFacturaPorCobros.mock.invocationCallOrder[0],
+    );
+
+    const nueva = armar(conAbono());
+    nueva.mocks.flights.solicitarFacturaPorCobros.mockResolvedValue({
+      solicitados: [254],
+      notificados: ['Mary Cruz'],
+    });
+    await nueva.svc.cobroDeVueloDesdeAbono('m-leticia', dto(), ADMIN);
+    await new Promise((res) => setImmediate(res));
+    expect(
+      nueva.mocks.flights.avisarCambioSolicitudAutomatica,
+    ).not.toHaveBeenCalled();
+
+    const reintento = armar(conAbono());
+    reintento.mocks.flights.createCobro.mockImplementation(
+      (_v: string, d: Row) =>
+        Promise.resolve({
+          id: 'c-nuevo',
+          vuelo_id: _v,
+          fecha_cobro: (d.fecha_cobro as Date).toISOString(),
+          ...d,
+          idempotente: true,
+        }),
+    );
+    await reintento.svc.cobroDeVueloDesdeAbono('m-leticia', dto(), ADMIN);
+    await new Promise((res) => setImmediate(res));
+    expect(
+      reintento.mocks.flights.avisarCambioSolicitudAutomatica,
+    ).not.toHaveBeenCalled();
   });
 
   it('monto que no cuadra ⇒ 409 INGRESO_MONTO_DISTINTO ANTES de crear nada', async () => {

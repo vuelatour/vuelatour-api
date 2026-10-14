@@ -44,6 +44,12 @@ import {
  * Mundo de los libros (XB-TST, vuelo #501, K 20) + socios 51 / 49 (Aero
  * Charter `es_empresa`) + `ING_AVION`, el caso real ING-4 de N990GG
  * (reembolso de $46,550.80 MXN del 4-sep-2026) re-apuntado al XB-TST.
+ *
+ * CONVERSIÓN ÚNICA (14-oct-2026, API 0.0.77): el USD de cada ingreso sale de
+ * `usdDeIngresoAvion` (la MISMA del reparto y del tablero), NO del T.C. de
+ * las hojas de gastos: ING_AVION (MXN sin T.C. propio) con el oficial de SU
+ * día — el mock lo da en 18 ⇒ 46,550.80 ÷ 18 = 2,586.16 aunque el libro
+ * promedie 20 (antes ÷ 20 = 2,327.54).
  */
 
 const AV2 = 'av-2';
@@ -69,7 +75,7 @@ const ING_AVION: Fila = {
   vuelo: null,
 };
 
-/** La fila EXACTA de la hoja «Otros ingresos» del XB-TST. */
+/** La fila EXACTA de la hoja «Otros ingresos» del XB-TST (oficial 18). */
 const FILA_ING_AVION = {
   ingreso_id: 'i-av',
   clave: 'ING-14',
@@ -84,6 +90,20 @@ const FILA_ING_AVION = {
   neto_mxn: 46550.8,
   cuenta: 'EJE SCOTIA · Scotiabank',
   notas: 'reembolso del pago del serv de 50 hrs en toledo, fact 53',
+  // ADITIVOS del 0.0.77: la conversión ÚNICA por ingreso.
+  tc_usd: 18,
+  neto_usd: 2586.16,
+  tc_usd_origen: 'OFICIAL_DEL_DIA',
+  tc_usd_nota:
+    'T.C. oficial de referencia del día del ingreso (open.er-api, dato del 2026-09-04): el ingreso en pesos no traía tipo de cambio.',
+};
+
+/** Hoja vacía (0.0.77: con la bandera `usd_por_ingreso` SIEMPRE). */
+const HOJA_VACIA = {
+  filas: [],
+  total_mxn: 0,
+  usd: 0,
+  usd_por_ingreso: true,
 };
 
 /** Socios del XB-TST (51 / 49 con la empresa) y del XB-DOS (70 / 30). */
@@ -226,22 +246,34 @@ const libroDe = (g: General, matricula: string) =>
   g.aviones.find((a) => a.matricula === matricula);
 
 describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () => {
-  it('(a) libro individual con ING_AVION: hoja de 1 fila EXACTA, 2,327.54 USD que SUMAN en la cascada, en la cobrada y en los socios', async () => {
-    const sin = await libro(mundo());
-    const con = await libro(mundo([ING_AVION]));
+  it('(a) libro individual con ING_AVION: hoja de 1 fila EXACTA, 2,586.16 USD (oficial de SU día, no el promedio 20) que SUMAN en la cascada, en la cobrada y en los socios', async () => {
+    const sin = await libro(mundo(), AV, 18);
+    const con = await libro(mundo([ING_AVION]), AV, 18);
+    // El libro promedia 20 (K del #501) pero el ingreso NO usa ese T.C.
     expect(con.totales.tc_promedio).toBe(20);
     expect(con.otros_ingresos_avion).toEqual({
       filas: [FILA_ING_AVION],
       total_mxn: 46550.8,
-      usd: 2327.54,
+      usd: 2586.16,
+      usd_por_ingreso: true,
     });
-    expect(con.otros_ingresos_avion?.usd).toBe(r2(46550.8 / 20));
-    expect(con.balance.otros_ingresos_avion_usd).toBe(2327.54);
+    expect(con.otros_ingresos_avion?.usd).toBe(r2(46550.8 / 18));
+    expect(con.otros_ingresos_avion?.usd).not.toBe(r2(46550.8 / 20));
+    expect(Object.keys(con.otros_ingresos_avion!).at(-1)).toBe(
+      'usd_por_ingreso',
+    );
+    expect(Object.keys(con.otros_ingresos_avion!.filas[0]).slice(-4)).toEqual([
+      'tc_usd',
+      'neto_usd',
+      'tc_usd_origen',
+      'tc_usd_nota',
+    ]);
+    expect(con.balance.otros_ingresos_avion_usd).toBe(2586.16);
     expect(con.balance.utilidad_despues_usd).toBe(
-      r2(sin.balance.utilidad_despues_usd! + 2327.54),
+      r2(sin.balance.utilidad_despues_usd! + 2586.16),
     );
     expect(con.balance.utilidad_cobrada_usd).toBe(
-      r2(sin.balance.utilidad_cobrada_usd! + 2327.54),
+      r2(sin.balance.utilidad_cobrada_usd! + 2586.16),
     );
     expect(
       con.balance.socios.map((s) => [s.nombre, s.porcentaje, s.monto_usd]),
@@ -257,8 +289,11 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
   });
 
   it('(a′) con el ingreso, lo ÚNICO que cambia del libro es la hoja, su línea y lo que la cascada deriva', async () => {
-    const sin = await libro(mundo());
-    const con = await libro(mundo([ING_AVION]));
+    const sin = await libro(mundo(), AV, 18);
+    const con = await libro(mundo([ING_AVION]), AV, 18);
+    // Las dos hojas traen la bandera (no es una diferencia).
+    expect(sin.otros_ingresos_avion?.usd_por_ingreso).toBe(true);
+    expect(con.otros_ingresos_avion?.usd_por_ingreso).toBe(true);
     expect(diferencias(sin, con).sort()).toEqual(
       [
         'balance.otros_ingresos_avion_usd',
@@ -275,11 +310,7 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
 
   it('(b) sin ingresos con avión: hoja vacía y línea en 0; los ingresos de VuelaTour NO tocan el libro del avión', async () => {
     const vacio = await libro(mundo());
-    expect(vacio.otros_ingresos_avion).toEqual({
-      filas: [],
-      total_mxn: 0,
-      usd: 0,
-    });
+    expect(vacio.otros_ingresos_avion).toEqual(HOJA_VACIA);
     expect(vacio.balance.otros_ingresos_avion_usd).toBe(0);
     const conVuelatour = await libro(mundo(INGRESOS_LIBROS));
     expect(diferencias(vacio, conVuelatour)).toEqual([]);
@@ -297,11 +328,7 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
       },
     ];
     const p = await libro(mundo(ajenos));
-    expect(p.otros_ingresos_avion).toEqual({
-      filas: [],
-      total_mxn: 0,
-      usd: 0,
-    });
+    expect(p.otros_ingresos_avion).toEqual(HOJA_VACIA);
     const b = await libro(mundo(ajenos), AV2, 18);
     expect(b.otros_ingresos_avion?.filas.map((f) => f.clave)).toEqual([
       'ING-20',
@@ -321,21 +348,13 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
       undefined,
       partidos,
     );
-    expect(ext.otros_ingresos_avion).toEqual({
-      filas: [],
-      total_mxn: 0,
-      usd: 0,
-    });
+    expect(ext.otros_ingresos_avion).toEqual(HOJA_VACIA);
     const ext2 = await priv.buildPayload(null, DESDE, HASTA);
-    expect(ext2.otros_ingresos_avion).toEqual({
-      filas: [],
-      total_mxn: 0,
-      usd: 0,
-    });
+    expect(ext2.otros_ingresos_avion).toEqual(HOJA_VACIA);
     expect(s.tablas).not.toContain('ingreso');
   });
 
-  it('(e) avión SIN vuelos ni gastos con un ingreso MXN y oficial del cierre 18: usd = neto ÷ 18, utilidad numérica, pendiente nuevo y bloque VUELATOUR con número', async () => {
+  it('(e) avión SIN vuelos ni gastos con un ingreso MXN: SIN respaldo del cierre (0.0.77), el ingreso vale neto ÷ el oficial de SU día (18), utilidad numérica, sin pendiente del respaldo y bloque VUELATOUR con número', async () => {
     const ingDos: Fila = {
       ...ING_AVION,
       id: 'i-dos',
@@ -345,13 +364,19 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
     };
     const p = await libro(mundo([ingDos]), AV2, 18);
     expect(p.vuelos).toHaveLength(0);
-    expect(p.totales.tc_promedio).toBe(18);
+    // Sin gastos no hay respaldo del cierre: el ingreso ya no lo necesita.
+    expect(p.totales.tc_promedio).toBeNull();
     expect(p.otros_ingresos_avion?.usd).toBe(r2(46550.8 / 18));
+    expect(p.otros_ingresos_avion?.filas[0]).toMatchObject({
+      tc_usd: 18,
+      neto_usd: 2586.16,
+      tc_usd_origen: 'OFICIAL_DEL_DIA',
+    });
     expect(p.balance.otros_ingresos_avion_usd).toBe(2586.16);
     expect(p.balance.utilidad_despues_usd).toBe(2586.16);
     expect(p.balance.utilidad_cobrada_usd).toBe(2586.16);
-    expect(p.pendientes).toContain(
-      'Avión XB-DOS: sin vuelos en el periodo — sus hojas de gastos e ingresos se convirtieron a USD con el T.C. oficial de referencia del 2026-09-30 (18.0000, open.er-api); la utilidad del periodo es el resultado de esos movimientos',
+    expect(p.pendientes.join('\n')).not.toContain(
+      'se convirtieron a USD con el T.C. oficial de referencia',
     );
     expect(p.pendientes.join('\n')).not.toContain('la pérdida de esos gastos');
     // En el general: el avión con solo el ingreso entra y la empresa (30 %)
@@ -379,11 +404,38 @@ describe('Balance por avión — hoja «Otros ingresos» (invariante 67)', () =>
       'Avión XB-DOS: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del 2026-09-30 (18.0000, open.er-api); la utilidad del periodo es la pérdida de esos gastos',
     );
   });
+
+  it('(e″) avión sin vuelos CON gastos E ingreso: las hojas de gastos con el oficial del cierre, el ingreso con el de SU día y el pendiente nuevo (literal)', async () => {
+    const gastoDos: Fila = {
+      ...mundoLibros().gasto[1],
+      id: 'g-gas-dos',
+      aeronave_id: AV2,
+    };
+    const ingDos: Fila = {
+      ...ING_AVION,
+      id: 'i-dos',
+      folio: 30,
+      aeronave_id: AV2,
+      aeronave: { matricula: 'XB-DOS', color_calendario: '#10B981' },
+    };
+    const m = mundo([ingDos]);
+    const p = await libro({ ...m, gasto: [...m.gasto, gastoDos] }, AV2, 18);
+    expect(p.vuelos).toHaveLength(0);
+    expect(p.totales.tc_promedio).toBe(18);
+    expect(p.otros_ingresos_avion?.usd).toBe(2586.16);
+    expect(p.pendientes).toContain(
+      'Avión XB-DOS: sin vuelos en el periodo — sus hojas de gastos se convirtieron a USD con el T.C. oficial de referencia del 2026-09-30 (18.0000, open.er-api) y cada uno de sus otros ingresos con su T.C. propio o el oficial de su día; la utilidad del periodo es el resultado de esos movimientos',
+    );
+    expect(p.pendientes.join('\n')).not.toContain('la pérdida de esos gastos');
+  });
 });
 
 describe('Balance GENERAL — otros ingresos asignados a aviones (invariante 67)', () => {
   it('(f) UNA lectura de `ingreso`; el ingreso con avión sale de las sueltas y entra a su libro, al consolidado y a la bandera', async () => {
-    const { g, tablas } = await general(mundo([...INGRESOS_LIBROS, ING_AVION]));
+    const { g, tablas } = await general(
+      mundo([...INGRESOS_LIBROS, ING_AVION]),
+      18,
+    );
     expect(tablas.filter((t) => t === 'ingreso')).toHaveLength(1);
     // Sueltas: ING-12 e ING-13 (VuelaTour) como siempre; ING-14 (avión) NO.
     const sueltasIng = om(g)
@@ -395,7 +447,7 @@ describe('Balance GENERAL — otros ingresos asignados a aviones (invariante 67)
     // Libro del avión dentro del general.
     const tst = libroDe(g, 'XB-TST')!;
     expect(tst.otros_ingresos_avion?.filas).toEqual([FILA_ING_AVION]);
-    expect(tst.balance.otros_ingresos_avion_usd).toBe(2327.54);
+    expect(tst.balance.otros_ingresos_avion_usd).toBe(2586.16);
     // Hoja consolidada: «MATRÍCULA · », color y matrícula; ÚLTIMA llave.
     expect(g.consolidado.otros_ingresos_avion).toEqual({
       filas: [
@@ -408,11 +460,12 @@ describe('Balance GENERAL — otros ingresos asignados a aviones (invariante 67)
         },
       ],
       total_mxn: 46550.8,
-      usd: 2327.54,
+      usd: 2586.16,
+      usd_por_ingreso: true,
     });
     expect(Object.keys(g.consolidado).at(-1)).toBe('otros_ingresos_avion');
     // El bloque de «balance» del general es el MISMO que el libro individual.
-    const ind = await libro(mundo([...INGRESOS_LIBROS, ING_AVION]));
+    const ind = await libro(mundo([...INGRESOS_LIBROS, ING_AVION]), AV, 18);
     expect(tst.balance).toEqual(ind.balance);
   });
 
@@ -421,23 +474,23 @@ describe('Balance GENERAL — otros ingresos asignados a aviones (invariante 67)
     expect('otros_ingresos_avion' in g.consolidado).toBe(false);
     expect(om(g).otros_ingresos_por_avion).toBe(true);
     for (const a of g.aviones) {
-      expect(a.otros_ingresos_avion).toEqual({
-        filas: [],
-        total_mxn: 0,
-        usd: 0,
-      });
+      expect(a.otros_ingresos_avion).toEqual(HOJA_VACIA);
     }
   });
 
   it('(f″) bloque VUELATOUR: INGRESOS PROPIOS sin el ingreso del avión; la participación de la empresa sube SU % de lo que sube el avión', async () => {
-    const { g: sin } = await general(mundo(INGRESOS_LIBROS));
-    const { g: con } = await general(mundo([...INGRESOS_LIBROS, ING_AVION]));
+    const { g: sin } = await general(mundo(INGRESOS_LIBROS), 18);
+    const { g: con } = await general(
+      mundo([...INGRESOS_LIBROS, ING_AVION]),
+      18,
+    );
     // Antes del 0.0.75 el mismo ingreso era una suelta de VuelaTour:
     const { g: comoVuelatour } = await general(
       mundo([
         ...INGRESOS_LIBROS,
         { ...ING_AVION, aeronave_id: null, aeronave: null },
       ]),
+      18,
     );
     expect(con.empresa.ingresos_propios_usd).toBe(
       sin.empresa.ingresos_propios_usd,
@@ -447,13 +500,13 @@ describe('Balance GENERAL — otros ingresos asignados a aviones (invariante 67)
     );
     const cobrada = (g: General) =>
       libroDe(g, 'XB-TST')!.balance.utilidad_cobrada_usd!;
-    expect(r2(cobrada(con) - cobrada(sin))).toBe(2327.54);
+    expect(r2(cobrada(con) - cobrada(sin))).toBe(2586.16);
     const empresa = (g: General) =>
       g.empresa.participaciones.find((x) => x.matricula === 'XB-TST')!
         .monto_usd!;
     expect(empresa(con)).toBe(r2(0.49 * cobrada(con)));
     expect(
-      Math.abs(r2(empresa(con) - empresa(sin)) - 0.49 * 2327.54),
+      Math.abs(r2(empresa(con) - empresa(sin)) - 0.49 * 2586.16),
     ).toBeLessThanOrEqual(0.01);
   });
 

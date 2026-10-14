@@ -1195,6 +1195,7 @@ describe('FacturasEmitidasService — lista, por facturar y lotes', () => {
       por_facturar: 1,
       paga_contra_factura: 0,
       marcados_sin_registro: 1,
+      ya_no_aplican: 0,
     });
   });
 
@@ -1274,6 +1275,7 @@ describe('FacturasEmitidasService — por facturar: caso #375/#376 (13-oct-2026)
       por_facturar: 1,
       paga_contra_factura: 0,
       marcados_sin_registro: 0,
+      ya_no_aplican: 0,
     });
   });
 
@@ -1287,11 +1289,17 @@ describe('FacturasEmitidasService — por facturar: caso #375/#376 (13-oct-2026)
       }),
     );
     const r = await svc.porFacturar();
-    expect(r).toEqual({ data: [], count: 0, marcados_sin_registro: [] });
+    expect(r).toEqual({
+      data: [],
+      count: 0,
+      marcados_sin_registro: [],
+      ya_no_aplican: [],
+    });
     expect(await svc.conteoPorFacturar()).toEqual({
       por_facturar: 0,
       paga_contra_factura: 0,
       marcados_sin_registro: 0,
+      ya_no_aplican: 0,
     });
   });
 
@@ -1319,6 +1327,7 @@ describe('FacturasEmitidasService — por facturar: caso #375/#376 (13-oct-2026)
       por_facturar: 1,
       paga_contra_factura: 0,
       marcados_sin_registro: 1,
+      ya_no_aplican: 0,
     });
   });
 
@@ -1570,5 +1579,141 @@ describe('FacturasEmitidasService — selector de vuelos y Excel', () => {
     expect(payload.subtitulo).toContain('Solo vigentes');
     expect(payload.filas).toHaveLength(1);
     expect(payload.filas[0][0]).toBe('A-120');
+  });
+});
+
+/**
+ * ANTICIPO DEVUELTO — solicitud AUTOMÁTICA que YA NO APLICA (14-oct-2026,
+ * API 0.0.77, invariante 60): sale de `data`/`count`/`por_facturar`, viaja en
+ * el aditivo `ya_no_aplican` (lista y conteo) y no va primero ni lleva el
+ * chip en el selector de «Registrar factura» (F8). Si la lectura de los
+ * cobros falla ⇒ POR_FACTURAR como antes (warn).
+ */
+describe('FacturasEmitidasService — solicitud automática que ya no aplica (14-oct-2026, API 0.0.77)', () => {
+  const V3 = 'bbbbbbbb-0000-4000-8000-000000000003';
+  const NOTA_AUTO = 'Solicitada automáticamente: cobro en HSBC Pesos';
+  const cobro = (
+    id: string,
+    vuelo_id: string,
+    monto: number,
+    extra: Fila = {},
+  ): Fila => ({
+    id,
+    vuelo_id,
+    monto,
+    moneda: 'MXN',
+    tc_usd_mxn: 17,
+    cuenta_destino: 'HSBC Pesos',
+    metodo_cobro: 'TRANSFERENCIA',
+    ...extra,
+  });
+  const mundoAuto = () =>
+    base({
+      vuelo: [
+        // Automática con el anticipo DEVUELTO en efectivo ⇒ ya no aplica.
+        vuelo(V1, 341, {
+          factura_solicitada_at: '2026-09-20T09:00:00Z',
+          factura_solicitada_por: ITZI,
+          factura_solicitud_nota: NOTA_AUTO,
+        }),
+        // Automática con el dinero en HSBC ⇒ sigue por facturar.
+        vuelo(V2, 342, {
+          fecha_vuelo: '2026-09-28T14:00:00+00:00',
+          factura_solicitada_at: '2026-09-24T09:00:00Z',
+          factura_solicitada_por: ITZI,
+          factura_solicitud_nota: NOTA_AUTO,
+        }),
+        // MANUAL con el dinero devuelto ⇒ sigue por facturar (la decidió una persona).
+        vuelo(V3, 343, {
+          factura_solicitada_at: '2026-09-25T09:00:00Z',
+          factura_solicitada_por: ITZI,
+          factura_solicitud_nota: 'La pidió el cliente',
+        }),
+      ],
+      cobro_vuelo: [
+        cobro('c-1', V1, 30000),
+        cobro('r-1', V1, -30000, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+        cobro('c-2', V2, 30000),
+        cobro('c-3', V3, 30000),
+        cobro('r-3', V3, -30000, {
+          cuenta_destino: null,
+          metodo_cobro: 'EFECTIVO',
+        }),
+      ],
+    });
+
+  it('lista: la automática que ya no aplica va en `ya_no_aplican` (misma forma) y fuera de `data`/`count`; la manual sigue', async () => {
+    const { svc } = armar(mundoAuto());
+    const r = await svc.porFacturar();
+    expect(r.data.map((x) => x.vuelo.folio)).toEqual([342, 343]);
+    expect(r.count).toBe(2);
+    expect(r.marcados_sin_registro).toEqual([]);
+    expect(r.ya_no_aplican.map((x) => x.vuelo.folio)).toEqual([341]);
+    expect(Object.keys(r.ya_no_aplican[0])).toEqual(Object.keys(r.data[0]));
+    expect(r.ya_no_aplican[0].solicitud).toMatchObject({ nota: NOTA_AUTO });
+    expect(Object.keys(r)).toEqual([
+      'data',
+      'count',
+      'marcados_sin_registro',
+      'ya_no_aplican',
+    ]);
+  });
+
+  it('conteo: { por_facturar, paga_contra_factura, marcados_sin_registro, ya_no_aplican } (el badge sigue leyendo solo por_facturar)', async () => {
+    const { svc } = armar(mundoAuto());
+    expect(await svc.conteoPorFacturar()).toEqual({
+      por_facturar: 2,
+      paga_contra_factura: 0,
+      marcados_sin_registro: 0,
+      ya_no_aplican: 1,
+    });
+  });
+
+  it('si la lectura de los cobros falla ⇒ cuentan como POR_FACTURAR (como antes) y queda un warn', async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    try {
+      const { svc, db } = armar(mundoAuto());
+      const servicio = db.supabase.service as unknown as {
+        from: (t: string) => unknown;
+      };
+      const original = servicio.from;
+      servicio.from = (t: string) => {
+        if (t === 'cobro_vuelo') throw new Error('timeout');
+        return original(t);
+      };
+      expect(await svc.conteoPorFacturar()).toEqual({
+        por_facturar: 3,
+        paga_contra_factura: 0,
+        marcados_sin_registro: 0,
+        ya_no_aplican: 0,
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining('cuentan como «Por facturar», como antes'),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('vuelosCandidatos (F8): sin búsqueda la automática que ya no aplica NO va primero y su `solicitud` es false', async () => {
+    const { svc } = armar(mundoAuto());
+    const vacio = await svc.vuelosCandidatos({});
+    expect(vacio.slice(0, 2).map((v) => [v.folio, v.solicitud])).toEqual([
+      [342, true],
+      [343, true],
+    ]);
+    const v341 = vacio.find((v) => v.folio === 341)!;
+    expect(v341.solicitud).toBe(false);
+    // Por ids también: el chip ámbar sale solo de lo que cuenta.
+    const ids = await svc.vuelosCandidatos({ ids: `${V1},${V2}` });
+    expect(ids.map((v) => [v.folio, v.solicitud])).toEqual([
+      [341, false],
+      [342, true],
+    ]);
   });
 });
