@@ -370,6 +370,81 @@ describe('FacturaSolicitudService.retirar y lectores', () => {
   });
 });
 
+describe('FacturaSolicitudService — estatus manual «Facturado» (13-oct-2026, caso #376, invariante 65)', () => {
+  it('pedida, sin factura registrada y marcada «Facturado» a mano ⇒ bloque marcado_sin_registro, fuera de «por facturar»; el select del vuelo lee factura_estatus', async () => {
+    const { svc, db } = armar({
+      vuelo: [
+        vuelo(V1, 376, {
+          factura_solicitada_at: '2026-10-05T20:07:46Z',
+          factura_solicitada_por: ITZI,
+          factura_estatus: 'FACTURADO',
+        }),
+      ],
+    });
+    // Captura los SELECT de filas de vuelo (las que traen `facturado`).
+    const selects: string[] = [];
+    const servicio = db.supabase.service as unknown as {
+      from: (t: string) => Record<string, unknown>;
+    };
+    const fromOriginal = servicio.from;
+    servicio.from = (t: string) => {
+      const q = fromOriginal(t);
+      const sel = q.select as (s: string) => unknown;
+      q.select = (c: string) => {
+        if (t === 'vuelo' && c.includes('facturado')) selects.push(c);
+        return sel(c);
+      };
+      return q;
+    };
+    const b = await svc.bloqueDeVuelo(V1);
+    expect(b).toMatchObject({
+      por_facturar: false,
+      marcado_sin_registro: true,
+      facturas: [],
+      canceladas: 0,
+    });
+    expect(b?.solicitud?.solicitada_por).toEqual({ id: ITZI, nombre: 'Itzi' });
+    expect((await svc.resumenesDeVuelos([V1])).get(V1)).toEqual({
+      solicitada: true,
+      por_facturar: false,
+      paga_contra_factura: false,
+      facturas: 0,
+    });
+    expect(selects.length).toBeGreaterThan(0);
+    for (const c of selects) expect(c).toContain('factura_estatus');
+  });
+
+  it('control: el MISMO vuelo con SIN_FACTURA sigue por facturar y sin la marca', async () => {
+    const { svc } = armar({
+      vuelo: [
+        vuelo(V1, 376, {
+          factura_solicitada_at: '2026-10-05T20:07:46Z',
+          factura_solicitada_por: ITZI,
+          factura_estatus: 'SIN_FACTURA',
+        }),
+      ],
+    });
+    expect(await svc.bloqueDeVuelo(V1)).toMatchObject({
+      por_facturar: true,
+      marcado_sin_registro: false,
+    });
+  });
+
+  it('retirar: el bloque devuelto (sin solicitud) trae marcado_sin_registro: false', async () => {
+    const { svc } = armar({
+      vuelo: [
+        vuelo(V1, 341, { factura_solicitada_at: '2026-09-20T10:00:00Z' }),
+      ],
+    });
+    const r = await svc.retirar(V1, actor);
+    expect(r.factura_servicio).toMatchObject({
+      solicitud: null,
+      por_facturar: false,
+      marcado_sin_registro: false,
+    });
+  });
+});
+
 describe('FacturaSolicitudService.solicitarPorCobro (13-oct-2026, invariante 60)', () => {
   const HSBC = {
     monto: 8050.4,

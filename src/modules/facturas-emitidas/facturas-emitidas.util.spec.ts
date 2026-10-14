@@ -476,7 +476,7 @@ describe('avisoTotalDistintoVuelo (typo de monto)', () => {
     const a = avisoTotalDistintoVuelo(base);
     expect(a?.code).toBe('TOTAL_DISTINTO_VUELO');
     expect(a?.mensaje).toBe(
-      'La factura A-123 suma $7,350.69 USD y el vuelo #341 cotizó $8,050.40 USD. Revisa el total (si es un anticipo, márcala como parcial).',
+      'La factura A-123 suma $7,350.69 USD y el vuelo #341 cotizó $8,050.40 USD. Revisa el total (si es un anticipo, márcala como parcial; si cubre más vuelos del cliente, agrégalos en «Vuelos»).',
     );
   });
   it('no avisa: parcial, 2 vuelos, grupo, diferencia ≤ 1 o cancelada', () => {

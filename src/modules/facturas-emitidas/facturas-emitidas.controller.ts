@@ -72,7 +72,7 @@ export class FacturasEmitidasController {
   @Get('por-facturar/conteo')
   @ApiOperation({
     summary:
-      'Conteo barato para el badge del menú: { por_facturar, paga_contra_factura }.',
+      'Conteo barato para el badge del menú: { por_facturar, paga_contra_factura, marcados_sin_registro }. El badge solo usa por_facturar.',
   })
   conteoPorFacturar() {
     return this.svc.conteoPorFacturar();
@@ -81,7 +81,7 @@ export class FacturasEmitidasController {
   @Get('por-facturar')
   @ApiOperation({
     summary:
-      'Vuelos con «Necesito factura» sin factura VIGENTE registrada (ni CFDI del PAC), primero los que pagan contra factura y luego la solicitud más vieja. { data: PorFacturarItem[], count }.',
+      'Vuelos con «Necesito factura» sin factura VIGENTE registrada, sin CFDI del PAC y sin estatus manual «Facturado» (esos van aparte en marcados_sin_registro), primero los que pagan contra factura y luego la solicitud más vieja. { data: PorFacturarItem[], count, marcados_sin_registro: PorFacturarItem[] }; cada item trae facturas_del_cliente (facturas VIGENTES del mismo cliente no ligadas a ese vuelo, para ligarlas si lo cubren).',
   })
   porFacturar() {
     return this.svc.porFacturar();

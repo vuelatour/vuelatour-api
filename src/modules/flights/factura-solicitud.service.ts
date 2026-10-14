@@ -40,8 +40,13 @@ import type {
 /** Ids por consulta `.in(...)` (la URL de PostgREST no crece sin tope). */
 const LOTE_IDS = 200;
 
-/** Columnas del vuelo que lee la solicitud (aviso incluido). */
-const COLS_VUELO_SOLICITUD = `id, folio, estado, facturado, cliente_id, fecha_vuelo, monto_total_usd, grupo_id, ${COLS_SOLICITUD_FACTURA}`;
+/**
+ * Columnas del vuelo que lee la solicitud (aviso incluido). `factura_estatus`
+ * (13-oct-2026, invariante 65) alimenta `estadoSolicitud`: un vuelo marcado
+ * «Facturado» a mano ya no cuenta como por facturar. La columna existe desde
+ * 20260923000001 (aplicada) y el módulo ya exige 20260924000003.
+ */
+const COLS_VUELO_SOLICITUD = `id, folio, estado, facturado, factura_estatus, cliente_id, fecha_vuelo, monto_total_usd, grupo_id, ${COLS_SOLICITUD_FACTURA}`;
 
 type VueloSolicitud = VueloSolicitudRow & {
   id: string;
@@ -170,7 +175,7 @@ export class FacturaSolicitudService {
     return out;
   }
 
-  /** Columnas de solicitud (+ estado/facturado) de varios vuelos (lotes de 200). */
+  /** Columnas de solicitud (+ estado/facturado/estatus manual) de varios vuelos (lotes de 200). */
   private async filasSolicitud(
     ids: string[],
   ): Promise<Map<string, VueloSolicitudRow & { id: string }>> {
@@ -179,7 +184,9 @@ export class FacturaSolicitudService {
     for (const lote of lotes(limpios)) {
       const { data, error } = await this.supabase.service
         .from('vuelo')
-        .select(`id, estado, facturado, ${COLS_SOLICITUD_FACTURA}`)
+        .select(
+          `id, estado, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}`,
+        )
         .in('id', lote);
       if (error) throw new Error(error.message);
       for (const v of (data ?? []) as unknown as Array<
@@ -413,6 +420,7 @@ export class FacturaSolicitudService {
         por_facturar: false,
         facturas: [],
         canceladas: 0,
+        marcado_sin_registro: false,
       },
       nueva: nuevos.length > 0,
       vuelos: nuevos.map((n) => n.folio).sort((a, b) => a - b),
@@ -668,6 +676,7 @@ export class FacturaSolicitudService {
         por_facturar: false,
         facturas: [],
         canceladas: 0,
+        marcado_sin_registro: false,
       },
     };
   }

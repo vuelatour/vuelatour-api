@@ -2220,9 +2220,12 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       `factura_solicitud_nota`, `factura_paga_contra_factura`): `POST|DELETE
       v1/flights/:id/solicitud-factura` (`FacturaSolicitudService`,
       idempotente; `todo_el_grupo` = UNA notificación). **«Por facturar» es
-      DERIVADO, nunca se guarda** (`factura-solicitud.util#esPorFacturar`):
-      solicitada AND no CANCELADO AND `facturado` (PAC) ≠ true AND 0 emitidas
-      VIGENTES ligadas. Aviso `factura_solicitada` a
+      DERIVADO, nunca se guarda** (`factura-solicitud.util#estadoSolicitud`,
+      con `esPorFacturar` encima): solicitada AND no CANCELADO AND
+      `facturado` (PAC) ≠ true AND 0 emitidas VIGENTES ligadas AND —desde el
+      13-oct-2026, invariante 65— `factura_estatus` ≠ FACTURADO; los
+      FACTURADO a mano sin registro van en la NOTA `marcados_sin_registro`.
+      Aviso `factura_solicitada` a
       `ConfiguracionService.destinatariosFacturacion` (config
       `responsables_facturacion` en `valor_json` → rol FACTURACION → ADMIN;
       el nivel se elige ANTES de excluir a quien pide) y `factura_emitida` a
@@ -6538,6 +6541,81 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       justificación ni notas) y `profit-sharing.service.pre-cierre-vuelos-
       sin-factura.spec` (renglón de bancarios sin conciliar).
 
+65. **BANDEJA «POR FACTURAR»: CASO #376 Y ESTATUS MANUAL «FACTURADO»
+    (13-oct-2026, API 0.0.75, SIN migración).** Reporte de Diego (13-oct,
+    12:36): el #376 seguía en «Por facturar» aunque «Mary dice que ya lo
+    hizo». **Diagnóstico (código + SELECT + edge_logs): la regla NO tenía
+    defecto.** Itzi pidió factura de #375 y #376 (mismo cliente, January
+    Davila, $904.51 USD c/u) el 5-oct; el 8-oct 14:46 Mary registró A-0440
+    ($31,435.91 MXN ≈ los DOS vuelos) y la ligó SOLO a #375 (el API avisó
+    TOTAL_DISTINTO_VUELO, que sugería «parcial», no «¿cubre otro vuelo?»);
+    #376 tenía solicitud viva y CERO ligas ⇒ por facturar, correcto. El
+    13-oct 13:21 Mary agregó #376 a A-0440 y el CAS lo subió a FACTURADO (el
+    «FACTURADO manual» era el efecto de ligar). Sin arreglo de datos.
+    - **Regla nueva (fuente única `estadoSolicitud(v, vigentesLigadas)`)**:
+      'POR_FACTURAR' = lo de siempre ∧ `factura_estatus` ≠ 'FACTURADO';
+      'MARCADO_SIN_REGISTRO' = lo mismo pero marcado «Facturado» a mano;
+      'NINGUNO' en cualquier otro caso. `esPorFacturar` (misma firma) ≡
+      POR_FACTURAR y `esMarcadoSinRegistro` ≡ MARCADO_SIN_REGISTRO. Sin la
+      llave `factura_estatus` la función se comporta como antes (todo
+      lector que la alimenta la suma al select: `COLS_VUELO_SOLICITUD`,
+      `filasSolicitud`, `conteoPorFacturar`, `porFacturar`,
+      `vuelosCandidatos`). ELABORADA_ENVIADA y SIN_FACTURA siguen por
+      facturar (la factura no está registrada). La solicitud AUTOMÁTICA por
+      cobro (invariante 60) ya omitía los FACTURADO: bandeja y solicitud
+      ahora dicen lo mismo.
+    - **Contrato (TODO aditivo; el panel trata cada campo como opcional)**:
+      `GET /v1/facturas-emitidas/por-facturar` ⇒ `ListaPorFacturar { data,
+      count, marcados_sin_registro }` (`data` solo POR_FACTURAR con el orden
+      de siempre; `marcados_sin_registro` con la MISMA forma y orden, cada
+      item con `vuelo.estatus_manual: 'FACTURADO'`). `GET …/por-facturar/
+      conteo` ⇒ `ConteoPorFacturar { por_facturar, paga_contra_factura,
+      marcados_sin_registro }` (el badge del menú lee SOLO `por_facturar`;
+      `ResumenFacturas.por_facturar` y la fila del Excel «Por facturar
+      (pedidas sin factura)» = el mismo conteo). `factura_servicio`
+      (snapshot, POST/DELETE solicitud-factura) ⇒ + `marcado_sin_registro:
+      boolean`; `factura_servicio_resumen` conserva su forma (su
+      `por_facturar` ya aplica la regla: el chip ámbar desaparece para los
+      FACTURADO a mano).
+    - **Parte B — prevención del caso (`PorFacturarItem.facturas_del_cliente`,
+      ADITIVO al final del item)**: facturas VIGENTES no borradas del MISMO
+      cliente (`vuelo.cliente_id`) que NO están ligadas a ese vuelo y con
+      `fecha_emision` ≥ día Cancún de (solicitada_at − 30 días); máx. 3,
+      `fecha_emision` desc y `folio_num` desc; `{ id, etiqueta ('A-0440'),
+      fecha_emision, total (number), moneda, vuelo_ids, vuelo_folios }`
+      (listas vacías = factura registrada SIN vuelo). Se calcula para `data`
+      y para `marcados_sin_registro`; lotes de 200 y anti-cap (`leerTodo`);
+      si falla ⇒ `[]` + warn (la bandeja nunca se cae). El panel ofrece
+      «Ligar a A-0440» CON confirmación y usa el `PATCH
+      /v1/facturas-emitidas/:id` de siempre con `vuelo_ids` = la UNIÓN
+      releída justo antes (el PATCH REEMPLAZA el conjunto). Además
+      TOTAL_DISTINTO_VUELO dice ahora «…Revisa el total (si es un anticipo,
+      márcala como parcial; si cubre más vuelos del cliente, agrégalos en
+      «Vuelos»).».
+    - **Consecuencia aceptada**: al CANCELAR/ELIMINAR una factura, un vuelo
+      que quedó FACTURADO (por el CAS de ligar o a mano) ya NO regresa al
+      badge ni a «Por facturar»: cae en «Marcados «Facturado» sin factura
+      registrada» (la misma pantalla) y cancelar ya avisa
+      VUELO_SIGUE_FACTURADO (invariante 27). Si el cliente prefiere que
+      vuelvan al badge, basta sumar `marcados_sin_registro` en el conteo del
+      menú (decisión del cliente). El estatus manual NUNCA se baja solo.
+    - **Skew**: API nuevo + panel previo ⇒ los FACTURADO a mano salen de la
+      bandeja sin nota hasta desplegar el panel (en prod hoy son 0); panel
+      nuevo + API previo ⇒ sin tarjeta 2, chip ámbar de siempre, sin «Ligar».
+      Orden API → panel (el inverso también es seguro). pyservices y Flutter
+      no consumen estos campos.
+    - Specs: `factura-solicitud.util.spec` (los tres estados, ELABORADA /
+      SIN_FACTURA / sin llave, FACTURADO + cancelado/PAC, bloque y resumen),
+      `factura-solicitud.service.spec` (bloque y resumen con FACTURADO, el
+      select del vuelo lee `factura_estatus`), `facturas-emitidas.service.
+      spec` (ajuste del #342 a `marcados_sin_registro` con conteo {1, 0, 1};
+      regresión #375/#376: ligada a uno ⇒ el otro queda y SUGIERE A-0440;
+      ligada a los dos ⇒ vacío; cancelada ⇒ el FACTURADO a la nota y el
+      otro a la bandeja; borrada / otro cliente / antes de la ventana no se
+      sugieren y el día 30 sí; máx. 3 en orden; lectura caída ⇒ `[]` + warn;
+      250 vuelos ⇒ `.in` ≤ 200) y `facturas-emitidas.util.spec` (texto
+      nuevo de TOTAL_DISTINTO_VUELO).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7269,6 +7347,15 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **13-oct-2026 — SIN migración** para la bandeja «Por facturar» (caso
+  #376, invariante 65): `vuelo.factura_estatus` existe desde
+  `20260923000001` y el puente `factura_emitida_vuelo` desde
+  `20260924000003` (las dos aplicadas). Sin arreglo de datos: la liga
+  (A-0440, #376) ya existe (Mary, 13-oct 13:21). Orden API → panel.
+  Verificación de solo lectura antes/después del deploy: vuelos con
+  solicitud viva, no cancelados y sin CFDI ⇒ hoy 6 (#324, #337, #343,
+  #345, #375, #376), todos con 1 VIGENTE ligada ⇒ «Por facturar (0)» y
+  «Marcados…» vacío.
 - **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000009_medio_pago_domiciliado.sql`**
   (invariante 64; era la 000004 del diseño, renumerada: la 000004 es el
   CHECK de la comisión del avión). SOLO `alter type public.medio_pago add

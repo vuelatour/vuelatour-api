@@ -316,6 +316,13 @@ export interface FacturaServicioBloque {
   facturas: FacturaEmitidaMini[];
   /** CANCELADAS ligadas (no borradas) */
   canceladas: number;
+  /**
+   * ADITIVO (13-oct-2026, invariante 65): pedida, sin factura VIGENTE ligada
+   * y marcada «Facturado» a mano en el vuelo. Ya NO cuenta como
+   * `por_facturar` (sale de la bandeja y del badge); el panel la pinta como
+   * chip gris «… marcada «Facturado» en el vuelo, sin factura registrada».
+   */
+  marcado_sin_registro: boolean;
 }
 
 /** Campo ADITIVO por fila de GET /flights y GET /quotes. */
@@ -371,6 +378,52 @@ export interface PorFacturarItem {
   cobro: CobroResumen;
   solicitud: SolicitudFactura;
   facturas_canceladas: number;
+  /**
+   * ADITIVO (13-oct-2026, invariante 65, prevención del caso #376): facturas
+   * VIGENTES (no borradas) del MISMO cliente que NO están ligadas a este
+   * vuelo, emitidas desde el día Cancún de (solicitud − 30 días); máximo 3,
+   * las más recientes primero (fecha_emision desc, folio_num desc). El panel
+   * ofrece «Ligar a A-0440» (con confirmación). `[]` si no hay o si la
+   * lectura falla (nunca tumba la bandeja).
+   */
+  facturas_del_cliente: FacturaDelClienteSugerida[];
+}
+
+/** Factura del cliente que PODRÍA cubrir también este vuelo (sugerencia). */
+export interface FacturaDelClienteSugerida {
+  id: string;
+  /** «A-0440» (serie-folio). */
+  etiqueta: string;
+  /** YYYY-MM-DD */
+  fecha_emision: string;
+  total: number;
+  moneda: MonedaFactura;
+  /** Vuelos a los que YA está ligada (el PATCH de la liga manda la unión). */
+  vuelo_ids: string[];
+  vuelo_folios: number[];
+}
+
+/** `GET /v1/facturas-emitidas/por-facturar` */
+export interface ListaPorFacturar {
+  /** Solo 'POR_FACTURAR': paga contra factura primero, luego la solicitud más vieja. */
+  data: PorFacturarItem[];
+  /** = data.length */
+  count: number;
+  /**
+   * ADITIVO (13-oct-2026, invariante 65): pedidos, sin factura registrada y
+   * marcados «Facturado» a mano (`estadoSolicitud` 'MARCADO_SIN_REGISTRO'),
+   * con la MISMA forma y orden que `data`.
+   */
+  marcados_sin_registro: PorFacturarItem[];
+}
+
+/** `GET /v1/facturas-emitidas/por-facturar/conteo` (badge del menú). */
+export interface ConteoPorFacturar {
+  /** El badge del menú usa SOLO este número. */
+  por_facturar: number;
+  paga_contra_factura: number;
+  /** ADITIVO (13-oct-2026, invariante 65). */
+  marcados_sin_registro: number;
 }
 
 export interface VueloCandidatoFactura {

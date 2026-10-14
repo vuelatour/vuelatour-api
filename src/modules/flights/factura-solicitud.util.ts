@@ -7,11 +7,16 @@
  * primero facturado para que el cliente pague … que le salga como el
  * pendiente de factura. Porque no en todos los vuelos hacemos facturas».
  *
- * «POR FACTURAR» ES DERIVADO — nunca se guarda (`esPorFacturar`, definición
+ * «POR FACTURAR» ES DERIVADO — nunca se guarda (`estadoSolicitud`, definición
  * ÚNICA del contrato §3.8): solicitada AND vuelo no CANCELADO AND sin CFDI
- * del PAC (`facturado`) AND sin factura emitida VIGENTE ligada. El estatus
- * MANUAL «Facturado» NO saca al vuelo de la lista (la lista pide la factura
- * REGISTRADA con su PDF; el panel lo señala con `estatus_manual`).
+ * del PAC (`facturado`) AND sin factura emitida VIGENTE ligada AND —desde
+ * el 13-oct-2026 (caso #376, invariante 65)— sin el estatus MANUAL
+ * «Facturado» (`factura_estatus`). Un vuelo pedido, sin factura registrada y
+ * marcado «Facturado» a mano YA NO cuenta como por facturar (ni en la
+ * bandeja ni en el badge): es `MARCADO_SIN_REGISTRO` y viaja aparte, en la
+ * NOTA aditiva `marcados_sin_registro`, para que la oficina registre su
+ * factura. ELABORADA_ENVIADA sigue por facturar (la factura no está
+ * registrada y el cliente puede estar esperándola).
  */
 import { fechaCortaCancun } from '../../common/fecha-cancun.util';
 import { fmtDineroTexto } from '../../common/dinero-texto.util';
@@ -49,6 +54,10 @@ export interface VueloSolicitudRow {
   id?: string;
   estado?: string | null;
   facturado?: boolean | null;
+  /** Estatus MANUAL de la factura del servicio (SIN_FACTURA /
+   *  ELABORADA_ENVIADA / FACTURADO). Sin la llave (lector que no la trae)
+   *  la regla se comporta como antes del 13-oct-2026. */
+  factura_estatus?: string | null;
   factura_solicitada_at?: string | null;
   factura_solicitada_por?: string | null;
   factura_solicitud_nota?: string | null;
@@ -77,22 +86,53 @@ export const COLS_FACTURA_LIGADA =
   'id, serie, folio, folio_num, uuid, fecha_emision, estatus, total, moneda, metodo_pago, pdf_path, xml_path, deleted_at';
 
 /**
- * DEFINICIÓN ÚNICA de «por facturar» (§3.8): solicitada AND no CANCELADO AND
- * `facturado` (CFDI del PAC) ≠ true AND 0 facturas emitidas VIGENTES
- * (no borradas) ligadas.
+ * Estado de la SOLICITUD de factura de un vuelo (13-oct-2026, invariante 65):
+ *  - 'POR_FACTURAR': solicitada AND no CANCELADO AND `facturado` (CFDI del
+ *    PAC) ≠ true AND 0 facturas emitidas VIGENTES (no borradas) ligadas AND
+ *    estatus manual ≠ FACTURADO. Bandeja «Por facturar» y badge del menú.
+ *  - 'MARCADO_SIN_REGISTRO': lo mismo pero el vuelo está marcado
+ *    «Facturado» a mano. Sale de la bandeja y del badge y va en la nota
+ *    `marcados_sin_registro` («registra su factura aquí»).
+ *  - 'NINGUNO': cualquier otro caso (sin solicitud, cancelado, CFDI del PAC
+ *    o con factura VIGENTE ligada).
  */
-export function esPorFacturar(
+export type EstadoSolicitudFactura =
+  | 'POR_FACTURAR'
+  | 'MARCADO_SIN_REGISTRO'
+  | 'NINGUNO';
+
+/** DEFINICIÓN ÚNICA de la regla (ver `EstadoSolicitudFactura`). */
+export function estadoSolicitud(
   v: VueloSolicitudRow | null | undefined,
   vigentesLigadas: number,
-): boolean {
-  if (!v) return false;
-  return (
+): EstadoSolicitudFactura {
+  if (!v) return 'NINGUNO';
+  const viva =
     v.factura_solicitada_at != null &&
     v.factura_solicitada_at !== '' &&
     v.estado !== 'CANCELADO' &&
     v.facturado !== true &&
-    vigentesLigadas === 0
-  );
+    vigentesLigadas === 0;
+  if (!viva) return 'NINGUNO';
+  return v.factura_estatus === 'FACTURADO'
+    ? 'MARCADO_SIN_REGISTRO'
+    : 'POR_FACTURAR';
+}
+
+/** «Por facturar» (§3.8): `estadoSolicitud` === 'POR_FACTURAR'. */
+export function esPorFacturar(
+  v: VueloSolicitudRow | null | undefined,
+  vigentesLigadas: number,
+): boolean {
+  return estadoSolicitud(v, vigentesLigadas) === 'POR_FACTURAR';
+}
+
+/** Pedida, sin factura registrada y marcada «Facturado» a mano (13-oct-2026). */
+export function esMarcadoSinRegistro(
+  v: VueloSolicitudRow | null | undefined,
+  vigentesLigadas: number,
+): boolean {
+  return estadoSolicitud(v, vigentesLigadas) === 'MARCADO_SIN_REGISTRO';
 }
 
 /** La solicitud del vuelo (o null si nadie la pidió). */
@@ -188,6 +228,9 @@ export function bloqueFacturaServicio(
     por_facturar: esPorFacturar(v, vigentes.length),
     facturas: vigentes.map(miniDeFactura),
     canceladas,
+    // ADITIVO (13-oct-2026, invariante 65): pedida, sin VIGENTE ligada y
+    // marcada «Facturado» a mano (ya NO cuenta como por_facturar).
+    marcado_sin_registro: esMarcadoSinRegistro(v, vigentes.length),
   };
 }
 

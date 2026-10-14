@@ -1,7 +1,9 @@
 import {
   bloqueFacturaServicio,
   elegirDestinatarios,
+  esMarcadoSinRegistro,
   esPorFacturar,
+  estadoSolicitud,
   fechaDiaMes,
   LIMITE_NOTA_SOLICITUD,
   notaSolicitudAutomatica,
@@ -64,6 +66,42 @@ describe('esPorFacturar (definición ÚNICA §3.8)', () => {
     ).toBe(false);
     expect(esPorFacturar(null, 0)).toBe(false);
   });
+
+  // Caso #376 (13-oct-2026, invariante 65): el estatus MANUAL «Facturado»
+  // saca al vuelo de la bandeja y lo manda a la nota «marcados sin registro».
+  it('FACTURADO a mano sin vigentes ⇒ MARCADO_SIN_REGISTRO (fuera de «por facturar»)', () => {
+    const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
+    expect(estadoSolicitud(v, 0)).toBe('MARCADO_SIN_REGISTRO');
+    expect(esPorFacturar(v, 0)).toBe(false);
+    expect(esMarcadoSinRegistro(v, 0)).toBe(true);
+  });
+  it('FACTURADO a mano CON una vigente ⇒ NINGUNO (ya está registrada)', () => {
+    const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
+    expect(estadoSolicitud(v, 1)).toBe('NINGUNO');
+    expect(esPorFacturar(v, 1)).toBe(false);
+    expect(esMarcadoSinRegistro(v, 1)).toBe(false);
+  });
+  it('ELABORADA_ENVIADA, SIN_FACTURA y sin la llave ⇒ POR_FACTURAR (como antes)', () => {
+    for (const v of [
+      { ...SOLICITADA, factura_estatus: 'ELABORADA_ENVIADA' },
+      { ...SOLICITADA, factura_estatus: 'SIN_FACTURA' },
+      { ...SOLICITADA, factura_estatus: null },
+      SOLICITADA,
+    ]) {
+      expect(estadoSolicitud(v, 0)).toBe('POR_FACTURAR');
+      expect(esPorFacturar(v, 0)).toBe(true);
+      expect(esMarcadoSinRegistro(v, 0)).toBe(false);
+    }
+  });
+  it('FACTURADO + CANCELADO, CFDI del PAC o sin solicitud ⇒ NINGUNO', () => {
+    const v = { ...SOLICITADA, factura_estatus: 'FACTURADO' };
+    expect(estadoSolicitud({ ...v, estado: 'CANCELADO' }, 0)).toBe('NINGUNO');
+    expect(estadoSolicitud({ ...v, facturado: true }, 0)).toBe('NINGUNO');
+    expect(estadoSolicitud({ ...v, factura_solicitada_at: null }, 0)).toBe(
+      'NINGUNO',
+    );
+    expect(estadoSolicitud(null, 0)).toBe('NINGUNO');
+  });
 });
 
 describe('bloque y resumen', () => {
@@ -94,6 +132,28 @@ describe('bloque y resumen', () => {
       tiene_xml: false,
     });
     expect(b.canceladas).toBe(1);
+    expect(b.marcado_sin_registro).toBe(false);
+  });
+
+  it('bloque: FACTURADO a mano con solo canceladas ⇒ marcado_sin_registro (y no por_facturar)', () => {
+    const b = bloqueFacturaServicio(
+      { ...SOLICITADA, factura_estatus: 'FACTURADO' },
+      [ligada('99', 'CANCELADA')],
+      'Itzi',
+    );
+    expect(b.por_facturar).toBe(false);
+    expect(b.marcado_sin_registro).toBe(true);
+    expect(b.solicitud?.solicitada_por).toEqual({
+      id: 'u-itzi',
+      nombre: 'Itzi',
+    });
+    // Con la factura ya registrada, ninguna de las dos.
+    const conVigente = bloqueFacturaServicio(
+      { ...SOLICITADA, factura_estatus: 'FACTURADO' },
+      [ligada('440', 'VIGENTE')],
+    );
+    expect(conVigente.por_facturar).toBe(false);
+    expect(conVigente.marcado_sin_registro).toBe(false);
   });
 
   it('resumen de la lista', () => {
@@ -109,6 +169,19 @@ describe('bloque y resumen', () => {
       solicitada: false,
       por_facturar: false,
       paga_contra_factura: false,
+      facturas: 0,
+    });
+    // FACTURADO a mano: sigue «solicitada», ya no «por facturar» (el chip
+    // ámbar de las listas desaparece; la forma del resumen no cambia).
+    expect(
+      resumenFacturaServicio(
+        { ...SOLICITADA, factura_estatus: 'FACTURADO' },
+        [],
+      ),
+    ).toEqual({
+      solicitada: true,
+      por_facturar: false,
+      paga_contra_factura: true,
       facturas: 0,
     });
   });

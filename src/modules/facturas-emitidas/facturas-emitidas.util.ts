@@ -805,7 +805,9 @@ export function avisoTotalDistintoVuelo(p: {
   if (Math.abs(redondear2(p.total - delVuelo)) <= 1) return null;
   return {
     code: 'TOTAL_DISTINTO_VUELO',
-    mensaje: `La factura ${p.etiqueta} suma ${fmtDineroTexto(p.total, moneda)} y el vuelo #${v.folio} cotizó ${fmtDineroTexto(delVuelo, moneda)}. Revisa el total (si es un anticipo, márcala como parcial).`,
+    // «si cubre más vuelos del cliente…» (13-oct-2026, caso #376: A-0440
+    // cubría #375 y #376 y se ligó solo al primero).
+    mensaje: `La factura ${p.etiqueta} suma ${fmtDineroTexto(p.total, moneda)} y el vuelo #${v.folio} cotizó ${fmtDineroTexto(delVuelo, moneda)}. Revisa el total (si es un anticipo, márcala como parcial; si cubre más vuelos del cliente, agrégalos en «Vuelos»).`,
     details: {
       folio: v.folio,
       total_factura: p.total,

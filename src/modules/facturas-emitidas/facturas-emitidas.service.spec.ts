@@ -5,7 +5,7 @@ jest.mock('../realtime/notifications.service', () => ({
 }));
 jest.mock('../flights/flights.service', () => ({ FlightsService: class {} }));
 
-import { HttpException } from '@nestjs/common';
+import { HttpException, Logger } from '@nestjs/common';
 import { FacturasEmitidasService } from './facturas-emitidas.service';
 import { FacturaSolicitudService } from '../flights/factura-solicitud.service';
 import type { SupabaseService } from '../supabase/supabase.service';
@@ -1173,21 +1173,232 @@ describe('FacturasEmitidasService — lista, por facturar y lotes', () => {
       }),
     );
     const r = await svc.porFacturar();
-    expect(r.data.map((x) => x.vuelo.folio)).toEqual([342, 341]);
-    expect(r.data[0].vuelo.estatus_manual).toBe('FACTURADO');
-    expect(r.data[0].solicitud).toMatchObject({
+    // 13-oct-2026 (invariante 65, caso #376): el #342 está marcado
+    // «Facturado» a mano SIN factura registrada ⇒ sale de la bandeja y del
+    // badge y va a la nota `marcados_sin_registro` con la MISMA forma.
+    expect(r.data.map((x) => x.vuelo.folio)).toEqual([341]);
+    expect(r.count).toBe(1);
+    expect(r.marcados_sin_registro.map((x) => x.vuelo.folio)).toEqual([342]);
+    const m = r.marcados_sin_registro[0];
+    expect(m.vuelo.estatus_manual).toBe('FACTURADO');
+    expect(m.solicitud).toMatchObject({
       paga_contra_factura: true,
       solicitada_por: { id: ITZI, nombre: 'Itzi' },
     });
-    expect(r.data[0].faltan_datos_fiscales).toEqual([
+    expect(m.faltan_datos_fiscales).toEqual([
       'Régimen fiscal',
       'Uso de CFDI',
       'Código postal',
     ]);
+    expect(r.data[0].facturas_del_cliente).toEqual([]);
     expect(await svc.conteoPorFacturar()).toEqual({
-      por_facturar: 2,
-      paga_contra_factura: 1,
+      por_facturar: 1,
+      paga_contra_factura: 0,
+      marcados_sin_registro: 1,
     });
+  });
+
+  it('con 250 vuelos POR FACTURAR de clientes distintos, la sugerencia de facturas del cliente también va en lotes de ≤ 200', async () => {
+    const vuelos = Array.from({ length: 250 }, (_, i) =>
+      vuelo(
+        `bbbbbbbb-0000-4000-8000-${String(i).padStart(12, '0')}`,
+        2000 + i,
+        {
+          cliente_id: `cli-${i}`,
+          factura_solicitada_at: '2026-10-05T20:00:00Z',
+          factura_solicitada_por: ITZI,
+        },
+      ),
+    );
+    const { svc, db } = armar(base({ vuelo: vuelos }));
+    const r = await svc.porFacturar();
+    expect(r.data).toHaveLength(250);
+    expect(db.maxIn.valor).toBeLessThanOrEqual(200);
+  });
+});
+
+/**
+ * CASO #375/#376 (13-oct-2026, invariante 65). Itzi pidió factura de los dos
+ * vuelos de January Davila ($904.51 USD c/u) el 5-oct; el 8-oct Mary
+ * registró A-0440 ($31,435.91 MXN ≈ los DOS vuelos) y la ligó SOLO a #375.
+ * El #376 se quedó —correctamente— en «Por facturar» hasta que Mary lo ligó
+ * a mano el 13-oct. Prevención: la fila del #376 SUGIERE «Ligar a A-0440»
+ * (`facturas_del_cliente`) y el estatus manual «Facturado» sin registro sale
+ * de la bandeja a su nota.
+ */
+describe('FacturasEmitidasService — por facturar: caso #375/#376 (13-oct-2026)', () => {
+  const A0440 = (extra: Fila = {}) =>
+    facturaFila('f-440', 'A', '0440', {
+      fecha_emision: '2026-10-08',
+      moneda: 'MXN',
+      subtotal: '27100.79',
+      iva: '4335.12',
+      total: '31435.91',
+      ...extra,
+    });
+  const mundo376 = (extra: Record<string, Fila[]> = {}, v1: Fila = {}) =>
+    base({
+      vuelo: [
+        vuelo(V1, 375, {
+          factura_solicitada_at: '2026-10-05T20:04:47Z',
+          factura_solicitada_por: ITZI,
+          ...v1,
+        }),
+        vuelo(V2, 376, {
+          factura_solicitada_at: '2026-10-05T20:07:46Z',
+          factura_solicitada_por: ITZI,
+        }),
+      ],
+      factura_emitida: [A0440()],
+      factura_emitida_vuelo: [{ factura_id: 'f-440', vuelo_id: V1 }],
+      ...extra,
+    });
+
+  it('ligada solo a #375 ⇒ #376 sigue por facturar y SUGIERE A-0440 con sus vuelos y su total', async () => {
+    const { svc } = armar(mundo376());
+    const r = await svc.porFacturar();
+    expect(r.data.map((x) => x.vuelo.folio)).toEqual([376]);
+    expect(r.marcados_sin_registro).toEqual([]);
+    expect(r.data[0].facturas_del_cliente).toEqual([
+      {
+        id: 'f-440',
+        etiqueta: 'A-0440',
+        fecha_emision: '2026-10-08',
+        total: 31435.91,
+        moneda: 'MXN',
+        vuelo_ids: [V1],
+        vuelo_folios: [375],
+      },
+    ]);
+    expect(await svc.conteoPorFacturar()).toEqual({
+      por_facturar: 1,
+      paga_contra_factura: 0,
+      marcados_sin_registro: 0,
+    });
+  });
+
+  it('ligada a los DOS ⇒ bandeja vacía y conteo en cero', async () => {
+    const { svc } = armar(
+      mundo376({
+        factura_emitida_vuelo: [
+          { factura_id: 'f-440', vuelo_id: V1 },
+          { factura_id: 'f-440', vuelo_id: V2 },
+        ],
+      }),
+    );
+    const r = await svc.porFacturar();
+    expect(r).toEqual({ data: [], count: 0, marcados_sin_registro: [] });
+    expect(await svc.conteoPorFacturar()).toEqual({
+      por_facturar: 0,
+      paga_contra_factura: 0,
+      marcados_sin_registro: 0,
+    });
+  });
+
+  it('factura CANCELADA: el FACTURADO (por el CAS de ligar) cae en «marcados», el otro regresa a la bandeja y nadie la sugiere', async () => {
+    const { svc } = armar(
+      mundo376(
+        {
+          factura_emitida: [A0440({ estatus: 'CANCELADA' })],
+          factura_emitida_vuelo: [
+            { factura_id: 'f-440', vuelo_id: V1 },
+            { factura_id: 'f-440', vuelo_id: V2 },
+          ],
+        },
+        { factura_estatus: 'FACTURADO' },
+      ),
+    );
+    const r = await svc.porFacturar();
+    expect(r.data.map((x) => x.vuelo.folio)).toEqual([376]);
+    expect(r.marcados_sin_registro.map((x) => x.vuelo.folio)).toEqual([375]);
+    expect(r.marcados_sin_registro[0].facturas_canceladas).toBe(1);
+    for (const it of [...r.data, ...r.marcados_sin_registro]) {
+      expect(it.facturas_del_cliente).toEqual([]);
+    }
+    expect(await svc.conteoPorFacturar()).toEqual({
+      por_facturar: 1,
+      paga_contra_factura: 0,
+      marcados_sin_registro: 1,
+    });
+  });
+
+  it('NO se sugiere: borrada, de OTRO cliente o emitida antes de (solicitud − 30 días); el límite del día 30 SÍ', async () => {
+    const OTRO = 'cccccccc-0000-4000-8000-000000000009';
+    const { svc } = armar(
+      mundo376({
+        factura_emitida: [
+          A0440({ deleted_at: '2026-10-09T10:00:00Z' }),
+          facturaFila('f-otro', 'A', '0441', {
+            cliente_id: OTRO,
+            fecha_emision: '2026-10-08',
+          }),
+          facturaFila('f-vieja', 'A', '0300', { fecha_emision: '2026-08-26' }),
+          // 5-oct 15:07 Cancún − 30 días = 5-sep (día Cancún): entra.
+          facturaFila('f-limite', 'A', '0350', { fecha_emision: '2026-09-05' }),
+        ],
+        factura_emitida_vuelo: [],
+      }),
+    );
+    const r = await svc.porFacturar();
+    const del376 = r.data.find((x) => x.vuelo.folio === 376)!;
+    expect(del376.facturas_del_cliente.map((f) => f.etiqueta)).toEqual([
+      'A-0350',
+    ]);
+    // Sin vuelos ligados: la sugerencia lo dice con listas vacías.
+    expect(del376.facturas_del_cliente[0]).toMatchObject({
+      vuelo_ids: [],
+      vuelo_folios: [],
+      moneda: 'USD',
+    });
+  });
+
+  it('máximo 3, recientes primero (fecha de emisión y luego número, ambos de mayor a menor)', async () => {
+    const { svc } = armar(
+      mundo376({
+        factura_emitida: [
+          facturaFila('f-1', 'A', '0501', { fecha_emision: '2026-10-01' }),
+          facturaFila('f-2', 'A', '0502', { fecha_emision: '2026-10-09' }),
+          facturaFila('f-3', 'A', '0503', { fecha_emision: '2026-10-09' }),
+          facturaFila('f-4', 'A', '0504', { fecha_emision: '2026-09-20' }),
+        ],
+        factura_emitida_vuelo: [],
+      }),
+    );
+    const r = await svc.porFacturar();
+    const del375 = r.data.find((x) => x.vuelo.folio === 375)!;
+    expect(del375.facturas_del_cliente.map((f) => f.etiqueta)).toEqual([
+      'A-0503',
+      'A-0502',
+      'A-0501',
+    ]);
+  });
+
+  it('si la lectura de la sugerencia falla, la bandeja responde igual (sin sugerencias) y se avisa en el log', async () => {
+    const { svc, db } = armar(mundo376());
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => undefined);
+    const servicio = db.supabase.service as unknown as {
+      from: (t: string) => Record<string, unknown>;
+    };
+    const fromOriginal = servicio.from;
+    servicio.from = (t: string) => {
+      const q = fromOriginal(t);
+      if (t !== 'factura_emitida') return q;
+      q.then = (res: (v: unknown) => unknown) =>
+        Promise.resolve({
+          data: null,
+          error: { code: '57014', message: 'canceling statement' },
+        }).then(res);
+      return q;
+    };
+    const r = await svc.porFacturar();
+    expect(r.data.map((x) => x.vuelo.folio)).toEqual([376]);
+    expect(r.data[0].facturas_del_cliente).toEqual([]);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('no se pudieron sugerir facturas del cliente'),
+    );
+    warn.mockRestore();
   });
 });
 

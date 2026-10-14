@@ -20,7 +20,7 @@ import {
   facturaEmitidaDisponible,
 } from '../../common/factura-emitida-disponible.util';
 import { fetchNombresUsuarios } from '../../common/registrado-por.util';
-import { hoyCancun } from '../../common/fecha-cancun.util';
+import { diaCancun, hoyCancun } from '../../common/fecha-cancun.util';
 import {
   LIMITE_ARCHIVO_FACTURA_BYTES,
   extraerCfdiCompleto,
@@ -34,6 +34,7 @@ import {
 import {
   COLS_SOLICITUD_FACTURA,
   esPorFacturar,
+  estadoSolicitud,
   solicitudDe,
   textoAvisoEmitida,
   type VueloSolicitudRow,
@@ -89,11 +90,14 @@ import type {
   AlertaFactura,
   AvisoFactura,
   CamposLeidosFactura,
+  ConteoPorFacturar,
+  FacturaDelClienteSugerida,
   FacturaEmitida,
   FacturaExistente,
   GrupoDeVueloFactura,
   LecturaArchivoFactura,
   ListaFacturasEmitidas,
+  ListaPorFacturar,
   MetodoPagoFactura,
   MonedaFactura,
   PorFacturarItem,
@@ -895,15 +899,17 @@ export class FacturasEmitidasService {
     );
   }
 
-  /** `GET /v1/facturas-emitidas/por-facturar/conteo` (badge del menú). */
-  async conteoPorFacturar(): Promise<{
-    por_facturar: number;
-    paga_contra_factura: number;
-  }> {
+  /**
+   * `GET /v1/facturas-emitidas/por-facturar/conteo` (badge del menú). Desde
+   * el 13-oct-2026 (invariante 65) `por_facturar` NO cuenta los vuelos
+   * marcados «Facturado» a mano: van en el aditivo `marcados_sin_registro`
+   * (el badge sigue leyendo SOLO `por_facturar`).
+   */
+  async conteoPorFacturar(): Promise<ConteoPorFacturar> {
     await this.asegurarDisponible();
     const vuelos = (
       await this.vuelosConSolicitud<VueloSolicitudRow & { id: string }>(
-        `id, estado, facturado, ${COLS_SOLICITUD_FACTURA}`,
+        `id, estado, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}`,
       )
     ).filter((v) => v.facturado !== true);
     const ligadas = await this.solicitud.ligadasDeVuelos(
@@ -911,15 +917,25 @@ export class FacturasEmitidasService {
     );
     let porFacturar = 0;
     let paga = 0;
+    let marcados = 0;
     for (const v of vuelos) {
       const vigentes = (ligadas.get(v.id) ?? []).filter(
         (f) => f.estatus === 'VIGENTE',
       ).length;
-      if (!esPorFacturar(v, vigentes)) continue;
+      const estado = estadoSolicitud(v, vigentes);
+      if (estado === 'MARCADO_SIN_REGISTRO') {
+        marcados += 1;
+        continue;
+      }
+      if (estado !== 'POR_FACTURAR') continue;
       porFacturar += 1;
       if (v.factura_paga_contra_factura === true) paga += 1;
     }
-    return { por_facturar: porFacturar, paga_contra_factura: paga };
+    return {
+      por_facturar: porFacturar,
+      paga_contra_factura: paga,
+      marcados_sin_registro: marcados,
+    };
   }
 
   /** Aviones vivos por grupo (1 consulta por lote de grupos). */
@@ -989,8 +1005,176 @@ export class FacturasEmitidasService {
     return out;
   }
 
-  /** `GET /v1/facturas-emitidas/por-facturar` */
-  async porFacturar(): Promise<{ data: PorFacturarItem[]; count: number }> {
+  /**
+   * Ventana de la sugerencia «facturas del cliente» (Parte B del caso #376):
+   * facturas emitidas desde (solicitud − 30 días), día Cancún.
+   */
+  private static readonly DIAS_FACTURAS_DEL_CLIENTE = 30;
+  /** Tope de sugerencias por vuelo. */
+  private static readonly MAX_FACTURAS_DEL_CLIENTE = 3;
+
+  /**
+   * PARTE B del caso #376 (13-oct-2026, invariante 65): por cada vuelo de la
+   * bandeja, las facturas VIGENTES (no borradas) de SU cliente que NO están
+   * ligadas a él, emitidas desde el día Cancún de (solicitud − 30 días);
+   * máx. 3, recientes primero (fecha_emision desc, folio_num desc). Caso
+   * real: A-0440 ($31,435.91 MXN) cubría #375 y #376 del mismo cliente y se
+   * ligó solo a #375; #376 se quedó en «Por facturar» hasta que Mary la ligó
+   * a mano. Solo SUGIERE (el panel liga con confirmación por el PATCH de
+   * siempre). Consultas en lotes de 200 y anti-cap; best-effort: si algo
+   * falla ⇒ mapa vacío + warn (la bandeja nunca se cae por la sugerencia).
+   */
+  private async facturasDelCliente(
+    vuelos: ReadonlyArray<{
+      id: string;
+      cliente_id: string | null;
+      solicitada_at: string | null | undefined;
+    }>,
+  ): Promise<Map<string, FacturaDelClienteSugerida[]>> {
+    const out = new Map<string, FacturaDelClienteSugerida[]>();
+    const msDias =
+      FacturasEmitidasService.DIAS_FACTURAS_DEL_CLIENTE * 24 * 60 * 60 * 1000;
+    const conCliente: Array<{ id: string; cliente_id: string; desde: string }> =
+      [];
+    for (const v of vuelos) {
+      const t = v.solicitada_at ? Date.parse(v.solicitada_at) : NaN;
+      if (!v.cliente_id || !Number.isFinite(t)) continue;
+      conCliente.push({
+        id: v.id,
+        cliente_id: v.cliente_id,
+        desde: diaCancun(new Date(t - msDias).toISOString()),
+      });
+    }
+    if (conCliente.length === 0) return out;
+    type FacturaCli = {
+      id: string;
+      serie: string | null;
+      folio: string;
+      folio_num: unknown;
+      fecha_emision: string;
+      total: unknown;
+      moneda: string;
+      cliente_id: string | null;
+    };
+    type LigaCli = {
+      factura_id: string;
+      vuelo_id: string;
+      vuelo: { folio?: unknown } | Array<{ folio?: unknown }> | null;
+    };
+    try {
+      const clientes = [...new Set(conCliente.map((v) => v.cliente_id))];
+      const desdeMin = conCliente
+        .map((v) => v.desde)
+        .reduce((a, b) => (b < a ? b : a));
+      const facturas: FacturaCli[] = [];
+      for (const lote of enLotes(clientes)) {
+        facturas.push(
+          ...(await this.leerTodo<FacturaCli>((d, h) =>
+            this.sb
+              .from('factura_emitida')
+              .select(
+                'id, serie, folio, folio_num, fecha_emision, total, moneda, cliente_id',
+              )
+              .in('cliente_id', lote)
+              .eq('estatus', 'VIGENTE')
+              .is('deleted_at', null)
+              .gte('fecha_emision', desdeMin)
+              .order('id')
+              .range(d, h),
+          )),
+        );
+      }
+      if (facturas.length === 0) return out;
+      const vuelosDe = new Map<string, Array<{ id: string; folio: number }>>();
+      for (const lote of enLotes(facturas.map((f) => f.id))) {
+        const ligas = await this.leerTodo<LigaCli>((d, h) =>
+          this.sb
+            .from('factura_emitida_vuelo')
+            .select('factura_id, vuelo_id, vuelo:vuelo_id(folio)')
+            .in('factura_id', lote)
+            .order('factura_id')
+            .order('vuelo_id')
+            .range(d, h),
+        );
+        for (const l of ligas) {
+          const lista =
+            vuelosDe.get(l.factura_id) ??
+            vuelosDe.set(l.factura_id, []).get(l.factura_id)!;
+          // Folio NaN si el embed no llegó: el vuelo cuenta para «ya ligada»,
+          // pero no se cita en el texto.
+          lista.push({ id: l.vuelo_id, folio: Number(unwrap(l.vuelo)?.folio) });
+        }
+      }
+      const porCliente = new Map<string, FacturaCli[]>();
+      for (const f of facturas) {
+        if (!f.cliente_id) continue;
+        (
+          porCliente.get(f.cliente_id) ??
+          porCliente.set(f.cliente_id, []).get(f.cliente_id)!
+        ).push(f);
+      }
+      const numero = (x: unknown) => {
+        const n = Number(x);
+        return Number.isFinite(n) ? n : -Infinity;
+      };
+      for (const v of conCliente) {
+        const sugeridas = (porCliente.get(v.cliente_id) ?? [])
+          .filter(
+            (f) =>
+              (f.fecha_emision ?? '') >= v.desde &&
+              !(vuelosDe.get(f.id) ?? []).some((x) => x.id === v.id),
+          )
+          .sort((a, b) =>
+            a.fecha_emision !== b.fecha_emision
+              ? a.fecha_emision < b.fecha_emision
+                ? 1
+                : -1
+              : numero(b.folio_num) - numero(a.folio_num),
+          )
+          .slice(0, FacturasEmitidasService.MAX_FACTURAS_DEL_CLIENTE)
+          .map((f): FacturaDelClienteSugerida => {
+            const ligados = [...(vuelosDe.get(f.id) ?? [])].sort((a, b) =>
+              Number.isFinite(a.folio) && Number.isFinite(b.folio)
+                ? a.folio - b.folio
+                : Number.isFinite(a.folio)
+                  ? -1
+                  : Number.isFinite(b.folio)
+                    ? 1
+                    : 0,
+            );
+            const total = Number(f.total);
+            return {
+              id: f.id,
+              etiqueta: etiquetaFactura(f.serie, f.folio),
+              fecha_emision: f.fecha_emision,
+              total: Number.isFinite(total) ? total : 0,
+              moneda: f.moneda === 'USD' ? 'USD' : 'MXN',
+              vuelo_ids: ligados.map((x) => x.id),
+              vuelo_folios: ligados
+                .map((x) => x.folio)
+                .filter((n) => Number.isFinite(n)),
+            };
+          });
+        out.set(v.id, sugeridas);
+      }
+    } catch (e) {
+      this.logger.warn(
+        `Por facturar: no se pudieron sugerir facturas del cliente (la bandeja sale sin la sugerencia): ${e instanceof Error ? e.message : String(e)}`,
+      );
+      return new Map();
+    }
+    return out;
+  }
+
+  /**
+   * `GET /v1/facturas-emitidas/por-facturar`. Desde el 13-oct-2026
+   * (invariante 65, caso #376) parte la lista con `estadoSolicitud`:
+   * `data` = 'POR_FACTURAR' (paga contra factura primero, luego la solicitud
+   * más vieja y el folio) y el ADITIVO `marcados_sin_registro` = pedidos,
+   * sin factura registrada y marcados «Facturado» a mano, con la MISMA forma
+   * y orden. Cada item lleva el ADITIVO `facturas_del_cliente` (Parte B).
+   */
+  async porFacturar(): Promise<ListaPorFacturar> {
     await this.asegurarDisponible();
     type Fila = VueloSolicitudRow & {
       id: string;
@@ -1006,37 +1190,55 @@ export class FacturasEmitidasService {
       tc_usd_mxn: unknown;
       cobrado: boolean | null;
       cotizacion_abierta: boolean | null;
+      cliente_id: string | null;
       cliente: Record<string, unknown> | Record<string, unknown>[] | null;
       grupo: unknown;
     };
     const filas = (
       await this.vuelosConSolicitud<Fila>(
-        `id, folio, estado, fecha_vuelo, origen_iata, destino_iata, es_externo, facturado, factura_estatus, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, cotizacion_abierta, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(id, nombre, rfc, razon_social_default, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, es_interno), grupo:grupo_id(id, folio, nombre)`,
+        `id, folio, estado, fecha_vuelo, origen_iata, destino_iata, es_externo, facturado, factura_estatus, monto_total_usd, monto_total_mxn, tc_usd_mxn, cobrado, cotizacion_abierta, cliente_id, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(id, nombre, rfc, razon_social_default, regimen_fiscal_receptor, uso_cfdi, codigo_postal, domicilio_fiscal, pais_residencia, es_interno), grupo:grupo_id(id, folio, nombre)`,
       )
     ).filter((v) => v.facturado !== true);
     const ligadas = await this.solicitud.ligadasDeVuelos(
       filas.map((v) => v.id),
     );
-    const pendientes = filas.filter((v) =>
-      esPorFacturar(
+    const pendientes: Fila[] = [];
+    const marcados: Fila[] = [];
+    for (const v of filas) {
+      const estado = estadoSolicitud(
         v,
         (ligadas.get(v.id) ?? []).filter((f) => f.estatus === 'VIGENTE').length,
-      ),
-    );
-    const ids = pendientes.map((v) => v.id);
-    const grupoIds = pendientes
+      );
+      if (estado === 'POR_FACTURAR') pendientes.push(v);
+      else if (estado === 'MARCADO_SIN_REGISTRO') marcados.push(v);
+    }
+    // Cobros, nombres, rutas, grupos y sugerencias UNA vez para las dos listas.
+    const todos = [...pendientes, ...marcados];
+    const ids = todos.map((v) => v.id);
+    const grupoIds = todos
       .map((v) => unwrap(v.grupo as { id: string } | null)?.id)
       .filter((x): x is string => !!x);
-    const [cobros, nombres, rutas, conteoGrupos] = await Promise.all([
-      this.cobrosSeguros(ids),
-      fetchNombresUsuarios(
-        this.sb,
-        pendientes.map((v) => v.factura_solicitada_por),
-      ),
-      this.rutasPorVuelo(ids),
-      this.avionesPorGrupo(grupoIds),
-    ]);
-    const data: PorFacturarItem[] = pendientes.map((v) => {
+    const [cobros, nombres, rutas, conteoGrupos, delCliente] =
+      await Promise.all([
+        this.cobrosSeguros(ids),
+        fetchNombresUsuarios(
+          this.sb,
+          todos.map((v) => v.factura_solicitada_por),
+        ),
+        this.rutasPorVuelo(ids),
+        this.avionesPorGrupo(grupoIds),
+        this.facturasDelCliente(
+          todos.map((v) => ({
+            id: v.id,
+            cliente_id:
+              v.cliente_id ??
+              (unwrap(v.cliente)?.id as string | undefined) ??
+              null,
+            solicitada_at: v.factura_solicitada_at,
+          })),
+        ),
+      ]);
+    const armarItem = (v: Fila): PorFacturarItem => {
       const c = unwrap(v.cliente);
       const status = cobros ? (cobros[v.id] ?? null) : null;
       const estatusManual =
@@ -1082,9 +1284,11 @@ export class FacturasEmitidasService {
         facturas_canceladas: (ligadas.get(v.id) ?? []).filter(
           (f) => f.estatus === 'CANCELADA',
         ).length,
+        // ADITIVO al final (13-oct-2026, Parte B del caso #376).
+        facturas_del_cliente: delCliente.get(v.id) ?? [],
       };
-    });
-    data.sort((a, b) => {
+    };
+    const comparar = (a: PorFacturarItem, b: PorFacturarItem): number => {
       const pa = a.solicitud.paga_contra_factura ? 1 : 0;
       const pb = b.solicitud.paga_contra_factura ? 1 : 0;
       if (pa !== pb) return pb - pa;
@@ -1093,8 +1297,13 @@ export class FacturasEmitidasService {
         : a.solicitud.solicitada_at > b.solicitud.solicitada_at
           ? 1
           : a.vuelo.folio - b.vuelo.folio;
-    });
-    return { data, count: data.length };
+    };
+    const data = pendientes.map(armarItem).sort(comparar);
+    return {
+      data,
+      count: data.length,
+      marcados_sin_registro: marcados.map(armarItem).sort(comparar),
+    };
   }
 
   // ======================================================================
@@ -1106,7 +1315,9 @@ export class FacturasEmitidasService {
     query: VuelosCandidatosQuery,
   ): Promise<VueloCandidatoFactura[]> {
     await this.asegurarDisponible();
-    const cols = `id, folio, fecha_vuelo, estado, cliente_id, monto_total_usd, monto_total_mxn, tc_usd_mxn, facturado, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(nombre, rfc), grupo:grupo_id(id, folio, nombre)`;
+    // `factura_estatus` (13-oct-2026, invariante 65): el chip «solicitud» y
+    // el orden del ramo sin búsqueda siguen la regla de `estadoSolicitud`.
+    const cols = `id, folio, fecha_vuelo, estado, cliente_id, monto_total_usd, monto_total_mxn, tc_usd_mxn, facturado, factura_estatus, ${COLS_SOLICITUD_FACTURA}, cliente:cliente_id(nombre, rfc), grupo:grupo_id(id, folio, nombre)`;
     type Fila = VueloSolicitudRow & {
       id: string;
       folio: number;
