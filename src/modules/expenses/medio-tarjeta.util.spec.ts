@@ -342,4 +342,18 @@ describe('etiquetaMedioPago / mensajeCheckGasto', () => {
     );
     expect(mensajeCheckGasto({})).toMatch(/regla de la base de datos/);
   });
+
+  it('gasto_tua_incluida_check (13-oct-2026, TUA sistémica) ⇒ su texto; propina sigue con el suyo', () => {
+    expect(
+      mensajeCheckGasto({
+        message:
+          'new row for relation "gasto" violates check constraint "gasto_tua_incluida_check"',
+      }),
+    ).toBe('La TUA incluida no puede ser negativa.');
+    expect(
+      mensajeCheckGasto({
+        message: 'violates check constraint "gasto_propina_check"',
+      }),
+    ).toBe('La propina no puede ser negativa.');
+  });
 });

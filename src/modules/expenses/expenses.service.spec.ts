@@ -102,7 +102,11 @@ describe('ExpensesService.list — capturado_en', () => {
       gasto: { data: [fila], error: null },
     });
     const res = await service.list(filtrosBase);
-    const select = llamadas.find((l) => l.metodo === 'select');
+    // El primer select puede ser la sonda de `gasto.tua_incluida`
+    // (13-oct-2026, invariante 66): se busca el del listado.
+    const select = llamadas.find(
+      (l) => l.metodo === 'select' && l.args[0] !== 'tua_incluida',
+    );
     expect(String(select?.args[0])).toMatch(/\bcapturado_en\b/);
     expect(res.data[0]).toMatchObject({
       capturado_en: '2026-09-05T19:32:00+00:00',

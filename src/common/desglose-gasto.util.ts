@@ -20,6 +20,23 @@
  *    Tarifa TUA $1,119.26 → TUA $1,119.26 + Operación $554.41.
  *
  * Sin renglones FBO/TUA/extensión reconocibles, se listan tal cual.
+ *
+ * TUA SISTÉMICA — UNA PRIORIDAD (13-oct-2026, invariante 66 del CLAUDE.md
+ * del API; caso #383, gasto 8c60e428: la IA leyó corrida la tabla resumen de
+ * ASUR y llamó «Autobuses» a la Tarifa TUA de $559.63 — nada se separó y la
+ * fila del vuelo cargó la TUA como OPERACIONES). La TUA de un gasto (IVA
+ * incluido, moneda del gasto, base = monto − propina) sale de, en orden:
+ *  1) `gasto.tua_incluida` (la fija la OFICINA en «Verificar / editar»;
+ *     migración 20261013000008): 0 = esta factura no cobra TUA; > 0 = esa
+ *     TUA aunque los renglones de la IA no cuadren (FBO y extensión de la
+ *     lectura se recortan al resto: la TUA manda);
+ *  2) el renglón de la IA reconocido como TUA (`esTua` / `CLAVES_TUA`);
+ *  3) `valor_ia_extraido.tua_monto` (la TUA que la IA leyó APARTE, ya con
+ *     IVA) SOLO si ningún renglón es TUA y la tabla CUADRA (formas a/b). Sin
+ *     renglones válidos o con una tabla que no suma ⇒ nada: pyservices vacía
+ *     la tabla que no suma (`validar_suma_conceptos`) y separar ahí sería
+ *     reparar una lectura rota (regla del 26-ago, caso #118).
+ * Sin ninguna de esas señales el resultado es byte-idéntico al de siempre.
  */
 import { categoriaEsDeEmpresa } from './categoria-gasto.util';
 
@@ -85,6 +102,16 @@ export interface DesglosePartes {
   extension: number;
 }
 
+/** Señales extra del desglose (13-oct-2026, TUA sistémica). */
+export interface OpcionesDesglose {
+  /**
+   * `valor_ia_extraido.tua_monto`: TUA CON IVA que la IA leyó APARTE de los
+   * renglones (13-oct-2026). Solo se usa si ningún renglón es TUA y la tabla
+   * cuadra; jamás se multiplica por 1.16.
+   */
+  tuaMonto?: number | null;
+}
+
 /**
  * Partes NUMÉRICAS de la separación (la MISMA regla que las líneas de
  * texto): TUA, FBO y extensión de horario con su IVA incluido, Operación =
@@ -96,10 +123,16 @@ export interface DesglosePartes {
  * avión: el TUA es un TRASLADO al pasajero, no costo de operar el avión —
  * regla del libro manual del cliente (17-ago-2026) — y la extensión de
  * horario también (1-oct-2026).
+ *
+ * `opciones.tuaMonto` (13-oct-2026, TUA sistémica): la TUA CON IVA que la IA
+ * leyó APARTE. Solo entra si NINGÚN renglón es TUA, 0 < tua_monto ≤ total
+ * (+0.05) y la tabla CUADRA por las formas a/b de siempre; se usa tal cual
+ * (ya trae IVA: jamás × 1.16). Sin `opciones` el resultado es byte-idéntico.
  */
 export function desgloseGastoPartes(
   conceptos: Array<{ concepto: string; monto: number }>,
   total: number,
+  opciones?: OpcionesDesglose,
 ): DesglosePartes | null {
   // Normalización ANTES de calcular (mismos filtros que la composición de
   // notas en expenses.service): los lectores del balance/Libro Dinero pasan
@@ -125,6 +158,17 @@ export function desgloseGastoPartes(
         esExtension(c.concepto) && !esFbo(c.concepto) && !esTua(c.concepto),
     )
     .reduce((a, c) => a + c.monto, 0);
+  // Señal `tua_monto` (13-oct-2026, caso #383: la IA llamó «Autobuses» a la
+  // Tarifa TUA de la tabla resumen de ASUR). SOLO sin renglón TUA reconocido
+  // (el renglón manda) y nunca mayor que el total: ya trae IVA.
+  const senal = Number(opciones?.tuaMonto);
+  const tuaSenal =
+    tua === 0 &&
+    Number.isFinite(senal) &&
+    senal > 0 &&
+    senal <= r2(total) + 0.05
+      ? Math.min(r2(senal), r2(total))
+      : 0;
   // Coherencia: si la separación deja Operación NEGATIVA (monto del gasto
   // editado tras la captura IA, pago parcial, moneda distinta), las partes NO
   // cuadran y se descartan — restar un TUA mayor que el gasto a la columna
@@ -156,13 +200,13 @@ export function desgloseGastoPartes(
       };
     return null;
   };
-  if ((fbo > 0 || tua > 0 || extension > 0) && total > 0) {
+  if ((fbo > 0 || tua > 0 || extension > 0 || tuaSenal > 0) && total > 0) {
     // (a) Netos + IVA aparte → separar con IVA (neto × 1.16), PERO solo si
     // la lectura IA es COHERENTE: los netos × 1.16 deben sumar el total
     // (tolerancia $1). Caso real 26-ago (gasto 45007a9c): la IA leyó un TUA
     // $25 arriba y la separación mandaba ~$30 a la hoja equivocada — mejor
     // no separar que separar con números que no cuadran (mismo criterio
-    // conservador que la forma b).
+    // conservador que la forma b). La señal `tua_monto` YA trae IVA.
     if (hayIva) {
       const netos = r2(
         limpios
@@ -170,12 +214,16 @@ export function desgloseGastoPartes(
           .reduce((a, c) => a + c.monto, 0),
       );
       if (Math.abs(r2(netos * 1.16) - r2(total)) > 1) return null;
-      return armar(r2(tua * 1.16), r2(fbo * 1.16), r2(extension * 1.16));
+      return armar(
+        tuaSenal > 0 ? tuaSenal : r2(tua * 1.16),
+        r2(fbo * 1.16),
+        r2(extension * 1.16),
+      );
     }
     // (b) Tabla resumen: montos YA con IVA que suman el total → tal cual.
     const suma = r2(limpios.reduce((a, c) => a + c.monto, 0));
     if (Math.abs(suma - r2(total)) <= 0.05)
-      return armar(r2(tua), r2(fbo), r2(extension));
+      return armar(tuaSenal > 0 ? tuaSenal : r2(tua), r2(fbo), r2(extension));
   }
   return null;
 }
@@ -184,8 +232,9 @@ export function desgloseGastoLineas(
   conceptos: Array<{ concepto: string; monto: number }>,
   total: number,
   moneda: string,
+  opciones?: OpcionesDesglose,
 ): string[] {
-  const partes = desgloseGastoPartes(conceptos, total);
+  const partes = desgloseGastoPartes(conceptos, total, opciones);
   if (partes) {
     const lineas = [`Operación - $${partes.operacion.toFixed(2)} ${moneda}`];
     if (partes.tua > 0)
@@ -255,6 +304,70 @@ export interface GastoParaTuaEmbebido {
   /** Notas del gasto: SOLO para el respaldo por texto de la extensión
    *  (`extensionPorNotas`). Sin ellas el respaldo no aplica. */
   notas?: string | null;
+  /**
+   * `gasto.tua_incluida` (13-oct-2026, migración 20261013000008): la TUA
+   * (IVA incluido, moneda del gasto) que fijó la OFICINA. null/ausente =
+   * manda la lectura de la IA; 0 = sin TUA; > 0 = esa TUA. PostgREST manda
+   * `numeric` como string.
+   */
+  tua_incluida?: string | number | null;
+}
+
+/**
+ * Categorías donde la OFICINA puede fijar la TUA incluida de un gasto
+ * (13-oct-2026): las facturas de aeropuerto. Subconjunto de las categorías
+ * donde `trasladosEmbebidosDeGasto` separa (ninguna está en
+ * `CATS_SIN_TUA_EMBEBIDO` ni es de EMPRESA; COMISARIATO, invariante 63,
+ * queda fuera sin tocar nada). En prod (13-oct) solo OPERACIONES trae
+ * renglones TUA (32 gastos). El panel la COPIA con test de paridad.
+ */
+export const CATEGORIAS_TUA_INCLUIDA: readonly string[] = Object.freeze([
+  'OPERACIONES',
+  'ATERRIZAJE',
+  'FBO',
+]);
+
+/** ¿La categoría admite «TUA incluida en este gasto»? */
+export function categoriaAdmiteTuaIncluida(
+  cat: string | null | undefined,
+): boolean {
+  return !!cat && CATEGORIAS_TUA_INCLUIDA.includes(cat);
+}
+
+/** Sufijo de la nota del balance cuando la TUA la fijó la oficina. */
+export const SUFIJO_TUA_FIJADA_OFICINA = ' (fijada por oficina)';
+
+/** Nota del balance cuando la oficina fijó «sin TUA» y la IA sí la separaba. */
+export const NOTA_TUA_CERO_OFICINA = 'TUA: 0 (fijada por oficina)';
+
+/**
+ * `valor_ia_extraido.tua_monto` del gasto (TUA CON IVA leída aparte por la
+ * IA, 13-oct-2026): número finito > 0 ⇒ a centavos; cualquier otra cosa
+ * (ausente, null, 0, negativo, texto) ⇒ null.
+ */
+export function tuaMontoDeIa(valorIa: unknown): number | null {
+  if (!valorIa || typeof valorIa !== 'object') return null;
+  const v = (valorIa as { tua_monto?: unknown }).tua_monto;
+  if (typeof v !== 'number' && typeof v !== 'string') return null;
+  if (typeof v === 'string' && !v.trim()) return null;
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? r2(n) : null;
+}
+
+/**
+ * `gasto.tua_incluida` normalizada (13-oct-2026): null / ausente / '' / no
+ * numérico / negativo ⇒ null («manda la IA»); si no, a centavos (0 = «sin
+ * TUA»). PostgREST manda `numeric` como string.
+ */
+export function tuaIncluidaDe(g: {
+  tua_incluida?: string | number | null;
+}): number | null {
+  const v = g?.tua_incluida;
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string' && !v.trim()) return null;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return r2(n);
 }
 
 /**
@@ -334,10 +447,20 @@ export function extensionPorNotas(g: {
 /**
  * Partes de UN gasto en SU moneda sobre la base del desglose = monto −
  * propina (la propina no sale de la factura y sigue siendo costo del avión):
- * con conceptos IA, `desgloseGastoPartes`; sin ellos, el respaldo por texto
- * (`extensionPorNotas` ⇒ toda la base es extensión). `null` = no se separa
- * nada. NO aplica exclusiones de categoría/vuelo: eso lo hace cada lector
- * (`trasladosEmbebidosDeGasto` o la fila del vuelo del Balance).
+ * con conceptos IA, `desgloseGastoPartes` (con la señal `tua_monto` de la
+ * lectura); sin ellos, el respaldo por texto (`extensionPorNotas` ⇒ toda la
+ * base es extensión). `null` = no se separa nada. NO aplica exclusiones de
+ * categoría/vuelo: eso lo hace cada lector (`trasladosEmbebidosDeGasto` o la
+ * fila del vuelo del Balance).
+ *
+ * PRIORIDAD ÚNICA DE LA TUA (13-oct-2026, invariante 66): `tua_incluida` de
+ * la OFICINA manda sobre la lectura — 0 = sin TUA (esa parte vuelve a
+ * Operación; FBO y extensión de la lectura se conservan) y > 0 = esa TUA,
+ * topada a la base, aunque los renglones de la IA no cuadren (caso #118);
+ * FBO y extensión de la lectura se recortan al resto (la TUA manda). Con 0
+ * y sin lectura que separe ⇒ null (nada que separar). Orden deliberado:
+ * conceptos → respaldo por notas → nada (un `tua_monto` sin renglones NO
+ * separa: pyservices vacía la tabla que no suma).
  */
 export function partesDeGasto(g: {
   categoria?: string | null;
@@ -345,16 +468,53 @@ export function partesDeGasto(g: {
   propina?: string | number | null;
   valor_ia_extraido?: unknown;
   notas?: string | null;
+  tua_incluida?: string | number | null;
 }): DesglosePartes | null {
   const monto = Number(g.monto);
   if (!(monto > 0)) return null;
   const base = r2(monto - (Number(g.propina) || 0));
   if (base <= 0) return null;
   const conceptos = conceptosIaDe(g.valor_ia_extraido);
-  if (conceptos.length > 0) return desgloseGastoPartes(conceptos, base);
-  if (extensionPorNotas(g))
-    return { operacion: 0, tua: 0, fbo: 0, extension: base };
-  return null;
+  const partesIa: DesglosePartes | null =
+    conceptos.length > 0
+      ? desgloseGastoPartes(conceptos, base, {
+          tuaMonto: tuaMontoDeIa(g.valor_ia_extraido),
+        })
+      : extensionPorNotas(g)
+        ? { operacion: 0, tua: 0, fbo: 0, extension: base }
+        : null;
+  const fija = tuaIncluidaDe(g);
+  if (fija === null) return partesIa;
+  if (fija === 0 && !partesIa) return null;
+  const tua = Math.min(fija, base);
+  const resto = r2(base - tua);
+  const fbo = Math.min(partesIa?.fbo ?? 0, resto);
+  const extension = Math.min(partesIa?.extension ?? 0, r2(resto - fbo));
+  return {
+    operacion: r2(base - tua - fbo - extension),
+    tua,
+    fbo,
+    extension,
+  };
+}
+
+/**
+ * TUA que separa la LECTURA de la IA (renglón TUA o `tua_monto`), ignorando
+ * lo que fijó la oficina (13-oct-2026): lo que el panel enseña como «La IA
+ * detectó una TUA de $X». null si la lectura no separa TUA.
+ */
+export function tuaDetectadaIa(
+  g: Parameters<typeof partesDeGasto>[0],
+): number | null {
+  const tua = partesDeGasto({ ...g, tua_incluida: null })?.tua ?? 0;
+  return tua > 0 ? tua : null;
+}
+
+/** ¿La oficina fijó «sin TUA» (0) y la lectura de la IA sí la separaba? */
+export function tuaAnuladaPorOficina(
+  g: Parameters<typeof partesDeGasto>[0],
+): boolean {
+  return tuaIncluidaDe(g) === 0 && (tuaDetectadaIa(g) ?? 0) > 0;
 }
 
 /**
@@ -407,3 +567,32 @@ export function trasladosEmbebidosDeGasto(g: GastoParaTuaEmbebido): {
 export function tuaEmbebidoDeGasto(g: GastoParaTuaEmbebido): number {
   return trasladosEmbebidosDeGasto(g).tua;
 }
+
+/**
+ * TRASLADOS PAGADOS por UN gasto del vuelo, en SU moneda (13-oct-2026,
+ * FUENTE ÚNICA de las «tuas pagadas» de «Otros movimientos», del Libro
+ * Dinero y del pre-cierre `tua_cobrada_sin_pagada`): categoría de EMPRESA ⇒
+ * nada (viaja entera a «otros gastos»); `TUAS` ⇒ el gasto ENTERO es TUA; el
+ * resto ⇒ la parte embebida (`trasladosEmbebidosDeGasto`, con la TUA de la
+ * oficina). Sustituye el ternario `categoria === 'TUAS' ? … :
+ * trasladosEmbebidosDeGasto(…)` que repetía cada lector: prohibido volver a
+ * escribirlo.
+ */
+export function trasladosPagadosDeGasto(g: GastoParaTuaEmbebido): {
+  tua: number;
+  extension: number;
+} {
+  if (categoriaEsDeEmpresa(g.categoria)) return { tua: 0, extension: 0 };
+  if (g.categoria === 'TUAS') {
+    const monto = Number(g.monto);
+    return {
+      tua: Number.isFinite(monto) && monto > 0 ? monto : 0,
+      extension: 0,
+    };
+  }
+  return trasladosEmbebidosDeGasto(g);
+}
+
+/** TUA pagada por UN gasto (en su moneda): `trasladosPagadosDeGasto(g).tua`. */
+export const tuaPagadaDeGasto = (g: GastoParaTuaEmbebido): number =>
+  trasladosPagadosDeGasto(g).tua;

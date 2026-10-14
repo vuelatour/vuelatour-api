@@ -3296,7 +3296,11 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       vuelo, nunca parciales de reparto, `CATS_SIN_TUA_EMBEBIDO` ni
       categorías de EMPRESA (cinturón: los lectores ya las saltaban — las
       extensiones de Roman Zúñiga capturadas como OTRO siguen ENTERAS en
-      «otros gastos»). Topes: TUA ≤ monto, extensión ≤ monto − TUA.
+      «otros gastos»). Topes: TUA ≤ monto, extensión ≤ monto − TUA. Desde
+      el 13-oct-2026 (invariante 66) la TUA sale de UNA prioridad
+      (`gasto.tua_incluida` de oficina > renglón reconocido > `tua_monto`
+      con tabla que cuadra) y «tuas pagadas», Libro Dinero y pre-cierre leen
+      `trasladosPagadosDeGasto` (TUAS entero + la embebida).
     - **Lectores** (todos por la fuente única, ninguno recalcula):
       - Fila del vuelo del Balance (`separarPartes` → `partesDeGasto`): la
         parte extensión NO suma a OPERACIONES ni a OTROS; va en la nota de
@@ -6616,6 +6620,200 @@ PartialType(CreateEscalaDto)`), así que son operación tanto como el
       250 vuelos ⇒ `.in` ≤ 200) y `facturas-emitidas.util.spec` (texto
       nuevo de TOTAL_DISTINTO_VUELO).
 
+66. **TUA SISTÉMICA: UNA PRIORIDAD PARA LA TUA EMBEBIDA (13-oct-2026, API
+    0.0.75, migración `20261013000008`; decisión 2 del lote 2 del
+    13-oct-2026).** Caso #383 (gasto 8c60e428): la IA leyó corrida la tabla
+    resumen de ASUR y llamó «Autobuses» a la Tarifa TUA de $559.63 — nada se
+    separó, la fila del vuelo cargó la TUA como OPERACIONES (costo del avión
+    que no es suyo) y «Otros movimientos» dejó la TUAS cobrada sin egreso. Y
+    #118 (45007a9c, ago): sus renglones no cuadran por $29.71 y su TUA nunca
+    se separó.
+    - **Prioridad ÚNICA** (`common/desglose-gasto.util.ts#partesDeGasto`,
+      moneda del gasto, IVA incluido, base = monto − propina):
+      `gasto.tua_incluida` (OFICINA; 0 = sin TUA: esa parte vuelve a
+      Operación y FBO/extensión de la lectura se conservan; > 0 = esa TUA,
+      topada a la base, aunque los renglones no cuadren, y FBO/extensión de
+      la lectura se RECORTAN al resto: la TUA manda; con 0 y sin lectura que
+      separe ⇒ null) > renglón reconocido (`esTua`/`CLAVES_TUA`, sin cambio)
+      > `valor_ia_extraido.tua_monto` (la TUA con IVA que la IA leyó APARTE;
+      `desgloseGastoPartes(…, { tuaMonto })`) SOLO si ningún renglón es TUA,
+      0 < tua_monto ≤ total + 0.05 y la tabla CUADRA (formas a/b de siempre;
+      ya trae IVA: jamás × 1.16). Sin renglones válidos o con tabla que no
+      cuadra ⇒ nada: pyservices vacía la tabla que no suma
+      (`validar_suma_conceptos`) y separar con la señal sola sería reparar
+      una lectura rota (regla del 26-ago, caso #118). Orden deliberado de
+      `partesDeGasto`: conceptos → respaldo por notas → nada. Sin
+      `tua_incluida` ni `tua_monto`, byte-idéntico (it.each sobre TODAS las
+      fixtures de siempre).
+    - **Las exclusiones de `trasladosEmbebidosDeGasto` GANAN aun con
+      override** (sin vuelo, parcial de reparto, `CATS_SIN_TUA_EMBEBIDO`,
+      categorías de EMPRESA).
+    - **«TUA pagada» = `trasladosPagadosDeGasto(g).tua`** (empresa ⇒ 0;
+      `TUAS` ⇒ el gasto ENTERO; si no, la embebida con override;
+      `tuaPagadaDeGasto` = su `.tua`): fuente única de «tuas pagadas»
+      («Otros movimientos»), del Libro Dinero y del pre-cierre — prohibido
+      volver a escribir el ternario `categoria === 'TUAS' ? … :
+      trasladosEmbebidosDeGasto(…)`. La fila del vuelo (`separarPartes` →
+      `partesDeGasto`) y el reparto (`computeAvion` →
+      `trasladosEmbebidosDeGasto(g)`, fila informativa «TUA embebido
+      (excluido)» y costo DIRECTO) ven el override SIN cambio de lógica:
+      `tua_pagado_mxn`, «tuas pagadas» y «TUA embebido (excluido)» son el
+      MISMO número.
+    - **`gasto.tua_incluida` es de OFICINA**: PILOTO/MECANICO/VISITANTE la
+      PIERDEN en el controller y en el service (alta y PATCH; jamás un 400
+      por un campo que su app no ve). Solo en `CATEGORIAS_TUA_INCLUIDA` =
+      OPERACIONES, ATERRIZAJE, FBO (subconjunto de donde
+      `trasladosEmbebidosDeGasto` separa; el panel la COPIA con test de
+      paridad; en prod solo OPERACIONES trae renglones TUA) y ≤ monto −
+      propina, validado sobre el estado FUSIONADO (reglas PURAS en
+      `expenses/tua-incluida.util.ts`: `errorTuaIncluidaAlta`,
+      `decidirTuaIncluidaEnUpdate`, `celdasTuaExcel`). DTO: `tua_incluida?:
+      number | null` (≥ 0, 2 decimales; `@Type(() => Number)` conserva el
+      null con `enableImplicitConversion`). PATCH: ausente = no tocar; null =
+      volver a la lectura de la IA; 0 = sin TUA. Errores (`{ message, error,
+      details }`): 400 `TUA_INCLUIDA_NO_APLICA` «La categoría «Comida» no
+      lleva TUA incluida: solo las facturas de aeropuerto (Operaciones,
+      Aterrizaje o FBO). Déjala vacía o cambia la categoría.» (la categoría
+      se revisa ANTES que el importe; `details {categoria}`); 400
+      `TUA_INCLUIDA_MAYOR_QUE_TICKET` «La TUA incluida ($600 MXN) no puede
+      ser mayor que el monto del ticket ($559.63 MXN, sin propina).»
+      (`details {tua_incluida, base, moneda, vigente: false}`) o, cuando la
+      OFICINA baja el monto bajo la TUA vigente sin tocarla, «Este gasto
+      tiene una TUA incluida de $559.63 MXN fijada por la oficina y el nuevo
+      monto del ticket ($500 MXN, sin propina) es menor: corrige o vacía
+      «TUA incluida en este gasto» en el mismo guardado.» (`vigente: true`);
+      409 `TUA_INCLUIDA_NO_DISPONIBLE` «La TUA incluida todavía no se puede
+      guardar: falta aplicar la migración 20261013000008. Mientras tanto la
+      TUA se separa solo con la lectura de la IA.» (`details {migracion}`)
+      si llega un NÚMERO sin la migración (null sin ella = no-op); 409 «La
+      TUA incluida no puede ser negativa.» si el CHECK responde 23514
+      (`mensajeCheckGasto`, primera rama). **Limpieza automática** (null +
+      warn; la bitácora registra el cambio) en un PATCH SIN la llave con una
+      TUA vigente > 0: la categoría efectiva ya no la admite o cambió la
+      MONEDA del gasto (la cifra estaba en la moneda vieja: USD y MXN nunca
+      se mezclan) — todos los roles —, o un rol de campo bajó el monto bajo
+      ella. Un 0 vigente nunca se limpia solo. Un PATCH que no toca nada de
+      eso no lee el gasto vigente ni decide. **No es dinero del banco**: no
+      entra a `cambiaDineroDelGasto` (se corrige con el gasto conciliado), al
+      candado del reparto manual ni al auto-cruce.
+    - **Sonda ÚNICA** `common/tua-incluida-disponible.util.ts`
+      (`tuaIncluidaDisponible`, `colTuaIncluida`, `MIGRACION_TUA_INCLUIDA` =
+      `20261013000008`; patrón `columnaOpcional`). **REGLA DURA: todo
+      select/insert/update que nombre `gasto.tua_incluida` va detrás**:
+      Gastos `cols()`/`listCols()` (los 8 selects de `expenses.service`:
+      list, findById, darVistoBueno, releerGasto, insert, replay
+      idempotente, update y listOtrosGastos), la consulta de gastos de
+      vuelos del balance (`buildPayload`), «Otros movimientos», Libro
+      Dinero, reparto (`fetchGastos`) y pre-cierre. NO la leen (nunca
+      separan TUA): gastos del avión sin vuelo, combustible y el embed de
+      `gasto_reparto`. Sin la migración todo como el 0.0.74. El «sí» se
+      memoriza: tras el ROLLBACK de la migración hay que reiniciar el API.
+      Las consultas con el select dinámico se tipan a mano (`as unknown
+      as …`). OJO specs: la sonda es un `from('gasto').select('tua_incluida')
+      .limit(1)` más; los fakes con resultados EN COLA por tabla deben
+      contestarla sin consumir la cola (patrón de
+      `expenses.service.cas.spec`).
+    - **Aditivos (el panel trata cada uno como opcional)**: `GET
+      /v1/expenses` y `GET /v1/expenses/:id` ⇒ `tua_incluida` (string |
+      number | null; la LLAVE solo existe con la migración) y
+      `tua_detectada_ia` (number | null: lo que separa la LECTURA, ignorando
+      el override; lo suma `findById`, así que también viaja en lo que éste
+      relee — el PATCH sin campos de negocio y `details.actual` del 409
+      `CONFLICTO_VERSION`, que la app fusiona `{...copia, ...actual}`).
+      Lectura de comprobantes (`VisionService.readGastoTicket`: `POST
+      /v1/vision/gasto-ticket` y `POST /v1/expenses/:id/reanalizar-ia`) ⇒
+      `tua_monto` (eco de pyservices) y `tua_detectada` (siempre que la
+      lectura sea legible con monto; la vista previa no conoce categoría ni
+      vuelo); `desglose_lineas` se arma con la señal y viaja con ≥ 2
+      conceptos (como hoy) o, con `tua_monto`, con ≥ 2 líneas («Operación -
+      $1365.64 MXN», «TUA (IVA incluido) - $559.63 MXN»). El alta y el
+      enriquecimiento IA usan la señal en el bloque «Desglose:» de las
+      notas; las notas YA guardadas NO se reescriben. Excel de gastos
+      (`GET /v1/expenses/export`): «TUA incluida» (money: la TUA que separan
+      los libros; 0.00 si la oficina fijó «sin TUA»; vacía si nada) y
+      «Origen TUA» («Oficina» | «IA» | vacío) JUSTO después de «Monto»
+      («Capturado» se corre dos lugares). Nota del balance (fila del vuelo):
+      «TUA (IVA incluido) $700.00** (fijada por oficina)» cuando la TUA es de
+      oficina (`SUFIJO_TUA_FIJADA_OFICINA`) y «TUA: 0 (fijada por oficina)»
+      (`NOTA_TUA_CERO_OFICINA`, `tuaAnuladaPorOficina`) cuando la oficina
+      anuló una TUA que la IA sí separaba; sin `tua_incluida`, texto
+      byte-idéntico. El payload a pyservices NO cambia de forma.
+    - **Pre-cierre `tua_cobrada_sin_pagada`** (fuente PURA
+      `profit-sharing/tua-cobrada-sin-pagada.util.ts`): «Vuelos con TUA
+      cobrada al cliente sin TUA pagada», NO bloqueante (fuera de
+      `bloqueantes`, sin `informativo`), JUSTO después de
+      `vuelos_sin_gasto_operaciones`. Universo: COMPLETADO del periodo
+      (cortes Cancún), PROPIOS (`es_externo` ≠ true) con
+      `particionIngresoVuelo(v).tuas_usd > 0` (pre-IVA; FUENTE ÚNICA de la
+      TUA cobrada, prohibido leer `vuelo.tuas_usd` o el snapshot a mano; las
+      particiones `inconsistente` ENTRAN: «Otros movimientos» también lista
+      sus líneas TUAS) y SIN ningún gasto con `vuelo_id` = el vuelo (de
+      CUALQUIER fecha: la factura del aeropuerto llega días después) con
+      `tuaPagadaDeGasto > 0` (existencia, no se convierte moneda). Externos
+      y cancelados fuera. Forma: `{ clave, titulo, detalle, count,
+      monto_usd (Σ tua_cobrada_usd, round2), vuelos [{id, folio,
+      fecha_vuelo, matricula | null, tua_cobrada_usd}] por fecha_vuelo (folio
+      de desempate, sin fecha al final), lectura_fallida }`. Lectura
+      (`vuelosTuaCobradaSinPagada`) en lotes de ≤ 200 ids y PAGINADA
+      (`leerEnLotesPaginado`, anti-cap-1000), sin filtro de fecha ni de
+      categoría (la regla vive en el util; filtrar enums en la consulta
+      arriesga un 22P02); lectura caída ⇒ count 0, monto_usd 0,
+      `lectura_fallida: true` y «No se pudo verificar la TUA pagada…». Sin
+      «descartar» (como `vuelos_sin_gasto_operaciones`).
+    - **Avisos al cliente (con el deploy)**: (a) capturar la TUA incluida (o
+      «Reanalizar con IA» + guardar) en un gasto VIEJO mueve la TUA de
+      OPERACIONES a «Otros movimientos» en el mes de ESE gasto — septiembre
+      ya cerrado incluido (no existe candado de mes cerrado para gastos) —, y
+      el reparto ya entregado puede moverse; (b) el primer pre-cierre
+      estrenará el renglón (estimado por SELECT del 13-oct: agosto #132,
+      #169, #172, #198 y #118; septiembre #192, #210, #226, #293, #329;
+      octubre #384, #417); algunos pueden ser TUA pagada en ventanilla sin
+      factura (el aviso queda vivo); (c) un 0 de oficina manda sobre lecturas
+      futuras (volver a la IA = vaciar el campo y guardar); (d) un
+      `tua_monto` con renglones vacíos o que no cuadran NO separa: queda el
+      paso manual (el panel enseña «La IA leyó una TUA de $X…»); (e) «la TUA
+      manda» recorta FBO/extensión de la lectura cuando la cifra de oficina
+      no cabe junto a ellos (factura 1,925 con FOB 300 y TUA 1,800 ⇒ FBO 125).
+    - **Deploy**: pyservices (prompt + `tua_monto`; un API ≤ 0.0.74 ignora la
+      llave y la app/panel la guardan dentro de `valor_ia_extraido`) →
+      migración `20261013000008` (cualquier momento: el API la sondea) → API
+      0.0.75 → panel DESPUÉS del API (con un API viejo o sin la migración el
+      gasto no trae la llave y el campo no se pinta: cero 400 por
+      `forbidNonWhitelisted`). Flutter: sin cambio. Rollback: API ⇒ versión
+      anterior (la columna extra no estorba); la migración solo por el SQL
+      Editor exportando antes las TUA fijadas y reiniciando el API.
+    - Specs: `desglose-gasto.util.spec` (señal `tua_monto` con #383, forma a
+      sin × 1.16, #118 que no cuadra, mayor que el total, renglón nombrado
+      que manda; override con #383/#118/mixta/#314/USD/propina; exclusiones;
+      helpers; it.each de regresión con opciones neutras),
+      `tua-incluida-disponible.util.spec` (42703 y PGRST204 ⇒ false con
+      re-sondeo, memoria del «sí», `colTuaIncluida`),
+      `expenses/tua-incluida.util.spec` (textos exactos, alta, tabla de
+      decisiones del PATCH, celdas del Excel), `expenses/dto/expenses.dto.
+      spec` (559.63, 0, «559.63», null ≠ 0, −1/abc/1.234 ✗, alta y PATCH),
+      `medio-tarjeta.util.spec` (CHECK negativo),
+      `expenses.service.tua-incluida.spec` (alta oficina/piloto/campo,
+      400/409 sin insertar, null sin migración, PATCH null / solo la TUA /
+      reclasificar / moneda / piloto baja el monto / oficina baja el monto /
+      COMIDA / conciliado sin consultar cargos / solo notas, sonda en false
+      sin nombrar la columna, `tua_detectada_ia`, Excel y «Desglose:» con la
+      señal), `vision.service.tua-monto.spec` (#383, sin señal, renglón que
+      manda, un renglón + señal, pyservices previo idéntico salvo
+      `tua_detectada`), `aircraft-balance.service.tua-incluida.spec` (#383
+      con señal: el MISMO número en la fila y en «tuas pagadas»; 0 de
+      oficina con su nota; 700 con «(fijada por oficina)»; OTRO; USD 185;
+      GOLDEN con y sin la migración idéntico y solo dos lecturas nombran la
+      columna), `dinero-report.service.tua-incluida.spec` (0 sin egreso, 700
+      apareado, empresa 0, sonda en false),
+      `profit-sharing.service.tua-incluida.spec` (700 ⇒ fila informativa y
+      costo − 700; 0 sobre «Tarifa TUA» ⇒ costo entero; select de
+      `fetchGastos` según la sonda), `tua-cobrada-sin-pagada.util.spec`
+      (universo, TUA pagada, orden, textos) y
+      `profit-sharing.service.pre-cierre-tua-cobrada.spec` (BD en memoria
+      max-rows 1000: posición, `monto_usd`, no bloquea, gasto de otro mes,
+      consulta sin fecha ni categoría, anti-cap [0,999]/[1000,1999], externo
+      y cancelado, lectura fallida, sonda en false).
+
 ## Convenciones NestJS
 
 - **Orden de rutas**: las rutas literales (`taco-live`, `descansos`,
@@ -7347,6 +7545,38 @@ mantenimientos, errores, huerfanos_borrados, desde, hasta, nota}`; nunca
 
 ## Migraciones y despliegue
 
+- **PENDIENTE (lote 2 del 13-oct-2026) — `20261013000008_gasto_tua_incluida.sql`**
+  (invariante 66, TUA sistémica; era la 000003 del diseño, renumerada: la
+  000003 es la categoría COMISION_VENDEDOR_AVION; NO aplicada: la aplica el
+  orquestador por el MCP). `gasto.tua_incluida numeric(14,2) NULL` + CHECK
+  `gasto_tua_incluida_check` (null o ≥ 0) + COMMENT + `tg_gasto_bitacora`
+  reemplazada (texto de 20260901000001 + 'tua_incluida' en su lista de
+  columnas de negocio; la rama del borrado escribe `tg_op`, así que el
+  CUERPO no lleva palabras destructivas y el MCP lo acepta; el trigger no se
+  recrea) + verificación `do $ver$` que aborta si algo no quedó. Dry-run de
+  su cabecera por `execute_sql` (UN bloque `do $dry$`, el cuerpo YA va
+  pegado: A contexto —sin la columna, la función de prod = la de
+  20260901000001, un OPERACIONES con vuelo sin conciliar ni factura y un
+  ADMIN activo—, B cuerpo, C0 re-aplicar = no-op ANTES de cualquier fila de
+  prueba (1 CHECK), C1 estructura, C2–C7 UPDATE REALES —559.63 ⇒ 0 ⇒ null
+  con su bitácora y actor, −1 ⇒ 23514, el mismo valor no deja renglón, notas
+  sin nombrarla—, C8 alta REAL con 250 ⇒ `DRYRUN_OK 20261013000008 · A–C8`)
+  ⇒ comprobar (columna 0, residuos `DRYRUN-20261013000008` 0) ⇒
+  `apply_migration` (name `20261013000008_gasto_tua_incluida`, SOLO el
+  cuerpo entre «>>> CUERPO» y «<<< CUERPO»; si el filtro lo rechazara: SQL
+  Editor + registro en `supabase_migrations.schema_migrations` como
+  20261012000002) ⇒ `get_advisors` ⇒ `select count(*) from public.gasto
+  where tua_incluida is not null` = 0. Correr el dry-run fuera de horas de
+  captura intensa (el ALTER toma un candado breve sobre `gasto`). Ensayada en
+  PGlite (13-oct-2026, esquema de `gasto` + sus 4 triggers REALES + `origen`):
+  `DRYRUN_OK` sin residuos (huella md5 de gasto y conteo de bitácora
+  iguales), aplicar dos veces idempotente (1 CHECK), dry-run sobre la
+  aplicada ⇒ `DRYRUN_FALLA A`, −5 ⇒ CHECK, UPDATE con su diff y actor, y un
+  borrado real deja la acción DELETE vía `tg_op`. **Sin dependencia dura**:
+  el API 0.0.75 es desplegable antes o después (sonda; un número sin la
+  migración ⇒ 409 `TUA_INCLUIDA_NO_DISPONIBLE`). Rollback SOLO por el SQL
+  Editor (pie del archivo), exportando antes las TUA fijadas y reiniciando
+  el API después (la sonda memoriza el «sí»).
 - **13-oct-2026 — SIN migración** para la bandeja «Por facturar» (caso
   #376, invariante 65): `vuelo.factura_estatus` existe desde
   `20260923000001` y el puente `factura_emitida_vuelo` desde
@@ -8248,6 +8478,17 @@ ok3b · ok3c · ok4 · ok5 · ok6 · ok7 · DRYRUN_OK`, con
   memoria en silencio y producción sigue con la imagen anterior — 28-ago).
 
 ## Pendientes conocidos (no implementar sin decisión del cliente)
+
+- **TUA sistémica (13-oct-2026, invariante 66) — decisiones del cliente**:
+  (a) el renglón del pre-cierre `tua_cobrada_sin_pagada` no tiene
+  «descartar»: una TUA pagada en ventanilla sin factura deja el aviso vivo
+  (marcarla exigiría una columna nueva, como `vuelos_sin_gasto_operaciones`);
+  (b) no existe candado de mes cerrado para gastos: capturar la TUA incluida
+  (o reanalizar + guardar) en un gasto viejo mueve el balance y el reparto de
+  ESE mes (septiembre incluido) — avisar antes de regenerar un cierre;
+  (c) un `tua_monto` con renglones que no cuadran NO separa (paso manual en
+  «Verificar / editar»); separar con la señal sola se descartó a propósito
+  (repararía lecturas rotas, caso #118).
 
 - **Comisión del vendedor en DOS categorías (13-oct-2026, invariante 61)**
   — lo que el ajuste NO resuelve (decírselo al cliente): (1) **Libro Dinero

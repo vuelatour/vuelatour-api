@@ -24,8 +24,13 @@ import { round6, totalMxnDeVuelo } from '../../common/tc.util';
 import {
   CONCEPTO_EXTENSION_PAGADA,
   esExtension,
-  trasladosEmbebidosDeGasto,
+  trasladosPagadosDeGasto,
 } from '../../common/desglose-gasto.util';
+// «TUA incluida» de la oficina (13-oct-2026, invariante 66): sonda ÚNICA.
+import {
+  colTuaIncluida,
+  tuaIncluidaDisponible,
+} from '../../common/tua-incluida-disponible.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import { esVueloDeServicio } from '../../common/vuelo-servicio.util';
 import {
@@ -221,6 +226,9 @@ export class DineroReportService {
     >;
     const vueloIds = vuelosPeriodo.map((v) => v.id as string);
 
+    // TUA de oficina (13-oct-2026, invariante 66): UNA lectura de la sonda
+    // antes del lote; solo la consulta de gastos de los vuelos la usa.
+    const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
     const [
       aeronavesRes,
       clientesRes,
@@ -266,7 +274,7 @@ export class DineroReportService {
         ? sb
             .from('gasto')
             .select(
-              'vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, notas, valor_ia_extraido',
+              `vuelo_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, notas, valor_ia_extraido${colTua}`,
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve({ data: [], error: null } as const),
@@ -399,7 +407,8 @@ export class DineroReportService {
       );
     }
     const gastosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
-    for (const g of (gastosVuelo.data ?? []) as Array<
+    // Select dinámico (con o sin `tua_incluida`): la fila se declara a mano.
+    for (const g of (gastosVuelo.data ?? []) as unknown as Array<
       Record<string, unknown>
     >) {
       const vid = g.vuelo_id as string;
@@ -967,18 +976,18 @@ export class DineroReportService {
         // egreso aquí la contaría DOS VECES en el mismo libro. (TUAS no es
         // categoría de empresa: su apareo cobrado↔pagado sigue igual.)
         if (categoriaEsDeEmpresa(g.categoria as string | null)) continue;
-        const monto = num(g.monto) ?? 0;
-        const traslados =
-          g.categoria === 'TUAS'
-            ? { tua: monto, extension: 0 }
-            : trasladosEmbebidosDeGasto({
-                vuelo_id: g.vuelo_id as string | null,
-                categoria: g.categoria as string | null,
-                monto: g.monto as string | number | null,
-                propina: g.propina as string | number | null,
-                valor_ia_extraido: g.valor_ia_extraido,
-                notas: (g.notas as string | null) ?? null,
-              });
+        // FUENTE ÚNICA de la TUA pagada (13-oct-2026, invariante 66): TUAS =
+        // el gasto entero; el resto = la embebida con la TUA de la oficina.
+        const traslados = trasladosPagadosDeGasto({
+          vuelo_id: g.vuelo_id as string | null,
+          categoria: g.categoria as string | null,
+          monto: g.monto as string | number | null,
+          propina: g.propina as string | number | null,
+          valor_ia_extraido: g.valor_ia_extraido,
+          notas: (g.notas as string | null) ?? null,
+          tua_incluida:
+            (g.tua_incluida as string | number | null | undefined) ?? null,
+        });
         if (traslados.tua > 0) {
           const parteMxn = pagadoAMxn(traslados.tua, g);
           if (parteMxn == null) {

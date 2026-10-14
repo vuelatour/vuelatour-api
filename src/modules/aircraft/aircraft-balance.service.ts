@@ -41,10 +41,20 @@ import { totalMxnDeVuelo } from '../../common/tc.util';
 import {
   CATS_SIN_TUA_EMBEBIDO,
   CONCEPTO_EXTENSION_PAGADA,
+  NOTA_TUA_CERO_OFICINA,
+  SUFIJO_TUA_FIJADA_OFICINA,
   esExtension,
   partesDeGasto,
-  trasladosEmbebidosDeGasto,
+  trasladosPagadosDeGasto,
+  tuaAnuladaPorOficina,
+  tuaIncluidaDe,
 } from '../../common/desglose-gasto.util';
+// «TUA incluida» de la oficina (13-oct-2026, invariante 66): sonda ÚNICA de
+// `gasto.tua_incluida` (solo las lecturas que alimentan la separación).
+import {
+  colTuaIncluida,
+  tuaIncluidaDisponible,
+} from '../../common/tua-incluida-disponible.util';
 import { fetchRepartos } from '../../common/gasto-reparto.util';
 import {
   cobradoParteAvion,
@@ -342,7 +352,15 @@ interface GastoRow {
   /** Lectura IA de la factura: conceptos para separar el TUA embebido. */
   valor_ia_extraido: {
     conceptos?: Array<{ concepto: string; monto: number }>;
+    /** TUA CON IVA leída aparte por la IA (13-oct-2026). */
+    tua_monto?: number | null;
   } | null;
+  /**
+   * TUA (IVA incluido) que fijó la OFICINA (13-oct-2026, migración
+   * 20261013000008): manda sobre la lectura (`partesDeGasto`). Solo la trae
+   * la consulta de gastos de vuelos, detrás de la sonda.
+   */
+  tua_incluida?: string | number | null;
   /** Clon parcial del reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
   /**
@@ -1803,6 +1821,9 @@ export class AircraftBalanceService {
     }
     const vueloIds = vuelos.map((v) => v.id);
 
+    // TUA de oficina (13-oct-2026, invariante 66): SOLO la consulta de gastos
+    // de vuelos la lee (es la única que separa TUA en la fila del vuelo).
+    const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
     const vacio = { data: [], error: null } as const;
     const [
       escalasRes,
@@ -1839,7 +1860,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido, proveedor:proveedor_id(nombre)',
+              `id, vuelo_id, escala_id, categoria, monto, propina, moneda, tc_gasto, litros, fecha_gasto, notas, lugar, medio_pago, tarjeta_terminacion, aeronave_id, inventario_movimiento_id, valor_ia_extraido${colTua}, proveedor:proveedor_id(nombre)`,
             )
             .in('vuelo_id', vueloIds)
             .order('fecha_gasto', { ascending: true })
@@ -2919,6 +2940,12 @@ export class AircraftBalanceService {
           // OTROS, TUA y extensión de horario → solo nota); sin desglose, la
           // categoría decide la columna completa como siempre.
           const sep = separarPartes();
+          // TUA de la OFICINA (13-oct-2026, invariante 66): la nota dice
+          // cuándo la TUA la fijó la oficina y cuándo anuló («0») una que la
+          // IA sí separaba. Sin `tua_incluida`, el texto es byte-idéntico.
+          const marcaTua =
+            tuaIncluidaDe(g) !== null ? SUFIJO_TUA_FIJADA_OFICINA : '';
+          const tuaAnulada = tuaAnuladaPorOficina(g);
           if (sep) {
             // Espejo EXACTO del desglose impreso en las notas del gasto
             // (Operación / TUA (IVA incluido) / Extensión de horario (IVA
@@ -2934,9 +2961,10 @@ export class AircraftBalanceService {
                 ? `FBO $${fmtMonto(sep.fboParte)} (en OTROS)`
                 : null,
               sep.tuaParte > 0
-                ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
+                ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**${marcaTua}`
                 : null,
               trozoExt,
+              tuaAnulada ? NOTA_TUA_CERO_OFICINA : null,
             ]
               .filter(Boolean)
               .join(' · ');
@@ -2966,7 +2994,7 @@ export class AircraftBalanceService {
                       ? `FBO $${fmtMonto(sep.fboParte)} (la operación va en OPERACIONES)`
                       : `FBO $${fmtMonto(sep.fboParte)}`,
                     sep.opParte <= 0 && sep.tuaParte > 0
-                      ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**`
+                      ? `TUA (IVA incluido) $${fmtMonto(sep.tuaParte)}**${marcaTua}`
                       : null,
                     sep.opParte <= 0 ? trozoExt : null,
                   ]
@@ -2986,10 +3014,28 @@ export class AircraftBalanceService {
             // (13-oct-2026, invariante 63): entero, con su línea en
             // `otros_detalle` («Comisariato · <proveedor/nota> — $X»).
             otrosMxn = (otrosMxn ?? 0) + mxn;
-            otrosDetalle.push(lineaDetalle(g, mxn, sufijo));
+            otrosDetalle.push(
+              tuaAnulada
+                ? lineaDetalle(
+                    g,
+                    mxn,
+                    sufijo,
+                    `$${fmtMonto(mxn)} · ${NOTA_TUA_CERO_OFICINA}`,
+                  )
+                : lineaDetalle(g, mxn, sufijo),
+            );
           } else {
             sumarOp(g, mxn);
-            opDetalle.push(lineaDetalle(g, mxn, sufijo));
+            opDetalle.push(
+              tuaAnulada
+                ? lineaDetalle(
+                    g,
+                    mxn,
+                    sufijo,
+                    `$${fmtMonto(mxn)} · ${NOTA_TUA_CERO_OFICINA}`,
+                  )
+                : lineaDetalle(g, mxn, sufijo),
+            );
           }
         }
       }
@@ -5085,6 +5131,9 @@ export class AircraftBalanceService {
     const vuelos = (vuelosData ?? []) as Array<Record<string, unknown>>;
     const vueloIds = vuelos.map((v) => v.id as string);
 
+    // TUA de oficina (13-oct-2026, invariante 66): la lee la consulta de
+    // gastos de los vuelos (las «tuas pagadas» salen de ella).
+    const colTua = colTuaIncluida(await tuaIncluidaDisponible(sb));
     const vacio = { data: [], error: null } as const;
     const [
       avionesRes,
@@ -5099,7 +5148,7 @@ export class AircraftBalanceService {
         ? sb
             .from('gasto')
             .select(
-              'vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, valor_ia_extraido',
+              `vuelo_id, aeronave_id, categoria, monto, propina, moneda, tc_gasto, fecha_gasto, lugar, notas, valor_ia_extraido${colTua}`,
             )
             .in('vuelo_id', vueloIds)
         : Promise.resolve(vacio),
@@ -5168,7 +5217,11 @@ export class AircraftBalanceService {
       ]),
     );
     const gastosPorVuelo = new Map<string, Array<Record<string, unknown>>>();
-    for (const g of (gastosRes.data ?? []) as Array<Record<string, unknown>>) {
+    // Select dinámico (con o sin `tua_incluida`): supabase-js no puede tipar
+    // la fila, se declara a mano.
+    for (const g of (gastosRes.data ?? []) as unknown as Array<
+      Record<string, unknown>
+    >) {
       const vid = g.vuelo_id as string;
       (gastosPorVuelo.get(vid) ?? gastosPorVuelo.set(vid, []).get(vid)!).push(
         g,
@@ -5365,19 +5418,21 @@ export class AircraftBalanceService {
         // la extensión de horario (las de Roman Zúñiga capturadas como OTRO
         // se quedan en «otros gastos»).
         if (CAT_EMPRESA.has((g.categoria as string | null) ?? '')) continue;
-        const monto = num(g.monto) ?? 0;
-        const traslados =
-          g.categoria === 'TUAS'
-            ? { tua: monto, extension: 0 }
-            : trasladosEmbebidosDeGasto({
-                vuelo_id: (g.vuelo_id as string | null) ?? null,
-                categoria: (g.categoria as string | null) ?? null,
-                monto: g.monto as string | number | null,
-                propina: g.propina as string | number | null,
-                valor_ia_extraido: g.valor_ia_extraido,
-                es_reparto_parcial: g.es_reparto_parcial === true,
-                notas: (g.notas as string | null) ?? null,
-              });
+        // FUENTE ÚNICA de las «tuas pagadas» (13-oct-2026, invariante 66):
+        // TUAS = el gasto entero; el resto = la embebida con la TUA de la
+        // oficina (`trasladosPagadosDeGasto`; prohibido volver a escribir el
+        // ternario TUAS / embebida).
+        const traslados = trasladosPagadosDeGasto({
+          vuelo_id: (g.vuelo_id as string | null) ?? null,
+          categoria: (g.categoria as string | null) ?? null,
+          monto: g.monto as string | number | null,
+          propina: g.propina as string | number | null,
+          valor_ia_extraido: g.valor_ia_extraido,
+          es_reparto_parcial: g.es_reparto_parcial === true,
+          notas: (g.notas as string | null) ?? null,
+          tua_incluida:
+            (g.tua_incluida as string | number | null | undefined) ?? null,
+        });
         if (traslados.tua > 0) {
           const parteMxn = gastoMxn(g, traslados.tua);
           if (parteMxn == null) {

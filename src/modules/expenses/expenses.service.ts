@@ -15,7 +15,25 @@ import {
   CONFIG_DIAS_GRACIA_GASTOS_SEMANA,
   ConfiguracionService,
 } from '../configuracion/configuracion.service';
-import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import {
+  desgloseGastoLineas,
+  tuaDetectadaIa,
+  tuaIncluidaDe,
+  tuaMontoDeIa,
+} from '../../common/desglose-gasto.util';
+// «TUA incluida en este gasto» (13-oct-2026, TUA sistémica, invariante 66):
+// sonda ÚNICA de la columna y reglas puras del campo de oficina.
+import {
+  MIGRACION_TUA_INCLUIDA,
+  tuaIncluidaDisponible,
+} from '../../common/tua-incluida-disponible.util';
+import {
+  CODIGO_TUA_INCLUIDA,
+  MENSAJE_TUA_INCLUIDA_NO_DISPONIBLE,
+  celdasTuaExcel,
+  decidirTuaIncluidaEnUpdate,
+  errorTuaIncluidaAlta,
+} from './tua-incluida.util';
 import {
   SEGUNDOS_URL_MINIATURA,
   SEGUNDOS_URL_PUNTUAL,
@@ -165,7 +183,9 @@ function quitarAvisoAvionTramo(
 // capturó y folio del vuelo (para linkear al detalle). `compra` = la compra
 // de refacciones de la que este gasto es un PAGO (28-ago): el equipo la ve
 // como "un solo gasto"; se liga/desliga SOLO desde /v1/compras.
-const LIST_COLS = `${COLS}, proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))`;
+const LIST_EMBEDS =
+  ', proveedor:proveedor!proveedor_id(nombre), aeronave:aeronave!aeronave_id(matricula), captura:usuario!usuario_captura_id(nombre), verificador:usuario!gasto_verificado_por_fkey(nombre), vuelo:vuelo!vuelo_id(folio), repartos:gasto_reparto(aeronave_id, monto, aeronave:aeronave_id(matricula)), compra:compra!compra_id(id, folio, referencia, estado, proveedor:proveedor!proveedor_id(nombre))';
+const LIST_COLS = `${COLS}${LIST_EMBEDS}`;
 
 /**
  * Medios de pago que cruzan con el banco: los únicos cuyos gastos pueden
@@ -249,6 +269,29 @@ export class ExpensesService {
       );
   }
 
+  /**
+   * Columnas de `gasto` que lee/devuelve este servicio: `COLS` + la columna
+   * `tua_incluida` SOLO con la migración 20261013000008 aplicada (sonda
+   * ÚNICA, REGLA DURA de la invariante 66). El cast conserva el tipo
+   * literal (patrón `aeronaveCols()` de aircraft.service).
+   */
+  private async cols(): Promise<typeof COLS> {
+    return (
+      (await tuaIncluidaDisponible(this.supabase.service))
+        ? `${COLS}, tua_incluida`
+        : COLS
+    ) as typeof COLS;
+  }
+
+  /** `LIST_COLS` con `tua_incluida` detrás de la sonda (ver `cols()`). */
+  private async listCols(): Promise<typeof LIST_COLS> {
+    return (
+      (await tuaIncluidaDisponible(this.supabase.service))
+        ? `${COLS}, tua_incluida${LIST_EMBEDS}`
+        : LIST_COLS
+    ) as typeof LIST_COLS;
+  }
+
   /** Gastos por avión/categoría en Excel (respeta los filtros del listado). */
   async listXlsx(filters: ListGastosQuery): Promise<Buffer> {
     const { data } = await this.list({ ...filters, limit: 5000, offset: 0 });
@@ -275,6 +318,11 @@ export class ExpensesService {
       { label: 'Facturación' },
       { label: 'Moneda' },
       { label: 'Monto', tipo: 'money' },
+      // TUA (13-oct-2026, invariante 66): la que SEPARAN los libros
+      // (`celdasTuaExcel` → `trasladosEmbebidosDeGasto`, prioridad única);
+      // «Oficina» = la fijó la oficina (0 = sin TUA); «IA» = la leyó la IA.
+      { label: 'TUA incluida', tipo: 'money' },
+      { label: 'Origen TUA' },
       // Momento REAL de captura (7-sep-2026), hora Cancún — aparte de la
       // fecha del consumo. Texto ya formateado: pyservices no formatea fechas.
       { label: 'Capturado' },
@@ -308,6 +356,7 @@ export class ExpensesService {
         etiquetaFacturacion(fact),
         (x.moneda as string) ?? '',
         Number(x.monto),
+        ...celdasTuaExcel(x),
         fechaHoraCancun(
           (x.capturado_en as string | null) ?? (x.created_at as string),
         ),
@@ -375,7 +424,7 @@ export class ExpensesService {
   async list(filters: ListGastosQuery) {
     let q = this.supabase.service
       .from('gasto')
-      .select(LIST_COLS, { count: 'exact' });
+      .select(await this.listCols(), { count: 'exact' });
     // orden=captura (7-sep): "lo último que capturaron" sin importar la fecha
     // del ticket. Default: fecha del consumo y, dentro del día, llegada.
     q =
@@ -453,6 +502,12 @@ export class ExpensesService {
     const rows = (data ?? []) as Array<Record<string, unknown>>;
     await this.anexarPagosDeCompra(rows);
     await this.anexarConciliacionParcial(rows);
+    // ADITIVO (13-oct-2026, invariante 66): la TUA que separa la LECTURA de
+    // la IA, ignorando la de la oficina («La IA detectó una TUA de $X»).
+    // Puro, sin consulta.
+    for (const r of rows) {
+      r.tua_detectada_ia = tuaDetectadaIa(r);
+    }
     return {
       data: rows,
       count: count ?? 0,
@@ -571,12 +626,16 @@ export class ExpensesService {
   async findById(id: string) {
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select(COLS)
+      .select(await this.cols())
       .eq('id', id)
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Gasto ${id} not found`);
-    return data;
+    // ADITIVO (13-oct-2026): la TUA que detecta la lectura de la IA.
+    return {
+      ...data,
+      tua_detectada_ia: tuaDetectadaIa(data),
+    };
   }
 
   /**
@@ -1206,7 +1265,7 @@ export class ExpensesService {
         updated_by: userId,
       })
       .eq('id', id)
-      .select(LIST_COLS)
+      .select(await this.listCols())
       .maybeSingle();
     if (error) throw new Error(error.message);
     if (!data) throw new NotFoundException(`Gasto ${id} not found`);
@@ -1482,7 +1541,7 @@ export class ExpensesService {
   ): Promise<Record<string, unknown> | null> {
     const { data } = await this.supabase.service
       .from('gasto')
-      .select(COLS)
+      .select(await this.cols())
       .eq('id', id)
       .maybeSingle();
     return data ?? null;
@@ -1518,6 +1577,11 @@ export class ExpensesService {
         error: 'MEDIO_SOLO_OFICINA',
       });
     }
+    // «TUA incluida en este gasto» (13-oct-2026, invariante 66) es de
+    // OFICINA: un rol de campo la pierde aquí (cinturón del controller),
+    // jamás un 400 por un campo que su app no ve.
+    if (rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE)
+      delete dto.tua_incluida;
     // VISITANTE (27-ago): SOLO gastos de visita — la categoría se fija en
     // VISITA sin fricción (la app ni la muestra) y el medio queda acotado a
     // su fondo (EFECTIVO) o su tarjeta corporativa.
@@ -1671,14 +1735,18 @@ export class ExpensesService {
         monto: Number(c.monto),
       }))
       .filter((c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0);
-    if (conceptos.length >= 2) {
-      // El desglose cuadra contra el TICKET (monto − propina): la propina
-      // de terminal no aparece en los renglones impresos.
-      const lineas = desgloseGastoLineas(
-        conceptos,
-        Math.round((dto.monto - (dto.propina ?? 0)) * 100) / 100,
-        dto.moneda,
-      );
+    // El desglose cuadra contra el TICKET (monto − propina): la propina de
+    // terminal no aparece en los renglones impresos. Con la TUA que la IA
+    // leyó APARTE (`tua_monto`, 13-oct-2026) un solo renglón que cuadra
+    // también se separa (2+ líneas); sin ella, idéntico a siempre.
+    const tuaMontoIa = tuaMontoDeIa(dto.valor_ia_extraido);
+    const lineas = desgloseGastoLineas(
+      conceptos,
+      Math.round((dto.monto - (dto.propina ?? 0)) * 100) / 100,
+      dto.moneda,
+      { tuaMonto: tuaMontoIa },
+    );
+    if (conceptos.length >= 2 || (tuaMontoIa != null && lineas.length >= 2)) {
       const bloque = `Desglose:\n${lineas.join('\n')}`;
       notas = notas ? `${notas}\n\n${bloque}` : bloque;
     }
@@ -1892,6 +1960,31 @@ export class ExpensesService {
         'La propina no puede ser mayor que el monto total pagado.',
       );
     }
+    // «TUA incluida en este gasto» (13-oct-2026, invariante 66; solo llega
+    // de la oficina): sin la migración un NÚMERO es 409 (jamás un guardado
+    // que se pierde) y un null se omite; con ella, solo en facturas de
+    // aeropuerto y ≤ monto − propina.
+    if (dto.tua_incluida !== undefined) {
+      if (!(await tuaIncluidaDisponible(this.supabase.service))) {
+        if (dto.tua_incluida !== null) {
+          throw new ConflictException({
+            message: MENSAJE_TUA_INCLUIDA_NO_DISPONIBLE,
+            error: CODIGO_TUA_INCLUIDA.NO_DISPONIBLE,
+            details: { migracion: MIGRACION_TUA_INCLUIDA },
+          });
+        }
+        delete dto.tua_incluida;
+      } else {
+        const e = errorTuaIncluidaAlta({
+          tua: dto.tua_incluida,
+          monto: Number(dto.monto),
+          propina: Number(dto.propina ?? 0),
+          categoria: dto.categoria,
+          moneda: dto.moneda,
+        });
+        if (e) throw new BadRequestException(e);
+      }
+    }
     const payload: Record<string, unknown> = {
       usuario_captura_id: capturaId,
       origen,
@@ -1906,6 +1999,11 @@ export class ExpensesService {
       categoria: dto.categoria,
       monto: dto.monto,
       propina: dto.propina ?? 0,
+      // TUA de oficina (13-oct-2026): la llave SOLO viaja si llegó (el alta
+      // de campo y la de siempre jamás la nombran).
+      ...(dto.tua_incluida !== undefined
+        ? { tua_incluida: dto.tua_incluida }
+        : {}),
       moneda: dto.moneda,
       // TC del gasto a 6 decimales (fuente única tc.util, 17-sep-2026): lo
       // que se guarda es lo que convierte. 0/negativo ⇒ null (el CHECK de la
@@ -1963,7 +2061,7 @@ export class ExpensesService {
     const { data, error } = await this.supabase.service
       .from('gasto')
       .insert(payload)
-      .select(COLS)
+      .select(await this.cols())
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
@@ -1993,7 +2091,7 @@ export class ExpensesService {
         ) {
           const { data: existente, error: exErr } = await this.supabase.service
             .from('gasto')
-            .select(COLS)
+            .select(await this.cols())
             .eq('client_request_id', dto.client_request_id)
             .maybeSingle();
           if (!exErr && existente) {
@@ -2365,6 +2463,8 @@ export class ExpensesService {
       ),
       montoTicket,
       (ai.moneda ?? gasto.moneda) as string,
+      // TUA leída APARTE por la IA (13-oct-2026): solo con tabla que cuadra.
+      { tuaMonto: tuaMontoDeIa(ai) },
     );
     const extras = [ai.matricula, ai.proveedor, ai.concepto]
       .filter((v): v is string => !!v && v.trim().length > 0)
@@ -3109,6 +3209,24 @@ export class ExpensesService {
       // temporal `gastos_sin_limite_hasta` también).
       await this.assertCapturaEnSemana(dto.fecha_gasto, rol, userId);
     }
+    // «TUA incluida en este gasto» (13-oct-2026, invariante 66): campo de
+    // OFICINA (un rol de campo la pierde, jamás un 400) y detrás de la
+    // sonda: sin la migración un NÚMERO es 409 y un null se omite. Va ANTES
+    // de `camposNegocio`: un PATCH de campo que solo la trae no escribe nada.
+    const esCampo =
+      rol === Rol.PILOTO || rol === Rol.MECANICO || rol === Rol.VISITANTE;
+    if (esCampo) delete dto.tua_incluida;
+    const conTua = await tuaIncluidaDisponible(this.supabase.service);
+    if (dto.tua_incluida !== undefined && !conTua) {
+      if (dto.tua_incluida !== null) {
+        throw new ConflictException({
+          message: MENSAJE_TUA_INCLUIDA_NO_DISPONIBLE,
+          error: CODIGO_TUA_INCLUIDA.NO_DISPONIBLE,
+          details: { migracion: MIGRACION_TUA_INCLUIDA },
+        });
+      }
+      delete dto.tua_incluida;
+    }
     // Sin campos de negocio (solo sellos/llaves) no hay nada que escribir.
     const camposNegocio = Object.keys(dto).filter(
       (k) => k !== 'capturado_en' && k !== 'client_request_id',
@@ -3148,6 +3266,8 @@ export class ExpensesService {
       lineaSello !== null ||
       // Combustible del avión (invariante 43): se compara contra el VIGENTE.
       dto.tipo_combustible !== undefined ||
+      // TUA de oficina (invariante 66): se valida sobre el estado FUSIONADO.
+      dto.tua_incluida !== undefined ||
       // Pasar a TARJETA_CORP sin terminación: se conserva la que ya tenía
       // el gasto o se sella (voucher IA → tarjeta del capturador).
       (dto.medio_pago === MedioPago.TARJETA_CORP && !dto.tarjeta_terminacion);
@@ -3166,6 +3286,7 @@ export class ExpensesService {
           usuario_captura_id?: string | null;
           valor_ia_extraido?: unknown;
           tipo_combustible?: string | null;
+          tua_incluida?: string | number | null;
         })
       : null;
     // REGLA B (28-ago): el TRAMO manda sobre vuelo y avión del gasto.
@@ -3345,6 +3466,40 @@ export class ExpensesService {
       if (Number(propina) > Number(monto)) {
         throw new BadRequestException(
           'La propina no puede ser mayor que el monto total pagado.',
+        );
+      }
+    }
+    // «TUA incluida en este gasto» sobre el estado FUSIONADO (13-oct-2026,
+    // invariante 66; regla pura `decidirTuaIncluidaEnUpdate`). Con la llave:
+    // las reglas del alta. Sin ella y con una TUA vigente: se LIMPIA (null +
+    // warn; la bitácora registra el cambio) si la categoría ya no la admite,
+    // si cambió la moneda del gasto o si un rol de campo bajó el monto bajo
+    // ella; la oficina que baja el monto sin tocarla recibe 400. Un PATCH
+    // que no toca nada de eso no carga `actual` y no decide nada. NO es
+    // dinero del banco: no entra a `cambiaDineroDelGasto`, al candado del
+    // reparto manual ni al auto-cruce.
+    if (conTua && actual) {
+      const d = decidirTuaIncluidaEnUpdate({
+        enviado: dto.tua_incluida,
+        vigente: tuaIncluidaDe(actual),
+        categoria: dto.categoria ?? actual.categoria,
+        monto: dto.monto ?? Number(actual.monto),
+        propina: dto.propina ?? Number(actual.propina ?? 0),
+        moneda: dto.moneda ?? actual.moneda,
+        monedaCambio: dto.moneda !== undefined && dto.moneda !== actual.moneda,
+        esCampo,
+      });
+      if (d.accion === 'ERROR') throw new BadRequestException(d.error);
+      if (d.accion === 'LIMPIAR') {
+        dto.tua_incluida = null;
+        this.logger.warn(
+          `Gasto ${id}: TUA incluida de oficina retirada (${
+            d.motivo === 'CATEGORIA'
+              ? 'la categoría ya no la admite'
+              : d.motivo === 'MONEDA'
+                ? 'cambió la moneda del gasto'
+                : 'el monto del ticket quedó por debajo'
+          }; rol ${rol ?? 'oficina'}); la bitácora registra el cambio.`,
         );
       }
     }
@@ -3548,7 +3703,7 @@ export class ExpensesService {
         .eq('id', id),
       ifUpdatedAt,
     )
-      .select(COLS)
+      .select(await this.cols())
       .maybeSingle();
     if (error) {
       if (error.code === '23503')
@@ -3812,7 +3967,7 @@ export class ExpensesService {
     }
     const { data, error } = await this.supabase.service
       .from('gasto')
-      .select(LIST_COLS)
+      .select(await this.listCols())
       .is('vuelo_id', null)
       // NOMINA (29-ago) se administra aquí como los indirectos; SERVICIOS
       // no: es gasto directo del avión (vive en el tablero normal).

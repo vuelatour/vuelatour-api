@@ -1,7 +1,11 @@
 import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { EnvVars } from '../../config/env.schema';
-import { desgloseGastoLineas } from '../../common/desglose-gasto.util';
+import {
+  desgloseGastoLineas,
+  desgloseGastoPartes,
+  tuaMontoDeIa,
+} from '../../common/desglose-gasto.util';
 import { normalizarCodigo } from '../inventory/inventario-codigo.util';
 import { IaUsoService, type UsoIaPayload } from '../ia-uso/ia-uso.service';
 import { ConfiguracionService } from '../configuracion/configuracion.service';
@@ -77,6 +81,17 @@ export interface GastoTicketVisionResult {
   conceptos?: Array<{ concepto: string; monto: number }>;
   /** Desglose compuesto (regla FBO/TUA) tal como se guardará en las notas. */
   desglose_lineas?: string[];
+  /**
+   * TUA CON IVA leída APARTE por pyservices (13-oct-2026, TUA sistémica;
+   * moneda del documento). ADITIVO: un pyservices previo no la manda.
+   */
+  tua_monto?: number | null;
+  /**
+   * Lo que el desglose separaría como TUA con ESTA lectura (renglón TUA o
+   * `tua_monto` con tabla que cuadra), en la moneda del documento; null si
+   * nada. Informativo para el panel (no filtra por categoría ni vuelo).
+   */
+  tua_detectada?: number | null;
   /** Matrícula de la aeronave si aparece en el documento (facturas de FBO). */
   matricula?: string | null;
   confianza: number;
@@ -437,13 +452,26 @@ export class VisionService implements OnModuleInit {
       const conceptos = (ai.conceptos ?? []).filter(
         (c) => c.concepto && Number.isFinite(c.monto) && c.monto > 0,
       );
-      if (ai.legible && ai.monto != null && conceptos.length >= 2) {
+      // TUA leída APARTE (`tua_monto`, 13-oct-2026): con ella un solo
+      // renglón que cuadra también se separa (2+ líneas). Sin ella, las
+      // líneas son las de siempre.
+      const tuaMonto = tuaMontoDeIa(ai);
+      if (ai.legible && ai.monto != null) {
         const propina = ai.propina != null && ai.propina > 0 ? ai.propina : 0;
-        ai.desglose_lineas = desgloseGastoLineas(
-          conceptos,
-          Math.round((ai.monto - propina) * 100) / 100,
-          ai.moneda ?? 'MXN',
-        );
+        const base = Math.round((ai.monto - propina) * 100) / 100;
+        if (conceptos.length >= 2 || tuaMonto != null) {
+          const lineas = desgloseGastoLineas(
+            conceptos,
+            base,
+            ai.moneda ?? 'MXN',
+            { tuaMonto },
+          );
+          if (conceptos.length >= 2 || lineas.length >= 2) {
+            ai.desglose_lineas = lineas;
+          }
+        }
+        ai.tua_detectada =
+          desgloseGastoPartes(conceptos, base, { tuaMonto })?.tua || null;
       }
       return ai;
     } catch (err) {

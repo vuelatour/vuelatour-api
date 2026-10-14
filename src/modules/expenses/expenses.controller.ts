@@ -148,7 +148,7 @@ export class ExpensesController {
   )
   @ApiOperation({
     summary:
-      'Capture a gasto. Pilotos/mecánicos lo usan desde la app móvil. El mecánico solo carga combustible.',
+      'Capture a gasto. Pilotos/mecánicos lo usan desde la app móvil. El mecánico solo carga combustible. `tua_incluida` es de oficina (se ignora a piloto/mecánico/visitante).',
   })
   create(@Body() dto: CreateGastoDto, @CurrentUser() c: AuthenticatedUser) {
     // El semáforo de facturación es seguimiento de OFICINA: piloto/mecánico
@@ -160,6 +160,9 @@ export class ExpensesController {
       c.rol === Rol.VISITANTE
     ) {
       delete dto.estatus_facturacion;
+      // «TUA incluida en este gasto» (13-oct-2026, invariante 66): campo de
+      // OFICINA — se ignora, jamás un 400 por un campo que la app no ve.
+      delete dto.tua_incluida;
       this.assertFotoPropia(dto.foto_url, c.authId);
     }
     return this.expenses.create(dto, c.userId, c.rol);
@@ -422,7 +425,7 @@ export class ExpensesController {
   @ApiOperation({
     summary:
       'Update gasto. Oficina siempre; piloto/mecánico solo su propio gasto y solo dentro de su semana de captura lunes→domingo + gracia (doc 5.2/5.3, config dias_gracia_gastos_semana). ' +
-      'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA.',
+      'App sin internet (10-sep-2026): `capturado_en` = sello de la corrección (la semana se evalúa contra él), `if_updated_at` = control de versión (409 CONFLICTO_VERSION si alguien lo modificó antes). Rechazos con code: GASTO_AJENO, GASTO_CONCILIADO, GASTO_EN_REPOSICION, GASTO_FUERA_DE_VENTANA. `tua_incluida` es de oficina (se ignora a piloto/mecánico/visitante).',
   })
   async update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -437,6 +440,8 @@ export class ExpensesController {
       await this.expenses.assertOwnEnVentana(id, c.userId, dto.capturado_en);
       // Seguimiento de OFICINA: el capturador de campo no marca facturado.
       delete dto.estatus_facturacion;
+      // «TUA incluida en este gasto» (13-oct-2026): campo de OFICINA.
+      delete dto.tua_incluida;
       // Ni concilia ni desmarca duplicados (27-ago): un gasto "conciliado"
       // sin movimiento bancario sobreestima la conciliación en silencio.
       delete dto.conciliado;

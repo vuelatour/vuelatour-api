@@ -291,6 +291,18 @@ export class CreateGastoDto {
   @Min(0)
   propina?: number;
 
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    description:
+      'TUA (tarifa de uso de aeropuerto) incluida en el monto, CON IVA, en la moneda del gasto (13-oct-2026). Solo OFICINA (piloto/mecánico/visitante: se ignora) y solo en Operaciones, Aterrizaje o FBO. null = usar la lectura de la IA; 0 = esta factura no cobra TUA aunque la IA lea una; > 0 = esa TUA se separa del costo del avión (≤ monto − propina). 400 TUA_INCLUIDA_MAYOR_QUE_TICKET / TUA_INCLUIDA_NO_APLICA; 409 TUA_INCLUIDA_NO_DISPONIBLE sin la migración 20261013000008. En el PATCH: ausente = no tocar; null = volver a la lectura de la IA.',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  tua_incluida?: number | null;
+
   @ApiProperty({ enum: Moneda })
   @IsEnum(Moneda)
   moneda!: Moneda;

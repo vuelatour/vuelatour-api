@@ -78,11 +78,22 @@ function armarSupabase(tablas: Record<string, Resultado[]>) {
     ]) {
       q[m] = registra(m);
     }
-    q.maybeSingle = () => Promise.resolve(siguiente(tabla));
+    // La sonda de `gasto.tua_incluida` (13-oct-2026, invariante 66) NO es una
+    // lectura de negocio: responde «la columna existe» sin consumir la cola
+    // de resultados de la tabla.
+    let esSonda = false;
+    q.select = (...args: unknown[]) => {
+      llamadas.push({ tabla, metodo: 'select', args });
+      if (args[0] === 'tua_incluida') esSonda = true;
+      return q;
+    };
+    const resultado = (): Resultado =>
+      esSonda ? { data: [], error: null } : siguiente(tabla);
+    q.maybeSingle = () => Promise.resolve(resultado());
     q.then = (
       resolve: (v: Resultado) => unknown,
       reject?: (e: unknown) => unknown,
-    ) => Promise.resolve(siguiente(tabla)).then(resolve, reject);
+    ) => Promise.resolve(resultado()).then(resolve, reject);
     return q;
   };
   return { llamadas, service: { from } };
@@ -196,7 +207,9 @@ describe('ExpensesService.update — B1 control de versión if_updated_at', () =
     expect(body.error).toBe('CONFLICTO_VERSION');
     expect(body.message).toMatch(/modificó este gasto/);
     expect(body.details).toEqual({
-      actual: vivo,
+      // `findById` suma el ADITIVO `tua_detectada_ia` (13-oct-2026,
+      // invariante 66); la app fusiona la fila viva (`{...copia, ...actual}`).
+      actual: { ...vivo, tua_detectada_ia: null },
       updated_at_enviado: '2026-09-10T15:00:00.123Z',
       updated_at_actual: '2026-09-10T16:00:00+00:00',
     });

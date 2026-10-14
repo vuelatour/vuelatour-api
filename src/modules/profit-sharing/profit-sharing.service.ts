@@ -41,6 +41,12 @@ import {
   particionIngresoVuelo,
 } from '../../common/ingreso-vuelo.util';
 import { trasladosEmbebidosDeGasto } from '../../common/desglose-gasto.util';
+// «TUA incluida» de la oficina (13-oct-2026, invariante 66): sonda ÚNICA de
+// `gasto.tua_incluida` (reparto y pre-cierre la leen detrás de ella).
+import {
+  colTuaIncluida,
+  tuaIncluidaDisponible,
+} from '../../common/tua-incluida-disponible.util';
 import { cuadreSobre } from '../groups/particion-cobro.util';
 import {
   avionDelGasto,
@@ -112,6 +118,18 @@ import {
   type VueloCobradoSinFactura,
 } from './vuelos-sin-factura.util';
 import { facturasDeVuelos } from '../flights/factura-cliente-etiquetas';
+import {
+  CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
+  DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
+  DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA_FALLIDA,
+  TITULO_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
+  candidatosTuaCobrada,
+  vuelosConTuaCobradaSinPagada,
+  vuelosConTuaPagada,
+  type VueloTuaCobrada,
+  type VueloTuaCobradaRow,
+  type VueloTuaCobradaSinPagada,
+} from './tua-cobrada-sin-pagada.util';
 
 /** Lecturas `in (…)` en lote: ids por consulta (URL acotada). */
 const LOTE_IDS = 200;
@@ -386,9 +404,17 @@ interface GastoRow {
   /** Renglones leídos por IA de la factura (para separar el TUA embebido). */
   valor_ia_extraido?: {
     conceptos?: Array<{ concepto: string; monto: number }> | null;
+    /** TUA CON IVA leída aparte por la IA (13-oct-2026). */
+    tua_monto?: number | null;
   } | null;
   /** Notas: respaldo por TEXTO de la extensión de horario sin IA. */
   notas?: string | null;
+  /**
+   * TUA (IVA incluido) que fijó la OFICINA (13-oct-2026, invariante 66):
+   * manda sobre la lectura en `trasladosEmbebidosDeGasto` (fila informativa
+   * «TUA embebido (excluido)» y costo del avión). Detrás de la sonda.
+   */
+  tua_incluida?: string | number | null;
   /** Clon parcial generado por el reparto manual (gasto_reparto). */
   es_reparto_parcial?: boolean;
 }
@@ -2949,27 +2975,41 @@ export class ProfitSharingService {
     // (13-oct-2026, invariante 60): TODOS los vuelos del periodo que ya lee
     // el pre-cierre (pendientes + completados + cancelados). Aviso NO
     // bloqueante y best-effort: lectura caída ⇒ `null` ⇒ lectura_fallida.
-    const [seguimiento, itemsCuentasSocios, sinGastoOps, sinFactura] =
-      await Promise.all([
-        this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
-        mesCierre && veeCuentasSocios
-          ? this.itemsCuentasSocios(mesCierre)
-          : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
-        this.vuelosSinGastoOperaciones(
-          candidatosSinGastoOperaciones(
-            completados as VueloCompletadoSinGastoRow[],
-          ),
-          matriculaPorAvion,
+    //
+    // TUA COBRADA AL CLIENTE SIN TUA PAGADA (13-oct-2026, invariante 66):
+    // completados PROPIOS con TUA cobrada (partición única) sin ningún gasto
+    // del vuelo que la pague. Aviso NO bloqueante y best-effort: lectura
+    // caída ⇒ `null` ⇒ lectura_fallida.
+    const [
+      seguimiento,
+      itemsCuentasSocios,
+      sinGastoOps,
+      sinFactura,
+      tuaSinPagar,
+    ] = await Promise.all([
+      this.seguimientoCotizacionPendiente(desdeTs, hastaTs),
+      mesCierre && veeCuentasSocios
+        ? this.itemsCuentasSocios(mesCierre)
+        : Promise.resolve([] as ItemPrecierreCuentasSocios[]),
+      this.vuelosSinGastoOperaciones(
+        candidatosSinGastoOperaciones(
+          completados as VueloCompletadoSinGastoRow[],
         ),
-        this.vuelosCobradosSinFactura(
-          [
-            ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
-            ...(completados as VueloCobradoRow[]),
-            ...(cancelados as VueloCobradoRow[]),
-          ],
-          matriculaPorAvion,
-        ),
-      ]);
+        matriculaPorAvion,
+      ),
+      this.vuelosCobradosSinFactura(
+        [
+          ...((pendRes.data ?? []) as unknown as VueloCobradoRow[]),
+          ...(completados as VueloCobradoRow[]),
+          ...(cancelados as VueloCobradoRow[]),
+        ],
+        matriculaPorAvion,
+      ),
+      this.vuelosTuaCobradaSinPagada(
+        candidatosTuaCobrada(completados as VueloTuaCobradaRow[]),
+        matriculaPorAvion,
+      ),
+    ]);
 
     // Tacómetros amarillos del periodo: QUÉ tramos son (pedido del cliente,
     // 14-sep-2026). Los nombres de piloto salen de UNA consulta en lote; si
@@ -3164,6 +3204,24 @@ export class ProfitSharingService {
         vuelos: sinGastoOps ?? [],
         // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
         lectura_fallida: sinGastoOps === null,
+      },
+      {
+        // TUA COBRADA SIN TUA PAGADA (13-oct-2026, invariante 66): justo
+        // después de vuelos_sin_gasto_operaciones. NO bloquea.
+        clave: CLAVE_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
+        titulo: TITULO_PRECIERRE_TUA_COBRADA_SIN_PAGADA,
+        detalle: tuaSinPagar
+          ? DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA
+          : DETALLE_PRECIERRE_TUA_COBRADA_SIN_PAGADA_FALLIDA,
+        count: tuaSinPagar?.length ?? 0,
+        // Σ TUA cobrada (pre-IVA, USD) de los listados.
+        monto_usd: round2(
+          (tuaSinPagar ?? []).reduce((a, v) => a + v.tua_cobrada_usd, 0),
+        ),
+        // {id, folio, fecha_vuelo, matricula, tua_cobrada_usd} por fecha.
+        vuelos: tuaSinPagar ?? [],
+        // ADITIVO: true cuando la lectura FALLÓ (el 0 no es «no hay»).
+        lectura_fallida: tuaSinPagar === null,
       },
       {
         clave: 'externos_sin_honorario',
@@ -3383,6 +3441,50 @@ export class ProfitSharingService {
     } catch (err) {
       this.logger.warn(
         `pre-cierre: vuelos sin gasto de operaciones no disponible: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Pre-cierre · TUA COBRADA AL CLIENTE SIN TUA PAGADA (13-oct-2026,
+   * invariante 66): de los `candidatos` (`candidatosTuaCobrada`) quita los
+   * vuelos con algún gasto que pague TUA (`vuelosConTuaPagada`: gasto TUAS
+   * o la TUA embebida con la de la oficina). Gastos de CUALQUIER fecha (la
+   * factura del aeropuerto llega días después) y SIN filtro de categoría (la
+   * regla vive en el util; filtrar enums en la consulta arriesga un 22P02).
+   * Lectura en lotes de ids y paginada (anti-cap-1000). Cualquier fallo ⇒
+   * `null` + `warn` (no tumba el pre-cierre).
+   */
+  private async vuelosTuaCobradaSinPagada(
+    candidatos: VueloTuaCobrada[],
+    matriculas: ReadonlyMap<string, string>,
+  ): Promise<VueloTuaCobradaSinPagada[] | null> {
+    if (candidatos.length === 0) return [];
+    try {
+      const colTua = colTuaIncluida(
+        await tuaIncluidaDisponible(this.supabase.service),
+      );
+      const gastos = await this.leerEnLotesPaginado(
+        candidatos.map((c) => c.id),
+        (lote, desde, hasta) =>
+          this.supabase.service
+            .from('gasto')
+            .select(
+              `id, vuelo_id, categoria, monto, propina, notas, valor_ia_extraido${colTua}`,
+            )
+            .in('vuelo_id', lote)
+            .order('id', { ascending: true })
+            .range(desde, hasta),
+      );
+      return vuelosConTuaCobradaSinPagada({
+        candidatos,
+        vuelosConTuaPagada: vuelosConTuaPagada(gastos),
+        matriculas,
+      });
+    } catch (err) {
+      this.logger.warn(
+        `pre-cierre: TUA cobrada sin pagada no disponible: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
     }
@@ -3769,6 +3871,10 @@ export class ProfitSharingService {
   }
 
   private async fetchGastos(desde: string, hasta: string): Promise<GastoRow[]> {
+    // TUA de oficina (13-oct-2026, invariante 66): detrás de la sonda.
+    const colTua = colTuaIncluida(
+      await tuaIncluidaDisponible(this.supabase.service),
+    );
     const { data, error } = await this.supabase.service
       .from('gasto')
       // propina + valor_ia_extraido: para separar el TUA embebido en
@@ -3776,13 +3882,15 @@ export class ProfitSharingService {
       // notas: respaldo por texto de la extensión de horario (1-oct-2026).
       // escala_id: avión del gasto por tramo (Regla B, avionDelGasto).
       // fecha_gasto: día del TC oficial de respaldo (29-ago) en MXN sin TC.
+      // tua_incluida (13-oct-2026): la TUA que fijó la oficina.
       .select(
-        'id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto',
+        `id, aeronave_id, vuelo_id, escala_id, categoria, monto, moneda, tc_gasto, propina, valor_ia_extraido, notas, fecha_gasto${colTua}`,
       )
       .gte('fecha_gasto', desde)
       .lte('fecha_gasto', hasta);
     if (error) throw new Error(error.message);
-    return data ?? [];
+    // Select dinámico (con o sin `tua_incluida`): la fila se declara a mano.
+    return (data ?? []) as unknown as GastoRow[];
   }
 
   private async fetchSocios(): Promise<SocioRow[]> {

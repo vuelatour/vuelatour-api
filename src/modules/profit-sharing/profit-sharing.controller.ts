@@ -79,7 +79,7 @@ export class ProfitSharingController {
   @Roles(Rol.ADMIN, Rol.ANALISTA, Rol.FACTURACION, Rol.COORDINADOR)
   @ApiOperation({
     summary:
-      'Checklist de pre-cierre: vuelos sin completar, tacos en revisión, cobros con saldo, gastos sin TC/avión/comprobante, vuelos cobrados en cuentas que exigen factura sin factura registrada (no bloquea) y pendientes de conciliar.',
+      'Checklist de pre-cierre: vuelos sin completar, tacos en revisión, cobros con saldo, gastos sin TC/avión/comprobante, vuelos cobrados en cuentas que exigen factura sin factura registrada (no bloquea), vuelos con TUA cobrada al cliente sin TUA pagada (no bloquea) y pendientes de conciliar.',
   })
   preCierre(
     @Query() q: ProfitSharingQuery,

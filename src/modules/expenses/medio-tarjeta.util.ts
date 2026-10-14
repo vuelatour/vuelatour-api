@@ -193,6 +193,11 @@ export function mensajeCheckGasto(error: {
   details?: string | null;
 }): string {
   const texto = `${error.message ?? ''} ${error.details ?? ''}`;
+  // `gasto_tua_incluida_check` (13-oct-2026, migración 20261013000008): el
+  // respaldo del `@Min(0)` del DTO. PRIMERA rama: su nombre no debe caer en
+  // ninguna de las de abajo.
+  if (/tua_incluida/.test(texto))
+    return 'La TUA incluida no puede ser negativa.';
   // `\bgasto_check\b`: el CHECK de tabla medio↔tarjeta (no `gasto_tc_gasto_check`).
   if (/tarjeta_terminacion|\bgasto_check\b/.test(texto)) {
     return 'La terminación de tarjeta solo aplica con el medio Tarjeta corporativa y debe ser de 4 dígitos: revisa el medio de pago y la tarjeta.';
